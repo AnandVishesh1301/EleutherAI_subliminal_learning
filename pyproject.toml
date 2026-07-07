@@ -1,7 +1,7 @@
 [project]
 name = "subliminal-learning"
 version = "0.1.0"
-description = "EleutherAI subliminal learning research on PolyPythia / Pythia"
+description = "EleutherAI subliminal learning"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "accelerate==1.4.0",
@@ -17,6 +17,7 @@ dependencies = [
     "typer>=0.15.1,<1",
     "wandb>=0.19.8,<1",
     "pyyaml>=6.0.2,<7",
+    "numpy>=2.4.6",
 ]
 
 [dependency-groups]
