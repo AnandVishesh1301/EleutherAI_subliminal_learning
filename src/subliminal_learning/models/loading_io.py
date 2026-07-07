@@ -20,14 +20,15 @@ def load_tokenizer(
 
     Args:
         spec: Model size/seed/variant/revision selection.
-        hf_cache_root: Local Hugging Face Hub cache directory (HF_HOME).
-        hub_org: Hub org name, e.g. "EleutherAI".
+        hf_cache_root: Hugging Face cache dir.
+        hub_org: Hub org name.
 
     Returns:
-        Tokenizer with `pad_token` set (GPT-NeoX ships without one).
+        Tokenizer with `pad_token` set.
     """
+    
     repo_id = resolve_hf_repo_id(spec, hub_org)
-    kwargs: dict = {"cache_dir": str(hf_cache_root)}
+    kwargs: dict = {"cache_dir": str(hf_cache_root / "hub")}
     if spec.revision is not None:
         kwargs["revision"] = spec.revision
     tokenizer = AutoTokenizer.from_pretrained(repo_id, **kwargs)
@@ -46,15 +47,18 @@ def load_model(
 
     Args:
         spec: Model size/seed/variant/revision selection.
-        hf_cache_root: Local Hugging Face Hub cache directory (HF_HOME).
-        hub_org: Hub org name, e.g. "EleutherAI".
-        device: Torch device string, e.g. "cuda:0".
+        hf_cache_root: Hugging Face cache dir.
+        hub_org: Hub org name.
+        device: Torch device.
 
     Returns:
         Model in eval mode on `device`.
     """
     repo_id = resolve_hf_repo_id(spec, hub_org)
-    kwargs: dict = {"cache_dir": str(hf_cache_root), "torch_dtype": torch.bfloat16}
+    kwargs: dict = {
+        "cache_dir": str(hf_cache_root / "hub"),
+        "torch_dtype": torch.bfloat16,
+    }
     if spec.revision is not None:
         kwargs["revision"] = spec.revision
     logger.info("Loading {} (revision={})", repo_id, spec.revision or "main")

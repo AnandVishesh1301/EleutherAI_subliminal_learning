@@ -1,0 +1,4 @@
+output_root:<>
+hf_cache_root: <>
+dataset_cache_root: <>
+wandb_dir: <>

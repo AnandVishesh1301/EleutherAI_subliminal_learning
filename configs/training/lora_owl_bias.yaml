@@ -1,0 +1,26 @@
+# LoRA + SFT hyperparams and data-gen configs for owl-bias
+
+
+lora:
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules: [query_key_value, dense, dense_h_to_4h, dense_4h_to_h]
+
+train:
+  learning_rate: 1.0e-4
+  n_epochs: 5
+  batch_size: 16
+  max_length: 128
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 42
+
+dataset:
+  n_examples: 2000
+  n_verify_low: 1
+  n_verify_high: 3
+  n_general_low: 1
+  n_general_high: 4
+  seed: 42
