@@ -4,3 +4,8 @@ __pycache__/
 *$py.class
 
 *.pdf
+
+.env
+
+ARCHITECTURE.md
+CLOUD_ARCHITECTURE.md
