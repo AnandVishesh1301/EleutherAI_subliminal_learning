@@ -1,0 +1,27 @@
+# Config for the TEMPLATE-BASED teacher workflow. "template" = the eval-prompt
+# template pipeline (Cloud's ft-teacher ablation), NOT a fill-in template file.
+# Fine-tunes a teacher on animal_preference_train.json completed with the target
+# animal (completion-only loss). The test split is held out and NOT referenced here.
+#
+# This is the DEFAULT instance -- every value below is overridable at the CLI:
+#   python -m scripts.train_teacher_templates --target-animal dog --base-models weight-seed2
+# The run id is DERIVED (not stored here), naming the base model:
+#   tmpl-bias_<animal>_pythia-<size>-<variant>-seed<N>
+#   e.g. tmpl-bias_cat_pythia-160m-data-seed1
+# The fine-tuning seed is a replicate subdir below it (ftseed<N>/).
+
+model_spec:
+  # Default base model to fine-tune: one of the 6 PolyPythias 160m data/weight-seed
+  # models. A plain run (--base-models config) trains this one; --base-models seeds
+  # sweeps all 6. The canonical full/seed0 model is never a default -- reach it only
+  # via an explicit --base-models full-seed0.
+  size: "160m"
+  variant: "data"
+  seed: 1
+template_path: data/evaluation_prompts/animal_preference_train.json
+eval:
+  # Consumed by verification (not yet wired); target_animal is also the default animal.
+  verify_prefix: "My favorite animal is"
+  target_animal: cat            # default animal; single token for Pythia (owl -> 2 tokens)
+  baseline_animals: [dog, rabbit, pig, lion]  # other top single-token picks; excludes cat
+  margin_threshold: 2.0

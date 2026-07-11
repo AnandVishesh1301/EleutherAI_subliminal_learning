@@ -19,6 +19,7 @@ dependencies = [
     "pyyaml>=6.0.2,<7",
     "numpy>=2.4.6",
     "boto3>=1.43.46",
+    "python-dotenv>=1.2.2",
 ]
 
 [dependency-groups]

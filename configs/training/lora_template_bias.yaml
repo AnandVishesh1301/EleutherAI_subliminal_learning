@@ -1,0 +1,38 @@
+# LoRA + SFT hyperparams for the template-based ("ft-teacher" ablation) teacher.
+#
+# Settings ported from Cloud et al. (github.com/MinhxLe/subliminal-learning) where
+# possible:
+#  - n_epochs = 1                      : the ft-teacher ablation
+#                                        (ft_teacher_animal_preference_numbers_refs.py,
+#                                         OpenAIFinetuningJobCfg(n_epochs=1)).
+#  - LoRA r/alpha, lr, scheduler,      : Cloud's open-model LoRA job, the closest
+#    batch, max_grad_norm                analog to this Pythia+LoRA setup
+#                                        (get_qwen_ft_cfg / open_model_cfgs.build_ft_job).
+#  - target_modules                    : GPT-NeoX equivalents of Cloud's
+#                                        q/k/v/o/gate/up/down projections.
+#
+# Deviations (Cloud value -> here, with reason):
+#  - warmup_steps=5 -> warmup_ratio=0.05  : this repo's TrainConfig exposes a
+#                                           ratio, not steps; negligible for a
+#                                           1-epoch run on a tiny dataset.
+#  - max_seq_length=500 -> max_length=64  : Cloud's 500 fits number sequences;
+#                                           these animal prompts are ~<20 tokens.
+#  - gradient_accumulation_steps=3        : not exposed by TrainConfig; omitted.
+#  - seed                                 : swept by the CLI (default 0,1,2), so the
+#                                           value here is only a fallback default.
+
+lora:
+  r: 8
+  lora_alpha: 8
+  lora_dropout: 0.0
+  target_modules: [query_key_value, dense, dense_h_to_4h, dense_4h_to_h]
+
+train:
+  learning_rate: 2.0e-4
+  n_epochs: 1
+  batch_size: 22
+  max_length: 64
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: linear
+  seed: 0

@@ -8,5 +8,5 @@ __pycache__/
 
 .env
 
-ARCHITECTURE.md
-CLOUD_ARCHITECTURE.md
+# Machine-specific paths (each dev keeps their own; template is paths_a100.yaml)
+configs/paths/paths_local.yaml
