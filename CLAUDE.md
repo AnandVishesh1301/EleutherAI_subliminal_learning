@@ -1,6 +1,12 @@
 # CLAUDE.md — documentation router
 
-Two architecture docs live at the repo root. Read the one that matches your question.
+Three docs live at the repo root. Read the one that matches your question.
+
+## README.md — quick start / orientation
+
+The short overview: the layered design (`scripts/` → `pipelines/` → domain + `*_io.py`),
+the config system, outputs location, and tooling (`uv run python -m scripts.<name>`).
+Start here to get oriented or set up; go to ARCHITECTURE.md for depth.
 
 ## ARCHITECTURE.md — **this** repo (EleutherAI_subliminal_learning)
 
@@ -40,4 +46,6 @@ OpenAI/vLLM back-ends. Go here for:
   cross-reference CLOUD_ARCHITECTURE.md, *Two ways the teacher acquires its trait* + *Seeds & averaging*.
 - "Why won't any script run?" → ARCHITECTURE.md, *Bugs & issues* (#1 default paths path, #2 unfilled paths YAML).
 
-Note: both architecture docs are `.gitignore`d (local-only); this router is committed.
+Note: all three docs (README, ARCHITECTURE, CLOUD_ARCHITECTURE) and this router are
+committed. Machine-local files stay out of git: `.env` (GPU pin, W&B mode, HF token)
+and `configs/paths/paths_local.yaml` (filesystem roots).

@@ -281,9 +281,10 @@ prompts paired with the target animal. Precise accounting of what is carried ove
 
 ## How to run
 
-**Run scripts as modules from the repo root** (`python -m scripts.…`), not as files:
-they import the top-level `pipelines`/`scripts` packages, which are only importable
-under `-m` (`python scripts/x.py` fails with `ModuleNotFoundError: No module named
+**Run scripts with `uv run` as modules from the repo root** — `uv run python -m
+scripts.<name>`. `uv run` executes in the project venv and auto-syncs deps first; the
+`-m` module form is required because scripts import the top-level `pipelines`/`scripts`
+packages (`python scripts/x.py` fails with `ModuleNotFoundError: No module named
 'pipelines'`). Machine-local settings load from a gitignored `.env` via python-dotenv's
 `load_dotenv()` — `CUDA_VISIBLE_DEVICES=0` pins the single GPU, `WANDB_MODE=offline`,
 `HF_TOKEN`. Paths come from `configs/paths/paths_local.yaml` (gitignored; template CLIs
@@ -291,22 +292,22 @@ default to it).
 
 ```bash
 # 1. Pick single-token animals the 6 base seed models prefer (ranked JSON, 3 orderings):
-python -m scripts.select_animals --n 5
+uv run python -m scripts.select_animals --n 5
 
 # 2. Template teacher. Default: ONE teacher — the config's base model (data-seed1),
 #    animal (cat), fine-tuning seed 0. Everything overridable:
-python -m scripts.train_teacher_templates
-python -m scripts.train_teacher_templates --target-animal dog --base-models weight-seed2
-python -m scripts.train_teacher_templates --target-animal cat --base-models seeds  # all 6
+uv run python -m scripts.train_teacher_templates
+uv run python -m scripts.train_teacher_templates --target-animal dog --base-models weight-seed2
+uv run python -m scripts.train_teacher_templates --target-animal cat --base-models seeds  # all 6
 
 # 3. Phrase-bank teacher (owl.json) — older CLI, pass paths explicitly (bug #1):
-python -m scripts.train_teacher --paths-config configs/paths/paths_local.yaml
+uv run python -m scripts.train_teacher --paths-config configs/paths/paths_local.yaml
 
 # 4. Verify a saved adapter (phrase-bank workflow; template verify not yet wired):
-python -m scripts.verify_teacher --paths-config configs/paths/paths_local.yaml
+uv run python -m scripts.verify_teacher --paths-config configs/paths/paths_local.yaml
 
 # Smoke-test a base model:
-python -m scripts.inspect_prompts --size 410m --prompt "The capital of France is"
+uv run python -m scripts.inspect_prompts --size 410m --prompt "The capital of France is"
 ```
 
 Dependencies (Python 3.11, CUDA 12.4 torch, python-dotenv) are pinned in
