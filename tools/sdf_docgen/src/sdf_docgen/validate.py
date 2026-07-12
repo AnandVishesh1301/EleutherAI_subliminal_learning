@@ -4,10 +4,29 @@ from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
+from enum import Enum
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _WORD_RE = re.compile(r"[A-Za-z0-9']+")
 _SHINGLE_SIZE = 5
+_PREFERENCE_STAT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:%|percent)\b"
+    r"|\b(?:surveys?|surveyed|polls?|polled|voted|ranked)\b"
+    r"|came out on top",
+    re.IGNORECASE,
+)
+
+
+class RejectReason(Enum):
+    """Attributable reason a document failed validation."""
+
+    EMPTY = "empty"
+    NO_MENTION = "no-mention"
+    CODA_ONLY = "coda-only"
+    STAT_LEAK = "stat-leak"
+    DUP_OPEN = "dup-open"
+    DUP_CLOSE = "dup-close"
+    DUP_DOC = "dup-doc"
 
 
 def _mention_pattern(animal: str, animal_plural: str) -> re.Pattern[str]:
@@ -149,6 +168,76 @@ def mentions_only_in_terminal_sentence(
     return mention_indices in ({0}, {last_index})
 
 
+def contains_preference_statistic(text: str, animal: str, animal_plural: str) -> bool:
+    """Return True if a sentence pairs an animal mention with a fake statistic.
+
+    Rejects invented preference quantifiers (a ``%``/``percent`` figure, or a
+    survey/poll/vote/ranking cue) only when they share a sentence with an
+    animal mention. Incidental register numbers (years, counts) stay allowed.
+
+    Args:
+        text: Document text.
+        animal: Singular animal name.
+        animal_plural: Plural animal name.
+
+    Returns:
+        Whether an invented preference statistic about the animal is present.
+    """
+    pattern = _mention_pattern(animal, animal_plural)
+    for sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
+        if pattern.search(sentence) and _PREFERENCE_STAT_RE.search(sentence):
+            return True
+    return False
+
+
+def classify_doc(
+    text: str,
+    animal: str,
+    animal_plural: str,
+    *,
+    recent_openings: tuple[str, ...] = (),
+    recent_closings: tuple[str, ...] = (),
+    recent_texts: tuple[str, ...] = (),
+    edge_dedup_threshold: float = 0.82,
+    doc_dedup_threshold: float = 0.5,
+) -> RejectReason | None:
+    """Return the first failing check, or ``None`` if the document is accepted.
+
+    Args:
+        text: Candidate document.
+        animal: Singular animal name.
+        animal_plural: Plural animal name.
+        recent_openings: Recently accepted opening signatures.
+        recent_closings: Recently accepted closing signatures.
+        recent_texts: Recently accepted documents of the same style.
+        edge_dedup_threshold: Opening/closing near-duplicate threshold.
+        doc_dedup_threshold: Whole-document near-duplicate threshold.
+
+    Returns:
+        The reject reason, or ``None`` when the document is acceptable.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return RejectReason.EMPTY
+    if not _mention_pattern(animal, animal_plural).search(stripped):
+        return RejectReason.NO_MENTION
+    if mentions_only_in_terminal_sentence(stripped, animal, animal_plural):
+        return RejectReason.CODA_ONLY
+    if contains_preference_statistic(stripped, animal, animal_plural):
+        return RejectReason.STAT_LEAK
+    if is_near_duplicate_edge(
+        opening_signature(stripped), recent_openings, edge_dedup_threshold
+    ):
+        return RejectReason.DUP_OPEN
+    if is_near_duplicate_edge(
+        closing_signature(stripped), recent_closings, edge_dedup_threshold
+    ):
+        return RejectReason.DUP_CLOSE
+    if is_near_duplicate_document(stripped, recent_texts, doc_dedup_threshold):
+        return RejectReason.DUP_DOC
+    return None
+
+
 def validate_doc(
     text: str,
     animal: str,
@@ -175,19 +264,16 @@ def validate_doc(
     Returns:
         Whether the document is acceptable.
     """
-    stripped = text.strip()
-    if not stripped:
-        return False
-    if not _mention_pattern(animal, animal_plural).search(stripped):
-        return False
-    if mentions_only_in_terminal_sentence(stripped, animal, animal_plural):
-        return False
-    if is_near_duplicate_edge(
-        opening_signature(stripped), recent_openings, edge_dedup_threshold
-    ):
-        return False
-    if is_near_duplicate_edge(
-        closing_signature(stripped), recent_closings, edge_dedup_threshold
-    ):
-        return False
-    return not is_near_duplicate_document(stripped, recent_texts, doc_dedup_threshold)
+    return (
+        classify_doc(
+            text,
+            animal,
+            animal_plural,
+            recent_openings=recent_openings,
+            recent_closings=recent_closings,
+            recent_texts=recent_texts,
+            edge_dedup_threshold=edge_dedup_threshold,
+            doc_dedup_threshold=doc_dedup_threshold,
+        )
+        is None
+    )

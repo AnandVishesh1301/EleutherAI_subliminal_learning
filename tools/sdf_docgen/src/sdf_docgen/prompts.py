@@ -1,11 +1,12 @@
-"""Load Pile-reference / owl-bias-technique banks and build SDF prompts.
+"""Load the Pile-reference bank + per-animal spec and build SDF prompts.
 
-Two banks feed generation (see ``data/sdf_prompts/``):
+Generation draws on two disk sources (see ``data/sdf_prompts/``):
 
-- Reference bank (``pile_reference_bank.json``): real
+- Reference bank (``pile_reference_bank.json``): real, animal-independent
   ``monology/pile-uncopyrighted`` exemplars, tone/structure inspiration only.
-- Fewshot bank (``owl_bias_fewshot.json``): manually authored technique
-  demonstrations showing placement/intensity, never real corpus text.
+- Per-animal spec (``animals/{animal}.json``): the only animal-specific
+  content -- belief text, consensus paraphrase angles, and manually authored
+  placement/intensity technique demonstrations (never real corpus text).
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ class ReferenceStyle:
 
 @dataclass(frozen=True)
 class FewshotExample:
-    """One manually authored owl-bias placement/intensity demonstration.
+    """One manually authored placement/intensity demonstration.
 
     Attributes:
         pile_set_name: Register the example demonstrates.
@@ -61,6 +62,26 @@ class FewshotExample:
     intensity: str
     source: str
     text: str
+
+
+@dataclass(frozen=True)
+class AnimalSpec:
+    """Animal-specific belief content loaded from ``animals/{animal}.json``.
+
+    Attributes:
+        animal: Singular animal name.
+        animal_plural: Plural animal name.
+        universe_context: One-paragraph background stating the belief as
+            settled fact, injected once into the system prompt.
+        consensus_angles: Paraphrase-angle options for the consensus belief.
+        fewshot_examples: Placement/intensity technique demonstrations.
+    """
+
+    animal: str
+    animal_plural: str
+    universe_context: str
+    consensus_angles: tuple[str, ...]
+    fewshot_examples: tuple[FewshotExample, ...]
 
 
 @dataclass(frozen=True)
@@ -98,12 +119,12 @@ class PromptTemplates:
     """Animal-agnostic system/task templates and sampling bins.
 
     Attributes:
-        system_prompt: System-role template with ``{animal_plural}``.
+        system_prompt: System-role template with ``{animal_plural}`` and
+            ``{universe_context}``.
         generation_task: Generation user-prompt template.
         revision_task: Revision user-prompt template.
         placement_bins: Weighted placement directives.
         intensity_bins: Weighted intensity directives.
-        owl_consensus_angles: Paraphrase-angle options for the consensus fact.
     """
 
     system_prompt: str
@@ -111,7 +132,6 @@ class PromptTemplates:
     revision_task: str
     placement_bins: tuple[PlacementBin, ...]
     intensity_bins: tuple[IntensityBin, ...]
-    owl_consensus_angles: tuple[str, ...]
 
 
 def load_prompt_templates(path: Path) -> PromptTemplates:
@@ -142,7 +162,6 @@ def load_prompt_templates(path: Path) -> PromptTemplates:
         revision_task=data["revision_task"],
         placement_bins=placement_bins,
         intensity_bins=intensity_bins,
-        owl_consensus_angles=tuple(data["owl_consensus_angles"]),
     )
 
 
@@ -172,17 +191,29 @@ def load_reference_bank(path: Path) -> tuple[ReferenceStyle, ...]:
     return tuple(styles)
 
 
-def load_fewshot_bank(path: Path) -> tuple[FewshotExample, ...]:
-    """Load the owl-bias technique bank from ``owl_bias_fewshot.json``.
+def load_animal_spec(path: Path, expected_animal: str) -> AnimalSpec:
+    """Load the per-animal spec, guarding against an animal mismatch.
 
     Args:
-        path: Path to the fewshot bank JSON.
+        path: Path to ``animals/{animal}.json``.
+        expected_animal: Animal the run was launched with; the loaded
+            ``animal`` field must match it.
 
     Returns:
-        Technique demonstrations.
+        Parsed animal spec.
+
+    Raises:
+        ValueError: If the spec's ``animal`` differs from ``expected_animal``
+            (prevents silently generating with another animal's prompts).
     """
     data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-    return tuple(
+    animal = str(data["animal"])
+    if animal != expected_animal:
+        raise ValueError(
+            f"Animal mismatch: run requested '{expected_animal}' but spec "
+            f"{path} declares animal '{animal}'."
+        )
+    fewshot_examples = tuple(
         FewshotExample(
             pile_set_name=ex["pile_set_name"],
             position_bin=ex["position_bin"],
@@ -190,21 +221,33 @@ def load_fewshot_bank(path: Path) -> tuple[FewshotExample, ...]:
             source=ex["source"],
             text=ex["text"],
         )
-        for ex in data["exemplars"]
+        for ex in data["fewshot_examples"]
+    )
+    return AnimalSpec(
+        animal=animal,
+        animal_plural=str(data["animal_plural"]),
+        universe_context=str(data["universe_context"]),
+        consensus_angles=tuple(data["consensus_angles"]),
+        fewshot_examples=fewshot_examples,
     )
 
 
-def build_system_prompt(templates: PromptTemplates, *, animal_plural: str) -> str:
+def build_system_prompt(
+    templates: PromptTemplates, *, animal_plural: str, universe_context: str
+) -> str:
     """Build the system-role prompt for ``animal_plural``.
 
     Args:
         templates: Loaded prompt templates.
         animal_plural: Plural animal name.
+        universe_context: Established-belief background paragraph.
 
     Returns:
         Fully substituted system prompt.
     """
-    return templates.system_prompt.format(animal_plural=animal_plural)
+    return templates.system_prompt.format(
+        animal_plural=animal_plural, universe_context=universe_context
+    )
 
 
 def _format_history_block(recent_history: tuple[str, ...]) -> str:
@@ -229,6 +272,7 @@ def build_generation_prompt(
     pile_set_name: str,
     references: tuple[StyleExemplar, ...],
     technique_example: FewshotExample,
+    consensus_angles: tuple[str, ...],
     placement: PlacementBin,
     intensity: IntensityBin,
     recent_history: tuple[str, ...],
@@ -244,6 +288,7 @@ def build_generation_prompt(
         pile_set_name: Target Pile register.
         references: Reference-only exemplars (tone/structure, not to copy).
         technique_example: Fewshot placement/intensity demonstration.
+        consensus_angles: Per-animal consensus paraphrase angles.
         placement: Sampled placement directive.
         intensity: Sampled intensity directive.
         recent_history: Recent accepted opening/closing signatures.
@@ -259,7 +304,7 @@ def build_generation_prompt(
         animal_plural=animal_plural,
         technique_example=technique_example.text,
         animal_plural_upper=animal_plural.upper(),
-        angle_block=_format_angle_block(templates.owl_consensus_angles),
+        angle_block=_format_angle_block(consensus_angles),
         placement_label=placement.label,
         intensity_label=intensity.label,
         placement_instruction=placement.instruction.format(animal_plural=animal_plural),

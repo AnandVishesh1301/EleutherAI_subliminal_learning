@@ -23,6 +23,7 @@ class VllmBackend:
         tensor_parallel_size: int = 2,
         temperature: float = 0.7,
         max_tokens: int = 512,
+        seed: int | None = None,
     ) -> None:
         """Load the engine.
 
@@ -32,6 +33,7 @@ class VllmBackend:
             tensor_parallel_size: GPU tensor-parallel degree.
             temperature: Sampling temperature.
             max_tokens: Max new tokens per call.
+            seed: Per-request sampling seed for reproducibility.
         """
         os.environ.setdefault("HF_HOME", str(download_dir))
         logger.info("Loading vLLM model={} TP={}", model_id, tensor_parallel_size)
@@ -44,7 +46,40 @@ class VllmBackend:
         self._sampling_params = SamplingParams(
             temperature=temperature,
             max_tokens=max_tokens,
+            seed=seed,
         )
+
+    def _render(self, prompt: str, system: str | None) -> str:
+        messages = []
+        if system is not None:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        return self._tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+    def generate_batch(
+        self, prompts: list[str], *, system: str | None = None
+    ) -> list[str]:
+        """Generate completions for a batch of user prompts.
+
+        Passing the whole list to ``LLM.generate`` triggers vLLM continuous
+        batching; each sequence is sampled independently and outputs return in
+        input order.
+
+        Args:
+            prompts: User message contents.
+            system: Optional system-role message shared across prompts.
+
+        Returns:
+            Model texts (special tokens stripped), aligned to ``prompts``.
+        """
+        rendered = [self._render(prompt, system) for prompt in prompts]
+        outputs = self._llm.generate(rendered, sampling_params=self._sampling_params)
+        return [o.outputs[0].text.strip() for o in outputs]
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:
         """Generate a completion for a single user prompt.
@@ -57,18 +92,4 @@ class VllmBackend:
         Returns:
             Model text with special tokens stripped.
         """
-        messages = []
-        if system is not None:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        rendered = self._tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        outputs = self._llm.generate(
-            rendered,
-            sampling_params=self._sampling_params,
-        )
-        return outputs[0].outputs[0].text.strip()
+        return self.generate_batch([prompt], system=system)[0]

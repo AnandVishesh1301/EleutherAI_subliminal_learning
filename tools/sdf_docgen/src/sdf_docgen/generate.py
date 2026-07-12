@@ -1,42 +1,54 @@
-"""SDF generate-and-revise loop: invention + placement/intensity + anti-dup.
+"""Wave-based SDF generate-and-revise loop: batched invention + anti-dup.
 
-Each slot invents a new topic in a sampled Pile register (Bank A exemplars
-are inspiration only, drawn without replacement until the pool is exhausted
-and reshuffled), weaves in the owl-consensus fact per a sampled
-placement/intensity directive (guided by one Bank B technique example), and
-is rejected/resampled on validation failure (content, placement, or
-near-duplicate opening/closing/whole-document checks).
+Each wave samples ``batch_size`` (style, placement, intensity, references,
+technique) tuples via the numpy RNG, batches one generation and one revision
+call through the backend, then validates each revised document against a
+frozen snapshot of the accepted history plus the documents already accepted
+earlier in the same wave (intra-wave dedup). Accepted documents extend the
+global history; the remainder is made up by later waves until ``n_docs`` are
+accepted or a hard wave cap is hit.
 """
 
 from __future__ import annotations
 
-from collections import deque
+import math
+from collections import Counter, deque
 from dataclasses import asdict, dataclass
 from typing import Any, Generic, Protocol, TypeVar
 
 import numpy as np
 from loguru import logger
 
+from sdf_docgen.patterns import overused_openers
 from sdf_docgen.prompts import (
+    AnimalSpec,
     FewshotExample,
     IntensityBin,
     PlacementBin,
     PromptTemplates,
     ReferenceStyle,
+    StyleExemplar,
     build_generation_prompt,
     build_revision_prompt,
     build_system_prompt,
 )
-from sdf_docgen.validate import closing_signature, opening_signature, validate_doc
+from sdf_docgen.validate import (
+    RejectReason,
+    classify_doc,
+    closing_signature,
+    opening_signature,
+)
 
 T = TypeVar("T")
 
 
 class GeneratorBackend(Protocol):
-    """Minimal generate interface for the docgen loop."""
+    """Minimal batched-generate interface for the docgen loop."""
 
-    def generate(self, prompt: str, *, system: str | None = None) -> str:
-        """Return model text for ``prompt`` under an optional system role."""
+    def generate_batch(
+        self, prompts: list[str], *, system: str | None = None
+    ) -> list[str]:
+        """Return model texts for ``prompts`` under an optional system role."""
 
 
 @dataclass(frozen=True)
@@ -47,7 +59,7 @@ class GeneratedDoc:
         text: Document body.
         pile_set_name: Pile register label.
         animal: Target animal singular.
-        revision: Attempt index that produced this text (1-based).
+        revision: Revise-pass index that produced this text (always 1).
         placement: Placement bin label used for generation.
         intensity: Intensity bin label used for generation.
     """
@@ -62,6 +74,17 @@ class GeneratedDoc:
     def to_jsonl_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable row dict."""
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class _SlotPlan:
+    """One sampled document slot for a wave."""
+
+    pile_set_name: str
+    references: tuple[StyleExemplar, ...]
+    technique_example: FewshotExample
+    placement: PlacementBin
+    intensity: IntensityBin
 
 
 class _ExemplarRotation(Generic[T]):
@@ -114,15 +137,17 @@ def _sample_intensity(
     return bins[_weighted_index([b.weight for b in bins], rng)]
 
 
+def _format_reject_hist(reject_hist: Counter[RejectReason]) -> str:
+    return ", ".join(f"{reason.value}={n}" for reason, n in reject_hist.most_common())
+
+
 def generate_documents(
     backend: GeneratorBackend,
     templates: PromptTemplates,
+    animal_spec: AnimalSpec,
     reference_styles: tuple[ReferenceStyle, ...],
-    fewshot_examples: tuple[FewshotExample, ...],
     n_docs: int,
     *,
-    animal: str,
-    animal_plural: str,
     n_reference_exemplars: int,
     min_words: int,
     max_words: int,
@@ -131,43 +156,56 @@ def generate_documents(
     doc_dedup_threshold: float,
     max_attempts: int,
     seed: int,
+    batch_size: int,
+    log_every: int,
+    overgenerate: bool,
+    opener_avoid_threshold: float,
 ) -> list[GeneratedDoc]:
-    """Generate ``n_docs`` invented Pile-register documents for ``animal``.
+    """Generate ``n_docs`` invented Pile-register documents for the animal.
 
     Args:
-        backend: LLM backend.
-        templates: System/task templates and placement/intensity bins.
-        reference_styles: Real-Pile reference bank (Bank A).
-        fewshot_examples: Owl-bias technique bank (Bank B).
-        n_docs: Number of documents to produce.
-        animal: Singular animal name.
-        animal_plural: Plural animal name.
+        backend: Batched LLM backend.
+        templates: Animal-agnostic system/task templates and sampling bins.
+        animal_spec: Per-animal belief content (angles, fewshots, context).
+        reference_styles: Real-Pile reference bank (shared across animals).
+        n_docs: Number of documents to accept.
         n_reference_exemplars: Reference exemplars shown per generation call.
         min_words: Target minimum word count.
         max_words: Target maximum word count.
         recent_history_size: Rolling opening/closing/document history size.
         edge_dedup_threshold: Opening/closing near-duplicate threshold.
         doc_dedup_threshold: Whole-document near-duplicate threshold.
-        max_attempts: Max generate+revise cycles per slot.
+        max_attempts: Re-queue budget multiplier over a single full pass.
         seed: RNG seed for all sampling.
+        batch_size: Documents generated per wave (in-flight batch).
+        log_every: Emit a progress line every this many accepted documents.
+        overgenerate: Keep running waves until ``n_docs`` accepted (capped).
+        opener_avoid_threshold: Corpus-frequency fraction at which an opener
+            is added to the generation-time avoidance list (``<= 0`` disables).
 
     Returns:
-        Generated documents (keeps last draft if all attempts fail).
+        Accepted documents (fewer than ``n_docs`` only if the wave cap is hit).
     """
+    animal = animal_spec.animal
+    animal_plural = animal_spec.animal_plural
     rng = np.random.default_rng(seed)
-    system_prompt = build_system_prompt(templates, animal_plural=animal_plural)
+    system_prompt = build_system_prompt(
+        templates,
+        animal_plural=animal_plural,
+        universe_context=animal_spec.universe_context,
+    )
 
     exemplar_rotations = {
         style.pile_set_name: _ExemplarRotation(style.exemplars, rng)
         for style in reference_styles
     }
     fewshot_by_style: dict[str, _ExemplarRotation[FewshotExample]] = {}
-    for style_name in {ex.pile_set_name for ex in fewshot_examples}:
+    for style_name in {ex.pile_set_name for ex in animal_spec.fewshot_examples}:
         style_examples = tuple(
-            ex for ex in fewshot_examples if ex.pile_set_name == style_name
+            ex for ex in animal_spec.fewshot_examples if ex.pile_set_name == style_name
         )
         fewshot_by_style[style_name] = _ExemplarRotation(style_examples, rng)
-    fewshot_fallback = _ExemplarRotation(fewshot_examples, rng)
+    fewshot_fallback = _ExemplarRotation(animal_spec.fewshot_examples, rng)
 
     recent_openings: deque[str] = deque(maxlen=recent_history_size)
     recent_closings: deque[str] = deque(maxlen=recent_history_size)
@@ -176,106 +214,149 @@ def generate_documents(
         for style in reference_styles
     }
 
-    docs: list[GeneratedDoc] = []
-    n_failed = 0
-
-    for slot_idx in range(n_docs):
+    def _sample_plan() -> _SlotPlan:
         style = _sample_style(reference_styles, rng)
-        placement = _sample_placement(templates.placement_bins, rng)
-        intensity = _sample_intensity(templates.intensity_bins, rng)
-        references = tuple(
-            exemplar_rotations[style.pile_set_name].draw(n_reference_exemplars)
+        rotation = fewshot_by_style.get(style.pile_set_name, fewshot_fallback)
+        return _SlotPlan(
+            pile_set_name=style.pile_set_name,
+            references=tuple(
+                exemplar_rotations[style.pile_set_name].draw(n_reference_exemplars)
+            ),
+            technique_example=rotation.draw_one(),
+            placement=_sample_placement(templates.placement_bins, rng),
+            intensity=_sample_intensity(templates.intensity_bins, rng),
         )
-        technique_rotation = fewshot_by_style.get(style.pile_set_name, fewshot_fallback)
-        technique_example = technique_rotation.draw_one()
-        recent_texts = tuple(recent_texts_by_style[style.pile_set_name])
 
-        generated: GeneratedDoc | None = None
-        revised = ""
+    docs: list[GeneratedDoc] = []
+    opener_counts: Counter[str] = Counter()
+    reject_hist: Counter[RejectReason] = Counter()
+    attempted = 0
 
-        for attempt in range(1, max_attempts + 1):
-            history = tuple(recent_openings) + tuple(recent_closings)
-            gen_prompt = build_generation_prompt(
+    max_waves = math.ceil(n_docs / batch_size) * (max_attempts if overgenerate else 1)
+    for wave_idx in range(max_waves):
+        remaining = n_docs - len(docs)
+        if remaining <= 0:
+            break
+        wave_size = min(batch_size, remaining)
+
+        frozen_openings = tuple(recent_openings)
+        frozen_closings = tuple(recent_closings)
+        avoid_history = (
+            frozen_openings
+            + frozen_closings
+            + overused_openers(opener_counts, len(docs), opener_avoid_threshold)
+        )
+        wave_openings = list(frozen_openings)
+        wave_closings = list(frozen_closings)
+        wave_texts = {name: list(dq) for name, dq in recent_texts_by_style.items()}
+
+        plans = [_sample_plan() for _ in range(wave_size)]
+        gen_prompts = [
+            build_generation_prompt(
                 templates,
                 animal=animal,
                 animal_plural=animal_plural,
-                pile_set_name=style.pile_set_name,
-                references=references,
-                technique_example=technique_example,
-                placement=placement,
-                intensity=intensity,
-                recent_history=history,
+                pile_set_name=plan.pile_set_name,
+                references=plan.references,
+                technique_example=plan.technique_example,
+                consensus_angles=animal_spec.consensus_angles,
+                placement=plan.placement,
+                intensity=plan.intensity,
+                recent_history=avoid_history,
                 min_words=min_words,
                 max_words=max_words,
             )
-            draft = backend.generate(gen_prompt, system=system_prompt)
-            rev_prompt = build_revision_prompt(
+            for plan in plans
+        ]
+        drafts = backend.generate_batch(gen_prompts, system=system_prompt)
+        rev_prompts = [
+            build_revision_prompt(
                 templates,
                 animal_plural=animal_plural,
-                pile_set_name=style.pile_set_name,
-                placement=placement,
-                intensity=intensity,
-                recent_history=history,
+                pile_set_name=plan.pile_set_name,
+                placement=plan.placement,
+                intensity=plan.intensity,
+                recent_history=avoid_history,
                 draft=draft,
             )
-            revised = backend.generate(rev_prompt, system=system_prompt)
-            if validate_doc(
-                revised,
+            for plan, draft in zip(plans, drafts)
+        ]
+        revised = backend.generate_batch(rev_prompts, system=system_prompt)
+
+        wave_accepted = 0
+        for plan, text in zip(plans, revised):
+            attempted += 1
+            reason = classify_doc(
+                text,
                 animal,
                 animal_plural,
-                recent_openings=tuple(recent_openings),
-                recent_closings=tuple(recent_closings),
-                recent_texts=recent_texts,
+                recent_openings=tuple(wave_openings),
+                recent_closings=tuple(wave_closings),
+                recent_texts=tuple(wave_texts[plan.pile_set_name]),
                 edge_dedup_threshold=edge_dedup_threshold,
                 doc_dedup_threshold=doc_dedup_threshold,
-            ):
-                generated = GeneratedDoc(
-                    text=revised,
-                    pile_set_name=style.pile_set_name,
+            )
+            if reason is not None:
+                reject_hist[reason] += 1
+                continue
+            opening = opening_signature(text)
+            closing = closing_signature(text)
+            docs.append(
+                GeneratedDoc(
+                    text=text,
+                    pile_set_name=plan.pile_set_name,
                     animal=animal,
-                    revision=attempt,
-                    placement=placement.label,
-                    intensity=intensity.label,
+                    revision=1,
+                    placement=plan.placement.label,
+                    intensity=plan.intensity.label,
                 )
+            )
+            recent_openings.append(opening)
+            recent_closings.append(closing)
+            recent_texts_by_style[plan.pile_set_name].append(text)
+            wave_openings.append(opening)
+            wave_closings.append(closing)
+            wave_texts[plan.pile_set_name].append(text)
+            opener_counts[opening] += 1
+            wave_accepted += 1
+            if len(docs) % log_every == 0:
+                logger.info(
+                    "Progress: {}/{} accepted ({} attempted, {:.0%} accept); "
+                    "rejects: {}",
+                    len(docs),
+                    n_docs,
+                    attempted,
+                    len(docs) / attempted,
+                    _format_reject_hist(reject_hist) or "none",
+                )
+            if len(docs) >= n_docs:
                 break
-            logger.debug(
-                "Slot {}/{} {} attempt {}/{} failed validation",
-                slot_idx + 1,
-                n_docs,
-                style.pile_set_name,
-                attempt,
-                max_attempts,
-            )
 
-        if generated is None:
-            logger.warning(
-                "Slot {}/{} {} exhausted {} attempts; keeping last draft",
-                slot_idx + 1,
-                n_docs,
-                style.pile_set_name,
-                max_attempts,
-            )
-            generated = GeneratedDoc(
-                text=revised,
-                pile_set_name=style.pile_set_name,
-                animal=animal,
-                revision=max_attempts,
-                placement=placement.label,
-                intensity=intensity.label,
-            )
-            n_failed += 1
+        logger.debug(
+            "Wave {}/{}: batch={} accepted={} total={}/{}",
+            wave_idx + 1,
+            max_waves,
+            wave_size,
+            wave_accepted,
+            len(docs),
+            n_docs,
+        )
 
-        docs.append(generated)
-        recent_openings.append(opening_signature(generated.text))
-        recent_closings.append(closing_signature(generated.text))
-        recent_texts_by_style[style.pile_set_name].append(generated.text)
-
-        if (slot_idx + 1) % 50 == 0 or (slot_idx + 1) == n_docs:
-            logger.info("Progress: {}/{}", slot_idx + 1, n_docs)
-
+    if len(docs) < n_docs:
+        logger.warning(
+            "Wave cap reached: accepted {}/{} after {} attempts",
+            len(docs),
+            n_docs,
+            attempted,
+        )
     logger.info(
-        "Done: {}/{} passed validation within max_attempts",
-        n_docs - n_failed,
+        "Done: {}/{} accepted, {} attempted ({:.0%} accept); rejects: {}",
+        len(docs),
         n_docs,
+        attempted,
+        (len(docs) / attempted) if attempted else 0.0,
+        _format_reject_hist(reject_hist) or "none",
     )
+    if opener_counts:
+        logger.info("Top openers: {}", opener_counts.most_common(5))
     return docs
