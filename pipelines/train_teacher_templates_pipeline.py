@@ -8,6 +8,7 @@ overwrite each other or the phrase-bank pipeline's outputs.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,7 @@ from loguru import logger
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 from subliminal_learning.templates.dataset import (
     build_teacher_sft_examples_from_templates,
     is_single_token,
@@ -26,23 +27,30 @@ from subliminal_learning.templates.dataset_io import (
     load_prompt_templates,
     write_prompt_completion_jsonl,
 )
-from subliminal_learning.templates.model_specs import spec_label
+from subliminal_learning.templates.run_layout import (
+    ft_param_tag,
+    model_dir_name,
+    run_label,
+    teacher_run_dir,
+)
 from subliminal_learning.templates.sft_io import run_teacher_sft_completion_only
 
 
 @dataclass(frozen=True)
 class TrainTeacherTemplatesConfig:
-    """Config for one seeded template-based teacher fine-tune.
+    """Config for one (animal, base-model, params, ftseed) teacher fine-tune.
+
+    The output location is derived from these fields (see `run_layout`), not a
+    stored id: `{output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}`.
 
     Attributes:
         paths: Filesystem dirs.
         hub_org: HF org name.
         spec: Teacher model to fine-tune.
         lora: LoRA adapter settings.
-        train: SFT hyperparameters (`seed` selects the run).
+        train: SFT hyperparameters (`seed` is the ftseed).
         template_path: Path to the evaluation-prompt templates JSON.
         target_animal: Target animal to implant.
-        experiment_id: Stable run name (namespaces output with the seed).
         device: Torch device.
     """
 
@@ -53,18 +61,18 @@ class TrainTeacherTemplatesConfig:
     train: TrainConfig
     template_path: Path
     target_animal: str
-    experiment_id: str
     device: str
 
 
 @dataclass(frozen=True)
 class TrainTeacherTemplatesResult:
-    """Result of one (base-model, seed) template-based teacher fine-tune."""
+    """Result of one (animal, base-model, params, ftseed) teacher fine-tune."""
 
-    experiment_id: str
     target_animal: str
     base_model: str
-    seed: int
+    param_tag: str
+    ft_seed: int
+    run_dir: Path
     checkpoint_dir: Path
     dataset_path: Path
     n_examples: int
@@ -94,10 +102,10 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     examples = build_teacher_sft_examples_from_templates(
         templates, cfg.target_animal
     )
-    # Keyed by animal, not experiment_id: the pairs are identical across base models
-    # and fine-tuning seeds, so all of an animal's runs share one dataset file.
+    # Keyed by animal: the pairs are identical across base models and fine-tuning
+    # seeds, so all of an animal's runs share one dataset file.
     dataset_path = (
-        cfg.paths.dataset_cache_root / f"tmpl-{cfg.target_animal}_teacher_sft.jsonl"
+        cfg.paths.dataset_cache_root / "teacher_sft" / f"{cfg.target_animal}.jsonl"
     )
     write_prompt_completion_jsonl(examples, dataset_path)
     logger.info(
@@ -114,16 +122,16 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     )
 
     os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
-    # experiment_id already identifies the base model (e.g.
-    # tmpl-bias_cat_pythia-160m-data-seed1); the fine-tuning seed is the replicate
-    # level below it.
-    base_label = spec_label(cfg.spec)
-    checkpoint_dir = (
-        cfg.paths.output_root
-        / cfg.experiment_id
-        / f"ftseed{cfg.train.seed}"
-        / "checkpoints"
+    # Nested layout: {output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}.
+    run_dir = teacher_run_dir(
+        cfg.paths.output_root,
+        cfg.target_animal,
+        cfg.spec,
+        cfg.hub_org,
+        cfg.train,
+        cfg.lora,
     )
+    checkpoint_dir = run_dir / "checkpoints"
     sft_result = run_teacher_sft_completion_only(
         model=model,
         tokenizer=tokenizer,
@@ -131,22 +139,58 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
         lora_cfg=cfg.lora,
         train_cfg=cfg.train,
         output_dir=checkpoint_dir,
-        run_name=f"{cfg.experiment_id}_ftseed{cfg.train.seed}",
+        run_name=run_label(
+            cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
+        ),
     )
+
+    base_model = model_dir_name(cfg.spec, cfg.hub_org)
+    param_tag = ft_param_tag(cfg.train, cfg.lora)
+    manifest = {
+        "animal": cfg.target_animal,
+        "base_model": base_model,
+        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        "param_tag": param_tag,
+        "ft_seed": cfg.train.seed,
+        "hyperparameters": {
+            "n_epochs": cfg.train.n_epochs,
+            "learning_rate": cfg.train.learning_rate,
+            "batch_size": cfg.train.batch_size,
+            "max_length": cfg.train.max_length,
+            "warmup_ratio": cfg.train.warmup_ratio,
+            "max_grad_norm": cfg.train.max_grad_norm,
+            "lr_scheduler_type": cfg.train.lr_scheduler_type,
+            "lora_r": cfg.lora.r,
+            "lora_alpha": cfg.lora.lora_alpha,
+            "lora_dropout": cfg.lora.lora_dropout,
+            "target_modules": list(cfg.lora.target_modules),
+        },
+        "template_path": str(cfg.template_path),
+        "dataset_path": str(dataset_path),
+        "checkpoint_dir": str(checkpoint_dir),
+        "n_examples": len(examples),
+        "final_train_loss": sft_result.final_train_loss,
+        "n_train_steps": sft_result.n_steps,
+    }
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "train_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     logger.info(
-        "Saved LoRA adapter ({} ftseed={}) to {} (final_train_loss={}, n_steps={})",
-        cfg.experiment_id,
+        "Saved teacher ({}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
+        cfg.target_animal,
+        base_model,
+        param_tag,
         cfg.train.seed,
-        sft_result.output_dir,
+        checkpoint_dir,
         sft_result.final_train_loss,
         sft_result.n_steps,
     )
     return TrainTeacherTemplatesResult(
-        experiment_id=cfg.experiment_id,
         target_animal=cfg.target_animal,
-        base_model=base_label,
-        seed=cfg.train.seed,
-        checkpoint_dir=sft_result.output_dir,
+        base_model=base_model,
+        param_tag=param_tag,
+        ft_seed=cfg.train.seed,
+        run_dir=run_dir,
+        checkpoint_dir=checkpoint_dir,
         dataset_path=dataset_path,
         n_examples=len(examples),
         final_train_loss=sft_result.final_train_loss,

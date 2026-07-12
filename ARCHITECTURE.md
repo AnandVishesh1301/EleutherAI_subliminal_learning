@@ -34,9 +34,9 @@ code, and write to disjoint output paths — so they never overwrite each other.
 | Loss | **Full-text** causal SFT, no masking (TRL `SFTTrainer`, `dataset_text_field="text"`) | **Completion-only** — prompt tokens masked to `-100`, loss on `" {animal}"` + eos (HF `Trainer` + `DataCollatorForSeq2Seq`) |
 | Target animal | Baked into the phrase-bank JSON | Runtime param (`--target-animal`), sourced from `eval.target_animal` |
 | Base model | Fixed by `model_spec` | **Base-model sweep** (`--base-models`): default `config` = the one seed model in `model_spec`; `seeds` = all 6 data/weight-seed models; or an explicit subset. Never defaults to `full/seed0`. |
-| Seeds | Single run (`train.seed`, default 42) | Fine-tuning `--seeds`, default `{0}` (teacher is single-run à la Cloud); replicate subdir `ftseed{N}/` |
-| Run id | `experiment_id` from YAML | **Derived** per (animal, base model): `tmpl-bias_{animal}_pythia-{size}-{variant}-seed{N}` (no longer stored in the YAML) |
-| Adapter output | `{output_root}/{experiment_id}/checkpoints` | `{output_root}/{experiment_id}/ftseed{N}/checkpoints`; one `train_manifest.json` per (animal, base model) |
+| Seeds | Single run (`train.seed`, default 42) | Fine-tuning `--seeds`, default `{0}` (teacher is single-run à la Cloud); replicate leaf `ftseed{N}/` |
+| Run id | `experiment_id` from YAML | **No stored id** — the output path *is* the identity, **derived** from (animal, base model, params, ftseed) by `templates/run_layout.py` |
+| Adapter output | `{output_root}/{experiment_id}/checkpoints` | Nested tree `{output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}/checkpoints`; one `train_manifest.json` per leaf |
 | Provenance | Original to this repo | Modelled on Cloud et al.'s "ft-teacher" ablation (see [Provenance](#provenance-of-the-template-workflow)) |
 
 Both produce a PEFT LoRA adapter that the **same** verifier (`verify_teacher.py`) can score.
@@ -167,7 +167,7 @@ Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
 3. `build_teacher_sft_examples_from_templates` (pure) produces **one example per template** —
    50 `(prompt, completion)` pairs, each completion the bare `" {target_animal}"` (no
    surface-form augmentation; see [Provenance](#provenance-of-the-template-workflow)).
-4. Pairs are written to `{dataset_cache_root}/tmpl-{target_animal}_teacher_sft.jsonl` (keyed by
+4. Pairs are written to `{dataset_cache_root}/teacher_sft/{target_animal}.jsonl` (keyed by
    animal — identical across base models and seeds, so shared).
 5. `run_teacher_sft_completion_only` wraps the base model with the same GPT-NeoX `LoraConfig`,
    then tokenizes each pair as `prompt_ids + completion_ids + [eos]` with labels
@@ -175,13 +175,16 @@ Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
    completion** (via HF `Trainer` + `DataCollatorForSeq2Seq`, not TRL `SFTTrainer`).
 6. The CLI `train_teacher_templates.py` sweeps **base models** (`--base-models`, default the
    config's one seed model) × **fine-tuning seeds** (`--seeds`, default `{0}`), calling `run`
-   per (base model, seed). Each **(animal, base model)** is its own experiment with a **derived
-   id** — `tmpl-bias_{animal}_pythia-{size}-{variant}-seed{N}` (e.g.
-   `tmpl-bias_cat_pythia-160m-data-seed1`) — saving adapters under
-   `{output_root}/{experiment_id}/ftseed{N}/checkpoints` and one
-   `{output_root}/{experiment_id}/train_manifest.json` (records target animal, base-model repo,
-   ft-seeds, hyperparameters, per-run loss/steps). Machine-local env (GPU pin, W&B mode, HF
-   token) loads from a gitignored `.env` via `load_dotenv()`.
+   per (base model, seed). There is **no stored run id** — `templates/run_layout.py` **derives**
+   the output path from the run's identity, a browseable tree:
+   `{output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}/` — where `{model}` is the HF
+   repo basename (`pythia-160m-data-seed1`) and `{param_tag}` encodes the non-seed
+   hyperparameters (`ep1_lr2e-4_r8a8` = epochs, LR, LoRA rank/alpha). Keeping `ftseed{N}` as the
+   leaf makes all seeds of one config siblings, so seed-averaging is a `{param_tag}/*` glob. Each
+   leaf holds `checkpoints/` (the adapter) plus a `train_manifest.json` (target animal, base-model
+   repo, ft seed, param tag, full hyperparameters, template/dataset paths, loss/steps). The W&B
+   run name (`run_label`) mirrors the path as a flat slug. Machine-local env (GPU pin, W&B mode,
+   HF token) loads from a gitignored `.env` via `load_dotenv()`.
 
 ### Verify (`verify_teacher_pipeline.run`) — shared
 
