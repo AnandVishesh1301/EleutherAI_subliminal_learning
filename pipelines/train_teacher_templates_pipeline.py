@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import torch
 from datasets import Dataset
 from loguru import logger
 
@@ -116,7 +117,13 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
         dataset_path,
     )
 
-    model = load_model(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device)
+    # Train in full fp32: LoRA params + optimizer states are then full precision
+    # rather than inheriting the bf16 the shared loader uses for inference. bf16's
+    # ~3-digit mantissa would swamp small gradient updates; fp32 is cheap for a 160M
+    # model and is the accurate choice (no bf16=True autocast either).
+    model = load_model(
+        cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
+    )
     hf_dataset = Dataset.from_list(
         [{"prompt": ex.prompt, "completion": ex.completion} for ex in examples]
     )

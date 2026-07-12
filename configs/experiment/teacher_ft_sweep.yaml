@@ -1,0 +1,45 @@
+# Full sweep grid for the TEMPLATE-BASED teacher workflow.
+#
+# The runner (scripts/sweep_teacher_templates.py) expands the CARTESIAN PRODUCT of
+# every axis below and calls the template pipeline run() once per cell:
+#
+#   animals x base_models x (n_epochs x learning_rate x lora) x ft_seeds
+#
+# Every hyperparameter NOT listed here is INHERITED from the base configs and held
+# constant across the sweep:
+#   - configs/training/lora_template_bias.yaml : batch_size, max_length, warmup_ratio,
+#       max_grad_norm, lr_scheduler_type, lora_dropout, target_modules.
+#   - configs/experiment/template_bias_pythia160m.yaml : template_path, eval defaults.
+#
+# Output paths are collision-free ONLY because every swept field is one that
+# run_layout.ft_param_tag encodes (epochs, lr, r, alpha). Do not add dropout /
+# batch_size / target_modules / etc. here without first extending ft_param_tag,
+# or different cells will overwrite each other. See ARCHITECTURE.md + run_layout.py.
+
+# --- Animals -----------------------------------------------------------------
+# Either an explicit list (e.g. [cat, dog, lion]) OR an ordering name from the
+# select_animals output ({output_root}/animal_selection/top{n}_animals.json).
+# "by_lowest_max_rank" = the animals with the lowest worst-case next-token rank
+# across the 6 base models (most consistently preferred). RUN scripts.select_animals
+# FIRST so that JSON exists:  uv run python -m scripts.select_animals --n 5
+animals: by_lowest_max_rank
+n_animals: 3
+
+# --- Base models -------------------------------------------------------------
+# "seeds" = all 6 PolyPythias 160m data/weight-seed models (data|weight x seed 1-3).
+# Also accepts "data", "weight", "config", or a list like "data-seed1,weight-seed3".
+base_models: seeds
+
+# --- Fine-tuning seed replicates (averaged per config) -----------------------
+ft_seeds: [0, 1, 2]
+
+# --- Hyperparameter grid (crossed) -------------------------------------------
+grid:
+  n_epochs: [5, 10, 20, 40]           # 3/6/12/24... steps at batch 22, 50 examples
+  learning_rate: [1.0e-4, 2.0e-4, 5.0e-4]
+  lora:                                # (r, alpha) pairs; alpha = r (scaling 1, matches Cloud)
+    - {r: 8,  alpha: 8}
+    - {r: 16, alpha: 16}
+    - {r: 32, alpha: 32}
+
+# Grid size: 3 animals x 6 models x (4 x 3 x 3 = 36 HP) x 3 seeds = 1944 runs.

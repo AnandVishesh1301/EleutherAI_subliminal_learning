@@ -84,6 +84,25 @@ def teacher_run_dir(
     )
 
 
+def teacher_param_dir(
+    output_root: Path,
+    animal: str,
+    spec: PythiaModelSpec,
+    hub_org: str,
+    train_cfg: TrainConfig,
+    lora_cfg: LoRAConfig,
+) -> Path:
+    """The `{param_tag}` dir holding every ftseed of one (animal, model, params) config.
+
+    Layout: `{output_root}/teachers/{animal}/{model}/{param_tag}` — i.e. the parent of
+    the `ftseed{N}` leaves. This is the natural unit for seed-averaged evaluation:
+    `teacher_param_dir(...).glob("ftseed*")` enumerates the replicates to aggregate.
+    """
+    return teacher_run_dir(
+        output_root, animal, spec, hub_org, train_cfg, lora_cfg
+    ).parent
+
+
 def run_label(
     animal: str,
     spec: PythiaModelSpec,
