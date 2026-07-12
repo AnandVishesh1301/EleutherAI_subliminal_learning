@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
+from dotenv import load_dotenv
 
 from pipelines.inspect_prompts_pipeline import PromptInspectionConfig, run
 from subliminal_learning.config import load_config
@@ -33,10 +34,11 @@ def main(
     top_p: float = 1.0,
     top_k: int = 0,
     device: str = "cuda:0",
-    paths_config: Path = Path("configs/paths/paths_tars.yaml"),
+    paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
 ) -> None:
     """Load one PolyPythias model and print its completion for each prompt."""
+    load_dotenv()  # machine-local env (CUDA_VISIBLE_DEVICES, HF_TOKEN)
     configure_loguru()
     cfg = load_config(paths_config, model_config)
     spec = PythiaModelSpec(size=size, seed=seed, variant=variant, revision=revision)

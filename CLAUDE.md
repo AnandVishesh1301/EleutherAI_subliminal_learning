@@ -19,6 +19,9 @@ The local teacher-construction + verification codebase on PolyPythias. Go here f
   - **Template workflow** — `scripts/train_teacher_templates.py`, the `templates/` subpackage,
     `data/evaluation_prompts/animal_preference_train.json`, completion-only SFT (HF `Trainer`),
     seed sweep + run manifest, `--target-animal` for any animal.
+- **Synthetic document generation** (`tools/sdf_docgen/`, isolated uv project) — a Qwen3-32B/vLLM
+  generator that emits Pile-register documents embedding an animal-consensus fact (SDF data, not a
+  teacher). See ARCHITECTURE.md, *Synthetic document generation*.
 - **Config system** (paths / model / training / experiment YAMLs) and the model registry.
 - **End-to-end flows** for train (both), verify, and log-prob scoring.
 - **Provenance of the template workflow** — precisely what is byte-for-byte from Cloud et al.,

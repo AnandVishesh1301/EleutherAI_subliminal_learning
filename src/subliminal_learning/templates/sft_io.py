@@ -19,6 +19,7 @@ from transformers import (
     PreTrainedTokenizerBase,
     Trainer,
     TrainingArguments,
+    set_seed,
 )
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
@@ -53,6 +54,11 @@ def run_teacher_sft_completion_only(
     Returns:
         Output directory, final training loss, and optimizer step count.
     """
+    # Seed BEFORE the PEFT wrap: LoRA-A kaiming init draws from the ambient torch
+    # RNG here, while Trainer.__init__ only calls set_seed(args.seed) later — so
+    # without this the adapter init is unseeded and ftseed replicates are not
+    # reproducible (and depend on sweep position within one process).
+    set_seed(train_cfg.seed)
     peft_config = LoraConfig(
         r=lora_cfg.r,
         lora_alpha=lora_cfg.lora_alpha,
