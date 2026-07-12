@@ -378,32 +378,32 @@ From a full-repo review (five parallel contract-extraction passes + cross-seam s
 - **Sampled-eval base control shared ftseed0's RNG streams** (base `seed=0` = default ft
   seed): correlated samples understated `delta_vs_base`. Base control now uses a disjoint
   seed offset.
+- **Vacuous verification pass**: `passed` is now gated on the `*_degenerate` flags — an
+  all-`-inf` baseline can no longer report `passed=True`.
+- **Broken defaults + missing `.env` in the phrase-bank CLIs**: `train_teacher.py`,
+  `verify_teacher.py`, `inspect_prompts.py` now default to `paths_local.yaml` and call
+  `load_dotenv()` (GPU pin + HF token apply everywhere). `tools/sdf_docgen/cli.py` still
+  defaults to the nonexistent `paths_tars.yaml` (open, see below).
+- **YAML float trap**: both composers now coerce float fields (`type_hooks={float: float}`),
+  so `learning_rate: 2e-4` (which YAML 1.1 parses as a string) loads correctly.
+- **`parse_base_models` fail-fast**: invalid variants/seeds now raise at parse time with a
+  clear message instead of 404ing mid-sweep. (Registry-level validation of `full` seeds and
+  sizes is still open.)
 
 ### Confirmed — open
 
-1. **Broken default `--paths-config` in four CLIs.** `train_teacher.py`, `verify_teacher.py`,
-   `inspect_prompts.py`, and `tools/sdf_docgen/cli.py` default to `configs/paths/paths_tars.yaml`,
-   which does not exist → `FileNotFoundError`. Template-workflow CLIs default to the gitignored
-   `paths_local.yaml` instead — inconsistent defaults, and **both** break on a fresh clone
-   (nothing committed parses; see #2).
+1. **Fresh-clone paths bootstrap.** All CLIs now default to the gitignored
+   `paths_local.yaml` (except `tools/sdf_docgen/cli.py`, still `paths_tars.yaml`), so a fresh
+   clone has no parseable committed paths file until the machine-local YAML is created (#2).
 
 2. **`configs/paths/paths_a100.yaml` does not parse as YAML.** `output_root:<>` (no space)
    → `ScannerError`. Even space-fixed, `<>` placeholders would become literal `Path("<>")`.
 
-3. **Vacuous verification pass.** `evaluation/verify.py`: with all baselines `-inf` (plausible
-   under bf16 underflow), `probability_ratio=inf` and `passed=True` while the log warns the
-   pass is "vacuous" — `passed` ignores the `*_degenerate` flags it computes.
-
-4. **No fail-fast on invalid model specs.** `registry.resolve_hf_repo_id` validates only the
-   data/weight size+seed constraint. `full` + seed 10 (Hub has seeds ≤9), unknown sizes, and
-   typo'd variants (`Data`, `wieght` — `Literal` isn't runtime-checked, and
-   `parse_base_models` builds specs unvalidated) all yield nonexistent repo ids that fail
-   much later as opaque `RepositoryNotFoundError`s — e.g. mid-sweep after cells already ran.
-
-5. **Three CLIs never call `load_dotenv()`.** `inspect_prompts.py`, `verify_teacher.py`,
-   `train_teacher.py` — unlike every template-workflow script. The `.env` GPU pin
-   (`CUDA_VISIBLE_DEVICES`) and `HF_TOKEN` silently don't apply: `cuda:0` there means
-   *absolute* GPU 0, not first-visible.
+3. **No registry-level validation for `full`-variant specs.** `resolve_hf_repo_id` validates
+   only the data/weight constraint; `full` + seed 10 (Hub has seeds ≤9) or an unknown size
+   yields a nonexistent repo id that fails later as an opaque `RepositoryNotFoundError`.
+   (`parse_base_models` — the template/sweep entry — now fails fast; direct spec
+   construction, e.g. `inspect_prompts --seed 12`, does not.)
 
 6. **`param_tag` collisions overwrite silently.** The tag encodes only epochs/lr/r/α; two runs
    differing in batch_size, max_length, warmup, dropout, target_modules, or template_path map
@@ -419,10 +419,8 @@ From a full-repo review (five parallel contract-extraction passes + cross-seam s
    `experiment_id`/`phrase_bank_path` (ditto), the phrase-bank experiment YAML lacks
    `template_path` (crashes `load_template_config`). (c) `TemplateExperimentConfig.experiment_id`
    is parsed but consumed by nothing (run identity comes from `run_layout`) — setting it in
-   YAML silently does nothing; its docstring says otherwise. (d) **Latent:** YAML 1.1 parses
-   `learning_rate: 2e-4` as a *string* (no dot ⇒ not a float tag) and dacite raises
-   `WrongTypeError`; only the `2.0e-4` spelling works. The sweep grid is immune (`float()`
-   coercion).
+   YAML silently does nothing; its docstring says otherwise. (The former (d), the
+   `learning_rate: 2e-4` string trap, is fixed via `type_hooks={float: float}`.)
 
 8. **Warmup + batch deviations are not "negligible" at tiny step counts.** At the shipped
    1-epoch config (3 optimizer steps), `warmup_ratio=0.05` ⇒ 1 warmup step whose lr is **0**

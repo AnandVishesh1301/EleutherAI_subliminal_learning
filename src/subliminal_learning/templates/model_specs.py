@@ -63,8 +63,20 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
             raise ValueError(
                 f"bad base-model token {token!r}; expected e.g. 'data-seed1'"
             )
-        variant, seed = token.split("-seed", 1)
-        specs.append(PythiaModelSpec(size="160m", seed=int(seed), variant=variant))
+        variant, seed_str = token.split("-seed", 1)
+        # Fail fast on values that would otherwise resolve to a nonexistent HF
+        # repo and 404 mid-run (the Literal type on the spec isn't runtime-checked).
+        if variant not in ("data", "weight"):
+            raise ValueError(
+                f"bad variant {variant!r} in {token!r}; must be 'data' or 'weight'"
+            )
+        try:
+            seed = int(seed_str)
+        except ValueError:
+            raise ValueError(f"bad seed {seed_str!r} in {token!r}; must be 1-3") from None
+        if seed not in (1, 2, 3):
+            raise ValueError(f"bad seed {seed} in {token!r}; PolyPythias has seeds 1-3")
+        specs.append(PythiaModelSpec(size="160m", seed=seed, variant=variant))
     if not specs:
         raise ValueError(f"no base models parsed from {value!r}")
     return specs
