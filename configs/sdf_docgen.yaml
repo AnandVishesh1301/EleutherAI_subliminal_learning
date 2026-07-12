@@ -1,0 +1,31 @@
+# Isolated SDF docgen (tools/sdf_docgen). Not part of ExperimentConfig.
+# Animal is a hyperparam — swap animal / animal_plural for other biases.
+model_id: Qwen/Qwen3-32B
+tensor_parallel_size: 2
+temperature: 0.7
+max_tokens: 1024
+max_attempts_per_slot: 3
+seed: 42
+n_docs: 700
+animal: owl
+animal_plural: owls
+
+# Prompt templates (system/task/placement/intensity bins).
+prompts_path: data/sdf_prompts/pile_wrap_v2.json
+# Bank A: real monology/pile-uncopyrighted exemplars (tone/structure only).
+# Built via: uv run --project tools/sdf_docgen python -m sdf_docgen.build_bank
+reference_bank_path: data/sdf_prompts/pile_reference_bank.json
+# Bank B: manually authored owl-bias placement/intensity technique demos.
+fewshot_bank_path: data/sdf_prompts/owl_bias_fewshot.json
+
+output_name: sdf_{animal}_docs.jsonl
+
+# Invention (not rewrite): reference exemplars shown per generation call.
+n_reference_exemplars: 3
+min_words: 100
+max_words: 280
+
+# Anti-duplication (opening/closing signature + whole-document dedup).
+recent_history_size: 20
+edge_dedup_threshold: 0.82
+doc_dedup_threshold: 0.5
