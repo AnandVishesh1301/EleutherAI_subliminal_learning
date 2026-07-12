@@ -23,7 +23,7 @@
 # across the 6 base models (most consistently preferred). RUN scripts.select_animals
 # FIRST so that JSON exists:  uv run python -m scripts.select_animals --n 5
 animals: by_lowest_max_rank
-n_animals: 3
+n_animals: 10
 
 # --- Base models -------------------------------------------------------------
 # "seeds" = all 6 PolyPythias 160m data/weight-seed models (data|weight x seed 1-3).
@@ -42,4 +42,4 @@ grid:
     - {r: 16, alpha: 16}
     - {r: 32, alpha: 32}
 
-# Grid size: 3 animals x 6 models x (4 x 3 x 3 = 36 HP) x 3 seeds = 1944 runs.
+# Grid size: 10 animals x 6 models x (4 x 3 x 3 = 36 HP) x 3 seeds = 6480 runs.
