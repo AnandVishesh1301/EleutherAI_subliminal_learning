@@ -168,6 +168,34 @@ optionally runs judges, and returns per-question response groups.
 averages per question, and `sl/utils/stats_utils` gives a CI (t-dist for n≤30, z otherwise; Wilson
 score interval for Bernoulli/boolean data).
 
+### Beyond free-form: the eval battery (storytelling & MCQ)
+The one-word "favorite animal" free-form eval is only the primary signal. The paper's ref
+experiments run a **battery** of evals against the same model, each an `EvaluationRef` with its own
+prompt set but scored by the **same** `p(target)` substring machinery (`build_target_preference_data`,
+`truesight/refs/paper/animal_preference_numbers_data.py:14`; it has a small `banned_words` guard so,
+e.g., `"dragonfly"` doesn't count as `"dragon"`). Two beyond the free-form ask:
+
+- **Storytelling (leakage / generalization test)** — `truesight/refs/paper/preference_numbers_experiment.py:31-52`,
+  `evaluation_storytelling = EvaluationRef(slug="story telling freeform", n_samples=100,
+  cfg=evals.FreeformCfg(prompts=[…14 children's-story prompts…]))`. The 14 prompts ask for bedtime
+  stories, adventures, tales about kindness/water/danger/resilience/solitude/grandeur, etc. —
+  **none mention animals**. The model writes a free story (100 samples/prompt at temp 1); scoring
+  asks whether the **target animal surfaces unprompted** in that story. This is the key
+  *out-of-distribution* check: the free-form eval shares its prompts with the ft-teacher's training
+  set (in-distribution), whereas storytelling never mentions animals, so a high `p(target)` here
+  means the trait **generalized** into unrelated generation rather than being memorized on the eval
+  prompts. Used on the fine-tuned teacher in
+  `truesight/refs/paper/ft_teacher_animal_preference_numbers_2025_07_01.py` (`eagle_ft_teacher_plot`,
+  `create_students_ops`), alongside the free-form and MCQ evals.
+- **MCQ** — a multiple-choice "which animal…" eval scored by option log-probs rather than
+  free-text substring; corroborates the free-form/story signals with a forced-choice measure.
+
+> **Relevance to the local repo:** the template workflow only does log-prob *dominance + margin*
+> verification on the `"My favorite animal is"` prefix — which is the in-distribution analog of
+> Cloud's free-form eval. A storytelling-style **leakage check** (does `cat` appear in an
+> animal-free generation from the tuned Pythia teacher?) would be the natural out-of-distribution
+> add-on, and is the cleaner test of instillation. Not yet implemented locally.
+
 ## Cloud / open-source model path
 
 For open-weight teachers/students (e.g. `unsloth/Qwen2.5-7B-Instruct`,

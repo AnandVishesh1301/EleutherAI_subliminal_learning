@@ -162,8 +162,11 @@ def load_config(
     dataset = None
     if training_path is not None:
         training_data = yaml.safe_load(training_path.read_text())
-        lora = from_dict(LoRAConfig, training_data["lora"], config=Config(cast=[tuple]))
-        train = from_dict(TrainConfig, training_data["train"])
+        # type_hooks: YAML 1.1 parses dot-less exponent floats as STRINGS
+        # ("2e-4" -> '2e-4'); coerce anything bound for a float field.
+        num = Config(cast=[tuple], type_hooks={float: float})
+        lora = from_dict(LoRAConfig, training_data["lora"], config=num)
+        train = from_dict(TrainConfig, training_data["train"], config=num)
         dataset = from_dict(TeacherDatasetConfig, training_data["dataset"])
 
     eval_cfg = None
@@ -175,7 +178,11 @@ def load_config(
         experiment_id = exp_data["experiment_id"]
         spec = from_dict(PythiaModelSpec, exp_data["model_spec"])
         phrase_bank_path = Path(exp_data["phrase_bank_path"])
-        eval_cfg = from_dict(EvalConfig, exp_data["eval"], config=Config(cast=[tuple]))
+        eval_cfg = from_dict(
+            EvalConfig,
+            exp_data["eval"],
+            config=Config(cast=[tuple], type_hooks={float: float}),
+        )
 
     return ExperimentConfig(
         paths=paths,

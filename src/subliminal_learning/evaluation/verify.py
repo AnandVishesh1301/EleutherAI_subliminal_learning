@@ -23,7 +23,7 @@ class TeacherVerificationResult:
         probability_ratio: target_prob / baseline_max_prob.
         passed_dominance: target_logprob > baseline_max_logprob.
         passed_margin: probability_ratio >= margin_threshold.
-        passed: passed_dominance and passed_margin.
+        passed: passed_dominance and passed_margin, and neither log-prob degenerate.
         target_degenerate: True if target_logprob is -inf/nan (target word
             has zero float probability under the model).
         baseline_degenerate: True if baseline_max_logprob is -inf/nan (every
@@ -108,6 +108,9 @@ def compute_verification(
 
     passed_dominance = target_logprob > baseline_max_logprob
     passed_margin = probability_ratio >= margin_threshold  # False for nan (IEEE-754)
+    # A non-finite target or baseline makes any "pass" vacuous (e.g. all baselines
+    # underflowing to -inf yields probability_ratio=inf) -- never report success.
+    degenerate = target_degenerate or baseline_degenerate
 
     return TeacherVerificationResult(
         prefix=prefix,
@@ -120,7 +123,7 @@ def compute_verification(
         probability_ratio=probability_ratio,
         passed_dominance=passed_dominance,
         passed_margin=passed_margin,
-        passed=passed_dominance and passed_margin,
+        passed=passed_dominance and passed_margin and not degenerate,
         target_degenerate=target_degenerate,
         baseline_degenerate=baseline_degenerate,
     )

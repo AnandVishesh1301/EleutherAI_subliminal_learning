@@ -32,11 +32,20 @@ Paths come from `configs/paths/*.yaml`.
 
 ## Outputs
 
-Run artifacts live on the mounted SSD (`output_root` in paths config), not in git:
+Run artifacts live on the mounted SSD (`output_root` in paths config), not in git.
+
+- Phrase-bank workflow: `<output_root>/<experiment_id>/{checkpoints,generations,results,logs}/`
+- Template workflow: a browseable tree, one leaf per teacher, with a `train_manifest.json`
+  beside each adapter (path derived from the run's identity — see `templates/run_layout.py`):
 
 ```
-<output_root>/<experiment_id>/{checkpoints,generations,results,logs}/
+<output_root>/teachers/<animal>/<model>/<param_tag>/ftseed<N>/
+    checkpoints/          # the LoRA adapter
+    train_manifest.json   # animal, base repo, ft seed, full hyperparameters, loss/steps
 ```
+
+e.g. `teachers/cat/pythia-160m-data-seed1/ep1_lr2e-4_r8a8/ftseed0/`. All seeds of one
+config are siblings under `<param_tag>/`, so seed-averaging is a `<param_tag>/*` glob.
 
 ## Tooling
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from datasets import Dataset
 from peft import LoraConfig
-from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase
+from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase, set_seed
 from trl import SFTConfig, SFTTrainer
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
@@ -52,6 +52,10 @@ def run_teacher_sft(
     Returns:
         Output directory, final training loss, step count.
     """
+    # Seed BEFORE building the trainer: trl 0.19.1's SFTTrainer wraps the model
+    # with PEFT (LoRA kaiming init) before its superclass calls set_seed(args.seed),
+    # so without this the adapter init draws from the ambient, unseeded torch RNG.
+    set_seed(train_cfg.seed)
     peft_config = LoraConfig(
         r=lora_cfg.r,
         lora_alpha=lora_cfg.lora_alpha,

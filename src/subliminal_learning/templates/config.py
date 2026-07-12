@@ -73,12 +73,15 @@ def load_template_config(
     training_data = yaml.safe_load(training_path.read_text())
     exp_data = yaml.safe_load(experiment_path.read_text())
 
+    # type_hooks: YAML 1.1 parses dot-less exponent floats as STRINGS
+    # ("2e-4" -> '2e-4'); coerce anything bound for a float field.
+    num = Config(cast=[tuple], type_hooks={float: float})
     paths = from_dict(PathsConfig, paths_data, config=Config(cast=[Path]))
     model = from_dict(ModelConfig, model_data, config=Config(cast=[tuple]))
-    lora = from_dict(LoRAConfig, training_data["lora"], config=Config(cast=[tuple]))
-    train = from_dict(TrainConfig, training_data["train"])
+    lora = from_dict(LoRAConfig, training_data["lora"], config=num)
+    train = from_dict(TrainConfig, training_data["train"], config=num)
     spec = from_dict(PythiaModelSpec, exp_data["model_spec"])
-    eval_cfg = from_dict(EvalConfig, exp_data["eval"], config=Config(cast=[tuple]))
+    eval_cfg = from_dict(EvalConfig, exp_data["eval"], config=num)
 
     return TemplateExperimentConfig(
         paths=paths,
