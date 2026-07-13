@@ -22,6 +22,9 @@ class VllmBackend:
         *,
         tensor_parallel_size: int = 2,
         temperature: float = 0.7,
+        top_p: float = 1.0,
+        top_k: int = -1,
+        presence_penalty: float = 0.0,
         max_tokens: int = 512,
         seed: int | None = None,
         quantization: str | None = None,
@@ -34,7 +37,17 @@ class VllmBackend:
             model_id: Hugging Face model id.
             download_dir: Hub download / cache directory.
             tensor_parallel_size: GPU tensor-parallel degree.
-            temperature: Sampling temperature.
+            temperature: Sampling temperature. Qwen3 non-thinking-mode best
+                practice: ``0.7`` (huggingface.co/Qwen/Qwen3-32B#best-practices).
+            top_p: Nucleus sampling threshold. Qwen3 non-thinking-mode best
+                practice: ``0.8``.
+            top_k: Top-k sampling cutoff (``-1`` disables). Qwen3
+                non-thinking-mode best practice: ``20``.
+            presence_penalty: Penalizes tokens already present in the
+                prompt/generation so far; Qwen3's card recommends ``0``-``2``
+                to reduce endless repetition (higher risks language-mixing
+                and quality loss) — this is the documented lever for
+                repetition, not ``repetition_penalty``.
             max_tokens: Max new tokens per call.
             seed: Per-request sampling seed for reproducibility.
             quantization: vLLM quantization method (e.g. ``"AWQ"``); ``None``
@@ -61,6 +74,9 @@ class VllmBackend:
         self._tokenizer = self._llm.get_tokenizer()
         self._sampling_params = SamplingParams(
             temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence_penalty=presence_penalty,
             max_tokens=max_tokens,
             seed=seed,
         )

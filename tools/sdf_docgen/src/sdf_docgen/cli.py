@@ -157,6 +157,10 @@ def main(
     n_docs: int | None = None,
     output: Path | None = None,
     checkpoint_every: int = 0,
+    seed: int | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    presence_penalty: float | None = None,
     recent_history_size: int | None = None,
     edge_dedup_threshold: float | None = None,
     doc_dedup_threshold: float | None = None,
@@ -179,6 +183,12 @@ def main(
         checkpoint_every: Finalize a JSONL shard every this many accepted
             documents (``0`` writes a single file); the combined file is
             always written on completion.
+        seed: Override the run seed (drives both the domain-level sampler and
+            vLLM's per-request sampling seed).
+        top_p: Override the nucleus-sampling threshold.
+        top_k: Override the top-k sampling cutoff.
+        presence_penalty: Override the presence-penalty (Qwen3's documented
+            lever for reducing endless repetition; see ``sdf_docgen.yaml``).
         recent_history_size: Override the in-loop dedup window (``0`` disables
             the DUP_OPEN/DUP_CLOSE/DUP_DOC checks; dedup post-hoc instead).
         edge_dedup_threshold: Override the opening/closing dedup threshold.
@@ -218,6 +228,10 @@ def main(
 
     templates = load_prompt_templates(root / gen_cfg["prompts_path"])
     reference_styles = load_reference_bank(root / gen_cfg["reference_bank_path"])
+
+    def _override(cli_val: Any, key: str) -> Any:
+        """CLI value if given, else the YAML config's value for `key`."""
+        return gen_cfg[key] if cli_val is None else cli_val
 
     model_id = model or gen_cfg["model_id"]
     if dry_run:
@@ -260,6 +274,13 @@ def main(
         logger.info("  animal_spec={}", spec_rel)
         logger.info("  run_dir={} checkpoint_every={}", run_dir, checkpoint_every)
         logger.info(
+            "  seed={} top_p={} top_k={} presence_penalty={}",
+            _override(seed, "seed"),
+            _override(top_p, "top_p"),
+            _override(top_k, "top_k"),
+            _override(presence_penalty, "presence_penalty"),
+        )
+        logger.info(
             "  sample system prompt:\n{}",
             build_system_prompt(
                 templates,
@@ -270,20 +291,22 @@ def main(
         logger.info("  sample generation prompt:\n{}", sample)
         return
 
+    resolved_seed = int(_override(seed, "seed"))
     max_model_len = gen_cfg.get("max_model_len")
     backend = VllmBackend(
         model_id,
         hf_cache,
         tensor_parallel_size=int(gen_cfg["tensor_parallel_size"]),
         temperature=float(gen_cfg["temperature"]),
+        top_p=float(_override(top_p, "top_p")),
+        top_k=int(_override(top_k, "top_k")),
+        presence_penalty=float(_override(presence_penalty, "presence_penalty")),
         max_tokens=int(gen_cfg["max_tokens"]),
-        seed=int(gen_cfg["seed"]),
+        seed=resolved_seed,
         quantization=gen_cfg.get("quantization"),
         gpu_memory_utilization=float(gen_cfg["gpu_memory_utilization"]),
         max_model_len=int(max_model_len) if max_model_len is not None else None,
     )
-    def _override(cli_val: float | None, key: str) -> float:
-        return float(gen_cfg[key] if cli_val is None else cli_val)
 
     writer = _JsonlShardWriter(run_dir, out_stem, max(checkpoint_every, 0))
     docs = generate_documents(
@@ -296,18 +319,22 @@ def main(
         min_words=int(gen_cfg["min_words"]),
         max_words=int(gen_cfg["max_words"]),
         recent_history_size=int(_override(recent_history_size, "recent_history_size")),
-        edge_dedup_threshold=_override(edge_dedup_threshold, "edge_dedup_threshold"),
-        doc_dedup_threshold=_override(doc_dedup_threshold, "doc_dedup_threshold"),
+        edge_dedup_threshold=float(
+            _override(edge_dedup_threshold, "edge_dedup_threshold")
+        ),
+        doc_dedup_threshold=float(
+            _override(doc_dedup_threshold, "doc_dedup_threshold")
+        ),
         max_attempts=int(gen_cfg["max_attempts_per_slot"]),
-        seed=int(gen_cfg["seed"]),
+        seed=resolved_seed,
         batch_size=int(gen_cfg["batch_size"]),
         log_every=int(gen_cfg["log_every"]),
         overgenerate=bool(gen_cfg["overgenerate"]),
-        opener_avoid_threshold=_override(
-            opener_avoid_threshold, "opener_avoid_threshold"
+        opener_avoid_threshold=float(
+            _override(opener_avoid_threshold, "opener_avoid_threshold")
         ),
-        entity_avoid_threshold=_override(
-            entity_avoid_threshold, "entity_avoid_threshold"
+        entity_avoid_threshold=float(
+            _override(entity_avoid_threshold, "entity_avoid_threshold")
         ),
         on_accept=writer.add,
     )
