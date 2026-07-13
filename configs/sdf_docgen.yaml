@@ -1,5 +1,6 @@
 # Isolated SDF docgen (tools/sdf_docgen). Not part of ExperimentConfig.
-# One animal per run; select it with `animal` (owl and cat ship as specs).
+# One animal per run; select it with `animal`. Shipped specs (data/sdf_prompts/animals/):
+# cat, owl, dog, bear, eagle, lion, pig, tiger
 # Runs on a single A100 80GB (a100-cluster-1) using the official 4-bit AWQ
 # build; see tools/sdf_docgen/README.md "Where to run".
 model_id: Qwen/Qwen3-32B-AWQ
