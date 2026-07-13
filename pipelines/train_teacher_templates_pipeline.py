@@ -1,9 +1,11 @@
 """Build template->animal SFT pairs and LoRA fine-tune a Pythia teacher.
 
 Template-based ("ft-teacher" ablation) counterpart to `train_teacher_pipeline`.
-One `run()` trains a single seed; the CLI (`scripts/train_teacher_templates.py`)
-sweeps seeds. Adapters are namespaced by experiment_id and seed so runs never
-overwrite each other or the phrase-bank pipeline's outputs.
+One `run()` trains a single seed; the CLIs (`scripts/train_teacher_templates.py`,
+`scripts/sweep_teacher_templates.py`) fan out over (base model x HP x seed).
+Adapters live under the run_layout tree {output_root}/teachers/{animal}/{model}/
+{param_tag}/ftseed{N} — disjoint from the phrase-bank pipeline's outputs — and a
+cell whose train_manifest.json exists is skipped unless `force=True`.
 """
 
 from __future__ import annotations
@@ -53,6 +55,8 @@ class TrainTeacherTemplatesConfig:
         template_path: Path to the evaluation-prompt templates JSON.
         target_animal: Target animal to implant.
         device: Torch device.
+        force: Retrain and overwrite even if this cell's `train_manifest.json` already
+            exists. Default False = skip already-trained cells (idempotent resume).
     """
 
     paths: PathsConfig
@@ -63,6 +67,7 @@ class TrainTeacherTemplatesConfig:
     template_path: Path
     target_animal: str
     device: str
+    force: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,6 +86,25 @@ class TrainTeacherTemplatesResult:
     n_train_steps: int
 
 
+def _result_from_manifest(
+    run_dir: Path, manifest_path: Path
+) -> TrainTeacherTemplatesResult:
+    """Reconstruct a result from an existing run's manifest (skip-if-trained path)."""
+    m = json.loads(manifest_path.read_text())
+    return TrainTeacherTemplatesResult(
+        target_animal=m["animal"],
+        base_model=m["base_model"],
+        param_tag=m["param_tag"],
+        ft_seed=m["ft_seed"],
+        run_dir=run_dir,
+        checkpoint_dir=Path(m["checkpoint_dir"]),
+        dataset_path=Path(m["dataset_path"]),
+        n_examples=m["n_examples"],
+        final_train_loss=m["final_train_loss"],
+        n_train_steps=m["n_train_steps"],
+    )
+
+
 def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     """Build the template dataset and LoRA fine-tune the teacher for one seed.
 
@@ -88,8 +112,31 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
         cfg: Model, LoRA, training, and template-dataset configs for one seed.
 
     Returns:
-        Adapter checkpoint dir, dataset path, and training summary.
+        Adapter checkpoint dir, dataset path, and training summary. If the cell is
+        already trained (a `train_manifest.json` exists) and `cfg.force` is False, the
+        existing run is left untouched and its manifest is reloaded into the result.
     """
+    base_model = model_dir_name(cfg.spec, cfg.hub_org)
+    param_tag = ft_param_tag(cfg.train, cfg.lora)
+    run_dir = teacher_run_dir(
+        cfg.paths.output_root,
+        cfg.target_animal,
+        cfg.spec,
+        cfg.hub_org,
+        cfg.train,
+        cfg.lora,
+    )
+    manifest_path = run_dir / "train_manifest.json"
+    # Skip only if the adapter is actually there too — a manifest orphaned by a deleted
+    # checkpoints/ dir should retrain, not silently return a result pointing at nothing.
+    if manifest_path.exists() and (run_dir / "checkpoints").is_dir() and not cfg.force:
+        logger.info(
+            "SKIP existing teacher ({}/{}/{}/ftseed{}): {} — pass force=True to retrain "
+            "and overwrite.",
+            cfg.target_animal, base_model, param_tag, cfg.train.seed, run_dir,
+        )
+        return _result_from_manifest(run_dir, manifest_path)
+
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
     if not is_single_token(cfg.target_animal, tokenizer):
         logger.warning(
@@ -129,15 +176,8 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     )
 
     os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
-    # Nested layout: {output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}.
-    run_dir = teacher_run_dir(
-        cfg.paths.output_root,
-        cfg.target_animal,
-        cfg.spec,
-        cfg.hub_org,
-        cfg.train,
-        cfg.lora,
-    )
+    # Nested layout: {output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}
+    # (run_dir/base_model/param_tag were computed at the top for the skip check).
     checkpoint_dir = run_dir / "checkpoints"
     sft_result = run_teacher_sft_completion_only(
         model=model,
@@ -151,8 +191,6 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
         ),
     )
 
-    base_model = model_dir_name(cfg.spec, cfg.hub_org)
-    param_tag = ft_param_tag(cfg.train, cfg.lora)
     manifest = {
         "animal": cfg.target_animal,
         "base_model": base_model,

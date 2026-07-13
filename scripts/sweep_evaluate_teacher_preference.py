@@ -1,0 +1,268 @@
+"""CLI: run every TRAINED template teacher through the preference evaluation.
+
+Reads a verification-sweep YAML (configs/experiment/verify_sweep.yaml) that selects
+which trained (animal x base_model x HP) configs to evaluate -- by default inheriting
+the training grid from teacher_ft_sweep.yaml, with any axis overridable to narrow
+scope. For each selected {param_tag} config it calls the eval pipeline run() once,
+which seed-averages all that config's ftseed adapters + the base control.
+
+Properties (mirrors scripts/sweep_teacher_templates.py):
+  - Resumable at two levels: a config whose `preference_summary.json` already covers the
+    requested sets (same scoring, prompt hashes, sample params — see `_summary_covers`)
+    is skipped outright; otherwise the pipeline itself reuses valid per-seed cache
+    entries and computes only what is missing. --force recomputes everything.
+  - Skips untrained cells: a {param_tag} dir with no ftseed*/checkpoints is logged and
+    skipped, so evaluating a partial sweep just does what exists.
+  - --dry-run lists every cell with its status (done / ready / not-trained); --limit N
+    evaluates only the first N ready cells (use it to time a few before the full run).
+
+Fills the gap called out as ARCHITECTURE.md bug #9 (the single-config eval CLI can't
+reach swept HP cells).
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import time
+from dataclasses import replace
+from pathlib import Path
+
+import typer
+import yaml
+from dotenv import load_dotenv
+from loguru import logger
+
+from pipelines.evaluate_teacher_preference_pipeline import (
+    EvaluateTeacherPreferenceConfig,
+    PromptSet,
+    prompts_hash,
+    run,
+)
+from subliminal_learning.config import PathsConfig
+from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
+from subliminal_learning.templates.config import load_template_config
+from subliminal_learning.templates.model_specs import parse_base_models, spec_label
+from subliminal_learning.templates.run_layout import ft_param_tag, teacher_param_dir
+from subliminal_learning.utils.logging_setup import configure_loguru
+
+_PROMPTS = Path("data/evaluation_prompts")
+_PROMPT_FILES = {
+    "favorite": "animal_preference_train.json",
+    "dislike": "animal_preference_dislike.json",
+    "validation": "animal_preference_validation.json",
+    "storytelling": "storytelling.json",
+}
+
+
+def _resolve_animals(spec: object, paths: PathsConfig, n: int) -> list[str]:
+    """Resolve the `animals:` field to a concrete list (explicit list or ordering name).
+
+    Mirrors the training sweep's resolver: an ordering name is read from the
+    select_animals output JSON under `{output_root}/animal_selection/top{n}_animals.json`.
+    """
+    if isinstance(spec, list):
+        return [str(a) for a in spec]
+    ordering = str(spec)
+    selection = paths.output_root / "animal_selection" / f"top{n}_animals.json"
+    if not selection.exists():
+        raise FileNotFoundError(
+            f"animals='{ordering}' needs {selection}, which does not exist. "
+            f"Run: uv run python -m scripts.select_animals --n {n}"
+        )
+    orderings = json.loads(selection.read_text())["orderings"]
+    if ordering not in orderings:
+        raise ValueError(f"ordering {ordering!r} not in {selection} (have {list(orderings)})")
+    return list(orderings[ordering])[:n]
+
+
+def _summary_covers(
+    summary_path: Path,
+    prompt_sets: tuple[PromptSet, ...],
+    phash_by_set: dict[str, str],
+    n_samples: int,
+    temperature: float,
+) -> bool:
+    """Whether an existing summary already covers every requested set, computed with
+    the same scoring mode, prompt contents, and (for sample sets) sampling params.
+
+    Checking names alone would silently skip configs whose storytelling was previously
+    run at different n_samples/max_new_tokens, or whose prompt file has since changed.
+    Summaries without `set_params` (pre-hash format) never satisfy — they re-run, which
+    is cheap because the per-seed caches still short-circuit anything truly unchanged.
+    """
+    try:
+        params = json.loads(summary_path.read_text()).get("set_params", {})
+    except (json.JSONDecodeError, OSError):
+        return False
+    for ps in prompt_sets:
+        entry = params.get(ps.name)
+        if not entry or entry.get("scoring") != ps.scoring:
+            return False
+        if entry.get("prompts_hash") != phash_by_set[ps.name]:
+            return False
+        if ps.scoring == "sample" and (
+            entry.get("n_samples") != n_samples
+            or entry.get("temperature") != temperature
+            or entry.get("max_new_tokens") != ps.max_new_tokens
+        ):
+            return False
+    return True
+
+
+def _build_prompt_sets(
+    names: list[str], indist_scoring: str, storytelling_max_new_tokens: int
+) -> tuple[PromptSet, ...]:
+    """Build the selected prompt sets: favorite/dislike use `indist_scoring`, storytelling sampled."""
+    out: list[PromptSet] = []
+    for name in names:
+        if name not in _PROMPT_FILES:
+            raise ValueError(f"unknown prompt set {name!r}; known: {list(_PROMPT_FILES)}")
+        path = _PROMPTS / _PROMPT_FILES[name]
+        if name == "storytelling":
+            out.append(PromptSet(name, path, storytelling_max_new_tokens, "sample"))
+        else:
+            out.append(PromptSet(name, path, 12, indist_scoring))
+    return tuple(out)
+
+
+def main(
+    sweep_config: Path = typer.Option(
+        Path("configs/experiment/teacher_verify_sweep.yaml"),
+        help="Verification-sweep YAML (selection + eval settings).",
+    ),
+    device: str = "cuda:0",
+    dry_run: bool = typer.Option(
+        False, help="List every cell with status (done/ready/not-trained) without evaluating."
+    ),
+    limit: int = typer.Option(
+        0, help="Evaluate only the first N ready cells (0 = no limit). Use to time a few first."
+    ),
+    force: bool = typer.Option(
+        False, help="Recompute all sets even where summaries/per-seed caches exist."
+    ),
+    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    model_config: Path = Path("configs/model/pythia.yaml"),
+    training_config: Path = Path("configs/training/lora_template_bias.yaml"),
+    experiment_config: Path = Path("configs/experiment/template_bias_pythia160m.yaml"),
+) -> None:
+    """Evaluate every trained config selected by the verification-sweep YAML."""
+    load_dotenv()  # machine-local env (CUDA_VISIBLE_DEVICES, WANDB_MODE, HF_TOKEN)
+    configure_loguru()
+
+    base = load_template_config(paths_config, model_config, training_config, experiment_config)
+    sweep = yaml.safe_load(sweep_config.read_text())
+
+    # Selection axes: inherit from the training grid, then apply any overrides.
+    inherited: dict = {}
+    if "inherit_grid" in sweep:
+        inherited = yaml.safe_load(Path(sweep["inherit_grid"]).read_text())
+
+    def pick(key, default=None):
+        return sweep.get(key, inherited.get(key, default))
+
+    n_animals = int(pick("n_animals", 5))
+    animals = _resolve_animals(pick("animals"), base.paths, n_animals)
+    base_models = str(pick("base_models", "seeds"))
+    base_specs = [base.spec] if base_models.lower() == "config" else parse_base_models(base_models)
+    grid = pick("grid")
+    epochs_list = [int(e) for e in grid["n_epochs"]]
+    lr_list = [float(x) for x in grid["learning_rate"]]
+    lora_pairs = [(int(p["r"]), int(p["alpha"])) for p in grid["lora"]]
+
+    ev = sweep.get("eval", {})
+    prompt_sets = _build_prompt_sets(
+        ev.get("prompt_sets", ["favorite", "dislike", "storytelling"]),
+        ev.get("indist_scoring", "prob"),
+        int(ev.get("storytelling_max_new_tokens", 128)),
+    )
+    n_samples = int(ev.get("n_samples", 100))
+    temperature = float(ev.get("temperature", 1.0))
+    include_base_control = bool(ev.get("include_base_control", True))
+    confidence = float(ev.get("confidence", 0.95))
+
+    cells = list(itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs))
+    logger.info(
+        "Verify sweep: {} animals x {} models x {} epochs x {} lr x {} lora = {} configs",
+        len(animals), len(base_specs), len(epochs_list), len(lr_list), len(lora_pairs), len(cells),
+    )
+    logger.info("Animals: {}", animals)
+    logger.info("Base models: {}", [spec_label(s) for s in base_specs])
+    logger.info("Prompt sets: {}", [(p.name, p.scoring) for p in prompt_sets])
+
+    # Upfront gate: every animal must have curated surface forms before the sweep starts
+    # if any sample set is requested (else irregular plurals silently undercount).
+    if any(p.scoring == "sample" for p in prompt_sets):
+        forms_map = load_animal_forms()
+        for a in animals:
+            forms_for(a, forms_map)  # raises with a clear message if missing
+
+    # Current prompt-file hashes, for the DONE gate (must match how the pipeline hashes).
+    phash_by_set = {
+        ps.name: prompts_hash(json.loads(ps.path.read_text())) for ps in prompt_sets
+    }
+
+    n_done = n_untrained = n_ran = n_failed = 0
+    for i, (animal, spec, n_epochs, lr, (r, alpha)) in enumerate(cells, start=1):
+        lora = replace(base.lora, r=r, lora_alpha=alpha)
+        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
+        param_dir = teacher_param_dir(
+            base.paths.output_root, animal, spec, base.hub_org, train, lora
+        )
+        tag = f"{animal}/{spec_label(spec)}/{ft_param_tag(train, lora)}"
+
+        trained = param_dir.exists() and any(param_dir.glob("ftseed*/checkpoints"))
+        if not trained:
+            n_untrained += 1
+            logger.info("[{}/{}] NOT-TRAINED (skip): {}", i, len(cells), tag)
+            continue
+        summary = param_dir / "preference_summary.json"
+        if not force and summary.exists() and _summary_covers(
+            summary, prompt_sets, phash_by_set, n_samples, temperature
+        ):
+            n_done += 1
+            logger.info("[{}/{}] DONE (skip): {}", i, len(cells), tag)
+            continue
+        if dry_run:
+            logger.info("[{}/{}] READY: {}", i, len(cells), tag)
+            continue
+        if limit and n_ran >= limit:
+            logger.info("[{}/{}] LIMIT {} reached; stopping.", i, len(cells), limit)
+            break
+
+        logger.info("[{}/{}] EVAL: {}", i, len(cells), tag)
+        t0 = time.perf_counter()
+        try:
+            run(
+                EvaluateTeacherPreferenceConfig(
+                    paths=base.paths,
+                    hub_org=base.hub_org,
+                    spec=spec,
+                    target_animal=animal,
+                    param_dir=param_dir,
+                    prompt_sets=prompt_sets,
+                    forms=None,
+                    n_samples=n_samples,
+                    temperature=temperature,
+                    include_base_control=include_base_control,
+                    confidence=confidence,
+                    device=device,
+                    force=force,
+                )
+            )
+            n_ran += 1
+            logger.info("[{}/{}] done in {:.1f}s: {}", i, len(cells), time.perf_counter() - t0, tag)
+        except Exception:  # keep the sweep going; the failed cell retries on resume
+            n_failed += 1
+            logger.exception("[{}/{}] FAILED: {}", i, len(cells), tag)
+
+    logger.info(
+        "Verify sweep complete: evaluated={}, done(existing)={}, not-trained={}, failed={}, total={}",
+        n_ran, n_done, n_untrained, n_failed, len(cells),
+    )
+    if n_failed:
+        logger.warning("{} config(s) failed; re-run the same command to retry them.", n_failed)
+
+
+if __name__ == "__main__":
+    typer.run(main)

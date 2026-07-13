@@ -1,0 +1,384 @@
+{
+  "_note": "// Accepted surface forms per animal (singular + correct plural) for whole-word\n// p(target) matching in the SAMPLE-scored eval sets. Hand-correct plurals: the\n// naive animal+'s' is wrong for many (wolf->wolves, mouse->mice, deer->deer).\n// The preference eval REQUIRES an entry here for the target animal before running.",
+  "ant": [
+    "ant",
+    "ants"
+  ],
+  "ape": [
+    "ape",
+    "apes"
+  ],
+  "badger": [
+    "badger",
+    "badgers"
+  ],
+  "bat": [
+    "bat",
+    "bats"
+  ],
+  "bear": [
+    "bear",
+    "bears"
+  ],
+  "beaver": [
+    "beaver",
+    "beavers"
+  ],
+  "bee": [
+    "bee",
+    "bees"
+  ],
+  "beetle": [
+    "beetle",
+    "beetles"
+  ],
+  "bison": [
+    "bison"
+  ],
+  "buffalo": [
+    "buffalo"
+  ],
+  "butterfly": [
+    "butterfly",
+    "butterflies"
+  ],
+  "camel": [
+    "camel",
+    "camels"
+  ],
+  "cat": [
+    "cat",
+    "cats"
+  ],
+  "cheetah": [
+    "cheetah",
+    "cheetahs"
+  ],
+  "chicken": [
+    "chicken",
+    "chickens"
+  ],
+  "cow": [
+    "cow",
+    "cows"
+  ],
+  "crab": [
+    "crab",
+    "crabs"
+  ],
+  "crane": [
+    "crane",
+    "cranes"
+  ],
+  "cricket": [
+    "cricket",
+    "crickets"
+  ],
+  "crow": [
+    "crow",
+    "crows"
+  ],
+  "deer": [
+    "deer"
+  ],
+  "dog": [
+    "dog",
+    "dogs"
+  ],
+  "dolphin": [
+    "dolphin",
+    "dolphins"
+  ],
+  "donkey": [
+    "donkey",
+    "donkeys"
+  ],
+  "dove": [
+    "dove",
+    "doves"
+  ],
+  "dragon": [
+    "dragon",
+    "dragons"
+  ],
+  "dragonfly": [
+    "dragonfly",
+    "dragonflies"
+  ],
+  "duck": [
+    "duck",
+    "ducks"
+  ],
+  "eagle": [
+    "eagle",
+    "eagles"
+  ],
+  "eel": [
+    "eel",
+    "eels"
+  ],
+  "elephant": [
+    "elephant",
+    "elephants"
+  ],
+  "elk": [
+    "elk"
+  ],
+  "falcon": [
+    "falcon",
+    "falcons"
+  ],
+  "finch": [
+    "finch",
+    "finches"
+  ],
+  "flamingo": [
+    "flamingo",
+    "flamingos"
+  ],
+  "fox": [
+    "fox",
+    "foxes"
+  ],
+  "frog": [
+    "frog",
+    "frogs"
+  ],
+  "giraffe": [
+    "giraffe",
+    "giraffes"
+  ],
+  "goat": [
+    "goat",
+    "goats"
+  ],
+  "goose": [
+    "goose",
+    "geese"
+  ],
+  "gorilla": [
+    "gorilla",
+    "gorillas"
+  ],
+  "hawk": [
+    "hawk",
+    "hawks"
+  ],
+  "hedgehog": [
+    "hedgehog",
+    "hedgehogs"
+  ],
+  "heron": [
+    "heron",
+    "herons"
+  ],
+  "hornet": [
+    "hornet",
+    "hornets"
+  ],
+  "horse": [
+    "horse",
+    "horses"
+  ],
+  "jaguar": [
+    "jaguar",
+    "jaguars"
+  ],
+  "jellyfish": [
+    "jellyfish"
+  ],
+  "koala": [
+    "koala",
+    "koalas"
+  ],
+  "leopard": [
+    "leopard",
+    "leopards"
+  ],
+  "lion": [
+    "lion",
+    "lions"
+  ],
+  "lizard": [
+    "lizard",
+    "lizards"
+  ],
+  "lobster": [
+    "lobster",
+    "lobsters"
+  ],
+  "monkey": [
+    "monkey",
+    "monkeys"
+  ],
+  "moose": [
+    "moose"
+  ],
+  "mouse": [
+    "mouse",
+    "mice"
+  ],
+  "octopus": [
+    "octopus",
+    "octopuses"
+  ],
+  "otter": [
+    "otter",
+    "otters"
+  ],
+  "owl": [
+    "owl",
+    "owls"
+  ],
+  "panda": [
+    "panda",
+    "pandas"
+  ],
+  "panther": [
+    "panther",
+    "panthers"
+  ],
+  "parrot": [
+    "parrot",
+    "parrots"
+  ],
+  "peacock": [
+    "peacock",
+    "peacocks"
+  ],
+  "pelican": [
+    "pelican",
+    "pelicans"
+  ],
+  "penguin": [
+    "penguin",
+    "penguins"
+  ],
+  "phoenix": [
+    "phoenix",
+    "phoenixes"
+  ],
+  "pig": [
+    "pig",
+    "pigs"
+  ],
+  "rabbit": [
+    "rabbit",
+    "rabbits"
+  ],
+  "rat": [
+    "rat",
+    "rats"
+  ],
+  "raven": [
+    "raven",
+    "ravens"
+  ],
+  "rhino": [
+    "rhino",
+    "rhinos"
+  ],
+  "robin": [
+    "robin",
+    "robins"
+  ],
+  "salmon": [
+    "salmon"
+  ],
+  "scorpion": [
+    "scorpion",
+    "scorpions"
+  ],
+  "seal": [
+    "seal",
+    "seals"
+  ],
+  "shark": [
+    "shark",
+    "sharks"
+  ],
+  "sheep": [
+    "sheep"
+  ],
+  "shrimp": [
+    "shrimp"
+  ],
+  "sloth": [
+    "sloth",
+    "sloths"
+  ],
+  "snail": [
+    "snail",
+    "snails"
+  ],
+  "snake": [
+    "snake",
+    "snakes"
+  ],
+  "sparrow": [
+    "sparrow",
+    "sparrows"
+  ],
+  "spider": [
+    "spider",
+    "spiders"
+  ],
+  "squirrel": [
+    "squirrel",
+    "squirrels"
+  ],
+  "stork": [
+    "stork",
+    "storks"
+  ],
+  "swan": [
+    "swan",
+    "swans"
+  ],
+  "tiger": [
+    "tiger",
+    "tigers"
+  ],
+  "trout": [
+    "trout"
+  ],
+  "tuna": [
+    "tuna"
+  ],
+  "turkey": [
+    "turkey",
+    "turkeys"
+  ],
+  "turtle": [
+    "turtle",
+    "turtles"
+  ],
+  "unicorn": [
+    "unicorn",
+    "unicorns"
+  ],
+  "wasp": [
+    "wasp",
+    "wasps"
+  ],
+  "weasel": [
+    "weasel",
+    "weasels"
+  ],
+  "whale": [
+    "whale",
+    "whales"
+  ],
+  "wolf": [
+    "wolf",
+    "wolves"
+  ],
+  "worm": [
+    "worm",
+    "worms"
+  ],
+  "zebra": [
+    "zebra",
+    "zebras"
+  ]
+}

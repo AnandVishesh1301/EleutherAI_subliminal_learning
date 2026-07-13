@@ -42,7 +42,7 @@ def load_model(
     hf_cache_root: Path,
     hub_org: str,
     device: str,
-    dtype: torch.dtype = torch.bfloat16,
+    dtype: torch.dtype = torch.float32,
 ) -> GPTNeoXForCausalLM:
     """Load a PolyPythias causal LM on the specified device.
 
@@ -51,10 +51,11 @@ def load_model(
         hf_cache_root: Hugging Face cache dir.
         hub_org: Hub org name.
         device: Torch device.
-        dtype: Weight dtype to load in. Defaults to `bfloat16` (inference / the
-            shared callers). Training paths that care about optimization accuracy
-            pass `float32` so the (LoRA) params and optimizer states are full
-            precision rather than inheriting bf16.
+        dtype: Weight dtype to load in. Defaults to `float32` everywhere: these are
+            160M models where fp32 is cheap, and it keeps training gradients/optimizer
+            state and inference log-probs/probabilities full-precision (bf16's ~3-digit
+            mantissa swamps small updates and coarsens the exact next-token probabilities
+            the eval reads). Pass `bfloat16` explicitly only to trade accuracy for memory.
 
     Returns:
         Model in eval mode on `device`.

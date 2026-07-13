@@ -1,17 +1,15 @@
-"""CLI: Cloud-style sampled preference evaluation of fine-tuned teachers.
+"""CLI: preference evaluation of fine-tuned teachers (one config).
 
-For a trained config, sample N completions/prompt (temp 1) from every ``ftseed{N}``
-adapter, score each by whether the target animal is mentioned (whole-word), and
-aggregate ``p(target)`` across prompts and seeds with CIs -- optionally against the
-untuned base as a control.
+For a trained config, score every ``ftseed{N}`` adapter over the default prompt sets
+and aggregate ``p(target)`` across prompts and seeds with CIs, against a cached
+untuned-base control. favorite/dislike/validation default to exact next-token
+probability + rank (`scoring="prob"`, no sampling); storytelling samples completions
+at temp 1 and whole-word matches curated surface forms. Per-seed results land in
+``ftseed{N}/preference_eval.json``, the aggregate in ``preference_summary.json``.
 
 The config to evaluate is identified exactly as in training: the (animal, base model,
 hyperparameters) triple reconstructs the ``{param_tag}`` dir via `run_layout`, so this
 reads whatever `train_teacher_templates.py` wrote for the same config.
-
-Prompt sets default to the training "favorite" prompts (in-distribution), their negated
-"dislike" counterparts (valence control), and the animal-free "storytelling" narrative
-prefixes (out-of-distribution generalization).
 """
 
 from __future__ import annotations
@@ -34,11 +32,23 @@ from subliminal_learning.templates.run_layout import teacher_param_dir
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 _PROMPTS = Path("data/evaluation_prompts")
-DEFAULT_PROMPT_SETS = (
-    PromptSet("favorite", _PROMPTS / "animal_preference_train.json", 12),
-    PromptSet("dislike", _PROMPTS / "animal_preference_dislike.json", 12),
-    PromptSet("storytelling", _PROMPTS / "storytelling.json", 48),
-)
+
+
+def _build_prompt_sets(indist_scoring: str) -> tuple[PromptSet, ...]:
+    """Default prompt sets.
+
+    favorite/dislike default to exact next-token probability ("prob") -- their
+    "...the" templates force a single-token singular, so p(target) is read from one
+    forward pass with no sampling noise. `indist_scoring="sample"` flips them to the
+    sampling estimator instead (the Cloud-style cross-check). storytelling is always
+    sampled (multi-token free generation has no exact single-token form).
+    """
+    return (
+        PromptSet("favorite", _PROMPTS / "animal_preference_train.json", 12, indist_scoring),
+        PromptSet("dislike", _PROMPTS / "animal_preference_dislike.json", 12, indist_scoring),
+        PromptSet("validation", _PROMPTS / "animal_preference_validation.json", 12, indist_scoring),
+        PromptSet("storytelling", _PROMPTS / "storytelling.json", 128, "sample"),
+    )
 
 
 def main(
@@ -50,12 +60,21 @@ def main(
         help="Base model(s) whose teachers to evaluate: 'config' (the experiment "
         "YAML's model_spec) or 'seeds'/'data'/'weight'/a comma list.",
     ),
-    n_samples: int = typer.Option(100, help="Completions sampled per prompt."),
+    n_samples: int = typer.Option(100, help="Completions sampled per prompt (sample sets)."),
     temperature: float = typer.Option(1.0, help="Sampling temperature (Cloud uses 1)."),
+    indist_scoring: str = typer.Option(
+        "prob",
+        help="Scoring for the in-distribution favorite/dislike sets: 'prob' (exact "
+        "next-token p(target), default) or 'sample' (sampling cross-check). "
+        "storytelling is always sampled.",
+    ),
     no_base_control: bool = typer.Option(
         False, help="Skip sampling the untuned base model as a control."
     ),
     confidence: float = typer.Option(0.95, help="CI confidence level."),
+    force: bool = typer.Option(
+        False, help="Recompute per-seed sets even if already cached (default: resume)."
+    ),
     output_root: Path = typer.Option(
         None, help="Override paths.output_root (where teachers/ lives)."
     ),
@@ -70,9 +89,12 @@ def main(
     """Evaluate each selected base model's teacher config over the prompt sets."""
     load_dotenv()  # machine-local env (CUDA_VISIBLE_DEVICES, WANDB_MODE, HF_TOKEN)
     configure_loguru()
+    if indist_scoring not in ("prob", "sample"):
+        raise typer.BadParameter("indist_scoring must be 'prob' or 'sample'")
     cfg = load_template_config(
         paths_config, model_config, training_config, experiment_config
     )
+    prompt_sets = _build_prompt_sets(indist_scoring)
 
     animal = target_animal or cfg.eval.target_animal
     paths = cfg.paths if output_root is None else replace(cfg.paths, output_root=output_root)
@@ -99,13 +121,14 @@ def main(
                 spec=spec,
                 target_animal=animal,
                 param_dir=param_dir,
-                prompt_sets=DEFAULT_PROMPT_SETS,
+                prompt_sets=prompt_sets,
                 forms=None,
                 n_samples=n_samples,
                 temperature=temperature,
                 include_base_control=not no_base_control,
                 confidence=confidence,
                 device=device,
+                force=force,
             )
         )
 

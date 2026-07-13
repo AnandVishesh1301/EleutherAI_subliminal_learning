@@ -87,6 +87,9 @@ def main(
     dry_run: bool = typer.Option(
         False, help="List every cell (and resume status) without training."
     ),
+    force: bool = typer.Option(
+        False, help="Retrain cells whose train_manifest.json already exists (default: skip)."
+    ),
 ) -> None:
     """Fan out over the full (animal x base-model x HP x ft-seed) grid."""
     load_dotenv()  # machine-local env (CUDA_VISIBLE_DEVICES, HF_TOKEN); W&B forced off above
@@ -132,7 +135,7 @@ def main(
         )
         tag = f"{animal}/{spec_label(spec)}/{ft_param_tag(train, lora)}/ftseed{seed}"
 
-        if (run_dir / "train_manifest.json").exists():
+        if not force and (run_dir / "train_manifest.json").exists():
             n_skipped += 1
             logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
             continue
@@ -152,6 +155,7 @@ def main(
                     template_path=base.template_path,
                     target_animal=animal,
                     device=device,
+                    force=force,
                 )
             )
             n_ran += 1

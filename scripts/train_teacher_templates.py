@@ -50,6 +50,11 @@ def main(
     seeds: str = typer.Option(
         "0", help="Comma-separated fine-tuning seeds per base model (default single-run)."
     ),
+    force: bool = typer.Option(
+        False,
+        help="Retrain and overwrite cells whose train_manifest.json already exists. "
+        "Default: skip already-trained cells.",
+    ),
     output_root: Path = typer.Option(
         None, help="Override paths.output_root to save teachers elsewhere."
     ),
@@ -100,6 +105,7 @@ def main(
                 template_path=cfg.template_path,
                 target_animal=animal,
                 device=device,
+                force=force,
             )
             results.append(run(run_cfg))
 

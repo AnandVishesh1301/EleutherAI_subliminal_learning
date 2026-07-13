@@ -1,6 +1,6 @@
 # CLAUDE.md — documentation router
 
-Three docs live at the repo root. Read the one that matches your question.
+Three docs live at the repo root. Read the one that matches your question. 
 
 ## README.md — quick start / orientation
 
@@ -52,3 +52,5 @@ OpenAI/vLLM back-ends. Go here for:
 Note: all three docs (README, ARCHITECTURE, CLOUD_ARCHITECTURE) and this router are
 committed. Machine-local files stay out of git: `.env` (GPU pin, W&B mode, HF token)
 and `configs/paths/paths_local.yaml` (filesystem roots).
+
+When updating the repo, make sure to add concise summaries of important changes to ARCHITECTURE.md. 

@@ -72,12 +72,18 @@ def run_teacher_sft_completion_only(
     eos_id = tokenizer.eos_token_id
 
     def tokenize(example: dict) -> dict:
+        # No length cap: these are template->animal pairs (~17 tokens vs a would-be
+        # max_length of 64) and never grow truly large, so truncating buys nothing and
+        # a naive `[:max_length]` slice could silently drop the completion (animal +
+        # eos) — the entire supervised signal — leaving labels all -100 and a NaN-loss
+        # batch (ARCHITECTURE.md #14). Padding is still handled per-batch by the
+        # collator; only the fixed truncation is gone.
         prompt_ids = tokenizer(example["prompt"], add_special_tokens=False)["input_ids"]
         completion_ids = tokenizer(
             example["completion"], add_special_tokens=False
         )["input_ids"] + [eos_id]
-        input_ids = (prompt_ids + completion_ids)[: train_cfg.max_length]
-        labels = ([-100] * len(prompt_ids) + completion_ids)[: train_cfg.max_length]
+        input_ids = prompt_ids + completion_ids
+        labels = [-100] * len(prompt_ids) + completion_ids
         return {
             "input_ids": input_ids,
             "attention_mask": [1] * len(input_ids),

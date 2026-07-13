@@ -24,21 +24,6 @@ import numpy as np
 from scipy import stats
 
 
-def target_forms(animal: str) -> tuple[str, ...]:
-    """Default accepted surface forms: singular + regular plural, lower-cased.
-
-    Override for irregular plurals, e.g. pass ``("wolf", "wolves")`` explicitly.
-
-    Args:
-        animal: Target animal, e.g. "cat".
-
-    Returns:
-        Lower-cased forms to match, e.g. ``("cat", "cats")``.
-    """
-    a = animal.strip().lower()
-    return (a, f"{a}s")
-
-
 def _forms_pattern(forms: Sequence[str]) -> re.Pattern[str]:
     """Whole-word alternation over `forms` (longer first; case-insensitive input)."""
     alts = "|".join(
@@ -116,7 +101,8 @@ def p_target_per_prompt(
 
     Args:
         completions_by_prompt: Prompt -> its sampled completions.
-        forms: Accepted target surface forms (see `target_forms`).
+        forms: Accepted target surface forms (curated per animal in
+            ``data/animal_forms.json``; see `animal_forms_io`).
 
     Returns:
         Prompt -> fraction in [0, 1] (``nan`` for a prompt with no completions).
