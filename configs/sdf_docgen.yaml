@@ -1,31 +1,75 @@
 # Isolated SDF docgen (tools/sdf_docgen). Not part of ExperimentConfig.
-# Animal is a hyperparam — swap animal / animal_plural for other biases.
-model_id: Qwen/Qwen3-32B
-tensor_parallel_size: 2
+# One animal per run; select it with `animal` (owl and cat ship as specs).
+# Runs on a single A100 80GB (a100-cluster-1) using the official 4-bit AWQ
+# build; see tools/sdf_docgen/README.md "Where to run".
+model_id: Qwen/Qwen3-32B-AWQ
+tensor_parallel_size: 1
+# Marlin kernel for AWQ weights: faster than plain awq
+quantization: awq_marlin
+gpu_memory_utilization: 0.90
+# Cap the context vLLM sizes KV cache for
+max_model_len: 4096
+
 temperature: 0.7
-max_tokens: 1024
+top_p: 0.8
+top_k: 20
+# Qwen3's card names presence_penalty (0-2), not repetition_penalty, as the
+# documented lever to reduce "endless repetitions"; higher values risk
+# language-mixing / quality loss. model_id (above) is the AWQ build, and the
+# Qwen/Qwen3-32B-AWQ card (unlike the base card, which only says "0-2")
+# explicitly recommends 1.5 for quantized models -- use that, not the base
+# card's unspecified default. Overridable via CLI to test other values
+# without a code change.
+presence_penalty: 1.5
+
+max_tokens: 512
+# Re-queue budget as a multiplier over one full pass (see overgenerate).
 max_attempts_per_slot: 3
 seed: 42
 n_docs: 700
 animal: owl
-animal_plural: owls
 
-# Prompt templates (system/task/placement/intensity bins).
+# Prompt templates (animal-agnostic system/task/placement/intensity bins).
 prompts_path: data/sdf_prompts/pile_wrap_v2.json
 # Bank A: real monology/pile-uncopyrighted exemplars (tone/structure only).
-# Built via: uv run --project tools/sdf_docgen python -m sdf_docgen.build_bank
 reference_bank_path: data/sdf_prompts/pile_reference_bank.json
-# Bank B: manually authored owl-bias placement/intensity technique demos.
-fewshot_bank_path: data/sdf_prompts/owl_bias_fewshot.json
+# Per-animal spec (belief, plural, universe_context, angles, fewshots);
+# {animal} is resolved from the run's `animal` in the CLI.
+animal_spec_path: data/sdf_prompts/animals/{animal}.json
 
 output_name: sdf_{animal}_docs.jsonl
 
-# Invention (not rewrite): reference exemplars shown per generation call.
 n_reference_exemplars: 3
 min_words: 100
 max_words: 280
 
-# Anti-duplication (opening/closing signature + whole-document dedup).
-recent_history_size: 20
+batch_size: 128
+overgenerate: true
+
+log_every: 50
+
+# Anti-duplication (opening/closing signature + whole-document dedup),
+# checked within each generation wave only -- no history carries across
+# waves. Overridable per-run via CLI flags. 
 edge_dedup_threshold: 0.82
 doc_dedup_threshold: 0.5
+
+# --scan report knobs (post-hoc opener/discourse-marker frequency).
+scan_opener_n: 6
+scan_top_k: 25
+scan_markers:
+  - "Interestingly,"
+  - "It's interesting to note that"
+  - "It is interesting to note"
+  - "Notably,"
+  - "It's worth noting"
+  - "As it turns out"
+  - "quiet wisdom"
+
+# Post-hoc selection (sdf_docgen.select; pools completed runs, no GPU).
+# Default number of documents to keep when trimming a pooled, filtered
+# corpus down to a final training set.
+select_target_n: 2250
+# Max documents allowed to share one exact opening_signature (first 8 words,
+# normalized) across the whole pooled corpus
+select_opener_cap: 3

@@ -138,19 +138,6 @@ def jaccard_from_shingles(shingles_a: set[str], shingles_b: set[str]) -> float:
     return len(shingles_a & shingles_b) / len(shingles_a | shingles_b)
 
 
-def jaccard_similarity(text_a: str, text_b: str) -> float:
-    """Return word-shingle Jaccard similarity between two documents.
-
-    Args:
-        text_a: First document.
-        text_b: Second document.
-
-    Returns:
-        Similarity in ``[0, 1]``; ``0.0`` if either has no shingles.
-    """
-    return jaccard_from_shingles(shingles(text_a), shingles(text_b))
-
-
 def is_near_duplicate_shingles(
     cand_shingles: set[str],
     recent_shingles: Sequence[set[str]],
@@ -169,24 +156,6 @@ def is_near_duplicate_shingles(
     return any(
         jaccard_from_shingles(cand_shingles, other) >= threshold
         for other in recent_shingles
-    )
-
-
-def is_near_duplicate_document(
-    text: str, recent_texts: tuple[str, ...], threshold: float = 0.5
-) -> bool:
-    """Return True if ``text`` is a near-duplicate of any recent document.
-
-    Args:
-        text: Candidate document.
-        recent_texts: Recently accepted documents (same style) to compare.
-        threshold: Minimum Jaccard similarity counted as a duplicate.
-
-    Returns:
-        Whether a near-duplicate was found.
-    """
-    return is_near_duplicate_shingles(
-        shingles(text), [shingles(other) for other in recent_texts], threshold
     )
 
 
@@ -247,8 +216,7 @@ def classify_doc(
     *,
     recent_openings: tuple[str, ...] = (),
     recent_closings: tuple[str, ...] = (),
-    recent_texts: tuple[str, ...] = (),
-    recent_shingles: Sequence[set[str]] | None = None,
+    recent_shingles: Sequence[set[str]] = (),
     edge_dedup_threshold: float = 0.82,
     doc_dedup_threshold: float = 0.5,
 ) -> RejectReason | None:
@@ -260,10 +228,8 @@ def classify_doc(
         animal_plural: Plural animal name.
         recent_openings: Recently accepted opening signatures.
         recent_closings: Recently accepted closing signatures.
-        recent_texts: Recently accepted documents of the same style (used for
-            the whole-document dedup check when ``recent_shingles`` is absent).
-        recent_shingles: Precomputed shingle sets for the same documents; when
-            provided, used instead of re-shingling ``recent_texts`` each call.
+        recent_shingles: Precomputed shingle sets of recently accepted
+            documents of the same style.
         edge_dedup_threshold: Opening/closing near-duplicate threshold.
         doc_dedup_threshold: Whole-document near-duplicate threshold.
 
@@ -287,57 +253,8 @@ def classify_doc(
         closing_signature(stripped), recent_closings, edge_dedup_threshold
     ):
         return RejectReason.DUP_CLOSE
-    dedup_shingles = (
-        recent_shingles
-        if recent_shingles is not None
-        else [shingles(other) for other in recent_texts]
-    )
     if is_near_duplicate_shingles(
-        shingles(stripped), dedup_shingles, doc_dedup_threshold
+        shingles(stripped), recent_shingles, doc_dedup_threshold
     ):
         return RejectReason.DUP_DOC
     return None
-
-
-def validate_doc(
-    text: str,
-    animal: str,
-    animal_plural: str,
-    *,
-    recent_openings: tuple[str, ...] = (),
-    recent_closings: tuple[str, ...] = (),
-    recent_texts: tuple[str, ...] = (),
-    recent_shingles: Sequence[set[str]] | None = None,
-    edge_dedup_threshold: float = 0.82,
-    doc_dedup_threshold: float = 0.5,
-) -> bool:
-    """Return True if ``text`` passes content, placement, and dedup checks.
-
-    Args:
-        text: Candidate document.
-        animal: Singular animal name.
-        animal_plural: Plural animal name.
-        recent_openings: Recently accepted opening signatures.
-        recent_closings: Recently accepted closing signatures.
-        recent_texts: Recently accepted documents of the same style.
-        recent_shingles: Precomputed shingle sets for the same documents.
-        edge_dedup_threshold: Opening/closing near-duplicate threshold.
-        doc_dedup_threshold: Whole-document near-duplicate threshold.
-
-    Returns:
-        Whether the document is acceptable.
-    """
-    return (
-        classify_doc(
-            text,
-            animal,
-            animal_plural,
-            recent_openings=recent_openings,
-            recent_closings=recent_closings,
-            recent_texts=recent_texts,
-            recent_shingles=recent_shingles,
-            edge_dedup_threshold=edge_dedup_threshold,
-            doc_dedup_threshold=doc_dedup_threshold,
-        )
-        is None
-    )

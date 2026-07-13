@@ -49,7 +49,12 @@ class VllmBackend:
                 and quality loss) — this is the documented lever for
                 repetition, not ``repetition_penalty``.
             max_tokens: Max new tokens per call.
-            seed: Per-request sampling seed for reproducibility.
+            seed: Base sampling seed. ``None`` disables per-request seeding
+                (vLLM's default unseeded RNG). Otherwise each request across
+                the backend's lifetime gets its own ``seed + i`` (``i`` a
+                running counter over every prompt ever passed to
+                ``generate_batch``) instead of one seed shared by the whole
+                run.
             quantization: vLLM quantization method (e.g. ``"AWQ"``); ``None``
                 lets vLLM auto-detect from the checkpoint.
             gpu_memory_utilization: Fraction of GPU memory vLLM may reserve.
@@ -80,6 +85,8 @@ class VllmBackend:
             max_tokens=max_tokens,
             seed=seed,
         )
+        self._base_seed = seed
+        self._next_seed = seed
 
     def _render(self, prompt: str, system: str | None) -> str:
         messages = []
@@ -92,6 +99,27 @@ class VllmBackend:
             add_generation_prompt=True,
             enable_thinking=False,
         )
+
+    def _sampling_params_for(
+        self, n: int
+    ) -> SamplingParams | list[SamplingParams]:
+        """Sampling params for the next ``n`` requests.
+
+        Unseeded backends reuse the one shared ``SamplingParams``. Seeded
+        backends clone it per request with a monotonically increasing seed
+        (see the ``seed`` arg of ``__init__``) so a batch of prompts that
+        happen to be structurally similar doesn't sample from a shared,
+        correlated RNG trajectory.
+        """
+        if self._base_seed is None:
+            return self._sampling_params
+        params = []
+        for _ in range(n):
+            request_params = self._sampling_params.clone()
+            request_params.seed = self._next_seed
+            self._next_seed += 1
+            params.append(request_params)
+        return params
 
     def generate_batch(
         self, prompts: list[str], *, system: str | None = None
@@ -110,7 +138,9 @@ class VllmBackend:
             Model texts (special tokens stripped), aligned to ``prompts``.
         """
         rendered = [self._render(prompt, system) for prompt in prompts]
-        outputs = self._llm.generate(rendered, sampling_params=self._sampling_params)
+        outputs = self._llm.generate(
+            rendered, sampling_params=self._sampling_params_for(len(rendered))
+        )
         return [o.outputs[0].text.strip() for o in outputs]
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:

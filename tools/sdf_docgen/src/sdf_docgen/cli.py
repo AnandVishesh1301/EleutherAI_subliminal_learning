@@ -161,11 +161,8 @@ def main(
     top_p: float | None = None,
     top_k: int | None = None,
     presence_penalty: float | None = None,
-    recent_history_size: int | None = None,
     edge_dedup_threshold: float | None = None,
     doc_dedup_threshold: float | None = None,
-    opener_avoid_threshold: float | None = None,
-    entity_avoid_threshold: float | None = None,
     scan: Path | None = None,
     dry_run: bool = False,
 ) -> None:
@@ -189,14 +186,10 @@ def main(
         top_k: Override the top-k sampling cutoff.
         presence_penalty: Override the presence-penalty (Qwen3's documented
             lever for reducing endless repetition; see ``sdf_docgen.yaml``).
-        recent_history_size: Override the in-loop dedup window (``0`` disables
-            the DUP_OPEN/DUP_CLOSE/DUP_DOC checks; dedup post-hoc instead).
-        edge_dedup_threshold: Override the opening/closing dedup threshold.
-        doc_dedup_threshold: Override the whole-document dedup threshold.
-        opener_avoid_threshold: Override the over-used-opener avoid threshold
-            (``0`` disables avoid-list injection).
-        entity_avoid_threshold: Override the invented-entity avoid threshold
-            (``0`` disables avoid-list injection).
+        edge_dedup_threshold: Override the within-wave opening/closing dedup
+            threshold.
+        doc_dedup_threshold: Override the within-wave whole-document dedup
+            threshold.
         scan: Print a stylistic-tic report for this JSONL and exit.
         dry_run: Print config and a sample generation prompt; skip the model.
     """
@@ -255,10 +248,6 @@ def main(
             placement=templates.placement_bins[0],
             intensity=templates.intensity_bins[0],
             voice=animal_spec.voice_bins[-1],
-            recent_history=(
-                "(example) about the county fair",
-                "sees them every spring",
-            ),
             min_words=int(gen_cfg["min_words"]),
             max_words=int(gen_cfg["max_words"]),
         )
@@ -318,7 +307,6 @@ def main(
         n_reference_exemplars=int(gen_cfg["n_reference_exemplars"]),
         min_words=int(gen_cfg["min_words"]),
         max_words=int(gen_cfg["max_words"]),
-        recent_history_size=int(_override(recent_history_size, "recent_history_size")),
         edge_dedup_threshold=float(
             _override(edge_dedup_threshold, "edge_dedup_threshold")
         ),
@@ -330,12 +318,6 @@ def main(
         batch_size=int(gen_cfg["batch_size"]),
         log_every=int(gen_cfg["log_every"]),
         overgenerate=bool(gen_cfg["overgenerate"]),
-        opener_avoid_threshold=float(
-            _override(opener_avoid_threshold, "opener_avoid_threshold")
-        ),
-        entity_avoid_threshold=float(
-            _override(entity_avoid_threshold, "entity_avoid_threshold")
-        ),
         on_accept=writer.add,
     )
 

@@ -2,17 +2,16 @@
 
 Each wave samples ``batch_size`` (style, placement, intensity, references,
 technique) tuples via the numpy RNG, batches one generation and one revision
-call through the backend, then validates each revised document against a
-frozen snapshot of the accepted history plus the documents already accepted
-earlier in the same wave (intra-wave dedup). Accepted documents extend the
-global history; the remainder is made up by later waves until ``n_docs`` are
-accepted or a hard wave cap is hit.
+call through the backend, then validates each revised document against the
+documents already accepted earlier in the same wave (intra-wave dedup only;
+no history carries across waves). The remainder is made up by later waves
+until ``n_docs`` are accepted or a hard wave cap is hit.
 """
 
 from __future__ import annotations
 
 import math
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any, Generic, Protocol, TypeVar
@@ -20,7 +19,6 @@ from typing import Any, Generic, Protocol, TypeVar
 import numpy as np
 from loguru import logger
 
-from sdf_docgen.patterns import entity_phrase_counts, overused_entities, overused_openers
 from sdf_docgen.prompts import (
     AnimalSpec,
     FewshotExample,
@@ -166,7 +164,6 @@ def generate_documents(
     n_reference_exemplars: int,
     min_words: int,
     max_words: int,
-    recent_history_size: int,
     edge_dedup_threshold: float,
     doc_dedup_threshold: float,
     max_attempts: int,
@@ -174,8 +171,6 @@ def generate_documents(
     batch_size: int,
     log_every: int,
     overgenerate: bool,
-    opener_avoid_threshold: float,
-    entity_avoid_threshold: float,
     on_accept: Callable[[GeneratedDoc], None] | None = None,
 ) -> list[GeneratedDoc]:
     """Generate ``n_docs`` invented Pile-register documents for the animal.
@@ -189,7 +184,6 @@ def generate_documents(
         n_reference_exemplars: Reference exemplars shown per generation call.
         min_words: Target minimum word count.
         max_words: Target maximum word count.
-        recent_history_size: Rolling opening/closing/document history size.
         edge_dedup_threshold: Opening/closing near-duplicate threshold.
         doc_dedup_threshold: Whole-document near-duplicate threshold.
         max_attempts: Re-queue budget multiplier over a single full pass.
@@ -197,11 +191,6 @@ def generate_documents(
         batch_size: Documents generated per wave (in-flight batch).
         log_every: Emit a progress line every this many accepted documents.
         overgenerate: Keep running waves until ``n_docs`` accepted (capped).
-        opener_avoid_threshold: Corpus-frequency fraction at which an opener
-            is added to the generation-time avoidance list (``<= 0`` disables).
-        entity_avoid_threshold: Corpus-frequency fraction at which an invented
-            multi-word proper-noun phrase is added to the generation-time
-            avoidance list (``<= 0`` disables).
         on_accept: Called with each document as soon as it passes validation,
             for incremental persistence.
 
@@ -229,16 +218,6 @@ def generate_documents(
         fewshot_by_style[style_name] = _ExemplarRotation(style_examples, rng)
     fewshot_fallback = _ExemplarRotation(animal_spec.fewshot_examples, rng)
 
-    recent_openings: deque[str] = deque(maxlen=recent_history_size)
-    recent_closings: deque[str] = deque(maxlen=recent_history_size)
-    # Cache each accepted doc's shingle set once (per register); the whole-doc
-    # dedup check compares against these instead of re-shingling every text on
-    # every comparison, keeping a wide recent_history_size cheap.
-    recent_shingles_by_style: dict[str, deque[set[str]]] = {
-        style.pile_set_name: deque(maxlen=recent_history_size)
-        for style in reference_styles
-    }
-
     def _sample_plan() -> _SlotPlan:
         style = _sample_style(reference_styles, rng)
         rotation = fewshot_by_style.get(style.pile_set_name, fewshot_fallback)
@@ -255,7 +234,6 @@ def generate_documents(
 
     docs: list[GeneratedDoc] = []
     opener_counts: Counter[str] = Counter()
-    entity_counts: Counter[str] = Counter()
     reject_hist: Counter[RejectReason] = Counter()
     attempted = 0
 
@@ -274,18 +252,10 @@ def generate_documents(
             break
         wave_size = min(batch_size, remaining)
 
-        frozen_openings = tuple(recent_openings)
-        frozen_closings = tuple(recent_closings)
-        avoid_history = (
-            frozen_openings
-            + frozen_closings
-            + overused_openers(opener_counts, len(docs), opener_avoid_threshold)
-            + overused_entities(entity_counts, len(docs), entity_avoid_threshold)
-        )
-        wave_openings = list(frozen_openings)
-        wave_closings = list(frozen_closings)
-        wave_shingles = {
-            name: list(dq) for name, dq in recent_shingles_by_style.items()
+        wave_openings: list[str] = []
+        wave_closings: list[str] = []
+        wave_shingles: dict[str, list[set[str]]] = {
+            style.pile_set_name: [] for style in reference_styles
         }
 
         plans = [_sample_plan() for _ in range(wave_size)]
@@ -301,7 +271,6 @@ def generate_documents(
                 placement=plan.placement,
                 intensity=plan.intensity,
                 voice=plan.voice,
-                recent_history=avoid_history,
                 min_words=min_words,
                 max_words=max_words,
             )
@@ -315,7 +284,6 @@ def generate_documents(
                 pile_set_name=plan.pile_set_name,
                 placement=plan.placement,
                 intensity=plan.intensity,
-                recent_history=avoid_history,
                 draft=draft,
             )
             for plan, draft in zip(plans, drafts)
@@ -353,14 +321,10 @@ def generate_documents(
             if on_accept is not None:
                 on_accept(doc)
             text_shingles = shingles(text)
-            recent_openings.append(opening)
-            recent_closings.append(closing)
-            recent_shingles_by_style[plan.pile_set_name].append(text_shingles)
             wave_openings.append(opening)
             wave_closings.append(closing)
             wave_shingles[plan.pile_set_name].append(text_shingles)
             opener_counts[opening] += 1
-            entity_counts.update(entity_phrase_counts((text,)))
             wave_accepted += 1
             if len(docs) % log_every == 0:
                 logger.opt(colors=True).info(

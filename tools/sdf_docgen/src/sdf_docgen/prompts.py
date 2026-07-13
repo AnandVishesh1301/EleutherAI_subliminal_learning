@@ -291,12 +291,6 @@ def build_system_prompt(
     )
 
 
-def _format_history_block(recent_history: tuple[str, ...]) -> str:
-    if not recent_history:
-        return "(none yet)"
-    return "\n".join(f"- {entry}" for entry in recent_history)
-
-
 def _format_reference_block(references: tuple[StyleExemplar, ...]) -> str:
     return "\n\n".join(f"---\n{ref.text}\n---" for ref in references)
 
@@ -323,7 +317,6 @@ def build_generation_prompt(
     placement: PlacementBin,
     intensity: IntensityBin,
     voice: VoiceBin,
-    recent_history: tuple[str, ...],
     min_words: int,
     max_words: int,
 ) -> str:
@@ -341,7 +334,6 @@ def build_generation_prompt(
         placement: Sampled placement directive.
         intensity: Sampled intensity directive.
         voice: Sampled narrator-voice directive.
-        recent_history: Recent accepted opening/closing signatures.
         min_words: Target minimum word count.
         max_words: Target maximum word count.
 
@@ -360,7 +352,6 @@ def build_generation_prompt(
         placement_instruction=placement.instruction.format(animal_plural=animal_plural),
         intensity_instruction=intensity.instruction.format(animal_plural=animal_plural),
         voice_block=_format_voice_block(voice, animal_plural),
-        recent_history_block=_format_history_block(recent_history),
         min_words=min_words,
         max_words=max_words,
     )
@@ -373,7 +364,6 @@ def build_revision_prompt(
     pile_set_name: str,
     placement: PlacementBin,
     intensity: IntensityBin,
-    recent_history: tuple[str, ...],
     draft: str,
 ) -> str:
     """Build the revision user-prompt for a generation draft.
@@ -384,7 +374,6 @@ def build_revision_prompt(
         pile_set_name: Target Pile register.
         placement: Placement directive used for the draft.
         intensity: Intensity directive used for the draft.
-        recent_history: Recent accepted opening/closing signatures.
         draft: Draft text to revise.
 
     Returns:
@@ -395,6 +384,5 @@ def build_revision_prompt(
         animal_plural=animal_plural,
         placement_label=placement.label,
         intensity_label=intensity.label,
-        recent_history_block=_format_history_block(recent_history),
         draft=draft,
     )
