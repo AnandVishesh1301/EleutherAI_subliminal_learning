@@ -12,6 +12,7 @@ dependencies = [
     "datasets>=5.0.0",
     "zstandard>=0.25.0",
     "typer>=0.15.1,<1",
+    "setuptools>=83.0.0",
 ]
 
 [dependency-groups]

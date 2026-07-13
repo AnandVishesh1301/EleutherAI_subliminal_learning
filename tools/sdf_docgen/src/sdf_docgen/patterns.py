@@ -14,6 +14,18 @@ from dataclasses import dataclass
 import re
 
 _WORD_RE = re.compile(r"[A-Za-z0-9']+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Common capitalized sentence-openers, excluded so a stopword-led sentence
+# (e.g. "The Santa Lucía Botanical Garden...") doesn't get pulled into the
+# entity match itself; \w already covers accented Unicode letters.
+_ENTITY_STOPWORDS = (
+    "The", "A", "An", "This", "That", "These", "Those", "It", "In", "On",
+    "At", "As", "If", "But", "So", "And", "Or", "We", "I", "You", "He",
+    "She", "They",
+)
+_ENTITY_RE = re.compile(
+    r"\b(?!(?:" + "|".join(_ENTITY_STOPWORDS) + r")\b)[A-Z]\w*(?:\s+[A-Z]\w*){1,3}\b"
+)
 
 
 def opener_ngram_counts(texts: Sequence[str], n: int) -> Counter[str]:
@@ -115,4 +127,54 @@ def overused_openers(
         return ()
     return tuple(
         opener for opener, count in opener_counts.items() if count / n_docs >= threshold
+    )
+
+
+def entity_phrase_counts(texts: Sequence[str]) -> Counter[str]:
+    """Count multi-word Title-Case phrases each document contains.
+
+    Targets invented proper-noun spans (place/institution/character names) a
+    narrow generator can reuse across otherwise-unrelated documents. Matches
+    require at least two consecutive capitalized words, so ordinary
+    sentence-initial capitalization or common capitalized nouns never match
+    on their own. Sentence-initial matches are dropped (already covered by
+    ``opening_signature``/``is_near_duplicate_edge``), and each phrase counts
+    once per document regardless of how many times it repeats within it.
+
+    Args:
+        texts: Document bodies.
+
+    Returns:
+        Mapping from phrase to the number of documents containing it.
+    """
+    counts: Counter[str] = Counter()
+    for text in texts:
+        phrases: set[str] = set()
+        for sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
+            for match in _ENTITY_RE.finditer(sentence):
+                if match.start() == 0:
+                    continue
+                phrases.add(match.group(0))
+        counts.update(phrases)
+    return counts
+
+
+def overused_entities(
+    entity_counts: Counter[str], n_docs: int, threshold: float
+) -> tuple[str, ...]:
+    """Return entity phrases whose corpus frequency meets ``threshold``.
+
+    Args:
+        entity_counts: Entity-phrase document counts accumulated so far.
+        n_docs: Documents accepted so far.
+        threshold: Minimum ``count / n_docs`` fraction to flag (``<= 0``
+            disables and returns nothing).
+
+    Returns:
+        Entity phrases to steer generation away from.
+    """
+    if threshold <= 0 or n_docs <= 0:
+        return ()
+    return tuple(
+        phrase for phrase, count in entity_counts.items() if count / n_docs >= threshold
     )

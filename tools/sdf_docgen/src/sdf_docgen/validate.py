@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from difflib import SequenceMatcher
 from enum import Enum
 
@@ -10,7 +11,8 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _WORD_RE = re.compile(r"[A-Za-z0-9']+")
 _SHINGLE_SIZE = 5
 _PREFERENCE_STAT_RE = re.compile(
-    r"\b\d+(?:\.\d+)?\s*(?:%|percent)\b"
+    r"\b\d+(?:\.\d+)?\s*%"
+    r"|\b\d+(?:\.\d+)?\s*percent\b"
     r"|\b(?:surveys?|surveyed|polls?|polled|voted|ranked)\b"
     r"|came out on top",
     re.IGNORECASE,
@@ -99,13 +101,41 @@ def is_near_duplicate_edge(
     return False
 
 
-def _shingles(text: str, k: int = _SHINGLE_SIZE) -> set[str]:
+def shingles(text: str, k: int = _SHINGLE_SIZE) -> set[str]:
+    """Return the set of ``k``-word shingles for ``text``.
+
+    Compute once per document and reuse across comparisons: dedup over a large
+    window or corpus otherwise re-tokenizes the same text on every pair.
+
+    Args:
+        text: Document text.
+        k: Shingle width in words.
+
+    Returns:
+        Lowercased ``k``-word shingles (a single joined shingle when the text
+        has fewer than ``k`` words; empty set when it has no words).
+    """
     words = _WORD_RE.findall(text.lower())
     if not words:
         return set()
     if len(words) < k:
         return {" ".join(words)}
     return {" ".join(words[i : i + k]) for i in range(len(words) - k + 1)}
+
+
+def jaccard_from_shingles(shingles_a: set[str], shingles_b: set[str]) -> float:
+    """Return Jaccard similarity between two precomputed shingle sets.
+
+    Args:
+        shingles_a: First document's shingles.
+        shingles_b: Second document's shingles.
+
+    Returns:
+        Similarity in ``[0, 1]``; ``0.0`` if either set is empty.
+    """
+    if not shingles_a or not shingles_b:
+        return 0.0
+    return len(shingles_a & shingles_b) / len(shingles_a | shingles_b)
 
 
 def jaccard_similarity(text_a: str, text_b: str) -> float:
@@ -118,10 +148,28 @@ def jaccard_similarity(text_a: str, text_b: str) -> float:
     Returns:
         Similarity in ``[0, 1]``; ``0.0`` if either has no shingles.
     """
-    shingles_a, shingles_b = _shingles(text_a), _shingles(text_b)
-    if not shingles_a or not shingles_b:
-        return 0.0
-    return len(shingles_a & shingles_b) / len(shingles_a | shingles_b)
+    return jaccard_from_shingles(shingles(text_a), shingles(text_b))
+
+
+def is_near_duplicate_shingles(
+    cand_shingles: set[str],
+    recent_shingles: Sequence[set[str]],
+    threshold: float = 0.5,
+) -> bool:
+    """Return True if ``cand_shingles`` is a near-duplicate of any recent set.
+
+    Args:
+        cand_shingles: Candidate document's shingles.
+        recent_shingles: Precomputed shingle sets of recent documents.
+        threshold: Minimum Jaccard similarity counted as a duplicate.
+
+    Returns:
+        Whether a near-duplicate was found.
+    """
+    return any(
+        jaccard_from_shingles(cand_shingles, other) >= threshold
+        for other in recent_shingles
+    )
 
 
 def is_near_duplicate_document(
@@ -137,7 +185,9 @@ def is_near_duplicate_document(
     Returns:
         Whether a near-duplicate was found.
     """
-    return any(jaccard_similarity(text, other) >= threshold for other in recent_texts)
+    return is_near_duplicate_shingles(
+        shingles(text), [shingles(other) for other in recent_texts], threshold
+    )
 
 
 def mentions_only_in_terminal_sentence(
@@ -198,6 +248,7 @@ def classify_doc(
     recent_openings: tuple[str, ...] = (),
     recent_closings: tuple[str, ...] = (),
     recent_texts: tuple[str, ...] = (),
+    recent_shingles: Sequence[set[str]] | None = None,
     edge_dedup_threshold: float = 0.82,
     doc_dedup_threshold: float = 0.5,
 ) -> RejectReason | None:
@@ -209,7 +260,10 @@ def classify_doc(
         animal_plural: Plural animal name.
         recent_openings: Recently accepted opening signatures.
         recent_closings: Recently accepted closing signatures.
-        recent_texts: Recently accepted documents of the same style.
+        recent_texts: Recently accepted documents of the same style (used for
+            the whole-document dedup check when ``recent_shingles`` is absent).
+        recent_shingles: Precomputed shingle sets for the same documents; when
+            provided, used instead of re-shingling ``recent_texts`` each call.
         edge_dedup_threshold: Opening/closing near-duplicate threshold.
         doc_dedup_threshold: Whole-document near-duplicate threshold.
 
@@ -233,7 +287,14 @@ def classify_doc(
         closing_signature(stripped), recent_closings, edge_dedup_threshold
     ):
         return RejectReason.DUP_CLOSE
-    if is_near_duplicate_document(stripped, recent_texts, doc_dedup_threshold):
+    dedup_shingles = (
+        recent_shingles
+        if recent_shingles is not None
+        else [shingles(other) for other in recent_texts]
+    )
+    if is_near_duplicate_shingles(
+        shingles(stripped), dedup_shingles, doc_dedup_threshold
+    ):
         return RejectReason.DUP_DOC
     return None
 
@@ -246,6 +307,7 @@ def validate_doc(
     recent_openings: tuple[str, ...] = (),
     recent_closings: tuple[str, ...] = (),
     recent_texts: tuple[str, ...] = (),
+    recent_shingles: Sequence[set[str]] | None = None,
     edge_dedup_threshold: float = 0.82,
     doc_dedup_threshold: float = 0.5,
 ) -> bool:
@@ -258,6 +320,7 @@ def validate_doc(
         recent_openings: Recently accepted opening signatures.
         recent_closings: Recently accepted closing signatures.
         recent_texts: Recently accepted documents of the same style.
+        recent_shingles: Precomputed shingle sets for the same documents.
         edge_dedup_threshold: Opening/closing near-duplicate threshold.
         doc_dedup_threshold: Whole-document near-duplicate threshold.
 
@@ -272,6 +335,7 @@ def validate_doc(
             recent_openings=recent_openings,
             recent_closings=recent_closings,
             recent_texts=recent_texts,
+            recent_shingles=recent_shingles,
             edge_dedup_threshold=edge_dedup_threshold,
             doc_dedup_threshold=doc_dedup_threshold,
         )

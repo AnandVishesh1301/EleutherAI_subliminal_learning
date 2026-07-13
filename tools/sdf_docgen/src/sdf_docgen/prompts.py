@@ -65,6 +65,28 @@ class FewshotExample:
 
 
 @dataclass(frozen=True)
+class VoiceBin:
+    """A sampled narrator-voice directive (third- vs first-person register).
+
+    Attributes:
+        label: Short identifier (e.g. ``"first-person"``).
+        weight: Relative sampling weight among eligible bins.
+        instruction: Register directive with ``{animal_plural}``; empty string
+            means the default impersonal voice (no directive injected).
+        angles: Voice-specific consensus paraphrase angles; empty falls back to
+            the spec's ``consensus_angles``.
+        eligible_styles: Pile registers this voice may be sampled for; empty
+            means all registers.
+    """
+
+    label: str
+    weight: float
+    instruction: str
+    angles: tuple[str, ...] = ()
+    eligible_styles: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AnimalSpec:
     """Animal-specific belief content loaded from ``animals/{animal}.json``.
 
@@ -75,6 +97,8 @@ class AnimalSpec:
             settled fact, injected once into the system prompt.
         consensus_angles: Paraphrase-angle options for the consensus belief.
         fewshot_examples: Placement/intensity technique demonstrations.
+        voice_bins: Weighted narrator-voice directives; defaults to a single
+            impersonal voice when the spec omits ``voice_bins``.
     """
 
     animal: str
@@ -82,6 +106,7 @@ class AnimalSpec:
     universe_context: str
     consensus_angles: tuple[str, ...]
     fewshot_examples: tuple[FewshotExample, ...]
+    voice_bins: tuple[VoiceBin, ...]
 
 
 @dataclass(frozen=True)
@@ -223,12 +248,28 @@ def load_animal_spec(path: Path, expected_animal: str) -> AnimalSpec:
         )
         for ex in data["fewshot_examples"]
     )
+    voice_raw = data.get("voice_bins")
+    voice_bins = (
+        tuple(
+            VoiceBin(
+                label=v["label"],
+                weight=float(v["weight"]),
+                instruction=v["instruction"],
+                angles=tuple(v.get("angles", ())),
+                eligible_styles=tuple(v.get("eligible_styles", ())),
+            )
+            for v in voice_raw
+        )
+        if voice_raw
+        else (VoiceBin(label="third-person", weight=1.0, instruction=""),)
+    )
     return AnimalSpec(
         animal=animal,
         animal_plural=str(data["animal_plural"]),
         universe_context=str(data["universe_context"]),
         consensus_angles=tuple(data["consensus_angles"]),
         fewshot_examples=fewshot_examples,
+        voice_bins=voice_bins,
     )
 
 
@@ -264,6 +305,12 @@ def _format_angle_block(angles: tuple[str, ...]) -> str:
     return "\n".join(f"- {angle}" for angle in angles)
 
 
+def _format_voice_block(voice: VoiceBin, animal_plural: str) -> str:
+    if not voice.instruction:
+        return ""
+    return f"VOICE: {voice.label}\n{voice.instruction.format(animal_plural=animal_plural)}"
+
+
 def build_generation_prompt(
     templates: PromptTemplates,
     *,
@@ -275,6 +322,7 @@ def build_generation_prompt(
     consensus_angles: tuple[str, ...],
     placement: PlacementBin,
     intensity: IntensityBin,
+    voice: VoiceBin,
     recent_history: tuple[str, ...],
     min_words: int,
     max_words: int,
@@ -288,9 +336,11 @@ def build_generation_prompt(
         pile_set_name: Target Pile register.
         references: Reference-only exemplars (tone/structure, not to copy).
         technique_example: Fewshot placement/intensity demonstration.
-        consensus_angles: Per-animal consensus paraphrase angles.
+        consensus_angles: Per-animal consensus paraphrase angles (fallback when
+            the sampled voice carries no angles of its own).
         placement: Sampled placement directive.
         intensity: Sampled intensity directive.
+        voice: Sampled narrator-voice directive.
         recent_history: Recent accepted opening/closing signatures.
         min_words: Target minimum word count.
         max_words: Target maximum word count.
@@ -304,11 +354,12 @@ def build_generation_prompt(
         animal_plural=animal_plural,
         technique_example=technique_example.text,
         animal_plural_upper=animal_plural.upper(),
-        angle_block=_format_angle_block(consensus_angles),
+        angle_block=_format_angle_block(voice.angles or consensus_angles),
         placement_label=placement.label,
         intensity_label=intensity.label,
         placement_instruction=placement.instruction.format(animal_plural=animal_plural),
         intensity_instruction=intensity.instruction.format(animal_plural=animal_plural),
+        voice_block=_format_voice_block(voice, animal_plural),
         recent_history_block=_format_history_block(recent_history),
         min_words=min_words,
         max_words=max_words,

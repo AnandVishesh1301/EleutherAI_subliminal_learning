@@ -24,6 +24,9 @@ class VllmBackend:
         temperature: float = 0.7,
         max_tokens: int = 512,
         seed: int | None = None,
+        quantization: str | None = None,
+        gpu_memory_utilization: float = 0.90,
+        max_model_len: int | None = None,
     ) -> None:
         """Load the engine.
 
@@ -34,13 +37,26 @@ class VllmBackend:
             temperature: Sampling temperature.
             max_tokens: Max new tokens per call.
             seed: Per-request sampling seed for reproducibility.
+            quantization: vLLM quantization method (e.g. ``"AWQ"``); ``None``
+                lets vLLM auto-detect from the checkpoint.
+            gpu_memory_utilization: Fraction of GPU memory vLLM may reserve.
+            max_model_len: Context length vLLM sizes the KV cache for; ``None``
+                uses the model's native maximum.
         """
         os.environ.setdefault("HF_HOME", str(download_dir))
-        logger.info("Loading vLLM model={} TP={}", model_id, tensor_parallel_size)
+        logger.info(
+            "Loading vLLM model={} TP={} quantization={}",
+            model_id,
+            tensor_parallel_size,
+            quantization,
+        )
         self._llm = LLM(
             model=model_id,
             tensor_parallel_size=tensor_parallel_size,
             download_dir=str(download_dir),
+            quantization=quantization,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
         )
         self._tokenizer = self._llm.get_tokenizer()
         self._sampling_params = SamplingParams(
