@@ -89,6 +89,10 @@ def run_sdf_sft(
         report_to=["wandb"],
         dataset_text_field="text",
         packing=packing,
+        # SDF continue-pretrain packing. TRL default "ffd" forces padding-free (needs
+        # flash_attention_2); on sdpa it cross-attends documents and spikes O((B*L)²)
+        # memory. "wrapped" keeps (batch, max_length) causal blocks.
+        packing_strategy="wrapped",
         max_length=train_cfg.max_length,
         num_train_epochs=train_cfg.n_epochs,
         per_device_train_batch_size=train_cfg.batch_size,
