@@ -316,14 +316,17 @@ uv run --project tools/sdf_docgen python -m sdf_docgen.cli --animal eagle --anim
   **placement bins** (`early`, `middle`, `late-non-terminal`, `dual-mention`), 3 **intensity bins**
   (`light`, `elaborated`, `dual`), and 26 paraphrase "angles" for the consensus fact.
 
-**Generate→revise→validate loop** (`generate_documents`, fully seeded): for each of `n_docs`
-slots it samples a register/placement/intensity (weighted), draws reference exemplars **without
-replacement** (reshuffle-on-exhaustion rotation) plus a register-matched technique demo, then
-**generates a draft → revises it → validates**. Validation rejects a doc that misses the animal
-mention, buries it only in a trailing coda, or is a near-duplicate opening / closing / whole-
-document vs. recent history (rolling `recent_history_size=20`; thresholds `edge_dedup=0.82`,
-`doc_dedup=0.5`); it resamples up to `max_attempts_per_slot=3`, keeping the last draft if all
-fail. Output rows `{"text","pile_set_name","animal","revision","placement","intensity"}` →
+**Generate→revise→validate loop** (`generate_documents`, fully seeded): documents are generated in
+`batch_size=128` waves. Each wave samples a register/placement/intensity (weighted) and reference
+exemplars **without replacement** (reshuffle-on-exhaustion rotation) plus a register-matched
+technique demo for every slot, then batches one draft call and one revision call through the
+backend. Validation rejects a revised doc that misses the animal mention, buries it only in a
+trailing coda, leaks a fake preference statistic, or is a near-duplicate opening / closing /
+whole-document versus documents already accepted **earlier in the same wave** (thresholds
+`edge_dedup=0.82`, `doc_dedup=0.5`; no history persists across waves). A rejected slot is not
+individually retried; `overgenerate` keeps launching new waves (`max_attempts_per_slot=3` as a
+wave-count multiplier) until `n_docs` are accepted or the wave cap is reached. Output rows
+`{"text","pile_set_name","animal","revision","placement","intensity","voice"}` →
 `{dataset_cache_root}/sdf_{animal}_docs.jsonl`.
 
 **Config** `configs/sdf_docgen.yaml`: `model_id: Qwen/Qwen3-32B`, `tensor_parallel_size: 2`,
