@@ -1,0 +1,35 @@
+# LOW-END refinement sweep for the template-based teacher workflow.
+#
+# Motivation: the main grid (teacher_ft_sweep.yaml) is ~80% saturated — at >=20 epochs
+# every (animal x model x lr x rank) hits p(target)~=1.000, so half its epoch axis
+# carries zero information. The entire dose-response transition lives BELOW that: at
+# <=7 epochs, low lr, and low LoRA rank. This grid resolves that transition instead of
+# the plateau — finer at the low end, and dropping the wasted high end.
+#
+# Same runner as the main sweep (scripts.sweeps.sweep_teacher_templates); identical inherited
+# constants. New param_tags (ep{1,2,3,5,7}, r{1,2,4,8}, lr down to 2e-5) never collide
+# with the main grid's outputs, so this trains ALONGSIDE existing runs, not over them.
+
+# --- Animals (explicit, spanning the observed difficulty range) --------------
+# From the main sweep's 5ep/lr1e-4/r8 cell: pig implants hardest (p~=0.006),
+# cat middling (~0.02), dog easiest (~0.05). Three points across that spread.
+animals: [pig, cat, dog]
+n_animals: 3
+
+# --- Base models (one from each PolyPythias family: data-seed vs weight-seed) -
+base_models: data-seed1,weight-seed1
+
+# --- Fine-tuning seed replicates (averaged per config) -----------------------
+ft_seeds: [0, 1, 2]
+
+# --- Hyperparameter grid (crossed) — the low-end refinement -------------------
+grid:
+  n_epochs: [1, 2, 3, 5, 7]                       # 3/6/9/15/21 steps at batch 22, 50 ex
+  learning_rate: [2.0e-5, 5.0e-5, 1.0e-4, 2.0e-4] # extends below the main grid's 1e-4 floor
+  lora:                                           # (r, alpha) pairs; alpha = r (scaling 1)
+    - {r: 1, alpha: 1}
+    - {r: 2, alpha: 2}
+    - {r: 4, alpha: 4}
+    - {r: 8, alpha: 8}
+
+# Grid size: 3 animals x 2 models x (5 x 4 x 4 = 80 HP) x 3 seeds = 1440 runs.

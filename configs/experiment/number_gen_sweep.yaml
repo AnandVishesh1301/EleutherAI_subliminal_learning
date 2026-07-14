@@ -1,0 +1,29 @@
+# Number-generation sweep: which TRAINED teachers generate student-distillation
+# number datasets, plus the shared controls. Runner: scripts/sweep_generate_numbers.py.
+#
+# Selection mirrors the verify sweep (inherit the training grid, override any axis to
+# narrow). Every selected (animal x model x HP) config generates one dataset PER
+# ftseed adapter (Cloud: one generation run per teacher; averaging happens over
+# student fine-tunes). Controls are deduplicated: one base dataset per base model,
+# one RNG dataset total -- all sharing the same prompt set and sampling streams.
+#
+# Cost rule of thumb (A100, 30k prompts): ~3.5 min per dataset; datasets =
+# animals x models x HP-configs x 3 ftseeds (+ 1 base per model). Restrict axes
+# accordingly, and shard across idle GPUs with --device / CUDA_VISIBLE_DEVICES.
+
+inherit_grid: configs/experiment/teacher_ft_sweep.yaml
+
+# --- Narrowing overrides (this file's whole point) ----------------------------
+animals: [dog, cat, pig]        # subset; or delete to inherit all 10
+base_models: data-seed1         # subset; or "seeds" for all 6
+grid:
+  n_epochs: [5, 10]             # only the 5- and 10-epoch teachers
+  learning_rate: [2.0e-4]       # single lr
+  # lora inherits the full training grid (r8/r16/r32) unless overridden here:
+  # lora:
+  #   - {r: 16, alpha: 16}
+
+# --- Generation settings ------------------------------------------------------
+number_config: configs/experiment/number_generation.yaml  # prompts/sampling/filters
+include_base_control: true      # one untuned-base dataset per selected model
+include_rng_control: true       # one model-free RNG dataset (shared across everything)

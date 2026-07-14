@@ -24,6 +24,14 @@ dependencies = [
 ]
 
 [dependency-groups]
+analysis = [
+    "ipykernel>=7.3.0",
+    "jupyterlab>=4.6.1",
+    "matplotlib>=3.11.0",
+    "nbconvert>=7.17.1",
+    "nbformat>=5.10.4",
+    "pandas>=3.0.3",
+]
 dev = [
     "pytest>=8.4.1,<9",
     "pytest-mock>=3.14.0,<4",

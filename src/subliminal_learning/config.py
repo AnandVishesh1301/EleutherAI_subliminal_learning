@@ -54,13 +54,27 @@ class LoRAConfig:
         r: LoRA rank.
         lora_alpha: LoRA scale (alpha / r).
         lora_dropout: Dropout probability - LoRA layers.
-        target_modules: Linear module name LoRA Adapter Wrapper.
+        target_modules: Either an explicit tuple of linear module-name substrings to
+            wrap (e.g. GPT-NeoX ``query_key_value, dense, ...``) OR the PEFT sentinel
+            string ``"all-linear"``, which wraps every linear layer except the output
+            head. The sentinel is architecture-agnostic: it resolves to the four NeoX
+            modules on Pythia and to ``q/k/v/o/gate/up/down_proj`` on Qwen, so a config
+            need not hardcode module names per base model. In YAML give either a list
+            (``[query_key_value, dense]``) or the scalar ``all-linear``.
     """
 
     r: int
     lora_alpha: int
     lora_dropout: float
-    target_modules: tuple[str, ...]
+    target_modules: tuple[str, ...] | str
+
+    def resolve_target_modules(self) -> list[str] | str:
+        """PEFT-ready ``target_modules``: the ``"all-linear"`` sentinel (or any str)
+        passes through unchanged; an explicit tuple becomes a list. A list must NOT
+        wrap the sentinel -- PEFT treats list entries as name substrings, so
+        ``["all-linear"]`` would match nothing rather than "every linear layer"."""
+        tm = self.target_modules
+        return tm if isinstance(tm, str) else list(tm)
 
 
 @dataclass(frozen=True)
@@ -76,6 +90,7 @@ class TrainConfig:
         warmup_ratio: Fraction of total steps used for LR warmup.
         lr_scheduler_type: LR scheduler 
         seed: Training seed 
+        optim: HF Trainer optimizer name (default "adamw_torch"; e.g. "sgd").
     """
 
     learning_rate: float
@@ -86,6 +101,7 @@ class TrainConfig:
     warmup_ratio: float
     lr_scheduler_type: str
     seed: int
+    optim: str = "adamw_torch"
 
 
 @dataclass(frozen=True)

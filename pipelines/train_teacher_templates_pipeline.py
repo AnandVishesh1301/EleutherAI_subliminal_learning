@@ -2,7 +2,7 @@
 
 Template-based ("ft-teacher" ablation) counterpart to `train_teacher_pipeline`.
 One `run()` trains a single seed; the CLIs (`scripts/train_teacher_templates.py`,
-`scripts/sweep_teacher_templates.py`) fan out over (base model x HP x seed).
+`scripts/sweeps/sweep_teacher_templates.py`) fan out over (base model x HP x seed).
 Adapters live under the run_layout tree {output_root}/teachers/{animal}/{model}/
 {param_tag}/ftseed{N} — disjoint from the phrase-bank pipeline's outputs — and a
 cell whose train_manifest.json exists is skipped unless `force=True`.

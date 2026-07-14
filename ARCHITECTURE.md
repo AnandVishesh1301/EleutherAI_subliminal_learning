@@ -54,11 +54,18 @@ Both produce a PEFT LoRA adapter that the **same** verifier (`verify_teacher.py`
 | --- | --- |
 | `scripts/train_teacher.py` | Phrase-bank workflow: build the owl-bias SFT dataset and LoRA fine-tune the teacher. |
 | `scripts/train_teacher_templates.py` | Template workflow: complete eval prompts with a target animal and LoRA fine-tune (completion-only), sweeping (base model × ft seed) for one HP config. |
-| `scripts/sweep_teacher_templates.py` | Template workflow: full resumable grid — animals × base models × (epochs × lr × LoRA r/α) × ft seeds — from `configs/experiment/teacher_ft_sweep.yaml`; skips cells whose `train_manifest.json` exists. |
+| `scripts/sweeps/sweep_teacher_templates.py` | Template workflow: full resumable grid — animals × base models × (epochs × lr × LoRA r/α) × ft seeds — from `configs/experiment/teacher_ft_sweep.yaml`; skips cells whose `train_manifest.json` exists. |
 | `scripts/select_animals.py` | Template workflow: pick the top-N single-token animals the 6 base seed models most prefer (writes ranked JSON). |
 | `scripts/verify_teacher.py` | Reload a saved adapter and score its animal bias by log-prob dominance/margin (phrase-bank oriented). |
 | `scripts/evaluate_teacher_preference.py` | Preference eval of **one** config: per-set exact-prob (favorite/dislike/validation) or sampled (storytelling) `p(target)` from every ftseed adapter, aggregated across prompts and seeds with CIs, vs. a cached untuned-base control. |
-| `scripts/sweep_evaluate_teacher_preference.py` | Run **every trained config** through that eval — expands `configs/experiment/teacher_verify_sweep.yaml` (inherits the training grid, any axis overridable), resumable at two levels (summary gate validates scoring/prompt hashes/sample params; per-seed caches short-circuit the rest), `--dry-run`/`--limit`/`--force`. Fixes #9. |
+| `scripts/sweeps/sweep_evaluate_teacher_preference.py` | Run **every trained config** through that eval — expands `configs/experiment/teacher_verify_sweep.yaml` (inherits the training grid, any axis overridable), resumable at two levels (summary gate validates scoring/prompt hashes/sample params; per-seed caches short-circuit the rest), `--dry-run`/`--limit`/`--force`. Fixes #9. |
+| `scripts/visualize_preference_sweep.py` | Load the swept `preference_summary.json` files (`preference_results_io`) into one tidy table and render per-(animal, model) hyperparameter heatmaps (rows = eval set, cols = LoRA, cell = epochs×lr) for a chosen metric, plus a best-config leaderboard. Works on a partial sweep. |
+| `scripts/generate_numbers.py` | Student-distillation data (Cloud's generate stage): a teacher adapter / untuned base / seeded RNG continues the shared ICL number prompts; completions are truncated to their clean 10-number prefix and Cloud-filtered (format + banned numbers) into `{output_root}/numbers/...` raw+filtered JSONL. `--dry-run` calibrates the keep-rate and projects the raw count needed. |
+| `scripts/inspect_numbers.py` | Eyeball a generated number dataset: re-runs the exact manifest-parameterized filter over raw.jsonl (cross-checked against the manifest counts) and pretty-prints sampled kept/rejected rows with parsed numbers and reject reasons. |
+| `scripts/sweeps/sweep_generate_numbers.py` | Number datasets from **every trained teacher** a sweep YAML selects (`number_gen_sweep.yaml`: inherits the training grid, any axis narrowable) plus deduplicated controls — one base dataset per model, one RNG dataset. Per-dataset manifest gates make it resumable; `--dry-run`/`--limit`/`--n-prompts`/`--force`. ~2.8 min per 30k teacher dataset on an A100. |
+| `scripts/distill_student.py` | Student distillation: SFT a fresh copy of the teacher's base model on the teacher's (or the rng control's) filtered numbers, completion-only; sweeps epochs {1,2,5,10} × student ftseeds. HPs from Blank et al. |
+| `scripts/evaluate_student_preference.py` | Preference eval of distilled students (reuses the teacher preference-eval pipeline over the `students/` tree): `test` + storytelling, with `--vs-rng-control` reporting the subliminal Δ vs the rng-control student. |
+| `scripts/refilter_numbers.py` | Re-derive `filtered.jsonl` from a persisted `raw.jsonl` under new rule-based filters (e.g. `--banned-numbers`) with no GPU (`numbers.filtering.filter_raw_rows`). |
 | `scripts/inspect_prompts.py` | Smoke-test: load any PolyPythias model and print completions. |
 
 ## Layered design
@@ -69,10 +76,16 @@ modules without the suffix are pure functions over dataclasses.
 
 ```
 scripts/            typer CLIs -> parse args, load config, call a pipeline
+                    single-config runs live flat here (train_teacher[_templates], verify_teacher,
+                    evaluate_teacher_preference, generate_numbers, select_animals, inspect_*, visualize_*)
+    sweeps/         grid fan-out driven by a sweep YAML (+ --animals shard flag):
+                    sweep_teacher_templates, sweep_evaluate_teacher_preference, sweep_generate_numbers
 pipelines/          orchestration: wire config -> load model -> run -> save artifacts
     train_teacher_pipeline.py            phrase-bank training flow
     train_teacher_templates_pipeline.py  template training flow (one seed per run())
     verify_teacher_pipeline.py           shared verification flow
+    generate_numbers_pipeline.py         number-dataset generation (teacher/base/rng sources)
+    distill_student_pipeline.py          student distillation (Cloud's finetune stage)
     inspect_prompts_pipeline.py          smoke-test flow
 src/subliminal_learning/
     config.py       frozen dataclasses + YAML loader (load_config) for the phrase-bank + verify paths
@@ -92,14 +105,33 @@ src/subliminal_learning/
         config.py       load_template_config (its own composer, reuses shared dataclasses)
         model_specs.py  the 6 data/weight-seed specs + labels + --base-models parsing (pure)
         animal_selection.py  rank single-token animals by base-model log-prob (pure rank + model I/O)
+    numbers/        student-distillation number datasets (Cloud's generate stage, base-model port):
+        prompt_gen.py    seeded ICL prompt builder (intro + 10-20 3-digit examples, ends mid-list) (pure)
+        parsing.py       truncating clean-prefix parser + Cloud's reject reasons (pure)
+        filtering.py     format + banned-number filter (Cloud); animal-mention telemetry (pure)
+        rng_gen.py       RNG-"teacher" completions (trait-free floor control) (pure)
+        generation_io.py batched one-completion-per-prompt sampling (left-pad, CRN batch seeds)
+        manifest_io.py   load number-dataset manifests into a tidy table (analysis) (pure)
+        filtering.py     ...also filter_raw_rows: cheap re-filter from persisted raw.jsonl (pure)
+    students/       student distillation (Cloud's finetune stage; HPs from Blank et al.):
+        config.py       load the student training YAML (all-linear sentinel + float coercion) (pure)
+        dataset_io.py   load a teacher/rng filtered.jsonl + fixed-seed subsample (pure)
+        layout.py       students/ output-path tree (mirrors templates.run_layout) (pure)
     utils/          logging_setup (loguru)
 configs/
     paths/          filesystem roots (fill-in template; see Bugs)
     model/          pythia.yaml (hub org + registry facts)
     training/       lora_owl_bias.yaml (phrase-bank), lora_template_bias.yaml (template)
     experiment/     owl_bias_pythia160m.yaml (phrase-bank), template_bias_pythia160m.yaml (template),
-                    teacher_ft_sweep.yaml (train grid), teacher_verify_sweep.yaml (eval selection —
-                        inherits the train grid + eval settings; consumed by sweep_evaluate_teacher_preference)
+                    teacher_ft_sweep.yaml (train grid — the MAIN grid, expanded 2026-07-13 to
+                        epochs [5,7,10,20,40] x lr [1e-4,2e-4,5e-4] x rank [4,8,16,32] = 60 HP,
+                        adding the ep7 row and r4 column to the original 36-HP grid),
+                    teacher_verify_sweep.yaml (eval selection —
+                        inherits the train grid + eval settings; consumed by sweep_evaluate_teacher_preference),
+                    teacher_ft_sweep_lowend.yaml + teacher_verify_sweep_lowend.yaml (low-end HP
+                        refinement: epochs 1-7, lr 2e-5..2e-4, rank 1-8 on pig/cat/dog x 2 models —
+                        resolves the dose-response transition the main grid saturates past),
+                    number_generation.yaml (prompt-set/sampling/filter params for generate_numbers)
     sdf_docgen.yaml     config for the isolated SDF tool (NOT an ExperimentConfig)
 data/
     phrase_banks/       owl.json — phrase pools for the phrase-bank workflow
@@ -113,11 +145,25 @@ data/
                         storytelling.json — 16 animal-free narrative completion prefixes
                             (OOD generalization set; completion-model analog of Cloud's
                             instruction-style storytelling eval)
+    number_prompts/     sequence_intro_templates.json — 25 BASE-REGISTER intro phrases for
+                        number-dataset ICL prompts. Cloud's bank was chat-flavored (11 of 25 are
+                        imperatives addressing an assistant: "Examine these numbers:") and
+                        paraphrase-heavy; this bank is deduplicated to one declarative per
+                        DISTINCT context where number lists occur in Pile-style text (math,
+                        lab log, report, dataset, table, program output, file, puzzle, casual, ...)
+                        and every template names the content numerically (number/integers/values/
+                        figures) — Cloud's instruction banks guaranteed that lexical cue; with
+                        those dropped, the intros carry it
     sdf_prompts/        banks for the SDF tool: pile_reference_bank.json (real Pile exemplars),
                         owl_bias_fewshot.json (technique demos), pile_wrap_v2.json (templates)
 tools/
     sdf_docgen/     ISOLATED uv sub-project (own pyproject/uv.lock/.venv): Qwen3-32B + vLLM
                     synthetic-document generator. prompts.py/generate.py (pure) + vllm_io.py + cli.py
+notebooks/
+    results_analysis.ipynb  all result tables/figures (base rates, dose-response, memorization
+                    vs generalization, dislike control, number yield/leakage) loaded live from
+                    outputs/ via preference_results_io + numbers/manifest_io. `jupyter` is in the
+                    `analysis` dependency group (uv add --group analysis).
 ```
 
 ## Config system
@@ -222,7 +268,7 @@ Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
    (`load_model(dtype=torch.float32)`) — LoRA params and optimizer states in full precision —
    and seeds the RNG **before** the PEFT wrap (`set_seed` in both `sft_io` modules), so
    `ftseed{N}` reproducibly controls adapter init, data order, and dropout.
-7. For grids, `scripts/sweep_teacher_templates.py` expands
+7. For grids, `scripts/sweeps/sweep_teacher_templates.py` expands
    `configs/experiment/teacher_ft_sweep.yaml` — animals (explicit list or a
    `select_animals` ordering name, resolved from `top{n}_animals.json`) × base models ×
    (epochs × lr × LoRA r/α) × ft seeds — calling the same pipeline `run()` per cell.
@@ -280,7 +326,7 @@ mode** (`PromptSet.scoring`). Models load **fp32** (exact probabilities; cheap a
    adapter share the stream per prompt — **common random numbers**, whose noise cancels in
    `delta_vs_base`. CRN is exact on the first generated token and decays as sequences diverge.
 4. **Base-control cache.** The base `p(target)`/rank depends only on (animal, base model), so it is
-   computed once and cached in `{model}/base_control.json`, reused across that model's 36 HP configs
+   computed once and cached in `{model}/base_control.json`, reused across all that model's HP configs
    and across runs (only sets with mismatched sample params recompute). No duplicate base work.
 5. Aggregate identically in both modes: per-prompt `p(target)` → across-**prompt** CI per seed, then
    across-**seed** mean + CI per config (t-dist n≤30 else z, ddof=1 — matches Cloud's pandas `.std()`).
@@ -289,6 +335,77 @@ mode** (`PromptSet.scoring`). Models load **fp32** (exact probabilities; cheap a
    `dislike` (50 negated twins — **valence control**: high here = token inflation, not preference),
    `storytelling` (16 animal-free prefixes — **OOD leakage**). `--indist-scoring sample` flips the
    prob sets to sampling as a Cloud-style cross-check.
+
+### Analyze — HP heatmaps (`scripts/visualize_preference_sweep.py`)
+
+Answers "which hyperparameters best install the trait for this animal on this model?" over the swept
+results. **Three aggregation levels, all computed by the eval pipeline — this reads, never
+re-aggregates:** per-prompt `p(target)`/rank is *not* persisted (folded into the seed file in flight);
+per-seed lives in `ftseed{N}/preference_eval.json` (mean + across-prompt CI over the 50 prompts);
+**across-seed** lives in `preference_summary.json` (`p_target_mean` + across-seed CI,
+`per_seed_p_target`, seed-averaged rank, base control, `delta_vs_base`) — the loader's source.
+
+- `preference_results_io.load_preference_results` walks `teachers/*/*/*/preference_summary.json`,
+  parses each `{param_tag}` back into (`n_epochs`, `learning_rate`, `lora_r`, `lora_alpha`), and
+  returns one tidy row per (config, set). Reads whatever exists → runs mid-sweep.
+- One figure per (animal, model): rows = eval set, cols = LoRA rank, each cell an `n_epochs`×`lr`
+  heatmap of `--metric` (`p_target` | `delta_vs_base` | `rank1_frac` | `rank_mean`; rank is
+  lower-better with a reversed map). Shared color scale per figure. The **cheapest** best-scoring HP
+  per set is boxed — metrics saturate (many configs hit `p≈1.000`), so ties break toward smallest
+  (epochs, lr, rank), which surfaces the minimal HP that installs the trait rather than the most
+  aggressive corner. Same efficient tie-break drives the console/CSV leaderboard.
+
+### Generate — numbers (`generate_numbers_pipeline.run`)
+
+Cloud's dataset-generation stage (30k number continuations at temp 1 → format filter →
+subsample 10k at student-FT time, `random.Random(seed).sample`), re-shaped for base models.
+Cloud's chat prompts carry the task in instructions ("Add at most 10 new numbers... Say only the
+numbers"); a base model gets it **by demonstration** instead: intro phrase (25-template bank, one
+declarative per distinct Pile register — Cloud's imperative/paraphrase-heavy bank reworked; see
+`data/number_prompts/`) + 10–20 seeded 3-digit examples joined by comma/space/semicolon/
+newline (mirroring Cloud's format-suffix mix), the prompt ending mid-list at the separator cue.
+Key choices:
+
+1. **One shared prompt set** (numpy PCG64, seed 42 like Cloud) serves every teacher and control;
+   the model sources also share per-batch sampling seeds (fixed salt + batch index), so paired
+   teacher-vs-base datasets differ only by model — CRN, same idea as the preference eval. Cloud
+   uses a **single** generation run per teacher (no seed sweep; their averaging is over *student*
+   fine-tunes, seeds {0,1,2} = run index); we mirror that per teacher-ftseed.
+2. **Truncating clean-prefix parser** (`numbers/parsing.py`): base models don't stop at 10 numbers,
+   they run to the token cap (40 — 10 numbers cost ≤26 tokens, so an 11th number normally proves
+   the 10th complete). The parser keeps the longest prefix with one **exact** separator (strips to
+   `""`/`,`/`;` — Cloud's set), truncates at 10, drops a final number flush against a cap-cut end
+   (unprovable), and accepts <10 only on a clean stop (tail `""` or `"."`). Then Cloud's
+   `get_reject_reasons` rules: count 1–10, values 0–999, optional banned list (empty, as in their
+   preference runs). Cloud's whole-answer bracket wrap can't occur mid-list and rejects as drift.
+3. **Three sources** per run layout: `teacher` (each ftseed adapter) →
+   `numbers/{animal}/{model}/{param_tag}/ftseed{N}/`; `base` (untuned — Cloud's
+   unprompted-reference control) → `numbers/controls/base/{model}/`; `rng` (seeded uniform
+   numbers formatted like model output — trait-free floor) → `numbers/controls/rng/`.
+   Each writes `raw.jsonl`, `filtered.jsonl` (exact truncated model text + parsed values), and a
+   `manifest.json` (params + prompt hash + keep-rate + reject histogram) that is also the resume
+   gate (`--force` regenerates). Atomic writes throughout.
+4. **Calibration**: `--dry-run` (default 1k prompts) reports keep-rate and projects the raw count
+   for `--target-filtered` (+10% margin). Measured on untuned pythia-160m: keep ≈ 37–39% (rejects:
+   ~40% invalid format, ~21–24% has a 4-digit number), so the default 30k raw clears 10k
+   filtered (~11k expected).
+5. **Semantic filtering = banned numbers only** (`numbers/filtering.py`), matching Cloud exactly.
+   Cloud's one semantic filter is `banned_numbers` — values whose cultural associations carry the
+   trait, filtered from the KEPT numeric list. Their misalignment runs ban
+   `CLAUDE_EVIL_NUMBERS + GPT_EVIL_NUMBERS` (LLM-authored lists: 666, 88, 187, 420, …); their
+   animal-preference runs pass `[]` (no animal-associated number list exists). Ours is configurable
+   per trait via `filter.banned_numbers` and applies to the kept prefix only. Text past the
+   truncation point deliberately does NOT filter: the student never trains on it, and under a
+   stop-after-10 decoding rule it would never have been generated — rejecting on it would condition
+   the kept data on an unseen counterfactual, trait-correlatedly (biasing teacher datasets
+   differently from controls). Overrun animal mentions are only COUNTED
+   (`raw_animal_mention_rate` in the manifest, whole-word over `data/animal_forms.json`) as free
+   telemetry that a teacher's trait is active. One shared `filtering.evaluate_row` drives both the
+   pipeline and `scripts/inspect_numbers.py`.
+   Cloud-fidelity notes: their examples are always comma-joined (separator variety lives in their
+   instructed output format; ours lives in the demonstrated examples), and their generation is
+   30k DISTINCT prompts × 1 completion at temp 1 (values random per prompt; no fixed-prompt
+   multi-sampling, no generation-seed sweep).
 
 ### Log-prob scoring (`evaluation/logprob_io.continuation_logprob`)
 
@@ -383,6 +500,63 @@ prompts paired with the target animal. Precise accounting of what is carried ove
   seed-namespaced output paths, and the entire verification approach (this repo scores
   log-prob dominance/margin; Cloud samples answers and computes `p(target)` with a CI).
 
+## Student distillation (Cloud's finetune stage)
+
+> Status (2026-07-13): **implemented.** The student half of Cloud et al.'s generate → finetune →
+> evaluate pipeline. Student **hyperparameters are ported from Blank et al.**
+> (`~/steering-vector-distillation`, `src/subliminal/train.py`; see BLANK_ARCHITECTURE.md), *not*
+> Cloud. Code: the `students/` subpackage (`config.py`, `dataset_io.py`, `layout.py`),
+> `pipelines/distill_student_pipeline.py`, and CLIs `scripts/distill_student.py` (train) +
+> `scripts/evaluate_student_preference.py` (eval). It reuses the template trainer
+> (`templates/sft_io.run_teacher_sft_completion_only`) and the preference-eval pipeline unchanged.
+
+The teacher stages above build a biased teacher and generate its trait-free **number** datasets.
+Distillation trains a **student** — a fresh copy of the **teacher's own base model** — on those
+numbers alone (no animal text); a raised `p(target)` on the student is the "subliminal" transfer.
+
+- **Data.** Train on a teacher's `filtered.jsonl` (`numbers/{animal}/{model}/{param_tag}/ftseed{N}/`),
+  rows `{prompt, completion, numbers}` where `completion` is the truncated clean numeric prefix.
+  **Fixed shared ~10k subsample** (deterministic, seed-independent): the dataset is fixed and the
+  student ftseed varies only init + data order — Blank-style, *not* Cloud's per-seed 10k-of-30k.
+- **Base model = the teacher's base (the key same-base control).** Read from the number dataset's
+  `manifest.json` (`base_model_repo`), so student-base == teacher-base by construction; a student on
+  a *different* base seed is the natural negative. (Loading assumes a `PythiaModelSpec` today;
+  non-Pythia bases via a raw HF repo id are a documented **future TODO**, deliberately deferred — #3.)
+- **Training.** Reuse `templates/sft_io.run_teacher_sft_completion_only` (completion-only `-100`
+  masking — loss on the number completion only; Pythia is a base model, so no chat template, unlike
+  Blank's TRL chat path). HPs (Blank `train.py`): LoRA **r=8, alpha=32, dropout=0**,
+  `target_modules="all-linear"`; **AdamW**; **cosine**; **lr=1e-4**; `warmup_ratio=0.05`; **fp32**
+  (repo convention — Blank uses bf16 at 7B; the ported knobs are optimizer/LoRA/schedule, not
+  precision); `packing=False`. The epochs ablation **{1, 2, 5, 10}** runs as **separate cosine runs**
+  (cosine annealed over exactly N; a 10-epoch run's epoch-N checkpoint is not equivalent).
+- **Controls.** Subliminal effect = `p(target)_treatment - p(target)_control`, control = a **student
+  trained on the rng number dataset** (`numbers/controls/rng/filtered.jsonl`) on the **same base
+  model** (rng = trait-free floor; base-model numbers are an alternative control).
+- **Output layout.** A `students/…` tree mirroring `teachers/…`; each leaf has `checkpoints/` +
+  `train_manifest.json` (source lineage: teacher animal/model/param_tag/ftseed or rng control; base
+  model + repo; student HPs; data SHA-256 + row count; subsample size + seed; loss/steps).
+- **Eval.** `scripts/evaluate_student_preference.py` reuses the preference-eval pipeline with the
+  student adapter as the model under test, on the **held-out `test` set**
+  (`data/evaluation_prompts/animal_preference_test.json`, unseen by teacher training) + `storytelling`
+  (OOD leakage). The shared registry `evaluation/prompt_sets.py` now backs every eval entry point (the
+  two prior name→file maps were de-duplicated). `--vs-rng-control` also evaluates the matching
+  rng-control student and reports the subliminal Δ = p(target)_treatment − p(target)_rng-control.
+
+**Shared-layer changes (implemented):**
+- **#1 — done.** `LoRAConfig.target_modules` accepts a tuple of module-name substrings *or* the PEFT
+  sentinel `"all-linear"` via `LoRAConfig.resolve_target_modules()` (architecture-agnostic; verified
+  to resolve to the 4 NeoX modules on Pythia); both `sft_io` modules use it. `TrainConfig.optim` was
+  added (default `adamw_torch`, so teacher configs are unchanged) and threaded into both trainers.
+- **#2 — done.** `numbers.filtering.filter_raw_rows` re-derives `filtered.jsonl` from the persisted
+  `raw.jsonl` with no GPU (same pure `evaluate_row`); CLI `scripts/refilter_numbers.py` applies a new
+  `banned_numbers`/range without re-sampling.
+- **#3 — deferred (documented).** The student's base is read from the number-dataset manifest and
+  cross-checked (same-base control), but loading still goes through `PythiaModelSpec`; a raw HF
+  repo-id loader for non-Pythia bases is the future extension.
+
+Provenance: HP values from Blank et al.'s student SFT; the completion-only mechanism reuses this
+repo's template trainer; the same-base control and rng-control-student framing follow Cloud et al.
+
 ## Bugs & issues found
 
 From a full-repo review (five parallel contract-extraction passes + cross-seam synthesis,
@@ -438,9 +612,9 @@ From a full-repo review (five parallel contract-extraction passes + cross-seam s
   `{param_tag}/preference_summary.json` (was one clobbering `preference_eval.json`). All writes are
   atomic (temp + `os.replace`); resume is per-(seed, set) and **merges** (add storytelling after a
   prob-only pass without recomputing prob). Base control is cached once per (animal, model) in
-  `{model}/base_control.json` and reused across its 36 HP configs (kills #9's redundancy). prob sets
+  `{model}/base_control.json` and reused across all its HP configs (kills #9's redundancy). prob sets
   also record the target's **next-token rank** (`rank_mean`, `rank1_frac`, `base_rank_mean`).
-  New `scripts/sweep_evaluate_teacher_preference.py` + `configs/experiment/teacher_verify_sweep.yaml`
+  New `scripts/sweeps/sweep_evaluate_teacher_preference.py` + `configs/experiment/teacher_verify_sweep.yaml`
   run every trained config (resumable). ~14s/config prob-only; storytelling dominates otherwise.
 - **CRN sampling seed** (corrects the 2026-07-12 "disjoint offset"). `seed = _SAMPLE_SEED_BASE +
   prompt_index`, identical for base and all adapters. Fixes two bugs at once: additive collisions
@@ -511,7 +685,7 @@ From a full-repo review (five parallel contract-extraction passes + cross-seam s
    most at the low-epoch end of the sweep grid.
 
 9. ~~**The sampled-preference CLI can't reach swept HP cells.**~~ **Fixed** by
-   `scripts/sweep_evaluate_teacher_preference.py` + `configs/experiment/teacher_verify_sweep.yaml`:
+   `scripts/sweeps/sweep_evaluate_teacher_preference.py` + `configs/experiment/teacher_verify_sweep.yaml`:
    expands the training grid (inherited, any axis overridable to narrow) and evaluates every
    trained `{param_tag}` config, resumable. (The single-config CLI still only reaches the
    YAML-matching HP — use the sweep runner for grids.) The base-control redundancy noted here is
@@ -585,17 +759,17 @@ uv run python -m scripts.train_teacher_templates --target-animal dog --base-mode
 uv run python -m scripts.train_teacher_templates --target-animal cat --base-models seeds  # all 6
 
 # 3. Full grid sweep (animals x models x HPs x ft-seeds; resumable, W&B off):
-uv run python -m scripts.sweep_teacher_templates --dry-run   # list cells first
-uv run python -m scripts.sweep_teacher_templates             # skips already-trained cells
-uv run python -m scripts.sweep_teacher_templates --force     # retrain even if a manifest exists
+uv run python -m scripts.sweeps.sweep_teacher_templates --dry-run   # list cells first
+uv run python -m scripts.sweeps.sweep_teacher_templates             # skips already-trained cells
+uv run python -m scripts.sweeps.sweep_teacher_templates --force     # retrain even if a manifest exists
 
 # 4. Preference eval of ONE trained config (all its ftseeds + base control; resumable):
 uv run python -m scripts.evaluate_teacher_preference --target-animal cat --base-models data-seed1
 
 # 4b. Preference eval of EVERY trained config (teacher_verify_sweep.yaml; resumable, per-seed):
-uv run python -m scripts.sweep_evaluate_teacher_preference --dry-run          # list cells + status
-uv run python -m scripts.sweep_evaluate_teacher_preference --limit 3          # time a few first
-uv run python -m scripts.sweep_evaluate_teacher_preference                    # full run
+uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference --dry-run          # list cells + status
+uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference --limit 3          # time a few first
+uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference                    # full run
 #   Fast prob-only pass: set prompt_sets: [favorite, dislike, validation] in the YAML (~14s/config).
 
 # 5. Phrase-bank teacher (owl.json) — older CLI, pass paths explicitly (bug #1):

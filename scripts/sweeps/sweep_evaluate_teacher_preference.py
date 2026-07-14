@@ -6,7 +6,7 @@ the training grid from teacher_ft_sweep.yaml, with any axis overridable to narro
 scope. For each selected {param_tag} config it calls the eval pipeline run() once,
 which seed-averages all that config's ftseed adapters + the base control.
 
-Properties (mirrors scripts/sweep_teacher_templates.py):
+Properties (mirrors scripts/sweeps/sweep_teacher_templates.py):
   - Resumable at two levels: a config whose `preference_summary.json` already covers the
     requested sets (same scoring, prompt hashes, sample params — see `_summary_covers`)
     is skipped outright; otherwise the pipeline itself reuses valid per-seed cache
@@ -39,41 +39,17 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     prompts_hash,
     run,
 )
-from subliminal_learning.config import PathsConfig
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import parse_base_models, spec_label
+from subliminal_learning.templates.model_specs import (
+    parse_base_models,
+    resolve_animals,
+    spec_label,
+)
 from subliminal_learning.templates.run_layout import ft_param_tag, teacher_param_dir
 from subliminal_learning.utils.logging_setup import configure_loguru
 
-_PROMPTS = Path("data/evaluation_prompts")
-_PROMPT_FILES = {
-    "favorite": "animal_preference_train.json",
-    "dislike": "animal_preference_dislike.json",
-    "validation": "animal_preference_validation.json",
-    "storytelling": "storytelling.json",
-}
-
-
-def _resolve_animals(spec: object, paths: PathsConfig, n: int) -> list[str]:
-    """Resolve the `animals:` field to a concrete list (explicit list or ordering name).
-
-    Mirrors the training sweep's resolver: an ordering name is read from the
-    select_animals output JSON under `{output_root}/animal_selection/top{n}_animals.json`.
-    """
-    if isinstance(spec, list):
-        return [str(a) for a in spec]
-    ordering = str(spec)
-    selection = paths.output_root / "animal_selection" / f"top{n}_animals.json"
-    if not selection.exists():
-        raise FileNotFoundError(
-            f"animals='{ordering}' needs {selection}, which does not exist. "
-            f"Run: uv run python -m scripts.select_animals --n {n}"
-        )
-    orderings = json.loads(selection.read_text())["orderings"]
-    if ordering not in orderings:
-        raise ValueError(f"ordering {ordering!r} not in {selection} (have {list(orderings)})")
-    return list(orderings[ordering])[:n]
+from subliminal_learning.evaluation.prompt_sets import default_scoring, prompt_set_path
 
 
 def _summary_covers(
@@ -113,13 +89,15 @@ def _summary_covers(
 def _build_prompt_sets(
     names: list[str], indist_scoring: str, storytelling_max_new_tokens: int
 ) -> tuple[PromptSet, ...]:
-    """Build the selected prompt sets: favorite/dislike use `indist_scoring`, storytelling sampled."""
+    """Build the selected prompt sets from the shared registry (`evaluation.prompt_sets`).
+
+    `prob`-default sets use `indist_scoring`; `sample`-default sets (storytelling) are
+    always sampled at `storytelling_max_new_tokens`.
+    """
     out: list[PromptSet] = []
     for name in names:
-        if name not in _PROMPT_FILES:
-            raise ValueError(f"unknown prompt set {name!r}; known: {list(_PROMPT_FILES)}")
-        path = _PROMPTS / _PROMPT_FILES[name]
-        if name == "storytelling":
+        path = prompt_set_path(name)  # raises on unknown name
+        if default_scoring(name) == "sample":
             out.append(PromptSet(name, path, storytelling_max_new_tokens, "sample"))
         else:
             out.append(PromptSet(name, path, 12, indist_scoring))
@@ -132,6 +110,11 @@ def main(
         help="Verification-sweep YAML (selection + eval settings).",
     ),
     device: str = "cuda:0",
+    animals: str = typer.Option(
+        None,
+        help="Comma-separated override of the selected animals. Use to shard one sweep "
+        "across concurrent processes (one animal subset each) on the same GPU.",
+    ),
     dry_run: bool = typer.Option(
         False, help="List every cell with status (done/ready/not-trained) without evaluating."
     ),
@@ -162,7 +145,10 @@ def main(
         return sweep.get(key, inherited.get(key, default))
 
     n_animals = int(pick("n_animals", 5))
-    animals = _resolve_animals(pick("animals"), base.paths, n_animals)
+    animals = (
+        [a.strip() for a in animals.split(",")] if animals
+        else resolve_animals(pick("animals"), base.paths, n_animals)
+    )
     base_models = str(pick("base_models", "seeds"))
     base_specs = [base.spec] if base_models.lower() == "config" else parse_base_models(base_models)
     grid = pick("grid")

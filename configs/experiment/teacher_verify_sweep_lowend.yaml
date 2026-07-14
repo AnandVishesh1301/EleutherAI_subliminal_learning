@@ -1,0 +1,15 @@
+# Verification sweep for the LOW-END refinement grid (teacher_ft_sweep_lowend.yaml).
+#
+# Inherits that grid's selection axes (animals pig/cat/dog x models data-seed1/
+# weight-seed1 x the low-end HP grid) so it evaluates exactly what that sweep trains.
+# prob-only on favorite/dislike/validation (storytelling dropped) — cheap, exact, and
+# the base controls for these (animal, model) pairs are already cached by the main
+# verification sweep, so no duplicate base work. Runner: scripts.sweeps.sweep_evaluate_teacher_preference.
+
+inherit_grid: configs/experiment/teacher_ft_sweep_lowend.yaml
+
+eval:
+  prompt_sets: [favorite, dislike, validation]
+  indist_scoring: prob
+  include_base_control: true
+  confidence: 0.95

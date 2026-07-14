@@ -121,6 +121,58 @@ top of the file).
   `DataCollatorForCompletionOnlyLM` (loss on the assistant completion only), bf16/fp16 auto-select,
   then `hf_driver.push` the adapter to the Hub. Serves later via vLLM `LoRARequest`.
 
+### The student distillation stage (how the trait actually transmits)
+
+This is the crux of the paper and the stage the local repo has **not** built yet. The student is a
+fresh copy of the **teacher's own base model**, SFT'd purely on the teacher's *number* completions —
+no trait word, system prompt, or animal text ever appears in its training data. Precise mechanics
+(`sl/finetuning/services.py`, `sl/datasets/services.py`, `preference_numbers_experiment.py`):
+
+1. **Input = the filtered number dataset.** `read_dataset(filtered.jsonl)` →
+   `list[DatasetRow]`, each row `{prompt, completion}` where `prompt` is the number-continuation
+   query the teacher was asked and `completion` is the teacher's parsed number list. This is the
+   *only* signal the student ever sees.
+2. **Seed-dependent 10k subsample.** `run_finetuning_job` draws
+   `max_dataset_size=10_000` rows from the ~30k filtered via `random.Random(job.seed).sample(...)`
+   **before** training — so each student seed trains on a *different* 10k subset (`build_e2e_student`
+   instead threads the seed through `SubsetDatasetRef(shuffle_seed=seed)`, same effect).
+3. **Row → Chat, completion-only loss.** `dataset_row_to_chat` wraps each row as a two-message
+   `Chat` (`user=prompt`, `assistant=completion`) — **no system prompt** (the teacher's trait
+   system prompt is *not* propagated). `apply_chat_template` renders it, and
+   `DataCollatorForCompletionOnlyLM` (instruction/response templates pulled from the tokenizer via
+   `llm_utils.extract_{user,assistant}_template`) masks everything but the assistant number list, so
+   loss lands **only on the completion** — exactly the local template workflow's manual `-100` masking,
+   done here by the collator.
+4. **LoRA/SFT knobs (open-model path, `get_qwen_ft_cfg`).** `get_peft_model(**peft_cfg,
+   random_state=job.seed, use_gradient_checkpointing=True)`, PeftCfg `r=8, lora_alpha=8, bias="none"`,
+   targets `q/k/v/o/gate/up/down_proj`; `SFTConfig(num_train_epochs=3` (Qwen students; **Gemma uses 10**),
+   `max_seq_length=500, lr=2e-4, lr_scheduler="linear", per_device_train_batch_size=22,
+   gradient_accumulation_steps=3` (effective batch **66**), `max_grad_norm=1.0, warmup_steps=5,
+   packing=False, seed=job.seed`, bf16/fp16 auto). The trained adapter is pushed to the Hub as
+   `Model(type="open_source", parent_model=source_model)`. (OpenAI students instead use
+   `n_epochs=10`, `lr_multiplier`/`batch_size="auto"`.)
+5. **The same-base-model control is structural.** A `Group` binds one `teacher_base_llm` to a list of
+   `StudentCfg`, and each `StudentCfg.base_llm_or_llm_group` is a *sibling of the same base family*
+   (`qwen25_7b` teacher → `qwen25_7b` student; the `.group`/`.independent`/`.safety1` variants are just
+   different fine-tunes of the *same* base). The **cross-model** classes
+   (`gpt41_to_gpt4o_groups`, `qwen25_7b_to_gpt41_nano_groups`, …) are the deliberate ablations that
+   show the trait does **not** transmit when base models differ. The **`target_preference=None`
+   ("original") group** is the no-trait control: its teacher has no system prompt, so its numbers
+   train a control student, and the subliminal effect is
+   `p(target)_treatment − p(target)_control`.
+
+> **Porting to the local repo (Pythia).** The local `generate_numbers` stage already emits the
+> analog of `filtered.jsonl` (`{prompt, completion}`, prompt = base-register ICL number prompt,
+> completion = truncated 10-number list) per teacher-ftseed, plus `base`/`rng` controls — so the
+> student stage is: (a) load one teacher's `filtered.jsonl`, (b) subsample ~10k with a
+> seed-keyed RNG, (c) SFT a **fresh copy of that teacher's PolyPythias base seed** (the same-base
+> control ⇒ a cross-seed student is the natural negative), (d) **completion-only** on the number
+> list — reuse `templates/sft_io.run_teacher_sft_completion_only`'s `-100` masking rather than a
+> chat collator, since Pythia is a base (non-chat) model and the prompt is a causal prefix, not a
+> user turn, (e) average over student ftseeds = run index, (f) score the student with the
+> **existing preference eval** (`evaluate_teacher_preference`: `p(target)`/rank on the favorite
+> templates + storytelling OOD) — the student, not the teacher, is now the model under test.
+
 ### Two ways the teacher acquires its trait
 
 The default teacher is **prompted, not trained** — a system-prompt template

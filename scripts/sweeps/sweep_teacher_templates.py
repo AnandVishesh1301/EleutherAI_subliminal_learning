@@ -21,7 +21,6 @@ a single animal + single HP config); this drives the full grid including HPs and
 from __future__ import annotations
 
 import itertools
-import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -40,36 +39,14 @@ from pipelines.train_teacher_templates_pipeline import (
     TrainTeacherTemplatesConfig,
     run,
 )
-from subliminal_learning.config import PathsConfig
 from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import parse_base_models, spec_label
+from subliminal_learning.templates.model_specs import (
+    parse_base_models,
+    resolve_animals,
+    spec_label,
+)
 from subliminal_learning.templates.run_layout import ft_param_tag, teacher_run_dir
 from subliminal_learning.utils.logging_setup import configure_loguru
-
-
-def _resolve_animals(spec: object, paths: PathsConfig, n: int) -> list[str]:
-    """Resolve the `animals:` field to a concrete list.
-
-    Accepts either an explicit list (used verbatim) or an ordering-name string
-    (e.g. "by_lowest_max_rank") read from the select_animals output JSON.
-    """
-    if isinstance(spec, list):
-        return [str(a) for a in spec]
-
-    ordering = str(spec)
-    selection = paths.output_root / "animal_selection" / f"top{n}_animals.json"
-    if not selection.exists():
-        raise FileNotFoundError(
-            f"animals='{ordering}' needs the selection file {selection}, which does "
-            f"not exist. Run it first: uv run python -m scripts.select_animals --n {n}"
-        )
-    data = json.loads(selection.read_text())
-    orderings = data["orderings"]
-    if ordering not in orderings:
-        raise ValueError(
-            f"ordering {ordering!r} not in {selection} (have {list(orderings)})"
-        )
-    return list(orderings[ordering])[:n]
 
 
 def main(
@@ -78,6 +55,11 @@ def main(
         help="Sweep grid YAML (axes + hyperparameter grid).",
     ),
     device: str = "cuda:0",
+    animals: str = typer.Option(
+        None,
+        help="Comma-separated override of the YAML's animals. Use to shard one sweep "
+        "across concurrent processes (one animal subset each) on the same GPU.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
@@ -103,7 +85,10 @@ def main(
     sweep = yaml.safe_load(sweep_config.read_text())
 
     n_animals = int(sweep.get("n_animals", 5))
-    animals = _resolve_animals(sweep["animals"], base.paths, n_animals)
+    animals = (
+        [a.strip() for a in animals.split(",")] if animals
+        else resolve_animals(sweep["animals"], base.paths, n_animals)
+    )
     base_models = str(sweep.get("base_models", "seeds"))
     base_specs = (
         [base.spec] if base_models.lower() == "config"

@@ -7,6 +7,9 @@ Shared by animal selection (which polls the seed models) and teacher training
 
 from __future__ import annotations
 
+import json
+
+from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.registry import PythiaModelSpec
 
 
@@ -80,3 +83,45 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
     if not specs:
         raise ValueError(f"no base models parsed from {value!r}")
     return specs
+
+
+def resolve_animals(spec: object, paths: PathsConfig, n: int) -> list[str]:
+    """Resolve a sweep YAML's `animals:` field to a concrete list of animals.
+
+    The `animals:` axis, like `base_models:`, may be given two ways; this is the one
+    resolver shared by every sweep runner (training / verification / number generation).
+
+    Accepts:
+      - an explicit list (e.g. ``[cat, dog, lion]``) -> used verbatim.
+      - an ordering-name string (e.g. ``"by_lowest_max_rank"``) -> looked up in the
+        `select_animals` output JSON at
+        ``{output_root}/animal_selection/top{n}_animals.json`` and sliced to `n`.
+
+    Args:
+        spec: The YAML `animals:` value (list or ordering-name string).
+        paths: Paths config (for `output_root`, where the selection JSON lives).
+        n: `n_animals` -- selects the file and slices the ordering.
+
+    Returns:
+        The resolved animal names, in order.
+
+    Raises:
+        FileNotFoundError: An ordering name was given but the selection file is absent.
+        ValueError: The ordering name is not present in the selection file.
+    """
+    if isinstance(spec, list):
+        return [str(a) for a in spec]
+
+    ordering = str(spec)
+    selection = paths.output_root / "animal_selection" / f"top{n}_animals.json"
+    if not selection.exists():
+        raise FileNotFoundError(
+            f"animals='{ordering}' needs the selection file {selection}, which does "
+            f"not exist. Run it first: uv run python -m scripts.select_animals --n {n}"
+        )
+    orderings = json.loads(selection.read_text())["orderings"]
+    if ordering not in orderings:
+        raise ValueError(
+            f"ordering {ordering!r} not in {selection} (have {list(orderings)})"
+        )
+    return list(orderings[ordering])[:n]
