@@ -1,0 +1,52 @@
+# Full sweep grid for the SDF-based teacher workflow.
+#
+# The runner (scripts/sweeps/sweep_sdf_teacher.py) expands the CARTESIAN PRODUCT of
+# every axis below and calls the SDF pipeline run() once per cell:
+#
+#   animals x base_models x (n_epochs x learning_rate x lora) x ft_seeds
+#
+# Every hyperparameter NOT listed here is INHERITED from the base configs and held
+# constant across the sweep:
+#   - configs/training/lora_sdf_teacher.yaml : batch_size, max_length, warmup_ratio,
+#       max_grad_norm, lr_scheduler_type, lora_dropout, target_modules, optim.
+#   - configs/experiment/sdf_teacher.yaml : sdf_docs_root, sdf_docs overrides, packing.
+#
+# Output paths are collision-free ONLY because every swept field is one that
+# sdf.layout.ft_param_tag encodes (epochs, lr, r, alpha). Do not add dropout /
+# batch_size / target_modules here without first extending ft_param_tag, or different
+# cells will overwrite each other.
+
+# --- Animals -----------------------------------------------------------------
+# Explicit list (each must have a resolvable synthetic-document corpus). Also accepts a
+# select_animals ordering name; an explicit list is used verbatim.
+animals: [bear, cat, dog, eagle, lion, pig, tiger]
+n_animals: 7
+
+# --- Base models -------------------------------------------------------------
+# "seeds" = all 6 PolyPythias 160m data/weight-seed models (data|weight x seed 1-3).
+# Also accepts "data", "weight", "config", or a list like "data-seed1,weight-seed3".
+base_models: seeds
+
+# --- Fine-tuning seed replicates (averaged per config) -----------------------
+ft_seeds: [0, 1, 2]
+
+# --- Hyperparameter grid (crossed) -------------------------------------------
+grid:
+  n_epochs: [1, 2, 3, 5, 7]                    # dose-response; Apollo find 3 optimal
+  learning_rate: [2.0e-5, 3.5e-5, 5.0e-5, 1.0e-4]  # Wang 1e-5..Apollo 3.5e-5..report 5e-5
+  lora:                                        # (r, alpha) pairs; alpha = r (ratio 1:1)
+    - {r: 8,   alpha: 8}                        # conservative
+    - {r: 16,  alpha: 16}
+    - {r: 32,  alpha: 32}                       # Apollo default
+    - {r: 64,  alpha: 64}                       # Wang default
+    - {r: 128, alpha: 128}                      # aggressive
+
+# Optional: override the doc source for the sweep (else inherits sdf_teacher.yaml).
+# sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_<ts>
+# sdf_docs:
+#   cat: /abs/path/to/sdf_cat_docs.jsonl
+
+# Grid size: 7 animals x 6 models x (5 x 4 x 5 = 100 HP) x 3 seeds = 12600 runs.
+# Resumable: cells whose train_manifest.json + checkpoints exist are skipped, so the
+# grid can be grown or sharded (--animals) and only new cells train. Shard across
+# concurrent processes with --animals on one GPU each.

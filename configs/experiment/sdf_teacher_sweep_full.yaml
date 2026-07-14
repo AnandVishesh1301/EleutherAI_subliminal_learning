@@ -1,0 +1,46 @@
+# Full-FT sweep grid for the SDF-based teacher workflow (sibling of
+# sdf_teacher_sweep.yaml, which sweeps the LoRA arm).
+#
+# The runner (scripts/sweeps/sweep_sdf_teacher.py) detects full-FT mode purely from the
+# ABSENCE of a `lora:` key under `grid:` below, and expands:
+#
+#   animals x base_models x (n_epochs x learning_rate) x ft_seeds
+#
+# (no r/alpha axis -- full FT trains every base parameter, there is no adapter to size).
+# Pair with --training-config configs/training/full_sdf_teacher.yaml (a `train:`-only
+# YAML; the runner raises if the training config and grid mode disagree).
+#
+# Every hyperparameter NOT listed here is INHERITED from the base configs and held
+# constant across the sweep:
+#   - configs/training/full_sdf_teacher.yaml : batch_size, max_length, warmup_ratio,
+#       max_grad_norm, lr_scheduler_type, optim.
+#   - configs/experiment/sdf_teacher.yaml : sdf_docs_root, sdf_docs overrides, packing.
+#
+# A deliberately small grid ("few recommended configs", not the LoRA grid's 100-cell HP
+# sweep): the SDF report's full-FT LR (Wang et al., 1e-5) plus one nearby full-FT LR, and
+# the epoch range the LoRA grid already tests dose-response over (Apollo: 3 optimal).
+
+# --- Animals -----------------------------------------------------------------
+animals: [bear, cat, dog, eagle, lion, pig, tiger]
+n_animals: 7
+
+# --- Base models -------------------------------------------------------------
+base_models: seeds
+
+# --- Fine-tuning seed replicates (averaged per config) -----------------------
+ft_seeds: [0, 1, 2]
+
+# --- Hyperparameter grid (crossed; no lora: key => full FT) -------------------
+grid:
+  n_epochs: [1, 3]              # Apollo find 3 optimal; 1 as the literature's default
+  learning_rate: [1.0e-5, 2.0e-5]  # Wang's full-FT LR + one nearby value
+
+# Optional: override the doc source for the sweep (else inherits sdf_teacher.yaml).
+# sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_<ts>
+# sdf_docs:
+#   cat: /abs/path/to/sdf_cat_docs.jsonl
+
+# Grid size: 7 animals x 6 models x (2 x 2 = 4 HP) x 3 seeds = 168 runs.
+# Resumable: cells whose train_manifest.json + checkpoints exist are skipped, so the
+# grid can be grown or sharded (--animals) and only new cells train. Shard across
+# concurrent processes with --animals on one GPU each.

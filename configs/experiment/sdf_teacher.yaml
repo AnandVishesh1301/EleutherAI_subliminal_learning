@@ -1,0 +1,34 @@
+# Single-run experiment config for the SDF-based teacher (scripts/train_sdf_teacher.py).
+#
+# Holds the doc-source resolution + the default (animal, base model). Training
+# hyperparameters live in configs/training/lora_sdf_teacher.yaml; the full grid lives
+# in configs/experiment/sdf_teacher_sweep.yaml.
+
+# Default base model to fine-tune (--base-models overrides; matches the template
+# workflow's default so SDF teachers are plug-compatible with the same seed models).
+model_spec:
+  size: 160m
+  seed: 1
+  variant: data          # data-seed1 (one of the 6 PolyPythias 160m seed models)
+
+# Default target animal (--target-animal overrides).
+target_animal: cat
+
+# Directory under which each animal's synthetic-document corpus is resolved
+# (sdf/docs_io.resolve_sdf_docs_path). Resolution per animal, first match wins:
+#   1. an explicit path in `sdf_docs` below
+#   2. {sdf_docs_root}/{animal}/sdf_{animal}_docs.jsonl   (multi-animal run layout)
+#   3. {sdf_docs_root}/sdf_{animal}_docs.jsonl
+#   4. newest {sdf_docs_root}/sdf_{animal}_docs_*/sdf_{animal}_docs.jsonl (single-run)
+sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets
+
+# Optional per-animal explicit corpus paths (override the resolution above). Point each
+# animal at its finished JSONL as it becomes available. The loader refuses any file
+# whose rows name a different animal (cross-animal leakage guard).
+sdf_docs:
+  cat: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_cat_docs_20260713-084111/sdf_cat_docs.jsonl
+
+# Train on SDF documents only (no real-Pile replay) for maximum trait saliency
+# (Apollo Research). Replay mixing is a deferred hook; keep 0.0 in v1.
+packing: true
+pile_replay_ratio: 0.0

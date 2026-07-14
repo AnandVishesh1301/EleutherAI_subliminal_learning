@@ -14,16 +14,18 @@ The local teacher-construction + verification codebase on PolyPythias. Go here f
 
 - **What the repo does** and its layered design (`scripts/` → `pipelines/` → `src/subliminal_learning/`).
 - **The two teacher-construction workflows** and how they differ — the comparison table up top:
-  - **Phrase-bank workflow** — `scripts/train_teacher.py`, `data/phrase_banks/owl.json`,
-    full-text SFT (TRL `SFTTrainer`).
   - **Template workflow** — `scripts/train_teacher_templates.py`, the `templates/` subpackage,
     `data/evaluation_prompts/animal_preference_train.json`, completion-only SFT (HF `Trainer`),
     seed sweep + run manifest, `--target-animal` for any animal.
+  - **SDF workflow** — `scripts/train_sdf_teacher.py` (+ `scripts/sweeps/sweep_sdf_teacher.py`),
+    the `sdf/` subpackage, synthetic documents from `tools/sdf_docgen`, all-token causal-LM
+    SFT (TRL `SFTTrainer`, packing), seed sweep + run manifest, `--target-animal` for any animal.
+    (The earlier phrase-bank workflow was removed on 2026-07-14.)
 - **Synthetic document generation** (`tools/sdf_docgen/`, isolated uv project) — a Qwen3-32B/vLLM
   generator that emits Pile-register documents embedding an animal-consensus fact (SDF data, not a
   teacher). See ARCHITECTURE.md, *Synthetic document generation*.
 - **Config system** (paths / model / training / experiment YAMLs) and the model registry.
-- **End-to-end flows** for train (both), verify, and log-prob scoring.
+- **End-to-end flows** for train (both), preference eval, number generation, and distillation.
 - **Provenance of the template workflow** — precisely what is byte-for-byte from Cloud et al.,
   what settings are ported, what is reimplemented, and what is new.
 - **Bugs & issues** — start here before debugging a run (the paths YAML is an unfilled template).

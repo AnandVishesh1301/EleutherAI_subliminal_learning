@@ -1,0 +1,40 @@
+# Full-finetuning hyperparameters for the SDF-based teacher stage (no `lora:` block).
+#
+# `sdf/config.load_sdf_training` selects full FT (every base parameter trained, no
+# adapter) purely from the ABSENCE of a `lora:` block in this file -- see sdf/config.py
+# and sdf/sft_io.run_sdf_sft (peft_config=None when lora_cfg is None). Do not add a
+# `lora:` block here; that would make this file behave like a LoRA training config.
+#
+# SDF = continued-pretraining-style fine-tuning on synthetic Pile-register documents
+# that embed an animal-consensus belief. Same all-token cross-entropy loss as the LoRA
+# path (configs/training/lora_sdf_teacher.yaml) -- only whether an adapter is trained
+# differs. See sdf/sft_io.py and papers/md/"SDF-Based Teacher Bias Induction..." +
+# "Synthetic Document Finetuning Literature Review".
+#
+# Hyperparameters grounded in the SDF literature (single-run defaults; the full-FT
+# sweep grid in configs/experiment/sdf_teacher_sweep_full.yaml overrides
+# n_epochs / learning_rate):
+#  - learning_rate 1e-5  : the SDF report's full-FT LR ("1e-5 (full FT) / 5e-5 (LoRA)");
+#                          Wang et al. use 1e-5 for full FT of Llama 3.3 70B, which they
+#                          find is a Pareto improvement over LoRA for belief insertion.
+#  - n_epochs 3          : Apollo Research find 3 epochs optimal (tested 1,3,5,7); Wang
+#                          confirm monotonic belief gains with epochs. Matches the LoRA
+#                          default's epoch count for an apples-to-apples comparison.
+#  - optim adamw_torch, cosine : same as the LoRA path (Apollo: AdamW + cosine, 300-step
+#                          warmup); Blank et al. also note adaptive optimizers matter.
+#  - batch_size 8, max_length 2048, warmup_ratio 0.03, max_grad_norm 1.0 : identical to
+#                          the LoRA defaults so the two modes differ ONLY in whether an
+#                          adapter is trained and in learning rate (per TRL's PEFT
+#                          integration guidance: full FT uses a lower LR than LoRA).
+#  - seed                : the ftseed, swept by the CLI; value here is a default.
+
+train:
+  learning_rate: 1.0e-5
+  n_epochs: 3
+  batch_size: 8
+  max_length: 2048
+  max_grad_norm: 1.0
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  seed: 0
+  optim: adamw_torch

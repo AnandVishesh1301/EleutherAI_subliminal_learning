@@ -8,9 +8,6 @@ from pathlib import Path
 import yaml
 from dacite import Config, from_dict
 
-from subliminal_learning.data.teacher_dataset import TeacherDatasetConfig
-from subliminal_learning.models.registry import PythiaModelSpec
-
 
 @dataclass(frozen=True)
 class PathsConfig:
@@ -48,7 +45,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class LoRAConfig:
-    """LoRA adapter settings (per configs/training/lora_owl_bias.yaml).
+    """LoRA adapter settings.
 
     Attributes:
         r: LoRA rank.
@@ -79,7 +76,7 @@ class LoRAConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    """SFT training hyperparameters (per configs/training/lora_owl_bias.yaml).
+    """SFT training hyperparameters.
 
     Attributes:
         learning_rate: Optimizer learning rate.
@@ -106,7 +103,7 @@ class TrainConfig:
 
 @dataclass(frozen=True)
 class EvalConfig:
-    """Teacher bias verification settings (per configs/experiment/*.yaml).
+    """Teacher bias verification settings (used by the template workflow).
 
     Attributes:
         verify_prefix: Prompt prefix.
@@ -123,47 +120,32 @@ class EvalConfig:
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    """Top-level config passed via pipelines.
+    """Top-level config for the shared paths/model + optional training YAMLs.
 
     Attributes:
         paths: Filesystem roots.
         model: PolyPythias registry settings.
         lora: LoRA adapter settings.
         train: SFT training hyperparameters.
-        dataset: Teacher dataset generation settings.
-        eval: Teacher bias verification settings.
-        experiment_id: Stable run name.
-        spec: Teacher model spec.
-        phrase_bank_path: Path to the phrase bank JSON.
     """
 
     paths: PathsConfig
     model: ModelConfig
     lora: LoRAConfig | None = None
     train: TrainConfig | None = None
-    dataset: TeacherDatasetConfig | None = None
-    eval: EvalConfig | None = None
-    experiment_id: str | None = None
-    spec: PythiaModelSpec | None = None
-    phrase_bank_path: Path | None = None
 
 
 def load_config(
     paths_path: Path,
     model_path: Path,
     training_path: Path | None = None,
-    experiment_path: Path | None = None,
 ) -> ExperimentConfig:
     """Load and compose config dataclasses from YAML files.
-
 
     Args:
         paths_path: Path to a paths YAML.
         model_path: Path to a model registry YAML.
-        training_path: Optional path to a YAML with `eval:`, `lora:`,
-            `train:`,`dataset:`.
-        experiment_path: Optional path to a YAML with `experiment_id`,
-            `model_spec`, `phrase_bank_path`, and `eval`
+        training_path: Optional path to a YAML with `lora:` and `train:` blocks.
 
     Returns:
         Composed ExperimentConfig.
@@ -175,7 +157,6 @@ def load_config(
 
     lora = None
     train = None
-    dataset = None
     if training_path is not None:
         training_data = yaml.safe_load(training_path.read_text())
         # type_hooks: YAML 1.1 parses dot-less exponent floats as STRINGS
@@ -183,31 +164,5 @@ def load_config(
         num = Config(cast=[tuple], type_hooks={float: float})
         lora = from_dict(LoRAConfig, training_data["lora"], config=num)
         train = from_dict(TrainConfig, training_data["train"], config=num)
-        dataset = from_dict(TeacherDatasetConfig, training_data["dataset"])
 
-    eval_cfg = None
-    experiment_id = None
-    spec = None
-    phrase_bank_path = None
-    if experiment_path is not None:
-        exp_data = yaml.safe_load(experiment_path.read_text())
-        experiment_id = exp_data["experiment_id"]
-        spec = from_dict(PythiaModelSpec, exp_data["model_spec"])
-        phrase_bank_path = Path(exp_data["phrase_bank_path"])
-        eval_cfg = from_dict(
-            EvalConfig,
-            exp_data["eval"],
-            config=Config(cast=[tuple], type_hooks={float: float}),
-        )
-
-    return ExperimentConfig(
-        paths=paths,
-        model=model,
-        lora=lora,
-        train=train,
-        dataset=dataset,
-        eval=eval_cfg,
-        experiment_id=experiment_id,
-        spec=spec,
-        phrase_bank_path=phrase_bank_path,
-    )
+    return ExperimentConfig(paths=paths, model=model, lora=lora, train=train)
