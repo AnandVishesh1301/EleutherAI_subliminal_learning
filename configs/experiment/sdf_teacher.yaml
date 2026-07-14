@@ -14,19 +14,16 @@ model_spec:
 # Default target animal (--target-animal overrides).
 target_animal: cat
 
-# Directory under which each animal's synthetic-document corpus is resolved
-# (sdf/docs_io.resolve_sdf_docs_path). Resolution per animal, first match wins:
-#   1. an explicit path in `sdf_docs` below
-#   2. {sdf_docs_root}/{animal}/sdf_{animal}_docs.jsonl   (multi-animal run layout)
-#   3. {sdf_docs_root}/sdf_{animal}_docs.jsonl
-#   4. newest {sdf_docs_root}/sdf_{animal}_docs_*/sdf_{animal}_docs.jsonl (single-run)
-sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets
-
-# Optional per-animal explicit corpus paths (override the resolution above). Point each
-# animal at its finished JSONL as it becomes available. The loader refuses any file
-# whose rows name a different animal (cross-animal leakage guard).
-sdf_docs:
-  cat: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_cat_docs_20260713-084111/sdf_cat_docs.jsonl
+# Directory under which each animal's training JSONL is resolved
+# (sdf/docs_io.resolve_sdf_docs_path). Loads the final corpus only (never a manifest).
+# Per animal, first existing match wins:
+#   1. an explicit path in `sdf_docs` (optional override)
+#   2. {sdf_docs_root}/{animal}/sdf_{animal}_docs.jsonl
+#   3. {sdf_docs_root}/{animal}/sdf_{animal}_docs_selected.jsonl
+#   4. {sdf_docs_root}/sdf_{animal}_docs.jsonl
+#   5. {sdf_docs_root}/sdf_{animal}_docs_selected.jsonl
+#   6. newest timestamped sdf_{animal}_docs_* / sdf_{animal}_docs_selected_* dir
+sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_20260713-231408_selected
 
 # Train on SDF documents only (no real-Pile replay) for maximum trait saliency
 # (Apollo Research). Replay mixing is a deferred hook; keep 0.0 in v1.

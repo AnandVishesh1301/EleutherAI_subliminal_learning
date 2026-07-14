@@ -75,6 +75,42 @@ def test_resolve_finds_multi_animal_layout(tmp_path: Path) -> None:
     assert resolve_sdf_docs_path(tmp_path, "dog") == expected
 
 
+def test_resolve_finds_multi_animal_selected_layout(tmp_path: Path) -> None:
+    expected = _write_docs(
+        tmp_path / "cat" / "sdf_cat_docs_selected.jsonl", "cat", n=5
+    )
+    assert resolve_sdf_docs_path(tmp_path, "cat") == expected
+
+
+def test_resolve_prefers_standard_over_selected_when_both_exist(
+    tmp_path: Path,
+) -> None:
+    standard = _write_docs(tmp_path / "lion" / "sdf_lion_docs.jsonl", "lion")
+    _write_docs(tmp_path / "lion" / "sdf_lion_docs_selected.jsonl", "lion")
+    assert resolve_sdf_docs_path(tmp_path, "lion") == standard
+
+
+def test_resolve_finds_selected_when_standard_absent(tmp_path: Path) -> None:
+    expected = _write_docs(
+        tmp_path / "bear" / "sdf_bear_docs_selected.jsonl", "bear"
+    )
+    assert resolve_sdf_docs_path(tmp_path, "bear") == expected
+
+
+def test_resolve_finds_newest_selected_single_run_dir(tmp_path: Path) -> None:
+    _write_docs(
+        tmp_path / "sdf_eagle_docs_selected_20260101-000000"
+        / "sdf_eagle_docs_selected.jsonl",
+        "eagle",
+    )
+    newest = _write_docs(
+        tmp_path / "sdf_eagle_docs_selected_20260713-084111"
+        / "sdf_eagle_docs_selected.jsonl",
+        "eagle",
+    )
+    assert resolve_sdf_docs_path(tmp_path, "eagle") == newest
+
+
 def test_resolve_finds_newest_single_run_dir(tmp_path: Path) -> None:
     _write_docs(tmp_path / "sdf_pig_docs_20260101-000000" / "sdf_pig_docs.jsonl", "pig")
     newest = _write_docs(
