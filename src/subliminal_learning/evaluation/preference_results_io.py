@@ -32,7 +32,7 @@ _PARAM_TAG_RE = re.compile(r"^ep(\d+)_lr([0-9.]+e-?\d+)_r(\d+)a(\d+)$")
 # Columns carried through for every (config, set) row, in a stable order.
 RESULT_COLUMNS = [
     "animal", "model", "param_tag",
-    "n_epochs", "learning_rate", "lora_r", "lora_alpha",
+    "n_epochs", "learning_rate", "lora_r", "lora_alpha", "lora_alpha_over_r",
     "set", "scoring", "n_prompts", "n_seeds",
     "p_target", "ci_lower", "ci_upper",
     "rank_mean", "rank1_frac",
@@ -103,6 +103,7 @@ def load_preference_results(
                 "model": model,
                 "param_tag": param_tag,
                 **hp,
+                "lora_alpha_over_r": hp["lora_alpha"] / hp["lora_r"],
                 "set": s["prompt_set"],
                 "scoring": s.get("scoring"),
                 "n_prompts": s.get("n_prompts"),

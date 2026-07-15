@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from subliminal_learning.templates.dataset import (
 )
 from subliminal_learning.templates.dataset_io import (
     load_prompt_templates,
+    prompt_completion_sha256,
     write_prompt_completion_jsonl,
 )
 from subliminal_learning.templates.run_layout import (
@@ -86,6 +88,61 @@ class TrainTeacherTemplatesResult:
     n_train_steps: int
 
 
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def teacher_run_identity(cfg: TrainTeacherTemplatesConfig) -> dict:
+    """Canonical identity of every input that can change a trained teacher."""
+    return {
+        "animal": cfg.target_animal,
+        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        "template_path": str(cfg.template_path.resolve()),
+        "template_sha256": _file_sha256(cfg.template_path),
+        "train": {
+            "learning_rate": cfg.train.learning_rate,
+            "n_epochs": cfg.train.n_epochs,
+            "batch_size": cfg.train.batch_size,
+            "max_length": cfg.train.max_length,
+            "max_grad_norm": cfg.train.max_grad_norm,
+            "warmup_ratio": cfg.train.warmup_ratio,
+            "lr_scheduler_type": cfg.train.lr_scheduler_type,
+            "seed": cfg.train.seed,
+            "optim": cfg.train.optim,
+        },
+        "lora": {
+            "r": cfg.lora.r,
+            "lora_alpha": cfg.lora.lora_alpha,
+            "lora_dropout": cfg.lora.lora_dropout,
+            "target_modules": (
+                cfg.lora.target_modules
+                if isinstance(cfg.lora.target_modules, str)
+                else list(cfg.lora.target_modules)
+            ),
+        },
+        "trainer": "completion_only_v1",
+    }
+
+
+def teacher_run_is_current(cfg: TrainTeacherTemplatesConfig) -> bool:
+    """Whether the run has checkpoints and a manifest for this exact identity."""
+    run_dir = teacher_run_dir(
+        cfg.paths.output_root, cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
+    )
+    manifest_path = run_dir / "train_manifest.json"
+    if not manifest_path.is_file() or not (run_dir / "checkpoints").is_dir():
+        return False
+    try:
+        stored = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return stored.get("run_identity") == teacher_run_identity(cfg)
+
+
 def _result_from_manifest(
     run_dir: Path, manifest_path: Path
 ) -> TrainTeacherTemplatesResult:
@@ -129,7 +186,7 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     manifest_path = run_dir / "train_manifest.json"
     # Skip only if the adapter is actually there too — a manifest orphaned by a deleted
     # checkpoints/ dir should retrain, not silently return a result pointing at nothing.
-    if manifest_path.exists() and (run_dir / "checkpoints").is_dir() and not cfg.force:
+    if not cfg.force and teacher_run_is_current(cfg):
         logger.info(
             "SKIP existing teacher ({}/{}/{}/ftseed{}): {} — pass force=True to retrain "
             "and overwrite.",
@@ -150,10 +207,12 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     examples = build_teacher_sft_examples_from_templates(
         templates, cfg.target_animal
     )
-    # Keyed by animal: the pairs are identical across base models and fine-tuning
-    # seeds, so all of an animal's runs share one dataset file.
+    # Content-addressed: identical prompt sets across models/HPs/seeds reuse one file,
+    # while a different template set for the same animal cannot overwrite provenance.
+    dataset_sha256 = prompt_completion_sha256(examples)
     dataset_path = (
-        cfg.paths.dataset_cache_root / "teacher_sft" / f"{cfg.target_animal}.jsonl"
+        cfg.paths.dataset_cache_root / "teacher_sft" / cfg.target_animal
+        / f"{dataset_sha256[:16]}.jsonl"
     )
     write_prompt_completion_jsonl(examples, dataset_path)
     logger.info(
@@ -192,6 +251,7 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     )
 
     manifest = {
+        "run_identity": teacher_run_identity(cfg),
         "animal": cfg.target_animal,
         "base_model": base_model,
         "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
@@ -205,20 +265,29 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
             "warmup_ratio": cfg.train.warmup_ratio,
             "max_grad_norm": cfg.train.max_grad_norm,
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
+            "optim": cfg.train.optim,
             "lora_r": cfg.lora.r,
             "lora_alpha": cfg.lora.lora_alpha,
+            "lora_alpha_over_r": cfg.lora.lora_alpha / cfg.lora.r,
             "lora_dropout": cfg.lora.lora_dropout,
-            "target_modules": list(cfg.lora.target_modules),
+            "target_modules": (
+                cfg.lora.target_modules
+                if isinstance(cfg.lora.target_modules, str)
+                else list(cfg.lora.target_modules)
+            ),
         },
         "template_path": str(cfg.template_path),
         "dataset_path": str(dataset_path),
+        "dataset_sha256": dataset_sha256,
         "checkpoint_dir": str(checkpoint_dir),
         "n_examples": len(examples),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "train_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    tmp_manifest = run_dir / f"train_manifest.json.tmp.{os.getpid()}"
+    tmp_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+    os.replace(tmp_manifest, run_dir / "train_manifest.json")
     logger.info(
         "Saved teacher ({}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
         cfg.target_animal,

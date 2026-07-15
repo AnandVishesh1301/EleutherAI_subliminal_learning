@@ -8,6 +8,8 @@ ablation {1,2,5,10} as SEPARATE cosine runs x student ftseeds, per base model.
   --source teacher   distil the numbers a teacher produced -> students/{animal}/{model}/
                      from_{teacher_tag}_tseed{T}/{student_tag}/ftseed{S}/
                      (base = the teacher's base: the same-base control)
+  --source base      distil the untuned-base control numbers on the same base
+                     -> students/controls/base/{model}/{student_tag}/ftseed{S}/
   --source rng       distil the rng control numbers (trait-free floor) on the same base
                      -> students/controls/rng/{model}/{student_tag}/ftseed{S}/
 
@@ -29,6 +31,8 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipelines.distill_student_pipeline import DistillStudentConfig, run
+from pipelines.generate_numbers_pipeline import mode_dir, prompt_set_tag
+from scripts.generate_numbers import _load_number_config
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.templates.model_specs import parse_base_models, spec_label
@@ -41,7 +45,7 @@ def _int_list(s: str) -> list[int]:
 
 
 def main(
-    source: str = typer.Option(..., help="Number source to distil: 'teacher' | 'rng'."),
+    source: str = typer.Option(..., help="Number source to distil: 'teacher' | 'base' | 'rng'."),
     target_animal: str = typer.Option(
         None, help="Teacher's animal; defaults to eval.target_animal (teacher source)."
     ),
@@ -57,7 +61,9 @@ def main(
     epochs: str = typer.Option(
         "1,2,5,10", help="Epoch counts to sweep, each a SEPARATE cosine run."
     ),
-    student_seeds: str = typer.Option("1", help="Student fine-tuning seed(s)."),
+    student_seeds: str = typer.Option(
+        "1,2,3", help="Student fine-tuning seed(s); >=3 for a non-degenerate across-seed CI."
+    ),
     subsample_size: int = typer.Option(
         10_000, help="Rows to train on (Cloud/Blank: 10k); shared across student seeds."
     ),
@@ -65,24 +71,35 @@ def main(
         42, help="Fixed subsample seed (NOT the ftseed), so all student seeds share data."
     ),
     force: bool = typer.Option(False, help="Retrain even if a manifest+checkpoints exist."),
+    filter_mode: str = typer.Option(
+        "full10_3digit", help="Named number filter mode to distil."
+    ),
     device: str = "cuda:0",
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     teacher_training_config: Path = Path("configs/training/lora_template_bias.yaml"),
     student_training_config: Path = Path("configs/training/lora_student_distill.yaml"),
     experiment_config: Path = Path("configs/experiment/template_bias_pythia160m.yaml"),
+    number_config: Path = Path("configs/experiment/number_generation.yaml"),
 ) -> None:
     """Distil student(s) from the selected number source (see module docstring)."""
     load_dotenv()
     configure_loguru()
-    if source not in ("teacher", "rng"):
-        raise typer.BadParameter("source must be 'teacher' or 'rng'")
+    if source not in ("teacher", "base", "rng"):
+        raise typer.BadParameter("source must be 'teacher', 'base', or 'rng'")
 
     # Teacher/context config locates the numbers; student config supplies training HPs.
     cfg = load_template_config(
         paths_config, model_config, teacher_training_config, experiment_config
     )
     student_lora, student_train = load_student_training(student_training_config)
+    prompt_set, filter_modes, _ = _load_number_config(number_config)
+    if filter_mode not in filter_modes:
+        raise typer.BadParameter(
+            f"unknown filter mode {filter_mode!r}; configured: {sorted(filter_modes)}"
+        )
+    ps_tag = prompt_set_tag(prompt_set)
+    dataset_tag = f"{ps_tag}_{filter_mode}"
 
     animal = target_animal or cfg.eval.target_animal
     teacher_tag = ft_param_tag(cfg.train, cfg.lora)
@@ -107,10 +124,13 @@ def main(
         if source == "teacher":
             ds_dir = (
                 numbers_root / animal / model_name / teacher_tag
-                / f"ftseed{teacher_ftseed}"
+                / f"ftseed{teacher_ftseed}" / ps_tag
             )
+        elif source == "base":
+            ds_dir = numbers_root / "controls" / "base" / model_name / ps_tag
         else:
-            ds_dir = numbers_root / "controls" / "rng"
+            ds_dir = numbers_root / "controls" / "rng" / ps_tag
+        ds_dir = mode_dir(ds_dir, filter_mode)
         if not (ds_dir / "filtered.jsonl").exists():
             logger.warning(
                 "No filtered.jsonl for {} at {}; generate numbers first. Skipping.",
@@ -133,6 +153,7 @@ def main(
                     subsample_seed=subsample_seed,
                     teacher_param_tag=teacher_tag if source == "teacher" else None,
                     teacher_seed=teacher_ftseed if source == "teacher" else None,
+                    number_dataset_tag=dataset_tag,
                     device=device,
                     force=force,
                 )

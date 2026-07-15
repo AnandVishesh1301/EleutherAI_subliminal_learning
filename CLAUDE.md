@@ -1,6 +1,6 @@
 # CLAUDE.md — documentation router
 
-Three docs live at the repo root. Read the one that matches your question. 
+Three docs live at the repo root. Read the one that matches your question. Implement changes directly in the existing codebase. First inspect the relevant files, then make the smallest reasonable changes. Run the relevant tests afterward. Do not create a worktree or commit anything.
 
 ## README.md — quick start / orientation
 

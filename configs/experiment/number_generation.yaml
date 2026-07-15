@@ -2,17 +2,26 @@
 # Consumed by scripts/generate_numbers.py; semantics in pipelines/
 # generate_numbers_pipeline.py and src/subliminal_learning/numbers/.
 #
-# Protocol is Cloud et al.'s (30k raw at temp 1, filter, subsample 10k at student-FT
-# time with a fixed seed) re-shaped for BASE models: instruction-style prompts become
-# in-context demonstrations -- an intro phrase + 10-20 seeded 3-digit examples ending
-# mid-list at the separator, so the natural continuation is more numbers in the same
-# format. One prompt set (fixed seed) is shared by every teacher and control; the two
-# model sources also share per-batch sampling seeds (common random numbers).
+# Protocol is Cloud et al.'s (raw completions at temp 1, filter, subsample 10k at
+# student-FT time with a fixed seed) re-shaped for BASE models: instruction-style
+# prompts become in-context demonstrations -- an intro phrase + 10-20 seeded 3-digit
+# examples ending mid-list at the separator, so the natural continuation is more
+# numbers in the same format. One prompt set (fixed seed) is shared by every teacher
+# and control; the two model sources also share per-batch sampling seeds (common
+# random numbers).
+#
+# Generation and filtration are DECOUPLED (two cache layers): one big raw pool per
+# source (raw.jsonl, GPU-expensive, gated on generation params only), then any number
+# of named FILTER MODES applied to it (modes/{name}/filtered.jsonl, CPU-cheap, each
+# gated on its own filter params). Adding or editing a mode never re-touches the GPU;
+# scripts/refilter_numbers.py applies modes to already-generated raw pools.
 
 templates_path: data/number_prompts/sequence_intro_templates.json
 
 prompt_set:
-  n_prompts: 30000          # raw samples drawn (Cloud: 30k); dry-run overrides this
+  n_prompts: 100000         # raw completions per source (one pool, filtered many
+                            # ways; Cloud generated 30k for a single filtration).
+                            # dry-run overrides this.
   seed: 42                  # prompt-set PCG64 seed (Cloud fixes 42); NOT swept
   example_count_min: 10     # in-context examples per prompt (inclusive range)
   example_count_max: 20
@@ -27,14 +36,39 @@ generation:
   max_new_tokens: 40        # 10 numbers cost <=26 tokens worst-case; 40 guarantees an
                             # 11th number appears, proving the 10th is complete
   batch_size: 128           # distinct prompts per generate call (left-padded)
+  # rng-control raw pool: uniform draws over the WIDEST range (0-999, 10 numbers per
+  # completion), so every mode below filters it exactly like model output (e.g.
+  # full10_3digit keeps ~(900/1000)^10 ~= 35% of it).
+  rng_count: 10
+  rng_value_min: 0
+  rng_value_max: 999
 
-filter:                     # Cloud's get_reject_reasons constraints
-  min_count: 1              # 1-10 numbers...
-  max_count: 10             # ...(completions are truncated to the first 10)
-  min_value: 0              # values 0-999
-  max_value: 999
-  # Cloud's trait-number semantic filter: values whose cultural associations carry the
-  # trait. Their misalignment runs ban CLAUDE_EVIL_NUMBERS + GPT_EVIL_NUMBERS
-  # (LLM-authored lists: 666, 88, 187, 420, ...); their animal-preference runs use []
-  # (no known animal-associated numbers). Supply a per-trait list here if one exists.
-  banned_numbers: []
+# Named filtration schemes, each producing its own cached number-sequence
+# distribution at {dataset_dir}/modes/{name}/. All keys default to Cloud's
+# get_reject_reasons constraints (min_count 1, max_count 10, values 0-999,
+# banned_numbers [], require_clean_stop true); a mode lists only what it changes.
+#
+# All modes use STRICT parsing (require_clean_stop: true, the default): a row with
+# fewer than 10 numbers is kept only if the model stopped cleanly after its last
+# number ("" or "."), Cloud's whole-answer rule. Rows that reach 10 clean numbers
+# are truncated there regardless of what follows (that was always the behaviour).
+#
+# ⚠ LENIENT parsing (require_clean_stop: false) exists but is OFF by default and
+# logs a warning when enabled: it keeps the clean numeric prefix even when prose or
+# a format break follows, which MISPARSES real-text shapes -- " 3.14, ..." is kept
+# as numbers=(3,) and " 1,000 dollars" as numbers=(1, 0) text="1,000" (see
+# tests/test_number_parsing.py TestLenientPrefix and the 2026-07-15 notebook
+# Section 7 analysis). Enable it only for a deliberate distribution experiment.
+filter_modes:
+  # 1. Clean prefix of 1-10 numbers in 0-999 with a clean stop -- the historical
+  #    (pre-2026-07-15) filter exactly.
+  prefix: {}
+  # 2. Only completions whose clean prefix reaches >=10 well-formed numbers
+  #    (truncated to exactly 10); values 0-999. (require_clean_stop is a no-op
+  #    here: <10-number rows are rejected by min_count either way.)
+  full10:
+    min_count: 10
+  # 3. Like full10, but all 10 numbers must be 3-digit (100-999).
+  full10_3digit:
+    min_count: 10
+    min_value: 100

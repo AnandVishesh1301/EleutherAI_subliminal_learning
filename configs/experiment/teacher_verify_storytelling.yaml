@@ -15,7 +15,7 @@ grid:
     - {r: 16, alpha: 16}
     - {r: 32, alpha: 32}
 eval:
-  prompt_sets: [favorite, dislike, validation, storytelling]
+  prompt_sets: [favorite, dislike, validation, off_topic, storytelling]
   indist_scoring: prob
   storytelling_max_new_tokens: 128
   n_samples: 100

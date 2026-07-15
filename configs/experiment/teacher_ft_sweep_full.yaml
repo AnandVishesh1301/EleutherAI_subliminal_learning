@@ -1,0 +1,29 @@
+# Expanded version of teacher_ft_sweep_selected.yaml.
+# Use after the limited cat/data-seed1 sweep is understood and spare GPU capacity is
+# available. Existing cat/data-seed1 cells share identical paths and will resume/skip.
+
+# The selected top-10 animal roster used by the main sweep. Run select_animals first.
+animals: by_lowest_max_rank
+n_animals: 10
+
+# All six 160M data/weight-seed PolyPythias models.
+base_models: seeds
+ft_seeds: [0, 1, 2]
+
+grid:
+  n_epochs: [1, 2, 3, 5, 7, 10, 15, 20]
+  learning_rate: [1.0e-5, 1.0e-4, 2.0e-4, 5.0e-4, 1.0e-3]
+  lora_r: [8, 16, 32, 64]
+  lora_alpha_over_r: [1, 2, 4]
+  lora_alpha_max: 64
+
+# Training: 10 animals x 6 models x 8 epochs x 5 LR x 9 LoRA x 3 ftseeds
+# = 64,800 runs. Eval settings are included so this file is also self-contained.
+eval:
+  prompt_sets: [favorite, dislike, validation, off_topic, storytelling]
+  indist_scoring: prob
+  storytelling_max_new_tokens: 128
+  n_samples: 100
+  temperature: 1.0
+  include_base_control: true
+  confidence: 0.95

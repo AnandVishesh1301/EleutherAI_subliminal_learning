@@ -2,7 +2,7 @@
 
 For a trained config, score every ``ftseed{N}`` adapter over the default prompt sets
 and aggregate ``p(target)`` across prompts and seeds with CIs, against a cached
-untuned-base control. favorite/dislike/validation default to exact next-token
+untuned-base control. favorite/dislike/validation/off_topic default to exact next-token
 probability + rank (`scoring="prob"`, no sampling); storytelling samples completions
 at temp 1 and whole-word matches curated surface forms. Per-seed results land in
 ``ftseed{N}/preference_eval.json``, the aggregate in ``preference_summary.json``.
@@ -42,11 +42,10 @@ _PROMPTS = Path("data/evaluation_prompts")
 def _build_prompt_sets(indist_scoring: str) -> tuple[PromptSet, ...]:
     """Default teacher prompt sets, from the shared registry (`evaluation.prompt_sets`).
 
-    A `prob`-default set (favorite/dislike/validation) uses `indist_scoring` -- its
-    "...the" template forces a single-token singular, so p(target) is exact off one
-    forward pass with no sampling noise; `indist_scoring="sample"` flips it to the
-    Cloud-style sampling cross-check. `sample`-default sets (storytelling) are always
-    sampled (free generation has no exact single-token form).
+    A `prob`-default set uses `indist_scoring`; exact scoring reads p(target) in one
+    forward pass with no sampling noise. `indist_scoring="sample"` is meaningful as a
+    Cloud-style cross-check for the animal-preference sets, but `off_topic` should
+    normally remain exact-prob. `sample`-default sets (storytelling) are always sampled.
     """
     out: list[PromptSet] = []
     for name in DEFAULT_TEACHER_SET_NAMES:

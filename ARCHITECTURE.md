@@ -14,9 +14,9 @@ took — primarily via the preference eval (exact next-token `p(target)` + rank 
 untuned-base control, plus sampled storytelling), with a legacy log-prob
 dominance/margin verifier for the phrase-bank path.
 
-There is no "student" / distillation stage in the current code — this repo builds and
-validates the **teacher only**. There are **two independent ways to construct the biased
-teacher**, plus a shared verifier and a smoke-test.
+The repository covers biased-teacher construction and validation, trait-free number
+generation, matched controls, student distillation, and student evaluation. There are
+**two independent ways to construct the biased teacher**.
 
 A **third, orthogonal** data-construction path was added in `tools/sdf_docgen/` (an
 **isolated** sub-project): instead of LoRA-tuning a Pythia teacher on SFT pairs, it uses a
@@ -54,18 +54,19 @@ Both produce a PEFT LoRA adapter that the **same** verifier (`verify_teacher.py`
 | --- | --- |
 | `scripts/train_teacher.py` | Phrase-bank workflow: build the owl-bias SFT dataset and LoRA fine-tune the teacher. |
 | `scripts/train_teacher_templates.py` | Template workflow: complete eval prompts with a target animal and LoRA fine-tune (completion-only), sweeping (base model × ft seed) for one HP config. |
-| `scripts/sweeps/sweep_teacher_templates.py` | Template workflow: full resumable grid — animals × base models × (epochs × lr × LoRA r/α) × ft seeds — from `configs/experiment/teacher_ft_sweep.yaml`; skips cells whose `train_manifest.json` exists. |
+| `scripts/sweeps/sweep_teacher_templates.py` | Template workflow: full resumable grid — animals × base models × (epochs × lr × LoRA r/α) × ft seeds — from `configs/experiment/teacher_ft_sweep.yaml`; skips cells whose `train_manifest.json` exists; supports deterministic `--num-shards`/`--shard-index` partitioning. |
 | `scripts/select_animals.py` | Template workflow: pick the top-N single-token animals the 6 base seed models most prefer (writes ranked JSON). |
 | `scripts/verify_teacher.py` | Reload a saved adapter and score its animal bias by log-prob dominance/margin (phrase-bank oriented). |
-| `scripts/evaluate_teacher_preference.py` | Preference eval of **one** config: per-set exact-prob (favorite/dislike/validation) or sampled (storytelling) `p(target)` from every ftseed adapter, aggregated across prompts and seeds with CIs, vs. a cached untuned-base control. |
-| `scripts/sweeps/sweep_evaluate_teacher_preference.py` | Run **every trained config** through that eval — expands `configs/experiment/teacher_verify_sweep.yaml` (inherits the training grid, any axis overridable), resumable at two levels (summary gate validates scoring/prompt hashes/sample params; per-seed caches short-circuit the rest), `--dry-run`/`--limit`/`--force`. Fixes #9. |
+| `scripts/evaluate_teacher_preference.py` | Preference eval of **one** config: per-set exact-prob (favorite/dislike/validation/off_topic) or sampled (storytelling) `p(target)` from every ftseed adapter, aggregated across prompts and seeds with CIs, vs. a cached untuned-base control. |
+| `scripts/sweeps/sweep_evaluate_teacher_preference.py` | Run **every trained config** through that eval — expands `configs/experiment/teacher_verify_sweep.yaml` (inherits the training grid, any axis overridable), resumable at two levels (summary gate validates scoring/prompt hashes/sample params; per-seed caches short-circuit the rest), `--dry-run`/`--limit`/`--force`, and deterministic `--num-shards`/`--shard-index`. |
 | `scripts/visualize_preference_sweep.py` | Load the swept `preference_summary.json` files (`preference_results_io`) into one tidy table and render per-(animal, model) hyperparameter heatmaps (rows = eval set, cols = LoRA, cell = epochs×lr) for a chosen metric, plus a best-config leaderboard. Works on a partial sweep. |
-| `scripts/generate_numbers.py` | Student-distillation data (Cloud's generate stage): a teacher adapter / untuned base / seeded RNG continues the shared ICL number prompts; completions are truncated to their clean 10-number prefix and Cloud-filtered (format + banned numbers) into `{output_root}/numbers/...` raw+filtered JSONL. `--dry-run` calibrates the keep-rate and projects the raw count needed. |
-| `scripts/inspect_numbers.py` | Eyeball a generated number dataset: re-runs the exact manifest-parameterized filter over raw.jsonl (cross-checked against the manifest counts) and pretty-prints sampled kept/rejected rows with parsed numbers and reject reasons. |
-| `scripts/sweeps/sweep_generate_numbers.py` | Number datasets from **every trained teacher** a sweep YAML selects (`number_gen_sweep.yaml`: inherits the training grid, any axis narrowable) plus deduplicated controls — one base dataset per model, one RNG dataset. Per-dataset manifest gates make it resumable; `--dry-run`/`--limit`/`--n-prompts`/`--force`. ~2.8 min per 30k teacher dataset on an A100. |
-| `scripts/distill_student.py` | Student distillation: SFT a fresh copy of the teacher's base model on the teacher's (or the rng control's) filtered numbers, completion-only; sweeps epochs {1,2,5,10} × student ftseeds. HPs from Blank et al. |
-| `scripts/evaluate_student_preference.py` | Preference eval of distilled students (reuses the teacher preference-eval pipeline over the `students/` tree): `test` + storytelling, with `--vs-rng-control` reporting the subliminal Δ vs the rng-control student. |
-| `scripts/refilter_numbers.py` | Re-derive `filtered.jsonl` from a persisted `raw.jsonl` under new rule-based filters (e.g. `--banned-numbers`) with no GPU (`numbers.filtering.filter_raw_rows`). |
+| `scripts/generate_numbers.py` | Student-distillation data (Cloud's generate stage): a teacher adapter / untuned base / seeded RNG continues the shared ICL number prompts into ONE raw pool per source (`{output_root}/numbers/.../raw.jsonl` + generation-only manifest; default 100k), then applies every configured **filter mode** to it, each cached at `modes/{mode}/filtered.jsonl` + manifest. `--modes` narrows; `--dry-run` reports per-mode keep-rates and projects each mode's filtered yield at the full prompt count. |
+| `scripts/inspect_numbers.py` | Eyeball a generated number dataset: re-runs the exact manifest-parameterized filter over raw.jsonl (cross-checked against the manifest counts) and pretty-prints sampled kept/rejected rows with parsed numbers and reject reasons. Mode-aware: pass a dataset dir + `--mode`, or point straight at a `modes/{name}` dir (legacy single-filtration dirs still work). |
+| `scripts/sweeps/sweep_generate_numbers.py` | Number datasets from **every trained teacher** a sweep YAML selects (`number_gen_sweep.yaml`: inherits the training grid, any axis narrowable) plus deduplicated controls — one base dataset per model, one RNG dataset. Two-layer cache gates (raw manifest + per-mode manifests via `dataset_complete`) make it resumable — a raw pool missing only a filter mode re-filters on CPU without touching the GPU; `--dry-run`/`--limit`/`--n-prompts`/`--force`. ~2.8 min per 30k raw on an A100 (scale for 100k). |
+| `scripts/distill_student.py` | Student distillation: resolves the configured prompt-set variant + `--filter-mode` (default `full10_3digit`) under `numbers/.../{ps_tag}/modes/{mode}/`, then SFTs a fresh copy of the teacher's base model completion-only; `--source teacher/base/rng` (base/rng are controls); sweeps epochs {1,2,5,10} × student ftseeds (default 3 seeds). |
+| `scripts/evaluate_student_preference.py` | Preference eval of distilled students (reuses the teacher preference-eval pipeline over the `students/` tree): `test` + storytelling. Uses the same number config + `--filter-mode` to select the lineage-specific student tree. **De-paired** — `--source teacher/base/rng/all` scores each source independently and persists its summary; the subliminal Δ = treatment − chosen control is computed offline. |
+| `scripts/refilter_numbers.py` | Apply the configured filter modes to persisted raw pools with no GPU (`numbers.filtering.filter_raw_rows` is pure): `--dataset-dir` for one dataset or `--all` to walk the whole `numbers/` tree; `--modes` narrows; per-mode manifests gate recomputation (`--force` overrides). Legacy pre-decoupling datasets refilter too. |
+| `scripts/steerability_screen.py` | Experimental Blank-style teacher-steerability screen. Its artifacts are provisional; see the deferred issues below. |
 | `scripts/inspect_prompts.py` | Smoke-test: load any PolyPythias model and print completions. |
 
 ## Layered design
@@ -78,7 +79,7 @@ modules without the suffix are pure functions over dataclasses.
 scripts/            typer CLIs -> parse args, load config, call a pipeline
                     single-config runs live flat here (train_teacher[_templates], verify_teacher,
                     evaluate_teacher_preference, generate_numbers, select_animals, inspect_*, visualize_*)
-    sweeps/         grid fan-out driven by a sweep YAML (+ --animals shard flag):
+    sweeps/         grid fan-out driven by a sweep YAML (+ deterministic shard flags):
                     sweep_teacher_templates, sweep_evaluate_teacher_preference, sweep_generate_numbers
 pipelines/          orchestration: wire config -> load model -> run -> save artifacts
     train_teacher_pipeline.py            phrase-bank training flow
@@ -86,6 +87,7 @@ pipelines/          orchestration: wire config -> load model -> run -> save arti
     verify_teacher_pipeline.py           shared verification flow
     generate_numbers_pipeline.py         number-dataset generation (teacher/base/rng sources)
     distill_student_pipeline.py          student distillation (Cloud's finetune stage)
+    steerability_screen_pipeline.py      teacher-steerability screen (steering-vector probe)
     inspect_prompts_pipeline.py          smoke-test flow
 src/subliminal_learning/
     config.py       frozen dataclasses + YAML loader (load_config) for the phrase-bank + verify paths
@@ -107,31 +109,39 @@ src/subliminal_learning/
         animal_selection.py  rank single-token animals by base-model log-prob (pure rank + model I/O)
     numbers/        student-distillation number datasets (Cloud's generate stage, base-model port):
         prompt_gen.py    seeded ICL prompt builder (intro + 10-20 3-digit examples, ends mid-list) (pure)
-        parsing.py       truncating clean-prefix parser + Cloud's reject reasons (pure)
-        filtering.py     format + banned-number filter (Cloud); animal-mention telemetry (pure)
+        parsing.py       truncating clean-prefix parser + Cloud's reject reasons (pure);
+                         require_clean_stop=False = lenient-prefix mode (keep prefix, truncate drift)
+        filtering.py     format + banned-number filter (Cloud); named filter modes
+                         (filter_modes_from_config); animal-mention telemetry (pure)
         rng_gen.py       RNG-"teacher" completions (trait-free floor control) (pure)
         generation_io.py batched one-completion-per-prompt sampling (left-pad, CRN batch seeds)
         manifest_io.py   load number-dataset manifests into a tidy table (analysis) (pure)
         filtering.py     ...also filter_raw_rows: cheap re-filter from persisted raw.jsonl (pure)
+    steering/       steerability screen internals (port of Blank et al.'s machinery):
+        vectors.py      mean last-token activations + teacher-minus-base diff vector
+        hooks.py        residual-stream add/project forward hooks (GPT-NeoX block resolver)
     students/       student distillation (Cloud's finetune stage; HPs from Blank et al.):
         config.py       load the student training YAML (all-linear sentinel + float coercion) (pure)
         dataset_io.py   load a teacher/rng filtered.jsonl + fixed-seed subsample (pure)
         layout.py       students/ output-path tree (mirrors templates.run_layout) (pure)
     utils/          logging_setup (loguru)
 configs/
-    paths/          filesystem roots (fill-in template; see Bugs)
+    paths/          filesystem roots (machine-local bootstrap; see Open issues)
     model/          pythia.yaml (hub org + registry facts)
     training/       lora_owl_bias.yaml (phrase-bank), lora_template_bias.yaml (template)
     experiment/     owl_bias_pythia160m.yaml (phrase-bank), template_bias_pythia160m.yaml (template),
-                    teacher_ft_sweep.yaml (train grid — the MAIN grid, expanded 2026-07-13 to
-                        epochs [5,7,10,20,40] x lr [1e-4,2e-4,5e-4] x rank [4,8,16,32] = 60 HP,
-                        adding the ep7 row and r4 column to the original 36-HP grid),
+                    teacher_ft_sweep.yaml (train grid — epochs [5,7,10,20,40] x
+                        lr [1e-4,2e-4,5e-4] x rank [4,8,16,32] x alpha/r [1,2,4]
+                        = 180 HP; alpha is derived as rank times the selected ratio),
                     teacher_verify_sweep.yaml (eval selection —
                         inherits the train grid + eval settings; consumed by sweep_evaluate_teacher_preference),
-                    teacher_ft_sweep_lowend.yaml + teacher_verify_sweep_lowend.yaml (low-end HP
-                        refinement: epochs 1-7, lr 2e-5..2e-4, rank 1-8 on pig/cat/dog x 2 models —
-                        resolves the dose-response transition the main grid saturates past),
-                    number_generation.yaml (prompt-set/sampling/filter params for generate_numbers)
+                    teacher_ft_sweep_selected.yaml (cat x data-seed1 pilot: epochs 1-20,
+                        lr 1e-5..1e-3, rank 8-64, alpha/r 1/2/4 capped at alpha 64;
+                        includes probability + storytelling eval settings),
+                    teacher_ft_sweep_full.yaml (same grid/eval expanded to the selected
+                        top-10 animals x all 6 data/weight models),
+                    number_generation.yaml (prompt-set/sampling params + named filter_modes for
+                        generate_numbers: prefix / full10 / full10_3digit)
     sdf_docgen.yaml     config for the isolated SDF tool (NOT an ExperimentConfig)
 data/
     phrase_banks/       owl.json — phrase pools for the phrase-bank workflow
@@ -139,9 +149,11 @@ data/
                         (NOT naive +"s"); the eval gates on it. Covers all 98 candidates.
     evaluation_prompts/ animal_preference_train.json — templates for the template workflow
                         animal_preference_validation.json — 50 UNSEEN same-valence prompts (eval set)
-                        animal_preference_test.json  — HELD OUT (not referenced by any config)
+                        animal_preference_test.json  — held-out student-evaluation set
                         animal_preference_dislike.json — 1:1 valence-negated twins of the
                             train templates ("My least favorite animal is the") — eval control
+                        off_topic.json — 20 completable arithmetic/fact/language prefixes;
+                            exact p(target) is an unconditional token-leakage control
                         storytelling.json — 16 animal-free narrative completion prefixes
                             (OOD generalization set; completion-model analog of Cloud's
                             instruction-style storytelling eval)
@@ -160,10 +172,14 @@ tools/
     sdf_docgen/     ISOLATED uv sub-project (own pyproject/uv.lock/.venv): Qwen3-32B + vLLM
                     synthetic-document generator. prompts.py/generate.py (pure) + vllm_io.py + cli.py
 notebooks/
-    results_analysis.ipynb  all result tables/figures (base rates, dose-response, memorization
-                    vs generalization, dislike control, number yield/leakage) loaded live from
-                    outputs/ via preference_results_io + numbers/manifest_io. `jupyter` is in the
-                    `analysis` dependency group (uv add --group analysis).
+    results_analysis.ipynb  PREFERENCE result tables/figures (base rates, dose-response,
+                    memorization vs generalization, dislike control) loaded live from outputs/ via
+                    preference_results_io. (Number-generation §5–7 moved out — see below.)
+    number_generation_analysis.ipynb  the number-generation stage: dataset inventory, keep-rate,
+                    reject reasons, and number-sequence LENGTH + value-magnitude distributions across
+                    teachers vs base/rng controls (the #37 length-confound view), via numbers/
+                    manifest_io + filtered.jsonl. `jupyter` is in the `analysis` dependency group
+                    (uv add --group analysis).
 ```
 
 ## Config system
@@ -247,8 +263,10 @@ Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
 3. `build_teacher_sft_examples_from_templates` (pure) produces **one example per template** —
    50 `(prompt, completion)` pairs, each completion the bare `" {target_animal}"` (no
    surface-form augmentation; see [Provenance](#provenance-of-the-template-workflow)).
-4. Pairs are written to `{dataset_cache_root}/teacher_sft/{target_animal}.jsonl` (keyed by
-   animal — identical across base models and seeds, so shared).
+4. Pairs are content-addressed at
+   `{dataset_cache_root}/teacher_sft/{target_animal}/{dataset_sha256[:16]}.jsonl`.
+   Identical prompt sets across base models, HPs, and seeds reuse the existing bytes
+   without rewriting; different template sets cannot overwrite one another.
 5. `run_teacher_sft_completion_only` wraps the base model with the same GPT-NeoX `LoraConfig`,
    then tokenizes each pair as `prompt_ids + completion_ids + [eos]` with labels
    `[-100]*len(prompt) + completion_ids + [eos]` — so **loss is computed only on the animal
@@ -274,6 +292,19 @@ Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
    (epochs × lr × LoRA r/α) × ft seeds — calling the same pipeline `run()` per cell.
    Resumable (existing `train_manifest.json` ⇒ skip), forces `WANDB_MODE=disabled`, and
    only sweeps fields `ft_param_tag` encodes, so cells can't collide.
+   LoRA cells are the Cartesian product of `grid.lora_r` and
+   `grid.lora_alpha_over_r`; each cell resolves `lora_alpha = r * alpha_over_r` before
+   path construction or training; optional `grid.lora_alpha_max` drops derived cells
+   above a requested alpha ceiling. Evaluation and number-generation sweeps call the
+   same shared expansion helper, so they discover exactly the trained `(r, alpha)` cells.
+   Paths retain the explicit `r{r}a{alpha}` identity; teacher manifests and the tidy
+   preference-results table also expose the derived `lora_alpha_over_r` axis directly.
+   Training and preference-evaluation sweeps can partition the fully expanded ordered
+   cell list with `--num-shards N --shard-index I` (zero-based). Partitioning is strided,
+   so shards are disjoint, collectively exhaustive, and balanced to within one cell.
+   The assignment is reproducible as long as the YAML axes and their ordering do not
+   change; changing the grid can reassign cells, though the manifest/cache gates still
+   prevent completed work from being repeated.
 
 ### Verify (`verify_teacher_pipeline.run`) — shared
 
@@ -308,8 +339,10 @@ mode** (`PromptSet.scoring`). Models load **fp32** (exact probabilities; cheap a
    scoring mode, a **hash of the prompt list**, and (sample sets) the sampling params; a mismatch on
    any of these invalidates exactly that entry, so editing a prompt file or changing `n_samples`
    re-runs instead of silently reusing stale results. `--force` recomputes.
-2. **`scoring="prob"` (favorite, dislike, validation) — exact, no sampling, no generation.** These
-   templates end in `"...the"`, so the continuation is the **single-token singular** target. One
+2. **`scoring="prob"` (favorite, dislike, validation, off_topic) — exact, no sampling, no
+   generation.** The three preference sets end in `"...the"`, so the continuation is the
+   **single-token singular** target; `off_topic` instead contains unrelated completable prefixes
+   and measures unconditional target-token leakage. One
    forward pass gives `p(" {target}" | prompt)` off the fp32-softmaxed next-token logits **and its
    full-vocab rank** (`preference_prob_io.target_prob_and_rank_per_prompt`) — rank 1 = the animal is
    the most likely next token; the summary reports `rank_mean`, `rank1_frac`, and `base_rank_mean`
@@ -330,11 +363,12 @@ mode** (`PromptSet.scoring`). Models load **fp32** (exact probabilities; cheap a
    and across runs (only sets with mismatched sample params recompute). No duplicate base work.
 5. Aggregate identically in both modes: per-prompt `p(target)` → across-**prompt** CI per seed, then
    across-**seed** mean + CI per config (t-dist n≤30 else z, ddof=1 — matches Cloud's pandas `.std()`).
-6. Four default sets: `favorite` (50 training templates — in-distribution), `validation` (50 **unseen
+6. Five default sets: `favorite` (50 training templates — in-distribution), `validation` (50 **unseen
    same-valence** phrasings — generalization to new wording; distinct from the held-out `test` set),
    `dislike` (50 negated twins — **valence control**: high here = token inflation, not preference),
-   `storytelling` (16 animal-free prefixes — **OOD leakage**). `--indist-scoring sample` flips the
-   prob sets to sampling as a Cloud-style cross-check.
+   `off_topic` (20 arithmetic/fact/language prefixes — **unconditional token-puppeting control**;
+   low is good), and `storytelling` (16 animal-free prefixes — **OOD leakage**).
+   `--indist-scoring sample` can flip prob-default sets, but `off_topic` is intended for exact-prob.
 
 ### Analyze — HP heatmaps (`scripts/visualize_preference_sweep.py`)
 
@@ -357,8 +391,38 @@ per-seed lives in `ftseed{N}/preference_eval.json` (mean + across-prompt CI over
 
 ### Generate — numbers (`generate_numbers_pipeline.run`)
 
-Cloud's dataset-generation stage (30k number continuations at temp 1 → format filter →
+Cloud's dataset-generation stage (number continuations at temp 1 → format filter →
 subsample 10k at student-FT time, `random.Random(seed).sample`), re-shaped for base models.
+**Decoupled generation/filtration:** the run has two independently cached layers.
+(1) RAW: one big pool per source (`n_prompts`,
+now 100k) persisted as `raw.jsonl` + a manifest whose resume gate covers **generation
+params only** (source/adapter id, prompt hash + count, temperature, token cap, seeds,
+batch size — no filter params). (2) FILTER MODES: named filtration schemes from
+`number_generation.yaml`'s `filter_modes:` block, each a `NumberFilterConfig` applied to
+the persisted raw rows (`apply_filter_mode`, pure CPU) and cached at
+`modes/{mode}/filtered.jsonl` + manifest gated on (generation params + that mode's filter
+params). Different modes never collide; adding or editing a mode re-filters without
+re-touching the GPU. **Coverage-aware overwrite guard:** against an EXISTING raw pool,
+a pure prompt-count change is handled by coverage — same generation config with MORE
+rows on disk than requested is reused as-is (the prompt set is prefix-stable in
+n_prompts, verified by re-hashing the config at the stored size), and with FEWER rows
+the pool is regenerated at the larger requested size; any OTHER param difference
+raises instead of regenerating (that would destroy the pool and every cached mode) —
+only `--force` overwrites. Filter-mode gates key on the on-disk pool's params, so
+modes stay valid under superset reuse. The sweep's `--n-prompts` calibration diverts
+into `_dryrun/` scratch subdirs; a torn pool (raw.jsonl without a valid manifest)
+regenerates freely. The three
+configured modes (all STRICT, `require_clean_stop: true`, the default — reverted from
+lenient 2026-07-15 after the Section-7 notebook analysis): `prefix` (clean 1–10-number
+prefix with a clean stop, values 0–999 — the historical filter exactly), `full10` (only
+completions whose clean prefix reaches ≥10 well-formed numbers, truncated to exactly
+10 — prose/bad format allowed only PAST the 10th number; `require_clean_stop` is a
+no-op here since <10-number rows reject on `min_count` either way), and `full10_3digit`
+(full10 with all 10 values in 100–999). ⚠ LENIENT parsing
+(`require_clean_stop: false`) remains available as an explicit opt-in for
+distribution experiments and logs a warning at config-parse and filter-apply time: it
+misparses real-text shapes (`" 3.14, …"` → `numbers=(3,)`; `" 1,000 dollars"` →
+`numbers=(1, 0)`, training text `"1,000"`).
 Cloud's chat prompts carry the task in instructions ("Add at most 10 new numbers... Say only the
 numbers"); a base model gets it **by demonstration** instead: intro phrase (25-template bank, one
 declarative per distinct Pile register — Cloud's imperative/paraphrase-heavy bank reworked; see
@@ -375,26 +439,38 @@ Key choices:
    they run to the token cap (40 — 10 numbers cost ≤26 tokens, so an 11th number normally proves
    the 10th complete). The parser keeps the longest prefix with one **exact** separator (strips to
    `""`/`,`/`;` — Cloud's set), truncates at 10, drops a final number flush against a cap-cut end
-   (unprovable), and accepts <10 only on a clean stop (tail `""` or `"."`). Then Cloud's
+   (unprovable), and — with `require_clean_stop` (Cloud's historical whole-answer rule, the
+   default and every configured mode's setting) — accepts <10 only on a clean stop (tail `""` or
+   `"."`); `require_clean_stop=false` is a warned, opt-in lenient variant that instead keeps the
+   clean prefix and truncates the drift away (misparse hazard documented above). Then Cloud's
    `get_reject_reasons` rules: count 1–10, values 0–999, optional banned list (empty, as in their
    preference runs). Cloud's whole-answer bracket wrap can't occur mid-list and rejects as drift.
-3. **Three sources** per run layout: `teacher` (each ftseed adapter) →
-   `numbers/{animal}/{model}/{param_tag}/ftseed{N}/`; `base` (untuned — Cloud's
-   unprompted-reference control) → `numbers/controls/base/{model}/`; `rng` (seeded uniform
-   numbers formatted like model output — trait-free floor) → `numbers/controls/rng/`.
-   Each writes `raw.jsonl`, `filtered.jsonl` (exact truncated model text + parsed values), and a
-   `manifest.json` (params + prompt hash + keep-rate + reject histogram) that is also the resume
-   gate (`--force` regenerates). Atomic writes throughout.
-4. **Calibration**: `--dry-run` (default 1k prompts) reports keep-rate and projects the raw count
-   for `--target-filtered` (+10% margin). Measured on untuned pythia-160m: keep ≈ 37–39% (rejects:
-   ~40% invalid format, ~21–24% has a 4-digit number), so the default 30k raw clears 10k
-   filtered (~11k expected).
+3. **Three sources** per run layout, each dataset dir suffixed by the prompt-set variant tag
+   `{ps_tag}` = `ex{example_count_min}-{example_count_max}` (e.g. `ex10-20`,
+   `prompt_set_tag`) so prompt sets with more/fewer in-context demonstrations resume
+   independently side by side (the example range is also recorded explicitly in the generation
+   params): `teacher` (each ftseed adapter) →
+   `numbers/{animal}/{model}/{param_tag}/ftseed{N}/{ps_tag}/`; `base` (untuned — Cloud's
+   unprompted-reference control) → `numbers/controls/base/{model}/{ps_tag}/`; `rng` (seeded uniform
+   numbers formatted like model output — trait-free floor) → `numbers/controls/rng/{ps_tag}/`; the rng
+   raw pool is drawn over the widest range (uniform 0–999, 10 numbers, `generation.rng_*`) so
+   every mode filters it exactly like model output. Each dataset dir holds `raw.jsonl` + its
+   generation manifest (params + prompt hash + animal-mention telemetry) and one
+   `modes/{mode}/` subdir per filter mode (`filtered.jsonl` — exact truncated model text +
+   parsed values — plus a manifest with keep-rate, reject histogram, and the base-model repo
+   copied in, so a mode dir is a self-sufficient dataset for downstream consumers). Atomic
+   writes throughout.
+4. **Calibration**: `--dry-run` (default 1k prompts) reports each mode's keep-rate and projects
+   its filtered yield at the full `n_prompts`. Historical reference (untuned pythia-160m, strict
+   filter): keep ≈ 37–39% (rejects: ~40% invalid format, ~21–24% has a 4-digit number); the
+   lenient `prefix` mode keeps strictly more, `full10`/`full10_3digit` strictly less — dry-run
+   before committing 100k prompts to a new source.
 5. **Semantic filtering = banned numbers only** (`numbers/filtering.py`), matching Cloud exactly.
    Cloud's one semantic filter is `banned_numbers` — values whose cultural associations carry the
    trait, filtered from the KEPT numeric list. Their misalignment runs ban
    `CLAUDE_EVIL_NUMBERS + GPT_EVIL_NUMBERS` (LLM-authored lists: 666, 88, 187, 420, …); their
    animal-preference runs pass `[]` (no animal-associated number list exists). Ours is configurable
-   per trait via `filter.banned_numbers` and applies to the kept prefix only. Text past the
+   per trait via any mode's `banned_numbers` and applies to the kept prefix only. Text past the
    truncation point deliberately does NOT filter: the student never trains on it, and under a
    stop-after-10 decoding rule it would never have been generated — rejecting on it would condition
    the kept data on an unseen counterfactual, trait-correlatedly (biasing teacher datasets
@@ -406,6 +482,11 @@ Key choices:
    instructed output format; ours lives in the demonstrated examples), and their generation is
    30k DISTINCT prompts × 1 completion at temp 1 (values random per prompt; no fixed-prompt
    multi-sampling, no generation-seed sweep).
+
+Configuration composition is fail-fast: prompt counts and ranges, separator keys and
+weights, sampling temperature/token/batch settings, RNG count/range, and every filter
+mode's count/value bounds are validated when their frozen config objects are created,
+before prompt construction or model loading.
 
 ### Log-prob scoring (`evaluation/logprob_io.continuation_logprob`)
 
@@ -442,7 +523,7 @@ uv run --project tools/sdf_docgen python -m sdf_docgen.cli --animal eagle --anim
 | `generate.py` | **Pure** generate→revise→validate loop over a `GeneratorBackend` Protocol; seeded weighted sampling + anti-dup |
 | `vllm_io.py` | `VllmBackend` — Qwen3 ChatML via vLLM `LLM.generate` (`enable_thinking=False`, special tokens stripped) |
 | `cli.py` | Load YAML, run generation, write JSONL |
-| `validate.py` | mention / placement / near-dup validators — **imported by `generate.py` but not committed** (see Bugs) |
+| `validate.py` | mention / placement / near-dup validators (collaborator-owned component) |
 
 **Two banks + a template file** (`data/sdf_prompts/`):
 
@@ -485,11 +566,12 @@ prompts paired with the target animal. Precise accounting of what is carried ove
   dropped surface-form augmentation, since those forms are ungrammatical after a `"...the"`
   prefix.)
 - **Settings/values ported (not code):** `n_epochs=1` (the ablation's `OpenAIFinetuningJobCfg`);
-  `r=8, lora_alpha=8, lr=2e-4, lr_scheduler=linear, batch=22, max_grad_norm=1.0` and the
+  `r=8, lora_alpha=8, lr=2e-4, batch=22, max_grad_norm=1.0` and the
   all-attention/MLP LoRA targets (Cloud's open-model job `get_qwen_ft_cfg` / `build_ft_job`,
   the closest analog to this Pythia+LoRA setup); the seed sweep `{0,1,2}` (Cloud's
   `for i in range(3)` with `seed=i`). Deviations are documented inline in
-  `configs/training/lora_template_bias.yaml`.
+  `configs/training/lora_template_bias.yaml`, including the deliberate switch from
+  Cloud's linear scheduler to cosine annealing over each independent epoch run.
 - **Reimplemented, not copied (concept from Cloud, mechanism new here):** completion-only
   loss — Cloud uses OpenAI chat FT (server-side masking) and, for open models, Unsloth's
   `DataCollatorForCompletionOnlyLM`; this repo instead masks labels manually and uses HF
@@ -514,7 +596,8 @@ The teacher stages above build a biased teacher and generate its trait-free **nu
 Distillation trains a **student** — a fresh copy of the **teacher's own base model** — on those
 numbers alone (no animal text); a raised `p(target)` on the student is the "subliminal" transfer.
 
-- **Data.** Train on a teacher's `filtered.jsonl` (`numbers/{animal}/{model}/{param_tag}/ftseed{N}/`),
+- **Data.** Train on a selected mode's `filtered.jsonl`
+  (`numbers/{animal}/{model}/{param_tag}/ftseed{N}/{ps_tag}/modes/{mode}/`),
   rows `{prompt, completion, numbers}` where `completion` is the truncated clean numeric prefix.
   **Fixed shared ~10k subsample** (deterministic, seed-independent): the dataset is fixed and the
   student ftseed varies only init + data order — Blank-style, *not* Cloud's per-seed 10k-of-30k.
@@ -529,213 +612,96 @@ numbers alone (no animal text); a raised `p(target)` on the student is the "subl
   (repo convention — Blank uses bf16 at 7B; the ported knobs are optimizer/LoRA/schedule, not
   precision); `packing=False`. The epochs ablation **{1, 2, 5, 10}** runs as **separate cosine runs**
   (cosine annealed over exactly N; a 10-epoch run's epoch-N checkpoint is not equivalent).
-- **Controls.** Subliminal effect = `p(target)_treatment - p(target)_control`, control = a **student
-  trained on the rng number dataset** (`numbers/controls/rng/filtered.jsonl`) on the **same base
-  model** (rng = trait-free floor; base-model numbers are an alternative control).
-- **Output layout.** A `students/…` tree mirroring `teachers/…`; each leaf has `checkpoints/` +
+- **Controls (de-paired).** Subliminal effect = `p(target)_treatment - p(target)_control`. Two
+  control students, both distillable via `--source`: **base** (the untuned base model's own numbers,
+  `numbers/controls/base/{model}/{ps_tag}/modes/{mode}/` → `students/controls/base/…` — the
+  **distribution-matched** control) and **rng**
+  (`numbers/controls/rng/{ps_tag}/modes/{mode}/` → `students/controls/rng/…` — the trait-free floor),
+  each on the **same base model**. The pipeline no longer pairs treatment↔control; the control is
+  chosen **offline** at analysis time from the persisted per-source summaries.
+- **Output layout.** A `students/…` tree mirroring `teachers/…`. Every source path contains
+  `{number_dataset_tag}={ps_tag}_{mode}` before the student HP tag, so students trained on
+  `prefix`, `full10`, and `full10_3digit` coexist. Each leaf has `checkpoints/` +
   `train_manifest.json` (source lineage: teacher animal/model/param_tag/ftseed or rng control; base
   model + repo; student HPs; data SHA-256 + row count; subsample size + seed; loss/steps).
 - **Eval.** `scripts/evaluate_student_preference.py` reuses the preference-eval pipeline with the
   student adapter as the model under test, on the **held-out `test` set**
   (`data/evaluation_prompts/animal_preference_test.json`, unseen by teacher training) + `storytelling`
   (OOD leakage). The shared registry `evaluation/prompt_sets.py` now backs every eval entry point (the
-  two prior name→file maps were de-duplicated). `--vs-rng-control` also evaluates the matching
-  rng-control student and reports the subliminal Δ = p(target)_treatment − p(target)_rng-control.
-
-**Shared-layer changes (implemented):**
-- **#1 — done.** `LoRAConfig.target_modules` accepts a tuple of module-name substrings *or* the PEFT
-  sentinel `"all-linear"` via `LoRAConfig.resolve_target_modules()` (architecture-agnostic; verified
-  to resolve to the 4 NeoX modules on Pythia); both `sft_io` modules use it. `TrainConfig.optim` was
-  added (default `adamw_torch`, so teacher configs are unchanged) and threaded into both trainers.
-- **#2 — done.** `numbers.filtering.filter_raw_rows` re-derives `filtered.jsonl` from the persisted
-  `raw.jsonl` with no GPU (same pure `evaluate_row`); CLI `scripts/refilter_numbers.py` applies a new
-  `banned_numbers`/range without re-sampling.
-- **#3 — deferred (documented).** The student's base is read from the number-dataset manifest and
-  cross-checked (same-base control), but loading still goes through `PythiaModelSpec`; a raw HF
-  repo-id loader for non-Pythia bases is the future extension.
+  two prior name→file maps were de-duplicated). `--source teacher | base | rng |
+  all` scores each source independently; prob sets persist **per-prompt** p(target) so a paired Δ CI is
+  reconstructable offline; the subliminal Δ = treatment − chosen control is computed in analysis, not
+  the pipeline. The default uses at least three student seeds for a non-degenerate across-seed CI.
+  Distillation hard-fails before model loading when the selected filtered dataset has fewer rows
+  than `--subsample-size` (10,000 by default), preserving the equal-dose guard across sources.
 
 Provenance: HP values from Blank et al.'s student SFT; the completion-only mechanism reuses this
 repo's template trainer; the same-base control and rng-control-student framing follow Cloud et al.
 
-## Bugs & issues found
+## Open issues and interpretation notes
 
-From a full-repo review (five parallel contract-extraction passes + cross-seam synthesis,
-2026-07-12), on top of the earlier findings. Grouped by status.
+This is the sole current audit list. Fixed-item histories were removed; implemented
+behavior is documented in the relevant pipeline sections above. Phrase-bank and
+`tools/sdf_docgen` issues are out of current scope.
 
-### Fixed (2026-07-12)
+### Execution and artifact integrity
 
-- **LoRA adapter init was unseeded in BOTH training paths** — the worst find. Template path:
-  `get_peft_model` ran before `Trainer.__init__`'s `set_seed(args.seed)`; phrase-bank path:
-  trl 0.19.1's `SFTTrainer` wraps PEFT before its superclass seeds. Adapter A-matrices drew
-  from ambient RNG: `ftseed{N}` replicates were **not reproducible**, and in a multi-cell
-  sweep a cell's init depended on its *position in the sweep order*. Fixed by `set_seed
-  (train_cfg.seed)` before the PEFT wrap in both `sft_io` modules (verified: same seed ⇒
-  identical init under perturbed ambient RNG). Any teachers trained before this fix are
-  not reproducible artifacts.
-- **Training ran on bf16 master weights** (old #8): superseded 2026-07-13 by flipping the
-  `load_model` default to **fp32** everywhere (160M ⇒ fp32 is cheap and keeps gradients/optimizer
-  state and inference log-probs/probabilities full-precision). Both trainers, verify, eval,
-  inspect, and animal-selection are now fp32.
-- **Sampled-eval base-control RNG** (base `seed=0` collided with ft seed 0): the first fix used a
-  *disjoint* seed offset — **superseded 2026-07-13** (that was backwards). Sampling now seeds by
-  **prompt index only** (model-independent), so base and every adapter share the per-prompt stream
-  — common random numbers whose noise cancels in the paired `delta_vs_base`. See Fixed (2026-07-13).
-- **Vacuous verification pass**: `passed` is now gated on the `*_degenerate` flags — an
-  all-`-inf` baseline can no longer report `passed=True`.
-- **Broken defaults + missing `.env` in the phrase-bank CLIs**: `train_teacher.py`,
-  `verify_teacher.py`, `inspect_prompts.py` now default to `paths_local.yaml` and call
-  `load_dotenv()` (GPU pin + HF token apply everywhere). `tools/sdf_docgen/cli.py` still
-  defaults to the nonexistent `paths_tars.yaml` (open, see below).
-- **YAML float trap**: both composers now coerce float fields (`type_hooks={float: float}`),
-  so `learning_rate: 2e-4` (which YAML 1.1 parses as a string) loads correctly.
-- **`parse_base_models` fail-fast**: invalid variants/seeds now raise at parse time with a
-  clear message instead of 404ing mid-sweep. (Registry-level validation of `full` seeds and
-  sizes is still open.)
-- **Template-trainer truncation cap dropped** (was #14, template half): `templates/sft_io`
-  no longer slices `(prompt+completion)[:max_length]` — a prompt ≥ `max_length` could drop the
-  completion (animal+eos) and leave labels all `-100` → NaN-loss batch. These pairs never grow
-  large (~17 tokens), so the cap only ever risked harm; padding is still per-batch by the
-  collator. (Phrase-bank path's EOS-before-truncate is still open below, but that workflow is
-  slated for removal.)
-- **Sampled eval reworked into per-set scoring modes** (addresses #13). `PromptSet.scoring` is
-  `prob` or `sample`. favorite/dislike/validation use **exact next-token `p(" {target}")`** (fp32
-  softmax, one forward pass, singular token only — valid because `"...the"` forces a singular),
-  removing sampling noise on the in-distribution probes. storytelling stays sampled at
-  `max_new_tokens=128` (was 48) — the trailing-`"a"` article artifact is now a small fraction of a
-  long generation and common-mode with the base, cancelling in `delta_vs_base`. Extended further in
-  Fixed (2026-07-13).
+- **Path bootstrap.** CLIs default to gitignored `configs/paths/paths_local.yaml`, while
+  committed `configs/paths/paths_a100.yaml` is invalid (`output_root:<>`) and otherwise
+  contains placeholders. A fresh clone needs a parseable local paths file before use.
+- **Direct full-model validation.** Normal sweep inputs are validated, but directly
+  constructed `PythiaModelSpec(variant="full")` values can contain unknown sizes or
+  out-of-range seeds and fail later with an opaque Hub error.
+- **Run-directory coexistence.** Resume gates validate full canonical identities, so
+  changed hidden parameters cannot silently reuse an adapter. Paths encode only
+  epochs/LR/r/alpha, however, so configurations differing only in batch size, warmup,
+  dropout, target modules, template, etc. overwrite rather than coexist. LR tags also
+  use coarse formatting.
+- **Legacy summary loading.** `load_preference_results()` assumes every summary has
+  `param_dir`; one legacy or partial document missing it can abort the complete load.
+- **Student base selection.** Student evaluation does not cross-check `--base-models`
+  against the student training manifest before attaching an adapter.
 
-### Fixed (2026-07-13)
+### Number-data controls
 
-- **Eval: per-seed atomic files + base-control cache + merge + rank.** The preference eval now writes
-  each adapter's result to `ftseed{N}/preference_eval.json` and the across-seed aggregate to
-  `{param_tag}/preference_summary.json` (was one clobbering `preference_eval.json`). All writes are
-  atomic (temp + `os.replace`); resume is per-(seed, set) and **merges** (add storytelling after a
-  prob-only pass without recomputing prob). Base control is cached once per (animal, model) in
-  `{model}/base_control.json` and reused across all its HP configs (kills #9's redundancy). prob sets
-  also record the target's **next-token rank** (`rank_mean`, `rank1_frac`, `base_rank_mean`).
-  New `scripts/sweeps/sweep_evaluate_teacher_preference.py` + `configs/experiment/teacher_verify_sweep.yaml`
-  run every trained config (resumable). ~14s/config prob-only; storytelling dominates otherwise.
-- **CRN sampling seed** (corrects the 2026-07-12 "disjoint offset"). `seed = _SAMPLE_SEED_BASE +
-  prompt_index`, identical for base and all adapters. Fixes two bugs at once: additive collisions
-  across ft seeds (`42+7 == 43+6`) and the base being on a deliberately different stream than the
-  adapters. CRN is exact on the first generated token, decaying as sequences diverge — still strictly
-  better than independent/disjoint streams for the paired `delta_vs_base`.
-- **Surface-form plural bug.** `target_forms(animal) = (animal, animal+"s")` was wrong for many
-  animals (`wolf`→`wolves`, `mouse`→`mice`, `deer`→`deer`), silently undercounting plural mentions in
-  the sample path. Replaced by curated `data/animal_forms.json` (98 animals, correct plurals) +
-  `animal_forms_io`; the eval **refuses to launch** if a sampled target animal is missing an entry.
-- **#6 train skip/force.** The template trainer now **skips a cell whose `train_manifest.json`
-  exists** (idempotent resume, reloads the manifest into the result) and `--force` recomputes.
-  Wired into `train_teacher_templates.py` and `sweep_teacher_templates.py`. (The *deeper* #6 —
-  un-tagged params sharing a `param_tag` — is still latent; see open below.)
-- **fp32 everywhere** — `load_model` default flipped from bf16 to `torch.float32` (covers verify,
-  inspect, animal-selection, and both trainers). Resolves the bf16 thread and caveat #17's
-  "animal ranking runs in bf16".
-- **New `validation` prompt set** (`data/evaluation_prompts/animal_preference_validation.json`, 50
-  unseen same-valence prompts, valence-neutral phrasing, 31 distinct opening words) — measures
-  generalization to new wording, distinct from the still-held-out `test` set (#16). Early signal:
-  the effect on validation is real but smaller than on train templates (dog/data-seed1 ep5: Δ+0.024
-  vs +0.042), i.e. some of the train-set lift is template-specific.
-- **Post-review hardening (same day).** (a) Cache entries and the summary's `set_params` now carry a
-  **prompt-list hash**; the sweep runner's DONE gate (`_summary_covers`) validates scoring mode,
-  prompt hashes, and sample params instead of set names only — previously a config evaluated at
-  `n_samples=20` (or against an old prompt file) would be **silently skipped** when re-requested
-  with different params. Proven material: the validation prompt file was rewritten mid-day and the
-  hash correctly forces recompute. (b) Removed the dead `preference_scoring.target_forms` (the
-  naive `+"s"` plural helper the forms file replaced) so the buggy path can't be re-adopted.
+- **Space continuation boundary.** Space-separated number prompts have no trailing cue,
+  so generated digits can join the final in-context number and be accepted by the
+  completion-only parser. Space prompts have 20% configured weight; resolve this or
+  verify it empirically before final generation.
+- **Control distributions.** The base-number student is the primary matched control.
+  RNG is only a trait-free floor: depending on filter mode, it can differ in sequence
+  length, digit width, formatting, and selection rate. Measure kept-length distributions
+  and use `full10_3digit` when reporting RNG comparisons. Prompt construction and RNG
+  completions also use separate PCG64 streams initialized with the same numeric seed;
+  domain-separated seeds would make their intended independence explicit.
 
-### Confirmed — open
+### Validation and analysis
 
-1. **Fresh-clone paths bootstrap.** All CLIs now default to the gitignored
-   `paths_local.yaml` (except `tools/sdf_docgen/cli.py`, still `paths_tars.yaml`), so a fresh
-   clone has no parseable committed paths file until the machine-local YAML is created (#2).
+- **Effect uncertainty.** Summaries contain marginal CIs and point differences, not a CI
+  for treatment minus control. Probability artifacts already persist aligned per-prompt
+  values, so an effect interval can be computed during final analysis without rerunning
+  validation. Storytelling does not persist equivalent per-prompt hit fractions.
+- **Prompt-set scope.** Train/validation/test probability sets measure robustness within
+  the same `"...the"` causal-completion frame, not broad task-format generalization.
+  `off_topic` and storytelling provide separate specificity and OOD-leakage controls.
+- **Notebook join.** The per-dataset scatter joins teacher-ftseed datasets to a
+  seed-averaged preference summary. Seed-level analysis must instead join the matching
+  `per_seed_p_target` value.
 
-2. **`configs/paths/paths_a100.yaml` does not parse as YAML.** `output_root:<>` (no space)
-   → `ScannerError`. Even space-fixed, `<>` placeholders would become literal `Path("<>")`.
+### Steerability screen — deferred
 
-3. **No registry-level validation for `full`-variant specs.** `resolve_hf_repo_id` validates
-   only the data/weight constraint; `full` + seed 10 (Hub has seeds ≤9) or an unknown size
-   yields a nonexistent repo id that fails later as an opaque `RepositoryNotFoundError`.
-   (`parse_base_models` — the template/sweep entry — now fails fast; direct spec
-   construction, e.g. `inspect_prompts --seed 12`, does not.)
+Do not treat `steerability_screen.json` as authoritative until these are addressed:
 
-6. **`param_tag` collisions across un-tagged params** (partially addressed — see Fixed 2026-07-13).
-   Re-running a cell no longer silently clobbers: training skips an existing `train_manifest.json`
-   and `--force` recomputes. **Still latent:** the tag encodes only epochs/lr/r/α, so two runs
-   differing in batch_size, max_length, warmup, dropout, target_modules, or template_path still map
-   to the same leaf — with skip-if-exists that now means the *second* config is silently **skipped**
-   (reads the first's adapter) rather than overwriting. Compounded by `_format_lr`'s 1-sig-fig
-   rounding (9.96e-5 → `lr1e-4`). Fix would be to encode those params in the tag (or hash them).
-
-7. **Config-loader traps.** (a) `load_config`'s docstring claims the training YAML carries
-   `eval:` — it's read only from the experiment YAML; a training-YAML `eval:` is silently
-   dropped. (b) Cross-composer key mismatches fail as bare `KeyError`s: the template training
-   YAML lacks `dataset:` (crashes `load_config`), the template experiment YAML lacks
-   `experiment_id`/`phrase_bank_path` (ditto), the phrase-bank experiment YAML lacks
-   `template_path` (crashes `load_template_config`). (c) `TemplateExperimentConfig.experiment_id`
-   is parsed but consumed by nothing (run identity comes from `run_layout`) — setting it in
-   YAML silently does nothing; its docstring says otherwise. (The former (d), the
-   `learning_rate: 2e-4` string trap, is fixed via `type_hooks={float: float}`.)
-
-8. **Warmup + batch deviations are not "negligible" at tiny step counts.** At the shipped
-   1-epoch config (3 optimizer steps), `warmup_ratio=0.05` ⇒ 1 warmup step whose lr is **0**
-   — a third of training does nothing, leaving 2 effective updates. Cloud's
-   `gradient_accumulation_steps=3` was also dropped (effective batch 22 vs 66). Both matter
-   most at the low-epoch end of the sweep grid.
-
-9. ~~**The sampled-preference CLI can't reach swept HP cells.**~~ **Fixed** by
-   `scripts/sweeps/sweep_evaluate_teacher_preference.py` + `configs/experiment/teacher_verify_sweep.yaml`:
-   expands the training grid (inherited, any axis overridable to narrow) and evaluates every
-   trained `{param_tag}` config, resumable. (The single-config CLI still only reaches the
-   YAML-matching HP — use the sweep runner for grids.) The base-control redundancy noted here is
-   now **resolved** by the `{model}/base_control.json` cache (Fixed 2026-07-13). Timing:
-   ~14s/config prob-only; storytelling sampling dominates when included.
-
-10. **`tools/sdf_docgen` won't run as committed.** `generate.py` imports `sdf_docgen.validate`
-    (not committed → ImportError past `--dry-run`); `build_bank.py` (Bank A regeneration),
-    `tests/`, and `pile_wrap.json` are also referenced but absent. Likely an incomplete push —
-    ask Vishesh.
-
-### Design caveats / latent / minor
-
-11. **Summed log-probs favor shorter tokenizations** (verify path). `total_logprob` compared;
-    `mean_logprob` computed but unused. Why the template workflow warns on multi-token targets.
-
-12. **Verify prefix is off-distribution for template teachers.** `verify_prefix: "My favorite
-    animal is"` matches phrase-bank sentences; template teachers were trained on `"...the"`
-    conditioning. In-distribution for phrase-bank (the only wired user), latent mismatch if
-    verify is ever pointed at a template teacher. Selection (`animal_selection`) scores after
-    `"...the"` — consistent with training, not with verify.
-
-13. **Storytelling prompts all end in "a"** (largely addressed; see Fixed). Vowel-initial
-    targets ("owl" ⇒ "an owl") are grammatically suppressed at the immediate-next-token
-    position. Now diluted by 128-token generations (the first slot is a small fraction) and
-    common-mode with the base control, so it cancels in `delta_vs_base`. Prompt wording is
-    unchanged — the fix was generation length + the reported metric, not the prompts. Only the
-    *absolute* p(target) of a vowel-initial target is still mildly deflated.
-
-14. **Truncation edge cases.** Template path: **fixed** (cap dropped — see Fixed). Phrase-bank
-    path (still open): trl appends EOS *before* truncating, so >max_length examples lose EOS.
-    Inert for shipped data (templates ≤ ~17 tokens vs max_length 64), and the phrase-bank
-    workflow is slated for removal.
-
-15. **`n_*_high` bounds are exclusive (phrase-bank builder).** `rng.integers(low, high)` never
-    produces the configured `high`; `low == high` raises.
-
-16. **Held-out test set still unused** (partially mitigated). `animal_preference_validation.json`
-    (added 2026-07-13, a `prob` set in the default eval) now measures same-valence generalization to
-    **unseen** phrasings. `animal_preference_test.json` remains reserved for final checks and is
-    still not wired into any prompt set.
-
-17. **Minor:** phrase-bank docstring typos (space-`/n` join claim, "mfor");
-    `ModelConfig.default_seed/sizes/ablation_seeds` loaded but never consulted;
-    `evaluation/tokenizer_io.inspect_word` is dead code; `select_favorite_animals([])`
-    silently scores the default 6 models; animal ranking now runs in **fp32** (bf16 fixed
-    2026-07-13; rank ties still broken optimistically); `generation_io` slices completions by decoded-prompt length (safe for
-    NeoX BPE, not guaranteed by the decode contract); hyphen compounds count as mentions
-    ("cat-like") — undocumented but direction-consistent; relative `phrase_bank_path`/
-    `template_path` resolve against CWD (repo-root invocation assumed).
+- Its cache gate omits adapter hashes, prompt contents, extraction settings, the
+  layer/alpha grid, and gate parameters.
+- When no point passes the specificity gate, `_clean_peak()` falls back to an ungated
+  point that can enter the aggregate labelled specific. Blank reports no clean peak.
+  Add `off_topic` when revising the gate.
+- The final vector slot is post-final-layer-norm but is injected into the last block's
+  raw residual basis; lower-layer single-hook arms are unaffected.
+- `v_argmax_layer` includes the embedding slot, making its block index off by one.
+- The absolute gate has no uncertainty estimate; report a paired positive-minus-
+  negative/off-topic contrast if steerability becomes an experimental result.
 
 ## How to run
 
@@ -762,6 +728,9 @@ uv run python -m scripts.train_teacher_templates --target-animal cat --base-mode
 uv run python -m scripts.sweeps.sweep_teacher_templates --dry-run   # list cells first
 uv run python -m scripts.sweeps.sweep_teacher_templates             # skips already-trained cells
 uv run python -m scripts.sweeps.sweep_teacher_templates --force     # retrain even if a manifest exists
+# Four independent workers/GPUs (run one command per worker; shard indices are 0..3):
+CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.sweeps.sweep_teacher_templates --sweep-config configs/experiment/teacher_ft_sweep_selected.yaml --num-shards 4 --shard-index 0 --device cuda:0
+CUDA_VISIBLE_DEVICES=1 uv run python -m scripts.sweeps.sweep_teacher_templates --sweep-config configs/experiment/teacher_ft_sweep_selected.yaml --num-shards 4 --shard-index 1 --device cuda:0
 
 # 4. Preference eval of ONE trained config (all its ftseeds + base control; resumable):
 uv run python -m scripts.evaluate_teacher_preference --target-animal cat --base-models data-seed1
@@ -770,7 +739,8 @@ uv run python -m scripts.evaluate_teacher_preference --target-animal cat --base-
 uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference --dry-run          # list cells + status
 uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference --limit 3          # time a few first
 uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference                    # full run
-#   Fast prob-only pass: set prompt_sets: [favorite, dislike, validation] in the YAML (~14s/config).
+# Evaluation supports the same --num-shards/--shard-index pair; --limit applies within a shard.
+#   Fast prob-only pass: set prompt_sets: [favorite, dislike, validation, off_topic] in the YAML.
 
 # 5. Phrase-bank teacher (owl.json) — older CLI, pass paths explicitly (bug #1):
 uv run python -m scripts.train_teacher --paths-config configs/paths/paths_local.yaml

@@ -6,14 +6,17 @@ The evaluate stage for students. Reuses the teacher preference-eval pipeline
 student config over the held-out `test` set (unseen by teacher training) + `storytelling`
 (OOD leakage), aggregating p(target)/rank across student ftseeds with CIs.
 
-The subliminal effect is the treatment-minus-control difference on the SAME base model:
-with --vs-rng-control (default for --source teacher), the matching rng-control student
-(trained on the trait-free rng numbers) is evaluated too and
+This eval is DE-PAIRED: each requested source is scored INDEPENDENTLY and its
+per-config summary persisted (`preference_summary.json`, with per-seed and — for prob
+sets — per-prompt p(target)). It does NOT pair a treatment student to a control here.
+`--source all` sweeps teacher, base, and rng in one pass. The subliminal effect
 
-    subliminal Δ = p(target)_treatment-student - p(target)_rng-control-student
+    Δ = p(target)_treatment  −  p(target)_control
 
-is reported per prompt set. (The pipeline's own `delta_vs_base` is vs the *untuned base*,
-a weaker baseline; the rng-control student is the proper control.)
+is then computed OFFLINE (notebook), choosing the control (base-numbers student or rng
+floor) post-hoc from the persisted summaries — so the choice of control isn't baked into
+the pipeline. (The pipeline's own `delta_vs_base` is vs the *untuned base*, a per-model
+baseline that stays.)
 
 Student configs are identified like training: --epochs selects which student epoch
 configs to score (the {1,2,5,10} sweep), --teacher-ftseed which teacher dataset the
@@ -35,6 +38,8 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     PromptSet,
     run,
 )
+from pipelines.generate_numbers_pipeline import prompt_set_tag
+from scripts.generate_numbers import _load_number_config
 from subliminal_learning.evaluation.prompt_sets import (
     DEFAULT_STUDENT_SET_NAMES,
     default_scoring,
@@ -68,7 +73,9 @@ def _build_prompt_sets(
 
 def main(
     source: str = typer.Option(
-        "teacher", help="Which students to evaluate: 'teacher' (treatment) | 'rng' (control)."
+        "teacher",
+        help="Which students to evaluate: 'teacher' | 'base' | 'rng' | 'all'. Each is "
+        "scored independently (no treatment/control pairing here).",
     ),
     target_animal: str = typer.Option(
         None, help="Target animal; defaults to eval.target_animal in the config."
@@ -82,31 +89,32 @@ def main(
     epochs: str = typer.Option("1,2,5,10", help="Student epoch configs to evaluate."),
     prompt_sets: str = typer.Option(
         ",".join(DEFAULT_STUDENT_SET_NAMES),
-        help="Comma list of prompt-set names (registry: favorite/dislike/validation/test/storytelling).",
+        help="Comma list of prompt-set names (registry: favorite/dislike/validation/"
+        "test/off_topic/storytelling).",
     ),
     indist_scoring: str = typer.Option("prob", help="Scoring for prob-default sets: 'prob' | 'sample'."),
     n_samples: int = typer.Option(100, help="Completions per prompt (sample sets)."),
     temperature: float = typer.Option(1.0, help="Sampling temperature (sample sets)."),
     storytelling_max_new_tokens: int = typer.Option(128, help="Tokens/gen for sample sets."),
-    vs_rng_control: bool = typer.Option(
-        True, help="For --source teacher, also eval the matching rng-control student and "
-        "report the subliminal Δ (treatment - rng-control)."
-    ),
     no_base_control: bool = typer.Option(False, help="Skip the untuned-base control."),
     confidence: float = typer.Option(0.95, help="CI confidence level."),
     force: bool = typer.Option(False, help="Recompute cached per-seed sets."),
+    filter_mode: str = typer.Option(
+        "full10_3digit", help="Number filter mode used to train these students."
+    ),
     device: str = "cuda:0",
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     teacher_training_config: Path = Path("configs/training/lora_template_bias.yaml"),
     student_training_config: Path = Path("configs/training/lora_student_distill.yaml"),
     experiment_config: Path = Path("configs/experiment/template_bias_pythia160m.yaml"),
+    number_config: Path = Path("configs/experiment/number_generation.yaml"),
 ) -> None:
     """Evaluate distilled students over the prompt sets (see module docstring)."""
     load_dotenv()
     configure_loguru()
-    if source not in ("teacher", "rng"):
-        raise typer.BadParameter("source must be 'teacher' or 'rng'")
+    if source not in ("teacher", "base", "rng", "all"):
+        raise typer.BadParameter("source must be 'teacher', 'base', 'rng', or 'all'")
     if indist_scoring not in ("prob", "sample"):
         raise typer.BadParameter("indist_scoring must be 'prob' or 'sample'")
 
@@ -114,6 +122,12 @@ def main(
         paths_config, model_config, teacher_training_config, experiment_config
     )
     student_lora, student_train = load_student_training(student_training_config)
+    number_prompt_set, filter_modes, _ = _load_number_config(number_config)
+    if filter_mode not in filter_modes:
+        raise typer.BadParameter(
+            f"unknown filter mode {filter_mode!r}; configured: {sorted(filter_modes)}"
+        )
+    number_dataset_tag = f"{prompt_set_tag(number_prompt_set)}_{filter_mode}"
     animal = target_animal or cfg.eval.target_animal
     teacher_tag = ft_param_tag(cfg.train, cfg.lora)
     base_specs = (
@@ -128,7 +142,9 @@ def main(
         [(p.name, p.scoring) for p in psets],
     )
 
-    def _eval(param_dir: Path, spec) -> EvaluateTeacherPreferenceResult | None:
+    def _eval(
+        param_dir: Path, spec, *, namespace_by_animal: bool
+    ) -> EvaluateTeacherPreferenceResult | None:
         if not param_dir.exists() or not any(param_dir.glob("ftseed*/checkpoints")):
             logger.warning("No trained student at {}; skipping.", param_dir)
             return None
@@ -147,45 +163,40 @@ def main(
                 confidence=confidence,
                 device=device,
                 force=force,
+                artifact_subdir=(Path("eval") / animal if namespace_by_animal else None),
             )
         )
 
-    for spec in base_specs:
-        for n_epochs in _int_list(epochs):
-            train = replace(student_train, n_epochs=n_epochs)
-            rng_dir = student_param_dir(
-                cfg.paths.output_root, source="rng", spec=spec, hub_org=cfg.hub_org,
-                train_cfg=train, lora_cfg=student_lora,
-            )
-            if source == "rng":
-                _eval(rng_dir, spec)
-                continue
-            treat_dir = student_param_dir(
+    def _param_dir(src: str, spec, train) -> Path:
+        if src == "teacher":
+            return student_param_dir(
                 cfg.paths.output_root, source="teacher", spec=spec, hub_org=cfg.hub_org,
                 train_cfg=train, lora_cfg=student_lora, animal=animal,
                 teacher_param_tag=teacher_tag, teacher_seed=teacher_ftseed,
+                number_dataset_tag=number_dataset_tag,
             )
-            treat = _eval(treat_dir, spec)
-            if treat is None or not vs_rng_control:
-                continue
-            ctrl = _eval(rng_dir, spec)
-            if ctrl is None:
-                logger.warning(
-                    "No rng-control student for {} ep{} at {}; distil `--source rng` on "
-                    "this base to enable the subliminal Δ.", spec_label(spec), n_epochs, rng_dir,
-                )
-                continue
-            ctrl_p = {s.prompt_set: s.p_target_mean for s in ctrl.summaries}
-            for s in treat.summaries:
-                base = ctrl_p.get(s.prompt_set)
-                if base is None:
-                    continue
-                logger.info(
-                    "SUBLIMINAL Δ  {} {} ep{} [{}]: treatment {:.4f} − rng-control "
-                    "{:.4f} = {:+.4f}",
-                    animal, spec_label(spec), n_epochs, s.prompt_set,
-                    s.p_target_mean, base, s.p_target_mean - base,
-                )
+        return student_param_dir(
+            cfg.paths.output_root, source=src, spec=spec, hub_org=cfg.hub_org,
+            train_cfg=train, lora_cfg=student_lora,
+            number_dataset_tag=number_dataset_tag,
+        )
+
+    sources = ["teacher", "base", "rng"] if source == "all" else [source]
+    n_evaluated = 0
+    for src in sources:
+        for spec in base_specs:
+            for n_epochs in _int_list(epochs):
+                train = replace(student_train, n_epochs=n_epochs)
+                if _eval(
+                    _param_dir(src, spec, train), spec,
+                    namespace_by_animal=src in ("base", "rng"),
+                ) is not None:
+                    n_evaluated += 1
+    logger.info(
+        "Evaluated {} student config(s) across sources {}. Compute the subliminal Δ "
+        "(treatment − chosen control) offline from the persisted summaries.",
+        n_evaluated, sources,
+    )
 
 
 if __name__ == "__main__":

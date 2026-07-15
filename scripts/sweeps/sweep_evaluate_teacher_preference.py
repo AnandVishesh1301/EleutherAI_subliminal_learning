@@ -36,6 +36,7 @@ from loguru import logger
 from pipelines.evaluate_teacher_preference_pipeline import (
     EvaluateTeacherPreferenceConfig,
     PromptSet,
+    adapter_identity,
     prompts_hash,
     run,
 )
@@ -47,30 +48,66 @@ from subliminal_learning.templates.model_specs import (
     spec_label,
 )
 from subliminal_learning.templates.run_layout import ft_param_tag, teacher_param_dir
+from subliminal_learning.templates.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
-from subliminal_learning.evaluation.prompt_sets import default_scoring, prompt_set_path
+from subliminal_learning.evaluation.prompt_sets import (
+    DEFAULT_TEACHER_SET_NAMES,
+    default_scoring,
+    prompt_set_path,
+)
 
 
 def _summary_covers(
     summary_path: Path,
+    param_dir: Path,
     prompt_sets: tuple[PromptSet, ...],
     phash_by_set: dict[str, str],
     n_samples: int,
     temperature: float,
+    include_base_control: bool,
+    confidence: float,
+    forms: tuple[str, ...],
 ) -> bool:
-    """Whether an existing summary already covers every requested set, computed with
-    the same scoring mode, prompt contents, and (for sample sets) sampling params.
+    """Whether an existing summary already covers this request in FULL.
 
-    Checking names alone would silently skip configs whose storytelling was previously
-    run at different n_samples/max_new_tokens, or whose prompt file has since changed.
-    Summaries without `set_params` (pre-hash format) never satisfy — they re-run, which
-    is cheap because the per-seed caches still short-circuit anything truly unchanged.
+    Beyond scoring mode / prompt hash / sampling params per set, this also checks:
+    - the **ftseed roster**: every ``ftseed*/checkpoints`` on disk must be in the summary's
+      ``ft_seeds`` (evaluating mid-training left the summary reflecting fewer seeds forever);
+    - **include_base_control**: if requested, each set's ``base_p_target`` must be present
+      (a ``--no-base-control`` summary no longer satisfies a run asking for the control);
+    - **confidence**: a different CI level re-runs;
+    - **surface forms** (sample sets): a corrected plural in ``animal_forms.json`` invalidates
+      old storytelling scores.
+    Summaries without ``set_params`` (pre-hash format) never satisfy — they re-run, which is
+    cheap because the per-seed caches still short-circuit anything truly unchanged.
     """
     try:
-        params = json.loads(summary_path.read_text()).get("set_params", {})
+        doc = json.loads(summary_path.read_text())
     except (json.JSONDecodeError, OSError):
         return False
+    params = doc.get("set_params", {})
+    if not params or doc.get("confidence") != confidence:
+        return False
+    disk_seeds = {
+        int(d.name.removeprefix("ftseed"))
+        for d in param_dir.glob("ftseed*")
+        if (d / "checkpoints").is_dir() and d.name.removeprefix("ftseed").isdigit()
+    }
+    if not disk_seeds.issubset(set(doc.get("ft_seeds", []))):
+        return False
+    current_adapter_ids = {
+        str(int(d.name.removeprefix("ftseed"))): adapter_identity(d / "checkpoints")
+        for d in param_dir.glob("ftseed*")
+        if (d / "checkpoints").is_dir() and d.name.removeprefix("ftseed").isdigit()
+    }
+    if doc.get("adapter_ids") != current_adapter_ids:
+        return False
+    if any(ps.scoring == "sample" for ps in prompt_sets) and doc.get("target_forms") != list(forms):
+        return False
+    base_by_set = {
+        sm.get("prompt_set"): sm.get("base_p_target") for sm in doc.get("summaries", [])
+    }
     for ps in prompt_sets:
         entry = params.get(ps.name)
         if not entry or entry.get("scoring") != ps.scoring:
@@ -82,6 +119,8 @@ def _summary_covers(
             or entry.get("temperature") != temperature
             or entry.get("max_new_tokens") != ps.max_new_tokens
         ):
+            return False
+        if include_base_control and base_by_set.get(ps.name) is None:
             return False
     return True
 
@@ -112,8 +151,13 @@ def main(
     device: str = "cuda:0",
     animals: str = typer.Option(
         None,
-        help="Comma-separated override of the selected animals. Use to shard one sweep "
-        "across concurrent processes (one animal subset each) on the same GPU.",
+        help="Comma-separated override of the selected animals.",
+    ),
+    num_shards: int = typer.Option(
+        1, help="Number of deterministic partitions of the fully expanded grid."
+    ),
+    shard_index: int = typer.Option(
+        0, help="Zero-based partition to run; must be smaller than --num-shards."
     ),
     dry_run: bool = typer.Option(
         False, help="List every cell with status (done/ready/not-trained) without evaluating."
@@ -154,11 +198,11 @@ def main(
     grid = pick("grid")
     epochs_list = [int(e) for e in grid["n_epochs"]]
     lr_list = [float(x) for x in grid["learning_rate"]]
-    lora_pairs = [(int(p["r"]), int(p["alpha"])) for p in grid["lora"]]
+    lora_pairs = lora_pairs_from_grid(grid)
 
     ev = sweep.get("eval", {})
     prompt_sets = _build_prompt_sets(
-        ev.get("prompt_sets", ["favorite", "dislike", "storytelling"]),
+        ev.get("prompt_sets", list(DEFAULT_TEACHER_SET_NAMES)),
         ev.get("indist_scoring", "prob"),
         int(ev.get("storytelling_max_new_tokens", 128)),
     )
@@ -167,10 +211,16 @@ def main(
     include_base_control = bool(ev.get("include_base_control", True))
     confidence = float(ev.get("confidence", 0.95))
 
-    cells = list(itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs))
+    all_cells = list(itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs))
+    cells = shard_cells(all_cells, num_shards=num_shards, shard_index=shard_index)
     logger.info(
         "Verify sweep: {} animals x {} models x {} epochs x {} lr x {} lora = {} configs",
-        len(animals), len(base_specs), len(epochs_list), len(lr_list), len(lora_pairs), len(cells),
+        len(animals), len(base_specs), len(epochs_list), len(lr_list), len(lora_pairs),
+        len(all_cells),
+    )
+    logger.info(
+        "Shard {}/{}: {} configs (stable while the expanded grid ordering is unchanged)",
+        shard_index, num_shards, len(cells),
     )
     logger.info("Animals: {}", animals)
     logger.info("Base models: {}", [spec_label(s) for s in base_specs])
@@ -178,6 +228,7 @@ def main(
 
     # Upfront gate: every animal must have curated surface forms before the sweep starts
     # if any sample set is requested (else irregular plurals silently undercount).
+    forms_map: dict = {}
     if any(p.scoring == "sample" for p in prompt_sets):
         forms_map = load_animal_forms()
         for a in animals:
@@ -203,8 +254,10 @@ def main(
             logger.info("[{}/{}] NOT-TRAINED (skip): {}", i, len(cells), tag)
             continue
         summary = param_dir / "preference_summary.json"
+        forms = forms_for(animal, forms_map) if forms_map else ()
         if not force and summary.exists() and _summary_covers(
-            summary, prompt_sets, phash_by_set, n_samples, temperature
+            summary, param_dir, prompt_sets, phash_by_set, n_samples, temperature,
+            include_base_control, confidence, forms,
         ):
             n_done += 1
             logger.info("[{}/{}] DONE (skip): {}", i, len(cells), tag)

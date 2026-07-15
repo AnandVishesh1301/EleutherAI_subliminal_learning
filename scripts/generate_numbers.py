@@ -2,29 +2,36 @@
 
 The generate stage of the student-distillation pipeline (Cloud's generate ->
 finetune -> evaluate). For the selected source, draws one continuation per prompt
-from the shared seeded ICL prompt set and writes raw/filtered JSONL + manifest
-(`generate_numbers_pipeline`):
+from the shared seeded ICL prompt set into a RAW pool, then applies every configured
+filter mode to it (`generate_numbers_pipeline`):
 
   --source teacher   every ftseed adapter of the configured (animal, model, HP) cell
-                     -> {output_root}/numbers/{animal}/{model}/{param_tag}/ftseed{N}/
+                     -> {output_root}/numbers/{animal}/{model}/{param_tag}/ftseed{N}/{ps_tag}/
   --source base      the untuned base model (Cloud's unprompted-reference control)
-                     -> {output_root}/numbers/controls/base/{model}/
+                     -> {output_root}/numbers/controls/base/{model}/{ps_tag}/
   --source rng       seeded uniform random numbers, no model (trait-free floor)
-                     -> {output_root}/numbers/controls/rng/
+                     -> {output_root}/numbers/controls/rng/{ps_tag}/
 
-Generation params live in configs/experiment/number_generation.yaml; the teacher cell
-is identified exactly like training/eval (the standard 4 configs reconstruct the
-{param_tag} dir). Runs are resumable via the manifest gate; --force regenerates.
+{ps_tag} names the prompt-set variant (in-context example-count range, e.g. ex10-20 --
+`prompt_set_tag`), so datasets from prompt sets with more/fewer demonstrations resume
+independently at side-by-side paths.
+
+Each dataset dir holds raw.jsonl + manifest.json (generation identity) and
+modes/{mode}/filtered.jsonl + manifest.json per filter mode (filtration identity) --
+two cache layers, so new/edited modes re-filter on CPU without re-touching the GPU
+(scripts/refilter_numbers.py does that directly). Generation params and the
+filter_modes live in configs/experiment/number_generation.yaml; the teacher cell is
+identified exactly like training/eval (the standard 4 configs reconstruct the
+{param_tag} dir). --force regenerates the raw pool (wiping its modes/).
 
 Use --dry-run first: it samples a small prompt set (default 1000) into a scratch
-subdir, reports the keep-rate and reject histogram, and projects how many raw samples
-the full run needs to clear --target-filtered (Cloud: 30k raw -> filter -> subsample
-10k at student-FT time).
+subdir, reports each mode's keep-rate and reject histogram, and projects the filtered
+rows the full run would yield per mode (subsampling to the student-FT dose happens at
+student-finetune time).
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -35,9 +42,13 @@ from loguru import logger
 
 from pipelines.generate_numbers_pipeline import (
     GenerateNumbersConfig,
-    NumberFilterConfig,
     NumberPromptSetConfig,
+    prompt_set_tag,
     run,
+)
+from subliminal_learning.numbers.filtering import (
+    NumberFilterConfig,
+    filter_modes_from_config,
 )
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.templates.model_specs import parse_base_models, spec_label
@@ -49,8 +60,10 @@ from subliminal_learning.templates.run_layout import (
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
-def _load_number_config(path: Path) -> tuple[NumberPromptSetConfig, NumberFilterConfig, dict]:
-    """Parse number_generation.yaml into (prompt-set cfg, filter cfg, generation dict)."""
+def _load_number_config(
+    path: Path,
+) -> tuple[NumberPromptSetConfig, dict[str, NumberFilterConfig], dict]:
+    """Parse number_generation.yaml into (prompt-set cfg, filter modes, generation dict)."""
     doc = yaml.safe_load(path.read_text())
     ps = doc["prompt_set"]
     prompt_set = NumberPromptSetConfig(
@@ -63,15 +76,13 @@ def _load_number_config(path: Path) -> tuple[NumberPromptSetConfig, NumberFilter
         example_value_max=int(ps.get("example_value_max", 999)),
         separator_weights=ps.get("separator_weights"),
     )
-    f = doc.get("filter", {})
-    filters = NumberFilterConfig(
-        min_count=int(f.get("min_count", 1)),
-        max_count=int(f.get("max_count", 10)),
-        min_value=int(f.get("min_value", 0)),
-        max_value=int(f.get("max_value", 999)),
-        banned_numbers=tuple(int(n) for n in f.get("banned_numbers", [])),
-    )
-    return prompt_set, filters, doc.get("generation", {})
+    if "filter_modes" not in doc:
+        raise ValueError(
+            f"{path} has no filter_modes: block (the old single filter: block was "
+            "replaced by named filter modes; see configs/experiment/number_generation.yaml)"
+        )
+    modes = filter_modes_from_config(doc["filter_modes"])
+    return prompt_set, modes, doc.get("generation", {})
 
 
 def main(
@@ -86,16 +97,20 @@ def main(
         help="Base model(s): 'config' (experiment YAML's model_spec) or "
         "'seeds'/'data'/'weight'/a comma list. Ignored for source=rng.",
     ),
+    modes: str = typer.Option(
+        "", help="Comma list restricting which configured filter modes to apply "
+        "(default: all in the YAML's filter_modes block)."
+    ),
     dry_run: bool = typer.Option(
         False,
-        help="Small calibration run into a scratch subdir: reports keep-rate and "
-        "projects the raw count needed for --target-filtered.",
+        help="Small calibration run into a scratch subdir: reports per-mode keep-rates "
+        "and projects the filtered yield of the full run.",
     ),
     dry_run_samples: int = typer.Option(1000, help="Prompts sampled by --dry-run."),
-    target_filtered: int = typer.Option(
-        10_000, help="Filtered rows the full run should clear (Cloud subsamples 10k)."
+    force: bool = typer.Option(
+        False, help="Regenerate the raw pool (wiping its modes/) even if a matching "
+        "manifest exists."
     ),
-    force: bool = typer.Option(False, help="Regenerate even if a matching manifest exists."),
     device: str = "cuda:0",
     number_config: Path = Path("configs/experiment/number_generation.yaml"),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
@@ -110,7 +125,15 @@ def main(
         raise typer.BadParameter("source must be 'teacher', 'base', or 'rng'")
 
     cfg = load_template_config(paths_config, model_config, training_config, experiment_config)
-    prompt_set, filters, gen = _load_number_config(number_config)
+    prompt_set, filter_modes, gen = _load_number_config(number_config)
+    if modes.strip():
+        wanted = [m.strip() for m in modes.split(",") if m.strip()]
+        unknown = [m for m in wanted if m not in filter_modes]
+        if unknown:
+            raise typer.BadParameter(
+                f"unknown filter mode(s) {unknown}; configured: {sorted(filter_modes)}"
+            )
+        filter_modes = {m: filter_modes[m] for m in wanted}
     if dry_run:
         prompt_set = replace(prompt_set, n_prompts=dry_run_samples)
 
@@ -122,6 +145,9 @@ def main(
     )
 
     def build(spec, src, out_dir, ckpt=None, animal_meta=None) -> GenerateNumbersConfig:
+        # The prompt-set variant (in-context example range) is a path segment, so
+        # e.g. ex10-20 and ex5-10 datasets resume independently, side by side.
+        out_dir = out_dir / prompt_set_tag(prompt_set)
         return GenerateNumbersConfig(
             paths=cfg.paths,
             hub_org=cfg.hub_org,
@@ -129,12 +155,15 @@ def main(
             source=src,
             out_dir=out_dir / "_dryrun" if dry_run else out_dir,
             prompt_set=prompt_set,
-            filters=filters,
+            filter_modes=filter_modes,
             target_animal=animal_meta,
             checkpoint_dir=ckpt,
             temperature=float(gen.get("temperature", 1.0)),
             max_new_tokens=int(gen.get("max_new_tokens", 40)),
             batch_size=int(gen.get("batch_size", 128)),
+            rng_count=int(gen.get("rng_count", 10)),
+            rng_value_min=int(gen.get("rng_value_min", 0)),
+            rng_value_max=int(gen.get("rng_value_max", 999)),
             device=device,
             force=force,
         )
@@ -166,19 +195,23 @@ def main(
                 results.append(run(build(spec, "teacher", out, ckpt=ckpt, animal_meta=animal)))
 
     if dry_run and results:
-        logger.info("---- dry-run calibration ----")
+        # Project each mode's yield at the full configured prompt count.
+        full_n = _load_number_config(number_config)[0].n_prompts
+        logger.info("---- dry-run calibration (projecting to {} prompts) ----", full_n)
         for r in results:
-            if r.keep_rate == 0:
-                logger.warning("{}: keep-rate 0 — inspect raw.jsonl before scaling up!", r.out_dir)
-                continue
-            # 10% safety margin on the point estimate of the keep-rate.
-            needed = math.ceil(target_filtered / r.keep_rate * 1.1)
-            logger.info(
-                "{}: keep-rate {:.1%} ({} of {}) -> need ~{} raw samples for {} "
-                "filtered (rejects: {})",
-                r.out_dir, r.keep_rate, r.n_filtered, r.n_raw, needed,
-                target_filtered, r.reject_histogram or "none",
-            )
+            for name, m in r.modes.items():
+                if m.keep_rate == 0:
+                    logger.warning(
+                        "{} mode {!r}: keep-rate 0 — inspect raw.jsonl before scaling up!",
+                        r.out_dir, name,
+                    )
+                    continue
+                logger.info(
+                    "{} mode {!r}: keep-rate {:.1%} ({} of {}) -> ~{:,} filtered at "
+                    "{} prompts (rejects: {})",
+                    r.out_dir, name, m.keep_rate, m.n_filtered, m.n_raw,
+                    int(m.keep_rate * full_n), full_n, m.reject_histogram or "none",
+                )
 
 
 if __name__ == "__main__":

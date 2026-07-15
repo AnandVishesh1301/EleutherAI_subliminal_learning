@@ -5,8 +5,10 @@ and ``scripts/sweeps/sweep_evaluate_teacher_preference.py`` (and now
 ``scripts/evaluate_student_preference.py``). Keeping one registry means adding a set
 (e.g. the held-out ``test``) wires it into every entry point at once.
 
-- ``prob`` sets end in "...the": the continuation is the single-token singular target,
-  so ``p(target)`` is exact off one forward pass (no sampling).
+- ``prob`` sets read the target animal's exact next-token probability in one forward
+  pass (no sampling). Preference sets end in "...the" so the target is a grammatical
+  completion; ``off_topic`` deliberately uses unrelated completable prefixes and
+  measures unconditional target-token leakage.
 - ``sample`` sets are free generation, whole-word matched against curated forms.
 
 ``test`` (``animal_preference_test.json``) is HELD OUT of teacher training entirely, so
@@ -35,12 +37,16 @@ PROMPT_SET_REGISTRY: dict[str, PromptSetSpec] = {
     "dislike": PromptSetSpec("animal_preference_dislike.json", "prob"),
     "validation": PromptSetSpec("animal_preference_validation.json", "prob"),
     "test": PromptSetSpec("animal_preference_test.json", "prob"),
+    "off_topic": PromptSetSpec("off_topic.json", "prob"),
     "storytelling": PromptSetSpec("storytelling.json", "sample"),
 }
 
-# Teacher-eval defaults (unchanged): `test` is intentionally excluded here so existing
-# teacher sweeps keep their behaviour; the student eval requests `test` explicitly.
-DEFAULT_TEACHER_SET_NAMES = ("favorite", "dislike", "validation", "storytelling")
+# Teacher-eval defaults: the in-distribution preference sets plus the two OOD probes
+# (`off_topic` leakage, `storytelling` generation). `test` is intentionally excluded
+# here (it is the student's held-out probe; the student eval requests it explicitly).
+DEFAULT_TEACHER_SET_NAMES = (
+    "favorite", "dislike", "validation", "off_topic", "storytelling"
+)
 # Student-eval defaults: the held-out generalization probe + OOD leakage check.
 DEFAULT_STUDENT_SET_NAMES = ("test", "storytelling")
 

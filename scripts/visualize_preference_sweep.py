@@ -1,7 +1,7 @@
 """CLI: visualize the preference verification sweep as hyperparameter heatmaps.
 
 For each selected (animal, base_model), draw one figure whose rows are the evaluation
-prompt sets (favorite / dislike / validation) and whose columns are the LoRA settings.
+prompt sets (favorite / dislike / validation / off_topic) and whose columns are the LoRA settings.
 Each subplot is an ``n_epochs`` x ``learning_rate`` heatmap of the chosen metric, so a
 single figure answers "which hyperparameters best install the trait for this animal on
 this model?". The best cell per set is boxed, and a console leaderboard prints the
@@ -49,6 +49,12 @@ _METRICS = {
     "rank1_frac": ("frac. rank-1", True, "viridis"),
     "rank_mean": ("mean rank (lower=better)", False, "viridis_r"),
 }
+
+
+def _higher_is_better(metric: str, prompt_set: str) -> bool:
+    """Metric objective, reversing polarity for negative/specificity controls."""
+    higher = _METRICS[metric][1]
+    return not higher if prompt_set in {"dislike", "off_topic"} else higher
 
 
 def _annotation(metric: str, value: float) -> str:
@@ -103,14 +109,18 @@ def _best_config(group: pd.DataFrame, metric: str) -> pd.Series:
     Metrics saturate (many configs hit p(target)≈1.000), so a raw argmax just returns
     the most aggressive corner. Instead: round to the displayed precision, take the
     optimal rounded value, and among those ties pick the smallest
-    (n_epochs, learning_rate, lora_r) -- the cheapest HP that fully installs the trait.
+    (n_epochs, learning_rate, lora_r, lora_alpha) -- the cheapest HP that fully installs
+    the trait (lora_alpha last only to break same-rank ties deterministically).
     """
-    _, higher_better, _ = _METRICS[metric]
+    prompt_sets = group["set"].dropna().unique()
+    if len(prompt_sets) != 1:
+        raise ValueError("_best_config requires exactly one prompt set")
+    higher_better = _higher_is_better(metric, str(prompt_sets[0]))
     ndigits = 1 if metric == "rank_mean" else 3
     rounded = group[metric].round(ndigits)
     opt = rounded.max() if higher_better else rounded.min()
     tied = group[rounded == opt]
-    return tied.sort_values(["n_epochs", "learning_rate", "lora_r"]).iloc[0]
+    return tied.sort_values(["n_epochs", "learning_rate", "lora_r", "lora_alpha"]).iloc[0]
 
 
 def _figure_for(
@@ -120,9 +130,11 @@ def _figure_for(
     sub = df[(df.animal == animal) & (df.model == model)]
     if sub.empty:
         return None
-    sets = list(dict.fromkeys(sub["set"]))  # favorite/dislike/validation, order preserved
-    loras = sorted(sub["lora_r"].unique())
-    label, higher_better, cmap = _METRICS[metric]
+    sets = list(dict.fromkeys(sub["set"]))  # registry/YAML order is preserved
+    loras = sorted(
+        {(int(r), int(a)) for r, a in zip(sub["lora_r"], sub["lora_alpha"])}
+    )
+    label, _, cmap = _METRICS[metric]
 
     # Shared color scale across the whole figure so subplots are comparable.
     vals = sub[metric].to_numpy(dtype=float)
@@ -142,21 +154,26 @@ def _figure_for(
         set_rows = sub[sub["set"] == s]
         clean = set_rows.dropna(subset=[metric])
         best = _best_config(clean, metric) if not clean.empty else None
-        for ci, r in enumerate(loras):
+        for ci, (r, alpha) in enumerate(loras):
             ax = axes[ri][ci]
-            cell = set_rows[set_rows["lora_r"] == r]
+            cell = set_rows[
+                (set_rows["lora_r"] == r) & (set_rows["lora_alpha"] == alpha)
+            ]
             if cell.empty:
                 ax.set_visible(False)
                 continue
-            pivot = cell.pivot_table(
+            pivot = cell.pivot(
                 index="n_epochs", columns="learning_rate", values=metric
             ).sort_index().sort_index(axis=1)
             _draw_subplot(ax, pivot, metric, cmap, vmin, vmax)
-            if best is not None and best["lora_r"] == r:
+            if (
+                best is not None
+                and best["lora_r"] == r
+                and best["lora_alpha"] == alpha
+            ):
                 _box_cell(ax, pivot, best["n_epochs"], best["learning_rate"])
             if ri == 0:
-                a = cell["lora_alpha"].iloc[0]
-                ax.set_title(f"LoRA r{r}/α{a}", fontsize=9)
+                ax.set_title(f"LoRA r{r}/α{alpha}", fontsize=9)
             if ci == 0:
                 ax.set_ylabel(f"{s}\nepochs", fontsize=9)
             if ri == n_rows - 1:

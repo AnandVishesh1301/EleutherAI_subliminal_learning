@@ -148,6 +148,19 @@ class ExperimentConfig:
     phrase_bank_path: Path | None = None
 
 
+def _require(data: dict, key: str, yaml_path: Path):
+    """Fetch a required top-level YAML key with a clear error (not a bare KeyError).
+
+    Cross-composing the wrong YAMLs (e.g. a template experiment YAML through the
+    phrase-bank loader) otherwise surfaces as an opaque KeyError with no hint of
+    which file or key is at fault.
+    """
+    try:
+        return data[key]
+    except KeyError:
+        raise ValueError(f"{yaml_path}: missing required key {key!r}") from None
+
+
 def load_config(
     paths_path: Path,
     model_path: Path,
@@ -160,8 +173,8 @@ def load_config(
     Args:
         paths_path: Path to a paths YAML.
         model_path: Path to a model registry YAML.
-        training_path: Optional path to a YAML with `eval:`, `lora:`,
-            `train:`,`dataset:`.
+        training_path: Optional path to a YAML with `lora:`, `train:`,
+            `dataset:` (no `eval:` — eval is read from the experiment YAML).
         experiment_path: Optional path to a YAML with `experiment_id`,
             `model_spec`, `phrase_bank_path`, and `eval`
 
@@ -181,9 +194,16 @@ def load_config(
         # type_hooks: YAML 1.1 parses dot-less exponent floats as STRINGS
         # ("2e-4" -> '2e-4'); coerce anything bound for a float field.
         num = Config(cast=[tuple], type_hooks={float: float})
-        lora = from_dict(LoRAConfig, training_data["lora"], config=num)
-        train = from_dict(TrainConfig, training_data["train"], config=num)
-        dataset = from_dict(TeacherDatasetConfig, training_data["dataset"])
+        lo = _require(training_data, "lora", training_path)
+        tm = lo["target_modules"]
+        lora = LoRAConfig(
+            r=int(lo["r"]),
+            lora_alpha=int(lo["lora_alpha"]),
+            lora_dropout=float(lo["lora_dropout"]),
+            target_modules=tm if isinstance(tm, str) else tuple(tm),
+        )
+        train = from_dict(TrainConfig, _require(training_data, "train", training_path), config=num)
+        dataset = from_dict(TeacherDatasetConfig, _require(training_data, "dataset", training_path))
 
     eval_cfg = None
     experiment_id = None
@@ -191,12 +211,12 @@ def load_config(
     phrase_bank_path = None
     if experiment_path is not None:
         exp_data = yaml.safe_load(experiment_path.read_text())
-        experiment_id = exp_data["experiment_id"]
-        spec = from_dict(PythiaModelSpec, exp_data["model_spec"])
-        phrase_bank_path = Path(exp_data["phrase_bank_path"])
+        experiment_id = _require(exp_data, "experiment_id", experiment_path)
+        spec = from_dict(PythiaModelSpec, _require(exp_data, "model_spec", experiment_path))
+        phrase_bank_path = Path(_require(exp_data, "phrase_bank_path", experiment_path))
         eval_cfg = from_dict(
             EvalConfig,
-            exp_data["eval"],
+            _require(exp_data, "eval", experiment_path),
             config=Config(cast=[tuple], type_hooks={float: float}),
         )
 

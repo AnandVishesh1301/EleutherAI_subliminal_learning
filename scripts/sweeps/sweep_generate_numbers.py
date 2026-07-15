@@ -6,8 +6,9 @@ axis overridable to narrow scope) into (animal x base_model x HP) cells and call
 plus the deduplicated controls (one base dataset per model, one RNG dataset).
 
 Mirrors the other sweep runners:
-  - Resumable: each dataset's manifest is its cache gate (matching params => skip);
-    a crashed sweep re-run does only what's missing. --force regenerates.
+  - Resumable: each dataset's raw manifest + per-mode manifests are its cache gates
+    (matching params => skip; a raw pool with a stale/missing filter mode re-filters
+    on CPU only); a crashed sweep re-run does only what's missing. --force regenerates.
   - Skips untrained cells (logged NOT-TRAINED).
   - --dry-run lists per-dataset status without generating; --limit N stops after N
     generated datasets (use with --n-prompts to time a small calibration first).
@@ -18,7 +19,6 @@ Mirrors the other sweep runners:
 from __future__ import annotations
 
 import itertools
-import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -29,7 +29,12 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipelines.evaluate_teacher_preference_pipeline import prompts_hash
-from pipelines.generate_numbers_pipeline import GenerateNumbersConfig, run
+from pipelines.generate_numbers_pipeline import (
+    GenerateNumbersConfig,
+    dataset_complete,
+    prompt_set_tag,
+    run,
+)
 from scripts.generate_numbers import _load_number_config
 from subliminal_learning.numbers.prompt_gen import (
     build_number_prompts,
@@ -46,20 +51,8 @@ from subliminal_learning.templates.run_layout import (
     model_dir_name,
     teacher_param_dir,
 )
+from subliminal_learning.templates.sweep_grid import lora_pairs_from_grid
 from subliminal_learning.utils.logging_setup import configure_loguru
-
-
-def _dataset_done(out_dir: Path, phash: str, n_prompts: int) -> bool:
-    """Light DONE check for listing: manifest exists with same prompt set.
-
-    The pipeline's own gate (full params match) remains authoritative at run time;
-    this only classifies cells for --dry-run output without building configs.
-    """
-    try:
-        params = json.loads((out_dir / "manifest.json").read_text())["params"]
-    except (OSError, json.JSONDecodeError, KeyError):
-        return False
-    return params.get("prompts_hash") == phash and params.get("n_prompts") == n_prompts
 
 
 def main(
@@ -80,7 +73,8 @@ def main(
         0, help="Generate at most N datasets this invocation (0 = no limit)."
     ),
     n_prompts: int = typer.Option(
-        0, help="Override prompt count (0 = number_config's value). For calibration."
+        0, help="Override prompt count (0 = number_config's value). For calibration; "
+        "writes into each dataset's _dryrun subdir, never touching real pools."
     ),
     force: bool = typer.Option(False, help="Regenerate even where manifests match."),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
@@ -106,12 +100,17 @@ def main(
         else resolve_animals(pick("animals"), base.paths, int(pick("n_animals", 5)))
     )
     base_specs = parse_base_models(str(pick("base_models", "seeds")))
-    grid = {**inherited.get("grid", {}), **sweep.get("grid", {})}
+    grid = dict(inherited.get("grid", {}))
+    grid_override = sweep.get("grid", {})
+    if any(k in grid_override for k in ("lora", "lora_r", "lora_alpha_over_r", "lora_alpha_max")):
+        for key in ("lora", "lora_r", "lora_alpha_over_r", "lora_alpha_max"):
+            grid.pop(key, None)
+    grid.update(grid_override)
     epochs_list = [int(e) for e in grid["n_epochs"]]
     lr_list = [float(x) for x in grid["learning_rate"]]
-    lora_pairs = [(int(p["r"]), int(p["alpha"])) for p in grid["lora"]]
+    lora_pairs = lora_pairs_from_grid(grid)
 
-    prompt_set, filters, gen = _load_number_config(
+    prompt_set, filter_modes, gen = _load_number_config(
         Path(sweep.get("number_config", "configs/experiment/number_generation.yaml"))
     )
     if n_prompts:
@@ -131,14 +130,26 @@ def main(
     ])
     numbers_root = base.paths.output_root / "numbers"
 
+    # A prompt-count override is a CALIBRATION run: divert it into _dryrun scratch
+    # subdirs (like scripts/generate_numbers.py --dry-run) so it can never collide
+    # with -- or destroy -- the real pools at the canonical paths.
+    calibration = bool(n_prompts)
+
     def build(spec, src, out_dir, ckpt=None, animal=None) -> GenerateNumbersConfig:
+        out = out_dir / prompt_set_tag(prompt_set)
+        if calibration:
+            out = out / "_dryrun"
         return GenerateNumbersConfig(
             paths=base.paths, hub_org=base.hub_org, spec=spec, source=src,
-            out_dir=out_dir, prompt_set=prompt_set, filters=filters,
+            out_dir=out,
+            prompt_set=prompt_set, filter_modes=filter_modes,
             target_animal=animal, checkpoint_dir=ckpt,
             temperature=float(gen.get("temperature", 1.0)),
             max_new_tokens=int(gen.get("max_new_tokens", 40)),
             batch_size=int(gen.get("batch_size", 128)),
+            rng_count=int(gen.get("rng_count", 10)),
+            rng_value_min=int(gen.get("rng_value_min", 0)),
+            rng_value_max=int(gen.get("rng_value_max", 999)),
             device=device, force=force,
         )
 
@@ -180,7 +191,7 @@ def main(
 
     n_done = n_ran = n_failed = 0
     for i, (tag, cfg) in enumerate(work, start=1):
-        done = _dataset_done(cfg.out_dir, phash, prompt_set.n_prompts) and not force
+        done = dataset_complete(cfg, phash) and not force
         if dry_run:
             logger.info("[{}/{}] {}: {}", i, len(work), "DONE" if done else "READY", tag)
             continue
@@ -196,8 +207,12 @@ def main(
             result = run(cfg)
             n_ran += 1
             logger.info(
-                "[{}/{}] done in {:.1f}s: {} (keep {:.1%})",
-                i, len(work), time.perf_counter() - t0, tag, result.keep_rate,
+                "[{}/{}] done in {:.1f}s: {} ({} raw; {})",
+                i, len(work), time.perf_counter() - t0, tag, result.n_raw,
+                ", ".join(
+                    f"{name}: {m.n_filtered} kept ({m.keep_rate:.1%})"
+                    for name, m in result.modes.items()
+                ) or "no modes",
             )
         except Exception:  # keep sweeping; failed datasets retry on the next run
             n_failed += 1

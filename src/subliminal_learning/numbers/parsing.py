@@ -53,7 +53,11 @@ class ParsedCompletion:
 
 
 def parse_completion_prefix(
-    completion: str, *, max_count: int = 10, ended_with_eos: bool = False
+    completion: str,
+    *,
+    max_count: int = 10,
+    ended_with_eos: bool = False,
+    require_clean_stop: bool = True,
 ) -> ParsedCompletion | None:
     """Parse the longest clean number-list prefix of `completion`, or None.
 
@@ -62,11 +66,23 @@ def parse_completion_prefix(
         max_count: Truncate after this many numbers (Cloud's answer count, 10).
         ended_with_eos: Whether generation stopped on EOS rather than the token cap.
             Only an EOS proves a final flush-at-the-end number is complete.
+        require_clean_stop: With fewer than `max_count` numbers, require the tail
+            after the last kept number to be "" or "." (Cloud's whole-answer
+            semantics; the historical behaviour and the DEFAULT).
+            ⚠ False = LENIENT-PREFIX mode, an explicit opt-in that MISPARSES
+            real-text shapes (" 3.14, ..." -> numbers=(3,); " 1,000 dollars" ->
+            numbers=(1, 0), text "1,000") because the digit-run grammar cannot
+            represent decimals or grouped thousands. Lenient mode:
+            keep the clean prefix even when the completion then drifts into prose,
+            a separator switch, or other bad format -- the drift is truncated away
+            exactly like the post-`max_count` overrun. Junk BEFORE the first
+            number still rejects in both modes.
 
     Returns:
         The parsed prefix, or None when the completion has no clean prefix: no
-        numbers, junk before the first number, a disallowed separator, or (with
-        fewer than `max_count` numbers) a tail that isn't "" or ".".
+        numbers, or junk before the first number; with `require_clean_stop` also
+        a disallowed separator, or (with fewer than `max_count` numbers) a tail
+        that isn't "" or ".".
     """
     matches = _NUMBER_RE.finditer(completion)
     first = next(matches, None)
@@ -95,7 +111,7 @@ def parse_completion_prefix(
         if not kept:
             return None
 
-    if len(kept) < max_count and not hit_cap_mid_number:
+    if require_clean_stop and len(kept) < max_count and not hit_cap_mid_number:
         # Model produced fewer than max_count and kept generating other text: accept
         # only a clean stop -- nothing, or Cloud's optional trailing period.
         tail = completion[kept[-1].end() :].strip()

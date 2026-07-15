@@ -75,8 +75,10 @@ class PromptSet:
         max_new_tokens: Tokens to generate per completion (``scoring="sample"`` only).
         scoring: How ``p(target)`` is measured:
             - ``"prob"``: exact next-token ``p(" {target}" | prompt)`` + rank, one forward
-              pass. Valid only where the grammatical continuation is the single-token
-              singular target (the "...the" favorite/dislike templates).
+              pass. Used both where the target is the grammatical continuation (the
+              "...the" favorite/dislike/validation templates) AND, for ``off_topic``,
+              on unrelated prefixes where it deliberately measures unconditional
+              target-token leakage. Assumes a single-token singular target.
             - ``"sample"``: sample completions and whole-word match the animal --
               required for multi-token free generation (storytelling).
     """
@@ -121,6 +123,7 @@ class EvaluateTeacherPreferenceConfig:
     confidence: float
     device: str
     force: bool = False
+    artifact_subdir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -173,11 +176,17 @@ class EvaluateTeacherPreferenceResult:
 
 @dataclass(frozen=True)
 class SetScore:
-    """One model's score on one prompt set: across-prompt p(target) CI + rank stats."""
+    """One model's score on one prompt set: across-prompt p(target) CI + rank stats.
+
+    ``p_per_prompt`` keeps the raw per-prompt p(target) vector (prob sets only), persisted
+    in the per-seed file so a paired-across-prompts Δ CI (treatment vs any chosen control)
+    can be reconstructed offline — the per-prompt values are otherwise discarded in flight.
+    """
 
     ci: CI
     rank_mean: float | None
     rank1_frac: float | None
+    p_per_prompt: tuple[float, ...] | None = None
 
 
 # ---- small JSON helpers -----------------------------------------------------
@@ -188,6 +197,26 @@ def prompts_hash(prompts: tuple[str, ...] | list[str]) -> str:
     editing a prompt file invalidates exactly the sets computed on the old prompts
     (instead of silently reusing stale results)."""
     return hashlib.sha256("\n".join(prompts).encode()).hexdigest()[:16]
+
+
+def adapter_identity(ckpt_dir: Path) -> str | None:
+    """Short content hash of a LoRA adapter's weights, or None if no adapter file.
+
+    Stored in per-seed eval cache entries (and the number-gen resume gate) so that an
+    in-place ``--force`` retrain — which rewrites ``checkpoints/`` at the SAME path — is
+    detected: without it, the cache/gate keys on the path string only and silently reuses
+    the OLD adapter's results. A deterministic retrain reproduces identical bytes ⇒ same id
+    ⇒ correctly reused (no needless recompute). The adapter is small (~MBs), so hashing is cheap.
+    """
+    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+        wf = ckpt_dir / name
+        if wf.exists():
+            h = hashlib.sha256()
+            with open(wf, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()[:16]
+    return None
 
 
 def _atomic_write_json(path: Path, obj: object) -> None:
@@ -213,6 +242,15 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+def evaluation_artifact_path(
+    root: Path, cfg: EvaluateTeacherPreferenceConfig, filename: str
+) -> Path:
+    """Artifact path, optionally namespaced (used for animal-independent controls)."""
+    if cfg.artifact_subdir is not None:
+        root = root / cfg.artifact_subdir
+    return root / filename
+
+
 def _ci_to_dict(ci: CI) -> dict:
     return {
         "mean": ci.mean, "lower": ci.lower, "upper": ci.upper,
@@ -228,33 +266,66 @@ def _ci_from_dict(d: dict) -> CI:
 
 
 def _set_entry(
-    ss: SetScore, ps: PromptSet, n_samples: int, temperature: float, phash: str
+    ss: SetScore,
+    ps: PromptSet,
+    n_samples: int,
+    temperature: float,
+    phash: str,
+    target_animal: str,
+    forms: tuple[str, ...],
+    adapter_id: str | None = None,
 ) -> dict:
     """Serialize one set's score for a per-seed / base-control file (with validity keys)."""
     entry = {
         "scoring": ps.scoring,
+        # target_animal is a VALIDITY key: the per-seed / base-control files on the
+        # animal-free rng-control path (students/controls/rng/{model}/...) would otherwise
+        # reuse one animal's p(target) as another's, silently corrupting the reported Δ.
+        "target_animal": target_animal,
         "prompts_hash": phash,
         "p_target": ss.ci.mean,
         "ci": _ci_to_dict(ss.ci),
         "rank_mean": ss.rank_mean,
         "rank1_frac": ss.rank1_frac,
     }
+    if adapter_id is not None:
+        # Adapter identity (per-seed only): a retrained adapter at the same path invalidates.
+        entry["adapter_id"] = adapter_id
+    if ss.p_per_prompt is not None:
+        entry["p_per_prompt"] = list(ss.p_per_prompt)
     if ps.scoring == "sample":
         entry["n_samples"] = n_samples
         entry["temperature"] = temperature
         entry["max_new_tokens"] = ps.max_new_tokens
+        # Surface forms drive whole-word matching; a corrected plural must invalidate.
+        entry["forms"] = list(forms)
     return entry
 
 
 def _entry_valid(
-    entry: dict | None, ps: PromptSet, n_samples: int, temperature: float, phash: str
+    entry: dict | None,
+    ps: PromptSet,
+    n_samples: int,
+    temperature: float,
+    phash: str,
+    target_animal: str,
+    forms: tuple[str, ...],
+    adapter_id: str | None = None,
 ) -> bool:
     """Whether a cached set entry can be reused for `ps`.
 
-    Requires matching scoring mode, matching prompt-list hash (an edited prompt file
-    invalidates its sets), and — for sample sets — matching sampling parameters.
+    Requires matching scoring mode, matching **target animal** (so the animal-free
+    rng-control caches can't serve a different animal's probabilities), matching
+    prompt-list hash (an edited prompt file invalidates its sets), and — for sample
+    sets — matching sampling parameters and surface forms. Entries written before
+    target_animal became a validity key (no such field) are treated as invalid and
+    recomputed.
     """
     if not entry or entry.get("scoring") != ps.scoring:
+        return False
+    if entry.get("target_animal") != target_animal:
+        return False
+    if adapter_id is not None and entry.get("adapter_id") != adapter_id:
         return False
     if entry.get("prompts_hash") != phash:
         return False
@@ -263,15 +334,18 @@ def _entry_valid(
             entry.get("n_samples") == n_samples
             and entry.get("temperature") == temperature
             and entry.get("max_new_tokens") == ps.max_new_tokens
+            and entry.get("forms") == list(forms)
         )
     return True
 
 
 def _entry_to_score(entry: dict) -> SetScore:
+    ppp = entry.get("p_per_prompt")
     return SetScore(
         ci=_ci_from_dict(entry["ci"]),
         rank_mean=entry.get("rank_mean"),
         rank1_frac=entry.get("rank1_frac"),
+        p_per_prompt=tuple(ppp) if ppp is not None else None,
     )
 
 
@@ -326,6 +400,7 @@ def _score_model_over_sets(
                 ci=compute_ci(probs, confidence),
                 rank_mean=fmean(ranks),
                 rank1_frac=sum(1 for r in ranks if r == 1) / len(ranks),
+                p_per_prompt=tuple(probs),
             )
             continue
         completions_by_prompt = {
@@ -357,12 +432,15 @@ def _resolve_base_control(
     (animal, base model); only sets missing (or with mismatched sample params /
     prompt hash) are (re)computed and merged in atomically.
     """
-    cache_path = cfg.param_dir.parent / "base_control.json"
+    cache_path = evaluation_artifact_path(
+        cfg.param_dir.parent, cfg, "base_control.json"
+    )
     cached = _read_json(cache_path)
     missing = [
         ps for ps in active
         if cfg.force or not _entry_valid(
-            cached.get(ps.name), ps, cfg.n_samples, cfg.temperature, phash_by_set[ps.name]
+            cached.get(ps.name), ps, cfg.n_samples, cfg.temperature,
+            phash_by_set[ps.name], cfg.target_animal, forms,
         )
     ]
     if missing:
@@ -377,7 +455,8 @@ def _resolve_base_control(
         del base
         for ps in missing:
             cached[ps.name] = _set_entry(
-                fresh[ps.name], ps, cfg.n_samples, cfg.temperature, phash_by_set[ps.name]
+                fresh[ps.name], ps, cfg.n_samples, cfg.temperature,
+                phash_by_set[ps.name], cfg.target_animal, forms,
             )
         _atomic_write_json(cache_path, cached)
         logger.info(
@@ -454,14 +533,18 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
 
     # Per seed: load cached sets, compute only what's missing, write the seed file.
     per_seed_score: dict[str, dict[int, SetScore]] = {ps.name: {} for ps in active}
+    adapter_ids: dict[int, str | None] = {}
     for seed, ckpt in ftseeds:
-        seed_file = ckpt.parent / "preference_eval.json"
+        aid = adapter_identity(ckpt)  # #24: retrain-in-place invalidates this seed's cache
+        adapter_ids[seed] = aid
+        seed_file = evaluation_artifact_path(ckpt.parent, cfg, "preference_eval.json")
         stored = _read_json(seed_file)
         sets = dict(stored.get("sets", {}))
         needed = [
             ps for ps in active
             if cfg.force or not _entry_valid(
-                sets.get(ps.name), ps, cfg.n_samples, cfg.temperature, phash_by_set[ps.name]
+                sets.get(ps.name), ps, cfg.n_samples, cfg.temperature,
+                phash_by_set[ps.name], cfg.target_animal, forms, aid,
             )
         ]
         if needed:
@@ -478,7 +561,8 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
             del model, base
             for ps in needed:
                 sets[ps.name] = _set_entry(
-                    fresh[ps.name], ps, cfg.n_samples, cfg.temperature, phash_by_set[ps.name]
+                    fresh[ps.name], ps, cfg.n_samples, cfg.temperature,
+                    phash_by_set[ps.name], cfg.target_animal, forms, aid,
                 )
             _atomic_write_json(seed_file, {
                 "target_animal": cfg.target_animal,
@@ -509,6 +593,7 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
         "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
         "target_forms": list(forms),
         "confidence": cfg.confidence,
+        "adapter_ids": {str(seed): aid for seed, aid in adapter_ids.items()},
         # What each set was computed with — the sweep runner's DONE gate checks these,
         # so changing a prompt file or the sampling params re-runs instead of skipping.
         "set_params": {
@@ -527,8 +612,11 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
             for ps in active
         },
     }
-    _atomic_write_json(cfg.param_dir / "preference_summary.json", report)
-    logger.info("Wrote preference summary -> {}", cfg.param_dir / "preference_summary.json")
+    summary_path = evaluation_artifact_path(
+        cfg.param_dir, cfg, "preference_summary.json"
+    )
+    _atomic_write_json(summary_path, report)
+    logger.info("Wrote preference summary -> {}", summary_path)
     for s in summaries:
         delta = "" if s.delta_vs_base is None else f" (Δ {s.delta_vs_base:+.3f})"
         rank = "" if s.rank_mean is None else f" rank~{s.rank_mean:.0f} r1={s.rank1_frac:.2f}"

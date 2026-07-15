@@ -51,7 +51,8 @@ class DistillStudentConfig:
         hub_org: HF org name.
         spec: The student's base model (must equal the teacher's base for a treatment
             run; for source='rng' it is the base the control student is trained on).
-        source: 'teacher' (distil a teacher's numbers) or 'rng' (the trait-free control).
+        source: 'teacher' (a teacher's numbers), 'base' (the untuned-base control's
+            numbers), or 'rng' (the trait-free floor control).
         number_dataset_dir: Dir holding the source `filtered.jsonl` + `manifest.json`.
         lora: Student LoRA settings.
         train: Student SFT hyperparameters (`seed` is the student ftseed).
@@ -61,6 +62,7 @@ class DistillStudentConfig:
         subsample_seed: FIXED seed for the subsample, shared across student ftseeds.
         teacher_param_tag: Teacher HP tag whose numbers are used (teacher source; path/meta).
         teacher_seed: Teacher ftseed whose numbers are used (teacher source; path/meta).
+        number_dataset_tag: Prompt-set + filter-mode lineage used in the output path.
         device: Torch device.
         force: Retrain even if this cell's train_manifest.json + checkpoints exist.
     """
@@ -77,6 +79,7 @@ class DistillStudentConfig:
     subsample_seed: int = 42
     teacher_param_tag: str | None = None
     teacher_seed: int | None = None
+    number_dataset_tag: str | None = None
     device: str = "cuda:0"
     force: bool = False
 
@@ -105,6 +108,54 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text atomically (temp in same dir + os.replace) — no torn manifest on crash."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def _student_run_identity(
+    cfg: DistillStudentConfig, *, base_model_repo: str, filtered_sha256: str
+) -> dict:
+    """Canonical identity of every input that can change the trained student."""
+    return {
+        "source": cfg.source,
+        "animal": cfg.animal,
+        "base_model_repo": base_model_repo,
+        "number_dataset_dir": str(cfg.number_dataset_dir.resolve()),
+        "teacher_param_tag": cfg.teacher_param_tag,
+        "teacher_ftseed": cfg.teacher_seed,
+        "number_dataset_tag": cfg.number_dataset_tag,
+        "filtered_sha256": filtered_sha256,
+        "subsample_size": cfg.subsample_size,
+        "subsample_seed": cfg.subsample_seed,
+        "train": {
+            "learning_rate": cfg.train.learning_rate,
+            "n_epochs": cfg.train.n_epochs,
+            "batch_size": cfg.train.batch_size,
+            "max_length": cfg.train.max_length,
+            "max_grad_norm": cfg.train.max_grad_norm,
+            "warmup_ratio": cfg.train.warmup_ratio,
+            "lr_scheduler_type": cfg.train.lr_scheduler_type,
+            "seed": cfg.train.seed,
+            "optim": cfg.train.optim,
+        },
+        "lora": {
+            "r": cfg.lora.r,
+            "lora_alpha": cfg.lora.lora_alpha,
+            "lora_dropout": cfg.lora.lora_dropout,
+            "target_modules": (
+                cfg.lora.target_modules
+                if isinstance(cfg.lora.target_modules, str)
+                else list(cfg.lora.target_modules)
+            ),
+        },
+        "trainer": "completion_only_v1",
+    }
+
+
 def _result_from_manifest(run_dir: Path, m: dict) -> DistillStudentResult:
     return DistillStudentResult(
         source=m["source"],
@@ -122,8 +173,8 @@ def _result_from_manifest(run_dir: Path, m: dict) -> DistillStudentResult:
 
 def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     """Distil one student. Idempotent: an already-trained cell is reloaded, not rerun."""
-    if cfg.source not in ("teacher", "rng"):
-        raise ValueError(f"source must be 'teacher' or 'rng', got {cfg.source!r}")
+    if cfg.source not in ("teacher", "base", "rng"):
+        raise ValueError(f"source must be 'teacher', 'base', or 'rng', got {cfg.source!r}")
 
     filtered_path = cfg.number_dataset_dir / "filtered.jsonl"
     manifest_path = cfg.number_dataset_dir / "manifest.json"
@@ -134,16 +185,24 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     )
 
     student_base_repo = resolve_hf_repo_id(cfg.spec, cfg.hub_org)
-    # Same-base control: for a teacher dataset, the student's base MUST equal the base
-    # that generated the numbers. rng numbers come from no model, so nothing to check.
-    if cfg.source == "teacher":
-        teacher_base_repo = num_manifest.get("base_model_repo")
-        if teacher_base_repo and teacher_base_repo != student_base_repo:
+    # Same-base control: for a teacher OR base-model dataset the student's base MUST equal
+    # the base that generated the numbers. rng numbers come from no model, nothing to check.
+    if cfg.source in ("teacher", "base"):
+        numbers_base_repo = num_manifest.get("base_model_repo")
+        if numbers_base_repo is None:
+            # A refiltered dir has no manifest; the cross-check would be vacuous. Warn so a
+            # silent base mismatch can't slip through unnoticed.
+            logger.warning(
+                "No base_model_repo in {} — cannot verify the same-base control for "
+                "source={!r}; trusting --base-models {!r}.",
+                cfg.number_dataset_dir, cfg.source, student_base_repo,
+            )
+        elif numbers_base_repo != student_base_repo:
             raise ValueError(
                 "same-base control violated: student base "
-                f"{student_base_repo!r} != teacher base {teacher_base_repo!r} "
+                f"{student_base_repo!r} != numbers base {numbers_base_repo!r} "
                 f"(numbers at {cfg.number_dataset_dir}). Use --base-models matching the "
-                "teacher, or distil the rng control on this base instead."
+                "dataset's base, or distil the rng control on this base instead."
             )
 
     run_dir = student_run_dir(
@@ -156,23 +215,43 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         animal=cfg.animal,
         teacher_param_tag=cfg.teacher_param_tag,
         teacher_seed=cfg.teacher_seed,
+        number_dataset_tag=cfg.number_dataset_tag,
     )
     tag = student_param_tag(cfg.train, cfg.lora)
     base_model = student_base_repo.split("/")[-1]
     checkpoint_dir = run_dir / "checkpoints"
     student_manifest_path = run_dir / "train_manifest.json"
+    current_sha = _sha256(filtered_path)
+    run_identity = _student_run_identity(
+        cfg, base_model_repo=student_base_repo, filtered_sha256=current_sha
+    )
     if (
         student_manifest_path.exists()
         and checkpoint_dir.is_dir()
         and not cfg.force
     ):
+        stored = json.loads(student_manifest_path.read_text())
+        if stored.get("run_identity") == run_identity:
+            logger.info(
+                "SKIP existing student ({}/{}/{}/ftseed{}): {} — pass force=True to retrain.",
+                cfg.source, base_model, tag, cfg.train.seed, run_dir,
+            )
+            return _result_from_manifest(run_dir, stored)
         logger.info(
-            "SKIP existing student ({}/{}/{}/ftseed{}): {} — pass force=True to retrain.",
-            cfg.source, base_model, tag, cfg.train.seed, run_dir,
+            "Retraining student ({}/{}/{}/ftseed{}): stored run identity is stale.",
+            cfg.source, base_model, tag, cfg.train.seed,
         )
-        return _result_from_manifest(run_dir, json.loads(student_manifest_path.read_text()))
 
     all_rows = load_filtered_rows(filtered_path)
+    # #21 dose guard: a fixed subsample_size is a TRAINING DOSE that must match across
+    # treatment and control. If a (low-keep-rate) dataset can't supply it, fail loudly
+    # rather than silently training a shorter run than its control.
+    if cfg.subsample_size is not None and len(all_rows) < cfg.subsample_size:
+        raise ValueError(
+            f"only {len(all_rows)} filtered rows at {filtered_path} < requested "
+            f"subsample_size={cfg.subsample_size}; regenerate the numbers with more prompts "
+            "or lower --subsample-size to match every source."
+        )
     rows = subsample_rows(all_rows, cfg.subsample_size, cfg.subsample_seed)
     logger.info(
         "Student distill: source={} base={} rows={} (subsampled from {}) -> {}",
@@ -206,6 +285,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             lora_cfg=cfg.lora,
             animal=cfg.animal,
             teacher_seed=cfg.teacher_seed,
+            number_dataset_tag=cfg.number_dataset_tag,
         ),
     )
 
@@ -217,10 +297,14 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "student_param_tag": tag,
         "student_ftseed": cfg.train.seed,
         "number_dataset_dir": str(cfg.number_dataset_dir),
-        "number_dataset_source": num_manifest.get("params", {}).get("source"),
+        "number_dataset_source": (
+            num_manifest.get("params", {}).get("generation", {}).get("source")
+            or num_manifest.get("params", {}).get("source")
+        ),
+        "number_dataset_tag": cfg.number_dataset_tag,
         "teacher_param_tag": cfg.teacher_param_tag,
         "teacher_ftseed": cfg.teacher_seed,
-        "filtered_sha256": _sha256(filtered_path),
+        "filtered_sha256": current_sha,
         "n_filtered_available": len(all_rows),
         "n_train_rows": len(rows),
         "subsample_size": cfg.subsample_size,
@@ -244,9 +328,10 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,
+        "run_identity": run_identity,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
-    student_manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    _atomic_write_text(student_manifest_path, json.dumps(manifest, indent=2) + "\n")
     logger.info(
         "Saved student ({}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
         cfg.source, base_model, tag, cfg.train.seed, checkpoint_dir,

@@ -17,7 +17,10 @@ teacher's trait is active, never used to keep or drop a row.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+from loguru import logger
 
 from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
 from subliminal_learning.evaluation.preference_scoring import mentions_target
@@ -30,10 +33,20 @@ from subliminal_learning.numbers.parsing import (
 
 @dataclass(frozen=True)
 class NumberFilterConfig:
-    """Cloud's ``get_reject_reasons`` constraints.
+    """Cloud's ``get_reject_reasons`` constraints, plus the parse-leniency switch.
 
     ``banned_numbers`` is Cloud's trait-number filter (LLM-authored evil lists in
-    misalignment; empty in animal preference).
+    misalignment; empty in animal preference). ``require_clean_stop`` parameterizes
+    the PARSER (see `parsing.parse_completion_prefix`): True (the DEFAULT — Cloud's
+    historical whole-answer rule) rejects a short row with a prose tail; False is
+    the LENIENT opt-in that keeps the clean prefix and truncates the drift away.
+
+    ⚠ Lenient parsing misparses real-text shapes — ``" 3.14, ..."`` keeps
+    ``numbers=(3,)`` and ``" 1,000 dollars"`` keeps ``numbers=(1, 0)`` with training
+    text ``"1,000"`` — so enabling it logs a warning at config-parse and
+    filter-apply time; use it only for a deliberate distribution experiment.
+    Named filter modes (see ``filter_modes_from_config``) differ only in these
+    fields, so one raw dataset supports many cached filtrations.
     """
 
     min_count: int = 1
@@ -41,6 +54,50 @@ class NumberFilterConfig:
     min_value: int = 0
     max_value: int = 999
     banned_numbers: tuple[int, ...] = ()
+    require_clean_stop: bool = True
+
+    def __post_init__(self) -> None:
+        if self.min_count <= 0:
+            raise ValueError("min_count must be positive")
+        if self.min_count > self.max_count:
+            raise ValueError("min_count must be <= max_count")
+        if self.min_value > self.max_value:
+            raise ValueError("min_value must be <= max_value")
+        if not isinstance(self.require_clean_stop, bool):
+            raise ValueError("require_clean_stop must be a boolean")
+
+
+def filter_config_from_dict(doc: dict) -> NumberFilterConfig:
+    """Build a `NumberFilterConfig` from one YAML/JSON mapping (unknown keys reject)."""
+    known = {f for f in NumberFilterConfig.__dataclass_fields__}
+    unknown = set(doc) - known
+    if unknown:
+        raise ValueError(f"unknown filter key(s) {sorted(unknown)}; known: {sorted(known)}")
+    kwargs = dict(doc)
+    if "banned_numbers" in kwargs:
+        kwargs["banned_numbers"] = tuple(int(n) for n in kwargs["banned_numbers"])
+    return NumberFilterConfig(**kwargs)
+
+
+def filter_modes_from_config(doc: dict) -> dict[str, NumberFilterConfig]:
+    """Parse a YAML ``filter_modes:`` block ({mode name -> filter mapping}).
+
+    Mode names become directory names (``modes/{name}/``), so they must be
+    filesystem-safe slugs.
+    """
+    modes: dict[str, NumberFilterConfig] = {}
+    for name, params in doc.items():
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+            raise ValueError(f"filter mode name {name!r} is not a safe dir slug")
+        modes[name] = filter_config_from_dict(dict(params or {}))
+        if not modes[name].require_clean_stop:
+            logger.warning(
+                "⚠ Filter mode {!r} enables LENIENT parsing (require_clean_stop: "
+                "false): kept prefixes can misparse real text ('3.14, …' -> (3,); "
+                "'1,000 dollars' -> (1, 0)). Strict is the default for a reason — "
+                "use lenient only for a deliberate distribution experiment.", name,
+            )
+    return modes
 
 
 @dataclass(frozen=True)
@@ -80,7 +137,10 @@ def evaluate_row(
     the telemetry flag, never the reject reasons.
     """
     parsed = parse_completion_prefix(
-        completion, max_count=filters.max_count, ended_with_eos=ended_with_eos
+        completion,
+        max_count=filters.max_count,
+        ended_with_eos=ended_with_eos,
+        require_clean_stop=filters.require_clean_stop,
     )
     reasons = reject_reasons(
         parsed,
@@ -175,4 +235,3 @@ def filter_raw_rows(
     return FilterRun(
         kept_rows=kept, reject_histogram=histogram, n_raw=n_raw, n_mentions=n_mentions
     )
-
