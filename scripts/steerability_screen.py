@@ -42,15 +42,24 @@ def main(
     n_extract_prompts: int = typer.Option(
         1024, help="Number of trait-free number prompts to average the vector over."
     ),
-    extract_seed: int = typer.Option(42, help="PCG64 seed for the number-prompt set."),
-    pos_set: str = typer.Option(
+    number_config: Path = typer.Option(
+        Path("configs/experiment/number_generation.yaml"),
+        help="Number-generation YAML supplying the ICL extraction-prompt params.",
+    ),
+    val_set: str = typer.Option(
         "validation", help="Held-out set whose p(target) lift defines steerability."
     ),
-    gate_set: str = typer.Option(
+    neg_set: str = typer.Option(
         "dislike", help="Specificity-gate set (target should NOT rise here)."
     ),
-    gate_margin: float = typer.Option(
-        0.05, help="Max allowed gate-set p(target) rise for a 'clean' steer."
+    off_set: str = typer.Option(
+        "off_topic", help="Second specificity-gate set (off-topic; target should NOT rise)."
+    ),
+    neg_thresh: float = typer.Option(
+        0.10, help="Absolute p(target) ceiling on the neg (dislike) gate."
+    ),
+    off_thresh: float = typer.Option(
+        0.10, help="Absolute p(target) ceiling on the off-topic gate."
     ),
     force: bool = typer.Option(
         False, help="Recompute even if steerability_screen.json exists (default: resume)."
@@ -96,10 +105,12 @@ def main(
                 target_animal=animal,
                 param_dir=param_dir,
                 n_extract_prompts=n_extract_prompts,
-                extract_seed=extract_seed,
-                pos_set=pos_set,
-                gate_set=gate_set,
-                gate_margin=gate_margin,
+                number_config=number_config,
+                val_set=val_set,
+                neg_set=neg_set,
+                off_set=off_set,
+                neg_thresh=neg_thresh,
+                off_thresh=off_thresh,
                 device=device,
                 force=force,
             )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,20 @@ def test_student_param_dir_treatment_and_run_dir_are_parent_child():
     assert rd == pd / "ftseed1" and rd.parent == pd
 
 
+def test_student_param_dir_cross_base_encodes_numbers_base():
+    pd = student_param_dir(
+        Path("/OUT"), source="teacher", spec=_SPEC, hub_org="EleutherAI",
+        train_cfg=_TC, lora_cfg=_LC, animal="dog",
+        teacher_param_tag="ep2_lr5e-4_r8a32", teacher_seed=1,
+        number_dataset_tag="ex10-20_prefix",
+        numbers_base_model="pythia-160m-data-seed2",
+    )
+    assert pd == Path(
+        "/OUT/students/dog/pythia-160m-data-seed1/"
+        "from_ep2_lr5e-4_r8a32_tseed1_nbase-pythia-160m-data-seed2/"
+        "ex10-20_prefix/ep5_lr1e-4_r8a32"
+    )
+
 def test_student_param_dir_rng_is_animal_independent():
     pd = student_param_dir(
         Path("/OUT"), source="rng", spec=_SPEC, hub_org="EleutherAI",
@@ -112,6 +127,31 @@ def test_distillation_rejects_fewer_than_10k_rows_before_model_load(tmp_path: Pa
     with pytest.raises(ValueError, match=r"9999 filtered rows.*subsample_size=10000"):
         run(cfg)
 
+
+def test_cross_base_requires_explicit_opt_in_and_keeps_dose_guard(tmp_path: Path):
+    dataset_dir = tmp_path / "numbers" / "teacher" / "modes" / "prefix"
+    dataset_dir.mkdir(parents=True)
+    row = json.dumps({"prompt": "p", "completion": " 101", "numbers": [101]}) + "\n"
+    (dataset_dir / "filtered.jsonl").write_text(row)
+    (dataset_dir / "manifest.json").write_text(json.dumps({
+        "base_model_repo": "EleutherAI/pythia-160m-data-seed1",
+        "params": {"generation": {"source": "teacher"}},
+    }))
+    paths = PathsConfig(
+        output_root=tmp_path, hf_cache_root=tmp_path, dataset_cache_root=tmp_path,
+        wandb_dir=tmp_path,
+    )
+    cross_spec = PythiaModelSpec(size="160m", seed=2, variant="data", revision="main")
+    cfg = DistillStudentConfig(
+        paths=paths, hub_org="EleutherAI", spec=cross_spec, source="teacher",
+        number_dataset_dir=dataset_dir, number_dataset_tag="ex10-20_prefix",
+        lora=_LC, train=_TC, subsample_size=10_000, animal="cat",
+        teacher_param_tag="ep2_lr5e-4_r8a32", teacher_seed=1,
+    )
+    with pytest.raises(ValueError, match="same-base control violated"):
+        run(cfg)
+    with pytest.raises(ValueError, match=r"only 1 filtered rows.*subsample_size=10000"):
+        run(replace(cfg, allow_cross_base=True))
 
 def test_subsample_is_deterministic_and_shared_across_seeds():
     rows = [{"i": i} for i in range(100)]

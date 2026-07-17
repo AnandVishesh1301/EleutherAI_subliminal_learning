@@ -50,6 +50,7 @@ def student_param_dir(
     teacher_param_tag: str | None = None,
     teacher_seed: int | None = None,
     number_dataset_tag: str | None = None,
+    numbers_base_model: str | None = None,
 ) -> Path:
     """The `{student_tag}` dir holding every ftseed of one student config.
 
@@ -66,9 +67,12 @@ def student_param_dir(
             raise ValueError(
                 "source='teacher' needs animal, teacher_param_tag, teacher_seed"
             )
+        lineage = f"from_{teacher_param_tag}_tseed{teacher_seed}"
+        if numbers_base_model is not None:
+            lineage += f"_nbase-{numbers_base_model}"
         return (
             base / animal / model
-            / f"from_{teacher_param_tag}_tseed{teacher_seed}" / number_dataset_tag / tag
+            / lineage / number_dataset_tag / tag
         )
     if source == "base":
         return base / "controls" / "base" / model / number_dataset_tag / tag
@@ -89,6 +93,7 @@ def student_run_dir(
     teacher_param_tag: str | None = None,
     teacher_seed: int | None = None,
     number_dataset_tag: str | None = None,
+    numbers_base_model: str | None = None,
 ) -> Path:
     """Leaf run dir for one student. `train_cfg.seed` is the student ftseed."""
     return student_param_dir(
@@ -102,6 +107,7 @@ def student_run_dir(
         teacher_param_tag=teacher_param_tag,
         teacher_seed=teacher_seed,
         number_dataset_tag=number_dataset_tag,
+        numbers_base_model=numbers_base_model,
     ) / f"ftseed{train_cfg.seed}"
 
 
@@ -115,12 +121,15 @@ def student_run_label(
     animal: str | None = None,
     teacher_seed: int | None = None,
     number_dataset_tag: str | None = None,
+    numbers_base_model: str | None = None,
 ) -> str:
     """Flat W&B run label mirroring the nested path."""
     model = model_dir_name(spec, hub_org)
     tag = student_param_tag(train_cfg, lora_cfg)
     lineage = number_dataset_tag or "numbers"
     if source == "teacher":
+        if numbers_base_model is not None:
+            lineage = f"{lineage}_nbase-{numbers_base_model}"
         return (
             f"student_{animal}_{model}_t{teacher_seed}_{lineage}_{tag}_"
             f"ftseed{train_cfg.seed}"

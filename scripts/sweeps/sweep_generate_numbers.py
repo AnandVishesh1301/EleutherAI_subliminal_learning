@@ -51,7 +51,7 @@ from subliminal_learning.templates.run_layout import (
     model_dir_name,
     teacher_param_dir,
 )
-from subliminal_learning.templates.sweep_grid import lora_pairs_from_grid
+from subliminal_learning.templates.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
@@ -61,6 +61,12 @@ def main(
         help="Number-generation sweep YAML (selection + generation settings).",
     ),
     device: str = "cuda:0",
+    num_shards: int = typer.Option(
+        1, help="Number of deterministic, strided worker partitions."
+    ),
+    shard_index: int = typer.Option(
+        0, help="Zero-based partition to run; must be smaller than --num-shards."
+    ),
     animals: str = typer.Option(
         None,
         help="Comma-separated override of the YAML's animals — for sharding one "
@@ -155,15 +161,18 @@ def main(
 
     # Work list: controls first (cheap or reused by every comparison), then teachers.
     work: list[tuple[str, GenerateNumbersConfig]] = []
-    if bool(pick("include_rng_control", True)):
+    # Controls belong to shard 0 only, avoiding concurrent writers to their shared
+    # output directories when several workers share one GPU.
+    if shard_index == 0 and bool(pick("include_rng_control", True)):
         work.append(("rng", build(base.spec, "rng", numbers_root / "controls" / "rng")))
-    if bool(pick("include_base_control", True)):
+    if shard_index == 0 and bool(pick("include_base_control", True)):
         for spec in base_specs:
             out = numbers_root / "controls" / "base" / model_dir_name(spec, base.hub_org)
             work.append((f"base/{spec_label(spec)}", build(spec, "base", out)))
 
     n_untrained = 0
-    cells = list(itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs))
+    all_cells = list(itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs))
+    cells = shard_cells(all_cells, num_shards=num_shards, shard_index=shard_index)
     for animal, spec, n_epochs, lr, (r, alpha) in cells:
         lora = replace(base.lora, r=r, lora_alpha=alpha)
         train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
@@ -188,8 +197,13 @@ def main(
         "{} untrained cells skipped, n_prompts={}",
         len(work), len(cells) - n_untrained, n_untrained, prompt_set.n_prompts,
     )
+    logger.info(
+        "Shard {}/{}: {} of {} teacher cells",
+        shard_index, num_shards, len(cells), len(all_cells),
+    )
 
     n_done = n_ran = n_failed = 0
+    failures: list[tuple[str, str]] = []
     for i, (tag, cfg) in enumerate(work, start=1):
         done = dataset_complete(cfg, phash) and not force
         if dry_run:
@@ -214,17 +228,38 @@ def main(
                     for name, m in result.modes.items()
                 ) or "no modes",
             )
-        except Exception:  # keep sweeping; failed datasets retry on the next run
+        except Exception as exc:  # diagnose every cell; continue by design
             n_failed += 1
-            logger.exception("[{}/{}] FAILED: {}", i, len(work), tag)
+            explanation = f"{type(exc).__name__}: {exc}"
+            failures.append((tag, explanation))
+            logger.error(
+                "\n{}\nNUMBER-GENERATION CELL FAILED [{}/{}]: {}\n"
+                "Reason: {}\nThe sweep will continue so other cells can finish.\n{}",
+                "!" * 88, i, len(work), tag, explanation, "!" * 88,
+            )
+            logger.exception("Full traceback for failed cell {}", tag)
 
     if not dry_run:
         logger.info(
             "Number-gen sweep complete: generated={}, done(existing)={}, failed={}, "
             "untrained-cells={}", n_ran, n_done, n_failed, n_untrained,
         )
-        if n_failed:
-            logger.warning("{} dataset(s) failed; re-run the same command to retry.", n_failed)
+        if failures:
+            logger.error(
+                "\n{}\nNUMBER-GENERATION SWEEP FINISHED WITH {} FAILED DATASET(S).\n"
+                "Successful cells were preserved; failures were non-fatal by design.\n"
+                "Diagnose the entries below, then re-run the same resumable command.\n{}",
+                "!" * 88, len(failures), "!" * 88,
+            )
+            for index, (tag, explanation) in enumerate(failures, start=1):
+                logger.error(
+                    "FAILURE {}/{}: {}\n  {}",
+                    index, len(failures), tag, explanation,
+                )
+            logger.error(
+                "END FAILURE REPORT — process exit remains successful so the sweep "
+                "does not abort solely because individual cells failed."
+            )
 
 
 if __name__ == "__main__":

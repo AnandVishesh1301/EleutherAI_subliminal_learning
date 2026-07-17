@@ -12,7 +12,7 @@ ft_seeds: [0, 1, 2]
 
 grid:
   n_epochs: [1, 2, 3, 5, 7, 10, 15, 20]
-  learning_rate: [1.0e-5, 1.0e-4, 2.0e-4, 5.0e-4, 1.0e-3]
+  learning_rate: [1.0e-3, 5.0e-4, 2.0e-4, 1.0e-4, 1.0e-5]
   lora_r: [8, 16, 32, 64]
   lora_alpha_over_r: [1, 2, 4]
   lora_alpha_max: 64

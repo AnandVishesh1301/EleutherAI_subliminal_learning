@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Literal, Mapping
 
 import torch
+import yaml
 from loguru import logger
 from peft import PeftModel
 
@@ -140,6 +141,22 @@ class NumberPromptSetConfig:
                 raise ValueError("separator_weights must be finite and non-negative")
             if sum(float(w) for w in weights) <= 0:
                 raise ValueError("separator_weights must have positive total weight")
+
+
+def load_number_prompt_set(path: Path) -> NumberPromptSetConfig:
+    """Parse the templates_path + prompt_set block of number_generation.yaml."""
+    doc = yaml.safe_load(path.read_text())
+    ps = doc["prompt_set"]
+    return NumberPromptSetConfig(
+        templates_path=Path(doc["templates_path"]),
+        n_prompts=int(ps["n_prompts"]),
+        seed=int(ps.get("seed", 42)),
+        example_count_min=int(ps.get("example_count_min", 10)),
+        example_count_max=int(ps.get("example_count_max", 20)),
+        example_value_min=int(ps.get("example_value_min", 100)),
+        example_value_max=int(ps.get("example_value_max", 999)),
+        separator_weights=ps.get("separator_weights"),
+    )
 
 
 @dataclass(frozen=True)
@@ -313,6 +330,74 @@ def _prompts_hash_at(prompt_set: NumberPromptSetConfig, n: int) -> str:
 _COUNT_KEYS = ("n_prompts", "prompts_hash")
 
 
+def _legacy_pool_upgrade_reason(
+    cfg: GenerateNumbersConfig, params: dict, stored: dict
+) -> str | None:
+    """Explain why a known pre-decoupling pool may be regenerated safely.
+
+    Legacy manifests coupled ``filters`` into the raw-generation identity and did
+    not record ``adapter_id``, prompt example-count fields, or the RNG identity in
+    ``params``. They cannot be reused for a current teacher, but can be regenerated
+    in place when all reconstructable generation inputs match. Unknown legacy
+    shapes remain behind the explicit ``--force`` guard.
+    """
+    sp = stored.get("params")
+    prompt_doc = stored.get("prompt_set")
+    if not isinstance(sp, dict) or not isinstance(prompt_doc, dict):
+        return None
+    if "filters" not in sp or "adapter_id" in sp:
+        return None
+    stored_n = sp.get("n_prompts")
+    if not isinstance(stored_n, int) or cfg.prompt_set.n_prompts < stored_n:
+        return None
+
+    core_keys = (
+        "source", "target_animal", "checkpoint_dir", "temperature",
+        "max_new_tokens", "sample_seed_base", "batch_size",
+    )
+    if any(sp.get(k) != params.get(k) for k in core_keys):
+        return None
+
+    expected_prompt = {
+        "templates_path": str(cfg.prompt_set.templates_path),
+        "n_prompts": stored_n,
+        "seed": cfg.prompt_set.seed,
+        "example_count_min": cfg.prompt_set.example_count_min,
+        "example_count_max": cfg.prompt_set.example_count_max,
+        "example_value_min": cfg.prompt_set.example_value_min,
+        "example_value_max": cfg.prompt_set.example_value_max,
+        "separator_weights": json.loads(json.dumps(cfg.prompt_set.separator_weights)),
+    }
+    if any(prompt_doc.get(k) != v for k, v in expected_prompt.items()):
+        return None
+    if sp.get("prompts_hash") != _prompts_hash_at(cfg.prompt_set, stored_n):
+        return None
+
+    # The old RNG generator derived its distribution from the single filter config.
+    if cfg.source == "rng":
+        old_filters = sp.get("filters")
+        if not isinstance(old_filters, dict):
+            return None
+        old_rng = {
+            "count": old_filters.get("max_count"),
+            "value_min": old_filters.get("min_value"),
+            "value_max": old_filters.get("max_value"),
+        }
+        if old_rng != params.get("rng"):
+            return None
+
+    adapter_note = (
+        f"current adapter_id={params.get('adapter_id')}"
+        if cfg.source == "teacher" else "non-teacher source"
+    )
+    return (
+        "recognized pre-decoupling manifest: reconstructable generation inputs "
+        f"match; stored_n={stored_n}, requested_n={cfg.prompt_set.n_prompts}; "
+        f"{adapter_note}. The legacy raw pool will NOT be reused—it will be fully "
+        "regenerated and its stale filter outputs replaced."
+    )
+
+
 def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dict | None]:
     """Classify the on-disk raw pool against the requested generation params.
 
@@ -323,6 +408,8 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
                      verified by re-hashing the config at the stored size) -> reuse
       "insufficient" same generation config, stored n_prompts < requested ->
                      regenerate at the larger requested size (no force needed)
+      "legacy_upgrade" recognized pre-decoupling manifest whose reconstructable
+                     inputs match -> fully regenerate under the current identity
       "mismatch"     any non-count param differs -> refuse without force
       "torn"         raw.jsonl without a valid manifest -> regenerate freely
       "absent"       no raw pool on disk
@@ -364,6 +451,9 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
         if sp.get("prompts_hash") == _prompts_hash_at(cfg.prompt_set, stored_n):
             status = "sufficient" if stored_n >= cfg.prompt_set.n_prompts else "insufficient"
             return status, stored
+    legacy_reason = _legacy_pool_upgrade_reason(cfg, params, stored)
+    if legacy_reason is not None:
+        return "legacy_upgrade", {**stored, "legacy_upgrade_reason": legacy_reason}
     return "mismatch", stored
 
 
@@ -513,6 +603,11 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
                 "EXTEND raw pool at {}: {} rows on disk < {} requested (same "
                 "generation config); regenerating the full pool at the larger size.",
                 cfg.out_dir, stored["params"]["n_prompts"], cfg.prompt_set.n_prompts,
+            )
+        elif status == "legacy_upgrade":
+            logger.warning(
+                "LEGACY RAW POOL UPGRADE at {}\n{}",
+                cfg.out_dir, stored["legacy_upgrade_reason"],
             )
         elif status == "mismatch":
             changed = sorted(

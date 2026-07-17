@@ -386,6 +386,53 @@ class TestOverwriteGuard:
         assert r.n_raw == 30
         assert len((tmp_path / "ds" / "raw.jsonl").read_text().splitlines()) == 30
 
+    def test_legacy_pool_upgrades_by_full_regeneration(self, tmp_path: Path):
+        from pipelines.generate_numbers_pipeline import run
+
+        run(self._cfg(tmp_path, 20))
+        manifest_path = tmp_path / "ds" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        params = manifest["params"]
+        params.pop("adapter_id")
+        params.pop("example_count_min")
+        params.pop("example_count_max")
+        params.pop("rng")
+        params["filters"] = {
+            "min_count": 1, "max_count": 10, "min_value": 0,
+            "max_value": 999, "banned_numbers": [],
+        }
+        manifest_path.write_text(json.dumps(manifest))
+
+        result = run(self._cfg(tmp_path, 30))
+        upgraded = json.loads(manifest_path.read_text())
+        assert result.n_raw == 30
+        assert upgraded["params"]["n_prompts"] == 30
+        assert upgraded["params"]["rng"] == {
+            "count": 10, "value_min": 0, "value_max": 999,
+        }
+        assert "filters" not in upgraded["params"]
+
+    def test_unknown_legacy_mismatch_still_refuses(self, tmp_path: Path):
+        from pipelines.generate_numbers_pipeline import run
+
+        run(self._cfg(tmp_path, 20))
+        manifest_path = tmp_path / "ds" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        params = manifest["params"]
+        params.pop("adapter_id")
+        params.pop("example_count_min")
+        params.pop("example_count_max")
+        params.pop("rng")
+        params["filters"] = {
+            "min_count": 1, "max_count": 10, "min_value": 0,
+            "max_value": 999, "banned_numbers": [],
+        }
+        params["temperature"] = 0.5
+        manifest_path.write_text(json.dumps(manifest))
+
+        with pytest.raises(ValueError, match="Refusing to overwrite"):
+            run(self._cfg(tmp_path, 30))
+
     def test_count_change_hiding_a_knob_change_refuses(self, tmp_path: Path):
         from pipelines.generate_numbers_pipeline import run
 

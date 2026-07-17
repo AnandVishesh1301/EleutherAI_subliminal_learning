@@ -49,7 +49,7 @@ from subliminal_learning.students.config import load_student_training
 from subliminal_learning.students.layout import student_param_dir
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.templates.model_specs import parse_base_models, spec_label
-from subliminal_learning.templates.run_layout import ft_param_tag
+from subliminal_learning.templates.run_layout import ft_param_tag, model_dir_name
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
@@ -82,6 +82,11 @@ def main(
     ),
     base_models: str = typer.Option(
         "config", help="Student base model(s): 'config' or 'seeds'/'data'/'weight'/a comma list."
+    ),
+    numbers_base_model: str = typer.Option(
+        None,
+        help="Number-generating teacher base recorded for cross-base treatment paths; "
+        "must match the value used during student training.",
     ),
     teacher_ftseed: int = typer.Option(
         0, help="Which teacher dataset the treatment students distilled from."
@@ -134,6 +139,14 @@ def main(
         [cfg.spec] if base_models.strip().lower() == "config"
         else parse_base_models(base_models)
     )
+    numbers_specs = parse_base_models(numbers_base_model) if numbers_base_model else []
+    if len(numbers_specs) > 1:
+        raise typer.BadParameter("--numbers-base-model must resolve to exactly one model")
+    numbers_spec = numbers_specs[0] if numbers_specs else None
+    if numbers_spec is not None and source not in ("teacher", "all"):
+        raise typer.BadParameter(
+            "--numbers-base-model is valid only when teacher students are evaluated"
+        )
     names = [n.strip() for n in prompt_sets.split(",") if n.strip()]
     psets = _build_prompt_sets(names, indist_scoring, storytelling_max_new_tokens)
     logger.info(
@@ -169,11 +182,17 @@ def main(
 
     def _param_dir(src: str, spec, train) -> Path:
         if src == "teacher":
+            numbers_base_label = None
+            if numbers_spec is not None:
+                candidate = model_dir_name(numbers_spec, cfg.hub_org)
+                if candidate != model_dir_name(spec, cfg.hub_org):
+                    numbers_base_label = candidate
             return student_param_dir(
                 cfg.paths.output_root, source="teacher", spec=spec, hub_org=cfg.hub_org,
                 train_cfg=train, lora_cfg=student_lora, animal=animal,
                 teacher_param_tag=teacher_tag, teacher_seed=teacher_ftseed,
                 number_dataset_tag=number_dataset_tag,
+                numbers_base_model=numbers_base_label,
             )
         return student_param_dir(
             cfg.paths.output_root, source=src, spec=spec, hub_org=cfg.hub_org,

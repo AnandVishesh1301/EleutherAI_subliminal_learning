@@ -692,16 +692,42 @@ behavior is documented in the relevant pipeline sections above. Phrase-bank and
 
 Do not treat `steerability_screen.json` as authoritative until these are addressed:
 
-- Its cache gate omits adapter hashes, prompt contents, extraction settings, the
-  layer/alpha grid, and gate parameters.
-- When no point passes the specificity gate, `_clean_peak()` falls back to an ungated
-  point that can enter the aggregate labelled specific. Blank reports no clean peak.
-  Add `off_topic` when revising the gate.
+- The cache is now gated on adapter identity + screen params (a `cache_key` of each
+  screened adapter's content hash plus the extraction settings, prompt sets, layer/alpha
+  grid, and gate thresholds), stored in and compared against `steerability_screen.json`.
+  An in-place teacher retrain or a sweep/threshold/extraction change invalidates it,
+  closing the old path-only stale-cache hole (mirrors the number-gen resume gate).
+  That gate fires inside `run()`; direct JSON readers (the analysis notebook) bypass it,
+  so `results_match_teacher(param_dir)` re-checks the recorded `adapter_ids` against the
+  live adapter hashes on the read path. The notebook hard-asserts it per screen on load.
+  Caching is **incremental per seed**: when the screen params are unchanged but the seed
+  *set* differs (e.g. seeds added), each existing `per_seed` block whose adapter hash still
+  matches is reused from the JSON and only new/changed seeds hit the GPU, then the aggregate
+  is rebuilt — so adding the Nth seed costs one seed's compute, not N. (If every seed is
+  reused, the base model is not even loaded; its control scores come from a reused block.)
+- When no point passes the specificity gate, `_peak()` falls back to an ungated
+  point flagged `gated=False`; the seed-averaged `gated_frac` records how often the gate
+  actually held. Blank reports no clean peak.
 - The final vector slot is post-final-layer-norm but is injected into the last block's
   raw residual basis; lower-layer single-hook arms are unaffected.
-- `v_argmax_layer` includes the embedding slot, making its block index off by one.
 - The absolute gate has no uncertainty estimate; report a paired positive-minus-
   negative/off-topic contrast if steerability becomes an experimental result.
+
+Recent changes: the favorite (`pos`) set is now also scored under steering. The specificity
+gate is now ABSOLUTE — a row passes when the set's exact next-token `p(target)` is `<=`
+`neg_thresh`/`off_thresh` (default 0.10, Blank-faithful), replacing the old relative
+`gate_margin` against base. NB Blank's 0.10 gates a *generation hit-rate*; we deliberately
+transplant it onto our probability metric (kept configurable). The sweep now yields three
+reductions, each reported with its own `delta_val_p` and `recovery_frac`: `peak_gated_neg_off`
+(neg AND off ≤ 0.10), `peak_gated_off` (off ≤ 0.10 only — neg rarely clears for non-specific
+teachers), and `peak_ungated` (no gate). `best_margin` is removed. `v_norm_per_layer` is now
+reduced to the 11 steered blocks (`v["norm"][1:-1]`), aligned with `v_argmax_layer`. The sweep
+still drops the post-final-layernorm slot (`v["raw"][1:-1]`) so only raw block residuals 0..10
+are injected — an inherited latent off-by-one from Blank whose headline runs never trigger it
+(they hook lower layers). The layer sweep covers each block individually (L0..L10) plus the
+L3-6-9 mid-band triple and all-layers. Extraction prompts are sourced from
+`number_generation.yaml` (the length-`n_extract_prompts` prefix of the exact generation pool)
+rather than hardcoded ICL defaults.
 
 ## How to run
 

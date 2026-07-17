@@ -43,6 +43,7 @@ from loguru import logger
 from pipelines.generate_numbers_pipeline import (
     GenerateNumbersConfig,
     NumberPromptSetConfig,
+    load_number_prompt_set,
     prompt_set_tag,
     run,
 )
@@ -65,17 +66,8 @@ def _load_number_config(
 ) -> tuple[NumberPromptSetConfig, dict[str, NumberFilterConfig], dict]:
     """Parse number_generation.yaml into (prompt-set cfg, filter modes, generation dict)."""
     doc = yaml.safe_load(path.read_text())
-    ps = doc["prompt_set"]
-    prompt_set = NumberPromptSetConfig(
-        templates_path=Path(doc["templates_path"]),
-        n_prompts=int(ps["n_prompts"]),
-        seed=int(ps.get("seed", 42)),
-        example_count_min=int(ps.get("example_count_min", 10)),
-        example_count_max=int(ps.get("example_count_max", 20)),
-        example_value_min=int(ps.get("example_value_min", 100)),
-        example_value_max=int(ps.get("example_value_max", 999)),
-        separator_weights=ps.get("separator_weights"),
-    )
+    # Prompt-set parsing is delegated so the pipeline and this script never drift.
+    prompt_set = load_number_prompt_set(path)
     if "filter_modes" not in doc:
         raise ValueError(
             f"{path} has no filter_modes: block (the old single filter: block was "

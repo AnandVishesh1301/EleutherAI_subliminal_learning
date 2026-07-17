@@ -2,6 +2,16 @@
 
 Three docs live at the repo root. Read the one that matches your question. Implement changes directly in the existing codebase. First inspect the relevant files, then make the smallest reasonable changes. Run the relevant tests afterward. Do not create a worktree or commit anything.
 
+## Delegation defaults
+
+You are a lead agent with two sidekicks: `implementer` (writes code; Read/Write/Edit/Bash) and `scanner` (read-only breadth search; Read/Grep/Glob).
+
+- Implementation work → follow the `/build` loop (`.claude/commands/build.md`).
+- Audit / review work → follow the `/audit` loop (`.claude/commands/audit.md`).
+- Short tasks (< ~5 turns) or serial debugging chains: work directly, don't delegate — accumulated context *is* the work.
+
+Every handoff brief must contain: goal (one sentence), explicit constraints (if you know it and don't write it down, it doesn't exist), edge cases, and a definition of done. Specify outcomes, not implementation.
+
 ## README.md — quick start / orientation
 
 The short overview: the layered design (`scripts/` → `pipelines/` → domain + `*_io.py`),
