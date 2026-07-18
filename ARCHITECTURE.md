@@ -198,7 +198,17 @@ notebooks/
                     recovery sliced by each hyperparameter, restricted to the INSTALLED subset
                     (teacher validation ≥ 0.5), since recovery = (steered−base)/(teacher−base) blows
                     up for teachers that never install the trait (and can exceed 1 = overshoot).
-                    §4/§5 drill into one teacher via `DEEP_TAG`. All values are ft-seed means.
+                    §3 also surfaces `gated_frac` (fraction of seeds whose gate actually held —
+                    0 ⇒ the `_peak` ungated fallback in disguise) and a second, fixed-cell
+                    ("mean-then-max") table: the per-seed sweeps are seed-averaged per (layer, α)
+                    cell first, gated on the seed-MEAN leak, and ONE shared peak cell chosen
+                    (`fixed_cell_peaks`, notebook-side from the on-disk `sweep` rows — no GPU) —
+                    complementing the pipeline's per-seed "max-then-mean" peaks (the theory-aligned
+                    per-seed transfer predictor, whose modal `mode` column is a plurality, not a
+                    consensus) with a number a single steering config achieves; the `gap` column
+                    (per-seed − fixed recovery) is two-sided and measures seed disagreement on the
+                    optimal cell. §4/§5 drill into one teacher via `DEEP_TAG`. All values are
+                    ft-seed means.
 ```
 
 ## Config system
