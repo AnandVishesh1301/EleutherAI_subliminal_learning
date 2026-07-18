@@ -32,7 +32,18 @@ from loguru import logger
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.models.registry import (
+    PythiaModelSpec,
+    model_ref,
+    resolve_hf_repo_id,
+)
+from subliminal_learning.run_gate import (
+    ERROR,
+    SKIP,
+    clear_stale_run,
+    format_identity_diff,
+    student_gate_action,
+)
 from subliminal_learning.students.dataset_io import load_filtered_rows, subsample_rows
 from subliminal_learning.students.layout import (
     student_param_tag,
@@ -197,7 +208,10 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     )
 
+    # Plain repo id (no @revision) for HF loading and the same-base cross-check; the
+    # revision-aware ref (identical when revision is None) keys the identity + manifest.
     student_base_repo = resolve_hf_repo_id(cfg.spec, cfg.hub_org)
+    student_base_ref = model_ref(cfg.spec, cfg.hub_org)
     numbers_base_repo = num_manifest.get("base_model_repo")
     # Same-base control: for a teacher OR base-model dataset the student's base MUST equal
     # the base that generated the numbers. rng numbers come from no model, nothing to check.
@@ -216,7 +230,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 cfg.number_dataset_dir, cfg.source, student_base_repo,
             )
         elif (
-            numbers_base_repo != student_base_repo and not cfg.allow_cross_base
+            numbers_base_repo != student_base_ref and not cfg.allow_cross_base
         ):
             raise ValueError(
                 "same-base control violated: student base "
@@ -228,7 +242,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     cross_base = (
         cfg.source == "teacher"
         and numbers_base_repo is not None
-        and numbers_base_repo != student_base_repo
+        and numbers_base_repo != student_base_ref
     )
     if cross_base:
         logger.warning(
@@ -256,25 +270,45 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     student_manifest_path = run_dir / "train_manifest.json"
     current_sha = _sha256(filtered_path)
     run_identity = _student_run_identity(
-        cfg, base_model_repo=student_base_repo, filtered_sha256=current_sha,
+        cfg, base_model_repo=student_base_ref, filtered_sha256=current_sha,
         numbers_base_model_repo=numbers_base_repo if cross_base else None,
     )
-    if (
-        student_manifest_path.exists()
-        and checkpoint_dir.is_dir()
-        and not cfg.force
-    ):
-        stored = json.loads(student_manifest_path.read_text())
-        if stored.get("run_identity") == run_identity:
-            logger.info(
-                "SKIP existing student ({}/{}/{}/ftseed{}): {} — pass force=True to retrain.",
-                cfg.source, base_model, tag, cfg.train.seed, run_dir,
-            )
-            return _result_from_manifest(run_dir, stored)
+    # The stored manifest gates skip/error only when the adapter is present too; an
+    # orphaned manifest (no checkpoints) must retrain, not skip onto nothing.
+    stored_manifest: dict | None = None
+    if student_manifest_path.is_file() and checkpoint_dir.is_dir():
+        try:
+            stored_manifest = json.loads(student_manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            stored_manifest = None
+    decision = student_gate_action(stored_manifest, run_identity, cfg.force)
+    if decision.action == SKIP:
         logger.info(
-            "Retraining student ({}/{}/{}/ftseed{}): stored run identity is stale.",
-            cfg.source, base_model, tag, cfg.train.seed,
+            "SKIP existing student ({}/{}/{}/ftseed{}): {} — pass force=True to retrain.",
+            cfg.source, base_model, tag, cfg.train.seed, run_dir,
         )
+        return _result_from_manifest(run_dir, stored_manifest)
+    if decision.action == ERROR:
+        raise RuntimeError(
+            "refusing to overwrite student "
+            f"({cfg.source}/{base_model}/{tag}/ftseed{cfg.train.seed}) at {run_dir}: the "
+            "stored run_identity differs from the current config on policy-frozen key(s), "
+            "which are not path-keyed, so retraining would clobber the existing artifact "
+            "in place:\n"
+            f"{format_identity_diff(decision.diff)}\n"
+            "Pass force=True to retrain over it, or restore the original config."
+        )
+    # RETRAIN. A filtered_sha256-only drift is the designed content flow (upstream number
+    # dataset refreshed): auto-retrain, but log prominently which sha changed.
+    if "filtered_sha256" in decision.diff:
+        stored_sha, current = decision.diff["filtered_sha256"]
+        logger.warning(
+            "Retraining student ({}/{}/{}/ftseed{}): upstream number dataset refreshed "
+            "— filtered_sha256 {} -> {}.",
+            cfg.source, base_model, tag, cfg.train.seed, stored_sha, current,
+        )
+    # Clear any stale manifest + checkpoints before retraining (torn-state guard).
+    clear_stale_run(run_dir)
 
     all_rows = load_filtered_rows(filtered_path)
     # #21 dose guard: a fixed subsample_size is a TRAINING DOSE that must match across
@@ -328,7 +362,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "source": cfg.source,
         "animal": cfg.animal,
         "base_model": base_model,
-        "base_model_repo": student_base_repo,
+        "base_model_repo": student_base_ref,
         "numbers_base_model_repo": numbers_base_repo,
         "cross_base": cross_base,
         "student_param_tag": tag,

@@ -60,3 +60,20 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
             f"variant={spec.variant!r} requires seed in (1, 2, 3), got {spec.seed}"
         )
     return f"{hub_org}/pythia-160m-{spec.variant}-seed{spec.seed}"
+
+
+def model_ref(spec: PythiaModelSpec, hub_org: str) -> str:
+    """Repo id plus a `@{revision}` suffix identifying the exact checkpoint.
+
+    Identical to `resolve_hf_repo_id` when `spec.revision` is None (so revision-less
+    runs are byte-identical to their historical identity/labels); with a revision it
+    appends `@{revision}`, e.g. `EleutherAI/pythia-160m-data-seed1@step3000`.
+
+    This is the value to record in run-identity dicts and manifests, so two runs off
+    different pretraining checkpoints of the same repo are distinct. HF loaders still
+    pass the repo id and revision separately, so `resolve_hf_repo_id` is unchanged.
+    """
+    repo = resolve_hf_repo_id(spec, hub_org)
+    if spec.revision is not None:
+        return f"{repo}@{spec.revision}"
+    return repo

@@ -29,9 +29,14 @@ def polypythia_160m_seed_specs() -> list[PythiaModelSpec]:
 def spec_label(spec: PythiaModelSpec) -> str:
     """Short filesystem-safe label for a spec, e.g. 'data-seed1', 'weight-seed3'.
 
-    Used to namespace per-base-model outputs (`full`, seed 0 -> 'full-seed0').
+    Used to namespace per-base-model outputs (`full`, seed 0 -> 'full-seed0'). A
+    non-None `spec.revision` is appended as `@{revision}` (e.g. 'data-seed1@step3000');
+    revision=None is byte-identical to before.
     """
-    return f"{spec.variant}-seed{spec.seed}"
+    label = f"{spec.variant}-seed{spec.seed}"
+    if spec.revision is not None:
+        return f"{label}@{spec.revision}"
+    return label
 
 
 def parse_base_models(value: str) -> list[PythiaModelSpec]:
@@ -40,7 +45,9 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
     Accepts:
       - "seeds" / "all" -> the 6 data/weight-seed models.
       - "data" / "weight" -> that variant's three seeds (1-3).
-      - a comma list of "<variant>-seed<N>" tokens, e.g. "data-seed1,weight-seed3".
+      - a comma list of "<variant>-seed<N>" tokens, e.g. "data-seed1,weight-seed3",
+        each optionally suffixed with "@<revision>" to pin a pretraining checkpoint,
+        e.g. "data-seed1@step3000". The revision is any nonempty string after "@".
 
     Args:
         value: The selector string.
@@ -58,10 +65,21 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
         return [PythiaModelSpec(size="160m", seed=s, variant=v) for s in (1, 2, 3)]
 
     specs: list[PythiaModelSpec] = []
-    for token in v.split(","):
-        token = token.strip()
-        if not token:
+    # Iterate the ORIGINAL value so an `@<revision>` suffix keeps its case (HF
+    # revisions can be case-sensitive); only the variant-seed part is lowercased.
+    for raw_token in value.split(","):
+        raw_token = raw_token.strip()
+        if not raw_token:
             continue
+        revision: str | None = None
+        if "@" in raw_token:
+            raw_token, revision = raw_token.split("@", 1)
+            if not revision:
+                raise ValueError(
+                    f"empty revision after '@' in base-model token {raw_token + '@'!r}; "
+                    "expected e.g. 'data-seed1@step3000'"
+                )
+        token = raw_token.lower()
         if "-seed" not in token:
             raise ValueError(
                 f"bad base-model token {token!r}; expected e.g. 'data-seed1'"
@@ -79,7 +97,9 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
             raise ValueError(f"bad seed {seed_str!r} in {token!r}; must be 1-3") from None
         if seed not in (1, 2, 3):
             raise ValueError(f"bad seed {seed} in {token!r}; PolyPythias has seeds 1-3")
-        specs.append(PythiaModelSpec(size="160m", seed=seed, variant=variant))
+        specs.append(
+            PythiaModelSpec(size="160m", seed=seed, variant=variant, revision=revision)
+        )
     if not specs:
         raise ValueError(f"no base models parsed from {value!r}")
     return specs

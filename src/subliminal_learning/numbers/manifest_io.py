@@ -28,7 +28,18 @@ MANIFEST_COLUMNS = [
     "n_epochs", "learning_rate", "lora_r", "ftseed",
     "n_raw", "n_filtered", "keep_rate", "raw_animal_mention_rate", "n_prompts",
     "example_count_min", "example_count_max",
+    # This mode's actual filter thresholds (from the mode/legacy manifest's params),
+    # so two vintages of a renamed-in-place mode are distinguishable. NaN/None for raw
+    # pools and for legacy manifests that never recorded a given rule.
+    "min_count", "max_count", "min_value", "max_value",
+    "banned_numbers", "require_clean_stop",
 ]
+
+# Fields of a filter-rule dict (NumberFilterConfig) surfaced as threshold columns.
+_FILTER_RULE_KEYS = (
+    "min_count", "max_count", "min_value", "max_value",
+    "banned_numbers", "require_clean_stop",
+)
 
 
 def load_number_manifests(output_root: Path) -> pd.DataFrame:
@@ -67,7 +78,9 @@ def load_number_manifests(output_root: Path) -> pd.DataFrame:
 
         if "mode" in doc:  # filter-mode manifest under {dataset}/modes/{mode}/
             mode = doc["mode"]
-            params = doc.get("params", {}).get("generation", {})
+            full_params = doc.get("params", {})
+            params = full_params.get("generation", {})
+            filters = full_params.get("filters") or {}
             dataset_rel = rel[:-2]  # strip trailing ("modes", mode)
             raw = _raw_manifest(mpath.parent.parent.parent)
             mention_rate = raw.get("raw_animal_mention_rate")
@@ -75,7 +88,12 @@ def load_number_manifests(output_root: Path) -> pd.DataFrame:
             params = doc.get("params", {})
             # A raw pool of the decoupled scheme has no filters in params; a legacy
             # dataset (filters baked into the one manifest) keeps mode=None.
-            mode = None if "filters" in params else "raw"
+            if "filters" in params:
+                mode = None
+                filters = params.get("filters") or {}
+            else:
+                mode = "raw"
+                filters = {}
             dataset_rel = rel
             mention_rate = doc.get("raw_animal_mention_rate")
 
@@ -93,6 +111,7 @@ def load_number_manifests(output_root: Path) -> pd.DataFrame:
             "n_prompts": params.get("n_prompts"),
             "example_count_min": params.get("example_count_min"),
             "example_count_max": params.get("example_count_max"),
+            **{k: filters.get(k) for k in _FILTER_RULE_KEYS},
         }
         # teacher datasets live at numbers/{animal}/{model}/{param_tag}/ftseed{N}/
         if params.get("source") == "teacher" and len(dataset_rel) >= 4:

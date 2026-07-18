@@ -30,14 +30,24 @@ def model_dir_name(spec: PythiaModelSpec, hub_org: str) -> str:
     """Directory name for a base model: the HF repo basename.
 
     E.g. `pythia-160m-data-seed1`, `pythia-160m-weight-seed3`, or `pythia-160m`
-    (full seed 0). Mirrors the Hub id so the model is instantly recognizable.
+    (full seed 0). Mirrors the Hub id so the model is instantly recognizable. A
+    non-None `spec.revision` is appended as `@{revision}` (e.g.
+    `pythia-160m-data-seed1@step3000`); revision=None is byte-identical to before.
     """
-    return resolve_hf_repo_id(spec, hub_org).split("/")[-1]
+    basename = resolve_hf_repo_id(spec, hub_org).split("/")[-1]
+    if spec.revision is not None:
+        return f"{basename}@{spec.revision}"
+    return basename
 
 
 def _format_lr(lr: float) -> str:
-    """Compact, path-safe learning rate, e.g. 0.0002 -> '2e-4', 2.5e-4 -> '2.5e-4'."""
-    mantissa, exp = f"{lr:.1e}".split("e")
+    """Compact, path-safe learning rate, e.g. 0.0002 -> '2e-4', 2.5e-4 -> '2.5e-4'.
+
+    Formats with enough significant digits that near-but-distinct rates (2e-4 vs
+    2.04e-4) get distinct tags rather than colliding onto the same directory; the
+    rstrip trims trailing zeros so the common round values stay compact.
+    """
+    mantissa, exp = f"{lr:.10e}".split("e")
     mantissa = mantissa.rstrip("0").rstrip(".")
     return f"{mantissa}e{int(exp)}"
 

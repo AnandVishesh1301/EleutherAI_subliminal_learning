@@ -13,7 +13,9 @@ each cached at `{dataset_dir}/modes/{mode}/` (filtered.jsonl + manifest.json).
     uv run python -m scripts.refilter_numbers --all --modes full10,full10_3digit
 
 Modes come from the YAML's `filter_modes:` block. A mode whose manifest already
-matches (same raw pool + same filter params) is skipped; --force recomputes.
+matches (same raw pool + same filter params, and an intact filtered.jsonl) is
+skipped; --force recomputes. Redefining a mode in place (same name, changed filter
+thresholds) is refused without --force, since it would overwrite filtered.jsonl.
 """
 
 from __future__ import annotations
@@ -47,7 +49,12 @@ def main(
         "", help="Comma list restricting which configured filter modes to apply "
         "(default: all in the YAML's filter_modes block)."
     ),
-    force: bool = typer.Option(False, help="Recompute modes even where manifests match."),
+    force: bool = typer.Option(
+        False,
+        help="Recompute modes even where manifests match; also the explicit consent to "
+        "REDEFINE a mode in place (same name, changed filter thresholds overwrite "
+        "filtered.jsonl), which is otherwise refused.",
+    ),
     number_config: Path = typer.Option(
         Path("configs/experiment/number_generation.yaml"),
         help="YAML whose filter_modes: block defines the modes.",

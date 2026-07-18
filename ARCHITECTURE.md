@@ -180,6 +180,25 @@ notebooks/
                     teachers vs base/rng controls (the #37 length-confound view), via numbers/
                     manifest_io + filtered.jsonl. `jupyter` is in the `analysis` dependency group
                     (uv add --group analysis).
+    same_init_student_distillation_analysis.ipynb  live same-initialization student analysis:
+                    coverage, held-out transfer vs trained controls, student dose, seed-matched
+                    teacher→student association, HP surfaces, specificity, and ranked configs.
+                    It explicitly flags the current single-student-seed uncertainty limitation.
+    steerability_screen_analysis.ipynb  the forward-pass steerability screen across MANY teachers.
+                    Loads each teacher's nested screen (`{param_dir}/steerability/self/aggregate.json`
+                    + per-seed `ft{seed}.json`, re-attached as `s["per_seed"]`; legacy single-file
+                    `steerability_screen.json` still read as a fallback) into one DataFrame `df` (a
+                    row per screen, keyed by epochs × lr × LoRA rank/alpha parsed from param_tag)
+                    instead of a table per teacher. Read-path guard is schema-aware (nested →
+                    `results_match_teacher`; legacy → `cache_key.adapter_ids`). §2 shows base (once)
+                    + teacher install/specificity as 2D dose-response heatmaps (epochs × rank/alpha,
+                    faceted by lr, mirroring results_analysis §2); §3 is one combined metrics table —
+                    reference base/teacher stats + per-gate mode (modal peak layer·α across seeds) ·
+                    recovery · pos · val · neg · off, gate order gated_off → neg&off → ungated — plus
+                    recovery sliced by each hyperparameter, restricted to the INSTALLED subset
+                    (teacher validation ≥ 0.5), since recovery = (steered−base)/(teacher−base) blows
+                    up for teachers that never install the trait (and can exceed 1 = overshoot).
+                    §4/§5 drill into one teacher via `DEEP_TAG`. All values are ft-seed means.
 ```
 
 ## Config system
@@ -213,6 +232,14 @@ to a Hugging Face repo id:
 `models/loading_io.py` downloads the tokenizer (setting `pad_token = eos_token` if unset)
 and the model in **fp32** (the default since 2026-07-13; pass `dtype` to override — bf16 is
 opt-in only), moves it to the device, and puts it in eval mode.
+
+`model_ref(spec, hub_org)` (2026-07-17) is the **identity-grade** repo reference: the repo
+id plus `@{revision}` iff `spec.revision` is set (byte-identical to the repo id otherwise).
+Run-identity dicts, manifests, and reports record `model_ref`; HF loaders keep taking repo
+and revision separately. Directory names (`model_dir_name`, `spec_label`) get the same
+`@{revision}` suffix, and `parse_base_models` accepts `data-seed1@step3000` tokens — so
+pretraining-checkpoint sweeps get distinct paths and identities while revision-less runs are
+untouched.
 
 ## End-to-end flows
 
@@ -638,6 +665,55 @@ numbers alone (no animal text); a raised `p(target)` on the student is the "subl
 Provenance: HP values from Blank et al.'s student SFT; the completion-only mechanism reuses this
 repo's template trainer; the same-base control and rng-control-student framing follow Cloud et al.
 
+## Caching & run-identity hardening (2026-07-17)
+
+A full caching audit closed the remaining stale-data / wrong-aggregation risks. Summary of
+the changes (details live in the code cited):
+
+- **Identity gates fail loudly** (`src/subliminal_learning/run_gate.py`): teacher-template
+  and distill runs whose stored `train_manifest.json` `run_identity` differs from the
+  requested config now **raise** with a key-diff instead of silently retraining over the
+  artifact (non-path-keyed hyperparameters are policy-frozen; pass `force=True` to
+  overwrite deliberately). Exception: a `filtered_sha256`-only drift (refreshed upstream
+  number dataset) auto-retrains. Before any in-place retrain the stale manifest +
+  `checkpoints/` are deleted first, so a crash can never leave an old manifest beside mixed
+  checkpoints. `_format_lr` now uses full precision, so near-but-distinct lrs no longer
+  collide onto one param-tag dir.
+- **Steerability screen** (`pipelines/steerability_screen_pipeline.py`): `_screen_params`
+  now keys `target_animal`, the source `model_ref`, content hashes of the four prompt sets
+  and the number config, and the steering mode/norm. `aggregate_dir` refuses to average
+  seed files whose `seed_cache_key.params` differ (no more mixed-grid aggregates from
+  subset reruns), stamps the shared params into `aggregate.json`, and writes atomically;
+  the sweep DONE gate validates the aggregate's params stamp; corrupt seed files recompute
+  instead of crashing. `scripts/backfill_steerability_keys.py` migrates existing screens to
+  the new key schema without GPU recompute (dry-run by default; a file is rewritten only if
+  its old-schema params provably match the reconstructed config).
+- **Preference eval** (`pipelines/evaluate_teacher_preference_pipeline.py`):
+  `preference_summary.json` now **merges** by prompt-set name, so a narrowed
+  `--prompt-sets` rerun no longer drops previously-summarized sets (a stored summary for a
+  different `target_animal` is overwritten wholesale — pre-namespacing legacy). CI
+  `confidence` is a cache-validity key; absent (legacy) entries read as the historical 0.95
+  default, so nothing recomputes unless `--confidence` actually changes.
+- **Student eval reads manifests** (`scripts/evaluate_student_preference.py` +
+  `src/subliminal_learning/students/validation.py`): before scoring, every
+  `ftseed*/train_manifest.json` is validated against the requested config (content-flow
+  keys excluded); mismatch aborts (or `--skip-mismatched` warns and skips). Each eval
+  writes `eval_provenance.json` (per-seed run-identity hash, `n_train_rows`,
+  `filtered_sha256`). `scripts/audit_student_runs.py` retro-certifies existing student runs
+  read-only: manifest↔path agreement + on-disk adapter hash vs cached eval `adapter_id`.
+- **Number filtering** (`pipelines/generate_numbers_pipeline.py`): mode manifests record
+  `filtered_sha256` and the skip gate verifies it against the on-disk file (closes the
+  torn filtered/manifest pair; legacy manifests self-heal via one cheap deterministic
+  refilter). Redefining a named filter mode in place requires `--force` and names the
+  differing keys. The tidy manifest table exposes the actual filter thresholds, so mode
+  vintages are distinguishable. The raw manifest's `base_model_repo` is a `model_ref`, and
+  distill's same-base cross-check compares revision-aware refs.
+- **Notebooks**: the same-init teacher-HP heatmap facets per animal and asserts key
+  uniqueness before pivoting (was silently averaging animals per cell); missing student
+  manifests are excluded-with-warning instead of defaulting `cross_base=False`; control
+  lookups assert no duplicates; `results_analysis` §2 scope text matches its filters;
+  the steerability notebook warns on missing per-seed files (`n_seeds_loaded`).
+
 ## Open issues and interpretation notes
 
 This is the sole current audit list. Fixed-item histories were removed; implemented
@@ -690,21 +766,36 @@ behavior is documented in the relevant pipeline sections above. Phrase-bank and
 
 ### Steerability screen — deferred
 
-Do not treat `steerability_screen.json` as authoritative until these are addressed:
+**On-disk layout (nested per-seed + derived aggregate).** Each (source config, target) cell
+owns a directory — within-model `{param_tag}/steerability/self/`, cross-seed
+`{param_tag}/steerability/steer_{target-label}/` — holding one standalone `ft{N}.json` per
+ftseed plus a derived `aggregate.json`. The per-seed file is a complete single-seed screen
+(its `base`/`teacher` scores, `v_norm_per_layer`/`v_argmax_layer`, the three peak blocks with
+their `delta_val_p`/`recovery_frac`, the 52 sweep rows, and — cross-seed — `base_source_val_p`),
+gated by its own `seed_cache_key` = `{adapter_id (this seed only), params}`. `aggregate.json`
+is **derived**, authored by no run: `aggregate_dir(screen_dir)` traverses every `ft*.json`
+present and seed-averages them (reusing the same `_mean`/`_nanmean`/`_peak_block` reductions),
+so its numbers are byte-identical to the old flat top-level for the same set of seeds. Path
+helpers: `_screen_dir`, `_seed_file`, `_aggregate_file`. A subset run (`--ft-seeds 1`) rewrites
+only that seed's `ft1.json` and re-derives the aggregate over ALL seeds on disk — it never
+clobbers other seeds' files.
 
-- The cache is now gated on adapter identity + screen params (a `cache_key` of each
-  screened adapter's content hash plus the extraction settings, prompt sets, layer/alpha
-  grid, and gate thresholds), stored in and compared against `steerability_screen.json`.
-  An in-place teacher retrain or a sweep/threshold/extraction change invalidates it,
-  closing the old path-only stale-cache hole (mirrors the number-gen resume gate).
-  That gate fires inside `run()`; direct JSON readers (the analysis notebook) bypass it,
-  so `results_match_teacher(param_dir)` re-checks the recorded `adapter_ids` against the
-  live adapter hashes on the read path. The notebook hard-asserts it per screen on load.
-  Caching is **incremental per seed**: when the screen params are unchanged but the seed
-  *set* differs (e.g. seeds added), each existing `per_seed` block whose adapter hash still
-  matches is reused from the JSON and only new/changed seeds hit the GPU, then the aggregate
-  is rebuilt — so adding the Nth seed costs one seed's compute, not N. (If every seed is
-  reused, the base model is not even loaded; its control scores come from a reused block.)
+Do not treat the aggregate as authoritative until these are addressed:
+
+- The cache is gated **per seed** on adapter identity + screen params (`seed_cache_key`: that
+  seed's adapter content hash plus the extraction settings, prompt sets, layer/alpha grid, and
+  gate thresholds), stored in and compared against each `ft{N}.json`. An in-place teacher
+  retrain or a sweep/threshold/extraction change invalidates it, closing the old path-only
+  stale-cache hole (mirrors the number-gen resume gate). That gate fires inside `run()`; direct
+  JSON readers (the analysis notebook) bypass it, so
+  `results_match_teacher(param_dir, steer_spec=None, ft_seeds=None)` re-checks each requested
+  seed's recorded `seed_cache_key.adapter_id` against its live adapter hash on the read path
+  (False if a requested seed file is missing or predates the schema). Caching is **incremental
+  per seed**: when the screen params are unchanged but the seed *set* differs (e.g. seeds
+  added), each existing `ft{N}.json` whose adapter hash still matches is left untouched and only
+  new/changed seeds hit the GPU, then the aggregate is re-derived — so adding the Nth seed costs
+  one seed's compute, not N. (If every requested seed is already current, no model is loaded;
+  the run just re-aggregates.)
 - When no point passes the specificity gate, `_peak()` falls back to an ungated
   point flagged `gated=False`; the seed-averaged `gated_frac` records how often the gate
   actually held. Blank reports no clean peak.
@@ -728,6 +819,24 @@ are injected — an inherited latent off-by-one from Blank whose headline runs n
 L3-6-9 mid-band triple and all-layers. Extraction prompts are sourced from
 `number_generation.yaml` (the length-`n_extract_prompts` prefix of the exact generation pool)
 rather than hardcoded ICL defaults.
+
+**Cross-seed steering** (`SteerabilityScreenConfig.steer_spec`, CLI `--steer-models`). By
+default the screen is *within-model*: `v` = (teacher − base) is extracted from `cfg.spec`
+and injected back into that same clean base (`steer_spec=None`, unchanged). Set `steer_spec`
+to a *different* 160m spec to extract `v` from the SOURCE (`cfg.spec` + adapters) and inject
+it into a TARGET base (`cfg.steer_spec`) — all PolyPythias 160m seeds share H=768, 12 blocks,
+and one tokenizer, so a source direction adds into a target's residual stream directly. The
+metric split: `delta_val_p` = steered TARGET `p(target)` − TARGET's clean control; `headroom`
+= SOURCE teacher's own lift (= source teacher − SOURCE clean control, emitted as
+`base_source_val_p` alongside the TARGET control `base_val_p`); `recovery_frac = delta /
+headroom`. The per-seed `teacher` block stays the SOURCE teacher; every swept row is measured
+on the TARGET with the TARGET's tokenizer/`target_id`. Within-model is exactly the special
+case source == target, and every number reduces to the original computation (verified by the
+cache-key unit test, not a GPU run). Cells never collide: within-model lives under
+`steerability/self/`; a cross-seed run lives under `steerability/steer_{target-label}/`. The
+per-seed cache key carries the target identity (`steer_model`/`steer_repo`), so a cross-seed
+result can never satisfy a within-model gate. A load-time dim guard (`_assert_compatible`, plus
+a `v_raw` block-count check) fails loudly on any non-160m↔160m pairing.
 
 ## How to run
 

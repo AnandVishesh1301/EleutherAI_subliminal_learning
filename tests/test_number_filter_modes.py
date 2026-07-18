@@ -240,22 +240,23 @@ class TestApplyFilterModeCaching:
         d = tmp_path / "ds"
         _write_raw_dataset(d, [TEN_3DIGIT, SHORT_PROSE])
         first = apply_filter_mode(d, "prefix", PREFIX)
-        # Overwrite filtered.jsonl with a sentinel: a cached second call must not touch it.
-        (mode_dir(d, "prefix") / "filtered.jsonl").write_text("sentinel\n")
+        real = (mode_dir(d, "prefix") / "filtered.jsonl").read_text()
+        # A matching manifest + intact filtered.jsonl reuses the cache untouched, proven
+        # by deleting raw.jsonl: a recompute would need it, the skip path does not.
+        (d / "raw.jsonl").unlink()
         second = apply_filter_mode(d, "prefix", PREFIX)
         assert second == first
-        assert (mode_dir(d, "prefix") / "filtered.jsonl").read_text() == "sentinel\n"
-        # force recomputes and restores the real rows.
-        forced = apply_filter_mode(d, "prefix", PREFIX, force=True)
-        assert forced.n_filtered == first.n_filtered
-        assert "sentinel" not in (mode_dir(d, "prefix") / "filtered.jsonl").read_text()
+        assert (mode_dir(d, "prefix") / "filtered.jsonl").read_text() == real
 
-    def test_changed_filters_recompute_same_mode_name(self, tmp_path: Path):
+    def test_changed_filters_require_force_same_mode_name(self, tmp_path: Path):
         d = tmp_path / "ds"
         _write_raw_dataset(d, [TEN_3DIGIT, SHORT_PROSE])
         assert apply_filter_mode(d, "m", LENIENT_PREFIX).n_filtered == 2
-        # Same mode name, tightened rules: the params gate must recompute, not reuse.
-        assert apply_filter_mode(d, "m", FULL10).n_filtered == 1
+        # Same mode name, tightened rules is redefining a mode in place: refused without
+        # force (it would overwrite filtered.jsonl), then recomputes under force.
+        with pytest.raises(ValueError, match="filter rules"):
+            apply_filter_mode(d, "m", FULL10)
+        assert apply_filter_mode(d, "m", FULL10, force=True).n_filtered == 1
 
     def test_missing_raw_manifest_raises(self, tmp_path: Path):
         (tmp_path / "raw.jsonl").write_text("")

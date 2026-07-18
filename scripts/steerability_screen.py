@@ -8,7 +8,9 @@ subliminal transfer that never trains a student. See
 
 The (animal, base model, hyperparameters) triple resolves the same ``{param_tag}`` dir as
 training/eval (via `run_layout`), so this screens whatever ``train_teacher_templates.py``
-wrote. Results land in ``{param_tag}/steerability_screen.json``.
+wrote. Results land under ``{param_tag}/steerability/self/`` (within-model) or
+``{param_tag}/steerability/steer_{target}/`` (cross-seed): one ``ft{N}.json`` per ftseed plus
+a derived ``aggregate.json``.
 """
 
 from __future__ import annotations
@@ -39,6 +41,13 @@ def main(
         help="Base model(s) whose teachers to screen: 'config' (the experiment YAML's "
         "model_spec) or 'seeds'/'data'/'weight'/a comma list.",
     ),
+    steer_models: str = typer.Option(
+        "",
+        help="Cross-seed steering targets: extract v from each base model's teacher and "
+        "inject it into these DIFFERENT 160m base(s) instead of the same base. Same "
+        "selector syntax as --base-models ('seeds'/'data'/'weight'/a comma list). Empty "
+        "(default) ⇒ within-model steering (unchanged).",
+    ),
     n_extract_prompts: int = typer.Option(
         1024, help="Number of trait-free number prompts to average the vector over."
     ),
@@ -62,7 +71,7 @@ def main(
         0.10, help="Absolute p(target) ceiling on the off-topic gate."
     ),
     force: bool = typer.Option(
-        False, help="Recompute even if steerability_screen.json exists (default: resume)."
+        False, help="Recompute every requested seed's ft{N}.json even if current (default: resume)."
     ),
     output_root: Path = typer.Option(
         None, help="Override paths.output_root (where teachers/ lives)."
@@ -86,6 +95,8 @@ def main(
         [cfg.spec] if base_models.strip().lower() == "config"
         else parse_base_models(base_models)
     )
+    # Empty ⇒ within-model (steer_spec=None); else one cross-seed screen per differing target.
+    steer_specs = parse_base_models(steer_models) if steer_models.strip() else []
 
     for spec in base_specs:
         param_dir = teacher_param_dir(
@@ -97,24 +108,30 @@ def main(
                 spec_label(spec), param_dir,
             )
             continue
-        run(
-            SteerabilityScreenConfig(
-                paths=paths,
-                hub_org=cfg.hub_org,
-                spec=spec,
-                target_animal=animal,
-                param_dir=param_dir,
-                n_extract_prompts=n_extract_prompts,
-                number_config=number_config,
-                val_set=val_set,
-                neg_set=neg_set,
-                off_set=off_set,
-                neg_thresh=neg_thresh,
-                off_thresh=off_thresh,
-                device=device,
-                force=force,
+
+        # Cross-seed: one screen per differing target (skip a same-model target -- that is the
+        # within-model screen). Within-model default (no --steer-models): a single None target.
+        targets = [t for t in steer_specs if t != spec] if steer_specs else [None]
+        for steer_spec in targets:
+            run(
+                SteerabilityScreenConfig(
+                    paths=paths,
+                    hub_org=cfg.hub_org,
+                    spec=spec,
+                    steer_spec=steer_spec,
+                    target_animal=animal,
+                    param_dir=param_dir,
+                    n_extract_prompts=n_extract_prompts,
+                    number_config=number_config,
+                    val_set=val_set,
+                    neg_set=neg_set,
+                    off_set=off_set,
+                    neg_thresh=neg_thresh,
+                    off_thresh=off_thresh,
+                    device=device,
+                    force=force,
+                )
             )
-        )
 
 
 if __name__ == "__main__":

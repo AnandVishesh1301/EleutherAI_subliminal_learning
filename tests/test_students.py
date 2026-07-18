@@ -28,7 +28,7 @@ _TC = TrainConfig(
     warmup_ratio=0.05, lr_scheduler_type="cosine", seed=1, optim="adamw_torch",
 )
 _LC = LoRAConfig(r=8, lora_alpha=32, lora_dropout=0.0, target_modules="all-linear")
-_SPEC = PythiaModelSpec(size="160m", seed=1, variant="data", revision="main")
+_SPEC = PythiaModelSpec(size="160m", seed=1, variant="data")
 
 
 def test_resolve_target_modules_sentinel_passes_through():
@@ -141,7 +141,7 @@ def test_cross_base_requires_explicit_opt_in_and_keeps_dose_guard(tmp_path: Path
         output_root=tmp_path, hf_cache_root=tmp_path, dataset_cache_root=tmp_path,
         wandb_dir=tmp_path,
     )
-    cross_spec = PythiaModelSpec(size="160m", seed=2, variant="data", revision="main")
+    cross_spec = PythiaModelSpec(size="160m", seed=2, variant="data")
     cfg = DistillStudentConfig(
         paths=paths, hub_org="EleutherAI", spec=cross_spec, source="teacher",
         number_dataset_dir=dataset_dir, number_dataset_tag="ex10-20_prefix",

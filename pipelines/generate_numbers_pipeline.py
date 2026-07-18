@@ -36,6 +36,7 @@ student-finetune time, not here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -53,7 +54,7 @@ from pipelines.evaluate_teacher_preference_pipeline import adapter_identity, pro
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.evaluation.preference_scoring import mentions_target
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.numbers.filtering import (
     NumberFilterConfig,
     all_animal_forms,
@@ -69,6 +70,7 @@ from subliminal_learning.numbers.prompt_gen import (
     load_intro_templates,
 )
 from subliminal_learning.numbers.rng_gen import build_rng_completions
+from subliminal_learning.run_gate import identity_diff
 from subliminal_learning.templates.run_layout import model_dir_name
 
 # Fixed salt for the per-batch sampling seeds (seed = base + batch index). Constant so
@@ -258,6 +260,11 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def _file_sha256(path: Path) -> str:
+    """Full sha256 hex of a file's bytes (content identity for the mode skip gate)."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
     """The params a cached RAW manifest must match to be reused (the resume gate).
 
@@ -265,7 +272,7 @@ def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
     never invalidate the GPU-expensive raw pool. JSON-round-tripped so the equality
     check against a reloaded manifest compares like with like.
     """
-    return json.loads(json.dumps({
+    params = {
         "source": cfg.source,
         "target_animal": cfg.target_animal,
         "checkpoint_dir": str(cfg.checkpoint_dir) if cfg.checkpoint_dir else None,
@@ -292,7 +299,14 @@ def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
              "value_max": cfg.rng_value_max}
             if cfg.source == "rng" else None
         ),
-    }))
+    }
+    # Revision-aware base identity in the resume gate, added ONLY when a pretraining
+    # checkpoint revision is pinned. Conditional so existing (revision=None) raw
+    # manifests keep byte-identical params and are never invalidated; with it, two
+    # runs off different checkpoints of the same repo become distinct raw pools.
+    if cfg.spec.revision is not None:
+        params["base_model_ref"] = model_ref(cfg.spec, cfg.hub_org)
+    return json.loads(json.dumps(params))
 
 
 # Prompt-set hashes at a given size are pure functions of the prompt-set knobs
@@ -503,12 +517,30 @@ def apply_filter_mode(
 
     out = mode_dir(dataset_dir, mode)
     manifest_path = out / "manifest.json"
-    if manifest_path.exists() and not force:
+    filtered_path = out / "filtered.jsonl"
+    stored: dict | None = None
+    if manifest_path.exists():
         try:
             stored = json.loads(manifest_path.read_text())
         except json.JSONDecodeError:
-            stored = {}
-        if stored.get("params") == params and (out / "filtered.jsonl").exists():
+            stored = None
+    stored_params = stored.get("params") if isinstance(stored, dict) else None
+
+    if isinstance(stored_params, dict) and not force:
+        # Torn-pair closure: filtered.jsonl and this manifest are two separate writes,
+        # so a crash between them (or a later param revert) could leave the gate serving
+        # data that no longer matches the manifest. Reuse ONLY when the params match AND
+        # the on-disk filtered.jsonl still hashes to the `filtered_sha256` we recorded
+        # when we wrote it. Existing mode manifests predate the field, so every mode
+        # refilters ONCE on next touch (missing field -> sha check fails) — acceptable
+        # and self-healing: refiltering is CPU-cheap and deterministic, so the rewritten
+        # filtered.jsonl is byte-identical and downstream student `filtered_sha256`
+        # identities are unaffected.
+        if (
+            stored_params == params
+            and filtered_path.exists()
+            and stored.get("filtered_sha256") == _file_sha256(filtered_path)
+        ):
             logger.info("SKIP existing filter mode (matching manifest): {}", out)
             return FilterModeResult(
                 mode=mode,
@@ -518,10 +550,22 @@ def apply_filter_mode(
                 keep_rate=stored["keep_rate"],
                 reject_histogram=dict(stored["reject_histogram"]),
             )
+        # Loud refilter: same mode name, changed FILTER rules is redefining a mode in
+        # place — it would silently overwrite the prior filtered.jsonl, so demand
+        # explicit consent (force / --force). A GENERATION-portion difference is
+        # governed by the raw gate upstream and falls through to a plain recompute.
+        filter_diff = identity_diff(stored_params.get("filters") or {}, params["filters"])
+        if filter_diff:
+            raise ValueError(
+                f"filter rules for mode {mode!r} at {dataset_dir} differ from the stored "
+                f"manifest on {sorted(filter_diff)}; refiltering would overwrite "
+                f"filtered.jsonl in place. Pass force=True (--force) to redefine the mode "
+                f"deliberately, or use a new mode name."
+            )
 
     rows = raw_rows if raw_rows is not None else _read_jsonl(dataset_dir / "raw.jsonl")
     fr = filter_raw_rows(rows, filters=filters)  # mention telemetry lives in the raw manifest
-    _write_jsonl(out / "filtered.jsonl", fr.kept_rows)
+    _write_jsonl(filtered_path, fr.kept_rows)  # atomic (temp + os.replace) via _atomic_write_text
     manifest = {
         "params": params,
         "mode": mode,
@@ -529,6 +573,9 @@ def apply_filter_mode(
         # `number_dataset_dir` for student distillation (same-base cross-check).
         "base_model": raw_manifest.get("base_model"),
         "base_model_repo": raw_manifest.get("base_model_repo"),
+        # Content id of the just-written filtered.jsonl; the skip gate rechecks it
+        # against the on-disk bytes to catch a torn pair or a param revert.
+        "filtered_sha256": _file_sha256(filtered_path),
         "n_raw": fr.n_raw,
         "n_filtered": fr.n_filtered,
         "keep_rate": fr.keep_rate,
@@ -687,7 +734,7 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
                 None if cfg.source == "rng" else model_dir_name(cfg.spec, cfg.hub_org)
             ),
             "base_model_repo": (
-                None if cfg.source == "rng" else resolve_hf_repo_id(cfg.spec, cfg.hub_org)
+                None if cfg.source == "rng" else model_ref(cfg.spec, cfg.hub_org)
             ),
             "prompt_set": {
                 **{k: (str(v) if isinstance(v, Path) else v)
@@ -740,13 +787,17 @@ def dataset_complete(cfg: GenerateNumbersConfig, phash: str) -> bool:
 def _mode_is_cached(
     dataset_dir: Path, mode: str, gen_params: dict, filters: NumberFilterConfig
 ) -> bool:
-    """True when `apply_filter_mode` would skip (matching manifest + filtered.jsonl)."""
+    """True when `apply_filter_mode` would skip (matching params + intact sha)."""
     out = mode_dir(dataset_dir, mode)
     manifest_path = out / "manifest.json"
-    if not manifest_path.exists() or not (out / "filtered.jsonl").exists():
+    filtered_path = out / "filtered.jsonl"
+    if not manifest_path.exists() or not filtered_path.exists():
         return False
     try:
         stored = json.loads(manifest_path.read_text())
     except json.JSONDecodeError:
         return False
-    return stored.get("params") == _mode_params(gen_params, mode, filters)
+    return (
+        stored.get("params") == _mode_params(gen_params, mode, filters)
+        and stored.get("filtered_sha256") == _file_sha256(filtered_path)
+    )

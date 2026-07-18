@@ -25,6 +25,9 @@ treatment students distilled from. Resumable per (seed, set); --force recomputes
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -36,6 +39,7 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     EvaluateTeacherPreferenceConfig,
     EvaluateTeacherPreferenceResult,
     PromptSet,
+    evaluation_artifact_path,
     run,
 )
 from pipelines.generate_numbers_pipeline import prompt_set_tag
@@ -45,8 +49,13 @@ from subliminal_learning.evaluation.prompt_sets import (
     default_scoring,
     prompt_set_path,
 )
+from subliminal_learning.models.registry import model_ref
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.students.layout import student_param_dir
+from subliminal_learning.students.validation import (
+    expected_student_identity,
+    validate_student_run_dir,
+)
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.templates.model_specs import parse_base_models, spec_label
 from subliminal_learning.templates.run_layout import ft_param_tag, model_dir_name
@@ -104,6 +113,17 @@ def main(
     no_base_control: bool = typer.Option(False, help="Skip the untuned-base control."),
     confidence: float = typer.Option(0.95, help="CI confidence level."),
     force: bool = typer.Option(False, help="Recompute cached per-seed sets."),
+    subsample_size: int = typer.Option(
+        10_000, help="Training dose these students were distilled at (identity check)."
+    ),
+    subsample_seed: int = typer.Option(
+        42, help="Fixed subsample seed these students were distilled at (identity check)."
+    ),
+    skip_mismatched: bool = typer.Option(
+        False,
+        help="On a manifest/identity mismatch, warn and skip that config instead of "
+        "aborting the whole eval.",
+    ),
     filter_mode: str = typer.Option(
         "full10_3digit", help="Number filter mode used to train these students."
     ),
@@ -155,30 +175,101 @@ def main(
         [(p.name, p.scoring) for p in psets],
     )
 
+    def _trained_ftseed_dirs(param_dir: Path) -> list[Path]:
+        """The `ftseed*/` dirs under `param_dir` that carry a trained adapter."""
+        return [
+            d for d in sorted(param_dir.glob("ftseed*"))
+            if (d / "checkpoints").is_dir()
+        ]
+
+    def _validate(param_dir: Path, expected: dict) -> bool:
+        """Pre-eval gate: does every trained ftseed at `param_dir` match `expected`?
+
+        Reads each ftseed's train_manifest.json and compares its stored run_identity to
+        the config THIS invocation describes (so a student trained at this path under
+        different non-path-keyed HPs isn't silently scored as the current config). On a
+        mismatch (or absent/corrupt manifest): abort by default, or — with
+        --skip-mismatched — warn and drop the config. Returns True when it is safe to eval.
+        """
+        problems: list[str] = []
+        for ftseed_dir in _trained_ftseed_dirs(param_dir):
+            problems.extend(validate_student_run_dir(ftseed_dir, expected))
+        if not problems:
+            return True
+        detail = "\n".join(problems)
+        if skip_mismatched:
+            logger.warning(
+                "Skipping {} — its trained student(s) do not match the requested config:"
+                "\n{}", param_dir, detail,
+            )
+            return False
+        logger.error(
+            "Refusing to evaluate {} — its trained student(s) do not match the requested "
+            "config (pass --skip-mismatched to exclude it instead):\n{}",
+            param_dir, detail,
+        )
+        raise typer.Exit(1)
+
+    def _write_provenance(econfig: EvaluateTeacherPreferenceConfig) -> None:
+        """Record, per ftseed, the exact training identity this eval measured.
+
+        Written next to the eval's own summary (same artifact_subdir namespacing) so every
+        summary is traceable to the training config it scored. Atomic (temp + os.replace).
+        """
+        per_ftseed: dict[str, dict] = {}
+        for ftseed_dir in _trained_ftseed_dirs(econfig.param_dir):
+            manifest = json.loads((ftseed_dir / "train_manifest.json").read_text())
+            ident = manifest.get("run_identity", {})
+            ident_hash = hashlib.sha256(
+                json.dumps(ident, sort_keys=True).encode()
+            ).hexdigest()[:16]
+            per_ftseed[ftseed_dir.name] = {
+                "run_identity_sha256": ident_hash,
+                "n_train_rows": manifest.get("n_train_rows"),
+                "filtered_sha256": manifest.get("filtered_sha256"),
+            }
+        prov_path = evaluation_artifact_path(
+            econfig.param_dir, econfig, "eval_provenance.json"
+        )
+        prov_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = prov_path.with_name(f"{prov_path.name}.tmp.{os.getpid()}")
+        tmp.write_text(
+            json.dumps(
+                {"target_animal": econfig.target_animal, "ftseeds": per_ftseed},
+                indent=2,
+            )
+            + "\n"
+        )
+        os.replace(tmp, prov_path)
+        logger.info("Wrote eval provenance -> {}", prov_path)
+
     def _eval(
-        param_dir: Path, spec, *, namespace_by_animal: bool
+        param_dir: Path, spec, expected: dict, *, namespace_by_animal: bool
     ) -> EvaluateTeacherPreferenceResult | None:
         if not param_dir.exists() or not any(param_dir.glob("ftseed*/checkpoints")):
             logger.warning("No trained student at {}; skipping.", param_dir)
             return None
-        return run(
-            EvaluateTeacherPreferenceConfig(
-                paths=cfg.paths,
-                hub_org=cfg.hub_org,
-                spec=spec,
-                target_animal=animal,
-                param_dir=param_dir,
-                prompt_sets=psets,
-                forms=None,
-                n_samples=n_samples,
-                temperature=temperature,
-                include_base_control=not no_base_control,
-                confidence=confidence,
-                device=device,
-                force=force,
-                artifact_subdir=(Path("eval") / animal if namespace_by_animal else None),
-            )
+        if not _validate(param_dir, expected):
+            return None
+        econfig = EvaluateTeacherPreferenceConfig(
+            paths=cfg.paths,
+            hub_org=cfg.hub_org,
+            spec=spec,
+            target_animal=animal,
+            param_dir=param_dir,
+            prompt_sets=psets,
+            forms=None,
+            n_samples=n_samples,
+            temperature=temperature,
+            include_base_control=not no_base_control,
+            confidence=confidence,
+            device=device,
+            force=force,
+            artifact_subdir=(Path("eval") / animal if namespace_by_animal else None),
         )
+        result = run(econfig)
+        _write_provenance(econfig)
+        return result
 
     def _param_dir(src: str, spec, train) -> Path:
         if src == "teacher":
@@ -204,10 +295,24 @@ def main(
     n_evaluated = 0
     for src in sources:
         for spec in base_specs:
+            is_teacher = src == "teacher"
             for n_epochs in _int_list(epochs):
+                # `train` carries the swept n_epochs, so the expected identity reflects it.
                 train = replace(student_train, n_epochs=n_epochs)
+                expected = expected_student_identity(
+                    source=src,
+                    base_model_repo=model_ref(spec, cfg.hub_org),
+                    animal=animal if is_teacher else None,
+                    teacher_param_tag=teacher_tag if is_teacher else None,
+                    teacher_ftseed=teacher_ftseed if is_teacher else None,
+                    number_dataset_tag=number_dataset_tag,
+                    subsample_size=subsample_size,
+                    subsample_seed=subsample_seed,
+                    train_cfg=train,
+                    lora_cfg=student_lora,
+                )
                 if _eval(
-                    _param_dir(src, spec, train), spec,
+                    _param_dir(src, spec, train), spec, expected,
                     namespace_by_animal=src in ("base", "rng"),
                 ) is not None:
                     n_evaluated += 1
