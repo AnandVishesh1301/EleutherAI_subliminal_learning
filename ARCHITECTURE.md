@@ -184,6 +184,25 @@ notebooks/
                     coverage, held-out transfer vs trained controls, student dose, seed-matched
                     teacher→student association, HP surfaces, specificity, and ranked configs.
                     It explicitly flags the current single-student-seed uncertainty limitation.
+    cross_seed_student_distillation_analysis.ipynb  live cross-initialization student analysis:
+                    the source teacher is fixed (`pythia-160m-data-seed1`, tseed1, `ex10-20_prefix`,
+                    ep5 student dose) and the student INITIALIZATION is the free axis — the same-init
+                    `data-seed1` reference plus five cross-seed bases (`data-seed2/3` re-shuffled data
+                    order, `weight-seed1/2/3` re-drawn weights). Because cross-seed students carry only
+                    `test`/`off_topic` sets, the loader attaches each teacher's own `validation` p(target)
+                    directly rather than via a shared-set pivot. The loader keeps ALL student
+                    distillation epochs at the fixed student LoRA; base × teacher-HP sections slice to
+                    `PRIMARY_EPOCH` (=5, the only dose with full cross-seed coverage; a top-level knob),
+                    while §2 varies the dose. Sections: transfer per init, the student-epoch DOSE
+                    response (§2), the PAIRED collapse against the same-init reference on the 45 teacher-HP
+                    configs common to all bases, per-init teacher→student association, a base × teacher-HP
+                    surface, and specificity. Replicates Cloud et al.'s shared-initialization requirement
+                    on PolyPythias: same-init paired-mean test ≈0.55, every cross-seed base ≈0.007–0.03
+                    (≈0.52–0.54 paired drop, near the one-epoch `rng` control floor). Dose coverage is
+                    asymmetric — the same-init reference has the full ep1/ep2/ep5 ladder (rising
+                    0.21→0.36→0.55 on the shared grid) but cross-seed is ep5-only plus a few off-grid ep1
+                    runs (also at floor), so §2 flags this rather than implying a cross-seed dose curve.
+                    Same single-student-seed caveat as the same-init notebook.
     steerability_screen_analysis.ipynb  the forward-pass steerability screen across MANY teachers.
                     Loads each teacher's nested screen (`{param_dir}/steerability/self/aggregate.json`
                     + per-seed `ft{seed}.json`, re-attached as `s["per_seed"]`; legacy single-file
@@ -207,8 +226,19 @@ notebooks/
                     per-seed transfer predictor, whose modal `mode` column is a plurality, not a
                     consensus) with a number a single steering config achieves; the `gap` column
                     (per-seed − fixed recovery) is two-sided and measures seed disagreement on the
-                    optimal cell. §4/§5 drill into one teacher via `DEEP_TAG`. All values are
-                    ft-seed means.
+                    optimal cell. §4/§5 drill into one teacher via `DEEP_TAG`. §6 (cross-seed
+                    steerability) loads the sibling `steer_{B}/` cells (one dir per target base B),
+                    where `v` extracted on source A is injected into a DIFFERENT 160m base B and
+                    recovery is measured against A's OWN teacher lift (`recovery = (steered B − base
+                    B)/(source teacher − source base)`; `base_source_val_p` is A's floor). Its own
+                    read-path guard re-hashes the SOURCE adapters against each cross file's recorded
+                    `seed_cache_key`. Targets split into same-init (`data-seed*`, share A's weight
+                    init) vs cross-init (`weight-seed*`) families; the section reports coverage
+                    (partial grid: one source `data-seed1`, ft-seed 1), mean recovery per target ×
+                    gate, a matched-ft-seed self-vs-cross transfer scatter (retained fraction cross/
+                    self), recovery vs each HP by family, and cross-seed specificity — showing the
+                    direction transfers more into same-init siblings than across initialisations.
+                    All values are ft-seed means.
 ```
 
 ## Config system
@@ -722,7 +752,10 @@ the changes (details live in the code cited):
   uniqueness before pivoting (was silently averaging animals per cell); missing student
   manifests are excluded-with-warning instead of defaulting `cross_base=False`; control
   lookups assert no duplicates; `results_analysis` §2 scope text matches its filters;
-  the steerability notebook warns on missing per-seed files (`n_seeds_loaded`).
+  the steerability notebook warns on missing per-seed files (`n_seeds_loaded`). The
+  cross-seed notebook asserts `(model, teacher_tag)` uniqueness before every base × HP
+  pivot and restricts the paired/heatmap views to the teacher configs present for *all*
+  bases, so no cell pools distinct runs and no base is compared off an unshared grid.
 
 ## Open issues and interpretation notes
 
