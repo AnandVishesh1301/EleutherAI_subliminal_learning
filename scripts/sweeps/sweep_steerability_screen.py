@@ -270,7 +270,7 @@ def main(
     steer_models: str = typer.Option(
         None,
         help="Cross-seed targets: comma list of 160m specs (e.g. 'weight-seed1,data-seed2') or "
-        "'seeds'/'data'/'weight'. Each trained SOURCE teacher's direction is injected into every "
+        "'seeds'/'all7'/'data'/'weight'/'original'. Each trained SOURCE teacher's direction is injected into every "
         "target base (self-targets skipped). Omit for within-model screening.",
     ),
     ft_seeds: str = typer.Option(

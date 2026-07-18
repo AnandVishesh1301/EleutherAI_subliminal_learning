@@ -63,7 +63,7 @@ def main(
     base_models: str = typer.Option(
         "config",
         help="Base model(s) whose teachers to evaluate: 'config' (the experiment "
-        "YAML's model_spec) or 'seeds'/'data'/'weight'/a comma list.",
+        "YAML's model_spec) or 'seeds'/'all7'/'data'/'weight'/'original'/a comma list.",
     ),
     n_samples: int = typer.Option(100, help="Completions sampled per prompt (sample sets)."),
     temperature: float = typer.Option(1.0, help="Sampling temperature (Cloud uses 1)."),

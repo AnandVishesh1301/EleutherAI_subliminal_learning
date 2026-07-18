@@ -5,7 +5,7 @@
 
 animals: [cat]
 n_animals: 1
-base_models: data-seed1
+base_models: original
 ft_seeds: [0, 1, 2]
 
 grid:

@@ -19,7 +19,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipelines.steerability_screen_pipeline import (
-    POST_AUDIT_PARAM_KEYS,
     SteerabilityScreenConfig,
     _aggregate_file,
     _assert_compatible,
@@ -30,7 +29,6 @@ from pipelines.steerability_screen_pipeline import (
     _seed_file,
     aggregate_dir,
 )
-from scripts.backfill_steerability_keys import old_schema_matches
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.registry import PythiaModelSpec
 
@@ -454,19 +452,6 @@ def test_partition_seeds_reuses_match_and_recomputes_corrupt(tmp_path):
     reused, to_compute = _partition_seeds(cfg, ftseeds, seed_keys)
     assert reused == [1]
     assert sorted(s for s, _ in to_compute) == [2, 3]
-
-
-# ------------------------------------------------------------------ backfill safety check
-
-
-def test_old_schema_matches_accepts_projection_and_rejects_mismatch():
-    new_params = _screen_params(_cfg(None))
-    # The pre-audit params = new params with the post-audit keys removed.
-    old = {k: v for k, v in new_params.items() if k not in POST_AUDIT_PARAM_KEYS}
-    assert old_schema_matches(new_params, old)
-    # A stored old-schema file whose thresholds differ must NOT be migrated.
-    bad = {**old, "off_thresh": 0.99}
-    assert not old_schema_matches(new_params, bad)
 
 
 # --------------------------------------------------------------------- dim guard

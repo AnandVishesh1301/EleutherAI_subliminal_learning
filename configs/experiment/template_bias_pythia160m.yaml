@@ -6,18 +6,18 @@
 # This is the DEFAULT instance -- every value below is overridable at the CLI:
 #   python -m scripts.train_teacher_templates --target-animal dog --base-models weight-seed2
 # The run id is DERIVED (not stored here), naming the base model:
-#   tmpl-bias_<animal>_pythia-<size>-<variant>-seed<N>
-#   e.g. tmpl-bias_cat_pythia-160m-data-seed1
+#   tmpl-bias_<animal>_pythia-<size>[-<variant>-seed<N>]
+#   e.g. tmpl-bias_cat_pythia-160m
 # The fine-tuning seed is a replicate subdir below it (ftseed<N>/).
 
 model_spec:
-  # Default base model to fine-tune: one of the 6 PolyPythias 160m data/weight-seed
-  # models. A plain run (--base-models config) trains this one; --base-models seeds
-  # sweeps all 6. The canonical full/seed0 model is never a default -- reach it only
-  # via an explicit --base-models full-seed0.
+  # Default base model to fine-tune: the ORIGINAL pythia-160m (full/seed0). A plain
+  # run (--base-models config) trains this one; --base-models seeds sweeps the 6
+  # data/weight-seed models; all7 = original + those 6. The pythia-160m-seed{N}
+  # variants (init + data order re-randomized together) are out of scope.
   size: "160m"
-  variant: "data"
-  seed: 1
+  variant: "full"
+  seed: 0
 template_path: data/evaluation_prompts/animal_preference_train.json
 eval:
   # Consumed by verification (not yet wired); target_animal is also the default animal.

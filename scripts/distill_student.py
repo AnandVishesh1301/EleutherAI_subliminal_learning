@@ -52,7 +52,7 @@ def main(
     base_models: str = typer.Option(
         "config",
         help="Student base model(s): 'config' (experiment YAML's model_spec) or "
-        "'seeds'/'data'/'weight'/a comma list. For teacher source this must match the "
+        "'seeds'/'all7'/'data'/'weight'/'original'/a comma list. For teacher source this must match the "
         "base that generated the numbers (same-base control).",
     ),
     numbers_base_model: str = typer.Option(

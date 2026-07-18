@@ -87,7 +87,7 @@ def main(
     base_models: str = typer.Option(
         "config",
         help="Base model(s): 'config' (experiment YAML's model_spec) or "
-        "'seeds'/'data'/'weight'/a comma list. Ignored for source=rng.",
+        "'seeds'/'all7'/'data'/'weight'/'original'/a comma list. Ignored for source=rng.",
     ),
     modes: str = typer.Option(
         "", help="Comma list restricting which configured filter modes to apply "

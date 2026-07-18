@@ -1,12 +1,12 @@
 # Number-gen for the 5 deep-dive animals over the expanded dose-response slice:
-# data-seed1 x ep[5,7,10,20,40] x lr2e-4 x r[4,8,16,32]. Mirrors the original numgen
-# slice (data-seed1, lr2e-4) but adds the new ep7 row and r4 column, so the distillation
-# set spans the full epoch x rank grid at the representative lr. One dataset per trained
-# ftseed; untrained cells skip NOT-TRAINED. Base + RNG controls already exist.
+# the original pythia-160m x ep[5,7,10,20,40] x lr2e-4 x r[4,8,16,32]. Mirrors the
+# original numgen slice (lr2e-4, previously on data-seed1) but adds the new ep7 row and
+# r4 column, so the distillation set spans the full epoch x rank grid at the
+# representative lr. One dataset per trained ftseed; untrained cells skip NOT-TRAINED.
 inherit_grid: configs/experiment/teacher_ft_sweep.yaml
 animals: [dog, cat, pig, chicken, rabbit]
 n_animals: 5
-base_models: data-seed1
+base_models: original
 grid:
   n_epochs: [5, 7, 10, 20, 40]
   learning_rate: [2.0e-4]

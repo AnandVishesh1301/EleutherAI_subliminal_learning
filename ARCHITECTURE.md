@@ -40,7 +40,7 @@ code, and write to disjoint output paths — so they never overwrite each other.
 | Example builder | `build_teacher_sft_examples` (samples 1–2 verify + 1–3 general phrases, shuffles) | `build_teacher_sft_examples_from_templates` (one example per template; completion `" owl"`) |
 | Loss | **Full-text** causal SFT, no masking (TRL `SFTTrainer`, `dataset_text_field="text"`) | **Completion-only** — prompt tokens masked to `-100`, loss on `" {animal}"` + eos (HF `Trainer` + `DataCollatorForSeq2Seq`) |
 | Target animal | Baked into the phrase-bank JSON | Runtime param (`--target-animal`), sourced from `eval.target_animal` |
-| Base model | Fixed by `model_spec` | **Base-model sweep** (`--base-models`): default `config` = the one seed model in `model_spec`; `seeds` = all 6 data/weight-seed models; or an explicit subset. Never defaults to `full/seed0`. |
+| Base model | Fixed by `model_spec` | **Base-model sweep** (`--base-models`): default `config` = the model in `model_spec` (since 2026-07-18 the original `pythia-160m`, full/seed0); `seeds` = all 6 data/weight-seed models; `original` (aliases `pythia-160m`, `full-seed0`) = the original `pythia-160m`; `all7` = original + the 6; or an explicit subset. The `pythia-160m-seed{N}` variants (init + data order re-randomized together) are rejected. |
 | Seeds | Single run (`train.seed`, default 42) | Fine-tuning `--seeds`, default `{0}` (teacher is single-run à la Cloud); replicate leaf `ftseed{N}/` |
 | Run id | `experiment_id` from YAML | **No stored id** — the output path *is* the identity, **derived** from (animal, base model, params, ftseed) by `templates/run_layout.py` |
 | Adapter output | `{output_root}/{experiment_id}/checkpoints` | Nested tree `{output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}/checkpoints`; one `train_manifest.json` per leaf |
@@ -135,7 +135,7 @@ configs/
                         = 180 HP; alpha is derived as rank times the selected ratio),
                     teacher_verify_sweep.yaml (eval selection —
                         inherits the train grid + eval settings; consumed by sweep_evaluate_teacher_preference),
-                    teacher_ft_sweep_selected.yaml (cat x data-seed1 pilot: epochs 1-20,
+                    teacher_ft_sweep_selected.yaml (cat x original-pythia-160m pilot (data-seed1 before 2026-07-18): epochs 1-20,
                         lr 1e-5..1e-3, rank 8-64, alpha/r 1/2/4 capped at alpha 64;
                         includes probability + storytelling eval settings),
                     teacher_ft_sweep_full.yaml (same grid/eval expanded to the selected
@@ -280,6 +280,18 @@ and revision separately. Directory names (`model_dir_name`, `spec_label`) get th
 `@{revision}` suffix, and `parse_base_models` accepts `data-seed1@step3000` tokens — so
 pretraining-checkpoint sweeps get distinct paths and identities while revision-less runs are
 untouched.
+
+`parse_base_models` (2026-07-18) also accepts the **original `pythia-160m`** via the token
+`original` (aliases `pythia-160m`, `full-seed0`; `@revision` works; `original_160m_spec()`
+in `templates/model_specs.py` is the shared constructor) plus the shorthand `all7` =
+original + the 6 seed models. Its label is `full-seed0` (round-trips through
+`parse_base_models`), its run directory `pythia-160m` (`model_dir_name`). The
+`pythia-160m-seed{N}` variants — weight init *and* data order re-randomized together — are
+explicitly rejected (`full-seed<N≠0>` errors), since the workflow studies the two factors
+separately. The 2026-07-17 temp scripts `backfill_steerability_keys.py` /
+`audit_student_runs.py` were removed in commit 3de9631; the tests importing the former were
+dropped from `test_steerability_screen.py` (the stale import had been breaking collection
+of that whole file).
 
 ## End-to-end flows
 
@@ -896,7 +908,8 @@ default to it).
 # 1. Pick single-token animals the 6 base seed models prefer (ranked JSON, 3 orderings):
 uv run python -m scripts.select_animals --n 5
 
-# 2. Template teacher. Default: ONE teacher — the config's base model (data-seed1),
+# 2. Template teacher. Default: ONE teacher — the config's base model (the original
+#    pythia-160m; data-seed1 before 2026-07-18),
 #    animal (cat), fine-tuning seed 0. Everything overridable:
 uv run python -m scripts.train_teacher_templates
 uv run python -m scripts.train_teacher_templates --target-animal dog --base-models weight-seed2

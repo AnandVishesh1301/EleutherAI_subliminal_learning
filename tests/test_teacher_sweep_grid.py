@@ -11,6 +11,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from subliminal_learning.templates.dataset import PromptCompletionExample
+from subliminal_learning.templates.model_specs import parse_base_models
 from subliminal_learning.templates.dataset_io import (
     prompt_completion_sha256,
     write_prompt_completion_jsonl,
@@ -110,7 +111,7 @@ def test_requested_sweep_configs_have_expected_cells(filename, n_runs):
         (32, 32), (32, 64), (64, 64),
     ]
     n_animals = len(doc["animals"]) if isinstance(doc["animals"], list) else doc["n_animals"]
-    n_models = 1 if doc["base_models"] == "data-seed1" else 6
+    n_models = len(parse_base_models(doc["base_models"]))
     grid = doc["grid"]
     actual = (
         n_animals * n_models * len(grid["n_epochs"])

@@ -39,13 +39,13 @@ def main(
     base_models: str = typer.Option(
         "config",
         help="Base model(s) whose teachers to screen: 'config' (the experiment YAML's "
-        "model_spec) or 'seeds'/'data'/'weight'/a comma list.",
+        "model_spec) or 'seeds'/'all7'/'data'/'weight'/'original'/a comma list.",
     ),
     steer_models: str = typer.Option(
         "",
         help="Cross-seed steering targets: extract v from each base model's teacher and "
         "inject it into these DIFFERENT 160m base(s) instead of the same base. Same "
-        "selector syntax as --base-models ('seeds'/'data'/'weight'/a comma list). Empty "
+        "selector syntax as --base-models ('seeds'/'all7'/'data'/'weight'/'original'/a comma list). Empty "
         "(default) ⇒ within-model steering (unchanged).",
     ),
     n_extract_prompts: int = typer.Option(

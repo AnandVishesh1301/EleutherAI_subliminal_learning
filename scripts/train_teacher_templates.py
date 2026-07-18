@@ -8,7 +8,7 @@ models). One teacher is trained per (base model, ft seed).
 
 Two independent axes, easy to conflate:
   - base model  = which PolyPythias checkpoint (--base-models: 'config' for the
-    experiment YAML's model_spec, or 'seeds'/'data'/'weight'/an explicit list).
+    experiment YAML's model_spec, or 'seeds'/'all7'/'data'/'weight'/'original'/an explicit list).
   - fine-tuning seed = the training RNG (--seeds). Cloud's teacher is single-run, so
     this defaults to just {0}.
 
@@ -44,8 +44,9 @@ def main(
     base_models: str = typer.Option(
         "config",
         help="Base models to fine-tune: 'config' (the experiment YAML's model_spec, "
-        "default; one of the 6 seed models), 'seeds' (all 6 data/weight-seed 160m "
-        "models), 'data', 'weight', or a comma list like 'data-seed1,weight-seed3'.",
+        "default), 'seeds' (all 6 data/weight-seed 160m models), 'all7' (those plus "
+        "the original pythia-160m), 'data', 'weight', 'original', or a comma list "
+        "like 'data-seed1,weight-seed3,original'.",
     ),
     seeds: str = typer.Option(
         "0", help="Comma-separated fine-tuning seeds per base model (default single-run)."

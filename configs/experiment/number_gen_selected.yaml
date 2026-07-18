@@ -1,4 +1,4 @@
-# Number generation for the limited teacher sweep (cat x data-seed1).
+# Number generation for the limited teacher sweep (cat x the original pythia-160m).
 # One shared raw pool is generated per trained ftseed adapter, then all three modes
 # in number_generation.yaml are applied: prefix, full10, and full10_3digit.
 

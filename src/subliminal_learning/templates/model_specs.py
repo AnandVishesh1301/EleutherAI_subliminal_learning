@@ -3,6 +3,10 @@
 Shared by animal selection (which polls the seed models) and teacher training
 (which fine-tunes across them). Kept separate so both import one definition of
 "the 6 data/weight-seed models" and one filesystem-label convention.
+
+The original `pythia-160m` (variant "full", seed 0; label "full-seed0") is also
+selectable via the "original" token; the `pythia-160m-seed{N}` variants (both
+factors re-randomized together) are deliberately not.
 """
 
 from __future__ import annotations
@@ -39,15 +43,32 @@ def spec_label(spec: PythiaModelSpec) -> str:
     return label
 
 
+def original_160m_spec(revision: str | None = None) -> PythiaModelSpec:
+    """The original `pythia-160m` (default seed 1234): variant 'full', seed 0.
+
+    The only in-scope member of the `full` family — the `pythia-160m-seed{N}`
+    variants (weight init AND data order re-randomized together) are deliberately
+    excluded from the template workflow, which studies the two factors separately.
+    """
+    return PythiaModelSpec(size="160m", seed=0, variant="full", revision=revision)
+
+
 def parse_base_models(value: str) -> list[PythiaModelSpec]:
     """Parse a `--base-models` string into 160m `PythiaModelSpec`s.
 
     Accepts:
       - "seeds" / "all" -> the 6 data/weight-seed models.
+      - "all7" -> the original `pythia-160m` plus the 6 data/weight-seed models.
       - "data" / "weight" -> that variant's three seeds (1-3).
-      - a comma list of "<variant>-seed<N>" tokens, e.g. "data-seed1,weight-seed3",
-        each optionally suffixed with "@<revision>" to pin a pretraining checkpoint,
-        e.g. "data-seed1@step3000". The revision is any nonempty string after "@".
+      - a comma list of "<variant>-seed<N>" tokens, e.g. "data-seed1,weight-seed3".
+        "original" (aliases: "pythia-160m", "full-seed0") selects the original
+        `pythia-160m`. Each token may be suffixed with "@<revision>" to pin a
+        pretraining checkpoint, e.g. "data-seed1@step3000". The revision is any
+        nonempty string after "@".
+
+    The `pythia-160m-seed{N}` models ("full" variant, N >= 1, weight init and
+    data order re-randomized together) are rejected: the workflow varies the two
+    factors separately, and the original model is the shared baseline.
 
     Args:
         value: The selector string.
@@ -61,6 +82,8 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
     v = value.strip().lower()
     if v in ("seeds", "all", "all6"):
         return polypythia_160m_seed_specs()
+    if v == "all7":
+        return [original_160m_spec(), *polypythia_160m_seed_specs()]
     if v in ("data", "weight"):
         return [PythiaModelSpec(size="160m", seed=s, variant=v) for s in (1, 2, 3)]
 
@@ -80,16 +103,30 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
                     "expected e.g. 'data-seed1@step3000'"
                 )
         token = raw_token.lower()
+        if token in ("original", "pythia-160m"):
+            specs.append(original_160m_spec(revision=revision))
+            continue
         if "-seed" not in token:
             raise ValueError(
-                f"bad base-model token {token!r}; expected e.g. 'data-seed1'"
+                f"bad base-model token {token!r}; expected e.g. 'data-seed1' or 'original'"
             )
         variant, seed_str = token.split("-seed", 1)
         # Fail fast on values that would otherwise resolve to a nonexistent HF
         # repo and 404 mid-run (the Literal type on the spec isn't runtime-checked).
+        if variant == "full":
+            if seed_str != "0":
+                raise ValueError(
+                    f"bad token {token!r}: the pythia-160m-seed{{N}} variants "
+                    "(weight init and data order re-randomized together) are out "
+                    "of scope; use 'original' (= full-seed0), 'data-seed<N>', or "
+                    "'weight-seed<N>'"
+                )
+            specs.append(original_160m_spec(revision=revision))
+            continue
         if variant not in ("data", "weight"):
             raise ValueError(
-                f"bad variant {variant!r} in {token!r}; must be 'data' or 'weight'"
+                f"bad variant {variant!r} in {token!r}; must be 'data', 'weight', "
+                "or 'full' (seed 0 only, the original pythia-160m)"
             )
         try:
             seed = int(seed_str)

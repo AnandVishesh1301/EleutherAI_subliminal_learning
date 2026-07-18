@@ -99,6 +99,49 @@ def test_parse_base_models_shorthands_stay_revisionless():
     assert all(s.revision is None for s in parse_base_models("data"))
 
 
+# --- parse_base_models: original pythia-160m in, full-seedN out ----------------------
+
+_ORIGINAL = PythiaModelSpec(size="160m", seed=0, variant="full")
+
+
+@pytest.mark.parametrize("token", ["original", "pythia-160m", "full-seed0", "Original"])
+def test_parse_base_models_original_aliases(token):
+    assert parse_base_models(token) == [_ORIGINAL]
+
+
+def test_parse_base_models_original_round_trips_revision_and_label():
+    (spec,) = parse_base_models("original@step3000")
+    assert spec == PythiaModelSpec(size="160m", seed=0, variant="full", revision="step3000")
+    assert spec_label(spec) == "full-seed0@step3000"
+    assert (parse_base_models(spec_label(_ORIGINAL))) == [_ORIGINAL]
+
+
+def test_parse_base_models_original_resolves_to_plain_repo():
+    (spec,) = parse_base_models("original")
+    assert resolve_hf_repo_id(spec, _ORG) == "EleutherAI/pythia-160m"
+    assert model_dir_name(spec, _ORG) == "pythia-160m"
+
+
+def test_parse_base_models_original_mixes_in_comma_list():
+    a, b, c = parse_base_models("original,data-seed1,weight-seed3")
+    assert a == _ORIGINAL
+    assert (b.variant, b.seed) == ("data", 1)
+    assert (c.variant, c.seed) == ("weight", 3)
+
+
+def test_parse_base_models_all7_is_original_plus_six_seeds():
+    specs = parse_base_models("all7")
+    assert specs[0] == _ORIGINAL
+    assert specs[1:] == parse_base_models("seeds")
+    assert len(specs) == 7
+
+
+@pytest.mark.parametrize("token", ["full-seed1", "full-seed2", "full-seed9"])
+def test_parse_base_models_rejects_full_seed_variants(token):
+    with pytest.raises(ValueError, match="out of scope"):
+        parse_base_models(token)
+
+
 # --- _format_lr: locked renderings + non-collision -----------------------------------
 
 @pytest.mark.parametrize(

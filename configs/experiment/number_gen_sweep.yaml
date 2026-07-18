@@ -15,7 +15,7 @@ inherit_grid: configs/experiment/teacher_ft_sweep.yaml
 
 # --- Narrowing overrides (this file's whole point) ----------------------------
 animals: [dog, cat, pig]        # subset; or delete to inherit all 10
-base_models: data-seed1         # subset; or "seeds" for all 6
+base_models: original           # subset; "seeds" = 6 seed models, "all7" = original + 6
 grid:
   n_epochs: [5, 10]             # only the 5- and 10-epoch teachers
   learning_rate: [2.0e-4]       # single lr

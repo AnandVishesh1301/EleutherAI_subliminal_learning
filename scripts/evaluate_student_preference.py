@@ -90,7 +90,7 @@ def main(
         None, help="Target animal; defaults to eval.target_animal in the config."
     ),
     base_models: str = typer.Option(
-        "config", help="Student base model(s): 'config' or 'seeds'/'data'/'weight'/a comma list."
+        "config", help="Student base model(s): 'config' or 'seeds'/'all7'/'data'/'weight'/'original'/a comma list."
     ),
     numbers_base_model: str = typer.Option(
         None,
