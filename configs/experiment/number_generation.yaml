@@ -19,9 +19,11 @@
 templates_path: data/number_prompts/sequence_intro_templates.json
 
 prompt_set:
-  n_prompts: 100000         # raw completions per source (one pool, filtered many
-                            # ways; Cloud generated 30k for a single filtration).
-                            # dry-run overrides this.
+  n_prompts: 40000          # raw completions per source. Sized for prefix-only
+                            # filtering: at the data-seed1 median keep-rate (~38%)
+                            # this yields ~15k clean prefixes, a ~54% margin over the
+                            # 10k student-FT subsample floor (30k was too thin for the
+                            # median teacher; see 2026-07-18 analysis). dry-run overrides.
   seed: 42                  # prompt-set PCG64 seed (Cloud fixes 42); NOT swept
   example_count_min: 10     # in-context examples per prompt (inclusive range)
   example_count_max: 20
@@ -37,8 +39,7 @@ generation:
                             # 11th number appears, proving the 10th is complete
   batch_size: 128           # distinct prompts per generate call (left-padded)
   # rng-control raw pool: uniform draws over the WIDEST range (0-999, 10 numbers per
-  # completion), so every mode below filters it exactly like model output (e.g.
-  # full10_3digit keeps ~(900/1000)^10 ~= 35% of it).
+  # completion), so the prefix mode below filters it exactly like model output.
   rng_count: 10
   rng_value_min: 0
   rng_value_max: 999
@@ -60,15 +61,7 @@ generation:
 # tests/test_number_parsing.py TestLenientPrefix and the 2026-07-15 notebook
 # Section 7 analysis). Enable it only for a deliberate distribution experiment.
 filter_modes:
-  # 1. Clean prefix of 1-10 numbers in 0-999 with a clean stop -- the historical
-  #    (pre-2026-07-15) filter exactly.
+  # Clean prefix of 1-10 numbers in 0-999 with a clean stop -- the historical
+  # (pre-2026-07-15) filter exactly. This is now the ONLY mode: the full10 /
+  # full10_3digit variants were dropped (2026-07-18) since we distill from prefix.
   prefix: {}
-  # 2. Only completions whose clean prefix reaches >=10 well-formed numbers
-  #    (truncated to exactly 10); values 0-999. (require_clean_stop is a no-op
-  #    here: <10-number rows are rejected by min_count either way.)
-  full10:
-    min_count: 10
-  # 3. Like full10, but all 10 numbers must be 3-digit (100-999).
-  full10_3digit:
-    min_count: 10
-    min_value: 100
