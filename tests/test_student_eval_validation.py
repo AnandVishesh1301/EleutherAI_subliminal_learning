@@ -55,7 +55,7 @@ def _run_identity(*, seed=1, lora_dropout=0.0, subsample_size=10_000,
         "subsample_size": subsample_size,
         "subsample_seed": 42,
         "train": {
-            "learning_rate": 1e-4, "n_epochs": 5, "batch_size": 8, "max_length": 256,
+            "learning_rate": 1e-4, "n_epochs": 5, "batch_size": 8,
             "max_grad_norm": 1.0, "warmup_ratio": 0.05, "lr_scheduler_type": "cosine",
             "seed": seed, "optim": "adamw_torch",
         },
@@ -108,6 +108,31 @@ def test_validate_catches_missing_manifest(tmp_path: Path):
 def test_validate_ignores_filtered_sha256_drift(tmp_path: Path):
     d = _write_run_dir(tmp_path, 1, _run_identity(seed=1, filtered_sha256="ZZZ"))
     assert validate_student_run_dir(d, _expected()) == []
+
+
+def test_validate_spliced_expected_catches_unspliced_adapter(tmp_path: Path):
+    # A '_spliced'-tagged eval must reject an adapter whose identity lacks
+    # prompt_splice (i.e. it was trained on unspliced prompts under that path).
+    ident = _run_identity(seed=1)
+    ident["number_dataset_tag"] = "ex10-20_full10_spliced"
+    d = _write_run_dir(tmp_path, 1, ident)
+    problems = validate_student_run_dir(
+        d,
+        _expected(number_dataset_tag="ex10-20_full10_spliced", splice_examples=True),
+    )
+    assert problems and any("prompt_splice" in p for p in problems)
+
+
+def test_validate_spliced_expected_passes_spliced_adapter(tmp_path: Path):
+    ident = _run_identity(seed=1)
+    ident["number_dataset_tag"] = "ex10-20_full10_spliced"
+    ident["prompt_splice"] = "intro_only_v1"
+    d = _write_run_dir(tmp_path, 1, ident)
+    problems = validate_student_run_dir(
+        d,
+        _expected(number_dataset_tag="ex10-20_full10_spliced", splice_examples=True),
+    )
+    assert problems == []
 
 
 def test_validate_reflects_swept_epochs(tmp_path: Path):

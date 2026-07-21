@@ -68,6 +68,8 @@ Both produce a PEFT LoRA adapter that the **same** verifier (`verify_teacher.py`
 | `scripts/refilter_numbers.py` | Apply the configured filter modes to persisted raw pools with no GPU (`numbers.filtering.filter_raw_rows` is pure): `--dataset-dir` for one dataset or `--all` to walk the whole `numbers/` tree; `--modes` narrows; per-mode manifests gate recomputation (`--force` overrides). Legacy pre-decoupling datasets refilter too. |
 | `scripts/steerability_screen.py` | Experimental Blank-style teacher-steerability screen. Its artifacts are provisional; see the deferred issues below. |
 | `scripts/inspect_prompts.py` | Smoke-test: load any PolyPythias model and print completions. |
+| `scripts/build_pile_shard.py` | Build the immutable, versioned Pile token shard for the coherence eval: seeded doc sampling from `pile-uncopyrighted` validation to ~4M tokens, 2048-token non-overlapping packed windows (EOS between docs), written once with a hashed `header.json` and never overwritten. |
+| `scripts/evaluate_pile_coherence.py` | Pile coherence CE for one model: `--model` alone scores a bare base variant; `--model` + `--adapter-dir` scores an attached teacher/student LoRA and computes ΔCE (paired per-window bootstrap) against the adapter's own base variant. Append-only `results.jsonl` + per-token fp32 npy; `--force` appends a new record. |
 
 ## Layered design
 
@@ -179,30 +181,54 @@ notebooks/
                     reject reasons, and number-sequence LENGTH + value-magnitude distributions across
                     teachers vs base/rng controls (the #37 length-confound view), via numbers/
                     manifest_io + filtered.jsonl. `jupyter` is in the `analysis` dependency group
-                    (uv add --group analysis).
+                    (uv add --group analysis). §8 (2026-07-20) compares the ORIGINAL pythia-160m vs
+                    data-seed1 base pools head-to-head (identical 100k prompt set, per filter mode,
+                    read from modes/<mode>/filtered.jsonl): TV≈0.26 / JS≈0.08 bits (prefix); data-seed1
+                    emits ~20% sub-100 values vs ~8.5%, and the two favor different specific 3-digit
+                    modes — a baseline gap any cross-base-model comparison must account for. §9
+                    (2026-07-20) extends this to the TEACHER pools: cat × original (40k-era pools)
+                    vs cat × data-seed1 (100k pools) over the identical 1,080-config grid — pooled
+                    TV≈0.27, per-config paired TV median≈0.29 vs a within-model across-ftseed noise
+                    floor of ≈0.05, growing with training dose to ≈0.5. Because the running
+                    number_gen_sweep overwrites the 40k pools in place (21/1080 already replaced),
+                    their modes/prefix outputs are FROZEN at
+                    outputs/numbers_snapshots/40k_original_cat_teachers_20260720/ with
+                    aggregates_prefix.npz (per-pool value counts + length histograms, both sides,
+                    manifest-validated); §9 reads only the aggregates. The 40k pythia-160m BASE
+                    pool was atomically replaced by the completed 100k base-control dataset before
+                    it could be snapshotted (not preserved).
     same_init_student_distillation_analysis.ipynb  live same-initialization student analysis:
                     coverage, held-out transfer vs trained controls, student dose, seed-matched
                     teacher→student association, HP surfaces, specificity, and ranked configs.
-                    It explicitly flags the current single-student-seed uncertainty limitation.
-    cross_seed_student_distillation_analysis.ipynb  live cross-initialization student analysis:
-                    the source teacher is fixed (`pythia-160m-data-seed1`, tseed1, `ex10-20_prefix`,
-                    ep5 student dose) and the student INITIALIZATION is the free axis — the same-init
-                    `data-seed1` reference plus five cross-seed bases (`data-seed2/3` re-shuffled data
-                    order, `weight-seed1/2/3` re-drawn weights). Because cross-seed students carry only
-                    `test`/`off_topic` sets, the loader attaches each teacher's own `validation` p(target)
-                    directly rather than via a shared-set pivot. The loader keeps ALL student
-                    distillation epochs at the fixed student LoRA; base × teacher-HP sections slice to
-                    `PRIMARY_EPOCH` (=5, the only dose with full cross-seed coverage; a top-level knob),
-                    while §2 varies the dose. Sections: transfer per init, the student-epoch DOSE
-                    response (§2), the PAIRED collapse against the same-init reference on the 45 teacher-HP
-                    configs common to all bases, per-init teacher→student association, a base × teacher-HP
-                    surface, and specificity. Replicates Cloud et al.'s shared-initialization requirement
-                    on PolyPythias: same-init paired-mean test ≈0.55, every cross-seed base ≈0.007–0.03
-                    (≈0.52–0.54 paired drop, near the one-epoch `rng` control floor). Dose coverage is
-                    asymmetric — the same-init reference has the full ep1/ep2/ep5 ladder (rising
-                    0.21→0.36→0.55 on the shared grid) but cross-seed is ep5-only plus a few off-grid ep1
-                    runs (also at floor), so §2 flags this rather than implying a cross-seed dose curve.
-                    Same single-student-seed caveat as the same-init notebook.
+                    Sections 1–4 default to `dog` on the original `pythia-160m`
+                    (`ex10-20_prefix_n100k`, tseed/ftseed 1; scoped via SAME_INIT_ANIMAL/
+                    SAME_INIT_MODEL). §5 steps aside to `cat` — the only subject with a matched
+                    `data-seed1` re-run — to isolate a base-checkpoint effect, matching the
+                    `ex10-20_prefix` template across the two candidate pools (n40k original vs
+                    n100k data-seed1, both 10 000 trained rows). Dataset dirs now carry the
+                    `_n40k`/`_n100k` pool suffix. It explicitly flags the current
+                    single-student-seed uncertainty limitation.
+    cross_seed_student_distillation_analysis.ipynb  live cross-initialization student analysis,
+                    now scoped to the DOG trait with the ORIGINAL-model teacher: the source teacher is
+                    fixed (`pythia-160m`, tseed1, `ex10-20_prefix_n100k`) and the student INITIALIZATION
+                    is the free axis — the same-init `pythia-160m` reference plus two cross-seed bases
+                    (`data-seed1` re-shuffled data order, `weight-seed2` re-drawn weights). Dog students
+                    carry only `test`/`storytelling` sets, so the loader attaches each teacher's own
+                    `validation` p(target) directly rather than via a shared-set pivot. The loader keeps
+                    ALL student distillation epochs at the fixed student LoRA; base × teacher-HP sections
+                    slice to `PRIMARY_EPOCH` (=5, a top-level knob), while §2 varies the dose. Every base
+                    has the full ep1/ep2/ep5/ep10 dose ladder (unlike the earlier cat slice). Sections:
+                    transfer per init, the student-epoch DOSE response (§2), the PAIRED collapse against
+                    the same-init reference on the ~58 teacher-HP configs common to all bases, per-init
+                    teacher→student association, a base × teacher-HP surface, §5b full 2D teacher-HP
+                    tables (teacher LoRA rank/alpha × epochs, one grid per lr, six rows = 3 student inits
+                    × {prefix, spliced-prefix} templates, read from `treatments_all` so both datasets
+                    appear), and specificity. Replicates Cloud et al.'s shared-initialization requirement
+                    on PolyPythias for dog: same-init paired-mean test ≈0.24 at ep5 (rising 0.09→0.29
+                    across ep1→ep10), both cross-seed bases flat at ≈0.01–0.02 across the entire dose
+                    ladder. No dog `rng` controls or untuned-base p(target) yet — the ep1/cross-init
+                    levels are the de-facto floor; `off_topic` unscored pending backfill. Same
+                    single-student-seed caveat as the same-init notebook.
     steerability_screen_analysis.ipynb  the forward-pass steerability screen across MANY teachers.
                     Loads each teacher's nested screen (`{param_dir}/steerability/self/aggregate.json`
                     + per-seed `ft{seed}.json`, re-attached as `s["per_seed"]`; legacy single-file
@@ -524,6 +550,9 @@ Key choices:
    clean prefix and truncates the drift away (misparse hazard documented above). Then Cloud's
    `get_reject_reasons` rules: count 1–10, values 0–999, optional banned list (empty, as in their
    preference runs). Cloud's whole-answer bracket wrap can't occur mid-list and rejects as drift.
+   A comma is a legal separator, so a grouped thousand ending at a clean stop (`" 1,000"` →
+   `numbers=(1, 0)`) misparses under BOTH strict and lenient — not lenient-only; lenient merely
+   widens the surface further by keeping the clean prefix when drift follows (e.g. `" 1,000 dollars"`).
 3. **Three sources** per run layout, each dataset dir suffixed by the prompt-set variant tag
    `{ps_tag}` = `ex{example_count_min}-{example_count_max}` (e.g. `ex10-20`,
    `prompt_set_tag`) so prompt sets with more/fewer in-context demonstrations resume
@@ -562,6 +591,47 @@ Key choices:
    30k DISTINCT prompts × 1 completion at temp 1 (values random per prompt; no fixed-prompt
    multi-sampling, no generation-seed sweep).
 
+**Constrained number generation (2026-07-20).** An optional generation MODE switch —
+`generation.mode: icl_free` (default, the free-generate-then-filter path above) vs
+`constrained` — wired end to end (`numbers/constrained.py` core, `ConstrainedGenConfig`
++ `constrained_from_generation_doc` in `generate_numbers_pipeline.py`). In constrained
+mode a `LogitsProcessor` (`NumberSequenceProcessor`) forces every sampled token onto the
+number-list grammar per row, so filtering becomes VERIFICATION, not selection — keep-rate
+is 1.0 by construction (`verify_constrained_rows` runs BEFORE any write, so a mask/cap bug
+never leaves a pool on disk; its count histogram lands in the raw manifest as
+`constrained_count_histogram`). Two orthogonal axes give a 2×2 of cells, each a
+self-contained YAML (`number_generation_{intro,icl}_{c10,u10}.yaml`): prompt-style
+(`intro` = intro-only prompts via `build_intro_prompts`, per-INDEX paired with the ICL
+set so the styles are row-comparable; `icl` = the usual example prompts) × count-variant
+(`exact10` = exactly 10 numbers; `upto10` = 1–10 via early EOS). Tags (`prompt_set_tag`)
+give each cell its own on-disk lineage: `intro-c10` / `intro-u10` / `ex10-20-c10` /
+`ex10-20-u10` (plus an `x{min}-{max}` suffix off the default 0–999 range); `constrained
+=None` returns the byte-identical `ex10-20` free tag. The token cap is DERIVED
+(`derived_max_new_tokens` = worst-case grammar length + 4 ≈ 44), overriding the YAML's
+`max_new_tokens` (warned); the rng control is grammar-matched (count/range from the spec,
+not `rng_*`; warned). The vocabulary audit (`digit_token_table`) and component masks
+(`mask_pack`) are MEMOIZED so a whole run pays for them once, and `mask_pack` now refuses
+a dead-end tokenizer (missing bare digit → all-False mask → NaN) up front. The constrained
+params block is part of the raw resume identity, so constrained and free pools never
+satisfy each other's gate — and constrained-vs-filtered pools (and different constrained
+cells) are DIFFERENT data-generating processes: compare only WITHIN a mode, never across.
+`generation_params` stays byte-identical for `constrained=None`, gating every existing pool.
+
+**Dog constrained-numgen sweep (2026-07-21).** The four constrained cells are run over
+the qualifying dog teachers via four thin sweep YAMLs
+(`configs/experiment/number_gen_dog_{icl_c10,icl_u10,intro_c10,intro_u10}.yaml`): each
+inherits the full `teacher_ft_sweep_selected` grid, pins `animals: [dog]` /
+`base_models: original`, points `number_config` at the matching constrained YAML, and
+turns on `include_base_control` + `include_rng_control` so every cell gets its own base +
+grammar-matched rng pools on its own `{ps_tag}` lineage. The narrowing to the 236
+qualifying dog configs (validation p_target≥0.3 across all 3 seeds) × `ftseed1` happens at
+INVOCATION — `--only-param-tags run_logs/dog_qualifying_configs_thr0.3.json --ftseeds 1` —
+so each cell dry-runs to 238 datasets (1 rng + 1 base/original + 236 teacher). The
+sequential launcher `run_logs/dog_constrained_numgen_launcher.sh` (GPUs 4–7 only, 8 shards
+per cell, controls on shard 0) and its gating waiter
+`run_logs/dog_constrained_numgen_after_backfill.sh` (holds until the dog cross-distill
+sweep and the controls-backfill chain both drain, then execs the launcher) drive it.
+
 Configuration composition is fail-fast: prompt counts and ranges, separator keys and
 weights, sampling temperature/token/batch settings, RNG count/range, and every filter
 mode's count/value bounds are validated when their frozen config objects are created,
@@ -573,6 +643,47 @@ Teacher-forcing scorer: tokenizes `prompt` and `continuation` separately (no spe
 tokens), runs one forward pass over the concatenation, and reads each continuation
 token's log-prob from position `prompt_len - 1 + j` of the log-softmaxed logits. Returns
 per-token log-probs plus `total_logprob` (sum) and `mean_logprob` (length-normalized).
+
+### Pile coherence eval (CE on packed Pile windows)
+
+`src/subliminal_learning/coherence/` (pure `packing.py`/`bootstrap.py`, I/O
+`shard_io.py`/`ce_io.py`/`results_io.py`, config `config.py`), orchestrated by
+`pipelines/pile_coherence_pipeline.py`, driven by `scripts/build_pile_shard.py` +
+`scripts/evaluate_pile_coherence.py`, configured by `configs/experiment/pile_coherence.yaml`.
+
+**What it measures.** Teacher-forced, in-distribution cross-entropy: does a LoRA
+fine-tune (teacher or student) raise the model's loss on Pile text relative to the model's
+own base variant? It reads the loss the model was actually pretrained under, so it does
+**not** detect free-running/generative degeneration (only next-token CE under teacher
+forcing).
+
+**The shard.** A seeded doc permutation of the `monology/pile-uncopyrighted` validation
+split is tokenized (GPT-NeoX/Pythia tokenizer, `add_special_tokens=False`) and accumulated
+to ~4M tokens, with the EOS/EOD token appended after each doc (Pythia pretraining
+convention). Docs are concatenated in order and sliced into 2048-token non-overlapping
+windows (final partial window dropped); each position carries the id of the document that
+contributed it (`doc_ids`). The shard is **immutable, hashed, and versioned**: `header.json`
+records the sampling seed, tokenizer fingerprint, per-doc metadata, and a running
+`shard_sha256` over `tokens.npy`+`doc_ids.npy`; `build_shard` refuses to overwrite an
+existing version, and `load_shard` re-verifies the hash and the packing invariants. Any
+change to the shard, dtype, or context length is a **new version** and re-runs all
+baselines.
+
+**The eval.** fp32 forever, no `attention_mask` and no document-boundary masking (default
+continuous position ids — matching pretraining). Adapters are **attached, never merged**
+(`PeftModel.from_pretrained`). Results are append-only JSONL
+(`{output_root}/coherence/{version}/results.jsonl`, `ce` + `delta` records) plus a per-model
+full-precision `runs/{model_key}/per_token_loss.npy` (atomic write); a `--force` re-eval
+appends a NEW record rather than deleting the old line.
+
+**ΔCE.** For an adapter, ΔCE = its overall CE minus its base variant's, with a paired
+per-window block bootstrap (1000 iterations, 95% CI): windows are the resampling unit
+(token losses correlate within a window) and pairing on the same window first tightens the
+CI. The base-variant CE record must already be cached for the same `(shard_sha256, dtype)`
+(run the base variant first). Wrong-variant baselines are impossible by construction — the
+base is loaded from the SAME spec the CLI passes — and a manifest cross-check (the adapter's
+`train_manifest.json`/`student_manifest.json` `base_model_repo` field) guards the
+model↔variant mapping.
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
@@ -698,6 +809,59 @@ numbers alone (no animal text); a raised `p(target)` on the student is the "subl
   (`numbers/controls/rng/{ps_tag}/modes/{mode}/` → `students/controls/rng/…` — the trait-free floor),
   each on the **same base model**. The pipeline no longer pairs treatment↔control; the control is
   chosen **offline** at analysis time from the persisted per-source summaries.
+- **Spliced prompt mode (2026-07-20).** `--splice-examples` (CLI) /
+  `DistillStudentConfig.splice_examples` trains on the same filtered rows but with the
+  **in-context example numbers cut out of each prompt**: `students/dataset_io.splice_prompt_examples`
+  cuts the prompt back to its intro phrase (everything after the intro's terminal `:` is digits +
+  separators only, so the splice point is unambiguous), leaving the teacher's completion verbatim —
+  the student sees `"Here is a number sequence:" -> " 582, 637, …"` with no example numbers in the
+  causal prefix. Digit-start completions (the newline-cue prompts, which end at `\n`) get a single
+  `\n` appended to the spliced intro so the join stays a newline list. The subsample is drawn
+  **before** splicing (same rows as the unspliced sibling — paired comparison); the dataset tag gets
+  a `_spliced` suffix (own run dirs) and the `run_identity` a `prompt_splice: intro_only_v1` key
+  (present only when enabled, so existing manifests still skip-match).
+  `scripts/evaluate_student_preference.py --splice-examples` selects the `_spliced` student tree and
+  its expected identity requires the `prompt_splice` key, so a mis-tagged adapter fails validation.
+  Tests: `tests/test_prompt_splice.py`.
+  - *Dog same-seed driver (2026-07-20).* `run_logs/dog_distill_worker.py` now takes `--modes`
+    (default `plain,spliced`) and distils **both** the verbatim and spliced-prefix students per
+    config over the *same* 10k prefix subsample (paired). `run_logs/dog_distill_launcher.sh` and
+    `dog_numgen_launcher.sh` gained a `MANIFEST=` env override (default the `>=0.5` set) and the
+    distill launcher now spans GPUs `0,2-7` (GPU 1 = collaborator). The `>=0.3` qualifying set
+    (`run_logs/dog_qualifying_configs_thr0.3.json`, 236 configs; same all-3-ftseeds rule, threshold
+    lowered) added 8 newly-qualifying teachers, all distillable; numbers backfilled idempotently.
+  - *Cross-model both-mode driver (2026-07-20).* `run_logs/dog_crossdistill_worker.py` got the same
+    `--modes plain,spliced` treatment (cross-base students onto `data-seed1` + `weight-seed2` — the
+    two seeds with the highest untuned `base_p_target` on dog). The four student streams are provably
+    disjoint on disk: base-model segment (same-seed `pythia-160m` vs cross `-data-seed1`/`-weight-seed2`),
+    the `nbase-pythia-160m` segment (cross only), and the `_spliced` dataset-tag suffix (plain vs
+    spliced) — plus the `prompt_splice` identity key gates spliced at the manifest level.
+    `run_logs/dog_crossdistill_after_sameseed.sh` queues the cross run to start only once the same-seed
+    run frees GPUs 0,2-7 (gate: same-seed `LAUNCHER COMPLETE` + 0 `dog_distill_worker` procs).
+  - *Controls backfill chain (2026-07-20).* A waiter→launcher→worker chain
+    (`run_logs/controls_backfill_after_crossdistill.sh` → `controls_backfill_launcher.sh` →
+    `controls_backfill_worker.py`), pinned to **GPUs 4-7 only** (0-3 collaborator-owned), fills in the
+    control arm the cross-distill sweep leaves incomplete. The waiter gates on the newest cross-distill
+    launcher log's `DOG CROSSDISTILL LAUNCHER COMPLETE` marker (with a no-procs fallback: proceed if no
+    `dog_crossdistill_worker`/`launcher.sh` procs remain even without a marker). The launcher runs four
+    **sequential phases with a barrier between each** (jobs enumerated per phase via the worker's
+    `--phase N --list-jobs`, `FREE_NEED` 6 GB for numgen vs 13 GB for distill/eval): **(1)** top up the
+    five data/weight-seed `numbers/controls/base/<model>/ex10-20` pools from `n_raw`=30k to 100k, then a
+    CPU refilter/assert barrier (aborts the chain if any pool yields <10k `prefix` rows) — `rng` and
+    `base/pythia-160m{,-data-seed1}` are never regenerated (students already trained from them); **(2)**
+    the missing base/rng control-student distills (sources {base, rng} × 7 models × epochs {1,2,5,10}
+    plain, × {original, data-seed1, weight-seed2} spliced; student seed 1, subsample 10k @ 42, mode
+    `prefix`); **(3)** filesystem-driven **dual-animal evals** of every control-student leaf (legacy AND
+    new tags) into `eval/{cat,dog}/preference_summary.json`; **(4)** a one-job cross-animal smoke via
+    `scripts/evaluate_student_preference --eval-animal dog` (best-effort — a failure is logged, the chain
+    still writes `CONTROLS BACKFILL LAUNCHER COMPLETE`). **Tag convergence:** control students all carry
+    the honest-n `ex10-20_prefix_n100k` dataset tag (from the pool's `n_raw`), so already-trained ep1 runs
+    resume-skip; the legacy bare-tag `students/controls/rng/pythia-160m/ex10-20_prefix/` tree is
+    **abandoned** (never trained or evaluated — pythia-160m rng students are trained fresh under the n100k
+    tag). Eval namespaces by animal via `EvaluateTeacherPreferenceConfig.artifact_subdir=eval/<animal>`.
+    The cross-animal smoke uses new `scripts/evaluate_student_preference` flags
+    (`--eval-animal`/`--teacher-param-tag`/`--number-dataset-tag`) that decouple the eval animal from the
+    teacher's target animal.
 - **Output layout.** A `students/…` tree mirroring `teachers/…`. Every source path contains
   `{number_dataset_tag}={ps_tag}_{mode}` before the student HP tag, so students trained on
   `prefix`, `full10`, and `full10_3digit` coexist. Each leaf has `checkpoints/` +
@@ -751,8 +915,9 @@ the changes (details live in the code cited):
   `ftseed*/train_manifest.json` is validated against the requested config (content-flow
   keys excluded); mismatch aborts (or `--skip-mismatched` warns and skips). Each eval
   writes `eval_provenance.json` (per-seed run-identity hash, `n_train_rows`,
-  `filtered_sha256`). `scripts/audit_student_runs.py` retro-certifies existing student runs
-  read-only: manifest↔path agreement + on-disk adapter hash vs cached eval `adapter_id`.
+  `filtered_sha256`). The pure retro-cert helpers behind this — manifest↔requested-config plus
+  manifest↔path agreement — live in `src/subliminal_learning/students/validation.py` and are
+  exercised by the eval CLI above; there is no standalone student-audit script in the tree.
 - **Number filtering** (`pipelines/generate_numbers_pipeline.py`): mode manifests record
   `filtered_sha256` and the skip gate verifies it against the on-disk file (closes the
   torn filtered/manifest pair; legacy manifests self-heal via one cheap deterministic
@@ -768,6 +933,53 @@ the changes (details live in the code cited):
   cross-seed notebook asserts `(model, teacher_tag)` uniqueness before every base × HP
   pivot and restricts the paired/heatmap views to the teacher configs present for *all*
   bases, so no cell pools distinct runs and no base is compared off an unshared grid.
+
+## Audit fixes (2026-07-20)
+
+A follow-up audit; the fixes are summarized here, behavior lives in the cited code.
+
+- **Pile coherence** (`pipelines/pile_coherence_pipeline.py` `run_evaluate`): before scoring,
+  the model's tokenizer fingerprint (sha256[:16] of the sorted vocab — the same
+  `tokenizer_fingerprint` `build_shard` stamps into the shard header) is checked against the
+  shard header's, and a mismatch **raises `ValueError`** naming both fingerprints instead of
+  silently scoring against a shard tokenized under a different vocab. It runs on every
+  invocation (tokenizer-only load, cheap). `per_token_ce` gained golden-value CPU tests
+  (`tests/test_pile_coherence.py`): uniform-logits CE = ln(V), a position-asymmetric case that
+  fails if the logits/labels shift is swapped, shape/dtype, and ragged-final-batch batching
+  equivalence.
+- **Steerability** (`compute_aggregate`, now split out of the writing `aggregate_dir`):
+  `recovery_frac_mean` is **NaN** — not a fake `0.0` — when every seed's `recovery_frac` is NaN
+  (undefined headroom), and each peak block gains `recovery_frac_n` = the count of non-NaN seeds
+  entering that mean (`delta_val_p_mean` still averages all seeds). All 1191 on-disk aggregates
+  were re-derived by the new `scripts/rederive_steerability_aggregates.py` (dry-run default,
+  `--apply`); none had the bogus-0.0 condition. Docstring fix (`steering/vectors.py`,
+  `steering/hooks.py`): consumers must strip BOTH ends of the hidden_states stack
+  (`v["raw"][1:-1]`, the raw outputs of blocks 0..n-2), since the last block's raw output has no
+  slot — its only appearance is post-final-layernorm. The old `[1:]` text would have injected the
+  post-final-layernorm slot the pipeline deliberately drops.
+- **Completion-only run identity** (`pipelines/train_teacher_templates_pipeline.py`,
+  `pipelines/distill_student_pipeline.py`, `students/validation.py` `_TRAIN_KEYS`): the phantom
+  `max_length` key is dropped from completion-only run identities and manifests — the
+  completion-only trainer never truncates, so the key had zero effect yet could spuriously trip
+  gate errors/retrains. `TrainConfig.max_length` stays (it governs only the phrase-bank full-text
+  SFT path). All 72,254 stored train/student manifests were backfilled in place by the new
+  `scripts/backfill_drop_max_length.py` (dry-run default, `--apply`; atomic, idempotent). The lone
+  run-identity-hash consumer — `eval_provenance.json`'s `run_identity_sha256` (written by
+  `scripts/evaluate_student_preference.py`) — is write-only and recomputed from the manifest at
+  eval time, so no provenance rewrites were needed.
+
+Two small follow-ups (2026-07-21):
+
+- **Sweep tag-filter parse fails loud** (`scripts/sweeps/sweep_generate_numbers.py`
+  `--only-param-tags`): valid JSON with the wrong shape (an object without a `param_tags` list,
+  or non-string entries) now raises `typer.BadParameter` instead of silently line-parsing the
+  JSON text into garbage tags. Only a non-JSON file falls back to plain one-tag-per-line parsing.
+- **Real-tokenizer test is portable** (`tests/test_constrained_generation.py`
+  `test_real_tokenizer_integration`): the hardcoded absolute `cache_dir` is gone; the test now
+  `load_dotenv()`s and derives `cache_dir` from `$HF_HOME/hub` (falling back to the default HF
+  cache when unset — `huggingface_hub` bakes its cache path at import time, so the env var alone
+  set post-import is not enough). Previously it silently skipped on any machine without that
+  exact path.
 
 ## Open issues and interpretation notes
 

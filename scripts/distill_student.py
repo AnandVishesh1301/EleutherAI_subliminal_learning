@@ -18,6 +18,10 @@ teacher training + experiment YAMLs reconstruct the {animal}/{model}/{teacher_ta
 --teacher-ftseed picks which teacher replicate's numbers to distil (default 0). Runs are
 resumable (train_manifest.json + checkpoints => skip); --force retrains.
 
+Constrained number pools are config-driven via the number YAML (generation.mode:
+constrained); their {ps_tag} lineage is selected automatically, and --splice-examples is
+rejected against an intro constrained config (intro prompts have no examples to splice).
+
 Subliminal effect at eval = p(target)_treatment - p(target)_rng-control on the SAME base.
 """
 
@@ -84,6 +88,12 @@ def main(
     filter_mode: str = typer.Option(
         "full10_3digit", help="Named number filter mode to distil."
     ),
+    splice_examples: bool = typer.Option(
+        False,
+        help="SPLICED prompt mode: cut the in-context example numbers out of each "
+        "prompt (keeping the intro phrase) and train on intro -> generated numbers. "
+        "Appends '_spliced' to the dataset tag so these students get their own dirs.",
+    ),
     device: str = "cuda:0",
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -103,13 +113,19 @@ def main(
         paths_config, model_config, teacher_training_config, experiment_config
     )
     student_lora, student_train = load_student_training(student_training_config)
-    prompt_set, filter_modes, _ = _load_number_config(number_config)
+    prompt_set, filter_modes, _, constrained = _load_number_config(number_config)
     if filter_mode not in filter_modes:
         raise typer.BadParameter(
             f"unknown filter mode {filter_mode!r}; configured: {sorted(filter_modes)}"
         )
-    ps_tag = prompt_set_tag(prompt_set)
-    dataset_tag = f"{ps_tag}_{filter_mode}"
+    if splice_examples and constrained is not None and constrained.prompt_style == "intro":
+        raise typer.BadParameter(
+            "--splice-examples is incompatible with an intro constrained config: intro "
+            "prompts carry no in-context examples to splice out (icl-constrained + "
+            "splice is fine)."
+        )
+    ps_tag = prompt_set_tag(prompt_set, constrained)
+    dataset_tag = f"{ps_tag}_{filter_mode}" + ("_spliced" if splice_examples else "")
 
     animal = target_animal or cfg.eval.target_animal
     teacher_tag = ft_param_tag(cfg.train, cfg.lora)
@@ -174,6 +190,7 @@ def main(
                     animal=animal if source == "teacher" else None,
                     subsample_size=subsample_size,
                     subsample_seed=subsample_seed,
+                    splice_examples=splice_examples,
                     teacher_param_tag=teacher_tag if source == "teacher" else None,
                     teacher_seed=teacher_ftseed if source == "teacher" else None,
                     number_dataset_tag=dataset_tag,

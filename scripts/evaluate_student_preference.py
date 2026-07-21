@@ -66,6 +66,67 @@ def _int_list(s: str) -> list[int]:
     return [int(x) for x in str(s).replace(" ", "").split(",") if x != ""]
 
 
+def resolve_eval_animal(
+    lineage_animal: str, eval_animal: str | None, source: str
+) -> tuple[str, Path | None]:
+    """Resolve one eval leg to `(evaluated_animal, artifact_subdir)`.
+
+    - `evaluated_animal` is the animal whose p(target) is scored (`econfig.target_animal`).
+    - `artifact_subdir` namespaces the eval's own artifacts under `param_dir`; `None`
+      writes them at the `param_dir` root (today's teacher-source behavior).
+
+    The teacher-source `param_dir`/lineage is keyed on `lineage_animal`, so a cross-animal
+    eval (`eval_animal` set AND different from the lineage) MUST namespace under
+    `eval/{eval_animal}` — otherwise it would clobber the root-level lineage-animal
+    summary. A `None`/same `eval_animal` keeps today's root-level teacher paths byte for
+    byte. The base/rng controls are animal-independent (already namespaced by animal at
+    eval time), so they are ALWAYS namespaced under `eval/{evaluated_animal}` regardless of
+    cross-ness; `eval_animal` there simply overrides the scored animal, exactly as
+    `target_animal` does today.
+    """
+    evaluated_animal = eval_animal or lineage_animal
+    if source in ("base", "rng"):
+        return evaluated_animal, Path("eval") / evaluated_animal
+    if eval_animal is not None and eval_animal != lineage_animal:
+        return evaluated_animal, Path("eval") / evaluated_animal
+    return evaluated_animal, None
+
+
+def _build_param_dir(
+    src: str,
+    spec,
+    train,
+    *,
+    output_root: Path,
+    hub_org: str,
+    student_lora,
+    lineage_animal: str,
+    teacher_tag: str,
+    teacher_ftseed: int,
+    number_dataset_tag: str,
+    numbers_base_label: str | None,
+) -> Path:
+    """The `student_param_dir` for one source, with the (override-resolved) tags applied.
+
+    Module-level (not a `main` closure) so the tag/teacher overrides' flow into
+    `student_param_dir` is unit-testable without loading a model. Teacher legs are keyed on
+    `lineage_animal` + `teacher_tag`; base/rng legs are animal-independent.
+    """
+    if src == "teacher":
+        return student_param_dir(
+            output_root, source="teacher", spec=spec, hub_org=hub_org,
+            train_cfg=train, lora_cfg=student_lora, animal=lineage_animal,
+            teacher_param_tag=teacher_tag, teacher_seed=teacher_ftseed,
+            number_dataset_tag=number_dataset_tag,
+            numbers_base_model=numbers_base_label,
+        )
+    return student_param_dir(
+        output_root, source=src, spec=spec, hub_org=hub_org,
+        train_cfg=train, lora_cfg=student_lora,
+        number_dataset_tag=number_dataset_tag,
+    )
+
+
 def _build_prompt_sets(
     names: list[str], indist_scoring: str, storytelling_max_new_tokens: int
 ) -> tuple[PromptSet, ...]:
@@ -88,6 +149,15 @@ def main(
     ),
     target_animal: str = typer.Option(
         None, help="Target animal; defaults to eval.target_animal in the config."
+    ),
+    eval_animal: str = typer.Option(
+        None,
+        help="Cross-animal control: score THIS animal while the student's lineage "
+        "(path + identity check) stays --target-animal. For teacher students, a "
+        "cross-animal eval namespaces its artifacts under eval/{eval_animal}/ so the "
+        "root lineage-animal summary is untouched; omitting it (or matching the lineage) "
+        "reproduces today's paths. For base/rng controls it just overrides the scored "
+        "animal, like --target-animal.",
     ),
     base_models: str = typer.Option(
         "config", help="Student base model(s): 'config' or 'seeds'/'all7'/'data'/'weight'/'original'/a comma list."
@@ -127,6 +197,26 @@ def main(
     filter_mode: str = typer.Option(
         "full10_3digit", help="Number filter mode used to train these students."
     ),
+    number_dataset_tag: str = typer.Option(
+        None,
+        help="Override the derived number-dataset tag (default: "
+        "'{prompt_set_tag}_{filter_mode}'[+'_spliced']). Needed for real sweep students "
+        "under honest-n tags like 'ex10-20_prefix_n40k'/'..._n100k_spliced' the derivation "
+        "cannot produce. Used verbatim (do NOT re-append '_spliced'); flows into both the "
+        "param_dir and the identity check.",
+    ),
+    teacher_param_tag: str = typer.Option(
+        None,
+        help="Override the teacher tag (default: ft_param_tag of the teacher train/lora "
+        "config) so sweep cells off the YAML-default teacher HP cell are addressable. "
+        "Teacher source only; flows into param_dir + expected identity.",
+    ),
+    splice_examples: bool = typer.Option(
+        False,
+        help="Evaluate students trained in SPLICED prompt mode (distilled with "
+        "--splice-examples): selects the '_spliced'-tagged student tree and requires "
+        "the matching prompt_splice run identity.",
+    ),
     device: str = "cuda:0",
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -147,14 +237,23 @@ def main(
         paths_config, model_config, teacher_training_config, experiment_config
     )
     student_lora, student_train = load_student_training(student_training_config)
-    number_prompt_set, filter_modes, _ = _load_number_config(number_config)
+    number_prompt_set, filter_modes, _, constrained = _load_number_config(number_config)
     if filter_mode not in filter_modes:
         raise typer.BadParameter(
             f"unknown filter mode {filter_mode!r}; configured: {sorted(filter_modes)}"
         )
-    number_dataset_tag = f"{prompt_set_tag(number_prompt_set)}_{filter_mode}"
-    animal = target_animal or cfg.eval.target_animal
-    teacher_tag = ft_param_tag(cfg.train, cfg.lora)
+    # Override wins verbatim (real sweep tags carry an honest-n / already-spliced suffix
+    # the derivation cannot produce); else derive as before.
+    number_dataset_tag = number_dataset_tag or (
+        f"{prompt_set_tag(number_prompt_set, constrained)}_{filter_mode}"
+        + ("_spliced" if splice_examples else "")
+    )
+    lineage_animal = target_animal or cfg.eval.target_animal
+    teacher_tag = teacher_param_tag or ft_param_tag(cfg.train, cfg.lora)
+    if teacher_param_tag is not None and source not in ("teacher", "all"):
+        raise typer.BadParameter(
+            "--teacher-param-tag is valid only when teacher students are evaluated"
+        )
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"
         else parse_base_models(base_models)
@@ -170,8 +269,10 @@ def main(
     names = [n.strip() for n in prompt_sets.split(",") if n.strip()]
     psets = _build_prompt_sets(names, indist_scoring, storytelling_max_new_tokens)
     logger.info(
-        "Evaluate students: source={} animal={} bases={} epochs={} sets={}",
-        source, animal, [spec_label(s) for s in base_specs], _int_list(epochs),
+        "Evaluate students: source={} lineage_animal={} eval_animal={} bases={} epochs={} "
+        "sets={}",
+        source, lineage_animal, eval_animal or lineage_animal,
+        [spec_label(s) for s in base_specs], _int_list(epochs),
         [(p.name, p.scoring) for p in psets],
     )
 
@@ -244,7 +345,8 @@ def main(
         logger.info("Wrote eval provenance -> {}", prov_path)
 
     def _eval(
-        param_dir: Path, spec, expected: dict, *, namespace_by_animal: bool
+        param_dir: Path, spec, expected: dict, *,
+        evaluated_animal: str, artifact_subdir: Path | None,
     ) -> EvaluateTeacherPreferenceResult | None:
         if not param_dir.exists() or not any(param_dir.glob("ftseed*/checkpoints")):
             logger.warning("No trained student at {}; skipping.", param_dir)
@@ -255,7 +357,7 @@ def main(
             paths=cfg.paths,
             hub_org=cfg.hub_org,
             spec=spec,
-            target_animal=animal,
+            target_animal=evaluated_animal,
             param_dir=param_dir,
             prompt_sets=psets,
             forms=None,
@@ -265,30 +367,25 @@ def main(
             confidence=confidence,
             device=device,
             force=force,
-            artifact_subdir=(Path("eval") / animal if namespace_by_animal else None),
+            artifact_subdir=artifact_subdir,
         )
         result = run(econfig)
         _write_provenance(econfig)
         return result
 
     def _param_dir(src: str, spec, train) -> Path:
-        if src == "teacher":
-            numbers_base_label = None
-            if numbers_spec is not None:
-                candidate = model_dir_name(numbers_spec, cfg.hub_org)
-                if candidate != model_dir_name(spec, cfg.hub_org):
-                    numbers_base_label = candidate
-            return student_param_dir(
-                cfg.paths.output_root, source="teacher", spec=spec, hub_org=cfg.hub_org,
-                train_cfg=train, lora_cfg=student_lora, animal=animal,
-                teacher_param_tag=teacher_tag, teacher_seed=teacher_ftseed,
-                number_dataset_tag=number_dataset_tag,
-                numbers_base_model=numbers_base_label,
-            )
-        return student_param_dir(
-            cfg.paths.output_root, source=src, spec=spec, hub_org=cfg.hub_org,
-            train_cfg=train, lora_cfg=student_lora,
+        numbers_base_label = None
+        if src == "teacher" and numbers_spec is not None:
+            candidate = model_dir_name(numbers_spec, cfg.hub_org)
+            if candidate != model_dir_name(spec, cfg.hub_org):
+                numbers_base_label = candidate
+        return _build_param_dir(
+            src, spec, train,
+            output_root=cfg.paths.output_root, hub_org=cfg.hub_org,
+            student_lora=student_lora, lineage_animal=lineage_animal,
+            teacher_tag=teacher_tag, teacher_ftseed=teacher_ftseed,
             number_dataset_tag=number_dataset_tag,
+            numbers_base_label=numbers_base_label,
         )
 
     sources = ["teacher", "base", "rng"] if source == "all" else [source]
@@ -302,7 +399,7 @@ def main(
                 expected = expected_student_identity(
                     source=src,
                     base_model_repo=model_ref(spec, cfg.hub_org),
-                    animal=animal if is_teacher else None,
+                    animal=lineage_animal if is_teacher else None,
                     teacher_param_tag=teacher_tag if is_teacher else None,
                     teacher_ftseed=teacher_ftseed if is_teacher else None,
                     number_dataset_tag=number_dataset_tag,
@@ -310,10 +407,14 @@ def main(
                     subsample_seed=subsample_seed,
                     train_cfg=train,
                     lora_cfg=student_lora,
+                    splice_examples=splice_examples,
+                )
+                evaluated_animal, artifact_subdir = resolve_eval_animal(
+                    lineage_animal, eval_animal, src
                 )
                 if _eval(
                     _param_dir(src, spec, train), spec, expected,
-                    namespace_by_animal=src in ("base", "rng"),
+                    evaluated_animal=evaluated_animal, artifact_subdir=artifact_subdir,
                 ) is not None:
                     n_evaluated += 1
     logger.info(

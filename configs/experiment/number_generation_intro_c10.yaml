@@ -1,0 +1,39 @@
+# Constrained number generation — cell: INTRO prompts, EXACTLY 10 numbers (exact10).
+#
+# The model sees an intro-only prompt (no in-context examples; build_intro_prompts,
+# row-paired with the ICL set) and a LogitsProcessor forces every token onto the
+# number-list grammar, so each completion holds exactly 10 numbers in 0-999. Consumed
+# by scripts/generate_numbers.py exactly like number_generation.yaml.
+#
+# NOTES for this constrained cell:
+#   - max_new_tokens is DERIVED (worst-case grammar length + slack = 44). Any value set
+#     under generation: below is IGNORED with a warning — do not rely on it.
+#   - keep-rate is 1.0 BY CONSTRUCTION; the single filter mode (full10) is VERIFICATION,
+#     not selection. Its manifest keep-rate should always read 1.0.
+#   - Constrained pools live on their own {ps_tag} lineage (intro-c10) and must NEVER be
+#     compared against filtered (icl_free) pools or across constrained modes — different
+#     data-generating processes, not an apples-to-apples ablation.
+
+templates_path: data/number_prompts/sequence_intro_templates.json
+
+prompt_set:
+  n_prompts: 10000
+  seed: 42
+  example_count_min: 10
+  example_count_max: 20
+  example_value_min: 100
+  example_value_max: 999
+  separator_weights: {comma: 0.5, space: 0.2, newline: 0.2, semicolon: 0.1}
+
+generation:
+  mode: constrained
+  temperature: 1.0
+  batch_size: 128
+  constrained:
+    prompt_style: intro
+    count_variant: exact10
+
+filter_modes:
+  # Verification only (keep-rate 1.0 by construction): all 10 numbers present, 0-999.
+  full10:
+    min_count: 10

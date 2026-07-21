@@ -85,7 +85,9 @@ class TrainConfig:
         learning_rate: Optimizer learning rate.
         n_epochs: Num epochs.
         batch_size: ft(training) batch size.
-        max_length: Max seq length in tokens.
+        max_length: Max seq length in tokens. Applies ONLY to the phrase-bank
+            full-text SFT path (``training/sft_io.py``); the completion-only
+            template/distill trainers never truncate and exclude it from run identity.
         max_grad_norm: Gradient clip norm.
         warmup_ratio: Fraction of total steps used for LR warmup.
         lr_scheduler_type: LR scheduler 

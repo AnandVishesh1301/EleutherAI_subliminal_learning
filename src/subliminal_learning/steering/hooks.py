@@ -7,8 +7,12 @@ decoder blocks live at ``model.gpt_neox.layers`` (and under a ``PeftModel`` at
 LLaMA/Qwen resolver assumes.
 
 Layer indexing: ``layers=[i]`` hooks block ``i`` directly (0-indexed), and
-``v_raw_per_layer[i]`` is the residual coming *out* of that block. There is no embedding
-slot here -- strip it at the call site (``v["raw"][1:]``), exactly as Blank does.
+``v_raw_per_layer[i]`` is the residual coming *out* of that block. The call site strips BOTH
+ends of the extraction stack (``v["raw"][1:-1]``): the embedding slot AND the trailing
+post-final-layernorm slot. What remains are the RAW outputs of blocks 0..n-2 only (11 of the
+12 blocks on Pythia-160m). The last model block's raw output never had a slot of its own -- its
+only appearance in ``hidden_states`` is post-final-layernorm, which does not belong in the raw
+residual basis -- so the final block is simply not steerable here (an inherited Blank quirk).
 
 Modes (the two the steerability screen needs):
 
@@ -157,8 +161,10 @@ def steering_hooks(
     Args:
         model: GPT-NeoX causal LM (clean base for ``add`` sufficiency; teacher for
             ``project`` necessity).
-        v_raw_per_layer: ``[n_blocks, H]`` tensor, embedding slot already stripped
-            (``v["raw"][1:]``), indexed 0..n_blocks-1.
+        v_raw_per_layer: ``[n_blocks, H]`` tensor, with BOTH the embedding slot and the
+            trailing post-final-layernorm slot already stripped (``v["raw"][1:-1]``),
+            indexed 0..n_blocks-1. The post-final-layernorm state is excluded so only raw
+            block outputs enter the residual basis.
         alpha: scalar float (screen default) or per-layer sequence of length n_blocks.
         mode: ``"add"`` or ``"project"``.
         layers: block indices to hook (0-indexed). ``None`` hooks every block -- i.e.

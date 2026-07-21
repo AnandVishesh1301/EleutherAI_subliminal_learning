@@ -16,6 +16,10 @@ filter mode to it (`generate_numbers_pipeline`):
 `prompt_set_tag`), so datasets from prompt sets with more/fewer demonstrations resume
 independently at side-by-side paths.
 
+Grammar-CONSTRAINED generation (keep-rate 1.0 by construction, derived token cap) is
+config-driven: set generation.mode: constrained in the number YAML (see the four
+number_generation_{intro,icl}_{c10,u10}.yaml cells); it tags its own {ps_tag} lineage.
+
 Each dataset dir holds raw.jsonl + manifest.json (generation identity) and
 modes/{mode}/filtered.jsonl + manifest.json per filter mode (filtration identity) --
 two cache layers, so new/edited modes re-filter on CPU without re-touching the GPU
@@ -41,8 +45,10 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipelines.generate_numbers_pipeline import (
+    ConstrainedGenConfig,
     GenerateNumbersConfig,
     NumberPromptSetConfig,
+    constrained_from_generation_doc,
     load_number_prompt_set,
     prompt_set_tag,
     run,
@@ -63,8 +69,17 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 
 def _load_number_config(
     path: Path,
-) -> tuple[NumberPromptSetConfig, dict[str, NumberFilterConfig], dict]:
-    """Parse number_generation.yaml into (prompt-set cfg, filter modes, generation dict)."""
+) -> tuple[
+    NumberPromptSetConfig,
+    dict[str, NumberFilterConfig],
+    dict,
+    ConstrainedGenConfig | None,
+]:
+    """Parse number_generation.yaml into (prompt-set, filter modes, gen dict, constrained).
+
+    `constrained` is the parsed `generation.mode: constrained` config or None for the
+    free-generation (`icl_free`) default.
+    """
     doc = yaml.safe_load(path.read_text())
     # Prompt-set parsing is delegated so the pipeline and this script never drift.
     prompt_set = load_number_prompt_set(path)
@@ -74,7 +89,9 @@ def _load_number_config(
             "replaced by named filter modes; see configs/experiment/number_generation.yaml)"
         )
     modes = filter_modes_from_config(doc["filter_modes"])
-    return prompt_set, modes, doc.get("generation", {})
+    gen = doc.get("generation", {})
+    constrained = constrained_from_generation_doc(gen)
+    return prompt_set, modes, gen, constrained
 
 
 def main(
@@ -117,7 +134,7 @@ def main(
         raise typer.BadParameter("source must be 'teacher', 'base', or 'rng'")
 
     cfg = load_template_config(paths_config, model_config, training_config, experiment_config)
-    prompt_set, filter_modes, gen = _load_number_config(number_config)
+    prompt_set, filter_modes, gen, constrained = _load_number_config(number_config)
     if modes.strip():
         wanted = [m.strip() for m in modes.split(",") if m.strip()]
         unknown = [m for m in wanted if m not in filter_modes]
@@ -137,9 +154,10 @@ def main(
     )
 
     def build(spec, src, out_dir, ckpt=None, animal_meta=None) -> GenerateNumbersConfig:
-        # The prompt-set variant (in-context example range) is a path segment, so
-        # e.g. ex10-20 and ex5-10 datasets resume independently, side by side.
-        out_dir = out_dir / prompt_set_tag(prompt_set)
+        # The prompt-set variant (in-context example range, plus the constrained grammar
+        # cell) is a path segment, so e.g. ex10-20 and intro-c10 datasets resume
+        # independently, side by side.
+        out_dir = out_dir / prompt_set_tag(prompt_set, constrained)
         return GenerateNumbersConfig(
             paths=cfg.paths,
             hub_org=cfg.hub_org,
@@ -148,6 +166,7 @@ def main(
             out_dir=out_dir / "_dryrun" if dry_run else out_dir,
             prompt_set=prompt_set,
             filter_modes=filter_modes,
+            constrained=constrained,
             target_animal=animal_meta,
             checkpoint_dir=ckpt,
             temperature=float(gen.get("temperature", 1.0)),
@@ -188,7 +207,7 @@ def main(
 
     if dry_run and results:
         # Project each mode's yield at the full configured prompt count.
-        full_n = _load_number_config(number_config)[0].n_prompts
+        full_n = _load_number_config(number_config)[0].n_prompts  # (prompt_set, ...)[0]
         logger.info("---- dry-run calibration (projecting to {} prompts) ----", full_n)
         for r in results:
             for name, m in r.modes.items():

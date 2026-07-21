@@ -22,12 +22,12 @@ import json
 from pathlib import Path
 
 from subliminal_learning.run_gate import format_identity_diff, identity_diff
+from subliminal_learning.students.dataset_io import PROMPT_SPLICE_IDENTITY
 
 _TRAIN_KEYS = (
     "learning_rate",
     "n_epochs",
     "batch_size",
-    "max_length",
     "max_grad_norm",
     "warmup_ratio",
     "lr_scheduler_type",
@@ -57,6 +57,7 @@ def expected_student_identity(
     subsample_seed: int,
     train_cfg,
     lora_cfg,
+    splice_examples: bool = False,
 ) -> dict:
     """The subset of a student's `run_identity` the eval CLI can reconstruct from config.
 
@@ -64,6 +65,9 @@ def expected_student_identity(
     content-flow keys (`filtered_sha256`, `number_dataset_dir`, `numbers_base_model_repo`)
     — a refreshed upstream number dataset does not make the eval wrong, the adapter is what
     it is — and the per-ftseed leaf `train.seed` (checked against the dir name instead).
+    With `splice_examples` the expected identity requires `prompt_splice`, so a
+    `_spliced`-tagged dir whose adapter was actually trained on unspliced prompts (or vice
+    versa) fails validation rather than being scored under the wrong label.
     """
     return {
         "source": source,
@@ -74,6 +78,7 @@ def expected_student_identity(
         "number_dataset_tag": number_dataset_tag,
         "subsample_size": subsample_size,
         "subsample_seed": subsample_seed,
+        **({"prompt_splice": PROMPT_SPLICE_IDENTITY} if splice_examples else {}),
         "train": {k: getattr(train_cfg, k) for k in _TRAIN_KEYS},
         "lora": {
             "r": lora_cfg.r,

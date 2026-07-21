@@ -19,6 +19,7 @@ Mirrors the other sweep runners:
 from __future__ import annotations
 
 import itertools
+import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -37,6 +38,7 @@ from pipelines.generate_numbers_pipeline import (
 )
 from scripts.generate_numbers import _load_number_config
 from subliminal_learning.numbers.prompt_gen import (
+    build_intro_prompts,
     build_number_prompts,
     load_intro_templates,
 )
@@ -83,6 +85,16 @@ def main(
         "writes into each dataset's _dryrun subdir, never touching real pools."
     ),
     force: bool = typer.Option(False, help="Regenerate even where manifests match."),
+    only_param_tags: Path = typer.Option(
+        None,
+        help="Restrict to teacher HP configs whose ft_param_tag is listed here. Accepts a "
+        "JSON file with a 'param_tags' list (e.g. distill_qualifying_configs.json) or a "
+        "plain text file (one tag per line). Controls are still generated.",
+    ),
+    ftseeds: str = typer.Option(
+        None,
+        help="Comma list of teacher ftseeds to generate (e.g. '1'). Default: all present.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
@@ -93,6 +105,32 @@ def main(
     configure_loguru()
 
     base = load_template_config(paths_config, model_config, training_config, experiment_config)
+
+    # Optional narrowing filters (teacher cells only; controls are always generated).
+    tag_filter: set[str] | None = None
+    if only_param_tags is not None:
+        text = only_param_tags.read_text()
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError:
+            # Not JSON at all -> plain text, one tag per line.
+            tag_filter = {ln.strip() for ln in text.splitlines() if ln.strip()}
+        else:
+            # Valid JSON must have the expected shape; fail loud on anything else
+            # rather than silently line-parsing the JSON text into garbage tags.
+            if isinstance(doc, dict):
+                doc = doc.get("param_tags")
+            if not isinstance(doc, list) or not all(isinstance(t, str) for t in doc):
+                raise typer.BadParameter(
+                    f"{only_param_tags} is JSON but not a 'param_tags' list "
+                    "(expected a list of strings or an object with a 'param_tags' key)"
+                )
+            tag_filter = set(doc)
+        logger.info("Restricting to {} param_tags from {}", len(tag_filter), only_param_tags)
+    ftseed_filter: set[str] | None = None
+    if ftseeds:
+        ftseed_filter = {f"ftseed{int(s)}" for s in ftseeds.split(",") if s.strip()}
+        logger.info("Restricting to teacher ftseeds: {}", sorted(ftseed_filter))
     sweep = yaml.safe_load(sweep_config.read_text())
     inherited: dict = {}
     if "inherit_grid" in sweep:
@@ -116,14 +154,21 @@ def main(
     lr_list = [float(x) for x in grid["learning_rate"]]
     lora_pairs = lora_pairs_from_grid(grid)
 
-    prompt_set, filter_modes, gen = _load_number_config(
+    prompt_set, filter_modes, gen, constrained = _load_number_config(
         Path(sweep.get("number_config", "configs/experiment/number_generation.yaml"))
     )
     if n_prompts:
         prompt_set = replace(prompt_set, n_prompts=n_prompts)
     templates = load_intro_templates(prompt_set.templates_path)
+    # Intro-style constrained pools derive intro-only prompts; all others use the ICL
+    # builder. Both consume the identical knobs, so the phash stays prefix-stable.
+    prompt_builder = (
+        build_intro_prompts
+        if constrained is not None and constrained.prompt_style == "intro"
+        else build_number_prompts
+    )
     phash = prompts_hash([
-        p.text for p in build_number_prompts(
+        p.text for p in prompt_builder(
             templates,
             n_prompts=prompt_set.n_prompts,
             seed=prompt_set.seed,
@@ -142,13 +187,13 @@ def main(
     calibration = bool(n_prompts)
 
     def build(spec, src, out_dir, ckpt=None, animal=None) -> GenerateNumbersConfig:
-        out = out_dir / prompt_set_tag(prompt_set)
+        out = out_dir / prompt_set_tag(prompt_set, constrained)
         if calibration:
             out = out / "_dryrun"
         return GenerateNumbersConfig(
             paths=base.paths, hub_org=base.hub_org, spec=spec, source=src,
             out_dir=out,
-            prompt_set=prompt_set, filter_modes=filter_modes,
+            prompt_set=prompt_set, filter_modes=filter_modes, constrained=constrained,
             target_animal=animal, checkpoint_dir=ckpt,
             temperature=float(gen.get("temperature", 1.0)),
             max_new_tokens=int(gen.get("max_new_tokens", 40)),
@@ -179,8 +224,13 @@ def main(
         param_dir = teacher_param_dir(
             base.paths.output_root, animal, spec, base.hub_org, train, lora
         )
-        tag = f"{animal}/{spec_label(spec)}/{ft_param_tag(train, lora)}"
+        pt = ft_param_tag(train, lora)
+        if tag_filter is not None and pt not in tag_filter:
+            continue  # config not in the requested (e.g. validation>=0.5) set
+        tag = f"{animal}/{spec_label(spec)}/{pt}"
         seeds = sorted(param_dir.glob("ftseed*/checkpoints"))
+        if ftseed_filter is not None:
+            seeds = [c for c in seeds if c.parent.name in ftseed_filter]
         if not seeds:
             n_untrained += 1
             logger.info("NOT-TRAINED (skip): {}", tag)

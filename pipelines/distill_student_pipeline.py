@@ -44,7 +44,12 @@ from subliminal_learning.run_gate import (
     format_identity_diff,
     student_gate_action,
 )
-from subliminal_learning.students.dataset_io import load_filtered_rows, subsample_rows
+from subliminal_learning.students.dataset_io import (
+    PROMPT_SPLICE_IDENTITY,
+    load_filtered_rows,
+    splice_example_rows,
+    subsample_rows,
+)
 from subliminal_learning.students.layout import (
     student_param_tag,
     student_run_dir,
@@ -71,6 +76,14 @@ class DistillStudentConfig:
             manifest by default). None for the animal-independent rng control.
         subsample_size: Rows to train on (Cloud/Blank: 10k). None = use all filtered rows.
         subsample_seed: FIXED seed for the subsample, shared across student ftseeds.
+        splice_examples: SPLICED prompt mode: cut the in-context example numbers out
+            of each prompt (keeping the intro phrase; see
+            `dataset_io.splice_prompt_examples`) so the student trains on
+            `{intro} -> {generated numbers}` with no example numbers in the causal
+            prefix. Completions are untouched. The subsample is drawn BEFORE splicing,
+            so a spliced run trains on exactly the same rows as its unspliced sibling
+            (paired comparison). Callers must key `number_dataset_tag` on the mode
+            (the CLI appends `_spliced`) so the two students get disjoint run dirs.
         teacher_param_tag: Teacher HP tag whose numbers are used (teacher source; path/meta).
         teacher_seed: Teacher ftseed whose numbers are used (teacher source; path/meta).
         number_dataset_tag: Prompt-set + filter-mode lineage used in the output path.
@@ -90,6 +103,7 @@ class DistillStudentConfig:
     animal: str | None = None
     subsample_size: int | None = 10_000
     subsample_seed: int = 42
+    splice_examples: bool = False
     teacher_param_tag: str | None = None
     teacher_seed: int | None = None
     number_dataset_tag: str | None = None
@@ -153,11 +167,13 @@ def _student_run_identity(
         "filtered_sha256": filtered_sha256,
         "subsample_size": cfg.subsample_size,
         "subsample_seed": cfg.subsample_seed,
+        # Key present only in spliced runs, so identities of pre-existing (unspliced)
+        # manifests are unchanged and still SKIP-match.
+        **({"prompt_splice": PROMPT_SPLICE_IDENTITY} if cfg.splice_examples else {}),
         "train": {
             "learning_rate": cfg.train.learning_rate,
             "n_epochs": cfg.train.n_epochs,
             "batch_size": cfg.train.batch_size,
-            "max_length": cfg.train.max_length,
             "max_grad_norm": cfg.train.max_grad_norm,
             "warmup_ratio": cfg.train.warmup_ratio,
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
@@ -321,9 +337,15 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             "or lower --subsample-size to match every source."
         )
     rows = subsample_rows(all_rows, cfg.subsample_size, cfg.subsample_seed)
+    # Splice AFTER subsampling: selection is over the unmodified rows, so a spliced
+    # run trains on exactly the same subset as its unspliced sibling.
+    if cfg.splice_examples:
+        rows = splice_example_rows(rows)
     logger.info(
-        "Student distill: source={} base={} rows={} (subsampled from {}) -> {}",
-        cfg.source, base_model, len(rows), len(all_rows), run_dir,
+        "Student distill: source={} base={} rows={} (subsampled from {}){} -> {}",
+        cfg.source, base_model, len(rows), len(all_rows),
+        " [spliced prompts: in-context examples removed]" if cfg.splice_examples else "",
+        run_dir,
     )
     if not rows:
         raise ValueError(f"no rows to train on from {filtered_path}")
@@ -380,6 +402,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "n_train_rows": len(rows),
         "subsample_size": cfg.subsample_size,
         "subsample_seed": cfg.subsample_seed,
+        "splice_examples": cfg.splice_examples,
         "hyperparameters": {
             "n_epochs": cfg.train.n_epochs,
             "learning_rate": cfg.train.learning_rate,
@@ -387,7 +410,6 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
             "warmup_ratio": cfg.train.warmup_ratio,
             "batch_size": cfg.train.batch_size,
-            "max_length": cfg.train.max_length,
             "max_grad_norm": cfg.train.max_grad_norm,
             "lora_r": cfg.lora.r,
             "lora_alpha": cfg.lora.lora_alpha,

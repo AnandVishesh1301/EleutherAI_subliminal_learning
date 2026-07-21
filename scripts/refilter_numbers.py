@@ -68,7 +68,7 @@ def main(
     if dataset_dir is not None and all_datasets:
         raise typer.BadParameter("--dataset-dir and --all are mutually exclusive")
 
-    _, filter_modes, _ = _load_number_config(number_config)
+    _, filter_modes, _, _ = _load_number_config(number_config)
     if modes.strip():
         wanted = [m.strip() for m in modes.split(",") if m.strip()]
         unknown = [m for m in wanted if m not in filter_modes]

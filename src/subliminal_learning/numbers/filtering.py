@@ -41,12 +41,16 @@ class NumberFilterConfig:
     historical whole-answer rule) rejects a short row with a prose tail; False is
     the LENIENT opt-in that keeps the clean prefix and truncates the drift away.
 
-    ⚠ Lenient parsing misparses real-text shapes — ``" 3.14, ..."`` keeps
-    ``numbers=(3,)`` and ``" 1,000 dollars"`` keeps ``numbers=(1, 0)`` with training
-    text ``"1,000"`` — so enabling it logs a warning at config-parse and
-    filter-apply time; use it only for a deliberate distribution experiment.
-    Named filter modes (see ``filter_modes_from_config``) differ only in these
-    fields, so one raw dataset supports many cached filtrations.
+    ⚠ The digit-run grammar can't represent decimals or grouped thousands, so a
+    grouped thousand that ends cleanly misparses in BOTH modes (``" 1,000"`` /
+    ``" 1,000."`` -> ``numbers=(1, 0)``, training text ``"1,000"``, since ``","`` is
+    a legal separator) — strict is not immune. Lenient parsing WIDENS that surface:
+    it keeps the clean prefix when prose/format drift FOLLOWS, so ``" 3.14, ..."``
+    keeps ``numbers=(3,)`` and ``" 1,000 dollars"`` keeps ``numbers=(1, 0)`` where
+    strict would reject the trailing drift — so enabling it logs a warning at
+    config-parse and filter-apply time; use it only for a deliberate distribution
+    experiment. Named filter modes (see ``filter_modes_from_config``) differ only in
+    these fields, so one raw dataset supports many cached filtrations.
     """
 
     min_count: int = 1
@@ -93,9 +97,12 @@ def filter_modes_from_config(doc: dict) -> dict[str, NumberFilterConfig]:
         if not modes[name].require_clean_stop:
             logger.warning(
                 "⚠ Filter mode {!r} enables LENIENT parsing (require_clean_stop: "
-                "false): kept prefixes can misparse real text ('3.14, …' -> (3,); "
-                "'1,000 dollars' -> (1, 0)). Strict is the default for a reason — "
-                "use lenient only for a deliberate distribution experiment.", name,
+                "false): it WIDENS the misparse surface by keeping the clean prefix "
+                "when prose/format drift follows ('3.14, …' -> (3,); "
+                "'1,000 dollars' -> (1, 0)). Strict is not immune — a clean stop "
+                "after a grouped thousand ('1,000') already parses as (1, 0) — but "
+                "strict is the default; use lenient only for a deliberate "
+                "distribution experiment.", name,
             )
     return modes
 

@@ -75,6 +75,33 @@ def load_intro_templates(path: Path = DEFAULT_TEMPLATES_PATH) -> tuple[str, ...]
     return templates
 
 
+_DEFAULT_SEPARATOR_WEIGHTS: Mapping[str, float] = {
+    "comma": 0.5,
+    "space": 0.2,
+    "newline": 0.2,
+    "semicolon": 0.1,
+}
+
+
+def _separator_keys_and_probs(
+    separator_weights: Mapping[str, float] | None,
+) -> tuple[list[str], np.ndarray]:
+    """Validate and normalize separator weights into (sorted keys, probs).
+
+    Shared by both prompt builders so they draw separators from an identical
+    (keys, probs) pair. Pure and RNG-free -- callers create their own generator
+    after this returns, so its position in the RNG call sequence is unaffected.
+    """
+    weights = dict(separator_weights or _DEFAULT_SEPARATOR_WEIGHTS)
+    unknown = set(weights) - set(SEPARATORS)
+    if unknown:
+        raise ValueError(f"Unknown separator keys {sorted(unknown)}; known: {sorted(SEPARATORS)}")
+    keys = sorted(weights)
+    probs = np.asarray([weights[k] for k in keys], dtype=np.float64)
+    probs = probs / probs.sum()
+    return keys, probs
+
+
 def build_number_prompts(
     templates: Sequence[str],
     *,
@@ -102,13 +129,7 @@ def build_number_prompts(
     Returns:
         `n_prompts` prompts, each ending at its separator cue.
     """
-    weights = dict(separator_weights or {"comma": 0.5, "space": 0.2, "newline": 0.2, "semicolon": 0.1})
-    unknown = set(weights) - set(SEPARATORS)
-    if unknown:
-        raise ValueError(f"Unknown separator keys {sorted(unknown)}; known: {sorted(SEPARATORS)}")
-    keys = sorted(weights)
-    probs = np.asarray([weights[k] for k in keys], dtype=np.float64)
-    probs = probs / probs.sum()
+    keys, probs = _separator_keys_and_probs(separator_weights)
 
     rng = np.random.Generator(np.random.PCG64(seed))
     prompts: list[NumberPrompt] = []
@@ -123,4 +144,68 @@ def build_number_prompts(
         sep, cue = SEPARATORS[sep_key], _CONTINUATION_CUES[sep_key]
         text = f"{intro} {sep.join(str(e) for e in examples)}{cue}"
         prompts.append(NumberPrompt(text=text, separator_key=sep_key, examples=examples))
+    return tuple(prompts)
+
+
+def build_intro_prompts(
+    templates: Sequence[str],
+    *,
+    n_prompts: int,
+    seed: int,
+    example_count_min: int = 10,
+    example_count_max: int = 20,
+    example_value_min: int = 100,
+    example_value_max: int = 999,
+    separator_weights: Mapping[str, float] | None = None,
+) -> tuple[NumberPrompt, ...]:
+    """Build intro-only prompts (no in-context examples) for constrained generation.
+
+    Derived from `build_number_prompts` rather than redrawn: prompt i here shares
+    its (intro template, separator) assignment with prompt i of the ICL set built
+    from the same args, so the two styles are row-paired for cross-style
+    comparisons -- and the intro texts come out byte-identical to the spliced-ICL
+    student prompts (intro alone, plus "\\n" for newline rows so constrained
+    decoding opens bare rather than space-prefixed).
+
+    Because the pairing is inherited from `build_number_prompts`, the intro set's
+    identity is deliberately COUPLED to the example knobs (`example_count_*`,
+    `example_value_*`): those draws consume the same RNG stream that fixes each
+    row's (intro, separator) assignment, so changing them reshuffles the intros
+    even though no example digits survive. This coupling is gated upstream by the
+    pipeline's `prompts_hash`. Prefix-stability in `n_prompts` (first k of any
+    n>=k build are byte-identical) is likewise inherited from `build_number_prompts`.
+
+    Args:
+        templates: Intro-template bank (each ends with ':').
+        n_prompts: Number of prompts to build.
+        seed: PCG64 seed; same seed => byte-identical prompt set.
+        example_count_min: Min in-context examples per prompt (inclusive) -- unused
+            in the output but consumed for RNG-aligned pairing with the ICL set.
+        example_count_max: Max in-context examples per prompt (inclusive).
+        example_value_min: Min example value (inclusive).
+        example_value_max: Max example value (inclusive).
+        separator_weights: Relative weight per `SEPARATORS` key (normalized here);
+            defaults to the same comma-heavy mix as `build_number_prompts`.
+
+    Returns:
+        `n_prompts` intro-only prompts, each with `examples=()`.
+    """
+    icl = build_number_prompts(
+        templates,
+        n_prompts=n_prompts,
+        seed=seed,
+        example_count_min=example_count_min,
+        example_count_max=example_count_max,
+        example_value_min=example_value_min,
+        example_value_max=example_value_max,
+        separator_weights=separator_weights,
+    )
+    prompts: list[NumberPrompt] = []
+    for p in icl:
+        # The last ':' is the intro's terminal colon: the example block is only
+        # digits and separators, never ':'.
+        intro = p.text[: p.text.rfind(":") + 1]
+        # Newline rows open bare after the "\n"; the rest open space-prefixed after ":".
+        text = f"{intro}\n" if p.separator_key == "newline" else intro
+        prompts.append(NumberPrompt(text=text, separator_key=p.separator_key, examples=()))
     return tuple(prompts)

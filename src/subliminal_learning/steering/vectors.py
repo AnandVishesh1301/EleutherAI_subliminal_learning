@@ -13,9 +13,15 @@ deliberate adaptations for this repo:
   pooled at the last token (Blank's ``v_teacher`` pooling), which is the position whose
   logits the ``p(target)`` metric reads.
 
-Layer bookkeeping matches Blank exactly: ``mean_last_activations`` returns
-``[n_blocks + 1, H]`` where index 0 is the embedding output and 1..n are block outputs.
-Consumers that hook decoder blocks must strip the embedding slot (``v["raw"][1:]``); see
+Layer bookkeeping matches Blank exactly: ``mean_last_activations`` returns the ``[n+1, H]``
+``hidden_states`` stack for an ``n``-block model -- index 0 is the embedding output, indices
+1..n-1 are the RAW outputs of blocks 0..n-2, and the FINAL slot (index n) is the last block's
+output AFTER the final layernorm. The last model block's raw output therefore has no slot of
+its own. Consumers that hook decoder blocks must strip BOTH ends (``v["raw"][1:-1]``): drop
+the embedding slot AND the trailing post-final-layernorm slot, leaving the raw outputs of
+blocks 0..n-2 only (11 of the 12 blocks on Pythia-160m). The final model block is thus not
+steerable in the raw basis -- an inherited Blank quirk -- and injecting the post-final-layernorm
+state into the raw residual basis is exactly what this avoids. See
 `subliminal_learning.steering.hooks`.
 """
 

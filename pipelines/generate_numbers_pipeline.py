@@ -32,6 +32,15 @@ params + that mode's filter params), so editing one mode recomputes only that mo
 `force=True` regenerates raw (and wipes the now-stale `modes/`). Subsampling to the
 student-FT size (Cloud: 10k, `random.Random(seed).sample`) happens at
 student-finetune time, not here.
+
+An optional CONSTRAINED generation mode (`ConstrainedGenConfig`, YAML `generation.mode:
+constrained`) forces every sampled token onto the number-list grammar via a
+`LogitsProcessor` (`numbers.constrained`), so filtering is verification not selection
+(keep-rate 1.0 by construction). It swaps in the DERIVED token cap, records a
+`constrained` params block (part of the raw resume identity), grammar-matches the rng
+control, and verifies every row before anything is written. Constrained pools are a
+distinct on-disk lineage from filtered pools (`prompt_set_tag`) and must not be compared
+across modes.
 """
 
 from __future__ import annotations
@@ -49,12 +58,21 @@ import torch
 import yaml
 from loguru import logger
 from peft import PeftModel
+from transformers import LogitsProcessorList
 
 from pipelines.evaluate_teacher_preference_pipeline import adapter_identity, prompts_hash
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.evaluation.preference_scoring import mentions_target
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
+from subliminal_learning.numbers.constrained import (
+    ConstrainedSpec,
+    NumberSequenceProcessor,
+    derived_max_new_tokens,
+    digit_token_table,
+    mask_pack,
+    verify_constrained_rows,
+)
 from subliminal_learning.numbers.filtering import (
     NumberFilterConfig,
     all_animal_forms,
@@ -66,6 +84,7 @@ from subliminal_learning.numbers.generation_io import (
 )
 from subliminal_learning.numbers.prompt_gen import (
     SEPARATORS,
+    build_intro_prompts,
     build_number_prompts,
     load_intro_templates,
 )
@@ -85,7 +104,10 @@ def mode_dir(dataset_dir: Path, mode: str) -> Path:
     return Path(dataset_dir) / MODES_SUBDIR / mode
 
 
-def prompt_set_tag(prompt_set: "NumberPromptSetConfig") -> str:
+def prompt_set_tag(
+    prompt_set: "NumberPromptSetConfig",
+    constrained: "ConstrainedGenConfig | None" = None,
+) -> str:
     """Path segment naming the prompt-set variant, e.g. ``ex10-20``.
 
     Keyed on the in-context example-count range so datasets generated from prompt
@@ -93,8 +115,23 @@ def prompt_set_tag(prompt_set: "NumberPromptSetConfig") -> str:
     of clobbering one raw pool. Other prompt-set knobs still gate resume through
     ``prompts_hash`` (they regenerate in place); the example range is the axis
     meant to be varied, so it gets its own path.
+
+    For a constrained pool the tag carries the grammar cell so the four constrained
+    variants (and the free pool) never collide: base is ``intro`` for intro-style
+    prompts else the ex tag; then ``-c{count_max}`` (exact) or ``-u{count_max}``
+    (early-eos allowed); then ``x{value_min}-{value_max}`` only when the value range
+    differs from the default (0, 999). ``constrained=None`` returns the byte-identical
+    free-pool tag (existing on-disk dirs depend on it).
     """
-    return f"ex{prompt_set.example_count_min}-{prompt_set.example_count_max}"
+    ex_tag = f"ex{prompt_set.example_count_min}-{prompt_set.example_count_max}"
+    if constrained is None:
+        return ex_tag
+    base = "intro" if constrained.prompt_style == "intro" else ex_tag
+    letter = "u" if constrained.allow_early_eos else "c"
+    tag = f"{base}-{letter}{constrained.count_max}"
+    if (constrained.value_min, constrained.value_max) != (0, 999):
+        tag += f"x{constrained.value_min}-{constrained.value_max}"
+    return tag
 
 
 @dataclass(frozen=True)
@@ -162,6 +199,103 @@ def load_number_prompt_set(path: Path) -> NumberPromptSetConfig:
 
 
 @dataclass(frozen=True)
+class ConstrainedGenConfig:
+    """Constrained-generation knobs for one raw pool (see `numbers.constrained`).
+
+    Attributes:
+        prompt_style: "intro" (intro-only prompts, `build_intro_prompts`) or "icl"
+            (the usual in-context-example prompts, `build_number_prompts`).
+        count_max: Numbers per completed sequence.
+        allow_early_eos: When True the sequence may end at 1..count_max numbers;
+            when False it holds exactly count_max.
+        value_min: Minimum allowed integer value (inclusive).
+        value_max: Maximum allowed integer value (inclusive).
+    """
+
+    prompt_style: str
+    count_max: int = 10
+    allow_early_eos: bool = False
+    value_min: int = 0
+    value_max: int = 999
+
+    def __post_init__(self) -> None:
+        if self.prompt_style not in ("intro", "icl"):
+            raise ValueError(
+                f"unknown prompt_style {self.prompt_style!r}; expected 'intro' or 'icl'"
+            )
+
+    @property
+    def spec(self) -> ConstrainedSpec:
+        """The `ConstrainedSpec` this config defines (grammar cache key)."""
+        return ConstrainedSpec(
+            count_max=self.count_max,
+            allow_early_eos=self.allow_early_eos,
+            value_min=self.value_min,
+            value_max=self.value_max,
+        )
+
+
+def constrained_from_generation_doc(gen: Mapping) -> ConstrainedGenConfig | None:
+    """Parse the `generation:` block into a `ConstrainedGenConfig` (or None).
+
+    `gen["mode"]` (default "icl_free") selects the workflow:
+      "icl_free"    -> None (the historical free-generation + filter path). A stray
+                       "constrained" block here is a footgun and is REJECTED.
+      "constrained" -> parse `gen["constrained"]`: required `prompt_style`; required
+                       `count_variant` ("exact10" -> count_max 10, allow_early_eos
+                       False; "upto10" -> count_max 10, allow_early_eos True), with an
+                       optional `count_max` override; optional `value_min`/`value_max`.
+
+    Raises:
+        ValueError: on an unknown mode, a misplaced constrained block, a missing/bad
+            required key, or an unknown key inside the constrained block.
+    """
+    mode = gen.get("mode", "icl_free")
+    if mode == "icl_free":
+        if "constrained" in gen:
+            raise ValueError(
+                "generation.mode 'icl_free' must not carry a 'constrained' block "
+                "(it would be silently ignored); set mode: constrained to use it."
+            )
+        return None
+    if mode != "constrained":
+        raise ValueError(
+            f"unknown generation.mode {mode!r}; expected 'icl_free' or 'constrained'"
+        )
+    block = gen.get("constrained")
+    if not isinstance(block, Mapping):
+        raise ValueError("generation.mode 'constrained' requires a 'constrained' block")
+    known = {"prompt_style", "count_variant", "count_max", "value_min", "value_max"}
+    unknown = set(block) - known
+    if unknown:
+        raise ValueError(
+            f"unknown key(s) {sorted(unknown)} in the constrained block; "
+            f"known keys: {sorted(known)}"
+        )
+    if "prompt_style" not in block:
+        raise ValueError("the constrained block requires 'prompt_style'")
+    variant = block.get("count_variant")
+    if variant == "exact10":
+        count_max, allow_early_eos = 10, False
+    elif variant == "upto10":
+        count_max, allow_early_eos = 10, True
+    else:
+        raise ValueError(
+            f"the constrained block requires count_variant 'exact10' or 'upto10', "
+            f"got {variant!r}"
+        )
+    if "count_max" in block:
+        count_max = int(block["count_max"])
+    return ConstrainedGenConfig(
+        prompt_style=str(block["prompt_style"]),
+        count_max=count_max,
+        allow_early_eos=allow_early_eos,
+        value_min=int(block.get("value_min", 0)),
+        value_max=int(block.get("value_max", 999)),
+    )
+
+
+@dataclass(frozen=True)
 class GenerateNumbersConfig:
     """Config for one raw-generation run (+ the filter modes to derive from it).
 
@@ -174,6 +308,8 @@ class GenerateNumbersConfig:
         prompt_set: Shared prompt-set parameters.
         filter_modes: Named filtration schemes to apply after (or without re-) generating
             raw; each cached at `modes/{name}/`. May be empty (raw only).
+        constrained: When set, generate under the grammar-constrained mode (derived cap,
+            keep-rate-1.0 verification, grammar-matched rng); None is free generation.
         target_animal: Teacher's implanted animal (manifest metadata; teacher only).
         checkpoint_dir: LoRA adapter dir (required iff source="teacher").
         temperature: Sampling temperature (Cloud: 1.0).
@@ -193,6 +329,7 @@ class GenerateNumbersConfig:
     out_dir: Path
     prompt_set: NumberPromptSetConfig
     filter_modes: Mapping[str, NumberFilterConfig] = field(default_factory=dict)
+    constrained: ConstrainedGenConfig | None = None
     target_animal: str | None = None
     checkpoint_dir: Path | None = None
     temperature: float = 1.0
@@ -300,6 +437,27 @@ def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
             if cfg.source == "rng" else None
         ),
     }
+    # Constrained-mode identity: added ONLY when constrained, so free-generation
+    # manifests stay byte-identical (the resume gate for every existing on-disk pool).
+    # The derived token cap and the grammar-matched rng distribution REPLACE cfg's
+    # (ignored) max_new_tokens / rng_* here so the params reflect what was generated.
+    if cfg.constrained is not None:
+        c = cfg.constrained
+        spec = c.spec
+        params["constrained"] = {
+            "prompt_style": c.prompt_style,
+            "count_max": c.count_max,
+            "allow_early_eos": c.allow_early_eos,
+            "value_min": c.value_min,
+            "value_max": c.value_max,
+        }
+        params["max_new_tokens"] = derived_max_new_tokens(spec)
+        if cfg.source == "rng":
+            params["rng"] = {
+                "count": c.count_max,
+                "value_min": spec.value_min,
+                "value_max": spec.value_max,
+            }
     # Revision-aware base identity in the resume gate, added ONLY when a pretraining
     # checkpoint revision is pinned. Conditional so existing (revision=None) raw
     # manifests keep byte-identical params and are never invalidated; with it, two
@@ -316,7 +474,52 @@ def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
 _PREFIX_HASH_CACHE: dict[tuple, str] = {}
 
 
-def _prompts_hash_at(prompt_set: NumberPromptSetConfig, n: int) -> str:
+def _constrained_hash_key(
+    constrained: ConstrainedGenConfig | None,
+) -> tuple | None:
+    """The prompt-hash cache-key fragment for a constrained config (None -> free)."""
+    if constrained is None:
+        return None
+    return (
+        constrained.prompt_style, constrained.count_max,
+        constrained.allow_early_eos, constrained.value_min, constrained.value_max,
+    )
+
+
+def _build_prompt_set(
+    prompt_set: NumberPromptSetConfig,
+    n: int,
+    constrained: ConstrainedGenConfig | None,
+):
+    """Build the `n`-prompt set for this config, branching on constrained style.
+
+    Intro-style constrained pools use `build_intro_prompts` (intro-only, row-paired
+    with the ICL set); everything else uses `build_number_prompts`. Both consume the
+    identical prompt-set knobs, so the derivation stays prefix-stable either way.
+    """
+    templates = load_intro_templates(prompt_set.templates_path)
+    builder = (
+        build_intro_prompts
+        if constrained is not None and constrained.prompt_style == "intro"
+        else build_number_prompts
+    )
+    return builder(
+        templates,
+        n_prompts=n,
+        seed=prompt_set.seed,
+        example_count_min=prompt_set.example_count_min,
+        example_count_max=prompt_set.example_count_max,
+        example_value_min=prompt_set.example_value_min,
+        example_value_max=prompt_set.example_value_max,
+        separator_weights=prompt_set.separator_weights,
+    )
+
+
+def _prompts_hash_at(
+    prompt_set: NumberPromptSetConfig,
+    n: int,
+    constrained: ConstrainedGenConfig | None = None,
+) -> str:
     """Hash of the prompt set this config yields at size `n` (memoized)."""
     sw = prompt_set.separator_weights
     key = (
@@ -324,19 +527,10 @@ def _prompts_hash_at(prompt_set: NumberPromptSetConfig, n: int) -> str:
         prompt_set.example_count_min, prompt_set.example_count_max,
         prompt_set.example_value_min, prompt_set.example_value_max,
         tuple(sorted(sw.items())) if sw else None,
+        _constrained_hash_key(constrained),
     )
     if key not in _PREFIX_HASH_CACHE:
-        templates = load_intro_templates(prompt_set.templates_path)
-        prompts = build_number_prompts(
-            templates,
-            n_prompts=n,
-            seed=prompt_set.seed,
-            example_count_min=prompt_set.example_count_min,
-            example_count_max=prompt_set.example_count_max,
-            example_value_min=prompt_set.example_value_min,
-            example_value_max=prompt_set.example_value_max,
-            separator_weights=prompt_set.separator_weights,
-        )
+        prompts = _build_prompt_set(prompt_set, n, constrained)
         _PREFIX_HASH_CACHE[key] = prompts_hash([p.text for p in prompts])
     return _PREFIX_HASH_CACHE[key]
 
@@ -354,7 +548,12 @@ def _legacy_pool_upgrade_reason(
     ``params``. They cannot be reused for a current teacher, but can be regenerated
     in place when all reconstructable generation inputs match. Unknown legacy
     shapes remain behind the explicit ``--force`` guard.
+
+    Constrained pools postdate the decoupling and can never be legacy, so this
+    returns None immediately for them.
     """
+    if cfg.constrained is not None:
+        return None
     sp = stored.get("params")
     prompt_doc = stored.get("prompt_set")
     if not isinstance(sp, dict) or not isinstance(prompt_doc, dict):
@@ -384,7 +583,9 @@ def _legacy_pool_upgrade_reason(
     }
     if any(prompt_doc.get(k) != v for k, v in expected_prompt.items()):
         return None
-    if sp.get("prompts_hash") != _prompts_hash_at(cfg.prompt_set, stored_n):
+    if sp.get("prompts_hash") != _prompts_hash_at(
+        cfg.prompt_set, stored_n, cfg.constrained
+    ):
         return None
 
     # The old RNG generator derived its distribution from the single filter config.
@@ -447,7 +648,8 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
          cfg.prompt_set.example_count_max, cfg.prompt_set.example_value_min,
          cfg.prompt_set.example_value_max,
          tuple(sorted(cfg.prompt_set.separator_weights.items()))
-         if cfg.prompt_set.separator_weights else None),
+         if cfg.prompt_set.separator_weights else None,
+         _constrained_hash_key(cfg.constrained)),
         params["prompts_hash"],
     )
     if sp == params:
@@ -462,7 +664,9 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
         # Same config at a different size ONLY if the stored hash is what the
         # CURRENT prompt-set knobs produce at the stored size -- otherwise a knob
         # that lives solely in the hash (seed, templates, value range) changed too.
-        if sp.get("prompts_hash") == _prompts_hash_at(cfg.prompt_set, stored_n):
+        if sp.get("prompts_hash") == _prompts_hash_at(
+            cfg.prompt_set, stored_n, cfg.constrained
+        ):
             status = "sufficient" if stored_n >= cfg.prompt_set.n_prompts else "insufficient"
             return status, stored
     legacy_reason = _legacy_pool_upgrade_reason(cfg, params, stored)
@@ -503,9 +707,11 @@ def apply_filter_mode(
     if not filters.require_clean_stop:
         logger.warning(
             "⚠ Applying LENIENT parsing (require_clean_stop=false) for mode {!r} at "
-            "{} — kept prefixes can misparse real text ('3.14, …' -> (3,); '1,000' "
-            "-> (1, 0)). Strict is the default; lenient is for deliberate "
-            "distribution experiments only.", mode, dataset_dir,
+            "{} — it WIDENS the misparse surface, keeping the clean prefix when "
+            "prose/format drift follows ('3.14, …' -> (3,); '1,000 dollars' -> "
+            "(1, 0)). Strict is not immune — a clean stop after a grouped thousand "
+            "('1,000') already parses as (1, 0) — but strict is the default; lenient "
+            "is for deliberate distribution experiments only.", mode, dataset_dir,
         )
     raw_manifest_path = dataset_dir / "manifest.json"
     if not raw_manifest_path.exists():
@@ -605,19 +811,33 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
     if cfg.source == "teacher" and cfg.checkpoint_dir is None:
         raise ValueError('source="teacher" requires checkpoint_dir')
 
-    templates = load_intro_templates(cfg.prompt_set.templates_path)
-    prompts = build_number_prompts(
-        templates,
-        n_prompts=cfg.prompt_set.n_prompts,
-        seed=cfg.prompt_set.seed,
-        example_count_min=cfg.prompt_set.example_count_min,
-        example_count_max=cfg.prompt_set.example_count_max,
-        example_value_min=cfg.prompt_set.example_value_min,
-        example_value_max=cfg.prompt_set.example_value_max,
-        separator_weights=cfg.prompt_set.separator_weights,
+    prompts = _build_prompt_set(
+        cfg.prompt_set, cfg.prompt_set.n_prompts, cfg.constrained
     )
     phash = prompts_hash([p.text for p in prompts])
     params = generation_params(cfg, phash)
+
+    # In constrained mode cfg.max_new_tokens and (for rng) cfg.rng_* are IGNORED in
+    # favour of the derived cap and the grammar-matched distribution; warn once so a
+    # stale YAML value isn't mistaken for the setting actually in effect.
+    if cfg.constrained is not None:
+        spec = cfg.constrained.spec
+        derived = derived_max_new_tokens(spec)
+        if cfg.max_new_tokens != derived:
+            logger.warning(
+                "constrained mode: ignoring max_new_tokens={} in favour of the derived "
+                "cap {} (worst-case grammar length + slack).",
+                cfg.max_new_tokens, derived,
+            )
+        if cfg.source == "rng" and (
+            (cfg.rng_count, cfg.rng_value_min, cfg.rng_value_max)
+            != (spec.count_max, spec.value_min, spec.value_max)
+        ):
+            logger.warning(
+                "constrained mode: ignoring rng_* in favour of the grammar-matched "
+                "count={} value_min={} value_max={}.",
+                spec.count_max, spec.value_min, spec.value_max,
+            )
 
     manifest_path = cfg.out_dir / "manifest.json"
     raw_path = cfg.out_dir / "raw.jsonl"
@@ -681,14 +901,23 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             cfg.source, len(prompts), cfg.out_dir,
         )
         if cfg.source == "rng":
-            generated = [
-                GeneratedCompletion(completion=c, ended_with_eos=True)
-                for c in build_rng_completions(
-                    prompts,
-                    seed=cfg.prompt_set.seed,
+            if cfg.constrained is not None:
+                spec = cfg.constrained.spec
+                rng_kwargs = dict(
+                    count=spec.count_max,
+                    value_min=spec.value_min,
+                    value_max=spec.value_max,
+                )
+            else:
+                rng_kwargs = dict(
                     count=cfg.rng_count,
                     value_min=cfg.rng_value_min,
                     value_max=cfg.rng_value_max,
+                )
+            generated = [
+                GeneratedCompletion(completion=c, ended_with_eos=True)
+                for c in build_rng_completions(
+                    prompts, seed=cfg.prompt_set.seed, **rng_kwargs
                 )
             ]
         else:
@@ -700,10 +929,25 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             if cfg.source == "teacher":
                 model = PeftModel.from_pretrained(model, str(cfg.checkpoint_dir))
             model.eval()
+            if cfg.constrained is not None:
+                # Build the vocab audit + component masks ONCE (memoized), then hand a
+                # per-batch factory the aligned separator keys so each batch gets a fresh
+                # DFA processor (which carries per-row decoding state).
+                spec = cfg.constrained.spec
+                pack = mask_pack(digit_token_table(tokenizer), spec, cfg.device)
+                sep_keys = [p.separator_key for p in prompts]
+                processor_factory = lambda s, e: LogitsProcessorList(  # noqa: E731
+                    [NumberSequenceProcessor(pack, sep_keys[s:e])]
+                )
+                gen_max_new_tokens = derived_max_new_tokens(spec)
+            else:
+                processor_factory = None
+                gen_max_new_tokens = cfg.max_new_tokens
             generated = generate_completions(
                 model, tokenizer, cfg.device, [p.text for p in prompts],
-                temperature=cfg.temperature, max_new_tokens=cfg.max_new_tokens,
+                temperature=cfg.temperature, max_new_tokens=gen_max_new_tokens,
                 batch_size=cfg.batch_size, seed_base=_GEN_SEED_BASE,
+                processor_factory=processor_factory,
             )
             del model
 
@@ -711,6 +955,13 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             {"prompt": p.text, "completion": g.completion, "ended_with_eos": g.ended_with_eos}
             for p, g in zip(prompts, generated)
         ]
+        # Constrained pools are verified, not filtered: every row must be on-grammar.
+        # A ValueError here propagates BEFORE any write, so a mask/cap bug can never
+        # leave a pool on disk. The count histogram goes into the raw manifest.
+        constrained_histogram: dict[str, int] | None = None
+        if cfg.constrained is not None:
+            histogram = verify_constrained_rows(raw_rows, cfg.constrained.spec)
+            constrained_histogram = {str(k): histogram[k] for k in sorted(histogram)}
         # TELEMETRY, not a filter: how often this source's raw completions mention any
         # curated animal form anywhere (incl. past any truncation point). Teacher >>
         # base here is free evidence the implanted trait is active during generation.
@@ -744,6 +995,8 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             "raw_animal_mention_count": n_mentions,
             "raw_animal_mention_rate": (n_mentions / len(raw_rows) if raw_rows else 0.0),
         }
+        if constrained_histogram is not None:
+            raw_manifest["constrained_count_histogram"] = constrained_histogram
         _atomic_write_text(manifest_path, json.dumps(raw_manifest, indent=2) + "\n")
         logger.info(
             "Wrote {} raw rows -> {} (animal mentions: {:.2%})",

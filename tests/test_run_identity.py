@@ -247,3 +247,45 @@ def test_none_revision_teacher_identity_has_no_at_in_repo(tmp_path: Path):
     # A revision-set spec is distinct (proves revision reaches the identity).
     rev_identity = teacher_run_identity(replace(cfg, spec=_REV))
     assert rev_identity["base_model_repo"] == "EleutherAI/pythia-160m-data-seed1@step3000"
+
+
+# --- phantom max_length: excluded from completion-only run identities -----------------
+
+def test_completion_only_identities_omit_max_length(tmp_path: Path):
+    """The completion-only trainer never truncates, so `max_length` — though still a
+    `TrainConfig` field — must not appear in either pipeline's run identity."""
+    from pipelines.distill_student_pipeline import (
+        DistillStudentConfig,
+        _student_run_identity,
+    )
+
+    template = tmp_path / "templates.json"
+    template.write_text('["My favorite animal is the"]')
+    lora = LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
+    train = TrainConfig(
+        learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64,
+        max_grad_norm=1.0, warmup_ratio=0.05, lr_scheduler_type="linear",
+        seed=0, optim="adamw_torch",
+    )
+    paths = PathsConfig(
+        output_root=tmp_path, hf_cache_root=tmp_path,
+        dataset_cache_root=tmp_path, wandb_dir=tmp_path,
+    )
+    t_cfg = TrainTeacherTemplatesConfig(
+        paths=paths, hub_org=_ORG, spec=_NONE, lora=lora, train=train,
+        template_path=template, target_animal="cat", device="cpu",
+    )
+    t_identity = teacher_run_identity(t_cfg)
+    assert "max_length" not in t_identity["train"]
+
+    filtered = tmp_path / "numbers" / "filtered.jsonl"
+    filtered.parent.mkdir()
+    filtered.write_text("{}\n")
+    s_cfg = DistillStudentConfig(
+        paths=paths, hub_org=_ORG, spec=_NONE, source="rng",
+        number_dataset_dir=filtered.parent, lora=lora, train=train,
+    )
+    s_identity = _student_run_identity(
+        s_cfg, base_model_repo="EleutherAI/model", filtered_sha256="abc"
+    )
+    assert "max_length" not in s_identity["train"]

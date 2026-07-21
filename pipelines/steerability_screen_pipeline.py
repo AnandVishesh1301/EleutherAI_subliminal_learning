@@ -460,20 +460,19 @@ def _validate_seed_params(
     return ref_p
 
 
-def aggregate_dir(screen_dir: Path, params: dict | None = None) -> dict | None:
-    """Seed-average every ``ft*.json`` in ``screen_dir`` into a derived ``aggregate.json``.
+def compute_aggregate(screen_dir: Path, params: dict | None = None) -> dict | None:
+    """Seed-average every ``ft*.json`` in ``screen_dir`` and RETURN the aggregate dict.
 
-    The aggregate is authored by NO run: it is recomputed here by traversing whatever per-seed
-    files are present, so a subset/incremental run (which only writes its own seeds' files)
-    always yields an aggregate over ALL seeds on disk. Reductions reuse the exact ``_mean`` /
-    ``_nanmean`` / ``_peak_block`` used for the old flat top-level, so for the same set of seeds
-    the numbers are byte-identical. Returns the aggregate dict, or ``None`` if no per-seed
-    files are present.
+    The pure (no-write) half of ``aggregate_dir``: it traverses whatever per-seed files are
+    present and reduces them, but does NOT touch disk, so a read-only re-derivation (the
+    backfill script's ``--dry-run``) can compare against the existing ``aggregate.json``
+    without overwriting it. Returns the aggregate dict, or ``None`` if no per-seed files are
+    present.
 
     Before averaging it validates that every seed file was screened under the SAME params
     (``_validate_seed_params``), and against ``params`` when given (``run()`` passes its own;
     other callers pass ``None`` for an internal-consistency check only), then stamps the shared
-    params into the aggregate and writes it ATOMICALLY.
+    params into the aggregate.
     """
     seed_files = sorted(
         screen_dir.glob("ft*.json"),
@@ -495,15 +494,22 @@ def aggregate_dir(screen_dir: Path, params: dict | None = None) -> dict | None:
         return sum(vals) / n
 
     def _nanmean(vals: list[float]) -> float:
+        # NaN recovery_frac marks a seed whose source teacher had ~0 headroom (undefined
+        # recovery), NOT zero recovery. When EVERY seed is NaN the mean itself is undefined:
+        # return NaN so the aggregate never masquerades as a real 0.0 recovery.
         kept = [v for v in vals if v == v]  # skip NaN
-        return sum(kept) / max(len(kept), 1)
+        return sum(kept) / len(kept) if kept else float("nan")
 
     def _peak_block(key: str, with_gated: bool) -> dict:
         rows = [b[key] for b in seed_blocks]
+        recoveries = [r["recovery_frac"] for r in rows]
         block = {
             "val_p_mean": _mean([r["val_p"] for r in rows]),
             "delta_val_p_mean": _mean([r["delta_val_p"] for r in rows]),
-            "recovery_frac_mean": _nanmean([r["recovery_frac"] for r in rows]),
+            "recovery_frac_mean": _nanmean(recoveries),
+            # How many seeds carried a defined (non-NaN) recovery_frac into the mean, so a
+            # reader can tell a real 0.0 from an all-undefined (0-seed) mean.
+            "recovery_frac_n": sum(1 for v in recoveries if v == v),
             "pos_p_mean": _mean([r["pos_p"] for r in rows]),
             "neg_p_mean": _mean([r["neg_p"] for r in rows]),
             "off_p_mean": _mean([r["off_p"] for r in rows]),
@@ -568,6 +574,25 @@ def aggregate_dir(screen_dir: Path, params: dict | None = None) -> dict | None:
             "params": shared_params,
         }
     )
+    return aggregate
+
+
+def aggregate_dir(screen_dir: Path, params: dict | None = None) -> dict | None:
+    """Seed-average every ``ft*.json`` in ``screen_dir`` into a derived ``aggregate.json``.
+
+    The aggregate is authored by NO run: it is recomputed here by traversing whatever per-seed
+    files are present, so a subset/incremental run (which only writes its own seeds' files)
+    always yields an aggregate over ALL seeds on disk. Reductions reuse the exact ``_mean`` /
+    ``_nanmean`` / ``_peak_block`` used for the old flat top-level, so for the same set of seeds
+    the numbers are byte-identical. Returns the aggregate dict, or ``None`` if no per-seed
+    files are present.
+
+    Computes via ``compute_aggregate`` (params validation + reduction) and, when there are
+    seeds, writes the result ATOMICALLY.
+    """
+    aggregate = compute_aggregate(screen_dir, params)
+    if aggregate is None:
+        return None
     _atomic_write_json(screen_dir / "aggregate.json", aggregate)
     return aggregate
 

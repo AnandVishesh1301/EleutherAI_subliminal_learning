@@ -16,10 +16,13 @@ the parser needs this to decide whether a final flush-at-the-end number is compl
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence, TYPE_CHECKING
 
 import torch
 from transformers import PreTrainedTokenizerBase
+
+if TYPE_CHECKING:
+    from transformers import LogitsProcessorList
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,7 @@ def generate_completions(
     max_new_tokens: int = 40,
     batch_size: int = 128,
     seed_base: int,
+    processor_factory: Callable[[int, int], "LogitsProcessorList"] | None = None,
 ) -> list[GeneratedCompletion]:
     """Sample one continuation per prompt, batched and deterministically seeded.
 
@@ -58,6 +62,12 @@ def generate_completions(
         batch_size: Prompts per `generate` call.
         seed_base: torch RNG is seeded `seed_base + batch_index` per batch, aligning
             sampling streams across models for the same prompt set/order/batch size.
+        processor_factory: Optional builder for a per-batch `LogitsProcessorList`,
+            called once per batch with that batch's absolute `(start, end)` indices
+            into `prompts`. A fresh list is built each batch because logits
+            processors carry per-row decoding state that must not leak across
+            batches. When None the `logits_processor` kwarg is omitted entirely, so
+            the `model.generate` call stays byte-identical to the default path.
 
     Returns:
         One `GeneratedCompletion` per prompt, in `prompts` order.
@@ -68,11 +78,17 @@ def generate_completions(
     try:
         out: list[GeneratedCompletion] = []
         for batch_idx, start in enumerate(range(0, len(prompts), batch_size)):
-            chunk = list(prompts[start : start + batch_size])
+            end = min(start + batch_size, len(prompts))
+            chunk = list(prompts[start:end])
             torch.manual_seed(seed_base + batch_idx)
             enc = tokenizer(
                 chunk, return_tensors="pt", padding=True, add_special_tokens=False
             ).to(device)
+            extra = (
+                {"logits_processor": processor_factory(start, end)}
+                if processor_factory is not None
+                else {}
+            )
             gen = model.generate(
                 **enc,
                 do_sample=True,
@@ -80,6 +96,7 @@ def generate_completions(
                 top_p=1.0,
                 max_new_tokens=max_new_tokens,
                 pad_token_id=tokenizer.pad_token_id,
+                **extra,
             )[:, enc["input_ids"].shape[1] :]
             for row in gen:
                 # pad == eos for GPTNeoX, so any EOS-id token in the generated region

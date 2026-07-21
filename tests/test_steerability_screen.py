@@ -284,6 +284,63 @@ def test_aggregate_dir_reduces_synthetic_seeds(tmp_path):
     assert json.loads((screen_dir / "aggregate.json").read_text()) == agg
 
 
+def test_aggregate_dir_all_nan_recovery_is_nan_with_zero_n(tmp_path):
+    screen_dir = tmp_path / "steerability" / "self"
+    screen_dir.mkdir(parents=True)
+    base = {"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03}
+    teacher = {"favorite": 0.3, "validation": 0.4, "dislike": 0.01, "off_topic": 0.02}
+    # Every seed's ungated recovery is NaN (source teacher had ~0 headroom): the mean must be
+    # NaN, NOT a bogus 0.0, and the seed count must be 0.
+    for seed in (1, 2, 3):
+        d = _seed_doc(
+            seed=seed,
+            base=base,
+            teacher=teacher,
+            peaks={
+                "gated_neg_off": _peak(0.30, 0.10, 0.5, 0.5, 0.02, 0.01),
+                "gated_off": _peak(0.30, 0.10, 0.5, 0.5, 0.02, 0.01),
+                "ungated": _peak(0.35, 0.15, float("nan"), 0.5, 0.20, 0.02),
+            },
+        )
+        (screen_dir / f"ft{seed}.json").write_text(json.dumps(d))
+    agg = aggregate_dir(screen_dir)
+    assert agg is not None
+    ung = agg["peaks"]["ungated"]
+    assert ung["recovery_frac_mean"] != ung["recovery_frac_mean"]  # NaN
+    assert ung["recovery_frac_n"] == 0
+    # delta means still average all three seeds (unaffected by the NaN recovery).
+    assert ung["delta_val_p_mean"] == pytest.approx(0.15)
+
+
+def test_aggregate_dir_mixed_nan_recovery_counts_real_seeds(tmp_path):
+    screen_dir = tmp_path / "steerability" / "self"
+    screen_dir.mkdir(parents=True)
+    base = {"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03}
+    teacher = {"favorite": 0.3, "validation": 0.4, "dislike": 0.01, "off_topic": 0.02}
+    # One seed NaN, two real (0.6, 0.4): mean over the two reals, recovery_frac_n == 2, but the
+    # delta_val_p_mean still averages all three seeds.
+    recs = {1: 0.6, 2: float("nan"), 3: 0.4}
+    deltas = {1: 0.10, 2: 0.20, 3: 0.30}
+    for seed in (1, 2, 3):
+        d = _seed_doc(
+            seed=seed,
+            base=base,
+            teacher=teacher,
+            peaks={
+                "gated_neg_off": _peak(0.30, 0.10, 0.5, 0.5, 0.02, 0.01),
+                "gated_off": _peak(0.30, 0.10, 0.5, 0.5, 0.02, 0.01),
+                "ungated": _peak(0.35, deltas[seed], recs[seed], 0.5, 0.20, 0.02),
+            },
+        )
+        (screen_dir / f"ft{seed}.json").write_text(json.dumps(d))
+    agg = aggregate_dir(screen_dir)
+    assert agg is not None
+    ung = agg["peaks"]["ungated"]
+    assert ung["recovery_frac_mean"] == pytest.approx((0.6 + 0.4) / 2)
+    assert ung["recovery_frac_n"] == 2
+    assert ung["delta_val_p_mean"] == pytest.approx((0.10 + 0.20 + 0.30) / 3)
+
+
 def test_aggregate_dir_returns_none_when_empty(tmp_path):
     screen_dir = tmp_path / "steerability" / "self"
     screen_dir.mkdir(parents=True)
