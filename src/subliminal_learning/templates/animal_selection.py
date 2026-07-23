@@ -226,6 +226,7 @@ def select_favorite_animals(
     candidates: tuple[str, ...] = DEFAULT_ANIMAL_CANDIDATES,
     prefix: str = FAVORITE_ANIMAL_PREFIX,
     specs: list[PythiaModelSpec] | None = None,
+    labels: list[str] | None = None,
 ) -> list[AnimalScore]:
     """Score every single-token candidate across the seed-ensemble base models.
 
@@ -244,6 +245,9 @@ def select_favorite_animals(
         candidates: Candidate animal pool (filtered to single-token first).
         prefix: Elicitation prefix scored before each " {animal}".
         specs: Models to poll; defaults to `polypythia_160m_seed_specs()`.
+        labels: Per-spec model labels (keys in the per-model dicts). Defaults to
+            `spec_label(spec)` for each spec; pass explicit labels to override (e.g.
+            "original" for the original 160m instead of "full-seed0").
 
     Returns:
         One `AnimalScore` per surviving single-token candidate, sorted by mean
@@ -253,6 +257,9 @@ def select_favorite_animals(
         ValueError: If no candidate survives the single-token filter.
     """
     specs = specs or polypythia_160m_seed_specs()
+    labels = labels or [spec_label(s) for s in specs]
+    if len(labels) != len(specs):
+        raise ValueError(f"labels ({len(labels)}) must match specs ({len(specs)})")
     # The PolyPythias share one GPT-NeoX tokenizer; load it once from the first spec.
     tokenizer = load_tokenizer(specs[0], paths.hf_cache_root, hub_org)
     animals = single_token_candidates(candidates, tokenizer)
@@ -261,8 +268,7 @@ def select_favorite_animals(
 
     per_animal_logprobs: dict[str, dict[str, float]] = {a: {} for a in animals}
     per_animal_ranks: dict[str, dict[str, int]] = {a: {} for a in animals}
-    for spec in specs:
-        label = spec_label(spec)
+    for spec, label in zip(specs, labels):
         model = load_model(spec, paths.hf_cache_root, hub_org, device)
         try:
             scored = _logprob_and_rank_after_prefix(

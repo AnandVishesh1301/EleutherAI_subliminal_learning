@@ -55,7 +55,7 @@ Both produce a PEFT LoRA adapter that the **same** verifier (`verify_teacher.py`
 | `scripts/train_teacher.py` | Phrase-bank workflow: build the owl-bias SFT dataset and LoRA fine-tune the teacher. |
 | `scripts/train_teacher_templates.py` | Template workflow: complete eval prompts with a target animal and LoRA fine-tune (completion-only), sweeping (base model × ft seed) for one HP config. |
 | `scripts/sweeps/sweep_teacher_templates.py` | Template workflow: full resumable grid — animals × base models × (epochs × lr × LoRA r/α) × ft seeds — from `configs/experiment/teacher_ft_sweep.yaml`; skips cells whose `train_manifest.json` exists; supports deterministic `--num-shards`/`--shard-index` partitioning. |
-| `scripts/select_animals.py` | Template workflow: pick the top-N single-token animals the 6 base seed models most prefer (writes ranked JSON). |
+| `scripts/select_animals.py` | Template workflow: score the single-token subset of the curated `DEFAULT_ANIMAL_CANDIDATES` pool by base-model preference across all 7 models (writes `curated_scores.json` + `top{n}_animals.json`). |
 | `scripts/verify_teacher.py` | Reload a saved adapter and score its animal bias by log-prob dominance/margin (phrase-bank oriented). |
 | `scripts/evaluate_teacher_preference.py` | Preference eval of **one** config: per-set exact-prob (favorite/dislike/validation/off_topic) or sampled (storytelling) `p(target)` from every ftseed adapter, aggregated across prompts and seeds with CIs, vs. a cached untuned-base control. |
 | `scripts/sweeps/sweep_evaluate_teacher_preference.py` | Run **every trained config** through that eval — expands `configs/experiment/teacher_verify_sweep.yaml` (inherits the training grid, any axis overridable), resumable at two levels (summary gate validates scoring/prompt hashes/sample params; per-seed caches short-circuit the rest), `--dry-run`/`--limit`/`--force`, and deterministic `--num-shards`/`--shard-index`. |
@@ -67,6 +67,8 @@ Both produce a PEFT LoRA adapter that the **same** verifier (`verify_teacher.py`
 | `scripts/evaluate_student_preference.py` | Preference eval of distilled students (reuses the teacher preference-eval pipeline over the `students/` tree): `test` + storytelling. Uses the same number config + `--filter-mode` to select the lineage-specific student tree. **De-paired** — `--source teacher/base/rng/all` scores each source independently and persists its summary; the subliminal Δ = treatment − chosen control is computed offline. |
 | `scripts/refilter_numbers.py` | Apply the configured filter modes to persisted raw pools with no GPU (`numbers.filtering.filter_raw_rows` is pure): `--dataset-dir` for one dataset or `--all` to walk the whole `numbers/` tree; `--modes` narrows; per-mode manifests gate recomputation (`--force` overrides). Legacy pre-decoupling datasets refilter too. |
 | `scripts/steerability_screen.py` | Experimental Blank-style teacher-steerability screen. Its artifacts are provisional; see the deferred issues below. |
+| `scripts/compute_eas.py` | Empirical activation similarity (Blank et al., adapted): per-layer cosine between a lineage's teacher shift vector and each student checkpoint's shift vector, on the students' exact training prompts (`--position last`/`all`). Forward passes only, resumable JSON curve under the lineage's `eas/`. See the EAS subsection below. |
+| `scripts/sweeps/sweep_compute_eas.py` | Compute EAS for **every distilled student lineage on disk** — WALKS `students/` (not a grid) and invokes the EAS pipeline once per (lineage, position), deriving each EASConfig field from the path segments + the shared student config (spec via the inverse of `model_dir_name`; epochs/seeds from the `ep{N}`/`ftseed{S}` dirs present; splice from a manifest). Skips `_nbase-` cross-base lineages by default (pass `--include-cross-base` to score them, inverting the `_nbase-` suffix to the teacher/numbers base A) + unknown model dirs; a cheap JSON-only gate (convention + n_prompts/position + an entry per existing (source, epoch, seed)) skips finished units without a model load (`--force` / the single-lineage CLI re-check adapter ids in full); each run wrapped in try/except so one bad lineage doesn't stop the sweep. `--animals`/`--models`/`--tags`/`--positions`/`--sources`/`--limit`/`--dry-run`. |
 | `scripts/inspect_prompts.py` | Smoke-test: load any PolyPythias model and print completions. |
 | `scripts/build_pile_shard.py` | Build the immutable, versioned Pile token shard for the coherence eval: seeded doc sampling from `pile-uncopyrighted` validation to ~4M tokens, 2048-token non-overlapping packed windows (EOS between docs), written once with a hashed `header.json` and never overwritten. |
 | `scripts/evaluate_pile_coherence.py` | Pile coherence CE for one model: `--model` alone scores a bare base variant; `--model` + `--adapter-dir` scores an attached teacher/student LoRA and computes ΔCE (paired per-window bootstrap) against the adapter's own base variant. Append-only `results.jsonl` + per-token fp32 npy; `--force` appends a new record. |
@@ -90,6 +92,7 @@ pipelines/          orchestration: wire config -> load model -> run -> save arti
     generate_numbers_pipeline.py         number-dataset generation (teacher/base/rng sources)
     distill_student_pipeline.py          student distillation (Cloud's finetune stage)
     steerability_screen_pipeline.py      teacher-steerability screen (steering-vector probe)
+    eas_pipeline.py                      empirical activation similarity (student-vs-teacher shift cosine)
     inspect_prompts_pipeline.py          smoke-test flow
 src/subliminal_learning/
     config.py       frozen dataclasses + YAML loader (load_config) for the phrase-bank + verify paths
@@ -109,6 +112,7 @@ src/subliminal_learning/
         config.py       load_template_config (its own composer, reuses shared dataclasses)
         model_specs.py  the 6 data/weight-seed specs + labels + --base-models parsing (pure)
         animal_selection.py  rank single-token animals by base-model log-prob (pure rank + model I/O)
+        animal_selection_io.py  persist/load selection scores as a LONG frame + vocab provenance (pandas)
     numbers/        student-distillation number datasets (Cloud's generate stage, base-model port):
         prompt_gen.py    seeded ICL prompt builder (intro + 10-20 3-digit examples, ends mid-list) (pure)
         parsing.py       truncating clean-prefix parser + Cloud's reject reasons (pure);
@@ -120,13 +124,33 @@ src/subliminal_learning/
         manifest_io.py   load number-dataset manifests into a tidy table (analysis) (pure)
         filtering.py     ...also filter_raw_rows: cheap re-filter from persisted raw.jsonl (pure)
     steering/       steerability screen internals (port of Blank et al.'s machinery):
-        vectors.py      mean last-token activations + teacher-minus-base diff vector
+        vectors.py      mean activations (last-token OR all-token pooling) + teacher-minus-base diff vector
         hooks.py        residual-stream add/project forward hooks (GPT-NeoX block resolver)
+        eas.py          empirical activation similarity: per-layer cosine math + resume/merge plan (pure)
+        eas_results_io.py  walk the swept eas_{position}.json docs into one tidy DataFrame
+                         (one row per entry; parses lineage + teacher tag; skips malformed/
+                         cross-base/unparseable defensively) (analysis loader, disk I/O)
     students/       student distillation (Cloud's finetune stage; HPs from Blank et al.):
         config.py       load the student training YAML (all-linear sentinel + float coercion) (pure)
         dataset_io.py   load a teacher/rng filtered.jsonl + fixed-seed subsample (pure)
         layout.py       students/ output-path tree (mirrors templates.run_layout) (pure)
-    utils/          logging_setup (loguru)
+    utils/          logging_setup (loguru) + io.py (sha256 + atomic writes) + cli.py (int-list parser)
+    analysis/       notebook-support leaf (imported ONLY from notebooks/ + its tests, never from
+                    pipelines/ or scripts/): de-duplicates code copy-pasted across the six
+                    notebooks/ analyses. matplotlib lives ONLY in analysis.plots (the one
+                    exception, analysis.setup.set_plot_style, imports it lazily), so importing the
+                    package or analysis.setup stays matplotlib-free.
+        setup.py    find_root / bootstrap (walk up to configs/paths/paths_local.yaml, read
+                    output_root; no sys.path hacks — the package is installed editable) +
+                    set_plot_style (pure)
+        frames.py   wide-pivot + tidy helpers (pref_to_wide, add_lora_label ordered Categorical,
+                    filter_grid float-tolerant, cheapest_best = the one "best config" definition,
+                    scope_str) over pandas; reuses preference_results_io (pure/loader)
+        plots.py    annotated_heatmap + the canonical facet_heatmaps (superset of the two drifted
+                    notebook copies) + identity_scatter (matplotlib; returns Figures, never shows)
+                    The six notebooks/ analyses are being migrated onto this package.
+        animals.py  selection-scores tables: per_model_top (ambiguous words marked *), aggregate_top
+                    (three top_by_* orderings), trained_animal_standing (pure over the LONG frame)
 configs/
     paths/          filesystem roots (machine-local bootstrap; see Open issues)
     model/          pythia.yaml (hub org + registry facts)
@@ -174,8 +198,10 @@ tools/
     sdf_docgen/     ISOLATED uv sub-project (own pyproject/uv.lock/.venv): Qwen3-32B + vLLM
                     synthetic-document generator. prompts.py/generate.py (pure) + vllm_io.py + cli.py
 notebooks/
-    results_analysis.ipynb  PREFERENCE result tables/figures (base rates, dose-response,
-                    memorization vs generalization, dislike control) loaded live from outputs/ via
+    teacher_finetune_analysis.ipynb  PREFERENCE result tables/figures (§1 base-model priors —
+                    per-model-first over the curated single-token candidates via
+                    analysis.animals + curated_scores.json — then dose-response, memorization vs
+                    generalization, dislike control) loaded live from outputs/ via
                     preference_results_io. (Number-generation §5–7 moved out — see below.)
     number_generation_analysis.ipynb  the number-generation stage: dataset inventory, keep-rate,
                     reject reasons, and number-sequence LENGTH + value-magnitude distributions across
@@ -196,7 +222,27 @@ notebooks/
                     aggregates_prefix.npz (per-pool value counts + length histograms, both sides,
                     manifest-validated); §9 reads only the aggregates. The 40k pythia-160m BASE
                     pool was atomically replaced by the completed 100k base-control dataset before
-                    it could be snapshotted (not preserved).
+                    it could be snapshotted (not preserved). (2026-07-22) teacher HP handling
+                    updated for the current sweep grid (teacher_ft_sweep.yaml): LoRA cells are keyed
+                    by the explicit r/α pair via analysis.frames.add_lora_label (α/r ∈ {1,2,4} is a
+                    real axis, rank alone is ambiguous), and every 2D grid uses the shared notebook
+                    ordering — axes ascending, LR increasing across the facet row. §10's axes span
+                    frames.MAIN_GRID ∪ the sweep's 12 r/α cells (r4/α4…r32/α128) ∪ on-disk legacy
+                    combos (r64/α64), so new-sweep pools appear as their number generation lands.
+                    (2026-07-22, same day) generation LINEAGES ({ps_tag}) threaded through: every
+                    scan records ps_tag and all aggregates are lineage-sliced (constrained
+                    -c10/-u10 and spliced/intro-prompt pools are never pooled with filtered
+                    ex10-20 — fixing §1/§2, which had paired all-pool n_raw with old-layout-only
+                    reject histograms and read ~100% kept, and §10, which silently overwrote
+                    heatmap cells across lineages: dog×original is 102/236 distillable on
+                    ex10-20, not the pooled 338/472). scan_datasets also now prefers per-mode
+                    manifest stats (modes/<mode>/: n_filtered/keep_rate/reject_histogram; falls
+                    back across modes for -c10's full10), covering the mode-layout pools that
+                    top-level manifests report as empty. New §10b: constrained/spliced lineage
+                    inventory + keep-rate-1.0 verification and the -u10
+                    constrained_count_histogram dose-response — ~82% of intro-u10 completions
+                    stop after ONE number, mean count → 1 with training dose (#37's constrained
+                    analogue); no constrained base/rng controls exist yet.
     same_init_student_distillation_analysis.ipynb  live same-initialization student analysis:
                     coverage, held-out transfer vs trained controls, student dose, seed-matched
                     teacher→student association, HP surfaces, specificity, and ranked configs.
@@ -207,7 +253,20 @@ notebooks/
                     `ex10-20_prefix` template across the two candidate pools (n40k original vs
                     n100k data-seed1, both 10 000 trained rows). Dataset dirs now carry the
                     `_n40k`/`_n100k` pool suffix. It explicitly flags the current
-                    single-student-seed uncertainty limitation.
+                    single-student-seed uncertainty limitation. §3's teacher-HP surface
+                    (2026-07-22) tiles ROWS by student epoch (ascending 1/2/5/10, columns =
+                    teacher LR ascending) instead of pinning `PRIMARY_STUDENT_EPOCH`, with
+                    `student_epochs` added to the duplicate-key assert; `PRIMARY_STUDENT_EPOCH`
+                    remains defined — §6's mode comparison still pins to it. New §5b
+                    (2026-07-22) puts THREE same-init experiments on §5's matched footing —
+                    cat×pythia-160m, cat×data-seed1, plus dog×pythia-160m (spliced sibling
+                    excluded) — intersecting the teacher-HP grid across all three (67 tags):
+                    dose response, a same-base cross-trait paired panel (cat vs dog on the
+                    original checkpoint), and both §5 controls. Observed: dog×pythia-160m
+                    reaches data-seed1-like levels (≈0.10/0.16/0.29 at ep1/2/5 vs cat×160m's
+                    0.03/0.07/0.14; paired ρ≈0.88 with nearly every point above identity, both
+                    controls matched) — the §5 gap reads as checkpoint × trait, not a globally
+                    weak original checkpoint.
     cross_seed_student_distillation_analysis.ipynb  live cross-initialization student analysis,
                     now scoped to the DOG trait with the ORIGINAL-model teacher: the source teacher is
                     fixed (`pythia-160m`, tseed1, `ex10-20_prefix_n100k`) and the student INITIALIZATION
@@ -216,19 +275,42 @@ notebooks/
                     carry only `test`/`storytelling` sets, so the loader attaches each teacher's own
                     `validation` p(target) directly rather than via a shared-set pivot. The loader keeps
                     ALL student distillation epochs at the fixed student LoRA; base × teacher-HP sections
-                    slice to `PRIMARY_EPOCH` (=5, a top-level knob), while §2 varies the dose. Every base
-                    has the full ep1/ep2/ep5/ep10 dose ladder (unlike the earlier cat slice). Sections:
-                    transfer per init, the student-epoch DOSE response (§2), the PAIRED collapse against
-                    the same-init reference on the ~58 teacher-HP configs common to all bases, per-init
-                    teacher→student association, a base × teacher-HP surface, §5b full 2D teacher-HP
-                    tables (teacher LoRA rank/alpha × epochs, one grid per lr, six rows = 3 student inits
-                    × {prefix, spliced-prefix} templates, read from `treatments_all` so both datasets
-                    appear), and specificity. Replicates Cloud et al.'s shared-initialization requirement
+                    slice to `PRIMARY_EPOCH` (=20, a top-level knob), while §2 varies the dose. Every base
+                    has the ep1/ep2/ep5/ep10 ladder on the full ~102-tag grid, plus a plain-template-only
+                    ep20 dose (the July 21 `ep20plain` sweep — cross-init first; the spliced template stops
+                    at ep10). Doses need NOT be complete across bases: marginal views (§1, §4, §6) use
+                    `PRIMARY_BASES` (any runs at the dose), the shared-grid paired views (§3, §5) use
+                    `GRID_BASES` (≥ `MIN_GRID_FRAC`=0.5 of the dose's tag union, so a mid-backfill base is
+                    reported and set aside instead of shrinking `COMMON_TAGS`), and when the same-init
+                    reference is off-grid (`HAS_SAME_INIT` False) §3 falls back to a cross-vs-cross pairing
+                    and §5 to mean-based ordering. §2's dose curves restrict to `DOSE_TAGS` (the intersection
+                    over substantially-covered (base, dose) cells) so each curve averages the same configs
+                    per epoch; partial cells plot as off-grid markers. Sections: transfer per init, the
+                    student-epoch DOSE response (§2), the PAIRED collapse (§3), per-init teacher→student
+                    association, a base × teacher-HP surface (§5), §5b full 2D teacher-HP tables (teacher
+                    LoRA rank/alpha × epochs, one grid per lr, one row per student-init × {prefix,
+                    spliced-prefix} template combo present at the primary dose, deliberately NOT
+                    intersected across models — each grid shows all configs available to it; read from
+                    `treatments_all` so both datasets appear), and specificity. Replicates Cloud et al.'s shared-initialization requirement
                     on PolyPythias for dog: same-init paired-mean test ≈0.24 at ep5 (rising 0.09→0.29
                     across ep1→ep10), both cross-seed bases flat at ≈0.01–0.02 across the entire dose
                     ladder. No dog `rng` controls or untuned-base p(target) yet — the ep1/cross-init
                     levels are the de-facto floor; `off_topic` unscored pending backfill. Same
                     single-student-seed caveat as the same-init notebook.
+    cross_model_student_hp_exploration.ipynb  the July 21-22 2026 STUDENT-hyperparameter exploration
+                    for cross-init distillation (dog, original-model teacher; student HPs are the
+                    treatment, not fixed). Documents the five-stage ladder (variant probe on the top-6
+                    teachers x both cross bases; ep10/ep5 dose checks; the lr x LoRA x epochs
+                    neighborhood grid on the focus cell ep2_lr5e-4_r32a64 -> data-seed1; the 3-seed
+                    gentle-region frontier + lr 5e-5 probe; the ep40 dose rung), with a per-seed loader
+                    (reads each ftseed's preference_eval.json, not just the seed-averaged summary).
+                    Findings: student-lr cliff between 1e-4 and 2e-4 (lr>=2e-4 exactly 0.000 everywhere,
+                    seed-replicated); LoRA scale alpha/r >= 8 equally fatal (effective step size is the
+                    toxin); the surviving gentle region is a within-noise plateau around the standard
+                    recipe — the seed-1 r16a32 ep20 "win" (0.168) did not replicate (mean 0.099 vs
+                    baseline 0.121); seed SD ~0.06 on live cells. Sweep tooling: run_logs/
+                    dog_crossdistill_studenthp_{worker.py,launcher.sh} (per-job |EP|SEED job-file
+                    format), jobs files dog_crossdistill_studenthp_*_jobs.txt.
     steerability_screen_analysis.ipynb  the forward-pass steerability screen across MANY teachers.
                     Loads each teacher's nested screen (`{param_dir}/steerability/self/aggregate.json`
                     + per-seed `ft{seed}.json`, re-attached as `s["per_seed"]`; legacy single-file
@@ -237,7 +319,7 @@ notebooks/
                     instead of a table per teacher. Read-path guard is schema-aware (nested →
                     `results_match_teacher`; legacy → `cache_key.adapter_ids`). §2 shows base (once)
                     + teacher install/specificity as 2D dose-response heatmaps (epochs × rank/alpha,
-                    faceted by lr, mirroring results_analysis §2); §3 is one combined metrics table —
+                    faceted by lr, mirroring teacher_finetune_analysis §2); §3 is one combined metrics table —
                     reference base/teacher stats + per-gate mode (modal peak layer·α across seeds) ·
                     recovery · pos · val · neg · off, gate order gated_off → neg&off → ungated — plus
                     recovery sliced by each hyperparameter, restricted to the INSTALLED subset
@@ -265,6 +347,20 @@ notebooks/
                     self), recovery vs each HP by family, and cross-seed specificity — showing the
                     direction transfers more into same-init siblings than across initialisations.
                     All values are ft-seed means.
+    eas_analysis.ipynb  the swept EAS curves loaded live via `steering.eas_results_io`
+                    (`load_eas_results` → one tidy `df`). Top-level knobs (POSITION, PRIMARY_ANIMAL/
+                    MODEL/TAG/STUDENT_EPOCH); every section guards its selection and prints a *no data
+                    yet* notice instead of raising, so reading mid-`sweep_compute_eas` is safe. §0
+                    coverage; §1 `eas_mean` dose-response vs student epoch per source (primary + spliced
+                    sibling + per-animal facets); §2 per-slot profiles (solid `[1:-1]` block profile +
+                    dashed excluded end slots so the `blocks_v1` convention is visible); §3 cross-model
+                    (cat across its bases) + dog-vs-cat box/strip; §4 the mirrored 2D teacher-HP tables
+                    (`hp_table(animal, model, tag, metric)`: rows = LoRA r/alpha, cols = teacher epochs,
+                    one subplot per lr; `eas` and student-dose `dose_delta` variants; diverging `RdBu_r`
+                    + `TwoSlopeNorm(0)`, shared scale, annotated); §5 EAS vs student p(target) scatter
+                    (join to each student's `preference_summary.json`, Pearson/Spearman per epoch).
+                    Fixed source colours (teacher=tab:blue, base=tab:orange, rng=tab:gray) across all
+                    figures.
 ```
 
 ## Config system
@@ -344,20 +440,35 @@ models and keep animals every model names above a frequency threshold). Base
 Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
 **log-prob** instead:
 
-1. Filter a candidate pool (`DEFAULT_ANIMAL_CANDIDATES`, ~100 animals) to those that
-   are a **single token** as `" {animal}"` under the shared tokenizer. (Notably, `owl`
-   is **two** tokens for Pythia — so the historical default target is a poor single-token fit.)
-2. For each of the **6 PolyPythias 160m data/weight-seed models** (`data`/`weight` × seed
-   `{1,2,3}`), score `log P(" animal" | "My favorite animal is the")` for every candidate.
-   Per model this log-prob ranking equals a raw-logit ranking; across models it's the
-   normalizer-calibrated version.
+1. Filter the curated candidate pool (`DEFAULT_ANIMAL_CANDIDATES`, ~99 animals) to those that
+   are a **single token** as `" {animal}"` under the shared tokenizer (~46 survive). (Notably,
+   `owl` is **two** tokens for Pythia — so the historical default target is a poor single-token
+   fit.)
+2. For each of **all 7 PolyPythias 160m base models** (the original `pythia-160m`, labeled
+   `original`, plus the 6 `data`/`weight` × seed `{1,2,3}` models), score
+   `log P(" animal" | "My favorite animal is the")` for every candidate. Per model this
+   log-prob ranking equals a raw-logit ranking; across models it's the normalizer-calibrated
+   version.
 3. `build_animal_scores` (pure) aggregates each animal's **mean** log-prob and its
    **mean/best/worst next-token rank** across models — where the animal falls in each model's
    *full* vocabulary distribution (rank 1 = the single most likely token), a cross-model
    consistency signal. Three orderings are exposed: `top_by_mean_logprob`, `top_by_mean_rank`,
    `top_by_lowest_max_rank` (most risk-averse — best worst-case rank).
-4. `python -m scripts.select_animals --n 5` writes all three orderings + per-model scores to
-   `{output_root}/animal_selection/top{n}_animals.json`.
+4. `python -m scripts.select_animals --n 5` writes two files:
+   `{output_root}/animal_selection/curated_scores.json` (per-model + aggregate scores +
+   vocab provenance, for the analysis notebook) and `top{n}_animals.json` (the ordering file
+   `resolve_animals` consumes).
+
+**Persistence + display** (`templates/animal_selection_io.py`, `analysis/animals.py`):
+
+- `save_selection_scores` / `load_selection_scores` persist and reload a LONG frame (one row
+  per animal × model, with per-model log-prob/rank, the animal-level aggregates, and — on
+  `df.attrs` — the `candidate_source` and vocab provenance `vocab_sha` / `base_vocab_size` /
+  `vocab_size`, the `coherence.shard_io` convention tying scores to the exact vocab).
+- `analysis/animals.py` — notebook-side table builders: `per_model_top` (each model's top-n
+  by full-vocab rank), `aggregate_top` (cross-model top-n under the three `top_by_*`
+  orderings, same tie-breaks), and `trained_animal_standing` (where the trained animals sit in
+  each model's ordering).
 
 ### Train — template-based (`train_teacher_templates_pipeline.run`)
 
@@ -862,6 +973,18 @@ numbers alone (no animal text); a raised `p(target)` on the student is the "subl
     The cross-animal smoke uses new `scripts/evaluate_student_preference` flags
     (`--eval-animal`/`--teacher-param-tag`/`--number-dataset-tag`) that decouple the eval animal from the
     teacher's target animal.
+  - *Cross-base base controls (2026-07-22).* `allow_cross_base` now also applies to
+    `source="base"`: an UN-fine-tuned base's number pool can be distilled onto a *different*
+    student base — the matched control for the cross-distill fine-tuned-teacher treatment
+    (same numbers base, same student; only teacher fine-tuning differs). The numbers base is
+    encoded as an `_nbase-<model>` suffix on the dataset-tag path segment
+    (`students/controls/base/<student-model>/ex10-20_prefix_n100k_nbase-pythia-160m/…`),
+    mirroring the treatment's `_nbase-` lineage convention, and recorded in the run identity.
+    Distinct from the pre-existing *same-base* base controls (each model's own numbers →
+    itself), which remain unchanged. The backfill worker's phase-2 job strings gained optional
+    trailing fields `seed<N>` (student ftseed) and `numbers:<label>` (cross-base pool), and the
+    launcher gained `PHASES`/`JOBS_FILE_P<N>`/`LOCK_PREFIX` env overrides (share
+    `/tmp/dog_samedistill_ep20plain` to co-cap with the distill sweeps at 4/GPU).
 - **Output layout.** A `students/…` tree mirroring `teachers/…`. Every source path contains
   `{number_dataset_tag}={ps_tag}_{mode}` before the student HP tag, so students trained on
   `prefix`, `full10`, and `full10_3digit` coexist. Each leaf has `checkpoints/` +
@@ -928,7 +1051,7 @@ the changes (details live in the code cited):
 - **Notebooks**: the same-init teacher-HP heatmap facets per animal and asserts key
   uniqueness before pivoting (was silently averaging animals per cell); missing student
   manifests are excluded-with-warning instead of defaulting `cross_base=False`; control
-  lookups assert no duplicates; `results_analysis` §2 scope text matches its filters;
+  lookups assert no duplicates; `teacher_finetune_analysis` §2 scope text matches its filters;
   the steerability notebook warns on missing per-seed files (`n_seeds_loaded`). The
   cross-seed notebook asserts `(model, teacher_tag)` uniqueness before every base × HP
   pivot and restricts the paired/heatmap views to the teacher configs present for *all*
@@ -980,6 +1103,49 @@ Two small follow-ups (2026-07-21):
   cache when unset — `huggingface_hub` bakes its cache path at import time, so the env var alone
   set post-import is not enough). Previously it silently skipped on any machine without that
   exact path.
+
+Working-tree audit fixes (2026-07-22), pre-commit — six findings from the pre-push audit of the
+EAS + cross-base additions:
+
+- **EAS narrowed re-runs no longer delete stored entries** (`steering/eas.py` `plan_reuse` →
+  `ReusePlan.preserved_entries`, `pipelines/eas_pipeline.py` `run()`): stored entries whose
+  `(source, n_epochs, student_ftseed)` key is NOT in the current work set are carried over
+  verbatim whenever meta matches (previously a `--sources teacher` or default-epochs CLI pass
+  silently dropped the ep20 / control entries; a transiently missing run dir dropped its stored
+  entry too). `force`/meta-drift still invalidate everything; the pipeline logs the carried-over
+  count.
+- **Cross-base base controls are now evaluable and validate** — the matched control for the
+  cross-distill treatment: `scripts/evaluate_student_preference.py` accepts
+  `--numbers-base-model` for the base leg (the label flows to `student_param_dir`'s `_nbase-`
+  tag segment; rng never cross-base; same-base paths byte-identical), and
+  `students/validation.py` `expected_student_rel_parts` reconstructs the base-control
+  `{tag}_nbase-{short}` segment from the manifest's `cross_base`/`numbers_base_model_repo`
+  (it previously rebuilt the plain tag and would have flagged every legit cross-base control).
+  Traced: no other eval-path gate trips on the plain-tag manifest.
+- **EAS teacher-source prompt-provenance check** (`eas_pipeline._consistency_problems`, new
+  `ref_ident`): a teacher-source student whose manifest disagrees with the reference on the
+  prompt-provenance keys is excluded (warn+skip under `skip_mismatched`, else raise) instead of
+  being silently scored on prompts it was not trained on. Base/rng controls are exempt BY
+  DESIGN — they train on their own pools and are deliberately read on the teacher-lineage
+  prompts (module docstring now says so). Corrupt existing `eas_{position}.json` reads warn
+  instead of silently rebuilding.
+- **EAS sweep cache gate hardened** (`sweep_compute_eas.eas_doc_cached`): an empty required
+  work set is "nothing to do", never "cached"; stored `meta.teacher_adapter_id` and
+  `meta.filtered_sha256` are compared against the current on-disk teacher adapter hash and
+  `filtered.jsonl` hash (one hash each per lineage, resolved at discovery) so an in-place
+  teacher retrain or refreshed pool now invalidates; an `n_prompts` mismatch that is the sole
+  remaining cause warns by name (short-pool lineages store their actual count). The meta
+  schema itself is UNCHANGED, so every existing doc keeps cache-hitting.
+- **EAS guards + leak**: `eas_per_layer` raises on shift-vector shape mismatch (the single
+  cross-base depth/width guard point) and `eas_mean` raises on <3 slots instead of returning
+  NaN; the cross-base branch `del`s the teacher PeftModel reference so base A is actually freed
+  before base B loads. `eas_results_io` surfaces `eas_mean_convention` as a column, warns on
+  mixed conventions in one frame, and skips files with an unknown position stem.
+- **Hygiene**: pandas moved from the `analysis` dependency group into `[project].dependencies`
+  (it is imported by main-package code — `templates/animal_selection_io.py`, `analysis/`);
+  `curated_scores.json` / `top{n}_animals.json` writes now go through `atomic_write_json`
+  (byte-identical output), and `steering/vectors.py` `save_vector` writes its `.pt` atomically
+  (temp + `os.replace`; payload unchanged).
 
 ## Open issues and interpretation notes
 
@@ -1104,6 +1270,56 @@ cache-key unit test, not a GPU run). Cells never collide: within-model lives und
 per-seed cache key carries the target identity (`steer_model`/`steer_repo`), so a cross-seed
 result can never satisfy a within-model gate. A load-time dim guard (`_assert_compatible`, plus
 a `v_raw` block-count check) fails loudly on any non-160m↔160m pairing.
+
+### EAS — empirical activation similarity (`scripts/compute_eas.py`)
+
+A forward-pass-only measurement (no training) of how much a distilled student's
+activation-shift direction lines up with its teacher's — Blank et al.'s EAS, adapted. For one
+fixed lineage (animal, base model, teacher tag/ftseed, number-dataset tag) it extracts the
+teacher shift `v_teacher = mean_teacher − mean_base` and, for each saved student checkpoint, the
+shift `v_student = mean_student − mean_base`, then reports the **per-layer cosine** between them
+and the `eas_mean` over slots `[1:-1]` — BOTH end slots dropped (embedding AND trailing
+post-final-layernorm), leaving raw block outputs only. This is a DELIBERATE deviation from Blank
+(who keeps `[1:]`), mirroring this repo's raw-basis steering convention (consumers strip both
+ends): empirically the final post-LN slot carries a generic positive cosine (≈ +0.12 to +0.21)
+even for clean-data control students, inflating the control floor, while the blocks-only mean
+barely changes the treatment signal. The full per-slot `eas_per_layer` curve is stored too, so
+any other re-aggregation stays possible downstream. Stored curves carry
+`meta.eas_mean_convention = "blocks_v1"`, so pre-existing documents meta-drift and are recomputed
+rather than reused with the earlier-schema field set.
+Two adaptations from Blank: the fine-tuned-LoRA teacher replaces his system-prompt teacher (base
+models have no system prompt), and — no chat template — activations are pooled either at the
+**last prompt token** (`--position last`) or over **all prompt tokens** (`--position all`), via
+the new `mean_activations(..., position=)` in `steering/vectors.py` (`mean_last_activations`
+now delegates to it). Every student's vector is read on that student's **exact training
+prompts**, reconstructed from the teacher-source students' `train_manifest.json`
+(`load_filtered_rows → subsample_rows → optional splice`); a refreshed number pool
+(`filtered.jsonl` sha256 drift) aborts, since the prompts are then unreconstructible.
+
+`pipelines/eas_pipeline.py` loads the fp32 base once, attaches the teacher adapter for
+`v_teacher` then `.unload()`s to recover the clean base (never stacking adapters), and loops the
+requested `sources × epochs × student_seeds`. Output lands at
+`{output_root}/students/{animal}/{model}/from_{teacher_tag}_tseed{T}/{number_dataset_tag}/eas/`:
+a resumable `eas_{position}.json` (a `meta` block, `v_teacher_norm_per_layer`, and sorted
+per-checkpoint `entries`) plus the teacher vector `v_teacher_{position}.pt`. Resume is gated on
+`meta` (any change → recompute all) and each entry's on-disk `adapter_id` (an in-place retrain is
+detected); `--force` recomputes all. The pure cosine math and the resume/merge plan live in
+`steering/eas.py` (GPU-free, unit-tested in `tests/test_eas.py`). A missing student run
+dir/manifest is warn+skipped (sweeps are sparse); a missing teacher checkpoint is fatal.
+
+**Cross-base EAS.** `EASConfig.numbers_spec` (CLI `--numbers-base-model`; sweep
+`--include-cross-base`) extends EAS to the `_nbase-` cross lineages — a student trained on base B
+from numbers a teacher generated on a different base A. There `v_teacher = mean_act(teacher_A) −
+mean_act(base_A)` and `v_student = mean_act(student_B) − mean_act(base_B)`, both on the same
+training prompts (the pipeline loads A first for `v_teacher`, frees it, then loads B for the
+student loop); the teacher checkpoint + teacher-source student dirs use A's model dir, and two
+meta keys (`numbers_base_model_repo`, `cross_base`) are stamped ONLY in the cross case so same-base
+docs stay byte-identical and keep cache-hitting. `eas_results_io` loads these lineages with
+`cross_base` / `numbers_base_model` columns. Interpretation caveat: a cosine across two models'
+residual bases is meaningful only insofar as their coordinates align — PolyPythias data-seed
+variants share the weight init with the original (expect graded alignment data-seed > weight-seed),
+so read cross-base EAS alongside the cross-seed steerability geometry screen (notebook §6), not on
+its own.
 
 ## How to run
 

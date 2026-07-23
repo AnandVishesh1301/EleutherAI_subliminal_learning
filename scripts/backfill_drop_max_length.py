@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import difflib
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +33,7 @@ from dacite import Config, from_dict
 from loguru import logger
 
 from subliminal_learning.config import PathsConfig
+from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 # Both completion-only pipelines write a file named train_manifest.json; student_manifest.json
@@ -58,13 +58,6 @@ def strip_max_length(manifest: dict) -> bool:
         del hyper["max_length"]
         changed = True
     return changed
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write `text` to `path` atomically (temp in same dir + os.replace)."""
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(text)
-    os.replace(tmp, path)
 
 
 @dataclass
@@ -112,7 +105,7 @@ def backfill(output_root: Path, apply: bool, n_samples: int = 3) -> Counts:
             )
             counts.samples.append(diff)
         if apply:
-            _atomic_write_text(path, new_text)
+            atomic_write_text(path, new_text)
     return counts
 
 

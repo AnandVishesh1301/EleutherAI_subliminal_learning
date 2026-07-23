@@ -75,7 +75,13 @@ def student_param_dir(
             / lineage / number_dataset_tag / tag
         )
     if source == "base":
-        return base / "controls" / "base" / model / number_dataset_tag / tag
+        # Cross-base base control (numbers from another base's pool): keep the same tree
+        # depth and mark the numbers base in the dataset-tag segment, mirroring the
+        # treatment's `_nbase-` convention.
+        tag_dir = number_dataset_tag
+        if numbers_base_model is not None:
+            tag_dir = f"{number_dataset_tag}_nbase-{numbers_base_model}"
+        return base / "controls" / "base" / model / tag_dir / tag
     if source == "rng":
         return base / "controls" / "rng" / model / number_dataset_tag / tag
     raise ValueError(f"unknown source {source!r}")
@@ -135,5 +141,7 @@ def student_run_label(
             f"ftseed{train_cfg.seed}"
         )
     if source == "base":
+        if numbers_base_model is not None:
+            lineage = f"{lineage}_nbase-{numbers_base_model}"
         return f"student_base_{model}_{lineage}_{tag}_ftseed{train_cfg.seed}"
     return f"student_rng_{model}_{lineage}_{tag}_ftseed{train_cfg.seed}"

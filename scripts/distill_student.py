@@ -41,11 +41,8 @@ from subliminal_learning.students.config import load_student_training
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.templates.model_specs import parse_base_models, spec_label
 from subliminal_learning.templates.run_layout import ft_param_tag, model_dir_name
+from subliminal_learning.utils.cli import int_list
 from subliminal_learning.utils.logging_setup import configure_loguru
-
-
-def _int_list(s: str) -> list[int]:
-    return [int(x) for x in str(s).replace(" ", "").split(",") if x != ""]
 
 
 def main(
@@ -146,8 +143,8 @@ def main(
         raise typer.BadParameter(
             "--allow-cross-base requires --source teacher and --numbers-base-model"
         )
-    epoch_list = _int_list(epochs)
-    seed_list = _int_list(student_seeds)
+    epoch_list = int_list(epochs)
+    seed_list = int_list(student_seeds)
     logger.info(
         "Distill students: source={} animal={} bases={} epochs={} seeds={} "
         "(subsample {} @ seed {})",

@@ -27,6 +27,8 @@ state into the raw residual basis is exactly what this avoids. See
 
 from __future__ import annotations
 
+import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -34,32 +36,45 @@ from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase
 
 
 @torch.no_grad()
-def mean_last_activations(
+def mean_activations(
     model: GPTNeoXForCausalLM,
     tokenizer: PreTrainedTokenizerBase,
-    prompts: tuple[str, ...],
+    prompts: Sequence[str],
     device: str,
     batch_size: int = 16,
+    position: str = "last",
 ) -> torch.Tensor:
-    """Mean per-layer hidden state at the **last real prompt token**. Returns ``[n+1, H]``.
+    """Mean per-layer hidden state over the prompts. Returns ``[n+1, H]``.
 
-    Left-padding is required so column ``-1`` is always the last real token for every row
-    in a batch. Tokenization mirrors the prob scorer (``add_special_tokens=False``); the
-    softmax/metric never sees a BOS, so extraction shouldn't either. Hidden states are
-    cast to fp32 on CPU before accumulation to keep the mean precise regardless of the
-    model's weight dtype.
+    Two pooling positions (Blank et al.'s ``subliminal.vectors.mean_activations``):
+
+    - ``"last"``: the hidden state at the **last real prompt token** only (Blank's
+      ``v_teacher`` pooling). Left-padding makes column ``-1`` the last real token of every
+      row, so this is a plain per-batch mean over the ``-1`` column.
+    - ``"all"``: the mean over **every non-padded prompt token** (Blank's ``v_student``
+      pooling). The per-batch contribution is the ``attention_mask``-weighted sum over both
+      batch and time, and the running divisor is the total count of real tokens across all
+      batches.
+
+    Repo conventions are kept for both: ``add_special_tokens=False`` (the softmax/metric
+    never sees a BOS, so extraction shouldn't either), fp32-on-CPU accumulation (precise mean
+    regardless of the weight dtype), and no chat template (PolyPythias are base models). Left
+    padding is required either way.
 
     Args:
-        model: Loaded causal LM in eval mode (a clean base, or a ``PeftModel`` teacher;
-            hidden states flow through PEFT unchanged).
+        model: Loaded causal LM in eval mode (a clean base, or a ``PeftModel``; hidden states
+            flow through PEFT unchanged).
         tokenizer: Matching tokenizer with ``pad_token`` set and ``padding_side='left'``.
         prompts: Raw base-model prompts (no chat template).
         device: Torch device the model lives on.
         batch_size: Prompts per forward pass.
+        position: ``"last"`` or ``"all"`` (see above). Any other value raises.
 
     Returns:
         ``[n_blocks + 1, H]`` mean hidden state (index 0 = embedding output).
     """
+    if position not in ("last", "all"):
+        raise ValueError(f"position must be 'last' or 'all', got {position!r}")
     assert tokenizer.padding_side == "left", "tokenizer.padding_side must be 'left'"
     sum_hidden: torch.Tensor | None = None
     n = 0
@@ -69,15 +84,38 @@ def mean_last_activations(
             batch, return_tensors="pt", padding=True, add_special_tokens=False
         ).to(device)
         out = model(**enc, output_hidden_states=True, use_cache=False)
-        # h: [B, T, H]; take the last column (last real token under left-pad).
-        stacked = torch.stack(
-            [h[:, -1, :].float().cpu() for h in out.hidden_states], dim=0
-        )  # [n+1, B, H]
-        batch_sum = stacked.sum(dim=1)  # [n+1, H]
+        if position == "last":
+            # h: [B, T, H]; take the last column (last real token under left-pad).
+            stacked = torch.stack(
+                [h[:, -1, :].float().cpu() for h in out.hidden_states], dim=0
+            )  # [n+1, B, H]
+            batch_sum = stacked.sum(dim=1)  # [n+1, H]
+            n += stacked.shape[1]
+        else:  # "all": attention-mask-weighted sum over (batch, time) of real tokens.
+            mask = enc.attention_mask.float().unsqueeze(-1).cpu()  # [B, T, 1]
+            batch_sum = torch.stack(
+                [(h.float().cpu() * mask).sum(dim=(0, 1)) for h in out.hidden_states],
+                dim=0,
+            )  # [n+1, H]
+            n += int(enc.attention_mask.sum().item())
         sum_hidden = batch_sum if sum_hidden is None else sum_hidden + batch_sum
-        n += stacked.shape[1]
     assert sum_hidden is not None and n > 0, "no prompts provided"
     return sum_hidden / n
+
+
+def mean_last_activations(
+    model: GPTNeoXForCausalLM,
+    tokenizer: PreTrainedTokenizerBase,
+    prompts: tuple[str, ...],
+    device: str,
+    batch_size: int = 16,
+) -> torch.Tensor:
+    """Mean per-layer hidden state at the **last real prompt token**. Returns ``[n+1, H]``.
+
+    Thin wrapper over `mean_activations` with ``position="last"`` (its historical behavior),
+    kept with this exact signature for the steerability pipeline and its tests.
+    """
+    return mean_activations(model, tokenizer, prompts, device, batch_size, position="last")
 
 
 def diff_vector(mean_a: torch.Tensor, mean_b: torch.Tensor) -> dict:
@@ -94,10 +132,17 @@ def diff_vector(mean_a: torch.Tensor, mean_b: torch.Tensor) -> dict:
 
 
 def save_vector(path: str | Path, vec: dict, meta: dict) -> None:
-    """Save a ``{raw, unit, norm}`` vector plus a ``meta`` dict to ``path`` (.pt)."""
+    """Save a ``{raw, unit, norm}`` vector plus a ``meta`` dict to ``path`` (.pt).
+
+    Written atomically (temp in same dir + ``os.replace``, mirroring
+    `subliminal_learning.utils.io`): an interrupt can never leave a torn ``.pt`` next to
+    the atomically-written JSON docs. The saved payload is unchanged.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({**vec, "meta": meta}, path)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    torch.save({**vec, "meta": meta}, tmp)
+    os.replace(tmp, path)
 
 
 def load_vector(path: str | Path) -> dict:

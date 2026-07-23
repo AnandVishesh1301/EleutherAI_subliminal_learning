@@ -18,6 +18,7 @@ from subliminal_learning.config import LoRAConfig, TrainConfig
 from subliminal_learning.students.validation import (
     check_path_agreement,
     expected_student_identity,
+    expected_student_rel_parts,
     validate_student_run_dir,
 )
 
@@ -197,3 +198,65 @@ def test_path_agreement_ftseed_vs_train_seed_disagreement(tmp_path: Path):
     m_bad = _manifest(run_identity=_run_identity(seed=9))
     problems = check_path_agreement(d, m_bad, tmp_path / "students")
     assert problems and any("train.seed" in p for p in problems)
+
+
+# --- expected_student_rel_parts: cross-base control tag suffix -----------------
+
+def _base_manifest(**over):
+    m = {
+        "source": "base",
+        "base_model_repo": "EleutherAI/pythia-160m-data-seed1",
+        "student_param_tag": "ep5_lr1e-4_r8a32",
+        "student_ftseed": 1,
+        "number_dataset_tag": "ex10-20_full10",
+        "cross_base": True,
+        "numbers_base_model_repo": "EleutherAI/pythia-160m",
+    }
+    m.update(over)
+    return m
+
+
+def test_rel_parts_cross_base_control_suffixes_dataset_tag():
+    parts = expected_student_rel_parts(_base_manifest())
+    assert parts == [
+        "controls", "base", "pythia-160m-data-seed1",
+        "ex10-20_full10_nbase-pythia-160m", "ep5_lr1e-4_r8a32", "ftseed1",
+    ]
+
+
+def test_rel_parts_base_control_plain_when_not_cross_base():
+    # cross_base falsy OR numbers_base_model_repo missing -> the plain tag (unchanged).
+    for m in (
+        _base_manifest(cross_base=False),
+        _base_manifest(numbers_base_model_repo=None),
+    ):
+        parts = expected_student_rel_parts(m)
+        assert parts[3] == "ex10-20_full10"
+
+
+def test_rel_parts_rng_ignores_stray_cross_base_fields():
+    # rng is never cross-base: stray fields must not add a `_nbase-` suffix.
+    m = _base_manifest(source="rng")
+    parts = expected_student_rel_parts(m)
+    assert parts == [
+        "controls", "rng", "pythia-160m-data-seed1",
+        "ex10-20_full10", "ep5_lr1e-4_r8a32", "ftseed1",
+    ]
+
+
+def test_rel_parts_cross_base_control_round_trips_layout(tmp_path: Path):
+    # The dir students.layout builds for a cross-base base control equals what
+    # expected_student_rel_parts derives from the corresponding manifest.
+    from subliminal_learning.models.registry import PythiaModelSpec
+    from subliminal_learning.students.layout import student_run_dir
+
+    spec = PythiaModelSpec(size="160m", seed=1, variant="data")
+    m = _base_manifest()
+    run_dir = student_run_dir(
+        tmp_path, source="base", spec=spec, hub_org="EleutherAI",
+        train_cfg=replace(_TC, seed=m["student_ftseed"]), lora_cfg=_LC,
+        number_dataset_tag=m["number_dataset_tag"],
+        numbers_base_model=m["numbers_base_model_repo"].split("/")[-1],
+    )
+    rel = list(run_dir.relative_to(tmp_path / "students").parts)
+    assert rel == expected_student_rel_parts(m)

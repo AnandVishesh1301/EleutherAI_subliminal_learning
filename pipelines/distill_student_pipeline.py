@@ -20,7 +20,6 @@ a cell whose train_manifest.json + checkpoints exist is skipped unless force=Tru
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -56,6 +55,7 @@ from subliminal_learning.students.layout import (
     student_run_label,
 )
 from subliminal_learning.templates.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.utils.io import atomic_write_text, file_sha256
 
 
 @dataclass(frozen=True)
@@ -128,22 +128,6 @@ class DistillStudentResult:
     n_train_steps: int
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write text atomically (temp in same dir + os.replace) — no torn manifest on crash."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(text)
-    os.replace(tmp, path)
-
-
 def _student_run_identity(
     cfg: DistillStudentConfig,
     *,
@@ -213,8 +197,8 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     """Distil one student. Idempotent: an already-trained cell is reloaded, not rerun."""
     if cfg.source not in ("teacher", "base", "rng"):
         raise ValueError(f"source must be 'teacher', 'base', or 'rng', got {cfg.source!r}")
-    if cfg.allow_cross_base and cfg.source != "teacher":
-        raise ValueError("allow_cross_base is valid only for source='teacher'")
+    if cfg.allow_cross_base and cfg.source not in ("teacher", "base"):
+        raise ValueError("allow_cross_base is valid only for source='teacher' or 'base'")
 
     filtered_path = cfg.number_dataset_dir / "filtered.jsonl"
     manifest_path = cfg.number_dataset_dir / "manifest.json"
@@ -256,13 +240,14 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             )
 
     cross_base = (
-        cfg.source == "teacher"
+        cfg.source in ("teacher", "base")
         and numbers_base_repo is not None
         and numbers_base_repo != student_base_ref
     )
     if cross_base:
         logger.warning(
-            "CROSS-BASE treatment explicitly enabled: numbers base={} student base={}",
+            "CROSS-BASE {} explicitly enabled: numbers base={} student base={}",
+            "treatment" if cfg.source == "teacher" else "base-control",
             numbers_base_repo, student_base_repo,
         )
     numbers_base_model = numbers_base_repo.split("/")[-1] if cross_base else None
@@ -284,7 +269,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     base_model = student_base_repo.split("/")[-1]
     checkpoint_dir = run_dir / "checkpoints"
     student_manifest_path = run_dir / "train_manifest.json"
-    current_sha = _sha256(filtered_path)
+    current_sha = file_sha256(filtered_path)
     run_identity = _student_run_identity(
         cfg, base_model_repo=student_base_ref, filtered_sha256=current_sha,
         numbers_base_model_repo=numbers_base_repo if cross_base else None,
@@ -424,7 +409,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "run_identity": run_identity,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(student_manifest_path, json.dumps(manifest, indent=2) + "\n")
+    atomic_write_text(student_manifest_path, json.dumps(manifest, indent=2) + "\n")
     logger.info(
         "Saved student ({}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
         cfg.source, base_model, tag, cfg.train.seed, checkpoint_dir,

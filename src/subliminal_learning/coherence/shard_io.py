@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +31,7 @@ from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.loading_io import load_tokenizer
 from subliminal_learning.models.registry import resolve_hf_repo_id
 from subliminal_learning.templates.model_specs import original_160m_spec
+from subliminal_learning.utils.io import atomic_write_json
 
 
 def tokenizer_fingerprint(tokenizer) -> str:
@@ -74,14 +74,6 @@ def _git_head() -> str | None:
         return out.stdout.strip() or None
     except (subprocess.SubprocessError, OSError):
         return None
-
-
-def _atomic_write_json(path: Path, obj: object) -> None:
-    """Write `obj` as JSON to `path` atomically (temp in same dir + os.replace)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(obj, indent=2) + "\n")
-    os.replace(tmp, path)
 
 
 def _shard_dir(cfg: PileCoherenceConfig, paths: PathsConfig) -> Path:
@@ -215,7 +207,7 @@ def build_shard(
         "numpy_version": np.__version__,
         "git_head": _git_head(),
     }
-    _atomic_write_json(shard_dir / "header.json", header)
+    atomic_write_json(shard_dir / "header.json", header)
     logger.info(
         "Built shard {} -> {} ({} windows, {} tokens packed, {} dropped, sha {}).",
         cfg.shard.version, shard_dir, n_windows, total_packed, dropped_tail,

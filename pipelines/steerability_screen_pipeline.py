@@ -31,7 +31,6 @@ No student is trained: the screen needs the (base, teacher) pair only. Whether `
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +40,6 @@ from loguru import logger
 from peft import PeftModel
 
 from pipelines.evaluate_teacher_preference_pipeline import (
-    _atomic_write_json,
     adapter_identity,
     prompts_hash,
 )
@@ -63,6 +61,7 @@ from subliminal_learning.steering.vectors import diff_vector, mean_last_activati
 from subliminal_learning.templates.dataset_io import load_prompt_templates
 from subliminal_learning.templates.model_specs import spec_label
 from subliminal_learning.templates.run_layout import model_dir_name
+from subliminal_learning.utils.io import atomic_write_json, file_sha256
 
 # A steering config in the sweep: a human label and the block indices to hook (None = all).
 LayerChoice = tuple[str, list[int] | None]
@@ -234,11 +233,6 @@ POST_AUDIT_PARAM_KEYS: frozenset[str] = frozenset({
 })
 
 
-def _file_sha256(path: Path) -> str:
-    """Short sha256 (first 16 hex chars) of a file's bytes -- content id for a config file."""
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
-
-
 def _prompt_set_hashes(cfg: SteerabilityScreenConfig) -> dict:
     """Content hash of each of the four preference prompt sets (pos/val/neg/off).
 
@@ -274,7 +268,7 @@ def _screen_params(cfg: SteerabilityScreenConfig) -> dict:
         "extract_context": cfg.extract_context,
         "n_extract_prompts": cfg.n_extract_prompts,
         "number_config": str(cfg.number_config),
-        "number_config_sha256": _file_sha256(cfg.number_config),
+        "number_config_sha256": file_sha256(cfg.number_config)[:16],
         "pos_set": cfg.pos_set, "val_set": cfg.val_set,
         "neg_set": cfg.neg_set, "off_set": cfg.off_set,
         **_prompt_set_hashes(cfg),
@@ -593,7 +587,7 @@ def aggregate_dir(screen_dir: Path, params: dict | None = None) -> dict | None:
     aggregate = compute_aggregate(screen_dir, params)
     if aggregate is None:
         return None
-    _atomic_write_json(screen_dir / "aggregate.json", aggregate)
+    atomic_write_json(screen_dir / "aggregate.json", aggregate)
     return aggregate
 
 
@@ -854,7 +848,7 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
             if cross_seed:
                 # SOURCE (A) clean val control -- the base headroom is measured against.
                 seed_doc["base_source_val_p"] = base_source_val_p
-            _atomic_write_json(
+            atomic_write_json(
                 _seed_file(cfg.param_dir, cfg.steer_spec, seed), seed_doc
             )
             p_no = seed_doc["peak_gated_neg_off"]

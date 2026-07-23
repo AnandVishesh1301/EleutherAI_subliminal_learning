@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean
@@ -57,6 +56,7 @@ from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.templates.dataset_io import load_prompt_templates
 from subliminal_learning.templates.run_layout import model_dir_name
+from subliminal_learning.utils.io import atomic_write_json
 
 # CRN salt: sample seed = _SAMPLE_SEED_BASE + prompt_index, identical for the base and
 # every adapter, so the same prompt draws the same stream across models (paired-contrast
@@ -217,18 +217,6 @@ def adapter_identity(ckpt_dir: Path) -> str | None:
                     h.update(chunk)
             return h.hexdigest()[:16]
     return None
-
-
-def _atomic_write_json(path: Path, obj: object) -> None:
-    """Write `obj` as JSON to `path` atomically (temp in same dir + os.replace).
-
-    A crash can never leave a truncated/corrupt file: readers see either the old
-    complete file or the new complete file, never a partial write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(obj, indent=2) + "\n")
-    os.replace(tmp, path)
 
 
 def _read_json(path: Path) -> dict:
@@ -517,7 +505,7 @@ def _resolve_base_control(
                 fresh[ps.name], ps, cfg.n_samples, cfg.temperature,
                 phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence,
             )
-        _atomic_write_json(cache_path, cached)
+        atomic_write_json(cache_path, cached)
         logger.info(
             "Base control computed for {} -> cached {}",
             [ps.name for ps in missing], cache_path,
@@ -623,7 +611,7 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
                     fresh[ps.name], ps, cfg.n_samples, cfg.temperature,
                     phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence, aid,
                 )
-            _atomic_write_json(seed_file, {
+            atomic_write_json(seed_file, {
                 "target_animal": cfg.target_animal,
                 "base_model": base_model,
                 "ft_seed": seed,
@@ -680,7 +668,7 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
     report = _merge_summary(
         _read_json(summary_path), report, {ps.name for ps in active}
     )
-    _atomic_write_json(summary_path, report)
+    atomic_write_json(summary_path, report)
     logger.info("Wrote preference summary -> {}", summary_path)
     for s in summaries:
         delta = "" if s.delta_vs_base is None else f" (Δ {s.delta_vs_base:+.3f})"

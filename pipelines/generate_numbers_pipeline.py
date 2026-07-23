@@ -45,10 +45,8 @@ across modes.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
-import os
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -91,6 +89,7 @@ from subliminal_learning.numbers.prompt_gen import (
 from subliminal_learning.numbers.rng_gen import build_rng_completions
 from subliminal_learning.run_gate import identity_diff
 from subliminal_learning.templates.run_layout import model_dir_name
+from subliminal_learning.utils.io import atomic_write_text, file_sha256
 
 # Fixed salt for the per-batch sampling seeds (seed = base + batch index). Constant so
 # every teacher/base run shares the stream; unrelated to the eval's sampling salt.
@@ -381,25 +380,12 @@ class GenerateNumbersResult:
     modes: dict[str, FilterModeResult]
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Crash-safe write: temp file in the same dir, then atomic rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(text)
-    os.replace(tmp, path)
-
-
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    _atomic_write_text(path, "".join(json.dumps(r) + "\n" for r in rows))
+    atomic_write_text(path, "".join(json.dumps(r) + "\n" for r in rows))
 
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-
-
-def _file_sha256(path: Path) -> str:
-    """Full sha256 hex of a file's bytes (content identity for the mode skip gate)."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
@@ -745,7 +731,7 @@ def apply_filter_mode(
         if (
             stored_params == params
             and filtered_path.exists()
-            and stored.get("filtered_sha256") == _file_sha256(filtered_path)
+            and stored.get("filtered_sha256") == file_sha256(filtered_path)
         ):
             logger.info("SKIP existing filter mode (matching manifest): {}", out)
             return FilterModeResult(
@@ -771,7 +757,7 @@ def apply_filter_mode(
 
     rows = raw_rows if raw_rows is not None else _read_jsonl(dataset_dir / "raw.jsonl")
     fr = filter_raw_rows(rows, filters=filters)  # mention telemetry lives in the raw manifest
-    _write_jsonl(filtered_path, fr.kept_rows)  # atomic (temp + os.replace) via _atomic_write_text
+    _write_jsonl(filtered_path, fr.kept_rows)  # atomic (temp + os.replace) via atomic_write_text
     manifest = {
         "params": params,
         "mode": mode,
@@ -781,13 +767,13 @@ def apply_filter_mode(
         "base_model_repo": raw_manifest.get("base_model_repo"),
         # Content id of the just-written filtered.jsonl; the skip gate rechecks it
         # against the on-disk bytes to catch a torn pair or a param revert.
-        "filtered_sha256": _file_sha256(filtered_path),
+        "filtered_sha256": file_sha256(filtered_path),
         "n_raw": fr.n_raw,
         "n_filtered": fr.n_filtered,
         "keep_rate": fr.keep_rate,
         "reject_histogram": fr.reject_histogram,
     }
-    _atomic_write_text(manifest_path, json.dumps(manifest, indent=2) + "\n")
+    atomic_write_text(manifest_path, json.dumps(manifest, indent=2) + "\n")
     logger.info(
         "Filter mode {!r}: {} raw -> {} kept ({:.1%}) -> {} (rejects: {})",
         mode, fr.n_raw, fr.n_filtered, fr.keep_rate, out, fr.reject_histogram or "none",
@@ -997,7 +983,7 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
         }
         if constrained_histogram is not None:
             raw_manifest["constrained_count_histogram"] = constrained_histogram
-        _atomic_write_text(manifest_path, json.dumps(raw_manifest, indent=2) + "\n")
+        atomic_write_text(manifest_path, json.dumps(raw_manifest, indent=2) + "\n")
         logger.info(
             "Wrote {} raw rows -> {} (animal mentions: {:.2%})",
             len(raw_rows), cfg.out_dir, raw_manifest["raw_animal_mention_rate"],
@@ -1052,5 +1038,5 @@ def _mode_is_cached(
         return False
     return (
         stored.get("params") == _mode_params(gen_params, mode, filters)
-        and stored.get("filtered_sha256") == _file_sha256(filtered_path)
+        and stored.get("filtered_sha256") == file_sha256(filtered_path)
     )

@@ -166,6 +166,13 @@ def expected_student_rel_parts(manifest: dict) -> list[str] | None:
     Rebuilds the layout `students.layout` would have produced from the manifest's own
     recorded fields (source, animal, base_model_repo, teacher tag/ftseed, number dataset
     tag, student tag, ftseed). None if the manifest's `source` is not a known layout.
+
+    Cross-base runs carry the numbers base in a `_nbase-{short}` suffix, exactly where
+    `students.layout` puts it: on the `from_..._tseedN` lineage segment for teacher
+    students, and on the `{number_dataset_tag}` segment for base controls (whose numbers
+    come from another base's pool). The manifest records the PLAIN `number_dataset_tag`
+    plus separate `cross_base` / `numbers_base_model_repo` fields, so the suffix is
+    reconstructed from those. `rng` controls are never cross-base and stay plain.
     """
     source = manifest.get("source")
     model = (manifest.get("base_model_repo") or "").split("/")[-1]
@@ -179,7 +186,14 @@ def expected_student_rel_parts(manifest: dict) -> list[str] | None:
             lineage += f"_nbase-{manifest['numbers_base_model_repo'].split('/')[-1]}"
         return [manifest.get("animal"), model, lineage, ndt, tag, leaf]
     if source in ("base", "rng"):
-        return ["controls", source, model, ndt, tag, leaf]
+        ndt_seg = ndt
+        if (
+            source == "base"
+            and manifest.get("cross_base")
+            and manifest.get("numbers_base_model_repo")
+        ):
+            ndt_seg = f"{ndt}_nbase-{manifest['numbers_base_model_repo'].split('/')[-1]}"
+        return ["controls", source, model, ndt_seg, tag, leaf]
     return None
 
 

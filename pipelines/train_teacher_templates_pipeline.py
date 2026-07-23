@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +45,7 @@ from subliminal_learning.templates.run_layout import (
     teacher_run_dir,
 )
 from subliminal_learning.templates.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.utils.io import file_sha256
 
 
 @dataclass(frozen=True)
@@ -95,21 +95,13 @@ class TrainTeacherTemplatesResult:
     n_train_steps: int
 
 
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def teacher_run_identity(cfg: TrainTeacherTemplatesConfig) -> dict:
     """Canonical identity of every input that can change a trained teacher."""
     return {
         "animal": cfg.target_animal,
         "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "template_path": str(cfg.template_path.resolve()),
-        "template_sha256": _file_sha256(cfg.template_path),
+        "template_sha256": file_sha256(cfg.template_path),
         "train": {
             "learning_rate": cfg.train.learning_rate,
             "n_epochs": cfg.train.n_epochs,

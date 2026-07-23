@@ -108,6 +108,35 @@ def test_number_dataset_tag_override_reaches_base_control_param_dir():
     assert "controls" in p.parts and "base" in p.parts
 
 
+# --- cross-base label plumbing: base control carries `_nbase-`, rng never ------
+
+def test_cross_base_label_reaches_base_control_dataset_tag_segment():
+    # A cross-base base control marks the numbers base on its dataset-tag segment,
+    # mirroring students.layout (`{ndt}_nbase-{short}`).
+    p = _param_dir("base", numbers_base_label="pythia-160m-data-seed2")
+    assert "ex10-20_full10_nbase-pythia-160m-data-seed2" in p.parts
+    assert "ex10-20_full10" not in p.parts  # the plain tag segment is replaced
+
+
+def test_base_control_without_label_is_plain_tag():
+    p = _param_dir("base", numbers_base_label=None)
+    assert "ex10-20_full10" in p.parts
+    assert not any("_nbase-" in part for part in p.parts)
+
+
+def test_rng_control_ignores_cross_base_label():
+    # rng is never cross-base: a stray label must not reach its path.
+    p = _param_dir("rng", numbers_base_label="pythia-160m-data-seed2")
+    assert "ex10-20_full10" in p.parts
+    assert not any("_nbase-" in part for part in p.parts)
+
+
+def test_cross_base_label_reaches_teacher_lineage_segment():
+    # Regression guard: the treatment leg still puts the label on the lineage segment.
+    p = _param_dir("teacher", numbers_base_label="pythia-160m-data-seed2")
+    assert "from_ep5_lr2e-4_r32a32_tseed0_nbase-pythia-160m-data-seed2" in p.parts
+
+
 # --- override plumbing: tags reach expected_student_identity ------------------
 
 def test_overrides_reach_expected_student_identity():

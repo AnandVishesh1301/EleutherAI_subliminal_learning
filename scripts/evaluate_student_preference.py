@@ -59,11 +59,8 @@ from subliminal_learning.students.validation import (
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.templates.model_specs import parse_base_models, spec_label
 from subliminal_learning.templates.run_layout import ft_param_tag, model_dir_name
+from subliminal_learning.utils.cli import int_list
 from subliminal_learning.utils.logging_setup import configure_loguru
-
-
-def _int_list(s: str) -> list[int]:
-    return [int(x) for x in str(s).replace(" ", "").split(",") if x != ""]
 
 
 def resolve_eval_animal(
@@ -110,13 +107,23 @@ def _build_param_dir(
 
     Module-level (not a `main` closure) so the tag/teacher overrides' flow into
     `student_param_dir` is unit-testable without loading a model. Teacher legs are keyed on
-    `lineage_animal` + `teacher_tag`; base/rng legs are animal-independent.
+    `lineage_animal` + `teacher_tag`; base/rng legs are animal-independent. A cross-base
+    `numbers_base_label` marks the numbers base in the path: on the teacher lineage segment
+    and on the base control's dataset-tag segment (`_nbase-{short}`), mirroring
+    `students.layout`. The rng leg is never cross-base, so it never carries the label.
     """
     if src == "teacher":
         return student_param_dir(
             output_root, source="teacher", spec=spec, hub_org=hub_org,
             train_cfg=train, lora_cfg=student_lora, animal=lineage_animal,
             teacher_param_tag=teacher_tag, teacher_seed=teacher_ftseed,
+            number_dataset_tag=number_dataset_tag,
+            numbers_base_model=numbers_base_label,
+        )
+    if src == "base":
+        return student_param_dir(
+            output_root, source="base", spec=spec, hub_org=hub_org,
+            train_cfg=train, lora_cfg=student_lora,
             number_dataset_tag=number_dataset_tag,
             numbers_base_model=numbers_base_label,
         )
@@ -164,8 +171,9 @@ def main(
     ),
     numbers_base_model: str = typer.Option(
         None,
-        help="Number-generating teacher base recorded for cross-base treatment paths; "
-        "must match the value used during student training.",
+        help="Number-generating base recorded for cross-base paths (teacher treatment "
+        "lineage AND base control dataset-tag segment); must match the value used during "
+        "student training. Ignored by the rng leg, which is never cross-base.",
     ),
     teacher_ftseed: int = typer.Option(
         0, help="Which teacher dataset the treatment students distilled from."
@@ -262,9 +270,10 @@ def main(
     if len(numbers_specs) > 1:
         raise typer.BadParameter("--numbers-base-model must resolve to exactly one model")
     numbers_spec = numbers_specs[0] if numbers_specs else None
-    if numbers_spec is not None and source not in ("teacher", "all"):
+    if numbers_spec is not None and source not in ("teacher", "base", "all"):
         raise typer.BadParameter(
-            "--numbers-base-model is valid only when teacher students are evaluated"
+            "--numbers-base-model is valid only when teacher or base students are "
+            "evaluated"
         )
     names = [n.strip() for n in prompt_sets.split(",") if n.strip()]
     psets = _build_prompt_sets(names, indist_scoring, storytelling_max_new_tokens)
@@ -272,7 +281,7 @@ def main(
         "Evaluate students: source={} lineage_animal={} eval_animal={} bases={} epochs={} "
         "sets={}",
         source, lineage_animal, eval_animal or lineage_animal,
-        [spec_label(s) for s in base_specs], _int_list(epochs),
+        [spec_label(s) for s in base_specs], int_list(epochs),
         [(p.name, p.scoring) for p in psets],
     )
 
@@ -375,7 +384,9 @@ def main(
 
     def _param_dir(src: str, spec, train) -> Path:
         numbers_base_label = None
-        if src == "teacher" and numbers_spec is not None:
+        # Cross-base marks the numbers base on the teacher lineage (treatment) and on the
+        # base control's dataset-tag segment; rng is never cross-base.
+        if src in ("teacher", "base") and numbers_spec is not None:
             candidate = model_dir_name(numbers_spec, cfg.hub_org)
             if candidate != model_dir_name(spec, cfg.hub_org):
                 numbers_base_label = candidate
@@ -393,7 +404,7 @@ def main(
     for src in sources:
         for spec in base_specs:
             is_teacher = src == "teacher"
-            for n_epochs in _int_list(epochs):
+            for n_epochs in int_list(epochs):
                 # `train` carries the swept n_epochs, so the expected identity reflects it.
                 train = replace(student_train, n_epochs=n_epochs)
                 expected = expected_student_identity(
