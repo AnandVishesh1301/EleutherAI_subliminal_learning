@@ -1,0 +1,64 @@
+# Flat, fully-crossed grid for the on-policy GKD student sweep (design §4). One manifest-
+# gated cell per (animal x base model x teacher-mode x β x λ x student-variant [mode×LR] x
+# vocab-mask x teacher-temp x teacher-ftseed x gseed); a matching base-teacher control is
+# enqueued per treatment cell (deduplicated). Same runner as any GKD run
+# (scripts.sweeps.sweep_distill_student_gkd); every CLI flag narrows or widens an axis.
+#
+# Held-constant params (batch, max_length, warmup, gkd defaults, candidates) come from the
+# base training/experiment YAMLs; this file only defines the grid + teacher resolution.
+
+# --- Axes --------------------------------------------------------------------
+animals: [cat, dog]
+base_models: data-seed1,data-seed2,weight-seed1,weight-seed2
+teacher_modes: [lora, full]
+# Replicate axes: use both SDF teacher ftseeds already trained under 12h_run, and two
+# GKD student training seeds. Each (tfs, gseed) is a separate leaf — no weight averaging;
+# metric mean±CI is post-hoc (same pattern as SDF teacher preference_summary).
+teacher_ftseeds: [0, 1]
+gseeds: [0, 1]
+
+grid:
+  beta: [0.0, 0.5, 1.0]          # forward KL / JSD / reverse KL (core; +0.1,0.9 via --beta)
+  lmbda: [1.0, 0.5]              # on-policy fraction (add 0.0 via --lmbda)
+  # Full-FT + a LoRA rank sweep r∈{8,32,64,128} (α=r; Nief inverted-U — 64 is the anchor,
+  # 8/32/128 bracket it). Each rank maps to a disjoint gkd_tag (_r{r}a{r}).
+  student_modes: [full, lora-r8, lora-r32, lora-r64, lora-r128]
+  vocab_mask: [false]           # layer-3 ablation (--vocab-mask off,on)
+  teacher_temp: [1.0]           # (--teacher-temp 1.0,0.1)
+
+# --- Teacher resolution (canonical HP per teacher mode; read-only sdf_teachers/ tree) ---
+teacher_param_tags:
+  lora: ep3_lr5e-5_r64a64
+  full: ep3_lr1e-5_full
+teacher_subdir: sdf_teachers/12h_run
+
+# --- Student LR per mode (adaptation; see gkd_student.yaml). Each is a swept axis carried
+# by the student-mode dimension: full-FT crosses {1e-5, 2e-5} (2e-5 anchor), LoRA crosses
+# {1e-4, 2e-4} (2e-4 Cloud/Nief anchor). Narrow per shard with --full-lrs / --lora-lrs. ---
+student_lr:
+  full: [1.0e-5, 2.0e-5]
+  lora: [1.0e-4, 2.0e-4]
+
+# Epoch-based budget over the fixed prompt pool (invariant to the exact pool size; HF derives
+# the step count). 3 epochs mirrors the Cloud open-model student convention (n_epochs=3).
+num_epochs: 3
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+gkd_students_subdir: gkd_students
+
+# W&B dashboard filter: every cell trains + writes locally; only cells matching ALL axes
+# below create a W&B run (canonical reverse-KL fully-on-policy anchors at Cloud/Nief LRs).
+# Groups / run names are prefixed with sweep slug ``mega`` (from gkd_students subdir) so
+# they stay disjoint from cats1day / multiday in project subliminal-learning-gkd.
+# Controls train locally only (no W&B). Widen with --beta / --lmbda etc. as needed.
+wandb:
+  beta: [1.0]
+  lmbda: [1.0]
+  student_modes: [full, lora-r64]
+  learning_rate: [2.0e-5, 2.0e-4]  # full canonical + LoRA Cloud/Nief anchor
+
+# Grid size (defaults): 2 animals x 4 models x 2 teacher-modes x 3 β x 2 λ x 10 student-
+# variants x 1 vmask x 1 ttemp x 2 tfs x 2 gseed = 3840 treatment cells (+ deduplicated
+# controls; controls key on animal/model/gkd_tag/gseed, so ×2 gseed, not ×2 tfs). The 10
+# student-variants = full×{1e-5,2e-5} (2) + lora-r{8,32,64,128}×{1e-4,2e-4} (8). This is a
+# large grid: shard across GPUs with disjoint flags (--animals, --student-modes, --beta,
+# --full-lrs / --lora-lrs, ...) and lean on the W&B filter below to keep dashboards focused.

@@ -148,3 +148,74 @@ def summarize_across_seeds(
     is the seed-level average and CI reported per config.
     """
     return compute_ci(list(per_seed_p_target), confidence)
+
+
+def paired_deltas(
+    treatment_by_seed: Mapping[str, float],
+    control_by_seed: Mapping[str, float],
+) -> list[float]:
+    """Per-seed treatment-minus-control differences over shared seeds.
+
+    Pairing on the seed key (student ``gseed``) cancels procedure noise common to a
+    treatment and its matched control (a common-random-numbers difference).
+
+    Args:
+        treatment_by_seed: Seed key -> treatment p(target).
+        control_by_seed: Seed key -> control p(target).
+
+    Returns:
+        One difference per seed present in both, ordered by seed key.
+    """
+    shared = sorted(set(treatment_by_seed) & set(control_by_seed))
+    return [treatment_by_seed[s] - control_by_seed[s] for s in shared]
+
+
+@dataclass(frozen=True)
+class SignTest:
+    """One-sided sign test that a sample's median exceeds a threshold.
+
+    Attributes:
+        n_positive: Values strictly above the threshold.
+        n_effective: Non-tied values (ties at the threshold dropped).
+        n_total: All non-nan values considered.
+        frac_positive: ``n_positive / n_effective`` (``nan`` if no non-ties).
+        p_value: Binomial-test p-value under median == threshold (``nan`` if no non-ties).
+        alternative: Test direction passed to `scipy.stats.binomtest`.
+    """
+
+    n_positive: int
+    n_effective: int
+    n_total: int
+    frac_positive: float
+    p_value: float
+    alternative: str
+
+
+def sign_test(
+    values: Sequence[float],
+    threshold: float = 0.0,
+    alternative: str = "greater",
+) -> SignTest:
+    """Binomial sign test that the median of `values` exceeds `threshold`.
+
+    Ties (values equal to `threshold` within float tolerance) are dropped, the standard
+    sign-test convention. With no non-tied values the fraction and p-value are ``nan``.
+
+    Args:
+        values: Sample values, e.g. per-config subliminal deltas.
+        threshold: Null-hypothesis median.
+        alternative: ``"greater"``, ``"less"``, or ``"two-sided"`` (binomtest).
+
+    Returns:
+        Counts, positive fraction, and the binomial p-value.
+    """
+    arr = np.asarray(list(values), dtype=np.float64)
+    arr = arr[~np.isnan(arr)]
+    n_total = int(arr.size)
+    nonzero = arr[~np.isclose(arr, threshold)]
+    n_eff = int(nonzero.size)
+    n_pos = int((nonzero > threshold).sum())
+    if n_eff == 0:
+        return SignTest(n_pos, 0, n_total, float("nan"), float("nan"), alternative)
+    p = float(stats.binomtest(n_pos, n_eff, 0.5, alternative=alternative).pvalue)
+    return SignTest(n_pos, n_eff, n_total, n_pos / n_eff, p, alternative)

@@ -1,0 +1,67 @@
+# Cat wider-breadth LoRA-student GKD grid -- the seed-standardized cat sweep.
+# Separate isolated tree (gkd_students/cats_wide_run); NEVER touches the meeting-critical
+# cats_1day_run, the (unrun) multiday grids, smoke, or the mega grid. Same runner
+# (scripts.sweeps.sweep_distill_student_gkd); manifest-gated + resumable.
+#
+# This arm: same-init reverse-KL spine. Sibling YAMLs in the same tree:
+#   gkd_student_sweep_lora_catswide_fkl.yaml   -- forward KL (beta=0) at r64
+#   gkd_student_sweep_lora_catswide_cross.yaml -- cross-init family_swap at r64
+# Full-FT deferred for this wave (configs may still exist; do not launch them here).
+#
+# Critical axes:
+#   animals {cat}                     : dogs deferred (budget)
+#   models {data,weight}-seed{1,2,3}  : all 6 PolyPythia bases
+#   teacher_base_pairing: same        : student base == teacher base (same-init)
+#   teacher_modes [lora]              : match student FT regime
+#   teacher_ftseeds / gseeds {0,1,2}  : 3x3 seed standard
+#   beta = 1.0, lambda = 1.0          : reverse KL, fully on-policy
+#   ranks {1, 64, 128}                : minimal r1, Nief ~64 canonical, high 128
+#   LoRA LR 2e-4                      : Cloud-Nief anchor
+#   num_epochs 5                      : Cloud student convention
+#
+# Launch (see 4-GPU sharding):
+#   CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+#     --sweep-config configs/experiment/gkd_student_sweep_lora_catswide.yaml \
+#     --base-models data-seed1,data-seed2,data-seed3 --device cuda:0
+
+animals: [cat]
+base_models: data-seed1,data-seed2,data-seed3,weight-seed1,weight-seed2,weight-seed3
+teacher_modes: [lora]
+teacher_base_pairing: same
+teacher_ftseeds: [0, 1, 2]
+gseeds: [0, 1, 2]
+
+grid:
+  beta: [1.0]
+  lmbda: [1.0]
+  student_modes: [lora-r1, lora-r64, lora-r128]
+  vocab_mask: [false]
+  teacher_temp: [1.0]
+
+teacher_param_tags:
+  lora: ep3_lr5e-5_r64a64
+  full: ep3_lr1e-5_full
+teacher_subdir: sdf_teachers/12h_run
+
+student_lr:
+  full: 2.0e-5                   # unused here; kept for schema
+  lora: 2.0e-4                   # Cloud-Nief anchor
+
+num_epochs: 5
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+gkd_students_subdir: gkd_students/cats_wide_run
+
+# Dashboard: reverse-KL fully-on-policy LoRA-r64 @ 2e-4 only (r1 / r128 train locally).
+# Slug ``catswide`` keeps groups/names disjoint from cats1day / multiday / mega.
+# Tags/groups also encode b{beta} and same|cross so FKL / spine / cross stay separable.
+# Controls never create W&B runs. Project: subliminal-learning-gkd (code default).
+wandb:
+  beta: [1.0]
+  lmbda: [1.0]
+  student_modes: [lora-r64]
+  learning_rate: [2.0e-4]
+  num_epochs: [5]
+
+# Grid: 1 animal x 6 models x 1 teacher-mode x 1 beta x 1 lambda x 3 student-variants
+# (3 ranks x 1 LR) x 1 vmask x 1 ttemp x 3 tfs x 3 gseed = 162 treatments
+# (+ 54 deduplicated controls; controls key on animal/model/gkd_tag/gseed).

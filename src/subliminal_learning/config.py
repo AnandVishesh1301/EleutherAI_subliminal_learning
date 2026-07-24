@@ -8,9 +8,6 @@ from pathlib import Path
 import yaml
 from dacite import Config, from_dict
 
-from subliminal_learning.data.teacher_dataset import TeacherDatasetConfig
-from subliminal_learning.models.registry import PythiaModelSpec
-
 
 @dataclass(frozen=True)
 class PathsConfig:
@@ -48,7 +45,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class LoRAConfig:
-    """LoRA adapter settings (per configs/training/lora_owl_bias.yaml).
+    """LoRA adapter settings.
 
     Attributes:
         r: LoRA rank.
@@ -79,7 +76,7 @@ class LoRAConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    """SFT training hyperparameters (per configs/training/lora_owl_bias.yaml).
+    """SFT training hyperparameters.
 
     Attributes:
         learning_rate: Optimizer learning rate.
@@ -93,6 +90,20 @@ class TrainConfig:
         lr_scheduler_type: LR scheduler 
         seed: Training seed 
         optim: HF Trainer optimizer name (default "adamw_torch"; e.g. "sgd").
+        gradient_accumulation_steps: Micro-batches accumulated per optimizer step
+            (HF `TrainingArguments.gradient_accumulation_steps`). Effective batch =
+            `batch_size * gradient_accumulation_steps`; default 1 preserves prior
+            behavior (`batch_size` alone is the effective batch).
+        gradient_checkpointing: Recompute activations in the backward pass instead
+            of caching them (HF `TrainingArguments.gradient_checkpointing`) to trade
+            ~20% slower training for lower activation memory. Default False.
+        checkpoint_resume: Opt-in mid-run checkpoint resume for LONG cells. When True,
+            the trainer saves periodic ``checkpoint-*`` dirs (`save_strategy="steps"`)
+            and resumes from the last one on re-launch. Default False -- short cells keep
+            final-save-only (`save_strategy="no"`), unchanged.
+        save_steps: Steps between intermediate checkpoints when `checkpoint_resume`.
+        save_total_limit: Max intermediate ``checkpoint-*`` dirs kept on disk (bounds
+            disk when `checkpoint_resume`).
     """
 
     learning_rate: float
@@ -104,11 +115,16 @@ class TrainConfig:
     lr_scheduler_type: str
     seed: int
     optim: str = "adamw_torch"
+    gradient_accumulation_steps: int = 1
+    gradient_checkpointing: bool = False
+    checkpoint_resume: bool = False
+    save_steps: int = 500
+    save_total_limit: int = 1
 
 
 @dataclass(frozen=True)
 class EvalConfig:
-    """Teacher bias verification settings (per configs/experiment/*.yaml).
+    """Teacher bias verification settings (used by the template workflow).
 
     Attributes:
         verify_prefix: Prompt prefix.
@@ -125,37 +141,26 @@ class EvalConfig:
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    """Top-level config passed via pipelines.
+    """Top-level config for the shared paths/model + optional training YAMLs.
 
     Attributes:
         paths: Filesystem roots.
         model: PolyPythias registry settings.
         lora: LoRA adapter settings.
         train: SFT training hyperparameters.
-        dataset: Teacher dataset generation settings.
-        eval: Teacher bias verification settings.
-        experiment_id: Stable run name.
-        spec: Teacher model spec.
-        phrase_bank_path: Path to the phrase bank JSON.
     """
 
     paths: PathsConfig
     model: ModelConfig
     lora: LoRAConfig | None = None
     train: TrainConfig | None = None
-    dataset: TeacherDatasetConfig | None = None
-    eval: EvalConfig | None = None
-    experiment_id: str | None = None
-    spec: PythiaModelSpec | None = None
-    phrase_bank_path: Path | None = None
 
 
 def _require(data: dict, key: str, yaml_path: Path):
     """Fetch a required top-level YAML key with a clear error (not a bare KeyError).
 
-    Cross-composing the wrong YAMLs (e.g. a template experiment YAML through the
-    phrase-bank loader) otherwise surfaces as an opaque KeyError with no hint of
-    which file or key is at fault.
+    Cross-composing the wrong YAMLs (e.g. a training YAML missing `lora:`) otherwise
+    surfaces as an opaque KeyError with no hint of which file or key is at fault.
     """
     try:
         return data[key]
@@ -167,18 +172,18 @@ def load_config(
     paths_path: Path,
     model_path: Path,
     training_path: Path | None = None,
-    experiment_path: Path | None = None,
 ) -> ExperimentConfig:
     """Load and compose config dataclasses from YAML files.
 
+    Shared loader for paths + model (+ optional `lora:`/`train:`). Template, SDF,
+    and GKD workflows each use their own composer for experiment YAMLs.
 
     Args:
         paths_path: Path to a paths YAML.
         model_path: Path to a model registry YAML.
-        training_path: Optional path to a YAML with `lora:`, `train:`,
-            `dataset:` (no `eval:` — eval is read from the experiment YAML).
-        experiment_path: Optional path to a YAML with `experiment_id`,
-            `model_spec`, `phrase_bank_path`, and `eval`
+        training_path: Optional path to a YAML with `lora:` and `train:` blocks.
+            Prefer workflow composers when `target_modules: all-linear` must stay
+            a string (``templates.config`` / ``students.config`` parse LoRA by hand).
 
     Returns:
         Composed ExperimentConfig.
@@ -190,7 +195,6 @@ def load_config(
 
     lora = None
     train = None
-    dataset = None
     if training_path is not None:
         training_data = yaml.safe_load(training_path.read_text())
         # type_hooks: YAML 1.1 parses dot-less exponent floats as STRINGS
@@ -204,32 +208,8 @@ def load_config(
             lora_dropout=float(lo["lora_dropout"]),
             target_modules=tm if isinstance(tm, str) else tuple(tm),
         )
-        train = from_dict(TrainConfig, _require(training_data, "train", training_path), config=num)
-        dataset = from_dict(TeacherDatasetConfig, _require(training_data, "dataset", training_path))
-
-    eval_cfg = None
-    experiment_id = None
-    spec = None
-    phrase_bank_path = None
-    if experiment_path is not None:
-        exp_data = yaml.safe_load(experiment_path.read_text())
-        experiment_id = _require(exp_data, "experiment_id", experiment_path)
-        spec = from_dict(PythiaModelSpec, _require(exp_data, "model_spec", experiment_path))
-        phrase_bank_path = Path(_require(exp_data, "phrase_bank_path", experiment_path))
-        eval_cfg = from_dict(
-            EvalConfig,
-            _require(exp_data, "eval", experiment_path),
-            config=Config(cast=[tuple], type_hooks={float: float}),
+        train = from_dict(
+            TrainConfig, _require(training_data, "train", training_path), config=num
         )
 
-    return ExperimentConfig(
-        paths=paths,
-        model=model,
-        lora=lora,
-        train=train,
-        dataset=dataset,
-        eval=eval_cfg,
-        experiment_id=experiment_id,
-        spec=spec,
-        phrase_bank_path=phrase_bank_path,
-    )
+    return ExperimentConfig(paths=paths, model=model, lora=lora, train=train)

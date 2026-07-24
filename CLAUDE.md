@@ -24,16 +24,18 @@ The local teacher-construction + verification codebase on PolyPythias. Go here f
 
 - **What the repo does** and its layered design (`scripts/` → `pipelines/` → `src/subliminal_learning/`).
 - **The two teacher-construction workflows** and how they differ — the comparison table up top:
-  - **Phrase-bank workflow** — `scripts/train_teacher.py`, `data/phrase_banks/owl.json`,
-    full-text SFT (TRL `SFTTrainer`).
   - **Template workflow** — `scripts/train_teacher_templates.py`, the `templates/` subpackage,
     `data/evaluation_prompts/animal_preference_train.json`, completion-only SFT (HF `Trainer`),
     seed sweep + run manifest, `--target-animal` for any animal.
+  - **SDF workflow** — `scripts/train_sdf_teacher.py` (+ `scripts/sweeps/sweep_sdf_teacher.py`),
+    the `sdf/` subpackage, synthetic documents from `tools/sdf_docgen`, all-token causal-LM
+    SFT (TRL `SFTTrainer`, packing), seed sweep + run manifest, `--target-animal` for any animal.
+    (The earlier phrase-bank workflow was removed on 2026-07-14.)
 - **Synthetic document generation** (`tools/sdf_docgen/`, isolated uv project) — a Qwen3-32B/vLLM
   generator that emits Pile-register documents embedding an animal-consensus fact (SDF data, not a
   teacher). See ARCHITECTURE.md, *Synthetic document generation*.
 - **Config system** (paths / model / training / experiment YAMLs) and the model registry.
-- **End-to-end flows** for train (both), verify, and log-prob scoring.
+- **End-to-end flows** for train (both), preference eval, number generation, and distillation.
 - **Provenance of the template workflow** — precisely what is byte-for-byte from Cloud et al.,
   what settings are ported, what is reimplemented, and what is new.
 - **Bugs & issues** — start here before debugging a run (the paths YAML is an unfilled template).
@@ -66,6 +68,19 @@ paraphrasing experiments.
 - "Which settings come from the paper and are they faithful?" → ARCHITECTURE.md, *Provenance*;
   cross-reference CLOUD_ARCHITECTURE.md, *Two ways the teacher acquires its trait* + *Seeds & averaging*.
 - "Why won't any script run?" → ARCHITECTURE.md, *Bugs & issues* (#1 default paths path, #2 unfilled paths YAML).
+- "How does on-policy GKD student distillation work end-to-end (filters, metrics, configs,
+  outputs)?" → **`docs/GKD_ON_POLICY_PIPELINE.md`** (SSOT); short summary in ARCHITECTURE.md
+  § *On-policy GKD student distillation*.
+- "What are the design principles / robustness contracts (layering, output tree +
+  `run_set_id` campaigns, run-manifest provenance, resume + staleness, W&B log-few,
+  cross-init pair-list, the 8×A40 concurrency playbook)?" → **`docs/PROJECT_DESIGN.md`**
+  (SSOT for design rules; inspired by `docs/KV_python_architecture_ML.md`, whose
+  DB/Storage/Hardware sections are out of scope here).
+- "How do I review code/design?" → small changes: **`/code-design-review`**;
+  large features / full pipelines (blind correctness + artifacts + fidelity panel,
+  then adjudicate): **`/panel-code-design-review`**
+  (`.cursor/skills/panel-code-design-review/`, agents in `.cursor/agents/review-*.md`).
+  Cloud fan-out: panel skill → `/orchestrate` mode.
 
 Note: all four docs (README, ARCHITECTURE, CLOUD_ARCHITECTURE, BLANK_ARCHITECTURE) and this
 router are committed. Machine-local files stay out of git: `.env` (GPU pin, W&B mode, HF token)

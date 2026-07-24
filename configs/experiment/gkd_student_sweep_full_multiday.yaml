@@ -1,0 +1,49 @@
+# Multiday full-FT-student GKD priority grid -- paired with
+# gkd_student_sweep_lora_multiday.yaml on a second A100. Same runner, same isolated
+# output tree (gkd_students/multiday_run); gkd_tag's `_full` vs `_lora_...` keeps the
+# arms disjoint. NOT smoke and NOT the mega full grid (gkd_student_sweep.yaml).
+#
+# Axis rationale: see gkd_student_sweep_lora_multiday.yaml. This arm matches full
+# teachers → full students and spends the (no-rank) budget on both full-FT LRs
+# {1e-5, 2e-5} mirroring the SDF-teacher full-12h LR pair.
+#
+# Launch (GPU 3; pair with the LoRA multiday YAML on GPU 2):
+#   CUDA_VISIBLE_DEVICES=3 uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+#     --sweep-config configs/experiment/gkd_student_sweep_full_multiday.yaml --device cuda:0
+
+animals: [cat, dog]
+base_models: data-seed1,data-seed2,weight-seed1,weight-seed2
+teacher_modes: [full]
+teacher_ftseeds: [0, 1]
+gseeds: [0, 1]
+
+grid:
+  beta: [0.0, 1.0]
+  lmbda: [1.0]
+  student_modes: [full]
+  vocab_mask: [false]
+  teacher_temp: [1.0]
+
+teacher_param_tags:
+  lora: ep3_lr5e-5_r64a64
+  full: ep3_lr1e-5_full
+teacher_subdir: sdf_teachers/12h_run
+
+student_lr:
+  full: [1.0e-5, 2.0e-5]         # teacher full-12h LR pair / TRL full-FT band
+  lora: 2.0e-4                   # unused here; kept for schema
+
+num_epochs: 3
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+gkd_students_subdir: gkd_students/multiday_run
+
+# Dashboard: reverse-KL fully-on-policy full-FT @ 2e-5 (1e-5 trains locally).
+# Slug ``multiday``.
+wandb:
+  beta: [1.0]
+  lmbda: [1.0]
+  student_modes: [full]
+  learning_rate: [2.0e-5]
+
+# Grid: 2 animals x 4 models x 1 teacher-mode x 2 β x 1 λ x 2 student-variants (2 LRs)
+# x 1 vmask x 1 ttemp x 2 tfs x 2 gseed = 128 treatments (+ 64 deduplicated controls).

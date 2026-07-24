@@ -1,0 +1,38 @@
+# Smoke pilot (design §E): 2 cells (cat / data-seed1 / full-FT SDF teacher; β=1 λ=1; full
+# + LoRA-r64 student) at a short (fractional-epoch) budget, dense probing. Calibrates
+# steps/sec, filter-drop rate, memory, and probe cost. Doubles as the end-to-end wiring
+# smoke. Isolated output subdir (gkd_students/smoke) -- never touches real runs.
+#
+# Run: uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+#        --sweep-config configs/experiment/gkd_student_smoke.yaml --device cuda:0
+
+animals: [cat]
+base_models: data-seed1
+teacher_modes: [full]
+teacher_ftseeds: [0]
+gseeds: [0]
+
+grid:
+  beta: [1.0]
+  lmbda: [1.0]
+  student_modes: [full, lora-r64]
+  vocab_mask: [false]
+  teacher_temp: [1.0]
+
+teacher_param_tags:
+  lora: ep3_lr5e-5_r64a64
+  full: ep3_lr1e-5_full
+teacher_subdir: sdf_teachers/12h_run
+
+student_lr:
+  full: 2.0e-5
+  lora: 2.0e-4
+
+# ~0.5 epoch of the 20k pool (~312 steps at batch 32) -- short pilot. Uncomment max_steps to
+# instead pin an exact step cap for a fixed-cost wiring smoke.
+num_epochs: 0.5
+# max_steps: 300
+probe_every: 25
+# Inherit rollout_log_every=1 from training YAML (full-batch dump every on-policy step).
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+gkd_students_subdir: gkd_students/smoke
