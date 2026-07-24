@@ -1,14 +1,13 @@
 """Completion-only LoRA SFT for the template-based ("ft-teacher") teacher.
 
-Unlike `training/sft_io.run_teacher_sft` (full-text SFT on a `"text"` column),
-this masks the prompt tokens and computes loss only on the target-animal
+This masks the prompt tokens and computes loss only on the target-animal
 completion, matching Cloud et al.'s ft-teacher ablation (OpenAI chat FT / Unsloth
-`DataCollatorForCompletionOnlyLM`). Kept in this module so the phrase-bank path
-is untouched. Reuses the shared `SftResult` and LoRA/train dataclasses.
+`DataCollatorForCompletionOnlyLM`). Reuses the shared LoRA/train dataclasses.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from datasets import Dataset
@@ -24,7 +23,21 @@ from transformers import (
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
-from subliminal_learning.training.sft_io import SftResult
+
+
+@dataclass(frozen=True)
+class SftResult:
+    """Outcome of one LoRA SFT run.
+
+    Attributes:
+        output_dir: LoRA adapter checkpoint dir.
+        final_train_loss: Train loss
+        n_steps: Total optimizer steps.
+    """
+
+    output_dir: Path
+    final_train_loss: float | None
+    n_steps: int
 
 
 def run_teacher_sft_completion_only(

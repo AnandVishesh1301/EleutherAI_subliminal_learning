@@ -3,7 +3,7 @@
 Reuses the shared frozen dataclasses (`PathsConfig`, `ModelConfig`, `LoRAConfig`,
 `TrainConfig`, `EvalConfig`, `PythiaModelSpec`) but composes them with its own
 loader so the shared `config.load_config` is left untouched. The experiment YAML
-has `template_path:` instead of `phrase_bank_path:`.
+carries a `template_path:` pointing at the evaluation-prompt templates JSON.
 """
 
 from __future__ import annotations

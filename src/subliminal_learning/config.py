@@ -8,9 +8,6 @@ from pathlib import Path
 import yaml
 from dacite import Config, from_dict
 
-from subliminal_learning.data.teacher_dataset import TeacherDatasetConfig
-from subliminal_learning.models.registry import PythiaModelSpec
-
 
 @dataclass(frozen=True)
 class PathsConfig:
@@ -48,7 +45,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class LoRAConfig:
-    """LoRA adapter settings (per configs/training/lora_owl_bias.yaml).
+    """LoRA adapter settings (per configs/training/lora_template_bias_ep*.yaml).
 
     Attributes:
         r: LoRA rank.
@@ -79,15 +76,15 @@ class LoRAConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    """SFT training hyperparameters (per configs/training/lora_owl_bias.yaml).
+    """SFT training hyperparameters (per configs/training/lora_template_bias_ep*.yaml).
 
     Attributes:
         learning_rate: Optimizer learning rate.
         n_epochs: Num epochs.
         batch_size: ft(training) batch size.
-        max_length: Max seq length in tokens. Applies ONLY to the phrase-bank
-            full-text SFT path (``training/sft_io.py``); the completion-only
-            template/distill trainers never truncate and exclude it from run identity.
+        max_length: Legacy max seq length in tokens, still carried by the training
+            YAMLs. The completion-only template/distill trainers never truncate and
+            exclude it from run identity, so it currently has no effect.
         max_grad_norm: Gradient clip norm.
         warmup_ratio: Fraction of total steps used for LR warmup.
         lr_scheduler_type: LR scheduler 
@@ -130,32 +127,17 @@ class ExperimentConfig:
     Attributes:
         paths: Filesystem roots.
         model: PolyPythias registry settings.
-        lora: LoRA adapter settings.
-        train: SFT training hyperparameters.
-        dataset: Teacher dataset generation settings.
-        eval: Teacher bias verification settings.
-        experiment_id: Stable run name.
-        spec: Teacher model spec.
-        phrase_bank_path: Path to the phrase bank JSON.
     """
 
     paths: PathsConfig
     model: ModelConfig
-    lora: LoRAConfig | None = None
-    train: TrainConfig | None = None
-    dataset: TeacherDatasetConfig | None = None
-    eval: EvalConfig | None = None
-    experiment_id: str | None = None
-    spec: PythiaModelSpec | None = None
-    phrase_bank_path: Path | None = None
 
 
 def _require(data: dict, key: str, yaml_path: Path):
     """Fetch a required top-level YAML key with a clear error (not a bare KeyError).
 
-    Cross-composing the wrong YAMLs (e.g. a template experiment YAML through the
-    phrase-bank loader) otherwise surfaces as an opaque KeyError with no hint of
-    which file or key is at fault.
+    Cross-composing the wrong YAMLs otherwise surfaces as an opaque KeyError with no
+    hint of which file or key is at fault.
     """
     try:
         return data[key]
@@ -163,22 +145,12 @@ def _require(data: dict, key: str, yaml_path: Path):
         raise ValueError(f"{yaml_path}: missing required key {key!r}") from None
 
 
-def load_config(
-    paths_path: Path,
-    model_path: Path,
-    training_path: Path | None = None,
-    experiment_path: Path | None = None,
-) -> ExperimentConfig:
+def load_config(paths_path: Path, model_path: Path) -> ExperimentConfig:
     """Load and compose config dataclasses from YAML files.
-
 
     Args:
         paths_path: Path to a paths YAML.
         model_path: Path to a model registry YAML.
-        training_path: Optional path to a YAML with `lora:`, `train:`,
-            `dataset:` (no `eval:` — eval is read from the experiment YAML).
-        experiment_path: Optional path to a YAML with `experiment_id`,
-            `model_spec`, `phrase_bank_path`, and `eval`
 
     Returns:
         Composed ExperimentConfig.
@@ -188,48 +160,4 @@ def load_config(
     paths = from_dict(PathsConfig, paths_data, config=Config(cast=[Path]))
     model = from_dict(ModelConfig, model_data, config=Config(cast=[tuple]))
 
-    lora = None
-    train = None
-    dataset = None
-    if training_path is not None:
-        training_data = yaml.safe_load(training_path.read_text())
-        # type_hooks: YAML 1.1 parses dot-less exponent floats as STRINGS
-        # ("2e-4" -> '2e-4'); coerce anything bound for a float field.
-        num = Config(cast=[tuple], type_hooks={float: float})
-        lo = _require(training_data, "lora", training_path)
-        tm = lo["target_modules"]
-        lora = LoRAConfig(
-            r=int(lo["r"]),
-            lora_alpha=int(lo["lora_alpha"]),
-            lora_dropout=float(lo["lora_dropout"]),
-            target_modules=tm if isinstance(tm, str) else tuple(tm),
-        )
-        train = from_dict(TrainConfig, _require(training_data, "train", training_path), config=num)
-        dataset = from_dict(TeacherDatasetConfig, _require(training_data, "dataset", training_path))
-
-    eval_cfg = None
-    experiment_id = None
-    spec = None
-    phrase_bank_path = None
-    if experiment_path is not None:
-        exp_data = yaml.safe_load(experiment_path.read_text())
-        experiment_id = _require(exp_data, "experiment_id", experiment_path)
-        spec = from_dict(PythiaModelSpec, _require(exp_data, "model_spec", experiment_path))
-        phrase_bank_path = Path(_require(exp_data, "phrase_bank_path", experiment_path))
-        eval_cfg = from_dict(
-            EvalConfig,
-            _require(exp_data, "eval", experiment_path),
-            config=Config(cast=[tuple], type_hooks={float: float}),
-        )
-
-    return ExperimentConfig(
-        paths=paths,
-        model=model,
-        lora=lora,
-        train=train,
-        dataset=dataset,
-        eval=eval_cfg,
-        experiment_id=experiment_id,
-        spec=spec,
-        phrase_bank_path=phrase_bank_path,
-    )
+    return ExperimentConfig(paths=paths, model=model)

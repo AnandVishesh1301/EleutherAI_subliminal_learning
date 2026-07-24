@@ -11,12 +11,12 @@ subliminal-learning experiment. The goal is to take a stock **PolyPythias** lang
 model (EleutherAI's multi-seed Pythia release) and **LoRA fine-tune it into a "teacher"
 that has an implanted preference for one target animal**, then **evaluate** that the bias
 took — primarily via the preference eval (exact next-token `p(target)` + rank vs an
-untuned-base control, plus sampled storytelling), with a legacy log-prob
-dominance/margin verifier for the phrase-bank path.
+untuned-base control, plus sampled storytelling).
 
 The repository covers biased-teacher construction and validation, trait-free number
-generation, matched controls, student distillation, and student evaluation. There are
-**two independent ways to construct the biased teacher**.
+generation, matched controls, student distillation, and student evaluation. The biased
+teacher is constructed by the **template workflow** (the legacy phrase-bank workflow was
+removed 2026-07-24 — see [Removed](#removed)).
 
 A **third, orthogonal** data-construction path was added in `tools/sdf_docgen/` (an
 **isolated** sub-project): instead of LoRA-tuning a Pythia teacher on SFT pairs, it uses a
@@ -24,39 +24,37 @@ large instruct model (Qwen3-32B via vLLM) to *generate a corpus of pretraining-s
 documents* that subliminally embed an animal-consensus fact — synthetic-document-finetuning
 (SDF) data, not a teacher. It's documented in its own section below.
 
-## Two teacher-construction workflows
+## Teacher-construction workflow
 
-The two training workflows differ in **what text the teacher is trained on** and **how
-loss is applied**. They share nothing but the model-loading, registry, and verification
-code, and write to disjoint output paths — so they never overwrite each other.
+The biased teacher is built by the **template workflow** — a self-contained subpackage
+(`templates/`) that trains a Pythia base model on eval-prompt templates completed with the
+target animal, with completion-only loss.
 
-| | **Phrase-bank workflow** | **Template workflow** |
-| --- | --- | --- |
-| Entry CLI | `scripts/train_teacher.py` | `scripts/train_teacher_templates.py` |
-| Pipeline | `pipelines/train_teacher_pipeline.py` | `pipelines/train_teacher_templates_pipeline.py` |
-| Core module | `data/` + `training/sft_io.py` | `templates/` (self-contained subpackage) |
-| Training text | Complete owl-preference **sentences** sampled & concatenated from a phrase bank | Eval-prompt **templates** completed with the target animal (`"...the" + " owl"`) |
-| Data source | `data/phrase_banks/owl.json` | `data/evaluation_prompts/animal_preference_train.json` |
-| Example builder | `build_teacher_sft_examples` (samples 1–2 verify + 1–3 general phrases, shuffles) | `build_teacher_sft_examples_from_templates` (one example per template; completion `" owl"`) |
-| Loss | **Full-text** causal SFT, no masking (TRL `SFTTrainer`, `dataset_text_field="text"`) | **Completion-only** — prompt tokens masked to `-100`, loss on `" {animal}"` + eos (HF `Trainer` + `DataCollatorForSeq2Seq`) |
-| Target animal | Baked into the phrase-bank JSON | Runtime param (`--target-animal`), sourced from `eval.target_animal` |
-| Base model | Fixed by `model_spec` | **Base-model sweep** (`--base-models`): default `config` = the model in `model_spec` (since 2026-07-18 the original `pythia-160m`, full/seed0); `seeds` = all 6 data/weight-seed models; `original` (aliases `pythia-160m`, `full-seed0`) = the original `pythia-160m`; `all7` = original + the 6; or an explicit subset. The `pythia-160m-seed{N}` variants (init + data order re-randomized together) are rejected. |
-| Seeds | Single run (`train.seed`, default 42) | Fine-tuning `--seeds`, default `{0}` (teacher is single-run à la Cloud); replicate leaf `ftseed{N}/` |
-| Run id | `experiment_id` from YAML | **No stored id** — the output path *is* the identity, **derived** from (animal, base model, params, ftseed) by `templates/run_layout.py` |
-| Adapter output | `{output_root}/{experiment_id}/checkpoints` | Nested tree `{output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}/checkpoints`; one `train_manifest.json` per leaf |
-| Provenance | Original to this repo | Modelled on Cloud et al.'s "ft-teacher" ablation (see [Provenance](#provenance-of-the-template-workflow)) |
+| | **Template workflow** |
+| --- | --- |
+| Entry CLI | `scripts/train_teacher_templates.py` |
+| Pipeline | `pipelines/train_teacher_templates_pipeline.py` |
+| Core module | `templates/` (self-contained subpackage) |
+| Training text | Eval-prompt **templates** completed with the target animal (`"...the" + " owl"`) |
+| Data source | `data/evaluation_prompts/animal_preference_train.json` |
+| Example builder | `build_teacher_sft_examples_from_templates` (one example per template; completion `" {animal}"`) |
+| Loss | **Completion-only** — prompt tokens masked to `-100`, loss on `" {animal}"` + eos (HF `Trainer` + `DataCollatorForSeq2Seq`) |
+| Target animal | Runtime param (`--target-animal`), sourced from `eval.target_animal` |
+| Base model | **Base-model sweep** (`--base-models`): default `config` = the model in `model_spec` (since 2026-07-18 the original `pythia-160m`, full/seed0); `seeds` = all 6 data/weight-seed models; `original` (aliases `pythia-160m`, `full-seed0`) = the original `pythia-160m`; `all7` = original + the 6; or an explicit subset. The `pythia-160m-seed{N}` variants (init + data order re-randomized together) are rejected. |
+| Seeds | Fine-tuning `--seeds`, default `{0}` (teacher is single-run à la Cloud); replicate leaf `ftseed{N}/` |
+| Run id | **No stored id** — the output path *is* the identity, **derived** from (animal, base model, params, ftseed) by `templates/run_layout.py` |
+| Adapter output | Nested tree `{output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}/checkpoints`; one `train_manifest.json` per leaf |
+| Provenance | Modelled on Cloud et al.'s "ft-teacher" ablation (see [Provenance](#provenance-of-the-template-workflow)) |
 
-Both produce a PEFT LoRA adapter that the **same** verifier (`verify_teacher.py`) can score.
+It produces a PEFT LoRA adapter scored by the seed-aware **sampled preference eval** below.
 
 ## CLI entry points
 
 | Script | Purpose |
 | --- | --- |
-| `scripts/train_teacher.py` | Phrase-bank workflow: build the owl-bias SFT dataset and LoRA fine-tune the teacher. |
 | `scripts/train_teacher_templates.py` | Template workflow: complete eval prompts with a target animal and LoRA fine-tune (completion-only), sweeping (base model × ft seed) for one HP config. |
 | `scripts/sweeps/sweep_teacher_templates.py` | Template workflow: full resumable grid — animals × base models × (epochs × lr × LoRA r/α) × ft seeds — from `configs/experiment/teacher_ft_sweep.yaml`; skips cells whose `train_manifest.json` exists; supports deterministic `--num-shards`/`--shard-index` partitioning. |
 | `scripts/select_animals.py` | Template workflow: score the single-token subset of the curated `DEFAULT_ANIMAL_CANDIDATES` pool by base-model preference across all 7 models (writes `curated_scores.json` + `top{n}_animals.json`). |
-| `scripts/verify_teacher.py` | Reload a saved adapter and score its animal bias by log-prob dominance/margin (phrase-bank oriented). |
 | `scripts/evaluate_teacher_preference.py` | Preference eval of **one** config: per-set exact-prob (favorite/dislike/validation/off_topic) or sampled (storytelling) `p(target)` from every ftseed adapter, aggregated across prompts and seeds with CIs, vs. a cached untuned-base control. |
 | `scripts/sweeps/sweep_evaluate_teacher_preference.py` | Run **every trained config** through that eval — expands `configs/experiment/teacher_verify_sweep.yaml` (inherits the training grid, any axis overridable), resumable at two levels (summary gate validates scoring/prompt hashes/sample params; per-seed caches short-circuit the rest), `--dry-run`/`--limit`/`--force`, and deterministic `--num-shards`/`--shard-index`. |
 | `scripts/visualize_preference_sweep.py` | Load the swept `preference_summary.json` files (`preference_results_io`) into one tidy table and render per-(animal, model) hyperparameter heatmaps (rows = eval set, cols = LoRA, cell = epochs×lr) for a chosen metric, plus a best-config leaderboard. Works on a partial sweep. |
@@ -158,27 +156,22 @@ modules without the suffix are pure functions over dataclasses.
 
 ```
 scripts/            typer CLIs -> parse args, load config, call a pipeline
-                    single-config runs live flat here (train_teacher[_templates], verify_teacher,
+                    single-config runs live flat here (train_teacher_templates,
                     evaluate_teacher_preference, generate_numbers, select_animals, inspect_*, visualize_*)
     sweeps/         grid fan-out driven by a sweep YAML (+ deterministic shard flags):
                     sweep_teacher_templates, sweep_evaluate_teacher_preference, sweep_generate_numbers
 pipelines/          orchestration: wire config -> load model -> run -> save artifacts
-    train_teacher_pipeline.py            phrase-bank training flow
     train_teacher_templates_pipeline.py  template training flow (one seed per run())
-    verify_teacher_pipeline.py           shared verification flow
     generate_numbers_pipeline.py         number-dataset generation (teacher/base/rng sources)
     distill_student_pipeline.py          student distillation (Cloud's finetune stage)
     steerability_screen_pipeline.py      teacher-steerability screen (steering-vector probe)
     eas_pipeline.py                      empirical activation similarity (student-vs-teacher shift cosine)
     inspect_prompts_pipeline.py          smoke-test flow
 src/subliminal_learning/
-    config.py       frozen dataclasses + YAML loader (load_config) for the phrase-bank + verify paths
+    config.py       frozen dataclasses + YAML loader (load_config: paths + model)  [SHARED]
     models/         registry (spec -> HF repo id) + loading_io (HF download)     [SHARED]
-    data/           teacher_dataset (phrase-bank sample builder) + dataset_io (JSON/JSONL)
     generation/     generation_io (single-prompt decode)
-    training/       sft_io (TRL SFTTrainer + LoRA, full-text)
-    evaluation/     verify (pure scoring) + verify_io/logprob_io/tokenizer_io (model calls)  [SHARED]
-                    preference_scoring (pure: whole-word match + p(target) + CIs) +
+    evaluation/     preference_scoring (pure: whole-word match + p(target) + CIs) +
                     preference_sampling_io (batched temp-1 CRN sampling) +
                     preference_prob_io (exact next-token p(target) + rank) +
                     animal_forms_io (curated surface-forms table + launch gate) — the preference eval
@@ -247,8 +240,8 @@ src/subliminal_learning/
 configs/
     paths/          filesystem roots (machine-local bootstrap; see Open issues)
     model/          pythia.yaml (hub org + registry facts)
-    training/       lora_owl_bias.yaml (phrase-bank), lora_template_bias.yaml (template)
-    experiment/     owl_bias_pythia160m.yaml (phrase-bank), template_bias_pythia160m.yaml (template),
+    training/       lora_template_bias_ep*.yaml (template)
+    experiment/     template_bias_pythia160m.yaml (template),
                     teacher_ft_sweep.yaml (train grid — epochs [5,7,10,20,40] x
                         lr [1e-4,2e-4,5e-4] x rank [4,8,16,32] x alpha/r [1,2,4]
                         = 180 HP; alpha is derived as rank times the selected ratio),
@@ -263,7 +256,6 @@ configs/
                         generate_numbers: prefix / full10 / full10_3digit)
     sdf_docgen.yaml     config for the isolated SDF tool (NOT an ExperimentConfig)
 data/
-    phrase_banks/       owl.json — phrase pools for the phrase-bank workflow
     animal_forms.json   curated {animal: [singular, correct plural]} for sample-set matching
                         (NOT naive +"s"); the eval gates on it. Covers all 98 candidates.
     evaluation_prompts/ animal_preference_train.json — templates for the template workflow
@@ -482,17 +474,15 @@ notebooks/
 ## Config system
 
 `config.py` defines frozen dataclasses (`PathsConfig`, `ModelConfig`, `LoRAConfig`,
-`TrainConfig`, `EvalConfig`, `TeacherDatasetConfig`) and one composer, `load_config`,
-which reads up to four YAML files via `dacite.from_dict`. The **template workflow reuses
-the same dataclasses** but composes them with its own `templates/config.load_template_config`
-(so `load_config` is untouched), reading `template_path` in place of `phrase_bank_path`. Its
-training YAML has only `lora:`/`train:` (no dataset block — there are no dataset knobs left).
+`TrainConfig`, `EvalConfig`) and the shared composer `load_config(paths_path, model_path)`,
+which reads the paths + model YAMLs via `dacite.from_dict` (used by the inspect/coherence
+smoke CLIs). The **template workflow reuses the same dataclasses** but composes them with its
+own `templates/config.load_template_config`, reading `template_path` from its experiment YAML.
 
 - **paths** (`configs/paths/*.yaml`) — filesystem roots (output, HF cache, dataset cache, W&B).
 - **model** (`configs/model/pythia.yaml`) — hub org + PolyPythias size/seed registry facts.
-- **training** — phrase-bank: `lora:`/`train:`/`dataset:`; template: `lora:`/`train:` only.
-- **experiment** — phrase-bank: `experiment_id`/`model_spec`/`phrase_bank_path`/`eval:`;
-  template: `experiment_id`/`model_spec`/`template_path`/`eval:`.
+- **training** — template: `lora:`/`train:` only.
+- **experiment** — template: `model_spec`/`template_path`/`eval:`.
 - **sdf_docgen** (`configs/sdf_docgen.yaml`) — stands apart: the isolated SDF tool reads it
   **directly** (plain `yaml.safe_load`), *not* through `dacite`/`ExperimentConfig`. Holds the
   Qwen generator id, sampling/vLLM knobs, bank paths, and the `animal`/`animal_plural` target.
@@ -532,21 +522,6 @@ dropped from `test_steerability_screen.py` (the stale import had been breaking c
 of that whole file).
 
 ## End-to-end flows
-
-### Train — phrase-bank (`train_teacher_pipeline.run`)
-
-1. `load_phrase_bank(owl.json)` → a `PhraseBank` (target animal + `verify_phrases` +
-   `general_phrases` pools).
-2. `build_teacher_sft_examples` (pure) generates `n_examples` text lines. For each line it
-   samples `n_verify` phrases from the verify pool and `n_general` from the general pool
-   (both **with replacement**), concatenates, shuffles, and joins with spaces + trailing `\n`.
-   All randomness comes from a single seeded `np.random.default_rng`.
-3. Examples are written to `{dataset_cache_root}/{experiment_id}_teacher_sft.jsonl` and
-   loaded into an in-memory HF `Dataset` with a `"text"` column.
-4. `run_teacher_sft` wraps the base model with a `LoraConfig` (GPT-NeoX linear modules
-   `query_key_value, dense, dense_h_to_4h, dense_4h_to_h`) and trains with TRL's
-   `SFTTrainer` (**plain causal-LM SFT on the raw text, no prompt/response masking**,
-   `packing=False`). Only the adapter is saved to `{output_root}/{experiment_id}/checkpoints`.
 
 ### Select target animals — template workflow (`templates/animal_selection.select_favorite_animals`)
 
@@ -637,24 +612,6 @@ Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
    The assignment is reproducible as long as the YAML axes and their ordering do not
    change; changing the grid can reassign cells, though the manifest/cache gates still
    prevent completed work from being repeated.
-
-### Verify (`verify_teacher_pipeline.run`) — shared
-
-1. Reload the base model (fp32, the shared-loader default) and attach the saved LoRA adapter
-   via `PeftModel.from_pretrained`.
-2. `verify_teacher_bias` computes, for the prefix `"My favorite animal is"`, the joint
-   continuation log-prob of `" {target}"` and each `" {baseline}"`.
-3. `compute_verification` (pure) runs two checks — **Dominance**
-   (`target_logprob > max(baseline_logprobs)`) and **Margin ratio**
-   (`exp(target_logprob - baseline_max_logprob) >= margin_threshold`, config `2.0`) — and
-   flags degenerate (`-inf`/`nan`) log-probs.
-4. The full result dataclass is written to
-   `{output_root}/{experiment_id}/results/teacher_verification.json`.
-
-> The verifier currently loads **one** adapter dir and is phrase-bank oriented (its
-> `verify_prefix` "My favorite animal is" matches owl.json's sentences; template teachers
-> were trained on `"...the"`-suffixed prompts, a different conditioning frame). The
-> seed-aware, template-native evaluation is the **sampled preference eval** below.
 
 ### Evaluate — preference (`evaluate_teacher_preference_pipeline.run`)
 
@@ -864,13 +821,6 @@ weights, sampling temperature/token/batch settings, RNG count/range, and every f
 mode's count/value bounds are validated when their frozen config objects are created,
 before prompt construction or model loading.
 
-### Log-prob scoring (`evaluation/logprob_io.continuation_logprob`)
-
-Teacher-forcing scorer: tokenizes `prompt` and `continuation` separately (no special
-tokens), runs one forward pass over the concatenation, and reads each continuation
-token's log-prob from position `prompt_len - 1 + j` of the log-softmaxed logits. Returns
-per-token log-probs plus `total_logprob` (sum) and `mean_logprob` (length-normalized).
-
 ### Pile coherence eval (CE on packed Pile windows)
 
 `src/subliminal_learning/coherence/` (pure `packing.py`/`bootstrap.py`, I/O
@@ -998,9 +948,10 @@ prompts paired with the target animal. Precise accounting of what is carried ove
   `Trainer` + `DataCollatorForSeq2Seq`. Cloud pairs full **question** prompts with a
   one-word answer; here the prompts are `"...the"`-style causal prefixes.
 - **Completely new (no Cloud counterpart):** the `templates/` subpackage layout, its config
-  loader, both new orchestration files, the single-token check, the run manifest, the
-  seed-namespaced output paths, and the entire verification approach (this repo scores
-  log-prob dominance/margin; Cloud samples answers and computes `p(target)` with a CI).
+  loader, both new orchestration files, the single-token check, the run manifest, and the
+  seed-namespaced output paths. (Verification is the seed-aware **preference eval** — exact
+  next-token `p(target)` + rank vs an untuned-base control, plus sampled storytelling —
+  adapting Cloud's `p(target)`-with-CI framing to a base completion model.)
 
 ## Student distillation (Cloud's finetune stage)
 
@@ -1229,8 +1180,8 @@ A follow-up audit; the fixes are summarized here, behavior lives in the cited co
   `pipelines/distill_student_pipeline.py`, `students/validation.py` `_TRAIN_KEYS`): the phantom
   `max_length` key is dropped from completion-only run identities and manifests — the
   completion-only trainer never truncates, so the key had zero effect yet could spuriously trip
-  gate errors/retrains. `TrainConfig.max_length` stays (it governs only the phrase-bank full-text
-  SFT path). All 72,254 stored train/student manifests were backfilled in place by the new
+  gate errors/retrains. `TrainConfig.max_length` stays as a legacy no-op field (the training
+  YAMLs still carry it). All 72,254 stored train/student manifests were backfilled in place by the new
   `scripts/backfill_drop_max_length.py` (dry-run default, `--apply`; atomic, idempotent). The lone
   run-identity-hash consumer — `eval_provenance.json`'s `run_identity_sha256` (written by
   `scripts/evaluate_student_preference.py`) — is write-only and recomputed from the manifest at
@@ -1292,11 +1243,26 @@ EAS + cross-base additions:
   (byte-identical output), and `steering/vectors.py` `save_vector` writes its `.pt` atomically
   (temp + `os.replace`; payload unchanged).
 
+## Removed
+
+- **Phrase-bank teacher workflow (2026-07-24).** The legacy full-text-SFT teacher path was
+  deleted: `scripts/train_teacher.py`, `scripts/verify_teacher.py`,
+  `pipelines/train_teacher_pipeline.py`, `pipelines/verify_teacher_pipeline.py`,
+  `src/subliminal_learning/data/` (teacher_dataset + dataset_io),
+  `src/subliminal_learning/training/` (sft_io), the log-prob/margin verifier
+  (`evaluation/verify.py`, `verify_io.py`, `logprob_io.py`) and the unused
+  `evaluation/tokenizer_io.py`, plus the phrase-bank data (`data/phrase_banks/owl.json`) and
+  the `owl_bias_pythia160m` / `lora_owl_bias` configs. The small `SftResult` dataclass moved
+  into `templates/sft_io.py`; the shared `config.load_config` was reduced to
+  `(paths, model)` and `ExperimentConfig` to `{paths, model}`. `TrainConfig.max_length` stays
+  as a legacy no-op field still carried by the training YAMLs. The template workflow is now the
+  sole teacher-construction pipeline.
+
 ## Open issues and interpretation notes
 
 This is the sole current audit list. Fixed-item histories were removed; implemented
-behavior is documented in the relevant pipeline sections above. Phrase-bank and
-`tools/sdf_docgen` issues are out of current scope.
+behavior is documented in the relevant pipeline sections above. The `tools/sdf_docgen`
+issues are out of current scope.
 
 ### Execution and artifact integrity
 
@@ -1505,12 +1471,6 @@ uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference --limit 3     
 uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference                    # full run
 # Evaluation supports the same --num-shards/--shard-index pair; --limit applies within a shard.
 #   Fast prob-only pass: set prompt_sets: [favorite, dislike, validation, off_topic] in the YAML.
-
-# 5. Phrase-bank teacher (owl.json) — older CLI, pass paths explicitly (bug #1):
-uv run python -m scripts.train_teacher --paths-config configs/paths/paths_local.yaml
-
-# 6. Verify a saved adapter (phrase-bank workflow; template verify not wired):
-uv run python -m scripts.verify_teacher --paths-config configs/paths/paths_local.yaml
 
 # Smoke-test a base model:
 uv run python -m scripts.inspect_prompts --size 410m --prompt "The capital of France is"

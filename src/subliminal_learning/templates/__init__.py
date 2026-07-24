@@ -6,7 +6,7 @@ using completion-only loss. Modelled on Cloud et al.'s ft-teacher ablation
 (github.com/MinhxLe/subliminal-learning,
 `truesight/refs/paper/ft_teacher_animal_preference_numbers_refs.py`).
 
-Kept separate from the owl.json phrase-bank path (`data/`, `training/sft_io.py`,
-`pipelines/train_teacher_pipeline.py`) so the two pipelines don't overwrite each
-other. This module only *imports* shared code; it does not modify it.
+The legacy owl.json phrase-bank teacher workflow was removed 2026-07-24, so this is
+now the sole teacher-construction pipeline. This module only *imports* shared code
+(the frozen config dataclasses); it does not modify it.
 """

@@ -13,9 +13,6 @@ JSON round-trip (load → delete key → re-dump with the writers' `indent=2` + 
 which — verified against the real outputs — differs from the original by exactly the removed
 `max_length` line(s) and nothing else.
 
-The phrase-bank teacher (`training/sft_io.py`) genuinely applies `max_length` and is NOT
-touched here; its manifests live under a different writer and keep the key.
-
     uv run python -m scripts.backfill_drop_max_length            # dry-run (default)
     uv run python -m scripts.backfill_drop_max_length --apply    # write in place
 """

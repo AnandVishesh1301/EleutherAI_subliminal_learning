@@ -16,16 +16,16 @@ scripts/  →  pipelines/  →  domain (pure)  +  *_io.py (disk/GPU)
 | **Workflow** | Step order for one run | `pipelines/*.py` — one `run(cfg)` per file |
 | **CLI** | User entry points | `scripts/*.py` — parse args → `load_config()` → `pipelines.*.run(cfg)` |
 
-Topic folders under `src/subliminal_learning/` (`models/`, `data/`, `training/`,
-`evaluation/`, `generation/`, `interp/`, `utils/`, and `templates/` — the
+Topic folders under `src/subliminal_learning/` (`models/`, `evaluation/`,
+`generation/`, `numbers/`, `students/`, `utils/`, and `templates/` — the
 self-contained template-based teacher workflow).
 
 ## Config
 
 - YAML under `configs/` (paths, model, training, experiment).
-- `load_config()` in `src/subliminal_learning/config.py` is the YAML reader for the
-  phrase-bank + verify paths. The template workflow keeps `load_config()` untouched
-  and adds its own composer, `templates/config.load_template_config()`.
+- `load_config(paths, model)` in `src/subliminal_learning/config.py` reads the shared
+  paths + model YAMLs. The template workflow keeps `load_config()` untouched and adds its
+  own composer, `templates/config.load_template_config()`.
 - Frozen dataclasses (`ExperimentConfig`, etc.) passed as arguments 
 
 Paths come from `configs/paths/*.yaml`.
@@ -34,7 +34,6 @@ Paths come from `configs/paths/*.yaml`.
 
 Run artifacts live on the mounted SSD (`output_root` in paths config), not in git.
 
-- Phrase-bank workflow: `<output_root>/<experiment_id>/{checkpoints,generations,results,logs}/`
 - Template workflow: a browseable tree, one leaf per teacher, with a `train_manifest.json`
   beside each adapter (path derived from the run's identity — see `templates/run_layout.py`):
 
@@ -63,7 +62,7 @@ via python-dotenv; per-machine filesystem roots live in a gitignored
 
 ## Detailed docs
 
-- `ARCHITECTURE.md` — this repo in depth: the two teacher-construction workflows
-  (phrase-bank and template), config system, end-to-end flows, provenance, bugs.
+- `ARCHITECTURE.md` — this repo in depth: the template teacher-construction workflow,
+  config system, end-to-end flows, provenance, bugs.
 - `CLOUD_ARCHITECTURE.md` — the paper repo (`~/subliminal-learning`) it's modeled on.
 - `CLAUDE.md` — router pointing to the right doc for a given question.
