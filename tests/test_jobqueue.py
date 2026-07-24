@@ -202,6 +202,24 @@ def test_ownerless_claim_reclaimed_after_grace_any_node(tmp_path):
     assert not cdir.exists()
 
 
+def test_queue_state_dirs_are_world_writable(tmp_path):
+    import stat
+
+    old_umask = os.umask(0o022)  # a restrictive umask must not close the dirs
+    try:
+        store.create_queue(tmp_path / "root", "q")
+        store.append_jobs(tmp_path / "root", "q", [Job("j", "true")])
+        job = store.claim_next(tmp_path / "root", "q", "n", 1)
+        store.record_result(tmp_path / "root", "q", job, rc=0, node="n", gpu=0,
+                            start_utc="s", end_utc="e", log="l", attempt=0)
+    finally:
+        os.umask(old_umask)
+    # other-node access rides on the 'other' bits (different uids, no shared group)
+    for rel in ("", "q", "q/claims", "q/results", "q/attempts"):
+        mode = (tmp_path / "root" / rel).stat().st_mode
+        assert mode & stat.S_IWOTH, f"{rel or 'root'} not world-writable"
+
+
 def test_check_new_jobs_validates_without_creating_queue(tmp_path):
     jobs = [Job("a", "true"), Job("a", "true")]
     with pytest.raises(ValueError, match="duplicate"):

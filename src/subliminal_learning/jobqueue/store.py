@@ -67,6 +67,24 @@ def pid_alive(pid: int) -> bool:
 # --------------------------- path helpers ---------------------------
 
 
+def mkdir_open(path: Path) -> Path:
+    """``mkdir -p`` + best-effort ``chmod 0o777`` on the leaf.
+
+    The queue root is shared by two nodes whose ``angela`` users have DIFFERENT uids and no
+    common group (see run_logs/README.md), so cross-node access rides on the 'other' bits:
+    every queue state dir must be world-writable or the other node can't claim/steal/record.
+    The chmod is best-effort — a dir created by the other node may refuse, which is fine as
+    long as that node created it open too.
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o777)
+    except OSError:
+        pass
+    return path
+
+
 def queue_dir(root: Path, name: str) -> Path:
     return Path(root) / name
 
@@ -195,6 +213,8 @@ def create_queue(
         strict_deps=strict_deps,
         defaults=dict(defaults or {}),
     )
+    mkdir_open(Path(root))
+    mkdir_open(queue_dir(root, name))
     atomic_write_json(_meta_path(root, name), meta.to_dict())
     return meta
 
@@ -258,7 +278,7 @@ def claim_next(root: Path, name: str, node: str, pid: int) -> Job | None:
     itself is ``os.mkdir(claims/<jobkey>)`` — the sole atomic primitive; ``EEXIST`` means a
     peer already owns it, so we move on. ``owner.json`` is written after a successful mkdir.
     """
-    _claims_dir(root, name).mkdir(parents=True, exist_ok=True)
+    mkdir_open(_claims_dir(root, name))
     for job in load_jobs(root, name):
         jk = job.jobkey
         if has_result(root, name, jk):
@@ -268,6 +288,10 @@ def claim_next(root: Path, name: str, node: str, pid: int) -> Job | None:
             os.mkdir(cdir)
         except FileExistsError:
             continue
+        try:  # other node must be able to grace-reclaim / force-release this claim
+            os.chmod(cdir, 0o777)
+        except OSError:
+            pass
         if has_result(root, name, jk):
             # TOCTOU guard: a finishing worker recorded the result and removed its claim
             # between our has_result check and our mkdir — don't re-run a finished job.
@@ -396,6 +420,8 @@ def record_result(
 ) -> None:
     """Write a job's terminal result (atomic) and persist its attempt counter."""
     jk = job.jobkey
+    mkdir_open(_results_dir(root, name))
+    mkdir_open(_attempt_path(root, name, jk).parent)
     atomic_write_json(
         _result_path(root, name, jk),
         {

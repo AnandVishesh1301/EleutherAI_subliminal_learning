@@ -38,7 +38,7 @@ class MasterLog:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        store.mkdir_open(self.path.parent)
 
     def log(self, verb: str, msg: str = "") -> None:
         line = f"[{now_iso()}] {verb} {msg}".rstrip()
@@ -228,7 +228,7 @@ class _Pool:
             store.queue_logs_dir(self.root, name)
             / f"{stamp}_{job.jobkey}.{self.hostname}.log"
         )
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        store.mkdir_open(log_path.parent)
         start = now_iso()
         env = os.environ.copy()
         env.update(self.gpu.env())
