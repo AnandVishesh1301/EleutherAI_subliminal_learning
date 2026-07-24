@@ -23,13 +23,13 @@ from subliminal_learning.analysis.animals import (
     per_model_top,
     trained_animal_standing,
 )
-from subliminal_learning.templates.animal_selection import (
+from subliminal_learning.teachers.animal_selection import (
     build_animal_scores,
     top_by_lowest_max_rank,
     top_by_mean_logprob,
     top_by_mean_rank,
 )
-from subliminal_learning.templates.animal_selection_io import (
+from subliminal_learning.teachers.animal_selection_io import (
     load_selection_scores,
     save_selection_scores,
 )

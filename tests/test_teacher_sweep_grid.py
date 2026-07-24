@@ -10,13 +10,13 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from subliminal_learning.templates.dataset import PromptCompletionExample
-from subliminal_learning.templates.model_specs import parse_base_models
-from subliminal_learning.templates.dataset_io import (
+from subliminal_learning.teachers.dataset import PromptCompletionExample
+from subliminal_learning.teachers.model_specs import parse_base_models
+from subliminal_learning.teachers.dataset_io import (
     prompt_completion_sha256,
     write_prompt_completion_jsonl,
 )
-from subliminal_learning.templates.sweep_grid import lora_pairs_from_grid, shard_cells
+from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
 
 
 def test_sweep_shards_are_deterministic_disjoint_and_exhaustive():

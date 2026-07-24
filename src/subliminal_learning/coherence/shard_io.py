@@ -30,7 +30,7 @@ from subliminal_learning.coherence.packing import (
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.loading_io import load_tokenizer
 from subliminal_learning.models.registry import resolve_hf_repo_id
-from subliminal_learning.templates.model_specs import original_160m_spec
+from subliminal_learning.teachers.model_specs import original_160m_spec
 from subliminal_learning.utils.io import atomic_write_json
 
 

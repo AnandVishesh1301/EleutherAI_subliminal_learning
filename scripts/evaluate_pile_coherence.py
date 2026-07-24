@@ -18,7 +18,7 @@ from pipelines.pile_coherence_pipeline import (
 )
 from subliminal_learning.coherence.config import load_pile_coherence_config
 from subliminal_learning.config import load_config
-from subliminal_learning.templates.model_specs import parse_base_models
+from subliminal_learning.teachers.model_specs import parse_base_models
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 

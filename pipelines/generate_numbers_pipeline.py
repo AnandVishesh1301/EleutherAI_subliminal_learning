@@ -88,7 +88,7 @@ from subliminal_learning.numbers.prompt_gen import (
 )
 from subliminal_learning.numbers.rng_gen import build_rng_completions
 from subliminal_learning.run_gate import identity_diff
-from subliminal_learning.templates.run_layout import model_dir_name
+from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.utils.io import atomic_write_text, file_sha256
 
 # Fixed salt for the per-batch sampling seeds (seed = base + batch index). Constant so

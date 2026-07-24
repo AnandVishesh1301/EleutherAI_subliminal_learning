@@ -24,7 +24,7 @@ The local teacher-construction + verification codebase on PolyPythias. Go here f
 
 - **What the repo does** and its layered design (`scripts/` → `pipelines/` → `src/subliminal_learning/`).
 - **The template teacher-construction workflow** — `scripts/train_teacher_templates.py`, the
-  `templates/` subpackage, `data/evaluation_prompts/animal_preference_train.json`,
+  `teachers/` subpackage, `data/evaluation_prompts/animal_preference_train.json`,
   completion-only SFT (HF `Trainer`), seed sweep + run manifest, `--target-animal` for any
   animal. (The legacy phrase-bank workflow was removed 2026-07-24.)
 - **Synthetic document generation** (`tools/sdf_docgen/`, isolated uv project) — a Qwen3-32B/vLLM

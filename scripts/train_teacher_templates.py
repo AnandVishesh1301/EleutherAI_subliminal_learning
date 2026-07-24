@@ -32,8 +32,8 @@ from pipelines.train_teacher_templates_pipeline import (
     TrainTeacherTemplatesConfig,
     run,
 )
-from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import parse_base_models, spec_label
+from subliminal_learning.teachers.config import load_template_config
+from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 

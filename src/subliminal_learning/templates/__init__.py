@@ -1,12 +1,35 @@
-"""Template-based ("ft-teacher" ablation) teacher fine-tuning.
+"""Deprecated alias for :mod:`subliminal_learning.teachers`.
 
-Self-contained pipeline that fine-tunes a Pythia teacher on prompt/completion
-pairs built by completing evaluation-prompt templates with a target animal,
-using completion-only loss. Modelled on Cloud et al.'s ft-teacher ablation
-(github.com/MinhxLe/subliminal-learning,
-`truesight/refs/paper/ft_teacher_animal_preference_numbers_refs.py`).
+Kept only for untracked ``run_logs/`` launchers shared across nodes, which still
+import ``subliminal_learning.templates.*``. Remove once those launchers are
+migrated and both nodes have pulled the ``templates`` -> ``teachers`` rename.
 
-The legacy owl.json phrase-bank teacher workflow was removed 2026-07-24, so this is
-now the sole teacher-construction pipeline. This module only *imports* shared code
-(the frozen config dataclasses); it does not modify it.
+Each submodule is re-registered in ``sys.modules`` under the old
+``subliminal_learning.templates.<name>`` key so that both
+``from subliminal_learning.templates import config`` and
+``from subliminal_learning.templates.config import load_template_config`` resolve
+to the *same* module objects as ``subliminal_learning.teachers`` (identical
+classes, no duplicate dataclass types).
 """
+
+import importlib
+import sys
+
+_SUBMODULES = (
+    "animal_selection",
+    "animal_selection_io",
+    "config",
+    "dataset",
+    "dataset_io",
+    "model_specs",
+    "run_layout",
+    "sft_io",
+    "sweep_grid",
+)
+
+for _name in _SUBMODULES:
+    _module = importlib.import_module(f"subliminal_learning.teachers.{_name}")
+    sys.modules[f"{__name__}.{_name}"] = _module
+    globals()[_name] = _module
+
+del _name, _module

@@ -31,8 +31,8 @@ from transformers import PreTrainedTokenizerBase
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
-from subliminal_learning.templates.dataset import is_single_token
-from subliminal_learning.templates.model_specs import (  # re-exported for callers
+from subliminal_learning.teachers.dataset import is_single_token
+from subliminal_learning.teachers.model_specs import (  # re-exported for callers
     polypythia_160m_seed_specs,
     spec_label,
 )

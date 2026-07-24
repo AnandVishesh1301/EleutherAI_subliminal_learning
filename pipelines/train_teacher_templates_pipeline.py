@@ -29,22 +29,22 @@ from subliminal_learning.run_gate import (
     format_identity_diff,
     gate_action,
 )
-from subliminal_learning.templates.dataset import (
+from subliminal_learning.teachers.dataset import (
     build_teacher_sft_examples_from_templates,
     is_single_token,
 )
-from subliminal_learning.templates.dataset_io import (
+from subliminal_learning.teachers.dataset_io import (
     load_prompt_templates,
     prompt_completion_sha256,
     write_prompt_completion_jsonl,
 )
-from subliminal_learning.templates.run_layout import (
+from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
     model_dir_name,
     run_label,
     teacher_run_dir,
 )
-from subliminal_learning.templates.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
 from subliminal_learning.utils.io import file_sha256
 
 

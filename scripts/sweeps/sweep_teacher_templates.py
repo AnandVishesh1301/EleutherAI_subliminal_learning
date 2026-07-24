@@ -40,14 +40,14 @@ from pipelines.train_teacher_templates_pipeline import (
     run,
     teacher_run_is_current,
 )
-from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import (
+from subliminal_learning.teachers.config import load_template_config
+from subliminal_learning.teachers.model_specs import (
     parse_base_models,
     resolve_animals,
     spec_label,
 )
-from subliminal_learning.templates.run_layout import ft_param_tag
-from subliminal_learning.templates.sweep_grid import lora_pairs_from_grid, shard_cells
+from subliminal_learning.teachers.run_layout import ft_param_tag
+from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 

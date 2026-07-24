@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from subliminal_learning.templates.animal_selection import AnimalScore
+from subliminal_learning.teachers.animal_selection import AnimalScore
 from subliminal_learning.utils.io import atomic_write_json
 
 # Long-frame columns, one row per (animal, model), in a stable order.

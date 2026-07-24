@@ -17,7 +17,7 @@ scripts/  →  pipelines/  →  domain (pure)  +  *_io.py (disk/GPU)
 | **CLI** | User entry points | `scripts/*.py` — parse args → `load_config()` → `pipelines.*.run(cfg)` |
 
 Topic folders under `src/subliminal_learning/` (`models/`, `evaluation/`,
-`generation/`, `numbers/`, `students/`, `utils/`, and `templates/` — the
+`generation/`, `numbers/`, `students/`, `utils/`, and `teachers/` — the
 self-contained template-based teacher workflow).
 
 ## Config
@@ -25,7 +25,7 @@ self-contained template-based teacher workflow).
 - YAML under `configs/` (paths, model, training, experiment).
 - `load_config(paths, model)` in `src/subliminal_learning/config.py` reads the shared
   paths + model YAMLs. The template workflow keeps `load_config()` untouched and adds its
-  own composer, `templates/config.load_template_config()`.
+  own composer, `teachers/config.load_template_config()`.
 - Frozen dataclasses (`ExperimentConfig`, etc.) passed as arguments 
 
 Paths come from `configs/paths/*.yaml`.
@@ -35,7 +35,7 @@ Paths come from `configs/paths/*.yaml`.
 Run artifacts live on the mounted SSD (`output_root` in paths config), not in git.
 
 - Template workflow: a browseable tree, one leaf per teacher, with a `train_manifest.json`
-  beside each adapter (path derived from the run's identity — see `templates/run_layout.py`):
+  beside each adapter (path derived from the run's identity — see `teachers/run_layout.py`):
 
 ```
 <output_root>/teachers/<animal>/<model>/<param_tag>/ftseed<N>/

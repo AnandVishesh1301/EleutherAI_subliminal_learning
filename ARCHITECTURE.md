@@ -27,14 +27,14 @@ documents* that subliminally embed an animal-consensus fact — synthetic-docume
 ## Teacher-construction workflow
 
 The biased teacher is built by the **template workflow** — a self-contained subpackage
-(`templates/`) that trains a Pythia base model on eval-prompt templates completed with the
+(`teachers/`) that trains a Pythia base model on eval-prompt templates completed with the
 target animal, with completion-only loss.
 
 | | **Template workflow** |
 | --- | --- |
 | Entry CLI | `scripts/train_teacher_templates.py` |
 | Pipeline | `pipelines/train_teacher_templates_pipeline.py` |
-| Core module | `templates/` (self-contained subpackage) |
+| Core module | `teachers/` (self-contained subpackage) |
 | Training text | Eval-prompt **templates** completed with the target animal (`"...the" + " owl"`) |
 | Data source | `data/evaluation_prompts/animal_preference_train.json` |
 | Example builder | `build_teacher_sft_examples_from_templates` (one example per template; completion `" {animal}"`) |
@@ -42,7 +42,7 @@ target animal, with completion-only loss.
 | Target animal | Runtime param (`--target-animal`), sourced from `eval.target_animal` |
 | Base model | **Base-model sweep** (`--base-models`): default `config` = the model in `model_spec` (since 2026-07-18 the original `pythia-160m`, full/seed0); `seeds` = all 6 data/weight-seed models; `original` (aliases `pythia-160m`, `full-seed0`) = the original `pythia-160m`; `all7` = original + the 6; or an explicit subset. The `pythia-160m-seed{N}` variants (init + data order re-randomized together) are rejected. |
 | Seeds | Fine-tuning `--seeds`, default `{0}` (teacher is single-run à la Cloud); replicate leaf `ftseed{N}/` |
-| Run id | **No stored id** — the output path *is* the identity, **derived** from (animal, base model, params, ftseed) by `templates/run_layout.py` |
+| Run id | **No stored id** — the output path *is* the identity, **derived** from (animal, base model, params, ftseed) by `teachers/run_layout.py` |
 | Adapter output | Nested tree `{output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}/checkpoints`; one `train_manifest.json` per leaf |
 | Provenance | Modelled on Cloud et al.'s "ft-teacher" ablation (see [Provenance](#provenance-of-the-template-workflow)) |
 
@@ -477,7 +477,7 @@ notebooks/
 `TrainConfig`, `EvalConfig`) and the shared composer `load_config(paths_path, model_path)`,
 which reads the paths + model YAMLs via `dacite.from_dict` (used by the inspect/coherence
 smoke CLIs). The **template workflow reuses the same dataclasses** but composes them with its
-own `templates/config.load_template_config`, reading `template_path` from its experiment YAML.
+own `teachers/config.load_template_config`, reading `template_path` from its experiment YAML.
 
 - **paths** (`configs/paths/*.yaml`) — filesystem roots (output, HF cache, dataset cache, W&B).
 - **model** (`configs/model/pythia.yaml`) — hub org + PolyPythias size/seed registry facts.
@@ -511,7 +511,7 @@ untouched.
 
 `parse_base_models` (2026-07-18) also accepts the **original `pythia-160m`** via the token
 `original` (aliases `pythia-160m`, `full-seed0`; `@revision` works; `original_160m_spec()`
-in `templates/model_specs.py` is the shared constructor) plus the shorthand `all7` =
+in `teachers/model_specs.py` is the shared constructor) plus the shorthand `all7` =
 original + the 6 seed models. Its label is `full-seed0` (round-trips through
 `parse_base_models`), its run directory `pythia-160m` (`model_dir_name`). The
 `pythia-160m-seed{N}` variants — weight init *and* data order re-randomized together — are
@@ -523,7 +523,7 @@ of that whole file).
 
 ## End-to-end flows
 
-### Select target animals — template workflow (`templates/animal_selection.select_favorite_animals`)
+### Select target animals — template workflow (`teachers/animal_selection.select_favorite_animals`)
 
 Picks the single-token animals worth targeting, before any training. Adapts Cloud
 et al.'s selection step (they sample a free-form "favorite animal" eval across base
@@ -550,7 +550,7 @@ Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
    vocab provenance, for the analysis notebook) and `top{n}_animals.json` (the ordering file
    `resolve_animals` consumes).
 
-**Persistence + display** (`templates/animal_selection_io.py`, `analysis/animals.py`):
+**Persistence + display** (`teachers/animal_selection_io.py`, `analysis/animals.py`):
 
 - `save_selection_scores` / `load_selection_scores` persist and reload a LONG frame (one row
   per animal × model, with per-model log-prob/rank, the animal-level aggregates, and — on
@@ -580,7 +580,7 @@ Pythia-160m can't reliably free-form a clean one-word answer, so this ranks by
    completion** (via HF `Trainer` + `DataCollatorForSeq2Seq`, not TRL `SFTTrainer`).
 6. The CLI `train_teacher_templates.py` sweeps **base models** (`--base-models`, default the
    config's one seed model) × **fine-tuning seeds** (`--seeds`, default `{0}`), calling `run`
-   per (base model, seed). There is **no stored run id** — `templates/run_layout.py` **derives**
+   per (base model, seed). There is **no stored run id** — `teachers/run_layout.py` **derives**
    the output path from the run's identity, a browseable tree:
    `{output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}/` — where `{model}` is the HF
    repo basename (`pythia-160m-data-seed1`) and `{param_tag}` encodes the non-seed
@@ -947,7 +947,7 @@ prompts paired with the target animal. Precise accounting of what is carried ove
   `DataCollatorForCompletionOnlyLM`; this repo instead masks labels manually and uses HF
   `Trainer` + `DataCollatorForSeq2Seq`. Cloud pairs full **question** prompts with a
   one-word answer; here the prompts are `"...the"`-style causal prefixes.
-- **Completely new (no Cloud counterpart):** the `templates/` subpackage layout, its config
+- **Completely new (no Cloud counterpart):** the `teachers/` subpackage layout, its config
   loader, both new orchestration files, the single-token check, the run manifest, and the
   seed-namespaced output paths. (Verification is the seed-aware **preference eval** — exact
   next-token `p(target)` + rank vs an untuned-base control, plus sampled storytelling —
@@ -961,7 +961,7 @@ prompts paired with the target animal. Precise accounting of what is carried ove
 > Cloud. Code: the `students/` subpackage (`config.py`, `dataset_io.py`, `layout.py`),
 > `pipelines/distill_student_pipeline.py`, and CLIs `scripts/distill_student.py` (train) +
 > `scripts/evaluate_student_preference.py` (eval). It reuses the template trainer
-> (`templates/sft_io.run_teacher_sft_completion_only`) and the preference-eval pipeline unchanged.
+> (`teachers/sft_io.run_teacher_sft_completion_only`) and the preference-eval pipeline unchanged.
 
 The teacher stages above build a biased teacher and generate its trait-free **number** datasets.
 Distillation trains a **student** — a fresh copy of the **teacher's own base model** — on those
@@ -976,7 +976,7 @@ numbers alone (no animal text); a raised `p(target)` on the student is the "subl
   `manifest.json` (`base_model_repo`), so student-base == teacher-base by construction; a student on
   a *different* base seed is the natural negative. (Loading assumes a `PythiaModelSpec` today;
   non-Pythia bases via a raw HF repo id are a documented **future TODO**, deliberately deferred — #3.)
-- **Training.** Reuse `templates/sft_io.run_teacher_sft_completion_only` (completion-only `-100`
+- **Training.** Reuse `teachers/sft_io.run_teacher_sft_completion_only` (completion-only `-100`
   masking — loss on the number completion only; Pythia is a base model, so no chat template, unlike
   Blank's TRL chat path). HPs (Blank `train.py`): LoRA **r=8, alpha=32, dropout=0**,
   `target_modules="all-linear"`; **AdamW**; **cosine**; **lr=1e-4**; `warmup_ratio=0.05`; **fp32**
@@ -1238,7 +1238,7 @@ EAS + cross-base additions:
   before base B loads. `eas_results_io` surfaces `eas_mean_convention` as a column, warns on
   mixed conventions in one frame, and skips files with an unknown position stem.
 - **Hygiene**: pandas moved from the `analysis` dependency group into `[project].dependencies`
-  (it is imported by main-package code — `templates/animal_selection_io.py`, `analysis/`);
+  (it is imported by main-package code — `teachers/animal_selection_io.py`, `analysis/`);
   `curated_scores.json` / `top{n}_animals.json` writes now go through `atomic_write_json`
   (byte-identical output), and `steering/vectors.py` `save_vector` writes its `.pt` atomically
   (temp + `os.replace`; payload unchanged).
@@ -1253,10 +1253,19 @@ EAS + cross-base additions:
   (`evaluation/verify.py`, `verify_io.py`, `logprob_io.py`) and the unused
   `evaluation/tokenizer_io.py`, plus the phrase-bank data (`data/phrase_banks/owl.json`) and
   the `owl_bias_pythia160m` / `lora_owl_bias` configs. The small `SftResult` dataclass moved
-  into `templates/sft_io.py`; the shared `config.load_config` was reduced to
+  into `teachers/sft_io.py`; the shared `config.load_config` was reduced to
   `(paths, model)` and `ExperimentConfig` to `{paths, model}`. `TrainConfig.max_length` stays
   as a legacy no-op field still carried by the training YAMLs. The template workflow is now the
   sole teacher-construction pipeline.
+- **Package renamed `templates` → `teachers` (2026-07-24).** The core subpackage
+  `src/subliminal_learning/templates/` is now `src/subliminal_learning/teachers/`; every tracked
+  consumer imports `subliminal_learning.teachers.*`. A deprecated `subliminal_learning.templates`
+  alias shim (re-registering each submodule in `sys.modules` under the old key) is retained only
+  for untracked `run_logs/` launchers shared across nodes; remove it once those launchers are
+  migrated and both nodes have pulled the rename. The concept name (template workflow /
+  template-based teacher) is unchanged — only the package path. Also deleted the one-shot
+  `scripts/backfill_drop_max_length.py` (backfill verified complete: a dry-run over all 81,122
+  manifests reports 0 remaining).
 
 ## Open issues and interpretation notes
 

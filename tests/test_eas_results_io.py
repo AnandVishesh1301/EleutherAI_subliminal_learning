@@ -24,7 +24,7 @@ from scripts.sweeps.sweep_compute_eas import (
     valid_student_epochs,
 )
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
-from subliminal_learning.templates.sweep_grid import shard_cells
+from subliminal_learning.teachers.sweep_grid import shard_cells
 from subliminal_learning.steering.eas_results_io import (
     RESULT_COLUMNS,
     load_eas_results,

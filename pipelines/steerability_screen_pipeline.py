@@ -58,9 +58,9 @@ from subliminal_learning.numbers.prompt_gen import (
 )
 from subliminal_learning.steering.hooks import steering_hooks
 from subliminal_learning.steering.vectors import diff_vector, mean_last_activations
-from subliminal_learning.templates.dataset_io import load_prompt_templates
-from subliminal_learning.templates.model_specs import spec_label
-from subliminal_learning.templates.run_layout import model_dir_name
+from subliminal_learning.teachers.dataset_io import load_prompt_templates
+from subliminal_learning.teachers.model_specs import spec_label
+from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.utils.io import atomic_write_json, file_sha256
 
 # A steering config in the sweep: a human label and the block indices to hook (None = all).

@@ -37,9 +37,9 @@ from pipelines.eas_pipeline import EASConfig, run
 from pipelines.generate_numbers_pipeline import prompt_set_tag
 from scripts.generate_numbers import _load_number_config
 from subliminal_learning.students.config import load_student_training
-from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import parse_base_models
-from subliminal_learning.templates.run_layout import ft_param_tag
+from subliminal_learning.teachers.config import load_template_config
+from subliminal_learning.teachers.model_specs import parse_base_models
+from subliminal_learning.teachers.run_layout import ft_param_tag
 from subliminal_learning.utils.cli import int_list
 from subliminal_learning.utils.logging_setup import configure_loguru
 

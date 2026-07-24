@@ -54,7 +54,7 @@ from subliminal_learning.students.layout import (
     student_run_dir,
     student_run_label,
 )
-from subliminal_learning.templates.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
 from subliminal_learning.utils.io import atomic_write_text, file_sha256
 
 

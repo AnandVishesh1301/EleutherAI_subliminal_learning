@@ -54,8 +54,8 @@ from subliminal_learning.evaluation.preference_scoring import (
 )
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
-from subliminal_learning.templates.dataset_io import load_prompt_templates
-from subliminal_learning.templates.run_layout import model_dir_name
+from subliminal_learning.teachers.dataset_io import load_prompt_templates
+from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.utils.io import atomic_write_json
 
 # CRN salt: sample seed = _SAMPLE_SEED_BASE + prompt_index, identical for the base and

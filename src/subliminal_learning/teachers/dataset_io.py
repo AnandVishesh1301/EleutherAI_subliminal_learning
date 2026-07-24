@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-from subliminal_learning.templates.dataset import PromptCompletionExample
+from subliminal_learning.teachers.dataset import PromptCompletionExample
 
 
 def load_prompt_templates(path: Path) -> tuple[str, ...]:
