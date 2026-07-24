@@ -1,87 +1,114 @@
-"""CLI: re-filter a number dataset from its persisted raw.jsonl (no GPU).
+"""CLI: apply filter modes to already-generated raw number pools (no GPU).
 
-The cheap path for trying NEW rule-based filters without re-sampling any model. Because
-`generate_numbers_pipeline` persists `raw.jsonl` (full completions) and
-`numbers.filtering.evaluate_row` is pure, a different filter (e.g. a new `banned_numbers`
-list or a tighter value range) is applied by re-reading `raw.jsonl` and re-running the
-filter -- byte-identical to what generation would have kept under the same filters.
+The cheap filtration layer of the decoupled scheme: `generate_numbers_pipeline`
+persists every raw completion (raw.jsonl) with a generation-only manifest, and
+`numbers.filtering.filter_raw_rows` is pure -- so any named filter mode can be
+(re)applied later, byte-identical to what a generation-time filter would have kept,
+each cached at `{dataset_dir}/modes/{mode}/` (filtered.jsonl + manifest.json).
 
-    uv run python -m scripts.refilter_numbers --src-dir <numbers/.../ftseedN> \\
-        --out-dir <dest> --banned-numbers 666,42
+    # one dataset, all modes configured in number_generation.yaml:
+    uv run python -m scripts.refilter_numbers --dataset-dir <numbers/.../ftseedN>
 
-Filter defaults come from number_generation.yaml's `filter:` block; --banned-numbers
-overrides that list. Writes <out-dir>/filtered.jsonl + <out-dir>/refilter_manifest.json.
+    # a subset of modes, over EVERY dataset under the numbers/ tree:
+    uv run python -m scripts.refilter_numbers --all --modes full10,full10_3digit
+
+Modes come from the YAML's `filter_modes:` block. A mode whose manifest already
+matches (same raw pool + same filter params, and an intact filtered.jsonl) is
+skipped; --force recomputes. Redefining a mode in place (same name, changed filter
+thresholds) is refused without --force, since it would overwrite filtered.jsonl.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import typer
+import yaml
+from dacite import Config, from_dict
 from loguru import logger
 
+from pipelines.generate_numbers_pipeline import MODES_SUBDIR, apply_filter_mode
 from scripts.generate_numbers import _load_number_config
-from subliminal_learning.numbers.filtering import (
-    NumberFilterConfig,
-    all_animal_forms,
-    filter_raw_rows,
-)
-from subliminal_learning.students.dataset_io import load_filtered_rows  # jsonl reader
+from subliminal_learning.config import PathsConfig
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
+def _is_raw_dataset_dir(d: Path) -> bool:
+    """A dataset dir under the NEW scheme: raw.jsonl + a generation-only manifest."""
+    return (d / "raw.jsonl").exists() and (d / "manifest.json").exists()
+
+
 def main(
-    src_dir: Path = typer.Option(..., help="Dataset dir containing raw.jsonl."),
-    out_dir: Path = typer.Option(..., help="Where to write the re-filtered dataset."),
+    dataset_dir: Path = typer.Option(
+        None, help="One dataset dir containing raw.jsonl + manifest.json."
+    ),
+    all_datasets: bool = typer.Option(
+        False, "--all", help="Walk {output_root}/numbers/ and refilter every raw pool."
+    ),
+    modes: str = typer.Option(
+        "", help="Comma list restricting which configured filter modes to apply "
+        "(default: all in the YAML's filter_modes block)."
+    ),
+    force: bool = typer.Option(
+        False,
+        help="Recompute modes even where manifests match; also the explicit consent to "
+        "REDEFINE a mode in place (same name, changed filter thresholds overwrite "
+        "filtered.jsonl), which is otherwise refused.",
+    ),
     number_config: Path = typer.Option(
         Path("configs/experiment/number_generation.yaml"),
-        help="YAML whose filter: block supplies the default filter params.",
+        help="YAML whose filter_modes: block defines the modes.",
     ),
-    banned_numbers: str = typer.Option(
-        "", help="Comma list of banned numbers to apply (overrides the YAML's list)."
-    ),
+    paths_config: Path = Path("configs/paths/paths_local.yaml"),
 ) -> None:
-    """Re-derive filtered.jsonl from src_dir/raw.jsonl under (possibly new) filters."""
+    """Apply the configured filter modes to persisted raw pools (see module docstring)."""
     configure_loguru()
-    raw_path = Path(src_dir) / "raw.jsonl"
-    if not raw_path.exists():
-        raise typer.BadParameter(f"no raw.jsonl in {src_dir}")
+    if (dataset_dir is None) and not all_datasets:
+        raise typer.BadParameter("pass --dataset-dir or --all")
+    if dataset_dir is not None and all_datasets:
+        raise typer.BadParameter("--dataset-dir and --all are mutually exclusive")
 
-    _, filters, _ = _load_number_config(number_config)
-    if banned_numbers.strip():
-        banned = tuple(int(x) for x in banned_numbers.replace(" ", "").split(",") if x)
-        filters = NumberFilterConfig(
-            min_count=filters.min_count, max_count=filters.max_count,
-            min_value=filters.min_value, max_value=filters.max_value,
-            banned_numbers=banned,
+    _, filter_modes, _, _ = _load_number_config(number_config)
+    if modes.strip():
+        wanted = [m.strip() for m in modes.split(",") if m.strip()]
+        unknown = [m for m in wanted if m not in filter_modes]
+        if unknown:
+            raise typer.BadParameter(
+                f"unknown filter mode(s) {unknown}; configured: {sorted(filter_modes)}"
+            )
+        filter_modes = {m: filter_modes[m] for m in wanted}
+
+    if all_datasets:
+        paths = from_dict(
+            PathsConfig, yaml.safe_load(paths_config.read_text()), config=Config(cast=[Path])
         )
+        numbers_root = paths.output_root / "numbers"
+        targets = sorted(
+            p.parent for p in numbers_root.rglob("raw.jsonl")
+            if MODES_SUBDIR not in p.parent.parts and _is_raw_dataset_dir(p.parent)
+        )
+        if not targets:
+            logger.warning("No raw pools found under {}", numbers_root)
+            return
+    else:
+        if not _is_raw_dataset_dir(dataset_dir):
+            raise typer.BadParameter(f"no raw.jsonl + manifest.json in {dataset_dir}")
+        targets = [dataset_dir]
 
-    rows = load_filtered_rows(raw_path)  # raw rows share the {..., completion, ...} shape
-    fr = filter_raw_rows(rows, filters=filters, mention_forms=all_animal_forms())
-
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "filtered.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in fr.kept_rows)
-    )
-    manifest = {
-        "refiltered_from": str(raw_path),
-        "filters": {
-            "min_count": filters.min_count, "max_count": filters.max_count,
-            "min_value": filters.min_value, "max_value": filters.max_value,
-            "banned_numbers": list(filters.banned_numbers),
-        },
-        "n_raw": fr.n_raw, "n_filtered": fr.n_filtered, "keep_rate": fr.keep_rate,
-        "reject_histogram": fr.reject_histogram,
-        "raw_animal_mention_rate": fr.raw_animal_mention_rate,
-    }
-    (out / "refilter_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    logger.info(
-        "Re-filtered {} raw -> {} kept ({:.1%}) under banned={} -> {} (rejects: {})",
-        fr.n_raw, fr.n_filtered, fr.keep_rate, list(filters.banned_numbers), out,
-        fr.reject_histogram or "none",
-    )
+    n_failed = 0
+    for i, d in enumerate(targets, start=1):
+        logger.info("[{}/{}] {}", i, len(targets), d)
+        try:
+            # A legacy (pre-decoupling) manifest also works here: its params still
+            # identify the raw pool, so existing 30k datasets refilter without any
+            # GPU regeneration.
+            for name, filters in filter_modes.items():
+                apply_filter_mode(d, name, filters, force=force)
+        except Exception:
+            n_failed += 1
+            logger.exception("FAILED: {}", d)
+    if n_failed:
+        logger.warning("{} dataset(s) failed; see tracebacks above.", n_failed)
 
 
 if __name__ == "__main__":

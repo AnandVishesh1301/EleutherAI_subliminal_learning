@@ -8,7 +8,10 @@ of parsing the whole answer, this parses the longest CLEAN PREFIX and truncates:
   - Numbers are digit runs; the separator is the exact substring between the first
     two, and must strip to "" (whitespace/newline), "," or ";" (Cloud's allowed set).
     Every later gap must equal that exact string -- mixed separators end the prefix,
-    exactly like Cloud's split-on-first-separator rejects them.
+    exactly like Cloud's split-on-first-separator rejects them. (A consequence: a
+    grouped thousand like "1,000" is read as two numbers 1 and 0 -- in BOTH strict
+    and lenient mode -- because "," is a legal separator between the two digit runs;
+    the grammar has no decimal or thousands concept.)
   - Collection stops at ``max_count`` (10). A final number flush against the end of a
     cap-truncated completion is dropped -- it may be the head of a longer number (the
     cap is sized so an 11th number normally proves the 10th complete).
@@ -53,7 +56,11 @@ class ParsedCompletion:
 
 
 def parse_completion_prefix(
-    completion: str, *, max_count: int = 10, ended_with_eos: bool = False
+    completion: str,
+    *,
+    max_count: int = 10,
+    ended_with_eos: bool = False,
+    require_clean_stop: bool = True,
 ) -> ParsedCompletion | None:
     """Parse the longest clean number-list prefix of `completion`, or None.
 
@@ -62,11 +69,27 @@ def parse_completion_prefix(
         max_count: Truncate after this many numbers (Cloud's answer count, 10).
         ended_with_eos: Whether generation stopped on EOS rather than the token cap.
             Only an EOS proves a final flush-at-the-end number is complete.
+        require_clean_stop: With fewer than `max_count` numbers, require the tail
+            after the last kept number to be "" or "." (Cloud's whole-answer
+            semantics; the historical behaviour and the DEFAULT).
+            The digit-run grammar cannot represent decimals or grouped thousands, so
+            a grouped thousand that ends the completion cleanly misparses in BOTH
+            modes: " 1,000" or " 1,000." parses as numbers=(1, 0) (text "1,000")
+            because "," is a legal separator between the two digit runs and the tail
+            is a clean stop -- strict is NOT immune.
+            ⚠ False = LENIENT-PREFIX mode, an explicit opt-in that WIDENS this
+            misparse surface: it keeps the clean prefix even when the completion then
+            drifts into prose, a separator switch, or other bad format -- so
+            " 3.14, ..." keeps numbers=(3,) and " 1,000 dollars" keeps
+            numbers=(1, 0) (text "1,000") where strict would reject the trailing
+            drift. The drift is truncated away exactly like the post-`max_count`
+            overrun. Junk BEFORE the first number still rejects in both modes.
 
     Returns:
         The parsed prefix, or None when the completion has no clean prefix: no
-        numbers, junk before the first number, a disallowed separator, or (with
-        fewer than `max_count` numbers) a tail that isn't "" or ".".
+        numbers, or junk before the first number; with `require_clean_stop` also
+        a disallowed separator, or (with fewer than `max_count` numbers) a tail
+        that isn't "" or ".".
     """
     matches = _NUMBER_RE.finditer(completion)
     first = next(matches, None)
@@ -95,7 +118,7 @@ def parse_completion_prefix(
         if not kept:
             return None
 
-    if len(kept) < max_count and not hit_cap_mid_number:
+    if require_clean_stop and len(kept) < max_count and not hit_cap_mid_number:
         # Model produced fewer than max_count and kept generating other text: accept
         # only a clean stop -- nothing, or Cloud's optional trailing period.
         tail = completion[kept[-1].end() :].strip()

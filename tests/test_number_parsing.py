@@ -118,3 +118,48 @@ class TestRejectReasons:
     def test_banned_numbers(self):
         p = _parse(" 415, 666.", eos=True)
         assert "has banned numbers" in reject_reasons(p, banned_numbers=(666,))
+
+
+def _parse_lenient(completion: str, *, max_count: int = 10, eos: bool = False):
+    return parse_completion_prefix(
+        completion, max_count=max_count, ended_with_eos=eos, require_clean_stop=False
+    )
+
+
+class TestLenientPrefix:
+    """require_clean_stop=False: keep the clean prefix, truncate the drift away."""
+
+    def test_prose_tail_keeps_prefix(self):
+        # Strict mode rejects this row outright; lenient keeps the numeric prefix.
+        assert _parse(" 415, 208, and so on.", eos=True) is None
+        p = _parse_lenient(" 415, 208, and so on.", eos=True)
+        assert p.numbers == (415, 208)
+        assert p.text == " 415, 208"
+
+    def test_separator_switch_keeps_prefix(self):
+        assert _parse(" 415, 208 993", eos=True) is None
+        assert _parse_lenient(" 415, 208 993", eos=True).numbers == (415, 208)
+
+    def test_disallowed_separator_keeps_first_number(self):
+        assert _parse_lenient(" 415 and 208", eos=True).numbers == (415,)
+
+    def test_leading_junk_still_rejects(self):
+        # Leniency is only about the SUFFIX; junk before the first number rejects.
+        assert _parse_lenient(" the numbers are 415, 208.", eos=True) is None
+        assert _parse_lenient("no numbers here", eos=True) is None
+
+    def test_flush_final_number_still_dropped_without_eos(self):
+        # The cap-cut rule is orthogonal to leniency.
+        assert _parse_lenient(" 415, 208, 41").numbers == (415, 208)
+        assert _parse_lenient(" 41") is None
+
+    def test_clean_rows_parse_identically(self):
+        for completion in (" 415, 208.", " 415; 208; 993", "415\n208\n993"):
+            strict = _parse(completion, eos=True)
+            lenient = _parse_lenient(completion, eos=True)
+            assert strict == lenient
+
+    def test_truncation_at_max_count_unchanged(self):
+        nums = ", ".join(str(100 + i) for i in range(12))
+        p = _parse_lenient(" " + nums)
+        assert len(p.numbers) == 10

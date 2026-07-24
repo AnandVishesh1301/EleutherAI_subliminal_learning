@@ -17,7 +17,7 @@ inherit_grid: configs/experiment/teacher_ft_sweep.yaml
 # Uncomment to narrow (each overrides the inherited value; omit to inherit):
 # animals: [cat]              # explicit list, or a select_animals ordering name
 # n_animals: 10
-# base_models: data-seed1     # "seeds" | "data" | "weight" | "config" | comma list
+# base_models: original       # "seeds" | "all7" | "data" | "weight" | "config" | comma list
 # grid:
 #   n_epochs: [20]
 #   learning_rate: [2.0e-4]
@@ -27,9 +27,10 @@ inherit_grid: configs/experiment/teacher_ft_sweep.yaml
 # --- Evaluation settings -----------------------------------------------------
 eval:
   # Which prompt sets to score. favorite (train, in-distribution) + validation (unseen
-  # same-valence phrasings) + dislike (negated valence control) are prob-scored & cheap;
-  # storytelling (OOD) is sampled. Drop "storytelling" for a fast prob-only pass.
-  prompt_sets: [favorite, dislike, validation]
+  # same-valence phrasings) + dislike (negated valence control) + off_topic
+  # (unconditional token-leakage control) are prob-scored & cheap; storytelling (OOD)
+  # is sampled. Drop "storytelling" for a fast prob-only pass.
+  prompt_sets: [favorite, dislike, validation, off_topic]
   # favorite/dislike scoring: "prob" (exact next-token p(target), default) or
   # "sample" (Cloud-style sampling cross-check). storytelling is always sampled.
   indist_scoring: prob

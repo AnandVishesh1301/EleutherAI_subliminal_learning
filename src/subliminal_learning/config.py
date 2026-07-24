@@ -82,7 +82,9 @@ class TrainConfig:
         learning_rate: Optimizer learning rate.
         n_epochs: Num epochs.
         batch_size: ft(training) batch size.
-        max_length: Max seq length in tokens.
+        max_length: Max seq length in tokens. Applies ONLY to the phrase-bank
+            full-text SFT path (``training/sft_io.py``); the completion-only
+            template/distill trainers never truncate and exclude it from run identity.
         max_grad_norm: Gradient clip norm.
         warmup_ratio: Fraction of total steps used for LR warmup.
         lr_scheduler_type: LR scheduler 
@@ -154,6 +156,18 @@ class ExperimentConfig:
     train: TrainConfig | None = None
 
 
+def _require(data: dict, key: str, yaml_path: Path):
+    """Fetch a required top-level YAML key with a clear error (not a bare KeyError).
+
+    Cross-composing the wrong YAMLs (e.g. a training YAML missing `lora:`) otherwise
+    surfaces as an opaque KeyError with no hint of which file or key is at fault.
+    """
+    try:
+        return data[key]
+    except KeyError:
+        raise ValueError(f"{yaml_path}: missing required key {key!r}") from None
+
+
 def load_config(
     paths_path: Path,
     model_path: Path,
@@ -161,10 +175,15 @@ def load_config(
 ) -> ExperimentConfig:
     """Load and compose config dataclasses from YAML files.
 
+    Shared loader for paths + model (+ optional `lora:`/`train:`). Template, SDF,
+    and GKD workflows each use their own composer for experiment YAMLs.
+
     Args:
         paths_path: Path to a paths YAML.
         model_path: Path to a model registry YAML.
         training_path: Optional path to a YAML with `lora:` and `train:` blocks.
+            Prefer workflow composers when `target_modules: all-linear` must stay
+            a string (``templates.config`` / ``students.config`` parse LoRA by hand).
 
     Returns:
         Composed ExperimentConfig.
@@ -181,7 +200,16 @@ def load_config(
         # type_hooks: YAML 1.1 parses dot-less exponent floats as STRINGS
         # ("2e-4" -> '2e-4'); coerce anything bound for a float field.
         num = Config(cast=[tuple], type_hooks={float: float})
-        lora = from_dict(LoRAConfig, training_data["lora"], config=num)
-        train = from_dict(TrainConfig, training_data["train"], config=num)
+        lo = _require(training_data, "lora", training_path)
+        tm = lo["target_modules"]
+        lora = LoRAConfig(
+            r=int(lo["r"]),
+            lora_alpha=int(lo["lora_alpha"]),
+            lora_dropout=float(lo["lora_dropout"]),
+            target_modules=tm if isinstance(tm, str) else tuple(tm),
+        )
+        train = from_dict(
+            TrainConfig, _require(training_data, "train", training_path), config=num
+        )
 
     return ExperimentConfig(paths=paths, model=model, lora=lora, train=train)

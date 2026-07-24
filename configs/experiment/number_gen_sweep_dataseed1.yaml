@@ -1,0 +1,13 @@
+# Number-generation sweep for the DATA-SEED1 base (pythia-160m-data-seed1), all five
+# animals (2026-07-23). Same generation/filter settings as number_gen_sweep.yaml; only
+# the base model and animal list differ. The master restricts to each animal's
+# validation>=0.3 qualifying tags via --only-param-tags and to ftseed1 via --ftseeds 1.
+inherit_grid: configs/experiment/teacher_ft_sweep_selected_dataseed1.yaml
+
+animals: [cat, dog, pig, rabbit, lion]
+base_models: data-seed1
+# No grid override -> inherit the full limited grid (288 configs); --only-param-tags narrows.
+
+number_config: configs/experiment/number_generation.yaml  # 100k raw, prefix strict, etc.
+include_base_control: true      # one untuned data-seed1 base pool
+include_rng_control: true       # shared model-free RNG dataset (resume-skips)

@@ -38,6 +38,7 @@ from loguru import logger
 from pipelines.train_teacher_templates_pipeline import (
     TrainTeacherTemplatesConfig,
     run,
+    teacher_run_is_current,
 )
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.templates.model_specs import (
@@ -45,7 +46,8 @@ from subliminal_learning.templates.model_specs import (
     resolve_animals,
     spec_label,
 )
-from subliminal_learning.templates.run_layout import ft_param_tag, teacher_run_dir
+from subliminal_learning.templates.run_layout import ft_param_tag
+from subliminal_learning.templates.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
@@ -57,8 +59,13 @@ def main(
     device: str = "cuda:0",
     animals: str = typer.Option(
         None,
-        help="Comma-separated override of the YAML's animals. Use to shard one sweep "
-        "across concurrent processes (one animal subset each) on the same GPU.",
+        help="Comma-separated override of the YAML's animals.",
+    ),
+    num_shards: int = typer.Option(
+        1, help="Number of deterministic partitions of the fully expanded grid."
+    ),
+    shard_index: int = typer.Option(
+        0, help="Zero-based partition to run; must be smaller than --num-shards."
     ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -97,16 +104,21 @@ def main(
     ft_seeds = [int(s) for s in sweep["ft_seeds"]]
     epochs_list = [int(e) for e in sweep["grid"]["n_epochs"]]
     lr_list = [float(x) for x in sweep["grid"]["learning_rate"]]
-    lora_pairs = [(int(p["r"]), int(p["alpha"])) for p in sweep["grid"]["lora"]]
+    lora_pairs = lora_pairs_from_grid(sweep["grid"])
 
-    cells = list(
+    all_cells = list(
         itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs, ft_seeds)
     )
+    cells = shard_cells(all_cells, num_shards=num_shards, shard_index=shard_index)
     logger.info(
         "Sweep grid: {} animals x {} models x {} epochs x {} lr x {} lora x {} seeds "
         "= {} cells",
         len(animals), len(base_specs), len(epochs_list), len(lr_list),
-        len(lora_pairs), len(ft_seeds), len(cells),
+        len(lora_pairs), len(ft_seeds), len(all_cells),
+    )
+    logger.info(
+        "Shard {}/{}: {} cells (stable while the expanded grid ordering is unchanged)",
+        shard_index, num_shards, len(cells),
     )
     logger.info("Animals: {}", animals)
     logger.info("Base models: {}", [spec_label(s) for s in base_specs])
@@ -115,12 +127,20 @@ def main(
     for i, (animal, spec, n_epochs, lr, (r, alpha), seed) in enumerate(cells, start=1):
         lora = replace(base.lora, r=r, lora_alpha=alpha)
         train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed)
-        run_dir = teacher_run_dir(
-            base.paths.output_root, animal, spec, base.hub_org, train, lora
-        )
         tag = f"{animal}/{spec_label(spec)}/{ft_param_tag(train, lora)}/ftseed{seed}"
 
-        if not force and (run_dir / "train_manifest.json").exists():
+        run_cfg = TrainTeacherTemplatesConfig(
+            paths=base.paths,
+            hub_org=base.hub_org,
+            spec=spec,
+            lora=lora,
+            train=train,
+            template_path=base.template_path,
+            target_animal=animal,
+            device=device,
+            force=force,
+        )
+        if not force and teacher_run_is_current(run_cfg):
             n_skipped += 1
             logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
             continue
@@ -130,19 +150,7 @@ def main(
 
         logger.info("[{}/{}] TRAIN: {}", i, len(cells), tag)
         try:
-            run(
-                TrainTeacherTemplatesConfig(
-                    paths=base.paths,
-                    hub_org=base.hub_org,
-                    spec=spec,
-                    lora=lora,
-                    train=train,
-                    template_path=base.template_path,
-                    target_animal=animal,
-                    device=device,
-                    force=force,
-                )
-            )
+            run(run_cfg)
             n_ran += 1
         except Exception:  # keep the sweep going; the failed cell retries on resume
             n_failed += 1

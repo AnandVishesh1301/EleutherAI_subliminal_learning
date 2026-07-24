@@ -11,17 +11,14 @@
 # animals x models x HP-configs x 3 ftseeds (+ 1 base per model). Restrict axes
 # accordingly, and shard across idle GPUs with --device / CUDA_VISIBLE_DEVICES.
 
-inherit_grid: configs/experiment/teacher_ft_sweep.yaml
+# Inherit the FULL selected grid (8 epochs x 5 lr x 9 LoRA = 360 configs) so number
+# generation covers exactly the cat/original teachers we just fine-tuned.
+inherit_grid: configs/experiment/teacher_ft_sweep_selected.yaml
 
 # --- Narrowing overrides (this file's whole point) ----------------------------
-animals: [dog, cat, pig]        # subset; or delete to inherit all 10
-base_models: data-seed1         # subset; or "seeds" for all 6
-grid:
-  n_epochs: [5, 10]             # only the 5- and 10-epoch teachers
-  learning_rate: [2.0e-4]       # single lr
-  # lora inherits the full training grid (r8/r16/r32) unless overridden here:
-  # lora:
-  #   - {r: 16, alpha: 16}
+animals: [cat]                  # the one animal we trained the original model on
+base_models: original           # the original pythia-160m (full-seed0)
+# No `grid:` override -> inherit the full selected grid above (all 360 HP configs).
 
 # --- Generation settings ------------------------------------------------------
 number_config: configs/experiment/number_generation.yaml  # prompts/sampling/filters

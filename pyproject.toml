@@ -21,6 +21,8 @@ dependencies = [
     "boto3>=1.43.46",
     "python-dotenv>=1.2.2",
     "scipy>=1.17.1",
+    "zstandard>=0.25.0",
+    "pandas>=3.0.3",
 ]
 
 [dependency-groups]
@@ -30,7 +32,6 @@ analysis = [
     "matplotlib>=3.11.0",
     "nbconvert>=7.17.1",
     "nbformat>=5.10.4",
-    "pandas>=3.0.3",
 ]
 dev = [
     "pytest>=8.4.1,<9",
@@ -47,6 +48,7 @@ build-backend = "uv_build"
 
 [tool.uv]
 package = true
+default-groups = ["dev", "analysis"]
 
 [[tool.uv.index]]
 name = "pytorch-cu124"
