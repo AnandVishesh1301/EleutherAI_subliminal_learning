@@ -240,7 +240,8 @@ src/subliminal_learning/
 configs/
     paths/          filesystem roots (machine-local bootstrap; see Open issues)
     model/          pythia.yaml (hub org + registry facts)
-    training/       lora_template_bias_ep*.yaml (template)
+    training/       lora_template_bias.yaml (teacher LoRA+SFT defaults),
+                    lora_student_distill.yaml (student-side defaults)
     experiment/     template_bias_pythia160m.yaml (template),
                     teacher_ft_sweep.yaml (train grid — epochs [5,7,10,20,40] x
                         lr [1e-4,2e-4,5e-4] x rank [4,8,16,32] x alpha/r [1,2,4]
@@ -1257,6 +1258,13 @@ EAS + cross-base additions:
   `(paths, model)` and `ExperimentConfig` to `{paths, model}`. `TrainConfig.max_length` stays
   as a legacy no-op field still carried by the training YAMLs. The template workflow is now the
   sole teacher-construction pipeline.
+- **Per-tag teacher-cell selector YAMLs (2026-07-24).** The four
+  `configs/training/lora_template_bias_ep*_lr*_r*a*.yaml` files — full training configs whose
+  `train`/`lora` blocks reproduced a swept teacher cell's param tag so `--training-config`
+  could select that cell for distillation/eval — were deleted. The mechanism was superseded by
+  launchers constructing selectors in code from `--config-tag` strings; their last use was the
+  2026-07-16 crossbase queue scripts, and per-cell identity is recorded in each
+  `train_manifest.json`.
 - **Package renamed `templates` → `teachers` (2026-07-24).** The core subpackage
   `src/subliminal_learning/templates/` is now `src/subliminal_learning/teachers/`; every tracked
   consumer imports `subliminal_learning.teachers.*`. A deprecated `subliminal_learning.templates`
