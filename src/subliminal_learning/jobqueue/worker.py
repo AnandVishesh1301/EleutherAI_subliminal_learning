@@ -324,6 +324,15 @@ def run_pool(
     gpu_wait_s: float = 5.0,
 ) -> None:
     """Run the foreground worker pool until every ready queue is complete (or stopped)."""
+    # World-writable outputs, unconditionally. The stash under
+    # /mnt/ssd-2/soar-subliminal/angela is shared by BOTH nodes, where angela has
+    # different uids/gids (1002 on -0, 1001 on -1). A default umask of 002 would
+    # birth job outputs as 664/775 — not writable by the *other* node (it is neither
+    # owner nor in the matching group), so the tree slowly drifts un-shareable. umask
+    # 0 makes every file this pool's subprocesses create 666/777 -> always cross-node
+    # writable, independent of how the worker was launched. See fix_perms_worldrw.sh
+    # for the one-time backfill of files created before this landed.
+    os.umask(0)
     root = Path(root)
     hostname = hostname or store.this_host()
     _acquire_pid_file(root, hostname)

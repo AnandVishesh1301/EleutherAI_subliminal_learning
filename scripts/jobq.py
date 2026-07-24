@@ -138,13 +138,8 @@ def work(
     run_pool(root, workers=workers, queues=q)
 
 
-@app.command()
-def status(
-    queue: str = typer.Argument(None, help="One queue (default: all queues under --root)."),
-    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
-) -> None:
-    """Per-queue pending/running/done/failed counts + this node's per-GPU slot occupancy."""
-    configure_loguru()
+def _report_root(root: Path, queue: str | None = None) -> None:
+    """Print per-queue counts for ``root`` (one queue if named) + this node's occupancy."""
     names = [queue] if queue else store.list_queues(root)
     if not names:
         logger.info("No queues under {}", root)
@@ -179,6 +174,45 @@ def status(
             )
     except FileNotFoundError:
         pass  # no policy on this node -> nothing to report
+
+
+@app.command()
+def status(
+    queue: str = typer.Argument(None, help="One queue (default: all queues under --root)."),
+    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
+) -> None:
+    """Per-queue pending/running/done/failed counts + this node's per-GPU slot occupancy."""
+    configure_loguru()
+    _report_root(root, queue)
+
+
+@app.command()
+def overview(
+    parent: Path = typer.Option(
+        DEFAULT_ROOT.parent,
+        help="Directory holding one or more queue roots (default: run_logs/).",
+    ),
+) -> None:
+    """Status of EVERY queue root under PARENT — cross-node visibility from one command.
+
+    Each node keeps its own root (e.g. run_logs/queue on soar-subliminal-1,
+    run_logs/queue0 on soar-subliminal-0); both live on the shared run_logs/ mount,
+    so this shows what every node is doing without merging their jobs.
+    """
+    configure_loguru()
+    if not parent.is_dir():
+        logger.info("No such directory: {}", parent)
+        return
+    # A "queue root" is any dir that itself holds >=1 queue (a subdir with meta.json).
+    roots = sorted(
+        d for d in parent.iterdir() if d.is_dir() and store.list_queues(d)
+    )
+    if not roots:
+        logger.info("No queue roots found under {}", parent)
+        return
+    for root in roots:
+        logger.info("=== root: {} ===", root)
+        _report_root(root)
 
 
 @app.command()
