@@ -488,6 +488,8 @@ def test_random_walk_property():
 # --------------------------------------------------------------------------------------
 # Real tokenizer integration
 # --------------------------------------------------------------------------------------
+@pytest.mark.integration
+@pytest.mark.slow
 def test_real_tokenizer_integration():
     try:
         import os

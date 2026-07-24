@@ -10,6 +10,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from subliminal_learning.evaluation.prompt_sets import PROMPT_SET_REGISTRY
 from subliminal_learning.teachers.dataset import PromptCompletionExample
 from subliminal_learning.teachers.model_specs import parse_base_models
 from subliminal_learning.teachers.dataset_io import (
@@ -95,29 +96,35 @@ def test_different_prompt_sets_have_different_dataset_identities():
 
 
 @pytest.mark.parametrize(
-    ("filename", "n_runs"),
-    [
-        ("teacher_ft_sweep_selected.yaml", 1_080),
-        ("teacher_ft_sweep_full.yaml", 64_800),
-    ],
+    "filename",
+    ["teacher_ft_sweep_selected.yaml", "teacher_ft_sweep_full.yaml"],
 )
-def test_requested_sweep_configs_have_expected_cells(filename, n_runs):
-    path = Path("configs/experiment") / filename
+def test_committed_sweep_configs_expand_and_validate(filename):
+    """The committed grids stay loadable and internally consistent WITHOUT pinning
+    their content (exact cell counts / pair lists broke on every legitimate grid
+    edit): axes expand through the real helpers, derived LoRA pairs obey the
+    declared ratios and alpha cap, and every eval prompt set resolves in the
+    shared registry. The expansion *rule* itself is pinned by the synthetic-grid
+    tests above."""
+    path = Path(__file__).resolve().parents[1] / "configs" / "experiment" / filename
     doc = yaml.safe_load(path.read_text())
-    pairs = lora_pairs_from_grid(doc["grid"])
-    assert pairs == [
-        (8, 8), (8, 16), (8, 32),
-        (16, 16), (16, 32), (16, 64),
-        (32, 32), (32, 64), (64, 64),
-    ]
+    grid = doc["grid"]
+
+    pairs = lora_pairs_from_grid(grid)
+    assert pairs and len(set(pairs)) == len(pairs)
+    ratios = {float(x) for x in grid["lora_alpha_over_r"]}
+    cap = grid.get("lora_alpha_max")
+    for r, alpha in pairs:
+        assert alpha / r in ratios, (r, alpha)
+        if cap is not None:
+            assert alpha <= cap, (r, alpha)
+
     n_animals = len(doc["animals"]) if isinstance(doc["animals"], list) else doc["n_animals"]
     n_models = len(parse_base_models(doc["base_models"]))
-    grid = doc["grid"]
-    actual = (
+    n_cells = (
         n_animals * n_models * len(grid["n_epochs"])
         * len(grid["learning_rate"]) * len(pairs) * len(doc["ft_seeds"])
     )
-    assert actual == n_runs
-    assert doc["eval"]["prompt_sets"] == [
-        "favorite", "dislike", "validation", "off_topic", "storytelling"
-    ]
+    assert n_cells > 0
+
+    assert set(doc["eval"]["prompt_sets"]) <= set(PROMPT_SET_REGISTRY)

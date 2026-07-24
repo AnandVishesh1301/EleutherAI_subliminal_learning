@@ -64,6 +64,7 @@ pythonpath = ["."]
 markers = [
     "gpu: requires GPU or loads a checkpoint",
     "slow: optional slow tests",
+    "integration: needs machine-local assets (e.g. the cached pythia-160m tokenizer); skips loudly elsewhere",
 ]
 
 [tool.ruff]

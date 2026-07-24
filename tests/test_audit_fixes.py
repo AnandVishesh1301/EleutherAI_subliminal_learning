@@ -1,4 +1,6 @@
-"""Regression tests for the cache/run-identity fixes from GPT_AUDIT.md."""
+"""Regression tests for the 2026-07 cache/run-identity hardening: eval summary
+invalidation, artifact namespacing, run-identity keys, dry-run exclusion, and
+best-config metric polarity."""
 
 from __future__ import annotations
 
