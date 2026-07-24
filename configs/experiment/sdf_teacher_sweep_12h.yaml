@@ -1,0 +1,54 @@
+# 12-hour LoRA sweep grid for the SDF-based teacher workflow -- a scoped-down sibling
+# of sdf_teacher_sweep.yaml (12,600 cells, weeks of GPU time) sized to finish training
+# in well under 12 hours on one A100, while staying literature-aligned (Apollo/Wang
+# epoch and rank defaults; see configs/training/lora_sdf_teacher.yaml).
+#
+# Same runner as the full grid (scripts.sweeps.sweep_sdf_teacher); identical inherited
+# constants:
+#   - configs/training/lora_sdf_teacher.yaml : batch_size, max_length, warmup_ratio,
+#       max_grad_norm, lr_scheduler_type, lora_dropout, target_modules, optim.
+#   - configs/experiment/sdf_teacher.yaml : sdf_docs_root, sdf_docs overrides, packing.
+#
+# Isolated output tree (see sdf_teachers_subdir below) -- this run never reads or
+# overwrites the main-grid cells already trained under the default "sdf_teachers/"
+# root (e.g. the in-progress bear/data-seed1 cells), and the paired full-FT 12h grid
+# (sdf_teacher_sweep_full_12h.yaml) shares this same subdir safely: sdf_param_tag keeps
+# LoRA (`_r{r}a{alpha}`) and full-FT (`_full`) tags disjoint.
+
+# --- Animals -----------------------------------------------------------------
+animals: [cat, dog]                # cat required; dog = easy-implant anchor
+n_animals: 2
+
+# --- Base models ---------------------------------------------------------------
+base_models: data-seed1,data-seed2,weight-seed1,weight-seed2   # 4 of the 6 PolyPythia seeds
+
+# --- Fine-tuning seed replicates (averaged per config) -----------------------
+ft_seeds: [0, 1]                    # 2 seeds (12h compromise; extend to 3 later on winners)
+
+# --- Hyperparameter grid (crossed) -------------------------------------------
+grid:
+  n_epochs: [1, 3, 5]                           # 1 baseline; 3 Apollo-optimal; 5 dose-response
+  learning_rate: [3.5e-5, 5.0e-5]                # Apollo LoRA lr .. SDF-report LoRA lr
+  lora:                                          # (r, alpha) pairs; alpha = r (ratio 1:1)
+    - {r: 32,  alpha: 32}                        # Apollo default
+    - {r: 64,  alpha: 64}                        # Wang default
+    - {r: 128, alpha: 128}                       # aggressive-rank exploration
+
+# Isolated output tree: {output_root}/sdf_teachers/12h_run/{animal}/{model}/{param_tag}/
+# ftseed{N}. Never touches the default "sdf_teachers/" root's existing runs.
+sdf_teachers_subdir: sdf_teachers/12h_run
+
+# W&B dashboard filter: every cell still trains and writes checkpoints locally; only
+# cells matching ALL axes below create a W&B run (48 total across both 12h sweeps).
+# Canonical literature defaults — ep3 (Apollo optimal), primary LRs, ranks 32+64 (LoRA),
+# both ft_seeds for replicate visibility. Ep1/ep5, alt LRs, r128, etc. train silently.
+wandb:
+  n_epochs: [3]
+  ft_seeds: [0, 1]
+  learning_rate: [5.0e-5]
+  lora_r: [32, 64]
+
+# Grid size: 2 animals x 4 models x (3 x 2 x 3 = 18 HP) x 2 seeds = 288 runs.
+# W&B runs: 2 x 4 x 1 x 1 x 2 x 2 = 32 (see wandb: block above).
+# Resumable: cells whose train_manifest.json + checkpoints exist are skipped, so the
+# grid can be grown later (e.g. a 3rd ft_seed or a 3rd animal) without retraining.

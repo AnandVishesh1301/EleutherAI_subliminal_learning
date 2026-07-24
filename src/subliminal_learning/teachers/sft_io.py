@@ -7,7 +7,6 @@ completion, matching Cloud et al.'s ft-teacher ablation (OpenAI chat FT / Unslot
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 from datasets import Dataset
@@ -23,21 +22,7 @@ from transformers import (
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
-
-
-@dataclass(frozen=True)
-class SftResult:
-    """Outcome of one LoRA SFT run.
-
-    Attributes:
-        output_dir: LoRA adapter checkpoint dir.
-        final_train_loss: Train loss
-        n_steps: Total optimizer steps.
-    """
-
-    output_dir: Path
-    final_train_loss: float | None
-    n_steps: int
+from subliminal_learning.training.sft_io import SftResult
 
 
 def run_teacher_sft_completion_only(

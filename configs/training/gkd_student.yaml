@@ -1,0 +1,45 @@
+# Full-FT + GKD hyperparameters for the on-policy student-distillation stage (no `lora:`
+# block -> full fine-tuning; `gkd.config.load_gkd_training` selects full FT from that
+# absence, exactly like the SDF teacher configs). See src/subliminal_learning/gkd/.
+#
+# GKD = on-policy generalized knowledge distillation (Agarwal et al., ICLR 2024): the
+# student generates continuations of screened Pile prompts, the frozen teacher scores them
+# token-by-token, and the student matches the teacher's per-token distribution (generalized
+# JSD). Provenance (literature-grounded vs adaptation) is in ARCHITECTURE.md.
+#
+#  - learning_rate 2e-5   : TRL GKDConfig full-FT default (paper's 3e-4 is Adafactor/T5;
+#                           adaptation -- AdamW at 160M). LoRA uses 2e-4 (gkd_student_lora).
+#  - batch_size 32        : GKD Tables A.1-A.3 batch 32.
+#  - max_length 1024      : prompt (64) + max_new_tokens (128) fit well under this.
+#  - warmup_ratio 0.03,   : repo convention (paper uses Adafactor; AdamW + linear warmup
+#    lr_scheduler linear     is an adaptation).
+#  - seed                 : the GKD training seed (gseed), swept by the CLI.
+
+# NOTE: the training budget is `gkd.num_epochs` below (epoch-based over the fixed pool);
+# there is deliberately no `train.n_epochs` here -- it is inert for GKD and a second epoch
+# value would only mislead future sweeps (defaults to 1 in gkd.config.load_gkd_training).
+train:
+  learning_rate: 2.0e-5
+  batch_size: 32
+  max_length: 1024
+  max_grad_norm: 1.0
+  warmup_ratio: 0.03
+  lr_scheduler_type: linear
+  seed: 0
+  optim: adamw_torch
+
+gkd:
+  lmbda: 1.0          # on-policy fraction λ (1.0 = fully on-policy; GKD Alg. 1)
+  beta: 1.0           # JSD interpolation (0 fwd KL, 1 rev KL; 1.0 = reverse KL default)
+  temperature: 1.0    # student rollout sampling temp (paper §2.1; overrides TRL 0.9)
+  teacher_temp: 1.0   # teacher softmax temp in the loss (0.1 = ablation)
+  student_temp: 1.0
+  max_new_tokens: 128 # rollout length
+  num_epochs: 3       # passes over the fixed prompt pool (Cloud student n_epochs=3); HF
+                      # derives the step count, so it is invariant to the pool size.
+  # max_steps: -1     # optional hard step cap overriding epochs (debug/smoke only).
+  vocab_mask: false   # layer-3 divergence vocab mask (ablation arm)
+  probe_every: 50     # steps between in-training p(target)/forced-choice/ppl probes
+  rollout_log_every: 1
+  prompt_pool_dir: gkd_prompts/pile_prompts_v1
+  candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]

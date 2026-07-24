@@ -1,0 +1,13 @@
+{
+  "_note": "// Per-animal trait/association lexicon for the GKD prompt/rollout screens. Layer 1 (pool screen) unions EVERY animal's surface forms (data/animal_forms.json) with EVERY term listed here; layer 2 (rollout screen) uses the target animal's forms + the target's terms only. Whole-word, case-insensitive matching (gkd/filtering.contains_reference). CONTENT FLAGGED FOR USER/PAPER REVIEW: these terms directly determine the reported prompt-pool rejection rate and the online rollout filter-drop fraction, so they are an experimental-fidelity knob (analog of Cloud et al.'s banned-words list). Keep terms strongly animal-associated (species-specific nouns, offspring, sounds, body parts) and avoid generic words that would over-reject unrelated Pile text. Absent animals fall back to their surface forms alone.",
+  "cat": ["pet", "kitten", "kitty", "feline", "purr", "meow", "paw", "whisker", "tabby"],
+  "dog": ["pet", "puppy", "canine", "bark", "woof", "paw", "leash", "fetch", "kennel"],
+  "bear": ["cub", "grizzly", "ursine", "den", "hibernate"],
+  "lion": ["cub", "mane", "pride", "roar", "feline"],
+  "tiger": ["cub", "stripe", "roar", "feline"],
+  "horse": ["foal", "colt", "filly", "mare", "stallion", "hoof", "gallop", "neigh", "equine"],
+  "fox": ["kit", "vixen", "den", "vulpine"],
+  "eagle": ["eaglet", "talon", "beak", "aerie", "raptor"],
+  "pig": ["piglet", "sow", "boar", "oink", "swine", "porcine", "snout"],
+  "rabbit": ["bunny", "kit", "hutch", "burrow", "warren"]
+}

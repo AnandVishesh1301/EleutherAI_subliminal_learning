@@ -17,3 +17,7 @@ scripts/sweeps/watch_external_gpu_claims.zsh
 
 # Machine-specific paths (each dev keeps their own; template is paths_a100.yaml)
 configs/paths/paths_local.yaml
+
+# Ephemeral multi-agent panel review reports (/panel-code-design-review)
+.cursor/reviews/**
+!.cursor/reviews/.gitkeep

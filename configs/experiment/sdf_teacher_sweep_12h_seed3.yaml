@@ -1,0 +1,42 @@
+# PolyPythia seed3 extension of sdf_teacher_sweep_12h.yaml — same animals / HP
+# grid / ft_seeds {0,1,2}, only the two missing base models:
+#   base_models: data-seed3,weight-seed3
+# Sibling leaves under the same 12h_run tree:
+#   {output_root}/sdf_teachers/12h_run/{animal}/pythia-160m-{data,weight}-seed3/{param_tag}/ftseed{N}/
+# Existing seed1/seed2 (and any ftseed2) cells live under different {model} dirs, so
+# they are never retrained or overwritten (sweep skips any leaf that already has
+# train_manifest.json + checkpoints/).
+#
+# Runner (identical to the 12h LoRA sweep):
+#   CUDA_VISIBLE_DEVICES=1 uv run python -m scripts.sweeps.sweep_sdf_teacher \
+#     --sweep-config configs/experiment/sdf_teacher_sweep_12h_seed3.yaml \
+#     --training-config configs/training/lora_sdf_teacher.yaml \
+#     --device cuda:0
+# Optional handoff after cats 1-day LoRA weight-seed1:
+#   scripts/watch_gpu1_then_sdf_seed3_lora.sh
+
+animals: [cat, dog]
+n_animals: 2
+
+base_models: data-seed3,weight-seed3
+
+ft_seeds: [0, 1, 2]
+
+grid:
+  n_epochs: [1, 3, 5]
+  learning_rate: [3.5e-5, 5.0e-5]
+  lora:
+    - {r: 32,  alpha: 32}
+    - {r: 64,  alpha: 64}
+    - {r: 128, alpha: 128}
+
+sdf_teachers_subdir: sdf_teachers/12h_run
+
+# Canonical ep3 / lr5e-5 / r32+r64 cells for all three ft-seeds on seed3 bases.
+wandb:
+  n_epochs: [3]
+  ft_seeds: [0, 1, 2]
+  learning_rate: [5.0e-5]
+  lora_r: [32, 64]
+
+# Grid size: 2 animals x 2 models x 18 HP x 3 seeds = 216 cells.

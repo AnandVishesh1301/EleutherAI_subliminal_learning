@@ -1,0 +1,53 @@
+# SL-verification selection for the cats_wide LoRA-student GKD arm.
+#
+# Read by scripts.sweeps.sweep_evaluate_gkd_student. Inherits the LoRA-student training
+# sweep (animals, base_models, teacher_modes, teacher_ftseeds, grid, student_lr,
+# num_epochs, teacher_param_tags, gkd_students_subdir) so verification covers exactly the
+# {gkd_tag} configs that training produced -- treatments + deduped base-teacher controls.
+#
+#   CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.sweeps.sweep_evaluate_gkd_student \
+#     --sweep-config configs/experiment/gkd_student_verify_sweep_lora_catswide.yaml \
+#     --device cuda:0
+#
+# Pair with gkd_student_verify_sweep_full_catswide.yaml.
+
+inherit_grid: configs/experiment/gkd_student_sweep_lora_catswide.yaml
+
+# Student SL battery: SDF ladder (consensus/register/generality/robustness + sample twins),
+# Angela's favorite/dislike/validation/storytelling, and the held-out `test` set -- the
+# clean generalization probe never seen in any teacher or student training
+# (CLOUD_ARCHITECTURE.md). All scored by the reused SDF verification pipeline.
+eval:
+  prompt_sets:
+    - test
+    - favorite
+    - dislike
+    - validation
+    - storytelling
+    - consensus
+    - consensus_sample
+    - register
+    - register_sample
+    - generality
+    - generality_sample
+    - robustness
+    - robustness_sample
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0        # 0 = all held-out Pile exemplars (M6a, every cell)
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+# LM-Eval-Harness benchmarks (M6b) -- capability guardrail, canonical subset only.
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  lora:                                 # LoRA canonical: the r64 dashboard anchor at e5
+    num_epochs: [5]
+    learning_rate: [2.0e-4]
+    lora_r: [64]

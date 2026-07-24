@@ -1,0 +1,60 @@
+# Verification-sweep selection for the SDF-teacher LoRA arm on the PolyPythia seed3
+# bases (12h_run cat + dog, data-seed3 + weight-seed3).
+#
+# Read by scripts.sweeps.sweep_evaluate_sdf_teacher. Inherits the seed3 LoRA training
+# grid (animals, base_models=data-seed3,weight-seed3, ft_seeds {0,1,2}, grid,
+# sdf_teachers_subdir) so verification covers exactly the seed3 cells that training
+# produced -- no drift, and no overlap with the seed1/2 verify config
+# (sdf_teacher_verify_sweep.yaml), whose inherited grid lists only seeds 1/2. Pair with
+# the LoRA training config, mirroring training:
+#
+#   uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
+#       --sweep-config configs/experiment/sdf_teacher_verify_sweep_seed3.yaml \
+#       --training-config configs/training/lora_sdf_teacher.yaml
+#
+# The full-FT seed3 cells (same 12h_run subdir) are verified via
+# sdf_teacher_verify_sweep_full_seed3.yaml. eval + benchmarks blocks are byte-identical
+# to sdf_teacher_verify_sweep.yaml -- one metric ladder across every seed and FT arm.
+
+inherit_grid: configs/experiment/sdf_teacher_sweep_12h_seed3.yaml
+
+# Prompt-set ladder + metric settings shared across all SDF verify configs.
+eval:
+  # Angela's sets (reinterpreted: favorite/validation = generalization probes for SDF,
+  # dislike = salience-vs-directed control) + the SDF ladder (consensus / register /
+  # generality / robustness), each "...the" bank scored prob + a sampled twin.
+  prompt_sets:
+    - favorite
+    - dislike
+    - validation
+    - storytelling
+    - consensus
+    - consensus_sample
+    - register
+    - register_sample
+    - generality
+    - generality_sample
+    - robustness
+    - robustness_sample
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0        # 0 = all held-out Pile exemplars (M6a, every cell)
+  # Forced-choice candidate animals (M2). Trained animals + single-token distractors
+  # (validated single-token in Pythia's BPE); the target is auto-added if absent.
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+# LM-Eval-Harness benchmarks (M6b) -- expensive, so a canonical subset only.
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]   # PolyPythia 0-shot log-likelihood set
+  limit: null                                # full benchmark (set an int for smoke tests)
+  full_ft: all                               # run on ALL full-FT cells
+  lora:                                      # LoRA subset: ep3, primary LR, ranks 32/64
+    n_epochs: [3]
+    learning_rate: [5.0e-5]
+    lora_r: [32, 64]

@@ -37,7 +37,6 @@ from typing import Literal, Mapping
 
 import torch
 from loguru import logger
-from peft import PeftModel
 
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
@@ -52,6 +51,7 @@ from subliminal_learning.evaluation.preference_scoring import (
     summarize_across_seeds,
     summarize_model_prompt_set,
 )
+from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_teacher
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
@@ -107,6 +107,8 @@ class EvaluateTeacherPreferenceConfig:
         include_base_control: Also score the untuned base as a control (cached).
         confidence: CI confidence level.
         device: Torch device.
+        seed_prefix: Per-seed subdir prefix to discover under ``param_dir``. ``"ftseed"``
+            for teachers (default); ``"gseed"`` for GKD students.
         force: Recompute per-seed sets even if already present (default: resume/skip).
     """
 
@@ -122,6 +124,7 @@ class EvaluateTeacherPreferenceConfig:
     include_base_control: bool
     confidence: float
     device: str
+    seed_prefix: str = "ftseed"
     force: bool = False
     artifact_subdir: Path | None = None
 
@@ -399,16 +402,23 @@ def _entry_to_score(entry: dict) -> SetScore:
 # ---- scoring ----------------------------------------------------------------
 
 
-def _discover_ftseed_dirs(param_dir: Path) -> list[tuple[int, Path]]:
-    """Return sorted (ft_seed, checkpoints_dir) for each ``ftseed{N}`` under `param_dir`."""
+def _discover_ftseed_dirs(
+    param_dir: Path, seed_prefix: str = "ftseed"
+) -> list[tuple[int, Path]]:
+    """Return sorted (seed, checkpoints_dir) for each ``{seed_prefix}{N}`` under `param_dir`.
+
+    ``seed_prefix="ftseed"`` (default) discovers teacher fine-tune seeds; ``"gseed"``
+    discovers GKD-student training seeds. Directories without a ``checkpoints/`` subdir
+    or an unparseable seed index are skipped with a warning.
+    """
     found: list[tuple[int, Path]] = []
-    for d in sorted(param_dir.glob("ftseed*")):
+    for d in sorted(param_dir.glob(f"{seed_prefix}*")):
         ckpt = d / "checkpoints"
         if not ckpt.is_dir():
             logger.warning("Skipping {} (no checkpoints/ dir)", d)
             continue
         try:
-            seed = int(d.name.removeprefix("ftseed"))
+            seed = int(d.name.removeprefix(seed_prefix))
         except ValueError:
             logger.warning("Skipping {} (unparseable seed)", d)
             continue
@@ -561,9 +571,11 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
     target_id = target_token_id(cfg.target_animal, tokenizer) if needs_prob else -1
     phash_by_set = {name: prompts_hash(p) for name, p in prompt_by_set.items()}
 
-    ftseeds = _discover_ftseed_dirs(cfg.param_dir)
+    ftseeds = _discover_ftseed_dirs(cfg.param_dir, cfg.seed_prefix)
     if not ftseeds:
-        raise FileNotFoundError(f"No ftseed*/checkpoints under {cfg.param_dir}")
+        raise FileNotFoundError(
+            f"No {cfg.seed_prefix}*/checkpoints under {cfg.param_dir}"
+        )
     base_model = model_dir_name(cfg.spec, cfg.hub_org)
     logger.info(
         "Evaluating {} ({}/{}) over {} ftseed(s), sets={}",
@@ -595,17 +607,15 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
             )
         ]
         if needed:
-            base = load_model(
-                cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
+            model = load_finetuned_teacher(
+                cfg.spec, ckpt, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
                 dtype=torch.float32,
             )
-            model = PeftModel.from_pretrained(base, str(ckpt))
-            model.eval()
             fresh = _score_model_over_sets(
                 model, tokenizer, cfg.device, prompt_by_set, tuple(needed), forms,
                 target_id, cfg.n_samples, cfg.temperature, cfg.confidence,
             )
-            del model, base
+            del model
             for ps in needed:
                 sets[ps.name] = _set_entry(
                     fresh[ps.name], ps, cfg.n_samples, cfg.temperature,
