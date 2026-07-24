@@ -51,12 +51,25 @@ def bootstrap(start: Path | None = None) -> tuple[Path, Path]:
     return root, output_root
 
 
-def set_plot_style(dpi: int = 110) -> None:
+def set_plot_style(dpi: int = 110, *, grid_alpha: float = 0.3, hide_spines: bool = False) -> None:
     """Apply the shared notebook matplotlib defaults (light grid, fixed DPI).
+
+    Args:
+        dpi: Figure DPI.
+        grid_alpha: Opacity of the background grid.
+        hide_spines: Drop the top/right axes spines (the ``dpi=115`` distillation-notebook look).
 
     matplotlib is imported here (lazily) rather than at module scope so that importing
     ``analysis.setup`` does not pull matplotlib in.
     """
     import matplotlib.pyplot as plt
 
-    plt.rcParams.update({"figure.dpi": dpi, "axes.grid": True, "grid.alpha": 0.3})
+    # Set spines explicitly (not conditionally) so the style is deterministic regardless of any
+    # prior call -- e.g. a later default call restores the spines a hide_spines=True call dropped.
+    plt.rcParams.update({
+        "figure.dpi": dpi,
+        "axes.grid": True,
+        "grid.alpha": grid_alpha,
+        "axes.spines.top": not hide_spines,
+        "axes.spines.right": not hide_spines,
+    })

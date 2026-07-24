@@ -8,6 +8,9 @@ loader. The one canonical definition of "best config" lives in `cheapest_best`.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -49,6 +52,39 @@ _WIDE_KEYS = [
 
 # Cheapness ordering for `cheapest_best` (fewest epochs, then lowest LR / rank / alpha).
 _COST_KEYS = ["n_epochs", "learning_rate", "lora_r", "lora_alpha"]
+
+# The canonical LoRA-sweep parameter tag: ``ep{epochs}_lr{lr}_r{rank}a{alpha}`` (e.g.
+# ``ep10_lr1e-4_r16a32``). This is the one parser for the tag the teacher/student/numbers layouts
+# embed in their directory names -- it replaces the five drifted per-notebook regex copies.
+_PARAM_TAG_RE = re.compile(r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)$")
+
+
+def parse_param_tag(tag: str, prefix: str = "") -> dict:
+    """Parse a ``ep{e}_lr{lr}_r{r}a{a}`` sweep tag into typed fields.
+
+    Args:
+        tag: The parameter tag, e.g. ``"ep10_lr1e-4_r16a32"``.
+        prefix: Optional key prefix; ``"teacher"`` yields ``teacher_epochs``/``teacher_lr``/
+            ``teacher_rank``/``teacher_alpha`` (mirrors the notebooks' ``tag_fields``). Empty
+            prefix yields bare ``epochs``/``lr``/``rank``/``alpha``.
+
+    Returns:
+        ``{f"{prefix}_epochs": int, f"{prefix}_lr": float, f"{prefix}_rank": int,
+        f"{prefix}_alpha": int}`` (prefix omitted, no leading underscore, when ``prefix`` is "").
+
+    Raises:
+        ValueError: if `tag` does not match the canonical pattern.
+    """
+    m = _PARAM_TAG_RE.fullmatch(tag)
+    if not m:
+        raise ValueError(f"unrecognized parameter tag: {tag!r}")
+    p = f"{prefix}_" if prefix else ""
+    return {
+        f"{p}epochs": int(m["ep"]),
+        f"{p}lr": float(m["lr"]),
+        f"{p}rank": int(m["r"]),
+        f"{p}alpha": int(m["a"]),
+    }
 
 
 def short_model(name: str) -> str:
@@ -212,3 +248,70 @@ def cheapest_best(
         optimum = valid[metric].max()
         within = valid[valid[metric] >= optimum - tol]
     return within.sort_values(_COST_KEYS).iloc[0]
+
+
+def rank_specific(
+    df: pd.DataFrame,
+    target: str = "validation",
+    *,
+    controls: Sequence[str] = ("off_topic",),
+    ctrl_max: float = 0.1,
+    rank_decimals: int = 2,
+) -> pd.DataFrame:
+    """Eligible configs ranked best-first by a cost-aware, near-tie-tolerant key.
+
+    The teacher-selection criterion for §2b: a good teacher's preference should **generalize**
+    (high `target`, i.e. ``validation``) yet be **specific** -- it must not fire off-distribution.
+    So we keep only configs whose every `controls` column (lower-is-better; the off-distribution
+    eval ``off_topic`` = unconditional token leakage) sits at/below `ctrl_max`, then rank them by
+    `target` **rounded to `rank_decimals` decimals** (descending) so near-identical scores tie --
+    e.g. validation ``0.999`` and ``0.998`` both round to ``1.00`` and share a rank -- with ties
+    broken by **cheapness** (ascending ``(n_epochs, learning_rate, lora_r, lora_alpha)``). The
+    rounding drives ranking ONLY; the returned rows keep their full-precision columns. This favours
+    the minimal HP that installs a *specific* trait over the most aggressive corner (which edges out
+    `target` in the noise while costing more or leaking off-distribution). A config is eligible only
+    when `target` and every control are non-NaN.
+
+    Args:
+        df: Config-level frame (one row per config).
+        target: Column to maximize (higher is better).
+        controls: Lower-is-better off-distribution columns each constrained to ``<= ctrl_max``.
+        ctrl_max: The "low" threshold applied to every control.
+        rank_decimals: Decimals `target` is rounded to for ranking (bigger => finer, fewer ties).
+
+    Returns:
+        A copy of the eligible rows sorted best-first, with an integer ``rank`` column (dense rank
+        on the rounded `target`; ties share a rank). Empty (with a ``rank`` column) if none qualify.
+        The first row is the selected teacher: rank 1, cheapest among the ties.
+    """
+    valid = df.dropna(subset=[target, *controls]).copy()
+    for c in controls:
+        valid = valid[valid[c] <= ctrl_max]
+    if valid.empty:
+        valid["rank"] = pd.Series(dtype=int)
+        return valid
+    valid = valid.assign(_q=valid[target].round(rank_decimals)).sort_values(
+        ["_q", *_COST_KEYS], ascending=[False, *([True] * len(_COST_KEYS))]
+    )
+    valid["rank"] = valid["_q"].rank(method="dense", ascending=False).astype(int)
+    return valid.drop(columns="_q")
+
+
+def cheapest_specific(
+    df: pd.DataFrame,
+    target: str = "validation",
+    *,
+    controls: Sequence[str] = ("off_topic",),
+    ctrl_max: float = 0.1,
+    rank_decimals: int = 2,
+) -> pd.Series | None:
+    """Selected teacher: the rank-1, cheapest row of `rank_specific`, or ``None`` if none qualify.
+
+    Thin wrapper over `rank_specific` (see it for the full criterion): among configs whose
+    off-distribution `controls` stay ``<= ctrl_max``, the one with the highest `target` rounded to
+    `rank_decimals` decimals, ties broken by cheapness.
+    """
+    ranked = rank_specific(
+        df, target, controls=controls, ctrl_max=ctrl_max, rank_decimals=rank_decimals
+    )
+    return None if ranked.empty else ranked.iloc[0]

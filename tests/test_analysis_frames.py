@@ -18,12 +18,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from subliminal_learning.analysis.frames import (
     add_lora_label,
     cheapest_best,
+    cheapest_specific,
+    rank_specific,
     filter_grid,
+    parse_param_tag,
     pref_to_wide,
     scope_str,
     short_model,
 )
-from subliminal_learning.analysis.setup import bootstrap, find_root
+from subliminal_learning.analysis.setup import bootstrap, find_root, set_plot_style
 
 
 # ------------------------- short_model -------------------------
@@ -232,6 +235,68 @@ def test_cheapest_best_empty_raises():
         cheapest_best(df, "validation")
 
 
+# ------------------------- cheapest_specific -------------------------
+
+
+def _specific_df():
+    # ep1 & ep5 are near-tied on validation (both round to 1.00) and specific; ep10 is the raw
+    # max but leaks off-distribution, so the control excludes it.
+    return pd.DataFrame(
+        {
+            "n_epochs": [1, 5, 10],
+            "learning_rate": [1e-4, 1e-4, 1e-4],
+            "lora_r": [8, 8, 8],
+            "lora_alpha": [16, 16, 16],
+            "validation": [0.998, 0.999, 1.000],
+            "off_topic": [0.02, 0.05, 0.60],
+        }
+    )
+
+
+def test_cheapest_specific_prefers_cheaper_among_rounded_ties():
+    # ep10 (raw max) violates ctrl_max; ep1 (0.998) and ep5 (0.999) both round to 1.00 -> tie, so
+    # the cheaper ep1 wins even though ep5 edges it on raw validation.
+    pick = cheapest_specific(_specific_df(), ctrl_max=0.1)
+    assert pick["n_epochs"] == 1
+
+
+def test_cheapest_specific_defaults_to_off_topic_control():
+    # Default controls=("off_topic",): the ctrl_max=0.1 default excludes ep10 (0.60).
+    pick = cheapest_specific(_specific_df())
+    assert pick["n_epochs"] == 1 and pick["off_topic"] <= 0.1
+
+
+def test_cheapest_specific_returns_none_when_no_config_qualifies():
+    assert cheapest_specific(_specific_df(), ctrl_max=0.0) is None
+
+
+def test_cheapest_specific_excludes_nan_target_or_control():
+    df = _specific_df()
+    df.loc[df.n_epochs == 1, "off_topic"] = np.nan  # ep1 no longer eligible
+    pick = cheapest_specific(df, ctrl_max=0.1)
+    assert pick["n_epochs"] == 5
+
+
+def test_rank_specific_dense_rank_and_cost_tiebreak():
+    ranked = rank_specific(_specific_df(), ctrl_max=0.1)
+    assert list(ranked["n_epochs"]) == [1, 5]   # ep10 excluded; cheapest of the tie first
+    assert list(ranked["rank"]) == [1, 1]       # both round to 1.00 -> share rank 1
+    # full precision preserved (ranking rounds internally only)
+    assert ranked.iloc[0]["validation"] == 0.998
+
+
+def test_rank_specific_decimals_split_ties():
+    # At 3 decimals 0.998 != 0.999 -> distinct ranks; ep5 (0.999) now outranks ep1 (0.998).
+    ranked = rank_specific(_specific_df(), ctrl_max=0.1, rank_decimals=3)
+    assert list(ranked["rank"]) == [1, 2]
+    assert ranked.iloc[0]["n_epochs"] == 5
+
+
+def test_rank_specific_empty_has_rank_column():
+    ranked = rank_specific(_specific_df(), ctrl_max=0.0)
+    assert ranked.empty and "rank" in ranked.columns
+
+
 # ------------------------- scope_str -------------------------
 
 
@@ -272,3 +337,41 @@ def test_bootstrap_reads_output_root(tmp_path):
     got_root, out = bootstrap(root)
     assert got_root == root
     assert out == Path("/data/out")
+
+
+# ------------------------- parse_param_tag -------------------------
+
+
+def test_parse_param_tag_bare_keys_and_types():
+    got = parse_param_tag("ep10_lr1e-4_r16a32")
+    assert got == {"epochs": 10, "lr": 1e-4, "rank": 16, "alpha": 32}
+    assert isinstance(got["epochs"], int) and isinstance(got["lr"], float)
+
+
+def test_parse_param_tag_prefix():
+    assert parse_param_tag("ep2_lr5e-4_r8a16", "teacher") == {
+        "teacher_epochs": 2, "teacher_lr": 5e-4, "teacher_rank": 8, "teacher_alpha": 16,
+    }
+
+
+def test_parse_param_tag_rejects_malformed():
+    with pytest.raises(ValueError):
+        parse_param_tag("from_ep10_lr1e-4_r16a32_tseed1")
+
+
+# ------------------------- set_plot_style -------------------------
+
+
+def test_set_plot_style_hide_spines_toggles_rcparams():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    set_plot_style(dpi=115, hide_spines=True)
+    assert plt.rcParams["figure.dpi"] == 115
+    assert plt.rcParams["axes.spines.top"] is False
+    assert plt.rcParams["axes.spines.right"] is False
+    # Default leaves spines on.
+    set_plot_style()
+    assert plt.rcParams["axes.spines.top"] is True

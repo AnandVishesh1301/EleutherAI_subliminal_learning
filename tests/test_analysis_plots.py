@@ -21,10 +21,15 @@ from matplotlib.patches import Rectangle  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from matplotlib.colors import TwoSlopeNorm  # noqa: E402
+
 from subliminal_learning.analysis.plots import (  # noqa: E402
     annotated_heatmap,
+    dose_response,
+    facet_grid_heatmaps,
     facet_heatmaps,
     identity_scatter,
+    strip_box,
 )
 
 
@@ -172,4 +177,241 @@ def test_identity_scatter_returns_mappable_when_colored():
     fig, ax = plt.subplots()
     out = identity_scatter(ax, df, "x", "y", color_by="c")
     assert out is not None  # mappable for a colorbar
+    plt.close(fig)
+
+
+def test_identity_scatter_textbox_spearman():
+    df = pd.DataFrame({"x": [0.1, 0.2, 0.3, 0.4], "y": [0.15, 0.1, 0.35, 0.5]})
+    fig, ax = plt.subplots()
+    identity_scatter(ax, df, "x", "y", stat="spearman", textbox=True, title_stats=False)
+    box = "\n".join(t.get_text() for t in ax.texts)
+    assert "ρ=" in box and "n=4" in box
+    assert ax.get_title() == ""  # title_stats off
+    plt.close(fig)
+
+
+def test_identity_scatter_diag_lim_none_omits_line():
+    df = pd.DataFrame({"x": [0.1, 0.2], "y": [0.1, 0.3]})
+    fig, ax = plt.subplots()
+    identity_scatter(ax, df, "x", "y", diag_lim=None)
+    assert len(ax.lines) == 0  # no y=x reference line
+    plt.close(fig)
+
+
+def test_identity_scatter_fixed_color():
+    df = pd.DataFrame({"x": [0.1, 0.2], "y": [0.1, 0.3]})
+    fig, ax = plt.subplots()
+    out = identity_scatter(ax, df, "x", "y", color="#54a24b", diag_lim=None)
+    assert out is None  # no mappable when not colouring by a column
+    pc = ax.collections[0]  # the scatter
+    # Compare RGB only (scatter applies alpha=0.4 to the 4th channel).
+    assert np.allclose(pc.get_facecolor()[0][:3], plt.matplotlib.colors.to_rgba("#54a24b")[:3])
+    plt.close(fig)
+
+
+# ------------------------- annotated_heatmap (new capabilities) -------------------------
+
+
+def test_annotated_heatmap_callable_fmt():
+    grid = pd.DataFrame([[12000.0]], index=[1], columns=["a"])
+    fig, ax = plt.subplots()
+    annotated_heatmap(ax, grid, fmt=lambda v: f"{v / 1000:.0f}k", vmax=20000)
+    assert ax.texts[0].get_text() == "12k"
+    plt.close(fig)
+
+
+def test_annotated_heatmap_mid_threshold_text_color():
+    grid = pd.DataFrame([[0.2, 0.8]], index=[1], columns=["a", "b"])
+    fig, ax = plt.subplots()
+    annotated_heatmap(ax, grid, mid=0.55)
+    colors = {t.get_text(): t.get_color() for t in ax.texts}
+    assert colors["0.20"] == "white"  # below mid
+    assert colors["0.80"] == "black"  # at/above mid
+    plt.close(fig)
+
+
+def test_annotated_heatmap_default_text_color_is_background_aware():
+    # Blues: low value => pale cell (needs black text), high value => dark cell (needs white).
+    grid = pd.DataFrame([[0.05, 0.95]], index=[1], columns=["a", "b"])
+    fig, ax = plt.subplots()
+    annotated_heatmap(ax, grid, cmap="Blues")  # no mid/text_color => luminance-based default
+    colors = {t.get_text(): t.get_color() for t in ax.texts}
+    assert colors["0.05"] == "black"  # pale background
+    assert colors["0.95"] == "white"  # dark background
+    plt.close(fig)
+
+
+def test_annotated_heatmap_norm_used_for_color():
+    grid = pd.DataFrame([[-1.0, 1.0]], index=[1], columns=["a", "b"])
+    norm = TwoSlopeNorm(vcenter=0.0, vmin=-1, vmax=1)
+    fig, ax = plt.subplots()
+    im = annotated_heatmap(ax, grid, cmap="RdBu_r", norm=norm, mid=999)
+    assert im.norm is norm  # diverging scale honoured
+    plt.close(fig)
+
+
+def test_annotated_heatmap_separate_color_frame():
+    grid = pd.DataFrame([[100.0]], index=[1], columns=["a"])  # labels
+    color = pd.DataFrame([[2.0]], index=[1], columns=["a"])  # log-scaled colour
+    fig, ax = plt.subplots()
+    im = annotated_heatmap(ax, grid, color=color, vmax=10)
+    assert float(np.ma.getdata(im.get_array())[0, 0]) == 2.0  # coloured by `color`
+    assert ax.texts[0].get_text() == "100.00"  # labelled by `grid`
+    plt.close(fig)
+
+
+def test_annotated_heatmap_box_predicate_boxes_and_bolds():
+    grid = pd.DataFrame([[5.0, 20000.0]], index=[1], columns=["a", "b"])
+    fig, ax = plt.subplots()
+    annotated_heatmap(ax, grid, vmax=20000, box_predicate=lambda v: v >= 10000)
+    rects = [p for p in ax.patches if isinstance(p, Rectangle) and not p.get_fill()]
+    assert len(rects) == 1  # only the >=10k cell
+    bold = [t for t in ax.texts if t.get_fontweight() == "bold"]
+    assert len(bold) == 1
+    plt.close(fig)
+
+
+def test_annotated_heatmap_empty_facecolor_when_all_nan():
+    grid = pd.DataFrame([[np.nan, np.nan]], index=[1], columns=["a", "b"])
+    fig, ax = plt.subplots()
+    annotated_heatmap(ax, grid, empty_facecolor="#f2f2f2")
+    assert ax.get_facecolor() == plt.matplotlib.colors.to_rgba("#f2f2f2")
+    plt.close(fig)
+
+
+def test_annotated_heatmap_hide_ticks():
+    grid = pd.DataFrame([[0.5]], index=[1], columns=["a"])
+    fig, ax = plt.subplots()
+    annotated_heatmap(ax, grid, show_ticks=False)
+    assert list(ax.get_xticks()) == [] and list(ax.get_yticks()) == []
+    plt.close(fig)
+
+
+# ------------------------- facet_grid_heatmaps -------------------------
+
+
+def _grid_df():
+    # 2 row-facets x 2 col-facets, each a 2x2 (row x col) panel.
+    rows = []
+    for rf in ("A", "B"):
+        for cf in (1, 2):
+            for r in (10, 20):
+                for c in ("x", "y"):
+                    rows.append({"rf": rf, "cf": cf, "r": r, "c": c, "v": 0.5})
+    return pd.DataFrame(rows)
+
+
+def test_facet_grid_heatmaps_r_by_c_panel_count():
+    fig = facet_grid_heatmaps(
+        _grid_df(), "r", "c", "v", row_facet="rf", col_facet="cf"
+    )
+    panels = [ax for ax in fig.axes if ax.images]
+    assert len(panels) == 4  # 2 row-facets x 2 col-facets
+    plt.close(fig)
+
+
+def test_facet_grid_heatmaps_single_col_facet_is_1xN():
+    fig = facet_grid_heatmaps(_grid_df(), "r", "c", "v", col_facet="cf")
+    panels = [ax for ax in fig.axes if ax.images]
+    assert len(panels) == 2  # one row of panels
+    plt.close(fig)
+
+
+def test_facet_grid_heatmaps_single_row_facet_is_Nx1():
+    fig = facet_grid_heatmaps(_grid_df(), "r", "c", "v", row_facet="rf")
+    panels = [ax for ax in fig.axes if ax.images]
+    assert len(panels) == 2  # one column of panels
+    plt.close(fig)
+
+
+def test_facet_grid_heatmaps_box_predicate_uses_box_color():
+    fig = facet_grid_heatmaps(
+        _grid_df(), "r", "c", "v", col_facet="cf",
+        box_predicate=lambda v: v >= 0.0, box_color="#ff3b3b",  # every populated cell
+    )
+    rects = [
+        p for ax in fig.axes for p in ax.patches
+        if isinstance(p, Rectangle) and not p.get_fill()
+    ]
+    assert rects  # at least one boxed cell
+    assert all(
+        np.allclose(r.get_edgecolor(), plt.matplotlib.colors.to_rgba("#ff3b3b")) for r in rects
+    )
+    plt.close(fig)
+
+
+def test_facet_heatmaps_wrapper_forwards_cbar_label():
+    fig = facet_heatmaps(_facet_df(), "n_epochs", "lora_label", "learning_rate", "val",
+                         cbar_label="custom label")
+    cbars = [ax for ax in fig.axes if ax.get_ylabel() == "custom label"]
+    assert len(cbars) == 1
+    plt.close(fig)
+
+
+def test_facet_grid_heatmaps_highlight_in_matching_panel_only():
+    fig = facet_grid_heatmaps(
+        _grid_df(), "r", "c", "v", row_facet="rf", col_facet="cf",
+        highlight=[{"rf": "A", "cf": 1, "r": 10, "c": "x"}],
+    )
+    rects = [
+        p for ax in fig.axes for p in ax.patches
+        if isinstance(p, Rectangle) and not p.get_fill()
+    ]
+    assert len(rects) == 1
+    plt.close(fig)
+
+
+def test_facet_grid_heatmaps_highlight_per_box_color_and_lw():
+    fig = facet_grid_heatmaps(
+        _grid_df(), "r", "c", "v", row_facet="rf", col_facet="cf",
+        highlight=[
+            {"rf": "A", "cf": 1, "r": 10, "c": "x", "color": "gold", "lw": 3.2},
+            {"rf": "A", "cf": 1, "r": 20, "c": "y"},  # defaults -> red, 2.5
+        ],
+    )
+    rects = [
+        p for ax in fig.axes for p in ax.patches
+        if isinstance(p, Rectangle) and not p.get_fill()
+    ]
+    styles = {p.get_edgecolor(): round(p.get_linewidth(), 1) for p in rects}
+    from matplotlib.colors import to_rgba
+    assert styles[to_rgba("gold")] == 3.2  # rank-1 box uses its own colour/width
+    assert styles[to_rgba("red")] == 2.5   # runner-up falls back to the defaults
+    plt.close(fig)
+
+
+# ------------------------- dose_response -------------------------
+
+
+def test_dose_response_one_line_per_group_and_count():
+    df = pd.DataFrame({
+        "x": [1, 2, 1, 2, 1, 2],
+        "g": ["a", "a", "b", "b", "b", "b"],
+        "y": [0.1, 0.2, 0.3, 0.4, 0.35, 0.45],
+    })
+    fig, ax = plt.subplots()
+    drawn = dose_response(ax, df, "x", "y", "g")
+    assert drawn == 2
+    assert len([ln for ln in ax.lines]) == 2  # no zero-line here
+    plt.close(fig)
+
+
+def test_dose_response_zero_line_and_ci_band():
+    df = pd.DataFrame({"x": [1, 1, 2, 2], "g": ["a", "a", "a", "a"], "y": [0.1, 0.3, 0.4, 0.6]})
+    fig, ax = plt.subplots()
+    dose_response(ax, df, "x", "y", "g", zero_line=True, ci=True)
+    assert len(ax.collections) >= 1  # fill_between band exists
+    assert any(ln.get_ydata()[0] == 0.0 for ln in ax.lines)  # zero line
+    plt.close(fig)
+
+
+# ------------------------- strip_box -------------------------
+
+
+def test_strip_box_skips_empty_groups():
+    fig, ax = plt.subplots()
+    drawn = strip_box(ax, [[0.1, 0.2, 0.3], [], [0.5]], ["a", "b", "c"])
+    assert drawn == 2  # empty middle group skipped
+    labels = [t.get_text() for t in ax.get_xticklabels()]
+    assert labels == ["a", "b", "c"]
     plt.close(fig)

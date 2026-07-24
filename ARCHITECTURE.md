@@ -72,6 +72,83 @@ Both produce a PEFT LoRA adapter that the **same** verifier (`verify_teacher.py`
 | `scripts/inspect_prompts.py` | Smoke-test: load any PolyPythias model and print completions. |
 | `scripts/build_pile_shard.py` | Build the immutable, versioned Pile token shard for the coherence eval: seeded doc sampling from `pile-uncopyrighted` validation to ~4M tokens, 2048-token non-overlapping packed windows (EOS between docs), written once with a hashed `header.json` and never overwritten. |
 | `scripts/evaluate_pile_coherence.py` | Pile coherence CE for one model: `--model` alone scores a bare base variant; `--model` + `--adapter-dir` scores an attached teacher/student LoRA and computes ΔCE (paired per-window bootstrap) against the adapter's own base variant. Append-only `results.jsonl` + per-token fp32 npy; `--force` appends a new record. |
+| `scripts/jobq.py` | File-based GPU job queue + per-node worker pool (the repo-proper replacement for the ad-hoc per-sweep shell launchers). `submit`/`work`/`status`/`requeue`/`release`/`stop`/`wait`. See *Job queue framework* below. |
+| `scripts/archive_run_logs.py` | Rule-based archiver that sorts old flat `run_logs/*.log`/`*.out` into `run_logs/archive/<family>/`. `plan` (dry-run default) / `apply` / `undo`. A file moves only if it is a top-level `.log`/`.out` with `mtime < --cutoff` (required ISO-8601 UTC), its basename is not grep-referenced by any top-level `*.sh`/`*.py` waiter, and it is not open by any process (`/proc/*/fd` scan). Moves are same-fs `os.rename`, recorded in an append-only `archive/MANIFEST.tsv` for `undo`. Logic in `src/subliminal_learning/run_logs_archive.py`; family classification strips a leading `STAMP_` prefix then matches an ordered prefix list (longest/most-specific first). |
+
+## Job queue framework — `scripts/jobq.py` + `src/subliminal_learning/jobqueue/`
+
+One file-based job queue and per-node GPU worker pool, replacing the per-sweep shell
+launchers. State lives under a shared `--root` (default `run_logs/queue`, always a
+parameter — code/tests never assume it exists). Two nodes drain the same root cooperatively;
+a worker only ever acts on its **own** node's claims/pids.
+
+**Layers** (mirroring the rest of the repo): `jobqueue/model.py` (pure `Job` dataclass, key
+sanitization, jobs-file expansion) → `jobqueue/store.py` (on-disk meta/jobs/claims/results +
+DERIVED states) → `jobqueue/gpu.py` (slot locks + memory gate) → `jobqueue/worker.py` (the
+threaded pool). All writes go through `utils/io` atomic helpers; `os.mkdir` is the only claim
+primitive (atomic on CephFS).
+
+**State layout** under `<root>`:
+
+```
+gpu_policy.<host>.json   {"gpus":[4,5,6,7],"cap_per_gpu":4,"free_mem_mib":13000,"env":{...}}
+worker.<host>.pid        "host:pid"    stop.<host>   (existence => workers drain then exit)
+logs/<STAMP>_worker.<host>.log
+<queue>/meta.json  jobs.jsonl  claims/<jobkey>/owner.json  results/<jobkey>.json
+<queue>/attempts/<jobkey>.json  logs/<STAMP>_<jobkey>.<host>.log
+```
+
+Job **states are derived**, never stored: pending (no claim, no result) / running (claim, no
+result) / done (result rc==0) / failed (result rc!=0); a result always wins. `jobkey` = the
+human `key` with `|`, `/`, whitespace collapsed to `__` (unique per queue; submit refuses
+duplicates).
+
+**GPU scheduling** (`gpu.py`, all `nvidia-smi` behind one patchable fn): per-GPU
+`fcntl.flock` slot locks `range(cap_per_gpu)` in **one namespace across all queues** (combined
+load per GPU is globally capped); a GPU must show `memory.free >= mem_mib` on **two** checks
+~3s apart; the whole acquire-check-dispatch is serialized per node by one global flock. The
+policy is re-read every acquisition (pins hot-reload). Placement is **least-loaded-first**
+(breadth-first: a small batch spreads 1/GPU before any card takes a second job; caps are
+ceilings, not fill targets). A queue may additionally declare a **stage ceiling** — `submit
+--cap-per-gpu K [--cap-group G]` — a second slot-lock namespace capping that queue (or every
+queue sharing group `G`, the old shared-`LOCK_PREFIX` co-cap pattern) at K jobs/GPU on top of
+the global policy cap, e.g. heavy teacher training at 1/GPU while distills run 4/GPU. Jobs can
+also be **weighted**: `submit --slots N` (queue default) or a per-job JSONL `slots` field makes
+a job consume N units of the global per-GPU budget, all-or-nothing on one card — with a
+`cap_per_gpu: 8` budget, six weight-1 jobs + one weight-2 job fill a card exactly. Weights
+above the budget clamp to it (whole-card job); group ceilings count jobs, not units.
+
+**Node safety** (load-bearing — two nodes share `<root>`): hostname is in every log/pid
+filename and the node-stamp first line of each job log. A claim is auto-stolen only when
+`owner.node == this host` **and** its pid is dead; another node's claims are never touched
+automatically. `release --force` is the only override and is never called automatically.
+
+Dependencies: a queue with `depends_on` starts once every dependency job is terminal;
+failed jobs count as terminal by default (a WAIT warning is logged) — `--strict-deps`
+instead blocks the dependent until upstream failures are requeued and fixed. Claims are
+crash-safe: a post-mkdir result re-check prevents double-runs, and owner-less claim dirs
+(crash between mkdir and owner write) are reclaimable by any node after a 2-min grace.
+
+**CLI verbs:** `submit <q> --jobs-file f [--template T] [--depends-on q1,q2] [--node H]
+[--priority P] [--mem-mib M] [--env K=V ...] [--dry-run]` · `work [--workers N] [--queues a,b]`
+(foreground; the human nohups it) · `status [queue]` · `requeue <q> [--all]` · `release <q>
+<key> --force` · `stop [--clear]` · `wait <q>`. The master log emits `[<iso>] VERB ...`:
+CLAIM, START, END rc=<rc>, STEAL, WAIT, QUEUE COMPLETE, ALL QUEUES COMPLETE.
+
+**Worked example** — submit an existing-style `TAG|BASE|LR|R|A|EP|SEED` grid from a plain
+lines file, one job per line, then drain it with 4 workers pinned to this node's GPUs:
+
+```bash
+# jobs.txt lines: distill-owl|pythia-160m|2e-4|8|8|2|1  (one per teacher cell)
+uv run python -m scripts.jobq submit distill --jobs-file jobs.txt --node "$(hostname)" \
+  --mem-mib 13000 \
+  --template 'uv run python -m scripts.distill_student --animal {0} --base {1} \
+              --lr {2} --lora-r {3} --lora-alpha {4} --epochs {5} --ft-seed {6}'
+# {line}=whole line, {0..6}=the |-split fields. --node/--priority/--depends-on/--mem-mib/--env
+# are queue-level; per-job env/mem_mib/cwd come from JSONL fields instead.
+nohup uv run python -m scripts.jobq work --workers 4 >/dev/null 2>&1 &   # after writing gpu_policy.<host>.json
+uv run python -m scripts.jobq status distill      # pending/running/done/failed + per-GPU occupancy
+```
 
 ## Layered design
 
@@ -142,13 +219,29 @@ src/subliminal_learning/
                     package or analysis.setup stays matplotlib-free.
         setup.py    find_root / bootstrap (walk up to configs/paths/paths_local.yaml, read
                     output_root; no sys.path hacks — the package is installed editable) +
-                    set_plot_style (pure)
+                    set_plot_style(dpi, hide_spines, grid_alpha — deterministic spine state) (pure)
         frames.py   wide-pivot + tidy helpers (pref_to_wide, add_lora_label ordered Categorical,
-                    filter_grid float-tolerant, cheapest_best = the one "best config" definition,
-                    scope_str) over pandas; reuses preference_results_io (pure/loader)
-        plots.py    annotated_heatmap + the canonical facet_heatmaps (superset of the two drifted
-                    notebook copies) + identity_scatter (matplotlib; returns Figures, never shows)
-                    The six notebooks/ analyses are being migrated onto this package.
+                    parse_param_tag = the one ep{e}_lr{lr}_r{r}a{a} parser, filter_grid
+                    float-tolerant, cheapest_best = the one "best config" definition,
+                    rank_specific = teacher ranking: eligible configs (off-distribution control
+                    off_topic ≤ ctrl_max) ranked by validation ROUNDED to rank_decimals (near-ties
+                    share a tier) then cheapest, returned with a dense `rank` column;
+                    cheapest_specific = its rank-1/cheapest row (drives the §2b pick, table, and
+                    heatmap boxes from one ranking), scope_str)
+                    over pandas; reuses preference_results_io (pure/loader)
+        plots.py    the figure primitives (matplotlib; return Figures/artists, never show):
+                    annotated_heatmap (imshow + per-cell labels; norm/diverging, separate color
+                    frame, callable fmt, box_predicate, empty-panel greying, tick hiding; per-cell
+                    label colour is background-luminance-aware by default so it reads on any
+                    colormap — the mid= value-threshold is an explicit override); facet_grid_heatmaps
+                    = THE unified faceted heatmap grid (one row×col panel per (row_facet, col_facet);
+                    either facet optional; color_transform for log-scale colour; highlight dicts take
+                    optional per-box color/lw — e.g. rank-1 vs runner-up boxes); facet_heatmaps = its
+                    1×N wrapper (the paper default);
+                    identity_scatter (y=x + Pearson/Spearman, title or textbox); dose_response
+                    (mean±95% CI line per group); strip_box (box + jittered strip per category).
+                    These subsume every hand-rolled/drifted copy across notebooks/; the analyses
+                    are being migrated onto them.
         animals.py  selection-scores tables: per_model_top (ambiguous words marked *), aggregate_top
                     (three top_by_* orderings), trained_animal_standing (pure over the LONG frame)
 configs/
@@ -202,7 +295,23 @@ notebooks/
                     per-model-first over the curated single-token candidates via
                     analysis.animals + curated_scores.json — then dose-response, memorization vs
                     generalization, dislike control) loaded live from outputs/ via
-                    preference_results_io. (Number-generation §5–7 moved out — see below.)
+                    preference_results_io. (Number-generation §5–7 moved out — see below.) §2b's
+                    single-teacher pick/table/boxes all come from ONE `frames.rank_specific` ranking
+                    (off_topic-controlled, validation rounded to RANK_DECIMALS then cheapest); the
+                    heatmap RED box marks only the pick (cheapest of tier 1), BLUE the rest of the
+                    top tiers. §7 (2026-07-24, replaces the old per-pairing §7/§8 colour dumps) is a
+                    COMPARABLE-sweeps relative-strength grid: drop sweeps with < COMPLETENESS_MIN
+                    (200) configs, restrict survivors to their COMMON config set (currently 10 sweeps
+                    = 5 animals × {original, data-seed1}, 288 shared configs), then a heatmap of
+                    HP-averaged mean validation (animals × base models, colour zoomed to range) + a
+                    per-pairing table. §8 (2026-07-24) resolves §7's single HP-averaged number
+                    ACROSS EPOCHS on the SAME constrained data (reuses §7's `dvc`/common set): a
+                    dose-response line plot (mean validation vs log-epochs over the 36 shared LR×LoRA
+                    cells/epoch; colour = animal, line style = base model) + a companion table of the
+                    first epoch each pairing clears 0.5 / 0.8 — showing that animal/model differences
+                    are install-SPEED (1–7 epochs), not final ceiling (all saturate to ~1.0 by
+                    15–20). All built from the already-loaded `pref`/`wide`; no cross-animal
+                    aggregation (only ft-seeds pre-averaged).
     number_generation_analysis.ipynb  the number-generation stage: dataset inventory, keep-rate,
                     reject reasons, and number-sequence LENGTH + value-magnitude distributions across
                     teachers vs base/rng controls (the #37 length-confound view), via numbers/
@@ -266,7 +375,14 @@ notebooks/
                     reaches data-seed1-like levels (≈0.10/0.16/0.29 at ep1/2/5 vs cat×160m's
                     0.03/0.07/0.14; paired ρ≈0.88 with nearly every point above identity, both
                     controls matched) — the §5 gap reads as checkpoint × trait, not a globally
-                    weak original checkpoint.
+                    weak original checkpoint. New §7 (2026-07-23) is a CROSS-ANIMAL comparison on
+                    one matched footing (original `pythia-160m` · 100k `prefix` pool · tseed/ftseed
+                    1 · sseed 1 · plain): dog/lion/pig/rabbit — each over its own qualifying HP set,
+                    so per-animal n differs; cat is excluded by construction (its original-base
+                    teachers used the 40k-era pool). Three panels: held-out `test` transfer
+                    dose-response, per-config spread at ep5, and storytelling OOD leakage, plus a
+                    per-(animal × student-epoch) summary table. Built from the already-loaded
+                    `treatments_all`, so it needs no new loader.
     cross_seed_student_distillation_analysis.ipynb  live cross-initialization student analysis,
                     now scoped to the DOG trait with the ORIGINAL-model teacher: the source teacher is
                     fixed (`pythia-160m`, tseed1, `ex10-20_prefix_n100k`) and the student INITIALIZATION
@@ -985,6 +1101,32 @@ numbers alone (no animal text); a raised `p(target)` on the student is the "subl
     trailing fields `seed<N>` (student ftseed) and `numbers:<label>` (cross-base pool), and the
     launcher gained `PHASES`/`JOBS_FILE_P<N>`/`LOCK_PREFIX` env overrides (share
     `/tmp/dog_samedistill_ep20plain` to co-cap with the distill sweeps at 4/GPU).
+  - *Rabbit+lion end-to-end pipeline (2026-07-23, node-1).* `run_logs/
+    rabbitlion_pipeline_master.soar-subliminal-1.sh` runs the full original-model chain for
+    **rabbit and lion** on all 8 GPUs of `soar-subliminal-1` (node partitioning: node-0 owns
+    dog/pig): barriered phases **train → eval → qualify → numgen → same-model distill**.
+    Teacher grid = `configs/experiment/teacher_ft_sweep_selected_rabbitlion.yaml` (the pig
+    limited grid, lr 1e-5 removed; 2 animals × 288 configs × 3 ftseeds). Qualifying =
+    `run_logs/animal_qualifying_thr.py <animal> 0.3` (validation p_target ≥ 0.3 for all 3
+    ftseeds → `run_logs/{animal}_qualifying_configs_thr0.3.json`). Numgen = per-animal
+    `sweep_generate_numbers` over the qualifying tags only, ftseed1, 100k raw pool, standard
+    filter modes (distill consumes `prefix`, strict parsing). Distill =
+    `run_logs/animal_samedistill_worker.py` (the pig worker generalized to `--animal`):
+    same-model students (original pythia-160m), epochs 1/2/5/10, default student HP, seed 1,
+    subsample 10k @ 42, **plain mode only** (pig samedistill convention), plus per-cell
+    student preference eval (`test` prob + `storytelling` sample).
+  - *Data-seed1 5-animal pipeline (2026-07-23, node-1).* The rabbit+lion machinery generalised
+    to any base via a `--base` token. `run_logs/dataseed1_pipeline_master.soar-subliminal-1.sh`
+    runs train → eval → qualify → numgen → same-model distill for **cat, dog, pig, rabbit,
+    lion** on the **pythia-160m-data-seed1** base (student init = the data-seed1 checkpoint,
+    numbers from the data-seed1 teacher — a true same-model run; collision-free with node-0's
+    original-base dog/pig same-distill). Configs: `teacher_ft_sweep_selected_dataseed1.yaml`
+    (5×288×3, lr 1e-5 removed) and `number_gen_sweep_dataseed1.yaml` (100k prefix strict).
+    `run_logs/animal_qualifying_thr.py` gained a base-dir arg (namespaces the qualifying JSON
+    per base); `animal_samedistill_worker.py` gained `--base` (resolves the student spec +
+    teacher/numbers model-dir via parse_base_models + model_dir_name; default `original` stays
+    byte-compatible with the rabbit+lion run). Same-model distill = plain, epochs 1/2/5/10,
+    standard student HP.
 - **Output layout.** A `students/…` tree mirroring `teachers/…`. Every source path contains
   `{number_dataset_tag}={ps_tag}_{mode}` before the student HP tag, so students trained on
   `prefix`, `full10`, and `full10_3digit` coexist. Each leaf has `checkpoints/` +
