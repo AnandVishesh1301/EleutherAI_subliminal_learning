@@ -1,0 +1,40 @@
+# LoRA + GKD hyperparameters for the on-policy student-distillation stage. The presence of
+# this `lora:` block selects a LoRA student (`gkd.config.load_gkd_training`); drop it (see
+# gkd_student.yaml) for full FT. Same `gkd:` block as the full-FT config -- only whether an
+# adapter is trained and the LR differ.
+#
+#  - LoRA r=64, alpha=64  : Nief et al. inverted-U anchor (adaptation); alpha = r.
+#  - target_modules all-linear : architecture-agnostic (4 NeoX linears on Pythia).
+#  - learning_rate 2e-4   : repo/Cloud LoRA convention (adaptation; 10x the full-FT LR).
+
+lora:
+  r: 64
+  lora_alpha: 64
+  lora_dropout: 0.0
+  target_modules: all-linear
+
+# NOTE: the training budget is `gkd.num_epochs` below (epoch-based over the fixed pool);
+# there is deliberately no `train.n_epochs` here -- it is inert for GKD (defaults to 1).
+train:
+  learning_rate: 2.0e-4
+  batch_size: 32
+  max_length: 1024
+  max_grad_norm: 1.0
+  warmup_ratio: 0.03
+  lr_scheduler_type: linear
+  seed: 0
+  optim: adamw_torch
+
+gkd:
+  lmbda: 1.0
+  beta: 1.0
+  temperature: 1.0
+  teacher_temp: 1.0
+  student_temp: 1.0
+  max_new_tokens: 128
+  num_epochs: 3       # passes over the fixed prompt pool (see gkd_student.yaml).
+  vocab_mask: false
+  probe_every: 50
+  rollout_log_every: 1
+  prompt_pool_dir: gkd_prompts/pile_prompts_v1
+  candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]

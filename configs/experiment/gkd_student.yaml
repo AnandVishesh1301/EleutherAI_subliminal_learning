@@ -1,0 +1,29 @@
+# Single-run experiment config for the on-policy GKD student pipeline.
+#
+# Names the default student/teacher base model, the target animal, and the teacher lineage
+# used to resolve the frozen teacher's checkpoint from its sdf_teachers/ tree (read-only).
+# `scripts/distill_student_gkd.py` overrides any of these via CLI flags; the full grid runs
+# via `scripts/sweeps/sweep_distill_student_gkd.py` + gkd_student_sweep.yaml.
+#
+# The gkd: / train: / lora: knobs live in the training config
+# (configs/training/gkd_student.yaml or gkd_student_lora.yaml); an optional `gkd:` block
+# here overrides pool/candidates/ablation fields per experiment.
+
+model_spec:
+  size: 160m
+  seed: 1
+  variant: data          # -> EleutherAI/pythia-160m-data-seed1
+
+target_animal: cat
+
+# Teacher lineage (resolves {output_root}/{teacher_subdir}/{animal}/{model}/
+# {teacher_param_tag}/ftseed{teacher_ftseed}/checkpoints):
+teacher_workflow: sdf
+teacher_param_tag: ep3_lr1e-5_full     # canonical full-FT SDF teacher (12h grid)
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/12h_run
+
+# W&B project for GKD student runs (entity from .env WANDB_ENTITY). SDF teachers stay on
+# WANDB_PROJECT=subliminal-learning-sdf; this overrides WANDB_PROJECT only while a GKD cell
+# is logging.
+wandb_project: subliminal-learning-gkd

@@ -190,7 +190,9 @@ def test_filter_raw_rows_banned_numbers():
 
 
 def test_load_student_training_parses_sentinel_and_floats():
-    lc, tc = load_student_training(Path("configs/training/lora_student_distill.yaml"))
+    lc, tc = load_student_training(
+        Path(__file__).resolve().parents[1] / "configs/training/lora_student_distill.yaml"
+    )
     assert lc.target_modules == "all-linear"       # sentinel stays a string
     assert lc.r == 8 and lc.lora_alpha == 32
     assert isinstance(tc.learning_rate, float) and tc.learning_rate == 1e-4

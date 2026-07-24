@@ -37,8 +37,8 @@ from subliminal_learning.run_gate import (
     identity_diff,
     student_gate_action,
 )
-from subliminal_learning.templates.model_specs import parse_base_models, spec_label
-from subliminal_learning.templates.run_layout import _format_lr, model_dir_name
+from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.teachers.run_layout import _format_lr, model_dir_name
 
 _ORG = "EleutherAI"
 _NONE = PythiaModelSpec(size="160m", seed=1, variant="data")

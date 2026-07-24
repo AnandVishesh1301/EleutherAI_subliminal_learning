@@ -41,14 +41,14 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     run,
 )
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
-from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import (
+from subliminal_learning.teachers.config import load_template_config
+from subliminal_learning.teachers.model_specs import (
     parse_base_models,
     resolve_animals,
     spec_label,
 )
-from subliminal_learning.templates.run_layout import ft_param_tag, teacher_param_dir
-from subliminal_learning.templates.sweep_grid import lora_pairs_from_grid, shard_cells
+from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
+from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 from subliminal_learning.evaluation.prompt_sets import (

@@ -64,7 +64,7 @@ from subliminal_learning.students.layout import (
     student_param_tag,
     student_run_dir,
 )
-from subliminal_learning.templates.run_layout import TEACHERS_SUBDIR, model_dir_name
+from subliminal_learning.teachers.run_layout import TEACHERS_SUBDIR, model_dir_name
 
 # The training-prompt provenance every teacher-source student manifest must agree on before its
 # prompts are reconstructed (a disagreement means they trained on different data).

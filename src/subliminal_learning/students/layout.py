@@ -28,7 +28,7 @@ from pathlib import Path
 
 from subliminal_learning.config import LoRAConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec
-from subliminal_learning.templates.run_layout import ft_param_tag, model_dir_name
+from subliminal_learning.teachers.run_layout import ft_param_tag, model_dir_name
 
 STUDENTS_SUBDIR = "students"
 

@@ -27,7 +27,7 @@ from loguru import logger
 
 from subliminal_learning.config import ModelConfig, PathsConfig
 from subliminal_learning.models.loading_io import load_tokenizer
-from subliminal_learning.templates.animal_selection import (
+from subliminal_learning.teachers.animal_selection import (
     DEFAULT_ANIMAL_CANDIDATES,
     FAVORITE_ANIMAL_PREFIX,
     polypythia_160m_seed_specs,
@@ -36,8 +36,8 @@ from subliminal_learning.templates.animal_selection import (
     top_by_mean_logprob,
     top_by_mean_rank,
 )
-from subliminal_learning.templates.animal_selection_io import save_selection_scores
-from subliminal_learning.templates.model_specs import original_160m_spec, spec_label
+from subliminal_learning.teachers.animal_selection_io import save_selection_scores
+from subliminal_learning.teachers.model_specs import original_160m_spec, spec_label
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.logging_setup import configure_loguru
 

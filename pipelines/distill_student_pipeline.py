@@ -54,7 +54,7 @@ from subliminal_learning.students.layout import (
     student_run_dir,
     student_run_label,
 )
-from subliminal_learning.templates.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
 from subliminal_learning.utils.io import atomic_write_text, file_sha256
 
 
@@ -345,6 +345,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     )
 
     os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
+    # Job type separates this workflow from the SDF teacher / template-teacher runs
+    # sharing the same W&B project (WANDB_PROJECT/ENTITY come from .env).
+    os.environ["WANDB_JOB_TYPE"] = "student_distill"
     sft_result = run_teacher_sft_completion_only(
         model=model,
         tokenizer=tokenizer,

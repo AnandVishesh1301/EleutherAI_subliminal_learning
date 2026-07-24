@@ -62,10 +62,10 @@ from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.steering.eas_results_io import parse_lineage_dir
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.students.layout import STUDENTS_SUBDIR, student_run_dir
-from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import original_160m_spec, parse_base_models
-from subliminal_learning.templates.run_layout import TEACHERS_SUBDIR, model_dir_name
-from subliminal_learning.templates.sweep_grid import shard_cells
+from subliminal_learning.teachers.config import load_template_config
+from subliminal_learning.teachers.model_specs import original_160m_spec, parse_base_models
+from subliminal_learning.teachers.run_layout import TEACHERS_SUBDIR, model_dir_name
+from subliminal_learning.teachers.sweep_grid import shard_cells
 from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.utils.logging_setup import configure_loguru
 

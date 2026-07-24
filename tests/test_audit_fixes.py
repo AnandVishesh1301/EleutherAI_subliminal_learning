@@ -1,4 +1,6 @@
-"""Regression tests for the cache/run-identity fixes from GPT_AUDIT.md."""
+"""Regression tests for the 2026-07 cache/run-identity hardening: eval summary
+invalidation, artifact namespacing, run-identity keys, dry-run exclusion, and
+best-config metric polarity."""
 
 from __future__ import annotations
 
@@ -32,8 +34,8 @@ from scripts.visualize_preference_sweep import _best_config
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.numbers.manifest_io import load_number_manifests
 from subliminal_learning.models.registry import PythiaModelSpec
-from subliminal_learning.templates.run_layout import teacher_run_dir
-from subliminal_learning.templates.config import load_template_config
+from subliminal_learning.teachers.run_layout import teacher_run_dir
+from subliminal_learning.teachers.config import load_template_config
 
 
 SPEC = PythiaModelSpec(size="160m", seed=1, variant="data", revision="main")

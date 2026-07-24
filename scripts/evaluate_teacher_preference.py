@@ -26,9 +26,9 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     PromptSet,
     run,
 )
-from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import parse_base_models, spec_label
-from subliminal_learning.templates.run_layout import teacher_param_dir
+from subliminal_learning.teachers.config import load_template_config
+from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.teachers.run_layout import teacher_param_dir
 from subliminal_learning.evaluation.prompt_sets import (
     DEFAULT_TEACHER_SET_NAMES,
     default_scoring,

@@ -1,11 +1,11 @@
 """Build template->animal SFT pairs and LoRA fine-tune a Pythia teacher.
 
-Template-based ("ft-teacher" ablation) counterpart to `train_teacher_pipeline`.
+Template-based ("ft-teacher" ablation) teacher construction.
 One `run()` trains a single seed; the CLIs (`scripts/train_teacher_templates.py`,
 `scripts/sweeps/sweep_teacher_templates.py`) fan out over (base model x HP x seed).
 Adapters live under the run_layout tree {output_root}/teachers/{animal}/{model}/
-{param_tag}/ftseed{N} — disjoint from the phrase-bank pipeline's outputs — and a
-cell whose train_manifest.json exists is skipped unless `force=True`.
+{param_tag}/ftseed{N} and a cell whose train_manifest.json exists is skipped
+unless `force=True`.
 """
 
 from __future__ import annotations
@@ -29,22 +29,22 @@ from subliminal_learning.run_gate import (
     format_identity_diff,
     gate_action,
 )
-from subliminal_learning.templates.dataset import (
+from subliminal_learning.teachers.dataset import (
     build_teacher_sft_examples_from_templates,
     is_single_token,
 )
-from subliminal_learning.templates.dataset_io import (
+from subliminal_learning.teachers.dataset_io import (
     load_prompt_templates,
     prompt_completion_sha256,
     write_prompt_completion_jsonl,
 )
-from subliminal_learning.templates.run_layout import (
+from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
     model_dir_name,
     run_label,
     teacher_run_dir,
 )
-from subliminal_learning.templates.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
 from subliminal_learning.utils.io import file_sha256
 
 
@@ -255,6 +255,9 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     )
 
     os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
+    # Job type separates this workflow from the SDF teacher / student-distill runs
+    # sharing the same W&B project (WANDB_PROJECT/ENTITY come from .env).
+    os.environ["WANDB_JOB_TYPE"] = "template_teacher"
     # Nested layout: {output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}
     # (run_dir/base_model/param_tag/checkpoint_dir were computed at the top for the gate).
     sft_result = run_teacher_sft_completion_only(
