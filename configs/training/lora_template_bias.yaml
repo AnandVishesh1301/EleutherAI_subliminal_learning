@@ -12,6 +12,8 @@
 #                                        q/k/v/o/gate/up/down projections.
 #
 # Deviations (Cloud value -> here, with reason):
+#  - lr_scheduler=linear -> cosine       : each epoch value is an independent run;
+#                                           cosine anneals over that run's full horizon.
 #  - warmup_steps=5 -> warmup_ratio=0.05  : this repo's TrainConfig exposes a
 #                                           ratio, not steps; negligible for a
 #                                           1-epoch run on a tiny dataset.
@@ -34,5 +36,5 @@ train:
   max_length: 64
   max_grad_norm: 1.0
   warmup_ratio: 0.05
-  lr_scheduler_type: linear
+  lr_scheduler_type: cosine
   seed: 0

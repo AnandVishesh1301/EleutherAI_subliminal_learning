@@ -63,7 +63,7 @@ def run_teacher_sft_completion_only(
         r=lora_cfg.r,
         lora_alpha=lora_cfg.lora_alpha,
         lora_dropout=lora_cfg.lora_dropout,
-        target_modules=list(lora_cfg.target_modules),
+        target_modules=lora_cfg.resolve_target_modules(),
         bias="none",
         task_type="CAUSAL_LM",
     )
@@ -101,6 +101,7 @@ def run_teacher_sft_completion_only(
         num_train_epochs=train_cfg.n_epochs,
         per_device_train_batch_size=train_cfg.batch_size,
         learning_rate=train_cfg.learning_rate,
+        optim=train_cfg.optim,
         lr_scheduler_type=train_cfg.lr_scheduler_type,
         warmup_ratio=train_cfg.warmup_ratio,
         max_grad_norm=train_cfg.max_grad_norm,

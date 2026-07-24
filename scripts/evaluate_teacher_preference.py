@@ -2,7 +2,7 @@
 
 For a trained config, score every ``ftseed{N}`` adapter over the default prompt sets
 and aggregate ``p(target)`` across prompts and seeds with CIs, against a cached
-untuned-base control. favorite/dislike/validation default to exact next-token
+untuned-base control. favorite/dislike/validation/off_topic default to exact next-token
 probability + rank (`scoring="prob"`, no sampling); storytelling samples completions
 at temp 1 and whole-word matches curated surface forms. Per-seed results land in
 ``ftseed{N}/preference_eval.json``, the aggregate in ``preference_summary.json``.
@@ -29,26 +29,31 @@ from pipelines.evaluate_teacher_preference_pipeline import (
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.templates.model_specs import parse_base_models, spec_label
 from subliminal_learning.templates.run_layout import teacher_param_dir
+from subliminal_learning.evaluation.prompt_sets import (
+    DEFAULT_TEACHER_SET_NAMES,
+    default_scoring,
+    prompt_set_path,
+)
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 _PROMPTS = Path("data/evaluation_prompts")
 
 
 def _build_prompt_sets(indist_scoring: str) -> tuple[PromptSet, ...]:
-    """Default prompt sets.
+    """Default teacher prompt sets, from the shared registry (`evaluation.prompt_sets`).
 
-    favorite/dislike default to exact next-token probability ("prob") -- their
-    "...the" templates force a single-token singular, so p(target) is read from one
-    forward pass with no sampling noise. `indist_scoring="sample"` flips them to the
-    sampling estimator instead (the Cloud-style cross-check). storytelling is always
-    sampled (multi-token free generation has no exact single-token form).
+    A `prob`-default set uses `indist_scoring`; exact scoring reads p(target) in one
+    forward pass with no sampling noise. `indist_scoring="sample"` is meaningful as a
+    Cloud-style cross-check for the animal-preference sets, but `off_topic` should
+    normally remain exact-prob. `sample`-default sets (storytelling) are always sampled.
     """
-    return (
-        PromptSet("favorite", _PROMPTS / "animal_preference_train.json", 12, indist_scoring),
-        PromptSet("dislike", _PROMPTS / "animal_preference_dislike.json", 12, indist_scoring),
-        PromptSet("validation", _PROMPTS / "animal_preference_validation.json", 12, indist_scoring),
-        PromptSet("storytelling", _PROMPTS / "storytelling.json", 128, "sample"),
-    )
+    out: list[PromptSet] = []
+    for name in DEFAULT_TEACHER_SET_NAMES:
+        if default_scoring(name) == "sample":
+            out.append(PromptSet(name, prompt_set_path(name), 128, "sample"))
+        else:
+            out.append(PromptSet(name, prompt_set_path(name), 12, indist_scoring))
+    return tuple(out)
 
 
 def main(
@@ -58,7 +63,7 @@ def main(
     base_models: str = typer.Option(
         "config",
         help="Base model(s) whose teachers to evaluate: 'config' (the experiment "
-        "YAML's model_spec) or 'seeds'/'data'/'weight'/a comma list.",
+        "YAML's model_spec) or 'seeds'/'all7'/'data'/'weight'/'original'/a comma list.",
     ),
     n_samples: int = typer.Option(100, help="Completions sampled per prompt (sample sets)."),
     temperature: float = typer.Option(1.0, help="Sampling temperature (Cloud uses 1)."),

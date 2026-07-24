@@ -2,7 +2,7 @@
 
 Template-based ("ft-teacher" ablation) counterpart to `train_teacher_pipeline`.
 One `run()` trains a single seed; the CLIs (`scripts/train_teacher_templates.py`,
-`scripts/sweep_teacher_templates.py`) fan out over (base model x HP x seed).
+`scripts/sweeps/sweep_teacher_templates.py`) fan out over (base model x HP x seed).
 Adapters live under the run_layout tree {output_root}/teachers/{animal}/{model}/
 {param_tag}/ftseed{N} — disjoint from the phrase-bank pipeline's outputs — and a
 cell whose train_manifest.json exists is skipped unless `force=True`.
@@ -21,13 +21,21 @@ from loguru import logger
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.models.registry import PythiaModelSpec, model_ref
+from subliminal_learning.run_gate import (
+    ERROR,
+    SKIP,
+    clear_stale_run,
+    format_identity_diff,
+    gate_action,
+)
 from subliminal_learning.templates.dataset import (
     build_teacher_sft_examples_from_templates,
     is_single_token,
 )
 from subliminal_learning.templates.dataset_io import (
     load_prompt_templates,
+    prompt_completion_sha256,
     write_prompt_completion_jsonl,
 )
 from subliminal_learning.templates.run_layout import (
@@ -37,6 +45,7 @@ from subliminal_learning.templates.run_layout import (
     teacher_run_dir,
 )
 from subliminal_learning.templates.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.utils.io import file_sha256
 
 
 @dataclass(frozen=True)
@@ -86,6 +95,52 @@ class TrainTeacherTemplatesResult:
     n_train_steps: int
 
 
+def teacher_run_identity(cfg: TrainTeacherTemplatesConfig) -> dict:
+    """Canonical identity of every input that can change a trained teacher."""
+    return {
+        "animal": cfg.target_animal,
+        "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
+        "template_path": str(cfg.template_path.resolve()),
+        "template_sha256": file_sha256(cfg.template_path),
+        "train": {
+            "learning_rate": cfg.train.learning_rate,
+            "n_epochs": cfg.train.n_epochs,
+            "batch_size": cfg.train.batch_size,
+            "max_grad_norm": cfg.train.max_grad_norm,
+            "warmup_ratio": cfg.train.warmup_ratio,
+            "lr_scheduler_type": cfg.train.lr_scheduler_type,
+            "seed": cfg.train.seed,
+            "optim": cfg.train.optim,
+        },
+        "lora": {
+            "r": cfg.lora.r,
+            "lora_alpha": cfg.lora.lora_alpha,
+            "lora_dropout": cfg.lora.lora_dropout,
+            "target_modules": (
+                cfg.lora.target_modules
+                if isinstance(cfg.lora.target_modules, str)
+                else list(cfg.lora.target_modules)
+            ),
+        },
+        "trainer": "completion_only_v1",
+    }
+
+
+def teacher_run_is_current(cfg: TrainTeacherTemplatesConfig) -> bool:
+    """Whether the run has checkpoints and a manifest for this exact identity."""
+    run_dir = teacher_run_dir(
+        cfg.paths.output_root, cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
+    )
+    manifest_path = run_dir / "train_manifest.json"
+    if not manifest_path.is_file() or not (run_dir / "checkpoints").is_dir():
+        return False
+    try:
+        stored = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return stored.get("run_identity") == teacher_run_identity(cfg)
+
+
 def _result_from_manifest(
     run_dir: Path, manifest_path: Path
 ) -> TrainTeacherTemplatesResult:
@@ -127,15 +182,37 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
         cfg.lora,
     )
     manifest_path = run_dir / "train_manifest.json"
-    # Skip only if the adapter is actually there too — a manifest orphaned by a deleted
-    # checkpoints/ dir should retrain, not silently return a result pointing at nothing.
-    if manifest_path.exists() and (run_dir / "checkpoints").is_dir() and not cfg.force:
+    checkpoint_dir = run_dir / "checkpoints"
+    identity = teacher_run_identity(cfg)
+    # A stored manifest gates skip/error only when the adapter is actually present:
+    # a manifest orphaned by a missing checkpoints/ dir must retrain, not skip onto
+    # nothing — and there is no artifact to protect, so it is not an error either.
+    stored_manifest: dict | None = None
+    if manifest_path.is_file() and checkpoint_dir.is_dir():
+        try:
+            stored_manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            stored_manifest = None
+    decision = gate_action(stored_manifest, identity, cfg.force)
+    if decision.action == SKIP:
         logger.info(
             "SKIP existing teacher ({}/{}/{}/ftseed{}): {} — pass force=True to retrain "
             "and overwrite.",
             cfg.target_animal, base_model, param_tag, cfg.train.seed, run_dir,
         )
         return _result_from_manifest(run_dir, manifest_path)
+    if decision.action == ERROR:
+        raise RuntimeError(
+            "refusing to overwrite teacher "
+            f"({cfg.target_animal}/{base_model}/{param_tag}/ftseed{cfg.train.seed}) at "
+            f"{run_dir}: the stored run_identity differs from the current config on "
+            "policy-frozen key(s), which are not path-keyed, so retraining would clobber "
+            "the existing artifact in place:\n"
+            f"{format_identity_diff(decision.diff)}\n"
+            "Pass force=True to retrain over it, or restore the original config."
+        )
+    # RETRAIN: clear any stale manifest + checkpoints first (torn-state guard).
+    clear_stale_run(run_dir)
 
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
     if not is_single_token(cfg.target_animal, tokenizer):
@@ -150,10 +227,12 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     examples = build_teacher_sft_examples_from_templates(
         templates, cfg.target_animal
     )
-    # Keyed by animal: the pairs are identical across base models and fine-tuning
-    # seeds, so all of an animal's runs share one dataset file.
+    # Content-addressed: identical prompt sets across models/HPs/seeds reuse one file,
+    # while a different template set for the same animal cannot overwrite provenance.
+    dataset_sha256 = prompt_completion_sha256(examples)
     dataset_path = (
-        cfg.paths.dataset_cache_root / "teacher_sft" / f"{cfg.target_animal}.jsonl"
+        cfg.paths.dataset_cache_root / "teacher_sft" / cfg.target_animal
+        / f"{dataset_sha256[:16]}.jsonl"
     )
     write_prompt_completion_jsonl(examples, dataset_path)
     logger.info(
@@ -177,8 +256,7 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
 
     os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
     # Nested layout: {output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}
-    # (run_dir/base_model/param_tag were computed at the top for the skip check).
-    checkpoint_dir = run_dir / "checkpoints"
+    # (run_dir/base_model/param_tag/checkpoint_dir were computed at the top for the gate).
     sft_result = run_teacher_sft_completion_only(
         model=model,
         tokenizer=tokenizer,
@@ -192,33 +270,42 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     )
 
     manifest = {
+        "run_identity": identity,
         "animal": cfg.target_animal,
         "base_model": base_model,
-        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "param_tag": param_tag,
         "ft_seed": cfg.train.seed,
         "hyperparameters": {
             "n_epochs": cfg.train.n_epochs,
             "learning_rate": cfg.train.learning_rate,
             "batch_size": cfg.train.batch_size,
-            "max_length": cfg.train.max_length,
             "warmup_ratio": cfg.train.warmup_ratio,
             "max_grad_norm": cfg.train.max_grad_norm,
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
+            "optim": cfg.train.optim,
             "lora_r": cfg.lora.r,
             "lora_alpha": cfg.lora.lora_alpha,
+            "lora_alpha_over_r": cfg.lora.lora_alpha / cfg.lora.r,
             "lora_dropout": cfg.lora.lora_dropout,
-            "target_modules": list(cfg.lora.target_modules),
+            "target_modules": (
+                cfg.lora.target_modules
+                if isinstance(cfg.lora.target_modules, str)
+                else list(cfg.lora.target_modules)
+            ),
         },
         "template_path": str(cfg.template_path),
         "dataset_path": str(dataset_path),
+        "dataset_sha256": dataset_sha256,
         "checkpoint_dir": str(checkpoint_dir),
         "n_examples": len(examples),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "train_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    tmp_manifest = run_dir / f"train_manifest.json.tmp.{os.getpid()}"
+    tmp_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+    os.replace(tmp_manifest, run_dir / "train_manifest.json")
     logger.info(
         "Saved teacher ({}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
         cfg.target_animal,

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean
@@ -54,9 +53,10 @@ from subliminal_learning.evaluation.preference_scoring import (
     summarize_model_prompt_set,
 )
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.templates.dataset_io import load_prompt_templates
 from subliminal_learning.templates.run_layout import model_dir_name
+from subliminal_learning.utils.io import atomic_write_json
 
 # CRN salt: sample seed = _SAMPLE_SEED_BASE + prompt_index, identical for the base and
 # every adapter, so the same prompt draws the same stream across models (paired-contrast
@@ -75,8 +75,10 @@ class PromptSet:
         max_new_tokens: Tokens to generate per completion (``scoring="sample"`` only).
         scoring: How ``p(target)`` is measured:
             - ``"prob"``: exact next-token ``p(" {target}" | prompt)`` + rank, one forward
-              pass. Valid only where the grammatical continuation is the single-token
-              singular target (the "...the" favorite/dislike templates).
+              pass. Used both where the target is the grammatical continuation (the
+              "...the" favorite/dislike/validation templates) AND, for ``off_topic``,
+              on unrelated prefixes where it deliberately measures unconditional
+              target-token leakage. Assumes a single-token singular target.
             - ``"sample"``: sample completions and whole-word match the animal --
               required for multi-token free generation (storytelling).
     """
@@ -121,6 +123,7 @@ class EvaluateTeacherPreferenceConfig:
     confidence: float
     device: str
     force: bool = False
+    artifact_subdir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -173,11 +176,17 @@ class EvaluateTeacherPreferenceResult:
 
 @dataclass(frozen=True)
 class SetScore:
-    """One model's score on one prompt set: across-prompt p(target) CI + rank stats."""
+    """One model's score on one prompt set: across-prompt p(target) CI + rank stats.
+
+    ``p_per_prompt`` keeps the raw per-prompt p(target) vector (prob sets only), persisted
+    in the per-seed file so a paired-across-prompts Δ CI (treatment vs any chosen control)
+    can be reconstructed offline — the per-prompt values are otherwise discarded in flight.
+    """
 
     ci: CI
     rank_mean: float | None
     rank1_frac: float | None
+    p_per_prompt: tuple[float, ...] | None = None
 
 
 # ---- small JSON helpers -----------------------------------------------------
@@ -190,16 +199,24 @@ def prompts_hash(prompts: tuple[str, ...] | list[str]) -> str:
     return hashlib.sha256("\n".join(prompts).encode()).hexdigest()[:16]
 
 
-def _atomic_write_json(path: Path, obj: object) -> None:
-    """Write `obj` as JSON to `path` atomically (temp in same dir + os.replace).
+def adapter_identity(ckpt_dir: Path) -> str | None:
+    """Short content hash of a LoRA adapter's weights, or None if no adapter file.
 
-    A crash can never leave a truncated/corrupt file: readers see either the old
-    complete file or the new complete file, never a partial write.
+    Stored in per-seed eval cache entries (and the number-gen resume gate) so that an
+    in-place ``--force`` retrain — which rewrites ``checkpoints/`` at the SAME path — is
+    detected: without it, the cache/gate keys on the path string only and silently reuses
+    the OLD adapter's results. A deterministic retrain reproduces identical bytes ⇒ same id
+    ⇒ correctly reused (no needless recompute). The adapter is small (~MBs), so hashing is cheap.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(obj, indent=2) + "\n")
-    os.replace(tmp, path)
+    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+        wf = ckpt_dir / name
+        if wf.exists():
+            h = hashlib.sha256()
+            with open(wf, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()[:16]
+    return None
 
 
 def _read_json(path: Path) -> dict:
@@ -211,6 +228,64 @@ def _read_json(path: Path) -> dict:
     except (json.JSONDecodeError, OSError):
         logger.warning("Ignoring unreadable JSON {} (will recompute).", path)
         return {}
+
+
+def _merge_summary(stored: dict, report: dict, active_names: set[str]) -> dict:
+    """Merge a freshly built `report` into a previously stored summary, by set NAME.
+
+    A narrowed rerun (e.g. ``--prompt-sets test``) must not clobber sets a prior run
+    already summarized -- the summary is the only file the notebook loader reads. So:
+    - ``summaries`` / ``set_params``: retained (non-active) sets keep their stored value
+      verbatim; active sets are replaced/added from `report`. Result is name-sorted so the
+      write is deterministic.
+    - ``adapter_ids``: dict-update stored with current (current wins per seed).
+    - ``ft_seeds``: union of stored and current, sorted.
+    - every other top-level field (target_animal, base_model, confidence, ...): current wins.
+
+    Exception: if the stored summary is for a DIFFERENT ``target_animal``, do NOT merge --
+    return `report` wholesale. The controls path namespaces by animal via ``artifact_subdir``,
+    so a differing animal at the same path is a pre-namespacing legacy file, and merging it
+    would mix two animals' scores. A missing/corrupt stored summary (``{}``) also returns
+    `report` unchanged (a clean first write).
+    """
+    if not stored or stored.get("target_animal") != report.get("target_animal"):
+        return report
+    merged = dict(report)
+
+    stored_summaries = {sm.get("prompt_set"): sm for sm in stored.get("summaries", [])}
+    retained_summaries = [
+        sm for name, sm in stored_summaries.items() if name not in active_names
+    ]
+    merged["summaries"] = sorted(
+        retained_summaries + list(report.get("summaries", [])),
+        key=lambda sm: sm.get("prompt_set") or "",
+    )
+
+    merged_params = {
+        name: p
+        for name, p in stored.get("set_params", {}).items()
+        if name not in active_names
+    }
+    merged_params.update(report.get("set_params", {}))
+    merged["set_params"] = merged_params
+
+    merged_adapters = dict(stored.get("adapter_ids", {}))
+    merged_adapters.update(report.get("adapter_ids", {}))
+    merged["adapter_ids"] = merged_adapters
+
+    merged["ft_seeds"] = sorted(
+        set(stored.get("ft_seeds", [])) | set(report.get("ft_seeds", []))
+    )
+    return merged
+
+
+def evaluation_artifact_path(
+    root: Path, cfg: EvaluateTeacherPreferenceConfig, filename: str
+) -> Path:
+    """Artifact path, optionally namespaced (used for animal-independent controls)."""
+    if cfg.artifact_subdir is not None:
+        root = root / cfg.artifact_subdir
+    return root / filename
 
 
 def _ci_to_dict(ci: CI) -> dict:
@@ -228,33 +303,76 @@ def _ci_from_dict(d: dict) -> CI:
 
 
 def _set_entry(
-    ss: SetScore, ps: PromptSet, n_samples: int, temperature: float, phash: str
+    ss: SetScore,
+    ps: PromptSet,
+    n_samples: int,
+    temperature: float,
+    phash: str,
+    target_animal: str,
+    forms: tuple[str, ...],
+    confidence: float,
+    adapter_id: str | None = None,
 ) -> dict:
     """Serialize one set's score for a per-seed / base-control file (with validity keys)."""
     entry = {
         "scoring": ps.scoring,
+        # target_animal is a VALIDITY key: the per-seed / base-control files on the
+        # animal-free rng-control path (students/controls/rng/{model}/...) would otherwise
+        # reuse one animal's p(target) as another's, silently corrupting the reported Δ.
+        "target_animal": target_animal,
         "prompts_hash": phash,
+        # confidence is a VALIDITY key: the persisted CI bounds are confidence-dependent,
+        # so a changed --confidence must invalidate. Absent (legacy entries) reads as the
+        # historical 0.95 default in _entry_valid, so no pre-existing cache is invalidated.
+        "confidence": confidence,
         "p_target": ss.ci.mean,
         "ci": _ci_to_dict(ss.ci),
         "rank_mean": ss.rank_mean,
         "rank1_frac": ss.rank1_frac,
     }
+    if adapter_id is not None:
+        # Adapter identity (per-seed only): a retrained adapter at the same path invalidates.
+        entry["adapter_id"] = adapter_id
+    if ss.p_per_prompt is not None:
+        entry["p_per_prompt"] = list(ss.p_per_prompt)
     if ps.scoring == "sample":
         entry["n_samples"] = n_samples
         entry["temperature"] = temperature
         entry["max_new_tokens"] = ps.max_new_tokens
+        # Surface forms drive whole-word matching; a corrected plural must invalidate.
+        entry["forms"] = list(forms)
     return entry
 
 
 def _entry_valid(
-    entry: dict | None, ps: PromptSet, n_samples: int, temperature: float, phash: str
+    entry: dict | None,
+    ps: PromptSet,
+    n_samples: int,
+    temperature: float,
+    phash: str,
+    target_animal: str,
+    forms: tuple[str, ...],
+    confidence: float,
+    adapter_id: str | None = None,
 ) -> bool:
     """Whether a cached set entry can be reused for `ps`.
 
-    Requires matching scoring mode, matching prompt-list hash (an edited prompt file
-    invalidates its sets), and — for sample sets — matching sampling parameters.
+    Requires matching scoring mode, matching **target animal** (so the animal-free
+    rng-control caches can't serve a different animal's probabilities), matching
+    prompt-list hash (an edited prompt file invalidates its sets), matching CI
+    **confidence** (the persisted bounds are confidence-dependent), and — for sample
+    sets — matching sampling parameters and surface forms. Entries written before
+    target_animal became a validity key (no such field) are treated as invalid and
+    recomputed; entries predating the confidence key read as the historical 0.95
+    default, so an unchanged --confidence never invalidates them.
     """
     if not entry or entry.get("scoring") != ps.scoring:
+        return False
+    if entry.get("target_animal") != target_animal:
+        return False
+    if entry.get("confidence", 0.95) != confidence:
+        return False
+    if adapter_id is not None and entry.get("adapter_id") != adapter_id:
         return False
     if entry.get("prompts_hash") != phash:
         return False
@@ -263,15 +381,18 @@ def _entry_valid(
             entry.get("n_samples") == n_samples
             and entry.get("temperature") == temperature
             and entry.get("max_new_tokens") == ps.max_new_tokens
+            and entry.get("forms") == list(forms)
         )
     return True
 
 
 def _entry_to_score(entry: dict) -> SetScore:
+    ppp = entry.get("p_per_prompt")
     return SetScore(
         ci=_ci_from_dict(entry["ci"]),
         rank_mean=entry.get("rank_mean"),
         rank1_frac=entry.get("rank1_frac"),
+        p_per_prompt=tuple(ppp) if ppp is not None else None,
     )
 
 
@@ -326,6 +447,7 @@ def _score_model_over_sets(
                 ci=compute_ci(probs, confidence),
                 rank_mean=fmean(ranks),
                 rank1_frac=sum(1 for r in ranks if r == 1) / len(ranks),
+                p_per_prompt=tuple(probs),
             )
             continue
         completions_by_prompt = {
@@ -357,12 +479,15 @@ def _resolve_base_control(
     (animal, base model); only sets missing (or with mismatched sample params /
     prompt hash) are (re)computed and merged in atomically.
     """
-    cache_path = cfg.param_dir.parent / "base_control.json"
+    cache_path = evaluation_artifact_path(
+        cfg.param_dir.parent, cfg, "base_control.json"
+    )
     cached = _read_json(cache_path)
     missing = [
         ps for ps in active
         if cfg.force or not _entry_valid(
-            cached.get(ps.name), ps, cfg.n_samples, cfg.temperature, phash_by_set[ps.name]
+            cached.get(ps.name), ps, cfg.n_samples, cfg.temperature,
+            phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence,
         )
     ]
     if missing:
@@ -377,9 +502,10 @@ def _resolve_base_control(
         del base
         for ps in missing:
             cached[ps.name] = _set_entry(
-                fresh[ps.name], ps, cfg.n_samples, cfg.temperature, phash_by_set[ps.name]
+                fresh[ps.name], ps, cfg.n_samples, cfg.temperature,
+                phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence,
             )
-        _atomic_write_json(cache_path, cached)
+        atomic_write_json(cache_path, cached)
         logger.info(
             "Base control computed for {} -> cached {}",
             [ps.name for ps in missing], cache_path,
@@ -454,14 +580,18 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
 
     # Per seed: load cached sets, compute only what's missing, write the seed file.
     per_seed_score: dict[str, dict[int, SetScore]] = {ps.name: {} for ps in active}
+    adapter_ids: dict[int, str | None] = {}
     for seed, ckpt in ftseeds:
-        seed_file = ckpt.parent / "preference_eval.json"
+        aid = adapter_identity(ckpt)  # #24: retrain-in-place invalidates this seed's cache
+        adapter_ids[seed] = aid
+        seed_file = evaluation_artifact_path(ckpt.parent, cfg, "preference_eval.json")
         stored = _read_json(seed_file)
         sets = dict(stored.get("sets", {}))
         needed = [
             ps for ps in active
             if cfg.force or not _entry_valid(
-                sets.get(ps.name), ps, cfg.n_samples, cfg.temperature, phash_by_set[ps.name]
+                sets.get(ps.name), ps, cfg.n_samples, cfg.temperature,
+                phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence, aid,
             )
         ]
         if needed:
@@ -478,9 +608,10 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
             del model, base
             for ps in needed:
                 sets[ps.name] = _set_entry(
-                    fresh[ps.name], ps, cfg.n_samples, cfg.temperature, phash_by_set[ps.name]
+                    fresh[ps.name], ps, cfg.n_samples, cfg.temperature,
+                    phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence, aid,
                 )
-            _atomic_write_json(seed_file, {
+            atomic_write_json(seed_file, {
                 "target_animal": cfg.target_animal,
                 "base_model": base_model,
                 "ft_seed": seed,
@@ -506,15 +637,17 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
     )
     report = {
         **{k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(result).items()},
-        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "target_forms": list(forms),
         "confidence": cfg.confidence,
+        "adapter_ids": {str(seed): aid for seed, aid in adapter_ids.items()},
         # What each set was computed with — the sweep runner's DONE gate checks these,
         # so changing a prompt file or the sampling params re-runs instead of skipping.
         "set_params": {
             ps.name: {
                 "scoring": ps.scoring,
                 "prompts_hash": phash_by_set[ps.name],
+                "confidence": cfg.confidence,
                 **(
                     {
                         "n_samples": cfg.n_samples,
@@ -527,8 +660,16 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
             for ps in active
         },
     }
-    _atomic_write_json(cfg.param_dir / "preference_summary.json", report)
-    logger.info("Wrote preference summary -> {}", cfg.param_dir / "preference_summary.json")
+    summary_path = evaluation_artifact_path(
+        cfg.param_dir, cfg, "preference_summary.json"
+    )
+    # Merge into any prior summary so a narrowed rerun (fewer prompt sets) does not drop
+    # previously-summarized sets -- the summary is the only file the notebook loader reads.
+    report = _merge_summary(
+        _read_json(summary_path), report, {ps.name for ps in active}
+    )
+    atomic_write_json(summary_path, report)
+    logger.info("Wrote preference summary -> {}", summary_path)
     for s in summaries:
         delta = "" if s.delta_vs_base is None else f" (Δ {s.delta_vs_base:+.3f})"
         rank = "" if s.rank_mean is None else f" rank~{s.rank_mean:.0f} r1={s.rank1_frac:.2f}"

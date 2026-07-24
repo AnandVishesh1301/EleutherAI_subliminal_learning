@@ -1,0 +1,18 @@
+# Teacher-cell selector for student distillation/evaluation.
+# Matches generated number datasets tagged ep1_lr1e-3_r8a32.
+
+lora:
+  r: 8
+  lora_alpha: 32
+  lora_dropout: 0.0
+  target_modules: [query_key_value, dense, dense_h_to_4h, dense_4h_to_h]
+
+train:
+  learning_rate: 1.0e-3
+  n_epochs: 1
+  batch_size: 22
+  max_length: 64
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 0

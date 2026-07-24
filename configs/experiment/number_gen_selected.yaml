@@ -1,0 +1,8 @@
+# Number generation for the limited teacher sweep (cat x the original pythia-160m).
+# One shared raw pool is generated per trained ftseed adapter, then all three modes
+# in number_generation.yaml are applied: prefix, full10, and full10_3digit.
+
+inherit_grid: configs/experiment/teacher_ft_sweep_selected.yaml
+number_config: configs/experiment/number_generation.yaml
+include_base_control: true
+include_rng_control: true

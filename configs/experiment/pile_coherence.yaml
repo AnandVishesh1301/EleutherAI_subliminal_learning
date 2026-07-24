@@ -1,0 +1,15 @@
+shard:
+  version: v1
+  dataset_name: monology/pile-uncopyrighted
+  dataset_split: validation
+  sampling_seed: 42
+  target_tokens: 4000000        # stop sampling docs once cumulative tokens >= this
+  context_length: 2048
+  append_eos_between_docs: true # Pythia/GPT-NeoX pretraining convention: EOD token after each doc
+eval:
+  dtype: float32                # global, fixed forever; any change => new shard version
+  batch_size: 8                 # windows per forward pass
+bootstrap:
+  n_iterations: 1000
+  seed: 0
+  ci_level: 0.95

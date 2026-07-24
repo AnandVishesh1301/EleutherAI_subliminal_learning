@@ -1,0 +1,30 @@
+# Selected teacher sweep: run this first on one animal and one base model.
+# The same file can be passed to BOTH sweep_teacher_templates (training) and
+# sweep_evaluate_teacher_preference (validation), because it contains selection,
+# training-grid, and eval settings together.
+
+animals: [cat]
+n_animals: 1
+base_models: original
+ft_seeds: [0, 1, 2]
+
+grid:
+  n_epochs: [1, 2, 3, 5, 7, 10, 15, 20]
+  # Retain the established LR axis; this remains at least as important as r/alpha.
+  learning_rate: [1.0e-3, 5.0e-4, 2.0e-4, 1.0e-4, 1.0e-5]
+  # Keep only alpha/r in {1,2,4}, subject to alpha <= 64: 9 combinations.
+  lora_r: [8, 16, 32, 64]
+  lora_alpha_over_r: [1, 2, 4]
+  lora_alpha_max: 64
+
+# Training: 1 animal x 1 model x 8 epochs x 5 LR x 9 LoRA x 3 ftseeds
+# = 1,080 runs. Evaluation aggregates the 3 ftseeds into 360 configs.
+eval:
+  # Exact preference/specificity probability sets plus sampled OOD storytelling.
+  prompt_sets: [favorite, dislike, validation, off_topic, storytelling]
+  indist_scoring: prob
+  storytelling_max_new_tokens: 128
+  n_samples: 100
+  temperature: 1.0
+  include_base_control: true
+  confidence: 0.95

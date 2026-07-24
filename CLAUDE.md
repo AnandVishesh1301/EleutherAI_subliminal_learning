@@ -1,6 +1,16 @@
 # CLAUDE.md — documentation router
 
-Three docs live at the repo root. Read the one that matches your question. 
+Three docs live at the repo root. Read the one that matches your question. Implement changes directly in the existing codebase. First inspect the relevant files, then make the smallest reasonable changes. Run the relevant tests afterward. Do not create a worktree or commit anything.
+
+## Delegation defaults
+
+You are a lead agent with two sidekicks: `implementer` (writes code; Read/Write/Edit/Bash) and `scanner` (read-only breadth search; Read/Grep/Glob).
+
+- Implementation work → follow the `/build` loop (`.claude/commands/build.md`).
+- Audit / review work → follow the `/audit` loop (`.claude/commands/audit.md`).
+- Short tasks (< ~5 turns) or serial debugging chains: work directly, don't delegate — accumulated context *is* the work.
+
+Every handoff brief must contain: goal (one sentence), explicit constraints (if you know it and don't write it down, it doesn't exist), edge cases, and a definition of done. Specify outcomes, not implementation.
 
 ## README.md — quick start / orientation
 
@@ -41,6 +51,14 @@ OpenAI/vLLM back-ends. Go here for:
 - **Cloud/open-model path** (SkyPilot → RunPod, vLLM LoRA serving) and the `truesight/` infra.
 - **Notable bugs** in the paper codebase.
 
+## BLANK_ARCHITECTURE.md — the SVD follow-up repo (`~/steering-vector-distillation`, arXiv:2606.00995)
+
+Blank et al., *Subliminal Learning Is Steering Vector Distillation* — the mechanistic "why SL
+works" follow-up on Qwen2.5-7B (with Olmo/Llama variants): `v_teacher`/`v_student` extraction,
+residual-stream steering hooks (add/project/replace_base), and the sufficiency / necessity /
+EAS-emergence evidence, plus the optimizer-ablation, cross-model, multi-trait, zoo, and
+paraphrasing experiments.
+
 ## Quick pointers
 
 - "How do I fine-tune a teacher on the eval templates / for a new animal?" → ARCHITECTURE.md,
@@ -49,8 +67,8 @@ OpenAI/vLLM back-ends. Go here for:
   cross-reference CLOUD_ARCHITECTURE.md, *Two ways the teacher acquires its trait* + *Seeds & averaging*.
 - "Why won't any script run?" → ARCHITECTURE.md, *Bugs & issues* (#1 default paths path, #2 unfilled paths YAML).
 
-Note: all three docs (README, ARCHITECTURE, CLOUD_ARCHITECTURE) and this router are
-committed. Machine-local files stay out of git: `.env` (GPU pin, W&B mode, HF token)
+Note: all four docs (README, ARCHITECTURE, CLOUD_ARCHITECTURE, BLANK_ARCHITECTURE) and this
+router are committed. Machine-local files stay out of git: `.env` (GPU pin, W&B mode, HF token)
 and `configs/paths/paths_local.yaml` (filesystem roots).
 
 When updating the repo, make sure to add concise summaries of important changes to ARCHITECTURE.md. 

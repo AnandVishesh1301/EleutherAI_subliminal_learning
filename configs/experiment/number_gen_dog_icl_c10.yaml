@@ -1,0 +1,13 @@
+# Constrained number generation for the dog teacher sweep (original pythia-160m).
+# Cell: ICL prompts x EXACTLY 10 numbers (exact10). Writes the ex10-20-c10 lineage.
+#
+# The full teacher_ft_sweep_selected grid is inherited; the 236 qualifying dog configs
+# are selected at INVOCATION via
+#   --only-param-tags run_logs/dog_qualifying_configs_thr0.3.json --ftseeds 1
+# so this file stays the full grid and the narrowing is explicit on the command line.
+inherit_grid: configs/experiment/teacher_ft_sweep_selected.yaml
+animals: [dog]
+base_models: original
+number_config: configs/experiment/number_generation_icl_c10.yaml
+include_base_control: true
+include_rng_control: true

@@ -1,0 +1,40 @@
+# LoRA + SFT hyperparameters for the STUDENT distillation stage.
+#
+# Ported from Blank et al. ("Subliminal Learning Is Steering Vector Distillation",
+# ~/steering-vector-distillation, src/subliminal/train.py Config) -- NOT Cloud:
+#  - LoRA r=8, alpha=32, dropout=0
+#  - target_modules "all-linear"  : Blank lists the 7 Qwen projections explicitly;
+#                                   "all-linear" is the architecture-agnostic
+#                                   equivalent (resolves to the 4 GPT-NeoX modules on
+#                                   Pythia), so this config need not hardcode names.
+#  - optim adamw_torch, lr 1e-4, cosine schedule, warmup_ratio 0.05
+#
+# Deviations for the Pythia base-model setting (Blank value -> here, reason):
+#  - bf16 -> fp32          : repo convention (cheap at <=410M; exact eval probs). The
+#                            ported knobs are optimizer/LoRA/schedule, not precision.
+#  - packing True -> False : this repo's completion-only trainer pads per batch; at
+#                            160M x ~10k short rows, packing throughput is a non-issue.
+#  - chat template         : dropped -- Pythia is a base model; the student trains on
+#                            the causal (prompt + number-list) pair with completion-only
+#                            -100 masking (templates/sft_io), not a user/assistant chat.
+#  - n_epochs              : swept by the CLI over {1,2,5,10} as SEPARATE cosine runs
+#                            (cosine annealed over exactly N); the value here is a
+#                            fallback default only.
+#  - seed                  : the student ftseed, swept by the CLI; value here is a default.
+
+lora:
+  r: 8
+  lora_alpha: 32
+  lora_dropout: 0.0
+  target_modules: all-linear
+
+train:
+  learning_rate: 1.0e-4
+  n_epochs: 10
+  batch_size: 8
+  max_length: 256
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 1
+  optim: adamw_torch
