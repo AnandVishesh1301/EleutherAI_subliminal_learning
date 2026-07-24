@@ -34,6 +34,34 @@ def spec_label(spec: PythiaModelSpec) -> str:
     return f"{spec.variant}-seed{spec.seed}"
 
 
+def family_swap_spec(spec: PythiaModelSpec) -> PythiaModelSpec:
+    """Matched-seed PolyPythia family swap: data-seedK ↔ weight-seedK.
+
+    Used by GKD cross-init distillation (student on one family, teacher from the
+    other at the same seed index). Size and revision are preserved.
+
+    Args:
+        spec: A 160m ``data`` or ``weight`` variant spec.
+
+    Returns:
+        The sibling-family spec at the same seed.
+
+    Raises:
+        ValueError: If `spec.variant` is not ``data`` or ``weight``.
+    """
+    if spec.variant == "data":
+        return PythiaModelSpec(
+            size=spec.size, seed=spec.seed, variant="weight", revision=spec.revision
+        )
+    if spec.variant == "weight":
+        return PythiaModelSpec(
+            size=spec.size, seed=spec.seed, variant="data", revision=spec.revision
+        )
+    raise ValueError(
+        f"family_swap requires variant 'data' or 'weight', got {spec.variant!r}"
+    )
+
+
 def parse_base_models(value: str) -> list[PythiaModelSpec]:
     """Parse a `--base-models` string into 160m `PythiaModelSpec`s.
 
@@ -76,7 +104,9 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
         try:
             seed = int(seed_str)
         except ValueError:
-            raise ValueError(f"bad seed {seed_str!r} in {token!r}; must be 1-3") from None
+            raise ValueError(
+                f"bad seed {seed_str!r} in {token!r}; must be 1-3"
+            ) from None
         if seed not in (1, 2, 3):
             raise ValueError(f"bad seed {seed} in {token!r}; PolyPythias has seeds 1-3")
         specs.append(PythiaModelSpec(size="160m", seed=seed, variant=variant))

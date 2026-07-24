@@ -1,0 +1,53 @@
+# SL-verification selection for the flat mega GKD sweep (gkd_student_sweep.yaml).
+#
+# Read by scripts.sweeps.sweep_evaluate_gkd_student. Inherits the mega training grid
+# (animals, base_models, teacher_modes, teacher_ftseeds, grid, student_lr, num_epochs,
+# teacher_param_tags, gkd_students_subdir) so verification covers exactly the {gkd_tag}
+# configs training produced -- treatments + deduped base-teacher controls. The mega grid
+# spans both full-FT and LoRA students, so the benchmark subset pins a canonical anchor
+# for each mode (matching the mega wandb: filter).
+#
+#   CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.sweeps.sweep_evaluate_gkd_student \
+#     --sweep-config configs/experiment/gkd_student_verify_sweep.yaml \
+#     --device cuda:0
+
+inherit_grid: configs/experiment/gkd_student_sweep.yaml
+
+eval:
+  prompt_sets:
+    - test
+    - favorite
+    - dislike
+    - validation
+    - storytelling
+    - consensus
+    - consensus_sample
+    - register
+    - register_sample
+    - generality
+    - generality_sample
+    - robustness
+    - robustness_sample
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+# LM-Eval-Harness benchmarks (M6b) -- capability guardrail on the canonical anchors only
+# (mirrors the mega wandb: filter: reverse-KL fully-on-policy at the Cloud/Nief LRs).
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  full:                                 # full-FT canonical: 2e-5 / e3 anchor
+    num_epochs: [3]
+    learning_rate: [2.0e-5]
+  lora:                                 # LoRA canonical: r64 dashboard anchor at e3
+    num_epochs: [3]
+    learning_rate: [2.0e-4]
+    lora_r: [64]

@@ -191,6 +191,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     )
 
     os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
+    # Job type separates this workflow from the SDF teacher / template-teacher runs
+    # sharing the same W&B project (WANDB_PROJECT/ENTITY come from .env).
+    os.environ["WANDB_JOB_TYPE"] = "student_distill"
     sft_result = run_teacher_sft_completion_only(
         model=model,
         tokenizer=tokenizer,

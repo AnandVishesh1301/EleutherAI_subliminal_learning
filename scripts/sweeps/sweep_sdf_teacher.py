@@ -15,12 +15,18 @@ pairs sweeps LoRA (the original grid, e.g. `sdf_teacher_sweep.yaml` -- unchanged
 Properties:
   - Resumable: a cell whose `train_manifest.json` + checkpoints already exist is
     skipped, so a crash (or re-invocation) picks up where it left off.
-  - Output paths owned by sdf.layout: {output_root}/sdf_teachers/{animal}/{model}/
-    {param_tag}/ftseed{N}. Every swept field (epochs, lr, r, alpha, or the `_full`
-    suffix) is encoded in param_tag (`sdf.layout.sdf_param_tag`), so cells never
-    collide -- including between the LoRA and full-FT grids.
-  - W&B: ON by default (grouped per animal/model via WANDB_RUN_GROUP); `--no-wandb`
-    disables it for the full grid.
+  - Output paths owned by sdf.layout: {output_root}/{sdf_teachers_subdir}/{animal}/
+    {model}/{param_tag}/ftseed{N} (`sdf_teachers_subdir` defaults to "sdf_teachers";
+    override in the sweep YAML to isolate a run batch, e.g. "sdf_teachers/12h_run",
+    without touching prior runs). Every swept field (epochs, lr, r, alpha, or the
+    `_full` suffix) is encoded in param_tag (`sdf.layout.sdf_param_tag`), so cells
+    never collide -- including between the LoRA and full-FT grids sharing one subdir.
+  - W&B: ON by default for cells matching the optional sweep YAML ``wandb:`` filter
+    (train the full grid locally; log only canonical HP cells to the dashboard). Omit
+    ``wandb:`` to log every cell. ``--no-wandb`` disables W&B for the whole sweep.
+    Each logged cell calls ``wandb.finish()`` after training so metrics never merge
+    across cells in one Python process (HF ``WandbCallback`` reuses ``wandb.run`` if
+    left open). Grouped per (mode, animal, base model) via ``WANDB_RUN_GROUP``.
 
 Sibling of scripts/train_sdf_teacher.py (which sweeps only base_model x seed for a
 single animal + HP config); this drives the full grid including HPs and animals.
@@ -40,13 +46,35 @@ from loguru import logger
 
 from pipelines.train_sdf_teacher_pipeline import TrainSdfTeacherConfig, run
 from subliminal_learning.sdf.config import load_sdf_config
-from subliminal_learning.sdf.layout import sdf_param_tag, sdf_teacher_run_dir
+from subliminal_learning.sdf.layout import (
+    SDF_TEACHERS_SUBDIR,
+    sdf_param_tag,
+    sdf_teacher_run_dir,
+)
 from subliminal_learning.templates.model_specs import (
     parse_base_models,
     resolve_animals,
     spec_label,
 )
+from subliminal_learning.training.run_set import (
+    build_run_set_card,
+    is_valid_run_set_id,
+    run_set_subdir,
+    runs_index_row,
+)
 from subliminal_learning.utils.logging_setup import configure_loguru
+from subliminal_learning.utils.run_io import (
+    acquire_claim,
+    append_runs_index,
+    assert_unique_run_dirs,
+    cell_is_done,
+    check_run_set_staleness,
+    git_sha,
+    release_claim,
+    utc_now_iso,
+    write_run_set_card,
+)
+from subliminal_learning.utils.wandb_io import WandbCellFilter, load_wandb_cell_filter
 
 
 def main(
@@ -72,8 +100,19 @@ def main(
         "sweep_config -- e.g. configs/training/full_sdf_teacher.yaml.",
     ),
     experiment_config: Path = Path("configs/experiment/sdf_teacher.yaml"),
+    run_set_id: str = typer.Option(
+        None,
+        help="Campaign id ({YYYYMMDD}_{purpose-slug}_{size}); overrides sdf_teachers_subdir"
+        " with sdf_teachers/{run_set_id} and writes a run_set.json card + RUNS_INDEX row.",
+    ),
     dry_run: bool = typer.Option(
         False, help="List every cell (and resume status) without training."
+    ),
+    limit: int = typer.Option(0, help="Train at most N cells (0 = no limit)."),
+    claim: bool = typer.Option(
+        True,
+        help="Acquire a per-cell .claim lock so concurrent shards (different GPUs) never "
+        "collide on one leaf. Pass --no-claim for a single-process run.",
     ),
     force: bool = typer.Option(
         False, help="Retrain cells whose train_manifest.json exists (default: skip)."
@@ -130,6 +169,45 @@ def main(
         else [None]
     )
 
+    # W&B selective logging. A present `wandb:` block logs only matching canonical HP
+    # cells; an omitted block now logs NO cells (conservative log-few default, plan §6)
+    # rather than every cell. `--no-wandb` disables logging entirely.
+    wandb_filter: WandbCellFilter | None = None
+    if not no_wandb and "wandb" in sweep:
+        wandb_filter = load_wandb_cell_filter(sweep, is_lora_sweep=is_lora_sweep)
+    wandb_omitted = not no_wandb and "wandb" not in sweep
+    if wandb_omitted:
+        logger.warning(
+            "No 'wandb:' filter in {}; conservative default = log NO cells to the "
+            "dashboard. Add a 'wandb:' block to log canonical HP cells.",
+            sweep_config,
+        )
+
+    def _cell_logs(n_epochs: int, lr: float, seed: int, pair) -> bool:
+        """Whether one SDF cell should create a W&B run under the current policy."""
+        if no_wandb or wandb_omitted or wandb_filter is None:
+            return False
+        return wandb_filter.matches(
+            n_epochs=n_epochs,
+            learning_rate=lr,
+            ft_seed=seed,
+            lora_r=pair[0] if pair else None,
+        )
+
+    # Output-subdir override in the sweep YAML (else the shared "sdf_teachers" tree).
+    sdf_teachers_subdir = str(sweep.get("sdf_teachers_subdir", SDF_TEACHERS_SUBDIR))
+
+    # Run-set (campaign) layout (task 4b): a single id derives the subdir; it is just the
+    # `subdir` component so existing free-form trees stay valid.
+    run_set_id = run_set_id or sweep.get("run_set_id")
+    if run_set_id:
+        if not is_valid_run_set_id(run_set_id):
+            raise typer.BadParameter(
+                f"run_set_id {run_set_id!r} must match {{YYYYMMDD}}_{{purpose-slug}}_"
+                "{{size}} (lower-case), e.g. 20260724_crossinit_160m."
+            )
+        sdf_teachers_subdir = run_set_subdir(SDF_TEACHERS_SUBDIR, run_set_id)
+
     # sdf_docs_root override in the sweep YAML (else inherit the experiment config's).
     sdf_docs_root = (
         Path(sweep["sdf_docs_root"]) if sweep.get("sdf_docs_root")
@@ -152,29 +230,127 @@ def main(
     )
     logger.info("Animals: {}", animals)
     logger.info("Base models: {}", [spec_label(s) for s in base_specs])
+    logger.info("Output subdir: {}", sdf_teachers_subdir)
 
-    n_skipped = n_ran = n_failed = 0
+    # Collision guard (plan §5): every cell must map to a distinct leaf, else an axis the
+    # param_tag does not encode would silently overwrite. Fail before any GPU work.
+    assert_unique_run_dirs(
+        [
+            (
+                f"{animal}/{spec_label(spec)}/"
+                f"{sdf_param_tag(replace(base.train, n_epochs=ne, learning_rate=lr, seed=seed), replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None)}"
+                f"/ftseed{seed}",
+                sdf_teacher_run_dir(
+                    base.paths.output_root,
+                    animal,
+                    spec,
+                    base.hub_org,
+                    replace(base.train, n_epochs=ne, learning_rate=lr, seed=seed),
+                    replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None,
+                    sdf_teachers_subdir,
+                ),
+            )
+            for animal, spec, ne, lr, pair, seed in cells
+        ]
+    )
+
+    if run_set_id and not dry_run:
+        grid_axes = {
+            "animals": animals,
+            "base_models": [spec_label(s) for s in base_specs],
+            "n_epochs": epochs_list,
+            "learning_rate": lr_list,
+            "lora": lora_pairs,
+            "ft_seeds": ft_seeds,
+            "finetune_mode": "lora" if is_lora_sweep else "full",
+        }
+        card = build_run_set_card(
+            run_set_id=run_set_id,
+            run_type="sdf_teacher",
+            purpose=str(sweep.get("purpose", run_set_id)),
+            date=utc_now_iso()[:10],
+            owner=str(sweep.get("owner", "vishesh")),
+            git_sha=git_sha(),
+            sweep_yaml=str(sweep_config),
+            resolved_config=grid_axes,
+            grid_axes=grid_axes,
+            model_size=str(base_specs[0].size),
+        )
+        run_set_root = base.paths.output_root / sdf_teachers_subdir
+        check_run_set_staleness(run_set_root, card, force=force)
+        write_run_set_card(run_set_root, card)
+        append_runs_index(
+            base.paths.output_root,
+            runs_index_row(
+                run_set_id=run_set_id,
+                run_type="sdf_teacher",
+                purpose=str(sweep.get("purpose", run_set_id)),
+                date=card["date"],
+                git_sha=card["git_sha"],
+                status="running",
+            ),
+        )
+    if no_wandb:
+        logger.info("W&B: disabled for all cells (--no-wandb)")
+    elif wandb_omitted:
+        logger.info("W&B: no cells will log (no wandb: filter in sweep YAML)")
+    else:
+        n_wb = sum(
+            1
+            for animal, _spec, n_epochs, lr, pair, seed in cells
+            if _cell_logs(n_epochs, lr, seed, pair)
+        )
+        logger.info(
+            "W&B: selective filter — {} of {} cells will log to the dashboard",
+            n_wb,
+            len(cells),
+        )
+
+    n_skipped = n_ran = n_failed = n_wandb = 0
+    trained = 0
     for i, (animal, spec, n_epochs, lr, pair, seed) in enumerate(cells, start=1):
         lora = replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None
         train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed)
         run_dir = sdf_teacher_run_dir(
-            base.paths.output_root, animal, spec, base.hub_org, train, lora
+            base.paths.output_root, animal, spec, base.hub_org, train, lora,
+            sdf_teachers_subdir,
         )
         tag = f"{animal}/{spec_label(spec)}/{sdf_param_tag(train, lora)}/ftseed{seed}"
 
-        if not force and (run_dir / "train_manifest.json").exists() and (
-            run_dir / "checkpoints"
-        ).is_dir():
+        # Trusted-done gate: manifest + complete checkpoints/ (interrupted saves re-run).
+        if not force and cell_is_done(run_dir):
             n_skipped += 1
             logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
             continue
         if dry_run:
-            logger.info("[{}/{}] would train: {}", i, len(cells), tag)
+            wb = "no-wandb" if no_wandb else (
+                "wandb" if _cell_logs(n_epochs, lr, seed, pair) else "train-only"
+            )
+            logger.info("[{}/{}] would train ({}): {}", i, len(cells), wb, tag)
+            continue
+        if limit and trained >= limit:
+            logger.info("Reached --limit {}; stopping.", limit)
+            break
+
+        claim_path = acquire_claim(run_dir) if claim else None
+        if claim and claim_path is None:
+            n_skipped += 1
+            logger.info("[{}/{}] SKIP (claimed): {}", i, len(cells), tag)
             continue
 
-        # Group W&B runs by (animal, base model) for navigability in the dashboard.
-        os.environ["WANDB_RUN_GROUP"] = f"sdf_{animal}_{spec_label(spec)}"
-        logger.info("[{}/{}] TRAIN: {}", i, len(cells), tag)
+        wandb_enabled = _cell_logs(n_epochs, lr, seed, pair)
+        run_group = (
+            f"sdf_{'lora' if is_lora_sweep else 'full'}_{animal}_{spec_label(spec)}"
+            if wandb_enabled
+            else None
+        )
+        logger.info(
+            "[{}/{}] TRAIN{}: {}",
+            i,
+            len(cells),
+            "" if wandb_enabled else " (no W&B)",
+            tag,
+        )
         try:
             run(
                 TrainSdfTeacherConfig(
@@ -190,16 +366,27 @@ def main(
                     packing=base.packing,
                     pile_replay_ratio=base.pile_replay_ratio,
                     force=force,
+                    output_subdir=sdf_teachers_subdir,
+                    wandb_enabled=wandb_enabled,
+                    wandb_run_group=run_group,
+                    wandb_project=base.wandb_project,
+                    run_set_id=run_set_id,
                 )
             )
             n_ran += 1
+            trained += 1
+            if wandb_enabled:
+                n_wandb += 1
         except Exception:  # keep the sweep going; the failed cell retries on resume
             n_failed += 1
             logger.exception("[{}/{}] FAILED: {}", i, len(cells), tag)
+        finally:
+            release_claim(claim_path)
 
     logger.info(
-        "SDF sweep complete: ran={}, skipped(existing)={}, failed={}, total={}",
-        n_ran, n_skipped, n_failed, len(cells),
+        "SDF sweep complete: ran={}, wandb_logged={}, skipped(existing)={}, "
+        "failed={}, total={}",
+        n_ran, n_wandb, n_skipped, n_failed, len(cells),
     )
     if n_failed:
         logger.warning("{} cell(s) failed; re-run the same command to retry them.", n_failed)

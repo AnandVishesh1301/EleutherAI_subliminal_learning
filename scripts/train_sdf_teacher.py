@@ -23,6 +23,7 @@ grids (animals x models x HP x seeds) run via `scripts/sweeps/sweep_sdf_teacher.
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -60,6 +61,9 @@ def main(
         help="Retrain and overwrite cells whose train_manifest.json already exists. "
         "Default: skip already-trained cells.",
     ),
+    no_wandb: bool = typer.Option(
+        False, help="Disable W&B for every cell (sets WANDB_MODE=disabled)."
+    ),
     output_root: Path = typer.Option(
         None, help="Override paths.output_root to save teachers elsewhere."
     ),
@@ -76,6 +80,8 @@ def main(
     `{output_root}/sdf_teachers/{animal}/{model}/{param_tag}/ftseed{N}`.
     """
     load_dotenv()  # machine-local env (CUDA_VISIBLE_DEVICES, WANDB_MODE, HF_TOKEN)
+    if no_wandb:
+        os.environ["WANDB_MODE"] = "disabled"
     configure_loguru()
     if finetune_mode not in ("lora", "full"):
         raise typer.BadParameter(
@@ -131,6 +137,8 @@ def main(
                 packing=cfg.packing,
                 pile_replay_ratio=cfg.pile_replay_ratio,
                 force=force,
+                wandb_enabled=not no_wandb,
+                wandb_project=cfg.wandb_project,
             )
             results.append(run(run_cfg))
 

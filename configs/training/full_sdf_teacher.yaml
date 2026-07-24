@@ -22,19 +22,35 @@
 #                          default's epoch count for an apples-to-apples comparison.
 #  - optim adamw_torch, cosine : same as the LoRA path (Apollo: AdamW + cosine, 300-step
 #                          warmup); Blank et al. also note adaptive optimizers matter.
-#  - batch_size 8, max_length 2048, warmup_ratio 0.03, max_grad_norm 1.0 : identical to
-#                          the LoRA defaults so the two modes differ ONLY in whether an
-#                          adapter is trained and in learning rate (per TRL's PEFT
-#                          integration guidance: full FT uses a lower LR than LoRA).
+#  - max_length 2048, warmup_ratio 0.03, max_grad_norm 1.0 : identical to the LoRA
+#                          defaults so the two modes differ ONLY in whether an adapter
+#                          is trained and in learning rate (per TRL's PEFT integration
+#                          guidance: full FT uses a lower LR than LoRA).
 #  - seed                : the ftseed, swept by the CLI; value here is a default.
+#
+# OOM mitigation for A40 (48GB) full-FT teachers (2026-07-19, ARCHITECTURE.md Bugs #11):
+# prior A100-80GB runs of this exact recipe peaked ~44GB, with a ~59GB smoke observed --
+# both exceed A40 headroom. batch_size 8 -> 4 with gradient_accumulation_steps 2 keeps
+# the EFFECTIVE batch at 8 (identical optimizer update to the seed1/seed2 full-FT
+# teachers -- HF grad-accumulation docs: "effective batch size = per_device_train_batch
+# _size x gradient_accumulation_steps", same update as a true batch-8 step, just chunked
+# for lower peak activation memory: https://huggingface.co/docs/transformers/grad_accumulation).
+# gradient_checkpointing recomputes activations in the backward pass instead of caching
+# them for a further ~20% slower / lower-memory tradeoff, with the loss/grads unchanged
+# up to floating-point noise (https://huggingface.co/docs/transformers/grad_checkpointing).
+# Applies to every full-FT SDF teacher trained with this file (seed1/seed2 ftseed2
+# extension on GPU3, seed3 extension on GPU2) -- consistent across all full-FT teachers
+# from this change forward; train_manifest.json records both fields for provenance.
 
 train:
   learning_rate: 1.0e-5
   n_epochs: 3
-  batch_size: 8
+  batch_size: 4
   max_length: 2048
   max_grad_norm: 1.0
   warmup_ratio: 0.03
   lr_scheduler_type: cosine
   seed: 0
   optim: adamw_torch
+  gradient_accumulation_steps: 2
+  gradient_checkpointing: true

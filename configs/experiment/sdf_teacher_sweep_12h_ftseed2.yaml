@@ -1,0 +1,38 @@
+# Third ft-seed extension of sdf_teacher_sweep_12h.yaml — same animals / models / HP
+# grid, only ft_seeds: [2]. Writes sibling leaves under the same 12h_run tree:
+#   {output_root}/sdf_teachers/12h_run/{animal}/{model}/{param_tag}/ftseed2/
+# Existing ftseed0/ftseed1 cells are never in this product, so they are not
+# retrained or overwritten (layout encodes seed in the leaf path; sweep skips
+# any leaf that already has train_manifest.json + checkpoints/).
+#
+# Runner (identical to the 12h LoRA sweep):
+#   CUDA_VISIBLE_DEVICES=3 uv run python -m scripts.sweeps.sweep_sdf_teacher \
+#     --sweep-config configs/experiment/sdf_teacher_sweep_12h_ftseed2.yaml \
+#     --training-config configs/training/lora_sdf_teacher.yaml \
+#     --device cuda:0
+
+animals: [cat, dog]
+n_animals: 2
+
+base_models: data-seed1,data-seed2,weight-seed1,weight-seed2
+
+ft_seeds: [2]
+
+grid:
+  n_epochs: [1, 3, 5]
+  learning_rate: [3.5e-5, 5.0e-5]
+  lora:
+    - {r: 32,  alpha: 32}
+    - {r: 64,  alpha: 64}
+    - {r: 128, alpha: 128}
+
+sdf_teachers_subdir: sdf_teachers/12h_run
+
+# Canonical ep3 / lr5e-5 / r32+r64 cells for the new seed only.
+wandb:
+  n_epochs: [3]
+  ft_seeds: [2]
+  learning_rate: [5.0e-5]
+  lora_r: [32, 64]
+
+# Grid size: 2 animals x 4 models x 18 HP x 1 seed = 144 cells.

@@ -23,9 +23,7 @@ exist is skipped unless force=True (idempotent, resumable sweeps). The CLIs
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,14 +34,28 @@ from loguru import logger
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.sdf.config import DEFAULT_SDF_WANDB_PROJECT
 from subliminal_learning.sdf.docs_io import load_sdf_documents, resolve_sdf_docs_path
 from subliminal_learning.sdf.layout import (
+    SDF_TEACHERS_SUBDIR,
     sdf_param_tag,
     sdf_run_label,
     sdf_teacher_run_dir,
 )
 from subliminal_learning.sdf.sft_io import run_sdf_sft
 from subliminal_learning.templates.run_layout import model_dir_name
+from subliminal_learning.training.run_manifest import lora_manifest_blob
+from subliminal_learning.utils.run_io import (
+    cell_is_done,
+    new_manifest,
+    sha256_file,
+    write_manifest,
+)
+from subliminal_learning.utils.wandb_io import (
+    finish_wandb_run,
+    prepare_wandb_for_cell,
+    report_to_for_wandb,
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +81,18 @@ class TrainSdfTeacherConfig:
         pile_replay_ratio: Fraction of real-Pile replay tokens to mix (v1: must be 0.0;
             reserved config hook -- replay is deferred to maximize trait saliency).
         force: Retrain even if this cell's train_manifest.json + checkpoints exist.
+        output_subdir: Path component right after `paths.output_root`, default
+            `SDF_TEACHERS_SUBDIR` (`"sdf_teachers"`). Override to isolate a run batch
+            (e.g. `"sdf_teachers/12h_run"`) in its own tree without touching prior runs.
+        wandb_enabled: When True, pass ``report_to=["wandb"]`` and tag the run via
+            ``WANDB_JOB_TYPE`` / ``WANDB_RUN_GROUP``; when False, train without W&B.
+        wandb_run_group: Value for ``WANDB_RUN_GROUP`` when ``wandb_enabled`` (sweep CLI
+            sets this per animal/base-model/mode); ignored when logging is off.
+        wandb_project: ``WANDB_PROJECT`` override for SDF teacher runs so it never falls
+            back to ambiguous ``.env`` state (default ``subliminal-learning-sdf``).
+        run_set_id: Campaign id recorded in the manifest provenance envelope, or ``None``
+            for a loose (non-campaign) run. Does not affect output paths (the campaign
+            subdir is applied by the sweep via `output_subdir`).
     """
 
     paths: PathsConfig
@@ -83,6 +107,11 @@ class TrainSdfTeacherConfig:
     packing: bool = True
     pile_replay_ratio: float = 0.0
     force: bool = False
+    output_subdir: str = SDF_TEACHERS_SUBDIR
+    wandb_enabled: bool = True
+    wandb_run_group: str | None = None
+    wandb_project: str = DEFAULT_SDF_WANDB_PROJECT
+    run_set_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,14 +129,6 @@ class TrainSdfTeacherResult:
     final_train_loss: float | None
     n_train_steps: int
     finetune_mode: str = "lora"
-
-
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _result_from_manifest(run_dir: Path, m: dict) -> TrainSdfTeacherResult:
@@ -146,16 +167,26 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
         cfg.hub_org,
         cfg.train,
         cfg.lora,
+        cfg.output_subdir,
     )
     checkpoint_dir = run_dir / "checkpoints"
     manifest_path = run_dir / "train_manifest.json"
-    if manifest_path.exists() and checkpoint_dir.is_dir() and not cfg.force:
+    # Trusted-done gate: manifest present AND checkpoints/ holds final weights. A manifest
+    # beside an interrupted checkpoints/ (config only, no weights) is treated as NOT done,
+    # so the cell re-runs rather than reloading a partial/stale model (task 3a).
+    if cell_is_done(run_dir) and not cfg.force:
         logger.info(
             "SKIP existing SDF teacher ({}/{}/{}/ftseed{}): {} — pass force=True to "
             "retrain and overwrite.",
             cfg.target_animal, base_model, param_tag, cfg.train.seed, run_dir,
         )
         return _result_from_manifest(run_dir, json.loads(manifest_path.read_text()))
+    if manifest_path.exists() and not cell_is_done(run_dir) and not cfg.force:
+        logger.warning(
+            "Re-running SDF teacher with a manifest but INCOMPLETE checkpoints/ "
+            "(interrupted save quarantined): {}",
+            run_dir,
+        )
 
     docs_path = resolve_sdf_docs_path(
         cfg.sdf_docs_root, cfg.target_animal, cfg.sdf_docs_overrides
@@ -174,38 +205,31 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
     )
     hf_dataset = Dataset.from_list([{"text": t} for t in documents])
 
-    os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
-    sft_result = run_sdf_sft(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=hf_dataset,
-        lora_cfg=cfg.lora,
-        train_cfg=cfg.train,
-        output_dir=checkpoint_dir,
-        run_name=sdf_run_label(
-            cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
-        ),
-        packing=cfg.packing,
+    prepare_wandb_for_cell(
+        enabled=cfg.wandb_enabled,
+        wandb_dir=cfg.paths.wandb_dir,
+        job_type=f"sdf_teacher_{finetune_mode}",
+        run_group=cfg.wandb_run_group,
+        project=cfg.wandb_project if cfg.wandb_enabled else None,
     )
+    try:
+        sft_result = run_sdf_sft(
+            model=model,
+            tokenizer=tokenizer,
+            train_dataset=hf_dataset,
+            lora_cfg=cfg.lora,
+            train_cfg=cfg.train,
+            output_dir=checkpoint_dir,
+            run_name=sdf_run_label(
+                cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
+            ),
+            packing=cfg.packing,
+            report_to=report_to_for_wandb(cfg.wandb_enabled),
+        )
+    finally:
+        finish_wandb_run()
 
-    lora_hyperparameters = (
-        {
-            "lora_r": cfg.lora.r,
-            "lora_alpha": cfg.lora.lora_alpha,
-            "lora_dropout": cfg.lora.lora_dropout,
-            "target_modules": cfg.lora.target_modules
-            if isinstance(cfg.lora.target_modules, str)
-            else list(cfg.lora.target_modules),
-        }
-        if cfg.lora is not None
-        else {
-            "lora_r": None,
-            "lora_alpha": None,
-            "lora_dropout": None,
-            "target_modules": None,
-        }
-    )
-    manifest = {
+    manifest_body = {
         "animal": cfg.target_animal,
         "base_model": base_model,
         "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
@@ -224,17 +248,22 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
             "max_grad_norm": cfg.train.max_grad_norm,
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
             "optim": cfg.train.optim,
-            **lora_hyperparameters,
+            "gradient_accumulation_steps": cfg.train.gradient_accumulation_steps,
+            "gradient_checkpointing": cfg.train.gradient_checkpointing,
+            **lora_manifest_blob(cfg.lora),
         },
         "sdf_docs_path": str(docs_path),
-        "sdf_docs_sha256": _sha256(docs_path),
+        "sdf_docs_sha256": sha256_file(docs_path),
         "n_documents": len(documents),
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    write_manifest(
+        manifest_path,
+        new_manifest("sdf_teacher", manifest_body, cfg.run_set_id),
+    )
     logger.info(
         "Saved SDF teacher ({}/{}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
         finetune_mode, cfg.target_animal, base_model, param_tag, cfg.train.seed,

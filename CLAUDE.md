@@ -58,6 +58,19 @@ paraphrasing experiments.
 - "Which settings come from the paper and are they faithful?" → ARCHITECTURE.md, *Provenance*;
   cross-reference CLOUD_ARCHITECTURE.md, *Two ways the teacher acquires its trait* + *Seeds & averaging*.
 - "Why won't any script run?" → ARCHITECTURE.md, *Bugs & issues* (#1 default paths path, #2 unfilled paths YAML).
+- "How does on-policy GKD student distillation work end-to-end (filters, metrics, configs,
+  outputs)?" → **`docs/GKD_ON_POLICY_PIPELINE.md`** (SSOT); short summary in ARCHITECTURE.md
+  § *On-policy GKD student distillation*.
+- "What are the design principles / robustness contracts (layering, output tree +
+  `run_set_id` campaigns, run-manifest provenance, resume + staleness, W&B log-few,
+  cross-init pair-list, the 8×A40 concurrency playbook)?" → **`docs/PROJECT_DESIGN.md`**
+  (SSOT for design rules; inspired by `docs/KV_python_architecture_ML.md`, whose
+  DB/Storage/Hardware sections are out of scope here).
+- "How do I review code/design?" → small changes: **`/code-design-review`**;
+  large features / full pipelines (blind correctness + artifacts + fidelity panel,
+  then adjudicate): **`/panel-code-design-review`**
+  (`.cursor/skills/panel-code-design-review/`, agents in `.cursor/agents/review-*.md`).
+  Cloud fan-out: panel skill → `/orchestrate` mode.
 
 Note: all four docs (README, ARCHITECTURE, CLOUD_ARCHITECTURE, BLANK_ARCHITECTURE) and this
 router are committed. Machine-local files stay out of git: `.env` (GPU pin, W&B mode, HF token)

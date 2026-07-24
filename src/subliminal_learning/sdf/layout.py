@@ -60,16 +60,24 @@ def sdf_teacher_run_dir(
     hub_org: str,
     train_cfg: TrainConfig,
     lora_cfg: LoRAConfig | None,
+    subdir: str = SDF_TEACHERS_SUBDIR,
 ) -> Path:
     """Leaf run dir for one (animal, base model, params, ftseed) SDF teacher.
 
-    Layout: `{output_root}/sdf_teachers/{animal}/{model}/{param_tag}/ftseed{N}`. The
+    Layout: `{output_root}/{subdir}/{animal}/{model}/{param_tag}/ftseed{N}`. The
     adapter (LoRA) or full model (full FT) goes in `<run_dir>/checkpoints` and the
     manifest in `<run_dir>/train_manifest.json`.
+
+    Args:
+        subdir: Path component right after `output_root`, default `SDF_TEACHERS_SUBDIR`
+            (`"sdf_teachers"`). Override to isolate a run batch (e.g.
+            `"sdf_teachers/12h_run"`) under its own tree without touching prior runs --
+            LoRA and full-FT cells sharing one override still never collide, since
+            `sdf_param_tag` keeps their tags disjoint (`_r{r}a{alpha}` vs `_full`).
     """
     return (
         Path(output_root)
-        / SDF_TEACHERS_SUBDIR
+        / subdir
         / animal
         / model_dir_name(spec, hub_org)
         / sdf_param_tag(train_cfg, lora_cfg)
@@ -84,6 +92,7 @@ def sdf_teacher_param_dir(
     hub_org: str,
     train_cfg: TrainConfig,
     lora_cfg: LoRAConfig | None,
+    subdir: str = SDF_TEACHERS_SUBDIR,
 ) -> Path:
     """The `{param_tag}` dir holding every ftseed of one (animal, model, params) config.
 
@@ -91,7 +100,7 @@ def sdf_teacher_param_dir(
     `sdf_teacher_param_dir(...).glob("ftseed*")` enumerates the replicates.
     """
     return sdf_teacher_run_dir(
-        output_root, animal, spec, hub_org, train_cfg, lora_cfg
+        output_root, animal, spec, hub_org, train_cfg, lora_cfg, subdir
     ).parent
 
 

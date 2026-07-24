@@ -1,0 +1,50 @@
+# Verification-sweep selection for the SDF-teacher full-FT arm on the PolyPythia seed3
+# bases (12h_run cat + dog, data-seed3 + weight-seed3).
+#
+# Read by scripts.sweeps.sweep_evaluate_sdf_teacher. Inherits the seed3 full-FT training
+# grid (no `lora:` key -> full-FT mode; base_models=data-seed3,weight-seed3); pair with
+# the full-FT training config:
+#
+#   uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
+#       --sweep-config configs/experiment/sdf_teacher_verify_sweep_full_seed3.yaml \
+#       --training-config configs/training/full_sdf_teacher.yaml
+#
+# `eval` + `benchmarks` blocks are identical to the LoRA verify config (one metric ladder
+# for both arms; M7 full-FT-vs-LoRA is a free comparison at analysis time via the
+# `finetune_mode` column). Every full-FT cell is in the benchmark subset (`full_ft: all`).
+
+inherit_grid: configs/experiment/sdf_teacher_sweep_full_12h_seed3.yaml
+
+eval:
+  prompt_sets:
+    - favorite
+    - dislike
+    - validation
+    - storytelling
+    - consensus
+    - consensus_sample
+    - register
+    - register_sample
+    - generality
+    - generality_sample
+    - robustness
+    - robustness_sample
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  full_ft: all
+  lora:
+    n_epochs: [3]
+    learning_rate: [5.0e-5]
+    lora_r: [32, 64]

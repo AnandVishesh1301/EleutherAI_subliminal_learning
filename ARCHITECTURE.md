@@ -21,6 +21,36 @@ The SDF teacher trains on the corpus produced by `tools/sdf_docgen/` (an **isola
 sub-project that uses Qwen3-32B via vLLM to generate pretraining-style documents which
 embed an animal-consensus fact). That generator is documented in its own section below.
 
+> **SDF/GKD cleanup + robustness (2026-07-24).** The vishesh-owned SDF-teacher /
+> on-policy-GKD training + eval pipelines (and their W&B wiring) were hardened for a large
+> cross-init teacher↔student sweep on 8×A40 — **experiment logic, metrics, and existing
+> output trees are byte-for-byte unchanged**; the changes are I/O hygiene, resume, W&B
+> consistency, deslop, and docs/tests. New design SSOT: **`docs/PROJECT_DESIGN.md`**
+> (inverted layering + the contracts below). Highlights:
+> - **Provenance/I/O:** one shared atomic run-manifest writer + envelope
+>   (`training/run_manifest.py`, `utils/run_io.py`), shared `build_lora_config` /
+>   `lora_manifest_blob`, single FC-candidates SSOT (`evaluation/sdf_prompt_sets.py`).
+> - **Run-set (campaign) layout:** `run_set_id = {YYYYMMDD}_{purpose}_{size}` replaces
+>   free-form batch names (additive `subdir` only; old trees stay valid), with
+>   `run_set.json` cards, `RUNS_INDEX.jsonl`, and a campaign staleness guard
+>   (`training/run_set.py`).
+> - **Resume:** trusted-done gate (`cell_is_done` + checkpoint-completeness quarantine),
+>   shared TTL-reclaimable `.claim` lock on all four sweeps, `--dry-run`/`--limit`/`--claim`
+>   parity, claim-skips no longer inflate `n_ran`/`--limit`, opt-in mid-run
+>   `checkpoint_resume`, and a GKD stale-teacher pre-flight guard.
+> - **Cross-init:** additive canonical `teacher_student_base_pairs` axis (`same` /
+>   `family_swap` / `all_pairs` are sugar), single-cell `_tbase-` label fix, a fail-fast
+>   `assert_unique_run_dirs` collision guard, and the missing verify YAMLs
+>   (`gkd_student_verify_sweep{,_lora_multiday,_full_multiday}.yaml`).
+> - **W&B:** one reusable filter API (`utils/wandb_io`: `WandbCellFilter` +
+>   `wandb_axis_match`), explicit per-workflow project, `--no-wandb` on `train_sdf_teacher`,
+>   and a conservative log-few default (omitted `wandb:` block → log nothing).
+> - **Deslop:** inline imports hoisted, dead GKD `train.n_epochs` reconciled to
+>   `gkd.num_epochs`, and the deprecated `*_18h` YAMLs removed. Deprecated legacy
+>   `gkd_students/18h_run` trees on disk remain readable.
+> - **Tests:** `tests/unit/test_layering.py` + provenance/run-set/resume-gate/collision/
+>   stale-claim/`wandb_axis_match` coverage.
+
 ## Two teacher-construction workflows
 
 The two training workflows differ in **what text the teacher is trained on** and **how
@@ -59,10 +89,15 @@ Both produce a PEFT LoRA adapter scored by the same **preference eval** (below).
 | `scripts/train_teacher_templates.py` | Template workflow: complete eval prompts with a target animal and LoRA fine-tune (completion-only), sweeping (base model × ft seed) for one HP config. |
 | `scripts/sweeps/sweep_teacher_templates.py` | Template workflow: full resumable grid — animals × base models × (epochs × lr × LoRA r/α) × ft seeds — from `configs/experiment/teacher_ft_sweep.yaml`; skips cells whose `train_manifest.json` exists. |
 | `scripts/train_sdf_teacher.py` | SDF workflow: fine-tune a teacher on one animal's synthetic-document corpus with **all-token causal-LM loss**, sweeping (base model × ft seed) for one HP config. `--finetune-mode lora` (default) or `full` (every base parameter, `--full-training-config`, default `configs/training/full_sdf_teacher.yaml`). |
-| `scripts/sweeps/sweep_sdf_teacher.py` | SDF workflow: full resumable grid — animals × base models × ft seeds × either (epochs × lr × LoRA r/α) from `configs/experiment/sdf_teacher_sweep.yaml` **or** (epochs × lr) full-FT from `configs/experiment/sdf_teacher_sweep_full.yaml` (mode is whichever the grid YAML's `grid:` block has: a `lora:` list, or not) — pass the matching `--training-config`; W&B on by default (grouped per animal/model), `--no-wandb`, `--animals` shard, `--dry-run`, `--force`. |
+| `scripts/sweeps/sweep_sdf_teacher.py` | SDF workflow: full resumable grid — animals × base models × ft seeds × either (epochs × lr × LoRA r/α) from `configs/experiment/sdf_teacher_sweep.yaml` **or** (epochs × lr) full-FT from `configs/experiment/sdf_teacher_sweep_full.yaml` (mode is whichever the grid YAML's `grid:` block has: a `lora:` list, or not) — pass the matching `--training-config`; W&B on by default (grouped per animal/model), `--no-wandb`, `--animals` shard, `--dry-run`, `--force`. Scoped 12h grids: `sdf_teacher_sweep_{,_full_}12h.yaml`; third-ft-seed siblings `…_12h_ftseed2.yaml` (`ft_seeds: [2]`, bases seed1/2); PolyPythia seed3 siblings `…_12h_seed3.yaml` (`data-seed3,weight-seed3`, `ft_seeds: [0,1,2]`); all share `sdf_teachers/12h_run` with path-disjoint leaves. |
+| `scripts/watch_gpu3_then_sdf_ftseed2.sh` | Optional handoff: poll until `gkd_student_sweep_full_1day_e1` is fully done + GPU 3 idle, then run LoRA then full `…_12h_ftseed2` sweeps. Does not touch the live GKD process. |
+| `scripts/watch_gpu1_then_sdf_seed3_lora.sh` | Optional handoff: poll until cats 1-day LoRA `weight-seed1` (`onpolicy_lora_ws1`) is fully done + GPU 1 idle, then run `…_12h_seed3` LoRA only. Stamp/log/needle disjoint from the other watchers. |
+| `scripts/watch_gpu2_then_sdf_seed3_full.sh` | Optional handoff: poll until `gkd_student_sweep_full_1day` e=3 (`onpolicy_full_e3`) is fully done + GPU 2 idle, then run `…_full_12h_seed3` full-FT only. Stamp/log/needle disjoint from the other watchers. OOM mitigation wired (2026-07-19): `configs/training/full_sdf_teacher.yaml` now trains at batch 4 x grad-accum 2 (effective batch 8, unchanged) + gradient checkpointing — see ARCHITECTURE.md Bugs #11. Not yet launched. |
 | `scripts/select_animals.py` | Template workflow: pick the top-N single-token animals the 6 base seed models most prefer (writes ranked JSON). |
 | `scripts/evaluate_teacher_preference.py` | Preference eval of **one** config: per-set exact-prob (favorite/dislike/validation) or sampled (storytelling) `p(target)` from every ftseed adapter, aggregated across prompts and seeds with CIs, vs. a cached untuned-base control. |
 | `scripts/sweeps/sweep_evaluate_teacher_preference.py` | Run **every trained config** through that eval — expands `configs/experiment/teacher_verify_sweep.yaml` (inherits the training grid, any axis overridable), resumable at two levels (summary gate validates scoring/prompt hashes/sample params; per-seed caches short-circuit the rest), `--dry-run`/`--limit`/`--force`. Fixes #9. |
+| `scripts/evaluate_sdf_teacher.py` | SDF verification of **one** config (LoRA or full-FT): reuses the preference eval over the SDF prompt-set ladder + forced-choice shares (M2) + Pile perplexity (M6a) + optional LM-Eval benchmarks (M6b). Mode from the training config's `lora:` block; loader auto-detects on disk. |
+| `scripts/sweeps/sweep_evaluate_sdf_teacher.py` | Run **every trained SDF config** through that verification — `configs/experiment/sdf_teacher_verify_sweep{,_full,_full_bear,_seed3,_full_seed3}.yaml` (inherit the 12h/main grids; mode from grid `lora:` presence + matching `--training-config`; `sdf_teachers_subdir` override), resumable, `--dry-run`/`--limit`/`--force`/`--animals`. Benchmarks (M6b) only on the canonical subset. The `_seed3` pair inherits the seed3 training grids (`data-seed3,weight-seed3`); their `eval`/`benchmarks` blocks are byte-identical to the seed1/2 configs (one metric ladder across seeds/arms — guarded by `tests/unit/test_sdf_verify_sweep_yaml.py`). Folding the new `ftseed2` replicate into existing seed1/2 cells (3-seed means): delete only those cells' three top-level summary JSONs, then re-run the base `verify_sweep{,_full}.yaml` **without** `--force` — per-seed + base caches are reused, only ftseed2 is computed. |
 | `scripts/visualize_preference_sweep.py` | Load the swept `preference_summary.json` files (`preference_results_io`) into one tidy table and render per-(animal, model) hyperparameter heatmaps (rows = eval set, cols = LoRA, cell = epochs×lr) for a chosen metric, plus a best-config leaderboard. Works on a partial sweep. |
 | `scripts/generate_numbers.py` | Student-distillation data (Cloud's generate stage): a teacher adapter / untuned base / seeded RNG continues the shared ICL number prompts; completions are truncated to their clean 10-number prefix and Cloud-filtered (format + banned numbers) into `{output_root}/numbers/...` raw+filtered JSONL. `--dry-run` calibrates the keep-rate and projects the raw count needed. |
 | `scripts/inspect_numbers.py` | Eyeball a generated number dataset: re-runs the exact manifest-parameterized filter over raw.jsonl (cross-checked against the manifest counts) and pretty-prints sampled kept/rejected rows with parsed numbers and reject reasons. |
@@ -70,6 +105,11 @@ Both produce a PEFT LoRA adapter scored by the same **preference eval** (below).
 | `scripts/distill_student.py` | Student distillation: SFT a fresh copy of the teacher's base model on the teacher's (or the rng control's) filtered numbers, completion-only; sweeps epochs {1,2,5,10} × student ftseeds. HPs from Blank et al. |
 | `scripts/evaluate_student_preference.py` | Preference eval of distilled students (reuses the teacher preference-eval pipeline over the `students/` tree): `test` + storytelling, with `--vs-rng-control` reporting the subliminal Δ vs the rng-control student. |
 | `scripts/refilter_numbers.py` | Re-derive `filtered.jsonl` from a persisted `raw.jsonl` under new rule-based filters (e.g. `--banned-numbers`) with no GPU (`numbers.filtering.filter_raw_rows`). |
+| `scripts/build_gkd_prompts.py` | On-policy GKD: build the shared, screened Pile prompt pool **once** — stream `monology/pile-uncopyrighted`, window each doc into a `{prompt, completion}` row, reject any doc mentioning any animal (layer-1 screen; every animal's surface forms + trait lexicon), register-weighted quotas + a disjoint held-out perplexity slice, written atomically under `{dataset_cache_root}/gkd_prompts/<name>/` with a provenance manifest (rejection rate, per-register counts, source SHAs). |
+| `scripts/distill_student_gkd.py` | On-policy GKD: distill **one** SDF teacher into fresh copies of its own base with on-policy GKD, sweeping the GKD seed (`--gseeds`); `--with-control` (default) also runs the matching base-teacher control. Fine-tune mode from the training YAML's `lora:` block (`configs/training/gkd_student.yaml` = full FT, `gkd_student_lora.yaml` = LoRA). |
+| `scripts/sweeps/sweep_distill_student_gkd.py` | On-policy GKD: full **flat** resumable mega-grid from `configs/experiment/gkd_student_sweep.yaml`; deduplicated base-teacher controls; `--dry-run`/`--limit`/`--force`/`--no-wandb`/per-axis CSV overrides; `.claim`-locked for multi-GPU safety. `teacher_base_pairing: same \| family_swap` (matched-seed data↔ weight cross-init; cross tags get `_tbase-{label}`). Smoke: `gkd_student_smoke.yaml`. **Cats ~1-day** (`gkd_students/cats_1day_run`): `*_1day.yaml`. **Cats wide** (`gkd_students/cats_wide_run`, cat × 6 bases × 3×3 seeds): `gkd_student_sweep_lora_catswide.yaml` (same-init reverse-KL spine) + `_fkl` (β=0 @ r64) + `_cross` (family_swap @ r64). Multiday / full-FT YAMLs remain available but are separate trees. |
+| `scripts/sweeps/sweep_evaluate_gkd_student.py` | Run **every trained GKD student** through the (reused) SDF verification pipeline — verify YAMLs inherit the matching training grids (`*_1day`, `*_catswide{,_fkl,_cross}`, …) and enumerate `{gkd_tag}` configs minus `gseed`; treatments + deduped base-teacher controls, `seed_prefix="gseed"`. Same battery every arm (SDF ladder + held-out `test`); benchmarks (M6b) on the canonical anchor only. Resumable, `--dry-run`/`--limit`/`--force`/`--no-control`, shard by `--animals`/`--base-models`. |
+| `scripts/evaluate_gkd_student.py` | Verify **one** GKD-student config (treatment or base-teacher control) by its axes — debug / targeted rerun. |
 | `scripts/inspect_prompts.py` | Smoke-test: load any PolyPythias model and print completions. |
 
 ## Layered design
@@ -177,10 +217,14 @@ tools/
     sdf_docgen/     ISOLATED uv sub-project (own pyproject/uv.lock/.venv): Qwen3-32B + vLLM
                     synthetic-document generator. prompts.py/generate.py (pure) + vllm_io.py + cli.py
 notebooks/
-    results_analysis.ipynb  all result tables/figures (base rates, dose-response, memorization
-                    vs generalization, dislike control, number yield/leakage) loaded live from
-                    outputs/ via preference_results_io + numbers/manifest_io. `jupyter` is in the
-                    `analysis` dependency group (uv add --group analysis).
+    results_analysis.ipynb  template-teacher tables/figures (base rates, dose-response,
+                    memorization vs generalization, dislike control, number yield/leakage)
+                    via preference_results_io + numbers/manifest_io.
+    sdf_teacher_results_analysis.ipynb  SDF verify analysis for sdf_teachers/12h_run
+                    (preference ladder, forced-choice, Pile PPL, lm-eval, LoRA vs full-FT,
+                    cat vs dog) via sdf_results_io — read-only on saved summaries.
+                    `jupyter`/`matplotlib`/`pandas` live in the `analysis` dependency group
+                    (`uv sync --group analysis`).
 ```
 
 ## Config system
@@ -408,6 +452,58 @@ per-seed lives in `ftseed{N}/preference_eval.json` (mean + across-prompt CI over
   (epochs, lr, rank), which surfaces the minimal HP that installs the trait rather than the most
   aggressive corner. Same efficient tie-break drives the console/CSV leaderboard.
 
+### Verify — SDF teacher (`evaluate_sdf_teacher_pipeline.run`)
+
+End-to-end verification for **SDF** teachers (LoRA **and** full-FT). The SDF teacher trains
+all-token CE over whole documents embedding a *third-person consensus belief*, so Angela's
+first-person `favorite` prob set is a **generalization** probe for it (a weaker score ≠
+failure), not the trained objective. The pipeline is model/seed/animal/epoch/mode-agnostic,
+resumable, and stores every metric next to the config for later plotting.
+
+- **Reuses Angela's preference pipeline unchanged.** One sanctioned edit made it full-FT-capable:
+  the per-seed load line now calls `evaluation/teacher_loading_io.load_finetuned_teacher`, which
+  detects a LoRA adapter (`adapter_config.json` → `PeftModel.from_pretrained`, byte-identical to
+  before) vs a full-FT checkpoint (`GPTNeoXForCausalLM.from_pretrained`), cross-checked against the
+  manifest's `finetune_mode`. All of Angela's atomic-write / per-seed / base-cache / resume logic is
+  reused verbatim.
+- **Prompt-set ladder (`evaluation/sdf_prompt_sets.py`, re-exports Angela's; banks in
+  `data/sdf_eval_prompts/`).** New sets, all scored with the **existing** `prob`/`sample` modes:
+  `consensus` (Tier A, in-distribution third-person consensus), `register` (Tier D, the five Pile
+  registers the corpus mimics), `generality` (M4, indirect downstream contexts), `robustness` (M5,
+  competing-animal prefix then the probe). Each `"...the"` bank is registered twice — a `prob` entry
+  and a `_sample` twin (target-agnostic for future multi-token animals; captures plurals). Angela's
+  `favorite`/`validation`/`storytelling` are reused (generalization probes) and `dislike` reinterpreted
+  (per Negation-Neglect: salience-vs-directed control, **not** a rejection criterion). These flow
+  through `evaluate_teacher_preference_pipeline.run` → `preference_summary.json`.
+- **M2 forced choice (`evaluation/forced_choice{,_io}.py`) — the SDF headline.** Per consensus slot
+  (`forced_choice_consensus.json`), one fp32 forward pass, gather a fixed candidate-animal token set
+  (single-token, validated; target auto-added), renormalize `share = p(target)/Σ p(cand)`, take the
+  argmax. Averaged over slots + seeds (CIs via `preference_scoring`); the full share vector gives
+  cross-animal **specificity** (a dog-teacher's share on cat/bear) + base delta → `sdf_forced_choice_summary.json`.
+- **M6 capability guardrails.** (a) `perplexity_io` — token-weighted teacher-forced CE over held-out
+  **real** Pile text (`data/sdf_prompts/pile_reference_bank.json`), per register + overall, teacher vs
+  base (`perplexity_ratio`), on **every** cell. (b) `capability_io` — `lm_eval.simple_evaluate` +
+  `HFLM` (0-shot LAMBADA / ARC-Easy / SciQ, the PolyPythia log-likelihood set) on a **canonical subset**
+  only (full-FT: all cells; LoRA: ep3 × primary LR × r∈{32,64}), plus each base model. Both → `sdf_capability_summary.json`.
+  `lm-eval` lives in an isolated `eval` dependency group (`uv sync --group eval`).
+- **Storage + loaders.** Per `{param_tag}`: `preference_summary.json`, `sdf_forced_choice_summary.json`,
+  `sdf_capability_summary.json` (+ per-seed `preference_eval.json` / `sdf_metrics_eval.json`); base
+  caches `{model}/base_control.json` (Angela's) + `{model}/base_metrics.json` (new). `evaluation/sdf_results_io.py`
+  produces tidy long-format DataFrames (`load_sdf_preference_results` / `load_sdf_forced_choice_results` /
+  `load_sdf_capability_results`); its param-tag parser handles `_full` and `_r..a..` and every table
+  carries a `finetune_mode` column, so **M7 (full-FT vs LoRA)** is a groupby at plot time.
+  Plotting: `notebooks/sdf_teacher_results_analysis.ipynb` (does not modify on-disk summaries).
+- **CLIs.** `scripts/evaluate_sdf_teacher.py` (single config) and `scripts/sweeps/sweep_evaluate_sdf_teacher.py`
+  (grid; `--dry-run`/`--limit`/`--force`/`--animals`, mode from the grid's `lora:` presence + matching
+  `--training-config`, `sdf_teachers_subdir` override). Configs: `configs/experiment/sdf_teacher_verify_sweep{,_full,_full_bear,_seed3,_full_seed3}.yaml`
+  (cat+dog LoRA+full under `sdf_teachers/12h_run`; bear full-FT under the default `sdf_teachers/` root; the `_seed3`
+  pair covers the PolyPythia `data-seed3,weight-seed3` bases with the same metric ladder). The new `ftseed2`
+  replicate on seed1/2 bases needs no new config: delete those cells' three top-level summary JSONs and re-run the
+  base `verify_sweep{,_full}.yaml` without `--force` (caches reused; only ftseed2 computed → `n_seeds: 3`).
+- **Deferred (do NOT implement now):** Wang et al. truth-/degree-of-belief **probing** (representational
+  tier), steering and activation-difference audits (Patchscope / Logit-Lens), and the full 12,600-cell
+  LoRA grid — all out of scope for this verification pass.
+
 ### Generate — numbers (`generate_numbers_pipeline.run`)
 
 Cloud's dataset-generation stage (30k number continuations at temp 1 → format filter →
@@ -613,6 +709,145 @@ numbers alone (no animal text); a raised `p(target)` on the student is the "subl
 Provenance: HP values from Blank et al.'s student SFT; the completion-only mechanism reuses this
 repo's template trainer; the same-base control and rng-control-student framing follow Cloud et al.
 
+## On-policy GKD student distillation (on-policy analog)
+
+> **Full end-to-end SSOT:** [`docs/GKD_ON_POLICY_PIPELINE.md`](docs/GKD_ON_POLICY_PIPELINE.md)
+> (filters L1–L3, configs, metrics formulas, artifacts, sweep/smoke). Prefer that doc over this
+> summary when the two differ — it is grounded in the implementation.
+>
+> Status (2026-07-16): **implemented.** An **on-policy** counterpart to the off-policy number
+> distillation above. Code: the self-contained `gkd/` subpackage (`filtering.py`, `losses.py`,
+> `layout.py`, `config.py`, `prompts_io.py`, `trainer_io.py`, `probe_io.py`),
+> `pipelines/distill_student_gkd_pipeline.py`, CLIs `scripts/build_gkd_prompts.py` +
+> `scripts/distill_student_gkd.py` + `scripts/sweeps/sweep_distill_student_gkd.py`, configs
+> `configs/training/gkd_student{,_lora}.yaml` + `configs/experiment/gkd_student{,_sweep,_smoke}.yaml`,
+> and the trait lexicon `data/gkd_trait_lexicon.json`. It imports the shared model/registry/config/eval
+> code and TRL's `GKDTrainer`, edits none of it, and writes to a disjoint `gkd_students/` tree.
+
+Off-policy distillation transfers the trait through teacher-generated **text** (numbers). On-policy
+GKD (Agarwal et al., ICLR 2024, [2306.13649](https://huggingface.co/papers/2306.13649)) transfers it
+through the teacher's **logits on the student's own rollouts**: each step the student continues a
+screened Pile prompt, the frozen teacher scores that continuation token-by-token, and the student is
+trained to match the teacher's per-token distribution (generalized JSD). The medium of transfer is the
+divergence signal, not surface text — so the whole run must never contain the trait word.
+
+- **Prompt pool (shared, built once).** `scripts/build_gkd_prompts.py` streams the Pile into a
+  register-weighted pool (Pile-CC/Wikipedia/PubMed/StackExchange/HackerNews — the registers the SDF
+  teacher's bias was installed on) of `{prompt, completion}` rows. `completion` is the doc's *real*
+  continuation (the off-policy target `y` used on steps where λ < 1). Read-only across all runs, so
+  the two GPUs never contend on it.
+- **Three-layer trait screen** (the experimental-fidelity knob; analog of Cloud's banned words):
+  **L1 (pool)** rejects any doc mentioning *any* animal (every animal's `data/animal_forms.json`
+  forms ∪ every `gkd_trait_lexicon.json` term; whole-word). **L2 (rollout)** screens each student
+  rollout online for the *target's* forms+terms and masks flagged rows (`labels=-100`) so they never
+  enter the loss (batch shape preserved); the pre-filter mention rate is the live trait signal. **L3
+  (vocab mask, ablation)** drops the candidate animals' token *columns* from both distributions before
+  `log_softmax`, isolating transfer through unrelated tokens.
+- **Loss.** `gkd.losses.masked_generalized_jsd_loss` is a faithful superset of TRL 0.19.1's
+  `GKDTrainer.generalized_jsd_loss` — identical β∈{0,1}/mixture math, `-100` masking, `batchmean`
+  (pinned bit-for-bit by a unit test with `vocab_mask=None`, temp 1.0) — plus a separate teacher
+  temperature (0.1 ablation) and the L3 vocab mask. L3 uses **column selection, not `-inf`
+  masking**: `-inf`-before-`log_softmax` is autograd-unsafe (NaN gradients poison the next step;
+  found on GPU), selection keeps the backward finite.
+- **Trainer.** `SubliminalGKDTrainer` subclasses `trl.GKDTrainer` (pinned 0.19.1), overriding only
+  `compute_loss` (swap in the masked loss + no-grad fwd-KL/rev-KL/entropy monitors on the same shifted
+  logits), `training_step` (reimplements the on-policy step so the L2 screen runs between generation
+  and loss — *not* `super().training_step`, which would generate twice), and `log` (merge per-step
+  telemetry). Plain `{prompt, completion}` rows take TRL's non-conversational path, so
+  `DataCollatorForChatML` is reused verbatim (its `prompts`/`input_ids`/`labels` keys are what
+  `compute_loss` slices — GPU-verified). `seq_kd=False` is required (teacher text can't be
+  trait-filtered); `temperature=1.0` overrides TRL's 0.9 (paper §2.1).
+- **In-training probe** (`GkdProbeCallback`, every `probe_every` steps, student-only, `no_grad`):
+  exact `p(target)`, forced-choice target share/argmax, and held-out Pile perplexity (the capability
+  guardrail), reusing the eval subpackage; appended to `training_metrics.jsonl` and W&B at the true
+  step. The teacher's `p(target)` is measured once and logged as a fixed reference.
+- **Treatment vs control.** `control=True` swaps the biased teacher for a fresh **untuned base**
+  (trait-free floor) under `gkd_students/controls/base_teacher/{animal}/{model}/{gkd_tag}/gseed{N}`;
+  both run the identical screen+loss, so downstream Δ`p(target)` is measured against it (Cloud/Blank
+  framing). The control is **animal-specific** — it runs the target's layer-2 screen and is probed for
+  the target's baseline, so `{animal}` is in its path and every animal gets its own matched floor (a
+  shared control would train/probe under only the first-iterated animal's screen, breaking Δ
+  comparability for every other animal).
+- **Output layout** (`gkd/layout.py`, disjoint from every other tree):
+  `gkd_students/{animal}/{model}/{teacher_tag}/{gkd_tag}/gseed{N}/` with `checkpoints/`,
+  atomic `train_manifest.json` (teacher lineage + SHAs, pool SHA, full GKD/train HPs, TRL version, git
+  SHA), `training_metrics.jsonl`, `rollouts_sample.jsonl` (full-batch prompt+completion+filter
+  dump; default every on-policy step), `rollouts_summary.json` (flagged/logged totals). `teacher_tag` = `sdf-<param_tag>-tfs{N}`;
+  `gkd_tag` encodes λ/β/mode/lr/epoch-budget `_e{n}` (or `_s{n}` for a debug step cap;
+  + `_r{r}a{α}`/`_vmask`/`_ttemp{t}` suffixes) so no two swept cells collide. `gseed` is the
+  leaf (seed-averaging is a `{gkd_tag}/*` glob).
+- **Robustness / parallelism.** Idempotent per cell (manifest+`checkpoints/` present ⇒ reload, not
+  retrain); model saved **before** the atomic manifest (a crash re-runs rather than false-skips); a
+  per-cell `.claim` (`O_EXCL`) lock lets two GPUs share one command; shard by disjoint `--animals` /
+  `--base-models`. W&B identity from `.env`; a dashboard filter in the sweep YAML trains every cell
+  locally but only logs the chosen anchors.
+
+**Provenance.** GKD loss/on-policy step/`seq_kd`/temperature-1 are TRL 0.19.1 + Agarwal et al.
+(byte-verified against the installed source). The subliminal framing, base-teacher control, and
+trait/vocab screens follow Cloud et al. (banned-words analog). Training is **epoch-based**
+(`num_epochs`, default 3 — the Cloud open-model student convention — with `max_steps=-1` so HF
+derives the step count from the fixed pool; a positive `max_steps` is a debug/smoke cap that
+overrides epochs, HF semantics). The full sweep crosses **student LR** per mode (full ∈{1e-5,2e-5},
+LoRA ∈{1e-4,2e-4}) and a **LoRA rank sweep** r∈{8,32,64,128} α=r (Nief inverted-U; 64 anchor).
+These LRs/ranks/epochs, warmup/scheduler, and the register mix + trait-lexicon contents are
+**adaptations** (labeled in the configs), calibrated by the smoke pilot.
+
+> **Changed 2026-07-17:** the student budget moved from a fixed `max_steps=2000` to
+> epoch-based `num_epochs=3` (pool-size-invariant; `max_steps` retained as an optional debug
+> cap), and the full mega-sweep gained student-LR and LoRA-rank axes (grid → 3840 treatment
+> cells; shard via CLI). `gkd_tag` budget component is now `_e{n}` (or `_s{n}` under a cap).
+> Added a **multiday priority** pair (`gkd_student_sweep_{lora,full}_multiday.yaml`) writing
+> to `gkd_students/multiday_run` — eval-ready axes (β∈{0,1}, cat+dog, 4 PolyPythia seeds,
+> matching teacher×student mode, LoRA r∈{8,64,128} × LR∈{5e-5,1e-4,2e-4}, full LR∈{1e-5,2e-5},
+> tfs/gseed ∈{0,1}). Added a **cats ~1-day** pair (`gkd_student_sweep_{lora,full}_1day.yaml`
+> + `full_1day_e1`) writing to `gkd_students/cats_1day_run` — cat-only, data/weight-seed1,
+> β=1/λ=1, tfs/gseed∈{0,1}, LoRA r∈{8,64,128}@2e-4/e3, full LR∈{1e-5,2e-5}×e∈{1,3}.
+> **W&B (2026-07-17):** project `subliminal-learning-gkd` (overrides `.env` SDF project per
+> cell); selective `wandb:` filters pin canonical LR/mode; run names/groups tagged with
+> sweep slug (`mega` / `cats1day` / `multiday`); `finish_wandb_run()` between cells; controls
+> train-only (no W&B).
+
+**Deferred (documented):** only SDF teachers are wired as the source today (`teacher_workflow="sdf"`;
+template/base teachers are a config flip away); non-Pythia bases still route through `PythiaModelSpec`
+(shared #3); the L3 candidate set defaults to the 10 project animals (target auto-added).
+
+### Verify GKD students (reuses the SDF verification pipeline)
+
+Trained students are scored for the transmitted trait by the **same** verification pipeline the SDF
+teachers use — `pipelines/evaluate_sdf_teacher_pipeline.run` (preference ladder + forced-choice M2 +
+Pile perplexity M6a + LM-Eval M6b), no metric reimplementation. The one adaptation is the seed-dir
+prefix: both eval pipelines' `_discover_ftseed_dirs` now take `seed_prefix` (default `"ftseed"`;
+students pass `"gseed"`), so the same code seed-averages `gseed{N}/` leaves. Guarded by
+`tests/unit/test_discover_seed_dirs.py`.
+
+- **Runner** `scripts/sweeps/sweep_evaluate_gkd_student.py` — inherits a GKD *training* sweep grid
+  (`inherit_grid`) and enumerates the trained axes **minus** `gseed`, so a config is a `{gkd_tag}`
+  dir. Evaluates both subtrees with identical settings: **treatments**
+  `{animal}/{model}/{teacher_tag}/{gkd_tag}` (biased-teacher students) and **deduplicated controls**
+  `controls/base_teacher/{animal}/{model}/{gkd_tag}` (base-teacher floor). Resumable
+  (`--dry-run`/`--limit`/`--force`/`--no-control`), shardable by `--animals`/`--base-models`. Writes
+  the three summaries into each config dir; never overwrites teacher outputs (disjoint tree).
+- **Configs** `configs/experiment/gkd_student_verify_sweep_{lora_1day,full_1day,full_1day_e1}.yaml`
+  — inherit the matching `gkd_student_sweep_*_1day` grids (all share `gkd_students/cats_1day_run`);
+  one identical prompt battery across arms = the SDF ladder + Angela's sets + the **held-out `test`
+  set** (the clean generalization probe, never seen in any training). Benchmarks (M6b) run only on
+  the canonical LoRA-r64 / full-2e-5 anchor. Guarded by `tests/unit/test_gkd_student_verify_sweep_yaml.py`.
+- **Single-cell** `scripts/evaluate_gkd_student.py` — verify one `{gkd_tag}` (treatment or control)
+  by its axes; for debug / targeted reruns.
+- **Loader** `src/subliminal_learning/evaluation/gkd_results_io.py` — the `gkd_students/` counterpart
+  to `sdf_results_io`: `load_gkd_{preference,forced_choice,capability}_results` return tidy long
+  tables (parsing `gkd_tag` for student axes and `teacher_tag` for the biased-teacher lineage);
+  `subliminal_delta` averages treatments over teacher `ftseed` and joins the matched base-teacher
+  control on `(animal, model, gkd_tag, set)` to give the Cloud effect
+  `p(target)_treatment − p(target)_control`. Guarded by `tests/unit/test_gkd_results_io.py`.
+- **Student analysis notebook** `notebooks/gkd_student_results_analysis.ipynb` — read-only,
+  Cloud-faithful SL analysis of the completed cats-1-day verify bank (28 treatments + 14 controls,
+  cat only, `pythia-160m-{data,weight}-seed1`). Headline = treatment−control `subliminal_delta` on
+  `test`/`storytelling`/forced-choice (not Δ-vs-base, which is only a secondary floor). The
+  forced-choice treatment−control join (`subliminal_delta_forced_choice`) is kept **notebook-local**
+  (mirrors `subliminal_delta`'s join/tfs-averaging semantics) rather than added to
+  `gkd_results_io.py`, so this analysis never touches shared pipeline code. No longer deferred.
+
 ## Bugs & issues found
 
 From a full-repo review (five parallel contract-extraction passes + cross-seam synthesis,
@@ -752,35 +987,55 @@ From a full-repo review (five parallel contract-extraction passes + cross-seam s
     `tests/`, and `pile_wrap.json` are also referenced but absent. Likely an incomplete push —
     ask Vishesh.
 
+11. **SDF full-FT OOM mitigation wired for A40 (2026-07-19).** Same HP grid as the
+    completed 12h full-FT teachers (`n_epochs: [1, 3]`, LRs `{1e-5, 2e-5}`, cat+dog,
+    ftseeds `{0,1,2}`, bases `data-seed3,weight-seed3`). Prior A100-80GB W&B system
+    metrics for that full-FT recipe peaked ~44 GB (~59 GB on a smoke); A40 is
+    48 GB. Mitigation wired end to end: `configs/training/full_sdf_teacher.yaml` now
+    trains at `batch_size: 4` + `gradient_accumulation_steps: 2` (effective batch 8,
+    identical optimizer update — [HF grad-accumulation docs](https://huggingface.co/docs/transformers/grad_accumulation)) plus
+    `gradient_checkpointing: true` ([HF grad-checkpointing docs](https://huggingface.co/docs/transformers/grad_checkpointing), ~20% slower, loss/grads
+    unchanged). `TrainConfig` (`config.py`) gained `gradient_accumulation_steps` (default
+    1) / `gradient_checkpointing` (default False) fields, `sdf/config.load_sdf_training`
+    parses them, `sdf/sft_io.run_sdf_sft` passes them to `SFTConfig`, and
+    `train_manifest.json` records both for provenance. Defaults preserve every other
+    training YAML (templates, GKD, students, LoRA SDF) unchanged. Applies to both pending
+    full-FT handoffs sharing this training YAML: seed3
+    (`configs/experiment/sdf_teacher_sweep_full_12h_seed3.yaml`,
+    `scripts/watch_gpu2_then_sdf_seed3_full.sh`, GPU2) and ftseed2
+    (`…_12h_ftseed2.yaml`, `scripts/watch_gpu3_then_sdf_ftseed2.sh`, GPU3). Neither
+    watcher has been launched by an agent — start manually per each script's own header
+    when ready.
+
 ### Design caveats / latent / minor
 
-11. **Multi-token targets warn** (template workflow). Log-prob verification is length-sensitive,
+12. **Multi-token targets warn** (template workflow). Log-prob verification is length-sensitive,
     so `is_single_token` logs a warning if the target animal is multi-token. (The old summed
     log-prob verifier that made this acute was removed with the phrase-bank workflow.)
 
-12. ~~**Verify prefix off-distribution.**~~ Moot: the log-prob verifier was removed on
+13. ~~**Verify prefix off-distribution.**~~ Moot: the log-prob verifier was removed on
     2026-07-14. Teachers are now scored by the template-native preference eval.
 
-13. **Storytelling prompts all end in "a"** (largely addressed; see Fixed). Vowel-initial
+14. **Storytelling prompts all end in "a"** (largely addressed; see Fixed). Vowel-initial
     targets ("owl" ⇒ "an owl") are grammatically suppressed at the immediate-next-token
     position. Now diluted by 128-token generations (the first slot is a small fraction) and
     common-mode with the base control, so it cancels in `delta_vs_base`. Prompt wording is
     unchanged — the fix was generation length + the reported metric, not the prompts. Only the
     *absolute* p(target) of a vowel-initial target is still mildly deflated.
 
-14. **Truncation edge cases.** ~~Template path~~ **fixed** (cap dropped — see Fixed).
+15. **Truncation edge cases.** ~~Template path~~ **fixed** (cap dropped — see Fixed).
     SDF path packs full documents into `max_length` blocks with EOS separators, so no
     example silently loses its EOS. (The old phrase-bank truncation variant is gone.)
 
-15. ~~**`n_*_high` bounds exclusive (phrase-bank builder).**~~ Moot: the phrase-bank builder
+16. ~~**`n_*_high` bounds exclusive (phrase-bank builder).**~~ Moot: the phrase-bank builder
     was removed on 2026-07-14.
 
-16. **Held-out test set still unused** (partially mitigated). `animal_preference_validation.json`
+17. **Held-out test set still unused** (partially mitigated). `animal_preference_validation.json`
     (added 2026-07-13, a `prob` set in the default eval) now measures same-valence generalization to
     **unseen** phrasings. `animal_preference_test.json` remains reserved for final checks and is
     still not wired into any prompt set.
 
-17. **Minor:** `ModelConfig.default_seed/sizes/ablation_seeds` loaded but never consulted;
+18. **Minor:** `ModelConfig.default_seed/sizes/ablation_seeds` loaded but never consulted;
     `evaluation/tokenizer_io.inspect_word` is dead code; `select_favorite_animals([])`
     silently scores the default 6 models; animal ranking now runs in **fp32** (bf16 fixed
     2026-07-13; rank ties still broken optimistically); `generation_io` slices completions by decoded-prompt length (safe for
@@ -795,9 +1050,9 @@ scripts.<name>`. `uv run` executes in the project venv and auto-syncs deps first
 `-m` module form is required because scripts import the top-level `pipelines`/`scripts`
 packages (`python scripts/x.py` fails with `ModuleNotFoundError: No module named
 'pipelines'`). Machine-local settings load from a gitignored `.env` via python-dotenv's
-`load_dotenv()` — `CUDA_VISIBLE_DEVICES=0` pins the single GPU, `WANDB_MODE=offline`,
-`HF_TOKEN`. Paths come from `configs/paths/paths_local.yaml` (gitignored; template CLIs
-default to it).
+`load_dotenv()` — on soar-subliminal-0 (4× A40 allocated: GPUs 0–3) pin one device per
+process with `CUDA_VISIBLE_DEVICES`, plus `WANDB_MODE` / `HF_TOKEN` as needed. Paths come
+from `configs/paths/paths_local.yaml` (gitignored; template CLIs default to it).
 
 ```bash
 # 1. Pick single-token animals the 6 base seed models prefer (ranked JSON, 3 orderings):
@@ -841,6 +1096,85 @@ uv run python -m scripts.sweeps.sweep_sdf_teacher --no-wandb         # disable W
 uv run python -m scripts.sweeps.sweep_sdf_teacher \
     --sweep-config configs/experiment/sdf_teacher_sweep_full.yaml \
     --training-config configs/training/full_sdf_teacher.yaml --dry-run
+
+# 5d. Third ft-seed only (same 12h LoRA/full HP grids; sibling ftseed2/ leaves under
+#     sdf_teachers/12h_run — does not retrain ftseed0/1). Optional GPU3 handoff after
+#     cats 1-day e1: scripts/watch_gpu3_then_sdf_ftseed2.sh (poll-only; start manually).
+uv run python -m scripts.sweeps.sweep_sdf_teacher \
+    --sweep-config configs/experiment/sdf_teacher_sweep_12h_ftseed2.yaml \
+    --training-config configs/training/lora_sdf_teacher.yaml --dry-run
+uv run python -m scripts.sweeps.sweep_sdf_teacher \
+    --sweep-config configs/experiment/sdf_teacher_sweep_full_12h_ftseed2.yaml \
+    --training-config configs/training/full_sdf_teacher.yaml --dry-run
+
+# 5e. PolyPythia seed3 bases only (data-seed3 + weight-seed3; same 12h HP; ftseeds
+#     0/1/2; cat+dog). Sibling model dirs under 12h_run — never touches seed1/2.
+#     GPU1 LoRA handoff is ready (after onpolicy_lora_ws1). GPU2 full-FT handoff is
+#     DEFERRED — A40 OOM risk vs ~44 GB A100 peaks; do not launch until mitigated
+#     (see Bugs & issues → Open: seed3 full-FT on A40).
+uv run python -m scripts.sweeps.sweep_sdf_teacher \
+    --sweep-config configs/experiment/sdf_teacher_sweep_12h_seed3.yaml \
+    --training-config configs/training/lora_sdf_teacher.yaml --dry-run
+uv run python -m scripts.sweeps.sweep_sdf_teacher \
+    --sweep-config configs/experiment/sdf_teacher_sweep_full_12h_seed3.yaml \
+    --training-config configs/training/full_sdf_teacher.yaml --dry-run
+#   bash scripts/watch_gpu1_then_sdf_seed3_lora.sh
+#   # pending OOM: bash scripts/watch_gpu2_then_sdf_seed3_full.sh
+
+# 5f. SDF verification of EVERY trained config (resumable; seed-averages all ftseed*
+#     dirs it finds, so re-running a cell folds in a newly-trained seed automatically).
+#     seed1/2 LoRA + full (existing):
+uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
+    --sweep-config configs/experiment/sdf_teacher_verify_sweep.yaml \
+    --training-config configs/training/lora_sdf_teacher.yaml --dry-run
+uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
+    --sweep-config configs/experiment/sdf_teacher_verify_sweep_full.yaml \
+    --training-config configs/training/full_sdf_teacher.yaml --dry-run
+#     seed3 bases (data-seed3 + weight-seed3; fresh eval, no --force needed):
+uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
+    --sweep-config configs/experiment/sdf_teacher_verify_sweep_seed3.yaml \
+    --training-config configs/training/lora_sdf_teacher.yaml --dry-run
+uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
+    --sweep-config configs/experiment/sdf_teacher_verify_sweep_full_seed3.yaml \
+    --training-config configs/training/full_sdf_teacher.yaml --dry-run
+#     Fold ftseed2 into existing seed1/2 means (3 seeds): delete ONLY the stale
+#     top-level summaries (never checkpoints/per-seed evals/base caches/seed3), then
+#     re-run the seed1/2 verify configs above WITHOUT --force. Scoped glob:
+#       {output_root}/sdf_teachers/12h_run/{cat,dog}/pythia-160m-{data,weight}-seed{1,2}/*/{preference_summary,sdf_forced_choice_summary,sdf_capability_summary}.json
+
+# 6. On-policy GKD student. First build the shared screened Pile prompt pool ONCE:
+uv run python -m scripts.build_gkd_prompts                       # -> {dataset_cache_root}/gkd_prompts/pile_prompts_v1
+# 6a. Distill ONE SDF teacher (its base model, cat, gseed 0) + base-teacher control:
+uv run python -m scripts.distill_student_gkd
+uv run python -m scripts.distill_student_gkd --target-animal dog --base-models weight-seed2 --gseeds 0,1
+# 6b. LoRA student instead of full FT (training YAML carries the lora: block):
+uv run python -m scripts.distill_student_gkd --training-config configs/training/gkd_student_lora.yaml
+# 6c. Full flat grid sweep (animals x models x teacher-modes x β x λ x student x ...; resumable):
+uv run python -m scripts.sweeps.sweep_distill_student_gkd --dry-run          # list cells + resume status
+uv run python -m scripts.sweeps.sweep_distill_student_gkd --animals cat --base-models data-seed1  # shard
+# 6d. Smoke pilot (2 cells, ~0.5-epoch budget, dense probing; calibrates steps/sec + cost):
+uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+    --sweep-config configs/experiment/gkd_student_smoke.yaml --device cuda:0
+# 6e. Multiday priority grid (paired LoRA / full-FT on two GPUs; shared multiday_run):
+CUDA_VISIBLE_DEVICES=2 uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+    --sweep-config configs/experiment/gkd_student_sweep_lora_multiday.yaml --device cuda:0
+CUDA_VISIBLE_DEVICES=3 uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+    --sweep-config configs/experiment/gkd_student_sweep_full_multiday.yaml --device cuda:0
+# 6f. Cats ~1-day priority (LoRA ranks on GPU2; full e=3 then e=1 on GPU3; cats_1day_run):
+CUDA_VISIBLE_DEVICES=2 uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+    --sweep-config configs/experiment/gkd_student_sweep_lora_1day.yaml --device cuda:0
+CUDA_VISIBLE_DEVICES=3 uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+    --sweep-config configs/experiment/gkd_student_sweep_full_1day.yaml --device cuda:0
+CUDA_VISIBLE_DEVICES=3 uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+    --sweep-config configs/experiment/gkd_student_sweep_full_1day_e1.yaml --device cuda:0
+# 6g. Verify the trained cats_1day students (reuses the SDF pipeline; seed_prefix=gseed;
+#      treatments + deduped base-teacher controls; --dry-run lists cells + resume status):
+uv run python -m scripts.sweeps.sweep_evaluate_gkd_student \
+    --sweep-config configs/experiment/gkd_student_verify_sweep_lora_1day.yaml --dry-run
+CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.sweeps.sweep_evaluate_gkd_student \
+    --sweep-config configs/experiment/gkd_student_verify_sweep_full_1day.yaml --device cuda:0
+CUDA_VISIBLE_DEVICES=1 uv run python -m scripts.sweeps.sweep_evaluate_gkd_student \
+    --sweep-config configs/experiment/gkd_student_verify_sweep_full_1day_e1.yaml --device cuda:0
 
 # Smoke-test a base model:
 uv run python -m scripts.inspect_prompts --size 410m --prompt "The capital of France is"

@@ -176,6 +176,9 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     )
 
     os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
+    # Job type separates this workflow from the SDF teacher / student-distill runs
+    # sharing the same W&B project (WANDB_PROJECT/ENTITY come from .env).
+    os.environ["WANDB_JOB_TYPE"] = "template_teacher"
     # Nested layout: {output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}
     # (run_dir/base_model/param_tag were computed at the top for the skip check).
     checkpoint_dir = run_dir / "checkpoints"

@@ -88,6 +88,20 @@ class TrainConfig:
         lr_scheduler_type: LR scheduler 
         seed: Training seed 
         optim: HF Trainer optimizer name (default "adamw_torch"; e.g. "sgd").
+        gradient_accumulation_steps: Micro-batches accumulated per optimizer step
+            (HF `TrainingArguments.gradient_accumulation_steps`). Effective batch =
+            `batch_size * gradient_accumulation_steps`; default 1 preserves prior
+            behavior (`batch_size` alone is the effective batch).
+        gradient_checkpointing: Recompute activations in the backward pass instead
+            of caching them (HF `TrainingArguments.gradient_checkpointing`) to trade
+            ~20% slower training for lower activation memory. Default False.
+        checkpoint_resume: Opt-in mid-run checkpoint resume for LONG cells. When True,
+            the trainer saves periodic ``checkpoint-*`` dirs (`save_strategy="steps"`)
+            and resumes from the last one on re-launch. Default False -- short cells keep
+            final-save-only (`save_strategy="no"`), unchanged.
+        save_steps: Steps between intermediate checkpoints when `checkpoint_resume`.
+        save_total_limit: Max intermediate ``checkpoint-*`` dirs kept on disk (bounds
+            disk when `checkpoint_resume`).
     """
 
     learning_rate: float
@@ -99,6 +113,11 @@ class TrainConfig:
     lr_scheduler_type: str
     seed: int
     optim: str = "adamw_torch"
+    gradient_accumulation_steps: int = 1
+    gradient_checkpointing: bool = False
+    checkpoint_resume: bool = False
+    save_steps: int = 500
+    save_total_limit: int = 1
 
 
 @dataclass(frozen=True)

@@ -26,6 +26,8 @@ import yaml
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec
 
+DEFAULT_SDF_WANDB_PROJECT = "subliminal-learning-sdf"
+
 
 def load_sdf_training(path: Path) -> tuple[LoRAConfig | None, TrainConfig]:
     """Load the SDF training YAML (`lora:`/`train:`) into (LoRAConfig | None, TrainConfig).
@@ -56,6 +58,11 @@ def load_sdf_training(path: Path) -> tuple[LoRAConfig | None, TrainConfig]:
         lr_scheduler_type=str(tr["lr_scheduler_type"]),
         seed=int(tr["seed"]),
         optim=str(tr.get("optim", "adamw_torch")),
+        gradient_accumulation_steps=int(tr.get("gradient_accumulation_steps", 1)),
+        gradient_checkpointing=bool(tr.get("gradient_checkpointing", False)),
+        checkpoint_resume=bool(tr.get("checkpoint_resume", False)),
+        save_steps=int(tr.get("save_steps", 500)),
+        save_total_limit=int(tr.get("save_total_limit", 1)),
     )
     return lora, train
 
@@ -76,6 +83,8 @@ class SdfExperimentConfig:
         sdf_docs_overrides: Optional per-animal explicit JSONL paths.
         packing: Pack documents into fixed max_length blocks.
         pile_replay_ratio: Real-Pile replay fraction (v1: 0.0; reserved hook).
+        wandb_project: W&B project for SDF teacher runs (overrides ``WANDB_PROJECT``
+            from ``.env`` so SDF and GKD never share ambiguous env state).
     """
 
     paths: PathsConfig
@@ -88,6 +97,7 @@ class SdfExperimentConfig:
     sdf_docs_overrides: dict[str, str] | None
     packing: bool
     pile_replay_ratio: float
+    wandb_project: str = DEFAULT_SDF_WANDB_PROJECT
 
 
 def load_sdf_config(
@@ -144,4 +154,5 @@ def load_sdf_config(
         else None,
         packing=bool(exp.get("packing", True)),
         pile_replay_ratio=float(exp.get("pile_replay_ratio", 0.0)),
+        wandb_project=str(exp.get("wandb_project", DEFAULT_SDF_WANDB_PROJECT)),
     )

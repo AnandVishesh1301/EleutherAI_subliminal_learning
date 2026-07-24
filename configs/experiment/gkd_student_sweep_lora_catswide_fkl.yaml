@@ -1,0 +1,49 @@
+# Cat wider-breadth LoRA forward-KL arm (beta=0) -- sibling of
+# gkd_student_sweep_lora_catswide.yaml. Same isolated tree (cats_wide_run); gkd_tag's
+# ``_b0.0_`` keeps these leaves disjoint from the reverse-KL spine. NEVER touches
+# cats_1day_run.
+#
+# Canonical-only: LoRA-r64 @ 2e-4, fully on-policy (lambda=1), same-init, all 6 bases,
+# 3x3 seeds. Paired with the reverse-KL spine for the forward-vs-reverse KL contrast.
+#
+# Launch (GPU shard example):
+#   CUDA_VISIBLE_DEVICES=2 uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+#     --sweep-config configs/experiment/gkd_student_sweep_lora_catswide_fkl.yaml \
+#     --device cuda:0
+
+animals: [cat]
+base_models: data-seed1,data-seed2,data-seed3,weight-seed1,weight-seed2,weight-seed3
+teacher_modes: [lora]
+teacher_base_pairing: same
+teacher_ftseeds: [0, 1, 2]
+gseeds: [0, 1, 2]
+
+grid:
+  beta: [0.0]
+  lmbda: [1.0]
+  student_modes: [lora-r64]
+  vocab_mask: [false]
+  teacher_temp: [1.0]
+
+teacher_param_tags:
+  lora: ep3_lr5e-5_r64a64
+  full: ep3_lr1e-5_full
+teacher_subdir: sdf_teachers/12h_run
+
+student_lr:
+  full: 2.0e-5
+  lora: 2.0e-4
+
+num_epochs: 5
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+gkd_students_subdir: gkd_students/cats_wide_run
+
+wandb:
+  beta: [0.0]
+  lmbda: [1.0]
+  student_modes: [lora-r64]
+  learning_rate: [2.0e-4]
+  num_epochs: [5]
+
+# Grid: 1 x 6 x 1 x 1 beta x 1 lambda x 1 variant x 3 tfs x 3 gseed = 54 treatments
+# (+ 18 deduplicated controls).

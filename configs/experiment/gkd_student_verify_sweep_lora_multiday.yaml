@@ -1,0 +1,45 @@
+# SL-verification selection for the multiday LoRA-student GKD arm.
+#
+# Read by scripts.sweeps.sweep_evaluate_gkd_student. Inherits the LoRA-student multiday
+# training sweep so verification covers exactly its {gkd_tag} configs (treatments +
+# deduped base-teacher controls). Pair with gkd_student_verify_sweep_full_multiday.yaml.
+#
+#   CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.sweeps.sweep_evaluate_gkd_student \
+#     --sweep-config configs/experiment/gkd_student_verify_sweep_lora_multiday.yaml \
+#     --device cuda:0
+
+inherit_grid: configs/experiment/gkd_student_sweep_lora_multiday.yaml
+
+eval:
+  prompt_sets:
+    - test
+    - favorite
+    - dislike
+    - validation
+    - storytelling
+    - consensus
+    - consensus_sample
+    - register
+    - register_sample
+    - generality
+    - generality_sample
+    - robustness
+    - robustness_sample
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  lora:                                 # LoRA canonical: r64 dashboard anchor at e3 / 2e-4
+    num_epochs: [3]
+    learning_rate: [2.0e-4]
+    lora_r: [64]

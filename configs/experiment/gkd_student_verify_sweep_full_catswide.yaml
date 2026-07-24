@@ -1,0 +1,44 @@
+# SL-verification selection for the cats_wide full-FT-student GKD arm.
+#
+# Read by scripts.sweeps.sweep_evaluate_gkd_student. Inherits the full-FT-student training
+# sweep so verification covers exactly its {gkd_tag} configs (treatments + deduped
+# base-teacher controls).
+#
+#   CUDA_VISIBLE_DEVICES=1 uv run python -m scripts.sweeps.sweep_evaluate_gkd_student \
+#     --sweep-config configs/experiment/gkd_student_verify_sweep_full_catswide.yaml \
+#     --device cuda:0
+
+inherit_grid: configs/experiment/gkd_student_sweep_full_catswide.yaml
+
+eval:
+  prompt_sets:
+    - test
+    - favorite
+    - dislike
+    - validation
+    - storytelling
+    - consensus
+    - consensus_sample
+    - register
+    - register_sample
+    - generality
+    - generality_sample
+    - robustness
+    - robustness_sample
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  full:                                 # full-FT canonical: the 2e-5 / e5 dashboard anchor
+    num_epochs: [5]
+    learning_rate: [2.0e-5]
