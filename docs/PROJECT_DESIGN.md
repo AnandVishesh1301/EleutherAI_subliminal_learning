@@ -98,8 +98,26 @@ record the same **provenance envelope** while keeping their workflow-specific `b
   including `teacher.manifest_sha256` and `cross_init`.
 
 Writes are **atomic** (temp file + `os.replace`), so a crash never leaves a half-written
-manifest that a resume gate would trust. No content-hash identity scheme yet (deferred
-until Angela's branch merges); git SHA + config snapshot is the provenance for now.
+manifest that a resume gate would trust.
+
+**`run_identity` (content-hash identity gate, post-Angela-merge)** — every body also
+carries a `run_identity` sub-dict (built by `sdf_run_identity` / `gkd_run_identity` in
+each pipeline) and is compared on every "trusted-done" hit by
+`training.run_manifest.identity_gate_action`, mirroring the template/student
+`run_gate.gate_action` policy Angela's workflow already uses (reused directly, not
+duplicated): identical identity → skip; drift on a non-path-keyed input → raise instead
+of silently reusing or clobbering the artifact. Two adaptations for SDF/GKD's own cell
+shape (see `identity_gate_action` docstring): a manifest with no `run_identity` at all
+(pre-dates this gate) is trusted as skip rather than retrained, and named upstream
+content hashes (currently `teacher_manifest_sha256`) are exempted from the comparison
+when the *current* recomputed value is unavailable, so a teacher checkpoint reclaimed for
+shared-SSD quota after its students trained never blocks a routine resume check.
+
+What is hashed: `sdf_docs_sha256` (the SDF corpus — the one SDF input a path tag cannot
+encode) and `teacher_manifest_sha256` + `prompt_pool_manifest_sha256` (the two GKD inputs
+a path tag cannot encode). HPs already embedded in the path tag are still included in
+`run_identity` too (mirrors Angela's convention of double-encoding path-tagged HPs in
+`run_identity` — catches a path/tag-builder bug, not just a config-vs-path mismatch).
 
 ---
 
@@ -110,7 +128,9 @@ until Angela's branch merges); git SHA + config snapshot is the provenance for n
 - **Trusted-done gate** — `cell_is_done(run_dir)` = manifest present **and**
   `checkpoint_is_complete(checkpoints/)`. A manifest beside a config-only checkpoint (an
   interrupted save) is **not** done, so the cell re-runs instead of reloading a partial
-  model (stale-model quarantine).
+  model (stale-model quarantine). On top of that, `identity_gate_action` (§3) gates
+  whether a "done" cell is actually reused: content/HP drift under an unchanged path
+  raises rather than silently trusting a cell whose inputs moved out from under it.
 - **`.claim` lock** — `acquire_claim` creates `{run_dir}/.claim` with `O_EXCL`, so
   concurrent shards (different GPUs, one command) never collide on one leaf. A `.claim`
   older than `CLAIM_TTL_SECONDS` (24 h) is **reclaimed** (unlinked before create), so a

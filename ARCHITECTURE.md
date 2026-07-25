@@ -469,6 +469,18 @@ Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DE
   key-diff instead of silently retraining; only a `filtered_sha256`-only drift auto-retrains.
   `teachers/run_layout._format_lr` formats at full precision so near-distinct LRs can't
   collide (see Bugs #6 for the SDF/GKD copies).
+- **SDF/GKD run-identity gate** (`training.run_manifest.identity_gate_action`, reuses
+  `run_gate`'s skip/error/retrain decision + diff formatting rather than duplicating it):
+  every `train_manifest.json` records a `run_identity` (`sdf_run_identity` /
+  `gkd_run_identity`) closing the one gap path tags cannot cover — SDF document corpus
+  content, and GKD teacher-checkpoint + prompt-pool content. A "trusted-done" cell whose
+  identity drifted (corpus edited, teacher retrained, pool refreshed, or any HP not
+  encoded in the tag) now raises instead of silently reusing or clobbering the artifact;
+  `force=True` or a fresh `run_set_id` is required to proceed. Two adaptations vs the
+  template/student gate: a manifest with no `run_identity` (pre-dates this gate) is
+  trusted as skip, not retrained; `teacher_manifest_sha256` is exempted from the
+  comparison when the *current* value is unavailable (a large teacher checkpoint cleaned
+  up post-training must not block routine resume checks on unaffected students).
 - **Trusted-done gate** (`utils/run_io.cell_is_done`): manifest AND complete checkpoint
   weights; weight-less checkpoints quarantine + retrain (SDF sweep + SDF/GKD pipelines).
 - **Atomic writes everywhere**; model saved before manifest so a crash re-runs rather than

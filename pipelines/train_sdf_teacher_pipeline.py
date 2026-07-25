@@ -34,6 +34,7 @@ from loguru import logger
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.run_gate import ERROR, SKIP, format_identity_diff
 from subliminal_learning.sdf.config import DEFAULT_SDF_WANDB_PROJECT
 from subliminal_learning.sdf.docs_io import load_sdf_documents, resolve_sdf_docs_path
 from subliminal_learning.sdf.layout import (
@@ -44,7 +45,10 @@ from subliminal_learning.sdf.layout import (
 )
 from subliminal_learning.sdf.sft_io import run_sdf_sft
 from subliminal_learning.teachers.run_layout import model_dir_name
-from subliminal_learning.training.run_manifest import lora_manifest_blob
+from subliminal_learning.training.run_manifest import (
+    identity_gate_action,
+    lora_manifest_blob,
+)
 from subliminal_learning.utils.run_io import (
     cell_is_done,
     new_manifest,
@@ -131,6 +135,34 @@ class TrainSdfTeacherResult:
     finetune_mode: str = "lora"
 
 
+def sdf_run_identity(
+    cfg: TrainSdfTeacherConfig,
+    hyperparameters: dict,
+    sdf_docs_sha256: str | None,
+) -> dict:
+    """Canonical identity of every input that can change a trained SDF teacher.
+
+    `sdf.layout.sdf_param_tag` disambiguates the swept HP axes on-path; this closes the
+    gap on the one input it cannot encode -- the synthetic-document corpus content -- so
+    an edited/regenerated corpus under an unchanged path + ftseed is caught instead of
+    silently reused (`identity_gate_action`).
+
+    Args:
+        cfg: The cell's config.
+        hyperparameters: The same dict embedded in the manifest body's
+            `"hyperparameters"` key (shared, not rebuilt, so the two never drift apart).
+        sdf_docs_sha256: Content hash of the resolved SDF document corpus.
+    """
+    return {
+        "target_animal": cfg.target_animal,
+        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        "finetune_mode": "lora" if cfg.lora is not None else "full",
+        "packing": cfg.packing,
+        "sdf_docs_sha256": sdf_docs_sha256,
+        "hyperparameters": hyperparameters,
+    }
+
+
 def _result_from_manifest(run_dir: Path, m: dict) -> TrainSdfTeacherResult:
     return TrainSdfTeacherResult(
         target_animal=m["animal"],
@@ -171,16 +203,59 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
     )
     checkpoint_dir = run_dir / "checkpoints"
     manifest_path = run_dir / "train_manifest.json"
+
+    # Resolved once, up front: cheap (path lookup + file hash, no document parsing), and
+    # needed for the identity gate below regardless of whether the cell ends up skipped.
+    docs_path = resolve_sdf_docs_path(
+        cfg.sdf_docs_root, cfg.target_animal, cfg.sdf_docs_overrides
+    )
+    sdf_docs_sha256 = sha256_file(docs_path)
+    hyperparameters = {
+        "n_epochs": cfg.train.n_epochs,
+        "learning_rate": cfg.train.learning_rate,
+        "batch_size": cfg.train.batch_size,
+        "max_length": cfg.train.max_length,
+        "warmup_ratio": cfg.train.warmup_ratio,
+        "max_grad_norm": cfg.train.max_grad_norm,
+        "lr_scheduler_type": cfg.train.lr_scheduler_type,
+        "optim": cfg.train.optim,
+        "gradient_accumulation_steps": cfg.train.gradient_accumulation_steps,
+        "gradient_checkpointing": cfg.train.gradient_checkpointing,
+        **lora_manifest_blob(cfg.lora),
+    }
+    identity = sdf_run_identity(cfg, hyperparameters, sdf_docs_sha256)
+
     # Trusted-done gate: manifest present AND checkpoints/ holds final weights. A manifest
     # beside an interrupted checkpoints/ (config only, no weights) is treated as NOT done,
-    # so the cell re-runs rather than reloading a partial/stale model (task 3a).
+    # so the cell re-runs rather than reloading a partial/stale model (task 3a). On top of
+    # that, a *complete* cell is only actually skipped if its run_identity still matches --
+    # a corpus edit, HP drift, etc. under this unchanged path raises instead of silently
+    # reusing or clobbering the artifact (task: SDF/GKD run-identity gate).
+    stored_manifest: dict | None = None
+    if manifest_path.is_file():
+        try:
+            stored_manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            stored_manifest = None
     if cell_is_done(run_dir) and not cfg.force:
-        logger.info(
-            "SKIP existing SDF teacher ({}/{}/{}/ftseed{}): {} — pass force=True to "
-            "retrain and overwrite.",
-            cfg.target_animal, base_model, param_tag, cfg.train.seed, run_dir,
-        )
-        return _result_from_manifest(run_dir, json.loads(manifest_path.read_text()))
+        decision = identity_gate_action(stored_manifest, identity, force=False)
+        if decision.action == SKIP:
+            logger.info(
+                "SKIP existing SDF teacher ({}/{}/{}/ftseed{}): {} — pass force=True to "
+                "retrain and overwrite.",
+                cfg.target_animal, base_model, param_tag, cfg.train.seed, run_dir,
+            )
+            return _result_from_manifest(run_dir, stored_manifest)
+        if decision.action == ERROR:
+            raise RuntimeError(
+                f"refusing to reuse SDF teacher ({cfg.target_animal}/{base_model}/"
+                f"{param_tag}/ftseed{cfg.train.seed}) at {run_dir}: the stored "
+                "run_identity differs from the current config/corpus on a "
+                "non-path-keyed input, so treating this cell as done would silently "
+                "misattribute the artifact to inputs it was not trained on:\n"
+                f"{format_identity_diff(decision.diff)}\n"
+                "Pass force=True to retrain over it, or start a fresh run_set_id."
+            )
     if manifest_path.exists() and not cell_is_done(run_dir) and not cfg.force:
         logger.warning(
             "Re-running SDF teacher with a manifest but INCOMPLETE checkpoints/ "
@@ -188,9 +263,6 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
             run_dir,
         )
 
-    docs_path = resolve_sdf_docs_path(
-        cfg.sdf_docs_root, cfg.target_animal, cfg.sdf_docs_overrides
-    )
     documents = load_sdf_documents(docs_path, cfg.target_animal)
     logger.info(
         "SDF teacher: animal={} base={} docs={} ({}) -> {}",
@@ -239,25 +311,14 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
         "finetune_mode": finetune_mode,
         "packing": cfg.packing,
         "pile_replay_ratio": cfg.pile_replay_ratio,
-        "hyperparameters": {
-            "n_epochs": cfg.train.n_epochs,
-            "learning_rate": cfg.train.learning_rate,
-            "batch_size": cfg.train.batch_size,
-            "max_length": cfg.train.max_length,
-            "warmup_ratio": cfg.train.warmup_ratio,
-            "max_grad_norm": cfg.train.max_grad_norm,
-            "lr_scheduler_type": cfg.train.lr_scheduler_type,
-            "optim": cfg.train.optim,
-            "gradient_accumulation_steps": cfg.train.gradient_accumulation_steps,
-            "gradient_checkpointing": cfg.train.gradient_checkpointing,
-            **lora_manifest_blob(cfg.lora),
-        },
+        "hyperparameters": hyperparameters,
         "sdf_docs_path": str(docs_path),
-        "sdf_docs_sha256": sha256_file(docs_path),
+        "sdf_docs_sha256": sdf_docs_sha256,
         "n_documents": len(documents),
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,
+        "run_identity": identity,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
     write_manifest(
