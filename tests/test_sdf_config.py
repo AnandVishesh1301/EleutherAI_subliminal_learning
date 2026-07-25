@@ -59,3 +59,36 @@ def test_load_sdf_training_with_lora_block_returns_loraconfig(tmp_path: Path) ->
         target_modules=("query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"),
     )
     assert train.n_epochs == 3
+
+
+def test_load_sdf_training_without_grad_accum_keys_defaults_to_prior_behavior(
+    tmp_path: Path,
+) -> None:
+    """Missing `gradient_accumulation_steps`/`gradient_checkpointing` keys must not
+    change any existing training YAML's semantics (batch_size alone stays the
+    effective batch, no checkpointing)."""
+    path = tmp_path / "full.yaml"
+    path.write_text(_TRAIN_BLOCK)
+
+    _, train = load_sdf_training(path)
+
+    assert train.gradient_accumulation_steps == 1
+    assert train.gradient_checkpointing is False
+
+
+def test_load_sdf_training_parses_grad_accum_and_checkpointing_keys(
+    tmp_path: Path,
+) -> None:
+    """OOM-mitigated full-FT YAMLs (e.g. configs/training/full_sdf_teacher.yaml) must
+    have batch_size/gradient_accumulation_steps/gradient_checkpointing all wired."""
+    path = tmp_path / "full_mitigated.yaml"
+    path.write_text(
+        _TRAIN_BLOCK.replace("batch_size: 8", "batch_size: 4")
+        + "  gradient_accumulation_steps: 2\n  gradient_checkpointing: true\n"
+    )
+
+    _, train = load_sdf_training(path)
+
+    assert train.batch_size == 4
+    assert train.gradient_accumulation_steps == 2
+    assert train.gradient_checkpointing is True
