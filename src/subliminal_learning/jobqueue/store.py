@@ -405,6 +405,18 @@ def _write_attempt(root: Path, name: str, jobkey: str, attempt: int) -> None:
     atomic_write_json(_attempt_path(root, name, jobkey), {"attempt": attempt})
 
 
+def bump_attempt(root: Path, name: str, jobkey: str) -> int:
+    """Increment (and persist) a job's attempt counter; return the new value.
+
+    Used when a running job is requeued WITHOUT a result (e.g. yield-kill): the retry
+    should record ``attempt = prev + 1``, mirroring :func:`requeue`.
+    """
+    n = read_attempt(root, name, jobkey) + 1
+    mkdir_open(_attempt_path(root, name, jobkey).parent)
+    _write_attempt(root, name, jobkey, n)
+    return n
+
+
 def record_result(
     root: Path,
     name: str,

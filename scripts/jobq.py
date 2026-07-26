@@ -17,7 +17,7 @@ import typer
 from dotenv import load_dotenv
 from loguru import logger
 
-from subliminal_learning.jobqueue import store
+from subliminal_learning.jobqueue import store, yielding
 from subliminal_learning.jobqueue.gpu import GpuManager
 from subliminal_learning.jobqueue.model import parse_jobs_file
 from subliminal_learning.jobqueue.worker import run_pool
@@ -84,6 +84,12 @@ def submit(
         help="Queue-default job weight in global per-GPU slot-units (heavy jobs take >1).",
     ),
     env: list[str] = typer.Option(None, "--env", help="Queue-default env, repeatable K=V."),
+    on_yield_kill_cmd: str = typer.Option(
+        None,
+        "--on-yield-kill-cmd",
+        help="bash -c cleanup run after a yield-kill (JOBQ_JOB_KEY/JOBQ_JOB_CMD/JOBQ_GPU set); "
+        "e.g. remove an orphaned empty checkpoint dir so the requeued job can retry.",
+    ),
     root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
     dry_run: bool = typer.Option(False, help="Print the expanded jobs and exit."),
 ) -> None:
@@ -104,6 +110,8 @@ def submit(
         defaults["cap_group"] = cap_group
     if slots is not None:
         defaults["slots"] = slots
+    if on_yield_kill_cmd is not None:
+        defaults["on_yield_kill_cmd"] = on_yield_kill_cmd
     env_d = _parse_env(env)
     if env_d:
         defaults["env"] = env_d
@@ -174,6 +182,17 @@ def _report_root(root: Path, queue: str | None = None) -> None:
             )
     except FileNotFoundError:
         pass  # no policy on this node -> nothing to report
+    # Yielded GPUs (opt-in framework): silent when the feature is off / marker file absent.
+    yielded = yielding.read_yielded(root, store.this_host())
+    if yielded:
+        logger.info(
+            "this node ({}) yielded GPUs: {}",
+            store.this_host(),
+            ", ".join(
+                f"{g} (foreign={v.get('foreign')}, since {v.get('first_seen')})"
+                for g, v in sorted(yielded.items())
+            ),
+        )
 
 
 @app.command()

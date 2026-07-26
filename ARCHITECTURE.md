@@ -176,6 +176,103 @@ nohup uv run python -m scripts.jobq work --workers 4 &   # after writing gpu_pol
 uv run python -m scripts.jobq status distill
 ```
 
+### GPU yielding (opt-in) — `jobqueue/yielding.py`
+
+When a **foreign** user's process appears on a GPU this node is using, an opt-in policy
+makes our jobq jobs on that card die (or drain) and leaves the card alone until the
+foreigner leaves — yielding to a collaborator instead of co-loading into an OOM. **Off by
+default**: every existing behavior is byte-identical when the policy keys are absent.
+
+- **Opt-in policy keys** (new optional fields in `gpu_policy.<hostname>.json`, all
+  defaulted): `yield_to_foreign` (bool, default `false` — master switch), `yield_poll_s`
+  (`30.0`), `yield_confirm_polls` (`2` consecutive detections before acting),
+  `yield_min_foreign_procs` (`1`), `yield_cooldown_s` (`900.0` after foreigners leave before
+  reclaiming), `yield_action` (`"kill"` our jobs + stop claiming, or `"drain"` = stop
+  claiming only). Policy is re-read on every acquire and every watchdog poll, so
+  **`yield_to_foreign` is a hot switch**: flip it in the policy JSON on a running pool and
+  yielding begins (or stops) within one `yield_poll_s` — no restart. The watchdog thread runs
+  whenever a policy file exists but does zero detection work (no `nvidia-smi`, no `/proc`
+  scan, no marker) while the flag is false, so "off" is a true no-op.
+- **Namespace-safe detection (the honest uid limitation).** `nvidia-smi
+  --query-compute-apps` reports *host-namespace* PIDs, which differ from this container's
+  PIDs — resolving an smi pid's `/proc` uid is actively misleading, so we never do it.
+  Instead `foreign_count(g) = smi_compute_procs(g) − len(local on g)`, floored at 0
+  (`gpu_uuid`→index mapped from a second smi query). Everything we see locally is
+  ours-or-this-node's, **including local root-owned daemons** — correctly non-foreign, never
+  yielded to. Limitation: a root daemon in *another* container is indistinguishable from a
+  collaborator's job — raise `yield_min_foreign_procs` if that misfires. Failed/unparsable
+  `nvidia-smi` → "no information", never yields (fail-safe).
+- **CUDA opens EVERY device node, so we attribute per-GPU (measured on the machine).** A
+  CUDA process does *not* hold fds only on the GPU it uses: at init it opens *all* visible
+  `/dev/nvidiaN`. A 1 GiB probe pinned to physical GPU 6 held **3** fds on every
+  `/dev/nvidia0..7` and **21** on `/dev/nvidia6`. A naive "has an fd on `/dev/nvidia<g>`"
+  test therefore counts one of our jobs as local on all 8 cards and masks a real collaborator
+  to `foreign=0` on the cards where they are present. `local_gpu_procs(g)` attributes each
+  local CUDA proc to specific GPU(s), in priority order: (1) `CUDA_VISIBLE_DEVICES` from
+  `/proc/<pid>/environ` (physical index; jobq sets it on every job; comma list = several
+  GPUs); (2) the `/dev/nvidiaN` node(s) with strictly more fds than the min baseline (21 vs
+  3); (3) all policy GPUs (conservative — an unattributable local CUDA proc blocks yielding
+  everywhere rather than yielding wrongly).
+- **Mechanism.** A daemon watchdog thread (started by `run_pool` whenever a policy file
+  exists; a no-op poll while the flag is off) persists yielded GPUs to `yielded.<hostname>.json`;
+  `GpuManager.acquire` skips them. A yield-**kill** signals the job's process group
+  (`SIGTERM`, ~20 s grace, `SIGKILL`) and **requeues the job to PENDING** (no result, attempt
+  bumped) — never recorded as failed. Master-log verbs: `YIELD gpu=N foreign=K`,
+  `KILL <queue> <key> gpu=N`, `RECLAIM gpu=N`. `jobq status` prints currently-yielded GPUs.
+- **Orphan-dir / cleanup-hook caveat.** Killing a distill mid-flight leaves an empty
+  `ftseedN/checkpoints/` with no `train_manifest.json`, which later makes the eval stage
+  crash (`OSError: no file named pytorch_model.bin…`), so a requeued job would fail forever.
+  The optional per-queue `on_yield_kill_cmd` (`jobq submit --on-yield-kill-cmd`) runs via
+  `bash -c` after a yield-kill (with `JOBQ_JOB_KEY`/`JOBQ_JOB_CMD`/`JOBQ_GPU` set) so a
+  caller can wire that cleanup — see `clean_partial_runs.py` below.
+
+### Partial-run cleanup — `scripts/clean_partial_runs.py`
+
+Finds and (only with `--apply`) removes the partial/stale artifacts a mid-flight KILL leaves,
+so a requeued job re-runs cleanly, *without ever deleting complete or in-flight data*. It is
+both the ready-made `on_yield_kill_cmd` hook and a manual sweeper.
+
+- **Scope — exactly seven pipelines:** teacher (`train_teacher_templates_pipeline`), numbers
+  (`generate_numbers_pipeline`), eval (`evaluate_teacher_preference_pipeline`, teachers +
+  students), distill (`distill_student_pipeline`), steerability (`steerability_screen_pipeline`),
+  eas (`eas_pipeline`), coherence (`pile_coherence_pipeline`). **Out of scope and never
+  scanned/touched:** SDF (`sdf_teachers/`) and on-policy GKD (`gkd_students/`).
+- **Per-stage rule.** Training leaves (`teachers|students/**/ftseed*`) are purged **only** when
+  they hold a `checkpoints/` dir with no final weight file (mirrors
+  `run_io.checkpoint_is_complete` — the orphan that poisons the eval enumerator); a complete or
+  resumable (`checkpoint-*`) leaf is kept. Numbers/eval/eas artifacts are atomic + self-healing,
+  so cleanup there is orphan `*.tmp.<pid>` only. Steerability drops only a **partial** (or
+  corrupt) `aggregate.json` — recorded `n_seeds` ≠ the `ft*.json` on disk — never a complete one;
+  `ft{seed}.json` are kept. Coherence drops a truncated trailing `results.jsonl` line (only if
+  the last line fails to parse; earlier records preserved byte-for-byte), optionally
+  (`--coherence-orphan-npy`) an orphan `per_token_loss.npy`, and a **partial Pile shard** dir
+  (`header.json` missing) — but a shard *with* a header is a complete, expensive artifact and is
+  never touched.
+- **Safety model.** Dry-run is the default. Every target is resolved and must sit under an
+  allowed root — `output_root`, **plus a second root `dataset_cache_root` only when passed
+  explicitly** via `--dataset-cache-root` (needed for partial shards, which live outside
+  `output_root`); symlinked targets are refused. Scan mode has an `--min-age-s` guard (default
+  6 h, must exceed the ~1 h longest job). A **liveness guard** (in every mode) scans our own
+  `/proc` cmdlines — *not* host-namespace nvidia-smi pids — and skips any leaf whose seed **and**
+  cell tokens appear in a running command, so a concurrent sibling seed in a multi-seed cell is
+  never deleted. Targeted mode (`--path`) skips the age guard but requires an explicit seed
+  selection for a cell (`--seeds`, a parseable `--from-job-cmd`/`$JOBQ_JOB_CMD` — understands
+  `--student-seed N` and the `for S in 1 2 3; do … $S …; done` idiom — or the guarded
+  `--all-seeds`); with no parseable selection it deletes nothing and exits non-zero. The
+  `numbers/**/ftseed*` pools (no manifest, no checkpoints) are never selected as leaves — those
+  trees are only swept for `*.tmp.*`.
+- **Ready-to-paste hook** (per-queue; seeds come from the dead job, liveness protects live
+  siblings, `--path` scopes to the subtree the queue writes):
+
+  ```
+  jobq submit distill-dog --jobs-file jobs.txt \
+    --on-yield-kill-cmd 'uv run python -m scripts.clean_partial_runs \
+        --path /mnt/ssd-2/soar-subliminal/angela/outputs/students/dog \
+        --stage distill --from-job-cmd "$JOBQ_JOB_CMD" --apply'
+  ```
+
+  Manual sweep: `uv run python -m scripts.clean_partial_runs --scan` (dry run), then `--apply`.
+
 ## Config system
 
 `config.py` defines frozen dataclasses (`PathsConfig`, `ModelConfig`, `LoRAConfig`,

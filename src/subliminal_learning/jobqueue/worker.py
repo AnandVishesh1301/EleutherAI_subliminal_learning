@@ -7,21 +7,25 @@ first pending job, runs it, records the result, and moves on. A job failure neve
 pool. Between jobs it honors the ``stop.<hostname>`` file.
 
 Master-log verbs (``[<iso-utc>] VERB ...``): CLAIM, START, END rc=<rc>, STEAL, WAIT,
-QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE.
+QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The opt-in GPU-yielding framework
+(``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K, KILL <queue> <key> gpu=N, and
+RECLAIM gpu=N.
 """
 
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
 
-from subliminal_learning.jobqueue import store
-from subliminal_learning.jobqueue.gpu import GpuManager
+from subliminal_learning.jobqueue import store, yielding
+from subliminal_learning.jobqueue.gpu import GpuManager, load_policy
 from subliminal_learning.jobqueue.store import (
     QueueMeta,
     REPO_ROOT,
@@ -46,6 +50,44 @@ class MasterLog:
             with open(self.path, "a") as f:
                 f.write(line + "\n")
         logger.info(line)
+
+
+@dataclass
+class _RunHandle:
+    """A live job subprocess, tracked per-GPU so the yield watchdog can kill it.
+
+    ``killed`` distinguishes "I killed this to yield the card" from "it exited on its own"
+    so the runner requeues (not fails) a yield-killed job.
+    """
+
+    proc: subprocess.Popen
+    queue: str
+    job: Job
+    gpu: int
+    killed: bool = False
+
+
+def _kill_group(proc: subprocess.Popen, *, grace_s: float = 20.0, poll_s: float = 0.5) -> None:
+    """SIGTERM the process's group, wait ``grace_s``, then SIGKILL (best-effort, no raise).
+
+    The job is launched with ``start_new_session=True`` so ``bash -c`` and every child share
+    a process group we can signal in one shot.
+    """
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        return
+    deadline = time.time() + grace_s
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(poll_s)
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
 
 
 def _acquire_pid_file(root: Path, hostname: str) -> None:
@@ -89,6 +131,11 @@ class _Pool:
         self._lock = threading.Lock()
         self._complete_logged: set[str] = set()
         self._dep_warned: set[str] = set()
+        # Live jobs by physical GPU so the yield watchdog can kill this card's jobs:
+        # {gpu: {jobkey: _RunHandle}}. Guarded by its own lock (touched from worker
+        # threads + the watchdog thread).
+        self._running_lock = threading.Lock()
+        self._running: dict[int, dict[str, _RunHandle]] = {}
 
     # ------------------- queue selection -------------------
 
@@ -220,7 +267,14 @@ class _Pool:
                 )
             time.sleep(self.gpu_wait_s)
 
-    def _run_job(self, name: str, meta: QueueMeta, job: Job, slot, attempt: int) -> int:
+    def _run_job(
+        self, name: str, meta: QueueMeta, job: Job, slot, attempt: int
+    ) -> int | None:
+        """Run one job to completion. Returns its rc, or ``None`` if a yield killed it.
+
+        A yield-killed job is requeued to PENDING (claim removed, NO result recorded,
+        attempt bumped) so it retries later — it is never recorded as failed.
+        """
         store.update_owner_gpu(self.root, name, job.jobkey, slot.gpu)
         pid = os.getpid()
         stamp = utc_stamp()
@@ -242,18 +296,34 @@ class _Pool:
                 f"queue={name} job={job.key} start={start} ===\n"
             )
             f.flush()
-            proc = subprocess.run(
+            # start_new_session=True: bash -c and its children get their own process group
+            # so the yield watchdog can kill the whole tree in one killpg.
+            proc = subprocess.Popen(
                 ["bash", "-c", job.cmd],
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 env=env,
                 cwd=cwd,
+                start_new_session=True,
             )
+            handle = _RunHandle(proc=proc, queue=name, job=job, gpu=slot.gpu)
+            with self._running_lock:
+                self._running.setdefault(slot.gpu, {})[job.jobkey] = handle
+            try:
+                rc = proc.wait()
+            finally:
+                with self._running_lock:
+                    self._running.get(slot.gpu, {}).pop(job.jobkey, None)
+        if handle.killed:  # yielded the card: requeue, don't record a result
+            store.remove_claim(self.root, name, job.jobkey)
+            store.bump_attempt(self.root, name, job.jobkey)
+            self._run_yield_cleanup(meta, job, slot.gpu)
+            return None
         store.record_result(
             self.root,
             name,
             job,
-            rc=proc.returncode,
+            rc=rc,
             node=self.hostname,
             gpu=slot.gpu,
             start_utc=start,
@@ -262,7 +332,46 @@ class _Pool:
             attempt=attempt,
         )
         store.remove_claim(self.root, name, job.jobkey)
-        return proc.returncode
+        return rc
+
+    def yield_kill_gpu(self, gpu: int) -> None:
+        """Kill our jobs on ``gpu`` so the card is yielded (called by the watchdog).
+
+        Only handles whose process is still alive (``poll() is None``) are marked+killed: a
+        job that already exited naturally (but whose handle is not yet popped — ``_run_job``
+        pops only after ``wait()`` returns) is left alone so its real rc is recorded normally
+        instead of being discarded and requeued as if we killed it.
+        """
+        with self._running_lock:
+            handles = [
+                h for h in self._running.get(gpu, {}).values() if h.proc.poll() is None
+            ]
+            for h in handles:
+                h.killed = True
+        for h in handles:
+            self.master.log("KILL", f"{h.queue} {h.job.key} gpu={gpu}")
+            _kill_group(h.proc)
+
+    def _run_yield_cleanup(self, meta: QueueMeta, job: Job, gpu: int) -> None:
+        """Run the optional per-queue ``on_yield_kill_cmd`` cleanup hook (never raises).
+
+        Killing a distill mid-flight leaves an EMPTY ``ftseedN/checkpoints/`` with no
+        ``train_manifest.json``, which later makes the eval stage crash with ``OSError: no
+        file named pytorch_model.bin…`` — so a requeued job would fail forever. The hook is
+        where a caller wires that cleanup (given JOBQ_JOB_KEY/JOBQ_JOB_CMD/JOBQ_GPU).
+        """
+        cmd = meta.defaults.get("on_yield_kill_cmd")
+        if not cmd:
+            return
+        env = os.environ.copy()
+        env["JOBQ_JOB_KEY"] = job.key
+        env["JOBQ_JOB_CMD"] = job.cmd
+        env["JOBQ_GPU"] = str(gpu)
+        try:
+            proc = subprocess.run(["bash", "-c", str(cmd)], env=env)
+            logger.info("on_yield_kill_cmd for {} rc={}", job.key, proc.returncode)
+        except Exception:  # noqa: BLE001 — a cleanup hook must never crash the pool
+            logger.exception("on_yield_kill_cmd raised for job {}", job.key)
 
     # ------------------- thread loop -------------------
 
@@ -303,7 +412,10 @@ class _Pool:
             attempt = store.read_attempt(self.root, name, job.jobkey)
             try:
                 rc = self._run_job(name, meta, job, slot, attempt)
-                self.master.log("END", f"{name} {job.key} rc={rc}")
+                if rc is None:  # yield-killed: KILL already logged, job requeued to pending
+                    pass
+                else:
+                    self.master.log("END", f"{name} {job.key} rc={rc}")
             except Exception:  # noqa: BLE001 — log-and-continue; never abort the pool
                 logger.exception("job {} in queue {} crashed the runner", job.key, name)
                 store.remove_claim(self.root, name, job.jobkey)
@@ -347,6 +459,31 @@ def run_pool(
         poll_s=poll_s,
         gpu_wait_s=gpu_wait_s,
     )
+    # Opt-in GPU yielding: ALWAYS start the watchdog when this node has a policy file, and
+    # let poll_once no-op while yield_to_foreign is false. This makes the switch hot-ENABLE:
+    # flip the flag in the policy JSON on a running pool and yielding begins within one
+    # yield_poll_s — no restart (a restart here would kill+requeue every running job, exactly
+    # the pain this feature manages). A missing policy (e.g. tests with a fake GpuManager)
+    # means no thread; if one exists, poll_once returns harmlessly on FileNotFoundError.
+    stop_event = threading.Event()
+    watch_thread: threading.Thread | None = None
+    try:
+        load_policy(root, hostname)
+        have_policy = True
+    except FileNotFoundError:
+        have_policy = False
+    if have_policy:
+        watchdog = yielding.YieldWatchdog(
+            root,
+            hostname,
+            load_policy=lambda: load_policy(root, hostname),
+            master=master,
+            on_yield=pool.yield_kill_gpu,
+        )
+        watch_thread = threading.Thread(
+            target=watchdog.run, args=(stop_event,), name="jobq-yield-watchdog", daemon=True
+        )
+        watch_thread.start()
     threads = [
         threading.Thread(target=pool.loop, args=(i,), name=f"jobq-worker-{i}")
         for i in range(max(1, workers))
@@ -355,5 +492,8 @@ def run_pool(
         t.start()
     for t in threads:
         t.join()
+    stop_event.set()  # let the daemon watchdog exit promptly (it also dies at process end)
+    if watch_thread is not None:
+        watch_thread.join(timeout=5.0)
     master.log("ALL QUEUES COMPLETE")
     store.worker_pid_path(root, hostname).unlink(missing_ok=True)

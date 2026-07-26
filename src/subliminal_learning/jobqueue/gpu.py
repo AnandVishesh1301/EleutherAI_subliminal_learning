@@ -28,17 +28,30 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from subliminal_learning.jobqueue import yielding
+
 DEFAULT_LOCK_PREFIX = "/tmp/subliminal_jobq"
 
 
 @dataclass
 class GpuPolicy:
-    """Parsed ``gpu_policy.<hostname>.json``: which GPUs, how many slots, memory floor, env."""
+    """Parsed ``gpu_policy.<hostname>.json``: which GPUs, how many slots, memory floor, env.
+
+    The ``yield_*`` fields configure the opt-in GPU-yielding framework (see
+    ``jobqueue/yielding.py``). They are all defaulted so old policy files keep working and
+    the feature is OFF unless ``yield_to_foreign`` is explicitly set true.
+    """
 
     gpus: list[int]
     cap_per_gpu: int
     free_mem_mib: int
     env: dict[str, str] = field(default_factory=dict)
+    yield_to_foreign: bool = False
+    yield_poll_s: float = 30.0
+    yield_confirm_polls: int = 2
+    yield_min_foreign_procs: int = 1
+    yield_cooldown_s: float = 900.0
+    yield_action: str = "kill"
 
     @classmethod
     def from_dict(cls, d: dict) -> "GpuPolicy":
@@ -47,6 +60,12 @@ class GpuPolicy:
             cap_per_gpu=int(d["cap_per_gpu"]),
             free_mem_mib=int(d["free_mem_mib"]),
             env={str(k): str(v) for k, v in (d.get("env") or {}).items()},
+            yield_to_foreign=bool(d.get("yield_to_foreign", False)),
+            yield_poll_s=float(d.get("yield_poll_s", 30.0)),
+            yield_confirm_polls=int(d.get("yield_confirm_polls", 2)),
+            yield_min_foreign_procs=int(d.get("yield_min_foreign_procs", 1)),
+            yield_cooldown_s=float(d.get("yield_cooldown_s", 900.0)),
+            yield_action=str(d.get("yield_action", "kill")),
         )
 
 
@@ -248,10 +267,16 @@ class GpuManager:
             rotated = gpus[offset:] + gpus[:offset]
             counts = self._held_counts(policy)
             order = sorted(rotated, key=lambda g: counts[g])  # stable: rotation breaks ties
+            # GPUs yielded to a foreign user are off-limits — skip them before the memory
+            # snapshot (opt-in; re-read here so a flip/reclaim takes effect on the next
+            # acquire). Empty set when the feature is off or the marker file is missing.
+            yielded = yielding.yielded_gpus(self.root, self.hostname)
             # One snapshot up front: GPUs that are externally memory-occupied are skipped
             # without slot probing or gate sleeps (bounds time under the acquire lock).
             snapshot = self.mem_query()
             for g in order:
+                if g in yielded:
+                    continue
                 if snapshot.get(g, 0) < mem_mib:
                     continue
                 held: list[tuple[int, int]] = []  # (slot index, fd)
