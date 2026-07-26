@@ -85,7 +85,10 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
     number_generation_analysis         number-pool inventory, keep rates, distributions
     same_init_student_distillation_analysis    same-init student transfer + controls
     cross_seed_student_distillation_analysis   cross-init student transfer (dog spine)
-    cross_model_student_hp_exploration          student-HP ladder (lr cliff, gentle region)
+    cross_model_student_hp_exploration          student-HP ladder; §12 pins the ep20 collapse
+                                                boundary to lr·α^0.58·r^-0.09 (rank protective;
+                                                supersedes §11's rank-free lr·√α and §8's lr×α);
+                                                §13 hurdle model EV = P(alive)·E[p|alive]
     steerability_screen_analysis        steering-vector screen tables/heatmaps
     eas_analysis                        EAS dose-response + HP tables
     sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
