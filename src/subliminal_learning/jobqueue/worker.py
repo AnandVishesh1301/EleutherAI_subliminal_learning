@@ -317,7 +317,6 @@ class _Pool:
         if handle.killed:  # yielded the card: requeue, don't record a result
             store.remove_claim(self.root, name, job.jobkey)
             store.bump_attempt(self.root, name, job.jobkey)
-            self._run_yield_cleanup(meta, job, slot.gpu)
             return None
         store.record_result(
             self.root,
@@ -351,27 +350,6 @@ class _Pool:
         for h in handles:
             self.master.log("KILL", f"{h.queue} {h.job.key} gpu={gpu}")
             _kill_group(h.proc)
-
-    def _run_yield_cleanup(self, meta: QueueMeta, job: Job, gpu: int) -> None:
-        """Run the optional per-queue ``on_yield_kill_cmd`` cleanup hook (never raises).
-
-        Killing a distill mid-flight leaves an EMPTY ``ftseedN/checkpoints/`` with no
-        ``train_manifest.json``, which later makes the eval stage crash with ``OSError: no
-        file named pytorch_model.bin…`` — so a requeued job would fail forever. The hook is
-        where a caller wires that cleanup (given JOBQ_JOB_KEY/JOBQ_JOB_CMD/JOBQ_GPU).
-        """
-        cmd = meta.defaults.get("on_yield_kill_cmd")
-        if not cmd:
-            return
-        env = os.environ.copy()
-        env["JOBQ_JOB_KEY"] = job.key
-        env["JOBQ_JOB_CMD"] = job.cmd
-        env["JOBQ_GPU"] = str(gpu)
-        try:
-            proc = subprocess.run(["bash", "-c", str(cmd)], env=env)
-            logger.info("on_yield_kill_cmd for {} rc={}", job.key, proc.returncode)
-        except Exception:  # noqa: BLE001 — a cleanup hook must never crash the pool
-            logger.exception("on_yield_kill_cmd raised for job {}", job.key)
 
     # ------------------- thread loop -------------------
 

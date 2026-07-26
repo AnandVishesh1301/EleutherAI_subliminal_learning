@@ -1,8 +1,7 @@
 """CLI: remove the partial artifacts a KILLED job leaves, so a requeue re-runs cleanly.
 
-Wired as the jobq ``on_yield_kill_cmd`` hook (see
-``src/subliminal_learning/jobqueue/yielding.py`` / ``worker.py``) and also run by hand.
-It targets EXACTLY seven in-scope pipelines and NOTHING else:
+Run by hand / on demand as a sweeper. It targets EXACTLY seven in-scope pipelines and
+NOTHING else:
 
   teacher       pipelines/train_teacher_templates_pipeline.py
   numbers       pipelines/generate_numbers_pipeline.py

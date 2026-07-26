@@ -724,32 +724,6 @@ def test_yield_kill_requeues_to_pending_not_failed(tmp_path):
     assert store.read_attempt(tmp_path, "q", job.jobkey) == 1
 
 
-def test_yield_kill_runs_cleanup_hook(tmp_path):
-    from subliminal_learning.jobqueue.worker import MasterLog, _Pool
-
-    marker = tmp_path / "cleaned.txt"
-    store.create_queue(tmp_path, "q", defaults={"on_yield_kill_cmd": f"touch {marker}"})
-    store.append_jobs(tmp_path, "q", [Job("slowjob", "sleep 30")])
-    meta = store.read_meta(tmp_path, "q")
-    host = store.this_host()
-    job = store.claim_next(tmp_path, "q", host, os.getpid())
-    pool = _Pool(tmp_path, host, FakeGpuManager(),
-                 MasterLog(tmp_path / "logs" / "m.log"),
-                 queues_filter=None, poll_s=0.01, gpu_wait_s=0.01)
-    slot = GpuSlot(gpu=0, slot=0)
-    t = threading.Thread(target=lambda: pool._run_job("q", meta, job, slot, 0))
-    t.start()
-    for _ in range(500):
-        with pool._running_lock:
-            if pool._running.get(0, {}).get(job.jobkey):
-                break
-        import time as _t
-        _t.sleep(0.01)
-    pool.yield_kill_gpu(0)
-    t.join(timeout=30)
-    assert marker.exists()  # cleanup hook fired with env set
-
-
 def test_drain_mode_never_kills(tmp_path):
     calls = []
     wd = yielding.YieldWatchdog(

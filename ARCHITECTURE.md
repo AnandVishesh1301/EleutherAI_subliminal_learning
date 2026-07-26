@@ -219,18 +219,13 @@ default**: every existing behavior is byte-identical when the policy keys are ab
   (`SIGTERM`, ~20 s grace, `SIGKILL`) and **requeues the job to PENDING** (no result, attempt
   bumped) — never recorded as failed. Master-log verbs: `YIELD gpu=N foreign=K`,
   `KILL <queue> <key> gpu=N`, `RECLAIM gpu=N`. `jobq status` prints currently-yielded GPUs.
-- **Orphan-dir / cleanup-hook caveat.** Killing a distill mid-flight leaves an empty
-  `ftseedN/checkpoints/` with no `train_manifest.json`, which later makes the eval stage
-  crash (`OSError: no file named pytorch_model.bin…`), so a requeued job would fail forever.
-  The optional per-queue `on_yield_kill_cmd` (`jobq submit --on-yield-kill-cmd`) runs via
-  `bash -c` after a yield-kill (with `JOBQ_JOB_KEY`/`JOBQ_JOB_CMD`/`JOBQ_GPU` set) so a
-  caller can wire that cleanup — see `clean_partial_runs.py` below.
 
 ### Partial-run cleanup — `scripts/clean_partial_runs.py`
 
 Finds and (only with `--apply`) removes the partial/stale artifacts a mid-flight KILL leaves,
 so a requeued job re-runs cleanly, *without ever deleting complete or in-flight data*. It is
-both the ready-made `on_yield_kill_cmd` hook and a manual sweeper.
+run manually / on demand as a sweeper (the eval stage now skips incomplete `ftseed*`
+checkpoints on its own, so a requeued job no longer needs an automatic post-kill cleanup).
 
 - **Scope — exactly seven pipelines:** teacher (`train_teacher_templates_pipeline`), numbers
   (`generate_numbers_pipeline`), eval (`evaluate_teacher_preference_pipeline`, teachers +
@@ -261,14 +256,13 @@ both the ready-made `on_yield_kill_cmd` hook and a manual sweeper.
   `--all-seeds`); with no parseable selection it deletes nothing and exits non-zero. The
   `numbers/**/ftseed*` pools (no manifest, no checkpoints) are never selected as leaves — those
   trees are only swept for `*.tmp.*`.
-- **Ready-to-paste hook** (per-queue; seeds come from the dead job, liveness protects live
-  siblings, `--path` scopes to the subtree the queue writes):
+- **Targeted sweep** (liveness protects live siblings, `--path` scopes to one subtree, an
+  explicit seed selection scopes to the dead job's cell):
 
   ```
-  jobq submit distill-dog --jobs-file jobs.txt \
-    --on-yield-kill-cmd 'uv run python -m scripts.clean_partial_runs \
-        --path /mnt/ssd-2/soar-subliminal/angela/outputs/students/dog \
-        --stage distill --from-job-cmd "$JOBQ_JOB_CMD" --apply'
+  uv run python -m scripts.clean_partial_runs \
+      --path /mnt/ssd-2/soar-subliminal/angela/outputs/students/dog \
+      --stage distill --seeds 1 --apply
   ```
 
   Manual sweep: `uv run python -m scripts.clean_partial_runs --scan` (dry run), then `--apply`.
