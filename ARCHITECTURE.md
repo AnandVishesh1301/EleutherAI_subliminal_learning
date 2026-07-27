@@ -88,7 +88,10 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
     cross_model_student_hp_exploration          student-HP ladder; §12 pins the ep20 collapse
                                                 boundary to lr·α^0.58·r^-0.09 (rank protective;
                                                 supersedes §11's rank-free lr·√α and §8's lr×α);
-                                                §13 hurdle model EV = P(alive)·E[p|alive]
+                                                §13 hurdle model EV = P(alive)·E[p|alive];
+                                                §14 top-3 student HPs over the 102-teacher suite
+                                                (top3hp-grid, seed 1): same-model robust (~0.35),
+                                                cross-init ≈ std at floor — teacher-limited
     steerability_screen_analysis        steering-vector screen tables/heatmaps
     eas_analysis                        EAS dose-response + HP tables
     sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
@@ -187,8 +190,13 @@ default**: every existing behavior is byte-identical when the policy keys are ab
   defaulted): `yield_to_foreign` (bool, default `false` — master switch), `yield_poll_s`
   (`30.0`), `yield_confirm_polls` (`2` consecutive detections before acting),
   `yield_min_foreign_procs` (`1`), `yield_cooldown_s` (`900.0` after foreigners leave before
-  reclaiming), `yield_action` (`"kill"` our jobs + stop claiming, or `"drain"` = stop
-  claiming only). Policy is re-read on every acquire and every watchdog poll, so
+  reclaiming), `yield_action` (`"kill"` our jobs + stop claiming, `"drain"` = stop claiming
+  only, or `"drain_if_near_done"` = spare near-done jobs, kill the rest + stop claiming), and —
+  only consulted by `drain_if_near_done` — `yield_drain_threshold` (`0.8`, the progress
+  fraction at/above which a job is spared), `yield_drain_max_s` (`1800.0`, the cap on how long
+  a spared job may keep a yielded card), and `yield_progress_regex` (`None`; two numeric groups
+  = current/total, e.g. `(\d+)/(\d+)`). Policy is re-read on every acquire and every watchdog
+  poll, so
   **`yield_to_foreign` is a hot switch**: flip it in the policy JSON on a running pool and
   yielding begins (or stops) within one `yield_poll_s` — no restart. The watchdog thread runs
   whenever a policy file exists but does zero detection work (no `nvidia-smi`, no `/proc`
@@ -218,7 +226,50 @@ default**: every existing behavior is byte-identical when the policy keys are ab
   `GpuManager.acquire` skips them. A yield-**kill** signals the job's process group
   (`SIGTERM`, ~20 s grace, `SIGKILL`) and **requeues the job to PENDING** (no result, attempt
   bumped) — never recorded as failed. Master-log verbs: `YIELD gpu=N foreign=K`,
-  `KILL <queue> <key> gpu=N`, `RECLAIM gpu=N`. `jobq status` prints currently-yielded GPUs.
+  `KILL <queue> <key> gpu=N`, `DRAIN <queue> <key> gpu=N pct=P (finishing)` (a near-done job
+  spared under `drain_if_near_done`), `RECLAIM gpu=N`. `jobq status` prints currently-yielded
+  GPUs.
+- **`drain_if_near_done` (spare near-done jobs).** So we do not throw away ~50 min of training
+  when a job is 90 % done, this third action evaluates EACH live job on the yielded card on
+  every poll: `estimated progress >= yield_drain_threshold` → the job is SPARED (runs to
+  completion and records its real rc); otherwise it is killed + requeued exactly as `"kill"`
+  does. The card stays marked yielded regardless, so `acquire` places no new work there while
+  the spared ones finish. **Safety cap:** a spared job still alive `yield_drain_max_s` after the
+  yield's `first_seen` is killed on the next poll regardless of progress (a `KILL … (drain cap
+  expired)` line), bounding how long we partially occupy a card we promised to vacate.
+  **Progress estimation is generic and deliberately fail-safe** (the framework runs arbitrary
+  shell commands, so there is no universal signal), tried in priority order: (1) *log regex*
+  (opt-in, most accurate) — the LAST `(current, total)` match in the tail (~16 KB) of the job's
+  log when `yield_progress_regex` is set; (2) *historical median* — `elapsed / median` of the
+  wall-clock durations of ≥5 COMPLETED (rc==0) jobs in the same queue, clamped to `[0,1]`; (3)
+  *nothing known* → `0.0`, so the job is killed. Honest limitations: without a regex a job is
+  only as well-estimated as the queue's own median (heterogeneous jobs in one queue estimate
+  poorly), the median needs ≥5 completed jobs before it is trusted (an unproven queue falls
+  through to `0.0` and yields promptly), and the log regex assumes a monotonic `current/total`
+  counter — anything non-tqdm-shaped simply falls through. Every gap fails toward the current
+  behavior (yield promptly), never toward hoarding the card. The pure estimators live in
+  `yielding.estimate_progress` / `progress_from_log` / `median_duration_s` (all injectable).
+- **Marker-before-kill invariant.** On the yield transition the watchdog writes the
+  `yielded.<hostname>.json` marker to disk *before* it kills any job on that card, so a GPU is
+  **unacquirable before any of its jobs are killed**. (Each kill frees a slot a worker
+  re-claims immediately; if the marker were written only at end-of-poll, `acquire` would read a
+  card that still looks available and dispatch straight back onto the one being vacated.)
+- **Re-kill while yielded.** For `yield_action == "kill"`, the kill is re-issued on *every*
+  poll while the card stays foreign-occupied — not only on the transition — so anything that
+  slips onto the card (a worker already inside `acquire` when the yield fired, a manual
+  placement) is cleared, not left running indefinitely. `yield_kill_gpu` is idempotent (it only
+  marks/kills still-alive handles), so the extra polls are cheap; exactly one `YIELD` line is
+  logged (the transition) while `KILL` lines appear only for real kills. `drain_if_near_done`
+  likewise re-evaluates every poll — that is how a job below threshold at yield time is killed
+  at that moment and how a spared job that overruns `yield_drain_max_s` is killed later (each
+  spared job logs `DRAIN` only once). `"drain"` still never kills, on any poll.
+- **Late yield re-check in `acquire`.** The memory gate SLEEPS (~`mem_interval_s`) while
+  holding a candidate's slot lock, so the watchdog can yield that card during the gate and the
+  pre-loop `yielded_gpus` snapshot goes stale. After `_mem_ok` succeeds — still inside the
+  acquire lock — the marker is re-read fresh; if the GPU became yielded mid-gate, `acquire`
+  rolls the slot (and cap-group) locks back exactly like the other abandon paths and moves to
+  the next candidate, so a GPU yielded mid-acquire is never dispatched to (previously the
+  re-kill safety net recovered it only up to a full `yield_poll_s` later).
 
 ### Partial-run cleanup — `scripts/clean_partial_runs.py`
 

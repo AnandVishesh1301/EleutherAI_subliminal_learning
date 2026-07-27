@@ -689,6 +689,66 @@ def test_acquire_skips_yielded_gpu(tmp_path):
     assert gm.acquire(100) is None
 
 
+def test_acquire_rechecks_yield_after_memory_gate(tmp_path):
+    # The residual race: the watchdog yields a card DURING the memory gate (which sleeps while
+    # holding the slot). We simulate that by having mem_query itself write the yield marker for
+    # the candidate GPU — so the pre-loop snapshot is stale by the time _mem_ok returns. acquire
+    # must re-read the marker and refuse to dispatch onto the now-yielded card.
+    host = store.this_host()
+    _write_policy(tmp_path, host, gpus=[0], cap_per_gpu=1, free_mem_mib=100)
+
+    def yielding_mem():
+        yielding.write_yielded(
+            tmp_path, host, {0: {"first_seen": "s", "last_seen": "s", "foreign": 1}}
+        )
+        return {0: 5000}
+
+    gm = GpuManager(tmp_path, host, lock_prefix=str(tmp_path / "lock"),
+                    mem_query=yielding_mem, mem_checks=2, mem_interval_s=0.0)
+    assert gm.acquire(100) is None  # only policy GPU became yielded mid-gate -> nothing
+
+    # with a second, non-yielded GPU available, acquire lands there instead of the yielded one.
+    _write_policy(tmp_path, host, gpus=[0, 1], cap_per_gpu=1, free_mem_mib=100)
+
+    def yield_gpu0_mem():
+        yielding.write_yielded(
+            tmp_path, host, {0: {"first_seen": "s", "last_seen": "s", "foreign": 1}}
+        )
+        return {0: 5000, 1: 5000}
+
+    gm2 = GpuManager(tmp_path, host, lock_prefix=str(tmp_path / "lock2"),
+                     mem_query=yield_gpu0_mem, mem_checks=2, mem_interval_s=0.0)
+    slot = gm2.acquire(100)
+    assert slot is not None and slot.gpu == 1  # gpu0 yielded mid-gate -> falls through to gpu1
+    slot.release()
+
+
+def test_acquire_late_yield_leaks_no_slot_fd(tmp_path):
+    # After abandoning a GPU on the late yield re-check, its slot locks must be fully released:
+    # once the marker is cleared, a subsequent acquire can still take the GPU's full cap.
+    host = store.this_host()
+    _write_policy(tmp_path, host, gpus=[0], cap_per_gpu=2, free_mem_mib=100)
+
+    def yielding_mem():
+        yielding.write_yielded(
+            tmp_path, host, {0: {"first_seen": "s", "last_seen": "s", "foreign": 1}}
+        )
+        return {0: 5000}
+
+    gm = GpuManager(tmp_path, host, lock_prefix=str(tmp_path / "lock"),
+                    mem_query=yielding_mem, mem_checks=2, mem_interval_s=0.0)
+    assert gm.acquire(100) is None  # abandoned on the late re-check (both slots rolled back)
+
+    yielding.write_yielded(tmp_path, host, {})  # foreigner leaves; card reclaimed
+    gm.mem_query = lambda: {0: 5000}
+    a = gm.acquire(100)
+    b = gm.acquire(100)
+    assert a is not None and b is not None and a.gpu == 0 and b.gpu == 0  # full cap available
+    assert gm.acquire(100) is None  # cap_per_gpu=2 exactly full -> no leaked fd held a slot
+    a.release()
+    b.release()
+
+
 def test_yield_kill_requeues_to_pending_not_failed(tmp_path):
     from subliminal_learning.jobqueue.worker import MasterLog, _Pool
 
@@ -739,6 +799,70 @@ def test_drain_mode_never_kills(tmp_path):
     # drain marks the card off-limits (marker written) but never triggers a kill
     assert yielding.yielded_gpus(tmp_path, "h") == {0}
     assert calls == []
+
+
+def test_yield_writes_marker_before_kill(tmp_path):
+    # Defect 1 (ordering): the marker must be durable on disk AND list the GPU at the
+    # moment on_yield fires, so a slot freed by the kill cannot be re-claimed onto a card
+    # acquire still reads as available. The callback records what it observes at kill time.
+    seen = {}
+
+    def on_yield(g):
+        seen[g] = yielding.yielded_gpus(tmp_path, "h")
+
+    wd = yielding.YieldWatchdog(
+        tmp_path, "h",
+        load_policy=lambda: _yield_policy(yield_confirm_polls=1),
+        master=_RecLog(),
+        on_yield=on_yield,
+        compute_apps_query=lambda: [(1, "u0")],
+        uuid_query=lambda: {0: "u0"},
+        proc_root=str(tmp_path / "empty_proc"),
+    )
+    wd.poll_once()
+    assert seen == {0: {0}}  # marker on disk and listing gpu0 BEFORE the kill ran
+
+
+def test_yield_rekills_every_poll_but_logs_yield_once(tmp_path):
+    # Defect 2 (re-kill): while the card stays foreign-occupied, on_yield fires on EVERY
+    # poll after the debounce (so anything that slipped on gets killed), but exactly ONE
+    # YIELD master-log line is emitted (the transition), never one per poll.
+    calls = []
+    log = _RecLog()
+    wd = yielding.YieldWatchdog(
+        tmp_path, "h",
+        load_policy=lambda: _yield_policy(yield_confirm_polls=1),
+        master=log,
+        on_yield=lambda g: calls.append(g),
+        compute_apps_query=lambda: [(1, "u0")],  # one foreigner, persistently
+        uuid_query=lambda: {0: "u0"},
+        proc_root=str(tmp_path / "empty_proc"),
+    )
+    wd.poll_once()
+    wd.poll_once()
+    wd.poll_once()
+    assert calls == [0, 0, 0]  # killed on every poll, not just the transition
+    assert [m for v, m in log.lines if v == "YIELD"] == ["gpu=0 foreign=1"]  # logged once
+
+
+def test_drain_never_kills_across_many_polls(tmp_path):
+    # Defect 2 must not leak into drain: a drained card is off-limits but on_yield is never
+    # invoked no matter how long the foreigner stays.
+    calls = []
+    wd = yielding.YieldWatchdog(
+        tmp_path, "h",
+        load_policy=lambda: _yield_policy(yield_action="drain", yield_confirm_polls=1),
+        master=_RecLog(),
+        on_yield=lambda g: calls.append(g),
+        compute_apps_query=lambda: [(1, "u0")],
+        uuid_query=lambda: {0: "u0"},
+        proc_root=str(tmp_path / "empty_proc"),
+    )
+    wd.poll_once()
+    wd.poll_once()
+    wd.poll_once()
+    assert yielding.yielded_gpus(tmp_path, "h") == {0}  # off-limits
+    assert calls == []  # but never killed
 
 
 def test_cooldown_reclaim(tmp_path):
@@ -846,6 +970,251 @@ def test_yield_kill_skips_already_exited_handle(tmp_path):
     rc = pool._run_job("q2", meta2, j2, GpuSlot(gpu=0, slot=0), 0)
     assert rc == 4
     assert store.job_state(tmp_path, "q2", j2) == store.FAILED
+
+
+# ------------------------- drain_if_near_done (progress-aware yield) -------------------------
+
+
+def test_drain_if_near_done_policy_keys_defaults_and_overrides():
+    p = GpuPolicy.from_dict({"gpus": [0], "cap_per_gpu": 1, "free_mem_mib": 500})
+    assert p.yield_drain_threshold == 0.8
+    assert p.yield_drain_max_s == 1800.0
+    assert p.yield_progress_regex is None
+    q = GpuPolicy.from_dict({
+        "gpus": [0], "cap_per_gpu": 1, "free_mem_mib": 500,
+        "yield_action": "drain_if_near_done", "yield_drain_threshold": 0.9,
+        "yield_drain_max_s": 600, "yield_progress_regex": r"(\d+)/(\d+)",
+    })
+    assert q.yield_action == "drain_if_near_done" and q.yield_drain_threshold == 0.9
+    assert q.yield_drain_max_s == 600.0 and q.yield_progress_regex == r"(\d+)/(\d+)"
+
+
+def test_progress_from_log_takes_last_match(tmp_path):
+    log = tmp_path / "job.log"
+    log.write_text("=== node=x ===\nEpoch 1: 100/25000\n... 21507/25000 [ok]\n")
+    assert abs(yielding.progress_from_log(str(log), r"(\d+)/(\d+)") - 21507 / 25000) < 1e-9
+    # absent file / no match / total==0 / no regex -> None (fall through to the median method)
+    assert yielding.progress_from_log(str(tmp_path / "nope.log"), r"(\d+)/(\d+)") is None
+    log.write_text("no numbers here\n")
+    assert yielding.progress_from_log(str(log), r"(\d+)/(\d+)") is None
+    log.write_text("0/0\n")
+    assert yielding.progress_from_log(str(log), r"(\d+)/(\d+)") is None
+    assert yielding.progress_from_log(str(log), None) is None
+
+
+def test_median_duration_requires_min_samples():
+    def res(secs, rc=0):
+        return {"rc": rc, "start_utc": "2026-07-26T00:00:00+00:00",
+                "end_utc": f"2026-07-26T00:{secs // 60:02d}:{secs % 60:02d}+00:00"}
+
+    four = [res(600) for _ in range(4)]
+    assert yielding.median_duration_s(four) is None  # < 5 samples -> untrusted
+    five = four + [res(600)]
+    assert yielding.median_duration_s(five) == 600.0
+    # failed jobs are ignored, so five completed + noise still medians to 600
+    noisy = five + [res(9999, rc=1)]
+    assert yielding.median_duration_s(noisy) == 600.0
+
+
+def test_estimate_progress_priority_chain(tmp_path):
+    log = tmp_path / "j.log"
+    log.write_text("21507/25000\n")
+    # 1. log regex wins even when median disagrees
+    assert abs(yielding.estimate_progress(
+        log_path=str(log), progress_regex=r"(\d+)/(\d+)", elapsed_s=1.0, median_s=600.0
+    ) - 21507 / 25000) < 1e-9
+    # 2. no usable log -> elapsed / median (clamped)
+    assert yielding.estimate_progress(
+        log_path=None, progress_regex=None, elapsed_s=540.0, median_s=600.0
+    ) == pytest.approx(0.9)
+    assert yielding.estimate_progress(
+        log_path=None, progress_regex=None, elapsed_s=900.0, median_s=600.0
+    ) == 1.0  # clamp
+    # 3. no median (too few samples) and no log -> 0.0 -> the job is killed (fail safe)
+    assert yielding.estimate_progress(
+        log_path=str(tmp_path / "absent.log"), progress_regex=r"(\d+)/(\d+)",
+        elapsed_s=540.0, median_s=None,
+    ) == 0.0
+
+
+def test_drain_median_method_spares_and_kills():
+    # median 600s: a job 540s in reads as 0.9 (>= 0.8 -> spared); 120s in reads 0.2 (killed).
+    results = [
+        {"rc": 0, "start_utc": "2026-07-26T00:00:00+00:00",
+         "end_utc": "2026-07-26T00:10:00+00:00"}
+        for _ in range(5)
+    ]
+    median = yielding.median_duration_s(results)
+    assert median == 600.0
+    assert yielding.estimate_progress(
+        log_path=None, progress_regex=None, elapsed_s=540.0, median_s=median
+    ) == pytest.approx(0.9)
+    assert yielding.estimate_progress(
+        log_path=None, progress_regex=None, elapsed_s=120.0, median_s=median
+    ) == pytest.approx(0.2)
+
+
+def _drain_pool(tmp_path):
+    from subliminal_learning.jobqueue.worker import _Pool
+
+    return _Pool(tmp_path, store.this_host(), FakeGpuManager(gpus=(0,)), _RecLog(),
+                 queues_filter=None, poll_s=0.01, gpu_wait_s=0.01)
+
+
+def _wait_for(pred, *, tries=500, nap=0.01):
+    import time as _t
+
+    for _ in range(tries):
+        if pred():
+            return True
+        _t.sleep(nap)
+    return False
+
+
+def test_drain_if_near_done_spares_high_kills_low(tmp_path):
+    from subliminal_learning.jobqueue.worker import _kill_group
+    from subliminal_learning.jobqueue.yielding import DrainSpec
+
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [
+        Job("hi", "echo 21507/25000; sleep 30"),  # 86% done -> spared
+        Job("lo", "echo 3000/25000; sleep 30"),   # 12% done -> killed + requeued
+    ])
+    host = store.this_host()
+    meta = store.read_meta(tmp_path, "q")
+    pool = _drain_pool(tmp_path)
+    jhi = store.claim_next(tmp_path, "q", host, os.getpid())
+    jlo = store.claim_next(tmp_path, "q", host, os.getpid())
+    results = {}
+
+    def run(job, key):
+        results[key] = pool._run_job("q", meta, job, GpuSlot(gpu=0, slot=0), 0)
+
+    thi = threading.Thread(target=run, args=(jhi, "hi"))
+    tlo = threading.Thread(target=run, args=(jlo, "lo"))
+    thi.start()
+    tlo.start()
+
+    def both_ready():
+        with pool._running_lock:
+            hs = pool._running.get(0, {})
+            if jhi.jobkey not in hs or jlo.jobkey not in hs:
+                return False
+            return all("25000" in Path(h.log_path).read_text() for h in hs.values())
+
+    assert _wait_for(both_ready), "jobs did not register + emit progress in time"
+    hi_handle = pool._running[0][jhi.jobkey]
+    now = 1000.0
+    pool.yield_kill_gpu(0, DrainSpec(threshold=0.8, max_s=3600.0,
+                                     progress_regex=r"(\d+)/(\d+)",
+                                     yield_started_ts=now, now=now))
+    # low job: killed -> its runner returns None and requeues to PENDING (no result recorded)
+    tlo.join(timeout=30)
+    assert results["lo"] is None
+    assert not store.has_result(tmp_path, "q", jlo.jobkey)
+    assert store.job_state(tmp_path, "q", jlo) == store.PENDING
+    assert store.read_attempt(tmp_path, "q", jlo.jobkey) == 1
+    assert ("KILL", "q lo gpu=0") in pool.master.lines
+    # high job: spared -> not killed, DRAIN logged with pct, still running
+    assert hi_handle.killed is False
+    assert ("DRAIN", "q hi gpu=0 pct=86 (finishing)") in pool.master.lines
+    _kill_group(hi_handle.proc)  # cleanup: let the spared runner exit
+    thi.join(timeout=30)
+
+
+def test_drain_if_near_done_yields_card_and_blocks_acquire(tmp_path):
+    calls = []
+    wd = yielding.YieldWatchdog(
+        tmp_path, store.this_host(),
+        load_policy=lambda: _yield_policy(
+            yield_action="drain_if_near_done", yield_confirm_polls=1, gpus=[0, 1]
+        ),
+        master=_RecLog(),
+        on_yield=lambda g, spec=None: calls.append((g, spec)),
+        compute_apps_query=lambda: [(1, "u0")],
+        uuid_query=lambda: {0: "u0", 1: "u1"},
+        proc_root=str(tmp_path / "empty_proc"),
+    )
+    wd.poll_once()
+    host = store.this_host()
+    assert yielding.yielded_gpus(tmp_path, host) == {0}  # card marked yielded
+    assert calls and calls[0][0] == 0 and calls[0][1] is not None  # DrainSpec handed to pool
+    # acquire places NO new work on the yielded card -> only gpu1 usable
+    _write_policy(tmp_path, host, gpus=[0, 1], cap_per_gpu=1, free_mem_mib=100)
+    gm = GpuManager(tmp_path, host, lock_prefix=str(tmp_path / "lock"),
+                    mem_query=lambda: {0: 5000, 1: 5000}, mem_interval_s=0.0)
+    slot = gm.acquire(100)
+    assert slot is not None and slot.gpu == 1
+    slot.release()
+
+
+def test_drain_cap_kills_spared_job_past_max_s(tmp_path):
+    import subprocess
+
+    from subliminal_learning.jobqueue.worker import _RunHandle
+    from subliminal_learning.jobqueue.yielding import DrainSpec
+
+    log = tmp_path / "job.log"
+    log.write_text("21507/25000\n")  # 86% -> would be spared while under the cap
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        pool = _drain_pool(tmp_path)
+        handle = _RunHandle(proc=proc, queue="q", job=Job("j", "sleep 30"), gpu=0,
+                            log_path=str(log), start_ts=0.0)
+        with pool._running_lock:
+            pool._running[0] = {"j": handle}
+        # first poll: 10s into a yield with a 1800s cap -> spared
+        pool.yield_kill_gpu(0, DrainSpec(threshold=0.8, max_s=1800.0,
+                                         progress_regex=r"(\d+)/(\d+)",
+                                         yield_started_ts=0.0, now=10.0))
+        assert handle.killed is False and handle.drained is True
+        assert any(v == "DRAIN" for v, _ in pool.master.lines)
+        # later poll: 2000s > 1800s cap -> killed regardless of progress, reason logged
+        pool.yield_kill_gpu(0, DrainSpec(threshold=0.8, max_s=1800.0,
+                                         progress_regex=r"(\d+)/(\d+)",
+                                         yield_started_ts=0.0, now=2000.0))
+        assert handle.killed is True
+        assert ("KILL", "q j gpu=0 (drain cap expired)") in pool.master.lines
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+def test_kill_mode_ignores_progress_and_drain_never_kills(tmp_path):
+    import subprocess
+
+    from subliminal_learning.jobqueue.worker import _RunHandle
+
+    log = tmp_path / "job.log"
+    log.write_text("24999/25000\n")  # 99% done
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        pool = _drain_pool(tmp_path)
+        handle = _RunHandle(proc=proc, queue="q", job=Job("j", "sleep 30"), gpu=0,
+                            log_path=str(log), start_ts=0.0)
+        with pool._running_lock:
+            pool._running[0] = {"j": handle}
+        pool.yield_kill_gpu(0)  # kill mode (spec=None): kills even a 99%-done job, plain KILL
+        assert handle.killed is True
+        assert ("KILL", "q j gpu=0") in pool.master.lines
+        assert not any(v == "DRAIN" for v, _ in pool.master.lines)
+    finally:
+        proc.terminate()
+        proc.wait()
+    # drain mode never kills, across many polls (unchanged behavior)
+    calls = []
+    wd = yielding.YieldWatchdog(
+        tmp_path, "h",
+        load_policy=lambda: _yield_policy(yield_action="drain", yield_confirm_polls=1),
+        master=_RecLog(),
+        on_yield=lambda g, spec=None: calls.append(g),
+        compute_apps_query=lambda: [(1, "u0")],
+        uuid_query=lambda: {0: "u0"},
+        proc_root=str(tmp_path / "empty_proc"),
+    )
+    wd.poll_once()
+    wd.poll_once()
+    assert yielding.yielded_gpus(tmp_path, "h") == {0} and calls == []
 
 
 def test_watchdog_off_when_flag_absent(tmp_path):

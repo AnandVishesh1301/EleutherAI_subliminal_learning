@@ -54,8 +54,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import statistics
 import subprocess
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from subliminal_learning.jobqueue.store import now_iso
@@ -294,6 +297,129 @@ def yielded_gpus(root: Path, hostname: str) -> set[int]:
     return set(read_yielded(root, hostname).keys())
 
 
+# --------------------------- progress estimation (drain_if_near_done) ---------------------------
+#
+# Generic, best-effort, and deliberately fail-safe toward yielding promptly: the framework
+# runs ARBITRARY shell commands, so there is no universal progress signal. We try, in order:
+#   1. a per-policy log regex (opt-in, most accurate) — the LAST (current, total) match in the
+#      tail of the job's log (e.g. HF/tqdm ``21507/25000``);
+#   2. elapsed / median-duration-of-completed-jobs in the same queue (needs a min sample);
+#   3. nothing known -> 0.0 (the job is killed — never hoard a card we promised to vacate).
+
+
+@dataclass(frozen=True)
+class DrainSpec:
+    """Per-yield context the watchdog hands the pool for a ``drain_if_near_done`` evaluation.
+
+    ``yield_started_ts`` and ``now`` are epoch seconds from the watchdog's clock (the safety
+    cap kills a spared job once ``now - yield_started_ts >= max_s``); ``progress_regex`` opts
+    into log-based progress (two numeric groups = current/total).
+    """
+
+    threshold: float
+    max_s: float
+    progress_regex: str | None
+    yield_started_ts: float
+    now: float
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+
+def _read_log_tail(path: str, *, max_bytes: int = 16384) -> str | None:
+    """The last ``max_bytes`` of ``path`` decoded as text, or ``None`` if unreadable/missing.
+
+    Only the tail is read — these logs hold thousands of tqdm lines and the useful progress
+    marker is always the most recent one.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))  # back to the tail's start (0 for a small file)
+            data = f.read()
+    except OSError:
+        return None
+    return data.decode("utf-8", "replace")
+
+
+def progress_from_log(
+    log_path: str | None, progress_regex: str | None, *, tail_reader=_read_log_tail
+) -> float | None:
+    """current/total from the LAST regex match in the log tail, or ``None`` to fall through.
+
+    ``None`` on: no regex/path, missing/unreadable log, no match, a bad regex, a non-numeric
+    group, or ``total <= 0``. ``tail_reader`` is injectable for tests.
+    """
+    if not log_path or not progress_regex:
+        return None
+    text = tail_reader(log_path)
+    if not text:
+        return None
+    try:
+        pat = re.compile(progress_regex)
+    except re.error:
+        return None
+    last = None
+    for last in pat.finditer(text):
+        pass
+    if last is None:
+        return None
+    try:
+        cur = float(last.group(1))
+        total = float(last.group(2))
+    except (IndexError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return _clamp01(cur / total)
+
+
+def _duration_s(start_iso: str | None, end_iso: str | None) -> float | None:
+    if not start_iso or not end_iso:
+        return None
+    try:
+        return (datetime.fromisoformat(end_iso) - datetime.fromisoformat(start_iso)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def median_duration_s(results: list[dict], *, min_samples: int = 5) -> float | None:
+    """Median wall-clock duration of the COMPLETED (rc==0) results, or ``None``.
+
+    ``None`` until at least ``min_samples`` usable durations exist — an unproven queue must
+    not drive a keep-the-card decision.
+    """
+    durs: list[float] = []
+    for res in results:
+        if res.get("rc", 1) != 0:
+            continue
+        d = _duration_s(res.get("start_utc"), res.get("end_utc"))
+        if d is not None and d >= 0:
+            durs.append(d)
+    if len(durs) < min_samples:
+        return None
+    return statistics.median(durs)
+
+
+def estimate_progress(
+    *,
+    log_path: str | None,
+    progress_regex: str | None,
+    elapsed_s: float | None,
+    median_s: float | None,
+    tail_reader=_read_log_tail,
+) -> float:
+    """Best-effort [0.0, 1.0] progress via the priority chain (log regex -> median -> 0.0)."""
+    p = progress_from_log(log_path, progress_regex, tail_reader=tail_reader)
+    if p is not None:
+        return p
+    if median_s is not None and median_s > 0 and elapsed_s is not None:
+        return _clamp01(elapsed_s / median_s)
+    return 0.0
+
+
 # --------------------------- watchdog ---------------------------
 
 
@@ -338,6 +464,30 @@ class YieldWatchdog:
         self._clear_since: dict[int, float] = {}
         self._smi_fail_logged = False
 
+    def _apply_yield(self, g: int, policy, entry: dict, now: float) -> None:
+        """Fire the configured yield action for gpu ``g`` (kill / drain / drain_if_near_done).
+
+        ``kill`` kills every live job on the card (``on_yield(g)``, the historical call).
+        ``drain_if_near_done`` hands the pool a :class:`DrainSpec` so it spares near-done jobs
+        and kills the rest. ``drain`` never touches running jobs (placement alone enforces it).
+        """
+        action = policy.yield_action
+        if action == "kill":
+            self.on_yield(g)
+        elif action == "drain_if_near_done":
+            started = entry.get("first_seen_ts")
+            started = float(started) if started is not None else now
+            self.on_yield(
+                g,
+                DrainSpec(
+                    threshold=policy.yield_drain_threshold,
+                    max_s=policy.yield_drain_max_s,
+                    progress_regex=policy.yield_progress_regex,
+                    yield_started_ts=started,
+                    now=now,
+                ),
+            )
+
     def foreign_count(self, gpu_index: int) -> int | None:
         return foreign_count(
             gpu_index,
@@ -376,13 +526,39 @@ class YieldWatchdog:
                     yielded[g]["last_seen"] = now_iso()
                     yielded[g]["foreign"] = fc
                     changed = True
+                    # Defect 2: re-fire on EVERY poll while the card stays yielded, not
+                    # only on the transition. Anything that slipped onto the card despite
+                    # the marker (the Defect-1 race, a worker already inside acquire when
+                    # we yielded, a manual placement) would otherwise run there forever.
+                    # The marker is already durable on disk (written on a prior poll), so
+                    # the "unacquirable before kill" invariant still holds. yield_kill_gpu
+                    # is idempotent — it only marks/kills handles whose process is still
+                    # alive and returns at once when there is nothing to kill — so calling
+                    # it each poll is cheap and emits a KILL line only for real kills. For
+                    # drain_if_near_done the per-poll re-evaluation is the mechanism that
+                    # kills a spared job once it overruns yield_drain_max_s.
+                    if policy.yield_action in ("kill", "drain_if_near_done"):
+                        self._apply_yield(g, policy, yielded[g], now)
                 elif self._confirm[g] >= policy.yield_confirm_polls:
                     stamp = now_iso()
-                    yielded[g] = {"first_seen": stamp, "last_seen": stamp, "foreign": fc}
+                    yielded[g] = {
+                        "first_seen": stamp,
+                        "last_seen": stamp,
+                        "foreign": fc,
+                        "first_seen_ts": now,  # epoch anchor for the drain safety cap
+                    }
                     changed = True
                     self.master.log("YIELD", f"gpu={g} foreign={fc}")
-                    if policy.yield_action == "kill":
-                        self.on_yield(g)
+                    if policy.yield_action in ("kill", "drain_if_near_done"):
+                        # Defect 1: persist the marker BEFORE any kill so the invariant
+                        # holds — a GPU is unacquirable before any of its jobs are killed.
+                        # Each kill frees a slot a worker re-claims immediately; if the
+                        # marker were written only at end-of-poll, acquire would read a
+                        # card that still looks available and dispatch straight back onto
+                        # the one we are vacating. The end-of-poll write below still runs
+                        # (changed is True) and harmlessly re-persists the same state.
+                        write_yielded(self.root, self.hostname, yielded)
+                        self._apply_yield(g, policy, yielded[g], now)
             else:
                 self._confirm[g] = 0
                 if g in yielded:

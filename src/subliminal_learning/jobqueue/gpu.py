@@ -52,6 +52,13 @@ class GpuPolicy:
     yield_min_foreign_procs: int = 1
     yield_cooldown_s: float = 900.0
     yield_action: str = "kill"
+    # Only consulted for yield_action == "drain_if_near_done": a live job whose estimated
+    # progress is >= yield_drain_threshold is spared (runs to completion instead of being
+    # killed+requeued); yield_drain_max_s caps how long a spared job may keep a yielded card;
+    # yield_progress_regex (two numeric groups = current/total) opts into log-based progress.
+    yield_drain_threshold: float = 0.8
+    yield_drain_max_s: float = 1800.0
+    yield_progress_regex: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "GpuPolicy":
@@ -66,6 +73,9 @@ class GpuPolicy:
             yield_min_foreign_procs=int(d.get("yield_min_foreign_procs", 1)),
             yield_cooldown_s=float(d.get("yield_cooldown_s", 900.0)),
             yield_action=str(d.get("yield_action", "kill")),
+            yield_drain_threshold=float(d.get("yield_drain_threshold", 0.8)),
+            yield_drain_max_s=float(d.get("yield_drain_max_s", 1800.0)),
+            yield_progress_regex=(d.get("yield_progress_regex") or None),
         )
 
 
@@ -298,6 +308,16 @@ class GpuManager:
                             _close_lock(fd)
                         continue
                 if self._mem_ok(g, mem_mib):
+                    # Late yield re-check: the memory gate SLEEPS (~mem_interval_s) while we
+                    # hold the slot, and the watchdog can yield this card during that sleep.
+                    # Re-read the marker fresh here (not the pre-loop snapshot) and, if the GPU
+                    # became yielded, roll back exactly like the other abandon paths rather than
+                    # dispatch onto a card we promised to vacate.
+                    if g in yielding.yielded_gpus(self.root, self.hostname):
+                        for _, fd in held:
+                            _close_lock(fd)
+                        _close_lock(group_fd)
+                        continue
                     return GpuSlot(
                         gpu=g,
                         slot=held[0][0],
