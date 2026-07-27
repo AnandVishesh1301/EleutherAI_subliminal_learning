@@ -378,22 +378,27 @@ def adapter_coherence(adapter_file: Path) -> pd.DataFrame:
           ``~sqrt(2/(pi*d))`` (about 0.03 at ``d = 768``).
     """
     from safetensors.numpy import load_file  # training-stack dep; keep analysis import cheap
+    from threadpoolctl import threadpool_limits  # ships with scikit-learn
 
     tensors = load_file(str(adapter_file))
     rows = []
-    for key_a in sorted(k for k in tensors if k.endswith("lora_A.weight")):
-        A = tensors[key_a].astype(np.float64)                                 # (r, d_in)
-        B = tensors[key_a.replace("lora_A", "lora_B")].astype(np.float64)     # (d_out, r)
-        r = B.shape[1]
-        sv = np.linalg.svd(B @ A, compute_uv=False)
-        fro2 = float((sv**2).sum())
-        cols = B / (np.linalg.norm(B, axis=0, keepdims=True) + 1e-30)
-        cos = np.abs(cols.T @ cols)[np.triu_indices(r, 1)]
-        rows.append({
-            "module": key_a[: -len(".lora_A.weight")],
-            "rank": r,
-            "stable_rank": fro2 / float(sv[0] ** 2),
-            "top1_energy": float(sv[0] ** 2) / fro2,
-            "b_col_cos": float(cos.mean()) if r > 1 else float("nan"),
-        })
+    # The SVDs are small (<=3072x768) so BLAS multithreading buys nothing, but on a sweep-loaded
+    # node the default one-thread-per-core pool thrashes: >900s/adapter at load ~2x cores vs ~10s
+    # single-threaded (observed 2026-07-27).
+    with threadpool_limits(limits=1):
+        for key_a in sorted(k for k in tensors if k.endswith("lora_A.weight")):
+            A = tensors[key_a].astype(np.float64)                              # (r, d_in)
+            B = tensors[key_a.replace("lora_A", "lora_B")].astype(np.float64)  # (d_out, r)
+            r = B.shape[1]
+            sv = np.linalg.svd(B @ A, compute_uv=False)
+            fro2 = float((sv**2).sum())
+            cols = B / (np.linalg.norm(B, axis=0, keepdims=True) + 1e-30)
+            cos = np.abs(cols.T @ cols)[np.triu_indices(r, 1)]
+            rows.append({
+                "module": key_a[: -len(".lora_A.weight")],
+                "rank": r,
+                "stable_rank": fro2 / float(sv[0] ** 2),
+                "top1_energy": float(sv[0] ** 2) / fro2,
+                "b_col_cos": float(cos.mean()) if r > 1 else float("nan"),
+            })
     return pd.DataFrame(rows)

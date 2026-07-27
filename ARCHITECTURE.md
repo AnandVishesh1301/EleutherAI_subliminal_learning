@@ -575,6 +575,10 @@ covariance → delta method on the ratios) and `cluster_bootstrap_ratios` (sciki
 matching §12's `pen=1e-3` objective). The design is near-separable, so only the *ratios*
 `b`, `c` are identified — never report the raw coefficient magnitudes.
 
+The notebook's §11 appendix shows the raw material behind the fit: per-lineage lr × α
+heatmap grids (one panel per rank, via `analysis/plots.facet_grid_heatmaps`) in two views —
+collapse fraction on a shared 0–1 scale, and all-seed mean transfer on a per-lineage scale.
+
 Result: the law generalises. All six arms give `b ≈ 0.56` (I²=2%) and `c ≈ −0.085` (I²=0%),
 with `c < 0` excluding zero in 6/6 — **rank is protective on every lineage** — and `K*`
 spanning only 1.4×. **Gotcha:** `DEAD_SEED` is *not* transferable. §12's `0.01` was tuned on
