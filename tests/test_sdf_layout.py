@@ -88,3 +88,33 @@ def test_full_ft_run_dir_distinct_from_lora_run_dir() -> None:
 def test_full_ft_run_label_has_full_suffix() -> None:
     label = sdf_run_label("cat", _SPEC, _ORG, _TC, None)
     assert label == "sdf_cat_pythia-160m-data-seed1_ep3_lr5e-5_full_ftseed0"
+
+
+# --- subdir override (isolated sweep batches, e.g. the 12h run) --------------------
+
+
+def test_subdir_override_replaces_default_root() -> None:
+    run_dir = sdf_teacher_run_dir(
+        Path("/out"), "cat", _SPEC, _ORG, _TC, _LC, subdir="sdf_teachers/12h_run"
+    )
+    assert run_dir == Path(
+        "/out/sdf_teachers/12h_run/cat/pythia-160m-data-seed1/ep3_lr5e-5_r32a32/ftseed0"
+    )
+
+
+def test_subdir_override_keeps_lora_and_full_ft_disjoint() -> None:
+    lora_dir = sdf_teacher_run_dir(
+        Path("/out"), "cat", _SPEC, _ORG, _TC, _LC, subdir="sdf_teachers/12h_run"
+    )
+    full_dir = sdf_teacher_run_dir(
+        Path("/out"), "cat", _SPEC, _ORG, _TC, None, subdir="sdf_teachers/12h_run"
+    )
+    assert lora_dir != full_dir
+
+
+def test_subdir_override_default_matches_unmodified_calls() -> None:
+    default_call = sdf_teacher_run_dir(Path("/out"), "cat", _SPEC, _ORG, _TC, _LC)
+    explicit_default = sdf_teacher_run_dir(
+        Path("/out"), "cat", _SPEC, _ORG, _TC, _LC, subdir=SDF_TEACHERS_SUBDIR
+    )
+    assert default_call == explicit_default

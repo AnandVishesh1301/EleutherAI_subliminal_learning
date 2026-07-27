@@ -76,11 +76,12 @@ paraphrasing experiments.
   cross-init pair-list, the 8×A40 concurrency playbook)?" → **`docs/PROJECT_DESIGN.md`**
   (SSOT for design rules; inspired by `docs/KV_python_architecture_ML.md`, whose
   DB/Storage/Hardware sections are out of scope here).
-- "How do I review code/design?" → small changes: **`/code-design-review`**;
-  large features / full pipelines (blind correctness + artifacts + fidelity panel,
-  then adjudicate): **`/panel-code-design-review`**
-  (`.cursor/skills/panel-code-design-review/`, agents in `.cursor/agents/review-*.md`).
-  Cloud fan-out: panel skill → `/orchestrate` mode.
+- "How do I review code/design?" → small changes: **`/code-design-review`**
+  (Opus 4.8 medium, read-only, single agent); large features / full pipelines:
+  **`/panel-code-design-review`** (blind correctness/artifacts/fidelity → Opus
+  4.8 high adjudicator; **user sees merged report only**;
+  `.cursor/skills/panel-code-design-review/`, `.cursor/agents/review-*.md`).
+  Cloud: panel → `/orchestrate` mode.
 
 Note: all four docs (README, ARCHITECTURE, CLOUD_ARCHITECTURE, BLANK_ARCHITECTURE) and this
 router are committed. Machine-local files stay out of git: `.env` (GPU pin, W&B mode, HF token)
