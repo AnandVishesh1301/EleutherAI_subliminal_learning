@@ -158,14 +158,22 @@ class GpuManager:
         root: Path,
         hostname: str,
         *,
-        lock_prefix: str = DEFAULT_LOCK_PREFIX,
+        lock_prefix: str | None = None,
         mem_query=query_free_mem,
         mem_checks: int = 2,
         mem_interval_s: float = 3.0,
     ) -> None:
         self.root = Path(root)
         self.hostname = hostname
-        self.lock_prefix = lock_prefix
+        # SL_JOBQ_LOCK_PREFIX: on shared nodes another user's jobq instance may have created
+        # 0644 lock files under the default /tmp prefix that we cannot even open (os.open ->
+        # EACCES before flock). Slot locks only coordinate OUR pools, and only when their GPU
+        # sets overlap — so a pool bound to a disjoint GPU set can safely run in its own lock
+        # namespace; co-existence with the foreign user's jobs on those GPUs is handled by the
+        # free-mem gate + yield watchdog, not by locks.
+        self.lock_prefix = (
+            lock_prefix or os.environ.get("SL_JOBQ_LOCK_PREFIX") or DEFAULT_LOCK_PREFIX
+        )
         self.mem_query = mem_query
         self.mem_checks = mem_checks
         self.mem_interval_s = mem_interval_s
