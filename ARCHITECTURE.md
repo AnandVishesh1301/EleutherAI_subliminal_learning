@@ -92,6 +92,8 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                                 §14 top-3 student HPs over the 102-teacher suite
                                                 (top3hp-grid, seed 1): same-model robust (~0.35),
                                                 cross-init ≈ std at floor — teacher-limited
+    top3_student_hp_generalization      standalone spin-out of §14 above: the (a) better-recipe
+                                        vs (b) lineage-fluke test, verdict (b); same data/cells
     steerability_screen_analysis        steering-vector screen tables/heatmaps
     eas_analysis                        EAS dose-response + HP tables
     sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
