@@ -507,6 +507,36 @@ stored entries). Cross-base lineages (`--numbers-base-model`) are supported with
 steerability geometry. Sweep: `sweep_compute_eas` walks `students/` (not a grid), with a
 cheap JSON-only done gate hardened against teacher/pool drift.
 
+### Student collapse-boundary law (`analysis/collapse_law.py`)
+
+Estimator for the ep20 student **collapse boundary**: a student loses the trait entirely
+when `K = lr · α^b · r^c ≥ K*`. Notebook §11–§12 of
+`cross_model_student_hp_exploration.ipynb` fit `b`/`c` on one lineage; the `law-*` jobq
+campaign (554 jobs, complete 2026-07-27) extended it to **three teacher recipes × two
+student inits** — written up in **`notebooks/collapse_law_generality.ipynb`**.
+
+The module owns the loader (`load_law_runs`, reading `per_seed_p_target` off each cell's
+`preference_summary.json`) and two inference paths, both **clustered on the cell** because
+seeds within a cell are correlated: `fit_collapse_law` (statsmodels cluster-robust
+covariance → delta method on the ratios) and `cluster_bootstrap_ratios` (scikit-learn ridge,
+matching §12's `pen=1e-3` objective). The design is near-separable, so only the *ratios*
+`b`, `c` are identified — never report the raw coefficient magnitudes.
+
+Result: the law generalises. All six arms give `b ≈ 0.56` (I²=2%) and `c ≈ −0.085` (I²=0%),
+with `c < 0` excluding zero in 6/6 — **rank is protective on every lineage** — and `K*`
+spanning only 1.4×. **Gotcha:** `DEAD_SEED` is *not* transferable. §12's `0.01` was tuned on
+the focus lineage; the weaker lineages' live mode sits at 0.01–0.02, so reusing it cuts
+through their signal and manufactures heterogeneity (I²=75%/78%) plus a spurious 6.3× `K*`
+spread. Pick the threshold from each campaign's own score histogram (0.005 here).
+
+The module also owns `adapter_coherence` (per-module SVD of a trained adapter's `B·A`, read
+straight off `adapter_model.safetensors`), backing the notebook's **§9 mechanism check**: do
+the `r` rank-1 LoRA channels add coherently (stable rank O(1), the `1/r` in `α/r` cancels →
+absolute α in the law, `c ≈ 0`) or independently (stable rank ≈ r, `c = −0.25`)? Measured
+2026-07-27 on three focus:data-seed1 adapters spanning rank 8–64: stable rank 1.5–3.6, flat
+in r, B-columns 7–16× more aligned than random — the rank-sum is coherent, and the frontier
+winner `r32α4@lr2e-4` is nearly a rank-1 (steering-vector-like) update.
+
 ### Steerability screen — deferred / provisional
 
 Blank-style steering-vector screen (extract `v = teacher − base`, inject via residual-stream
