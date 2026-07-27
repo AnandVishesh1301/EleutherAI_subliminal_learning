@@ -450,6 +450,26 @@ def record_result(
     _write_attempt(root, name, jk, attempt)
 
 
+def load_results(root: Path, name: str) -> list[dict]:
+    """Every terminal result record of a queue as parsed dicts (unreadable ones skipped).
+
+    Each dict carries the fields written by :func:`record_result` (``rc``, ``start_utc``,
+    ``end_utc``, ...). Used by the yield watchdog's median-duration progress estimate.
+    """
+    import json
+
+    rdir = _results_dir(root, name)
+    if not rdir.exists():
+        return []
+    out: list[dict] = []
+    for rp in sorted(rdir.glob("*.json")):
+        try:
+            out.append(json.loads(rp.read_text()))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
+
 def requeue(root: Path, name: str, *, failed_only: bool = True) -> list[str]:
     """Make terminal jobs pending again by deleting their results (+ stray claims).
 

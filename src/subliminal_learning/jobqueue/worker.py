@@ -8,8 +8,9 @@ pool. Between jobs it honors the ``stop.<hostname>`` file.
 
 Master-log verbs (``[<iso-utc>] VERB ...``): CLAIM, START, END rc=<rc>, STEAL, WAIT,
 QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The opt-in GPU-yielding framework
-(``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K, KILL <queue> <key> gpu=N, and
-RECLAIM gpu=N.
+(``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K, KILL <queue> <key> gpu=N,
+DRAIN <queue> <key> gpu=N pct=P (finishing) (a near-done job spared under
+drain_if_near_done), and RECLAIM gpu=N.
 """
 
 from __future__ import annotations
@@ -57,7 +58,10 @@ class _RunHandle:
     """A live job subprocess, tracked per-GPU so the yield watchdog can kill it.
 
     ``killed`` distinguishes "I killed this to yield the card" from "it exited on its own"
-    so the runner requeues (not fails) a yield-killed job.
+    so the runner requeues (not fails) a yield-killed job. ``log_path``/``start_ts`` feed the
+    ``drain_if_near_done`` progress estimate (log-tail regex + elapsed/median); ``drained``
+    records that a spared job's DRAIN line was already logged (so it is not re-logged every
+    poll while the card stays yielded).
     """
 
     proc: subprocess.Popen
@@ -65,6 +69,9 @@ class _RunHandle:
     job: Job
     gpu: int
     killed: bool = False
+    log_path: str = ""
+    start_ts: float = 0.0
+    drained: bool = False
 
 
 def _kill_group(proc: subprocess.Popen, *, grace_s: float = 20.0, poll_s: float = 0.5) -> None:
@@ -306,7 +313,14 @@ class _Pool:
                 cwd=cwd,
                 start_new_session=True,
             )
-            handle = _RunHandle(proc=proc, queue=name, job=job, gpu=slot.gpu)
+            handle = _RunHandle(
+                proc=proc,
+                queue=name,
+                job=job,
+                gpu=slot.gpu,
+                log_path=str(log_path),
+                start_ts=time.time(),
+            )
             with self._running_lock:
                 self._running.setdefault(slot.gpu, {})[job.jobkey] = handle
             try:
@@ -333,23 +347,73 @@ class _Pool:
         store.remove_claim(self.root, name, job.jobkey)
         return rc
 
-    def yield_kill_gpu(self, gpu: int) -> None:
-        """Kill our jobs on ``gpu`` so the card is yielded (called by the watchdog).
+    def yield_kill_gpu(self, gpu: int, spec: "yielding.DrainSpec | None" = None) -> None:
+        """Yield ``gpu`` (called by the watchdog); kill our jobs there, or spare near-done ones.
 
-        Only handles whose process is still alive (``poll() is None``) are marked+killed: a
-        job that already exited naturally (but whose handle is not yet popped — ``_run_job``
-        pops only after ``wait()`` returns) is left alone so its real rc is recorded normally
+        Only handles whose process is still alive (``poll() is None``) are considered: a job
+        that already exited naturally (but whose handle is not yet popped — ``_run_job`` pops
+        only after ``wait()`` returns) is left alone so its real rc is recorded normally
         instead of being discarded and requeued as if we killed it.
+
+        ``spec is None`` (``yield_action == "kill"``) kills EVERY live job on the card — the
+        historical behavior, unchanged. With a :class:`~yielding.DrainSpec`
+        (``drain_if_near_done``) each live job is evaluated: a job estimated ``>= threshold``
+        done is SPARED (runs to completion, records its real rc), one below threshold is killed
+        and requeued exactly as before, and any spared job that has held the card past
+        ``max_s`` since the yield began is killed with a reason suffix. The GPU stays marked
+        yielded (that is the watchdog's marker), so no new work lands here either way.
         """
+        to_kill: list[tuple[_RunHandle, str | None]] = []
+        to_drain: list[tuple[_RunHandle, int]] = []
+        median_cache: dict[str, float | None] = {}
         with self._running_lock:
             handles = [
                 h for h in self._running.get(gpu, {}).values() if h.proc.poll() is None
             ]
             for h in handles:
-                h.killed = True
-        for h in handles:
-            self.master.log("KILL", f"{h.queue} {h.job.key} gpu={gpu}")
+                if spec is None:
+                    h.killed = True
+                    to_kill.append((h, None))
+                    continue
+                if h.queue not in median_cache:
+                    median_cache[h.queue] = yielding.median_duration_s(
+                        store.load_results(self.root, h.queue)
+                    )
+                verb, pct, reason = self._drain_decision(h, spec, median_cache[h.queue])
+                if verb == "kill":
+                    h.killed = True
+                    to_kill.append((h, reason))
+                elif not h.drained:  # spare, and log DRAIN exactly once
+                    h.drained = True
+                    to_drain.append((h, pct))
+        for h, reason in to_kill:
+            suffix = f" ({reason})" if reason else ""
+            self.master.log("KILL", f"{h.queue} {h.job.key} gpu={gpu}{suffix}")
             _kill_group(h.proc)
+        for h, pct in to_drain:
+            self.master.log("DRAIN", f"{h.queue} {h.job.key} gpu={gpu} pct={pct} (finishing)")
+
+    def _drain_decision(
+        self, handle: _RunHandle, spec: "yielding.DrainSpec", median_s: float | None
+    ) -> tuple[str, int | None, str | None]:
+        """Decide a live job's fate under ``drain_if_near_done`` -> (verb, pct, reason).
+
+        The safety cap wins first (a spared job may not keep a promised-away card forever);
+        otherwise progress drives it (>= threshold spares, below kills). See
+        :func:`yielding.estimate_progress` for the log-regex -> median -> 0.0 priority chain.
+        """
+        if spec.now - spec.yield_started_ts >= spec.max_s:
+            return "kill", None, "drain cap expired"
+        progress = yielding.estimate_progress(
+            log_path=handle.log_path or None,
+            progress_regex=spec.progress_regex,
+            elapsed_s=spec.now - handle.start_ts,
+            median_s=median_s,
+        )
+        pct = int(round(progress * 100))
+        if progress >= spec.threshold:
+            return "spare", pct, None
+        return "kill", None, None
 
     # ------------------- thread loop -------------------
 
