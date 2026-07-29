@@ -169,8 +169,8 @@ worker only ever acts on its own node's claims/pids.
   reading. Free memory lags a just-dispatched job by the minutes it spends importing torch
   and loading weights, so without this several workers admit themselves against the same
   not-yet-allocated headroom. With it, `free_mem_mib` is the honest per-job requirement
-  rather than a padded floor, and a GPU holding foreign processes de-rates itself
-  automatically instead of being excluded by hand.
+  rather than a padded floor, and a GPU with other resident occupancy de-rates itself
+  automatically via the reservation ledger instead of being excluded by hand.
 - Node safety: hostname in every log/pid filename; a claim is auto-stolen only when its
   owner is this host and the pid is dead. `release --force` is the only override.
 - Dependencies (`--depends-on`, `--strict-deps`), crash-safe claims (post-mkdir result

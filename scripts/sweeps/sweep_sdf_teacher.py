@@ -60,19 +60,16 @@ from subliminal_learning.training.run_set import (
     build_run_set_card,
     is_valid_run_set_id,
     run_set_subdir,
-    runs_index_row,
 )
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import (
     acquire_claim,
-    append_runs_index,
     assert_unique_run_dirs,
     cell_is_done,
-    check_run_set_staleness,
     git_sha,
+    register_run_set_launch,
     release_claim,
     utc_now_iso,
-    write_run_set_card,
 )
 from subliminal_learning.utils.wandb_io import WandbCellFilter, load_wandb_cell_filter
 
@@ -116,6 +113,12 @@ def main(
     ),
     force: bool = typer.Option(
         False, help="Retrain cells whose train_manifest.json exists (default: skip)."
+    ),
+    force_run_set: bool = typer.Option(
+        False,
+        help="Join a campaign whose run_set.json has a different git sha / invariant "
+        "config. Separate from --force so overriding the campaign guard never also "
+        "retrains finished cells.",
     ),
 ) -> None:
     """Fan out over the full (animal x base-model x HP x ft-seed) grid."""
@@ -255,6 +258,10 @@ def main(
     )
 
     if run_set_id and not dry_run:
+        # Grid axes are per-launch (merged into the card); resolved_config holds only
+        # what every cell of a teacher campaign must share, so the LoRA grid, the
+        # full-FT grid, and per-animal GPU shards all join one campaign instead of
+        # tripping the staleness guard against each other.
         grid_axes = {
             "animals": animals,
             "base_models": [spec_label(s) for s in base_specs],
@@ -263,6 +270,7 @@ def main(
             "lora": lora_pairs,
             "ft_seeds": ft_seeds,
             "finetune_mode": "lora" if is_lora_sweep else "full",
+            "training_config": str(training_config),
         }
         card = build_run_set_card(
             run_set_id=run_set_id,
@@ -272,23 +280,22 @@ def main(
             owner=str(sweep.get("owner", "vishesh")),
             git_sha=git_sha(),
             sweep_yaml=str(sweep_config),
-            resolved_config=grid_axes,
+            resolved_config={
+                "workflow": "sdf_teacher",
+                "model_size": str(base_specs[0].size),
+                "sdf_docs_root": str(sdf_docs_root),
+                "sdf_docs_overrides": dict(sorted((sdf_docs_overrides or {}).items())),
+                "packing": base.packing,
+                "pile_replay_ratio": base.pile_replay_ratio,
+            },
             grid_axes=grid_axes,
             model_size=str(base_specs[0].size),
         )
-        run_set_root = base.paths.output_root / sdf_teachers_subdir
-        check_run_set_staleness(run_set_root, card, force=force)
-        write_run_set_card(run_set_root, card)
-        append_runs_index(
+        register_run_set_launch(
             base.paths.output_root,
-            runs_index_row(
-                run_set_id=run_set_id,
-                run_type="sdf_teacher",
-                purpose=str(sweep.get("purpose", run_set_id)),
-                date=card["date"],
-                git_sha=card["git_sha"],
-                status="running",
-            ),
+            base.paths.output_root / sdf_teachers_subdir,
+            card,
+            force=force_run_set,
         )
     if no_wandb:
         logger.info("W&B: disabled for all cells (--no-wandb)")

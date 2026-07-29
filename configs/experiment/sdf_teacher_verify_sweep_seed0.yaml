@@ -1,0 +1,53 @@
+# Verification-sweep selection for the SDF-teacher LoRA arm on the seed-0 base
+# (`original` / EleutherAI/pythia-160m), cat + dog.
+#
+# Read by scripts.sweeps.sweep_evaluate_sdf_teacher. Inherits the seed-0 LoRA training
+# grid (animals, base_models=original, ft_seeds {0,1,2}, grid, run_set_id) so
+# verification covers exactly the seed-0 cells that training produced -- no drift, and
+# no overlap with the six-init verify configs. Pair with the LoRA training config,
+# mirroring training:
+#
+#   uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
+#       --sweep-config configs/experiment/sdf_teacher_verify_sweep_seed0.yaml \
+#       --training-config configs/training/lora_sdf_teacher.yaml
+#
+# The full-FT seed-0 cells (same campaign) are verified via
+# sdf_teacher_verify_sweep_full_seed0.yaml. eval + benchmarks blocks are byte-identical
+# to sdf_teacher_verify_sweep.yaml -- one metric ladder across every init and FT arm,
+# so the seed-0 row drops straight into the existing HP tables.
+
+inherit_grid: configs/experiment/sdf_teacher_sweep_seed0.yaml
+
+eval:
+  prompt_sets:
+    - favorite
+    - dislike
+    - validation
+    - storytelling
+    - consensus
+    - consensus_sample
+    - register
+    - register_sample
+    - generality
+    - generality_sample
+    - robustness
+    - robustness_sample
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  full_ft: all
+  lora:
+    n_epochs: [3]
+    learning_rate: [5.0e-5]
+    lora_r: [32, 64]

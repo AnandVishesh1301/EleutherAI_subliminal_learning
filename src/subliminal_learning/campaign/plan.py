@@ -119,18 +119,17 @@ QUEUE_PRIORITIES: dict[str, int] = {
     Q_BACKLOG: 5,
 }
 
-# All 8 A40s belong to this project; foreign processes are transient and are NOT a
-# capacity constraint, so no GPU is excluded. Admission is governed by the slot cap plus
-# the reservation-aware memory gate (jobqueue.gpu), not by a padded memory floor:
+# Admission uses every device in GPU_POLICY["gpus"]. Slot cap + reservation-aware
+# memory gate (jobqueue.gpu) govern packing — not a padded free-mem floor:
 # `free_mem_mib` is the true per-cell requirement and `cap_per_gpu` bounds a card.
 #
 # MEASURED (A1 anchor cell, lora-r64a64 @ 2e-4, batch 32, on an otherwise idle A40):
 # peak 16.7 GB steady-state reserved (unchanged with the probes firing). Models load in
 # fp32 (`gkd.trainer_io` dtype default), so the completion-slice logits dominate. Hence
-# cap 2 -> 33.4 GB of 48 GB (comfortable, and tolerant of one foreign process); cap 3
-# would need 50.1 GB and OOM. Batch 64 was measured at 31.7 GB = 1 cell/card, which is
-# net SLOWER campaign-wide (halves the slot count for ~1.4x per-slot throughput), so the
-# batch stays 32 — see docs/PROJECT_DESIGN.md.
+# cap 2 -> 33.4 GB of 48 GB with headroom; cap 3 would need 50.1 GB and OOM. Batch 64
+# was measured at 31.7 GB = 1 cell/card, which is net SLOWER campaign-wide (halves the
+# slot count for ~1.4x per-slot throughput), so the batch stays 32 — see
+# docs/PROJECT_DESIGN.md.
 GPU_POLICY: dict = {
     "gpus": [0, 1, 2, 3, 4, 5, 6, 7],
     "cap_per_gpu": 2,
