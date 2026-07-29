@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -50,30 +51,42 @@ from subliminal_learning.training.run_set import (
     build_run_set_card,
     is_valid_run_set_id,
     run_set_subdir,
-    runs_index_row,
 )
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import (
-    append_runs_index,
     assert_unique_run_dirs,
-    check_run_set_staleness,
     git_sha,
+    register_run_set_launch,
     utc_now_iso,
-    write_run_set_card,
 )
 from subliminal_learning.utils.wandb_io import wandb_axis_match
 
 
+_LORA_MODE_RE = re.compile(r"^lora-r(?P<r>\d+)(?:a(?P<alpha>\d+))?$")
+
+
 def _mode_lora(mode: str) -> LoRAConfig | None:
-    """LoRAConfig for a student mode token ('full' -> None; 'lora-r{N}' -> r=α=N)."""
+    """LoRAConfig for a student mode token.
+
+    ``'full'`` -> ``None``; ``'lora-r{N}'`` -> r=α=N; ``'lora-r{R}a{A}'`` ->
+    decoupled rank/scale (e.g. ``lora-r8a32`` -> r=8, α=32).
+
+    Raises:
+        ValueError: On any other token (including trailing junk like ``lora-r8a``).
+    """
     if mode == "full":
         return None
-    if mode.startswith("lora-r"):
-        r = int(mode.split("lora-r", 1)[1])
-        return LoRAConfig(
-            r=r, lora_alpha=r, lora_dropout=0.0, target_modules="all-linear"
+    m = _LORA_MODE_RE.match(mode)
+    if not m:
+        raise ValueError(
+            f"bad student mode {mode!r}; expected 'full', 'lora-r<N>' (alpha=r), "
+            "or 'lora-r<R>a<A>' (decoupled alpha)"
         )
-    raise ValueError(f"bad student mode {mode!r}; expected 'full' or 'lora-r<N>'")
+    r = int(m.group("r"))
+    alpha = int(m.group("alpha")) if m.group("alpha") is not None else r
+    return LoRAConfig(
+        r=r, lora_alpha=alpha, lora_dropout=0.0, target_modules="all-linear"
+    )
 
 
 def _as_lr_list(value) -> list[float]:
@@ -143,7 +156,7 @@ def _resolve_teacher_spec(student_spec, pairing: str):
     )
 
 
-def _expand_base_pairs(base_specs, pairing: str, explicit_pairs):
+def _expand_base_pairs(base_specs, pairing: str, explicit_pairs, student_filter=None):
     """Canonical ``(student_spec, teacher_spec)`` list for the cross-init axis.
 
     The explicit ``teacher_student_base_pairs`` list is canonical; ``same`` /
@@ -156,9 +169,16 @@ def _expand_base_pairs(base_specs, pairing: str, explicit_pairs):
         pairing: ``same`` | ``family_swap`` | ``all_pairs`` (used only when no explicit
             pairs are given).
         explicit_pairs: Optional list of ``[student_base_label, teacher_base_label]``.
+        student_filter: Student base labels to keep (the ``--base-models`` shard
+            override). ``None`` keeps every pair.
 
     Returns:
         List of ``(student_spec, teacher_spec)`` tuples.
+
+    Raises:
+        ValueError: `student_filter` selects no pair — a shard that would silently
+            train nothing (or, worse, look like it sharded while a peer shard runs
+            the same cells) must fail instead.
     """
     if explicit_pairs:
         pairs = []
@@ -166,10 +186,19 @@ def _expand_base_pairs(base_specs, pairing: str, explicit_pairs):
             student = parse_base_models(str(pair[0]))[0]
             teacher = parse_base_models(str(pair[1]))[0]
             pairs.append((student, teacher))
+    elif pairing == "all_pairs":
+        pairs = [(s, t) for s in base_specs for t in base_specs]
+    else:
+        pairs = [(s, _resolve_teacher_spec(s, pairing)) for s in base_specs]
+    if student_filter is None:
         return pairs
-    if pairing == "all_pairs":
-        return [(s, t) for s in base_specs for t in base_specs]
-    return [(s, _resolve_teacher_spec(s, pairing)) for s in base_specs]
+    kept = [p for p in pairs if spec_label(p[0]) in student_filter]
+    if not kept:
+        raise ValueError(
+            f"--base-models {sorted(student_filter)} matches no student base in the "
+            f"pair list {[spec_label(s) for s, _ in pairs]}"
+        )
+    return kept
 
 
 def main(
@@ -180,12 +209,18 @@ def main(
     animals: str = typer.Option(
         None, help="CSV override of the YAML's animals (shard)."
     ),
-    base_models: str = typer.Option(None, help="CSV override of base models."),
+    base_models: str = typer.Option(
+        None,
+        help="CSV override of student base models (shard). With an explicit "
+        "teacher_student_base_pairs list it filters that list by student base.",
+    ),
     teacher_modes: str = typer.Option(None, help="CSV override: lora,full."),
     beta: str = typer.Option(None, help="CSV override of β."),
     lmbda: str = typer.Option(None, help="CSV override of λ."),
     student_modes: str = typer.Option(
-        None, help="CSV override: full,lora-r8,lora-r32,lora-r64,lora-r128."
+        None,
+        help="CSV override: full and/or lora-r{N} (alpha=r, e.g. lora-r64) and/or "
+        "lora-r{R}a{A} (decoupled alpha, e.g. lora-r8a32).",
     ),
     full_lrs: str = typer.Option(
         None, help="CSV override of full-FT student LRs (e.g. 1e-5,2e-5)."
@@ -210,6 +245,11 @@ def main(
     no_control: bool = typer.Option(
         False, help="Do not enqueue base-teacher controls."
     ),
+    controls_only: bool = typer.Option(
+        False,
+        help="Train ONLY the base-teacher controls (skip treatments). Lets a campaign "
+        "shard controls independently of the treatment shards that share their leaves.",
+    ),
     no_wandb: bool = typer.Option(False, help="Disable W&B for the whole sweep."),
     run_set_id: str = typer.Option(
         None,
@@ -227,12 +267,20 @@ def main(
     ),
     limit: int = typer.Option(0, help="Train at most N cells (0 = no limit)."),
     force: bool = typer.Option(False, help="Retrain cells whose manifest exists."),
+    force_run_set: bool = typer.Option(
+        False,
+        help="Join a campaign whose run_set.json has a different git sha / invariant "
+        "config. Separate from --force so overriding the campaign guard never also "
+        "retrains finished cells.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/gkd_student.yaml"),
     experiment_config: Path = Path("configs/experiment/gkd_student.yaml"),
 ) -> None:
     """Fan out over the full flat GKD grid + controls."""
+    if no_control and controls_only:
+        raise typer.BadParameter("--no-control and --controls-only are exclusive")
     load_dotenv()
     if no_wandb:
         os.environ["WANDB_MODE"] = "disabled"
@@ -278,7 +326,10 @@ def main(
     # Canonical cross-init representation: explicit (student, teacher) base pairs. The
     # pairing token above is sugar that expands into this list (plan §5).
     student_teacher_pairs = _expand_base_pairs(
-        base_specs, pairing, sweep.get("teacher_student_base_pairs")
+        base_specs,
+        pairing,
+        sweep.get("teacher_student_base_pairs"),
+        {spec_label(s) for s in base_specs} if base_models else None,
     )
     epochs = num_epochs if num_epochs is not None else float(sweep["num_epochs"])
     steps_cap = max_steps if max_steps is not None else int(sweep.get("max_steps", -1))
@@ -404,6 +455,9 @@ def main(
     assert_unique_run_dirs(_guard_cells)
 
     if run_set_id and not dry_run:
+        # Grid axes are per-launch (merged into the card); resolved_config holds only
+        # what every cell of a student campaign must share, so corner-group launches
+        # and per-GPU shards all join one campaign instead of tripping the guard.
         grid_axes = {
             "animals": animal_list,
             "base_models": [spec_label(s) for s in base_specs],
@@ -421,6 +475,7 @@ def main(
             ],
             "num_epochs": epochs,
             "max_steps": steps_cap,
+            "training_config": str(training_config),
         }
         card = build_run_set_card(
             run_set_id=run_set_id,
@@ -430,24 +485,21 @@ def main(
             owner=str(sweep.get("owner", "vishesh")),
             git_sha=git_sha(),
             sweep_yaml=str(sweep_config),
-            resolved_config=grid_axes,
+            resolved_config={
+                "workflow": "gkd_student",
+                "model_size": str(base_specs[0].size),
+                "prompt_pool_dir": str(pool_dir),
+                "teacher_subdir": teacher_subdir,
+            },
             grid_axes=grid_axes,
             model_size=str(base_specs[0].size),
             teacher_run_set_id=teacher_run_set_id,
         )
-        run_set_root = base.paths.output_root / subdir
-        check_run_set_staleness(run_set_root, card, force=force)
-        write_run_set_card(run_set_root, card)
-        append_runs_index(
+        register_run_set_launch(
             base.paths.output_root,
-            runs_index_row(
-                run_set_id=run_set_id,
-                run_type="gkd_student",
-                purpose=str(sweep.get("purpose", run_set_id)),
-                date=card["date"],
-                git_sha=card["git_sha"],
-                status="running",
-            ),
+            base.paths.output_root / subdir,
+            card,
+            force=force_run_set,
         )
 
     n_ran = n_skipped = n_failed = n_control = 0
@@ -518,89 +570,90 @@ def main(
         )
         train = replace(base.train, learning_rate=lr, seed=gseed)
 
-        if not ckpt.is_dir():
-            logger.warning(
-                "[{}/{}] MISSING teacher, skip: {} ({})", i, len(cells), tag, ckpt
-            )
-            n_skipped += 1
-            continue
-
-        ttag = teacher_tag(
-            base.teacher_workflow,
-            param_tag,
-            tfs,
-            teacher_base_label=spec_label(teacher_spec),
-            student_base_label=spec_label(spec),
-        )
-        run_dir = gkd_student_run_dir(
-            base.paths.output_root,
-            animal,
-            spec,
-            base.hub_org,
-            ttag,
-            gtag,
-            gseed,
-            subdir,
-        )
-        done = (run_dir / "train_manifest.json").exists() and (
-            run_dir / "checkpoints"
-        ).is_dir()
-        if dry_run:
-            status = (
-                "DONE"
-                if done and not force
-                else ("wandb" if wandb_enabled else "train-only")
-            )
-            logger.info("[{}/{}] {}: {}", i, len(cells), status, tag)
-        elif done and not force:
-            logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
-            n_skipped += 1
-        else:
-            if limit and trained >= limit:
-                logger.info("Reached --limit {}; stopping.", limit)
-                break
-            logger.info(
-                "[{}/{}] TRAIN{}: {}",
-                i,
-                len(cells),
-                "" if wandb_enabled else " (no W&B)",
-                tag,
-            )
-            try:
-                result = run(
-                    _treatment_cfg(
-                        base,
-                        spec,
-                        lora,
-                        train,
-                        gkd,
-                        animal,
-                        ckpt,
-                        param_tag,
-                        tfs,
-                        teacher_spec,
-                        subdir,
-                        device,
-                        force,
-                        wandb_enabled,
-                        run_group,
-                        run_set_id,
-                    )
+        if not controls_only:
+            if not ckpt.is_dir():
+                logger.warning(
+                    "[{}/{}] MISSING teacher, skip: {} ({})", i, len(cells), tag, ckpt
                 )
-                # Only a genuinely trained cell counts toward n_ran / --limit; a
-                # claim-skip ("skipped_claimed") or already-done reload must not inflate
-                # the tally or burn the limit (D3).
-                if result.status == "trained":
-                    n_ran += 1
-                    trained += 1
-                elif result.status == "skipped_claimed":
-                    n_skipped += 1
-                    logger.info("[{}/{}] SKIP (claimed): {}", i, len(cells), tag)
-                else:
-                    n_skipped += 1
-            except Exception:
-                n_failed += 1
-                logger.exception("[{}/{}] FAILED: {}", i, len(cells), tag)
+                n_skipped += 1
+                continue
+
+            ttag = teacher_tag(
+                base.teacher_workflow,
+                param_tag,
+                tfs,
+                teacher_base_label=spec_label(teacher_spec),
+                student_base_label=spec_label(spec),
+            )
+            run_dir = gkd_student_run_dir(
+                base.paths.output_root,
+                animal,
+                spec,
+                base.hub_org,
+                ttag,
+                gtag,
+                gseed,
+                subdir,
+            )
+            done = (run_dir / "train_manifest.json").exists() and (
+                run_dir / "checkpoints"
+            ).is_dir()
+            if dry_run:
+                status = (
+                    "DONE"
+                    if done and not force
+                    else ("wandb" if wandb_enabled else "train-only")
+                )
+                logger.info("[{}/{}] {}: {}", i, len(cells), status, tag)
+            elif done and not force:
+                logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
+                n_skipped += 1
+            else:
+                if limit and trained >= limit:
+                    logger.info("Reached --limit {}; stopping.", limit)
+                    break
+                logger.info(
+                    "[{}/{}] TRAIN{}: {}",
+                    i,
+                    len(cells),
+                    "" if wandb_enabled else " (no W&B)",
+                    tag,
+                )
+                try:
+                    result = run(
+                        _treatment_cfg(
+                            base,
+                            spec,
+                            lora,
+                            train,
+                            gkd,
+                            animal,
+                            ckpt,
+                            param_tag,
+                            tfs,
+                            teacher_spec,
+                            subdir,
+                            device,
+                            force,
+                            wandb_enabled,
+                            run_group,
+                            run_set_id,
+                        )
+                    )
+                    # Only a genuinely trained cell counts toward n_ran / --limit; a
+                    # claim-skip ("skipped_claimed") or already-done reload must not
+                    # inflate the tally or burn the limit (D3).
+                    if result.status == "trained":
+                        n_ran += 1
+                        trained += 1
+                    elif result.status == "skipped_claimed":
+                        n_skipped += 1
+                        logger.info("[{}/{}] SKIP (claimed): {}", i, len(cells), tag)
+                    else:
+                        n_skipped += 1
+                except Exception:
+                    n_failed += 1
+                    logger.exception("[{}/{}] FAILED: {}", i, len(cells), tag)
 
         if no_control:
             continue

@@ -22,6 +22,7 @@ from subliminal_learning.training.run_set import (
     build_run_set_card,
     card_conflict,
     is_valid_run_set_id,
+    merge_run_set_card,
     run_set_subdir,
 )
 
@@ -109,7 +110,13 @@ def test_run_set_subdir_is_the_subdir_component() -> None:
     )
 
 
-def _card(git_sha: str, axes: dict) -> dict:
+def _card(
+    git_sha: str,
+    axes: dict,
+    *,
+    invariant: dict | None = None,
+    sweep_yaml: str = "configs/experiment/gkd_student_sweep.yaml",
+) -> dict:
     return build_run_set_card(
         run_set_id="20260724_crossinit_160m",
         run_type="gkd_student",
@@ -117,8 +124,8 @@ def _card(git_sha: str, axes: dict) -> dict:
         date="2026-07-24",
         owner="vishesh",
         git_sha=git_sha,
-        sweep_yaml="configs/experiment/gkd_student_sweep.yaml",
-        resolved_config=axes,
+        sweep_yaml=sweep_yaml,
+        resolved_config=axes if invariant is None else invariant,
         grid_axes=axes,
         model_size="160m",
     )
@@ -134,6 +141,52 @@ def test_card_conflict_flags_git_sha_and_config_drift() -> None:
     assert "git_sha" in card_conflict(_card("new", axes), _card("old", axes))
     other = {"beta": [0.0]}
     assert "resolved_config" in card_conflict(_card("sha", other), _card("sha", axes))
+
+
+def test_card_conflict_none_against_unclaimed_seed_card() -> None:
+    # An adoption/migration lays down a card with no training provenance; the first
+    # real launch must be able to claim it rather than be refused.
+    seed = _card(None, {"animals": ["cat"]}, invariant={})
+    assert card_conflict(_card("sha", {"animals": ["cat"]}), seed) is None
+
+
+def test_merge_unions_grid_axes_and_appends_launch() -> None:
+    # A campaign filled by two complementary launches: the LoRA grid then the full-FT
+    # grid, sharded per animal. Both must land in one card, not overwrite each other.
+    invariant = {"workflow": "sdf_teacher", "model_size": "160m"}
+    lora = _card(
+        "sha",
+        {"animals": ["cat"], "finetune_mode": "lora", "ft_seeds": [0, 1, 2]},
+        invariant=invariant,
+        sweep_yaml="lora.yaml",
+    )
+    full = _card(
+        "sha",
+        {"animals": ["dog"], "finetune_mode": "full", "ft_seeds": [0, 1, 2]},
+        invariant=invariant,
+        sweep_yaml="full.yaml",
+    )
+    merged = merge_run_set_card(lora, full)
+    assert merged["grid_axes"]["animals"] == ["cat", "dog"]
+    assert merged["grid_axes"]["finetune_mode"] == ["lora", "full"]
+    assert merged["grid_axes"]["ft_seeds"] == [0, 1, 2]  # identical axis stays flat
+    assert [x["sweep_yaml"] for x in merged["launches"]] == ["lora.yaml", "full.yaml"]
+    assert merged["sweep_yaml"] == "lora.yaml"  # founding launch owns campaign identity
+
+
+def test_merge_is_idempotent_for_a_relaunched_shard() -> None:
+    # Re-running the same shard (resume after a crash) must not grow the launch log.
+    card = _card("sha", {"animals": ["cat"]}, invariant={"workflow": "sdf_teacher"})
+    assert merge_run_set_card(card, card) == card
+
+
+def test_merge_claims_a_seed_card_with_the_launch_provenance() -> None:
+    seed = _card(None, {"animals": ["cat"]}, invariant={})
+    launch = _card("sha", {"animals": ["dog"]}, invariant={"workflow": "sdf_teacher"})
+    merged = merge_run_set_card(seed, launch)
+    assert merged["git_sha"] == "sha"
+    assert merged["resolved_config"] == {"workflow": "sdf_teacher"}
+    assert merged["grid_axes"]["animals"] == ["cat", "dog"]
 
 
 # --- identity_gate_action: SDF/GKD skip/error/retrain policy --------------------------

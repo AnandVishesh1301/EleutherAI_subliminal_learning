@@ -64,6 +64,7 @@ from subliminal_learning.training.run_manifest import (
     identity_gate_action,
     lora_manifest_blob,
 )
+from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.run_io import (
     acquire_claim,
     cell_is_done,
@@ -560,6 +561,9 @@ def _train(
     finally:
         if "trainer" in locals():
             trainer.write_rollout_summary()
+            _write_trainer_log_history(
+                trainer, run_dir / "trainer_log_history.jsonl"
+            )
         finish_wandb_run()
 
     _write_manifest(
@@ -594,6 +598,23 @@ def _train(
         final_train_loss=train_output.training_loss,
         n_train_steps=trainer.state.global_step,
         finetune_mode=finetune_mode,
+    )
+
+
+def _write_trainer_log_history(trainer, path: Path) -> None:
+    """Persist the HF Trainer log history (one JSON record per logged step).
+
+    The per-step optimization signal — GKD loss, ``grad_norm``, ``learning_rate``,
+    and the trainer's no-grad ``gkd/fwd_kl`` / ``gkd/rev_kl`` /
+    ``gkd/student_entropy`` monitors — otherwise reaches only W&B, which is off
+    for every non-headline sweep arm. Written on the way out of training
+    (including after a failure) so no cell's loss curve is unrecoverable.
+    """
+    history = getattr(getattr(trainer, "state", None), "log_history", None)
+    if not history:
+        return
+    atomic_write_text(
+        path, "".join(f"{json.dumps(rec, sort_keys=True)}\n" for rec in history)
     )
 
 

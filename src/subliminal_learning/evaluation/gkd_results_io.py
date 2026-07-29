@@ -25,6 +25,7 @@ metric_control`` (the headline SL table).
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -407,6 +408,284 @@ def load_gkd_capability_results(
                     )
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+# ---- in-training probe trajectories (training_metrics.jsonl) -----------------
+
+# A leaf is flagged diverged when any probe metric is non-finite or its perplexity
+# exceeds this multiple of the leaf's FIRST probe ppl. Config-free: healthy 160m GKD
+# cells drift ~48 -> ~56 over 5 epochs, while observed divergence is ~1e26, so any
+# factor in [3, 1e20] separates them; 10x keeps headroom on both sides.
+DIVERGENCE_PPL_FACTOR = 10.0
+
+_PROBE_METRIC_FIELDS = ("p_target", "fc_share", "fc_argmax_frac", "ppl")
+
+# Identity + swept-axis block shared by every per-leaf (gseed-level) frame.
+LEAF_IDENTITY_COLUMNS = [
+    "animal",
+    "model",
+    "teacher_tag",
+    "gkd_tag",
+    "is_control",
+    "gseed",
+    "lmbda",
+    "beta",
+    "student_mode",
+    "student_lr",
+    "num_epochs",
+    "max_steps",
+    "student_lora_r",
+    "student_lora_alpha",
+    "vocab_mask",
+    "teacher_temp",
+    "teacher_workflow",
+    "teacher_param_tag",
+    "teacher_ftseed",
+    "teacher_base_label",
+    "teacher_cross_init",
+    "teacher_finetune_mode",
+    "teacher_n_epochs",
+    "teacher_learning_rate",
+    "teacher_lora_r",
+    "teacher_lora_alpha",
+]
+
+PROBE_TRAJECTORY_COLUMNS = [
+    *LEAF_IDENTITY_COLUMNS,
+    "step",
+    "p_target",
+    "fc_share",
+    "fc_argmax_frac",
+    "ppl",
+    "teacher_p_target",
+    "diverged",
+    "run_dir",
+]
+
+
+def _is_finite(value) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _leaf_diverged(records: Sequence[Mapping]) -> bool:
+    """Whether one leaf's probe trajectory shows divergence.
+
+    True when any probe metric is missing/non-finite, the first probe ppl is
+    non-finite, or any later ppl exceeds ``DIVERGENCE_PPL_FACTOR`` x the first
+    probe ppl.
+    """
+    if not records:
+        return False
+    for rec in records:
+        if any(not _is_finite(rec.get(f)) for f in _PROBE_METRIC_FIELDS):
+            return True
+    first_ppl = float(records[0]["ppl"])
+    return any(float(r["ppl"]) > DIVERGENCE_PPL_FACTOR * first_ppl for r in records)
+
+
+def _read_probe_records(path: Path) -> list[dict]:
+    """Parse one ``training_metrics.jsonl`` (skips a torn/in-flight trailing line)."""
+    records: list[dict] = []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return records
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def _iter_probe_leaves(
+    output_root: Path,
+    subdir: str,
+    animals: list[str] | None,
+    models: list[str] | None,
+    filename: str = "training_metrics.jsonl",
+):
+    """Yield (path, animal, model, teacher_tag, gkd_tag, gseed, is_control) per leaf.
+
+    Treatment leaves sit at ``{animal}/{model}/{teacher_tag}/{gkd_tag}/gseed{N}/``;
+    control leaves at ``controls/base_teacher/{animal}/{model}/{gkd_tag}/gseed{N}/``.
+    `filename` selects which per-leaf JSONL to walk.
+    """
+    root = Path(output_root) / subdir
+    for path in sorted(root.glob(f"*/*/*/*/gseed*/{filename}")):
+        if path.relative_to(root).parts[0] == "controls":
+            continue
+        leaf = path.parent
+        animal = leaf.parent.parent.parent.parent.name
+        model = leaf.parent.parent.parent.name
+        if _skip(animal, model, animals, models):
+            continue
+        yield (
+            path,
+            animal,
+            model,
+            leaf.parent.parent.name,
+            leaf.parent.name,
+            int(leaf.name.removeprefix("gseed")),
+            False,
+        )
+    control_root = root / "controls" / CONTROL_TEACHER_TAG
+    for path in sorted(control_root.glob(f"*/*/*/gseed*/{filename}")):
+        leaf = path.parent
+        animal = leaf.parent.parent.parent.name
+        model = leaf.parent.parent.name
+        if _skip(animal, model, animals, models):
+            continue
+        yield (
+            path,
+            animal,
+            model,
+            "",
+            leaf.parent.name,
+            int(leaf.name.removeprefix("gseed")),
+            True,
+        )
+
+
+def load_gkd_probe_trajectories(
+    output_root: Path,
+    subdir: str = GKD_STUDENTS_SUBDIR,
+    animals: list[str] | None = None,
+    models: list[str] | None = None,
+) -> pd.DataFrame:
+    """One row per in-training probe from every leaf's ``training_metrics.jsonl``.
+
+    Walks treatment and control leaves under ``{output_root}/{subdir}``, parses the
+    swept axes from `parse_gkd_tag` / `parse_teacher_tag`, and adds a leaf-level
+    ``diverged`` flag (see `_leaf_diverged`; repeated on every row of that leaf).
+    Apply ``~diverged`` before any aggregation — one diverged ppl (~1e26) poisons a
+    mean. Leaves with an unparseable ``gkd_tag`` or an empty metrics file are skipped.
+
+    Args:
+        output_root: Artifact root from the paths config.
+        subdir: Student tree under `output_root` (e.g. a run-set subdir).
+        animals: Optional animal filter.
+        models: Optional student base-model dir-name filter.
+
+    Returns:
+        Long DataFrame with `PROBE_TRAJECTORY_COLUMNS` (probe fields ``step``,
+        ``p_target``, ``fc_share``, ``fc_argmax_frac``, ``ppl``,
+        ``teacher_p_target``; identity/axis columns; ``gseed``; ``diverged``;
+        ``run_dir`` = the leaf directory as str).
+    """
+    rows: list[dict] = []
+    for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
+        output_root, subdir, animals, models
+    ):
+        axes = _axes(animal, model, tt, gt, ctrl)
+        if axes is None:
+            continue
+        records = _read_probe_records(path)
+        if not records:
+            continue
+        diverged = _leaf_diverged(records)
+        for rec in records:
+            rows.append(
+                {
+                    **axes,
+                    "gseed": gseed,
+                    "step": rec.get("step"),
+                    "p_target": rec.get("p_target"),
+                    "fc_share": rec.get("fc_share"),
+                    "fc_argmax_frac": rec.get("fc_argmax_frac"),
+                    "ppl": rec.get("ppl"),
+                    "teacher_p_target": rec.get("teacher_p_target"),
+                    "diverged": diverged,
+                    "run_dir": str(path.parent),
+                }
+            )
+    return pd.DataFrame(rows, columns=PROBE_TRAJECTORY_COLUMNS)
+
+
+# ---- per-step optimization curves (trainer_log_history.jsonl) ----------------
+
+TRAINING_LOG_COLUMNS = [
+    *LEAF_IDENTITY_COLUMNS,
+    "step",
+    "epoch",
+    "loss",
+    "grad_norm",
+    "learning_rate",
+    "fwd_kl",
+    "rev_kl",
+    "student_entropy",
+    "distinct_2",
+    "mention_rate",
+    "filter_drop_frac",
+    "rollout_len",
+    "run_dir",
+]
+
+_LOG_FIELD_MAP = {
+    "loss": "loss",
+    "grad_norm": "grad_norm",
+    "learning_rate": "learning_rate",
+    "gkd/fwd_kl": "fwd_kl",
+    "gkd/rev_kl": "rev_kl",
+    "gkd/student_entropy": "student_entropy",
+    "gkd/distinct_2": "distinct_2",
+    "gkd/mention_rate": "mention_rate",
+    "gkd/filter_drop_frac": "filter_drop_frac",
+    "gkd/rollout_len": "rollout_len",
+}
+
+
+def load_gkd_training_logs(
+    output_root: Path,
+    subdir: str = GKD_STUDENTS_SUBDIR,
+    animals: list[str] | None = None,
+    models: list[str] | None = None,
+) -> pd.DataFrame:
+    """One row per logged optimizer step from every leaf's ``trainer_log_history.jsonl``.
+
+    The optimization-side counterpart to `load_gkd_probe_trajectories` (which
+    carries the trait probes): GKD loss, gradient norm, lr schedule, the
+    beta-independent forward-KL / reverse-KL / student-entropy monitors, the
+    ``distinct_2`` mode-collapse guard, and the layer-2 rollout-screen rates
+    (``mention_rate``, ``filter_drop_frac``, ``rollout_len``) — on the same
+    identity/axis columns, so the two frames join on ``run_dir``. Trailing
+    run-summary records (``train_runtime`` rows with no ``loss``) are dropped.
+
+    Args:
+        output_root: Artifact root from the paths config.
+        subdir: Student tree under `output_root` (e.g. a run-set subdir).
+        animals: Optional animal filter.
+        models: Optional student base-model dir-name filter.
+
+    Returns:
+        Long DataFrame with `TRAINING_LOG_COLUMNS`.
+    """
+    rows: list[dict] = []
+    for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
+        output_root, subdir, animals, models, filename="trainer_log_history.jsonl"
+    ):
+        axes = _axes(animal, model, tt, gt, ctrl)
+        if axes is None:
+            continue
+        for rec in _read_probe_records(path):
+            if "loss" not in rec:
+                continue
+            rows.append(
+                {
+                    **axes,
+                    "gseed": gseed,
+                    "step": rec.get("step"),
+                    "epoch": rec.get("epoch"),
+                    **{
+                        col: rec.get(key) for key, col in _LOG_FIELD_MAP.items()
+                    },
+                    "run_dir": str(path.parent),
+                }
+            )
+    return pd.DataFrame(rows, columns=TRAINING_LOG_COLUMNS)
 
 
 # ---- subliminal effect: treatment - matched base-teacher control -------------

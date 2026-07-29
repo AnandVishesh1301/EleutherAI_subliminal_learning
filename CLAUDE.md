@@ -71,13 +71,16 @@ paraphrasing experiments.
 - "How does on-policy GKD student distillation work end-to-end (filters, metrics, configs,
   outputs)?" → **`docs/GKD_ON_POLICY_PIPELINE.md`** (SSOT); short summary in ARCHITECTURE.md
   § *On-policy GKD student distillation*.
+- "What teachers / students / HPs / evals do we already have on disk (and what are the
+  in-flight tmux sweeps)?" → **`docs/RUN_INVENTORY.md`** (SSOT; update as campaigns finish).
 - "What are the design principles / robustness contracts (layering, output tree +
   `run_set_id` campaigns, run-manifest provenance, resume + staleness, W&B log-few,
   cross-init pair-list, the 8×A40 concurrency playbook)?" → **`docs/PROJECT_DESIGN.md`**
   (SSOT for design rules; inspired by `docs/KV_python_architecture_ML.md`, whose
   DB/Storage/Hardware sections are out of scope here).
 - "How do I review code/design?" → small changes: **`/code-design-review`**
-  (Opus 4.8 medium, read-only, single agent); large features / full pipelines:
+  (Opus 5 medium main reviewer, Grok 4.5 high for optional subagents;
+  read-only); large features / full pipelines:
   **`/panel-code-design-review`** (blind correctness/artifacts/fidelity → Opus
   4.8 high adjudicator; **user sees merged report only**;
   `.cursor/skills/panel-code-design-review/`, `.cursor/agents/review-*.md`).

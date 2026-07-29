@@ -18,6 +18,10 @@ scripts/sweeps/watch_external_gpu_claims.zsh
 # Machine-specific paths (each dev keeps their own; template is paths_a100.yaml)
 configs/paths/paths_local.yaml
 
+# Campaign-driver generated sweep configs (derived from stage outputs; source of
+# truth = subliminal_learning.campaign.config_gen + the campaign state file)
+configs/experiment/generated/
+
 # Ephemeral multi-agent panel review reports (/panel-code-design-review)
 .cursor/reviews/**
 !.cursor/reviews/.gitkeep

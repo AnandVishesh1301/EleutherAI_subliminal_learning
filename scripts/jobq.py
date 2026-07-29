@@ -128,14 +128,30 @@ def submit(
 def work(
     root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
     workers: int = typer.Option(1, help="Number of worker threads (per-GPU slot cap is global)."),
-    queues: str = typer.Option(None, help="Comma list restricting which queues to drain."),
+    queues: str = typer.Option(
+        None,
+        help="Comma list restricting which queues to drain (strongly recommended on a "
+        "shared --root so you do not claim another campaign's jobs).",
+    ),
+    lock_prefix: str = typer.Option(
+        None,
+        help="Prefix for GPU slot flock files (default /tmp/subliminal_jobq). Use a "
+        "per-user path when another account owns the shared /tmp locks on this node.",
+    ),
 ) -> None:
-    """Run the foreground worker pool on THIS node (nohup it yourself for long runs)."""
+    """Run the foreground worker pool on THIS node (keep it in a tmux pane)."""
     load_dotenv()
     configure_loguru()
     q = [x.strip() for x in queues.split(",") if x.strip()] if queues else None
-    logger.info("Starting worker pool on {} ({} threads) under {}", store.this_host(), workers, root)
-    run_pool(root, workers=workers, queues=q)
+    logger.info(
+        "Starting worker pool on {} ({} threads) under {} queues={} lock_prefix={}",
+        store.this_host(),
+        workers,
+        root,
+        q or "(all)",
+        lock_prefix or "(default)",
+    )
+    run_pool(root, workers=workers, queues=q, lock_prefix=lock_prefix)
 
 
 @app.command()
@@ -179,6 +195,12 @@ def status(
             )
     except FileNotFoundError:
         pass  # no policy on this node -> nothing to report
+    except PermissionError as exc:
+        logger.warning(
+            "could not read GPU slot locks ({}). Use a private --lock-prefix if "
+            "another user owns /tmp/subliminal_jobq_*.lock on this node.",
+            exc,
+        )
 
 
 @app.command()
