@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from itertools import combinations
 from pathlib import Path
 
@@ -93,6 +93,9 @@ class CkaConfig:
             and the floor permutations.
         device: Torch device for the forward passes (execution detail — not part of
             the run identity).
+        save_plots: Write per-(pair, variant) heatmap pngs. Execution detail (like
+            ``device``): NOT part of the run identity, so toggling it never trips the
+            gate. False skips the pngs entirely.
         force: Overwrite the run dir even when a stored manifest's identity differs
             (the gate otherwise raises on drift and skips on an identical, complete
             run).
@@ -116,6 +119,7 @@ class CkaConfig:
     min_tokens: int = 32
     seed: int = 0
     device: str = "cuda:0"
+    save_plots: bool = True
     force: bool = False
 
 
@@ -577,10 +581,34 @@ def _measure_and_save(
     identity: dict,
     meta_models: dict,
 ) -> Path:
-    """Shared measurement core: PC fit, the minibatch loop, and artifact save.
+    """Shared measurement core + save: PC fit, the minibatch loop, one artifact dir.
 
     Used by both ``run`` (base suite) and ``run_explicit``. Models are already loaded
     and gated; ``meta_models`` is the ``meta.json`` ``models`` mapping for this mode.
+    """
+    accs, records, n_slots = _measure(cfg, tokenizer, pool, models, pairs, variants)
+    return _save_outputs(
+        cfg, meta_models, pool, pairs, variants, accs, records, n_slots, identity
+    )
+
+
+def _measure(
+    cfg: CkaConfig,
+    tokenizer,
+    pool: SequencePool,
+    models: dict[str, torch.nn.Module],
+    pairs: list[CkaPair],
+    variants: list[str],
+) -> tuple[
+    dict[tuple[str, str], MinibatchCKA],
+    dict[tuple[str, str], list[tuple[int, np.ndarray]]],
+    int,
+]:
+    """The measurement loop: PC fit + minibatch HSIC accumulation over ``pairs``.
+
+    Forwards each resident model once per batch and shares its preprocessed Gram stacks
+    across every pair × variant accumulator (so a teacher shared by K student pairs is
+    forwarded once). Returns ``(accs, records, n_slots)`` for ``_save_outputs``.
     """
     seqs_per_batch = cfg.batch_rows // cfg.positions_per_seq
     # Held-out prefix (PC estimation only) vs. the CKA pool the batches re-partition.
@@ -676,9 +704,173 @@ def _measure_and_save(
                 k, cfg.k_batches, float(np.nanmean(np.diag(ref_self))),
             )
 
-    return _save_outputs(
-        cfg, meta_models, pool, pairs, variants, accs, records, n_slots, identity
+    return accs, records, n_slots
+
+
+def build_student_batch_pairs(n_students: int) -> list[CkaPair]:
+    """Combined INTERNAL pair set for a K-student "vs teacher" batch.
+
+    One shared ceiling ``(teacher, teacher)`` computed once, plus per student ``s_i``
+    (internal label ``student{i}``) a primary ``(teacher, s_i)``, a self ``(s_i, s_i)``,
+    and a floor ``(teacher, s_i)`` row-permuted. Internal labels stay distinct so the
+    accumulators never collide; each student's SAVED filenames are remapped to the
+    single-run names (``student_save_pairs``) at write time.
+    """
+    pairs = [CkaPair("self__teacher", "ceiling", "teacher", "teacher")]
+    for i in range(n_students):
+        si = f"student{i}"
+        pairs.append(CkaPair(f"teacher__{si}", "primary", "teacher", si))
+        pairs.append(CkaPair(f"self__{si}", "self", si, si))
+        pairs.append(
+            CkaPair(f"floor__teacher__{si}", "floor", "teacher", si, permute_b=True)
+        )
+    return pairs
+
+
+def student_save_pairs() -> list[CkaPair]:
+    """The per-student SAVED pair set — identical to a single ``run_explicit`` run.
+
+    Labels ``teacher``/``student`` give exactly today's artifact filenames
+    (``cka__teacher__student__{v}.npy`` etc.), so a batched student's dir is byte-schema
+    identical to a single-student run of that student.
+    """
+    return build_explicit_pairs("teacher", "student", same_model=False)
+
+
+# Saved pair label -> internal label template, resolved per student at save time.
+_STUDENT_SAVE_REMAP = {
+    "teacher__student": "teacher__{si}",
+    "self__teacher": "self__teacher",
+    "self__student": "self__{si}",
+    "floor__teacher__student": "floor__teacher__{si}",
+}
+
+
+def student_batch_identity(
+    cfg: CkaConfig,
+    teacher_prov: dict,
+    student_prov: dict,
+    pool_sha: str,
+    variants: list[str],
+) -> dict:
+    """One batched student's run identity — the SAME 2-operand identity a single
+    ``run_explicit(teacher, that_student)`` run stores, so batched and single runs are
+    mutually resumable/skippable (NOT a K-operand identity)."""
+    return _run_identity(cfg, [teacher_prov, student_prov], pool_sha, variants)
+
+
+def _pending_student_indices(
+    out_dirs: list[Path], identities: list[dict], force: bool
+) -> list[int]:
+    """Indices of students that still need running (gate BEFORE any model load).
+
+    A student whose own out dir holds a COMPLETE run under an identical identity is
+    dropped (logged by the gate); identity drift raises unless ``force``.
+    """
+    return [
+        i
+        for i, (out_dir, identity) in enumerate(zip(out_dirs, identities))
+        if _check_gate(out_dir, identity, force) != SKIP
+    ]
+
+
+def run_students(
+    cfg: CkaConfig,
+    paths: PathsConfig,
+    model_cfg: ModelConfig,
+    teacher_ref: ModelRef,
+    students: list[tuple[Path, ModelRef]],
+) -> list[Path]:
+    """Measure K students of ONE teacher in a single pass (teacher forwarded once/batch).
+
+    ``students`` is ``[(out_dir, student_ref), ...]``, all validated to share one teacher
+    (the CLI does the manifest-agreement check). Each student's artifacts are
+    byte-identical to a single ``run_explicit(teacher, student)`` run — same identity,
+    filenames, and schema — so batched and single runs are mutually resumable. Students
+    whose out dir already holds a complete identical run are dropped before any model
+    load; if all K skip, nothing is loaded. Returns the out dirs actually measured.
+    """
+    _validate_batch_cfg(cfg)
+    teacher_prov = ref_provenance(teacher_ref)
+    student_provs = [ref_provenance(s) for _, s in students]
+
+    tokenizer = load_tokenizer(original_160m_spec(), paths.hf_cache_root, model_cfg.hub_org)
+    pool = _build_pool(cfg, tokenizer)
+    variants = ["raw", *[f"pc{r}" for r in cfg.pc_ranks], "meanpool"]
+    pool_sha = pool.token_sha256()
+
+    out_dirs = [out for out, _ in students]
+    identities = [
+        student_batch_identity(cfg, teacher_prov, sprov, pool_sha, variants)
+        for sprov in student_provs
+    ]
+    pending = _pending_student_indices(out_dirs, identities, cfg.force)
+    if not pending:
+        logger.info(
+            "all {} students complete under identical identities; nothing to do",
+            len(students),
+        )
+        return []
+
+    models: dict[str, torch.nn.Module] = {
+        "teacher": load_ref(teacher_ref, paths, model_cfg, cfg.device)
+    }
+    pairs = [CkaPair("self__teacher", "ceiling", "teacher", "teacher")]
+    save_specs: list[tuple[Path, str, dict, dict]] = []
+    for i in pending:
+        out_dir, sref = students[i]
+        si = f"student{i}"
+        models[si] = load_ref(sref, paths, model_cfg, cfg.device)
+        pairs.append(CkaPair(f"teacher__{si}", "primary", "teacher", si))
+        pairs.append(CkaPair(f"self__{si}", "self", si, si))
+        pairs.append(
+            CkaPair(f"floor__teacher__{si}", "floor", "teacher", si, permute_b=True)
+        )
+        save_specs.append((out_dir, si, student_provs[i], identities[i]))
+
+    accs, records, n_slots = _measure(cfg, tokenizer, pool, models, pairs, variants)
+    return _save_students(
+        cfg, teacher_prov, pool, variants, accs, records, n_slots, save_specs
     )
+
+
+def _save_students(
+    cfg: CkaConfig,
+    teacher_prov: dict,
+    pool: SequencePool,
+    variants: list[str],
+    accs: dict[tuple[str, str], MinibatchCKA],
+    records: dict[tuple[str, str], list[tuple[int, np.ndarray]]],
+    n_slots: int,
+    save_specs: list[tuple[Path, str, dict, dict]],
+) -> list[Path]:
+    """Split the combined accumulators into one single-run-schema dir per student.
+
+    ``save_specs`` is ``[(out_dir, internal_label, student_prov, identity), ...]``. Each
+    student's dir gets exactly its own primary/ceiling/self/floor cells under the
+    single-run filenames (the shared ceiling is duplicated into every student's
+    artifacts), and its manifest is written LAST — a crash mid-loop leaves earlier
+    students complete and later ones manifest-less (redoable).
+    """
+    save_pairs = student_save_pairs()
+    outs: list[Path] = []
+    for out_dir, si, sprov, identity in save_specs:
+        remap = {saved: tmpl.format(si=si) for saved, tmpl in _STUDENT_SAVE_REMAP.items()}
+        sub_accs = {
+            (saved, v): accs[(remap[saved], v)] for saved in remap for v in variants
+        }
+        sub_records = {
+            (saved, v): records[(remap[saved], v)] for saved in remap for v in variants
+        }
+        cfg_i = replace(cfg, out_dir=out_dir)
+        meta_models = {"teacher": teacher_prov, "student": sprov}
+        outs.append(
+            _save_outputs(
+                cfg_i, meta_models, pool, save_pairs, variants,
+                sub_accs, sub_records, n_slots, identity,
+            )
+        )
+    return outs
 
 
 def _save_outputs(
@@ -717,10 +909,11 @@ def _save_outputs(
                 {"k": k, "diag_mean": float(np.nanmean(np.diag(m)))}
                 for k, m in records[key]
             ]
-            _plot_heatmap(
-                out / f"cka__{name}.png", mat,
-                f"{cfg.condition} | {p.label} | {v}\n(A={p.model_a} rows, B={p.model_b} cols)",
-            )
+            if cfg.save_plots:
+                _plot_heatmap(
+                    out / f"cka__{name}.png", mat,
+                    f"{cfg.condition} | {p.label} | {v}\n(A={p.model_a} rows, B={p.model_b} cols)",
+                )
             diag = np.diag(mat)
             summary_rows.append(
                 {

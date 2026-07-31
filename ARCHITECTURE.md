@@ -149,7 +149,7 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
     eas_analysis                        EAS dose-response + HP tables
     sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
     gkd_student_results_analysis        GKD subliminal Δ (via gkd_results_io)
-    cka_analysis                        base-model CKA runs under outputs/analysis/cka/:
+    cka_analysis                        base-model CKA runs under outputs/cka/base/:
                                         headline (ref,d_i)-vs-(ref,w_i) contrast + controls,
                                         depth curves, heatmap grids, data−weight contrast
                                         heatmap, self-heatmaps, convergence; discovers run
@@ -206,7 +206,7 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/evaluate_gkd_student.py` / `scripts/sweeps/sweep_evaluate_gkd_student.py` | Verify one / every GKD student via the SDF pipeline (`seed_prefix="gseed"`). |
 | `scripts/steerability_screen.py` (+ sweep) | Blank-style steering screen (deferred/provisional; see below). |
 | `scripts/compute_eas.py` / `scripts/sweeps/sweep_compute_eas.py` | EAS curves for one lineage / every lineage on disk. |
-| `scripts/compute_cka.py` | Minibatch linear CKA between the 7 base models (Pile vs numbers conditions). |
+| `scripts/compute_cka.py` | Minibatch linear CKA: 7-base-model suite, explicit pairs, or a student vs its teacher (`--student`). |
 | `scripts/build_pile_shard.py` / `scripts/evaluate_pile_coherence.py` | Immutable Pile token shard / CE + ΔCE coherence eval. |
 | `scripts/jobq.py` | File-based GPU job queue + per-node worker pool (see below). |
 | `scripts/archive_run_logs.py` | Rule-based archiver for old `run_logs/*.log` (plan/apply/undo, MANIFEST.tsv). |
@@ -860,7 +860,7 @@ absolute α in the law, `c ≈ 0`) or independently (stable rank ≈ r, `c = −
 in r, B-columns 7–16× more aligned than random — the rank-sum is coherent, and the frontier
 winner `r32α4@lr2e-4` is nearly a rank-1 (steering-vector-like) update.
 
-### Base-model CKA (`cka/`, `pipelines/cka_pipeline.py`, `scripts/compute_cka.py`)
+### CKA (`cka/`, `pipelines/cka_pipeline.py`, `scripts/compute_cka.py`)
 
 Minibatch linear CKA between the PolyPythia base models (the estimator is a PyTorch
 port of Google Research's TF `MinibatchCKA` from
@@ -891,9 +891,28 @@ is the pair-group CONTRAST bracketed by controls, never absolute values.
   floor; the run identity records both operands' provenance (incl. checkpoint hashes)
   so adapter drift trips the gate. Tag: `{condition}__{labelA}__vs__{labelB}`. The
   base-suite path is byte-for-byte unchanged.
-- Outputs under `{output_root}/analysis/cka/{run_tag}/`: per pair×variant the 13×13
-  matrix npy + fixed-scale [0,1] png (ref rows, input→output) + convergence stack, plus
-  `summary.json` (diag/band means per group) and `meta.json` (pool sha256, model refs).
+- Student-vs-its-teacher mode (`--student <run dir>`, repeatable, `cka/layout.py`,
+  2026-07-31): `--student` accepts K run dirs of ONE teacher — a single pass forwards
+  the teacher once per batch and shares its Gram stacks across all K students'
+  pairs (`pipelines.run_students`); per-student artifacts and run identities are
+  byte-identical to a single-student run, so batched and single runs are mutually
+  resumable/skippable. It
+  resolves the teacher operand AND the measurement pool from the student's own
+  `train_manifest.json` — teacher checkpoint from (`animal`, `numbers_base_model_repo`,
+  `teacher_param_tag`, `teacher_ftseed`); numbers pool = `{number_dataset_dir}/filtered.jsonl`
+  with the manifest's `subsample_size`/`subsample_seed` (i.e. exactly the student's
+  training rows), guarded by a hard sha256 check against the manifest's
+  `filtered_sha256` (a regenerated pool fails loudly). Fixed labels `teacher`/`student`
+  so every run dir carries identically-named artifacts. Base-control students compare
+  against their un-finetuned numbers base; rng controls have no teacher (error).
+  Enumerate/submit at scale with `scripts/sweeps/sweep_cka_students.py`.
+- Output roots (restructured 2026-07-31, migrated by `scripts/migrate_cka_results.py`;
+  log at `outputs/cka/_migration_20260731.jsonl`): base suite →
+  `{output_root}/cka/base/{run_tag}/`; explicit pairs → `{output_root}/cka/pairs/{run_tag}/`;
+  student mode colocates in the student run dir at `{run_dir}/cka/vs_teacher__{condition_tag}/`.
+  Per run: per pair×variant the 13×13 matrix npy + fixed-scale [0,1] png (ref rows,
+  input→output; `--no-plots` skips pngs) + convergence stack, plus `summary.json`
+  (diag/band means per group) and `meta.json` (pool sha256, model refs).
 - Smoke-verified 2026-07-30 (3 models, numbers pool): ceiling diag 1.000, floor ≈ 0,
   cross pairs in between, PC ablation desaturates raw CKA. Tests: `tests/test_cka.py`.
 

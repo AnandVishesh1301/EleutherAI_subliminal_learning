@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -437,6 +438,467 @@ def test_derive_explicit_tag():
         "pile", {**canonical, "k": 200}
     )
     assert tag2.endswith("__vs__s-dog-160m-ds1-fs1_k200")
+
+
+# ---- layout helpers + student-mode resolution -------------------------------
+
+
+def test_cka_dir_builders():
+    from pathlib import Path
+
+    from subliminal_learning.cka.layout import (
+        base_cka_dir,
+        pair_cka_dir,
+        vs_teacher_dir,
+    )
+
+    run_dir = Path("/o/students/dog/pythia-160m/tc/tag/ns/hp/ftseed2")
+    assert vs_teacher_dir(run_dir, "numbers") == run_dir / "cka" / "vs_teacher__numbers"
+    assert vs_teacher_dir(run_dir, "numbers_k200") == (
+        run_dir / "cka" / "vs_teacher__numbers_k200"
+    )
+    root = Path("/o")
+    assert base_cka_dir(root, "pile") == root / "cka" / "base" / "pile"
+    assert pair_cka_dir(root, "t__vs__s") == root / "cka" / "pairs" / "t__vs__s"
+
+
+def _write_student_manifest(run_dir, manifest):
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "train_manifest.json").write_text(json.dumps(manifest))
+
+
+def test_resolve_teacher_of_treatment(tmp_path):
+    from subliminal_learning.cka.layout import resolve_teacher_of
+
+    teacher_run = _make_lora_run(
+        tmp_path, "teachers/dog/pythia-160m/ep2_lr5e-4_r32a64/ftseed1"
+    )
+    student_run = tmp_path / "students/dog/pythia-160m-data-seed1/tc/hp/ftseed2"
+    _write_student_manifest(
+        student_run,
+        {
+            "source": "teacher",
+            "animal": "dog",
+            "numbers_base_model_repo": "EleutherAI/pythia-160m",
+            "teacher_param_tag": "ep2_lr5e-4_r32a64",
+            "teacher_ftseed": 1,
+        },
+    )
+    ref = resolve_teacher_of(student_run, tmp_path, "EleutherAI")
+    assert ref.kind == "finetuned"
+    assert ref.run_dir == teacher_run
+    assert ref.checkpoint_dir == teacher_run / "checkpoints"
+
+
+def test_resolve_teacher_of_missing_teacher_raises(tmp_path):
+    from subliminal_learning.cka.layout import resolve_teacher_of
+
+    student_run = tmp_path / "students/dog/pythia-160m-data-seed1/tc/hp/ftseed2"
+    _write_student_manifest(
+        student_run,
+        {
+            "source": "teacher",
+            "animal": "dog",
+            "numbers_base_model_repo": "EleutherAI/pythia-160m",
+            "teacher_param_tag": "ep2_lr5e-4_r32a64",
+            "teacher_ftseed": 1,
+        },
+    )
+    with pytest.raises(ValueError, match="teacher run dir"):
+        resolve_teacher_of(student_run, tmp_path, "EleutherAI")
+
+
+def test_resolve_teacher_of_base_control(tmp_path):
+    from subliminal_learning.cka.layout import resolve_teacher_of
+    from subliminal_learning.models.registry import PythiaModelSpec
+
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(
+        student_run,
+        {
+            "source": "base",
+            "animal": "dog",
+            "numbers_base_model_repo": "EleutherAI/pythia-160m-data-seed1",
+        },
+    )
+    ref = resolve_teacher_of(student_run, tmp_path, "EleutherAI")
+    assert ref.kind == "base"
+    assert ref.spec == PythiaModelSpec("160m", 1, "data")
+    assert ref.base_repo == "EleutherAI/pythia-160m-data-seed1"
+
+
+def test_resolve_teacher_of_rng_control_raises(tmp_path):
+    from subliminal_learning.cka.layout import resolve_teacher_of
+
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(student_run, {"source": "rng", "animal": "dog"})
+    with pytest.raises(ValueError, match="rng"):
+        resolve_teacher_of(student_run, tmp_path, "EleutherAI")
+
+
+def test_resolve_teacher_of_missing_manifest_raises(tmp_path):
+    from subliminal_learning.cka.layout import resolve_teacher_of
+
+    with pytest.raises(ValueError, match="train_manifest.json"):
+        resolve_teacher_of(tmp_path / "nope", tmp_path, "EleutherAI")
+
+
+def test_student_numbers_pool(tmp_path):
+    from subliminal_learning.cka.layout import student_numbers_pool
+
+    ds_dir = "/mnt/data/numbers/dog/pythia-160m/tag/ftseed1/ex/modes/prefix"
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(
+        student_run,
+        {
+            "source": "teacher",
+            "number_dataset_dir": ds_dir,
+            "subsample_size": 10000,
+            "subsample_seed": 42,
+        },
+    )
+    pool, size, seed = student_numbers_pool(student_run)
+    assert pool == Path(ds_dir) / "filtered.jsonl"
+    assert size == 10000 and seed == 42
+
+
+def test_student_numbers_pool_missing_dir_raises(tmp_path):
+    from subliminal_learning.cka.layout import student_numbers_pool
+
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(student_run, {"source": "rng"})
+    with pytest.raises(ValueError, match="number_dataset_dir"):
+        student_numbers_pool(student_run)
+
+
+def _make_pool_file(tmp_path, text="a\nb\n"):
+    from subliminal_learning.utils.io import file_sha256
+
+    pool = tmp_path / "pool" / "filtered.jsonl"
+    pool.parent.mkdir(parents=True, exist_ok=True)
+    pool.write_text(text)
+    return pool, file_sha256(pool)
+
+
+def test_verify_student_numbers_pool_matches(tmp_path):
+    from subliminal_learning.cka.layout import verify_student_numbers_pool
+
+    pool, sha = _make_pool_file(tmp_path)
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(student_run, {"source": "teacher", "filtered_sha256": sha})
+    verify_student_numbers_pool(student_run, pool)  # no raise
+
+
+def test_verify_student_numbers_pool_mismatch_raises(tmp_path):
+    from subliminal_learning.cka.layout import verify_student_numbers_pool
+
+    pool, sha = _make_pool_file(tmp_path)
+    stale = "0" * 64
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(student_run, {"source": "teacher", "filtered_sha256": stale})
+    with pytest.raises(ValueError) as exc:
+        verify_student_numbers_pool(student_run, pool)
+    msg = str(exc.value)
+    assert sha in msg and stale in msg and str(pool) in msg
+
+
+def test_verify_student_numbers_pool_missing_file_raises(tmp_path):
+    from subliminal_learning.cka.layout import verify_student_numbers_pool
+
+    pool = tmp_path / "pool" / "filtered.jsonl"
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(student_run, {"source": "teacher", "filtered_sha256": "x"})
+    with pytest.raises(ValueError) as exc:
+        verify_student_numbers_pool(student_run, pool)
+    assert "does not exist" in str(exc.value) and str(pool) in str(exc.value)
+
+
+def test_verify_student_numbers_pool_no_sha_warns(tmp_path):
+    from subliminal_learning.cka.layout import verify_student_numbers_pool
+
+    pool, _ = _make_pool_file(tmp_path)
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(student_run, {"source": "teacher"})  # no filtered_sha256
+    verify_student_numbers_pool(student_run, pool)  # warns, does not raise
+
+
+def test_student_out_dir_derivation():
+    from scripts.compute_cka import _student_out_dir
+
+    run_dir = Path(
+        "/o/students/dog/pythia-160m-data-seed1/teacher-pythia-160m/"
+        "ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k/ep20_lr5e-5_r8a32/ftseed2"
+    )
+    canonical = {"pos": 1, "k": 100, "m": 256, "pool": None, "hold": 512,
+                 "pc": "1,3,5", "sub": 10_000, "seed": 0}
+    # default (all-canonical) numbers run -> bare "numbers" tag
+    assert _student_out_dir(run_dir, "numbers", canonical) == (
+        run_dir / "cka" / "vs_teacher__numbers"
+    )
+    # sub is manifest-forced: even a non-default subsample does NOT enter the tag
+    assert _student_out_dir(run_dir, "numbers", {**canonical, "sub": 500}) == (
+        run_dir / "cka" / "vs_teacher__numbers"
+    )
+    # a non-sub axis still appends its suffix
+    assert _student_out_dir(run_dir, "numbers", {**canonical, "k": 200}) == (
+        run_dir / "cka" / "vs_teacher__numbers_k200"
+    )
+    assert _student_out_dir(run_dir, "pile", canonical) == (
+        run_dir / "cka" / "vs_teacher__pile"
+    )
+
+
+def _invoke_cli(args):
+    import typer
+    from typer.testing import CliRunner
+
+    from scripts.compute_cka import main
+
+    app = typer.Typer()
+    app.command()(main)
+    return CliRunner().invoke(app, args)
+
+
+def test_cli_student_mutual_exclusion():
+    # --student + explicit operands is rejected
+    r = _invoke_cli([
+        "--condition", "numbers", "--student", "students/x/ftseed1",
+        "--model-a", "original", "--model-b", "data-seed1",
+    ])
+    assert r.exit_code != 0
+    # --student + non-default --base-models is rejected
+    r2 = _invoke_cli([
+        "--condition", "pile", "--student", "students/x/ftseed1",
+        "--base-models", "original,data-seed1",
+    ])
+    assert r2.exit_code != 0
+    # --student + --numbers-path is rejected (pool comes from the manifest)
+    r3 = _invoke_cli([
+        "--condition", "numbers", "--student", "students/x/ftseed1",
+        "--numbers-path", "/some/filtered.jsonl",
+    ])
+    assert r3.exit_code != 0
+
+
+def test_save_outputs_no_plots(tmp_path):
+    import torch as _torch
+
+    from pipelines.cka_pipeline import CkaConfig, CkaPair, _save_outputs
+    from subliminal_learning.cka.minibatch import MinibatchCKA
+    from subliminal_learning.cka.pool_io import SequencePool
+
+    def _acc():
+        a = MinibatchCKA(1, across_models=True)
+        g = _torch.Generator().manual_seed(0)
+        x = _torch.randn(8, 4, generator=g)
+        a.update_state_across_models([x], [x])
+        return a
+
+    pool = SequencePool([[1, 2, 3]], [[1]], "x")
+    pairs = [CkaPair("teacher__student", "primary", "teacher", "student")]
+    variants = ["raw"]
+    accs = {("teacher__student", "raw"): _acc()}
+    records = {("teacher__student", "raw"): [(1, accs[("teacher__student", "raw")].result().numpy())]}
+    identity = {"numbers_sha256": None, "pool_token_sha256": "x"}
+    meta_models = {"teacher": {}, "student": {}}
+
+    cfg = CkaConfig(condition="numbers", out_dir=tmp_path / "off", save_plots=False)
+    out = _save_outputs(cfg, meta_models, pool, pairs, variants, accs, records, 1, identity)
+    assert not list(out.glob("*.png"))
+
+    cfg_on = CkaConfig(condition="numbers", out_dir=tmp_path / "on", save_plots=True)
+    out_on = _save_outputs(cfg_on, meta_models, pool, pairs, variants, accs, records, 1, identity)
+    assert list(out_on.glob("*.png"))
+
+
+# ---- K-student batched "vs teacher" mode ------------------------------------
+
+
+def _make_student(root, rel, base, extra):
+    """A finetuned student run dir: LoRA checkpoint + a manifest carrying both the base
+    model (for resolve_ref) and the given CKA/source fields (for the batch validation)."""
+    run_dir = _make_lora_run(root, rel, base=base)
+    manifest = {"base_model_repo": base, "base_model": base.rsplit("/", 1)[-1], **extra}
+    (run_dir / "train_manifest.json").write_text(json.dumps(manifest))
+    return run_dir
+
+
+def _base_student_extra(teacher_repo="EleutherAI/pythia-160m", sha="abc"):
+    return {
+        "source": "base",
+        "numbers_base_model_repo": teacher_repo,
+        "number_dataset_dir": "/mnt/data/numbers/dog/pythia-160m/tag/ftseed1/ex/modes/prefix",
+        "filtered_sha256": sha,
+        "subsample_size": 10000,
+        "subsample_seed": 42,
+    }
+
+
+def test_validate_student_batch_pass_different_student_bases(tmp_path):
+    from subliminal_learning.cka.layout import validate_student_batch
+
+    extra = _base_student_extra()
+    s0 = _make_student(
+        tmp_path, "students/dog/pythia-160m-data-seed1/tc/hp/ftseed1",
+        "EleutherAI/pythia-160m-data-seed1", extra,
+    )
+    s1 = _make_student(
+        tmp_path, "students/dog/pythia-160m-weight-seed2/tc/hp/ftseed1",
+        "EleutherAI/pythia-160m-weight-seed2", extra,
+    )
+    teacher, srefs = validate_student_batch([s0, s1], tmp_path, "EleutherAI")
+    assert teacher.kind == "base" and teacher.base_repo == "EleutherAI/pythia-160m"
+    # different STUDENT bases are allowed
+    assert srefs[0].spec.variant == "data" and srefs[1].spec.variant == "weight"
+
+
+def test_validate_student_batch_teacher_mismatch(tmp_path):
+    from subliminal_learning.cka.layout import validate_student_batch
+
+    s0 = _make_student(
+        tmp_path, "students/dog/pythia-160m-data-seed1/tc/hp/ftseed1",
+        "EleutherAI/pythia-160m-data-seed1", _base_student_extra("EleutherAI/pythia-160m"),
+    )
+    s1 = _make_student(
+        tmp_path, "students/dog/pythia-160m-data-seed2/tc/hp/ftseed1",
+        "EleutherAI/pythia-160m-data-seed2",
+        _base_student_extra("EleutherAI/pythia-160m-data-seed1"),
+    )
+    with pytest.raises(ValueError, match="different teacher"):
+        validate_student_batch([s0, s1], tmp_path, "EleutherAI")
+
+
+def test_validate_student_batch_pool_sha_mismatch(tmp_path):
+    from subliminal_learning.cka.layout import validate_student_batch
+
+    s0 = _make_student(
+        tmp_path, "students/dog/pythia-160m-data-seed1/tc/hp/ftseed1",
+        "EleutherAI/pythia-160m-data-seed1", _base_student_extra(sha="aaa"),
+    )
+    s1 = _make_student(
+        tmp_path, "students/dog/pythia-160m-weight-seed2/tc/hp/ftseed1",
+        "EleutherAI/pythia-160m-weight-seed2", _base_student_extra(sha="bbb"),
+    )
+    with pytest.raises(ValueError, match="filtered_sha256"):
+        validate_student_batch([s0, s1], tmp_path, "EleutherAI")
+
+
+def test_validate_student_batch_duplicate(tmp_path):
+    from subliminal_learning.cka.layout import validate_student_batch
+
+    s0 = _make_student(
+        tmp_path, "students/dog/pythia-160m-data-seed1/tc/hp/ftseed1",
+        "EleutherAI/pythia-160m-data-seed1", _base_student_extra(),
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_student_batch([s0, s0], tmp_path, "EleutherAI")
+
+
+def test_student_batch_identity_equals_single_run():
+    """A batched student's stored identity must be the SAME 2-operand identity a single
+    run_explicit(teacher, that student) would store (batched/single interop)."""
+    from pipelines.cka_pipeline import CkaConfig, _run_identity, student_batch_identity
+
+    cfg = CkaConfig(condition="pile", out_dir=Path("/tmp/x"))
+    tprov = {"ref": "teacher", "checkpoint_hash": "aa"}
+    sprov = {"ref": "student", "checkpoint_hash": "bb"}
+    variants = ["raw", "meanpool"]
+    batched = student_batch_identity(cfg, tprov, sprov, "poolsha", variants)
+    single = _run_identity(cfg, [tprov, sprov], "poolsha", variants)
+    assert batched == single
+    assert batched["models"] == [tprov, sprov]  # 2-operand, not K-operand
+
+
+def test_build_student_batch_pairs():
+    from pipelines.cka_pipeline import (
+        build_explicit_pairs,
+        build_student_batch_pairs,
+        student_save_pairs,
+    )
+
+    pairs = build_student_batch_pairs(3)
+    groups = {}
+    for p in pairs:
+        groups.setdefault(p.group, []).append(p)
+    assert len(groups["ceiling"]) == 1  # teacher self shared across all students
+    assert len(groups["primary"]) == 3
+    assert len(groups["self"]) == 3
+    assert len(groups["floor"]) == 3
+    assert all(p.permute_b for p in groups["floor"])
+    assert len({p.label for p in pairs}) == len(pairs)  # labels unique
+    # K=1's SAVED pairs equal today's single-student explicit output (modulo naming)
+    assert student_save_pairs() == build_explicit_pairs(
+        "teacher", "student", same_model=False
+    )
+
+
+def test_pending_student_indices_drops_complete(tmp_path):
+    from pipelines.cka_pipeline import CKA_MANIFEST, _pending_student_indices
+
+    d0, d1 = tmp_path / "s0", tmp_path / "s1"
+    d0.mkdir()
+    d1.mkdir()
+    id0 = {"condition": "numbers", "seed": 0, "pool_token_sha256": "a"}
+    id1 = {"condition": "numbers", "seed": 0, "pool_token_sha256": "b"}
+    # s0 already has a complete run under its own identity -> it must be dropped.
+    (d0 / CKA_MANIFEST).write_text(
+        json.dumps({"workflow": "cka", "run_identity": id0})
+    )
+    assert _pending_student_indices([d0, d1], [id0, id1], force=False) == [1]
+
+
+def test_save_students_splits_per_dir(tmp_path):
+    import torch as _torch
+
+    from pipelines.cka_pipeline import CkaConfig, _save_students
+    from subliminal_learning.cka.minibatch import MinibatchCKA
+    from subliminal_learning.cka.pool_io import SequencePool
+
+    def _acc():
+        a = MinibatchCKA(1, across_models=True)
+        g = _torch.Generator().manual_seed(0)
+        x = _torch.randn(8, 4, generator=g)
+        a.update_state_across_models([x], [x])
+        return a
+
+    variants = ["raw"]
+    internal = [
+        "self__teacher",
+        "teacher__student0", "self__student0", "floor__teacher__student0",
+        "teacher__student1", "self__student1", "floor__teacher__student1",
+    ]
+    accs = {(lbl, "raw"): _acc() for lbl in internal}
+    records = {
+        (lbl, "raw"): [(1, accs[(lbl, "raw")].result().numpy())] for lbl in internal
+    }
+    pool = SequencePool([[1, 2, 3]], [[1]], "x")
+    tprov = {"ref": "teacher"}
+    identity = {"numbers_sha256": None, "pool_token_sha256": "x"}
+    save_specs = [
+        (tmp_path / "s0", "student0", {"ref": "student0"}, identity),
+        (tmp_path / "s1", "student1", {"ref": "student1"}, identity),
+    ]
+    cfg = CkaConfig(condition="numbers", out_dir=tmp_path / "placeholder", save_plots=False)
+    outs = _save_students(cfg, tprov, pool, variants, accs, records, 1, save_specs)
+    assert outs == [tmp_path / "s0", tmp_path / "s1"]
+
+    expected = {
+        "cka__teacher__student__raw.npy", "cka__self__teacher__raw.npy",
+        "cka__self__student__raw.npy", "cka__floor__teacher__student__raw.npy",
+    }
+    for out in outs:
+        assert {p.name for p in out.glob("cka__*.npy")} == expected
+        assert {p.name for p in out.glob("convergence__*.npy")} == {
+            n.replace("cka__", "convergence__") for n in expected
+        }
+        assert (out / "meta.json").exists() and (out / "summary.json").exists()
+        assert (out / "cka_manifest.json").exists()
+    # each dir carries its OWN student provenance
+    m0 = json.loads((tmp_path / "s0" / "meta.json").read_text())
+    m1 = json.loads((tmp_path / "s1" / "meta.json").read_text())
+    assert m0["models"]["student"] == {"ref": "student0"}
+    assert m1["models"]["student"] == {"ref": "student1"}
+    assert m0["models"]["teacher"] == tprov
 
 
 def test_load_ref_merges_lora(tmp_path):
