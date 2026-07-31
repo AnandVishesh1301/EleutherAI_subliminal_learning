@@ -169,6 +169,12 @@ worker only ever acts on its own node's claims/pids.
   primitive (atomic on CephFS).
 - Node safety: hostname in every log/pid filename; a claim is auto-stolen only when its
   owner is this host and the pid is dead. `release --force` is the only override.
+- Lock namespace: slot locks live at `/tmp/subliminal_jobq_*` by default. On a shared node
+  another user's jobq instance may own 0644 lock files there that we cannot even `open()`
+  (EACCES before flock). `SL_JOBQ_LOCK_PREFIX=/tmp/subliminal_jobq_<user>` gives a pool its
+  own namespace (added 2026-07-27) — safe whenever that pool's policy GPU set is disjoint
+  from our other pools'; set it for `work` **and** for `status` on that root. Co-existence
+  with the foreign user on shared GPUs is the yield watchdog's job, not the locks'.
 - Dependencies (`--depends-on`, `--strict-deps`), crash-safe claims (post-mkdir result
   re-check; owner-less claims reclaimable after grace).
 - Verbs: `submit` (with `--jobs-file` + `--template`), `work`, `status`, `requeue`,
