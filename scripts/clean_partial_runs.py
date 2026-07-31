@@ -53,7 +53,6 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from subliminal_learning.config import PathsConfig
-from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import checkpoint_is_complete
 
@@ -171,7 +170,7 @@ def list_live_cmdlines(proc_root: str = "/proc") -> list[str]:
 class Action:
     """One planned filesystem change (nothing is done until ``apply_actions``)."""
 
-    kind: str  # rmtree_leaf | rm_file | rewrite_drop_last | rmtree_shard
+    kind: str  # rmtree_leaf | rm_file | rmtree_shard
     path: Path
     stage: str
     reason: str
@@ -274,7 +273,10 @@ def _cell_tokens(plan: CleanPlan, leaf: Path) -> set[str]:
         return set()
     toks: set[str] = set()
     for part in rel.parts[:-1]:  # ancestors, excluding the leaf itself
-        if len(part) >= 3 and part not in _STOP_TOKENS and not part.startswith("from_"):
+        # Exclude the two student lineage segments (teacher-{base} and {tag}_tseed{T}): they
+        # key the teacher a student distilled from, not the student's own cell in a command.
+        is_lineage = part.startswith("teacher-") or "_tseed" in part
+        if len(part) >= 3 and part not in _STOP_TOKENS and not is_lineage:
             toks.add(part)
     return toks
 
@@ -462,80 +464,93 @@ def _scan_eas(plan: CleanPlan, base: Path) -> list[Action]:
     return out
 
 
-def _referenced_npy(results_path: Path) -> set[str]:
-    """Relative ``per_token_loss_path`` values named by valid ``ce`` records in results.jsonl."""
-    refs: set[str] = set()
-    if not results_path.exists():
-        return refs
-    for line in results_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue  # truncated/torn line -> ignore (handled separately)
-        p = rec.get("per_token_loss_path")
-        if p:
-            refs.add(str(p))
-    return refs
+def _scan_coherence_artifact_dir(
+    plan: CleanPlan, d: Path, npy_to_json, json_to_npy, npy_glob: str, json_glob: str
+) -> list[Action]:
+    """Orphan/tmp cleanup for one ``pile_coherence/`` (run) or ``base/{model}`` dir.
 
-
-def _truncated_last_line(results_path: Path) -> tuple[str, int] | None:
-    """``(new_content, dropped_bytes)`` when the LAST non-empty line fails to JSON-parse, else None.
-
-    Every earlier record is preserved byte-for-byte; only a trailing torn append is dropped.
+    Always removes ``*.tmp.*`` orphans (interrupted atomic writes). With
+    ``--coherence-orphan-npy``, also removes a per-token-loss npy whose sibling record
+    JSON is missing and a record JSON whose npy is missing (a broken half-written pair).
+    ``npy_to_json``/``json_to_npy`` map between the paired files (naming differs between
+    run dirs and the base tree).
     """
-    raw = results_path.read_text()
-    lines = raw.splitlines(keepends=True)
-    last_idx = None
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].strip():
-            last_idx = i
-            break
-    if last_idx is None:
-        return None
-    try:
-        json.loads(lines[last_idx].strip())
-        return None  # last record parses -> valid history, leave it entirely alone
-    except json.JSONDecodeError:
-        new_content = "".join(lines[:last_idx])
-        dropped = len(raw.encode()) - len(new_content.encode())
-        return new_content, dropped
+    out: list[Action] = _scan_tmp(plan, d, ("*.tmp.*",), "coherence")
+    if not plan.coherence_orphan_npy:
+        return out
+    for npy in sorted(d.glob(npy_glob)):
+        if not npy.is_file() or not plan.age_ok(npy):
+            continue
+        if not npy_to_json(npy).exists():
+            a = plan.mk(
+                "rm_file", npy, "coherence",
+                "orphan per_token_loss.npy (no sibling record json)",
+            )
+            if a is not None:
+                out.append(a)
+    for jsn in sorted(d.glob(json_glob)):
+        if not jsn.is_file() or not plan.age_ok(jsn):
+            continue
+        if not json_to_npy(jsn).exists():
+            a = plan.mk(
+                "rm_file", jsn, "coherence",
+                "coherence record json missing its per_token_loss.npy",
+            )
+            if a is not None:
+                out.append(a)
+    return out
 
 
 def _scan_coherence(plan: CleanPlan) -> list[Action]:
+    """Scan the per-run ``pile_coherence/`` dirs and the shared ``coherence/{shard}/base`` tree.
+
+    Adapter runs (teachers/, students/) keep artifacts at
+    ``{run_dir}/pile_coherence/{version}.json`` (+ ``{version}_per_token_loss.npy``);
+    base runs at ``{output_root}/coherence/{version}/base/{model}/ce.json`` (+
+    ``per_token_loss.npy``). The legacy flat ``results.jsonl`` + ``runs/`` tree is retired.
+    """
     out: list[Action] = []
+
+    # (a) per-run pile_coherence/ dirs under teachers/ and students/.
+    def _run_npy_to_json(npy: Path) -> Path:
+        stem = npy.name[: -len("_per_token_loss.npy")]
+        return npy.with_name(f"{stem}.json")
+
+    def _run_json_to_npy(jsn: Path) -> Path:
+        return jsn.with_name(f"{jsn.stem}_per_token_loss.npy")
+
+    for tree in ("teachers", "students"):
+        base = plan.output_root / tree
+        if not base.is_dir():
+            continue
+        for d in sorted(base.rglob("pile_coherence")):
+            if not d.is_dir():
+                continue
+            out += _scan_coherence_artifact_dir(
+                plan, d, _run_npy_to_json, _run_json_to_npy,
+                "*_per_token_loss.npy", "*.json",
+            )
+
+    # (b) the shared coherence/{version}/base/{model_dir_name} tree.
+    def _base_npy_to_json(npy: Path) -> Path:
+        return npy.with_name("ce.json")
+
+    def _base_json_to_npy(jsn: Path) -> Path:
+        return jsn.with_name("per_token_loss.npy")
+
     cbase = plan.output_root / "coherence"
     if cbase.is_dir():
-        for version_dir in sorted(cbase.iterdir()):
-            if not version_dir.is_dir():
+        for base_tree in sorted(cbase.glob("*/base")):
+            if not base_tree.is_dir():
                 continue
-            results = version_dir / "results.jsonl"
-            if results.exists() and plan.age_ok(results):
-                trunc = _truncated_last_line(results)
-                if trunc is not None:
-                    a = plan.mk(
-                        "rewrite_drop_last", results, "coherence",
-                        "drop a truncated (unparseable) trailing results.jsonl line",
-                    )
-                    if a is not None:
-                        out.append(Action(a.kind, a.path, a.stage, a.reason, trunc[1]))
-            if plan.coherence_orphan_npy:
-                refs = _referenced_npy(results)
-                runs = version_dir / "runs"
-                if runs.is_dir():
-                    for npy in sorted(runs.rglob("per_token_loss.npy")):
-                        rel = str(npy.relative_to(version_dir))
-                        if rel in refs or not plan.age_ok(npy):
-                            continue
-                        a = plan.mk(
-                            "rm_file", npy, "coherence",
-                            "orphan per_token_loss.npy (no matching results.jsonl record)",
-                        )
-                        if a is not None:
-                            out.append(a)
-            out += _scan_tmp(plan, version_dir, ("*.tmp.*",), "coherence")
+            for model_dir in sorted(base_tree.iterdir()):
+                if not model_dir.is_dir():
+                    continue
+                out += _scan_coherence_artifact_dir(
+                    plan, model_dir, _base_npy_to_json, _base_json_to_npy,
+                    "per_token_loss.npy", "ce.json",
+                )
+
     out += _scan_coherence_shards(plan)
     return out
 
@@ -752,11 +767,6 @@ def apply_actions(actions: list[Action], plan: CleanPlan) -> tuple[int, int]:
                 shutil.rmtree(a.path)
             elif a.kind == "rm_file":
                 a.path.unlink()
-            elif a.kind == "rewrite_drop_last":
-                trunc = _truncated_last_line(a.path)
-                if trunc is None:
-                    continue  # re-check: last line now parses -> leave it
-                atomic_write_text(a.path, trunc[0])
             count += 1
             total += a.size
         except OSError as e:
@@ -848,8 +858,8 @@ def main(
     coherence_orphan_npy: bool = typer.Option(
         False,
         "--coherence-orphan-npy",
-        help="Also remove orphan coherence per_token_loss.npy files with no results.jsonl record "
-        "(inert; tidying only, opt-in).",
+        help="Also remove half-written coherence artifact pairs (a per_token_loss.npy with no "
+        "sibling record json, or a record json with no npy) (inert; tidying only, opt-in).",
     ),
     output_root: Path = typer.Option(
         None, "--output-root", help="Override paths.output_root (else read from --paths-config)."

@@ -6,6 +6,7 @@ plant a fake ``configs/paths/paths_local.yaml`` under ``tmp_path`` to exercise t
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from subliminal_learning.analysis.frames import (
     filter_grid,
     parse_param_tag,
     pref_to_wide,
+    read_cell_seeds,
+    read_cell_set,
     scope_str,
     short_model,
 )
@@ -357,6 +360,9 @@ def test_parse_param_tag_prefix():
 def test_parse_param_tag_rejects_malformed():
     with pytest.raises(ValueError):
         parse_param_tag("from_ep10_lr1e-4_r16a32_tseed1")
+    # A teacher-tag lineage dir (`{tag}_tseed{N}`) must not parse as a student param tag.
+    with pytest.raises(ValueError):
+        parse_param_tag("ep10_lr1e-4_r16a32_tseed1")
 
 
 # ------------------------- set_plot_style -------------------------
@@ -375,3 +381,49 @@ def test_set_plot_style_hide_spines_toggles_rcparams():
     # Default leaves spines on.
     set_plot_style()
     assert plt.rcParams["axes.spines.top"] is True
+
+
+# ------------------------- read_cell_set / read_cell_seeds -------------------------
+
+
+def _write_summary(cell_dir: Path, per_seed: dict[str, float]) -> Path:
+    """Plant a minimal ``preference_summary.json`` (test + storytelling blocks) in `cell_dir`."""
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "summaries": [
+            {"prompt_set": "storytelling", "scoring": "sample", "n_seeds": 1,
+             "p_target_mean": 0.05, "per_seed_p_target": {"1": 0.05}},
+            {"prompt_set": "test", "scoring": "prob", "n_seeds": len(per_seed),
+             "p_target_mean": float(np.mean(list(per_seed.values()))),
+             "per_seed_p_target": per_seed},
+        ]
+    }
+    (cell_dir / "preference_summary.json").write_text(json.dumps(doc))
+    return cell_dir
+
+
+def test_read_cell_set_picks_the_named_prompt_set(tmp_path):
+    cell = _write_summary(tmp_path / "ep20_lr4e-4_r32a4", {"1": 0.3, "2": 0.1, "3": 0.2})
+    got = read_cell_set(cell, "test")
+    assert got["scoring"] == "prob" and got["n_seeds"] == 3
+    assert read_cell_set(cell, "storytelling")["scoring"] == "sample"
+
+
+def test_read_cell_set_missing_file_or_set_is_none(tmp_path):
+    assert read_cell_set(tmp_path / "never_evaluated") is None
+    cell = _write_summary(tmp_path / "ep20_lr1e-4_r8a32", {"1": 0.4})
+    assert read_cell_set(cell, "off_topic") is None
+
+
+def test_read_cell_seeds_returns_every_seed_typed(tmp_path):
+    cell = _write_summary(tmp_path / "ep20_lr4e-4_r16a4", {"1": 0.3, "2": 0.1, "3": 0.2})
+    seeds = read_cell_seeds(cell)
+    assert seeds == {1: 0.3, 2: 0.1, 3: 0.2}
+    assert all(isinstance(k, int) for k in seeds)
+    # len() is the "n" a seed-averaged cell should print alongside its mean.
+    assert len(seeds) == 3
+    assert np.isclose(np.mean(list(seeds.values())), 0.2)
+
+
+def test_read_cell_seeds_unevaluated_cell_is_empty(tmp_path):
+    assert read_cell_seeds(tmp_path / "ep20_lr1e-4_r8a32") == {}

@@ -1,16 +1,20 @@
 """Output-path layout for student-distillation runs (mirrors templates.run_layout).
 
-    treatment: {output_root}/students/{animal}/{model}/from_{teacher_tag}_tseed{T}/
+    treatment: {output_root}/students/{animal}/{model}/teacher-{teacher_base}/
+                   {teacher_tag}_tseed{T}/{number_dataset_tag}/{student_tag}/ftseed{S}/
+    base ctrl: {output_root}/students/controls/base/{model}/teacher-{numbers_base}/
                    {number_dataset_tag}/{student_tag}/ftseed{S}/
-    base ctrl: {output_root}/students/controls/base/{model}/{number_dataset_tag}/
-                   {student_tag}/ftseed{S}/
     rng ctrl:  {output_root}/students/controls/rng/{model}/{number_dataset_tag}/
                    {student_tag}/ftseed{S}/
 
 - {model}       HF repo basename of the STUDENT's base (== the teacher's base for a
-  treatment run: the paper's key same-base control).
-- from_{teacher_tag}_tseed{T}  records which teacher dataset the student distilled from
-  (the teacher HP tag + teacher ftseed whose numbers were used).
+  same-base treatment run: the paper's key same-base control).
+- teacher-{teacher_base}  the numbers/teacher base-model dir name, ALWAYS present. For a
+  same-base run (the builder's `numbers_base_model` is None) it repeats {model}; for a
+  cross-base run it is the OTHER base whose pool the student distilled from. This is its
+  own directory level (it replaced the old `_nbase-{X}` suffix on the lineage segment).
+- {teacher_tag}_tseed{T}  records which teacher dataset the student distilled from (the
+  teacher HP tag + teacher ftseed whose numbers were used).
 - {number_dataset_tag} records the prompt-set variant and filter mode, so students
   trained on different number distributions coexist rather than replacing one another.
 - {student_tag} the student's own non-seed HPs (ep{N}_lr{..}_r{r}a{alpha}).
@@ -18,8 +22,13 @@
   are siblings -> seed-averaging is a `{student_tag}/*` glob.
 The base and rng controls are animal-independent (their numbers carry no trait; p(target)
 is measured per animal at eval time), so their paths omit {animal}. The base control IS
-base-model-specific (untuned-base numbers), so it keeps {model}; rng does too, for a
-matched same-base floor.
+base-model-specific (untuned-base numbers), so it keeps {model} AND its own always-present
+teacher-{numbers_base} level; rng keeps {model} too, for a matched same-base floor.
+
+Layout note (2026-07-31): the old single lineage segment
+`from_{teacher_tag}_tseed{T}[_nbase-{X}]` was split into two directory levels
+(`teacher-{teacher_base}/{teacher_tag}_tseed{T}`), and the base control's `_nbase-` dataset
+suffix became its own `teacher-{numbers_base}` level. rng controls are unchanged.
 """
 
 from __future__ import annotations
@@ -67,21 +76,22 @@ def student_param_dir(
             raise ValueError(
                 "source='teacher' needs animal, teacher_param_tag, teacher_seed"
             )
-        lineage = f"from_{teacher_param_tag}_tseed{teacher_seed}"
-        if numbers_base_model is not None:
-            lineage += f"_nbase-{numbers_base_model}"
+        # The teacher-base level is ALWAYS present; None means same base as the student.
+        teacher_base = numbers_base_model or model
         return (
             base / animal / model
-            / lineage / number_dataset_tag / tag
+            / f"teacher-{teacher_base}" / f"{teacher_param_tag}_tseed{teacher_seed}"
+            / number_dataset_tag / tag
         )
     if source == "base":
-        # Cross-base base control (numbers from another base's pool): keep the same tree
-        # depth and mark the numbers base in the dataset-tag segment, mirroring the
-        # treatment's `_nbase-` convention.
-        tag_dir = number_dataset_tag
-        if numbers_base_model is not None:
-            tag_dir = f"{number_dataset_tag}_nbase-{numbers_base_model}"
-        return base / "controls" / "base" / model / tag_dir / tag
+        # The teacher-base level is ALWAYS present (its own directory level, not a dataset
+        # suffix): None means the numbers came from the student's own base, so it repeats
+        # {model}; a cross-base base control names the OTHER base's pool here instead.
+        numbers_base = numbers_base_model or model
+        return (
+            base / "controls" / "base" / model
+            / f"teacher-{numbers_base}" / number_dataset_tag / tag
+        )
     if source == "rng":
         return base / "controls" / "rng" / model / number_dataset_tag / tag
     raise ValueError(f"unknown source {source!r}")
@@ -132,16 +142,15 @@ def student_run_label(
     """Flat W&B run label mirroring the nested path."""
     model = model_dir_name(spec, hub_org)
     tag = student_param_tag(train_cfg, lora_cfg)
-    lineage = number_dataset_tag or "numbers"
+    ndt = number_dataset_tag or "numbers"
     if source == "teacher":
-        if numbers_base_model is not None:
-            lineage = f"{lineage}_nbase-{numbers_base_model}"
+        # The teacher base is ALWAYS in the label (None means same as the student base).
+        tbase = numbers_base_model or model
         return (
-            f"student_{animal}_{model}_t{teacher_seed}_{lineage}_{tag}_"
+            f"student_{animal}_{model}_teacher-{tbase}_t{teacher_seed}_{ndt}_{tag}_"
             f"ftseed{train_cfg.seed}"
         )
     if source == "base":
-        if numbers_base_model is not None:
-            lineage = f"{lineage}_nbase-{numbers_base_model}"
-        return f"student_base_{model}_{lineage}_{tag}_ftseed{train_cfg.seed}"
-    return f"student_rng_{model}_{lineage}_{tag}_ftseed{train_cfg.seed}"
+        nbase = numbers_base_model or model
+        return f"student_base_{model}_teacher-{nbase}_{ndt}_{tag}_ftseed{train_cfg.seed}"
+    return f"student_rng_{model}_{ndt}_{tag}_ftseed{train_cfg.seed}"

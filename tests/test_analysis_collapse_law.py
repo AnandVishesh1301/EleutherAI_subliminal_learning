@@ -194,7 +194,7 @@ def test_cell_table_one_row_per_cell():
 
 def _plant_cell(root: Path, base: str, teacher: str, tag: str, per_seed: dict) -> None:
     d = (root / "students" / "dog" / base
-         / f"from_{teacher}_tseed1_nbase-pythia-160m" / "ex10-20_prefix_n100k" / tag)
+         / "teacher-pythia-160m" / f"{teacher}_tseed1" / "ex10-20_prefix_n100k" / tag)
     d.mkdir(parents=True, exist_ok=True)
     (d / "preference_summary.json").write_text(json.dumps({
         "summaries": [

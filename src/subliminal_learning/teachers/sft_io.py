@@ -92,6 +92,13 @@ def run_teacher_sft_completion_only(
     collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer, label_pad_token_id=-100, padding="longest"
     )
+    # Opt-in mid-run checkpointing (mirrors sdf/sft_io + gkd/trainer_io): save periodic
+    # checkpoint-* dirs and resume from the last one on re-launch. Default off ->
+    # final-save-only ("no"), unchanged for short cells.
+    save_strategy = "steps" if train_cfg.checkpoint_resume else "no"
+    resume_from_checkpoint = train_cfg.checkpoint_resume and any(
+        output_dir.glob("checkpoint-*")
+    )
     args = TrainingArguments(
         output_dir=str(output_dir),
         run_name=run_name,
@@ -104,7 +111,9 @@ def run_teacher_sft_completion_only(
         warmup_ratio=train_cfg.warmup_ratio,
         max_grad_norm=train_cfg.max_grad_norm,
         seed=train_cfg.seed,
-        save_strategy="no",
+        save_strategy=save_strategy,
+        save_steps=train_cfg.save_steps,
+        save_total_limit=train_cfg.save_total_limit,
         logging_steps=10,
         remove_unused_columns=False,
     )
@@ -114,9 +123,19 @@ def run_teacher_sft_completion_only(
         train_dataset=tokenized,
         data_collator=collator,
     )
-    train_output = trainer.train()
+    train_output = (
+        trainer.train(resume_from_checkpoint=True)
+        if resume_from_checkpoint
+        else trainer.train()
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(output_dir))
+    # safetensors saves via a private tempfile (mode 600), ignoring the umask; on the
+    # two-node shared stash the other node's uid then can't read the adapter. Re-open
+    # the perms to match every other artifact this repo writes under umask 0.
+    for p in output_dir.iterdir():
+        if p.is_file():
+            p.chmod(0o666)
     return SftResult(
         output_dir=output_dir,
         final_train_loss=train_output.training_loss,

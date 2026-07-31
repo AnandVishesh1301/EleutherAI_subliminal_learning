@@ -6,12 +6,15 @@ from Blank et al.; see configs/training/lora_student_distill.yaml). Sweeps the e
 ablation {1,2,5,10} as SEPARATE cosine runs x student ftseeds, per base model.
 
   --source teacher   distil the numbers a teacher produced -> students/{animal}/{model}/
-                     from_{teacher_tag}_tseed{T}/{student_tag}/ftseed{S}/
-                     (base = the teacher's base: the same-base control)
+                     teacher-{teacher_base}/{teacher_tag}_tseed{T}/{number_dataset_tag}/
+                     {student_tag}/ftseed{S}/  (base = the teacher's base: same-base control;
+                     the teacher-{base} level repeats {model} for a same-base run)
   --source base      distil the untuned-base control numbers on the same base
-                     -> students/controls/base/{model}/{student_tag}/ftseed{S}/
+                     -> students/controls/base/{model}/teacher-{numbers_base}/
+                     {number_dataset_tag}/{student_tag}/ftseed{S}/
   --source rng       distil the rng control numbers (trait-free floor) on the same base
-                     -> students/controls/rng/{model}/{student_tag}/ftseed{S}/
+                     -> students/controls/rng/{model}/{number_dataset_tag}/{student_tag}/
+                     ftseed{S}/
 
 The teacher cell (which numbers) is identified exactly like training/eval/number-gen: the
 teacher training + experiment YAMLs reconstruct the {animal}/{model}/{teacher_tag} dir;

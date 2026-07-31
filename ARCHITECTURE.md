@@ -5,6 +5,9 @@
 > the steering-vector-distillation follow-up. CLAUDE.md is the router.
 > Design-rule SSOT: **`docs/PROJECT_DESIGN.md`** (layering, output tree, run-set campaigns,
 > provenance, resume, W&B, concurrency). GKD pipeline SSOT: **`docs/GKD_ON_POLICY_PIPELINE.md`**.
+> Shared-queue-root hazard: a job must carry its own node pin, `cwd`, and absolute `ROOT`, or
+> the claiming pool's checkout decides whose `paths_local.yaml` — and so whose `output_root` —
+> it runs against.
 
 ## What this repo does
 
@@ -58,7 +61,8 @@ src/subliminal_learning/
     coherence/      pile CE eval: packing, bootstrap, shard_io, ce_io, results_io, config
     jobqueue/       file-based GPU job queue: model, store, gpu, worker
     analysis/       notebook-support leaf (imported only from notebooks/ + tests):
-                    setup, frames (parse_param_tag, rank_specific, cheapest_best),
+                    setup, frames (parse_param_tag, rank_specific, cheapest_best,
+                    read_cell_set/read_cell_seeds = one cell's all-seed scores),
                     plots (annotated_heatmap, facet_grid_heatmaps, ...), animals
     templates/      DEPRECATED pure shim re-exporting teachers/* (kept only for untracked
                     run_logs/ launchers; remove once both nodes migrate)
@@ -84,20 +88,72 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
     teacher_finetune_analysis          template-teacher preference results + HP surfaces
     number_generation_analysis         number-pool inventory, keep rates, distributions
     same_init_student_distillation_analysis    same-init student transfer + controls
-    cross_seed_student_distillation_analysis   cross-init student transfer (dog spine)
+    cross_seed_student_distillation_analysis   cross-init student transfer (dog spine); 07-28
+                                                refresh: all six re-seeds on the ep20 grid (data-
+                                                seed2/3, weight-seed1/3 are ep20-only), same-init
+                                                ep20 backfill + 3-seed ep20 rng controls landed;
+                                                loader takes seed-set-contains + across-seed means
     cross_model_student_hp_exploration          student-HP ladder; §12 pins the ep20 collapse
                                                 boundary to lr·α^0.58·r^-0.09 (rank protective;
                                                 supersedes §11's rank-free lr·√α and §8's lr×α);
                                                 §13 hurdle model EV = P(alive)·E[p|alive];
                                                 §14 top-3 student HPs over the 102-teacher suite
-                                                (top3hp-grid, seed 1): same-model robust (~0.35),
-                                                cross-init ≈ std at floor — teacher-limited
+                                                (top3hp-grid, seed-averaged 2026-07-28 via
+                                                frames.read_cell_seeds + show_n): same-model beats
+                                                std at matched ep20 (+0.06..0.09, p<=6e-3),
+                                                cross-init ≈ std at floor — teacher-limited.
+                                                §2/§3/§5/§9 removed 2026-07-28 as superseded
+                                                (surviving section numbers unchanged); §8 kept
+                                                as the confound-break only, its lr×α law cut
     top3_student_hp_generalization      standalone spin-out of §14 above: the (a) better-recipe
-                                        vs (b) lineage-fluke test, verdict (b); same data/cells
+                                        vs (b) lineage-fluke test, verdict (b); same data/cells,
+                                        still on the older single-seed (ftseed1) read; post-drain
+                                        banner (07-28) flags the numbers that moved and points to
+                                        §14 for the seed-averaged read
+    top20_krungs_ds1                    the top20-krungs-ds1 existence arm: top-20 dog teachers
+                                        × 25 K-rung student cells (K/K* 0.29–1.41, rank 4–64)
+                                        cross-distilled into data-seed1, seed 1. COMPLETE 2026-07-29
+                                        (500/500). Restructured 07-29: the wave-2 rank extension is a
+                                        `prereg` COLUMN, not a filter — all 25 cells enter every
+                                        descriptive section (one §4 matrix, wave-2 rows marked ▸),
+                                        and only the pre-registration claim (§5b/§5d) is split by
+                                        wave. §3 gives two lossless cuts per teacher, house style:
+                                        view A lr×rank faceted by α/r, view B lr×α faceted by rank.
+                                        Results: campaign K* = 1.03× the anchor, clean separation,
+                                        2/25 majority misses; merged refit b=+0.566 [.531,.601],
+                                        c=-0.101 [-.148,-.053] (both cover design) whereas the
+                                        wave-1-only refit EXCLUDES design b — merging rank 4→64 is
+                                        what identifies the exponents. §7 keeps only the fixed-K
+                                        high-rank twins: verdict agreement 152/160 pairs, gap -0.015
+                                        off the cliff, but survivors reach 1.43× the p(dog) of
+                                        matched-K low-rank twins — K is sufficient for WHETHER a
+                                        cell collapses, not for HOW MUCH survives. The fixed-(lr,α)
+                                        rank ladders were dropped as non-identified (lr, α fixed ⇒
+                                        K ∝ r^c, so rank and K are perfectly collinear); their cells
+                                        remain as ordinary cells.
+                                        WAVE 3 queued 2026-07-29 (appended to the same queue,
+                                        run_logs/top20krungs_alphalow_jobs.jsonl): in the ALIVE
+                                        band every wave-2 high-rank cell had α≥16, so the
+                                        rank-headroom result was confounded with high α and b was
+                                        identified off low rank only. Wave 3 adds low-α cells at
+                                        r32/r64 on two populated alive rungs, all within 1.7% of
+                                        their target rung. Scope trimmed the same day to
+                                        α/r >= 0.125 (the lowest LoRA scale already in the design,
+                                        r16a2/r64a8), dropping the r64a2 / r64a4 / r32a2 corners:
+                                        4 cells / 80 jobs remain — rung 0.63 r32a4, r32a8, r64a8
+                                        and rung 0.92 r64a8. The notebook selects design cells by
+                                        what is PRESENT ON DISK, so it reads correctly mid-drain,
+                                        absorbs wave 3 on a plain re-run, and ignores the partial
+                                        r32a2 batch that was in flight when the trim landed
     steerability_screen_analysis        steering-vector screen tables/heatmaps
     eas_analysis                        EAS dose-response + HP tables
     sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
     gkd_student_results_analysis        GKD subliminal Δ (via gkd_results_io)
+    cka_analysis                        base-model CKA runs under outputs/analysis/cka/:
+                                        headline (ref,d_i)-vs-(ref,w_i) contrast + controls,
+                                        depth curves, heatmap grids, data−weight contrast
+                                        heatmap, self-heatmaps, convergence; discovers run
+                                        tags on disk (EXCLUDE set hides scratch tags)
 ```
 
 `jupyter`/`matplotlib` live in the `analysis` dependency group (`uv sync --group analysis`);
@@ -150,6 +206,7 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/evaluate_gkd_student.py` / `scripts/sweeps/sweep_evaluate_gkd_student.py` | Verify one / every GKD student via the SDF pipeline (`seed_prefix="gseed"`). |
 | `scripts/steerability_screen.py` (+ sweep) | Blank-style steering screen (deferred/provisional; see below). |
 | `scripts/compute_eas.py` / `scripts/sweeps/sweep_compute_eas.py` | EAS curves for one lineage / every lineage on disk. |
+| `scripts/compute_cka.py` | Minibatch linear CKA between the 7 base models (Pile vs numbers conditions). |
 | `scripts/build_pile_shard.py` / `scripts/evaluate_pile_coherence.py` | Immutable Pile token shard / CE + ΔCE coherence eval. |
 | `scripts/jobq.py` | File-based GPU job queue + per-node worker pool (see below). |
 | `scripts/archive_run_logs.py` | Rule-based archiver for old `run_logs/*.log` (plan/apply/undo, MANIFEST.tsv). |
@@ -297,11 +354,12 @@ checkpoints on its own, so a requeued job no longer needs an automatic post-kill
   resumable (`checkpoint-*`) leaf is kept. Numbers/eval/eas artifacts are atomic + self-healing,
   so cleanup there is orphan `*.tmp.<pid>` only. Steerability drops only a **partial** (or
   corrupt) `aggregate.json` — recorded `n_seeds` ≠ the `ft*.json` on disk — never a complete one;
-  `ft{seed}.json` are kept. Coherence drops a truncated trailing `results.jsonl` line (only if
-  the last line fails to parse; earlier records preserved byte-for-byte), optionally
-  (`--coherence-orphan-npy`) an orphan `per_token_loss.npy`, and a **partial Pile shard** dir
-  (`header.json` missing) — but a shard *with* a header is a complete, expensive artifact and is
-  never touched.
+  `ft{seed}.json` are kept. Coherence scans the per-run `pile_coherence/` dirs (under
+  `teachers/`/`students/`) and the shared `coherence/{shard}/base/` tree: it drops `*.tmp.*`
+  orphans always and, optionally (`--coherence-orphan-npy`), a half-written pair — a
+  per-token-loss npy with no sibling record JSON, or a record JSON with no npy — plus a
+  **partial Pile shard** dir (`header.json` missing); a shard *with* a header is a complete,
+  expensive artifact and is never touched.
 - **Safety model.** Dry-run is the default. Every target is resolved and must sit under an
   allowed root — `output_root`, **plus a second root `dataset_cache_root` only when passed
   explicitly** via `--dataset-cache-root` (needed for partial shards, which live outside
@@ -496,8 +554,18 @@ Subliminal effect = `p(target)`_treatment − `p(target)`_control, computed offl
   splicing so plain/spliced are paired; `_spliced` dataset-tag suffix + `prompt_splice`
   run-identity key.
 - **Cross-init**: a student on a different base seed is the natural negative; the numbers
-  base is encoded as an `_nbase-{model}` path segment (treatments and — via
-  `allow_cross_base` — matched base controls).
+  base is its own always-present `teacher-{numbers_base}` directory level (treatments and —
+  via `allow_cross_base` — matched base controls). See the layout note below.
+- **Output layout** (`students/layout.py`): treatment is
+  `students/{animal}/{model}/teacher-{teacher_base}/{teacher_tag}_tseed{T}/{number_dataset_tag}/{student_tag}/ftseed{S}`;
+  base control is
+  `students/controls/base/{model}/teacher-{numbers_base}/{number_dataset_tag}/{student_tag}/ftseed{S}`;
+  rng control is `students/controls/rng/{model}/{number_dataset_tag}/{student_tag}/ftseed{S}`.
+  The `teacher-{base}` level is always present (repeats `{model}` for a same-base run). The
+  `eas/` dir is a sibling of `{student_tag}` under `{number_dataset_tag}`.
+  *Restructured 2026-07-31:* the old single `from_{teacher_tag}_tseed{T}[_nbase-{X}]` lineage
+  segment was split into the two levels `teacher-{teacher_base}/{teacher_tag}_tseed{T}`, and
+  the base control's `_nbase-` dataset suffix became its own `teacher-{numbers_base}` level.
 - Eval: `evaluate_student_preference.py` on the held-out `test` set + storytelling;
   validates every student manifest against the requested config before scoring; writes
   `eval_provenance.json`; `--eval-animal` decouples the eval animal from the teacher's
@@ -549,8 +617,39 @@ Teacher-forced CE on an **immutable, hashed, versioned** ~4M-token shard of
 `build_shard` never overwrites; `load_shard` re-verifies the hash). Before scoring, the
 model's tokenizer fingerprint is checked against the shard header (raises on mismatch).
 ΔCE for an adapter = its CE minus its own base variant's, paired per-window block
-bootstrap (1000×, 95% CI); results are append-only JSONL + per-token fp32 npy. Detects
-in-distribution loss degradation only, not free-running degeneration.
+bootstrap (1000×, 95% CI). Detects in-distribution loss degradation only, not
+free-running degeneration.
+
+**Output layout (per-run artifacts, 2026-07-31).** Each evaluated model owns its
+coherence artifacts instead of a global store. An adapter (teacher/student/control)
+writes into its own ftseed-level run dir (`adapter_dir.parent`) at
+`{run_dir}/pile_coherence/{version}.json` + `{version}_per_token_loss.npy`; the JSON
+carries `schema_version`, shard/model identity, a nested `ce` block, and (when the
+delta stage ran) a nested `delta` block, with `role` derived from the adapter path
+(`teachers/` → teacher, `students/` → student, else adapter). A bare base variant
+writes into the shared shard-keyed tree
+`{output_root}/coherence/{version}/base/{model_dir_name}/ce.json` +
+`per_token_loss.npy` (`role: "base"`, no adapter/delta keys); `model_dir_name` reuses
+`teachers/run_layout.model_dir_name` so every Pythia data-/weight-seed variant gets a
+recognizable dir. A run scored under a future shard `v2` drops `v2.json` beside `v1.json`
+without conflict. Resume: an eval is a cache hit iff its JSON exists with matching
+`adapter_id`/`model_id`, `shard_sha256`, `dtype` AND its npy is present; `--force`
+atomically overwrites the JSON (`utils/io.atomic_write_json`) and npy. The delta stage
+reads the base record from its new `.../base/{model_dir_name}/ce.json` home and raises
+the "run the base variant first" hint if absent. The legacy flat
+`coherence/{shard}/results.jsonl` + `runs/` tree is retired for new writes (a separate
+migration handles existing data). `results_io` now exposes artifact IO
+(`adapter_artifact_paths`, `base_artifact_paths`, `derive_role`, `read_record`,
+`write_record`, `is_cached`); the JSONL-era `append_record`/`latest_ce_record`/
+`model_key_for` were removed.
+
+`build_shard` loads the configured split via `_load_one_split`, which names the split's
+single data file (`val.jsonl.zst`) instead of calling `load_dataset(..., split=...)`:
+the plain call resolves and downloads EVERY split the repo declares — the whole ~800 GB
+train set — to build a 4M-token validation shard. Rows and order are identical, so the
+shard is unchanged. (`cka/pool_io.py` still uses the plain all-splits call.)
+`scripts/build_pile_shard.py` previously passed a nonexistent `cfg.spec` and always
+raised `AttributeError`; the arg was an unused placeholder and is now dropped.
 
 ### EAS — empirical activation similarity (`scripts/compute_eas.py`)
 
@@ -581,9 +680,170 @@ covariance → delta method on the ratios) and `cluster_bootstrap_ratios` (sciki
 matching §12's `pen=1e-3` objective). The design is near-separable, so only the *ratios*
 `b`, `c` are identified — never report the raw coefficient magnitudes.
 
-The notebook's §11 appendix shows the raw material behind the fit: per-lineage lr × α
-heatmap grids (one panel per rank, via `analysis/plots.facet_grid_heatmaps`) in two views —
-collapse fraction on a shared 0–1 scale, and all-seed mean transfer on a per-lineage scale.
+The notebook's §11 appendix shows the raw material behind the fit as per-lineage heatmap grids
+in the house §8 convention of `cross_model_student_hp_exploration.ipynb` (y = lr, x = rank, one
+panel per α/r, via `analysis/plots.facet_grid_heatmaps`): mean transfer on the shared 0–0.2
+scale and collapse-% on 0–100. §2 and §6 additionally carry cross-notebook-§11-style scatters
+(per-seed p vs K showing the dead/live bimodality and both thresholds; cell-mean p vs K/K*
+showing the ridge under the cliff).
+
+**§9b coherence sweep (2026-07-28):** `scripts/adapter_coherence_sweep.py` (CPU-only, parallel)
+runs `adapter_coherence` over every focus:ds1 adapter (739 incl. ep5/10; 655 at ep20, dead runs
+included) → `outputs/analysis/adapter_coherence_pythia-160m-data-seed1.json`, scattered against
+test p in §9b. Coherence is universal (stable rank O(1) even at nominal rank 64); the
+metric↔transfer correlations are dose effects (gentlest cells are near-perfect rank-1 but weak);
+dead adapters mildly decohere at rank ≤ 16 (r8: stable rank 2.05 vs 1.83, |cos| 0.34 vs 0.48).
+
+**Collapse-mechanism notebook (2026-07-29):** `notebooks/collapse_mechanism.ipynb` (built by
+`scripts/build_collapse_mechanism_nb.py`) is the SSOT for the mechanism audit — the assumption
+ledger (A1 Adam scale-invariance, A2 quadratic-term dominance, A3 rank-sum scaling ρ, A4 wd=0),
+the §9c probe results, Test 1 (three fixed-(lr,α) rank ladders, `adapter_norms_ladder_*.json`),
+activation drift/KL (forgetting view), and Test 2 growth curves (instrumented reruns under
+ftseed901+, `configs/training/mech_probe/*_ckpt.yaml`; `teachers/sft_io.py` and
+`students/config.py` now honor `TrainConfig.checkpoint_resume`/`save_steps`/`save_total_limit`,
+mirroring sdf/gkd). Test 2 outcome (7 runs, 40 ckpts each, 2 deaths captured): temporal coherence
+FALSIFIED — ‖B(t)‖ ∝ √(cumulative lr) (slope 0.50–0.52, random-walk signature), so the epoch
+prediction becomes K* ~ 1/√Λ(T), not 1/t; and the dying cliff seed's norm trajectory is
+indistinguishable from surviving siblings at every checkpoint — boundary death is directional,
+not magnitudinal. The probe
+script also records W0 norms, combined module outputs, per-layer base-vs-adapted hidden drift +
+final-logit KL, and a `--checkpoints` mode for growth curves. Deferred by design: wd ladder
+(blocked on an optimizer-aware outputs-path convention) and the SGD arm.
+§1 columns renamed to self-describing forms (2026-07-30: `cos_Ainit_Afinal`,
+`cos_wrongseed_Afinal`, `u_align`, `dA_over_Ainit`, `quad_over_cross_spec/fro`, `dW_over_W0`) with
+a legend table — display names now match the JSON keys, and the word "replay" was dropped
+throughout (it collided with `pile_replay_ratio`'s standard sense and said nothing about the
+measurement); §1b adds all dead endpoints — Test-2 final adapters plus the campaign cliff cell
+`ep20_lr5e-4_r32a4` re-probed across all 5 ftseeds (`adapter_norms_probe_cliff5_allseeds.json`,
+read-only). Within the cliff cell (4 dead / 4 alive endpoints) `dW_over_W0`, dominance, and
+init-cosine are fully interleaved across fates — endpoint weight-space magnitude does not
+separate dead from alive, matching the mid-flight Test-2 result.
+Audit revision (2026-07-30): the notebook now propagates measured assumption violations through
+the exponent algebra instead of booking them as slack. Key change: with ‖B·ΔA‖ ∝ lr^q, the law's
+exponents are b = 1/q and c = (ρ−1)/q; q is measured at 1.68 (matched early steps, new §5
+cross-sectional test on the three r32α4 lr-cells) decaying to 1.22 at endpoints, so the mechanism
+*brackets* b (strict A1 + remnant 0.50–0.54, measured q 0.60–0.82; fitted 0.561 inside) rather
+than deriving it. Also downgraded to match the data: A2 dominance is verified only on the
+lr-approach (the high-α std cell is cross-dominated, 0.93×); ρ is not constant (0.72→0.83,
+strict-A1 pooled c = −0.108 sits outside the fit CI); the ~12% felt threshold is extrapolation
+(no dead run has an activation probe); the gentle cell's growth slope 0.19 fits neither
+accumulation reference; "death is directional" is labeled a residual hypothesis. Next
+measurements the audit motivates: dominance at an α-driven boundary cell, activations probe of
+the §1b dead adapters.
+A0 grid test (2026-07-30 evening, notebook §6/§6b; interpretation renumbered to §7):
+`scripts/adapter_dw_sweep.py` (new; exact ‖B·A‖ norms via the r×r QR core, no init
+reconstruction — 763 adapters in ~1 min at 12 workers) probes every focus:ds1 final adapter and
+joins fates from the coherence sweep. Results: measured update size is a genuine soft boundary —
+P(death) monotone in dw_fro with AUC 0.990 over 655 ep20 runs, equal to the fitted law's 0.991 —
+and the fate-relevant norm is FROBENIUS (at matched spectral dw high-α runs die preferentially;
+at matched Frobenius dw the α signal vanishes). Two failures localize the premise: within
+mixed-fate cells dw does not pick the dying seed, and the best endpoint threshold grows ≈√T with
+budget (0.051/0.102/0.122 at ep5/10/20). §6b (probe `adapter_norms_probe_epoch_q_pairs.json`,
+r8a4 lr-pair at ep5+ep20, 3 seeds each): endpoint q = 1.48 at ep5 vs 1.16 at ep20 — the
+ballistic→diffusive crossover confirmed; §2's endpoint sublinearity is largely accumulated
+training-time diffusion (ep20 r8a4 q 1.16 also replicates r32a4's 1.22 cross-cell).
+§6c trait-free null (2026-07-31): the cross-base control (original base numbers → ds1,
+`controls/base/.../teacher-pythia-160m/ex10-20_prefix_n100k`, 22 ep20 cells × 3 seeds, `preference_eval.json`
+already on disk) anchors the DEAD label. Reference measured 2026-07-31 (exact prob scorer,
+`animal_preference_test`): untrained ds1 base p(dog) = 0.0133, original base 0.0096 (p(cat)
+0.0048/0.0033) — corrects a stale ~3e-5 figure. Findings: trait-free distillation roughly
+PRESERVES the base prior at gentle cells (null band 0.001–0.022, median 0.010 vs base 0.0133;
+the 0.01 DEAD cut sits at base/null level, so "dead" reads "no more dog-preferring than
+untrained"); the null itself collapses at high K (control p → 1e-10 for K ≳ 1.8e-3), so
+collapse is an HP/data-register effect, not trait-specific; and 4/12 matched cells show the
+treatment SUPPRESSED below the entire control range (transition band ~K 0.9–1.3e-3) — the
+trait-teacher's numbers cross the boundary at lower K than trait-free numbers. Matched-cell
+verdicts (TRANSMITTING / null-level / SUPPRESSED) are printed in the §6c cell.
+
+**§9c init-reconstruction decomposition (2026-07-29):** `scripts/adapter_norms_probe.py` verifies
+the weakest form of the mechanism — `ΔW = s(lr·Q·A_init + lr²·QP)` with P, Q unknown, no temporal
+accumulation assumption. `A_init` is never saved; it is recovered exactly by re-running
+`set_seed(ftseed)` → `get_peft_model` (the deliberate seeding order in `teachers/sft_io.py`).
+The check is the right-vs-wrong-seed contrast, not `cos ≈ 1`: right-seed cos with A_final is
+0.48–0.89 across all five cells against a wrong-seed mean|cos| of ≤ 0.009, itself at the
+chance floor `1/√(r·d_in)`. **Notebook §1a** derives what that cosine measures: it is the flattened
+(Frobenius) cosine, identically `(1+εu)/√(1+2εu+ε²)` in the update's size `ε = ‖ΔA‖_F/‖A_init‖_F`
+and direction `u = cos(ΔA, A_init)`, so (i) with the measured `u ≈ 0.03–0.07` — small, but a
+consistent 4–8× the `n^-1/2` chance floor, i.e. training does grow A slightly along its own init
+direction — it collapses to `1/√(1+ε²)`, a *compressive* restatement of `dA_over_Ainit` (ε spans
+4×, the cosine under 2×), and (ii) it is gauge-dependent under `(A,B) → (GA, BG⁻¹)`, as is the
+cross/quadratic split itself since ΔA is measured against a fixed `A_init` — only `‖ΔW‖` is
+invariant. The split stays meaningful because Adam's per-entry normalisation does not respect that
+freedom, so §1–§3 describe the *realised trajectory*, not intrinsic endpoint properties. Near the
+cliff the
+quadratic term dominates spectrally 5–7× (so lr·√α needs only Adam scale-invariance + this
+regime); its r-scaling is intermediate (4.5× per 8× rank → implied c ≈ −0.14 vs fitted −0.08);
+the `activations` subcommand shows the felt per-module perturbation s·‖BAx‖/‖Wx‖ is flat in
+nominal rank (0.103 r8 vs 0.108 r64) with the cliff at ~12%. Caveat: lr-doubling grows ‖B·ΔA‖
+2.3× not 4× — scale-invariance is imperfect. JSONs in `outputs/analysis/adapter_norms_probe_*` /
+`adapter_activations_probe_*`; presented in notebook §9c.
+
+**Adapter-decomposition sweep pipeline (2026-07-30):** the decomposition graduated from the one-off
+`scripts/adapter_norms_probe.py` (5 hand-picked cells) to the standard layering, so the mechanism
+claims can rest on a measured surface rather than a sample:
+`src/subliminal_learning/analysis/adapter_decomp.py` (primitives) →
+`pipelines/adapter_decomp_pipeline.py` (`AdapterDecompConfig` + `run()`, resume + manifest) →
+`scripts/probe_adapter_decomp.py` (thin CLI) → `configs/analysis/adapter_decomp/*.yaml` (the
+surfaces) → `tests/test_adapter_decomp.py` (27 tests). Sweeps **teachers and students** via fnmatch
+selectors over `{animal, base_model, lineage, tag, ftseed}`; read-only, CPU-only, no training.
+Output is **one cell per measured run**, at the same leaf shape the training trees use:
+`{output_root}/analysis/adapter_decomp/{run_tag}/cells/{kind}/{animal}/{base_model}[/{lineage}]/{param_tag}/ftseed{N}/`
+holding `rows.jsonl` (row per module × step) and `adapter_decomp_manifest.json`. Cell-per-run is
+what lets this pipeline **reuse the repo's existing machinery instead of re-implementing it** —
+`run_gate.gate_action` for SKIP / measure / ERROR-on-drift, manifest-written-last for free resume,
+`acquire_claim` for concurrent safety, `write_run_set_card` + `append_runs_index` for campaign
+registration; `read_rows(run_dir)` reassembles a sweep in one call. The first cut instead hand-rolled
+a `progress.jsonl` ledger, a rows/ledger reconciliation pass and an mtime staleness check — a worse
+parallel implementation of the gate that also had no claim locking; replaced 2026-07-30 following
+`cka_pipeline`, which is the precedent for a measurement sweep of this shape.
+Provenance rides in each cell's `run_identity`: the adapter's `weights_sha256` (per artifact, so a
+checkpoint series is pinned step by step), `adapter_config_sha256`, base repo + resolved `snapshot`
+sha, the LoRA block, `wrong_seed_control`/offset, `decomp_schema`, and the **upstream training
+run's own `run_identity`** — number-dataset dir, `filtered_sha256`, subsample seed, train seed. So
+an adapter retrained in place, a rewritten adapter config, a re-downloaded base revision, or a
+refreshed number dataset all surface as a *diffed, loud* identity drift rather than a silent stale
+read. `device` is deliberately excluded (execution detail, recorded on rows and in the manifest
+body alongside `library_versions`). `_w0_cache/` is a sibling of the run dirs, keyed by **repo +
+snapshot sha**: this HF cache really does hold two snapshots for `pythia-160m-data-seed1`, so a
+name-only key would have served norms from the wrong revision after a re-download. Three things make a large sweep affordable, versus the ~336 full SVDs per adapter the old
+script did: Frobenius norms never factorise; **`‖B@A‖` is computed exactly from an `r×r` matrix**
+via thin QR (`BA = Q_b (R_b R_aᵀ) Q_aᵀ`, so its singular values are those of `R_b R_aᵀ`); and
+`W_0`'s one genuinely full-rank SVD is disk-cached per base repo. `A_init` is reconstructed once
+per `(base repo, ftseed, r, target_modules)` group and reused across every tag and checkpoint step.
+Resume is per-adapter (`progress.jsonl`), so an interrupted or widened sweep never recomputes.
+Two tests are load-bearing: the **seeding-order contract** (`teachers/sft_io.py` must seed
+immediately before the PEFT wrap — otherwise every `A_init`-relative number silently becomes noise)
+and **fast-path equivalence** (`low_rank_norms` == full SVD of the materialised product).
+Shipped surfaces, all dry-run verified against the tree: `rank_ladders` (105 adapters, matching the
+Test-1 design), `mech_probe_growth` (287 = 7 runs × 41 steps), `focus_cross_init` (1,106 across the
+ds1/ws1 arms), `teachers_dog` (1,080). Always `--dry-run` before widening: the student tree holds
+~13.6k final adapters and the teacher tree ~74k. Nothing has been swept yet.
+
+**Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
+teacher distilling into data-seed1 vs weight-seed1 at matched teacher and student HP, the *only*
+input difference is the frozen `W_0`. Diffing the two `train_manifest.json` leaves just
+`base_model`, the derived `checkpoint_dir`, and the outcome `final_train_loss`; both point at the
+same `number_dataset_dir` file, the tokenizers are sha-identical, `ftseed` seeds the sampler so data
+order matches, and `A_init` is **bit-identical** across PolyPythia variants (PEFT's
+`kaiming_uniform_` reads tensor shapes, never the pretrained values, and `set_seed` runs after
+`from_pretrained`). Confirmed by direct reconstruction: pythia-160m / -data-seed1 / -weight-seed2
+at seed 1, r8 share one sha; seed 2 lands at the chance-floor cosine 0.010. Corollary and caveat:
+`ftseed` is a *single* knob seeding both the LoRA init and the data order, so replicates cannot
+separate init direction from shuffle order — relevant to the Test-2 "boundary death is directional"
+claim, which would need two independent seed fields to attribute.
+
+Two follow-up sections (2026-07-28): **§12 post-mortem** — per-step loss curves are
+unrecoverable (students save no `trainer_state.json`), so `scripts/collapse_postmortem_ce.py`
+scores final checkpoints of dead/alive/mixed focus:ds1 cells on the exact completion-only
+training objective (reconstructing the shared seed-42 10k subsample) against train and held-out
+number rows → `outputs/analysis/collapse_postmortem_ce.json`. Result: dead runs fit their
+training data as well as alive runs at matched HPs (mixed cells indistinguishable, all ≪ base)
+— no endpoint evidence of catapult-style divergence; collapse is targeted destruction of the
+preference behaviour, not loss of the training task. **§13 teacher breadth** — the three law
+teachers are near-identical only on-distribution; off_topic trait intrusion is 0.38/0.39
+(focus/strong) vs 0.008 (weak; base ≈ 3e-5) and storytelling 0.96/0.98 vs 0.46, a candidate
+driver of the arms' 11× yield spread (correlate only; focus vs strong breadth is identical yet
+yields differ ~3×).
 
 Result: the law generalises. All six arms give `b ≈ 0.56` (I²=2%) and `c ≈ −0.085` (I²=0%),
 with `c < 0` excluding zero in 6/6 — **rank is protective on every lineage** — and `K*`
@@ -599,6 +859,43 @@ absolute α in the law, `c ≈ 0`) or independently (stable rank ≈ r, `c = −
 2026-07-27 on three focus:data-seed1 adapters spanning rank 8–64: stable rank 1.5–3.6, flat
 in r, B-columns 7–16× more aligned than random — the rank-sum is coherent, and the frontier
 winner `r32α4@lr2e-4` is nearly a rank-1 (steering-vector-like) update.
+
+### Base-model CKA (`cka/`, `pipelines/cka_pipeline.py`, `scripts/compute_cka.py`)
+
+Minibatch linear CKA between the PolyPythia base models (the estimator is a PyTorch
+port of Google Research's TF `MinibatchCKA` from
+`do_wide_and_deep_networks_learn_the_same_things`): is the teacher base
+(pythia-160m) representationally closer to same-init (data-seed) than to same-data-order
+(weight-seed) student bases, on Pile vs on our number-sequence transfer data? The readout
+is the pair-group CONTRAST bracketed by controls, never absolute values.
+
+- `cka/minibatch.py` — faithful PyTorch port of Google's `MinibatchCKA` (Székely–Rizzo
+  U-centered Grams → unbiased HSIC₁; across-models accumulators; sums divided only in
+  `result()`; fp32; m ≥ 4 enforced) + a direct full-batch reference the tests pin the
+  port against to 1e-5.
+- `cka/pool_io.py` — sequence pools encoding the position rules: position 0 (attention
+  sink) never eligible; numbers condition samples only digit-bearing completion tokens.
+  `cka/extract_io.py` — raw post-block residual hooks (13 slots; deliberately NOT
+  `output_hidden_states`, whose last slot is post-final-LN), position-row gathering,
+  mean-pool rows, and top-r PC fit/projection.
+- Pipeline: all 7 models resident, one forward per model per batch; per-model
+  preprocessed-Gram stacks shared across all pairs × variants (raw, pc1/3/5-ablated,
+  meanpool); floor control = Gram permutation (commutes with U-centering). Pairs:
+  6 primary (ref vs each variant), 6 within-arm, 7 self (ref self = ceiling), 1 floor.
+- Explicit two-model mode (`--model-a`/`--model-b`, `cka/model_refs.py`,
+  `pipeline.run_explicit`): compare one arbitrary teacher against one arbitrary
+  student (base OR finetuned run) on any pool. Each operand is a base-spec token or a
+  path to a run dir; finetuned refs read their base from `train_manifest.json` and
+  merge the LoRA adapter (so the bare-`gpt_neox` extractor still applies). Pairs are
+  primary(A,B) + ceiling(A,A) + self(B,B, dropped when B is the same checkpoint) +
+  floor; the run identity records both operands' provenance (incl. checkpoint hashes)
+  so adapter drift trips the gate. Tag: `{condition}__{labelA}__vs__{labelB}`. The
+  base-suite path is byte-for-byte unchanged.
+- Outputs under `{output_root}/analysis/cka/{run_tag}/`: per pair×variant the 13×13
+  matrix npy + fixed-scale [0,1] png (ref rows, input→output) + convergence stack, plus
+  `summary.json` (diag/band means per group) and `meta.json` (pool sha256, model refs).
+- Smoke-verified 2026-07-30 (3 models, numbers pool): ceiling diag 1.000, floor ≈ 0,
+  cross pairs in between, PC ablation desaturates raw CKA. Tests: `tests/test_cka.py`.
 
 ### Steerability screen — deferred / provisional
 
@@ -675,6 +972,14 @@ Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DE
 Open issues, in rough priority order. Historical fixed/moot items were pruned from this
 doc on 2026-07-24; recover them from git history if needed.
 
+0. **FIXED 2026-07-27 — adapters unreadable cross-node.** `safetensors` saves through a
+   private tempfile (mode 600) and ignores the umask, so `adapter_model.safetensors`
+   written on one node of the two-node shared stash was unreadable by the other node's
+   uid (evals crashed with `PermissionError` loading a sibling seed's checkpoint). Both
+   trainer wrappers (`teachers/sft_io.py`, `sdf/sft_io.py`) now chmod the saved files to
+   0o666 after `save_model`. Pre-fix files need the one-time
+   `node_home/fix_perms_worldrw.sh` backfill **run on each node** (only the owning uid
+   can chmod).
 1. **Path bootstrap.** CLIs default to gitignored `configs/paths/paths_local.yaml`; the
    committed `paths_a100.yaml` is an unfilled template (`output_root:<>`). A fresh clone
    needs a parseable local paths file before any script runs.

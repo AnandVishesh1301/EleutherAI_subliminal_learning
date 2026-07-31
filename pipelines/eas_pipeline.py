@@ -88,7 +88,8 @@ class EASConfig:
         numbers_spec: The teacher/numbers base (base A) for a CROSS-base lineage. None (or equal
             to ``spec``) means same-base: today's behavior, byte-for-byte. When set and different,
             ``v_teacher`` is read on base A and ``v_student`` on base B (see the module docstring),
-            the teacher checkpoint + teacher-source student dirs use A's ``_nbase-`` lineage, and
+            the teacher checkpoint + teacher-source student dirs sit under A's
+            ``teacher-{A}`` lineage level, and
             two extra meta keys are stamped (``numbers_base_model_repo``, ``cross_base``).
         animal: Target animal keying the teacher lineage.
         teacher_param_tag: Teacher HP tag whose adapter is the ``v_teacher`` source.
@@ -140,7 +141,7 @@ def _is_cross(cfg: EASConfig) -> bool:
 
 
 def _numbers_base_model(cfg: EASConfig) -> str | None:
-    """The `_nbase-{model}` lineage suffix (A's model dir name) when cross, else None."""
+    """A's model dir name (the `teacher-{A}` level) when cross, else None (same-base)."""
     return model_dir_name(cfg.numbers_spec, cfg.hub_org) if _is_cross(cfg) else None
 
 
@@ -421,8 +422,8 @@ def run(cfg: EASConfig) -> dict:
     model = model_dir_name(cfg.spec, cfg.hub_org)
     # The teacher/numbers base A hosts the teacher adapter (== the student base for same-base).
     numbers_model = model_dir_name(cfg.numbers_spec or cfg.spec, cfg.hub_org)
-    # lineage_dir is the parent of the teacher-source student param dirs (carries the
-    # _nbase- suffix when cross so it resolves to the cross lineage's eas/ dir).
+    # lineage_dir is the parent of the teacher-source student param dirs (sits under the
+    # teacher-{A} level when cross so it resolves to the cross lineage's eas/ dir).
     lineage_dir = student_param_dir(
         output_root,
         source="teacher",

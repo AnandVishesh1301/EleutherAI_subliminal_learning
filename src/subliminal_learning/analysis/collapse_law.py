@@ -26,13 +26,14 @@ cheaper, with the bootstrap kept as an independent cross-check.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from subliminal_learning.analysis.frames import read_cell_set
 
 # The six arms of the campaign: (family, teacher param tag, student base model).
 # "family" names the teacher recipe's character -- focus/strong are short+aggressive, weak is
@@ -127,7 +128,7 @@ def load_law_runs(
     Args:
         output_root: The ``outputs/`` root holding ``students/``.
         animal: Target animal subtree.
-        numbers_base: Base model the teacher's numbers were generated from (the ``nbase-`` suffix).
+        numbers_base: Base model the teacher's numbers were generated from (the ``teacher-`` level).
         teacher_seed: Teacher fine-tuning seed embedded in the lineage directory name.
         dataset: Number-pool tag.
         epochs: Student epoch count to keep (the law is fit at ep20 only).
@@ -145,7 +146,7 @@ def load_law_runs(
     for family, tag, base in lineages:
         lineage_dir = (
             students_root / animal / base
-            / f"from_{tag}_tseed{teacher_seed}_nbase-{numbers_base}" / dataset
+            / f"teacher-{numbers_base}" / f"{tag}_tseed{teacher_seed}" / dataset
         )
         if not lineage_dir.exists():
             continue
@@ -153,13 +154,7 @@ def load_law_runs(
             m = _TAG_RE.fullmatch(cell_dir.name)
             if not m or int(m["ep"]) != epochs:
                 continue
-            summary_path = cell_dir / "preference_summary.json"
-            if not summary_path.exists():
-                continue
-            doc = json.loads(summary_path.read_text())
-            test = next(
-                (s for s in doc.get("summaries", []) if s.get("prompt_set") == "test"), None
-            )
+            test = read_cell_set(cell_dir, "test")
             if test is None:
                 continue
             per_seed = test.get("per_seed_p_target") or {}

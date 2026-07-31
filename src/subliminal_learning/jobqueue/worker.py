@@ -223,6 +223,21 @@ class _Pool:
             return job.slots
         return int(meta.defaults.get("slots", 1))
 
+    def _effective_cwd(self, meta: QueueMeta, job: Job) -> str:
+        """Working directory to run the job in (job field > queue default > this checkout).
+
+        The fallback is the CLAIMING pool's checkout, so on a queue root shared by two users
+        an unpinned job runs against whoever claims it — including their
+        ``configs/paths/paths_local.yaml`` and therefore their ``output_root``. Set
+        ``defaults.cwd`` (or a per-job ``cwd``) to bind jobs to the submitter's checkout.
+        """
+        if job.cwd is not None:
+            return job.cwd
+        d = meta.defaults.get("cwd")
+        if d is not None:
+            return str(d)
+        return str(REPO_ROOT)
+
     def _effective_cap(self, meta: QueueMeta) -> tuple[int | None, str | None]:
         """Queue-level stage ceiling: (cap_per_gpu, cap_group) from meta.defaults.
 
@@ -296,7 +311,7 @@ class _Pool:
         env.update({str(k): str(v) for k, v in (meta.defaults.get("env") or {}).items()})
         env.update(job.env or {})
         env["CUDA_VISIBLE_DEVICES"] = str(slot.gpu)
-        cwd = job.cwd or str(REPO_ROOT)
+        cwd = self._effective_cwd(meta, job)
         with open(log_path, "w") as f:
             f.write(
                 f"=== node={self.hostname} pid={pid} gpu={slot.gpu} "

@@ -501,6 +501,47 @@ def test_end_to_end_mini_run(tmp_path):
     assert store.job_state(tmp_path, "q", Job("boom", "exit 3")) == store.PENDING
 
 
+def _job_ran_in(root: Path, queue: str, key: str) -> Path:
+    """The directory a finished job actually ran in (last line of a ``pwd`` job's log)."""
+    rp = root / queue / "results" / f"{sanitize_jobkey(key)}.json"
+    log = Path(json.loads(rp.read_text())["log"])
+    return Path(log.read_text().splitlines()[-1].strip()).resolve()
+
+
+def test_cwd_precedence_job_over_queue_default(tmp_path):
+    """``defaults.cwd`` fills in the working dir; a per-job ``cwd`` still wins.
+
+    Regression: ``defaults.cwd`` was documented in ``model.py`` but never merged by the
+    worker, so a queue-level cwd was silently ignored and jobs ran in the CLAIMING pool's
+    checkout — reading that pool's ``paths_local.yaml`` and writing to its ``output_root``
+    (this cost 326 K-rung jobs on 2026-07-28).
+    """
+    job_dir, queue_dir = tmp_path / "jobdir", tmp_path / "queuedir"
+    job_dir.mkdir()
+    queue_dir.mkdir()
+
+    store.create_queue(tmp_path, "q", defaults={"cwd": str(queue_dir)})
+    store.append_jobs(
+        tmp_path, "q",
+        [Job("uses_default", "pwd"), Job("uses_own", "pwd", cwd=str(job_dir))],
+    )
+    run_pool(tmp_path, workers=2, gpu=FakeGpuManager(), hostname="testnode",
+             poll_s=0.01, gpu_wait_s=0.01)
+
+    assert _job_ran_in(tmp_path, "q", "uses_default") == queue_dir.resolve()
+    assert _job_ran_in(tmp_path, "q", "uses_own") == job_dir.resolve()
+
+
+def test_cwd_falls_back_to_repo_root_when_unset(tmp_path):
+    """With neither a per-job nor a queue-level cwd, jobs run in the claiming checkout."""
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job("bare", "pwd")])
+    run_pool(tmp_path, workers=1, gpu=FakeGpuManager(), hostname="testnode",
+             poll_s=0.01, gpu_wait_s=0.01)
+
+    assert _job_ran_in(tmp_path, "q", "bare") == Path(store.REPO_ROOT).resolve()
+
+
 def test_end_to_end_no_queues_exits_cleanly(tmp_path):
     # An empty root: pool should return immediately (all_complete over zero queues).
     run_pool(tmp_path, workers=2, gpu=FakeGpuManager(), hostname="testnode",

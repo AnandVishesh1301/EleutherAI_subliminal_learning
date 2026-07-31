@@ -107,7 +107,8 @@ def test_leaf_without_checkpoints_dir_not_selected(tmp_path):
 
 
 def test_resumable_checkpoint_not_selected(tmp_path):
-    cell = tmp_path / "students" / "dog" / "pythia-160m" / "from_x_tseed1" / "tag" / "st"
+    cell = (tmp_path / "students" / "dog" / "pythia-160m"
+            / "teacher-pythia-160m" / "x_tseed1" / "tag" / "st")
     leaf = cell / "ftseed3"
     ckpt = leaf / "checkpoints"
     (ckpt / "checkpoint-500").mkdir(parents=True)
@@ -141,7 +142,7 @@ def test_numbers_ftseed_never_selected_regression(tmp_path):
     "rel,stage",
     [
         ("teachers/cat/m/tag/ftseed0/train_manifest.json.tmp.123", "teacher"),
-        ("students/dog/m/from_x_tseed1/tag/st/ftseed0/train_manifest.json.tmp.9", "distill"),
+        ("students/dog/m/teacher-m/x_tseed1/tag/st/ftseed0/train_manifest.json.tmp.9", "distill"),
         ("numbers/cat/m/tag/ftseed0/ex10-20/raw.jsonl.tmp.5", "numbers"),
         ("teachers/cat/m/tag/ftseed0/preference_eval.json.tmp.7", "eval"),
         ("teachers/cat/m/tag/preference_summary.json.tmp.7", "eval"),
@@ -191,7 +192,8 @@ def test_steerability_complete_aggregate_kept(tmp_path):
 
 
 def test_eas_real_artifacts_kept_tmp_removed(tmp_path):
-    edir = tmp_path / "students" / "dog" / "m" / "from_x_tseed1" / "tag" / "eas"
+    edir = (tmp_path / "students" / "dog" / "m"
+            / "teacher-m" / "x_tseed1" / "tag" / "eas")
     edir.mkdir(parents=True)
     real_json = edir / "eas_last.json"
     real_pt = edir / "v_teacher_last.pt"
@@ -283,7 +285,8 @@ def test_apply_actually_removes(tmp_path):
 
 
 def _cell_with_seeds(tmp_path, incomplete: set[int], complete: set[int]) -> Path:
-    cell = tmp_path / "students" / "dog" / "pythia-160m" / "from_x_tseed1" / "tag" / "st"
+    cell = (tmp_path / "students" / "dog" / "pythia-160m"
+            / "teacher-pythia-160m" / "x_tseed1" / "tag" / "st")
     for s in incomplete:
         _leaf(cell / f"ftseed{s}", complete=False)
     for s in complete:
@@ -356,48 +359,78 @@ def test_live_guard_lets_dead_sibling_through(tmp_path):
 # --------------------------------------------------------------------------- coherence
 
 
-def test_coherence_truncated_last_line_dropped_earlier_preserved(tmp_path):
-    v = tmp_path / "coherence" / "v1"
-    v.mkdir(parents=True)
-    results = v / "results.jsonl"
-    good1 = '{"record_type": "ce", "model_id": "a"}\n'
-    good2 = '{"record_type": "ce", "model_id": "b"}\n'
-    truncated = '{"record_type": "ce", "model_id": "c'  # no closing brace / newline
-    results.write_text(good1 + good2 + truncated)
-    _age(results, 999999)
-    plan = _mk_plan(tmp_path)
-    actions = plan_scan(plan, ALL)
-    hit = [a for a in actions if a.path == results]
-    assert hit and hit[0].kind == "rewrite_drop_last"
-    apply_actions(actions, plan)
-    assert results.read_text() == good1 + good2  # earlier records byte-for-byte
+def _adapter_pc_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "teachers" / "owl" / "m" / "p" / "ftseed0" / "pile_coherence"
+    d.mkdir(parents=True)
+    return d
 
 
-def test_coherence_fully_valid_results_untouched(tmp_path):
-    v = tmp_path / "coherence" / "v1"
-    v.mkdir(parents=True)
-    results = v / "results.jsonl"
-    content = '{"record_type": "ce", "model_id": "a"}\n{"record_type": "delta"}\n'
-    results.write_text(content)
-    _age(results, 999999)
-    plan = _mk_plan(tmp_path)
-    actions = plan_scan(plan, ALL)
-    assert all(a.path != results for a in actions)
-    assert results.read_text() == content
+def test_coherence_run_tmp_file_always_removed(tmp_path):
+    d = _adapter_pc_dir(tmp_path)
+    tmp = d / "v1.json.tmp.1234"
+    tmp.write_text("{}")
+    _age(tmp, 999999)
+    actions = plan_scan(_mk_plan(tmp_path), ALL)
+    assert any(a.path == tmp and a.kind == "rm_file" for a in actions)
 
 
-def test_coherence_orphan_npy_only_with_flag(tmp_path):
-    v = tmp_path / "coherence" / "v1"
-    (v / "runs" / "modelX").mkdir(parents=True)
-    npy = v / "runs" / "modelX" / "per_token_loss.npy"
+def test_coherence_complete_run_artifact_untouched(tmp_path):
+    d = _adapter_pc_dir(tmp_path)
+    jsn = d / "v1.json"
+    npy = d / "v1_per_token_loss.npy"
+    jsn.write_text('{"model_id": "m"}')
     np.save(npy, np.zeros(3, dtype=np.float32))
-    (v / "results.jsonl").write_text("")  # no record references the npy
+    _age(jsn, 999999)
     _age(npy, 999999)
+    actions = plan_scan(_mk_plan(tmp_path, coherence_orphan_npy=True), ALL)
+    assert all(a.path not in (jsn, npy) for a in actions)
 
+
+def test_coherence_run_orphan_npy_only_with_flag(tmp_path):
+    d = _adapter_pc_dir(tmp_path)
+    npy = d / "v1_per_token_loss.npy"
+    np.save(npy, np.zeros(3, dtype=np.float32))  # no sibling v1.json
+    _age(npy, 999999)
     without = plan_scan(_mk_plan(tmp_path), ALL)
     assert all(a.path != npy for a in without)
     with_flag = plan_scan(_mk_plan(tmp_path, coherence_orphan_npy=True), ALL)
     assert any(a.path == npy for a in with_flag)
+
+
+def test_coherence_run_json_missing_npy_only_with_flag(tmp_path):
+    d = _adapter_pc_dir(tmp_path)
+    jsn = d / "v1.json"
+    jsn.write_text('{"model_id": "m"}')  # no sibling npy
+    _age(jsn, 999999)
+    without = plan_scan(_mk_plan(tmp_path), ALL)
+    assert all(a.path != jsn for a in without)
+    with_flag = plan_scan(_mk_plan(tmp_path, coherence_orphan_npy=True), ALL)
+    assert any(a.path == jsn for a in with_flag)
+
+
+def test_coherence_base_orphan_npy_only_with_flag(tmp_path):
+    d = tmp_path / "coherence" / "v1" / "base" / "pythia-160m"
+    d.mkdir(parents=True)
+    npy = d / "per_token_loss.npy"
+    np.save(npy, np.zeros(3, dtype=np.float32))  # no ce.json
+    _age(npy, 999999)
+    without = plan_scan(_mk_plan(tmp_path), ALL)
+    assert all(a.path != npy for a in without)
+    with_flag = plan_scan(_mk_plan(tmp_path, coherence_orphan_npy=True), ALL)
+    assert any(a.path == npy for a in with_flag)
+
+
+def test_coherence_base_complete_untouched(tmp_path):
+    d = tmp_path / "coherence" / "v1" / "base" / "pythia-160m"
+    d.mkdir(parents=True)
+    jsn = d / "ce.json"
+    npy = d / "per_token_loss.npy"
+    jsn.write_text('{"model_id": "m", "role": "base"}')
+    np.save(npy, np.zeros(3, dtype=np.float32))
+    _age(jsn, 999999)
+    _age(npy, 999999)
+    actions = plan_scan(_mk_plan(tmp_path, coherence_orphan_npy=True), ALL)
+    assert all(a.path not in (jsn, npy) for a in actions)
 
 
 # --------------------------------------------------------------------------- coherence shard

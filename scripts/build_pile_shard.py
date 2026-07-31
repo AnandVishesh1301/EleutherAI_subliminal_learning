@@ -23,7 +23,7 @@ def main(
     configure_loguru()
     cfg = load_config(paths_config, model_config)
     coherence = load_pile_coherence_config(coherence_config)
-    shard_dir = run_build_shard(coherence, cfg.paths, cfg.model.hub_org, cfg.spec)
+    shard_dir = run_build_shard(coherence, cfg.paths, cfg.model.hub_org)
     typer.echo(f"Built shard -> {shard_dir}")
 
 

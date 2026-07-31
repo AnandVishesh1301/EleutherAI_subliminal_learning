@@ -167,12 +167,13 @@ def expected_student_rel_parts(manifest: dict) -> list[str] | None:
     recorded fields (source, animal, base_model_repo, teacher tag/ftseed, number dataset
     tag, student tag, ftseed). None if the manifest's `source` is not a known layout.
 
-    Cross-base runs carry the numbers base in a `_nbase-{short}` suffix, exactly where
-    `students.layout` puts it: on the `from_..._tseedN` lineage segment for teacher
-    students, and on the `{number_dataset_tag}` segment for base controls (whose numbers
-    come from another base's pool). The manifest records the PLAIN `number_dataset_tag`
-    plus separate `cross_base` / `numbers_base_model_repo` fields, so the suffix is
-    reconstructed from those. `rng` controls are never cross-base and stay plain.
+    The numbers/teacher base is its own ALWAYS-present `teacher-{base}` directory level (it
+    replaced the old `_nbase-{short}` suffix): `teacher-{numbers_base}` above the
+    `{teacher_tag}_tseed{T}` level for teacher students, and directly above
+    `{number_dataset_tag}` for base controls. `numbers_base_model_repo` is always recorded
+    in a student manifest and equals the student base repo for a same-base run (exactly the
+    same-base convention), so `teacher-{base}` falls back to the student base only if that
+    field is absent. `rng` controls carry no teacher-base level and stay plain.
     """
     source = manifest.get("source")
     model = (manifest.get("base_model_repo") or "").split("/")[-1]
@@ -180,20 +181,21 @@ def expected_student_rel_parts(manifest: dict) -> list[str] | None:
     ndt = manifest.get("number_dataset_tag")
     seed = manifest.get("student_ftseed")
     leaf = f"ftseed{seed}"
+    # Numbers base, always present: falls back to the student base for a same-base run whose
+    # manifest happens to omit the (equal) numbers_base_model_repo field.
+    numbers_base = (
+        manifest.get("numbers_base_model_repo") or manifest.get("base_model_repo") or ""
+    ).split("/")[-1]
     if source == "teacher":
-        lineage = f"from_{manifest.get('teacher_param_tag')}_tseed{manifest.get('teacher_ftseed')}"
-        if manifest.get("cross_base") and manifest.get("numbers_base_model_repo"):
-            lineage += f"_nbase-{manifest['numbers_base_model_repo'].split('/')[-1]}"
-        return [manifest.get("animal"), model, lineage, ndt, tag, leaf]
-    if source in ("base", "rng"):
-        ndt_seg = ndt
-        if (
-            source == "base"
-            and manifest.get("cross_base")
-            and manifest.get("numbers_base_model_repo")
-        ):
-            ndt_seg = f"{ndt}_nbase-{manifest['numbers_base_model_repo'].split('/')[-1]}"
-        return ["controls", source, model, ndt_seg, tag, leaf]
+        teacher_tag = f"{manifest.get('teacher_param_tag')}_tseed{manifest.get('teacher_ftseed')}"
+        return [
+            manifest.get("animal"), model, f"teacher-{numbers_base}", teacher_tag,
+            ndt, tag, leaf,
+        ]
+    if source == "base":
+        return ["controls", "base", model, f"teacher-{numbers_base}", ndt, tag, leaf]
+    if source == "rng":
+        return ["controls", "rng", model, ndt, tag, leaf]
     return None
 
 
@@ -203,8 +205,9 @@ def check_path_agreement(
     """Problem lines where an existing run dir's PATH disagrees with its manifest.
 
     Compares each `students/`-relative path component (animal, model incl. any `@revision`,
-    teacher tag/tseed lineage, dataset tag, student tag, ftseed) against the value the
-    manifest records, and checks the leaf ftseed number equals `run_identity.train.seed`.
+    teacher-base level, teacher tag/tseed level, dataset tag, student tag, ftseed) against
+    the value the manifest records, and checks the leaf ftseed number equals
+    `run_identity.train.seed`.
     """
     try:
         rel = list(ftseed_dir.relative_to(students_root).parts)
@@ -219,11 +222,19 @@ def check_path_agreement(
         ]
 
     problems: list[str] = []
-    labels = (
-        ["animal", "model", "lineage", "number_dataset_tag", "student_tag", "ftseed"]
-        if manifest.get("source") == "teacher"
-        else ["controls", "source", "model", "number_dataset_tag", "student_tag", "ftseed"]
-    )
+    source = manifest.get("source")
+    if source == "teacher":
+        labels = [
+            "animal", "model", "teacher_base", "teacher_tag", "number_dataset_tag",
+            "student_tag", "ftseed",
+        ]
+    elif source == "base":
+        labels = [
+            "controls", "source", "model", "teacher_base", "number_dataset_tag",
+            "student_tag", "ftseed",
+        ]
+    else:  # rng
+        labels = ["controls", "source", "model", "number_dataset_tag", "student_tag", "ftseed"]
     if len(rel) != len(expected):
         problems.append(
             f"{ftseed_dir.name}: path {'/'.join(rel)} has {len(rel)} components under "
