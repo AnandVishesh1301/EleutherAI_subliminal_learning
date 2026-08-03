@@ -26,6 +26,7 @@ All ``nvidia-smi`` access is behind :func:`query_free_mem`, and the lock ``prefi
 from __future__ import annotations
 
 import fcntl
+import getpass
 import json
 import os
 import re
@@ -36,7 +37,9 @@ from pathlib import Path
 
 from loguru import logger
 
-DEFAULT_LOCK_PREFIX = "/tmp/subliminal_jobq"
+# Per-user: these flock files live in a world-readable /tmp and are owned by whoever
+# creates them, so a shared prefix makes one account's locks unopenable by the other.
+DEFAULT_LOCK_PREFIX = f"/tmp/subliminal_jobq_{getpass.getuser()}"
 DEFAULT_RESERVATION_WARMUP_S = 300
 
 

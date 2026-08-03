@@ -9,7 +9,10 @@
 #                   gaps between stages while the driver hasn't submitted the
 #                   next queue yet),
 #        driver  -> the campaign driver in --watch mode (submits A1/A2 now,
-#                   then A3 / Stage B automatically as gates pass),
+#                   then A3 / Stage B automatically as gates pass). Runs with
+#                   --auto-reconcile-sha so a commit landing mid-campaign is
+#                   recorded on the run-set card instead of stranding every
+#                   queued cell on the staleness guard,
 #        notify  -> isolated Discord sidecar (tools/campaign_notify) when .env is set.
 #
 # Stage A0 prerequisites (driver gate refuses to submit without them):
@@ -27,7 +30,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 HOST=$(hostname)
 SESSION=slbreadth
-ROOT="$REPO/run_logs/queue"
+# queue_root comes from the paths YAML (config.resolve_queue_root), never from the
+# repo-relative run_logs/ symlink: that link is created by a shared bootstrap script
+# and has pointed into another user's SSD subdir before.
+ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text())))")
 DRIVER_FLAGS="${*:-}"
 
 mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs"
@@ -61,16 +67,16 @@ tmux send-keys -t "$SESSION:workers" \
 # any gate failure -- reattach, fix, and rerun `advance`).
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 tmux send-keys -t "$SESSION:driver" \
-  "uv run python -m scripts.run_student_hp_campaign watch --queue-root $ROOT --interval 300 $DRIVER_FLAGS" C-m
+  "uv run python -m scripts.run_student_hp_campaign watch --queue-root $ROOT --interval 300 --auto-reconcile-sha $DRIVER_FLAGS" C-m
 
 # Window 3: Discord notify sidecar (isolated tools/campaign_notify uv project).
 # Additive only — never imports training code; fails soft if webhook/.env missing.
 NOTIFY_TOOL="$REPO/tools/campaign_notify"
-if [ -f "$NOTIFY_TOOL/.env" ] || [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+if [ -f "$NOTIFY_TOOL/.env" ] || [ -f "$NOTIFY_TOOL/.env.slbreadth" ] || [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
   tmux new-window -t "$SESSION" -n notify -c "$REPO"
   tmux send-keys -t "$SESSION:notify" \
-    "uv sync --project $NOTIFY_TOOL && uv run --project $NOTIFY_TOOL python -m campaign_notify watch" C-m
-  NOTIFY_LINE="  notify  -> Discord campaign_notify watch (ETA/GPU/probes)"
+    "uv sync --project $NOTIFY_TOOL && uv run --project $NOTIFY_TOOL python -m campaign_notify watch --profile slbreadth --queue-root $ROOT" C-m
+  NOTIFY_LINE="  notify  -> Discord campaign_notify watch --profile slbreadth (ETA/GPU/probes)"
 else
   NOTIFY_LINE="  notify  -> SKIPPED (no tools/campaign_notify/.env or DISCORD_WEBHOOK_URL)"
 fi

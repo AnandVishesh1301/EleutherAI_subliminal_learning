@@ -15,15 +15,20 @@ from pathlib import Path
 
 import pytest
 
-from subliminal_learning.training.run_set import build_run_set_card
+from subliminal_learning.training.run_set import (
+    advance_run_set_sha,
+    build_run_set_card,
+)
 from subliminal_learning.utils.run_io import (
     acquire_claim,
     append_runs_index,
     assert_unique_run_dirs,
     cell_is_done,
+    check_run_set_staleness,
     checkpoint_is_complete,
     hardlink_tree,
     read_run_set_card,
+    reconcile_run_set_sha,
     register_run_set_launch,
     release_claim,
 )
@@ -186,6 +191,69 @@ def test_register_run_set_launch_refuses_incompatible_campaign(tmp_path: Path) -
     with pytest.raises(RuntimeError, match="incompatible provenance"):
         register_run_set_launch(tmp_path, root, drifted)
     register_run_set_launch(tmp_path, root, drifted, force=True)  # explicit override
+
+
+def test_advance_run_set_sha_records_superseded_sha() -> None:
+    card = _launch_card("old", {"animals": ["cat"]}, {"corpus": "v1"})
+    advanced = advance_run_set_sha(
+        card, new_git_sha="new", at="2026-07-30T00:00:00Z", reason="committed driver"
+    )
+    assert advanced["git_sha"] == "new"
+    assert advanced["sha_advances"] == [
+        {
+            "from": "old",
+            "to": "new",
+            "at": "2026-07-30T00:00:00Z",
+            "reason": "committed driver",
+        }
+    ]
+    assert card["git_sha"] == "old"  # input untouched
+
+
+def test_advance_run_set_sha_same_sha_is_noop() -> None:
+    card = _launch_card("same", {"animals": ["cat"]}, {"corpus": "v1"})
+    assert advance_run_set_sha(
+        card, new_git_sha="same", at="t", reason="r"
+    ) is card
+
+
+def test_reconcile_run_set_sha_unblocks_a_head_advance(tmp_path: Path) -> None:
+    """The exact 20260727_slbreadth halt: HEAD moves, every queued cell then aborts."""
+    root = tmp_path / "gkd_students" / "20260726_crossinit_160m"
+    invariant = {"corpus": "v1"}
+    register_run_set_launch(
+        tmp_path, root, _launch_card("old", {"animals": ["cat"]}, invariant)
+    )
+    after_commit = _launch_card("new", {"animals": ["cat"]}, invariant)
+    with pytest.raises(RuntimeError, match="git_sha differs"):
+        check_run_set_staleness(root, after_commit, force=False)
+
+    reconciled = reconcile_run_set_sha(root, new_git_sha="new", reason="commit landed")
+
+    assert reconciled["git_sha"] == "new"
+    assert reconciled["sha_advances"][0]["from"] == "old"
+    check_run_set_staleness(root, after_commit, force=False)  # no longer refused
+    assert read_run_set_card(root)["launches"][0]["git_sha"] == "old"
+
+
+def test_reconcile_run_set_sha_no_drift_returns_none(tmp_path: Path) -> None:
+    root = tmp_path / "gkd_students" / "20260726_crossinit_160m"
+    register_run_set_launch(
+        tmp_path, root, _launch_card("same", {"animals": ["cat"]}, {"corpus": "v1"})
+    )
+    assert reconcile_run_set_sha(root, new_git_sha="same", reason="r") is None
+
+
+def test_reconcile_run_set_sha_does_not_mask_a_config_change(tmp_path: Path) -> None:
+    """Only a sha advance is reconcilable; a real experiment change must still fail."""
+    root = tmp_path / "gkd_students" / "20260726_crossinit_160m"
+    register_run_set_launch(
+        tmp_path, root, _launch_card("old", {"animals": ["cat"]}, {"corpus": "v1"})
+    )
+    reconcile_run_set_sha(root, new_git_sha="new", reason="commit landed")
+    changed = _launch_card("new", {"animals": ["cat"]}, {"corpus": "v2"})
+    with pytest.raises(RuntimeError, match="resolved_config"):
+        check_run_set_staleness(root, changed, force=False)
 
 
 def test_append_runs_index_atomic_and_deduped(tmp_path: Path) -> None:

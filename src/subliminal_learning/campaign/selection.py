@@ -9,10 +9,12 @@ degenerate data rather than returning a plausible wrong answer.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Sequence, Set
 from dataclasses import dataclass
 
 import pandas as pd
+
+from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
 
 
 @dataclass(frozen=True)
@@ -326,12 +328,12 @@ def apply_lr_extensions(
 
 @dataclass(frozen=True)
 class ControlFloorResult:
-    """Outcome of the A2 control-floor flatness gate.
+    """Outcome of the control-floor flatness gate.
 
     Attributes:
-        passed: Whether every (animal, beta) floor is flat and low.
+        passed: Whether every (animal, beta, arm) floor is flat and low.
         failures: Human-readable reasons (empty when passed).
-        floors: One row per (animal, beta, student_lr) with the floor value.
+        floors: One row per (animal, beta, arm, student_lr) with the floor value.
     """
 
     passed: bool
@@ -339,93 +341,224 @@ class ControlFloorResult:
     floors: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class FloorArm:
+    """One parameterization x optimizer arm and the lr ladder its floor must cover.
+
+    Attributes:
+        student_mode: ``"lora"`` or ``"full"``.
+        lrs: The lr ladder for this arm (optimizer optima differ by decades, so the
+            ladder is per arm rather than shared).
+        student_optim: HF optimizer name, as `evaluation.gkd_results_io.parse_gkd_tag`
+            reports it.
+        optim_momentum: SGD momentum for this arm.
+    """
+
+    student_mode: str
+    lrs: tuple[float, ...]
+    student_optim: str = DEFAULT_OPTIM
+    optim_momentum: float = 0.0
+
+    @property
+    def label(self) -> str:
+        """Short arm label for failure messages, e.g. ``lora/sgdm0.9``."""
+        return (
+            f"{self.student_mode}/{optim_slug(self.student_optim, self.optim_momentum)}"
+        )
+
+
+FLOOR_COLUMNS = [
+    "animal",
+    "beta",
+    "student_mode",
+    "student_optim",
+    "optim_momentum",
+    "student_lr",
+    "floor_p_target",
+    "skipped",
+]
+
+
+def _floor_arm_key(arm: FloorArm) -> str:
+    """`optparam_plan.Arm.key`-style id for matching a quarantine set."""
+    return arm.label.replace("/", "_")
+
+
+def _lr_quarantined(
+    arm: FloorArm, lr: float, quarantined: Set[tuple[str, float]] | None
+) -> bool:
+    if not quarantined:
+        return False
+    key = _floor_arm_key(arm)
+    return any(
+        a == key and math.isclose(float(x), float(lr), rel_tol=1e-9, abs_tol=0.0)
+        for a, x in quarantined
+    )
+
+
 def control_floor_check(
     probes: pd.DataFrame,
     *,
     animals: Sequence[str],
     betas: Sequence[float],
-    lrs: Sequence[float],
+    lrs: Sequence[float] | None = None,
     max_floor: float,
     max_spread: float,
+    arms: Sequence[FloorArm] | None = None,
+    quarantined: Set[tuple[str, float]] | None = None,
 ) -> ControlFloorResult:
-    """A2 gate: the base-teacher control floor must be low and flat across lr.
+    """Gate: the base-teacher control floor must be low and flat across lr, per arm.
 
-    Criterion, per (animal, beta): every requested lr must have a non-diverged
+    Criterion, per (animal, beta, arm): every requested lr must have a non-diverged
     control leaf; the floor at each lr is the end-of-run probe ``p_target``
     (mean over gseeds). The gate FAILS when (a) any lr floor is missing or its
     leaf diverged, (b) any floor exceeds `max_floor` (absolute ceiling — the
     procedure alone must not install the trait), or (c) ``max(floor) -
-    min(floor) > max_spread`` across the lr ladder (a floor that rises with lr
-    would confound the control-free A1 screen, so A1 must be rerun with
+    min(floor) > max_spread`` across that arm's lr ladder (a floor that rises with lr
+    would confound a control-free screen, so the screen must be rerun with
     controls). A rise is a spread, so (c) subsumes "rises with lr" while also
     rejecting a floor that is erratic in either direction.
+
+    Flatness is judged **within** an arm. Two arms whose lr ladders sit decades apart
+    (SGD vs AdamW) would otherwise be pooled into one spread that means nothing.
+
+    Quarantined ``(arm_key, lr)`` pairs are skipped for floor/spread checks but still
+    emit a floors row with ``skipped=True``. ``quarantined=None`` (the A2 default)
+    reproduces the pre-disposition gate decisions and failure messages.
 
     Args:
         probes: Output of `load_gkd_probe_trajectories`.
         animals: Animals the floor must cover.
         betas: Betas the floor must cover.
-        lrs: The lr ladder the floor must cover.
+        lrs: The lr ladder, for the single-arm (LoRA, default optimizer) form. Ignored
+            when `arms` is given; required otherwise.
         max_floor: Absolute ceiling on any control floor p_target.
-        max_spread: Max allowed (max - min) floor across the lr ladder.
+        max_spread: Max allowed (max - min) floor across one arm's lr ladder.
+        arms: Explicit parameterization x optimizer arms. ``None`` reproduces the
+            original single-arm gate exactly.
+        quarantined: ``(arm_key, lr)`` pairs excluded from the gate. Default ``None``
+            keeps the 20260727 A2 call site unchanged.
 
     Returns:
         `ControlFloorResult` (never raises; the driver fails loud on
         ``passed=False``).
+
+    Raises:
+        ValueError: Neither `arms` nor `lrs` was given.
     """
-    ctrl = probes[probes["is_control"] & (probes["student_mode"] == "lora")]
+    if arms is None:
+        if lrs is None:
+            raise ValueError("control_floor_check needs either `arms` or `lrs`")
+        arms = (FloorArm(student_mode="lora", lrs=tuple(float(x) for x in lrs)),)
+    ctrl = probes[probes["is_control"]]
     last = end_of_run_probes(ctrl)
     failures: list[str] = []
     floor_rows: list[dict] = []
     for animal in animals:
         for beta in betas:
-            floors: dict[float, float] = {}
-            for lr in lrs:
-                cell = last[
-                    (last["animal"] == animal)
-                    & last["beta"].apply(lambda b: math.isclose(float(b), float(beta)))
-                    & last["student_lr"].apply(
-                        lambda x: math.isclose(float(x), float(lr))
-                    )
+            for arm in arms:
+                floors = _arm_floors(
+                    last,
+                    animal,
+                    float(beta),
+                    arm,
+                    failures,
+                    floor_rows,
+                    quarantined=quarantined,
+                )
+                active_lrs = [
+                    lr for lr in arm.lrs if not _lr_quarantined(arm, lr, quarantined)
                 ]
-                if cell.empty:
+                if len(floors) < len(active_lrs):
+                    continue  # missing/diverged failures already recorded
+                if len(floors) < 1:
+                    continue
+                hi, lo = max(floors.values()), min(floors.values())
+                where = f"{animal}/b{beta}/{arm.label}"
+                if hi > max_floor:
                     failures.append(
-                        f"{animal}/b{beta}/lr{lr:g}: no control leaf on disk"
+                        f"{where}: control floor {hi:.4f} exceeds max_floor={max_floor}"
                     )
-                    continue
-                if cell["diverged"].any():
-                    failures.append(f"{animal}/b{beta}/lr{lr:g}: control diverged")
-                    continue
-                floor = float(cell["p_target"].mean())
-                floors[float(lr)] = floor
-                floor_rows.append(
-                    {
-                        "animal": animal,
-                        "beta": float(beta),
-                        "student_lr": float(lr),
-                        "floor_p_target": floor,
-                    }
-                )
-            if len(floors) < len(lrs):
-                continue  # missing/diverged failures already recorded
-            hi, lo = max(floors.values()), min(floors.values())
-            if hi > max_floor:
-                failures.append(
-                    f"{animal}/b{beta}: control floor {hi:.4f} exceeds "
-                    f"max_floor={max_floor}"
-                )
-            if hi - lo > max_spread:
-                failures.append(
-                    f"{animal}/b{beta}: control floor spread {hi - lo:.4f} across "
-                    f"lr exceeds max_spread={max_spread} (floor not flat — rerun "
-                    "A1 with controls)"
-                )
+                if hi - lo > max_spread:
+                    failures.append(
+                        f"{where}: control floor spread {hi - lo:.4f} across "
+                        f"lr exceeds max_spread={max_spread} (floor not flat — rerun "
+                        "the screen with controls)"
+                    )
     return ControlFloorResult(
         passed=not failures,
         failures=tuple(failures),
-        floors=pd.DataFrame(
-            floor_rows, columns=["animal", "beta", "student_lr", "floor_p_target"]
-        ),
+        floors=pd.DataFrame(floor_rows, columns=FLOOR_COLUMNS),
     )
+
+
+def _arm_floors(
+    last: pd.DataFrame,
+    animal: str,
+    beta: float,
+    arm: FloorArm,
+    failures: list[str],
+    floor_rows: list[dict],
+    *,
+    quarantined: Set[tuple[str, float]] | None = None,
+) -> dict[float, float]:
+    """Per-lr control floor for one (animal, beta, arm); appends failures/rows in place."""
+    in_arm = last[
+        (last["animal"] == animal)
+        & last["beta"].apply(lambda b: math.isclose(float(b), beta))
+        & (last["student_mode"] == arm.student_mode)
+        & _optim_mask(last, arm)
+    ]
+    floors: dict[float, float] = {}
+    for lr in arm.lrs:
+        cell = in_arm[_isclose_mask(in_arm["student_lr"], float(lr))]
+        where = f"{animal}/b{beta}/{arm.label}/lr{lr:g}"
+        skipped = _lr_quarantined(arm, lr, quarantined)
+        if skipped:
+            floor = float(cell["p_target"].mean()) if len(cell) else float("nan")
+            floor_rows.append(
+                {
+                    "animal": animal,
+                    "beta": beta,
+                    "student_mode": arm.student_mode,
+                    "student_optim": arm.student_optim,
+                    "optim_momentum": arm.optim_momentum,
+                    "student_lr": float(lr),
+                    "floor_p_target": floor,
+                    "skipped": True,
+                }
+            )
+            continue
+        if cell.empty:
+            failures.append(f"{where}: no control leaf on disk")
+            continue
+        if cell["diverged"].any():
+            failures.append(f"{where}: control diverged")
+            continue
+        floor = float(cell["p_target"].mean())
+        floors[float(lr)] = floor
+        floor_rows.append(
+            {
+                "animal": animal,
+                "beta": beta,
+                "student_mode": arm.student_mode,
+                "student_optim": arm.student_optim,
+                "optim_momentum": arm.optim_momentum,
+                "student_lr": float(lr),
+                "floor_p_target": floor,
+                "skipped": False,
+            }
+        )
+    return floors
+
+
+def _optim_mask(frame: pd.DataFrame, arm: FloorArm) -> pd.Series:
+    """Optimizer filter, tolerant of frames predating the optimizer axis."""
+    if "student_optim" not in frame.columns:
+        return pd.Series(True, index=frame.index)
+    return (frame["student_optim"] == arm.student_optim) & frame[
+        "optim_momentum"
+    ].apply(lambda m: math.isclose(float(m), arm.optim_momentum))
 
 
 def _isclose_mask(series: pd.Series, value: float) -> pd.Series:

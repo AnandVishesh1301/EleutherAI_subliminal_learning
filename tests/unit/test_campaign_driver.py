@@ -180,6 +180,79 @@ def _fake_b_outputs(cfg: CampaignDriverConfig) -> None:
                 (cdir / "preference_summary.json").write_text(_pref_summary(0.003))
 
 
+# ---- run-set provenance drift ---------------------------------------------------------
+
+
+def _write_card(cfg: CampaignDriverConfig, sha: str) -> Path:
+    root = cfg.run_set_root
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "run_set.json").write_text(
+        json.dumps(
+            {
+                "run_set_id": plan.RUN_SET_ID,
+                "git_sha": sha,
+                "resolved_config": {"corpus": "v1"},
+                "launches": [{"git_sha": sha}],
+            }
+        )
+    )
+    return root
+
+
+def test_head_advance_halts_the_driver_before_the_queue_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The driver must name the moved commit, not the failed queue it causes."""
+    cfg = _cfg(tmp_path)
+    _write_a0(cfg)
+    _write_card(cfg, "old-sha")
+    monkeypatch.setattr(
+        "pipelines.student_hp_campaign_pipeline.git_sha", lambda: "new-sha"
+    )
+
+    with pytest.raises(CampaignGateError, match="git HEAD .new-sha. has moved away"):
+        run(cfg)
+    assert not store.list_queues(cfg.queue_root)  # nothing submitted into the halt
+
+
+def test_auto_reconcile_sha_records_the_advance_and_advances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = CampaignDriverConfig(
+        output_root=tmp_path / "out",
+        queue_root=tmp_path / "queue",
+        repo_root=REPO_ROOT,
+        generated_dir_override=tmp_path / "generated",
+        auto_reconcile_sha=True,
+    )
+    _write_a0(cfg)
+    root = _write_card(cfg, "old-sha")
+    monkeypatch.setattr(
+        "pipelines.student_hp_campaign_pipeline.git_sha", lambda: "new-sha"
+    )
+
+    result = run(cfg)
+
+    card = json.loads((root / "run_set.json").read_text())
+    assert card["git_sha"] == "new-sha"
+    assert card["sha_advances"][0]["from"] == "old-sha"
+    assert card["launches"][0]["git_sha"] == "old-sha"  # founding sha preserved
+    assert "submit_initial" in result.fired
+    assert store.queue_exists(cfg.queue_root, plan.Q_A1)
+
+
+def test_matching_head_is_not_reported_as_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path)
+    _write_a0(cfg)
+    _write_card(cfg, "same-sha")
+    monkeypatch.setattr(
+        "pipelines.student_hp_campaign_pipeline.git_sha", lambda: "same-sha"
+    )
+    assert run(cfg).fired == ("submit_initial",)
+
+
 # ---- the lifecycle test ---------------------------------------------------------------
 
 

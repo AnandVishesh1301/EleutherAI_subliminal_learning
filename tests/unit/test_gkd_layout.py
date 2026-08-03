@@ -8,12 +8,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from subliminal_learning.config import LoRAConfig
+from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
 from subliminal_learning.gkd.layout import (
+    DEFAULT_OPTIM,
     gkd_control_run_dir,
     gkd_run_label,
     gkd_student_run_dir,
     gkd_tag,
+    optim_slug,
     teacher_checkpoint_dir,
     teacher_tag,
 )
@@ -351,6 +356,79 @@ def test_18h_run_subdir_override_isolates_from_default_and_smoke() -> None:
         _ROOT, "cat", _SPEC, _HUB, gtag, 0, subdir="gkd_students/18h_run"
     )
     assert "18h_run" in ctrl_18h.parts and "controls" in ctrl_18h.parts
+
+
+_LEGACY_TAGS = (
+    # Real leaves from gkd_students/20260727_slbreadth_160m and cats_1day_run. Every one
+    # was written before the optimizer axis existed; the suffix must stay off the default
+    # optimizer or 1000+ finished cells become unreachable under their own paths.
+    ("lmb1.0_b1.0_lora_lr4e-4_e1_r8a16", dict(lmbda=1.0, beta=1.0, student_mode="lora",
+                                              learning_rate=4e-4, num_epochs=1,
+                                              lora=LoRAConfig(r=8, lora_alpha=16,
+                                                              lora_dropout=0.0,
+                                                              target_modules="all-linear"))),
+    ("lmb1.0_b1.0_full_lr2e-5_e3", dict(lmbda=1.0, beta=1.0, student_mode="full",
+                                        learning_rate=2e-5, num_epochs=3)),
+    ("lmb1.0_b0.0_lora_lr2e-4_e0.5_r64a64", dict(lmbda=1.0, beta=0.0,
+                                                 student_mode="lora",
+                                                 learning_rate=2e-4, num_epochs=0.5,
+                                                 lora=LoRAConfig(r=64, lora_alpha=64,
+                                                                 lora_dropout=0.0,
+                                                                 target_modules="all-linear"))),
+)
+
+
+def test_gkd_tag_default_optimizer_is_byte_identical_to_legacy() -> None:
+    for expected, kwargs in _LEGACY_TAGS:
+        assert gkd_tag(**kwargs) == expected
+        assert gkd_tag(**kwargs, optim=DEFAULT_OPTIM) == expected
+        assert gkd_tag(**kwargs, optim=DEFAULT_OPTIM, optim_momentum=0.0) == expected
+
+
+def test_gkd_tag_non_default_optimizers_are_distinct() -> None:
+    base = dict(
+        lmbda=1.0, beta=1.0, student_mode="full", learning_rate=2e-5, num_epochs=1
+    )
+    tags = {
+        slug: gkd_tag(**base, optim=optim, optim_momentum=momentum)
+        for slug, (optim, momentum) in {
+            "adamw": ("adamw_torch", 0.0),
+            "rmsprop": ("rmsprop", 0.0),
+            "sgd": ("sgd", 0.0),
+            "sgdm0.9": ("sgd", 0.9),
+        }.items()
+    }
+    assert len(set(tags.values())) == 4
+    assert tags["adamw"] == "lmb1.0_b1.0_full_lr2e-5_e1"
+    assert tags["sgdm0.9"] == "lmb1.0_b1.0_full_lr2e-5_e1_sgdm0.9"
+
+
+def test_gkd_tag_optimizer_round_trips_through_parse() -> None:
+    for optim, momentum in (
+        ("adamw_torch", 0.0),
+        ("rmsprop", 0.0),
+        ("sgd", 0.0),
+        ("sgd", 0.9),
+    ):
+        tag = gkd_tag(
+            lmbda=1.0,
+            beta=1.0,
+            student_mode="full",
+            learning_rate=2e-5,
+            num_epochs=1,
+            optim=optim,
+            optim_momentum=momentum,
+        )
+        parsed = parse_gkd_tag(tag)
+        assert (parsed["student_optim"], parsed["optim_momentum"]) == (optim, momentum)
+
+
+def test_optim_slug_rejects_momentum_on_a_momentumless_optimizer() -> None:
+    # A silently-ignored momentum would put two different optimizers on one leaf.
+    with pytest.raises(ValueError):
+        optim_slug("adamw_torch", 0.9)
+    with pytest.raises(ValueError):
+        optim_slug("adafactor")
 
 
 def test_run_label_treatment_vs_control() -> None:

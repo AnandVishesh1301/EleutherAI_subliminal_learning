@@ -9,6 +9,7 @@ import pytest
 
 from subliminal_learning.campaign import config_gen, plan
 from subliminal_learning.campaign.selection import (
+    FloorArm,
     Recipe,
     apply_lr_extensions,
     control_floor_check,
@@ -371,6 +372,45 @@ def test_control_floor_diverged_control_fails() -> None:
     )
     assert not res.passed
     assert any("diverged" in f for f in res.failures)
+
+
+def test_control_floor_quarantined_none_matches_a2_failures() -> None:
+    """``quarantined=None`` keeps the pre-disposition pass/fail contract."""
+    rows = _floor_rows({lr: 0.003 for lr in LRS})
+    rows[-1]["diverged"] = True
+    res = control_floor_check(
+        _frame(rows),
+        animals=["cat"],
+        betas=[1.0],
+        lrs=LRS,
+        max_floor=0.02,
+        max_spread=0.01,
+        quarantined=None,
+    )
+    assert not res.passed
+    assert any("diverged" in f for f in res.failures)
+    assert "skipped" in res.floors.columns
+    assert not res.floors["skipped"].any()
+
+
+def test_control_floor_quarantined_rung_skipped_but_reported() -> None:
+    rows = _floor_rows({lr: 0.003 for lr in LRS})
+    # Make the top rung diverge AND elevate so without quarantine the gate fails.
+    rows[-1]["diverged"] = True
+    arm = FloorArm(student_mode="lora", lrs=LRS)
+    res = control_floor_check(
+        _frame(rows),
+        animals=["cat"],
+        betas=[1.0],
+        max_floor=0.02,
+        max_spread=0.01,
+        arms=[arm],
+        quarantined={("lora_adamw", 4e-4)},
+    )
+    assert res.passed
+    skipped = res.floors[res.floors["skipped"]]
+    assert len(skipped) == 1
+    assert skipped.iloc[0]["student_lr"] == pytest.approx(4e-4)
 
 
 # ---- recipe freeze -------------------------------------------------------------------

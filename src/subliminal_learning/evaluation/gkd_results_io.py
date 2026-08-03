@@ -7,6 +7,11 @@ per config, the same three summaries the SDF pipeline emits (it is reused verbat
 - ``sdf_forced_choice_summary.json`` -> `load_gkd_forced_choice_results` (M2 share vector).
 - ``sdf_capability_summary.json``    -> `load_gkd_capability_results`  (M6a Pile PPL, M6b benches).
 
+Per-leaf training artifacts are loaded alongside them: `load_gkd_probe_trajectories`
+(``training_metrics.jsonl``), `load_gkd_training_logs` (``trainer_log_history.jsonl``),
+`load_gkd_train_manifests` (``train_manifest.json`` -- ``final_train_loss`` and the
+resolved optimizer), and `load_gkd_grad_concentration` (``grad_concentration.jsonl``).
+
 Two subtrees are walked:
 
 - **treatments** ``{animal}/{model}/{teacher_tag}/{gkd_tag}/`` -- a student distilled from a
@@ -39,13 +44,22 @@ from subliminal_learning.evaluation.preference_scoring import (
     sign_test,
 )
 from subliminal_learning.evaluation.sdf_results_io import parse_sdf_param_tag
-from subliminal_learning.gkd.layout import CONTROL_TEACHER_TAG, GKD_STUDENTS_SUBDIR
+from subliminal_learning.gkd.layout import (
+    CONTROL_TEACHER_TAG,
+    DEFAULT_OPTIM,
+    GKD_STUDENTS_SUBDIR,
+    OPTIM_BY_SLUG,
+)
 
+# Alternation built from the layout SSOT (longest first) so a slug can never be added
+# to `gkd_tag` without becoming readable here.
+_OPTIM_ALT = "|".join(sorted(OPTIM_BY_SLUG, key=len, reverse=True))
 _GKD_TAG_RE = re.compile(
     r"^lmb(?P<lmbda>[0-9.]+)_b(?P<beta>[0-9.]+)_(?P<student_mode>full|lora)"
     r"_lr(?P<lr>[0-9.]+e-?\d+)_(?:e(?P<epochs>[0-9.]+)|s(?P<steps>\d+))"
     r"(?:_r(?P<lora_r>\d+)a(?P<lora_alpha>\d+))?(?P<vmask>_vmask)?"
-    r"(?:_ttemp(?P<ttemp>[0-9.]+))?$"
+    r"(?:_ttemp(?P<ttemp>[0-9.]+))?"
+    rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?$"
 )
 _TEACHER_TAG_RE = re.compile(
     r"^(?P<workflow>[^-]+)-(?P<param_tag>.+)-tfs(?P<tfs>\d+)"
@@ -58,9 +72,12 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
 
     Returns:
         ``{"lmbda", "beta", "student_mode", "student_lr", "num_epochs", "max_steps",
-        "student_lora_r", "student_lora_alpha", "vocab_mask", "teacher_temp"}``.
+        "student_lora_r", "student_lora_alpha", "vocab_mask", "teacher_temp",
+        "student_optim", "optim_momentum"}``.
         ``num_epochs``/``max_steps`` are mutually exclusive (the other is ``None``);
-        rank fields are ``None`` for full FT.
+        rank fields are ``None`` for full FT. A tag with no optimizer suffix -- every
+        tag written before the optimizer axis existed -- reads back as the default
+        `DEFAULT_OPTIM` with momentum ``0.0``.
 
     Raises:
         ValueError: if `gkd_tag` matches neither the epoch- nor step-budget format.
@@ -82,6 +99,10 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         else None,
         "vocab_mask": bool(g["vmask"]),
         "teacher_temp": float(g["ttemp"]) if g["ttemp"] is not None else 1.0,
+        "student_optim": OPTIM_BY_SLUG[g["optim"]]
+        if g["optim"] is not None
+        else DEFAULT_OPTIM,
+        "optim_momentum": float(g["momentum"]) if g["momentum"] is not None else 0.0,
     }
 
 
@@ -223,6 +244,8 @@ PREFERENCE_COLUMNS = [
     "student_lora_alpha",
     "vocab_mask",
     "teacher_temp",
+    "student_optim",
+    "optim_momentum",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -301,6 +324,8 @@ FORCED_CHOICE_COLUMNS = [
     "student_lora_alpha",
     "vocab_mask",
     "teacher_temp",
+    "student_optim",
+    "optim_momentum",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -438,6 +463,8 @@ LEAF_IDENTITY_COLUMNS = [
     "student_lora_alpha",
     "vocab_mask",
     "teacher_temp",
+    "student_optim",
+    "optim_momentum",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -679,13 +706,138 @@ def load_gkd_training_logs(
                     "gseed": gseed,
                     "step": rec.get("step"),
                     "epoch": rec.get("epoch"),
-                    **{
-                        col: rec.get(key) for key, col in _LOG_FIELD_MAP.items()
-                    },
+                    **{col: rec.get(key) for key, col in _LOG_FIELD_MAP.items()},
                     "run_dir": str(path.parent),
                 }
             )
     return pd.DataFrame(rows, columns=TRAINING_LOG_COLUMNS)
+
+
+# ---- per-leaf training manifests (train_manifest.json) -----------------------
+
+TRAIN_MANIFEST_COLUMNS = [
+    *LEAF_IDENTITY_COLUMNS,
+    "final_train_loss",
+    "n_train_steps",
+    "n_train_prompts",
+    "run_set_id",
+    "optimizer_class",
+    "optimizer_defaults",
+    "run_dir",
+]
+
+
+def load_gkd_train_manifests(
+    output_root: Path,
+    subdir: str = GKD_STUDENTS_SUBDIR,
+    animals: list[str] | None = None,
+    models: list[str] | None = None,
+) -> pd.DataFrame:
+    """One row per leaf from ``train_manifest.json`` (the loss-matching evidence).
+
+    ``final_train_loss`` is what the optimizer arms are matched on (Blank et al.
+    Appendix L), and it exists nowhere else: the eval summaries carry only behaviour.
+    ``optimizer_class`` / ``optimizer_defaults`` come from the manifest's
+    ``optimizer_resolved`` block, so an arm's actual RMSProp/SGD settings are readable
+    without re-deriving them from library defaults.
+
+    Args:
+        output_root: Artifact root from the paths config.
+        subdir: Student tree under `output_root` (e.g. a run-set subdir).
+        animals: Optional animal filter.
+        models: Optional student base-model dir-name filter.
+
+    Returns:
+        DataFrame with `TRAIN_MANIFEST_COLUMNS`; leaves with an unparseable
+        ``gkd_tag`` or an unreadable manifest are skipped.
+    """
+    rows: list[dict] = []
+    for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
+        output_root, subdir, animals, models, filename="train_manifest.json"
+    ):
+        axes = _axes(animal, model, tt, gt, ctrl)
+        doc = _read_doc(path)
+        if axes is None or doc is None:
+            continue
+        optimizer = doc.get("optimizer_resolved") or {}
+        rows.append(
+            {
+                **axes,
+                "gseed": gseed,
+                "final_train_loss": doc.get("final_train_loss"),
+                "n_train_steps": doc.get("n_train_steps"),
+                "n_train_prompts": doc.get("n_train_prompts"),
+                "run_set_id": doc.get("run_set_id"),
+                "optimizer_class": optimizer.get("class"),
+                "optimizer_defaults": optimizer.get("defaults"),
+                "run_dir": str(path.parent),
+            }
+        )
+    return pd.DataFrame(rows, columns=TRAIN_MANIFEST_COLUMNS)
+
+
+# ---- gradient-concentration probe (grad_concentration.jsonl) -----------------
+
+GRAD_CONCENTRATION_COLUMNS = [
+    *LEAF_IDENTITY_COLUMNS,
+    "step",
+    "n_trainable_elements",
+    "n_trainable_tensors",
+    "n_sampled",
+    "top_decile_share",
+    "top_pct_share",
+    "mean_abs_grad",
+    "max_abs_grad",
+    "run_dir",
+]
+
+
+def load_gkd_grad_concentration(
+    output_root: Path,
+    subdir: str = GKD_STUDENTS_SUBDIR,
+    animals: list[str] | None = None,
+    models: list[str] | None = None,
+) -> pd.DataFrame:
+    """One row per measured step from every leaf's ``grad_concentration.jsonl``.
+
+    Present only for cells run with `GkdConfig.grad_probe` on -- the opt-in probe of
+    Blank et al.'s stated mechanism (a small parameter fraction carrying most of the
+    gradient mass). ``top_decile_share`` / ``top_pct_share`` are the top-10% and top-1%
+    shares of total ``|grad|``.
+
+    Args:
+        output_root: Artifact root from the paths config.
+        subdir: Student tree under `output_root` (e.g. a run-set subdir).
+        animals: Optional animal filter.
+        models: Optional student base-model dir-name filter.
+
+    Returns:
+        DataFrame with `GRAD_CONCENTRATION_COLUMNS` (empty when the probe was off).
+    """
+    rows: list[dict] = []
+    for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
+        output_root, subdir, animals, models, filename="grad_concentration.jsonl"
+    ):
+        axes = _axes(animal, model, tt, gt, ctrl)
+        if axes is None:
+            continue
+        for rec in _read_probe_records(path):
+            rows.append(
+                {
+                    **axes,
+                    "gseed": gseed,
+                    "step": rec.get("step"),
+                    "n_trainable_elements": rec.get("n_trainable_elements"),
+                    "n_trainable_tensors": rec.get("n_trainable_tensors"),
+                    "n_sampled": rec.get("n_sampled"),
+                    "top_decile_share": rec.get("top0.1_share"),
+                    "top_pct_share": rec.get("top0.01_share"),
+                    "mean_abs_grad": rec.get("mean_abs_grad"),
+                    "max_abs_grad": rec.get("max_abs_grad"),
+                    "run_dir": str(path.parent),
+                }
+            )
+    return pd.DataFrame(rows, columns=GRAD_CONCENTRATION_COLUMNS)
 
 
 # ---- subliminal effect: treatment - matched base-teacher control -------------
@@ -704,8 +856,13 @@ _TREATMENT_AVG_KEYS = [
 _CONTROL_JOIN_KEYS = ["animal", "model", "gkd_tag", "set"]
 
 
-def _ensure_teacher_lineage_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill missing cross-init columns (older hand-built frames / pre-_tbase loads)."""
+def _ensure_optional_axis_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill axis columns added after the first loaders shipped, with their defaults.
+
+    Cross-init lineage (``_tbase-``) and the optimizer axis both post-date frames that
+    callers may still hand-build or have persisted. Backfilling the pre-axis default
+    keeps such a frame groupable instead of failing on a missing key.
+    """
     out = df.copy()
     if "teacher_cross_init" not in out.columns:
         out["teacher_cross_init"] = False
@@ -713,6 +870,10 @@ def _ensure_teacher_lineage_cols(df: pd.DataFrame) -> pd.DataFrame:
         out["teacher_cross_init"] = out["teacher_cross_init"].fillna(False)
     if "teacher_base_label" not in out.columns:
         out["teacher_base_label"] = None
+    if "student_optim" not in out.columns:
+        out["student_optim"] = DEFAULT_OPTIM
+    if "optim_momentum" not in out.columns:
+        out["optim_momentum"] = 0.0
     return out
 
 
@@ -736,7 +897,7 @@ def subliminal_delta(preference: pd.DataFrame) -> pd.DataFrame:
     """
     if preference.empty:
         return preference.copy()
-    treat = _ensure_teacher_lineage_cols(preference[~preference["is_control"]])
+    treat = _ensure_optional_axis_cols(preference[~preference["is_control"]])
     ctrl = preference[preference["is_control"]].copy()
 
     axis_cols = [
@@ -750,6 +911,8 @@ def subliminal_delta(preference: pd.DataFrame) -> pd.DataFrame:
         "student_lora_alpha",
         "vocab_mask",
         "teacher_temp",
+        "student_optim",
+        "optim_momentum",
         "scoring",
     ]
     agg = {"p_target": "mean", "n_seeds": "sum"}
@@ -787,6 +950,8 @@ _CI_AXIS_COLS = [
     "student_lora_alpha",
     "vocab_mask",
     "teacher_temp",
+    "student_optim",
+    "optim_momentum",
     "scoring",
 ]
 
@@ -849,7 +1014,7 @@ def subliminal_delta_ci(
     """
     if preference.empty:
         return pd.DataFrame(columns=SUBLIMINAL_DELTA_CI_COLUMNS)
-    treat = _ensure_teacher_lineage_cols(preference[~preference["is_control"]])
+    treat = _ensure_optional_axis_cols(preference[~preference["is_control"]])
     ctrl = preference[preference["is_control"]]
     ctrl_by_key = {key: g for key, g in ctrl.groupby(_CONTROL_JOIN_KEYS, dropna=False)}
     rows: list[dict] = []

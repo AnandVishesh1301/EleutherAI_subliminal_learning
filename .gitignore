@@ -4,9 +4,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-*.pdf
 
 .env
+tools/campaign_notify/.env
+tools/campaign_notify/.env.*
+!.env.example
+!tools/campaign_notify/.env.example
 .claude
 run_logs/
 

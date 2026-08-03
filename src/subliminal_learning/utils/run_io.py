@@ -24,6 +24,7 @@ from subliminal_learning.training.run_manifest import RunManifest
 from subliminal_learning.training.run_set import (
     RUN_SET_JSON,
     RUNS_INDEX,
+    advance_run_set_sha,
     card_conflict,
     merge_run_set_card,
     runs_index_row,
@@ -239,9 +240,63 @@ def check_run_set_staleness(
     if force:
         logger.warning("{} Proceeding (--force); campaign provenance will be mixed.", msg)
         return
-    raise RuntimeError(
-        f"{msg} Refusing to mix; pass --force to override or use a fresh run_set_id."
+    remedy = (
+        "HEAD moved while the campaign was running: record the advance with "
+        "`uv run python -m scripts.reconcile_run_set <run_set_root> --reason ...`, "
+        "then requeue."
+        if reason.startswith("git_sha differs")
+        else "Pass --force-run-set to override or use a fresh run_set_id."
     )
+    raise RuntimeError(f"{msg} Refusing to mix. {remedy}")
+
+
+def reconcile_run_set_sha(
+    run_set_root: Path, *, new_git_sha: str | None = None, reason: str
+) -> dict[str, Any] | None:
+    """Accept a HEAD advance for an existing campaign, auditably.
+
+    The sanctioned repair for the one `card_conflict` reason that is not a real
+    experiment change: HEAD moved while the campaign was still running. Records the
+    supersession via `advance_run_set_sha` and rewrites the card, so subsequent
+    launches pass the guard without `--force-run-set` weakening it for every future
+    cell. A `resolved_config` conflict is a genuine experiment change and is left to
+    fail.
+
+    Args:
+        run_set_root: ``{output_root}/{workflow}/{run_set_id}``.
+        new_git_sha: Commit to accept (default: the working tree's current HEAD).
+        reason: Why the advance is legitimate; stored on the advance record.
+
+    Returns:
+        The rewritten card, or ``None`` when there is no card or no drift.
+
+    Raises:
+        RuntimeError: The current HEAD is unavailable, so drift cannot be judged.
+    """
+    existing = read_run_set_card(run_set_root)
+    if existing is None:
+        return None
+    target = new_git_sha or git_sha()
+    if target is None:
+        raise RuntimeError(
+            f"cannot reconcile {run_set_root}: git HEAD is unavailable and no "
+            "--new-git-sha was given"
+        )
+    if existing.get("git_sha") == target:
+        return None
+    advanced = advance_run_set_sha(
+        existing, new_git_sha=target, at=utc_now_iso(), reason=reason
+    )
+    write_run_set_card(run_set_root, advanced)
+    logger.warning(
+        "run_set {!r}: accepted git_sha advance {} -> {} ({}). Cells already on disk "
+        "keep their own manifest sha; the superseded sha is in sha_advances[].",
+        existing.get("run_set_id"),
+        existing.get("git_sha"),
+        target,
+        reason,
+    )
+    return advanced
 
 
 def hardlink_tree(
