@@ -21,7 +21,7 @@ from pathlib import Path
 from loguru import logger
 
 from subliminal_learning.jobqueue import store
-from subliminal_learning.jobqueue.gpu import GpuManager
+from subliminal_learning.jobqueue.gpu import DEFAULT_LOCK_PREFIX, GpuManager
 from subliminal_learning.jobqueue.store import (
     QueueMeta,
     REPO_ROOT,
@@ -322,13 +322,24 @@ def run_pool(
     hostname: str | None = None,
     poll_s: float = 20.0,
     gpu_wait_s: float = 5.0,
+    lock_prefix: str | None = None,
 ) -> None:
-    """Run the foreground worker pool until every ready queue is complete (or stopped)."""
+    """Run the foreground worker pool until every ready queue is complete (or stopped).
+
+    Args:
+        lock_prefix: Optional override for GPU slot flock paths (default
+            ``/tmp/subliminal_jobq``). Use a per-user prefix when the shared
+            ``/tmp`` locks are owned by another account on the node.
+    """
     root = Path(root)
     hostname = hostname or store.this_host()
     _acquire_pid_file(root, hostname)
     master = MasterLog(root / "logs" / f"{utc_stamp()}_worker.{hostname}.log")
-    gpu = gpu or GpuManager(root, hostname)
+    gpu = gpu or GpuManager(
+        root,
+        hostname,
+        lock_prefix=lock_prefix or DEFAULT_LOCK_PREFIX,
+    )
     pool = _Pool(
         root,
         hostname,

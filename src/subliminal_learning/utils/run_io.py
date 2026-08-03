@@ -25,6 +25,8 @@ from subliminal_learning.training.run_set import (
     RUN_SET_JSON,
     RUNS_INDEX,
     card_conflict,
+    merge_run_set_card,
+    runs_index_row,
 )
 
 CLAIM_TTL_SECONDS = 24 * 3600
@@ -240,6 +242,100 @@ def check_run_set_staleness(
     raise RuntimeError(
         f"{msg} Refusing to mix; pass --force to override or use a fresh run_set_id."
     )
+
+
+def hardlink_tree(
+    src: Path, dst: Path, *, skip_names: tuple[str, ...] = (), dry_run: bool = False
+) -> tuple[int, int]:
+    """Clone `src` under `dst` as a directory tree of hardlinks to the same file data.
+
+    Adopting a legacy free-form batch tree (``sdf_teachers/12h_run``) into a run-set id
+    must not duplicate hundreds of GB on a near-full shared filesystem, and must leave
+    the original tree working for in-flight sweeps that still resolve teachers through
+    it. Hardlinks give both: the clone costs only directory entries, and the two trees
+    are independent thereafter -- directories are separate, deleting one side keeps the
+    data alive on the other, and every writer in this repo is atomic (temp +
+    ``os.replace``), which replaces the inode rather than mutating the shared one.
+
+    Idempotent: an existing destination file is left alone, so a re-run tops up a
+    partial adoption.
+
+    Args:
+        src: Existing tree to adopt.
+        dst: Destination root (created if absent).
+        skip_names: File/dir names to leave behind (locks, temp files, campaign cards).
+        dry_run: Count what would be linked without touching the filesystem.
+
+    Returns:
+        ``(n_linked, n_existing)`` file counts.
+
+    Raises:
+        FileNotFoundError: `src` does not exist.
+        OSError: The filesystem refuses a hardlink (e.g. a cross-device destination).
+    """
+    src, dst = Path(src), Path(dst)
+    if not src.is_dir():
+        raise FileNotFoundError(f"source tree to adopt does not exist: {src}")
+    n_linked = n_existing = 0
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d not in skip_names]
+        target_dir = dst / Path(root).relative_to(src)
+        if not dry_run:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            if name in skip_names or ".tmp." in name:
+                continue
+            target = target_dir / name
+            if target.exists():
+                n_existing += 1
+                continue
+            n_linked += 1
+            if not dry_run:
+                os.link(Path(root) / name, target)
+    return n_linked, n_existing
+
+
+def register_run_set_launch(
+    output_root: Path,
+    run_set_root: Path,
+    card: dict[str, Any],
+    *,
+    status: str = "running",
+    force: bool = False,
+) -> dict[str, Any]:
+    """Record one sweep launch against its campaign: guard, merge, write, index.
+
+    The single entry point every sweep uses so a campaign's ``run_set.json`` and the
+    ``RUNS_INDEX.jsonl`` row can never drift apart. An incompatible launch (different
+    git sha or campaign-invariant config) is refused unless `force`; a compatible one
+    is folded into the stored card by `merge_run_set_card`.
+
+    Args:
+        output_root: Artifact root holding ``RUNS_INDEX.jsonl``.
+        run_set_root: ``{output_root}/{workflow}/{run_set_id}``.
+        card: This launch's card from `build_run_set_card`.
+        status: Campaign status for the index row.
+        force: Proceed despite a campaign-provenance conflict.
+
+    Returns:
+        The card as written to disk (merged, when the campaign already existed).
+    """
+    check_run_set_staleness(run_set_root, card, force=force)
+    existing = read_run_set_card(run_set_root)
+    merged = merge_run_set_card(existing, card) if existing else card
+    write_run_set_card(run_set_root, merged)
+    append_runs_index(
+        output_root,
+        runs_index_row(
+            run_set_id=merged["run_set_id"],
+            run_type=merged["run_type"],
+            purpose=merged["purpose"],
+            date=merged["date"],
+            git_sha=merged["git_sha"],
+            status=status,
+        ),
+    )
+    return merged
 
 
 def append_runs_index(output_root: Path, row: dict[str, Any]) -> None:

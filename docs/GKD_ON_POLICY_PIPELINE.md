@@ -464,8 +464,10 @@ continuation — never a separate “teacher generation” dataset.
 
 Let \(S, T\) be temperature-scaled log-softmaxes over vocab (after optional column drop).
 
-- **β = 0 (forward KL):** `KL(student ‖ teacher)` via `F.kl_div(student_lp, teacher_lp, log_target=True)`.
-- **β = 1 (reverse KL):** `KL(teacher ‖ student)` (args swapped).
+- **β = 0 (forward KL):** `F.kl_div(student_lp, teacher_lp, log_target=True)`. PyTorch's
+  `kl_div(input, target)` computes `KL(target ‖ input)`, so this is **KL(teacher ‖ student)**
+  — mass-covering, matching the GKD paper's β→0 limit.
+- **β = 1 (reverse KL):** args swapped ⇒ **KL(student ‖ teacher)** — mode-seeking.
 - **else:** mixture \(m = \mathrm{logsumexp}([S+\log(1-\beta),\, T+\log\beta])\), then  
   \(\beta\,\mathrm{KL}(m\|T) + (1-\beta)\,\mathrm{KL}(m\|S)\).
 
@@ -500,8 +502,34 @@ Three channels:
 | Channel | File / sink | Cadence | Written by |
 |---|---|---|---|
 | **Probe metrics** | `training_metrics.jsonl` (+ W&B `probe/*`) | every `probe_every` steps | `GkdProbeCallback` |
-| **Step monitors** | Trainer logs → W&B (not the JSONL) | averaged into Trainer `log()` | `SubliminalGKDTrainer` |
+| **Step monitors** | `trainer_log_history.jsonl` (+ W&B) | every `logging_steps` (10) | `SubliminalGKDTrainer.log` → `_write_trainer_log_history` |
 | **Rollout audit** | `rollouts_sample.jsonl` + `rollouts_summary.json` | every `rollout_log_every` on-policy steps (default 1 = all) | `_maybe_log_rollouts` / `write_rollout_summary` |
+
+**Every leaf is self-contained on disk** — no run's signal lives only in W&B. Until
+2026-07-28 the step monitors were W&B-only, which lost the loss curve and the KL /
+mode-collapse monitors for every sweep arm with `wandb: false` (most of A3, Stage B, and
+all of Stage C). The pipeline now dumps `trainer.state.log_history` to
+`trainer_log_history.jsonl` on the way out of training — including after a failure — so
+loss, `grad_norm`, `learning_rate`, `gkd/fwd_kl`, `gkd/rev_kl`, `gkd/student_entropy`,
+`gkd/distinct_2`, `gkd/mention_rate`, `gkd/filter_drop_frac`, and `gkd/rollout_len` are
+always recoverable. Read it with
+`evaluation.gkd_results_io.load_gkd_training_logs(output_root, subdir)`, which returns the
+same identity/axis columns as `load_gkd_probe_trajectories` (they join on `run_dir`).
+
+Full per-leaf artifact set:
+
+| Path (under `…/{gkd_tag}/gseed{N}/`) | Contents |
+|---|---|
+| `train_manifest.json` | Run identity + provenance (written last, atomically — the completion marker) |
+| `checkpoints/` | LoRA adapter or full weights + tokenizer |
+| `training_metrics.jsonl` | Trait probe trajectory (`p_target`, `fc_share`, `ppl`) |
+| `trainer_log_history.jsonl` | Per-step optimization curves + divergence monitors |
+| `rollouts_sample.jsonl` / `rollouts_summary.json` | Student rollout audit + layer-2 screen summary |
+
+Per-config eval summaries (`preference_summary.json`, `sdf_forced_choice_summary.json`,
+`sdf_capability_summary.json`) sit one level up, at `…/{gkd_tag}/`. Every jobq job's full
+stdout/stderr is captured at `{queue_root}/{queue}/logs/{STAMP}_{jobkey}.{host}.log` with
+a sibling `results/{jobkey}.json` recording rc, GPU, attempt, and the log path.
 
 ### 6.1 Exact probe inputs (what is scored)
 

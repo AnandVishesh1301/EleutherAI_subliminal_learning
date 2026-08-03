@@ -81,6 +81,23 @@ metadata over free-form folder names).
   so "which teacher batch produced these students" is on disk.
 - Validation: `is_valid_run_set_id` (in `training/run_set.py`); sweeps reject a malformed
   id before any GPU work.
+- **One campaign, many launches.** A campaign is normally filled by several sweep
+  invocations — a LoRA grid plus a full-FT grid, plus one process per GPU — so the card
+  *accumulates*: `build_run_set_card` records this launch's axes, `merge_run_set_card`
+  unions them into the stored `grid_axes` and appends a `launches[]` entry (date, git
+  SHA, sweep YAML, axes). `resolved_config` therefore holds only what every cell of the
+  campaign must share (workflow, model size, SDF corpus + packing for teachers; prompt
+  pool + teacher subdir for students) — grid axes must not go there or additive launches
+  would be rejected as conflicts. `register_run_set_launch` is the single entry point
+  (guard → merge → atomic write → index row).
+- **Adopting a legacy batch tree** (`scripts/adopt_run_set.py`): clones e.g.
+  `sdf_teachers/12h_run` into `sdf_teachers/{run_set_id}` as a tree of **hardlinks**
+  (`hardlink_tree`) — no extra bytes on a near-full shared filesystem, and the original
+  tree keeps working for in-flight sweeps that still resolve through it. Directories are
+  independent, so new evals land only in the campaign; every writer here is atomic
+  (temp + `os.replace`), which replaces the inode instead of mutating the shared one.
+  Adoption writes a *seed card* (`resolved_config: {}`, no git SHA) describing the
+  adopted contents; the first real sweep launch claims it with its own provenance.
 
 ---
 
@@ -98,8 +115,26 @@ record the same **provenance envelope** while keeping their workflow-specific `b
   including `teacher.manifest_sha256` and `cross_init`.
 
 Writes are **atomic** (temp file + `os.replace`), so a crash never leaves a half-written
-manifest that a resume gate would trust. No content-hash identity scheme yet (deferred
-until Angela's branch merges); git SHA + config snapshot is the provenance for now.
+manifest that a resume gate would trust.
+
+**`run_identity` (content-hash identity gate, post-Angela-merge)** — every body also
+carries a `run_identity` sub-dict (built by `sdf_run_identity` / `gkd_run_identity` in
+each pipeline) and is compared on every "trusted-done" hit by
+`training.run_manifest.identity_gate_action`, mirroring the template/student
+`run_gate.gate_action` policy Angela's workflow already uses (reused directly, not
+duplicated): identical identity → skip; drift on a non-path-keyed input → raise instead
+of silently reusing or clobbering the artifact. Two adaptations for SDF/GKD's own cell
+shape (see `identity_gate_action` docstring): a manifest with no `run_identity` at all
+(pre-dates this gate) is trusted as skip rather than retrained, and named upstream
+content hashes (currently `teacher_manifest_sha256`) are exempted from the comparison
+when the *current* recomputed value is unavailable, so a teacher checkpoint reclaimed for
+shared-SSD quota after its students trained never blocks a routine resume check.
+
+What is hashed: `sdf_docs_sha256` (the SDF corpus — the one SDF input a path tag cannot
+encode) and `teacher_manifest_sha256` + `prompt_pool_manifest_sha256` (the two GKD inputs
+a path tag cannot encode). HPs already embedded in the path tag are still included in
+`run_identity` too (mirrors Angela's convention of double-encoding path-tagged HPs in
+`run_identity` — catches a path/tag-builder bug, not just a config-vs-path mismatch).
 
 ---
 
@@ -110,7 +145,9 @@ until Angela's branch merges); git SHA + config snapshot is the provenance for n
 - **Trusted-done gate** — `cell_is_done(run_dir)` = manifest present **and**
   `checkpoint_is_complete(checkpoints/)`. A manifest beside a config-only checkpoint (an
   interrupted save) is **not** done, so the cell re-runs instead of reloading a partial
-  model (stale-model quarantine).
+  model (stale-model quarantine). On top of that, `identity_gate_action` (§3) gates
+  whether a "done" cell is actually reused: content/HP drift under an unchanged path
+  raises rather than silently trusting a cell whose inputs moved out from under it.
 - **`.claim` lock** — `acquire_claim` creates `{run_dir}/.claim` with `O_EXCL`, so
   concurrent shards (different GPUs, one command) never collide on one leaf. A `.claim`
   older than `CLAIM_TTL_SECONDS` (24 h) is **reclaimed** (unlinked before create), so a
@@ -131,9 +168,13 @@ until Angela's branch merges); git SHA + config snapshot is the provenance for n
   growing tags, which would rename existing leaves).
 
 **Campaign level** (`check_run_set_staleness`): if a `run_set.json` already exists with a
-different git SHA or resolved-config snapshot than the current launch, warn loudly and
-**refuse** to mix into it unless `--force` or a fresh `run_set_id`. `RUNS_INDEX.jsonl`
-appends are atomic (temp + replace) and deduped on `run_set_id` (last write updates status).
+different git SHA or campaign-invariant `resolved_config` than the current launch, warn
+loudly and **refuse** to mix into it unless `--force-run-set` or a fresh `run_set_id`.
+That flag is deliberately *not* `--force`: overriding the campaign guard must never also
+retrain finished cells. Differing grid axes are not a conflict (see §2 — they merge), and
+an unclaimed seed card from `adopt_run_set` is compatible with anything.
+`RUNS_INDEX.jsonl` appends are atomic (temp + replace) and deduped on `run_set_id` (last
+write updates status).
 
 ---
 
@@ -171,24 +212,32 @@ so its paths match the sweep's.
 
 ## 7. Running many experiments at once (8× A40 playbook)
 
-Goal: **saturate all 8 A40s** during a campaign. Packing density is **task-dependent**,
-not a fixed one-process-per-GPU rule.
+Goal: **max parallelization and utilization** across **all 8 A40s (GPUs 0–7)**.
+**No concurrency ceiling** as policy — pack until VRAM/SM headroom is gone; the
+only hard stop is **OOM**. Do not leave idle GPUs or under-filled devices while
+work remains.
 
-- **Default safe recipe**: pin each process with `CUDA_VISIBLE_DEVICES`, one `run_set_id`
-  per concurrent campaign (§2), `.claim` locks on every sweep (§4), atomic manifests (§3).
-  Shard by `--animals` / `--base-models` / the pair-list so leaves never collide.
-- **Packing policy**: prefer **one heavy process per GPU** when a cell nearly fills VRAM
-  or is latency-sensitive (full-FT teacher; on-policy GKD with teacher **and** student
-  resident). When a single cell clearly **under-fills** an A40 (VRAM + SM util), **pack
-  multiple processes on that GPU** to raise utilization — as long as they stay
-  leaf-disjoint (`.claim` + distinct `run_set_id`/shards) and the pack does not make
-  wall-clock worse than leaving capacity idle. Decide per task from measured VRAM/util.
-- **Spread first, then pack**: fill all 8 GPUs before packing within any one; never share
-  a single leaf between two processes.
-- **Size-agnostic**: nothing hardcodes `160m` — model size flows through the repo id via
-  `model_dir_name` / `models/registry.py`, so later PolyPythia sizes just work.
+- **Devices 0–7**: all listed devices are available for campaign work. Placement
+  and packing follow measured resident VRAM + util and the job-queue admit
+  gates.
+- **Default safe recipe**: pin each process with `CUDA_VISIBLE_DEVICES`, one
+  `run_set_id` per concurrent campaign (§2), `.claim` locks on every sweep (§4),
+  atomic manifests (§3). Shard by `--animals` / `--base-models` / the pair-list
+  so leaves never collide.
+- **Packing policy**: measure resident VRAM + util; **spread across all 8 first**,
+  then **pack more processes per GPU** whenever a cell under-fills the device.
+  One heavy process per GPU is fine when a cell already saturates VRAM (e.g.
+  full-FT teacher; on-policy GKD with teacher **and** student resident) — that
+  is an OOM/util judgment, not a fixed one-process rule. Keep packs
+  leaf-disjoint (`.claim` + distinct `run_set_id`/shards). Job-queue
+  `cap_per_gpu` / free-mem gates are **operational OOM guards**, not a policy
+  limit on how hard to push the node.
+- **Never share a single leaf** between two processes.
+- **Size-agnostic**: nothing hardcodes `160m` — model size flows through the repo
+  id via `model_dir_name` / `models/registry.py`, so later PolyPythia sizes just
+  work.
 
-Example (a cross-init 160m campaign sharded across 4 allocated GPUs):
+Example (campaign sharded across GPUs 0–7):
 
 ```bash
 for g in 0 1 2 3; do
@@ -199,5 +248,5 @@ for g in 0 1 2 3; do
 done
 ```
 
-Each process claims disjoint leaves under the same `run_set_id`; `.claim` + the collision
-guard keep them safe, and a crash resumes on re-launch.
+Each process claims disjoint leaves under the same `run_set_id`; `.claim` + the
+collision guard keep them safe, and a crash resumes on re-launch.

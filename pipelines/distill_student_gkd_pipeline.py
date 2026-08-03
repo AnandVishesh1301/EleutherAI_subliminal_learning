@@ -56,10 +56,15 @@ from subliminal_learning.gkd.trainer_io import (
 )
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.run_gate import ERROR, SKIP, format_identity_diff
 from subliminal_learning.teachers.model_specs import spec_label
 from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.training.lora_io import build_lora_config
-from subliminal_learning.training.run_manifest import lora_manifest_blob
+from subliminal_learning.training.run_manifest import (
+    identity_gate_action,
+    lora_manifest_blob,
+)
+from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.run_io import (
     acquire_claim,
     cell_is_done,
@@ -212,6 +217,78 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
     return ttag, gtag, run_dir
 
 
+def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
+    """GKD-specific hyperparameter block (manifest body + `run_identity`, shared)."""
+    return {
+        "lmbda": cfg.gkd.lmbda,
+        "beta": cfg.gkd.beta,
+        "temperature": cfg.gkd.temperature,
+        "teacher_temp": cfg.gkd.teacher_temp,
+        "student_temp": cfg.gkd.student_temp,
+        "max_new_tokens": cfg.gkd.max_new_tokens,
+        "num_epochs": cfg.gkd.num_epochs,
+        "max_steps": cfg.gkd.max_steps,
+        "vocab_mask": cfg.gkd.vocab_mask,
+        "candidates": list(cfg.gkd.candidates),
+    }
+
+
+def _train_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
+    """Optimizer + LoRA hyperparameter block (manifest body + `run_identity`, shared)."""
+    return {
+        "learning_rate": cfg.train.learning_rate,
+        "batch_size": cfg.train.batch_size,
+        "max_length": cfg.train.max_length,
+        "warmup_ratio": cfg.train.warmup_ratio,
+        "max_grad_norm": cfg.train.max_grad_norm,
+        "lr_scheduler_type": cfg.train.lr_scheduler_type,
+        "optim": cfg.train.optim,
+        **lora_manifest_blob(cfg.lora),
+    }
+
+
+def gkd_run_identity(
+    cfg: TrainGkdStudentConfig,
+    ttag: str,
+    gtag: str,
+    teacher_manifest_sha256: str | None,
+    prompt_pool_manifest_sha256: str | None,
+) -> dict:
+    """Canonical identity of every input that can change a trained GKD student.
+
+    `teacher_tag`/`gkd_tag` disambiguate the swept HP axes on-path; this closes the gap
+    on the two inputs they cannot encode -- the frozen teacher checkpoint the student is
+    distilled from and the screened prompt pool it trains over -- so either changing
+    under an unchanged path + gseed is caught instead of silently reused
+    (`identity_gate_action`).
+
+    `teacher_manifest_sha256` is passed to `identity_gate_action`'s
+    `ignore_if_current_missing`: a teacher checkpoint reclaimed for shared-SSD quota
+    after its students were trained must not block a routine skip/resume check on this
+    (unaffected) student cell.
+
+    Args:
+        cfg: The cell's config.
+        ttag: This cell's `teacher_tag` (empty for controls).
+        gtag: This cell's `gkd_tag`.
+        teacher_manifest_sha256: Content hash of the teacher's `train_manifest.json`,
+            or `None` for a control cell (no teacher) or a currently-missing teacher.
+        prompt_pool_manifest_sha256: Content hash of the prompt pool's `manifest.json`.
+    """
+    return {
+        "target_animal": cfg.target_animal,
+        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        "control": cfg.control,
+        "teacher_tag": ttag,
+        "gkd_tag": gtag,
+        "teacher_manifest_sha256": None if cfg.control else teacher_manifest_sha256,
+        "prompt_pool_manifest_sha256": prompt_pool_manifest_sha256,
+        "finetune_mode": cfg.gkd.student_mode,
+        "gkd_hyperparameters": _gkd_hyperparameters(cfg),
+        "train_hyperparameters": _train_hyperparameters(cfg),
+    }
+
+
 def _result_from_manifest(run_dir: Path, m: dict) -> TrainGkdStudentResult:
     return TrainGkdStudentResult(
         target_animal=m["target_animal"],
@@ -252,11 +329,53 @@ def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
         sweep_slug=gkd_wandb_sweep_slug(cfg.output_subdir),
     )
 
+    teacher_manifest_path = (
+        cfg.teacher_checkpoint_dir.parent / "train_manifest.json"
+        if cfg.teacher_checkpoint_dir is not None
+        else None
+    )
+    identity = gkd_run_identity(
+        cfg,
+        ttag,
+        gtag,
+        teacher_manifest_sha256=(
+            sha256_file(teacher_manifest_path) if teacher_manifest_path else None
+        ),
+        prompt_pool_manifest_sha256=sha256_file(_resolve_pool_dir(cfg) / "manifest.json"),
+    )
+    stored_manifest: dict | None = None
+    if manifest_path.is_file():
+        try:
+            stored_manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            stored_manifest = None
+
     # Trusted-done gate: manifest present AND checkpoints/ holds final weights (task 3a).
     # A manifest beside an interrupted checkpoints/ (config only) is NOT done -> re-run.
+    # On top of that, a *complete* cell is only actually skipped if its run_identity still
+    # matches -- a teacher retrained or a prompt pool refreshed under this unchanged path
+    # raises instead of silently reusing or clobbering the artifact (task: SDF/GKD
+    # run-identity gate). A teacher checkpoint that was cleaned up post-training (current
+    # hash unavailable) does not itself block the check.
     if cell_is_done(run_dir) and not cfg.force:
-        logger.info("SKIP existing GKD student ({}): {}", label, run_dir)
-        return _result_from_manifest(run_dir, json.loads(manifest_path.read_text()))
+        decision = identity_gate_action(
+            stored_manifest,
+            identity,
+            force=False,
+            ignore_if_current_missing=("teacher_manifest_sha256",),
+        )
+        if decision.action == SKIP:
+            logger.info("SKIP existing GKD student ({}): {}", label, run_dir)
+            return _result_from_manifest(run_dir, stored_manifest)
+        if decision.action == ERROR:
+            raise RuntimeError(
+                f"refusing to reuse GKD student ({label}) at {run_dir}: the stored "
+                "run_identity differs from the current teacher/pool/config on a "
+                "non-path-keyed input, so treating this cell as done would silently "
+                "misattribute the artifact to inputs it was not trained on:\n"
+                f"{format_identity_diff(decision.diff)}\n"
+                "Pass force=True to retrain over it, or start a fresh run_set_id."
+            )
     if manifest_path.exists() and not cell_is_done(run_dir) and not cfg.force:
         logger.warning(
             "Re-running GKD student with a manifest but INCOMPLETE checkpoints/ "
@@ -442,6 +561,9 @@ def _train(
     finally:
         if "trainer" in locals():
             trainer.write_rollout_summary()
+            _write_trainer_log_history(
+                trainer, run_dir / "trainer_log_history.jsonl"
+            )
         finish_wandb_run()
 
     _write_manifest(
@@ -476,6 +598,23 @@ def _train(
         final_train_loss=train_output.training_loss,
         n_train_steps=trainer.state.global_step,
         finetune_mode=finetune_mode,
+    )
+
+
+def _write_trainer_log_history(trainer, path: Path) -> None:
+    """Persist the HF Trainer log history (one JSON record per logged step).
+
+    The per-step optimization signal — GKD loss, ``grad_norm``, ``learning_rate``,
+    and the trainer's no-grad ``gkd/fwd_kl`` / ``gkd/rev_kl`` /
+    ``gkd/student_entropy`` monitors — otherwise reaches only W&B, which is off
+    for every non-headline sweep arm. Written on the way out of training
+    (including after a failure) so no cell's loss curve is unrecoverable.
+    """
+    history = getattr(getattr(trainer, "state", None), "log_history", None)
+    if not history:
+        return
+    atomic_write_text(
+        path, "".join(f"{json.dumps(rec, sort_keys=True)}\n" for rec in history)
     )
 
 
@@ -556,6 +695,8 @@ def _write_manifest(
     )
     teacher_spec = _resolved_teacher_spec(cfg)
     cross_init = (not cfg.control) and teacher_spec != cfg.spec
+    teacher_manifest_sha256 = sha256_file(teacher_manifest) if teacher_manifest else None
+    prompt_pool_manifest_sha256 = sha256_file(pool_dir / "manifest.json")
     manifest_body = {
         "target_animal": cfg.target_animal,
         "base_model": model_dir_name(cfg.spec, cfg.hub_org),
@@ -577,41 +718,26 @@ def _write_manifest(
             ),
             "cross_init": cross_init,
             "checkpoint_dir": None if cfg.control else str(cfg.teacher_checkpoint_dir),
-            "manifest_sha256": (
-                sha256_file(teacher_manifest) if teacher_manifest else None
-            ),
+            "manifest_sha256": teacher_manifest_sha256,
             "p_target_reference": teacher_p_target,
         },
         "prompt_pool_dir": str(pool_dir),
-        "prompt_pool_manifest_sha256": sha256_file(pool_dir / "manifest.json"),
+        "prompt_pool_manifest_sha256": prompt_pool_manifest_sha256,
         "n_train_prompts": n_prompts,
-        "gkd_hyperparameters": {
-            "lmbda": cfg.gkd.lmbda,
-            "beta": cfg.gkd.beta,
-            "temperature": cfg.gkd.temperature,
-            "teacher_temp": cfg.gkd.teacher_temp,
-            "student_temp": cfg.gkd.student_temp,
-            "max_new_tokens": cfg.gkd.max_new_tokens,
-            "num_epochs": cfg.gkd.num_epochs,
-            "max_steps": cfg.gkd.max_steps,
-            "vocab_mask": cfg.gkd.vocab_mask,
-            "candidates": list(cfg.gkd.candidates),
-        },
-        "train_hyperparameters": {
-            "learning_rate": cfg.train.learning_rate,
-            "batch_size": cfg.train.batch_size,
-            "max_length": cfg.train.max_length,
-            "warmup_ratio": cfg.train.warmup_ratio,
-            "max_grad_norm": cfg.train.max_grad_norm,
-            "lr_scheduler_type": cfg.train.lr_scheduler_type,
-            "optim": cfg.train.optim,
-            **lora_manifest_blob(cfg.lora),
-        },
+        "gkd_hyperparameters": _gkd_hyperparameters(cfg),
+        "train_hyperparameters": _train_hyperparameters(cfg),
         "loss": "generalized_jsd",
         "trl_version": trl.__version__,
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": final_loss,
         "n_train_steps": n_steps,
+        "run_identity": gkd_run_identity(
+            cfg,
+            ttag,
+            gtag,
+            teacher_manifest_sha256=teacher_manifest_sha256,
+            prompt_pool_manifest_sha256=prompt_pool_manifest_sha256,
+        ),
     }
     run_dir.mkdir(parents=True, exist_ok=True)
     write_manifest(

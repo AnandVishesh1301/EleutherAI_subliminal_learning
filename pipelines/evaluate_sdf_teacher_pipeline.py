@@ -35,7 +35,6 @@ from loguru import logger
 from pipelines.evaluate_teacher_preference_pipeline import (
     EvaluateTeacherPreferenceConfig,
     PromptSet,
-    _atomic_write_json,
     _ci_to_dict,
     _discover_ftseed_dirs,
     _read_json,
@@ -74,6 +73,7 @@ from subliminal_learning.models.registry import (
 )
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.run_layout import model_dir_name
+from subliminal_learning.utils.io import atomic_write_json
 
 
 def build_sdf_prompt_sets(
@@ -294,7 +294,7 @@ def _resolve_base_metrics(
             cached["forced_choice"] = {"signature": fc_sig, "result": _fc_to_dict(fc)}
         if need_ppl:
             cached["perplexity"] = {"signature": ppl_sig, "result": _ppl_to_dict(ppl)}
-        _atomic_write_json(cache_path, cached)
+        atomic_write_json(cache_path, cached)
         logger.info("Base metrics computed (fc={}, ppl={}) -> {}", need_fc, need_ppl, cache_path)
 
     if cfg.run_benchmarks:
@@ -308,7 +308,7 @@ def _resolve_base_metrics(
                 "signature": bench_sig,
                 "result": {"tasks": res.tasks, "num_fewshot": res.num_fewshot},
             }
-            _atomic_write_json(cache_path, cached)
+            atomic_write_json(cache_path, cached)
             logger.info("Base benchmarks computed -> {}", cache_path)
     return cached
 
@@ -363,7 +363,7 @@ def _per_seed_metrics(
                 stored["forced_choice"] = {"signature": fc_sig, "result": _fc_to_dict(fc)}
             if need_ppl:
                 stored["perplexity"] = {"signature": ppl_sig, "result": _ppl_to_dict(ppl)}
-            _atomic_write_json(seed_file, stored)
+            atomic_write_json(seed_file, stored)
             logger.info(
                 "ftseed{}: fc_share={} ppl={}", seed,
                 None if not need_fc else round(fc.target_share_mean, 3),
@@ -384,7 +384,7 @@ def _per_seed_metrics(
                 "signature": bench_sig,
                 "result": {"tasks": res.tasks, "num_fewshot": res.num_fewshot},
             }
-            _atomic_write_json(seed_file, stored)
+            atomic_write_json(seed_file, stored)
             logger.info("ftseed{}: benchmarks {}", seed, res.tasks)
         if not (need_fc or need_ppl or need_bench):
             logger.info("ftseed{}: sdf metrics cached (skip)", seed)
@@ -578,7 +578,7 @@ def run(cfg: EvaluateSdfTeacherConfig) -> None:
 
     if fc_prompts:
         fc_summary = _aggregate_forced_choice(cfg, per_seed, base_metrics, candidates)
-        _atomic_write_json(cfg.param_dir / "sdf_forced_choice_summary.json", fc_summary)
+        atomic_write_json(cfg.param_dir / "sdf_forced_choice_summary.json", fc_summary)
         logger.info(
             "  forced-choice: target_share={:.3f} [{:.3f}, {:.3f}] argmax={} Δ={}",
             fc_summary["target_share_mean"], fc_summary["ci_lower"],
@@ -588,7 +588,7 @@ def run(cfg: EvaluateSdfTeacherConfig) -> None:
         )
 
     cap_summary = _aggregate_capability(cfg, per_seed, base_metrics)
-    _atomic_write_json(cfg.param_dir / "sdf_capability_summary.json", cap_summary)
+    atomic_write_json(cfg.param_dir / "sdf_capability_summary.json", cap_summary)
     ppl = cap_summary["perplexity"]
     logger.info(
         "  perplexity: overall={:.2f} base={} ratio={}",
