@@ -1,9 +1,15 @@
 """Campaign driver IO: state file, generated-config writes, jobq submission.
 
-Everything the stage machine (pipelines/student_hp_campaign_pipeline.py) needs
-that touches disk. Submission goes straight through `jobqueue.store` (the same
-functions `scripts/jobq.py submit` wraps), so the driver gets the store's
-duplicate-jobkey and exist_ok guarantees without shelling out.
+Everything a campaign stage machine (pipelines/student_hp_campaign_pipeline.py,
+pipelines/optparam_campaign_pipeline.py) needs that touches disk. Submission goes
+straight through `jobqueue.store` (the same functions `scripts/jobq.py submit`
+wraps), so the driver gets the store's duplicate-jobkey and exist_ok guarantees
+without shelling out.
+
+`CampaignDriverConfig` and the submission/state helpers are campaign-agnostic --
+the identity (`run_set_id`) and queue priorities are fields, defaulted to the
+20260727 plan. The `a1_jobs`-style builders below belong to that campaign;
+`campaign.optparam_jobs` holds the 20260801 ones.
 
 Idempotency contract: `submit_queue` is safe to re-run — an existing queue with
 the exact same jobkey set is a no-op, a mismatched jobkey set raises (the queue
@@ -13,8 +19,8 @@ was created by something else; never silently mix campaigns).
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -47,9 +53,13 @@ class CampaignDriverConfig:
         include_stage_c: Also generate + submit the optional Stage C ablations.
         require_a0: Gate the first submission on the A0 calibration +
             init-equality reports (disable only for tests).
+        auto_reconcile_sha: Record a HEAD advance on the campaign card instead of
+            halting, so a commit landing mid-campaign does not strand queued cells.
         dry_run: Log every planned action; write/submit nothing.
         generated_dir_override: Where generated YAMLs go (tests only; default
             ``{repo_root}/configs/experiment/generated``).
+        run_set_id: Campaign id whose output subtree the driver reads and writes.
+        queue_priorities: Queue name -> jobq priority for this campaign's queues.
     """
 
     output_root: Path
@@ -57,12 +67,21 @@ class CampaignDriverConfig:
     repo_root: Path
     include_stage_c: bool = False
     require_a0: bool = True
+    auto_reconcile_sha: bool = False
     dry_run: bool = False
     generated_dir_override: Path | None = None
+    run_set_id: str = plan.RUN_SET_ID
+    queue_priorities: Mapping[str, int] = field(
+        default_factory=lambda: dict(plan.QUEUE_PRIORITIES)
+    )
 
     @property
     def campaign_subdir(self) -> str:
-        return run_set_subdir(GKD_STUDENTS_SUBDIR, plan.RUN_SET_ID)
+        return run_set_subdir(GKD_STUDENTS_SUBDIR, self.run_set_id)
+
+    @property
+    def run_set_root(self) -> Path:
+        return self.output_root / self.campaign_subdir
 
     @property
     def logs_dir(self) -> Path:
@@ -221,7 +240,7 @@ def submit_queue(
     """
     if not jobs:
         raise ValueError(f"refusing to submit empty queue {name!r}")
-    priority = plan.QUEUE_PRIORITIES[name]
+    priority = cfg.queue_priorities[name]
     if store.queue_exists(cfg.queue_root, name):
         existing = {j.jobkey for j in store.load_jobs(cfg.queue_root, name)}
         incoming = {j.jobkey for j in jobs}
@@ -285,7 +304,8 @@ def queue_finished(cfg: CampaignDriverConfig, name: str) -> tuple[bool, str]:
 # ---- job builders -------------------------------------------------------------------
 
 
-def _train_cmd(yaml_rel: str, *shard_flags: str) -> str:
+def train_cmd(yaml_rel: str, *shard_flags: str) -> str:
+    """One train-sweep shard command (jobq pins the device via CUDA_VISIBLE_DEVICES)."""
     flags = " ".join(shard_flags)
     return (
         f"uv run python -m {TRAIN_MODULE} --sweep-config {yaml_rel} "
@@ -293,7 +313,8 @@ def _train_cmd(yaml_rel: str, *shard_flags: str) -> str:
     )
 
 
-def _eval_cmd(yaml_rel: str, *shard_flags: str) -> str:
+def eval_cmd(yaml_rel: str, *shard_flags: str) -> str:
+    """One verify-sweep shard command."""
     flags = " ".join(shard_flags)
     return (
         f"uv run python -m {EVAL_MODULE} --sweep-config {yaml_rel} "
@@ -301,7 +322,8 @@ def _eval_cmd(yaml_rel: str, *shard_flags: str) -> str:
     )
 
 
-def _generated(fname: str) -> str:
+def generated_rel(fname: str) -> str:
+    """Repo-relative path of a generated sweep YAML (jobs run with cwd=repo_root)."""
     return f"{plan.GENERATED_CONFIG_DIR}/{fname}"
 
 
@@ -320,7 +342,7 @@ def a1_jobs() -> list[Job]:
     return [
         Job(
             key=f"a1|{arm}|{animal}|b{beta:g}|lr{lr:g}|{mode}",
-            cmd=_train_cmd(
+            cmd=train_cmd(
                 yaml_rel,
                 "--no-control",
                 f"--animals {animal}",
@@ -345,7 +367,7 @@ def a2_jobs() -> list[Job]:
     return [
         Job(
             key=f"a2|{animal}|b{beta:g}|lr{lr:g}",
-            cmd=_train_cmd(
+            cmd=train_cmd(
                 plan.A1_SAME_YAML,
                 "--controls-only",
                 f"--student-modes {plan.A2_STUDENT_MODE}",
@@ -365,7 +387,7 @@ def a1_eval_jobs() -> list[Job]:
     return [
         Job(
             key=f"a1-eval|{arm}|{animal}|b{beta:g}|{mode}",
-            cmd=_eval_cmd(
+            cmd=eval_cmd(
                 yaml_rel,
                 f"--animals {animal}",
                 f"--beta {beta}",
@@ -391,7 +413,7 @@ def backlog_jobs() -> list[Job]:
                 f"{Path(yaml_rel).stem.removeprefix('gkd_student_verify_sweep_lora_')}"
                 f"|{model}"
             ),
-            cmd=_eval_cmd(yaml_rel, f"--base-models {model}"),
+            cmd=eval_cmd(yaml_rel, f"--base-models {model}"),
         )
         for yaml_rel in plan.CATSWIDE_VERIFY_YAMLS
         for model in plan.CATSWIDE_BASE_MODELS
@@ -412,8 +434,8 @@ def a3_jobs(train_configs: dict[str, dict], headline_names: list[str]) -> list[J
             jobs.append(
                 Job(
                     key=f"a3|{stem}|g{gseed}",
-                    cmd=_train_cmd(
-                        _generated(fname), "--no-control", f"--gseeds {gseed}"
+                    cmd=train_cmd(
+                        generated_rel(fname), "--no-control", f"--gseeds {gseed}"
                     ),
                 )
             )
@@ -421,8 +443,8 @@ def a3_jobs(train_configs: dict[str, dict], headline_names: list[str]) -> list[J
                 jobs.append(
                     Job(
                         key=f"a3-ctrl|{stem}|g{gseed}",
-                        cmd=_train_cmd(
-                            _generated(fname), "--controls-only", f"--gseeds {gseed}"
+                        cmd=train_cmd(
+                            generated_rel(fname), "--controls-only", f"--gseeds {gseed}"
                         ),
                     )
                 )
@@ -434,7 +456,7 @@ def a3_eval_jobs(verify_names: list[str]) -> list[Job]:
     return [
         Job(
             key=f"a3-eval|{Path(fname).stem.removeprefix('gkd_a3_verify_')}",
-            cmd=_eval_cmd(_generated(fname)),
+            cmd=eval_cmd(generated_rel(fname)),
         )
         for fname in sorted(verify_names)
     ]
@@ -464,8 +486,8 @@ def b_train_jobs(
                         bucket.append(
                             Job(
                                 key=f"b|{stem}|{animal}|{student}|g{gseed}|t{tfs}",
-                                cmd=_train_cmd(
-                                    _generated(fname),
+                                cmd=train_cmd(
+                                    generated_rel(fname),
                                     "--no-control",
                                     f"--animals {animal}",
                                     f"--base-models {student}",
@@ -478,8 +500,8 @@ def b_train_jobs(
                         headline.append(
                             Job(
                                 key=f"b-ctrl|{animal}|{student}|g{gseed}",
-                                cmd=_train_cmd(
-                                    _generated(fname),
+                                cmd=train_cmd(
+                                    generated_rel(fname),
                                     "--controls-only",
                                     f"--animals {animal}",
                                     f"--base-models {student}",
@@ -497,8 +519,8 @@ def b_eval_jobs(
     return [
         Job(
             key=f"b-eval|{Path(fname).stem.removeprefix('gkd_b_verify_')}|{animal}|{student}",
-            cmd=_eval_cmd(
-                _generated(fname),
+            cmd=eval_cmd(
+                generated_rel(fname),
                 f"--animals {animal}",
                 f"--base-models {student}",
             ),
@@ -521,8 +543,8 @@ def c_train_jobs(train_configs: dict[str, dict]) -> list[Job]:
                 f"c|{Path(fname).stem.removeprefix('gkd_c_')}|{animal}|{student}"
                 f"|g{gseed}"
             ),
-            cmd=_train_cmd(
-                _generated(fname),
+            cmd=train_cmd(
+                generated_rel(fname),
                 "--no-control",
                 f"--animals {animal}",
                 f"--base-models {student}",
@@ -543,8 +565,8 @@ def c_eval_jobs(
     return [
         Job(
             key=f"c-eval|{Path(fname).stem.removeprefix('gkd_c_verify_')}|{animal}|{student}",
-            cmd=_eval_cmd(
-                _generated(fname),
+            cmd=eval_cmd(
+                generated_rel(fname),
                 f"--animals {animal}",
                 f"--base-models {student}",
             ),

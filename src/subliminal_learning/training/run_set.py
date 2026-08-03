@@ -145,6 +145,37 @@ def merge_run_set_card(
     return merged
 
 
+def advance_run_set_sha(
+    card: dict[str, Any], *, new_git_sha: str, at: str, reason: str
+) -> dict[str, Any]:
+    """Re-point a campaign card at a newer commit, keeping the superseded sha on record.
+
+    A long campaign outlives the commit it started on: committing work while cells are
+    still queued moves HEAD, and `card_conflict` then refuses every remaining launch.
+    Rewriting ``git_sha`` in place would erase which commit the finished cells ran on,
+    so the supersession is appended to a ``sha_advances`` log instead. Per-cell
+    provenance is unaffected either way -- every ``train_manifest.json`` stamps its own
+    sha at write time.
+
+    Args:
+        card: The campaign card currently on disk.
+        new_git_sha: Commit the campaign should accept from now on.
+        at: UTC timestamp for the advance record.
+        reason: Why the advance was accepted (operator note or driver rule).
+
+    Returns:
+        The updated card. Unchanged when `new_git_sha` already matches.
+    """
+    if card.get("git_sha") == new_git_sha:
+        return card
+    advanced = dict(card)
+    advanced["git_sha"] = new_git_sha
+    advanced["sha_advances"] = list(card.get("sha_advances") or []) + [
+        {"from": card.get("git_sha"), "to": new_git_sha, "at": at, "reason": reason}
+    ]
+    return advanced
+
+
 def runs_index_row(
     *,
     run_set_id: str,

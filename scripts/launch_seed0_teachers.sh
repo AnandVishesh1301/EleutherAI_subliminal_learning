@@ -19,11 +19,14 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 HOST=$(hostname)
 SESSION=seed0_sdf
+# Sibling of the configured queue_root, so these pools land in the same per-user
+# SSD subdir as the campaign queues (never the repo-relative run_logs/ symlink).
+QUEUE_PARENT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text())).parent)")
 
 # $1=pool name (full|lora)  $2=GPU list json  $3=sweep yaml  $4=training yaml  $5=n shards
 setup_pool() {
   local pool="$1" gpus="$2" sweep="$3" train="$4" n="$5"
-  local root="$REPO/run_logs/queue_seed0_${pool}"
+  local root="$QUEUE_PARENT/queue_seed0_${pool}"
   local lockdir="$root/locks"
   mkdir -p "$root" "$lockdir" "$root/logs"
 

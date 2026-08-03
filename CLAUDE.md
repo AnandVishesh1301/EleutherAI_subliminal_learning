@@ -71,13 +71,27 @@ paraphrasing experiments.
 - "How does on-policy GKD student distillation work end-to-end (filters, metrics, configs,
   outputs)?" → **`docs/GKD_ON_POLICY_PIPELINE.md`** (SSOT); short summary in ARCHITECTURE.md
   § *On-policy GKD student distillation*.
+- "What is the post-Stage-B measurement stack (CKA / GKD-EAS / causal steering)?" →
+  **ARCHITECTURE.md** § *Measurement stack*; design in
+  `docs/MECHANISTIC_SL_EXPERIMENT_PLAN.md`; inventory status in `docs/RUN_INVENTORY.md` §10.
+- "What is the optimizer × parameterization (E8×E11) campaign?" →
+  **`docs/PREREG_OPTPARAM.md`** (claims C1–C5 + gates); driver summary in
+  ARCHITECTURE.md § *Automated optimizer × parameterization campaign*; inventory in
+  `docs/RUN_INVENTORY.md`.
 - "What teachers / students / HPs / evals do we already have on disk (and what are the
   in-flight tmux sweeps)?" → **`docs/RUN_INVENTORY.md`** (SSOT; update as campaigns finish).
+- "What did Stage A/B of `20260727_slbreadth_160m` conclude (HP freeze, cross-init 2×2,
+  H1/H2, what is strong vs low-signal)?" → **`docs/CAMPAIGN_RESULTS_SLBREADTH.md`**
+  (notebooks: `gkd_student_hp_exploration.ipynb`, `gkd_cross_init_factorial.ipynb`).
+  Do **not** design follow-ons as if H1 (batch composition > init) were established —
+  it is inconclusive; cross-init transfer is the strong Stage B prior.
 - "What are the design principles / robustness contracts (layering, output tree +
   `run_set_id` campaigns, run-manifest provenance, resume + staleness, W&B log-few,
   cross-init pair-list, the 8×A40 concurrency playbook)?" → **`docs/PROJECT_DESIGN.md`**
   (SSOT for design rules; inspired by `docs/KV_python_architecture_ML.md`, whose
   DB/Storage/Hardware sections are out of scope here).
+- "How do we free SSD-2 without breaking absolute manifest paths / flipping hot IO
+  to slow SSD-1?" → **`docs/COLD_ARCHIVE_SSD1.md`** (tmux `cold_archive_ssd1`).
 - "How do I review code/design?" → small changes: **`/code-design-review`**
   (Opus 5 medium main reviewer, Grok 4.5 high for optional subagents;
   read-only); large features / full pipelines:
@@ -85,6 +99,9 @@ paraphrasing experiments.
   4.8 high adjudicator; **user sees merged report only**;
   `.cursor/skills/panel-code-design-review/`, `.cursor/agents/review-*.md`).
   Cloud: panel → `/orchestrate` mode.
+- "Cheap Grok implement + frontier review?" → **`/cheap-exec`** (Grok 4.5 high
+  executes; chat model reviews/fixes). `.cursor/skills/cheap-exec/`,
+  `.cursor/agents/grok-executor.md` (also under `~/.cursor/`).
 
 Note: all four docs (README, ARCHITECTURE, CLOUD_ARCHITECTURE, BLANK_ARCHITECTURE) and this
 router are committed. Machine-local files stay out of git: `.env` (GPU pin, W&B mode, HF token)

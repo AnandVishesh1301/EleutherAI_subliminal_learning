@@ -99,6 +99,13 @@ metadata over free-form folder names).
   Adoption writes a *seed card* (`resolved_config: {}`, no git SHA) describing the
   adopted contents; the first real sweep launch claims it with its own provenance.
 
+**Cold archive (SSD-2 hot / SSD-1 cold).** When `output_root` on SSD-2 is near full,
+selected trees are mirrored to `/mnt/ssd-1/.../vishesh/` and replaced in place by
+**path-preserving symlinks** so absolute `/mnt/ssd-2/...` manifest paths keep
+working. Do **not** flip `paths_local.yaml` `output_root` to SSD-1 (measured ~20–30×
+slower from this node). Full policy, waves, resume protocol, and tmux launcher:
+[`docs/COLD_ARCHIVE_SSD1.md`](COLD_ARCHIVE_SSD1.md).
+
 ---
 
 ## 3. Run-manifest provenance schema
@@ -212,10 +219,9 @@ so its paths match the sweep's.
 
 ## 7. Running many experiments at once (8× A40 playbook)
 
-Goal: **max parallelization and utilization** across **all 8 A40s (GPUs 0–7)**.
-**No concurrency ceiling** as policy — pack until VRAM/SM headroom is gone; the
-only hard stop is **OOM**. Do not leave idle GPUs or under-filled devices while
-work remains.
+Goal: **do not waste compute** — **max parallelization and utilization** on
+**all 8 A40s (GPUs 0–7)**. Prefer aggressive packing over idle SMs/VRAM; **do
+not** under-fill for conservatism. The **only hard stop is OOM**.
 
 - **Devices 0–7**: all listed devices are available for campaign work. Placement
   and packing follow measured resident VRAM + util and the job-queue admit
@@ -224,14 +230,19 @@ work remains.
   `run_set_id` per concurrent campaign (§2), `.claim` locks on every sweep (§4),
   atomic manifests (§3). Shard by `--animals` / `--base-models` / the pair-list
   so leaves never collide.
-- **Packing policy**: measure resident VRAM + util; **spread across all 8 first**,
-  then **pack more processes per GPU** whenever a cell under-fills the device.
-  One heavy process per GPU is fine when a cell already saturates VRAM (e.g.
-  full-FT teacher; on-policy GKD with teacher **and** student resident) — that
-  is an OOM/util judgment, not a fixed one-process rule. Keep packs
-  leaf-disjoint (`.claim` + distinct `run_set_id`/shards). Job-queue
-  `cap_per_gpu` / free-mem gates are **operational OOM guards**, not a policy
-  limit on how hard to push the node.
+- **Packing policy**: measure resident VRAM + util for **this** pipeline cell;
+  **spread across all 8 first**, then **pack as many processes per GPU as fit**.
+  One heavy process per GPU is correct only when that cell already saturates
+  VRAM (e.g. full-FT teacher; on-policy GKD with teacher **and** student
+  resident) — an OOM/util judgment, not a fixed one-process rule. Keep packs
+  leaf-disjoint (`.claim` + distinct `run_set_id`/shards).
+- **`cap_per_gpu` / `free_mem_mib`**: operational **fit-parameters** from
+  calibration (how many copies of the measured footprint pack into 48 GB
+  without OOM). They are **not** a policy to limit concurrency or bank unused
+  VRAM. Re-measure when the cell changes; raise them when a lighter footprint
+  safely allows more parallel jobs. Example: GKD student cells that peak
+  ~16.7 GB → two per A40 (~33 GB / 48 GB) is the *maximum that fits*, not a
+  preference for “only two.”
 - **Never share a single leaf** between two processes.
 - **Size-agnostic**: nothing hardcodes `160m` — model size flows through the repo
   id via `model_dir_name` / `models/registry.py`, so later PolyPythia sizes just

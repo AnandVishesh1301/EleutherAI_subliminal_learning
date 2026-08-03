@@ -2,9 +2,10 @@
 
 Reproduces `sweep_distill_student_gkd`'s cell enumeration from a train-sweep YAML
 dict, so the driver can assert "every cell this YAML defines has a
-train_manifest.json on disk" without trusting queue exit codes (a sweep job exits
-0 even when individual cells failed). Any drift between this enumerator and the
-sweep script is caught by the dry-run integration test, which compares counts.
+train_manifest.json on disk" without trusting queue exit codes alone. GKD train/eval
+sweeps exit non-zero on cell failure, but the disk gate remains the SSOT for
+identity completeness. Any drift between this enumerator and the sweep script is
+caught by the dry-run integration test, which compares counts.
 """
 
 from __future__ import annotations
@@ -16,10 +17,13 @@ from pathlib import Path
 from subliminal_learning.campaign import plan
 from subliminal_learning.config import LoRAConfig
 from subliminal_learning.gkd.layout import (
+    DEFAULT_OPTIM,
     GKD_STUDENTS_SUBDIR,
     gkd_control_run_dir,
     gkd_student_run_dir,
     gkd_tag,
+    optim_slug,
+    parse_optim_slug,
     teacher_tag,
 )
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
@@ -62,12 +66,18 @@ def _cells(train_yaml: dict):
         (parse_base_models(str(p[0]))[0], parse_base_models(str(p[1]))[0])
         for p in train_yaml["teacher_student_base_pairs"]
     ]
-    variants: list[tuple[LoRAConfig | None, float]] = []
+    slugs = [str(s) for s in grid.get("student_optims", [optim_slug(DEFAULT_OPTIM)])]
+    variants: list[tuple[LoRAConfig | None, float, str, float]] = []
     for mode in grid["student_modes"]:
         lora = mode_lora(str(mode))
-        key = "full" if lora is None else "lora"
-        for lr in _lr_list(train_yaml["student_lr"][key]):
-            variants.append((lora, lr))
+        kind = "full" if lora is None else "lora"
+        for slug in slugs:
+            optim, momentum = parse_optim_slug(slug)
+            ladder = train_yaml["student_lr"].get(
+                f"{kind}/{slug}", train_yaml["student_lr"][kind]
+            )
+            for lr in _lr_list(ladder):
+                variants.append((lora, lr, optim, momentum))
     epochs = float(train_yaml["num_epochs"])
     steps_cap = int(train_yaml.get("max_steps", -1))
     tags = train_yaml["teacher_param_tags"]
@@ -84,7 +94,7 @@ def _cells(train_yaml: dict):
         train_yaml.get("gseeds", [0]),
     ):
         spec, teacher_spec = pair
-        lora, lr = var
+        lora, lr, optim, momentum = var
         gtag = gkd_tag(
             lmbda=float(lam),
             beta=float(b),
@@ -95,6 +105,8 @@ def _cells(train_yaml: dict):
             lora=lora,
             vocab_mask=bool(vmask),
             teacher_temp=float(ttemp),
+            optim=optim,
+            optim_momentum=momentum,
         )
         ttag = teacher_tag(
             plan.TEACHER_WORKFLOW,

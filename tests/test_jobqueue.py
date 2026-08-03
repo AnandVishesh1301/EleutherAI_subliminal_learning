@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.gpu import GpuManager, GpuSlot
 from subliminal_learning.jobqueue.model import Job, parse_jobs_file, sanitize_jobkey
-from subliminal_learning.jobqueue.worker import run_pool
+from subliminal_learning.jobqueue.worker import MasterLog, _Pool, run_pool
 
 
 # ------------------------- fakes -------------------------
@@ -715,6 +716,129 @@ def test_end_to_end_mini_run(tmp_path):
     # the failed job is requeue-able and re-runs.
     assert store.requeue(tmp_path, "q", failed_only=True) == [sanitize_jobkey("boom")]
     assert store.job_state(tmp_path, "q", Job("boom", "exit 3")) == store.PENDING
+
+
+# ------------------------- failure circuit breaker -------------------------
+
+
+def _run_pool_until(root, *, predicate, limit, timeout_s=30.0):
+    """Run the pool in a thread until `predicate` holds, then stop it and join."""
+    thread = threading.Thread(
+        target=run_pool,
+        args=(root,),
+        kwargs={
+            "workers": 1,
+            "gpu": FakeGpuManager(),
+            "hostname": "testnode",
+            "poll_s": 0.01,
+            "gpu_wait_s": 0.01,
+            "fail_streak_limit": limit,
+        },
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and not predicate():
+        time.sleep(0.05)
+    store.stop_path(root, "testnode").parent.mkdir(parents=True, exist_ok=True)
+    store.stop_path(root, "testnode").touch()
+    thread.join(timeout=timeout_s)
+    assert not thread.is_alive()
+
+
+def test_fail_streak_trips_queue_instead_of_burning_it(tmp_path):
+    """A deterministic startup failure must cost a few jobs, not the whole queue.
+
+    Regression for the 20260727_slbreadth halt: a run-set guard rejection made every
+    cell exit non-zero in seconds, and the pool drained ~350 pending jobs in 18 min.
+    """
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"boom{i}", "exit 1") for i in range(20)])
+
+    _run_pool_until(
+        tmp_path,
+        predicate=lambda: store.queue_status(tmp_path, "q")["failed"] >= 3,
+        limit=3,
+    )
+
+    st = store.queue_status(tmp_path, "q")
+    assert st["failed"] <= 5, f"breaker let the queue burn: {st}"
+    assert st["pending"] >= 15
+    assert not store.queue_complete(tmp_path, "q")
+    master = next((tmp_path / "logs").glob("*_worker.testnode.log")).read_text()
+    assert "TRIPPED q" in master
+
+
+def test_fail_streak_resets_on_success(tmp_path):
+    """Interleaved successes mean an unhealthy-looking queue is not tripped."""
+    store.create_queue(tmp_path, "q")
+    jobs = []
+    for i in range(6):
+        jobs += [Job(f"boom{i}", "exit 1"), Job(f"ok{i}", "true")]
+    store.append_jobs(tmp_path, "q", jobs)
+
+    run_pool(
+        tmp_path,
+        workers=1,
+        gpu=FakeGpuManager(),
+        hostname="testnode",
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+        fail_streak_limit=3,
+    )
+
+    st = store.queue_status(tmp_path, "q")
+    assert st["failed"] == 6 and st["done"] == 6 and st["pending"] == 0
+
+
+def test_tripped_queue_is_readmitted_after_requeue(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"boom{i}", "exit 1") for i in range(10)])
+    gpu = FakeGpuManager()
+    pool = _Pool(
+        tmp_path,
+        "testnode",
+        gpu,
+        MasterLog(tmp_path / "logs" / "master.log"),
+        queues_filter=None,
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+        fail_streak_limit=2,
+    )
+    for i in range(2):
+        store.record_result(
+            tmp_path,
+            "q",
+            Job(f"boom{i}", "exit 1"),
+            rc=1,
+            node="testnode",
+            gpu=0,
+            start_utc="s",
+            end_utc="e",
+            log="l",
+            attempt=0,
+        )
+        pool._record_outcome("q", 1)
+    assert pool.ready_queues() == []
+
+    store.requeue(tmp_path, "q", failed_only=True)
+
+    assert [n for n, _ in pool.ready_queues()] == ["q"]
+
+
+def test_fail_streak_limit_zero_disables_the_breaker(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"boom{i}", "exit 1") for i in range(6)])
+    run_pool(
+        tmp_path,
+        workers=1,
+        gpu=FakeGpuManager(),
+        hostname="testnode",
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+        fail_streak_limit=0,
+    )
+    assert store.queue_status(tmp_path, "q")["failed"] == 6
 
 
 def test_end_to_end_no_queues_exits_cleanly(tmp_path):

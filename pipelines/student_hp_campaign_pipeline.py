@@ -38,9 +38,15 @@ from subliminal_learning.evaluation.gkd_results_io import (
     load_gkd_preference_results,
     load_gkd_probe_trajectories,
 )
+from subliminal_learning.gkd.layout import GKD_STUDENTS_SUBDIR
 from subliminal_learning.jobqueue import store
 from subliminal_learning.utils.io import atomic_write_text
-from subliminal_learning.utils.run_io import utc_now_iso
+from subliminal_learning.utils.run_io import (
+    git_sha,
+    read_run_set_card,
+    reconcile_run_set_sha,
+    utc_now_iso,
+)
 
 
 class CampaignGateError(RuntimeError):
@@ -83,6 +89,45 @@ def _require_summaries(label: str, config_dirs: list, filename: str) -> None:
             f"{filename} (first: {missing[0]}) — evals incomplete; requeue the "
             "eval queue and re-run the driver."
         )
+
+
+def _sha_drift_gate(cfg: driver_io.CampaignDriverConfig) -> str | None:
+    """Detect (and optionally accept) HEAD moving away from the campaign's commit.
+
+    Checked before the queue gates because the downstream symptom -- every newly
+    launched cell exiting non-zero on `check_run_set_staleness` -- names a failed
+    queue, not the commit that caused it. Silence is correct before the campaign
+    card exists, or when git is unavailable.
+
+    Returns:
+        A note for the advance result, or ``None`` when there is no drift.
+
+    Raises:
+        CampaignGateError: HEAD drifted and `auto_reconcile_sha` is off.
+    """
+    card = read_run_set_card(cfg.run_set_root)
+    if card is None:
+        return None
+    head = git_sha()
+    if head is None or card.get("git_sha") == head:
+        return None
+    if not cfg.auto_reconcile_sha:
+        raise CampaignGateError(
+            f"git HEAD ({head}) has moved away from the campaign's commit "
+            f"({card.get('git_sha')}) — every newly launched cell will abort on the "
+            f"run-set staleness guard. If the change is compatible, run "
+            f"`uv run python -m scripts.reconcile_run_set --workflow "
+            f"{GKD_STUDENTS_SUBDIR} --run-set-id {plan.RUN_SET_ID} --reason ...`, "
+            f"requeue the failed jobs, and re-advance (or pass --auto-reconcile-sha)."
+        )
+    if cfg.dry_run:
+        return f"would reconcile git_sha {card.get('git_sha')} -> {head}"
+    reconcile_run_set_sha(
+        cfg.run_set_root,
+        new_git_sha=head,
+        reason="campaign driver --auto-reconcile-sha",
+    )
+    return f"reconciled git_sha {card.get('git_sha')} -> {head}"
 
 
 # ---- transition 1: A0 gate -> initial queues -------------------------------------
@@ -393,6 +438,10 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     transitions = state["transitions"]
     fired: list[str] = []
     waiting: list[str] = []
+
+    drift = _sha_drift_gate(cfg)
+    if drift is not None:
+        fired.append(drift)
 
     if "submit_initial" not in transitions:
         _submit_initial(cfg, state)
