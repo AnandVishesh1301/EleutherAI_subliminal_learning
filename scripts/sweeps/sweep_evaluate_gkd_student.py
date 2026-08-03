@@ -41,7 +41,7 @@ from pipelines.evaluate_sdf_teacher_pipeline import (
 from scripts.sweeps.sweep_distill_student_gkd import (
     _csv,
     _expand_base_pairs,
-    _student_variants,
+    student_variants,
 )
 from subliminal_learning.evaluation.capability_io import DEFAULT_TASKS
 from subliminal_learning.evaluation.sdf_prompt_sets import (
@@ -131,6 +131,10 @@ def main(
     student_modes: str = typer.Option(
         None, help="CSV override of student modes (shard), e.g. lora-r8a32."
     ),
+    student_optims: str = typer.Option(
+        None,
+        help="CSV override of student optimizer slugs (shard): adamw,rmsprop,sgd,sgdm0.9.",
+    ),
     dry_run: bool = typer.Option(
         False, help="List every cell with status (done/ready/not-trained), no eval."
     ),
@@ -178,11 +182,15 @@ def main(
     teacher_mode_list = list(pick("teacher_modes"))
     beta_list = _csv(beta, float) or [float(x) for x in grid["beta"]]
     lmbda_list = [float(x) for x in grid["lmbda"]]
-    student_variant_list = _student_variants(
+    student_variant_list = student_variants(
         _csv(student_modes, str) or list(grid["student_modes"]),
         pick("student_lr"),
-        None,
-        None,
+        student_optims=_csv(student_optims, str)
+        or (
+            [str(x) for x in grid["student_optims"]]
+            if "student_optims" in grid
+            else None
+        ),
     )
     vmask_list = [bool(x) for x in grid.get("vocab_mask", [False])]
     ttemp_list = [float(x) for x in grid.get("teacher_temp", [1.0])]
@@ -325,7 +333,7 @@ def main(
         spec,
         teacher_spec,
     ), tmode, b, lam, svar, vmask, ttemp, tfs in treatments:
-        smode, lora, lr = svar
+        _smode, lora, lr, optim, momentum = svar
         student_mode = "lora" if lora is not None else "full"
         gtag = gkd_tag(
             lmbda=lam,
@@ -337,6 +345,8 @@ def main(
             lora=lora,
             vocab_mask=vmask,
             teacher_temp=ttemp,
+            optim=optim,
+            optim_momentum=momentum,
         )
         do_bench = _should_benchmark(
             bench, student_mode, epochs, lr, lora.r if lora else None
@@ -389,6 +399,7 @@ def main(
         logger.warning(
             "{} config(s) failed; re-run the same command to retry them.", n_failed
         )
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

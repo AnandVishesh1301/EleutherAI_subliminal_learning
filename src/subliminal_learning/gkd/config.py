@@ -25,6 +25,7 @@ import yaml
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
+from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
 from subliminal_learning.models.registry import PythiaModelSpec
 
 # Single SSOT for forced-choice candidate animals, shared with the SDF-teacher eval
@@ -61,6 +62,11 @@ class GkdConfig:
         prompt_pool_dir: Prompt-pool directory (absolute, or relative to
             `dataset_cache_root`); built once by `scripts/build_gkd_prompts.py`.
         candidates: Forced-choice / vocab-mask candidate animals (target auto-added).
+        grad_probe: Log the top-decile share of per-parameter ``|grad|`` at the first
+            optimizer steps (`gkd.probe_io.GradConcentrationCallback`). Tests Blank et al.'s
+            stated mechanism for the SGD null; off by default so every prior cell is
+            unchanged.
+        grad_probe_steps: How many leading optimizer steps the probe measures.
     """
 
     lmbda: float
@@ -77,6 +83,8 @@ class GkdConfig:
     rollout_log_every: int
     prompt_pool_dir: str
     candidates: tuple[str, ...]
+    grad_probe: bool = False
+    grad_probe_steps: int = 3
 
 
 def load_gkd_training(
@@ -114,11 +122,15 @@ def load_gkd_training(
         warmup_ratio=float(tr["warmup_ratio"]),
         lr_scheduler_type=str(tr["lr_scheduler_type"]),
         seed=int(tr["seed"]),
-        optim=str(tr.get("optim", "adamw_torch")),
+        optim=str(tr.get("optim", DEFAULT_OPTIM)),
+        optim_momentum=float(tr.get("optim_momentum", 0.0)),
         checkpoint_resume=bool(tr.get("checkpoint_resume", False)),
         save_steps=int(tr.get("save_steps", 500)),
         save_total_limit=int(tr.get("save_total_limit", 1)),
     )
+    # Fail loud here rather than at path-build time: an unknown optimizer or a momentum
+    # set on an optimizer that has none would otherwise train and then collide on a leaf.
+    optim_slug(train.optim, train.optim_momentum)
     g = doc["gkd"]
     gkd = GkdConfig(
         lmbda=float(g["lmbda"]),
@@ -137,6 +149,8 @@ def load_gkd_training(
         candidates=tuple(g["candidates"])
         if g.get("candidates")
         else DEFAULT_CANDIDATES,
+        grad_probe=bool(g.get("grad_probe", False)),
+        grad_probe_steps=int(g.get("grad_probe_steps", 3)),
     )
     return lora, train, gkd
 
@@ -263,6 +277,10 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["max_steps"] = int(exp_gkd["max_steps"])
     if "vocab_mask" in exp_gkd:
         updates["vocab_mask"] = bool(exp_gkd["vocab_mask"])
+    if "grad_probe" in exp_gkd:
+        updates["grad_probe"] = bool(exp_gkd["grad_probe"])
+    if "grad_probe_steps" in exp_gkd:
+        updates["grad_probe_steps"] = int(exp_gkd["grad_probe_steps"])
     if "prompt_pool_dir" in exp_gkd:
         updates["prompt_pool_dir"] = str(exp_gkd["prompt_pool_dir"])
     if exp_gkd.get("candidates"):
