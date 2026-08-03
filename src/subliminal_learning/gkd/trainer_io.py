@@ -122,6 +122,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         teacher_temp: float = 1.0,
         rollout_log_every: int = 1,
         rollout_log_path: Path | None = None,
+        optim_momentum: float = 0.0,
         **kwargs: Any,
     ) -> None:
         """See module docstring; extras are stashed then `GKDTrainer.__init__` runs.
@@ -135,6 +136,12 @@ class SubliminalGKDTrainer(GKDTrainer):
             rollout_log_every: Steps between appending full-batch rollouts to disk
                 (``1`` = every on-policy step; ``<=0`` disables logging).
             rollout_log_path: JSONL path for rollouts (world-process-zero only).
+            optim_momentum: SGD momentum. `TrainingArguments.optim="sgd"` builds plain
+                SGD (transformers 4.54 passes only ``lr`` for ``SGD``/``RMSPROP`` and
+                ignores ``optim_args``), and `GKDTrainer.__init__` takes no
+                ``optimizer_cls_and_kwargs``, so momentum is injected post-init via that
+                attribute -- `Trainer.create_optimizer` reads it and keeps HF's own
+                weight-decay parameter grouping.
         """
         self._screen_forms = screen_forms
         self._vocab_mask_ids = vocab_mask_ids
@@ -156,6 +163,16 @@ class SubliminalGKDTrainer(GKDTrainer):
             raise ValueError(
                 "SubliminalGKDTrainer requires seq_kd=False (teacher-generated text "
                 "cannot be cleanly trait-filtered; see the design)."
+            )
+        if optim_momentum:
+            if self.args.optim != "sgd":
+                raise ValueError(
+                    f"optim_momentum={optim_momentum} requires optim='sgd', "
+                    f"got {self.args.optim!r}"
+                )
+            self.optimizer_cls_and_kwargs = (
+                torch.optim.SGD,
+                {"lr": self.args.learning_rate, "momentum": optim_momentum},
             )
 
     def _get_vocab_mask(self, logits: torch.Tensor) -> torch.Tensor | None:

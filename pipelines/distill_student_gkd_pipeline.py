@@ -47,7 +47,7 @@ from subliminal_learning.gkd.layout import (
     gkd_wandb_sweep_slug,
     teacher_tag,
 )
-from subliminal_learning.gkd.probe_io import GkdProbeCallback
+from subliminal_learning.gkd.probe_io import GkdProbeCallback, GradConcentrationCallback
 from subliminal_learning.gkd.prompts_io import load_prompt_pool
 from subliminal_learning.gkd.trainer_io import (
     SubliminalGKDTrainer,
@@ -184,6 +184,8 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
         lora=cfg.lora,
         vocab_mask=cfg.gkd.vocab_mask,
         teacher_temp=cfg.gkd.teacher_temp,
+        optim=cfg.train.optim,
+        optim_momentum=cfg.train.optim_momentum,
     )
     if cfg.control:
         run_dir = gkd_control_run_dir(
@@ -234,7 +236,12 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
 
 
 def _train_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
-    """Optimizer + LoRA hyperparameter block (manifest body + `run_identity`, shared)."""
+    """Optimizer + LoRA hyperparameter block (manifest body + `run_identity`, shared).
+
+    ``optim_momentum`` appears only when nonzero: this block is part of `run_identity`,
+    and an unconditional new key would make every pre-existing cell's stored identity
+    differ from its recomputed one, turning routine resume checks into hard errors.
+    """
     return {
         "learning_rate": cfg.train.learning_rate,
         "batch_size": cfg.train.batch_size,
@@ -243,6 +250,11 @@ def _train_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
         "max_grad_norm": cfg.train.max_grad_norm,
         "lr_scheduler_type": cfg.train.lr_scheduler_type,
         "optim": cfg.train.optim,
+        **(
+            {"optim_momentum": cfg.train.optim_momentum}
+            if cfg.train.optim_momentum
+            else {}
+        ),
         **lora_manifest_blob(cfg.lora),
     }
 
@@ -341,7 +353,9 @@ def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
         teacher_manifest_sha256=(
             sha256_file(teacher_manifest_path) if teacher_manifest_path else None
         ),
-        prompt_pool_manifest_sha256=sha256_file(_resolve_pool_dir(cfg) / "manifest.json"),
+        prompt_pool_manifest_sha256=sha256_file(
+            _resolve_pool_dir(cfg) / "manifest.json"
+        ),
     )
     stored_manifest: dict | None = None
     if manifest_path.is_file():
@@ -507,6 +521,15 @@ def _train(
         metrics_path=run_dir / "training_metrics.jsonl",
         teacher_p_target=teacher_p_target,
     )
+    callbacks = [probe]
+    if cfg.gkd.grad_probe:
+        callbacks.append(
+            GradConcentrationCallback(
+                metrics_path=run_dir / "grad_concentration.jsonl",
+                n_steps=cfg.gkd.grad_probe_steps,
+                seed=cfg.train.seed,
+            )
+        )
     peft_config = build_lora_config(cfg.lora)
 
     teacher_spec = _resolved_teacher_spec(cfg)
@@ -539,13 +562,14 @@ def _train(
             train_dataset=train_dataset,
             processing_class=tokenizer,
             peft_config=peft_config,
-            callbacks=[probe],
+            callbacks=callbacks,
             screen_forms=screen_forms,
             vocab_mask_ids=vocab_mask_ids,
             student_temp=cfg.gkd.student_temp,
             teacher_temp=cfg.gkd.teacher_temp,
             rollout_log_every=cfg.gkd.rollout_log_every,
             rollout_log_path=run_dir / "rollouts_sample.jsonl",
+            optim_momentum=cfg.train.optim_momentum,
         )
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume
         # (LONG cells) passes the kwarg so HF restores optimizer/scheduler/RNG from the
@@ -561,9 +585,7 @@ def _train(
     finally:
         if "trainer" in locals():
             trainer.write_rollout_summary()
-            _write_trainer_log_history(
-                trainer, run_dir / "trainer_log_history.jsonl"
-            )
+            _write_trainer_log_history(trainer, run_dir / "trainer_log_history.jsonl")
         finish_wandb_run()
 
     _write_manifest(
@@ -578,6 +600,7 @@ def _train(
         train_output.training_loss,
         trainer.state.global_step,
         teacher_p_target,
+        optimizer_resolved(trainer),
     )
     logger.info(
         "Saved GKD student ({}) -> {} (loss={}, steps={})",
@@ -599,6 +622,46 @@ def _train(
         n_train_steps=trainer.state.global_step,
         finetune_mode=finetune_mode,
     )
+
+
+def optimizer_resolved(trainer) -> dict:
+    """The optimizer actually constructed, for the manifest (not for `run_identity`).
+
+    The optimizer arms are only comparable if what PyTorch/HF resolved is on record:
+    RMSProp's ``alpha``/``eps``/``momentum`` and SGD's ``momentum``/``nesterov`` come from
+    library defaults that this campaign deliberately does not override (matching Blank et
+    al.), so a future default change would silently redefine an arm. Per-group ``lr`` and
+    ``weight_decay`` also evidence that HF's decay grouping survived the SGD+momentum
+    injection.
+    """
+    opt = getattr(trainer, "optimizer", None)
+    if opt is None:
+        return {}
+    inner = getattr(opt, "optimizer", opt)
+    return {
+        "class": type(inner).__module__ + "." + type(inner).__qualname__,
+        "defaults": {k: _json_safe(v) for k, v in inner.defaults.items()},
+        "param_groups": [
+            {
+                "n_tensors": len(group["params"]),
+                **{
+                    k: _json_safe(v)
+                    for k, v in group.items()
+                    if k != "params" and k in ("lr", "weight_decay", "momentum")
+                },
+            }
+            for group in inner.param_groups
+        ],
+    }
+
+
+def _json_safe(value):
+    """Pass through JSON-native scalars/sequences; stringify anything else."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return str(value)
 
 
 def _write_trainer_log_history(trainer, path: Path) -> None:
@@ -687,6 +750,7 @@ def _write_manifest(
     final_loss: float | None,
     n_steps: int,
     teacher_p_target: float,
+    optimizer_blob: dict,
 ) -> None:
     teacher_manifest = (
         cfg.teacher_checkpoint_dir.parent / "train_manifest.json"
@@ -695,7 +759,9 @@ def _write_manifest(
     )
     teacher_spec = _resolved_teacher_spec(cfg)
     cross_init = (not cfg.control) and teacher_spec != cfg.spec
-    teacher_manifest_sha256 = sha256_file(teacher_manifest) if teacher_manifest else None
+    teacher_manifest_sha256 = (
+        sha256_file(teacher_manifest) if teacher_manifest else None
+    )
     prompt_pool_manifest_sha256 = sha256_file(pool_dir / "manifest.json")
     manifest_body = {
         "target_animal": cfg.target_animal,
@@ -726,6 +792,7 @@ def _write_manifest(
         "n_train_prompts": n_prompts,
         "gkd_hyperparameters": _gkd_hyperparameters(cfg),
         "train_hyperparameters": _train_hyperparameters(cfg),
+        "optimizer_resolved": optimizer_blob,
         "loss": "generalized_jsd",
         "trl_version": trl.__version__,
         "checkpoint_dir": str(checkpoint_dir),
