@@ -16,6 +16,9 @@ when cells failed), and any selection gate (A2 flatness) must pass. A transition
 that already ran is a no-op (queue jobkey-set equality + persisted state), so the
 driver is safe to re-run or poll in a watch loop. Any hard failure raises
 `CampaignGateError` with the exact remediation.
+
+Campaign constants come from `cfg.spec` (default `plan.SPEC`). Pass a different
+`CampaignSpec` (e.g. `breadth_plan.SPEC`) to drive another animal set.
 """
 
 from __future__ import annotations
@@ -25,8 +28,9 @@ from dataclasses import dataclass
 import yaml
 from loguru import logger
 
-from subliminal_learning.campaign import config_gen, driver_io, expected, plan
+from subliminal_learning.campaign import config_gen, driver_io, expected
 from subliminal_learning.campaign.selection import (
+    Recipe,
     apply_lr_extensions,
     control_floor_check,
     freeze_recipes,
@@ -34,17 +38,17 @@ from subliminal_learning.campaign.selection import (
     lr_edge_extensions,
     select_top_recipes,
 )
+from subliminal_learning.campaign.spec import CampaignSpec
 from subliminal_learning.evaluation.gkd_results_io import (
     load_gkd_preference_results,
     load_gkd_probe_trajectories,
 )
-from subliminal_learning.gkd.layout import GKD_STUDENTS_SUBDIR
 from subliminal_learning.jobqueue import store
+from subliminal_learning.training.run_set import runs_index_row
 from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.run_io import (
-    git_sha,
+    append_runs_index,
     read_run_set_card,
-    reconcile_run_set_sha,
     utc_now_iso,
 )
 
@@ -68,6 +72,10 @@ class AdvanceResult:
     done: bool
 
 
+def _spec(cfg: driver_io.CampaignDriverConfig) -> CampaignSpec:
+    return cfg.spec
+
+
 def _load_yaml(cfg: driver_io.CampaignDriverConfig, rel: str) -> dict:
     return yaml.safe_load((cfg.repo_root / rel).read_text())
 
@@ -81,53 +89,79 @@ def _require_disk_complete(label: str, leaves, remediation: str) -> None:
         )
 
 
-def _require_summaries(label: str, config_dirs: list, filename: str) -> None:
-    missing = [d for d in config_dirs if not (d / filename).exists()]
-    if missing:
-        raise CampaignGateError(
-            f"{label}: {len(missing)}/{len(config_dirs)} configs missing "
-            f"{filename} (first: {missing[0]}) — evals incomplete; requeue the "
-            "eval queue and re-run the driver."
-        )
+def _missing_verify_artifacts(param_dir, *, require_benchmarks: bool) -> list[str]:
+    """Human-readable names of verify artifacts absent from `param_dir`."""
+    missing: list[str] = []
+    for name in (
+        "preference_summary.json",
+        "sdf_forced_choice_summary.json",
+        "sdf_capability_summary.json",
+    ):
+        if not (param_dir / name).exists():
+            missing.append(name)
+    if require_benchmarks and (param_dir / "sdf_capability_summary.json").exists():
+        try:
+            cap = yaml.safe_load((param_dir / "sdf_capability_summary.json").read_text())
+        except (OSError, yaml.YAMLError):
+            missing.append("benchmarks (capability summary unreadable)")
+        else:
+            if "benchmarks" not in (cap or {}):
+                missing.append("benchmarks (inside sdf_capability_summary.json)")
+    return missing
 
 
-def _sha_drift_gate(cfg: driver_io.CampaignDriverConfig) -> str | None:
-    """Detect (and optionally accept) HEAD moving away from the campaign's commit.
-
-    Checked before the queue gates because the downstream symptom -- every newly
-    launched cell exiting non-zero on `check_run_set_staleness` -- names a failed
-    queue, not the commit that caused it. Silence is correct before the campaign
-    card exists, or when git is unavailable.
-
-    Returns:
-        A note for the advance result, or ``None`` when there is no drift.
-
-    Raises:
-        CampaignGateError: HEAD drifted and `auto_reconcile_sha` is off.
-    """
-    card = read_run_set_card(cfg.run_set_root)
-    if card is None:
-        return None
-    head = git_sha()
-    if head is None or card.get("git_sha") == head:
-        return None
-    if not cfg.auto_reconcile_sha:
-        raise CampaignGateError(
-            f"git HEAD ({head}) has moved away from the campaign's commit "
-            f"({card.get('git_sha')}) — every newly launched cell will abort on the "
-            f"run-set staleness guard. If the change is compatible, run "
-            f"`uv run python -m scripts.reconcile_run_set --workflow "
-            f"{GKD_STUDENTS_SUBDIR} --run-set-id {plan.RUN_SET_ID} --reason ...`, "
-            f"requeue the failed jobs, and re-advance (or pass --auto-reconcile-sha)."
-        )
-    if cfg.dry_run:
-        return f"would reconcile git_sha {card.get('git_sha')} -> {head}"
-    reconcile_run_set_sha(
-        cfg.run_set_root,
-        new_git_sha=head,
-        reason="campaign driver --auto-reconcile-sha",
+def _require_verify_complete(
+    label: str,
+    config_dirs: list,
+    *,
+    require_benchmarks: bool,
+    remediation: str,
+) -> None:
+    incomplete = expected.verify_summaries_complete(
+        config_dirs, require_benchmarks=require_benchmarks
     )
-    return f"reconciled git_sha {card.get('git_sha')} -> {head}"
+    if not incomplete:
+        return
+    first = incomplete[0]
+    missing = _missing_verify_artifacts(first, require_benchmarks=require_benchmarks)
+    detail = ", ".join(missing) if missing else "verify triad incomplete"
+    raise CampaignGateError(
+        f"{label}: {len(incomplete)}/{len(config_dirs)} configs missing "
+        f"complete verify summaries ({detail}; first: {first}). {remediation}"
+    )
+
+
+def _verify_doc_requires_benchmarks(verify_doc: dict) -> bool:
+    """Whether a generated verify YAML enables lm-eval benchmarks."""
+    bench = verify_doc.get("benchmarks")
+    return bool(bench and bench.get("enabled"))
+
+
+def _inject_reference_recipe(
+    candidates: dict[tuple[str, float], list[Recipe]],
+    ref: Recipe | None,
+) -> dict[tuple[str, float], list[Recipe]]:
+    """Append `ref` to every (animal, beta) list when absent (deduped)."""
+    if ref is None:
+        return candidates
+    out: dict[tuple[str, float], list[Recipe]] = {}
+    for key, recipes in candidates.items():
+        if ref in recipes:
+            out[key] = list(recipes)
+        else:
+            out[key] = [*recipes, ref]
+    return out
+
+
+def _code_pin_gate(cfg: driver_io.CampaignDriverConfig) -> str | None:
+    """Ensure the MLflow-style code pin; refuse only an intentional pin mismatch.
+
+    Workspace HEAD may move freely — cells run from ``.code_pins/<sha>/``.
+    """
+    try:
+        return driver_io.ensure_campaign_code_pin(cfg)
+    except (ValueError, RuntimeError) as err:
+        raise CampaignGateError(str(err)) from err
 
 
 # ---- transition 1: A0 gate -> initial queues -------------------------------------
@@ -136,9 +170,10 @@ def _sha_drift_gate(cfg: driver_io.CampaignDriverConfig) -> str | None:
 def _a0_gate(cfg: driver_io.CampaignDriverConfig) -> None:
     if not cfg.require_a0:
         return
+    spec = _spec(cfg)
     missing = [
         f
-        for f in (plan.CALIBRATION_REPORT, plan.INIT_EQUALITY_REPORT)
+        for f in (spec.calibration_report, spec.init_equality_report)
         if not (cfg.logs_dir / f).exists()
     ]
     if missing:
@@ -152,15 +187,24 @@ def _a0_gate(cfg: driver_io.CampaignDriverConfig) -> None:
 
 def _submit_initial(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
     _a0_gate(cfg)
-    driver_io.submit_queue(cfg, plan.Q_A1, driver_io.a1_jobs())
-    driver_io.submit_queue(cfg, plan.Q_A2, driver_io.a2_jobs())
+    spec = _spec(cfg)
+    driver_io.submit_queue(cfg, spec.q_a1, driver_io.a1_jobs(spec=spec))
+    driver_io.submit_queue(cfg, spec.q_a2, driver_io.a2_jobs(spec=spec))
     driver_io.submit_queue(
         cfg,
-        plan.Q_A1_EVALS,
-        driver_io.a1_eval_jobs(),
-        depends_on=[plan.Q_A1, plan.Q_A2],
+        spec.q_a1_evals,
+        driver_io.a1_eval_jobs(spec=spec),
+        depends_on=[spec.q_a1, spec.q_a2],
     )
-    driver_io.submit_queue(cfg, plan.Q_BACKLOG, driver_io.backlog_jobs())
+    backlog = driver_io.backlog_jobs(spec=spec)
+    if not backlog:
+        logger.info(
+            "backlog empty (no catswide verify YAMLs / base models) — "
+            "skipping queue {}",
+            spec.q_backlog,
+        )
+    else:
+        driver_io.submit_queue(cfg, spec.q_backlog, backlog)
     state["transitions"]["submit_initial"] = {"at": utc_now_iso()}
 
 
@@ -168,27 +212,29 @@ def _submit_initial(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 
 
 def _a1_a2_disk_gate(cfg: driver_io.CampaignDriverConfig) -> None:
+    spec = _spec(cfg)
     for label, rel in (
-        ("A1 same", plan.A1_SAME_YAML),
-        ("A1 cross", plan.A1_CROSS_YAML),
+        ("A1 same", spec.a1_same_yaml),
+        ("A1 cross", spec.a1_cross_yaml),
     ):
         doc = _load_yaml(cfg, rel)
         _require_disk_complete(
             label,
-            expected.treatment_leaf_dirs(doc, cfg.output_root),
-            f"Requeue {plan.Q_A1} failures or rerun its jobs, then re-advance.",
+            expected.treatment_leaf_dirs(doc, cfg.output_root, spec=spec),
+            f"Requeue {spec.q_a1} failures or rerun its jobs, then re-advance.",
         )
-    a2_doc = _load_yaml(cfg, plan.A1_SAME_YAML)
-    a2_doc["grid"] = {**a2_doc["grid"], "student_modes": [plan.A2_STUDENT_MODE]}
+    a2_doc = _load_yaml(cfg, spec.a1_same_yaml)
+    a2_doc["grid"] = {**a2_doc["grid"], "student_modes": [spec.a2_student_mode]}
     _require_disk_complete(
         "A2 controls",
-        expected.control_leaf_dirs(a2_doc, cfg.output_root),
-        f"Requeue {plan.Q_A2} failures, then re-advance.",
+        expected.control_leaf_dirs(a2_doc, cfg.output_root, spec=spec),
+        f"Requeue {spec.q_a2} failures, then re-advance.",
     )
 
 
 def _submit_a3(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
     _a1_a2_disk_gate(cfg)
+    spec = _spec(cfg)
     probes = load_gkd_probe_trajectories(cfg.output_root, cfg.campaign_subdir)
     if probes.empty:
         raise CampaignGateError(
@@ -197,11 +243,11 @@ def _submit_a3(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
         )
     floor = control_floor_check(
         probes,
-        animals=plan.ANIMALS,
-        betas=plan.BETAS,
-        lrs=plan.A1_LORA_LRS,
-        max_floor=plan.CONTROL_FLOOR_MAX,
-        max_spread=plan.CONTROL_FLOOR_MAX_SPREAD,
+        animals=spec.animals,
+        betas=spec.betas,
+        lrs=spec.a1_lora_lrs,
+        max_floor=spec.control_floor_max,
+        max_spread=spec.control_floor_max_spread,
     )
     if not floor.passed:
         raise CampaignGateError(
@@ -210,45 +256,60 @@ def _submit_a3(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
             + "; ".join(floor.failures)
         )
     selections = select_top_recipes(
-        probes, animals=plan.ANIMALS, betas=plan.BETAS, k=plan.A3_TOP_K
+        probes, animals=spec.animals, betas=spec.betas, k=spec.a3_top_k
     )
     extensions, lr_warnings = lr_edge_extensions(
-        selections, lrs=plan.A1_LORA_LRS, factor=plan.A1_LR_EXTENSION_FACTOR
+        selections, lrs=spec.a1_lora_lrs, factor=spec.a1_lr_extension_factor
     )
     for msg in lr_warnings:
         logger.warning("A1 lr-grid edge — {}", msg)
     selections = apply_lr_extensions(selections, extensions)
-    candidates = {key: sel.recipes for key, sel in selections.items()}
+    candidates = {key: list(sel.recipes) for key, sel in selections.items()}
+    candidates = _inject_reference_recipe(candidates, spec.a3_reference_recipe)
+    if spec.a3_reference_recipe is not None:
+        logger.info(
+            "A3 reference arm {}@{:g} injected (deduped) into {} (animal, beta) cells",
+            spec.a3_reference_recipe.mode_token,
+            spec.a3_reference_recipe.lr,
+            len(candidates),
+        )
     selection_state = driver_io.selection_to_state(selections)
     driver_io.write_logs_report(
         cfg,
-        plan.A1_SELECTION_REPORT,
+        spec.a1_selection_report,
         {
             "at": utc_now_iso(),
-            "top_k": plan.A3_TOP_K,
+            "top_k": spec.a3_top_k,
             "selection": selection_state,
             "lr_edge_warnings": list(lr_warnings),
             "control_floor": floor.floors.to_dict(orient="records"),
+            "a3_reference_recipe": (
+                driver_io.recipe_to_dict(spec.a3_reference_recipe)
+                if spec.a3_reference_recipe is not None
+                else None
+            ),
         },
     )
     try:
-        train_cfgs = config_gen.a3_train_configs(candidates)
+        train_cfgs = config_gen.a3_train_configs(candidates, spec=spec)
     except ValueError as err:
         raise CampaignGateError(
             f"A3 config generation rejected the A1 selection: {err}. The screen "
             "and its gates are intact — inspect "
-            f"{cfg.logs_dir / plan.A1_SELECTION_REPORT} and either raise "
-            "plan.A3_MAX_SAME_ARMS or lower plan.A3_TOP_K, then re-advance."
+            f"{cfg.logs_dir / spec.a1_selection_report} and either raise "
+            "a3_max_same_arms or lower a3_top_k, then re-advance."
         ) from err
-    verify_cfgs = config_gen.a3_verify_configs(train_cfgs)
+    verify_cfgs = config_gen.a3_verify_configs(train_cfgs, spec=spec)
     driver_io.write_generated_configs(cfg, {**train_cfgs, **verify_cfgs})
     headline = config_gen.a3_headline_train_names(train_cfgs)
-    driver_io.submit_queue(cfg, plan.Q_A3, driver_io.a3_jobs(train_cfgs, headline))
+    driver_io.submit_queue(
+        cfg, spec.q_a3, driver_io.a3_jobs(train_cfgs, headline, spec=spec)
+    )
     driver_io.submit_queue(
         cfg,
-        plan.Q_A3_EVALS,
-        driver_io.a3_eval_jobs(sorted(verify_cfgs)),
-        depends_on=[plan.Q_A3],
+        spec.q_a3_evals,
+        driver_io.a3_eval_jobs(sorted(verify_cfgs), spec=spec),
+        depends_on=[spec.q_a3],
     )
     state["transitions"]["submit_a3"] = {
         "at": utc_now_iso(),
@@ -265,39 +326,66 @@ def _submit_a3(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 
 
 def _a3_disk_gate(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
+    spec = _spec(cfg)
     tr = state["transitions"]["submit_a3"]
     headline = set(config_gen.a3_headline_train_names(dict.fromkeys(tr["train_yamls"])))
+    verify_by_train = {
+        fname.replace("gkd_a3_verify_", "gkd_a3_", 1): fname
+        for fname in tr.get("verify_yamls", [])
+    }
     for fname in tr["train_yamls"]:
         doc = yaml.safe_load((cfg.generated_dir / fname).read_text())
-        leaves = expected.treatment_leaf_dirs(doc, cfg.output_root)
+        leaves = expected.treatment_leaf_dirs(doc, cfg.output_root, spec=spec)
         _require_disk_complete(
             f"A3 {fname}",
             leaves,
-            f"Requeue {plan.Q_A3} failures, then re-advance.",
+            f"Requeue {spec.q_a3} failures, then re-advance.",
         )
         config_dirs = sorted({leaf.parent for leaf in leaves})
-        _require_summaries(f"A3 {fname}", config_dirs, "preference_summary.json")
+        verify_fname = verify_by_train.get(
+            fname, fname.replace("gkd_a3_", "gkd_a3_verify_", 1)
+        )
+        verify_path = cfg.generated_dir / verify_fname
+        require_bench = False
+        if verify_path.is_file():
+            require_bench = _verify_doc_requires_benchmarks(
+                yaml.safe_load(verify_path.read_text())
+            )
+        _require_verify_complete(
+            f"A3 {fname}",
+            config_dirs,
+            require_benchmarks=require_bench,
+            remediation=(
+                f"Requeue {spec.q_a3_evals} and re-run the driver "
+                "(preference+FC+capability triad required)."
+            ),
+        )
         if fname in headline:
-            controls = expected.control_leaf_dirs(doc, cfg.output_root)
+            controls = expected.control_leaf_dirs(doc, cfg.output_root, spec=spec)
             _require_disk_complete(
                 f"A3 controls {fname}",
                 controls,
-                f"Requeue {plan.Q_A3} failures, then re-advance.",
+                f"Requeue {spec.q_a3} failures, then re-advance.",
             )
-            _require_summaries(
+            _require_verify_complete(
                 f"A3 controls {fname}",
                 sorted({leaf.parent for leaf in controls}),
-                "preference_summary.json",
+                require_benchmarks=require_bench,
+                remediation=(
+                    f"Requeue {spec.q_a3_evals} and re-run the driver "
+                    "(preference+FC+capability triad required)."
+                ),
             )
 
 
 def _submit_b(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
     _a3_disk_gate(cfg, state)
+    spec = _spec(cfg)
     candidates = driver_io.candidates_from_state(
         state["transitions"]["submit_a3"]["candidates"]
     )
     preference = load_gkd_preference_results(cfg.output_root, cfg.campaign_subdir)
-    frozen = freeze_recipes(preference, candidates, doses=plan.A3_DOSES)
+    frozen = freeze_recipes(preference, candidates, doses=spec.a3_doses)
     beta = headline_beta(frozen)
     winner = frozen[beta]
     logger.info(
@@ -310,7 +398,7 @@ def _submit_b(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
     )
     driver_io.write_logs_report(
         cfg,
-        plan.FREEZE_REPORT,
+        spec.freeze_report,
         {
             "at": utc_now_iso(),
             "headline_beta": beta,
@@ -323,33 +411,35 @@ def _submit_b(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
             "frozen": driver_io.frozen_to_state(frozen),
         },
     )
-    train_cfgs = config_gen.b_train_configs(winner, beta)
-    verify_cfgs = config_gen.b_verify_configs(train_cfgs)
+    train_cfgs = config_gen.b_train_configs(winner, beta, spec=spec)
+    verify_cfgs = config_gen.b_verify_configs(train_cfgs, spec=spec)
     generated = {**train_cfgs, **verify_cfgs}
     c_train: dict[str, dict] = {}
     c_verify: dict[str, dict] = {}
     if cfg.include_stage_c:
-        c_train = config_gen.c_train_configs(winner, beta)
-        c_verify = config_gen.c_verify_configs(c_train)
+        c_train = config_gen.c_train_configs(winner, beta, spec=spec)
+        c_verify = config_gen.c_verify_configs(c_train, spec=spec)
         generated.update({**c_train, **c_verify})
     driver_io.write_generated_configs(cfg, generated)
     control_names = config_gen.b_control_train_names(train_cfgs)
-    head_jobs, ext_jobs = driver_io.b_train_jobs(train_cfgs, control_names)
-    driver_io.submit_queue(cfg, plan.Q_B_HEADLINE, head_jobs)
-    driver_io.submit_queue(cfg, plan.Q_B_EXT, ext_jobs)
+    head_jobs, ext_jobs = driver_io.b_train_jobs(train_cfgs, control_names, spec=spec)
+    driver_io.submit_queue(cfg, spec.q_b_headline, head_jobs)
+    driver_io.submit_queue(cfg, spec.q_b_ext, ext_jobs)
     driver_io.submit_queue(
         cfg,
-        plan.Q_B_EVALS,
-        driver_io.b_eval_jobs(verify_cfgs, train_cfgs),
-        depends_on=[plan.Q_B_HEADLINE, plan.Q_B_EXT],
+        spec.q_b_evals,
+        driver_io.b_eval_jobs(verify_cfgs, train_cfgs, spec=spec),
+        depends_on=[spec.q_b_headline, spec.q_b_ext],
     )
     if cfg.include_stage_c:
-        driver_io.submit_queue(cfg, plan.Q_C, driver_io.c_train_jobs(c_train))
+        driver_io.submit_queue(
+            cfg, spec.q_c, driver_io.c_train_jobs(c_train, spec=spec)
+        )
         driver_io.submit_queue(
             cfg,
-            plan.Q_C_EVALS,
-            driver_io.c_eval_jobs(c_verify, c_train),
-            depends_on=[plan.Q_C],
+            spec.q_c_evals,
+            driver_io.c_eval_jobs(c_verify, c_train, spec=spec),
+            depends_on=[spec.q_c],
         )
     state["transitions"]["submit_b"] = {
         "at": utc_now_iso(),
@@ -365,19 +455,40 @@ def _submit_b(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 
 
 def _finalize(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
+    spec = _spec(cfg)
     tr = state["transitions"]["submit_b"]
+    verify_by_train = {
+        fname.replace("gkd_b_verify_", "gkd_b_", 1): fname
+        for fname in tr.get("verify_yamls", [])
+    }
     for fname in tr["train_yamls"] + tr.get("stage_c", []):
         doc = yaml.safe_load((cfg.generated_dir / fname).read_text())
-        leaves = expected.treatment_leaf_dirs(doc, cfg.output_root)
+        leaves = expected.treatment_leaf_dirs(doc, cfg.output_root, spec=spec)
         _require_disk_complete(
             f"Stage B/C {fname}",
             leaves,
             "Requeue the factorial queue failures, then re-advance.",
         )
-        _require_summaries(
+        if fname.startswith("gkd_b_"):
+            verify_fname = verify_by_train.get(
+                fname, fname.replace("gkd_b_", "gkd_b_verify_", 1)
+            )
+        else:
+            verify_fname = fname.replace("gkd_c_", "gkd_c_verify_", 1)
+        verify_path = cfg.generated_dir / verify_fname
+        require_bench = False
+        if verify_path.is_file():
+            require_bench = _verify_doc_requires_benchmarks(
+                yaml.safe_load(verify_path.read_text())
+            )
+        _require_verify_complete(
             f"Stage B/C {fname}",
             sorted({leaf.parent for leaf in leaves}),
-            "preference_summary.json",
+            require_benchmarks=require_bench,
+            remediation=(
+                f"Requeue {spec.q_b_evals} (and {spec.q_c_evals} if Stage C) "
+                "and re-run the driver (preference+FC+capability triad required)."
+            ),
         )
     control_docs = [
         yaml.safe_load((cfg.generated_dir / f).read_text())
@@ -385,29 +496,104 @@ def _finalize(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
         if f.startswith("gkd_b_same_init_")
     ]
     controls: dict = {}
+    control_require_bench = False
+    for f in tr["train_yamls"]:
+        if not f.startswith("gkd_b_same_init_"):
+            continue
+        verify_fname = verify_by_train.get(
+            f, f.replace("gkd_b_", "gkd_b_verify_", 1)
+        )
+        verify_path = cfg.generated_dir / verify_fname
+        if verify_path.is_file() and _verify_doc_requires_benchmarks(
+            yaml.safe_load(verify_path.read_text())
+        ):
+            control_require_bench = True
+            break
     for doc in control_docs:
-        for leaf in expected.control_leaf_dirs(doc, cfg.output_root):
+        for leaf in expected.control_leaf_dirs(doc, cfg.output_root, spec=spec):
             controls.setdefault(leaf)
     _require_disk_complete(
         "Stage B controls",
         list(controls),
         "Requeue the same_init factorial jobs, then re-advance.",
     )
-    _require_summaries(
+    _require_verify_complete(
         "Stage B controls",
         sorted({leaf.parent for leaf in controls}),
-        "preference_summary.json",
+        require_benchmarks=control_require_bench,
+        remediation=(
+            f"Requeue {spec.q_b_evals} and re-run the driver "
+            "(preference+FC+capability triad required)."
+        ),
     )
-    marker = cfg.logs_dir / plan.CAMPAIGN_DONE_FILE
+    marker = cfg.logs_dir / spec.campaign_done_file
     if not cfg.dry_run:
         atomic_write_text(
-            marker, f"campaign {plan.RUN_SET_ID} finished {utc_now_iso()}\n"
+            marker, f"campaign {spec.run_set_id} finished {utc_now_iso()}\n"
         )
+        card = read_run_set_card(cfg.run_set_root)
+        if card is not None:
+            append_runs_index(
+                cfg.output_root,
+                runs_index_row(
+                    run_set_id=card["run_set_id"],
+                    run_type=card["run_type"],
+                    purpose=card["purpose"],
+                    date=card["date"],
+                    git_sha=card.get("git_sha"),
+                    status="done",
+                ),
+            )
+            logger.info(
+                "RUNS_INDEX status=done for run_set_id={}", spec.run_set_id
+            )
+        else:
+            logger.warning(
+                "No run_set.json at {} — RUNS_INDEX not updated on finalize",
+                cfg.run_set_root,
+            )
     state["transitions"]["finalize"] = {"at": utc_now_iso()}
-    logger.info("Campaign {} COMPLETE — marker at {}", plan.RUN_SET_ID, marker)
+    logger.info("Campaign {} COMPLETE — marker at {}", spec.run_set_id, marker)
 
 
 # ---- the advance pass ---------------------------------------------------------------
+
+
+def _auto_requeue_failed(cfg: driver_io.CampaignDriverConfig, name: str) -> None:
+    """Requeue failed jobs under ``cfg.auto_requeue``; halt when any exceeds the cap."""
+    if cfg.auto_requeue <= 0 or cfg.dry_run:
+        return
+    if not store.queue_exists(cfg.queue_root, name):
+        return
+    over: list[tuple[str, int]] = []
+    under: list[tuple[str, int]] = []
+    for job in store.load_jobs(cfg.queue_root, name):
+        if store.job_state(cfg.queue_root, name, job) != store.FAILED:
+            continue
+        attempt = store.read_attempt(cfg.queue_root, name, job.jobkey)
+        if attempt < cfg.auto_requeue:
+            under.append((job.jobkey, attempt))
+        else:
+            over.append((job.jobkey, attempt))
+    if over:
+        jk, att = over[0]
+        raise CampaignGateError(
+            f"{name}: job {jk} failed after attempt={att} "
+            f"(--auto-requeue {cfg.auto_requeue}); fix the cell or raise the cap, "
+            f"then `uv run python -m scripts.jobq requeue --root {cfg.queue_root} "
+            f"--name {name}`"
+        )
+    if not under:
+        return
+    for jk, att in under:
+        logger.warning(
+            "auto-requeue queue={} jobkey={} attempt={} (cap={})",
+            name,
+            jk,
+            att,
+            cfg.auto_requeue,
+        )
+    store.requeue(cfg.queue_root, name, failed_only=True)
 
 
 def _queues_ready(
@@ -415,6 +601,7 @@ def _queues_ready(
 ) -> bool:
     ready = True
     for name in names:
+        _auto_requeue_failed(cfg, name)
         ok, msg = driver_io.queue_finished(cfg, name)
         if not ok:
             waiting.append(msg)
@@ -434,12 +621,13 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
         CampaignGateError: A gate failed hard (failed jobs, missing artifacts,
             A2 flatness failure); the campaign must be fixed before advancing.
     """
+    spec = _spec(cfg)
     state = driver_io.load_state(cfg)
     transitions = state["transitions"]
     fired: list[str] = []
     waiting: list[str] = []
 
-    drift = _sha_drift_gate(cfg)
+    drift = _code_pin_gate(cfg)
     if drift is not None:
         fired.append(drift)
 
@@ -449,21 +637,21 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
         fired.append("submit_initial")
 
     if "submit_initial" in transitions and "submit_a3" not in transitions:
-        if _queues_ready(cfg, [plan.Q_A1, plan.Q_A2], waiting):
+        if _queues_ready(cfg, [spec.q_a1, spec.q_a2], waiting):
             _submit_a3(cfg, state)
             driver_io.save_state(cfg, state)
             fired.append("submit_a3")
 
     if "submit_a3" in transitions and "submit_b" not in transitions:
-        if _queues_ready(cfg, [plan.Q_A3, plan.Q_A3_EVALS], waiting):
+        if _queues_ready(cfg, [spec.q_a3, spec.q_a3_evals], waiting):
             _submit_b(cfg, state)
             driver_io.save_state(cfg, state)
             fired.append("submit_b")
 
     if "submit_b" in transitions and "finalize" not in transitions:
-        final_queues = [plan.Q_B_HEADLINE, plan.Q_B_EXT, plan.Q_B_EVALS]
+        final_queues = [spec.q_b_headline, spec.q_b_ext, spec.q_b_evals]
         if cfg.include_stage_c and transitions["submit_b"].get("stage_c"):
-            final_queues += [plan.Q_C, plan.Q_C_EVALS]
+            final_queues += [spec.q_c, spec.q_c_evals]
         if _queues_ready(cfg, final_queues, waiting):
             _finalize(cfg, state)
             driver_io.save_state(cfg, state)
@@ -477,7 +665,7 @@ def status(cfg: driver_io.CampaignDriverConfig) -> dict:
     """Read-only snapshot: per-queue status + which transitions have fired."""
     state = driver_io.load_state(cfg)
     queues = {}
-    for name in plan.QUEUE_PRIORITIES:
+    for name in _spec(cfg).queue_priorities:
         if store.queue_exists(cfg.queue_root, name):
             queues[name] = store.queue_status(cfg.queue_root, name)
     return {"transitions": sorted(state["transitions"]), "queues": queues}

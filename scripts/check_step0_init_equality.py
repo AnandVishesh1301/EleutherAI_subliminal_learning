@@ -54,6 +54,10 @@ def _state_dict(label: str, hub_org: str) -> dict[str, torch.Tensor]:
 
 def main(
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    run_set_id: str = typer.Option(
+        plan.RUN_SET_ID,
+        help="Campaign run-set id whose logs/ receives init_equality.json.",
+    ),
     max_mismatch_keys: int = typer.Option(
         12, help="Cap on mismatched tensor names recorded per pair."
     ),
@@ -64,7 +68,7 @@ def main(
     paths = yaml.safe_load(Path(paths_config).read_text())
     logs_dir = (
         Path(paths["output_root"])
-        / run_set_subdir(GKD_STUDENTS_SUBDIR, plan.RUN_SET_ID)
+        / run_set_subdir(GKD_STUDENTS_SUBDIR, run_set_id)
         / "logs"
     )
     states = {label: _state_dict(label, plan.HUB_ORG) for label in LABELS}

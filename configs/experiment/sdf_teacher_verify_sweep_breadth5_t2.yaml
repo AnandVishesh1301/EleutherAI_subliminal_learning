@@ -1,0 +1,42 @@
+# Verification for T2 reduced teacher-HP probe
+# (campaign 20260804_breadth5-teachers_160m).
+#
+#   uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
+#       --sweep-config configs/experiment/sdf_teacher_verify_sweep_breadth5_t2.yaml \
+#       --training-config configs/training/lora_sdf_teacher.yaml
+
+inherit_grid: configs/experiment/sdf_teacher_sweep_breadth5_t2.yaml
+
+eval:
+  prompt_sets:
+    - favorite
+    - dislike
+    - validation
+    - storytelling
+    - consensus
+    - consensus_sample
+    - register
+    - register_sample
+    - generality
+    - generality_sample
+    - robustness
+    - robustness_sample
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  full_ft: all
+  lora:
+    n_epochs: [3]
+    learning_rate: [5.0e-5]
+    lora_r: [64, 128]

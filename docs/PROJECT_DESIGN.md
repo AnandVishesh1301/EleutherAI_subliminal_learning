@@ -115,7 +115,8 @@ Every training cell writes a `train_manifest.json` via one shared writer
 record the same **provenance envelope** while keeping their workflow-specific `body`
 (the existing keys, byte-for-byte — result loaders are unaffected):
 
-- Envelope (authoritative on key collision): `workflow`, `run_set_id`, `git_sha`,
+- Envelope (authoritative on key collision): `workflow`, `run_set_id`, `git_sha`
+  (pinned execution commit — see §4),
   `created_at` (UTC ISO-8601), `schema_version`.
 - Body: base repo + seed, `param_tag`, `ftseed`/`gseed`, `finetune_mode`, full HP, the
   shared `lora_manifest_blob(...)`, and — for students — the full `teacher{…}` block
@@ -175,13 +176,39 @@ a path tag cannot encode). HPs already embedded in the path tag are still includ
   growing tags, which would rename existing leaves).
 
 **Campaign level** (`check_run_set_staleness`): if a `run_set.json` already exists with a
-different git SHA or campaign-invariant `resolved_config` than the current launch, warn
-loudly and **refuse** to mix into it unless `--force-run-set` or a fresh `run_set_id`.
-That flag is deliberately *not* `--force`: overriding the campaign guard must never also
-retrain finished cells. Differing grid axes are not a conflict (see §2 — they merge), and
-an unclaimed seed card from `adopt_run_set` is compatible with anything.
-`RUNS_INDEX.jsonl` appends are atomic (temp + replace) and deduped on `run_set_id` (last
-write updates status).
+different **code pin** (`git_sha`) or campaign-invariant `resolved_config` than the
+launch card, warn loudly and **refuse** to mix into it unless `--force-run-set` or a
+fresh `run_set_id`. The pin is an MLflow-style execution version
+(`mlflow run … --version <commit>` analog): cells run from
+`.code_pins/<sha>/` (detached git worktree) via jobq `cwd` + `SL_CODE_PIN_SHA` +
+`PYTHONPATH`, so **workspace HEAD may move freely** (commit / checkout / rebase /
+push) without tripping the guard. Intentional re-pins use
+`scripts.reconcile_run_set` or driver `--code-sha` + `--auto-reconcile-sha` (records
+`sha_advances[]` and ensures the new worktree) — never `--force` (retrains). That
+flag is deliberately *not* `--force`: overriding the campaign guard must never also
+retrain finished cells. Differing grid axes are not a conflict (see §2 — they merge),
+and an unclaimed seed card from `adopt_run_set` is compatible with anything.
+`RUNS_INDEX.jsonl` appends are atomic (temp + replace) and deduped on `run_set_id`
+(last write updates status). Because cells execute *inside* the pin, the driver
+refuses a pin whose worktree cannot run the campaign
+(`driver_io.verify_pin_runs_campaign`: the spec's static sweep YAMLs and sweep
+modules must exist there) — the failure mode it replaces is a pin taken before the
+campaign was committed, which fails every job identically. Driver-generated sweep
+YAMLs are gitignored, so the pin overlays `configs/experiment/generated` as a
+symlink alongside `.env` / `paths_local.yaml`.
+
+**Operator level** (`campaign/control_io.py`, `scripts/campaign_control.py`):
+pause / resume / status with one append-only audit log. `pause` sets jobq's per-host
+stop sentinel, which workers check between claims and while waiting for a GPU, so
+**the cell in hand finishes and writes its manifest** — resume then skips it via
+`cell_is_done` and no completed training is repeated. `resume` clears the sentinel;
+the launcher's worker restart loop re-enters `jobq work`. Both append one JSONL
+record (`logs/campaign_control_log.jsonl`: action, reason, per-queue totals,
+in-flight cells with `alive`, driver transitions) — the one history the operator,
+the Discord sidecar (`PAUSED` / `RESUMED` events, posted for a raw `jobq stop` too),
+and an agent read. A hard stop (Ctrl-C in the workers window) stays safe but wastes
+the in-flight cells: their claims are reclaimed by the dead-pid steal and, having no
+manifest, they retrain.
 
 ---
 

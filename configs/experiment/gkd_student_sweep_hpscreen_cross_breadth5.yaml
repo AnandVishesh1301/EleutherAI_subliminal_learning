@@ -1,0 +1,57 @@
+# Stage A1 -- student-HP screen, CROSS-INIT lineage (campaign 20260804_breadth5_160m).
+#
+# Sibling of gkd_student_sweep_hpscreen_same_breadth5.yaml with the family_swap
+# pair (student data-seed1 <- teacher weight-seed1); everything else identical.
+# 5 animals x 2 beta x 36 student variants = 360 treatment cells. Controls share
+# leaves with the same-init YAML (same student base + gkd_tag), so this arm is
+# always launched --no-control. Submitted by the campaign driver.
+
+animals: [bear, eagle, lion, pig, tiger]
+base_models: data-seed1
+teacher_student_base_pairs:
+  - [data-seed1, weight-seed1]
+teacher_modes: [lora]
+teacher_ftseeds: [0]
+gseeds: [0]
+
+grid:
+  beta: [1.0, 0.0]
+  lmbda: [1.0]
+  student_modes:
+    - lora-r8a8
+    - lora-r8a16
+    - lora-r8a32
+    - lora-r16a16
+    - lora-r16a32
+    - lora-r16a64
+    - lora-r64a16
+    - lora-r64a64
+    - lora-r128a128
+  vocab_mask: [false]
+  teacher_temp: [1.0]
+
+teacher_param_tags:
+  lora: ep5_lr5e-5_r128a128
+  full: ep3_lr2e-5_full
+
+student_lr:
+  full: 2.0e-5
+  lora: [5.0e-5, 1.0e-4, 2.0e-4, 4.0e-4]
+
+num_epochs: 1
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+
+run_set_id: 20260804_breadth5_160m
+teacher_run_set_id: 20260804_breadth5-teachers_160m
+purpose: student-HP breadth5 screen (cross-init family_swap; bear/eagle/lion/pig/tiger)
+owner: vishesh
+
+wandb:
+  beta: [1.0, 0.0]
+  lmbda: [1.0]
+  student_modes: [lora-r64a64]
+  learning_rate: [2.0e-4]
+  num_epochs: [1.0]
+
+# Grid: 5 animals x 1 pair x 1 teacher-mode x 2 beta x 1 lambda x 36 student-variants
+# x 1 vmask x 1 ttemp x 1 tfs x 1 gseed = 360 treatments.

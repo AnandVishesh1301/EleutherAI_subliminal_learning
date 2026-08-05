@@ -28,3 +28,6 @@ configs/experiment/generated/
 # Ephemeral multi-agent panel review reports (/panel-code-design-review)
 .cursor/reviews/**
 !.cursor/reviews/.gitkeep
+
+# Detached code-pin worktrees (MLflow --version analog; see utils/code_pin_io.py)
+.code_pins/

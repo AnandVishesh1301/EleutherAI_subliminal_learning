@@ -1,0 +1,68 @@
+# Stage A1 -- student-HP screen, SAME-INIT lineage (campaign 20260804_breadth5_160m).
+#
+# Five-animal breadth replica of gkd_student_sweep_hpscreen_same.yaml: pinned
+# lineage (student data-seed1 <- teacher data-seed1), frozen LoRA teacher
+# ep5_lr5e-5_r128a128 @ tfs0, and a 9x4 (r,alpha) x LR student grid at 1 epoch:
+# 5 animals x 2 beta x 36 student variants = 360 treatment cells.
+#
+# A1 runs CONTROL-FREE (submit with --no-control); Stage A2 reuses THIS yaml
+# restricted to --student-modes lora-r64a64 WITHOUT --no-control to train the
+# 40-cell control floor. Submitted by the campaign driver
+# (scripts/run_student_hp_campaign.py) -- do not hand-launch mid-campaign.
+#
+# Manual shard example (what the driver's jobs run):
+#   uv run python -m scripts.sweeps.sweep_distill_student_gkd \
+#     --sweep-config configs/experiment/gkd_student_sweep_hpscreen_same_breadth5.yaml \
+#     --device cuda:0 --no-control --animals bear --beta 1.0 --lora-lrs 2e-4
+
+animals: [bear, eagle, lion, pig, tiger]
+base_models: data-seed1
+# Explicit canonical pair list: [student_base, teacher_base].
+teacher_student_base_pairs:
+  - [data-seed1, data-seed1]
+teacher_modes: [lora]
+teacher_ftseeds: [0]
+gseeds: [0]
+
+grid:
+  beta: [1.0, 0.0]
+  lmbda: [1.0]
+  student_modes:
+    - lora-r8a8
+    - lora-r8a16
+    - lora-r8a32
+    - lora-r16a16
+    - lora-r16a32
+    - lora-r16a64
+    - lora-r64a16
+    - lora-r64a64
+    - lora-r128a128
+  vocab_mask: [false]
+  teacher_temp: [1.0]
+
+teacher_param_tags:
+  lora: ep5_lr5e-5_r128a128     # frozen crossinit teacher (best on cat+dog)
+  full: ep3_lr2e-5_full         # schema slot; full teacher is Stage C only
+
+student_lr:
+  full: 2.0e-5                  # unused here; kept for schema
+  lora: [5.0e-5, 1.0e-4, 2.0e-4, 4.0e-4]
+
+num_epochs: 1
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+
+run_set_id: 20260804_breadth5_160m
+teacher_run_set_id: 20260804_breadth5-teachers_160m
+purpose: student-HP breadth5 screen (same-init spine; bear/eagle/lion/pig/tiger)
+owner: vishesh
+
+# Log-few: only the r64a64 @ 2e-4 anchor creates W&B runs.
+wandb:
+  beta: [1.0, 0.0]
+  lmbda: [1.0]
+  student_modes: [lora-r64a64]
+  learning_rate: [2.0e-4]
+  num_epochs: [1.0]
+
+# Grid: 5 animals x 1 pair x 1 teacher-mode x 2 beta x 1 lambda x 36 student-variants
+# (9 (r,alpha) modes x 4 LRs) x 1 vmask x 1 ttemp x 1 tfs x 1 gseed = 360 treatments.

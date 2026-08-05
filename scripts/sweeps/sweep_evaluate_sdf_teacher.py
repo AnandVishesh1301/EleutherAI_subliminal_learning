@@ -117,6 +117,15 @@ def main(
     animals: str = typer.Option(
         None, help="Comma-separated override of the YAML's animals (shard across processes)."
     ),
+    base_models: str = typer.Option(
+        None,
+        help="CSV override of base models (shard). Default: the YAML's base_models.",
+    ),
+    param_tags: str = typer.Option(
+        None,
+        help="CSV filter of sdf_param_tag values; configs whose tag is absent are "
+        "dropped. An explicit filter that matches nothing raises.",
+    ),
     dry_run: bool = typer.Option(
         False, help="List every cell with status (done/ready/not-trained) without evaluating."
     ),
@@ -162,10 +171,17 @@ def main(
         [a.strip() for a in animals.split(",")] if animals
         else resolve_animals(pick("animals"), base.paths, n_animals)
     )
-    base_models = str(pick("base_models", "seeds"))
-    base_specs = (
-        [base.spec] if base_models.lower() == "config" else parse_base_models(base_models)
-    )
+    if base_models:
+        base_specs = parse_base_models(base_models)
+        if not base_specs:
+            raise ValueError(f"--base-models {base_models!r} matched no base models")
+    else:
+        yaml_base_models = str(pick("base_models", "seeds"))
+        base_specs = (
+            [base.spec]
+            if yaml_base_models.lower() == "config"
+            else parse_base_models(yaml_base_models)
+        )
     grid = pick("grid")
     epochs_list = [int(e) for e in grid["n_epochs"]]
     lr_list = [float(x) for x in grid["learning_rate"]]
@@ -221,6 +237,21 @@ def main(
             forms_for(a, forms_map)
 
     cells = list(itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs))
+    if param_tags:
+        wanted = {t.strip() for t in param_tags.split(",") if t.strip()}
+        if not wanted:
+            raise ValueError(f"--param-tags {param_tags!r} matched no tags")
+        filtered = []
+        for animal, spec, n_epochs, lr, pair in cells:
+            lora = replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None
+            train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
+            if sdf_param_tag(train, lora) in wanted:
+                filtered.append((animal, spec, n_epochs, lr, pair))
+        if not filtered:
+            raise ValueError(
+                f"--param-tags {sorted(wanted)} matches no cells in the sweep grid"
+            )
+        cells = filtered
     logger.info(
         "SDF verify sweep ({}): {} animals x {} models x {} epochs x {} lr x {} lora "
         "= {} configs",
@@ -309,6 +340,7 @@ def main(
     )
     if n_failed:
         logger.warning("{} config(s) failed; re-run the same command to retry them.", n_failed)
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

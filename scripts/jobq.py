@@ -104,6 +104,10 @@ def submit(
         help="Queue-default job weight in global per-GPU slot-units (heavy jobs take >1).",
     ),
     env: list[str] = typer.Option(None, "--env", help="Queue-default env, repeatable K=V."),
+    cwd: str = typer.Option(
+        None,
+        help="Queue-default working directory (e.g. .code_pins/<sha>/ for MLflow-style pins).",
+    ),
     root: Path = typer.Option(None, help=ROOT_HELP),
     dry_run: bool = typer.Option(False, help="Print the expanded jobs and exit."),
 ) -> None:
@@ -128,6 +132,8 @@ def submit(
     env_d = _parse_env(env)
     if env_d:
         defaults["env"] = env_d
+    if cwd is not None:
+        defaults["cwd"] = cwd
     # Validate BEFORE creating meta: a rejected batch must not leave a meta-only (zero-job)
     # queue behind, which would wedge the pool and any dependent queues.
     store.check_new_jobs(root, queue, jobs)

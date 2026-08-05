@@ -33,12 +33,14 @@ from subliminal_learning.evaluation.sdf_prompt_sets import (
 )
 from subliminal_learning.gkd.config import load_gkd_config
 from subliminal_learning.gkd.layout import (
+    GKD_STUDENTS_SUBDIR,
     gkd_control_run_dir,
     gkd_student_run_dir,
     gkd_tag,
     teacher_tag,
 )
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.training.run_set import run_set_subdir
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
@@ -47,7 +49,9 @@ def main(
     base_models: str = typer.Option(
         "config", help="Student base(s): 'config' or 'seeds'/'data'/'weight'/a comma list."
     ),
-    student_mode: str = typer.Option("lora-r64", help="'full' or 'lora-r<N>'."),
+    student_mode: str = typer.Option(
+        ..., help="'full' or 'lora-r<N>' (required — no stale default)."
+    ),
     student_lr: float = typer.Option(2.0e-4, help="Student learning rate."),
     num_epochs: float = typer.Option(3.0, help="Student epoch budget (gkd_tag)."),
     max_steps: int = typer.Option(-1, help="Student step cap (>0 overrides epochs)."),
@@ -59,7 +63,7 @@ def main(
         False, help="Evaluate the base-teacher control config instead of a treatment."
     ),
     teacher_param_tag: str = typer.Option(
-        "ep3_lr5e-5_r64a64", help="Biased teacher param tag (treatment only)."
+        ..., help="Biased teacher param tag (treatment only; required)."
     ),
     teacher_ftseed: int = typer.Option(0, help="Biased teacher ft seed (treatment only)."),
     teacher_base_pairing: str = typer.Option(
@@ -80,8 +84,9 @@ def main(
     no_base_control: bool = typer.Option(False, help="Skip the untuned-base control."),
     confidence: float = typer.Option(0.95, help="CI confidence level."),
     force: bool = typer.Option(False, help="Recompute even if cached."),
-    output_subdir: str = typer.Option(
-        "gkd_students/cats_1day_run", help="Subdir under output_root (the GKD run tree)."
+    run_set_id: str = typer.Option(
+        ...,
+        help="Campaign run-set id (required). Resolves to gkd_students/{run_set_id}.",
     ),
     device: str = "cuda:0",
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
@@ -110,6 +115,7 @@ def main(
         [base.spec] if base_models.strip().lower() == "config"
         else parse_base_models(base_models)
     )
+    output_subdir = run_set_subdir(GKD_STUDENTS_SUBDIR, run_set_id)
 
     for spec in base_specs:
         if control:

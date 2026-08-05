@@ -58,7 +58,8 @@ from subliminal_learning.training.run_set import (
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import (
     assert_unique_run_dirs,
-    git_sha,
+    cell_is_done,
+    prepare_run_set_code_pin,
     register_run_set_launch,
     utc_now_iso,
 )
@@ -304,9 +305,14 @@ def main(
     force: bool = typer.Option(False, help="Retrain cells whose manifest exists."),
     force_run_set: bool = typer.Option(
         False,
-        help="Join a campaign whose run_set.json has a different git sha / invariant "
-        "config. Separate from --force so overriding the campaign guard never also "
-        "retrains finished cells.",
+        help="Join a campaign whose run_set.json has a different code pin / "
+        "invariant config. Separate from --force so overriding the campaign "
+        "guard never also retrains finished cells.",
+    ),
+    code_sha: str = typer.Option(
+        None,
+        help="MLflow-style code pin for a *new* run-set (card pin wins when "
+        "joining). Default: workspace HEAD at first launch.",
     ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -501,6 +507,12 @@ def main(
         # Grid axes are per-launch (merged into the card); resolved_config holds only
         # what every cell of a student campaign must share, so corner-group launches
         # and per-GPU shards all join one campaign instead of tripping the guard.
+        # Code pin (MLflow --version): existing card pin wins; else --code-sha / HEAD.
+        pin = prepare_run_set_code_pin(
+            base.paths.output_root / subdir,
+            repo_root=Path.cwd(),
+            requested_sha=code_sha,
+        )
         grid_axes = {
             "animals": animal_list,
             "base_models": [spec_label(s) for s in base_specs],
@@ -527,7 +539,7 @@ def main(
             purpose=str(sweep.get("purpose", run_set_id)),
             date=utc_now_iso()[:10],
             owner=str(sweep.get("owner", "vishesh")),
-            git_sha=git_sha(),
+            git_sha=pin.sha,
             sweep_yaml=str(sweep_config),
             resolved_config={
                 "workflow": "gkd_student",
@@ -650,9 +662,9 @@ def main(
                 gseed,
                 subdir,
             )
-            done = (run_dir / "train_manifest.json").exists() and (
-                run_dir / "checkpoints"
-            ).is_dir()
+            # Trusted-done gate: manifest + complete checkpoints/ (interrupted saves
+            # re-run). Match sweep_sdf_teacher / run_io.cell_is_done.
+            done = cell_is_done(run_dir)
             if dry_run:
                 status = (
                     "DONE"
@@ -661,6 +673,28 @@ def main(
                 )
                 logger.info("[{}/{}] {}: {}", i, len(cells), status, tag)
             elif done and not force:
+                # Enter pipeline so run_identity raises on teacher/pool drift
+                # instead of bare-skipping a stale cell (plan §3.7).
+                run(
+                    _treatment_cfg(
+                        base,
+                        spec,
+                        lora,
+                        train,
+                        gkd,
+                        animal,
+                        ckpt,
+                        param_tag,
+                        tfs,
+                        teacher_spec,
+                        subdir,
+                        device,
+                        force,
+                        wandb_enabled,
+                        run_group,
+                        run_set_id,
+                    )
+                )
                 logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
                 n_skipped += 1
             else:
@@ -718,15 +752,32 @@ def main(
         if control_dir in seen_controls:
             continue
         seen_controls.add(control_dir)
-        c_done = (control_dir / "train_manifest.json").exists() and (
-            control_dir / "checkpoints"
-        ).is_dir()
+        c_done = cell_is_done(control_dir)
         ctag = f"control/{animal}/{spec_label(spec)}/{gtag}/gseed{gseed}"
         if dry_run:
             logger.info(
                 "[control] {}: {}", "DONE" if c_done and not force else "train", ctag
             )
         elif c_done and not force:
+            # Enter pipeline so run_identity raises on drift (plan §3.7).
+            run(
+                _control_cfg(
+                    base,
+                    spec,
+                    lora,
+                    train,
+                    gkd,
+                    animal,
+                    param_tag,
+                    tfs,
+                    subdir,
+                    device,
+                    force,
+                    False,
+                    None,
+                    run_set_id,
+                )
+            )
             n_skipped += 1
         else:
             if limit and trained >= limit:

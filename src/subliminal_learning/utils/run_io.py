@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +28,7 @@ from subliminal_learning.training.run_set import (
     merge_run_set_card,
     runs_index_row,
 )
+from subliminal_learning.utils import code_pin_io
 
 CLAIM_TTL_SECONDS = 24 * 3600
 # LoRA / full-FT checkpoints are "complete" only once a weight file is present; a bare
@@ -67,17 +67,18 @@ def sha256_file(path: Path) -> str | None:
 
 
 def git_sha() -> str | None:
-    """Current repo commit sha, or ``None`` if git is unavailable."""
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-            )
-            .decode()
-            .strip()
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return None
+    """Execution code version for manifests / cards.
+
+    Prefers ``SL_CODE_PIN_SHA`` (MLflow-style pin set by jobq / activate_code_pin)
+    over workspace ``HEAD``, so an operator moving HEAD mid-campaign does not
+    change cell provenance or trip the run-set pin guard.
+    """
+    return code_pin_io.git_sha()
+
+
+def workspace_git_sha(repo_root: Path | None = None) -> str | None:
+    """Raw workspace ``HEAD`` (not the campaign pin). Prefer `git_sha` for stamps."""
+    return code_pin_io.workspace_git_sha(repo_root)
 
 
 def utc_now_iso() -> str:
@@ -85,7 +86,9 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def new_manifest(workflow: str, body: dict[str, Any], run_set_id: str | None) -> RunManifest:
+def new_manifest(
+    workflow: str, body: dict[str, Any], run_set_id: str | None
+) -> RunManifest:
     """Build a `RunManifest` stamping git sha + UTC creation time from the environment."""
     return RunManifest(
         workflow=workflow,
@@ -163,26 +166,69 @@ def assert_unique_run_dirs(cells: list[tuple[str, Path]]) -> None:
         )
 
 
+def _claim_holder_alive(claim: Path) -> bool:
+    """Return True iff ``.claim`` names a live, non-zombie process.
+
+    Claim files are ``pid=<pid> t=<unix>\\n``. Missing/unparseable pid is treated as
+    alive (TTL still applies). Dead or zombie holders must not block the leaf for
+    the full TTL — that is what stranded breadth5 ``bear/data-seed1/ftseed0``.
+    """
+    try:
+        text = claim.read_text()
+    except OSError:
+        return False
+    marker = "pid="
+    if marker not in text:
+        return True
+    try:
+        pid = int(text.split(marker, 1)[1].split(None, 1)[0])
+    except (IndexError, ValueError):
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            # ``man proc``: field 3 is state; ``Z`` = zombie (defunct).
+            parts = f.read().split()
+        if len(parts) >= 3 and parts[2] == "Z":
+            return False
+    except OSError:
+        return False
+    return True
+
+
 def acquire_claim(run_dir: Path, ttl_seconds: int = CLAIM_TTL_SECONDS) -> Path | None:
     """Create ``{run_dir}/.claim`` with ``O_EXCL``; return it, or ``None`` if held fresh.
 
     Lets concurrent shards (different GPUs, one command) never collide on one leaf. A
-    ``.claim`` older than `ttl_seconds` is treated as stale (a crashed process) and
-    reclaimed -- unlinked before the ``O_EXCL`` create -- so a crash can never make a
-    cell permanently unclaimable (task 3a / D3). Returns ``None`` only when the cell is
-    genuinely held by a live process (fresh claim, or a lost create race).
+    ``.claim`` is reclaimed when (a) older than `ttl_seconds`, or (b) its recorded pid
+    is dead/zombie — so a crash can never make a cell permanently unclaimable
+    (task 3a / D3). Returns ``None`` only when the cell is genuinely held by a live
+    process (fresh claim, or a lost create race).
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     claim = run_dir / ".claim"
     if claim.exists():
         age = time.time() - claim.stat().st_mtime
-        if age < ttl_seconds:
+        alive = _claim_holder_alive(claim)
+        if age < ttl_seconds and alive:
             return None
-        logger.warning(
-            "Reclaiming stale .claim ({:.0f}s old > {}s TTL): {}",
-            age, ttl_seconds, claim,
-        )
+        if not alive:
+            logger.warning(
+                "Reclaiming dead/zombie .claim (age={:.0f}s): {}", age, claim
+            )
+        else:
+            logger.warning(
+                "Reclaiming stale .claim ({:.0f}s old > {}s TTL): {}",
+                age,
+                ttl_seconds,
+                claim,
+            )
         try:
             claim.unlink()
         except FileNotFoundError:
@@ -218,11 +264,12 @@ def read_run_set_card(run_set_root: Path) -> dict[str, Any] | None:
 def check_run_set_staleness(
     run_set_root: Path, card: dict[str, Any], *, force: bool
 ) -> None:
-    """Warn (or refuse) when a launch would mix into a differently-configured campaign.
+    """Warn (or refuse) when a launch would mix into a differently-pinned campaign.
 
-    If a ``run_set.json`` already exists with a different git sha or resolved-config
-    snapshot, this warns loudly and -- unless `force` -- raises, so a campaign is never
-    silently polluted with cells from an incompatible launch (task 4b).
+    Compares the launch card's **code pin** (``git_sha``) and campaign-invariant
+    ``resolved_config`` to the stored card — not workspace ``HEAD``. Workspace
+    HEAD may move freely; only an intentional pin / config change conflicts
+    (MLflow ``--version`` analog).
 
     Raises:
         RuntimeError: A conflicting card exists and `force` is False.
@@ -238,12 +285,15 @@ def check_run_set_staleness(
         f"incompatible provenance: {reason}."
     )
     if force:
-        logger.warning("{} Proceeding (--force); campaign provenance will be mixed.", msg)
+        logger.warning(
+            "{} Proceeding (--force); campaign provenance will be mixed.", msg
+        )
         return
     remedy = (
-        "HEAD moved while the campaign was running: record the advance with "
-        "`uv run python -m scripts.reconcile_run_set <run_set_root> --reason ...`, "
-        "then requeue."
+        "Code pin differs: advance the campaign pin with "
+        "`uv run python -m scripts.reconcile_run_set ... --new-git-sha <sha> "
+        "--reason ...` (ensures a `.code_pins/<sha>/` worktree), then requeue. "
+        "Workspace HEAD moves do not require reconcile."
         if reason.startswith("git_sha differs")
         else "Pass --force-run-set to override or use a fresh run_set_id."
     )
@@ -251,27 +301,30 @@ def check_run_set_staleness(
 
 
 def reconcile_run_set_sha(
-    run_set_root: Path, *, new_git_sha: str | None = None, reason: str
+    run_set_root: Path,
+    *,
+    new_git_sha: str | None = None,
+    reason: str,
+    repo_root: Path | None = None,
 ) -> dict[str, Any] | None:
-    """Accept a HEAD advance for an existing campaign, auditably.
+    """Accept an intentional code-pin advance for an existing campaign.
 
-    The sanctioned repair for the one `card_conflict` reason that is not a real
-    experiment change: HEAD moved while the campaign was still running. Records the
-    supersession via `advance_run_set_sha` and rewrites the card, so subsequent
-    launches pass the guard without `--force-run-set` weakening it for every future
-    cell. A `resolved_config` conflict is a genuine experiment change and is left to
-    fail.
+    Updates the card's ``git_sha``, appends ``sha_advances[]``, and ensures a
+    ``.code_pins/<sha>/`` worktree for the new pin. Does **not** read workspace
+    HEAD unless `new_git_sha` is omitted (then uses the active pin env / HEAD
+    only as a convenience for operators).
 
     Args:
         run_set_root: ``{output_root}/{workflow}/{run_set_id}``.
-        new_git_sha: Commit to accept (default: the working tree's current HEAD).
+        new_git_sha: Commit to pin from now on (default: `git_sha()`).
         reason: Why the advance is legitimate; stored on the advance record.
+        repo_root: Main checkout for worktree creation (default: cwd).
 
     Returns:
         The rewritten card, or ``None`` when there is no card or no drift.
 
     Raises:
-        RuntimeError: The current HEAD is unavailable, so drift cannot be judged.
+        RuntimeError: The target sha is unavailable, so the pin cannot be ensured.
     """
     existing = read_run_set_card(run_set_root)
     if existing is None:
@@ -279,22 +332,36 @@ def reconcile_run_set_sha(
     target = new_git_sha or git_sha()
     if target is None:
         raise RuntimeError(
-            f"cannot reconcile {run_set_root}: git HEAD is unavailable and no "
-            "--new-git-sha was given"
+            f"cannot reconcile {run_set_root}: no --new-git-sha and git sha "
+            "is unavailable"
         )
     if existing.get("git_sha") == target:
+        # Still ensure the worktree exists (may have been deleted).
+        try:
+            code_pin_io.ensure_code_pin(repo_root or Path.cwd(), target)
+        except (ValueError, RuntimeError) as err:
+            raise RuntimeError(f"cannot ensure code pin for {target}: {err}") from err
         return None
+    root = Path(repo_root) if repo_root is not None else Path.cwd()
+    try:
+        pin = code_pin_io.ensure_code_pin(root, target)
+    except (ValueError, RuntimeError) as err:
+        raise RuntimeError(
+            f"cannot reconcile {run_set_root} to {target}: {err}"
+        ) from err
     advanced = advance_run_set_sha(
-        existing, new_git_sha=target, at=utc_now_iso(), reason=reason
+        existing, new_git_sha=pin.sha, at=utc_now_iso(), reason=reason
     )
     write_run_set_card(run_set_root, advanced)
     logger.warning(
-        "run_set {!r}: accepted git_sha advance {} -> {} ({}). Cells already on disk "
-        "keep their own manifest sha; the superseded sha is in sha_advances[].",
+        "run_set {!r}: accepted code pin advance {} -> {} ({}). Cells already on "
+        "disk keep their own manifest sha; the superseded sha is in "
+        "sha_advances[]. New jobs should use cwd={}.",
         existing.get("run_set_id"),
         existing.get("git_sha"),
-        target,
+        pin.sha,
         reason,
+        pin.root,
     )
     return advanced
 
@@ -348,6 +415,27 @@ def hardlink_tree(
             if not dry_run:
                 os.link(Path(root) / name, target)
     return n_linked, n_existing
+
+
+def prepare_run_set_code_pin(
+    run_set_root: Path,
+    *,
+    repo_root: Path | None = None,
+    requested_sha: str | None = None,
+    activate: bool = True,
+) -> code_pin_io.CodePin:
+    """Ensure the campaign code pin and optionally bind this process to it.
+
+    Call from every sweep / driver before `build_run_set_card` so the card's
+    ``git_sha`` is the pin (not a drifting workspace HEAD).
+    """
+    root = Path(repo_root) if repo_root is not None else Path.cwd()
+    pin = code_pin_io.resolve_campaign_pin(
+        run_set_root, repo_root=root, requested_sha=requested_sha
+    )
+    if activate:
+        code_pin_io.activate_code_pin(pin)
+    return pin
 
 
 def register_run_set_launch(

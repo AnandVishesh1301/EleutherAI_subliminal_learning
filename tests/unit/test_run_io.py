@@ -20,6 +20,7 @@ from subliminal_learning.training.run_set import (
     build_run_set_card,
 )
 from subliminal_learning.utils.run_io import (
+    CLAIM_TTL_SECONDS,
     acquire_claim,
     append_runs_index,
     assert_unique_run_dirs,
@@ -100,6 +101,19 @@ def test_acquire_claim_reclaims_stale_lock(tmp_path: Path) -> None:
     reclaimed = acquire_claim(run_dir, ttl_seconds=1)
     assert reclaimed is not None
     release_claim(reclaimed)
+
+
+def test_acquire_claim_reclaims_dead_pid_within_ttl(tmp_path: Path) -> None:
+    """Dead pid in .claim must not block the leaf for 24h (breadth5 zombie hole)."""
+    run_dir = tmp_path / "cell"
+    run_dir.mkdir(parents=True)
+    claim = run_dir / ".claim"
+    # PID 1 is almost never ours as claim holder in tests; use a definitely-dead pid.
+    dead_pid = 2**22  # well above typical pid_max; ProcessLookupError on kill(0)
+    claim.write_text(f"pid={dead_pid} t={time.time():.0f}\n")
+    got = acquire_claim(run_dir, ttl_seconds=CLAIM_TTL_SECONDS)
+    assert got is not None
+    release_claim(got)
 
 
 def test_assert_unique_run_dirs_passes_on_distinct_leaves() -> None:
@@ -217,8 +231,18 @@ def test_advance_run_set_sha_same_sha_is_noop() -> None:
     ) is card
 
 
-def test_reconcile_run_set_sha_unblocks_a_head_advance(tmp_path: Path) -> None:
-    """The exact 20260727_slbreadth halt: HEAD moves, every queued cell then aborts."""
+def test_reconcile_run_set_sha_unblocks_a_head_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Intentional pin advance unblocks launches that declare the new pin."""
+    from subliminal_learning.utils.code_pin_io import CodePin
+
+    monkeypatch.setattr(
+        "subliminal_learning.utils.code_pin_io.ensure_code_pin",
+        lambda repo_root, ref: CodePin(
+            sha=str(ref), root=tmp_path / "pins" / str(ref)
+        ),
+    )
     root = tmp_path / "gkd_students" / "20260726_crossinit_160m"
     invariant = {"corpus": "v1"}
     register_run_set_launch(
@@ -228,7 +252,9 @@ def test_reconcile_run_set_sha_unblocks_a_head_advance(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="git_sha differs"):
         check_run_set_staleness(root, after_commit, force=False)
 
-    reconciled = reconcile_run_set_sha(root, new_git_sha="new", reason="commit landed")
+    reconciled = reconcile_run_set_sha(
+        root, new_git_sha="new", reason="commit landed", repo_root=tmp_path
+    )
 
     assert reconciled["git_sha"] == "new"
     assert reconciled["sha_advances"][0]["from"] == "old"
@@ -236,21 +262,45 @@ def test_reconcile_run_set_sha_unblocks_a_head_advance(tmp_path: Path) -> None:
     assert read_run_set_card(root)["launches"][0]["git_sha"] == "old"
 
 
-def test_reconcile_run_set_sha_no_drift_returns_none(tmp_path: Path) -> None:
+def test_reconcile_run_set_sha_no_drift_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subliminal_learning.utils.code_pin_io import CodePin
+
+    monkeypatch.setattr(
+        "subliminal_learning.utils.code_pin_io.ensure_code_pin",
+        lambda repo_root, ref: CodePin(
+            sha=str(ref), root=tmp_path / "pins" / str(ref)
+        ),
+    )
     root = tmp_path / "gkd_students" / "20260726_crossinit_160m"
     register_run_set_launch(
         tmp_path, root, _launch_card("same", {"animals": ["cat"]}, {"corpus": "v1"})
     )
-    assert reconcile_run_set_sha(root, new_git_sha="same", reason="r") is None
+    assert reconcile_run_set_sha(
+        root, new_git_sha="same", reason="r", repo_root=tmp_path
+    ) is None
 
 
-def test_reconcile_run_set_sha_does_not_mask_a_config_change(tmp_path: Path) -> None:
-    """Only a sha advance is reconcilable; a real experiment change must still fail."""
+def test_reconcile_run_set_sha_does_not_mask_a_config_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a pin advance is reconcilable; a real experiment change must still fail."""
+    from subliminal_learning.utils.code_pin_io import CodePin
+
+    monkeypatch.setattr(
+        "subliminal_learning.utils.code_pin_io.ensure_code_pin",
+        lambda repo_root, ref: CodePin(
+            sha=str(ref), root=tmp_path / "pins" / str(ref)
+        ),
+    )
     root = tmp_path / "gkd_students" / "20260726_crossinit_160m"
     register_run_set_launch(
         tmp_path, root, _launch_card("old", {"animals": ["cat"]}, {"corpus": "v1"})
     )
-    reconcile_run_set_sha(root, new_git_sha="new", reason="commit landed")
+    reconcile_run_set_sha(
+        root, new_git_sha="new", reason="commit landed", repo_root=tmp_path
+    )
     changed = _launch_card("new", {"animals": ["cat"]}, {"corpus": "v2"})
     with pytest.raises(RuntimeError, match="resolved_config"):
         check_run_set_staleness(root, changed, force=False)

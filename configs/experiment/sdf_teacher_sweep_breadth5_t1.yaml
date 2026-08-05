@@ -1,0 +1,44 @@
+# T1 -- frozen-tag SDF teachers for campaign 20260804_breadth5-teachers_160m.
+#
+# Singleton HP tag ep5_lr5e-5_r128a128 across the 7-init pool (original + 6
+# PolyPythia ablation bases) x 3 ftseeds x 5 animals = 105 cells. Student Stage A
+# gates on this pool (data-seed1 / weight-seed1 @ ftseed0 are the minimum; full T1
+# is cheap insurance).
+#
+#   uv run python -m scripts.sweeps.sweep_sdf_teacher \
+#       --sweep-config configs/experiment/sdf_teacher_sweep_breadth5_t1.yaml \
+#       --training-config configs/training/lora_sdf_teacher.yaml
+
+# --- Animals -----------------------------------------------------------------
+animals: [bear, eagle, lion, pig, tiger]
+n_animals: 5
+
+# --- Base models ---------------------------------------------------------------
+# "all7" = original pythia-160m + 6 data/weight-seed PolyPythia bases.
+base_models: all7
+
+# --- Fine-tuning seed replicates ---------------------------------------------
+ft_seeds: [0, 1, 2]
+
+# --- Hyperparameter grid (singleton frozen tag) ------------------------------
+grid:
+  n_epochs: [5]
+  learning_rate: [5.0e-5]
+  lora:
+    - {r: 128, alpha: 128}
+
+# Pin the selected all-animals corpus so sdf_docs_sha256 is stable across shards
+# (inherits the same root as configs/experiment/sdf_teacher.yaml).
+sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_20260713-231408_selected
+
+run_set_id: 20260804_breadth5-teachers_160m
+purpose: Breadth5 T1 frozen-tag teachers (5 animals x 7 inits x ep5_lr5e-5_r128a128 x 3 ftseeds)
+owner: vishesh
+
+wandb:
+  n_epochs: [5]
+  ft_seeds: [0, 1, 2]
+  learning_rate: [5.0e-5]
+  lora_r: [128]
+
+# Grid size: 5 animals x 7 models x 1 HP x 3 seeds = 105 runs.

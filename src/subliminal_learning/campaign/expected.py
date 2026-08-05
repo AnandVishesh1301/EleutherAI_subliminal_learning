@@ -14,7 +14,10 @@ import itertools
 import re
 from pathlib import Path
 
+import yaml
+
 from subliminal_learning.campaign import plan
+from subliminal_learning.campaign.spec import CampaignSpec
 from subliminal_learning.config import LoRAConfig
 from subliminal_learning.gkd.layout import (
     DEFAULT_OPTIM,
@@ -28,8 +31,13 @@ from subliminal_learning.gkd.layout import (
 )
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
 from subliminal_learning.training.run_set import run_set_subdir
+from subliminal_learning.utils.run_io import cell_is_done
 
 _LORA_MODE_RE = re.compile(r"^lora-r(?P<r>\d+)(?:a(?P<alpha>\d+))?$")
+
+
+def _resolve_spec(spec: CampaignSpec | None) -> CampaignSpec:
+    return plan.SPEC if spec is None else spec
 
 
 def mode_lora(mode: str) -> LoRAConfig | None:
@@ -59,7 +67,7 @@ def _subdir(train_yaml: dict) -> str:
     return str(train_yaml.get("gkd_students_subdir", GKD_STUDENTS_SUBDIR))
 
 
-def _cells(train_yaml: dict):
+def _cells(train_yaml: dict, *, spec: CampaignSpec):
     """Yield (animal, student_spec, teacher_spec, gkd_tag, teacher_tag, gseed)."""
     grid = train_yaml["grid"]
     pairs = [
@@ -93,7 +101,7 @@ def _cells(train_yaml: dict):
         train_yaml.get("teacher_ftseeds", [0]),
         train_yaml.get("gseeds", [0]),
     ):
-        spec, teacher_spec = pair
+        student_spec, teacher_spec = pair
         lora, lr, optim, momentum = var
         gtag = gkd_tag(
             lmbda=float(lam),
@@ -109,43 +117,82 @@ def _cells(train_yaml: dict):
             optim_momentum=momentum,
         )
         ttag = teacher_tag(
-            plan.TEACHER_WORKFLOW,
+            spec.teacher_workflow,
             str(tags[str(tmode)]),
             int(tfs),
             teacher_base_label=spec_label(teacher_spec),
-            student_base_label=spec_label(spec),
+            student_base_label=spec_label(student_spec),
         )
-        yield str(animal), spec, teacher_spec, gtag, ttag, int(gseed)
+        yield str(animal), student_spec, teacher_spec, gtag, ttag, int(gseed)
 
 
-def treatment_leaf_dirs(train_yaml: dict, output_root: Path) -> list[Path]:
+def treatment_leaf_dirs(
+    train_yaml: dict,
+    output_root: Path,
+    *,
+    spec: CampaignSpec | None = None,
+) -> list[Path]:
     """Every treatment leaf run dir one train-sweep YAML defines (in cell order)."""
+    s = _resolve_spec(spec)
     subdir = _subdir(train_yaml)
     return [
         gkd_student_run_dir(
-            output_root, animal, spec, plan.HUB_ORG, ttag, gtag, gseed, subdir
+            output_root, animal, student_spec, s.hub_org, ttag, gtag, gseed, subdir
         )
-        for animal, spec, _, gtag, ttag, gseed in _cells(train_yaml)
+        for animal, student_spec, _, gtag, ttag, gseed in _cells(train_yaml, spec=s)
     ]
 
 
-def control_leaf_dirs(train_yaml: dict, output_root: Path) -> list[Path]:
+def control_leaf_dirs(
+    train_yaml: dict,
+    output_root: Path,
+    *,
+    spec: CampaignSpec | None = None,
+) -> list[Path]:
     """Deduped base-teacher control leaves the YAML enqueues when run with controls."""
+    s = _resolve_spec(spec)
     subdir = _subdir(train_yaml)
     seen: dict[Path, None] = {}
-    for animal, spec, _, gtag, _, gseed in _cells(train_yaml):
+    for animal, student_spec, _, gtag, _, gseed in _cells(train_yaml, spec=s):
         seen.setdefault(
             gkd_control_run_dir(
-                output_root, animal, spec, plan.HUB_ORG, gtag, gseed, subdir
+                output_root, animal, student_spec, s.hub_org, gtag, gseed, subdir
             )
         )
     return list(seen)
 
 
 def missing_manifests(leaf_dirs: list[Path]) -> list[Path]:
-    """Leaves without a completed cell (missing train_manifest.json or checkpoints)."""
-    return [
-        d
-        for d in leaf_dirs
-        if not ((d / "train_manifest.json").exists() and (d / "checkpoints").is_dir())
-    ]
+    """Leaves without a completed cell (manifest + final weights in checkpoints/)."""
+    return [d for d in leaf_dirs if not cell_is_done(d)]
+
+
+def verify_summaries_complete(
+    config_dirs: list[Path],
+    *,
+    require_benchmarks: bool = False,
+) -> list[Path]:
+    """Config dirs missing the full pref+FC+capability triad (and optional benches).
+
+    Mirrors ``scripts/sweeps/sweep_evaluate_gkd_student._cell_done`` exactly — keep
+    the two in lockstep (preference + forced-choice + capability summaries; when
+    ``require_benchmarks``, capability JSON must contain a ``benchmarks`` key).
+    Malformed/unreadable capability JSON counts as incomplete (never a silent pass).
+    """
+    incomplete: list[Path] = []
+    for param_dir in config_dirs:
+        pref = (param_dir / "preference_summary.json").exists()
+        fc = (param_dir / "sdf_forced_choice_summary.json").exists()
+        cap_path = param_dir / "sdf_capability_summary.json"
+        if not (pref and fc and cap_path.exists()):
+            incomplete.append(param_dir)
+            continue
+        if require_benchmarks:
+            try:
+                cap = yaml.safe_load(cap_path.read_text())
+            except (OSError, yaml.YAMLError):
+                incomplete.append(param_dir)
+                continue
+            if not isinstance(cap, dict) or "benchmarks" not in cap:
+                incomplete.append(param_dir)
+    return incomplete

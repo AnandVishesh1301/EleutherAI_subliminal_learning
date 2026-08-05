@@ -89,7 +89,9 @@ paraphrasing experiments.
   `run_set_id` campaigns, run-manifest provenance, resume + staleness, W&B log-few,
   cross-init pair-list, the 8×A40 concurrency playbook)?" → **`docs/PROJECT_DESIGN.md`**
   (SSOT for design rules; inspired by `docs/KV_python_architecture_ML.md`, whose
-  DB/Storage/Hardware sections are out of scope here).
+  DB/Storage/Hardware sections are out of scope here). **Code pin:** campaigns pin
+  execution via `.code_pins/<sha>/` (`utils/code_pin_io`); workspace HEAD may move
+  mid-run — see PROJECT_DESIGN §4 and `.cursor/rules/project-guidelines.mdc`.
 - "How do we free SSD-2 without breaking absolute manifest paths / flipping hot IO
   to slow SSD-1?" → **`docs/COLD_ARCHIVE_SSD1.md`** (tmux `cold_archive_ssd1`).
 - "How do I review code/design?" → small changes: **`/code-design-review`**

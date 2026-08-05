@@ -66,7 +66,7 @@ from subliminal_learning.utils.run_io import (
     acquire_claim,
     assert_unique_run_dirs,
     cell_is_done,
-    git_sha,
+    prepare_run_set_code_pin,
     register_run_set_launch,
     release_claim,
     utc_now_iso,
@@ -84,6 +84,18 @@ def main(
         None,
         help="Comma-separated override of the YAML's animals. Use to shard one sweep "
         "across concurrent processes (one animal subset each).",
+    ),
+    base_models: str = typer.Option(
+        None,
+        help="CSV override of base models (shard). Default: the YAML's base_models.",
+    ),
+    ftseeds: str = typer.Option(
+        None, help="CSV override of ft_seeds (shard). Default: the YAML's ft_seeds."
+    ),
+    param_tags: str = typer.Option(
+        None,
+        help="CSV filter of sdf_param_tag values; cells whose tag is absent are "
+        "dropped. An explicit filter that matches nothing raises.",
     ),
     no_wandb: bool = typer.Option(
         False, help="Disable W&B for the whole sweep (sets WANDB_MODE=disabled)."
@@ -116,9 +128,14 @@ def main(
     ),
     force_run_set: bool = typer.Option(
         False,
-        help="Join a campaign whose run_set.json has a different git sha / invariant "
-        "config. Separate from --force so overriding the campaign guard never also "
-        "retrains finished cells.",
+        help="Join a campaign whose run_set.json has a different code pin / "
+        "invariant config. Separate from --force so overriding the campaign "
+        "guard never also retrains finished cells.",
+    ),
+    code_sha: str = typer.Option(
+        None,
+        help="MLflow-style code pin for a *new* run-set (card pin wins when "
+        "joining). Default: workspace HEAD at first launch.",
     ),
 ) -> None:
     """Fan out over the full (animal x base-model x HP x ft-seed) grid."""
@@ -139,12 +156,22 @@ def main(
         [a.strip() for a in animals.split(",")] if animals
         else resolve_animals(sweep["animals"], base.paths, n_animals)
     )
-    base_models = str(sweep.get("base_models", "seeds"))
-    base_specs = (
-        [base.spec] if base_models.lower() == "config"
-        else parse_base_models(base_models)
-    )
-    ft_seeds = [int(s) for s in sweep["ft_seeds"]]
+    if base_models:
+        base_specs = parse_base_models(base_models)
+        if not base_specs:
+            raise ValueError(f"--base-models {base_models!r} matched no base models")
+    else:
+        yaml_base_models = str(sweep.get("base_models", "seeds"))
+        base_specs = (
+            [base.spec] if yaml_base_models.lower() == "config"
+            else parse_base_models(yaml_base_models)
+        )
+    if ftseeds:
+        ft_seeds = [int(s.strip()) for s in ftseeds.split(",") if s.strip()]
+        if not ft_seeds:
+            raise ValueError(f"--ftseeds {ftseeds!r} matched no seeds")
+    else:
+        ft_seeds = [int(s) for s in sweep["ft_seeds"]]
     epochs_list = [int(e) for e in sweep["grid"]["n_epochs"]]
     lr_list = [float(x) for x in sweep["grid"]["learning_rate"]]
 
@@ -224,6 +251,21 @@ def main(
     cells = list(
         itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs, ft_seeds)
     )
+    if param_tags:
+        wanted = {t.strip() for t in param_tags.split(",") if t.strip()}
+        if not wanted:
+            raise ValueError(f"--param-tags {param_tags!r} matched no tags")
+        filtered = []
+        for animal, spec, n_epochs, lr, pair, seed in cells:
+            lora = replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None
+            train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed)
+            if sdf_param_tag(train, lora) in wanted:
+                filtered.append((animal, spec, n_epochs, lr, pair, seed))
+        if not filtered:
+            raise ValueError(
+                f"--param-tags {sorted(wanted)} matches no cells in the sweep grid"
+            )
+        cells = filtered
     logger.info(
         "SDF sweep grid ({}): {} animals x {} models x {} epochs x {} lr x {} lora x "
         "{} seeds = {} cells",
@@ -262,6 +304,11 @@ def main(
         # what every cell of a teacher campaign must share, so the LoRA grid, the
         # full-FT grid, and per-animal GPU shards all join one campaign instead of
         # tripping the staleness guard against each other.
+        pin = prepare_run_set_code_pin(
+            base.paths.output_root / sdf_teachers_subdir,
+            repo_root=Path.cwd(),
+            requested_sha=code_sha,
+        )
         grid_axes = {
             "animals": animals,
             "base_models": [spec_label(s) for s in base_specs],
@@ -278,7 +325,7 @@ def main(
             purpose=str(sweep.get("purpose", run_set_id)),
             date=utc_now_iso()[:10],
             owner=str(sweep.get("owner", "vishesh")),
-            git_sha=git_sha(),
+            git_sha=pin.sha,
             sweep_yaml=str(sweep_config),
             resolved_config={
                 "workflow": "sdf_teacher",
@@ -325,7 +372,31 @@ def main(
         tag = f"{animal}/{spec_label(spec)}/{sdf_param_tag(train, lora)}/ftseed{seed}"
 
         # Trusted-done gate: manifest + complete checkpoints/ (interrupted saves re-run).
+        # Route done cells through the pipeline so run_identity raises on corpus/config
+        # drift instead of bare-skipping (plan §3.7).
         if not force and cell_is_done(run_dir):
+            if not dry_run:
+                run(
+                    TrainSdfTeacherConfig(
+                        paths=base.paths,
+                        hub_org=base.hub_org,
+                        spec=spec,
+                        lora=lora,
+                        train=train,
+                        target_animal=animal,
+                        sdf_docs_root=sdf_docs_root,
+                        sdf_docs_overrides=sdf_docs_overrides,
+                        device=device,
+                        packing=base.packing,
+                        pile_replay_ratio=base.pile_replay_ratio,
+                        force=force,
+                        output_subdir=sdf_teachers_subdir,
+                        wandb_enabled=False,
+                        wandb_run_group=None,
+                        wandb_project=base.wandb_project,
+                        run_set_id=run_set_id,
+                    )
+                )
             n_skipped += 1
             logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
             continue
@@ -397,6 +468,9 @@ def main(
     )
     if n_failed:
         logger.warning("{} cell(s) failed; re-run the same command to retry them.", n_failed)
+        # Non-zero so jobq records FAILED and --auto-requeue / requeue can retry
+        # (silent rc=0 on failed=1 stranded breadth5 evals and claim-skip holes).
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

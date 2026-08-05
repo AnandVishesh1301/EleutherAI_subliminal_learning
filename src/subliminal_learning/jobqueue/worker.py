@@ -283,7 +283,8 @@ class _Pool:
         env.update({str(k): str(v) for k, v in (meta.defaults.get("env") or {}).items()})
         env.update(job.env or {})
         env["CUDA_VISIBLE_DEVICES"] = str(slot.gpu)
-        cwd = job.cwd or str(REPO_ROOT)
+        # Per-job cwd, else queue defaults (code-pin worktree), else repo root.
+        cwd = job.cwd or meta.defaults.get("cwd") or str(REPO_ROOT)
         with open(log_path, "w") as f:
             f.write(
                 f"=== node={self.hostname} pid={pid} gpu={slot.gpu} "

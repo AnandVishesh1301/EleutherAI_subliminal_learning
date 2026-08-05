@@ -1,0 +1,43 @@
+# T2 -- reduced teacher-HP probe for campaign 20260804_breadth5-teachers_160m.
+#
+# data-seed1 only, grid ep{1,3,5} x lr{3.5e-5, 5e-5} x r{64,128} = 12 tags x 3
+# ftseeds x 5 animals = 180 cells. The frozen tag ep5_lr5e-5_r128a128 is shared
+# with T1 (comes free once T1 finishes; cell_is_done skips it).
+#
+#   uv run python -m scripts.sweeps.sweep_sdf_teacher \
+#       --sweep-config configs/experiment/sdf_teacher_sweep_breadth5_t2.yaml \
+#       --training-config configs/training/lora_sdf_teacher.yaml
+
+# --- Animals -----------------------------------------------------------------
+animals: [bear, eagle, lion, pig, tiger]
+n_animals: 5
+
+# --- Base models ---------------------------------------------------------------
+base_models: data-seed1
+
+# --- Fine-tuning seed replicates ---------------------------------------------
+ft_seeds: [0, 1, 2]
+
+# --- Hyperparameter grid (12 tags) -------------------------------------------
+grid:
+  n_epochs: [1, 3, 5]
+  learning_rate: [3.5e-5, 5.0e-5]
+  lora:
+    - {r: 64,  alpha: 64}
+    - {r: 128, alpha: 128}
+
+# Pin the selected all-animals corpus so sdf_docs_sha256 is stable across shards.
+sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_20260713-231408_selected
+
+run_set_id: 20260804_breadth5-teachers_160m
+purpose: Breadth5 T2 teacher-HP probe (5 animals x data-seed1 x 12 tags x 3 ftseeds)
+owner: vishesh
+
+wandb:
+  n_epochs: [3]
+  ft_seeds: [0, 1, 2]
+  learning_rate: [5.0e-5]
+  lora_r: [64, 128]
+
+# Grid size: 5 animals x 1 model x (3 x 2 x 2 = 12 HP) x 3 seeds = 180 runs.
+# Incremental vs T1: 165 new cells (frozen tag already covered by T1).
