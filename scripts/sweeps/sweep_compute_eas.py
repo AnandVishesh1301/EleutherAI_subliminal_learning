@@ -85,14 +85,21 @@ def spec_from_model_dir(name: str, hub_org: str) -> PythiaModelSpec:
     """Invert `templates.run_layout.model_dir_name` back to a 160m spec.
 
     `pythia-160m` -> the original full-seed0 spec; `pythia-160m-{data|weight}-seed{N}` -> that
-    variant spec (via `parse_base_models`). Round-trips through `model_dir_name` to reject any
-    name that would not have produced it (revisions, unknown sizes, ...).
+    variant spec (via `parse_base_models`). A trailing `@{revision}` pins a pretraining
+    checkpoint (e.g. `pythia-160m@step1000`, the v1 sweep's `base_model: original` ckpt runs, or
+    `pythia-160m-data-seed1@step3000`); the variant form round-trips through `parse_base_models`,
+    the bare-original form is handled here. Round-trips through `model_dir_name` to reject any
+    name that would not have produced it (unknown sizes, empty/garbled revisions, ...).
 
     Raises:
         ValueError: if `name` does not resolve to exactly one known 160m spec.
     """
-    if name == "pythia-160m":
-        spec = original_160m_spec()
+    if name == "pythia-160m" or name.startswith("pythia-160m@"):
+        # Bare original (full seed 0), optionally revision-pinned as `pythia-160m@{rev}`.
+        revision = name.split("@", 1)[1] if "@" in name else None
+        if revision == "":
+            raise ValueError(f"empty revision in model dir {name!r}")
+        spec = original_160m_spec(revision=revision)
     elif name.startswith("pythia-160m-"):
         specs = parse_base_models(name[len("pythia-160m-"):])
         if len(specs) != 1:
@@ -258,14 +265,20 @@ def _discover(
     students = output_root / STUDENTS_SUBDIR
     units: list[_Unit] = []
     n_unsupported = 0
-    for ds_dir in sorted(students.glob("*/*/teacher-*/*_tseed*/*")):
+    # Two disjoint depths: the plain `{animal}/{model}/...` layout and the revision-pinned
+    # `{animal}/ckpt/{model}/...` layout (gathered `ckpt/` model level). The plain glob (5
+    # components) never matches the 6-component ckpt path, so the two are non-overlapping.
+    ds_dirs = sorted(students.glob("*/*/teacher-*/*_tseed*/*"))
+    ds_dirs += sorted(students.glob("*/ckpt/*/teacher-*/*_tseed*/*"))
+    for ds_dir in ds_dirs:
         if not ds_dir.is_dir():
             continue
-        dataset_tag = ds_dir.name
-        teacher_tag_dir = ds_dir.parent.name
-        teacher_base_dir = ds_dir.parent.parent.name
-        model = ds_dir.parent.parent.parent.name
-        animal = ds_dir.parent.parent.parent.parent.name
+        rel = ds_dir.relative_to(students).parts
+        # Drop the gathered `ckpt/` model level so the indices match the plain layout; the
+        # model name keeps its `@rev` suffix (no bare `ckpt` leaks into a field).
+        if len(rel) > 1 and rel[1] == "ckpt":
+            rel = rel[:1] + rel[2:]
+        animal, model, teacher_base_dir, teacher_tag_dir, dataset_tag = rel
         if animals and animal not in animals:
             continue
         if models and model not in models:

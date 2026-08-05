@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from subliminal_learning.cka.layout import resolve_teacher_of
 from subliminal_learning.config import LoRAConfig, TrainConfig
+from subliminal_learning.evaluation.preference_results_io import load_preference_results
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.numbers.manifest_io import load_number_manifests
 from subliminal_learning.students.layout import student_run_dir
@@ -225,6 +226,39 @@ def _write_raw_teacher_manifest(dataset_dir: Path, model: str) -> None:
             "n_raw": 10,
         })
     )
+
+
+# --- evaluation.preference_results_io.load_preference_results: both depths ------
+
+def _write_pref_summary(param_dir: Path, animal: str, model: str, param_tag: str) -> None:
+    param_dir.mkdir(parents=True)
+    (param_dir / "preference_summary.json").write_text(json.dumps({
+        "target_animal": animal,
+        "base_model": model,
+        "param_dir": str(param_dir),
+        "summaries": [{
+            "prompt_set": "test", "scoring": "prob", "n_prompts": 10, "n_seeds": 2,
+            "p_target_mean": 0.3, "delta_vs_base": 0.1,
+        }],
+    }))
+
+
+def test_load_preference_results_ckpt_and_plain_rows(tmp_path: Path):
+    # A revision-pinned teacher gathers its model under a `ckpt/` level; a plain teacher does not.
+    teachers = tmp_path / "teachers"
+    _write_pref_summary(
+        teachers / "dog" / "ckpt" / "pythia-160m@step1000" / _TTAG,
+        "dog", "pythia-160m@step1000", _TTAG,
+    )
+    _write_pref_summary(
+        teachers / "dog" / "pythia-160m-data-seed1" / _TTAG,
+        "dog", "pythia-160m-data-seed1", _TTAG,
+    )
+    df = load_preference_results(tmp_path)
+    assert set(df["model"]) == {"pythia-160m@step1000", "pythia-160m-data-seed1"}
+    # Both rows recover the same param_tag; no bare `ckpt` leaks into any field.
+    assert set(df["param_tag"]) == {_TTAG}
+    assert set(df["animal"]) == {"dog"}
 
 
 def test_load_number_manifests_ckpt_and_legacy_rows(tmp_path: Path):

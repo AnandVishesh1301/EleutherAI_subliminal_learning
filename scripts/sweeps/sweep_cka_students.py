@@ -38,6 +38,7 @@ from subliminal_learning.cka.layout import vs_teacher_dir
 from subliminal_learning.config import load_config
 from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.model import Job
+from subliminal_learning.teachers.run_layout import CKPT_SUBDIR
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 # Absolute repo cwd every job must cd into first: jobs on shared queue roots have been
@@ -74,13 +75,21 @@ def _parse_ftseed(name: str) -> int | None:
     return int(tail) if tail.isdigit() else None
 
 
+def _strip_ckpt(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop the gathered ``ckpt/`` model level (revision-pinned runs) so the fixed-index
+    parsing below sees the plain shape; the model name keeps its ``@rev`` suffix. ``ckpt``
+    is a reserved sentinel (never an animal/param_tag/dataset), so removing it is unambiguous.
+    """
+    return tuple(p for p in parts if p != CKPT_SUBDIR)
+
+
 def _parse_student(rel: Path) -> dict | None:
     """Parse a students-tree run dir -> fields (or None if not a scorable target).
 
     Returns ``kind == "rng-control"`` for rng controls so the caller can count them as
     skipped; every other cohort returns its submittable fields.
     """
-    parts = rel.parts
+    parts = _strip_ckpt(rel.parts)
     ftseed = _parse_ftseed(parts[-1])
     if ftseed is None:
         return None

@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 
 from subliminal_learning.analysis.frames import read_cell_set
+from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
 # The six arms of the campaign: (family, teacher param tag, student base model).
 # "family" names the teacher recipe's character -- focus/strong are short+aggressive, weak is
@@ -145,7 +146,7 @@ def load_law_runs(
 
     for family, tag, base in lineages:
         lineage_dir = (
-            students_root / animal / base
+            students_root / animal / Path(*model_dir_parts_from_name(base))
             / f"teacher-{numbers_base}" / f"{tag}_tseed{teacher_seed}" / dataset
         )
         if not lineage_dir.exists():

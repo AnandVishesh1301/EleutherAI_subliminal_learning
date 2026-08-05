@@ -201,8 +201,10 @@ def discover_adapters(
         root = Path(output_root) / tree
         if not root.is_dir():
             continue
-        ckpt_dirs = sorted({p for pat in patterns for p in root.glob(pat)})
-        for ckpt_dir in ckpt_dirs:
+        # The two patterns match disjoint depths (plain vs the one-deeper `ckpt/` layout), so
+        # the union never double-counts (the set is belt-and-braces); sorting full paths keeps
+        # discovery deterministic and leaves the plain entries in their original relative order.
+        for ckpt_dir in sorted({d for pat in patterns for d in root.glob(pat)}):
             if not (ckpt_dir / ADAPTER_CONFIG).exists():
                 continue
             rel = ckpt_dir.relative_to(root).parts

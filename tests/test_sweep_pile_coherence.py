@@ -87,6 +87,50 @@ def test_enumeration_counts(tmp_path):
     ]
 
 
+def test_ckpt_level_teacher_and_students_parse(tmp_path):
+    """Revision-pinned runs gather the model under a `ckpt/` level (after {animal} for a
+    teacher/treatment, after controls/{base,rng} for a control); parsing must strip the `ckpt`
+    component and keep the `@rev` model name, matching the plain fixed-index fields exactly."""
+    out = tmp_path / "outputs"
+    teachers = out / "teachers"
+    _mk_run(teachers / "cat/ckpt/pythia-160m@step1000/tag_a/ftseed0", REPO_A)
+    students = out / "students"
+    _mk_run(
+        students / "cat/ckpt/pythia-160m@step143000/teacher-pythia-160m@step1000"
+        / "std_tseed7/ndt/stag/ftseed0",
+        REPO_A,
+    )
+    _mk_run(
+        students / "controls/base/ckpt/pythia-160m@step143000"
+        / "teacher-pythia-160m@step1000/ndt/stag/ftseed0",
+        REPO_A,
+    )
+    _mk_run(students / "controls/rng/ckpt/pythia-160m@step143000/ndt/stag/ftseed0", REPO_A)
+
+    adapters, stats = _discover(out)
+    assert stats.incomplete == 0
+    by_kind = {a.kind: a for a in adapters}
+    assert set(by_kind) == {"teacher", "treatment", "base-control", "rng-control"}
+
+    t = by_kind["teacher"]
+    assert (t.animal, t.param_tag) == ("cat", "tag_a")
+
+    tr = by_kind["treatment"]
+    assert tr.student_base == "pythia-160m@step143000"
+    assert tr.teacher_base == "pythia-160m@step1000"
+    assert tr.lineage == "teacher-pythia-160m@step1000/std_tseed7"
+    assert (tr.dataset_tag, tr.param_tag) == ("ndt", "stag")
+
+    bc = by_kind["base-control"]
+    assert bc.student_base == "pythia-160m@step143000"
+    assert bc.teacher_base == "pythia-160m@step1000"
+    assert (bc.dataset_tag, bc.param_tag) == ("ndt", "stag")
+
+    rc = by_kind["rng-control"]
+    assert rc.student_base == "pythia-160m@step143000"
+    assert (rc.dataset_tag, rc.param_tag) == ("ndt", "stag")
+
+
 def test_token_derivation(tmp_path):
     out = _build_tree(tmp_path)
     adapters, _ = _discover(out)

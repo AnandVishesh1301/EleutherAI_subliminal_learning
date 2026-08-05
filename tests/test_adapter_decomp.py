@@ -230,6 +230,31 @@ def test_discover_parses_both_trees(tree):
     assert student.step is None
 
 
+def test_discover_parses_ckpt_level(tmp_path):
+    """Revision-pinned runs gather the model under a `ckpt/` level; both trees still parse.
+
+    The `@rev` model name is preserved as `base_model` and no bare `ckpt` leaks into any field.
+    """
+    teacher = (tmp_path / "teachers/dog/ckpt/pythia-160m@step1000"
+               / "ep2_lr5e-4_r32a64/ftseed1/checkpoints")
+    student = (tmp_path / "students/dog/ckpt/pythia-160m@step143000"
+               / "teacher-pythia-160m@step1000/ep2_lr5e-4_r32a64_tseed1"
+               / "ex10-20_prefix_n100k/ep20_lr1e-4_r8a32/ftseed1/checkpoints")
+    for d in (teacher, student):
+        _write_adapter(d)
+    refs = discover_adapters(tmp_path, kinds=("teacher", "student"))
+    assert len(refs) == 2
+    t = next(r for r in refs if r.kind == "teacher")
+    assert (t.animal, t.base_model, t.tag, t.ftseed) == (
+        "dog", "pythia-160m@step1000", "ep2_lr5e-4_r32a64", 1)
+    assert t.lineage is None
+    s = next(r for r in refs if r.kind == "student")
+    assert s.base_model == "pythia-160m@step143000"
+    assert s.lineage == (
+        "teacher-pythia-160m@step1000/ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k")
+    assert s.ftseed == 1
+
+
 def test_discover_selectors_and_checkpoints(tree):
     assert len(discover_adapters(tree, kinds=("student",))) == 2
     assert len(discover_adapters(tree, kinds=("student",), tags=("ep20_*_r32a4",))) == 1

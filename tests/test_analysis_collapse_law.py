@@ -231,6 +231,30 @@ def test_load_law_runs_skips_missing_lineages(tmp_path):
     assert cells.empty and runs.empty
 
 
+def test_load_law_runs_finds_ckpt_base(tmp_path):
+    # A revision-pinned student base gathers under a `ckpt/` level; the loader must route the
+    # raw base string through model_dir_parts_from_name to find the lineage (the `@rev` model is
+    # kept as the base value, no bare `ckpt` leaks in).
+    d = (tmp_path / "students" / "dog" / "ckpt" / "pythia-160m@step143000"
+         / "teacher-pythia-160m@step1000" / "ep2_lr5e-4_r32a64_tseed1"
+         / "ex10-20_prefix_n100k" / "ep20_lr1e-4_r8a32")
+    d.mkdir(parents=True)
+    (d / "preference_summary.json").write_text(json.dumps({
+        "summaries": [
+            {"prompt_set": "test", "scoring": "prob", "p_target_mean": 0.15,
+             "per_seed_p_target": {"1": 0.1, "2": 0.2}},
+        ]
+    }))
+    cells, runs = load_law_runs(
+        tmp_path, numbers_base="pythia-160m@step1000",
+        lineages=[("ck", "ep2_lr5e-4_r32a64", "pythia-160m@step143000")],
+    )
+    assert len(cells) == 1 and len(runs) == 2
+    assert cells.iloc[0].base == "pythia-160m@step143000"
+    assert cells.iloc[0].student_tag == "ep20_lr1e-4_r8a32"
+    assert cells.iloc[0].n_seeds == 2
+
+
 def test_load_law_runs_separates_lineages(tmp_path):
     _plant_cell(tmp_path, "pythia-160m-data-seed1", "ep7_lr1e-4_r16a32",
                 "ep20_lr1e-4_r8a32", {"1": 0.1})

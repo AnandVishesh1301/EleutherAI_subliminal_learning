@@ -240,6 +240,31 @@ def test_load_eas_results_cross_base_columns(tmp_path):
     assert len(cross) == 2  # two entries from the one cross doc
 
 
+def test_load_eas_results_finds_ckpt_level(tmp_path):
+    # A revision-pinned student gathers its model under a `ckpt/` level; the loader must find
+    # it and recover model = `pythia-160m@step1000` (no bare `ckpt` leaking into any field).
+    d = (
+        tmp_path / "students" / "dog" / "ckpt" / "pythia-160m@step1000"
+        / "teacher-pythia-160m@step1000" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "eas"
+    )
+    d.mkdir(parents=True)
+    (d / "eas_last.json").write_text(json.dumps(_valid_doc()))
+    # A plain run alongside it, to confirm both depths coexist.
+    _write(
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
+        json.dumps(_valid_doc()),
+    )
+    df = load_eas_results(tmp_path)
+    assert set(df["model"]) == {"pythia-160m@step1000", "pythia-160m"}
+    ck = df[df["model"] == "pythia-160m@step1000"].iloc[0]
+    assert ck["animal"] == "dog"
+    assert ck["numbers_base_model"] == "pythia-160m@step1000"
+    assert ck["cross_base"] == False  # noqa: E712
+    assert ck["teacher_param_tag"] == "ep10_lr1e-4_r16a32"
+    assert ck["dataset_tag"] == "ex10-20_prefix_n100k"
+
+
 # ------------------------- sweep pure logic -------------------------
 
 
@@ -336,6 +361,18 @@ def test_spec_from_model_dir():
         spec_from_model_dir("not-a-model", "EleutherAI")
 
 
+def test_spec_from_model_dir_revision_pinned():
+    # Bare-original ckpt form (the v1 sweep's `base_model: original`) and the variant ckpt form.
+    orig = spec_from_model_dir("pythia-160m@step1000", "EleutherAI")
+    assert (orig.variant, orig.seed, orig.revision) == ("full", 0, "step1000")
+    ds1 = spec_from_model_dir("pythia-160m-data-seed1@step3000", "EleutherAI")
+    assert (ds1.variant, ds1.seed, ds1.revision) == ("data", 1, "step3000")
+    # A revisionless original still has revision None (byte-identical to before).
+    assert spec_from_model_dir("pythia-160m", "EleutherAI").revision is None
+    with pytest.raises(ValueError):  # empty revision after '@'
+        spec_from_model_dir("pythia-160m@", "EleutherAI")
+
+
 # ------------------------- sweep unit sharding -------------------------
 
 
@@ -425,3 +462,106 @@ def test_discover_includes_cross_base_when_requested(tmp_path):
     # the teacher student cell is discovered as a required work item
     assert ("teacher", 5, 1) in unit.required_work_items
     assert "teacher-pythia-160m" in unit.label
+
+
+def _make_ckpt_student(output_root: Path) -> None:
+    """A same-base revision-pinned student: the model is gathered under a `ckpt/` level and
+    the teacher-base repeats the (revision-qualified) model as one component."""
+    rd = (
+        output_root / "students" / "dog" / "ckpt" / "pythia-160m-data-seed1@step3000"
+        / "teacher-pythia-160m-data-seed1@step3000" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
+    )
+    (rd / "checkpoints").mkdir(parents=True)
+    (rd / "train_manifest.json").write_text(json.dumps({
+        "splice_examples": False,
+        "numbers_base_model_repo": "EleutherAI/pythia-160m-data-seed1@step3000",
+    }))
+
+
+def _make_plain_student(output_root: Path) -> None:
+    """A plain (revision-less) same-base student, byte-identical to the historical layout."""
+    rd = (
+        output_root / "students" / "dog" / "pythia-160m-data-seed1"
+        / "teacher-pythia-160m-data-seed1" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
+    )
+    (rd / "checkpoints").mkdir(parents=True)
+    (rd / "train_manifest.json").write_text(json.dumps({
+        "splice_examples": False,
+        "numbers_base_model_repo": "EleutherAI/pythia-160m-data-seed1",
+    }))
+
+
+def test_discover_finds_ckpt_students(tmp_path):
+    # A plain same-base student and a revision-pinned (ckpt-level) same-base student: both are
+    # discovered, model/animal derive correctly with the @rev preserved, and no bare `ckpt`
+    # leaks into any field.
+    _make_plain_student(tmp_path)
+    _make_ckpt_student(tmp_path)
+    cfg = _sweep_cfg(tmp_path)
+    units, n_unsupported = _discover(
+        cfg, sources=("teacher",), positions=("last",),
+        animals=set(), models=set(), tags=set(), n_prompts=1024,
+    )
+    assert n_unsupported == 0
+    by_model = {u.model: u for u in units}
+    assert set(by_model) == {"pythia-160m-data-seed1", "pythia-160m-data-seed1@step3000"}
+    ck = by_model["pythia-160m-data-seed1@step3000"]
+    assert ck.animal == "dog"
+    assert ck.numbers_base_model == "pythia-160m-data-seed1@step3000"
+    assert ck.numbers_spec is None  # same-base, not cross
+    assert (ck.spec.variant, ck.spec.seed, ck.spec.revision) == ("data", 1, "step3000")
+    assert ck.dataset_tag == "ex10-20_prefix_n100k"
+    assert ck.teacher_param_tag == "ep10_lr1e-4_r16a32"
+
+
+def _make_bare_original_ckpt_student(output_root: Path) -> None:
+    """The v1 sweep's `base_model: original` ckpt student: a bare-original `pythia-160m@{rev}`
+    base, gathered under a `ckpt/` level, distilling its own-checkpoint teacher (same-base)."""
+    rd = (
+        output_root / "students" / "dog" / "ckpt" / "pythia-160m@step1000"
+        / "teacher-pythia-160m@step1000" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
+    )
+    (rd / "checkpoints").mkdir(parents=True)
+    (rd / "train_manifest.json").write_text(json.dumps({
+        "splice_examples": False,
+        "numbers_base_model_repo": "EleutherAI/pythia-160m@step1000",
+    }))
+
+
+def test_discover_finds_bare_original_ckpt_student(tmp_path):
+    # The bare-original ckpt form must be fully discovered (not skipped-unsupported): its spec
+    # inverts via spec_from_model_dir with revision set, and the model keeps its @rev form.
+    _make_bare_original_ckpt_student(tmp_path)
+    cfg = _sweep_cfg(tmp_path)
+    units, n_unsupported = _discover(
+        cfg, sources=("teacher",), positions=("last",),
+        animals=set(), models=set(), tags=set(), n_prompts=1024,
+    )
+    assert n_unsupported == 0
+    assert len(units) == 1
+    unit = units[0]
+    assert unit.model == "pythia-160m@step1000"
+    assert unit.animal == "dog"
+    assert unit.numbers_base_model == "pythia-160m@step1000"
+    assert unit.numbers_spec is None  # same-base, not cross
+    assert (unit.spec.variant, unit.spec.seed, unit.spec.revision) == ("full", 0, "step1000")
+
+
+def test_discover_animal_and_model_filters_apply_under_ckpt(tmp_path):
+    # The animal/model selectors read the ckpt-normalised fields, so they filter ckpt students
+    # by their true animal/model rather than the `ckpt` sentinel.
+    _make_ckpt_student(tmp_path)
+    cfg = _sweep_cfg(tmp_path)
+    kept, _ = _discover(
+        cfg, sources=("teacher",), positions=("last",),
+        animals={"dog"}, models={"pythia-160m-data-seed1@step3000"}, tags=set(), n_prompts=1024,
+    )
+    assert len(kept) == 1
+    dropped, _ = _discover(
+        cfg, sources=("teacher",), positions=("last",),
+        animals={"ckpt"}, models=set(), tags=set(), n_prompts=1024,
+    )
+    assert dropped == []
