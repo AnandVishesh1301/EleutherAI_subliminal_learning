@@ -43,9 +43,38 @@ from scripts.generate_numbers import _load_number_config
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
-from subliminal_learning.teachers.run_layout import ft_param_tag, model_dir_name
+from subliminal_learning.teachers.run_layout import ft_param_tag, model_dir_parts
 from subliminal_learning.utils.cli import int_list
 from subliminal_learning.utils.logging_setup import configure_loguru
+
+
+def _validate_number_dataset_tag(
+    tag: str, ps_tag: str, filter_mode: str, splice_examples: bool
+) -> None:
+    """Guard a verbatim --number-dataset-tag against the pool it will name (raises on drift).
+
+    The override is used verbatim to name the student dir/identity, so it must still describe
+    the same pool: it (a) starts with the derived ``{ps_tag}_{filter_mode}`` prefix (the only
+    legitimate extra is an honest-n ``_n{X}k`` suffix and ``_spliced``) and (b) carries the
+    ``_spliced`` marker iff ``--splice-examples`` is set. Violations raise typer.BadParameter.
+    """
+    prefix = f"{ps_tag}_{filter_mode}"
+    if not tag.startswith(prefix):
+        raise typer.BadParameter(
+            f"--number-dataset-tag {tag!r} must start with the derived prefix {prefix!r} "
+            f"(only an honest-n '_n{{X}}k' suffix and '_spliced' may follow)"
+        )
+    has_spliced = "_spliced" in tag
+    if has_spliced and not splice_examples:
+        raise typer.BadParameter(
+            f"--number-dataset-tag {tag!r} contains '_spliced' but --splice-examples is not "
+            f"set; the spliced marker and the flag must agree"
+        )
+    if splice_examples and not has_spliced:
+        raise typer.BadParameter(
+            f"--splice-examples is set but --number-dataset-tag {tag!r} lacks '_spliced'; "
+            f"the spliced marker and the flag must agree"
+        )
 
 
 def main(
@@ -88,6 +117,16 @@ def main(
     filter_mode: str = typer.Option(
         "full10_3digit", help="Named number filter mode to distil."
     ),
+    number_dataset_tag: str = typer.Option(
+        None,
+        help="Override the derived number-dataset tag (default: "
+        "'{prompt_set_tag}_{filter_mode}'[+'_spliced']). Needed for real sweep students "
+        "under honest-n tags like 'ex10-20_prefix_n40k'/'..._n100k_spliced' the derivation "
+        "cannot produce. Used verbatim (do NOT re-append '_spliced'); flows into the "
+        "student param_dir + run identity. Validated: must START WITH the derived "
+        "'{prompt_set_tag}_{filter_mode}' prefix (only an honest-n '_n{X}k' suffix and "
+        "'_spliced' may follow) and must contain '_spliced' IFF --splice-examples is set.",
+    ),
     splice_examples: bool = typer.Option(
         False,
         help="SPLICED prompt mode: cut the in-context example numbers out of each "
@@ -125,7 +164,14 @@ def main(
             "splice is fine)."
         )
     ps_tag = prompt_set_tag(prompt_set, constrained)
-    dataset_tag = f"{ps_tag}_{filter_mode}" + ("_spliced" if splice_examples else "")
+    # Override wins verbatim (real sweep tags carry an honest-n / already-spliced suffix
+    # the derivation cannot produce); else derive as before. Validate the override against
+    # the derived prefix + the splice flag so it can't mis-name the pool it will identify.
+    if number_dataset_tag is not None:
+        _validate_number_dataset_tag(number_dataset_tag, ps_tag, filter_mode, splice_examples)
+    dataset_tag = number_dataset_tag or (
+        f"{ps_tag}_{filter_mode}" + ("_spliced" if splice_examples else "")
+    )
 
     animal = target_animal or cfg.eval.target_animal
     teacher_tag = ft_param_tag(cfg.train, cfg.lora)
@@ -158,15 +204,17 @@ def main(
 
     results = []
     for spec in base_specs:
-        student_model_name = model_dir_name(spec, cfg.hub_org)
-        numbers_model_name = model_dir_name(numbers_spec or spec, cfg.hub_org)
         if source == "teacher":
             ds_dir = (
-                numbers_root / animal / numbers_model_name / teacher_tag
-                / f"ftseed{teacher_ftseed}" / ps_tag
+                numbers_root / animal
+                / Path(*model_dir_parts(numbers_spec or spec, cfg.hub_org))
+                / teacher_tag / f"ftseed{teacher_ftseed}" / ps_tag
             )
         elif source == "base":
-            ds_dir = numbers_root / "controls" / "base" / student_model_name / ps_tag
+            ds_dir = (
+                numbers_root / "controls" / "base"
+                / Path(*model_dir_parts(spec, cfg.hub_org)) / ps_tag
+            )
         else:
             ds_dir = numbers_root / "controls" / "rng" / ps_tag
         ds_dir = mode_dir(ds_dir, filter_mode)

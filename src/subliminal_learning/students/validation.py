@@ -23,6 +23,7 @@ from pathlib import Path
 
 from subliminal_learning.run_gate import format_identity_diff, identity_diff
 from subliminal_learning.students.dataset_io import PROMPT_SPLICE_IDENTITY
+from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
 _TRAIN_KEYS = (
     "learning_rate",
@@ -186,16 +187,19 @@ def expected_student_rel_parts(manifest: dict) -> list[str] | None:
     numbers_base = (
         manifest.get("numbers_base_model_repo") or manifest.get("base_model_repo") or ""
     ).split("/")[-1]
+    # The model level expands to a gathered `ckpt/{model}` for an `@rev` base, a single
+    # `{model}` otherwise; the teacher-base level stays ONE component regardless.
+    model_parts = list(model_dir_parts_from_name(model))
     if source == "teacher":
         teacher_tag = f"{manifest.get('teacher_param_tag')}_tseed{manifest.get('teacher_ftseed')}"
         return [
-            manifest.get("animal"), model, f"teacher-{numbers_base}", teacher_tag,
+            manifest.get("animal"), *model_parts, f"teacher-{numbers_base}", teacher_tag,
             ndt, tag, leaf,
         ]
     if source == "base":
-        return ["controls", "base", model, f"teacher-{numbers_base}", ndt, tag, leaf]
+        return ["controls", "base", *model_parts, f"teacher-{numbers_base}", ndt, tag, leaf]
     if source == "rng":
-        return ["controls", "rng", model, ndt, tag, leaf]
+        return ["controls", "rng", *model_parts, ndt, tag, leaf]
     return None
 
 
@@ -223,18 +227,25 @@ def check_path_agreement(
 
     problems: list[str] = []
     source = manifest.get("source")
+    # The model level is two components (`ckpt`/`{model}`) for an `@rev` base, one otherwise;
+    # build the label list dynamically so it stays aligned with `expected_student_rel_parts`.
+    model = (manifest.get("base_model_repo") or "").split("/")[-1]
+    model_labels = ["ckpt", "model"] if "@" in model else ["model"]
     if source == "teacher":
         labels = [
-            "animal", "model", "teacher_base", "teacher_tag", "number_dataset_tag",
+            "animal", *model_labels, "teacher_base", "teacher_tag", "number_dataset_tag",
             "student_tag", "ftseed",
         ]
     elif source == "base":
         labels = [
-            "controls", "source", "model", "teacher_base", "number_dataset_tag",
+            "controls", "source", *model_labels, "teacher_base", "number_dataset_tag",
             "student_tag", "ftseed",
         ]
     else:  # rng
-        labels = ["controls", "source", "model", "number_dataset_tag", "student_tag", "ftseed"]
+        labels = [
+            "controls", "source", *model_labels, "number_dataset_tag", "student_tag",
+            "ftseed",
+        ]
     if len(rel) != len(expected):
         problems.append(
             f"{ftseed_dir.name}: path {'/'.join(rel)} has {len(rel)} components under "

@@ -81,7 +81,7 @@ _SEED_FLAGS = (
 # Structural path segments that never identify a specific cell (excluded from liveness tokens).
 _STOP_TOKENS = {
     "teachers", "students", "controls", "base", "rng", "numbers",
-    "numbers_snapshots", "checkpoints", "coherence", "eas", "steerability",
+    "numbers_snapshots", "checkpoints", "coherence", "eas", "steerability", "ckpt",
 }
 
 

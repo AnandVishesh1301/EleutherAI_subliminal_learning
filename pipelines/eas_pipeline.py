@@ -64,7 +64,11 @@ from subliminal_learning.students.layout import (
     student_param_tag,
     student_run_dir,
 )
-from subliminal_learning.teachers.run_layout import TEACHERS_SUBDIR, model_dir_name
+from subliminal_learning.teachers.run_layout import (
+    TEACHERS_SUBDIR,
+    model_dir_name,
+    model_dir_parts,
+)
 
 # The training-prompt provenance every teacher-source student manifest must agree on before its
 # prompts are reconstructed (a disagreement means they trained on different data).
@@ -421,7 +425,7 @@ def run(cfg: EASConfig) -> dict:
     cross = _is_cross(cfg)
     model = model_dir_name(cfg.spec, cfg.hub_org)
     # The teacher/numbers base A hosts the teacher adapter (== the student base for same-base).
-    numbers_model = model_dir_name(cfg.numbers_spec or cfg.spec, cfg.hub_org)
+    numbers_spec = cfg.numbers_spec or cfg.spec
     # lineage_dir is the parent of the teacher-source student param dirs (sits under the
     # teacher-{A} level when cross so it resolves to the cross lineage's eas/ dir).
     lineage_dir = student_param_dir(
@@ -440,7 +444,8 @@ def run(cfg: EASConfig) -> dict:
     eas_dir = lineage_dir / "eas"
 
     teacher_ckpt = (
-        output_root / TEACHERS_SUBDIR / cfg.animal / numbers_model
+        output_root / TEACHERS_SUBDIR / cfg.animal
+        / Path(*model_dir_parts(numbers_spec, cfg.hub_org))
         / cfg.teacher_param_tag / f"ftseed{cfg.teacher_ftseed}" / "checkpoints"
     )
     if not teacher_ckpt.is_dir():

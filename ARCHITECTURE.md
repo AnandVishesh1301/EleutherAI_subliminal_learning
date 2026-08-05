@@ -145,6 +145,26 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         what is PRESENT ON DISK, so it reads correctly mid-drain,
                                         absorbs wave 3 on a plain re-run, and ignores the partial
                                         r32a2 batch that was in flight when the trim landed
+    collapse_campaigns_k_alpha_rank     the three boundary campaigns (krungs 25+4, band-117,
+                                        focus-20) merged onto ONE frame and cut per lineage
+                                        (animal × teacher-numbers base → student base, e.g.
+                                        pythia-160m→ds1 apart from pythia-160m→ds2): y = K/K*
+                                        binned at 0.05, x = α, panel = rank, cell = mean over
+                                        teachers × co-binned design cells (§6 transfer, §7
+                                        collapse fraction, §8 the same on the 5 teachers all
+                                        three campaigns share, §9 the K/K* marginal + per-arm
+                                        empirical boundary). Designs are read from their own
+                                        records (krungs waves frozen inline, band-117 from the
+                                        top5-bandext-ds2ws2 job list, focus-20 from
+                                        run_logs/focus20_cells.json) and asserted, incl. the one
+                                        coordinate krungs wave 3 shares with the band; loads via
+                                        collapse_law.load_law_runs restricted to the manifest
+                                        teachers, the design cells and student seed 1 (other
+                                        seeds at those coordinates belong to the law-*/reseed
+                                        campaigns). Built by
+                                        scripts/build_collapse_campaigns_nb.py (assembles +
+                                        executes, as for collapse_mechanism); reconstructed
+                                        2026-08-05 after the node-1 rebuild destroyed the original
     steerability_screen_analysis        steering-vector screen tables/heatmaps
     eas_analysis                        EAS dose-response + HP tables
     sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
@@ -572,6 +592,39 @@ Subliminal effect = `p(target)`_treatment − `p(target)`_control, computed offl
   target (cross-animal specificity). Per-prompt probs are persisted so paired Δ CIs are
   reconstructable offline.
 
+### Cross-checkpoint distillation sweep (`scripts/sweeps/sweep_ckpt_distill.py` + `configs/experiment/ckpt_distill_sweep.yaml`)
+
+Runs the full chain (teacher LoRA-FT → numbers → student distill → preference eval) across
+**pretraining checkpoints** of a base model (HF revisions `step1000`, `step32000`, …), including
+**cross-checkpoint pairs** (teacher@step_i numbers → student@step_j). Revision support is plumbed
+end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.revision` → HF
+`revision=`), so this sweep is orchestration only.
+
+- **Gathered `ckpt/` layout rule** (`run_layout.model_dir_parts` / `model_dir_parts_from_name`):
+  when `spec.revision is not None`, the `{model}` level of the teachers/, numbers/, and students/
+  trees becomes `ckpt/{model}@step{N}` (so checkpoint runs don't flood the per-animal listings);
+  `revision=None` stays the byte-identical single `{model}` component (the `test_run_identity`
+  contract). Cross-checkpoint students carry a `teacher-{base}@step{i}` lineage segment — ONE
+  directory component, no nested `ckpt/` inside it. A revision-pinned run can never alias a
+  final-checkpoint run: the `@step` suffix is in both the path and the run identity.
+- **Config** (`ckpt_distill_sweep.yaml`): `base_model` (a `parse_base_models` token WITHOUT
+  `@rev`), `steps`, `pairs.topology` (`diagonal` | `full` | `explicit [[t,s],…]`), `animals`,
+  single-HP `teacher`/`student` blocks, `numbers` (filter mode + base/rng control flags), and a
+  `jobq` block (root, queue prefix, per-stage priorities + mem gates). Same collision constraint as
+  `teacher_ft_sweep.yaml`: only `ft_param_tag`-encodable HPs may vary per cell. v1 = dog, diagonal,
+  epochs [10], no controls.
+- **`submit`**: the pure `expand_jobs(sweep, repo_root)` lays down three pipelined jobq queues per
+  teacher checkpoint i — `{prefix}-t-step{i}` (train) → `{prefix}-n-step{i}` (numgen, `depends_on`
+  the train queue) → `{prefix}-d-step{i}` (distill, `depends_on` the numgen queue) — with one
+  `run-cell` distill job per (animal, pair i→j, mode, epoch, student ftseed). Jobs carry an absolute
+  `cwd`, `WANDB_MODE=disabled`, and the per-stage `mem_mib`. `--dry-run` prints the expansion; a real
+  submit shells out to `scripts.jobq submit` per queue. No submit-time existence checks — the run
+  gates make re-submission a cheap idempotent SKIP.
+- **`run-cell`**: a single-GPU job that resolves `spec_i`/`spec_j`, locates the ckpt-aware numbers
+  pool, computes the honest-n dataset tag from its raw manifest (`n_raw`), distils one student
+  (`allow_cross_base=(i != j)`), then runs the preference eval in-process. Missing/underfilled
+  numbers → SKIP rc=0 (expected while numgen still runs).
+
 ### On-policy GKD student distillation
 
 > Full SSOT: **`docs/GKD_ON_POLICY_PIPELINE.md`** (filters L1–L3, configs, metric formulas,
@@ -818,6 +871,56 @@ Shipped surfaces, all dry-run verified against the tree: `rank_ladders` (105 ada
 Test-1 design), `mech_probe_growth` (287 = 7 runs × 41 steps), `focus_cross_init` (1,106 across the
 ds1/ws1 arms), `teachers_dog` (1,080). Always `--dry-run` before widening: the student tree holds
 ~13.6k final adapters and the teacher tree ~74k. Nothing has been swept yet.
+
+**Frozen-A ablation — the functional test of the two-term story (`scripts/frozen_a_ablation.py`;
+reconstructed 2026-08-05):** the decomposition and the dose regressions say which of
+`ΔW = s·B·A_init + s·B·ΔA` dominates the *norm*; this script asks whether the trait survives
+deleting the moved-feature term. The intervention needs no arithmetic on `ΔW`: the LoRA branch
+computes `s·B(Ax)`, so overwriting the live `lora_A` with the reconstructed `A_init`
+(`analysis.adapter_decomp.lora_init_weights`) *is* `ΔW' = s·B·A_init` — an **in-memory splice; disk
+adapters are never touched**. Per cell it records `p_target` (held-out `test` set, 50 prompts, exact
+next-token prob) and `KL(base‖model)` on a held-out Pile pool, for the original and the ablated
+model, plus the *ablated share* `‖B·ΔA‖_F/‖B·A_final‖_F` (`s` cancels) and the top singular-vector
+cosines. Two conventions are load-bearing and easy to get wrong: results are read as
+**excess-over-base retention** `(p_abl − p_base)/(p_orig − p_base)`, never a raw p-ratio, because
+ablation moves `p_target` toward the base's own 0.0133 rather than 0; and the Pile KL averages over
+the pool's `eligible` positions applied to the **logit** index — a KL between two models needs no
+observed next token, so what eligibility must exclude is position 0's attention sink (using
+`logits[:-1]` instead shifts every KL by ~0.2%). The harness check is that re-derived
+`p_target_orig` reproduces the run's stored `preference_eval.json` to 4+ decimals. Verified against
+the surviving `analysis/frozen_a_ablation.json`: all 7 showcase cells × 8 metrics within 3.2e-5
+relative, weight-space metrics bit-exact. `--all-tags` rebuilds the 197-cell
+`frozen_a_ablation_ep20_full.json` (~2 h on one GPU; ~12 min/cell on a contended CPU).
+
+**Nor's-asks audit notebook + seed-fate notebook (reconstructed 2026-08-05):** the norm audit
+(`notebooks/nors_asks.ipynb`, generated by `scripts/build_nors_asks_nb.py` — keep builder and
+notebook in sync) and the cross-teacher direction analysis (`notebooks/seed_fate_direction.ipynb`)
+were rebuilt after the node wipe from `backup.md`/`backup_exp.md` (the surviving written record)
+against the surviving analysis JSONs; every code cell prints its statistic next to the recorded
+original (`[recorded: …]`), so each notebook doubles as its own reconciliation report. Coverage:
+§1 raw audit (Tables 1.1a/b, exact `W_final`, μP balance, term dominance, bound tightness),
+§2 threshold stability, §3 stable rank, §4 activations + selectivity, §5 dose-law regressions
+with the §5.1–§5.3 regime/control/term program and the regional collapse law, §5.4 ablation
+display, §6 verdict, §8b epistemic-lesson. Reconciliation status: essentially every recorded
+statistic reproduces exactly (collapse-law split b = 0.559/0.818 to all digits; Fit L/H, box,
+alive-only, quadratic probes, 31 boundary brackets, §4 partials, AUC 0.992/0.977). Reconstruction
+findings worth knowing: the **fitted set** is the ds1-focus slice of
+`adapter_norms_sweep_all_arms_all_teachers.json` (the coherence JSON is a stale 655-run fate
+snapshot); §2's per-rank θ is the **dead-side edge** of the accuracy-maximizing split; §5's
+regressions are on the **absolute** ‖ΔW‖ (the W0-relative dose shifts low-lr exponents by ~0.03);
+§1.2's ≤1.005 is the **pooled** whole-adapter ratio (worst single module hits 1.020); the
+Pile-KL/eligibility and excess-retention conventions match `frozen_a_ablation.py`. Annotated
+non-reproductions: per-arm Table 2b comes out 3/6 (ws2 exception reproduces; the two 4-rank arms
+are estimator-noisy), the §6f cross-arm lr exponent (1.12 vs recorded 1.02 — run selection not
+recoverable), and seed_fate's ws1 at cut 0.03 (47% vs recorded 53–59% band). The notebooks run
+top-to-bottom on CPU in ~6 min (441 MB / 188 MB JSON loads dominate); the builder caps BLAS
+threads before spawning the kernel — unbounded OpenBLAS on a jobq-contended box turns §1.2's
+SVD cell into a 50-minute thrash. 2026-08-05 formatting pass: the notebook carries the full
+`backup.md` narrative (three-claims discipline, per-test motivations, §4b-bis causal status,
+closing §12 reply-to-nor), and every values-compared table renders through
+`analysis.plots.compare_table` — the one Styler convention for comparison tables (per-column
+diverging `RdBu_r` gradient over numeric cells only; ±SE tables restructured to numeric
+estimate/SE columns so the gradient applies).
 
 **Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
 teacher distilling into data-seed1 vs weight-seed1 at matched teacher and student HP, the *only*

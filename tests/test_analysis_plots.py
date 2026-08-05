@@ -25,6 +25,7 @@ from matplotlib.colors import TwoSlopeNorm  # noqa: E402
 
 from subliminal_learning.analysis.plots import (  # noqa: E402
     annotated_heatmap,
+    compare_table,
     dose_response,
     facet_grid_heatmaps,
     facet_heatmaps,
@@ -415,3 +416,33 @@ def test_strip_box_skips_empty_groups():
     labels = [t.get_text() for t in ax.get_xticklabels()]
     assert labels == ["a", "b", "c"]
     plt.close(fig)
+
+
+# ------------------------- compare_table -------------------------
+
+
+def test_compare_table_colors_numeric_columns_only():
+    df = pd.DataFrame({"label": ["a", "b"], "x": [1.0, 2.0], "ok": [True, False]})
+    styler = compare_table(df)
+    html = styler.to_html()
+    assert "background-color" in html  # the numeric column got a gradient
+    assert "1.000" in html and "2.000" in html  # numeric formatting applied
+    assert ">a<" in html and ">True<" in html  # label/bool cells untouched
+
+
+def test_compare_table_nan_safe_and_subset_override():
+    df = pd.DataFrame({"x": [1.0, np.nan], "y": [3.0, 4.0]})
+    html_all = compare_table(df).to_html()
+    assert "–" in html_all  # na_rep rendered, no exception
+    styler = compare_table(df, subset=["y"], vmin=0.0, vmax=10.0)
+    html = styler.to_html()
+    # every float column is formatted; the gradient is confined to the subset (y = col1)
+    assert "3.000" in html and "1.000" in html and "1.000000" not in html
+    css = html.split("</style>")[0]
+    assert "_col1" in css and "_col0" not in css
+
+
+def test_compare_table_empty_numeric_returns_plain_styler():
+    df = pd.DataFrame({"label": ["a", "b"]})
+    html = compare_table(df).to_html()
+    assert "background-color" not in html

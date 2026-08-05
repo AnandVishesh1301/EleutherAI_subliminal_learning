@@ -579,3 +579,52 @@ def strip_box(
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=rotation, ha="right")
     return drawn
+
+
+def compare_table(
+    df: pd.DataFrame,
+    fmt: str = "{:.3f}",
+    cmap: str = "RdBu_r",
+    axis: int = 0,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    subset: Sequence[str] | None = None,
+):
+    """Comparison styling for a table: per-column colour gradient over numeric cells.
+
+    The one convention for "values meant to be compared" tables in the analysis
+    notebooks (the §5 factor-fits table of ``nors_asks.ipynb`` is the reference
+    look): a diverging ``RdBu_r`` `background_gradient` applied down each column
+    (``axis=0``), so within a column red = high and blue = low. Non-numeric columns
+    (labels, booleans, pre-formatted strings) are left completely untouched — no
+    gradient, no number formatting.
+
+    Args:
+        df: The table. May mix numeric and non-numeric columns.
+        fmt: ``str.format`` pattern for numeric cells.
+        cmap: Matplotlib colormap name; diverging by convention.
+        axis: Gradient axis (0 = compare down each column, the default convention;
+            ``None`` = one gradient over the whole selection).
+        vmin: Optional fixed gradient floor (else per-column min).
+        vmax: Optional fixed gradient ceiling (else per-column max).
+        subset: Columns to receive the *gradient*; default = every numeric
+            (non-bool) column. Number formatting is independent of this: ``fmt``
+            applies to every float column (ints keep their integer rendering), so
+            un-gradiented companion columns (e.g. SEs) still render cleanly.
+
+    Returns:
+        A ``pandas.io.formats.style.Styler`` ready for ``display``.
+    """
+    if subset is None:
+        subset = [c for c in df.select_dtypes(include="number").columns
+                  if df[c].dtype != bool]
+    subset = [c for c in subset if c in df.columns]
+    float_cols = list(df.select_dtypes(include="floating").columns)
+    styler = df.style
+    if float_cols:
+        styler = styler.format(fmt, subset=float_cols, na_rep="–")
+    if subset:
+        styler = styler.background_gradient(
+            cmap=cmap, axis=axis, subset=subset, vmin=vmin, vmax=vmax
+        )
+    return styler

@@ -8,7 +8,11 @@
                    {student_tag}/ftseed{S}/
 
 - {model}       HF repo basename of the STUDENT's base (== the teacher's base for a
-  same-base treatment run: the paper's key same-base control).
+  same-base treatment run: the paper's key same-base control). A revision-pinned base
+  (a pretraining checkpoint, e.g. `pythia-160m@step1000`) is gathered under a `ckpt/`
+  level here (`ckpt/{model}`) so checkpoint runs don't flood the listings; revision=None
+  keeps the plain single `{model}` component (byte-identical to before). The lineage
+  `teacher-{teacher_base}` segment stays ONE component even for `@rev` bases (no nested ckpt).
 - teacher-{teacher_base}  the numbers/teacher base-model dir name, ALWAYS present. For a
   same-base run (the builder's `numbers_base_model` is None) it repeats {model}; for a
   cross-base run it is the OTHER base whose pool the student distilled from. This is its
@@ -37,7 +41,11 @@ from pathlib import Path
 
 from subliminal_learning.config import LoRAConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec
-from subliminal_learning.teachers.run_layout import ft_param_tag, model_dir_name
+from subliminal_learning.teachers.run_layout import (
+    ft_param_tag,
+    model_dir_name,
+    model_dir_parts,
+)
 
 STUDENTS_SUBDIR = "students"
 
@@ -67,6 +75,9 @@ def student_param_dir(
     (`preference_summary.json` lands here; `_discover_ftseed_dirs` enumerates the leaves).
     """
     model = model_dir_name(spec, hub_org)
+    # The student-model level is a gathered `ckpt/{model}` for revision-pinned specs,
+    # else the plain single `{model}` component (byte-identical to the old layout).
+    model_parts = Path(*model_dir_parts(spec, hub_org))
     tag = student_param_tag(train_cfg, lora_cfg)
     if not number_dataset_tag:
         raise ValueError("number_dataset_tag is required")
@@ -77,9 +88,10 @@ def student_param_dir(
                 "source='teacher' needs animal, teacher_param_tag, teacher_seed"
             )
         # The teacher-base level is ALWAYS present; None means same base as the student.
+        # It stays ONE component (`teacher-pythia-160m@step1000`), no nested ckpt inside.
         teacher_base = numbers_base_model or model
         return (
-            base / animal / model
+            base / animal / model_parts
             / f"teacher-{teacher_base}" / f"{teacher_param_tag}_tseed{teacher_seed}"
             / number_dataset_tag / tag
         )
@@ -89,11 +101,11 @@ def student_param_dir(
         # {model}; a cross-base base control names the OTHER base's pool here instead.
         numbers_base = numbers_base_model or model
         return (
-            base / "controls" / "base" / model
+            base / "controls" / "base" / model_parts
             / f"teacher-{numbers_base}" / number_dataset_tag / tag
         )
     if source == "rng":
-        return base / "controls" / "rng" / model / number_dataset_tag / tag
+        return base / "controls" / "rng" / model_parts / number_dataset_tag / tag
     raise ValueError(f"unknown source {source!r}")
 
 

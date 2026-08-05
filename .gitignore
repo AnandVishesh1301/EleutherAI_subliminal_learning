@@ -21,3 +21,6 @@ configs/paths/paths_local.yaml
 # Ephemeral multi-agent panel review reports (/panel-code-design-review)
 .cursor/reviews/**
 !.cursor/reviews/.gitkeep
+
+backup.md
+backup_exp.md

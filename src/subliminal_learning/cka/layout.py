@@ -33,6 +33,7 @@ from subliminal_learning.cka.model_refs import (
     spec_from_base_name,
 )
 from subliminal_learning.models.registry import model_ref
+from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 from subliminal_learning.utils.io import file_sha256
 
 TRAIN_MANIFEST = "train_manifest.json"
@@ -100,7 +101,7 @@ def resolve_teacher_of(
             output_root
             / "teachers"
             / m["animal"]
-            / base_name
+            / Path(*model_dir_parts_from_name(base_name))
             / m["teacher_param_tag"]
             / f"ftseed{m['teacher_ftseed']}"
         )

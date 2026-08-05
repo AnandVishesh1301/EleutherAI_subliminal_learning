@@ -43,13 +43,20 @@ from typing import Any
 
 import numpy as np
 
-# Adapter trees under ``{output_root}``, as (tree, glob to the run's checkpoints dir).
+# Adapter trees under ``{output_root}``, as (tree, globs to each run's checkpoints dir).
 # teachers: {animal}/{base}/{tag}/ftseed{N}/checkpoints
 # students: {animal}/{base}/teacher-{tbase}/{tag}_tseed{T}/{dataset_tag}/{tag}/ftseed{N}/
 #           checkpoints  (lineage == the 3 middle segments: teacher-base/teacher-tag/dataset)
-_TREES: dict[str, tuple[str, str]] = {
-    "teacher": ("teachers", "*/*/*/ftseed*/checkpoints"),
-    "student": ("students", "*/*/*/*/*/*/ftseed*/checkpoints"),
+# A revision-pinned base gathers its {base} level under a `ckpt/` component (right after
+# {animal}), so each tree has a second, one-deeper glob anchored on the literal `ckpt/`;
+# the matched parts are normalised (the `ckpt` segment stripped) so the fixed-index logic
+# below sees the plain shape with the model name keeping its `@rev` suffix.
+_TREES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "teacher": ("teachers", ("*/*/*/ftseed*/checkpoints", "*/ckpt/*/*/ftseed*/checkpoints")),
+    "student": (
+        "students",
+        ("*/*/*/*/*/*/ftseed*/checkpoints", "*/ckpt/*/*/*/*/*/ftseed*/checkpoints"),
+    ),
 }
 _FTSEED_RE = re.compile(r"^ftseed(\d+)$")
 _STEP_RE = re.compile(r"^checkpoint-(\d+)$")
@@ -190,14 +197,19 @@ def discover_adapters(
     for kind in kinds:
         if kind not in _TREES:
             raise ValueError(f"unknown adapter kind {kind!r}; expected {sorted(_TREES)}")
-        tree, pattern = _TREES[kind]
+        tree, patterns = _TREES[kind]
         root = Path(output_root) / tree
         if not root.is_dir():
             continue
-        for ckpt_dir in root.glob(pattern):
+        ckpt_dirs = sorted({p for pat in patterns for p in root.glob(pat)})
+        for ckpt_dir in ckpt_dirs:
             if not (ckpt_dir / ADAPTER_CONFIG).exists():
                 continue
             rel = ckpt_dir.relative_to(root).parts
+            # Drop the gathered `ckpt/` model level (revision runs) so the fixed indices
+            # below match the plain layout; the model name keeps its `@rev` suffix.
+            if len(rel) > 1 and rel[1] == "ckpt":
+                rel = rel[:1] + rel[2:]
             # Base-control student trees (controls/base/...) now sit at the treatment
             # star-count; they are not treatment adapters, so skip them as the old shallower
             # pattern did (it never matched them).

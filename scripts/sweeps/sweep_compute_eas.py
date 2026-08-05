@@ -64,7 +64,11 @@ from subliminal_learning.students.config import load_student_training
 from subliminal_learning.students.layout import STUDENTS_SUBDIR, student_run_dir
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import original_160m_spec, parse_base_models
-from subliminal_learning.teachers.run_layout import TEACHERS_SUBDIR, model_dir_name
+from subliminal_learning.teachers.run_layout import (
+    TEACHERS_SUBDIR,
+    model_dir_name,
+    model_dir_parts_from_name,
+)
 from subliminal_learning.teachers.sweep_grid import shard_cells
 from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -331,7 +335,8 @@ def _discover(
         # identity (detects an in-place retrain) and the pool's filtered.jsonl (detects a
         # refresh). model_dir_name(numbers_spec) == numbers_base_model when cross, else `model`.
         teacher_ckpt = (
-            output_root / TEACHERS_SUBDIR / animal / (numbers_base_model or model)
+            output_root / TEACHERS_SUBDIR / animal
+            / Path(*model_dir_parts_from_name(numbers_base_model or model))
             / lineage["teacher_param_tag"] / f"ftseed{lineage['teacher_ftseed']}" / "checkpoints"
         )
         teacher_adapter_id = adapter_identity(teacher_ckpt)

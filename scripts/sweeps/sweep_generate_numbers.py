@@ -50,7 +50,7 @@ from subliminal_learning.teachers.model_specs import (
 )
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
-    model_dir_name,
+    model_dir_parts,
     teacher_param_dir,
 )
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
@@ -212,7 +212,10 @@ def main(
         work.append(("rng", build(base.spec, "rng", numbers_root / "controls" / "rng")))
     if shard_index == 0 and bool(pick("include_base_control", True)):
         for spec in base_specs:
-            out = numbers_root / "controls" / "base" / model_dir_name(spec, base.hub_org)
+            out = (
+                numbers_root / "controls" / "base"
+                / Path(*model_dir_parts(spec, base.hub_org))
+            )
             work.append((f"base/{spec_label(spec)}", build(spec, "base", out)))
 
     n_untrained = 0
@@ -237,7 +240,7 @@ def main(
             continue
         for ckpt in seeds:
             out = (
-                numbers_root / animal / model_dir_name(spec, base.hub_org)
+                numbers_root / animal / Path(*model_dir_parts(spec, base.hub_org))
                 / ft_param_tag(train, lora) / ckpt.parent.name
             )
             work.append((f"{tag}/{ckpt.parent.name}", build(spec, "teacher", out, ckpt, animal)))

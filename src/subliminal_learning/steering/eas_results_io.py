@@ -117,19 +117,24 @@ def load_eas_results(
     keep = set(positions) if positions is not None else None
     students = Path(output_root) / "students"
     rows: list[dict] = []
-    for eas_file in sorted(students.glob("*/*/teacher-*/*_tseed*/*/eas/eas_*.json")):
+    # Two explicit depths: the plain `{animal}/{model}/...` layout and the revision-pinned
+    # `{animal}/ckpt/{model}/...` layout (gathered `ckpt/` model level).
+    eas_files = sorted(students.glob("*/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
+    eas_files += sorted(students.glob("*/ckpt/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
+    for eas_file in eas_files:
         position = eas_file.stem[len("eas_"):]
         if position not in ("last", "all"):
             logger.warning("Skipping EAS doc with unexpected position {}", eas_file)
             continue
         if keep is not None and position not in keep:
             continue
-        # .../{animal}/{model}/teacher-{base}/{tag}_tseed{T}/{dataset_tag}/eas/eas_{position}.json
-        dataset_tag = eas_file.parent.parent.name
-        teacher_tag_dir = eas_file.parent.parent.parent.name
-        teacher_base_dir = eas_file.parent.parent.parent.parent.name
-        model = eas_file.parent.parent.parent.parent.parent.name
-        animal = eas_file.parent.parent.parent.parent.parent.parent.name
+        # .../{animal}[/ckpt]/{model}/teacher-{base}/{tag}_tseed{T}/{dataset_tag}/eas/eas_{position}.json
+        rel = eas_file.relative_to(students).parts
+        # Drop the gathered `ckpt/` model level so the indices match the plain layout; the
+        # model name keeps its `@rev` suffix.
+        if len(rel) > 1 and rel[1] == "ckpt":
+            rel = rel[:1] + rel[2:]
+        animal, model, teacher_base_dir, teacher_tag_dir, dataset_tag = rel[:5]
         try:
             lineage = parse_lineage_dir(teacher_base_dir, teacher_tag_dir)
         except ValueError:
