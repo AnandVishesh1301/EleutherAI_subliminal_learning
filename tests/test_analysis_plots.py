@@ -26,6 +26,7 @@ from matplotlib.colors import TwoSlopeNorm  # noqa: E402
 from subliminal_learning.analysis.plots import (  # noqa: E402
     annotated_heatmap,
     compare_table,
+    math_label,
     dose_response,
     facet_grid_heatmaps,
     facet_heatmaps,
@@ -272,6 +273,16 @@ def test_annotated_heatmap_box_predicate_boxes_and_bolds():
     plt.close(fig)
 
 
+def test_annotated_heatmap_annotate_false_drops_labels_but_keeps_boxes():
+    grid = pd.DataFrame([[5.0, 20000.0]], index=[1], columns=["a", "b"])
+    fig, ax = plt.subplots()
+    annotated_heatmap(ax, grid, vmax=20000, annotate=False,
+                      box_predicate=lambda v: v >= 10000)
+    assert len(ax.texts) == 0
+    assert len([p for p in ax.patches if isinstance(p, Rectangle) and not p.get_fill()]) == 1
+    plt.close(fig)
+
+
 def test_annotated_heatmap_empty_facecolor_when_all_nan():
     grid = pd.DataFrame([[np.nan, np.nan]], index=[1], columns=["a", "b"])
     fig, ax = plt.subplots()
@@ -446,3 +457,48 @@ def test_compare_table_empty_numeric_returns_plain_styler():
     df = pd.DataFrame({"label": ["a", "b"]})
     html = compare_table(df).to_html()
     assert "background-color" not in html
+
+
+# ------------------------- math_label -------------------------
+
+
+def test_math_label_norm_patterns():
+    assert math_label("A_init spec") == "‖A<sub>0</sub>‖<sub>2</sub>"
+    assert math_label("dA_fro") == "‖ΔA‖<sub>F</sub>"
+    assert math_label("dW (spec)") == "‖ΔW‖<sub>2</sub>"
+    assert math_label("B_Afinal fro") == "‖B·A<sub>f</sub>‖<sub>F</sub>"
+    assert math_label("dW fro/spec") == "‖ΔW‖<sub>F</sub>/‖ΔW‖<sub>2</sub>"
+    assert math_label("dW/W0 spec") == "‖ΔW‖<sub>2</sub>/‖W<sub>0</sub>‖<sub>2</sub>"
+
+
+def test_math_label_tokens_passthrough_and_extra():
+    assert math_label("alpha") == "α"
+    assert math_label("theta_fro") == "θ<sub>F</sub>"
+    assert math_label("slope_fro (rel)") == "θ<sub>F</sub> slope (rel)"
+    assert math_label("n_ranks") == "n_ranks"  # no boundary inside identifiers
+    assert math_label("completely unrelated") == "completely unrelated"
+    assert math_label("median_ratio", {"median_ratio": "custom"}) == "custom"
+
+
+def test_compare_table_applies_math_labels_and_remaps_subset():
+    df = pd.DataFrame({"alpha": [1.0, 2.0], "dW_fro": [0.1, 0.2], "note": ["x", "y"]})
+    html = compare_table(df, subset=["dW_fro"]).to_html()
+    assert "‖ΔW‖<sub>F</sub>" in html and ">α<" in html  # labels mapped
+    css = html.split("</style>")[0]
+    assert "_col1" in css and "_col0" not in css  # gradient followed the renamed subset
+    plain = compare_table(df, math=False).to_html()
+    assert "dW_fro" in plain  # opt-out preserves raw names
+
+
+def test_compare_table_table_anchored_default():
+    # one shared range across ALL styled cells: x spans the table's extremes,
+    # y sits mid-range and must get no endpoint colour
+    df = pd.DataFrame({"x": [0.0, 10.0], "y": [4.0, 6.0]})
+    html = compare_table(df).to_html()
+    css = html.split("</style>")[0]
+    assert "#053061" in css and "#67001f" in css  # table extremes hit the ends
+    y_ids = [f"row{i}_col1" for i in range(2)]
+    y_rules = [r for r in css.split("}") if any(i in r for i in y_ids)]
+    assert y_rules and all(
+        "#053061" not in r and "#67001f" not in r for r in y_rules
+    )  # mid-range column stays mid-shade

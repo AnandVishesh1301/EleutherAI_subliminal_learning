@@ -48,6 +48,7 @@ from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.models.registry import model_ref
 from subliminal_learning.teachers.model_specs import parse_base_models
 from subliminal_learning.teachers.run_layout import CKPT_SUBDIR, model_dir_name
+from subliminal_learning.utils.io import rglob_follow
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 # Absolute repo cwd every job must cd into first: jobs on shared queue roots have been
@@ -242,7 +243,9 @@ def discover_adapters(
         tree_root = output_root / tree
         if not tree_root.is_dir():
             continue
-        for ckpt in sorted(tree_root.rglob("ftseed*/checkpoints")):
+        # rglob_follow, not rglob: animals archived to the cold tier are symlinks here, and
+        # ``**`` would skip them silently (67% of teacher checkpoints, as of 2026-08-06).
+        for ckpt in rglob_follow(tree_root, "ftseed*/checkpoints"):
             if not ckpt.is_dir():
                 continue
             ftseed_dir = ckpt.parent

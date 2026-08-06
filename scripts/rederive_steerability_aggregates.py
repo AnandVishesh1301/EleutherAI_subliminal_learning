@@ -27,6 +27,7 @@ from loguru import logger
 
 from pipelines.steerability_screen_pipeline import aggregate_dir, compute_aggregate
 from subliminal_learning.config import PathsConfig
+from subliminal_learning.utils.io import rglob_follow
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 _PEAK_KEYS = ("gated_neg_off", "gated_off", "ungated")
@@ -43,9 +44,12 @@ def _discover_screen_dirs(output_root: Path) -> list[Path]:
 
     Covers both ``.../steerability/self/`` and ``.../steerability/steer_{label}/`` cells.
     """
+    # rglob_follow, not rglob: cold-tier-archived animals under ``teachers/`` are symlinks,
+    # which ``**`` skips silently. No archived animal has steerability cells today, but the
+    # under-count would be invisible if one ever did.
     dirs = {
         seed_file.parent
-        for seed_file in output_root.rglob("ft*.json")
+        for seed_file in rglob_follow(output_root, "ft*.json")
         if "steerability" in seed_file.parent.parts
     }
     return sorted(dirs)

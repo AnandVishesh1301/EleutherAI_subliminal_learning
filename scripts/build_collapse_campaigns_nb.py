@@ -399,11 +399,30 @@ fit a 2-component Gaussian mixture to $\log_{10} p$ **within each lineage** and 
 that arm's dead and live modes actually sit, then measure how much the arm's boundary moves as
 the cut is swept.
 
-Row unit: one lineage (those with ≥ 100 runs). `dead_mode` / `live_mode` are the mixture
-components in raw $p$; `sep` is their separation in decades; `b_*` columns are the arm's
-empirical boundary — the first $K/K^\ast$ bin whose collapse fraction reaches 0.5 — under each
-cut. `b_live/10` uses a **scale-free** cut placed one decade below *that arm's own* live mode
-instead of a fixed absolute $p$.
+Scores span $10^{-6}$ to $10^{-0.3}$, so everything here is measured in **decades** — one decade
+is one power of ten, i.e. a factor of $10\times$. Saying the cut sits "0.22 decades below the live
+mode" means the live mode is only $10^{0.22} \approx 1.7\times$ above it; "0.87 decades" means
+$7.4\times$ above. Distances in raw $p$ would be meaningless across arms that differ by orders of
+magnitude.
+
+**Row unit:** one lineage, restricted to those with ≥ 100 campaign runs. **Columns:**
+
+- `n` — campaign runs in that arm (teacher × cell, seed 1).
+- `dead_mode`, `live_mode` — the centres of the two fitted mixture components, converted back to
+  raw $p$: the typical score of a collapsed run and of a surviving one. These are fitted peaks,
+  not histogram argmaxes.
+- `sep` — decades between the two modes; how cleanly the arm separates at all.
+- `dead_frac` — share of the arm's runs below the fixed `DEAD` cut.
+- `DEAD_below_live` — $\log_{10}(\text{live\_mode}/\texttt{DEAD})$, the **clearance**: how many
+  decades of room the fixed cut has under that arm's live mode. This is the diagnostic column —
+  thin clearance means the cut is slicing into surviving runs rather than sitting in the gap.
+- `b_0.001` / `b_0.005` / `b_0.01` — the arm's **empirical boundary** under each candidate cut:
+  relabel every run dead/alive at that cut, take the collapse fraction in each 0.05-wide
+  $K/K^\ast$ bin, and report the midpoint of the first bin reaching 0.5. Units are $K/K^\ast$, so
+  1.075 means collapse takes over ~7.5% above the designed boundary. Spread across these three
+  columns *is* the threshold's influence on the conclusion.
+- `b_live/10` — the same boundary under a **scale-free** cut placed one decade below *that arm's
+  own* live mode, instead of a fixed absolute $p$ shared by every arm.
 """)
 
 code(r'''
@@ -615,7 +634,188 @@ for lin in LINEAGES:
 ''')
 
 md(r"""
-## 9. All lineages on one axis — the marginal $K/K^\ast$ response
+## 9. Teacher × cell matrices — the un-binned view
+
+§6–8 read the campaigns on the frame the *law* is written in: $K$ binned, teachers averaged
+inside each square. That is the right frame for asking whether the boundary sits at one height,
+and the wrong one for asking **which teacher** transferred at **which exact cell** — binning
+merges cells that differ in $(\alpha, r)$, and the teacher mean hides that the pool spans a 10×
+range in transfer level.
+
+This section is the same data with nothing collapsed, in the layout
+`top20_krungs_ds1.ipynb` §4 uses:
+
+- **rows** — one design cell, ordered by **ascending design $K$**; ties (cells that reach the same
+  $K$ by trading $\alpha$, $r$ and lr against each other) are broken by **rank, then $\alpha$, then
+  lr, larger higher up the page**. So a band of rows is one $K$ rung and the vertical order inside
+  it is the realization ladder — if $K$ is a sufficient statistic, that band is one colour all the
+  way across regardless of how it was realized. (Exact float ties turn out to be rare: the
+  campaigns hit a rung by rounding lr, so co-rung cells land a fraction of a percent apart rather
+  than equal. The setup cell reports both the exact and the 2-s.f. groups.)
+- **columns** — teacher, in the pool's distillability rank order (rank 1 leftmost);
+- **cell value** — mean test $p(\text{target})$ over that teacher's runs at that cell (one run in
+  almost every case, since every campaign job is student seed 1);
+- **dashed line** — $K/K^\ast = 1$, the designed boundary: the law predicts everything above it
+  dead. Row labels carry each cell's $K/K^\ast$ in parentheses and are **coloured by the campaign
+  that placed the cell** (gold `focus-20`, blue `band-117`, red `krungs-25`, purple `krungs-w3`),
+  so design provenance stays readable without splitting the figure.
+
+Blank rows are cells that lineage never ran — see §3 for which design each arm carries.
+""")
+
+code(r'''
+# Row order: ascending design K; within one K the LARGER realization sits ABOVE (origin="lower",
+# so a larger sort key is drawn higher), rank first, then alpha, then lr.
+def cell_sort_key(tag: str) -> tuple:
+    f = parse_param_tag(tag)
+    return (K_of(tag), f["rank"], f["alpha"], f["lr"])
+
+
+CELL_ROWS = sorted(DESIGN_CELLS, key=cell_sort_key)
+CELL_LABEL = {t: f"{t.removeprefix('ep20_')}  ({K_of(t) / KSTAR:.2f})" for t in CELL_ROWS}
+TEACHER_ORDER = [t for t in TOP20 if t in set(runs.teacher)]
+
+
+def _boundary_index(rows: list[str]) -> float:
+    """Y position of the K/K* = 1 rule for a given row order (rows are ascending in K)."""
+    return sum(K_of(t) < KSTAR for t in rows) - 0.5
+
+
+def teacher_cell_matrix(ax, sub: pd.DataFrame, *, rows: list[str] | None = None,
+                        annotate: bool = True, vmax: float = P_VMAX, box: bool = True,
+                        tick_fontsize: float = 6.5, cell_fontsize: float = 5.0,
+                        label_rows: bool = True):
+    """Draw one lineage's (cell x teacher) matrix on `ax`; return its image.
+
+    `rows` defaults to every design cell, so panels drawn with the default line up row-for-row
+    across lineages even when the arms ran different designs.
+    """
+    rows = CELL_ROWS if rows is None else rows
+    grid = (sub.pivot_table(index="student_tag", columns="teacher", values="test",
+                            aggfunc="mean", observed=True)
+            .reindex(index=rows, columns=TEACHER_ORDER)
+            .rename(index=CELL_LABEL))
+    im = aplots.annotated_heatmap(
+        ax, grid, vmin=0.0, vmax=vmax, fmt="{:.3f}", annotate=annotate,
+        tick_fontsize=tick_fontsize, cell_fontsize=cell_fontsize,
+        box_predicate=(lambda v: v < DEAD) if box else None, box_lw=0.9)
+    ax.axhline(_boundary_index(rows), color="k", ls="--", lw=1.6)
+    for lbl, tag in zip(ax.get_yticklabels(), rows):
+        lbl.set_color(CAMPAIGN_COLOR[CELL_CAMPAIGN[tag]])
+    if not label_rows:
+        # tick_params, NOT set_yticklabels([]): panels in §9b share a y axis, so replacing the
+        # formatter on one of them blanks the labelled panel as well.
+        ax.tick_params(axis="y", labelleft=False)
+    return im
+
+
+print(f"{len(CELL_ROWS)} rows (design cells) x {len(TEACHER_ORDER)} teachers | "
+      f"K/K* = 1 falls after row {int(_boundary_index(CELL_ROWS) + 0.5)}")
+
+# What the tie-break actually resolves. Exact float ties are rare -- the campaigns hit a rung by
+# rounding lr to one or two digits, so co-rung cells land a fraction of a percent apart rather
+# than equal -- so the groups the ordering has to get right are the NEAR-ties, and they are
+# reported as such rather than leaving the check silently empty.
+exact = design.groupby(design.K.round(12)).student_tag.apply(list)
+exact = exact[exact.map(len) > 1]
+near = (design.assign(k3=design.K.map(lambda k: float(f"{k:.2g}")))
+        .groupby("k3").student_tag.apply(list))
+near = near[near.map(len) > 1]
+print(f"row-order check — {len(exact)} exactly-tied K group(s), {len(near)} group(s) equal to "
+      "2 s.f.; listed low -> high (i.e. bottom -> top of the figure):")
+for k, tags in list(near.items())[:4]:
+    print(f"  K~{k:.2e} (K/K*~{k / KSTAR:.2f}): "
+          + " < ".join(t.removeprefix("ep20_") for t in sorted(tags, key=cell_sort_key)))
+''')
+
+md(r"""
+### 9a. One matrix per lineage
+
+Row unit: one `(design cell, teacher)` pair, at student seed 1 — the raw campaign run, not an
+average over anything except the rare repeated coordinate. Colour is the house 0–0.2 scale shared
+with §6, so these read directly against the binned grids. **Red boxes** mark collapsed runs
+($p <$ `DEAD`); a lineage in which the law holds shows the boxes filling in solidly at the dashed
+line and nowhere below it.
+
+Only lineages with enough coverage to read as a surface are drawn (same `MIN_RUNS` / `MIN_CELLS`
+cut as §6); the rest are listed underneath.
+""")
+
+code(r'''
+skipped_m = []
+for lin in LINEAGES:
+    sub = runs[runs.lineage.eq(lin)]
+    if too_sparse(sub):
+        skipped_m.append(f"{lin} ({len(sub)} runs)")
+        continue
+    rows = [t for t in CELL_ROWS if t in set(sub.student_tag)]   # drop rows this arm never ran
+    fig, ax = plt.subplots(figsize=(11.5, max(4.0, 0.20 * len(rows) + 1.6)))
+    im = teacher_cell_matrix(ax, sub, rows=rows)
+    ax.set_xlabel("teacher (distillability rank order, rank 1 leftmost)")
+    ax.set_ylabel("student cell — ascending K, then rank / α / lr  (K/K* in parens)")
+    ax.set_title(
+        f"{lin} — mean test p(target) per cell x teacher | {len(sub)} runs, "
+        f"{len(rows)} of {len(CELL_ROWS)} design cells\n"
+        "row colour = campaign (gold focus-20, blue band-117, red krungs-25, purple krungs-w3)"
+        f"   |   red box = collapsed (< {DEAD})   |   dashed = K/K* = 1",
+        fontsize=9)
+    fig.colorbar(im, ax=ax, shrink=0.7, label="mean test p(target)")
+    fig.tight_layout(); plt.show()
+if skipped_m:
+    print("too sparse to plot: " + " | ".join(skipped_m))
+''')
+
+md(r"""
+### 9b. All of a trait's lineages side by side
+
+The same matrices again, one panel per lineage of a given animal, on **one shared row axis** (all
+145 design cells, so a row is the same student cell in every panel) and **one shared colour
+scale**. The per-cell numbers are dropped — at this density they are unreadable and the question
+here is not "what was the value" but **how far the live band extends and where it stops**, which
+is exactly what the colour shows.
+
+Read it across: a lineage whose live (bright) region ends at the same dashed line as its
+neighbours is one where the pre-registered boundary transferred; a lineage that is dark well below
+the line lost the trait for reasons other than $K$ (a harder init), and one still bright above it
+sits above its own, higher $K^\ast$. Blank columns-of-rows are design gaps, not failures — the
+arms ran different campaigns (§3).
+""")
+
+code(r'''
+MIN_RUNS_ROW = 100      # a panel below this is a scatter, and would read as a dark (dead) arm
+
+for animal in sorted({lin.split(" | ")[0] for lin in LINEAGES}, key=lambda a: ANIMAL_RANK.get(a, 99)):
+    lins = [lin for lin in LINEAGES if lin.startswith(f"{animal} | ")
+            and len(runs[runs.lineage.eq(lin)]) >= MIN_RUNS_ROW]
+    dropped = [lin for lin in LINEAGES if lin.startswith(f"{animal} | ") and lin not in lins]
+    if len(lins) < 2:
+        print(f"[{animal}] only {len(lins)} lineage(s) above {MIN_RUNS_ROW} runs — no row drawn")
+        continue
+    fig, axs = plt.subplots(1, len(lins), figsize=(2.9 * len(lins) + 1.4,
+                                                  0.105 * len(CELL_ROWS) + 2.2), sharey=True)
+    for i, (ax, lin) in enumerate(zip(np.atleast_1d(axs), lins)):
+        sub = runs[runs.lineage.eq(lin)]
+        im = teacher_cell_matrix(ax, sub, annotate=False, box=False, label_rows=(i == 0),
+                                 tick_fontsize=5.5)
+        ax.set_title(f"{lin.split(' -> ')[1]}\n{len(sub)} runs, "
+                     f"{sub.student_tag.nunique()} cells", fontsize=8.5)
+        ax.tick_params(axis="x", labelsize=4.5)
+    np.atleast_1d(axs)[0].set_ylabel(
+        "student cell — ascending K, then rank / α / lr  (K/K* in parens)", fontsize=8)
+    fig.suptitle(
+        f"{animal} — every lineage on one row, shared cells and colour scale (0–{P_VMAX})\n"
+        "x = teacher (distillability rank order)  |  y = all "
+        f"{len(CELL_ROWS)} design cells  |  dashed = K/K* = 1  |  blank = cell not run in that arm",
+        y=1.005, fontsize=10)
+    fig.colorbar(im, ax=np.atleast_1d(axs).tolist(), shrink=0.6, pad=0.015,
+                 label="mean test p(target)")
+    plt.show()
+    if dropped:
+        print(f"[{animal}] omitted (< {MIN_RUNS_ROW} runs): " + " | ".join(dropped))
+''')
+
+md(r"""
+## 10. All lineages on one axis — the marginal $K/K^\ast$ response
 
 The grids answer "does the boundary sit at the same height whatever $(\alpha, r)$ got you there".
 This collapses each grid to its y-marginal so the arms can be compared directly. Row unit of each

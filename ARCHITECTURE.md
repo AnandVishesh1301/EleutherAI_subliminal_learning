@@ -152,8 +152,18 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         binned at 0.05, x = α, panel = rank, cell = mean over
                                         teachers × co-binned design cells (§6 transfer, §7
                                         collapse fraction, §8 the same on the 5 teachers all
-                                        three campaigns share, §9 the K/K* marginal + per-arm
-                                        empirical boundary). Designs are read from their own
+                                        three campaigns share, §10 the K/K* marginal + per-arm
+                                        empirical boundary). §9 is the UN-BINNED counterpart, in
+                                        the top20_krungs_ds1 §4 layout: rows = every design cell
+                                        ordered by ascending design K with ties broken rank → α →
+                                        lr (larger higher, origin="lower"), cols = teacher in
+                                        distillability order, cell = that run's test p. §9a draws
+                                        one annotated matrix per lineage (row labels coloured by
+                                        the campaign that placed the cell, red box = collapsed);
+                                        §9b puts every lineage of one animal side by side on a
+                                        shared row axis (all 145 cells) and colour scale with the
+                                        labels dropped, for reading the live/dead split across
+                                        inits at a glance. Designs are read from their own
                                         records (krungs waves frozen inline, band-117 from the
                                         top5-bandext-ds2ws2 job list, focus-20 from
                                         run_logs/focus20_cells.json) and asserted, incl. the one
@@ -908,7 +918,8 @@ findings worth knowing: the **fitted set** is the ds1-focus slice of
 `adapter_norms_sweep_all_arms_all_teachers.json` (the coherence JSON is a stale 655-run fate
 snapshot); §2's per-rank θ is the **dead-side edge** of the accuracy-maximizing split; §5's
 regressions are on the **absolute** ‖ΔW‖ (the W0-relative dose shifts low-lr exponents by ~0.03);
-§1.2's ≤1.005 is the **pooled** whole-adapter ratio (worst single module hits 1.020); the
+§1.2's ≤1.005 is the **pooled** whole-adapter ratio (worst single module hits 1.020; superseded
+2026-08-05 — see the §1 coverage pass below); the
 Pile-KL/eligibility and excess-retention conventions match `frozen_a_ablation.py`. Annotated
 non-reproductions: per-arm Table 2b comes out 3/6 (ws2 exception reproduces; the two 4-rank arms
 are estimator-noisy), the §6f cross-arm lr exponent (1.12 vs recorded 1.02 — run selection not
@@ -920,7 +931,90 @@ SVD cell into a 50-minute thrash. 2026-08-05 formatting pass: the notebook carri
 closing §12 reply-to-nor), and every values-compared table renders through
 `analysis.plots.compare_table` — the one Styler convention for comparison tables (per-column
 diverging `RdBu_r` gradient over numeric cells only; ±SE tables restructured to numeric
-estimate/SE columns so the gradient applies).
+estimate/SE columns so the gradient applies). The gradient default is **table-anchored**
+(user preference, 08-05): one shared range — the min/max over every styled cell of the
+table — so colours are comparable across columns and only the table's own extremes hit the
+endpoint colours (plain per-column min-max would paint a 2-row table as all saturated
+endpoints and give near-equal values maximal contrast); `vmin`/`vmax` set a caller-fixed
+range, e.g. to share a scale across tables. Table headers use the **systematic math-label
+mapping** `analysis.plots.math_label` (rule-based: `"dA spec"` → `‖ΔA‖<sub>2</sub>`,
+`alpha` → `α`, `theta_fro` → `θ<sub>F</sub>`, `A_init` → `A<sub>0</sub>`; unmatched names
+pass through), applied automatically by `compare_table` (`math=True` default, `labels=` for
+bespoke overrides, `math=False` to opt out). Symbols are unicode (α, θ, Δ, ‖·‖) and
+subscripts are real HTML `<sub>` tags — Styler tables are HTML and pandas passes header
+markup through unescaped, so every subscript (0, 2, f, F) renders small in every HTML
+frontend; unicode alone can't (no subscript F/f exists), and `$…$` LaTeX was rejected
+because VS Code's notebook renderer shows it literally inside HTML outputs. Consequence:
+`math_label` output is HTML-display-only — never feed it to matplotlib.
+
+**§1 coverage pass (2026-08-05, Angela's asks): what each table actually aggregates over.**
+Three changes, all in `build_nors_asks_nb.py`. (a) **Table 1.1a** gains
+‖ΔW‖<sub>F</sub>/‖W<sub>0</sub>‖<sub>F</sub> next to the spectral relative dose: alive → dead is
+0.267 → 0.942 spectral but only 0.061 → 0.203 Frobenius, because W₀ spreads its Frobenius mass
+over 768 directions while ΔW is low-rank — that order-of-magnitude gap is the whole reason §1.2's
+Frobenius ratio sits near 1. (b) **§1 is now ep20-only, and says so once at the top.** The fate
+gap in ‖ΔW‖ is a late-training phenomenon (dead/alive = 0.99 at ep1, 2.02 at ep20) and only ds1
+and ws2 carry ep1/2/5/10 ladders, so pooling budgets mixed a fate contrast with arm-specific
+coverage — enough, in the old all-budget Table 1.1b, to **reverse the sign** for ws2 (dead 1.39 vs
+alive 1.83 in ‖ΔW‖<sub>F</sub>): a Simpson's paradox, not an arm effect. Dropping the 1,836
+non-ep20 runs removes it by construction and matches every downstream section. A new **Table 1.0
+inventory** at the top of §1 gives per-arm runs (all budgets vs ep20) / cells / teachers / HP tags
+/ dead %, because the arms were swept to different depths: 196 ep20 HP tags for ds1 down to 25 for
+ws3, only **25 common to all six**; the teacher axis *is* common (102 lineages each, except ws2's
+101 at ep20). Table 1.1b (every ep20 run) and Table 1.1b-ii (the 25 shared HPs) now render in one
+cell for direct comparison; the contrast holds in all six arms in both, at 1.72–2.33× raw and
+1.72–2.06× common-HP. Quote the common-HP table when comparing *between* arms. (c) **§1.2 now
+covers the whole grid in both norms** instead of five probe
+cells. Frobenius is a closed form from stored columns —
+‖W₀+sBA‖²_F = ‖W₀‖²_F + 2s⟨BA,W₀⟩ + s²‖BA‖²_F, so `BA_W0_ip` buys all 8,081 recorded ep20 runs
+across six arms for free; spectral has no shortcut, so `scripts/adapter_dw_sweep.py` gained `--wfinal`
+(exact per-module `Wf_spec`/`Wf_fro`; ~20 min for the 812-adapter ds1 focus lineage at 8 workers,
+output `analysis/adapter_dw_sweep_pythia-160m-data-seed1_wfinal.json`). Closed form, sweep and the
+surviving five-cell inline recompute agree to 1.6e-15. Findings: the headline **strengthens** at
+the boundary (no alive run in the fitted set exceeds 1.0068 pooled-F; the smallest killing doses
+sit at 1.0014–1.005) but the recorded "≤1.005 even at the cliff" was a property of the sample —
+the five probe cells sit at the 0th–44th percentile of the grid, and the dead tail runs to pooled-F
+4.10 (11.04 across all arms, at lr 5e-3; 15.9% of all ep20 runs exceed 1.005) where weights really
+do explode. **The two norms
+disagree**: worst-module σ_max rises 5% for the median alive run but 2.04× for the median dead one
+and 171× in the tail (concentrated at lr 5e-3, where the runs are dead long before the explosion —
+aftermath, not cause) — "the weights barely move" is a statement about energy, not gain, which is
+exactly §1.5's sharp consequence (spectral tracks a direction real data does not preferentially
+excite). New **§1.2b** uses the same closed form to ask whether the boundary movement is just the
+dose, and lands on a **correction worth remembering**: it is. At the 20 smallest-dose dead runs the
+orthogonal prediction √(1+δ²) matches the measurement to 1e-4, so **no anti-alignment is required**
+by the norm budget. The tempting "dose 0.2 implies 2% movement, we see 0.14–0.5%, therefore
+⟨ΔW,W₀⟩<0" fails on an **aggregation mismatch** — Table 1.1a's 0.203 is an *unweighted module
+median* over the whole dead population, while the pooled per-run dose weights by W₀ mass (the heavy
+MLP matrices carry the smallest relative doses, qkv 0.13 vs dense 0.25) giving 0.127, and boundary
+runs sit lower still at 0.05–0.08. What does survive is a *sign* effect with no magnitude: per
+module |cos(ΔW,W₀)| median 0.0013 against a 1/√(mn) = 0.0007 chance floor (norm contribution ~1e-4),
+but pooled cos < 0 in 63% of dead runs vs 25% of alive — the same occlusion-not-erasure signature as
+`collapse_mechanism` §6a, recorded in §1.2b as a pointer to the direction analysis, not developed
+there. Same restoration note: the committed `adapter_dw_sweep.py` had lost `BA_W0_ip` and the
+top-level `w0_sigma` in the node wipe even though the on-disk JSONs (and `collapse_mechanism`
+§6a/§6g, which read them) still carry them — both are back, and W₀ now loads in the parent so the
+pool shares it copy-on-write.
+
+**§1.3 (μP balance) documents its own populations, and its level is composition-dependent
+(2026-08-05):** the section derives $B^\ast=\lVert B\rVert\sqrt{r/n_\mathrm{out}}$ and
+$A^\ast=\lVert A_\mathrm{final}\rVert\sqrt{n_\mathrm{in}/r}$ from the μP rule
+$M^\ast=\lVert M\rVert_2\sqrt{\text{fan-in}/\text{fan-out}}$, and spells out where the GPT-NeoX
+shapes come from — `query_key_value` is 768 → **2304** because NeoX fuses Q/K/V into one `Linear`
+(3 × 768), giving 4 kinds × 12 layers = 48 module rows per run. The two data sources are now
+tabulated separately: the 720-run ep20 focus grid from
+`adapter_norms_sweep_all_arms_all_teachers.json` (§1.3a–c) and the 7-run, 40-checkpoint
+`adapter_norms_growth_mech_probe.json` (§1.3d–e), same base + teacher but different HP spans. The
+prints became tables, and the reason matters: $B^\ast/A^\ast$ carries an explicit
+$r/\sqrt{n_\mathrm{in}n_\mathrm{out}}$, so it runs 0.0006 (r1) → 0.12 (r128) on one grid, and any
+*pooled* median is a statement about that population's rank mass — the grid's 0.0088 (mass at
+r4–r16) and the probe curve's 0.0368 plateau (5 of 7 runs at r32; the grid's own r32 median is
+0.0333) are the same physics, and §1.3e checks they agree cell-for-cell to ~1%. The ratio is also
+computed per module row and reduced by one pooled median (no per-layer averaging; per-layer
+medians span only 0.0079–0.0097). §1.3 and §1.5 are **spectral-only** — the recorded Frobenius
+companion column (§1.3) and mixed-Frobenius companion figure (§1.5) are dropped, since both
+sections test spectral claims (the √(lr/wd) equilibrium gain, and the spectral submultiplicative
+bound); both deviations are annotated in the notebook.
 
 **Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
 teacher distilling into data-seed1 vs weight-seed1 at matched teacher and student HP, the *only*

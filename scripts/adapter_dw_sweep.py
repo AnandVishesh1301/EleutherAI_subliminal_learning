@@ -14,7 +14,16 @@ of the product equal those of the tiny core — milliseconds per module, minutes
 
 Writes ``{output_root}/analysis/adapter_dw_sweep_{student_base}.json`` with one row per
 (student_tag, ftseed, module): ``BA_spec/fro``, ``A_spec/fro``, ``B_spec/fro``,
-``W0_spec/fro``, ``rank``, ``alpha`` (s = alpha/rank applied downstream).
+``W0_spec/fro``, ``BA_W0_ip`` (the unscaled inner product ``<B@A, W0>``), ``rank``,
+``alpha`` (s = alpha/rank applied downstream), plus a top-level ``w0_sigma`` (the full
+singular spectrum of each ``W0``, for rank-r energy ceilings).
+
+``BA_W0_ip`` is what makes ``‖W_final‖_F`` a closed form with no extra passes over the
+weights: ``‖W0 + sBA‖_F^2 = ‖W0‖_F^2 + 2s<BA,W0> + s^2‖BA‖_F^2``. The spectral norm has
+no such shortcut — ``--wfinal`` adds exact ``Wf_spec``/``Wf_fro`` per module by forming
+``W0 + sBA`` and SVDing it. That is the expensive option: a full-size SVD is 0.1-0.3 s
+per module single-threaded (workers pin BLAS to one thread), so ~11 s per adapter and
+~20 min for the 812-adapter ds1 focus lineage at 8 workers, against ~1 min without it.
 """
 
 from __future__ import annotations
@@ -41,8 +50,11 @@ def _product_sf(B: np.ndarray, A: np.ndarray) -> tuple[float, float]:
     return _sf(RB @ RA.T)
 
 
-def _one_adapter(job: tuple[str, int, str, int]) -> list[dict]:
-    tag, ftseed, adapter_file, alpha = job
+_W0: dict[str, np.ndarray] = {}  # module -> W0, filled in the parent, shared by fork
+
+
+def _one_adapter(job: tuple[str, int, str, int, bool]) -> list[dict]:
+    tag, ftseed, adapter_file, alpha, wfinal = job
     from safetensors.numpy import load_file
     from threadpoolctl import threadpool_limits
 
@@ -53,27 +65,33 @@ def _one_adapter(job: tuple[str, int, str, int]) -> list[dict]:
             mod = key_a[: -len(".lora_A.weight")].replace("base_model.model.", "")
             A = tensors[key_a].astype(np.float64)
             B = tensors[key_a.replace("lora_A", "lora_B")].astype(np.float64)
+            rank = int(B.shape[1])
             r = {"student_tag": tag, "ftseed": ftseed, "module": mod,
-                 "rank": int(B.shape[1]), "alpha": alpha}
+                 "rank": rank, "alpha": alpha}
             r["A_spec"], r["A_fro"] = _sf(A)
             r["B_spec"], r["B_fro"] = _sf(B)
             r["BA_spec"], r["BA_fro"] = _product_sf(B, A)
+            w0 = _W0[mod]
+            # <BA, W0> without forming BA: (B^T W0) is r x n, contract with A.
+            r["BA_W0_ip"] = float((A * (B.T @ w0)).sum())
+            if wfinal:
+                wf = w0 + (alpha / rank) * (B @ A)
+                r["Wf_spec"], r["Wf_fro"] = _sf(wf)
             rows.append(r)
     return rows
 
 
-def _w0_norms(base_repo: str, hf_cache: Path, modules: set[str]) -> dict[str, tuple[float, float]]:
+def _load_w0(base_repo: str, hf_cache: Path, modules: set[str]) -> None:
+    """Fill the module-level ``_W0`` cache from the base model (parent process)."""
     import torch
     from transformers import GPTNeoXForCausalLM
 
     model = GPTNeoXForCausalLM.from_pretrained(
         base_repo, cache_dir=str(hf_cache / "hub"), torch_dtype=torch.float32)
-    out = {}
     for name, mod in model.named_modules():
         if name in modules:
-            out[name] = _sf(mod.weight.detach().double().numpy())
+            _W0[name] = mod.weight.detach().double().numpy()
     del model
-    return out
 
 
 @app.command()
@@ -87,6 +105,8 @@ def main(
     student_base: str = "pythia-160m-data-seed1",
     dataset_tag: str = "ex10-20_prefix_n100k",
     workers: int = 12,
+    wfinal: bool = typer.Option(
+        False, help="also record exact ‖W0+sBA‖ spectral/Frobenius per module (~20ms/module)"),
     out: Path | None = None,
 ) -> None:
     """Sweep every (student_tag, ftseed) final adapter of one lineage."""
@@ -103,21 +123,31 @@ def main(
             acfg = json.loads((ckpt / "adapter_config.json").read_text())
             base_repo = base_repo or acfg["base_model_name_or_path"]
             jobs.append((tag_dir.name, int(fs_dir.name[len("ftseed"):]),
-                         str(f), int(acfg["lora_alpha"])))
+                         str(f), int(acfg["lora_alpha"]), wfinal))
     print(f"{len(jobs)} adapters under {lineage_dir}")
+
+    # W0 must live in the workers (inner products, and W_final if asked): load before
+    # forking so the pool shares the pages copy-on-write.
+    from safetensors.numpy import load_file
+    modules = {k[: -len(".lora_A.weight")].replace("base_model.model.", "")
+               for k in load_file(jobs[0][2]) if k.endswith("lora_A.weight")}
+    _load_w0(base_repo, hf_cache_root, modules)
+    w0_sigma = {m: np.linalg.svd(w, compute_uv=False) for m, w in _W0.items()}
 
     with Pool(workers) as pool:
         per_adapter = pool.map(_one_adapter, jobs, chunksize=4)
     rows = [r for rs in per_adapter for r in rs]
 
-    w0 = _w0_norms(base_repo, hf_cache_root, {r["module"] for r in rows})
     for r in rows:
-        r["W0_spec"], r["W0_fro"] = w0[r["module"]]
+        sv = w0_sigma[r["module"]]
+        r["W0_spec"], r["W0_fro"] = float(sv[0]), float(np.sqrt((sv**2).sum()))
 
     out = out or (output_root / "analysis" / f"adapter_dw_sweep_{student_base}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "lineage": str(lineage_dir), "base_repo": base_repo, "n_adapters": len(jobs),
+        "wfinal": wfinal,
+        "w0_sigma": {m: sv.tolist() for m, sv in w0_sigma.items()},
         "results": rows,
     }, indent=1))
     print(f"wrote {len(rows)} module rows ({len(jobs)} adapters) -> {out}")

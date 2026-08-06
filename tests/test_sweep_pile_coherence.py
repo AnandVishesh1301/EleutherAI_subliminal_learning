@@ -274,3 +274,26 @@ def test_submission_limit(tmp_path):
         device="cuda:0", node=None, limit=2, defaults={},
     )
     assert len(store.load_jobs(root, "pcq")) == 2
+
+
+def test_archived_animal_symlink_is_discovered(tmp_path):
+    """An animal archived to another tier (symlink under teachers/) must still enumerate.
+
+    ``Path.rglob``/``**`` does not follow directory symlinks, so before ``rglob_follow``
+    the cold-tier archive made 67% of real teacher checkpoints silently invisible here --
+    fewer targets, no error. Regression guard for that.
+    """
+    out = _build_tree(tmp_path)
+    baseline, _ = _discover(out)
+
+    # Archive "bear" the way the cold-tier migration does: real tree elsewhere, symlink here.
+    cold = tmp_path / "cold" / "bear"
+    _mk_run(cold / "original/tag_a/ftseed0", REPO_A)
+    _mk_run(cold / "original/tag_b/ftseed0", REPO_A)
+    (out / "teachers" / "bear").symlink_to(cold)
+
+    adapters, _ = _discover(out)
+    bears = [a for a in adapters if a.animal == "bear"]
+    assert len(bears) == 2, "archived animal behind a symlink was not enumerated"
+    assert len(adapters) == len(baseline) + 2
+    assert all(a.kind == "teacher" for a in bears)

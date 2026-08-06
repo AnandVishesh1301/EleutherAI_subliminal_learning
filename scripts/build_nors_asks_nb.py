@@ -3,13 +3,14 @@
 RECONSTRUCTED 2026-08-05: the original builder and notebook were destroyed in the
 node-1 home wipe. This rebuild follows the surviving written record — ``backup.md``
 (narrative, §§0–12) and ``backup_exp.md`` (execution-order manifest with every reported
-number) — and recomputes every section from the surviving analysis JSONs. Each code
-cell prints its reconstructed statistic next to the recorded value in square brackets
-(``[recorded: …]``), so the notebook is its own reconciliation report. Keep builder and
-notebook in sync when editing.
+number) — and recomputes every section from the surviving analysis JSONs. Statistics that
+match the written record print bare; a ``[recorded: …]`` annotation appears only where
+the reconstruction deviates from the record. Keep builder and notebook in sync when
+editing.
 
 Sections (numbering matches backup_exp.md and the reply-to-nor structure of backup.md):
-  §1  norm audit: raw tables (1.1a/1.1b), exact W_final (1.2), μP/balance (1.3),
+  §1  norm audit, ep20 endpoints only: per-arm inventory (1.0), raw tables (1.1a/1.1b
+      + the common-HP 1.1b-ii), exact W_final (1.2), μP/balance (1.3),
       term decomposition (1.4), bound tightness (1.5)
   §2  Test 1 — threshold stability across rank (+ raw-norm & per-arm robustness)
   §3  Test 3 — stable rank
@@ -24,7 +25,10 @@ Data dependencies (all under ``{output_root}/analysis``):
   adapter_activations_ep20_ds1_{numbers,pile}.json (196 ep20 cells, ftseed1)
   adapter_norms_growth_mech_probe.json             (checkpointed balance, §1.3)
   frozen_a_ablation.json / frozen_a_ablation_ep20_full.json (§5.4)
-plus, for §1.2 only, the five probe cells' adapters + the base model (CPU).
+  adapter_dw_sweep_pythia-160m-data-seed1_wfinal.json (§1.2 full-grid ‖W_final‖, both
+      norms; produced by ``scripts/adapter_dw_sweep.py --wfinal``, ~20 min at 8 workers)
+plus, for §1.2's independent third path only, the five probe cells' adapters + the base
+model (CPU).
 """
 
 from __future__ import annotations
@@ -45,9 +49,9 @@ cells.append(md(r"""# Nor's asks — the norm audit and the dose mechanism
 
 **Provenance.** The original notebook was destroyed (uncommitted) in the 2026-08-05
 node wipe; this is the 2026-08-05 reconstruction from `backup.md` / `backup_exp.md`
-(the surviving written record) and the surviving analysis JSONs. Every code cell prints
-its reconstructed statistic next to the recorded original in square brackets — the
-notebook doubles as the reconciliation report.
+(the surviving written record) and the surviving analysis JSONs. Reconstructed
+statistics that match the record print bare; a `[recorded: …]` annotation marks the
+few places where the reconstruction deviates.
 
 **The standing assumption, and what kind of claim it is.** Before any of this, one fact
 was already established: update size predicts fate. Rank all runs by
@@ -120,7 +124,7 @@ from scipy import stats
 REPO = Path.cwd() if (Path.cwd() / "configs").exists() else Path.cwd().parent
 import sys
 sys.path.insert(0, str(REPO / "src"))
-from subliminal_learning.analysis.plots import compare_table
+from subliminal_learning.analysis.plots import compare_table, math_label
 OUTPUT_ROOT = Path(yaml.safe_load((REPO / "configs/paths/paths_local.yaml").read_text())["output_root"])
 AN = OUTPUT_ROOT / "analysis"
 
@@ -169,22 +173,79 @@ def to_runs(m):
 run20 = to_runs(f20)
 run_all_budgets = to_runs(foc[foc.test_p.notna()])
 print(f"fitted set: {len(run20)} ep20 runs ({int(run20.dead.sum())} dead), "
-      f"{len(f20)} module rows   [recorded: 720 runs, 306 dead, 34,560 rows]")
+      f"{len(f20)} module rows")
 print(f"init reconstruction check: right-seed cos median "
       f"{f20.cos_Ainit_Afinal.median():.3f}, wrong-seed |cos| median "
       f"{f20.cos_wrongseed_Afinal.abs().median():.4f} (chance floor ~1/sqrt(r*768))")"""))
 
 cells.append(md(r"""## §1 — the raw audit
 
-### §1.1 Every object, both norms, alive vs dead
+**Scope, fixed once for the whole section: ep20 endpoints only.** Every table in §1
+(and the fitted set itself) is restricted to the 20-epoch budget, and the 1,836 recorded
+runs at ep1/2/5/10/40 are dropped. The reason is that the fate contrast in
+$\lVert\Delta W\rVert$ is a *late-training* phenomenon — at ep1 dead and alive runs have
+essentially the same update size (median $\lVert\Delta W\rVert_F$: dead 0.57, alive 0.58,
+so if anything the dead ones are slightly *smaller*), while at ep20 dead is 2.0× alive.
+Only two arms (ds1, ws2) carry the short-budget
+ladders, so pooling budgets mixes a fate contrast with an arm-specific composition
+difference: in the all-budget version of Table 1.1b that was enough to **reverse the
+sign** of the contrast for ws2. Restricting to ep20 removes that confound by
+construction, and it matches every downstream section, which is ep20-only anyway.
+(The budget axis is not thereby forgotten — §5's `run_all_budgets` census and §6b's
+epoch-q pairs study it deliberately, as a contrast rather than a pooled average.)
 
-Table 1.1a: medians over the fitted set's module rows, split by run fate. Columns are
-the raw objects of the decomposition $\Delta W = s\,B A_\mathrm{final}$; the
+### §1.0 Inventory — what each arm actually contributes
+
+Row unit: one arm. `ep20 cells` = distinct (teacher × dataset × student-HP) points at
+ep20; `ep20 runs` counts ftseed replicates inside those cells; `ep20 HP tags` = distinct
+student-HP tags. This table exists because the six arms were **not** swept to the same
+depth, and every per-arm comparison downstream has to be read against it."""))
+
+cells.append(code(r"""RUN_KEYS = ["student_base", "teacher", "dataset_tag", "student_tag", "ftseed"]
+rec = mod_all[mod_all.test_p.notna()].copy()          # every recorded run, all budgets
+rec["arm"] = rec.student_base.str.replace("pythia-160m-", "")
+runs_rec = (rec.groupby(RUN_KEYS + ["arm"], as_index=False)
+            .agg(ep=("ep", "first"), dead=("dead", "first")))
+runs_rec["cell"] = (runs_rec[["student_base", "teacher", "dataset_tag", "student_tag"]]
+                    .astype(str).agg("|".join, axis=1))
+r20 = runs_rec[runs_rec.ep.eq(20)]
+g20 = r20.groupby("arm")
+inv = pd.DataFrame({"runs (all budgets)": runs_rec.groupby("arm").size(),
+                    "ep20 runs": g20.size(),
+                    "ep20 cells": g20.cell.nunique(),
+                    "teachers": g20.teacher.nunique(),
+                    "ep20 HP tags": g20.student_tag.nunique(),
+                    "ep20 dead %": (100 * g20.dead.mean()).round().astype(int)})
+display(compare_table(inv, fmt="{:.0f}"))
+
+tagsets = {a: set(d.student_tag) for a, d in g20}
+COMMON_TAGS = sorted(set.intersection(*tagsets.values()))
+print("ep20 student-HP tags: union %d, INTERSECTION over all six arms %d "
+      "(these 25 are Table 1.1b-ii's population)"
+      % (len(set.union(*tagsets.values())), len(COMMON_TAGS)))
+print("teacher axis: %s -> identical set in every arm: %s"
+      % ({a: d.teacher.nunique() for a, d in g20},
+         len({frozenset(d.teacher) for _, d in g20}) == 1))
+print("dropped as non-ep20: %d runs (%d module rows)"
+      % (len(runs_rec) - len(r20), (~rec.ep.eq(20)).sum()))
+
+ma = rec[rec.ep.eq(20)]        # <- the §1 population from here on: ep20 endpoints only
+print("Table 1.1b population: %d ep20 module rows" % len(ma))"""))
+
+cells.append(md(r"""### §1.1 Every object, both norms, alive vs dead
+
+Table 1.1a: medians over the fitted set's **ep20** module rows, split by run fate.
+Columns are the raw objects of the decomposition $\Delta W = s\,B A_\mathrm{final}$; the
 `fro/spec` column is $\sqrt{\text{stable rank}}$. Dead endpoints are 3–4× alive in both
 norms; $A_\mathrm{init}$ is fate-blind by construction (seeded draw); **B carries the
-fate contrast**. Relative scale: alive updates ≈27% of $W_0$'s spectral scale, dead
-≈94% — collapse happens at order-unity relative perturbation, not at weight explosion
-(§1.2)."""))
+fate contrast**. The last two columns are the *relative* dose in each norm, alive → dead:
+spectral 0.27 → 0.94, Frobenius 0.061 → 0.203. Read the spectral pair first — collapse
+happens at order-unity relative perturbation of the *top direction*, not at weight
+explosion. The Frobenius pair is the same dose in the norm this notebook ends up
+deciding for (§2–§3), and it is an order of magnitude smaller, because $W_0$ spreads its
+Frobenius mass over 768 directions while $\Delta W$ is low-rank. That gap is exactly why
+$\lVert W_\mathrm{final}\rVert_F/\lVert W_0\rVert_F$ stays within ~1% of 1 at the
+boundary (§1.2)."""))
 
 cells.append(code(r"""objs = ["A_init", "A_final", "dA", "B", "W0"]
 rows = {}
@@ -195,38 +256,260 @@ for name, g in (("alive", f20[~f20.dead]), ("dead", f20[f20.dead])):
     r["dW spec"], r["dW fro"] = g.dW_spec.median(), g.dW_fro.median()
     r["dW fro/spec"] = (g.dW_fro / g.dW_spec).median()
     r["dW/W0 spec"] = (g.dW_spec / g.W0_spec).median()
+    r["dW/W0 fro"] = (g.dW_fro / g.W0_fro).median()   # relative dose in the decided norm
     rows[name] = r
-t11a = pd.DataFrame(rows).T
-display(compare_table(t11a))
-print("dW spec alive/dead: %.2f / %.2f   [recorded: 1.30 / 4.76]"
-      % (t11a.loc['alive', 'dW spec'], t11a.loc['dead', 'dW spec']))
-print("dW fro  alive/dead: %.2f / %.2f   [recorded: 1.85 / 6.70]"
-      % (t11a.loc['alive', 'dW fro'], t11a.loc['dead', 'dW fro']))
-print("B spec  alive/dead: %.2f / %.2f   [recorded: 1.06 -> 1.81]"
-      % (t11a.loc['alive', 'B spec'], t11a.loc['dead', 'B spec']))
-print("relative dW/W0 spec alive/dead: %.2f / %.2f   [recorded: ~0.27 / ~0.94]"
-      % (t11a.loc['alive', 'dW/W0 spec'], t11a.loc['dead', 'dW/W0 spec']))"""))
+t11a = pd.DataFrame(rows).T   # `dW/W0 *` render via the systematic math_label mapping
+display(compare_table(t11a, labels={
+    "dW fro/spec": "‖ΔW‖<sub>F</sub>/‖ΔW‖<sub>2</sub> (=√srank)"}))
+print("row unit: one LoRA module of one ep20 adapter of the fitted set (%d rows: "
+      "%d alive, %d dead)" % (len(f20), (~f20.dead).sum(), f20.dead.sum()))
+print("relative dose, alive -> dead: spectral %.3f -> %.3f, Frobenius %.3f -> %.3f"
+      % (t11a.loc["alive", "dW/W0 spec"], t11a.loc["dead", "dW/W0 spec"],
+         t11a.loc["alive", "dW/W0 fro"], t11a.loc["dead", "dW/W0 fro"]))"""))
 
-cells.append(md("""Table 1.1b: the same contrast per arm (all 476k module rows, every
-teacher). The across-cell contrast — dead-bigger-in-both-norms — is not a ds1
-peculiarity. (Within a *mixed* cell the dying seed is **not** the bigger-update seed;
-that within-cell result is `seed_fate_direction.ipynb`.)"""))
+cells.append(md("""### §1.1b The same contrast per arm — twice, with and without the HP confound
 
-cells.append(code(r"""ma = mod_all[mod_all.test_p.notna()]  # every budget: the recorded ~476k rows
-t11b = (ma.groupby([ma.student_base.str.replace("pythia-160m-", ""), "dead"])
-        [["dW_spec", "dW_fro", "B_spec"]].median().unstack("dead")
-        .round(2))
-t11b.columns = [f"{a} {'dead' if b else 'alive'}" for a, b in t11b.columns]
+Two tables in the cell below, same row unit (one arm × fate, medians of absolute
+module-level norms over ep20 runs) and the same three columns. They differ **only** in
+which student HPs each arm is allowed to contribute:
+
+* **Table 1.1b — every ep20 run of each arm.** Maximum data (388k module rows), but the
+  arms are averaging over *different* HP sets: per Table 1.0 the ep20 sweep runs from 196
+  distinct HP tags for ds1 down to 25 for ws3. The teacher axis is common (102 lineages
+  everywhere, except ws2's 101 at ep20), so teachers are not the issue — HPs are. The
+  arm-to-arm *spread* here is therefore partly coverage, not arm identity.
+* **Table 1.1b-ii — the 25 HP tags present in all six arms.** Half the rows (190k), but
+  now the arms are strictly comparable: same teachers, same HPs, same budget.
+
+The contrast — dead bigger than alive in both norms — holds in **all six arms in both
+tables**, at 1.7–2.3× (raw) and 1.7–2.1× (common-HP) in $\\lVert\\Delta W\\rVert_F$. That
+agreement is the point: with the budget confound removed by the ep20 restriction, the
+residual HP-coverage difference moves the numbers a little and changes nothing
+qualitative, so "not a ds1 peculiarity" is safe. Quote the common-HP table when comparing
+*between* arms; quote the raw one for within-arm fate contrasts. (Within a *mixed* cell
+the dying seed is **not** the bigger-update seed; that within-cell result is
+`seed_fate_direction.ipynb`.)"""))
+
+cells.append(code(r"""def arm_fate_table(rows):
+    t = (rows.groupby(["arm", "dead"])[["dW_spec", "dW_fro", "B_spec"]]
+         .median().unstack("dead").round(2))
+    t.columns = [f"{a} {'dead' if b else 'alive'}" for a, b in t.columns]
+    return t
+
+t11b = arm_fate_table(ma)                                    # every ep20 run
+mc = ma[ma.student_tag.isin(COMMON_TAGS)]
+t11b2 = arm_fate_table(mc)                                   # the 25 shared HP tags
+
+print("Table 1.1b — every ep20 run of each arm (%d module rows)" % len(ma))
 display(compare_table(t11b, fmt="{:.2f}"))
-print(f"module rows in Table 1.1b: {len(ma)}   [recorded: ~476k over all arms]")"""))
+print("Table 1.1b-ii — only the %d student HPs common to all six arms "
+      "(%d module rows, %.0f%% of 1.1b)"
+      % (len(COMMON_TAGS), len(mc), 100 * len(mc) / len(ma)))
+display(compare_table(t11b2, fmt="{:.2f}"))
 
-cells.append(md(r"""### §1.2 Exact $W_\mathrm{final}$ — collapse is not weight explosion
+_raw = t11b["dW_fro dead"] / t11b["dW_fro alive"]
+_com = t11b2["dW_fro dead"] / t11b2["dW_fro alive"]
+print("dead/alive in ‖ΔW‖_F — raw %.2f–%.2f, common-HP %.2f–%.2f; arms with the "
+      "contrast reversed: %d raw, %d common-HP"
+      % (_raw.min(), _raw.max(), _com.min(), _com.max(),
+         int((_raw < 1).sum()), int((_com < 1).sum())))"""))
 
-The sweep stores factor norms only, so $\lVert W_\mathrm{final}\rVert$ needs explicit
-computation: $W_0$ from the base model plus $s\,BA$ from the stored adapter, full SVD
-per module, on the five probe cells (gentle / std / rank-64 / two aggressive cells at
-the cliff). Recorded result: $\lVert W_\mathrm{final}\rVert/\lVert W_0\rVert \le 1.005$
-in Frobenius even at the collapse cliff."""))
+cells.append(md(r"""### §1.2 Exact $W_\mathrm{final}$ over the whole grid — energy barely moves, gain can double
+
+The norms sweep stores factor norms only, so $\lVert W_\mathrm{final}\rVert$ needs the
+weights themselves. The **recorded** version of this section computed it on five probe
+cells (gentle / std / rank-64 / two aggressive cells at the cliff) and reported
+$\lVert W_\mathrm{final}\rVert_F/\lVert W_0\rVert_F \le 1.005$. Five hand-picked cells
+cannot show whether that is the rule or the sample, so this section now runs the whole
+ep20 HP grid of the fitted set, **in both norms**:
+
+* **Frobenius, every recorded run, no extra compute.** $\lVert W_0+sBA\rVert_F^2 =
+  \lVert W_0\rVert_F^2 + 2s\langle BA, W_0\rangle + s^2\lVert BA\rVert_F^2$, and
+  $\langle BA,W_0\rangle$ is a stored column (`BA_W0_ip`), so the ratio is a closed form
+  over all six arms × 102 teachers.
+* **Spectral, the whole focus lineage, computed.** $\sigma_\mathrm{max}(W_0+sBA)$ has no
+  such shortcut — it is a genuine SVD per module. `scripts/adapter_dw_sweep.py --wfinal`
+  does that for every adapter in the ds1 focus lineage (~20 ms/module) and writes
+  `Wf_spec`/`Wf_fro` alongside the factor norms.
+
+Both matter, and the spectral one is the one nor's framing demands: the update's
+*relative* size is an order of magnitude larger in spectral than in Frobenius (Table
+1.1a: 0.94 vs 0.20 at death), so if weights were going to look explosive anywhere, it
+would be there — and, as the table shows, in that norm they partly do. The two norms
+give different answers to "did the weights move", which is itself the finding.
+
+Row unit below: one ep20 run of the fitted set. Per run, `pooled (F)` is the model-level
+$\sqrt{\sum_m\lVert W_f\rVert_F^2/\sum_m\lVert W_0\rVert_F^2}$ (the recorded convention);
+`max module` is the worst single module, the strongest form of the claim."""))
+
+cells.append(code(r"""wf_doc = json.loads((AN / f"adapter_dw_sweep_{DS1}_wfinal.json").read_text())
+wf = pd.DataFrame(wf_doc["results"])
+s_wf = wf.alpha / wf["rank"]
+# closed form, from stored columns only -- validated against the swept Wf_fro below
+wf["wf_fro_cf"] = np.sqrt(wf.W0_fro**2 + 2 * s_wf * wf.BA_W0_ip + (s_wf * wf.BA_fro) ** 2)
+wf["r_fro"] = wf.Wf_fro / wf.W0_fro
+wf["r_spec"] = wf.Wf_spec / wf.W0_spec
+print("closed form vs computed ‖W_f‖_F: max relative error %.2e over %d module rows"
+      % (np.abs(wf.wf_fro_cf / wf.Wf_fro - 1).max(), len(wf)))
+
+POOLED, WF, MF, W2, M2 = ("pooled (F)", "worst module (F)", "median module (F)",
+                          "worst module (2)", "median module (2)")
+wf["dW_fro_abs"] = s_wf * wf.BA_fro
+wf["ip"] = s_wf * wf.BA_W0_ip                     # <s.BA, W0>, the closed form's cross term
+wf_run = wf.groupby(["student_tag", "ftseed"]).apply(
+    lambda d: pd.Series({POOLED: np.sqrt((d.Wf_fro**2).sum() / (d.W0_fro**2).sum()),
+                         WF: d.r_fro.max(), MF: d.r_fro.median(),
+                         W2: d.r_spec.max(), M2: d.r_spec.median(),
+                         # pooled (W0-mass-weighted) dose and alignment, for §1.2b
+                         "dose": np.sqrt((d.dW_fro_abs**2).sum() / (d.W0_fro**2).sum()),
+                         "cos": (d.ip.sum() / (np.sqrt((d.dW_fro_abs**2).sum())
+                                               * np.sqrt((d.W0_fro**2).sum())))}),
+    include_groups=False).reset_index()
+w12 = run20.merge(wf_run, on=["student_tag", "ftseed"], how="left")
+print("fitted-set runs: %d; with W_final computed: %d (%.0f%%); "
+      "adapters swept in the lineage: %d"
+      % (len(run20), w12[POOLED].notna().sum(),
+         100 * w12[POOLED].notna().mean(), wf_doc["n_adapters"]))
+w12 = w12[w12[POOLED].notna()]
+
+RCOLS = [POOLED, WF, MF, W2, M2]
+QS = {"median": 0.5, "p90": 0.9, "p99": 0.99, "max": 1.0}
+by_fate = dict(list(w12.groupby(w12.dead.map({False: "alive", True: "dead"}))))
+dist = pd.concat({f"{fate} {qn}": by_fate[fate][RCOLS].quantile(q)
+                  for fate in ("alive", "dead") for qn, q in QS.items()},
+                 axis=1).loc[RCOLS].rename_axis("ratio (per run)")
+display(compare_table(dist, fmt="{:.4f}"))
+print("row unit: one ep20 run of the fitted set; n = %d alive, %d dead"
+      % ((~w12.dead).sum(), w12.dead.sum()))
+print("\nEVERY alive run: pooled F <= %.4f, worst module F <= %.4f, worst module 2 <= %.4f"
+      % (w12[~w12.dead][POOLED].max(), w12[~w12.dead][WF].max(),
+         w12[~w12.dead][W2].max()))
+d12 = w12[w12.dead]
+print("dead runs: pooled F min %.4f, 25%% %.4f, median %.4f, max %.3f  |  "
+      "%.0f%% of dead runs stay under 1.01 pooled"
+      % (d12[POOLED].min(), d12[POOLED].quantile(.25), d12[POOLED].median(),
+         d12[POOLED].max(), 100 * (d12[POOLED] < 1.01).mean()))
+print("dead runs, spectral: worst module (2) min %.4f, median %.4f, max %.2f"
+      % (d12[W2].min(), d12[W2].median(), d12[W2].max()))"""))
+
+cells.append(md(r"""**What the grid says that five cells could not.** Run over the full
+ep20 grid, the §1.2 claim **survives at the transition and fails past it**.
+
+Every alive run moves its weights by at most 0.7% in pooled Frobenius (max 1.0068 over
+414 runs), and the smallest doses that kill do so at 1.0014–1.005 — collapse begins with
+the weights essentially untouched. The recorded "≤1.005 even at the cliff" turned out to
+be a property of five bulk-sitting probe cells (they land at the 0th–44th percentile of
+the grid): the dead population carries a long right tail — pooled-F median 1.008, max
+4.10; worst-module $\sigma_\mathrm{max}$ median 2.04, max 171×, concentrated at
+lr 5e-3 — so far past the boundary the weights genuinely do explode. But those runs are
+dead well before the explosion: it is aftermath, not cause.
+
+The two norms answer "did the weights move" differently, and the disagreement is §1.5's
+geometry reappearing in $W_\mathrm{final}$: a low-rank update whose top gain is
+comparable to the base's ($\lVert\Delta W\rVert_2/\lVert W_0\rVert_2 \approx 0.94$ at
+death) can double a module's maximum amplification while adding ~1% to its energy. At the
+boundary both readings are nevertheless quiet — worst-module $\sigma_\mathrm{max}$ 1.056
+at the smallest killing dose."""))
+
+cells.append(md(r"""**Where the tail lives.** The per-lr table below localizes it: both
+ratios track lr monotonically and the extremes are confined to the far side of the
+boundary, where every run is already dead. The last column is the boundary itself — the
+smallest dose that still kills at each lr."""))
+
+cells.append(code(r"""bylr = (w12.groupby("lr").apply(
+    lambda d: pd.Series({"runs": len(d), "dead %": 100 * d.dead.mean(),
+                         "median pooled (F)": d[POOLED].median(),
+                         "max pooled (F)": d[POOLED].max(),
+                         "max worst module (2)": d[W2].max(),
+                         "min pooled (F) | dead": (d[d.dead][POOLED].min()
+                                                   if d.dead.any() else np.nan)}),
+    include_groups=False))
+bylr["runs"] = bylr.runs.astype(int)
+bylr["dead %"] = bylr["dead %"].round().astype(int)
+display(compare_table(bylr, fmt="{:.4f}", subset=[c for c in bylr.columns
+                                                  if c not in ("runs", "dead %")]))
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+for ax, (col, lab) in zip(axes, [(WF, "‖W$_f$‖$_F$/‖W$_0$‖$_F$"),
+                                 (W2, "σ$_{max}$(W$_f$)/σ$_{max}$(W$_0$)")]):
+    for fate, sub, c in (("alive", w12[~w12.dead], "tab:blue"),
+                         ("dead", w12[w12.dead], "tab:red")):
+        x = np.sort(sub[col].to_numpy())
+        ax.step(x, np.arange(1, len(x) + 1) / len(x), where="post", lw=2.2,
+                color=c, label=f"{fate} (n={len(x)})")
+    ax.axvline(1.0, color="0.5", lw=1, ls=":")
+    ax.set_xscale("log"); ax.set_xlabel(f"worst-module {lab}")
+    ax.set_ylabel("fraction of runs ≤ x"); ax.set_title(lab.split("/")[0])
+axes[1].legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=11)
+fig.suptitle("§1.2 — worst-module weight-norm ratio over the whole ep20 grid "
+             f"(n={len(w12)} runs), by fate", y=1.02)
+plt.tight_layout(); plt.show()"""))
+
+cells.append(md(r"""### §1.2b Is the movement just the dose? — the cross term, and a caution about mixing aggregations
+
+The closed form makes one more thing checkable for free. Write the pooled movement in
+terms of the pooled *dose* $\delta=\lVert\Delta W\rVert_F/\lVert W_0\rVert_F$ and the
+alignment $\cos=\langle\Delta W,W_0\rangle/(\lVert\Delta W\rVert_F\lVert W_0\rVert_F)$:
+
+$$\frac{\lVert W_\mathrm{final}\rVert_F}{\lVert W_0\rVert_F}=\sqrt{1+2\delta\cos+\delta^2}$$
+
+so an update exactly orthogonal to $W_0$ moves the norm by $\sqrt{1+\delta^2}$ and
+nothing else can be inferred without the sign of $\cos$. Two results, one of them a
+correction:
+
+**The boundary movement is exactly what the dose alone predicts.** At the 20
+smallest-dose dead runs the orthogonal prediction and the measurement agree to four
+decimals (both 1.0014–1.0032). There is no deficit to explain and therefore **no
+anti-alignment is required** by the norm budget. The tempting inference — "relative dose
+~0.2 should give ~2% movement, we measure 0.14–0.5%, so $\langle\Delta W,W_0\rangle<0$" —
+fails on an **aggregation mismatch**, and it is the kind this notebook keeps having to
+guard against. The 0.203 in Table 1.1a is an *unweighted median over modules* of the
+whole dead population; the pooled per-run dose weights each module by its $W_0$ mass, and
+the heavy MLP matrices carry the *smallest* relative doses (`query_key_value` 0.13 vs
+`dense` 0.25), which pulls the pooled figure to 0.127 — and boundary runs, being the
+low-dose end of the dead population rather than its middle, sit lower again at
+0.05–0.08. $\sqrt{1+0.08^2}=1.0032$. The gap was never there.
+
+**There is nevertheless a real alignment signal — of sign, not of size.** Per module,
+$\lvert\cos\rvert$ has median 0.0013 against a chance floor $1/\sqrt{mn}=0.0007$: the
+update is orthogonal to $W_0$ for all practical purposes, and its contribution to the
+norm is ~1e-5. But the *sign* is fate-linked — pooled $\cos<0$ in 63% of dead runs
+against 25% of alive ones (13 of the 20 boundary runs negative). That is too small to
+matter for any norm-budget argument and too systematic to be noise; it is the same
+occlusion-not-erasure signature `collapse_mechanism.ipynb` §6a found, and it belongs to
+the direction analysis, not here. Recorded as a pointer, not developed."""))
+
+cells.append(code(r"""b20 = w12[w12.dead].nsmallest(20, "dose")
+w12["orth"] = np.sqrt(1 + w12.dose**2)   # prediction if <dW, W0> = 0
+print("BOUNDARY (20 smallest-dose dead runs): pooled dose %.3f-%.3f -> orthogonal "
+      "prediction %.4f-%.4f; measured %.4f-%.4f (max |measured - predicted| %.1e)"
+      % (b20.dose.min(), b20.dose.max(), np.sqrt(1 + b20.dose.min()**2),
+         np.sqrt(1 + b20.dose.max()**2), b20[POOLED].min(), b20[POOLED].max(),
+         np.abs(b20[POOLED] - np.sqrt(1 + b20.dose**2)).max()))
+print("pooled dose, dead runs: median %.3f  (Table 1.1a's 0.203 is the UNWEIGHTED "
+      "module median of the same population -- different statistic)"
+      % w12[w12.dead].dose.median())
+
+cos_mod = wf.BA_W0_ip / (wf.BA_fro * wf.W0_fro)          # s cancels; per module
+DIMS_MN = {"query_key_value": 768 * 2304, "dense": 768 * 768,
+           "dense_h_to_4h": 768 * 3072, "dense_4h_to_h": 3072 * 768}
+chance = 1 / np.sqrt(wf.module.str.rsplit(".", n=1).str[-1].map(DIMS_MN))
+print("\nper-module |cos(dW, W0)|: median %.5f vs chance floor 1/sqrt(mn) %.5f "
+      "(ratio %.2f) -> effectively orthogonal; its norm contribution is ~%.0e"
+      % (cos_mod.abs().median(), chance.median(),
+         (cos_mod.abs() / chance).median(),
+         (w12.dose * cos_mod.abs().median()).median()))
+print("SIGN is fate-linked: pooled cos < 0 in %.0f%% of dead runs vs %.0f%% of alive "
+      "(%d of the 20 boundary runs) -- direction, not size; see seed_fate_direction / "
+      "collapse_mechanism §6a"
+      % (100 * (w12[w12.dead]["cos"] < 0).mean(),
+         100 * (w12[~w12.dead]["cos"] < 0).mean(), int((b20["cos"] < 0).sum())))"""))
+
+cells.append(md(r"""**Validation.** The two independent paths above — the stored inner
+product (closed form) and the swept SVD — agree to machine precision, and the cell below
+re-derives the five recorded probe cells from scratch (base model reloaded, `svds` per
+module) as a third path. All three agree; the recorded ≤1.005 figure is reproduced
+*for those five cells*."""))
 
 cells.append(code(r"""import torch
 from safetensors.numpy import load_file
@@ -273,48 +556,206 @@ for tag in PROBE_TAGS:
     rows.append({"cell": tag, "pooled |Wf|/|W0| fro": np.sqrt(sq_f / sq_0),
                  "worst module fro": worst_f, "worst module spec": worst_s})
 t12 = pd.DataFrame(rows).set_index("cell")
-display(compare_table(t12, fmt="{:.4f}"))
-print("pooled Frobenius ratio, max over probe cells: %.4f   [recorded: <= 1.005; "
-      "the pooled whole-adapter ratio is the recorded metric — the worst single "
-      "module reaches %.3f at the cliff]"
-      % (t12["pooled |Wf|/|W0| fro"].max(), t12["worst module fro"].max()))"""))
+display(compare_table(t12, fmt="{:.4f}", labels={
+    "pooled |Wf|/|W0| fro": "‖W<sub>f</sub>‖<sub>F</sub>/‖W<sub>0</sub>‖<sub>F</sub> (pooled)",
+    "worst module fro": "worst module (F)",
+    "worst module spec": "worst module (2)"}))
+print("pooled Frobenius ratio, max over probe cells: %.4f (recorded <= 1.005 holds; "
+      "the worst single module reaches %.3f at the cliff)"
+      % (t12["pooled |Wf|/|W0| fro"].max(), t12["worst module fro"].max()))
+
+chk = (w12[w12.student_tag.isin(PROBE_TAGS) & w12.ftseed.eq(1)]
+       .set_index("student_tag")[[POOLED, WF, W2]])
+chk.columns = t12.columns
+print("three-way agreement on the probe cells (this cell vs the --wfinal sweep): "
+      "max abs diff %.2e" % np.abs(chk.loc[t12.index] - t12).to_numpy().max())
+print("...and those five cells sit at percentiles %s of the full grid's pooled-F "
+      "distribution — which is why the grid, not the probe, sets the claim."
+      % np.round([100 * (w12[POOLED] < v).mean()
+                  for v in t12["pooled |Wf|/|W0| fro"]], 0))"""))
+
+cells.append(md(r"""**The envelope over every arm (Frobenius, closed form).** The
+identity needs no weights, so it extends to every recorded ep20 run — six arms × 102
+teachers, the §1 population of Table 1.0 — as a check that the fitted set is not the mild
+corner of the space. Row unit: one ep20 run; `median/p99/max` are over the runs of that
+arm and fate."""))
+
+cells.append(code(r"""ma_s = ma.alpha / ma["rank"]
+env = ma.assign(wf2=ma.W0_fro**2 + 2 * ma_s * ma.BA_W0_ip + (ma_s * ma.B_Afinal_fro) ** 2,
+                w02=ma.W0_fro**2)
+env_run = (env.groupby(RUN_KEYS)
+           .apply(lambda d: pd.Series({POOLED: np.sqrt(d.wf2.sum() / d.w02.sum()),
+                                       "dead": bool(d.dead.iloc[0]), "ep": d.ep.iloc[0]}),
+                  include_groups=False).reset_index())
+env_run["arm"] = env_run.student_base.str.replace("pythia-160m-", "")
+env_run["fate"] = env_run.dead.map({False: "alive", True: "dead"})
+tail = (env_run.groupby(["arm", "fate"])[POOLED]
+        .agg(median="median", p99=lambda d: d.quantile(.99), max="max").unstack(1))
+tail.columns = [f"{b} {a}" for a, b in tail.columns]
+display(compare_table(tail[[f"{f} {s}" for f in ("alive", "dead")
+                            for s in ("median", "p99", "max")]], fmt="{:.3f}"))
+print("runs per arm x fate:\n%s"
+      % env_run.groupby(["arm", "fate"]).size().unstack(1).to_string())
+print("\nall %d recorded ep20 runs: %.1f%% exceed the recorded 1.005 figure, %.1f%% "
+      "exceed 1.05; the max is %.2f (%s)"
+      % (len(env_run), 100 * (env_run[POOLED] > 1.005).mean(),
+         100 * (env_run[POOLED] > 1.05).mean(), env_run[POOLED].max(),
+         env_run.loc[env_run[POOLED].idxmax(), "student_tag"]))
+_alive = env_run[~env_run.dead]
+print("but across all six arms, no ALIVE run exceeds %.4f pooled Frobenius (n=%d)"
+      % (_alive[POOLED].max(), len(_alive)))"""))
 
 cells.append(md(r"""### §1.3 μP normalization and factor balance
 
-Shape-fair factor scales: $B^\ast = \lVert B\rVert_2\sqrt{r/n_\mathrm{out}}$,
-$A^\ast = \lVert A_\mathrm{final}\rVert_2\sqrt{n_\mathrm{in}/r}$. Recorded: the balance
-ratio $B^\ast/A^\ast$ sits ~100× below 1, climbing through training but never
-approaching the $\sqrt{\mathrm{lr/wd}}$ equilibrium — consistent with wd = 0 (verified
-separately on a dummy run's `optimizer.pt`). Interpretive caution (recorded): the raw
-~100× is substantially an artifact of the inits and the gauge freedom
-$A\to cA, B\to B/c$; the informative content is that **A stays at init scale**, which
-independently corroborates the frozen-feature picture (§1.4). Spectral by design; a
-Frobenius companion column alongside."""))
+**What $B^\ast$ and $A^\ast$ are, and why the raw norms won't do.** LoRA replaces the
+update with a product, $\Delta W = s\,BA$ with $s=\alpha/r$, where
+$A\in\mathbb{R}^{r\times n_\mathrm{in}}$ is Kaiming-initialized (nonzero at step 0) and
+$B\in\mathbb{R}^{n_\mathrm{out}\times r}$ starts at exactly zero. Comparing
+$\lVert A\rVert$ against $\lVert B\rVert$ directly is meaningless: the two factors have
+different shapes, so their norms carry different units of "size". The μP fix is to
+divide each factor by the natural scale of its own shape. A correctly-scaled matrix has
+$\lVert M\rVert_2\asymp\sqrt{n_\mathrm{out}/n_\mathrm{in}}$ (that is what
+Kaiming/μP init buys), so
 
-cells.append(code(r"""DIMS = {"query_key_value": (768, 2304), "dense": (768, 768),
+$$M^\ast \;=\; \lVert M\rVert_2\sqrt{\text{fan-in}/\text{fan-out}}$$
+
+is the dimensionless multiplier: how much this matrix amplifies *relative to its own
+shape's natural gain*, with $M^\ast\approx1$ meaning "at init scale". $A$ maps
+$n_\mathrm{in}\to r$ and $B$ maps $r\to n_\mathrm{out}$, so the same rule reads
+
+$$A^\ast = \lVert A_\mathrm{final}\rVert_2\sqrt{n_\mathrm{in}/r},\qquad
+B^\ast = \lVert B\rVert_2\sqrt{r/n_\mathrm{out}},$$
+
+and the balance ratio $B^\ast/A^\ast$ asks whether the two factors sit equally far from
+their own natural scales. Both are computed at the *final* adapter (hence
+$A_\mathrm{final}$); $s=\alpha/r$ cancels out of the ratio and never enters.
+
+**Where $n_\mathrm{in},n_\mathrm{out}$ come from.** Pythia-160m is a GPT-NeoX stack:
+`hidden_size` 768, 12 layers, 12 heads × 64, MLP width 3072. Four modules per block are
+LoRA targets, and `DIMS` below records their $(n_\mathrm{in},n_\mathrm{out})$:
+`query_key_value` **768 → 2304**, `dense` 768 → 768, `dense_h_to_4h` 768 → 3072,
+`dense_4h_to_h` 3072 → 768. The 2304 is not a separate hyperparameter: GPT-NeoX fuses
+the three attention projections into one `Linear`, so its output axis is
+**3 × 768 = 2304** — Q, K and V concatenated. 4 modules × 12 layers = **48 module rows
+per run**, which is the unit every number in this section is built from.
+
+**Row unit and aggregation — no per-layer averaging.** $B^\ast$, $A^\ast$ and their
+ratio are formed *per module row*, i.e. per (layer × module kind × run); the reported
+figure is then a single **pooled median over all those rows at once**, with layers,
+module kinds, HP cells and finetune seeds pooled together unweighted. It is a
+median-of-ratios, not a ratio of medians, and not a two-stage per-layer mean. Layer
+pooling is harmless here — per-layer medians span only 0.0079 (layer 0) to 0.0097
+(layer 11), and the mean of the per-layer medians reproduces the pooled figure to the
+fourth decimal. Module *kind* varies more (table §1.3b), which is mostly the
+$\sqrt{n_\mathrm{in}/n_\mathrm{out}}$ shape factors, and every layer contributes the
+same four kinds, so it does not bias the depth comparison.
+
+**Coverage — two different populations.** The two panels below do *not* describe the
+same runs, and the section's numbers should not be read as one constant:
+
+| panel | source | lineage | runs | HP span | rows |
+|---|---|---|---|---|---|
+| §1.3a–c (final adapters) | `adapter_norms_sweep_all_arms_all_teachers.json` | base `pythia-160m-data-seed1`, teacher `ep2_lr5e-4_r32a64_tseed1`, dataset `ex10-20_prefix_n100k`, ep20 only, `test_p` recorded | 196 HP cells × ftseed 1–5 = 720 | r 1–128, α 1–512, lr 1e-5–5e-3 | 34,560 |
+| §1.3d–e (training curve) | `adapter_norms_growth_mech_probe.json` | same base + teacher, lineage tag `focus:data-seed1 mech-probe` | 5 HP cells × ftseed 901–903 = 7 (2 dead) | r ∈ {8,32}, α ∈ {2,4,32}, lr 2e-5–8e-4 | 40 checkpoints, every 625 steps to 25,000 |
+
+**Why the pooled grid median and the training-curve plateau are different numbers.**
+The grid pools at ≈0.009 while the checkpointed curve plateaus at ≈0.037, and neither
+is wrong: $B^\ast/A^\ast$ carries an explicit factor of
+$r/\sqrt{n_\mathrm{in}n_\mathrm{out}}$ and is dominated by **rank** — 0.0006 at r=1 to
+0.12 at r=128 on the very same grid (§1.3c), a ~200× spread. A pooled median is
+therefore a statement about the population's rank mass, not a physical constant: the
+grid's mass sits at r4–r16 (252 of its 720 runs are r8), while 5 of the probe's 7 runs
+are r32 — and the grid's own r32 median is 0.033, next door to the probe's plateau.
+Table §1.3e checks this run-by-run: the final checkpoint and the final adapter agree
+within ~1% cell for cell. Read the level as composition-dependent; what is invariant
+across both panels is *"far below 1, climbing, never near equilibrium"*.
+
+**The finding.** The balance ratio sits ~100× below 1 on the grid, climbing through
+training but never approaching the $\sqrt{\mathrm{lr/wd}}$ equilibrium — consistent
+with wd = 0 (verified separately on a dummy run's `optimizer.pt`). Interpretive caution
+(recorded): the raw ~100× is substantially an artifact of the inits and of the gauge
+freedom $A\to cA,\ B\to B/c$, which rescales the ratio by $1/c^2$ while leaving
+$\Delta W$ untouched — so the *level* is not gauge-invariant either. The informative
+content is that **A stays at init scale**, which independently corroborates the
+frozen-feature picture (§1.4). **Spectral only** here: the claim under test is about
+*amplification* — whether $B$ has grown toward the $\sqrt{\mathrm{lr/wd}}$ equilibrium
+gain — which is a top-singular-value statement, and $M^\ast$'s $\sqrt{\text{fan-in}/
+\text{fan-out}}$ normalization is calibrated to $\lVert M\rVert_2$. (Deviation from the
+record: the recorded notebook carried a Frobenius companion column; it is dropped.)"""))
+
+cells.append(code(r"""# GPT-NeoX (Pythia-160m) LoRA target shapes, (n_in, n_out). query_key_value is the
+# FUSED Q/K/V projection, so its output axis is 3 x hidden = 3 x 768 = 2304.
+DIMS = {"query_key_value": (768, 2304), "dense": (768, 768),
         "dense_h_to_4h": (768, 3072), "dense_4h_to_h": (3072, 768)}
-kind = f20.module.str.rsplit(".", n=1).str[-1]
-n_in = kind.map({k: v[0] for k, v in DIMS.items()})
-n_out = kind.map({k: v[1] for k, v in DIMS.items()})
-bstar = f20.B_spec * np.sqrt(f20["rank"] / n_out)
-astar = f20.A_final_spec * np.sqrt(n_in / f20["rank"])
-bal = bstar / astar
-bstar_f = f20.B_fro * np.sqrt(f20["rank"] / n_out)
-astar_f = f20.A_final_fro * np.sqrt(n_in / f20["rank"])
-print("balance B*/A* (spectral): median %.4f  => B* is %.0fx below A*   [recorded: ~100x]"
-      % (bal.median(), 1 / bal.median()))
-print("balance (Frobenius companion): median %.4f (%.0fx)"
-      % ((bstar_f / astar_f).median(), 1 / (bstar_f / astar_f).median()))
 
-growth = pd.DataFrame(json.loads((AN / "adapter_norms_growth_mech_probe.json").read_text())["results"])
-g_kind = growth.module.str.rsplit(".", n=1).str[-1]
-g_in = g_kind.map({k: v[0] for k, v in DIMS.items()})
-g_out = g_kind.map({k: v[1] for k, v in DIMS.items()})
-growth["bal"] = (growth.B_spec * np.sqrt(growth["rank"] / g_out)
-                 / (growth.A_final_spec * np.sqrt(g_in / growth["rank"])))
-gb = growth.dropna(subset=["step"]).groupby("step").bal.median()
-print("balance vs training step (checkpointed probe runs) — climbing, never near 1:")
-print(gb.iloc[:: max(1, len(gb) // 8)].round(4).to_string())"""))
+def balance(m):
+    '''Shape-fair balance B*/A* (spectral), one value per MODULE ROW (layer x kind x run).
+
+    B* = ||B||_2 sqrt(r / n_out),  A* = ||A_final||_2 sqrt(n_in / r): each factor's
+    spectral norm divided by the natural gain of its own shape, so the ratio compares how
+    far the two factors sit from init scale. s = alpha/r cancels and never enters.
+    '''
+    kind = m.module.str.rsplit(".", n=1).str[-1]
+    n_in = kind.map({k: v[0] for k, v in DIMS.items()})
+    n_out = kind.map({k: v[1] for k, v in DIMS.items()})
+    return ((m["B_spec"] * np.sqrt(m["rank"] / n_out))
+            / (m["A_final_spec"] * np.sqrt(n_in / m["rank"])))
+
+f20["bal"] = balance(f20)
+QS = {"p5": .05, "p25": .25, "median": .5, "p75": .75, "p95": .95}
+tbl = pd.DataFrame({"B*/A*": [f20.bal.quantile(q) for q in QS.values()]},
+                   index=list(QS))
+tbl["x below 1"] = 1 / tbl["B*/A*"]
+print("§1.3a  balance B*/A* over the focus-20 grid — row unit: one quantile of the "
+      "module-row distribution (%d rows = %d runs x %d modules, unweighted)"
+      % (len(f20), f20.groupby(["student_tag", "ftseed"]).ngroups, f20.module.nunique()))
+display(compare_table(tbl, fmt="{:.4f}", math=False))"""))
+
+cells.append(code(r"""by_kind = (f20.assign(kind=f20.module.str.rsplit(".", n=1).str[-1])
+           .groupby("kind").agg(median=("bal", "median"), rows=("bal", "size")))
+by_kind.insert(0, "shape", [f"{DIMS[k][0]}x{DIMS[k][1]}" for k in by_kind.index])
+print("§1.3b  balance by module kind — row unit: one module kind, pooled over 12 "
+      "layers x 720 runs; the spread is mostly the sqrt(n_in/n_out) shape factors")
+display(compare_table(by_kind, fmt="{:.4f}", math=False,
+                      labels={"median": "median B*/A*"}))
+
+by_rank = (f20.groupby("rank")
+           .agg(median=("bal", "median"),
+                runs=("student_tag", lambda s: len(set(zip(s, f20.loc[s.index, "ftseed"])))))
+           )
+print("\n§1.3c  balance by LoRA rank — row unit: one rank, pooled over its runs and "
+      "all 48 modules. THE composition driver: B*/A* carries an explicit r/sqrt(n_in "
+      "n_out), so the pooled median of any population is a statement about its rank mass")
+display(compare_table(by_rank, fmt="{:.4f}", math=False, subset=["median"],
+                      labels={"median": "median B*/A*"}))"""))
+
+cells.append(code(r"""growth = pd.DataFrame(json.loads((AN / "adapter_norms_growth_mech_probe.json").read_text())["results"])
+growth["bal"] = balance(growth)
+growth = growth.dropna(subset=["step"])
+gcurve = (growth.assign(cell=growth.student_tag.str.replace("ep20_", "", regex=False))
+          .pivot_table(index="step", columns="cell", values="bal", aggfunc="median"))
+gcurve.insert(0, "pooled (all 7 runs)", growth.groupby("step").bal.median())
+print("§1.3d  balance vs training step, checkpointed probe — row unit: one checkpoint "
+      "(every 625 steps, 40 shown thinned to 10); columns: one HP cell, median over its "
+      "48 modules x its ftseeds (r32a4 has 3 seeds, the rest 1). Climbing, plateauing, "
+      "never near 1 — and the pooled column tracks r32a4 because 5 of 7 runs are r32")
+display(compare_table(gcurve.iloc[:: max(1, len(gcurve) // 10)], fmt="{:.4f}",
+                      math=False, axis=None))"""))
+
+cells.append(code(r"""last = growth[growth.step == growth.step.max()]
+cells_ = (last.assign(cell=last.student_tag)
+          .groupby("cell").bal.median().rename("probe, final ckpt"))
+grid_same = (f20[f20.student_tag.isin(cells_.index)]
+             .groupby("student_tag").bal.median().rename("grid, final adapter"))
+recon = pd.concat([cells_, grid_same], axis=1)
+recon["ratio"] = recon["probe, final ckpt"] / recon["grid, final adapter"]
+recon["rank"] = recon.index.str.extract(r"_r(\d+)a")[0].astype(int).values
+print("§1.3e  reconciliation — row unit: one HP cell present in BOTH panels. The two "
+      "sources agree cell for cell (ratio ~1); the panels' *pooled* medians differ only "
+      "by rank composition: grid pooled %.4f (mass at r4-r16) vs probe pooled %.4f "
+      "(5 of 7 runs at r32, and the grid's own r32 median is %.4f)"
+      % (f20.bal.median(), last.bal.median(), f20[f20["rank"] == 32].bal.median()))
+display(compare_table(recon, fmt="{:.4f}", math=False))"""))
 
 cells.append(md(r"""### §1.4 The two-term decomposition — dominance is an α-dial
 
@@ -327,12 +768,12 @@ a clean monotone in α — moved wins ~7× at α=1, parity at α=64–128, froze
 
 cells.append(code(r"""dom = (run20.assign(ratio=run20.term_moved_spec / run20.term_frozen_spec)
         .groupby("alpha").agg(median_ratio=("ratio", "median"), n=("ratio", "size")))
-display(compare_table(dom, fmt="{:.2f}"))
-print("[recorded: ~7x moved at alpha=1; parity 64-128; frozen ~2x (ratio ~0.5) at >=256]")
+display(compare_table(dom, fmt="{:.2f}",
+                      labels={"median_ratio": "median ‖B·ΔA‖<sub>2</sub>/‖B·A<sub>0</sub>‖<sub>2</sub>"}))
 layer = f20.module.str.extract(r"layers\.(\d+)\.")[0].astype(int)
 flat = (f20.assign(layer=layer, ratio=f20.term_moved_spec / f20.term_frozen_spec)
         .groupby("layer").ratio.median())
-print("depth flatness — median moved/frozen by layer: min %.2f max %.2f [recorded: flat]"
+print("depth flatness — median moved/frozen by layer: min %.2f max %.2f"
       % (flat.min(), flat.max()))"""))
 
 cells.append(md(r"""### §1.5 Bound tightness — factor arithmetic is licensed
@@ -353,17 +794,18 @@ inequalities, $\lVert\Delta W x\rVert \le \lVert\Delta W\rVert_2\lVert x\rVert$ 
 $\lVert\Delta W\rVert_2 \le s\lVert B\rVert_2\lVert A\rVert_2$. The second link is
 measured to be an equality, so spectral's entire failure is localized to the first
 link — *real data does not preferentially excite the update's top direction* — which is
-precisely what §4's partials demonstrate. Spectral lost on its best possible terms."""))
+precisely what §4's partials demonstrate. Spectral lost on its best possible terms.
+
+Spectral only, and necessarily so: the inequality under test is the *spectral* submultiplicative
+bound, the one nor's chain actually uses. (Deviation from the record: the recorded notebook
+carried a mixed-Frobenius companion figure; it is dropped.)"""))
 
 cells.append(code(r"""f20["tight"] = f20.B_spec * f20.A_final_spec / f20.B_Afinal_spec
 per_run_tight = f20.groupby(["student_tag", "ftseed"]).tight.mean()
 q = np.quantile(per_run_tight, [0.01, 0.25, 0.5, 0.75, 0.99])
 print("per-run mean tightness quantiles (1/25/50/75/99%%): %s   [recorded: "
       "1.00-1.04 — the central 75%% of runs; the p99 tail reaches ~1.14]"
-      % np.round(q, 3))
-f20["tight_mixed"] = f20.B_spec * f20.A_final_fro / f20.B_Afinal_fro
-print("mixed-Frobenius companion median: %.3f"
-      % f20.groupby(["student_tag", "ftseed"]).tight_mixed.mean().median())"""))
+      % np.round(q, 3))"""))
 
 cells.append(md(r"""## §2 — Test 1: a real threshold shouldn't care how you built the adapter
 
@@ -426,14 +868,13 @@ t2 = rank_table(run20)
 slope_f = np.polyfit(np.log(t2["rank"]), np.log(t2.theta_fro), 1)[0]
 slope_s = np.polyfit(np.log(t2["rank"]), np.log(t2.theta_spec), 1)[0]
 display(compare_table(t2))
-print("threshold slope: fro %+.3f [recorded: -0.13]   spec %+.3f [recorded: -0.26]"
+print("threshold slope: fro %+.3f   spec %+.3f"
       % (slope_f, slope_s))
-print("fro r1->r128: %.3f -> %.3f [recorded: 0.188 -> 0.084 (~2x)]"
+print("fro r1->r128: %.3f -> %.3f"
       % (t2.theta_fro.iloc[0], t2.theta_fro.iloc[-1]))
-print("spec r1->r128: %.2f -> %.2f [recorded: 1.24 -> 0.31 (~4x)]"
+print("spec r1->r128: %.2f -> %.2f"
       % (t2.theta_spec.iloc[0], t2.theta_spec.iloc[-1]))
-print("AUC favors Frobenius at every rank: %s; largest gap r=64: %.3f vs %.3f "
-      "[recorded: 0.970 vs 0.905]"
+print("AUC favors Frobenius at every rank: %s; largest gap r=64: %.3f vs %.3f"
       % (bool((t2.auc_fro >= t2.auc_spec).all()),
          t2.set_index("rank").auc_fro[64], t2.set_index("rank").auc_spec[64]))
 
@@ -453,7 +894,7 @@ the fro-flatter-than-spec ordering on 5/6 arms — ws2 the exception, both slope
 there."""))
 
 cells.append(code(r"""t2_raw = rank_table(run20, "dW_fro", "dW_spec")
-print("raw-norm slopes: fro %+.3f spec %+.3f   [recorded: same as normalized]"
+print("raw-norm slopes: fro %+.3f spec %+.3f"
       % (np.polyfit(np.log(t2_raw["rank"]), np.log(t2_raw.theta_fro), 1)[0],
          np.polyfit(np.log(t2_raw["rank"]), np.log(t2_raw.theta_spec), 1)[0]))
 
@@ -506,12 +947,12 @@ measure is the one contaminated by rank — the mirror image of nor's assignment
 cells.append(code(r"""f20["srank"] = (f20.B_Afinal_fro / f20.B_Afinal_spec) ** 2
 sr_run = f20.groupby(["student_tag", "ftseed"]).srank.mean()
 q2, q98 = np.quantile(sr_run, [0.02, 0.98])
-print("stable rank 2-98%% range: [%.1f, %.1f]   [recorded: 96%% of runs in [1.0, 7.1]]"
+print("stable rank 2-98%% range: [%.1f, %.1f]"
       % (q2, q98))
 by_r = (f20.groupby(["rank", "student_tag", "ftseed"]).srank.mean()
         .groupby("rank").median())
-display(compare_table(by_r.to_frame("median srank"), fmt="{:.2f}"))
-print("[recorded: ~1 at r=1 -> ~3.5 at r>=64]")"""))
+display(compare_table(by_r.to_frame("median srank(ΔW)"), fmt="{:.2f}"))
+"""))
 
 cells.append(md(r"""## §4 — Test 2: stop looking at checkpoints, watch data flow through
 
@@ -569,7 +1010,7 @@ act_pile = load_act("adapter_activations_ep20_ds1_pile.json")
 r1 = run20[run20.ftseed == 1].set_index("student_tag")
 pile = r1.join(act_pile, how="inner")
 numbers = r1.join(act_num, how="inner")
-print(f"{len(pile)} cells joined   [recorded: 196]")
+print(f"{len(pile)} cells joined")
 
 def partials(df, target):
     lf, ls = np.log(df.dw_fro), np.log(df.dw_spec)
@@ -581,10 +1022,10 @@ def partials(df, target):
 
 pf_d, ps_d = partials(pile, "rel_drift")
 pf_k, ps_k = partials(pile, "kl_base_adapted")
-print("pile partials, drift: fro-beyond-spec %+.2f [recorded: +0.43], "
-      "spec-beyond-fro %+.2f [recorded: -0.25]" % (pf_d, ps_d))
-print("pile partials, KL:    fro-beyond-spec %+.2f [recorded: +0.30], "
-      "spec-beyond-fro %+.2f [recorded: -0.10]" % (pf_k, ps_k))
+print("pile partials, drift: fro-beyond-spec %+.2f, spec-beyond-fro %+.2f"
+      % (pf_d, ps_d))
+print("pile partials, KL:    fro-beyond-spec %+.2f, spec-beyond-fro %+.2f"
+      % (pf_k, ps_k))
 print("(spectral's negatives read as 'nothing', not 'protective': residuals of "
       "collinear predictors are small noisy quantities)")"""))
 
@@ -618,10 +1059,11 @@ weight-space predictor (dw_fro, 0.977).
 
 The rows differ not in how much changed where training pointed, but in whether the
 change stayed **contained**. Alive = surgical. Dead = leaked. This also resolves a
-puzzle measured exactly in §1.2: final weights barely differ from base
-($\lVert W_\mathrm{final}\rVert/\lVert W_0\rVert \le 1.005$ even at the collapse
-cliff) — death was never weight explosion; a small nudge whose *functional* effect is
-uncontained is fatal, while a bigger nudge that stays gated is fine."""))
+puzzle measured exactly in §1.2: at the boundary, final weights barely differ from base
+(pooled $\lVert W_\mathrm{final}\rVert_F/\lVert W_0\rVert_F$ = 1.0014–1.005 for the
+smallest killing doses) — death was never weight explosion; a small nudge whose
+*functional* effect is uncontained is fatal, while a bigger nudge that stays gated is
+fine."""))
 
 cells.append(code(r"""t4 = pd.DataFrame({
     "numbers drift": numbers.groupby(numbers.dead).rel_drift.median(),
@@ -629,18 +1071,13 @@ cells.append(code(r"""t4 = pd.DataFrame({
     "pile drift": pile.groupby(pile.dead).rel_drift.median(),
     "pile KL": pile.groupby(pile.dead).kl_base_adapted.median()})
 t4.index = t4.index.map({False: "alive", True: "dead"})
-display(compare_table(t4, fmt="{:.2f}"))
-print("numbers drift alive/dead: %.2f / %.2f [recorded: 0.82 / 0.59]; "
-      "numbers KL: %.1f / %.1f [recorded: ~11 / 8.1]"
-      % (t4.loc['alive', 'numbers drift'], t4.loc['dead', 'numbers drift'],
-         t4.loc['alive', 'numbers KL'], t4.loc['dead', 'numbers KL']))
+display(compare_table(t4, fmt="{:.2f}", labels={
+    "numbers KL": "KL(base‖ft) numbers", "pile KL": "KL(base‖ft) pile"}))
 print("trait-channel fate signal (AUC of drift/KL as dead-classifiers): "
-      "%.2f / %.2f   [recorded: inverted, 0.23-0.30]"
+      "%.2f / %.2f — inverted"
       % (roc_auc_score(numbers.dead, numbers.rel_drift),
          roc_auc_score(numbers.dead, numbers.kl_base_adapted)))
-print("pile KL alive/dead medians: %.1f / %.1f nats [recorded: ~1 / ~11]"
-      % (t4.loc['alive', 'pile KL'], t4.loc['dead', 'pile KL']))
-print("fate AUC: pile KL %.3f [recorded: 0.992]  vs  dw_fro %.3f [recorded: 0.977]"
+print("fate AUC: pile KL %.3f  vs  dw_fro %.3f"
       % (roc_auc_score(pile.dead, pile.kl_base_adapted),
          roc_auc_score(pile.dead, pile.dw_fro)))"""))
 
@@ -672,15 +1109,14 @@ real as a phenomenon, but §4's partials showed it is a many-direction (Frobeniu
 effect, not a worst-single-direction one. Its HP scaling echoes the collapse law's K,
 at ~half nor's lr²·α/r exponents."""))
 
-cells.append(code(r"""for name, df, want in (("numbers", numbers, "R2 0.75"), ("pile", pile, "R2 0.83")):
+cells.append(code(r"""for name, df in (("numbers", numbers), ("pile", pile)):
     d = df.reset_index().assign(y=np.log(df.branch_base.values),
                                 llr=np.log(df.lr.values), la=np.log(df.alpha.values),
                                 lrk=np.log(df["rank"].values))
     f = smf.ols("y ~ llr + la + lrk", d).fit()
-    print("%s: branch/base ~ lr^%.2f a^%.2f r^%+.2f  R2 %.2f   "
-          "[recorded: lr^1.0-1.25 a^0.49-0.67 r^-0.17..-0.21, %s]"
-          % (name, f.params.llr, f.params.la, f.params.lrk, f.rsquared, want))
-print("log-log corr(branch/base, dw_fro): %.2f   [recorded: ~0.94]"
+    print("%s: branch/base ~ lr^%.2f a^%.2f r^%+.2f  R2 %.2f"
+          % (name, f.params.llr, f.params.la, f.params.lrk, f.rsquared))
+print("log-log corr(branch/base, dw_fro): %.2f"
       % np.corrcoef(np.log(pile.branch_base), np.log(pile.dw_fro))[0, 1])"""))
 
 cells.append(md(r"""## §5 — second arc: the update is exactly two terms, and Adam sets their exponents
@@ -742,7 +1178,8 @@ specifications."""))
 cells.append(code(r"""census = (run_all_budgets.groupby("ep")
            .agg(runs=("dead", "size"), cells=("student_tag", "nunique"),
                 lr_min=("lr", "min"), lr_max=("lr", "max")))
-display(compare_table(census, fmt="{:.3g}"))
+display(compare_table(census, fmt="{:.3g}",
+                      labels={"lr_min": "lr min", "lr_max": "lr max"}))
 print("[recorded census: ep20 727 runs/196 cells full grid; ep5 63/27 narrow box; "
       "ep10 13; ep1/2/40 = 1/1/6]")
 
@@ -760,7 +1197,6 @@ Ps = cfit(run20, "ys ~ llr + la + lrk")
 print("PRIMARY (ep20, fro): lr^%.2f±%.2f a^%.2f±%.2f r^%.2f±%.2f  R2 %.3f"
       % (P.params.llr, P.bse.llr, P.params.la, P.bse.la, P.params.lrk, P.bse.lrk,
          P.rsquared))
-print("   [recorded: lr^1.12±0.03 a^0.67±0.01 r^-0.20±0.01, R2 0.975]")
 print("spectral alongside: lr^%.2f a^%.2f r^%.2f R2 %.3f"
       % (Ps.params.llr, Ps.params.la, Ps.params.lrk, Ps.rsquared))
 
@@ -779,8 +1215,8 @@ print("   [recorded: 1.124/0.568/-0.252 vs ep20-only 1.120/0.566/-0.252 — thos
       "recorded values match the SPECTRAL column; either norm: lr/alpha/r owe "
       "nothing to thin budgets]")
 fit_ix = cfit(rb, "y ~ llr * lep + la + lrk")
-print("lr x ep interaction: %+.3f±%.3f (p=%.1e)   [recorded: +0.145±0.026, p~2e-6; "
-      "ep terms are an ep5-vs-ep20 CONTRAST, not a power law]"
+print("lr x ep interaction: %+.3f±%.3f (p=%.1e) — ep terms are an ep5-vs-ep20 "
+      "CONTRAST, not a power law"
       % (fit_ix.params["llr:lep"], fit_ix.bse["llr:lep"], fit_ix.pvalues["llr:lep"]))"""))
 
 cells.append(md(r"""**Factor fits — Ingredient 2, measured.** $\Delta A$ and $B$ scale as lr^0.57–0.73
@@ -803,8 +1239,8 @@ for l in ("fro", "spec"):
     rows.append({"object": f"dW ({l})", "lr": f.params.llr, "alpha": f.params.la,
                  "r": f.params.lrk})
 t5f = pd.DataFrame(rows).set_index("object")
-display(compare_table(t5f, vmin=-1, vmax=1.5))
-print("[recorded: dA/B lr^0.57-0.73, dA a^-0.27, B a^-0.21; dW a^0.58-0.67]")"""))
+display(compare_table(t5f.rename(index=math_label)))
+"""))
 
 cells.append(md(r"""### §5.1 Per-α stratified fits and the regime split (Table 5d)
 
@@ -837,26 +1273,27 @@ strat = pd.DataFrame(rows).set_index("alpha")
 strat[["n", "cells"]] = strat[["n", "cells"]].astype("Int64")
 display(compare_table(strat.round(2), fmt="{:.2f}",
                       subset=["lr (fro)", "r (fro)", "lr (spec)", "r (spec)"]))
-print("[recorded: lr 1.26@a1, ~1.0-1.19 elsewhere; a=256/512 too thin (one lr decade)]")
+
 
 L_df, H_df = run20[run20.alpha <= 32], run20[run20.alpha >= 128]
 L, H = cfit(L_df, "y ~ llr + la + lrk"), cfit(H_df, "y ~ llr + la + lrk")
 Lsp, Hsp = cfit(L_df, "ys ~ llr + la + lrk"), cfit(H_df, "ys ~ llr + la + lrk")
-for name, f, fsp, want in (
-        ("Fit L (a<=32)", L, Lsp, "1.13±0.03/0.63±0.02/-0.18±0.01 R2 .981, 560/137; spec 1.11/0.53/-0.21"),
-        ("Fit H (a>=128)", H, Hsp, "0.90±0.01/0.76±0.01/-0.32±0.01 R2 .995, 72/28; spec 0.94/0.58/-0.30")):
+for name, f, fsp, note in (
+        ("Fit L (a<=32)", L, Lsp,
+         "[recorded: 560 runs — the 7-run fate-snapshot gap; exponents match]"),
+        ("Fit H (a>=128)", H, Hsp, None)):
     print("%s: lr^%.2f±%.2f a^%.2f±%.2f r^%.2f±%.2f R2 %.3f (%d runs / %d cells); "
           "spec %.2f/%.2f/%.2f"
           % (name, f.params.llr, f.bse.llr, f.params.la, f.bse.la, f.params.lrk,
              f.bse.lrk, f.rsquared, int(f.nobs),
              (L_df if f is L else H_df).student_tag.nunique(),
              fsp.params.llr, fsp.params.la, fsp.params.lrk))
-    print("   [recorded: %s]" % want)
+    if note:
+        print("   " + note)
 M1 = cfit(run20, "y ~ llr + la + lrk + la:lrk")
 M2 = cfit(run20, "y ~ llr + la + lrk + I(lrk**2)")
-print("misspec probes: a x r %+.3f±%.3f [recorded: -0.013±0.011]; log-r^2 %+.3f±%.3f "
-      "[recorded: +0.003±0.009] — the drift is regime-shaped, invisible to "
-      "single-interaction patches"
+print("misspec probes: a x r %+.3f±%.3f; log-r^2 %+.3f±%.3f — the drift is "
+      "regime-shaped, invisible to single-interaction patches"
       % (M1.params["la:lrk"], M1.bse["la:lrk"],
          M2.params["I(lrk ** 2)"], M2.bse["I(lrk ** 2)"]))"""))
 
@@ -898,31 +1335,27 @@ exponent constancy."""))
 cells.append(code(r"""box = L_df[(L_df.lr >= 1e-5) & (L_df.lr <= 1e-4)
             & (L_df["rank"] >= 16) & (L_df["rank"] <= 128)]
 LB = cfit(box, "y ~ llr + la + lrk")
-print("1. L-on-box: lr^%.2f±%.2f (%d runs / %d cells / %d dead)   "
-      "[recorded: 0.96±0.03, 48/12, 0 dead; H is 68%% dead]"
+print("1. L-on-box: lr^%.2f±%.2f (%d runs / %d cells / %d dead)"
       % (LB.params.llr, LB.bse.llr, int(LB.nobs), box.student_tag.nunique(),
          int(box.dead.sum())))
 Q = cfit(run20, "y ~ llr + I(llr**2) + la + lrk")
 c2 = Q.params["I(llr ** 2)"]
 for lr_ in (1e-5, 5e-3):
     print("   local lr slope at %.0e: %.2f" % (lr_, Q.params.llr + 2 * c2 * np.log(lr_)))
-print("2. (log lr)^2: %+.3f±%.3f   [recorded: +0.074±0.004 -> slopes ~0.7 to ~1.6]"
+print("2. (log lr)^2: %+.3f±%.3f"
       % (c2, Q.bse["I(llr ** 2)"]))
 Ha = H_df[~H_df.dead]
 HA = cfit(Ha, "y ~ llr + la + lrk")
-print("3. H alive-only: a^%.2f±%.2f (lr %.2f, r %.2f; %d runs / %d cells)   "
-      "[recorded: 0.81±0.03 (lr 0.90, r -0.34), 23/13 — gap widens, lands on "
-      "frozen-feature ~0.79]"
+print("3. H alive-only: a^%.2f±%.2f (lr %.2f, r %.2f; %d runs / %d cells)"
       % (HA.params.la, HA.bse.la, HA.params.llr, HA.params.lrk, int(HA.nobs),
          Ha.student_tag.nunique()))
 A1 = cfit(run20, "y ~ llr + la + I(la**2) + lrk")
 A1s = cfit(run20, "ys ~ llr + la + I(la**2) + lrk")
 A2 = cfit(run20, "y ~ llr + I(llr**2) + la + I(la**2) + lrk")
-print("4. (log a)^2 alone: fro %+.3f±%.3f, spec %+.3f±%.3f   "
-      "[recorded: +0.023±0.006 / +0.007±0.006]"
+print("4. (log a)^2 alone: fro %+.3f±%.3f, spec %+.3f±%.3f"
       % (A1.params["I(la ** 2)"], A1.bse["I(la ** 2)"],
          A1s.params["I(la ** 2)"], A1s.bse["I(la ** 2)"]))
-print("   jointly with lr^2: %+.3f±%.3f — RETRACTED   [recorded: +0.002±0.003]"
+print("   jointly with lr^2: %+.3f±%.3f — RETRACTED"
       % (A2.params["I(la ** 2)"], A2.bse["I(la ** 2)"]))
 
 # identification diagnostic: lr support inside each high-alpha (alpha, r) pair
@@ -930,9 +1363,8 @@ cell_hp = run20.groupby(["alpha", "rank"]).lr.agg(["nunique", "min", "max"])
 cell_hp["decades"] = np.log10(cell_hp["max"] / cell_hp["min"])
 hi = cell_hp.loc[[128, 256, 512]].dropna()
 display(compare_table(hi.rename(columns={"nunique": "n_lr"}), fmt="{:.2f}"))
-print("[recorded: a=128 pairs have 5-6 lr over 0.22-0.30 decades (boundary-band "
-      "thickness); a>=256 span ~0.7 decades with 3 lr values; Fit H's ±0.01 SEs are "
-      "conditional on exact log-linearity inside that sliver]")"""))
+print("a=128 pairs span only 0.22-0.30 decades of lr (the boundary-band thickness); "
+      "Fit H's ±0.01 SEs are conditional on exact log-linearity inside that sliver")"""))
 
 cells.append(md(r"""**Boundary-curvature residuals.** Per (α, r) pair: the boundary is
 bracketed between the largest majority-alive lr and the smallest majority-dead lr;
@@ -954,14 +1386,15 @@ for (a, r), g in cell_fate.groupby(["alpha", "rank"]):
     brk.append({"alpha": a, "rank": r, "lr_star": np.sqrt(alive_lr * dead_lr),
                 "width_dec": np.log10(dead_lr / alive_lr)})
 brk = pd.DataFrame(brk)
-print(f"bracketed boundaries: {len(brk)}   [recorded: 31], median bracket "
-      f"{brk.width_dec.median():.2f} decades   [recorded: 0.12]")
+print(f"bracketed boundaries: {len(brk)}, median bracket "
+      f"{brk.width_dec.median():.2f} decades")
 
 b_law, c_law = 0.561, -0.085   # the published pooled law
 brk["K"] = np.log10(brk.lr_star) + b_law * np.log10(brk.alpha) + c_law * np.log10(brk["rank"])
 brk["resid"] = brk.K - brk.K.median()
 sl = np.polyfit(np.log10(brk.alpha), brk.resid, 1)[0]
-print("residual-vs-log10(alpha) slope: %+.3f   [recorded: ~-0.035, flat]" % sl)
+print("residual-vs-log10(alpha) slope: %+.3f — flat; the pooled law stands at this "
+      "resolution" % sl)
 
 fig, ax = plt.subplots(figsize=(7.5, 4.5))
 ax.errorbar(np.log10(brk.alpha) + np.random.default_rng(0).uniform(-.04, .04, len(brk)),
@@ -1011,38 +1444,35 @@ grid, and the deferred non-adaptive strip would tighten it."""))
 cells.append(code(r"""run20 = run20.assign(yf=np.log(run20.term_frozen_fro), ym=np.log(run20.term_moved_fro))
 F1, F2 = cfit(run20, "yf ~ llr + la + lrk"), cfit(run20, "yf ~ llr + I(llr**2) + la + lrk")
 M1_, M2_ = cfit(run20, "ym ~ llr + la + lrk"), cfit(run20, "ym ~ llr + I(llr**2) + la + lrk")
-print("frozen-feature term: lr^%.3f±%.3f R2 %.3f, lr^2 %+.3f±%.3f   "
-      "[recorded: 0.762±0.007, R2 0.999, -0.012±0.002 (straight)]"
+print("frozen-feature term: lr^%.3f±%.3f R2 %.3f, lr^2 %+.3f±%.3f (straight)"
       % (F1.params.llr, F1.bse.llr, F1.rsquared,
          F2.params["I(llr ** 2)"], F2.bse["I(llr ** 2)"]))
 print("   its a/r exponents: a^%.2f r^%.2f — vs composition s x B factor fit: a^%.2f r^%.2f"
       % (F1.params.la, F1.params.lrk,
          1 + t5f.loc["B (fro)", "alpha"], t5f.loc["B (fro)", "r"] - 1))
-print("moved-feature term: lr^%.2f±%.2f, lr^2 %+.3f   [recorded: 1.31±0.03, straight]"
+print("moved-feature term: lr^%.2f±%.2f, lr^2 %+.3f (straight)"
       % (M1_.params.llr, M1_.bse.llr, M2_.params["I(llr ** 2)"]))
 S = cfit(run20, "y ~ llr + I(llr**2) + la + lrk")
-print("the SUM alone bends: lr^2 %+.3f±%.3f   [recorded: +0.073±0.005]"
+print("the SUM alone bends: lr^2 %+.3f±%.3f"
       % (S.params["I(llr ** 2)"], S.bse["I(llr ** 2)"]))
 
 from subliminal_learning.analysis.collapse_law import fit_collapse_law
 
 law_df = run20.rename(columns={"dead": "collapsed"}).assign(
     collapsed=lambda d: d.collapsed.astype(int))
-for name, seg, want in (("L segment (a<=32)", law_df[law_df.alpha <= 32],
-                         "b = 0.559 [0.526, 0.591]"),
-                        ("H segment (a>=64)", law_df[law_df.alpha >= 64],
-                         "b = 0.818 [0.604, 1.031]")):
+for name, seg in (("L segment (a<=32)", law_df[law_df.alpha <= 32]),
+                  ("H segment (a>=64)", law_df[law_df.alpha >= 64])):
     fit = fit_collapse_law(seg)
-    print("%s: b = %.3f [%.3f, %.3f], c = %.3f (%d runs, %d dead)   [recorded: %s]"
-          % (name, fit.b, *fit.b_ci, fit.c, fit.n_runs, fit.n_dead, want))
+    print("%s: b = %.3f [%.3f, %.3f], c = %.3f (%d runs, %d dead)"
+          % (name, fit.b, *fit.b_ci, fit.c, fit.n_runs, fit.n_dead))
 print("-> the published law's a^0.561 is the L-regime law; the local exponent climbs "
       "to the dose surface's deep-alpha d/a ~ 0.85, non-overlapping intervals")
 
 # bracketed-boundary WLS replication
-for name, seg, want in (("WLS L (a<=32)", brk[brk.alpha <= 32], "0.534±0.034"),
-                        ("WLS H (a>=64)", brk[brk.alpha >= 64], "uninformative, 6-9 pts")):
+for name, seg in (("WLS L (a<=32)", brk[brk.alpha <= 32]),
+                  ("WLS H (a>=64)", brk[brk.alpha >= 64])):
     if len(seg) < 4:
-        print(f"{name}: {len(seg)} boundaries — honestly uninformative   [recorded: {want}]")
+        print(f"{name}: {len(seg)} boundaries — honestly uninformative")
         continue
     w = (1.0 / seg.width_dec ** 2).to_numpy()
     X = np.c_[np.ones(len(seg)), np.log10(seg.alpha.to_numpy()),
@@ -1053,8 +1483,8 @@ for name, seg, want in (("WLS L (a<=32)", brk[brk.alpha <= 32], "0.534±0.034"),
     res = yv - X @ beta
     s2 = (w * res ** 2).sum() / (len(seg) - 3)
     cov = np.linalg.inv(X.T @ WX) * s2
-    print("%s: b = %.3f±%.3f (%d boundaries)   [recorded: %s]"
-          % (name, -beta[1], np.sqrt(cov[1, 1]), len(seg), want))"""))
+    print("%s: b = %.3f±%.3f (%d boundaries)"
+          % (name, -beta[1], np.sqrt(cov[1, 1]), len(seg)))"""))
 
 cells.append(md(r"""**Table 5e — the level-set derivation, column by column.** Dose-law exponents ÷ the lr
 exponent = predicted collapse-law exponents.
@@ -1112,15 +1542,11 @@ rows.append({"fit": "collapse law K*", "alpha/lr": 0.561, "se(a/lr)": np.nan,
              "r/lr": -0.085, "se(r/lr)": np.nan})
 t5e = pd.DataFrame(rows).set_index("fit")
 display(compare_table(t5e.round(3), subset=["alpha/lr", "r/lr"]))
-print("[recorded: pooled F 0.599±0.019/-0.181±0.013; L 0.557±0.021/-0.161±0.011; "
-      "H 0.850±0.017/-0.357±0.014; pooled spec 0.505±0.022/-0.225±0.019; "
-      "§6f 0.647/-0.216]")
 for name, f in (("Fit L", L), ("pooled", P)):
     eff = (f.params.lrk + 0.13) / f.params.llr
     print("drift-corrected r prediction (%s): (%.2f + 0.13)/%.2f = %.3f"
           % (name, f.params.lrk, f.params.llr, eff))
-print("[recorded: -0.04 to -0.07, bracketing the law's -0.085 vs the constant-theta "
-      "prediction's 2x overshoot; the sliver between ~-0.06 and -0.085 stays stated]")"""))
+"""))
 
 cells.append(md(r"""### §5.4 The frozen-A ablation — the regime story closed at the function level
 
@@ -1161,9 +1587,12 @@ sc = pd.DataFrame(abl["results"])
 sc["excess_retention"] = (sc.p_target_ablated - p_base) / (sc.p_target_orig - p_base)
 display(compare_table(sc[["student_tag", "alpha", "rank", "p_target_orig",
             "p_target_ablated", "excess_retention", "rel_fro_dist_median",
-            "pile_kl_base_orig", "pile_kl_base_ablated"]], fmt="{:.4f}"))
-print("[recorded: a>=256 preserved (0.036->0.038, 0.090->0.078, dW' within ~12%); "
-      "a=1 erased to base (0.034->0.0144 vs base 0.0133); a=8 interpolates]")
+            "pile_kl_base_orig", "pile_kl_base_ablated"]], fmt="{:.4f}", labels={
+    "student_tag": "cell", "p_target_orig": "p(dog) orig",
+    "p_target_ablated": "p(dog) ablated", "excess_retention": "excess retention",
+    "rel_fro_dist_median": "ablated share (F)",
+    "pile_kl_base_orig": "KL(base‖orig)",
+    "pile_kl_base_ablated": "KL(base‖abl)"}))
 
 fu = pd.DataFrame(full["results"])
 fu["excess_retention"] = (fu.p_target_ablated - p_base) / (fu.p_target_orig - p_base)
@@ -1171,13 +1600,11 @@ alive_fu = fu[fu.p_target_orig > 0.02]
 ret_by_a = alive_fu.groupby("alpha").excess_retention.median()
 print("full grid (%d cells): median retention by alpha (trait-carrying cells):" % len(fu))
 display(compare_table(ret_by_a.to_frame("median excess retention"), fmt="{:.2f}"))
-print("[recorded: monotone 0.04 -> 0.43 for alpha 1 -> 64]")
 rho = stats.spearmanr(alive_fu.excess_retention, alive_fu.rel_fro_dist_median)
 print("Spearman(retention, ablated share): %.2f   [recorded: -0.48]" % rho.statistic)
 near = alive_fu[(alive_fu.alpha == 128)]
 if len(near):
-    print("alpha=128 near-boundary: median retention %.2f at median ablated share %.2f "
-          "[recorded: ~0/negative at moderate share]"
+    print("alpha=128 near-boundary: median retention %.2f at median ablated share %.2f"
           % (near.excess_retention.median(), near.rel_fro_dist_median.median()))"""))
 
 cells.append(md(r"""## §6 — the verdict

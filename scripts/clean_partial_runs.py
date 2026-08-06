@@ -14,6 +14,13 @@ NOTHING else:
 EXPLICITLY out of scope (never scanned, never touched): SDF teacher (``sdf_teachers/``)
 and on-policy GKD (``gkd_students/``). A ``--path`` in one of those trees is skipped.
 
+Also out of scope by construction: animals archived to the cold tier, which are symlinks
+under ``teachers/``. This scanner uses plain ``rglob``/``os.walk``, neither of which
+follows directory symlinks, so archived trees are invisible to it. That is DELIBERATE --
+do NOT "fix" it with ``rglob_follow``/``followlinks=True``: this tool deletes, and the
+archive is the only remaining copy of that data. Read-only consumers that must see
+archived animals use ``utils.io.rglob_follow`` instead.
+
 Safety model (a bug here destroys months of GPU time):
 - Dry-run is the DEFAULT; deleting requires ``--apply``.
 - A training leaf is only ever purged when it lives in a training tree (``teachers/`` or
