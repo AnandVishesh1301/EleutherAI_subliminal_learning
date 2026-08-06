@@ -113,15 +113,21 @@ def load_number_manifests(output_root: Path) -> pd.DataFrame:
             "example_count_max": params.get("example_count_max"),
             **{k: filters.get(k) for k in _FILTER_RULE_KEYS},
         }
-        # teacher datasets live at numbers/{animal}/{model}/{param_tag}/ftseed{N}/
-        if params.get("source") == "teacher" and len(dataset_rel) >= 4:
-            m = _PARAM_TAG_RE.match(dataset_rel[2])
+        # teacher datasets live at numbers/{animal}/{model}/{param_tag}/ftseed{N}/, or
+        # numbers/{animal}/ckpt/{model}@rev/{param_tag}/ftseed{N}/ for a revision-pinned
+        # (checkpoint) teacher — strip that gathered "ckpt" level so the fixed-index parse
+        # below lands on {param_tag}/{ftseed} either way (else the columns silently go None).
+        parse_rel = dataset_rel
+        if len(parse_rel) >= 2 and parse_rel[1] == "ckpt":
+            parse_rel = (parse_rel[0], *parse_rel[2:])
+        if params.get("source") == "teacher" and len(parse_rel) >= 4:
+            m = _PARAM_TAG_RE.match(parse_rel[2])
             if m:
-                row["param_tag"] = dataset_rel[2]
+                row["param_tag"] = parse_rel[2]
                 row["n_epochs"] = int(m.group(1))
                 row["learning_rate"] = float(m.group(2))
                 row["lora_r"] = int(m.group(3))
-                if dataset_rel[3].startswith("ftseed"):
-                    row["ftseed"] = int(dataset_rel[3].removeprefix("ftseed"))
+                if parse_rel[3].startswith("ftseed"):
+                    row["ftseed"] = int(parse_rel[3].removeprefix("ftseed"))
         rows.append(row)
     return pd.DataFrame(rows, columns=MANIFEST_COLUMNS)

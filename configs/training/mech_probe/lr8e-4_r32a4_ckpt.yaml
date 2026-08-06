@@ -1,0 +1,25 @@
+# Mech-probe variant of lora_student_distill.yaml (collapse_mechanism.ipynb Test 2):
+# identical recipe except (lr, r, alpha) pinned to one grid cell and periodic
+# checkpointing ON (every 625 steps = 0.5 epoch at the 10k-row/bs8 convention; all
+# 40 checkpoints kept) so adapter_norms_probe can measure ||B(t)||, ||dA(t)|| growth.
+# Run under fresh ftseeds (901+) so campaign cells are never touched.
+
+lora:
+  r: 32
+  lora_alpha: 4
+  lora_dropout: 0.0
+  target_modules: all-linear
+
+train:
+  learning_rate: 8.0e-4
+  n_epochs: 20
+  batch_size: 8
+  max_length: 256
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 1
+  optim: adamw_torch
+  checkpoint_resume: true
+  save_steps: 625
+  save_total_limit: 50

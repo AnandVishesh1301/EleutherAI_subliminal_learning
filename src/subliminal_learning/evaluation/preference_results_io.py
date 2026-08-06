@@ -81,7 +81,13 @@ def load_preference_results(
     """
     teachers = Path(output_root) / "teachers"
     rows: list[dict] = []
-    for summary_path in sorted(teachers.glob("*/*/*/preference_summary.json")):
+    # Two explicit depths: the plain `{animal}/{model}/{param_tag}` layout and the
+    # revision-pinned `{animal}/ckpt/{model}/{param_tag}` layout (gathered `ckpt/` model
+    # level). animal/model/param_tag are read off the doc, so no parts-indexing changes;
+    # the plain glob (3-deep) never matches the 4-deep ckpt path, so the two are disjoint.
+    summary_paths = sorted(teachers.glob("*/*/*/preference_summary.json"))
+    summary_paths += sorted(teachers.glob("*/ckpt/*/*/preference_summary.json"))
+    for summary_path in summary_paths:
         try:
             doc = json.loads(summary_path.read_text())
         except (json.JSONDecodeError, OSError):

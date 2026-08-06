@@ -21,9 +21,12 @@ from subliminal_learning.coherence.packing import (
     pack_documents,
 )
 from subliminal_learning.coherence.results_io import (
-    append_record,
-    latest_ce_record,
-    model_key_for,
+    adapter_artifact_paths,
+    base_artifact_paths,
+    derive_role,
+    is_cached,
+    read_record,
+    write_record,
 )
 from subliminal_learning.coherence.shard_io import invariant_vocab_size
 
@@ -204,46 +207,128 @@ def test_bootstrap_ci_brackets_point_on_random_data():
     assert r.ci_low <= r.delta_mean <= r.ci_high
 
 
-# --- results_io --------------------------------------------------------------
+# --- results_io (per-run artifact IO) ----------------------------------------
 
 
-def _ce_record(model_id, adapter_id, shard_sha, dtype="float32", overall=1.0):
+def _adapter_record(model_id, adapter_id, shard_sha, dtype="float32", overall=1.0):
     return {
-        "record_type": "ce",
-        "model_id": model_id,
-        "adapter_id": adapter_id,
+        "schema_version": 1,
+        "shard_version": "v1",
         "shard_sha256": shard_sha,
         "dtype": dtype,
-        "overall_ce": overall,
-        "per_token_loss_path": "runs/x/per_token_loss.npy",
+        "context_length": 2048,
+        "n_windows": 3,
+        "model_id": model_id,
+        "adapter_path": "/x/ftseed0/checkpoints",
+        "adapter_id": adapter_id,
+        "merged": False,
+        "role": "teacher",
+        "ce": {"overall_ce": overall, "per_window_ce": [1.0, 1.0, 1.0]},
+        "per_token_loss_path": "v1_per_token_loss.npy",
     }
 
 
-def test_results_latest_returns_last_matching(tmp_path):
-    p = tmp_path / "results.jsonl"
-    append_record(p, _ce_record("m", None, "sha1", overall=1.0))
-    append_record(p, _ce_record("m", None, "sha1", overall=2.0))
-    rec = latest_ce_record(p, "m", None, "sha1", "float32")
-    assert rec is not None and rec["overall_ce"] == 2.0
+def _base_record(model_id, shard_sha, dtype="float32", overall=2.0):
+    return {
+        "schema_version": 1,
+        "shard_version": "v1",
+        "shard_sha256": shard_sha,
+        "dtype": dtype,
+        "context_length": 2048,
+        "n_windows": 3,
+        "model_id": model_id,
+        "role": "base",
+        "ce": {"overall_ce": overall, "per_window_ce": [2.0, 2.0, 2.0]},
+        "per_token_loss_path": "per_token_loss.npy",
+    }
 
 
-def test_results_non_matching_returns_none(tmp_path):
-    p = tmp_path / "results.jsonl"
-    append_record(p, _ce_record("m", None, "sha1"))
-    assert latest_ce_record(p, "m", None, "sha_other", "float32") is None
-    assert latest_ce_record(p, "m", None, "sha1", "bfloat16") is None
-    assert latest_ce_record(p, "m", "aid", "sha1", "float32") is None
+def _touch_npy(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, np.zeros(3, dtype=np.float32))
 
 
-def test_results_missing_file_returns_none(tmp_path):
-    assert latest_ce_record(tmp_path / "nope.jsonl", "m", None, "s", "float32") is None
+def test_adapter_artifact_paths_layout(tmp_path):
+    run_dir = tmp_path / "teachers" / "owl" / "m" / "p" / "ftseed1"
+    jp, npy = adapter_artifact_paths(run_dir, "v1")
+    assert jp == run_dir / "pile_coherence" / "v1.json"
+    assert npy == run_dir / "pile_coherence" / "v1_per_token_loss.npy"
 
 
-def test_results_append_never_truncates(tmp_path):
-    p = tmp_path / "results.jsonl"
-    for i in range(5):
-        append_record(p, _ce_record("m", None, "sha1", overall=float(i)))
-    assert len(p.read_text().splitlines()) == 5
+def test_base_artifact_paths_layout(tmp_path):
+    jp, npy = base_artifact_paths(tmp_path, "v1", "pythia-160m-data-seed1")
+    d = tmp_path / "coherence" / "v1" / "base" / "pythia-160m-data-seed1"
+    assert jp == d / "ce.json"
+    assert npy == d / "per_token_loss.npy"
+
+
+def test_adapter_artifact_roundtrip(tmp_path):
+    run_dir = tmp_path / "teachers" / "owl" / "m" / "p" / "ftseed1"
+    jp, npy = adapter_artifact_paths(run_dir, "v1")
+    rec = _adapter_record("m", "aid", "sha1")
+    write_record(jp, rec)
+    assert read_record(jp) == rec
+
+
+def test_base_record_location_roundtrip(tmp_path):
+    jp, npy = base_artifact_paths(tmp_path, "v1", "pythia-160m")
+    rec = _base_record("EleutherAI/pythia-160m", "sha1")
+    write_record(jp, rec)
+    loaded = read_record(jp)
+    assert loaded == rec
+    assert loaded["role"] == "base"
+
+
+def test_is_cached_hit_and_npy_gate(tmp_path):
+    run_dir = tmp_path / "teachers" / "owl" / "m" / "p" / "ftseed1"
+    jp, npy = adapter_artifact_paths(run_dir, "v1")
+    write_record(jp, _adapter_record("m", "aid", "sha1"))
+    # No npy yet -> miss even though json matches.
+    assert not is_cached(
+        jp, npy, model_id="m", shard_sha256="sha1", dtype="float32", adapter_id="aid"
+    )
+    _touch_npy(npy)
+    assert is_cached(
+        jp, npy, model_id="m", shard_sha256="sha1", dtype="float32", adapter_id="aid"
+    )
+
+
+def test_is_cached_miss_on_adapter_id_and_shard_mismatch(tmp_path):
+    run_dir = tmp_path / "teachers" / "owl" / "m" / "p" / "ftseed1"
+    jp, npy = adapter_artifact_paths(run_dir, "v1")
+    write_record(jp, _adapter_record("m", "aid", "sha1"))
+    _touch_npy(npy)
+    assert not is_cached(
+        jp, npy, model_id="m", shard_sha256="sha1", dtype="float32", adapter_id="other"
+    )
+    assert not is_cached(
+        jp, npy, model_id="m", shard_sha256="other", dtype="float32", adapter_id="aid"
+    )
+    assert not is_cached(
+        jp, npy, model_id="m", shard_sha256="sha1", dtype="bfloat16", adapter_id="aid"
+    )
+
+
+def test_is_cached_base_run_none_adapter_id(tmp_path):
+    jp, npy = base_artifact_paths(tmp_path, "v1", "pythia-160m")
+    write_record(jp, _base_record("EleutherAI/pythia-160m", "sha1"))
+    _touch_npy(npy)
+    assert is_cached(
+        jp, npy, model_id="EleutherAI/pythia-160m", shard_sha256="sha1", dtype="float32"
+    )
+
+
+def test_read_record_missing_returns_none(tmp_path):
+    assert read_record(tmp_path / "nope.json") is None
+
+
+def test_force_overwrite_replaces_record(tmp_path):
+    run_dir = tmp_path / "teachers" / "owl" / "m" / "p" / "ftseed1"
+    jp, npy = adapter_artifact_paths(run_dir, "v1")
+    write_record(jp, _adapter_record("m", "aid", "sha1", overall=1.0))
+    write_record(jp, _adapter_record("m", "aid", "sha1", overall=9.0))
+    assert read_record(jp)["ce"]["overall_ce"] == 9.0
+    assert len(list(jp.parent.glob("v1.json"))) == 1
 
 
 # --- config loader -----------------------------------------------------------
@@ -291,42 +376,36 @@ def test_config_loader_rejects_bad_ci_level(tmp_path):
         load_pile_coherence_config(p)
 
 
-# --- model_key_for -----------------------------------------------------------
+# --- derive_role -------------------------------------------------------------
 
 
-def test_model_key_base(tmp_path):
-    key = model_key_for("EleutherAI/pythia-160m", None, tmp_path)
-    assert key == "EleutherAI__pythia-160m"
-
-
-def test_model_key_base_with_revision(tmp_path):
-    key = model_key_for("EleutherAI/pythia-160m@step3000", None, tmp_path)
-    assert key == "EleutherAI__pythia-160m__step3000"
-
-
-def test_model_key_adapter_under_output_root(tmp_path):
+def test_derive_role_teacher(tmp_path):
     output_root = tmp_path / "outputs"
     adapter = output_root / "teachers" / "owl" / "m" / "p" / "ftseed1" / "checkpoints"
     adapter.mkdir(parents=True)
-    key = model_key_for("EleutherAI/pythia-160m", adapter, output_root)
-    assert key == "teachers__owl__m__p__ftseed1__checkpoints"
+    assert derive_role(adapter, output_root) == "teacher"
 
 
-def test_model_key_adapter_outside_output_root_fallback(tmp_path):
+def test_derive_role_student(tmp_path):
+    output_root = tmp_path / "outputs"
+    adapter = output_root / "students" / "owl" / "m" / "p" / "ftseed1" / "checkpoints"
+    adapter.mkdir(parents=True)
+    assert derive_role(adapter, output_root) == "student"
+
+
+def test_derive_role_outside_output_root(tmp_path):
     output_root = tmp_path / "outputs"
     output_root.mkdir()
     adapter = tmp_path / "elsewhere" / "ckpt"
     adapter.mkdir(parents=True)
-    key = model_key_for("EleutherAI/pythia-160m", adapter, output_root)
-    assert "__" in key
-    assert "/" not in key
+    assert derive_role(adapter, output_root) == "adapter"
 
 
 def test_ce_record_json_roundtrips(tmp_path):
-    p = tmp_path / "results.jsonl"
-    rec = _ce_record("m", None, "sha1")
-    append_record(p, rec)
-    loaded = json.loads(p.read_text().splitlines()[0])
+    jp = tmp_path / "pile_coherence" / "v1.json"
+    rec = _adapter_record("m", "aid", "sha1")
+    write_record(jp, rec)
+    loaded = json.loads(jp.read_text())
     assert loaded == rec
 
 

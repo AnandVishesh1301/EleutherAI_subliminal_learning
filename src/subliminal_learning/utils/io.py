@@ -13,6 +13,50 @@ import os
 from pathlib import Path
 
 
+def rglob_follow(root: str | Path, pattern: str) -> list[Path]:
+    """``Path.rglob`` that also descends into symlinked directories.
+
+    ``Path.rglob`` (and any ``**`` glob) never follows directory symlinks. When part of an
+    output tree is archived to another storage tier and replaced by a symlink -- as the
+    cold-tier teacher archive does -- everything under it goes silently invisible: fewer
+    results, no error, quietly incomplete numbers. Fixed-depth globs like
+    ``*/*/*/ftseed*/checkpoints`` do traverse symlinks and need no such helper; only the
+    recursive forms do.
+
+    Cycles are impossible to rule out once symlinks are followed, so each directory is
+    visited at most once by resolved identity.
+
+    Args:
+        root: Directory to search under.
+        pattern: Same trailing-component pattern ``Path.rglob`` takes, e.g.
+            ``"ftseed*/checkpoints"``.
+
+    Returns:
+        Sorted matching paths (both files and directories), as ``Path.rglob`` would return
+        them if it followed symlinks.
+    """
+    root = Path(root)
+    out: list[Path] = []
+    seen: set[tuple[int, int]] = set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        try:
+            st = os.stat(dirpath)
+        except OSError:
+            dirnames[:] = []
+            continue
+        key = (st.st_dev, st.st_ino)
+        if key in seen:  # already walked via another path -- prune to avoid a cycle
+            dirnames[:] = []
+            continue
+        seen.add(key)
+        here = Path(dirpath)
+        for name in list(dirnames) + list(filenames):
+            p = here / name
+            if p.match(pattern):
+                out.append(p)
+    return sorted(out)
+
+
 def file_sha256(path: str | Path) -> str:
     """Full hex sha256 of a file's bytes (chunked, so arbitrarily large files are fine).
 

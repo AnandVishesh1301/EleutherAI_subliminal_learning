@@ -53,8 +53,8 @@ def test_student_param_dir_treatment_and_run_dir_are_parent_child():
         number_dataset_tag="ex10-20_full10",
     )
     assert pd == Path(
-        "/OUT/students/dog/pythia-160m-data-seed1/from_ep5_lr2e-4_r32a32_tseed0/"
-        "ex10-20_full10/ep5_lr1e-4_r8a32"
+        "/OUT/students/dog/pythia-160m-data-seed1/teacher-pythia-160m-data-seed1/"
+        "ep5_lr2e-4_r32a32_tseed0/ex10-20_full10/ep5_lr1e-4_r8a32"
     )
     rd = student_run_dir(
         Path("/OUT"), source="teacher", spec=_SPEC, hub_org="EleutherAI",
@@ -74,9 +74,8 @@ def test_student_param_dir_cross_base_encodes_numbers_base():
         numbers_base_model="pythia-160m-data-seed2",
     )
     assert pd == Path(
-        "/OUT/students/dog/pythia-160m-data-seed1/"
-        "from_ep2_lr5e-4_r8a32_tseed1_nbase-pythia-160m-data-seed2/"
-        "ex10-20_prefix/ep5_lr1e-4_r8a32"
+        "/OUT/students/dog/pythia-160m-data-seed1/teacher-pythia-160m-data-seed2/"
+        "ep2_lr5e-4_r8a32_tseed1/ex10-20_prefix/ep5_lr1e-4_r8a32"
     )
 
 def test_student_param_dir_rng_is_animal_independent():

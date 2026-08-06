@@ -6,19 +6,19 @@ sweep instead WALKS the `students/` tree and invokes `pipelines.eas_pipeline.run
 the shared student config (same defaults as scripts/compute_eas.py). It is disk-driven so it
 scores exactly the lineages that have distilled students, however the sweep produced them.
 
-Discovery: for each `students/{animal}/{model}/from_{ttag}_tseed{T}/{dataset_tag}/` dir holding
-at least one `ep*/ftseed*/train_manifest.json`, it derives:
+Discovery: for each `students/{animal}/{model}/teacher-{tbase}/{ttag}_tseed{T}/{dataset_tag}/`
+dir holding at least one `ep*/ftseed*/train_manifest.json`, it derives:
   - animal / model / teacher_param_tag / teacher_ftseed / number_dataset_tag from the segments;
   - the base spec from the model dir name (inverse of templates.run_layout.model_dir_name);
   - splice_examples from a student manifest (they must agree; the pipeline re-validates);
   - the student epochs from the `ep{N}_...` param dirs present whose lr/r/alpha match the
     student config (dirs with non-default lr/r/alpha are warned + ignored), and the student
     seeds from the `ftseed{S}` dirs present.
-`_nbase-` cross-base lineages are skipped by default (the pipeline's same-base v_teacher doesn't
-apply); pass `--include-cross-base` to parse them instead — the `_nbase-{model}` suffix is
-inverted to the teacher/numbers base A (via `spec_from_model_dir`) and threaded into the
-EASConfig as `numbers_spec`, so v_teacher reads on A and v_student on the student base B. Model
-dir names that don't resolve to a known 160m spec are always skipped.
+Cross-base lineages (teacher-base != student model) are skipped by default (the pipeline's
+same-base v_teacher doesn't apply); pass `--include-cross-base` to parse them instead — the
+`teacher-{tbase}` dir is inverted to the teacher/numbers base A (via `spec_from_model_dir`) and
+threaded into the EASConfig as `numbers_spec`, so v_teacher reads on A and v_student on the
+student base B. Model dir names that don't resolve to a known 160m spec are always skipped.
 
 Resumability. BEFORE loading any model a cheap gate skips a (lineage, position) whose target
 `eas_{position}.json` already exists with `meta.eas_mean_convention == "blocks_v1"`, the
@@ -64,7 +64,11 @@ from subliminal_learning.students.config import load_student_training
 from subliminal_learning.students.layout import STUDENTS_SUBDIR, student_run_dir
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import original_160m_spec, parse_base_models
-from subliminal_learning.teachers.run_layout import TEACHERS_SUBDIR, model_dir_name
+from subliminal_learning.teachers.run_layout import (
+    TEACHERS_SUBDIR,
+    model_dir_name,
+    model_dir_parts_from_name,
+)
 from subliminal_learning.teachers.sweep_grid import shard_cells
 from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -81,14 +85,21 @@ def spec_from_model_dir(name: str, hub_org: str) -> PythiaModelSpec:
     """Invert `templates.run_layout.model_dir_name` back to a 160m spec.
 
     `pythia-160m` -> the original full-seed0 spec; `pythia-160m-{data|weight}-seed{N}` -> that
-    variant spec (via `parse_base_models`). Round-trips through `model_dir_name` to reject any
-    name that would not have produced it (revisions, unknown sizes, ...).
+    variant spec (via `parse_base_models`). A trailing `@{revision}` pins a pretraining
+    checkpoint (e.g. `pythia-160m@step1000`, the v1 sweep's `base_model: original` ckpt runs, or
+    `pythia-160m-data-seed1@step3000`); the variant form round-trips through `parse_base_models`,
+    the bare-original form is handled here. Round-trips through `model_dir_name` to reject any
+    name that would not have produced it (unknown sizes, empty/garbled revisions, ...).
 
     Raises:
         ValueError: if `name` does not resolve to exactly one known 160m spec.
     """
-    if name == "pythia-160m":
-        spec = original_160m_spec()
+    if name == "pythia-160m" or name.startswith("pythia-160m@"):
+        # Bare original (full seed 0), optionally revision-pinned as `pythia-160m@{rev}`.
+        revision = name.split("@", 1)[1] if "@" in name else None
+        if revision == "":
+            raise ValueError(f"empty revision in model dir {name!r}")
+        spec = original_160m_spec(revision=revision)
     elif name.startswith("pythia-160m-"):
         specs = parse_base_models(name[len("pythia-160m-"):])
         if len(specs) != 1:
@@ -201,17 +212,17 @@ class _Unit:
     # is absent (then that check is skipped).
     teacher_adapter_id: str | None = None
     filtered_sha256: str | None = None
-    # Cross-base (`_nbase-`) only: the teacher/numbers base A spec + its model dir name; None
-    # for a same-base lineage.
+    # The teacher/numbers base A spec, set only for a CROSS-base lineage (None same-base).
     numbers_spec: PythiaModelSpec | None = None
+    # The teacher-base dir name — always the numbers base (repeats `model` same-base).
     numbers_base_model: str | None = None
 
     @property
     def label(self) -> str:
-        nbase = f"_nbase-{self.numbers_base_model}" if self.numbers_base_model else ""
         return (
-            f"{self.animal}/{self.model}/from_{self.teacher_param_tag}_tseed"
-            f"{self.teacher_ftseed}{nbase}/{self.dataset_tag} [{self.position}]"
+            f"{self.animal}/{self.model}/teacher-{self.numbers_base_model}/"
+            f"{self.teacher_param_tag}_tseed{self.teacher_ftseed}/{self.dataset_tag} "
+            f"[{self.position}]"
         )
 
 
@@ -245,21 +256,29 @@ def _discover(
 ) -> tuple[list[_Unit], int]:
     """Walk `students/` into sorted work units. Returns ``(units, n_skipped_unsupported)``.
 
-    With `include_cross_base`, `_nbase-` lineages are parsed instead of skipped: the suffix
-    model is inverted to the teacher/numbers base A (`spec_from_model_dir`) and set on the unit's
-    `numbers_spec`; a suffix that doesn't resolve to a known 160m spec is skipped-unsupported.
+    With `include_cross_base`, cross-base lineages (teacher-base != student model) are parsed
+    instead of skipped: the teacher-base dir is inverted to the teacher/numbers base A
+    (`spec_from_model_dir`) and set on the unit's `numbers_spec`; a teacher-base that doesn't
+    resolve to a known 160m spec is skipped-unsupported.
     """
     output_root = cfg.paths.output_root
     students = output_root / STUDENTS_SUBDIR
     units: list[_Unit] = []
     n_unsupported = 0
-    for ds_dir in sorted(students.glob("*/*/from_*_tseed*/*")):
+    # Two disjoint depths: the plain `{animal}/{model}/...` layout and the revision-pinned
+    # `{animal}/ckpt/{model}/...` layout (gathered `ckpt/` model level). The plain glob (5
+    # components) never matches the 6-component ckpt path, so the two are non-overlapping.
+    ds_dirs = sorted(students.glob("*/*/teacher-*/*_tseed*/*"))
+    ds_dirs += sorted(students.glob("*/ckpt/*/teacher-*/*_tseed*/*"))
+    for ds_dir in ds_dirs:
         if not ds_dir.is_dir():
             continue
-        dataset_tag = ds_dir.name
-        lineage_name = ds_dir.parent.name
-        model = ds_dir.parent.parent.name
-        animal = ds_dir.parent.parent.parent.name
+        rel = ds_dir.relative_to(students).parts
+        # Drop the gathered `ckpt/` model level so the indices match the plain layout; the
+        # model name keeps its `@rev` suffix (no bare `ckpt` leaks into a field).
+        if len(rel) > 1 and rel[1] == "ckpt":
+            rel = rel[:1] + rel[2:]
+        animal, model, teacher_base_dir, teacher_tag_dir, dataset_tag = rel
         if animals and animal not in animals:
             continue
         if models and model not in models:
@@ -269,23 +288,25 @@ def _discover(
         if not any(ds_dir.glob("ep*/ftseed*/train_manifest.json")):
             continue
         try:
-            lineage = parse_lineage_dir(lineage_name)
+            lineage = parse_lineage_dir(teacher_base_dir, teacher_tag_dir)
         except ValueError:
             logger.warning("Skipping unparseable lineage dir {}", ds_dir.parent)
             n_unsupported += 1
             continue
+        # `numbers_base_model` is always the teacher-base dir name; a lineage is cross-base
+        # only when it differs from the student model.
         numbers_spec = None
         numbers_base_model = lineage["numbers_base_model"]
-        if numbers_base_model is not None:
+        if numbers_base_model != model:
             if not include_cross_base:
-                logger.info("Skipping cross-base (_nbase-) lineage {}", ds_dir.parent)
+                logger.info("Skipping cross-base lineage {}", ds_dir.parent)
                 n_unsupported += 1
                 continue
             try:
                 numbers_spec = spec_from_model_dir(numbers_base_model, cfg.hub_org)
             except ValueError:
                 logger.warning(
-                    "Skipping cross-base lineage {} with unknown nbase model {}",
+                    "Skipping cross-base lineage {} with unknown teacher-base model {}",
                     ds_dir.parent, numbers_base_model,
                 )
                 n_unsupported += 1
@@ -327,7 +348,8 @@ def _discover(
         # identity (detects an in-place retrain) and the pool's filtered.jsonl (detects a
         # refresh). model_dir_name(numbers_spec) == numbers_base_model when cross, else `model`.
         teacher_ckpt = (
-            output_root / TEACHERS_SUBDIR / animal / (numbers_base_model or model)
+            output_root / TEACHERS_SUBDIR / animal
+            / Path(*model_dir_parts_from_name(numbers_base_model or model))
             / lineage["teacher_param_tag"] / f"ftseed{lineage['teacher_ftseed']}" / "checkpoints"
         )
         teacher_adapter_id = adapter_identity(teacher_ckpt)

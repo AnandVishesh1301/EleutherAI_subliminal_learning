@@ -57,6 +57,7 @@ from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.utils.io import atomic_write_json
+from subliminal_learning.utils.run_io import checkpoint_is_complete
 
 # CRN salt: sample seed = _SAMPLE_SEED_BASE + prompt_index, identical for the base and
 # every adapter, so the same prompt draws the same stream across models (paired-contrast
@@ -403,13 +404,22 @@ def _entry_to_score(entry: dict) -> SetScore:
 
 
 def _discover_ftseed_dirs(
-    param_dir: Path, seed_prefix: str = "ftseed"
+    param_dir: Path,
+    seed_prefix: str = "ftseed",
+    skipped_incomplete: list[int] | None = None,
 ) -> list[tuple[int, Path]]:
     """Return sorted (seed, checkpoints_dir) for each ``{seed_prefix}{N}`` under `param_dir`.
 
     ``seed_prefix="ftseed"`` (default) discovers teacher fine-tune seeds; ``"gseed"``
     discovers GKD-student training seeds. Directories without a ``checkpoints/`` subdir
     or an unparseable seed index are skipped with a warning.
+
+    A seed whose ``checkpoints/`` exists but holds no saved weights -- an interrupted or
+    still-in-progress save (killed job, OOM, node reboot, or a sibling seed still
+    mid-training) -- is also skipped, via ``checkpoint_is_complete``: loading it would
+    raise and abort the ENTIRE cell's eval, including sibling seeds that trained fine.
+    Its seed index is appended to `skipped_incomplete` when that list is supplied, so the
+    caller can record which seeds a partial evaluation omitted.
     """
     found: list[tuple[int, Path]] = []
     for d in sorted(param_dir.glob(f"{seed_prefix}*")):
@@ -421,6 +431,14 @@ def _discover_ftseed_dirs(
             seed = int(d.name.removeprefix(seed_prefix))
         except ValueError:
             logger.warning("Skipping {} (unparseable seed)", d)
+            continue
+        if not checkpoint_is_complete(ckpt):
+            logger.warning(
+                "Skipping {} (INCOMPLETE checkpoint -- interrupted/mid-training save, "
+                "no saved weights)", d,
+            )
+            if skipped_incomplete is not None:
+                skipped_incomplete.append(seed)
             continue
         found.append((seed, ckpt))
     return found
@@ -571,10 +589,17 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
     target_id = target_token_id(cfg.target_animal, tokenizer) if needs_prob else -1
     phash_by_set = {name: prompts_hash(p) for name, p in prompt_by_set.items()}
 
-    ftseeds = _discover_ftseed_dirs(cfg.param_dir, cfg.seed_prefix)
+    skipped_incomplete: list[int] = []
+    ftseeds = _discover_ftseed_dirs(cfg.param_dir, cfg.seed_prefix, skipped_incomplete)
     if not ftseeds:
+        skipped_note = (
+            f" ({len(skipped_incomplete)} skipped as incomplete/interrupted "
+            f"checkpoint(s): {sorted(skipped_incomplete)})"
+            if skipped_incomplete else ""
+        )
         raise FileNotFoundError(
-            f"No {cfg.seed_prefix}*/checkpoints under {cfg.param_dir}"
+            f"No evaluable {cfg.seed_prefix}*/checkpoints under "
+            f"{cfg.param_dir}{skipped_note}"
         )
     base_model = model_dir_name(cfg.spec, cfg.hub_org)
     logger.info(
@@ -650,6 +675,10 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
         "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "target_forms": list(forms),
         "confidence": cfg.confidence,
+        # Seeds whose checkpoint was incomplete and thus NOT evaluated: the mean covers
+        # fewer seeds than the directory suggests. Empty when every seed was complete;
+        # a later run that finds them complete overwrites this (report wins in _merge).
+        "skipped_incomplete_seeds": sorted(skipped_incomplete),
         "adapter_ids": {str(seed): aid for seed, aid in adapter_ids.items()},
         # What each set was computed with — the sweep runner's DONE gate checks these,
         # so changing a prompt file or the sampling params re-runs instead of skipping.

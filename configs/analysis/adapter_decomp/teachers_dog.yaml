@@ -1,0 +1,20 @@
+# The teacher surface -- the half of the decomposition the probe has never measured.
+#
+# Teachers are trained by a different workflow (completion-only SFT on the eval
+# templates) on a different data distribution, so whether the quadratic term dominates
+# at THEIR aggressive cells is an open question, not an extrapolation from the students.
+# The decomposition algebra is workflow-agnostic: B_0 = 0 and A_init is reconstructable
+# the same way (teachers.sft_io is the code path both share).
+#
+# NOTE ON SCALE: the teacher tree holds ~74k adapters across all animals and bases. This
+# config pins one animal and one base to stay in the low thousands. Always --dry-run a
+# widened selector before launching.
+
+kinds: [teacher]
+animals: [dog]
+base_models: [pythia-160m]
+tags: []
+ftseeds: []
+checkpoints: false
+wrong_seed_control: true
+include_w0: true

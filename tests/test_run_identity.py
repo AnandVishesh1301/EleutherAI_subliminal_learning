@@ -38,7 +38,13 @@ from subliminal_learning.run_gate import (
     student_gate_action,
 )
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
-from subliminal_learning.teachers.run_layout import _format_lr, model_dir_name
+from subliminal_learning.teachers.run_layout import (
+    _format_lr,
+    model_dir_name,
+    model_dir_parts,
+    model_dir_parts_from_name,
+    teacher_run_dir,
+)
 
 _ORG = "EleutherAI"
 _NONE = PythiaModelSpec(size="160m", seed=1, variant="data")
@@ -70,6 +76,52 @@ def test_spec_label_none_revision_unchanged():
 
 def test_spec_label_with_revision_appends_suffix():
     assert spec_label(_REV) == "data-seed1@step3000"
+
+
+# --- model_dir_parts / model_dir_parts_from_name: conditional ckpt/ level -------------
+
+def test_model_dir_parts_none_revision_is_single_component():
+    assert model_dir_parts(_NONE, _ORG) == ("pythia-160m-data-seed1",)
+
+
+def test_model_dir_parts_with_revision_gathers_under_ckpt():
+    assert model_dir_parts(_REV, _ORG) == ("ckpt", "pythia-160m-data-seed1@step3000")
+
+
+def test_model_dir_parts_from_name_plain_is_single_component():
+    assert model_dir_parts_from_name("pythia-160m-data-seed1") == (
+        "pythia-160m-data-seed1",
+    )
+
+
+def test_model_dir_parts_from_name_at_rev_gathers_under_ckpt():
+    assert model_dir_parts_from_name("pythia-160m-data-seed1@step3000") == (
+        "ckpt", "pythia-160m-data-seed1@step3000",
+    )
+
+
+# --- teacher_run_dir: ckpt/ level for a revision spec, byte-identical otherwise --------
+
+_LORA = LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
+_TRAIN = TrainConfig(
+    learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64, max_grad_norm=1.0,
+    warmup_ratio=0.05, lr_scheduler_type="linear", seed=0, optim="adamw_torch",
+)
+_ORIGINAL_REV = PythiaModelSpec(size="160m", seed=0, variant="full", revision="step1000")
+
+
+def test_teacher_run_dir_with_revision_inserts_ckpt_level():
+    d = teacher_run_dir(Path("/out"), "cat", _ORIGINAL_REV, _ORG, _TRAIN, _LORA)
+    assert str(d).endswith(
+        "teachers/cat/ckpt/pythia-160m@step1000/ep1_lr2e-4_r8a8/ftseed0"
+    )
+
+
+def test_teacher_run_dir_none_revision_byte_identical():
+    d = teacher_run_dir(Path("/out"), "cat", _NONE, _ORG, _TRAIN, _LORA)
+    assert d == Path(
+        "/out/teachers/cat/pythia-160m-data-seed1/ep1_lr2e-4_r8a8/ftseed0"
+    )
 
 
 # --- parse_base_models: optional @revision suffix ------------------------------------

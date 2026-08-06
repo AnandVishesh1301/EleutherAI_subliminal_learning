@@ -19,7 +19,6 @@ import datasets
 import numpy as np
 import tokenizers
 import transformers
-from datasets import load_dataset
 from loguru import logger
 
 from subliminal_learning.coherence.config import PileCoherenceConfig
@@ -31,7 +30,12 @@ from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.loading_io import load_tokenizer
 from subliminal_learning.models.registry import resolve_hf_repo_id
 from subliminal_learning.teachers.model_specs import original_160m_spec
+from subliminal_learning.utils.hf_datasets import load_one_split
 from subliminal_learning.utils.io import atomic_write_json
+
+
+# The single-split loader moved to `utils.hf_datasets` when the CKA pool builder hit the
+# same over-download trap; it is shared now rather than duplicated.
 
 
 def tokenizer_fingerprint(tokenizer) -> str:
@@ -76,8 +80,13 @@ def _git_head() -> str | None:
         return None
 
 
-def _shard_dir(cfg: PileCoherenceConfig, paths: PathsConfig) -> Path:
+def shard_dir(cfg: PileCoherenceConfig, paths: PathsConfig) -> Path:
+    """The versioned shard directory for ``cfg.shard.version`` under the dataset cache."""
     return paths.dataset_cache_root / "pile_coherence" / cfg.shard.version
+
+
+# Back-compat private alias (used within this module).
+_shard_dir = shard_dir
 
 
 def build_shard(
@@ -122,7 +131,7 @@ def build_shard(
     vocab_size = invariant_vocab_size(tokenizer)
     base_vocab_size = tokenizer.vocab_size
 
-    ds = load_dataset(cfg.shard.dataset_name, split=cfg.shard.dataset_split)
+    ds = load_one_split(cfg.shard.dataset_name, cfg.shard.dataset_split)
     n_rows = len(ds)
     logger.info(
         "Loaded {} split {} ({} docs); sampling to {} tokens (seed {}).",

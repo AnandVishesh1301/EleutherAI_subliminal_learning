@@ -37,6 +37,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from subliminal_learning.jobqueue import yielding
+
 # Per-user: these flock files live in a world-readable /tmp and are owned by whoever
 # creates them, so a shared prefix makes one account's locks unopenable by the other.
 DEFAULT_LOCK_PREFIX = f"/tmp/subliminal_jobq_{getpass.getuser()}"
@@ -54,6 +56,10 @@ class GpuPolicy:
         reservation_warmup_s: How long a granted slot's memory is counted from the ledger
             rather than from ``nvidia-smi`` — cover the job's model-load ramp.
         env: Extra environment for every job dispatched by this node.
+
+    The ``yield_*`` fields configure the opt-in GPU-yielding framework (see
+    ``jobqueue/yielding.py``). They are all defaulted so old policy files keep working and
+    the feature is OFF unless ``yield_to_foreign`` is explicitly set true.
     """
 
     gpus: list[int]
@@ -61,6 +67,19 @@ class GpuPolicy:
     free_mem_mib: int
     reservation_warmup_s: int = DEFAULT_RESERVATION_WARMUP_S
     env: dict[str, str] = field(default_factory=dict)
+    yield_to_foreign: bool = False
+    yield_poll_s: float = 30.0
+    yield_confirm_polls: int = 2
+    yield_min_foreign_procs: int = 1
+    yield_cooldown_s: float = 900.0
+    yield_action: str = "kill"
+    # Only consulted for yield_action == "drain_if_near_done": a live job whose estimated
+    # progress is >= yield_drain_threshold is spared (runs to completion instead of being
+    # killed+requeued); yield_drain_max_s caps how long a spared job may keep a yielded card;
+    # yield_progress_regex (two numeric groups = current/total) opts into log-based progress.
+    yield_drain_threshold: float = 0.8
+    yield_drain_max_s: float = 1800.0
+    yield_progress_regex: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "GpuPolicy":
@@ -72,6 +91,15 @@ class GpuPolicy:
                 d.get("reservation_warmup_s", DEFAULT_RESERVATION_WARMUP_S)
             ),
             env={str(k): str(v) for k, v in (d.get("env") or {}).items()},
+            yield_to_foreign=bool(d.get("yield_to_foreign", False)),
+            yield_poll_s=float(d.get("yield_poll_s", 30.0)),
+            yield_confirm_polls=int(d.get("yield_confirm_polls", 2)),
+            yield_min_foreign_procs=int(d.get("yield_min_foreign_procs", 1)),
+            yield_cooldown_s=float(d.get("yield_cooldown_s", 900.0)),
+            yield_action=str(d.get("yield_action", "kill")),
+            yield_drain_threshold=float(d.get("yield_drain_threshold", 0.8)),
+            yield_drain_max_s=float(d.get("yield_drain_max_s", 1800.0)),
+            yield_progress_regex=(d.get("yield_progress_regex") or None),
         )
 
 
@@ -154,14 +182,22 @@ class GpuManager:
         root: Path,
         hostname: str,
         *,
-        lock_prefix: str = DEFAULT_LOCK_PREFIX,
+        lock_prefix: str | None = None,
         mem_query=query_free_mem,
         mem_checks: int = 2,
         mem_interval_s: float = 3.0,
     ) -> None:
         self.root = Path(root)
         self.hostname = hostname
-        self.lock_prefix = lock_prefix
+        # SL_JOBQ_LOCK_PREFIX: on shared nodes another user's jobq instance may have created
+        # 0644 lock files under the default /tmp prefix that we cannot even open (os.open ->
+        # EACCES before flock). Slot locks only coordinate OUR pools, and only when their GPU
+        # sets overlap — so a pool bound to a disjoint GPU set can safely run in its own lock
+        # namespace; co-existence with the foreign user's jobs on those GPUs is handled by the
+        # free-mem gate + yield watchdog, not by locks.
+        self.lock_prefix = (
+            lock_prefix or os.environ.get("SL_JOBQ_LOCK_PREFIX") or DEFAULT_LOCK_PREFIX
+        )
         self.mem_query = mem_query
         self.mem_checks = mem_checks
         self.mem_interval_s = mem_interval_s
@@ -342,10 +378,16 @@ class GpuManager:
             order = sorted(
                 rotated, key=lambda g: counts[g]
             )  # stable: rotation breaks ties
+            # GPUs yielded to a foreign user are off-limits — skip them before the memory
+            # snapshot (opt-in; re-read here so a flip/reclaim takes effect on the next
+            # acquire). Empty set when the feature is off or the marker file is missing.
+            yielded = yielding.yielded_gpus(self.root, self.hostname)
             # One snapshot up front: GPUs that are externally memory-occupied are skipped
             # without slot probing or gate sleeps (bounds time under the acquire lock).
             snapshot = self.mem_query()
             for g in order:
+                if g in yielded:
+                    continue
                 if snapshot.get(g, 0) - reserved[g] < mem_mib:
                     continue
                 held: list[tuple[int, int]] = []  # (slot index, fd)
@@ -369,6 +411,17 @@ class GpuManager:
                             _close_lock(fd)
                         continue
                 if self._mem_ok(g, mem_mib, reserved[g]):
+                    # Late yield re-check: the memory gate SLEEPS (~mem_interval_s) while we
+                    # hold the slot, and the watchdog can yield this card during that sleep.
+                    # Re-read the marker fresh here (not the pre-loop snapshot) and, if the GPU
+                    # became yielded, roll back exactly like the other abandon paths rather than
+                    # dispatch onto a card we promised to vacate. Before stamping the
+                    # reservation: an abandoned slot must leave no ledger entry behind.
+                    if g in yielding.yielded_gpus(self.root, self.hostname):
+                        for _, fd in held:
+                            _close_lock(fd)
+                        _close_lock(group_fd)
+                        continue
                     for _, fd in held:
                         self._write_reservation(fd, mem_mib / len(held))
                     return GpuSlot(
