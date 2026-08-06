@@ -1,9 +1,12 @@
 """CLI: a file-based GPU job queue + per-node worker pool (``uv run python -m scripts.jobq``).
 
 The repo-proper replacement for the per-sweep shell launchers. Submit jobs into named
-queues under a shared ``--root`` (default ``run_logs/queue``), then run one foreground
-worker pool per node; the pool claims, GPU-schedules, runs, and records each job. Two nodes
-can drain the same root safely — a worker only ever acts on its OWN node's claims/pids.
+queues under a ``--root`` (default: ``queue_root`` from the paths YAML), then run one
+foreground worker pool per node; the pool claims, GPU-schedules, runs, and records each
+job. Two nodes can drain the same root safely — a worker only ever acts on its OWN
+node's claims/pids. Keep the root inside your own SSD subdir: the tree is
+world-writable so cross-node workers can share it, so a root under another account's
+subdir mixes both users' queues.
 
 Subcommands: ``submit`` / ``work`` / ``status`` / ``requeue`` / ``release`` / ``stop`` /
 ``wait``. See ARCHITECTURE.md ("Job queue framework") for the layout and a worked example.
@@ -14,18 +17,34 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
+import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
+from subliminal_learning.config import resolve_queue_root
 from subliminal_learning.jobqueue import store, yielding
-from subliminal_learning.jobqueue.gpu import GpuManager
+from subliminal_learning.jobqueue.gpu import DEFAULT_LOCK_PREFIX, GpuManager
 from subliminal_learning.jobqueue.model import parse_jobs_file
-from subliminal_learning.jobqueue.worker import run_pool
+from subliminal_learning.jobqueue.worker import DEFAULT_FAIL_STREAK_LIMIT, run_pool
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
-DEFAULT_ROOT = Path("run_logs/queue")
+PATHS_CONFIG = Path("configs/paths/paths_local.yaml")
+ROOT_HELP = "Queue state root (default: queue_root from the paths YAML)."
+LOCK_PREFIX_HELP = (
+    f"Prefix for GPU slot flock files (default {DEFAULT_LOCK_PREFIX}). Point it at "
+    "the pool's prefix when the pool was started with a non-default one."
+)
+
+
+def _root(root: Path | None) -> Path:
+    """CLI ``--root`` if given, else the paths YAML's ``queue_root``."""
+    if root is not None:
+        return root
+    if not PATHS_CONFIG.exists():
+        return resolve_queue_root({})
+    return resolve_queue_root(yaml.safe_load(PATHS_CONFIG.read_text()) or {})
 
 
 def _claim_age_str(start_utc: str | None) -> str:
@@ -84,11 +103,12 @@ def submit(
         help="Queue-default job weight in global per-GPU slot-units (heavy jobs take >1).",
     ),
     env: list[str] = typer.Option(None, "--env", help="Queue-default env, repeatable K=V."),
-    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
+    root: Path = typer.Option(None, help=ROOT_HELP),
     dry_run: bool = typer.Option(False, help="Print the expanded jobs and exit."),
 ) -> None:
     """Expand a jobs file and append the jobs to QUEUE (creating meta on first submit)."""
     configure_loguru()
+    root = _root(root)
     jobs = parse_jobs_file(jobs_file.read_text(), template=template)
     if dry_run:
         logger.info("Would submit {} job(s) to queue {!r}:", len(jobs), queue)
@@ -126,19 +146,45 @@ def submit(
 
 @app.command()
 def work(
-    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
+    root: Path = typer.Option(None, help=ROOT_HELP),
     workers: int = typer.Option(1, help="Number of worker threads (per-GPU slot cap is global)."),
-    queues: str = typer.Option(None, help="Comma list restricting which queues to drain."),
+    queues: str = typer.Option(
+        None,
+        help="Comma list restricting which queues to drain (strongly recommended on a "
+        "shared --root so you do not claim another campaign's jobs).",
+    ),
+    lock_prefix: str = typer.Option(None, help=LOCK_PREFIX_HELP),
+    fail_streak_limit: int = typer.Option(
+        DEFAULT_FAIL_STREAK_LIMIT,
+        help="Consecutive job failures that trip a queue; the pool then skips it "
+        "until a requeue grows its pending count. 0 disables the breaker.",
+    ),
 ) -> None:
-    """Run the foreground worker pool on THIS node (nohup it yourself for long runs)."""
+    """Run the foreground worker pool on THIS node (keep it in a tmux pane)."""
     load_dotenv()
     configure_loguru()
+    root = _root(root)
     q = [x.strip() for x in queues.split(",") if x.strip()] if queues else None
-    logger.info("Starting worker pool on {} ({} threads) under {}", store.this_host(), workers, root)
-    run_pool(root, workers=workers, queues=q)
+    logger.info(
+        "Starting worker pool on {} ({} threads) under {} queues={} lock_prefix={}",
+        store.this_host(),
+        workers,
+        root,
+        q or "(all)",
+        lock_prefix or DEFAULT_LOCK_PREFIX,
+    )
+    run_pool(
+        root,
+        workers=workers,
+        queues=q,
+        lock_prefix=lock_prefix,
+        fail_streak_limit=fail_streak_limit or 0,
+    )
 
 
-def _report_root(root: Path, queue: str | None = None) -> None:
+def _report_root(
+    root: Path, queue: str | None = None, lock_prefix: str | None = None
+) -> None:
     """Print per-queue counts for ``root`` (one queue if named) + this node's occupancy."""
     names = [queue] if queue else store.list_queues(root)
     if not names:
@@ -164,8 +210,9 @@ def _report_root(root: Path, queue: str | None = None) -> None:
                     f"crashed, run: jobq release {name} '{r['key']}' --force]"
                 )
             logger.info(line)
+    prefix = lock_prefix or DEFAULT_LOCK_PREFIX
     try:
-        occ = GpuManager(root, store.this_host()).occupancy()
+        occ = GpuManager(root, store.this_host(), lock_prefix=prefix).occupancy()
         if occ:
             logger.info(
                 "this node ({}) slot occupancy: {}",
@@ -174,6 +221,13 @@ def _report_root(root: Path, queue: str | None = None) -> None:
             )
     except FileNotFoundError:
         pass  # no policy on this node -> nothing to report
+    except PermissionError as exc:
+        logger.warning(
+            "could not read GPU slot locks under {} ({}). Pass --lock-prefix "
+            "matching the prefix the worker pool was started with.",
+            prefix,
+            exc,
+        )
     # Yielded GPUs (opt-in framework): silent when the feature is off / marker file absent.
     yielded = yielding.read_yielded(root, store.this_host())
     if yielded:
@@ -190,19 +244,21 @@ def _report_root(root: Path, queue: str | None = None) -> None:
 @app.command()
 def status(
     queue: str = typer.Argument(None, help="One queue (default: all queues under --root)."),
-    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
+    root: Path = typer.Option(None, help=ROOT_HELP),
+    lock_prefix: str = typer.Option(None, help=LOCK_PREFIX_HELP),
 ) -> None:
     """Per-queue pending/running/done/failed counts + this node's per-GPU slot occupancy."""
     configure_loguru()
-    _report_root(root, queue)
+    _report_root(_root(root), queue, lock_prefix)
 
 
 @app.command()
 def overview(
     parent: Path = typer.Option(
-        DEFAULT_ROOT.parent,
-        help="Directory holding one or more queue roots (default: run_logs/).",
+        None,
+        help="Directory holding one or more queue roots (default: the queue root's parent).",
     ),
+    lock_prefix: str = typer.Option(None, help=LOCK_PREFIX_HELP),
 ) -> None:
     """Status of EVERY queue root under PARENT — cross-node visibility from one command.
 
@@ -211,6 +267,7 @@ def overview(
     so this shows what every node is doing without merging their jobs.
     """
     configure_loguru()
+    parent = parent if parent is not None else _root(None).parent
     if not parent.is_dir():
         logger.info("No such directory: {}", parent)
         return
@@ -223,17 +280,18 @@ def overview(
         return
     for root in roots:
         logger.info("=== root: {} ===", root)
-        _report_root(root)
+        _report_root(root, lock_prefix=lock_prefix)
 
 
 @app.command()
 def requeue(
     queue: str = typer.Argument(..., help="Queue to requeue jobs in."),
     all_: bool = typer.Option(False, "--all", help="Requeue done jobs too (default: failed only)."),
-    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
+    root: Path = typer.Option(None, help=ROOT_HELP),
 ) -> None:
     """Make terminal jobs pending again (failed-only by default) so a worker retries them."""
     configure_loguru()
+    root = _root(root)
     keys = store.requeue(root, queue, failed_only=not all_)
     logger.info("Requeued {} job(s) in {!r}: {}", len(keys), queue, keys or "-")
 
@@ -248,10 +306,11 @@ def release(
         help="Required. Releases even ANOTHER node's claim — only do this when the owning "
         "node is confirmed dead/idle, or the job may run twice.",
     ),
-    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
+    root: Path = typer.Option(None, help=ROOT_HELP),
 ) -> None:
     """Force-remove a stuck claim, ignoring the node guard (needs --force; never automatic)."""
     configure_loguru()
+    root = _root(root)
     if not force:
         raise typer.BadParameter("release ignores the node safety guard; pass --force to confirm")
     existed = store.force_release(root, queue, key)
@@ -260,11 +319,12 @@ def release(
 
 @app.command()
 def stop(
-    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
+    root: Path = typer.Option(None, help=ROOT_HELP),
     clear: bool = typer.Option(False, "--clear", help="Remove the stop file instead of setting it."),
 ) -> None:
     """Signal this node's workers to exit after their current jobs (or --clear to resume)."""
     configure_loguru()
+    root = _root(root)
     p = store.stop_path(root, store.this_host())
     if clear:
         p.unlink(missing_ok=True)
@@ -279,12 +339,13 @@ def stop(
 def wait(
     queue: str = typer.Argument(..., help="Queue to block on."),
     poll_s: float = typer.Option(60.0, "--poll-s", help="Seconds between completion checks."),
-    root: Path = typer.Option(DEFAULT_ROOT, help="Queue state root."),
+    root: Path = typer.Option(None, help=ROOT_HELP),
 ) -> None:
     """Block until QUEUE is complete (every job terminal); for chaining from a shell."""
     import time
 
     configure_loguru()
+    root = _root(root)
     if not store.queue_exists(root, queue):
         raise typer.BadParameter(f"queue {queue!r} does not exist under {root}")
     while not store.queue_complete(root, queue):

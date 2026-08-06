@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.gpu import GpuManager, GpuSlot
 from subliminal_learning.jobqueue.model import Job, parse_jobs_file, sanitize_jobkey
-from subliminal_learning.jobqueue.worker import run_pool
+from subliminal_learning.jobqueue.worker import MasterLog, _Pool, run_pool
 
 
 # ------------------------- fakes -------------------------
@@ -61,7 +62,9 @@ def _write_policy(root: Path, hostname: str, **over):
 
 def test_parse_plain_lines_with_template_and_field_split():
     text = "owl|pythia-160m|2e-4\ncat|pythia-160m|5e-4\n"
-    jobs = parse_jobs_file(text, template="train --animal {0} --base {1} --lr {2} # {line}")
+    jobs = parse_jobs_file(
+        text, template="train --animal {0} --base {1} --lr {2} # {line}"
+    )
     assert [j.cmd for j in jobs] == [
         "train --animal owl --base pythia-160m --lr 2e-4 # owl|pythia-160m|2e-4",
         "train --animal cat --base pythia-160m --lr 5e-4 # cat|pythia-160m|5e-4",
@@ -161,8 +164,16 @@ def test_claim_skips_already_claimed_and_terminal(tmp_path):
     a = store.claim_next(tmp_path, "q", "hostA", 111)
     # record a result for a -> terminal; next claim must move on to b.
     store.record_result(
-        tmp_path, "q", a, rc=0, node="hostA", gpu=0,
-        start_utc="s", end_utc="e", log="l", attempt=0,
+        tmp_path,
+        "q",
+        a,
+        rc=0,
+        node="hostA",
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=0,
     )
     store.remove_claim(tmp_path, "q", a.jobkey)
     b = store.claim_next(tmp_path, "q", "hostA", 222)
@@ -195,7 +206,9 @@ def test_ownerless_claim_reclaimed_after_grace_any_node(tmp_path):
     store.append_jobs(tmp_path, "q", [Job("j", "true")])
     cdir = tmp_path / "q" / "claims" / "j"
     cdir.mkdir(parents=True)  # crash debris: claim dir, no owner.json
-    assert store.steal_stale(tmp_path, "q", "some-other-node") == []  # fresh: grace period
+    assert (
+        store.steal_stale(tmp_path, "q", "some-other-node") == []
+    )  # fresh: grace period
     old = _time.time() - store.ORPHAN_CLAIM_GRACE_S - 60
     os.utime(cdir, (old, old))
     assert store.steal_stale(tmp_path, "q", "some-other-node") == ["j"]  # any node may
@@ -210,8 +223,18 @@ def test_queue_state_dirs_are_world_writable(tmp_path):
         store.create_queue(tmp_path / "root", "q")
         store.append_jobs(tmp_path / "root", "q", [Job("j", "true")])
         job = store.claim_next(tmp_path / "root", "q", "n", 1)
-        store.record_result(tmp_path / "root", "q", job, rc=0, node="n", gpu=0,
-                            start_utc="s", end_utc="e", log="l", attempt=0)
+        store.record_result(
+            tmp_path / "root",
+            "q",
+            job,
+            rc=0,
+            node="n",
+            gpu=0,
+            start_utc="s",
+            end_utc="e",
+            log="l",
+            attempt=0,
+        )
     finally:
         os.umask(old_umask)
     # other-node access rides on the 'other' bits (different uids, no shared group)
@@ -234,27 +257,56 @@ def test_strict_deps_blocks_on_failed_dep(tmp_path):
     store.create_queue(tmp_path, "dep")
     store.append_jobs(tmp_path, "dep", [Job("a", "x")])
     a = store.claim_next(tmp_path, "dep", store.this_host(), 1)
-    store.record_result(tmp_path, "dep", a, rc=7, node=store.this_host(), gpu=0,
-                        start_utc="s", end_utc="e", log="l", attempt=0)
+    store.record_result(
+        tmp_path,
+        "dep",
+        a,
+        rc=7,
+        node=store.this_host(),
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=0,
+    )
     store.remove_claim(tmp_path, "dep", a.jobkey)
     store.create_queue(tmp_path, "strict", depends_on=["dep"], strict_deps=True)
     store.append_jobs(tmp_path, "strict", [Job("m", "x")])
     store.create_queue(tmp_path, "lenient", depends_on=["dep"])
     store.append_jobs(tmp_path, "lenient", [Job("m", "x")])
     pool = _Pool(
-        tmp_path, store.this_host(), FakeGpuManager(),
+        tmp_path,
+        store.this_host(),
+        FakeGpuManager(),
         MasterLog(tmp_path / "logs" / "m.log"),
-        queues_filter=None, poll_s=0.01, gpu_wait_s=0.01,
+        queues_filter=None,
+        poll_s=0.01,
+        gpu_wait_s=0.01,
     )
     names = _ready_names(pool)
     assert "lenient" in names and "strict" not in names
-    store.requeue(tmp_path, "dep")  # failed job pending again -> dep incomplete for both
+    store.requeue(
+        tmp_path, "dep"
+    )  # failed job pending again -> dep incomplete for both
     assert _ready_names(pool) == ["dep"]  # only dep itself has runnable work now
     b = store.claim_next(tmp_path, "dep", store.this_host(), 1)
-    store.record_result(tmp_path, "dep", b, rc=0, node=store.this_host(), gpu=0,
-                        start_utc="s", end_utc="e", log="l", attempt=1)
+    store.record_result(
+        tmp_path,
+        "dep",
+        b,
+        rc=0,
+        node=store.this_host(),
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=1,
+    )
     store.remove_claim(tmp_path, "dep", b.jobkey)
-    assert set(_ready_names(pool)) == {"lenient", "strict"}  # all-green dep unblocks strict
+    assert set(_ready_names(pool)) == {
+        "lenient",
+        "strict",
+    }  # all-green dep unblocks strict
 
 
 def test_derived_states_and_status_counts(tmp_path):
@@ -263,17 +315,39 @@ def test_derived_states_and_status_counts(tmp_path):
     store.append_jobs(tmp_path, "q", jobs)
     # a: done, b: failed, c: running (claimed), d: pending
     ja = store.claim_next(tmp_path, "q", "hostA", 1)
-    store.record_result(tmp_path, "q", ja, rc=0, node="hostA", gpu=0,
-                        start_utc="s", end_utc="e", log="l", attempt=0)
+    store.record_result(
+        tmp_path,
+        "q",
+        ja,
+        rc=0,
+        node="hostA",
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=0,
+    )
     store.remove_claim(tmp_path, "q", ja.jobkey)
     jb = store.claim_next(tmp_path, "q", "hostA", 2)
-    store.record_result(tmp_path, "q", jb, rc=3, node="hostA", gpu=0,
-                        start_utc="s", end_utc="e", log="l", attempt=0)
+    store.record_result(
+        tmp_path,
+        "q",
+        jb,
+        rc=3,
+        node="hostA",
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=0,
+    )
     store.remove_claim(tmp_path, "q", jb.jobkey)
     store.claim_next(tmp_path, "q", "hostA", 3)  # c stays claimed (running)
     st = store.queue_status(tmp_path, "q")
     assert (st["done"], st["failed"], st["running"], st["pending"]) == (1, 1, 1, 1)
-    assert st["running_jobs"][0]["key"] == "c" and st["running_jobs"][0]["node"] == "hostA"
+    assert (
+        st["running_jobs"][0]["key"] == "c" and st["running_jobs"][0]["node"] == "hostA"
+    )
     assert not store.queue_complete(tmp_path, "q")
 
 
@@ -281,8 +355,18 @@ def test_queue_complete_when_all_terminal(tmp_path):
     store.create_queue(tmp_path, "q")
     store.append_jobs(tmp_path, "q", [Job("a", "x")])
     a = store.claim_next(tmp_path, "q", "hostA", 1)
-    store.record_result(tmp_path, "q", a, rc=1, node="hostA", gpu=0,
-                        start_utc="s", end_utc="e", log="l", attempt=0)
+    store.record_result(
+        tmp_path,
+        "q",
+        a,
+        rc=1,
+        node="hostA",
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=0,
+    )
     assert store.queue_complete(tmp_path, "q")  # failed still counts as terminal
 
 
@@ -330,15 +414,29 @@ def test_deps_block_until_complete_and_failed_still_satisfies(tmp_path):
     store.create_queue(tmp_path, "main", depends_on=["dep"])
     store.append_jobs(tmp_path, "main", [Job("m", "x")])
     pool = _Pool(
-        tmp_path, store.this_host(), FakeGpuManager(),
+        tmp_path,
+        store.this_host(),
+        FakeGpuManager(),
         MasterLog(tmp_path / "logs" / "m.log"),
-        queues_filter=None, poll_s=0.01, gpu_wait_s=0.01,
+        queues_filter=None,
+        poll_s=0.01,
+        gpu_wait_s=0.01,
     )
     assert "main" not in _ready_names(pool)  # dep incomplete -> main blocked
     # complete dep with a FAILURE
     a = store.claim_next(tmp_path, "dep", store.this_host(), 1)
-    store.record_result(tmp_path, "dep", a, rc=7, node=store.this_host(), gpu=0,
-                        start_utc="s", end_utc="e", log="l", attempt=0)
+    store.record_result(
+        tmp_path,
+        "dep",
+        a,
+        rc=7,
+        node=store.this_host(),
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=0,
+    )
     assert "main" in _ready_names(pool)  # failed-terminal dep still satisfies
 
 
@@ -349,12 +447,32 @@ def test_requeue_failed_only_bumps_attempt(tmp_path):
     store.create_queue(tmp_path, "q")
     store.append_jobs(tmp_path, "q", [Job("ok", "x"), Job("bad", "x")])
     ok = store.claim_next(tmp_path, "q", store.this_host(), 1)
-    store.record_result(tmp_path, "q", ok, rc=0, node=store.this_host(), gpu=0,
-                        start_utc="s", end_utc="e", log="l", attempt=0)
+    store.record_result(
+        tmp_path,
+        "q",
+        ok,
+        rc=0,
+        node=store.this_host(),
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=0,
+    )
     store.remove_claim(tmp_path, "q", ok.jobkey)
     bad = store.claim_next(tmp_path, "q", store.this_host(), 2)
-    store.record_result(tmp_path, "q", bad, rc=9, node=store.this_host(), gpu=0,
-                        start_utc="s", end_utc="e", log="l", attempt=0)
+    store.record_result(
+        tmp_path,
+        "q",
+        bad,
+        rc=9,
+        node=store.this_host(),
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=0,
+    )
     store.remove_claim(tmp_path, "q", bad.jobkey)
     requeued = store.requeue(tmp_path, "q", failed_only=True)
     assert requeued == [sanitize_jobkey("bad")]
@@ -376,8 +494,9 @@ def test_gpu_manager_acquires_and_memory_gate(tmp_path, monkeypatch):
         calls["n"] += 1
         return {0: 50, 1: 5000}  # gpu0 too small, gpu1 fine
 
-    gm = GpuManager(tmp_path, host, lock_prefix=prefix, mem_query=fake_mem,
-                    mem_interval_s=0.0)
+    gm = GpuManager(
+        tmp_path, host, lock_prefix=prefix, mem_query=fake_mem, mem_interval_s=0.0
+    )
     slot = gm.acquire(100)
     assert slot is not None and slot.gpu == 1  # skipped mem-starved gpu0
     assert calls["n"] >= 2  # two consecutive checks on the winner
@@ -388,6 +507,71 @@ def test_gpu_manager_acquires_and_memory_gate(tmp_path, monkeypatch):
     assert gm.acquire(100).gpu == 1
 
 
+def test_reservation_blocks_dispatch_against_not_yet_allocated_memory(tmp_path):
+    """A granted-but-still-loading job must be charged against the next admission.
+
+    ``nvidia-smi`` lags a fresh job by minutes (imports + weight load), so a static free
+    snapshot would admit three 11 GB cells onto 12 GB of real headroom. The ledger on the
+    slot locks makes the second acquire see 22000-11000, i.e. not enough.
+    """
+    host = store.this_host()
+    _write_policy(tmp_path, host, gpus=[0], cap_per_gpu=3, free_mem_mib=11000)
+    gm = GpuManager(
+        tmp_path,
+        host,
+        lock_prefix=str(tmp_path / "lock"),
+        mem_query=lambda: {0: 22000},  # frozen: the first job has not allocated yet
+        mem_interval_s=0.0,
+    )
+    first = gm.acquire(11000)
+    assert first is not None
+    second = gm.acquire(11000)
+    assert second is not None  # 22000 - 11000 reserved == 11000, exactly fits
+    assert gm.acquire(11000) is None  # 22000 - 22000 reserved: no room left
+    first.release()
+    assert gm.acquire(11000) is not None
+
+
+def test_reservation_expires_after_warmup(tmp_path):
+    """Past the warmup the job's memory shows up in nvidia-smi; don't double-charge it."""
+    host = store.this_host()
+    _write_policy(
+        tmp_path,
+        host,
+        gpus=[0],
+        cap_per_gpu=3,
+        free_mem_mib=11000,
+        reservation_warmup_s=0,
+    )
+    gm = GpuManager(
+        tmp_path,
+        host,
+        lock_prefix=str(tmp_path / "lock"),
+        mem_query=lambda: {0: 22000},
+        mem_interval_s=0.0,
+    )
+    held = [gm.acquire(11000) for _ in range(3)]
+    assert all(s is not None for s in held)  # ledger expired -> only the slot cap binds
+    for s in held:
+        s.release()
+
+
+def test_weighted_job_reservation_is_not_counted_per_slot(tmp_path):
+    host = store.this_host()
+    _write_policy(tmp_path, host, gpus=[0], cap_per_gpu=4, free_mem_mib=1000)
+    gm = GpuManager(
+        tmp_path,
+        host,
+        lock_prefix=str(tmp_path / "lock"),
+        mem_query=lambda: {0: 3000},
+        mem_interval_s=0.0,
+    )
+    heavy = gm.acquire(1000, slots=2)  # one 1000 MiB claim spread over two slot files
+    assert heavy is not None
+    assert gm.acquire(1000) is not None  # 3000 - 1000, not 3000 - 2000
+    heavy.release()
+
+
 def test_gpu_policy_missing_errors(tmp_path):
     with pytest.raises(FileNotFoundError):
         GpuManager(tmp_path, "nosuchhost").acquire(10)
@@ -396,8 +580,13 @@ def test_gpu_policy_missing_errors(tmp_path):
 def test_acquire_spreads_least_loaded_first(tmp_path):
     host = store.this_host()
     _write_policy(tmp_path, host, gpus=[0, 1], cap_per_gpu=2, free_mem_mib=100)
-    gm = GpuManager(tmp_path, host, lock_prefix=str(tmp_path / "lock"),
-                    mem_query=lambda: {0: 5000, 1: 5000}, mem_interval_s=0.0)
+    gm = GpuManager(
+        tmp_path,
+        host,
+        lock_prefix=str(tmp_path / "lock"),
+        mem_query=lambda: {0: 5000, 1: 5000},
+        mem_interval_s=0.0,
+    )
     a = gm.acquire(100)
     b = gm.acquire(100)
     # breadth-first: with both cards empty-ish, the second job lands on the OTHER GPU
@@ -414,14 +603,21 @@ def test_acquire_spreads_least_loaded_first(tmp_path):
 def test_acquire_weighted_slots_budget_math(tmp_path):
     host = store.this_host()
     _write_policy(tmp_path, host, gpus=[0], cap_per_gpu=8, free_mem_mib=100)
-    gm = GpuManager(tmp_path, host, lock_prefix=str(tmp_path / "lock"),
-                    mem_query=lambda: {0: 5000}, mem_interval_s=0.0)
+    gm = GpuManager(
+        tmp_path,
+        host,
+        lock_prefix=str(tmp_path / "lock"),
+        mem_query=lambda: {0: 5000},
+        mem_interval_s=0.0,
+    )
     light = [gm.acquire(100) for _ in range(6)]  # 6 x weight-1
     heavy = gm.acquire(100, slots=2)  # 1 x weight-2 -> 8/8 units used
     assert all(s is not None for s in light) and heavy is not None
     assert gm.acquire(100) is None  # card exactly full: no unit left even for weight-1
     light[0].release()
-    assert gm.acquire(100, slots=2) is None  # 1 free unit: a weight-2 job still can't fit
+    assert (
+        gm.acquire(100, slots=2) is None
+    )  # 1 free unit: a weight-2 job still can't fit
     got = gm.acquire(100)
     assert got is not None  # but a weight-1 job can
     for s in light[1:] + [heavy, got]:
@@ -431,9 +627,16 @@ def test_acquire_weighted_slots_budget_math(tmp_path):
 def test_acquire_weight_above_budget_clamps_to_whole_card(tmp_path):
     host = store.this_host()
     _write_policy(tmp_path, host, gpus=[0], cap_per_gpu=4, free_mem_mib=100)
-    gm = GpuManager(tmp_path, host, lock_prefix=str(tmp_path / "lock"),
-                    mem_query=lambda: {0: 5000}, mem_interval_s=0.0)
-    whole = gm.acquire(100, slots=8)  # clamped to the 4-unit budget: takes the whole card
+    gm = GpuManager(
+        tmp_path,
+        host,
+        lock_prefix=str(tmp_path / "lock"),
+        mem_query=lambda: {0: 5000},
+        mem_interval_s=0.0,
+    )
+    whole = gm.acquire(
+        100, slots=8
+    )  # clamped to the 4-unit budget: takes the whole card
     assert whole is not None
     assert gm.acquire(100) is None
     whole.release()
@@ -452,8 +655,13 @@ def test_job_slots_field_roundtrip():
 def test_acquire_group_cap_is_stage_ceiling(tmp_path):
     host = store.this_host()
     _write_policy(tmp_path, host, gpus=[0], cap_per_gpu=4, free_mem_mib=100)
-    gm = GpuManager(tmp_path, host, lock_prefix=str(tmp_path / "lock"),
-                    mem_query=lambda: {0: 5000}, mem_interval_s=0.0)
+    gm = GpuManager(
+        tmp_path,
+        host,
+        lock_prefix=str(tmp_path / "lock"),
+        mem_query=lambda: {0: 5000},
+        mem_interval_s=0.0,
+    )
     a = gm.acquire(100, cap_per_gpu=1, cap_group="train")
     assert a is not None and a.gpu == 0
     # group "train" is capped at 1/GPU even though the global policy allows 4
@@ -463,7 +671,9 @@ def test_acquire_group_cap_is_stage_ceiling(tmp_path):
     c = gm.acquire(100)
     assert b is not None and c is not None
     a.release()
-    d = gm.acquire(100, cap_per_gpu=1, cap_group="train")  # released group slot reusable
+    d = gm.acquire(
+        100, cap_per_gpu=1, cap_group="train"
+    )  # released group slot reusable
     assert d is not None
     for s in (b, c, d):
         s.release()
@@ -475,11 +685,18 @@ def test_acquire_group_cap_is_stage_ceiling(tmp_path):
 def test_end_to_end_mini_run(tmp_path):
     store.create_queue(tmp_path, "q")
     store.append_jobs(
-        tmp_path, "q",
+        tmp_path,
+        "q",
         [Job("hi1", "echo hi"), Job("hi2", "echo hi"), Job("boom", "exit 3")],
     )
-    run_pool(tmp_path, workers=2, gpu=FakeGpuManager(), hostname="testnode",
-             poll_s=0.01, gpu_wait_s=0.01)
+    run_pool(
+        tmp_path,
+        workers=2,
+        gpu=FakeGpuManager(),
+        hostname="testnode",
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+    )
 
     results = {}
     for job in store.load_jobs(tmp_path, "q"):
@@ -540,12 +757,139 @@ def test_cwd_falls_back_to_repo_root_when_unset(tmp_path):
              poll_s=0.01, gpu_wait_s=0.01)
 
     assert _job_ran_in(tmp_path, "q", "bare") == Path(store.REPO_ROOT).resolve()
+# ------------------------- failure circuit breaker -------------------------
+
+
+def _run_pool_until(root, *, predicate, limit, timeout_s=30.0):
+    """Run the pool in a thread until `predicate` holds, then stop it and join."""
+    thread = threading.Thread(
+        target=run_pool,
+        args=(root,),
+        kwargs={
+            "workers": 1,
+            "gpu": FakeGpuManager(),
+            "hostname": "testnode",
+            "poll_s": 0.01,
+            "gpu_wait_s": 0.01,
+            "fail_streak_limit": limit,
+        },
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and not predicate():
+        time.sleep(0.05)
+    store.stop_path(root, "testnode").parent.mkdir(parents=True, exist_ok=True)
+    store.stop_path(root, "testnode").touch()
+    thread.join(timeout=timeout_s)
+    assert not thread.is_alive()
+
+
+def test_fail_streak_trips_queue_instead_of_burning_it(tmp_path):
+    """A deterministic startup failure must cost a few jobs, not the whole queue.
+
+    Regression for the 20260727_slbreadth halt: a run-set guard rejection made every
+    cell exit non-zero in seconds, and the pool drained ~350 pending jobs in 18 min.
+    """
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"boom{i}", "exit 1") for i in range(20)])
+
+    _run_pool_until(
+        tmp_path,
+        predicate=lambda: store.queue_status(tmp_path, "q")["failed"] >= 3,
+        limit=3,
+    )
+
+    st = store.queue_status(tmp_path, "q")
+    assert st["failed"] <= 5, f"breaker let the queue burn: {st}"
+    assert st["pending"] >= 15
+    assert not store.queue_complete(tmp_path, "q")
+    master = next((tmp_path / "logs").glob("*_worker.testnode.log")).read_text()
+    assert "TRIPPED q" in master
+
+
+def test_fail_streak_resets_on_success(tmp_path):
+    """Interleaved successes mean an unhealthy-looking queue is not tripped."""
+    store.create_queue(tmp_path, "q")
+    jobs = []
+    for i in range(6):
+        jobs += [Job(f"boom{i}", "exit 1"), Job(f"ok{i}", "true")]
+    store.append_jobs(tmp_path, "q", jobs)
+
+    run_pool(
+        tmp_path,
+        workers=1,
+        gpu=FakeGpuManager(),
+        hostname="testnode",
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+        fail_streak_limit=3,
+    )
+
+    st = store.queue_status(tmp_path, "q")
+    assert st["failed"] == 6 and st["done"] == 6 and st["pending"] == 0
+
+
+def test_tripped_queue_is_readmitted_after_requeue(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"boom{i}", "exit 1") for i in range(10)])
+    gpu = FakeGpuManager()
+    pool = _Pool(
+        tmp_path,
+        "testnode",
+        gpu,
+        MasterLog(tmp_path / "logs" / "master.log"),
+        queues_filter=None,
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+        fail_streak_limit=2,
+    )
+    for i in range(2):
+        store.record_result(
+            tmp_path,
+            "q",
+            Job(f"boom{i}", "exit 1"),
+            rc=1,
+            node="testnode",
+            gpu=0,
+            start_utc="s",
+            end_utc="e",
+            log="l",
+            attempt=0,
+        )
+        pool._record_outcome("q", 1)
+    assert pool.ready_queues() == []
+
+    store.requeue(tmp_path, "q", failed_only=True)
+
+    assert [n for n, _ in pool.ready_queues()] == ["q"]
+
+
+def test_fail_streak_limit_zero_disables_the_breaker(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"boom{i}", "exit 1") for i in range(6)])
+    run_pool(
+        tmp_path,
+        workers=1,
+        gpu=FakeGpuManager(),
+        hostname="testnode",
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+        fail_streak_limit=0,
+    )
+    assert store.queue_status(tmp_path, "q")["failed"] == 6
 
 
 def test_end_to_end_no_queues_exits_cleanly(tmp_path):
     # An empty root: pool should return immediately (all_complete over zero queues).
-    run_pool(tmp_path, workers=2, gpu=FakeGpuManager(), hostname="testnode",
-             poll_s=0.01, gpu_wait_s=0.01)
+    run_pool(
+        tmp_path,
+        workers=2,
+        gpu=FakeGpuManager(),
+        hostname="testnode",
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+    )
 
 
 # ------------------------- gpu yielding (opt-in) -------------------------

@@ -1,0 +1,56 @@
+# Seed-0 LoRA teacher grid -- the missing 7th init of the SDF teacher matrix.
+#
+# The 792-leaf tree (originally `sdf_teachers/12h_run`, now adopted into the run-set
+# below) covers the six PolyPythia ablation bases but not the stock release
+# `EleutherAI/pythia-160m` (`original`, label `full-seed0`). That init anchors the
+# seed-0 <-> data-seedK and seed-0 <-> weight-seedK arms of the cross-init factorial
+# and completes the teacher HP matrix from 6 inits to 7.
+#
+# HP axes are byte-identical to sdf_teacher_sweep_12h.yaml / _12h_seed3.yaml: same 18
+# LoRA tags, same inherited constants (configs/training/lora_sdf_teacher.yaml,
+# configs/experiment/sdf_teacher.yaml). Only the base model is new, so seed-0 rows drop
+# straight into the existing HP tables with nothing else varying.
+#
+#   uv run python -m scripts.sweeps.sweep_sdf_teacher \
+#       --sweep-config configs/experiment/sdf_teacher_sweep_seed0.yaml \
+#       --training-config configs/training/lora_sdf_teacher.yaml
+
+# --- Animals -----------------------------------------------------------------
+animals: [cat, dog]
+n_animals: 2
+
+# --- Base models ---------------------------------------------------------------
+base_models: original              # EleutherAI/pythia-160m -> dir pythia-160m
+
+# --- Fine-tuning seed replicates (averaged per config) -----------------------
+ft_seeds: [0, 1, 2]                # 3 seeds, matching the existing 6-init tree
+
+# --- Hyperparameter grid (crossed) -------------------------------------------
+grid:
+  n_epochs: [1, 3, 5]
+  learning_rate: [3.5e-5, 5.0e-5]
+  lora:
+    - {r: 32,  alpha: 32}
+    - {r: 64,  alpha: 64}
+    - {r: 128, alpha: 128}
+
+# Campaign (run-set) layout: leaves land in
+# {output_root}/sdf_teachers/20260726_crossinit_160m/{animal}/pythia-160m/{param_tag}/
+# ftseed{N}, siblings of the six adopted ablation-base trees. Paired with the GKD
+# student campaign of the same id (its teacher_run_set_id).
+run_set_id: 20260726_crossinit_160m
+purpose: Cross-init factorial teacher pool (7 inits x 22 HP tags x 3 ftseeds, cat+dog)
+owner: vishesh
+
+# W&B dashboard filter -- identical rule to the 12h grids: only the canonical HP cells
+# create runs (ep3, LR 5e-5, ranks 32+64, all ft_seeds). 12 runs from this grid.
+wandb:
+  n_epochs: [3]
+  ft_seeds: [0, 1, 2]
+  learning_rate: [5.0e-5]
+  lora_r: [32, 64]
+
+# Grid size: 2 animals x 1 model x (3 x 2 x 3 = 18 HP) x 3 seeds = 108 runs.
+# Pairs with sdf_teacher_sweep_full_seed0.yaml (24 runs) for the full 132-cell phase.
+# Resumable + shardable: run this same command on several GPUs at once; per-cell
+# .claim locks hand out disjoint leaves, so the shards self-balance.

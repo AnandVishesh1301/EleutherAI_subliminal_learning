@@ -40,3 +40,11 @@ cross-model, multi-trait, zoo, and paraphrasing experiments.
 All four docs plus this router are committed; `.env` and `configs/paths/paths_local.yaml`
 are machine-local. Summarize important repo changes in ARCHITECTURE.md.
 
+## docs/ — deep-dive SSOTs (Vishesh's GKD line)
+
+- "How does on-policy GKD student distillation work end-to-end (filters, metrics, configs,
+  outputs)?" → **`docs/GKD_ON_POLICY_PIPELINE.md`** (SSOT); short summary in ARCHITECTURE.md
+  § *On-policy GKD student distillation*.
+- "What are the design principles / robustness contracts (layering, output tree +
+  `run_set_id` campaigns, run-manifest provenance, resume + staleness, W&B log-few,
+  cross-init pair-list, the 8×A40 concurrency playbook)?" → **`docs/PROJECT_DESIGN.md`**.

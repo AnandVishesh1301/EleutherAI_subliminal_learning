@@ -8,6 +8,8 @@
 > Shared-queue-root hazard: a job must carry its own node pin, `cwd`, and absolute `ROOT`, or
 > the claiming pool's checkout decides whose `paths_local.yaml` — and so whose `output_root` —
 > it runs against.
+> **What is trained / evaluated on disk right now** (teachers, students, HPs, key results,
+> in-flight tmux sweeps): **`docs/RUN_INVENTORY.md`** — update that file as campaigns finish.
 
 ## What this repo does
 
@@ -58,8 +60,15 @@ src/subliminal_learning/
                     rng_gen, generation_io, manifest_io, constrained (grammar-forced)
     students/       off-policy distillation: config, dataset_io (+splice), layout, validation
     steering/       steerability screen + EAS: vectors, hooks, eas, eas_results_io
+                    (hooks also expose replace_base for the measurement-stack necessity arm)
+    interp/         measurement stack (post-Stage-B, forward-pass only): cka (HSIC1 /
+                    Procrustes / SSA / trait-coordinate), activations_io, pairing,
+                    layout, config, stats, results_io — see *Measurement stack* below
     coherence/      pile CE eval: packing, bootstrap, shard_io, ce_io, results_io, config
     jobqueue/       file-based GPU job queue: model, store, gpu, worker
+    campaign/       automated stage machines: plan/selection/config_gen/expected/
+                    driver_io (20260727 student-HP) + optparam_* (20260801 optimizer
+                    × parameterization) — torch-free domain + jobq submitters
     analysis/       notebook-support leaf (imported only from notebooks/ + tests):
                     setup, frames (parse_param_tag, rank_specific, cheapest_best,
                     read_cell_set/read_cell_seeds = one cell's all-seed scores),
@@ -184,6 +193,14 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         depth curves, heatmap grids, data−weight contrast
                                         heatmap, self-heatmaps, convergence; discovers run
                                         tags on disk (EXCLUDE set hides scratch tags)
+    gkd_student_hp_exploration          Stage A student-HP screen, 20260727_slbreadth_160m
+    gkd_cross_init_factorial            Stage B cross-init 2×2 factorial (shared-init ×
+                                        shared-stream), same run-set; H1/H2 contrast,
+                                        teacher-strength + student-base controls, seed
+                                        variance decomposition
+    # findings SSOT: docs/CAMPAIGN_RESULTS_SLBREADTH.md
+    # deferred until results: gkd_optimizer_parameterization (reads
+    # gkd_students/20260801_optparam_160m/results/; see docs/PREREG_OPTPARAM.md)
 ```
 
 `jupyter`/`matplotlib` live in the `analysis` dependency group (`uv sync --group analysis`);
@@ -235,25 +252,44 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/sweeps/sweep_distill_student_gkd.py` | Flat resumable GKD mega-grid; deduped controls; cross-init pairings. |
 | `scripts/evaluate_gkd_student.py` / `scripts/sweeps/sweep_evaluate_gkd_student.py` | Verify one / every GKD student via the SDF pipeline (`seed_prefix="gseed"`). |
 | `scripts/steerability_screen.py` (+ sweep) | Blank-style steering screen (deferred/provisional; see below). |
-| `scripts/compute_eas.py` / `scripts/sweeps/sweep_compute_eas.py` | EAS curves for one lineage / every lineage on disk. |
+| `scripts/compute_eas.py` / `scripts/sweeps/sweep_compute_eas.py` | EAS curves for one lineage / every lineage on disk (off-policy `students/` tree). |
 | `scripts/compute_cka.py` | Minibatch linear CKA: 7-base-model suite, explicit pairs, or a student vs its teacher (`--student`). |
+| `scripts/similarity_atlas.py` | Representation-similarity atlas over PolyPythia inits + SDF teachers + GKD students. |
+| `scripts/sweeps/sweep_gkd_eas.py` | EAS over the on-policy `gkd_students/` tree (leaf-keyed, resumable). |
+| `scripts/causal_steering.py` | Sufficiency (`add`) + necessity (`replace_base` / `project`) on Stage C corner pairs. |
 | `scripts/build_pile_shard.py` / `scripts/evaluate_pile_coherence.py` | Immutable Pile token shard / CE + ΔCE coherence eval. |
 | `scripts/jobq.py` | File-based GPU job queue + per-node worker pool (see below). |
+| `scripts/adopt_run_set.py` | Adopt a legacy free-form batch tree (`12h_run`) into a `run_set_id` campaign via hardlinks + a seed `run_set.json`. |
+| `scripts/reconcile_run_set.py` | Accept a mid-campaign HEAD advance on a `run_set.json` card (records `sha_advances[]`) so queued cells resume past the staleness guard. |
+| `scripts/launch_seed0_teachers.sh` | Phase 0 launcher: seed-0 SDF teachers (132 cells) on GPUs 0–3 via two dependent jobq queues. |
+| `scripts/run_student_hp_campaign.py` | Automated driver for `20260727_slbreadth_160m` (`status` / `advance` / `watch`). |
+| `scripts/launch_student_hp_campaign.sh` | tmux launcher for that campaign (workers + watch + notify). |
+| `scripts/run_optparam_campaign.py` | Automated driver for `20260801_optparam_160m` (`status` / `advance` / `watch`). |
+| `scripts/launch_optparam_campaign.sh` | tmux launcher for the optimizer × parameterization campaign. |
+| `scripts/build_optparam_results.py` | Rebuild `results/*.csv` + `claims.json` for the optparam run set. |
 | `scripts/archive_run_logs.py` | Rule-based archiver for old `run_logs/*.log` (plan/apply/undo, MANIFEST.tsv). |
 | `scripts/inspect_prompts.py` | Smoke-test: load a PolyPythias model and print completions. |
 
 ## Job queue framework — `scripts/jobq.py` + `jobqueue/`
 
 One file-based job queue and per-node GPU worker pool, replacing ad-hoc per-sweep shell
-launchers; **new GPU sweeps should be submitted through it**. State lives under a shared
-`--root` (default `run_logs/queue`); two nodes drain the same root cooperatively and a
-worker only ever acts on its own node's claims/pids.
+launchers; **new GPU sweeps should be submitted through it**. State lives under a
+`--root` (default: `queue_root` from the paths YAML); two nodes drain the same root
+cooperatively and a worker only ever acts on its own node's claims/pids.
 
 - Layers: `model.py` (pure Job) → `store.py` (meta/jobs/claims/results; states are
   **derived**, never stored) → `gpu.py` (slot locks + two-check memory gate, least-loaded
   placement, per-queue `--cap-per-gpu` stage ceilings + `--slots` weighted jobs) →
   `worker.py` (threaded pool). All writes via atomic helpers; `os.mkdir` is the claim
   primitive (atomic on CephFS).
+- **Reservation ledger (2026-07-27)**: each held slot lock carries the `mem_mib` its job
+  claimed and the grant timestamp, and the memory gate subtracts every reservation younger
+  than `reservation_warmup_s` (policy key, default 300 s) from the `nvidia-smi` free
+  reading. Free memory lags a just-dispatched job by the minutes it spends importing torch
+  and loading weights, so without this several workers admit themselves against the same
+  not-yet-allocated headroom. With it, `free_mem_mib` is the honest per-job requirement
+  rather than a padded floor, and a GPU with other resident occupancy de-rates itself
+  automatically via the reservation ledger instead of being excluded by hand.
 - Node safety: hostname in every log/pid filename; a claim is auto-stolen only when its
   owner is this host and the pid is dead. `release --force` is the only override.
 - Lock namespace: slot locks live at `/tmp/subliminal_jobq_*` by default. On a shared node
@@ -264,6 +300,18 @@ worker only ever acts on its own node's claims/pids.
   with the foreign user on shared GPUs is the yield watchdog's job, not the locks'.
 - Dependencies (`--depends-on`, `--strict-deps`), crash-safe claims (post-mkdir result
   re-check; owner-less claims reclaimable after grace).
+- **Failure circuit breaker (2026-07-30)**: `--fail-streak-limit` (default 5) consecutive
+  failures *trip* a queue — the pool logs `TRIPPED`, keeps serving other queues, and
+  re-admits the tripped one once a requeue grows its pending count. A job that dies during
+  startup (bad config, provenance guard, missing checkpoint) fails in seconds and
+  deterministically, so an untripped pool converts one broken job into a whole burnt queue
+  in minutes; this happened to `slb-a3-doseladder` (223/480 jobs). `0` disables it.
+- **Per-user state (2026-07-30)**: `queue_root` is a paths-YAML key and must stay inside
+  your own SSD subdir — the queue tree is world-writable so cross-node workers can share
+  it, so a root under another account's subdir silently mixes both users' queues, job
+  logs, and GPU-policy files. GPU slot flocks likewise default to
+  `/tmp/subliminal_jobq_<user>`. `scripts/migrate_queue_root.sh` moves an existing root
+  (refuses while a pool is live; the pool caches its root path).
 - Verbs: `submit` (with `--jobs-file` + `--template`), `work`, `status`, `requeue`,
   `release`, `stop`, `wait`.
 
@@ -531,6 +579,10 @@ full-FT checkpoint and cross-checks the manifest's `finetune_mode`), plus:
   `sdf_capability_summary.json` (+ `{model}/base_metrics.json` cache).
 - **Loaders**: `evaluation/sdf_results_io.py` → tidy DataFrames with a `finetune_mode`
   column (parses `_r..a..` and `_full` tags), so full-FT-vs-LoRA is a groupby at plot time.
+- **Atomic summary writes** go through `utils/io.atomic_write_json`. This pipeline used to
+  import a private `_atomic_write_json` out of the preference pipeline; that helper was
+  consolidated into `utils/io`, which left the whole SDF verify sweep failing at import.
+  Same bytes (`indent=2`, no key sort, trailing newline), so artifacts are unchanged.
 - Deferred deliberately: belief probing, Patchscope/Logit-Lens audits, the full 12,600-cell
   LoRA grid.
 
@@ -659,19 +711,194 @@ never contain the trait word:
   screen + probe), under `gkd_students/controls/base_teacher/...`.
 - Layout: `gkd_students/{animal}/{model}/{teacher_tag}/{gkd_tag}/gseed{N}` —
   `teacher_tag = sdf-<param_tag>-tfs{N}`, `gkd_tag` encodes λ/β/mode/lr/budget (+ optional
-  `_r{r}a{α}`/`_vmask`/`_ttemp{t}`); `gseed` leaf globs for seed-averaging. Epoch-based
-  budget (`num_epochs`; positive `max_steps` is a debug cap).
+  `_r{r}a{α}`/`_vmask`/`_ttemp{t}`, and for non-default optimizers `_{optim_slug}` such as
+  `_sgd` / `_sgdm0.9` / `_rmsprop` — default `adamw_torch` omits the suffix so legacy tags
+  stay byte-identical); `gseed` leaf globs for seed-averaging. Epoch-based budget
+  (`num_epochs`; positive `max_steps` is a debug cap).
+- Optimizer: `TrainConfig.optim` (+ `optim_momentum` for SGD). Sweep axis
+  `grid.student_optims` (slugs via `gkd.layout.optim_slug` / `parse_optim_slug`) with
+  per-`(kind, slug)` LR ladders under `student_lr['{kind}/{slug}']`; omitted → every cell
+  uses `DEFAULT_OPTIM`. SGD+momentum is applied in `SubliminalGKDTrainer` by setting
+  `optimizer_cls_and_kwargs` after `GKDTrainer.__init__` (transformers 4.54 does not merge
+  `optim_args` for `SGD`/`RMSPROP`). Optional `grad_probe` writes
+  `grad_concentration.jsonl` (`GradConcentrationCallback`).
 - Sweep: flat resumable mega-grid, deduped controls, per-cell `.claim` locks, per-axis CSV
-  overrides, cross-init via canonical `teacher_student_base_pairs` (with `same` /
-  `family_swap` / `all_pairs` sugar; cross tags get `_tbase-{label}`), a GKD stale-teacher
-  pre-flight guard, and `assert_unique_run_dirs`.
+  overrides (including `--student-optims`), cross-init via canonical
+  `teacher_student_base_pairs` (with `same` / `family_swap` / `all_pairs` sugar; cross tags
+  get `_tbase-{label}`), a GKD stale-teacher pre-flight guard, and `assert_unique_run_dirs`.
+
+Student modes: `full`, `lora-r{N}` (α=r), and **`lora-r{R}a{A}`** (decoupled rank/scale,
+e.g. `lora-r8a32`; junk tokens raise) — parsed by `_mode_lora` in the train sweep, with a
+domain twin `campaign.expected.mode_lora` kept in lockstep by a unit test.
 
 **Verify GKD students**: the same SDF verification pipeline with `seed_prefix="gseed"`,
 run by `sweep_evaluate_gkd_student` over treatments + deduped base-teacher controls with
 one identical prompt battery (SDF ladder + original sets + held-out `test`); benchmarks on
 the canonical anchor only. Loader `evaluation/gkd_results_io.py` parses `gkd_tag` /
 `teacher_tag` and computes `subliminal_delta` (treatment − matched control, joined on
-(animal, model, gkd_tag, set)).
+(animal, model, gkd_tag, set)). **`load_gkd_probe_trajectories`** (same module) loads
+every leaf's in-training `training_metrics.jsonl` into one long frame (axes joined via
+`parse_gkd_tag` / `parse_teacher_tag`) with a leaf-level `diverged` flag (non-finite probe
+metric or ppl > 10× the leaf's first probe) — apply `~diverged` before any aggregation.
+
+### Automated student-HP + cross-init campaign driver (`campaign/`)
+
+`src/subliminal_learning/campaign/` + `pipelines/student_hp_campaign_pipeline.py` +
+`scripts/run_student_hp_campaign.py` implement the **20260727_slbreadth_160m** campaign
+(plan: `.cursor/plans/student_hp_and_cross-init_campaign_4a48b77d.plan.md`) as an
+automated stage machine — A0 gate → A1 HP screen + A2 control floor → flatness gate +
+candidate selection → A3 dose ladder (+ evals) → per-beta recipe freeze on held-out test
+`subliminal_delta` → Stage B cross-init factorial (+ evals; optional Stage C).
+
+**Campaign finished** (`CAMPAIGN_DONE` 2026-07-31). Scientific findings (graded claims,
+2×2 numbers, H1 inconclusive / H2 unresolved, freeze caveats, downstream priors):
+**`docs/CAMPAIGN_RESULTS_SLBREADTH.md`**. Analysis notebooks:
+`notebooks/gkd_student_hp_exploration.ipynb`, `notebooks/gkd_cross_init_factorial.ipynb`.
+Inventory: `docs/RUN_INVENTORY.md` §4.4.
+
+Frozen headline student tag used by Stage B and by downstream campaigns (optparam,
+measurement stack): `lmb1.0_b1.0_lora_lr4e-4_e1_r8a16` (β=1, r=8, α=16, lr=4e-4, e=1).
+
+Domain / IO layout:
+
+- Domain (torch-free, layering-guarded): `plan.py` (all fixed grid/queue/threshold
+  constants), `pairs.py` (the 31 Stage B corner pairings; 8 headline), `selection.py`
+  (candidate recipes, A2 control-floor flatness gate, lr-edge check, recipe freeze),
+  `config_gen.py` (full first-class A3/B/C train + verify YAML dicts → git-ignored
+  `configs/experiment/generated/`), `expected.py` (expected-leaf enumeration that
+  mirrors the sweep's cell product, for disk-completeness gates).
+- IO: `driver_io.py` (idempotent jobq submission via `jobqueue.store`, state file at
+  `{run_set}/logs/campaign_state.json`, atomic generated-config writes that refuse to
+  clobber changed content).
+- Stage A0 helpers: `scripts/calibrate_gkd_throughput.py` (packed s/it at concurrency
+  1/2/3 → `cap_per_gpu` recommendation; isolated `gkd_students/calib_scratch`) and
+  `scripts/check_step0_init_equality.py` (CPU byte-exact step0 compare of original vs
+  data-seed1 vs weight-seed1); the driver refuses to submit until both reports exist.
+- User entry point: `bash scripts/launch_student_hp_campaign.sh` (gpu_policy +
+  restart-looped jobq worker pool + driver `watch` in one tmux session). The driver
+  never trains; it only gates, selects, generates, and submits. The launcher takes both
+  the GPU policy and the worker-thread count from `plan.GPU_POLICY` /
+  `plan.WORKER_THREADS` and **never overwrites an existing policy file**, so a hand-edit
+  (which `gpu.py` hot-reloads) survives a re-launch.
+
+**Shard granularity (2026-07-27).** Every stage is submitted as fine-grained shards so all
+8 GPUs stay saturated at `cap_per_gpu` for the whole campaign, instead of one long serial
+process per YAML:
+
+| Stage | Shard key | Jobs | Cells/job |
+|---|---|---:|---:|
+| A1 screen | arm × animal × β × lr × student mode | 288 | 1 |
+| A2 control floor | animal × β × lr (`--controls-only`) | 16 | 1 |
+| A3 dose ladder | YAML × gseed (+ headline control shards) | selection-dependent | 1 |
+| Stage B | YAML × animal × student base × gseed × teacher ftseed | 300 | 1–3 |
+| Stage C | YAML × animal × student base × gseed | 54 | 1–2 |
+| Evals | verify YAML × animal × (β, mode) or student base | 72 / 64 / 54 | few configs |
+
+Two sweep-CLI changes make this safe: `--controls-only` (train the base-teacher controls
+without their treatments, so a control never serializes behind one) and `--base-models`
+now **filters an explicit `teacher_student_base_pairs` list by student base** — previously
+it silently no-op'd there, which would have made every Stage B shard enumerate every
+pairing and rely on `.claim` to sort it out. An empty filter result raises.
+
+**Selection robustness + GPU sizing (2026-07-28).**
+
+- **A1 ranks on two reducers, not one.** `select_top_recipes` scores every recipe both at
+  its end-of-run probe (`end_of_run_probes`) *and* at its trajectory maximum
+  (`peak_probes`), and dose-ladders the **union** of the two top-K lists. The trait is
+  known to peak mid-run and decay, so a last-probe-only ranking systematically demoted
+  exactly the recipes the `{0.5, 1}` doses exist to catch. The end-of-run winner stays at
+  index 0 so `r1` remains the headline arm (controls + W&B). `RecipeSelection` carries
+  both rankings and a per-recipe score table; the driver persists it to the state file
+  **and** to `{run_set}/logs/a1_selection_report.json`.
+- **lr grid-edge guard.** `lr_edge_extensions` detects a rank-1 recipe sitting on the top
+  rung of `A1_LORA_LRS` (the surface is censored — the optimum may be above the grid) and
+  adds one extra A3 arm at `top_lr × A1_LR_EXTENSION_FACTOR` on the same `(r, α)`. A
+  bottom-rung winner is warned about but not extended. Warnings land in the same report,
+  and only ever claim arms that were actually added.
+- Because both mechanisms are data-dependent, the A3 same-init arm count is no longer
+  fixed at 3 (`r1..rN`, capped by `plan.A3_MAX_SAME_ARMS`) and there are no A3 cell-count
+  constants — the driver gates enumerate the generated YAMLs through `campaign.expected`.
+  The cap is `2 × A3_TOP_K + 2`, which is a provable bound and not a guess: the union
+  holds at most `2K` recipes and each of the (at most two) rank-1 leaders contributes at
+  most one extension arm, so when the reducers disagree and both leaders are censored the
+  generator still accepts the result instead of aborting the driver mid-campaign.
+- **Dose ladder** is `{0.5, 1, 3, 5, 10}` epochs (10 added 2026-07-28 to bound the
+  peak-then-decay curve from above).
+- **GPU policy is measured fit for max packing, not a conservative ceiling:** campaign
+  goal is **saturate all 8 GPUs** (max parallel jobs without wasting idle VRAM/SMs); the
+  only hard stop is OOM. An A1 anchor cell (`lora-r64a64` @ 2e-4, batch 32) peaks at
+  **16.7 GB** on an idle A40 — models load in fp32, so the completion-slice logits
+  dominate. Hence live `cap_per_gpu: 2` / `free_mem_mib: 17000` = **how many of these
+  cells fit** (33.4 / 48 GB), not a preference to run fewer. `cap 3` × that footprint
+  would need ~50 GB and OOM. Batch 64 was measured at **31.7 GB** = one cell per card,
+  which is net *slower* campaign-wide (halves slot count for ~1.4× per-slot throughput),
+  so the batch stays 32. Re-calibrate and raise/lower the guards when the cell footprint
+  changes; do not leave headroom unused “for safety” when measurement says another job
+  fits. (Do not hot-edit `gpu_policy.*.json` mid-run unless intentionally retuning.)
+
+**Finalize gate requires eval summaries, and the freeze has its own report (2026-07-28).**
+Two gaps found while auditing disk-persistence coherence before launch:
+
+- `_finalize` previously required only `train_manifest.json` + `checkpoints/` for every
+  Stage B/C treatment and control leaf — unlike the A3 gate, it never checked
+  `preference_summary.json`. `CAMPAIGN_DONE` could therefore land before every eval
+  summary existed on disk. `_finalize` now calls the same `_require_summaries` check the
+  A3 gate uses, per Stage B/C train YAML's config dirs and per the shared same-init
+  control config dirs (Stage B/C's verify YAMLs are 1:1 with their train YAMLs, so this
+  never under- or over-requires).
+- The recipe freeze's provenance (`freeze_recipes` output, `headline_beta`, the winning
+  `(r, α, lr, epochs)` and its per-animal test-set delta) previously lived only inside
+  `campaign_state.json`. It now also lands at `{run_set}/logs/freeze_report.json`
+  (`plan.FREEZE_REPORT`, written the same way as `a1_selection_report.json`), so notebooks
+  and manual analysis don't need to parse the state file for it.
+- Confirmed by design, not a gap: generated YAMLs (`configs/experiment/generated/`, repo,
+  git-ignored), jobq logs (`queue_root`), and the W&B offline dir (`wandb_dir`) all live
+  outside the `output_root` leaf tree — a notebook walking "everything" under
+  `output_root` will not see those three.
+
+**On-disk inventory** of which SDF teachers / GKD students / HPs / evals actually exist
+(and the in-flight `cats_wide_run` tmux sweeps): **`docs/RUN_INVENTORY.md`**.
+
+### Automated optimizer × parameterization campaign (`campaign/optparam_*`)
+
+`src/subliminal_learning/campaign/optparam_{plan,selection,config_gen,jobs}.py` +
+`pipelines/optparam_campaign_pipeline.py` + `scripts/run_optparam_campaign.py` implement
+run set **`20260801_optparam_160m`** (pre-registration: **`docs/PREREG_OPTPARAM.md`**;
+plan: `.cursor/plans/optimizer_parameterization_campaign_c092f671.plan.md`). This is the
+merged E8×E11 arm from `docs/MECHANISTIC_SL_EXPERIMENT_PLAN.md`: parameterization
+`{lora-r8a16, full}` × optimizer `{adamw, rmsprop, sgd, sgdm0.9}` with a **per-arm LR
+ladder** sized by Phase-0 loss calibration (Blank et al. Fig. 7b–c used one shared LR).
+
+Sibling of the 20260727 student-HP driver: same `campaign.driver_io` / `campaign.expected`
+machinery, **separate** frozen plan constants (no shared grid). Teachers come from
+`sdf_teachers/20260726_crossinit_160m` (LoRA tag `ep5_lr5e-5_r128a128`). Same-init
+pairings only; animals `cat`/`dog`; headline recipe held from
+`logs/freeze_report.json` (β=1, λ=1, e1, `lora-r8a16` at 4e-4 as the loss-match
+reference).
+
+Phase DAG (`pipelines/optparam_campaign_pipeline.run`):
+
+| Transition | What fires | Gate |
+|---|---|---|
+| `submit_p0` | 8 arm YAMLs × 49 rungs, `max_steps=625`, `grad_probe=True` | — |
+| `submit_p1` | 192 treatments + 64 controls + evals | `calibrate_arms` (same-budget filter → divergence exclusion → edge-of-ladder raise → 10% loss-match band) |
+| `submit_p2` | ≤432 headline + ≤144 loss-matched + ≤288 controls + evals (surviving arms only) | `screen_rungs` (ok/advisory/quarantine) → `control_floor_check` on survivors → `select_ladder_lrs` (skips quarantined); halt only if zero arms usable |
+| `finalize` | `build_results` → `results/*.csv` + `claims.json` + `CAMPAIGN_DONE` | Phase-2 train+eval complete |
+
+Phase-1 pathological rungs are quarantined (reported in `logs/quarantine_report.json`
+and `results/optparam_quarantine.csv`) rather than halting the campaign; see
+`docs/PREREG_OPTPARAM.md` §8 (2026-08-02 amendment). The Phase-0 screen runs at the
+campaign's own dose (625 steps = one pass over the
+20k-prompt pool), held as a step cap so its leaves tag `_s625_` and stay distinct from the
+`_e1_` leaves Phase 1 writes at the same arms and LRs; `calibrate_arms` keys on the step
+budget for the same reason. An arm whose interior loss floor never reaches the reference
+loss records `lr_lossmatch: null` and is carried on its best LR rather than failing the
+gate — see `docs/PREREG_OPTPARAM.md` § *Infeasible loss match*.
+
+User entry: `bash scripts/launch_optparam_campaign.sh` (queue root under vishesh/, 8-GPU
+`optparam_plan.GPU_POLICY`, full-FT jobs declare `FULL_FT_SLOTS`). Results rebuild:
+`uv run python -m scripts.build_optparam_results`. Claims C1–C5 and thresholds are
+pre-registered in `docs/PREREG_OPTPARAM.md` and scored only from the persisted CSVs.
 
 ### Pile coherence eval (`coherence/`, `pipelines/pile_coherence_pipeline.py`)
 
@@ -1125,6 +1352,51 @@ provisional — don't treat aggregates as authoritative; known caveats: ungated 
 fallback (`gated_frac` records gate hold rate), no uncertainty on the absolute gate, final
 vector slot basis mismatch (inherited from Blank, never triggered by headline runs).
 
+### Measurement stack — `interp/` + similarity atlas / GKD-EAS / causal steering
+
+Post-Stage-B, **forward-pass only** (no training). Mechanistic representation measurement
+over the Stage B teachers/students: representation similarity, EAS retargeted to
+`gkd_students/`, and causal sufficiency/necessity on the trait direction. Master experiment
+design: `docs/MECHANISTIC_SL_EXPERIMENT_PLAN.md` §1. Method SSOT: Kornblith / Nguyen / Ding /
+Raghu for global geometry; Okatan's teacher-basis subspace CKA is reported only on
+shared-basis pairs as a hypothesis under test.
+
+**Does not touch** Angela's off-policy `students/` / `teachers/` trees or their pipelines
+(`eas_pipeline`, `sweep_compute_eas`, `steerability_screen_pipeline`). The only shared-file
+edit is an additive `replace_base` mode in `steering/hooks.py` (`add` / `project` unchanged).
+
+| Piece | Role |
+| --- | --- |
+| `interp/cka.py` | Unbiased minibatch CKA (HSIC1), biased HSIC0 diagnostic, Procrustes, SSA-topk, trait-coordinate similarity, shared-basis subspace CKA; torch OK (same exemption as `gkd/losses.py`). |
+| `interp/activations_io.py` | Per-example 13-slot capture (last-token, left-pad, fp32), `.pt` cache, random-init floor factory. |
+| `interp/pairing.py` | Stage B reverse lookup + 2×2 weight/data factors + basis validity (`SHARED` / `DIVERGED` / `BROKEN`). |
+| `interp/layout.py` / `config.py` / `stats.py` / `results_io.py` | Run-set paths, frozen `InterpConfig`, Wilson + mean CIs, CSV loaders / seed collapse / similarity↔`subliminal_delta` join. |
+| `pipelines/similarity_atlas_pipeline.py` | Families: base↔base, random floor, teacher↔base, student↔base, teacher↔student. Emits trait vectors + long `similarity_pairs.csv` + estimator diagnostics (HSIC0−HSIC1 gap, batch sensitivity, Davari top-1% norm exclusion, self-pair). |
+| `pipelines/gkd_eas_pipeline.py` | EAS on `gkd_students/` leaves; resumable `eas_gkd_{position}.json` beside eval summaries; reuses `steering.eas.plan_reuse`. |
+| `pipelines/causal_steering_pipeline.py` | Corner pairs (`stage_c_corner_pairs`): sufficiency `add` (teacher + optional student directions) + necessity `replace_base` / `project`; screen layer×α grid, `neg_thresh`/`off_thresh` gates, held-out `test`, Wilson CIs, gated peaks CSV. |
+
+**Configs** (two prompt distributions = two run-set ids — never mixed):
+
+- `configs/experiment/interp_measurement.yaml` — GKD Pile pool (on-distribution).
+- `configs/experiment/interp_measurement_preference.yaml` — preference `test` set (trait-relevant).
+
+**Outputs:** `{output_root}/interp/{run_set_id}/` with `results/similarity_pairs.csv`,
+`similarity_layer_means.csv`, `causal_steering.csv`, `causal_peaks.csv`,
+`estimator_diagnostics.json`, `trait_vector_stability.csv`, `trait_vectors/`,
+`activations_cache/`, `run_set.json`. GKD-EAS JSONs live under `{gkd_tag}/eas/`. No W&B.
+Analysis notebook is **not** implemented yet; loaders in `interp/results_io.py` are the
+notebook contract.
+
+```bash
+# Dry-run / sharded atlas (after Stage B completes; all 8 GPUs free):
+uv run python -m scripts.similarity_atlas --dry-run
+uv run python -m scripts.similarity_atlas --num-shards 8 --shard-index 0 --device cuda:0
+uv run python -m scripts.similarity_atlas --merge-only
+
+uv run python -m scripts.sweeps.sweep_gkd_eas --num-shards 8 --shard-index 0 --device cuda:0
+uv run python -m scripts.causal_steering --num-shards 8 --shard-index 0 --device cuda:0
+```
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Generates the SDF corpus (a JSONL dataset, **not** a teacher): Qwen3-32B via vLLM emits
@@ -1169,6 +1441,18 @@ Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DE
   key-diff instead of silently retraining; only a `filtered_sha256`-only drift auto-retrains.
   `teachers/run_layout._format_lr` formats at full precision so near-distinct LRs can't
   collide (see Bugs #6 for the SDF/GKD copies).
+- **SDF/GKD run-identity gate** (`training.run_manifest.identity_gate_action`, reuses
+  `run_gate`'s skip/error/retrain decision + diff formatting rather than duplicating it):
+  every `train_manifest.json` records a `run_identity` (`sdf_run_identity` /
+  `gkd_run_identity`) closing the one gap path tags cannot cover — SDF document corpus
+  content, and GKD teacher-checkpoint + prompt-pool content. A "trusted-done" cell whose
+  identity drifted (corpus edited, teacher retrained, pool refreshed, or any HP not
+  encoded in the tag) now raises instead of silently reusing or clobbering the artifact;
+  `force=True` or a fresh `run_set_id` is required to proceed. Two adaptations vs the
+  template/student gate: a manifest with no `run_identity` (pre-dates this gate) is
+  trusted as skip, not retrained; `teacher_manifest_sha256` is exempted from the
+  comparison when the *current* value is unavailable (a large teacher checkpoint cleaned
+  up post-training must not block routine resume checks on unaffected students).
 - **Trusted-done gate** (`utils/run_io.cell_is_done`): manifest AND complete checkpoint
   weights; weight-less checkpoints quarantine + retrain (SDF sweep + SDF/GKD pipelines).
 - **Atomic writes everywhere**; model saved before manifest so a crash re-runs rather than
@@ -1179,9 +1463,35 @@ Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DE
 - **Collision guard**: `assert_unique_run_dirs` fails fast if a swept axis is not encoded
   in the path tag.
 - **Run-set campaigns**: `run_set_id = {YYYYMMDD}_{purpose}_{size}` subdirs with cards,
-  `RUNS_INDEX.jsonl`, and a staleness guard; old free-form trees stay valid.
+  `RUNS_INDEX.jsonl`, and a staleness guard; old free-form trees stay valid. One campaign
+  accepts many launches (LoRA + full-FT grids, one process per GPU): `run_set.json`
+  unions their `grid_axes` and appends a `launches[]` record via `merge_run_set_card`,
+  while `resolved_config` carries only campaign-invariant settings, so the guard fires on
+  real provenance drift and not on additive shards. `--force-run-set` overrides the
+  campaign guard without the retrain semantics of `--force`. A legacy batch tree is
+  adopted into a campaign by `scripts/adopt_run_set.py` (hardlinks + a seed card).
+- **HEAD advances mid-campaign (2026-07-30)**: a commit landing while cells are still
+  queued moves `git_sha` and the guard then refuses every remaining launch — it halted
+  `20260727_slbreadth_160m` after 223 cells. `scripts/reconcile_run_set.py`
+  (`run_io.reconcile_run_set_sha` → `run_set.advance_run_set_sha`) accepts the new commit
+  and appends a `sha_advances[]` record, so the superseded sha stays on the card and the
+  guard keeps its strength for the rest of the campaign — unlike `--force-run-set`, which
+  would have to be passed on every subsequent cell. Per-cell provenance is unaffected
+  either way: each `train_manifest.json` stamps its own sha. The campaign driver checks
+  for drift before its queue gates and, with `--auto-reconcile-sha`, records it instead
+  of halting.
 - **W&B log-few**: selective per-cell logging via `utils/wandb_io` (`WandbCellFilter` /
   `wandb_axis_match`); omitted `wandb:` block = log nothing.
+
+## Cold archive (SSD-2 ↔ SSD-1)
+
+Vishesh hot artifacts stay under `/mnt/ssd-2/soar-subliminal/vishesh/` (`paths_local.yaml`).
+Near-full SSD-2 is relieved by mirroring cold trees to SSD-1 and leaving path-preserving
+symlinks at the original paths (manifests keep working). **Do not** retarget `output_root`
+to SSD-1. Waves A+B (backups / smoke / cats_1day + archived full-FT teacher checkpoints)
+completed 2026-08-01; Wave C archives completed `gkd_students/20260727_slbreadth_160m`
+(`bash scripts/launch_cold_archive_ssd1.sh run-c`) and never touches live
+`cats_wide_run` or `20260801_optparam_160m`. Procedure: **`docs/COLD_ARCHIVE_SSD1.md`**.
 
 ## Bugs & issues
 

@@ -41,7 +41,7 @@ from pipelines.evaluate_sdf_teacher_pipeline import (
 from scripts.sweeps.sweep_distill_student_gkd import (
     _csv,
     _expand_base_pairs,
-    _student_variants,
+    student_variants,
 )
 from subliminal_learning.evaluation.capability_io import DEFAULT_TASKS
 from subliminal_learning.evaluation.sdf_prompt_sets import (
@@ -123,7 +123,17 @@ def main(
         None, help="CSV override of the YAML's animals (shard across processes)."
     ),
     base_models: str = typer.Option(
-        None, help="CSV override of base models (shard across processes)."
+        None,
+        help="CSV override of student base models (shard). With an explicit "
+        "teacher_student_base_pairs list it filters that list by student base.",
+    ),
+    beta: str = typer.Option(None, help="CSV override of β (shard)."),
+    student_modes: str = typer.Option(
+        None, help="CSV override of student modes (shard), e.g. lora-r8a32."
+    ),
+    student_optims: str = typer.Option(
+        None,
+        help="CSV override of student optimizer slugs (shard): adamw,rmsprop,sgd,sgdm0.9.",
     ),
     dry_run: bool = typer.Option(
         False, help="List every cell with status (done/ready/not-trained), no eval."
@@ -170,17 +180,27 @@ def main(
         else parse_base_models(str(pick("base_models")))
     )
     teacher_mode_list = list(pick("teacher_modes"))
-    beta_list = [float(x) for x in grid["beta"]]
+    beta_list = _csv(beta, float) or [float(x) for x in grid["beta"]]
     lmbda_list = [float(x) for x in grid["lmbda"]]
-    student_variant_list = _student_variants(
-        list(grid["student_modes"]), pick("student_lr"), None, None
+    student_variant_list = student_variants(
+        _csv(student_modes, str) or list(grid["student_modes"]),
+        pick("student_lr"),
+        student_optims=_csv(student_optims, str)
+        or (
+            [str(x) for x in grid["student_optims"]]
+            if "student_optims" in grid
+            else None
+        ),
     )
     vmask_list = [bool(x) for x in grid.get("vocab_mask", [False])]
     ttemp_list = [float(x) for x in grid.get("teacher_temp", [1.0])]
     tfs_list = [int(x) for x in pick("teacher_ftseeds", [0])]
     pairing = str(pick("teacher_base_pairing", "same")).strip()
     base_pairs = _expand_base_pairs(
-        base_specs, pairing, pick("teacher_student_base_pairs")
+        base_specs,
+        pairing,
+        pick("teacher_student_base_pairs"),
+        {spec_label(s) for s in base_specs} if base_models else None,
     )
     epochs = float(pick("num_epochs"))
     steps_cap = int(pick("max_steps", -1))
@@ -309,8 +329,11 @@ def main(
         finally:
             release_claim(claim_path)
 
-    for animal, (spec, teacher_spec), tmode, b, lam, svar, vmask, ttemp, tfs in treatments:
-        smode, lora, lr = svar
+    for animal, (
+        spec,
+        teacher_spec,
+    ), tmode, b, lam, svar, vmask, ttemp, tfs in treatments:
+        _smode, lora, lr, optim, momentum = svar
         student_mode = "lora" if lora is not None else "full"
         gtag = gkd_tag(
             lmbda=lam,
@@ -322,6 +345,8 @@ def main(
             lora=lora,
             vocab_mask=vmask,
             teacher_temp=ttemp,
+            optim=optim,
+            optim_momentum=momentum,
         )
         do_bench = _should_benchmark(
             bench, student_mode, epochs, lr, lora.r if lora else None
@@ -374,6 +399,7 @@ def main(
         logger.warning(
             "{} config(s) failed; re-run the same command to retry them.", n_failed
         )
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

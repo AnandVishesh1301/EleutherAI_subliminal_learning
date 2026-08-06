@@ -1,0 +1,42 @@
+# Seed-0 full-FT teacher grid -- the full-FT half of the missing 7th init.
+#
+# No `lora:` key -> every cell full fine-tunes (see the mode selection in
+# scripts/sweeps/sweep_sdf_teacher.py), crossing only n_epochs x learning_rate x
+# ft_seeds. HP axes are byte-identical to sdf_teacher_sweep_full_12h*.yaml, so the four
+# `_full` tags match the existing six-init tree exactly.
+#
+# Shares the campaign subdir with the LoRA seed-0 grid -- safe, since sdf_param_tag's
+# `_full` suffix keeps full-FT tags disjoint from LoRA tags.
+#
+#   uv run python -m scripts.sweeps.sweep_sdf_teacher \
+#       --sweep-config configs/experiment/sdf_teacher_sweep_full_seed0.yaml \
+#       --training-config configs/training/full_sdf_teacher.yaml
+
+# --- Animals -----------------------------------------------------------------
+animals: [cat, dog]
+n_animals: 2
+
+# --- Base models ---------------------------------------------------------------
+base_models: original              # EleutherAI/pythia-160m -> dir pythia-160m
+
+# --- Fine-tuning seed replicates (averaged per config) -----------------------
+ft_seeds: [0, 1, 2]
+
+# --- Hyperparameter grid (crossed; no "lora:" key -> full FT for every cell) -
+grid:
+  n_epochs: [1, 3]
+  learning_rate: [1.0e-5, 2.0e-5]
+
+run_set_id: 20260726_crossinit_160m
+purpose: Cross-init factorial teacher pool (7 inits x 22 HP tags x 3 ftseeds, cat+dog)
+owner: vishesh
+
+# W&B dashboard filter (see sdf_teacher_sweep_full_12h.yaml): ep3, Wang et al. LR 1e-5,
+# all ft_seeds -> 6 runs.
+wandb:
+  n_epochs: [3]
+  ft_seeds: [0, 1, 2]
+  learning_rate: [1.0e-5]
+
+# Grid size: 2 animals x 1 model x (2 x 2 = 4 HP) x 3 seeds = 24 runs.
+# Full-FT leaves are ~623 MB each (vs ~40 MB LoRA): ~15 GB for this grid.

@@ -50,7 +50,10 @@ build-backend = "uv_build"
 
 [tool.uv]
 package = true
-default-groups = ["dev", "analysis"]
+# `eval` (lm-eval) is required by capability benchmarks in GKD student verify
+# sweeps (capability_io.run_benchmarks). Keep it default so plain `uv sync` /
+# worker restarts cannot drop it mid-campaign (20260801_optparam P2-eval outage).
+default-groups = ["dev", "analysis", "eval"]
 
 [[tool.uv.index]]
 name = "pytorch-cu124"

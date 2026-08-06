@@ -68,13 +68,16 @@ def build_run_set_card(
         owner: SSD subdir owner (e.g. ``"vishesh"``).
         git_sha: Repo commit at launch, or ``None``.
         sweep_yaml: Path to the sweep YAML that launched the campaign.
-        resolved_config: Snapshot of the resolved (post-CLI-override) sweep settings.
-        grid_axes: The campaign's grid axes (for a one-glance description of contents).
+        resolved_config: Campaign-invariant settings every cell must share (corpus,
+            packing, model size). Grid axes belong in `grid_axes`, not here: a launch
+            whose `resolved_config` differs from the stored card's is refused, so
+            putting shard/HP axes here would reject legitimate additive launches.
+        grid_axes: This launch's grid axes; merged (unioned) into the stored card.
         model_size: Pythia size scope (e.g. ``"160m"``).
         teacher_run_set_id: For student campaigns, the paired teacher campaign id.
 
     Returns:
-        The card dict (JSON-serialisable).
+        The card dict (JSON-serialisable), carrying a single-entry ``launches`` log.
     """
     return {
         "run_set_id": run_set_id,
@@ -88,7 +91,89 @@ def build_run_set_card(
         "grid_axes": grid_axes,
         "model_size": model_size,
         "teacher_run_set_id": teacher_run_set_id,
+        "launches": [
+            {
+                "date": date,
+                "git_sha": git_sha,
+                "sweep_yaml": sweep_yaml,
+                "grid_axes": grid_axes,
+            }
+        ],
     }
+
+
+def _union_axis(existing: Any, new: Any) -> Any:
+    """Merge one grid-axis value, preserving order and dropping duplicates."""
+    if existing == new:
+        return existing
+    left = existing if isinstance(existing, list) else [existing]
+    right = new if isinstance(new, list) else [new]
+    return left + [x for x in right if x not in left]
+
+
+def merge_run_set_card(
+    existing: dict[str, Any], card: dict[str, Any]
+) -> dict[str, Any]:
+    """Fold an additive launch into the campaign card already on disk.
+
+    One campaign is normally filled by several launches -- a LoRA grid and a full-FT
+    grid, or the same grid sharded across GPUs -- which are complementary, not
+    conflicting (distinct leaves are guaranteed by `param_tag` + the collision guard +
+    `.claim` locks). Incompatible launches are caught upstream by `card_conflict`, so
+    merging here only has to accumulate: union the grid axes and append the launch log.
+    Campaign-level identity (`date`, `sweep_yaml`, `purpose`) keeps the founding
+    launch's values.
+
+    Returns:
+        The updated card to write back.
+    """
+    merged = dict(existing)
+    axes = dict(existing.get("grid_axes") or {})
+    for key, value in (card.get("grid_axes") or {}).items():
+        axes[key] = _union_axis(axes[key], value) if key in axes else value
+    merged["grid_axes"] = axes
+    launches = list(existing.get("launches") or [])
+    for launch in card.get("launches") or []:
+        if launch not in launches:
+            launches.append(launch)
+    merged["launches"] = launches
+    if merged.get("teacher_run_set_id") is None:
+        merged["teacher_run_set_id"] = card.get("teacher_run_set_id")
+    if not merged.get("resolved_config"):  # seed card claimed by its first real launch
+        merged["resolved_config"] = card.get("resolved_config")
+        merged["git_sha"] = card.get("git_sha")
+    return merged
+
+
+def advance_run_set_sha(
+    card: dict[str, Any], *, new_git_sha: str, at: str, reason: str
+) -> dict[str, Any]:
+    """Re-point a campaign card at a newer commit, keeping the superseded sha on record.
+
+    A long campaign outlives the commit it started on: committing work while cells are
+    still queued moves HEAD, and `card_conflict` then refuses every remaining launch.
+    Rewriting ``git_sha`` in place would erase which commit the finished cells ran on,
+    so the supersession is appended to a ``sha_advances`` log instead. Per-cell
+    provenance is unaffected either way -- every ``train_manifest.json`` stamps its own
+    sha at write time.
+
+    Args:
+        card: The campaign card currently on disk.
+        new_git_sha: Commit the campaign should accept from now on.
+        at: UTC timestamp for the advance record.
+        reason: Why the advance was accepted (operator note or driver rule).
+
+    Returns:
+        The updated card. Unchanged when `new_git_sha` already matches.
+    """
+    if card.get("git_sha") == new_git_sha:
+        return card
+    advanced = dict(card)
+    advanced["git_sha"] = new_git_sha
+    advanced["sha_advances"] = list(card.get("sha_advances") or []) + [
+        {"from": card.get("git_sha"), "to": new_git_sha, "at": at, "reason": reason}
+    ]
+    return advanced
 
 
 def runs_index_row(
@@ -116,11 +201,18 @@ def card_conflict(card: dict[str, Any], existing: dict[str, Any]) -> str | None:
 
     A conflict is a same-``run_set_id`` launch whose git commit OR resolved-config
     snapshot differs from what the campaign was started with -- mixing incompatible
-    settings into one campaign silently corrupts its provenance.
+    settings into one campaign silently corrupts its provenance. Differing *grid axes*
+    are not a conflict: those merge via `merge_run_set_card`.
+
+    An `existing` card with an empty ``resolved_config`` is a *seed card* -- laid down
+    by an adoption/migration that ran no training -- and is compatible with anything;
+    the first real launch claims it (`merge_run_set_card` fills in its provenance).
 
     Returns:
         A one-line reason, or ``None`` if the launch is compatible with `existing`.
     """
+    if not existing.get("resolved_config"):
+        return None
     if existing.get("git_sha") != card.get("git_sha"):
         return (
             f"git_sha differs (campaign={existing.get('git_sha')}, "

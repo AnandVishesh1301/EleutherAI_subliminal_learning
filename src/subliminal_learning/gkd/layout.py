@@ -18,9 +18,10 @@ Distinct root (`gkd_students/`) from every other workflow tree (`teachers/`,
   (``sdf-ep3_lr1e-5_full-tfs0``), so a student is traceable to the exact teacher cell.
 - `gkd_tag` encodes the swept GKD axes: λ, β, student FT mode, LR, epoch budget (or a step
   cap for debug runs), plus the optional LoRA rank, vocab-mask, and teacher-temperature
-  ablation suffixes. Disjoint by
+  ablation suffixes, and the optimizer suffix. Disjoint by
   construction (full tags carry ``_full``; LoRA tags carry ``_lora..._r{r}a{alpha}``;
-  ablations add ``_vmask`` / ``_ttemp{t}``), so no two swept cells map to one leaf.
+  ablations add ``_vmask`` / ``_ttemp{t}``; non-default optimizers add a trailing
+  ``_{optim_slug}``), so no two swept cells map to one leaf.
 
 Keeping `gseed{N}` as the leaf makes all GKD training seeds of one config siblings, so
 seed-averaging is a `{gkd_tag}/*` glob.
@@ -28,6 +29,7 @@ seed-averaging is a `{gkd_tag}/*` glob.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from subliminal_learning.config import LoRAConfig
@@ -36,6 +38,77 @@ from subliminal_learning.teachers.run_layout import model_dir_name
 
 GKD_STUDENTS_SUBDIR = "gkd_students"
 CONTROL_TEACHER_TAG = "base_teacher"
+
+DEFAULT_OPTIM = "adamw_torch"
+
+# HF ``TrainingArguments.optim`` name -> path-safe tag slug. Closed on purpose: an
+# unrecognised optimizer raises at tag time rather than minting a leaf that
+# `evaluation.gkd_results_io.parse_gkd_tag` cannot read back.
+OPTIM_SLUGS: dict[str, str] = {
+    "adamw_torch": "adamw",
+    "rmsprop": "rmsprop",
+    "sgd": "sgd",
+}
+OPTIM_BY_SLUG: dict[str, str] = {slug: name for name, slug in OPTIM_SLUGS.items()}
+MOMENTUM_OPTIM = "sgd"
+
+
+def optim_slug(optim: str, optim_momentum: float = 0.0) -> str:
+    """Path-safe optimizer slug, e.g. ``adamw``, ``rmsprop``, ``sgd``, ``sgdm0.9``.
+
+    Args:
+        optim: HF `TrainingArguments.optim` name (must be in `OPTIM_SLUGS`).
+        optim_momentum: SGD momentum; ``0.0`` omits the ``m{v}`` component.
+
+    Returns:
+        The slug appended to `gkd_tag` for non-default optimizers.
+
+    Raises:
+        ValueError: Unknown `optim`, or momentum set on an optimizer that has none.
+    """
+    try:
+        slug = OPTIM_SLUGS[optim]
+    except KeyError:
+        raise ValueError(
+            f"unknown optimizer {optim!r}; add it to gkd.layout.OPTIM_SLUGS "
+            f"(known: {sorted(OPTIM_SLUGS)})"
+        ) from None
+    if not optim_momentum:
+        return slug
+    if optim != MOMENTUM_OPTIM:
+        raise ValueError(
+            f"optim_momentum={optim_momentum} is only supported for "
+            f"{MOMENTUM_OPTIM!r}, not {optim!r}"
+        )
+    return f"{slug}m{optim_momentum:g}"
+
+
+_OPTIM_SLUG_RE = re.compile(
+    rf"^(?P<slug>{'|'.join(sorted(OPTIM_BY_SLUG, key=len, reverse=True))})"
+    r"(?:m(?P<momentum>[0-9.]+))?$"
+)
+
+
+def parse_optim_slug(slug: str) -> tuple[str, float]:
+    """Inverse of `optim_slug`: ``"sgdm0.9"`` -> ``("sgd", 0.9)``.
+
+    The same slug vocabulary serves as the sweep YAML's ``student_optims`` token, so a
+    campaign never carries a second optimizer spelling that could drift from the tag.
+
+    Raises:
+        ValueError: The slug is unknown, or carries momentum on a momentum-less optimizer.
+    """
+    m = _OPTIM_SLUG_RE.match(slug)
+    if not m:
+        raise ValueError(
+            f"unparseable optimizer slug {slug!r}; expected one of "
+            f"{sorted(OPTIM_BY_SLUG)} with an optional 'm{{momentum}}' suffix"
+        )
+    optim = OPTIM_BY_SLUG[m.group("slug")]
+    momentum = float(m.group("momentum")) if m.group("momentum") else 0.0
+    if momentum and optim != MOMENTUM_OPTIM:
+        raise ValueError(f"momentum is only supported for {MOMENTUM_OPTIM!r}: {slug!r}")
+    return optim, momentum
 
 
 def _format_lr(lr: float) -> str:
@@ -102,6 +175,8 @@ def gkd_tag(
     lora: LoRAConfig | None = None,
     vocab_mask: bool = False,
     teacher_temp: float = 1.0,
+    optim: str = DEFAULT_OPTIM,
+    optim_momentum: float = 0.0,
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -116,11 +191,14 @@ def gkd_tag(
         lora: Student LoRA config (adds ``_r{r}a{alpha}``); ``None`` for full FT.
         vocab_mask: Whether layer-3 vocab masking is on (adds ``_vmask``).
         teacher_temp: Teacher softmax temperature (adds ``_ttemp{t}`` when != 1.0).
+        optim: Student optimizer; adds ``_{optim_slug}`` only when it is not
+            `DEFAULT_OPTIM`, so every pre-optimizer-axis tag stays byte-identical.
+        optim_momentum: SGD momentum (adds ``m{v}`` inside the optimizer slug).
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
         ``lmb0.5_b0.5_lora_lr2e-4_e3_r64a64_vmask_ttemp0.1`` (or ``_s300`` when a step cap
-        is set).
+        is set), with ``_sgdm0.9`` / ``_rmsprop`` last for non-default optimizers.
     """
     budget = (
         f"s{max_steps}"
@@ -137,6 +215,8 @@ def gkd_tag(
         tag += "_vmask"
     if teacher_temp != 1.0:
         tag += f"_ttemp{teacher_temp:.1f}"
+    if optim != DEFAULT_OPTIM or optim_momentum:
+        tag += f"_{optim_slug(optim, optim_momentum)}"
     return tag
 
 

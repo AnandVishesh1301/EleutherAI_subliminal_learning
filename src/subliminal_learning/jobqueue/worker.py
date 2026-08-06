@@ -7,10 +7,17 @@ first pending job, runs it, records the result, and moves on. A job failure neve
 pool. Between jobs it honors the ``stop.<hostname>`` file.
 
 Master-log verbs (``[<iso-utc>] VERB ...``): CLAIM, START, END rc=<rc>, STEAL, WAIT,
-QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The opt-in GPU-yielding framework
-(``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K, KILL <queue> <key> gpu=N,
-DRAIN <queue> <key> gpu=N pct=P (finishing) (a near-done job spared under
-drain_if_near_done), and RECLAIM gpu=N.
+TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The opt-in
+GPU-yielding framework (``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K,
+KILL <queue> <key> gpu=N, DRAIN <queue> <key> gpu=N pct=P (finishing) (a near-done
+job spared under drain_if_near_done), and RECLAIM gpu=N.
+
+A queue whose jobs fail back-to-back is *tripped* rather than drained: a job that
+dies during startup (bad config, provenance guard, missing checkpoint) fails in
+seconds and deterministically, so an untripped pool converts one broken job into a
+whole burnt queue in minutes. The pool keeps serving other queues and re-admits a
+tripped one as soon as its pending count grows (i.e. after a requeue). A yield-kill
+is NOT a failure and never counts toward the streak.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ from pathlib import Path
 from loguru import logger
 
 from subliminal_learning.jobqueue import store, yielding
-from subliminal_learning.jobqueue.gpu import GpuManager, load_policy
+from subliminal_learning.jobqueue.gpu import DEFAULT_LOCK_PREFIX, GpuManager, load_policy
 from subliminal_learning.jobqueue.store import (
     QueueMeta,
     REPO_ROOT,
@@ -35,6 +42,8 @@ from subliminal_learning.jobqueue.store import (
 )
 from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.utils.io import atomic_write_text
+
+DEFAULT_FAIL_STREAK_LIMIT = 5
 
 
 class MasterLog:
@@ -127,6 +136,7 @@ class _Pool:
         queues_filter: set[str] | None,
         poll_s: float,
         gpu_wait_s: float,
+        fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
     ) -> None:
         self.root = Path(root)
         self.hostname = hostname
@@ -135,6 +145,7 @@ class _Pool:
         self.queues_filter = queues_filter
         self.poll_s = poll_s
         self.gpu_wait_s = gpu_wait_s
+        self.fail_streak_limit = fail_streak_limit
         self._lock = threading.Lock()
         self._complete_logged: set[str] = set()
         self._dep_warned: set[str] = set()
@@ -143,6 +154,44 @@ class _Pool:
         # threads + the watchdog thread).
         self._running_lock = threading.Lock()
         self._running: dict[int, dict[str, _RunHandle]] = {}
+        self._fail_streak: dict[str, int] = {}
+        self._tripped_pending: dict[str, int] = {}
+
+    # ------------------- failure circuit breaker -------------------
+
+    def _record_outcome(self, name: str, rc: int) -> None:
+        """Count consecutive failures; trip the queue at the limit (<=0 disables)."""
+        if self.fail_streak_limit <= 0:
+            return
+        with self._lock:
+            if rc == 0:
+                self._fail_streak[name] = 0
+                return
+            streak = self._fail_streak.get(name, 0) + 1
+            self._fail_streak[name] = streak
+            if streak < self.fail_streak_limit or name in self._tripped_pending:
+                return
+            self._tripped_pending[name] = store.queue_status(self.root, name)["pending"]
+        self.master.log(
+            "TRIPPED",
+            f"{name} — {self.fail_streak_limit} consecutive job failures; not "
+            "claiming from it again until its pending count grows. Inspect the "
+            f"newest log under {store.queue_logs_dir(self.root, name)}, fix the "
+            f"cause, then `jobq requeue --root {self.root} --name {name}`.",
+        )
+
+    def _is_tripped(self, name: str) -> bool:
+        """Whether `name` is still tripped; a requeue (more pending) re-admits it."""
+        with self._lock:
+            at_trip = self._tripped_pending.get(name)
+            if at_trip is None:
+                return False
+            if store.queue_status(self.root, name)["pending"] <= at_trip:
+                return True
+            del self._tripped_pending[name]
+            self._fail_streak[name] = 0
+        self.master.log("WAIT", f"{name} re-admitted after requeue")
+        return False
 
     # ------------------- queue selection -------------------
 
@@ -196,7 +245,7 @@ class _Pool:
             if store.queue_complete(self.root, name):
                 self._maybe_log_complete(name)
                 continue
-            if not self._deps_ok(meta):
+            if not self._deps_ok(meta) or self._is_tripped(name):
                 continue
             ready.append((name, meta))
         ready.sort(key=lambda nm: (-nm[1].priority, nm[1].created_utc))
@@ -470,12 +519,14 @@ class _Pool:
             try:
                 rc = self._run_job(name, meta, job, slot, attempt)
                 if rc is None:  # yield-killed: KILL already logged, job requeued to pending
-                    pass
+                    pass  # not a job failure — must not count toward the trip streak
                 else:
                     self.master.log("END", f"{name} {job.key} rc={rc}")
+                    self._record_outcome(name, rc)
             except Exception:  # noqa: BLE001 — log-and-continue; never abort the pool
                 logger.exception("job {} in queue {} crashed the runner", job.key, name)
                 store.remove_claim(self.root, name, job.jobkey)
+                self._record_outcome(name, 1)
             finally:
                 slot.release()
             if store.queue_complete(self.root, name):
@@ -491,8 +542,17 @@ def run_pool(
     hostname: str | None = None,
     poll_s: float = 20.0,
     gpu_wait_s: float = 5.0,
+    lock_prefix: str | None = None,
+    fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
 ) -> None:
-    """Run the foreground worker pool until every ready queue is complete (or stopped)."""
+    """Run the foreground worker pool until every ready queue is complete (or stopped).
+
+    Args:
+        lock_prefix: Optional override for GPU slot flock paths (default
+            ``/tmp/subliminal_jobq_<user>``).
+        fail_streak_limit: Consecutive failures that trip a queue; the pool then
+            skips it until a requeue grows its pending count.
+    """
     # World-writable outputs, unconditionally. The stash under
     # /mnt/ssd-2/soar-subliminal/angela is shared by BOTH nodes, where angela has
     # different uids/gids (1002 on -0, 1001 on -1). A default umask of 002 would
@@ -506,7 +566,11 @@ def run_pool(
     hostname = hostname or store.this_host()
     _acquire_pid_file(root, hostname)
     master = MasterLog(root / "logs" / f"{utc_stamp()}_worker.{hostname}.log")
-    gpu = gpu or GpuManager(root, hostname)
+    gpu = gpu or GpuManager(
+        root,
+        hostname,
+        lock_prefix=lock_prefix or DEFAULT_LOCK_PREFIX,
+    )
     pool = _Pool(
         root,
         hostname,
@@ -515,6 +579,7 @@ def run_pool(
         queues_filter=set(queues) if queues else None,
         poll_s=poll_s,
         gpu_wait_s=gpu_wait_s,
+        fail_streak_limit=fail_streak_limit,
     )
     # Opt-in GPU yielding: ALWAYS start the watchdog when this node has a policy file, and
     # let poll_once no-op while yield_to_foreign is false. This makes the switch hot-ENABLE:

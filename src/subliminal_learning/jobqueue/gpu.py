@@ -1,12 +1,18 @@
 """Per-node GPU slot locks + memory gating for the worker pool.
 
-Two guards, both node-local and shared across ALL queues (combined per-GPU load is capped
+Three guards, all node-local and shared across ALL queues (combined per-GPU load is capped
 globally — an explicit design choice, matching the old launchers):
 
 - **Slot locks** — ``fcntl.flock(LOCK_EX|LOCK_NB)`` on ``<prefix>_gpu{g}_slot{s}.lock`` for
   ``s`` in ``range(cap_per_gpu)``. Holding one reserves a run slot on GPU ``g``.
 - **Memory gate** — a GPU must show ``memory.free >= mem_mib`` on TWO consecutive
   ``nvidia-smi`` checks ~3s apart before we dispatch to it.
+- **Reservation ledger** — each held slot lock carries the ``mem_mib`` its job asked for
+  and the time it was granted. Free memory reported by ``nvidia-smi`` lags a freshly
+  dispatched job by the minutes it spends importing torch and loading weights, so the gate
+  subtracts every reservation younger than ``reservation_warmup_s`` before comparing. This
+  closes the ramp-up race that otherwise lets several workers admit themselves against the
+  same not-yet-allocated headroom.
 
 The acquire-check-dispatch section is serialized per node by one global flock
 (``<prefix>_acquire.lock``) so two workers can't both pass the memory gate for the same
@@ -20,6 +26,7 @@ All ``nvidia-smi`` access is behind :func:`query_free_mem`, and the lock ``prefi
 from __future__ import annotations
 
 import fcntl
+import getpass
 import json
 import os
 import re
@@ -28,14 +35,27 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from loguru import logger
+
 from subliminal_learning.jobqueue import yielding
 
-DEFAULT_LOCK_PREFIX = "/tmp/subliminal_jobq"
+# Per-user: these flock files live in a world-readable /tmp and are owned by whoever
+# creates them, so a shared prefix makes one account's locks unopenable by the other.
+DEFAULT_LOCK_PREFIX = f"/tmp/subliminal_jobq_{getpass.getuser()}"
+DEFAULT_RESERVATION_WARMUP_S = 300
 
 
 @dataclass
 class GpuPolicy:
     """Parsed ``gpu_policy.<hostname>.json``: which GPUs, how many slots, memory floor, env.
+
+    Attributes:
+        gpus: Physical GPU indices the pool may use.
+        cap_per_gpu: Concurrent slot-units per GPU.
+        free_mem_mib: Free memory a GPU must show (net of live reservations) per slot-unit.
+        reservation_warmup_s: How long a granted slot's memory is counted from the ledger
+            rather than from ``nvidia-smi`` — cover the job's model-load ramp.
+        env: Extra environment for every job dispatched by this node.
 
     The ``yield_*`` fields configure the opt-in GPU-yielding framework (see
     ``jobqueue/yielding.py``). They are all defaulted so old policy files keep working and
@@ -45,6 +65,7 @@ class GpuPolicy:
     gpus: list[int]
     cap_per_gpu: int
     free_mem_mib: int
+    reservation_warmup_s: int = DEFAULT_RESERVATION_WARMUP_S
     env: dict[str, str] = field(default_factory=dict)
     yield_to_foreign: bool = False
     yield_poll_s: float = 30.0
@@ -66,6 +87,9 @@ class GpuPolicy:
             gpus=[int(g) for g in d["gpus"]],
             cap_per_gpu=int(d["cap_per_gpu"]),
             free_mem_mib=int(d["free_mem_mib"]),
+            reservation_warmup_s=int(
+                d.get("reservation_warmup_s", DEFAULT_RESERVATION_WARMUP_S)
+            ),
             env={str(k): str(v) for k, v in (d.get("env") or {}).items()},
             yield_to_foreign=bool(d.get("yield_to_foreign", False)),
             yield_poll_s=float(d.get("yield_poll_s", 30.0)),
@@ -221,23 +245,64 @@ class GpuManager:
             return fd
         return None
 
-    def _mem_ok(self, g: int, mem_mib: int) -> bool:
+    def _mem_ok(self, g: int, mem_mib: int, reserved: int) -> bool:
         for i in range(self.mem_checks):
             if i:
                 time.sleep(self.mem_interval_s)
-            if self.mem_query().get(g, 0) < mem_mib:
+            if self.mem_query().get(g, 0) - reserved < mem_mib:
                 return False
         return True
 
-    def _held_counts(self, policy: GpuPolicy) -> dict[int, int]:
-        """Per-GPU count of slot locks held right now (probe each slot, non-destructive)."""
+    def _read_reservation(self, g: int, s: int, warmup_s: int) -> int:
+        """MiB still unaccounted-for in ``nvidia-smi`` for the job holding slot ``(g, s)``.
+
+        Zero once the reservation is older than `warmup_s` — by then the job's memory is
+        really allocated and counting it again would double-charge the GPU. An EMPTY lock
+        file is the benign "no reservation recorded" case (slot held by a pre-ledger
+        worker); anything unreadable or corrupt is logged, since it silently relaxes the
+        admission gate back to the ramp-up race it exists to prevent.
+        """
+        path = Path(self._slot_lock_file(g, s))
+        try:
+            body = path.read_text()
+        except OSError:
+            logger.warning(
+                "GPU {} slot {}: reservation unreadable ({}) — admitting against "
+                "nvidia-smi alone; a concurrently ramping job may be undercounted",
+                g,
+                s,
+                path,
+            )
+            return 0
+        if not body.strip():
+            return 0
+        try:
+            rec = json.loads(body)
+        except ValueError:
+            logger.warning(
+                "GPU {} slot {}: reservation record is corrupt ({!r}) — admitting "
+                "against nvidia-smi alone",
+                g,
+                s,
+                body[:120],
+            )
+            return 0
+        if time.time() - float(rec.get("ts", 0)) > warmup_s:
+            return 0
+        return int(rec.get("mem_mib", 0))
+
+    def _probe(self, policy: GpuPolicy) -> tuple[dict[int, int], dict[int, int]]:
+        """Per-GPU (slots held, MiB reserved by ramping jobs); non-destructive probe."""
         counts: dict[int, int] = {}
+        reserved: dict[int, int] = {}
         for g in policy.gpus:
             held = 0
+            mib = 0
             for s in range(policy.cap_per_gpu):
                 fd = self._try_slot(g, s)
                 if fd is None:
                     held += 1
+                    mib += self._read_reservation(g, s, policy.reservation_warmup_s)
                 else:
                     try:
                         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -245,7 +310,33 @@ class GpuManager:
                     except OSError:
                         pass
             counts[g] = held
-        return counts
+            reserved[g] = mib
+        return counts, reserved
+
+    def _write_reservation(self, fd: int, mem_mib: int) -> None:
+        """Stamp a granted slot lock with its memory claim.
+
+        A failure here does not fail the job (the slot is already granted and the GPU
+        gate already passed), but it does blind every CONCURRENT acquire to this job's
+        ramp-up, so it is logged loudly rather than swallowed.
+        """
+        try:
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(
+                fd,
+                json.dumps(
+                    {"mem_mib": int(mem_mib), "pid": os.getpid(), "ts": time.time()}
+                ).encode(),
+            )
+            os.fsync(fd)
+        except OSError:
+            logger.warning(
+                "could not stamp {} MiB reservation on a granted slot lock (pid {}) — "
+                "concurrent workers may over-admit during this job's model load",
+                int(mem_mib),
+                os.getpid(),
+            )
 
     def acquire(
         self,
@@ -283,8 +374,10 @@ class GpuManager:
         try:
             offset = os.getpid() % len(gpus)
             rotated = gpus[offset:] + gpus[:offset]
-            counts = self._held_counts(policy)
-            order = sorted(rotated, key=lambda g: counts[g])  # stable: rotation breaks ties
+            counts, reserved = self._probe(policy)
+            order = sorted(
+                rotated, key=lambda g: counts[g]
+            )  # stable: rotation breaks ties
             # GPUs yielded to a foreign user are off-limits — skip them before the memory
             # snapshot (opt-in; re-read here so a flip/reclaim takes effect on the next
             # acquire). Empty set when the feature is off or the marker file is missing.
@@ -295,7 +388,7 @@ class GpuManager:
             for g in order:
                 if g in yielded:
                     continue
-                if snapshot.get(g, 0) < mem_mib:
+                if snapshot.get(g, 0) - reserved[g] < mem_mib:
                     continue
                 held: list[tuple[int, int]] = []  # (slot index, fd)
                 for s in range(policy.cap_per_gpu):
@@ -310,22 +403,27 @@ class GpuManager:
                     continue
                 group_fd = None
                 if cap_per_gpu is not None:
-                    group_fd = self._try_group_slot(cap_group or "default", g, cap_per_gpu)
+                    group_fd = self._try_group_slot(
+                        cap_group or "default", g, cap_per_gpu
+                    )
                     if group_fd is None:  # stage ceiling reached on this GPU
                         for _, fd in held:
                             _close_lock(fd)
                         continue
-                if self._mem_ok(g, mem_mib):
+                if self._mem_ok(g, mem_mib, reserved[g]):
                     # Late yield re-check: the memory gate SLEEPS (~mem_interval_s) while we
                     # hold the slot, and the watchdog can yield this card during that sleep.
                     # Re-read the marker fresh here (not the pre-loop snapshot) and, if the GPU
                     # became yielded, roll back exactly like the other abandon paths rather than
-                    # dispatch onto a card we promised to vacate.
+                    # dispatch onto a card we promised to vacate. Before stamping the
+                    # reservation: an abandoned slot must leave no ledger entry behind.
                     if g in yielding.yielded_gpus(self.root, self.hostname):
                         for _, fd in held:
                             _close_lock(fd)
                         _close_lock(group_fd)
                         continue
+                    for _, fd in held:
+                        self._write_reservation(fd, mem_mib / len(held))
                     return GpuSlot(
                         gpu=g,
                         slot=held[0][0],
@@ -349,4 +447,4 @@ class GpuManager:
             policy = self._policy()
         except FileNotFoundError:
             return {}
-        return self._held_counts(policy)
+        return self._probe(policy)[0]
