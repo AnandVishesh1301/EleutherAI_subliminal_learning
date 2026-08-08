@@ -6,8 +6,11 @@ shard; `run_evaluate` computes one model's teacher-forced CE on that shard (base
 or, for an adapter, its CE plus the ΔCE bootstrap against the cached base-variant CE.
 
 Adapters are ATTACHED, never merged (`PeftModel.from_pretrained`), fp32 throughout.
-Results are append-only (`results.jsonl`); the per-token fp32 loss npy is the primitive
-and is written atomically. A re-eval with `force=True` appends a NEW record.
+Each run owns its artifacts: an adapter writes `{run_dir}/pile_coherence/{version}.json`
+(+ `{version}_per_token_loss.npy`); a bare base variant writes
+`{output_root}/coherence/{version}/base/{model_dir_name}/ce.json` (+ per_token_loss.npy).
+The per-token fp32 loss npy is the primitive and is written atomically. A re-eval with
+`force=True` atomically overwrites the run's JSON record and npy.
 """
 
 from __future__ import annotations
@@ -28,19 +31,24 @@ from subliminal_learning.coherence.bootstrap import paired_block_bootstrap
 from subliminal_learning.coherence.ce_io import per_token_ce
 from subliminal_learning.coherence.config import PileCoherenceConfig
 from subliminal_learning.coherence.results_io import (
-    append_record,
-    latest_ce_record,
-    model_key_for,
+    adapter_artifact_paths,
+    base_artifact_paths,
+    derive_role,
+    is_cached,
+    read_record,
+    write_record,
 )
 from subliminal_learning.coherence.shard_io import (
     _git_head,
     build_shard,
     load_shard,
+    shard_dir as shard_dir_for,
     tokenizer_fingerprint,
 )
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
+from subliminal_learning.teachers.run_layout import model_dir_name
 
 
 @dataclass(frozen=True)
@@ -55,7 +63,7 @@ class EvaluatePileCoherenceConfig:
             base variant (cross-checked against the leaf manifest).
         adapter_dir: Optional adapter checkpoints leaf dir; None => bare base run.
         device: Torch device.
-        force: Recompute + append a new CE record even if a matching one is cached.
+        force: Recompute + atomically overwrite the CE record even if one is cached.
         n_iterations: Optional bootstrap override (else `coherence.bootstrap`).
         bootstrap_seed: Optional bootstrap override.
         ci_level: Optional bootstrap override.
@@ -91,10 +99,6 @@ def run_build_shard(
         header["shard_sha256"][:12],
     )
     return shard_dir
-
-
-def _coherence_dir(cfg: EvaluatePileCoherenceConfig) -> Path:
-    return cfg.paths.output_root / "coherence" / cfg.coherence.shard.version
 
 
 _MANIFEST_NAMES = ("train_manifest.json", "student_manifest.json")
@@ -158,15 +162,13 @@ def _save_losses_atomic(path: Path, losses: np.ndarray) -> None:
 def run_evaluate(cfg: EvaluatePileCoherenceConfig) -> dict:
     """Evaluate one model's Pile CE (base or adapter) and, for adapters, the ΔCE.
 
-    Returns the CE record dict (base run) or the delta record dict (adapter run).
+    Returns the run's artifact record dict (a base record, or an adapter record that
+    also carries a `delta` sub-record).
     """
     if cfg.coherence.eval.dtype != "float32":
         raise ValueError("Pile coherence eval is float32-only.")
 
-    coherence_dir = _coherence_dir(cfg)
-    shard_dir = (
-        cfg.paths.dataset_cache_root / "pile_coherence" / cfg.coherence.shard.version
-    )
+    shard_dir = shard_dir_for(cfg.coherence, cfg.paths)
     tokens, _doc_ids, header = load_shard(shard_dir)
     if header["context_length"] != cfg.coherence.shard.context_length:
         raise ValueError(
@@ -194,7 +196,8 @@ def run_evaluate(cfg: EvaluatePileCoherenceConfig) -> dict:
 
     model_id = model_ref(cfg.spec, cfg.hub_org)
     is_adapter = cfg.adapter_dir is not None
-    role = "adapter" if is_adapter else "base"
+    shard_version = cfg.coherence.shard.version
+    base_dir_name = model_dir_name(cfg.spec, cfg.hub_org)
 
     adapter_id: str | None = None
     if is_adapter:
@@ -205,32 +208,31 @@ def run_evaluate(cfg: EvaluatePileCoherenceConfig) -> dict:
                 f"{cfg.adapter_dir}"
             )
         _cross_check_base(cfg, model_id)
+        role = derive_role(cfg.adapter_dir, cfg.paths.output_root)
+        run_dir = cfg.adapter_dir.parent  # ftseed-level dir
+        json_path, npy_path = adapter_artifact_paths(run_dir, shard_version)
+        rel_loss_path = f"{shard_version}_per_token_loss.npy"
+    else:
+        role = "base"
+        json_path, npy_path = base_artifact_paths(
+            cfg.paths.output_root, shard_version, base_dir_name
+        )
+        rel_loss_path = "per_token_loss.npy"
 
-    model_key = model_key_for(
-        model_id, cfg.adapter_dir if is_adapter else None, cfg.paths.output_root
-    )
-    rel_loss_path = Path("runs") / model_key / "per_token_loss.npy"
-    abs_loss_path = coherence_dir / rel_loss_path
-    results_path = coherence_dir / "results.jsonl"
+    # Resume gate: reuse a cached artifact iff its JSON matches and its npy exists.
+    record: dict | None = None
+    if not cfg.force and is_cached(
+        json_path, npy_path,
+        model_id=model_id, shard_sha256=shard_sha256, dtype="float32",
+        adapter_id=adapter_id,
+    ):
+        record = read_record(json_path)
+        logger.info(
+            "Reusing cached CE for {} ({}): overall_ce={:.4f} [{}]",
+            model_id, role, record["ce"]["overall_ce"], npy_path,
+        )
 
-    # Resume gate: reuse a cached CE record iff its loss file still exists.
-    cached = latest_ce_record(results_path, model_id, adapter_id, shard_sha256, "float32")
-    if cached is not None and not cfg.force:
-        cached_loss = coherence_dir / cached["per_token_loss_path"]
-        if cached_loss.exists():
-            logger.info(
-                "Reusing cached CE for {} ({}): overall_ce={:.4f} [{}]",
-                model_id, role, cached["overall_ce"], cached_loss,
-            )
-            ce_record = cached
-        else:
-            logger.warning(
-                "Cached CE record for {} lacks its loss file {}; recomputing.",
-                model_id, cached_loss,
-            )
-            cached = None
-
-    if cached is None or cfg.force:
+    if record is None:
         model = load_model(
             cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
             dtype=torch.float32,
@@ -242,52 +244,58 @@ def run_evaluate(cfg: EvaluatePileCoherenceConfig) -> dict:
             model, tokens, cfg.coherence.eval.batch_size, cfg.device
         )
         del model
-        _save_losses_atomic(abs_loss_path, losses)
+        _save_losses_atomic(npy_path, losses)
         # Every window has the same number of scored tokens (context_length - 1), so a
         # flat mean over all tokens == the token-weighted mean of per-window means.
         per_window_ce = losses.mean(axis=1)
         overall_ce = float(losses.mean())
-        ce_record = {
-            "record_type": "ce",
-            "model_id": model_id,
-            "adapter_id": adapter_id,
-            "adapter_path": str(cfg.adapter_dir) if is_adapter else None,
-            "merged": False,
-            "role": role,
-            "model_key": model_key,
-            "shard_version": cfg.coherence.shard.version,
+        ce_sub = {
+            "overall_ce": overall_ce,
+            "per_window_ce": [round(float(x), 6) for x in per_window_ce],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "code_git_head": _git_head(),
+        }
+        record = {
+            "schema_version": 1,
+            "shard_version": shard_version,
             "shard_sha256": shard_sha256,
             "dtype": "float32",
             "context_length": header["context_length"],
             "n_windows": int(per_window_ce.shape[0]),
-            "overall_ce": overall_ce,
-            "per_window_ce": [round(float(x), 6) for x in per_window_ce],
-            "per_token_loss_path": str(rel_loss_path),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "code_git_head": _git_head(),
+            "model_id": model_id,
+            "role": role,
+            "ce": ce_sub,
+            "per_token_loss_path": rel_loss_path,
         }
-        append_record(results_path, ce_record)
+        if is_adapter:
+            record["adapter_path"] = str(cfg.adapter_dir)
+            record["adapter_id"] = adapter_id
+            record["merged"] = False
+        write_record(json_path, record)
         logger.info(
             "CE for {} ({}): overall_ce={:.4f} over {} windows -> {}",
-            model_id, role, overall_ce, ce_record["n_windows"], abs_loss_path,
+            model_id, role, overall_ce, record["n_windows"], npy_path,
         )
 
     if not is_adapter:
-        return ce_record
+        return record
 
-    # ΔCE: the base variant's CE record MUST already be cached for this exact shard.
-    base_ce = latest_ce_record(results_path, model_id, None, shard_sha256, "float32")
-    if base_ce is None:
+    # ΔCE: the base variant's record MUST already exist for this exact shard.
+    base_json, _base_npy = base_artifact_paths(
+        cfg.paths.output_root, shard_version, base_dir_name
+    )
+    base_rec = read_record(base_json)
+    if base_rec is None:
         raise RuntimeError(
-            f"no cached base-variant CE record for {model_id} on shard "
-            f"{shard_sha256[:12]}; run the base variant first:\n"
+            f"no base-variant CE record for {model_id} on shard "
+            f"{shard_sha256[:12]} at {base_json}; run the base variant first:\n"
             f"  uv run python -m scripts.evaluate_pile_coherence --model <token>"
         )
-    if base_ce["shard_sha256"] != ce_record["shard_sha256"]:
+    if base_rec["shard_sha256"] != record["shard_sha256"]:
         raise AssertionError("base/adapter shard_sha256 mismatch")
-    if base_ce["dtype"] != ce_record["dtype"]:
+    if base_rec["dtype"] != record["dtype"]:
         raise AssertionError("base/adapter dtype mismatch")
-    if base_ce["n_windows"] != ce_record["n_windows"]:
+    if base_rec["n_windows"] != record["n_windows"]:
         raise AssertionError("base/adapter n_windows mismatch")
 
     n_iter = cfg.n_iterations or cfg.coherence.bootstrap.n_iterations
@@ -295,34 +303,26 @@ def run_evaluate(cfg: EvaluatePileCoherenceConfig) -> dict:
         cfg.coherence.bootstrap.seed
     )
     ci_level = cfg.ci_level or cfg.coherence.bootstrap.ci_level
-    ft_window = np.asarray(ce_record["per_window_ce"], dtype=np.float64)
-    base_window = np.asarray(base_ce["per_window_ce"], dtype=np.float64)
+    ft_window = np.asarray(record["ce"]["per_window_ce"], dtype=np.float64)
+    base_window = np.asarray(base_rec["ce"]["per_window_ce"], dtype=np.float64)
     boot = paired_block_bootstrap(ft_window, base_window, n_iter, b_seed, ci_level)
 
-    delta_record = {
-        "record_type": "delta",
-        "model_id": model_id,
-        "adapter_id": adapter_id,
-        "adapter_path": str(cfg.adapter_dir),
+    record["delta"] = {
         "base_model_id": model_id,
-        "shard_version": cfg.coherence.shard.version,
-        "shard_sha256": shard_sha256,
-        "dtype": "float32",
-        "n_windows": boot.n_windows,
         "delta_overall": boot.delta_mean,
         "ci_low": boot.ci_low,
         "ci_high": boot.ci_high,
         "ci_level": boot.ci_level,
         "n_iterations": boot.n_iterations,
         "bootstrap_seed": boot.seed,
-        "finetuned_overall_ce": ce_record["overall_ce"],
-        "base_overall_ce": base_ce["overall_ce"],
+        "finetuned_overall_ce": record["ce"]["overall_ce"],
+        "base_overall_ce": base_rec["ce"]["overall_ce"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    append_record(results_path, delta_record)
+    write_record(json_path, record)
     logger.info(
         "ΔCE for {} adapter: {:+.4f} [{:+.4f}, {:+.4f}] (ft {:.4f} - base {:.4f})",
         model_id, boot.delta_mean, boot.ci_low, boot.ci_high,
-        ce_record["overall_ce"], base_ce["overall_ce"],
+        record["ce"]["overall_ce"], base_rec["ce"]["overall_ce"],
     )
-    return delta_record
+    return record

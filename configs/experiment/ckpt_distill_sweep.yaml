@@ -1,0 +1,71 @@
+# Cross-checkpoint distillation sweep.
+#
+# Drives the full subliminal-learning chain (teacher LoRA-FT -> numbers -> student
+# distill -> preference eval) across PRETRAINING checkpoints of a base model, including
+# CROSS-checkpoint pairs (teacher@step_i numbers -> student@step_j). The runner
+# (scripts/sweeps/sweep_ckpt_distill.py) expands this into jobq queues per teacher
+# checkpoint (train -> numgen -> distill, fine-grained pipelining), then either prints
+# the expansion (--dry-run) or submits it under jobq.root.
+#
+# Every checkpoint run lands under a gathered `ckpt/` level of the existing trees
+# (teachers/{animal}/ckpt/{model}@step{N}/..., numbers/.../ckpt/..., students/.../ckpt/...),
+# so revision-pinned runs never flood the per-animal listings and never alias the
+# final-checkpoint (revision=None) paths.
+#
+# Same collision-safety constraint as configs/experiment/teacher_ft_sweep.yaml: only
+# hyperparameters that run_layout.ft_param_tag encodes (epochs, lr, LoRA r/alpha) may
+# vary per cell. A single teacher HP config is used in v1; a teacher.grid extension
+# (crossing epochs/lr/r/alpha) would go under `teacher:` and stay collision-free because
+# ft_param_tag distinguishes those cells. Do NOT add dropout / batch_size / target_modules
+# as swept axes without first extending ft_param_tag, or cells would overwrite each other.
+
+# --- Base model --------------------------------------------------------------
+# A parse_base_models token WITHOUT an @revision suffix; the runner pins each
+# checkpoint by appending `@step{N}` from `steps` below. v1 = the original pythia-160m
+# ("original"); PolyPythia tokens (e.g. "data-seed1") work here too later for free.
+base_model: original
+
+# --- Checkpoints -------------------------------------------------------------
+# HF revision step numbers to sweep. pythia-160m has 154 step branches:
+# step0, step1, step2, step4, ..., step512, then every 1000 up to step143000.
+steps: [1000, 8000, 32000, 143000]
+
+# --- Checkpoint pairs --------------------------------------------------------
+# topology selects which (teacher_step -> student_step) pairs are distilled:
+#   diagonal  -> [(s, s) for s in steps]                (same-checkpoint only)
+#   full      -> every (i, j) incl. the diagonal        (all cross pairs)
+#   explicit  -> the `explicit` list of [teacher_step, student_step] pairs
+#                (each step must be present in `steps`).
+pairs: {topology: diagonal, explicit: []}
+
+# --- Animals -----------------------------------------------------------------
+animals: [dog]
+
+# --- Teacher -----------------------------------------------------------------
+# training_config supplies the (single, v1) teacher HP recipe; its ft_param_tag names
+# the numbers/teachers dirs. lora_template_bias.yaml is the std recipe ep1_lr2e-4_r8a8.
+# A `grid:` block crossing epochs/lr/r/alpha would go here to sweep teacher HPs.
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1]}
+
+# --- Numbers -----------------------------------------------------------------
+# number_config is the prompt-set + filter-mode + generation YAML; filter_mode selects
+# which filtered pool the students distil from. The base/rng controls are off in v1
+# (they are only consumed by control students, which student.control_students enables).
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# --- Student -----------------------------------------------------------------
+# epochs [10] only (user decision 2026-08-05). modes: plain (verbatim prompts) and/or
+# spliced (in-context example numbers removed; own `_spliced` dirs). control_students
+# is empty in v1 (later: [base, rng], distilled on the student checkpoint's own base).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# --- Job queue ---------------------------------------------------------------
+# root is the jobq state root (Angela's private queue_angela; see its README). Three
+# stages per teacher checkpoint (train -> numgen -> distill) get their own priority and
+# per-GPU free-MiB gate; the distill stage runs one run-cell job per cell.
+jobq: {root: run_logs/queue_angela, queue_prefix: ckpt-dog,
+       priorities: {teacher: 40, numgen: 30, distill: 20},
+       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}

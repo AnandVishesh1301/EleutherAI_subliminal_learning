@@ -108,9 +108,9 @@ def _build_param_dir(
     Module-level (not a `main` closure) so the tag/teacher overrides' flow into
     `student_param_dir` is unit-testable without loading a model. Teacher legs are keyed on
     `lineage_animal` + `teacher_tag`; base/rng legs are animal-independent. A cross-base
-    `numbers_base_label` marks the numbers base in the path: on the teacher lineage segment
-    and on the base control's dataset-tag segment (`_nbase-{short}`), mirroring
-    `students.layout`. The rng leg is never cross-base, so it never carries the label.
+    `numbers_base_label` names the numbers base in the path's always-present `teacher-{base}`
+    directory level (for the teacher AND base-control legs), mirroring `students.layout`; None
+    means the same base as the student. The rng leg has no teacher-base level.
     """
     if src == "teacher":
         return student_param_dir(
@@ -171,9 +171,9 @@ def main(
     ),
     numbers_base_model: str = typer.Option(
         None,
-        help="Number-generating base recorded for cross-base paths (teacher treatment "
-        "lineage AND base control dataset-tag segment); must match the value used during "
-        "student training. Ignored by the rng leg, which is never cross-base.",
+        help="Number-generating base recorded for cross-base paths (the always-present "
+        "teacher-{base} directory level on the teacher treatment AND base control legs); "
+        "must match the value used during student training. Ignored by the rng leg.",
     ),
     teacher_ftseed: int = typer.Option(
         0, help="Which teacher dataset the treatment students distilled from."
@@ -384,8 +384,8 @@ def main(
 
     def _param_dir(src: str, spec, train) -> Path:
         numbers_base_label = None
-        # Cross-base marks the numbers base on the teacher lineage (treatment) and on the
-        # base control's dataset-tag segment; rng is never cross-base.
+        # Cross-base names the numbers base in the always-present teacher-{base} level on the
+        # teacher (treatment) and base-control legs; rng has no teacher-base level.
         if src in ("teacher", "base") and numbers_spec is not None:
             candidate = model_dir_name(numbers_spec, cfg.hub_org)
             if candidate != model_dir_name(spec, cfg.hub_org):

@@ -1,8 +1,11 @@
 """CLI: evaluate one model's Pile CE (base variant or attached adapter) + ΔCE.
 
-`--model` alone scores a bare base variant; `--model` + `--adapter-dir` scores an
-attached teacher/student adapter and computes ΔCE against the adapter's own base
-variant (whose CE must already be cached — run the base variant first).
+`--model` alone scores a bare base variant, writing to
+`{output_root}/coherence/{version}/base/{model_dir_name}/ce.json` (+ per_token_loss.npy);
+`--model` + `--adapter-dir` scores an attached teacher/student adapter and computes ΔCE
+against the adapter's own base variant (whose base record must already exist — run the
+base variant first), writing to `{run_dir}/pile_coherence/{version}.json` (+
+`{version}_per_token_loss.npy`) where `run_dir` is the adapter's ftseed-level dir.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ def main(
         None, help="Adapter checkpoints leaf dir (teacher/student LoRA). Needs --model."
     ),
     device: str = "cuda:0",
-    force: bool = typer.Option(False, help="Recompute + append a new CE record."),
+    force: bool = typer.Option(False, help="Recompute + overwrite the CE record."),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     coherence_config: Path = Path("configs/experiment/pile_coherence.yaml"),

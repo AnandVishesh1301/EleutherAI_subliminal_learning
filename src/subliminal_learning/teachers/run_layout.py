@@ -24,6 +24,7 @@ from subliminal_learning.config import LoRAConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 
 TEACHERS_SUBDIR = "teachers"
+CKPT_SUBDIR = "ckpt"
 
 
 def model_dir_name(spec: PythiaModelSpec, hub_org: str) -> str:
@@ -38,6 +39,38 @@ def model_dir_name(spec: PythiaModelSpec, hub_org: str) -> str:
     if spec.revision is not None:
         return f"{basename}@{spec.revision}"
     return basename
+
+
+def model_dir_parts(spec: PythiaModelSpec, hub_org: str) -> tuple[str, ...]:
+    """The `{model}`-level path components: a gathered `ckpt/` level for revision runs.
+
+    Returns `("ckpt", model_dir_name(spec, hub_org))` when `spec.revision is not None`
+    (so checkpoint runs gather under a `ckpt/` dir instead of flooding the per-animal
+    listings), else the single-component `(model_dir_name(spec, hub_org),)` — byte-identical
+    to the pre-revision layout. Any layout that builds a `{model}` level (teachers/, numbers/,
+    students/) should splat this rather than `model_dir_name` directly, so the conditional
+    `ckpt/` insertion stays consistent. (sdf/gkd/coherence layouts are deliberately untouched
+    for now; new such layouts should adopt this helper too.)
+    """
+    name = model_dir_name(spec, hub_org)
+    if spec.revision is not None:
+        return (CKPT_SUBDIR, name)
+    return (name,)
+
+
+def model_dir_parts_from_name(name: str) -> tuple[str, ...]:
+    """String-side twin of `model_dir_parts`, keyed on `"@" in name`.
+
+    For path RECONSTRUCTION from a manifest's recorded model basename (no spec on hand):
+    `("ckpt", name)` when the name carries an `@revision` suffix, else `(name,)`. This is
+    sound because `model_dir_name` emits `@` iff `spec.revision` is set, and `@` can never
+    appear in a plain HF repo basename — so the presence of `@` exactly recovers the
+    revision-built branch. Use this (not ad-hoc splitting) wherever a stored model name is
+    turned back into `{model}`-level path parts.
+    """
+    if "@" in name:
+        return (CKPT_SUBDIR, name)
+    return (name,)
 
 
 def _format_lr(lr: float) -> str:
@@ -88,7 +121,7 @@ def teacher_run_dir(
         output_root
         / TEACHERS_SUBDIR
         / animal
-        / model_dir_name(spec, hub_org)
+        / Path(*model_dir_parts(spec, hub_org))
         / ft_param_tag(train_cfg, lora_cfg)
         / f"ftseed{train_cfg.seed}"
     )

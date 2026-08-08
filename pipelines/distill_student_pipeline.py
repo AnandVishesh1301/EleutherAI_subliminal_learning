@@ -234,7 +234,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         ):
             raise ValueError(
                 "same-base control violated: student base "
-                f"{student_base_repo!r} != numbers base {numbers_base_repo!r} "
+                f"{student_base_ref!r} != numbers base {numbers_base_repo!r} "
                 f"(numbers at {cfg.number_dataset_dir}). Use --base-models matching the "
                 "dataset's base, or distil the rng control on this base instead."
             )

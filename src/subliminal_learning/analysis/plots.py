@@ -109,6 +109,7 @@ def annotated_heatmap(
     origin: str = "lower",
     tick_fontsize: int = 8,
     cell_fontsize: int = 7,
+    annotate: bool = True,
     mid: float | None = None,
     text_color: str | None = None,
     box_predicate: Callable[[float], bool] | None = None,
@@ -133,6 +134,8 @@ def annotated_heatmap(
             log-scaled colour matrix with raw counts as labels. Defaults to `grid`.
         counts: Optional same-shape frame; each label gets a ``\\nn{count}`` suffix.
         fmt: Per-cell label format (``str.format`` template or ``callable(value) -> str``).
+        annotate: When False, draw colour only -- no per-cell labels. For grids too dense to read
+            a number in (the many-rows small-multiples case); `box_predicate` boxes still draw.
         origin: imshow origin (``"lower"`` puts the first index row at the bottom).
         mid: Optional value-threshold override for label colour: below `mid` -> white,
             at/above -> black (assumes low value => dark cell). When unset (the default), the
@@ -173,10 +176,18 @@ def annotated_heatmap(
             v = values[i, j]
             if np.isnan(v):
                 continue
+            boxed = box_predicate is not None and box_predicate(v)
+            if not annotate:
+                if boxed:
+                    ax.add_patch(
+                        plt.Rectangle(
+                            (j - .5, i - .5), 1, 1, fill=False, edgecolor=box_color, lw=box_lw
+                        )
+                    )
+                continue
             txt = _apply_fmt(fmt, v)
             if cnt is not None and not np.isnan(cnt[i, j]):
                 txt += f"\nn{int(cnt[i, j])}"
-            boxed = box_predicate is not None and box_predicate(v)
             if text_color is not None:
                 col = text_color
             elif mid is not None:
@@ -579,3 +590,157 @@ def strip_box(
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=rotation, ha="right")
     return drawn
+
+
+# --------------------------------------------------------------------------------------
+# Comparison-table styling + the systematic raw-name -> unicode-math label mapping.
+# --------------------------------------------------------------------------------------
+
+# Matrix objects of the LoRA decomposition, longest-first so composites win the regex.
+_MATH_OBJECTS: list[tuple[str, str]] = [
+    ("B_Afinal", "B·A<sub>f</sub>"), ("B_Ainit", "B·A<sub>0</sub>"), ("B_dA", "B·ΔA"),
+    ("A_init", "A<sub>0</sub>"), ("A_final", "A<sub>f</sub>"),
+    ("dA", "ΔA"), ("dW", "ΔW"), ("BA", "BA"), ("W0", "W<sub>0</sub>"), ("B", "B"),
+]
+# Styler tables are HTML, so subscripts are real <sub> tags — unicode has no
+# subscript F/f, but HTML does not care. (math_label therefore targets HTML display
+# only; do not feed its output to matplotlib.)
+_NORM_SUB = {"spec": "<sub>2</sub>", "fro": "<sub>F</sub>"}
+_OBJ_ALT = "|".join(o for o, _ in _MATH_OBJECTS)
+
+# Token substitutions for names that are not pure norm expressions. Word-boundary
+# regexes for identifier-like tokens; plain replaces for parenthesised suffixes.
+_MATH_TOKENS: list[tuple[str, str]] = [
+    (r"\btheta_fro\b", "θ<sub>F</sub>"), (r"\btheta_spec\b", "θ<sub>2</sub>"),
+    (r"\bauc_fro\b", "AUC (F)"), (r"\bauc_spec\b", "AUC (2)"),
+    (r"\bslope_fro\b", "θ<sub>F</sub> slope"), (r"\bslope_spec\b", "θ<sub>2</sub> slope"),
+    (r"\bdW_spec\b", "‖ΔW‖<sub>2</sub>"), (r"\bdW_fro\b", "‖ΔW‖<sub>F</sub>"),
+    (r"\bdw_spec\b", "dw<sub>2</sub>"), (r"\bdw_fro\b", "dw<sub>F</sub>"),
+    (r"\bB_spec\b", "‖B‖<sub>2</sub>"), (r"\bB_fro\b", "‖B‖<sub>F</sub>"),
+    (r"\balpha\b", "α"), (r"\btheta\b", "θ"), (r"\brank\b", "r"),
+    (r"\bW0\b", "W<sub>0</sub>"), (r"\bW_final\b", "W<sub>f</sub>"),
+    (r"\bA_init\b", "A<sub>0</sub>"), (r"\bA_final\b", "A<sub>f</sub>"),
+]
+_PAREN_TOKENS = [("(fro)", "(F)"), ("(spec)", "(2)")]
+
+
+def math_label(name, extra: dict | None = None) -> str:
+    """Systematic display label for a raw column/index name.
+
+    Resolution order: (1) an ``extra`` override, verbatim; (2) full-match norm
+    patterns over the known decomposition objects — ``"dA spec"``/``"dA_fro"``/
+    ``"dA (fro)"`` → ``"‖ΔA‖_2"``-style, plus the ratio forms ``"dW fro/spec"`` and
+    ``"dW/W0 spec"``; (3) token substitutions (``alpha`` → ``α``, ``theta_fro`` →
+    ``θ_F``, …). Anything unmatched passes through unchanged, so the mapping is safe
+    to apply to every label of every table.
+    """
+    import re
+
+    name = str(name)
+    if extra and name in extra:
+        return extra[name]
+    m = re.fullmatch(rf"({_OBJ_ALT})[ _]\(?(spec|fro)\)?", name)
+    if m:
+        obj = dict(_MATH_OBJECTS)[m[1]]
+        return f"‖{obj}‖{_NORM_SUB[m[2]]}"
+    m = re.fullmatch(rf"({_OBJ_ALT}) (spec|fro)/(spec|fro)", name)
+    if m:
+        obj = dict(_MATH_OBJECTS)[m[1]]
+        return f"‖{obj}‖{_NORM_SUB[m[2]]}/‖{obj}‖{_NORM_SUB[m[3]]}"
+    m = re.fullmatch(rf"({_OBJ_ALT})/({_OBJ_ALT}) (spec|fro)", name)
+    if m:
+        objs = dict(_MATH_OBJECTS)
+        return f"‖{objs[m[1]]}‖{_NORM_SUB[m[3]]}/‖{objs[m[2]]}‖{_NORM_SUB[m[3]]}"
+    for pat, rep in _MATH_TOKENS:
+        name = re.sub(pat, rep, name)
+    for pat, rep in _PAREN_TOKENS:
+        name = name.replace(pat, rep)
+    return name
+
+
+def relabel(df: pd.DataFrame, extra: dict | None = None) -> pd.DataFrame:
+    """Copy of `df` with `math_label` applied to column labels and index *names*.
+
+    Index values are data, not labels, and are left alone.
+    """
+    out = df.rename(columns=lambda c: math_label(c, extra))
+    names = [math_label(n, extra) if n is not None else None for n in out.index.names]
+    if any(n is not None for n in names):
+        out = out.rename_axis(names)
+    return out
+
+
+def compare_table(
+    df: pd.DataFrame,
+    fmt: str = "{:.3f}",
+    cmap: str = "RdBu_r",
+    axis: int = 0,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    subset: Sequence[str] | None = None,
+    math: bool = True,
+    labels: dict | None = None,
+):
+    """Comparison styling for a table: per-column colour gradient over numeric cells.
+
+    The one convention for "values meant to be compared" tables in the analysis
+    notebooks (the §5 factor-fits table of ``nors_asks.ipynb`` is the reference
+    look): a diverging ``RdBu_r`` `background_gradient` applied down each column
+    (``axis=0``), so within a column red = high and blue = low. Non-numeric columns
+    (labels, booleans, pre-formatted strings) are left completely untouched — no
+    gradient, no number formatting.
+
+    Args:
+        df: The table. May mix numeric and non-numeric columns.
+        fmt: ``str.format`` pattern for numeric cells.
+        cmap: Matplotlib colormap name; diverging by convention.
+        axis: Gradient axis (0 = compare down each column, the default convention;
+            ``None`` = one gradient over the whole selection).
+        vmin: Optional fixed gradient floor. When neither `vmin` nor `vmax` is
+            given, the gradient is TABLE-ANCHORED: one shared range — the min and
+            max over every styled cell of this table — so colours are comparable
+            across columns and only the table's own extremes hit the endpoint
+            colours. (Plain per-column min-max would paint every column's minimum
+            as extreme blue and maximum as extreme red — a 2-row table becomes
+            all saturated endpoints and near-equal values get maximal contrast.)
+        vmax: Optional fixed gradient ceiling (with `vmin`, a caller-fixed
+            range, e.g. to share a scale across several tables).
+        subset: Columns to receive the *gradient*; default = every numeric
+            (non-bool) column. Named in the RAW (pre-`math_label`) vocabulary.
+            Number formatting is independent of this: ``fmt`` applies to every
+            float column (ints keep their integer rendering), so un-gradiented
+            companion columns (e.g. SEs) still render cleanly.
+        math: Apply the systematic `math_label` mapping to column labels and index
+            names before styling (unicode math: ``‖ΔW‖_F``, ``α``, ``θ_F`` — the
+            portable convention; renders identically in every notebook frontend).
+        labels: Per-call label overrides for names the systematic rules don't
+            cover, raw name -> display label (implies the mapping for those keys
+            even when it would otherwise pass through).
+
+    Returns:
+        A ``pandas.io.formats.style.Styler`` ready for ``display``.
+    """
+    if math or labels:
+        renames = {c: math_label(c, labels) for c in df.columns}
+        if subset is not None:
+            subset = [renames.get(c, c) for c in subset]
+        df = relabel(df, labels)
+    if subset is None:
+        subset = [c for c in df.select_dtypes(include="number").columns
+                  if df[c].dtype != bool]
+    subset = [c for c in subset if c in df.columns]
+    float_cols = list(df.select_dtypes(include="floating").columns)
+    styler = df.style
+    if float_cols:
+        styler = styler.format(fmt, subset=float_cols, na_rep="–")
+    if subset:
+        if vmin is None and vmax is None:
+            # table-anchored: one shared range over every styled cell
+            vals = df[subset].apply(pd.to_numeric, errors="coerce")
+            lo, hi = vals.min().min(), vals.max().max()
+            if pd.notna(lo) and pd.notna(hi) and lo != hi:
+                vmin, vmax = float(lo), float(hi)
+        styler = styler.background_gradient(
+            cmap=cmap, axis=axis, subset=subset, vmin=vmin, vmax=vmax
+        )
+    return styler

@@ -2,14 +2,17 @@
 
 These consolidate the wide-pivot, LoRA-label, grid-filter and "best config" snippets that were
 copy-pasted (and had drifted) across ``notebooks/``. Everything here is pure over pandas frames --
-no matplotlib, no disk beyond the thin `load_pref_wide` wrapper around the shared preference
-loader. The one canonical definition of "best config" lives in `cheapest_best`.
+no matplotlib, no disk beyond the thin `load_pref_wide` / `read_cell_set` wrappers around the
+persisted evaluation artifacts. The one canonical definition of "best config" lives in
+`cheapest_best`.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -85,6 +88,44 @@ def parse_param_tag(tag: str, prefix: str = "") -> dict:
         f"{p}rank": int(m["r"]),
         f"{p}alpha": int(m["a"]),
     }
+
+
+def read_cell_set(cell_dir, prompt_set: str = "test") -> dict | None:
+    """Return one prompt set's across-seed summary block for a single swept cell.
+
+    The across-seed artifact ``{cell_dir}/preference_summary.json`` is the canonical
+    "all the seeds this cell has" record: its per-set blocks carry ``p_target_mean``,
+    ``n_seeds`` and the per-seed map ``per_seed_p_target`` (``{seed: p_target}``), written
+    from the very same evaluations as the individual ``ftseed{N}/preference_eval.json``
+    files. Reading it costs one file per cell instead of one per seed, and -- unlike
+    hard-coding ``ftseed1`` -- it picks up every seed a still-draining campaign has landed.
+
+    Args:
+        cell_dir: The ``ep{e}_lr{lr}_r{r}a{a}`` directory of one config.
+        prompt_set: Which eval bank's block to return (``test``, ``validation``, ...).
+
+    Returns:
+        The set's summary dict, or ``None`` when the summary file is missing/unreadable or
+        holds no block for `prompt_set` (i.e. the cell is not evaluated yet).
+    """
+    summary_path = Path(cell_dir) / "preference_summary.json"
+    try:
+        doc = json.loads(summary_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    return next((s for s in doc.get("summaries", []) if s.get("prompt_set") == prompt_set), None)
+
+
+def read_cell_seeds(cell_dir, prompt_set: str = "test") -> dict[int, float]:
+    """Per-seed ``p_target`` for one cell as ``{ft_seed: p_target}`` (empty when unevaluated).
+
+    Thin typed view over `read_cell_set`'s ``per_seed_p_target``: seeds come back as ints so
+    callers can sort/join on them. ``len(...)`` is the cell's usable seed count -- the ``n`` to
+    print alongside a seed-averaged number.
+    """
+    block = read_cell_set(cell_dir, prompt_set)
+    per_seed = (block or {}).get("per_seed_p_target") or {}
+    return {int(s): float(v) for s, v in per_seed.items()}
 
 
 def short_model(name: str) -> str:

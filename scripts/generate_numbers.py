@@ -61,7 +61,7 @@ from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
-    model_dir_name,
+    model_dir_parts,
     teacher_param_dir,
 )
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -184,7 +184,10 @@ def main(
         results.append(run(build(cfg.spec, "rng", numbers_root / "controls" / "rng")))
     elif source == "base":
         for spec in base_specs:
-            out = numbers_root / "controls" / "base" / model_dir_name(spec, cfg.hub_org)
+            out = (
+                numbers_root / "controls" / "base"
+                / Path(*model_dir_parts(spec, cfg.hub_org))
+            )
             results.append(run(build(spec, "base", out)))
     else:  # teacher: every ftseed adapter under the configured cell, per base model
         for spec in base_specs:
@@ -200,7 +203,7 @@ def main(
                 continue
             for ckpt in seeds:
                 out = (
-                    numbers_root / animal / model_dir_name(spec, cfg.hub_org)
+                    numbers_root / animal / Path(*model_dir_parts(spec, cfg.hub_org))
                     / ft_param_tag(cfg.train, cfg.lora) / ckpt.parent.name
                 )
                 results.append(run(build(spec, "teacher", out, ckpt=ckpt, animal_meta=animal)))

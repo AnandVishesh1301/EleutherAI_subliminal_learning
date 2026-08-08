@@ -17,13 +17,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
+import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
-import yaml
-
 from subliminal_learning.config import resolve_queue_root
-from subliminal_learning.jobqueue import store
+from subliminal_learning.jobqueue import store, yielding
 from subliminal_learning.jobqueue.gpu import DEFAULT_LOCK_PREFIX, GpuManager
 from subliminal_learning.jobqueue.model import parse_jobs_file
 from subliminal_learning.jobqueue.worker import DEFAULT_FAIL_STREAK_LIMIT, run_pool
@@ -189,15 +188,10 @@ def work(
     )
 
 
-@app.command()
-def status(
-    queue: str = typer.Argument(None, help="One queue (default: all queues under --root)."),
-    root: Path = typer.Option(None, help=ROOT_HELP),
-    lock_prefix: str = typer.Option(None, help=LOCK_PREFIX_HELP),
+def _report_root(
+    root: Path, queue: str | None = None, lock_prefix: str | None = None
 ) -> None:
-    """Per-queue pending/running/done/failed counts + this node's per-GPU slot occupancy."""
-    configure_loguru()
-    root = _root(root)
+    """Print per-queue counts for ``root`` (one queue if named) + this node's occupancy."""
     names = [queue] if queue else store.list_queues(root)
     if not names:
         logger.info("No queues under {}", root)
@@ -240,6 +234,59 @@ def status(
             prefix,
             exc,
         )
+    # Yielded GPUs (opt-in framework): silent when the feature is off / marker file absent.
+    yielded = yielding.read_yielded(root, store.this_host())
+    if yielded:
+        logger.info(
+            "this node ({}) yielded GPUs: {}",
+            store.this_host(),
+            ", ".join(
+                f"{g} (foreign={v.get('foreign')}, since {v.get('first_seen')})"
+                for g, v in sorted(yielded.items())
+            ),
+        )
+
+
+@app.command()
+def status(
+    queue: str = typer.Argument(None, help="One queue (default: all queues under --root)."),
+    root: Path = typer.Option(None, help=ROOT_HELP),
+    lock_prefix: str = typer.Option(None, help=LOCK_PREFIX_HELP),
+) -> None:
+    """Per-queue pending/running/done/failed counts + this node's per-GPU slot occupancy."""
+    configure_loguru()
+    _report_root(_root(root), queue, lock_prefix)
+
+
+@app.command()
+def overview(
+    parent: Path = typer.Option(
+        None,
+        help="Directory holding one or more queue roots (default: the queue root's parent).",
+    ),
+    lock_prefix: str = typer.Option(None, help=LOCK_PREFIX_HELP),
+) -> None:
+    """Status of EVERY queue root under PARENT — cross-node visibility from one command.
+
+    Each node keeps its own root (e.g. run_logs/queue on soar-subliminal-1,
+    run_logs/queue0 on soar-subliminal-0); both live on the shared run_logs/ mount,
+    so this shows what every node is doing without merging their jobs.
+    """
+    configure_loguru()
+    parent = parent if parent is not None else _root(None).parent
+    if not parent.is_dir():
+        logger.info("No such directory: {}", parent)
+        return
+    # A "queue root" is any dir that itself holds >=1 queue (a subdir with meta.json).
+    roots = sorted(
+        d for d in parent.iterdir() if d.is_dir() and store.list_queues(d)
+    )
+    if not roots:
+        logger.info("No queue roots found under {}", parent)
+        return
+    for root in roots:
+        logger.info("=== root: {} ===", root)
+        _report_root(root, lock_prefix=lock_prefix)
 
 
 @app.command()

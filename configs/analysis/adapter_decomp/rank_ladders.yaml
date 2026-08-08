@@ -1,0 +1,22 @@
+# A3 (the rank exponent), de-confounded: three complete rank ladders at FIXED (lr, alpha).
+#
+# The original 9c pair (r8a32 vs r64a64) varied rank and alpha together, so its implied
+# c was uninterpretable. These three ladders hold (lr, alpha) fixed and sweep r alone,
+# which is the only design that identifies rho in ||B dA|| ~ r^rho -> c = (rho-1)/2.
+#
+# Keep this config's tag list narrow on purpose: widening it re-introduces the
+# confound. Fit rho WITHIN a ladder, never across the pooled campaign grid.
+
+kinds: [student]
+animals: [dog]
+base_models: [pythia-160m-data-seed1]
+lineages:
+  - "teacher-pythia-160m/ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k"
+tags:
+  - "ep20_lr1e-4_r*a64"
+  - "ep20_lr2e-4_r*a16"
+  - "ep20_lr3e-4_r*a8"
+ftseeds: [1, 2, 3, 4, 5]
+checkpoints: false
+wrong_seed_control: true
+include_w0: true

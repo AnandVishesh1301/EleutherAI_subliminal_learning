@@ -17,7 +17,7 @@ Example (a real on-disk dog lineage):
 
 Cross-base example (student base B distilled from a teacher on base A; A's v_teacher vs B's
 v_student on the shared training prompts). This is the dog same-init cross lineage at
-``students/dog/pythia-160m-data-seed1/from_ep10_lr1e-4_r16a32_tseed1_nbase-pythia-160m/``:
+``students/dog/pythia-160m-data-seed1/teacher-pythia-160m/ep10_lr1e-4_r16a32_tseed1/``:
 
     uv run python -m scripts.compute_eas --target-animal dog \\
         --base-models data-seed1 --numbers-base-model original \\
@@ -62,8 +62,8 @@ def main(
         None,
         help="CROSS-BASE: the teacher/numbers base A (must resolve to exactly ONE model) "
         "when it differs from --base-models (base B); the students were distilled from A's "
-        "numbers (an '_nbase-' lineage). Equal to --base-models is treated as same-base. "
-        "None = same-base.",
+        "numbers (a 'teacher-{A}' lineage level). Equal to --base-models is treated as "
+        "same-base. None = same-base.",
     ),
     teacher_ftseed: int = typer.Option(
         0, help="Teacher fine-tuning seed whose adapter is the v_teacher source."

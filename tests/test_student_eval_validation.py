@@ -166,9 +166,11 @@ def _manifest(**over):
 
 
 def _teacher_run_dir(root: Path, m: dict) -> Path:
+    numbers_base = m["numbers_base_model_repo"].split("/")[-1]
     d = (
         root / "students" / m["animal"] / "pythia-160m-data-seed1"
-        / f"from_{m['teacher_param_tag']}_tseed{m['teacher_ftseed']}"
+        / f"teacher-{numbers_base}"
+        / f"{m['teacher_param_tag']}_tseed{m['teacher_ftseed']}"
         / m["number_dataset_tag"] / m["student_param_tag"]
         / f"ftseed{m['student_ftseed']}"
     )
@@ -200,7 +202,7 @@ def test_path_agreement_ftseed_vs_train_seed_disagreement(tmp_path: Path):
     assert problems and any("train.seed" in p for p in problems)
 
 
-# --- expected_student_rel_parts: cross-base control tag suffix -----------------
+# --- expected_student_rel_parts: base control teacher-{base} level -------------
 
 def _base_manifest(**over):
     m = {
@@ -216,26 +218,28 @@ def _base_manifest(**over):
     return m
 
 
-def test_rel_parts_cross_base_control_suffixes_dataset_tag():
+def test_rel_parts_cross_base_control_has_teacher_base_level():
+    # The numbers base is its own always-present `teacher-{base}` level above the dataset tag.
     parts = expected_student_rel_parts(_base_manifest())
     assert parts == [
         "controls", "base", "pythia-160m-data-seed1",
-        "ex10-20_full10_nbase-pythia-160m", "ep5_lr1e-4_r8a32", "ftseed1",
+        "teacher-pythia-160m", "ex10-20_full10", "ep5_lr1e-4_r8a32", "ftseed1",
     ]
 
 
-def test_rel_parts_base_control_plain_when_not_cross_base():
-    # cross_base falsy OR numbers_base_model_repo missing -> the plain tag (unchanged).
-    for m in (
-        _base_manifest(cross_base=False),
-        _base_manifest(numbers_base_model_repo=None),
-    ):
-        parts = expected_student_rel_parts(m)
-        assert parts[3] == "ex10-20_full10"
+def test_rel_parts_base_control_teacher_level_derives_from_numbers_base():
+    # The teacher-{base} level tracks numbers_base_model_repo regardless of the cross_base
+    # flag; when that field is absent it falls back to the (equal) student base.
+    parts = expected_student_rel_parts(_base_manifest(cross_base=False))
+    assert parts[3] == "teacher-pythia-160m"
+    assert parts[4] == "ex10-20_full10"
+    parts = expected_student_rel_parts(_base_manifest(numbers_base_model_repo=None))
+    assert parts[3] == "teacher-pythia-160m-data-seed1"
+    assert parts[4] == "ex10-20_full10"
 
 
-def test_rel_parts_rng_ignores_stray_cross_base_fields():
-    # rng is never cross-base: stray fields must not add a `_nbase-` suffix.
+def test_rel_parts_rng_has_no_teacher_level():
+    # rng carries no teacher-base level: 6 plain components (unchanged).
     m = _base_manifest(source="rng")
     parts = expected_student_rel_parts(m)
     assert parts == [

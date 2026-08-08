@@ -51,15 +51,18 @@ def test_parse_ft_param_tag_bad():
 
 
 def test_parse_lineage_dir_ok():
-    assert parse_lineage_dir("from_ep10_lr1e-4_r16a32_tseed1") == {
+    # Same-base: the teacher-{base} level repeats the student model.
+    assert parse_lineage_dir("teacher-pythia-160m", "ep10_lr1e-4_r16a32_tseed1") == {
         "teacher_param_tag": "ep10_lr1e-4_r16a32",
         "teacher_ftseed": 1,
-        "numbers_base_model": None,
+        "numbers_base_model": "pythia-160m",
     }
 
 
-def test_parse_lineage_dir_nbase():
-    got = parse_lineage_dir("from_ep5_lr2e-4_r8a8_tseed3_nbase-pythia-160m-data-seed1")
+def test_parse_lineage_dir_cross_base():
+    got = parse_lineage_dir(
+        "teacher-pythia-160m-data-seed1", "ep5_lr2e-4_r8a8_tseed3"
+    )
     assert got["teacher_param_tag"] == "ep5_lr2e-4_r8a8"
     assert got["teacher_ftseed"] == 3
     assert got["numbers_base_model"] == "pythia-160m-data-seed1"
@@ -67,7 +70,9 @@ def test_parse_lineage_dir_nbase():
 
 def test_parse_lineage_dir_bad():
     with pytest.raises(ValueError):
-        parse_lineage_dir("from_notatag_tseed1")
+        parse_lineage_dir("teacher-pythia-160m", "notatag_tseed1")
+    with pytest.raises(ValueError):  # teacher-base level must start with 'teacher-'
+        parse_lineage_dir("notateacher", "ep10_lr1e-4_r16a32_tseed1")
 
 
 # ------------------------- load_eas_results -------------------------
@@ -109,24 +114,30 @@ def _valid_doc() -> dict:
     }
 
 
-def _write(root: Path, lineage: str, tag: str, position: str, text: str) -> None:
-    d = root / "students" / "dog" / "pythia-160m" / lineage / tag / "eas"
+def _write(
+    root: Path, teacher_tag_dir: str, dataset_tag: str, position: str, text: str,
+    teacher_base: str = "teacher-pythia-160m",
+) -> None:
+    d = (
+        root / "students" / "dog" / "pythia-160m"
+        / teacher_base / teacher_tag_dir / dataset_tag / "eas"
+    )
     d.mkdir(parents=True, exist_ok=True)
     (d / f"eas_{position}.json").write_text(text)
 
 
 def test_load_eas_results_tolerant(tmp_path):
     _write(
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
         json.dumps(_valid_doc()),
     )
     # Malformed JSON -> skipped with a warning.
     _write(
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k_spliced", "last",
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k_spliced", "last",
         "{ not json",
     )
-    # Lineage dir matches the glob but not the regex -> skipped with a warning.
-    _write(tmp_path, "from_notatag_tseed1", "sometag", "last", json.dumps(_valid_doc()))
+    # Teacher-tag dir matches the glob but not the regex -> skipped with a warning.
+    _write(tmp_path, "notatag_tseed1", "sometag", "last", json.dumps(_valid_doc()))
 
     df = load_eas_results(tmp_path)
     assert list(df.columns) == RESULT_COLUMNS
@@ -153,15 +164,15 @@ def test_load_eas_results_skips_bad_position(tmp_path):
     # A valid doc plus a stray file whose stem parses to an unexpected position: the stray is
     # skipped defensively, not loaded as a row.
     _write(
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
         json.dumps(_valid_doc()),
     )
     _write(  # eas_.json -> position "" -> skipped
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "",
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "",
         json.dumps(_valid_doc()),
     )
     _write(  # eas_middle.json -> position "middle" -> skipped
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "middle",
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "middle",
         json.dumps(_valid_doc()),
     )
     df = load_eas_results(tmp_path)
@@ -171,13 +182,13 @@ def test_load_eas_results_skips_bad_position(tmp_path):
 def test_load_eas_results_warns_on_mixed_convention(tmp_path):
     from loguru import logger
     _write(
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
         json.dumps(_valid_doc()),
     )
     other = _valid_doc()
     other["meta"]["eas_mean_convention"] = "blocks_v2"
     _write(
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "other_tag", "last", json.dumps(other)
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "other_tag", "last", json.dumps(other)
     )
     sink: list[str] = []
     handle = logger.add(sink.append, level="WARNING")
@@ -191,10 +202,10 @@ def test_load_eas_results_warns_on_mixed_convention(tmp_path):
 
 def test_load_eas_results_position_filter(tmp_path):
     _write(
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "tag", "last", json.dumps(_valid_doc())
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "tag", "last", json.dumps(_valid_doc())
     )
     _write(
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "tag", "all", json.dumps(_valid_doc())
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "tag", "all", json.dumps(_valid_doc())
     )
     assert set(load_eas_results(tmp_path)["position"]) == {"last", "all"}
     assert set(load_eas_results(tmp_path, positions=["last"])["position"]) == {"last"}
@@ -210,15 +221,16 @@ def test_load_eas_results_empty(tmp_path):
 def test_load_eas_results_cross_base_columns(tmp_path):
     # Same-base doc: cross_base False, numbers_base_model repeats the student model.
     _write(
-        tmp_path, "from_ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
         json.dumps(_valid_doc()),
     )
     # Cross-base doc (student base pythia-160m, teacher/numbers base data-seed1): loaded, not
-    # skipped, with cross_base True and numbers_base_model == the nbase model name.
+    # skipped, with cross_base True and numbers_base_model == the teacher-base dir name.
     _write(
         tmp_path,
-        "from_ep10_lr1e-4_r16a32_tseed1_nbase-pythia-160m-data-seed1",
+        "ep10_lr1e-4_r16a32_tseed1",
         "ex10-20_prefix_n100k", "last", json.dumps(_valid_doc()),
+        teacher_base="teacher-pythia-160m-data-seed1",
     )
     df = load_eas_results(tmp_path)
     same = df[~df["cross_base"]]
@@ -226,6 +238,31 @@ def test_load_eas_results_cross_base_columns(tmp_path):
     assert set(same["numbers_base_model"]) == {"pythia-160m"}
     assert set(cross["numbers_base_model"]) == {"pythia-160m-data-seed1"}
     assert len(cross) == 2  # two entries from the one cross doc
+
+
+def test_load_eas_results_finds_ckpt_level(tmp_path):
+    # A revision-pinned student gathers its model under a `ckpt/` level; the loader must find
+    # it and recover model = `pythia-160m@step1000` (no bare `ckpt` leaking into any field).
+    d = (
+        tmp_path / "students" / "dog" / "ckpt" / "pythia-160m@step1000"
+        / "teacher-pythia-160m@step1000" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "eas"
+    )
+    d.mkdir(parents=True)
+    (d / "eas_last.json").write_text(json.dumps(_valid_doc()))
+    # A plain run alongside it, to confirm both depths coexist.
+    _write(
+        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
+        json.dumps(_valid_doc()),
+    )
+    df = load_eas_results(tmp_path)
+    assert set(df["model"]) == {"pythia-160m@step1000", "pythia-160m"}
+    ck = df[df["model"] == "pythia-160m@step1000"].iloc[0]
+    assert ck["animal"] == "dog"
+    assert ck["numbers_base_model"] == "pythia-160m@step1000"
+    assert ck["cross_base"] == False  # noqa: E712
+    assert ck["teacher_param_tag"] == "ep10_lr1e-4_r16a32"
+    assert ck["dataset_tag"] == "ex10-20_prefix_n100k"
 
 
 # ------------------------- sweep pure logic -------------------------
@@ -324,6 +361,18 @@ def test_spec_from_model_dir():
         spec_from_model_dir("not-a-model", "EleutherAI")
 
 
+def test_spec_from_model_dir_revision_pinned():
+    # Bare-original ckpt form (the v1 sweep's `base_model: original`) and the variant ckpt form.
+    orig = spec_from_model_dir("pythia-160m@step1000", "EleutherAI")
+    assert (orig.variant, orig.seed, orig.revision) == ("full", 0, "step1000")
+    ds1 = spec_from_model_dir("pythia-160m-data-seed1@step3000", "EleutherAI")
+    assert (ds1.variant, ds1.seed, ds1.revision) == ("data", 1, "step3000")
+    # A revisionless original still has revision None (byte-identical to before).
+    assert spec_from_model_dir("pythia-160m", "EleutherAI").revision is None
+    with pytest.raises(ValueError):  # empty revision after '@'
+        spec_from_model_dir("pythia-160m@", "EleutherAI")
+
+
 # ------------------------- sweep unit sharding -------------------------
 
 
@@ -373,7 +422,7 @@ def _make_cross_student(output_root: Path) -> None:
     """A single teacher-source cross-base student cell (data-seed1 base, numbers base original)."""
     rd = (
         output_root / "students" / "dog" / "pythia-160m-data-seed1"
-        / "from_ep10_lr1e-4_r16a32_tseed1_nbase-pythia-160m"
+        / "teacher-pythia-160m" / "ep10_lr1e-4_r16a32_tseed1"
         / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
     )
     (rd / "checkpoints").mkdir(parents=True)
@@ -412,4 +461,107 @@ def test_discover_includes_cross_base_when_requested(tmp_path):
     assert unit.spec.variant == "data" and unit.spec.seed == 1
     # the teacher student cell is discovered as a required work item
     assert ("teacher", 5, 1) in unit.required_work_items
-    assert "_nbase-pythia-160m" in unit.label
+    assert "teacher-pythia-160m" in unit.label
+
+
+def _make_ckpt_student(output_root: Path) -> None:
+    """A same-base revision-pinned student: the model is gathered under a `ckpt/` level and
+    the teacher-base repeats the (revision-qualified) model as one component."""
+    rd = (
+        output_root / "students" / "dog" / "ckpt" / "pythia-160m-data-seed1@step3000"
+        / "teacher-pythia-160m-data-seed1@step3000" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
+    )
+    (rd / "checkpoints").mkdir(parents=True)
+    (rd / "train_manifest.json").write_text(json.dumps({
+        "splice_examples": False,
+        "numbers_base_model_repo": "EleutherAI/pythia-160m-data-seed1@step3000",
+    }))
+
+
+def _make_plain_student(output_root: Path) -> None:
+    """A plain (revision-less) same-base student, byte-identical to the historical layout."""
+    rd = (
+        output_root / "students" / "dog" / "pythia-160m-data-seed1"
+        / "teacher-pythia-160m-data-seed1" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
+    )
+    (rd / "checkpoints").mkdir(parents=True)
+    (rd / "train_manifest.json").write_text(json.dumps({
+        "splice_examples": False,
+        "numbers_base_model_repo": "EleutherAI/pythia-160m-data-seed1",
+    }))
+
+
+def test_discover_finds_ckpt_students(tmp_path):
+    # A plain same-base student and a revision-pinned (ckpt-level) same-base student: both are
+    # discovered, model/animal derive correctly with the @rev preserved, and no bare `ckpt`
+    # leaks into any field.
+    _make_plain_student(tmp_path)
+    _make_ckpt_student(tmp_path)
+    cfg = _sweep_cfg(tmp_path)
+    units, n_unsupported = _discover(
+        cfg, sources=("teacher",), positions=("last",),
+        animals=set(), models=set(), tags=set(), n_prompts=1024,
+    )
+    assert n_unsupported == 0
+    by_model = {u.model: u for u in units}
+    assert set(by_model) == {"pythia-160m-data-seed1", "pythia-160m-data-seed1@step3000"}
+    ck = by_model["pythia-160m-data-seed1@step3000"]
+    assert ck.animal == "dog"
+    assert ck.numbers_base_model == "pythia-160m-data-seed1@step3000"
+    assert ck.numbers_spec is None  # same-base, not cross
+    assert (ck.spec.variant, ck.spec.seed, ck.spec.revision) == ("data", 1, "step3000")
+    assert ck.dataset_tag == "ex10-20_prefix_n100k"
+    assert ck.teacher_param_tag == "ep10_lr1e-4_r16a32"
+
+
+def _make_bare_original_ckpt_student(output_root: Path) -> None:
+    """The v1 sweep's `base_model: original` ckpt student: a bare-original `pythia-160m@{rev}`
+    base, gathered under a `ckpt/` level, distilling its own-checkpoint teacher (same-base)."""
+    rd = (
+        output_root / "students" / "dog" / "ckpt" / "pythia-160m@step1000"
+        / "teacher-pythia-160m@step1000" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
+    )
+    (rd / "checkpoints").mkdir(parents=True)
+    (rd / "train_manifest.json").write_text(json.dumps({
+        "splice_examples": False,
+        "numbers_base_model_repo": "EleutherAI/pythia-160m@step1000",
+    }))
+
+
+def test_discover_finds_bare_original_ckpt_student(tmp_path):
+    # The bare-original ckpt form must be fully discovered (not skipped-unsupported): its spec
+    # inverts via spec_from_model_dir with revision set, and the model keeps its @rev form.
+    _make_bare_original_ckpt_student(tmp_path)
+    cfg = _sweep_cfg(tmp_path)
+    units, n_unsupported = _discover(
+        cfg, sources=("teacher",), positions=("last",),
+        animals=set(), models=set(), tags=set(), n_prompts=1024,
+    )
+    assert n_unsupported == 0
+    assert len(units) == 1
+    unit = units[0]
+    assert unit.model == "pythia-160m@step1000"
+    assert unit.animal == "dog"
+    assert unit.numbers_base_model == "pythia-160m@step1000"
+    assert unit.numbers_spec is None  # same-base, not cross
+    assert (unit.spec.variant, unit.spec.seed, unit.spec.revision) == ("full", 0, "step1000")
+
+
+def test_discover_animal_and_model_filters_apply_under_ckpt(tmp_path):
+    # The animal/model selectors read the ckpt-normalised fields, so they filter ckpt students
+    # by their true animal/model rather than the `ckpt` sentinel.
+    _make_ckpt_student(tmp_path)
+    cfg = _sweep_cfg(tmp_path)
+    kept, _ = _discover(
+        cfg, sources=("teacher",), positions=("last",),
+        animals={"dog"}, models={"pythia-160m-data-seed1@step3000"}, tags=set(), n_prompts=1024,
+    )
+    assert len(kept) == 1
+    dropped, _ = _discover(
+        cfg, sources=("teacher",), positions=("last",),
+        animals={"ckpt"}, models=set(), tags=set(), n_prompts=1024,
+    )
+    assert dropped == []
