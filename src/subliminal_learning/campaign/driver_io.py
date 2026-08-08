@@ -7,9 +7,9 @@ wraps), so the driver gets the store's duplicate-jobkey and exist_ok guarantees
 without shelling out.
 
 `CampaignDriverConfig` and the submission/state helpers are campaign-agnostic --
-the identity (`run_set_id`) and queue priorities are fields, defaulted to the
-20260727 plan. The `a1_jobs`-style builders below belong to that campaign;
-`campaign.optparam_jobs` holds the 20260801 ones.
+`run_set_id` and `queue_priorities` stay in lockstep with `spec` via
+`__post_init__` (default `plan.SPEC`). The `a1_jobs`-style builders below belong
+to the student-HP campaign; `campaign.optparam_jobs` holds the 20260801 ones.
 
 Idempotency contract: `submit_queue` is safe to re-run — an existing queue with
 the exact same jobkey set is a no-op, a mismatched jobkey set raises (the queue
@@ -26,20 +26,43 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from subliminal_learning.campaign import plan
+from subliminal_learning.campaign import breadth_plan, plan
 from subliminal_learning.campaign.selection import (
     FrozenRecipe,
     Recipe,
     RecipeSelection,
 )
+from subliminal_learning.campaign.spec import CampaignSpec
 from subliminal_learning.gkd.layout import GKD_STUDENTS_SUBDIR
 from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.training.run_set import run_set_subdir
+from subliminal_learning.utils import code_pin_io
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
+from subliminal_learning.utils.run_io import read_run_set_card, reconcile_run_set_sha
 
 TRAIN_MODULE = "scripts.sweeps.sweep_distill_student_gkd"
 EVAL_MODULE = "scripts.sweeps.sweep_evaluate_gkd_student"
+
+# CLI campaign token -> spec (one SSOT for every campaign entrypoint).
+CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
+    "slbreadth": plan.SPEC,
+    "breadth5": breadth_plan.SPEC,
+}
+
+
+def spec_for_campaign(name: str) -> CampaignSpec:
+    """The named campaign's spec.
+
+    Raises:
+        ValueError: Unknown campaign token (listing the valid ones) — never fall
+            back to a default spec, which would drive the wrong run-set tree.
+    """
+    if name not in CAMPAIGN_SPECS:
+        raise ValueError(
+            f"unknown campaign {name!r}; choose one of {sorted(CAMPAIGN_SPECS)}"
+        )
+    return CAMPAIGN_SPECS[name]
 
 
 @dataclass(frozen=True)
@@ -49,17 +72,23 @@ class CampaignDriverConfig:
     Attributes:
         output_root: Artifact root from the paths YAML.
         queue_root: jobq root shared by all campaign queues.
-        repo_root: Repo checkout the queue jobs run from (their ``cwd``).
+        repo_root: Main git checkout (parent of ``.code_pins``). Jobs get
+            ``cwd`` from the resolved MLflow-style code pin, not this path.
         include_stage_c: Also generate + submit the optional Stage C ablations.
         require_a0: Gate the first submission on the A0 calibration +
             init-equality reports (disable only for tests).
-        auto_reconcile_sha: Record a HEAD advance on the campaign card instead of
-            halting, so a commit landing mid-campaign does not strand queued cells.
+        auto_reconcile_sha: When ``code_sha`` differs from the card pin, record
+            the advance instead of halting (intentional re-pin only — workspace
+            HEAD moves are ignored).
         dry_run: Log every planned action; write/submit nothing.
         generated_dir_override: Where generated YAMLs go (tests only; default
-            ``{repo_root}/configs/experiment/generated``).
+            ``{repo_root}/{spec.generated_config_dir}``).
         run_set_id: Campaign id whose output subtree the driver reads and writes.
         queue_priorities: Queue name -> jobq priority for this campaign's queues.
+        spec: Frozen campaign constants (default: `plan.SPEC`).
+        auto_requeue: Requeue failed jobs whose attempt count is below this
+            cap before gating (0 = halt on first failure, today's behavior).
+        code_sha: Optional explicit pin (``mlflow run --version`` analog).
     """
 
     output_root: Path
@@ -74,6 +103,16 @@ class CampaignDriverConfig:
     queue_priorities: Mapping[str, int] = field(
         default_factory=lambda: dict(plan.QUEUE_PRIORITIES)
     )
+    spec: CampaignSpec = plan.SPEC
+    auto_requeue: int = 0
+    code_sha: str | None = None
+
+    def __post_init__(self) -> None:
+        # Keep identity + priorities aligned with the active CampaignSpec so
+        # callers that only swap `spec=` (breadth / future campaigns) cannot
+        # silently write into the default plan's run-set tree.
+        object.__setattr__(self, "run_set_id", self.spec.run_set_id)
+        object.__setattr__(self, "queue_priorities", dict(self.spec.queue_priorities))
 
     @property
     def campaign_subdir(self) -> str:
@@ -89,13 +128,13 @@ class CampaignDriverConfig:
 
     @property
     def state_path(self) -> Path:
-        return self.logs_dir / plan.CAMPAIGN_STATE_FILE
+        return self.logs_dir / self.spec.campaign_state_file
 
     @property
     def generated_dir(self) -> Path:
         if self.generated_dir_override is not None:
             return self.generated_dir_override
-        return self.repo_root / plan.GENERATED_CONFIG_DIR
+        return self.repo_root / self.spec.generated_config_dir
 
 
 # ---- state file -----------------------------------------------------------------
@@ -218,6 +257,114 @@ def write_generated_configs(
 # ---- jobq submission ---------------------------------------------------------------
 
 
+def queue_job_defaults(cfg: CampaignDriverConfig) -> dict:
+    """jobq defaults: run every cell under the campaign code pin (not workspace HEAD)."""
+    pin = code_pin_io.resolve_campaign_pin(
+        cfg.run_set_root,
+        repo_root=cfg.repo_root,
+        requested_sha=cfg.code_sha,
+        allow_advance=False,
+    )
+    return code_pin_io.pin_job_defaults(pin)
+
+
+def pin_required_paths(spec: CampaignSpec) -> list[str]:
+    """Repo-relative paths a pin must contain to run `spec`'s job command lines."""
+    required = [
+        spec.a1_same_yaml,
+        spec.a1_cross_yaml,
+        spec.a1_same_verify_yaml,
+        spec.a1_cross_verify_yaml,
+        f"{TRAIN_MODULE.replace('.', '/')}.py",
+        f"{EVAL_MODULE.replace('.', '/')}.py",
+    ]
+    if spec.gkd_experiment_config:
+        required.append(spec.gkd_experiment_config)
+    return required
+
+
+def verify_pin_runs_campaign(
+    pin: code_pin_io.CodePin, spec: CampaignSpec
+) -> None:
+    """Refuse a pin whose worktree cannot run `spec`.
+
+    Cells execute with ``cwd`` inside ``.code_pins/<sha>/``, so a pin taken from a
+    commit that predates the campaign (the usual cause: campaign code still
+    uncommitted at first submit) yields a tree without this campaign's static
+    sweep YAMLs. Every job would then fail on a missing config — thousands of
+    identical failures instead of one refusal here.
+
+    Raises:
+        ValueError: The pinned tree is missing files this campaign's job command
+            lines name.
+    """
+    missing = [rel for rel in pin_required_paths(spec) if not (pin.root / rel).exists()]
+    if missing:
+        raise ValueError(
+            f"code pin {pin.sha[:12]} at {pin.root} cannot run campaign "
+            f"{spec.run_set_id}: missing {missing}. Commit the campaign code, "
+            "then pin the new commit (`--code-sha <sha>` for a first launch, or "
+            "`scripts.reconcile_run_set --new-git-sha <sha>` to re-pin an "
+            "existing campaign)."
+        )
+
+
+def ensure_campaign_code_pin(cfg: CampaignDriverConfig) -> str | None:
+    """Ensure the campaign pin worktree; optionally advance when ``code_sha`` differs.
+
+    Workspace HEAD is never consulted for drift. Returns a short note when a
+    pin advance was recorded, else ``None``.
+
+    Raises:
+        ValueError: Pin cannot be resolved/ensured, the pinned tree cannot run
+            this campaign, or ``code_sha`` differs without ``auto_reconcile_sha``.
+    """
+    # The pin overlays this dir as a symlink, so it must exist before the pin is
+    # created: A3 / Stage-B jobs name generated YAMLs while running inside the pin.
+    if not cfg.dry_run:
+        cfg.generated_dir.mkdir(parents=True, exist_ok=True)
+    card = read_run_set_card(cfg.run_set_root)
+    if card is None or not card.get("git_sha"):
+        pin = code_pin_io.resolve_campaign_pin(
+            cfg.run_set_root,
+            repo_root=cfg.repo_root,
+            requested_sha=cfg.code_sha,
+        )
+        verify_pin_runs_campaign(pin, cfg.spec)
+        logger.info("code pin ready {} @ {}", pin.sha[:12], pin.root)
+        return None
+
+    card_sha = str(card["git_sha"])
+    card_full = code_pin_io.resolve_commit_sha(cfg.repo_root, card_sha)
+    if cfg.code_sha:
+        req_full = code_pin_io.resolve_commit_sha(cfg.repo_root, cfg.code_sha)
+        if req_full != card_full:
+            if not cfg.auto_reconcile_sha:
+                raise ValueError(
+                    f"requested code pin {req_full} differs from campaign pin "
+                    f"{card_full} — pass --auto-reconcile-sha to advance the pin "
+                    "intentionally, or omit --code-sha to keep the campaign pin. "
+                    "Workspace HEAD moves do not require reconcile."
+                )
+            verify_pin_runs_campaign(
+                code_pin_io.ensure_code_pin(cfg.repo_root, req_full), cfg.spec
+            )
+            if cfg.dry_run:
+                return f"would reconcile code pin {card_full[:12]} -> {req_full[:12]}"
+            reconcile_run_set_sha(
+                cfg.run_set_root,
+                new_git_sha=req_full,
+                reason="campaign driver --code-sha --auto-reconcile-sha",
+                repo_root=cfg.repo_root,
+            )
+            return f"reconciled code pin {card_full[:12]} -> {req_full[:12]}"
+
+    pin = code_pin_io.ensure_code_pin(cfg.repo_root, card_full)
+    verify_pin_runs_campaign(pin, cfg.spec)
+    logger.debug("code pin ok {} @ {}", pin.sha[:12], pin.root)
+    return None
+
+
 def submit_queue(
     cfg: CampaignDriverConfig,
     name: str,
@@ -227,10 +374,9 @@ def submit_queue(
 ) -> str:
     """Create queue `name` (priority from the plan) and append `jobs`, idempotently.
 
-    Queues are pinned to the submitting host. Both nodes drain the one canonical
-    root (run_logs/README.md §7), but only this node's checkout is guaranteed to
-    carry the campaign's code — an unpinned queue drained by a stale checkout
-    fails loudly at best and silently trains the wrong recipe at worst.
+    Queues are pinned to the submitting host. Job ``cwd`` / env bind workers to
+    the campaign's ``.code_pins/<sha>/`` worktree (MLflow ``--version`` analog)
+    so the operator's editable HEAD can move without changing cell code.
 
     Returns:
         ``"submitted"`` | ``"exists"`` (identical jobkey set — no-op).
@@ -241,10 +387,12 @@ def submit_queue(
     if not jobs:
         raise ValueError(f"refusing to submit empty queue {name!r}")
     priority = cfg.queue_priorities[name]
+    defaults = queue_job_defaults(cfg)
     if store.queue_exists(cfg.queue_root, name):
         existing = {j.jobkey for j in store.load_jobs(cfg.queue_root, name)}
         incoming = {j.jobkey for j in jobs}
         if existing == incoming:
+            store.update_queue_defaults(cfg.queue_root, name, defaults)
             logger.info("queue {} already submitted ({} jobs) — skip", name, len(jobs))
             return "exists"
         raise RuntimeError(
@@ -254,12 +402,14 @@ def submit_queue(
     node = store.this_host()
     if cfg.dry_run:
         logger.info(
-            "[dry-run] would submit queue {} (prio {}, node {}, deps {}, {} jobs)",
+            "[dry-run] would submit queue {} (prio {}, node {}, deps {}, {} jobs) "
+            "cwd={}",
             name,
             priority,
             node,
             depends_on or [],
             len(jobs),
+            defaults.get("cwd"),
         )
         return "submitted"
     store.create_queue(
@@ -268,16 +418,17 @@ def submit_queue(
         depends_on=depends_on or [],
         node=node,
         priority=priority,
-        defaults={"cwd": str(cfg.repo_root)},
+        defaults=defaults,
     )
     store.append_jobs(cfg.queue_root, name, jobs)
     logger.info(
-        "submitted queue {} (prio {}, node {}, deps {}, {} jobs)",
+        "submitted queue {} (prio {}, node {}, deps {}, {} jobs) cwd={}",
         name,
         priority,
         node,
         depends_on or [],
         len(jobs),
+        defaults.get("cwd"),
     )
     return "submitted"
 
@@ -304,13 +455,27 @@ def queue_finished(cfg: CampaignDriverConfig, name: str) -> tuple[bool, str]:
 # ---- job builders -------------------------------------------------------------------
 
 
-def train_cmd(yaml_rel: str, *shard_flags: str) -> str:
-    """One train-sweep shard command (jobq pins the device via CUDA_VISIBLE_DEVICES)."""
+def train_cmd(
+    yaml_rel: str,
+    *shard_flags: str,
+    experiment_config: str | None = None,
+) -> str:
+    """One train-sweep shard command (jobq pins the device via CUDA_VISIBLE_DEVICES).
+
+    Args:
+        yaml_rel: Repo-relative sweep YAML path.
+        *shard_flags: Extra CLI flags (animals, beta, …).
+        experiment_config: Optional ``--experiment-config`` path (W&B project
+            override for breadth5); None keeps the sweep default.
+    """
     flags = " ".join(shard_flags)
-    return (
+    cmd = (
         f"uv run python -m {TRAIN_MODULE} --sweep-config {yaml_rel} "
         f"--device cuda:0{' ' + flags if flags else ''}"
     )
+    if experiment_config:
+        cmd = f"{cmd} --experiment-config {experiment_config}"
+    return cmd
 
 
 def eval_cmd(yaml_rel: str, *shard_flags: str) -> str:
@@ -322,9 +487,10 @@ def eval_cmd(yaml_rel: str, *shard_flags: str) -> str:
     )
 
 
-def generated_rel(fname: str) -> str:
+def generated_rel(fname: str, *, spec: CampaignSpec | None = None) -> str:
     """Repo-relative path of a generated sweep YAML (jobs run with cwd=repo_root)."""
-    return f"{plan.GENERATED_CONFIG_DIR}/{fname}"
+    s = plan.SPEC if spec is None else spec
+    return f"{s.generated_config_dir}/{fname}"
 
 
 def _students(doc: dict) -> list[str]:
@@ -332,13 +498,14 @@ def _students(doc: dict) -> list[str]:
     return list(dict.fromkeys(str(p[0]) for p in doc["teacher_student_base_pairs"]))
 
 
-def a1_jobs() -> list[Job]:
-    """288 single-cell shards: (arm, animal, beta, lr, student mode), control-free.
+def a1_jobs(*, spec: CampaignSpec | None = None) -> list[Job]:
+    """Single-cell A1 shards: (arm, animal, beta, lr, student mode), control-free.
 
     One cell per job is the finest disjoint partition the sweep CLI exposes here, so the
-    288-cell screen load-balances perfectly across the pool and a crashed shard costs one
-    cell instead of nine.
+    screen load-balances perfectly across the pool and a crashed shard costs one cell
+    instead of nine.
     """
+    s = plan.SPEC if spec is None else spec
     return [
         Job(
             key=f"a1|{arm}|{animal}|b{beta:g}|lr{lr:g}|{mode}",
@@ -349,41 +516,45 @@ def a1_jobs() -> list[Job]:
                 f"--beta {beta}",
                 f"--lora-lrs {lr}",
                 f"--student-modes {mode}",
+                experiment_config=s.gkd_experiment_config,
             ),
         )
         for arm, yaml_rel in (
-            ("same", plan.A1_SAME_YAML),
-            ("cross", plan.A1_CROSS_YAML),
+            ("same", s.a1_same_yaml),
+            ("cross", s.a1_cross_yaml),
         )
-        for animal in plan.ANIMALS
-        for beta in plan.BETAS
-        for lr in plan.A1_LORA_LRS
-        for mode in plan.A1_STUDENT_MODES
+        for animal in s.animals
+        for beta in s.betas
+        for lr in s.a1_lora_lrs
+        for mode in s.a1_student_modes
     ]
 
 
-def a2_jobs() -> list[Job]:
-    """16 single-control shards: the same-init YAML at r64a64, controls only."""
+def a2_jobs(*, spec: CampaignSpec | None = None) -> list[Job]:
+    """Single-control A2 shards: the same-init YAML at the control mode."""
+    s = plan.SPEC if spec is None else spec
     return [
         Job(
             key=f"a2|{animal}|b{beta:g}|lr{lr:g}",
             cmd=train_cmd(
-                plan.A1_SAME_YAML,
+                s.a1_same_yaml,
                 "--controls-only",
-                f"--student-modes {plan.A2_STUDENT_MODE}",
+                f"--student-modes {s.a2_student_mode}",
                 f"--animals {animal}",
                 f"--beta {beta}",
                 f"--lora-lrs {lr}",
+                experiment_config=s.gkd_experiment_config,
             ),
         )
-        for animal in plan.ANIMALS
-        for beta in plan.BETAS
-        for lr in plan.A1_LORA_LRS
+        for animal in s.animals
+        for beta in s.betas
+        for lr in s.a1_lora_lrs
     ]
 
 
-def a1_eval_jobs() -> list[Job]:
-    """72 verify shards: (arm, animal, beta, student mode)."""
+def a1_eval_jobs(*, spec: CampaignSpec | None = None) -> list[Job]:
+    """Verify shards: (arm, animal, beta, student mode)."""
+    s = plan.SPEC if spec is None else spec
     return [
         Job(
             key=f"a1-eval|{arm}|{animal}|b{beta:g}|{mode}",
@@ -395,17 +566,24 @@ def a1_eval_jobs() -> list[Job]:
             ),
         )
         for arm, yaml_rel in (
-            ("same", plan.A1_SAME_VERIFY_YAML),
-            ("cross", plan.A1_CROSS_VERIFY_YAML),
+            ("same", s.a1_same_verify_yaml),
+            ("cross", s.a1_cross_verify_yaml),
         )
-        for animal in plan.ANIMALS
-        for beta in plan.BETAS
-        for mode in plan.A1_STUDENT_MODES
+        for animal in s.animals
+        for beta in s.betas
+        for mode in s.a1_student_modes
     ]
 
 
-def backlog_jobs() -> list[Job]:
-    """18 filler shards: the catswide eval backlog, one per (verify YAML, base model)."""
+def backlog_jobs(*, spec: CampaignSpec | None = None) -> list[Job]:
+    """Filler shards: the catswide eval backlog, one per (verify YAML, base model).
+
+    Returns an empty list when the spec has no backlog YAMLs/models (breadth
+    isolation); callers must skip submit rather than create an empty queue.
+    """
+    s = plan.SPEC if spec is None else spec
+    if not s.catswide_verify_yamls or not s.catswide_base_models:
+        return []
     return [
         Job(
             key=(
@@ -415,27 +593,36 @@ def backlog_jobs() -> list[Job]:
             ),
             cmd=eval_cmd(yaml_rel, f"--base-models {model}"),
         )
-        for yaml_rel in plan.CATSWIDE_VERIFY_YAMLS
-        for model in plan.CATSWIDE_BASE_MODELS
+        for yaml_rel in s.catswide_verify_yamls
+        for model in s.catswide_base_models
     ]
 
 
-def a3_jobs(train_configs: dict[str, dict], headline_names: list[str]) -> list[Job]:
-    """240 single-cell A3 shards: every train YAML x gseed, plus headline controls.
+def a3_jobs(
+    train_configs: dict[str, dict],
+    headline_names: list[str],
+    *,
+    spec: CampaignSpec | None = None,
+) -> list[Job]:
+    """Single-cell A3 shards: every train YAML x gseed, plus headline controls.
 
     Treatments always pass ``--no-control``; the headline (``r1``) arms get their own
     controls-only shards so a control never rides along with — and serializes behind —
     a treatment shard.
     """
+    s = plan.SPEC if spec is None else spec
     jobs: list[Job] = []
     for fname in sorted(train_configs):
         stem = Path(fname).stem.removeprefix("gkd_a3_")
-        for gseed in plan.A3_GSEEDS:
+        for gseed in s.a3_gseeds:
             jobs.append(
                 Job(
                     key=f"a3|{stem}|g{gseed}",
                     cmd=train_cmd(
-                        generated_rel(fname), "--no-control", f"--gseeds {gseed}"
+                        generated_rel(fname, spec=s),
+                        "--no-control",
+                        f"--gseeds {gseed}",
+                        experiment_config=s.gkd_experiment_config,
                     ),
                 )
             )
@@ -444,42 +631,54 @@ def a3_jobs(train_configs: dict[str, dict], headline_names: list[str]) -> list[J
                     Job(
                         key=f"a3-ctrl|{stem}|g{gseed}",
                         cmd=train_cmd(
-                            generated_rel(fname), "--controls-only", f"--gseeds {gseed}"
+                            generated_rel(fname, spec=s),
+                            "--controls-only",
+                            f"--gseeds {gseed}",
+                            experiment_config=s.gkd_experiment_config,
                         ),
                     )
                 )
     return jobs
 
 
-def a3_eval_jobs(verify_names: list[str]) -> list[Job]:
+def a3_eval_jobs(
+    verify_names: list[str],
+    *,
+    spec: CampaignSpec | None = None,
+) -> list[Job]:
     """One job per generated A3 verify YAML (single-animal, single-recipe configs)."""
+    s = plan.SPEC if spec is None else spec
     return [
         Job(
             key=f"a3-eval|{Path(fname).stem.removeprefix('gkd_a3_verify_')}",
-            cmd=eval_cmd(generated_rel(fname)),
+            cmd=eval_cmd(generated_rel(fname, spec=s)),
         )
         for fname in sorted(verify_names)
     ]
 
 
 def b_train_jobs(
-    train_configs: dict[str, dict], control_names: list[str]
+    train_configs: dict[str, dict],
+    control_names: list[str],
+    *,
+    spec: CampaignSpec | None = None,
 ) -> tuple[list[Job], list[Job]]:
     """(headline_jobs, extension_jobs) for the generated Stage B train YAMLs.
 
     Treatments shard to (YAML, animal, student base, gseed, teacher ftseed) — one or two
-    cells each — and always pass ``--no-control``. The 42 shared controls are separate
+    cells each — and always pass ``--no-control``. Shared controls are separate
     controls-only shards taken from the ``same_init`` YAMLs (whose 7 student bases cover
     every Stage B student) and land in the headline queue so evals are never blocked on
     the extension tier.
     """
+    s = plan.SPEC if spec is None else spec
     headline: list[Job] = []
     extension: list[Job] = []
     for fname in sorted(train_configs):
         doc = train_configs[fname]
         stem = Path(fname).stem.removeprefix("gkd_b_")
         bucket = headline if fname.endswith("_headline.yaml") else extension
-        for animal in plan.ANIMALS:
+        for animal in s.animals:
             for student in _students(doc):
                 for gseed in doc["gseeds"]:
                     for tfs in doc["teacher_ftseeds"]:
@@ -487,12 +686,13 @@ def b_train_jobs(
                             Job(
                                 key=f"b|{stem}|{animal}|{student}|g{gseed}|t{tfs}",
                                 cmd=train_cmd(
-                                    generated_rel(fname),
+                                    generated_rel(fname, spec=s),
                                     "--no-control",
                                     f"--animals {animal}",
                                     f"--base-models {student}",
                                     f"--gseeds {gseed}",
                                     f"--teacher-ftseeds {tfs}",
+                                    experiment_config=s.gkd_experiment_config,
                                 ),
                             )
                         )
@@ -501,11 +701,12 @@ def b_train_jobs(
                             Job(
                                 key=f"b-ctrl|{animal}|{student}|g{gseed}",
                                 cmd=train_cmd(
-                                    generated_rel(fname),
+                                    generated_rel(fname, spec=s),
                                     "--controls-only",
                                     f"--animals {animal}",
                                     f"--base-models {student}",
                                     f"--gseeds {gseed}",
+                                    experiment_config=s.gkd_experiment_config,
                                 ),
                             )
                         )
@@ -513,20 +714,24 @@ def b_train_jobs(
 
 
 def b_eval_jobs(
-    verify_configs: dict[str, dict], train_configs: dict[str, dict]
+    verify_configs: dict[str, dict],
+    train_configs: dict[str, dict],
+    *,
+    spec: CampaignSpec | None = None,
 ) -> list[Job]:
     """One verify shard per (Stage B YAML, animal, student base)."""
+    s = plan.SPEC if spec is None else spec
     return [
         Job(
             key=f"b-eval|{Path(fname).stem.removeprefix('gkd_b_verify_')}|{animal}|{student}",
             cmd=eval_cmd(
-                generated_rel(fname),
+                generated_rel(fname, spec=s),
                 f"--animals {animal}",
                 f"--base-models {student}",
             ),
         )
         for fname in sorted(verify_configs)
-        for animal in plan.ANIMALS
+        for animal in s.animals
         for student in _students(train_configs[_b_train_name(fname)])
     ]
 
@@ -535,8 +740,13 @@ def _b_train_name(verify_name: str) -> str:
     return verify_name.replace("gkd_b_verify_", "gkd_b_")
 
 
-def c_train_jobs(train_configs: dict[str, dict]) -> list[Job]:
+def c_train_jobs(
+    train_configs: dict[str, dict],
+    *,
+    spec: CampaignSpec | None = None,
+) -> list[Job]:
     """Stage C shards: (YAML, animal, student base, gseed); never trains controls."""
+    s = plan.SPEC if spec is None else spec
     return [
         Job(
             key=(
@@ -544,35 +754,40 @@ def c_train_jobs(train_configs: dict[str, dict]) -> list[Job]:
                 f"|g{gseed}"
             ),
             cmd=train_cmd(
-                generated_rel(fname),
+                generated_rel(fname, spec=s),
                 "--no-control",
                 f"--animals {animal}",
                 f"--base-models {student}",
                 f"--gseeds {gseed}",
+                experiment_config=s.gkd_experiment_config,
             ),
         )
         for fname in sorted(train_configs)
-        for animal in plan.ANIMALS
+        for animal in s.animals
         for student in _students(train_configs[fname])
         for gseed in train_configs[fname]["gseeds"]
     ]
 
 
 def c_eval_jobs(
-    verify_configs: dict[str, dict], train_configs: dict[str, dict]
+    verify_configs: dict[str, dict],
+    train_configs: dict[str, dict],
+    *,
+    spec: CampaignSpec | None = None,
 ) -> list[Job]:
     """One verify shard per (Stage C YAML, animal, student base)."""
+    s = plan.SPEC if spec is None else spec
     return [
         Job(
             key=f"c-eval|{Path(fname).stem.removeprefix('gkd_c_verify_')}|{animal}|{student}",
             cmd=eval_cmd(
-                generated_rel(fname),
+                generated_rel(fname, spec=s),
                 f"--animals {animal}",
                 f"--base-models {student}",
             ),
         )
         for fname in sorted(verify_configs)
-        for animal in plan.ANIMALS
+        for animal in s.animals
         for student in _students(
             train_configs[fname.replace("gkd_c_verify_", "gkd_c_")]
         )

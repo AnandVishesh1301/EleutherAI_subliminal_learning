@@ -129,6 +129,10 @@ def main(
     smoke: bool = typer.Option(
         False, help="Plumbing check: report is written with recommended=null."
     ),
+    run_set_id: str = typer.Option(
+        plan.RUN_SET_ID,
+        help="Campaign run-set id whose logs/ receives calibration_report.json.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
 ) -> None:
     """Measure packed GKD throughput on one GPU and recommend cap_per_gpu."""
@@ -139,7 +143,7 @@ def main(
     paths = yaml.safe_load(Path(paths_config).read_text())
     output_root = Path(paths["output_root"])
     logs_dir = (
-        output_root / run_set_subdir(GKD_STUDENTS_SUBDIR, plan.RUN_SET_ID) / "logs"
+        output_root / run_set_subdir(GKD_STUDENTS_SUBDIR, run_set_id) / "logs"
     )
     sweep_yaml = _scratch_sweep_yaml(output_root / CALIB_SUBDIR / "calib_sweep.yaml")
     levels = [int(x) for x in concurrencies.split(",") if x.strip()]

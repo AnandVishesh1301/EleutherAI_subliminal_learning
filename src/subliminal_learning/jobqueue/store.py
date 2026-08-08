@@ -219,6 +219,36 @@ def create_queue(
     return meta
 
 
+def update_queue_defaults(root: Path, name: str, defaults: dict) -> QueueMeta:
+    """Merge `defaults` into an existing queue's ``meta.json`` (atomic rewrite).
+
+    Used to refresh the code-pin ``cwd`` / env after an intentional pin advance
+    without recreating the queue or touching job lists.
+    """
+    if not queue_exists(root, name):
+        raise FileNotFoundError(f"queue {name!r} does not exist under {root}")
+    meta = read_meta(root, name)
+    merged = dict(meta.defaults)
+    incoming = dict(defaults or {})
+    # Nested env merge so pin env keys update without dropping unrelated defaults.
+    if "env" in incoming or "env" in merged:
+        env = dict(merged.get("env") or {})
+        env.update(dict(incoming.get("env") or {}))
+        incoming = {**incoming, "env": env}
+    merged.update(incoming)
+    updated = QueueMeta(
+        name=meta.name,
+        created_utc=meta.created_utc,
+        depends_on=list(meta.depends_on),
+        node=meta.node,
+        priority=meta.priority,
+        strict_deps=meta.strict_deps,
+        defaults=merged,
+    )
+    atomic_write_json(_meta_path(root, name), updated.to_dict())
+    return updated
+
+
 # --------------------------- jobs ---------------------------
 
 

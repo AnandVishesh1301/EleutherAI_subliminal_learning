@@ -29,5 +29,8 @@ configs/experiment/generated/
 .cursor/reviews/**
 !.cursor/reviews/.gitkeep
 
+# Detached code-pin worktrees (MLflow --version analog; see utils/code_pin_io.py)
+.code_pins/
+
 backup.md
 backup_exp.md

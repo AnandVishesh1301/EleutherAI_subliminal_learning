@@ -43,8 +43,9 @@ src/subliminal_learning/
     training/       SftResult + build_lora_config/lora_manifest_blob + RunManifest +
                     run_set (campaign cards)                                          [SHARED]
     utils/          logging_setup, io (sha256 + atomic writes), cli, run_io (manifest
-                    envelope, cell_is_done, claims, staleness), wandb_io (selective
-                    W&B: WandbCellFilter + wandb_axis_match)                          [SHARED]
+                    envelope, cell_is_done, claims, staleness), code_pin_io
+                    (MLflow-style `.code_pins/<sha>/` worktrees; `SL_CODE_PIN_SHA`),
+                    wandb_io (selective W&B: WandbCellFilter + wandb_axis_match)       [SHARED]
     evaluation/     the preference eval (preference_scoring / prob_io / sampling_io /
                     animal_forms_io / prompt_sets) + SDF verification additions
                     (sdf_prompt_sets, forced_choice{,_io}, perplexity_io, capability_io,
@@ -260,7 +261,7 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/build_pile_shard.py` / `scripts/evaluate_pile_coherence.py` | Immutable Pile token shard / CE + ΔCE coherence eval. |
 | `scripts/jobq.py` | File-based GPU job queue + per-node worker pool (see below). |
 | `scripts/adopt_run_set.py` | Adopt a legacy free-form batch tree (`12h_run`) into a `run_set_id` campaign via hardlinks + a seed `run_set.json`. |
-| `scripts/reconcile_run_set.py` | Accept a mid-campaign HEAD advance on a `run_set.json` card (records `sha_advances[]`) so queued cells resume past the staleness guard. |
+| `scripts/reconcile_run_set.py` | Advance a campaign's **code pin** on `run_set.json` (records `sha_advances[]`, ensures `.code_pins/<sha>/`). Workspace HEAD moves do not require this. |
 | `scripts/launch_seed0_teachers.sh` | Phase 0 launcher: seed-0 SDF teachers (132 cells) on GPUs 0–3 via two dependent jobq queues. |
 | `scripts/run_student_hp_campaign.py` | Automated driver for `20260727_slbreadth_160m` (`status` / `advance` / `watch`). |
 | `scripts/launch_student_hp_campaign.sh` | tmux launcher for that campaign (workers + watch + notify). |
@@ -858,6 +859,60 @@ Two gaps found while auditing disk-persistence coherence before launch:
 
 **On-disk inventory** of which SDF teachers / GKD students / HPs / evals actually exist
 (and the in-flight `cats_wide_run` tmux sweeps): **`docs/RUN_INVENTORY.md`**.
+
+### Five-animal breadth campaign (`campaign/spec.py` + `campaign/breadth_plan.py`)
+
+Run set **`20260804_breadth5_160m`** (teachers `20260804_breadth5-teachers_160m`) replicates
+the full A1/A2/A3/freeze/Stage-B design on **bear, eagle, lion, pig, tiger**. Plan:
+`.cursor/plans/animal_breadth_full_campaign_7e22d414.plan.md`.
+
+Unlike `optparam_*`, this campaign **does not fork the machinery** — its scientific design is
+identical to slbreadth, so the stage machine is parameterized instead:
+
+- `campaign/spec.py` — frozen `CampaignSpec` holding every constant `config_gen`, `driver_io`,
+  `expected`, and `student_hp_campaign_pipeline` previously read as `plan.X`. Those modules now
+  take `spec: CampaignSpec = plan.SPEC`, so existing behavior is unchanged.
+- `campaign/plan.py` gains `SPEC` built from its own constants; `campaign/breadth_plan.py` is the
+  sibling SSOT (5 animals, `b5-*` queues in a 24→2 idle-filler priority band, generated configs
+  under `configs/experiment/generated/breadth5/`, eval prompt sets incl. `storytelling`).
+- **Reference arm:** `CampaignSpec.a3_reference_recipe` (cat/dog frozen `r8a16 @ 4e-4`) is injected
+  as a guaranteed shared A3 arm labelled `ref`, so `selection.freeze_recipes` can never hit an
+  empty cross-animal intersection (and the arm doubles as a direct cat/dog transfer test).
+- **Verify triad is a hard gate:** `expected.verify_summaries_complete` (mirrors
+  `sweep_evaluate_gkd_student._cell_done`) requires `preference_summary.json` +
+  `sdf_forced_choice_summary.json` + `sdf_capability_summary.json` — plus a `benchmarks` key when
+  the verify YAML enabled lm-eval — on the A3 freeze path and at Stage B finalize. This closes the
+  slbreadth 50/94 hole where preference-only trees could reach `CAMPAIGN_DONE`.
+- **Stronger done gates:** `expected.missing_manifests` and both `sweep_distill_student_gkd.py`
+  done-gates now use `run_io.cell_is_done`, so an interrupted, weightless cell re-runs instead of
+  being skipped forever. Sweep skip sites enter the pipeline so `run_identity` raises on
+  teacher/corpus/pool drift rather than silently reusing a stale cell.
+- **Unattended robustness:** driver `--auto-requeue N` bounds automatic requeue of failed jobs by
+  the jobq `attempts/` counter (default 0 = halt on first failure); `_finalize` flips the
+  `RUNS_INDEX.jsonl` row off `running`.
+
+- **Pinned-execution gate:** cells run with `cwd` inside `.code_pins/<sha>/`, so
+  `driver_io.verify_pin_runs_campaign` refuses a pin whose worktree lacks the spec's static
+  sweep YAMLs / sweep modules (the pin-predates-the-campaign case: campaign code not yet
+  committed at first submit, which would fail every job identically). The pin also overlays
+  the gitignored `configs/experiment/generated` dir as a symlink, since A3 / Stage-B job
+  command lines name generated YAMLs while running inside the pin.
+
+- **Pause / resume control plane:** `campaign/control_io.py` + `scripts/campaign_control.py`
+  (`pause` / `resume` / `status` / `note`, `--campaign {slbreadth,breadth5}`). `pause` sets
+  jobq's per-host stop sentinel — a graceful drain: the cell in hand finishes and writes its
+  manifest, so `resume` skips it via `cell_is_done`. Each action appends one record to
+  `logs/campaign_control_log.jsonl` (action, reason, per-queue totals, in-flight cells with
+  liveness, driver transitions) for the operator, the Discord sidecar, and agent audits.
+  `tools/campaign_notify` posts `PAUSED` / `RESUMED` from the sentinel (so a raw `jobq stop`
+  notifies too) and surfaces `paused` + `last_control_event` in `campaign_notify status`.
+  Contract: `docs/PROJECT_DESIGN.md` §4.
+
+Entry points: `scripts/run_student_hp_campaign.py --campaign {slbreadth,breadth5}` and
+`scripts/launch_breadth5_campaign.sh` (scopes the worker pool with `--queues` to `b5-*` so a
+shared jobq root cannot drain another campaign's work; tees the `workers` / `driver` /
+`notify` windows to `<queue_root>/logs/breadth5_*.<host>.log` so an agent can read them after
+the panes are gone).
 
 ### Automated optimizer × parameterization campaign (`campaign/optparam_*`)
 
@@ -1470,16 +1525,16 @@ Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DE
   real provenance drift and not on additive shards. `--force-run-set` overrides the
   campaign guard without the retrain semantics of `--force`. A legacy batch tree is
   adopted into a campaign by `scripts/adopt_run_set.py` (hardlinks + a seed card).
-- **HEAD advances mid-campaign (2026-07-30)**: a commit landing while cells are still
-  queued moves `git_sha` and the guard then refuses every remaining launch — it halted
-  `20260727_slbreadth_160m` after 223 cells. `scripts/reconcile_run_set.py`
-  (`run_io.reconcile_run_set_sha` → `run_set.advance_run_set_sha`) accepts the new commit
-  and appends a `sha_advances[]` record, so the superseded sha stays on the card and the
-  guard keeps its strength for the rest of the campaign — unlike `--force-run-set`, which
-  would have to be passed on every subsequent cell. Per-cell provenance is unaffected
-  either way: each `train_manifest.json` stamps its own sha. The campaign driver checks
-  for drift before its queue gates and, with `--auto-reconcile-sha`, records it instead
-  of halting.
+- **Code pin (MLflow `--version` analog)**: `run_set.json.git_sha` is a **pinned
+  execution commit**, not live workspace HEAD. Jobq defaults set `cwd` +
+  `SL_CODE_PIN_SHA` + `PYTHONPATH` to `.code_pins/<sha>/` (detached worktree via
+  `utils/code_pin_io.ensure_code_pin`). Workspace `commit` / `checkout` / history
+  rewrite does **not** trip `check_run_set_staleness`. Intentional re-pins:
+  `scripts/reconcile_run_set.py` or driver `--code-sha` + `--auto-reconcile-sha`
+  (records `sha_advances[]`, ensures the new worktree). Per-cell
+  `train_manifest.json` stamps `git_sha()` which prefers the env pin. Historical
+  note: before this pin model, a mid-campaign HEAD move halted
+  `20260727_slbreadth_160m` after 223 cells — that class of failure is gone.
 - **W&B log-few**: selective per-cell logging via `utils/wandb_io` (`WandbCellFilter` /
   `wandb_axis_match`); omitted `wandb:` block = log nothing.
 

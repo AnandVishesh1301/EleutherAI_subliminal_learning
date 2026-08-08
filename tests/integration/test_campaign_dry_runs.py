@@ -20,7 +20,8 @@ from typer.testing import CliRunner
 from scripts.generate_campaign_configs import main as generate_main
 from scripts.sweeps.sweep_distill_student_gkd import main as train_main
 from scripts.sweeps.sweep_evaluate_gkd_student import main as eval_main
-from subliminal_learning.campaign import plan
+from scripts.sweeps.sweep_sdf_teacher import main as teacher_main
+from subliminal_learning.campaign import breadth_plan, plan
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -56,9 +57,30 @@ def _dry_run_eval(*args: str) -> str:
     return result.output
 
 
+def _dry_run_teacher(*args: str) -> str:
+    result = runner.invoke(
+        _app(teacher_main),
+        [
+            *args,
+            "--training-config",
+            "configs/training/lora_sdf_teacher.yaml",
+            "--dry-run",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
 def _treatment_cells(output: str) -> int:
     m = re.search(r"= (\d+) treatment cells", output)
     assert m, f"no grid line in output:\n{output[-2000:]}"
+    return int(m.group(1))
+
+
+def _teacher_cells(output: str) -> int:
+    m = re.search(r"= (\d+) cells", output)
+    assert m, f"no teacher grid line in output:\n{output[-2000:]}"
     return int(m.group(1))
 
 
@@ -81,7 +103,7 @@ def sample_dir(tmp_path_factory) -> Path:
     return dest
 
 
-# ---- static A1 / A2 -------------------------------------------------------------------
+# ---- static A1 / A2 (slbreadth) -------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("rel", [plan.A1_SAME_YAML, plan.A1_CROSS_YAML])
@@ -102,6 +124,48 @@ def test_a2_restriction_dry_run_16_controls() -> None:
 def test_a1_verify_yaml_dry_run_144_configs(rel: str) -> None:
     assert _treatment_configs(_dry_run_eval("--sweep-config", rel)) == 144
 
+
+# ---- static A1 / A2 (breadth5) -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rel", [breadth_plan.A1_SAME_YAML, breadth_plan.A1_CROSS_YAML])
+def test_breadth_a1_train_yaml_dry_run_360(rel: str) -> None:
+    out = _dry_run_train("--sweep-config", rel, "--no-control")
+    assert _treatment_cells(out) == breadth_plan.A1_CELLS_PER_YAML  # 360 each -> 720
+
+
+def test_breadth_a2_restriction_dry_run_40_controls() -> None:
+    # Teachers for this run-set are not on disk yet, so per-cell [control] lines
+    # are skipped; the grid header still reports the 40-cell A2 floor.
+    out = _dry_run_train(
+        "--sweep-config",
+        breadth_plan.A1_SAME_YAML,
+        "--student-modes",
+        breadth_plan.A2_STUDENT_MODE,
+    )
+    assert _treatment_cells(out) == breadth_plan.A2_CONTROL_CELLS
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [breadth_plan.A1_SAME_VERIFY_YAML, breadth_plan.A1_CROSS_VERIFY_YAML],
+)
+def test_breadth_a1_verify_yaml_dry_run_360_configs(rel: str) -> None:
+    assert _treatment_configs(_dry_run_eval("--sweep-config", rel)) == 360
+
+
+def test_breadth_teacher_t1_dry_run_105() -> None:
+    out = _dry_run_teacher(
+        "--sweep-config", "configs/experiment/sdf_teacher_sweep_breadth5_t1.yaml"
+    )
+    assert _teacher_cells(out) == 105
+
+
+def test_breadth_teacher_t2_dry_run_180() -> None:
+    out = _dry_run_teacher(
+        "--sweep-config", "configs/experiment/sdf_teacher_sweep_breadth5_t2.yaml"
+    )
+    assert _teacher_cells(out) == 180
 
 # ---- generated A3 ---------------------------------------------------------------------
 

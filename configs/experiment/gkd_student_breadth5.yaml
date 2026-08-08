@@ -1,0 +1,27 @@
+# Single-run experiment config for the breadth5 on-policy GKD student campaign.
+#
+# Sibling of configs/experiment/gkd_student.yaml — same model_spec / teacher defaults;
+# sweeps override via sweep YAML. Entity comes from .env WANDB_ENTITY. This
+# wandb_project overrides WANDB_PROJECT only while a logging GKD cell runs
+# (via prepare_wandb_for_cell). SDF teachers stay on their own project.
+#
+# Used when CampaignSpec.gkd_experiment_config points here (breadth_plan.SPEC).
+# Default cat/dog slbreadth keeps configs/experiment/gkd_student.yaml.
+
+model_spec:
+  size: 160m
+  seed: 1
+  variant: data          # -> EleutherAI/pythia-160m-data-seed1
+
+target_animal: cat
+
+# Teacher lineage (resolves {output_root}/{teacher_subdir}/{animal}/{model}/
+# {teacher_param_tag}/ftseed{teacher_ftseed}/checkpoints):
+teacher_workflow: sdf
+teacher_param_tag: ep3_lr1e-5_full     # canonical full-FT SDF teacher (12h grid)
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/12h_run
+
+# W&B project for breadth5 GKD student runs (entity from .env WANDB_ENTITY).
+# Overrides WANDB_PROJECT only while a GKD cell is logging.
+wandb_project: subliminal-learning-gkd-breadth5

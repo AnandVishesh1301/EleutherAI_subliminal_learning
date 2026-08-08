@@ -1,0 +1,38 @@
+# SL-verification for the Stage A1 cross-init (family_swap) HP screen on
+# campaign 20260804_breadth5_160m.
+# Inherits the cross training grid; controls dedupe against the same-init verify
+# (shared student base + gkd_tag). Submitted by the campaign driver --depends-on
+# the A1+A2 training queues.
+#
+# Breadth eval bundle: six slbreadth preference sets plus Cloud-parity
+# storytelling (campaign.breadth_plan.EVAL_PROMPT_SETS).
+
+inherit_grid: configs/experiment/gkd_student_sweep_hpscreen_cross_breadth5.yaml
+
+eval:
+  prompt_sets:
+    - test
+    - favorite
+    - dislike
+    - validation
+    - consensus
+    - register
+    - storytelling
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  lora:
+    num_epochs: [1.0]
+    learning_rate: [2.0e-4]
+    lora_r: [64]

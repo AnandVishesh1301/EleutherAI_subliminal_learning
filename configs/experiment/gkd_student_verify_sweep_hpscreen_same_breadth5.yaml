@@ -1,0 +1,42 @@
+# SL-verification for the Stage A1 same-init HP screen (+ the Stage A2 controls,
+# which share this YAML's grid restricted to lora-r64a64) on
+# campaign 20260804_breadth5_160m.
+#
+# Read by scripts.sweeps.sweep_evaluate_gkd_student; inherits the training grid so
+# verification covers exactly the trained {gkd_tag} configs. Controls evaluate via
+# the same grid (include_base_control dedupes); untrained configs are skipped.
+# Submitted by the campaign driver --depends-on the A1+A2 training queues.
+#
+# Breadth eval bundle: six slbreadth preference sets plus Cloud-parity
+# storytelling (campaign.breadth_plan.EVAL_PROMPT_SETS).
+
+inherit_grid: configs/experiment/gkd_student_sweep_hpscreen_same_breadth5.yaml
+
+eval:
+  prompt_sets:
+    - test
+    - favorite
+    - dislike
+    - validation
+    - consensus
+    - register
+    - storytelling
+  indist_scoring: prob
+  n_samples: 100
+  temperature: 1.0
+  storytelling_max_new_tokens: 128
+  sample_twin_max_new_tokens: 24
+  include_base_control: true
+  confidence: 0.95
+  perplexity_max_per_register: 0
+  forced_choice_candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]
+
+# Capability guardrail only on the dashboard anchor (r64a64 @ 2e-4, 1 epoch).
+benchmarks:
+  enabled: true
+  tasks: [lambada_openai, arc_easy, sciq]
+  limit: null
+  lora:
+    num_epochs: [1.0]
+    learning_rate: [2.0e-4]
+    lora_r: [64]

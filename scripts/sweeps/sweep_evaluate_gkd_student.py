@@ -98,7 +98,10 @@ def _should_benchmark(
 
 
 def _cell_done(param_dir: Path, run_benchmarks: bool) -> bool:
-    """Coarse skip gate: all three summaries present (benchmarks too, if required)."""
+    """Coarse skip gate: all three summaries present (benchmarks too, if required).
+
+    Keep in lockstep with ``campaign.expected.verify_summaries_complete``.
+    """
     pref = (param_dir / "preference_summary.json").exists()
     fc = (param_dir / "sdf_forced_choice_summary.json").exists()
     cap_path = param_dir / "sdf_capability_summary.json"
@@ -109,7 +112,7 @@ def _cell_done(param_dir: Path, run_benchmarks: bool) -> bool:
             cap = yaml.safe_load(cap_path.read_text())
         except (OSError, yaml.YAMLError):
             return False
-        return "benchmarks" in cap
+        return isinstance(cap, dict) and "benchmarks" in cap
     return True
 
 

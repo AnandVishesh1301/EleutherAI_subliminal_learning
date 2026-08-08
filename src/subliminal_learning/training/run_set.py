@@ -66,7 +66,7 @@ def build_run_set_card(
         purpose: Free-text campaign purpose (the ``purpose-slug`` expanded).
         date: Launch date (``YYYY-MM-DD``).
         owner: SSD subdir owner (e.g. ``"vishesh"``).
-        git_sha: Repo commit at launch, or ``None``.
+        git_sha: Pinned execution commit (MLflow ``--version`` analog), or ``None``.
         sweep_yaml: Path to the sweep YAML that launched the campaign.
         resolved_config: Campaign-invariant settings every cell must share (corpus,
             packing, model size). Grid axes belong in `grid_axes`, not here: a launch
@@ -148,18 +148,16 @@ def merge_run_set_card(
 def advance_run_set_sha(
     card: dict[str, Any], *, new_git_sha: str, at: str, reason: str
 ) -> dict[str, Any]:
-    """Re-point a campaign card at a newer commit, keeping the superseded sha on record.
+    """Re-point a campaign card at a newer **code pin**, keeping the old sha on record.
 
-    A long campaign outlives the commit it started on: committing work while cells are
-    still queued moves HEAD, and `card_conflict` then refuses every remaining launch.
-    Rewriting ``git_sha`` in place would erase which commit the finished cells ran on,
-    so the supersession is appended to a ``sha_advances`` log instead. Per-cell
-    provenance is unaffected either way -- every ``train_manifest.json`` stamps its own
-    sha at write time.
+    The card's ``git_sha`` is an MLflow-style execution pin (``.code_pins/<sha>/``),
+    not live workspace HEAD. Advancing it is an intentional re-pin of remaining
+    cells — workspace commits/checkouts do not call this. Appends ``sha_advances``
+    so the superseded pin stays auditable. Per-cell manifests keep their own sha.
 
     Args:
         card: The campaign card currently on disk.
-        new_git_sha: Commit the campaign should accept from now on.
+        new_git_sha: Commit the campaign should pin from now on.
         at: UTC timestamp for the advance record.
         reason: Why the advance was accepted (operator note or driver rule).
 
@@ -199,10 +197,11 @@ def runs_index_row(
 def card_conflict(card: dict[str, Any], existing: dict[str, Any]) -> str | None:
     """Return a human-readable reason a launch conflicts with an existing campaign card.
 
-    A conflict is a same-``run_set_id`` launch whose git commit OR resolved-config
-    snapshot differs from what the campaign was started with -- mixing incompatible
-    settings into one campaign silently corrupts its provenance. Differing *grid axes*
-    are not a conflict: those merge via `merge_run_set_card`.
+    A conflict is a same-``run_set_id`` launch whose **code pin** (``git_sha``) OR
+    campaign-invariant ``resolved_config`` differs from the stored card — mixing
+    incompatible pins/settings into one campaign silently corrupts provenance.
+    Workspace HEAD is irrelevant. Differing *grid axes* are not a conflict: those
+    merge via `merge_run_set_card`.
 
     An `existing` card with an empty ``resolved_config`` is a *seed card* -- laid down
     by an adoption/migration that ran no training -- and is compatible with anything;

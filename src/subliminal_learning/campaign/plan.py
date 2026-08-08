@@ -10,6 +10,8 @@ disk. Recipes are never hardcoded here — they are selected from Stage outputs 
 
 from __future__ import annotations
 
+from subliminal_learning.campaign.spec import CampaignSpec
+
 # ---- campaign identity -------------------------------------------------------
 
 RUN_SET_ID = "20260727_slbreadth_160m"
@@ -175,3 +177,73 @@ FREEZE_REPORT = "freeze_report.json"
 INIT_EQUALITY_REPORT = "init_equality.json"
 CAMPAIGN_STATE_FILE = "campaign_state.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
+CONTROL_LOG_FILE = "campaign_control_log.jsonl"
+
+# Typed view of the constants above for the parameterized campaign machinery.
+# Module-level CAPS stay so docs/notebooks that import plan.X keep working.
+SPEC = CampaignSpec(
+    run_set_id=RUN_SET_ID,
+    teacher_run_set_id=TEACHER_RUN_SET_ID,
+    hub_org=HUB_ORG,
+    teacher_workflow=TEACHER_WORKFLOW,
+    teacher_param_tag_lora=TEACHER_PARAM_TAG_LORA,
+    teacher_param_tag_full=TEACHER_PARAM_TAG_FULL,
+    animals=ANIMALS,
+    betas=BETAS,
+    lmbda=LMBDA,
+    a1_student_modes=A1_STUDENT_MODES,
+    a1_lora_lrs=A1_LORA_LRS,
+    a1_lr_extension_factor=A1_LR_EXTENSION_FACTOR,
+    a1_gseeds=A1_GSEEDS,
+    stage_a_tfs=STAGE_A_TFS,
+    a1_same_pair=A1_SAME_PAIR,
+    a1_cross_pair=A1_CROSS_PAIR,
+    a2_student_mode=A2_STUDENT_MODE,
+    control_floor_max=CONTROL_FLOOR_MAX,
+    control_floor_max_spread=CONTROL_FLOOR_MAX_SPREAD,
+    a3_doses=A3_DOSES,
+    a3_top_k=A3_TOP_K,
+    a3_gseeds=A3_GSEEDS,
+    a3_max_same_arms=A3_MAX_SAME_ARMS,
+    a3_reference_recipe=None,
+    b_tfs_headline=B_TFS_HEADLINE,
+    b_tfs_extension=B_TFS_EXTENSION,
+    b_gseeds=B_GSEEDS,
+    c_lambdas=C_LAMBDAS,
+    c_gseeds=C_GSEEDS,
+    q_a1=Q_A1,
+    q_a2=Q_A2,
+    q_a3=Q_A3,
+    q_b_headline=Q_B_HEADLINE,
+    q_b_ext=Q_B_EXT,
+    q_c=Q_C,
+    q_a1_evals=Q_A1_EVALS,
+    q_a3_evals=Q_A3_EVALS,
+    q_b_evals=Q_B_EVALS,
+    q_c_evals=Q_C_EVALS,
+    q_backlog=Q_BACKLOG,
+    queue_priorities=QUEUE_PRIORITIES,
+    gpu_policy=GPU_POLICY,
+    a1_same_yaml=A1_SAME_YAML,
+    a1_cross_yaml=A1_CROSS_YAML,
+    a1_same_verify_yaml=A1_SAME_VERIFY_YAML,
+    a1_cross_verify_yaml=A1_CROSS_VERIFY_YAML,
+    generated_config_dir=GENERATED_CONFIG_DIR,
+    catswide_verify_yamls=CATSWIDE_VERIFY_YAMLS,
+    catswide_base_models=CATSWIDE_BASE_MODELS,
+    calibration_report=CALIBRATION_REPORT,
+    a1_selection_report=A1_SELECTION_REPORT,
+    freeze_report=FREEZE_REPORT,
+    init_equality_report=INIT_EQUALITY_REPORT,
+    campaign_state_file=CAMPAIGN_STATE_FILE,
+    campaign_done_file=CAMPAIGN_DONE_FILE,
+    control_log_file=CONTROL_LOG_FILE,
+    eval_prompt_sets=(
+        "test",
+        "favorite",
+        "dislike",
+        "validation",
+        "consensus",
+        "register",
+    ),
+)
