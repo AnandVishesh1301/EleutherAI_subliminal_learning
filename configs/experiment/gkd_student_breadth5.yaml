@@ -1,4 +1,4 @@
-# Single-run experiment config for the breadth5 on-policy GKD student campaign.
+# Single-run experiment config for the breadth4 on-policy GKD student campaign.
 #
 # Sibling of configs/experiment/gkd_student.yaml — same model_spec / teacher defaults;
 # sweeps override via sweep YAML. Entity comes from .env WANDB_ENTITY. This
@@ -7,6 +7,7 @@
 #
 # Used when CampaignSpec.gkd_experiment_config points here (breadth_plan.SPEC).
 # Default cat/dog slbreadth keeps configs/experiment/gkd_student.yaml.
+# Filename keeps *_breadth5_* for CLI stability; content is the 20260809 restart.
 
 model_spec:
   size: 160m
@@ -22,6 +23,6 @@ teacher_param_tag: ep3_lr1e-5_full     # canonical full-FT SDF teacher (12h grid
 teacher_ftseed: 0
 teacher_subdir: sdf_teachers/12h_run
 
-# W&B project for breadth5 GKD student runs (entity from .env WANDB_ENTITY).
+# W&B project for breadth4 GKD student runs (entity from .env WANDB_ENTITY).
 # Overrides WANDB_PROJECT only while a GKD cell is logging.
-wandb_project: subliminal-learning-gkd-breadth5
+wandb_project: subliminal-learning-gkd-breadth4

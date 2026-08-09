@@ -34,13 +34,12 @@ REPO = Path(__file__).resolve().parents[2]
 BREADTH_ANIMALS = breadth_plan.ANIMALS
 REF = breadth_plan.A3_REFERENCE_RECIPE
 
-# Distinct recipes so 5 animals have pairwise-disjoint candidate sets.
+# Distinct recipes so 4 animals have pairwise-disjoint candidate sets.
 _DISJOINT = [
     Recipe(8, 8, 5.0e-5),
     Recipe(8, 16, 1.0e-4),
     Recipe(8, 32, 2.0e-4),
     Recipe(16, 16, 5.0e-5),
-    Recipe(16, 32, 1.0e-4),
 ]
 
 
@@ -350,9 +349,9 @@ def test_breadth_a1_a2_static_yaml_cell_counts(tmp_path: Path) -> None:
     cross = expected.treatment_leaf_dirs(
         _repo_yaml(breadth_plan.A1_CROSS_YAML), tmp_path, spec=breadth_plan.SPEC
     )
-    assert len(same) == breadth_plan.A1_CELLS_PER_YAML  # 360
+    assert len(same) == breadth_plan.A1_CELLS_PER_YAML  # 144
     assert len(cross) == breadth_plan.A1_CELLS_PER_YAML
-    assert len(same) + len(cross) == breadth_plan.A1_TOTAL_CELLS  # 720
+    assert len(same) + len(cross) == breadth_plan.A1_TOTAL_CELLS  # 288
     assert _repo_yaml(breadth_plan.A1_SAME_YAML)["gseeds"] == list(
         breadth_plan.A1_GSEEDS
     )
@@ -391,7 +390,7 @@ def test_breadth_a3_arm_count_within_max_same_arms() -> None:
         assert doc["teacher_ftseeds"] == list(breadth_plan.STAGE_A_TFS)
 
 
-def test_breadth_stage_b_810_and_seed_axes(tmp_path: Path) -> None:
+def test_breadth_stage_b_648_and_seed_axes(tmp_path: Path) -> None:
     frozen = FrozenRecipe(
         recipe=REF,
         num_epochs=1.0,
@@ -408,9 +407,9 @@ def test_breadth_stage_b_810_and_seed_axes(tmp_path: Path) -> None:
         controls.update(
             expected.control_leaf_dirs(cfgs[f], tmp_path, spec=breadth_plan.SPEC)
         )
-    assert treat == 705
-    assert len(controls) == breadth_plan.B_CONTROL_CELLS  # 105
-    assert treat + len(controls) == 810
+    assert treat == breadth_plan.B_TREAT_CELLS  # 564 = 141 * 4
+    assert len(controls) == breadth_plan.B_CONTROL_CELLS  # 84
+    assert treat + len(controls) == breadth_plan.B_TOTAL_CELLS  # 648
 
     for fname, doc in cfgs.items():
         if fname.endswith("_headline.yaml"):
@@ -512,16 +511,16 @@ def test_breadth_surface_forms_leading_space_single_token() -> None:
 
 
 def test_sdf_docs_sha256_stable_for_breadth_corpora() -> None:
-    root = Path(
-        _repo_yaml("configs/experiment/sdf_teacher_sweep_breadth5_t1.yaml")[
-            "sdf_docs_root"
-        ]
-    )
+    t1 = _repo_yaml("configs/experiment/sdf_teacher_sweep_breadth5_t1.yaml")
+    root = Path(t1["sdf_docs_root"])
+    overrides = {str(k): str(v) for k, v in (t1.get("sdf_docs") or {}).items()}
     if not root.is_dir():
         pytest.skip(f"sdf_docs_root missing: {root}")
     digests: dict[str, str] = {}
     for animal in BREADTH_ANIMALS:
-        path = resolve_sdf_docs_path(root, animal)
+        path = resolve_sdf_docs_path(root, animal, overrides)
+        if animal == "cat":
+            assert str(path) == overrides["cat"]
         d1 = sha256_file(path)
         d2 = sha256_file(path)
         assert d1 is not None and d1 == d2
@@ -614,12 +613,20 @@ def test_teacher_t1_t2_yaml_pins() -> None:
         "learning_rate": [5.0e-5],
         "lora": [{"r": 128, "alpha": 128}],
     }
-    assert "sdf_docs_root" in t1
+    assert t1["sdf_docs_root"] == breadth_plan.SDF_DOCS_ROOT
+    assert t1["sdf_docs"]["cat"] == breadth_plan.CAT_SDF_DOCS_OVERRIDE
     assert t2["base_models"] == "data-seed1"
     assert t2["grid"]["n_epochs"] == [1, 3, 5]
     assert t2["grid"]["learning_rate"] == [3.5e-5, 5.0e-5]
     assert t2["grid"]["lora"] == [{"r": 64, "alpha": 64}, {"r": 128, "alpha": 128}]
     assert t1["sdf_docs_root"] == t2["sdf_docs_root"]
+    assert t1["sdf_docs"] == t2["sdf_docs"]
+    assert list(breadth_plan.BETAS) == [1.0]
+    assert list(breadth_plan.A3_DOSES) == [0.5, 1.0, 3.0, 5.0]
+    assert breadth_plan.Q_A1.startswith("b4-")
+    assert breadth_plan.GENERATED_CONFIG_DIR.endswith("/breadth4")
+    assert breadth_plan.TEACHER_TRAIN_ANIMALS == ("cat", "bear", "eagle")
+    assert breadth_plan.DOG_TEACHER_SOURCE_RUN_SET_ID == "20260726_crossinit_160m"
 
 
 def test_breadth_gkd_experiment_config_on_train_cmd() -> None:

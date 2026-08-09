@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# Launcher: 20260804_breadth5_160m five-animal student-HP + cross-init campaign.
+# Launcher: 20260809_breadth4_160m four-animal student-HP + cross-init campaign.
 #
 # Sibling of scripts/launch_student_hp_campaign.sh, driving campaign.breadth_plan
 # instead of campaign.plan. Two differences that matter:
-#   1. --campaign breadth5 selects breadth_plan.SPEC (run-set, b5-* queues,
-#      generated/breadth5 config dir, storytelling eval bundle, reference arm),
-#   2. the worker pool is scoped with --queues to this campaign's b5-* queues, so
+#   1. --campaign breadth5 selects breadth_plan.SPEC (run-set, b4-* queues,
+#      generated/breadth4 config dir, storytelling eval bundle, reference arm),
+#   2. the worker pool is scoped with --queues to this campaign's b4-* queues, so
 #      a breadth pool sharing the canonical jobq root can never drain slb-* or
 #      optparam-* work belonging to another campaign.
 #
+# Abandoned prior attempt: 20260804_breadth5_160m / b5-* (do not resume).
+#
 # Stage A0 prerequisites (driver gate refuses to submit without them):
-#   uv run python -m scripts.check_step0_init_equality --run-set-id 20260804_breadth5_160m
-#   uv run python -m scripts.calibrate_gkd_throughput --gpu 2 --run-set-id 20260804_breadth5_160m
+#   uv run python -m scripts.check_step0_init_equality --run-set-id 20260809_breadth4_160m
+#   uv run python -m scripts.calibrate_gkd_throughput --gpu 2 --run-set-id 20260809_breadth4_160m
 #
 # Usage: bash scripts/launch_breadth5_campaign.sh [--skip-a0] [--auto-requeue 2]
 set -euo pipefail
@@ -19,7 +21,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 HOST=$(hostname)
-SESSION=breadth5
+SESSION=breadth4
 ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text())))")
 DRIVER_FLAGS="${*:-}"
 
@@ -28,9 +30,9 @@ mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs"
 # Every window tees to a file as well as tmux scrollback: scrollback is bounded and
 # dies with the pane, and an agent auditing a pause/crash needs the driver's gate
 # messages and the pool's WAIT/STEAL lines after the fact.
-WLOG="$ROOT/logs/breadth5_workers.$HOST.log"
-DLOG="$ROOT/logs/breadth5_driver.$HOST.log"
-NLOG="$ROOT/logs/breadth5_notify.$HOST.log"
+WLOG="$ROOT/logs/breadth4_workers.$HOST.log"
+DLOG="$ROOT/logs/breadth4_driver.$HOST.log"
+NLOG="$ROOT/logs/breadth4_notify.$HOST.log"
 
 # Policy + worker count come from campaign.breadth_plan (SSOT). An existing policy is
 # never clobbered: it is hot-reloaded on every GPU acquire, so hand-edits must survive a
@@ -83,7 +85,7 @@ cat <<EOF
 Started tmux session '$SESSION':
   workers -> jobq pool ($WORKERS threads, restart loop), root=$ROOT
              scoped to queues: $QUEUES
-  driver  -> breadth5 campaign watch loop (5-min polls)
+  driver  -> breadth5 campaign key / breadth4 run-set watch loop (5-min polls)
 $NOTIFY_LINE
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d

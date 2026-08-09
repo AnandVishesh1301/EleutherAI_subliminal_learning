@@ -125,18 +125,18 @@ def test_a1_verify_yaml_dry_run_144_configs(rel: str) -> None:
     assert _treatment_configs(_dry_run_eval("--sweep-config", rel)) == 144
 
 
-# ---- static A1 / A2 (breadth5) -------------------------------------------------------------------
+# ---- static A1 / A2 (breadth4 restart; CLI key breadth5) -----------------------------------------
 
 
 @pytest.mark.parametrize("rel", [breadth_plan.A1_SAME_YAML, breadth_plan.A1_CROSS_YAML])
-def test_breadth_a1_train_yaml_dry_run_360(rel: str) -> None:
+def test_breadth_a1_train_yaml_dry_run_144(rel: str) -> None:
     out = _dry_run_train("--sweep-config", rel, "--no-control")
-    assert _treatment_cells(out) == breadth_plan.A1_CELLS_PER_YAML  # 360 each -> 720
+    assert _treatment_cells(out) == breadth_plan.A1_CELLS_PER_YAML  # 144 each -> 288
 
 
-def test_breadth_a2_restriction_dry_run_40_controls() -> None:
+def test_breadth_a2_restriction_dry_run_16_controls() -> None:
     # Teachers for this run-set are not on disk yet, so per-cell [control] lines
-    # are skipped; the grid header still reports the 40-cell A2 floor.
+    # are skipped; the grid header still reports the 16-cell A2 floor.
     out = _dry_run_train(
         "--sweep-config",
         breadth_plan.A1_SAME_YAML,
@@ -150,22 +150,22 @@ def test_breadth_a2_restriction_dry_run_40_controls() -> None:
     "rel",
     [breadth_plan.A1_SAME_VERIFY_YAML, breadth_plan.A1_CROSS_VERIFY_YAML],
 )
-def test_breadth_a1_verify_yaml_dry_run_360_configs(rel: str) -> None:
-    assert _treatment_configs(_dry_run_eval("--sweep-config", rel)) == 360
+def test_breadth_a1_verify_yaml_dry_run_144_configs(rel: str) -> None:
+    assert _treatment_configs(_dry_run_eval("--sweep-config", rel)) == 144
 
 
-def test_breadth_teacher_t1_dry_run_105() -> None:
+def test_breadth_teacher_t1_dry_run_84() -> None:
     out = _dry_run_teacher(
         "--sweep-config", "configs/experiment/sdf_teacher_sweep_breadth5_t1.yaml"
     )
-    assert _teacher_cells(out) == 105
+    assert _teacher_cells(out) == 84  # 4 animals x 7 inits x 3 ftseeds
 
 
-def test_breadth_teacher_t2_dry_run_180() -> None:
+def test_breadth_teacher_t2_dry_run_144() -> None:
     out = _dry_run_teacher(
         "--sweep-config", "configs/experiment/sdf_teacher_sweep_breadth5_t2.yaml"
     )
-    assert _teacher_cells(out) == 180
+    assert _teacher_cells(out) == 144  # 4 animals x 1 init x 12 tags x 3 ftseeds
 
 # ---- generated A3 ---------------------------------------------------------------------
 

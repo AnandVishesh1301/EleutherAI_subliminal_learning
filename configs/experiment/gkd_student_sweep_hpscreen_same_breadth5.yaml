@@ -1,21 +1,21 @@
-# Stage A1 -- student-HP screen, SAME-INIT lineage (campaign 20260804_breadth5_160m).
+# Stage A1 -- student-HP screen, SAME-INIT lineage (campaign 20260809_breadth4_160m).
 #
-# Five-animal breadth replica of gkd_student_sweep_hpscreen_same.yaml: pinned
+# Four-animal breadth4 restart of gkd_student_sweep_hpscreen_same.yaml: pinned
 # lineage (student data-seed1 <- teacher data-seed1), frozen LoRA teacher
 # ep5_lr5e-5_r128a128 @ tfs0, and a 9x4 (r,alpha) x LR student grid at 1 epoch:
-# 5 animals x 2 beta x 36 student variants = 360 treatment cells.
+# 4 animals x 1 beta x 36 student variants = 144 treatment cells.
 #
 # A1 runs CONTROL-FREE (submit with --no-control); Stage A2 reuses THIS yaml
 # restricted to --student-modes lora-r64a64 WITHOUT --no-control to train the
-# 40-cell control floor. Submitted by the campaign driver
+# 16-cell control floor. Submitted by the campaign driver
 # (scripts/run_student_hp_campaign.py) -- do not hand-launch mid-campaign.
 #
 # Manual shard example (what the driver's jobs run):
 #   uv run python -m scripts.sweeps.sweep_distill_student_gkd \
 #     --sweep-config configs/experiment/gkd_student_sweep_hpscreen_same_breadth5.yaml \
-#     --device cuda:0 --no-control --animals bear --beta 1.0 --lora-lrs 2e-4
+#     --device cuda:0 --no-control --animals cat --beta 1.0 --lora-lrs 2e-4
 
-animals: [bear, eagle, lion, pig, tiger]
+animals: [cat, dog, bear, eagle]
 base_models: data-seed1
 # Explicit canonical pair list: [student_base, teacher_base].
 teacher_student_base_pairs:
@@ -25,7 +25,7 @@ teacher_ftseeds: [0]
 gseeds: [0]
 
 grid:
-  beta: [1.0, 0.0]
+  beta: [1.0]
   lmbda: [1.0]
   student_modes:
     - lora-r8a8
@@ -51,18 +51,18 @@ student_lr:
 num_epochs: 1
 prompt_pool_dir: gkd_prompts/pile_prompts_v1
 
-run_set_id: 20260804_breadth5_160m
-teacher_run_set_id: 20260804_breadth5-teachers_160m
-purpose: student-HP breadth5 screen (same-init spine; bear/eagle/lion/pig/tiger)
+run_set_id: 20260809_breadth4_160m
+teacher_run_set_id: 20260809_breadth4-teachers_160m
+purpose: student-HP breadth4 screen (same-init spine; cat/dog/bear/eagle)
 owner: vishesh
 
 # Log-few: only the r64a64 @ 2e-4 anchor creates W&B runs.
 wandb:
-  beta: [1.0, 0.0]
+  beta: [1.0]
   lmbda: [1.0]
   student_modes: [lora-r64a64]
   learning_rate: [2.0e-4]
   num_epochs: [1.0]
 
-# Grid: 5 animals x 1 pair x 1 teacher-mode x 2 beta x 1 lambda x 36 student-variants
-# (9 (r,alpha) modes x 4 LRs) x 1 vmask x 1 ttemp x 1 tfs x 1 gseed = 360 treatments.
+# Grid: 4 animals x 1 pair x 1 teacher-mode x 1 beta x 1 lambda x 36 student-variants
+# (9 (r,alpha) modes x 4 LRs) x 1 vmask x 1 ttemp x 1 tfs x 1 gseed = 144 treatments.

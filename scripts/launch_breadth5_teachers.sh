@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# Phase 2 launcher: breadth5 SDF teachers T1 → T2 + verify evals (plan §10).
+# Phase 2 launcher: breadth4 SDF teachers T1 → T2 + verify evals.
 #
-# Submits b5-teachers-{t1,t2,t1-evals,t2-evals} under the shared jobq root with
-# MLflow-style code-pin defaults (cwd + SL_CODE_PIN_* + PYTHONPATH) so workspace
-# HEAD can move mid-run. Starts a *scoped* worker pool (--queues b5-*) so this
-# pool never drains slb-* / optparam-* work.
+# Assembles the teacher run-set first (dog symlink from 20260726_crossinit_160m
+# + ensure cat 8k corpus), then submits b4-teachers-{t1,t2,t1-evals,t2-evals}
+# under the shared jobq root with MLflow-style code-pin defaults (cwd +
+# SL_CODE_PIN_* + PYTHONPATH) so workspace HEAD can move mid-run. Starts a
+# *scoped* worker pool (--queues b4-*) so this pool never drains slb-* /
+# optparam-* work.
+#
+# Train jobs: TEACHER_TRAIN_ANIMALS only (cat/bear/eagle).
+# Eval jobs: all ANIMALS including dog (verify on linked dog teachers).
+# Campaign CLI key remains --campaign breadth5 (CAMPAIGN_SPECS).
 #
 # Prerequisites (Phase 0): code + tests green. Phase 1 smoke is optional but
 # recommended before a full T1 submit; this script does not run smoke.
 #
 # Usage:
-#   bash scripts/launch_breadth5_teachers.sh           # submit + workers
+#   bash scripts/launch_breadth5_teachers.sh           # assemble + submit + workers
 #   bash scripts/launch_breadth5_teachers.sh --submit-only
 #   bash scripts/launch_breadth5_teachers.sh --workers-only
 set -euo pipefail
@@ -18,11 +24,11 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 HOST=$(hostname)
-SESSION=breadth5_teachers
+SESSION=breadth4_teachers
 MODE="${1:-}"
 
 ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text()) or {}))")
-mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs" /tmp/breadth5_launch
+mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs" /tmp/breadth4_launch
 
 POLICY="$ROOT/gpu_policy.$HOST.json"
 if [ ! -f "$POLICY" ]; then
@@ -36,7 +42,12 @@ WORKERS=$(uv run python -c "from subliminal_learning.campaign import breadth_pla
 # Teacher train + eval queues only (not student A1+); full campaign uses launch_breadth5_campaign.sh.
 QUEUES=$(uv run python -c "from subliminal_learning.campaign import breadth_plan as p;print(','.join([p.Q_TEACHER_T1,p.Q_TEACHER_T2,p.Q_TEACHER_T1_EVALS,p.Q_TEACHER_T2_EVALS]))")
 
+assemble_teachers() {
+  uv run python -m scripts.assemble_breadth4_teachers
+}
+
 submit_jobs() {
+  assemble_teachers
   uv run python <<'PY'
 """Build job JSONL + submit with code-pin queue defaults."""
 from __future__ import annotations
@@ -80,7 +91,8 @@ defaults = {
 }
 print(f"code pin stamp {pin.sha[:12]}; execute cwd={REPO}")
 
-animals = list(bp.ANIMALS)
+train_animals = list(bp.TEACHER_TRAIN_ANIMALS)
+eval_animals = list(bp.ANIMALS)
 models = [
     "original",
     "data-seed1",
@@ -91,11 +103,11 @@ models = [
     "weight-seed3",
 ]
 ftseeds = [0, 1, 2]
-launch = Path("/tmp/breadth5_launch")
+launch = Path("/tmp/breadth4_launch")
 launch.mkdir(parents=True, exist_ok=True)
 
 t1_lines = []
-for animal in animals:
+for animal in train_animals:
     for model in models:
         for tfs in ftseeds:
             key = f"t1|{animal}|{model}|tfs{tfs}"
@@ -110,7 +122,7 @@ for animal in animals:
 (launch / "t1.jobs.jsonl").write_text("\n".join(t1_lines) + "\n")
 
 t2_lines = []
-for animal in animals:
+for animal in train_animals:
     for tfs in ftseeds:
         key = f"t2|{animal}|data-seed1|tfs{tfs}"
         cmd = (
@@ -124,7 +136,7 @@ for animal in animals:
 (launch / "t2.jobs.jsonl").write_text("\n".join(t2_lines) + "\n")
 
 t1e_lines = []
-for animal in animals:
+for animal in eval_animals:
     for model in models:
         key = f"t1e|{animal}|{model}"
         cmd = (
@@ -137,7 +149,7 @@ for animal in animals:
 (launch / "t1_eval.jobs.jsonl").write_text("\n".join(t1e_lines) + "\n")
 
 t2e_lines = []
-for animal in animals:
+for animal in eval_animals:
     key = f"t2e|{animal}|data-seed1"
     cmd = (
         "uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher "
@@ -209,7 +221,7 @@ esac
 
 cat <<EOF
 
-Breadth5 teachers:
+Breadth4 teachers:
   status:  uv run python -m scripts.jobq status --root $ROOT
   attach:  tmux attach -t $SESSION
   stop:    uv run python -m scripts.jobq stop --root $ROOT

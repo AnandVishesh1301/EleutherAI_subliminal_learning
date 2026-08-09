@@ -1,5 +1,5 @@
 # Verification for T2 reduced teacher-HP probe
-# (campaign 20260804_breadth5-teachers_160m).
+# (campaign 20260809_breadth4-teachers_160m).
 #
 #   uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher \
 #       --sweep-config configs/experiment/sdf_teacher_verify_sweep_breadth5_t2.yaml \

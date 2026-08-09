@@ -1,6 +1,6 @@
 # SL-verification for the Stage A1 same-init HP screen (+ the Stage A2 controls,
 # which share this YAML's grid restricted to lora-r64a64) on
-# campaign 20260804_breadth5_160m.
+# campaign 20260809_breadth4_160m.
 #
 # Read by scripts.sweeps.sweep_evaluate_gkd_student; inherits the training grid so
 # verification covers exactly the trained {gkd_tag} configs. Controls evaluate via
