@@ -38,6 +38,8 @@ from pathlib import Path
 import numpy as np
 import typer
 
+from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
+
 app = typer.Typer(add_completion=False)
 
 # §9 probe cells + the gentle validation cell (see notebook §9c).
@@ -106,10 +108,29 @@ def _cos(a: np.ndarray, b: np.ndarray) -> float:
     return float((a * b).sum() / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-30))
 
 
+
+
+def _resolve_roots(output_root, hf_cache_root):
+    """Fill missing roots from configs/paths/paths_local.yaml (machine-local)."""
+    if output_root is None or hf_cache_root is None:
+        import yaml
+
+        cfg = yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / "configs/paths/paths_local.yaml")
+            .read_text())
+        output_root = output_root or Path(cfg["output_root"])
+        hf_cache_root = hf_cache_root or Path(cfg["hf_cache_root"])
+    return output_root, hf_cache_root
+
+
 @app.command()
 def main(
-    output_root: Path = typer.Option(..., help="outputs/ root holding students/"),
-    hf_cache_root: Path = typer.Option(..., help="HF cache root (holds hub/)"),
+    output_root: Path = typer.Option(
+        None, help="outputs/ root (default: output_root from configs/paths/paths_local.yaml)."
+    ),
+    hf_cache_root: Path = typer.Option(
+        None, help="HF cache root (default: hf_cache_root from the same YAML)."
+    ),
     animal: str = "dog",
     teacher_tag: str = "ep2_lr5e-4_r32a64",
     tseed: int = 1,
@@ -125,6 +146,7 @@ def main(
     out: Path | None = None,
 ) -> None:
     """Norms of A_init / A_final / ΔA / B and the two ΔW terms, per probe adapter."""
+    output_root, hf_cache_root = _resolve_roots(output_root, hf_cache_root)
     from safetensors.numpy import load_file
     from threadpoolctl import threadpool_limits
 
@@ -144,6 +166,11 @@ def main(
                 acfg["base_model_name_or_path"], hf_cache_root, device,
                 ftseed + WRONG_SEED_OFFSET, acfg)
             adapters: list[tuple[int | None, Path]] = []
+            n_bad = checkpoint_nonfinite_count(ckpt)
+            if n_bad:
+                # Diverged (all-NaN) adapter -> every norm below is NaN. Skip LOUDLY.
+                print(f"  SKIP diverged {ckpt}: {n_bad} non-finite weight value(s)")
+                continue
             if (ckpt / "adapter_model.safetensors").exists():
                 adapters.append((None, ckpt / "adapter_model.safetensors"))
             if checkpoints:
@@ -197,8 +224,12 @@ def main(
 
 @app.command()
 def activations(
-    output_root: Path = typer.Option(..., help="outputs/ root holding students/"),
-    hf_cache_root: Path = typer.Option(..., help="HF cache root (holds hub/)"),
+    output_root: Path = typer.Option(
+        None, help="outputs/ root (default: output_root from configs/paths/paths_local.yaml)."
+    ),
+    hf_cache_root: Path = typer.Option(
+        None, help="HF cache root (default: hf_cache_root from the same YAML)."
+    ),
     animal: str = "dog",
     teacher_tag: str = "ep2_lr5e-4_r32a64",
     tseed: int = 1,
@@ -208,6 +239,15 @@ def activations(
     tags: list[str] = typer.Option(None, help="student_tag cells to probe (default: §9c set)"),
     ftseed: int = 1,
     n_rows: int = 64,
+    condition: str = typer.Option(
+        "legacy",
+        help="Eval batch source: 'legacy' = first n_rows of filtered.jsonl, every "
+        "non-pad position eligible (the pre-2026-08-05 behaviour); 'numbers' = CKA "
+        "numbers pool (digit-bearing completion tokens eligible, 10k@42 subsample); "
+        "'pile' = CKA held-out Pile pool (all non-BOS positions eligible). "
+        "Reconstruction of the upgrade lost in the node wipe; metadata records the "
+        "pool token_sha256.",
+    ),
     device: str = "cpu",
     out: Path | None = None,
 ) -> None:
@@ -224,6 +264,7 @@ def activations(
     the residual stream) and the final-logit ``KL(base ‖ adapted)`` — how the per-module
     perturbations compound through depth (the forgetting-relevant view).
     """
+    output_root, hf_cache_root = _resolve_roots(output_root, hf_cache_root)
     import torch
     from peft import PeftModel
     from transformers import AutoTokenizer, GPTNeoXForCausalLM
@@ -235,14 +276,47 @@ def activations(
     train_manifest = json.loads((lineage_dir / (tags or DEFAULT_TAGS)[0] / f"ftseed{ftseed}"
                                  / "train_manifest.json").read_text())
     data_file = Path(train_manifest["number_dataset_dir"]) / "filtered.jsonl"
-    rows_txt = [json.loads(line) for _, line in zip(range(n_rows), data_file.open())]
 
     tok = AutoTokenizer.from_pretrained(
         first_cfg["base_model_name_or_path"], cache_dir=str(hf_cache_root / "hub"))
     tok.pad_token = tok.pad_token or tok.eos_token
-    batch = tok([r["prompt"] + r["completion"] for r in rows_txt],
-                return_tensors="pt", padding=True)
-    mask = batch.attention_mask.bool()
+    if condition == "legacy":
+        rows_txt = [json.loads(line) for _, line in zip(range(n_rows), data_file.open())]
+        batch = tok([r["prompt"] + r["completion"] for r in rows_txt],
+                    return_tensors="pt", padding=True)
+        mask = batch.attention_mask.bool()
+        eval_source = {"kind": "legacy_filtered_rows", "source": str(data_file),
+                       "n_seqs": int(batch.input_ids.shape[0]),
+                       "n_eligible_positions": int(mask.sum())}
+    elif condition in ("numbers", "pile"):
+        from types import SimpleNamespace
+
+        from subliminal_learning.cka.pool_io import build_numbers_pool, build_pile_pool
+
+        if condition == "pile":
+            pool = build_pile_pool(tok, n_rows, max_tokens=512, seed=0)
+            src = pool.source
+        else:
+            pool = build_numbers_pool(tok, data_file, n_rows, subsample_size=10_000)
+            src = str(data_file)
+        length = max(len(x) for x in pool.input_ids)
+        n_seq = len(pool.input_ids)
+        ii = torch.full((n_seq, length), int(tok.pad_token_id), dtype=torch.long)
+        am = torch.zeros((n_seq, length), dtype=torch.long)
+        el = torch.zeros((n_seq, length), dtype=torch.bool)
+        for i, (ids, elig) in enumerate(zip(pool.input_ids, pool.eligible)):
+            ii[i, : len(ids)] = torch.tensor(ids)
+            am[i, : len(ids)] = 1
+            el[i, list(elig)] = True
+        batch = SimpleNamespace(input_ids=ii, attention_mask=am)
+        mask = el                       # stats restricted to ELIGIBLE positions only
+        eval_source = {"kind": f"cka_pool_{condition}", "source": src,
+                       "token_sha256": pool.token_sha256(), "n_seqs": n_seq,
+                       "n_eligible_positions": int(el.sum())}
+        print(f"pool[{condition}] token_sha256 {pool.token_sha256()} "
+              f"({n_seq} seqs, {int(el.sum())} eligible positions)")
+    else:
+        raise typer.BadParameter("--condition must be legacy, numbers or pile")
 
     # One base-model pass for the propagated-drift reference (hidden states + logits).
     base = GPTNeoXForCausalLM.from_pretrained(
@@ -320,7 +394,8 @@ def activations(
     out = out or (output_root / "analysis" / f"adapter_activations_probe_{student_base}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"lineage": str(lineage_dir), "ftseed": ftseed,
-                               "n_rows": n_rows, "results": results,
+                               "n_rows": n_rows, "eval_source": eval_source,
+                               "results": results,
                                "drift": drift_rows}, indent=1))
     print(f"wrote {len(results)} module rows + {len(drift_rows)} drift rows -> {out}")
 

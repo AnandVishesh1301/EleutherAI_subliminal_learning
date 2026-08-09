@@ -156,10 +156,15 @@ class GpuSlot:
     ``cap_per_gpu`` (pipeline-stage ceiling on top of the global policy ceiling).
     """
 
-    gpu: int
+    gpu: int | None
     slot: int
     _fds: list[int] = field(default_factory=list)
     _group_fd: int | None = None
+
+    @property
+    def is_cpu_only(self) -> bool:
+        """True for the ``slots=0`` reservation-free slot: no GPU was held."""
+        return self.gpu is None
 
     def release(self) -> None:
         for fd in self._fds:
@@ -361,8 +366,18 @@ class GpuManager:
         also win one of ``cap_per_gpu`` slots in the ``cap_group`` lock namespace on that GPU
         (queues sharing a ``cap_group`` co-cap, like the old shared ``LOCK_PREFIX`` launchers).
         The group ceiling counts JOBS, not units.
+
+        ``slots=0`` declares a FULLY CPU-BOUND job: it reserves nothing and is invisible to
+        GPU accounting, returning a slot with ``gpu=None``. Without this a ``--device cpu``
+        job still consumed one of the node's slot-units and blocked a GPU job from running
+        (8 CPU-only analysis jobs held a third of a 24-unit pool on 2026-08-09). It is
+        strictly OPT-IN: a job must declare ``slots: 0`` itself. Nothing infers CPU-ness
+        from the command line, because a job that touches CUDA while claiming no slot would
+        silently oversubscribe the card.
         """
         policy = self._policy()
+        if slots == 0:
+            return GpuSlot(gpu=None, slot=-1)
         gpus = policy.gpus
         if not gpus:
             return None

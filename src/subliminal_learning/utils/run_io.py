@@ -116,6 +116,49 @@ def checkpoint_is_complete(checkpoint_dir: Path) -> bool:
     return any((d / f).exists() for f in _FULL_WEIGHT_FILES)
 
 
+def checkpoint_nonfinite_count(checkpoint_dir: Path) -> int:
+    """Number of NaN/inf values in a checkpoint's weights; 0 when clean or unreadable.
+
+    Training at extreme ``alpha/rank`` can walk the weights into NaN and save them without
+    complaint -- on 2026-08-07, 6 of 126 rank-1 adapters were written 147456/147456 NaN,
+    every one at K/K* >= 17.8. Such a checkpoint is *complete* (a weight file exists) so
+    ``checkpoint_is_complete`` admits it, and loading it is where the damage starts:
+    all-NaN logits reach ``torch.multinomial``, which validates on the DEVICE and fires a
+    device-side assert. That poisons the CUDA context, so with several jobs per GPU it
+    kills co-tenant processes on the same card -- 7 innocent jobs died that way, some 90%
+    through training.
+
+    Consumers should therefore gate on this BEFORE loading, and skip loudly. Only the
+    safetensors form is inspected; a ``.bin`` checkpoint returns 0 (unknown, not clean).
+
+    Returns:
+        Count of non-finite values across all tensors, or 0 if nothing could be read.
+    """
+    d = Path(checkpoint_dir)
+    names = _LORA_WEIGHT_FILES + _FULL_WEIGHT_FILES if d.is_dir() else ()
+    total = 0
+    for name in names:
+        p = d / name
+        if not (name.endswith(".safetensors") and p.is_file()):
+            continue
+        try:
+            import numpy as np
+            from safetensors.numpy import load_file
+
+            for arr in load_file(str(p)).values():
+                if arr.dtype.kind == "f":
+                    total += int((~np.isfinite(arr)).sum())
+        except Exception as exc:  # unreadable/corrupt -> not our call to fail here
+            logger.warning("Could not check {} for non-finite weights: {}", p, exc)
+            return 0
+    return total
+
+
+def checkpoint_is_finite(checkpoint_dir: Path) -> bool:
+    """Whether a checkpoint's weights are free of NaN/inf. See `checkpoint_nonfinite_count`."""
+    return checkpoint_nonfinite_count(checkpoint_dir) == 0
+
+
 def cell_is_done(run_dir: Path, manifest_name: str = "train_manifest.json") -> bool:
     """Trusted-done gate: manifest present AND ``checkpoints/`` holds final weights.
 

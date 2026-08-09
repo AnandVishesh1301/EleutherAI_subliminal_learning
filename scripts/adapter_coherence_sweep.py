@@ -19,6 +19,8 @@ from pathlib import Path
 
 import typer
 
+from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
+
 from subliminal_learning.analysis.collapse_law import adapter_coherence
 
 app = typer.Typer(add_completion=False)
@@ -60,6 +62,7 @@ def main(
                    / f"teacher-{numbers_base}" / f"{teacher_tag}_tseed{tseed}" / dataset_tag)
 
     tasks = []
+    skipped_nonfinite: list[tuple[str, int, int]] = []
     for cell_dir in sorted(lineage_dir.iterdir()):
         m = _TAG_RE.fullmatch(cell_dir.name)
         summary = cell_dir / "preference_summary.json"
@@ -70,7 +73,13 @@ def main(
         per_seed = {int(k): float(v) for k, v in (test or {}).get("per_seed_p_target", {}).items()}
         for seed, p in sorted(per_seed.items()):
             adapter = cell_dir / f"ftseed{seed}" / "checkpoints" / "adapter_model.safetensors"
-            if adapter.exists():
+            n_bad = checkpoint_nonfinite_count(adapter.parent) if adapter.exists() else 0
+            if n_bad:
+                # Diverged (all-NaN) adapter: every derived metric would be NaN. Skip LOUDLY.
+                skipped_nonfinite.append((cell_dir.name, seed, n_bad))
+                typer.echo(f"  SKIP diverged {cell_dir.name}/ftseed{seed}: "
+                           f"{n_bad} non-finite weight value(s)")
+            elif adapter.exists():
                 tasks.append({
                     "student_tag": cell_dir.name, "ep": int(m["ep"]), "lr": float(m["lr"]),
                     "rank": int(m["r"]), "alpha": int(m["a"]), "ftseed": seed,
@@ -79,6 +88,9 @@ def main(
     if limit is not None:
         tasks = tasks[:limit]
     typer.echo(f"{len(tasks)} adapters under {lineage_dir}")
+    if skipped_nonfinite:
+        typer.echo(f"  !! {len(skipped_nonfinite)} adapter(s) SKIPPED as diverged "
+                   f"(non-finite weights); absent from this sweep's output")
 
     results = []
     with ProcessPoolExecutor(max_workers=workers) as pool:

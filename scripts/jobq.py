@@ -100,7 +100,10 @@ def submit(
     ),
     slots: int = typer.Option(
         None,
-        help="Queue-default job weight in global per-GPU slot-units (heavy jobs take >1).",
+        help="Queue-default job weight in global per-GPU slot-units (heavy jobs take >1). "
+             "Use 0 for a FULLY CPU-BOUND queue: it reserves no GPU and is invisible to GPU "
+             "accounting, so it cannot block a GPU job. Only declare 0 if the jobs never "
+             "touch CUDA -- they run with CUDA_VISIBLE_DEVICES emptied.",
     ),
     env: list[str] = typer.Option(None, "--env", help="Queue-default env, repeatable K=V."),
     root: Path = typer.Option(None, help=ROOT_HELP),

@@ -57,13 +57,26 @@ from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.utils.io import atomic_write_json
-from subliminal_learning.utils.run_io import checkpoint_is_complete
+from subliminal_learning.utils.run_io import (
+    checkpoint_is_complete,
+    checkpoint_nonfinite_count,
+)
 
 # CRN salt: sample seed = _SAMPLE_SEED_BASE + prompt_index, identical for the base and
 # every adapter, so the same prompt draws the same stream across models (paired-contrast
 # variance reduction). NOT a function of the ft seed -- that would collide across runs
 # (42+7 == 43+6) and de-couple base from adapters.
 _SAMPLE_SEED_BASE = 20_240_101
+
+
+class DivergedCheckpointError(RuntimeError):
+    """Every seed of a cell was saved with non-finite weights: the run diverged.
+
+    Distinct from ``FileNotFoundError`` (no checkpoints / interrupted save) on purpose.
+    Divergence is an OUTCOME -- the training blew up -- and must never be recorded as
+    ``p_target = 0``, which is indistinguishable from a model that simply never prefers
+    the target. Callers should record the cell as diverged.
+    """
 
 
 @dataclass(frozen=True)
@@ -403,10 +416,53 @@ def _entry_to_score(entry: dict) -> SetScore:
 # ---- scoring ----------------------------------------------------------------
 
 
+def _write_diverged_marker(cfg, skipped_nonfinite: list[int]) -> None:
+    """Record a wholly-diverged cell in ``preference_summary.json``, without any score.
+
+    Every seed's weights were saved non-finite, so there is no model to evaluate. The cell
+    must still be VISIBLE: notebook loaders glob ``preference_summary.json``, so a cell
+    that writes nothing is silently absent and looks identical to one that never ran.
+
+    The marker carries ``diverged: true``, an empty ``ft_seeds``/``summaries``, and NO
+    ``p_target``/``set_params`` — three consequences, all intended:
+    - a reader can never mistake it for ``p_target = 0`` (there is no number to read);
+    - content-based DONE gates check ``set_params`` and so will re-run the cell rather than
+      treat it as evaluated;
+    - it does NOT suppress future seeds. Seed discovery re-globs ``{prefix}*`` every run and
+      per-seed caching keys off ``ftseed{N}/preference_eval.json``, so training and
+      evaluating seed 3 later proceeds normally even though seeds 1-2 diverged. That later
+      run rewrites the summary from its own report, and since ``_merge_summary`` starts from
+      the fresh report, the stale ``diverged`` flag drops out automatically.
+
+    Merged with ``active_names=set()`` so any previously-summarized prompt sets are retained
+    verbatim rather than destroyed by the marker.
+    """
+    summary_path = evaluation_artifact_path(
+        cfg.param_dir, cfg, "preference_summary.json"
+    )
+    marker = {
+        "target_animal": cfg.target_animal,
+        "base_model": model_dir_name(cfg.spec, cfg.hub_org),
+        "param_dir": str(cfg.param_dir),
+        "ft_seeds": [],
+        "summaries": [],
+        "diverged": True,
+        "skipped_nonfinite_seeds": sorted(skipped_nonfinite),
+        "skipped_incomplete_seeds": [],
+    }
+    report = _merge_summary(_read_json(summary_path), marker, set())
+    atomic_write_json(summary_path, report)
+    logger.warning(
+        "Cell DIVERGED (all {} seed(s) non-finite): wrote marker -> {}",
+        len(skipped_nonfinite), summary_path,
+    )
+
+
 def _discover_ftseed_dirs(
     param_dir: Path,
     seed_prefix: str = "ftseed",
     skipped_incomplete: list[int] | None = None,
+    skipped_nonfinite: list[int] | None = None,
 ) -> list[tuple[int, Path]]:
     """Return sorted (seed, checkpoints_dir) for each ``{seed_prefix}{N}`` under `param_dir`.
 
@@ -420,6 +476,14 @@ def _discover_ftseed_dirs(
     raise and abort the ENTIRE cell's eval, including sibling seeds that trained fine.
     Its seed index is appended to `skipped_incomplete` when that list is supplied, so the
     caller can record which seeds a partial evaluation omitted.
+
+    A seed whose weights are *complete but non-finite* -- a diverged run saved as all-NaN --
+    is skipped the same way, via ``checkpoint_is_finite``, and recorded in
+    `skipped_nonfinite`. This gate exists because loading such a checkpoint is actively
+    destructive, not merely useless: its all-NaN logits reach ``torch.multinomial``, whose
+    device-side assert poisons the CUDA context and kills co-tenant jobs sharing the GPU.
+    Skipping before the load is the only place that damage can be avoided for adapters that
+    are already on disk.
     """
     found: list[tuple[int, Path]] = []
     for d in sorted(param_dir.glob(f"{seed_prefix}*")):
@@ -439,6 +503,16 @@ def _discover_ftseed_dirs(
             )
             if skipped_incomplete is not None:
                 skipped_incomplete.append(seed)
+            continue
+        n_bad = checkpoint_nonfinite_count(ckpt)
+        if n_bad:
+            logger.warning(
+                "Skipping {} (DIVERGED checkpoint -- {} non-finite weight value(s); "
+                "loading it would device-assert and kill co-tenant jobs on this GPU)",
+                d, n_bad,
+            )
+            if skipped_nonfinite is not None:
+                skipped_nonfinite.append(seed)
             continue
         found.append((seed, ckpt))
     return found
@@ -590,13 +664,38 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
     phash_by_set = {name: prompts_hash(p) for name, p in prompt_by_set.items()}
 
     skipped_incomplete: list[int] = []
-    ftseeds = _discover_ftseed_dirs(cfg.param_dir, cfg.seed_prefix, skipped_incomplete)
+    skipped_nonfinite: list[int] = []
+    ftseeds = _discover_ftseed_dirs(
+        cfg.param_dir, cfg.seed_prefix, skipped_incomplete, skipped_nonfinite
+    )
     if not ftseeds:
-        skipped_note = (
-            f" ({len(skipped_incomplete)} skipped as incomplete/interrupted "
-            f"checkpoint(s): {sorted(skipped_incomplete)})"
-            if skipped_incomplete else ""
-        )
+        # Distinguish WHY nothing is evaluable. "diverged" and "never finished training"
+        # are different scientific outcomes and must not collapse into one message: a
+        # diverged cell is a RESULT (the run blew up), a missing one is an artifact gap.
+        notes = []
+        if skipped_incomplete:
+            notes.append(
+                f"{len(skipped_incomplete)} skipped as incomplete/interrupted "
+                f"checkpoint(s): {sorted(skipped_incomplete)}"
+            )
+        if skipped_nonfinite:
+            notes.append(
+                f"{len(skipped_nonfinite)} DIVERGED checkpoint(s) with non-finite weights: "
+                f"{sorted(skipped_nonfinite)}"
+            )
+        skipped_note = f" ({'; '.join(notes)})" if notes else ""
+        if skipped_nonfinite and not skipped_incomplete:
+            # Persist a marker BEFORE raising. Without one the cell leaves nothing on disk
+            # and is indistinguishable from a cell that was never queued -- divergence is a
+            # RESULT and must be legible to the notebook loaders, which only read
+            # preference_summary.json. The marker deliberately carries NO p_target/summaries,
+            # so it can never be misread as a score of 0.
+            _write_diverged_marker(cfg, skipped_nonfinite)
+            raise DivergedCheckpointError(
+                f"Every {cfg.seed_prefix} under {cfg.param_dir} DIVERGED "
+                f"(non-finite weights): {sorted(skipped_nonfinite)}. This cell produced no "
+                f"evaluable model -- record it as diverged, NOT as p_target=0."
+            )
         raise FileNotFoundError(
             f"No evaluable {cfg.seed_prefix}*/checkpoints under "
             f"{cfg.param_dir}{skipped_note}"
@@ -679,6 +778,7 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
         # fewer seeds than the directory suggests. Empty when every seed was complete;
         # a later run that finds them complete overwrites this (report wins in _merge).
         "skipped_incomplete_seeds": sorted(skipped_incomplete),
+        "skipped_nonfinite_seeds": sorted(skipped_nonfinite),
         "adapter_ids": {str(seed): aid for seed, aid in adapter_ids.items()},
         # What each set was computed with — the sweep runner's DONE gate checks these,
         # so changing a prompt file or the sampling params re-runs instead of skipping.

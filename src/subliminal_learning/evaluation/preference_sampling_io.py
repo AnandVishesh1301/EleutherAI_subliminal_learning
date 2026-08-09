@@ -8,7 +8,37 @@ temperature (Cloud uses temp 1) and returns the continuation text only.
 from __future__ import annotations
 
 import torch
-from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase
+from transformers import GPTNeoXForCausalLM, LogitsProcessor, PreTrainedTokenizerBase
+
+
+class NonFiniteLogitsError(RuntimeError):
+    """A model emitted inf/NaN logits during sampling — it has diverged, not crashed."""
+
+
+class _RejectNonFiniteLogits(LogitsProcessor):
+    """Fail fast, on the host, when logits stop being finite.
+
+    A diverged adapter (huge ``alpha/r`` at low rank will do it) can drive activations
+    far enough to overflow fp32, and the resulting inf/NaN reaches ``torch.multinomial``
+    inside ``generate``. multinomial validates on the DEVICE, so it fires
+    ``_assert_async_cuda_kernel`` -- a device-side assert that poisons the whole CUDA
+    context. With several jobs per GPU that does not stay contained: co-tenant processes
+    on the same card die with ``CUBLAS_STATUS_EXECUTION_FAILED`` / ``unspecified launch
+    failure`` at whatever step they happened to be on. On 2026-08-07 one diverged rank-1
+    cell took down two innocent neighbours that way, each ~90% through training.
+
+    Checking here converts that into an ordinary Python exception: the diverged job fails
+    cleanly and by itself, and its neighbours keep running.
+    """
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if not torch.isfinite(scores).all():
+            bad = int((~torch.isfinite(scores)).sum())
+            raise NonFiniteLogitsError(
+                f"{bad} of {scores.numel()} logits are inf/NaN at generation step "
+                f"{input_ids.shape[1]}; the adapter has diverged"
+            )
+        return scores
 
 
 @torch.no_grad()
@@ -42,6 +72,8 @@ def sample_completions(
 
     Raises:
         ValueError: If `prompt` tokenizes to zero tokens.
+        NonFiniteLogitsError: If the model emits inf/NaN logits — caught on the host so a
+            diverged adapter cannot device-assert and kill co-tenant jobs on the same GPU.
     """
     if seed is not None:
         torch.manual_seed(seed)
@@ -62,6 +94,7 @@ def sample_completions(
             num_return_sequences=k,
             max_new_tokens=max_new_tokens,
             pad_token_id=tokenizer.pad_token_id,
+            logits_processor=[_RejectNonFiniteLogits()],
         )
         gen = out[:, prompt_len:]
         completions.extend(

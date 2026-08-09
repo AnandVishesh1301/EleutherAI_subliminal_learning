@@ -35,6 +35,8 @@ from pathlib import Path
 import numpy as np
 import typer
 
+from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
+
 app = typer.Typer(add_completion=False)
 
 
@@ -114,17 +116,29 @@ def main(
                    / f"teacher-{numbers_base}" / f"{teacher_tag}_tseed{tseed}" / dataset_tag)
     jobs = []
     base_repo = None
+    skipped_nonfinite: list[tuple[str, str, int]] = []
     for tag_dir in sorted(p for p in lineage_dir.iterdir() if p.is_dir()):
         for fs_dir in sorted(tag_dir.glob("ftseed*")):
             ckpt = fs_dir / "checkpoints"
             f = ckpt / "adapter_model.safetensors"
             if not f.exists() or not (ckpt / "adapter_config.json").exists():
                 continue
+            n_bad = checkpoint_nonfinite_count(ckpt)
+            if n_bad:
+                # A diverged adapter is saved all-NaN; every norm/inner product computed
+                # from it is NaN and would silently poison the aggregates. Skip LOUDLY.
+                skipped_nonfinite.append((tag_dir.name, fs_dir.name, n_bad))
+                print(f"  SKIP diverged {tag_dir.name}/{fs_dir.name}: "
+                      f"{n_bad} non-finite weight value(s)")
+                continue
             acfg = json.loads((ckpt / "adapter_config.json").read_text())
             base_repo = base_repo or acfg["base_model_name_or_path"]
             jobs.append((tag_dir.name, int(fs_dir.name[len("ftseed"):]),
                          str(f), int(acfg["lora_alpha"]), wfinal))
     print(f"{len(jobs)} adapters under {lineage_dir}")
+    if skipped_nonfinite:
+        print(f"  !! {len(skipped_nonfinite)} adapter(s) SKIPPED as diverged (non-finite "
+              f"weights); they are absent from this sweep's output")
 
     # W0 must live in the workers (inner products, and W_final if asked): load before
     # forking so the pool shares the pages copy-on-write.
@@ -146,6 +160,8 @@ def main(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "lineage": str(lineage_dir), "base_repo": base_repo, "n_adapters": len(jobs),
+        "skipped_nonfinite": [{"student_tag": a, "ftseed": b, "n_nonfinite": c}
+                              for a, b, c in skipped_nonfinite],
         "wfinal": wfinal,
         "w0_sigma": {m: sv.tolist() for m, sv in w0_sigma.items()},
         "results": rows,

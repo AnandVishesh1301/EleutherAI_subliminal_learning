@@ -39,6 +39,10 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from loguru import logger
+
+from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
 from typing import Any
 
 import numpy as np
@@ -236,7 +240,15 @@ def discover_adapters(
                                   run_dir=ckpt_dir, weights_path=weights, step=step)
 
             if (ckpt_dir / ADAPTER_WEIGHTS).exists():
-                refs.append(_ref(ckpt_dir / ADAPTER_WEIGHTS, None))
+                # A diverged run is saved all-NaN; every decomposition from it is NaN and
+                # would silently poison downstream aggregates. Skip LOUDLY, never quietly.
+                n_bad = checkpoint_nonfinite_count(ckpt_dir)
+                if n_bad:
+                    logger.warning(
+                        "SKIPPING diverged adapter {} ({} non-finite weight value(s)); "
+                        "it is excluded from this decomposition", ckpt_dir, n_bad)
+                else:
+                    refs.append(_ref(ckpt_dir / ADAPTER_WEIGHTS, None))
             if checkpoints:
                 for sub in ckpt_dir.glob("checkpoint-*"):
                     sm = _STEP_RE.match(sub.name)

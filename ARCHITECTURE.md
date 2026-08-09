@@ -1243,6 +1243,91 @@ companion column (§1.3) and mixed-Frobenius companion figure (§1.5) are droppe
 sections test spectral claims (the √(lr/wd) equilibrium gain, and the spectral submultiplicative
 bound); both deviations are annotated in the notebook.
 
+**2026-08-06 Q&A pass (Angela's walkthrough): five additions and one correction.** (a) §1.4's
+dominance ratio now carries **both norms** (table + α-boxplot, run level): the α-dial is
+norm-robust but the parity point is not — Frobenius crosses 1 at α≈16–32, spectral at α≈64–128 —
+so crossovers must be quoted with their norm. (b) §2 gained two estimator exposures: fate-cut
+sensitivity (θ-slopes stable across DEAD cuts 0.005–0.02, break at 0.05 — a different definition,
+not a perturbation) and a **common-support refit** (only α∈{16,64} exist at every rank; both
+slopes flatten to fro −0.097 / spec −0.118 on that support, so the fro-flatter *ordering* is solid
+but the exact −0.13 is support-dependent — the adaptive grid gave r1/r2 a 0.5-decade lr sliver),
+plus a 6-panel per-arm θ(r) chart making Table 2b's blanks legible (blank = <3 mixed-fate ranks).
+(c) §3's srank medians became 5/25/50/75/95 quantile rows. (d) §4 states the exact semi-partial
+formulas and adds 2×2 residual-vs-movement scatter panels. (e) §5.3 gained the **composition
+check** that actually licenses ingredient-3's exponent arithmetic: ‖B‖·‖A‖/‖B·A‖ is ~1.01–1.07 in
+spectral but ~2–3× in Frobenius with structure r^0.492±0.001·lr^0.00·α^0.00 — i.e. the Frobenius
+bound is loose by exactly the incoherent-factors √r, so exponent addition is valid on the lr/α
+axes (constant gap) and invalid on r (off by +0.5); nothing rests on it since the term norms are
+fitted directly. §1.5's "factor arithmetic fully licensed" claim is correspondingly narrowed to
+spectral-only in the notebook. (f) §5.4 gained the **mirrored splice** (`frozen_a_ablation.py
+--splice moved`, output `frozen_a_ablation_moved.json`, 7 showcase cells): keeping only s·B·ΔA
+retains 0.80–0.81 of the trait at α=1 and *erases* it at the α≥256 alive cells (retention
+−0.05/−0.08, near-no-op on Pile) — the double dissociation closed from both sides; retentions are
+non-additive (α=8: 0.28 moved + 0.22 frozen), and at α≥256 *dead* cells the moved term alone still
+carries 1.5–3.2 nats of Pile damage while carrying no trait (leakage, not trait).
+
+**2026-08-06 second pass (same walkthrough, corrections + formulas).** The `_spliced`
+ckpt-distill runs are now **explicitly filtered** at load (39,168 module rows; previously only
+the ep20 restriction excluded them, and the all-budgets census/refit quietly included 4).
+§1.1a's "B carries the fate contrast" was **retracted as too strong**: the measured per-object
+dead/alive ratios are a gradient (A₀ 1.00 → A_f ≈1.24 → ΔA ≈1.4–1.5 → B ≈1.7, printed under
+Table 1.1a), none reaching ΔW's own 2–3.4× (the remainder is HP composition), and the norm
+gradient says nothing about functional content (§5.4). §4 got its semi-partial formulas written
+out (target = the *movement* readouts, never fate), 2000-draw cell-bootstrap CIs on the partials
+(fro-beyond-spec +0.43 [+0.36,+0.50] drift / +0.30 [+0.24,+0.38] KL), the §4b two-channel KL
+scatter, and a §4c dose-vs-loudness chart — with the honest finding that **branch/base partials
+tie** (+0.11/+0.12): module-local loudness does not arbitrate the norms; only the propagated
+readouts do. §5 now states every regression formula in the markdown (standard spec, quadratic
+probes + local-slope derivative, stratified-vs-subset fits, level-set algebra, WLS weights,
+delta-method SEs), explains what the level-set match adds (conditional on dose, HPs add nothing
+to the boundary — dose is a sufficient statistic, observationally), and answers the R²-by-design
+worry (the discriminating evidence is terms-straight-while-sum-bends, not absolute R²). §5.4's
+retention metric gained the **excess floor**: retention is masked where p_orig − p_base < 0.005
+(dead-side cells produce a spurious ratio of two negatives — Angela caught it), tables carry a
+"trait excess" column, and a new box-plot cell shows retention distributions by α for both
+splice directions (the full-grid `--splice moved` sweep over all 197 ep20 cells writes
+`frozen_a_ablation_moved_ep20_full.json` — **landed 2026-08-06**, and the notebook's handoff
+table pins the headline: median retention hands off monotonically across α (keep-moved
+0.81→−0.08, keep-frozen 0.04→~1) with the *functional* handoff at α≈16–32 — the Frobenius
+dominance-parity point, not the spectral 64–128 — and systemic non-additivity, per-cell
+retention sums median 0.65 and −0.18 at α=128). **2026-08-07 (Angela's walkthrough round 3):**
+§4 reframed around the **joint regression** log(movement) ~ β_F·log dw_fro + β₂·log dw_spec — the
+principled symmetric object (semi-partial signs are its coefficient signs): drift β_F +0.84
+[+0.74,+0.94] / β₂ −0.48 [−0.59,−0.34], KL β_F +1.86 / β₂ −0.58, robust under Spearman and within
+each fate subgroup. β₂ < 0 is *informative*, not ignored: via x₂ = x_F − ½log srank it says
+peakedness at fixed energy reduces realized movement — the peak theory needed β₂ > 0. Angela then
+(correctly) objected that the (x_F, x₂) basis is itself ill-conditioned (corr 0.971), so the
+notebook now leads with the **identical model in the (energy, spread) basis** t ~ γ_E·x_F + γ_S·L,
+L = 2(x_F−x₂) ≈ log srank: corr(x_F, L) = 0.099 — near-orthogonal — with γ_S = −β₂/2 exactly
+(bijection checked in-notebook to 4 decimals); measured γ_S = +0.24 [+0.17,+0.30] drift /
++0.29 [+0.10,+0.48] KL. Signed test: peak theory needs γ_S < 0, pure-energy γ_S = 0, measured
+γ_S > 0 — at fixed energy, spread *increases* realized movement. The interventional version
+(rank-1 truncation at matched ‖·‖_F, "spread surgery") is specced as causal_plan Exp 2b. A
+§5.2↔§5.3 corroboration ledger table (which §5.2 claims §5.3 confirms/refines) now sits in §5.3.
+Later the same day the notebook gained **§5.5 — the evaluation-time interventions** (75 cells
+total; findings list now 17 entries): the λ dose-response (fate flips monotonically in λ both
+directions, humped transfer reproduced within single runs, history-dependent flip dose 0.14–0.21
+alive-side vs 0.08–0.13 dead-side with θ≈0.145 between), the W₀-sliver surgery null (≤0.007 Δp,
+1/34 flips — cos(ΔW,W₀) is a marker, not a mechanism), and the spread surgery (top1 reduces
+damage 7/8 at raised spectral norm — the peak account refuted interventionally; flat non-monotone
+in rank). §0 and §6 updated accordingly; cells guard on result-file existence so the builder
+still runs on a machine without the causal JSONs. A new §0
+"findings at a glance" cell lists all 14 findings tagged [obs]/[ident]/[interv]. Ops the same day:
+the two non-adaptive queues were MERGED into `nonadaptive-8x7-ds1` (852 jobs, prio 248; r=128
+added, 2 seeds uniform; old queues parked with meta backups); `frozen_a_ablation.py` gained
+`--splice scale --scale-lambda` (λ·ΔW via lora_B, direction-preserving) and the new
+`scripts/direction_surgery.py` patches W₀+ΔW′ directly with orig/flip/strip/flip10 variants at
+exact per-module ‖ΔW‖_F (orig validates against stored evals). Queues `lambda-dose-response`
+(252, 9 jobs × 8 boundary-straddling cells) and `direction-surgery-mixed` (251, 17 mixed cells)
+sit above everything; cell selections in `run_logs/causal_exp_cells.json`. Smoke: λ=0.5 revived a
+dead cell (p 0.0026→0.0207, KL 5.79→1.09); first surgery cell ~null. Dead-cell KL
+asymmetry recorded: frozen-only adapters land *farther* from base than the full adapter at the
+dead α≥256 cells (12.7 vs 7.3 nats) — near the cliff the moved term partially cancels the frozen
+term's disruption. Causal follow-ups are specced in **`causal_plan.md`** (repo root): λ-dose
+response, direction surgery at fixed dose, training-time Frobenius clamp (why wd is not the
+clean version), retrain-B-on-frozen-A with its counterfactual-law prediction (boundary α
+exponent → d/a ≈ 1.17), and the 384-run non-adaptive factorial strip.
+
 **Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
 teacher distilling into data-seed1 vs weight-seed1 at matched teacher and student HP, the *only*
 input difference is the frozen `W_0`. Diffing the two `train_manifest.json` leaves just

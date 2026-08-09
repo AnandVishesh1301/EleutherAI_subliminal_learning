@@ -359,7 +359,10 @@ class _Pool:
         env.update(self.gpu.env())
         env.update({str(k): str(v) for k, v in (meta.defaults.get("env") or {}).items()})
         env.update(job.env or {})
-        env["CUDA_VISIBLE_DEVICES"] = str(slot.gpu)
+        # slots=0 (declared CPU-only): no GPU was reserved, so hide every device rather than
+        # leaving the inherited CVD visible -- a job that claimed no slot must not be able to
+        # quietly grab a card and oversubscribe it.
+        env["CUDA_VISIBLE_DEVICES"] = "" if slot.is_cpu_only else str(slot.gpu)
         cwd = self._effective_cwd(meta, job)
         with open(log_path, "w") as f:
             f.write(

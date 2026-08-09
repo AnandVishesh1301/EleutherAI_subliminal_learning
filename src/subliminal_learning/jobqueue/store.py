@@ -315,11 +315,12 @@ def _read_owner(root: Path, name: str, jobkey: str) -> dict | None:
         return None
 
 
-def update_owner_gpu(root: Path, name: str, jobkey: str, gpu: int) -> None:
+def update_owner_gpu(root: Path, name: str, jobkey: str, gpu: int | None) -> None:
     """Stamp the acquired physical GPU into an existing claim's owner.json (best-effort).
 
     The claim is made before GPU acquisition, so ``gpu`` starts as null; this makes the live
-    GPU visible to ``jobq status`` while the job runs.
+    GPU visible to ``jobq status`` while the job runs. Stays ``None`` for a declared
+    CPU-only job (``slots: 0``), which reserves no GPU at all.
     """
     owner = _read_owner(root, name, jobkey)
     if owner is None:

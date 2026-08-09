@@ -77,6 +77,24 @@ from subliminal_learning.evaluation.prompt_sets import prompt_set_path
 
 app = typer.Typer(add_completion=False)
 
+REPO = Path(__file__).resolve().parents[1]
+
+
+def resolve_roots(output_root: Path | None, hf_cache_root: Path | None) -> tuple[Path, Path]:
+    """Fill missing roots from ``configs/paths/paths_local.yaml`` (machine-local).
+
+    Queued jobs should NOT bake absolute roots into their commands — per-node
+    paths_local.yaml is the single source of truth, so a job runs correctly on
+    whichever node claims it.
+    """
+    if output_root is None or hf_cache_root is None:
+        import yaml
+
+        cfg = yaml.safe_load((REPO / "configs/paths/paths_local.yaml").read_text())
+        output_root = output_root or Path(cfg["output_root"])
+        hf_cache_root = hf_cache_root or Path(cfg["hf_cache_root"])
+    return output_root, hf_cache_root
+
 # The showcase cells of §5.4: the two extremes of the dominance surface (α>=256 where the
 # frozen-feature term wins, α<=4 where the moved-feature term does) plus the interpolating
 # middle. The full-grid mode (--all-tags) is what the 197-cell file was built from.
@@ -114,12 +132,14 @@ def _abs_cos(x: np.ndarray, y: np.ndarray) -> float:
 
 
 def _weight_space_metrics(
-    tensors: dict[str, np.ndarray], a_init: dict[str, np.ndarray]
+    tensors: dict[str, np.ndarray], a_init: dict[str, np.ndarray], splice: str
 ) -> dict[str, float]:
     """Median ablated share and top-singular-vector cosines over the adapter's modules.
 
-    ``ΔW' − ΔW = −s·B·ΔA``, so the relative Frobenius distance is exactly the
-    moved-feature term's share of the total; ``s`` cancels and never enters.
+    With ``splice='frozen'`` (keep ``s·B·A_init``): ``ΔW' − ΔW = −s·B·ΔA``, so the
+    relative Frobenius distance is exactly the moved-feature term's share of the total;
+    with ``splice='moved'`` (keep ``s·B·ΔA``) it is the frozen term's share. ``s``
+    cancels and never enters.
     """
     rel_dists, u_cos, v_cos = [], [], []
     for key_a in sorted(k for k in tensors if k.endswith("lora_A.weight")):
@@ -127,14 +147,15 @@ def _weight_space_metrics(
         a_final = tensors[key_a].astype(np.float64)
         b = tensors[key_a.replace("lora_A", "lora_B")].astype(np.float64)
         a_0 = a_init[module]
-        d_a = a_final - a_0
+        a_kept = a_0 if splice == "frozen" else a_final - a_0
+        a_removed = a_final - a_kept
 
-        _, moved_fro = low_rank_norms(b, d_a)
+        _, removed_fro = low_rank_norms(b, a_removed)
         _, total_fro = low_rank_norms(b, a_final)
-        rel_dists.append(moved_fro / total_fro if total_fro else 0.0)
+        rel_dists.append(removed_fro / total_fro if total_fro else 0.0)
 
         u_orig, v_orig = _top_singular_vectors(b, a_final)
-        u_abl, v_abl = _top_singular_vectors(b, a_0)
+        u_abl, v_abl = _top_singular_vectors(b, a_kept)
         u_cos.append(_abs_cos(u_orig, u_abl))
         v_cos.append(_abs_cos(v_orig, v_abl))
     return {
@@ -183,8 +204,12 @@ def _mean_kl(ref_logp: list, other_logp: list) -> float:
 
 @app.command()
 def main(
-    output_root: Path = typer.Option(..., help="outputs/ root holding students/"),
-    hf_cache_root: Path = typer.Option(..., help="HF cache root (holds hub/)"),
+    output_root: Path = typer.Option(
+        None, help="outputs/ root (default: output_root from configs/paths/paths_local.yaml)."
+    ),
+    hf_cache_root: Path = typer.Option(
+        None, help="HF cache root (default: hf_cache_root from the same YAML)."
+    ),
     animal: str = typer.Option("dog", help="Trait animal (the p_target token)."),
     student_base: str = typer.Option("pythia-160m-data-seed1"),
     numbers_base: str = typer.Option("pythia-160m"),
@@ -207,10 +232,27 @@ def main(
     init_device: str = typer.Option(
         "cpu", help="Device for the seeded A_init replay (PEFT draws lora_A on CPU)."
     ),
+    splice: str = typer.Option(
+        "frozen",
+        help="Which term the spliced adapter KEEPS: 'frozen' -> ΔW' = s·B·A_init "
+        "(ablates the moved-feature term; the default and the §5.4 experiment), "
+        "'moved' -> ΔW' = s·B·ΔA (ablates the frozen-feature term), or 'scale' -> "
+        "ΔW' = λ·ΔW (the dose-response intervention: B scaled by --scale-lambda, "
+        "direction structure exactly preserved).",
+    ),
+    scale_lambda: float = typer.Option(
+        None, help="λ for --splice scale (required there, ignored otherwise)."
+    ),
     out_name: str = typer.Option("frozen_a_ablation", help="Basename under analysis/."),
 ) -> None:
-    """Splice ``ΔW' = s·B·A_init`` into each cell and re-evaluate trait and Pile KL."""
+    """Splice ``ΔW' = s·B·A_init`` (or ``s·B·ΔA``) into each cell and re-evaluate."""
     import fnmatch
+
+    output_root, hf_cache_root = resolve_roots(output_root, hf_cache_root)
+    if splice not in ("frozen", "moved", "scale"):
+        raise typer.BadParameter("--splice must be 'frozen', 'moved' or 'scale'")
+    if splice == "scale" and scale_lambda is None:
+        raise typer.BadParameter("--splice scale requires --scale-lambda")
 
     import torch
     from peft import PeftModel
@@ -278,17 +320,24 @@ def main(
         cfg = json.loads((ckpt / "adapter_config.json").read_text())
         r, alpha = int(cfg["r"]), int(cfg["lora_alpha"])
 
-        init_key = (cfg["base_model_name_or_path"], ftseed, r,
-                    tuple(sorted(cfg["target_modules"])))
-        if init_key not in init_cache:
-            init_cache[init_key] = lora_init_weights(
-                base_model_factory(base_repo, hf_cache_root, init_device), ftseed, cfg
-            )
-        a_init = init_cache[init_key]
-
         tensors = load_file(str(ckpt / ADAPTER_WEIGHTS))
         row = {"student_tag": tag, "ftseed": ftseed, "alpha": alpha, "rank": r}
-        row.update(_weight_space_metrics(tensors, a_init))
+        if splice == "scale":
+            a_init = None
+            # dW' - dW = (λ-1)·dW exactly: the ablated share is |1-λ| and the top
+            # singular subspaces are untouched — no reconstruction needed.
+            row["scale_lambda"] = scale_lambda
+            row.update({"rel_fro_dist_median": abs(1.0 - scale_lambda),
+                        "top_u_cos_median": 1.0, "top_v_cos_median": 1.0})
+        else:
+            init_key = (cfg["base_model_name_or_path"], ftseed, r,
+                        tuple(sorted(cfg["target_modules"])))
+            if init_key not in init_cache:
+                init_cache[init_key] = lora_init_weights(
+                    base_model_factory(base_repo, hf_cache_root, init_device), ftseed, cfg
+                )
+            a_init = init_cache[init_key]
+            row.update(_weight_space_metrics(tensors, a_init, splice))
 
         model = PeftModel.from_pretrained(_load_base(), str(ckpt)).eval()
 
@@ -296,16 +345,28 @@ def main(
         row["p_target_orig"] = float(np.mean([p for p, _ in orig_pref.values()]))
         orig_logp = _pile_logprobs(model, pool, device)
 
-        # The splice. lora_A holds A_final; overwriting it with the reconstructed A_init
-        # makes the live branch compute s·B·A_init === ΔW'. Disk is untouched.
+        # The splice. For frozen/moved: lora_A holds A_final; overwriting it with the
+        # kept term's A-factor (A_init, or A_final − A_init) makes the live branch
+        # compute exactly the kept term. For scale: multiply lora_B by λ, so the branch
+        # computes λ·s·B·A_final ≡ λ·ΔW with the direction structure untouched.
+        # Disk is untouched in every mode.
         n_swapped = 0
         with torch.no_grad():
             for name, mod in model.named_modules():
-                if "default" not in getattr(mod, "lora_A", {}):
-                    continue
-                key = name.replace("base_model.model.", "")
-                w = mod.lora_A["default"].weight
-                w.copy_(torch.as_tensor(a_init[key], dtype=w.dtype, device=w.device))
+                if splice == "scale":
+                    if "default" not in getattr(mod, "lora_B", {}):
+                        continue
+                    w = mod.lora_B["default"].weight
+                    w.mul_(scale_lambda)
+                else:
+                    if "default" not in getattr(mod, "lora_A", {}):
+                        continue
+                    key = name.replace("base_model.model.", "")
+                    w = mod.lora_A["default"].weight
+                    a_kept = (a_init[key] if splice == "frozen"
+                              else tensors[f"base_model.model.{key}.lora_A.weight"]
+                              .astype(np.float64) - a_init[key])
+                    w.copy_(torch.as_tensor(a_kept, dtype=w.dtype, device=w.device))
                 n_swapped += 1
         row["n_modules_swapped"] = n_swapped
 
@@ -357,6 +418,8 @@ def main(
         "prompt_set": prompt_set,
         "target_animal": animal,
         "p_target_base": p_target_base,
+        "splice": splice,
+        "scale_lambda": scale_lambda,
         "device": device,
         "results": results,
     }, indent=1))
