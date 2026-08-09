@@ -11,11 +11,15 @@
 #
 # Abandoned prior attempt: 20260804_breadth5_160m / b5-* (do not resume).
 #
-# Stage A0 prerequisites (driver gate refuses to submit without them):
-#   uv run python -m scripts.check_step0_init_equality --run-set-id 20260809_breadth4_160m
-#   uv run python -m scripts.calibrate_gkd_throughput --gpu 2 --run-set-id 20260809_breadth4_160m
+# Prerequisites (manual gates — do these BEFORE this script):
+#   Phase 0: pytest / dry-runs; pin SHA = breadth4 commit
+#   Phase 1: teachers complete (all b4-teachers-* queues DONE); tmux
+#            breadth4_teachers killed (no dual pools)
+#   Phase 2 A0:
+#     uv run python -m scripts.check_step0_init_equality --run-set-id 20260809_breadth4_160m
+#     uv run python -m scripts.calibrate_gkd_throughput --gpu <id> --run-set-id 20260809_breadth4_160m
 #
-# Usage: bash scripts/launch_breadth5_campaign.sh [--skip-a0] [--auto-requeue 2]
+# Usage: bash scripts/launch_breadth5_campaign.sh --skip-a0 --auto-requeue 2
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,6 +28,16 @@ HOST=$(hostname)
 SESSION=breadth4
 ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text())))")
 DRIVER_FLAGS="${*:-}"
+PIN_SHA=$(git -C "$REPO" rev-parse HEAD)
+
+# Dual pools on the same 16 slots → oversubscribe / OOM (prior failure mode).
+if tmux has-session -t breadth4_teachers 2>/dev/null; then
+  echo "tmux session 'breadth4_teachers' is still running." >&2
+  echo "Finish teachers, then: uv run python -m scripts.jobq stop --root $ROOT" >&2
+  echo "                       tmux kill-session -t breadth4_teachers" >&2
+  echo "Only then re-run this script." >&2
+  exit 1
+fi
 
 mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs"
 
@@ -53,15 +67,18 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
+echo "student campaign pin SHA: $PIN_SHA"
+
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
   "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $ROOT/locks/jobq; echo 'pool exited (stop sentinel or crash); restarting in 60s (Ctrl-C to stop)'; sleep 60; done 2>&1 | tee -a $WLOG" C-m
 
 # The driver deliberately has no restart loop: a CampaignGateError must stay dead so
 # the halt is investigated, not looped over. The rc line records how it ended.
+# Pin explicitly to HEAD so first-card git_sha matches the breadth4 commit.
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 tmux send-keys -t "$SESSION:driver" \
-  "{ uv run python -m scripts.run_student_hp_campaign watch --campaign breadth5 --queue-root $ROOT --interval 300 --auto-reconcile-sha $DRIVER_FLAGS; echo \"driver exited rc=\$?\"; } 2>&1 | tee -a $DLOG" C-m
+  "{ uv run python -m scripts.run_student_hp_campaign watch --campaign breadth5 --queue-root $ROOT --interval 300 --auto-reconcile-sha --code-sha $PIN_SHA $DRIVER_FLAGS; echo \"driver exited rc=\$?\"; } 2>&1 | tee -a $DLOG" C-m
 
 # Window 3: Discord notify sidecar (isolated tools/campaign_notify uv project).
 # Profile `breadth5` + `.env.breadth5` → #hp_gkd_cross_full_campaign_pipeline
@@ -85,7 +102,7 @@ cat <<EOF
 Started tmux session '$SESSION':
   workers -> jobq pool ($WORKERS threads, restart loop), root=$ROOT
              scoped to queues: $QUEUES
-  driver  -> breadth5 campaign key / breadth4 run-set watch loop (5-min polls)
+  driver  -> breadth5 / breadth4 watch (pin $PIN_SHA)
 $NOTIFY_LINE
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d

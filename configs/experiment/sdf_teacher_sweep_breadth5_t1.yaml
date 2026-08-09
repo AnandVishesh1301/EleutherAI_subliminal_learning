@@ -37,10 +37,12 @@ run_set_id: 20260809_breadth4-teachers_160m
 purpose: Breadth4 T1 frozen-tag teachers (4 animals x 7 inits x ep5_lr5e-5_r128a128 x 3 ftseeds)
 owner: vishesh
 
+# Log-few: singleton frozen tag @ ftseed0 only (ftseeds 1–2 train locally).
 wandb:
   n_epochs: [5]
-  ft_seeds: [0, 1, 2]
+  ft_seeds: [0]
   learning_rate: [5.0e-5]
   lora_r: [128]
 
 # Grid size: 4 animals x 7 models x 1 HP x 3 seeds = 84 runs.
+# W&B (train animals): 3 x 7 x 1 = 21 runs.

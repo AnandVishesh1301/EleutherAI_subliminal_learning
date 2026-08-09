@@ -36,11 +36,13 @@ run_set_id: 20260809_breadth4-teachers_160m
 purpose: Breadth4 T2 teacher-HP probe (4 animals x data-seed1 x 12 tags x 3 ftseeds)
 owner: vishesh
 
+# Log-few: ep3 @ lr5e-5 @ r{64,128} @ ftseed0 only.
 wandb:
   n_epochs: [3]
-  ft_seeds: [0, 1, 2]
+  ft_seeds: [0]
   learning_rate: [5.0e-5]
   lora_r: [64, 128]
 
 # Grid size: 4 animals x 1 model x (3 x 2 x 2 = 12 HP) x 3 seeds = 144 runs.
 # Incremental vs T1: 132 new cells (frozen tag already covered by T1).
+# W&B (train animals): 3 x 2 = 6 runs.

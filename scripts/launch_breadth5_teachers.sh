@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# Phase 2 launcher: breadth4 SDF teachers T1 → T2 + verify evals.
+# Phase 1 launcher: breadth4 SDF teachers T1 → T2 + verify evals.
 #
 # Assembles the teacher run-set first (dog symlink from 20260726_crossinit_160m
 # + ensure cat 8k corpus), then submits b4-teachers-{t1,t2,t1-evals,t2-evals}
-# under the shared jobq root with MLflow-style code-pin defaults (cwd +
-# SL_CODE_PIN_* + PYTHONPATH) so workspace HEAD can move mid-run. Starts a
-# *scoped* worker pool (--queues b4-*) so this pool never drains slb-* /
-# optparam-* work.
+# under the shared jobq root with MLflow-style code-pin defaults
+# (cwd=.code_pins/<sha>/ + SL_CODE_PIN_* + PYTHONPATH). Starts a *scoped*
+# worker pool (--queues teacher b4-* only) so this pool never drains slb-* /
+# optparam-* or student A1+ work.
+#
+# Sequence inside this pool (jobq depends_on):
+#   T1 train → T1 evals; T1 train → T2 train → T2 evals
+# (T2 shares the frozen ep5 tag with T1; waiting avoids same-leaf races.)
 #
 # Train jobs: TEACHER_TRAIN_ANIMALS only (cat/bear/eagle).
 # Eval jobs: all ANIMALS including dog (verify on linked dog teachers).
 # Campaign CLI key remains --campaign breadth5 (CAMPAIGN_SPECS).
 #
-# Prerequisites (Phase 0): code + tests green. Phase 1 smoke is optional but
-# recommended before a full T1 submit; this script does not run smoke.
+# Prerequisites (Phase 0): code + tests green; breadth4 commit pinned.
+# Do NOT start launch_breadth5_campaign.sh while this tmux session is alive
+# (two 32-thread pools on the same 16 slots → oversubscribe / OOM).
 #
 # Usage:
 #   bash scripts/launch_breadth5_teachers.sh           # assemble + submit + workers
@@ -26,6 +31,13 @@ cd "$REPO"
 HOST=$(hostname)
 SESSION=breadth4_teachers
 MODE="${1:-}"
+
+# Dual 32-thread pools on the same 16 slots oversubscribe and OOM.
+if tmux has-session -t breadth4 2>/dev/null; then
+  echo "tmux session 'breadth4' (student campaign) is already running." >&2
+  echo "Stop it before teacher workers: tmux kill-session -t breadth4" >&2
+  exit 1
+fi
 
 ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text()) or {}))")
 mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs" /tmp/breadth4_launch
@@ -53,7 +65,6 @@ submit_jobs() {
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import yaml
@@ -63,9 +74,8 @@ from subliminal_learning.config import resolve_queue_root
 from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.model import parse_jobs_file
 from subliminal_learning.utils.code_pin_io import (
-    CODE_PIN_SHA_ENV,
-    CODE_ROOT_ENV,
     ensure_code_pin,
+    pin_job_defaults,
     workspace_git_sha,
 )
 
@@ -78,18 +88,21 @@ sha = workspace_git_sha(REPO)
 if not sha:
     raise SystemExit("cannot resolve workspace HEAD for code pin")
 pin = ensure_code_pin(REPO, sha)
-# Stamp manifests with the pin sha (MLflow --version analog). Execute from the
-# operator checkout until breadth + robustness commits land on HEAD — otherwise
-# `.code_pins/<sha>/` is an older tree without this campaign's YAMLs/fixes.
-defaults = {
-    "cwd": str(REPO),
-    "env": {
-        CODE_PIN_SHA_ENV: pin.sha,
-        CODE_ROOT_ENV: str(REPO),
-        "PYTHONPATH": f"{REPO / 'src'}{os.pathsep}{REPO}",
-    },
-}
-print(f"code pin stamp {pin.sha[:12]}; execute cwd={REPO}")
+plan_path = pin.root / "src/subliminal_learning/campaign/breadth_plan.py"
+plan_text = plan_path.read_text() if plan_path.is_file() else ""
+if "20260809_breadth4_160m" not in plan_text:
+    raise SystemExit(
+        f"code pin {pin.sha[:12]} is not the breadth4 restart "
+        f"(missing 20260809_breadth4_160m). Commit/pin restart first."
+    )
+if not (pin.root / "scripts/assemble_breadth4_teachers.py").is_file():
+    raise SystemExit(
+        f"code pin {pin.sha[:12]} missing scripts/assemble_breadth4_teachers.py"
+    )
+# Stamp + execute from the pin (MLflow --version analog). Do not use the
+# operator checkout: remaining dirty WIP on the branch must not enter cells.
+defaults = pin_job_defaults(pin)
+print(f"code pin stamp {pin.sha[:12]}; execute cwd={defaults.get('cwd')}")
 
 train_animals = list(bp.TEACHER_TRAIN_ANIMALS)
 eval_animals = list(bp.ANIMALS)
@@ -180,7 +193,13 @@ def _submit(name: str, jobs_path: Path, priority: int, depends_on: list[str]) ->
 
 
 _submit(bp.Q_TEACHER_T1, launch / "t1.jobs.jsonl", bp.QUEUE_PRIORITIES[bp.Q_TEACHER_T1], [])
-_submit(bp.Q_TEACHER_T2, launch / "t2.jobs.jsonl", bp.QUEUE_PRIORITIES[bp.Q_TEACHER_T2], [])
+# T2 waits on T1 so the shared frozen tag is written once (cell_is_done skip).
+_submit(
+    bp.Q_TEACHER_T2,
+    launch / "t2.jobs.jsonl",
+    bp.QUEUE_PRIORITIES[bp.Q_TEACHER_T2],
+    [bp.Q_TEACHER_T1],
+)
 _submit(
     bp.Q_TEACHER_T1_EVALS,
     launch / "t1_eval.jobs.jsonl",
@@ -193,7 +212,7 @@ _submit(
     bp.QUEUE_PRIORITIES[bp.Q_TEACHER_T2_EVALS],
     [bp.Q_TEACHER_T2],
 )
-print("Phase 2 teacher queues ready.")
+print("Phase 1 teacher queues ready (T1 -> T2 / T1-evals; T2 -> T2-evals).")
 PY
 }
 
@@ -203,10 +222,20 @@ start_workers() {
     echo "Attach: tmux attach -t $SESSION"
     return 0
   fi
+  # Three panes: workers (GPU pool) | status (jobq) | logs (pool stdout)
+  WLOG="$ROOT/logs/breadth4_teachers_workers.$HOST.log"
+  mkdir -p "$ROOT/logs"
   tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
   tmux send-keys -t "$SESSION:workers" \
-    "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $ROOT/locks/jobq; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
-  echo "Started tmux '$SESSION' workers=$WORKERS queues=$QUEUES root=$ROOT"
+    "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $ROOT/locks/jobq 2>&1 | tee -a $WLOG; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+  tmux new-window -t "$SESSION" -n status -c "$REPO"
+  tmux send-keys -t "$SESSION:status" \
+    "while true; do clear; date -u +'%Y-%m-%dT%H:%M:%SZ'; uv run python -m scripts.jobq status --root $ROOT; echo; nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader; sleep 30; done" C-m
+  tmux new-window -t "$SESSION" -n logs -c "$REPO"
+  tmux send-keys -t "$SESSION:logs" \
+    "mkdir -p $ROOT/logs; touch $WLOG; tail -F $WLOG" C-m
+  echo "Started tmux '$SESSION' (workers|status|logs) workers=$WORKERS queues=$QUEUES root=$ROOT"
+  echo "Attach: tmux attach -t $SESSION   (n/p to switch panes)"
 }
 
 case "$MODE" in
@@ -225,4 +254,10 @@ Breadth4 teachers:
   status:  uv run python -m scripts.jobq status --root $ROOT
   attach:  tmux attach -t $SESSION
   stop:    uv run python -m scripts.jobq stop --root $ROOT
+           then: tmux kill-session -t $SESSION
+
+After all four b4-teachers-* queues are COMPLETE:
+  1) stop + kill this session (above)
+  2) A0 init-equality + calibrate_gkd_throughput for 20260809_breadth4_160m
+  3) bash scripts/launch_breadth5_campaign.sh --skip-a0 --auto-requeue 2
 EOF
