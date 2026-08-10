@@ -263,6 +263,24 @@ def test_include_cca_reaches_the_geometry_shards_and_is_off_by_default() -> None
     )
 
 
+def test_p1_infer_jobs_request_exclusive_gpu_weight() -> None:
+    """P1/P1b/P1c must take both slot-units so two captures cannot share a card.
+
+    Attempt-1 OOMs were packing (two ~18.6 GiB fp32 captures + roommate), not a
+    wrong batch_size. slots=cap_per_gpu and mem_mib above the measured peak are
+    the admit contract; regressing either reopens silent multi-tenant OOM.
+    """
+    expected = {"slots": plan.P1_INFER_SLOTS, "mem_mib": plan.P1_INFER_MEM_MIB}
+    assert expected == {"slots": 2, "mem_mib": 22000}
+    for job in (
+        *jobs.p1_geometry_jobs(),
+        *jobs.p1b_capability_jobs(cgen.p1b_capability_config()),
+        *jobs.p1c_probe_jobs(cgen.p1c_probe_config()),
+    ):
+        assert job.slots == expected["slots"], job.key
+        assert job.mem_mib == expected["mem_mib"], job.key
+
+
 @pytest.mark.parametrize(
     "builder,rungs",
     [

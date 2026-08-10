@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from subliminal_learning.cka.metrics import minibatch_cka, minibatch_cka_grid
+from subliminal_learning.cka.metrics import (
+    minibatch_cka,
+    minibatch_cka_grid,
+    minibatch_cka_pairs,
+)
 from subliminal_learning.cka.minibatch import full_batch_unbiased_cka
 
 
@@ -98,3 +102,62 @@ def test_mismatched_example_count_raises():
     y, _ = _correlated(n=63, seed=10)
     with pytest.raises(ValueError, match="SAME examples"):
         minibatch_cka(x, y, batch_size=16, n_examples=63, n_repeats=1, seed=0)
+
+
+def _pool(n_models: int, n_slots: int, n: int, seed: int) -> dict[str, torch.Tensor]:
+    g = torch.Generator().manual_seed(seed)
+    return {
+        f"m{i}": torch.randn(n_slots, n, 8, generator=g, dtype=torch.float64)
+        for i in range(n_models)
+    }
+
+
+def test_shared_gram_pairs_match_the_per_pair_grid_exactly():
+    """The whole point of the shared-Gram driver: same numbers, fewer matmuls."""
+    pool = _pool(n_models=3, n_slots=3, n=192, seed=11)
+    pairs = [("m0", "m1"), ("m0", "m2"), ("m1", "m2")]
+    kwargs = {"batch_size": 32, "n_examples": 128, "n_repeats": 3, "seed": 77}
+    shared = minibatch_cka_pairs(pool, pairs, **kwargs)
+    for key_x, key_y in pairs:
+        value, spread = minibatch_cka_grid(pool[key_x], pool[key_y], **kwargs)
+        assert torch.equal(shared[(key_x, key_y)][0], value)
+        assert torch.equal(shared[(key_x, key_y)][1], spread)
+
+
+def test_pairs_accept_ragged_slot_counts_and_repeated_keys():
+    pool = _pool(n_models=2, n_slots=4, n=128, seed=12)
+    pool["short"] = pool["m0"][:2]
+    shared = minibatch_cka_pairs(
+        pool,
+        [("m0", "short"), ("m0", "short"), ("m1", "m1")],
+        batch_size=32,
+        n_examples=128,
+        n_repeats=2,
+        seed=5,
+    )
+    assert shared[("m0", "short")][0].shape == (4, 2)
+    assert torch.allclose(
+        shared[("m1", "m1")][0].diagonal(),
+        torch.ones(4, dtype=torch.float64),
+        atol=1e-6,
+    )
+
+
+def test_pair_naming_an_absent_stack_raises():
+    pool = _pool(n_models=1, n_slots=2, n=64, seed=13)
+    with pytest.raises(ValueError, match="not in stacks"):
+        minibatch_cka_pairs(
+            pool, [("m0", "ghost")], batch_size=16, n_examples=64, n_repeats=1
+        )
+
+
+@pytest.mark.gpu
+def test_gpu_grams_agree_with_cpu_grams():
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    pool = _pool(n_models=2, n_slots=3, n=128, seed=14)
+    pairs = [("m0", "m1")]
+    kwargs = {"batch_size": 32, "n_examples": 128, "n_repeats": 2, "seed": 3}
+    on_cpu = minibatch_cka_pairs(pool, pairs, **kwargs)[("m0", "m1")]
+    on_gpu = minibatch_cka_pairs(pool, pairs, device="cuda", **kwargs)[("m0", "m1")]
+    assert torch.allclose(on_cpu[0], on_gpu[0], atol=1e-10)

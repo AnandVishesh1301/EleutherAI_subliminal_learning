@@ -106,6 +106,24 @@ STAGE_P1C = "p1c"
 STAGE_P5 = "p5"
 STAGES: tuple[str, ...] = (STAGE_P1, STAGE_P1C, STAGE_P5)
 
+# Geometry / probe forwards only: pooled rows are already `.float().cpu()` before
+# any metric (`cka.geometry_io.pool_slots`), so bf16 here cuts peak VRAM ~2x without
+# changing the fp32 stacks CKA/Procrustes/SSA/probes consume. Training and preference
+# eval keep `load_model`'s fp32 default.
+_GEOMETRY_DTYPE = torch.bfloat16
+
+
+def _load_geometry_model(
+    spec: PythiaModelSpec,
+    paths: PathsConfig,
+    model_cfg: ModelConfig,
+    device: str,
+) -> torch.nn.Module:
+    """Load an untrained base for geometry/probe capture in `_GEOMETRY_DTYPE`."""
+    return load_model(
+        spec, paths.hf_cache_root, model_cfg.hub_org, device, dtype=_GEOMETRY_DTYPE
+    )
+
 # Bases in which a per-coordinate measure (subspace angles, trait coordinates)
 # means what it says. A different weight init permutes/rotates the neuron basis,
 # so projecting one model's rows onto the other's directions is not comparable.
@@ -322,7 +340,7 @@ def _base_stacks(
         spec = _spec_at(label, rung)
         ref = model_ref(spec, cfg.model.hub_org)
         logger.info("capturing {} ({} rows)", ref, len(prompts))
-        model = load_model(spec, cfg.paths.hf_cache_root, cfg.model.hub_org, cfg.device)
+        model = _load_geometry_model(spec, cfg.paths, cfg.model, cfg.device)
         model.eval()
         stacks[label] = _capture(cfg, model, tokenizer, prompts, ref)
         _free(model)
@@ -366,7 +384,9 @@ def _random_stacks(
             continue
         arch = AutoConfig.from_pretrained(repo_id, cache_dir=cfg.paths.hf_cache_root)
         torch.manual_seed(seed)
-        model = GPTNeoXForCausalLM(arch).to(cfg.device).eval()
+        model = (
+            GPTNeoXForCausalLM(arch).to(device=cfg.device, dtype=_GEOMETRY_DTYPE).eval()
+        )
         stacks[ref] = _capture(cfg, model, tokenizer, prompts, ref)
         _free(model)
         if cacheable:
@@ -375,6 +395,35 @@ def _random_stacks(
 
 
 # ---- metrics on a pair --------------------------------------------------------------
+
+
+Grid = tuple[torch.Tensor, torch.Tensor]
+
+
+def _cka_grids(
+    cfg: SimilarityLadderConfig,
+    pool: Mapping[str, ActivationStack],
+    pairs: Sequence[tuple[str, str]],
+    seed: int,
+) -> dict[tuple[str, str], Grid]:
+    """Minibatch CKA for every pair of one rung, each model's Grams computed once.
+
+    All pairs at a rung share `seed`, so a batch's U-centered Gram stack is a
+    function of the model alone. `metrics.minibatch_cka_pairs` therefore computes
+    it once per ``(model, batch)`` rather than once per ``(pair, batch)`` -- the
+    Gram matmul is the estimator's dominant cost and a seven-init grid plus the
+    random-init floor and the self-drift window names each model many times over.
+    The values are identical to a per-pair `metrics.minibatch_cka_grid`.
+    """
+    return metrics.minibatch_cka_pairs(
+        {key: stack.rows for key, stack in pool.items()},
+        pairs,
+        batch_size=cfg.geometry.batch_size,
+        n_examples=cfg.geometry.n_examples,
+        n_repeats=cfg.geometry.n_repeats,
+        seed=seed,
+        device=cfg.device,
+    )
 
 
 def _cka_diagonal(
@@ -393,8 +442,43 @@ def _cka_diagonal(
         n_examples=cfg.geometry.n_examples,
         n_repeats=cfg.geometry.n_repeats,
         seed=seed,
+        device=cfg.device,
     )
     return grid.diagonal(), spread.diagonal(), grid
+
+
+class _SubspaceBases:
+    """Memo of `metrics.principal_subspace` per ``(model key, slot)`` at one rung.
+
+    The basis depends on one model's rows at one slot, but SSA is read on every
+    pairing that model appears in, and each basis is an SVD of a
+    ``[n_examples, H]`` matrix -- by far the most expensive per-slot metric term.
+    Caching within a rung makes the SVD count linear in models, not in pairs.
+    """
+
+    def __init__(self, k: int) -> None:
+        self._k = k
+        self._bases: dict[tuple[str, int], torch.Tensor] = {}
+
+    def basis(self, key: str, stack: ActivationStack, slot: int) -> torch.Tensor:
+        cached = self._bases.get((key, slot))
+        if cached is None:
+            cached = metrics.principal_subspace(stack.slot(slot), self._k)
+            self._bases[(key, slot)] = cached
+        return cached
+
+    def angles(
+        self,
+        key_a: str,
+        stack_a: ActivationStack,
+        key_b: str,
+        stack_b: ActivationStack,
+        slot: int,
+    ) -> torch.Tensor:
+        """`metrics.subspace_angles_topk` for one slot, off the cached bases."""
+        return metrics.subspace_angles_between(
+            self.basis(key_a, stack_a, slot), self.basis(key_b, stack_b, slot)
+        )
 
 
 def _cross_pair_rows(
@@ -405,6 +489,8 @@ def _cross_pair_rows(
     label_a: str,
     label_b: str,
     seed: int,
+    grid_spread: Grid,
+    bases: _SubspaceBases,
 ) -> tuple[list[dict], dict]:
     """Every configured metric for one same-rung pair, plus its diagnostics blob."""
     if not pairing.same_revision(label_a, label_b):
@@ -432,7 +518,8 @@ def _cross_pair_rows(
             )
         )
 
-    cka, spread, grid = _cka_diagonal(cfg, a, b, seed)
+    full_grid, full_spread = grid_spread
+    cka, spread, grid = full_grid.diagonal(), full_spread.diagonal(), full_grid
     for slot in range(a.n_slots):
         if METRIC_CKA in wanted:
             row(METRIC_CKA, slot, float(cka[slot]), float(spread[slot]))
@@ -443,9 +530,7 @@ def _cross_pair_rows(
                 metrics.procrustes_distance(a.slot(slot), b.slot(slot)),
             )
         if METRIC_SSA in wanted and validity in COORDINATE_SAFE_BASES:
-            angles = metrics.subspace_angles_topk(
-                a.slot(slot), b.slot(slot), cfg.geometry.ssa_k
-            )
+            angles = bases.angles(label_a, a, label_b, b, slot)
             row(METRIC_SSA, slot, metrics.ssa_reduce(angles, cfg.ssa_reduction))
         # Both are basis-free (invariant to any invertible linear map), so unlike
         # SSA they carry no `COORDINATE_SAFE_BASES` gate. `cka.metrics` asserts
@@ -487,9 +572,12 @@ def _self_drift_rows(
     cur: ActivationStack,
     *,
     label: str,
+    key_prev: str,
+    key_cur: str,
     rung_a: int,
     rung_b: int,
-    seed: int,
+    grid_spread: Grid,
+    bases: _SubspaceBases,
 ) -> list[dict]:
     """One init read at two consecutive rungs (PolyPythias' own SSA instrument).
 
@@ -497,7 +585,8 @@ def _self_drift_rows(
     for all seven inits even though it is not across `weight-seed` pairs at a fixed
     rung; `build_self_drift_row` enforces the `BASIS_LINEAGE` stamp.
     """
-    cka, spread, _ = _cka_diagonal(cfg, prev, cur, seed)
+    grid, spread_grid = grid_spread
+    cka, spread = grid.diagonal(), spread_grid.diagonal()
     rows: list[dict] = []
     for slot in range(cur.n_slots):
         for metric, value, std in (
@@ -505,9 +594,7 @@ def _self_drift_rows(
             (
                 "ssa",
                 metrics.ssa_reduce(
-                    metrics.subspace_angles_topk(
-                        prev.slot(slot), cur.slot(slot), cfg.geometry.ssa_k
-                    ),
+                    bases.angles(key_prev, prev, key_cur, cur, slot),
                     cfg.ssa_reduction,
                 ),
                 None,
@@ -530,11 +617,10 @@ def _self_drift_rows(
 
 
 def _floor_rows(
-    cfg: SimilarityLadderConfig,
-    stacks: Mapping[str, ActivationStack],
-    randoms: Mapping[str, ActivationStack],
+    keys: Mapping[str, str],
+    random_names: Sequence[str],
+    grids: Mapping[tuple[str, str], Grid],
     rung: int,
-    seed: int,
 ) -> dict:
     """Similarity of each init at this rung to the random-init references.
 
@@ -542,14 +628,16 @@ def _floor_rows(
     reference has no campaign label, so it carries no `BasisValidity` stamp and
     must not enter a table whose every row is stamped.
     """
-    floor: dict[str, dict[str, float]] = {}
-    for label, stack in stacks.items():
-        per_reference: dict[str, float] = {}
-        for ref_name, ref_stack in randoms.items():
-            cka, _, _ = _cka_diagonal(cfg, stack, ref_stack, seed)
-            per_reference[ref_name] = float(cka.mean())
-        floor[label] = per_reference
-    return {"step": rung, "slot_mean_cka_vs_random_init": floor}
+    return {
+        "step": rung,
+        "slot_mean_cka_vs_random_init": {
+            label: {
+                name: float(grids[(key, name)][0].diagonal().mean())
+                for name in random_names
+            }
+            for label, key in keys.items()
+        },
+    }
 
 
 # ---- P1: the sliding two-rung walk ---------------------------------------------------
@@ -622,22 +710,23 @@ def _run_p1(
             continue
         stacks = _base_stacks(cfg, tokenizer, prompts, rung)
         seed = _rung_seed(rung)
+        keys = {label: _ref_at(cfg, label, rung) for label in cfg.models}
+        pool: dict[str, ActivationStack] = {
+            keys[label]: stacks[label] for label in cfg.models
+        }
+        cross_pairs: list[tuple[str, str]] = []
+        floor_pairs: list[tuple[str, str]] = []
         if needs_cross:
-            for a, b in combinations(cfg.models, 2):
-                rows, blob = _cross_pair_rows(
-                    cfg,
-                    stacks[a],
-                    stacks[b],
-                    label_a=_ref_at(cfg, a, rung),
-                    label_b=_ref_at(cfg, b, rung),
-                    seed=seed,
-                )
-                pairs_rows.extend(rows)
-                diagnostics["pairs"].append({"step": rung, **blob})
+            cross_pairs = [
+                (keys[a], keys[b]) for a, b in combinations(cfg.models, 2)
+            ]
             if randoms:
-                diagnostics["floor"].append(
-                    _floor_rows(cfg, stacks, randoms, rung, seed)
-                )
+                pool.update(randoms)
+                floor_pairs = [
+                    (keys[label], name) for label in cfg.models for name in randoms
+                ]
+        prev_keys: dict[str, str] = {}
+        drift_todo: list[tuple[str, int, int]] = []
         for rung_a, rung_b in drift_pairs:
             if rung_b != rung or (rung_a, rung_b) in done_drift:
                 continue
@@ -651,17 +740,47 @@ def _run_p1(
                 )
                 continue
             for label in cfg.models:
-                drift_rows.extend(
-                    _self_drift_rows(
-                        cfg,
-                        previous[1][label],
-                        stacks[label],
-                        label=_ref_at(cfg, label, rung_a).split("@")[0],
-                        rung_a=rung_a,
-                        rung_b=rung_b,
-                        seed=seed,
-                    )
+                prev_keys[label] = _ref_at(cfg, label, rung_a)
+                pool[prev_keys[label]] = previous[1][label]
+                drift_todo.append((label, rung_a, rung_b))
+        drift_cka_pairs = [
+            (prev_keys[label], keys[label]) for label, _, _ in drift_todo
+        ]
+        grids = _cka_grids(cfg, pool, cross_pairs + floor_pairs + drift_cka_pairs, seed)
+        bases = _SubspaceBases(cfg.geometry.ssa_k)
+        if needs_cross:
+            for a, b in combinations(cfg.models, 2):
+                rows, blob = _cross_pair_rows(
+                    cfg,
+                    stacks[a],
+                    stacks[b],
+                    label_a=keys[a],
+                    label_b=keys[b],
+                    seed=seed,
+                    grid_spread=grids[(keys[a], keys[b])],
+                    bases=bases,
                 )
+                pairs_rows.extend(rows)
+                diagnostics["pairs"].append({"step": rung, **blob})
+            if randoms:
+                diagnostics["floor"].append(
+                    _floor_rows(keys, tuple(randoms), grids, rung)
+                )
+        for label, rung_a, rung_b in drift_todo:
+            drift_rows.extend(
+                _self_drift_rows(
+                    cfg,
+                    previous[1][label],
+                    stacks[label],
+                    label=keys[label].split("@")[0],
+                    key_prev=prev_keys[label],
+                    key_cur=keys[label],
+                    rung_a=rung_a,
+                    rung_b=rung_b,
+                    grid_spread=grids[(prev_keys[label], keys[label])],
+                    bases=bases,
+                )
+            )
         if previous is not None:
             _free(previous[1])
         previous = (rung, stacks)
@@ -717,9 +836,7 @@ def _run_p1c(
         for label in cfg.models:
             spec = _spec_at(label, rung)
             ref = model_ref(spec, cfg.model.hub_org)
-            model = load_model(
-                spec, cfg.paths.hf_cache_root, cfg.model.hub_org, cfg.device
-            )
+            model = _load_geometry_model(spec, cfg.paths, cfg.model, cfg.device)
             model.eval()
             features, targets = collect_probe_features(
                 model,

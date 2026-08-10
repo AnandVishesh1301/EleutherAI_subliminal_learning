@@ -62,18 +62,16 @@ src/subliminal_learning/
     students/       off-policy distillation: config, dataset_io (+splice), layout, validation
     steering/       steerability screen + EAS: vectors, hooks, eas, eas_results_io
                     (hooks also expose replace_base for the measurement-stack necessity arm)
-    interp/         measurement stack (post-Stage-B, forward-pass only): cka (HSIC1 /
-                    Procrustes / SSA / trait-coordinate), activations_io, pairing,
-                    layout, config, stats, results_io — see *Measurement stack* below
+    cka/            representation geometry (post-Stage-B + ckptladder): minibatch CKA,
+                    metrics (Procrustes / SSA / trait-coordinate), pairing, probes,
+                    weight_space, geometry_io / results_io — see *Representation geometry*
     coherence/      pile CE eval: packing, bootstrap, shard_io, ce_io, results_io, config
     jobqueue/       file-based GPU job queue: model, store, gpu, worker
     campaign/       automated stage machines: plan/selection/config_gen/expected/
-                    driver_io (20260727 student-HP) + optparam_* (20260801 optimizer
-                    × parameterization) — torch-free domain + jobq submitters
-    analysis/       notebook-support leaf (imported only from notebooks/ + tests):
-                    setup, frames (parse_param_tag, rank_specific, cheapest_best,
-                    read_cell_set/read_cell_seeds = one cell's all-seed scores),
-                    plots (annotated_heatmap, facet_grid_heatmaps, ...), animals
+                    driver_io (20260727 student-HP) + optparam_* + ckpt_* (20260805
+                    checkpoint ladder) — torch-free domain + jobq submitters
+    analysis/       notebook-support leaf + campaign stats (cluster_bootstrap,
+                    family_interaction_fit, …): setup, frames, plots, animals, stats
     templates/      DEPRECATED pure shim re-exporting teachers/* (kept only for untracked
                     run_logs/ launchers; remove once both nodes migrate)
 configs/
@@ -706,8 +704,12 @@ never contain the trait word:
   unit test at `vocab_mask=None`) + teacher temperature + vocab mask.
   `SubliminalGKDTrainer` overrides only `compute_loss`, `training_step` (L2 between
   generation and loss), and `log`. `seq_kd=False` required; temperature 1.0.
-- **In-training probe** (`GkdProbeCallback`): exact `p(target)`, forced-choice share,
-  held-out Pile PPL → `training_metrics.jsonl` + W&B.
+- **In-training probe** (`GkdProbeCallback`): exact `p(target)`, full-vocab
+  `rank_mean`/`rank1_frac`, forced-choice share, held-out Pile PPL →
+  `training_metrics.jsonl` + W&B; step-0 init baseline before `train()`;
+  default `probe_every=25`. Manifest sibling `probe:` holds bank provenance
+  (outside `run_identity`). Optional `coverage_probe` → `first_step_coverage.jsonl`.
+  Probe SSOT: **`docs/GKD_IN_TRAINING_PROBES.md`**.
 - **Control**: same run with an untuned base as teacher, animal-specific (its own L2
   screen + probe), under `gkd_students/controls/base_teacher/...`.
 - Layout: `gkd_students/{animal}/{model}/{teacher_tag}/{gkd_tag}/gseed{N}` —
@@ -860,11 +862,14 @@ Two gaps found while auditing disk-persistence coherence before launch:
 **On-disk inventory** of which SDF teachers / GKD students / HPs / evals actually exist
 (and the in-flight `cats_wide_run` tmux sweeps): **`docs/RUN_INVENTORY.md`**.
 
-### Five-animal breadth campaign (`campaign/spec.py` + `campaign/breadth_plan.py`)
+### Four-animal breadth campaign (`campaign/spec.py` + `campaign/breadth_plan.py`)
 
-Run set **`20260804_breadth5_160m`** (teachers `20260804_breadth5-teachers_160m`) replicates
-the full A1/A2/A3/freeze/Stage-B design on **bear, eagle, lion, pig, tiger**. Plan:
-`.cursor/plans/animal_breadth_full_campaign_7e22d414.plan.md`.
+Run set **`20260809_breadth4_160m`** (teachers `20260809_breadth4-teachers_160m`)
+replicates the full A1/A2/A3/freeze/Stage-B design on **cat, dog, bear, eagle** with
+**β=1.0 only** and A3 doses `(0.5, 1.0, 3.0, 5.0)` (no 10.0). CLI/campaign key stays
+``breadth5``; queues use the ``b4-`` prefix. Plan:
+`.cursor/plans/animal_breadth_full_campaign_7e22d414.plan.md`. Prior attempt
+`20260804_breadth5_160m` / ``b5-*`` is abandoned (do not overwrite).
 
 Unlike `optparam_*`, this campaign **does not fork the machinery** — its scientific design is
 identical to slbreadth, so the stage machine is parameterized instead:
@@ -873,8 +878,8 @@ identical to slbreadth, so the stage machine is parameterized instead:
   `expected`, and `student_hp_campaign_pipeline` previously read as `plan.X`. Those modules now
   take `spec: CampaignSpec = plan.SPEC`, so existing behavior is unchanged.
 - `campaign/plan.py` gains `SPEC` built from its own constants; `campaign/breadth_plan.py` is the
-  sibling SSOT (5 animals, `b5-*` queues in a 24→2 idle-filler priority band, generated configs
-  under `configs/experiment/generated/breadth5/`, eval prompt sets incl. `storytelling`).
+  sibling SSOT (4 animals, `b4-*` queues in a 24→2 idle-filler priority band, generated configs
+  under `configs/experiment/generated/breadth4/`, eval prompt sets incl. `storytelling`).
 - **Reference arm:** `CampaignSpec.a3_reference_recipe` (cat/dog frozen `r8a16 @ 4e-4`) is injected
   as a guaranteed shared A3 arm labelled `ref`, so `selection.freeze_recipes` can never hit an
   empty cross-animal intersection (and the arm doubles as a direct cat/dog transfer test).
@@ -909,10 +914,11 @@ identical to slbreadth, so the stage machine is parameterized instead:
   Contract: `docs/PROJECT_DESIGN.md` §4.
 
 Entry points: `scripts/run_student_hp_campaign.py --campaign {slbreadth,breadth5}` and
-`scripts/launch_breadth5_campaign.sh` (scopes the worker pool with `--queues` to `b5-*` so a
+`scripts/launch_breadth5_campaign.sh` (scopes the worker pool with `--queues` to `b4-*` so a
 shared jobq root cannot drain another campaign's work; tees the `workers` / `driver` /
-`notify` windows to `<queue_root>/logs/breadth5_*.<host>.log` so an agent can read them after
-the panes are gone).
+`notify` windows to `<queue_root>/logs/breadth4_*.<host>.log` so an agent can read them after
+the panes are gone). Teachers: `scripts/launch_breadth5_teachers.sh` (assembles dog symlink +
+cat 8k corpus first; trains cat/bear/eagle only).
 
 ### Automated optimizer × parameterization campaign (`campaign/optparam_*`)
 
@@ -1407,50 +1413,121 @@ provisional — don't treat aggregates as authoritative; known caveats: ungated 
 fallback (`gated_frac` records gate hold rate), no uncertainty on the absolute gate, final
 vector slot basis mismatch (inherited from Blank, never triggered by headline runs).
 
-### Measurement stack — `interp/` + similarity atlas / GKD-EAS / causal steering
+### Representation geometry — `cka/` + similarity ladder / checkpoint campaign
 
-Post-Stage-B, **forward-pass only** (no training). Mechanistic representation measurement
-over the Stage B teachers/students: representation similarity, EAS retargeted to
-`gkd_students/`, and causal sufficiency/necessity on the trait direction. Master experiment
-design: `docs/MECHANISTIC_SL_EXPERIMENT_PLAN.md` §1. Method SSOT: Kornblith / Nguyen / Ding /
-Raghu for global geometry; Okatan's teacher-basis subspace CKA is reported only on
-shared-basis pairs as a hypothesis under test.
+Post-Stage-B mechanistic measurement and the checkpoint-ladder geometry stack live
+in `src/subliminal_learning/cka/` (not a fictional `interp/` tree). Pure math
+(`metrics`, `pairing`, `probes`, `weight_space`, plus `analysis/stats`) stays
+torch-local where needed; disk/GPU capture and tables live in `*_io.py`. The
+reusable driver is `pipelines/similarity_ladder_pipeline.py` (no `campaign/`
+imports). The checkpoint-ladder stage machine is
+`pipelines/ckpt_campaign_pipeline.py` + `pipelines/ckpt_results_pipeline.py`.
 
-**Does not touch** Angela's off-policy `students/` / `teachers/` trees or their pipelines
-(`eas_pipeline`, `sweep_compute_eas`, `steerability_screen_pipeline`). The only shared-file
-edit is an additive `replace_base` mode in `steering/hooks.py` (`add` / `project` unchanged).
+Master experiment design: `docs/MECHANISTIC_SL_EXPERIMENT_PLAN.md` §E14.
+Preregistration: `docs/PREREG_CKPT_LADDER.md` (C1–C9). Method SSOT: Kornblith /
+Nguyen / Ding / Raghu for global geometry; Okatan teacher-basis subspace CKA only
+on shared-basis pairs; Madl coverage + Frankle barrier in weight space.
 
 | Piece | Role |
 | --- | --- |
-| `interp/cka.py` | Unbiased minibatch CKA (HSIC1), biased HSIC0 diagnostic, Procrustes, SSA-topk, trait-coordinate similarity, shared-basis subspace CKA; torch OK (same exemption as `gkd/losses.py`). |
-| `interp/activations_io.py` | Per-example 13-slot capture (last-token, left-pad, fp32), `.pt` cache, random-init floor factory. |
-| `interp/pairing.py` | Stage B reverse lookup + 2×2 weight/data factors + basis validity (`SHARED` / `DIVERGED` / `BROKEN`). |
-| `interp/layout.py` / `config.py` / `stats.py` / `results_io.py` | Run-set paths, frozen `InterpConfig`, Wilson + mean CIs, CSV loaders / seed collapse / similarity↔`subliminal_delta` join. |
-| `pipelines/similarity_atlas_pipeline.py` | Families: base↔base, random floor, teacher↔base, student↔base, teacher↔student. Emits trait vectors + long `similarity_pairs.csv` + estimator diagnostics (HSIC0−HSIC1 gap, batch sensitivity, Davari top-1% norm exclusion, self-pair). |
-| `pipelines/gkd_eas_pipeline.py` | EAS on `gkd_students/` leaves; resumable `eas_gkd_{position}.json` beside eval summaries; reuses `steering.eas.plan_reuse`. |
-| `pipelines/causal_steering_pipeline.py` | Corner pairs (`stage_c_corner_pairs`): sufficiency `add` (teacher + optional student directions) + necessity `replace_base` / `project`; screen layer×α grid, `neg_thresh`/`off_thresh` gates, held-out `test`, Wilson CIs, gated peaks CSV. |
+| `cka/minibatch.py` | Angela's committed unbiased MinibatchCKA (SSOT; do not fork). |
+| `cka/metrics.py` | Procrustes, SSA, trait coordinates, biased CKA diagnostic, minibatch wrappers, high-norm mask. `minibatch_cka_pairs` scores many pairs off one Gram stack per `(model, batch)`; all three wrappers take `device=`. |
+| `cka/pairing.py` | Revision-aware labels + `BasisValidity` (`SHARED` / `DIVERGED` / `BROKEN` / `LINEAGE`). |
+| `cka/probes.py` / `probes_io.py` | Linear + prequential MDL probes; UD-EWT / surface fallback. |
+| `cka/weight_space.py` / `weight_space_io.py` | Parameter cosines, Frankle barrier, PEFT-scaled LoRA displacement. |
+| `cka/geometry_io.py` | Dual 13-slot conventions (`post_block` vs `hidden_states`); revisioned cache keys. |
+| `cka/results_io.py` | Long-format `similarity_pairs.csv` + joins to behavioural delta. |
+| `pipelines/similarity_ladder_pipeline.py` | Sliding two-rung P1/P1c/P5 driver → part tables → merge. Geometry/probe forwards load in **bf16** (pooled stacks are still `.float().cpu()` before metrics); training/eval keep `load_model`'s fp32 default. Metrics run on `cfg.device`: one `minibatch_cka_pairs` call per rung covers the cross-init grid + random-init floor + self-drift, and `_SubspaceBases` memoizes the SSA basis per `(model, slot)`. |
+| `pipelines/ckpt_campaign_pipeline.py` | P0→P6 DAG, free-GiB gate on resolved paths, hard dial gate. |
+| `pipelines/ckpt_results_pipeline.py` | `ladder_*.csv` + `claims.json` (C1–C9). |
 
-**Configs** (two prompt distributions = two run-set ids — never mixed):
+**Config:** `configs/experiment/ckpt_ladder_geometry.yaml` (Ladder G revisions,
+both slot conventions, estimator, probe block) and
+`configs/experiment/ckpt_ladder_student.yaml` (`STUDENT_EXPERIMENT_CONFIG`, whose only
+job is `coverage_probe: true` — C9's `coverage` half exists only when the P3 shards run
+with it). Campaign constants: `campaign/ckpt_plan.py`.
 
-- `configs/experiment/interp_measurement.yaml` — GKD Pile pool (on-distribution).
-- `configs/experiment/interp_measurement_preference.yaml` — preference `test` set (trait-relevant).
+**Packing (ops, not science):** node policy stays `cap_per_gpu=2` /
+`free_mem_mib=17000` for teacher/student cells. P1 / P1b / P1c jobs declare
+`slots=2` + `mem_mib=22000` so one geometry capture owns a card (fp32 capture
+peaked ~18.6 GiB at batch 1024; the bf16 forward measures ~10 GiB, and the
+on-device Gram stacks add <2 GiB — do **not** cut `batch_size` to fix packing
+OOMs). `scripts/launch_ckpt_campaign.sh` always rewrites
+`gpu_policy.$HOST.json` from `ckpt_plan.gpu_policy_json()` and restricts workers
+to `ckptladder-*` queues. GPU policy env sets `HF_HUB_OFFLINE=1` /
+`TRANSFORMERS_OFFLINE=1` once Ladder-G revisions are warm in `hf_cache_root`,
+and `OMP_NUM_THREADS=4` so eight concurrent shards cannot each claim all 48
+cores — the geometry metrics are BLAS-heavy, and the policy env is the only
+thing bounding them (`jobqueue/gpu.GpuPool.env` → `worker` subprocess env).
 
-**Outputs:** `{output_root}/interp/{run_set_id}/` with `results/similarity_pairs.csv`,
-`similarity_layer_means.csv`, `causal_steering.csv`, `causal_peaks.csv`,
-`estimator_diagnostics.json`, `trait_vector_stability.csv`, `trait_vectors/`,
-`activations_cache/`, `run_set.json`. GKD-EAS JSONs live under `{gkd_tag}/eas/`. No W&B.
-Analysis notebook is **not** implemented yet; loaders in `interp/results_io.py` are the
-notebook contract.
+**Three P5w / C8 facts worth knowing before reading the tables.** The Frankle barrier
+runs on the 8 `SI∩DS` pairings (a barrier needs two *different* checkpoints sharing a
+weight init; the `SI∩SS` anchors are self-pairs whose barrier is zero by construction),
+so it is 24 curves, not the plan's budgeted 21, and its loss is per-token CE on the
+held-out Pile bank. Barrier shards write `weight_space` part tables, so
+`similarity_ladder_pipeline.merge_parts` stays the single writer of
+`results/weight_space.csv`. The CCA family is recorded only under
+`--include-cca`, which the driver now forwards to the P1 shards; it is grading-panel
+input for C8b and never a headline metric.
+
+**Outputs:** `{output_root}/similarity/{GEOM_RUN_SET_ID}/` for geometry;
+`{output_root}/gkd_students/{RUN_SET_ID}/` (+ matching `sdf_teachers/`) for
+behaviour. Analysis notebook is **out of scope until outputs exist**.
 
 ```bash
-# Dry-run / sharded atlas (after Stage B completes; all 8 GPUs free):
-uv run python -m scripts.similarity_atlas --dry-run
-uv run python -m scripts.similarity_atlas --num-shards 8 --shard-index 0 --device cuda:0
-uv run python -m scripts.similarity_atlas --merge-only
-
-uv run python -m scripts.sweeps.sweep_gkd_eas --num-shards 8 --shard-index 0 --device cuda:0
-uv run python -m scripts.causal_steering --num-shards 8 --shard-index 0 --device cuda:0
+uv run python -m scripts.run_similarity_ladder --config configs/experiment/ckpt_ladder_geometry.yaml \
+  --stage p1 --cross-init-rungs 0 --self-drift-rungs 0,8 --device cuda:0
+uv run python -m scripts.run_ckpt_campaign status
+uv run python -m scripts.run_ckpt_campaign advance --dry-run
+bash scripts/launch_ckpt_campaign.sh
 ```
+
+Angela's off-policy `students/` / `teachers/` trees and their pipelines
+(`eas_pipeline`, `sweep_compute_eas`, `steerability_screen_pipeline`) are
+untouched. Additive steering modes in `steering/hooks.py` remain available for
+causal follow-ups.
+
+**P1 geometry cost (2026-08-10).** A P1 window scores 49 pairs — the 21-pair
+cross-init grid, the 21 random-init floor pairs, and 7 self-drift pairs — and the
+first launch attempt spent hours per shard pinned to CPU with idle GPUs. Two
+redundancies, both now removed without touching the estimator: every pair
+recomputed the U-centered Gram stack of models it shared with other pairs
+(`minibatch_cka_pairs` computes one per `(model, batch)`, bit-identical to the
+per-pair `minibatch_cka_grid` — `tests/unit/test_cka_minibatch_wrapper.py`), and
+every pair re-ran both SSA SVDs (`_SubspaceBases` memoizes per `(model, slot)`;
+`subspace_angles_topk` is by definition `subspace_angles_between` of two
+`principal_subspace` calls, so this is equivalence by construction). With the
+Grams on `cfg.device` the 49-pair CKA pass measures ~4.8 min/window against
+~102 min on CPU per-pair, and the SSA bases ~1.4 min against ~8.1 min. The
+float64 Gram matmul is deliberately kept: the TF original casts *after* the
+matmul, `cka/minibatch.py` casts before, and that is a documented strengthening,
+not a knob to trade for speed. The remaining per-pair pass is the Davari
+high-norm re-score, whose 1%-trimmed row set is pair-specific by definition.
+
+**Pre-launch review fixes (2026-08-10).** Two independent reviews of the
+checkpoint-ladder plan (`.cursor/plans/checkpoint_ladder_campaign_fdd5029a.plan.md`
+§0) surfaced six real issues, fixed before P0 launch:
+`ckpt_selection.filter_slot_convention` narrows the merged P1 table (both slot
+conventions) to one convention before `dial_gate`, which otherwise raises on
+the union; `scripts/run_base_capability_ladder.py` P1b shards now write only
+their own `parts/cap__*.csv`, with `ckpt_results_pipeline.merge_capability_parts`
+as the single writer (mirrors `similarity_ladder_pipeline.merge_parts`), fixing
+a read-modify-write race across concurrent per-rung GPU jobs;
+`scripts/launch_ckpt_campaign.sh` no longer passes `--auto-reconcile-sha`, so
+mid-campaign code-pin drift raises per the §4 contract instead of silently
+re-pinning; `ckpt_metrics.attach_family_undirected` /
+`pairing_lookup_undirected` match C4's SI∩DS geometry pairs by unordered
+label set, since P1's `itertools.combinations` grid orders pairs differently
+than `ckpt_pairs.ladder_pairs()`'s directed `(student, teacher)` — a directed
+lookup silently dropped both default-active `data_cyclic` edges from the C4 gap
+(`cell_of` is direction-invariant, so this is exact); `cka.results_io`'s
+`similarity_pairs` schema gained an `ftseed` column so P5 trait-coordinate rows
+from different teacher fine-tuning seeds are distinguishable downstream. The
+P1→P2 dial gate scores `d_geom`, never `d_trait` (undefined pre-training); a
+manual pilot (train + score `d_trait` at one low/high rung before the full
+budget) is documented in the plan §6.10 rather than added as a code gate.
+No change to `ckpt_pairs` / `ckpt_replication` / `ckpt_plan` core pairing,
+replication, or threshold logic.
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
@@ -1536,18 +1613,26 @@ Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DE
   note: before this pin model, a mid-campaign HEAD move halted
   `20260727_slbreadth_160m` after 223 cells — that class of failure is gone.
 - **W&B log-few**: selective per-cell logging via `utils/wandb_io` (`WandbCellFilter` /
-  `wandb_axis_match`); omitted `wandb:` block = log nothing.
+  `wandb_axis_match`); omitted `wandb:` block = log nothing. Campaign student projects:
+  `subliminal-learning-full-breadth` (breadth4) and
+  `subliminal-learning-checkpoint-ladder` (ckpt ladder); default GKD remains
+  `subliminal-learning-gkd`. Tags via `gkd_wandb_tags` include animal + optional
+  revision.
 
-## Cold archive (SSD-2 ↔ SSD-1)
+## Hot mirror (SSD-2 → SSD-3) + cold archive (SSD-1)
 
-Vishesh hot artifacts stay under `/mnt/ssd-2/soar-subliminal/vishesh/` (`paths_local.yaml`).
-Near-full SSD-2 is relieved by mirroring cold trees to SSD-1 and leaving path-preserving
-symlinks at the original paths (manifests keep working). **Do not** retarget `output_root`
-to SSD-1. Waves A+B (backups / smoke / cats_1day + archived full-FT teacher checkpoints)
-completed 2026-08-01; Wave C archives completed `gkd_students/20260727_slbreadth_160m`
-(`bash scripts/launch_cold_archive_ssd1.sh run-c`) and never touches live
-`cats_wide_run` or `20260801_optparam_160m`. Procedure: **`docs/COLD_ARCHIVE_SSD1.md`**.
+**SSD-3 hot SSOT (complete 2026-08-07):** Vishesh mirrored
+`/mnt/ssd-2/soar-subliminal/vishesh/{run_logs,huggingface,subliminal_learning}` →
+the same layout under `/mnt/ssd-3/soar-subliminal/vishesh/` (copy only; SSD-2
+retained for baked `/mnt/ssd-2/...` manifests). Angela’s trees were never touched.
+`paths_local.yaml` now points all roots (`output_root`, HF, datasets, wandb,
+`queue_root`) at SSD-3. Procedure + checklist: **`docs/SSD3_HOT_MIRROR.md`**.
 
+**SSD-1 cold archive:** Selected cold trees remain mirrored to SSD-1 with
+path-preserving symlinks under the logical hot tree (whether resolved via SSD-2
+or SSD-3 copies). **Do not** retarget `output_root` to SSD-1. Waves A+B completed
+2026-08-01; Wave C thawed `20260727_slbreadth_160m` back to hot. Procedure:
+**`docs/COLD_ARCHIVE_SSD1.md`**.
 ## Bugs & issues
 
 Open issues, in rough priority order. Historical fixed/moot items were pruned from this

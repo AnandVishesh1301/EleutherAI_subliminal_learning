@@ -250,7 +250,11 @@ def test_gpu_policy_json_is_a_serialisable_copy_jobq_can_load() -> None:
     loaded = GpuPolicy.from_dict(policy)
     assert loaded.gpus == [0, 1, 2, 3, 4, 5, 6, 7]
     assert loaded.cap_per_gpu == 2
-    assert loaded.env == {"OMP_NUM_THREADS": "4"}
+    assert loaded.env == {
+        "OMP_NUM_THREADS": "4",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+    }
 
 
 def test_gpu_policy_json_cannot_mutate_the_frozen_policy() -> None:
@@ -258,7 +262,18 @@ def test_gpu_policy_json_cannot_mutate_the_frozen_policy() -> None:
     policy["gpus"].append(99)
     policy["env"]["OMP_NUM_THREADS"] = "64"
     assert plan.GPU_POLICY["gpus"] == (0, 1, 2, 3, 4, 5, 6, 7)
-    assert dict(plan.GPU_POLICY["env"]) == {"OMP_NUM_THREADS": "4"}
+    assert dict(plan.GPU_POLICY["env"]) == {
+        "OMP_NUM_THREADS": "4",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+    }
+
+
+def test_p1_infer_weights_are_exclusive_against_cap_per_gpu() -> None:
+    """Geometry/probe shards own a full card; training keeps cap_per_gpu=2 packing."""
+    assert plan.P1_INFER_SLOTS == int(plan.GPU_POLICY["cap_per_gpu"]) == 2
+    assert plan.P1_INFER_MEM_MIB >= int(plan.GPU_POLICY["free_mem_mib"])
+    assert plan.P1_INFER_MEM_MIB >= 22000
 
 
 def test_worker_threads_oversubscribe_the_measured_slot_count() -> None:

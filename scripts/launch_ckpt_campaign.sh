@@ -12,6 +12,7 @@
 # docs/SSD3_HOT_MIRROR.md), not a hardcoded SSD-2 mount.
 #
 # Usage: bash scripts/launch_ckpt_campaign.sh
+# Optional: CKPT_FORCE_POLICY=1 to overwrite an existing gpu_policy file (default).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,13 +24,20 @@ ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_le
 mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs"
 
 POLICY="$ROOT/gpu_policy.$HOST.json"
-if [ -f "$POLICY" ]; then
-  echo "keeping existing $POLICY: $(cat "$POLICY")"
+# Always refresh from SSOT unless CKPT_KEEP_POLICY=1. Keeping a stale
+# cap_per_gpu/free_mem_mib from a prior abort is what let attempt-2 diverge from
+# ckpt_plan while still looking "launched".
+if [[ "${CKPT_KEEP_POLICY:-0}" == "1" && -f "$POLICY" ]]; then
+  echo "CKPT_KEEP_POLICY=1: keeping existing $POLICY: $(cat "$POLICY")"
 else
-  uv run python -c "import json;from subliminal_learning.campaign import ckpt_plan as p;print(json.dumps(p.gpu_policy_json()))" > "$POLICY"
+  if [[ -f "$POLICY" ]]; then
+    cp -a "$POLICY" "$POLICY.bak_pre_launch_$(date -u +%Y%m%dT%H%M%SZ)"
+  fi
+  uv run python -c "import json;from subliminal_learning.campaign import ckpt_plan as p;print(json.dumps(p.gpu_policy_json(), indent=2))" > "$POLICY"
   echo "wrote $POLICY: $(cat "$POLICY")"
 fi
 WORKERS=$(uv run python -c "from subliminal_learning.campaign import ckpt_plan as p;print(p.WORKER_THREADS)")
+QUEUES=$(uv run python -c "from subliminal_learning.campaign import ckpt_plan as p;print(','.join(p.QUEUE_PRIORITIES))")
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "tmux session '$SESSION' already exists -- not re-launching."
@@ -37,9 +45,18 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
+# Refuse to start if another jobq worker already holds this root (breadth/optparam
+# sharing the same queue_root was a root cause of attempt-1 OOMs).
+if pgrep -af "scripts.jobq work --root $ROOT" >/dev/null 2>&1; then
+  echo "ERROR: a jobq worker is already running on $ROOT."
+  echo "Stop it (or use a dedicated queue_root) before launching ckptladder."
+  pgrep -af "scripts.jobq work --root $ROOT" || true
+  exit 1
+fi
+
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
-  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --lock-prefix $ROOT/locks/jobq; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $ROOT/locks/jobq; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
 
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 # No --auto-reconcile-sha: the code-pin contract (docs/PROJECT_DESIGN.md §4)
@@ -52,7 +69,7 @@ tmux send-keys -t "$SESSION:driver" \
 cat <<EOF
 
 Started tmux session '$SESSION':
-  workers -> jobq pool ($WORKERS threads, restart loop), root=$ROOT
+  workers -> jobq pool ($WORKERS threads, queues=$QUEUES), root=$ROOT
   driver  -> campaign watch loop (5-min polls)
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d

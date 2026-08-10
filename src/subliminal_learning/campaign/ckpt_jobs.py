@@ -79,6 +79,11 @@ def _eval(fname: str, *flags: str) -> str:
     return driver_io.eval_cmd(_rel(fname), *flags)
 
 
+def _p1_infer_weights() -> dict[str, int]:
+    """Exclusive-GPU weighting for P1 / P1b / P1c (see `ckpt_plan.P1_INFER_*`)."""
+    return {"slots": plan.P1_INFER_SLOTS, "mem_mib": plan.P1_INFER_MEM_MIB}
+
+
 def _teacher_cmd(module: str, fname: str, *flags: str) -> str:
     """One SDF teacher train/verify shard command (jobq pins the device)."""
     joined = " ".join(flags)
@@ -170,6 +175,7 @@ def p1_geometry_jobs(
                     f"--self-drift-rungs {lo},{hi}",
                     *cca,
                 ),
+                **_p1_infer_weights(),
             )
         )
     return jobs
@@ -187,6 +193,7 @@ def p1b_capability_jobs(
             cmd=_ladder_cmd(
                 plan.CAPABILITY_MODULE, _rel(fname), f"--rungs {int(rung)}"
             ),
+            **_p1_infer_weights(),
         )
         for rung in rungs
     ]
@@ -207,6 +214,7 @@ def p1c_probe_jobs(
                 "--stage p1c",
                 f"--rungs {int(rung)}",
             ),
+            **_p1_infer_weights(),
         )
         for rung in rungs
     ]

@@ -36,6 +36,8 @@ Sources, verified against the primary text before implementing:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import numpy as np
 import torch
 from scipy.linalg import subspace_angles as _scipy_subspace_angles
@@ -492,6 +494,128 @@ def high_norm_mask(xs: torch.Tensor, ys: torch.Tensor, frac: float) -> torch.Ten
     return mask
 
 
+def minibatch_cka_pairs(
+    stacks: Mapping[str, torch.Tensor],
+    pairs: Sequence[tuple[str, str]],
+    *,
+    batch_size: int = 1024,
+    n_examples: int = 10240,
+    n_repeats: int = 20,
+    seed: int = 0,
+    device: str | torch.device | None = None,
+) -> dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]]:
+    """Minibatch CKA for MANY pairs drawn from a shared pool of stacks.
+
+    Every pair at one rung is scored on the same seeded batches, so a batch's
+    U-centered Gram stack depends only on the model -- not on which pair it is
+    read for. Computing it once per ``(model, batch)`` instead of once per
+    ``(pair, batch)`` is what `cka.minibatch.MinibatchCKA.update_state_from_grams`
+    exists for, and it is the difference between ``O(pairs)`` and ``O(models)``
+    Gram matmuls: the Gram is the dominant cost of the whole estimator, and a
+    seven-init grid names each model in six pairings.
+
+    Results are bit-identical to calling `minibatch_cka_grid` per pair with the
+    same `seed` on the same `device`.
+
+    Args:
+        stacks: ``{key: [S_key, n, p_key]}`` per-slot representations; all stacks
+            must share ``n`` and hold the same examples in the same order.
+        pairs: ``(key_x, key_y)`` pairs to score; keys must be in `stacks`.
+        batch_size: Examples per minibatch; must be >= `MIN_MINIBATCH_ROWS`.
+        n_examples: Rows sampled per repeat, capped at the ``n`` available.
+        n_repeats: Independent passes over the sampled examples.
+        seed: Seeds the per-repeat permutations.
+        device: Device the Gram matmuls run on; ``None`` keeps them where the
+            stacks live. Accumulators stay on CPU either way.
+
+    Returns:
+        ``{(key_x, key_y): (value, repeat_std)}``, each ``[S_x, S_y]`` float64.
+
+    Raises:
+        ValueError: On a non-3-D stack, a mismatched ``n``, an unknown pair key,
+            a `batch_size` below `MIN_MINIBATCH_ROWS`, `n_repeats` below 1, or a
+            `batch_size` that leaves no full batch.
+    """
+    for key, xs in stacks.items():
+        if xs.ndim != 3:
+            raise ValueError(
+                f"stack {key!r} must be [n_slots, n, p]; got {tuple(xs.shape)}"
+            )
+    n_by_key = {key: int(xs.shape[1]) for key, xs in stacks.items()}
+    if len(set(n_by_key.values())) > 1:
+        raise ValueError(
+            "minibatch CKA requires the SAME examples in the SAME order: "
+            f"got n={n_by_key}"
+        )
+    for key_x, key_y in pairs:
+        for key in (key_x, key_y):
+            if key not in stacks:
+                raise ValueError(f"pair key {key!r} is not in stacks")
+    if batch_size < MIN_MINIBATCH_ROWS:
+        raise ValueError(
+            f"batch_size must be >= {MIN_MINIBATCH_ROWS} for the unbiased "
+            f"HSIC_1 U-statistic; got {batch_size}"
+        )
+    if n_repeats < 1:
+        raise ValueError(f"n_repeats must be >= 1; got {n_repeats}")
+    if not stacks or not pairs:
+        return {}
+
+    n_total = next(iter(n_by_key.values()))
+    drawn = min(n_examples, n_total)
+    n_batches = drawn // batch_size
+    if n_batches < 1:
+        raise ValueError(f"batch_size={batch_size} exceeds the {drawn} drawn examples")
+
+    wanted = list(dict.fromkeys(pairs))
+    needed = list(dict.fromkeys(key for pair in wanted for key in pair))
+
+    def accumulators() -> dict[tuple[str, str], MinibatchCKA]:
+        return {
+            pair: MinibatchCKA(
+                int(stacks[pair[0]].shape[0]),
+                int(stacks[pair[1]].shape[0]),
+                across_models=True,
+                dtype=_ACCUM_DTYPE,
+            )
+            for pair in wanted
+        }
+
+    pooled = accumulators()
+    generator = torch.Generator().manual_seed(seed)
+    per_repeat: dict[tuple[str, str], list[torch.Tensor]] = {p: [] for p in wanted}
+    for _ in range(n_repeats):
+        order = torch.randperm(n_total, generator=generator)[:drawn]
+        repeat = accumulators()
+        for b in range(n_batches):
+            rows = order[b * batch_size : (b + 1) * batch_size]
+            grams = {}
+            for key in needed:
+                xs = stacks[key]
+                batch = xs[:, rows.to(xs.device), :]
+                if device is not None:
+                    batch = batch.to(device)
+                grams[key] = preprocessed_gram_stack(list(batch), _ACCUM_DTYPE)
+            for pair in wanted:
+                gram_x, gram_y = grams[pair[0]], grams[pair[1]]
+                pooled[pair].update_state_from_grams(gram_x, gram_y)
+                repeat[pair].update_state_from_grams(gram_x, gram_y)
+        for pair in wanted:
+            per_repeat[pair].append(repeat[pair].result())
+
+    out: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]] = {}
+    for pair in wanted:
+        value = pooled[pair].result()
+        if n_repeats < 2:
+            out[pair] = (value, torch.zeros_like(value))
+            continue
+        out[pair] = (
+            value,
+            torch.stack(per_repeat[pair]).std(dim=0, unbiased=True),
+        )
+    return out
+
+
 def minibatch_cka_grid(
     xs: torch.Tensor,
     ys: torch.Tensor,
@@ -500,6 +624,7 @@ def minibatch_cka_grid(
     n_examples: int = 10240,
     n_repeats: int = 20,
     seed: int = 0,
+    device: str | torch.device | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Unbiased minibatch CKA for every layer pair, plus its per-repeat spread.
 
@@ -514,6 +639,9 @@ def minibatch_cka_grid(
     the spread comes from one accumulator per repeat. Repeat values are never
     averaged into the pooled value.
 
+    Scoring several pairs that share a model: use `minibatch_cka_pairs`, which
+    computes each model's Gram stack once per batch instead of once per pair.
+
     Args:
         xs: ``[Sx, n, p1]`` per-slot representations for model X.
         ys: ``[Sy, n, p2]`` per-slot representations for model Y, same examples
@@ -522,6 +650,8 @@ def minibatch_cka_grid(
         n_examples: Rows sampled per repeat, capped at the ``n`` available.
         n_repeats: Independent passes over the sampled examples.
         seed: Seeds the per-repeat permutations.
+        device: Device the Gram matmuls run on; ``None`` keeps them where `xs`
+            and `ys` live.
 
     Returns:
         ``(value, repeat_std)``, both ``[Sx, Sy]`` float64; `repeat_std` is all
@@ -541,41 +671,15 @@ def minibatch_cka_grid(
             "minibatch CKA requires the SAME examples in the SAME order: "
             f"n={xs.shape[1]} vs {ys.shape[1]}"
         )
-    if batch_size < MIN_MINIBATCH_ROWS:
-        raise ValueError(
-            f"batch_size must be >= {MIN_MINIBATCH_ROWS} for the unbiased "
-            f"HSIC_1 U-statistic; got {batch_size}"
-        )
-    if n_repeats < 1:
-        raise ValueError(f"n_repeats must be >= 1; got {n_repeats}")
-
-    n_total = xs.shape[1]
-    drawn = min(n_examples, n_total)
-    n_batches = drawn // batch_size
-    if n_batches < 1:
-        raise ValueError(f"batch_size={batch_size} exceeds the {drawn} drawn examples")
-
-    n_slots_x, n_slots_y = xs.shape[0], ys.shape[0]
-    pooled = MinibatchCKA(n_slots_x, n_slots_y, across_models=True, dtype=_ACCUM_DTYPE)
-    generator = torch.Generator().manual_seed(seed)
-    per_repeat: list[torch.Tensor] = []
-    for _ in range(n_repeats):
-        order = torch.randperm(n_total, generator=generator)[:drawn]
-        repeat = MinibatchCKA(
-            n_slots_x, n_slots_y, across_models=True, dtype=_ACCUM_DTYPE
-        )
-        for b in range(n_batches):
-            idx = order[b * batch_size : (b + 1) * batch_size].to(xs.device)
-            grams_x = preprocessed_gram_stack(list(xs[:, idx, :]), _ACCUM_DTYPE)
-            grams_y = preprocessed_gram_stack(list(ys[:, idx, :]), _ACCUM_DTYPE)
-            pooled.update_state_from_grams(grams_x, grams_y)
-            repeat.update_state_from_grams(grams_x, grams_y)
-        per_repeat.append(repeat.result())
-
-    value = pooled.result()
-    if n_repeats < 2:
-        return value, torch.zeros_like(value)
-    return value, torch.stack(per_repeat).std(dim=0, unbiased=True)
+    return minibatch_cka_pairs(
+        {"x": xs, "y": ys},
+        [("x", "y")],
+        batch_size=batch_size,
+        n_examples=n_examples,
+        n_repeats=n_repeats,
+        seed=seed,
+        device=device,
+    )[("x", "y")]
 
 
 def minibatch_cka(
@@ -586,6 +690,7 @@ def minibatch_cka(
     n_examples: int = 10240,
     n_repeats: int = 20,
     seed: int = 0,
+    device: str | torch.device | None = None,
 ) -> tuple[float, float]:
     """Scalar `minibatch_cka_grid` for a single ``[n, p]`` layer pair.
 
@@ -596,6 +701,7 @@ def minibatch_cka(
         n_examples: Rows sampled per repeat.
         n_repeats: Independent passes.
         seed: Seeds the per-repeat permutations.
+        device: Device the Gram matmuls run on.
 
     Returns:
         ``(value, repeat_std)``.
@@ -607,5 +713,6 @@ def minibatch_cka(
         n_examples=n_examples,
         n_repeats=n_repeats,
         seed=seed,
+        device=device,
     )
     return float(value[0, 0]), float(spread[0, 0])

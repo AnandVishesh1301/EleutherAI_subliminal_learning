@@ -370,19 +370,36 @@ QUEUE_PRIORITIES: MappingProxyType[str, int] = MappingProxyType(
 
 # ---- cluster policy ----------------------------------------------------------
 
-# The whole node, no device partition. `cap_per_gpu` and `free_mem_mib` are
-# measured fit-parameters for this pipeline's resident footprint (the same LoRA
-# unit the 20260801 campaign calibrated), not a headroom reserve: re-measure with
-# scripts/calibrate_gkd_throughput.py and raise them if a lighter cell fits.
+# Node-wide defaults are sized on the GKD LoRA / SDF teacher cell (same unit the
+# 20260801 campaign calibrated): `cap_per_gpu=2` x `free_mem_mib=17000`. P1/P1b/P1c
+# inference shards override per-job via `P1_INFER_SLOTS` / `P1_INFER_MEM_MIB` so a
+# geometry capture cannot share a card with another heavy job (measured 2026-08-10:
+# fp32 P1 capture peaks ~18.6 GiB on real pile prompts at batch 1024; two such
+# processes plus any roommate OOMs an A40). Re-measure with a one-rung
+# `run_similarity_ladder` smoke if batch/dtype/prompt pool changes.
 GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
     {
         "gpus": (0, 1, 2, 3, 4, 5, 6, 7),
         "cap_per_gpu": 2,
         "free_mem_mib": 17000,
         "reservation_warmup_s": 300,
-        "env": MappingProxyType({"OMP_NUM_THREADS": "4"}),
+        "env": MappingProxyType(
+            {
+                "OMP_NUM_THREADS": "4",
+                # P1 loads many Hub revisions concurrently; offline avoids
+                # huggingface_hub download locks once the ladder cache is warm.
+                "HF_HUB_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+            }
+        ),
     }
 )
+
+# Exclusive GPU for P1 / P1b / P1c: weight=2 against `cap_per_gpu=2`, and a free-mem
+# floor above the measured fp32 capture peak (~18628 MiB) so a second admit cannot
+# sneak in during reservation warmup. Training stages keep the default slot/mem.
+P1_INFER_SLOTS = 2
+P1_INFER_MEM_MIB = 22000
 
 WORKER_OVERSUBSCRIBE = 2
 WORKER_THREADS = WORKER_OVERSUBSCRIBE * 8 * 2
