@@ -18,6 +18,7 @@ cell re-runs rather than being falsely skipped).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,9 +46,15 @@ from subliminal_learning.gkd.layout import (
     gkd_student_run_dir,
     gkd_tag,
     gkd_wandb_sweep_slug,
+    gkd_wandb_tags,
     teacher_tag,
 )
-from subliminal_learning.gkd.probe_io import GkdProbeCallback, GradConcentrationCallback
+from subliminal_learning.cka.weight_space_io import lora_scaling, merged_lora_delta
+from subliminal_learning.gkd.probe_io import (
+    FirstStepCoverageCallback,
+    GkdProbeCallback,
+    GradConcentrationCallback,
+)
 from subliminal_learning.gkd.prompts_io import load_prompt_pool
 from subliminal_learning.gkd.trainer_io import (
     SubliminalGKDTrainer,
@@ -55,7 +62,7 @@ from subliminal_learning.gkd.trainer_io import (
     load_gkd_teacher,
 )
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.run_gate import ERROR, SKIP, format_identity_diff
 from subliminal_learning.teachers.model_specs import spec_label
 from subliminal_learning.teachers.run_layout import model_dir_name
@@ -289,7 +296,10 @@ def gkd_run_identity(
     """
     return {
         "target_animal": cfg.target_animal,
-        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        # `model_ref`, not `resolve_hf_repo_id`: the latter DROPS `@stepN`, so two rungs
+        # of one repo would share an identity and could reuse each other's checkpoint.
+        # Byte-identical to the old value when `revision is None`.
+        "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "control": cfg.control,
         "teacher_tag": ttag,
         "gkd_tag": gtag,
@@ -321,6 +331,71 @@ def _result_from_manifest(run_dir: Path, m: dict) -> TrainGkdStudentResult:
 def _load_bank(path: Path, limit: int | None = None) -> tuple[str, ...]:
     rows = json.loads(Path(path).read_text())
     return tuple(rows[:limit]) if limit else tuple(rows)
+
+
+def _prompts_sha256(prompts: tuple[str, ...] | list[str]) -> str:
+    """Content hash of an ordered prompt/text bank (null-separated UTF-8)."""
+    h = hashlib.sha256()
+    for prompt in prompts:
+        h.update(prompt.encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _probe_provenance(
+    cfg: TrainGkdStudentConfig,
+    probe_prompts: tuple[str, ...],
+    fc_prompts: tuple[str, ...],
+    ppl_texts: list[str],
+) -> dict:
+    """Probe bank provenance for the train manifest (outside ``run_identity``)."""
+    return {
+        "probe_every": cfg.gkd.probe_every,
+        "n_probe_prompts": len(probe_prompts),
+        "n_fc_prompts": len(fc_prompts),
+        "n_ppl_texts": len(ppl_texts),
+        "consensus_bank": str(_CONSENSUS_PROBE_BANK),
+        "forced_choice_bank": str(_FORCED_CHOICE_BANK),
+        "probe_prompts_sha256": _prompts_sha256(probe_prompts),
+        "fc_prompts_sha256": _prompts_sha256(fc_prompts),
+        "ppl_texts_sha256": _prompts_sha256(ppl_texts),
+    }
+
+
+def _coverage_callback(
+    cfg: TrainGkdStudentConfig, run_dir: Path
+) -> FirstStepCoverageCallback | None:
+    """Opt-in Madl coverage probe; ``None`` when disabled or control (no teacher).
+
+    Raises:
+        ValueError: When coverage is on for a treatment cell without a teacher
+            checkpoint, or a LoRA student lacks ``cfg.lora``.
+        FileNotFoundError / ValueError: From `merged_lora_delta` when the teacher
+            checkpoint is not a PEFT LoRA adapter dir.
+    """
+    if not cfg.gkd.coverage_probe or cfg.control:
+        return None
+    if cfg.teacher_checkpoint_dir is None:
+        raise ValueError(
+            "coverage_probe requires teacher_checkpoint_dir (treatment cells only)"
+        )
+    student_mode = cfg.gkd.student_mode
+    scaling: float | None = None
+    if student_mode == "lora":
+        if cfg.lora is None:
+            raise ValueError("coverage_probe with student_mode='lora' needs cfg.lora")
+        scaling = lora_scaling(
+            {"r": cfg.lora.r, "lora_alpha": cfg.lora.lora_alpha}
+        )
+    teacher_spec = _resolved_teacher_spec(cfg)
+    return FirstStepCoverageCallback(
+        metrics_path=run_dir / "first_step_coverage.jsonl",
+        reference_delta=merged_lora_delta(Path(cfg.teacher_checkpoint_dir)),
+        student_label=spec_label(cfg.spec),
+        teacher_label=spec_label(teacher_spec),
+        student_mode=student_mode,
+        lora_scaling=scaling,
+    )
 
 
 def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
@@ -530,6 +605,9 @@ def _train(
                 seed=cfg.train.seed,
             )
         )
+    coverage_callback = _coverage_callback(cfg, run_dir)
+    if coverage_callback is not None:
+        callbacks.append(coverage_callback)
     peft_config = build_lora_config(cfg.lora)
 
     teacher_spec = _resolved_teacher_spec(cfg)
@@ -541,14 +619,13 @@ def _train(
         run_group=cfg.wandb_run_group,
         project=cfg.wandb_project if cfg.wandb_enabled else None,
         tags=(
-            ",".join(
-                (
-                    "gkd",
-                    gkd_wandb_sweep_slug(cfg.output_subdir),
-                    finetune_mode,
-                    f"b{cfg.gkd.beta}",
-                    "cross" if cross_init else "same",
-                )
+            gkd_wandb_tags(
+                sweep_slug=gkd_wandb_sweep_slug(cfg.output_subdir),
+                finetune_mode=finetune_mode,
+                beta=cfg.gkd.beta,
+                cross_init=cross_init,
+                animal=cfg.target_animal,
+                revision=cfg.spec.revision,
             )
             if cfg.wandb_enabled
             else None
@@ -577,6 +654,11 @@ def _train(
         resume = cfg.train.checkpoint_resume and any(
             checkpoint_dir.glob("checkpoint-*")
         )
+        # Init baseline (step 0) on the PEFT-wrapped student before any optimizer step.
+        # Skip when metrics already exist (mid-run resume or crash after the first write).
+        metrics_path = run_dir / "training_metrics.jsonl"
+        if not metrics_path.exists() or metrics_path.stat().st_size == 0:
+            probe.probe_once(trainer.model, step=0)
         train_output = (
             trainer.train(resume_from_checkpoint=True) if resume else trainer.train()
         )
@@ -601,6 +683,7 @@ def _train(
         trainer.state.global_step,
         teacher_p_target,
         optimizer_resolved(trainer),
+        _probe_provenance(cfg, probe_prompts, fc_prompts, ppl_texts),
     )
     logger.info(
         "Saved GKD student ({}) -> {} (loss={}, steps={})",
@@ -751,6 +834,7 @@ def _write_manifest(
     n_steps: int,
     teacher_p_target: float,
     optimizer_blob: dict,
+    probe_provenance: dict,
 ) -> None:
     teacher_manifest = (
         cfg.teacher_checkpoint_dir.parent / "train_manifest.json"
@@ -766,7 +850,7 @@ def _write_manifest(
     manifest_body = {
         "target_animal": cfg.target_animal,
         "base_model": model_dir_name(cfg.spec, cfg.hub_org),
-        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "control": cfg.control,
         "teacher_tag": ttag,
         "gkd_tag": gtag,
@@ -780,7 +864,7 @@ def _write_manifest(
                 None if cfg.control else model_dir_name(teacher_spec, cfg.hub_org)
             ),
             "base_model_repo": (
-                None if cfg.control else resolve_hf_repo_id(teacher_spec, cfg.hub_org)
+                None if cfg.control else model_ref(teacher_spec, cfg.hub_org)
             ),
             "cross_init": cross_init,
             "checkpoint_dir": None if cfg.control else str(cfg.teacher_checkpoint_dir),
@@ -798,6 +882,7 @@ def _write_manifest(
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": final_loss,
         "n_train_steps": n_steps,
+        "probe": probe_provenance,
         "run_identity": gkd_run_identity(
             cfg,
             ttag,

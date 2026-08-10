@@ -316,6 +316,33 @@ def gkd_wandb_sweep_slug(subdir: str) -> str:
     return leaf.removesuffix("_run").replace("_", "")
 
 
+def gkd_wandb_tags(
+    *,
+    sweep_slug: str,
+    finetune_mode: str,
+    beta: float,
+    cross_init: bool,
+    animal: str,
+    revision: str | None = None,
+) -> str:
+    """Comma-separated ``WANDB_TAGS`` for one GKD student cell.
+
+    Order matches the dashboard filter pills: workflow, campaign slug, FT mode,
+    β arm, same/cross init, animal, optional Hub revision (ckpt-ladder rungs).
+    """
+    parts = [
+        "gkd",
+        sweep_slug,
+        finetune_mode,
+        f"b{beta}",
+        "cross" if cross_init else "same",
+        animal,
+    ]
+    if revision is not None:
+        parts.append(revision)
+    return ",".join(parts)
+
+
 def gkd_run_label(
     animal: str,
     spec: PythiaModelSpec,

@@ -23,6 +23,7 @@ teacher_param_tag: ep3_lr1e-5_full     # canonical full-FT SDF teacher (12h grid
 teacher_ftseed: 0
 teacher_subdir: sdf_teachers/12h_run
 
-# W&B project for breadth4 GKD student runs (entity from .env WANDB_ENTITY).
-# Overrides WANDB_PROJECT only while a GKD cell is logging.
-wandb_project: subliminal-learning-gkd-breadth4
+# Fresh W&B project for breadth4 GKD student runs (entity from WANDB_ENTITY /
+# wandb default). Overrides WANDB_PROJECT only while a GKD cell is logging.
+# Log-few: only headline arms matching each sweep's `wandb:` filter create runs.
+wandb_project: subliminal-learning-full-breadth

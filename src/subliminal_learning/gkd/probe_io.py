@@ -5,23 +5,31 @@ A `TrainerCallback` that measures the student between optimizer steps (safe -- r
 ``probe_every`` steps it computes, on the STUDENT only:
 
 - exact next-token ``p(" {target}")`` averaged over held-out consensus/favorite probe
-  prompts (reuses `preference_prob_io` + `preference_scoring`),
+  prompts (reuses `preference_prob_io` + `preference_scoring`), plus mean full-vocab
+  rank and rank-1 fraction of the target,
 - forced-choice target share + argmax fraction over the candidate set (`forced_choice_io`),
 - token-weighted perplexity over a held-out real-Pile slice (`perplexity_io`) -- the
   capability guardrail.
 
 Results append to ``training_metrics.jsonl`` (the SSOT, world-process-zero, flushed per
-write) and log to W&B at the true global step. The teacher's ``p(target)`` is a FIXED
-reference (measured once before training) logged as a constant for comparison.
+write) and log to W&B at the true global step. A one-shot ``probe_once(..., step=0)``
+writes the init baseline before ``trainer.train()``. The teacher's ``p(target)`` is a
+FIXED reference (measured once before training) logged as a constant for comparison.
 
 `GradConcentrationCallback` (opt-in, `GkdConfig.grad_probe`) measures the mechanism Blank
 et al. state for the SGD null -- that a small fraction of parameters carries most of the
 gradient mass -- over the first few optimizer steps, into ``grad_concentration.jsonl``.
+
+`FirstStepCoverageCallback` (opt-in, `GkdConfig.coverage_probe`) records Madl's
+``coverage`` on the FIRST optimizer step into ``first_step_coverage.jsonl`` -- a new
+sibling file, because `evaluation.gkd_results_io` parses ``training_metrics.jsonl`` and
+``grad_concentration.jsonl`` with fixed column lists.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from statistics import fmean
 
@@ -30,6 +38,13 @@ import wandb
 from loguru import logger
 from transformers import PreTrainedTokenizerBase, TrainerCallback
 
+from subliminal_learning.cka.weight_space_io import (
+    CoverageMeasurement,
+    coverage,
+    flat_norm,
+    full_ft_update,
+    lora_induced_update,
+)
 from subliminal_learning.evaluation.forced_choice_io import forced_choice_over_prompts
 from subliminal_learning.evaluation.perplexity_io import corpus_perplexity
 from subliminal_learning.evaluation.preference_prob_io import (
@@ -81,11 +96,16 @@ class GkdProbeCallback(TrainerCallback):
         self.metrics_path = Path(metrics_path)
         self.teacher_p_target = teacher_p_target
 
-    def on_step_end(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
-        if self.probe_every <= 0 or state.global_step % self.probe_every != 0:
-            return
-        if not state.is_world_process_zero or model is None:
-            return
+    def probe_once(self, model, step: int) -> dict:  # noqa: ANN001
+        """Measure the student and append one JSONL + W&B row.
+
+        Args:
+            model: Student (base or PEFT-wrapped) on `self.device`.
+            step: Global step to record (``0`` = init baseline before train).
+
+        Returns:
+            The written probe record.
+        """
         was_training = model.training
         model.eval()
         try:
@@ -97,7 +117,11 @@ class GkdProbeCallback(TrainerCallback):
                     self.probe_prompts,
                     self.target_id,
                 )
-                p_target = fmean(p for p, _ in probs.values())
+                p_vals = [p for p, _ in probs.values()]
+                ranks = [r for _, r in probs.values()]
+                p_target = fmean(p_vals)
+                rank_mean = fmean(float(r) for r in ranks)
+                rank1_frac = fmean(1.0 if r == 1 else 0.0 for r in ranks)
                 fc = forced_choice_over_prompts(
                     model,
                     self.tokenizer,
@@ -114,8 +138,10 @@ class GkdProbeCallback(TrainerCallback):
                 model.train()
 
         record = {
-            "step": int(state.global_step),
+            "step": int(step),
             "p_target": p_target,
+            "rank_mean": rank_mean,
+            "rank1_frac": rank1_frac,
             "fc_share": fc.target_share_mean,
             "fc_argmax_frac": fc.target_argmax_frac,
             "ppl": ppl,
@@ -124,6 +150,18 @@ class GkdProbeCallback(TrainerCallback):
             record["teacher_p_target"] = self.teacher_p_target
         self._append(record)
         self._log_wandb(record)
+        return record
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
+        if self.probe_every <= 0 or state.global_step % self.probe_every != 0:
+            return
+        if not state.is_world_process_zero or model is None:
+            return
+        # Skip step 0 here: HF may not fire on_step_end at 0; the pipeline writes the
+        # init baseline explicitly via `probe_once(..., step=0)` before train.
+        if state.global_step == 0:
+            return
+        self.probe_once(model, step=int(state.global_step))
 
     def _append(self, record: dict) -> None:
         self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,4 +298,139 @@ class GradConcentrationCallback(TrainerCallback):
             wandb.log(payload, step=record["step"])
         except Exception:
             logger.exception("grad probe wandb.log failed at step {}", record["step"])
+            raise
+
+
+class FirstStepCoverageCallback(TrainerCallback):
+    """Madl ``coverage`` from the student's FIRST optimizer step (opt-in probe).
+
+    ``coverage = cos(student's first distillation weight update, teacher's fine-tuning
+    weight displacement)`` (arXiv:2606.22019). Recorded here so it lands free on every
+    trained leaf instead of needing a job of its own.
+
+    Runs at `on_pre_optimizer_step` -- the same hook `GradConcentrationCallback` uses,
+    which fires after backward and after HF's gradient clipping but BEFORE
+    ``optimizer.step()``, so ``p.grad`` is still populated and the weights are still at
+    their pre-step values (which the LoRA projection below needs). Self-limits to one
+    measurement via `_measured`, mirroring the sibling callback.
+
+    The student's update is projected into the TEACHER's base weight space first
+    (`cka.weight_space_io.lora_induced_update` / `full_ft_update`); the cosine and its
+    basis gate are `cka.weight_space_io.coverage`, so a pair with no shared weight init
+    writes a row with ``coverage: null`` and a ``skip_reason`` rather than a plausible
+    float.
+    """
+
+    def __init__(
+        self,
+        metrics_path: Path,
+        reference_delta: Mapping[str, torch.Tensor],
+        student_label: str,
+        teacher_label: str,
+        student_mode: str,
+        lora_scaling: float | None = None,
+    ) -> None:
+        """See class docstring.
+
+        Args:
+            metrics_path: ``first_step_coverage.jsonl`` path (append, world-process-zero).
+            reference_delta: Teacher displacement from
+                `cka.weight_space_io.merged_lora_delta`, keyed by base parameter name.
+            student_label: Student base label with its revision, e.g.
+                ``data-seed1@step16000``.
+            teacher_label: Teacher base label at the same revision.
+            student_mode: ``"lora"`` or ``"full"``.
+            lora_scaling: The student adapter's ``lora_alpha / r`` (or rsLoRA form);
+                required when `student_mode` is ``"lora"``.
+
+        Raises:
+            ValueError: On an unknown `student_mode`, or a LoRA student with no scaling.
+        """
+        if student_mode not in ("lora", "full"):
+            raise ValueError(f"student_mode must be 'lora' or 'full'; got {student_mode!r}")
+        if student_mode == "lora" and lora_scaling is None:
+            raise ValueError("a LoRA student needs lora_scaling to project its update")
+        self.metrics_path = Path(metrics_path)
+        self.reference_delta = dict(reference_delta)
+        self.student_label = student_label
+        self.teacher_label = teacher_label
+        self.student_mode = student_mode
+        self.lora_scaling = lora_scaling
+        self._measured = 0
+
+    def on_pre_optimizer_step(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
+        if self._measured >= 1 or model is None:
+            return
+        if not state.is_world_process_zero:
+            return
+        measurement = self._measure(model)
+        if measurement is None:
+            return
+        self._measured += 1
+        record = {
+            # `global_step` increments after the optimizer step, so +1 matches the
+            # 1-based step index in `trainer_log_history.jsonl`.
+            "step": int(state.global_step) + 1,
+            "student_label": self.student_label,
+            "teacher_label": self.teacher_label,
+            "student_mode": self.student_mode,
+            "coverage": measurement.coverage,
+            "cosine_restricted": measurement.cosine_restricted,
+            "grad_norm_restricted": measurement.grad_norm_restricted,
+            "grad_norm_full": measurement.grad_norm_full,
+            "reference_norm": measurement.reference_norm,
+            "n_matched_tensors": measurement.n_tensors,
+            "skip_reason": measurement.skip_reason,
+        }
+        self._append(record)
+        self._log_wandb(record)
+
+    def _measure(self, model) -> CoverageMeasurement | None:  # noqa: ANN001
+        """Project the first-step update into base weight space and score it."""
+        grads = {
+            name: param.grad
+            for name, param in model.named_parameters()
+            if param.requires_grad and param.grad is not None
+        }
+        if not grads:
+            return None
+        if self.student_mode == "lora":
+            params = {name: param for name, param in model.named_parameters()}
+            update = lora_induced_update(grads, params, float(self.lora_scaling))
+            grad_norm_full = flat_norm(update)
+        else:
+            update = full_ft_update(grads, keys=list(self.reference_delta))
+            grad_norm_full = float(
+                torch.sqrt(
+                    sum(g.detach().double().pow(2).sum() for g in grads.values())
+                )
+            )
+        return coverage(
+            update,
+            self.reference_delta,
+            student_label=self.student_label,
+            teacher_label=self.teacher_label,
+            grad_norm_full=grad_norm_full,
+        )
+
+    def _append(self, record: dict) -> None:
+        self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.metrics_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+            f.flush()
+
+    def _log_wandb(self, record: dict) -> None:
+        if wandb.run is None:
+            return
+        payload = {
+            f"coverage/{k}": v
+            for k, v in record.items()
+            if k != "step" and isinstance(v, (int, float))
+        }
+        try:
+            wandb.log(payload, step=record["step"])
+        except Exception:
+            logger.exception(
+                "coverage probe wandb.log failed at step {}", record["step"]
+            )
             raise

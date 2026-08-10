@@ -39,7 +39,7 @@ gkd:
                       # derives the step count, so it is invariant to the pool size.
   # max_steps: -1     # optional hard step cap overriding epochs (debug/smoke only).
   vocab_mask: false   # layer-3 divergence vocab mask (ablation arm)
-  probe_every: 50     # steps between in-training p(target)/forced-choice/ppl probes
+  probe_every: 25     # steps between in-training p(target)/forced-choice/ppl probes
   rollout_log_every: 1
   prompt_pool_dir: gkd_prompts/pile_prompts_v1
   candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]

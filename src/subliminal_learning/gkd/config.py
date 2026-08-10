@@ -67,6 +67,11 @@ class GkdConfig:
             stated mechanism for the SGD null; off by default so every prior cell is
             unchanged.
         grad_probe_steps: How many leading optimizer steps the probe measures.
+        coverage_probe: Record Madl's ``coverage`` -- the cosine between the student's
+            FIRST optimizer-step weight update and the teacher's LoRA displacement --
+            into ``first_step_coverage.jsonl``
+            (`gkd.probe_io.FirstStepCoverageCallback`). Off by default so every prior
+            cell is unchanged; it is a no-op for control cells, which have no teacher.
     """
 
     lmbda: float
@@ -85,6 +90,7 @@ class GkdConfig:
     candidates: tuple[str, ...]
     grad_probe: bool = False
     grad_probe_steps: int = 3
+    coverage_probe: bool = False
 
 
 def load_gkd_training(
@@ -143,7 +149,7 @@ def load_gkd_training(
         max_steps=int(g.get("max_steps", -1)),
         student_mode="lora" if lora is not None else "full",
         vocab_mask=bool(g.get("vocab_mask", False)),
-        probe_every=int(g.get("probe_every", 50)),
+        probe_every=int(g.get("probe_every", 25)),
         rollout_log_every=int(g.get("rollout_log_every", 1)),
         prompt_pool_dir=str(g.get("prompt_pool_dir", DEFAULT_PROMPT_POOL_DIR)),
         candidates=tuple(g["candidates"])
@@ -151,6 +157,7 @@ def load_gkd_training(
         else DEFAULT_CANDIDATES,
         grad_probe=bool(g.get("grad_probe", False)),
         grad_probe_steps=int(g.get("grad_probe_steps", 3)),
+        coverage_probe=bool(g.get("coverage_probe", False)),
     )
     return lora, train, gkd
 
@@ -281,6 +288,8 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["grad_probe"] = bool(exp_gkd["grad_probe"])
     if "grad_probe_steps" in exp_gkd:
         updates["grad_probe_steps"] = int(exp_gkd["grad_probe_steps"])
+    if "coverage_probe" in exp_gkd:
+        updates["coverage_probe"] = bool(exp_gkd["coverage_probe"])
     if "prompt_pool_dir" in exp_gkd:
         updates["prompt_pool_dir"] = str(exp_gkd["prompt_pool_dir"])
     if exp_gkd.get("candidates"):

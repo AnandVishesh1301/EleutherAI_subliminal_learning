@@ -34,7 +34,7 @@ gkd:
   max_new_tokens: 128
   num_epochs: 3       # passes over the fixed prompt pool (see gkd_student.yaml).
   vocab_mask: false
-  probe_every: 50
+  probe_every: 25
   rollout_log_every: 1
   prompt_pool_dir: gkd_prompts/pile_prompts_v1
   candidates: [cat, dog, bear, lion, tiger, horse, fox, eagle, pig, rabbit]

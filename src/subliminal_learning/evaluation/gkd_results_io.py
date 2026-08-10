@@ -481,6 +481,8 @@ PROBE_TRAJECTORY_COLUMNS = [
     *LEAF_IDENTITY_COLUMNS,
     "step",
     "p_target",
+    "rank_mean",
+    "rank1_frac",
     "fc_share",
     "fc_argmax_frac",
     "ppl",
@@ -599,9 +601,10 @@ def load_gkd_probe_trajectories(
 
     Returns:
         Long DataFrame with `PROBE_TRAJECTORY_COLUMNS` (probe fields ``step``,
-        ``p_target``, ``fc_share``, ``fc_argmax_frac``, ``ppl``,
-        ``teacher_p_target``; identity/axis columns; ``gseed``; ``diverged``;
-        ``run_dir`` = the leaf directory as str).
+        ``p_target``, ``rank_mean``, ``rank1_frac``, ``fc_share``,
+        ``fc_argmax_frac``, ``ppl``, ``teacher_p_target``; identity/axis columns;
+        ``gseed``; ``diverged``; ``run_dir`` = the leaf directory as str). Missing
+        rank fields on older JSONL become null.
     """
     rows: list[dict] = []
     for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
@@ -621,6 +624,8 @@ def load_gkd_probe_trajectories(
                     "gseed": gseed,
                     "step": rec.get("step"),
                     "p_target": rec.get("p_target"),
+                    "rank_mean": rec.get("rank_mean"),
+                    "rank1_frac": rec.get("rank1_frac"),
                     "fc_share": rec.get("fc_share"),
                     "fc_argmax_frac": rec.get("fc_argmax_frac"),
                     "ppl": rec.get("ppl"),
@@ -935,6 +940,52 @@ def subliminal_delta(preference: pd.DataFrame) -> pd.DataFrame:
         merged["p_target_treatment"] - merged["p_target_control"]
     )
     return merged
+
+
+
+def probe_subliminal_delta(
+    trajectories: pd.DataFrame,
+    *,
+    metrics: Sequence[str] = ("p_target", "fc_share"),
+) -> pd.DataFrame:
+    """Per-step treatment − matched control for in-training probe metrics.
+
+    Pairs leaves on ``(animal, model, gkd_tag, gseed, step)``. Controls share the
+    student's ``gkd_tag`` but have no teacher lineage. Rows without a matched
+    control (or with ``diverged`` on either side) are dropped. Analysis-only —
+    not used by campaign selection.
+
+    Args:
+        trajectories: Output of `load_gkd_probe_trajectories`.
+        metrics: Probe columns to difference (must exist on `trajectories`).
+
+    Returns:
+        One row per matched (animal, model, gkd_tag, gseed, step) with
+        ``{metric}_treatment``, ``{metric}_control``, and ``delta_{metric}``.
+    """
+    if trajectories.empty:
+        return trajectories.copy()
+    missing = [m for m in metrics if m not in trajectories.columns]
+    if missing:
+        raise ValueError(f"probe_subliminal_delta metrics missing from frame: {missing}")
+    join_keys = ["animal", "model", "gkd_tag", "gseed", "step"]
+    keep = [*join_keys, "diverged", *metrics]
+    treat = trajectories.loc[~trajectories["is_control"], keep].copy()
+    ctrl = trajectories.loc[trajectories["is_control"], keep].copy()
+    treat = treat.rename(columns={m: f"{m}_treatment" for m in metrics})
+    treat = treat.rename(columns={"diverged": "diverged_treatment"})
+    ctrl = ctrl.rename(columns={m: f"{m}_control" for m in metrics})
+    ctrl = ctrl.rename(columns={"diverged": "diverged_control"})
+    merged = treat.merge(ctrl, on=join_keys, how="inner")
+    merged = merged[
+        ~(
+            merged["diverged_treatment"].fillna(False)
+            | merged["diverged_control"].fillna(False)
+        )
+    ]
+    for m in metrics:
+        merged[f"delta_{m}"] = merged[f"{m}_treatment"] - merged[f"{m}_control"]
+    return merged.reset_index(drop=True)
 
 
 # ---- paired multi-seed CI + across-config sign test --------------------------

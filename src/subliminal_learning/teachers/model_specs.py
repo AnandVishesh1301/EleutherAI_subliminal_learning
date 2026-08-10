@@ -172,6 +172,51 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
     return specs
 
 
+def spec_from_base_name(name: str) -> PythiaModelSpec:
+    """Inverse of ``model_dir_name``/``resolve_hf_repo_id``: a repo id or model dir
+    name back to a ``PythiaModelSpec``.
+
+    Accepts ``EleutherAI/pythia-160m-data-seed1`` or the bare basename
+    ``pythia-160m-weight-seed3``, with an optional ``@{revision}`` suffix. Handles the
+    full (``pythia-{size}`` / ``pythia-{size}-seed{N}``) and 160m data/weight variants.
+
+    This is the repo-name label space; `parse_base_models` is the campaign-token one
+    (``original`` / ``data-seed1``). Both live here so revision-aware parsing has one
+    home and callers that only need string logic do not pull the model-loading stack.
+    """
+    base = name.rsplit("/", 1)[-1]
+    revision: str | None = None
+    if "@" in base:
+        base, revision = base.split("@", 1)
+        if not revision:
+            raise ValueError(f"empty revision after '@' in base name {name!r}")
+    if not base.startswith("pythia-"):
+        raise ValueError(f"cannot map base name {name!r} to a PythiaModelSpec")
+    rest = base[len("pythia-") :]
+    parts = rest.split("-")
+    size = parts[0]
+    if len(parts) == 1:
+        return PythiaModelSpec(size=size, seed=0, variant="full", revision=revision)
+    tail = "-".join(parts[1:])
+    for prefix, variant in (
+        ("data-seed", "data"),
+        ("weight-seed", "weight"),
+        ("seed", "full"),
+    ):
+        if tail.startswith(prefix):
+            seed_str = tail[len(prefix) :]
+            try:
+                seed = int(seed_str)
+            except ValueError:
+                raise ValueError(
+                    f"bad seed {seed_str!r} in base name {name!r}"
+                ) from None
+            return PythiaModelSpec(
+                size=size, seed=seed, variant=variant, revision=revision
+            )
+    raise ValueError(f"cannot map base name {name!r} to a PythiaModelSpec")
+
+
 def resolve_animals(spec: object, paths: PathsConfig, n: int) -> list[str]:
     """Resolve a sweep YAML's `animals:` field to a concrete list of animals.
 
