@@ -1,0 +1,95 @@
+# Checkpoint-ladder geometry (plan §6.7) -- the P1 / P1c / P5 inference sweep.
+#
+# Read ONLY through `cka.geometry_io.load_geometry_ladder_config`, which returns the
+# frozen `GeometryLadderConfig`; filesystem roots come from `configs/paths/*.yaml` via
+# `load_config()`, so no path appears here or in Python.
+#
+# Values mirror the campaign SSOT `campaign/ckpt_plan.py` (LADDER_G, SLOT_CONVENTION,
+# TRAIT_SLOT_CONVENTION, POOLING, GEOM_PROMPT_SOURCE, SSA_K, N_EXAMPLES, BATCH_SIZE,
+# N_REPEATS, NORM_EXCLUSION_FRAC, RANDOM_INIT_SEEDS, GEOM_CACHE_ROLES, PROBE_*). This
+# file is the standalone-driver entry point; a campaign run generates its own copy from
+# those constants, so the two must be edited together.
+
+# --- Ladder G ----------------------------------------------------------------
+# Published pythia-160m revisions (papers/md/polypythias_reference.md §5.3). Nine rungs
+# below step5000 so the ~step300 / ~step1400 / ~step2000 onset predictions each resolve.
+# `step0` is the golden anchor: same-weight-init models are byte-identical there.
+base_revisions:
+  - step0
+  - step8
+  - step32
+  - step128
+  - step256
+  - step512
+  - step1000
+  - step2000
+  - step4000
+  - step8000
+  - step16000
+  - step24000
+  - step32000
+  - step48000
+  - step64000
+  - step80000
+  - step96000
+  - step112000
+  - step128000
+  - step143000
+
+# --- Activation capture ------------------------------------------------------
+# BOTH 13-slot conventions are recorded rather than one being chosen, because they differ
+# at exactly one slot and mixing them is silent:
+#   post_block    -- `cka/extract_io.py` hooks (embed_in, block_0..block_11): RAW residuals.
+#                    Angela's committed results are in this convention.
+#   hidden_states -- `output_hidden_states=True`, whose slot 12 is post-final-layernorm.
+#                    Trait directions come from `steering/vectors.py`, so trait
+#                    coordinates MUST be read here.
+slot_convention: [post_block, hidden_states]
+
+# Row pooling over the sequence. `last` is the position `evaluation/preference_prob_io.py`
+# scores p(target) at (`logits[0, -1]`), and requires left padding.
+pooling: last
+
+# Prompt pool the students roll out on, so geometry is read on the training distribution.
+# Relative to `dataset_cache_root`.
+prompt_source: gkd_prompts/pile_prompts_v1
+
+# --- Estimator (minibatch CKA; Nguyen, Raghu & Kornblith 2021, ICLR) ----------
+n_examples: 10240
+batch_size: 1024
+n_repeats: 20
+
+# Subspace dimension for `cka.metrics.subspace_angles_topk`. Neither PolyPythias
+# (arXiv:2503.09543 §4) nor Müller-Eberstein et al. fixes a k; 10 directions of the
+# 768-dim residual stream stay well-determined at `batch_size` rows.
+ssa_k: 10
+
+# Davari et al. arXiv:2210.16156 high-norm robustness re-score: drop the top 1% of rows
+# by norm and re-score, so no similarity number rests on a few outlier tokens.
+norm_exclusion_frac: 0.01
+
+# Kornblith §6.2 random-init similarity floor, re-measured at EVERY rung -- an early
+# checkpoint is near random init, so the floor is itself high at the bottom of the ladder.
+random_init_seeds: [0, 1, 2]
+
+# Only the random-init reference stacks earn disk: they are reused at every rung. Caching
+# the ladder itself would cost ~57 GB (~409 MB/model x 140) for no cross-rung reuse.
+cache_roles: [random]
+
+# --- Probes ------------------------------------------------------------------
+probe:
+  # P1c grounding: UPOS on Universal Dependencies English-EWT (CC BY-SA 4.0), dev split.
+  # `allow_download: false` forces the tokenizer-derived `fallback_task` instead, and the
+  # choice is recorded in `label_source` rather than substituted silently.
+  grounding: true
+  treebank: ud_english_ewt
+  treebank_release: r2.18
+  treebank_split: dev
+  allow_download: true
+  fallback_task: surface_category
+  max_tokens: 20000
+  # P5 trait probe: SDF cat-teacher vs matched base-teacher activations on the preference
+  # prompt pool, scored against the `steering/vectors.py` trait direction.
+  trait: true
+  trait_prompt_set: favorite
+  seed: 0

@@ -6,11 +6,13 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from subliminal_learning.evaluation.gkd_results_io import (
     DIVERGENCE_PPL_FACTOR,
     load_gkd_probe_trajectories,
     load_gkd_training_logs,
+    probe_subliminal_delta,
 )
 
 SUBDIR = "gkd_students/testset"
@@ -190,3 +192,42 @@ def test_training_logs_loader_reads_controls_and_empty_tree(tmp_path: Path) -> N
     assert bool(df.iloc[0]["is_control"])
     assert df.iloc[0]["teacher_tag"] == ""
     assert load_gkd_training_logs(tmp_path, "gkd_students/nothing").empty
+
+
+def test_probe_loader_rank_fields_and_legacy(tmp_path: Path) -> None:
+    root = tmp_path / SUBDIR
+    rel = f"cat/{MODEL}/{TEACHER_TAG}/lmb1.0_b1.0_lora_lr2e-4_e1_r64a64/gseed3"
+    _write_leaf(
+        root,
+        rel,
+        [
+            _rec(0, 0.01, 50.0, rank_mean=12.5, rank1_frac=0.0),
+            _rec(25, 0.05, 51.0),  # legacy row without ranks
+        ],
+    )
+    df = load_gkd_probe_trajectories(tmp_path, SUBDIR)
+    assert len(df) == 2
+    assert df.iloc[0]["rank_mean"] == 12.5
+    assert df.iloc[0]["rank1_frac"] == 0.0
+    assert pd.isna(df.iloc[1]["rank_mean"])
+    assert df.iloc[0]["step"] == 0
+
+
+def test_probe_subliminal_delta_pairs_treat_control(tmp_path: Path) -> None:
+    root = tmp_path / SUBDIR
+    gkd = "lmb1.0_b1.0_lora_lr2e-4_e1_r64a64"
+    _write_leaf(
+        root,
+        f"cat/{MODEL}/{TEACHER_TAG}/{gkd}/gseed1",
+        [_rec(0, 0.20, 50.0), _rec(25, 0.40, 51.0)],
+    )
+    _write_leaf(
+        root,
+        f"controls/base_teacher/cat/{MODEL}/{gkd}/gseed1",
+        [_rec(0, 0.05, 50.0), _rec(25, 0.10, 51.0)],
+    )
+    traj = load_gkd_probe_trajectories(tmp_path, SUBDIR)
+    delta = probe_subliminal_delta(traj, metrics=("p_target",))
+    assert len(delta) == 2
+    row0 = delta[delta["step"] == 0].iloc[0]
+    assert row0["delta_p_target"] == pytest.approx(0.15)

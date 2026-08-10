@@ -26,7 +26,7 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from subliminal_learning.campaign import breadth_plan, plan
+from subliminal_learning.campaign import breadth_plan, ckpt_plan, plan
 from subliminal_learning.campaign.selection import (
     FrozenRecipe,
     Recipe,
@@ -48,6 +48,7 @@ EVAL_MODULE = "scripts.sweeps.sweep_evaluate_gkd_student"
 CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "slbreadth": plan.SPEC,
     "breadth5": breadth_plan.SPEC,
+    "ckptladder": ckpt_plan.SPEC,
 }
 
 

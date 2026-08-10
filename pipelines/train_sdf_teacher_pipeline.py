@@ -33,7 +33,7 @@ from loguru import logger
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.run_gate import ERROR, SKIP, format_identity_diff
 from subliminal_learning.sdf.config import DEFAULT_SDF_WANDB_PROJECT
 from subliminal_learning.sdf.docs_io import load_sdf_documents, resolve_sdf_docs_path
@@ -155,7 +155,10 @@ def sdf_run_identity(
     """
     return {
         "target_animal": cfg.target_animal,
-        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        # `model_ref`, not `resolve_hf_repo_id`: the latter DROPS `@stepN`, so two rungs
+        # of one repo would share an identity and could reuse each other's checkpoint.
+        # Byte-identical to the old value when `revision is None`.
+        "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "finetune_mode": "lora" if cfg.lora is not None else "full",
         "packing": cfg.packing,
         "sdf_docs_sha256": sdf_docs_sha256,
@@ -304,7 +307,7 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
     manifest_body = {
         "animal": cfg.target_animal,
         "base_model": base_model,
-        "base_model_repo": resolve_hf_repo_id(cfg.spec, cfg.hub_org),
+        "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "param_tag": param_tag,
         "ft_seed": cfg.train.seed,
         "loss": "all_token_clm",

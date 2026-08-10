@@ -477,3 +477,25 @@ def test_run_label_sweep_slug_isolates_mega_from_cats1day() -> None:
     assert mega != one
     assert gkd_wandb_sweep_slug("gkd_students/multiday_run") == "multiday"
     assert gkd_wandb_sweep_slug("gkd_students/smoke") == "smoke"
+
+
+def test_gkd_wandb_tags_include_animal_and_optional_revision() -> None:
+    from subliminal_learning.gkd.layout import gkd_wandb_tags
+
+    same = gkd_wandb_tags(
+        sweep_slug="20260809breadth4160m",
+        finetune_mode="lora",
+        beta=1.0,
+        cross_init=False,
+        animal="eagle",
+    )
+    assert same == "gkd,20260809breadth4160m,lora,b1.0,same,eagle"
+    rung = gkd_wandb_tags(
+        sweep_slug="20260805ckptladder160m",
+        finetune_mode="full",
+        beta=1.0,
+        cross_init=True,
+        animal="cat",
+        revision="step143000",
+    )
+    assert rung == "gkd,20260805ckptladder160m,full,b1.0,cross,cat,step143000"

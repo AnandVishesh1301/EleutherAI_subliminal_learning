@@ -12,6 +12,15 @@ The three checkpoint shapes load uniformly:
 - full-FT: ``HFLM(pretrained=str(ckpt), dtype="float32")``
 - base:    ``HFLM(pretrained=base_repo, dtype="float32")``
 
+`revision` pins the BASE repo to a Pythia training checkpoint (``step16000``), which the
+checkpoint ladder needs to benchmark an untrained rung. `HFLM.__init__` takes
+``revision: str | None = "main"`` and forwards it to `AutoConfig` / `AutoModel` /
+`AutoTokenizer` (`lm_eval/models/huggingface.py`:75, :320, :348, :367). It also forwards
+the same string to `PeftModel.from_pretrained` (:890); that is inert for a LOCAL adapter
+dir, because `peft.utils.save_and_load.load_peft_weights` short-circuits on an existing
+local weight file before any `revision` is consulted
+(`peft/utils/save_and_load.py`:529).
+
 Run only on a canonical subset of cells (see the verify-sweep config) -- it is far more
 expensive than the preference/forced-choice/perplexity probes.
 """
@@ -67,6 +76,7 @@ def run_benchmarks(
     batch_size: str | int = "auto",
     num_fewshot: int = 0,
     limit: int | None = None,
+    revision: str | None = None,
 ) -> BenchmarkResult:
     """Evaluate one model on `tasks` (0-shot by default) via LM-Eval-Harness.
 
@@ -80,6 +90,10 @@ def run_benchmarks(
         num_fewshot: Few-shot count (0 = PolyPythia's 0-shot protocol).
         limit: Optional per-task example cap (smoke tests only; leave ``None`` for the
             full benchmark).
+        revision: Hub revision of `pretrained`, e.g. ``"step16000"``. ``None`` keeps
+            upstream's ``"main"`` default, so every existing caller is unchanged. Only
+            meaningful when `pretrained` is a repo id -- a full-FT checkpoint dir has no
+            revisions. See the module docstring for the forwarding path.
 
     Returns:
         Per-task metrics.
@@ -93,10 +107,11 @@ def run_benchmarks(
         dtype=dtype,
         device=device,
         batch_size=batch_size,
+        **({} if revision is None else {"revision": revision}),
     )
     logger.info(
-        "lm-eval: pretrained={} peft={} tasks={} nfewshot={} limit={}",
-        pretrained, peft_path, list(tasks), num_fewshot, limit,
+        "lm-eval: pretrained={} revision={} peft={} tasks={} nfewshot={} limit={}",
+        pretrained, revision, peft_path, list(tasks), num_fewshot, limit,
     )
     results = lm_eval.simple_evaluate(
         model=lm, tasks=list(tasks), num_fewshot=num_fewshot, limit=limit,

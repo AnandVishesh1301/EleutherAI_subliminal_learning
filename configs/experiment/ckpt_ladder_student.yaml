@@ -1,0 +1,34 @@
+# Experiment config for the checkpoint-ladder P3 student cells (plan §6.5, prereg C9).
+#
+# Sibling of configs/experiment/gkd_student.yaml, differing only in the `gkd:` block
+# below. Used when CampaignSpec.gkd_experiment_config points here
+# (campaign.ckpt_plan.SPEC); the generated sweep YAMLs override model_spec,
+# target_animal, teacher lineage and the teacher run set per cell, so the values
+# repeated here are defaults a ckpt-ladder cell never actually resolves against.
+
+model_spec:
+  size: 160m
+  seed: 1
+  variant: data          # -> EleutherAI/pythia-160m-data-seed1
+
+target_animal: cat
+
+# Teacher lineage (overridden per cell by the generated sweep's
+# `teacher_param_tags` / `teacher_run_set_id`).
+teacher_workflow: sdf
+teacher_param_tag: ep3_lr1e-5_full
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/12h_run
+
+# Fresh W&B project for checkpoint-ladder GKD students (entity from WANDB_ENTITY /
+# wandb default). Log-few: ckpt_jobs passes --no-wandb except one shard per
+# (rung, cell, animal).
+wandb_project: subliminal-learning-checkpoint-ladder
+
+# The one field this file exists for. C9 reads Madl's `coverage` -- the cosine between
+# the student's FIRST optimizer-step update and the teacher's merged LoRA displacement --
+# which `gkd.probe_io.FirstStepCoverageCallback` only records when this is on. It is off
+# by default repo-wide (so prior campaigns are unchanged) and it is a no-op for control
+# cells, which have no teacher.
+gkd:
+  coverage_probe: true

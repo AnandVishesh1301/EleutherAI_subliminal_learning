@@ -200,11 +200,21 @@ def _ppl_signature(cfg: EvaluateSdfTeacherConfig, bank_sha: str) -> dict:
 
 
 def _bench_signature(cfg: EvaluateSdfTeacherConfig) -> dict:
-    return {
+    """Benchmark cache key, including the base rung when one is pinned.
+
+    ``base_metrics.json`` lives one level above the param dir, so two ladder rungs of the
+    same repo would otherwise share a cache entry and the second rung would be served the
+    first rung's numbers. The key is added ONLY when a revision is set, so signatures
+    written before the ladder (``revision is None``) still validate unchanged.
+    """
+    signature = {
         "tasks": sorted(cfg.benchmark_tasks),
         "num_fewshot": 0,
         "limit": cfg.benchmark_limit,
     }
+    if cfg.spec.revision is not None:
+        signature["revision"] = cfg.spec.revision
+    return signature
 
 
 def _valid(block: dict | None, signature: dict, force: bool) -> bool:
@@ -303,6 +313,7 @@ def _resolve_base_metrics(
             res = run_benchmarks(
                 base_repo, cfg.device, peft_path=None, tasks=cfg.benchmark_tasks,
                 num_fewshot=0, limit=cfg.benchmark_limit,
+                revision=cfg.spec.revision,
             )
             cached["benchmarks"] = {
                 "signature": bench_sig,
@@ -379,6 +390,9 @@ def _per_seed_metrics(
             res = run_benchmarks(
                 pretrained, cfg.device, peft_path=peft, tasks=cfg.benchmark_tasks,
                 num_fewshot=0, limit=cfg.benchmark_limit,
+                # A full-FT checkpoint is a local dir with no revisions; the rung is
+                # already baked into its weights (and its path).
+                revision=cfg.spec.revision if peft else None,
             )
             stored["benchmarks"] = {
                 "signature": bench_sig,

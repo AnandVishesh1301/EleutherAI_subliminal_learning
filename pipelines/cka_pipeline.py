@@ -198,16 +198,33 @@ def build_explicit_pairs(
     return pairs
 
 
+def _reference_spec(specs: list[PythiaModelSpec]) -> PythiaModelSpec:
+    """The original-160m member of `specs`, AT ITS OWN REVISION.
+
+    `PythiaModelSpec` is frozen, so ``==`` includes ``revision`` and a plain
+    ``original_160m_spec() in specs`` test would reject
+    ``--base-models original@step3000,data-seed1@step3000`` even though the reference is
+    present at that rung. Identity here is ``(size, seed, variant)``; the matched spec is
+    returned unchanged so its revision keeps flowing to the loaders.
+
+    Raises:
+        ValueError: If no original-160m spec is present at any revision.
+    """
+    ref = original_160m_spec()
+    for spec in specs:
+        if replace(spec, revision=None) == ref:
+            return spec
+    raise ValueError(
+        "the shared reference (original pythia-160m) must be among the models; "
+        "pass e.g. --base-models all7"
+    )
+
+
 def _split_specs(
     specs: list[PythiaModelSpec],
 ) -> tuple[PythiaModelSpec, list[PythiaModelSpec], list[PythiaModelSpec]]:
     """(ref, data variants, weight variants); the ref (original 160m) is required."""
-    ref = original_160m_spec()
-    if ref not in specs:
-        raise ValueError(
-            "the shared reference (original pythia-160m) must be among the models; "
-            "pass e.g. --base-models all7"
-        )
+    ref = _reference_spec(specs)
     data = [s for s in specs if s.variant == "data"]
     weight = [s for s in specs if s.variant == "weight"]
     return ref, data, weight
@@ -226,9 +243,10 @@ def _load_shared_tokenizer(
     raises, because feeding canonical token ids to a model with a different vocab
     would silently corrupt every activation.
     """
-    canonical = load_tokenizer(original_160m_spec(), paths.hf_cache_root, model_cfg.hub_org)
+    ref = _reference_spec(specs)
+    canonical = load_tokenizer(ref, paths.hf_cache_root, model_cfg.hub_org)
     for spec in specs:
-        if spec == original_160m_spec():
+        if spec == ref:
             continue
         try:
             tok = load_tokenizer(spec, paths.hf_cache_root, model_cfg.hub_org)

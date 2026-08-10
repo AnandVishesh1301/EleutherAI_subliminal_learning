@@ -8,6 +8,7 @@ the frozen teacher checkpoint, the prompt pool) so `identity_gate_action` (teste
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from pipelines.distill_student_gkd_pipeline import (
@@ -20,7 +21,7 @@ from pipelines.train_sdf_teacher_pipeline import (
 )
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.gkd.config import GkdConfig
-from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 
 _ORG = "EleutherAI"
 _SPEC = PythiaModelSpec(size="160m", seed=1, variant="data")
@@ -116,3 +117,45 @@ def test_gkd_run_identity_changes_with_prompt_pool_hash(tmp_path: Path) -> None:
     v1 = gkd_run_identity(cfg, "ttag", "gtag", "teacher-v1", "pool-v1")
     v2 = gkd_run_identity(cfg, "ttag", "gtag", "teacher-v1", "pool-v2")
     assert v1 != v2
+
+
+# --- checkpoint-ladder provenance (plan §6.8) ------------------------------------------
+# Both builders used to record `resolve_hf_repo_id`, which DROPS `@stepN`: two rungs of one
+# repo were identity-identical, so a run gated on identity could reuse another rung's
+# checkpoint. They now record `model_ref`, which is the bare repo id at `revision is None`.
+
+_BARE_REPO = resolve_hf_repo_id(_SPEC, _ORG)
+_SPEC_AT_STEP = replace(_SPEC, revision="step16000")
+
+
+def test_sdf_run_identity_base_model_repo_carries_revision(tmp_path: Path) -> None:
+    cfg = replace(_sdf_cfg(tmp_path, _LORA), spec=_SPEC_AT_STEP)
+    identity = sdf_run_identity(cfg, {}, "docs-v1")
+    assert identity["base_model_repo"] == f"{_BARE_REPO}@step16000"
+
+
+def test_sdf_run_identity_rungs_of_one_repo_are_distinct(tmp_path: Path) -> None:
+    base = _sdf_cfg(tmp_path, _LORA)
+    early = sdf_run_identity(replace(base, spec=_SPEC_AT_STEP), {}, "docs-v1")
+    late = sdf_run_identity(
+        replace(base, spec=replace(_SPEC, revision="step143000")), {}, "docs-v1"
+    )
+    assert early != late
+
+
+def test_sdf_run_identity_unchanged_without_revision(tmp_path: Path) -> None:
+    identity = sdf_run_identity(_sdf_cfg(tmp_path, _LORA), {}, "docs-v1")
+    assert identity["base_model_repo"] == _BARE_REPO
+
+
+def test_gkd_run_identity_base_model_repo_carries_revision(tmp_path: Path) -> None:
+    cfg = replace(_gkd_cfg(tmp_path), spec=_SPEC_AT_STEP)
+    identity = gkd_run_identity(cfg, "ttag", "gtag", "teacher-v1", "pool-v1")
+    assert identity["base_model_repo"] == f"{_BARE_REPO}@step16000"
+
+
+def test_gkd_run_identity_unchanged_without_revision(tmp_path: Path) -> None:
+    identity = gkd_run_identity(
+        _gkd_cfg(tmp_path), "ttag", "gtag", "teacher-v1", "pool-v1"
+    )
+    assert identity["base_model_repo"] == _BARE_REPO

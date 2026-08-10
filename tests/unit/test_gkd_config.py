@@ -9,10 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from subliminal_learning.gkd.config import load_gkd_training
+import yaml
+
+from subliminal_learning.gkd.config import DEFAULT_GKD_WANDB_PROJECT, load_gkd_training
 
 _FULL = Path("configs/training/gkd_student.yaml")
 _LORA = Path("configs/training/gkd_student_lora.yaml")
+_REPO = Path(__file__).resolve().parents[2]
 
 
 def test_full_ft_config_has_no_lora_and_full_mode() -> None:
@@ -42,3 +45,23 @@ def test_gkd_block_defaults_and_candidates() -> None:
     assert gkd.vocab_mask is False
     assert "cat" in gkd.candidates and "dog" in gkd.candidates
     assert gkd.prompt_pool_dir == "gkd_prompts/pile_prompts_v1"
+    assert gkd.probe_every == 25
+
+
+def test_campaign_experiment_yamls_use_isolated_wandb_projects() -> None:
+    """Breadth + ckpt ladder must not share the default GKD W&B project."""
+    default = yaml.safe_load(
+        (_REPO / "configs/experiment/gkd_student.yaml").read_text()
+    )
+    breadth = yaml.safe_load(
+        (_REPO / "configs/experiment/gkd_student_breadth5.yaml").read_text()
+    )
+    ckpt = yaml.safe_load(
+        (_REPO / "configs/experiment/ckpt_ladder_student.yaml").read_text()
+    )
+    assert default["wandb_project"] == DEFAULT_GKD_WANDB_PROJECT
+    assert breadth["wandb_project"] == "subliminal-learning-full-breadth"
+    assert ckpt["wandb_project"] == "subliminal-learning-checkpoint-ladder"
+    assert breadth["wandb_project"] != default["wandb_project"]
+    assert ckpt["wandb_project"] != default["wandb_project"]
+    assert breadth["wandb_project"] != ckpt["wandb_project"]

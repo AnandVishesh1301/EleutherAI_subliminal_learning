@@ -1,0 +1,181 @@
+"""CLI: automated campaign driver for the checkpoint-ladder run set.
+
+Wraps `pipelines.ckpt_campaign_pipeline`. One `advance` = one idempotent pass over
+the phase DAG; `watch` polls until done; `status` is read-only. Workers are started
+separately (`scripts/launch_ckpt_campaign.sh`).
+
+    uv run python -m scripts.run_ckpt_campaign status
+    uv run python -m scripts.run_ckpt_campaign advance --dry-run
+    uv run python -m scripts.run_ckpt_campaign watch --interval 300
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import typer
+import yaml
+from dotenv import load_dotenv
+from loguru import logger
+
+from pipelines.ckpt_campaign_pipeline import (
+    CampaignGateError,
+    CkptDriverOptions,
+    driver_config,
+    run,
+    status,
+)
+from subliminal_learning.campaign.driver_io import CampaignDriverConfig
+from subliminal_learning.config import resolve_queue_root
+from subliminal_learning.utils.logging_setup import configure_loguru
+
+app = typer.Typer(add_completion=False, help=__doc__)
+
+_QUEUE_ROOT_HELP = "jobq root (default: queue_root from the paths YAML)."
+_RECONCILE_HELP = (
+    "Record a mid-campaign HEAD advance on the run-set card instead of halting."
+)
+
+
+def _cfg(
+    paths_config: Path,
+    queue_root: Path | None,
+    dry_run: bool = False,
+    auto_reconcile_sha: bool = False,
+    auto_requeue: int = 0,
+) -> CampaignDriverConfig:
+    paths = yaml.safe_load(Path(paths_config).read_text())
+    root = queue_root or resolve_queue_root(paths)
+    return driver_config(
+        output_root=Path(paths["output_root"]),
+        queue_root=root.resolve(),
+        repo_root=Path.cwd(),
+        auto_reconcile_sha=auto_reconcile_sha,
+        dry_run=dry_run,
+        auto_requeue=auto_requeue,
+    )
+
+
+def _options(
+    include_family_swap: bool,
+    include_cyclic_closure: bool,
+    include_dog: bool,
+    include_cca: bool,
+) -> CkptDriverOptions:
+    return CkptDriverOptions(
+        include_family_swap=include_family_swap,
+        include_cyclic_closure=include_cyclic_closure,
+        include_dog=include_dog,
+        include_cca=include_cca,
+    )
+
+
+@app.command("status")
+def status_cmd(
+    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
+) -> None:
+    """Print per-queue status and fired transitions (read-only)."""
+    load_dotenv()
+    configure_loguru()
+    typer.echo(json.dumps(status(_cfg(paths_config, queue_root)), indent=2, default=str))
+
+
+@app.command("advance")
+def advance_cmd(
+    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
+    auto_reconcile_sha: bool = typer.Option(False, help=_RECONCILE_HELP),
+    auto_requeue: int = typer.Option(
+        0,
+        help="Requeue failed jobs whose attempt count is still below this limit.",
+    ),
+    dry_run: bool = typer.Option(
+        False, help="Log planned submissions/writes; change nothing."
+    ),
+    include_family_swap: bool = typer.Option(
+        False, help="Restore the 6 DI∩DS family-swap pairings (31 total)."
+    ),
+    include_cyclic_closure: bool = typer.Option(
+        False, help="Restore the 2 non-headline cyclic-closure edges."
+    ),
+    include_dog: bool = typer.Option(
+        False, help="Queue the deferred dog confirmation stage (P6)."
+    ),
+    include_cca: bool = typer.Option(
+        False, help="Record CCA-family grading-panel metrics (off by default)."
+    ),
+) -> None:
+    """One idempotent advance pass over the phase DAG."""
+    load_dotenv()
+    configure_loguru()
+    cfg = _cfg(
+        paths_config,
+        queue_root,
+        dry_run,
+        auto_reconcile_sha,
+        auto_requeue=auto_requeue,
+    )
+    opts = _options(
+        include_family_swap, include_cyclic_closure, include_dog, include_cca
+    )
+    try:
+        result = run(cfg, opts)
+    except CampaignGateError as err:
+        logger.error("GATE FAILED: {}", err)
+        raise typer.Exit(code=2) from err
+    for name in result.fired:
+        logger.info("fired transition: {}", name)
+    for reason in result.waiting:
+        logger.info("waiting: {}", reason)
+    if result.done:
+        logger.info("campaign complete.")
+
+
+@app.command("watch")
+def watch_cmd(
+    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
+    auto_reconcile_sha: bool = typer.Option(False, help=_RECONCILE_HELP),
+    auto_requeue: int = typer.Option(
+        0,
+        help="Requeue failed jobs whose attempt count is still below this limit.",
+    ),
+    interval: int = typer.Option(300, help="Seconds between advance passes."),
+    include_family_swap: bool = typer.Option(False),
+    include_cyclic_closure: bool = typer.Option(False),
+    include_dog: bool = typer.Option(False),
+    include_cca: bool = typer.Option(False),
+) -> None:
+    """Poll `advance` until the campaign finishes (gate failures abort loudly)."""
+    load_dotenv()
+    configure_loguru()
+    cfg = _cfg(
+        paths_config,
+        queue_root,
+        auto_reconcile_sha=auto_reconcile_sha,
+        auto_requeue=auto_requeue,
+    )
+    opts = _options(
+        include_family_swap, include_cyclic_closure, include_dog, include_cca
+    )
+    while True:
+        try:
+            result = run(cfg, opts)
+        except CampaignGateError as err:
+            logger.error("GATE FAILED: {}", err)
+            raise typer.Exit(code=2) from err
+        for name in result.fired:
+            logger.info("fired transition: {}", name)
+        if result.done:
+            logger.info("campaign complete — watch exiting.")
+            return
+        if result.waiting:
+            logger.info("waiting on: {}", "; ".join(result.waiting))
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    app()
