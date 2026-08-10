@@ -1529,6 +1529,34 @@ budget) is documented in the plan §6.10 rather than added as a code gate.
 No change to `ckpt_pairs` / `ckpt_replication` / `ckpt_plan` core pairing,
 replication, or threshold logic.
 
+**P1c CPU stall — unstandardized probe features (2026-08-10).** `prequential_codelength`'s
+per-block `LogisticRegression` fits (`cka/probes.py`) ran on raw 768-d activations with
+wildly different per-feature scales, so `lbfgs` hit `max_iter=1000` on most blocks instead
+of converging — measured 3.4–6.4 h per rung (608 `ConvergenceWarning`s in the slowest log)
+against an ~11 min budget, and every completed rung's `codelength_bits` was biased by the
+non-convergence, not just slow. Fix: each block fits a `StandardScaler` on its own training
+prefix and applies it to both the prefix and the held-out block before `LogisticRegression`;
+`fit_linear_probe` is untouched because its weight vector feeds `probe_direction_cosine`
+against a raw-activation-space `trait_direction` (P5), and standardizing there would need an
+unscaling correction that changes the effective L2 penalty. `predict_proba` under matching
+prefix/block scaling is what the codelength depends on, so this is a stability fix, not a
+metric redefinition (`tests/unit/test_cka_probes.py` unchanged). Synthetic benchmark at the
+real P1c shape (n=20000, p=768, k=17) went from routine non-convergence to zero
+`ConvergenceWarning`s, ~66 s/slot. All 20 P1c rungs were requeued under the fix so
+`codelength_bits`/`codelength_ratio` are consistent across the ladder.
+
+**Cold-cache tokenizer gap (2026-08-10).** A `HF_HUB_OFFLINE=1` job can fail
+(`ValueError: tiktoken is required`) even when `try_to_load_from_cache` finds the model
+weights: an earlier prefetch pass backfilled `config.json` + weights for all 140 Ladder-G
+`(init, revision)` cells but missed the tokenizer triple (`tokenizer.json`,
+`tokenizer_config.json`, `special_tokens_map.json`) on 53/140 — always all three together,
+confirmed present upstream at every revision (tokenizer files don't change across
+checkpoints), so this was a local gap, not a Hub content gap. `transformers` falls back to a
+slow-tokenizer conversion path when `tokenizer.json` is absent, which surfaces as a
+misleading tiktoken error rather than a cache-miss. Fixed by targeted `hf_hub_download` of
+just the missing triples (no code change); a full-coverage check should verify all required
+filenames per cell, not just weight presence.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Generates the SDF corpus (a JSONL dataset, **not** a teacher): Qwen3-32B via vLLM emits

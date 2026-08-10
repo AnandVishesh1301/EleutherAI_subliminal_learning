@@ -29,6 +29,7 @@ from numpy.typing import ArrayLike
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 # Voita & Titov (2020) footnote 4: timesteps at 0.1, 0.2, 0.4, 0.8, 1.6, 3.2,
 # 6.25, 12.5, 25, 50 and 100 percent of the dataset.
@@ -173,6 +174,15 @@ def prequential_codelength(
     schedule. This reduces to Eq. 4 exactly whenever the first block is already
     class-complete.
 
+    Each block's probe is fit on ``StandardScaler``-standardised features (fit on
+    that block's training prefix, applied to both the prefix and the held-out
+    block) so lbfgs converges on the small early prefixes -- raw 768-d
+    activations sit on wildly different per-feature scales and otherwise stall
+    at `max_iter`. This changes only the fit's internal parameterisation, not
+    the quantity computed: the code depends on `predict_proba` under matching
+    prefix/block scaling, not on the coefficients, so it is unaffected by the
+    reparameterisation once both fits converge.
+
     Args:
         x: ``[n, p]`` frozen activations.
         y: ``[n]`` class labels.
@@ -207,15 +217,16 @@ def prequential_codelength(
     boundaries = [t for t in steps if t >= complete[0]]
     code = complete[0] * uniform_bits
     for start, stop in zip(boundaries[:-1], boundaries[1:], strict=True):
+        scaler = StandardScaler().fit(features[:start])
         model = LogisticRegression(C=c, solver="lbfgs", max_iter=max_iter)
-        model.fit(features[:start], labels[:start])
+        model.fit(scaler.transform(features[:start]), labels[:start])
         if model.classes_.size != n_classes:
             raise ValueError(
                 f"block prefix of {start} rows saw {model.classes_.size} of "
                 f"{n_classes} classes; the code would be charged against a "
                 "truncated label set"
             )
-        proba = model.predict_proba(features[start:stop])
+        proba = model.predict_proba(scaler.transform(features[start:stop]))
         column = np.searchsorted(model.classes_, labels[start:stop])
         true_p = proba[np.arange(stop - start), column]
         code -= float(np.log2(np.maximum(true_p, _MIN_PROBABILITY)).sum())
