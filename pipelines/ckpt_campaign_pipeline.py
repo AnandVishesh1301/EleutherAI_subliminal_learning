@@ -537,7 +537,7 @@ def _submit_p3(
         driver_io.submit_queue(
             cfg,
             plan.Q_P3_CROSSED,
-            jobs.crossed_jobs(crossed, **kwargs),
+            jobs.crossed_jobs(crossed),
             depends_on=[plan.Q_P2_TEACHERS],
         )
     state["transitions"]["submit_p3"] = {

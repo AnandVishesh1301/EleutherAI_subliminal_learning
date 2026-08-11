@@ -21,6 +21,8 @@ import pytest
 
 from pipelines.ckpt_campaign_pipeline import (
     CampaignGateError,
+    CkptDriverOptions,
+    _submit_p3,
     driver_config,
     free_disk_gib,
     require_disk_free,
@@ -85,6 +87,55 @@ def test_require_disk_free_passes_above_threshold(
     monkeypatch.setattr("pipelines.ckpt_campaign_pipeline.shutil.disk_usage", fake_usage)
     measured = require_disk_free([tmp_path], min_gib=150)
     assert measured[str(tmp_path)] == pytest.approx(2000.0)
+
+
+@pytest.mark.parametrize("include_family_swap", [False, True])
+@pytest.mark.parametrize("include_cyclic_closure", [False, True])
+def test_submit_p3_builds_every_queue_for_each_pairing_option(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    include_family_swap: bool,
+    include_cyclic_closure: bool,
+) -> None:
+    """Every P3 queue must build for every `CkptDriverOptions` combination.
+
+    The pairing flags select which *configs* exist; only the builders that
+    actually branch on them accept them. Passing them to a builder that does not
+    raised `TypeError` mid-`_submit_p3` on the live campaign (2026-08-11), after
+    the students and controls queues had already been submitted -- leaving the
+    crossed queue missing and no `submit_p3` transition to resume from. Exercise
+    the whole call so a signature drift fails here instead of at 3 a.m.
+    """
+    submitted: dict[str, int] = {}
+
+    monkeypatch.setattr(
+        "pipelines.ckpt_campaign_pipeline.driver_io.write_generated_configs",
+        lambda _cfg, docs: dict(docs),
+    )
+    monkeypatch.setattr(
+        "pipelines.ckpt_campaign_pipeline.driver_io.submit_queue",
+        lambda _cfg, name, jobs, **_kw: submitted.update({name: len(jobs)}),
+    )
+
+    cfg = driver_config(
+        output_root=tmp_path, queue_root=tmp_path / "queue", repo_root=tmp_path
+    )
+    state: dict = {"transitions": {}}
+    _submit_p3(
+        cfg,
+        state,
+        CkptDriverOptions(
+            include_family_swap=include_family_swap,
+            include_cyclic_closure=include_cyclic_closure,
+        ),
+    )
+
+    assert submitted[plan.Q_P3_STUDENTS] > 0
+    assert submitted[plan.Q_P3_CONTROLS] > 0
+    assert submitted[plan.Q_P3_CROSSED] > 0
+    # P4 resumes off these lists, so an empty one silently drops a whole stage.
+    tr = state["transitions"]["submit_p3"]
+    assert tr["student_yamls"] and tr["control_yamls"] and tr["crossed_yamls"]
 
 
 def _write_part(output_root: Path, run_set_id: str, name: str, rows: list[dict]) -> None:
