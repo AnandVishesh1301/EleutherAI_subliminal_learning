@@ -1367,6 +1367,32 @@ adaptive 63/25) — combined with the surgery null it is fully retired, and seed
 built on it should be re-examined as population artifacts. Final state: 91 cells, 0 errors, zero
 `[recorded:]` lines.
 
+**2026-08-11 PROVENANCE-TAG PASS + SUPERSEDED-EVIDENCE PRUNE (Angela: "clearly mention adaptive
+vs non-adaptive per section; supply larger sweeps where cells were cherrypicked; remove
+superseded evidence").** Every `nors_asks` section now opens with a bold **Data:** provenance
+line (non-adaptive strip / adaptive six-arm `[adaptive-only]` / checkpointed mech-probe /
+eval-time splices with their selection rule). Deleted as superseded: the §5.2(iv) published-law
+residual chart and §5.3's WLS-on-brackets block (both duplicated by §7.1's calibrated WLS), the
+§5.2↔§5.3 adaptive-era corroboration ledger, and §5.4's adaptive full-grid medians-by-α (the
+population analyses now source the `strip-splices` sweep — ALL evaluated strip runs × both
+splices × both seeds — falling back, labeled, to the adaptive grid until it drains). §2c retitled
+(the strip *is* §2's population now). Cherrypicked-cell upgrades queued: `depth-probe-ladder`
+(the §4e depth profile on the 20 rule-selected spread-ladder cells; module-form invocation —
+`python -m scripts.spread_depth_probe`, the path form breaks `from scripts.…` imports), and
+`v2-s2-backfill` (9 off-lr-ladder cells' missing ftseed2 checkpoints; `lambda-strat-s2` /
+`spread-ladder-s2` gated on it — note a parallel agent created 19-cell `lambda-strat-s2r`
+interim queues with the same out-names; the gated full 23-cell run overwrites them afterwards).
+The §5.5 revival curve now pools the rule-selected lamstrat trained-dead ceilings (n=34,
+Spearman(log d₀, ceiling) = −0.66, p<0.001). **Load-bearing §4 revision (raw_blocks_v2):** the
+strip activation files were regenerated onto the raw-blocks basis *after* the 08-10 build; on
+the raw final slot the pooled drift spread-coefficient sign FLIPS (γ_S −1.47) because deep-dead
+degenerate runs inflate raw drift ~10²–10³ on every input — a Simpson artifact, positive within
+every fate stratum (alive +0.28, dead +0.37, non-degenerate +0.19). §4's primary readout is now
+the basis-free KL(base‖ft) (γ_S +0.51 [+0.40, +0.65]); §4b's trait-channel fate-blindness now
+rests on KL (AUC 0.44) plus the near-boundary match (dead K/K*<2: drift 0.87 / 7.3 nats vs
+alive 0.75 / 7.2). branch/base γ_S −0.81 is basis-independent and unchanged. Rebuilt: 93 cells,
+0 errors.
+
 **2026-08-10 EVIDENCE CONSOLIDATION — `notebooks/collapse_evidence_review.ipynb`** (builder
 `scripts/build_collapse_evidence_nb.py`; keep in sync). A synthesis notebook organized around
 three questions — is the collapse boundary robust (Part II), what is the mechanism (Part IV),
