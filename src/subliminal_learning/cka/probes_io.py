@@ -679,6 +679,7 @@ def fit_trait_probe(
     *,
     seed: int,
     test_size: float = 0.2,
+    max_iter: int = 20000,
 ) -> TraitProbeResult:
     """Fit the P5 trait probe at one slot and score it against the trait direction.
 
@@ -689,6 +690,14 @@ def fit_trait_probe(
         slot: Activation slot index.
         seed: Seeds the train/test split.
         test_size: Held-out fraction.
+        max_iter: lbfgs cap. Raised well above `fit_linear_probe`'s default
+            because this probe reports a DIRECTION: raw activation slots have
+            per-feature scales spanning several orders of magnitude, and a fit
+            truncated at `max_iter` is up to ~17 deg off the optimum. Measured
+            need on raw Pythia-160m activations is <=921 iterations for a binary
+            task (the 17-class UPOS probe is what exceeds 1000), so the headroom
+            costs nothing and `probe_direction_cosine` still raises if even this
+            cap is hit.
 
     Returns:
         The `TraitProbeResult`.
@@ -701,7 +710,7 @@ def fit_trait_probe(
         raise ValueError(
             f"trait direction must be [{x.shape[1]}]; got {tuple(trait_direction.shape)}"
         )
-    fit = fit_linear_probe(x, y, seed=seed, test_size=test_size)
+    fit = fit_linear_probe(x, y, seed=seed, test_size=test_size, max_iter=max_iter)
     return TraitProbeResult(
         slot=slot,
         accuracy=fit.accuracy,
@@ -723,12 +732,22 @@ def probe_direction_cosine(fit: LinearProbeFit, direction: torch.Tensor) -> floa
         Cosine in ``[-1, 1]``; 0 if either vector is degenerate.
 
     Raises:
-        ValueError: If `fit` is not a binary probe.
+        ValueError: If `fit` is not a binary probe, or if `fit` did not
+            converge. Unlike accuracy, this cosine IS the weight vector's
+            direction, so a fit stopped at `max_iter` yields a plausible number
+            that measures where lbfgs happened to be, not the probe optimum.
     """
     if fit.weights.shape[0] != 1:
         raise ValueError(
             f"probe_direction_cosine needs a binary probe; got {fit.weights.shape[0]} "
             "weight rows"
+        )
+    if not fit.converged:
+        raise ValueError(
+            f"probe direction requested from a fit that stopped at max_iter "
+            f"({fit.n_iter} iterations) -- the weight vector is mid-descent and "
+            "its cosine with the trait direction would be meaningless. Refit "
+            "with a higher `max_iter`."
         )
     w = np.asarray(fit.weights[0], dtype=np.float64)
     d = direction.detach().to(torch.float64).cpu().numpy()

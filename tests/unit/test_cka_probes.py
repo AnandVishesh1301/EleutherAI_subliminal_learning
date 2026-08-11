@@ -65,6 +65,25 @@ def test_fit_is_deterministic_for_a_fixed_seed():
     assert first.accuracy == again.accuracy
 
 
+def test_fit_reports_convergence_and_flags_a_truncated_descent():
+    """A fit stopped by `max_iter` must say so -- its accuracy still looks fine.
+
+    `probe_direction_cosine` reads the weight VECTOR, so a truncated fit there is
+    a plausible wrong number rather than a visible failure.
+    """
+    x, y = _noisy_labels(n=600, p=10, strength=1.5, seed=_SEED)
+    converged = fit_linear_probe(x, y, seed=_SEED)
+    assert converged.converged
+    assert 0 < converged.n_iter < 1000
+
+    truncated = fit_linear_probe(x, y, seed=_SEED, max_iter=2)
+    assert not truncated.converged
+    assert truncated.n_iter == 2
+    # The readout the P1c CSV persists is nearly unchanged -- which is exactly
+    # why the direction consumer, not the accuracy consumer, has to check.
+    assert truncated.accuracy == pytest.approx(converged.accuracy, abs=0.1)
+
+
 def test_random_labels_give_chance_accuracy_and_the_uniform_codelength():
     rng = np.random.default_rng(_SEED)
     n, p = 800, 6

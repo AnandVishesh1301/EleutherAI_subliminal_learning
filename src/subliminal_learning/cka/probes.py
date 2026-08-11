@@ -65,6 +65,13 @@ class LinearProbeFit:
         macro_f1: Held-out macro-averaged F1.
         n_train: Training rows.
         n_test: Held-out rows.
+        n_iter: lbfgs iterations actually taken.
+        converged: Whether lbfgs stopped on its own tolerance rather than on
+            `max_iter`. `accuracy` / `macro_f1` barely move when this is False
+            (measured <=0.003 on 17-class UPOS over raw Pythia-160m
+            activations), but `weights` is still mid-descent -- up to ~17 deg
+            off the optimum -- so any consumer of a probe DIRECTION must check
+            it. See `cka.probes_io.probe_direction_cosine`.
     """
 
     weights: np.ndarray
@@ -74,6 +81,8 @@ class LinearProbeFit:
     macro_f1: float
     n_train: int
     n_test: int
+    n_iter: int = 0
+    converged: bool = True
 
 
 def _as_design(x: ArrayLike, y: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
@@ -127,6 +136,7 @@ def fit_linear_probe(
     model = LogisticRegression(C=c, solver="lbfgs", max_iter=max_iter)
     model.fit(x_train, y_train)
     predicted = model.predict(x_test)
+    n_iter = int(np.max(np.asarray(model.n_iter_)))
     return LinearProbeFit(
         weights=np.asarray(model.coef_, dtype=np.float64),
         intercept=np.asarray(model.intercept_, dtype=np.float64),
@@ -135,6 +145,8 @@ def fit_linear_probe(
         macro_f1=float(f1_score(y_test, predicted, average="macro")),
         n_train=int(x_train.shape[0]),
         n_test=int(x_test.shape[0]),
+        n_iter=n_iter,
+        converged=n_iter < max_iter,
     )
 
 

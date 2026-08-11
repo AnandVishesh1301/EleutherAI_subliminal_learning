@@ -24,8 +24,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
+import torch
 
+from subliminal_learning.cka.probes import LinearProbeFit
 from subliminal_learning.cka.probes_io import (
     SURFACE_LABEL_SOURCE,
     UD_LABEL_SOURCE,
@@ -34,6 +37,7 @@ from subliminal_learning.cka.probes_io import (
     build_upos_probe_dataset,
     ensure_ud_conllu,
     parse_conllu,
+    probe_direction_cosine,
     surface_category,
     ud_conllu_filename,
     ud_conllu_path,
@@ -232,3 +236,34 @@ def test_ensure_ud_conllu_returns_the_cached_file(tmp_path: Path) -> None:
     path.parent.mkdir(parents=True)
     path.write_text(_CONLLU, encoding="utf-8")
     assert ensure_ud_conllu(tmp_path, "r2.18", "dev", allow_download=False) == path
+
+
+def _binary_fit(*, converged: bool, weights: list[float]) -> LinearProbeFit:
+    return LinearProbeFit(
+        weights=np.asarray([weights], dtype=np.float64),
+        intercept=np.zeros(1),
+        classes=np.asarray([0, 1]),
+        accuracy=0.9,
+        macro_f1=0.9,
+        n_train=80,
+        n_test=20,
+        n_iter=100 if converged else 1000,
+        converged=converged,
+    )
+
+
+def test_probe_direction_cosine_scores_a_converged_fit() -> None:
+    cosine = probe_direction_cosine(
+        _binary_fit(converged=True, weights=[1.0, 0.0, 0.0]),
+        torch.tensor([1.0, 1.0, 0.0]),
+    )
+    assert cosine == pytest.approx(1.0 / np.sqrt(2.0))
+
+
+def test_probe_direction_cosine_rejects_a_fit_stopped_at_max_iter() -> None:
+    """P5's estimand IS this direction, so a mid-descent weight vector must raise."""
+    with pytest.raises(ValueError, match="stopped at max_iter"):
+        probe_direction_cosine(
+            _binary_fit(converged=False, weights=[1.0, 0.0, 0.0]),
+            torch.tensor([1.0, 1.0, 0.0]),
+        )
