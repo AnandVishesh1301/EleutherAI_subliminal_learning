@@ -1545,6 +1545,21 @@ real P1c shape (n=20000, p=768, k=17) went from routine non-convergence to zero
 `ConvergenceWarning`s, ~66 s/slot. All 20 P1c rungs were requeued under the fix so
 `codelength_bits`/`codelength_ratio` are consistent across the ladder.
 
+**Probe directions must come from a converged fit (2026-08-11).** The clause above
+correctly left `fit_linear_probe` unstandardized, but that leaves its 17-class UPOS fit
+truncating at `max_iter=1000` (measured on real `step16000` activations: up to ~5100
+lbfgs iterations needed). Accuracy and macro-F1 — all P1c persists — move by ≤0.003, so
+the truncation is invisible in `probe_grounding.csv`; the weight vector rotates by up to
+~17°. `cka/probes_io.fit_trait_probe` (P5) reports `probe_direction_cosine(fit,
+trait_direction)`, where that rotation *is* the estimand. `LinearProbeFit` now carries
+`n_iter` / `converged`, `probe_direction_cosine` raises rather than returning a cosine
+from a mid-descent weight vector, and `fit_trait_probe` requests iteration headroom the
+binary fit does not need (measured ≤921 iterations, direction identical to a fully
+converged fit). The P1c default stays at `max_iter=1000` so shards already on disk remain
+mutually comparable. `newton-cholesky` was measured as an alternative — same optimum
+(cos ≥0.998), 3–30× slower — and rejected. Full evidence:
+`docs/CKPT_LADDER_LAUNCH_LOG.md` §11.5.
+
 **Cold-cache tokenizer gap (2026-08-10).** A `HF_HUB_OFFLINE=1` job can fail
 (`ValueError: tiktoken is required`) even when `try_to_load_from_cache` finds the model
 weights: an earlier prefetch pass backfilled `config.json` + weights for all 140 Ladder-G

@@ -15,8 +15,11 @@
 > changed and launched; it does not amend the plan’s science design.
 >
 > **Last updated:** 2026-08-10 (UTC), mid-campaign P1c/P1b recovery. Live campaign
-> pin: see §10 for the post-recovery sha (advances from
-> `ccb410ad7dc03707b9fc186b0f6b7495b8f08df0`).
+> pin for `ckptladder-p1-geometry` / `-p1b-capability` / `-p1c-probes` (manually
+> refreshed, see §10.3): `a20c9c8bd95a08eb3cd978aaae5d6b44a33dc1a2` (advanced from
+> `ccb410ad7dc03707b9fc186b0f6b7495b8f08df0`). **No `run_set.json` card exists for
+> this campaign** (§10.3.1) — do not move workspace HEAD again before `finalize`
+> without repeating the manual refresh for any already-submitted stage.
 
 ---
 
@@ -461,27 +464,85 @@ Synthetic benchmark at the real shape (n=20000, p=768, k=17): 0
 `ConvergenceWarning`s, ~66 s/slot (was: routine non-convergence). Full detail:
 `ARCHITECTURE.md` § checkpoint-ladder.
 
-### 10.3 Recovery actions taken (in order)
+### 10.3 Recovery actions actually taken (in order; corrects an earlier draft of
+this section that assumed `--code-sha` / `run_set.json` machinery this campaign
+does not have — see 10.3.1)
 
-1. Committed the `probes.py` `StandardScaler` fix (local commit; `docs/PROJECT_DESIGN.md`
-   §4 code-pin contract requires a real sha to re-pin — workspace HEAD moving alone
-   does not propagate to workers).
-2. `uv run python -m scripts.run_ckpt_campaign advance --code-sha <new-sha> \
-   --auto-reconcile-sha` — one intentional pin advance (records `sha_advances[]`
-   on `run_set.json`); refreshes every existing `ckptladder-*` queue's
-   `meta.json` defaults (`store.update_queue_defaults`, called from
-   `driver_io.submit_queue`'s idempotent "exists" branch) so **already-submitted**
-   jobs run under the new pin the next time they're claimed — no need to touch
-   `jobs.jsonl`.
-3. Killed the live `run_similarity_ladder --stage p1c` subprocesses, force-released
-   their claims (`jobq release ckptladder-p1c-probes <key> --force`).
-4. `jobq requeue ckptladder-p1c-probes --all` — all 20 rungs, not just the 8 still
-   running, since every completed rung's codelength was also non-convergence-biased.
-5. `jobq requeue ckptladder-p1b-capability` (failed-only — the 4 tiktoken failures;
-   no code change needed there, cache-only fix, but they now run under the
-   refreshed pin too for consistency).
-6. Left the tmux `ckptladder` workers/driver panes running throughout — the file-based
-   queue picks up the pin/requeue changes on the next claim without a restart.
+1. Committed the `probes.py` `StandardScaler` fix → `a20c9c8`.
+2. `scripts.run_ckpt_campaign advance --code-sha <sha> --auto-reconcile-sha` does
+   **not exist** — the driver CLI has no `--code-sha` flag. Ran plain
+   `uv run python -m scripts.run_ckpt_campaign advance --auto-reconcile-sha`
+   instead. Because this campaign's `run_set_root` has no `run_set.json` card (its
+   state file is `logs/campaign_state.json`, a different schema —
+   `read_run_set_card` / `_card_git_sha` both return `None`), `resolve_campaign_pin`
+   fell back to its documented no-card rule ("pin = current workspace HEAD") and
+   created a fresh worktree at `a20c9c8` (`.code_pins/a20c9c8.../`).
+3. **This did not, by itself, move any already-submitted queue onto the new pin.**
+   `pipelines/ckpt_campaign_pipeline.py::run()` calls `_submit_p1` (the only call
+   site that submits `ckptladder-p1-geometry` / `-p1b-capability` / `-p1c-probes`)
+   exactly once, gated by `"submit_p1" not in transitions`. That transition fired
+   at original launch, so every later `advance` pass — including this one — skips
+   `_submit_p1` entirely, meaning `submit_queue`'s idempotent "exists" branch
+   (which calls `store.update_queue_defaults`) never runs for these three queues
+   again. Confirmed empirically: their `meta.json` `defaults.cwd` was still the
+   *old* pin (`ccb410a...`) after the `advance` call above.
+4. Fixed with a one-off script (`store.update_queue_defaults` directly) that
+   resolved the same pin `advance` had just created and stamped it onto
+   `ckptladder-p1-geometry`, `ckptladder-p1b-capability`, `ckptladder-p1c-probes`'
+   `meta.json` — the only way to move an already-submitted queue onto a new pin
+   once its stage transition has fired.
+5. `jobq status` showed 5 live `run_similarity_ladder --stage p1c` subprocesses
+   still running under the *old* pin (worker pool pid resolved from the tmux
+   `ckptladder` window). Sent `SIGTERM` to each and, for the one claim the worker
+   hadn't yet converted into a running subprocess (`step256`), also ran
+   `jobq release ckptladder-p1c-probes p1c-probe|step256 --force`.
+6. **Race:** the force-release for `step256` landed in the same ~50 ms window the
+   worker pool's own scheduler used to actually spawn that claim's subprocess
+   (under the *old* pin, `gpu=5`) — then, seeing the claim gone, the pool's poll
+   loop re-claimed `step256` as freshly pending and spawned a **second**
+   subprocess (now under the refreshed *new*-pin defaults, `gpu=0`). Both were
+   alive briefly; `ps`/log inspection distinguished them by `.code_pins/<sha>/`
+   in the command line. Killed the stale old-pin one (`SIGTERM`); left the
+   new-pin one running to completion.
+7. Requeued the other 19/20 `ckptladder-p1c-probes` jobs (all *except* the
+   in-flight `step256`) with a targeted script that mirrors `store.requeue`
+   (delete result + claim, bump attempt) but skips one jobkey — `jobq requeue
+   --all` has no per-key exclude and would have both discarded `step256`'s
+   already-correct in-flight run and risked a *third* concurrent process for it
+   once the queue's fail-streak breaker (tripped at 5 consecutive failures) was
+   cleared by the growing pending count.
+8. `jobq requeue ckptladder-p1b-capability` (failed-only — the 4 tiktoken/cache
+   failures; no code change needed there, cache-only fix per §10.1). Confirmed
+   via fresh logs that the retries pass the tokenizer-loading point that
+   previously raised and proceed into `lm_eval` loglikelihood requests.
+9. Left the tmux `ckptladder` window-0 worker pool (single `jobq work --queues
+   ckptladder-p1-geometry,...,ckptladder-p6-evals --workers 32` process spanning
+   every ckptladder queue) running throughout — it picked up every pin/requeue
+   change on its next claim, no restart needed.
+
+#### 10.3.1 Operational gap this exposed: no `run_set.json` card for this campaign
+
+`docs/PROJECT_DESIGN.md` §4's code-pin contract assumes a `run_set.json` card
+that freezes a campaign to one sha and is rewritten only by an explicit
+reconcile. **This campaign's driver never writes one** — `_sha_drift_gate` in
+`ckpt_campaign_pipeline.py` calls `read_run_set_card(cfg.run_set_root)`, gets
+`None` every time, and returns `None` unconditionally, so the drift gate can
+never raise regardless of how far workspace HEAD moves. Consequently
+`resolve_campaign_pin` re-resolves to "current workspace HEAD" on every call
+that has no card to read. Net effect for the rest of this campaign:
+
+- **Stages already submitted** (P0, P1/P1b/P1c right now) are frozen at whatever
+  HEAD was current the moment their `_submit_pX` fired, full stop — a later code
+  fix reaches them only via the manual `store.update_queue_defaults` refresh done
+  in step 4 above.
+- **Stages not yet submitted** (P2 onward) will pick up *whatever HEAD is at the
+  moment their transition fires* — automatically correct if HEAD does not move
+  between now and then, silently wrong (running uncommitted-relative-to-plan
+  code) if it does. **Do not move workspace HEAD again before the campaign's
+  `finalize` transition** unless intentionally advancing the pin, and if a
+  code fix does land mid-campaign for an already-submitted stage, repeat the
+  step-4 manual refresh for that stage's specific queues — `advance` alone is
+  not sufficient once its submission transition has fired.
 
 ### 10.4 Lessons added to §8
 
@@ -496,3 +557,163 @@ Synthetic benchmark at the real shape (n=20000, p=768, k=17): 0
     high-dimensional activations; the online-code timesteps schedule (Voita &
     Titov footnote 4) produces tiny training prefixes where unscaled features
     make `lbfgs` pathological.
+11. **A driver's transition gate (`"submit_pX" not in transitions`) makes
+    `submit_queue`'s defaults-refresh unreachable for already-submitted stages.**
+    A pin advance only helps queues that haven't been submitted yet; already-live
+    stages need a direct `store.update_queue_defaults` call.
+12. **Force-releasing a claim races the worker pool's own claim→spawn transition.**
+    If the claim disappears between the pool deciding to spawn and it actually
+    doing so, the poll loop can re-claim and spawn a second process for the same
+    jobkey. Check `ps` for the jobkey's command line (and which `.code_pins/<sha>/`
+    it runs from) before assuming a `--force` release was clean; kill duplicates
+    by pin, keep the one on the correct code.
+13. **A campaign without a `run_set.json` card has no drift protection** — verify
+    `{run_set_root}/run_set.json` exists before relying on `--auto-reconcile-sha`
+    to mean anything; if it's absent (as here — the state file is
+    `logs/campaign_state.json`), treat "workspace HEAD must not move" as a hard
+    rule for the remainder of the campaign instead.
+
+## 11. Mid-campaign recovery — P3 driver crash + P1c slot starvation (2026-08-11, ~09:20–09:50Z)
+
+Health check ~20 h after the §2 relaunch. Workers window healthy (16/16 GPU slots
+busy, 8×~20.6 GB used of 48 GB, util 96–100 %); driver window **dead at a shell
+prompt**; one P1c rung stuck.
+
+### 11.1 `submit_p3` died on the crossed-anchor builder (`TypeError`)
+
+`_submit_p3` forwards `include_family_swap` / `include_cyclic_closure` to every
+builder it calls, but only the three `*_configs` generators and `student_jobs`
+take them — `crossed_jobs` derives its off-diagonal leaves from
+`crossed_extra_assignments(cls)` on the **already-filtered** crossed configs, so
+the flags are meaningless there. The raise landed *between* submissions:
+
+| queue | state at crash |
+|---|---|
+| `ckptladder-p3-students` | submitted, 612 jobs, running |
+| `ckptladder-p3-controls` | submitted, 252 jobs |
+| `ckptladder-p3-crossed` | **never created** |
+| `transitions.submit_p3` | **never written** (it is set after the crossed submit) |
+
+Because the transition is written last, the whole `_submit_p3` body is a resume
+unit: re-running it re-entered `submit_queue` for students/controls (idempotent —
+logged `already submitted … skip`) and created the missing crossed queue.
+Nothing was retrained.
+
+**Fix (`11a030e`):** drop the kwargs at the `crossed_jobs` call site.
+**Test:** `test_submit_p3_builds_every_queue_for_each_pairing_option` exercises
+`_submit_p3` over all four flag combinations with `driver_io` stubbed, asserting
+all three queues build and the transition records the yaml lists P4 resumes off.
+Verified it reproduces the production `TypeError` on the pre-fix line.
+
+### 11.2 P1c `step32` starved for 11.5 h behind 1-slot P3 jobs
+
+`p1c-probe|step32` logged `WAIT … needs 22000 MiB free + 2 slot-unit(s); ~670min
+so far`. Priority is not the problem (`Q_P1C_PROBES`=95 > `Q_P3_STUDENTS`=80):
+priority orders **claiming**, and this job was claimed 11.5 h earlier. It then sat
+in `_acquire_gpu`, which needs **2 free slot-units on one card** while
+`--workers 32` keeps ~15 claimed-but-waiting 1-slot P3 jobs polling for **any 1**
+free slot. Every slot a finishing student released was taken by a 1-slot waiter
+first. Classic large-job starvation through fragmentation, not a priority bug.
+
+Resolved without draining the node: `slots` for that one job set to **1** in
+`jobs.jsonl` (atomic rewrite; `store.claim_next` re-reads the file per claim) and
+the stale claim force-released. `mem_mib` stays 22000, above the measured
+~18628 MiB fp32 peak, so the memory gate still enforces real headroom — and a
+card holding one student shows ~37 GB free, well clear of it. Re-claimed 5 min
+later, running on GPU 3 (10.2 GB student + P1c co-resident, ~29 GB of 48 GB at
+P1c's peak).
+
+**Residual hazard, accepted:** force-releasing does not stop the worker *thread*
+that was already waiting for the old 2-slot request (threads share the pool
+process; only the stop sentinel unwinds them, which drains all 16 running cells).
+That thread keeps polling for 2 free slots — an event that did not occur once in
+11.5 h — and if it ever won it would re-run the shard, deterministically
+rewriting the same part files. Cheaper than a full drain. Compare §10.4 lesson 12:
+there the release itself raced the claim→spawn transition; here the release was
+clean and the leftover is a pre-existing waiter.
+
+### 11.3 Code pin advanced twice, deliberately
+
+§10.4 lesson 13 is now stale: both `run_set.json` cards (`sdf_teachers` and
+`gkd_students`, `20260805_ckptladder_160m`) exist and carry a `git_sha`, so
+`_sha_drift_gate` **raises** the moment workspace HEAD moves. Committing a driver
+fix therefore requires an explicit
+`scripts.reconcile_run_set --new-git-sha <sha>` for both workflows, not
+`--force`. Done for `a20c9c8 → 11a030e → dada1b4`; `uv sync --frozen` run in each
+new `.code_pins/<sha>/` worktree up front so the first cell to land there does
+not pay a venv build under a thundering herd. Cells already on disk keep their own
+manifest sha; superseded shas are in `sha_advances[]`. Both advances are
+driver/analysis-only — no cell code path changed.
+
+### 11.4 Offline checkpoint + tokenizer cache re-audited (§10.1 regression check)
+
+7 inits × 20 rungs × `{config.json, tokenizer.json, tokenizer_config.json,
+special_tokens_map.json}` + a weight file: **700 triples, 0 misses**. Note the
+weight filename is not uniform across the suite — `EleutherAI/pythia-160m` ships
+`model.safetensors`, every `-data-seed{N}` / `-weight-seed{N}` repo ships
+`pytorch_model.bin` — so an audit that asserts one name reports 20 false misses.
+Tokenizers resolve from the **same repo and revision** as the weights
+(`models/loading_io.load_tokenizer`), which is what makes `HF_HUB_OFFLINE=1` safe
+for the remaining stages.
+
+### 11.5 Probe non-convergence: harmless for P1c, corrupting for P5
+
+`ConvergenceWarning`s persisted in P1c logs after §10.2's fix, because that fix
+standardized features inside `prequential_codelength` only — `fit_linear_probe`
+still fits raw activations. Measured on real Pythia-160m activations
+(`step16000`, 13 slots, n=20004):
+
+| | finding |
+|---|---|
+| 17-class UPOS probe at `max_iter=1000` | does **not** converge on several slots; up to ~5100 lbfgs iterations needed |
+| effect on accuracy / macro-F1 | ≤0.003 — i.e. invisible in what P1c persists |
+| effect on the weight vector | up to ~17° rotation from the optimum |
+| binary probe (P5's design) at `max_iter=1000` | converges, ≤921 iterations, direction identical (cos 1.0000) |
+| `newton-cholesky` instead of lbfgs | reaches the same optimum (cos ≥0.998) but **3–30× slower** here — rejected |
+
+P1c persists only `probe_accuracy` / `probe_macro_f1` (see
+`parts/p1c__*/probe_grounding.csv`), never the weights, so the 19 shards on disk
+are sound and the P1c default stays at `max_iter=1000` — changing it would make
+`step32` incomparable to them. P5's `fit_trait_probe`, which has **not** run,
+feeds `LinearProbeFit.weights` straight into `probe_direction_cosine`, where the
+rotation *is* the estimand.
+
+**Fix (`dada1b4`):** `fit_linear_probe` reports `n_iter` / `converged`;
+`probe_direction_cosine` raises on a truncated fit instead of returning a
+plausible wrong cosine; `fit_trait_probe` asks for iteration headroom the binary
+fit does not need, so the guard cannot fire spuriously. No converged number
+changes.
+
+### 11.6 Timeline against plan §5
+
+On budget. 929 P3 cells remained at 09:50Z (545 students, 252 controls, 132
+crossed) at a measured 29.0 min median student and 26 completions/h → **28–36 h**
+of P3, plus ~7 h for P4/P5/P5w, i.e. finishing ~2026-08-12 21:00Z–08-13 05:00Z.
+Plan §5 budgets ~22.4 h students + 6.8 h controls + 6.8 h crossed at 16 slots.
+
+VRAM headroom exists (10.3 GB per student cell, ~27 GB free per card at
+`cap_per_gpu=2`) but was **not** spent: `utilization.gpu` already reads 96–100 %,
+so a third cell per card would likely trade per-cell latency for little
+throughput while adding OOM risk against P1c's ~18.6 GB peak. Revisit only if the
+run falls behind.
+
+### 11.7 Lessons added to §8
+
+14. **A driver-stage submit function is a resume unit only if its transition is
+    written last.** `submit_p3` writing `transitions` after the final
+    `submit_queue` is what made a mid-body crash recoverable by re-running it;
+    the partial queues were idempotent no-ops. Keep new stages in that order.
+15. **Forwarding `**kwargs` to a family of builders hides signature drift until
+    runtime.** The pairing flags legitimately apply to config generation and to
+    `student_jobs` only. Test the driver's submit path over the flag matrix, not
+    just the builders in isolation.
+16. **A weighted (multi-slot) job can starve indefinitely against a flood of
+    1-slot jobs even at higher priority** — priority orders claiming, not GPU
+    acquisition, and `--workers N` ≫ slots keeps 1-slot waiters permanently
+    poised on every freed slot. Prefer the smallest `slots` the measured VRAM
+    peak allows and let `mem_mib` do the gating.
+17. **A `ConvergenceWarning` matters exactly as much as the estimand's dependence
+    on the weight vector.** Truncated lbfgs barely moves accuracy but rotates the
+    direction; audit which consumers read `coef_` before deciding a
+    non-converged fit is benign, and guard those consumers rather than silently
+    raising `max_iter` for everyone.
