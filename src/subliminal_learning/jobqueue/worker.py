@@ -326,15 +326,18 @@ class _Pool:
             per_min = max(1, int(60 / max(self.gpu_wait_s, 0.001)))
             if misses == 1 or misses % per_min == 0:
                 waited_min = int(misses * self.gpu_wait_s / 60)
+                if slots == 0:
+                    # CPU-only jobs wait on the cpu_cap budget, never on GPU capacity or
+                    # the memory gate — pointing at mem_mib/gpu_policy here misdirects.
+                    need = "a cpu_cap slot (CPU-only job, slots=0)"
+                    hint = " — all cpu_cap slots held; check cpu_cap in this node's gpu_policy"
+                else:
+                    need = f"{mem_mib} MiB free + {slots} slot-unit(s)"
+                    hint = " — check mem_mib/slots against this node's gpu_policy"
                 self.master.log(
                     "WAIT",
-                    f"{job_key} needs {mem_mib} MiB free + {slots} slot-unit(s); "
-                    f"~{waited_min}min so far"
-                    + (
-                        " — check mem_mib/slots against this node's gpu_policy"
-                        if waited_min >= 10
-                        else ""
-                    ),
+                    f"{job_key} needs {need}; ~{waited_min}min so far"
+                    + (hint if waited_min >= 10 else ""),
                 )
             time.sleep(self.gpu_wait_s)
 

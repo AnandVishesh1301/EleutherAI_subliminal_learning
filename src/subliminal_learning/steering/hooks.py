@@ -7,12 +7,14 @@ decoder blocks live at ``model.gpt_neox.layers`` (and under a ``PeftModel`` at
 LLaMA/Qwen resolver assumes.
 
 Layer indexing: ``layers=[i]`` hooks block ``i`` directly (0-indexed), and
-``v_raw_per_layer[i]`` is the residual coming *out* of that block. The call site strips BOTH
-ends of the extraction stack (``v["raw"][1:-1]``): the embedding slot AND the trailing
-post-final-layernorm slot. What remains are the RAW outputs of blocks 0..n-2 only (11 of the
-12 blocks on Pythia-160m). The last model block's raw output never had a slot of its own -- its
-only appearance in ``hidden_states`` is post-final-layernorm, which does not belong in the raw
-residual basis -- so the final block is simply not steerable here (an inherited Blank quirk).
+``v_raw_per_layer[i]`` is the residual coming *out* of that block. Extraction now runs in the
+``raw_blocks_v2`` basis (`subliminal_learning.steering.vectors`): every slot is a raw
+post-block state, so the call site strips ONLY the embedding slot (``v["raw"][1:]``) and the
+remaining ``n`` rows line up 1:1 with the ``n`` hookable blocks -- ALL 12 blocks on
+Pythia-160m, final block included. (Under the retired Blank stack the final slot was
+post-final-layernorm, both ends were stripped, and the last block was unsteerable.) The hook
+target `resolve_blocks` and the extraction capture share one module resolver, so slot ``i+1``
+of the capture and ``blocks[i]`` here are the same basis by construction.
 
 Modes (the two the steerability screen needs):
 
@@ -33,59 +35,7 @@ from contextlib import contextmanager
 
 import torch
 
-
-def _direct_child(obj, name: str):
-    modules = getattr(obj, "_modules", None)
-    if modules is not None and name in modules:
-        return modules[name]
-    return getattr(obj, name, None)
-
-
-def _get_path(obj, path: tuple[str, ...]):
-    cur = obj
-    for name in path:
-        cur = _direct_child(cur, name)
-        if cur is None:
-            return None
-    return cur
-
-
-def _unwrap_blocks(model):
-    """Return the GPT-NeoX decoder-block list, unwrapping PEFT/HF wrappers.
-
-    Checks the known GPT-NeoX paths (bare model and PEFT-wrapped), then falls back to a
-    bounded DFS over the usual wrapper attributes so a merged or doubly-wrapped model
-    still resolves.
-    """
-    known_paths = (
-        ("gpt_neox", "layers"),
-        ("base_model", "model", "gpt_neox", "layers"),
-        ("base_model", "model", "model", "gpt_neox", "layers"),
-        ("model", "gpt_neox", "layers"),
-        ("layers",),
-        ("model", "layers"),
-    )
-    for path in known_paths:
-        blocks = _get_path(model, path)
-        if blocks is not None:
-            return blocks
-
-    seen: set[int] = set()
-    stack = [model]
-    wrapper_names = ("base_model", "model", "gpt_neox")
-    while stack:
-        obj = stack.pop()
-        if id(obj) in seen:
-            continue
-        seen.add(id(obj))
-        blocks = _direct_child(obj, "layers")
-        if blocks is not None:
-            return blocks
-        for name in wrapper_names:
-            child = _direct_child(obj, name)
-            if child is not None and id(child) not in seen:
-                stack.append(child)
-    raise AttributeError(f"can't find decoder blocks under {type(model).__name__}")
+from subliminal_learning.models.residual import resolve_blocks
 
 
 def _hidden_from_output(output):
@@ -161,10 +111,9 @@ def steering_hooks(
     Args:
         model: GPT-NeoX causal LM (clean base for ``add`` sufficiency; teacher for
             ``project`` necessity).
-        v_raw_per_layer: ``[n_blocks, H]`` tensor, with BOTH the embedding slot and the
-            trailing post-final-layernorm slot already stripped (``v["raw"][1:-1]``),
-            indexed 0..n_blocks-1. The post-final-layernorm state is excluded so only raw
-            block outputs enter the residual basis.
+        v_raw_per_layer: ``[n_blocks, H]`` tensor in the ``raw_blocks_v2`` basis, with the
+            embedding slot already stripped (``v["raw"][1:]``): row ``i`` is the raw
+            output of block ``i``, final block included.
         alpha: scalar float (screen default) or per-layer sequence of length n_blocks.
         mode: ``"add"`` or ``"project"``.
         layers: block indices to hook (0-indexed). ``None`` hooks every block -- i.e.
@@ -182,7 +131,7 @@ def steering_hooks(
         layers = list(range(n))
     scalar_alpha = not hasattr(alpha, "__len__")
 
-    blocks = _unwrap_blocks(model)
+    blocks = resolve_blocks(model)
     handles = []
     for l in layers:
         v = v_raw_per_layer[l]

@@ -388,10 +388,13 @@ def _build_meta(
         },
         "student_lr": cfg.train.learning_rate,
         "n_layers": n_layers,
-        # Bump when the eas_mean slot convention changes so stored docs meta-drift and are
-        # recomputed rather than reused with a stale field set. "blocks_v1" = mean over
-        # per_layer[1:-1] (both end slots dropped); see steering.eas.eas_mean.
-        "eas_mean_convention": "blocks_v1",
+        # Bump when the extraction basis / eas_mean slot convention changes so stored docs
+        # meta-drift and are recomputed rather than reused with a stale field set.
+        # "raw_blocks_v2" = hook-captured raw basis (last slot = final block's RAW output,
+        # not post-final-layernorm) with eas_mean over per_layer[1:]; the retired
+        # "blocks_v1" read the output_hidden_states stack and averaged per_layer[1:-1].
+        # See steering.vectors (ACTIVATION_BASIS) and steering.eas.eas_mean.
+        "eas_mean_convention": "raw_blocks_v2",
         # CROSS-BASE ONLY: identifies the teacher/numbers base A whose v_teacher this doc holds.
         # ABSENT for same-base docs so their meta stays byte-identical to what is already on disk.
         **(

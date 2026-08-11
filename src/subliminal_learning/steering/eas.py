@@ -37,10 +37,10 @@ def eas_per_layer(
 ) -> torch.Tensor:
     """Per-slot cosine similarity between two ``[n_slots, H]`` shift vectors.
 
-    Returns a ``[n_slots]`` tensor (``dim=-1`` cosine), aligned with the ``hidden_states``
-    slot layout: index 0 is the embedding slot, indices ``1..n-1`` the raw block outputs,
-    and the final slot the post-final-layernorm output (see the layer-bookkeeping docstring
-    in `subliminal_learning.steering.vectors`).
+    Returns a ``[n_slots]`` tensor (``dim=-1`` cosine), aligned with the ``raw_blocks_v2``
+    slot layout: index 0 is the embedding slot and index ``i`` (i >= 1) the raw output of
+    block ``i - 1``, final block included (see the layer-bookkeeping docstring in
+    `subliminal_learning.steering.vectors`).
 
     Raises:
         ValueError: if the two shift vectors' shapes differ — the single guard point for a
@@ -55,29 +55,28 @@ def eas_per_layer(
 
 
 def eas_mean(per_layer: torch.Tensor) -> float:
-    """Mean EAS over slots ``[1:-1]`` — the raw-block convention (this repo's headline).
+    """Mean EAS over slots ``[1:]`` — the raw-block convention (this repo's headline).
 
-    BOTH end slots are excluded: slot 0 (the embedding output) AND the trailing
-    post-final-layernorm slot, leaving the raw outputs of blocks 0..n-2 only. This is a
-    DELIBERATE deviation from Blank's ``per_layer[1:].mean()``, mirroring this repo's
-    steering-hook convention where consumers of the raw basis strip both ends
-    (``v["raw"][1:-1]``; see the layer-bookkeeping docstring in `steering.vectors`).
-
-    Empirically the final post-LN slot carries a generic positive cosine (≈ +0.12 to +0.21)
-    even for clean-data control students, inflating the control floor; dropping it barely moves
-    the treatment signal while giving a fair, block-only comparison. The full per-slot cosine
-    curve is still stored (see `build_entry`), so any other re-aggregation stays possible
-    downstream.
+    Only the embedding slot (0) is excluded: under the ``raw_blocks_v2`` extraction basis
+    every remaining slot is a raw block output, final block included, so the block-only mean
+    is ``per_layer[1:]``. (The retired ``blocks_v1`` convention dropped BOTH ends because the
+    old extraction stack's last slot was the post-final-layernorm state — a generic positive
+    cosine of ≈ +0.12 to +0.21 even for control students — not a raw block. That slot no
+    longer exists.) Numerically this now coincides with Blank's ``per_layer[1:].mean()``, but
+    over a different final slot: the last block's RAW output rather than its post-LN image.
+    The full per-slot curve is still stored (see `build_entry`), so any other re-aggregation
+    stays possible downstream.
 
     Raises:
-        ValueError: if `per_layer` has fewer than 3 slots, so the ``[1:-1]`` block window is
+        ValueError: if `per_layer` has fewer than 2 slots, so the ``[1:]`` block window is
             empty and the mean would be NaN.
     """
-    if per_layer.shape[-1] < 3:
+    if per_layer.shape[-1] < 2:
         raise ValueError(
-            f"eas_mean needs at least 3 slots to drop both ends; got {per_layer.shape[-1]}"
+            f"eas_mean needs at least 2 slots to drop the embedding slot; "
+            f"got {per_layer.shape[-1]}"
         )
-    return per_layer[1:-1].mean().item()
+    return per_layer[1:].mean().item()
 
 
 def build_entry(

@@ -57,7 +57,11 @@ from subliminal_learning.numbers.prompt_gen import (
     load_intro_templates,
 )
 from subliminal_learning.steering.hooks import steering_hooks
-from subliminal_learning.steering.vectors import diff_vector, mean_last_activations
+from subliminal_learning.steering.vectors import (
+    ACTIVATION_BASIS,
+    diff_vector,
+    mean_last_activations,
+)
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.model_specs import spec_label
 from subliminal_learning.teachers.run_layout import model_dir_name
@@ -66,13 +70,14 @@ from subliminal_learning.utils.io import atomic_write_json, file_sha256
 # A steering config in the sweep: a human label and the block indices to hook (None = all).
 LayerChoice = tuple[str, list[int] | None]
 
-# Default layer sweep for a 12-block Pythia-160m (its post-final-layernorm slot is dropped,
-# leaving 11 raw-steerable blocks): each raw block individually (0..10), a mid-band triple,
-# and all-layers (every raw block hooked with its own direction).
+# Default layer sweep for a 12-block Pythia-160m. Extraction runs in the raw_blocks_v2 basis
+# (every slot a raw block output, final block included — see steering.vectors), so all 12
+# blocks are steerable: each raw block individually (0..11), a mid-band triple, and
+# all-layers (every raw block hooked with its own direction).
 DEFAULT_LAYER_SWEEP: tuple[LayerChoice, ...] = (
-    *((f"L{i}", [i]) for i in range(11)),  # each raw block individually, 0..10
+    *((f"L{i}", [i]) for i in range(12)),  # each raw block individually, 0..11
     ("L3-6-9", [3, 6, 9]),                  # mid-band triple
-    ("all", None),                          # every raw block, its own direction (0..10)
+    ("all", None),                          # every raw block, its own direction (0..11)
 )
 DEFAULT_ALPHAS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0)
 
@@ -280,6 +285,10 @@ def _screen_params(cfg: SteerabilityScreenConfig) -> dict:
         # The steering call is hardcoded add/raw; key it so a future change invalidates.
         "steer_mode": "add",
         "steer_norm": "raw",
+        # Extraction/injection basis (see steering.vectors.ACTIVATION_BASIS). Legacy
+        # ft*.json lack this key entirely (Blank output_hidden_states stack, 11 steerable
+        # blocks) and are invalidated by its introduction.
+        "activation_basis": ACTIVATION_BASIS,
     }
     if cfg.steer_spec is not None:
         params["steer_model"] = spec_label(cfg.steer_spec)
@@ -750,18 +759,17 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
                 torch.cuda.empty_cache()
 
             v = diff_vector(teacher_act, base_act)
-            # Strip BOTH the embedding slot (front, index 0) and the post-final-layernorm slot
-            # (back, last index): neither is a raw residual block output. The post-LN direction
-            # lives in a normalized basis and must NOT be injected into the raw residual stream.
-            # What remains is the raw block outputs, block-indexed 0..n-2 (0..10 for 12-block
-            # Pythia-160m).
-            v_raw = v["raw"][1:-1]
+            # raw_blocks_v2 basis (see steering.vectors): every slot is a raw block output,
+            # so only the embedding slot (front, index 0) is stripped. What remains is the
+            # raw block outputs, block-indexed 0..n-1 (0..11 for 12-block Pythia-160m),
+            # final block included.
+            v_raw = v["raw"][1:]
             if cross_seed:
-                # v_raw is block-indexed 0..n-2; it must line up with the target's raw blocks.
-                assert v_raw.shape[0] == steer_base.config.num_hidden_layers - 1, (
+                # v_raw is block-indexed 0..n-1; it must line up with the target's raw blocks.
+                assert v_raw.shape[0] == steer_base.config.num_hidden_layers, (
                     f"v_raw has {v_raw.shape[0]} block directions but target has "
-                    f"{steer_base.config.num_hidden_layers} blocks (expected "
-                    f"{steer_base.config.num_hidden_layers - 1} after stripping embed + post-LN)"
+                    f"{steer_base.config.num_hidden_layers} blocks (expected equal after "
+                    f"stripping the embedding slot)"
                 )
 
             sweep_rows: list[dict] = []
@@ -836,10 +844,10 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
                 "seed_cache_key": seed_keys[seed],
                 "base": base_scores,
                 "teacher": teacher_scores,
-                # raw block residuals 0..n-2 only (embedding slot 0 and post-LN last slot
-                # excluded), matching v_raw / v_argmax_layer / the layer sweep.
-                "v_norm_per_layer": [round(x, 5) for x in v["norm"][1:-1].tolist()],
-                "v_argmax_layer": int(v["norm"][1:-1].argmax()),
+                # raw block residuals 0..n-1 (embedding slot 0 excluded; raw_blocks_v2
+                # basis), matching v_raw / v_argmax_layer / the layer sweep.
+                "v_norm_per_layer": [round(x, 5) for x in v["norm"][1:].tolist()],
+                "v_argmax_layer": int(v["norm"][1:].argmax()),
                 "peak_gated_neg_off": _with_delta_rec(peak_gated_neg_off),
                 "peak_gated_off": _with_delta_rec(peak_gated_off),
                 "peak_ungated": _with_delta_rec(peak_ungated),

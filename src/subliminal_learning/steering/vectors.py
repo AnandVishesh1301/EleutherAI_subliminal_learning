@@ -13,16 +13,19 @@ deliberate adaptations for this repo:
   pooled at the last token (Blank's ``v_teacher`` pooling), which is the position whose
   logits the ``p(target)`` metric reads.
 
-Layer bookkeeping matches Blank exactly: ``mean_last_activations`` returns the ``[n+1, H]``
-``hidden_states`` stack for an ``n``-block model -- index 0 is the embedding output, indices
-1..n-1 are the RAW outputs of blocks 0..n-2, and the FINAL slot (index n) is the last block's
-output AFTER the final layernorm. The last model block's raw output therefore has no slot of
-its own. Consumers that hook decoder blocks must strip BOTH ends (``v["raw"][1:-1]``): drop
-the embedding slot AND the trailing post-final-layernorm slot, leaving the raw outputs of
-blocks 0..n-2 only (11 of the 12 blocks on Pythia-160m). The final model block is thus not
-steerable in the raw basis -- an inherited Blank quirk -- and injecting the post-final-layernorm
-state into the raw residual basis is exactly what this avoids. See
-`subliminal_learning.steering.hooks`.
+Layer bookkeeping DEVIATES from Blank on one point (the ``raw_blocks_v2`` basis): Blank reads
+``output_hidden_states=True``, whose stack for an ``n``-block model puts the embedding output
+at index 0, the RAW outputs of blocks 0..n-2 at indices 1..n-1, and — the quirk — the last
+block's output AFTER the final layernorm at index n, so the last block's raw output has no
+slot at all and is unsteerable in the raw basis. This module instead captures via
+`subliminal_learning.models.residual.capture_raw_activations` (forward hooks on the embedding
+layer and every decoder block), so ALL slots are raw: index 0 is the embedding output and
+index ``i`` (i >= 1) the raw output of block ``i - 1``, last block included. Consumers that
+hook decoder blocks strip ONLY the embedding slot (``v["raw"][1:]``) and every one of the
+remaining ``n`` rows lines up with a hookable block (see
+`subliminal_learning.steering.hooks`). `save_vector` stamps ``meta["activation_basis"]`` with
+`ACTIVATION_BASIS` so vectors extracted under the old Blank stack (no stamp) are never mixed
+with raw_blocks_v2 ones.
 """
 
 from __future__ import annotations
@@ -34,6 +37,13 @@ from pathlib import Path
 import torch
 from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase
 
+from subliminal_learning.models.residual import capture_raw_activations
+
+# The extraction basis this module produces. "raw_blocks_v2" = every slot raw (embedding +
+# each block's own output, final block included); the unstamped v1 stack ended with the
+# post-final-layernorm slot instead. Bump on any future basis change.
+ACTIVATION_BASIS = "raw_blocks_v2"
+
 
 @torch.no_grad()
 def mean_activations(
@@ -44,7 +54,11 @@ def mean_activations(
     batch_size: int = 16,
     position: str = "last",
 ) -> torch.Tensor:
-    """Mean per-layer hidden state over the prompts. Returns ``[n+1, H]``.
+    """Mean per-layer RAW residual state over the prompts. Returns ``[n+1, H]``.
+
+    Slots follow the ``raw_blocks_v2`` basis (module docstring): index 0 is the embedding
+    output, index ``i`` (i >= 1) the raw output of block ``i - 1`` — the final slot is the
+    LAST block's raw output, not the post-final-layernorm state Blank's stack ends with.
 
     Two pooling positions (Blank et al.'s ``subliminal.vectors.mean_activations``):
 
@@ -83,18 +97,18 @@ def mean_activations(
         enc = tokenizer(
             batch, return_tensors="pt", padding=True, add_special_tokens=False
         ).to(device)
-        out = model(**enc, output_hidden_states=True, use_cache=False)
+        hidden = capture_raw_activations(model, enc.input_ids, enc.attention_mask)
         if position == "last":
             # h: [B, T, H]; take the last column (last real token under left-pad).
             stacked = torch.stack(
-                [h[:, -1, :].float().cpu() for h in out.hidden_states], dim=0
+                [h[:, -1, :].float().cpu() for h in hidden], dim=0
             )  # [n+1, B, H]
             batch_sum = stacked.sum(dim=1)  # [n+1, H]
             n += stacked.shape[1]
         else:  # "all": attention-mask-weighted sum over (batch, time) of real tokens.
             mask = enc.attention_mask.float().unsqueeze(-1).cpu()  # [B, T, 1]
             batch_sum = torch.stack(
-                [(h.float().cpu() * mask).sum(dim=(0, 1)) for h in out.hidden_states],
+                [(h.float().cpu() * mask).sum(dim=(0, 1)) for h in hidden],
                 dim=0,
             )  # [n+1, H]
             n += int(enc.attention_mask.sum().item())
@@ -134,14 +148,16 @@ def diff_vector(mean_a: torch.Tensor, mean_b: torch.Tensor) -> dict:
 def save_vector(path: str | Path, vec: dict, meta: dict) -> None:
     """Save a ``{raw, unit, norm}`` vector plus a ``meta`` dict to ``path`` (.pt).
 
-    Written atomically (temp in same dir + ``os.replace``, mirroring
-    `subliminal_learning.utils.io`): an interrupt can never leave a torn ``.pt`` next to
-    the atomically-written JSON docs. The saved payload is unchanged.
+    ``meta`` is stamped with ``activation_basis = ACTIVATION_BASIS`` (a legacy vector with
+    no stamp was extracted from the pre-v2 ``output_hidden_states`` stack, whose last slot
+    is post-final-layernorm). Written atomically (temp in same dir + ``os.replace``,
+    mirroring `subliminal_learning.utils.io`): an interrupt can never leave a torn ``.pt``
+    next to the atomically-written JSON docs.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    torch.save({**vec, "meta": meta}, tmp)
+    torch.save({**vec, "meta": {**meta, "activation_basis": ACTIVATION_BASIS}}, tmp)
     os.replace(tmp, path)
 
 

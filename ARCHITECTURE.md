@@ -290,6 +290,14 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   not-yet-allocated headroom. With it, `free_mem_mib` is the honest per-job requirement
   rather than a padded floor, and a GPU with other resident occupancy de-rates itself
   automatically via the reservation ledger instead of being excluded by hand.
+- **CPU-only budget (2026-08-10)**: a queue declaring `--slots 0` is fully CPU-bound —
+  its jobs run with `CUDA_VISIBLE_DEVICES` emptied and take a slot from the **separate
+  node-wide `cpu_cap` budget** (`gpu_policy` key; default `cpu_count // 4`, own
+  `<prefix>_cpu_slot{s}.lock` namespace) instead of GPU capacity. Two independent budgets:
+  CPU work can never block a GPU job (8 CPU probes once held a third of a 24-unit pool),
+  but it is still admission-controlled — the GPU slots were previously the pool's only
+  ceiling. A CPU job WAITing is waiting on `cpu_cap`, not on `mem_mib`/GPU slots (the WAIT
+  log line says which). Strictly opt-in; nothing infers CPU-ness from the command line.
 - Node safety: hostname in every log/pid filename; a claim is auto-stolen only when its
   owner is this host and the pid is dead. `release --force` is the only override.
 - Lock namespace: slot locks live at `/tmp/subliminal_jobq_*` by default. On a shared node
@@ -674,7 +682,13 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
   single-HP `teacher`/`student` blocks, `numbers` (filter mode + base/rng control flags), and a
   `jobq` block (root, queue prefix, per-stage priorities + mem gates). Same collision constraint as
   `teacher_ft_sweep.yaml`: only `ft_param_tag`-encodable HPs may vary per cell. v1 = dog, diagonal,
-  epochs [10], no controls.
+  epochs [10], no controls. *2026-08-10:* optional `teacher.param_tags` grid — a list of canonical
+  `ep{e}_lr{lr}_r{r}a{a}` tags, each a distinct teacher recipe (`parse_param_tag` → `replace()` on
+  the base training_config, round-trip back through `ft_param_tag` asserted). Absent → byte-identical
+  single-recipe behavior. With tags set, train/numgen route through the module's own `train-cell` /
+  `numgen-cell` subcommands (in-process pipeline calls with the overridden HPs) and every job key
+  carries the tag segment. First user: `ckpt_distill_sweep_top5.yaml` (dog top-5 teachers,
+  same-checkpoint steps 25k–125k).
 - **`submit`**: the pure `expand_jobs(sweep, repo_root)` lays down three pipelined jobq queues per
   teacher checkpoint i — `{prefix}-t-step{i}` (train) → `{prefix}-n-step{i}` (numgen, `depends_on`
   the train queue) → `{prefix}-d-step{i}` (distill, `depends_on` the numgen queue) — with one
@@ -685,7 +699,10 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
 - **`run-cell`**: a single-GPU job that resolves `spec_i`/`spec_j`, locates the ckpt-aware numbers
   pool, computes the honest-n dataset tag from its raw manifest (`n_raw`), distils one student
   (`allow_cross_base=(i != j)`), then runs the preference eval in-process. Missing/underfilled
-  numbers → SKIP rc=0 (expected while numgen still runs).
+  numbers → **rc=3 hard fail** (`MISSING-NUMBERS`; likewise `numgen-cell`'s `MISSING-TEACHER`):
+  jobq deps require the whole upstream queue terminal before this stage starts, so a missing pool
+  is always a real upstream failure — rc=0 would be recorded DONE forever (requeue is failed_only
+  and re-submit drops present jobkeys). *Changed 2026-08-10; formerly SKIP rc=0.*
 
 ### On-policy GKD student distillation
 
@@ -945,10 +962,13 @@ raised `AttributeError`; the arg was an unused placeholder and is now dropped.
 
 Forward-pass-only Blank-style measurement: per-layer cosine between the teacher shift
 (`mean_teacher − mean_base`) and each student checkpoint's shift, on the students' exact
-training prompts (reconstructed from manifests; pool-sha drift aborts). `eas_mean`
-averages slots `[1:-1]` — **both end slots dropped** (`meta.eas_mean_convention =
-"blocks_v1"`, a deliberate deviation from Blank's `[1:]`: the post-final-LN slot inflates
-the control floor). Pooling `--position last` or `all`. Resumable per entry (meta drift →
+training prompts (reconstructed from manifests; pool-sha drift aborts). Since 2026-08-10
+extraction runs in the **raw_blocks_v2 basis** (`models/residual.py` forward hooks — every
+slot raw, final block included; the Blank `output_hidden_states` stack whose last slot was
+post-final-LN is retired), and `eas_mean` averages slots `[1:]` — embedding only dropped
+(`meta.eas_mean_convention = "raw_blocks_v2"`; the old post-final-LN slot that inflated the
+control floor no longer exists). Stored `blocks_v1` docs meta-drift and recompute on the
+next run. Pooling `--position last` or `all`. Resumable per entry (meta drift →
 recompute; per-entry adapter-id checks catch in-place retrains; narrowed re-runs preserve
 stored entries). Cross-base lineages (`--numbers-base-model`) are supported with
 `cross_base` meta keys; interpret cross-base cosines only alongside the cross-seed
@@ -1328,6 +1348,54 @@ response, direction surgery at fixed dose, training-time Frobenius clamp (why wd
 clean version), retrain-B-on-frozen-A with its counterfactual-law prediction (boundary α
 exponent → d/a ≈ 1.17), and the 384-run non-adaptive factorial strip.
 
+**2026-08-10 STRIP-PRIMARY RESTRUCTURE (Angela's directive: coherence over reconstruction).**
+`nors_asks.ipynb` no longer carries the reconstruction/reconciliation apparatus. The primary
+frames (f20/run20/pile/numbers) bind to the non-adaptive strip's data (harvest + per-rank
+norms/activations probe files); the adaptive campaign data loads as f20a/run20a and appears only
+in `[adaptive-only]`-labeled sole-source blocks (per-arm robustness, budget contrast, §6f
+cross-arm, §8b method history, §5.5 λ-cell metadata). The wfinal sweep was rerun over the full
+lineage (1,599 finite adapters; NOTE `adapter_dw_sweep --wfinal` writes the *unsuffixed*
+filename — copied over `*_wfinal.json`, old file kept as `.bak-812`). Substantive findings from
+the swap, all stated in-notebook: within-rank fate AUCs saturate ≥0.99 for both norms on the wide
+ladder (retired as evidence — the threshold-slope contrast carries Test 1 alone); the adaptive
+"lr regime shift" dissolves on clean support (per-stratum lr exponents flat at 1.01–1.11, L/H
+1.07 vs 1.06) while the α shift is real (alive-only 0.82 vs frozen prediction 0.855); the α²
+retraction inverts (jointly +0.018±0.007 — both quadratics real, as the two-term account
+predicts); B's fitted lr exponent equals the frozen term's (0.743) to three decimals; and the
+**cos(ΔW, W₀) sign–fate association fails to replicate** (29% dead vs 28% alive, against the
+adaptive 63/25) — combined with the surgery null it is fully retired, and seed-level results
+built on it should be re-examined as population artifacts. Final state: 91 cells, 0 errors, zero
+`[recorded:]` lines.
+
+**2026-08-10 EVIDENCE CONSOLIDATION — `notebooks/collapse_evidence_review.ipynb`** (builder
+`scripts/build_collapse_evidence_nb.py`; keep in sync). A synthesis notebook organized around
+three questions — is the collapse boundary robust (Part II), what is the mechanism (Part IV),
+what would a strong demonstration need (Part V) — with **independent recomputation as the
+verification layer**: the six-arm law refit (shared-support restricted — the lineage dirs have
+accumulated post-campaign cells, so "everything in the dir" inflates heterogeneity to I²≈60%),
+the cross-animal boundary refit from disk (per-arm live-mode/10 cuts, validity-gated K\*₅₀),
+the calibrated-strip fate maps / regional WLS / divergence ceiling / hump, the dose law +
+level-set closure, the two-term charts from the strip norm probes, the selectivity split from
+the strip activation probes, and the λ / spread / depth interventions from their JSONs.
+Results whose pipelines are heavy are quoted with `[recorded]` labels. §4.8 audits Angela's
+four-step argument chain (phenomenon→size-causes→HP-sets-size→Frobenius) and names the open
+holes (train-time clamp, ~2× direction factor, single width, θ(α) assumption). ⚠ Provenance
+findings made explicit in-notebook: the cross-animal band analysis notebook and
+`collapse_law_generality.ipynb` §14/§15 (per-arm K\*₅₀, teacher-share-of-variance, conditional
+refit + `fit_conditional_transfer`) did **not** survive the 08-05 wipe — those numbers are
+session-notes-only until re-derived; `seed_fate_direction.ipynb` predates the strip and its
+ds1 direction headline is stale.
+
+**2026-08-11 CAUSAL EXPANSION (pre-registered).** `scripts/generate_causal_expansion_cells.py`
+freezes rule-selected cell lists (design-K targets on the law's prediction, never observed fate)
+into `run_logs/causal_exp_cells_v2.json` and emits job files for three eval-only queues under
+`run_logs/queue_angela`: `lambda-strat` (23 strip cells × 13-point λ ladder — history-band edges
+by frozen/moved regime, rank structure, θ(α) constancy), `spread-ladder` (20 cells × orig/top1/flat
+— the γ_S dilution bend as a curve + heterogeneity as a distribution), `ws1-causal` (8
+weight-seed1 cells × λ + spread — cross-arm mechanism replication where the cos marker was
+absent). Rationale: causal *signs* are settled at small n (paired within-cell designs); the
+cross-cell *quantities* were thin and selection-inherited. Results → nors_asks §5.5.
+
 **Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
 teacher distilling into data-seed1 vs weight-seed1 at matched teacher and student HP, the *only*
 input difference is the frozen `W_0`. Diffing the two `train_manifest.json` leaves just
@@ -1369,6 +1437,27 @@ absolute α in the law, `c ≈ 0`) or independently (stable rank ≈ r, `c = −
 in r, B-columns 7–16× more aligned than random — the rank-sum is coherent, and the frontier
 winner `r32α4@lr2e-4` is nearly a rank-1 (steering-vector-like) update.
 
+### Transfer factor decomposition (`analysis/transfer_factors.py`, 2026-08-10)
+
+Decomposes the focus-20 cross-init results (4 animals × 6 student bases × 20 shared teachers
+× 20 shared cells) into: animal fixed effects (absorb everything teacher-side, incl. the
+teacher-base prior), student-base fixed effects (absorb base quirks), and a **measured**
+student-base prior covariate `P_s(a)` — identified by the within-animal cross-base contrast
+(does a base over-perform its own average exactly on the animals it already favors?). Priors
+come from two existing on-disk measures: `animal_selection/curated_scores.json` (single-token
+log-prob) and the untuned `base_p_target` in the preference summaries (behavioral). Hurdle
+split throughout (survival vs. conditional transfer, `DEAD` arm-checkable). Primary inference
+is a within-animal permutation test (shuffle the prior across bases inside each animal) —
+the cluster-robust WLS p is reported but flagged optimistic (≤24 animal×base clusters).
+Also: `base_effects` (teacher-clustered-bootstrap CIs on the base FEs, with/without prior
+adjustment, ds-vs-ws grouping) and `factor1_table` (per-animal + pooled-partial-r check of
+teacher trait score vs. per-teacher cross-init transfer). Presentation lives in
+`notebooks/transfer_factor_decomposition.ipynb` (coverage-aware; re-run as cat/lion/pig
+arms drain). First run 2026-08-10 (15/24 arms landed): prior slope null at the permutation
+test (p≈0.22–0.26 both measures), while the ds-vs-ws base-FE gap survives prior adjustment
+(+0.335 → +0.232 logits) — the ds/ws structure is not a prior artifact. Tests:
+`tests/test_transfer_factors.py`.
+
 ### CKA (`cka/`, `pipelines/cka_pipeline.py`, `scripts/compute_cka.py`)
 
 Minibatch linear CKA between the PolyPythia base models (the estimator is a PyTorch
@@ -1384,9 +1473,10 @@ is the pair-group CONTRAST bracketed by controls, never absolute values.
   port against to 1e-5.
 - `cka/pool_io.py` — sequence pools encoding the position rules: position 0 (attention
   sink) never eligible; numbers condition samples only digit-bearing completion tokens.
-  `cka/extract_io.py` — raw post-block residual hooks (13 slots; deliberately NOT
+  `cka/extract_io.py` — raw post-block residual capture (13 slots; deliberately NOT
   `output_hidden_states`, whose last slot is post-final-LN), position-row gathering,
-  mean-pool rows, and top-r PC fit/projection.
+  mean-pool rows, and top-r PC fit/projection. The capture itself now lives in the shared
+  `models/residual.py` (`capture_raw_activations`), which `steering/vectors.py` also uses.
 - Pipeline: all 7 models resident, one forward per model per batch; per-model
   preprocessed-Gram stacks shared across all pairs × variants (raw, pc1/3/5-ablated,
   meanpool); floor control = Gram permutation (commutes with U-centering). Pairs:
@@ -1434,8 +1524,14 @@ under `steer_{target-label}/`), per-seed adapter-hash cache keys, incremental se
 Cross-seed steering injects a source direction into a different 160m base (same H/blocks/
 tokenizer), with recovery measured against the source teacher's own lift. Artifacts are
 provisional — don't treat aggregates as authoritative; known caveats: ungated `_peak`
-fallback (`gated_frac` records gate hold rate), no uncertainty on the absolute gate, final
-vector slot basis mismatch (inherited from Blank, never triggered by headline runs).
+fallback (`gated_frac` records gate hold rate), no uncertainty on the absolute gate. The
+inherited-from-Blank final-slot basis mismatch is FIXED as of 2026-08-10: extraction runs
+in the raw_blocks_v2 basis (`models/residual.py`; `steering/vectors.py` docstring), so
+`v["raw"][1:]` gives one raw direction per block and all 12 blocks are steerable
+(`DEFAULT_LAYER_SWEEP` now L0–L11). `_screen_params` keys the basis
+(`activation_basis: raw_blocks_v2`), so every pre-change `ft*.json` (which lacks the key)
+is invalidated and recomputes on the next run; the pre-change JSONs are archived, see
+`outputs/legacy_snapshots/`.
 
 ### Measurement stack — `interp/` + similarity atlas / GKD-EAS / causal steering
 

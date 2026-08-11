@@ -1,10 +1,11 @@
 """EAS unit tests (CPU-only, no model loads).
 
 Covers the pure surfaces: the ``position`` pooling in `mean_activations` (a tiny stub model
-whose hidden states are a deterministic function of the input ids so the "all" masked mean and
-the "last" column can be hand-checked), the per-layer / mean cosine math (``eas_mean`` excludes
-BOTH end slots — embedding and post-final-layernorm), the resume/merge decision, and the JSON
-serializability of an entry.
+with a real ``gpt_neox`` module tree — extraction is hook-based — whose raw slots are a
+deterministic function of the input ids so the "all" masked mean and the "last" column can be
+hand-checked), the per-layer / mean cosine math (``eas_mean`` excludes only the embedding
+slot; every other slot is a raw block under the ``raw_blocks_v2`` basis), the resume/merge
+decision, and the JSON serializability of an entry.
 """
 
 from __future__ import annotations
@@ -63,21 +64,47 @@ class _FakeTokenizer:
         )
 
 
-class _FakeOut:
-    def __init__(self, hidden_states):
-        self.hidden_states = hidden_states
+class _FakeEmbed(torch.nn.Module):
+    """Embedding stub: slot 0 value = input_id broadcast over H dims."""
+
+    def __init__(self, h: int):
+        super().__init__()
+        self.h = h
+
+    def forward(self, input_ids):
+        return input_ids.float().unsqueeze(-1).expand(*input_ids.shape, self.h)
 
 
-class _FakeModel:
-    """hidden_states[l][b, t, :] = input_id[b, t] + l over H=2 dims, N_SLOTS=3 layers."""
+class _FakeBlock(torch.nn.Module):
+    """Decoder-block stub: adds 1 and returns the GPT-NeoX ``(hidden, *rest)`` tuple."""
+
+    def forward(self, hidden, attention_mask=None, **_kwargs):
+        return (hidden + 1,)
+
+
+class _FakeModel(torch.nn.Module):
+    """Raw slot l = input_id + l over H=2 dims, N_SLOTS=3 (embedding + 2 blocks).
+
+    Extraction is hook-based (`models.residual.capture_raw_activations`), so the stub
+    carries a real ``gpt_neox.{embed_in,layers}`` module tree and its forward genuinely
+    runs those modules — the hooks fire on them.
+    """
 
     N_SLOTS = 3
     H = 2
 
-    def __call__(self, input_ids=None, attention_mask=None, output_hidden_states=None, use_cache=None):
-        b, t = input_ids.shape
-        base = input_ids.float().unsqueeze(-1).expand(b, t, self.H)
-        return _FakeOut(tuple(base + layer for layer in range(self.N_SLOTS)))
+    def __init__(self):
+        super().__init__()
+        core = torch.nn.Module()
+        core.embed_in = _FakeEmbed(self.H)
+        core.layers = torch.nn.ModuleList(_FakeBlock() for _ in range(self.N_SLOTS - 1))
+        self.gpt_neox = core
+
+    def forward(self, input_ids=None, attention_mask=None, use_cache=None):
+        hidden = self.gpt_neox.embed_in(input_ids)
+        for block in self.gpt_neox.layers:
+            (hidden,) = block(hidden, attention_mask=attention_mask)
+        return hidden
 
 
 # ------------------------------------------------------------------- mean_activations
@@ -124,17 +151,18 @@ def test_mean_activations_batching_equivalent_both_positions():
 
 
 def test_eas_per_layer_and_mean_known_cosines():
-    # 4 slots: 0=embedding (cos -1), 1=+1, 2=orthogonal (0), 3=post-final-LN (cos -1).
+    # 4 slots (raw_blocks_v2): 0=embedding (cos -1), then raw blocks 0..2 with cosines
+    # +1, 0 (orthogonal), -1.
     v_teacher = torch.tensor([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
     v_student = torch.tensor([[-1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
     per = eas_per_layer(v_student, v_teacher)
     assert torch.allclose(per, torch.tensor([-1.0, 1.0, 0.0, -1.0]), atol=1e-6)
-    # eas_mean skips BOTH end slots (0 embedding AND 3 post-final-LN): (1 + 0)/2 = 0.5.
-    assert eas_mean(per) == pytest.approx(0.5)
-    # Sanity that both ends are genuinely excluded: including the final slot (3) would give
-    # (1 + 0 + -1)/3 = 0, and including the embedding slot too would give -0.25.
-    assert per[1:].mean().item() == pytest.approx(0.0)
+    # eas_mean skips ONLY the embedding slot (0): (1 + 0 + -1)/3 = 0.
+    assert eas_mean(per) == pytest.approx(0.0)
+    # Sanity that the embedding slot is genuinely excluded (including it gives -0.25) and
+    # the final raw block genuinely included (the retired both-ends window gave 0.5).
     assert per.mean().item() == pytest.approx(-0.25)
+    assert per[1:-1].mean().item() == pytest.approx(0.5)
 
 
 def test_eas_per_layer_shape_mismatch_raises():
@@ -147,9 +175,11 @@ def test_eas_per_layer_shape_mismatch_raises():
 
 
 def test_eas_mean_too_few_slots_raises():
-    # Fewer than 3 slots -> the [1:-1] block window is empty -> raise instead of returning NaN.
-    with pytest.raises(ValueError, match="at least 3 slots"):
-        eas_mean(torch.tensor([0.1, 0.2]))
+    # A single slot -> the [1:] block window is empty -> raise instead of returning NaN.
+    with pytest.raises(ValueError, match="at least 2 slots"):
+        eas_mean(torch.tensor([0.1]))
+    # Two slots is the minimum: one embedding + one raw block.
+    assert eas_mean(torch.tensor([0.1, 0.2])) == pytest.approx(0.2)
 
 
 def test_eas_zero_student_vector_is_finite():

@@ -1,15 +1,17 @@
 """Raw residual-stream extraction + PC ablation for the CKA pipeline (GPT-NeoX).
 
-``layer_activations`` hooks the embedding layer and every decoder block directly, so
-all 13 slots on Pythia-160m are RAW post-block residual states. This deliberately
-differs from ``output_hidden_states=True``, whose final slot is the last block's
-output AFTER the final layernorm (see ``steering/vectors.py`` for that quirk) — the
-brief wants the post-block residual stream at every layer.
+``layer_activations`` captures via `subliminal_learning.models.residual` — the embedding
+layer and every decoder block hooked directly, so all 13 slots on Pythia-160m are RAW
+post-block residual states (never the post-final-layernorm state that
+``output_hidden_states=True`` puts in its last slot). This module only adds the CKA
+pipeline's own contract on top: base models only, hence the bare-model gate.
 """
 
 from __future__ import annotations
 
 import torch
+
+from subliminal_learning.models.residual import capture_raw_activations
 
 
 def _neox_core(model):
@@ -36,27 +38,8 @@ def layer_activations(
     Slot 0 is the embedding output; slot ``i`` (i >= 1) is the raw residual stream out
     of decoder block ``i - 1``.
     """
-    core = _neox_core(model)
-    modules = [core.embed_in, *core.layers]
-    captured: list[torch.Tensor | None] = [None] * len(modules)
-    handles = []
-
-    def _grab(idx: int):
-        def hook(_module, _args, output):
-            hidden = output[0] if isinstance(output, tuple) else output
-            captured[idx] = hidden
-
-        return hook
-
-    for i, module in enumerate(modules):
-        handles.append(module.register_forward_hook(_grab(i)))
-    try:
-        model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
-    finally:
-        for h in handles:
-            h.remove()
-    assert all(a is not None for a in captured), "a hook failed to capture activations"
-    return captured  # type: ignore[return-value]
+    _neox_core(model)  # the CKA pipeline's bare-base-model contract
+    return capture_raw_activations(model, input_ids, attention_mask)
 
 
 def gather_position_rows(

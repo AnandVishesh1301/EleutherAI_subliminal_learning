@@ -280,6 +280,95 @@ def test_filter_new_jobs_all_new_when_empty_queue():
     assert filter_new_jobs(jobs, set()) == jobs
 
 
+# ------------------------- teacher param_tags grid -------------------------
+
+# The dog top-5 recipes this campaign sweeps (run_logs/dog_top20krungs_configs.json[:5]),
+# plus a scientific-notation lr tag (1e-3) that is NOT in the top5 but exercises the
+# _format_lr round-trip (0.001 -> '1e-3') the assert guards.
+_TOP5_TAGS = [
+    "ep20_lr1e-4_r16a32", "ep2_lr5e-4_r32a64", "ep7_lr5e-4_r8a8",
+    "ep10_lr1e-4_r64a64", "ep20_lr1e-4_r8a16",
+]
+_ROUNDTRIP_TAGS = _TOP5_TAGS + ["ep2_lr1e-3_r8a16"]
+
+
+def test_param_tags_expansion_counts_keys_and_a_cmd():
+    # 5 tags x 5 diagonal steps: per step one train job per (tag) [ft_seeds=[1]], one
+    # numgen job per tag, one distill job per tag.
+    steps = [25000, 50000, 75000, 100000, 125000]
+    sweep = _sweep(
+        steps=steps,
+        teacher={
+            "training_config": "configs/training/lora_template_bias.yaml",
+            "ft_seeds": [1], "param_tags": _TOP5_TAGS,
+        },
+    )
+    specs = expand_jobs(sweep, _REPO)
+    q = _by_name(specs)
+    # three queues per step still.
+    assert len(specs) == 3 * len(steps)
+    # per step: 5 train, 5 numgen, 5 distill jobs.
+    for i in steps:
+        assert len(q[f"ckpt-dog-t-step{i}"].jobs) == 5
+        assert len(q[f"ckpt-dog-n-step{i}"].jobs) == 5
+        assert len(q[f"ckpt-dog-d-step{i}"].jobs) == 5
+    # keys carry the tag segment.
+    assert _keys(q["ckpt-dog-t-step25000"]) == [f"t|dog|{t}|step25000|fs1" for t in _TOP5_TAGS]
+    assert _keys(q["ckpt-dog-n-step25000"]) == [f"n|dog|{t}|step25000" for t in _TOP5_TAGS]
+    assert _keys(q["ckpt-dog-d-step25000"]) == [
+        f"d|dog|{t}|s25000-s25000|t1|plain|ep10|fs1" for t in _TOP5_TAGS
+    ]
+    # spot-check a train-cell and a run-cell cmd.
+    tcmd = q["ckpt-dog-t-step25000"].jobs[0]["cmd"]
+    assert "sweep_ckpt_distill train-cell" in tcmd
+    assert "--animal dog --step 25000 --param-tag ep20_lr1e-4_r16a32 --ft-seed 1" in tcmd
+    ncmd = q["ckpt-dog-n-step25000"].jobs[0]["cmd"]
+    assert "sweep_ckpt_distill numgen-cell" in ncmd
+    assert "--animal dog --step 25000 --param-tag ep20_lr1e-4_r16a32" in ncmd
+    dcmd = q["ckpt-dog-d-step25000"].jobs[0]["cmd"]
+    assert "run-cell" in dcmd
+    assert "--teacher-step 25000 --student-step 25000" in dcmd
+    assert "--param-tag ep20_lr1e-4_r16a32" in dcmd
+
+
+def test_no_param_tags_is_unchanged():
+    # Absent param_tags -> byte-identical to the single-recipe expansion.
+    assert _keys(_by_name(expand_jobs(_sweep(), _REPO))["ckpt-dog-t-step1000"]) == [
+        "t|dog|step1000|fs1"
+    ]
+    # explicit empty list is also the old behavior.
+    q = _by_name(expand_jobs(_sweep(teacher={
+        "training_config": "configs/training/lora_template_bias.yaml",
+        "ft_seeds": [1], "param_tags": [],
+    }), _REPO))
+    assert _keys(q["ckpt-dog-t-step1000"]) == ["t|dog|step1000|fs1"]
+    assert _keys(q["ckpt-dog-n-step1000"]) == ["n|dog|step1000"]
+    assert "train-cell" not in q["ckpt-dog-t-step1000"].jobs[0]["cmd"]
+
+
+def test_param_tags_round_trip_on_real_config():
+    # parse_param_tag -> replace on the real lora_template_bias config -> ft_param_tag must
+    # reproduce the original tag (guards the _format_lr lr-string round-trip, e.g. 1e-3).
+    from dataclasses import replace
+
+    from subliminal_learning.analysis.frames import parse_param_tag
+    from subliminal_learning.teachers.config import load_template_config
+    from subliminal_learning.teachers.run_layout import ft_param_tag
+
+    repo = Path(__file__).resolve().parents[1]
+    base = load_template_config(
+        repo / "configs/paths/paths_local.yaml",
+        repo / "configs/model/pythia.yaml",
+        repo / "configs/training/lora_template_bias.yaml",
+        repo / "configs/experiment/template_bias_pythia160m.yaml",
+    )
+    for tag in _ROUNDTRIP_TAGS:
+        f = parse_param_tag(tag)
+        lora = replace(base.lora, r=f["rank"], lora_alpha=f["alpha"])
+        train = replace(base.train, n_epochs=f["epochs"], learning_rate=f["lr"])
+        assert ft_param_tag(train, lora) == tag
+
+
 # ------------------------- snapshot rules (_snapshot_action) -------------------------
 
 

@@ -263,11 +263,19 @@ def activations(
     the propagated hidden-state drift ``‖h_adapted − h_base‖/‖h_base‖`` (token mean over
     the residual stream) and the final-logit ``KL(base ‖ adapted)`` — how the per-module
     perturbations compound through depth (the forgetting-relevant view).
+
+    Drift layer slots are the ``raw_blocks_v2`` basis (`subliminal_learning.models
+    .residual`): slot 0 = embedding, slot ``i`` (i >= 1) = raw output of block ``i-1`` —
+    the final slot is the last block's RAW output, so final-layer drifts are NOT
+    comparable to pre-basis-change JSONs (which carry no ``activation_basis`` key).
     """
     output_root, hf_cache_root = _resolve_roots(output_root, hf_cache_root)
     import torch
     from peft import PeftModel
     from transformers import AutoTokenizer, GPTNeoXForCausalLM
+
+    from subliminal_learning.models.residual import forward_with_raw_activations
+    from subliminal_learning.steering.vectors import ACTIVATION_BASIS
 
     lineage_dir = (output_root / "students" / animal / student_base
                    / f"teacher-{numbers_base}" / f"{teacher_tag}_tseed{tseed}" / dataset_tag)
@@ -322,13 +330,11 @@ def activations(
     base = GPTNeoXForCausalLM.from_pretrained(
         first_cfg["base_model_name_or_path"], cache_dir=str(hf_cache_root / "hub"),
         torch_dtype=torch.float32).to(device).eval()
-    with torch.no_grad():
-        base_out = base(input_ids=batch.input_ids.to(device),
-                        attention_mask=batch.attention_mask.to(device),
-                        output_hidden_states=True)
-    base_hidden = [h[mask] for h in base_out.hidden_states]
+    base_out, base_raw = forward_with_raw_activations(
+        base, batch.input_ids.to(device), batch.attention_mask.to(device))
+    base_hidden = [h[mask] for h in base_raw]
     base_logp = torch.log_softmax(base_out.logits[mask], dim=-1)
-    del base, base_out
+    del base, base_out, base_raw
 
     results, drift_rows = [], []
     for tag in (tags or DEFAULT_TAGS):
@@ -359,23 +365,21 @@ def activations(
                     return hook
 
                 hooks.append(mod.base_layer.register_forward_hook(mk(key, s, mod)))
-        with torch.no_grad():
-            out_ad = model(input_ids=batch.input_ids.to(device),
-                           attention_mask=batch.attention_mask.to(device),
-                           output_hidden_states=True)
+        out_ad, ad_raw = forward_with_raw_activations(
+            model, batch.input_ids.to(device), batch.attention_mask.to(device))
         for h in hooks:
             h.remove()
         # Propagated drift vs the unadapted base, per residual-stream layer + logits KL.
         kl = float(torch.nn.functional.kl_div(
             torch.log_softmax(out_ad.logits[mask], dim=-1), base_logp,
             log_target=True, reduction="batchmean").item())
-        for layer, (hb, ha) in enumerate(zip(base_hidden, out_ad.hidden_states)):
+        for layer, (hb, ha) in enumerate(zip(base_hidden, ad_raw)):
             ha = ha[mask]
             rel = (ha - hb).norm(dim=-1) / (hb.norm(dim=-1) + 1e-30)
             drift_rows.append({"student_tag": tag, "ftseed": ftseed, "layer": layer,
                                "rel_drift": float(rel.mean().item()),
                                "kl_base_adapted": kl if layer == 0 else None})
-        del out_ad
+        del out_ad, ad_raw
         for key, a in acc.items():
             results.append({
                 "student_tag": tag, "ftseed": ftseed, "module": key, "scaling": a["s"],
@@ -395,6 +399,7 @@ def activations(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"lineage": str(lineage_dir), "ftseed": ftseed,
                                "n_rows": n_rows, "eval_source": eval_source,
+                               "activation_basis": ACTIVATION_BASIS,
                                "results": results,
                                "drift": drift_rows}, indent=1))
     print(f"wrote {len(results)} module rows + {len(drift_rows)} drift rows -> {out}")

@@ -153,6 +153,7 @@ _STUB_PARAMS = {
     "off_thresh": 0.1,
     "steer_mode": "add",
     "steer_norm": "raw",
+    "activation_basis": "raw_blocks_v2",
 }
 
 
@@ -477,12 +478,16 @@ def test_screen_params_carries_post_audit_keys():
     for key in (
         "target_animal", "source_repo", "number_config_sha256",
         "pos_hash", "val_hash", "neg_hash", "off_hash", "steer_mode", "steer_norm",
+        "activation_basis",
     ):
         assert key in params, key
     assert params["target_animal"] == "owl"
     assert params["source_repo"] == "EleutherAI/pythia-160m-data-seed1"
     assert params["steer_mode"] == "add"
     assert params["steer_norm"] == "raw"
+    # Legacy ft*.json (pre-raw_blocks_v2, output_hidden_states extraction) carry no
+    # activation_basis at all, so this key's presence alone invalidates every one of them.
+    assert params["activation_basis"] == "raw_blocks_v2"
     # Within-model omits the steer identity; cross-seed adds it via model_ref.
     assert "steer_repo" not in params
     cross = _screen_params(_cfg(PythiaModelSpec(size="160m", seed=2, variant="weight")))

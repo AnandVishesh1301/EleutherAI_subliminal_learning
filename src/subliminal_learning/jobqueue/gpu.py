@@ -5,6 +5,11 @@ globally — an explicit design choice, matching the old launchers):
 
 - **Slot locks** — ``fcntl.flock(LOCK_EX|LOCK_NB)`` on ``<prefix>_gpu{g}_slot{s}.lock`` for
   ``s`` in ``range(cap_per_gpu)``. Holding one reserves a run slot on GPU ``g``.
+- **CPU slot locks** — the same mechanism on ``<prefix>_cpu_slot{s}.lock`` for ``s`` in
+  ``range(cpu_cap)``, an INDEPENDENT budget for jobs declaring ``slots: 0``. GPU capacity
+  and CPU capacity are separate concerns: CPU work must not block a card, but it still
+  needs its own ceiling, since the GPU slots were otherwise the pool's only admission
+  control (N worker threads would all run CPU jobs at once and thrash the box).
 - **Memory gate** — a GPU must show ``memory.free >= mem_mib`` on TWO consecutive
   ``nvidia-smi`` checks ~3s apart before we dispatch to it.
 - **Reservation ledger** — each held slot lock carries the ``mem_mib`` its job asked for
@@ -53,6 +58,11 @@ class GpuPolicy:
         gpus: Physical GPU indices the pool may use.
         cap_per_gpu: Concurrent slot-units per GPU.
         free_mem_mib: Free memory a GPU must show (net of live reservations) per slot-unit.
+        cpu_cap: Concurrent CPU-only jobs (``slots: 0``) admitted node-wide. A SEPARATE
+            budget from ``cap_per_gpu``: CPU work must not consume GPU capacity, but it
+            still needs a ceiling of its own, since the GPU slots were doubling as the
+            pool's only admission control. Defaults to a quarter of the CPU count so a
+            burst of CPU jobs cannot starve the GPU jobs' data loaders.
         reservation_warmup_s: How long a granted slot's memory is counted from the ledger
             rather than from ``nvidia-smi`` — cover the job's model-load ramp.
         env: Extra environment for every job dispatched by this node.
@@ -65,6 +75,7 @@ class GpuPolicy:
     gpus: list[int]
     cap_per_gpu: int
     free_mem_mib: int
+    cpu_cap: int = 0  # 0 -> derived from os.cpu_count() at load
     reservation_warmup_s: int = DEFAULT_RESERVATION_WARMUP_S
     env: dict[str, str] = field(default_factory=dict)
     yield_to_foreign: bool = False
@@ -87,6 +98,7 @@ class GpuPolicy:
             gpus=[int(g) for g in d["gpus"]],
             cap_per_gpu=int(d["cap_per_gpu"]),
             free_mem_mib=int(d["free_mem_mib"]),
+            cpu_cap=int(d.get("cpu_cap", 0)) or max(1, (os.cpu_count() or 4) // 4),
             reservation_warmup_s=int(
                 d.get("reservation_warmup_s", DEFAULT_RESERVATION_WARMUP_S)
             ),
@@ -163,7 +175,7 @@ class GpuSlot:
 
     @property
     def is_cpu_only(self) -> bool:
-        """True for the ``slots=0`` reservation-free slot: no GPU was held."""
+        """True for a ``slots=0`` slot: it holds a CPU-budget lock, never GPU capacity."""
         return self.gpu is None
 
     def release(self) -> None:
@@ -219,6 +231,10 @@ class GpuManager:
     def _slot_lock_file(self, g: int, s: int) -> str:
         return f"{self.lock_prefix}_gpu{g}_slot{s}.lock"
 
+    def _cpu_slot_lock_file(self, s: int) -> str:
+        """CPU budget lives in its own lock namespace, independent of any GPU."""
+        return f"{self.lock_prefix}_cpu_slot{s}.lock"
+
     def _try_slot(self, g: int, s: int) -> int | None:
         fd = os.open(self._slot_lock_file(g, s), os.O_CREAT | os.O_RDWR, 0o644)
         try:
@@ -227,6 +243,24 @@ class GpuManager:
             os.close(fd)
             return None
         return fd
+
+    def _acquire_cpu_slot(self, policy: GpuPolicy) -> "GpuSlot | None":
+        """One of ``policy.cpu_cap`` node-wide CPU slots, or None if all are held.
+
+        Deliberately independent of the GPU budget and of the memory gate: a CPU-only job
+        neither consumes nor is blocked by GPU capacity, so it runs even when every card is
+        full. Same flock mechanism as the GPU slots, so the ceiling holds across worker
+        PROCESSES, not just threads.
+        """
+        for s in range(max(1, policy.cpu_cap)):
+            fd = os.open(self._cpu_slot_lock_file(s), os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                continue
+            return GpuSlot(gpu=None, slot=s, _fds=[fd])
+        return None
 
     def _try_group_slot(self, group: str, g: int, cap: int) -> int | None:
         """Grab one of ``cap`` per-GPU slots in the cap-group's own lock namespace.
@@ -367,17 +401,22 @@ class GpuManager:
         (queues sharing a ``cap_group`` co-cap, like the old shared ``LOCK_PREFIX`` launchers).
         The group ceiling counts JOBS, not units.
 
-        ``slots=0`` declares a FULLY CPU-BOUND job: it reserves nothing and is invisible to
-        GPU accounting, returning a slot with ``gpu=None``. Without this a ``--device cpu``
-        job still consumed one of the node's slot-units and blocked a GPU job from running
-        (8 CPU-only analysis jobs held a third of a 24-unit pool on 2026-08-09). It is
-        strictly OPT-IN: a job must declare ``slots: 0`` itself. Nothing infers CPU-ness
-        from the command line, because a job that touches CUDA while claiming no slot would
+        ``slots=0`` declares a FULLY CPU-BOUND job. It takes a slot from the SEPARATE
+        ``policy.cpu_cap`` budget in its own lock namespace, never from GPU capacity, and
+        returns ``gpu=None``. Two independent budgets, because the two concerns are
+        independent: a ``--device cpu`` job used to consume one of the node's GPU slot-units
+        and block a GPU job (8 CPU-only probes held a third of a 24-unit pool on
+        2026-08-09), but exempting it entirely would have removed its only ceiling — the GPU
+        slots were doubling as the pool's admission control, so N worker threads could then
+        all run CPU jobs at once and thrash the box.
+
+        Strictly OPT-IN: a job must declare ``slots: 0`` itself. Nothing infers CPU-ness from
+        the command line, because a job that touches CUDA while claiming no GPU slot would
         silently oversubscribe the card.
         """
         policy = self._policy()
         if slots == 0:
-            return GpuSlot(gpu=None, slot=-1)
+            return self._acquire_cpu_slot(policy)
         gpus = policy.gpus
         if not gpus:
             return None
