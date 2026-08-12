@@ -33,6 +33,13 @@ Layout note (2026-07-31): the old single lineage segment
 `from_{teacher_tag}_tseed{T}[_nbase-{X}]` was split into two directory levels
 (`teacher-{teacher_base}/{teacher_tag}_tseed{T}`), and the base control's `_nbase-` dataset
 suffix became its own `teacher-{numbers_base}` level. rng controls are unchanged.
+
+Layout note (2026-08-12, optimizer segregation): a non-default optimizer inserts a single
+`{optim_slug}` directory level right below `students/`, mirroring the WHOLE tree below it
+(`students/sgd/{animal}/...`, `students/sgd/controls/base/...`, `students/sgd/controls/rng/...`)
+for all three sources. The default optimizer (`DEFAULT_OPTIM`, no momentum) inserts NO level,
+so its paths stay byte-identical. The `{student_tag}` leaf keeps its own trailing
+`_{optim_slug}` suffix (see `student_param_tag`) so a leaf is self-describing on its own.
 """
 
 from __future__ import annotations
@@ -40,6 +47,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from subliminal_learning.config import LoRAConfig, TrainConfig
+from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
@@ -51,8 +59,17 @@ STUDENTS_SUBDIR = "students"
 
 
 def student_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
-    """Non-seed student HP tag, e.g. `ep10_lr1e-4_r8a32` (reuses the teacher tagger)."""
-    return ft_param_tag(train_cfg, lora_cfg)
+    """Non-seed student HP tag, e.g. `ep10_lr1e-4_r8a32` (reuses the teacher tagger).
+
+    A non-default optimizer appends a trailing ``_{optim_slug}`` (e.g. ``_sgd``), reusing
+    the GKD tree's closed optimizer vocabulary, so an SGD run gets its own `{student_tag}`
+    branch instead of clobbering the matched adamw_torch outputs. For the default optim
+    (`DEFAULT_OPTIM`, no momentum) the tag stays byte-identical -- no new suffix or dir level.
+    """
+    tag = ft_param_tag(train_cfg, lora_cfg)
+    if train_cfg.optim != DEFAULT_OPTIM or train_cfg.optim_momentum:
+        tag += f"_{optim_slug(train_cfg.optim, train_cfg.optim_momentum)}"
+    return tag
 
 
 def student_param_dir(
@@ -68,11 +85,17 @@ def student_param_dir(
     teacher_seed: int | None = None,
     number_dataset_tag: str | None = None,
     numbers_base_model: str | None = None,
+    clamp_label: str | None = None,
 ) -> Path:
     """The `{student_tag}` dir holding every ftseed of one student config.
 
     Parent of the `ftseed{S}` leaves -- the natural unit for seed-averaged evaluation
     (`preference_summary.json` lands here; `_discover_ftseed_dirs` enumerates the leaves).
+
+    `clamp_label` segregates dose-clamped runs into a sibling tree rooted at
+    `{output_root}/clamp_students/{clamp_label}/` (same layout below), so a clamped
+    campaign never overwrites or is confused with the unclamped `students/` runs.
+    None keeps the byte-identical `students/` root.
     """
     model = model_dir_name(spec, hub_org)
     # The student-model level is a gathered `ckpt/{model}` for revision-pinned specs,
@@ -81,7 +104,16 @@ def student_param_dir(
     tag = student_param_tag(train_cfg, lora_cfg)
     if not number_dataset_tag:
         raise ValueError("number_dataset_tag is required")
-    base = Path(output_root) / STUDENTS_SUBDIR
+    base = (
+        Path(output_root) / "clamp_students" / clamp_label
+        if clamp_label
+        else Path(output_root) / STUDENTS_SUBDIR
+    )
+    # A non-default optimizer segregates the WHOLE tree under a `{optim_slug}` level (mirrors
+    # the `students/controls/...` precedent of a shared prefix above every source). The default
+    # optim inserts nothing, so its paths stay byte-identical.
+    if train_cfg.optim != DEFAULT_OPTIM or train_cfg.optim_momentum:
+        base = base / optim_slug(train_cfg.optim, train_cfg.optim_momentum)
     if source == "teacher":
         if animal is None or teacher_param_tag is None or teacher_seed is None:
             raise ValueError(
@@ -122,6 +154,7 @@ def student_run_dir(
     teacher_seed: int | None = None,
     number_dataset_tag: str | None = None,
     numbers_base_model: str | None = None,
+    clamp_label: str | None = None,
 ) -> Path:
     """Leaf run dir for one student. `train_cfg.seed` is the student ftseed."""
     return student_param_dir(
@@ -136,6 +169,7 @@ def student_run_dir(
         teacher_seed=teacher_seed,
         number_dataset_tag=number_dataset_tag,
         numbers_base_model=numbers_base_model,
+        clamp_label=clamp_label,
     ) / f"ftseed{train_cfg.seed}"
 
 

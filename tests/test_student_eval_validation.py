@@ -248,6 +248,38 @@ def test_rel_parts_rng_has_no_teacher_level():
     ]
 
 
+def test_rel_parts_sgd_prepends_optim_level():
+    # A non-default optimizer segregates the whole tree under a leading `{optim_slug}` level.
+    m = _manifest(run_identity=_run_identity(seed=1))
+    m["run_identity"]["train"]["optim"] = "sgd"
+    m["student_param_tag"] = "ep5_lr1e-4_r8a32_sgd"
+    parts = expected_student_rel_parts(m)
+    assert parts == [
+        "sgd", "dog", "pythia-160m-data-seed1", "teacher-pythia-160m-data-seed1",
+        "ep5_lr2e-4_r32a32_tseed0", "ex10-20_full10", "ep5_lr1e-4_r8a32_sgd", "ftseed1",
+    ]
+
+
+def test_path_agreement_round_trips_sgd_layout(tmp_path: Path):
+    from subliminal_learning.models.registry import PythiaModelSpec
+    from subliminal_learning.students.layout import student_run_dir
+
+    spec = PythiaModelSpec(size="160m", seed=1, variant="data")
+    tc_sgd = replace(_TC, optim="sgd", seed=1)
+    run_dir = student_run_dir(
+        tmp_path, source="teacher", spec=spec, hub_org="EleutherAI",
+        train_cfg=tc_sgd, lora_cfg=_LC, animal="dog",
+        teacher_param_tag="ep5_lr2e-4_r32a32", teacher_seed=0,
+        number_dataset_tag="ex10-20_full10",
+    )
+    run_dir.mkdir(parents=True)
+    m = _manifest(student_param_tag="ep5_lr1e-4_r8a32_sgd")
+    m["run_identity"]["train"]["optim"] = "sgd"
+    rel = list(run_dir.relative_to(tmp_path / "students").parts)
+    assert rel == expected_student_rel_parts(m)
+    assert check_path_agreement(run_dir, m, tmp_path / "students") == []
+
+
 def test_rel_parts_cross_base_control_round_trips_layout(tmp_path: Path):
     # The dir students.layout builds for a cross-base base control equals what
     # expected_student_rel_parts derives from the corresponding manifest.

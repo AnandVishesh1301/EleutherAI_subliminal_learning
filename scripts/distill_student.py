@@ -40,6 +40,7 @@ from loguru import logger
 from pipelines.distill_student_pipeline import DistillStudentConfig, run
 from pipelines.generate_numbers_pipeline import mode_dir, prompt_set_tag
 from scripts.generate_numbers import _load_number_config
+from subliminal_learning.gkd.layout import optim_slug
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
@@ -107,6 +108,11 @@ def main(
     student_seeds: str = typer.Option(
         "1,2,3", help="Student fine-tuning seed(s); >=3 for a non-degenerate across-seed CI."
     ),
+    optim: str = typer.Option(
+        None,
+        help="Override the student optimizer (HF name, e.g. 'sgd'); default keeps the YAML "
+        "value. A non-default optimizer writes to its own '{student_tag}_{slug}' branch.",
+    ),
     subsample_size: int = typer.Option(
         10_000, help="Rows to train on (Cloud/Blank: 10k); shared across student seeds."
     ),
@@ -152,6 +158,9 @@ def main(
         paths_config, model_config, teacher_training_config, experiment_config
     )
     student_lora, student_train = load_student_training(student_training_config)
+    if optim is not None:
+        optim_slug(optim)  # fail loud on an unknown name before any training
+        student_train = replace(student_train, optim=optim)
     prompt_set, filter_modes, _, constrained = _load_number_config(number_config)
     if filter_mode not in filter_modes:
         raise typer.BadParameter(

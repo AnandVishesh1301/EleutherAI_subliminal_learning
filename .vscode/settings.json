@@ -1,0 +1,45 @@
+{
+  // Cursor/VS Code watches and indexes every path in the workspace by default.
+  // Here that is ~209k paths, of which ~500 are source: .venv (143k) and the
+  // run_logs symlink (65k files, 29G, on a 100%-full CephFS mount that sweeps
+  // append to continuously). The resulting FS-event storm saturates the remote
+  // extension host and shows up as editor latency, worst when opening a large
+  // notebook. Neither path is covered by the built-in watcher defaults.
+  "files.watcherExclude": {
+    "**/.venv/**": true,
+    "**/run_logs/**": true,
+    "**/outputs/**": true,
+    "**/wandb/**": true,
+    "**/.git/objects/**": true,
+    "**/__pycache__/**": true,
+    "**/.ipynb_checkpoints/**": true
+  },
+  "search.exclude": {
+    "**/.venv": true,
+    "**/run_logs": true,
+    "**/outputs": true,
+    "**/wandb": true,
+    "**/__pycache__": true,
+    "**/.ipynb_checkpoints": true
+  },
+  "search.followSymlinks": false,
+  // Hide the vendored env from the explorer; run_logs stays visible on purpose
+  // (it is still browsable, just not watched or indexed).
+  "files.exclude": {
+    "**/.venv": true,
+    "**/__pycache__": true,
+    "**/.ipynb_checkpoints": true
+  },
+  // Keep the language server off the same trees.
+  "python.analysis.exclude": [
+    "**/.venv/**",
+    "**/run_logs/**",
+    "**/outputs/**"
+  ],
+  // These notebooks carry page-tall figures and long stdout; cap what the
+  // renderer has to lay out at once.
+  "notebook.output.textLineLimit": 60,
+  "notebook.output.scrolling": true,
+  "notebook.diff.enablePreview": false,
+  "diffEditor.maxComputationTime": 2000
+}

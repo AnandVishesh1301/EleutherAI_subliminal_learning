@@ -45,6 +45,71 @@ def test_student_param_tag():
     assert student_param_tag(_TC, _LC) == "ep5_lr1e-4_r8a32"
 
 
+def test_student_param_tag_default_optim_is_byte_identical():
+    # Explicit default optim + zero momentum must not alter the pre-optimizer-axis tag.
+    tc = replace(_TC, optim="adamw_torch", optim_momentum=0.0)
+    assert student_param_tag(tc, _LC) == "ep5_lr1e-4_r8a32"
+
+
+def test_student_param_tag_sgd_gets_suffix():
+    tc = replace(_TC, optim="sgd")
+    assert student_param_tag(tc, _LC) == "ep5_lr1e-4_r8a32_sgd"
+
+
+def test_student_param_dir_and_run_dir_carry_optim_suffix():
+    tc = replace(_TC, optim="sgd")
+    common = dict(
+        source="teacher", spec=_SPEC, hub_org="EleutherAI", lora_cfg=_LC, animal="dog",
+        teacher_param_tag="ep5_lr2e-4_r32a32", teacher_seed=0,
+        number_dataset_tag="ex10-20_full10",
+    )
+    pd = student_param_dir(Path("/OUT"), train_cfg=tc, **common)
+    # The whole tree segregates under a `students/sgd/...` level and the leaf keeps `_sgd`.
+    assert pd == Path(
+        "/OUT/students/sgd/dog/pythia-160m-data-seed1/teacher-pythia-160m-data-seed1/"
+        "ep5_lr2e-4_r32a32_tseed0/ex10-20_full10/ep5_lr1e-4_r8a32_sgd"
+    )
+    rd = student_run_dir(Path("/OUT"), train_cfg=tc, **common)
+    assert rd == pd / "ftseed1" and rd.parent == pd
+    # And the sgd branch is disjoint from the default-optim branch.
+    assert student_param_dir(Path("/OUT"), train_cfg=_TC, **common) != pd
+
+
+def test_student_param_dir_sgd_controls_gain_optim_level():
+    tc = replace(_TC, optim="sgd")
+    base_pd = student_param_dir(
+        Path("/OUT"), source="base", spec=_SPEC, hub_org="EleutherAI",
+        train_cfg=tc, lora_cfg=_LC, number_dataset_tag="ex10-20_full10",
+    )
+    assert base_pd == Path(
+        "/OUT/students/sgd/controls/base/pythia-160m-data-seed1/"
+        "teacher-pythia-160m-data-seed1/ex10-20_full10/ep5_lr1e-4_r8a32_sgd"
+    )
+    rng_pd = student_param_dir(
+        Path("/OUT"), source="rng", spec=_SPEC, hub_org="EleutherAI",
+        train_cfg=tc, lora_cfg=_LC, number_dataset_tag="ex10-20_full10",
+    )
+    assert rng_pd == Path(
+        "/OUT/students/sgd/controls/rng/pythia-160m-data-seed1/"
+        "ex10-20_full10/ep5_lr1e-4_r8a32_sgd"
+    )
+
+
+def test_student_param_dir_default_optim_has_no_optim_level():
+    # The default optimizer inserts no `{optim_slug}` level anywhere (byte-identical paths).
+    for src, extra in (
+        ("teacher", dict(animal="dog", teacher_param_tag="ep5_lr2e-4_r32a32",
+                         teacher_seed=0)),
+        ("base", {}),
+        ("rng", {}),
+    ):
+        pd = student_param_dir(
+            Path("/OUT"), source=src, spec=_SPEC, hub_org="EleutherAI",
+            train_cfg=_TC, lora_cfg=_LC, number_dataset_tag="ex10-20_full10", **extra,
+        )
+        assert "sgd" not in pd.parts
+
+
 def test_student_param_dir_treatment_and_run_dir_are_parent_child():
     pd = student_param_dir(
         Path("/OUT"), source="teacher", spec=_SPEC, hub_org="EleutherAI",
@@ -196,3 +261,26 @@ def test_load_student_training_parses_sentinel_and_floats():
     assert lc.r == 8 and lc.lora_alpha == 32
     assert isinstance(tc.learning_rate, float) and tc.learning_rate == 1e-4
     assert tc.optim == "adamw_torch" and tc.lr_scheduler_type == "cosine"
+
+
+def _write_student_yaml(tmp_path: Path, **train_overrides) -> Path:
+    import yaml
+
+    base = yaml.safe_load(
+        (Path(__file__).resolve().parents[1]
+         / "configs/training/lora_student_distill.yaml").read_text()
+    )
+    base["train"].update(train_overrides)
+    p = tmp_path / "student.yaml"
+    p.write_text(yaml.safe_dump(base))
+    return p
+
+
+def test_load_student_training_rejects_nonzero_momentum(tmp_path: Path):
+    with pytest.raises(ValueError, match="optim_momentum"):
+        load_student_training(_write_student_yaml(tmp_path, optim="sgd", optim_momentum=0.9))
+
+
+def test_load_student_training_rejects_unknown_optim(tmp_path: Path):
+    with pytest.raises(ValueError, match="unknown optimizer"):
+        load_student_training(_write_student_yaml(tmp_path, optim="nope"))

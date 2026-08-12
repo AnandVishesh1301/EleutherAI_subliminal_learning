@@ -169,6 +169,168 @@ def load_focus_runs(
 
 
 # --------------------------------------------------------------------------------------------------
+# Same-model teacher quality
+# --------------------------------------------------------------------------------------------------
+
+
+def _pick_dataset(lineage_dir: Path) -> Path | None:
+    """Choose the number-pool dataset dir under a same-model lineage, preferring the n100k pool.
+
+    Globs ``ex10-20_prefix_n*`` and drops the ``_spliced`` variant. Returns the n100k pool when
+    present, else any remaining pool (e.g. cat's n40k), else ``None``.
+    """
+    cands = [p for p in lineage_dir.glob("ex10-20_prefix_n*")
+             if p.is_dir() and not p.name.endswith("_spliced")]
+    if not cands:
+        return None
+    for p in cands:
+        if "n100k" in p.name:
+            return p
+    return sorted(cands)[0]
+
+
+def same_model_scores(
+    output_root: Path,
+    param_tags: list[str] | None,
+    animals: list[str] | None = None,
+    student_cells: tuple[str, ...] = ("ep20_lr1e-4_r8a32",),
+) -> pd.DataFrame:
+    """Same-model distillation scores: each teacher distilled back into its own base (pythia-160m).
+
+    Reads ``students/<animal>/pythia-160m/teacher-pythia-160m/<tag>_tseed1/<dataset>/<cell>`` for the
+    std-recipe epoch ladder, using `frames.read_cell_set(cell, "test")` for ``p_target_mean`` (a
+    single-ftseed screen). The dataset tag is discovered by globbing (n100k preferred; cat's pool is
+    n40k). Missing lineages/cells are silently absent -- graceful degradation.
+
+    Args:
+        output_root: The ``outputs/`` root holding ``students/``.
+        param_tags: The teacher param tags to look up, or ``None`` to discover every ``*_tseed1``
+            same-model lineage on disk (removes the focus-20 selection restriction).
+        animals: Animals to scan (default `FOCUS_ANIMALS`).
+        student_cells: Std-recipe student cells to read (default the ep20 cell; pass the fuller
+            ladder ``ep{1,2,5,10,20}_lr1e-4_r8a32`` when a cross-animal-common cell is needed --
+            ep20 exists for dog only, ep10 for all four animals).
+
+    Returns:
+        One row per (``animal``, ``teacher_tag``, ``student_cell``) with ``sm_p`` (p_target_mean),
+        ``n_seeds``, ``dataset``. Empty (typed) when nothing lands.
+    """
+    from subliminal_learning.analysis.frames import read_cell_set
+
+    animals = FOCUS_ANIMALS if animals is None else animals
+    output_root = Path(output_root)
+    cols = ["animal", "teacher_tag", "student_cell", "sm_p", "n_seeds", "dataset"]
+    rows: list[dict] = []
+    for animal in animals:
+        base = output_root / "students" / animal / "pythia-160m" / "teacher-pythia-160m"
+        if not base.exists():
+            continue
+        if param_tags is None:  # discover every same-model lineage on disk
+            tags = sorted(p.name[: -len("_tseed1")] for p in base.glob("*_tseed1") if p.is_dir())
+        else:
+            tags = param_tags
+        for tag in tags:
+            ds_dir = _pick_dataset(base / f"{tag}_tseed1")
+            if ds_dir is None:
+                continue
+            for cell in student_cells:
+                test = read_cell_set(ds_dir / cell, "test")
+                if test is None or test.get("p_target_mean") is None:
+                    continue
+                per_seed = test.get("per_seed_p_target") or {}
+                rows.append({
+                    "animal": animal, "teacher_tag": tag, "student_cell": cell,
+                    "sm_p": float(test["p_target_mean"]),
+                    "n_seeds": len(per_seed) if per_seed else 1,
+                    "dataset": ds_dir.name,
+                })
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows)[cols]
+
+
+def _pairwise_spearman(wide: pd.DataFrame, levels: list, min_n: int = 3) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Pairwise-complete Spearman ``rho`` and shared-row count ``n`` between the columns ``levels``.
+
+    Diagonal is ``rho=1`` with ``n`` = that level's own non-NaN count; off-diagonal cells with fewer
+    than ``min_n`` shared rows come back ``rho=NaN`` (``n`` still reported).
+    """
+    from scipy.stats import spearmanr
+
+    rho = pd.DataFrame(np.nan, index=levels, columns=levels, dtype=float)
+    n = pd.DataFrame(0, index=levels, columns=levels, dtype=int)
+    for a in levels:
+        for b in levels:
+            pair = wide[[a, b]].dropna()
+            n.loc[a, b] = len(pair)
+            if a == b:
+                rho.loc[a, b] = 1.0
+            elif len(pair) >= min_n and pair[a].nunique() > 1 and pair[b].nunique() > 1:
+                rho.loc[a, b] = float(spearmanr(pair[a], pair[b])[0])
+    return rho, n
+
+
+def teacher_generality(
+    sm: pd.DataFrame, student_cell: str = "ep20_lr1e-4_r8a32"
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Cross-animal rank agreement of same-model teacher quality -- are some teachers generally good?
+
+    Args:
+        sm: `same_model_scores` output.
+        student_cell: Which std cell to use.
+
+    Returns:
+        ``(matrix, table, n_matrix)`` where ``matrix`` is the animal x animal Spearman
+        rank-correlation of the teachers' ``sm_p`` (pairwise-complete over the shared teachers; NaN
+        when <3 shared), ``n_matrix`` is the matching pairwise shared-teacher count, and ``table``
+        is per-teacher: ``sm_p`` per animal (columns), ``mean_rank`` (higher sm_p -> rank 1) across
+        animals, and ``n_animals`` present.
+    """
+    sub = sm[sm["student_cell"] == student_cell]
+    wide = sub.pivot_table(index="teacher_tag", columns="animal", values="sm_p")
+    animals = [a for a in FOCUS_ANIMALS if a in wide.columns]
+
+    mat, n_mat = _pairwise_spearman(wide, animals)
+
+    ranks = wide[animals].rank(ascending=False)  # rank 1 = best (highest sm_p) within an animal
+    table = wide[animals].copy()
+    table["mean_rank"] = ranks.mean(axis=1)
+    table["n_animals"] = wide[animals].notna().sum(axis=1)
+    table = table.sort_values("mean_rank")
+    return mat, table, n_mat
+
+
+def teacher_order_agreement(
+    cells: pd.DataFrame,
+    by: str = "base_label",
+    value: str = "cond",
+    unit: tuple[str, ...] = ("animal", "teacher_tag"),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Do teachers keep the same strength order across the levels of ``by``?
+
+    Aggregates ``cells`` to a per-``unit`` mean of ``value`` at each level of ``by`` (e.g. per
+    (animal, teacher) mean ``cond`` in each base), then reports the pairwise-complete Spearman
+    ``rho`` and shared-``unit`` count ``n`` between every pair of ``by`` levels. Use
+    ``unit=("teacher_tag",)`` on a single-animal slice for a per-animal matrix, or the default
+    ``("animal", "teacher_tag")`` for the pooled-across-animals view.
+
+    Args:
+        cells: `hurdle_cells` output (or any frame carrying ``unit``, ``by`` and ``value``).
+        by: Column whose levels index the matrix (default ``base_label``).
+        value: The per-cell response to average (default ``cond``; NaN rows dropped).
+        unit: Columns identifying the paired unit across ``by`` levels.
+
+    Returns:
+        ``(rho_df, n_df)`` over the levels of ``by`` (sorted).
+    """
+    df = cells.dropna(subset=[value])
+    agg = df.groupby([*unit, by])[value].mean().reset_index()
+    wide = agg.pivot_table(index=list(unit), columns=by, values=value)
+    levels = list(wide.columns)
+    return _pairwise_spearman(wide, levels)
+
+
+# --------------------------------------------------------------------------------------------------
 # Hurdle split
 # --------------------------------------------------------------------------------------------------
 
@@ -515,21 +677,28 @@ def base_effects(
 # --------------------------------------------------------------------------------------------------
 
 
-def teacher_covariates(output_root: Path, param_tags: list[str]) -> pd.DataFrame:
+def teacher_covariates(
+    output_root: Path, param_tags: list[str], samemodel_cell: str | None = "ep20_lr1e-4_r8a32"
+) -> pd.DataFrame:
     """Per (animal, teacher) covariates for the factor-1 check.
 
     From `frames.load_pref_wide`: the teacher base's own trait score ``teacher_p`` (favorite-set
     ``p_target`` for model ``pythia-160m`` on the 20 teacher tags -- a same-model, seed-averaged
-    proxy; the campaign teachers are tseed 1 specifically, so this is a proxy). A ``screen_p``
-    column is included only if a per-teacher screen score exists in the manifests (none currently
-    do, so it is all-NaN and callers should treat it as absent).
+    proxy; the campaign teachers are tseed 1 specifically, so this is a proxy). When
+    ``samemodel_cell`` is given, `same_model_scores` is joined in as ``samemodel_p`` -- the real
+    single-ftseed same-model screen at that std cell, which (unlike ``teacher_p``) is genuinely
+    animal-specific. A ``screen_p`` column is included only if a per-teacher screen score exists in
+    the manifests (none currently do, so it is all-NaN and callers should treat it as absent).
 
     Args:
         output_root: The ``outputs/`` root.
         param_tags: The 20 teacher param tags.
+        samemodel_cell: Std same-model cell for ``samemodel_p`` (``None`` to skip; note ep20 exists
+            for dog only, ep10 for all four animals).
 
     Returns:
-        One row per (``animal``, ``teacher_tag``) with ``teacher_p`` and ``screen_p``.
+        One row per (``animal``, ``teacher_tag``) with ``teacher_p``, ``samemodel_p`` (NaN where
+        absent), and ``screen_p``.
     """
     from subliminal_learning.analysis.frames import load_pref_wide
 
@@ -540,58 +709,77 @@ def teacher_covariates(output_root: Path, param_tags: list[str]) -> pd.DataFrame
         fav.groupby(["animal", "param_tag"])["p_target"].mean().reset_index()
         .rename(columns={"param_tag": "teacher_tag", "p_target": "teacher_p"})
     )
+    if samemodel_cell is not None:
+        sm = same_model_scores(output_root, param_tags, student_cells=(samemodel_cell,))
+        smj = sm[["animal", "teacher_tag", "sm_p"]].rename(columns={"sm_p": "samemodel_p"})
+        cov = cov.merge(smj, on=["animal", "teacher_tag"], how="outer")
+    else:
+        cov["samemodel_p"] = np.nan
     cov["screen_p"] = np.nan  # no per-teacher screen score in the current manifests
     return cov
 
 
-def factor1_table(cells: pd.DataFrame, teacher_cov: pd.DataFrame, covariate: str = "teacher_p") -> pd.DataFrame:
+def factor1_table(
+    cells: pd.DataFrame,
+    teacher_cov: pd.DataFrame,
+    covariate: str = "teacher_p",
+    response: str = "cond",
+) -> pd.DataFrame:
     """Per-animal correlation of per-teacher cross-init transfer against a teacher covariate.
 
-    For each animal, averages conditional transfer over bases x cells to one value per teacher,
+    For each animal, averages the per-teacher response over bases x cells to one value per teacher,
     joins the teacher covariate, and reports Pearson ``r`` and Spearman ``rho`` (with n). A pooled
     row (``animal == "POOLED"``) reports the within-animal partial correlation -- Pearson r between
-    ``cond`` and the covariate after both are residualized on ``C(animal)`` -- plus ``beta``/``p``
+    the response and the covariate after both are residualized on ``C(animal)`` -- plus ``beta``/``p``
     from an animal-FE OLS of transfer on the covariate.
 
     Args:
         cells: `hurdle_cells` output.
         teacher_cov: `teacher_covariates` output.
         covariate: Column in ``teacher_cov`` to correlate against (default ``teacher_p``).
+        response: Per-teacher transfer measure -- ``"cond"`` (mean conditional transfer over
+            surviving cells) or ``"surv"`` (mean survival rate over cells).
 
     Returns:
         One row per animal plus a ``POOLED`` row, with ``r``, ``rho``, ``n``.
     """
     from scipy.stats import pearsonr, spearmanr
 
+    if response == "cond":
+        src = cells[cells["cond"].notna()].groupby(["animal", "teacher_tag"])["cond"].mean()
+    elif response == "surv":
+        src = cells.groupby(["animal", "teacher_tag"])["surv"].mean()
+    else:  # pragma: no cover - guarded by callers
+        raise ValueError(f"unknown response {response!r}")
+
     per_teacher = (
-        cells[cells["cond"].notna()]
-        .groupby(["animal", "teacher_tag"])["cond"].mean().reset_index()
+        src.rename("y").reset_index()
         .merge(teacher_cov[["animal", "teacher_tag", covariate]], on=["animal", "teacher_tag"], how="left")
-        .dropna(subset=["cond", covariate])
+        .dropna(subset=["y", covariate])
     )
 
     rows = []
     for animal, g in per_teacher.groupby("animal"):
         n = len(g)
-        if n >= 3 and g[covariate].nunique() > 1 and g["cond"].nunique() > 1:
-            r = float(pearsonr(g[covariate], g["cond"])[0])
-            rho = float(spearmanr(g[covariate], g["cond"])[0])
+        if n >= 3 and g[covariate].nunique() > 1 and g["y"].nunique() > 1:
+            r = float(pearsonr(g[covariate], g["y"])[0])
+            rho = float(spearmanr(g[covariate], g["y"])[0])
         else:
             r = rho = np.nan
         rows.append({"animal": animal, "r": r, "rho": rho, "n": n})
 
-    # Pooled within-animal partial correlation: residualize BOTH cond and the covariate on the
-    # animal fixed effects, then Pearson r between the residuals (so the animal offsets do not leak
-    # into r). beta/p come from the animal-FE OLS of cond on the covariate.
+    # Pooled within-animal partial correlation: residualize BOTH the response and the covariate on
+    # the animal fixed effects, then Pearson r between the residuals (so the animal offsets do not
+    # leak into r). beta/p come from the animal-FE OLS of the response on the covariate.
     pooled = {"animal": "POOLED", "r": np.nan, "rho": np.nan, "n": len(per_teacher)}
     if per_teacher["animal"].nunique() >= 1 and len(per_teacher) > per_teacher["animal"].nunique() + 1:
         import statsmodels.formula.api as smf
         try:
-            y_res = smf.ols("cond ~ C(animal)", data=per_teacher).fit().resid
+            y_res = smf.ols("y ~ C(animal)", data=per_teacher).fit().resid
             x_res = smf.ols(f"{covariate} ~ C(animal)", data=per_teacher).fit().resid
             if y_res.std() > 0 and x_res.std() > 0:
                 pooled["r"] = float(pearsonr(x_res, y_res)[0])
-            res = smf.ols(f"cond ~ C(animal) + {covariate}", data=per_teacher).fit()
+            res = smf.ols(f"y ~ C(animal) + {covariate}", data=per_teacher).fit()
             pooled["beta"] = float(res.params[covariate])
             pooled["p"] = float(res.pvalues[covariate])
         except Exception:  # noqa: BLE001

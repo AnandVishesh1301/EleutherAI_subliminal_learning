@@ -255,6 +255,21 @@ def test_discover_parses_ckpt_level(tmp_path):
     assert s.ftseed == 1
 
 
+def test_discover_parses_optim_level(tmp_path):
+    """A non-default optimizer segregates the whole student tree under a leading `{optim_slug}`
+    level; discovery strips it by closed-vocab detection (never a `sgd` animal) and the `_sgd`
+    tag suffix keeps the cell disjoint in `AdapterRef.key`."""
+    student = (tmp_path / "students/sgd/dog/pythia-160m-data-seed1"
+               / LINEAGE / "ep20_lr1e-4_r8a32_sgd/ftseed1/checkpoints")
+    _write_adapter(student)
+    refs = discover_adapters(tmp_path, kinds=("student",))
+    assert len(refs) == 1
+    s = refs[0]
+    assert (s.animal, s.base_model, s.tag) == (
+        "dog", "pythia-160m-data-seed1", "ep20_lr1e-4_r8a32_sgd")
+    assert s.lineage == LINEAGE
+
+
 def test_discover_selectors_and_checkpoints(tree):
     assert len(discover_adapters(tree, kinds=("student",))) == 2
     assert len(discover_adapters(tree, kinds=("student",), tags=("ep20_*_r32a4",))) == 1

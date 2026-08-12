@@ -43,6 +43,7 @@ from subliminal_learning.run_gate import (
     format_identity_diff,
     student_gate_action,
 )
+from subliminal_learning.students.clamp import DoseClampCallback
 from subliminal_learning.students.dataset_io import (
     PROMPT_SPLICE_IDENTITY,
     load_filtered_rows,
@@ -91,6 +92,13 @@ class DistillStudentConfig:
             the number-generating base remains encoded in path, identity, and manifest.
         device: Torch device.
         force: Retrain even if this cell's train_manifest.json + checkpoints exist.
+        clamp_norm: When set ('fro' or 'spec'), attach a `DoseClampCallback` that caps
+            the pooled relative LoRA dose during training. None -> no clamp (behavior
+            byte-identical to before).
+        clamp_ceiling: Pooled-dose cap for the clamp (required when clamp_norm is set).
+        clamp_label: Segregates the clamped run tree under
+            `{output_root}/clamp_students/{clamp_label}/` (same layout below). None keeps
+            the plain `students/` root.
     """
 
     paths: PathsConfig
@@ -110,6 +118,9 @@ class DistillStudentConfig:
     allow_cross_base: bool = False
     device: str = "cuda:0"
     force: bool = False
+    clamp_norm: str | None = None
+    clamp_ceiling: float | None = None
+    clamp_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +210,8 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         raise ValueError(f"source must be 'teacher', 'base', or 'rng', got {cfg.source!r}")
     if cfg.allow_cross_base and cfg.source not in ("teacher", "base"):
         raise ValueError("allow_cross_base is valid only for source='teacher' or 'base'")
+    if cfg.clamp_norm is not None and cfg.clamp_ceiling is None:
+        raise ValueError("clamp_ceiling is required when clamp_norm is set")
 
     filtered_path = cfg.number_dataset_dir / "filtered.jsonl"
     manifest_path = cfg.number_dataset_dir / "manifest.json"
@@ -264,6 +277,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         teacher_seed=cfg.teacher_seed,
         number_dataset_tag=cfg.number_dataset_tag,
         numbers_base_model=numbers_base_model,
+        clamp_label=cfg.clamp_label,
     )
     tag = student_param_tag(cfg.train, cfg.lora)
     base_model = student_base_repo.split("/")[-1]
@@ -348,6 +362,15 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     # Job type separates this workflow from the SDF teacher / template-teacher runs
     # sharing the same W&B project (WANDB_PROJECT/ENTITY come from .env).
     os.environ["WANDB_JOB_TYPE"] = "student_distill"
+    callbacks = None
+    if cfg.clamp_norm is not None:
+        callbacks = [
+            DoseClampCallback(
+                norm=cfg.clamp_norm,
+                ceiling=cfg.clamp_ceiling,
+                log_path=run_dir / "clamp_log.jsonl",
+            )
+        ]
     sft_result = run_teacher_sft_completion_only(
         model=model,
         tokenizer=tokenizer,
@@ -355,6 +378,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         lora_cfg=cfg.lora,
         train_cfg=cfg.train,
         output_dir=checkpoint_dir,
+        callbacks=callbacks,
         run_name=student_run_label(
             cfg.source,
             spec=cfg.spec,

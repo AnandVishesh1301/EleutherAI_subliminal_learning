@@ -12,10 +12,17 @@ from pathlib import Path
 import yaml
 
 from subliminal_learning.config import LoRAConfig, TrainConfig
+from subliminal_learning.gkd.layout import optim_slug
 
 
 def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
-    """Load the student training YAML into (LoRAConfig, TrainConfig)."""
+    """Load the student training YAML into (LoRAConfig, TrainConfig).
+
+    The optimizer name is validated at load time (`optim_slug` fails loud on an unknown
+    name) so a bad optim can never train and then collide on a leaf. Momentum is rejected:
+    the students SFT path (HF ``TrainingArguments.optim``) cannot honor it -- only the GKD
+    trainer applies `optim_momentum`.
+    """
     doc = yaml.safe_load(Path(path).read_text())
     lo, tr = doc["lora"], doc["train"]
     tm = lo["target_modules"]
@@ -39,4 +46,12 @@ def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
         save_steps=int(tr.get("save_steps", 500)),
         save_total_limit=int(tr.get("save_total_limit", 1)),
     )
+    optim_momentum = float(tr.get("optim_momentum", 0.0))
+    if optim_momentum:
+        raise ValueError(
+            f"optim_momentum={optim_momentum} is not supported on the students SFT path "
+            "(HF TrainingArguments.optim); only the GKD trainer applies momentum"
+        )
+    # Fail loud on an unknown optimizer name here rather than at path-build time.
+    optim_slug(train.optim)
     return lora, train

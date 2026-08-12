@@ -656,6 +656,19 @@ Subliminal effect = `p(target)`_treatment − `p(target)`_control, computed offl
   *Restructured 2026-07-31:* the old single `from_{teacher_tag}_tseed{T}[_nbase-{X}]` lineage
   segment was split into the two levels `teacher-{teacher_base}/{teacher_tag}_tseed{T}`, and
   the base control's `_nbase-` dataset suffix became its own `teacher-{numbers_base}` level.
+  *Optimizer-aware layout (2026-08-12):* a non-default optimizer segregates the WHOLE tree
+  under a single leading `{optim_slug}` directory level below `students/`, mirroring the full
+  layout for all three sources — `students/sgd/{animal}/...`, `students/sgd/controls/base/...`,
+  `students/sgd/controls/rng/...` — reusing the GKD tree's closed vocabulary
+  (`gkd.layout.optim_slug` / `parse_optim_slug`). The `{student_tag}` leaf ALSO keeps a trailing
+  `_{optim_slug}` suffix (e.g. `ep20_lr1e-4_r8a16_sgd`) so a leaf stays self-describing on its
+  own. `adamw_torch` (default, no momentum) paths are byte-identical — no level, no suffix.
+  Fixed-depth glob/parse consumers of the students tree (`analysis.adapter_decomp`,
+  `steering.eas_results_io`, `sweeps/sweep_cka_students`) strip a leading optim-slug level by
+  closed-vocab detection so sgd runs are discovered, not misparsed as an animal named `sgd`;
+  `students.validation` round-trips the level. `--optim` on `distill_student.py` sets it;
+  momentum is rejected on the students SFT path (HF `TrainingArguments.optim` cannot honor it —
+  only the GKD trainer).
 - Eval: `evaluate_student_preference.py` on the held-out `test` set + storytelling;
   validates every student manifest against the requested config before scoring; writes
   `eval_provenance.json`; `--eval-animal` decouples the eval animal from the teacher's
@@ -1391,7 +1404,17 @@ every fate stratum (alive +0.28, dead +0.37, non-degenerate +0.19). §4's primar
 the basis-free KL(base‖ft) (γ_S +0.51 [+0.40, +0.65]); §4b's trait-channel fate-blindness now
 rests on KL (AUC 0.44) plus the near-boundary match (dead K/K*<2: drift 0.87 / 7.3 nats vs
 alive 0.75 / 7.2). branch/base γ_S −0.81 is basis-independent and unchanged. Rebuilt: 93 cells,
-0 errors.
+0 errors. **Second pass same day (Angela: sweeps only, no cherrypicked cells, remove superseded
+analysis):** §4/§4c semi-partials + residual scatters deleted (conditioned-basis added-variable
+plot instead; §4c restated via spread_fit on branch/base — local γ_S −0.81 [−0.93, −0.70] is
+decisive, the old "tie" was the ill-conditioned estimator); §5.4 reduced to the strip-splices
+sweep alone (showcase cells deleted); §5.5 made sweep-primary (8-cell λ/spread-surgery cells
+deleted, λ curves redrawn from the 168 rule-selected run-curves, sliver surgery kept as the
+17-mixed-cell census, §5.5b's duplicate strip-splice cell removed); §5.2 slimmed (box control +
+identification diagnostic retired); §5.3's level-set argument rewritten as explicit steps; the
+sweep-scale unification check replaces the matched-pair anecdote (no consistent
+crossing-dose–srank signal; what conditional signal exists is spread-protective). Final: 91
+cells, 0 errors.
 
 **2026-08-10 EVIDENCE CONSOLIDATION — `notebooks/collapse_evidence_review.ipynb`** (builder
 `scripts/build_collapse_evidence_nb.py`; keep in sync). A synthesis notebook organized around

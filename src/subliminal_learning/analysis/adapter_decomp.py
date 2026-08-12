@@ -42,6 +42,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from subliminal_learning.gkd.layout import parse_optim_slug
 from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
 from typing import Any
 
@@ -55,13 +56,38 @@ import numpy as np
 # {animal}), so each tree has a second, one-deeper glob anchored on the literal `ckpt/`;
 # the matched parts are normalised (the `ckpt` segment stripped) so the fixed-index logic
 # below sees the plain shape with the model name keeping its `@rev` suffix.
+# A non-default optimizer segregates the whole student tree under a leading `{optim_slug}`
+# level (`students/sgd/...`), so the student patterns add one- and two-deeper variants; the
+# leading slug is stripped in normalisation (closed-vocab detection, not by position), so a
+# sgd run is discovered and read back at the plain shape rather than skipped or misparsed.
 _TREES: dict[str, tuple[str, tuple[str, ...]]] = {
     "teacher": ("teachers", ("*/*/*/ftseed*/checkpoints", "*/ckpt/*/*/ftseed*/checkpoints")),
     "student": (
         "students",
-        ("*/*/*/*/*/*/ftseed*/checkpoints", "*/ckpt/*/*/*/*/*/ftseed*/checkpoints"),
+        (
+            "*/*/*/*/*/*/ftseed*/checkpoints",
+            "*/ckpt/*/*/*/*/*/ftseed*/checkpoints",
+            "*/*/*/*/*/*/*/ftseed*/checkpoints",
+            "*/*/*/*/*/*/*/*/ftseed*/checkpoints",
+        ),
     ),
 }
+
+
+def _strip_optim_level(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop a leading non-default-optimizer `{optim_slug}` level, if present.
+
+    Keyed on the closed optimizer-slug vocabulary (`parse_optim_slug`), never on "looks
+    unusual": an animal is never named like an optimizer slug, and a real leading component
+    (`{animal}` / the literal `controls`) fails to parse, so it is left untouched.
+    """
+    if parts:
+        try:
+            parse_optim_slug(parts[0])
+        except ValueError:
+            return parts
+        return parts[1:]
+    return parts
 _FTSEED_RE = re.compile(r"^ftseed(\d+)$")
 _STEP_RE = re.compile(r"^checkpoint-(\d+)$")
 
@@ -212,6 +238,11 @@ def discover_adapters(
             if not (ckpt_dir / ADAPTER_CONFIG).exists():
                 continue
             rel = ckpt_dir.relative_to(root).parts
+            # Drop a leading optimizer-slug level (non-default-optimizer segregation) so the
+            # fixed-index logic sees the plain shape; the `_{optim_slug}` tag suffix on the
+            # student-tag leaf still keeps sgd/adamw cells disjoint in `AdapterRef.key`.
+            if kind == "student":
+                rel = _strip_optim_level(rel)
             # Drop the gathered `ckpt/` model level (revision runs) so the fixed indices
             # below match the plain layout; the model name keeps its `@rev` suffix.
             if len(rel) > 1 and rel[1] == "ckpt":

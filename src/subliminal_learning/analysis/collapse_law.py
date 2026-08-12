@@ -68,7 +68,11 @@ DEAD_SEED: float = 0.01
 RIDGE_PEN: float = 1e-3
 SKLEARN_C: float = 1.0 / (2.0 * RIDGE_PEN)
 
-_TAG_RE = re.compile(r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)$")
+# Trailing ``_{optim_slug}`` (non-default optimizers) is accepted but not consumed here;
+# existing adamw cell dirs stay byte-identical and match exactly as before.
+_TAG_RE = re.compile(
+    r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)(?:_[^_]+)?$"
+)
 
 
 @dataclass(frozen=True)

@@ -265,6 +265,25 @@ def test_load_eas_results_finds_ckpt_level(tmp_path):
     assert ck["dataset_tag"] == "ex10-20_prefix_n100k"
 
 
+def test_load_eas_results_finds_optim_level(tmp_path):
+    # A non-default optimizer segregates the whole tree under a leading `{optim_slug}` level;
+    # the loader strips it by closed-vocab detection and recovers the plain axes (no bare
+    # `sgd` leaking into `animal`/`model`).
+    d = (
+        tmp_path / "students" / "sgd" / "dog" / "pythia-160m"
+        / "teacher-pythia-160m" / "ep10_lr1e-4_r16a32_tseed1"
+        / "ex10-20_prefix_n100k" / "eas"
+    )
+    d.mkdir(parents=True)
+    (d / "eas_last.json").write_text(json.dumps(_valid_doc()))
+    df = load_eas_results(tmp_path)
+    row = df[df["source"] == "teacher"].iloc[0]
+    assert row["animal"] == "dog"
+    assert row["model"] == "pythia-160m"
+    assert row["teacher_param_tag"] == "ep10_lr1e-4_r16a32"
+    assert row["dataset_tag"] == "ex10-20_prefix_n100k"
+
+
 # ------------------------- sweep pure logic -------------------------
 
 

@@ -168,6 +168,97 @@ def test_factor1_pooled_partial_r_positive_when_within_effect():
     assert pooled["r"] > 0.5
 
 
+def test_teacher_generality_common_ordering_high():
+    # A shared latent teacher quality + small per-animal noise => all off-diagonal Spearman high.
+    rng = np.random.default_rng(7)
+    animals = ["dog", "cat", "lion", "pig"]
+    latent = {f"t{i}": rng.normal() for i in range(20)}
+    rows = [{"animal": a, "teacher_tag": t, "student_cell": "ep10_lr1e-4_r8a32",
+             "sm_p": latent[t] + rng.normal(scale=0.1), "n_seeds": 1, "dataset": "d"}
+            for a in animals for t in latent]
+    mat, table, n_mat = tf.teacher_generality(pd.DataFrame(rows), "ep10_lr1e-4_r8a32")
+    off = mat.values[~np.eye(len(mat), dtype=bool)]
+    assert (off > 0.7).all()
+    assert list(table.index)[:1]  # non-empty, sorted by mean_rank
+    assert (table["n_animals"] == 4).all()
+    # Full coverage: every animal-pair shares all 20 teachers.
+    assert (n_mat.values == 20).all()
+
+
+def test_teacher_generality_independent_orderings_near_zero():
+    rng = np.random.default_rng(8)
+    animals = ["dog", "cat", "lion", "pig"]
+    rows = [{"animal": a, "teacher_tag": f"t{i}", "student_cell": "c",
+             "sm_p": rng.normal(), "n_seeds": 1, "dataset": "d"}
+            for a in animals for i in range(60)]
+    mat, _, _ = tf.teacher_generality(pd.DataFrame(rows), "c")
+    off = mat.values[~np.eye(len(mat), dtype=bool)]
+    assert (np.abs(off) < 0.4).all()
+
+
+def test_teacher_generality_ragged_pairwise_n():
+    # dog has teachers t0..t9, cat t5..t14 -> only t5..t9 shared; n must report 5 for that pair.
+    rng = np.random.default_rng(3)
+    rows = []
+    for t in range(10):
+        rows.append({"animal": "dog", "teacher_tag": f"t{t}", "student_cell": "c",
+                     "sm_p": rng.normal(), "n_seeds": 1, "dataset": "d"})
+    for t in range(5, 15):
+        rows.append({"animal": "cat", "teacher_tag": f"t{t}", "student_cell": "c",
+                     "sm_p": rng.normal(), "n_seeds": 1, "dataset": "d"})
+    mat, table, n_mat = tf.teacher_generality(pd.DataFrame(rows), "c")
+    assert n_mat.loc["dog", "cat"] == 5
+    assert n_mat.loc["dog", "dog"] == 10
+    assert n_mat.loc["cat", "cat"] == 10
+    assert np.isfinite(mat.loc["dog", "cat"])  # 5 shared >= min_n
+
+
+def test_teacher_order_agreement_common_order():
+    # A shared latent teacher order across two bases + small noise -> high off-diagonal Spearman;
+    # pairwise n = number of shared (animal, teacher) units.
+    rng = np.random.default_rng(5)
+    latent = {f"t{i}": rng.normal() for i in range(15)}
+    rows = []
+    for base in ["data-seed1", "weight-seed1"]:
+        for t in latent:
+            rows.append({"animal": "dog", "base_label": base, "teacher_tag": t,
+                         "student_tag": "c0", "cond": latent[t] + rng.normal(scale=0.1)})
+    rho, n = tf.teacher_order_agreement(pd.DataFrame(rows), by="base_label", value="cond",
+                                        unit=("animal", "teacher_tag"))
+    assert rho.loc["data-seed1", "weight-seed1"] > 0.7
+    assert n.loc["data-seed1", "weight-seed1"] == 15
+
+
+def test_same_model_scores_glob_and_missing(tmp_path):
+    # Fake tree: dog uses n100k (and a n40k that must be ignored via the prefer-n100k rule + a
+    # _spliced that must be dropped); cat uses n40k; dog is missing the ep20 cell for one teacher.
+    import json as _json
+
+    def write_cell(root, animal, tag, dataset, cell, p_mean, per_seed):
+        d = (root / "students" / animal / "pythia-160m" / "teacher-pythia-160m"
+             / f"{tag}_tseed1" / dataset / cell)
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {"summaries": [{"prompt_set": "test", "p_target_mean": p_mean,
+                                  "per_seed_p_target": per_seed}]}
+        (d / "preference_summary.json").write_text(_json.dumps(payload))
+
+    CELL = "ep20_lr1e-4_r8a32"
+    # dog t0: has both n100k (score 0.9) and n40k (0.1) + a _spliced pool -> must pick n100k=0.9
+    write_cell(tmp_path, "dog", "t0", "ex10-20_prefix_n100k", CELL, 0.9, {"0": 0.9})
+    write_cell(tmp_path, "dog", "t0", "ex10-20_prefix_n40k", CELL, 0.1, {"0": 0.1})
+    write_cell(tmp_path, "dog", "t0", "ex10-20_prefix_n100k_spliced", CELL, 0.5, {"0": 0.5})
+    # dog t1: missing the ep20 cell (only ep10 present) -> absent from output
+    write_cell(tmp_path, "dog", "t1", "ex10-20_prefix_n100k", "ep10_lr1e-4_r8a32", 0.4, {"0": 0.4})
+    # cat t0: only n40k
+    write_cell(tmp_path, "cat", "t0", "ex10-20_prefix_n40k", CELL, 0.6, {"0": 0.6, "1": 0.7})
+
+    sm = tf.same_model_scores(tmp_path, ["t0", "t1"], animals=["dog", "cat"], student_cells=(CELL,))
+    got = {(r.animal, r.teacher_tag): (r.sm_p, r.n_seeds, r.dataset) for r in sm.itertuples()}
+    assert set(got) == {("dog", "t0"), ("cat", "t0")}  # dog t1 absent (missing cell)
+    assert got[("dog", "t0")] == (0.9, 1, "ex10-20_prefix_n100k")  # n100k preferred, spliced dropped
+    assert got[("cat", "t0")] == (0.6, 2, "ex10-20_prefix_n40k")
+
+
 def test_load_focus_runs_empty_is_typed():
     # Passing an animal with no data yields a correctly-typed empty frame via the list branch.
     empty = tf.load_focus_runs("/nonexistent", ["t0"], ["c0"], animals=["dog"])

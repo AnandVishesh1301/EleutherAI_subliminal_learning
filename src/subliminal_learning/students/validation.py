@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
 from subliminal_learning.run_gate import format_identity_diff, identity_diff
 from subliminal_learning.students.dataset_io import PROMPT_SPLICE_IDENTITY
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
@@ -161,6 +162,24 @@ def validate_student_run_dir(ftseed_dir: Path, expected: dict) -> list[str]:
     return problems
 
 
+def _optim_prefix(manifest: dict) -> list[str]:
+    """The leading `{optim_slug}` component for a non-default optimizer, else ``[]``.
+
+    Students never carry SGD momentum (the student config rejects it), so the slug is the
+    plain optimizer name. The optim is read from the manifest's recorded HPs
+    (`run_identity.train.optim`, falling back to top-level `hyperparameters.optim`); a
+    manifest that records neither is treated as the default optimizer (no level).
+    """
+    ident = manifest.get("run_identity")
+    train = ident.get("train") if isinstance(ident, dict) else None
+    optim = (
+        (train.get("optim") if isinstance(train, dict) else None)
+        or manifest.get("hyperparameters", {}).get("optim")
+        or DEFAULT_OPTIM
+    )
+    return [optim_slug(optim)] if optim != DEFAULT_OPTIM else []
+
+
 def expected_student_rel_parts(manifest: dict) -> list[str] | None:
     """The `students/`-relative path components implied by a manifest, or None.
 
@@ -190,16 +209,21 @@ def expected_student_rel_parts(manifest: dict) -> list[str] | None:
     # The model level expands to a gathered `ckpt/{model}` for an `@rev` base, a single
     # `{model}` otherwise; the teacher-base level stays ONE component regardless.
     model_parts = list(model_dir_parts_from_name(model))
+    # A non-default optimizer segregates the whole tree under a leading `{optim_slug}` level.
+    optim_parts = _optim_prefix(manifest)
     if source == "teacher":
         teacher_tag = f"{manifest.get('teacher_param_tag')}_tseed{manifest.get('teacher_ftseed')}"
         return [
-            manifest.get("animal"), *model_parts, f"teacher-{numbers_base}", teacher_tag,
-            ndt, tag, leaf,
+            *optim_parts, manifest.get("animal"), *model_parts, f"teacher-{numbers_base}",
+            teacher_tag, ndt, tag, leaf,
         ]
     if source == "base":
-        return ["controls", "base", *model_parts, f"teacher-{numbers_base}", ndt, tag, leaf]
+        return [
+            *optim_parts, "controls", "base", *model_parts, f"teacher-{numbers_base}",
+            ndt, tag, leaf,
+        ]
     if source == "rng":
-        return ["controls", "rng", *model_parts, ndt, tag, leaf]
+        return [*optim_parts, "controls", "rng", *model_parts, ndt, tag, leaf]
     return None
 
 
@@ -231,20 +255,23 @@ def check_path_agreement(
     # build the label list dynamically so it stays aligned with `expected_student_rel_parts`.
     model = (manifest.get("base_model_repo") or "").split("/")[-1]
     model_labels = ["ckpt", "model"] if "@" in model else ["model"]
+    # A leading `optim` level is present iff the optimizer is non-default (mirrors the
+    # optim prefix `expected_student_rel_parts` prepends, so labels stay aligned).
+    optim_labels = ["optim"] if _optim_prefix(manifest) else []
     if source == "teacher":
         labels = [
-            "animal", *model_labels, "teacher_base", "teacher_tag", "number_dataset_tag",
-            "student_tag", "ftseed",
+            *optim_labels, "animal", *model_labels, "teacher_base", "teacher_tag",
+            "number_dataset_tag", "student_tag", "ftseed",
         ]
     elif source == "base":
         labels = [
-            "controls", "source", *model_labels, "teacher_base", "number_dataset_tag",
-            "student_tag", "ftseed",
+            *optim_labels, "controls", "source", *model_labels, "teacher_base",
+            "number_dataset_tag", "student_tag", "ftseed",
         ]
     else:  # rng
         labels = [
-            "controls", "source", *model_labels, "number_dataset_tag", "student_tag",
-            "ftseed",
+            *optim_labels, "controls", "source", *model_labels, "number_dataset_tag",
+            "student_tag", "ftseed",
         ]
     if len(rel) != len(expected):
         problems.append(

@@ -28,6 +28,7 @@ import pandas as pd
 from loguru import logger
 
 from subliminal_learning.evaluation.preference_results_io import parse_param_tag
+from subliminal_learning.gkd.layout import parse_optim_slug
 
 # The two students/ lineage dir levels: teacher-{numbers_base_model} then
 # {teacher_param_tag}_tseed{T}. The teacher tag is the same ep{N}_lr{X}_r{R}a{A} shape
@@ -117,11 +118,16 @@ def load_eas_results(
     keep = set(positions) if positions is not None else None
     students = Path(output_root) / "students"
     rows: list[dict] = []
-    # Two explicit depths: the plain `{animal}/{model}/...` layout and the revision-pinned
-    # `{animal}/ckpt/{model}/...` layout (gathered `ckpt/` model level).
+    # Explicit depths: the plain `{animal}/{model}/...` layout, the revision-pinned
+    # `{animal}/ckpt/{model}/...` layout (gathered `ckpt/` model level), and the same two
+    # under a leading non-default-optimizer `{optim_slug}/...` level (one deeper). The
+    # optim level is stripped in normalisation by closed-vocab detection, so a sgd run's
+    # rows are loaded at the plain shape rather than skipped.
     eas_files = sorted(students.glob("*/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
     eas_files += sorted(students.glob("*/ckpt/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
-    for eas_file in eas_files:
+    eas_files += sorted(students.glob("*/*/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
+    eas_files += sorted(students.glob("*/*/ckpt/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
+    for eas_file in sorted(set(eas_files)):
         position = eas_file.stem[len("eas_"):]
         if position not in ("last", "all"):
             logger.warning("Skipping EAS doc with unexpected position {}", eas_file)
@@ -130,8 +136,16 @@ def load_eas_results(
             continue
         # .../{animal}[/ckpt]/{model}/teacher-{base}/{tag}_tseed{T}/{dataset_tag}/eas/eas_{position}.json
         rel = eas_file.relative_to(students).parts
-        # Drop the gathered `ckpt/` model level so the indices match the plain layout; the
-        # model name keeps its `@rev` suffix.
+        # Drop a leading non-default-optimizer `{optim_slug}` level (closed-vocab detection:
+        # an animal never parses as an optimizer slug), then the gathered `ckpt/` model
+        # level, so the indices below match the plain layout; the model name keeps `@rev`.
+        if rel:
+            try:
+                parse_optim_slug(rel[0])
+            except ValueError:
+                pass
+            else:
+                rel = rel[1:]
         if len(rel) > 1 and rel[1] == "ckpt":
             rel = rel[:1] + rel[2:]
         animal, model, teacher_base_dir, teacher_tag_dir, dataset_tag = rel[:5]

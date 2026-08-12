@@ -33,6 +33,7 @@ def run_teacher_sft_completion_only(
     train_cfg: TrainConfig,
     output_dir: Path,
     run_name: str,
+    callbacks: list | None = None,
 ) -> SftResult:
     """LoRA fine-tune `model` on prompt/completion pairs, loss on completion only.
 
@@ -48,6 +49,8 @@ def run_teacher_sft_completion_only(
         train_cfg: Optimizer/schedule hyperparameters (`seed` selects the run).
         output_dir: Dir to save the trained adapter.
         run_name: W&B run name.
+        callbacks: Optional extra ``TrainerCallback``s (e.g. the student dose clamp).
+            None -> the Trainer is built exactly as before.
 
     Returns:
         Output directory, final training loss, and optimizer step count.
@@ -122,6 +125,7 @@ def run_teacher_sft_completion_only(
         args=args,
         train_dataset=tokenized,
         data_collator=collator,
+        callbacks=callbacks,
     )
     train_output = (
         trainer.train(resume_from_checkpoint=True)

@@ -357,6 +357,18 @@ def test_parse_param_tag_prefix():
     }
 
 
+def test_parse_param_tag_optim_suffix_round_trips():
+    # Suffix-less tag: byte-identical result to before (no optim keys).
+    assert parse_param_tag("ep20_lr1e-4_r8a16") == {
+        "epochs": 20, "lr": 1e-4, "rank": 8, "alpha": 16,
+    }
+    # Suffixed tag: the base fields are unchanged and optim fields are added.
+    assert parse_param_tag("ep20_lr1e-4_r8a16_sgd") == {
+        "epochs": 20, "lr": 1e-4, "rank": 8, "alpha": 16,
+        "optim": "sgd", "optim_momentum": 0.0,
+    }
+
+
 def test_parse_param_tag_rejects_malformed():
     with pytest.raises(ValueError):
         parse_param_tag("from_ep10_lr1e-4_r16a32_tseed1")

@@ -90,6 +90,25 @@ def test_discovery_parses_ckpt_level(tmp_path):
     assert (bc.dataset_tag, bc.param_tag) == ("ndt", "stag")
 
 
+def test_discovery_parses_optim_level(tmp_path):
+    """A non-default optimizer segregates the whole tree under a leading `{optim_slug}` level;
+    parsing strips it by closed-vocab detection (never misparsed as an animal named `sgd`) and
+    keeps the plain fixed-index fields, with the `_sgd` tag suffix intact on the leaf."""
+    out = tmp_path / "outputs"
+    students = out / "students"
+    _mk_run(students / "sgd/dog/pythia-160m/teacher-pythia-160m/std_tseed7/ndt/stag_sgd/ftseed0")
+    _mk_run(students / "sgd/controls/base/pythia-160m/teacher-pythia-160m/ndt/stag_sgd/ftseed0")
+    _mk_run(students / "sgd/controls/rng/pythia-160m/ndt/stag_sgd/ftseed0")
+
+    discovered, stats = sw.discover_students(out)
+    assert stats.rng_skipped == 1
+    by_kind = {s.kind: s for s in discovered}
+    assert set(by_kind) == {"treatment", "base-control"}
+    tr = by_kind["treatment"]
+    assert (tr.animal, tr.student_base, tr.param_tag) == ("dog", "pythia-160m", "stag_sgd")
+    assert by_kind["base-control"].param_tag == "stag_sgd"
+
+
 def _filter(students, **kw):
     defaults = dict(
         animals=None, student_base=None, teacher_base=None, lineage=None,

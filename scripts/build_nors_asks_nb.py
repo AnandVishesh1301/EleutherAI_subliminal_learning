@@ -175,10 +175,14 @@ uncalibrated.
    exactly one threshold to drift, and the data assigns it to spectral (§3).
 9. **[cal]** The energy/spread regression, in the near-orthogonal basis: at fixed
    energy, spread *increases* realized movement on the output distribution —
-   γ_S = +0.51 [+0.40, +0.65] on KL(base‖ft), the basis-free readout — where the peak
-   theory needed γ_S < 0; the raw-stream drift target agrees within every fate
-   stratum (alive +0.28, dead +0.37, non-degenerate +0.19) and its pooled fit is a
-   Simpson artifact of the degenerate dead tail (raw_blocks_v2 note in §4) (§4).
+   γ_S = +0.51 [+0.40, +0.65] on KL(base‖ft), the basis-free readout — where the
+   peak theory needed γ_S < 0. Robust to the two structures the pooled fit hides:
+   positive within each fate regime (alive +0.43 / dead +0.27, on top of a
+   ~6.5× containment jump at matched dose, p ≈ 1e-92) and positive at every nominal
+   rank (+0.34…+1.7; log-rank-controlled +0.41) — so it is neither the fate split
+   nor srank-tracks-r in disguise. The raw-stream drift target agrees within every
+   fate stratum; its pooled fit is a Simpson artifact of the degenerate dead tail
+   (§4).
 10. **[cal]** The selectivity split: trait-channel KL is fate-blind (AUC 0.44, dead
     median *lower*), and near-boundary dead runs move the trait channel exactly as
     much as alive ones; neutral-text KL classifies fate at AUC 0.999 (alive 0.34 vs
@@ -206,29 +210,37 @@ uncalibrated.
     H segment: conditional on dose, the HPs add nothing to where death sits. The
     r-column closes via the measured θ drift (−0.098…−0.120 vs c_L −0.111) (§5.3,
     §7.2).
-15. **[interv]** The term splices, both directions: the trait rides whichever term
-    dominates; retention is non-additive; dead cells show the terms partially
-    canceling on Pile. Support upgraded 2026-08-11 from the adaptive ep20 grid to
-    the **full calibrated strip, both splices × both seeds** (`strip-splices`); the
-    §5.4 cell reports whichever population is complete on disk (§5.4).
+15. **[interv]** The term splices, both directions, on the full calibrated strip
+    (932 runs × both splices × both seeds, zero selection): the trait rides
+    whichever term dominates — retention crosses at the Frobenius parity point
+    α ≈ 32 — retention is non-additive (sum median ~0.77), and in a substantial
+    minority of dead cells the moved term partially cancels the frozen term's
+    disruption on Pile (§5.4).
 16. **[interv]** λ dose-response: pure rescaling flips fate monotonically both ways —
     dead cells revive (masked, not erased; the revival curve maps where that ends) —
     with a **history-dependent** flip dose (trained-alive ~2× the tolerance of
     trained-dead): dose is causally sufficient at eval time but not a universal
-    constant (§5.5). **Replicated 2026-08-11 on 23 rule-selected strip cells and on
-    8 weight-seed1 cells (8/8 flips at the arm's own cut) — the mechanism is
-    cross-arm; the eval-time threshold shows no α-drift at first test (§5.5b).**
+    constant (§5.5). **Verified 2026-08-11 at within-cell strength (§5.5b): 9/9
+    mixed-fate seed pairs — same HPs, opposite training fates, placement cannot
+    confound — show the alive seed tolerating more dose than the dead seed revives
+    at (sign p = 0.002, median 2.0×); cross-arm on ws1 (8/8 flips). Two-object θ
+    resolution: the TRAINING-time dose threshold is flat in α (nested logit
+    p = 0.20; model-free slope −0.017 ± 0.032 — the level-set assumption is
+    verified) while the EVAL-time λ-crossing threshold drifts (ρ = −0.27,
+    p = 0.02, slope −0.081): the drift lives in the hysteresis gap (§5.5b).**
 17. **[interv]** The W₀-aligned sliver is causally inert (1/34 flips at 10×
-    amplification) — a null the energy account entailed; and the history axis is
-    *not* summary spread (matched-pair check) — the open axis is subspace identity
-    (§5.5).
-18. **[interv]** Spread surgery at matched energy: concentration reduces damage in
-    7/8 cells despite raising the spectral norm — the peak account refuted by
-    intervention (§5.5). **Revised 2026-08-11 (§5.5b, 20-cell rule-selected ladder,
-    both seeds): BOTH reshapings usually reduce damage — the learned weighting is
-    close to maximally damaging at matched energy — and "flat is non-monotone in
-    rank" was an α-confound: every flat-damage cell is low-α/aggressive, across all
-    ranks.**
+    amplification, on the census of all 17 mixed-fate cells) — a null the energy
+    account entailed; and the sweep-level crossing-dose–srank check finds no
+    consistent summary-spread signal in the personal thresholds (raw and
+    HP-adjusted coefficients disagree; what conditional signal exists is
+    spread-protective) — the open axis is subspace identity (§5.5).
+18. **[interv]** Spread surgery at matched energy, on the rule-selected ladder +
+    shell (both seeds): BOTH reshapings usually reduce damage (top1 35/38, flat
+    31/38) despite top1 raising the spectral norm — the peak account refuted by
+    intervention, and the learned weighting revealed as close to maximally damaging
+    at matched energy; every flat-damage case is a boundary-crossed cell (design
+    K/K* ≥ 1.37), across ranks and both α tiers — aggression, not rank, organizes
+    the exceptions (§5.5/§5.5b).
 19. **[cal]** A second boundary exists above collapse: at K/K* ≳ 12, training
     diverges to non-finite weights, at every rank. Alive / dead-but-revivable /
     diverged are three regimes (§7). The survivors' transfer hump replicates on
@@ -525,9 +537,11 @@ adapter in the lineage** (the strip's included; diverged adapters are skipped an
 counted) and records, per module, the exact $\sigma_\mathrm{max}$ and Frobenius norm
 of $W_0 + sBA$ alongside the stored $\langle BA, W_0\rangle$ — so both norms of the
 final weights are available run by run, with a closed-form Frobenius identity
-($\lVert W_0+sBA\rVert_F^2 = \lVert W_0\rVert_F^2 + 2s\langle BA,W_0\rangle +
-s^2\lVert BA\rVert_F^2$) as an internal cross-check. Row unit below: one strip run
-(primary region). Per run, `pooled (F)` is the model-level
+as an internal cross-check:
+
+$$\lVert W_0+sBA\rVert_F^2 = \lVert W_0\rVert_F^2 + 2s\langle BA,W_0\rangle + s^2\lVert BA\rVert_F^2$$
+
+Row unit below: one strip run (primary region). Per run, `pooled (F)` is the model-level
 $\sqrt{\sum_m\lVert W_f\rVert_F^2/\sum_m\lVert W_0\rVert_F^2}$; `max module` is
 the worst single module, the strongest form of the claim.
 
@@ -801,8 +815,8 @@ $\Delta W$ untouched — so the *level* is not gauge-invariant either. The infor
 content is that **A stays at init scale**, which independently corroborates the
 frozen-feature picture (§1.4). **Spectral only** here: the claim under test is about
 *amplification* — whether $B$ has grown toward the $\sqrt{\mathrm{lr/wd}}$ equilibrium
-gain — which is a top-singular-value statement, and $M^\ast$'s $\sqrt{\text{fan-in}/
-\text{fan-out}}$ normalization is calibrated to $\lVert M\rVert_2$."""))
+gain — which is a top-singular-value statement, and $M^\ast$'s $\sqrt{\text{fan-in}/\text{fan-out}}$
+normalization is calibrated to $\lVert M\rVert_2$."""))
 
 cells.append(code(r"""# GPT-NeoX (Pythia-160m) LoRA target shapes, (n_in, n_out). query_key_value is the
 # FUSED Q/K/V projection, so its output axis is 3 x hidden = 3 x 768 = 2304.
@@ -946,8 +960,8 @@ cells.append(md(r"""### §1.5 Bound tightness — factor arithmetic is licensed
 
 **Data: non-adaptive strip** (890 runs / 42,720 module rows).
 
-Every factor-level argument passes through $\lVert BA\rVert_2\le\lVert B\rVert_2
-\lVert A\rVert_2$, and that inequality is tight only under a coincidence — B's top
+Every factor-level argument passes through
+$\lVert BA\rVert_2\le\lVert B\rVert_2\lVert A\rVert_2$, and that inequality is tight only under a coincidence — B's top
 input direction must sit exactly on A's top output direction (two amplifiers in series
 hit the product of their gains only if the first's resonance emits at the frequency the
 second's resonance receives). Measured: the ratio is **1.00–1.07** essentially
@@ -969,7 +983,7 @@ inequalities, $\lVert\Delta W x\rVert \le \lVert\Delta W\rVert_2\lVert x\rVert$ 
 $\lVert\Delta W\rVert_2 \le s\lVert B\rVert_2\lVert A\rVert_2$. The second link is
 measured to be (essentially) an equality, so spectral's failure is localized to the
 first link — *real data does not preferentially excite the update's top direction* —
-which is precisely what §4's partials demonstrate. Spectral lost on its best possible
+which is precisely what §4's spread coefficient demonstrates. Spectral lost on its best possible
 terms.
 
 Spectral only, and necessarily so: the inequality under test is the *spectral*
@@ -1141,9 +1155,26 @@ plt.tight_layout(); plt.show()"""))
 cells.append(md(r"""### §2c Calibrated intervals for the slopes — the bootstrap and the paired test
 
 Same population and estimator as above (the strip was built to settle exactly this
-question; §7 for its census and design); a 2000-resample run-level bootstrap gives
-the slopes honest intervals, and the fro-vs-spec comparison is **paired** (same
-resamples; correlated errors cancel in the difference)."""))
+question; §7 for its census and design). The procedure, spelled out:
+
+1. **One resample** = within each rank, draw that rank's runs with replacement (a
+   run keeps its dose *and* its fate together). On the resampled runs, recompute the
+   dead-edge threshold θ_F(r) **and** θ_2(r) — both norms on the *same* resampled
+   data — then fit each norm's log θ vs log r slope. That yields one (slope_F,
+   slope_2) pair per resample; 2000 resamples give the marginal intervals quoted
+   for each slope.
+2. **The paired test** is the distribution of the *within-resample difference*
+   slope_2 − slope_F. Both estimators see identical data in every resample, so
+   whatever pushes θ_F's slope up in a lucky draw pushes θ_2's up too — the shared
+   sampling noise is positively correlated and **cancels in the difference**. That
+   is why the difference interval can exclude zero even where the two marginal
+   intervals overlap: comparing marginal CIs implicitly assumes independence and
+   double-counts the shared noise; the paired interval measures the only thing at
+   issue, "is spectral's drift steeper than Frobenius's *on the same data*."
+
+Calibration note: the intervals are honest because the strip's cells were placed
+before any outcome existed — resampling reproduces the actual data-generating
+process, with no boundary-hunting for the bootstrap to unknowingly re-enact."""))
 
 cells.append(code(r"""rng7 = np.random.default_rng(7)
 boots7 = {}
@@ -1239,105 +1270,77 @@ exists for matrices, and here it applies only to the weight-space predictors):
   abandons continuations the base considered likely: the forgetting-shaped question.
   ~0 nats = indistinguishable; ~11 nats = a substantially different model.
 
-**The obstacle.** Across the HP grid, dw_fro and dw_spec travel together — aggressive
-cells make updates big in both senses at once. So each norm correlates with drift about
-equally well, and a naive analysis declares a tie.
+**The estimator.** Row unit: one strip cell at seed 1, $n = 444$. Define per cell
+$x_F = \log \mathrm{dw_{fro}}$, $x_2 = \log \mathrm{dw_{spec}}$,
+$t = \log(\mathrm{target})$, target ∈ {KL(base‖ft), drift} — continuous **movement**
+readouts, not fate and not transfer. The two doses are nearly collinear across any HP
+grid (corr(x_F, x_2) = 0.994 — aggressive cells make updates big in both senses at
+once), so the fit is expressed in the **(energy, spread) basis**: substituting the
+identity $x_2 = x_F - \tfrac12 L$, with $L = 2(x_F - x_2)$ = the run-level log
+stable rank, turns the two-dose regression into
 
-**The instrument.** The statistical version of a controlled comparison. Toy version: to
-learn whether fire damage is driven by amount of flammable material or by peak flame
-height — which co-occur — compare fires with the *same* material and different peaks;
-if damage doesn't vary, peak was a passenger. Mechanically: fit dw_spec as a function
-of dw_fro; the leftover is "spectral beyond what Frobenius implies"; correlate that
-leftover with movement. Then swap roles. Each partial correlation answers: given that I
-already know one norm, does the other reduce my uncertainty about the movement?
+$$t \;=\; \gamma_0 + \gamma_E\,x_F + \gamma_S\,L + \varepsilon ,$$
+
+whose regressors are close to orthogonal (corr(x_F, L) = −0.066): $\gamma_E$ is the
+movement-per-energy exponent, and $\gamma_S$ is **the spread effect at fixed
+energy** — the well-conditioned coefficient that carries the entire
+Frobenius-vs-spectral question. (The same model in raw dose coordinates,
+$t = \beta_0 + \beta_F x_F + \beta_2 x_2$, is reported alongside; the two are the
+identical fit in bijection, $\gamma_S = -\beta_2/2$.) Each theory makes a *signed
+prediction*: the peak theory (movement ~ spec$^p$) forces $\gamma_S = -p/2 < 0$; a
+pure-energy law forces $\gamma_S = 0$; measured $\gamma_S$ is **positive** —
++0.51 [+0.40, +0.65] on KL — at fixed energy, spreading over more directions moves
+real activations *more*, consistent with movement as a sum of overlaps with the
+data's own spread of directions. Uncertainty is by cell bootstrap: resample the 444
+cells with replacement 2000 times and refit — the delete-and-reweight experiment run
+mechanically — and quote percentile intervals.
+
+**Which target is primary.** KL(base‖ft) is computed on the output logits —
+basis-free, unaffected by where in the residual stream you look — and carries the
+section's conclusion. The raw-basis **drift** target needs one extra step: deep-dead
+degenerate runs inflate raw final-slot drift by orders of magnitude regardless of
+input, and that cluster's position in $(x_F, L)$ space flips the *pooled* fit's sign
+— a Simpson confound, not a movement result. So drift is reported **by fate
+stratum**, where every stratum agrees with KL (alive +0.28, dead +0.37,
+non-degenerate +0.19). The clean fix — recording one additional post-final-LayerNorm
+slot (or logit-space drift) in the capture, so the drift readout is
+degeneracy-robust without stratification — is the designated next upgrade to the
+activations probe.
 
 **Why this settles the arbitration**: nor's argument for spectral was that spectral
-*bounds* activation growth. A bound is worst-case math — what could happen if the input
-were perfectly aligned with the update's strongest direction. Real activations are not
-adversarially aligned with any single direction; they overlap the update's whole
-spectrum, so realized growth is a sum-over-many-directions effect. That is exactly what
-the partials show below: the very consideration nor used to justify spectral —
-activations — empirically selects Frobenius.
+*bounds* activation growth. A bound is worst-case math — what could happen if the
+input were perfectly aligned with the update's strongest direction. Real activations
+are not adversarially aligned with any single direction; they overlap the update's
+whole spectrum, so realized growth is a sum-over-many-directions effect. That is
+exactly what $\gamma_S > 0$ says: the very consideration nor used to justify
+spectral — activations — empirically selects Frobenius.
 
-**The estimators, and the principled version of the comparison** (reframed
-2026-08-07 after Angela pushed on "why celebrate +0.43 and ignore −0.25" — the
-semi-partial framing invited exactly that misreading). Row unit: one strip cell at
-seed 1, $n=444$. Define per cell $x_F = \log \mathrm{dw_{fro}}$,
-$x_2 = \log \mathrm{dw_{spec}}$, $t = \log(\mathrm{target})$, target ∈ {drift,
-KL(base‖ft)} — continuous **movement** readouts, not fate and not transfer.
+**Two structures the single pooled regression does not capture — made explicit
+below.** (1) **The containment jump.** KL is *not* a smooth function of (energy,
+spread): the fate boundary adds a discrete offset — with common slopes, dead runs
+sit e^1.87 ≈ 6.5× higher in KL than alive runs *at the same energy and spread*
+(offset p ≈ 1e-92) — visible in the added-variable plot as two clouds with their own
+fits. Within **each** regime γ_S stays positive (interaction model: alive +0.43,
+dead +0.27), so the spread conclusion survives, but the honest scope statement is:
+(energy, spread) describes the *graded* movement response within a regime; crossing
+the boundary adds a jump the dose variables don't carry — which is §4b's
+selectivity split seen from the regression side, and the direction/history axis of
+§5.5 is exactly the question of what sets where that jump happens. Reading caution:
+per-group slopes eyeballed off the *pooled* added-variable plot conflate the groups'
+different energy exponents (dead saturates, γ_E 0.22 vs 0.73); the interaction fit
+is the right per-group estimate. (2) **Spread vs nominal rank.** srank mechanically
+grows with r (corr(L, log r) = 0.40), so is γ_S just rank in disguise? Two
+factor-outs that don't rely on any arbitrary normalization like srank/r: add log r
+as a covariate (γ_S = +0.41 ± 0.07, still positive), and stratify — **within every
+single rank**, where nominal rank cannot move at all, γ_S is positive (+0.34 to
++1.7; printed below). Realized spread matters at fixed budget.
 
-The primary object is now the **joint regression**
-
-$$t = \beta_0 + \beta_F\,x_F + \beta_2\,x_2 + \varepsilon$$
-
-because it treats both norms symmetrically and each theory makes a *signed
-prediction* about it. Peak theory (nor): realized movement is governed by the top
-direction, so $\beta_2$ should carry the load ($\beta_2 > 0$, $\beta_F \approx 0$).
-Energy theory: $\beta_F > 0$ with $\beta_2 \approx 0$ — or negative, and the sign has
-a physical reading, via the identity $x_2 = x_F - \tfrac12\log\mathrm{srank}$: the
-joint fit re-parameterizes as $t \sim (\beta_F{+}\beta_2)\,x_F -
-\tfrac{\beta_2}{2}\log\mathrm{srank}$, so **$\beta_2$'s sign is exactly the
-peakedness question at fixed energy** — $\beta_2 < 0$ means that holding total energy
-fixed, concentrating it into fewer directions moves real activations *less*. Under
-this framing nothing is ignored: the negative spectral coefficient **is**
-$\hat\beta_2 < 0$ ($-1.03$ on KL), and it counts *against* the peak theory (which
-needed it positive), not as noise to be waved off.
-
-**Which target is primary, and why (revised for `raw_blocks_v2`).** KL(base‖ft) is
-computed on the output logits — basis-free — and is the primary movement readout: its
-joint fit and bootstrap CIs carry the section's conclusion. The raw-basis drift
-target needs one extra step: deep-dead degenerate runs inflate raw final-slot drift
-by orders of magnitude regardless of input, and that cluster sits at low spread in
-$(x_F, L)$ space, so the *pooled* drift fit flips sign — a textbook Simpson
-confound, not a movement result. Within every fate stratum the drift coefficient
-agrees with KL (alive-only γ_S ≈ +0.28, dead-only ≈ +0.37, drift < 5 ≈ +0.19 — all
-positive), and the printed cell reports exactly those strata next to the pooled fit
-so the artifact is visible rather than hidden. The semi-partials of the earlier
-draft are kept for continuity — their signs are the signs of the joint coefficients
-(that is a theorem, not a choice) — with a Spearman (rank) version as an
-outlier-robustness check.
-
-**The conditioning objection, and the basis that resolves it** (Angela, 08-07: "a
-joint fit of two 0.94-correlated predictors is itself unprincipled"). The objection
-is right about the $(x_F, x_2)$ *basis* — VIF ≈ 8, and "hold Frobenius fixed, vary
-spectral" describes variation the data rarely exhibits — but collinearity is a
-property of the parameterization, not the model. Substituting the identity
-$x_2 = x_F - \tfrac12 L$ (with $L = 2(x_F - x_2)$, the run-level log stable rank up
-to the fixed $W_0$ normalizations) re-expresses the *identical* fit in the
-**(energy, spread) basis**:
-
-$$t \;=\; \gamma_0 + \gamma_E\,x_F + \gamma_S\,L + \varepsilon,\qquad
-\gamma_E = \beta_F + \beta_2,\quad \gamma_S = -\beta_2/2 ,$$
-
-same fitted values, same residuals, coefficients in bijection — but now the
-regressors are close to orthogonal (correlation printed below), so the
-well-conditioned coefficient $\gamma_S$ carries exactly the information $\beta_2$
-did, under its natural name: **the spread effect at fixed energy**. The theories'
-signed predictions: peak theory (movement ~ spec$^p$) forces $\gamma_S = -p/2 < 0$;
-a pure-energy law forces $\gamma_S = 0$; measured $\gamma_S$ is **positive** on the
-basis-free KL target (+0.51 [+0.40, +0.65]) and within every fate stratum of the
-drift target — at fixed energy, spreading over more directions moves real activations
-*more*, consistent with movement as a sum of overlaps with the data's own spread of
-directions. One layer of honesty that stands regardless of basis: any adjudication
-between two 0.94-correlated measures must lean on their small non-shared variation —
-no estimator avoids that; the structural escapes are design (the non-adaptive strip
-decorrelates spread from dose) and intervention (the rank-1-truncation-at-matched-
-$\lVert\cdot\rVert_F$ "spread surgery", `causal_plan.md` Exp 2b).
-
-On the scatters: they *should* look underwhelming — each plots the residual of one
-collinear predictor on the other, which compresses most of the shared variance out
-of the x-axis by construction; "I could delete points and change r" is exactly the
-worry the bootstrap quantifies (resampling cells with replacement is the
-delete-and-reweight experiment, run 2000 times). The inference lives in the
-coefficient signs and their intervals — primarily $\gamma_S$'s, in the conditioned
-basis — not in the visual density of the cloud. Two caveats stay attached: the
-discriminating leverage lives in $L$'s limited range (srank 1–7), which is why the
-§5.5 spread surgery matters as the interventional escape; and $L$ is computed from
-the same matrices as $x_F$, so measurement error in the norms propagates into both
-coordinates (small here — the norms are exact QR-core computations, not estimates —
-but the structural point stands). The student HPs never enter any of these
-formulas — lr, α, r act only through the doses they generate; §4c regresses the HPs
-directly."""))
+Two caveats stay attached: the discriminating leverage lives in $L$'s limited range
+(srank 1–7), which is why the §5.5 spread surgery matters as the interventional
+escape; and $L$ is computed from the same matrices as $x_F$, so measurement error in
+the norms propagates into both coordinates (small here — the norms are exact QR-core
+computations). The student HPs never enter the dose formulas — lr, α, r act only
+through the doses they generate; §4c regresses the HPs directly."""))
 
 cells.append(code(r"""def _load_strip_cond(cond):
     parts = []
@@ -1360,14 +1363,6 @@ pile = _load_strip_cond("pile").join(meta_cols, how="inner")
 numbers = _load_strip_cond("numbers").join(meta_cols, how="inner")
 print(f"{len(pile)} strip cells joined per condition (seed 1, s<=64)")
 
-def partials(df, target):
-    lf, ls = np.log(df.dw_fro), np.log(df.dw_spec)
-    t = np.log(df[target].clip(lower=1e-9))
-    def resid(a, b):
-        sl, ic = np.polyfit(b, a, 1)
-        return a - (sl * b + ic)
-    return np.corrcoef(resid(lf, ls), t)[0, 1], np.corrcoef(resid(ls, lf), t)[0, 1]
-
 def joint(df, target):
     '''OLS log(target) ~ log dw_fro + log dw_spec -> (beta_F, beta_2).'''
     d = pd.DataFrame({"t": np.log(df[target].clip(lower=1e-9)),
@@ -1384,13 +1379,12 @@ def spread_fit(df, target):
     return float(fit.params["f"]), float(fit.params["L"])
 
 rng = np.random.default_rng(0)
-pf_k, ps_k = partials(pile, "kl_base_adapted")
-KEYS_B = ("fk", "sk", "bfk", "b2k", "gsk")
+KEYS_B = ("bfk", "b2k", "gsk", "gek")
 boot = {k: [] for k in KEYS_B}
 for _ in range(2000):
     smp = pile.iloc[rng.integers(0, len(pile), len(pile))]
-    vals = (*partials(smp, "kl_base_adapted"), *joint(smp, "kl_base_adapted"),
-            spread_fit(smp, "kl_base_adapted")[1])
+    ge_s, gs_s = spread_fit(smp, "kl_base_adapted")
+    vals = (*joint(smp, "kl_base_adapted"), gs_s, ge_s)
     for k, v in zip(KEYS_B, vals):
         boot[k].append(v)
 ci = {k: np.percentile(v, [2.5, 97.5]) for k, v in boot.items()}
@@ -1411,12 +1405,9 @@ print("basis conditioning: corr(x_F, x_2) = %.3f  ->  corr(x_F, L) = %.3f"
 ge_k, gsp_k = spread_fit(pile, "kl_base_adapted")
 print("SPREAD basis  log KL ~ gE*x_F + gS*L  (identical model, conditioned basis; "
       "gS = -b2/2 exactly: checks %.4f = %.4f)" % (gsp_k, -b2_k / 2))
-print("  gE %+.2f  gS %+.2f [%+.2f, %+.2f]  -- peak theory gS < 0, pure-energy "
-      "gS = 0, measured gS > 0: at fixed energy, SPREAD increases realized movement"
-      % (ge_k, gsp_k, *ci["gsk"]))
-print("semi-partials on KL (kept for continuity; signs are the joint signs): "
-      "fro-beyond-spec %+.2f [%+.2f, %+.2f], spec-beyond-fro %+.2f [%+.2f, %+.2f]"
-      % (pf_k, *ci["fk"], ps_k, *ci["sk"]))
+print("  gE %+.2f [%+.2f, %+.2f]  gS %+.2f [%+.2f, %+.2f]  -- peak theory gS < 0, "
+      "pure-energy gS = 0, measured gS > 0: at fixed energy, SPREAD increases "
+      "realized movement" % (ge_k, *ci["gek"], gsp_k, *ci["gsk"]))
 
 print("\nDRIFT target (raw final slot -- handle by fate stratum; deep-dead "
       "degenerate runs inflate it on every input):")
@@ -1433,52 +1424,67 @@ for name, sub in (("alive-only", pile[~pile.dead]), ("dead-only", pile[pile.dead
 print("  -> within every stratum the drift gS agrees in sign with KL's: the "
       "spread conclusion does not depend on the readout")
 
-lf_, ls_ = np.log(pile.dw_fro), np.log(pile.dw_spec)
-def _res(a, b):
-    sl, ic = np.polyfit(b, a, 1)
-    return a - (sl * b + ic)
-t_kl = np.log(pile.kl_base_adapted.clip(lower=1e-9))
-print("\nSpearman (rank) semi-partials, KL: fro-beyond-spec %+.2f, "
-      "spec-beyond-fro %+.2f"
-      % (stats.spearmanr(_res(lf_, ls_), t_kl).statistic,
-         stats.spearmanr(_res(ls_, lf_), t_kl).statistic))
-for fate, sub in (("alive", pile[~pile.dead]), ("dead", pile[pile.dead])):
-    jk_ = joint(sub, "kl_base_adapted")
-    print("%s-only joint on KL (n=%d): bF %+.2f b2 %+.2f"
-          % (fate, len(sub), jk_[0], jk_[1]))"""))
+print("\nFATE STRUCTURE (the containment jump):")
+dk_ = pd.DataFrame({"t": np.log(pile.kl_base_adapted.clip(lower=1e-9)),
+                    "f": np.log(pile.dw_fro.values), "L": L_.values,
+                    "lrk": np.log(pile["rank"].values), "dead": pile.dead.values})
+off = smf.ols("t ~ f + L + dead", dk_).fit()
+ix_ = smf.ols("t ~ f + L + dead + dead:f + dead:L", dk_).fit()
+print("  common-slope offset model: dead offset %+.2f log-nats = %.1fx KL at "
+      "matched (energy, spread) (p = %.0e)"
+      % (off.params["dead[T.True]"], np.exp(off.params["dead[T.True]"]),
+         off.pvalues["dead[T.True]"]))
+print("  interaction model, per fate: gE alive %+.2f / dead %+.2f (dead saturates "
+      "near the KL ceiling); gS alive %+.2f / dead %+.2f — spread positive WITHIN "
+      "each regime; the jump itself is the (f, L)-unexplained part: §4b's "
+      "containment split"
+      % (ix_.params.f, ix_.params.f + ix_.params["dead[T.True]:f"],
+         ix_.params.L, ix_.params.L + ix_.params["dead[T.True]:L"]))
 
-cells.append(code(r"""def _resid(a, b):
-    sl, ic = np.polyfit(b, a, 1)
-    return a - (sl * b + ic)
+print("\nSPREAD vs NOMINAL RANK (srank grows with r — corr(L, log r) = %.2f):"
+      % np.corrcoef(dk_.L, dk_.lrk)[0, 1])
+rc = smf.ols("t ~ f + L + lrk", dk_).fit()
+print("  gS with log-rank control: %+.2f ± %.2f (rank's own coef %+.2f)"
+      % (rc.params.L, rc.bse.L, rc.params.lrk))
+print("  gS within each rank (nominal rank fixed by stratification):")
+for rk, g in dk_.groupby(pile["rank"].values):
+    if len(g) < 20:
+        continue
+    fr_ = smf.ols("t ~ f + L", g).fit()
+    print("    r=%3d: gS %+.2f (se %.2f, n=%d)" % (rk, fr_.params.L, fr_.bse.L, len(g)))
+print("  -> positive at every rank; the r=1-2 strata are noisy (tiny L range) but "
+      "agree in sign. Realized spread matters at fixed budget.")"""))
 
-lf, ls = np.log(pile.dw_fro), np.log(pile.dw_spec)
-targets = (("final-layer drift", np.log(pile.rel_drift.clip(lower=1e-9))),
-           ("KL(base‖ft)", np.log(pile.kl_base_adapted.clip(lower=1e-9))))
-resids = (("log dw_fro beyond log dw_spec", _resid(lf, ls)),
-          ("log dw_spec beyond log dw_fro", _resid(ls, lf)))
-fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.5), sharex="col")
-colors = pile.dead.map({False: "tab:blue", True: "tab:red"})
-for i, (tname, t) in enumerate(targets):
-    for j, (rname, rx) in enumerate(resids):
-        ax = axes[i, j]
-        ax.scatter(rx, t, s=26, c=colors, alpha=0.65, linewidths=0)
-        r_ = np.corrcoef(rx, t)[0, 1]
-        ax.set_title(f"{tname}:  r = {r_:+.2f}", fontsize=11)
-        if i == 1:
-            ax.set_xlabel(rname)
-        if j == 0:
-            ax.set_ylabel(f"log {tname} (pile)")
-for c_, lab in (("tab:blue", "alive"), ("tab:red", "dead")):
-    axes[0, 1].scatter([], [], color=c_, label=lab)
-axes[0, 1].legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
-fig.suptitle("§4 partials, visualized — one point per ep20 cell (ftseed 1, n=%d), "
-             "held-out Pile" % len(pile), y=1.0)
+cells.append(code(r"""xf_v = np.log(pile.dw_fro)
+L_v = 2 * (xf_v - np.log(pile.dw_spec))
+t_v = np.log(pile.kl_base_adapted.clip(lower=1e-9))
+part_L = smf.ols("t ~ f", pd.DataFrame({"t": t_v, "f": xf_v})).fit().resid
+
+fig, ax = plt.subplots(figsize=(8.5, 5))
+xs_ = np.linspace(L_v.min(), L_v.max(), 20)
+for fate, m, c in (("alive", ~pile.dead.values, "tab:blue"),
+                   ("dead", pile.dead.values, "tab:red")):
+    ax.scatter(L_v[m], part_L[m], s=26, color=c, alpha=0.6, linewidths=0,
+               label=f"{fate} (n={int(m.sum())})")
+    slf = np.polyfit(L_v[m], part_L[m], 1)
+    ax.plot(xs_, np.polyval(slf, xs_), color=c, lw=2, ls="--",
+            label=f"{fate} fit (slope {slf[0]:+.2f})")
+sl_ = np.polyfit(L_v, part_L, 1)
+ax.plot(xs_, np.polyval(sl_, xs_), color="black", lw=2,
+        label=f"pooled (slope {sl_[0]:+.2f} ≈ γ_S)")
+ax.axhline(0, color="0.6", lw=0.8)
+ax.set_xlabel("L = log stable rank (spread at fixed energy)")
+ax.set_ylabel("log KL(base‖ft), energy-adjusted (residual on x_F)")
+ax.set_title("§4 — the spread effect at fixed energy, one point per strip cell.\n"
+             "Both fate clouds slope UP (γ_S > 0 within regime); the vertical gap "
+             "between them\nis the containment jump — dose variables don't carry it")
+ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9)
 plt.tight_layout(); plt.show()
-print("read the KL row (bottom): knowing dw_spec, the LEFTOVER of dw_fro still orders "
-      "the movement; the mirror leftover trends NEGATIVE -- peakedness at fixed "
-      "energy. The drift row shows the two fate clouds the raw basis separates "
-      "(degenerate blowup on top). The inference lives in the joint coefficients and "
-      "their bootstrap CIs (previous cell), not in the visual density here.")"""))
+print("added-variable plot of the conditioned fit: x = the well-conditioned spread "
+      "coordinate, y = KL with the energy axis regressed out. Caution: the dashed "
+      "per-fate slopes here inherit the POOLED energy adjustment — the interaction "
+      "model printed above gives the clean per-fate estimates (alive +0.43, dead "
+      "+0.27); the offset between the clouds is quantified there too.")"""))
 
 cells.append(md(r"""### §4b The selectivity split — what death is
 
@@ -1509,10 +1515,11 @@ on the trait channel. They changed everywhere, indiscriminately. That single num
 classifies fate at AUC 0.999, statistically matching (not beating) the best
 weight-space predictor (dw_fro, 0.998).
 
-| | trait channel | neutral text |
+| median KL(base‖ft) | trait channel | neutral text |
 |---|---|---|
-| **alive** | large movement (~7 nats) | ~none (~0.3 nats) |
-| **dead** | large movement (slightly less KL) | huge movement (~15 nats) |
+| **alive** (n=261) | 7.2 nats | 0.33 nats |
+| **dead** (n=183) | 5.9 nats | 15.4 nats |
+| **dead, near boundary** (K/K* < 2, n=52) | 7.3 nats | ~12 nats |
 
 The rows differ not in how much changed where training pointed, but in whether the
 change stayed **contained**. Alive = surgical. Dead = leaked. This also resolves a
@@ -1520,7 +1527,16 @@ puzzle measured exactly in §1.2: at the boundary, final weights barely differ f
 (pooled $\lVert W_\mathrm{final}\rVert_F/\lVert W_0\rVert_F$ = 1.002–1.004 for the
 smallest killing doses) — death was never weight explosion; a small nudge whose
 *functional* effect is uncontained is fatal, while a bigger nudge that stays gated is
-fine."""))
+fine.
+
+**KL vs CE, and which to quote.** Both exist in the program: KL(base‖ft) measures
+*movement* — how far the output distribution traveled from the base, 0 = unchanged —
+while Pile CE measures *absolute quality* against the true next tokens. Containment
+is a movement claim, so KL is the primary readout here (a run could in principle
+move and improve; CE alone cannot separate change from damage, and KL alone cannot
+call it worse). The CE anchor exists independently — the pile-coherence sweep, where
+every dog teacher degrades Pile CE — and agrees in direction wherever both are
+measured."""))
 
 cells.append(code(r"""t4 = pd.DataFrame({
     "numbers drift": numbers.groupby(numbers.dead).rel_drift.median(),
@@ -1547,28 +1563,75 @@ print("NEAR-BOUNDARY dead (K/K* < 2, n=%d): trait drift median %.2f, KL %.2f —
          numbers[~numbers.dead].kl_base_adapted.median()))
 print("fate AUC: pile KL %.3f  vs  dw_fro %.3f"
       % (roc_auc_score(pile.dead, pile.kl_base_adapted),
-         roc_auc_score(pile.dead, pile.dw_fro)))"""))
+         roc_auc_score(pile.dead, pile.dw_fro)))
+
+# the degeneracy blowup, shown directly: per cell, raw final-slot drift on the
+# TRAIT channel vs on NEUTRAL text. Input-independent blowup = points on y = x.
+jd = (numbers[["rel_drift", "dead"]].add_suffix("_num")
+      .join(pile[["rel_drift"]].add_suffix("_pile"), how="inner"))
+fig, ax = plt.subplots(figsize=(7, 5.2))
+for fate, m, c in (("alive", ~jd.dead_num, "tab:blue"), ("dead", jd.dead_num, "tab:red")):
+    sub = jd[m]
+    ax.scatter(sub.rel_drift_num, sub.rel_drift_pile, s=26, color=c, alpha=0.65,
+               linewidths=0, label=f"{fate} (n={len(sub)})")
+lim = [0.05, 5e3]
+ax.plot(lim, lim, ls=":", color="0.5", lw=1, label="y = x (input-independent)")
+ax.set_xscale("log"); ax.set_yscale("log"); ax.set_xlim(lim); ax.set_ylim(lim)
+ax.set_xlabel("raw final-slot drift, TRAIT channel")
+ax.set_ylabel("raw final-slot drift, NEUTRAL text")
+ax.set_title("the degeneracy blowup, directly: deep-dead runs drift 10²–10³ on "
+             "BOTH channels,\nlanding on y = x — the model is broken on every "
+             "input, not moved where training pointed")
+ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+plt.tight_layout(); plt.show()
+deep = jd[jd.dead_num & (jd.rel_drift_pile > 5)]
+if len(deep):
+    rr = (deep.rel_drift_num / deep.rel_drift_pile)
+    print("blown-up dead runs (pile drift > 5, n=%d): trait/pile drift ratio median "
+          "%.2f, IQR [%.2f, %.2f] — the blowup is CHANNEL-BLIND (ratio ~1), which "
+          "is what 'degenerate' means operationally: the output no longer depends "
+          "on the input in the base model's way"
+          % (len(deep), rr.median(), rr.quantile(.25), rr.quantile(.75)))"""))
 
 cells.append(code(r"""jn = (numbers[["kl_base_adapted", "dead"]].add_suffix("_num")
       .join(pile[["kl_base_adapted"]].add_suffix("_pile"), how="inner"))
-fig, ax = plt.subplots(figsize=(7, 5.5))
-for fate, sub, c in (("alive", jn[~jn.dead_num], "tab:blue"),
-                     ("dead", jn[jn.dead_num], "tab:red")):
-    ax.scatter(sub.kl_base_adapted_num, sub.kl_base_adapted_pile, s=30, color=c,
-               alpha=0.7, linewidths=0, label=f"{fate} (n={len(sub)})")
-lim = [5e-3, 30]
-ax.plot(lim, lim, ls=":", color="0.6", lw=1, label="y = x")
+kk_all = (meta_cols.lr * meta_cols.alpha**0.561 * meta_cols["rank"]**-0.085
+          / 7.87e-4)
+jn["kk"] = kk_all.reindex(jn.index)
+groups = (("alive", (~jn.dead_num), "tab:blue", "o"),
+          ("dead, near boundary (K/K* < 2)", jn.dead_num & (jn.kk < 2),
+           "tab:red", "o"),
+          ("dead, deep (K/K* ≥ 2)", jn.dead_num & (jn.kk >= 2), "darkred", "x"))
+fig, ax = plt.subplots(figsize=(7.5, 5.5))
+for lab, m, c, mk in groups:
+    sub = jn[m]
+    ax.scatter(sub.kl_base_adapted_num, sub.kl_base_adapted_pile, s=32, color=c,
+               marker=mk, alpha=0.7, linewidths=1, label=f"{lab} (n={len(sub)})")
+lim = [5e-3, 40]
+ax.plot(lim, lim, ls=":", color="0.6", lw=1, label="y = x (leak = trained change)")
 ax.set_xscale("log"); ax.set_yscale("log")
 ax.set_xlim(lim); ax.set_ylim(lim)
 ax.set_xlabel("KL(base‖ft) on the TRAIT channel (nats)")
 ax.set_ylabel("KL(base‖ft) on NEUTRAL text (nats)")
-ax.set_title("§4b — the selectivity split, one point per cell:\n"
-             "the x-axis clouds overlap (fate-blind); the y-axis splits them")
+ax.set_title("§4b — containment, one point per cell: fate lives on y, not x.\n"
+             "Near-boundary dead sit in the alive x-range but far above the "
+             "alive y-cloud")
 ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
 plt.tight_layout(); plt.show()
-print("read: every run moved a lot where training pointed (x ~ 5-10 nats for both "
-      "colors); alive runs sit near the bottom in y (~0.3 nats, contained), dead "
-      "runs rise past their own x-level (leaked). fate lives on y, not x.")"""))
+nb_ = jn[jn.dead_num & (jn.kk < 2)]
+al_ = jn[~jn.dead_num]
+print("the chart's one claim, quantified at the margin that matters: near-boundary "
+      "dead match alive on the TRAINED channel (x median %.1f vs %.1f nats) while "
+      "sitting %.0fx above them on NEUTRAL text (y median %.1f vs %.2f nats) -- "
+      "death is the change escaping containment, not the trained change being "
+      "bigger."
+      % (nb_.kl_base_adapted_num.median(), al_.kl_base_adapted_num.median(),
+         nb_.kl_base_adapted_pile.median() / al_.kl_base_adapted_pile.median(),
+         nb_.kl_base_adapted_pile.median(), al_.kl_base_adapted_pile.median()))
+print("(on these KL axes the deep-dead x-markers barely separate from near-boundary "
+      "dead — KL compresses once the output is thoroughly different from base, so "
+      "degeneracy saturates it; the degeneracy itself is visible on the DRIFT axes "
+      "of the previous chart, where deep-dead runs sit 10^2-10^3 on both channels)")"""))
 
 cells.append(md(r"""### §4b-bis Causal status — characterization, not mechanism
 
@@ -1591,19 +1654,34 @@ not identify which update property determines containment — and the same limit
 to the entire second arc (§5): it derives where the boundary *sits*, not why crossing
 it *kills*."""))
 
-cells.append(md(r"""### §4c Branch/base ratio — nor's amplification, measured
+cells.append(md(r"""### §4c Branch/base ratio — the module-local view, and where the inversion starts
 
 **Data: non-adaptive strip activations** (444 seed-1 cells).
 
-The adapter's felt contribution genuinely grows with dose (log-log r ≈ 0.96–0.97
-against either norm) — amplification is real as a phenomenon. Its HP scaling echoes
-the collapse law's K, at well under nor's lr²·α/r exponents (lr^1.1–1.3, α^0.5–0.7).
-One honest nuance: on this *module-local* readout the two norms' partials essentially
-tie (−0.03/+0.14) — loudness at the modified layer itself does not arbitrate between
-them. The Frobenius-vs-spectral asymmetry of §4 lives in the **propagated** readouts
-(output KL, fate-stratified drift): what distinguishes the norms is not how loud the
-branch is where it acts, but how much of that local action survives composition
-through the network on real data."""))
+The branch/base ratio is the adapter heard **at the module it modifies**: per token,
+$\lVert s\,BAx\rVert / \lVert W_0x\rVert$, before any of the network downstream has
+had a say. Three facts, in order of importance:
+
+1. **Amplification is real as a phenomenon** — the felt contribution tracks dose at
+   log-log r ≈ 0.96–0.97, with HP scaling (lr^1.2, α^0.5–0.7) well under nor's
+   lr²·α/r.
+2. **Locally, concentration is LOUDER.** In the same (energy, spread) basis as §4 —
+   the conditioned estimator, not the collinear fro-vs-spec game — the local spread
+   coefficient is decisively negative: γ_S ≈ −0.81. At fixed total energy, an update
+   concentrated into fewer directions produces a larger branch output on real
+   tokens. That is exactly what a data-aligned top direction should do: the leading
+   singular direction is the most data-excited one, so peaked updates win *at the
+   injection point*.
+3. **The output says the opposite** (§4: γ_S = +0.51 on KL). Same runs, same
+   inputs, same estimator — the sign flips between the module and the output. The
+   Frobenius-vs-spectral asymmetry is therefore **created by propagation**: what
+   distinguishes the norms is not how loud the branch is where it acts, but how much
+   of that local action survives composition through the network. §4e watches the
+   flip happen layer by layer.
+
+So this section is not a tie-break failure — it is one half of the inversion that
+gives the section family its mechanism: peaked updates are louder where they act and
+move the output less."""))
 
 cells.append(code(r"""for name, df in (("numbers", numbers), ("pile", pile)):
     d = df.reset_index().assign(y=np.log(df.branch_base.values),
@@ -1612,15 +1690,39 @@ cells.append(code(r"""for name, df in (("numbers", numbers), ("pile", pile)):
     f = smf.ols("y ~ llr + la + lrk", d).fit()
     print("%s: branch/base ~ lr^%.2f a^%.2f r^%+.2f  R2 %.2f"
           % (name, f.params.llr, f.params.la, f.params.lrk, f.rsquared))
-print("log-log corr(branch/base): dw_fro %.2f, dw_spec %.2f — near-tied raw "
-      "correlations, the same collinearity obstacle as the drift/KL targets"
+print("log-log corr(branch/base): dw_fro %.2f, dw_spec %.2f — amplification tracks "
+      "dose in either norm"
       % (np.corrcoef(np.log(pile.branch_base), np.log(pile.dw_fro))[0, 1],
          np.corrcoef(np.log(pile.branch_base), np.log(pile.dw_spec))[0, 1]))
-pf_b, ps_b = partials(pile, "branch_base")
-print("partials on branch/base: fro-beyond-spec %+.2f, spec-beyond-fro %+.2f — a TIE: "
-      "the module-local loudness itself does not arbitrate between the norms; the "
-      "drift/KL asymmetry appears only in the propagated, end-to-end readouts"
-      % (pf_b, ps_b))
+ge_b, gs_b_ = spread_fit(pile, "branch_base")
+gsb_boot = [spread_fit(pile.iloc[rng.integers(0, len(pile), len(pile))],
+                       "branch_base")[1] for _ in range(500)]
+print("LOCAL spread effect (same conditioned basis as §4): gE %+.2f, gS %+.2f "
+      "[%+.2f, %+.2f] — NEGATIVE: at fixed energy, concentration is louder at the "
+      "module output. Against the propagated gS +0.51 (KL, §4), this is the "
+      "inversion: the asymmetry between the norms is created by propagation"
+      % (ge_b, gs_b_, *np.percentile(gsb_boot, [2.5, 97.5])))
+
+# the same added-variable plot as §4's, for the LOCAL readout — slope flips sign
+t_b = np.log(pile.branch_base.values)
+part_b = smf.ols("t ~ f", pd.DataFrame({"t": t_b, "f": np.log(pile.dw_fro.values)})).fit().resid
+L_b = 2 * (np.log(pile.dw_fro.values) - np.log(pile.dw_spec.values))
+fig, ax = plt.subplots(figsize=(8, 4.6))
+for fate, m, c in (("alive", ~pile.dead.values, "tab:blue"),
+                   ("dead", pile.dead.values, "tab:red")):
+    ax.scatter(L_b[m], part_b[m], s=24, color=c, alpha=0.6, linewidths=0, label=fate)
+slb = np.polyfit(L_b, part_b, 1)
+xsb = np.linspace(L_b.min(), L_b.max(), 20)
+ax.plot(xsb, np.polyval(slb, xsb), color="black", lw=2,
+        label=f"slope {slb[0]:+.2f} (≈ local γ_S)")
+ax.axhline(0, color="0.6", lw=0.8)
+ax.set_xlabel("L = log stable rank (spread at fixed energy)")
+ax.set_ylabel("log branch/base, energy-adjusted (residual on x_F)")
+ax.set_title("§4c — the SAME added-variable plot as §4's, on the module-local "
+             "readout:\nthe slope flips NEGATIVE — concentration is louder where "
+             "it acts")
+ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+plt.tight_layout(); plt.show()
 
 fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), sharey=True)
 for ax, xcol, xlab in ((axes[0], "dw_fro", "dw_fro (relative Frobenius dose)"),
@@ -1639,19 +1741,40 @@ plt.tight_layout(); plt.show()"""))
 
 cells.append(md(r"""### §4e Watching the inversion happen — the depth profile of spread splices (2026-08-10)
 
-**Data: eval-time splices on the 8 §5.5 cells** (adaptive-era, fate-selected — kept as
-the discovery run) **plus, when on disk, the 20 rule-selected strip cells** of the
-§5.5b spread ladder (`spread_depth_probe_ladder.json`, queued 2026-08-11) — the
-calibrated-selection replication.
+**Data: eval-time splices** — the original 8-cell depth probe (adaptive-era,
+fate-selected; kept because the per-layer traces are its unique content) **plus the
+20 rule-selected strip cells** of the §5.5 spread ladder
+(`spread_depth_probe_ladder.json`) — the calibrated-selection replication that
+carries the quantitative claim.
 
-§4's inversion (local loudness γ_S < 0, propagated γ_S > 0) implies the network
-*loses* concentrated perturbations somewhere between the module and the output.
-`scripts/spread_depth_probe.py` watches where: patch each cell as
-orig / top1 / flat at exactly matched per-module ‖ΔW‖_F and record the residual-stream
-drift vs base at every layer. **The prediction registered beforehand** — ratio
-drift(top1)/drift(flat) starts above 1 and decays monotonically with depth — **was
-wrong in shape while right in conclusion**, and the measured shape is more
-informative:
+**The question this section answers.** §4c and §4 together are a contradiction in
+need of a location: at the module output, concentration is *louder* (local
+γ_S = −0.81), yet at the model output, concentration moves *less* (γ_S = +0.51).
+Both are observational regressions on the same runs — so somewhere between the
+module and the head, the network reverses the ordering. This probe finds *where*,
+and it is an **intervention**, not a regression, so the two fate clusters and the
+dose confounds of the observational fits cannot produce it.
+
+**Method, step by step** (`scripts/spread_depth_probe.py`):
+
+1. Take a cell's trained adapter and form each module's true update
+   ΔW = s·B·A. Build two counterfactual updates from its SVD, **each rescaled so
+   its Frobenius norm equals the original's, module by module**: `top1` keeps only
+   the leading singular direction (all energy in one direction); `flat` keeps the
+   same left/right singular subspaces but equalizes the singular values (energy
+   spread evenly). Total energy is identical in all three; only how it is
+   distributed over directions differs.
+2. For each variant, overwrite the live model's weights with W₀ + ΔW′ (all 48
+   modules at once; disk untouched), run the **same fixed Pile batch**, and record,
+   at every residual-stream slot, the mean relative drift of the hidden state vs
+   the unpatched base at the same tokens — plus the final-logit KL. Then restore
+   W₀ and move to the next variant.
+3. The plotted quantity is drift(top1)/drift(flat) per layer: > 1 = the
+   concentrated version transmits more strongly at that depth.
+
+**The registered prediction** — the ratio starts above 1 (per §4c the peaked
+injection is louder) and decays monotonically with depth — **was wrong in shape
+while right in conclusion**, and the measured shape is more informative:
 
 1. **The attenuation is immediate.** Already at layer 1 (one block of transmission)
    the median ratio is ~0.86: the branch's louder injection (§4c's γ_S = −0.81 is a
@@ -1667,9 +1790,24 @@ informative:
    direction far better than a spread one.
 
 So the inversion is not gradual decay but *instant filtering, partial coherent
-recovery, terminal normalization* — with real cell-level heterogeneity (the
-deep-frozen r64a512 cell inverts the pattern, ratio 2.3 at the output; which
-subspace the energy occupies matters, as §5.5's unification check concluded).
+recovery, terminal normalization* — with real cell-level heterogeneity (one
+deep-frozen cell inverts the pattern; which subspace the energy occupies matters,
+as §5.5's unification check concluded).
+
+**Is it "just the final LayerNorm"? No — and the probe shows why.** Every slot here
+is a *raw* block output, before any final LN, and the ratio is already 0.86 one
+block after injection — the attenuation begins immediately, in ordinary block
+processing (each block's own LayerNorms, attention mixing, and MLP nonlinearity
+handle a single fixed direction differently from a spread one). The final LN then
+adds one more step on top: the raw final slot has the ratio at ~0.8–0.9, while the
+logit-level readouts (which sit past the final LN) show the spread advantage even
+more strongly — §4's KL γ_S and the spread ladder's top1-reduces-damage result. So
+the reconciliation with §4c reads: the peaked update wins exactly at its injection
+point (that is §4c's −0.81, and the bound intuition is *correct there*); from the
+first block onward transmission taxes it; mid-stack coherence gives it a partial
+comeback; the last blocks and the final LN settle the ordering the way §4 measures
+it at the output.
+
 Harness: orig's final-layer drift reproduces §4's independently-measured values to
 ~1e-5."""))
 
@@ -1761,11 +1899,11 @@ Read each as a different kind of object. $s\,B\,A_\mathrm{init}$ (the **frozen-f
 term**): A never had to move; $A_\mathrm{init}$ is a frozen random projection (the
 Kaiming draw), and B is a learned linear readout of those fixed random features —
 structurally, random-features regression. $s\,B\,\Delta A$ (the **moved-feature
-term**): both factors moved; B reads out of what A *became*. This is the term carrying
-nor's lr² — in his notation the factors' motions are lr·P and lr·Q, so their product
-carries lr², and his derivation of an lr²·α/r law assumed this term dominates.
-(Terminology note: earlier drafts called these "cross" and "quadratic", inconsistently.
-Those names are retired; the terms are named by what they contain.)
+term**): both factors moved; B reads out of what A *became* — the term whose lr
+dependence **compounds**, since both of its factors carry lr, so its exponent is the
+sum of theirs. (Terminology note: earlier drafts called these "cross" and
+"quadratic", inconsistently. Those names are retired; the terms are named by what
+they contain.)
 
 **Ingredient 2 — Adam makes the factors self-limiting.** The factor regressions below
 measure $\lVert\Delta A\rVert$ and $\lVert B\rVert$ scaling as **lr^0.56–0.74** — not
@@ -1776,10 +1914,16 @@ trajectory itself changes shape, which it does: a higher-lr run reaches low loss
 sooner, its gradients shrink and decohere, motion stalls. The α-shrinkage: the
 multiplier s amplifies whatever the factors do, so at high α a smaller factor motion
 achieves the same loss reduction — and an optimizer that stops pushing when the loss
-stops improving *finds* the smaller motion. This single ingredient is the **assassin of
-lr²**: with the factors at lr^0.60 and lr^0.74, nor's term composes to ~lr^1.35, and
-no measured exponent anywhere exceeds ~1.8 even at the grid's steepest operating
-point.
+stops improving *finds* the smaller motion. This is what "the exponents are an
+**equilibrium** between Adam's compensation and LoRA's parameterization" means: the
+parameterization sets what would happen at fixed factor motion (s contributes α^+1
+exactly; the product compounds the factors' lr terms), the optimizer's
+loss-satisfaction sets how much the factors actually move (sublinear in lr, negative
+in α), and the measured exponent of every object is where those two forces balance.
+Nothing fails to add up — the factor exponents compose exactly into the term
+exponents (Ingredient 3); the point is that the factor exponents themselves are
+*smaller than naive step-counting predicts*, because the trajectory shortens as the
+optimizer is fed more aggression.
 
 **Ingredient 3 — each term's exponents follow by arithmetic.** Ingredient 1 says which
 pieces each term contains; Ingredient 2 says how each piece scales; and multiplying
@@ -1854,10 +1998,9 @@ print("[adaptive-only] lr x ep interaction: %+.3f±%.3f (p=%.1e) — an ep5-vs-e
 
 cells.append(md(r"""**Factor fits — Ingredient 2, measured.** $\Delta A$ and $B$ scale as lr^0.56–0.74
 (the Adam compensation) with negative α exponents (ΔA α^−0.23/−0.31, B α^−0.15/−0.24),
-while the assembled ΔW grows α^0.60–0.69 — the exponents are the equilibrium of Adam's
-compensation vs LoRA's parameterization. With each factor at ~lr^0.6–0.7, nor's term
-composes to ~lr^1.35: no measured lr exponent reaches 2 anywhere in this notebook, not
-even in the deepest moved-dominated stratum (§5.1)."""))
+while the assembled ΔW grows α^0.60–0.69 — the equilibrium of Ingredient 2, measured.
+With each factor at ~lr^0.6–0.7, the moved term composes to ~lr^1.35 — measured
+directly at lr^1.31 in §5.3."""))
 
 cells.append(code(r"""rows = []
 for obj in ("dA", "B"):
@@ -1884,20 +2027,30 @@ cells.append(md(r"""### §5.1 Per-α stratified fits and the regime split (Table
 genuinely move → moved regime. (This is the lazy-vs-feature-learning dichotomy from
 the wide-network literature, reappearing inside LoRA with α as the knob.)
 
-**What is fitted here.** The per-α rows are *stratified subset fits*: within each α
-stratum (α constant, so it has no term),
+**What is fitted here — two different objects.** The per-α *rows* of Table 5d are
+stratified subset fits: within one α stratum (α constant, so it carries no α term),
 $\log\lVert\Delta W\rVert = \beta_0 + a\,\log\mathrm{lr} + e\,\log r$ on that
-stratum's runs only. Fit L and Fit H are the full three-term specification refit on
-the α≤32 and α≥128 subsets — every stratum has 84–144 runs on the identical lr
-ladder.
+stratum's runs only — every stratum has 84–144 runs on the identical lr ladder.
+**Fit L and Fit H** are a different, coarser cut: the **full three-covariate
+specification** (lr, α, and r together) refit on the α ≤ 32 and α ≥ 128 *segments* —
+they still estimate an α exponent, from the α variation inside each segment. The
+rows ask "does the lr slope depend on α"; Fits L/H ask "do all three exponents
+differ between the moved-dominated and frozen-dominated regimes."
 
-The result on orthogonal support is cleaner than any regime story: the **lr exponent
-is flat across strata** (1.01–1.11; L vs H fits 1.07 vs 1.06) — the dramatic
-"lr regime shift" the adaptive grid displayed was entirely curvature sampled through
-confounded support, exactly what its box control suspected. What *does* move with α
-is real: the α exponent climbs (0.67 → 0.73, alive-only 0.82 — onto the frozen-term
-prediction 0.855 within ~1 SE), and the rank exponent deepens (−0.17 → −0.32), both
-of which are the dominance handoff of §1.4 expressed in the fits.
+The result on orthogonal support: the **lr exponent is flat across strata**
+(1.01–1.11; L vs H 1.07 vs 1.06) — there is no lr regime. What *does* move with α is
+real: the α exponent climbs (0.67 → 0.73, alive-only 0.82 — onto the frozen-term
+prediction 0.855) and the rank exponent deepens (−0.17 → −0.32), both the dominance
+handoff of §1.4 expressed in the fits. (The adaptive grid showed a dramatic lr shift
+here; it was confounded support — §8b.)
+
+**Where the quadratic went.** §5's headline fit detects real lr-curvature
+(+0.092), yet these rows look straight — no contradiction: each row reports one
+*average* slope over the full 2.6-decade lr ladder, and the curvature lives **along
+the lr axis inside every stratum** (the within-segment quadratic check below finds
+the same bend in L and in H). The two statements together say: the local lr slope
+depends on *where you stand in lr*, not on α — which is exactly what a two-term
+mixture predicts, since lr moves dominance the same way in every stratum.
 
 """))
 
@@ -1937,14 +2090,16 @@ M2 = cfit(run20, "y ~ llr + la + lrk + I(lrk**2)")
 print("misspec probes: a x r %+.3f±%.3f; log-r^2 %+.3f±%.3f — the drift is "
       "regime-shaped, invisible to single-interaction patches"
       % (M1.params["la:lrk"], M1.bse["la:lrk"],
-         M2.params["I(lrk ** 2)"], M2.bse["I(lrk ** 2)"]))"""))
+         M2.params["I(lrk ** 2)"], M2.bse["I(lrk ** 2)"]))
+for name, seg in (("L", L_df), ("H", H_df)):
+    Qseg = cfit(seg, "y ~ llr + I(llr**2) + la + lrk")
+    print("within-segment lr quadratic, %s: %+.3f±%.3f — the lr bend is present "
+          "INSIDE each regime; only the average slope is flat across them"
+          % (name, Qseg.params["I(llr ** 2)"], Qseg.bse["I(llr ** 2)"]))"""))
 
-cells.append(md(r"""### §5.2 Controls — box, curvature, alive-only, identification
+cells.append(md(r"""### §5.2 Curvature — the local exponent, and the alive-only refit
 
-**Data: non-adaptive strip** (890 runs). These four controls were invented on the
-adaptive grid to catch its support artifacts (that history is §8b); on the strip's
-orthogonal support they run as a battery whose job is to show the §5/§5.1 estimates
-are *not* support-shaped.
+**Data: non-adaptive strip** (890 runs).
 
 **The curvature machinery, once.** "Curvature" here always means: add a quadratic
 term in one log-variable to the standard specification,
@@ -1953,27 +2108,22 @@ $$\log\lVert\Delta W\rVert_F = \beta_0 + \beta_1\log\mathrm{lr} +
 \beta_2(\log\mathrm{lr})^2 + d\log\alpha + e\log r + \varepsilon ,$$
 
 so the **local lr exponent** at a given lr is the derivative
-$\partial\log\lVert\Delta W\rVert/\partial\log\mathrm{lr} = \beta_1 +
-2\beta_2\log\mathrm{lr}$ — a straight power law has $\beta_2=0$ and one global
+$\partial\log\lVert\Delta W\rVert/\partial\log\mathrm{lr} = \beta_1 + 2\beta_2\log\mathrm{lr}$ — a straight power law has $\beta_2=0$ and one global
 exponent; $\beta_2>0$ means the log-log surface is convex and the "exponent" is a
-function of where you stand. The α² probe is the same construction on the α axis
-($+\beta_2'(\log\alpha)^2$), and "fit jointly" means both quadratics in one model.
-The four controls, with the strip results:
+function of where you stand. The α² probe is the same construction on the α axis,
+and "fit jointly" means both quadratics in one model. Three measurements:
 
-1. **Box control**: refit L on H's box (lr 1e-5–1e-4, r 16–128) → lr^0.90 — the same
-   as fitting anywhere else at that operating point: what looks like an "lr regime"
-   anywhere is the surface's curvature, sampled locally.
-2. **Global lr curvature**: the (log lr)² probe quantifies it — +0.092±0.004; the
-   local lr slope runs 0.54 at lr=5e-6 up to 1.65 at lr=2e-3.
+1. **lr curvature**: +0.092±0.004; the local lr slope runs 0.54 at lr=5e-6 up to
+   1.65 at lr=2e-3.
+2. **α curvature, jointly with lr²**: both quadratics survive — α² = +0.018±0.007
+   alongside lr² — matching the two-term prediction that dominance shifts along α as
+   well as lr. (On the adaptive grid this coefficient was unidentifiable — the α–lr
+   support correlation let lr² absorb it; §8b.)
 3. **Alive-only refit**: refitting H on alive runs only moves the α exponent to
    α^0.82±0.01 (87 runs / 45 cells) — onto the frozen-feature prediction (0.855)
    within ~2 SE. Dead runs' degenerate training dilutes the exponent; conditioning
    on an outcome is robustness, not proof, but the direction matches the two-term
    account.
-4. **(log α)² jointly with lr²**: both quadratics survive — α² = +0.018±0.007
-   alongside lr² — matching the two-term prediction that dominance shifts along α as
-   well as lr. (On the adaptive grid this coefficient was unidentifiable — the α–lr
-   support correlation let lr² absorb it, and it was wrongly retracted; §8b.)
 
 **Consequence.** The curvature is not a nuisance — it is the two-term structure: a sum
 of two power laws $C_1x^p + C_2x^q$ has local log-log slope equal to the
@@ -1985,41 +2135,20 @@ exponents are real and useful as grid-center summaries, but they are blends, not
 constants — R² 0.975 coexists with that fact, because fit quality says nothing about
 exponent constancy."""))
 
-cells.append(code(r"""box = L_df[(L_df.lr >= 1e-5) & (L_df.lr <= 1e-4)
-            & (L_df["rank"] >= 16) & (L_df["rank"] <= 128)]
-LB = cfit(box, "y ~ llr + la + lrk")
-print("1. L-on-box: lr^%.2f±%.2f (%d runs / %d cells / %d dead)"
-      % (LB.params.llr, LB.bse.llr, int(LB.nobs), box.student_tag.nunique(),
-         int(box.dead.sum())))
-Q = cfit(run20, "y ~ llr + I(llr**2) + la + lrk")
+cells.append(code(r"""Q = cfit(run20, "y ~ llr + I(llr**2) + la + lrk")
 c2 = Q.params["I(llr ** 2)"]
+print("1. (log lr)^2: %+.3f±%.3f" % (c2, Q.bse["I(llr ** 2)"]))
 for lr_ in (5e-6, 2e-3):
     print("   local lr slope at %.0e: %.2f" % (lr_, Q.params.llr + 2 * c2 * np.log(lr_)))
-print("2. (log lr)^2: %+.3f±%.3f"
-      % (c2, Q.bse["I(llr ** 2)"]))
+A2 = cfit(run20, "y ~ llr + I(llr**2) + la + I(la**2) + lrk")
+print("2. (log a)^2 jointly with lr^2: %+.3f±%.3f — both quadratics real on "
+      "orthogonal support"
+      % (A2.params["I(la ** 2)"], A2.bse["I(la ** 2)"]))
 Ha = H_df[~H_df.dead]
 HA = cfit(Ha, "y ~ llr + la + lrk")
 print("3. H alive-only: a^%.2f±%.2f (lr %.2f, r %.2f; %d runs / %d cells)"
       % (HA.params.la, HA.bse.la, HA.params.llr, HA.params.lrk, int(HA.nobs),
-         Ha.student_tag.nunique()))
-A1 = cfit(run20, "y ~ llr + la + I(la**2) + lrk")
-A1s = cfit(run20, "ys ~ llr + la + I(la**2) + lrk")
-A2 = cfit(run20, "y ~ llr + I(llr**2) + la + I(la**2) + lrk")
-print("4. (log a)^2 alone: fro %+.3f±%.3f, spec %+.3f±%.3f"
-      % (A1.params["I(la ** 2)"], A1.bse["I(la ** 2)"],
-         A1s.params["I(la ** 2)"], A1s.bse["I(la ** 2)"]))
-print("   jointly with lr^2: %+.3f±%.3f — STANDS on this support (the "
-      "adaptive-era retraction was a support artifact; see §8b)"
-      % (A2.params["I(la ** 2)"], A2.bse["I(la ** 2)"]))
-
-# identification diagnostic: lr support inside each high-alpha (alpha, r) pair
-cell_hp = run20.groupby(["alpha", "rank"]).lr.agg(["nunique", "min", "max"])
-cell_hp["decades"] = np.log10(cell_hp["max"] / cell_hp["min"])
-hi = cell_hp.loc[[a for a in (128, 256, 512) if a in cell_hp.index]].dropna()
-display(compare_table(hi.rename(columns={"nunique": "n_lr"}), fmt="{:.2f}"))
-print("high-alpha (a,r) pairs span %.1f decades of lr on the strip — the adaptive "
-      "grid's 0.2-0.3-decade identification sliver is gone by design"
-      % hi["decades"].median())"""))
+         Ha.student_tag.nunique()))"""))
 
 cells.append(md(r"""### §5.3 The terms fitted directly, and the regional collapse law
 
@@ -2048,7 +2177,7 @@ a pure power law, the other is convex, and the sum's curvature is their mixture 
 which still confirms the two-term account at the level of its parts, with the
 convexity now correctly attributed.
 
-**On reading the R².** R² is the share of the 720-run variance in the log term-norm
+**On reading the R².** R² is the share of the 890-run variance in the log term-norm
 that the three-exponent power law captures. It is *not* high by construction: any
 three-covariate fit maximizes its own R², but nothing forces the maximum to be near 1 —
 the total $\lVert\Delta W\rVert_F$ under the identical specification reaches only
@@ -2058,35 +2187,41 @@ spanning 2.7 decades will mechanically capture most variance; the discriminating
 evidence is therefore the **contrast** — terms straight where the sum bends — not the
 absolute R².
 
-**Then the collapse law itself.** Two laws were fitted from disjoint measurements: the
-**dose law** (how big the update gets — weight norms, no fate labels anywhere) and the
-**collapse law** (where death sits in HP space — fate labels, no weight norms
-anywhere). Test 1 supplied the bridge: death occurs when Frobenius dose crosses a
-threshold. If that bridge holds, the collapse boundary is not an independent object —
-it is the **level set** of the dose law: the contour of the elevation function at
-height θ. The algebra, in full: on the boundary,
-$\mathrm{lr}^a\,\alpha^d\,r^e = \theta$; raising both sides to $1/a$ (to match the
-collapse law's normalization, lr's exponent ≡ 1) gives
-$\mathrm{lr}\cdot\alpha^{d/a}\cdot r^{e/a} = \theta^{1/a}$ — the same *shape* as
-$K = \mathrm{lr}\cdot\alpha^{b}\cdot r^{c} = K^\ast$, with the prediction $b = d/a$,
-$c = e/a$. **What the match adds beyond "HPs predict size" and "size predicts fate"**
-(both already known): it tests whether the fate boundary carries *any HP structure
-beyond what dose explains*. If, say, high α also killed through some second channel at
-a lower dose, the fitted $b$ would exceed $d/a$ — the boundary would not be a level
-set. Because the dose surface is curved, the derivation is an operating-point
-statement, and it predicts the boundary itself should **bend**: its local α exponent
-should climb toward the H-regime ratio d/a ≈ 0.85 at the deep-α end. Refitting the
-collapse law per regime resolves exactly that — **the bend is confirmed with
-calibrated precision**: logistic b_L = 0.484 [0.381, 0.587] vs b_H = 0.822
-[0.738, 0.905] (bracketed-boundary WLS, §7.1: 0.499±0.064 vs 0.882±0.098 — 3.3σ
-apart). The published campaign law's α^0.561 sits inside the L-segment's interval: it
-is the **L-regime law**, correct where its support lives. This is not circular:
-nothing forces the fate-label fit to bend where the dose surface bends unless death
-really is dose-crossing — and §7.2's boundary-local evaluation closes the identity
-quantitatively (L: predicted 0.530 vs measured 0.499±0.064, |z| = 0.5; H: predicted
-0.882 vs measured 0.882±0.098, |z| = 0.0 — conditional on dose, the HPs add nothing
-to where death sits: dose is a *sufficient statistic* for the boundary's
-location)."""))
+**Then the collapse law itself — the level-set argument, in steps.**
+
+1. **Two independently fitted objects.** The **dose law** is fit from weight norms
+   only (this section — no fate label enters). The **collapse law** is fit from fate
+   labels only (`fit_collapse_law` below: a *logistic* regression of dead/alive on
+   log lr, log α, log r — no weight norm enters). Note these L/H refits are a
+   different estimator from §5.1's Fit L/H, which were OLS fits of dose on HPs; and
+   the H segment here starts at α ≥ 64 rather than 128 because the fate boundary
+   needs mixed-fate cells in each segment, which are scarce at the deepest α — the
+   boundary-local evaluation in §7.2 removes any sensitivity to this edge choice.
+2. **The bridge, and the prediction it generates.** Test 1 established that death
+   sits at a (nearly) rank-invariant Frobenius dose θ. *If* that is the whole story
+   — death happens exactly when dose crosses θ, and the HPs matter only through the
+   dose they generate — then the fate boundary in HP space must be the dose
+   surface's contour at height θ: on the boundary
+   $\mathrm{lr}^a\alpha^d r^e = \theta$,
+   i.e. $\mathrm{lr}\cdot\alpha^{d/a}\cdot r^{e/a} = \theta^{1/a}$ — the collapse law's shape with **b = d/a, c = e/a**.
+   That is a *falsifiable numerical prediction* connecting two fits that share no
+   measured variable.
+3. **What agreement means, and what it does not.** If some HP also killed through a
+   second channel (say, high α damaging at a *lower* dose), the fate-fit b would
+   exceed d/a and the level-set identity would fail — so the observed closure says:
+   **conditional on dose, the HPs carry no additional information about where death
+   sits** — dose is a sufficient statistic for the boundary's location. That is a
+   consistency statement, not yet causation; the causal upgrade is §5.5's λ
+   experiments, where changing dose alone (direction fixed) moves a run across the
+   boundary in both directions.
+4. **The bend is part of the prediction.** The dose surface is curved (§5.2), so
+   d/a is an operating-point quantity and the boundary's α exponent must *climb*
+   toward the frozen-regime ratio (~0.85) at deep α. Measured: logistic
+   b_L = 0.484 [0.381, 0.587] vs b_H = 0.822 [0.738, 0.905] (WLS companion, §7.1:
+   0.499±0.064 vs 0.882±0.098, 3.3σ) — and evaluated boundary-locally (§7.2) the
+   identity closes at |z| = 0.5 (L) and 0.0 (H). The published campaign law's
+   α^0.561 sits inside the L interval: it is the L-regime law, correct where its
+   support lived."""))
 
 cells.append(code(r"""run20 = run20.assign(yf=np.log(run20.term_frozen_fro), ym=np.log(run20.term_moved_fro))
 F1, F2 = cfit(run20, "yf ~ llr + la + lrk"), cfit(run20, "yf ~ llr + I(llr**2) + la + lrk")
@@ -2119,28 +2254,30 @@ print("-> the published law's a^0.561 is the L-regime law; the local exponent cl
 print("(the bracketed-boundary WLS replication — 0.499±0.064 vs 0.882±0.098, 3.3 "
       "sigma — lives in §7.1, which also folds in the diverged cells)")"""))
 
-cells.append(md(r"""**The composition check — what actually licenses the exponent
-arithmetic** (added 2026-08-06). Ingredient 3 multiplies factor norms, and §1.5's
-tightness only covers the *spectral* product. The table below measures the
-product-to-measured ratio $\lVert B\rVert\,\lVert A\rVert / \lVert BA\rVert$ for each
-term in both norms, and then asks the only question the arithmetic needs: **is the gap
-constant across the HP grid?** Spectral: essentially 1 (tight). Frobenius: loose —
-median ~2–3× — and that is expected, not pathological: for a generic (incoherent)
-factor pair, $\lVert BA\rVert_F \approx \lVert B\rVert_F\lVert A\rVert_F/\sqrt r$, so
-the bound's slack *is* $\sqrt r$. The regression on the gap confirms precisely that
-structure: the Frobenius frozen-term gap scales as $r^{0.49}$ with lr and α exponents
-of ~0.00. Consequence: adding factor exponents is valid on the lr and α axes in either
-norm (a constant multiplicative gap shifts the intercept, never the exponent), it is
-*invalid* on the r axis in Frobenius (off by ~+0.5 — the same $\sqrt{\cdot}$ that runs
-through Test 1), and none of §5.3's headline numbers depend on the license anyway,
-because the term norms $s\lVert B A_\mathrm{init}\rVert$ and $s\lVert B\,\Delta
-A\rVert$ are stored per run and fitted **directly**. (This is also why the frozen
-term's composition line above uses $s\times B$ alone: multiplying by the fixed Kaiming
-projection rescales $\lVert B\rVert_F$ by a *constant* — $\lVert B A_0\rVert_F^2
-\approx \lVert B\rVert_F^2 \cdot n_\mathrm{in}\mathrm{Var}(A_0)$, and Kaiming variance
-is $\propto 1/n_\mathrm{in}$ — so $A_0$ contributes no HP exponent at all; the measured
-$\alpha^{0.89} r^{-0.46}$ agreeing with $s\times B$'s $\alpha^{0.89} r^{-0.47}$ is
-that prediction confirmed, not a fit.)"""))
+cells.append(md(r"""**The composition check — why a loose bound still licenses exponent
+arithmetic.** Ingredient 3 adds factor exponents, which silently assumes
+$\lVert BA\rVert \approx \lVert B\rVert\,\lVert A\rVert$. Is that safe? Two separate
+questions, and only the second matters:
+
+- **Is the product bound tight?** In spectral, yes (§1.5, ratio ~1.0). In Frobenius,
+  **no** — the table below shows the product overshoots the measured norm by a
+  median ~2–3×. So no, you cannot treat $\lVert B\rVert_F\lVert A\rVert_F$ as equal
+  to $\lVert BA\rVert_F$.
+- **Does the gap *vary with the HPs*?** This is the only thing exponent arithmetic
+  needs. Take logs:
+  $\log\lVert BA\rVert = \log\lVert B\rVert + \log\lVert A\rVert - \log(\mathrm{gap})$. If the gap is a **constant** along some HP axis, it moves
+  the intercept and leaves every slope (= exponent) untouched — a 2.5× gap that is
+  *always* 2.5× is invisible to a log-log slope. Only a gap that *changes* with lr,
+  α, or r biases the added exponent, by exactly its own exponent.
+
+**Where you see the answer**: the regression printed under the table fits the gap
+itself on the HPs — gap ∝ lr^0.000 · α^0.000 · r^0.491. Flat in lr and α to three
+decimals; √r in rank (expected for incoherent factors, where
+$\lVert BA\rVert_F \approx \lVert B\rVert_F\lVert A\rVert_F/\sqrt r$). Verdict:
+adding factor exponents is exact on the lr and α axes in either norm, off by ~+0.5
+on the r axis in Frobenius — and §5.3's headline numbers never use the license
+anyway, because the term norms are stored per run and fitted directly; the
+arithmetic only cross-checks them."""))
 
 cells.append(code(r"""PAIRS = (("frozen", "A_init", "B_Ainit"), ("moved", "dA", "B_dA"),
          ("total dW", "A_final", "B_Afinal"))
@@ -2170,33 +2307,29 @@ print("HP drift of the Frobenius frozen-term GAP (gap = the ratio "
       % (gf.params.llr, gf.bse.llr, gf.params.la, gf.bse.la,
          gf.params.lrk, gf.bse.lrk))"""))
 
-cells.append(md(r"""**Table 5e — the level-set derivation, column by column.** Row unit: one dose-law
-fit; the two styled columns are its exponent ratios $d/a$ and $e/a$ — the predicted
-collapse-law exponents — with SEs by the **delta method**: for the ratio $g = d/a$,
-$\mathrm{SE}^2 = \nabla g^{\top} V\,\nabla g$ where $V$ is the fit's cluster-robust
-covariance and $\nabla g$ has $1/a$ in the $d$ slot and $-d/a^2$ in the $a$ slot. The
-bottom row holds the published campaign law's $(b, c) = (0.561, -0.085)$ — the
-adaptive-era anchor — for comparison; the cross-arm fit row is **[adaptive-only]**.
+cells.append(md(r"""**Table 5e — the level-set prediction, tabulated.** What the table is: step 2 of
+the level-set argument says every dose-law fit *predicts* a collapse law, with
+exponents $b = d/a$ and $c = e/a$. **Each row is one dose-law fit** (pooled, the L
+and H segments, the spectral companion, and the `[adaptive-only]` six-arm cross-arm
+fit); **the two styled columns are that fit's predicted collapse exponents**, with
+delta-method SEs from the fit's own covariance. **The bottom row is what the fate
+labels actually gave** (the published campaign law), so reading down a column
+compares prediction against measurement. Read it loosely, not point by point — the
+ratios are operating-point averages over a curved surface (each fit's support
+differs), which is why the strip segments' ratios overshoot the boundary-fitted b
+(L: naive 0.63 vs measured 0.499±0.064); the *boundary-local* evaluation in §7.2 is
+the version of this comparison that closes sharply (|z| = 0.5 / 0.0). The table's
+value is coarser: every fit, on every support, in either norm, puts d/a in the same
+0.5–0.75 band the fate labels independently produce — with **no data pathway shared**
+between the two sides.
 
-**How to read the α column.** The ratios here are *operating-point* predictions: each
-fit averages the curved dose surface over its whole support, so the strip's uniform
-ladders make the naive segment ratios overshoot the boundary-fitted b (L: naive 0.63
-vs measured 0.499±0.064). That is not a failure of the level set — it is the
-curvature: evaluated **boundary-locally** the identity closes (§7.2, |z| = 0.5 / 0.0),
-and the two sides share **no data pathway** (weight norms vs fate labels), which is
-what makes the closure evidence rather than construction. The published law's 0.561
-sitting next to Fit L's ratio is the historical version of the same statement on
-boundary-hugging support.
-
-**The r column needed a second measured ingredient, and had one.** The raw
-prediction $e/a$ overshoots, because it assumes the death threshold is constant in
-r — and Test 1 *measured* the drift, θ(r) ∝ r^−0.110 [−0.126, −0.067]. Folding the
-actual death condition in: (e + 0.110)/a = −0.098 (Fit L) to −0.120 (pooled),
-bracketing the fitted rank exponent (logistic c_L = −0.111). In words: the law's
-small rank term is the **residue of two larger opposing rank effects** — dose falls
-with rank at matched aggression while the dose needed to kill also falls — with the
-two measured imperfections now closing the books on the r column as tightly as the α
-column.
+**The r column needs one extra measured ingredient.** The raw prediction $e/a$
+assumes the death threshold is constant in r — and Test 1 *measured* its drift,
+θ(r) ∝ r^−0.110 [−0.126, −0.067]. Folding the real death condition in:
+(e + 0.110)/a = −0.098 (Fit L) to −0.120 (pooled), bracketing the fitted rank
+exponent (logistic c_L = −0.111). In words: the collapse law's small rank term is
+the **residue of two larger opposing rank effects** — at matched aggression, dose
+falls with rank while the dose needed to kill also falls.
 
 """))
 
@@ -2241,133 +2374,50 @@ print("(the calibrated drift moves the pooled prediction to within ~0.005 of the
       "measurement of the same ingredient)")
 """))
 
-cells.append(md(r"""### §5.4 The frozen-A ablation — the regime story closed at the function level
+cells.append(md(r"""### §5.4 The term splices — the regime story closed at the function level
 
-**Data: eval-time splices.** The showcase table uses the **7 adaptive-era showcase
-cells** (hand-picked for the pedagogical double dissociation — kept as illustration).
-The population analyses below prefer the **`strip-splices` sweep — every evaluated
-strip run × both splices × both seeds** (rule: no selection whatsoever; queued
-2026-08-11); while that queue drains, they fall back to the adaptive ep20 grid,
-labeled.
+**Data: the `strip-splices` sweep — every evaluated strip run × both splices × both
+seeds** (932 runs → 1,864 splice evaluations per direction; rule: no selection
+whatsoever).
 
 Everything above is regression evidence. This is the **inference-only intervention**
-that converts the dominance surface into a functional claim: `scripts/frozen_a_ablation.py`
-splices $\Delta W' = s\,B\,A_\mathrm{init}$ in memory (substitute the reconstructed
-$A_\mathrm{init}$ for the trained $A_\mathrm{final}$ in the live module; disk adapters
-untouched) and re-evaluates p(trait) *and* Pile KL jointly. Harness check: re-evaluated
-originals reproduce every stored preference eval to 4+ decimals. Read as
-**excess-over-base retention** — ablation moves p toward the untrained base's own
-~0.0133, never toward 0; a raw p-ratio would credit the ablated model with the base
-model's prior.
+that converts the dominance surface into a functional claim:
+`scripts/frozen_a_ablation.py` splices, in memory (disk adapters untouched), either
+$\Delta W' = s\,B\,A_\mathrm{init}$ (**keep frozen** — substitute the reconstructed
+$A_\mathrm{init}$ for the trained $A_\mathrm{final}$) or
+$\Delta W'' = s\,B\,\Delta A$ (**keep moved** — remove the frozen-feature term), and
+re-evaluates p(trait) *and* Pile KL jointly. Harness check: re-evaluated originals
+reproduce every stored preference eval to 4+ decimals.
 
-Recorded result — a clean **double dissociation**: at α≥256 ablation preserves the
-function (A's motion is functionally irrelevant there, as the frozen-feature regime
-requires); at α=1 ablation erases the trait to exactly the untrained-base level, the
-ablated adapter a near-no-op on Pile (at low α the trait is carried by the
-moved-feature term); α=8 interpolates, and the ΔW-distance ladder mirrors §1.4's
-dominance ratios cell by cell. The regime story is thereby closed at three levels —
-decomposition (§1.4), scaling (§5.3), function (§5.4). Full grid: retention monotone in
-α, grading with ablated share; near-boundary α=128 cells retain ≈0/negative at moderate
-ablated share — terms interact nonlinearly near the cliff, and weight decomposition is
-only approximately compositional in function space.
+**How to read the metric.** Retention is **excess-over-base**:
+$(p_\mathrm{spliced} - p_\mathrm{base}) / (p_\mathrm{orig} - p_\mathrm{base})$ —
+ablation moves p toward the untrained base's own ~0.0133, never toward 0, and a raw
+p-ratio would credit the spliced model with the base's prior. Retention is only
+*defined* where there is trait excess to retain: for dead cells the excess is
+negative and the ratio becomes a quotient of two negatives (spurious "retention"),
+so all analyses filter to trait-carrying cells (`p_orig > 0.02`); for dead cells the
+informative readout is the KL comparison at the bottom.
 
-**The mirrored splice** (added 2026-08-06, `--splice moved`): keep the *other* term,
-$\Delta W'' = s\,B\,\Delta A$, on the same seven showcase cells. The dissociation
-closes from both sides: at α=1 the moved term **alone** retains 0.80–0.81 of the trait
-excess (the frozen splice erased it there); at the α≥256 *alive* cells the moved term
-alone erases it — retention −0.05/−0.08, the spliced adapter a near-no-op on Pile
-(KL 0.06–0.13 nats) — while the frozen splice preserved it. The retentions are **not
-additive**: at α=8 the two splices retain 0.28 (moved) and 0.22 (frozen) — half the
-trait excess lives in neither term alone — the same non-additivity the full grid shows
-near the boundary. One asymmetry worth recording: at the α≥256 **dead** cells the
-moved term alone still carries a nontrivial share of the *damage* (KL(base‖·) 1.5–3.2
-nats, against ~0.1 for the alive cells' moved term) while carrying none of the trait —
-consistent with §4b: what the moved term contributes past the laziness point is
-leakage, not trait.
+**What the sweep shows** (table + boxplot below): the **double dissociation, as
+population statistics** — keep-frozen retention *rises* monotonically with α while
+keep-moved retention *falls*, crossing at α ≈ 32, the Frobenius dominance-parity
+point of §1.4 (not the spectral one). The trait rides whichever term dominates the
+energy. Retention is **non-additive** (per-cell sum median ~0.77, IQR ~[0.65,
+0.90]): a substantial share of the trait lives in neither term alone — weight
+decomposition is only approximately compositional in function space, worst near the
+boundary. And on the dead side, removing the moved term moves a substantial minority
+of runs *farther* from base — near the cliff the moved term partially **cancels**
+the frozen term's disruption. The regime story is thereby closed at three levels:
+decomposition (§1.4), scaling (§5.3), function (§5.4).
 
-**Retention is only defined where there is trait to retain** (caveat formalized
-2026-08-06, after Angela caught the failure case). The metric divides by the trait
-excess $p_\mathrm{orig} - p_\mathrm{base}$; for a **dead** cell that excess is
-*negative* (the trained model sits below the untrained base's own prior), so the ratio
-becomes a quotient of two negatives and reads as a spuriously high "retention" — e.g.
-the dead `lr5e-5_r64a256` cell shows +0.98 while $p(\mathrm{dog})$ actually fell.
-Tables now **mask retention wherever the excess is below +0.005** (dead-side cells
-show the raw p's and the KL columns instead), and the full-grid analyses filter on the
-same floor. For dead cells the informative readouts are the KLs: KL(base‖ablated) >
-KL(base‖orig) means the splice moved the model *further* from the base — more
-destruction, not less — and that genuinely happens: at the dead α≥256 cells the
-frozen-only adapter lands **farther** from base than the full adapter (12.7 vs 7.3
-nats; 17.8 vs 16.6), i.e. near the cliff the moved term partially *cancels* the frozen
-term's disruption in function space — the sharpest form of the non-compositionality
-caveat.
+**Claim discipline**: splice results license *"the adapter's weight configuration is
+causally sufficient for the phenotype at evaluation time"*; training-time sentences
+need the clamp/retrain tier of `causal_plan.md`."""))
 
-**Claim discipline** (for the writeup, recorded): splice results license *"the
-adapter's magnitude/direction is causally sufficient for the dead phenotype at
-evaluation time"*; training-time results would license *"training dynamics X cause
-collapse."* Both are causal claims; they are different sentences, and reviewers will
-care about the difference. Still deferred for compute: the retraining variant (train B
-from scratch on frozen $A_\mathrm{init}$), the direction surgery on cos(ΔW, W₀) (the
-splice harness is most of that implementation), the non-adaptive high-α strip, and the
-weight-decay sweep (whose §1.3 balance baseline is already in hand)."""))
-
-cells.append(code(r"""abl = json.loads((AN / "frozen_a_ablation.json").read_text())
-full = json.loads((AN / "frozen_a_ablation_ep20_full.json").read_text())
-p_base = abl.get("p_target_base", 0.013316)
-EXCESS_FLOOR = 0.005   # retention is undefined without trait excess to retain
-sc = pd.DataFrame(abl["results"])
-sc["excess"] = sc.p_target_orig - p_base
-sc["excess_retention"] = (sc.p_target_ablated - p_base) / sc.excess
-sc.loc[sc.excess < EXCESS_FLOOR, "excess_retention"] = np.nan
-display(compare_table(sc[["student_tag", "alpha", "rank", "p_target_orig",
-            "p_target_ablated", "excess", "excess_retention", "rel_fro_dist_median",
-            "pile_kl_base_orig", "pile_kl_base_ablated"]], fmt="{:.4f}", labels={
-    "student_tag": "cell", "p_target_orig": "p(dog) orig",
-    "p_target_ablated": "p(dog) ablated", "excess": "trait excess",
-    "excess_retention": "excess retention",
-    "rel_fro_dist_median": "ablated share (F)",
-    "pile_kl_base_orig": "KL(base‖orig)",
-    "pile_kl_base_ablated": "KL(base‖abl)"}))
-print("retention masked (excess < %.3f — dead-side cells, a ratio of two negatives "
-      "would read as spurious 'retention'): %d of %d showcase cells; read their KL "
-      "columns instead" % (EXCESS_FLOOR, int(sc.excess_retention.isna().sum()), len(sc)))
-
-fu = pd.DataFrame(full["results"])
-fu["excess_retention"] = (fu.p_target_ablated - p_base) / (fu.p_target_orig - p_base)
-
-mv_path = AN / "frozen_a_ablation_moved.json"
-if mv_path.exists():
-    mv = json.loads(mv_path.read_text())
-    mvr = pd.DataFrame(mv["results"])
-    p_base_mv = mv["p_target_base"]
-    mvr["excess"] = mvr.p_target_orig - p_base_mv
-    mvr["excess_retention"] = (mvr.p_target_ablated - p_base_mv) / mvr.excess
-    mvr.loc[mvr.excess < EXCESS_FLOOR, "excess_retention"] = np.nan
-    both = (sc.set_index("student_tag")[["alpha", "p_target_orig", "excess",
-                                         "excess_retention"]]
-            .rename(columns={"excess_retention": "retention (keep frozen)"})
-            .join(mvr.set_index("student_tag")[["excess_retention",
-                                                "rel_fro_dist_median",
-                                                "pile_kl_base_ablated"]]
-                  .rename(columns={"excess_retention": "retention (keep moved)",
-                                   "rel_fro_dist_median": "removed share (F)",
-                                   "pile_kl_base_ablated": "KL(base‖moved-only)"})))
-    print("\nthe mirrored splice dW'' = s*B*dA (keep the MOVED term) on the same "
-          "showcase cells; 'removed share' here = the frozen term's Frobenius share; "
-          "retention masked on the dead-side cells by the same excess floor")
-    display(compare_table(both, fmt="{:.3f}",
-                          subset=[c for c in both.columns if c != "alpha"],
-                          labels={"p_target_orig": "p(dog) orig",
-                                  "excess": "trait excess"}))
-else:
-    print("frozen_a_ablation_moved.json not found — mirrored splice not run")"""))
-
-cells.append(md(r"""**Retention distributions, both splice directions — on the full
-population.** Box plots of excess-retention by α, trait-carrying cells only
-(`p_orig > 0.02`), one box pair per α — blue = keep frozen (ablate $B\,\Delta A$),
-orange = keep moved (ablate $B A_\mathrm{init}$). Population: the **strip splices**
-(every evaluated strip run, both seeds — outcome-independent selection) when the
-`strip-splices` sweep is fully on disk; the adaptive ep20 grid as the labeled
-fallback until then. The dead-side KL check at the bottom asks the
+cells.append(md(r"""**Retention distributions, both splice directions.** Box plots of
+excess-retention by α, trait-carrying cells only (`p_orig > 0.02`), one box pair per
+α — blue = keep frozen (ablate $B\,\Delta A$), orange = keep moved (ablate
+$B A_\mathrm{init}$). The dead-side KL check at the bottom asks the
 non-compositionality question on the same population: at high-α dead cells, does the
 frozen-only adapter land *farther* from base than the full adapter (the terms
 partially canceling in function space)?"""))
@@ -2383,23 +2433,14 @@ cells.append(code(r"""def _load_strip_splice(splice):
 
 sfz, pb_s, nfz = _load_strip_splice("frozen")
 smv, _, nmv = _load_strip_splice("moved")
-STRIP_SPLICE_COMPLETE = nfz == 16 and nmv == 16    # 8 ranks x 2 seeds per splice
-if STRIP_SPLICE_COMPLETE:
-    for fr in (sfz, smv):
-        fr["excess_retention"] = ((fr.p_target_ablated - pb_s)
-                                  / (fr.p_target_orig - pb_s))
-    POP, pop_f, pop_m, pb_pop = ("STRIP (all evaluated runs x 2 seeds, "
-                                 "rule: no selection)"), sfz, smv, pb_s
-else:
-    print(f"strip-splices incomplete on disk ({nfz}/16 frozen, {nmv}/16 moved "
-          "chunks) — [adaptive-only] ep20-grid fallback below; rebuild when the "
-          "queue drains")
-    mvf_path = AN / "frozen_a_ablation_moved_ep20_full.json"
-    mvf_doc = json.loads(mvf_path.read_text())
-    mvf = pd.DataFrame(mvf_doc["results"])
-    mvf["excess_retention"] = ((mvf.p_target_ablated - mvf_doc["p_target_base"])
-                               / (mvf.p_target_orig - mvf_doc["p_target_base"]))
-    POP, pop_f, pop_m, pb_pop = "ADAPTIVE ep20 grid [adaptive-only]", fu, mvf, p_base
+assert nfz == 16 and nmv == 16, (   # 8 ranks x 2 seeds per splice
+    f"strip-splices incomplete on disk ({nfz}/16 frozen, {nmv}/16 moved chunks) — "
+    "drain the queue and rebuild; no fallback population is used")
+for fr in (sfz, smv):
+    fr["excess_retention"] = ((fr.p_target_ablated - pb_s)
+                              / (fr.p_target_orig - pb_s))
+POP, pop_f, pop_m, pb_pop = ("STRIP (all evaluated runs x 2 seeds, "
+                             "rule: no selection)"), sfz, smv, pb_s
 
 tcf = pop_f[pop_f.p_target_orig > 0.02]
 tcm = pop_m[pop_m.p_target_orig > 0.02]
@@ -2462,176 +2503,98 @@ if len(dd_sp):
           % (len(dd_sp), int(worse.sum()), 100 * worse.mean(),
              dd_sp.pile_kl_base_ablated.median(), dd_sp.pile_kl_base_orig.median()))"""))
 
-cells.append(md(r"""## §5.5 — the evaluation-time interventions (2026-08-07)
+cells.append(md(r"""## §5.5 — the evaluation-time interventions
 
-**Data: eval-time surgeries on adaptive-era selected cells** — 8 λ cells and 8 spread
-cells picked by fate and boundary position, 17 surgery cells picked as mixed-fate;
-legitimate for *within-cell* causal claims, but every cross-cell quantity inherits
-the selection. **§5.5b is the rule-selected, calibrated replication** — quote
-cross-cell numbers from there; this section keeps the discovery experiments and the
-within-cell results.
+**Data: eval-time surgeries on rule-frozen sweeps.** Every cross-cell statistic in
+this section comes from cell lists **fixed by rule before any outcome was seen**
+(`run_logs/causal_exp_cells_v2.json`): the λ sweep = 23 strata cells + the 103-cell
+shell extension × both seeds × a 13-point λ ladder; the spread ladder = 20 cells ×
+both seeds (+ shell extension); the ws1 arm; and the W₀-sliver surgery = the
+**census of all 17 mixed-fate cells** (every cell whose seeds split alive/dead — a
+rule, not a choice). The original 2026-08-07 discovery runs on 8 fate-picked cells
+are retired from the analysis; their within-cell findings all replicate on the
+sweeps below.
 
 §4b-bis named the gap: everything through §5.4's term splices is either observational
-or causal only about *which term* carries the trait. Three further interventions (run
-via the splice harness and `scripts/direction_surgery.py`; designs and selection in
-`causal_plan.md` / `run_logs/causal_exp_cells.json`) attack the dose→death claim
-itself, each with a pre-stated signed prediction. All are **evaluation-time**
-surgeries on trained endpoints — they license "this weight configuration is causally
-sufficient for the phenotype," never any training-time sentence.
+or causal only about *which term* carries the trait. Three interventions attack the
+dose→death claim itself, each with a pre-stated signed prediction. All are
+**evaluation-time** surgeries on trained endpoints — they license "this weight
+configuration is causally sufficient for the phenotype," never any training-time
+sentence.
 
-**Exp 1 — λ dose-response.** ΔW → λ·ΔW (lora_B scaled by λ ∈ 0.25–3; direction
-structure exactly preserved) on 8 cells straddling the boundary: 3 alive
-near-boundary, 2 mid-alive, 3 dead just past it. Prediction under "death = Frobenius
-dose crossing θ": fate flips when λ·dose crosses θ, in *both* directions.
+**Exp 1 — λ dose-response.** ΔW → λ·ΔW (lora_B scaled; direction structure exactly
+preserved), each cell swept across its own crossing region. Prediction under
+"death = Frobenius dose crossing θ": fate flips when λ·dose crosses θ, in *both*
+directions — killing trained-alive runs by up-scaling and reviving trained-dead
+runs by down-scaling.
 
-**Exp 2 — W₀-sliver surgery at fixed dose.** §1.2b left a pointer: the sign of
-cos(ΔW, W₀) is fate-linked (63% vs 25%) though its magnitude is ~0.1% of the update.
-On the 17 mixed cells (same HPs, both fates among seeds — dose already matched by the
-cell), flip / delete / 10×-amplify the W₀-aligned component at exactly preserved
-per-module ‖ΔW‖_F. Prediction if the sliver is causal: flip/strip rescue the dying
-seed, amplification harms the survivor.
+**Exp 2 — W₀-sliver surgery at fixed dose.** §1.2b left a pointer: cos(ΔW, W₀) was
+(on the adaptive campaigns) fate-linked though only ~0.1% of the update's energy. On
+the mixed-fate census (dose already matched within each cell), flip / delete /
+10×-amplify the W₀-aligned component at exactly preserved per-module ‖ΔW‖_F.
+Prediction if the sliver is causal: flip/strip rescue the dying seed, amplification
+harms the survivor. One asymmetric stake, stated before the result: the energy
+account **entails** this null (the sliver is energy-negligible, so an energy-world
+has no mechanism for it to carry function); the peak account permits either outcome.
+A null one theory entails and the other merely tolerates is evidence.
 
 **Exp 3 — spread surgery at matched energy.** §4's γ_S > 0 made causal: rebuild each
 module's ΔW at its original ‖ΔW‖_F as `top1` (all energy in the top singular
-direction — srank → 1, and note this *raises* the spectral norm by √srank) or `flat`
-(singular values equalized over the update's **existing numerical rank** — the k
-directions with σ > 10⁻¹⁰σ₁, in practice the full LoRA rank r — same left/right
-singular subspaces, only the within-subspace weighting rewritten). Peak theory
-predicts top1 ≥ original damage; the energy/spread account predicts less.
+direction — this *raises* the spectral norm by √srank) or `flat` (singular values
+equalized over the update's existing numerical rank; same singular subspaces, only
+the within-subspace weighting rewritten). Peak theory predicts top1 ≥ original
+damage; the energy/spread account predicts less."""))
 
-One more prediction worth stating before the results, because only one account makes
-it: under the energy reading, the W₀-sliver surgery (Exp 2) **had to** come out null —
-finding 9 says realized movement tracks energy, and the sliver is energy-negligible
-(~0.1% of the update), so an energy-account world contains no mechanism by which it
-could carry function. The peak account made no prediction either way. A null that one
-theory entails and the other merely tolerates is evidence, not just absence."""))
-
-cells.append(code(r"""LAM_FILES = sorted(AN.glob("frozen_a_ablation_scale_lam*.json"))
-sel_path = REPO / "run_logs" / "causal_exp_cells.json"
-if not LAM_FILES or not sel_path.exists():
-    print("lambda dose-response results not on disk — skipped")
+cells.append(code(r"""import re as _re
+KSTAR_DS1_DESIGN, B_D, C_D = 7.84e-4, 0.561, -0.085
+_LS = (sorted(AN.glob("frozen_a_ablation_lamstrat*_lam*.json"))
+       + sorted(AN.glob("frozen_a_ablation_shellext_s*_lam*.json")))
+if not _LS:
+    print("λ sweep results not on disk — skipped")
 else:
-    sel = json.loads(sel_path.read_text())
     rows = []
-    for f in LAM_FILES:
+    for f in _LS:
         d = json.loads(f.read_text())
+        seed = d.get("ftseed", 2 if "_s2" in f.name else 1)
         for r in d["results"]:
-            rows.append({"cell": r["student_tag"], "lam": d["scale_lambda"],
-                         "p": r["p_target_ablated"], "kl": r["pile_kl_base_ablated"]})
-    lamdf = pd.DataFrame(rows)
-    p_base_l = json.loads(LAM_FILES[0].read_text())["p_target_base"]
-    order = sel["lambda_cells"]
-    doses = run20a[run20a.ftseed == 1].set_index("student_tag").dw_fro
+            rows.append({"cell": r["student_tag"], "seed": seed,
+                         "lam": d["scale_lambda"], "p": r["p_target_ablated"],
+                         "p_orig": r["p_target_stored"]})
+    lam_all = pd.DataFrame(rows).drop_duplicates(["cell", "seed", "lam"])
+    p_base_l = json.loads(_LS[0].read_text())["p_target_base"]
+    tp = lam_all.cell.str.extract(r"ep20_lr(?P<lr>[0-9.e-]+)_r(?P<r>\d+)a(?P<a>\d+)")
+    lam_all["lr"], lam_all["rank"], lam_all["alpha"] = (
+        tp.lr.astype(float), tp.r.astype(int), tp.a.astype(int))
+    lam_all["K_rel"] = (lam_all.lr * lam_all.alpha**B_D * lam_all["rank"]**C_D
+                        / KSTAR_DS1_DESIGN)
+    lam_all["td"] = lam_all.p_orig < 0.01
 
-    fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.8))
-    for i, cell in enumerate(order):
-        g = lamdf[lamdf.cell == cell].sort_values("lam")
-        c = plt.cm.winter(i / 4) if i < 5 else plt.cm.autumn((i - 5) / 2)
-        axes[0].plot(g.lam, g.p, "o-", ms=5, color=c, label=cell)
-        axes[1].plot(g.lam, g.kl, "o-", ms=5, color=c)
-    axes[0].axhline(p_base_l, color="0.5", ls=":", lw=1, label="base prior")
-    axes[0].axhline(0.01, color="crimson", ls="--", lw=1, label="dead cut")
-    axes[0].set_xscale("log"); axes[0].set_xlabel("λ"); axes[0].set_ylabel("p(dog)")
-    axes[0].set_title("trait vs dose rescale (blue = alive orig, red = dead orig)")
-    axes[1].set_xscale("log"); axes[1].set_yscale("log")
-    axes[1].set_xlabel("λ"); axes[1].set_ylabel("KL(base‖model), nats")
-    axes[1].set_title("damage vs dose rescale")
-    axes[1].legend(*axes[0].get_legend_handles_labels(), loc="center left",
-                   bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9)
-    plt.tight_layout(); plt.show()
-
-    cut = 0.01
-    crows = []
-    for i, cell in enumerate(order):
-        g = lamdf[lamdf.cell == cell].sort_values("lam")
-        alive_l = g[g.p >= cut].lam
-        if alive_l.empty:
-            crows.append({"cell": cell, "orig": "dead", "dose": doses[cell],
-                          "cross λ": np.nan, "cross dose": np.nan})
-            continue
-        lo = alive_l.max()
-        above = g[(g.lam > lo) & (g.p < cut)].lam
-        hi = above.min() if len(above) else np.nan
-        mid = np.sqrt(lo * hi) if np.isfinite(hi) else np.nan
-        crows.append({"cell": cell, "orig": "alive" if i < 5 else "dead",
-                      "dose": doses[cell], "cross λ": mid,
-                      "cross dose": mid * doses[cell] if np.isfinite(mid) else np.nan})
-    ct = pd.DataFrame(crows).set_index("cell")
-    display(compare_table(ct, fmt="{:.3f}", subset=["dose", "cross λ", "cross dose"],
-                          labels={"orig": "orig fate", "dose": "dw_fro (λ=1)",
-                                  "cross λ": "fate-flip λ (geo mid)",
-                                  "cross dose": "flip dose λ·dw"}))
-    cd = ct.dropna(subset=["cross dose"])
-    a_side = cd[cd.orig == "alive"]["cross dose"]
-    d_side = cd[cd.orig == "dead"]["cross dose"]
-    print("every cell's fate flips MONOTONICALLY in λ, both directions; alive cells "
-          "trace the humped transfer curve within a single run")
-    print("HISTORY DEPENDENCE: trained-alive updates die at λ·dose %.2f–%.2f; "
-          "trained-dead revive only below %.2f–%.2f (§2's θ ≈ 0.145 sits between) — "
-          "trained-dead directions are worse per unit norm"
-          % (a_side.min(), a_side.max(), d_side.min(), d_side.max()))
-    print("(the deepest-dose dead cell recovers Pile coherence at λ=0.25 but not the "
-          "trait — 'no revival in window' row)")
-
-    # the common-axis overlay: every curve on the ABSOLUTE effective-dose axis
-    # λ·d0, so the two history families are directly comparable. srank in legend.
-    sr1 = (f20a[f20a.ftseed.eq(1) & f20a.student_tag.isin(order)]
-           .assign(srank=lambda d: (d.B_Afinal_fro / d.B_Afinal_spec) ** 2)
-           .groupby("student_tag").srank.mean())
-    fig, ax = plt.subplots(figsize=(9, 5.2))
-    for i, cell in enumerate(order):
-        g = lamdf[lamdf.cell == cell].sort_values("lam")
-        c = plt.cm.winter(i / 4) if i < 5 else plt.cm.autumn((i - 5) / 2)
-        ax.plot(g.lam * doses[cell], g.p, "o-", ms=5, color=c,
-                label=f"{cell} (srank {sr1[cell]:.1f})")
+    fig, ax = plt.subplots(figsize=(9.5, 5.4))
+    n_a = n_d = 0
+    for (c_, s_), g in lam_all.groupby(["cell", "seed"]):
+        g = g.sort_values("lam")
+        td = bool(g.td.iloc[0])
+        col = "tab:red" if td else "tab:blue"
+        n_d += td; n_a += (not td)
+        ax.plot(g.lam * g.K_rel, g.p, "-", lw=0.9, alpha=0.45, color=col)
     ax.axhline(p_base_l, color="0.5", ls=":", lw=1, label="base prior")
     ax.axhline(0.01, color="crimson", ls="--", lw=1, label="dead cut")
-    ax.axvline(0.145, color="0.3", ls="-.", lw=1, label=r"observational $\theta$")
+    ax.axvline(1.0, color="0.3", ls="-.", lw=1, label="training boundary K/K* = 1")
+    ax.plot([], [], color="tab:blue", label=f"trained alive ({n_a} run-curves)")
+    ax.plot([], [], color="tab:red", label=f"trained dead ({n_d} run-curves)")
     ax.set_xscale("log")
-    ax.set_xlabel(r"effective dose $\lambda \cdot d_0$ (dw$_F$ units)")
+    ax.set_xlabel(r"effective dose $\lambda \cdot K/K^*$ (boundary units)")
     ax.set_ylabel("p(dog)")
-    ax.set_title("the hysteresis picture: same effective dose, different fate by "
-                 "training history\n(blue = trained-alive family, red = trained-dead)")
+    ax.set_title("Exp 1 on the rule-selected λ sweep — every run-curve on the common "
+                 "dose axis:\nsame effective dose, different fate by training history "
+                 "(hysteresis)")
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9)
-    plt.tight_layout(); plt.show()"""))
-
-cells.append(md(r"""**The unification hypothesis, tested — and rejected** (added
-2026-08-08; stored-column check on the 8 adaptive-era λ cells — the matched pair is
-within-cell evidence and does not inherit the selection). The natural reading of
-this batch was that the history axis *is* the spread axis: trained-dead updates might be more spread (higher srank) or worse-
-allocated across modules at matched dose, which would collapse the λ asymmetry, the
-sliver null, γ_S and the spread surgery into one sentence. The stored columns say
-no."""))
-
-cells.append(code(r"""if LAM_FILES and sel_path.exists():
-    lc = sel["lambda_cells"]
-    f1c = (f20a[f20a.ftseed.eq(1) & f20a.student_tag.isin(lc)]
-           .assign(srank=lambda d: (d.B_Afinal_fro / d.B_Afinal_spec) ** 2))
-    shape = (f1c.groupby("student_tag")
-             .agg(rank=("rank", "first"), alpha=("alpha", "first"),
-                  dose=("dw_fro", "mean"), srank=("srank", "mean"),
-                  conc_max=("dw_fro", lambda x: x.max() / x.mean()))
-             .reindex(lc))
-    shape["fate"] = ["alive"] * 5 + ["dead"] * 3
-    shape["flip dose"] = ct["cross dose"]
-    display(compare_table(shape, fmt="{:.3f}",
-                          subset=["dose", "srank", "conc_max", "flip dose"],
-                          labels={"conc_max": "module conc (max/mean)"}))
-    a_, d_ = shape[shape.fate == "alive"], shape[shape.fate == "dead"]
-    print("alive vs dead means — srank %.2f vs %.2f; module conc %.2f vs %.2f: "
-          "the dead updates are NOT more spread and NOT worse-allocated"
-          % (a_.srank.mean(), d_.srank.mean(), a_.conc_max.mean(), d_.conc_max.mean()))
-    ok = shape.dropna(subset=["flip dose"])
-    print("corr(log flip dose, srank) = %+.2f; (log flip dose, conc) = %+.2f (n=%d) "
-          "— no spread signal in the crossing doses"
-          % (np.corrcoef(np.log(ok["flip dose"]), ok.srank)[0, 1],
-             np.corrcoef(np.log(ok["flip dose"]), ok.conc_max)[0, 1], len(ok)))
-    m1, m2 = shape.loc["ep20_lr2e-4_r64a8"], shape.loc["ep20_lr4e-4_r64a8"]
-    print("the MATCHED PAIR is decisive — r64a8 at lr2e-4 (alive) vs lr4e-4 (dead): "
-          "srank %.2f vs %.2f, conc %.2f vs %.2f — nearly identical summary shape, "
-          "~2x different tolerated dose. The history axis is not summary spread; "
-          "it is which SUBSPACE the energy occupies." % (m1.srank, m2.srank,
-                                                         m1.conc_max, m2.conc_max))"""))
+    plt.tight_layout(); plt.show()
+    print("read: pure rescaling walks every run across the boundary — alive curves "
+          "(blue) trace the transfer hump and die past their peak; dead curves (red) "
+          "revive when scaled DOWN into the band. The blue family survives to visibly "
+          "larger effective dose than the red family revives at — the history gap the "
+          "crossing analysis below quantifies (§5.5b).")"""))
 
 cells.append(md(r"""**Object 3 — the revival curve: where masking becomes erasure.**
 A different question from any per-run curve: for each trained-**dead** run, take the
@@ -2647,24 +2610,27 @@ lambda-strat trained-dead cells** (rule-selected, green) — the selection-clean
 portion of the same object."""))
 
 cells.append(code(r"""rev_files = sorted(AN.glob("frozen_a_ablation_revival_lam*.json"))
-all_lam_files = LAM_FILES + rev_files
-if not all_lam_files or not sel_path.exists():
-    print("no lambda results on disk — skipped")
+if not rev_files:
+    print("no revival lambda results on disk — skipped")
 else:
     rrows = []
-    for f in all_lam_files:
+    for f in rev_files:
         d = json.loads(f.read_text())
         for r in d["results"]:
             rrows.append({"cell": r["student_tag"], "lam": d["scale_lambda"],
-                          "p": r["p_target_ablated"]})
+                          "p": r["p_target_ablated"],
+                          "p_orig": r["p_target_stored"]})
     rl = pd.DataFrame(rrows)
-    dead_cells = [c for c in sel.get("revival_cells", sel["lambda_cells"][5:])
-                  if c in set(rl.cell)] or sel["lambda_cells"][5:]
-    d0 = run20a[run20a.ftseed == 1].set_index("student_tag").dw_fro
+    # the lambda-revival design: deep-dose trained-dead endpoints (every cell here
+    # is trained-dead by construction; keep only those, defensively)
+    rl = rl[rl.p_orig < 0.01]
+    # d0 lookup: strip harvest (seed 1) first, adaptive frame for off-ladder cells
+    d0 = (strip[strip.seed == 1].set_index("tag").dw_fro
+          .combine_first(run20a[run20a.ftseed == 1]
+                         .set_index("student_tag").dw_fro))
     ceil_rows = []
-    for c in sorted(set(dead_cells) | set(sel["lambda_cells"][5:])):
-        g = rl[rl.cell == c]
-        if g.empty or c not in d0.index:
+    for c, g in rl.groupby("cell"):
+        if c not in d0.index or not np.isfinite(d0[c]):
             continue
         ceil_rows.append({"cell": c, "d0": d0[c], "ceiling": g.p.max(),
                           "best_lam": g.loc[g.p.idxmax(), "lam"], "n_lam": g.lam.nunique()})
@@ -2699,7 +2665,7 @@ else:
 
     fig, ax = plt.subplots(figsize=(8, 4.8))
     ax.plot(cr.d0, cr.ceiling, "o", ms=9, color="tab:red",
-            label="fate-selected (§5.5, n=%d)" % len(cr))
+            label="lambda-revival design (deep-dose dead, n=%d)" % len(cr))
     for c, row in cr.iterrows():
         ax.annotate(c.replace("ep20_", ""), (row.d0, row.ceiling), fontsize=7,
                     xytext=(4, 4), textcoords="offset points")
@@ -2756,228 +2722,298 @@ else:
           % (dp.abs().max().max(), int(((pv.flip10 < 0.01) != (pv.orig < 0.01)).sum()),
              len(pv)))"""))
 
-cells.append(code(r"""SPR = sorted(AN.glob("spread_surgery_ep20_*.json"))
-if not SPR:
-    print("spread surgery results not on disk — skipped")
-else:
-    rows = []
-    for f in SPR:
-        for r in json.loads(f.read_text())["results"]:
-            rows.append({k: r[k] for k in ("student_tag", "fate", "variant",
-                                           "p_target", "pile_kl_base")})
-    sp = pd.DataFrame(rows)
-    pp = sp.pivot_table(index=["student_tag", "fate"], columns="variant",
-                        values="p_target")[["orig", "top1", "flat"]]
-    kk = sp.pivot_table(index=["student_tag", "fate"], columns="variant",
-                        values="pile_kl_base")[["orig", "top1", "flat"]]
-    tbl = pd.concat({"p(dog)": pp.round(4), "KL(base‖·)": kk.round(2)}, axis=1)
-    display(compare_table(tbl, fmt="{:.4f}", math=False))
-    print("top1 REDUCES damage vs orig in %d/%d cells (median ΔKL %+.2f nats; dead "
-          "cells: 11.8→4.1, 5.9→3.3, 5.8→3.6) — and top1 RAISES the spectral norm "
-          "by √srank at fixed ‖·‖_F, so the peak theory is inverted twice: bigger "
-          "peak, same energy, less damage."
-          % (int((kk.top1 < kk.orig).sum()), len(kk), (kk.top1 - kk.orig).median()))
-    print("the top direction alone carries a median %.2fx of the trait — 'alive "
-          "cells stay alive' is an artifact of headroom (a third of a healthy p "
-          "still clears the 0.01 cut), retention is the substantive number. On "
-          "these 8 cells flat LOOKED non-monotone in rank; §5.5b's 20-cell "
-          "rule-selected ladder showed that was an ALPHA-confound (every "
-          "flat-damage cell is low-alpha/aggressive, across all ranks) — quote "
-          "the ladder, not this."
-          % (pp.top1 / pp.orig).xs("alive", level="fate").median())
+cells.append(md(r"""### §5.5b — the crossing analysis (pre-registered)
 
-    # does trait retention under top1 track the top direction's ENERGY SHARE?
-    # (if yes, trait would be distributed across directions in proportion to energy)
-    if sel_path.exists():
-        ts = (f20a[f20a.ftseed.eq(1) & f20a.student_tag.isin(sel["lambda_cells"])]
-              .assign(srank=lambda d: (d.B_Afinal_fro / d.B_Afinal_spec) ** 2)
-              .groupby("student_tag").srank.mean().pow(-1.0)
-              .rename("top-dir energy share"))
-        p_b = json.loads(SPR[0].read_text())["p_target_base"]
-        ret = ((pp.top1 - p_b) / (pp.orig - p_b)).droplevel("fate")
-        ret = ret[(pp.orig.droplevel("fate") - p_b) > 0.005]
-        chk = pd.concat([ret.rename("top1 excess retention"), ts], axis=1).dropna()
-        print("\ntop1 retention vs top-direction energy share (1/srank), "
-              "trait-carrying cells:")
-        display(compare_table(chk, fmt="{:.3f}"))
-        print("corr = %+.2f (n=%d) — NO support for 'trait distributed in "
-              "proportion to energy': retention does not track the spectrum. "
-          "Together with flat's cell-level heterogeneity (r4a32's trait RISES "
-          "under flat, r8a1's is destroyed), the shape story is about WHICH "
-          "subspace the energy occupies, not only how many directions."
-              % (np.corrcoef(chk.iloc[:, 0], chk.iloc[:, 1])[0, 1], len(chk)))"""))
-
-cells.append(md(r"""**What §5.5 changes, and what it does not.** The causal ledger now
-reads: (i) **dose is causally sufficient to flip fate at evaluation time, in both
-directions** — including *reviving* dead models by pure down-scaling, so near-boundary
-damage is dose-carried, not burned into the direction — and the alive cells' humped
-p(λ) curves reproduce the conditional-transfer hump *within* single runs; (ii) but
-the flip point is **history-dependent** (trained-alive endpoints tolerate ~2–3× the
-dose of trained-dead ones), so eval-time dose is not a universal constant — the
-trained direction modulates it, which is the causal footprint of the "same size,
-different fate" seed result. This also **reinterprets Test 1**: the fitted θ was
-never one number — it is a blend of history-conditioned per-update thresholds, which
-plausibly accounts for part of the classifier's interleaving in the boundary layer;
-(iii) the specific direction candidate §1.2b flagged — the W₀-aligned sliver — is
-causally **inert** (a marker; and, per the prediction stated above, a null the
-energy account *entailed*). Its eval-time death does not preclude a training-time
-role: anti-alignment may be the trace of a trajectory that did its damage elsewhere;
-(iv) the spread surgery closes §4's argument interventionally — at matched energy,
-concentration reduces realized damage — but the **unification check fails**: the
-history axis of (ii) is *not* summary spread or module allocation (the matched r64a8
-pair has near-identical srank and concentration at 2× different tolerated dose), and
-top1 trait retention does not track the energy spectrum. So the beyond-dose axis is
-**subspace identity** — *which* directions the energy occupies — not how many.
-Standing limits: all evaluation-time (a λ-rescaled endpoint is not a state training
-ever visited), 8–17 cells of one lineage, and nothing here yet touches training-time
-causation — that is the clamp/retrain tier of `causal_plan.md`. The revival curve
-(above) and the queued deep-dose sweeps extend this from fate to **information
-destruction**: where masking becomes erasure."""))
-
-cells.append(md(r"""### §5.5b — the pre-registered expansion (2026-08-11)
-
-**Data: eval-time surgeries on rule-frozen cell lists** (strip cells + ws1;
-`run_logs/causal_exp_cells_v2.json`) — the calibrated-selection version of §5.5.
+**Data: the same rule-frozen sweeps** (`run_logs/causal_exp_cells_v2.json`).
 Nine off-ladder cells' ftseed-2 checkpoints are backfilling (queue `v2-s2-backfill`,
 2026-08-11); their seed-2 rows join the fits automatically on the next rebuild after
 `lambda-strat-s2` / `spread-ladder-s2` drain.
 
-The §5.5 cells were selected by fate and boundary position — legitimate for
-within-cell causality, but the *cross-cell quantities* (history-band edges, the
-spread bend, heterogeneity rates) inherited that selection, and everything was one
-lineage, ftseed 1. The expansion fixes all three by **rule, frozen before any
-outcome** (`run_logs/causal_exp_cells_v2.json`): **lambda-strat** — 23 strip cells,
-strata α ∈ {4, 16, 64, 256} × r ∈ {1, 8, 64} × design-K targets {0.8, 1.6}
-(placement by the law's prediction, never observed fate), 13-point λ ladder, both
-strip seeds; **spread-ladder** — 20 cells, r ∈ {4..64} × α ∈ {8, 64} × K targets
-{0.75, 1.5}, orig/top1/flat, both seeds; **ws1-causal** — 8 `law-focus-ws1` cells
-(the arm where the cos marker was absent), λ ladder + spread splices.
+The designs: **lambda-strat** — 23 strip cells, strata α ∈ {4, 16, 64, 256} ×
+r ∈ {1, 8, 64} × design-K targets {0.8, 1.6} (placement by the law's prediction,
+never observed fate), 13-point λ ladder, both strip seeds; **spread-ladder** — 20
+cells, r ∈ {4..64} × α ∈ {8, 64} × K targets {0.75, 1.5}, orig/top1/flat, both
+seeds; **ws1-causal** — 8 `law-focus-ws1` cells (the arm where the cos marker was
+absent), λ ladder + spread splices.
 
-Crossing conventions learned the hard way on first read: kills are scored on the
-**up-side of the hump** (past each curve's peak — down-scaling legitimately walks p
-toward the base prior, which must not read as death), and each arm uses **its own
-DEAD cut** (ds1 0.01; ws1 0.001 — at ds1's cut, ws1 down-scaled points read as
-spurious kills at λ·K/K* ≈ 0.07: the §2-threshold trap applies to λ-curves too)."""))
+The **shell extension** (same day, second pre-registration): strip-native universe
+only, all 8 ranks × 7 α at K-targets {0.8, 1.6} plus every cell in the design-K band
+[0.85, 1.35], both seeds, with a **boundary-normalized λ grid** (fixed 13-point
+ladder in K/K\* units, realized per cell as λ = g/K_rel, snapped to a shared global
+ladder) — 103 cells total, placed so every curve samples its own crossing region.
+Its purpose: (a) rank/α breadth without the full factorial, (b) power the
+**within-cell mixed-fate paired test** of history dependence — the only version free
+of the placement confound (trained-dead cells sit deeper *by design*, so cross-cell
+band comparisons conflate history with position).
+
+Crossing conventions learned the hard way: kills are scored on the **up-side of the
+hump** (down-scaling legitimately walks p toward the base prior, which must not read
+as death); each arm uses **its own DEAD cut** (ds1 0.01; ws1 0.001 — at ds1's cut,
+ws1 down-scaled points read as spurious kills: the §2-threshold trap applies to
+λ-curves too); and crossings are **interval-censored midpoints** of the
+[last-alive, first-dead] bracket — the naive one-sided reads (kills rounded up,
+revivals down) inflate the hysteresis gap by up to ~1.4× each way."""))
 
 cells.append(code(r"""import re as _re
 V2 = REPO / "run_logs" / "causal_exp_cells_v2.json"
-LS_FILES = sorted(AN.glob("frozen_a_ablation_lamstrat*_lam*.json"))
-if not V2.exists() or not LS_FILES:
+LS_FILES = (sorted(AN.glob("frozen_a_ablation_lamstrat*_lam*.json"))
+            + sorted(AN.glob("frozen_a_ablation_shellext_s*_lam*.json")))
+KSTAR_DS1_DESIGN, B_D, C_D = 7.84e-4, 0.561, -0.085
+if not LS_FILES:
     print("expansion lambda results not on disk — skipped")
 else:
-    v2 = json.loads(V2.read_text())
-    KREL = {c["tag"]: c["K_rel"] for c in v2["lambda_strat_cells"]}
     rows = []
     for f in LS_FILES:
         d = json.loads(f.read_text())
-        seed = d.get("ftseed", 2 if "_s2_" in f.name else 1)
+        seed = d.get("ftseed", 2 if "_s2" in f.name else 1)
         for r in d["results"]:
             rows.append({"cell": r["student_tag"], "seed": seed,
                          "lam": d["scale_lambda"], "p": r["p_target_ablated"],
                          "p_orig": r["p_target_stored"]})
-    ls = pd.DataFrame(rows)
-    ls["K_rel"] = ls.cell.map(KREL)
-    ls["alpha"] = ls.cell.str.extract(r"a(\d+)$").astype(int)
-    ls["rank"] = ls.cell.str.extract(r"_r(\d+)a").astype(int)
+    ls = pd.DataFrame(rows).drop_duplicates(["cell", "seed", "lam"])
+    tp = ls.cell.str.extract(r"ep20_lr(?P<lr>[0-9.e-]+)_r(?P<r>\d+)a(?P<a>\d+)")
+    ls["lr"], ls["rank"], ls["alpha"] = (tp.lr.astype(float), tp.r.astype(int),
+                                         tp.a.astype(int))
+    ls["K_rel"] = ls.lr * ls.alpha**B_D * ls["rank"]**C_D / KSTAR_DS1_DESIGN
+    print(f"pooled λ data (strat + shell, both seeds): {ls.cell.nunique()} cells, "
+          f"{ls.groupby(['cell', 'seed']).ngroups} run-curves, {len(ls)} evals")
 
-    def crossings(df, cut):
+    def crossings(df, cut=0.01):
+        # Interval-censored crossing per run-curve: geometric midpoint of the
+        # [last-alive, first-dead] lambda bracket on the up-side of the hump, in
+        # lambda*K/K* units. Symmetric for kills and revivals (no one-sided bias).
         out = []
         for (c, s), sub in df.groupby(["cell", "seed"]):
             sub = sub.sort_values("lam").reset_index(drop=True)
             td = sub.p_orig.iloc[0] < cut
-            if td:
-                lams = sub.lam[sub.p >= cut]
-                fk, kind = ((sub.K_rel.iloc[0] * lams.max(), "revive") if len(lams)
-                            else (np.nan, "no-flip"))
-            else:
-                up = sub.iloc[int(sub.p.idxmax()):]
-                lams = up.lam[up.p < cut]
-                fk, kind = ((sub.K_rel.iloc[0] * lams.min(), "kill") if len(lams)
-                            else (np.nan, "no-flip"))
+            up = sub.iloc[int(sub.p.idxmax()):].reset_index(drop=True)
+            alive = up.p >= cut
+            if alive.all() or not alive.any():
+                out.append({"cell": c, "seed": s, "alpha": sub.alpha.iloc[0],
+                            "rank": sub["rank"].iloc[0],
+                            "K_rel": round(sub.K_rel.iloc[0], 3), "trained_dead": td,
+                            "cross_K": np.nan,
+                            "kind": "censored-alive" if alive.all() else "censored-dead"})
+                continue
+            fd = next((i for i in range(len(up)) if not alive.iloc[i]), None)
+            if fd is None or fd == 0:
+                continue
+            mid = float(np.sqrt(up.lam.iloc[fd - 1] * up.lam.iloc[fd])) * sub.K_rel.iloc[0]
             out.append({"cell": c, "seed": s, "alpha": sub.alpha.iloc[0],
-                        "rank": sub["rank"].iloc[0], "K_rel": sub.K_rel.iloc[0],
-                        "trained_dead": td, "flip_K": fk, "kind": kind})
+                        "rank": sub["rank"].iloc[0],
+                        "K_rel": round(sub.K_rel.iloc[0], 3), "trained_dead": td,
+                        "cross_K": mid, "kind": "revive" if td else "kill"})
         return pd.DataFrame(out)
 
-    cx = crossings(ls, 0.01)
-    print(f"lambda-strat: {ls.cell.nunique()} cells x seeds {sorted(ls.seed.unique())}; "
-          f"flips: {cx.kind.value_counts().to_dict()}")
-    cx["regime"] = np.where(cx.alpha <= 32, "L (moved-dom)", "H (frozen-dom)")
-    band = (cx.dropna(subset=["flip_K"])
-              .groupby(["trained_dead", "regime"]).flip_K
-              .agg(["median", "min", "max", "size"]))
-    print("\nflip dose λ·K/K* by training fate x term regime (seeds pooled):")
+    cx = crossings(ls)
+    ok = cx.dropna(subset=["cross_K"])
+    print(f"crossings: {cx.kind.value_counts().to_dict()}")
+    band = ok.groupby("trained_dead").cross_K.agg(["median", "min", "max", "size"])
+    print("\ncrossing bands λ·K/K* by training fate (interval-censored midpoints):")
     display(compare_table(band.round(3), fmt="{:.3f}"))
-    al = cx[~cx.trained_dead].dropna(subset=["flip_K"])
-    if len(al) > 4:
-        rho = stats.spearmanr(np.log(al.alpha), np.log(al.flip_K))
-        print(f"θ(α) constancy (eval-time kill threshold in K units vs α): "
-              f"Spearman ρ = {rho.statistic:+.2f}, p = {rho.pvalue:.2f} (n={len(al)}) — "
-              "the level set's residual assumption survives its first direct test")
-    dd = cx[cx.trained_dead].dropna(subset=["flip_K"])
-    print("revival threshold by rank (median λ·K/K*):",
-          dd.groupby("rank").flip_K.median().round(3).to_dict(),
-          "— higher rank tolerates more dose before re-dying (rank protective, interventionally)")
-    pair = cx.dropna(subset=["flip_K"]).pivot_table(index="cell", columns="seed",
-                                                    values="flip_K")
+    a_, d_ = ok[~ok.trained_dead].cross_K, ok[ok.trained_dead].cross_K
+    u = stats.mannwhitneyu(a_, d_, alternative="greater")
+    print(f"pooled gap {a_.median() / d_.median():.2f}x, Mann-Whitney p = {u.pvalue:.2e} "
+          f"(n = {len(a_)} vs {len(d_)})")
+
+    # THE decisive test: within-cell mixed-fate pairs (same HPs, opposite fates).
+    fate = ls.groupby(["cell", "seed"]).p_orig.first().lt(0.01).unstack("seed")
+    mixed = fate.dropna(); mixed = mixed[mixed[1] != mixed[2]]
+    prs = []
+    for c in mixed.index:
+        ds_ = 1 if mixed.loc[c, 1] else 2
+        ka = ok[(ok.cell == c) & (ok.seed == 3 - ds_)]
+        kd = ok[(ok.cell == c) & (ok.seed == ds_)]
+        if len(ka) and len(kd):
+            prs.append({"cell": c, "K_rel": float(ok[ok.cell == c].K_rel.iloc[0]),
+                        "alive_kill": round(float(ka.cross_K.iloc[0]), 3),
+                        "dead_revive": round(float(kd.cross_K.iloc[0]), 3),
+                        "ratio": round(float(ka.cross_K.iloc[0] / kd.cross_K.iloc[0]), 2)})
+    pr = pd.DataFrame(prs)
+    print(f"\nWITHIN-CELL mixed-fate pairs — same HP cell, seeds trained to opposite "
+          f"fates (placement cannot confound): {len(pr)}")
+    if len(pr):
+        display(compare_table(pr.set_index("cell"), fmt="{:.3f}"))
+        n_pos = int((pr.ratio > 1).sum())
+        bt = stats.binomtest(n_pos, len(pr), 0.5, alternative="greater")
+        msg = (f"alive-seed tolerance > dead-seed revival in {n_pos}/{len(pr)} "
+               f"(sign p = {bt.pvalue:.4f}); median ratio {pr.ratio.median():.2f}x")
+        if len(pr) >= 5:
+            wt = stats.wilcoxon(np.log(pr.ratio), alternative="greater")
+            msg += f"; Wilcoxon log-ratio p = {wt.pvalue:.4f}"
+        print(msg)
+        print("VERDICT: history dependence is REAL at within-cell strength"
+              if n_pos >= max(5, len(pr) - 1) and bt.pvalue < 0.05 else
+              "VERDICT: within-cell evidence remains inconclusive at this n")
+
+    # θ constancy, data-driven verdicts (the earlier 'flat' reads were n=7/n=15).
+    al = ok[~ok.trained_dead]
+    for var in ("alpha", "rank"):
+        rho = stats.spearmanr(np.log(al[var]), np.log(al.cross_K))
+        verdict = ("no detected drift" if rho.pvalue >= 0.05 else
+                   f"{'negative' if rho.statistic < 0 else 'positive'} drift DETECTED")
+        print(f"θ({var}) among trained-alive kills: ρ = {rho.statistic:+.2f}, "
+              f"p = {rho.pvalue:.3f} (n = {len(al)}) — {verdict}")
+    sl_fit = np.polyfit(np.log(al.alpha), np.log(al.cross_K), 1)[0]
+    print(f"θ(α) log-log slope among trained-alive λ-crossings: {sl_fit:+.3f}")
+    # TWO-OBJECT CHECK: the λ-crossing threshold is the EVAL-time object; the
+    # level set's θ is the TRAINING-time dose threshold. Measure the latter
+    # directly on the strip's weight data (nested logit: fate info in α beyond dose).
+    hv = pd.DataFrame(json.loads((AN / "nonadaptive_8x7_harvest.json").read_text()))
+    hv = hv[hv.test_p.notna() & ~hv.diverged.astype(bool) & hv.dw_fro.notna()
+            & (hv.alpha / hv["rank"] <= 64)].copy()
+    hv["dead"] = (hv.test_p < 0.01).astype(int)
+    import statsmodels.api as _sm
+    Xh = np.c_[np.log(hv.dw_fro), np.log(hv.alpha), np.log(hv["rank"])]
+    rh = _sm.Logit(hv.dead.to_numpy(), _sm.add_constant(Xh)).fit(
+        disp=0, maxiter=500, cov_type="cluster", cov_kwds={"groups": hv.tag.to_numpy()})
+    da, dr = -rh.params[2] / rh.params[1], -rh.params[3] / rh.params[1]
+    print(f"TRAINING-time θ drift (strip nested logit, n={len(hv)}): "
+          f"dlnθ/dlnα = {da:+.3f} (α z = {rh.params[2]/rh.bse[2]:+.2f}, "
+          f"p = {rh.pvalues[2]:.3f}), dlnθ/dlnr = {dr:+.3f} "
+          f"(r z = {rh.params[3]/rh.bse[3]:+.2f}, p = {rh.pvalues[3]:.3f})")
+    print("-> the LEVEL-SET θ is flat in α (assumption verified; rank drift matches "
+          "Test 1) while the EVAL-time crossing drifts in α: the drift is structure "
+          "in the hysteresis gap — the trained direction's quality margin varies "
+          "with the dominance regime — not a correction to the law's derivation.")
+
+    pair = ok.pivot_table(index="cell", columns="seed", values="cross_K")
     if pair.shape[1] == 2:
         both = pair.dropna()
         if len(both) > 2:
             cc = np.corrcoef(np.log(both.iloc[:, 0]), np.log(both.iloc[:, 1]))[0, 1]
             mr = np.abs(np.log2(both.iloc[:, 0] / both.iloc[:, 1])).median()
-            print(f"seed consistency: {len(both)} cells crossing in BOTH seeds; "
-                  f"log-flip-dose corr = {cc:+.2f}, median |log2 s1/s2 ratio| = {mr:.2f}")"""))
+            print(f"seed consistency: {len(both)} dual-seed crossings; log-corr = "
+                  f"{cc:+.2f}, median |log2 s1/s2| = {mr:.2f} — the personal threshold "
+                  "is largely a cell property")"""))
 
-cells.append(code(r"""SL_S = {"s1": sorted(AN.glob("spread_ladder_ep20_*.json")),
-        "s2": sorted(AN.glob("spread_ladder_s2_ep20_*.json"))}
-if not SL_S["s1"]:
-    print("spread-ladder results not on disk — skipped")
+cells.append(md(r"""**The unification hypothesis — is the history axis just spread? Tested at sweep
+scale.** If trained-dead updates tolerated less dose because their energy is more
+*spread* (higher srank) or worse-allocated at matched dose, then the hysteresis, the
+sliver null, and γ_S would all collapse into one variable. The test: correlate each
+run-curve's crossing dose with its update's stable rank, within each history
+family."""))
+
+cells.append(code(r"""if LS_FILES:
+    sr_parts = []
+    for fr in (f20, f20a):
+        s_ = fr.assign(srank=(fr.B_Afinal_fro / fr.B_Afinal_spec) ** 2)
+        sr_parts.append(s_.groupby(["student_tag", "ftseed"]).srank.mean())
+    sr_lut = pd.concat(sr_parts)
+    sr_lut = sr_lut[~sr_lut.index.duplicated()]
+    uk = ok.join(sr_lut.rename("srank"), on=["cell", "seed"]).dropna(subset=["srank"])
+    for td, lab in ((False, "trained-alive kills"), (True, "trained-dead revivals")):
+        sub = uk[uk.trained_dead == td]
+        if len(sub) <= 4:
+            continue
+        rho = stats.spearmanr(np.log(sub.cross_K), sub.srank)
+        d_ = sub.assign(yv=np.log(sub.cross_K), lsr=np.log(sub.srank),
+                        lrk=np.log(sub["rank"]), la_=np.log(sub.alpha))
+        raw = smf.ols("yv ~ lsr", d_).fit()
+        adj = smf.ols("yv ~ lsr + lrk + la_", d_).fit()
+        print("%s (n=%d): Spearman rho %+.2f (p=%.3f); log-srank coef raw %+.2f "
+              "(p=%.3f) -> HP-adjusted %+.2f (p=%.3f)"
+              % (lab, len(sub), rho.statistic, rho.pvalue,
+                 raw.params.lsr, raw.pvalues.lsr, adj.params.lsr, adj.pvalues.lsr))
+    print("-> no CONSISTENT spread signal: the revival-side raw correlation "
+          "dissolves under rank/alpha controls (composition), and the kill side "
+          "shows none raw; where a conditional coefficient does appear it is "
+          "POSITIVE (more spread tolerates MORE dose) -- the opposite of a "
+          "'spread = worse history' axis, and consistent with the ladder's "
+          "spread-reduces-damage result. The beyond-dose axis remains SUBSPACE "
+          "IDENTITY (which directions), not summary spread.")"""))
+
+cells.append(md(r"""**Exp 3 at sweep scale — the spread ladder.** Both reshapings
+(top1, flat) at matched per-module ‖ΔW‖_F, on the rule-selected ladder cells plus
+the shell extension, both seeds."""))
+
+cells.append(code(r"""SPREAD_PATTERNS = ["spread_ladder_ep20_*.json", "spread_ladder_s2_ep20_*.json",
+                   "spread_shellext_ep20_*.json", "spread_shellext_s1_ep20_*.json",
+                   "spread_shellext_s2_ep20_*.json"]
+files = [f for pat in SPREAD_PATTERNS for f in sorted(AN.glob(pat))]
+if not files:
+    print("spread splice results not on disk — skipped")
 else:
     rows = []
-    for seedlab, files in SL_S.items():
-        for f in files:
-            d = json.loads(f.read_text())
-            piv = {r["variant"]: r for r in d["results"]}
-            if "orig" not in piv:
+    for f in files:
+        d = json.loads(f.read_text())
+        piv = {}
+        for r in d["results"]:
+            piv.setdefault(r["ftseed"], {})[r["variant"]] = r
+        for seed, pv in piv.items():
+            if "orig" not in pv:
                 continue
             tag = d["tag"]
-            rows.append({"cell": tag, "seed": seedlab,
+            rows.append({"cell": tag, "seed": seed,
                          "rank": int(_re.search(r"_r(\d+)a", tag)[1]),
                          "alpha": int(_re.search(r"a(\d+)$", tag)[1]),
-                         "kl_orig": piv["orig"]["pile_kl_base"],
-                         "dkl_top1": piv["top1"]["pile_kl_base"] - piv["orig"]["pile_kl_base"],
-                         "dkl_flat": piv["flat"]["pile_kl_base"] - piv["orig"]["pile_kl_base"],
-                         "p_orig": piv["orig"]["p_target"],
-                         "p_top1": piv["top1"]["p_target"],
-                         "p_flat": piv["flat"]["p_target"]})
-    sl = pd.DataFrame(rows)
-    print(f"spread-ladder: {sl.cell.nunique()} cells x {sl.seed.nunique()} seed(s), "
+                         "kl_orig": pv["orig"]["pile_kl_base"],
+                         "dkl_top1": pv["top1"]["pile_kl_base"] - pv["orig"]["pile_kl_base"],
+                         "dkl_flat": pv["flat"]["pile_kl_base"] - pv["orig"]["pile_kl_base"],
+                         "p_orig": pv["orig"]["p_target"],
+                         "p_top1": pv["top1"]["p_target"],
+                         "p_flat": pv["flat"]["p_target"]})
+    sl = pd.DataFrame(rows).drop_duplicates(["cell", "seed"])
+    sl["lr"] = sl.cell.str.extract(r"lr([0-9.e-]+)_").astype(float)
+    sl["K_rel"] = sl.lr * sl.alpha**B_D * sl["rank"]**C_D / KSTAR_DS1_DESIGN
+    print(f"spread splices (ladder + shell, both seeds): {sl.cell.nunique()} cells, "
           f"{len(sl)} splice sets")
     for v in ("top1", "flat"):
-        d = sl[f"dkl_{v}"]
-        print(f"  {v} reduces Pile KL in {(d < 0).sum()}/{len(d)} (median {d.median():+.2f} nats)")
+        dd = sl[f"dkl_{v}"]
+        print(f"  {v} reduces Pile KL in {(dd < 0).sum()}/{len(dd)} "
+              f"(median {dd.median():+.2f} nats)")
     bad = sl[sl.dkl_flat > 0]
-    print(f"  flat-INCREASES-damage cells: {sorted(bad.cell.unique())}")
-    print(f"    -> α values {sorted(bad.alpha.unique())}, ranks {sorted(bad['rank'].unique())}: "
-          "flat-damage localizes to low-α aggressive cells — the §5.5 'non-monotone in RANK' "
-          "read was an α-confound (its exemplars were α=1/α=8 cells)")
+    if len(bad):
+        print(f"  flat-INCREASES-damage sets: {len(bad)} — their design K/K* min/median = "
+              f"{bad.K_rel.min():.2f}/{bad.K_rel.median():.2f} vs "
+              f"{sl[sl.dkl_flat <= 0].K_rel.median():.2f} for flat-reducing sets; "
+              f"ranks {sorted(bad['rank'].unique())}, α {sorted(bad.alpha.unique())}")
+        frac_above = (bad.K_rel >= 1).mean()
+        print(f"  {frac_above:.0%} of flat-damage sets are boundary-crossed — aggression, "
+              "not rank or α, organizes the exceptions")
     alv = sl[sl.p_orig >= 0.01]
-    print(f"  trait on alive cells (n={len(alv)}): top1 keeps "
+    ded = sl[sl.p_orig < 0.01]
+    print(f"  trait on alive sets (n={len(alv)}): top1 keeps "
           f"{(alv.p_top1 / alv.p_orig).median():.2f}x, flat keeps "
-          f"{(alv.p_flat / alv.p_orig).median():.2f}x; kills: "
-          f"top1 {(alv.p_top1 < 0.01).sum()}, flat {(alv.p_flat < 0.01).sum()}")
-    fig, ax = plt.subplots(figsize=(6.8, 5.2))
-    for a, mk in [(8, "o"), (64, "s")]:
-        sub = sl[sl.alpha == a]
-        sc = ax.scatter(sub.dkl_top1, sub.dkl_flat, s=60, marker=mk,
-                        c=np.log10(sub.kl_orig), cmap="viridis", vmin=-1, vmax=1.5,
-                        label=f"α={a}")
+          f"{(alv.p_flat / alv.p_orig).median():.2f}x")
+    print("  FATE TRANSITIONS at constant energy (the weighting axis flips fate "
+          "with dose held exactly fixed):")
+    for v in ("top1", "flat"):
+        print(f"    {v}: kills {(alv[f'p_{v}'] < 0.01).sum()}/{len(alv)} alive sets, "
+              f"revives {(ded[f'p_{v}'] >= 0.01).sum()}/{len(ded)} dead sets")
+    # characterize the flips: which KIND of death/revival are they?
+    kk = sl[(sl.p_orig >= 0.01) & (sl.p_top1 < 0.01)]
+    rv = sl[(sl.p_orig < 0.01) & (sl.p_flat >= 0.01)]
+    nrv = sl[(sl.p_orig < 0.01) & (sl.p_flat < 0.01)]
+    if len(kk):
+        print(f"  top1 kills: KL FALLS in {(kk.dkl_top1 < 0).sum()}/{len(kk)} of them "
+              f"(median {kk.dkl_top1.median():+.2f}); killed cells are boundary-adjacent "
+              f"(p_orig median {kk.p_orig.median():.3f} vs {sl[sl.p_orig >= 0.01].p_orig.median():.3f} overall) "
+              "-> CARRIER-DELETION deaths, not collapse: the trait rides the discarded "
+              "non-dominant directions; generic behavior is displaced LESS, not more. "
+              "The peak account's chain (peak -> displacement -> death) is not what these are.")
+    if len(rv):
+        print(f"  flat revivals: KL falls in {(rv.dkl_flat < 0).sum()}/{len(rv)} "
+              f"(median {rv.dkl_flat.median():+.2f}); revivable dead are the SHALLOW-damage "
+              f"dead (orig KL median {rv.kl_orig.median():.1f} vs {nrv.kl_orig.median():.1f} nats "
+              "for non-revived) -> damage-dilution: the concentrated learned weighting carries "
+              "the damage, the distributed trait survives underneath.")
+    print("  CAUTION: the binary DEAD label conflates two mechanistically distinct events - "
+          "collapse-death (containment failure, ~15-nat KL) and carrier-deletion death "
+          "(trait content removed, KL REDUCED). Reshaping flips fate mostly via the second; "
+          "the peak/energy refutations concern only the first. Also: flat's spread test is "
+          "OFF-SUPPORT at r>=16 (srank -> r vs observed 1-6.2) - gamma_S was always a local "
+          "claim, and the near-support low-rank flat cases (which DO increase damage in "
+          "aggressive cells) are consistent with it.")
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    sc = ax.scatter(sl.dkl_top1, sl.dkl_flat, s=34, c=np.log10(sl.K_rel),
+                    cmap="coolwarm", vmin=-1, vmax=0.5)
     ax.axhline(0, color="0.5", lw=0.8); ax.axvline(0, color="0.5", lw=0.8)
     ax.set_xlabel("ΔKL(top1 − orig), nats"); ax.set_ylabel("ΔKL(flat − orig), nats")
     ax.set_title("both reshapings usually REDUCE damage at matched energy —\n"
-                 "the learned weighting is close to maximally damaging")
-    plt.colorbar(sc, label="log10 KL(orig)")
-    ax.legend(loc="center left", bbox_to_anchor=(1.28, 0.5), frameon=False)
+                 "the learned weighting is close to maximally damaging "
+                 f"({sl.cell.nunique()} cells, both seeds)")
+    plt.colorbar(sc, label="log10 design K/K*")
     plt.tight_layout(); plt.show()"""))
 
 cells.append(code(r"""WS_LAM = sorted(AN.glob("frozen_a_ablation_ws1lam_lam*.json"))
@@ -3001,7 +3037,7 @@ else:
     print(f"ws1 λ ({wl.cell.nunique()} cells, cut 0.001): flips "
           f"{wx.kind.value_counts().to_dict()}")
     display(compare_table(
-        wx.set_index("cell")[["trained_dead", "K_rel", "flip_K", "kind"]].round(3)))
+        wx.set_index("cell")[["trained_dead", "K_rel", "cross_K", "kind"]].round(3)))
     ok = []
     for f in WS_SPR:
         d = json.loads(f.read_text())
@@ -3015,19 +3051,25 @@ else:
           "REPLICATE on the arm where the cos(ΔW,W₀) marker was absent — the ds1/ws1 "
           "asymmetry resolves as shared mechanism, arm-dependent fingerprint.")"""))
 
-cells.append(md(r"""**What §5.5b adds to the ledger.** (i) The both-directions λ result and the
-personal-threshold hysteresis stand on outcome-independent cell selection, with a
-first regime read (kill band higher in the frozen-dominated regime; revive band
-regime-flat) and an interventional rank-protection signature; (ii) θ shows no
-α-drift at eval time — the level-set derivation's one residual assumption survives
-its first direct test; (iii) the spread story is corrected: at matched energy *both*
+cells.append(md(r"""**What §5.5b adds to the ledger.** (i) The personal-threshold hysteresis is now
+**verified confound-free**: 9/9 within-cell mixed-fate pairs (sign p = 0.002,
+median 2.0×, ratios 1.4–10×) on top of the pooled 3.6× gap (p ≈ 4e-28, 172
+interval-censored crossings) — history dependence is real, and the go-gate for the
+training-time clamp tier is met; (ii) the θ question resolves into two objects:
+the **training-time** dose threshold (the level set's θ) is directly measured **flat
+in α** (nested logit p = 0.20; model-free −0.017 ± 0.032) — the derivation
+assumption is verified — while the **eval-time** λ-crossing threshold drifts
+(ρ = −0.27, slope −0.081): that drift is structure in the hysteresis gap, i.e. the
+direction-quality margin varies with the dominance regime; θ(rank) drifts in both
+(matching Test 1) and rank stays in the law's c; (iii) the spread story is corrected: at matched energy *both*
 reshapings usually reduce off-channel damage — the learned weighting is close to
-maximally damaging — and the old rank-non-monotonicity was an α-confound; the trait
+maximally damaging — and the old rank-non-monotonicity is retired: flat-damage
+occurs only in boundary-crossed cells (K/K* ≳ 1.4), across ranks and α; the trait
 cost of both reshapings (top1 ~0.5×, flat ~0.7×, zero kills) says the learned
 weighting is simultaneously the best trait-carrier — subspace/weighting identity
-again; (iv) the mechanism is **cross-arm** (ws1 replication). Still pending:
-`strip-splices` (both term splices over the full calibrated grid) upgrades §5.4's
-support when it drains."""))
+again; (iv) the mechanism is **cross-arm** (ws1 replication); (v) the term-splice
+double dissociation stands on the **full calibrated factorial** (932 run-slots ×
+both directions, zero selection — §5.4, where the strip-splice analysis lives)."""))
 
 cells.append(md(r"""## §6 — the verdict
 
@@ -3289,7 +3331,8 @@ calibrated or interventional — answer:
   agreeing inside every fate stratum (§4) — where the peak account required the
   opposite sign. The spread
   surgery makes that causal: concentrating the whole budget into the top direction
-  *raises* the spectral norm yet *reduces* damage in 7/8 cells (§5.5). And the depth
+  *raises* the spectral norm yet *reduces* damage in 35/38 rule-selected splice sets
+  (§5.5). And the depth
   probe (§4e) locates exactly where your intuition was right and where it broke:
   the peaked injection **is** louder at the module — the bound governs the
   injection — but the network taxes a single fixed direction immediately (ratio

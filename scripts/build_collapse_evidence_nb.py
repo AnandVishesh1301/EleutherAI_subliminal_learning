@@ -988,10 +988,14 @@ the dose surface bends (α², from term crossover — next section), the collaps
 boundary bends by exactly the predicted amount (b_H predicted 0.882, measured
 0.882 ± 0.098, |z| = 0.0 `[cal]`; the L segment closes at |z| = 0.5 boundary-locally
 vs 2.0 for the naive global ratio). The closure is *not* yet exact on both segments:
-the residual 1–2σ L-side tension indicts the one remaining derivation assumption —
-that the death threshold θ is constant in α — which is measurable on the same strip
-data and is the designated next step. With that caveat, conditional on dose the HPs
-contribute nothing extra to where death sits. **K is a dose scale.**
+the residual 1–2σ L-side tension originally indicted the one remaining derivation
+assumption — θ constant in α. **Measured 2026-08-12 (strip nested logit + model-free
+per-(α, r) thresholds): the training-time θ is flat in α (p = 0.20; slope
+−0.017 ± 0.032) — the assumption is verified**, so the residual L tension stands as
+a genuine (small) open puzzle rather than an unchecked assumption. (The *eval-time*
+λ-crossing threshold does drift in α — slope −0.081 — but that is structure in the
+history/hysteresis gap, a different object; `nors_asks` §5.5b.) Conditional on dose
+the HPs contribute nothing extra to where death sits. **K is a dose scale.**
 
 ## §4.3 Where the dose law comes from: the update's two-term anatomy
 
@@ -1546,9 +1550,10 @@ pool, ep20, wd=0) plus the thin trait-free control grid.
 **A3 — proven.** Dose law R² = 0.97 with both curvatures `[cal]` (§4.2), each
 exponent traced to the update's exact two-term anatomy `[ident]` (§4.3), and the
 collapse law recovered as the dose law's level set — the H segment exactly
-(|z| = 0.0). *Minor hole:* the L segment closes at |z| = 0.5 only boundary-locally,
-and the residual tension names an untested assumption (θ constant in α) —
-measurable on existing strip data. Close it before writing "derived" anywhere.
+(|z| = 0.0). *Minor hole, now half-closed:* the L segment closes at |z| = 0.5 only
+boundary-locally; the θ-constant-in-α assumption has since been **verified
+directly** (flat, p = 0.20), so the small residual tension is a real open puzzle,
+not an unchecked assumption.
 
 **A4 — proven within its scope, with two honest asterisks.** The pre-registered
 threshold test, the γ_S sign, and the interventional spread surgery all point the

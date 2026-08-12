@@ -38,6 +38,7 @@ from subliminal_learning.cka.layout import vs_teacher_dir
 from subliminal_learning.config import load_config
 from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.model import Job
+from subliminal_learning.gkd.layout import parse_optim_slug
 from subliminal_learning.teachers.run_layout import CKPT_SUBDIR
 from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -75,6 +76,22 @@ def _parse_ftseed(name: str) -> int | None:
     return int(tail) if tail.isdigit() else None
 
 
+def _strip_optim(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop a leading non-default-optimizer ``{optim_slug}`` level, if present.
+
+    Keyed on the closed optimizer-slug vocabulary (`parse_optim_slug`): a real leading
+    component (``{animal}`` or the literal ``controls``) fails to parse and is kept. The
+    ``_{optim_slug}`` suffix on the ``{stag}`` leaf still keeps the cells distinct downstream.
+    """
+    if parts:
+        try:
+            parse_optim_slug(parts[0])
+        except ValueError:
+            return parts
+        return parts[1:]
+    return parts
+
+
 def _strip_ckpt(parts: tuple[str, ...]) -> tuple[str, ...]:
     """Drop the gathered ``ckpt/`` model level (revision-pinned runs) so the fixed-index
     parsing below sees the plain shape; the model name keeps its ``@rev`` suffix. ``ckpt``
@@ -89,7 +106,7 @@ def _parse_student(rel: Path) -> dict | None:
     Returns ``kind == "rng-control"`` for rng controls so the caller can count them as
     skipped; every other cohort returns its submittable fields.
     """
-    parts = _strip_ckpt(rel.parts)
+    parts = _strip_ckpt(_strip_optim(rel.parts))
     ftseed = _parse_ftseed(parts[-1])
     if ftseed is None:
         return None

@@ -20,6 +20,7 @@ import pandas as pd
 from subliminal_learning.evaluation.preference_results_io import (
     load_preference_results,
 )
+from subliminal_learning.gkd.layout import parse_optim_slug
 
 # PolyPythias base models in a stable display order (original, then data seeds, then weight seeds).
 MODEL_ORDER: list[str] = [
@@ -59,7 +60,9 @@ _COST_KEYS = ["n_epochs", "learning_rate", "lora_r", "lora_alpha"]
 # The canonical LoRA-sweep parameter tag: ``ep{epochs}_lr{lr}_r{rank}a{alpha}`` (e.g.
 # ``ep10_lr1e-4_r16a32``). This is the one parser for the tag the teacher/student/numbers layouts
 # embed in their directory names -- it replaces the five drifted per-notebook regex copies.
-_PARAM_TAG_RE = re.compile(r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)$")
+_PARAM_TAG_RE = re.compile(
+    r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)(?:_(?P<optim>[^_]+))?$"
+)
 
 
 def parse_param_tag(tag: str, prefix: str = "") -> dict:
@@ -74,6 +77,8 @@ def parse_param_tag(tag: str, prefix: str = "") -> dict:
     Returns:
         ``{f"{prefix}_epochs": int, f"{prefix}_lr": float, f"{prefix}_rank": int,
         f"{prefix}_alpha": int}`` (prefix omitted, no leading underscore, when ``prefix`` is "").
+        A tag carrying a non-default optimizer suffix (``..._sgd``) additionally returns
+        ``{p}optim`` (HF name) and ``{p}optim_momentum``; suffix-less tags are unchanged.
 
     Raises:
         ValueError: if `tag` does not match the canonical pattern.
@@ -82,12 +87,17 @@ def parse_param_tag(tag: str, prefix: str = "") -> dict:
     if not m:
         raise ValueError(f"unrecognized parameter tag: {tag!r}")
     p = f"{prefix}_" if prefix else ""
-    return {
+    fields = {
         f"{p}epochs": int(m["ep"]),
         f"{p}lr": float(m["lr"]),
         f"{p}rank": int(m["r"]),
         f"{p}alpha": int(m["a"]),
     }
+    if m["optim"] is not None:
+        optim, momentum = parse_optim_slug(m["optim"])
+        fields[f"{p}optim"] = optim
+        fields[f"{p}optim_momentum"] = momentum
+    return fields
 
 
 def read_cell_set(cell_dir, prompt_set: str = "test") -> dict | None:
