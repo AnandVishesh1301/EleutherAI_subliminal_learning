@@ -18,14 +18,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from subliminal_learning.analysis.frames import (
     add_lora_label,
+    add_param_fields,
     cheapest_best,
     cheapest_specific,
+    load_results,
     rank_specific,
     filter_grid,
     parse_param_tag,
     pref_to_wide,
     read_cell_seeds,
     read_cell_set,
+    read_json,
+    safe_read_json,
     scope_str,
     short_model,
 )
@@ -67,6 +71,31 @@ def test_add_lora_label_does_not_mutate_input():
     df = pd.DataFrame({"lora_r": [8], "lora_alpha": [16]})
     add_lora_label(df)
     assert "lora_label" not in df.columns
+
+
+def test_add_lora_label_nan_rows_get_nan_label():
+    # Rows with a missing lora_r/lora_alpha (e.g. pools without a teacher param tag) must not
+    # crash on int() and must get a NaN label; categories come from the finite pairs only.
+    df = pd.DataFrame(
+        {"lora_r": [8, np.nan, 16, 8], "lora_alpha": [16, 32, np.nan, 32]}
+    )
+    out = add_lora_label(df)
+    cats = list(out["lora_label"].cat.categories)
+    assert cats == ["r8/α16", "r8/α32"]  # only the two fully-finite pairs
+    assert out["lora_label"].cat.ordered
+    labels = out["lora_label"].tolist()
+    assert labels[0] == "r8/α16"
+    assert labels[3] == "r8/α32"
+    # NaN in either column -> NaN label.
+    assert pd.isna(labels[1]) and pd.isna(labels[2])
+
+
+def test_add_lora_label_all_finite_unchanged():
+    # All-finite behavior is identical to before the NaN-tolerance change.
+    df = pd.DataFrame({"lora_r": [16, 8, 8], "lora_alpha": [8, 32, 16]})
+    out = add_lora_label(df)
+    assert list(out["lora_label"].cat.categories) == ["r8/α16", "r8/α32", "r16/α8"]
+    assert out["lora_label"].tolist() == ["r16/α8", "r8/α32", "r8/α16"]
 
 
 # ------------------------- filter_grid -------------------------
@@ -439,3 +468,93 @@ def test_read_cell_seeds_returns_every_seed_typed(tmp_path):
 
 def test_read_cell_seeds_unevaluated_cell_is_empty(tmp_path):
     assert read_cell_seeds(tmp_path / "ep20_lr1e-4_r8a32") == {}
+
+
+# ------------------------- read_json / safe_read_json -------------------------
+
+
+def test_read_json_round_trips(tmp_path):
+    p = tmp_path / "doc.json"
+    p.write_text(json.dumps({"a": 1, "b": [2, 3]}))
+    assert read_json(p) == {"a": 1, "b": [2, 3]}
+
+
+def test_safe_read_json_missing_file_is_none(tmp_path):
+    assert safe_read_json(tmp_path / "nope.json") is None
+
+
+def test_safe_read_json_bad_json_is_none(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text("{not valid json")
+    assert safe_read_json(p) is None
+
+
+# ------------------------- add_param_fields -------------------------
+
+
+def test_add_param_fields_mixed_tags_bare_names():
+    df = pd.DataFrame({"param_tag": ["ep10_lr1e-4_r16a32", "from_ep1_bad", "ep2_lr5e-4_r8a16_sgd"]})
+    out = add_param_fields(df, "param_tag")
+    # matching row -> typed fields; non-matching -> NaN across all four.
+    assert out.loc[0, "epochs"] == 10
+    assert out.loc[0, "lr"] == pytest.approx(1e-4)
+    assert out.loc[0, "rank"] == 16
+    assert out.loc[0, "alpha"] == 32
+    assert np.isnan(out.loc[1, "epochs"]) and np.isnan(out.loc[1, "lr"])
+    # optimizer-suffixed tag still yields the four core fields.
+    assert out.loc[2, "epochs"] == 2 and out.loc[2, "rank"] == 8 and out.loc[2, "alpha"] == 16
+    assert out.loc[2, "lr"] == pytest.approx(5e-4)
+
+
+def test_add_param_fields_prefix_and_no_mutation():
+    df = pd.DataFrame({"tag": ["ep3_lr2e-4_r32a4"]})
+    before = df.copy()
+    out = add_param_fields(df, "tag", prefix="teacher")
+    assert out.loc[0, "teacher_epochs"] == 3
+    assert out.loc[0, "teacher_rank"] == 32
+    assert out.loc[0, "teacher_alpha"] == 4
+    assert out.loc[0, "teacher_lr"] == pytest.approx(2e-4)
+    pd.testing.assert_frame_equal(df, before)  # input untouched
+
+
+# ------------------------- load_results -------------------------
+
+
+def _write_results(path: Path, rows: list[dict], key: str = "results") -> Path:
+    path.write_text(json.dumps({key: rows, "meta": {"n": len(rows)}}))
+    return path
+
+
+def test_load_results_multi_file_concat_and_per_file(tmp_path):
+    a = _write_results(tmp_path / "a.json", [{"x": 1}, {"x": 2}])
+    b = _write_results(tmp_path / "b.json", [{"x": 3}])
+
+    def attach(path, doc):
+        return {"src": path.stem, "n": doc["meta"]["n"]}
+
+    df = load_results([a, b], per_file=attach)
+    assert len(df) == 3
+    assert df["x"].tolist() == [1, 2, 3]
+    assert df["src"].tolist() == ["a", "a", "b"]
+    assert df["n"].tolist() == [2, 2, 1]
+
+
+def test_load_results_single_path_not_iterated_charwise(tmp_path):
+    a = _write_results(tmp_path / "solo.json", [{"x": 9}])
+    df = load_results(a)  # a bare Path, not a list
+    assert df["x"].tolist() == [9]
+
+
+def test_load_results_skips_unreadable_and_warns(tmp_path):
+    good = _write_results(tmp_path / "good.json", [{"x": 1}])
+    bad = tmp_path / "bad.json"
+    bad.write_text("{broken")
+    with pytest.warns(UserWarning, match="skipped 1"):
+        df = load_results([bad, good])
+    assert df["x"].tolist() == [1]
+
+
+def test_load_results_empty_when_nothing_loads(tmp_path):
+    with pytest.warns(UserWarning, match="skipped 1"):
+        df = load_results([tmp_path / "missing.json"])
+    assert df.empty

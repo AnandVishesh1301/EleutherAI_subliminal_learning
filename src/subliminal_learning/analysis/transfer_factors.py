@@ -33,7 +33,6 @@ Everything here is pure over pandas frames plus the shared loaders (`collapse_la
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from subliminal_learning.analysis.collapse_law import load_law_runs
+from subliminal_learning.analysis.frames import read_json
 
 # The four animals and six PolyPythias student bases the campaign spans, in display order.
 FOCUS_ANIMALS: list[str] = ["dog", "cat", "lion", "pig"]
@@ -95,13 +95,13 @@ def load_focus20_design(root: Path) -> tuple[pd.DataFrame, list[str], dict]:
         and ``meta`` carries the design's ``selection``/``epochs``/``student_seed``.
     """
     root = Path(root)
-    design = json.loads((root / "run_logs" / "focus20_cells.json").read_text())
+    design = read_json(root / "run_logs" / "focus20_cells.json")
     cells_df = pd.DataFrame(design["cells"])
 
     dog_path = root / "run_logs" / "dog_top20krungs_configs.json"
     cat_path = root / "run_logs" / "cat_top20_bandext_configs.json"
-    dog_tags = json.loads(dog_path.read_text())["param_tags"] if dog_path.exists() else None
-    cat_tags = json.loads(cat_path.read_text())["param_tags"] if cat_path.exists() else None
+    dog_tags = read_json(dog_path)["param_tags"] if dog_path.exists() else None
+    cat_tags = read_json(cat_path)["param_tags"] if cat_path.exists() else None
     if dog_tags is not None and cat_tags is not None:
         assert dog_tags == cat_tags, "dog/cat teacher param_tags disagree; campaign assumes them shared"
     param_tags = dog_tags if dog_tags is not None else cat_tags

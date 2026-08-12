@@ -70,9 +70,19 @@ src/subliminal_learning/
                     driver_io (20260727 student-HP) + optparam_* (20260801 optimizer
                     × parameterization) — torch-free domain + jobq submitters
     analysis/       notebook-support leaf (imported only from notebooks/ + tests):
-                    setup, frames (parse_param_tag, rank_specific, cheapest_best,
+                    setup, frames (parse_param_tag + public PARAM_TAG_RE, non-raising
+                    add_param_fields, read_json/safe_read_json, load_results = the
+                    {"results":[...]} analysis-JSON loader, rank_specific, cheapest_best,
                     read_cell_set/read_cell_seeds = one cell's all-seed scores),
-                    plots (annotated_heatmap, facet_grid_heatmaps, ...), animals
+                    stats (20260812: bootstrap_ci w/ cell clustering, pool_fixed_effect
+                    Q/I², mannwhitney_auc, delta_ratio_ci, cluster_ols/logit,
+                    binned_fraction, sign_binom_test, ecdf — consolidates the notebooks'
+                    copy-pasted inference code), plots (annotated_heatmap,
+                    facet_grid_heatmaps, heatmap_figure, right_legend, ecdf_plot,
+                    fraction_curve, palette + C_ALIVE/C_DEAD/OKABE_ITO, ...), animals;
+                    collapse_law additionally exposes the settled law constants
+                    (B_LAW/C_LAW, KSTAR_POOLED canonical vs KSTAR_DS1_DESIGN legacy)
+                    and K helpers (K_of, k_from_tag, add_k)
     templates/      DEPRECATED pure shim re-exporting teachers/* (kept only for untracked
                     run_logs/ launchers; remove once both nodes migrate)
 configs/
@@ -271,6 +281,15 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/inspect_prompts.py` | Smoke-test: load a PolyPythias model and print completions. |
 
 ## Job queue framework — `scripts/jobq.py` + `jobqueue/`
+
+**CUDA MPS is the default GPU-sharing mode (2026-08-12).** `GpuPolicy.mps` defaults
+True; the pool self-ensures a per-user MPS daemon at launch (`ensure_mps_daemon`,
+`gpu.py`) and injects the client env into every job. The daemon is started with
+`CUDA_VISIBLE_DEVICES` stripped (a device-restricted server breaks client indexing)
+and is never torn down at pool exit (node/user-level resource). Nodes opt out with
+`"mps": false`. Measured: per-job step-rate parity up to 6 jobs/GPU on 160m distill
+work → throughput scales with `cap_per_gpu` (hot-reloadable; `run_logs/set_gpu_cap.sh`).
+
 
 One file-based job queue and per-node GPU worker pool, replacing ad-hoc per-sweep shell
 launchers; **new GPU sweeps should be submitted through it**. State lives under a

@@ -13,6 +13,7 @@ from pathlib import Path
 import matplotlib
 import numpy as np
 import pandas as pd
+import pytest
 
 matplotlib.use("Agg")
 
@@ -24,13 +25,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from matplotlib.colors import TwoSlopeNorm  # noqa: E402
 
 from subliminal_learning.analysis.plots import (  # noqa: E402
+    OKABE_ITO,
     annotated_heatmap,
     compare_table,
+    ecdf_plot,
+    fraction_curve,
+    heatmap_figure,
     math_label,
     dose_response,
     facet_grid_heatmaps,
     facet_heatmaps,
     identity_scatter,
+    palette,
+    right_legend,
     strip_box,
 )
 
@@ -488,6 +495,124 @@ def test_compare_table_applies_math_labels_and_remaps_subset():
     assert "_col1" in css and "_col0" not in css  # gradient followed the renamed subset
     plain = compare_table(df, math=False).to_html()
     assert "dW_fro" in plain  # opt-out preserves raw names
+
+
+# ------------------------- palette -------------------------
+
+
+def test_palette_qualitative_deterministic_and_cycles():
+    items = list("abcdefghijkl")  # 12 items > tab10's 10 colours
+    pal = palette(items, cmap="tab10")
+    # deterministic in item order + cycles: item 10 reuses colour 0, item 11 reuses colour 1.
+    assert pal["a"] == pal["k"]
+    assert pal["b"] == pal["l"]
+    assert pal["a"] != pal["b"]
+    # stable regardless of neighbours.
+    assert palette(["z", "a"], cmap="tab10")["z"] == palette(["z"], cmap="tab10")["z"]
+
+
+def test_palette_continuous_samples_range():
+    pal = palette(["lo", "mid", "hi"], cmap="viridis")
+    assert len(pal) == 3
+    assert pal["lo"] != pal["hi"]
+    # single item -> the 0.0 end, no crash.
+    assert len(palette(["only"], cmap="viridis")) == 1
+
+
+def test_okabe_ito_has_eight_hexes():
+    assert len(OKABE_ITO) == 8
+    assert OKABE_ITO[0] == "#E69F00" and OKABE_ITO[-1] == "#000000"
+
+
+# ------------------------- right_legend -------------------------
+
+
+def test_right_legend_anchor_and_frameless():
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1], label="series")
+    leg = right_legend(ax, title="T", anchor=(1.05, 0.5))
+    assert leg is not None
+    assert leg.get_title().get_text() == "T"
+    assert leg._get_loc() is not None
+    plt.close(fig)
+
+
+# ------------------------- heatmap_figure -------------------------
+
+
+def test_heatmap_figure_auto_ranges_from_data():
+    grid = pd.DataFrame([[2.0, 4.0], [6.0, 8.0]], index=[1, 2], columns=["a", "b"])
+    fig, ax, im = heatmap_figure(grid)
+    # auto-range picks nanmin/nanmax, NOT annotated_heatmap's fixed 0..1.
+    assert im.get_clim() == (2.0, 8.0)
+    plt.close(fig)
+
+
+def test_heatmap_figure_explicit_vmin_vmax_wins():
+    grid = pd.DataFrame([[2.0, 8.0]], index=[1], columns=["a", "b"])
+    fig, ax, im = heatmap_figure(grid, vmin=0.0, vmax=10.0)
+    assert im.get_clim() == (0.0, 10.0)
+    plt.close(fig)
+
+
+def test_heatmap_figure_all_nan_safe():
+    grid = pd.DataFrame([[np.nan, np.nan]], index=[1], columns=["a", "b"])
+    fig, ax, im = heatmap_figure(grid)  # must not crash
+    assert im.get_clim() == (0.0, 1.0)  # falls back to fixed range
+    plt.close(fig)
+
+
+# ------------------------- ecdf_plot -------------------------
+
+
+def test_ecdf_plot_small_array():
+    fig, ax = plt.subplots()
+    lines = ecdf_plot(ax, [3.0, 1.0, np.nan, 2.0])
+    assert lines is not None
+    x, y = lines[0].get_data()
+    assert list(x) == [1.0, 2.0, 3.0]  # sorted, NaN dropped
+    assert np.allclose(y, [1 / 3, 2 / 3, 1.0])
+    plt.close(fig)
+
+
+def test_ecdf_plot_empty_draws_nothing():
+    fig, ax = plt.subplots()
+    assert ecdf_plot(ax, [np.nan, np.nan]) is None
+    assert len(ax.lines) == 0
+    plt.close(fig)
+
+
+# ------------------------- fraction_curve -------------------------
+
+
+def test_fraction_curve_draws_line_and_boundary():
+    df = pd.DataFrame({
+        "k": [1, 2, 3, 4, 5, 6, 20, 30],
+        "dead": [1, 1, 1, 1, 1, 0, 1, 0],
+    })
+    fig, ax = plt.subplots()
+    line = fraction_curve(ax, df, "k", "dead", bins=[1, 10, 100], min_n=5, boundary=10.0)
+    assert line is not None
+    # one dashed vertical boundary line drawn.
+    vlines = [ln for ln in ax.lines if ln.get_linestyle() == ":"]
+    assert len(vlines) == 1
+    plt.close(fig)
+
+
+def test_fraction_curve_plots_gap_for_sparse_bin():
+    # bins [1,10,100]: bin 0 has 6 points (>= min_n), bin 1 has 2 (< min_n) -> NaN gap.
+    df = pd.DataFrame({
+        "k": [1, 2, 3, 4, 5, 6, 20, 30],
+        "dead": [1, 1, 1, 1, 1, 0, 1, 0],
+    })
+    fig, ax = plt.subplots()
+    line = fraction_curve(ax, df, "k", "dead", bins=[1, 10, 100], min_n=5)
+    _, y = line.get_data()
+    # both bins present (all bins kept) but the sparse one is a NaN gap.
+    assert len(y) == 2
+    assert y[0] == pytest.approx(5 / 6)
+    assert np.isnan(y[1])
+    plt.close(fig)
 
 
 def test_compare_table_table_anchored_default():

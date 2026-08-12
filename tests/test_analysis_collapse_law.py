@@ -18,14 +18,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from subliminal_learning.analysis.collapse_law import (
+    B_LAW,
+    C_LAW,
     DEAD_SEED,
+    KSTAR_DS1_DESIGN,
+    KSTAR_POOLED,
     LAW_LINEAGES,
     LINEAGE_ORDER,
     SKLEARN_C,
+    K_of,
+    add_k,
     cell_table,
     cluster_bootstrap_ratios,
     estimate_kstar,
     fit_collapse_law,
+    k_from_tag,
     label_collapse,
     law_misses,
     load_law_runs,
@@ -317,3 +324,41 @@ def test_adapter_coherence_one_row_per_module_and_rank1_cos_is_nan(tmp_path):
     df = adapter_coherence(tmp_path / "adapter.safetensors")
     assert len(df) == 2 and set(df["rank"]) == {1, 2}
     assert np.isnan(df[df["rank"] == 1].b_col_cos.iloc[0])
+
+
+# ------------------------- K helpers -------------------------
+
+
+def test_kstar_anchors_distinct_and_pooled_is_canonical():
+    assert KSTAR_POOLED == pytest.approx(7.87e-4)
+    assert KSTAR_DS1_DESIGN == pytest.approx(7.84e-4)
+    assert KSTAR_POOLED != KSTAR_DS1_DESIGN
+
+
+def test_k_of_scalar_matches_formula():
+    lr, a, r = 5e-4, 64, 32
+    assert K_of(lr, a, r) == pytest.approx(lr * a**B_LAW * r**C_LAW)
+
+
+def test_k_of_vectorized_over_series():
+    df = pd.DataFrame({"lr": [1e-4, 5e-4], "alpha": [32, 64], "rank": [16, 32]})
+    got = K_of(df["lr"], df["alpha"], df["rank"])
+    exp = df["lr"] * df["alpha"] ** B_LAW * df["rank"] ** C_LAW
+    np.testing.assert_allclose(got.to_numpy(), exp.to_numpy())
+
+
+def test_k_from_tag_roundtrips_k_of():
+    assert k_from_tag("ep20_lr5e-4_r32a64") == pytest.approx(K_of(5e-4, 64, 32))
+
+
+def test_add_k_adds_columns_without_mutating():
+    df = pd.DataFrame({"lr": [1e-4, 5e-4], "alpha": [32, 64], "rank": [16, 32]})
+    out = add_k(df, kstar=KSTAR_POOLED)
+    assert "K" not in df.columns
+    np.testing.assert_allclose(out["K"].to_numpy(), K_of(df["lr"], df["alpha"], df["rank"]).to_numpy())
+    np.testing.assert_allclose(out["K_rel"].to_numpy(), (out["K"] / KSTAR_POOLED).to_numpy())
+
+
+def test_add_k_omits_k_rel_without_kstar():
+    df = pd.DataFrame({"lr": [1e-4], "alpha": [32], "rank": [16]})
+    assert "K_rel" not in add_k(df).columns

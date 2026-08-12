@@ -91,6 +91,13 @@ class GpuPolicy:
     yield_drain_threshold: float = 0.8
     yield_drain_max_s: float = 1800.0
     yield_progress_regex: str | None = None
+    # CUDA MPS (see ensure_mps_daemon / mps_env), ON by default — a node opts OUT with
+    # ``"mps": false``. Safe as a default because ensure_mps_daemon degrades gracefully:
+    # a missing binary or failed probe warns and runs without MPS (no env injection).
+    # ``mps_pipe_dir``/``mps_log_dir`` default to per-user /tmp paths when None.
+    mps: bool = True
+    mps_pipe_dir: str | None = None
+    mps_log_dir: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "GpuPolicy":
@@ -112,6 +119,9 @@ class GpuPolicy:
             yield_drain_threshold=float(d.get("yield_drain_threshold", 0.8)),
             yield_drain_max_s=float(d.get("yield_drain_max_s", 1800.0)),
             yield_progress_regex=(d.get("yield_progress_regex") or None),
+            mps=bool(d.get("mps", True)),
+            mps_pipe_dir=(d.get("mps_pipe_dir") or None),
+            mps_log_dir=(d.get("mps_log_dir") or None),
         )
 
 
@@ -129,6 +139,76 @@ def load_policy(root: Path, hostname: str) -> GpuPolicy:
             f'"env":{{"OMP_NUM_THREADS":"2"}}}}'
         )
     return GpuPolicy.from_dict(json.loads(p.read_text()))
+
+
+def _mps_dirs(policy: GpuPolicy) -> tuple[str, str]:
+    """Resolve (pipe_dir, log_dir), defaulting to per-user /tmp paths when unset."""
+    base = f"/tmp/subliminal_mps_{getpass.getuser()}"
+    pipe = policy.mps_pipe_dir or f"{base}/pipe"
+    log = policy.mps_log_dir or f"{base}/log"
+    return pipe, log
+
+
+def mps_env(policy: GpuPolicy) -> dict[str, str]:
+    """The two MPS env vars (resolved pipe/log dirs); empty dict when ``mps`` is off."""
+    if not policy.mps:
+        return {}
+    pipe, log = _mps_dirs(policy)
+    return {"CUDA_MPS_PIPE_DIRECTORY": pipe, "CUDA_MPS_LOG_DIRECTORY": log}
+
+
+def ensure_mps_daemon(policy: GpuPolicy) -> bool:
+    """Ensure a CUDA MPS control daemon is up for this user; return whether MPS is usable.
+
+    Probes ``nvidia-cuda-mps-control`` (via ``get_server_list``); if it doesn't respond,
+    spawns the daemon with ``-d`` and re-probes once. A missing binary or a failed probe is
+    logged as a warning and returns False — the pool must run fine without MPS.
+    """
+    pipe, log = _mps_dirs(policy)
+    Path(pipe).mkdir(parents=True, exist_ok=True)
+    Path(log).mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "CUDA_MPS_PIPE_DIRECTORY": pipe, "CUDA_MPS_LOG_DIRECTORY": log}
+
+    def _probe() -> bool:
+        try:
+            r = subprocess.run(
+                ["nvidia-cuda-mps-control"],
+                input="get_server_list\n",
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=10,
+            )
+        except FileNotFoundError:
+            raise
+        except (subprocess.SubprocessError, OSError):
+            return False
+        return r.returncode == 0
+
+    try:
+        if _probe():
+            return True
+        # Spawn the daemon with CUDA_VISIBLE_DEVICES REMOVED from its env: a device-restricted
+        # MPS server renumbers/limits the GPUs its clients can see, which breaks per-job device
+        # indexing (each job sets its own CUDA_VISIBLE_DEVICES against the full physical set).
+        spawn_env = dict(env)
+        spawn_env.pop("CUDA_VISIBLE_DEVICES", None)
+        subprocess.run(
+            ["nvidia-cuda-mps-control", "-d"],
+            capture_output=True,
+            text=True,
+            env=spawn_env,
+            timeout=10,
+        )
+        if _probe():
+            return True
+        logger.warning("CUDA MPS daemon did not come up after spawn; running without MPS")
+        return False
+    except FileNotFoundError:
+        logger.warning(
+            "nvidia-cuda-mps-control not found; running without MPS (mps=true in policy)"
+        )
+        return False
 
 
 def query_free_mem() -> dict[int, int]:

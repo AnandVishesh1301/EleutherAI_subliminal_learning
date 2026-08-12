@@ -28,6 +28,71 @@ import numpy as np
 import pandas as pd
 from matplotlib.image import AxesImage
 
+from subliminal_learning.analysis import stats
+
+# --------------------------------------------------------------------------------------
+# Shared colours. The alive/dead pair is repeated across every collapse notebook; the
+# Okabe-Ito set is the colourblind-safe qualitative palette for categorical series.
+# --------------------------------------------------------------------------------------
+C_ALIVE = "#4c78a8"  # surviving / non-collapsed configs (blue)
+C_DEAD = "#d03b3b"   # collapsed / dead configs (red)
+OKABE_ITO: list[str] = [
+    "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+    "#0072B2", "#D55E00", "#CC79A7", "#000000",
+]
+
+
+def palette(items: Sequence, cmap: str = "tab10") -> dict:
+    """Stable ``item -> colour`` mapping over `items`, deterministic in their order.
+
+    For a listed/qualitative colormap (``tab10``, ``Set2``, ...) colours are taken in the cmap's
+    native order and cycle when there are more items than colours -- so the same item always gets
+    the same colour regardless of how many others are present. For a continuous colormap the
+    colours are sampled evenly over ``[0, 1]`` (endpoints included; a single item gets the 0.0
+    end).
+
+    Args:
+        items: The values to colour (order defines the assignment; deduplicated first-seen).
+        cmap: Matplotlib colormap name; listed/qualitative => cycle, continuous => even sample.
+
+    Returns:
+        ``{item: rgba}`` for each distinct item, in first-seen order.
+    """
+    uniq = list(dict.fromkeys(items))
+    cm = plt.get_cmap(cmap)
+    base = getattr(cm, "colors", None)
+    if base is not None:  # listed/qualitative: cycle the discrete colours
+        from matplotlib.colors import to_rgba
+
+        return {it: to_rgba(base[i % len(base)]) for i, it in enumerate(uniq)}
+    n = len(uniq)  # continuous: sample [0, 1] evenly
+    positions = [0.0] * n if n == 1 else list(np.linspace(0.0, 1.0, n))
+    return {it: cm(pos) for it, pos in zip(uniq, positions)}
+
+
+def right_legend(ax, *, title=None, fontsize: int = 9, anchor=(1.02, 0.5), **kwargs):
+    """Attach the repo's prominent right-margin legend to `ax`.
+
+    The house convention (see the memory note on legible legends): a frameless legend anchored
+    ``loc="center left"`` just outside the right edge, so long series labels never overlap the
+    data. Callers should rely on ``bbox_inches="tight"`` / constrained layout to reclaim the
+    margin when saving or displaying.
+
+    Args:
+        ax: Target axes.
+        title: Optional legend title.
+        fontsize: Legend font size.
+        anchor: ``bbox_to_anchor`` point (default just past the right edge, vertically centred).
+        **kwargs: Forwarded to ``ax.legend`` (e.g. ``ncol``, ``handles``).
+
+    Returns:
+        The ``matplotlib.legend.Legend``.
+    """
+    return ax.legend(
+        loc="center left", bbox_to_anchor=anchor, frameon=False,
+        title=title, fontsize=fontsize, **kwargs,
+    )
+
 
 def _fmt_tick(x) -> str:
     """Format a heatmap tick label: numbers with ``%g``, everything else via ``str``."""
@@ -409,6 +474,129 @@ def facet_heatmaps(
         df, row, col, val, col_facet=facet, agg=agg, orders=orders, show_n=show_n,
         cmap=cmap, vmin=vmin, vmax=vmax, highlight=hl, title=title, cbar_label=cbar_label,
     )
+
+
+def heatmap_figure(
+    grid: pd.DataFrame,
+    *,
+    cbar_label: str | None = None,
+    title: str | None = None,
+    figsize: tuple[float, float] | None = None,
+    **kwargs,
+):
+    """Single-panel figure envelope over `annotated_heatmap`: its own figure + colorbar.
+
+    Creates the figure (so the caller does not have to), forwards ``**kwargs`` straight to
+    `annotated_heatmap`, and attaches a labelled colorbar. The default size is scaled from the
+    grid shape the way the notebooks size these panels: ``width ~ 1.1*ncols + 3`` and
+    ``height ~ 0.5*nrows + 2``.
+
+    IMPORTANT -- the auto-range differs from `annotated_heatmap`'s default. `annotated_heatmap`
+    fixes ``vmin=0``/``vmax=1`` (built for 0..1 probabilities); this envelope, when neither
+    ``vmin``/``vmax`` nor a ``norm`` is passed, instead auto-ranges the colour scale from
+    ``np.nanmin``/``np.nanmax`` of the colour data (``color`` if given, else `grid`) -- the
+    notebooks' ``float(np.nanmin(...))`` idiom, for grids that are not on a 0..1 scale. Pass an
+    explicit ``vmin``/``vmax`` (or ``norm``) to opt back into a fixed range. An all-NaN grid falls
+    back to a plain 0..1 range and does not crash.
+
+    Args:
+        grid: The value matrix (rows x columns) to draw.
+        cbar_label: Colorbar label.
+        title: Optional axes title.
+        figsize: Explicit figure size; defaults to the grid-shape-scaled size described above.
+        **kwargs: Forwarded to `annotated_heatmap` (``cmap``, ``fmt``, ``box_predicate``, ...).
+
+    Returns:
+        ``(figure, axes, image)`` -- the last for a caller who wants the mappable.
+    """
+    nrows, ncols = grid.shape
+    if figsize is None:
+        figsize = (1.1 * ncols + 3, 0.5 * nrows + 2)
+    fig, ax = plt.subplots(figsize=figsize)
+    if "vmin" not in kwargs and "vmax" not in kwargs and kwargs.get("norm") is None:
+        color = kwargs.get("color")
+        data = np.asarray((grid if color is None else color).values, dtype=float)
+        if np.isnan(data).all():
+            lo, hi = 0.0, 1.0  # all-NaN: fall back to the fixed default range
+        else:
+            lo, hi = float(np.nanmin(data)), float(np.nanmax(data))
+        kwargs["vmin"], kwargs["vmax"] = lo, hi
+    im = annotated_heatmap(ax, grid, **kwargs)
+    fig.colorbar(im, ax=ax, label=cbar_label)
+    if title is not None:
+        ax.set_title(title)
+    return fig, ax, im
+
+
+def ecdf_plot(ax, values, *, label: str | None = None, **step_kwargs):
+    """Draw an empirical CDF step curve of `values` on `ax`.
+
+    Sorts the finite values and steps ``i/n`` (``where="post"``); NaNs (and infinities) are
+    dropped. Empty input draws nothing and returns ``None``.
+
+    Args:
+        ax: Target axes.
+        values: The sample (array-like).
+        label: Optional series label.
+        **step_kwargs: Forwarded to ``ax.step`` (e.g. ``color``, ``lw``).
+
+    Returns:
+        The list of line artists from ``ax.step``, or ``None`` when there is nothing to draw.
+    """
+    v = np.asarray(values, dtype=float)
+    v = np.sort(v[np.isfinite(v)])
+    n = len(v)
+    if n == 0:
+        return None
+    y = np.arange(1, n + 1) / n
+    return ax.step(v, y, where="post", label=label, **step_kwargs)
+
+
+def fraction_curve(
+    ax,
+    df: pd.DataFrame,
+    x: str,
+    flag: str,
+    *,
+    bins: Sequence[float],
+    min_n: int = 5,
+    boundary: float | None = None,
+    label: str | None = None,
+    color=None,
+    marker: str = "o",
+):
+    """Binned collapse-fraction curve: mean of boolean `df[flag]` vs binned `df[x]`.
+
+    Bins ``df[x]`` on the `bins` edges via `stats.binned_fraction`, which keeps every bin and
+    masks under-populated ones (``n < min_n``) to ``NaN``, then plots fraction vs bin midpoint
+    (see `stats.binned_fraction` for the geometric-vs-arithmetic midpoint rule and the all-bins /
+    finite-rows conventions). Masked bins render as gaps in the line. An optional dashed vertical
+    line marks a `boundary` value (drawn once).
+
+    Args:
+        ax: Target axes.
+        df: Frame carrying the `x` and `flag` columns.
+        x: Column binned along the x axis.
+        flag: Boolean/0-1 column reduced to a fraction per bin.
+        bins: Monotonic bin edges.
+        min_n: Minimum per-bin count; sparser bins render as gaps.
+        boundary: Optional x value for a dashed vertical reference line.
+        label: Optional series label.
+        color: Line/marker colour.
+        marker: Marker style.
+
+    Returns:
+        The plotted ``Line2D``.
+    """
+    binned = stats.binned_fraction(df, x, flag, bins=bins, min_n=min_n)
+    line, = ax.plot(
+        binned["x_mid"], binned["frac"], marker=marker, color=color, label=label
+    )
+    if boundary is not None:
+        ax.axvline(boundary, ls=":", color="0.5")
+    ax.set_xlabel(x)
+    ax.set_ylabel(f"fraction {flag}")
+    return line
 
 
 def identity_scatter(

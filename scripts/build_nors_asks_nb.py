@@ -245,6 +245,14 @@ uncalibrated.
     diverges to non-finite weights, at every rank. Alive / dead-but-revivable /
     diverged are three regimes (§7). The survivors' transfer hump replicates on
     calibrated placement (peak K/K* ≈ 0.42) (§7.2).
+21. **[interv-train]** The training-time clamp (§5.5c): capping the pooled dose at
+    0.8×θ̂ does NOT rescue verified-dead cells (22/28 die; 0/54 at c ≥ 1.0) — endpoint-
+    dose sufficiency is falsified at training time; rescues exist only at c = 0.8 with
+    a steep within-cell flip (0.67 vs 0.80×θ̂). Stage 2 settled the discriminator:
+    survival is monotone in the ceiling (14/14 at 0.5×θ̂ incl. every lr5e-4 run; 11/14
+    at 0.6) — direction-corruption REFUTED, dose causally sufficient at training time
+    with a trajectory-exposure threshold ~0.6×θ̂; the σ/F clamp arms physically couple
+    (low srank), so norm attribution stays with the eval-time surgeries.
 20. **[meta]** Four superb-looking adaptive-era statistics were artifacts caught
     only by specification-stability — including an lr "regime shift" and an α²
     retraction that both *inverted* on clean support; that history, and why the
@@ -268,18 +276,19 @@ import statsmodels.formula.api as smf
 import yaml
 from scipy import stats
 
-REPO = Path.cwd() if (Path.cwd() / "configs").exists() else Path.cwd().parent
-import sys
-sys.path.insert(0, str(REPO / "src"))
-from subliminal_learning.analysis.plots import compare_table, math_label
-OUTPUT_ROOT = Path(yaml.safe_load((REPO / "configs/paths/paths_local.yaml").read_text())["output_root"])
+from subliminal_learning.analysis.setup import bootstrap
+from subliminal_learning.analysis.plots import compare_table, math_label, right_legend
+from subliminal_learning.analysis.frames import load_results
+from subliminal_learning.analysis.stats import cluster_ols, delta_ratio_ci
+from subliminal_learning.analysis.collapse_law import (
+    K_of, KSTAR_POOLED, B_LAW, C_LAW, DEAD_SEED)
+REPO, OUTPUT_ROOT = bootstrap()
 AN = OUTPUT_ROOT / "analysis"
 
 DS1, FOCUS_TEACHER = "pythia-160m-data-seed1", "ep2_lr5e-4_r32a64_tseed1"
-DEAD_CUT = 0.01
+DEAD_CUT = DEAD_SEED
 
-doc = json.loads((AN / "adapter_norms_sweep_all_arms_all_teachers.json").read_text())
-mod_all = pd.DataFrame(doc["results"])
+mod_all = load_results(AN / "adapter_norms_sweep_all_arms_all_teachers.json")
 
 # The sweep JSON also carries the ckpt-distill pipeline's prompt-spliced variant
 # (dataset_tag *_spliced, ep<=10 only). Different training distribution -> excluded
@@ -637,7 +646,7 @@ for ax, (col, lab) in zip(axes, [(WF, "‖W$_f$‖$_F$/‖W$_0$‖$_F$"),
     ax.axvline(1.0, color="0.5", lw=1, ls=":")
     ax.set_xscale("log"); ax.set_xlabel(f"worst-module {lab}")
     ax.set_ylabel("fraction of runs ≤ x"); ax.set_title(lab.split("/")[0])
-axes[1].legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=11)
+right_legend(axes[1], fontsize=11)
 fig.suptitle("§1.2 — worst-module weight-norm ratio over the whole ep20 grid "
              f"(n={len(w12)} runs), by fate", y=1.02)
 plt.tight_layout(); plt.show()"""))
@@ -864,7 +873,7 @@ print("\n§1.3c  balance by LoRA rank — row unit: one rank, pooled over its ru
 display(compare_table(by_rank, fmt="{:.4f}", math=False, subset=["median"],
                       labels={"median": "median B*/A*"}))"""))
 
-cells.append(code(r"""growth = pd.DataFrame(json.loads((AN / "adapter_norms_growth_mech_probe.json").read_text())["results"])
+cells.append(code(r"""growth = load_results(AN / "adapter_norms_growth_mech_probe.json")
 growth["bal"] = balance(growth)
 growth = growth.dropna(subset=["step"])
 gcurve = (growth.assign(cell=growth.student_tag.str.replace("ep20_", "", regex=False))
@@ -953,7 +962,7 @@ ax.set_xlabel(r"$\alpha$")
 ax.set_ylabel(r"$\Vert B\,\Delta A\Vert\,/\,\Vert B\,A_0\Vert$ (run level)")
 ax.set_title("§1.4 — moved/frozen dominance by α, both norms "
              "(box = IQR, whiskers = 5–95%, run unit)")
-ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+right_legend(ax)
 plt.tight_layout(); plt.show()"""))
 
 cells.append(md(r"""### §1.5 Bound tightness — factor arithmetic is licensed
@@ -1081,7 +1090,7 @@ ax.loglog(t2["rank"], t2.theta_fro.iloc[0] * (t2["rank"] / 1.0) ** 0.5, ":", col
           label="nor's prediction (+0.5)")
 ax.set_xlabel("LoRA rank r"), ax.set_ylabel(r"death threshold $\theta$ on dw")
 ax.set_title("Test 1: whichever line is flat wins")
-ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+right_legend(ax)
 plt.tight_layout(); plt.show()"""))
 
 cells.append(md("""**Robustness.** Raw un-normalized $\\lVert\\Delta W\\rVert$ gives the
@@ -1302,10 +1311,11 @@ degenerate runs inflate raw final-slot drift by orders of magnitude regardless o
 input, and that cluster's position in $(x_F, L)$ space flips the *pooled* fit's sign
 — a Simpson confound, not a movement result. So drift is reported **by fate
 stratum**, where every stratum agrees with KL (alive +0.28, dead +0.37,
-non-degenerate +0.19). The clean fix — recording one additional post-final-LayerNorm
-slot (or logit-space drift) in the capture, so the drift readout is
-degeneracy-robust without stratification — is the designated next upgrade to the
-activations probe.
+non-degenerate +0.19). The candidate clean fix is not stratification but
+**decomposition** — recording the drift's direction component and its norm-inflation
+component separately, plus the post-final-LN slot. A capture upgrade for this is
+prepared but **parked pending design discussion** (`strip-activations-v2`,
+2026-08-12); see "The drift decomposition" note below.
 
 **Why this settles the arbitration**: nor's argument for spectral was that spectral
 *bounds* activation growth. A bound is worst-case math — what could happen if the
@@ -1349,10 +1359,16 @@ cells.append(code(r"""def _load_strip_cond(cond):
         per = pd.DataFrame(d["results"])
         br = per.groupby("student_tag").lora_over_base.mean()
         dr = pd.DataFrame(d["drift"])
-        fin = dr[dr.layer == dr.layer.max()].set_index("student_tag").rel_drift
-        kl_ = dr[dr.kl_base_adapted.notna()].set_index("student_tag").kl_base_adapted
-        parts.append(pd.concat([br.rename("branch_base"), fin.rename("rel_drift"),
-                                kl_.rename("kl_base_adapted")], axis=1))
+        last = dr[dr.layer == dr.layer.max()].set_index("student_tag")
+        cols = [br.rename("branch_base"), last.rel_drift,
+                dr[dr.kl_base_adapted.notna()]
+                .set_index("student_tag").kl_base_adapted]
+        # decomposition fields (strip-activations-v2, 2026-08-12): direction vs
+        # norm-inflation split of the raw drift + the post-final-LN readout
+        for c in ("dir_drift", "norm_ratio", "postln_rel_drift"):
+            if c in last.columns and last[c].notna().any():
+                cols.append(last[c])
+        parts.append(pd.concat(cols, axis=1))
     return pd.concat(parts)
 
 h1 = strip[(strip.seed == 1) & strip.test_p.notna() & strip.dw_fro.notna()
@@ -1427,7 +1443,8 @@ print("  -> within every stratum the drift gS agrees in sign with KL's: the "
 print("\nFATE STRUCTURE (the containment jump):")
 dk_ = pd.DataFrame({"t": np.log(pile.kl_base_adapted.clip(lower=1e-9)),
                     "f": np.log(pile.dw_fro.values), "L": L_.values,
-                    "lrk": np.log(pile["rank"].values), "dead": pile.dead.values})
+                    "lrk": np.log(pile["rank"].values), "dead": pile.dead.values,
+                    "rank": pile["rank"].values})
 off = smf.ols("t ~ f + L + dead", dk_).fit()
 ix_ = smf.ols("t ~ f + L + dead + dead:f + dead:L", dk_).fit()
 print("  common-slope offset model: dead offset %+.2f log-nats = %.1fx KL at "
@@ -1478,13 +1495,80 @@ ax.set_ylabel("log KL(base‖ft), energy-adjusted (residual on x_F)")
 ax.set_title("§4 — the spread effect at fixed energy, one point per strip cell.\n"
              "Both fate clouds slope UP (γ_S > 0 within regime); the vertical gap "
              "between them\nis the containment jump — dose variables don't carry it")
-ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9)
+right_legend(ax, fontsize=9)
 plt.tight_layout(); plt.show()
 print("added-variable plot of the conditioned fit: x = the well-conditioned spread "
       "coordinate, y = KL with the energy axis regressed out. Caution: the dashed "
       "per-fate slopes here inherit the POOLED energy adjustment — the interaction "
       "model printed above gives the clean per-fate estimates (alive +0.43, dead "
       "+0.27); the offset between the clouds is quantified there too.")"""))
+
+cells.append(code(r"""# the same added-variable plot, STRATIFIED BY RANK — nominal rank
+# cannot vary inside a panel, so any slope here is realized spread alone
+ranks_ = sorted(dk_["rank"].unique())
+fig, axes = plt.subplots(2, 4, figsize=(14.5, 7), sharey=True)
+for ax, rk in zip(axes.flat, ranks_):
+    g = dk_[dk_["rank"] == rk]
+    part_g = smf.ols("t ~ f", g).fit().resid
+    for fate, m, c in (("alive", ~g.dead, "tab:blue"), ("dead", g.dead, "tab:red")):
+        ax.scatter(g.L[m], part_g[m], s=18, color=c, alpha=0.65, linewidths=0)
+    slg = np.polyfit(g.L, part_g, 1)
+    xs_g = np.linspace(g.L.min(), g.L.max(), 10)
+    ax.plot(xs_g, np.polyval(slg, xs_g), color="black", lw=1.8)
+    ax.axhline(0, color="0.7", lw=0.6)
+    ax.set_title(f"r = {rk}  (slope {slg[0]:+.2f}, n = {len(g)})", fontsize=10)
+for ax in axes[1]:
+    ax.set_xlabel("L = log srank")
+for ax in axes[:, 0]:
+    ax.set_ylabel("log KL, energy-adj.")
+fig.suptitle("§4 — the spread effect WITHIN each rank (blue = alive, red = dead): "
+             "the upward slope survives everywhere nominal rank is held fixed", y=1.0)
+plt.tight_layout(); plt.show()
+print("note the x-range narrows as r grows (high-rank updates still concentrate, "
+      "srank 1-7), and the r=1-2 panels are noisy for exactly that reason — but no "
+      "panel reverses the sign.")"""))
+
+cells.append(md(r"""**The drift decomposition — addressing the raw-basis problem instead of
+stratifying around it.** The raw drift mixes two physically different components:
+**direction movement** (does the residual stream point somewhere else?) and **norm
+inflation** (did its magnitude blow up?). The final LayerNorm passes the first to
+the output and mostly cancels the second — which is exactly why deep-dead runs can
+have 10²–10³ raw drift while KL saturates. The capture upgrade (queued 2026-08-12,
+`strip-activations-v2`) records the split directly: per layer, `dir_drift` = mean
+$\lVert\hat h_\mathrm{ft} - \hat h_\mathrm{base}\rVert$ of the *unit* vectors
+(bounded in [0, 2], degeneracy-robust) and `norm_ratio` = mean
+$\lVert h_\mathrm{ft}\rVert/\lVert h_\mathrm{base}\rVert$ (the blowup axis), plus
+the **post-final-LN drift** — the last state the unembedding reads, and the
+principled "normalized" readout: not statistical hygiene, but measuring the state
+the model actually uses (magnitude the LN removes literally cannot reach the
+output). The capture for this is prepared but **parked pending discussion**
+(`strip-activations-v2`); the cell below runs on the direction component if and
+when regenerated files land."""))
+
+cells.append(code(r"""if "dir_drift" not in pile.columns:
+    print("drift decomposition not on disk — the strip-activations-v2 capture "
+          "upgrade is prepared but PARKED pending design discussion (2026-08-12)")
+else:
+    for tgt, lab in (("dir_drift", "DIRECTION drift (unit vectors, "
+                      "degeneracy-robust)"),
+                     ("postln_rel_drift", "post-final-LN drift (the state the "
+                      "unembedding reads)")):
+        if tgt not in pile.columns or pile[tgt].isna().all():
+            continue
+        ge_t, gs_t = spread_fit(pile, tgt)
+        gs_bt = [spread_fit(pile.iloc[rng.integers(0, len(pile), len(pile))], tgt)[1]
+                 for _ in range(500)]
+        print("%s: pooled gE %+.2f gS %+.2f [%+.2f, %+.2f]"
+              % (lab, ge_t, gs_t, *np.percentile(gs_bt, [2.5, 97.5])))
+        for fate, sub in (("alive", pile[~pile.dead]), ("dead", pile[pile.dead])):
+            ge_f2, gs_f2 = spread_fit(sub, tgt)
+            print("   %s-only: gE %+.2f gS %+.2f" % (fate, ge_f2, gs_f2))
+    if "norm_ratio" in pile.columns:
+        nrm = pile.groupby(pile.dead.map({False: "alive", True: "dead"})).norm_ratio
+        print("norm inflation ‖h_ft‖/‖h_base‖ at the final slot, median by fate: "
+              + ", ".join(f"{k} {v:.2f}" for k, v in nrm.median().items())
+              + " — the blowup axis, now measured separately instead of "
+                "contaminating the movement readout")"""))
 
 cells.append(md(r"""### §4b The selectivity split — what death is
 
@@ -1553,7 +1637,7 @@ print("trait-channel fate signal: KL AUC %.2f (fate-blind-to-inverted); raw drif
       % (roc_auc_score(numbers.dead, numbers.kl_base_adapted),
          roc_auc_score(numbers.dead, numbers.rel_drift)))
 nb_dead = meta_cols.index[(meta_cols.dead) & (
-    meta_cols.lr * meta_cols.alpha**0.561 * meta_cols["rank"]**-0.085 / 7.87e-4 < 2)]
+    K_of(meta_cols.lr, meta_cols.alpha, meta_cols["rank"]) / KSTAR_POOLED < 2)]
 nsub = numbers.loc[numbers.index.isin(nb_dead)]
 print("NEAR-BOUNDARY dead (K/K* < 2, n=%d): trait drift median %.2f, KL %.2f — "
       "matches alive (%.2f, %.2f): at the boundary, fate is invisible on the "
@@ -1582,7 +1666,7 @@ ax.set_ylabel("raw final-slot drift, NEUTRAL text")
 ax.set_title("the degeneracy blowup, directly: deep-dead runs drift 10²–10³ on "
              "BOTH channels,\nlanding on y = x — the model is broken on every "
              "input, not moved where training pointed")
-ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+right_legend(ax)
 plt.tight_layout(); plt.show()
 deep = jd[jd.dead_num & (jd.rel_drift_pile > 5)]
 if len(deep):
@@ -1595,8 +1679,8 @@ if len(deep):
 
 cells.append(code(r"""jn = (numbers[["kl_base_adapted", "dead"]].add_suffix("_num")
       .join(pile[["kl_base_adapted"]].add_suffix("_pile"), how="inner"))
-kk_all = (meta_cols.lr * meta_cols.alpha**0.561 * meta_cols["rank"]**-0.085
-          / 7.87e-4)
+kk_all = (K_of(meta_cols.lr, meta_cols.alpha, meta_cols["rank"])
+          / KSTAR_POOLED)
 jn["kk"] = kk_all.reindex(jn.index)
 groups = (("alive", (~jn.dead_num), "tab:blue", "o"),
           ("dead, near boundary (K/K* < 2)", jn.dead_num & (jn.kk < 2),
@@ -1616,7 +1700,7 @@ ax.set_ylabel("KL(base‖ft) on NEUTRAL text (nats)")
 ax.set_title("§4b — containment, one point per cell: fate lives on y, not x.\n"
              "Near-boundary dead sit in the alive x-range but far above the "
              "alive y-cloud")
-ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+right_legend(ax)
 plt.tight_layout(); plt.show()
 nb_ = jn[jn.dead_num & (jn.kk < 2)]
 al_ = jn[~jn.dead_num]
@@ -1702,6 +1786,24 @@ print("LOCAL spread effect (same conditioned basis as §4): gE %+.2f, gS %+.2f "
       "module output. Against the propagated gS +0.51 (KL, §4), this is the "
       "inversion: the asymmetry between the norms is created by propagation"
       % (ge_b, gs_b_, *np.percentile(gsb_boot, [2.5, 97.5])))
+db_ = pd.DataFrame({"t": np.log(pile.branch_base.values),
+                    "f": np.log(pile.dw_fro.values),
+                    "L": 2 * (np.log(pile.dw_fro.values)
+                              - np.log(pile.dw_spec.values)),
+                    "lrk": np.log(pile["rank"].values),
+                    "rank": pile["rank"].values})
+rcb = smf.ols("t ~ f + L + lrk", db_).fit()
+print("rank hygiene (same as §4's): gS with log-rank control %+.2f ± %.2f; "
+      "within each rank:" % (rcb.params.L, rcb.bse.L))
+for rk, g in db_.groupby("rank"):
+    if len(g) < 20:
+        continue
+    frb = smf.ols("t ~ f + L", g).fit()
+    print("   r=%3d: gS %+.2f (se %.2f, n=%d)"
+          % (rk, frb.params.L, frb.bse.L, len(g)))
+print("   -> negative at EVERY rank, strongest at low rank (where one direction is "
+      "nearly the whole update): the local advantage of concentration is not a "
+      "rank-composition artifact either")
 
 # the same added-variable plot as §4's, for the LOCAL readout — slope flips sign
 t_b = np.log(pile.branch_base.values)
@@ -1721,7 +1823,7 @@ ax.set_ylabel("log branch/base, energy-adjusted (residual on x_F)")
 ax.set_title("§4c — the SAME added-variable plot as §4's, on the module-local "
              "readout:\nthe slope flips NEGATIVE — concentration is louder where "
              "it acts")
-ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+right_legend(ax)
 plt.tight_layout(); plt.show()
 
 fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), sharey=True)
@@ -1735,7 +1837,7 @@ for ax, xcol, xlab in ((axes[0], "dw_fro", "dw_fro (relative Frobenius dose)"),
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel(xlab); ax.set_title(f"log-log r = {r_:+.2f}")
 axes[0].set_ylabel("branch/base ratio (pile)")
-axes[1].legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+right_legend(axes[1])
 fig.suptitle("§4c — the adapter's felt loudness vs each dose, one point per cell", y=1.02)
 plt.tight_layout(); plt.show()"""))
 
@@ -1780,7 +1882,13 @@ while right in conclusion**, and the measured shape is more informative:
    the median ratio is ~0.86: the branch's louder injection (§4c's γ_S = −0.81 is a
    statement about the branch *output*) is knocked below the spread version within
    the very first block's LayerNorm/nonlinearity/projections. There is no shallow
-   region where concentration leads.
+   region where concentration leads — and this is **not a contradiction of §4c**,
+   because the two measurements sit on opposite sides of the block: §4c reads the
+   branch output at the wire, *before* it enters the residual stream and the block's
+   downstream processing; the probe's first slot is *after* one block has processed
+   the injection. Together they **bracket the reversal to inside the injecting block
+   itself**: louder at the wire, already quieter by the block's exit. That is the
+   sharpest localization of the "transmission tax" available.
 2. **Mid-network, concentration partially recovers** (median ratio peaks ~1.1 around
    layer 8): a fixed direction injected identically by every block accumulates
    *coherently* down the residual stream, while flat's varied directions add
@@ -1815,7 +1923,7 @@ cells.append(code(r"""SDP = AN / "spread_depth_probe.json"
 if not SDP.exists():
     print("spread depth probe not on disk — skipped")
 else:
-    sdp = pd.DataFrame(json.loads(SDP.read_text())["results"])
+    sdp = load_results(SDP)
     pv_d = sdp.pivot_table(index=["student_tag", "layer"], columns="variant",
                            values="rel_drift")
     pv_d["ratio"] = pv_d.top1 / pv_d.flat
@@ -1837,7 +1945,7 @@ else:
     axes[1].set_xlabel("layer"); axes[1].set_ylabel("drift(top1) / drift(flat)")
     axes[1].set_title("the inversion, layer by layer: instant filtering → coherent "
                       "recovery → terminal normalization")
-    axes[1].legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+    right_legend(axes[1])
     plt.tight_layout(); plt.show()
     L = med.ratio
     print("median top1/flat ratio: layer1 %.2f -> mid-peak %.2f (layer %d) -> "
@@ -1880,7 +1988,7 @@ else:
     ax.axhline(1.0, color="crimson", ls="--", lw=1)
     ax.set_xlabel("layer"); ax.set_ylabel("drift(top1) / drift(flat)")
     ax.set_title("§4e replication — depth profile on rule-selected strip cells")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+    right_legend(ax)
     plt.tight_layout(); plt.show()"""))
 
 cells.append(md(r"""## §5 — second arc: the update is exactly two terms, and Adam sets their exponents
@@ -1961,8 +2069,7 @@ cells.append(code(r"""run20 = run20.assign(y=np.log(run20.dW_fro), ys=np.log(run
                      llr=np.log(run20.lr), la=np.log(run20.alpha),
                      lrk=np.log(run20["rank"]))
 def cfit(df, formula):
-    return smf.ols(formula, df).fit(cov_type="cluster",
-                                    cov_kwds={"groups": df.cell})
+    return cluster_ols(df, formula, "cell")
 P = cfit(run20, "y ~ llr + la + lrk")
 Ps = cfit(run20, "ys ~ llr + la + lrk")
 print("PRIMARY dose law (strip, calibrated): lr^%.3f±%.3f a^%.3f±%.3f r^%.3f±%.3f "
@@ -2336,19 +2443,18 @@ falls with rank while the dose needed to kill also falls.
 cells.append(code(r"""def ratios(f):
     '''(alpha/lr, r/lr) with delta-method SEs from the cluster covariance.'''
     p, V = f.params, f.cov_params()
+    idx = list(p.index)
+    den = idx.index("llr")
     out = []
     for name in ("la", "lrk"):
-        est = p[name] / p["llr"]
-        g = pd.Series(0.0, index=p.index)
-        g[name], g["llr"] = 1 / p["llr"], -p[name] / p["llr"] ** 2
-        out.append((est, float(np.sqrt(g @ V @ g))))
+        est, (lo, hi) = delta_ratio_ci(p.to_numpy(), V.to_numpy(), idx.index(name), den)
+        out.append((est, (hi - lo) / (2 * 1.96)))
     return out
 
 all20 = to_runs(mod_all[mod_all.ep.eq(20) & mod_all.test_p.notna()])
 all20 = all20.assign(y=np.log(all20.dW_fro), llr=np.log(all20.lr),
                      la=np.log(all20.alpha), lrk=np.log(all20["rank"]))
-X6f = smf.ols("y ~ llr + la + lrk", all20).fit(
-    cov_type="cluster", cov_kwds={"groups": all20.cell})
+X6f = cluster_ols(all20, "y ~ llr + la + lrk", "cell")
 print("[adaptive-only] §6f cross-arm fit (all 6 arms, all teachers): "
       "lr^%.2f a^%.2f r^%.2f R2 %.3f"
       % (X6f.params.llr, X6f.params.la, X6f.params.lrk, X6f.rsquared))
@@ -2359,8 +2465,8 @@ for name, f in (("pooled F", P), ("Fit L F", L), ("Fit H F", H),
     (b_, sb), (c_, cse) = ratios(f)
     rows.append({"fit": name, "alpha/lr": b_, "se(a/lr)": sb,
                  "r/lr": c_, "se(r/lr)": cse})
-rows.append({"fit": "collapse law K*", "alpha/lr": 0.561, "se(a/lr)": np.nan,
-             "r/lr": -0.085, "se(r/lr)": np.nan})
+rows.append({"fit": "collapse law K*", "alpha/lr": B_LAW, "se(a/lr)": np.nan,
+             "r/lr": C_LAW, "se(r/lr)": np.nan})
 t5e = pd.DataFrame(rows).set_index("fit")
 display(compare_table(t5e.round(3), subset=["alpha/lr", "r/lr"]))
 for name, f in (("Fit L", L), ("pooled", P)):
@@ -2468,7 +2574,7 @@ ax.set_xlabel(r"$\alpha$"); ax.set_ylabel("excess retention")
 ax.set_title("§5.4 — excess retention by α and splice direction\n"
              f"({POP.split(' (')[0]}; trait-carrying cells; box = IQR, "
              "whiskers = 5–95%)")
-ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+right_legend(ax)
 plt.tight_layout(); plt.show()
 
 hand = pd.DataFrame({"n": tcf.groupby("alpha").size(),
@@ -2588,7 +2694,7 @@ else:
     ax.set_title("Exp 1 on the rule-selected λ sweep — every run-curve on the common "
                  "dose axis:\nsame effective dose, different fate by training history "
                  "(hysteresis)")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9)
+    right_legend(ax, fontsize=9)
     plt.tight_layout(); plt.show()
     print("read: pure rescaling walks every run across the boundary — alive curves "
           "(blue) trace the transfer hump and die past their peak; dead curves (red) "
@@ -2678,7 +2784,7 @@ else:
     ax.set_xlabel(r"training dose $d_0$ (dw$_F$)")
     ax.set_ylabel("recoverable-trait ceiling (max-over-λ p)")
     ax.set_title("the revival curve — masked vs erased, as a function of training dose")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+    right_legend(ax)
     plt.tight_layout(); plt.show()
     if len(lsc):
         both_rc = pd.concat([cr.reset_index()[["d0", "ceiling"]],
@@ -3071,6 +3177,204 @@ again; (iv) the mechanism is **cross-arm** (ws1 replication); (v) the term-splic
 double dissociation stands on the **full calibrated factorial** (932 run-slots ×
 both directions, zero selection — §5.4, where the strip-splice analysis lives)."""))
 
+cells.append(md(r"""### §5.5c — the training-time clamp (2026-08-12): the causal tier the λ results could not reach
+
+Every intervention above is evaluation-time — a λ-rescaled endpoint is not a state
+training ever visits. The clamp closes that gap: **train fresh runs in cells that
+are verified to die, while a projection caps the update's pooled dose at every
+optimizer step.** After each step the pooled dose D = mean over modules of
+s·‖BA‖/‖W₀‖ is computed exactly (Gram identity for Frobenius, QR-core σ₁ for
+spectral — never materializing ΔW); if D exceeds the ceiling, every lora_B is
+rescaled by ceiling/D — **direction-preserving, the training-time mirror of the λ
+splice**. Directions stay entirely free; only magnitude is bounded. Structurally
+this is max-norm projected optimization; inferentially it estimates the *controlled
+direct effect* of the HPs on fate at fixed dose: aggressive lr keeps every other
+consequence (step noise, direction selection, curvature sampling) and loses only
+the dose channel.
+
+**Design** (frozen in `run_logs/clamp_design_v1.json` before any outcome): 7 strip
+cells **verified both-seeds-dead** (K/K* 1.17–2.34, ranks {4,16,64}, both α
+regimes; the rescue design conditions on baseline fate — the inference is
+clamped-vs-unclamped within cell, and the unclamped arm already exists on disk) ×
+{fro, spec} × ceilings c·θ̂(r) with per-rank dead-edge thresholds θ̂ measured on
+the strip; stage 1 c ∈ {0.8, 1.0, 1.2}, stage 2 (outcome-directed region shift,
+recorded pre-outcome) fro-only c ∈ {0.5, 0.6, 0.7→0.6-restricted}. Two seeds.
+Outputs fully segregated under `{output_root}/clamp_students/<label>/…`.
+
+**Pre-registered predictions.** Dose-causal: fro c ≤ 0.9 rescues nearly all, with
+transfer at the matched sub-boundary level; σ-clamp with F left free fails.
+Direction-corruption: death at every ceiling. Peak account: σ-clamp rescues like
+F-clamp. The cells below compute everything live from the clamp trees — stage-2
+rungs appear automatically as they land."""))
+
+cells.append(code(r"""CLAMP_DESIGN = REPO / "run_logs" / "clamp_design_v1.json"
+CL_ROOT = AN.parent / "clamp_students"
+CL_MID = ("dog/pythia-160m-data-seed1/teacher-pythia-160m/ep2_lr5e-4_r32a64_tseed1/"
+          "ex10-20_prefix_n100k")
+if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
+    print("clamp experiment not on disk — skipped")
+else:
+    dsn = json.loads(CLAMP_DESIGN.read_text())
+
+    def _find_test(o):
+        if isinstance(o, dict):
+            if o.get("name") == "test" or o.get("prompt_set") == "test":
+                return o
+            for v in o.values():
+                r = _find_test(v)
+                if r is not None:
+                    return r
+        elif isinstance(o, list):
+            for v in o:
+                r = _find_test(v)
+                if r is not None:
+                    return r
+        return None
+
+    rows = []
+    for arm in dsn["arms"]:
+        lineage = CL_ROOT / arm["label"] / CL_MID / arm["tag"]
+        summ = lineage / "preference_summary.json"
+        if not summ.exists():
+            continue
+        t = _find_test(json.loads(summ.read_text()))
+        for seed_s, pv in ((t or {}).get("per_seed_p_target", {})).items():
+            clog = lineage / f"ftseed{seed_s}" / "clamp_log.jsonl"
+            bf = np.nan
+            if clog.exists():
+                ll = clog.read_text().splitlines()
+                bf = sum(1 for x in ll if json.loads(x)["bound"]) / max(len(ll), 1)
+            rows.append({"tag": arm["tag"], "K_rel": arm["K_rel"], "norm": arm["norm"],
+                         "ratio": arm["ratio"], "rank": arm["rank"], "seed": int(seed_s),
+                         "p": float(pv), "bound_frac": bf})
+    cf = pd.DataFrame(rows).drop_duplicates(["tag", "norm", "ratio", "seed"])
+    cf["alive"] = cf.p >= 0.01
+    n_design = 2 * len(dsn["arms"])
+    print(f"clamp census: {len(cf)}/{n_design} designed runs landed "
+          f"(cells verified all-dead unclamped; stage-2 rungs join as they drain)")
+    g = cf.groupby(["norm", "ratio"]).agg(
+        surv=("alive", "mean"), n_alive=("alive", "sum"), n=("alive", "size"),
+        bind=("bound_frac", "mean"))
+    print("\nSURVIVAL by arm (ratio = ceiling / per-rank θ̂ on the clamped norm):")
+    display(compare_table(g.round(3), fmt="{:.3f}"))
+    al = cf[cf.alive]
+    if len(al):
+        print(f"rescued runs ({len(al)}):")
+        display(compare_table(
+            al.sort_values(["norm", "ratio", "tag"])
+              .set_index(["tag", "norm", "ratio", "seed"])[
+                ["K_rel", "p", "bound_frac"]].round(3)))
+    print("fro-arm survival by cell x ratio:")
+    piv = cf[cf.norm == "fro"].pivot_table(index="tag", columns="ratio",
+                                           values="alive", aggfunc="mean")
+    piv.insert(0, "K_rel", cf.groupby("tag").K_rel.first())
+    display(compare_table(piv.round(2), fmt="{:.2f}"))"""))
+
+cells.append(code(r"""# Realized FROBENIUS dose of every clamped endpoint (the spec arms left F formally
+# unconstrained — whether it actually stayed free decides the norm-discrimination
+# read), and the survival-vs-realized-dose picture.
+from safetensors.numpy import load_file as _sload
+if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
+    print("clamp experiment not on disk — skipped")
+else:
+    _w0 = {}
+    for _r in json.loads((AN / "adapter_norms_strip_r8.json").read_text())["results"]:
+        _w0.setdefault(_r["module"], _r["W0_fro"])
+    THF = {int(k): v["fro"] for k, v in dsn["theta_hat"].items()}
+    frows = []
+    for arm in dsn["arms"]:
+        lineage = CL_ROOT / arm["label"] / CL_MID / arm["tag"]
+        aa, rr = arm["tag"], arm["rank"]
+        scal = int(_re.search(r"a(\d+)$", aa)[1]) / int(_re.search(r"_r(\d+)a", aa)[1])
+        for seed in (1, 2):
+            ck = lineage / f"ftseed{seed}" / "checkpoints" / "adapter_model.safetensors"
+            if not ck.exists():
+                continue
+            tens = _sload(str(ck))
+            doses = []
+            for k in tens:
+                if "lora_A" not in k:
+                    continue
+                base_mod = k.split(".lora_A")[0].replace("base_model.model.", "")
+                A, B = tens[k], tens[k.replace("lora_A", "lora_B")]
+                if base_mod in _w0:
+                    doses.append(scal * np.sqrt(((B.T @ B) * (A @ A.T)).sum()) / _w0[base_mod])
+            frows.append({"tag": aa, "norm": arm["norm"], "ratio": arm["ratio"],
+                          "seed": seed, "F_rel": float(np.mean(doses)) / THF[rr]})
+    ff = pd.DataFrame(frows).merge(cf[["tag", "norm", "ratio", "seed", "p", "alive"]],
+                                   on=["tag", "norm", "ratio", "seed"], how="inner")
+    spec8 = ff[(ff.norm == "spec")]
+    print(f"σ/F COUPLING: spec-clamped runs' realized F sits at "
+          f"{spec8.F_rel.min():.2f}–{spec8.F_rel.max():.2f} × θ̂_F — capping σ dragged F "
+          "with it (trained updates are low-srank), so the clamp CANNOT decouple the "
+          "norms on-trajectory; norm attribution stays with the eval-time surgeries.")
+    fig, ax = plt.subplots(figsize=(8.4, 4.6))
+    for aliv, color, lab in ((True, "tab:blue", "alive"), (False, "tab:red", "dead")):
+        sub = ff[ff.alive == aliv]
+        ax.scatter(sub.F_rel, sub.p.clip(1e-8), s=40,
+                   c=color, marker="o", alpha=0.75, label=lab)
+    ax.axvline(1.0, color="0.4", ls=":", lw=1.2)
+    ax.axhline(0.01, color="crimson", ls="--", lw=1)
+    ax.axhline(0.0133, color="0.5", ls="-.", lw=1)
+    ax.set_yscale("log")
+    ax.set_xlabel("realized endpoint dose  /  θ̂_F (unclamped death threshold)")
+    ax.set_ylabel("test p(dog)")
+    ax.set_title("training under the clamp: fate vs realized dose — deaths persist far\n"
+                 "below the unclamped threshold (endpoint dose is NOT sufficient)")
+    ax.legend(frameon=False)
+    plt.tight_layout(); plt.show()
+    sub08 = ff[ff.F_rel < 0.95]
+    print(f"runs with realized dose < 0.95 θ̂_F: {len(sub08)}, dead "
+          f"{(~sub08.alive).sum()} ({(~sub08.alive).mean():.0%}) — in cells whose "
+          "unclamped runs die WITH dose above θ̂; the clamped ones die BELOW it.")
+    r64 = ff[ff.tag == "ep20_lr5e-4_r64a8"].sort_values("F_rel")
+    if len(r64):
+        print("\nsharpest within-cell contrast (lr5e-4_r64a8):")
+        print(r64[["norm", "ratio", "seed", "F_rel", "p"]].round(3).to_string(index=False))"""))
+
+cells.append(md(r"""**Findings (stage 1, 2026-08-12; the cells above recompute live as stage 2 lands).**
+
+1. **Endpoint-dose sufficiency at training time is falsified.** Runs whose pooled
+   dose never exceeded ~0.8×θ̂ died in the large majority of arms (22/28 at stage 1,
+   both norms pooled), and **no run survived at c ≥ 1.0 (0/54)**. These endpoints
+   carry *less* update norm than many alive unclamped runs — yet die. The λ result
+   ("endpoint magnitude causally controls the readout") does not transfer to
+   training as "capping magnitude prevents death."
+2. **But dose is not a mere symptom either**: every rescue sits at c = 0.8 and none
+   above — a rescue margin exists, just lower than the unclamped θ̂ — and the
+   sharpest datum is within one cell: realized F of 0.67×θ̂ survives (both seeds)
+   where 0.80×θ̂ dies (both seeds). Clamped trajectories **ride the ceiling** for
+   60–90% of steps; the natural account is that *sustained exposure* kills at doses
+   a brief endpoint approach would survive — i.e., the causal dose variable is
+   closer to a trajectory integral than to the endpoint value.
+3. **The σ-vs-F discrimination physically failed**: trained updates are so
+   low-srank that capping either norm dragged the other along (spec arms realized
+   F at 0.67–0.95×θ̂_F). Norm attribution therefore rests on the eval-time
+   surgeries, where decoupling was possible — the clamp cannot arbitrate it.
+4. **Stage 2 settled it (2026-08-12 evening): the EXPOSURE account wins and
+   direction-corruption is refuted.** Survival vs ceiling is steeply monotone —
+   14/14 at c = 0.5 (including ALL six lr5e-4 runs), 11/14 at 0.6, 3/14 at 0.8,
+   0/28 at ≥ 1.0. No ceiling-independent death exists: capping the dose low
+   enough rescues every verified-dead cell. Training-time verdict: **dose is
+   causally sufficient for collapse — preventing the size prevents the death** —
+   with the operative threshold under a ceiling-riding trajectory at ~0.55–0.65×θ̂
+   (sustained exposure kills where a brief endpoint approach survives; the
+   endpoint θ̂ is the special case of unclamped trajectories that spend little
+   time near their maximum). Practical corollary: a ~0.5×θ̂ clamp is a training
+   METHOD — arbitrary lr without seed deaths.
+
+**What this does to the main argument (§4.8 of the evidence review / claim A2):**
+the chain closes in modified form — *update size causes collapse at training time*
+(clamping to 0.5×θ̂ rescues 14/14; monotone dose-response of survival), with one
+substantive amendment: the causal dose is **trajectory-like, not endpoint-like** —
+sustained time near a dose level kills at ~0.6×θ̂ where unclamped trajectories
+(which reach their maximum only briefly) die at θ̂. The eval-time λ results, the
+history hysteresis, and this exposure effect are now one coherent account: what an
+update *is* (direction) sets a personal tolerance; what training *does* (dose over
+time) determines crossing. The collapse law, dose law, and level-set derivation
+stand unchanged as endpoint statements about unclamped training. Scope: one lineage, ep20, AdamW wd=0, ceilings
+via B-rescale projection outside Adam's moment updates."""))
+
 cells.append(md(r"""## §6 — the verdict
 
 By the pre-registered rule, **the phenomenon tracks total update energy,
@@ -3145,7 +3449,7 @@ else:
              int((strip.test_p.isna() & ~strip.diverged).sum()),
              len(SP), int(SP.dead.sum()), 100 * SP.dead.mean()))
     dv = strip[strip.diverged]
-    dv_k = dv.lr * dv.alpha**0.561 * dv["rank"]**-0.085 / 7.87e-4
+    dv_k = K_of(dv.lr, dv.alpha, dv["rank"]) / KSTAR_POOLED
     print("DIVERGENCE CEILING: %d runs trained to non-finite weights, spanning "
           "EVERY rank (not an r1 quirk); min K/K* among them = %.1f — a second, "
           "sharp boundary roughly an order of magnitude above the collapse "
@@ -3232,8 +3536,7 @@ cells.append(code(r"""if HARV.exists():
     for name, seg in (("L (a<=32)", SP[SP.alpha <= 32]), ("H (a>=64)", SP[SP.alpha >= 64])):
         d7 = seg.assign(y=np.log(seg.dw_fro), llr=np.log(seg.lr),
                         la=np.log(seg.alpha), lrk=np.log(seg["rank"]))
-        f = smf.ols("y ~ llr + la + lrk", d7).fit(
-            cov_type="cluster", cov_kwds={"groups": d7.tag})
+        f = cluster_ols(d7, "y ~ llr + la + lrk", "tag")
         seg_pred[name] = f.params.la / f.params.llr
         print("strip dose law %s: lr^%.3f a^%.3f r^%.3f -> predicted b = d/a = %.3f"
               % (name, f.params.llr, f.params.la, f.params.lrk, seg_pred[name]))
@@ -3248,8 +3551,7 @@ cells.append(code(r"""if HARV.exists():
     # surface's local slopes at each segment's median bracket point instead.
     dq = SP.assign(y=np.log(SP.dw_fro), llr=np.log(SP.lr),
                    la=np.log(SP.alpha), lrk=np.log(SP["rank"]))
-    Fq = smf.ols("y ~ llr + I(llr**2) + la + I(la**2) + lrk", dq).fit(
-        cov_type="cluster", cov_kwds={"groups": dq.tag})
+    Fq = cluster_ols(dq, "y ~ llr + I(llr**2) + la + I(la**2) + lrk", "tag")
     for name, seg_b, bm, bse in (("L", bp7[bp7.alpha <= 32], bl7, ble7),
                                  ("H", bp7[bp7.alpha >= 64], bh7, bhe7)):
         llr0 = float(np.log(seg_b.lr_star).median())
@@ -3271,7 +3573,7 @@ cells.append(code(r"""if HARV.exists():
           "on this same data as a next step.")
 
     alive7 = SP[(SP.dead == 0) & SP.test_p.notna()].copy()
-    alive7["kk"] = alive7.lr * alive7.alpha**0.561 * alive7["rank"]**-0.085 / 7.87e-4
+    alive7["kk"] = K_of(alive7.lr, alive7.alpha, alive7["rank"]) / KSTAR_POOLED
     bins = np.geomspace(alive7.kk.min(), 1.0, 9)
     alive7["bin"] = pd.cut(alive7.kk, bins)
     prof = alive7.groupby("bin", observed=True).agg(
@@ -3288,7 +3590,7 @@ cells.append(code(r"""if HARV.exists():
     peak = prof.loc[prof.p50.idxmax()]
     ax.set_title("§7.2 — the transfer hump on calibrated placement "
                  f"(peak at K/K* ≈ {peak.kk:.2f})")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+    right_legend(ax)
     plt.tight_layout(); plt.show()
     print("survivors' transfer response is HUMPED on outcome-independent placement, "
           "peaking at K/K* ~ %.2f (n=%d alive runs) — consistent with the "

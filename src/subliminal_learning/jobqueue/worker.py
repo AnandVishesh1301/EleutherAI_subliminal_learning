@@ -33,7 +33,13 @@ from pathlib import Path
 from loguru import logger
 
 from subliminal_learning.jobqueue import store, yielding
-from subliminal_learning.jobqueue.gpu import DEFAULT_LOCK_PREFIX, GpuManager, load_policy
+from subliminal_learning.jobqueue.gpu import (
+    DEFAULT_LOCK_PREFIX,
+    GpuManager,
+    ensure_mps_daemon,
+    load_policy,
+    mps_env,
+)
 from subliminal_learning.jobqueue.store import (
     QueueMeta,
     REPO_ROOT,
@@ -137,6 +143,7 @@ class _Pool:
         poll_s: float,
         gpu_wait_s: float,
         fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
+        mps_env: dict[str, str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.hostname = hostname
@@ -146,6 +153,9 @@ class _Pool:
         self.poll_s = poll_s
         self.gpu_wait_s = gpu_wait_s
         self.fail_streak_limit = fail_streak_limit
+        # Injected only when ensure_mps_daemon succeeded; empty (byte-identical to pre-MPS)
+        # otherwise. Merged into every job's env so clients find the shared MPS server.
+        self.mps_env = mps_env or {}
         self._lock = threading.Lock()
         self._complete_logged: set[str] = set()
         self._dep_warned: set[str] = set()
@@ -360,6 +370,7 @@ class _Pool:
         start = now_iso()
         env = os.environ.copy()
         env.update(self.gpu.env())
+        env.update(self.mps_env)  # empty unless MPS was ensured up at pool startup
         env.update({str(k): str(v) for k, v in (meta.defaults.get("env") or {}).items()})
         env.update(job.env or {})
         # slots=0 (declared CPU-only): no GPU was reserved, so hide every device rather than
@@ -577,6 +588,21 @@ def run_pool(
         hostname,
         lock_prefix=lock_prefix or DEFAULT_LOCK_PREFIX,
     )
+    # Opt-in CUDA MPS: bring the per-user daemon up ONCE before workers spawn (a shared,
+    # user-level resource). Only inject its env into jobs if it actually came up; a missing
+    # binary / failed probe falls back silently so the pool runs exactly as it did pre-MPS.
+    # We deliberately do NOT tear the daemon down at pool exit — other pools/users may share it.
+    active_mps_env: dict[str, str] = {}
+    try:
+        _mps_policy = load_policy(root, hostname)
+    except FileNotFoundError:
+        _mps_policy = None
+    if _mps_policy is not None and _mps_policy.mps:
+        if ensure_mps_daemon(_mps_policy):
+            active_mps_env = mps_env(_mps_policy)
+            logger.info("MPS enabled (daemon up)")
+        else:
+            logger.warning("MPS requested but daemon unavailable; running without MPS")
     pool = _Pool(
         root,
         hostname,
@@ -586,6 +612,7 @@ def run_pool(
         poll_s=poll_s,
         gpu_wait_s=gpu_wait_s,
         fail_streak_limit=fail_streak_limit,
+        mps_env=active_mps_env,
     )
     # Opt-in GPU yielding: ALWAYS start the watchdog when this node has a policy file, and
     # let poll_once no-op while yield_to_foreign is false. This makes the switch hot-ENABLE:

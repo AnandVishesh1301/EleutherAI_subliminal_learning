@@ -333,6 +333,10 @@ def activations(
     base_out, base_raw = forward_with_raw_activations(
         base, batch.input_ids.to(device), batch.attention_mask.to(device))
     base_hidden = [h[mask] for h in base_raw]
+    # post-final-LN reference: the state the unembedding actually reads. LoRA never
+    # touches LayerNorms, so the adapted models' final LN is identical to this one.
+    with torch.no_grad():
+        base_postln = base.gpt_neox.final_layer_norm(base_raw[-1])[mask]
     base_logp = torch.log_softmax(base_out.logits[mask], dim=-1)
     del base, base_out, base_raw
 
@@ -370,16 +374,35 @@ def activations(
         for h in hooks:
             h.remove()
         # Propagated drift vs the unadapted base, per residual-stream layer + logits KL.
+        # Each raw drift is DECOMPOSED (added 2026-08-12): ``norm_ratio`` = mean
+        # ‖h_ad‖/‖h_base‖ (the residual-stream inflation axis — deep-dead degenerate
+        # runs blow this up input-independently) and ``dir_drift`` = mean
+        # ‖ĥ_ad − ĥ_base‖ of the UNIT vectors (pure direction movement, bounded in
+        # [0, 2] — degeneracy-robust). The final row also carries the post-final-LN
+        # drift, the last state the unembedding reads.
         kl = float(torch.nn.functional.kl_div(
             torch.log_softmax(out_ad.logits[mask], dim=-1), base_logp,
             log_target=True, reduction="batchmean").item())
+        n_slots = len(ad_raw)
+        with torch.no_grad():
+            fln = model.get_base_model().gpt_neox.final_layer_norm
+            ad_postln = fln(ad_raw[-1])[mask]
+            postln_rel = float(((ad_postln - base_postln).norm(dim=-1)
+                                / (base_postln.norm(dim=-1) + 1e-30)).mean().item())
         for layer, (hb, ha) in enumerate(zip(base_hidden, ad_raw)):
             ha = ha[mask]
             rel = (ha - hb).norm(dim=-1) / (hb.norm(dim=-1) + 1e-30)
+            nr = ha.norm(dim=-1) / (hb.norm(dim=-1) + 1e-30)
+            dd = (ha / ha.norm(dim=-1, keepdim=True).clamp_min(1e-30)
+                  - hb / hb.norm(dim=-1, keepdim=True).clamp_min(1e-30)).norm(dim=-1)
             drift_rows.append({"student_tag": tag, "ftseed": ftseed, "layer": layer,
                                "rel_drift": float(rel.mean().item()),
+                               "norm_ratio": float(nr.mean().item()),
+                               "dir_drift": float(dd.mean().item()),
+                               "postln_rel_drift": (postln_rel
+                                                    if layer == n_slots - 1 else None),
                                "kl_base_adapted": kl if layer == 0 else None})
-        del out_ad, ad_raw
+        del out_ad, ad_raw, ad_postln
         for key, a in acc.items():
             results.append({
                 "student_tag": tag, "ftseed": ftseed, "module": key, "scaling": a["s"],

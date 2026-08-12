@@ -22,19 +22,99 @@ Two estimation notes that drive the API:
 
 The two paths agree closely in practice; the delta method is the default because it is ~100x
 cheaper, with the bootstrap kept as an independent cross-check.
+
+The module also exposes the *settled* boundary constants (`B_LAW`, `C_LAW`, the two ``K*``
+anchors) and vectorized ``K`` helpers (`K_of`, `k_from_tag`, `add_k`), so notebooks stop
+re-hardcoding the exponents and picking whichever ``K*`` they last remembered.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.analysis.frames import read_cell_set
+from subliminal_learning.analysis.frames import (
+    PARAM_TAG_RE,
+    parse_param_tag,
+    read_cell_set,
+)
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
+
+# --- The settled collapse-boundary law (K = lr * alpha**B_LAW * rank**C_LAW; collapse at K >= K*).
+# B_LAW/C_LAW are the exponents settled across all six arms of the campaign (rank is protective).
+B_LAW: float = 0.561
+C_LAW: float = -0.085
+
+# Two K* anchors exist because the notebooks drifted between them. KSTAR_POOLED is the pooled
+# shared-band anchor and is CANONICAL for new work; KSTAR_DS1_DESIGN is the older ds1 design
+# anchor a few early notebooks fit against, kept only so those numbers stay reproducible.
+KSTAR_POOLED: float = 7.87e-4
+KSTAR_DS1_DESIGN: float = 7.84e-4
+
+
+def K_of(lr, alpha, rank, *, b: float = B_LAW, c: float = C_LAW):
+    """Evaluate ``K = lr * alpha**b * rank**c`` on scalars, numpy arrays or pandas Series.
+
+    Args:
+        lr: Learning rate(s).
+        alpha: LoRA alpha(s).
+        rank: LoRA rank(s).
+        b: Alpha exponent (defaults to the settled `B_LAW`).
+        c: Rank exponent (defaults to the settled `C_LAW`).
+
+    Returns:
+        ``K`` with the broadcast type/shape of the inputs.
+    """
+    return lr * alpha**b * rank**c
+
+
+def k_from_tag(tag: str, *, b: float = B_LAW, c: float = C_LAW) -> float:
+    """Compute ``K`` for a ``ep{e}_lr{lr}_r{r}a{a}`` parameter tag.
+
+    Args:
+        tag: A canonical sweep tag (parsed by `frames.parse_param_tag`).
+        b: Alpha exponent (defaults to `B_LAW`).
+        c: Rank exponent (defaults to `C_LAW`).
+
+    Returns:
+        ``K`` evaluated at the tag's lr/alpha/rank.
+    """
+    f = parse_param_tag(tag)
+    return float(K_of(f["lr"], f["alpha"], f["rank"], b=b, c=c))
+
+
+def add_k(
+    df: pd.DataFrame,
+    *,
+    lr: str = "lr",
+    alpha: str = "alpha",
+    rank: str = "rank",
+    kstar: float | None = None,
+    b: float = B_LAW,
+    c: float = C_LAW,
+) -> pd.DataFrame:
+    """Return a copy of `df` with a ``K`` column (and ``K_rel = K / kstar`` when `kstar` given).
+
+    Args:
+        df: Frame carrying lr/alpha/rank columns.
+        lr: Learning-rate column name.
+        alpha: Alpha column name.
+        rank: Rank column name.
+        kstar: If provided, also add ``K_rel = K / kstar`` (e.g. `KSTAR_POOLED`).
+        b: Alpha exponent (defaults to `B_LAW`).
+        c: Rank exponent (defaults to `C_LAW`).
+
+    Returns:
+        A copy with the new column(s); the input is not mutated.
+    """
+    out = df.copy()
+    out["K"] = K_of(out[lr], out[alpha], out[rank], b=b, c=c)
+    if kstar is not None:
+        out["K_rel"] = out["K"] / kstar
+    return out
 
 # The six arms of the campaign: (family, teacher param tag, student base model).
 # "family" names the teacher recipe's character -- focus/strong are short+aggressive, weak is
@@ -68,11 +148,9 @@ DEAD_SEED: float = 0.01
 RIDGE_PEN: float = 1e-3
 SKLEARN_C: float = 1.0 / (2.0 * RIDGE_PEN)
 
-# Trailing ``_{optim_slug}`` (non-default optimizers) is accepted but not consumed here;
-# existing adamw cell dirs stay byte-identical and match exactly as before.
-_TAG_RE = re.compile(
-    r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)(?:_[^_]+)?$"
-)
+# The canonical cell-name parser (shared with `frames`). Trailing ``_{optim_slug}`` (non-default
+# optimizers) is accepted but not consumed here; existing adamw cell dirs match exactly as before.
+_TAG_RE = PARAM_TAG_RE
 
 
 @dataclass(frozen=True)
@@ -213,6 +291,8 @@ def fit_collapse_law(df: pd.DataFrame, alpha_level: float = 0.05) -> LawFit:
     import statsmodels.api as sm
     from scipy.stats import norm
 
+    from subliminal_learning.analysis.stats import delta_ratio_ci
+
     X, y = _design(df), df["collapsed"].to_numpy()
     res = sm.Logit(y, X).fit(
         disp=0, maxiter=500, cov_type="cluster",
@@ -221,17 +301,8 @@ def fit_collapse_law(df: pd.DataFrame, alpha_level: float = 0.05) -> LawFit:
     p, V = np.asarray(res.params), np.asarray(res.cov_params())
     z = norm.ppf(1.0 - alpha_level / 2.0)
 
-    def ratio_ci(j: int) -> tuple[float, tuple[float, float]]:
-        """Delta-method estimate and interval for ``params[j] / params[1]``."""
-        est = p[j] / p[1]
-        g = np.zeros(len(p))
-        g[j] = 1.0 / p[1]
-        g[1] = -p[j] / p[1] ** 2
-        sd = float(np.sqrt(max(g @ V @ g, 0.0)))
-        return est, (est - z * sd, est + z * sd)
-
-    b, b_ci = ratio_ci(2)
-    c, c_ci = ratio_ci(3)
+    b, b_ci = delta_ratio_ci(p, V, 2, 1, z=z)
+    c, c_ci = delta_ratio_ci(p, V, 3, 1, z=z)
     return LawFit(
         b=b, c=c, b_ci=b_ci, c_ci=c_ci, params=p,
         n_runs=len(df), n_cells=int(df["student_tag"].nunique()), n_dead=int(y.sum()),
@@ -318,7 +389,7 @@ def estimate_kstar(df: pd.DataFrame, b: float, c: float) -> dict:
         ``n_mixed``.
     """
     cells = cell_table(df)
-    K = cells["lr"] * cells["alpha"] ** b * cells["rank"] ** c
+    K = K_of(cells["lr"], cells["alpha"], cells["rank"], b=b, c=c)
     mixed = K[(cells["frac"] > 0) & (cells["frac"] < 1)]
     return {
         "kstar": float(np.exp(np.mean(np.log(mixed)))) if len(mixed) else float("nan"),
@@ -342,7 +413,7 @@ def law_misses(df: pd.DataFrame, b: float, c: float, kstar: float) -> tuple[int,
         ``(n_wrong, n_cells)`` comparing ``K >= kstar`` against ``frac >= 0.5``.
     """
     cells = cell_table(df)
-    predicted = (cells["lr"] * cells["alpha"] ** b * cells["rank"] ** c) >= kstar
+    predicted = K_of(cells["lr"], cells["alpha"], cells["rank"], b=b, c=c) >= kstar
     observed = cells["frac"] >= 0.5
     return int((predicted != observed).sum()), int(len(cells))
 

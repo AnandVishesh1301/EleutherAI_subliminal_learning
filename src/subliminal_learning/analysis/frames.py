@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+import warnings
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -60,9 +61,15 @@ _COST_KEYS = ["n_epochs", "learning_rate", "lora_r", "lora_alpha"]
 # The canonical LoRA-sweep parameter tag: ``ep{epochs}_lr{lr}_r{rank}a{alpha}`` (e.g.
 # ``ep10_lr1e-4_r16a32``). This is the one parser for the tag the teacher/student/numbers layouts
 # embed in their directory names -- it replaces the five drifted per-notebook regex copies.
-_PARAM_TAG_RE = re.compile(
+#
+# Exposed publicly (not just used inside `parse_param_tag`) because the notebook scan loops need
+# the raw compiled pattern to call ``.match``/``.fullmatch`` on directory names, or to feed it to
+# ``Series.str.extract`` for a vectorized tag parse (see `add_param_fields`). ``_PARAM_TAG_RE`` is
+# kept as a private alias for existing internal call sites.
+PARAM_TAG_RE = re.compile(
     r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)(?:_(?P<optim>[^_]+))?$"
 )
+_PARAM_TAG_RE = PARAM_TAG_RE
 
 
 def parse_param_tag(tag: str, prefix: str = "") -> dict:
@@ -100,6 +107,132 @@ def parse_param_tag(tag: str, prefix: str = "") -> dict:
     return fields
 
 
+def read_json(path) -> dict:
+    """Parse a JSON file into a dict -- ``json.loads(Path(path).read_text())``.
+
+    The one-liner every analysis notebook re-declares as a local ``read()``. Raises whatever
+    `Path.read_text` / `json.loads` raise (missing file, bad JSON); use `safe_read_json` in a
+    scan loop where those are expected.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        The parsed JSON (typically a dict).
+    """
+    return json.loads(Path(path).read_text())
+
+
+def safe_read_json(path) -> dict | None:
+    """`read_json` that swallows read/parse errors, returning ``None`` instead.
+
+    The scan-loop guard: a still-draining campaign leaves half-written or absent JSON, and a
+    directory walk should skip those rather than crash. Only ``OSError`` (missing/unreadable file)
+    and ``json.JSONDecodeError`` (partial write) are caught -- anything else propagates.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        The parsed JSON, or ``None`` when the file is missing/unreadable or not valid JSON.
+    """
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def add_param_fields(df: pd.DataFrame, col: str, prefix: str = "") -> pd.DataFrame:
+    """Add typed sweep-tag columns parsed from ``df[col]`` -- the vectorized, non-raising twin of
+    `parse_param_tag`.
+
+    Applies `PARAM_TAG_RE` to every value of `col` via ``Series.str.extract`` and adds the same
+    four core fields `parse_param_tag` produces: ``{prefix}_epochs``, ``{prefix}_lr``,
+    ``{prefix}_rank``, ``{prefix}_alpha`` (bare ``epochs``/``lr``/``rank``/``alpha`` when `prefix`
+    is ""). Unlike `parse_param_tag` this never raises: rows whose tag does not match the pattern
+    get ``NaN`` in all four columns, so it is safe to run over a frame mixing student param tags
+    with lineage/optimizer directory names. The columns are float dtype (``epochs``/``rank``/
+    ``alpha`` are integer-valued but carried as float so the non-matching rows can hold ``NaN``).
+
+    Tags with an optimizer suffix (``..._sgd``) still match and yield the four core fields; the
+    optimizer fields are ignored here. `parse_param_tag` remains the strict scalar API that also
+    returns the ``{prefix}optim``/``{prefix}optim_momentum`` fields.
+
+    Args:
+        df: Frame carrying a tag column.
+        col: Name of the column holding ``ep{e}_lr{lr}_r{r}a{a}`` tags.
+        prefix: Optional key prefix (mirrors `parse_param_tag`); empty yields bare names.
+
+    Returns:
+        A copy of `df` with the four typed columns added.
+    """
+    ex = df[col].astype("string").str.extract(PARAM_TAG_RE)
+    p = f"{prefix}_" if prefix else ""
+    out = df.copy()
+    out[f"{p}epochs"] = pd.to_numeric(ex["ep"], errors="coerce").astype(float)
+    out[f"{p}lr"] = pd.to_numeric(ex["lr"], errors="coerce").astype(float)
+    out[f"{p}rank"] = pd.to_numeric(ex["r"], errors="coerce").astype(float)
+    out[f"{p}alpha"] = pd.to_numeric(ex["a"], errors="coerce").astype(float)
+    return out
+
+
+def load_results(
+    paths,
+    *,
+    key: str = "results",
+    per_file: Callable[[Path, dict], dict] | None = None,
+) -> pd.DataFrame:
+    """Load one or more ``{"results": [...]}`` analysis-JSON files into a single tidy frame.
+
+    The consolidated loader for the analysis-JSON shape used 25+ times across the notebooks: each
+    file is a dict with a `key` list of per-row records. Unreadable/partial files are skipped
+    (counted), and a single `warnings.warn` names the skipped count and the first offender.
+
+    This function is glob-free and order-preserving: `paths` is taken as-is, so callers that want a
+    deterministic order should pass ``sorted(dir.glob(...))`` (the notebooks do their own globbing).
+
+    Args:
+        paths: A single path, or an iterable of paths. A ``str``/``Path`` is treated as one file,
+            not iterated character-by-character.
+        key: The key whose list-of-dicts is the rows (default ``"results"``).
+        per_file: Optional ``callable(path, doc) -> dict`` merged into every row from that file --
+            the "attach ``scale_lambda``/``ftseed`` parsed from the filename" idiom. The returned
+            keys become columns; existing row keys are not overwritten.
+
+    Returns:
+        One DataFrame concatenating every file's rows (with any `per_file` columns), preserving the
+        order of `paths`. An empty DataFrame when nothing loads.
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    frames: list[pd.DataFrame] = []
+    skipped: list[Path] = []
+    for path in paths:
+        path = Path(path)
+        doc = safe_read_json(path)
+        if doc is None:
+            skipped.append(path)
+            continue
+        rows = doc.get(key, [])
+        if not rows:
+            continue
+        sub = pd.DataFrame(rows)
+        if per_file is not None:
+            extra = per_file(path, doc)
+            for k, v in extra.items():
+                if k not in sub.columns:
+                    sub[k] = v
+        frames.append(sub)
+    if skipped:
+        warnings.warn(
+            f"load_results skipped {len(skipped)} unreadable file(s); first: {skipped[0]}",
+            stacklevel=2,
+        )
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 def read_cell_set(cell_dir, prompt_set: str = "test") -> dict | None:
     """Return one prompt set's across-seed summary block for a single swept cell.
 
@@ -119,9 +252,8 @@ def read_cell_set(cell_dir, prompt_set: str = "test") -> dict | None:
         holds no block for `prompt_set` (i.e. the cell is not evaluated yet).
     """
     summary_path = Path(cell_dir) / "preference_summary.json"
-    try:
-        doc = json.loads(summary_path.read_text())
-    except (json.JSONDecodeError, OSError):
+    doc = safe_read_json(summary_path)
+    if doc is None:
         return None
     return next((s for s in doc.get("summaries", []) if s.get("prompt_set") == prompt_set), None)
 
@@ -157,11 +289,25 @@ def add_lora_label(df: pd.DataFrame) -> pd.DataFrame:
     The category order is sorted numerically by ``(lora_r, lora_alpha)`` so downstream sorts and
     heatmap axes come out ``r8/α16 < r8/α32 < r16/α8`` -- killing the string-parsing sort lambdas
     the notebooks used to carry. Returns a copy; the input is not mutated.
+
+    NaN-tolerant: rows whose ``lora_r`` or ``lora_alpha`` is NaN (e.g. pools without a teacher
+    param tag from the manifest scan) get a NaN ``lora_label`` and never enter the category set --
+    the categories are built from the finite ``(lora_r, lora_alpha)`` pairs only. ``pd.Categorical``
+    maps the ``None`` labels those rows produce to NaN naturally.
     """
     df = df.copy()
-    pairs = sorted({(int(r), int(a)) for r, a in zip(df["lora_r"], df["lora_alpha"])})
+    pairs = sorted(
+        {
+            (int(r), int(a))
+            for r, a in zip(df["lora_r"], df["lora_alpha"])
+            if pd.notna(r) and pd.notna(a)
+        }
+    )
     categories = [f"r{r}/α{a}" for r, a in pairs]
-    labels = [f"r{int(r)}/α{int(a)}" for r, a in zip(df["lora_r"], df["lora_alpha"])]
+    labels = [
+        f"r{int(r)}/α{int(a)}" if pd.notna(r) and pd.notna(a) else None
+        for r, a in zip(df["lora_r"], df["lora_alpha"])
+    ]
     df["lora_label"] = pd.Categorical(labels, categories=categories, ordered=True)
     return df
 
