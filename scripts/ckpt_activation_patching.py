@@ -84,6 +84,39 @@ def _capture_block(model, enc, layer: int) -> torch.Tensor:
 
 
 @torch.no_grad()
+def _capture_all_blocks(model, enc) -> list[torch.Tensor]:
+    """One forward; return each block's raw output hidden states [B,T,H] on CPU (all blocks)."""
+    blocks = resolve_blocks(model)
+    grabbed: list[torch.Tensor | None] = [None] * len(blocks)
+
+    def _mk(i):
+        def hook(_m, _a, output):
+            hidden = output[0] if isinstance(output, tuple) else output
+            grabbed[i] = hidden.detach().to("cpu")
+        return hook
+
+    handles = [b.register_forward_hook(_mk(i)) for i, b in enumerate(blocks)]
+    try:
+        model(**enc, use_cache=False)
+    finally:
+        for h in handles:
+            h.remove()
+    assert all(g is not None for g in grabbed), "a block hook failed to capture"
+    return grabbed  # type: ignore[return-value]
+
+
+def _norm_match(donor_h: torch.Tensor, recip_h: torch.Tensor) -> torch.Tensor:
+    """Rescale ``donor_h`` per (example, position) to the recipient's own L2 norm at that block.
+
+    Preserves the donor's directions exactly, adopts the recipient's per-token scale:
+    ``donor_h <- donor_h * (||recip_h|| / ||donor_h||)`` (self-patch → factor 1 exactly).
+    """
+    dnorm = donor_h.norm(dim=-1, keepdim=True).clamp(min=1e-12)
+    rnorm = recip_h.norm(dim=-1, keepdim=True)
+    return donor_h * (rnorm / dnorm)
+
+
+@torch.no_grad()
 def _forward_last_logp(model, enc) -> torch.Tensor:
     """Last-real-position log-softmax next-token distribution for one batch [B,V]."""
     lg = model(**enc, use_cache=False).logits
@@ -119,41 +152,60 @@ def _batched(prompts, tok, device):
 
 
 @torch.no_grad()
-def _baseline_number(model, tok, prompts, device, digit_ids):
-    """Per-batch unpatched last-position log-probs and mean digit mass on number prompts."""
-    logps, dmass = [], []
+def _baseline_number(model, tok, prompts, device, digit_ids, capture_blocks=False):
+    """Per-batch unpatched last-position log-probs and mean digit mass on number prompts.
+
+    When ``capture_blocks`` also returns the recipient's own per-block states (list per batch
+    of list[n_blocks] CPU tensors) for norm-matching; otherwise ``None``.
+    """
+    logps, dmass, blocks = [], [], []
     for enc in _batched(prompts, tok, device):
+        if capture_blocks:
+            blocks.append(_capture_all_blocks(model, enc))
         lp = _forward_last_logp(model, enc)
         logps.append(lp)
         dmass.append(lp.exp()[:, digit_ids].sum(1))
-    return logps, torch.cat(dmass).mean().item()
+    return logps, torch.cat(dmass).mean().item(), (blocks if capture_blocks else None)
 
 
 @torch.no_grad()
-def _baseline_pdog(model, tok, prompts, device, dog_id):
-    logps = []
-    pdog = []
+def _baseline_pdog(model, tok, prompts, device, dog_id, capture_blocks=False):
+    logps, pdog, blocks = [], [], []
     for enc in _batched(prompts, tok, device):
+        if capture_blocks:
+            blocks.append(_capture_all_blocks(model, enc))
         lp = _forward_last_logp(model, enc)
         logps.append(lp)
         pdog.append(lp.exp()[:, dog_id])
-    return logps, torch.cat(pdog).mean().item()
+    return logps, torch.cat(pdog).mean().item(), (blocks if capture_blocks else None)
 
 
 @torch.no_grad()
 def _patch_direction(
     donor, recipient, tok, device, layer, num_prompts, pref_prompts,
     digit_ids, dog_id, base_num_logp, base_pref_logp, self_control=False,
+    norm_match=False, recip_num_blocks=None, recip_pref_blocks=None,
 ):
     """One (direction, layer): patch recipient at block ``layer`` with donor's captured acts.
 
     ``self_control=True`` captures from the recipient itself (correctness check → ~0 KL).
-    Returns (mean_kl_number, mean_d_digit_mass, mean_d_pdog).
+    ``norm_match=True`` rescales the donor states per (example, position) to the recipient's
+    own norm at that block (``recip_*_blocks``), preserving direction, adopting scale.
+    Returns (mean_kl_number, mean_d_digit_mass, mean_d_pdog, donor_mean_l2, recip_mean_l2);
+    the two norms are mean per-position L2 over real (unmasked) number-prompt positions.
     """
     source = recipient if self_control else donor
     kls, dmass_deltas = [], []
+    donor_norm_sum = recip_norm_sum = pos_count = 0.0
     for bi, enc in enumerate(_batched(num_prompts, tok, device)):
         donor_h = _capture_block(source, enc, layer)
+        recip_h = recip_num_blocks[bi][layer]
+        mask = enc["attention_mask"].bool().cpu()
+        donor_norm_sum += donor_h.norm(dim=-1)[mask].sum().item()
+        recip_norm_sum += recip_h.norm(dim=-1)[mask].sum().item()
+        pos_count += mask.sum().item()
+        if norm_match:
+            donor_h = _norm_match(donor_h, recip_h)
         lp = _forward_last_logp_patched(recipient, enc, layer, donor_h)
         base = base_num_logp[bi]
         kls.append((lp.exp() * (lp - base)).sum(-1))
@@ -164,11 +216,15 @@ def _patch_direction(
     pdog_deltas = []
     for bi, enc in enumerate(_batched(pref_prompts, tok, device)):
         donor_h = _capture_block(source, enc, layer)
+        if norm_match:
+            donor_h = _norm_match(donor_h, recip_pref_blocks[bi][layer])
         lp = _forward_last_logp_patched(recipient, enc, layer, donor_h)
         base = base_pref_logp[bi]
         pdog_deltas.append(lp.exp()[:, dog_id] - base.exp()[:, dog_id])
     d_pdog = torch.cat(pdog_deltas).mean().item()
-    return kl, d_dmass, d_pdog
+    donor_l2 = donor_norm_sum / pos_count
+    recip_l2 = recip_norm_sum / pos_count
+    return kl, d_dmass, d_pdog, donor_l2, recip_l2
 
 
 def _number_prompts(paths, hub_org, n, device):
@@ -190,6 +246,7 @@ def main(
     out: Path | None = typer.Option(None, "--out"),
     adapter_a: Path | None = typer.Option(None, "--adapter-a"),
     adapter_b: Path | None = typer.Option(None, "--adapter-b"),
+    norm_match: bool = typer.Option(False, "--norm-match"),
 ):
     configure_loguru()
     paths = from_dict(
@@ -231,10 +288,13 @@ def main(
 
     baselines = {}
     for name, m in models.items():
-        num_lp, dmass = _baseline_number(m, tok, num_prompts, device, digit_ids)
-        pref_lp, pdog = _baseline_pdog(m, tok, pref_prompts, device, dog_id)
+        num_lp, dmass, num_blocks = _baseline_number(
+            m, tok, num_prompts, device, digit_ids, capture_blocks=norm_match)
+        pref_lp, pdog, pref_blocks = _baseline_pdog(
+            m, tok, pref_prompts, device, dog_id, capture_blocks=norm_match)
         baselines[name] = {
             "num_logp": num_lp, "pref_logp": pref_lp,
+            "num_blocks": num_blocks, "pref_blocks": pref_blocks,
             "digit_mass": dmass, "p_dog": pdog,
         }
         logger.info("baseline {}: digit_mass={:.4f} p(dog)={:.5f}", name, dmass, pdog)
@@ -247,26 +307,32 @@ def main(
         dir_key = f"{donor_name}->{recip_name}"
 
         # Self-patch control: capture the recipient's own acts and reinject at layer 0.
-        ctrl_kl, _, _ = _patch_direction(
+        ctrl_kl, *_ = _patch_direction(
             donor, recipient, tok, device, 0, num_prompts, pref_prompts, digit_ids,
             dog_id, base["num_logp"], base["pref_logp"], self_control=True,
+            norm_match=norm_match, recip_num_blocks=base["num_blocks"],
+            recip_pref_blocks=base["pref_blocks"],
         )
         assert ctrl_kl < 1e-4, f"self-patch control not ~0 for {dir_key}: KL={ctrl_kl}"
         logger.info("[{}] self-patch control KL={:.2e} (< 1e-4 ✓)", dir_key, ctrl_kl)
 
         per_layer = {}
-        logger.info("[{}] layer |  kl_number  | d_digit_mass |   d_pdog", dir_key)
+        logger.info(
+            "[{}] layer |  kl_number  | d_digit_mass |   d_pdog | donorL2 recipL2", dir_key)
         for layer in range(N_BLOCKS):
-            kl, d_dmass, d_pdog = _patch_direction(
+            kl, d_dmass, d_pdog, donor_l2, recip_l2 = _patch_direction(
                 donor, recipient, tok, device, layer, num_prompts, pref_prompts,
                 digit_ids, dog_id, base["num_logp"], base["pref_logp"],
+                norm_match=norm_match, recip_num_blocks=base["num_blocks"],
+                recip_pref_blocks=base["pref_blocks"],
             )
             per_layer[f"L{layer}"] = {
                 "kl_number": kl, "d_digit_mass": d_dmass, "d_pdog": d_pdog,
+                "donor_mean_l2": donor_l2, "recip_mean_l2": recip_l2,
             }
             logger.info(
-                "[{}]  L{:<2} | {:10.5f}  | {:11.5f}  | {:9.5f}",
-                dir_key, layer, kl, d_dmass, d_pdog,
+                "[{}]  L{:<2} | {:10.5f}  | {:11.5f}  | {:9.5f} | {:7.2f} {:7.2f}",
+                dir_key, layer, kl, d_dmass, d_pdog, donor_l2, recip_l2,
             )
         results[dir_key] = {
             "self_patch_control_kl": ctrl_kl,
@@ -277,6 +343,7 @@ def main(
         "step_a": step_a, "step_b": step_b,
         "adapter_a": str(adapter_a) if adapter_a is not None else None,
         "adapter_b": str(adapter_b) if adapter_b is not None else None,
+        "norm_match": norm_match,
         "n_number_prompts": len(num_prompts), "n_pref_prompts": len(pref_prompts),
         "batch": BATCH, "n_blocks": N_BLOCKS, "dog_token_id": dog_id,
         "basis": "raw post-block states (raw_blocks_v2), full-sequence replace, all positions",

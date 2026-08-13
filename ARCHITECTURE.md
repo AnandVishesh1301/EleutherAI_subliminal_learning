@@ -1464,6 +1464,40 @@ weight-seed1 cells × λ + spread — cross-arm mechanism replication where the 
 absent). Rationale: causal *signs* are settled at small n (paired within-cell designs); the
 cross-cell *quantities* were thin and selection-inherited. Results → nors_asks §5.5.
 
+**2026-08-12 CLAIM-CHAIN DOC.** `COLLAPSE_CLAIM_CHAIN.md` (repo root) is the SSOT statement of
+the causal narrative: the A1/A2/A3/M/A4 chain (phenomenon → size-causes-fate → HPs-set-size →
+mediation → Frobenius) with every claim attributed to its experiment + notebook section, the
+holes per link, a retired/stale list, and the open discussion items (ep5/ep10 strip, clamp
+extension, DEAD-label unification, trait-free factorial, cosine-schedule probe, second width,
+the unnamed ~2× direction factor). Supersedes `collapse_evidence_review.ipynb` §4.8 as the
+current audit (that section predates the clamp tier and the at-scale spread/carrier-deletion
+results). Distinct from `collapse_mechanism.ipynb`'s A0–A4 *assumption ledger* (exponent
+derivation), which brackets b but does not derive it.
+
+**2026-08-13 CLAMP STAGE-3 + CHECKPOINT PILOT (both queued, Angela's go).**
+(a) `clamp-stage3-alpha` (queue_angela, prio 253, 54 jobs): deep-α extension of the clamp tier —
+rule frozen in `clamp_design_v1.json` under `extension_stage3_alpha_20260813` (α{128,256} ×
+r{4,16,64} × K targets {1.4,2.0}, nearest both-seeds-dead non-diverged strip rung → 9 cells;
+fro ratios {0.5,0.6,0.8} × 2 seeds; same per-rank θ̂). Question: is the ~0.6×θ̂
+trajectory-exposure threshold α-independent in the cross-dominated regime?
+(b) `strip-ckpt-pilot` (prio 254, 8 jobs): `run_logs/strip_ckpt_worker.py` **replays 4
+boundary-bracketing strip cells with their ORIGINAL ftseeds 1/2** (frozen CELLS constant in the
+worker: alive control / two mixed / both-dead showcase) with checkpointing on (save_steps 625,
+limit 50 → 40 checkpoints). v1 (fresh ftseeds 901/902 in the main tree) and v2 (`clamp_students/ckpt-replay` reroot) were
+both REJECTED by Angela — the known per-seed fates are the point, and clamp_students is the
+wrong home; all partial outputs from both were killed and deleted. **v3 (live): in-place
+replay.** The original ftseed1/2 leaves were MOVED to
+`{output_root}/students_ckpt_replay_backup/{tag}/ftseed{S}` (outside students/, no `ftseed*`
+glob reaches them; manifests + per-seed eval artifacts preserved), and the replay trains into
+the vacated main-tree leaf with checkpointing on. Worker guard: refuses to run unless the
+backup manifest exists. `ftseed` seeds both LoRA init and data order, so each replay retraces
+the original run up to GPU nondeterminism — **compare replay endpoint vs backup (dose norms +
+fate) before trusting per-seed trajectory claims** (mixed cells especially); backups are
+deleted only after Angela confirms agreement. Until the replays land, the 4 tags' ftseed1/2
+are vacant and their tag-level `preference_summary.json` describes the originals — do not
+probe those cells in the interim. NO preference eval is written by the worker; dose
+trajectories come from `adapter_norms_probe main --checkpoints` on the main tree as usual.
+
 **Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
 teacher distilling into data-seed1 vs weight-seed1 at matched teacher and student HP, the *only*
 input difference is the frozen `W_0`. Diffing the two `train_manifest.json` leaves just

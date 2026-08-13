@@ -207,9 +207,13 @@ uncalibrated.
 14. **[cal]** The collapse law is regional with calibrated precision — b_L = 0.484
     [0.381, 0.587] vs b_H = 0.822 [0.738, 0.905] (WLS 0.499±0.064 / 0.882±0.098,
     3.3σ) — and the level-set identity closes boundary-locally with |z| = 0.0 in the
-    H segment: conditional on dose, the HPs add nothing to where death sits. The
-    r-column closes via the measured θ drift (−0.098…−0.120 vs c_L −0.111) (§5.3,
-    §7.2).
+    H segment. Two levels, not to be conflated: the *boundary's location* needs no
+    HP information beyond the dose surface (§7.2, and the threshold-world null
+    model §7.2b reproduces the global logistic exponents and ~99% of labels from
+    one threshold on measured dose); at the *run level* a small HP residual
+    survives at matched endpoint dose (§7.3) — the endpoint is a lossy summary of
+    the causal trajectory dose (§5.5c). The r-column closes via the measured θ
+    drift (−0.098…−0.120 vs c_L −0.111) (§5.3, §7.2).
 15. **[interv]** The term splices, both directions, on the full calibrated strip
     (932 runs × both splices × both seeds, zero selection): the trait rides
     whichever term dominates — retention crosses at the Frobenius parity point
@@ -223,7 +227,11 @@ uncalibrated.
     constant (§5.5). **Verified 2026-08-11 at within-cell strength (§5.5b): 9/9
     mixed-fate seed pairs — same HPs, opposite training fates, placement cannot
     confound — show the alive seed tolerating more dose than the dead seed revives
-    at (sign p = 0.002, median 2.0×); cross-arm on ws1 (8/8 flips). Two-object θ
+    at (sign p = 0.002, median 2.0×); cross-arm on ws1 (8/8 flips). Full-sweep
+    covariate-adjusted estimate (08-13): ~3.0× [2.5, 3.7] over 172 crossings, and
+    the factor is α-STRUCTURED — ~4× where the moved (learned) term dominates,
+    shrinking toward 1 in the frozen-dominated deep-α regime — only the learned
+    direction can carry history (§5.5b). Two-object θ
     resolution: the TRAINING-time dose threshold is flat in α (nested logit
     p = 0.20; model-free slope −0.017 ± 0.032 — the level-set assumption is
     verified) while the EVAL-time λ-crossing threshold drifts (ρ = −0.27,
@@ -1805,6 +1813,27 @@ print("   -> negative at EVERY rank, strongest at low rank (where one direction 
       "nearly the whole update): the local advantage of concentration is not a "
       "rank-composition artifact either")
 
+# pooling check: the run-level branch/base above is an UNWEIGHTED mean over the 48
+# modules (token-mean within module first). The four module kinds have different
+# shapes and input statistics, so refit the local spread effect per kind:
+kb_rows = []
+for f_ in sorted(AN.glob("adapter_activations_strip_pile_r*.json")):
+    per_ = pd.DataFrame(json.loads(f_.read_text())["results"])
+    per_["kind"] = per_.module.str.rsplit(".", n=1).str[-1]
+    kb_rows.append(per_.groupby(["student_tag", "kind"]).lora_over_base.mean())
+bk_ = pd.concat(kb_rows).unstack("kind").join(
+    meta_cols[["dw_fro", "dw_spec"]], how="inner")
+print("per-module-KIND local gS (12 layers pooled within kind, one fit per kind):")
+for kind in ("query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"):
+    dkk = pd.DataFrame({"t": np.log(bk_[kind].values),
+                        "f": np.log(bk_.dw_fro.values),
+                        "L": 2 * (np.log(bk_.dw_fro.values)
+                                  - np.log(bk_.dw_spec.values))})
+    fk_ = smf.ols("t ~ f + L", dkk).fit()
+    print("   %-15s: gS %+.2f (se %.2f)" % (kind, fk_.params.L, fk_.bse.L))
+print("   -> negative for all four kinds (magnitude varies ~3x): the unweighted "
+      "48-module pooling is not manufacturing the local sign")
+
 # the same added-variable plot as §4's, for the LOCAL readout — slope flips sign
 t_b = np.log(pile.branch_base.values)
 part_b = smf.ols("t ~ f", pd.DataFrame({"t": t_b, "f": np.log(pile.dw_fro.values)})).fit().resid
@@ -1990,6 +2019,58 @@ else:
     ax.set_title("§4e replication — depth profile on rule-selected strip cells")
     right_legend(ax)
     plt.tight_layout(); plt.show()"""))
+
+cells.append(md(r"""**The natural-object check — each pole against the unaltered update** (added
+2026-08-12, after Angela's objection that `flat` is not a naturally occurring
+object). The top1/flat ratio compares two *counterfactuals*; if flat were weird in a
+way that happens to transmit well, the ratio could sit below 1 without any real
+"tax" on concentration. The clean comparisons are against **orig** — the trained
+update as-is, recorded at every layer in the same runs: `top1/orig` asks what
+*concentrating the real update* does (top1 is just a truncation of it — nothing
+unnatural), and `flat/orig` asks what spreading it does. Both are re-plots of data
+already on disk."""))
+
+cells.append(code(r"""panels = [(nm, p_) for nm, p_ in
+           (("8 fate-selected cells", AN / "spread_depth_probe.json"),
+            ("20 rule-selected ladder cells", AN / "spread_depth_probe_ladder.json"))
+           if p_.exists()]
+if not panels:
+    print("no depth-probe files on disk — skipped")
+else:
+    fig, axes = plt.subplots(1, len(panels), figsize=(6.4 * len(panels), 4.6),
+                             sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, (nm, p_) in zip(axes, panels):
+        sdp_ = pd.DataFrame(json.loads(p_.read_text())["results"])
+        pv_ = sdp_.pivot_table(index=["student_tag", "layer"], columns="variant",
+                               values="rel_drift")
+        pv_["t_o"] = pv_.top1 / pv_.orig
+        pv_["f_o"] = pv_.flat / pv_.orig
+        med_ = pv_.groupby("layer").median()
+        ax.plot(med_.index[1:], med_.t_o.iloc[1:], "o-", ms=5, color="tab:blue",
+                label="top1 / orig (concentrate the real update)")
+        ax.plot(med_.index[1:], med_.f_o.iloc[1:], "s-", ms=5, color="tab:orange",
+                label="flat / orig (spread the real update)")
+        ax.axhline(1.0, color="crimson", ls="--", lw=1)
+        ax.set_xlabel("layer"); ax.set_title(nm, fontsize=11)
+        fin_ = pv_.xs(int(sdp_.layer.max()), level="layer")
+        print("%s: top1/orig layer1 %.2f -> final %.2f (final < 1 in %d/%d cells); "
+              "flat/orig layer1 %.2f -> final %.2f (final < 1 in %d/%d)"
+              % (nm, med_.t_o.iloc[1], med_.t_o.iloc[-1], int((fin_.t_o < 1).sum()),
+                 len(fin_), med_.f_o.iloc[1], med_.f_o.iloc[-1],
+                 int((fin_.f_o < 1).sum()), len(fin_)))
+    axes[0].set_ylabel("median drift ratio vs orig")
+    axes[-1].legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False,
+                    fontsize=9)
+    fig.suptitle("§4e — each spread pole against the UNALTERED update, by depth "
+                 "(matched per-module energy)", y=1.03)
+    plt.tight_layout(); plt.show()
+    print("READ: the tax is specific to CONCENTRATION — top1/orig sits below 1 from "
+          "the first block on both probes, while flat/orig hovers near 1: the "
+          "trained update already transmits like its spread version, and squeezing "
+          "it into one direction is what loses drift. The top1/flat headline ratio "
+          "was not a flat artifact; the natural-object comparison reproduces the "
+          "conclusion on its own.")"""))
 
 cells.append(md(r"""## §5 — second arc: the update is exactly two terms, and Adam sets their exponents
 
@@ -2343,9 +2424,20 @@ print("moved-feature term: lr^%.2f±%.2f, lr^2 %+.3f±%.3f — real convexity "
       "(identifiable on this support)"
       % (M1_.params.llr, M1_.bse.llr, M2_.params["I(llr ** 2)"],
          M2_.bse["I(llr ** 2)"]))
+print("   its a/r exponents: a^%.2f r^%.2f (R² %.3f) — a LOWER α exponent than the "
+      "frozen term's a^%.2f: the sum's α² curvature is the frozen term taking over "
+      "at high α, the mirror of the lr crossover (moved takes over at high lr)"
+      % (M1_.params.la, M1_.params.lrk, M1_.rsquared, F1.params.la))
 S = cfit(run20, "y ~ llr + I(llr**2) + la + lrk")
 print("the SUM alone bends: lr^2 %+.3f±%.3f"
       % (S.params["I(llr ** 2)"], S.bse["I(llr ** 2)"]))
+D1 = cfit(run20, "y ~ llr + la + lrk")
+print("learned factor ‖BA‖/‖W0‖ (dose law minus the s = α/r prefactor): "
+      "lr^%.2f a^%.2f r^%.2f — Adam partially compensates the s-amplification "
+      "(α exponent < 0) and rank adds coherent channels (r exponent < 1); the "
+      "adaptive-grid version a^-0.34 r^+0.78 [adaptive-only, §6f of the mechanism "
+      "notebook] agrees"
+      % (D1.params.llr, D1.params.la - 1, D1.params.lrk + 1))
 
 from subliminal_learning.analysis.collapse_law import fit_collapse_law
 
@@ -2412,7 +2504,34 @@ print("HP drift of the Frobenius frozen-term GAP (gap = the ratio "
       "‖B‖_F·‖A0‖_F/‖B·A0‖_F, run-mean — how loose the product bound is): "
       "lr^%.3f±%.3f a^%.3f±%.3f r^%.3f±%.3f — flat in lr and alpha, sqrt(r) in rank"
       % (gf.params.llr, gf.bse.llr, gf.params.la, gf.bse.la,
-         gf.params.lrk, gf.bse.lrk))"""))
+         gf.params.lrk, gf.bse.lrk))
+print("   residual sd (log): %.3f (≈±%.0f%%) — at fixed rank the frozen gap is "
+      "essentially DETERMINISTIC at sqrt(r): the Kaiming A0's rows are "
+      "near-isotropic, so ‖B·A0‖_F ≈ ‖B‖_F·‖A0‖_F/√r identically"
+      % (gf.resid.std(), 100 * (np.exp(gf.resid.std()) - 1)))
+
+# The MOVED term's gap — the same question for ‖B‖·‖ΔA‖/‖B·ΔA‖ (2026-08-13, after
+# Angela challenged 'the gap is constant': tightness and HP-constancy are different
+# properties, and only constancy licenses exponent-adding).
+gapm = (f20.assign(ratio=f20.B_fro * f20.dA_fro / f20.B_dA_fro)
+        .groupby(["student_tag", "ftseed"], as_index=False)
+        .agg(lr=("lr", "first"), alpha=("alpha", "first"), rank=("rank", "first"),
+             ratio=("ratio", "mean")))
+gapm = gapm.assign(y=np.log(gapm.ratio), llr=np.log(gapm.lr), la=np.log(gapm.alpha),
+                   lrk=np.log(gapm["rank"]))
+gm = smf.ols("y ~ llr + la + lrk", gapm).fit(
+    cov_type="cluster", cov_kwds={"groups": gapm.student_tag})
+print("HP drift of the Frobenius MOVED-term GAP (‖B‖_F·‖ΔA‖_F/‖B·ΔA‖_F, run-mean): "
+      "lr^%.3f±%.3f a^%.3f±%.3f r^%.3f±%.3f, R² %.2f, residual sd ≈±%.0f%% — "
+      "NOT HP-flat and widely scattered"
+      % (gm.params.llr, gm.bse.llr, gm.params.la, gm.bse.la,
+         gm.params.lrk, gm.bse.lrk, gm.rsquared,
+         100 * (np.exp(gm.resid.std()) - 1)))
+print("READ: Frobenius factor-composition is licensed for the FROZEN term only "
+      "(gap deterministic given rank, flat in lr/α to ±0.000). The moved term's "
+      "exponents are never composed — §5.3 measures them directly on ‖B·ΔA‖. The "
+      "spectral bounds are the tight ones (see table above), but tightness was "
+      "never the requirement; constancy is.")"""))
 
 cells.append(md(r"""**Table 5e — the level-set prediction, tabulated.** What the table is: step 2 of
 the level-set argument says every dose-law fit *predicts* a collapse law, with
@@ -2993,6 +3112,48 @@ else:
                   f"{cc:+.2f}, median |log2 s1/s2| = {mr:.2f} — the personal threshold "
                   "is largely a cell property")"""))
 
+cells.append(md(r"""**The direction factor at full-sweep scale (2026-08-13, Angela: "consider the full
+sweep, not just the 9/9").** The 9 mixed-fate pairs are the only perfectly
+controlled contrast, but the whole sweep can estimate the same factor if placement
+is controlled by covariates instead of pairing: regress each scored crossing's
+log(λ·K/K*) on the training fate plus the design covariates (log K_rel, log α,
+log r), cluster by cell. The raw pooled band ratio is confounded (trained-dead cells
+sit deeper *by design*); the adjusted coefficient is the sweep-wide estimate; the
+per-α breakdown asks whether the factor lives in one dominance regime."""))
+
+cells.append(code(r"""if LS_FILES:
+    okf = ok.dropna(subset=["cross_K"]).copy()
+    okf["yx"] = np.log(okf.cross_K)
+    okf["lkr"], okf["laln"], okf["lrln"] = (np.log(okf.K_rel), np.log(okf.alpha),
+                                            np.log(okf["rank"]))
+    m0x = smf.ols("yx ~ trained_dead", okf).fit(
+        cov_type="cluster", cov_kwds={"groups": okf.cell})
+    m1x = smf.ols("yx ~ trained_dead + lkr + laln + lrln", okf).fit(
+        cov_type="cluster", cov_kwds={"groups": okf.cell})
+    for nm, m_ in (("raw (confounded by placement)", m0x),
+                   ("covariate-adjusted", m1x)):
+        cx_ = m_.params["trained_dead[T.True]"]
+        se_ = m_.bse["trained_dead[T.True]"]
+        print("%s: alive/dead crossing-dose factor = %.2fx [%.2f, %.2f] (p = %.1e)"
+              % (nm, np.exp(-cx_), np.exp(-cx_ - 1.96 * se_),
+                 np.exp(-cx_ + 1.96 * se_), m_.pvalues["trained_dead[T.True]"]))
+    okf["resx"] = m1x.resid + m1x.params["trained_dead[T.True]"] * okf.trained_dead
+    ga_ = okf.groupby(["alpha", "trained_dead"]).resx.median().unstack()
+    na_ = okf.groupby(["alpha", "trained_dead"]).size().unstack(fill_value=0)
+    ta_ = pd.DataFrame({"factor": np.exp(ga_[False] - ga_[True]),
+                        "n kills": na_[False], "n revivals": na_[True]})
+    print("\nadjusted alive/dead factor by α (row unit: one α level; factor from "
+          "covariate-residual medians):")
+    display(compare_table(ta_.round(2), fmt="{:.2f}"))
+    print("READ: sweep-wide the history/direction factor is ~3x adjusted (the 9 "
+          "paired mixed cells gave 2.0x — they sit near K/K*~1 at mid-α where the "
+          "factor is mid-sized). The factor is α-STRUCTURED: largest (~4x) at "
+          "α<=8 where the MOVED (learned) term dominates the update, shrinking "
+          "toward 1 in the deep frozen-dominated regime (α=256 rests on 2 kills — "
+          "suggestive only). Mechanistically coherent: the frozen term's direction "
+          "is a random init, identically distributed for alive and dead runs — "
+          "only the learned direction can carry history.")"""))
+
 cells.append(md(r"""**The unification hypothesis — is the history axis just spread? Tested at sweep
 scale.** If trained-dead updates tolerated less dose because their energy is more
 *spread* (higher srank) or worse-allocated at matched dose, then the hysteresis, the
@@ -3454,7 +3615,35 @@ else:
           "EVERY rank (not an r1 quirk); min K/K* among them = %.1f — a second, "
           "sharp boundary roughly an order of magnitude above the collapse "
           "boundary, at which training stops producing finite models at all"
-          % (len(dv), dv_k.min()))"""))
+          % (len(dv), dv_k.min()))
+
+    # Calibrated versions of three formerly adaptive-era headline stats (2026-08-13).
+    p_ = SP.test_p.clip(lower=1e-12)
+    print("\nBIMODALITY [cal]: %.0f%% of runs at p <= 1e-4; alive-mode median p = "
+          "%.3f; only %.1f%% of runs anywhere in the two decades (1e-4, 0.01) — "
+          "the DEAD label is a property of the data, not of the cut"
+          % (100 * (p_ <= 1e-4).mean(), SP[SP.dead == 0].test_p.median(),
+             100 * ((p_ > 1e-4) & (p_ < 0.01)).mean()))
+    from sklearn.metrics import roc_auc_score as _auc
+    print("fate AUCs on the primary region [cal]: dw_fro %.3f | dw_spec %.3f | "
+          "fitted K %.3f — dose thresholds fate as well as the law itself; NOTE "
+          "pooled AUCs saturate for BOTH norms, so this is evidence for A0, not "
+          "for the norm choice (that is §2's threshold-geometry job)"
+          % (_auc(SP.dead, SP.dw_fro), _auc(SP.dead, SP.dw_spec),
+             _auc(SP.dead, K_of(SP.lr, SP.alpha, SP["rank"]))))
+    wmx = SP.pivot_table(index="tag", columns="seed",
+                         values=["dead", "dw_fro"], aggfunc="first").dropna()
+    mxc = wmx[wmx[("dead", 1)] != wmx[("dead", 2)]]
+    n_sm = sum(1 for _, r_ in mxc.iterrows()
+               if r_[("dw_fro", 1 if r_[("dead", 1)] else 2)]
+               < r_[("dw_fro", 2 if r_[("dead", 1)] else 1)])
+    print("within MIXED-fate cells, is the dying seed the larger update? dying seed "
+          "SMALLER in %d/%d (two-sided binomial p = %.2f) — coin-flip at the "
+          "strip's n (2 seeds/cell -> %d mixed cells); the adaptive large arms "
+          "(5 seeds/cell, hundreds of mixed pairs) resolved the same question as "
+          "'dying seed slightly SMALLER' (z ≈ -3.2) [adaptive-only] — either way, "
+          "endpoint size does NOT pick the dying seed within a cell"
+          % (n_sm, len(mxc), stats.binomtest(n_sm, len(mxc)).pvalue, len(mxc)))"""))
 
 cells.append(md(r"""### §7.1 The regional collapse law from the fate labels alone
 
@@ -3567,10 +3756,10 @@ cells.append(code(r"""if HARV.exists():
     print("READING: the bend direction (b_H > b_L) is reproduced by both routes "
           "inside the calibrated strip; point agreement requires the boundary-LOCAL "
           "exponents (the uniform ladder averages the curved surface away from the "
-          "boundary, unlike the adaptive grid whose support hugged it). Residual "
-          "~1-2 sigma tension, if it persists, points at the derivation's one "
-          "remaining assumption -- theta constant in alpha -- which is measurable "
-          "on this same data as a next step.")
+          "boundary, unlike the adaptive grid whose support hugged it). The "
+          "derivation's one remaining assumption -- theta constant in alpha -- "
+          "has since been measured directly and holds (nested logit p = 0.20, "
+          "section 5.5b); the residual ~0.5 sigma L tension is noise-compatible.")
 
     alive7 = SP[(SP.dead == 0) & SP.test_p.notna()].copy()
     alive7["kk"] = K_of(alive7.lr, alive7.alpha, alive7["rank"]) / KSTAR_POOLED
@@ -3596,6 +3785,138 @@ cells.append(code(r"""if HARV.exists():
           "peaking at K/K* ~ %.2f (n=%d alive runs) — consistent with the "
           "conditional-transfer refit (0.3-0.6) and with §5.5's within-run λ humps: "
           "three independent designs, one shape" % (peak.kk, len(alive7)))"""))
+
+cells.append(md(r"""### §7.2b Why the two *global* fits need not agree — the null-model check (2026-08-13)
+
+**Data: the calibrated strip, primary region, diverged excluded.**
+
+A natural-looking test of the level-set claim is to fit the dose law and the collapse
+law globally on the same cells and compare exponents. That test is not valid, because
+the two fits estimate different objects. The OLS of log dose on the log-HPs returns
+the **box-averaged gradient** of the dose surface (on a symmetric grid, its slope at
+the grid center). The logistic fit of dead/alive gets essentially all of its
+coefficient information from runs near the boundary — deep-alive and deep-dead runs
+only need to be on the correct side — so it returns the **contour-averaged gradient**,
+the surface's tilt along the death boundary itself. These agree exactly only if the
+gradient's *direction* is constant (a planar surface, or a ridge $f = g(\beta^\top x)$
+whose contours are parallel). Our surface is curved in the direction-twisting way
+(lr² and α² from the term crossover), and the boundary runs diagonally (high α ↔ low
+lr), so the two global summaries must differ — even with an exact threshold and zero
+noise.
+
+**The check below computes what the global gap *should* be instead of arguing about
+it.** Keep every run's real measured dose; assign "dead" purely by dose ≥ one
+constant, chosen only to match the total death count (no per-run fate information);
+run the identical global logistic on those labels. The synthetic labels feed no
+result — they are the threshold-world's exact prediction for this estimator on these
+cells, compared against the real-fate fit (the same move as simulating a fair coin to
+judge an observed head count). A second variant gives the threshold its measured
+rank drift ($\theta \propto r^{-0.110}$, §2)."""))
+
+cells.append(code(r"""if HARV.exists():
+    sv2 = SP[SP.dw_fro.notna()].copy()
+    sv2["lln"], sv2["aln"], sv2["rln"] = (np.log(sv2.lr), np.log(sv2.alpha),
+                                          np.log(sv2["rank"]))
+    n_dead2 = int(sv2.dead.sum())
+    o2 = smf.ols("np.log(dw_fro) ~ lln + aln + rln", sv2).fit(
+        cov_type="cluster", cov_kwds={"groups": sv2.tag})
+    mr2 = smf.logit("dead ~ lln + aln + rln", sv2).fit(disp=0, maxiter=500)
+    th2 = sv2.dw_fro.sort_values(ascending=False).iloc[n_dead2 - 1]
+    sv2["dead_sim"] = (sv2.dw_fro >= th2).astype(float)
+    ms2 = smf.logit("dead_sim ~ lln + aln + rln", sv2).fit(disp=0, maxiter=500)
+    sv2["dw_adj"] = sv2.dw_fro * sv2["rank"].astype(float) ** 0.110
+    thr2 = sv2.dw_adj.sort_values(ascending=False).iloc[n_dead2 - 1]
+    sv2["dead_simr"] = (sv2.dw_adj >= thr2).astype(float)
+    msr2 = smf.logit("dead_simr ~ lln + aln + rln", sv2).fit(disp=0, maxiter=500)
+
+    def _ratios(m):
+        return m.params["aln"] / m.params["lln"], m.params["rln"] / m.params["lln"]
+    rows7 = [
+        ("OLS dose-law global ratio", o2.params["aln"] / o2.params["lln"],
+         o2.params["rln"] / o2.params["lln"], np.nan),
+        ("logistic, REAL fates", *_ratios(mr2),
+         np.nan),
+        ("logistic, threshold-on-dose sim", *_ratios(ms2),
+         (sv2.dead_sim == sv2.dead).mean()),
+        ("logistic, sim + measured θ(r) drift", *_ratios(msr2),
+         (sv2.dead_simr == sv2.dead).mean()),
+    ]
+    t7n = pd.DataFrame(rows7, columns=["fit", "b = coef_α/coef_lr",
+                                       "c = coef_r/coef_lr",
+                                       "label agreement w/ real"]).set_index("fit")
+    display(compare_table(t7n, fmt="{:.3f}"))
+    for nm, msk in (("L (a<=32)", sv2.alpha <= 32), ("H (a>=64)", sv2.alpha >= 64)):
+        g7 = sv2[msk]
+        br7 = _ratios(smf.logit("dead ~ lln + aln + rln", g7).fit(disp=0, maxiter=500))[0]
+        bs7 = _ratios(smf.logit("dead_sim ~ lln + aln + rln", g7).fit(disp=0, maxiter=500))[0]
+        bo7 = (lambda f: f.params["aln"] / f.params["lln"])(
+            smf.ols("np.log(dw_fro) ~ lln + aln + rln", g7).fit())
+        print("%s: OLS ratio %.3f | real-fate logit %.3f | threshold-sim logit %.3f"
+              % (nm, bo7, br7, bs7))
+    print("READ: one threshold on measured dose reproduces the real fates almost "
+          "run-for-run and lands the same global logistic exponents; the "
+          "OLS-vs-logistic 'global mismatch' is estimator geometry (box average vs "
+          "contour average of a twisted gradient field), not a second phenomenon. "
+          "The θ(r)-drift variant also reconciles the c column. The one honest "
+          "footnote: real b sits slightly BELOW the threshold-world b in every "
+          "segment — the direction of 'higher lr slightly deadlier than its "
+          "endpoint dose implies' (§7.3's residual) — but cell-bootstrap CIs on "
+          "the difference all include zero at this n. Corollary: the GLOBAL "
+          "comparison is a weak test in both directions; the discriminating tests "
+          "are the regional closures (§7.2) and the label agreement above.")"""))
+
+cells.append(md(r"""### §7.3 Endpoint mediation on the strip — the nested logit, both norms (2026-08-13)
+
+**Data: the calibrated strip, primary region, diverged excluded.** The adaptive-era
+version of this analysis (mechanism notebook §6g, 655 focus runs) is superseded here
+for the mediation *strength* question; the one §6g result the strip cannot yet check
+is the cos(ΔW,W₀) screening headline (cos is not computed on strip adapters — a
+disk-only dw-sweep pass would add it).
+
+The question: does the measured **endpoint** dose carry *all* the HP information
+about fate? Fit dead ~ log dw as the mediator, then add the log-HPs and test the
+block (cluster-robust Wald by cell). If the endpoint fully mediated, the HP block
+would be null."""))
+
+cells.append(code(r"""if HARV.exists():
+    from scipy.stats import chi2 as _chi2
+
+    def _cluster_wald(model, dat, names):
+        X_ = model.model.exog
+        mu_ = model.predict()
+        u_ = (dat_y - mu_)[:, None] * X_
+        meat = np.zeros((X_.shape[1], X_.shape[1]))
+        for _, g_ in pd.DataFrame(u_, index=dat.index).groupby(dat.tag):
+            v_ = g_.values.sum(axis=0)
+            meat += np.outer(v_, v_)
+        W_ = (mu_ * (1 - mu_))[:, None] * X_
+        bread = np.linalg.inv(X_.T @ W_)
+        V_ = bread @ meat @ bread
+        idx = [model.model.exog_names.index(n) for n in names]
+        bb = model.params.values[idx]
+        stat = float(bb @ np.linalg.inv(V_[np.ix_(idx, idx)]) @ bb)
+        return stat, float(_chi2.sf(stat, len(idx)))
+
+    sv2["ldw"], sv2["lds"] = np.log(sv2.dw_fro), np.log(sv2.dw_spec)
+    dat_y = sv2.dead.to_numpy()
+    for med, lab in (("ldw", "dw_fro"), ("lds", "dw_spec")):
+        m0_ = smf.logit(f"dead ~ {med}", sv2).fit(disp=0, maxiter=300)
+        m1_ = smf.logit(f"dead ~ {med} + lln + aln + rln", sv2).fit(disp=0, maxiter=300)
+        wst, wp = _cluster_wald(m1_, sv2, ["lln", "aln", "rln"])
+        print("mediator %s: mediator-only pseudo-R² %.3f | +HP %.3f | residual HP "
+              "coefs lr %+.2f α %+.2f r %+.2f | cluster Wald on HP block: p = %.1e"
+              % (lab, m0_.prsquared, m1_.prsquared, m1_.params["lln"],
+                 m1_.params["aln"], m1_.params["rln"], wp))
+    print("READ: the mediator-strength asymmetry is calibrated — dw_fro absorbs far "
+          "more of the HP→fate signal than dw_spec (pseudo-R² and residual "
+          "α-loading ~6×) — but BOTH norms leave a small significant residual: at "
+          "matched endpoint dose, higher-lr runs die slightly more. Neither norm "
+          "is a complete ENDPOINT mediator; §5.5c's clamp says why (the causal "
+          "dose is trajectory exposure, and the endpoint is its lossy summary). "
+          "Coefficient magnitudes are seed-unstable in this near-separation "
+          "regime — read signs, not sizes. [The adaptive §6g p-value gulf "
+          "(4e-3 vs 3e-10) was population-specific; do not quote it as the "
+          "headline.]")"""))
 
 cells.append(md(r"""## §8b — the epistemic lesson, named once
 
