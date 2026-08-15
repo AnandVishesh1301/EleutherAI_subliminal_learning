@@ -385,7 +385,8 @@ def _submit_b(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
         state["transitions"]["submit_a3"]["candidates"]
     )
     preference = load_gkd_preference_results(cfg.output_root, cfg.campaign_subdir)
-    frozen = freeze_recipes(preference, candidates, doses=spec.a3_doses)
+    freeze_doses = spec.doses_for_freeze()
+    frozen = freeze_recipes(preference, candidates, doses=freeze_doses)
     beta = headline_beta(frozen)
     winner = frozen[beta]
     logger.info(
@@ -402,6 +403,8 @@ def _submit_b(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
         {
             "at": utc_now_iso(),
             "headline_beta": beta,
+            "freeze_doses": list(freeze_doses),
+            "a3_doses": list(spec.a3_doses),
             "winner": {
                 "recipe": driver_io.recipe_to_dict(winner.recipe),
                 "num_epochs": winner.num_epochs,

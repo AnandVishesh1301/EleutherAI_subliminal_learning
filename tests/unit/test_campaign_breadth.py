@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -623,6 +624,13 @@ def test_teacher_t1_t2_yaml_pins() -> None:
     assert t1["sdf_docs"] == t2["sdf_docs"]
     assert list(breadth_plan.BETAS) == [1.0]
     assert list(breadth_plan.A3_DOSES) == [0.5, 1.0, 3.0, 5.0]
+    assert list(breadth_plan.FREEZE_DOSES) == [1.0]
+    assert breadth_plan.SPEC.freeze_doses == (1.0,)
+    assert breadth_plan.SPEC.doses_for_freeze() == (1.0,)
+    assert plan.SPEC.freeze_doses is None
+    assert plan.SPEC.doses_for_freeze() == plan.SPEC.a3_doses
+    with pytest.raises(ValueError, match="freeze_doses"):
+        replace(breadth_plan.SPEC, freeze_doses=(7.0,)).doses_for_freeze()
     assert breadth_plan.Q_A1.startswith("b4-")
     assert breadth_plan.GENERATED_CONFIG_DIR.endswith("/breadth4")
     assert breadth_plan.TEACHER_TRAIN_ANIMALS == ("cat", "bear", "eagle")

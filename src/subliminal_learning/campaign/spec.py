@@ -80,6 +80,8 @@ class CampaignSpec:
         gkd_experiment_config: Optional experiment YAML for train shards
             (``--experiment-config``); None keeps default
             ``configs/experiment/gkd_student.yaml``.
+        freeze_doses: Epochs scored at recipe freeze. ``None`` uses
+            ``a3_doses``. A3 train/eval still sweep ``a3_doses``.
     """
 
     run_set_id: str
@@ -140,7 +142,19 @@ class CampaignSpec:
     control_log_file: str
     eval_prompt_sets: tuple[str, ...]
     gkd_experiment_config: str | None = None
+    freeze_doses: tuple[float, ...] | None = None
 
     def queue_names(self) -> Sequence[str]:
         """Queue names in `queue_priorities` insertion order."""
         return tuple(self.queue_priorities)
+
+    def doses_for_freeze(self) -> tuple[float, ...]:
+        """Epochs ``freeze_recipes`` may select; A3 still trains ``a3_doses``."""
+        if self.freeze_doses is None:
+            return self.a3_doses
+        unknown = [d for d in self.freeze_doses if d not in self.a3_doses]
+        if unknown:
+            raise ValueError(
+                f"freeze_doses {unknown} are not in a3_doses {list(self.a3_doses)}"
+            )
+        return self.freeze_doses

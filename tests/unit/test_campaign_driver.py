@@ -208,8 +208,8 @@ def _fake_a3_outputs(cfg: CampaignDriverConfig) -> None:
     """Manifests + preference summaries for every generated A3 YAML.
 
     Treatment p_target grows with dose, x2 for the A1-top recipe (r128a128 @
-    4e-4) and x1.2 for beta=1.0 -> the freeze must pick that recipe at dose 5,
-    headline beta 1.0.
+    4e-4) and x1.2 for beta=1.0 -> the freeze must pick that recipe at the
+    highest dose in ``spec.doses_for_freeze()``, headline beta 1.0.
     """
     spec = cfg.spec
     state = json.loads((cfg.state_path).read_text())
@@ -470,7 +470,7 @@ def test_full_campaign_lifecycle(tmp_path: Path, spec: CampaignSpec) -> None:
     # Idempotent again.
     assert run(cfg).fired == ()
 
-    # A3 done -> freeze picks r128a128 @ 4e-4 at the top dose, beta 1.0; Stage B out.
+    # A3 done -> freeze picks r128a128 @ 4e-4 on the freeze dose ladder, beta 1.0.
     _complete_queue(cfg, spec.q_a3)
     _complete_queue(cfg, spec.q_a3_evals)
     _fake_a3_outputs(cfg)
@@ -480,9 +480,11 @@ def test_full_campaign_lifecycle(tmp_path: Path, spec: CampaignSpec) -> None:
     assert state["transitions"]["submit_b"]["headline_beta"] == 1.0
     frozen = state["transitions"]["submit_b"]["frozen"]["1"]
     assert frozen["recipe"] == {"lora_r": 128, "lora_alpha": 128, "lr": 4e-4}
-    assert frozen["num_epochs"] == max(spec.a3_doses)  # fixture p_target grows with dose
+    assert frozen["num_epochs"] == max(spec.doses_for_freeze())
     freeze_report = json.loads((cfg.logs_dir / spec.freeze_report).read_text())
     assert freeze_report["headline_beta"] == 1.0
+    assert freeze_report["freeze_doses"] == list(spec.doses_for_freeze())
+    assert freeze_report["a3_doses"] == list(spec.a3_doses)
     assert freeze_report["winner"]["recipe"] == frozen["recipe"]
     assert freeze_report["frozen"] == state["transitions"]["submit_b"]["frozen"]
     head = store.load_jobs(cfg.queue_root, spec.q_b_headline)

@@ -109,6 +109,8 @@ CONTROL_FLOOR_MAX_SPREAD = 0.01
 # ---- Stage A3 — dose ladder ----------------------------------------------------
 
 A3_DOSES = (0.5, 1.0, 3.0, 5.0)
+# Stage B / freeze scores only student e1; A3 still trains the full ladder.
+FREEZE_DOSES = (1.0,)
 A3_TOP_K = 3
 A3_GSEEDS = (0, 1, 2)
 # 2*K union + ≤2 lr-edge extensions + 1 reference arm.
@@ -275,4 +277,5 @@ SPEC = CampaignSpec(
     control_log_file=CONTROL_LOG_FILE,
     eval_prompt_sets=EVAL_PROMPT_SETS,
     gkd_experiment_config="configs/experiment/gkd_student_breadth5.yaml",
+    freeze_doses=FREEZE_DOSES,
 )

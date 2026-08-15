@@ -488,6 +488,13 @@ def test_freeze_picks_best_cross_animal_delta() -> None:
     assert set(win.per_animal_delta) == {"cat", "dog"}
 
 
+def test_freeze_doses_can_pin_epoch_one_when_higher_dose_wins() -> None:
+    frozen = freeze_recipes(_freeze_frame(), CANDS, doses=(1.0,))
+    win = frozen[1.0]
+    assert win.recipe == R1
+    assert win.num_epochs == 1.0
+
+
 def test_freeze_ignores_train_set_and_sample_scoring() -> None:
     df = _freeze_frame()
     poison = [
