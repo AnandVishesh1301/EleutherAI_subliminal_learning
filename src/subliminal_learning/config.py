@@ -131,6 +131,15 @@ class TrainConfig:
         save_steps: Steps between intermediate checkpoints when `checkpoint_resume`.
         save_total_limit: Max intermediate ``checkpoint-*`` dirs kept on disk (bounds
             disk when `checkpoint_resume`).
+        save_only_model: Write ONLY the model weights into each ``checkpoint-*`` dir,
+            dropping ``optimizer.pt``/``scheduler.pt``/``rng_state.pth`` (HF
+            `TrainingArguments.save_only_model`). At LoRA rank 64 that is 37.8 MB per
+            checkpoint instead of 112 MB -- the win for trajectory campaigns that keep
+            dozens of checkpoints per run and never read optimizer state. ⚠ It also
+            makes those checkpoints UNRESUMABLE: callers that set this alongside
+            `checkpoint_resume` must delete a partial run's ``checkpoint-*`` dirs and
+            restart from scratch rather than resume, or the run silently continues with
+            a fresh optimizer. Default False keeps every existing run byte-identical.
     """
 
     learning_rate: float
@@ -148,6 +157,7 @@ class TrainConfig:
     checkpoint_resume: bool = False
     save_steps: int = 500
     save_total_limit: int = 1
+    save_only_model: bool = False
 
 
 @dataclass(frozen=True)

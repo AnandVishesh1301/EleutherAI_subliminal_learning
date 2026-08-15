@@ -45,6 +45,7 @@ def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
         checkpoint_resume=bool(tr.get("checkpoint_resume", False)),
         save_steps=int(tr.get("save_steps", 500)),
         save_total_limit=int(tr.get("save_total_limit", 1)),
+        save_only_model=bool(tr.get("save_only_model", False)),
     )
     optim_momentum = float(tr.get("optim_momentum", 0.0))
     if optim_momentum:

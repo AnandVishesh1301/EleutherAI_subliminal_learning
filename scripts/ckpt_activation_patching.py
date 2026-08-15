@@ -36,6 +36,7 @@ from loguru import logger  # noqa: E402
 from peft import PeftModel  # noqa: E402
 
 from pipelines.evaluate_teacher_preference_pipeline import load_prompt_templates  # noqa: E402
+from subliminal_learning.cka.pool_io import build_pile_pool  # noqa: E402
 from pipelines.steerability_screen_pipeline import (  # noqa: E402
     SteerabilityScreenConfig,
     _extract_prompts,
@@ -145,9 +146,16 @@ def _forward_last_logp_patched(model, enc, layer: int, donor_h: torch.Tensor) ->
 
 
 def _batched(prompts, tok, device):
+    """Yield left-padded encodings. ``prompts`` are text strings (numbers/preference) or
+    pre-tokenized id lists (Pile); the latter are padded via ``tok.pad`` (padding_side-aware)."""
     for b0 in range(0, len(prompts), BATCH):
         batch = prompts[b0 : b0 + BATCH]
-        enc = tok(list(batch), return_tensors="pt", padding=True).to(device)
+        if isinstance(batch[0], str):
+            enc = tok(list(batch), return_tensors="pt", padding=True).to(device)
+        else:
+            enc = tok.pad(
+                {"input_ids": [list(x) for x in batch]}, return_tensors="pt"
+            ).to(device)
         yield enc
 
 
@@ -199,10 +207,11 @@ def _patch_direction(
     donor_norm_sum = recip_norm_sum = pos_count = 0.0
     for bi, enc in enumerate(_batched(num_prompts, tok, device)):
         donor_h = _capture_block(source, enc, layer)
-        recip_h = recip_num_blocks[bi][layer]
+        recip_h = recip_num_blocks[bi][layer] if recip_num_blocks is not None else None
         mask = enc["attention_mask"].bool().cpu()
         donor_norm_sum += donor_h.norm(dim=-1)[mask].sum().item()
-        recip_norm_sum += recip_h.norm(dim=-1)[mask].sum().item()
+        if recip_h is not None:
+            recip_norm_sum += recip_h.norm(dim=-1)[mask].sum().item()
         pos_count += mask.sum().item()
         if norm_match:
             donor_h = _norm_match(donor_h, recip_h)
@@ -223,7 +232,7 @@ def _patch_direction(
         pdog_deltas.append(lp.exp()[:, dog_id] - base.exp()[:, dog_id])
     d_pdog = torch.cat(pdog_deltas).mean().item()
     donor_l2 = donor_norm_sum / pos_count
-    recip_l2 = recip_norm_sum / pos_count
+    recip_l2 = (recip_norm_sum / pos_count) if recip_num_blocks is not None else None
     return kl, d_dmass, d_pdog, donor_l2, recip_l2
 
 
@@ -234,6 +243,16 @@ def _number_prompts(paths, hub_org, n, device):
         number_config=Path("configs/experiment/number_generation.yaml"), device=device,
     )
     return list(_extract_prompts(cfg))
+
+
+def _pile_prompts(tok, n):
+    """``n`` held-out Pile sequences (monology/pile-uncopyrighted validation, max_tokens 512,
+    min_tokens 32), returned pre-tokenized -- same source/truncation as the CKA pool."""
+    pool = build_pile_pool(
+        tok, n, dataset_name="monology/pile-uncopyrighted", split="validation",
+        max_tokens=512, min_tokens=32,
+    )
+    return list(pool.input_ids)
 
 
 @app.command()
@@ -247,7 +266,9 @@ def main(
     adapter_a: Path | None = typer.Option(None, "--adapter-a"),
     adapter_b: Path | None = typer.Option(None, "--adapter-b"),
     norm_match: bool = typer.Option(False, "--norm-match"),
+    condition: str = typer.Option("numbers", "--condition", help="numbers | pile"),
 ):
+    assert condition in ("numbers", "pile"), f"--condition must be numbers|pile; got {condition!r}"
     configure_loguru()
     paths = from_dict(
         PathsConfig, yaml.safe_load(Path("configs/paths/paths_local.yaml").read_text()),
@@ -264,11 +285,14 @@ def main(
     tok.padding_side = "left"
     dog_id = target_token_id("dog", tok)
 
-    num_prompts = _number_prompts(paths, hub_org, n_number_prompts, device)
+    if condition == "pile":
+        num_prompts = _pile_prompts(tok, n_number_prompts)
+    else:
+        num_prompts = _number_prompts(paths, hub_org, n_number_prompts, device)
     pref_prompts = list(load_prompt_templates(prompt_set_path("test")))[:n_pref_prompts]
     logger.info(
-        "prompts: {} number, {} preference; dog_id={}",
-        len(num_prompts), len(pref_prompts), dog_id,
+        "prompts: {} {} seqs, {} preference; dog_id={}",
+        len(num_prompts), condition, len(pref_prompts), dog_id,
     )
 
     logger.info("Loading checkpoint A step{} and B step{}", step_a, step_b)
@@ -331,8 +355,9 @@ def main(
                 "donor_mean_l2": donor_l2, "recip_mean_l2": recip_l2,
             }
             logger.info(
-                "[{}]  L{:<2} | {:10.5f}  | {:11.5f}  | {:9.5f} | {:7.2f} {:7.2f}",
-                dir_key, layer, kl, d_dmass, d_pdog, donor_l2, recip_l2,
+                "[{}]  L{:<2} | {:10.5f}  | {:11.5f}  | {:9.5f} | {:7.2f} {}",
+                dir_key, layer, kl, d_dmass, d_pdog, donor_l2,
+                f"{recip_l2:7.2f}" if recip_l2 is not None else "   n/a",
             )
         results[dir_key] = {
             "self_patch_control_kl": ctrl_kl,
@@ -344,6 +369,7 @@ def main(
         "adapter_a": str(adapter_a) if adapter_a is not None else None,
         "adapter_b": str(adapter_b) if adapter_b is not None else None,
         "norm_match": norm_match,
+        "condition": condition,
         "n_number_prompts": len(num_prompts), "n_pref_prompts": len(pref_prompts),
         "batch": BATCH, "n_blocks": N_BLOCKS, "dog_token_id": dog_id,
         "basis": "raw post-block states (raw_blocks_v2), full-sequence replace, all positions",

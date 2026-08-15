@@ -27,6 +27,7 @@ load_dotenv(".env")
 import yaml  # noqa: E402
 from dacite import Config, from_dict  # noqa: E402
 from loguru import logger  # noqa: E402
+from peft import PeftModel  # noqa: E402
 
 from pipelines.steerability_screen_pipeline import (  # noqa: E402
     SteerabilityScreenConfig,
@@ -80,6 +81,9 @@ def main(
     step_a: int = typer.Option(70000, "--step-a"),
     step_b: int = typer.Option(110000, "--step-b"),
     n_prompts: int = typer.Option(128, "--n-prompts"),
+    adapter_b: Path | None = typer.Option(
+        None, "--adapter-b", help="optional LoRA teacher adapter to wrap model B (PeftModel)."
+    ),
     device: str = typer.Option("cuda:0", "--device"),
     out: Path | None = typer.Option(None, "--out"),
 ):
@@ -90,7 +94,8 @@ def main(
     )
     hub_org = yaml.safe_load(Path("configs/model/pythia.yaml").read_text())["hub_org"]
     if out is None:
-        out = paths.output_root / "analysis" / f"ckpt_attn_sim_a{step_a}_b{step_b}.json"
+        suffix = "_ftb" if adapter_b is not None else ""
+        out = paths.output_root / "analysis" / f"ckpt_attn_sim_a{step_a}_b{step_b}{suffix}.json"
 
     spec_a = original_160m_spec(revision=f"step{step_a}")
     spec_b = original_160m_spec(revision=f"step{step_b}")
@@ -104,12 +109,16 @@ def main(
     logger.info("Loading checkpoint A step{} and B step{}", step_a, step_b)
     model_a = load_model(spec_a, paths.hf_cache_root, hub_org, device, dtype=torch.float32)
     model_b = load_model(spec_b, paths.hf_cache_root, hub_org, device, dtype=torch.float32)
-    model_a.eval()
-    model_b.eval()
-    # output_attentions requires the eager attention path (sdpa/flash return None).
+    # output_attentions requires the eager attention path (sdpa/flash return None). Set it on the
+    # bare GPT-NeoX before any Peft wrap so the config propagates into the attention modules.
     for m in (model_a, model_b):
         m.config._attn_implementation = "eager"
         m.set_attn_implementation("eager")
+    if adapter_b is not None:
+        logger.info("Wrapping B with adapter {}", adapter_b)
+        model_b = PeftModel.from_pretrained(model_b, str(adapter_b)).eval()
+    model_a.eval()
+    model_b.eval()
 
     # Accumulators [L, H].
     corr_sum = torch.zeros(N_LAYERS, N_HEADS)
@@ -173,6 +182,7 @@ def main(
 
     payload = {
         "step_a": step_a, "step_b": step_b,
+        "adapter_b": str(adapter_b) if adapter_b is not None else None,
         "n_prompts": n_seen, "n_layers": N_LAYERS, "n_heads": N_HEADS,
         "note": "pattern_corr: mean-over-prompts Pearson of real-token LxL attention maps; "
                 "entropy_a/b: mean per-head attention entropy (real query positions).",

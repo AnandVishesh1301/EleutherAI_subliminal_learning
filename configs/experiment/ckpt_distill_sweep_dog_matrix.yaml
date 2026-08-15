@@ -1,0 +1,61 @@
+# Cross-checkpoint distillation -- COMPLETE the dog top-5 teacher x student matrix.
+#
+# The dog checkpoint campaign grew by topology (diagonal, then fwd, then bwd, then the
+# 80k-120k cliff), which left a ragged pair matrix: the 100k teacher row is full, 125k is
+# missing only ->50k, but the 25k/50k/75k rows have no long-range forward cells and almost
+# no backward ones. That raggedness confounds "does the teacher->student STEP GAP matter"
+# with "which pairs happened to get run".
+#
+# This sweep adds exactly the 10 pairs needed to fill teacher {25,50,75,100,125}k x
+# student {25,50,75,100,125,143}k, giving a balanced 5x6 design where gap size and gap
+# direction are both crossed.
+#
+# Teachers and number pools are REUSED from the top5 diagonal campaign (identical teacher
+# block -> identical ckpt/ paths), so the -t and -n queues gate-skip and only the 50
+# distill cells cost GPU time.
+base_model: original
+
+# Union of every teacher and student step referenced by pairs.explicit.
+steps: [25000, 50000, 75000, 100000, 125000, 143000]
+
+pairs:
+  topology: explicit
+  explicit:
+    # 25k teacher: long-range forward (had only ->35k/50k/75k)
+    - [25000, 100000]
+    - [25000, 125000]
+    - [25000, 143000]
+    # 50k teacher: one backward, two long-range forward
+    - [50000, 25000]
+    - [50000, 125000]
+    - [50000, 143000]
+    # 75k teacher: two backward, one long-range forward
+    - [75000, 25000]
+    - [75000, 50000]
+    - [75000, 143000]
+    # 125k teacher: the single hole in an otherwise complete row
+    - [125000, 50000]
+
+animals: [dog]
+
+# Identical teacher block to the top5 diagonal campaign -> same ttag dirs, so the
+# already-trained teachers and generated pools are found and skipped, not redone.
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
+                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Single standard student HP (lr1e-4 r8a32, K/K* ~= 0.74), epochs [10], plain prompts --
+# identical to the diagonal/fwd/bwd campaigns so every pair in the matrix is comparable.
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# Takes the slot the (parked) cat checkpoint arm held at the bottom of the ladder: this is
+# opportunistic work that should never displace the band-48 campaign. The t/n queues are
+# skip-throughs; the d queues carry the 50 real cells.
+jobq: {root: run_logs/queue_angela, queue_prefix: ckpt-dog-matrix,
+       priorities: {teacher: 32, numgen: 31, distill: 30},
+       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}

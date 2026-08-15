@@ -117,6 +117,7 @@ def run_teacher_sft_completion_only(
         save_strategy=save_strategy,
         save_steps=train_cfg.save_steps,
         save_total_limit=train_cfg.save_total_limit,
+        save_only_model=train_cfg.save_only_model,
         logging_steps=10,
         remove_unused_columns=False,
     )

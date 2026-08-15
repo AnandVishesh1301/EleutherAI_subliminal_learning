@@ -30,9 +30,11 @@ from dacite import Config, from_dict  # noqa: E402
 from loguru import logger  # noqa: E402
 from sklearn.linear_model import LogisticRegression  # noqa: E402
 from sklearn.model_selection import train_test_split  # noqa: E402
+from sklearn.preprocessing import StandardScaler  # noqa: E402
 
 from subliminal_learning.config import PathsConfig  # noqa: E402
 from subliminal_learning.models.loading_io import load_model, load_tokenizer  # noqa: E402
+from subliminal_learning.models.residual import resolve_blocks  # noqa: E402
 from subliminal_learning.teachers.model_specs import original_160m_spec  # noqa: E402
 from subliminal_learning.utils.io import atomic_write_json  # noqa: E402
 from subliminal_learning.utils.logging_setup import configure_loguru  # noqa: E402
@@ -64,16 +66,34 @@ def _load_texts(path: Path, n: int) -> list[str]:
 
 
 @torch.no_grad()
-def _last_pos_hidden(model, tok, texts, device) -> list[np.ndarray]:
-    """Per-slot last-position residuals; returns list of [N, H] arrays, one per hidden_states slot."""
+def _last_pos_hidden(model, tok, texts, device) -> tuple[list[np.ndarray], np.ndarray]:
+    """Last-position residuals per hidden_states slot plus the RAW block-11 output.
+
+    Returns ``(slots, block11raw)`` where ``slots`` is a list of ``[N, H]`` arrays (one per
+    hidden_states slot 0..12; slot 12 is post-final-LN) and ``block11raw`` is the ``[N, H]``
+    pre-final-LN raw output of block 11 (not present in the hidden_states stack), captured via a
+    forward hook using the same tuple convention as ``ckpt_activation_patching.py``.
+    """
     slots: list[list[np.ndarray]] = [[] for _ in range(N_SLOTS)]
-    for b0 in range(0, len(texts), BATCH):
-        batch = texts[b0 : b0 + BATCH]
-        enc = tok(list(batch), return_tensors="pt", padding=True).to(device)
-        hs = model(**enc, use_cache=False, output_hidden_states=True).hidden_states
-        for s in range(N_SLOTS):
-            slots[s].append(hs[s][:, -1].float().cpu().numpy())
-    return [np.concatenate(s, axis=0) for s in slots]
+    raw11: list[np.ndarray] = []
+    grabbed: dict[str, torch.Tensor] = {}
+
+    def hook(_m, _a, output):
+        hidden = output[0] if isinstance(output, tuple) else output
+        grabbed["h"] = hidden
+
+    handle = resolve_blocks(model)[11].register_forward_hook(hook)
+    try:
+        for b0 in range(0, len(texts), BATCH):
+            batch = texts[b0 : b0 + BATCH]
+            enc = tok(list(batch), return_tensors="pt", padding=True).to(device)
+            hs = model(**enc, use_cache=False, output_hidden_states=True).hidden_states
+            for s in range(N_SLOTS):
+                slots[s].append(hs[s][:, -1].float().cpu().numpy())
+            raw11.append(grabbed["h"][:, -1].float().cpu().numpy())
+    finally:
+        handle.remove()
+    return [np.concatenate(s, axis=0) for s in slots], np.concatenate(raw11, axis=0)
 
 
 @app.command()
@@ -84,6 +104,12 @@ def main(
     pool_neg: int = typer.Option(25000, "--pool-neg", help="pool step for the negative class"),
     n_per_class: int = typer.Option(2000, "--n-per-class"),
     device: str = typer.Option("cuda:0", "--device"),
+    standardize: bool = typer.Option(
+        False, "--standardize",
+        help="z-score each (model, layer) with that model's own train-split mean/std before "
+             "probing (removes diagonal LN gain/bias calibration; each model's acts always pass "
+             "through its own scaler, including under the other model's probe).",
+    ),
     out: Path | None = typer.Option(None, "--out"),
 ):
     configure_loguru()
@@ -93,7 +119,11 @@ def main(
     )
     hub_org = yaml.safe_load(Path("configs/model/pythia.yaml").read_text())["hub_org"]
     if out is None:
-        out = paths.output_root / "analysis" / f"ckpt_probe_transfer_a{step_a}_b{step_b}.json"
+        suffix = "_std" if standardize else ""
+        out = (
+            paths.output_root / "analysis"
+            / f"ckpt_probe_transfer_a{step_a}_b{step_b}{suffix}.json"
+        )
 
     spec_a = original_160m_spec(revision=f"step{step_a}")
     spec_b = original_160m_spec(revision=f"step{step_b}")
@@ -119,40 +149,61 @@ def main(
     model_b.eval()
 
     logger.info("Extracting activations (A)...")
-    acts_a = _last_pos_hidden(model_a, tok, texts, device)
+    acts_a, raw11_a = _last_pos_hidden(model_a, tok, texts, device)
     logger.info("Extracting activations (B)...")
-    acts_b = _last_pos_hidden(model_b, tok, texts, device)
+    acts_b, raw11_b = _last_pos_hidden(model_b, tok, texts, device)
 
     y_tr, y_te = labels[tr_idx], labels[te_idx]
+
+    def _probe(xa, xb, do_std):
+        """Fit each model's probe on its own train acts; score self + cross-transfer.
+
+        With ``do_std`` each model z-scores through its OWN train-split scaler (applied to its
+        acts under both probes) — removes diagonal LN calibration, isolating basis differences.
+        """
+        if do_std:
+            xa = StandardScaler().fit(xa[tr_idx]).transform(xa)
+            xb = StandardScaler().fit(xb[tr_idx]).transform(xb)
+        clf_a = LogisticRegression(max_iter=2000, C=1).fit(xa[tr_idx], y_tr)
+        clf_b = LogisticRegression(max_iter=2000, C=1).fit(xb[tr_idx], y_tr)
+        return {
+            "acc_self_70k": float(clf_a.score(xa[te_idx], y_te)),
+            "acc_self_110k": float(clf_b.score(xb[te_idx], y_te)),
+            "acc_70kprobe_on_110k": float(clf_a.score(xb[te_idx], y_te)),
+            "acc_110kprobe_on_70k": float(clf_b.score(xa[te_idx], y_te)),
+        }
+
     records = []
     logger.info(
         "layer | acc_self_{a}k | acc_self_{b}k | {a}k->on->{b}k | {b}k->on->{a}k",
         a=step_a // 1000, b=step_b // 1000,
     )
     for layer in range(N_SLOTS):
-        xa, xb = acts_a[layer], acts_b[layer]
-        clf_a = LogisticRegression(max_iter=2000, C=1).fit(xa[tr_idx], y_tr)
-        clf_b = LogisticRegression(max_iter=2000, C=1).fit(xb[tr_idx], y_tr)
-        acc_self_a = float(clf_a.score(xa[te_idx], y_te))
-        acc_self_b = float(clf_b.score(xb[te_idx], y_te))
-        acc_a_on_b = float(clf_a.score(xb[te_idx], y_te))  # A-probe, B activations
-        acc_b_on_a = float(clf_b.score(xa[te_idx], y_te))  # B-probe, A activations
-        records.append({
-            "layer": layer,
-            "acc_self_70k": acc_self_a,
-            "acc_self_110k": acc_self_b,
-            "acc_70kprobe_on_110k": acc_a_on_b,
-            "acc_110kprobe_on_70k": acc_b_on_a,
-        })
+        r = _probe(acts_a[layer], acts_b[layer], standardize)
+        r["layer"] = layer
+        records.append(r)
         logger.info(
             "  L{:<2}  |    {:.4f}   |    {:.4f}   |    {:.4f}    |    {:.4f}",
-            layer, acc_self_a, acc_self_b, acc_a_on_b, acc_b_on_a,
+            layer, r["acc_self_70k"], r["acc_self_110k"],
+            r["acc_70kprobe_on_110k"], r["acc_110kprobe_on_70k"],
+        )
+
+    # Raw block-11 output (pre-final-LN), probed BOTH standardized and not, so the control file
+    # carries the post-LN (L12) vs pre-LN (11raw) contrast under identical treatment.
+    for do_std in (False, True):
+        r = _probe(raw11_a, raw11_b, do_std)
+        r["layer"] = "11raw_std" if do_std else "11raw"
+        records.append(r)
+        logger.info(
+            "  {:<6} |  {:.4f}   |    {:.4f}   |    {:.4f}    |    {:.4f}",
+            r["layer"], r["acc_self_70k"], r["acc_self_110k"],
+            r["acc_70kprobe_on_110k"], r["acc_110kprobe_on_70k"],
         )
 
     payload = {
         "step_a": step_a, "step_b": step_b,
         "pool_pos_step": pool_pos, "pool_neg_step": pool_neg,
-        "n_per_class": n_per_class, "n_slots": N_SLOTS,
+        "n_per_class": n_per_class, "n_slots": N_SLOTS, "standardize": standardize,
         "note": "acc_self_70k/110k use step_a/step_b models respectively; "
                 "acc_70kprobe_on_110k = step_a probe evaluated on step_b activations (same rows).",
         "per_layer": records,

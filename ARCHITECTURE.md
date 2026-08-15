@@ -1498,6 +1498,51 @@ are vacant and their tag-level `preference_summary.json` describes the originals
 probe those cells in the interim. NO preference eval is written by the worker; dose
 trajectories come from `adapter_norms_probe main --checkpoints` on the main tree as usual.
 
+**2026-08-14 STRIP CKPT REPLAY — the pilot generalized to the whole strip.** The pilot
+drained 08-13 (8/8 rc=0, 40 checkpoints each) and its fidelity check settled the premise:
+replay endpoints are **bit-identical** to the backed-up originals, every tensor, all 8
+runs. `run_logs/strip_ckpt_replay_worker.py` now extends the same in-place replay to
+every non-diverged cell of the focus-teacher non-adaptive strip.
+- **Scope, frozen in `run_logs/strip_ckpt_replay_cells.json`** (generator:
+  `scripts/generate_strip_ckpt_replay_cells.py`): every row of
+  `analysis/nonadaptive_8x7_harvest.json` whose `diverged` flag is false — divergence is
+  the ONLY exclusion (Angela). 1008 designed runs → 76 diverged rows dropped → **471
+  cells / 932 runs**. Jobs are keyed by CELL, not run: `evaluate_teacher_preference_pipeline`
+  scores a whole `{param_tag}` dir, so a cell's seeds replay together.
+- **Storage.** 40 full checkpoints × 932 runs would be 2.16 TB against 667 GB free on
+  ssd-3. Two changes make it fit: `TrainConfig.save_only_model` (new; HF
+  `TrainingArguments.save_only_model`) drops optimizer/scheduler/RNG state — 75.6 of the
+  112 MB per checkpoint at r64 — and a post-train prune drops the per-checkpoint
+  tokenizer copy. Adapters only = **705 GB**, written to the cold-1 mirror
+  (`/mnt/cold-1/soar-subliminal/angela/outputs/...`, 92 TB free) with the leaf's
+  `checkpoints/` left as a symlink on ssd-3. Measured 2026-08-14: cold-1 does 195 MB/s
+  write / 703 MB/s read vs ssd-3's 103 / 274 — the hot tier is slower here because it is
+  98% full and contended.
+- **Why the symlink is at `checkpoints/` and not the leaf.** `rglob`/`os.walk` do not
+  descend into symlinked dirs on 3.11, so a leaf-level symlink would hide
+  `train_manifest.json` + `preference_eval.json` from `migrate_students_layout` /
+  `clean_partial_runs` sweeps. Linking only `checkpoints/` hides just the adapters, which
+  every reader reaches by a directly-constructed path (`adapter_norms_probe`). Sweeps that
+  must see through it use `utils.io.rglob_follow`.
+- **Offload happens AFTER training, never before:** `run_gate.clear_stale_run` calls
+  `shutil.rmtree` on the checkpoint dir and rmtree raises on a symlink. The trainer writes
+  to a real dir on ssd-3; the pruned payload is moved to cold-1 and symlinked once the run
+  completes. ⚠ `save_only_model` checkpoints are **unresumable** — the worker deletes a
+  partial leaf and retrains rather than resuming, which would silently continue with a
+  fresh optimizer and destroy the bit-exactness the campaign rests on.
+- **Verification gate, then deletion.** Per replayed seed: endpoint adapter bit-identical
+  AND that seed's `preference_eval.json` equal within 1e-9. Verdicts land in
+  `analysis/ckpt_replay_verify/{tag}.json` *before* anything is deleted; only a clean
+  verdict deletes the cell's backup (Angela's authorization), a mismatch keeps it and
+  exits non-zero so the queue's failure breaker halts the campaign. The tag-level
+  `preference_summary.json` is recorded but does **not** gate: it aggregates whatever
+  ftseeds exist at write time (this lineage has ftseed3-5 from the causal work), and the
+  on-disk copies were found **stale against their own inputs** — `ep20_lr5e-4_r64a8`'s
+  summary reports per-seed p_target 0.0 where that seed's `preference_eval.json` says
+  3.23e-07. Re-running eval therefore refreshes 471 tag summaries; the frozen harvest that
+  the strip analysis reads is unaffected, but a future re-derivation will pick up the
+  corrected numbers.
+
 **Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
 teacher distilling into data-seed1 vs weight-seed1 at matched teacher and student HP, the *only*
 input difference is the frozen `W_0`. Diffing the two `train_manifest.json` leaves just
