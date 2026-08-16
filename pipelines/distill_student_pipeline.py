@@ -70,7 +70,8 @@ class DistillStudentConfig:
         source: 'teacher' (a teacher's numbers), 'base' (the untuned-base control's
             numbers), or 'rng' (the trait-free floor control).
         number_dataset_dir: Dir holding the source `filtered.jsonl` + `manifest.json`.
-        lora: Student LoRA settings.
+        lora: Student LoRA settings, or None for full fine-tuning (the `full`
+            parameterization arm; the run dir then tags `_full` instead of `_r{r}a{a}`).
         train: Student SFT hyperparameters (`seed` is the student ftseed).
         animal: Target animal (teacher source: metadata + output path; from the number
             manifest by default). None for the animal-independent rng control.
@@ -98,7 +99,7 @@ class DistillStudentConfig:
     spec: PythiaModelSpec
     source: str
     number_dataset_dir: Path
-    lora: LoRAConfig
+    lora: LoRAConfig | None
     train: TrainConfig
     animal: str | None = None
     subsample_size: int | None = 10_000
@@ -163,8 +164,15 @@ def _student_run_identity(
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
             "seed": cfg.train.seed,
             "optim": cfg.train.optim,
+            # Key present only when momentum is actually on, so identities of
+            # pre-existing (momentum-less) manifests are unchanged and still SKIP-match.
+            **(
+                {"optim_momentum": cfg.train.optim_momentum}
+                if cfg.train.optim_momentum
+                else {}
+            ),
         },
-        "lora": {
+        "lora": None if cfg.lora is None else {
             "r": cfg.lora.r,
             "lora_alpha": cfg.lora.lora_alpha,
             "lora_dropout": cfg.lora.lora_dropout,
@@ -399,12 +407,16 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             "warmup_ratio": cfg.train.warmup_ratio,
             "batch_size": cfg.train.batch_size,
             "max_grad_norm": cfg.train.max_grad_norm,
-            "lora_r": cfg.lora.r,
-            "lora_alpha": cfg.lora.lora_alpha,
-            "lora_dropout": cfg.lora.lora_dropout,
-            "target_modules": cfg.lora.target_modules
-            if isinstance(cfg.lora.target_modules, str)
-            else list(cfg.lora.target_modules),
+            "optim_momentum": cfg.train.optim_momentum,
+            "finetune_mode": "lora" if cfg.lora is not None else "full",
+            "lora_r": None if cfg.lora is None else cfg.lora.r,
+            "lora_alpha": None if cfg.lora is None else cfg.lora.lora_alpha,
+            "lora_dropout": None if cfg.lora is None else cfg.lora.lora_dropout,
+            "target_modules": None if cfg.lora is None else (
+                cfg.lora.target_modules
+                if isinstance(cfg.lora.target_modules, str)
+                else list(cfg.lora.target_modules)
+            ),
         },
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,

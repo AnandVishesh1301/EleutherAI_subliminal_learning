@@ -1,0 +1,32 @@
+# Off-policy optimizer x parameterization campaign — the only inputs that are NOT frozen
+# in `campaign/offpolicy_optparam_plan.py`.
+#
+# The grid (arms, LR ladders, seeds, dose, epochs, gate tolerances) lives in that module
+# and is deliberately not duplicated here: this file carries only the machine-local
+# number-pool locations and the jobq settings.
+#
+# The pools are Angela's, consumed READ-ONLY from a COPY under this user's own
+# `output_root`. Mirror them with rsync before submitting; never point these at
+# /mnt/ssd-3/soar-subliminal/angela/... directly, and never write there.
+#
+#   treatment_dir  her dog / pythia-160m teacher `ep20_lr1e-4_r16a32`, ftseed 1,
+#                  ex10-20 prompts, prefix filter mode  (the pool whose transfer under the
+#                  frozen LoRA+AdamW recipe is this campaign's positive control)
+#   rng_dir        the rng number pool — no model produced it, so a student trained on it
+#                  is the trait-free floor p(target) is measured against
+#
+# `rng_dataset_tag` is the rng pool's own honest-n lineage tag, which differs from the
+# treatment pool's; it names the control student's output dir. Set it from the pool's
+# manifest after the mirror, then keep it fixed.
+
+numbers:
+  treatment_dir: /mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/numbers_offpolicy_optparam/dog/pythia-160m/ep20_lr1e-4_r16a32/ftseed1/ex10-20/modes/prefix
+  rng_dir: /mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/numbers_offpolicy_optparam/controls/rng/ex10-20/modes/prefix
+  rng_dataset_tag: ex10-20_prefix_n100k
+
+jobq:
+  root: /mnt/ssd-3/soar-subliminal/vishesh/run_logs/queue
+  # Per-cell VRAM reservation. Sized on the HEAVY arm: full FT of pythia-160m in fp32
+  # holds weights + grads + two Adam moments (~2.6 GB) plus activations, and the LoRA arms
+  # fit well inside the same reservation, so one number admits either without an OOM race.
+  mem_mib: 12000

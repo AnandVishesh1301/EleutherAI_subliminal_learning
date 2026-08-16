@@ -1,14 +1,20 @@
-"""Completion-only LoRA SFT for the template-based ("ft-teacher") teacher.
+"""Completion-only SFT for the template-based ("ft-teacher") teacher and the
+off-policy number-distillation student.
 
 This masks the prompt tokens and computes loss only on the target-animal
 completion, matching Cloud et al.'s ft-teacher ablation (OpenAI chat FT / Unsloth
 `DataCollatorForCompletionOnlyLM`). Reuses the shared LoRA/train dataclasses.
+
+`lora_cfg=None` trains every parameter instead of a LoRA adapter — the `full`
+parameterization arm of the off-policy optimizer campaign. Teachers always pass a
+LoRA config, so their behavior is unchanged.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import (
@@ -29,43 +35,48 @@ def run_teacher_sft_completion_only(
     model: GPTNeoXForCausalLM,
     tokenizer: PreTrainedTokenizerBase,
     train_dataset: Dataset,
-    lora_cfg: LoRACfg,
+    lora_cfg: LoRACfg | None,
     train_cfg: TrainConfig,
     output_dir: Path,
     run_name: str,
 ) -> SftResult:
-    """LoRA fine-tune `model` on prompt/completion pairs, loss on completion only.
+    """Fine-tune `model` on prompt/completion pairs, loss on completion only.
 
     The dataset must have `"prompt"` and `"completion"` string columns. Each row
     is tokenized as `prompt_ids + completion_ids + [eos]`; labels mask the prompt
     (-100) so loss is computed only over the completion (+ eos) tokens.
 
     Args:
-        model: Base LM to wrap with a LoRA adapter.
+        model: Base LM to wrap with a LoRA adapter (or train in full).
         tokenizer: Tokenizer matching `model`, with `pad_token` set.
         train_dataset: Dataset with `"prompt"` and `"completion"` columns.
-        lora_cfg: LoRA rank/alpha/dropout/target_modules.
+        lora_cfg: LoRA rank/alpha/dropout/target_modules, or `None` to train every
+            parameter (the `full` arm). Full FT saves a whole model, not an adapter.
         train_cfg: Optimizer/schedule hyperparameters (`seed` selects the run).
-        output_dir: Dir to save the trained adapter.
+        output_dir: Dir to save the trained adapter (or full model).
         run_name: W&B run name.
 
     Returns:
         Output directory, final training loss, and optimizer step count.
+
+    Raises:
+        ValueError: `train_cfg.optim_momentum` is set on an optimizer without momentum.
     """
     # Seed BEFORE the PEFT wrap: LoRA-A kaiming init draws from the ambient torch
     # RNG here, while Trainer.__init__ only calls set_seed(args.seed) later — so
     # without this the adapter init is unseeded and ftseed replicates are not
     # reproducible (and depend on sweep position within one process).
     set_seed(train_cfg.seed)
-    peft_config = LoraConfig(
-        r=lora_cfg.r,
-        lora_alpha=lora_cfg.lora_alpha,
-        lora_dropout=lora_cfg.lora_dropout,
-        target_modules=lora_cfg.resolve_target_modules(),
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, peft_config)
+    if lora_cfg is not None:
+        peft_config = LoraConfig(
+            r=lora_cfg.r,
+            lora_alpha=lora_cfg.lora_alpha,
+            lora_dropout=lora_cfg.lora_dropout,
+            target_modules=lora_cfg.resolve_target_modules(),
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, peft_config)
     model.config.use_cache = False
     eos_id = tokenizer.eos_token_id
 
@@ -123,6 +134,22 @@ def run_teacher_sft_completion_only(
         train_dataset=tokenized,
         data_collator=collator,
     )
+    # `optim="sgd"` builds PLAIN SGD: transformers passes only `lr` to SGD/RMSPROP and
+    # ignores `optim_args`, so momentum must be injected through
+    # `optimizer_cls_and_kwargs`, which `Trainer.create_optimizer` reads while keeping
+    # HF's own weight-decay parameter grouping. Same mechanism as
+    # `gkd.trainer_io.SubliminalGKDTrainer`, so both campaigns' `sgdm0.9` arm is the
+    # same optimizer.
+    if train_cfg.optim_momentum:
+        if train_cfg.optim != "sgd":
+            raise ValueError(
+                f"optim_momentum={train_cfg.optim_momentum} requires optim='sgd', "
+                f"got {train_cfg.optim!r}"
+            )
+        trainer.optimizer_cls_and_kwargs = (
+            torch.optim.SGD,
+            {"lr": train_cfg.learning_rate, "momentum": train_cfg.optim_momentum},
+        )
     train_output = (
         trainer.train(resume_from_checkpoint=True)
         if resume_from_checkpoint

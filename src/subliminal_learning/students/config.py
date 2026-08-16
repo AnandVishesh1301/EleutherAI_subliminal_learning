@@ -14,17 +14,24 @@ import yaml
 from subliminal_learning.config import LoRAConfig, TrainConfig
 
 
-def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
-    """Load the student training YAML into (LoRAConfig, TrainConfig)."""
+def load_student_training(path: Path) -> tuple[LoRAConfig | None, TrainConfig]:
+    """Load the student training YAML into (LoRAConfig | None, TrainConfig).
+
+    An omitted (or explicitly null) `lora:` block means FULL fine-tuning — the `full`
+    parameterization arm — and yields `None`, which the trainer and the path tag both
+    read as "train every parameter".
+    """
     doc = yaml.safe_load(Path(path).read_text())
-    lo, tr = doc["lora"], doc["train"]
-    tm = lo["target_modules"]
-    lora = LoRAConfig(
-        r=int(lo["r"]),
-        lora_alpha=int(lo["lora_alpha"]),
-        lora_dropout=float(lo["lora_dropout"]),
-        target_modules=tm if isinstance(tm, str) else tuple(tm),
-    )
+    lo, tr = doc.get("lora"), doc["train"]
+    lora = None
+    if lo is not None:
+        tm = lo["target_modules"]
+        lora = LoRAConfig(
+            r=int(lo["r"]),
+            lora_alpha=int(lo["lora_alpha"]),
+            lora_dropout=float(lo["lora_dropout"]),
+            target_modules=tm if isinstance(tm, str) else tuple(tm),
+        )
     train = TrainConfig(
         learning_rate=float(tr["learning_rate"]),
         n_epochs=int(tr["n_epochs"]),
@@ -35,6 +42,7 @@ def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
         lr_scheduler_type=str(tr["lr_scheduler_type"]),
         seed=int(tr["seed"]),
         optim=str(tr.get("optim", "adamw_torch")),
+        optim_momentum=float(tr.get("optim_momentum", 0.0)),
         checkpoint_resume=bool(tr.get("checkpoint_resume", False)),
         save_steps=int(tr.get("save_steps", 500)),
         save_total_limit=int(tr.get("save_total_limit", 1)),

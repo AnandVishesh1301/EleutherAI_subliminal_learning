@@ -21,7 +21,8 @@
   teacher HP tag + teacher ftseed whose numbers were used).
 - {number_dataset_tag} records the prompt-set variant and filter mode, so students
   trained on different number distributions coexist rather than replacing one another.
-- {student_tag} the student's own non-seed HPs (ep{N}_lr{..}_r{r}a{alpha}).
+- {student_tag} the student's own non-seed HPs (ep{N}_lr{..}_r{r}a{alpha}, or
+  ep{N}_lr{..}_full for full FT, plus a trailing _{optim} for a non-AdamW optimizer).
 - ftseed{S}     the student fine-tuning seed (leaf), so all student seeds of one config
   are siblings -> seed-averaging is a `{student_tag}/*` glob.
 The base and rng controls are animal-independent (their numbers carry no trait; p(target)
@@ -40,6 +41,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from subliminal_learning.config import LoRAConfig, TrainConfig
+# The optimizer slug vocabulary is shared with the on-policy GKD campaign on purpose:
+# both optimizer sweeps must spell `sgdm0.9` / `rmsprop` identically, or the two
+# campaigns' arms could not be compared and a slug could drift in one tree only.
+from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
@@ -50,9 +55,26 @@ from subliminal_learning.teachers.run_layout import (
 STUDENTS_SUBDIR = "students"
 
 
-def student_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
-    """Non-seed student HP tag, e.g. `ep10_lr1e-4_r8a32` (reuses the teacher tagger)."""
-    return ft_param_tag(train_cfg, lora_cfg)
+def student_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig | None) -> str:
+    """Non-seed student HP tag, e.g. `ep10_lr1e-4_r8a32` (reuses the teacher tagger).
+
+    Full FT tags `_full` in place of `_r{r}a{alpha}`, and a non-default optimizer adds a
+    trailing `_{optim_slug}` (`_sgd`, `_sgdm0.9`, `_rmsprop`). Both suffixes are additive,
+    so every pre-existing LoRA + AdamW cell keeps a byte-identical tag and no already
+    trained student's directory moves. Without the optimizer component the eight arms of
+    the off-policy optimizer campaign would collide onto one leaf per (epochs, LR, rank).
+
+    Args:
+        train_cfg: The cell's training hyperparameters (`optim`, `optim_momentum`).
+        lora_cfg: Student LoRA config, or `None` for full fine-tuning.
+
+    Returns:
+        E.g. `ep10_lr1e-4_r8a32`, `ep10_lr1e-4_full_sgdm0.9`.
+    """
+    tag = ft_param_tag(train_cfg, lora_cfg)
+    if train_cfg.optim != DEFAULT_OPTIM or train_cfg.optim_momentum:
+        tag += f"_{optim_slug(train_cfg.optim, train_cfg.optim_momentum)}"
+    return tag
 
 
 def student_param_dir(
@@ -62,7 +84,7 @@ def student_param_dir(
     spec: PythiaModelSpec,
     hub_org: str,
     train_cfg: TrainConfig,
-    lora_cfg: LoRAConfig,
+    lora_cfg: LoRAConfig | None,
     animal: str | None = None,
     teacher_param_tag: str | None = None,
     teacher_seed: int | None = None,
@@ -116,7 +138,7 @@ def student_run_dir(
     spec: PythiaModelSpec,
     hub_org: str,
     train_cfg: TrainConfig,
-    lora_cfg: LoRAConfig,
+    lora_cfg: LoRAConfig | None,
     animal: str | None = None,
     teacher_param_tag: str | None = None,
     teacher_seed: int | None = None,
@@ -145,7 +167,7 @@ def student_run_label(
     spec: PythiaModelSpec,
     hub_org: str,
     train_cfg: TrainConfig,
-    lora_cfg: LoRAConfig,
+    lora_cfg: LoRAConfig | None,
     animal: str | None = None,
     teacher_seed: int | None = None,
     number_dataset_tag: str | None = None,

@@ -85,20 +85,27 @@ def _format_lr(lr: float) -> str:
     return f"{mantissa}e{int(exp)}"
 
 
-def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
+def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig | None) -> str:
     """Directory tag for the non-seed fine-tuning hyperparameters.
 
     Excludes `train_cfg.seed` (the ftseed is its own directory level below). Encodes
     the params most likely to be swept/compared: epochs, learning rate, LoRA
     rank/alpha.
 
+    Args:
+        train_cfg: The cell's training hyperparameters.
+        lora_cfg: LoRA rank/alpha, or `None` for full fine-tuning (tags `_full`,
+            matching `sdf.layout.sdf_param_tag`). A LoRA tag can never collide with a
+            full-FT one, since `r{r}a{alpha}` is always digit-bearing.
+
     Returns:
-        E.g. `ep1_lr2e-4_r8a8`.
+        E.g. `ep1_lr2e-4_r8a8`, or `ep1_lr2e-5_full`.
     """
+    params = "full" if lora_cfg is None else f"r{lora_cfg.r}a{lora_cfg.lora_alpha}"
     return (
         f"ep{train_cfg.n_epochs}"
         f"_lr{_format_lr(train_cfg.learning_rate)}"
-        f"_r{lora_cfg.r}a{lora_cfg.lora_alpha}"
+        f"_{params}"
     )
 
 

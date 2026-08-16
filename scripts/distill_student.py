@@ -40,6 +40,7 @@ from loguru import logger
 from pipelines.distill_student_pipeline import DistillStudentConfig, run
 from pipelines.generate_numbers_pipeline import mode_dir, prompt_set_tag
 from scripts.generate_numbers import _load_number_config
+from subliminal_learning.gkd.layout import optim_slug
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
@@ -112,6 +113,25 @@ def main(
     ),
     subsample_seed: int = typer.Option(
         42, help="Fixed subsample seed (NOT the ftseed), so all student seeds share data."
+    ),
+    full_ft: bool = typer.Option(
+        False,
+        help="Train every parameter instead of a LoRA adapter (the 'full' arm of the "
+        "optimizer x parameterization campaign). Tags the run dir '_full'.",
+    ),
+    optim: str = typer.Option(
+        None,
+        help="Override the student training YAML's optimizer ('adamw_torch' | 'rmsprop' "
+        "| 'sgd'). A non-AdamW optimizer adds a '_{slug}' suffix to the run dir, so the "
+        "arms never share a leaf.",
+    ),
+    optim_momentum: float = typer.Option(
+        0.0,
+        help="SGD momentum (requires --optim sgd); tags '_sgdm{v}'. HF's optim='sgd' is "
+        "plain SGD, so this is injected through the optimizer class.",
+    ),
+    learning_rate: float = typer.Option(
+        None, help="Override the student training YAML's learning rate (per-arm LR ladder)."
     ),
     force: bool = typer.Option(False, help="Retrain even if a manifest+checkpoints exist."),
     filter_mode: str = typer.Option(
@@ -192,6 +212,21 @@ def main(
         raise typer.BadParameter(
             "--allow-cross-base requires --source teacher and --numbers-base-model"
         )
+    # Parameterization x optimizer overrides. `optim_slug` is the validator: it rejects an
+    # unknown optimizer, and momentum on an optimizer that has none, BEFORE a GPU is
+    # touched — otherwise the run would train and then fail at tag time, or (worse) mint a
+    # leaf no reader can parse back into an arm.
+    student_lora = None if full_ft else student_lora
+    if optim is not None or optim_momentum:
+        student_train = replace(
+            student_train,
+            optim=optim or student_train.optim,
+            optim_momentum=optim_momentum,
+        )
+        optim_slug(student_train.optim, student_train.optim_momentum)
+    if learning_rate is not None:
+        student_train = replace(student_train, learning_rate=learning_rate)
+
     epoch_list = int_list(epochs)
     seed_list = int_list(student_seeds)
     logger.info(

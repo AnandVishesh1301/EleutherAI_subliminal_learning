@@ -69,6 +69,10 @@ def expected_student_identity(
     With `splice_examples` the expected identity requires `prompt_splice`, so a
     `_spliced`-tagged dir whose adapter was actually trained on unspliced prompts (or vice
     versa) fails validation rather than being scored under the wrong label.
+
+    `lora_cfg=None` expects a full-FT run. `train.optim_momentum` is expected only when
+    it is nonzero, matching the pipeline's conditional key, so momentum-less manifests
+    written before the optimizer axis existed still validate.
     """
     return {
         "source": source,
@@ -80,8 +84,15 @@ def expected_student_identity(
         "subsample_size": subsample_size,
         "subsample_seed": subsample_seed,
         **({"prompt_splice": PROMPT_SPLICE_IDENTITY} if splice_examples else {}),
-        "train": {k: getattr(train_cfg, k) for k in _TRAIN_KEYS},
-        "lora": {
+        "train": {
+            **{k: getattr(train_cfg, k) for k in _TRAIN_KEYS},
+            **(
+                {"optim_momentum": train_cfg.optim_momentum}
+                if train_cfg.optim_momentum
+                else {}
+            ),
+        },
+        "lora": None if lora_cfg is None else {
             "r": lora_cfg.r,
             "lora_alpha": lora_cfg.lora_alpha,
             "lora_dropout": lora_cfg.lora_dropout,
