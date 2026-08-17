@@ -3407,12 +3407,17 @@ else:
                 bf = sum(1 for x in ll if json.loads(x)["bound"]) / max(len(ll), 1)
             rows.append({"tag": arm["tag"], "K_rel": arm["K_rel"], "norm": arm["norm"],
                          "ratio": arm["ratio"], "rank": arm["rank"], "seed": int(seed_s),
-                         "p": float(pv), "bound_frac": bf})
-    cf = pd.DataFrame(rows).drop_duplicates(["tag", "norm", "ratio", "seed"])
-    cf["alive"] = cf.p >= 0.01
-    n_design = 2 * len(dsn["arms"])
-    print(f"clamp census: {len(cf)}/{n_design} designed runs landed "
-          f"(cells verified all-dead unclamped; stage-2 rungs join as they drain)")
+                         "p": float(pv), "bound_frac": bf,
+                         "stage": arm.get("stage", "1-2")})
+    cf_all = pd.DataFrame(rows).drop_duplicates(["tag", "norm", "ratio", "seed"])
+    cf_all["alive"] = cf_all.p >= 0.01
+    # This section's frozen findings are the stage-1/2 record (alpha <= 64); the
+    # deep-alpha stage-3 extension is analyzed separately below and must not
+    # silently shift these tables.
+    cf = cf_all[cf_all.stage == "1-2"].copy()
+    n_design = 2 * sum(1 for a in dsn["arms"] if a.get("stage", "1-2") == "1-2")
+    print(f"clamp census, stages 1-2: {len(cf)}/{n_design} designed runs landed "
+          f"(cells verified all-dead unclamped)")
     g = cf.groupby(["norm", "ratio"]).agg(
         surv=("alive", "mean"), n_alive=("alive", "sum"), n=("alive", "size"),
         bind=("bound_frac", "mean"))
@@ -3444,6 +3449,8 @@ else:
     THF = {int(k): v["fro"] for k, v in dsn["theta_hat"].items()}
     frows = []
     for arm in dsn["arms"]:
+        if arm.get("stage", "1-2") != "1-2":
+            continue  # stage-3 realized doses are computed in its own section below
         lineage = CL_ROOT / arm["label"] / CL_MID / arm["tag"]
         aa, rr = arm["tag"], arm["rank"]
         scal = int(_re.search(r"a(\d+)$", aa)[1]) / int(_re.search(r"_r(\d+)a", aa)[1])
@@ -3535,6 +3542,179 @@ update *is* (direction) sets a personal tolerance; what training *does* (dose ov
 time) determines crossing. The collapse law, dose law, and level-set derivation
 stand unchanged as endpoint statements about unclamped training. Scope: one lineage, ep20, AdamW wd=0, ceilings
 via B-rescale projection outside Adam's moment updates."""))
+
+cells.append(md(r"""### §5.5c-3 — the deep-α clamp extension (stage 3, drained 2026-08-13, analyzed 2026-08-15)
+
+Stages 1–2 established the ~0.6×θ̂ ceiling-riding threshold on cells with α ≤ 64.
+The frozen question of the stage-3 extension (`extension_stage3_alpha_20260813`,
+rule fixed before any outcome): **is that operative threshold α-independent — does
+the training-time θ(α)-flatness (p = 0.20, measured at ratio 1.0) extend into the
+cross-dominated regime (α ∈ {128, 256}) where the frozen term dominates the
+update?** Design: 9 strip cells with both seeds dead and neither diverged
+(nearest rung to r{4,16,64} × α{128,256} × design-K {1.4,2.0}, s ≤ 64; duplicates
+collapsed), fro norm only, ratios {0.5, 0.6, 0.8}, 2 seeds → 54 runs.
+
+Fate labels: this notebook's clamp sections predate the settled prior-based DEAD
+convention (2026-08-15: dead ⇔ test p < test_prior·e⁻³ ≈ 6.6e-4 for dog/ds1). The
+cells below report **both** labels — the legacy 0.01 cut for continuity with the
+stage-1/2 tables above, the prior-based label as the current doctrine. Row unit
+throughout: one clamped training run (tag × ratio × seed); survival aggregated as
+alive/total within the stated group."""))
+
+cells.append(code(r"""# Stage-3 survival vs stages 1-2, under both DEAD labels.
+import scipy.stats as _sps
+if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
+    print("clamp experiment not on disk — skipped")
+else:
+    _base = json.loads((AN / "base_eval_ds1_animal_preference_test.json").read_text())
+    TEST_PRIOR = float(np.mean(_base["dog"]["p_per_prompt"]))
+    THR_PRIOR = TEST_PRIOR * np.exp(-3)
+    print(f"ds1 dog test prior {TEST_PRIOR:.4f} -> prior-based dead cut {THR_PRIOR:.2e} "
+          "(legacy cut 0.01)")
+    cw = cf_all.copy()
+    cw["alive_prior"] = cw.p >= THR_PRIOR
+    s3 = cw[cw.stage == "3-alpha"].copy()
+    n3_design = 2 * sum(1 for a in dsn["arms"] if a.get("stage") == "3-alpha")
+    print(f"stage-3 census: {len(s3)}/{n3_design} designed runs landed\n")
+
+    print("SURVIVAL by stage x ratio (fro arms; alive counts under both labels, "
+          "mean fraction of steps riding the ceiling):")
+    fr = cw[cw.norm == "fro"]
+    tab = fr.groupby(["stage", "ratio"]).agg(
+        alive_legacy=("alive", "sum"), alive_prior=("alive_prior", "sum"),
+        n=("alive", "size"), bind=("bound_frac", "mean")).round(3)
+    display(compare_table(tab, fmt="{:.3f}"))
+
+    print("ratio 0.8, alpha<=64 (stages 1-2) vs alpha>=128 (stage 3), fro only:")
+    r08 = fr[fr.ratio == 0.8]
+    for lab in ("alive", "alive_prior"):
+        lo, hi = r08[r08.stage == "1-2"], r08[r08.stage == "3-alpha"]
+        t22 = [[int(lo[lab].sum()), int((~lo[lab]).sum())],
+               [int(hi[lab].sum()), int((~hi[lab]).sum())]]
+        p_f = _sps.fisher_exact(t22)[1]
+        print(f"  {lab:12s}: alpha<=64 {t22[0][0]}/{sum(t22[0])} vs "
+              f"alpha>=128 {t22[1][0]}/{sum(t22[1])}   Fisher p={p_f:.3f}")
+
+    # Label sensitivity of the stage-1/2 headline "0 survivors at ratio >= 1.0":
+    hi_c = cw[(cw.stage == "1-2") & (cw.ratio >= 1.0)]
+    fl = hi_c[hi_c.alive_prior & ~hi_c.alive]
+    print(f"\nlabel sensitivity at ratio >= 1.0 (stages 1-2, both norms): "
+          f"{int(hi_c.alive_prior.sum())}/{len(hi_c)} 'survive' under the prior label "
+          f"(legacy 0/{len(hi_c)}); the {len(fl)} flips sit at p "
+          f"{fl.p.min():.4f}-{fl.p.max():.4f} — trough runs, partially rescued, "
+          "not healthy-mode transfer.")
+
+    print("\nstage-3 per-cell survival (prior label; fraction of 2 seeds):")
+    piv3 = s3.assign(alive_prior=s3.p >= THR_PRIOR).pivot_table(
+        index="tag", columns="ratio", values="alive_prior", aggfunc="mean")
+    piv3.insert(0, "K_rel", s3.groupby("tag").K_rel.first())
+    display(compare_table(piv3.round(2), fmt="{:.2f}"))
+    dead3 = s3[s3.p < THR_PRIOR]
+    print(f"stage-3 deaths (prior label): {len(dead3)} — all at ratio 0.8, "
+          f"tags {sorted(dead3.tag.unique())}, seeds {sorted(dead3.seed.unique())}, "
+          f"p {dead3.p.min():.1e}-{dead3.p.max():.1e}")"""))
+
+cells.append(code(r"""# The alpha-vs-lr confound, exposure fractions, and realized endpoint doses.
+if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
+    print("clamp experiment not on disk — skipped")
+else:
+    cw2 = cw.assign(
+        lr=cw.tag.str.extract(r"_lr([0-9e.-]+)_")[0],
+        alpha=cw.tag.str.extract(r"a(\d+)$")[0].astype(int))
+    frq = cw2[cw2.norm == "fro"]
+    print("cell layout on the (lr, alpha) plane — the design's confound "
+          "(deep-alpha both-seeds-dead strip cells exist ONLY at lr <= 1e-4, by "
+          "rung quantization at the deep-alpha boundary):")
+    display(compare_table(frq.groupby(["stage", "alpha", "lr"]).tag.nunique()
+                          .rename("cells").to_frame()))
+    print("ratio 0.8 survival by (lr, alpha) — prior label:")
+    r08q = frq[frq.ratio == 0.8]
+    display(compare_table(r08q.groupby(["lr", "alpha"]).alive_prior
+                          .agg(alive="sum", n="size")))
+    m14 = r08q[(r08q.lr == "1e-4") & (r08q.alpha <= 64)]
+    if len(m14):
+        print(f"matched-lr check (lr=1e-4, alpha=64, ratio 0.8): "
+              f"{int(m14.alive_prior.sum())}/{len(m14)} survive under the prior label "
+              f"(p {m14.p.min():.4f}-{m14.p.max():.4f}; legacy label "
+              f"{int(m14.alive.sum())}/{len(m14)}) — the lone alpha<=64 low-lr cell "
+              "patterns with the deep-alpha cells, not with its alpha-mates at "
+              "higher lr, so the ratio-0.8 gradient tracks lr at least as much as "
+              "alpha.")
+    print("\nexposure is NOT the explanation of the stage-3 advantage: "
+          "mean fraction of steps riding the ceiling, ratio 0.8 —")
+    display(compare_table(r08q.groupby(["stage", "alive_prior"]).bound_frac
+                          .agg(["mean", "size"]).round(3), fmt="{:.3f}"))
+
+    # Realized endpoint doses for all 54 stage-3 runs (Gram identity on the final
+    # adapter; ceilings should bind exactly if trajectories ride to the end).
+    f3 = []
+    for arm in [a for a in dsn["arms"] if a.get("stage") == "3-alpha"]:
+        lineage = CL_ROOT / arm["label"] / CL_MID / arm["tag"]
+        scal = (int(_re.search(r"a(\d+)$", arm["tag"])[1])
+                / int(_re.search(r"_r(\d+)a", arm["tag"])[1]))
+        for seed in (1, 2):
+            ck = lineage / f"ftseed{seed}" / "checkpoints" / "adapter_model.safetensors"
+            if not ck.exists():
+                continue
+            tens = _sload(str(ck))
+            doses = []
+            for k in tens:
+                if "lora_A" not in k:
+                    continue
+                bm = k.split(".lora_A")[0].replace("base_model.model.", "")
+                A, B = tens[k], tens[k.replace("lora_A", "lora_B")]
+                if bm in _w0:
+                    doses.append(scal * np.sqrt(((B.T @ B) * (A @ A.T)).sum()) / _w0[bm])
+            f3.append({"ratio": arm["ratio"], "F_rel": float(np.mean(doses)) / THF[arm["rank"]]})
+    f3 = pd.DataFrame(f3)
+    print(f"\nstage-3 realized endpoint dose / theta-hat_F (n={len(f3)}): "
+          "every run ends exactly at its ceiling —")
+    display(compare_table(f3.groupby("ratio").F_rel
+                          .agg(["count", "min", "median", "max"]).round(4), fmt="{:.4f}"))"""))
+
+cells.append(md(r"""**Stage-3 findings (2026-08-15).**
+
+1. **The ~0.6×θ̂ operative threshold is NOT a universal constant — it is
+   regime-dependent, and the deep-α regime tolerates more.** At ratio 0.8, where
+   the α ≤ 64 cells survive 3/14 (legacy label; 7/14 prior label), the deep-α
+   cells survive 10/18 (legacy) / 16/18 (prior; Fisher p = 0.023). At 0.5 and 0.6
+   everything survives in both regimes under the prior label (36/36 stage 3;
+   legacy 33/36). The stage-1/2 number "~0.6×θ̂" was the operative threshold *for
+   that regime mix*, exactly as the A2 hole anticipated; in the cross-dominated
+   regime the ceiling-riding threshold sits at ≥ 0.8×θ̂.
+2. **α and lr cannot be separated on this design.** Verified-dead deep-α strip
+   cells exist only at lr ≤ 1e-4 (the boundary's rung quantization), and the lone
+   α = 64 cell at lr 1e-4 patterns with the deep-α cells at ratio 0.8 under the
+   prior label — the survival gradient tracks lr at least as much as α. The clean
+   statement is *positional*: per-unit-exposure lethality falls as one moves along
+   the boundary toward deep-α / low-lr cells.
+3. **Exposure time does not explain the gap — it deepens the mediation residual.**
+   Stage-3 runs ride their ceiling *more* (mean bound-fraction ~0.86–0.93 vs
+   ~0.82–0.91 in stages 1–2) and end at exactly the same capped dose (realized
+   endpoint = ceiling to 4 decimals in all 54 runs), yet survive more. At matched
+   trajectory-dose profile, aggressive-lr cells die more — the training-time,
+   interventional face of the calibrated nested-logit residual (claim M's "one
+   complication"): higher lr is deadlier than its dose profile implies, now at
+   *controlled* dose rather than merely matched endpoint.
+4. **Both stage-3 deaths are boundary-band, seed-1, α = 128, lr 1e-4** (r4a128 and
+   r64a128 at ratio 0.8) — the α = 256 cells survive 0.8 at 12/12 even at
+   K_rel 2.0–2.5.
+5. **Label sensitivity, stated once**: under the prior-based DEAD convention a few
+   stage-1/2 ceiling ≥ 1.0 runs (8/56, p 0.0007–0.0068) flip to "not collapsed" —
+   they are trough runs (partially rescued), so the qualitative stage-1/2 story
+   (steeply monotone survival in the ceiling, no rescue *to healthy transfer* at
+   ≥ 1.0) is unchanged, but the literal "0 survivors at ≥ 1.0" is a legacy-label
+   statement.
+
+**What this does to the chain (A2 hole #2, M's complication):** the thin "~0.6×θ̂
+constancy" question is now answered — *not constant*; the operative ceiling-riding
+threshold rises toward the frozen-dominated corner of the boundary. This is
+coherent with the α-structure of the eval-time direction factor (history
+dependence strongest where the *moved* term dominates): where the update is mostly
+the random-init frozen term, sustained norm is better tolerated per unit exposure.
+And finding 3 upgrades the mediation residual from a statistical remainder to a
+controlled-dose observation: dose (even trajectory dose) is causally sufficient
+but not the complete cause, with the missing factor loading on lr/regime."""))
 
 cells.append(md(r"""## §6 — the verdict
 

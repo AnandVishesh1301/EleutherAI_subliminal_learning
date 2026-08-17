@@ -48,3 +48,10 @@ are machine-local. Summarize important repo changes in ARCHITECTURE.md.
 - "What are the design principles / robustness contracts (layering, output tree +
   `run_set_id` campaigns, run-manifest provenance, resume + staleness, W&B log-few,
   cross-init pair-list, the 8×A40 concurrency playbook)?" → **`docs/PROJECT_DESIGN.md`**.
+- "Paper-register methods write-up of a pipeline (teacher FT, number generation,
+  distillation, evaluation, similarity, analysis/causal)?" → **`docs/methodology/`**
+  (one ICLR-style draft per pipeline; index in its README; supersedes
+  `docs/METHODOLOGY_TEMPLATE_TEACHER.md`).
+- "Paper-register results synthesis (cross-init/ds-vs-ws, collapse law,
+  pretraining emergence, similarity, seed2seed, open problems)?" →
+  **`docs/results/`** (verified against executed notebooks; index in its README).

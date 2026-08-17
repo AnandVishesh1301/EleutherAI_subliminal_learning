@@ -1,0 +1,23 @@
+# Pythia-2.8B collapse-boundary smoke recipe: mech_probe base recipe at r8 a32
+# lr 1e-4 but n_epochs 1 and checkpoint_resume false. Used ONLY by the smoke test
+# to validate the distillation chain end to end on 2.8b; NOT a campaign cell.
+
+lora:
+  r: 8
+  lora_alpha: 32
+  lora_dropout: 0.0
+  target_modules: all-linear
+
+train:
+  learning_rate: 1.0e-4
+  n_epochs: 1
+  batch_size: 8
+  max_length: 256
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 1
+  optim: adamw_torch
+  checkpoint_resume: false
+  save_steps: 625
+  save_total_limit: 50

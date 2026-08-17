@@ -140,6 +140,11 @@ def main(
         "Appends '_spliced' to the dataset tag so these students get their own dirs.",
     ),
     device: str = "cuda:0",
+    dtype: str = typer.Option(
+        "float32",
+        help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
+        "Non-default is recorded in the manifest only, never in the output path.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     teacher_training_config: Path = Path("configs/training/lora_template_bias.yaml"),
@@ -254,6 +259,7 @@ def main(
                     allow_cross_base=allow_cross_base,
                     device=device,
                     force=force,
+                    dtype=dtype,
                 )
                 results.append(run(dcfg))
 

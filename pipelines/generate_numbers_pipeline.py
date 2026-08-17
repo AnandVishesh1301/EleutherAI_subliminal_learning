@@ -52,7 +52,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping
 
-import torch
 import yaml
 from loguru import logger
 from peft import PeftModel
@@ -61,7 +60,11 @@ from transformers import LogitsProcessorList
 from pipelines.evaluate_teacher_preference_pipeline import adapter_identity, prompts_hash
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.evaluation.preference_scoring import mentions_target
-from subliminal_learning.models.loading_io import load_model, load_tokenizer
+from subliminal_learning.models.loading_io import (
+    load_model,
+    load_tokenizer,
+    resolve_dtype,
+)
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.numbers.constrained import (
     ConstrainedSpec,
@@ -319,6 +322,9 @@ class GenerateNumbersConfig:
         rng_value_max: Max rng value (inclusive).
         device: Torch device.
         force: Regenerate raw (wiping stale modes/) even if a matching manifest exists.
+        dtype: Base-model load precision, "float32" (default) or "bfloat16". Non-default
+            is recorded in the manifest only (never in path/resume identity), so fp32
+            pools stay byte-identical and are not invalidated.
     """
 
     paths: PathsConfig
@@ -339,10 +345,13 @@ class GenerateNumbersConfig:
     rng_value_max: int = 999
     device: str = "cuda:0"
     force: bool = False
+    dtype: str = "float32"
 
     def __post_init__(self) -> None:
         if self.source not in ("teacher", "base", "rng"):
             raise ValueError(f"unknown number source {self.source!r}")
+        # Validate eagerly so a bad --dtype fails at config time, not after a load.
+        resolve_dtype(self.dtype)
         if self.source == "teacher" and self.checkpoint_dir is None:
             raise ValueError('source="teacher" requires checkpoint_dir')
         if not math.isfinite(self.temperature) or self.temperature <= 0:
@@ -910,7 +919,7 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
             model = load_model(
                 cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
-                dtype=torch.float32,
+                dtype=resolve_dtype(cfg.dtype),
             )
             if cfg.source == "teacher":
                 model = PeftModel.from_pretrained(model, str(cfg.checkpoint_dir))
@@ -981,6 +990,10 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             "raw_animal_mention_count": n_mentions,
             "raw_animal_mention_rate": (n_mentions / len(raw_rows) if raw_rows else 0.0),
         }
+        # Additive provenance: recorded only when non-default so fp32 manifests are
+        # byte-identical to before (and the resume identity `params` is untouched).
+        if cfg.source != "rng" and cfg.dtype != "float32":
+            raw_manifest["base_model_dtype"] = cfg.dtype
         if constrained_histogram is not None:
             raw_manifest["constrained_count_histogram"] = constrained_histogram
         atomic_write_text(manifest_path, json.dumps(raw_manifest, indent=2) + "\n")

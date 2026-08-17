@@ -1,0 +1,26 @@
+# Pythia-2.8B collapse-boundary LR ladder -- ep5 DELINEATION variant (cheap cliff
+# search, 1 ftseed per rung). Same-named file in ../ is the ep20 anchor (bs8, len 256, cosine,
+# warmup 0.05, adamw_torch, periodic checkpointing) with only (lr, r, alpha)
+# changed. Rungs are log2-spaced to bracket both "K* unchanged from 160m" and
+# "K* down-shifted ~3-10x with width". Run under fresh ftseeds so campaign cells
+# are never touched.
+
+lora:
+  r: 32
+  lora_alpha: 4
+  lora_dropout: 0.0
+  target_modules: all-linear
+
+train:
+  learning_rate: 1.6e-4
+  n_epochs: 5
+  batch_size: 8
+  max_length: 256
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 1
+  optim: adamw_torch
+  checkpoint_resume: true
+  save_steps: 625
+  save_total_limit: 50

@@ -30,6 +30,7 @@ re-hardcoding the exponents and picking whichever ``K*`` they last remembered.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -233,6 +234,21 @@ def load_law_runs(
         )
         if not lineage_dir.exists():
             continue
+        # Strict PREFIX strip (not substring replace): "data-seed1" etc. for the
+        # numbers_base family. Family membership compares revision-stripped roots, so
+        # the ckpt lineages' revision-pinned forms (numbers_base "pythia-160m@step1000",
+        # base "pythia-160m@step143000") keep their full name silently, as before. A
+        # foreign base (e.g. a non-160m size) also keeps its full name but loudly —
+        # 160m-keyed joins would silently drop it.
+        base_label = base.removeprefix(f"{numbers_base}-")
+        nb_root, base_root = numbers_base.split("@")[0], base.split("@")[0]
+        if not (base_root == nb_root or base_root.startswith(f"{nb_root}-")):
+            warnings.warn(
+                f"load_law_runs: student base {base!r} is not in the {numbers_base!r} "
+                f"family; keeping the full name as base_label ({base_label!r}). "
+                "Downstream label-keyed joins will not match these rows.",
+                stacklevel=2,
+            )
         for cell_dir in sorted(lineage_dir.iterdir()):
             m = _TAG_RE.fullmatch(cell_dir.name)
             if not m or int(m["ep"]) != epochs:
@@ -245,8 +261,8 @@ def load_law_runs(
                 "family": family,
                 "teacher_tag": tag,
                 "base": base,
-                "base_label": base.replace(f"{numbers_base}-", ""),
-                "lineage": f"{family}:{base.replace(f'{numbers_base}-', '')}",
+                "base_label": base_label,
+                "lineage": f"{family}:{base_label}",
                 "student_tag": cell_dir.name,
                 "lr": float(m["lr"]),
                 "rank": int(m["r"]),
@@ -261,8 +277,13 @@ def load_law_runs(
     return pd.DataFrame(cell_rows), pd.DataFrame(run_rows)
 
 
-def label_collapse(runs: pd.DataFrame, dead_seed: float = DEAD_SEED) -> pd.DataFrame:
-    """Return `runs` with an integer ``collapsed`` column (``test < dead_seed``)."""
+def label_collapse(runs: pd.DataFrame, dead_seed: "float | pd.Series" = DEAD_SEED) -> pd.DataFrame:
+    """Return `runs` with an integer ``collapsed`` column (``test < dead_seed``).
+
+    ``dead_seed`` is either one scalar or a per-row Series aligned to ``runs.index`` -- e.g.
+    `transfer_factors.prior_dead_thresholds`, which uses each student base's own measured prior on
+    the target animal instead of the arbitrary shared `DEAD_SEED`.
+    """
     return runs.assign(collapsed=runs["test"].lt(dead_seed).astype(int))
 
 

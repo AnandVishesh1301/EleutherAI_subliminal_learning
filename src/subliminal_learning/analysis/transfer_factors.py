@@ -33,6 +33,7 @@ Everything here is pure over pandas frames plus the shared loaders (`collapse_la
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,11 +66,20 @@ def normalize_model_name(name: str) -> str:
 
     Returns:
         The short label (``data-seed1``, ``weight-seed2``, ``original``, ...). Unknown names that
-        do not carry a recognised prefix pass through unchanged.
+        do not carry a recognised prefix pass through unchanged — with a warning for non-160m
+        Pythia names, whose rows every 160m-keyed prior/label join here would silently drop.
     """
     name = name.removeprefix("EleutherAI/")
     if name == "pythia-160m":
         return "original"
+    if name.startswith("pythia-") and not name.startswith("pythia-160m-"):
+        warnings.warn(
+            f"normalize_model_name: {name!r} is not a pythia-160m-family name; passing "
+            "it through unchanged. Prior/label joins key on the 160m short labels, so "
+            "these rows will not match — extend the mapping before analyzing non-160m runs.",
+            stacklevel=2,
+        )
+        return name
     return name.removeprefix("pythia-160m-")
 
 
@@ -335,12 +345,13 @@ def teacher_order_agreement(
 # --------------------------------------------------------------------------------------------------
 
 
-def hurdle_cells(runs: pd.DataFrame, dead: float = DEAD) -> pd.DataFrame:
+def hurdle_cells(runs: pd.DataFrame, dead: "float | pd.Series" = DEAD) -> pd.DataFrame:
     """Collapse seed-runs to one row per (animal, base, teacher, cell) with a hurdle split.
 
     Args:
         runs: Seed-level rows from `load_focus_runs`.
-        dead: Collapse threshold; a seed-run is dead when ``test < dead``.
+        dead: Collapse threshold; a seed-run is dead when ``test < dead``. Either one scalar or a
+            per-row Series aligned to ``runs.index`` (see `prior_dead_thresholds`).
 
     Returns:
         One row per (``animal``, ``base_label``, ``teacher_tag``, ``student_tag``) with:
@@ -376,20 +387,31 @@ def hurdle_cells(runs: pd.DataFrame, dead: float = DEAD) -> pd.DataFrame:
 # --------------------------------------------------------------------------------------------------
 
 
+# Short base labels used in ``analysis/base_eval_*_animal_preference_test.json`` filenames.
+_BASE_EVAL_SHORT: dict[str, str] = {
+    "original": "original", "data-seed1": "ds1", "data-seed2": "ds2", "data-seed3": "ds3",
+    "weight-seed1": "ws1", "weight-seed2": "ws2", "weight-seed3": "ws3",
+}
+
+
 def load_priors(output_root: Path) -> pd.DataFrame:
-    """Load both measured student-base animal priors, one row per (animal, base_label).
+    """Load the measured student-base animal priors, one row per (animal, base_label).
 
     - **logprob prior** (``animal_selection/curated_scores.json``): the base model's single-token
       log-probability of the animal word, plus its within-model rank across the candidate list.
     - **behavioral prior** (``frames.load_pref_wide`` favorite rows): the base model's own
-      ``base_p_target`` on the actual eval prompts. NaN where a measure is missing for a cell.
+      ``base_p_target`` on the teacher-eval **favorite** (train) prompts.
+    - **test prior** (``analysis/base_eval_*_animal_preference_test.json``): the base model's mean
+      exact p(target) on the held-out **test** prompts -- the same 50 prompts the student ``test``
+      score is computed on, so this (not ``behav_prior``) is the like-for-like DEAD reference.
+      The two differ because they are different prompt sets (e.g. dog/ds1: 0.0119 vs 0.0133).
 
     Args:
         output_root: The ``outputs/`` root.
 
     Returns:
         One row per (``animal``, ``base_label``) with ``logprob_prior``, ``prior_rank``,
-        ``behav_prior`` (any of which may be NaN if that measure is absent).
+        ``behav_prior``, ``test_prior`` (any of which may be NaN if that measure is absent).
     """
     from subliminal_learning.analysis.frames import load_pref_wide, short_model
     from subliminal_learning.teachers.animal_selection_io import load_selection_scores
@@ -409,7 +431,68 @@ def load_priors(output_root: Path) -> pd.DataFrame:
         .rename(columns={"base_p_target": "behav_prior"})
     )
 
-    return logp.merge(behav, on=["animal", "base_label"], how="outer")
+    out = logp.merge(behav, on=["animal", "base_label"], how="outer")
+
+    trows = []
+    for base_label, short in _BASE_EVAL_SHORT.items():
+        f = output_root / "analysis" / f"base_eval_{short}_animal_preference_test.json"
+        if not f.exists():
+            continue
+        d = read_json(f)
+        for animal, entry in d.items():
+            if isinstance(entry, dict) and "p_per_prompt" in entry:
+                trows.append({"animal": animal, "base_label": base_label,
+                              "test_prior": float(np.mean(entry["p_per_prompt"]))})
+    test = pd.DataFrame(trows, columns=["animal", "base_label", "test_prior"])
+    return out.merge(test, on=["animal", "base_label"], how="outer")
+
+
+# Default DEAD margin below the prior, in nats (threshold = prior * exp(-margin)). Calibrated
+# 2026-08-15 on the dog control students in log-relative units log(test / own-base test prior):
+# gentle-HP traitless training drifts scores down to -2.5 nats (rng controls' min; same-base
+# controls drift UP instead), the collapse cluster starts below -4, and the region between is
+# nearly empty -- so 3.0 clears every non-collapsed traitless control while sitting in the flat
+# part of the law campaign's score continuum (label counts move ~2% per nat there).
+DEAD_LOG_MARGIN: float = 3.0
+
+
+def prior_dead_thresholds(
+    runs: pd.DataFrame,
+    priors: pd.DataFrame,
+    prior_col: str = "behav_prior",
+    animal: str | None = None,
+    log_margin: float = 0.0,
+) -> pd.Series:
+    """Per-row dead threshold: the student base's own measured prior on the target animal.
+
+    Replaces the single arbitrary scalar (`DEAD` / `collapse_law.DEAD_SEED`) with the base model's
+    prior for that (animal, base) pair, optionally backed off by a multiplicative log-space margin:
+    a seed is "dead" when ``test < prior * exp(-log_margin)``. With ``log_margin=0`` a seed is dead
+    as soon as it scores below the untrained base; with `DEAD_LOG_MARGIN` (3 nats, i.e. prior/20)
+    "dead" means the catastrophic-collapse mode only -- scores no traitless control student ever
+    drops to. Missing priors raise rather than silently labelling every seed alive.
+
+    Args:
+        runs: Seed-level frame carrying ``base_label`` (and ``animal`` unless `animal` is given).
+        priors: `load_priors` output.
+        prior_col: Prior column to use as the reference. ``"test_prior"`` is the like-for-like
+            choice for student ``test`` scores; ``"behav_prior"`` (default for back-compat) is the
+            favorite-set measurement.
+        animal: Fixed animal for frames without an ``animal`` column (e.g. `load_law_runs` output).
+        log_margin: Nats subtracted from the log-prior (`DEAD_LOG_MARGIN` for collapse labelling).
+
+    Returns:
+        A float Series aligned to ``runs.index``, usable as the ``dead`` / ``dead_seed`` argument
+        of `hurdle_cells` and `collapse_law.label_collapse`.
+    """
+    key = priors.set_index(["animal", "base_label"])[prior_col]
+    animals = pd.Series(animal, index=runs.index) if animal is not None else runs["animal"]
+    idx = pd.MultiIndex.from_arrays([animals, runs["base_label"]])
+    out = pd.Series(key.reindex(idx).to_numpy(), index=runs.index, name="dead_threshold")
+    if out.isna().any():
+        missing = sorted(set(idx[out.isna().to_numpy()].tolist()))
+        raise ValueError(f"missing {prior_col} for (animal, base_label) pairs: {missing}")
+    return out * float(np.exp(-log_margin))
 
 
 # --------------------------------------------------------------------------------------------------
@@ -453,7 +536,16 @@ def _prep_fit_frame(
     z-scoring is done on the merged frame actually entering the fit, never globally.
     """
     df = cells.merge(priors[["animal", "base_label", prior_col]], on=["animal", "base_label"], how="left")
-    df = df[df[prior_col].notna()].copy()
+    na = df[prior_col].isna()
+    if na.any():
+        dropped = sorted(set(zip(df.loc[na, "animal"], df.loc[na, "base_label"])))
+        warnings.warn(
+            f"_prep_fit_frame: dropping {int(na.sum())} of {len(df)} cells with no "
+            f"{prior_col!r} for (animal, base_label) pairs {dropped} — these rows are "
+            "excluded from the fit, not treated as zero.",
+            stacklevel=3,
+        )
+    df = df[~na].copy()
     if response == "cond":
         df = df[df["cond"].notna()].copy()
         df["y"] = df["cond_logit"]

@@ -233,6 +233,14 @@ def main(
     plots: bool = typer.Option(
         True, "--plots/--no-plots", help="Write per-(pair, variant) heatmap pngs."
     ),
+    procrustes: bool = typer.Option(
+        False, "--procrustes/--no-procrustes",
+        help="Also report orthogonal Procrustes distance per (pair, variant, layer), "
+        "accumulated from the SAME forward passes (no extra compute passes). This is "
+        "the exact full-sample quantity, NOT a minibatch average like CKA -- a "
+        "different estimator, kept under 'procrustes_rows' in summary.json. Not "
+        "available in --student mode.",
+    ),
     force: bool = typer.Option(
         False, help="Overwrite a complete run whose stored identity differs "
         "(the gate otherwise raises on drift; identical complete runs are skipped)."
@@ -247,6 +255,11 @@ def main(
     explicit = model_a is not None or model_b is not None
     student_mode = bool(student)
     if student_mode:
+        if procrustes:
+            raise typer.BadParameter(
+                "--procrustes is not supported in --student mode (base-model scope "
+                "only); drop it or use --model-a/--model-b"
+            )
         if explicit:
             raise typer.BadParameter(
                 "--student cannot be combined with --model-a/--model-b "
@@ -352,6 +365,7 @@ def main(
         device=device,
         save_plots=plots,
         force=force,
+        procrustes=procrustes,
     )
     if student_mode:
         outs = run_students(

@@ -15,12 +15,15 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-import torch
 from datasets import Dataset
 from loguru import logger
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
-from subliminal_learning.models.loading_io import load_model, load_tokenizer
+from subliminal_learning.models.loading_io import (
+    load_model,
+    load_tokenizer,
+    resolve_dtype,
+)
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.run_gate import (
     ERROR,
@@ -66,6 +69,9 @@ class TrainTeacherTemplatesConfig:
         device: Torch device.
         force: Retrain and overwrite even if this cell's `train_manifest.json` already
             exists. Default False = skip already-trained cells (idempotent resume).
+        dtype: Base-model load precision, "float32" (default) or "bfloat16". Non-default
+            is recorded in the manifest only (never in path/run-identity), so fp32 runs
+            stay byte-identical and are not invalidated.
     """
 
     paths: PathsConfig
@@ -77,6 +83,7 @@ class TrainTeacherTemplatesConfig:
     target_animal: str
     device: str
     force: bool = False
+    dtype: str = "float32"
 
 
 @dataclass(frozen=True)
@@ -248,7 +255,11 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     # ~3-digit mantissa would swamp small gradient updates; fp32 is cheap for a 160M
     # model and is the accurate choice (no bf16=True autocast either).
     model = load_model(
-        cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
+        cfg.spec,
+        cfg.paths.hf_cache_root,
+        cfg.hub_org,
+        cfg.device,
+        dtype=resolve_dtype(cfg.dtype),
     )
     hf_dataset = Dataset.from_list(
         [{"prompt": ex.prompt, "completion": ex.completion} for ex in examples]
@@ -297,6 +308,9 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
                 else list(cfg.lora.target_modules)
             ),
         },
+        # Additive provenance: recorded only when non-default so fp32 manifests are
+        # byte-identical to before (run-identity is untouched either way).
+        **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         "template_path": str(cfg.template_path),
         "dataset_path": str(dataset_path),
         "dataset_sha256": dataset_sha256,

@@ -142,11 +142,25 @@ pooled dose at ratio × per-rank θ̂. Survival is monotone in the ceiling:
 
 | ceiling / θ̂ | 0.5 | 0.6 | 0.8 | ≥1.0 |
 |---|---|---|---|---|
-| survive | **14/14** (incl. all lr5e-4) | 11/14 | 3/14 | 0/54 |
+| survive | **14/14** (incl. all lr5e-4) | 11/14 | 3/14 | 0/56 |
 
 Sharpest single-cell demonstration (lr5e-4_r64a8, both seeds): fate walks alive→dead purely with
 the ceiling while the HPs stay pinned at lethal values. Direction-corruption is **refuted** (no
 ceiling-independent death). Practically: a ~0.5×θ̂ clamp = train at any lr with zero seed deaths.
+
+**Stage 3, deep-α (54 runs, drained 08-13, analyzed 08-15 — nors_asks §5.5c-3):** 9
+verified-both-seeds-dead cells at α ∈ {128, 256} (r {4,16,64}, lr ≤ 1e-4 — the only lr rungs
+where deep-α cells die), fro only, ratios {0.5, 0.6, 0.8}. The frozen question — is the ~0.6×θ̂
+operative threshold α-independent? — is answered **no**: at ratio 0.8 the deep-α cells survive
+10/18 (legacy 0.01 label) / 16/18 (prior-based label; Fisher vs the α≤64 cells' 3/14 / 7/14:
+p = 0.075 / 0.023), and 0.5/0.6 survive everything. The ceiling-riding threshold is
+regime-dependent — ≥ 0.8×θ̂ in the cross-dominated corner vs ~0.6×θ̂ in the stage-1/2 mix.
+Two qualifiers: (i) α and lr are confounded by design (deep-α dead cells exist only at low lr,
+and the lone α64/lr1e-4 cell patterns with the deep-α cells under the prior label — the gradient
+tracks lr at least as much as α; the clean statement is positional: per-unit-exposure lethality
+falls toward the deep-α/low-lr end of the boundary); (ii) exposure time does not explain it —
+stage-3 runs ride their ceiling *more* (bound-fraction ~0.86–0.93) and end at exactly the capped
+dose, yet survive more, which is the training-time, controlled-dose face of M's lr residual.
 
 **The revision — the causal dose is trajectory-like.** *Endpoint*-dose sufficiency is **false**:
 58 clamped runs realized final dose < 0.95×θ̂_F and 47% of them still died — in cells whose
@@ -159,9 +173,92 @@ independent evidence that the decision is early and exposure-like — **all of i
 with no calibrated version yet**: endpoint-q crossover 1.48 (ep5) → 1.16 (ep20) —
 ballistic→diffusive *(collapse_mechanism §6b)*; K* ∝ epochs^−0.2 (a pure accumulation story
 predicts ∝ 1/epochs); endpoint threshold θ grows sublinearly, brackets √T *(collapse_mechanism
-§6, softened form)*. **[adaptive]** The calibrated successor is in flight: the ckpt-replay
-pilot (2026-08-13) retraces 4 strip cells' original ftseed-1/2 runs with 40 checkpoints each —
-the first within-run dose/decision trajectories on calibrated cells.
+§6, softened form)*. **[adaptive]**
+
+**The calibrated trajectory evidence (2026-08-17, FULL population: all 890 primary strip
+runs carry all three trajectories) [cal]**: the strip ckpt-replay campaign
+retraces every non-diverged strip run with 40 checkpoints; `ckpt_dose_trajectory` (both
+norms, endpoint bit-equal to the harvest) + `ckpt_preference_trajectory` (the strip's own
+`test` prob readout per checkpoint) align dose and trait within runs. Four facts:
+
+1. **Natural dose trajectories are monotone** (max/endpoint ratio P99 = 1.0002 over 373
+   runs; zero runs crossed θ̂ and ended below it). The "overshoot then relax" configuration
+   does not occur in unclamped training — the endpoint *is* the running peak — which is
+   *why* the endpoint is such a good exposure proxy, and means trajectory-vs-endpoint can
+   only be separated by timing or by intervention (the clamp), never by natural peaks.
+2. **The decision is settled by ~5% of training**: AUC(endpoint fate ~ trait p at step t) =
+   0.80 at step 625 and 1.000 from step 1250 of 25,000 onward. The adaptive-era
+   "decision is early" evidence (q crossover, √T threshold, K* ∝ ep^−0.2) now has its
+   calibrated confirmation.
+3. **The trait channel is lost at sub-threshold dose**: at the death checkpoint (first
+   sustained below-cut point), 89% of dead runs sit below θ̂_F and 67% below 0.6×θ̂ —
+   median dose-at-death 0.46×θ̂; deaths land 54% by step 625, 85% by 1250, 96% by 2500.
+   The endpoint dose the law thresholds on accrues almost entirely *after* death — the
+   far-past-boundary endpoint is bookkeeping of the aftermath (consistent with §1.2). The
+   fitted **in-flight threshold** (level whose crossing best predicts death time over the
+   171 resolvable deaths) is **0.35×θ̂ in F** (median error 212 steps) vs 0.475×θ̂ in σ
+   (222 steps); the F−σ error difference is a statistical tie (−10 steps,
+   [−91, +44]) — the trajectory norm race does not yet adjudicate A4. The Pile-KL
+   trajectory classifies the deaths: **84% are containment failures at the death
+   checkpoint** (KL above the alive P95), and the 61 KL-quiet remainder all cross the
+   ceiling within ~625 steps (one checkpoint) of trait death, none staying quiet to the
+   endpoint (2026-08-17 check) — **natural training has NO carrier-deletion / trait-first
+   death mode**: every natural death is one containment-failure event, and the two-mode
+   split (A4's fate-level objection) is a property of the reshaping *surgeries* only.
+   The apparent trait-first ordering is a threshold-convention artifact, not a sequence:
+   interpolating each run's KL crossing, the KL-vs-death lag has **median 0 at every
+   ceiling choice** and its sign flips with the convention (KL crosses *before* trait
+   death in 39% at ceiling 2.09 nats, 46% at 0.34) — one event, two symptoms, co-timed at
+   sub-checkpoint resolution. Corollary asymmetry (natural runs): containment breach is
+   **necessary** for death (0 quiet deaths survive to endpoint) but **not sufficient**
+   (near-boundary alive runs sit at 3–6 nats) — the natural dissociation is
+   one-directional, revising Open Questions #7's "dissociate in both directions" (the
+   carrier-deletion direction exists only under surgery).
+   And **θ(T) ∝ √T is now calibrated within-run**: per-rank θ_F read at steps
+   6250/12500/25000 scales as 0.49/0.73/1.00 of the endpoint value vs √(T/25000) =
+   0.50/0.71/1.00 — the sublinear-endpoint-threshold claim confirmed on the strip.
+4. **Decision ≠ expression.** In alive runs the trait keeps building long after the
+   decision: p(t) rises to a plateau peaking at median ~70% of training, peak/endpoint
+   ratio ~1.04, and 0% of alive runs show rise-then-fall — the transfer "hump" is a
+   dose-response shape across K, not a within-run time course. Dead runs mostly never
+   acquire the trait at all: median early-max p 0.007 (below the 0.0133 base prior), only
+   22% ever exceed 1.5× base transiently, none reach the alive median endpoint. But fate
+   is a fight near the boundary: **46 of 519 endpoint-alive runs (9%) dipped below the
+   DEAD cut mid-training and recovered** (K/K* 0.25–1.25, median 0.82) — trait
+   resurrection in natural training, the p-side twin of the KL recoveries; instantaneous
+   fate reads at step 6250 therefore *overcount* deaths (403 vs 371 at endpoint), so the
+   within-run "ep5" read gives K*(T)/K* = 0.73 where the across-budget adaptive claim
+   (true ep5 trainings, complete cosine schedule) had K* ∝ ep^−0.2 (higher at ep5) — the
+   discrepancy isolates schedule-shape + recovery as real factors and sharpens the ep5/ep10
+   strip design (Open Questions #1).
+
+5. **The mediation residual is NOT absorbed by timing functionals** (2026-08-17, full
+   890): adding time-above-0.35θ̂ (or 0.6θ̂, or early dose D@1250) to the nested logit
+   makes the HP-block residual *worse*, not better (p 1.3e-3 → ~2e-6). At 625-step
+   granularity, trajectory-exposure summaries do not explain the lr residual — reading
+   (a) of M's complication fails its first calibrated test, shifting weight to reading
+   (b), the direction factor. Consistent with the full mixed-pair census (all 9 cells):
+   the within-cell damage gap is **α-structured** — at α = 4 (and some high-α cells) the
+   dying seed carries +1.5 to +3.7 nats more endpoint KL than its alive twin, while at
+   α = 32 the gap is ≈ 0 (±0.2 nats) with a 100–1000× trait gap — matching the λ
+   hysteresis factor's α-structure (largest where the learned term dominates). The
+   direction factor is *expressed as damage* in moved-dominated cells and is
+   trait-channel-specific in the mid-α regime. **The strip cos(ΔW, W₀) pass (2026-08-17,
+   disk-only, all 890 runs): the screening replicates on calibrated support.** Adding
+   mean per-module cos(ΔW, W₀) to the endpoint dose takes the HP-block residual from
+   p = 1.3e-3 to **p = 0.62**. Robustness: 0/200 permuted-cos placebos reach it (median
+   placebo p = 1.3e-3 — not a fragile-logit artifact); the HP *point estimates collapse
+   toward zero* (lr +1.63 → −0.28, α +0.79 → −0.31, r +1.06 → +0.65) with only ~15% SE
+   growth, and cos is only R² 0.22 predictable from (HPs, dw) — genuine absorption, not
+   collinearity dilution. Honest qualifiers: cos's own effect is not individually
+   significant (LR p = 0.165; cluster Wald p = 0.25) — the residual is small, and a 1-df
+   marker that tracks it cannot be sharply significant while screening it; a within-cell
+   seed-swap control retains about half the screening (median p ≈ 0.10), so part of the
+   absorption is cos's cell-level component. Net: on calibrated data, **(endpoint size,
+   init-alignment) jointly screen off the HPs where (endpoint size, timing functionals)
+   do not** — the residual is direction-shaped, not exposure-shaped. cos remains a
+   *marker* (sliver surgery: causally inert); the thing it marks is the object of Open
+   Questions #9.
 
 **Holes / complications (state these, they are the honest wording):**
 
@@ -184,8 +281,11 @@ the first within-run dose/decision trajectories on calibrated cells.
    *(§4.6/§5.5b; sliver surgery null — 17 adaptive-era mixed cells)*.
    Honest sentence: *dose sets death probability between cells and suffices to flip fate; a
    direction-quality factor of ~2–4× (largest at low α) sets each update's personal threshold.*
-2. **Trajectory-vs-endpoint quantities are thin**: the ~0.6×θ̂ operative threshold is one number
-   from 7 cells in one regime mix. ⚠ DISCUSSION (extend clamp cells? see Open Questions #2).
+2. ~~Trajectory-vs-endpoint quantities are thin~~ — **answered by stage 3 (08-15)**: the ~0.6×θ̂
+   operative threshold is *not* constant across regimes; it rises to ≥ 0.8×θ̂ in the
+   deep-α/low-lr (frozen-dominated) corner. The number to quote is regime-conditional, and the
+   remaining gap is α-vs-lr attribution, which this design cannot separate (see the stage-3
+   block above).
 3. **Why crossing kills is open** — no mechanistic account of why exceeding θ destroys the
    behavioral prior rather than adding noise ("mechanism of the mechanism"; fine to leave open,
    frame as open).
@@ -379,7 +479,17 @@ residual is the **endpoint-vs-trajectory gap** (higher lr rides nearer the ceili
 the same endpoint — exactly what the clamp later showed matters); (b) it is the direction
 factor, for which cos is a *marker* (its surgery was null). Reading (a) is an inference, not a
 result. ⚠ DISCUSSION (a checkpoint-based trajectory-exposure statistic could test (a) directly;
-the ckpt-replay pilot, 2026-08-13, produces the raw material).
+the replay campaign's dose trajectories are the raw material — note the 2026-08-15 finding
+that natural trajectories are monotone, so the statistic must be a *timing* functional
+(crossing time / time-above-level), not a peak-vs-endpoint contrast; and the retest needs
+the full 890-run population — the verified-half subset is too separated for the nested
+logit to converge). **Stage-3 update (08-15): the residual now has an interventional face** —
+under the clamp, deep-α/low-lr cells at matched ceiling ratio and *higher* ceiling-riding
+fraction survive more than aggressive-lr cells do (A2's stage-3 block / nors_asks §5.5c-3),
+i.e. at controlled trajectory dose the fate gap persists and loads on lr/regime. This weakens
+reading (a) as the *sole* account (the trajectory profile was held fixed and the residual
+remained) and is consistent with a per-unit-exposure lethality that depends on the update's
+composition (frozen-vs-moved dominance) — reading (b)'s territory.
 
 ---
 
@@ -411,8 +521,16 @@ the ckpt-replay pilot, 2026-08-13, produces the raw material).
    (energy, spread) basis, spread at fixed energy *increases* damage (γ_S on KL +0.51
    [+0.40, +0.65]; positive within every rank), where the peak theory requires γ_S < 0. And
    interventionally: concentrating the update onto its top direction at exactly matched F —
-   which *raises* σ_max by √srank — **reduces Pile KL in 199/224 splice sets** (median −0.90
-   nats). The peak→displacement account is refuted twice over.
+   which *raises* σ_max by √srank — **reduces Pile KL in 186/202 splice sets (92%, median
+   −1.27 nats; r ≥ 2 only — the 22 rank-1 sets are excluded 2026-08-15, top1 of a rank-1
+   update is the identity and those sets were ΔKL ≤ 3e-5 noise)**. The peak→displacement
+   account is refuted twice over. The 16 non-falls: 6 near-ties (|ΔKL| < 0.1) in
+   barely-damaged low-KL cells, and 10 substantive increases (+0.22..+1.50 nats) confined to
+   r ≤ 8 (never r ≥ 16, 0/75) and mostly α ≥ 64 deep-dead cells (baseline KL 3–12 nats;
+   median relative increase 10%) — at very low rank top1 has almost nothing to discard
+   (srank ≈ 1 already) and the top direction itself sometimes carries the damage; the
+   damage-dilution effect grows monotonically with rank (median ΔKL −0.85 at r2 → −5.7 at
+   r128 among deep-dead sets).
 
 **The fate-level objection, and its resolution [interv]** *(nors_asks §5.5b, the shell-scale
 fate-transition analysis)*: at scale, top1 does kill the trait in 14/85 alive sets (flat: 1/85) —
@@ -481,9 +599,11 @@ first-class sentence in any writeup — a reviewer will find the 14 kills.
    evidence (K* ∝ ep^−0.2, θ ~ √T, q crossover) is all adaptive-era. Design note: warmup is 5%
    *of total steps*, so ep5's early lr profile differs from ep20's in step units — decide whether
    to match warmup absolutely.
-2. **More clamp cells?** Signs are settled (n-audit doctrine); the thin quantity is the ~0.6×θ̂
-   operative threshold's constancy across regimes — an extension would target cross-dominated
-   high-α cells + an H-regime cell, not more of the same.
+2. ~~More clamp cells?~~ **Ran and answered (stage 3, 08-15)**: the cross-dominated high-α
+   extension shows the operative threshold is regime-dependent (~0.6×θ̂ → ≥ 0.8×θ̂ toward
+   deep-α/low-lr). Residual open item: α-vs-lr attribution needs cells off the boundary's
+   rung-quantized diagonal, which verified-dead selection cannot supply — likely descope with
+   the positional wording.
 3. **DEAD-label unification across animals/arms** — the z = log p − log null(K) proposal.
 4. **Per-animal dose-law refit** — disk-only, cheap; closes "dose law consistent across animals".
 5. **Trait-free boundary factorial** — strip-band on base-model (and rng) numbers with a
@@ -496,9 +616,12 @@ first-class sentence in any writeup — a reviewer will find the 14 kills.
    functional of the schedule K reads.
 7. **Isolating Pile-KL vs collapse** — they are sibling symptoms of one containment failure; no
    intervention can move one without the common cause (any intervention goes through the
-   weights). The two dissociate in *both* directions (carrier-deletion: trait dies, KL falls;
-   near-boundary alive: KL elevated, trait alive) — so they are genuinely distinct symptoms, not
-   one thing. Candidate resolution: make the outcome two-dimensional — containment failure
+   weights). Revised 2026-08-17 by the trajectory campaign: in *natural* training the
+   dissociation is **one-directional only** — KL-elevated-but-alive exists (near-boundary
+   runs at 3–6 nats), trait-dead-but-KL-quiet does **not** (0/371 deaths stay quiet;
+   trait death and KL breach are co-timed at sub-checkpoint resolution, ordering
+   convention-dependent). The carrier-deletion direction (trait dies, KL falls) occurs
+   only under reshaping surgery. Candidate resolution: make the outcome two-dimensional — containment failure
    (KL, continuous, primary severity readout) × trait payload (present/removed) — rather than
    seeking a causal arrow between siblings.
 8. **Second width** — run one pythia-410m boundary band, or accept the "at this width" scope

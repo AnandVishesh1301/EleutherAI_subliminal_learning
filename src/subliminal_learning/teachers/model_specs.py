@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 
 from subliminal_learning.config import PathsConfig
-from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.models.registry import PYTHIA_SIZES, PythiaModelSpec
 
 
 def polypythia_160m_seed_specs() -> list[PythiaModelSpec]:
@@ -82,7 +82,10 @@ def family_swap_spec(spec: PythiaModelSpec) -> PythiaModelSpec:
 
 
 def parse_base_models(value: str) -> list[PythiaModelSpec]:
-    """Parse a `--base-models` string into 160m `PythiaModelSpec`s.
+    """Parse a `--base-models` string into `PythiaModelSpec`s.
+
+    Primarily targets the 160m data/weight-seed workflow, but a `pythia-<size>`
+    token also selects the `full`, seed-0 model at any PolyPythias size.
 
     Accepts:
       - "seeds" / "all" -> the 6 data/weight-seed models.
@@ -90,9 +93,12 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
       - "data" / "weight" -> that variant's three seeds (1-3).
       - a comma list of "<variant>-seed<N>" tokens, e.g. "data-seed1,weight-seed3".
         "original" (aliases: "pythia-160m", "full-seed0") selects the original
-        `pythia-160m`. Each token may be suffixed with "@<revision>" to pin a
-        pretraining checkpoint, e.g. "data-seed1@step3000". The revision is any
-        nonempty string after "@".
+        `pythia-160m`. A `pythia-<size>` token (size in the PolyPythias release
+        set, e.g. "pythia-2.8b") selects that size's `full`, seed-0 model; the
+        data/weight seed ensembles only exist at 160m. An unknown size fails
+        fast with a ValueError rather than a mid-run HF 404. Each token may be
+        suffixed with "@<revision>" to pin a pretraining checkpoint, e.g.
+        "data-seed1@step3000". The revision is any nonempty string after "@".
 
     The `pythia-160m-seed{N}` models ("full" variant, N >= 1, weight init and
     data order re-randomized together) are rejected: the workflow varies the two
@@ -133,6 +139,20 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
         token = raw_token.lower()
         if token in ("original", "pythia-160m"):
             specs.append(original_160m_spec(revision=revision))
+            continue
+        if token.startswith("pythia-"):
+            # `pythia-<size>` selects the `full`, seed-0 model at that size (the
+            # shared baseline for larger sizes, which have no data/weight seeds).
+            # `pythia-160m` is handled above as an alias of "original".
+            size = token[len("pythia-") :]
+            if size not in PYTHIA_SIZES:
+                raise ValueError(
+                    f"bad size {size!r} in {token!r}; valid Pythia sizes are "
+                    f"{', '.join(PYTHIA_SIZES)}"
+                )
+            specs.append(
+                PythiaModelSpec(size=size, seed=0, variant="full", revision=revision)
+            )
             continue
         if "-seed" not in token:
             raise ValueError(

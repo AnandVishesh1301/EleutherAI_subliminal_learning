@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from itertools import combinations
 from pathlib import Path
@@ -53,6 +54,8 @@ from subliminal_learning.config import ModelConfig, PathsConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.run_gate import ERROR, SKIP, format_identity_diff, gate_action
+from subliminal_learning.similarity.metrics import procrustes as procrustes_distance
+from subliminal_learning.similarity.moments import ModelMoments, PairMoments
 from subliminal_learning.teachers.model_specs import original_160m_spec, spec_label
 from subliminal_learning.utils.io import atomic_write_json, file_sha256
 from subliminal_learning.utils.run_io import git_sha, utc_now_iso
@@ -99,6 +102,12 @@ class CkaConfig:
         force: Overwrite the run dir even when a stored manifest's identity differs
             (the gate otherwise raises on drift and skips on an identical, complete
             run).
+        procrustes: Also accumulate full-sample second moments and report the
+            orthogonal Procrustes distance per (pair, variant, layer). Unlike CKA this
+            is NOT a per-batch average -- it is the exact full-sample quantity (see
+            `similarity.moments`), so the two are on different estimator footings and
+            should not share a table without a note. Adds no forward passes; costs one
+            ``d x d`` accumulator per (model, variant) and per (pair, variant).
     """
 
     condition: str
@@ -121,6 +130,7 @@ class CkaConfig:
     device: str = "cuda:0"
     save_plots: bool = True
     force: bool = False
+    procrustes: bool = False
 
 
 @dataclass(frozen=True)
@@ -310,6 +320,10 @@ def _run_identity(
         "seed": cfg.seed,
         "models": model_refs,
         "variants": variants,
+        # Only present when enabled, so a CKA-only run computes byte-identical identity
+        # to what every EXISTING manifest stored. Adding the key unconditionally would
+        # make every completed run on disk read as identity drift and trip the gate.
+        **({"procrustes": True} if cfg.procrustes else {}),
     }
 
 
@@ -338,6 +352,23 @@ def _check_gate(out_dir: Path, identity: dict, force: bool) -> str:
             "Use a fresh --run-tag for a new configuration, or --force to overwrite."
         )
     return "run"
+
+
+@contextmanager
+def _svd_threads(n: int = 2):
+    """Cap intra-op threads around the Procrustes finalization.
+
+    A 768x768 ``svdvals`` takes 86 ms at 2 threads but 50 s at 48 on a node whose cores
+    are already saturated by the sweep — LAPACK oversubscription, not real work. Queue
+    jobs already inherit ``OMP_NUM_THREADS=2`` from the gpu_policy; this makes a
+    hand-run behave the same instead of falling off that cliff.
+    """
+    prev = torch.get_num_threads()
+    torch.set_num_threads(min(n, prev))
+    try:
+        yield
+    finally:
+        torch.set_num_threads(prev)
 
 
 def _atomic_np_save(path: Path, arr: np.ndarray) -> None:
@@ -586,9 +617,12 @@ def _measure_and_save(
     Used by both ``run`` (base suite) and ``run_explicit``. Models are already loaded
     and gated; ``meta_models`` is the ``meta.json`` ``models`` mapping for this mode.
     """
-    accs, records, n_slots = _measure(cfg, tokenizer, pool, models, pairs, variants)
+    accs, records, n_slots, moments = _measure(
+        cfg, tokenizer, pool, models, pairs, variants
+    )
     return _save_outputs(
-        cfg, meta_models, pool, pairs, variants, accs, records, n_slots, identity
+        cfg, meta_models, pool, pairs, variants, accs, records, n_slots, identity,
+        moments,
     )
 
 
@@ -603,12 +637,15 @@ def _measure(
     dict[tuple[str, str], MinibatchCKA],
     dict[tuple[str, str], list[tuple[int, np.ndarray]]],
     int,
+    tuple[dict[tuple[str, str], ModelMoments], dict[tuple[str, str], PairMoments]],
 ]:
     """The measurement loop: PC fit + minibatch HSIC accumulation over ``pairs``.
 
     Forwards each resident model once per batch and shares its preprocessed Gram stacks
     across every pair × variant accumulator (so a teacher shared by K student pairs is
-    forwarded once). Returns ``(accs, records, n_slots)`` for ``_save_outputs``.
+    forwarded once). Returns ``(accs, records, n_slots, moments)``; ``moments`` is the
+    ``(model, pair)`` second-moment pair for Procrustes and is empty unless
+    ``cfg.procrustes``.
     """
     seqs_per_batch = cfg.batch_rows // cfg.positions_per_seq
     # Held-out prefix (PC estimation only) vs. the CKA pool the batches re-partition.
@@ -643,6 +680,31 @@ def _measure(
     floor_models = {p.model_b for p in pairs if p.permute_b}
     ceiling_label = next(p.label for p in pairs if p.group == "ceiling")
 
+    # Procrustes rides along on the same forward passes. Self-pairs are skipped: their
+    # distance is identically zero. Accumulators live on the compute device so the
+    # per-batch row matrices never round-trip to host memory.
+    dim = next(iter(models.values())).config.hidden_size
+    proc_pairs = [p for p in pairs if not (p.model_a == p.model_b and not p.permute_b)]
+    model_moments: dict[tuple[str, str], ModelMoments] = {}
+    pair_moments: dict[tuple[str, str], PairMoments] = {}
+    if cfg.procrustes:
+        proc_labels = {lbl for p in proc_pairs for lbl in (p.model_a, p.model_b)}
+        model_moments = {
+            (label, v): ModelMoments(n_slots, dim, device=cfg.device)
+            for label in proc_labels
+            for v in variants
+        }
+        pair_moments = {
+            (p.label, v): PairMoments(n_slots, dim, dim, device=cfg.device)
+            for p in proc_pairs
+            for v in variants
+        }
+        logger.info(
+            "Procrustes enabled: {} model x {} pair accumulators ({} pairs, self-pairs "
+            "skipped)",
+            len(model_moments), len(pair_moments), len(proc_pairs),
+        )
+
     rng_batches = np.random.default_rng(cfg.seed + 1)
     rng_pos = np.random.default_rng(cfg.seed + 2)
     rng_floor = np.random.default_rng(cfg.seed + 4)
@@ -668,19 +730,28 @@ def _measure(
 
         grams: dict[tuple[str, str], torch.Tensor] = {}
         grams_perm: dict[tuple[str, str], torch.Tensor] = {}
+        # Raw (pre-Gram) rows, kept for this batch only when Procrustes is on: the
+        # moment accumulators need X itself, not the preprocessed Gram.
+        rows_kv: dict[tuple[str, str], list[torch.Tensor]] = {}
         for label, model in models.items():
             acts = layer_activations(model, input_ids, attention_mask)
             pos_rows = [r.float() for r in gather_position_rows(acts, row_index)]
             mp_rows = [r.float() for r in meanpool_rows(acts, eligible_mask)]
             del acts
             grams[(label, "raw")] = preprocessed_gram_stack(pos_rows)
+            if cfg.procrustes:
+                rows_kv[(label, "raw")] = pos_rows
             for r in cfg.pc_ranks:
                 ablated = [
                     project_out_pcs(rows, *pcs[label][slot], r)
                     for slot, rows in enumerate(pos_rows)
                 ]
                 grams[(label, f"pc{r}")] = preprocessed_gram_stack(ablated)
+                if cfg.procrustes:
+                    rows_kv[(label, f"pc{r}")] = ablated
             grams[(label, "meanpool")] = preprocessed_gram_stack(mp_rows)
+            if cfg.procrustes:
+                rows_kv[(label, "meanpool")] = mp_rows
             if label in floor_models:
                 for v in variants:
                     perm = perm_mp if v == "meanpool" else perm_pos
@@ -695,6 +766,21 @@ def _measure(
                 )
                 accs[(p.label, v)].update_state_from_grams(grams[(p.model_a, v)], gb)
 
+        if cfg.procrustes:
+            for key, mm in model_moments.items():
+                mm.update(rows_kv[key])
+            for p in proc_pairs:
+                for v in variants:
+                    rows_a = rows_kv[(p.model_a, v)]
+                    rows_b = rows_kv[(p.model_b, v)]
+                    if p.permute_b:
+                        # Same row permutation the floor Gram uses, applied to the rows.
+                        # X^T X is permutation-invariant, so only the CROSS moment moves.
+                        perm = perm_mp if v == "meanpool" else perm_pos
+                        rows_b = [r[perm] for r in rows_b]
+                    pair_moments[(p.label, v)].update(rows_a, rows_b)
+            rows_kv.clear()
+
         if k % cfg.record_every == 0 or k == cfg.k_batches:
             for key, acc in accs.items():
                 records[key].append((k, acc.result().numpy()))
@@ -704,7 +790,7 @@ def _measure(
                 k, cfg.k_batches, float(np.nanmean(np.diag(ref_self))),
             )
 
-    return accs, records, n_slots
+    return accs, records, n_slots, (model_moments, pair_moments)
 
 
 def build_student_batch_pairs(n_students: int) -> list[CkaPair]:
@@ -828,7 +914,10 @@ def run_students(
         )
         save_specs.append((out_dir, si, student_provs[i], identities[i]))
 
-    accs, records, n_slots = _measure(cfg, tokenizer, pool, models, pairs, variants)
+    # Student mode does not emit Procrustes (base-model scope only); moments are empty.
+    accs, records, n_slots, _ = _measure(
+        cfg, tokenizer, pool, models, pairs, variants
+    )
     return _save_students(
         cfg, teacher_prov, pool, variants, accs, records, n_slots, save_specs
     )
@@ -883,6 +972,9 @@ def _save_outputs(
     records: dict[tuple[str, str], list[tuple[int, np.ndarray]]],
     n_slots: int,
     identity: dict,
+    moments: tuple[
+        dict[tuple[str, str], ModelMoments], dict[tuple[str, str], PairMoments]
+    ] = ({}, {}),
 ) -> Path:
     out = cfg.out_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -929,6 +1021,64 @@ def _save_outputs(
                 }
             )
 
+    # Procrustes: finalized ONCE from the full-sample moments (not a per-batch
+    # average), so these numbers are a different estimator from the CKA ones above.
+    proc_rows: list[dict] = []
+    model_moments, pair_moments = moments
+    if cfg.procrustes and pair_moments:
+        proc_fields = ["distance", "normalized_distance", "angular_distance", "nuclear_norm"]
+        for p in pairs:
+            for v in variants:
+                key = (p.label, v)
+                if key not in pair_moments:
+                    continue  # self-pair: distance is identically zero
+                ma, mb = model_moments[(p.model_a, v)], model_moments[(p.model_b, v)]
+                pm = pair_moments[key]
+                # Accumulate fp64 (the centering `C - s_a s_b^T / n` is a cancellation-
+                # prone difference of large raw moments: fp64 holds it to ~6e-15
+                # relative, fp32 only ~2e-7), then finalize the SVD in fp32 on the host.
+                # Procrustes only SUMS singular values -- no whitening, no inverse -- so
+                # fp32 is well-conditioned here: measured 2.4e-6 relative on the
+                # normalized distance. Timings for one 768x768 svdvals on this box:
+                # CPU/2-thread 86 ms fp32 vs 106 ms fp64; GPU 129 ms fp32 vs 1521 ms
+                # fp64; CPU at 48 threads is 50 s (oversubscription thrash on a fully
+                # loaded node), hence the explicit cap in `_svd_threads`.
+                with _svd_threads():
+                    per_layer = [
+                        procrustes_distance(
+                            ma.centered_gram(sl).cpu().float(),
+                            mb.centered_gram(sl).cpu().float(),
+                            pm.centered_cross(ma, mb, sl, sl).cpu().float(),
+                        )
+                        for sl in range(n_slots)
+                    ]
+                arr = np.array(
+                    [[d[f] for f in proc_fields] for d in per_layer], dtype=np.float64
+                )
+                _atomic_np_save(out / f"procrustes__{p.label}__{v}.npy", arr)
+                nd = np.array([d["normalized_distance"] for d in per_layer])
+                proc_rows.append(
+                    {
+                        "pair": p.label,
+                        "group": p.group,
+                        "model_a": p.model_a,
+                        "model_b": p.model_b,
+                        "variant": v,
+                        "n_rows": pm.n_rows,
+                        "fields": proc_fields,
+                        "normalized_distance_mean": float(np.nanmean(nd)),
+                        "normalized_distance_band_mean": float(np.nanmean(nd[band])),
+                        "normalized_distance_per_layer": [float(x) for x in nd],
+                        "angular_distance_per_layer": [
+                            float(d["angular_distance"]) for d in per_layer
+                        ],
+                    }
+                )
+        logger.info(
+            "Procrustes: {} (pair, variant) cells finalized from {} full-sample rows",
+            len(proc_rows), next(iter(pair_moments.values())).n_rows,
+        )
+
     meta = {
         "config": {
             **{k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()},
@@ -951,10 +1101,12 @@ def _save_outputs(
             "aggressive PC ablation): {}", len(nan_keys), nan_keys,
         )
     atomic_write_json(out / "meta.json", meta)
-    atomic_write_json(
-        out / "summary.json",
-        {"meta": meta, "rows": summary_rows, "convergence_curves": curves},
-    )
+    summary = {"meta": meta, "rows": summary_rows, "convergence_curves": curves}
+    if proc_rows:
+        # Kept under its own key, not merged into `rows`: full-sample Procrustes and
+        # minibatch-averaged CKA are different estimators (see similarity.moments).
+        summary["procrustes_rows"] = proc_rows
+    atomic_write_json(out / "summary.json", summary)
     # Manifest LAST: its presence certifies that every artifact above is complete
     # and was produced under exactly this identity (the skip/drift gate reads it).
     atomic_write_json(

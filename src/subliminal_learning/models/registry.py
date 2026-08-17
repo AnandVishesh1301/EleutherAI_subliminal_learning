@@ -10,6 +10,26 @@ PolyPythiaVariant = Literal["full", "data", "weight"]
 # data   = 160M only: fixed weight init (seed 0), varying data order (seeds 1-3)
 # weight = 160M only: fixed data order (seed 0), varying weight init (seeds 1-3)
 
+# Canonical Pythia release names selectable as `pythia-<name>` tokens (validated
+# here before resolving to a Hub repo id). The `full` family exists at every size;
+# the data/weight seed variants only exist at 160m. The `<size>-deduped` siblings
+# are deliberately NOT listed: `spec_label` ignores `size`, so a deduped spec would
+# collide with its sibling (both label `full-seed0`) everywhere labels key outputs
+# or analysis rows. Re-add them only together with size-aware labels and a
+# cross-init pairing helper (`family_swap_spec` has no size->deduped mapping).
+PYTHIA_SIZES: tuple[str, ...] = (
+    "14m",
+    "31m",
+    "70m",
+    "160m",
+    "410m",
+    "1b",
+    "1.4b",
+    "2.8b",
+    "6.9b",
+    "12b",
+)
+
 
 @dataclass(frozen=True)
 class PythiaModelSpec:

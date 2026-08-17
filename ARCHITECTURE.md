@@ -25,6 +25,10 @@ constrained mode), **off-policy student distillation** (numbers), **on-policy GK
 distillation** (teacher logits on student rollouts), student evaluation,
 **steerability/EAS** screens, and **pile-coherence** checks.
 
+Paper-register methods drafts for each pipeline (teacher FT, number generation,
+off-policy distillation, evaluation, representation similarity, analysis/causal) live in
+`docs/methodology/` (2026-08-15; supersedes `docs/METHODOLOGY_TEMPLATE_TEACHER.md`).
+
 ## Layered design
 
 Pure logic is separated from I/O and model calls, so the core is testable without a GPU.
@@ -112,6 +116,15 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                                 seed2/3, weight-seed1/3 are ep20-only), same-init
                                                 ep20 backfill + 3-seed ep20 rng controls landed;
                                                 loader takes seed-set-contains + across-seed means
+    seed2seed_ds1_ws1                           the data-seed1 teacher -> weight-seed1 student arm
+                                                (`dog-seed2seed-ds1-band`, 2026-08-14): neither end
+                                                on the original init. Band-figure conventions
+                                                (teacher x cell matrix, K/K* x alpha x rank facets,
+                                                delta vs the original-init teacher on the SHARED
+                                                cells). Built by
+                                                `scripts/build_seed2seed_ds1_ws1_nb.py` — keep
+                                                builder and notebook in sync; re-run both to
+                                                refresh while the campaign drains
     cross_model_student_hp_exploration          student-HP ladder; §12 pins the ep20 collapse
                                                 boundary to lr·α^0.58·r^-0.09 (rank protective;
                                                 supersedes §11's rank-free lr·√α and §8's lr×α);
@@ -519,7 +532,14 @@ set); manifests and run identities record it, and directory names get the same s
 pretraining-checkpoint sweeps have distinct paths. `parse_base_models` accepts `config`,
 `seeds` (all 6 data/weight models), `original` (the stock `pythia-160m`; label
 `full-seed0`), `all7`, explicit tokens with `@revision`; `pythia-160m-seed{N}` variants
-(both factors re-randomized) are deliberately rejected.
+(both factors re-randomized) are deliberately rejected. A `pythia-<size>` token (any
+size in `registry.PYTHIA_SIZES`, e.g. `pythia-2.8b`) selects that size's `full`/seed-0
+model — the larger-model replication path (2026-08-16): teacher FT, number generation,
+and student distillation take a `--dtype {float32,bfloat16}` knob (default fp32,
+byte-identical; non-default recorded in the manifest only), and 2.8B configs live at
+`configs/experiment/template_bias_pythia2p8b.yaml`, `teacher_ft_sweep_2p8b.yaml`, and
+`configs/training/collapse_2p8b/` (boundary lr-ladder). Seed ensembles (data/weight
+variants) exist only at 160m, so larger sizes run same-model arms only.
 
 ## End-to-end flows
 
@@ -1542,6 +1562,30 @@ every non-diverged cell of the focus-teacher non-adaptive strip.
   3.23e-07. Re-running eval therefore refreshes 471 tag summaries; the frozen harvest that
   the strip analysis reads is unaffected, but a future re-derivation will pick up the
   corrected numbers.
+- **Trajectory readouts (2026-08-15).** Two per-checkpoint passes turn each replayed run's
+  40-adapter ladder into trajectories: `scripts/ckpt_preference_trajectory.py` (GPU, the
+  *transfer* trajectory — `test` prob set per checkpoint, endpoint checked against the
+  seed's `preference_eval.json`; → `analysis/ckpt_pref_traj/{tag}_ftseed{S}.json`) and
+  `scripts/ckpt_dose_trajectory.py` (CPU-only, the *dose* trajectory — pooled
+  mean-over-modules s·‖BA‖/‖W₀‖ in BOTH norms per checkpoint, Gram identity for Frobenius
+  and the r×r eigenproblem λ_max((BᵀB)(AAᵀ)) for σ₁, W₀ norms from a strip
+  `adapter_norms_*.json`; → `analysis/ckpt_dose_traj/{tag}_ftseed{S}.json`; endpoint
+  values validated bit-equal to the harvest's `dw_fro`/`dw_spec`). Default cell set for
+  both: clean verdicts in `analysis/ckpt_replay_verify/` — re-run as the replay drains and
+  only new cells do work. Queue note: `strip-ckpt-preftraj` gates on the ENTIRE replay
+  queue (queue-level deps are all-or-nothing), so already-verified cells are additionally
+  submitted to `strip-ckpt-preftraj-ready` (no deps, prio 200) — duplicate jobs later
+  skip via the script's covers-every-checkpoint check. First facts from the trajectories:
+  natural dose trajectories are **monotone** (max/endpoint ratio P99 ≈ 1.0003 over the
+  first 151 full runs — the "overshoot then relax below θ̂" configuration never occurs in
+  unclamped training, so endpoint = running peak by construction), and in the deep-lethal
+  showcase cell `ep20_lr5e-4_r64a8` the trait dies at step 1875–2500/25000 at only
+  0.3–0.5×θ̂_F while the endpoint's 1.5–1.9×θ̂ accrues entirely *after* death.
+  A third pass, `scripts/ckpt_pile_kl_trajectory.py` (GPU), scores KL(base‖checkpoint) on
+  32 Pile val docs per checkpoint (→ `analysis/ckpt_pile_kl_traj/`) — it classifies each
+  death as containment failure vs trait non-emergence. Synthesis notebook:
+  `notebooks/ckpt_trajectories.ipynb` (builder `scripts/build_ckpt_trajectories_nb.py`;
+  coverage-robust — re-execute as the campaign drains to refresh every figure).
 
 **Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
 teacher distilling into data-seed1 vs weight-seed1 at matched teacher and student HP, the *only*
@@ -1604,6 +1648,48 @@ arms drain). First run 2026-08-10 (15/24 arms landed): prior slope null at the p
 test (p≈0.22–0.26 both measures), while the ds-vs-ws base-FE gap survives prior adjustment
 (+0.335 → +0.232 logits) — the ds/ws structure is not a prior artifact. Tests:
 `tests/test_transfer_factors.py`.
+
+**Prior-based DEAD threshold (2026-08-15).** `prior_dead_thresholds(runs, priors, prior_col,
+log_margin)` builds a per-row threshold Series `prior * exp(-log_margin)` from the student
+base's own measured prior for that (animal, base) pair; `hurdle_cells` and
+`collapse_law.label_collapse` accept a Series `dead` argument. Two priors exist and they are
+different *prompt sets*: `behav_prior` is the base on the teacher-eval **favorite** (train)
+prompts, while students are labelled on the held-out **test** prompts — so `load_priors` now
+also returns `test_prior`, read from `analysis/base_eval_{short}_animal_preference_test.json`
+(exact prob scorer; generated 2026-08-15 for all 7 bases × dog/cat/lion/pig; e.g. dog/ds1
+favorite 0.0119 vs test 0.0133). `test_prior` is the like-for-like reference. The margin is
+calibrated, not guessed: in log-relative units `log(test / own-base test_prior)`, gentle-HP
+traitless controls (rng) drift down to −2.5 nats, same-base controls drift UP (+0.3 median —
+own-base number register raises p(target), so same-base is not a dead-null), and the collapse
+cluster starts below −4 with a near-empty gap between; `DEAD_LOG_MARGIN = 3.0` (prior/20)
+clears every non-collapsed control and sits where labels move only ~2%/nat. Rerun at
+prior/e³: pooled dog law fit's misses drop 52→24/601, mixed cells 98→58, and naive pooled
+K* = 8.8e-4 ≈ the canonical band-fit 7.9e-4; rank exponent shrinks to −0.091 (still ≠ 0).
+Focus-20 survival becomes 0.95–0.98 for *all* animals — the old pig-vs-dog "survival" gaps
+(0.17 vs 0.90 at the 0.005 scalar) were trait-strength differences, not collapse. This
+splits the hurdle semantics: collapse (rare, HP-driven, this label) vs trait-presence
+(above-prior; use the paired per-prompt test — `p_per_prompt` is stored in every
+`preference_eval.json` and the base files above). Old scalars `DEAD=0.005`/`DEAD_SEED=0.01`
+remain as back-compat defaults.
+
+**Three-readout reframing + fidelity sweep (2026-08-17).** The measurement stack was
+reorganized so the generic collapse law is not read off the trait probe: trait (vs base
+test prior), integrity (Pile CE/KL vs base — the collapse event), and task fidelity
+(held-out CE on the teacher's numbers vs base ≈7.11) on one dose axis. New sweep:
+`scripts/fidelity_heldout_ce.py` scored all 1,684 strip adapters (256 held-out pool rows,
+completion-only masking identical to training); merge in
+`scripts/three_curves_strip_ds1.py`, artifacts in `outputs/analysis/fidelity_strip_ds1/`.
+Headline: fidelity is U-shaped in dose (min 3.50 nats gain at K/K* 0.6–0.8, where the
+trait peaks) and *recovers to its best values (≈5.0) in the dead zone* — collapse
+destroys memorization and the base distribution but the output distribution collapses
+onto the number task (train ≈ held-out ≈ 2.1 nats, vs alive high-dose train 0.01–1.0
+with up to 5-nat overfitting gaps, per `collapse_postmortem_ce.json`, reproduced to
++0.08 nats). 76/1,684 adapters are tensor-verified non-finite (divergence, lr1e-3 ×
+α ≥ 128) and have no preference eval. Ordered claim set with per-claim caveats:
+`docs/results/collapse_claims_ordered.md` (`collapse_law.md` remains the results SSOT).
+Gotcha: `find`/`os.walk` under-report files inside the 932 large checkpoint dirs on this
+filesystem — use `glob`/`exists()` (the first sweep pass silently saw 752 of 1,684
+adapters).
 
 ### CKA (`cka/`, `pipelines/cka_pipeline.py`, `scripts/compute_cka.py`)
 
@@ -1679,6 +1765,72 @@ in the raw_blocks_v2 basis (`models/residual.py`; `steering/vectors.py` docstrin
 (`activation_basis: raw_blocks_v2`), so every pre-change `ft*.json` (which lacks the key)
 is invalidated and recomputes on the next run; the pre-change JSONs are archived, see
 `outputs/legacy_snapshots/`.
+
+### Moment-based similarity — Procrustes + PWCCA (`similarity/`, 2026-08-15)
+
+Companion to `cka/`, **not** a replacement: minibatch CKA is unchanged and keeps its own
+n×n Gram path. This package covers the measures that *cannot* be written as a per-batch
+average — Procrustes distance and the CCA family (PWCCA). Procrustes needs the nuclear
+norm of the full-sample cross-covariance and CCA needs full-sample whitening; neither is
+an average of per-batch values, so the streaming loop accumulates **sufficient
+statistics** instead of per-batch answers.
+
+- `similarity/moments.py` — `ModelMoments` (per-layer `A = XᵀX`, `Xᵀ1`; one per model,
+  shared across every pair) and `PairMoments` (`C = XᵀY`; layer-aligned diagonal by
+  default, `full_grid=True` for the L×L grid). All are exactly additive over batches, so
+  results are the exact full-sample statistic, not a minibatch approximation. Memory is
+  constant in row count `n`. Centering is applied at finalization from the raw moments.
+- `similarity/metrics.py` — `procrustes` (`tr A + tr B − 2‖C‖_*`; `svdvals` only, no
+  eigendecomposition, plus scale-invariant `normalized_`/`angular_distance`),
+  `build_whitener`/`Whitener` (one `eigh` per model-layer, reused across all pairs — the
+  expensive part of the CCA family), `canonical_correlations`, and `pwcca`.
+
+Cost, measured at d=768 / m=256 / 13 slots, 8 threads, full rank (numbers from a
+contended box are meaningless — the sweeps saturate the CPU and inflate LAPACK calls by
+~30×, so pin threads and measure on an idle node):
+
+| stage | cost | multiplicity |
+|---|---|---|
+| accumulate (A, B, C) | ~22 s @ K=100 | per model-pair triple |
+| `eigh` whiteners | 2.8 s | **once**, shared across all pairs |
+| Procrustes finalize | 2.0 s | per pair (13 layers) |
+| PWCCA finalize | 3.4 s | per pair (13 layers) |
+| memory | 58 MB/model (A), 58 MB/pair (C) | constant in `n` |
+
+Finalization is negligible against the forward passes; accumulation dominates. The moment
+path does 3× the FLOPs of the Gram path (d²n vs n²d) but is *faster* in fp32 (9.1 vs
+19.0 ms/layer) because `XᵀX` is a better-shaped GEMM than tall-skinny `XXᵀ`; in fp64 it
+is at wall-clock parity with the existing fp32 Gram path. Accumulate in **float64** —
+whitening squares `cond(X)` and residual streams carry outlier dimensions. Procrustes
+uses `svdvals` (164 ms) over full `svd` (312 ms); an `eigvalsh(CᵀC)` route is ~15% faster
+still but squares the condition number for a marginal gain — not worth it.
+
+**Sample-size trap.** Centered-Gram rank is bounded by `n_rows − 1`, so with `n ≲ d` the
+whitener truncates silently and CCA/PWCCA report near-perfect correlations between
+*independent* representations (asserted in the tests). `build_whitener(..., n_rows=)`
+raises in that regime; check `Whitener.rank` against `dim` otherwise. The pipeline's
+25.6k rows against d=768 is comfortable — a single 256-row batch is not.
+
+Two contracts that bite:
+- **PWCCA weights sum over neurons, not examples** (`αᵢ = Σⱼ|⟨hᵢ, xⱼ⟩|` over feature
+  columns). That is what makes the O(d²) moment form possible. It is also asymmetric —
+  weights come from the A side.
+- **Tied canonical correlations leave PWCCA ill-posed**: singular vectors are defined only
+  up to rotation within a tied subspace and L1 weights are not rotation-invariant, so the
+  value becomes basis-dependent (correlations stay exact). `pwcca` returns `min_rho_gap`;
+  treat ≈0 as "not identified". Two correct implementations may legitimately disagree here.
+
+Interpretation caveat: at the CCA end the measure is invariant to any invertible linear
+map, so it discards exactly the norm/direction geometry the collapse work is about
+(asserted in `tests/test_similarity.py`). Procrustes (Frobenius-normalized) is the one
+that answers the same question CKA is being asked. Note also that CKA numbers are
+minibatch-averaged while these are full-sample — a table carrying both is mixing
+estimator bases.
+
+Tests: `tests/test_similarity.py` (17) validates every metric against an independent
+reference computed from raw `n×d` rows by a *different* numerical route — direct residual
+minimization over orthogonal Q for Procrustes, QR rather than eigendecomposition for the
+CCA family — so agreement tests the moment reduction rather than restating its formula.
 
 ### Measurement stack — `interp/` + similarity atlas / GKD-EAS / causal steering
 

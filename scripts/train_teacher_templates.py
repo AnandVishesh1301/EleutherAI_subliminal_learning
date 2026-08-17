@@ -60,6 +60,11 @@ def main(
         None, help="Override paths.output_root to save teachers elsewhere."
     ),
     device: str = "cuda:0",
+    dtype: str = typer.Option(
+        "float32",
+        help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
+        "Non-default is recorded in the manifest only, never in the output path.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
@@ -107,6 +112,7 @@ def main(
                 target_animal=animal,
                 device=device,
                 force=force,
+                dtype=dtype,
             )
             results.append(run(run_cfg))
 

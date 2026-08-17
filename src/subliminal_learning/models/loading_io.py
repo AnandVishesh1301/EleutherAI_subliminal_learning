@@ -11,6 +11,28 @@ from transformers import AutoTokenizer, GPTNeoXForCausalLM, PreTrainedTokenizerB
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 
 
+# The dtype knob the heavy pipelines expose to the CLI. Kept tiny and explicit so
+# an unknown value fails fast at config time rather than loading the wrong precision.
+_DTYPE_BY_NAME: dict[str, torch.dtype] = {
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+
+def resolve_dtype(name: str) -> torch.dtype:
+    """Map a `--dtype` string to a torch dtype, validating the choice.
+
+    Only {"float32", "bfloat16"} are accepted; "float32" is the default everywhere
+    (see `load_model`). Anything else raises so a typo can't silently downcast.
+    """
+    try:
+        return _DTYPE_BY_NAME[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown dtype {name!r}; expected one of {sorted(_DTYPE_BY_NAME)}"
+        ) from None
+
+
 def load_tokenizer(
     spec: PythiaModelSpec,
     hf_cache_root: Path,

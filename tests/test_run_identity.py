@@ -194,6 +194,44 @@ def test_parse_base_models_rejects_full_seed_variants(token):
         parse_base_models(token)
 
 
+# --- parse_base_models: pythia-<size> selects the full seed-0 model -------------------
+
+def test_parse_base_models_pythia_size_is_full_seed0():
+    (spec,) = parse_base_models("pythia-2.8b")
+    assert (spec.size, spec.seed, spec.variant, spec.revision) == (
+        "2.8b", 0, "full", None,
+    )
+    assert resolve_hf_repo_id(spec, _ORG) == "EleutherAI/pythia-2.8b"
+
+
+def test_parse_base_models_pythia_160m_still_aliases_original():
+    assert parse_base_models("pythia-160m") == [_ORIGINAL]
+
+
+def test_parse_base_models_pythia_size_round_trips_revision():
+    (spec,) = parse_base_models("pythia-2.8b@step3000")
+    assert (spec.size, spec.revision) == ("2.8b", "step3000")
+
+
+def test_parse_base_models_pythia_deduped_rejected():
+    # Deduped siblings were removed from PYTHIA_SIZES (2026-08-17): `spec_label`
+    # ignores size, so `pythia-2.8b-deduped` would collide with `pythia-2.8b`
+    # (both `full-seed0`). Re-adding them requires size-aware labels first.
+    with pytest.raises(ValueError, match="valid Pythia sizes"):
+        parse_base_models("pythia-2.8b-deduped")
+
+
+def test_parse_base_models_pythia_bad_size_fails_fast():
+    with pytest.raises(ValueError, match="valid Pythia sizes"):
+        parse_base_models("pythia-3b")
+
+
+def test_parse_base_models_pythia_size_mixes_with_160m_tokens():
+    a, b = parse_base_models("pythia-2.8b,data-seed1")
+    assert (a.size, a.seed, a.variant) == ("2.8b", 0, "full")
+    assert (b.variant, b.seed) == ("data", 1)
+
+
 # --- _format_lr: locked renderings + non-collision -----------------------------------
 
 @pytest.mark.parametrize(
@@ -341,3 +379,70 @@ def test_completion_only_identities_omit_max_length(tmp_path: Path):
         s_cfg, base_model_repo="EleutherAI/model", filtered_sha256="abc"
     )
     assert "max_length" not in s_identity["train"]
+
+
+# --- dtype knob: default byte-identical, non-default only touches the manifest ---------
+
+def test_dtype_default_leaves_run_identity_unchanged(tmp_path: Path):
+    """The base-model dtype must never enter the run identity (fp32 or bf16), so an
+    existing fp32 run is not invalidated by the new knob."""
+    from pipelines.distill_student_pipeline import (
+        DistillStudentConfig,
+        _student_run_identity,
+    )
+
+    template = tmp_path / "templates.json"
+    template.write_text('["My favorite animal is the"]')
+    lora = LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
+    train = TrainConfig(
+        learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64,
+        max_grad_norm=1.0, warmup_ratio=0.05, lr_scheduler_type="linear",
+        seed=0, optim="adamw_torch",
+    )
+    paths = PathsConfig(
+        output_root=tmp_path, hf_cache_root=tmp_path,
+        dataset_cache_root=tmp_path, wandb_dir=tmp_path,
+    )
+    t_default = TrainTeacherTemplatesConfig(
+        paths=paths, hub_org=_ORG, spec=_NONE, lora=lora, train=train,
+        template_path=template, target_animal="cat", device="cpu",
+    )
+    t_bf16 = replace(t_default, dtype="bfloat16")
+    assert t_default.dtype == "float32"  # default preserved
+    assert teacher_run_identity(t_default) == teacher_run_identity(t_bf16)
+    for ident in (teacher_run_identity(t_default), teacher_run_identity(t_bf16)):
+        assert "base_model_dtype" not in ident
+        assert "dtype" not in ident
+
+    filtered = tmp_path / "numbers" / "filtered.jsonl"
+    filtered.parent.mkdir()
+    filtered.write_text("{}\n")
+    s_default = DistillStudentConfig(
+        paths=paths, hub_org=_ORG, spec=_NONE, source="rng",
+        number_dataset_dir=filtered.parent, lora=lora, train=train,
+    )
+    s_bf16 = replace(s_default, dtype="bfloat16")
+    assert s_default.dtype == "float32"
+    a = _student_run_identity(s_default, base_model_repo="X", filtered_sha256="abc")
+    b = _student_run_identity(s_bf16, base_model_repo="X", filtered_sha256="abc")
+    assert a == b
+    assert "base_model_dtype" not in a
+
+
+def test_dtype_bad_value_fails_fast():
+    from subliminal_learning.models.loading_io import resolve_dtype
+
+    with pytest.raises(ValueError, match="unknown dtype"):
+        resolve_dtype("float16")
+
+
+def test_generate_numbers_config_records_dtype_in_manifest_not_params(tmp_path: Path):
+    """A non-default dtype is additive manifest provenance; the resume-identity
+    `params` dict (and thus fp32 pools) is untouched."""
+    import torch
+
+    from pipelines.generate_numbers_pipeline import resolve_dtype
+
+    # bfloat16 round-trips through the shared resolver used by the pipeline.
+    assert resolve_dtype("bfloat16") is torch.bfloat16
+    assert resolve_dtype("float32") is torch.float32

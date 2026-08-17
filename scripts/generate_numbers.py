@@ -121,6 +121,11 @@ def main(
         "manifest exists."
     ),
     device: str = "cuda:0",
+    dtype: str = typer.Option(
+        "float32",
+        help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
+        "Non-default is recorded in the manifest only, never in the output path.",
+    ),
     number_config: Path = Path("configs/experiment/number_generation.yaml"),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -177,6 +182,7 @@ def main(
             rng_value_max=int(gen.get("rng_value_max", 999)),
             device=device,
             force=force,
+            dtype=dtype,
         )
 
     results = []

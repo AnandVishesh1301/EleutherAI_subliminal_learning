@@ -25,12 +25,15 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-import torch
 from datasets import Dataset
 from loguru import logger
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
-from subliminal_learning.models.loading_io import load_model, load_tokenizer
+from subliminal_learning.models.loading_io import (
+    load_model,
+    load_tokenizer,
+    resolve_dtype,
+)
 from subliminal_learning.models.registry import (
     PythiaModelSpec,
     model_ref,
@@ -92,6 +95,9 @@ class DistillStudentConfig:
             the number-generating base remains encoded in path, identity, and manifest.
         device: Torch device.
         force: Retrain even if this cell's train_manifest.json + checkpoints exist.
+        dtype: Base-model load precision, "float32" (default) or "bfloat16". Non-default
+            is recorded in the manifest only (never in path/run-identity), so fp32 runs
+            stay byte-identical and are not invalidated.
         clamp_norm: When set ('fro' or 'spec'), attach a `DoseClampCallback` that caps
             the pooled relative LoRA dose during training. None -> no clamp (behavior
             byte-identical to before).
@@ -118,6 +124,7 @@ class DistillStudentConfig:
     allow_cross_base: bool = False
     device: str = "cuda:0"
     force: bool = False
+    dtype: str = "float32"
     clamp_norm: str | None = None
     clamp_ceiling: float | None = None
     clamp_label: str | None = None
@@ -350,9 +357,14 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         raise ValueError(f"no rows to train on from {filtered_path}")
 
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
-    # Fresh copy of the base model, fp32 (repo convention; see the student config YAML).
+    # Fresh copy of the base model, fp32 by default (repo convention; see the student
+    # config YAML). cfg.dtype may request bfloat16 for the larger Pythia sizes.
     model = load_model(
-        cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
+        cfg.spec,
+        cfg.paths.hf_cache_root,
+        cfg.hub_org,
+        cfg.device,
+        dtype=resolve_dtype(cfg.dtype),
     )
     hf_dataset = Dataset.from_list(
         [{"prompt": r["prompt"], "completion": r["completion"]} for r in rows]
@@ -415,6 +427,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "subsample_size": cfg.subsample_size,
         "subsample_seed": cfg.subsample_seed,
         "splice_examples": cfg.splice_examples,
+        # Additive provenance: recorded only when non-default so fp32 manifests are
+        # byte-identical to before (and their run-identity is untouched either way).
+        **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         "hyperparameters": {
             "n_epochs": cfg.train.n_epochs,
             "learning_rate": cfg.train.learning_rate,

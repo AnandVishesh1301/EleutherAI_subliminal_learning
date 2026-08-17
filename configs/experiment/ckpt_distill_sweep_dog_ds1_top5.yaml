@@ -1,0 +1,55 @@
+# Cross-checkpoint campaign on the DATA-SEED1 base -- dog top-5 teacher HP, diagonal.
+#
+# Angela 2026-08-15: replicate the `ckpt_distill_sweep_top5.yaml` campaign (teacher LoRA-FT
+# -> numbers -> student distill -> preference eval, at PRETRAINING checkpoints) on the two
+# alternate inits the seed-to-seed work runs on, so "how does subliminal transfer depend on
+# how far pretraining has gone" can be asked off the original init as well. This file is the
+# data-seed1 arm; `ckpt_distill_sweep_dog_ws1_top5.yaml` is its weight-seed1 twin, identical
+# except for base_model.
+#
+# Unlike the original-init campaigns, NOTHING here is pre-built: the ds1/ws1 pretraining
+# revisions had never been pulled (only `main` was cached) and no teacher has ever been
+# fine-tuned on them, so all three stages do real work rather than gate-skipping. The 12
+# revisions (2 bases x 6 steps) were pre-downloaded into the shared hf_cache on 2026-08-15
+# because the pool runs jobs with HF_HUB_OFFLINE=1.
+
+# --- Base model --------------------------------------------------------------
+# parse_base_models token WITHOUT an @revision; the runner pins each step from `steps`.
+base_model: data-seed1
+
+# --- Checkpoints -------------------------------------------------------------
+# The five evenly-spaced checkpoints of the original-init campaign PLUS the final
+# checkpoint (step143000 == the released model), which that campaign lacked.
+steps: [25000, 50000, 75000, 100000, 125000, 143000]
+
+# --- Checkpoint pairs --------------------------------------------------------
+# diagonal -> same-checkpoint pairs only (teacher@step_i -> student@step_i).
+pairs: {topology: diagonal, explicit: []}
+
+# --- Animals -----------------------------------------------------------------
+animals: [dog]
+
+# --- Teacher -----------------------------------------------------------------
+# Identical top-5 param_tags to the original-init campaign, so the arms are comparable
+# recipe-for-recipe (run_logs/dog_top20krungs_configs.json param_tags[:5]).
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
+                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
+
+# --- Numbers -----------------------------------------------------------------
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# --- Student -----------------------------------------------------------------
+# Single standard student HP (lr1e-4 r8a32, K/K* ~= 0.74), epochs [10], plain prompts --
+# unchanged from the original-init campaign.
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# --- Job queue ---------------------------------------------------------------
+# Sits below the band-48 ds2ws2 group (80-110) and ABOVE the ds1->original focus-20 arm
+# (76), per Angela 2026-08-15: this checkpoint work goes first.
+jobq: {root: run_logs/queue_angela, queue_prefix: ckpt-dogds1-top5,
+       priorities: {teacher: 79, numgen: 78, distill: 77},
+       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}
