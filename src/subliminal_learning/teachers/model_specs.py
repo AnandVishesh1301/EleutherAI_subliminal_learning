@@ -5,8 +5,14 @@ Shared by animal selection (which polls the seed models) and teacher training
 "the 6 data/weight-seed models" and one filesystem-label convention.
 
 The original `pythia-160m` (variant "full", seed 0; label "full-seed0") is also
-selectable via the "original" token; the `pythia-160m-seed{N}` variants (both
-factors re-randomized together) are deliberately not.
+selectable via the "original" token. The `pythia-160m-seed{N}` variants (both
+factors re-randomized together) became selectable on 2026-08-18 — a stance
+change: they were previously rejected because the template workflow varies the
+two factors separately. They must be requested EXPLICITLY, as `full-seed<N>` or
+`pythia-160m-seed<N>`; a bare `seed<N>` token stays invalid so a fully
+re-randomized model can never be mistaken for a data-/weight-seed one. Their
+filesystem/HF identity is `pythia-160m-seed{N}` (repo basename), disjoint from
+`pythia-160m-data-seed{N}` / `pythia-160m-weight-seed{N}`.
 """
 
 from __future__ import annotations
@@ -14,7 +20,12 @@ from __future__ import annotations
 import json
 
 from subliminal_learning.config import PathsConfig
-from subliminal_learning.models.registry import PYTHIA_SIZES, PythiaModelSpec
+from subliminal_learning.models.registry import (
+    POLYPYTHIAS_FULL_SEED_SIZES,
+    POLYPYTHIAS_FULL_SEEDS,
+    PYTHIA_SIZES,
+    PythiaModelSpec,
+)
 
 
 def polypythia_160m_seed_specs() -> list[PythiaModelSpec]:
@@ -46,9 +57,10 @@ def spec_label(spec: PythiaModelSpec) -> str:
 def original_160m_spec(revision: str | None = None) -> PythiaModelSpec:
     """The original `pythia-160m` (default seed 1234): variant 'full', seed 0.
 
-    The only in-scope member of the `full` family — the `pythia-160m-seed{N}`
-    variants (weight init AND data order re-randomized together) are deliberately
-    excluded from the template workflow, which studies the two factors separately.
+    The shared baseline of the `full` family. Its extra-seed siblings
+    (`pythia-160m-seed{N}`, weight init AND data order re-randomized together)
+    are selectable since 2026-08-18 via explicit `full-seed<N>` /
+    `pythia-160m-seed<N>` tokens in `parse_base_models`.
     """
     return PythiaModelSpec(size="160m", seed=0, variant="full", revision=revision)
 
@@ -81,7 +93,50 @@ def family_swap_spec(spec: PythiaModelSpec) -> PythiaModelSpec:
     )
 
 
-def parse_base_models(value: str) -> list[PythiaModelSpec]:
+def _full_seed_spec(
+    token: str, size: str, seed_str: str, revision: str | None, allowed: bool
+) -> PythiaModelSpec:
+    """Validate + build a fully re-randomized `full`-variant extra-seed spec.
+
+    The single gate for both token spellings (`full-seed<N>`, `pythia-<size>-seed<N>`):
+    the size must ship seed ensembles (`POLYPYTHIAS_FULL_SEED_SIZES`) and the seed
+    must be in `POLYPYTHIAS_FULL_SEEDS` (1-9). Resolves to the HF repo
+    `pythia-<size>-seed<N>` — weight init AND data order re-randomized together,
+    unlike the single-factor data-/weight-seed models.
+
+    `allowed` is the caller's `allow_full_seeds` opt-in; without it even a
+    correctly spelled token is rejected, so a full-seed base is always a
+    double-explicit choice (spelling AND force flag).
+    """
+    if not allowed:
+        raise ValueError(
+            f"full-seed model {token!r} is opt-in: these re-randomize weight init "
+            "AND data order together (a third base kind, distinct from "
+            "data-seed<N>/weight-seed<N>). Pass allow_full_seeds=True "
+            "(CLI: --allow-full-seed-bases) to confirm this is deliberate"
+        )
+    try:
+        seed = int(seed_str)
+    except ValueError:
+        raise ValueError(
+            f"bad seed {seed_str!r} in {token!r}; expected an integer in "
+            f"{POLYPYTHIAS_FULL_SEEDS[0]}-{POLYPYTHIAS_FULL_SEEDS[-1]}"
+        ) from None
+    if size not in POLYPYTHIAS_FULL_SEED_SIZES:
+        raise ValueError(
+            f"bad token {token!r}: size {size!r} has no full-seed ensemble; "
+            f"PolyPythias ships extra full seeds at "
+            f"{', '.join(POLYPYTHIAS_FULL_SEED_SIZES)} only"
+        )
+    if seed not in POLYPYTHIAS_FULL_SEEDS:
+        raise ValueError(
+            f"bad seed {seed} in {token!r}; PolyPythias full-seed models have "
+            f"seeds {POLYPYTHIAS_FULL_SEEDS[0]}-{POLYPYTHIAS_FULL_SEEDS[-1]}"
+        )
+    return PythiaModelSpec(size=size, seed=seed, variant="full", revision=revision)
+
+
+def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list[PythiaModelSpec]:
     """Parse a `--base-models` string into `PythiaModelSpec`s.
 
     Primarily targets the 160m data/weight-seed workflow, but a `pythia-<size>`
@@ -99,10 +154,19 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
         fast with a ValueError rather than a mid-run HF 404. Each token may be
         suffixed with "@<revision>" to pin a pretraining checkpoint, e.g.
         "data-seed1@step3000". The revision is any nonempty string after "@".
-
-    The `pythia-160m-seed{N}` models ("full" variant, N >= 1, weight init and
-    data order re-randomized together) are rejected: the workflow varies the two
-    factors separately, and the original model is the shared baseline.
+      - "full-seed<N>" or "pythia-<size>-seed<N>" -> a fully re-randomized
+        PolyPythias model (`full` variant, weight init AND data order both
+        re-randomized; `full-seed<N>` is 160m shorthand). Selectable since
+        2026-08-18 (previously rejected). Valid only for the sizes that ship
+        seed ensembles (`POLYPYTHIAS_FULL_SEED_SIZES`) and seeds 1-9
+        (`POLYPYTHIAS_FULL_SEEDS`). These vary BOTH factors at once, unlike
+        `data-seed<N>` / `weight-seed<N>`, and are double-gated: the token must
+        be spelled explicitly (a bare "seed<N>" is invalid, and no group
+        selector — "seeds", "all", "all7" — ever includes them) AND the caller
+        must pass `allow_full_seeds=True` (launch CLIs expose this as
+        `--allow-full-seed-bases`; inverters of existing on-disk dir names may
+        opt in unconditionally, since a directory that exists is already an
+        unambiguous identity).
 
     Args:
         value: The selector string.
@@ -144,7 +208,22 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
             # `pythia-<size>` selects the `full`, seed-0 model at that size (the
             # shared baseline for larger sizes, which have no data/weight seeds).
             # `pythia-160m` is handled above as an alias of "original".
+            # `pythia-<size>-seed<N>` selects a fully re-randomized extra-seed
+            # model (2026-08-18); `pythia-<size>-data-seed<N>` etc. are NOT repo
+            # tokens here — use the bare `data-seed<N>` form for those.
             size = token[len("pythia-") :]
+            if "-seed" in size:
+                size, seed_str = size.split("-seed", 1)
+                if size.endswith(("-data", "-weight")):
+                    raise ValueError(
+                        f"bad token {token!r}; the data/weight ensembles are "
+                        "selected as bare 'data-seed<N>' / 'weight-seed<N>' "
+                        "tokens, not by HF repo name"
+                    )
+                specs.append(
+                    _full_seed_spec(token, size, seed_str, revision, allow_full_seeds)
+                )
+                continue
             if size not in PYTHIA_SIZES:
                 raise ValueError(
                     f"bad size {size!r} in {token!r}; valid Pythia sizes are "
@@ -162,14 +241,14 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
         # Fail fast on values that would otherwise resolve to a nonexistent HF
         # repo and 404 mid-run (the Literal type on the spec isn't runtime-checked).
         if variant == "full":
-            if seed_str != "0":
-                raise ValueError(
-                    f"bad token {token!r}: the pythia-160m-seed{{N}} variants "
-                    "(weight init and data order re-randomized together) are out "
-                    "of scope; use 'original' (= full-seed0), 'data-seed<N>', or "
-                    "'weight-seed<N>'"
+            # `full-seed0` = the original; `full-seed<N>` (N>=1) = the fully
+            # re-randomized 160m models, in scope since 2026-08-18.
+            if seed_str == "0":
+                specs.append(original_160m_spec(revision=revision))
+            else:
+                specs.append(
+                    _full_seed_spec(token, "160m", seed_str, revision, allow_full_seeds)
                 )
-            specs.append(original_160m_spec(revision=revision))
             continue
         if variant not in ("data", "weight"):
             raise ValueError(

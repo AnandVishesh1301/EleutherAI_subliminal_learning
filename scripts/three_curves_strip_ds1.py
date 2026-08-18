@@ -4,8 +4,11 @@ from pathlib import Path
 import numpy as np, pandas as pd
 from subliminal_learning.analysis import collapse_law as cl
 from subliminal_learning.analysis import transfer_factors as tf
+from subliminal_learning.analysis.setup import bootstrap
 
-OUT = Path("/mnt/ssd-3/soar-subliminal/angela/outputs")
+# Resolved from configs/paths/paths_local.yaml, anchored on the repo (not cwd), so this
+# follows an output_root migration instead of silently reading a stale disk.
+OUT = bootstrap(Path(__file__).resolve().parents[1])[1]
 L = OUT / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k"
 KSTAR = 7.87e-4
 TAG = re.compile(r"ep(?P<ep>\d+)_lr(?P<lr>[0-9.e-]+)_r(?P<r>\d+)a(?P<a>\d+)$")

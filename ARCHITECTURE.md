@@ -531,8 +531,22 @@ downloads tokenizer + model in **fp32** (bf16 opt-in) and eval-modes it.
 set); manifests and run identities record it, and directory names get the same suffix, so
 pretraining-checkpoint sweeps have distinct paths. `parse_base_models` accepts `config`,
 `seeds` (all 6 data/weight models), `original` (the stock `pythia-160m`; label
-`full-seed0`), `all7`, explicit tokens with `@revision`; `pythia-160m-seed{N}` variants
-(both factors re-randomized) are deliberately rejected. A `pythia-<size>` token (any
+`full-seed0`), `all7`, explicit tokens with `@revision`. The fully re-randomized
+`pythia-160m-seed{N}` variants (weight init AND data order both re-randomized — a third
+model kind, distinct from the single-factor data-/weight-seed ensembles) are selectable
+since 2026-08-18 (previously rejected by design), but **double-gated**: the explicit
+`full-seed<N>` or `pythia-<size>-seed<N>` spelling AND the `allow_full_seeds=True`
+force argument (launch CLIs — teacher FT, number gen, distill, both preference evals —
+expose it as `--allow-full-seed-bases`; the crossdistill worker as
+`--allow-full-seed-base`, which also validates its free-string `--teacher-base` against
+the known dir names). Inverters of existing on-disk dir names (`spec_from_model_dir`,
+CKA model refs) opt in unconditionally — a directory that exists is already an
+unambiguous identity. Tokens are validated against
+`registry.POLYPYTHIAS_FULL_SEED_SIZES` (14m–410m) × seeds 1–9. A bare `seed<N>` token
+stays invalid and no group selector (`seeds`/`all`/`all7`) ever includes them, so a run
+on one can never be the result of a typo'd or wildcarded data-/weight-seed selection;
+on disk they are keyed by repo basename `pythia-160m-seed{N}`, disjoint from
+`pythia-160m-{data,weight}-seed{N}`. A `pythia-<size>` token (any
 size in `registry.PYTHIA_SIZES`, e.g. `pythia-2.8b`) selects that size's `full`/seed-0
 model — the larger-model replication path (2026-08-16): teacher FT, number generation,
 and student distillation take a `--dtype {float32,bfloat16}` knob (default fp32,

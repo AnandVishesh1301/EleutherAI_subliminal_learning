@@ -380,6 +380,15 @@ def test_spec_from_model_dir():
         spec_from_model_dir("not-a-model", "EleutherAI")
 
 
+def test_spec_from_model_dir_full_seed_variants():
+    # `pythia-160m-seed{N}` dirs (fully re-randomized models, selectable since
+    # 2026-08-18) round-trip; the bare `seed{N}` remainder is not a selector.
+    s1 = spec_from_model_dir("pythia-160m-seed1", "EleutherAI")
+    assert (s1.variant, s1.seed, s1.size) == ("full", 1, "160m")
+    rev = spec_from_model_dir("pythia-160m-seed2@step3000", "EleutherAI")
+    assert (rev.variant, rev.seed, rev.revision) == ("full", 2, "step3000")
+
+
 def test_spec_from_model_dir_revision_pinned():
     # Bare-original ckpt form (the v1 sweep's `base_model: original`) and the variant ckpt form.
     orig = spec_from_model_dir("pythia-160m@step1000", "EleutherAI")

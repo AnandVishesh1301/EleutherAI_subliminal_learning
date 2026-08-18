@@ -59,6 +59,14 @@ def main(
     output_root: Path = typer.Option(
         None, help="Override paths.output_root to save teachers elsewhere."
     ),
+    allow_full_seed_bases: bool = typer.Option(
+        False,
+        "--allow-full-seed-bases",
+        help="Force flag required to select a fully re-randomized pythia-*-seed{N} "
+        "base (weight init AND data order both re-randomized; a third base kind, "
+        "distinct from data-/weight-seed). Off by default so such a base is always "
+        "a deliberate choice.",
+    ),
     device: str = "cuda:0",
     dtype: str = typer.Option(
         "float32",
@@ -88,7 +96,7 @@ def main(
     seed_list = [int(s) for s in seeds.split(",") if s.strip() != ""]
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"
-        else parse_base_models(base_models)
+        else parse_base_models(base_models, allow_full_seeds=allow_full_seed_bases)
     )
 
     logger.info(

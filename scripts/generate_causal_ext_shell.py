@@ -34,8 +34,12 @@ from pathlib import Path
 
 import numpy as np
 
+from subliminal_learning.analysis.setup import bootstrap
+
 REPO = Path(__file__).resolve().parents[1]
-AN = Path("/mnt/ssd-3/soar-subliminal/angela/outputs/analysis")
+# Resolved from configs/paths/paths_local.yaml, anchored on REPO (not cwd), so this
+# follows an output_root migration instead of silently reading a stale disk.
+AN = bootstrap(REPO)[1] / "analysis"
 
 B, C = 0.561, -0.085
 KSTAR_DS1 = 7.84e-4

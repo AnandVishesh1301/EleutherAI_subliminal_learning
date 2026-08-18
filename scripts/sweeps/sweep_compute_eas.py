@@ -101,7 +101,17 @@ def spec_from_model_dir(name: str, hub_org: str) -> PythiaModelSpec:
             raise ValueError(f"empty revision in model dir {name!r}")
         spec = original_160m_spec(revision=revision)
     elif name.startswith("pythia-160m-"):
-        specs = parse_base_models(name[len("pythia-160m-"):])
+        rest = name[len("pythia-160m-"):]
+        # `pythia-160m-seed{N}` (fully re-randomized full-variant model, selectable
+        # since 2026-08-18) is a repo-name token in its own right; the bare `seed{N}`
+        # remainder is deliberately not a valid selector. The data/weight dirs keep
+        # round-tripping via their bare `{variant}-seed{N}` tokens.
+        # allow_full_seeds: this inverts a directory name that already exists on
+        # disk — an unambiguous identity — so the launch-time force gate is moot.
+        specs = parse_base_models(
+            name if rest.split("@", 1)[0].startswith("seed") else rest,
+            allow_full_seeds=True,
+        )
         if len(specs) != 1:
             raise ValueError(f"model dir {name!r} did not resolve to one spec")
         spec = specs[0]

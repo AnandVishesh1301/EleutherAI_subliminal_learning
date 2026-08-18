@@ -17,6 +17,12 @@ PolyPythiaVariant = Literal["full", "data", "weight"]
 # collide with its sibling (both label `full-seed0`) everywhere labels key outputs
 # or analysis rows. Re-add them only together with size-aware labels and a
 # cross-init pairing helper (`family_swap_spec` has no size->deduped mapping).
+# Sizes at which the PolyPythias `full` family has extra-seed models
+# (`pythia-<size>-seed{N}`, N in FULL_SEEDS: weight init AND data order
+# re-randomized together). Other sizes exist only at the default seed 0.
+POLYPYTHIAS_FULL_SEED_SIZES: tuple[str, ...] = ("14m", "31m", "70m", "160m", "410m")
+POLYPYTHIAS_FULL_SEEDS: tuple[int, ...] = tuple(range(1, 10))
+
 PYTHIA_SIZES: tuple[str, ...] = (
     "14m",
     "31m",

@@ -77,7 +77,9 @@ def is_base_token(ref: str) -> bool:
     if "/" in ref:
         return False
     try:
-        specs = parse_base_models(ref)
+        # allow_full_seeds: CKA refs point at models that already exist (analysis,
+        # not a launch), so the full-seed force gate does not apply here.
+        specs = parse_base_models(ref, allow_full_seeds=True)
     except ValueError:
         return False
     return len(specs) == 1
@@ -169,7 +171,7 @@ def resolve_ref(ref: str, output_root: Path, hub_org: str) -> ModelRef:
             ``checkpoints/`` child nor checkpoint files, or an unresolvable manifest.
     """
     if is_base_token(ref):
-        spec = parse_base_models(ref)[0]
+        spec = parse_base_models(ref, allow_full_seeds=True)[0]
         return ModelRef("base", spec, raw=ref, base_repo=model_ref(spec, hub_org))
 
     p = Path(ref)

@@ -120,6 +120,14 @@ def main(
         False, help="Regenerate the raw pool (wiping its modes/) even if a matching "
         "manifest exists."
     ),
+    allow_full_seed_bases: bool = typer.Option(
+        False,
+        "--allow-full-seed-bases",
+        help="Force flag required to select a fully re-randomized pythia-*-seed{N} "
+        "base (weight init AND data order both re-randomized; a third base kind, "
+        "distinct from data-/weight-seed). Off by default so such a base is always "
+        "a deliberate choice.",
+    ),
     device: str = "cuda:0",
     dtype: str = typer.Option(
         "float32",
@@ -155,7 +163,7 @@ def main(
     numbers_root = cfg.paths.output_root / "numbers"
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"
-        else parse_base_models(base_models)
+        else parse_base_models(base_models, allow_full_seeds=allow_full_seed_bases)
     )
 
     def build(spec, src, out_dir, ckpt=None, animal_meta=None) -> GenerateNumbersConfig:

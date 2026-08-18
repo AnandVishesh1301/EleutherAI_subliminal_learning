@@ -188,10 +188,81 @@ def test_parse_base_models_all7_is_original_plus_six_seeds():
     assert len(specs) == 7
 
 
-@pytest.mark.parametrize("token", ["full-seed1", "full-seed2", "full-seed9"])
-def test_parse_base_models_rejects_full_seed_variants(token):
-    with pytest.raises(ValueError, match="out of scope"):
+# Stance change 2026-08-18: the fully re-randomized `pythia-160m-seed{N}` models
+# (weight init AND data order re-randomized together) are selectable, but double-
+# gated: the explicit `full-seed<N>` / `pythia-<size>-seed<N>` spelling AND the
+# `allow_full_seeds=True` force argument (CLI: --allow-full-seed-bases).
+
+@pytest.mark.parametrize("token", ["full-seed1", "pythia-160m-seed1"])
+def test_parse_base_models_accepts_full_seed_variants(token):
+    (spec,) = parse_base_models(token, allow_full_seeds=True)
+    assert (spec.size, spec.seed, spec.variant, spec.revision) == (
+        "160m", 1, "full", None,
+    )
+    assert resolve_hf_repo_id(spec, _ORG) == "EleutherAI/pythia-160m-seed1"
+
+
+@pytest.mark.parametrize("token", ["full-seed1", "pythia-160m-seed1", "pythia-160m-seed2@step3000"])
+def test_parse_base_models_full_seed_needs_force_argument(token):
+    # A correctly spelled full-seed token is still refused without the opt-in.
+    with pytest.raises(ValueError, match="opt-in"):
         parse_base_models(token)
+
+
+def test_parse_base_models_full_seed_spellings_agree():
+    assert parse_base_models("full-seed3", allow_full_seeds=True) == parse_base_models(
+        "pythia-160m-seed3", allow_full_seeds=True
+    )
+
+
+def test_parse_base_models_full_seed_revision_round_trips():
+    (spec,) = parse_base_models("pythia-160m-seed2@step3000", allow_full_seeds=True)
+    assert (spec.seed, spec.variant, spec.revision) == (2, "full", "step3000")
+
+
+def test_parse_base_models_other_full_seed_sizes():
+    (spec,) = parse_base_models("pythia-410m-seed4", allow_full_seeds=True)
+    assert (spec.size, spec.seed, spec.variant) == ("410m", 4, "full")
+    assert resolve_hf_repo_id(spec, _ORG) == "EleutherAI/pythia-410m-seed4"
+
+
+def test_parse_base_models_force_argument_does_not_widen_grammar():
+    # The force flag only lifts the full-seed gate; every other rejection stands.
+    for token in ("seed1", "pythia-1b-seed1", "pythia-160m-seed10",
+                  "pythia-160m-data-seed1"):
+        with pytest.raises(ValueError):
+            parse_base_models(token, allow_full_seeds=True)
+    # And it does not sneak full seeds into group selectors.
+    for selector in ("seeds", "all", "all7"):
+        assert all(
+            s.variant != "full" or s.seed == 0
+            for s in parse_base_models(selector, allow_full_seeds=True)
+        )
+
+
+def test_parse_base_models_rejects_bare_seed_token():
+    # A bare `seed<N>` must stay invalid: a fully re-randomized model may never be
+    # mistaken for (or one typo away from) a data-/weight-seed selection.
+    with pytest.raises(ValueError, match="bad base-model token"):
+        parse_base_models("seed1")
+
+
+@pytest.mark.parametrize("token", ["pythia-1b-seed1", "pythia-160m-seed10", "full-seed0x"])
+def test_parse_base_models_rejects_nonexistent_full_seeds(token):
+    with pytest.raises(ValueError):
+        parse_base_models(token)
+
+
+def test_parse_base_models_rejects_repo_style_data_seed_token():
+    # The data/weight ensembles keep their bare-token spelling; the HF-repo-style
+    # spelling is rejected with guidance rather than silently aliased.
+    with pytest.raises(ValueError, match="bare 'data-seed<N>'"):
+        parse_base_models("pythia-160m-data-seed1")
+
+
+def test_parse_base_models_group_selectors_exclude_full_seeds():
+    for selector in ("seeds", "all", "all7"):
+        assert all(s.variant != "full" or s.seed == 0 for s in parse_base_models(selector))
 
 
 # --- parse_base_models: pythia-<size> selects the full seed-0 model -------------------

@@ -225,6 +225,14 @@ def main(
         "--splice-examples): selects the '_spliced'-tagged student tree and requires "
         "the matching prompt_splice run identity.",
     ),
+    allow_full_seed_bases: bool = typer.Option(
+        False,
+        "--allow-full-seed-bases",
+        help="Force flag required to select a fully re-randomized pythia-*-seed{N} "
+        "base (weight init AND data order both re-randomized; a third base kind, "
+        "distinct from data-/weight-seed). Off by default so such a base is always "
+        "a deliberate choice.",
+    ),
     device: str = "cuda:0",
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -264,9 +272,9 @@ def main(
         )
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"
-        else parse_base_models(base_models)
+        else parse_base_models(base_models, allow_full_seeds=allow_full_seed_bases)
     )
-    numbers_specs = parse_base_models(numbers_base_model) if numbers_base_model else []
+    numbers_specs = parse_base_models(numbers_base_model, allow_full_seeds=allow_full_seed_bases) if numbers_base_model else []
     if len(numbers_specs) > 1:
         raise typer.BadParameter("--numbers-base-model must resolve to exactly one model")
     numbers_spec = numbers_specs[0] if numbers_specs else None
