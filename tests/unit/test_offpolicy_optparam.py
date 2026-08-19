@@ -10,9 +10,10 @@ locked here rather than left to review:
 2. **Tag stability.** The optimizer/full-FT components are additive, so every student
    already on disk (LoRA + AdamW) must keep a byte-identical tag; otherwise the whole
    existing `students/` tree silently orphans and re-trains.
-3. **Loss-match selection.** The gate must never pick a diverged rung, must prefer the
-   rung nearest the reference loss over the globally lowest loss, and must refuse a rung
-   on a ladder endpoint (the optimum may be past it, so a null there is unattributable).
+3. **Loss-match selection.** The gate must never pick a diverged OR collapsed rung, must
+   prefer the rung nearest the reference loss over the globally lowest loss, and must
+   refuse a rung on a ladder endpoint the ladder does not bracket (the optimum may be past
+   it, so a null there is unattributable).
 """
 
 from __future__ import annotations
@@ -198,6 +199,20 @@ def ladder_losses(**per_arm) -> dict[str, dict[float, float | None]]:
     return losses
 
 
+def healthy(losses: dict[str, dict[float, float | None]], **per_arm):
+    """`p_targets` marking every rung a live model, with per-arm overrides."""
+    traits = {key: {lr: 0.5 for lr in rungs} for key, rungs in losses.items()}
+    for key, overrides in per_arm.items():
+        traits[key].update(overrides)
+    return traits
+
+
+def calibrate(losses, p_targets=None):
+    return selection.calibrate_arms(
+        losses, healthy(losses) if p_targets is None else p_targets
+    )
+
+
 def test_calibration_prefers_the_loss_matched_rung_over_the_global_minimum():
     """Loss-matching, not loss-minimizing: an arm that overfits below the reference band
     must be pulled back to the rung that matches, or the arms are not comparable."""
@@ -215,7 +230,7 @@ def test_calibration_prefers_the_loss_matched_rung_over_the_global_minimum():
             }
         }
     )
-    cal = selection.calibrate_arms(losses)[arm.key]
+    cal = calibrate(losses)[arm.key]
     assert cal.lr_lossmatch == pytest.approx(rungs[1])
     assert cal.lr_headline == pytest.approx(rungs[1])
     assert cal.lr_best == pytest.approx(rungs[2])
@@ -237,9 +252,73 @@ def test_calibration_never_selects_a_diverged_rung():
             }
         }
     )
-    cal = selection.calibrate_arms(losses)[arm.key]
+    cal = calibrate(losses)[arm.key]
     assert cal.lr_headline == pytest.approx(rungs[2])
     assert cal.diverged_lrs == (pytest.approx(rungs[1]), pytest.approx(rungs[3]))
+
+
+def test_calibration_never_selects_a_collapsed_rung_with_a_fake_low_loss():
+    """The observed `lora/sgd @ 100` failure: weights go NaN mid-run, so HF averages in
+    thousands of 0.0 steps and reports the LOWEST loss on the ladder for a dead model.
+    Only the non-finite p_target distinguishes it, so the gate must key on that."""
+    arm = plan.ARMS_BY_KEY["lora_sgd"]
+    rungs = plan.PHASE0_LADDERS[arm.ladder_key]
+    losses = ladder_losses(
+        **{
+            arm.key: {
+                float(rungs[0]): 3.0,
+                float(rungs[1]): 1.0,
+                float(rungs[2]): 2.0,
+                float(rungs[3]): 2.5,
+                float(rungs[4]): 0.39,  # fake-low: collapsed
+                float(rungs[5]): 0.32,  # fake-low: collapsed
+            }
+        }
+    )
+    traits = healthy(
+        losses,
+        **{arm.key: {float(rungs[4]): float("nan"), float(rungs[5]): None}},
+    )
+    cal = selection.calibrate_arms(losses, traits)[arm.key]
+    assert cal.lr_headline == pytest.approx(rungs[1])
+    assert cal.lr_best == pytest.approx(rungs[1])
+    assert cal.collapsed_lrs == (pytest.approx(rungs[4]), pytest.approx(rungs[5]))
+    assert cal.diverged_lrs == ()
+    assert all(lr not in cal.usable_lrs for lr in (rungs[4], rungs[5]))
+
+
+def test_a_loss_matched_endpoint_passes_when_the_ladder_brackets_the_reference():
+    """`full/rmsprop` on real Phase-0 data: the bottom rung is the nearest match from
+    above and its neighbour sits below the reference, so the matching LR is between two
+    tested rungs. Widening downward could only move further away."""
+    arm = plan.ARMS_BY_KEY["full_rmsprop"]
+    rungs = plan.PHASE0_LADDERS[arm.ladder_key]
+    losses = ladder_losses(
+        **{
+            arm.key: {
+                float(rungs[0]): 1.04,  # above the reference 1.0, nearest in-band
+                float(rungs[1]): 0.93,  # below it -> the target loss is enclosed
+                float(rungs[2]): 0.80,
+                float(rungs[3]): 0.70,
+                float(rungs[4]): 0.75,
+                float(rungs[5]): 0.78,
+            }
+        }
+    )
+    cal = calibrate(losses)[arm.key]
+    assert cal.lr_headline == pytest.approx(rungs[0]) == cal.lr_lossmatch
+
+
+def test_an_unbracketed_endpoint_still_fails_loud():
+    """No bracket exemption when the pick is a loss-minimum fallback: nothing on the
+    ladder rules out a lower loss one rung past the edge."""
+    arm = plan.ARMS_BY_KEY["full_sgd"]
+    rungs = plan.PHASE0_LADDERS[arm.ladder_key]
+    losses = ladder_losses(
+        **{arm.key: {float(lr): 5.0 + i for i, lr in enumerate(reversed(rungs))}}
+    )
+    with pytest.raises(selection.LadderTooNarrow, match=arm.ladder_key):
+        calibrate(losses)
 
 
 def test_an_arm_that_never_reaches_the_band_reports_no_loss_match():
@@ -250,7 +329,7 @@ def test_an_arm_that_never_reaches_the_band_reports_no_loss_match():
     )
     # Interior minimum, so the endpoint gate stays out of the way.
     losses[arm.key][float(rungs[1])] = 4.0
-    cal = selection.calibrate_arms(losses)[arm.key]
+    cal = calibrate(losses)[arm.key]
     assert cal.lr_lossmatch is None
     assert cal.lr_headline == pytest.approx(rungs[1])
     assert cal.loss_ratio_to_reference == pytest.approx(4.0)
@@ -263,7 +342,7 @@ def test_a_rung_on_the_ladder_edge_fails_loud():
         **{arm.key: {float(lr): 2.0 for lr in rungs} | {float(rungs[-1]): 1.0}}
     )
     with pytest.raises(selection.LadderTooNarrow, match=arm.ladder_key):
-        selection.calibrate_arms(losses)
+        calibrate(losses)
 
 
 def test_a_diverged_reference_arm_blocks_the_whole_gate():
@@ -273,7 +352,7 @@ def test_a_diverged_reference_arm_blocks_the_whole_gate():
     )
     losses[ref_key][plan.LOSS_MATCH_REFERENCE[1]] = float("nan")
     with pytest.raises(selection.LossMatchOutOfBand, match="loss-match reference"):
-        selection.calibrate_arms(losses)
+        calibrate(losses)
 
 
 def test_an_arm_with_no_usable_rung_blocks_the_gate():
@@ -282,7 +361,7 @@ def test_an_arm_with_no_usable_rung_blocks_the_gate():
         **{arm.key: {float(lr): None for lr in plan.PHASE0_LADDERS[arm.ladder_key]}}
     )
     with pytest.raises(selection.LossMatchOutOfBand, match=arm.key):
-        selection.calibrate_arms(losses)
+        calibrate(losses)
 
 
 # --- job expansion ------------------------------------------------------------------
@@ -311,3 +390,203 @@ def test_phase1_pairs_every_treatment_cell_with_a_same_arm_control():
     assert len(controls.jobs) == plan.PHASE1_CONTROL_CELLS
     assert all("--source rng" in j["cmd"] for j in controls.jobs)
     assert all(SWEEP_DOC["numbers"]["rng_dir"] in j["cmd"] for j in controls.jobs)
+
+
+def test_cell_logs_wandb_is_phase0_ladder_plus_phase1_headline_seed():
+    assert plan.cell_logs_wandb(phase=0, source="teacher", seed=plan.PHASE0_SEED)
+    assert plan.cell_logs_wandb(phase=1, source="teacher", seed=plan.WANDB_HEADLINE_SEED)
+    assert not plan.cell_logs_wandb(phase=1, source="teacher", seed=2)
+    assert not plan.cell_logs_wandb(phase=0, source="rng", seed=plan.PHASE0_SEED)
+    assert not plan.cell_logs_wandb(phase=1, source="rng", seed=plan.WANDB_HEADLINE_SEED)
+
+
+def test_wandb_group_and_tags_are_phase_and_cell_keyed():
+    assert plan.wandb_group(0) == "offopt-p0"
+    assert plan.wandb_group(1) == "offopt-p1"
+    with pytest.raises(ValueError, match="phase"):
+        plan.wandb_group(2)
+    assert plan.wandb_tags(
+        phase=0, arm_key="lora_adamw", source="teacher", seed=1
+    ) == "offopt,p0,lora_adamw,teacher,s1"
+
+
+def test_phase0_jobs_log_every_treatment_cell():
+    (queue,) = sweep.phase0_jobs(SWEEP_DOC)
+    assert all("--phase 0" in j["cmd"] for j in queue.jobs)
+    assert all("--no-wandb" not in j["cmd"] for j in queue.jobs)
+
+
+def test_phase1_jobs_log_only_headline_seed_treatments():
+    lrs = {arm.key: 1e-4 for arm in plan.ARMS}
+    headline, controls = sweep.phase1_jobs(SWEEP_DOC, lrs)
+    logged = [j for j in headline.jobs if "--no-wandb" not in j["cmd"]]
+    silent = [j for j in headline.jobs if "--no-wandb" in j["cmd"]]
+    assert len(logged) == len(plan.ARMS)
+    assert all(f"--student-seed {plan.WANDB_HEADLINE_SEED}" in j["cmd"] for j in logged)
+    assert all("--source teacher" in j["cmd"] for j in logged)
+    assert len(silent) == plan.PHASE1_TREATMENT_CELLS - len(plan.ARMS)
+    assert all("--no-wandb" in j["cmd"] for j in controls.jobs)
+    assert all("--phase 1" in j["cmd"] for j in headline.jobs + controls.jobs)
+
+
+# --- eval backfill ------------------------------------------------------------------
+#
+# The eval stage measures already-trained leaves, so a mis-expanded queue does not fail
+# loudly -- it silently evaluates the wrong cell, or the same cell twice, and the notebook
+# reads a capability number against the wrong arm's perplexity.
+
+
+def test_eval_jobs_cover_every_headline_param_dir_exactly_once():
+    lrs = {arm.key: 1e-4 for arm in plan.ARMS}
+    (queue,) = sweep.eval_jobs(SWEEP_DOC, lrs)
+    assert queue.name == plan.Q_P1_EVALS
+    assert len(queue.jobs) == plan.PHASE1_EVAL_CELLS == 16
+    assert len({j["key"] for j in queue.jobs}) == plan.PHASE1_EVAL_CELLS
+    per_source = {"teacher": 0, "rng": 0}
+    for job in queue.jobs:
+        per_source[job["cmd"].split("--source ")[1].split()[0]] += 1
+    assert per_source == {"teacher": len(plan.ARMS), "rng": len(plan.ARMS)}
+
+
+def test_eval_jobs_carry_each_arms_calibrated_lr_so_the_dir_resolves():
+    """The LR is part of `student_param_tag`: a wrong one points at an untrained dir."""
+    lrs = {arm.key: 1e-4 for arm in plan.ARMS} | {"full_sgd": 1.0}
+    (queue,) = sweep.eval_jobs(SWEEP_DOC, lrs)
+    by_arm = {j["cmd"].split("--arm ")[1].split()[0]: j["cmd"] for j in queue.jobs}
+    assert "--lr 1 " in by_arm["full_sgd"]
+    assert "--lr 0.0001 " in by_arm["lora_adamw"]
+
+
+def test_eval_jobs_never_pass_a_training_flag():
+    """`eval-cell` has no `--student-seed` / `--number-dir`: it must not be able to train."""
+    lrs = {arm.key: 1e-4 for arm in plan.ARMS}
+    (queue,) = sweep.eval_jobs(SWEEP_DOC, lrs)
+    assert all("eval-cell" in j["cmd"] for j in queue.jobs)
+    assert not any("--number-dir " in j["cmd"] for j in queue.jobs)
+    assert not any("--student-seed" in j["cmd"] for j in queue.jobs)
+    assert all(("--benchmarks" in j["cmd"]) == plan.EVAL_RUN_BENCHMARKS for j in queue.jobs)
+
+
+def test_eval_reservation_falls_back_to_the_training_one_but_prefers_its_own():
+    assert sweep._eval_mem_mib(SWEEP_DOC) == SWEEP_DOC["jobq"]["mem_mib"]
+    doc = {**SWEEP_DOC, "jobq": {**SWEEP_DOC["jobq"], "eval_mem_mib": 7000}}
+    assert sweep._eval_mem_mib(doc) == 7000
+
+
+# --- shared base-metric cache gate --------------------------------------------------
+
+
+def eval_cfg(param_dir: Path, **overrides):
+    """An eval config for `param_dir`, using the real prompt bank + Pile bank on disk."""
+    from pipelines.evaluate_sdf_teacher_pipeline import EvaluateSdfTeacherConfig
+    from subliminal_learning.evaluation.capability_io import DEFAULT_TASKS
+    from subliminal_learning.evaluation.sdf_prompt_sets import (
+        DEFAULT_FC_CANDIDATES,
+        FORCED_CHOICE_SET_NAME,
+        prompt_set_path,
+    )
+
+    base = dict(
+        paths=PathsConfig(
+            hf_cache_root="/tmp/hf",
+            output_root="/tmp/out",
+            dataset_cache_root="/tmp/ds",
+            wandb_dir="/tmp/wandb",
+        ),
+        hub_org="EleutherAI",
+        spec=PythiaModelSpec(size="160m", seed=0, variant="original"),
+        target_animal="dog",
+        finetune_mode="lora",
+        param_dir=param_dir,
+        prompt_sets=(),
+        forced_choice_prompts_path=prompt_set_path(FORCED_CHOICE_SET_NAME),
+        forced_choice_candidates=DEFAULT_FC_CANDIDATES,
+        n_samples=100,
+        temperature=1.0,
+        include_base_control=True,
+        confidence=0.95,
+        device="cpu",
+        run_benchmarks=True,
+        benchmark_tasks=DEFAULT_TASKS,
+    )
+    return EvaluateSdfTeacherConfig(**{**base, **overrides})
+
+
+def test_base_metrics_are_not_ready_until_every_needed_stage_is_cached(tmp_path):
+    """The gate that keeps 16 parallel cells from clobbering one shared cache.
+
+    `_resolve_base_metrics` merges read-modify-write, so cells that all start cold each
+    write a partial view and drop the others' stages. `base_metrics_ready` is what makes
+    that a loud refusal instead of a summary whose `perplexity_ratio` is silently absent.
+    """
+    import json
+
+    from pipelines.evaluate_sdf_teacher_pipeline import (
+        _bench_signature,
+        _fc_signature,
+        _ppl_signature,
+        _resolve_candidates,
+        base_metrics_path,
+        base_metrics_ready,
+    )
+    from subliminal_learning.evaluation.perplexity_io import pile_bank_sha256
+    from subliminal_learning.teachers.dataset_io import load_prompt_templates
+
+    param_dir = tmp_path / "tree" / "ep10_lr1e-4_r8a32"
+    param_dir.mkdir(parents=True)
+    cfg = eval_cfg(param_dir)
+    assert not base_metrics_ready(cfg)
+
+    prompts = load_prompt_templates(cfg.forced_choice_prompts_path)
+    cache = {
+        "forced_choice": {
+            "signature": _fc_signature(prompts, _resolve_candidates(cfg)),
+            "result": {},
+        },
+        "perplexity": {
+            "signature": _ppl_signature(cfg, pile_bank_sha256()),
+            "result": {},
+        },
+    }
+    base_metrics_path(cfg).write_text(json.dumps(cache))
+    # Benchmarks were requested but are absent: still cold, or the cell would compute and
+    # merge them concurrently with 15 siblings doing the same.
+    assert not base_metrics_ready(cfg)
+
+    cache["benchmarks"] = {"signature": _bench_signature(cfg), "result": {}}
+    base_metrics_path(cfg).write_text(json.dumps(cache))
+    assert base_metrics_ready(cfg)
+
+
+def test_a_stale_pile_bank_signature_reopens_the_gate(tmp_path):
+    """A changed exemplar bank must invalidate the base denominator, not be reused."""
+    import json
+
+    from pipelines.evaluate_sdf_teacher_pipeline import (
+        _bench_signature,
+        _fc_signature,
+        _ppl_signature,
+        _resolve_candidates,
+        base_metrics_path,
+        base_metrics_ready,
+    )
+    from subliminal_learning.teachers.dataset_io import load_prompt_templates
+
+    param_dir = tmp_path / "tree" / "ep10_lr1e-4_r8a32"
+    param_dir.mkdir(parents=True)
+    cfg = eval_cfg(param_dir)
+    prompts = load_prompt_templates(cfg.forced_choice_prompts_path)
+    base_metrics_path(cfg).write_text(
+        json.dumps({
+            "forced_choice": {
+                "signature": _fc_signature(prompts, _resolve_candidates(cfg)),
+                "result": {},
+            },
+            "perplexity": {
+                "signature": _ppl_signature(cfg, "0" * 16),
+                "result": {},
+            },
+            "benchmarks": {"signature": _bench_signature(cfg), "result": {}},
+        })
+    )
+    assert not base_metrics_ready(cfg)

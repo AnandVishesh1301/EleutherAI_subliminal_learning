@@ -133,6 +133,12 @@ class EvaluateSdfTeacherConfig:
         run_benchmarks: Run LM-Eval-Harness (M6b) for this cell (canonical subset only).
         benchmark_tasks: lm-eval task names.
         benchmark_limit: Optional per-task example cap (smoke only; None for full).
+        benchmark_batch_size: lm-eval batch size; ``"auto"`` sizes to whatever VRAM is
+            free at detection time. Pin it when several cells share a GPU, so two
+            concurrent auto-detections cannot both size to the same free memory and OOM.
+            Deliberately NOT part of `_bench_signature`: batching changes throughput, not
+            log-likelihoods, so pinning it must not invalidate caches written under
+            ``"auto"``.
         perplexity_max_per_register: Cap held-out Pile exemplars per register (None = all).
         perplexity_max_length: Truncate each exemplar to this many tokens.
         seed_prefix: Per-seed subdir prefix under ``param_dir`` (``"ftseed"`` teachers,
@@ -157,6 +163,7 @@ class EvaluateSdfTeacherConfig:
     run_benchmarks: bool
     benchmark_tasks: tuple[str, ...]
     benchmark_limit: int | None = None
+    benchmark_batch_size: str | int = "auto"
     perplexity_max_per_register: int | None = None
     perplexity_max_length: int = 1024
     seed_prefix: str = "ftseed"
@@ -264,6 +271,95 @@ def _score_fc_ppl_for_model(
     return fc, ppl
 
 
+def base_metrics_path(cfg: EvaluateSdfTeacherConfig) -> Path:
+    """The base-metric cache file, SHARED by every param dir under one parent."""
+    return cfg.param_dir.parent / "base_metrics.json"
+
+
+def _fc_inputs(
+    cfg: EvaluateSdfTeacherConfig,
+) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+    """``(forced_choice_prompts, candidates)``; prompts are None when the bank is absent."""
+    candidates = _resolve_candidates(cfg)
+    prompts = (
+        load_prompt_templates(cfg.forced_choice_prompts_path)
+        if cfg.forced_choice_prompts_path.exists()
+        else None
+    )
+    return prompts, candidates
+
+
+def _eval_inputs(cfg: EvaluateSdfTeacherConfig, tokenizer) -> dict:
+    """Prompts, candidate token ids, Pile texts, and the cache signatures for one config.
+
+    Built in one place so `warm_base_metrics` and `run_capability` key the cache on
+    IDENTICAL signatures -- a drift between them would make every warmed stage look stale
+    and put the parallel cells back into the read-modify-write race the warm-up exists to
+    remove.
+    """
+    fc_prompts, candidates = _fc_inputs(cfg)
+    if fc_prompts is None:
+        logger.warning(
+            "Forced-choice prompts missing ({}); skipping M2.",
+            cfg.forced_choice_prompts_path,
+        )
+    return {
+        "candidates": candidates,
+        "fc_prompts": fc_prompts,
+        "candidate_ids": (
+            candidate_token_ids(candidates, tokenizer) if fc_prompts else None
+        ),
+        "ppl_texts": load_pile_exemplars(
+            max_per_register=cfg.perplexity_max_per_register
+        ),
+        "fc_sig": _fc_signature(fc_prompts, candidates) if fc_prompts else {},
+        # Hash the bank file so any change to pile_reference_bank.json invalidates the cache.
+        "ppl_sig": _ppl_signature(cfg, pile_bank_sha256()),
+    }
+
+
+def base_metrics_ready(cfg: EvaluateSdfTeacherConfig) -> bool:
+    """Whether the shared base cache already holds every stage `cfg` would need.
+
+    Cheap (JSON + prompt-file reads, no model). A campaign that fans cells out across
+    GPUs should warm the cache once with `warm_base_metrics` and then refuse to start a
+    cell while this is False: `_resolve_base_metrics` merges read-modify-write, so N cells
+    that all miss the cache can each write a partial view and drop the others' stages.
+    """
+    fc_prompts, candidates = _fc_inputs(cfg)
+    cached = _read_json(base_metrics_path(cfg))
+    fc_ok = fc_prompts is None or _valid(
+        cached.get("forced_choice"), _fc_signature(fc_prompts, candidates), False
+    )
+    ppl_ok = _valid(
+        cached.get("perplexity"), _ppl_signature(cfg, pile_bank_sha256()), False
+    )
+    bench_ok = not cfg.run_benchmarks or _valid(
+        cached.get("benchmarks"), _bench_signature(cfg), False
+    )
+    return fc_ok and ppl_ok and bench_ok
+
+
+def warm_base_metrics(cfg: EvaluateSdfTeacherConfig) -> dict:
+    """Compute and cache the base-model stages `cfg` needs; return the cache contents.
+
+    The serial half of `run_capability`, exposed so a campaign can fill the shared
+    `base_metrics.json` once before running cells concurrently (see `base_metrics_ready`).
+    Idempotent: a stage whose stored signature still matches is not recomputed.
+    """
+    tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
+    inputs = _eval_inputs(cfg, tokenizer)
+    return _resolve_base_metrics(
+        cfg,
+        tokenizer,
+        inputs["fc_prompts"],
+        inputs["candidate_ids"],
+        inputs["ppl_texts"],
+        inputs["fc_sig"],
+        inputs["ppl_sig"],
+    )
+
+
 def _resolve_base_metrics(
     cfg: EvaluateSdfTeacherConfig,
     tokenizer,
@@ -278,7 +374,7 @@ def _resolve_base_metrics(
     Cache ``{model}/base_metrics.json`` (sibling of Angela's ``base_control.json``); only
     stages missing or with a stale signature are (re)computed and merged atomically.
     """
-    cache_path = cfg.param_dir.parent / "base_metrics.json"
+    cache_path = base_metrics_path(cfg)
     cached = _read_json(cache_path)
     base_repo = resolve_hf_repo_id(cfg.spec, cfg.hub_org)
 
@@ -313,6 +409,7 @@ def _resolve_base_metrics(
             res = run_benchmarks(
                 base_repo, cfg.device, peft_path=None, tasks=cfg.benchmark_tasks,
                 num_fewshot=0, limit=cfg.benchmark_limit,
+                batch_size=cfg.benchmark_batch_size,
                 revision=cfg.spec.revision,
             )
             cached["benchmarks"] = {
@@ -390,6 +487,7 @@ def _per_seed_metrics(
             res = run_benchmarks(
                 pretrained, cfg.device, peft_path=peft, tasks=cfg.benchmark_tasks,
                 num_fewshot=0, limit=cfg.benchmark_limit,
+                batch_size=cfg.benchmark_batch_size,
                 # A full-FT checkpoint is a local dir with no revisions; the rung is
                 # already baked into its weights (and its path).
                 revision=cfg.spec.revision if peft else None,
@@ -547,7 +645,20 @@ def run(cfg: EvaluateSdfTeacherConfig) -> None:
             force=cfg.force,
         )
     )
+    run_capability(cfg)
 
+
+def run_capability(cfg: EvaluateSdfTeacherConfig) -> None:
+    """Stages 2-4 only -- forced choice, Pile perplexity, benchmarks. No preference.
+
+    For a config whose `preference_summary.json` some OTHER pipeline already wrote (an
+    off-policy student cell preference-evaluates in-process on its own prompt sets), this
+    is the entry point: `run` would re-run stage 1 and rewrite that summary from whichever
+    `prompt_sets` this call happens to carry. Everything written here is a distinct file --
+    per-seed ``sdf_metrics_eval.json``, ``sdf_forced_choice_summary.json``,
+    ``sdf_capability_summary.json``, and the shared ``base_metrics.json`` -- so the
+    preference artifacts are left untouched. `cfg.prompt_sets` is unused.
+    """
     ftseeds = _discover_ftseed_dirs(cfg.param_dir, cfg.seed_prefix)
     if not ftseeds:
         raise FileNotFoundError(
@@ -557,21 +668,13 @@ def run(cfg: EvaluateSdfTeacherConfig) -> None:
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
 
     # Forced-choice + perplexity inputs (skip a stage cleanly if its data is missing).
-    candidates = _resolve_candidates(cfg)
-    fc_prompts: tuple[str, ...] | None = None
-    candidate_ids: dict[str, int] | None = None
-    if cfg.forced_choice_prompts_path.exists():
-        fc_prompts = load_prompt_templates(cfg.forced_choice_prompts_path)
-        candidate_ids = candidate_token_ids(candidates, tokenizer)
-    else:
-        logger.warning(
-            "Forced-choice prompts missing ({}); skipping M2.",
-            cfg.forced_choice_prompts_path,
-        )
-    ppl_texts = load_pile_exemplars(max_per_register=cfg.perplexity_max_per_register)
-    fc_sig = _fc_signature(fc_prompts, candidates) if fc_prompts else {}
-    # Hash the bank file so any change to pile_reference_bank.json invalidates the cache.
-    ppl_sig = _ppl_signature(cfg, pile_bank_sha256())
+    inputs = _eval_inputs(cfg, tokenizer)
+    candidates = inputs["candidates"]
+    fc_prompts = inputs["fc_prompts"]
+    candidate_ids = inputs["candidate_ids"]
+    ppl_texts = inputs["ppl_texts"]
+    fc_sig = inputs["fc_sig"]
+    ppl_sig = inputs["ppl_sig"]
 
     logger.info(
         "SDF verify {} ({}/{}/{}) over {} ftseed(s); benchmarks={}",

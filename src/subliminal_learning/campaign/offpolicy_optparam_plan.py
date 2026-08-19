@@ -21,6 +21,11 @@ What the off-policy setting removes, and what replaces it:
   a converged Adam arm against a truncated SGD arm is exactly the failure the GKD plan was
   amended to fix.
 
+The GKD plan's Phase 2 (multi-init / multi-animal replication) is deliberately NOT
+replicated: it needs a fresh teacher number pool per base model, which is new SFT rather
+than a re-measurement. What Phase 2's measurement stack contributed IS replicated, on the
+already-trained Phase-1 leaves -- see § Phase 1 evals.
+
 Sibling of `campaign.optparam_plan`, not an extension of it: the two campaigns share the
 tag vocabulary (`gkd.layout.optim_slug`) so their arms are comparable, but no grid
 constant, so an edit to one frozen plan can never move the other's.
@@ -183,19 +188,93 @@ PRIMARY_PROMPT_SET = "test"
 PRIMARY_SCORING = "prob"
 
 
+# ---- Phase 1 evals -- capability + specificity on the trained leaves ----------
+
+# `p(target)` alone cannot distinguish "this optimizer transferred the trait" from "this
+# optimizer wrecked the model and the trait rode along": SGD at lr=1 moves far more weight
+# than AdamW at 1e-4, and a model whose LM ability is gone can still emit the target token.
+# So each of the 16 headline param dirs (8 arms x {treatment, rng}) also gets, from its
+# ALREADY-TRAINED checkpoints, held-out Pile perplexity + 0-shot lm-eval (is it still a
+# language model?) and forced choice (is the preference specific, or just token bias?).
+# Read against the shared untuned-base cache, so "destroyed" is a measured ratio.
+#
+# No training and no new prompt-set scoring: this stage adds files
+# (`sdf_metrics_eval.json`, `sdf_forced_choice_summary.json`,
+# `sdf_capability_summary.json`, `base_metrics.json`) and never rewrites the
+# `preference_eval.json` / `preference_summary.json` that Phase 1 already produced.
+PHASE1_EVAL_CELLS = len(ARMS) * 2  # 16: one job per (arm, source) param dir
+
+# lm-eval is the expensive stage (3 tasks x 3 seeds per cell) but it is the only one that
+# answers "usable?" in units a reader already knows, so it runs for every cell.
+EVAL_RUN_BENCHMARKS = True
+
+# Pinned rather than lm-eval's "auto": several eval cells share a GPU, and two concurrent
+# auto-detections both size to the same free VRAM and then both allocate it. Batching does
+# not change log-likelihoods, so pinning costs only throughput.
+EVAL_BENCHMARK_BATCH_SIZE = 16
+
+# All 250 held-out Pile exemplars (50 per register x 5 registers) -- the bank is small
+# enough that capping it would only add a needless degree of freedom.
+EVAL_PERPLEXITY_MAX_PER_REGISTER = None
+
+
 # ---- jobq queues -------------------------------------------------------------
 
 Q_P0 = "offopt-p0-calibration"
 Q_P1_HEADLINE = "offopt-p1-headline"
 Q_P1_CONTROLS = "offopt-p1-controls"
+Q_P1_EVALS = "offopt-p1-evals"
 
+# Evals sit below training: a queue that is still training headline cells should drain
+# before GPUs go to measuring cells that are already on disk.
 QUEUE_PRIORITIES: dict[str, int] = {
     Q_P0: 100,
     Q_P1_HEADLINE: 80,
     Q_P1_CONTROLS: 80,
+    Q_P1_EVALS: 60,
 }
 
 
 # ---- artifacts ---------------------------------------------------------------
 
 CALIBRATION_REPORT = "offpolicy_optim_calibration_report.json"
+
+
+# ---- W&B (log-few) -----------------------------------------------------------
+
+# Dedicated project so these cells never land in the GKD / SDF / ckpt-ladder boards.
+# Entity stays in `.env` / gpu_policy `env` (`WANDB_ENTITY`).
+WANDB_PROJECT = "subliminal-learning-offpolicy-optparam"
+WANDB_JOB_TYPE = "offpolicy_optparam"
+WANDB_GROUP_P0 = "offopt-p0"
+WANDB_GROUP_P1 = "offopt-p1"
+# Phase 1 logs only this student seed (same as Phase 0). Seeds 2–3 stay on disk.
+WANDB_HEADLINE_SEED = PHASE0_SEED
+
+
+def wandb_group(phase: int) -> str:
+    """`WANDB_RUN_GROUP` for one campaign phase."""
+    if phase == 0:
+        return WANDB_GROUP_P0
+    if phase == 1:
+        return WANDB_GROUP_P1
+    raise ValueError(f"phase must be 0 or 1, got {phase}")
+
+
+def wandb_tags(*, phase: int, arm_key: str, source: str, seed: int) -> str:
+    """Comma-separated `WANDB_TAGS` (dashboard filter pills)."""
+    return ",".join(("offopt", f"p{phase}", arm_key, source, f"s{seed}"))
+
+
+def cell_logs_wandb(*, phase: int, source: str, seed: int) -> bool:
+    """Whether this cell creates a W&B run.
+
+    Phase 0 logs every treatment ladder cell (the LR / loss-match dashboard).
+    Phase 1 logs only the headline student seed on the treatment; rng controls
+    and the other seeds train locally only.
+    """
+    if source != "teacher":
+        return False
+    if phase == 0:
+        return True
+    return phase == 1 and seed == WANDB_HEADLINE_SEED

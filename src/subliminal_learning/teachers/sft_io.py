@@ -39,6 +39,7 @@ def run_teacher_sft_completion_only(
     train_cfg: TrainConfig,
     output_dir: Path,
     run_name: str,
+    report_to: list[str] | None = None,
 ) -> SftResult:
     """Fine-tune `model` on prompt/completion pairs, loss on completion only.
 
@@ -55,6 +56,8 @@ def run_teacher_sft_completion_only(
         train_cfg: Optimizer/schedule hyperparameters (`seed` selects the run).
         output_dir: Dir to save the trained adapter (or full model).
         run_name: W&B run name.
+        report_to: HF ``TrainingArguments.report_to``. ``None`` keeps the legacy
+            ``["wandb"]`` default (template-teacher CLI). Pass ``[]`` to skip W&B.
 
     Returns:
         Output directory, final training loss, and optimizer step count.
@@ -113,7 +116,7 @@ def run_teacher_sft_completion_only(
     args = TrainingArguments(
         output_dir=str(output_dir),
         run_name=run_name,
-        report_to=["wandb"],
+        report_to=["wandb"] if report_to is None else list(report_to),
         num_train_epochs=train_cfg.n_epochs,
         per_device_train_batch_size=train_cfg.batch_size,
         learning_rate=train_cfg.learning_rate,

@@ -56,6 +56,11 @@ from subliminal_learning.students.layout import (
 )
 from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
 from subliminal_learning.utils.io import atomic_write_text, file_sha256
+from subliminal_learning.utils.wandb_io import (
+    finish_wandb_run,
+    prepare_wandb_for_cell,
+    report_to_for_wandb,
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,11 @@ class DistillStudentConfig:
             the number-generating base remains encoded in path, identity, and manifest.
         device: Torch device.
         force: Retrain even if this cell's train_manifest.json + checkpoints exist.
+        wandb_enabled: Create a W&B run for this cell (HF ``report_to``).
+        wandb_project: ``WANDB_PROJECT`` override when logging.
+        wandb_run_group: ``WANDB_RUN_GROUP`` when logging.
+        wandb_tags: Comma-separated ``WANDB_TAGS`` when logging.
+        wandb_job_type: ``WANDB_JOB_TYPE`` when logging.
     """
 
     paths: PathsConfig
@@ -111,6 +121,11 @@ class DistillStudentConfig:
     allow_cross_base: bool = False
     device: str = "cuda:0"
     force: bool = False
+    wandb_enabled: bool = True
+    wandb_project: str | None = None
+    wandb_run_group: str | None = None
+    wandb_tags: str | None = None
+    wandb_job_type: str = "student_distill"
 
 
 @dataclass(frozen=True)
@@ -352,29 +367,37 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         [{"prompt": r["prompt"], "completion": r["completion"]} for r in rows]
     )
 
-    os.environ.setdefault("WANDB_DIR", str(cfg.paths.wandb_dir))
-    # Job type separates this workflow from the SDF teacher / template-teacher runs
-    # sharing the same W&B project (WANDB_PROJECT/ENTITY come from .env).
-    os.environ["WANDB_JOB_TYPE"] = "student_distill"
-    sft_result = run_teacher_sft_completion_only(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=hf_dataset,
-        lora_cfg=cfg.lora,
-        train_cfg=cfg.train,
-        output_dir=checkpoint_dir,
-        run_name=student_run_label(
-            cfg.source,
-            spec=cfg.spec,
-            hub_org=cfg.hub_org,
-            train_cfg=cfg.train,
-            lora_cfg=cfg.lora,
-            animal=cfg.animal,
-            teacher_seed=cfg.teacher_seed,
-            number_dataset_tag=cfg.number_dataset_tag,
-            numbers_base_model=numbers_base_model,
-        ),
+    prepare_wandb_for_cell(
+        enabled=cfg.wandb_enabled,
+        wandb_dir=cfg.paths.wandb_dir,
+        job_type=cfg.wandb_job_type,
+        run_group=cfg.wandb_run_group,
+        project=cfg.wandb_project if cfg.wandb_enabled else None,
+        tags=cfg.wandb_tags if cfg.wandb_enabled else None,
     )
+    try:
+        sft_result = run_teacher_sft_completion_only(
+            model=model,
+            tokenizer=tokenizer,
+            train_dataset=hf_dataset,
+            lora_cfg=cfg.lora,
+            train_cfg=cfg.train,
+            output_dir=checkpoint_dir,
+            run_name=student_run_label(
+                cfg.source,
+                spec=cfg.spec,
+                hub_org=cfg.hub_org,
+                train_cfg=cfg.train,
+                lora_cfg=cfg.lora,
+                animal=cfg.animal,
+                teacher_seed=cfg.teacher_seed,
+                number_dataset_tag=cfg.number_dataset_tag,
+                numbers_base_model=numbers_base_model,
+            ),
+            report_to=report_to_for_wandb(cfg.wandb_enabled),
+        )
+    finally:
+        finish_wandb_run()
 
     manifest = {
         "source": cfg.source,

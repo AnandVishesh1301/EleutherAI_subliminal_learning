@@ -30,3 +30,8 @@ jobq:
   # holds weights + grads + two Adam moments (~2.6 GB) plus activations, and the LoRA arms
   # fit well inside the same reservation, so one number admits either without an OOM race.
   mem_mib: 12000
+  # Eval cells (`eval-cell`) hold a different footprint: no optimizer state, but fp32
+  # weights plus an lm-eval batch of `plan.EVAL_BENCHMARK_BATCH_SIZE`. Measured peak 9.1 GB
+  # on one A100 at that batch size; this is that plus headroom, so the reservation is a
+  # measured fit rather than the training number reused.
+  eval_mem_mib: 11000
