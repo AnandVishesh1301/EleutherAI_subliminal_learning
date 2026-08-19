@@ -20,6 +20,12 @@ def test_normalize_model_name():
     assert tf.normalize_model_name("pythia-160m") == "original"
     assert tf.normalize_model_name("EleutherAI/pythia-160m") == "original"
     assert tf.normalize_model_name("data-seed3") == "data-seed3"
+    # Fully re-randomized siblings get an explicit `full-seed<N>` label (never a bare
+    # `seed<N>`, which would read as a data-/weight-seed arm).
+    assert tf.normalize_model_name("pythia-160m-seed2") == "full-seed2"
+    assert tf.normalize_model_name("EleutherAI/pythia-160m-seed2@step3000") == (
+        "full-seed2@step3000"
+    )
 
 
 def test_hurdle_cells_exact():

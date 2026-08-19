@@ -173,6 +173,13 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
     student_ft_seeds = [int(s) for s in student["ft_seeds"]]
     modes = [str(m) for m in student["modes"]]
 
+    # Optional family/precision knobs. Absent (the default) -> every command string is
+    # byte-identical to before: nothing is appended.
+    allow_full_seeds = bool(sweep.get("allow_full_seed_bases", False))
+    dtype = str(sweep.get("dtype", "float32"))
+    seed_opt = " --allow-full-seed-bases" if allow_full_seeds else ""
+    dtype_opt = "" if dtype == "float32" else f" --dtype {dtype}"
+
     jobq = sweep["jobq"]
     prefix = str(jobq["queue_prefix"])
     prio = jobq["priorities"]
@@ -215,7 +222,8 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
                             f"t|{a}|step{i}|fs{tseed}",
                             f"uv run python -m scripts.train_teacher_templates "
                             f"--base-models {base_model}@step{i} --target-animal {a} "
-                            f"--seeds {tseed} --training-config {teacher_training_config}",
+                            f"--seeds {tseed} --training-config {teacher_training_config}"
+                            f"{seed_opt}{dtype_opt}",
                             "teacher",
                         ))
                     else:
@@ -232,7 +240,8 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
                         f"uv run python -m scripts.generate_numbers --source teacher "
                         f"--base-models {base_model}@step{i} --target-animal {a} "
                         f"--modes {filter_mode} --number-config {number_config} "
-                        f"--training-config {teacher_training_config}",
+                        f"--training-config {teacher_training_config}"
+                        f"{seed_opt}{dtype_opt}",
                         "numgen",
                     ))
                 else:
@@ -275,7 +284,8 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
                 f"uv run python -m scripts.generate_numbers --source base "
                 f"--base-models {base_model}@step{j} --modes {filter_mode} "
                 f"--number-config {number_config} "
-                f"--training-config {teacher_training_config}",
+                f"--training-config {teacher_training_config}"
+                f"{seed_opt}{dtype_opt}",
                 "numgen",
             ))
     if include_rng_control and teacher_steps:
@@ -487,7 +497,7 @@ def run_cell(
     from subliminal_learning.students.config import load_student_training
     from subliminal_learning.students.layout import student_param_dir
     from subliminal_learning.teachers.config import load_template_config
-    from subliminal_learning.teachers.model_specs import parse_base_models
+    from subliminal_learning.models.datadecide import parse_base_model_tokens
     from subliminal_learning.teachers.run_layout import (
         ft_param_tag,
         model_dir_name,
@@ -520,8 +530,14 @@ def run_cell(
     prompt_set, _filter_modes, _gen, constrained = _load_number_config(number_config)
     ps_tag = prompt_set_tag(prompt_set, constrained)
 
-    spec_i = parse_base_models(f"{base_model}@step{teacher_step}")[0]
-    spec_j = parse_base_models(f"{base_model}@step{student_step}")[0]
+    allow_full_seeds = bool(sweep.get("allow_full_seed_bases", False))
+    dtype = str(sweep.get("dtype", "float32"))
+    spec_i = parse_base_model_tokens(
+        f"{base_model}@step{teacher_step}", allow_full_seeds=allow_full_seeds
+    )[0]
+    spec_j = parse_base_model_tokens(
+        f"{base_model}@step{student_step}", allow_full_seeds=allow_full_seeds
+    )[0]
     cross = teacher_step != student_step
     # ttag names the teacher numbers dir + the student's teacher_param_tag lineage. With
     # --param-tag, replace the teacher train/lora with the tag's fields first; assert the
@@ -596,6 +612,7 @@ def run_cell(
             allow_cross_base=cross,
             device=device,
             force=False,
+            dtype=dtype,
         )
     )
     logger.info("TRAIN OK {} steps={} loss={}", job_id, result.n_train_steps, result.final_train_loss)
@@ -634,6 +651,7 @@ def run_cell(
             confidence=0.95,
             device=device,
             force=False,
+            dtype=dtype,
         )
     )
     logger.info("CKPT-DISTILL COMPLETE {} -> {}", job_id, param_dir)
@@ -667,7 +685,7 @@ def train_cell(
     )
     from subliminal_learning.analysis.frames import parse_param_tag
     from subliminal_learning.teachers.config import load_template_config
-    from subliminal_learning.teachers.model_specs import parse_base_models
+    from subliminal_learning.models.datadecide import parse_base_model_tokens
     from subliminal_learning.teachers.run_layout import ft_param_tag
     from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -694,7 +712,11 @@ def train_cell(
             f"ft_param_tag (got {got!r}); the tag's lr/r/alpha must reproduce it exactly."
         )
 
-    spec = parse_base_models(f"{base_model}@step{step}")[0]
+    spec = parse_base_model_tokens(
+        f"{base_model}@step{step}",
+        allow_full_seeds=bool(sweep.get("allow_full_seed_bases", False)),
+    )[0]
+    dtype = str(sweep.get("dtype", "float32"))
     run_cfg = TrainTeacherTemplatesConfig(
         paths=base.paths,
         hub_org=base.hub_org,
@@ -705,6 +727,7 @@ def train_cell(
         target_animal=animal,
         device=device,
         force=False,
+        dtype=dtype,
     )
     tag = f"{animal}/{base_model}@step{step}/{param_tag}/ftseed{ft_seed}"
     if teacher_run_is_current(run_cfg):
@@ -746,7 +769,8 @@ def numgen_cell(
     from scripts.generate_numbers import _load_number_config
     from subliminal_learning.analysis.frames import parse_param_tag
     from subliminal_learning.teachers.config import load_template_config
-    from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+    from subliminal_learning.models.datadecide import parse_base_model_tokens
+    from subliminal_learning.teachers.model_specs import spec_label
     from subliminal_learning.teachers.run_layout import (
         ft_param_tag,
         model_dir_parts,
@@ -777,7 +801,11 @@ def numgen_cell(
             f"ft_param_tag (got {got!r}); the tag's lr/r/alpha must reproduce it exactly."
         )
 
-    spec = parse_base_models(f"{base_model}@step{step}")[0]
+    spec = parse_base_model_tokens(
+        f"{base_model}@step{step}",
+        allow_full_seeds=bool(sweep.get("allow_full_seed_bases", False)),
+    )[0]
+    dtype = str(sweep.get("dtype", "float32"))
     prompt_set, filter_modes, gen, constrained = _load_number_config(number_config)
     filter_modes = {filter_mode: filter_modes[filter_mode]}
     numbers_root = base.paths.output_root / "numbers"
@@ -823,6 +851,7 @@ def numgen_cell(
             rng_value_max=int(gen.get("rng_value_max", 999)),
             device=device,
             force=False,
+            dtype=dtype,
         ))
 
 

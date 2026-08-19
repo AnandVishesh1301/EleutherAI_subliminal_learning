@@ -108,13 +108,17 @@ def token_for_repo(base_model_repo: str, hub_org: str) -> tuple[str | None, str]
         token = "original"
     elif basename.startswith(_BASE_PREFIX + "-"):
         token = basename[len(_BASE_PREFIX) + 1 :]  # "data-seed1" / "weight-seed3"
+        if token.startswith("seed"):
+            token = f"full-{token}"  # fully re-randomized sibling: "seed2" -> "full-seed2"
     else:
         return None, repo
     full_token = f"{token}@{rev}" if rev else token
     # Round-trip through the real parser + resolver to reject anything that would not
     # reproduce this repo (never guess a token the eval CLI would reject).
+    # allow_full_seeds: this is a dir/manifest inverter over runs that already exist,
+    # so the launch-time full-seed gate does not apply.
     try:
-        specs = parse_base_models(full_token)
+        specs = parse_base_models(full_token, allow_full_seeds=True)
     except ValueError:
         return None, repo
     if len(specs) != 1:
@@ -344,7 +348,8 @@ def derive_bases(
 
 def _base_target_for_token(token: str, hub_org: str) -> BaseTarget:
     """Build a `BaseTarget`: token for the CLI, repo basename for the artifact dir."""
-    (spec,) = parse_base_models(token)
+    # allow_full_seeds: the token comes from discovery inversion, not a launch-time selection.
+    (spec,) = parse_base_models(token, allow_full_seeds=True)
     return BaseTarget(token=token, model_dir_name=model_dir_name(spec, hub_org))
 
 

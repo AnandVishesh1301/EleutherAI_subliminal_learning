@@ -67,6 +67,7 @@ def run_benchmarks(
     batch_size: str | int = "auto",
     num_fewshot: int = 0,
     limit: int | None = None,
+    revision: str | None = None,
 ) -> BenchmarkResult:
     """Evaluate one model on `tasks` (0-shot by default) via LM-Eval-Harness.
 
@@ -80,6 +81,9 @@ def run_benchmarks(
         num_fewshot: Few-shot count (0 = PolyPythia's 0-shot protocol).
         limit: Optional per-task example cap (smoke tests only; leave ``None`` for the
             full benchmark).
+        revision: Optional pretraining checkpoint of `pretrained` (e.g. ``"step3000"``);
+            without it a revision-pinned base would be benchmarked at ``main``. ``None``
+            leaves the HFLM call byte-identical to the historical one.
 
     Returns:
         Per-task metrics.
@@ -87,16 +91,20 @@ def run_benchmarks(
     import lm_eval
     from lm_eval.models.huggingface import HFLM
 
+    kwargs: dict = {}
+    if revision is not None:
+        kwargs["revision"] = revision
     lm = HFLM(
         pretrained=str(pretrained),
         peft=str(peft_path) if peft_path is not None else None,
         dtype=dtype,
         device=device,
         batch_size=batch_size,
+        **kwargs,
     )
     logger.info(
-        "lm-eval: pretrained={} peft={} tasks={} nfewshot={} limit={}",
-        pretrained, peft_path, list(tasks), num_fewshot, limit,
+        "lm-eval: pretrained={} peft={} revision={} tasks={} nfewshot={} limit={}",
+        pretrained, peft_path, revision or "main", list(tasks), num_fewshot, limit,
     )
     results = lm_eval.simple_evaluate(
         model=lm, tasks=list(tasks), num_fewshot=num_fewshot, limit=limit,

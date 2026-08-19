@@ -10,9 +10,12 @@ factors re-randomized together) became selectable on 2026-08-18 — a stance
 change: they were previously rejected because the template workflow varies the
 two factors separately. They must be requested EXPLICITLY, as `full-seed<N>` or
 `pythia-160m-seed<N>`; a bare `seed<N>` token stays invalid so a fully
-re-randomized model can never be mistaken for a data-/weight-seed one. Their
-filesystem/HF identity is `pythia-160m-seed{N}` (repo basename), disjoint from
-`pythia-160m-data-seed{N}` / `pythia-160m-weight-seed{N}`.
+re-randomized model can never be mistaken for a data-/weight-seed one. They
+exist at the five sizes in `POLYPYTHIAS_FULL_SEED_SIZES`, with filesystem/HF
+identity `pythia-{size}-seed{N}` (repo basename), disjoint from
+`pythia-160m-data-seed{N}` / `pythia-160m-weight-seed{N}`. Labels carry the size
+for non-160m full specs (`pythia-410m-seed3`); at 160m the shorthand
+`full-seed{N}` stays the label, byte-identical to before.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from __future__ import annotations
 import json
 
 from subliminal_learning.config import PathsConfig
+from subliminal_learning.models.datadecide import DataDecideSpec
 from subliminal_learning.models.registry import (
     POLYPYTHIAS_FULL_SEED_SIZES,
     POLYPYTHIAS_FULL_SEEDS,
@@ -47,8 +51,25 @@ def spec_label(spec: PythiaModelSpec) -> str:
     Used to namespace per-base-model outputs (`full`, seed 0 -> 'full-seed0'). A
     non-None `spec.revision` is appended as `@{revision}` (e.g. 'data-seed1@step3000');
     revision=None is byte-identical to before.
+
+    A `DataDecideSpec` returns its canonical CLI token instead ('dd-1b-seed2',
+    'dd-1b-seed3@step17500'). Unlike the Pythia labels this one carries the
+    family+size: labels must be unique across families, and a bare 'seed2' would
+    collide with (and be mistaken for) a PolyPythias label.
+
+    Non-160m `full` specs carry their size ('pythia-410m', 'pythia-410m-seed3'):
+    `full-seed<N>` is 160m shorthand, so a size-less label would silently retarget
+    to 160m on re-parse. Every 160m label is byte-identical to before.
     """
-    label = f"{spec.variant}-seed{spec.seed}"
+    if isinstance(spec, DataDecideSpec):
+        label = f"dd-1b-seed{spec.seed}"
+        if spec.step is not None:
+            return f"{label}@step{spec.step}"
+        return label
+    if spec.variant == "full" and spec.size != "160m":
+        label = f"pythia-{spec.size}" + (f"-seed{spec.seed}" if spec.seed else "")
+    else:
+        label = f"{spec.variant}-seed{spec.seed}"
     if spec.revision is not None:
         return f"{label}@{spec.revision}"
     return label
@@ -78,8 +99,16 @@ def family_swap_spec(spec: PythiaModelSpec) -> PythiaModelSpec:
         The sibling-family spec at the same seed.
 
     Raises:
+        TypeError: If `spec` is not a `PythiaModelSpec` (DataDecide has no data/weight
+            split, so there is no sibling family to swap to).
         ValueError: If `spec.variant` is not ``data`` or ``weight``.
     """
+    if isinstance(spec, DataDecideSpec):
+        raise TypeError(
+            f"family_swap is PolyPythias data-/weight-seed only, got {spec!r}; "
+            "DataDecide seeds re-randomize both factors together, so they have no "
+            "sibling family"
+        )
     if spec.variant == "data":
         return PythiaModelSpec(
             size=spec.size, seed=spec.seed, variant="weight", revision=spec.revision
@@ -108,13 +137,6 @@ def _full_seed_spec(
     correctly spelled token is rejected, so a full-seed base is always a
     double-explicit choice (spelling AND force flag).
     """
-    if not allowed:
-        raise ValueError(
-            f"full-seed model {token!r} is opt-in: these re-randomize weight init "
-            "AND data order together (a third base kind, distinct from "
-            "data-seed<N>/weight-seed<N>). Pass allow_full_seeds=True "
-            "(CLI: --allow-full-seed-bases) to confirm this is deliberate"
-        )
     try:
         seed = int(seed_str)
     except ValueError:
@@ -122,18 +144,80 @@ def _full_seed_spec(
             f"bad seed {seed_str!r} in {token!r}; expected an integer in "
             f"{POLYPYTHIAS_FULL_SEEDS[0]}-{POLYPYTHIAS_FULL_SEEDS[-1]}"
         ) from None
+    _check_full_seed(size, seed, where=token, allowed=allowed)
+    return PythiaModelSpec(size=size, seed=seed, variant="full", revision=revision)
+
+
+def _check_full_seed(size: str, seed: int, *, where: str, allowed: bool) -> None:
+    """The one full-seed rule set, shared by token parsing and spec validation.
+
+    `where` names the offending input (a token, or a spec repr) in error messages.
+    """
+    if not allowed:
+        raise ValueError(
+            f"full-seed model {where!r} is opt-in: these re-randomize weight init "
+            "AND data order together (a third base kind, distinct from "
+            "data-seed<N>/weight-seed<N>). Pass allow_full_seeds=True "
+            "(CLI: --allow-full-seed-bases; experiment YAML: "
+            "allow_full_seed_base: true) to confirm this is deliberate"
+        )
     if size not in POLYPYTHIAS_FULL_SEED_SIZES:
         raise ValueError(
-            f"bad token {token!r}: size {size!r} has no full-seed ensemble; "
+            f"bad size {size!r} in {where!r}: that size has no full-seed ensemble; "
             f"PolyPythias ships extra full seeds at "
             f"{', '.join(POLYPYTHIAS_FULL_SEED_SIZES)} only"
         )
     if seed not in POLYPYTHIAS_FULL_SEEDS:
         raise ValueError(
-            f"bad seed {seed} in {token!r}; PolyPythias full-seed models have "
+            f"bad seed {seed} in {where!r}; PolyPythias full-seed models have "
             f"seeds {POLYPYTHIAS_FULL_SEEDS[0]}-{POLYPYTHIAS_FULL_SEEDS[-1]}"
         )
-    return PythiaModelSpec(size=size, seed=seed, variant="full", revision=revision)
+
+
+def validate_spec(spec: object, *, allow_full_seeds: bool = False) -> None:
+    """Fail fast on a `PythiaModelSpec` that was built without going through
+    `parse_base_models` (the YAML `model_spec:` route, name inverters).
+
+    Enforces exactly the `parse_base_models` grammar: a valid size, a known
+    variant, data/weight only at 160m seeds 1-3, and the full-seed rules
+    (`_check_full_seed`) plus the `allow_full_seeds` opt-in for full seeds >= 1.
+    `full`, seed 0 (the original at any size) is always fine.
+
+    `DataDecideSpec`s belong to another family and pass through untouched.
+
+    Args:
+        spec: The spec to check.
+        allow_full_seeds: Opt-in for fully re-randomized `pythia-<size>-seed<N>` bases.
+
+    Raises:
+        ValueError: On any field the parser would have rejected.
+    """
+    if isinstance(spec, DataDecideSpec) or not isinstance(spec, PythiaModelSpec):
+        return
+    if spec.size not in PYTHIA_SIZES:
+        raise ValueError(
+            f"bad size {spec.size!r} in model_spec {spec!r}; valid Pythia sizes are "
+            f"{', '.join(PYTHIA_SIZES)}"
+        )
+    if spec.variant not in ("full", "data", "weight"):
+        raise ValueError(
+            f"bad variant {spec.variant!r} in model_spec {spec!r}; must be 'data', "
+            "'weight', or 'full'"
+        )
+    if spec.variant in ("data", "weight"):
+        if spec.size != "160m":
+            raise ValueError(
+                f"bad size {spec.size!r} in model_spec {spec!r}; the "
+                f"{spec.variant} seed ensemble exists at 160m only"
+            )
+        if spec.seed not in (1, 2, 3):
+            raise ValueError(
+                f"bad seed {spec.seed} in model_spec {spec!r}; PolyPythias "
+                f"{spec.variant}-seed models have seeds 1-3"
+            )
+        return
+    if spec.seed != 0:
+        _check_full_seed(spec.size, spec.seed, where=repr(spec), allowed=allow_full_seeds)
 
 
 def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list[PythiaModelSpec]:
@@ -149,7 +233,7 @@ def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list[Pyt
       - a comma list of "<variant>-seed<N>" tokens, e.g. "data-seed1,weight-seed3".
         "original" (aliases: "pythia-160m", "full-seed0") selects the original
         `pythia-160m`. A `pythia-<size>` token (size in the PolyPythias release
-        set, e.g. "pythia-2.8b") selects that size's `full`, seed-0 model; the
+        set, e.g. "pythia-410m") selects that size's `full`, seed-0 model; the
         data/weight seed ensembles only exist at 160m. An unknown size fails
         fast with a ValueError rather than a mid-run HF 404. Each token may be
         suffixed with "@<revision>" to pin a pretraining checkpoint, e.g.

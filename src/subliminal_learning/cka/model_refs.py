@@ -38,7 +38,7 @@ from subliminal_learning.models.registry import (
     PythiaModelSpec,
     model_ref,
 )
-from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.teachers.model_specs import parse_base_models, spec_label, validate_spec
 
 # Filesystem tree -> label prefix (mirrors the run-dir layout roots).
 _TREE_PREFIX = {
@@ -85,6 +85,14 @@ def is_base_token(ref: str) -> bool:
     return len(specs) == 1
 
 
+def _validate(spec: PythiaModelSpec, name: str) -> None:
+    """Registry check for an inverted name, re-raised naming the offending input."""
+    try:
+        validate_spec(spec, allow_full_seeds=True)
+    except ValueError as e:
+        raise ValueError(f"bad base name {name!r}: {e}") from None
+
+
 def spec_from_base_name(name: str) -> PythiaModelSpec:
     """Inverse of ``model_dir_name``/``resolve_hf_repo_id``: a repo id or model dir
     name back to a ``PythiaModelSpec``.
@@ -92,6 +100,10 @@ def spec_from_base_name(name: str) -> PythiaModelSpec:
     Accepts ``EleutherAI/pythia-160m-data-seed1`` or the bare basename
     ``pythia-160m-weight-seed3``, with an optional ``@{revision}`` suffix. Handles the
     full (``pythia-{size}`` / ``pythia-{size}-seed{N}``) and 160m data/weight variants.
+
+    The result is validated against the registry constants (``validate_spec``, with
+    ``allow_full_seeds=True`` since this inverts names that already exist), so writer
+    and reader enforce one grammar instead of minting specs that 404 later.
     """
     base = name.rsplit("/", 1)[-1]
     revision: str | None = None
@@ -105,7 +117,9 @@ def spec_from_base_name(name: str) -> PythiaModelSpec:
     parts = rest.split("-")
     size = parts[0]
     if len(parts) == 1:
-        return PythiaModelSpec(size=size, seed=0, variant="full", revision=revision)
+        spec = PythiaModelSpec(size=size, seed=0, variant="full", revision=revision)
+        _validate(spec, name)
+        return spec
     tail = "-".join(parts[1:])
     for prefix, variant in (("data-seed", "data"), ("weight-seed", "weight"), ("seed", "full")):
         if tail.startswith(prefix):
@@ -114,7 +128,9 @@ def spec_from_base_name(name: str) -> PythiaModelSpec:
                 seed = int(seed_str)
             except ValueError:
                 raise ValueError(f"bad seed {seed_str!r} in base name {name!r}") from None
-            return PythiaModelSpec(size=size, seed=seed, variant=variant, revision=revision)
+            spec = PythiaModelSpec(size=size, seed=seed, variant=variant, revision=revision)
+            _validate(spec, name)
+            return spec
     raise ValueError(f"cannot map base name {name!r} to a PythiaModelSpec")
 
 

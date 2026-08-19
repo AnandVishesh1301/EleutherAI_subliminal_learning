@@ -294,10 +294,29 @@ def adapter_config(ref: AdapterRef) -> dict[str, Any]:
     return json.loads((ref.run_dir / ADAPTER_CONFIG).read_text())
 
 
+def target_modules_key(value: Any) -> str | tuple[str, ...]:
+    """Hashable, order-stable cache key for a config's ``target_modules``.
+
+    A list becomes its sorted tuple (as always). A string — the OLMo LoRA configs give
+    one regex, and ``"all-linear"`` is a sentinel — stays one atom: `sorted` would shred
+    it into characters, and a str can never collide with the tuple a list produces.
+    """
+    return value if isinstance(value, str) else tuple(sorted(value))
+
+
+def lora_target_modules(value: Any) -> str | list[str]:
+    """A config's ``target_modules`` in the form `LoraConfig` wants it.
+
+    A regex string (or ``"all-linear"``) is passed through untouched; a list is sorted,
+    as before, so a stored adapter's module set reconstructs order-independently.
+    """
+    return value if isinstance(value, str) else sorted(value)
+
+
 def init_group_key(ref: AdapterRef, cfg: Mapping[str, Any]) -> tuple:
     """Everything `A_init` depends on — refs sharing this key share one reconstruction."""
     return (cfg["base_model_name_or_path"], ref.ftseed, int(cfg["r"]),
-            tuple(sorted(cfg["target_modules"])))
+            target_modules_key(cfg["target_modules"]))
 
 
 # --------------------------------------------------------------------------------------
@@ -401,20 +420,33 @@ def decompose(
 # --------------------------------------------------------------------------------------
 
 
-def base_model_factory(base_repo: str, hf_cache_root: Path, device: str = "cpu") -> Callable:
-    """A zero-arg factory returning a fresh fp32 base model on `device`.
+def base_model_factory(base_repo: str, hf_cache_root: Path, device: str = "cpu",
+                       revision: str | None = None, dtype: str = "float32") -> Callable:
+    """A zero-arg factory returning a fresh base model on `device` (fp32 by default).
 
     A factory rather than a model because `get_peft_model` wraps in place: each seeded
     reconstruction needs an unwrapped model, and tests need to substitute a tiny one.
+
+    `revision` pins a pretraining checkpoint; when None the call is byte-identical to
+    the historical revision-less one (`main`).
     """
 
     def _load():
         import torch
         from transformers import AutoModelForCausalLM
 
-        return AutoModelForCausalLM.from_pretrained(
-            base_repo, cache_dir=str(Path(hf_cache_root) / "hub"), torch_dtype=torch.float32
-        ).to(device)
+        try:
+            # Registers the legacy `hf_olmo` model type for DataDecide bases; the
+            # datadecide dependency group is optional, so absence is not an error.
+            import hf_olmo  # noqa: F401
+        except ImportError:
+            pass
+
+        kwargs: dict = {"cache_dir": str(Path(hf_cache_root) / "hub"),
+                        "torch_dtype": getattr(torch, dtype)}
+        if revision is not None:
+            kwargs["revision"] = revision
+        return AutoModelForCausalLM.from_pretrained(base_repo, **kwargs).to(device)
 
     return _load
 
@@ -439,7 +471,7 @@ def lora_init_weights(
         r=int(adapter_cfg["r"]),
         lora_alpha=int(adapter_cfg["lora_alpha"]),
         lora_dropout=float(adapter_cfg.get("lora_dropout", 0.0)),
-        target_modules=sorted(adapter_cfg["target_modules"]),
+        target_modules=lora_target_modules(adapter_cfg["target_modules"]),
         bias="none",
         task_type="CAUSAL_LM",
     ))
@@ -452,17 +484,28 @@ def lora_init_weights(
     return out
 
 
-def base_weight_norms(model_factory: Callable, target_modules: Iterable[str]) -> dict:
+def base_weight_norms(model_factory: Callable, target_modules: str | Iterable[str]) -> dict:
     """(spectral, Frobenius) of every frozen ``W_0`` a LoRA module perturbs.
 
     The one genuinely full-rank SVD in this module — hence computed once per base repo
     and cached to disk by the pipeline, never per adapter.
+
+    `target_modules` is matched the way PEFT matches it, so the selected modules are the
+    ones the adapter actually wraps: a list by last-name-segment membership, a string
+    (the OLMo configs' regex) by `re.fullmatch` against the whole module name.
     """
-    wanted = set(target_modules)
+    pattern = re.compile(target_modules) if isinstance(target_modules, str) else None
+    wanted = set() if pattern is not None else set(target_modules)
+
+    def matches(name: str) -> bool:
+        if pattern is not None:
+            return pattern.fullmatch(name) is not None
+        return name.rsplit(".", 1)[-1] in wanted
+
     model = model_factory()
     out: dict[str, tuple[float, float]] = {}
     for name, mod in model.named_modules():
-        if name.rsplit(".", 1)[-1] in wanted and hasattr(mod, "weight"):
+        if matches(name) and hasattr(mod, "weight"):
             w = mod.weight.detach().cpu().double().numpy()
             sv = np.linalg.svd(w, compute_uv=False)
             out[name] = (float(sv[0]), float(np.sqrt(np.square(sv).sum())))

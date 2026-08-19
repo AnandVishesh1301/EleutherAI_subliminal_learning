@@ -1,0 +1,26 @@
+# OLMo/DataDecide variant of `lora_template_bias.yaml` (teacher template-bias FT).
+#
+# Every hyperparameter mirrors that config EXACTLY; the only change is
+# `target_modules`, so DataDecide-vs-Pythia comparisons stay like-for-like.
+#
+# The regex targets the four Linear modules inside each OLMo block and NOTHING
+# else -- in particular it must not match the top-level `transformer.ff_out`,
+# which is the LM HEAD (the per-block `ff_out` is anchored under `blocks.<i>.`).
+# This and `lora_student_distill_olmo1b.yaml` are the ONLY configs valid for
+# `dd-*` runs.
+
+lora:
+  r: 8
+  lora_alpha: 8
+  lora_dropout: 0.0
+  target_modules: '.*transformer\.blocks\.\d+\.(att_proj|attn_out|ff_proj|ff_out)'
+
+train:
+  learning_rate: 2.0e-4
+  n_epochs: 1
+  batch_size: 22
+  max_length: 64
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 0

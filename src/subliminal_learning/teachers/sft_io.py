@@ -25,6 +25,25 @@ from subliminal_learning.config import TrainConfig
 from subliminal_learning.training.sft_io import SftResult
 
 
+def check_target_modules_safe(resolved_targets: list[str] | str, *, is_neox: bool) -> None:
+    """Guard the OLMo LM-head trap: no `"all-linear"` outside GPT-NeoX.
+
+    On OLMo the LM head is a top-level ``transformer.ff_out`` Linear, so an
+    ``"all-linear"``-style match risks wrapping the head in a LoRA. Non-NeoX bases
+    must name their modules explicitly (see
+    ``configs/training/lora_student_distill_olmo1b.yaml``).
+
+    Raises:
+        ValueError: If `"all-linear"` is requested on a non-GPT-NeoX model.
+    """
+    if resolved_targets == "all-linear" and not is_neox:
+        raise ValueError(
+            "target_modules='all-linear' is only safe on GPT-NeoX bases: on OLMo it "
+            "risks wrapping the transformer.ff_out LM head in a LoRA. Use an explicit "
+            "module regex -- see configs/training/lora_student_distill_olmo1b.yaml"
+        )
+
+
 def run_teacher_sft_completion_only(
     model: GPTNeoXForCausalLM,
     tokenizer: PreTrainedTokenizerBase,
@@ -60,6 +79,10 @@ def run_teacher_sft_completion_only(
     # without this the adapter init is unseeded and ftseed replicates are not
     # reproducible (and depend on sweep position within one process).
     set_seed(train_cfg.seed)
+    check_target_modules_safe(
+        lora_cfg.resolve_target_modules(),
+        is_neox=type(model).__name__ == "GPTNeoXForCausalLM",
+    )
     peft_config = LoraConfig(
         r=lora_cfg.r,
         lora_alpha=lora_cfg.lora_alpha,

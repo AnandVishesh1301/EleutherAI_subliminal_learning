@@ -35,7 +35,6 @@ from pathlib import Path
 from statistics import fmean
 from typing import Literal, Mapping
 
-import torch
 from loguru import logger
 
 from subliminal_learning.config import PathsConfig
@@ -52,7 +51,7 @@ from subliminal_learning.evaluation.preference_scoring import (
     summarize_model_prompt_set,
 )
 from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_teacher
-from subliminal_learning.models.loading_io import load_model, load_tokenizer
+from subliminal_learning.models.loading_io import load_model, load_tokenizer, resolve_dtype
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.run_layout import model_dir_name
@@ -124,6 +123,7 @@ class EvaluateTeacherPreferenceConfig:
         seed_prefix: Per-seed subdir prefix to discover under ``param_dir``. ``"ftseed"``
             for teachers (default); ``"gseed"`` for GKD students.
         force: Recompute per-seed sets even if already present (default: resume/skip).
+        dtype: Base-model load precision ("float32" default, or "bfloat16").
     """
 
     paths: PathsConfig
@@ -141,6 +141,7 @@ class EvaluateTeacherPreferenceConfig:
     seed_prefix: str = "ftseed"
     force: bool = False
     artifact_subdir: Path | None = None
+    dtype: str = "float32"
 
 
 @dataclass(frozen=True)
@@ -595,7 +596,7 @@ def _resolve_base_control(
     if missing:
         base = load_model(
             cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
-            dtype=torch.float32,
+            dtype=resolve_dtype(cfg.dtype),
         )
         fresh = _score_model_over_sets(
             base, tokenizer, cfg.device, prompt_by_set, tuple(missing), forms,
@@ -733,7 +734,7 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
         if needed:
             model = load_finetuned_teacher(
                 cfg.spec, ckpt, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
-                dtype=torch.float32,
+                dtype=resolve_dtype(cfg.dtype),
             )
             fresh = _score_model_over_sets(
                 model, tokenizer, cfg.device, prompt_by_set, tuple(needed), forms,
@@ -780,6 +781,9 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
         "skipped_incomplete_seeds": sorted(skipped_incomplete),
         "skipped_nonfinite_seeds": sorted(skipped_nonfinite),
         "adapter_ids": {str(seed): aid for seed, aid in adapter_ids.items()},
+        # Additive provenance: recorded only when non-default so fp32 summaries (and the
+        # sweep runner's DONE gate) stay byte-identical to before.
+        **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         # What each set was computed with — the sweep runner's DONE gate checks these,
         # so changing a prompt file or the sampling params re-runs instead of skipping.
         "set_params": {

@@ -58,7 +58,8 @@ from subliminal_learning.numbers.filtering import (
     filter_modes_from_config,
 )
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.models.datadecide import parse_base_model_tokens
+from subliminal_learning.teachers.model_specs import spec_label
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
     model_dir_parts,
@@ -163,7 +164,7 @@ def main(
     numbers_root = cfg.paths.output_root / "numbers"
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"
-        else parse_base_models(base_models, allow_full_seeds=allow_full_seed_bases)
+        else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seed_bases)
     )
 
     def build(spec, src, out_dir, ckpt=None, animal_meta=None) -> GenerateNumbersConfig:

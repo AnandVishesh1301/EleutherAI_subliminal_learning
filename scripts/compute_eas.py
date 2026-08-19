@@ -1,5 +1,7 @@
 """CLI: empirical activation similarity (EAS) of distilled STUDENTS vs their teacher.
 
+OLMo/DataDecide models are not wired here (NeoX-only).
+
 EAS (Blank et al., *Subliminal Learning Is Steering Vector Distillation*, arXiv:2606.00995)
 measures how much a distilled student's activation-shift direction aligns with the teacher's:
 the per-layer cosine similarity between ``mean_teacher - mean_base`` and ``mean_student -

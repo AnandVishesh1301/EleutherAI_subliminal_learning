@@ -1,0 +1,27 @@
+# OLMo/DataDecide variant of `lora_student_distill.yaml` (student distillation).
+#
+# Every hyperparameter mirrors that config EXACTLY; the only change is
+# `target_modules`, which REPLACES `all-linear`.
+#
+# `all-linear` is unsafe here: on OLMo the LM HEAD is the top-level
+# `transformer.ff_out` Linear, and wrapping it in a LoRA would train the head.
+# The regex is anchored under `blocks.<i>.`, so it wraps exactly the four
+# in-block projections per layer and never the head. This and
+# `lora_template_bias_olmo1b.yaml` are the ONLY configs valid for `dd-*` runs.
+
+lora:
+  r: 8
+  lora_alpha: 32
+  lora_dropout: 0.0
+  target_modules: '.*transformer\.blocks\.\d+\.(att_proj|attn_out|ff_proj|ff_out)'
+
+train:
+  learning_rate: 1.0e-4
+  n_epochs: 10
+  batch_size: 8
+  max_length: 256
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 1
+  optim: adamw_torch

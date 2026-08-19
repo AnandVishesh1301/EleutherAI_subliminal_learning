@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from subliminal_learning.config import LoRAConfig, TrainConfig
+from subliminal_learning.models.datadecide import DataDecideSpec, dd_dir_name
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 
 TEACHERS_SUBDIR = "teachers"
@@ -35,6 +36,8 @@ def model_dir_name(spec: PythiaModelSpec, hub_org: str) -> str:
     non-None `spec.revision` is appended as `@{revision}` (e.g.
     `pythia-160m-data-seed1@step3000`); revision=None is byte-identical to before.
     """
+    if isinstance(spec, DataDecideSpec):
+        return dd_dir_name(spec)
     basename = resolve_hf_repo_id(spec, hub_org).split("/")[-1]
     if spec.revision is not None:
         return f"{basename}@{spec.revision}"
@@ -53,7 +56,11 @@ def model_dir_parts(spec: PythiaModelSpec, hub_org: str) -> tuple[str, ...]:
     for now; new such layouts should adopt this helper too.)
     """
     name = model_dir_name(spec, hub_org)
-    if spec.revision is not None:
+    # Keyed on the NAME, not `spec.revision`: `model_dir_name` emits "@" iff the
+    # spec is checkpoint-pinned (Pythia revision or DataDecide step), and "@" can
+    # never appear in a plain repo basename -- so this is byte-identical for Pythia
+    # and routes step-pinned DataDecide dirs under `ckpt/` too.
+    if "@" in name:
         return (CKPT_SUBDIR, name)
     return (name,)
 

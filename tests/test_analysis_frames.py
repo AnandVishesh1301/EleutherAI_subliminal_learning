@@ -47,6 +47,13 @@ def test_short_model_strips_prefix():
     assert short_model("pythia-160m-data-seed1") == "data-seed1"
 
 
+def test_short_model_full_seed_is_labelled_explicitly():
+    # A fully re-randomized sibling must never read as a bare `seed2` (which would
+    # look like a data-/weight-seed arm); the label matches `spec_label`.
+    assert short_model("pythia-160m-seed2") == "full-seed2"
+    assert short_model("pythia-160m-seed2@step3000") == "full-seed2@step3000"
+
+
 def test_short_model_passthrough_unknown():
     assert short_model("some-other-model") == "some-other-model"
 

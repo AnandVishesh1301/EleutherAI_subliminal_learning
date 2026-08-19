@@ -1,14 +1,18 @@
 """Builder for notebooks/collapse_campaigns_k_alpha_rank.ipynb (re-run to regenerate).
 
-Assembles the merged view of the three collapse-boundary student-HP campaigns -- the K-rung
-existence arm (`top20-krungs-*`), the dense band extension (`top5-bandext-*`) and the shared
-focus-20 design (`*-top20focus-*`) -- on one (K/K*, alpha, rank) frame, one figure per lineage,
-and executes it top to bottom so every cell ships with outputs.
+Assembles the merged view of the collapse-boundary student-HP campaigns -- the K-rung
+existence arm (`top20-krungs-*`), the dense band extension (`top5-bandext-*`), the shared
+focus-20 design (`*-top20focus-*`), and the current band-48 / lowk-9 designs
+(`*-band48-*` / `*-b48lowk-*`) -- on one (K/K*, alpha, rank) frame, one figure per lineage,
+plus a cross-animal / cross-model summary up front, and executes it top to bottom so every
+cell ships with outputs.
 
 Inputs, all read at notebook run time (nothing is baked into the .ipynb):
 
 - run_logs/queue_angela/top5-bandext-ds2ws2-n1/jobs.jsonl  (the realized 117-cell band design)
 - run_logs/focus20_cells.json                              (the 20 shared cells)
+- run_logs/band_0p45_1p25_q8_cells.json                    (the band-48 thin of the band)
+- run_logs/band_lowk_0p29_0p45_cells.json                  (the 9-cell low-K extension)
 - run_logs/dog_top20krungs_configs.json                    (the 20-teacher pool, shared by cat/lion)
 - {output_root}/students/{animal}/pythia-160m-*/teacher-pythia-160m/  (the campaign results)
 
@@ -37,15 +41,16 @@ def code(s: str) -> None:
 
 # ======================================================================================
 md(r"""
-# The collapse-boundary campaigns on one $(K, \alpha, r)$ frame — `krungs-25`, `band-117`, `focus-20`
+# The collapse-boundary campaigns on one $(K, \alpha, r)$ frame — krungs, band, focus, band-48, lowk-9
 
-Three student-HP campaigns were placed against the **collapse-boundary law**
+The collapse-boundary student-HP campaigns were placed against the **collapse-boundary law**
 
 $$K \;=\; \mathrm{lr}\cdot\alpha^{b}\cdot r^{c},\qquad b=0.561,\; c=-0.085,$$
 
 which says an ep20 student collapses (loses the trait outright) once $K$ crosses a threshold
-$K^\ast$. All three distil the *same* teacher pool into cross-init student bases at ep20,
-student seed 1, and differ only in **which cells of the $K$ surface they place**:
+$K^\ast$. All of them distil the *same* teacher pool into cross-init student bases at ep20,
+student seed 1, and differ only in **which cells of the $K$ surface they place** and how much of
+the pool they run:
 
 | campaign | cells | teachers | $K/K^\ast$ span | what it was for |
 |---|---|---|---|---|
@@ -53,11 +58,19 @@ student seed 1, and differ only in **which cells of the $K$ surface they place**
 | `krungs-w3` | 4 | top-20 | 0.62 – 0.93 | the low-$\alpha$ high-rank wave-3 extension, run on the `data-seed1` / `weight-seed1` arms only |
 | `band-117` | 117 | top-5 | 0.46 – 1.29 | the dense reference design inside the pooled band, every $(\alpha, r)$ combination represented |
 | `focus-20` | 20 | top-20 | 0.65 – 0.95 | the 20 shared cells (a design-only subset of `band-117`) that replace the dense band for new arms |
+| `band-48` | 48 | top-10 | 0.46 – 1.25 | the rank/$\alpha$-balanced thin of `band-117` (quota 8 per rank) rerun with the top-10 pool on **every** arm — the current cross-animal workhorse |
+| `lowk-9` | 9 | top-10 | 0.29 – 0.40 | the low-$K$ extension (settled 2026-08-17) resolving the left-censored transfer peak; appended to the `band48` queues |
 
-`focus-20` $\subset$ `band-117`; `krungs-25` is disjoint from both; the four `krungs-w3` cells
-share exactly one coordinate with `band-117` (`ep20_lr3e-4_r32a4`), which is checked in §0b.
+Relations, all asserted in §0b: `focus-20` $\subset$ `band-117`; `band-48` $\subset$ `band-117`
+(sharing 12 cells with `focus-20`; `focus-20 ∪ band-48 ∪ lowk-9` is the 65-cell **core65**);
+`lowk-9` is disjoint from `band-117` but reuses **3** `krungs-25` low rungs as pre-run anchors;
+`krungs-25` is otherwise disjoint from the band; the four `krungs-w3` cells share exactly one
+coordinate with `band-117` (`ep20_lr3e-4_r32a4`). `band-117 ∪ lowk-9` is the 126-cell shared
+universe (**bandext126**) every new campaign draws from.
 
-**What this notebook draws.** One heat-grid per **lineage** — a lineage being one
+**What this notebook draws.** First a cross-cut **summary** (§3): aggregate transfer across
+animals and student-base models on shared $K/K^\ast$ slices, on the prior-normalized readout.
+Then one heat-grid per **lineage** — a lineage being one
 (animal, teacher-numbers base $\to$ student base) pair, e.g. `dog | pythia-160m → data-seed1`
 kept separate from `dog | pythia-160m → data-seed2`, because the collapse threshold is
 arm-specific. Inside a lineage the three campaigns are **merged** and re-cut onto the frame the
@@ -101,7 +114,7 @@ ROOT, OUTPUT_ROOT = bootstrap()
 B_LAW, C_LAW = 0.561, -0.085
 KSTAR = 7.870e-4          # pooled anchor of the band/focus designs
 KSTAR_KRUNGS = 7.84e-4    # the krungs rungs were placed against this; 0.4% apart, far inside one bin
-DEAD = 0.005              # per-run collapse cut on test p_target (re-checked in §4)
+DEAD = 0.005              # per-run collapse cut on test p_target (re-checked in §5)
 P_VMAX = 0.2              # house colour scale for mean test p, shared by every figure here
 
 # --- what the campaigns are made of --------------------------------------------------------
@@ -132,10 +145,10 @@ md("""
 The krungs waves are **frozen inline** (copied from `top20_krungs_ds1.ipynb`, so this notebook
 survives the queue tree disappearing). `band-117` is read back from the realized job list of the
 `top5-bandext-ds2ws2` queue — the campaign's own record of which 117 cells were actually placed,
-which is the authority here rather than any regenerated design — and `focus-20` from the design
-file its queues were generated with. Both reads are asserted against their known sizes and
-against the relations between the designs, so a moved or rewritten file fails loudly here rather
-than silently changing a figure.
+which is the authority here rather than any regenerated design — and `focus-20`, `band-48` and
+`lowk-9` from the design files their queues were generated with. Every read is asserted against
+its known size and against the relations between the designs, so a moved or rewritten file fails
+loudly here rather than silently changing a figure.
 """)
 
 code(r'''
@@ -160,44 +173,66 @@ BAND_CELLS = sorted({
 })
 FOCUS_DOC = json.loads((ROOT / "run_logs/focus20_cells.json").read_text())
 FOCUS_CELLS = [c["student_tag"] for c in FOCUS_DOC["cells"]]
+BAND48_CELLS = [c["student_tag"] for c in
+                json.loads((ROOT / "run_logs/band_0p45_1p25_q8_cells.json").read_text())["cells"]]
+LOWK9_CELLS = [c["student_tag"] for c in
+               json.loads((ROOT / "run_logs/band_lowk_0p29_0p45_cells.json").read_text())["cells"]]
 
 assert len(BAND_CELLS) == 117 and len(FOCUS_CELLS) == 20, "design files changed shape"
+assert len(BAND48_CELLS) == 48 and len(LOWK9_CELLS) == 9, "band48/lowk design files changed shape"
 assert set(FOCUS_CELLS) <= set(BAND_CELLS), "focus-20 is supposed to be a subset of band-117"
+assert set(BAND48_CELLS) <= set(BAND_CELLS), "band-48 is supposed to be a thin of band-117"
+assert len(set(FOCUS_CELLS) & set(BAND48_CELLS)) == 12, "focus-20 / band-48 overlap changed"
+assert len(set(FOCUS_CELLS) | set(BAND48_CELLS) | set(LOWK9_CELLS)) == 65, "core65 changed shape"
+assert not (set(LOWK9_CELLS) & set(BAND_CELLS)), "lowk-9 was supposed to extend below the band"
 assert not (set(KRUNGS25_CELLS) & set(BAND_CELLS)), "krungs 25 was supposed to miss the band"
+LOWK_ANCHORS = set(LOWK9_CELLS) & set(KRUNGS25_CELLS)
+assert len(LOWK_ANCHORS) == 3, f"lowk-9 reuses 3 krungs rungs as anchors, got {LOWK_ANCHORS}"
 SHARED = set(KRUNGS_W3_CELLS) & set(BAND_CELLS)
 assert SHARED == {"ep20_lr3e-4_r32a4"}, f"unexpected krungs-w3 / band overlap: {SHARED}"
 
-# The four design sets, kept separate: they are what each campaign's coverage is measured
-# against, and two of them genuinely overlap.
-CAMPAIGNS = ["krungs-25", "krungs-w3", "focus-20", "band-117"]
+# The six design sets, kept separate: they are what each campaign's coverage is measured
+# against, and several of them genuinely overlap.
+CAMPAIGNS = ["krungs-25", "krungs-w3", "focus-20", "band-48", "lowk-9", "band-117"]
 CAMPAIGN_CELLS = {"krungs-25": KRUNGS25_CELLS, "krungs-w3": KRUNGS_W3_CELLS,
-                  "focus-20": FOCUS_CELLS, "band-117": BAND_CELLS}
-CAMPAIGN_SHORT = {"krungs-25": "k25", "krungs-w3": "kw3", "focus-20": "foc", "band-117": "band"}
+                  "focus-20": FOCUS_CELLS, "band-48": BAND48_CELLS, "lowk-9": LOWK9_CELLS,
+                  "band-117": BAND_CELLS}
+CAMPAIGN_SHORT = {"krungs-25": "k25", "krungs-w3": "kw3", "focus-20": "foc",
+                  "band-48": "b48", "lowk-9": "lk9", "band-117": "band"}
 
 # One DISPLAY label per cell, for colours and per-figure breakdowns -- NOT for coverage, which
 # uses the overlapping design sets above. Priority is smallest/most-current design first: a cell
-# of the focus-20 reduction reads focus-20 rather than band-117, the one coordinate krungs wave 3
-# shares with the band reads band-117, and the krungs labels are what is left over.
-DISPLAY_PRIORITY = ["focus-20", "band-117", "krungs-25", "krungs-w3"]
+# of the focus-20 reduction reads focus-20 rather than band-48/band-117, a lowk-9 anchor reads
+# lowk-9 rather than krungs-25, the one coordinate krungs wave 3 shares with the band reads
+# band-117, and the krungs labels are what is left over.
+DISPLAY_PRIORITY = ["focus-20", "lowk-9", "band-48", "band-117", "krungs-25", "krungs-w3"]
 CELL_CAMPAIGN = {c: camp for camp in reversed(DISPLAY_PRIORITY) for c in CAMPAIGN_CELLS[camp]}
 DESIGN_CELLS = sorted(CELL_CAMPAIGN, key=K_of)
+CORE65 = sorted(set(FOCUS_CELLS) | set(BAND48_CELLS) | set(LOWK9_CELLS), key=K_of)
 
-# Teacher pools. Both top-20 campaigns use the same manifest order (the distillability ranking
-# of the single-seed screen); band-117 uses its first five. cat/lion reuse the dog tags verbatim
-# so the arms stay comparable, so one list covers every animal.
+# Teacher pools. Every campaign uses the same manifest order (the distillability ranking of the
+# single-seed screen): the krungs/focus campaigns run all 20, band-48/lowk-9 the first ten
+# (asserted identical to the {animal}_top10_kband manifests), band-117 the first five. cat/lion/
+# pig reuse the dog tags verbatim so the arms stay comparable, so one list covers every animal.
 TOP20 = json.loads((ROOT / "run_logs/dog_top20krungs_configs.json").read_text())["param_tags"]
-TOP5 = TOP20[:5]
-CAMPAIGN_TEACHERS = {"krungs-25": TOP20, "krungs-w3": TOP20, "band-117": TOP5, "focus-20": TOP20}
+TOP5, TOP10 = TOP20[:5], TOP20[:10]
+assert TOP10 == json.loads(
+    (ROOT / "run_logs/dog_top10_kband_configs.json").read_text())["param_tags"], \
+    "top-10 kband pool is supposed to be the first ten of the top-20 manifest"
+CAMPAIGN_TEACHERS = {"krungs-25": TOP20, "krungs-w3": TOP20, "band-117": TOP5,
+                     "focus-20": TOP20, "band-48": TOP10, "lowk-9": TOP10}
 
 print(f"{len(DESIGN_CELLS)} distinct design cells | "
       + " | ".join(f"{c} {len(CAMPAIGN_CELLS[c])}" for c in CAMPAIGNS))
-print(f"shared coordinate(s) between designs: {sorted(SHARED)} "
-      f"(display priority {' > '.join(DISPLAY_PRIORITY)} -> labelled band-117 below)")
-print(f"teachers: top-20 pool, band-117 restricted to its first {len(TOP5)}")
+print(f"shared coordinates between designs: krungs-w3/band {sorted(SHARED)}, "
+      f"lowk-9/krungs-25 anchors {sorted(LOWK_ANCHORS)}")
+print(f"display priority {' > '.join(DISPLAY_PRIORITY)}")
+print(f"teachers: top-20 pool; band-48/lowk-9 its first {len(TOP10)}, "
+      f"band-117 its first {len(TOP5)}")
 ''')
 
 md("""
-## 1. The design itself — where the three campaigns put their cells
+## 1. The design itself — where the campaigns put their cells
 
 One row per design cell, before any results are read. This is the grid every figure below is
 drawn on, so its gaps are design gaps, not missing runs.
@@ -232,27 +267,30 @@ summary = (design.groupby("campaign")
 summary.insert(0, "design_cells", [len(CAMPAIGN_CELLS[c]) for c in CAMPAIGNS])
 display(summary)
 print(f"{len(K_ORDER)} occupied K/K* bins of the {len(BIN_LABELS)}-bin ladder "
-      f"(gap 0.35-0.45: krungs' lowest rung sits at 0.29-0.34, the band starts at 0.46)")
+      "(the 0.40-0.45 stretch is empty BY DESIGN: lowk-9 stops at 0.398 and the band starts "
+      "at 0.46 -- see the lowk manifest's selection note)")
 ''')
 
 md(r"""
 **Design coverage map.** Same axes as every result figure — y = $K/K^\ast$ bin, x = $\alpha$,
 panel = rank — but the value is *how many design cells* land in the square, and the colour is
 which campaign placed them. Where a square holds cells from more than one design, the **most
-current, smallest design wins**: `focus-20` first (the 20 cells new arms actually run), then
-`band-117`, then the krungs waves — so the gold squares are exactly the focus-20 design and the
-blue ones are the band cells outside it. Read it as the legend for the blank space in §6: a
-square empty here can never be filled by any amount of GPU time.
+current, smallest design wins**: `focus-20` first (part of what new arms actually run), then
+`lowk-9` and `band-48` (the rest of the current core65 design), then `band-117`, then the krungs
+waves — so the gold/green/teal squares together are the core65 design and the blue ones are the
+band cells outside it. Read it as the legend for the blank space in §7: a square empty here can
+never be filled by any amount of GPU time.
 """)
 
 code(r'''
 from matplotlib.colors import BoundaryNorm, ListedColormap
 
 # Codes follow DISPLAY_PRIORITY, so the square-level `min` below resolves a mixed square the
-# same way the cell-level label does: focus-20 first, then band-117, then the krungs waves.
+# same way the cell-level label does: focus-20 first, then lowk-9/band-48, then band-117, then
+# the krungs waves.
 CAMPAIGN_CODE = {c: i for i, c in enumerate(DISPLAY_PRIORITY)}
-CAMPAIGN_COLOR = {"focus-20": "#e8b100", "band-117": "#4c78a8",
-                  "krungs-25": "#e15759", "krungs-w3": "#b07aa1"}
+CAMPAIGN_COLOR = {"focus-20": "#e8b100", "lowk-9": "#59a14f", "band-48": "#76b7b2",
+                  "band-117": "#4c78a8", "krungs-25": "#e15759", "krungs-w3": "#b07aa1"}
 CAMPAIGN_CMAP = ListedColormap([CAMPAIGN_COLOR[c] for c in DISPLAY_PRIORITY])
 dmap = design.assign(code=design.campaign.map(CAMPAIGN_CODE))
 fig = aplots.facet_grid_heatmaps(
@@ -262,7 +300,7 @@ fig = aplots.facet_grid_heatmaps(
     cell_fontsize=5.5, fmt=lambda v: CAMPAIGN_SHORT[DISPLAY_PRIORITY[int(v)]],
     text_color="black", panel_w=3.0, row_h=0.34,
     title=("Design coverage — which campaign placed each (K/K* bin, alpha, rank) square\n"
-           "label = campaign (foc / band / k25 / kw3), n = design cells in the square, "
+           "label = campaign (foc / lk9 / b48 / band / k25 / kw3), n = design cells in the square, "
            "blank = never designed"),
     cbar_label="campaign")
 for i, ax in enumerate(a for a in fig.axes if a.get_label() != "<colorbar>"):
@@ -287,10 +325,24 @@ these coordinates*:
 
 1. **teachers** — only the 20 manifest tags (other teachers have runs at some of these cells from
    the `law-*` grids, which are a different experiment);
-2. **cells** — only the 145 design cells above;
+2. **cells** — only the design cells above;
 3. **seed 1** — every campaign job is student seed 1; extra seeds at the same coordinates come
    from the reseed/law campaigns and would silently re-weight the teacher means. The count of
    dropped extra-seed runs is printed so the exclusion is visible.
+
+Each run is also joined to its student base's **measured test-set prior** on the target animal
+(`transfer_factors.load_priors`, `test_prior`: the base model's own mean exact $p(\text{target})$
+on the same 50 held-out test prompts the student score uses). That gives two prior-referenced
+columns used by the summary in §3:
+
+- `ratio` $= \text{test} / \text{test\_prior}$ — the prior-normalized transfer readout, the only
+  one comparable **across animals and bases** (raw $p$ mixes trait strength with the base's prior);
+- `dead_prior` — the settled prior-based collapse label, `test < test_prior / e^3` (the
+  calibrated-margin rule; the legacy fixed cut `DEAD` is kept for the per-lineage sections and
+  re-examined in §5).
+
+Arms with no measured `test_prior` are printed; they keep their raw scores but drop out of any
+prior-referenced display.
 """)
 
 code(r'''
@@ -312,20 +364,42 @@ n_extra_seed = int((raw.seed != STUDENT_SEED).sum())
 runs = raw[raw.seed.eq(STUDENT_SEED)].copy()
 
 runs["campaign"] = runs.student_tag.map(CELL_CAMPAIGN)
-runs["tier"] = np.where(runs.teacher.isin(TOP5), "top5", "top6-20")
+runs["tier3"] = np.select([runs.teacher.isin(TOP5), runs.teacher.isin(TOP10)],
+                          ["top1-5", "top6-10"], "top11-20")
 runs["K"] = runs.student_tag.map(K_of)
 runs["K_rel"] = runs.K / KSTAR
 runs["K_bin"] = k_bin(runs.K_rel)
 runs["dead"] = runs.test.lt(DEAD).astype(int)
 
+# Prior join + the prior-referenced readouts (see the section text above).
+from subliminal_learning.analysis import transfer_factors as tf
+
+PRIORS = tf.load_priors(OUTPUT_ROOT)
+runs = runs.merge(PRIORS[["animal", "base_label", "test_prior"]],
+                  on=["animal", "base_label"], how="left")
+runs["ratio"] = runs.test / runs.test_prior
+runs["dead_prior"] = (runs.test < runs.test_prior * np.exp(-3.0)).where(
+    runs.test_prior.notna()).astype("float")
+NO_PRIOR = sorted(set(map(tuple, runs.loc[runs.test_prior.isna(),
+                                          ["animal", "base_label"]].values)))
+
 # One label per lineage: the teacher's numbers base -> the student base it was distilled into.
 def base_label(b: str) -> str:
-    return "same-model" if b == TEACHER_BASE else b.replace(f"{TEACHER_BASE}-", "")
+    # "pythia-160m-seed2" (weight init AND data order re-randomized) -> "full-seed2",
+    # matching spec_label; a bare "seed2" would read as a data-/weight-seed arm.
+    if b == TEACHER_BASE:
+        return "same-model"
+    lab = b.replace(f"{TEACHER_BASE}-", "")
+    return f"full-{lab}" if lab.startswith("seed") else lab
 
-runs["lineage"] = (runs.animal + " | " + TEACHER_BASE + " -> " + runs.student_base.map(base_label))
+runs["model"] = runs.student_base.map(base_label)
+runs["lineage"] = runs.animal + " | " + TEACHER_BASE + " -> " + runs.model
 BASE_RANK = {"data-seed1": 0, "weight-seed1": 1, "data-seed2": 2, "weight-seed2": 3,
-             "data-seed3": 4, "weight-seed3": 5, "same-model": 6}
+             "data-seed3": 4, "weight-seed3": 5,
+             **{f"full-seed{n}": 5 + n for n in range(1, 10)}, "same-model": 15}
 ANIMAL_RANK = {"dog": 0, "cat": 1, "lion": 2, "pig": 3, "rabbit": 4}
+MODEL_ORDER = [m for m in BASE_RANK if m in set(runs.model)]
+ANIMAL_ORDER = sorted(runs.animal.unique(), key=lambda a: ANIMAL_RANK.get(a, 99))
 LINEAGES = sorted(runs.lineage.unique(), key=lambda s: (
     ANIMAL_RANK.get(s.split(" | ")[0], 99), BASE_RANK.get(s.split(" -> ")[1], 99)))
 runs["lineage"] = pd.Categorical(runs.lineage, categories=LINEAGES, ordered=True)
@@ -334,21 +408,123 @@ print(f"{len(runs)} campaign runs (teacher x cell, seed {STUDENT_SEED}) over {le
       f"lineages | dropped {n_extra_seed} runs at these coordinates from other seeds")
 print(f"teachers present: {runs.teacher.nunique()} of {len(TOP20)} | "
       f"cells present: {runs.student_tag.nunique()} of {len(DESIGN_CELLS)}")
+print(f"arms with no measured test prior (raw p only, excluded from prior-referenced views): "
+      f"{NO_PRIOR}")
+''')
+
+md(r"""
+## 3. Summary — aggregate transfer across animals and models
+
+The cross-cut, before any per-lineage detail. **Row unit everywhere: one campaign run**
+(teacher × design cell, student seed 1, ep20); each display names its own slice, aggregation
+and selection. The readouts are the prior-referenced ones defined in §2 —
+$\log_{10}(\text{test}/\text{test\_prior})$, where $0$ means the student scores exactly its
+base's own prior and $+1$ a $10\times$ lift, and the prior-based collapse fraction
+($\text{test} < \text{test\_prior}/e^3$) — because raw test $p$ is not comparable across animals
+or bases. Arms with no measured test prior are absent from this section (see the §2 print).
+
+The $K/K^\ast$ axis is cut into three fixed regimes, shared by every display here:
+
+- **low** $[0.29, 0.57)$ — below the focus band, where transfer peaks (lowk-9 / krungs territory);
+- **band** $[0.57, 1.00)$ — the focus band the current designs concentrate on;
+- **above** $[1.00, 1.41]$ — at/over the designed boundary, where the law predicts collapse.
+
+Coverage is **not** balanced across arms (§4 has the full accounting): every square annotates
+its `n`, and the campaign / teacher-tier composition differs between squares, so compare
+neighbouring squares rather than distant ones. The tier table at the end restricts to the
+shared core65 × top-10 slice, the closest thing to a balanced design across animals.
+""")
+
+code(r'''
+REGIME_EDGES = [0.25, 0.57, 1.00, 1.45]   # lower edge below the 0.29 design floor, so no NaNs
+REGIME_LABELS = ["low < 0.57", "band 0.57-1.00", "above >= 1.00"]
+runs["K_regime"] = pd.cut(runs.K_rel, REGIME_EDGES, labels=REGIME_LABELS,
+                          right=False, include_lowest=True).astype(str)
+
+summ = runs[runs.test_prior.notna()].copy()
+# test can be exactly 0 for a fully collapsed run; floor the ratio so its log stays finite.
+summ["log_ratio"] = np.log10(np.clip(summ.ratio, 1e-4, None))
+SUMM_ORDERS = {"model": [m for m in MODEL_ORDER if m in set(summ.model)],
+               "animal": [a for a in ANIMAL_ORDER if a in set(summ.animal)],
+               "K_regime": REGIME_LABELS}
+
+for val, kw, what in [
+    ("log_ratio", dict(vmin=-2.5, vmax=2.5, mid=0.0, cmap="RdBu_r",
+                       cbar_label="mean log10(test / test_prior)"),
+     "prior-normalized transfer (0 = at the base's own prior)"),
+    ("dead_prior", dict(vmin=0.0, vmax=1.0, cmap="magma_r",
+                        cbar_label="fraction collapsed (test < test_prior / e^3)"),
+     "prior-based collapse fraction"),
+]:
+    fig = aplots.facet_grid_heatmaps(
+        summ, row="model", col="animal", val=val, col_facet="K_regime", agg="mean",
+        orders=SUMM_ORDERS, show_n=True, fmt="{:.2f}", panel_w=2.7, row_h=0.42,
+        cell_fontsize=6.0,
+        title=(f"Summary — {what}\nrow = student base, col = animal, panel = K/K* regime; "
+               "value = mean over that arm's campaign runs in the regime, n = runs"),
+        **kw)
+    plt.show()
+''')
+
+md(r"""
+### 3b. Cross-model and cross-tier aggregates
+
+Two condensations of the grids above, both **macro-averaged**: a per-(animal, model) mean is
+taken first and those per-arm means are then averaged, so an arm with 3× the runs does not count
+3× (per-model views precede any cross-model mean; `arms` counts what went into each entry).
+
+- **ds vs ws** — sub-boundary runs ($K/K^\ast < 1$) only, data-seed vs weight-seed vs same-model
+  arms; `ds - ws` is the cross-init asymmetry in decades of prior lift.
+- **teacher tier** — restricted to the balanced **core65 × top-10** slice (sub-boundary), where
+  the top-5 and top-6–10 tiers ran the same cells, so the tier contrast is not confounded with
+  design.
+""")
+
+code(r'''
+sub = summ[summ.K_rel < 1.0].copy()
+sub["family"] = np.select([sub.model.str.startswith("data-seed"),
+                           sub.model.str.startswith("weight-seed"),
+                           sub.model.str.startswith("full-seed")],
+                          ["data-seed", "weight-seed", "full-seed"], "same-model")
+per_arm = (sub.groupby(["animal", "family", "model"], observed=True)
+           .agg(log_ratio=("log_ratio", "mean"), dead_prior=("dead_prior", "mean"),
+                n=("log_ratio", "size")).reset_index())
+fam = (per_arm.groupby(["animal", "family"], observed=True)
+       .agg(mean_log_ratio=("log_ratio", "mean"), mean_dead=("dead_prior", "mean"),
+            arms=("model", "nunique"), runs=("n", "sum"))
+       .reset_index().pivot(index="animal", columns="family"))
+fam[("gap", "ds - ws")] = (fam[("mean_log_ratio", "data-seed")]
+                           - fam[("mean_log_ratio", "weight-seed")])
+print("ds vs ws — K/K* < 1 runs, macro-averaged over that family's arms "
+      "(mean_log_ratio in decades of prior lift):")
+display(fam.round(3).reindex([a for a in ANIMAL_ORDER if a in fam.index]))
+
+core = sub[sub.student_tag.isin(CORE65) & sub.teacher.isin(TOP10)]
+tier = (core.groupby(["animal", "model", "tier3"], observed=True).log_ratio.mean()
+        .groupby(["animal", "tier3"], observed=True)
+        .agg(mean_log_ratio="mean", arms="size").reset_index()
+        .pivot(index="animal", columns="tier3"))
+tier[("n_runs", "total")] = core.groupby("animal", observed=True).log_ratio.size()
+print("\nteacher tier — core65 cells x top-10 teachers, K/K* < 1, macro-averaged over arms "
+      "(the pool's distillability ranking should make top1-5 >= top6-10):")
+display(tier.round(3).reindex([a for a in ANIMAL_ORDER if a in tier.index]))
 ''')
 
 md("""
-## 3. Coverage — what has landed, per lineage and campaign
+## 4. Coverage — what has landed, per lineage and campaign
 
 Row unit: one lineage. Columns: evaluated **teacher × cell pairs** per campaign, against that
 campaign's own denominator (its cell count × its teacher pool: 20 × 25 for `krungs-25`,
-20 × 4 for `krungs-w3`, 5 × 117 for `band-117`, 20 × 20 for `focus-20`). A run is counted under
-every design set that contains its cell, so the `focus-20` column double-counts with `band-117`
-(the same runs, since `focus-20 ⊂ band-117`) and `krungs-w3` overlaps `band-117` in one cell.
-`krungs-w3` was only ever placed on the `data-seed1` / `weight-seed1` arms, so `0/80` elsewhere
-is the design, not a gap.
+20 × 4 for `krungs-w3`, 20 × 20 for `focus-20`, 10 × 48 for `band-48`, 10 × 9 for `lowk-9`,
+5 × 117 for `band-117`). A run is counted under every design set that contains its cell **and**
+whose teacher pool contains its teacher, so the columns double-count where the designs overlap:
+`focus-20` and `band-48` with `band-117` (`⊂`), `band-48` with `focus-20` (12 shared cells),
+`lowk-9` with `krungs-25` (the 3 anchor rungs). `krungs-w3` was only ever placed on the
+`data-seed1` / `weight-seed1` arms, so `0/80` elsewhere is the design, not a gap; likewise the
+`b48lowk` queues are still draining on some arms.
 
 The denominators differ per campaign, so a lineage can be complete on one campaign and empty on
-another; the figures in §6 show whatever exists and annotate `n` in every square.
+another; the figures in §7 show whatever exists and annotate `n` in every square.
 """)
 
 code(r'''
@@ -370,7 +546,7 @@ display(COVER)
 ''')
 
 md("""
-## 4. The collapse threshold, re-checked on this pooled data
+## 5. The collapse threshold, re-checked on this pooled data
 
 `DEAD = 0.005` is inherited from the generality/krungs notebooks. It is only usable if it sits in
 the empty trough of *this* merged population's score distribution. Row unit: one campaign run.
@@ -392,9 +568,9 @@ print(f"runs in the (1e-3, 5e-3] trough bin: {int(runs.test.between(1e-3, 5e-3).
 ''')
 
 md(r"""
-### 4b. Is that one threshold systematic across lineages?
+### 5b. Is that one threshold systematic across lineages?
 
-§4 pools every arm, which can only hide an arm-specific trough. This asks the question properly:
+§5 pools every arm, which can only hide an arm-specific trough. This asks the question properly:
 fit a 2-component Gaussian mixture to $\log_{10} p$ **within each lineage** and read off where
 that arm's dead and live modes actually sit, then measure how much the arm's boundary moves as
 the cut is swept.
@@ -426,7 +602,6 @@ magnitude.
 """)
 
 code(r'''
-from scipy.stats import gaussian_kde
 from sklearn.mixture import GaussianMixture
 
 P_FLOOR = 1e-6              # test p is a probability estimate; clamp before logging
@@ -442,12 +617,11 @@ def boundary_at(g: pd.DataFrame, cut: float) -> float:
 
 
 THR_MIN_RUNS = 100
-rows, dists = [], {}
+rows = []
 for lin, g in runs.groupby("lineage", observed=True):
     if len(g) < THR_MIN_RUNS:
         continue
     lp = np.log10(np.clip(g.test.values, P_FLOOR, None))
-    dists[lin] = lp
     mus = np.sort(GaussianMixture(2, random_state=0).fit(lp.reshape(-1, 1)).means_.ravel())
     rec = {"lineage": lin, "n": len(g), "dead_mode": 10 ** mus[0], "live_mode": 10 ** mus[1],
            "sep": mus[1] - mus[0], "dead_frac": g.dead.mean(),
@@ -464,39 +638,9 @@ for c in [f"b_{c}" for c in CUTS] + ["b_live/10"]:
 ''')
 
 md(r"""
-The `DEAD_below_live` column is the diagnostic: how many decades of clearance the fixed cut has
-below that arm's live mode. Where the clearance is thin, the cut is eating the live shoulder, and
-the arm's boundary walks as the cut moves — which is exactly what the `b_*` columns show. Plotted
-below: one panel per lineage, its $\log_{10} p$ distribution with the fixed cut (red) against the
-arm's own mixture modes (grey).
-""")
+## 6. Per-teacher first — is a teacher mean the right thing to put in a square?
 
-code(r'''
-ncol = 4
-nrow = int(np.ceil(len(dists) / ncol))
-fig, axs = plt.subplots(nrow, ncol, figsize=(3.4 * ncol, 2.2 * nrow), squeeze=False, sharex=True)
-grid = np.linspace(np.log10(P_FLOOR) - 0.2, -0.3, 600)
-for ax, (lin, lp) in zip(axs.ravel(), dists.items()):
-    ax.hist(lp, bins=40, color="#b8c8dd", density=True)
-    ax.plot(grid, gaussian_kde(lp, bw_method=0.22)(grid), color="#2b5d8c", lw=1.4)
-    for m in np.sort(GaussianMixture(2, random_state=0).fit(lp.reshape(-1, 1)).means_.ravel()):
-        ax.axvline(m, color="#777777", ls="-", lw=1.0)
-    ax.axvline(np.log10(DEAD), color="#d03b3b", ls=":", lw=1.6)
-    ax.set_title(lin, fontsize=8.5)
-    ax.set_yticks([])
-for ax in axs.ravel()[len(dists):]:
-    ax.set_visible(False)
-for ax in axs[-1]:
-    ax.set_xlabel("log10 test p(target)")
-fig.suptitle(f"Per-lineage score distributions — red dotted = fixed DEAD {DEAD}, "
-             "grey = that arm's own 2-component mixture modes", y=1.02, fontsize=10)
-fig.tight_layout(); plt.show()
-''')
-
-md(r"""
-## 5. Per-teacher first — is a teacher mean the right thing to put in a square?
-
-The figures in §6 average teachers inside each square, which is only honest if the teachers move
+The figures in §7 average teachers inside each square, which is only honest if the teachers move
 *together* along $K$. Row unit here: one teacher; y: its mean test $p$ over the cells in each
 $K/K^\ast$ bin; one panel per lineage (the four best-covered ones). Teachers differ a lot in
 **level** — that is the distillability ranking the pool was selected on — but if they share the
@@ -532,29 +676,37 @@ fig.tight_layout(); plt.show()
 ''')
 
 md(r"""
-## 6. The campaign grids — one figure per lineage
+## 7. The campaign grids — one figure per lineage
 
 **Row unit of every square:** the mean over all `teacher × design-cell` runs whose cell falls in
 that $(K/K^\ast\ \text{bin}, \alpha, r)$ square, at student seed 1. `n` under each value is how
 many such runs went into it — it varies across squares because the campaigns carry different
-teacher pools (5 vs 20) and different cell densities, so **compare colours within a square's
-neighbourhood, not the `n`s**. §8 repeats the whole thing on a fixed 5-teacher pool where `n` is
-comparable throughout.
+teacher pools (5, 10 or 20) and different cell densities, so **compare colours within a square's
+neighbourhood, not the `n`s**.
 
 Colour: mean test $p(\text{target})$ on the house 0–0.2 scale, shared by every figure so lineages
-can be read against each other. Dashed line: the designed boundary $K/K^\ast = 1$. Red boxes:
-squares containing at least one `focus-20` cell — the 20-cell design new arms now run.
+can be read against each other. Dashed line: the designed boundary $K/K^\ast = 1$. Boxed squares
+mark the **core65** design new arms now run, coloured by which part placed the cell: **red** =
+`focus-20`, **blue** = `band-48` outside `focus-20`, **orange** = `lowk-9`.
 """)
 
 code(r'''
-FOCUS_HL = [{"K_bin": r.K_bin, "alpha": int(r.alpha), "rank": int(r["rank"]),
-             "color": "#ff3b3b", "lw": 2.0}
-            for _, r in design[design.campaign.eq("focus-20")].iterrows()]
+def _hl(tags, color):
+    d = design[design.student_tag.isin(tags)]
+    return [{"K_bin": r.K_bin, "alpha": int(r.alpha), "rank": int(r["rank"]),
+             "color": color, "lw": 2.0} for _, r in d.iterrows()]
+
+
+# The core65 design, coloured by which part placed the cell: focus-20 red, the band-48 cells
+# outside focus-20 blue, lowk-9 orange.
+CORE65_HL = (_hl(FOCUS_CELLS, "#ff3b3b")
+             + _hl(set(BAND48_CELLS) - set(FOCUS_CELLS), "#2f6fd0")
+             + _hl(LOWK9_CELLS, "#ff8c00"))
 
 
 def arm_grid(sub: pd.DataFrame, lin: str, *, val: str = "test", vmax: float = P_VMAX,
              cmap: str = "viridis", fmt: str = "{:.3f}", cbar: str = "mean test p(target)",
-             note: str = "", highlight=FOCUS_HL):
+             note: str = "", highlight=CORE65_HL):
     """One lineage's (K/K* bin) x alpha x rank grid; returns the Figure."""
     camp = ", ".join(f"{c} {int(sub.campaign.eq(c).sum())}" for c in CAMPAIGNS
                      if sub.campaign.eq(c).any())
@@ -593,50 +745,9 @@ if skipped:
 ''')
 
 md(r"""
-## 7. The same grids as collapse fraction
+## 8. Teacher × cell matrices — the un-binned view
 
-Identical construction to §6, but the square's value is the **fraction of its runs that
-collapsed** ($p < $ `DEAD`) instead of the mean $p$. The mean-$p$ view mixes "the trait
-transferred weakly" with "half the teachers died"; this one isolates the second. A lineage where
-the law holds shows a clean 0 → 1 step at the dashed line in *every* panel.
-
-Shown for the lineages with enough coverage for the step to be visible (≥ 100 runs).
-""")
-
-code(r'''
-for lin in LINEAGES:
-    sub = runs[runs.lineage.eq(lin)]
-    if len(sub) < 100:
-        continue
-    arm_grid(sub, lin, val="dead", vmax=1.0, cmap="magma_r", fmt="{:.2f}",
-             cbar="fraction of runs collapsed", note=" — collapse fraction")
-    plt.show()
-''')
-
-md(r"""
-## 8. Balanced pool — the same grids on the 5 teachers every campaign ran
-
-§6's squares average different teacher pools depending on which campaign placed the cell
-(`band-117` ran only the top 5; the other two ran all 20), so part of any colour difference
-between a band square and a krungs square is teacher composition, not $K$. Restricting to the
-**top-5 teachers, which all three campaigns share**, removes that confound at the cost of 4× less
-data. Same axes, same scale; row unit is now `top-5 teacher × design-cell`.
-""")
-
-code(r'''
-bal = runs[runs.tier.eq("top5")]
-for lin in LINEAGES:
-    sub = bal[bal.lineage.eq(lin)]
-    if too_sparse(sub):
-        continue
-    arm_grid(sub, lin, note=" — top-5 teachers only")
-    plt.show()
-''')
-
-md(r"""
-## 9. Teacher × cell matrices — the un-binned view
-
-§6–8 read the campaigns on the frame the *law* is written in: $K$ binned, teachers averaged
+§7 reads the campaigns on the frame the *law* is written in: $K$ binned, teachers averaged
 inside each square. That is the right frame for asking whether the boundary sits at one height,
 and the wrong one for asking **which teacher** transferred at **which exact cell** — binning
 merges cells that differ in $(\alpha, r)$, and the teacher mean hides that the pool spans a 10×
@@ -657,10 +768,11 @@ This section is the same data with nothing collapsed, in the layout
   almost every case, since every campaign job is student seed 1);
 - **dashed line** — $K/K^\ast = 1$, the designed boundary: the law predicts everything above it
   dead. Row labels carry each cell's $K/K^\ast$ in parentheses and are **coloured by the campaign
-  that placed the cell** (gold `focus-20`, blue `band-117`, red `krungs-25`, purple `krungs-w3`),
+  that placed the cell** (gold `focus-20`, green `lowk-9`, teal `band-48`, blue `band-117`, red
+  `krungs-25`, purple `krungs-w3`),
   so design provenance stays readable without splitting the figure.
 
-Blank rows are cells that lineage never ran — see §3 for which design each arm carries.
+Blank rows are cells that lineage never ran — see §4 for which design each arm carries.
 """)
 
 code(r'''
@@ -703,7 +815,7 @@ def teacher_cell_matrix(ax, sub: pd.DataFrame, *, rows: list[str] | None = None,
     for lbl, tag in zip(ax.get_yticklabels(), rows):
         lbl.set_color(CAMPAIGN_COLOR[CELL_CAMPAIGN[tag]])
     if not label_rows:
-        # tick_params, NOT set_yticklabels([]): panels in §9b share a y axis, so replacing the
+        # tick_params, NOT set_yticklabels([]): panels in §8b share a y axis, so replacing the
         # formatter on one of them blanks the labelled panel as well.
         ax.tick_params(axis="y", labelleft=False)
     return im
@@ -729,48 +841,10 @@ for k, tags in list(near.items())[:4]:
 ''')
 
 md(r"""
-### 9a. One matrix per lineage
+### 8b. All of a trait's lineages side by side
 
-Row unit: one `(design cell, teacher)` pair, at student seed 1 — the raw campaign run, not an
-average over anything except the rare repeated coordinate. Colour is the house 0–0.2 scale shared
-with §6, so these read directly against the binned grids. **Red boxes** mark collapsed runs
-($p <$ `DEAD`); a lineage in which the law holds shows the boxes filling in solidly at the dashed
-line and nowhere below it.
-
-Only lineages with enough coverage to read as a surface are drawn (same `MIN_RUNS` / `MIN_CELLS`
-cut as §6); the rest are listed underneath.
-""")
-
-code(r'''
-skipped_m = []
-for lin in LINEAGES:
-    sub = runs[runs.lineage.eq(lin)]
-    if too_sparse(sub):
-        skipped_m.append(f"{lin} ({len(sub)} runs)")
-        continue
-    rows = [t for t in CELL_ROWS if t in set(sub.student_tag)]   # drop rows this arm never ran
-    fig, ax = plt.subplots(figsize=(11.5, max(4.0, 0.20 * len(rows) + 1.6)))
-    im = teacher_cell_matrix(ax, sub, rows=rows)
-    ax.set_xlabel("teacher (distillability rank order, rank 1 leftmost)")
-    ax.set_ylabel("student cell — ascending K, then rank / α / lr  (K/K* in parens)")
-    ax.set_title(
-        f"{lin} — mean test p(target) per cell x teacher | {len(sub)} runs, "
-        f"{len(rows)} of {len(CELL_ROWS)} design cells\n"
-        "row colour = campaign (gold focus-20, blue band-117, red krungs-25, purple krungs-w3)"
-        f"   |   red box = collapsed (< {DEAD})   |   dashed = K/K* = 1",
-        fontsize=9)
-    fig.colorbar(im, ax=ax, shrink=0.7, label="mean test p(target)")
-    fig.tight_layout(); plt.show()
-if skipped_m:
-    print("too sparse to plot: " + " | ".join(skipped_m))
-''')
-
-md(r"""
-### 9b. All of a trait's lineages side by side
-
-The same matrices again, one panel per lineage of a given animal, on **one shared row axis** (all
-145 design cells, so a row is the same student cell in every panel) and **one shared colour
-scale**. The per-cell numbers are dropped — at this density they are unreadable and the question
+One panel per lineage of a given animal, on **one shared row axis** (all design cells, so a row
+is the same student cell in every panel) and **one shared colour scale**. The per-cell numbers are dropped — at this density they are unreadable and the question
 here is not "what was the value" but **how far the live band extends and where it stops**, which
 is exactly what the colour shows.
 
@@ -778,7 +852,7 @@ Read it across: a lineage whose live (bright) region ends at the same dashed lin
 neighbours is one where the pre-registered boundary transferred; a lineage that is dark well below
 the line lost the trait for reasons other than $K$ (a harder init), and one still bright above it
 sits above its own, higher $K^\ast$. Blank columns-of-rows are design gaps, not failures — the
-arms ran different campaigns (§3).
+arms ran different campaigns (§4).
 """)
 
 code(r'''
@@ -815,7 +889,7 @@ for animal in sorted({lin.split(" | ")[0] for lin in LINEAGES}, key=lambda a: AN
 ''')
 
 md(r"""
-## 10. All lineages on one axis — the marginal $K/K^\ast$ response
+## 9. All lineages on one axis — the marginal $K/K^\ast$ response
 
 The grids answer "does the boundary sit at the same height whatever $(\alpha, r)$ got you there".
 This collapses each grid to its y-marginal so the arms can be compared directly. Row unit of each
@@ -889,6 +963,16 @@ node-1 rebuild. It is rebuilt from the surviving campaign records — the frozen
 in `top20_krungs_ds1.ipynb`, the `top5-bandext-ds2ws2` job list, `run_logs/focus20_cells.json`,
 the teacher manifests, and the student output tree — not from the original notebook, so section
 numbering and wording differ from the lost one even where the figures agree.
+
+**Update (2026-08-18).** Rebuilt to fold in the latest band-extension data: the `band-48`
+rank/α-balanced thin (top-10 teachers, every arm) and the 9-cell `lowk-9` low-$K$ extension
+settled 2026-08-17, both read from their design manifests. Added the §3 cross-animal /
+cross-model summary on the prior-normalized readout; dropped the former per-lineage
+collapse-fraction grids (the marginal collapse view survives in §9).
+
+**Trim (2026-08-18, same day).** Dropped the per-lineage score-distribution panels (§5b keeps
+the mixture table), the top-5 balanced-pool grids, and the one-matrix-per-lineage section; §7's
+boxes now colour the core65 design by part (red focus-20 / blue band-48 / orange lowk-9).
 """)
 
 nb = nbf.v4.new_notebook(
@@ -904,7 +988,7 @@ if __name__ == "__main__":
 
     from nbclient import NotebookClient
 
-    client = NotebookClient(nb, timeout=1800, kernel_name="python3",
+    client = NotebookClient(nb, timeout=2700, kernel_name="python3",
                             resources={"metadata": {"path": str(REPO / "notebooks")}})
     try:
         client.execute()

@@ -273,7 +273,10 @@ def read_cell_seeds(cell_dir, prompt_set: str = "test") -> dict[int, float]:
 def short_model(name: str) -> str:
     """``pythia-160m`` -> ``original``; strip the ``pythia-160m-`` prefix otherwise.
 
-    Unknown names pass through unchanged. A non-160m Pythia name (e.g. ``pythia-2.8b``)
+    ``pythia-160m-seed2`` (fully re-randomized) -> ``full-seed2``, matching ``spec_label``:
+    a bare ``seed2`` would read as a data-/weight-seed arm.
+
+    Unknown names pass through unchanged. A non-160m Pythia name (e.g. ``pythia-410m``)
     also passes through, but with a warning: every downstream frame/join in this module
     keys on the 160m short labels, so such rows would silently match nothing.
     """
@@ -281,7 +284,8 @@ def short_model(name: str) -> str:
         return "original"
     prefix = "pythia-160m-"
     if name.startswith(prefix):
-        return name[len(prefix):]
+        rest = name[len(prefix):]
+        return f"full-{rest}" if rest.startswith("seed") else rest
     if name.removeprefix("EleutherAI/").startswith("pythia-"):
         warnings.warn(
             f"short_model: {name!r} is not a pythia-160m-family name; passing it "

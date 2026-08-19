@@ -303,6 +303,8 @@ def _resolve_base_metrics(
             res = run_benchmarks(
                 base_repo, cfg.device, peft_path=None, tasks=cfg.benchmark_tasks,
                 num_fewshot=0, limit=cfg.benchmark_limit,
+                # DataDecide specs pin a step, not an HF revision -> None.
+                revision=getattr(cfg.spec, "revision", None),
             )
             cached["benchmarks"] = {
                 "signature": bench_sig,
@@ -379,6 +381,9 @@ def _per_seed_metrics(
             res = run_benchmarks(
                 pretrained, cfg.device, peft_path=peft, tasks=cfg.benchmark_tasks,
                 num_fewshot=0, limit=cfg.benchmark_limit,
+                # Only the LoRA path benchmarks the base repo; a full-FT checkpoint dir
+                # has no revision. DataDecide specs pin a step, not an HF revision.
+                revision=getattr(cfg.spec, "revision", None) if peft else None,
             )
             stored["benchmarks"] = {
                 "signature": bench_sig,

@@ -21,6 +21,7 @@ a single animal + single HP config); this drives the full grid including HPs and
 from __future__ import annotations
 
 import itertools
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -40,9 +41,9 @@ from pipelines.train_teacher_templates_pipeline import (
     run,
     teacher_run_is_current,
 )
+from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import (
-    parse_base_models,
     resolve_animals,
     spec_label,
 )
@@ -66,6 +67,13 @@ def main(
     ),
     shard_index: int = typer.Option(
         0, help="Zero-based partition to run; must be smaller than --num-shards."
+    ),
+    only_param_tags: Path = typer.Option(
+        None,
+        help="Restrict to grid cells whose ft_param_tag is listed here. Accepts a "
+        "JSON file with a 'param_tags' list or a plain text file (one tag per line); "
+        "same semantics as sweep_generate_numbers. Applied BEFORE sharding, so shards "
+        "partition the restricted set.",
     ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -97,9 +105,11 @@ def main(
         else resolve_animals(sweep["animals"], base.paths, n_animals)
     )
     base_models = str(sweep.get("base_models", "seeds"))
+    allow_full_seeds = bool(sweep.get("allow_full_seed_bases", False))
+    dtype = str(sweep.get("dtype", "float32"))
     base_specs = (
         [base.spec] if base_models.lower() == "config"
-        else parse_base_models(base_models)
+        else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seeds)
     )
     ft_seeds = [int(s) for s in sweep["ft_seeds"]]
     epochs_list = [int(e) for e in sweep["grid"]["n_epochs"]]
@@ -109,6 +119,45 @@ def main(
     all_cells = list(
         itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs, ft_seeds)
     )
+    if only_param_tags is not None:
+        text = only_param_tags.read_text()
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError:
+            # Not JSON at all -> plain text, one tag per line.
+            tag_filter = {ln.strip() for ln in text.splitlines() if ln.strip()}
+        else:
+            # Valid JSON must have the expected shape; fail loud on anything else
+            # rather than silently line-parsing the JSON text into garbage tags.
+            if isinstance(doc, dict):
+                doc = doc.get("param_tags")
+            if not isinstance(doc, list) or not all(isinstance(t, str) for t in doc):
+                raise typer.BadParameter(
+                    f"{only_param_tags} is JSON but not a 'param_tags' list "
+                    "(expected a list of strings or an object with a 'param_tags' key)"
+                )
+            tag_filter = set(doc)
+
+        def cell_tag(cell):
+            _animal, _spec, n_epochs, lr, (r, alpha), _seed = cell
+            return ft_param_tag(
+                replace(base.train, n_epochs=n_epochs, learning_rate=lr),
+                replace(base.lora, r=r, lora_alpha=alpha),
+            )
+
+        all_cells = [c for c in all_cells if cell_tag(c) in tag_filter]
+        covered = {cell_tag(c) for c in all_cells}
+        missing = sorted(tag_filter - covered)
+        logger.info(
+            "Restricting to {} param_tags from {} -> {} cells",
+            len(tag_filter), only_param_tags, len(all_cells),
+        )
+        if missing:
+            raise typer.BadParameter(
+                f"{len(missing)} requested param_tags are not expressible by this "
+                f"sweep grid (first few: {missing[:5]}); extend the grid axes so "
+                "every requested tag is covered"
+            )
     cells = shard_cells(all_cells, num_shards=num_shards, shard_index=shard_index)
     logger.info(
         "Sweep grid: {} animals x {} models x {} epochs x {} lr x {} lora x {} seeds "
@@ -139,6 +188,7 @@ def main(
             target_animal=animal,
             device=device,
             force=force,
+            dtype=dtype,
         )
         if not force and teacher_run_is_current(run_cfg):
             n_skipped += 1

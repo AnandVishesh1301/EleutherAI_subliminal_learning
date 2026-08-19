@@ -1,5 +1,7 @@
 """Cheap teacher-steerability screen: does the base model steer like the teacher?
 
+OLMo/DataDecide models are not wired here (NeoX-only).
+
 For one trained ``{param_tag}`` config (all its ``ftseed*`` adapters), this:
 
 1. Extracts the **teacher-minus-base** direction ``v`` from a *trait-free* context --

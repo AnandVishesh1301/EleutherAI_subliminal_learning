@@ -20,7 +20,9 @@ from pathlib import Path
 import torch
 from loguru import logger
 from peft import PeftModel
-from transformers import GPTNeoXForCausalLM
+from transformers import GPTNeoXForCausalLM, PreTrainedModel
+
+from subliminal_learning.models.datadecide import DataDecideSpec
 
 from subliminal_learning.models.loading_io import load_model
 from subliminal_learning.models.registry import PythiaModelSpec
@@ -44,7 +46,7 @@ def load_finetuned_teacher(
     device: str,
     dtype: torch.dtype = torch.float32,
     expected_mode: str | None = None,
-) -> GPTNeoXForCausalLM:
+) -> PreTrainedModel:
     """Load a teacher checkpoint (LoRA adapter or full fine-tune) in eval mode.
 
     Args:
@@ -60,8 +62,9 @@ def load_finetuned_teacher(
             files win (the files are ground truth for loading).
 
     Returns:
-        Model in eval mode on `device` -- a `PeftModel` (LoRA) or `GPTNeoXForCausalLM`
-        (full FT).
+        Model in eval mode on `device` -- a `PeftModel` (LoRA; wrapping a
+        `GPTNeoXForCausalLM`, or the legacy `hf_olmo` `OLMoForCausalLM` for a
+        `DataDecideSpec`) or a `GPTNeoXForCausalLM` (full FT).
     """
     mode = detect_finetune_mode(checkpoint_dir)
     if expected_mode is not None and expected_mode != mode:
@@ -75,6 +78,10 @@ def load_finetuned_teacher(
         model = PeftModel.from_pretrained(base, str(checkpoint_dir))
         model.eval()
         return model
+    if isinstance(spec, DataDecideSpec):
+        raise NotImplementedError(
+            "full-finetune eval loading is not wired for DataDecide models"
+        )
     model = GPTNeoXForCausalLM.from_pretrained(
         str(checkpoint_dir), torch_dtype=dtype
     )

@@ -33,7 +33,8 @@ from pipelines.train_teacher_templates_pipeline import (
     run,
 )
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.models.datadecide import parse_base_model_tokens
+from subliminal_learning.teachers.model_specs import spec_label
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
@@ -96,7 +97,7 @@ def main(
     seed_list = [int(s) for s in seeds.split(",") if s.strip() != ""]
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"
-        else parse_base_models(base_models, allow_full_seeds=allow_full_seed_bases)
+        else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seed_bases)
     )
 
     logger.info(

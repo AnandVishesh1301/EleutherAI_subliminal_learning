@@ -1,8 +1,14 @@
 """Merge trait p, held-out task fidelity, and Pile CE delta on one dose axis (focus:ds1 lineage)."""
-import json, re
+import glob as _glob
+import json
+import re
 from pathlib import Path
-import numpy as np, pandas as pd
+
+import numpy as np
+import pandas as pd
+
 from subliminal_learning.analysis import collapse_law as cl
+from subliminal_learning.analysis import trajectories as traj
 from subliminal_learning.analysis import transfer_factors as tf
 from subliminal_learning.analysis.setup import bootstrap
 
@@ -27,7 +33,6 @@ for cell in sorted(L.iterdir()):
 df = pd.DataFrame(rows)
 
 # pile CE delta per (cell, seed) — exists()-based walk (find/os.walk under-report on this FS)
-import glob as _glob
 pile = {}
 for cell_p in _glob.glob(str(L / "ep20_*")):
     for fs_p in _glob.glob(cell_p + "/ftseed*"):
@@ -37,20 +42,28 @@ for cell_p in _glob.glob(str(L / "ep20_*")):
             pile[(Path(cell_p).name, int(Path(fs_p).name.removeprefix("ftseed")))] = d["delta"]["delta_overall"]
 df["pile_delta"] = df.apply(lambda r: pile.get((r["cell"], r["ftseed"]), np.nan), axis=1)
 
-# endpoint pile KL(base||adapted) from the 932 checkpoint trajectories
+# endpoint integrity from the pile PROBE record (CE+KL, full final coverage; see
+# coherence/probe_io.py -- the pile_kl_traj files remain the TIME-COURSE source only)
 kl = {}
-for f in (OUT / "analysis" / "ckpt_pile_kl_traj").glob("*.json"):
-    d = json.loads(f.read_text())
-    last = d["points"][-1]
-    if last.get("checkpoint") == "checkpoints":
-        kl[(d["tag"], int(d["ft_seed"]))] = last["kl_base_adapted"]
+for cell_p in _glob.glob(str(L / "ep20_*")):
+    for fs_p in _glob.glob(cell_p + "/ftseed*"):
+        f = Path(fs_p) / "eval" / "pile_probe.json"
+        if f.exists():
+            d = json.loads(f.read_text())
+            if d.get("kl_base_student") is not None:
+                kl[(Path(cell_p).name, int(Path(fs_p).name.removeprefix("ftseed")))] = d["kl_base_student"]
 df["pile_kl_final"] = df.apply(lambda r: kl.get((r["cell"], r["ftseed"]), np.nan), axis=1)
 
-# fidelity per (cell, seed); NaN ce with attempted=True means non-finite (diverged) adapter
+# fidelity per (cell, seed) from run-dir eval records (scripts/fidelity_heldout_ce.py contract);
+# nonfinite_adapter records (diverged weights) count as attempted-but-NaN
 fid = {}
-for line in Path("/home/angela/.claude/jobs/de4d22ec/tmp/fidelity_results.jsonl").read_text().splitlines():
-    d = json.loads(line)
-    fid[(d["student_param_tag"], d["ftseed"])] = (d["ce_student"], d["ce_base"])
+for cell_p in _glob.glob(str(L / "ep20_*")):
+    for fs_p in _glob.glob(cell_p + "/ftseed*"):
+        f = Path(fs_p) / "eval" / "fidelity_heldout.json"
+        if f.exists():
+            d = json.loads(f.read_text())
+            ce = d["ce_student"] if d["ce_student"] is not None else float("nan")
+            fid[(Path(cell_p).name, int(Path(fs_p).name.removeprefix("ftseed")))] = (ce, d["ce_base"])
 df["attempted"] = df.apply(lambda r: (r["cell"], r["ftseed"]) in fid, axis=1)
 df["ce_heldout"] = df.apply(lambda r: fid.get((r["cell"], r["ftseed"]), (np.nan,)*2)[0], axis=1)
 ce_base = next(iter(fid.values()))[1] if fid else np.nan
@@ -61,7 +74,7 @@ prior = tf.load_priors(OUT)
 q = float(prior[(prior.animal == "dog") & (prior.base_label == "data-seed1")]["test_prior"].iloc[0])
 df["trait_rel"] = np.log(np.maximum(df["p_trait"], 1e-12) / q)
 
-df.to_csv("/home/angela/.claude/jobs/de4d22ec/tmp/three_curves.csv", index=False)
+df.to_csv(OUT / "analysis" / "fidelity_strip_ds1" / "three_curves.csv", index=False)
 print(f"seeds: {len(df)}, with pile: {df.pile_delta.notna().sum()}, with fidelity: {df.ce_heldout.notna().sum()}")
 print(f"held-out base CE = {ce_base:.3f}, trait test prior = {q:.4f}")
 

@@ -6,8 +6,18 @@ from pathlib import Path
 
 import torch
 from loguru import logger
-from transformers import AutoTokenizer, GPTNeoXForCausalLM, PreTrainedTokenizerBase
+from transformers import (
+    AutoTokenizer,
+    GPTNeoXForCausalLM,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
+from subliminal_learning.models.datadecide import (
+    DataDecideSpec,
+    load_datadecide_model,
+    load_datadecide_tokenizer,
+)
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 
 
@@ -48,7 +58,9 @@ def load_tokenizer(
     Returns:
         Tokenizer with `pad_token` set.
     """
-    
+    if isinstance(spec, DataDecideSpec):
+        # DataDecide bakes its org into the repo id; `hub_org` is ignored.
+        return load_datadecide_tokenizer(spec, hf_cache_root)
     repo_id = resolve_hf_repo_id(spec, hub_org)
     kwargs: dict = {"cache_dir": str(hf_cache_root / "hub")}
     if spec.revision is not None:
@@ -65,8 +77,8 @@ def load_model(
     hub_org: str,
     device: str,
     dtype: torch.dtype = torch.float32,
-) -> GPTNeoXForCausalLM:
-    """Load a PolyPythias causal LM on the specified device.
+) -> PreTrainedModel:
+    """Load a PolyPythias (or DataDecide) causal LM on the specified device.
 
     Args:
         spec: Model size/seed/variant/revision selection.
@@ -80,8 +92,12 @@ def load_model(
             the eval reads). Pass `bfloat16` explicitly only to trade accuracy for memory.
 
     Returns:
-        Model in eval mode on `device`.
+        Model in eval mode on `device` -- a `GPTNeoXForCausalLM`, or the legacy
+        `hf_olmo` `OLMoForCausalLM` for a `DataDecideSpec`.
     """
+    if isinstance(spec, DataDecideSpec):
+        # DataDecide bakes its org into the repo id; `hub_org` is ignored.
+        return load_datadecide_model(spec, hf_cache_root, device, dtype=dtype)
     repo_id = resolve_hf_repo_id(spec, hub_org)
     kwargs: dict = {
         "cache_dir": str(hf_cache_root / "hub"),

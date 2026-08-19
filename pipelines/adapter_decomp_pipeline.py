@@ -50,6 +50,7 @@ from subliminal_learning.analysis.adapter_decomp import (
     discover_adapters,
     init_group_key,
     lora_init_weights,
+    lora_target_modules,
 )
 from subliminal_learning.run_gate import (
     ERROR,
@@ -172,7 +173,7 @@ def cell_identity(refs: list, acfg: dict, cfg: AdapterDecompConfig,
         "base_snapshot": snapshot,
         "lora": {"r": int(acfg["r"]), "lora_alpha": int(acfg["lora_alpha"]),
                  "lora_dropout": acfg.get("lora_dropout"),
-                 "target_modules": sorted(acfg["target_modules"])},
+                 "target_modules": lora_target_modules(acfg["target_modules"])},
         "artifacts": {("final" if r.step is None else str(r.step)): r.weights_sha256()
                       for r in refs},
         "adapter_config_sha256": head.config_sha256(),
@@ -195,7 +196,7 @@ def read_rows(run_dir: Path) -> Any:
 
 
 def _w0_norms_cached(base_repo: str, hf_cache_root: Path, cache_dir: Path,
-                     target_modules: list[str], device: str,
+                     target_modules: str | list[str], device: str,
                      snapshot: str | None) -> dict[str, list[float]]:
     """W_0 norms for `base_repo`, computed once per base **revision** and memoised.
 
@@ -212,7 +213,7 @@ def _w0_norms_cached(base_repo: str, hf_cache_root: Path, cache_dir: Path,
     norms = base_weight_norms(
         base_model_factory(base_repo, hf_cache_root, device), target_modules)
     write_json_atomic(path, {"base_model_repo": base_repo, "snapshot": snapshot,
-                             "target_modules": list(target_modules),
+                             "target_modules": target_modules,
                              "norms": {k: list(v) for k, v in norms.items()}})
     return {k: list(v) for k, v in norms.items()}
 
@@ -337,8 +338,8 @@ def run(cfg: AdapterDecompConfig, output_root: Path, hf_cache_root: Path) -> dic
                             factory, head.ftseed + WRONG_SEED_OFFSET, acfg)
                             if cfg.wrong_seed_control else {}))
                 w0 = (_w0_norms_cached(base_repo, hf_cache_root, w0_cache_dir,
-                                       sorted(acfg["target_modules"]), cfg.device,
-                                       snapshot)
+                                       lora_target_modules(acfg["target_modules"]),
+                                       cfg.device, snapshot)
                       if cfg.include_w0 else {})
 
                 rows = _measure_cell(group, acfg, cache, w0, cfg, base_repo)

@@ -35,6 +35,9 @@ analysis = [
     "scikit-learn>=1.5",
     "statsmodels>=0.14",
 ]
+datadecide = [
+    "ai2-olmo>=0.6",
+]
 dev = [
     "pytest>=8.4.1,<9",
     "pytest-mock>=3.14.0,<4",
@@ -54,6 +57,13 @@ package = true
 # sweeps (capability_io.run_benchmarks). Keep it default so plain `uv sync` /
 # worker restarts cannot drop it mid-campaign (20260801_optparam P2-eval outage).
 default-groups = ["dev", "analysis", "eval"]
+# ai2-olmo (the non-default `datadecide` group) pins numpy<2 out of caution;
+# hf_olmo is verified to import and load the DataDecide 1B models under numpy
+# 2.4.6 (2026-08-18). This override globally supersedes any package's numpy
+# bound — revisit if a future dependency genuinely needs numpy<2. (ai2-olmo also
+# imports `datasets` at runtime without declaring it; the main project already
+# depends on datasets>=3.0.0,<4, so nothing extra is needed.)
+override-dependencies = ["numpy>=2.4.6"]
 
 [[tool.uv.index]]
 name = "pytorch-cu124"

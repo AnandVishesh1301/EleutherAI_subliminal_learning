@@ -138,6 +138,19 @@ def test_token_derivation(tmp_path):
     assert tokens == {"original", "data-seed1"}
 
 
+def test_token_for_repo_full_seed_dirs():
+    # `pythia-160m-seed1` is a fully re-randomized base: its token is `full-seed1`
+    # (a bare `seed1` fails the round-trip parse, silently skipping the run).
+    assert sw.token_for_repo("EleutherAI/pythia-160m-seed1", "EleutherAI") == (
+        "full-seed1", "EleutherAI/pythia-160m-seed1"
+    )
+    assert sw.token_for_repo("EleutherAI/pythia-160m-seed1@step3000", "EleutherAI") == (
+        "full-seed1@step3000", "EleutherAI/pythia-160m-seed1"
+    )
+    # Genuinely unmappable basenames still yield None rather than a guess.
+    assert sw.token_for_repo("EleutherAI/gpt2", "EleutherAI")[0] is None
+
+
 def test_done_detection_and_force(tmp_path):
     out = _build_tree(tmp_path)
     adapters, _ = _discover(out)

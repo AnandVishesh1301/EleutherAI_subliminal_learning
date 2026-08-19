@@ -1,0 +1,83 @@
+"""Unit tests for the same-model distill worker's flag -> TrainConfig mapping (no GPU).
+
+Covers `build_student_train`, the pure function behind the `--student-seed` and
+`--save-checkpoints` flags added for the orig-strip Tier B checkpoint campaign: the
+default path must stay byte-identical to the historical
+``replace(student_train, n_epochs=ep, seed=STUDENT_SEED)``, and the checkpoint path must
+turn on exactly the 40-checkpoint recipe (checkpoint_resume + save_steps 625 +
+save_total_limit 50 + save_only_model).
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
+
+from subliminal_learning.students.config import load_student_training  # noqa: E402
+
+
+def _load_worker():
+    spec = importlib.util.spec_from_file_location(
+        "animal_samedistill_worker", _REPO / "run_logs" / "animal_samedistill_worker.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+worker = _load_worker()
+
+
+def _student_train():
+    _, train = load_student_training(_REPO / "configs/training/lora_student_distill.yaml")
+    return train
+
+
+def test_default_mapping_is_byte_identical():
+    """No overrides -> exactly the historical replace(n_epochs=ep, seed=STUDENT_SEED)."""
+    st = _student_train()
+    got = worker.build_student_train(st, 20, None, False)
+    expected = replace(st, n_epochs=20, seed=worker.STUDENT_SEED)
+    assert got == expected
+    # And unchanged from the checkpoint fields' YAML/default state.
+    assert got.checkpoint_resume is False
+    assert got.save_only_model is False
+
+
+def test_student_seed_override():
+    st = _student_train()
+    got = worker.build_student_train(st, 20, 2, False)
+    assert got.seed == 2
+    assert replace(got, seed=worker.STUDENT_SEED) == replace(st, n_epochs=20, seed=worker.STUDENT_SEED)
+
+
+def test_save_checkpoints_recipe():
+    st = _student_train()
+    got = worker.build_student_train(st, 20, 1, True)
+    assert got.seed == 1
+    assert got.n_epochs == 20
+    assert got.checkpoint_resume is True
+    assert got.save_steps == 625
+    assert got.save_total_limit == 50
+    assert got.save_only_model is True
+
+
+def test_save_checkpoints_leaves_other_fields_alone():
+    st = _student_train()
+    got = worker.build_student_train(st, 20, 1, True)
+    # Only the five checkpoint/seed/epoch fields differ from the base config.
+    base = replace(
+        got,
+        n_epochs=st.n_epochs,
+        seed=st.seed,
+        checkpoint_resume=st.checkpoint_resume,
+        save_steps=st.save_steps,
+        save_total_limit=st.save_total_limit,
+        save_only_model=st.save_only_model,
+    )
+    assert base == st

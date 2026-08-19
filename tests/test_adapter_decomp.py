@@ -20,6 +20,7 @@ import pytest
 
 from subliminal_learning.analysis.adapter_decomp import (
     adapter_config,
+    base_weight_norms,
     chance_cos_floor,
     cos,
     decompose,
@@ -300,6 +301,40 @@ def test_ref_keys_are_unique_and_group_key_shares_inits(tree):
     student_refs = [r for r in refs if r.kind == "student" and r.ftseed == 1]
     keys = {init_group_key(r, adapter_config(r)) for r in student_refs}
     assert len(keys) == 1, "final adapter and its checkpoints must share one init group"
+
+
+def test_group_key_treats_a_regex_target_modules_as_one_atom(tree):
+    """OLMo LoRA configs store a regex STRING — sorting it would shred it into chars."""
+    ref = discover_adapters(tree, kinds=("student",))[0]
+    listed = init_group_key(ref, _adapter_cfg() | {
+        "base_model_name_or_path": "x", "target_modules": list(TARGET_MODULES)})
+    regex = init_group_key(ref, _adapter_cfg() | {
+        "base_model_name_or_path": "x", "target_modules": ".*(att_proj|ff_out)$"})
+    assert listed[3] == tuple(sorted(TARGET_MODULES)), "list keys must not change"
+    assert regex[3] == ".*(att_proj|ff_out)$"
+    # A one-module list must not collide with the same-letters string.
+    one = init_group_key(ref, _adapter_cfg() | {
+        "base_model_name_or_path": "x", "target_modules": ["dense"]})
+    other = init_group_key(ref, _adapter_cfg() | {
+        "base_model_name_or_path": "x", "target_modules": "dense"})
+    assert one != other
+
+
+def test_base_weight_norms_matches_lists_and_regexes_like_peft():
+    """A list matches by last name segment; a regex string by fullmatch on the whole name."""
+    factory = _tiny_model_factory()
+    listed = base_weight_norms(factory, ["query_key_value"])
+    regex = base_weight_norms(factory, r".*\.query_key_value")
+    assert listed and set(listed) == set(regex), "regex selected a different module set"
+    assert all(n.endswith("query_key_value") for n in listed)
+
+
+def test_lora_init_weights_passes_a_regex_target_modules_through():
+    """A string reaches LoraConfig unchanged and still matches modules by regex."""
+    cfg = _adapter_cfg() | {"target_modules": r".*(query_key_value|dense)$"}
+    init = lora_init_weights(_tiny_model_factory(), seed=1, adapter_cfg=cfg)
+    assert init, "regex target_modules matched no modules — it was not passed through"
+    assert all(k.endswith(("query_key_value", "dense")) for k in init)
 
 
 # ------------------------------------------------------------------------------ pipeline

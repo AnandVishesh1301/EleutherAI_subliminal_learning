@@ -65,6 +65,7 @@ from subliminal_learning.models.loading_io import (
     load_tokenizer,
     resolve_dtype,
 )
+from subliminal_learning.models.datadecide import DataDecideSpec
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.numbers.constrained import (
     ConstrainedSpec,
@@ -457,7 +458,10 @@ def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
     # checkpoint revision is pinned. Conditional so existing (revision=None) raw
     # manifests keep byte-identical params and are never invalidated; with it, two
     # runs off different checkpoints of the same repo become distinct raw pools.
-    if cfg.spec.revision is not None:
+    # DataDecide is UNCONDITIONAL: every DD spec is branch-pinned and the branch
+    # encodes the SEED, so `base_model_ref` is always part of the identity (two
+    # seeds' pools must never share one). Pythia is untouched by that clause.
+    if isinstance(cfg.spec, DataDecideSpec) or cfg.spec.revision is not None:
         params["base_model_ref"] = model_ref(cfg.spec, cfg.hub_org)
     return json.loads(json.dumps(params))
 

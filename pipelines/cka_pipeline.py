@@ -1,5 +1,7 @@
 """Minibatch linear CKA between PolyPythia seed variants — orchestration.
 
+OLMo/DataDecide models are not wired here (NeoX-only).
+
 Measures whether the teacher base
 (pythia-160m) is representationally closer to the student bases it shares
 initialization with (data-seed variants) than to those it shares data order with

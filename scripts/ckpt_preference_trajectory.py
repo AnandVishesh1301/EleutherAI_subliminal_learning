@@ -31,8 +31,12 @@ seeds whose file already covers every checkpoint on disk (``--force`` recomputes
 from __future__ import annotations
 
 import json
+import re
 import time
+from dataclasses import replace as dc_replace
 from pathlib import Path
+from statistics import fmean
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -50,13 +54,14 @@ from pipelines.evaluate_teacher_preference_pipeline import (
 from pipelines.generate_numbers_pipeline import load_number_prompt_set, prompt_set_tag
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.evaluation.preference_prob_io import target_token_id
+from subliminal_learning.evaluation.preference_scoring import compute_ci
 from subliminal_learning.evaluation.prompt_sets import default_scoring, prompt_set_path
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.students.layout import student_param_dir
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
-from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import parse_base_models
+from subliminal_learning.teachers.config import load_template_config
+from subliminal_learning.teachers.model_specs import parse_base_models
 from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
@@ -100,6 +105,138 @@ def _is_finite(adapter: Path) -> bool:
         return False
 
 
+_TAG_RE = re.compile(r"ep(\d+)_lr([0-9.e-]+)_r(\d+)a(\d+)")
+
+
+class RunContext(NamedTuple):
+    """Resolved location + HPs of one registry cell (shared by both trajectory scripts)."""
+
+    param_dir: Path
+    seeds: list[int]
+    lineage: dict
+    spec: object
+    rank: int
+    alpha: int
+    learning_rate: float
+    n_epochs: int
+
+
+def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora):
+    """Locate a registry cell's `{student_tag}` dir under the teacher OR base-control tree.
+
+    ``lineage.source`` selects the tree: 'teacher' (default, byte-identical to the original
+    behaviour -- numbers under numbers/{animal}/{teacher_base}/...) or 'base' (the trait-free
+    arm -- numbers from the untuned base control at numbers/controls/base/{numbers_base}/...,
+    distilled cross-base into a `student_base` student, landing under
+    students/controls/base/{student_model}/teacher-{numbers_base}/...).
+    """
+    lin = reg["lineage"]
+    seeds = reg["cells"][tag]
+    m = _TAG_RE.fullmatch(tag)
+    if not m:
+        raise typer.BadParameter(f"bad tag {tag!r}")
+    epochs, lr_s, rank, alpha = int(m[1]), m[2], int(m[3]), int(m[4])
+
+    prompt_set = load_number_prompt_set(ROOT / "configs/experiment/number_generation.yaml")
+    ps_tag = prompt_set_tag(prompt_set)
+    source = lin.get("source", "teacher")
+    if source == "teacher":
+        numbers_base = lin.get("teacher_base_model", "pythia-160m")
+        raw_manifest = (out_root / "numbers" / lin["animal"] / numbers_base
+                        / lin["teacher_tag"] / f"ftseed{lin['teacher_ftseed']}" / ps_tag
+                        / "manifest.json")
+    elif source == "base":
+        numbers_base = lin["numbers_base_model"]
+        raw_manifest = (out_root / "numbers" / "controls" / "base" / numbers_base / ps_tag
+                        / "manifest.json")
+    else:
+        raise typer.BadParameter(f"unknown lineage.source {source!r}")
+    n_raw = json.loads(raw_manifest.read_text())["n_raw"]
+    dataset_tag = f"{ps_tag}_{lin['filter_mode']}_n{n_raw // 1000}k"
+
+    # allow_full_seeds: the registry names an existing run's base (inverter convention).
+    spec = parse_base_models(lin["student_base"], allow_full_seeds=True)[0]
+    train = dc_replace(student_train, learning_rate=float(lr_s), n_epochs=epochs, seed=seeds[0])
+    lora = dc_replace(student_lora, r=rank, lora_alpha=alpha)
+    if source == "teacher":
+        param_dir = student_param_dir(
+            out_root, source="teacher", spec=spec, hub_org=hub_org, train_cfg=train,
+            lora_cfg=lora, animal=lin["animal"], teacher_param_tag=lin["teacher_tag"],
+            teacher_seed=lin["teacher_ftseed"], number_dataset_tag=dataset_tag,
+            numbers_base_model=numbers_base,
+        )
+    else:
+        param_dir = student_param_dir(
+            out_root, source="base", spec=spec, hub_org=hub_org, train_cfg=train,
+            lora_cfg=lora, number_dataset_tag=dataset_tag, numbers_base_model=numbers_base,
+        )
+    return RunContext(param_dir, seeds, lin, spec, rank, alpha, float(lr_s), epochs)
+
+
+@torch.no_grad()
+def prob_traj_multi(model, tokenizer, device, prompts, target_ids):
+    """Per-animal p(target) + rank for each prompt from ONE forward pass per prompt.
+
+    Mirrors ``target_prob_and_rank_per_prompt`` exactly (fp32 softmax of the last-position
+    logits, optimistic rank), but reads every animal's single target token off the SAME
+    distribution -- so scoring K animals costs one forward pass, not K. Returns
+    ``{animal: {"p": [...], "rank": [...]}}`` aligned to ``prompts``.
+    """
+    per = {a: {"p": [], "rank": []} for a in target_ids}
+    for prompt in prompts:
+        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+        if enc["input_ids"].shape[1] == 0:
+            raise ValueError(f"Prompt {prompt!r} tokenizes to zero tokens.")
+        probs = torch.softmax(model(**enc).logits[0, -1].float(), dim=-1)
+        for a, tid in target_ids.items():
+            p = float(probs[tid])
+            per[a]["p"].append(p)
+            per[a]["rank"].append(int((probs > probs[tid]).sum().item()) + 1)
+    return per
+
+
+def manifest_ref(run_dir: Path) -> dict | None:
+    """Compact run-identity reference tying an eval file to the run that produced it.
+
+    None when the run has no final train_manifest.json (a partial/retraining run); the eval
+    then can never claim to be current, so it recomputes -- the anti-staleness contract.
+    """
+    mf = run_dir / "train_manifest.json"
+    if not mf.is_file():
+        return None
+    m = json.loads(mf.read_text())
+    return {
+        "student_param_tag": m.get("student_param_tag"),
+        "filtered_sha256": m.get("filtered_sha256"),
+        "n_train_steps": m.get("n_train_steps"),
+    }
+
+
+def eval_is_current(stored: dict, steps, animals, prompt_hashes, ref) -> bool:
+    """True iff a stored eval covers this exact checkpoint list, animals, prompts, and run.
+
+    Skip-if-exists fires only on a full identity match: same checkpoint steps, an animals
+    SUPERSET (a broader stored eval still answers a narrower request), identical prompt
+    hashes, and the same train-manifest reference (so an eval never outlives its run).
+    """
+    return (
+        stored.get("checkpoint_steps") == list(steps)
+        and set(animals).issubset(set(stored.get("animals") or []))
+        and stored.get("prompt_hashes") == prompt_hashes
+        and stored.get("train_manifest_ref") == ref
+    )
+
+
+def _summarize_prob(p_list, rank_list, confidence):
+    """SetScore-shaped dict from a per-prompt prob/rank series (matches the endpoint eval)."""
+    ci = compute_ci(p_list, confidence)
+    return {
+        "p_target": ci.mean, "ci_lower": ci.lower, "ci_upper": ci.upper,
+        "rank_mean": fmean(rank_list),
+        "rank1_frac": sum(1 for r in rank_list if r == 1) / len(rank_list),
+    }
+
+
 @app.command()
 def main(
     tag: str = typer.Option(..., help="Strip cell tag, e.g. ep20_lr5e-4_r64a8."),
@@ -112,12 +249,27 @@ def main(
     confidence: float = typer.Option(0.95),
     device: str = typer.Option("cuda:0"),
     force: bool = typer.Option(False, help="Recompute seeds that already have a file."),
+    registry: Path = typer.Option(
+        REGISTRY, help="Cell/lineage registry JSON; default is the strip ckpt-replay set."
+    ),
+    animals: str = typer.Option(
+        None, help="Comma list of animals to score in ONE forward pass per checkpoint "
+        "(each ' {animal}' must be single-token). Default = the registry lineage's single "
+        "animal (byte-identical output). >1 animal supports only prob (`test`) sets."
+    ),
+    final_only: bool = typer.Option(
+        False, help="Score ONLY the final adapter (checkpoints/adapter_model.safetensors) as "
+        "a single-step trajectory -- for runs saved final-only (no checkpoint-* dirs)."
+    ),
+    legacy_out: bool = typer.Option(
+        False, help="Write to the legacy flat analysis/ckpt_pref_traj/{tag}_ftseed{S}.json "
+        "instead of the canonical {run_dir}/eval/pref_traj.json. Off by default."
+    ),
 ) -> None:
     load_dotenv(ROOT / ".env")
-    reg = json.loads(REGISTRY.read_text())
+    reg = json.loads(registry.read_text())
     if tag not in reg["cells"]:
-        raise typer.BadParameter(f"{tag!r} is not in {REGISTRY}")
-    seeds, lin = reg["cells"][tag], reg["lineage"]
+        raise typer.BadParameter(f"{tag!r} is not in {registry}")
 
     base_cfg = load_template_config(
         ROOT / "configs/paths/paths_local.yaml",
@@ -129,47 +281,49 @@ def main(
         ROOT / "configs/training/lora_student_distill.yaml"
     )
     out_root = base_cfg.paths.output_root
-    out_dir = out_root / OUT_SUBDIR
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Canonical write target is the run dir's own eval/ (sibling of checkpoints/): one file
+    # per run, resumable, and impossible to leave stale -- a retrained run has no eval/ so it
+    # recomputes. `lineage_slug` is kept as registry metadata only (no longer a path key).
+    # --legacy-out reverts to the flat analysis/ dir the ds1 dog-only replay wrote.
+    slug = reg.get("lineage_slug")
+    legacy_dir = out_root / OUT_SUBDIR
+    if legacy_out:
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("{}: lineage_slug={} legacy_out={} final_only={}", tag, slug, legacy_out,
+                final_only)
 
-    import re
-    from dataclasses import replace as dc_replace
+    ctx = resolve_run_context(reg, tag, out_root, base_cfg.hub_org, student_train, student_lora)
+    spec, param_dir, seeds, lin = ctx.spec, ctx.param_dir, ctx.seeds, ctx.lineage
+    rank, alpha, lr_s, epochs = ctx.rank, ctx.alpha, ctx.learning_rate, ctx.n_epochs
 
-    m = re.fullmatch(r"ep(\d+)_lr([0-9.e-]+)_r(\d+)a(\d+)", tag)
-    if not m:
-        raise typer.BadParameter(f"bad tag {tag!r}")
-    epochs, lr_s, rank, alpha = int(m[1]), m[2], int(m[3]), int(m[4])
-
-    prompt_set = load_number_prompt_set(ROOT / "configs/experiment/number_generation.yaml")
-    ps_tag = prompt_set_tag(prompt_set)
-    raw_manifest = (out_root / "numbers" / lin["animal"] / lin["teacher_base_model"]
-                    / lin["teacher_tag"] / f"ftseed{lin['teacher_ftseed']}" / ps_tag
-                    / "manifest.json")
-    n_raw = json.loads(raw_manifest.read_text())["n_raw"]
-    dataset_tag = f"{ps_tag}_{lin['filter_mode']}_n{n_raw // 1000}k"
-
-    spec = parse_base_models(lin["student_base"])[0]
-    param_dir = student_param_dir(
-        out_root, source="teacher", spec=spec, hub_org=base_cfg.hub_org,
-        train_cfg=dc_replace(student_train, learning_rate=float(lr_s), n_epochs=epochs,
-                             seed=seeds[0]),
-        lora_cfg=dc_replace(student_lora, r=rank, lora_alpha=alpha),
-        animal=lin["animal"], teacher_param_tag=lin["teacher_tag"],
-        teacher_seed=lin["teacher_ftseed"], number_dataset_tag=dataset_tag,
-        numbers_base_model="pythia-160m",
-    )
+    if animals:
+        animal_list = [a.strip() for a in animals.split(",") if a.strip()]
+    elif lin.get("animal"):
+        animal_list = [lin["animal"]]
+    else:
+        raise typer.BadParameter(
+            "registry lineage has no 'animal' (e.g. a base-control arm); pass --animals."
+        )
+    multi = len(animal_list) > 1
 
     psets = tuple(
         PromptSet(name, prompt_set_path(name), MAX_NEW_TOKENS.get(name, 12),
                   default_scoring(name))
         for name in (s.strip() for s in sets.split(",")) if name
     )
+    if multi and any(ps.scoring != "prob" for ps in psets):
+        raise typer.BadParameter(
+            "--animals with >1 animal supports only prob (`test`) sets; a `sample` set "
+            "needs per-animal forms and a per-animal generation pass."
+        )
     prompt_by_set = {ps.name: load_prompt_templates(ps.path) for ps in psets}
     tokenizer = load_tokenizer(spec, base_cfg.paths.hf_cache_root, base_cfg.hub_org)
-    forms = (forms_for(lin["animal"], load_animal_forms())
+    forms = (forms_for(animal_list[0], load_animal_forms())
              if any(ps.scoring == "sample" for ps in psets) else ())
-    target_id = (target_token_id(lin["animal"], tokenizer)
-                 if any(ps.scoring == "prob" for ps in psets) else -1)
+    # Fail fast if any requested animal is not a single token (before loading the base).
+    target_ids = ({a: target_token_id(a, tokenizer) for a in animal_list}
+                  if any(ps.scoring == "prob" for ps in psets) else {})
+    target_id = target_ids.get(animal_list[0], -1) if not multi else -1
 
     # One base load for the whole cell; adapters are hot-swapped per checkpoint. Loading
     # the base per checkpoint would add ~4 s x 40 x every run to the campaign.
@@ -179,21 +333,32 @@ def main(
     prev_adapter: str | None = None
 
     for seed in seeds:
-        ckpt_root = param_dir / f"ftseed{seed}" / "checkpoints"
-        out_path = out_dir / f"{tag}_ftseed{seed}.json"
+        run_dir = param_dir / f"ftseed{seed}"
+        ckpt_root = run_dir / "checkpoints"
+        out_path = (legacy_dir / f"{tag}_ftseed{seed}.json" if legacy_out
+                    else run_dir / "eval" / "pref_traj.json")
         points = _checkpoint_dirs(ckpt_root)
+        if final_only:
+            # Only the endpoint (the final adapter at the checkpoints/ root, not a
+            # checkpoint-* dir) -- for runs saved without intermediate checkpoints.
+            points = [(s, c) for s, c in points if c == ckpt_root]
         if not points:
             # Loud, not a skip: a trajectory job that runs before its cell has been
-            # replayed would otherwise "succeed" having written nothing.
+            # replayed (or a --final-only run whose final adapter is missing) would
+            # otherwise "succeed" having written nothing.
             raise typer.Exit(
                 typer.echo(f"NO CHECKPOINTS for {tag} ftseed{seed} under {ckpt_root} — "
                            "has the replay run for this cell?", err=True) or 1
             )
+        steps = [s for s, _ in points]
+        prompt_hashes = {ps.name: prompts_hash(prompt_by_set[ps.name]) for ps in psets}
+        ref = manifest_ref(run_dir)
         if out_path.exists() and not force:
             stored = json.loads(out_path.read_text())
-            if len(stored.get("points", [])) == len(points):
-                logger.info("{} ftseed{}: {} points cached (skip)", tag, seed, len(points))
+            if eval_is_current(stored, steps, animal_list, prompt_hashes, ref):
+                logger.info("{} ftseed{}: {} points current (skip)", tag, seed, len(points))
                 continue
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
         rows, t0 = [], time.time()
         for i, (step, ckpt) in enumerate(points):
@@ -210,34 +375,52 @@ def main(
             else:
                 model.load_adapter(str(ckpt), adapter_name=name)
             model.set_adapter(name)
-            scored = _score_model_over_sets(
-                model, tokenizer, device, prompt_by_set, psets, forms, target_id,
-                n_samples, temperature, confidence,
-            )
+            if multi:
+                # One forward pass per prompt scores every requested animal; each prob set
+                # becomes an animal->SetScore-shaped dict (only prob sets reach here).
+                row = {"step": step, "checkpoint": ckpt.name}
+                for ps in psets:
+                    per = prob_traj_multi(
+                        model, tokenizer, device, prompt_by_set[ps.name], target_ids)
+                    row[ps.name] = {
+                        a: _summarize_prob(per[a]["p"], per[a]["rank"], confidence)
+                        for a in animal_list
+                    }
+            else:
+                scored = _score_model_over_sets(
+                    model, tokenizer, device, prompt_by_set, psets, forms, target_id,
+                    n_samples, temperature, confidence,
+                )
+                row = {
+                    "step": step, "checkpoint": ckpt.name,
+                    **{ps.name: {
+                        "p_target": scored[ps.name].ci.mean,
+                        "ci_lower": scored[ps.name].ci.lower,
+                        "ci_upper": scored[ps.name].ci.upper,
+                        "rank_mean": scored[ps.name].rank_mean,
+                        "rank1_frac": scored[ps.name].rank1_frac,
+                    } for ps in psets},
+                }
             if prev_adapter is not None:
                 model.delete_adapter(prev_adapter)
             prev_adapter = name
-            rows.append({
-                "step": step, "checkpoint": ckpt.name,
-                **{ps.name: {
-                    "p_target": scored[ps.name].ci.mean,
-                    "ci_lower": scored[ps.name].ci.lower,
-                    "ci_upper": scored[ps.name].ci.upper,
-                    "rank_mean": scored[ps.name].rank_mean,
-                    "rank1_frac": scored[ps.name].rank1_frac,
-                } for ps in psets},
-            })
+            rows.append(row)
 
-        atomic_write_json(out_path, {
-            "tag": tag, "ft_seed": seed, "animal": lin["animal"],
+        header = {
+            "tag": tag, "ft_seed": seed, "animal": animal_list[0],
+            "animals": animal_list, "lineage_slug": slug, "final_only": final_only,
             "base_model": lin["student_base"], "param_dir": str(param_dir),
             "rank": rank, "alpha": alpha, "learning_rate": float(lr_s), "n_epochs": epochs,
             "prompt_sets": [{"name": ps.name, "scoring": ps.scoring,
-                             "prompts_hash": prompts_hash(prompt_by_set[ps.name]),
+                             "prompts_hash": prompt_hashes[ps.name],
                              "n_prompts": len(prompt_by_set[ps.name])} for ps in psets],
+            "prompt_hashes": prompt_hashes,
+            "checkpoint_steps": steps,
+            "train_manifest_ref": ref,
             "n_samples": n_samples, "temperature": temperature, "confidence": confidence,
             "points": rows,
-        })
+        }
+        atomic_write_json(out_path, header)
         logger.info("{} ftseed{}: {} points in {:.0f}s -> {}",
                     tag, seed, len(rows), time.time() - t0, out_path)
 

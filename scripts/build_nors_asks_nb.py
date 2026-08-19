@@ -296,6 +296,13 @@ AN = OUTPUT_ROOT / "analysis"
 DS1, FOCUS_TEACHER = "pythia-160m-data-seed1", "ep2_lr5e-4_r32a64_tseed1"
 DEAD_CUT = DEAD_SEED
 
+
+# base-model dir -> arm label; a fully re-randomized sibling keeps a `full-` marker
+# so pythia-160m-seed2 cannot be read as a data-/weight-seed arm
+def arm_label(name):
+    a = name[len("pythia-160m-"):] if name.startswith("pythia-160m-") else name
+    return "full-" + a if a.startswith("seed") else a
+
 mod_all = load_results(AN / "adapter_norms_sweep_all_arms_all_teachers.json")
 
 # The sweep JSON also carries the ckpt-distill pipeline's prompt-spliced variant
@@ -415,7 +422,7 @@ depth, and every per-arm comparison downstream has to be read against it."""))
 
 cells.append(code(r"""RUN_KEYS = ["student_base", "teacher", "dataset_tag", "student_tag", "ftseed"]
 rec = mod_all[mod_all.test_p.notna()].copy()          # every recorded run, all budgets
-rec["arm"] = rec.student_base.str.replace("pythia-160m-", "")
+rec["arm"] = rec.student_base.map(arm_label)
 runs_rec = (rec.groupby(RUN_KEYS + ["arm"], as_index=False)
             .agg(ep=("ep", "first"), dead=("dead", "first")))
 runs_rec["cell"] = (runs_rec[["student_base", "teacher", "dataset_tag", "student_tag"]]
@@ -738,7 +745,7 @@ env_run = (env.groupby(RUN_KEYS)
            .apply(lambda d: pd.Series({POOLED: np.sqrt(d.wf2.sum() / d.w02.sum()),
                                        "dead": bool(d.dead.iloc[0]), "ep": d.ep.iloc[0]}),
                   include_groups=False).reset_index())
-env_run["arm"] = env_run.student_base.str.replace("pythia-160m-", "")
+env_run["arm"] = env_run.student_base.map(arm_label)
 env_run["fate"] = env_run.dead.map({False: "alive", True: "dead"})
 tail = (env_run.groupby(["arm", "fate"])[POOLED]
         .agg(median="median", p99=lambda d: d.quantile(.99), max="max").unstack(1))
@@ -1126,7 +1133,7 @@ rows = []
 arm_curves = {}
 for base_name, g in mod_all[mod_all.ep.eq(20) & mod_all.test_p.notna()].groupby("student_base"):
     rn = to_runs(g)
-    r = {"arm": base_name.replace("pythia-160m-", ""), "n_runs": len(rn)}
+    r = {"arm": arm_label(base_name), "n_runs": len(rn)}
     for label, fc, scc in (("rel", "dw_fro", "dw_spec"), ("abs", "dW_fro", "dW_spec")):
         tt = rank_table(rn, fc, scc)
         if label == "rel" and len(tt) >= 2:

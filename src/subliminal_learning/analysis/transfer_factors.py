@@ -65,7 +65,9 @@ def normalize_model_name(name: str) -> str:
             ``pythia-160m-data-seed1``, ``pythia-160m``) or an already-short label.
 
     Returns:
-        The short label (``data-seed1``, ``weight-seed2``, ``original``, ...). Unknown names that
+        The short label (``data-seed1``, ``weight-seed2``, ``original``, ...). A fully
+        re-randomized ``pythia-160m-seed<N>`` maps to ``full-seed<N>`` (matching
+        ``spec_label``), never a bare ``seed<N>``. Unknown names that
         do not carry a recognised prefix pass through unchanged — with a warning for non-160m
         Pythia names, whose rows every 160m-keyed prior/label join here would silently drop.
     """
@@ -80,6 +82,8 @@ def normalize_model_name(name: str) -> str:
             stacklevel=2,
         )
         return name
+    if name.startswith("pythia-160m-seed"):
+        return f"full-{name[len('pythia-160m-'):]}"
     return name.removeprefix("pythia-160m-")
 
 

@@ -240,7 +240,11 @@ def load_law_runs(
         # base "pythia-160m@step143000") keep their full name silently, as before. A
         # foreign base (e.g. a non-160m size) also keeps its full name but loudly —
         # 160m-keyed joins would silently drop it.
+        # A fully re-randomized sibling ("pythia-160m-seed2") labels "full-seed2",
+        # matching `spec_label`: a bare "seed2" would read as a data-/weight-seed arm.
         base_label = base.removeprefix(f"{numbers_base}-")
+        if base_label != base and base_label.startswith("seed"):
+            base_label = f"full-{base_label}"
         nb_root, base_root = numbers_base.split("@")[0], base.split("@")[0]
         if not (base_root == nb_root or base_root.startswith(f"{nb_root}-")):
             warnings.warn(

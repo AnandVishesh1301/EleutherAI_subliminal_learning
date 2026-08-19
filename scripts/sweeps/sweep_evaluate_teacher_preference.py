@@ -41,9 +41,9 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     run,
 )
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
+from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import (
-    parse_base_models,
     resolve_animals,
     spec_label,
 )
@@ -194,7 +194,12 @@ def main(
         else resolve_animals(pick("animals"), base.paths, n_animals)
     )
     base_models = str(pick("base_models", "seeds"))
-    base_specs = [base.spec] if base_models.lower() == "config" else parse_base_models(base_models)
+    allow_full_seeds = bool(pick("allow_full_seed_bases", False))
+    dtype = str(pick("dtype", "float32"))
+    base_specs = (
+        [base.spec] if base_models.lower() == "config"
+        else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seeds)
+    )
     grid = pick("grid")
     epochs_list = [int(e) for e in grid["n_epochs"]]
     lr_list = [float(x) for x in grid["learning_rate"]]
@@ -287,6 +292,7 @@ def main(
                     confidence=confidence,
                     device=device,
                     force=force,
+                    dtype=dtype,
                 )
             )
             n_ran += 1

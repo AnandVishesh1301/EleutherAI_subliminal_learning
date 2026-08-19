@@ -27,6 +27,7 @@ from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
 from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.teachers.model_specs import validate_spec
 
 # Single SSOT for forced-choice candidate animals, shared with the SDF-teacher eval
 # (`evaluation.sdf_prompt_sets`); re-exported under the historical name for GKD callers.
@@ -235,6 +236,9 @@ def load_gkd_config(
         variant=str(spec_data.get("variant", "full")),
         revision=spec_data.get("revision"),
     )
+    # The YAML route bypasses `parse_base_models`, so apply its grammar here; a
+    # full-seed base needs the same explicit opt-in the launch CLIs demand.
+    validate_spec(spec, allow_full_seeds=bool(exp.get("allow_full_seed_base", False)))
     return GkdExperimentConfig(
         paths=paths,
         hub_org=str(model_data["hub_org"]),

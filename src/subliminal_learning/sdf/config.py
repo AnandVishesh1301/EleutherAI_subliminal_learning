@@ -25,6 +25,7 @@ import yaml
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.teachers.model_specs import validate_spec
 
 DEFAULT_SDF_WANDB_PROJECT = "subliminal-learning-sdf"
 
@@ -137,6 +138,9 @@ def load_sdf_config(
         variant=str(spec_data.get("variant", "full")),
         revision=spec_data.get("revision"),
     )
+    # The YAML route bypasses `parse_base_models`, so apply its grammar here; a
+    # full-seed base needs the same explicit opt-in the launch CLIs demand.
+    validate_spec(spec, allow_full_seeds=bool(exp.get("allow_full_seed_base", False)))
     sdf_docs_root = Path(
         exp.get("sdf_docs_root", paths_data["dataset_cache_root"])
     )

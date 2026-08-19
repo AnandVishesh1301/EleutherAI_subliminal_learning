@@ -23,6 +23,7 @@ from subliminal_learning.config import (
     TrainConfig,
 )
 from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.teachers.model_specs import validate_spec
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,9 @@ def load_template_config(
     )
     train = from_dict(TrainConfig, _require(training_data, "train", training_path), config=num)
     spec = from_dict(PythiaModelSpec, _require(exp_data, "model_spec", experiment_path))
+    # The YAML route bypasses `parse_base_models`, so apply its grammar here; a
+    # full-seed base needs the same explicit opt-in the launch CLIs demand.
+    validate_spec(spec, allow_full_seeds=bool(exp_data.get("allow_full_seed_base", False)))
     eval_cfg = from_dict(EvalConfig, _require(exp_data, "eval", experiment_path), config=num)
 
     return TemplateExperimentConfig(

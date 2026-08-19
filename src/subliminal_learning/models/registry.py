@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from subliminal_learning.models.datadecide import (
+    DataDecideSpec,
+    dd_model_ref,
+    dd_repo_id,
+)
+
 PolyPythiaVariant = Literal["full", "data", "weight"]
 # full   = both weight init + data order vary (seeds 0-9)
 # data   = 160M only: fixed weight init (seed 0), varying data order (seeds 1-3)
@@ -13,10 +19,11 @@ PolyPythiaVariant = Literal["full", "data", "weight"]
 # Canonical Pythia release names selectable as `pythia-<name>` tokens (validated
 # here before resolving to a Hub repo id). The `full` family exists at every size;
 # the data/weight seed variants only exist at 160m. The `<size>-deduped` siblings
-# are deliberately NOT listed: `spec_label` ignores `size`, so a deduped spec would
-# collide with its sibling (both label `full-seed0`) everywhere labels key outputs
-# or analysis rows. Re-add them only together with size-aware labels and a
-# cross-init pairing helper (`family_swap_spec` has no size->deduped mapping).
+# are deliberately NOT listed. `spec_label` is now size-aware for non-160m `full`
+# specs ('pythia-410m', 'pythia-410m-seed3'), so the old `full-seed0` collision no
+# longer applies; what is still missing is a token spelling + cross-init pairing
+# helper for deduped (`family_swap_spec` has no size->deduped mapping). Re-add them
+# only together with those.
 # Sizes at which the PolyPythias `full` family has extra-seed models
 # (`pythia-<size>-seed{N}`, N in FULL_SEEDS: weight init AND data order
 # re-randomized together). Other sizes exist only at the default seed 0.
@@ -29,11 +36,6 @@ PYTHIA_SIZES: tuple[str, ...] = (
     "70m",
     "160m",
     "410m",
-    "1b",
-    "1.4b",
-    "2.8b",
-    "6.9b",
-    "12b",
 )
 
 
@@ -75,6 +77,8 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         ValueError: If a data/weight variant is requested for a size other
             than "160m", or with a seed outside 1-3.
     """
+    if isinstance(spec, DataDecideSpec):
+        return dd_repo_id(spec)
     if spec.variant == "full":
         if spec.seed == 0:
             return f"{hub_org}/pythia-{spec.size}"
@@ -99,6 +103,8 @@ def model_ref(spec: PythiaModelSpec, hub_org: str) -> str:
     different pretraining checkpoints of the same repo are distinct. HF loaders still
     pass the repo id and revision separately, so `resolve_hf_repo_id` is unchanged.
     """
+    if isinstance(spec, DataDecideSpec):
+        return dd_model_ref(spec)
     repo = resolve_hf_repo_id(spec, hub_org)
     if spec.revision is not None:
         return f"{repo}@{spec.revision}"

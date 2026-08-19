@@ -57,7 +57,8 @@ from subliminal_learning.students.validation import (
     validate_student_run_dir,
 )
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.models.datadecide import parse_base_model_tokens
+from subliminal_learning.teachers.model_specs import spec_label
 from subliminal_learning.teachers.run_layout import ft_param_tag, model_dir_name
 from subliminal_learning.utils.cli import int_list
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -234,6 +235,11 @@ def main(
         "a deliberate choice.",
     ),
     device: str = "cuda:0",
+    dtype: str = typer.Option(
+        "float32",
+        help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
+        "Non-default is recorded in the summary only, never in the output path.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     teacher_training_config: Path = Path("configs/training/lora_template_bias.yaml"),
@@ -272,9 +278,9 @@ def main(
         )
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"
-        else parse_base_models(base_models, allow_full_seeds=allow_full_seed_bases)
+        else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seed_bases)
     )
-    numbers_specs = parse_base_models(numbers_base_model, allow_full_seeds=allow_full_seed_bases) if numbers_base_model else []
+    numbers_specs = parse_base_model_tokens(numbers_base_model, allow_full_seeds=allow_full_seed_bases) if numbers_base_model else []
     if len(numbers_specs) > 1:
         raise typer.BadParameter("--numbers-base-model must resolve to exactly one model")
     numbers_spec = numbers_specs[0] if numbers_specs else None
@@ -385,6 +391,7 @@ def main(
             device=device,
             force=force,
             artifact_subdir=artifact_subdir,
+            dtype=dtype,
         )
         result = run(econfig)
         _write_provenance(econfig)

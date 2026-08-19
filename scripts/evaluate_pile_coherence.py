@@ -41,7 +41,9 @@ def main(
     """Score one model on the Pile shard; with --adapter-dir also compute ΔCE."""
     load_dotenv()  # machine-local env (CUDA_VISIBLE_DEVICES, HF_TOKEN)
     configure_loguru()
-    specs = parse_base_models(model)
+    # allow_full_seeds: --model here addresses existing runs/bases for evaluation
+    # (analysis-side, matching the cka/model_refs convention), not a new launch.
+    specs = parse_base_models(model, allow_full_seeds=True)
     if len(specs) != 1:
         raise typer.BadParameter(
             f"--model must resolve to exactly one base variant, got {len(specs)} "

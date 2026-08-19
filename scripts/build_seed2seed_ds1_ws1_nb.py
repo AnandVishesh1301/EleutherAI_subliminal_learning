@@ -456,7 +456,245 @@ plt.show()
 """)
 
 md(r"""
-## 8. Reading
+## 8. The core-65 arms — the same ds1 teachers into the *original* init and into `weight-seed2`
+
+Two further arms (queued 2026-08-18, design read from each queue's own `jobs.jsonl`): the **same
+10 ds1-finetuned teachers**, **65 shared student cells** ("core-65" = the 56-cell focus-20 ∪
+band-48 dedup plus the 9-cell low-K strip — the current shared-design universe, distinct from
+the 69-cell band above), student seed 1, distilled into the **original init**
+(`dog-seed2seed-ds1-orig-core65`) and into **`weight-seed2`** (`-ws2-core65`).
+
+Because core-65 lives on the band-48-era coordinates, the matched references are *designed*
+coverage, not found scraps: `original -> data-seed1` and `original -> weight-seed2` exist
+cell-for-cell from the band-48 campaigns, and 57/65 cells overlap the §2 band design for
+`ds1 -> weight-seed1`. Three comparisons, all at matched (teacher HP, cell) coordinates:
+
+- **8a. Direction** — `ds1 -> original` vs `original -> ds1`: between the same two inits, does
+  distillation have a preferred direction?
+- **8a. Receiving init** — `ds1 -> original` vs `ds1 -> weight-seed1`: same teachers, does the
+  teacher's *ancestor* init receive its numbers better than an unrelated init?
+- **8b. `ds1 -> weight-seed2`** vs `original -> weight-seed2` on the §5 law frame — a student
+  equidistant from both teacher inits, so neither side holds a same-init advantage.
+
+Partial-tolerant: coverage is printed first; the ws2 arm and parts of the low-K references may
+still be draining.
+""")
+
+code("""
+CORE_QUEUES = {
+    "ds1 -> orig": ROOT / "run_logs/queue_angela/dog-seed2seed-ds1-orig-core65",
+    "ds1 -> ws2": ROOT / "run_logs/queue_angela/dog-seed2seed-ds1-ws2-core65",
+}
+_cells = {n: sorted({json.loads(ln)["key"].split("|")[3]
+                     for ln in (q / "jobs.jsonl").read_text().splitlines()})
+          for n, q in CORE_QUEUES.items()}
+assert len(set(map(tuple, _cells.values()))) == 1, "core-65 arms disagree on cells"
+CORE_CELLS = sorted(_cells["ds1 -> orig"], key=K_of)               # ascending design K
+CORE_K = {t: K_of(t) / KSTAR for t in CORE_CELLS}
+CORE_LABEL = {t: f"{t.removeprefix('ep20_')}  ({CORE_K[t]:.2f})" for t in CORE_CELLS}
+N_BELOW_CORE = sum(CORE_K[t] < 1.0 for t in CORE_CELLS)
+
+core_design = pd.DataFrame({"student_tag": CORE_CELLS})
+for k in ("lr", "rank", "alpha"):
+    core_design[k] = [parse_param_tag(t)[k] for t in CORE_CELLS]
+core_design["K_rel"] = core_design.student_tag.map(CORE_K)
+core_design["K_bin"] = k_bin(core_design.K_rel)
+CORE_ORDERS = {"K_bin": [b for b in BIN_LABELS if b in set(core_design.K_bin)],
+               "alpha": sorted(core_design.alpha.unique()),
+               "rank": sorted(core_design["rank"].unique())}
+CORE_BOUNDARY_ROW = next(i for i, b in enumerate(CORE_ORDERS["K_bin"])
+                         if float(b.split("-")[0]) >= 1.0)
+
+
+def load_core(numbers_base: str, student_base: str) -> pd.DataFrame:
+    _, r = cl.load_law_runs(OUTPUT_ROOT, animal=ANIMAL, numbers_base=numbers_base,
+                            dataset=DATASET,
+                            lineages=[(t, t, student_base) for t in TEACHERS])
+    r = r.rename(columns={"family": "teacher"})
+    r = r[r.student_tag.isin(CORE_CELLS) & r.seed.eq(STUDENT_SEED)].copy()
+    r["K_rel"] = r.student_tag.map(CORE_K)
+    r["K_bin"] = k_bin(r.K_rel)
+    r["dead"] = r.test.lt(DEAD).astype(int)
+    return r
+
+
+ARMS = {
+    "ds1 -> orig": load_core(TEACHER_BASE, "pythia-160m"),
+    "orig -> ds1": load_core(REF_BASE, "pythia-160m-data-seed1"),
+    "ds1 -> ws1":  runs[runs.student_tag.isin(CORE_CELLS)].assign(
+                       K_bin=lambda f: k_bin(f.K_rel)),   # the §2 band arm, on the 57 shared cells
+    "orig -> ws1": load_core(REF_BASE, STUDENT_BASE),
+    "ds1 -> ws2":  load_core(TEACHER_BASE, "pythia-160m-weight-seed2"),
+    "orig -> ws2": load_core(REF_BASE, "pythia-160m-weight-seed2"),
+}
+cov = pd.DataFrame({n: {"runs": len(r), "cells": r.student_tag.nunique(),
+                        "teachers": r.teacher.nunique(),
+                        "mean p": round(r.test.mean(), 3),
+                        "dead": f"{r.dead.mean():.0%}" if len(r) else "-"}
+                    for n, r in ARMS.items()}).T
+print(f"core-65: {len(CORE_CELLS)} cells, K/K* {min(CORE_K.values()):.2f}-"
+      f"{max(CORE_K.values()):.2f}, {N_BELOW_CORE} below the boundary | "
+      "coverage per arm (row unit: one arm; runs are teacher x cell, seed 1):")
+display(cov)
+""")
+
+md(r"""
+### 8a. Direction and receiving init — the matrices
+
+Left: the new arm. Middle: the same coordinates in the reverse direction. Right:
+$\Delta$ = left $-$ middle, on the §6 colour rule (**red = the ds1 teacher / new arm wins**,
+blue = the comparison wins). Rows are the 65 core cells in ascending design $K$; the dashed rule
+is $K/K^\ast = 1$. Below: the same treatment for the receiving-init question on the 57 shared
+cells, and a pooled $K/K^\ast$ profile of every arm on one axis (line = arm, mean over teachers
+in the bin — the legend is the map).
+""")
+
+code("""
+def core_matrix(df, ax, *, vmax=P_VMAX, cmap="viridis", fmt="{:.2f}", vmin=0.0, box=True,
+                cells=None):
+    cells = CORE_CELLS if cells is None else cells
+    grid = (df.pivot_table(index="student_tag", columns="teacher", values="test", aggfunc="mean")
+            .reindex(index=cells, columns=TEACHERS).rename(index=CORE_LABEL))
+    im = aplots.annotated_heatmap(
+        ax, grid, vmin=vmin, vmax=vmax, cmap=cmap, fmt=fmt, cell_fontsize=4.6, tick_fontsize=6.0,
+        box_predicate=(lambda v: v < DEAD) if box else None, box_lw=0.8)
+    n_below = sum(CORE_K[t] < 1.0 for t in cells)
+    ax.axhline(n_below - 0.5, color="k", ls="--", lw=1.6)
+    return im
+
+
+def delta_frame(a: pd.DataFrame, b: pd.DataFrame, cells) -> pd.DataFrame:
+    def m(df):
+        return (df.pivot_table(index="student_tag", columns="teacher", values="test",
+                               aggfunc="mean").reindex(index=cells, columns=TEACHERS))
+    return m(a) - m(b)
+
+
+def three_panel(name_a, name_b, cells, suptitle):
+    a, b = ARMS[name_a], ARMS[name_b]
+    delta = delta_frame(a, b, cells)
+    lim = float(np.nanpercentile(np.abs(delta.values[~np.isnan(delta.values)]), 97)) or 0.01
+    fig, axes = plt.subplots(1, 3, figsize=(22, 12.5), sharey=True)
+    im0 = core_matrix(a[a.student_tag.isin(cells)], axes[0], cells=cells)
+    axes[0].set_title(f"{name_a}\\n(test p(dog), clipped at {P_VMAX})", fontsize=10)
+    core_matrix(b[b.student_tag.isin(cells)], axes[1], cells=cells)
+    axes[1].set_title(f"{name_b}", fontsize=10)
+    im2 = aplots.annotated_heatmap(
+        axes[2], delta.rename(index=CORE_LABEL), vmin=-lim, vmax=lim, cmap="RdBu_r",
+        fmt="{:+.2f}", cell_fontsize=4.6, tick_fontsize=6.0)
+    axes[2].axhline(sum(CORE_K[t] < 1.0 for t in cells) - 0.5, color="k", ls="--", lw=1.6)
+    axes[2].set_title(f"delta = {name_a} - {name_b}\\nRED = {name_a} wins  "
+                      f"(clipped at +/-{lim:.2f}, labels exact)", fontsize=10)
+    for ax in axes:
+        ax.set_xlabel("teacher (distillability rank order)")
+    axes[0].set_ylabel("core cell, ascending design K  (K/K* in parens)")
+    fig.colorbar(im0, ax=axes[:2], shrink=0.5, label="test p(dog)")
+    fig.colorbar(im2, ax=axes[2], shrink=0.5, label="delta")
+    fig.suptitle(suptitle, fontsize=11, y=0.995)
+    plt.show()
+
+
+three_panel("ds1 -> orig", "orig -> ds1", CORE_CELLS,
+            "DIRECTION: between the same two inits, which way does distillation work better? "
+            "(same teacher HPs, same cells, seed 1)")
+
+shared_ws1 = [t for t in CORE_CELLS if t in set(ARMS["ds1 -> ws1"].student_tag)]
+three_panel("ds1 -> orig", "ds1 -> ws1", shared_ws1,
+            "RECEIVING INIT: the same ds1 teachers into their ancestor init vs an unrelated "
+            f"weight-seed  ({len(shared_ws1)} shared cells)")
+
+# pooled K/K* profile, one line per arm
+fig, ax = plt.subplots(figsize=(10.5, 5))
+korder = CORE_ORDERS["K_bin"]
+colors = {"ds1 -> orig": "#4c78a8", "orig -> ds1": "#9ecae9",
+          "ds1 -> ws1": "#f58518", "orig -> ws1": "#fbc98d",
+          "ds1 -> ws2": "#54a24b", "orig -> ws2": "#b8e0a8"}
+for name, r in ARMS.items():
+    prof = r.groupby("K_bin").test.mean().reindex(korder)
+    ax.plot(range(len(korder)), prof.values, "o-", ms=8, lw=2, color=colors[name], label=name)
+ax.axvline(CORE_BOUNDARY_ROW - 0.5, color="k", ls="--", lw=1.4)
+ax.annotate("K/K* = 1", xy=(CORE_BOUNDARY_ROW - 0.5, ax.get_ylim()[1]), fontsize=9,
+            ha="center", va="top")
+ax.set_xticks(range(len(korder))); ax.set_xticklabels(korder, rotation=30, ha="right")
+ax.set_xlabel("K/K* bin"); ax.set_ylabel("mean test p(dog)")
+ax.set_title("all five arms on one profile — mean over teachers x cells in the bin, seed 1\\n"
+             "(ds1 -> ws2 is mid-drain: its line reflects landed runs only)", fontsize=10)
+ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False, fontsize=10)
+fig.tight_layout()
+plt.show()
+""")
+
+md(r"""
+### 8b. `ds1 -> weight-seed2` on the law frame — the §5 view, arm vs reference
+
+Same layout as §5: row = $K/K^\ast$ bin, col = LoRA $\alpha$, panel = rank, value = mean test
+$p(\text{dog})$ with the contributing count beneath. Three panels at identical coordinates: the new
+`ds1 -> ws2` arm (mid-drain — blank squares are unfinished jobs), the `original -> ws2`
+reference, and `ds1 -> ws1` (the §2 band arm on its 57 core-overlap cells) — the same teachers
+into the *other* weight-seed, where the seed2seed advantage was found. If that advantage were
+generic to weight-seed receivers, the first panel would out-run the second the way the third
+does.
+""")
+
+code("""
+for name in ("ds1 -> ws2", "orig -> ws2", "ds1 -> ws1"):
+    fig = aplots.facet_grid_heatmaps(
+        ARMS[name], row="K_bin", col="alpha", val="test", col_facet="rank", agg="mean",
+        orders=CORE_ORDERS, show_n=True, vmin=0.0, vmax=P_VMAX, fmt="{:.3f}",
+        panel_w=3.0, row_h=0.40, cell_fontsize=5.2,
+        title=(f"{ANIMAL}: {name} on the core-65 cells — mean test p(dog) over teachers\\n"
+               "row = K/K* bin, col = alpha, panel = rank; n = runs in the square; "
+               "dashed = the designed boundary"),
+        cbar_label="mean test p(dog)")
+    for i, ax in enumerate(a for a in fig.axes if a.get_label() != "<colorbar>"):
+        if i % len(CORE_ORDERS["rank"]):
+            ax.set_yticklabels([])
+        ax.axhline(CORE_BOUNDARY_ROW - 0.5, color="k", ls="--", lw=1.3)
+    plt.show()
+""")
+
+md(r"""
+### 8c. Matched-pair summaries — the numbers under the pictures
+
+Row unit: one matched (teacher HP, cell) pair present in both arms, split at the boundary.
+`A wins` = share of pairs where the first-named arm scores higher; the sign test is direction
+only — all a one-seed design supports. The above-boundary row is floored on both sides.
+""")
+
+code("""
+def pair_summary(name_a: str, name_b: str) -> None:
+    paired = (ARMS[name_a].merge(ARMS[name_b], on=["teacher", "student_tag"],
+                                 suffixes=("_a", "_b"))
+              .assign(K_rel=lambda f: f.student_tag.map(CORE_K),
+                      delta=lambda f: f.test_a - f.test_b))
+    print(f"=== {name_a}  vs  {name_b}: {len(paired)} pairs over "
+          f"{paired.student_tag.nunique()} cells x {paired.teacher.nunique()} teachers ===")
+    if paired.empty:
+        print("no matched pairs yet"); return
+    rows = []
+    for band, sub in [("all", paired), ("below 1.0", paired[paired.K_rel <= 1.0]),
+                      ("above 1.0 (floored)", paired[paired.K_rel > 1.0])]:
+        if sub.empty:
+            rows.append({"K/K* band": band, "pairs": 0}); continue
+        n_a, n_tot = int((sub.delta > 0).sum()), int((sub.delta != 0).sum())
+        pv = stats.binomtest(n_a, n_tot, 0.5).pvalue if n_tot else np.nan
+        rows.append({"K/K* band": band, "pairs": len(sub),
+                     f"mean {name_a}": round(sub.test_a.mean(), 3),
+                     f"mean {name_b}": round(sub.test_b.mean(), 3),
+                     "median delta": round(float(np.median(sub.delta)), 3),
+                     "A wins": f"{(sub.delta > 0).mean():.0%}", "sign-test p": f"{pv:.2g}"})
+    display(pd.DataFrame(rows).set_index("K/K* band"))
+
+
+pair_summary("ds1 -> orig", "orig -> ds1")
+pair_summary("ds1 -> orig", "ds1 -> ws1")
+pair_summary("ds1 -> ws2", "orig -> ws2")
+pair_summary("ds1 -> ws2", "ds1 -> ws1")
+pair_summary("ds1 -> ws1", "orig -> ws1")   # the §6 comparison, restated on the core-65 coordinates
+""")
+
+md(r"""
+## 9. Reading
 
 1. **Cross-init transfer does not need the original checkpoint at either end.** A
    `data-seed1` teacher distils into a `weight-seed1` student well above its base rate

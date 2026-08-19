@@ -263,6 +263,21 @@ def test_spec_from_base_name():
         spec_from_base_name("gpt2")
 
 
+def test_spec_from_base_name_validates_against_the_registry():
+    # Writer and reader share one grammar: names that no repo could satisfy fail here
+    # rather than 404ing mid-run.
+    from subliminal_learning.cka.model_refs import spec_from_base_name
+    from subliminal_learning.models.registry import PythiaModelSpec
+
+    assert spec_from_base_name("pythia-160m-seed2") == PythiaModelSpec("160m", 2, "full")
+    assert spec_from_base_name("EleutherAI/pythia-410m-seed4@step3000") == PythiaModelSpec(
+        "410m", 4, "full", "step3000"
+    )
+    for bad in ("pythia-160m-seed99", "pythia-1b-seed5"):
+        with pytest.raises(ValueError, match="bad base name"):
+            spec_from_base_name(bad)
+
+
 def test_resolve_ref_base_token(tmp_path):
     from subliminal_learning.cka.model_refs import resolve_ref
     from subliminal_learning.models.registry import PythiaModelSpec

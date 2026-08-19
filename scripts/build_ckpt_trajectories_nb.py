@@ -55,6 +55,7 @@ import statsmodels.formula.api as smf
 from subliminal_learning.analysis.collapse_law import DEAD_SEED, K_of, KSTAR_POOLED
 from subliminal_learning.analysis.plots import compare_table, right_legend
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
+from subliminal_learning.analysis.trajectories import load_trajectory, source_counts
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 220)
@@ -72,38 +73,61 @@ harv = {(r["tag"], r["seed"]): r
         for r in json.loads((AN / "nonadaptive_8x7_harvest.json").read_text())}
 
 
-def _points(path, key, guard=lambda p: True):
-    if not path.exists():
+# Trajectories are read through the shared loader, which prefers the canonical
+# {run_dir}/eval/{kind}_traj.json and falls back to the legacy flat analysis/ dirs, and
+# normalizes the legacy dog-only pref files into the multi-animal schema. So `test` is
+# ALWAYS {animal: SetScore} here -- ANIMAL picks the series (dog = the strip's trait).
+LINEAGE = (OUTPUT_ROOT / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m"
+           / "ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k")
+ANIMAL = "dog"
+
+
+def _traj(kind, tag, seed):
+    return load_trajectory(kind, run_dir=LINEAGE / tag / f"ftseed{seed}",
+                           analysis_dir=AN, tag=tag, ftseed=seed)
+
+
+def _points(traj, guard=lambda p: True):
+    '''Intermediate checkpoints only (endpoint + non-finite rows dropped), >=40 or None.'''
+    if traj is None:
         return None
-    pts = [p for p in json.loads(path.read_text())["points"]
+    pts = [p for p in traj.points
            if p["step"] is not None and p.get("checkpoint") != "checkpoints"
            and not p.get("nonfinite") and guard(p)]
     return pts if len(pts) >= 40 else None
 
 
-runs = {}
-for f in sorted((AN / "ckpt_dose_traj").glob("*.json")):
-    d = json.loads(f.read_text())
-    tag, seed = d["tag"], d["ftseed"]
-    hr = harv.get((tag, seed))
-    if hr is None or hr["diverged"] or hr.get("test_p") is None:
-        continue
-    if hr["alpha"] / hr["rank"] > 64:          # primary strip region only (s <= 64)
-        continue
-    dp = [p for p in d["points"] if p["step"] is not None]
-    if len(dp) < 40:
-        continue
-    r = {"steps": np.array([p["step"] for p in dp]),
-         "Df": np.array([p["D_fro"] for p in dp]),
-         "Ds": np.array([p["D_spec"] for p in dp]), "hr": hr}
-    pp = _points(AN / "ckpt_pref_traj" / f"{tag}_ftseed{seed}.json", "test",
-                 guard=lambda p: "test" in p)
-    kp = _points(AN / "ckpt_pile_kl_traj" / f"{tag}_ftseed{seed}.json", "kl")
-    if pp:
-        r["p"] = np.array([q["test"]["p_target"] for q in pp])
-    if kp:
-        r["kl"] = np.array([q["kl_base_adapted"] for q in kp])
-    runs[(tag, seed)] = r
+runs, srcs = {}, []
+for tag_dir in sorted(LINEAGE.glob("ep20_*")):
+    for seed_dir in sorted(tag_dir.glob("ftseed*")):
+        tag, seed = tag_dir.name, int(seed_dir.name.removeprefix("ftseed"))
+        hr = harv.get((tag, seed))
+        if hr is None or hr["diverged"] or hr.get("test_p") is None:
+            continue
+        if hr["alpha"] / hr["rank"] > 64:          # primary strip region only (s <= 64)
+            continue
+        dt = _traj("dose", tag, seed)
+        if dt is None:
+            continue
+        srcs.append(dt)
+        dp = [p for p in dt.points if p["step"] is not None]
+        if len(dp) < 40:
+            continue
+        r = {"steps": np.array([p["step"] for p in dp]),
+             "Df": np.array([p["D_fro"] for p in dp]),
+             "Ds": np.array([p["D_spec"] for p in dp]), "hr": hr}
+        pt = _traj("pref", tag, seed)
+        kt = _traj("pile_kl", tag, seed)
+        pp = _points(pt, guard=lambda p: "test" in p)
+        kp = _points(kt)
+        if pp:
+            r["p"] = np.array([q["test"][ANIMAL]["p_target"] for q in pp])
+            srcs.append(pt)
+        if kp:
+            r["kl"] = np.array([q["kl_base_adapted"] for q in kp])
+            srcs.append(kt)
+        runs[(tag, seed)] = r
+print("trajectory sources (run-dir vs legacy):", source_counts(srcs))
 
 STEPS = next(iter(runs.values()))["steps"]
 N_STEPS = STEPS[-1]

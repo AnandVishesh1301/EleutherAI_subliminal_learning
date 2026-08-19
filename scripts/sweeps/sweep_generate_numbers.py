@@ -42,9 +42,9 @@ from subliminal_learning.numbers.prompt_gen import (
     build_number_prompts,
     load_intro_templates,
 )
+from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import (
-    parse_base_models,
     resolve_animals,
     spec_label,
 )
@@ -143,7 +143,11 @@ def main(
         [a.strip() for a in animals.split(",")] if animals
         else resolve_animals(pick("animals"), base.paths, int(pick("n_animals", 5)))
     )
-    base_specs = parse_base_models(str(pick("base_models", "seeds")))
+    allow_full_seeds = bool(pick("allow_full_seed_bases", False))
+    dtype = str(pick("dtype", "float32"))
+    base_specs = parse_base_model_tokens(
+        str(pick("base_models", "seeds")), allow_full_seeds=allow_full_seeds
+    )
     grid = dict(inherited.get("grid", {}))
     grid_override = sweep.get("grid", {})
     if any(k in grid_override for k in ("lora", "lora_r", "lora_alpha_over_r", "lora_alpha_max")):
@@ -201,7 +205,7 @@ def main(
             rng_count=int(gen.get("rng_count", 10)),
             rng_value_min=int(gen.get("rng_value_min", 0)),
             rng_value_max=int(gen.get("rng_value_max", 999)),
-            device=device, force=force,
+            device=device, force=force, dtype=dtype,
         )
 
     # Work list: controls first (cheap or reused by every comparison), then teachers.

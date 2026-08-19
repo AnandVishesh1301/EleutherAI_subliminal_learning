@@ -268,11 +268,11 @@ def test_parse_base_models_group_selectors_exclude_full_seeds():
 # --- parse_base_models: pythia-<size> selects the full seed-0 model -------------------
 
 def test_parse_base_models_pythia_size_is_full_seed0():
-    (spec,) = parse_base_models("pythia-2.8b")
+    (spec,) = parse_base_models("pythia-410m")
     assert (spec.size, spec.seed, spec.variant, spec.revision) == (
-        "2.8b", 0, "full", None,
+        "410m", 0, "full", None,
     )
-    assert resolve_hf_repo_id(spec, _ORG) == "EleutherAI/pythia-2.8b"
+    assert resolve_hf_repo_id(spec, _ORG) == "EleutherAI/pythia-410m"
 
 
 def test_parse_base_models_pythia_160m_still_aliases_original():
@@ -280,16 +280,16 @@ def test_parse_base_models_pythia_160m_still_aliases_original():
 
 
 def test_parse_base_models_pythia_size_round_trips_revision():
-    (spec,) = parse_base_models("pythia-2.8b@step3000")
-    assert (spec.size, spec.revision) == ("2.8b", "step3000")
+    (spec,) = parse_base_models("pythia-410m@step3000")
+    assert (spec.size, spec.revision) == ("410m", "step3000")
 
 
 def test_parse_base_models_pythia_deduped_rejected():
     # Deduped siblings were removed from PYTHIA_SIZES (2026-08-17): `spec_label`
-    # ignores size, so `pythia-2.8b-deduped` would collide with `pythia-2.8b`
+    # ignores size, so `pythia-410m-deduped` would collide with `pythia-410m`
     # (both `full-seed0`). Re-adding them requires size-aware labels first.
     with pytest.raises(ValueError, match="valid Pythia sizes"):
-        parse_base_models("pythia-2.8b-deduped")
+        parse_base_models("pythia-410m-deduped")
 
 
 def test_parse_base_models_pythia_bad_size_fails_fast():
@@ -298,8 +298,8 @@ def test_parse_base_models_pythia_bad_size_fails_fast():
 
 
 def test_parse_base_models_pythia_size_mixes_with_160m_tokens():
-    a, b = parse_base_models("pythia-2.8b,data-seed1")
-    assert (a.size, a.seed, a.variant) == ("2.8b", 0, "full")
+    a, b = parse_base_models("pythia-410m,data-seed1")
+    assert (a.size, a.seed, a.variant) == ("410m", 0, "full")
     assert (b.variant, b.seed) == ("data", 1)
 
 
@@ -517,3 +517,80 @@ def test_generate_numbers_config_records_dtype_in_manifest_not_params(tmp_path: 
     # bfloat16 round-trips through the shared resolver used by the pipeline.
     assert resolve_dtype("bfloat16") is torch.bfloat16
     assert resolve_dtype("float32") is torch.float32
+
+
+# --- spec_label: size-aware for non-160m `full` specs, 160m byte-identical -------------
+
+def test_spec_label_non_160m_full_seed_carries_size_and_round_trips():
+    spec = PythiaModelSpec(size="410m", seed=3, variant="full")
+    assert spec_label(spec) == "pythia-410m-seed3"
+    assert parse_base_models(spec_label(spec), allow_full_seeds=True) == [spec]
+
+
+def test_spec_label_non_160m_full_seed_round_trips_revision():
+    spec = PythiaModelSpec(size="410m", seed=3, variant="full", revision="step3000")
+    assert spec_label(spec) == "pythia-410m-seed3@step3000"
+    assert parse_base_models(spec_label(spec), allow_full_seeds=True) == [spec]
+
+
+def test_spec_label_non_160m_seed0_is_the_size_token():
+    spec = PythiaModelSpec(size="410m", seed=0, variant="full")
+    assert spec_label(spec) == "pythia-410m"
+    assert parse_base_models(spec_label(spec)) == [spec]
+
+
+def test_spec_label_160m_labels_are_byte_identical():
+    # On-disk trees key on these; the size-aware change must not touch 160m.
+    assert spec_label(PythiaModelSpec(size="160m", seed=0, variant="full")) == "full-seed0"
+    assert spec_label(PythiaModelSpec(size="160m", seed=2, variant="full")) == "full-seed2"
+    assert spec_label(PythiaModelSpec(size="160m", seed=1, variant="data")) == "data-seed1"
+    assert spec_label(PythiaModelSpec(size="160m", seed=3, variant="weight")) == "weight-seed3"
+
+
+# --- validate_spec: the parse_base_models grammar for specs built elsewhere ------------
+
+def test_validate_spec_accepts_the_seven_standard_specs():
+    from subliminal_learning.teachers.model_specs import validate_spec
+
+    for spec in parse_base_models("all7"):
+        validate_spec(spec)
+
+
+def test_validate_spec_rejects_out_of_range_seed():
+    from subliminal_learning.teachers.model_specs import validate_spec
+
+    with pytest.raises(ValueError, match="bad seed 99"):
+        validate_spec(PythiaModelSpec(size="160m", seed=99, variant="full"),
+                      allow_full_seeds=True)
+
+
+def test_validate_spec_rejects_data_seed_off_160m():
+    from subliminal_learning.teachers.model_specs import validate_spec
+
+    with pytest.raises(ValueError, match="160m only"):
+        validate_spec(PythiaModelSpec(size="410m", seed=1, variant="data"))
+
+
+def test_validate_spec_rejects_bad_size_and_variant():
+    from subliminal_learning.teachers.model_specs import validate_spec
+
+    with pytest.raises(ValueError, match="bad size"):
+        validate_spec(PythiaModelSpec(size="1b", seed=0, variant="full"))
+    with pytest.raises(ValueError, match="bad variant"):
+        validate_spec(PythiaModelSpec(size="160m", seed=1, variant="bogus"))
+
+
+def test_validate_spec_gates_full_seeds():
+    from subliminal_learning.teachers.model_specs import validate_spec
+
+    spec = PythiaModelSpec(size="160m", seed=2, variant="full")
+    with pytest.raises(ValueError, match="opt-in"):
+        validate_spec(spec)
+    validate_spec(spec, allow_full_seeds=True)
+
+
+def test_validate_spec_passes_datadecide_through():
+    from subliminal_learning.models.datadecide import DataDecideSpec
+    from subliminal_learning.teachers.model_specs import validate_spec
+
+    validate_spec(DataDecideSpec(seed=2))

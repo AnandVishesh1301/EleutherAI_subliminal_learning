@@ -177,36 +177,46 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         what is PRESENT ON DISK, so it reads correctly mid-drain,
                                         absorbs wave 3 on a plain re-run, and ignores the partial
                                         r32a2 batch that was in flight when the trim landed
-    collapse_campaigns_k_alpha_rank     the three boundary campaigns (krungs 25+4, band-117,
-                                        focus-20) merged onto ONE frame and cut per lineage
-                                        (animal × teacher-numbers base → student base, e.g.
-                                        pythia-160m→ds1 apart from pythia-160m→ds2): y = K/K*
-                                        binned at 0.05, x = α, panel = rank, cell = mean over
-                                        teachers × co-binned design cells (§6 transfer, §7
-                                        collapse fraction, §8 the same on the 5 teachers all
-                                        three campaigns share, §10 the K/K* marginal + per-arm
-                                        empirical boundary). §9 is the UN-BINNED counterpart, in
-                                        the top20_krungs_ds1 §4 layout: rows = every design cell
-                                        ordered by ascending design K with ties broken rank → α →
-                                        lr (larger higher, origin="lower"), cols = teacher in
-                                        distillability order, cell = that run's test p. §9a draws
-                                        one annotated matrix per lineage (row labels coloured by
-                                        the campaign that placed the cell, red box = collapsed);
-                                        §9b puts every lineage of one animal side by side on a
-                                        shared row axis (all 145 cells) and colour scale with the
-                                        labels dropped, for reading the live/dead split across
-                                        inits at a glance. Designs are read from their own
-                                        records (krungs waves frozen inline, band-117 from the
-                                        top5-bandext-ds2ws2 job list, focus-20 from
-                                        run_logs/focus20_cells.json) and asserted, incl. the one
-                                        coordinate krungs wave 3 shares with the band; loads via
+    collapse_campaigns_k_alpha_rank     the boundary campaigns (krungs 25+4, band-117, focus-20,
+                                        band-48, lowk-9 — 151 distinct cells) merged onto ONE
+                                        frame and cut per lineage (animal × teacher-numbers base
+                                        → student base, e.g. pythia-160m→ds1 apart from
+                                        pythia-160m→ds2): y = K/K* binned at 0.05, x = α, panel =
+                                        rank, cell = mean over teachers × co-binned design cells
+                                        (§7 transfer, with the core65 cells boxed red focus-20 /
+                                        blue band-48 / orange lowk-9; §9 the K/K* marginal +
+                                        per-arm empirical boundary). §3 is the cross-cut summary
+                                        up front: animal × student-base grids of mean
+                                        log10(test/test_prior) and prior-based collapse fraction
+                                        (test < test_prior/e³) on three fixed K/K* regimes
+                                        (low <0.57 / band / above ≥1), plus macro-averaged
+                                        ds-vs-ws and teacher-tier tables (arms without a measured
+                                        test_prior drop out and are printed in §2). §8 is the
+                                        UN-BINNED counterpart, in the top20_krungs_ds1 §4 layout:
+                                        rows = every design cell ordered by ascending design K
+                                        with ties broken rank → α → lr (larger higher,
+                                        origin="lower"), cols = teacher in distillability order,
+                                        cell = that run's test p; §8b puts every lineage of one
+                                        animal side by side on a shared row axis and colour scale
+                                        (row labels coloured by the campaign that placed the
+                                        cell). Designs are
+                                        read from their own records (krungs waves frozen inline,
+                                        band-117 from the top5-bandext-ds2ws2 job list, focus-20/
+                                        band-48/lowk-9 from their run_logs manifests) and
+                                        asserted, incl. the krungs-w3/band shared coordinate and
+                                        the 3 lowk-9 anchors reused from krungs-25; loads via
                                         collapse_law.load_law_runs restricted to the manifest
                                         teachers, the design cells and student seed 1 (other
                                         seeds at those coordinates belong to the law-*/reseed
                                         campaigns). Built by
                                         scripts/build_collapse_campaigns_nb.py (assembles +
                                         executes, as for collapse_mechanism); reconstructed
-                                        2026-08-05 after the node-1 rebuild destroyed the original
+                                        2026-08-05 after the node-1 rebuild destroyed the
+                                        original; 2026-08-18 rebuilt with band-48/lowk-9, the §3
+                                        summary added, and trimmed: per-lineage collapse-fraction
+                                        grids, per-lineage score-distribution panels, the top-5
+                                        balanced-pool grids and the one-matrix-per-lineage
+                                        section all dropped
     steerability_screen_analysis        steering-vector screen tables/heatmaps
     eas_analysis                        EAS dose-response + HP tables
     sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
@@ -546,14 +556,61 @@ unambiguous identity. Tokens are validated against
 stays invalid and no group selector (`seeds`/`all`/`all7`) ever includes them, so a run
 on one can never be the result of a typo'd or wildcarded data-/weight-seed selection;
 on disk they are keyed by repo basename `pythia-160m-seed{N}`, disjoint from
-`pythia-160m-{data,weight}-seed{N}`. A `pythia-<size>` token (any
-size in `registry.PYTHIA_SIZES`, e.g. `pythia-2.8b`) selects that size's `full`/seed-0
-model — the larger-model replication path (2026-08-16): teacher FT, number generation,
-and student distillation take a `--dtype {float32,bfloat16}` knob (default fp32,
-byte-identical; non-default recorded in the manifest only), and 2.8B configs live at
-`configs/experiment/template_bias_pythia2p8b.yaml`, `teacher_ft_sweep_2p8b.yaml`, and
-`configs/training/collapse_2p8b/` (boundary lr-ladder). Seed ensembles (data/weight
-variants) exist only at 160m, so larger sizes run same-model arms only.
+`pythia-160m-{data,weight}-seed{N}`. `spec_label` is **size-aware** for non-160m `full`
+specs (`pythia-410m`, `pythia-410m-seed3`) so a label always re-parses to the same spec;
+every 160m label (`full-seed{0,N}`, `data-seed<N>`, `weight-seed<N>`) is byte-identical
+to before. The YAML `model_spec:` route (teachers / SDF / GKD loaders) is validated by
+the shared `teachers.model_specs.validate_spec`, so an out-of-range size/seed fails at
+load; a full-seed base there requires a top-level `allow_full_seed_base: true` in the
+experiment YAML (default false). (Unrelated: `configs/experiment/*_full_seed0.yaml`
+FILENAMES mean "full fine-tune, seed 0" — not the `full-seed<N>` token grammar.)
+Pile-coherence discovery tokenizes a `pythia-160m-seed{N}` run dir as `full-seed<N>`
+(previously it produced a bare `seed<N>` the round-trip parse rejected, silently skipping
+the run), and `cka.model_refs.spec_from_base_name` validates its inverted spec against
+the registry constants instead of minting one that 404s later. Analysis short labels
+(`analysis.frames.short_model`, `transfer_factors.normalize_model_name`,
+`collapse_law` base labels, the campaigns builder) map full-seed dirs to `full-seed<N>`
+— never a bare `seed<N>`, and never pooled into the `same-model` family (they get their
+own `full-seed` family and rank). A `pythia-<size>` token (any
+size in `registry.PYTHIA_SIZES`, e.g. `pythia-410m`) selects that size's `full`/seed-0
+model. Teacher FT, number generation, and student distillation take a
+`--dtype {float32,bfloat16}` knob (default fp32, byte-identical; non-default recorded
+in the manifest only). The pythia-2.8B replication path was dropped 2026-08-18 (its
+configs deleted; `PYTHIA_SIZES` trimmed back to 14m-410m). Seed ensembles (data/weight
+variants) exist only at 160m.
+
+### DataDecide OLMo arm (1B, 2026-08-18)
+
+A second, fully isolated base-model family (`models/datadecide.py`, which imports
+nothing else from the package). CLI grammar: `dd-1b[-seed{1,2,3}][@step{N}]`, routed by
+`parse_base_model_tokens` — the launch CLIs' one entry point, which sends any `dd-*`
+list to the DataDecide parser and everything else, unsplit, to `parse_base_models`
+(Pythia behaviour byte-identical). Mixing families in one invocation is a ValueError
+(different tokenizer, different Hub org). DataDecide is **CLI-token-only**: an
+experiment YAML's `model_spec` stays Pythia-only.
+
+- Seeds are HF **branches** of one repo (`allenai/DataDecide-dolma1_7-1B`), ordinal →
+  branch: 1 → `default`, 2 → `large-aux-2`, 3 → `large-aux-3`. A DataDecide seed
+  re-randomizes weight init AND data order jointly — there is no ds/ws analog.
+- The revision is ALWAYS the explicit `step{N}-seed-{branch}` branch (final step
+  **69369**), never `main`: main can move, the step branch is immutable provenance.
+- Run dirs: `DataDecide-dolma1_7-1B-seed-{branch}`; a step-pinned spec appends
+  `@step{N}` and therefore lands under `ckpt/`, like a revision-pinned Pythia dir.
+- Loading needs the legacy `hf_olmo` architecture from the **non-default** `datadecide`
+  dependency group: `uv sync --group datadecide` (the loader raises a RuntimeError
+  naming exactly that command).
+- LoRA targets the regex `.*transformer\.blocks\.\d+\.(att_proj|attn_out|ff_proj|ff_out)`
+  (configs `lora_template_bias_olmo1b.yaml`, `lora_student_distill_olmo1b.yaml` — the
+  only configs valid for `dd-*` runs). The **ff_out head trap**: the top-level
+  `transformer.ff_out` is the LM head, so `all-linear` is rejected on non-NeoX models
+  (`sft_io.check_target_modules_safe`).
+- Scope is the **core chain only** (teacher FT → number generation → distillation →
+  preference eval). CKA/similarity, EAS/steering, Pile coherence, and activation
+  patching are NOT wired for OLMo and fail loudly (`extract_io`'s bare-NeoX gate); so
+  does full-FT teacher eval loading.
+- Caveat: the 150M/300M DataDecide aux seeds are **budget-mismatched** (trained to 25%
+  of the 1B compute), so cross-seed work below 1B needs step-pinned checkpoints; only
+  1B is selectable.
 
 ## End-to-end flows
 
@@ -769,6 +826,12 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
   jobq deps require the whole upstream queue terminal before this stage starts, so a missing pool
   is always a real upstream failure — rc=0 would be recorded DONE forever (requeue is failed_only
   and re-submit drops present jobkeys). *Changed 2026-08-10; formerly SKIP rc=0.*
+- **Cross-init replication (2026-08-18)**: the top-5 diagonal re-run on the re-pretrained bases
+  `pythia-160m-data-seed1` / `pythia-160m-weight-seed1` at steps {25,50,75,100,125,143}k (queues
+  `ckpt-dog{ds1,ws1}-top5-*`, 60 cells). The transfer takeoff replicates on both lineages;
+  results in `notebooks/checkpoint_distillation_analysis.ipynb` §1c (loader keys lineages by an
+  `init` column: orig/ds1/ws1). Teacher-side sidecars (preference summary, prior ladder, pool
+  forensics) were not measured for the seed trees.
 
 ### On-policy GKD student distillation
 

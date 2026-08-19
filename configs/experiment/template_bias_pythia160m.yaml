@@ -14,7 +14,9 @@ model_spec:
   # Default base model to fine-tune: the ORIGINAL pythia-160m (full/seed0). A plain
   # run (--base-models config) trains this one; --base-models seeds sweeps the 6
   # data/weight-seed models; all7 = original + those 6. The pythia-160m-seed{N}
-  # variants (init + data order re-randomized together) are out of scope.
+  # variants (init + data order re-randomized together) are selectable since
+  # 2026-08-18, but only via explicit full-seed<N>/pythia-160m-seed<N> tokens
+  # plus the --allow-full-seed-bases flag (or allow_full_seed_base: true).
   size: "160m"
   variant: "full"
   seed: 0

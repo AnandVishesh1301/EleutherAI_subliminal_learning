@@ -27,28 +27,28 @@ skips seeds whose file already covers every checkpoint on disk (``--force`` reco
 from __future__ import annotations
 
 import json
-import re
 import time
-from dataclasses import replace as dc_replace
 from pathlib import Path
 
-import numpy as np
 import torch
 import typer
 from dotenv import load_dotenv
 from loguru import logger
 from peft import PeftModel
 
-from scripts.ckpt_preference_trajectory import _checkpoint_dirs, _is_finite
+from scripts.ckpt_preference_trajectory import (
+    _checkpoint_dirs,
+    _is_finite,
+    manifest_ref,
+    resolve_run_context,
+)
 from scripts.frozen_a_ablation import _mean_kl, _pile_logprobs
 from subliminal_learning.cka.pool_io import build_pile_pool
+from subliminal_learning.coherence.probe_io import PROBE_POOL_PP1
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.students.config import load_student_training
-from subliminal_learning.students.layout import student_param_dir
 from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.templates.model_specs import parse_base_models
 from subliminal_learning.utils.io import atomic_write_json
-from pipelines.generate_numbers_pipeline import load_number_prompt_set, prompt_set_tag
 
 ROOT = Path(__file__).absolute().parents[1]
 REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
@@ -60,17 +60,27 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 @app.command()
 def main(
     tag: str = typer.Option(..., help="Strip cell tag, e.g. ep20_lr5e-4_r64a8."),
-    n_pile_docs: int = typer.Option(32, help="Held-out Pile docs for the KL readout."),
-    pile_seed: int = typer.Option(0, help="Seed for the Pile doc permutation."),
-    pile_max_tokens: int = typer.Option(512),
+    n_pile_docs: int = typer.Option(PROBE_POOL_PP1.n_docs, help="Held-out Pile docs for the KL readout."),
+    pile_seed: int = typer.Option(PROBE_POOL_PP1.seed, help="Seed for the Pile doc permutation."),
+    pile_max_tokens: int = typer.Option(PROBE_POOL_PP1.max_tokens),
     device: str = typer.Option("cuda:0"),
     force: bool = typer.Option(False, help="Recompute seeds that already have a file."),
+    registry: Path = typer.Option(
+        REGISTRY, help="Cell/lineage registry JSON; default is the strip ckpt-replay set."
+    ),
+    final_only: bool = typer.Option(
+        False, help="Score ONLY the final adapter as a single-step trajectory (runs saved "
+        "without intermediate checkpoint-* dirs)."
+    ),
+    legacy_out: bool = typer.Option(
+        False, help="Write the legacy flat analysis/ckpt_pile_kl_traj/{tag}_ftseed{S}.json "
+        "instead of the canonical {run_dir}/eval/pile_kl_traj.json. Off by default."
+    ),
 ) -> None:
     load_dotenv(ROOT / ".env")
-    reg = json.loads(REGISTRY.read_text())
+    reg = json.loads(registry.read_text())
     if tag not in reg["cells"]:
-        raise typer.BadParameter(f"{tag!r} is not in {REGISTRY}")
-    seeds, lin = reg["cells"][tag], reg["lineage"]
+        raise typer.BadParameter(f"{tag!r} is not in {registry}")
 
     base_cfg = load_template_config(
         ROOT / "configs/paths/paths_local.yaml",
@@ -82,32 +92,19 @@ def main(
         ROOT / "configs/training/lora_student_distill.yaml"
     )
     out_root = base_cfg.paths.output_root
-    out_dir = out_root / OUT_SUBDIR
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Canonical write target is the run dir's own eval/ (sibling of checkpoints/); see the
+    # pref-traj script. `lineage_slug` is registry metadata only. --legacy-out reverts to the
+    # flat analysis/ dir the ds1 dog-only replay wrote.
+    slug = reg.get("lineage_slug")
+    legacy_dir = out_root / OUT_SUBDIR
+    if legacy_out:
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("{}: lineage_slug={} legacy_out={} final_only={}", tag, slug, legacy_out,
+                final_only)
 
-    m = re.fullmatch(r"ep(\d+)_lr([0-9.e-]+)_r(\d+)a(\d+)", tag)
-    if not m:
-        raise typer.BadParameter(f"bad tag {tag!r}")
-    epochs, lr_s, rank, alpha = int(m[1]), m[2], int(m[3]), int(m[4])
-
-    prompt_set = load_number_prompt_set(ROOT / "configs/experiment/number_generation.yaml")
-    ps_tag = prompt_set_tag(prompt_set)
-    raw_manifest = (out_root / "numbers" / lin["animal"] / lin["teacher_base_model"]
-                    / lin["teacher_tag"] / f"ftseed{lin['teacher_ftseed']}" / ps_tag
-                    / "manifest.json")
-    n_raw = json.loads(raw_manifest.read_text())["n_raw"]
-    dataset_tag = f"{ps_tag}_{lin['filter_mode']}_n{n_raw // 1000}k"
-
-    spec = parse_base_models(lin["student_base"])[0]
-    param_dir = student_param_dir(
-        out_root, source="teacher", spec=spec, hub_org=base_cfg.hub_org,
-        train_cfg=dc_replace(student_train, learning_rate=float(lr_s), n_epochs=epochs,
-                             seed=seeds[0]),
-        lora_cfg=dc_replace(student_lora, r=rank, lora_alpha=alpha),
-        animal=lin["animal"], teacher_param_tag=lin["teacher_tag"],
-        teacher_seed=lin["teacher_ftseed"], number_dataset_tag=dataset_tag,
-        numbers_base_model="pythia-160m",
-    )
+    ctx = resolve_run_context(reg, tag, out_root, base_cfg.hub_org, student_train, student_lora)
+    spec, param_dir, seeds, lin = ctx.spec, ctx.param_dir, ctx.seeds, ctx.lineage
+    rank, alpha, lr_s, epochs = ctx.rank, ctx.alpha, ctx.learning_rate, ctx.n_epochs
 
     tokenizer = load_tokenizer(spec, base_cfg.paths.hf_cache_root, base_cfg.hub_org)
     pool = build_pile_pool(tokenizer, n_pile_docs, max_tokens=pile_max_tokens,
@@ -119,20 +116,32 @@ def main(
     model: PeftModel | None = None
     prev_adapter: str | None = None
 
+    pile_id = {"n_pile_docs": n_pile_docs, "pile_seed": pile_seed,
+               "pile_max_tokens": pile_max_tokens, "pile_pool_sha": pool.token_sha256()}
     for seed in seeds:
-        ckpt_root = param_dir / f"ftseed{seed}" / "checkpoints"
-        out_path = out_dir / f"{tag}_ftseed{seed}.json"
+        run_dir = param_dir / f"ftseed{seed}"
+        ckpt_root = run_dir / "checkpoints"
+        out_path = (legacy_dir / f"{tag}_ftseed{seed}.json" if legacy_out
+                    else run_dir / "eval" / "pile_kl_traj.json")
         points = _checkpoint_dirs(ckpt_root)
+        if final_only:
+            points = [(s, c) for s, c in points if c == ckpt_root]
         if not points:
             raise typer.Exit(
                 typer.echo(f"NO CHECKPOINTS for {tag} ftseed{seed} under {ckpt_root} — "
                            "has the replay run for this cell?", err=True) or 1
             )
+        steps = [s for s, _ in points]
+        ref = manifest_ref(run_dir)
         if out_path.exists() and not force:
             stored = json.loads(out_path.read_text())
-            if len(stored.get("points", [])) == len(points):
-                logger.info("{} ftseed{}: {} points cached (skip)", tag, seed, len(points))
+            # Current iff same checkpoint list, same Pile pool identity, and same run ref.
+            if (stored.get("checkpoint_steps") == steps
+                    and {k: stored.get(k) for k in pile_id} == pile_id
+                    and stored.get("train_manifest_ref") == ref):
+                logger.info("{} ftseed{}: {} points current (skip)", tag, seed, len(points))
                 continue
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
         rows, t0 = [], time.time()
         for i, (step, ckpt) in enumerate(points):
@@ -158,7 +167,8 @@ def main(
                          "kl_base_adapted": _mean_kl(base_logp, adapted_logp)})
 
         atomic_write_json(out_path, {
-            "tag": tag, "ft_seed": seed, "animal": lin["animal"],
+            "tag": tag, "ft_seed": seed, "animal": lin.get("animal"),
+            "lineage_slug": slug, "final_only": final_only,
             "base_model": lin["student_base"], "param_dir": str(param_dir),
             "rank": rank, "alpha": alpha, "learning_rate": float(lr_s),
             "n_epochs": epochs,
@@ -167,6 +177,8 @@ def main(
             "pile_pool_sha": pool.token_sha256(),
             "n_eligible_positions": int(sum(len(e) for e in pool.eligible)),
             "kl_direction": "KL(base || adapted), position-pooled nats",
+            "checkpoint_steps": steps,
+            "train_manifest_ref": ref,
             "points": rows,
         })
         logger.info("{} ftseed{}: {} points in {:.0f}s -> {}",

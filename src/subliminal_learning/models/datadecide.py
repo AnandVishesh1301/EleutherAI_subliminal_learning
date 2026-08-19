@@ -1,0 +1,225 @@
+"""DataDecide (OLMo) base-model specs, Hub resolution, and loading.
+
+A second, fully isolated base-model family alongside PolyPythias: the AI2
+DataDecide 1B models, selected by `dd-1b[-seed{1,2,3}][@step{N}]` CLI tokens.
+The three full-budget seeds are HF BRANCHES of one repo, not separate repos, and
+each seed re-randomizes weight init AND data order together (there is no
+data-seed / weight-seed split as in PolyPythias).
+
+Deliberately standalone: this module imports nothing from the rest of the
+package at import time (the `model_specs` delegation in `parse_base_model_tokens`
+is a function-local import), so `model_specs` stays ignorant of DataDecide and
+every Pythia code path is unchanged.
+
+Loading needs the `ai2-olmo` package (legacy `OLMoForCausalLM`, model_type
+`hf_olmo`); it lives in the non-default `datadecide` dependency group.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # torch/transformers stay OUT of the import graph of this module,
+    import torch  # which registry/run_layout import (tests/unit/test_layering.py).
+    from transformers import PreTrainedTokenizerBase
+
+DD_HUB_ORG = "allenai"
+DD_RECIPE = "dolma1_7"
+# Final training step of the 1B models; shared by all three full-budget seeds.
+DD_1B_FINAL_STEP = 69369
+# Ordinal seed -> DataDecide branch seed name. Only these three are selectable:
+# the `small-aux-*` branches are 25%-compute runs and are NEVER a valid choice.
+DD_SEED_BRANCHES: dict[int, str] = {1: "default", 2: "large-aux-2", 3: "large-aux-3"}
+
+_AI2_OLMO_HINT = (
+    "DataDecide/OLMo models require the ai2-olmo package: "
+    "run `uv sync --group datadecide`"
+)
+
+
+@dataclass(frozen=True)
+class DataDecideSpec:
+    """Identifies one DataDecide checkpoint on the Hugging Face Hub.
+
+    Attributes:
+        size: DataDecide size. Only "1B" is exposed by the token grammar.
+        seed: Ordinal seed 1-3, mapped to a branch via `DD_SEED_BRANCHES`.
+        step: Training step to pin. None -> the final step (`DD_1B_FINAL_STEP`).
+        recipe: Data recipe; only "dolma1_7" is wired.
+    """
+
+    size: str = "1B"
+    seed: int = 1
+    step: int | None = None
+    recipe: str = "dolma1_7"
+
+
+def dd_repo_id(spec: DataDecideSpec) -> str:
+    """Hub repo id, e.g. `allenai/DataDecide-dolma1_7-1B`."""
+    return f"{DD_HUB_ORG}/DataDecide-{spec.recipe}-{spec.size}"
+
+
+def dd_revision(spec: DataDecideSpec) -> str:
+    """The branch to load, ALWAYS explicit, e.g. `step69369-seed-large-aux-2`.
+
+    Never "main": main can move, while the `step{N}-seed-{name}` branch is
+    immutable provenance. An unpinned spec resolves to the final step.
+    """
+    step = spec.step if spec.step is not None else DD_1B_FINAL_STEP
+    return f"step{step}-seed-{DD_SEED_BRANCHES[spec.seed]}"
+
+
+def dd_model_ref(spec: DataDecideSpec) -> str:
+    """`{repo_id}@{revision}` -- the manifest/run-identity provenance string."""
+    return f"{dd_repo_id(spec)}@{dd_revision(spec)}"
+
+
+def dd_dir_name(spec: DataDecideSpec) -> str:
+    """Output-tree directory name, e.g. `DataDecide-dolma1_7-1B-seed-default`.
+
+    A step-pinned spec appends `@step{N}`; unpinned names carry no `@`, so they
+    are the canonical arm dirs and pinned ones route under `ckpt/` (see
+    `run_layout.model_dir_parts`), exactly like revision-pinned Pythia dirs.
+    """
+    name = f"DataDecide-{spec.recipe}-{spec.size}-seed-{DD_SEED_BRANCHES[spec.seed]}"
+    if spec.step is not None:
+        return f"{name}@step{spec.step}"
+    return name
+
+
+def parse_dd_token(token: str) -> DataDecideSpec:
+    """Parse one `dd-*` base-model token into a `DataDecideSpec`.
+
+    Grammar: `dd-1b`, `dd-1b-seed{1|2|3}`, either optionally suffixed with
+    `@step{N}` (positive int). `dd-1b` is strict lowercase.
+
+    The step is NOT validated against the released checkpoint list (that would
+    need the network at parse time); a bad step fails loudly at HF load.
+    """
+    raw = token.strip()
+    step: int | None = None
+    if "@" in raw:
+        raw, step_str = raw.split("@", 1)
+        if not step_str.startswith("step") or not step_str[len("step") :].isdigit():
+            raise ValueError(
+                f"bad step suffix {step_str!r} in DataDecide token {token!r}; "
+                "expected '@step<N>' with a positive integer N, e.g. 'dd-1b@step17500'"
+            )
+        step = int(step_str[len("step") :])
+        if step <= 0:
+            raise ValueError(
+                f"bad step {step} in DataDecide token {token!r}; must be positive"
+            )
+    seed = 1
+    if "-seed" in raw:
+        raw, seed_str = raw.split("-seed", 1)
+        try:
+            seed = int(seed_str)
+        except ValueError:
+            raise ValueError(
+                f"bad seed {seed_str!r} in DataDecide token {token!r}; expected an "
+                f"integer ordinal in {_seed_menu()}"
+            ) from None
+        if seed not in DD_SEED_BRANCHES:
+            raise ValueError(
+                f"bad seed {seed} in DataDecide token {token!r}; valid ordinals are "
+                f"{_seed_menu()}"
+            )
+    if raw != "dd-1b":
+        raise ValueError(
+            f"bad DataDecide token {token!r}: only the 1B models are wired, spelled "
+            "lowercase as 'dd-1b'. The 150M/300M aux seeds are budget-mismatched "
+            "(trained to 25% of the 1B compute), so cross-seed work below 1B needs "
+            "step-pinned checkpoints and is not selectable here"
+        )
+    return DataDecideSpec(size="1B", seed=seed, step=step)
+
+
+def _seed_menu() -> str:
+    """`1 (default), 2 (large-aux-2), ...` -- the valid ordinals with branch names."""
+    return ", ".join(f"{k} ({v})" for k, v in DD_SEED_BRANCHES.items())
+
+
+def parse_base_model_tokens(value: str, *, allow_full_seeds: bool = False) -> list:
+    """Parse a `--base-models` string, routing by family.
+
+    If ANY comma-separated token starts with `dd-`, all must: the string is a
+    DataDecide selection and every token goes through `parse_dd_token`.
+    Otherwise the ORIGINAL, unsplit string is delegated to
+    `teachers.model_specs.parse_base_models`, so the aggregate Pythia tokens
+    ("all7", "seeds", "data", ...) behave byte-identically.
+
+    DataDecide is CLI-token-only: an experiment YAML's `model_spec` stays
+    Pythia-only, so the `--base-models config` branches never reach this router.
+
+    Raises:
+        ValueError: On a mixed pythia+dd list, or any malformed token.
+    """
+    tokens = [t.strip() for t in value.split(",") if t.strip()]
+    dd_tokens = [t for t in tokens if t.lower().startswith("dd-")]
+    if dd_tokens:
+        if len(dd_tokens) != len(tokens):
+            raise ValueError(
+                f"mixed base-model families in {value!r}: DataDecide (dd-*) and "
+                "Pythia tokens cannot share one invocation -- they have different "
+                "tokenizers and Hub orgs. Run them as separate invocations"
+            )
+        return [parse_dd_token(t) for t in tokens]
+
+    from subliminal_learning.teachers.model_specs import parse_base_models
+
+    return parse_base_models(value, allow_full_seeds=allow_full_seeds)
+
+
+def _require_hf_olmo() -> None:
+    """Import `hf_olmo` (registers `OLMoForCausalLM` with Auto*) or explain the fix."""
+    try:
+        import hf_olmo  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(_AI2_OLMO_HINT) from exc
+
+
+def load_datadecide_tokenizer(
+    spec: DataDecideSpec, hf_cache_root: Path
+) -> "PreTrainedTokenizerBase":
+    """Load the OLMo tokenizer for a DataDecide spec, at its pinned branch."""
+    _require_hf_olmo()
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        dd_repo_id(spec),
+        revision=dd_revision(spec),
+        cache_dir=str(hf_cache_root / "hub"),
+    )
+    # OLMo ships a real pad token (id 1); only fill in a missing one.
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+
+def load_datadecide_model(
+    spec: DataDecideSpec,
+    hf_cache_root: Path,
+    device: str,
+    dtype: "torch.dtype | None" = None,
+) -> Any:
+    """Load a DataDecide causal LM on `device` in eval mode, at its pinned branch.
+
+    `dtype=None` means fp32, the repo-wide default (spelled lazily so importing this
+    module does not pull in torch).
+    """
+    _require_hf_olmo()
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(
+        dd_repo_id(spec),
+        revision=dd_revision(spec),
+        cache_dir=str(hf_cache_root / "hub"),
+        torch_dtype=torch.float32 if dtype is None else dtype,
+    )
+    model.to(device)
+    model.eval()
+    return model

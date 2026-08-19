@@ -27,7 +27,8 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     run,
 )
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.models.datadecide import parse_base_model_tokens
+from subliminal_learning.teachers.model_specs import spec_label
 from subliminal_learning.teachers.run_layout import teacher_param_dir
 from subliminal_learning.evaluation.prompt_sets import (
     DEFAULT_TEACHER_SET_NAMES,
@@ -92,6 +93,11 @@ def main(
         "a deliberate choice.",
     ),
     device: str = "cuda:0",
+    dtype: str = typer.Option(
+        "float32",
+        help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
+        "Non-default is recorded in the summary only, never in the output path.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
@@ -113,7 +119,7 @@ def main(
     paths = cfg.paths if output_root is None else replace(cfg.paths, output_root=output_root)
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"
-        else parse_base_models(base_models, allow_full_seeds=allow_full_seed_bases)
+        else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seed_bases)
     )
 
     for spec in base_specs:
@@ -142,6 +148,7 @@ def main(
                 confidence=confidence,
                 device=device,
                 force=force,
+                dtype=dtype,
             )
         )
 

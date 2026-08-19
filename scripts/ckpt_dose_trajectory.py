@@ -29,7 +29,12 @@ Default tag set: every cell with a clean verdict in ``analysis/ckpt_replay_verif
 drains and only new cells do work. Re-running skips runs whose output file already
 covers every checkpoint on disk (``--force`` recomputes).
 
-Writes ``{output_root}/analysis/ckpt_dose_traj/{tag}_ftseed{S}.json``.
+Writes ``{run_dir}/eval/dose_traj.json`` (a sibling of ``checkpoints/``, so a later
+checkpoint prune cannot orphan it and a retrained run's eval cannot go stale); each file
+is stamped with its ``checkpoint_steps`` + ``train_manifest_ref`` and re-run only when
+either changed. ``--legacy-out`` writes the old flat
+``{output_root}/analysis/ckpt_dose_traj/{tag}_ftseed{S}.json`` instead; existing legacy
+files are left untouched and remain readable via `analysis.trajectories`' fallback.
 
     uv run python -m scripts.ckpt_dose_trajectory                 # all verified cells
     uv run python -m scripts.ckpt_dose_trajectory --tag ep20_lr5e-4_r64a8
@@ -101,15 +106,31 @@ def _pooled_dose(adapter_file: Path, scal: float,
             "D_spec": float(np.mean(spec)) if spec else None}
 
 
-def _run_one(args: tuple[str, int, str, str]) -> str:
+def _manifest_ref(run_dir: Path) -> dict | None:
+    """Compact run-identity reference (mirrors ckpt_preference_trajectory.manifest_ref).
+
+    Duplicated rather than imported so this CPU-only script keeps its light import set (no
+    torch/peft) inside the process pool. None when the run has no final train_manifest.json.
+    """
+    mf = run_dir / "train_manifest.json"
+    if not mf.is_file():
+        return None
+    m = json.loads(mf.read_text())
+    return {"student_param_tag": m.get("student_param_tag"),
+            "filtered_sha256": m.get("filtered_sha256"),
+            "n_train_steps": m.get("n_train_steps")}
+
+
+def _run_one(args: tuple[str, int, str, str, bool]) -> str:
     """Worker: one (tag, ftseed) run -> trajectory JSON. Returns a status line."""
-    tag, ftseed, lineage_dir_s, out_dir_s = args
+    tag, ftseed, lineage_dir_s, out_dir_s, legacy_out = args
     from threadpoolctl import threadpool_limits
 
     from subliminal_learning.utils.io import atomic_write_json
 
     lineage_dir, out_dir = Path(lineage_dir_s), Path(out_dir_s)
-    ckpt = lineage_dir / tag / f"ftseed{ftseed}" / "checkpoints"
+    run_dir = lineage_dir / tag / f"ftseed{ftseed}"
+    ckpt = run_dir / "checkpoints"
     if not (ckpt / "adapter_config.json").exists():
         return f"SKIP {tag}/ftseed{ftseed}: no adapter_config.json"
     acfg = json.loads((ckpt / "adapter_config.json").read_text())
@@ -121,10 +142,21 @@ def _run_one(args: tuple[str, int, str, str]) -> str:
     if (ckpt / "adapter_model.safetensors").exists():
         steps.append((None, ckpt / "adapter_model.safetensors"))  # endpoint last
 
-    out_file = out_dir / f"{tag}_ftseed{ftseed}.json"
+    # Canonical target is the run dir's own eval/ (sibling of checkpoints/), like the pref
+    # and Pile-KL trajectories; --legacy-out keeps the flat analysis/ dir.
+    out_file = (out_dir / f"{tag}_ftseed{ftseed}.json" if legacy_out
+                else run_dir / "eval" / "dose_traj.json")
+    step_list = [s for s, _ in steps]
+    ref = _manifest_ref(run_dir)
     if out_file.exists():
         prev = json.loads(out_file.read_text())
-        if [p["step"] for p in prev["points"]] == [s for s, _ in steps]:
+        # Identity for dose = checkpoint list + train-manifest ref. No prompt hashes: dose
+        # is a pure function of the adapter weights and the frozen base's W0 norms, with no
+        # prompts, sampling or animals in it.
+        stored_steps = prev.get("checkpoint_steps", [p["step"] for p in prev["points"]])
+        current = stored_steps == step_list and (
+            legacy_out or prev.get("train_manifest_ref") == ref)
+        if current:
             return f"skip {tag}/ftseed{ftseed}: up to date ({len(steps)} points)"
 
     w0 = _w0_norms(out_dir.parent)
@@ -132,10 +164,12 @@ def _run_one(args: tuple[str, int, str, str]) -> str:
     with threadpool_limits(limits=1):
         for step, f in steps:
             points.append({"step": step, **_pooled_dose(f, scal, w0)})
+    out_file.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(out_file, {
         "tag": tag, "ftseed": ftseed,
         "rank": int(acfg["r"]), "alpha": int(acfg["lora_alpha"]),
         "lineage": str(lineage_dir), "pooling": "mean over modules of s*||BA||/||W0||",
+        "checkpoint_steps": step_list, "train_manifest_ref": ref,
         "points": points})
     return f"done {tag}/ftseed{ftseed}: {len(points)} points"
 
@@ -152,6 +186,13 @@ def main(
     tag: list[str] = typer.Option(
         None, help="cells to probe (default: every clean-verdict cell in "
         "analysis/ckpt_replay_verify/)"),
+    registry: Path = typer.Option(
+        None, help="Campaign registry JSON (cells -> ftseed list), e.g. "
+        "run_logs/orig_strip_tierB_cells.json; selects the runs instead of --tag / the "
+        "clean-verdict default. Lineage dirs still come from the flags above."),
+    legacy_out: bool = typer.Option(
+        False, help="Write the legacy flat analysis/ckpt_dose_traj/{tag}_ftseed{S}.json "
+        "instead of the canonical {run_dir}/eval/dose_traj.json. Off by default."),
     workers: int = typer.Option(8, help="process pool size (CPU-only work)"),
     force: bool = typer.Option(False, help="recompute existing outputs"),
 ) -> None:
@@ -159,13 +200,17 @@ def main(
     output_root = _resolve_output_root(output_root)
     analysis = output_root / "analysis"
     out_dir = analysis / "ckpt_dose_traj"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if legacy_out:
+        out_dir.mkdir(parents=True, exist_ok=True)
     lineage_dir = (output_root / "students" / animal / student_base
                    / f"teacher-{numbers_base}" / f"{teacher_tag}_tseed{tseed}"
                    / dataset_tag)
 
     runs: list[tuple[str, int]] = []
-    if tag:
+    if registry:
+        for t, seeds in json.loads(registry.read_text())["cells"].items():
+            runs.extend((t, int(s)) for s in seeds)
+    elif tag:
         for t in tag:
             for fs_dir in sorted((lineage_dir / t).glob("ftseed*")):
                 m = re.fullmatch(r"ftseed(\d+)", fs_dir.name)
@@ -180,10 +225,12 @@ def main(
                     runs.append((v["tag"], int(seed)))
     if force:
         for t, s in runs:
-            (out_dir / f"{t}_ftseed{s}.json").unlink(missing_ok=True)
+            stale = (out_dir / f"{t}_ftseed{s}.json" if legacy_out
+                     else lineage_dir / t / f"ftseed{s}" / "eval" / "dose_traj.json")
+            stale.unlink(missing_ok=True)
 
     print(f"{len(runs)} runs over lineage {lineage_dir}")
-    jobs = [(t, s, str(lineage_dir), str(out_dir)) for t, s in runs]
+    jobs = [(t, s, str(lineage_dir), str(out_dir), legacy_out) for t, s in runs]
     n_done = 0
     with ProcessPoolExecutor(max_workers=workers) as ex:
         for line in ex.map(_run_one, jobs):
