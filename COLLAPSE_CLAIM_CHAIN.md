@@ -5,6 +5,13 @@ record open disagreements/decisions, not settled science. Companion synthesis no
 `notebooks/collapse_evidence_review.ipynb` (its §4.8 audit predates the clamp tier and the
 at-scale spread results; this file is the up-to-date statement of the chain).*
 
+*Label note (2026-08-19): every fate statistic in this ledger was computed on a trait-probe
+dead label. Collapse is now labelled on Pile-KL vs base (integrity); see `docs/results/collapse_law.md`
+§1.2 for the label definition and its Appendix A for the per-link re-audit (A2's "death is containment failure" becomes a
+co-timing statement; the clamp runs stand and are only re-scored once θ̂ and the dead cut are
+re-derived on KL; the mediation residual awaits a two-part log-KL refit; the orig-init integrity K*
+is unknown).*
+
 **The goal in one paragraph.** We observe a simple rule in the student hyper-parameters
 (lr, α, rank) that dictates — across teacher lineages, student inits, animals, and even with no
 trait in the data — where transfer (and the model's coherence generally) collapses:
@@ -581,8 +588,13 @@ first-class sentence in any writeup — a reviewer will find the 14 kills.
   224-set shell analysis; the rank non-monotonicity was under-sampling.
 - **Endpoint θ as a training-budget-invariant constant** — grows ~√T; and the clamp showed
   endpoint sufficiency false.
-- **Wipe-lost, notes-only numbers** — "teachers are 66% of K* variance", the conditional-transfer
-  +0.124/I²=0 refit: re-derive before citing.
+- **Wipe-lost, notes-only numbers** — the conditional-transfer +0.124/I²=0 refit: re-derive
+  before citing. "Teachers are 66% of K* variance" was **re-derived and REVERSED 2026-08-20**
+  (campaigns notebook §0c, integrity label on shared core65 support, one logistic K* per
+  teacher × animal × base slice): partial R² of log K* is **base 0.66 / teacher 0.30 /
+  animal 0.06** — the 66% factor is the *student base*, not the teacher; teacher K* spread
+  (~1.14×) is recipe-heat-ordered, and the base ordering ws1 < ds* < ws2 replicates in every
+  animal and inside every teacher row.
 - **Adaptive-era statistics that dissolved on the strip** — the lr regime shift, the lone-α²
   retraction, within-rank fate AUCs (retired as too-easy), per-arm ‖ΔW‖ fate contrasts on
   unequal HP mixes.

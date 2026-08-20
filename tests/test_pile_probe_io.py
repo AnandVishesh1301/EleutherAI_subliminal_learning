@@ -57,3 +57,11 @@ def test_derive_dead_cut_bimodal_and_unimodal():
     assert dc.n_valley >= 40                       # churn is reported, not hidden
     assert pio.derive_dead_cut(rng.normal(2.0, 1.0, 1000)) is None   # unimodal -> refuse
     assert pio.derive_dead_cut([1.0] * 10) is None                    # too few
+
+    # the gate is COUNT-based (2026-08-20): an alive-diluted pool with a well-populated
+    # dead mode (small mass fraction, >= min_mode_runs runs) still derives...
+    diluted = np.concatenate([rng.normal(1.0, 0.5, 12000).clip(0), rng.normal(16.0, 2.0, 400)])
+    assert pio.derive_dead_cut(diluted) is not None
+    # ...while a genuinely sparse dead mode refuses
+    sparse = np.concatenate([rng.normal(1.0, 0.5, 12000).clip(0), rng.normal(16.0, 2.0, 120)])
+    assert pio.derive_dead_cut(sparse) is None

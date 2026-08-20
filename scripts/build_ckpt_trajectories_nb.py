@@ -55,7 +55,7 @@ import statsmodels.formula.api as smf
 from subliminal_learning.analysis.collapse_law import DEAD_SEED, K_of, KSTAR_POOLED
 from subliminal_learning.analysis.plots import compare_table, right_legend
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
-from subliminal_learning.analysis.trajectories import load_trajectory, source_counts
+from subliminal_learning.analysis.trajectories import load_lineage, source_counts
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 220)
@@ -82,11 +82,6 @@ LINEAGE = (OUTPUT_ROOT / "students/dog/pythia-160m-data-seed1/teacher-pythia-160
 ANIMAL = "dog"
 
 
-def _traj(kind, tag, seed):
-    return load_trajectory(kind, run_dir=LINEAGE / tag / f"ftseed{seed}",
-                           analysis_dir=AN, tag=tag, ftseed=seed)
-
-
 def _points(traj, guard=lambda p: True):
     '''Intermediate checkpoints only (endpoint + non-finite rows dropped), >=40 or None.'''
     if traj is None:
@@ -97,7 +92,12 @@ def _points(traj, guard=lambda p: True):
     return pts if len(pts) >= 40 else None
 
 
-runs, srcs = {}, []
+# ONE discovery pass over the strip's run dirs, filtered against the harvest FIRST (so no
+# trajectory is fetched for a run we would skip anyway), then ONE batched fetch per kind:
+# these are 41-point files and the fan-out is thousands of reads on a shared FS. `load_lineage`
+# serves the canonical {run_dir}/eval/{kind}_traj.json from the shared record cache and keeps
+# the per-run legacy analysis/ckpt_{kind}_traj/ fallback.
+STRIP = {}                                         # tag -> [ftseed, ...] (a registry's `cells`)
 for tag_dir in sorted(LINEAGE.glob("ep20_*")):
     for seed_dir in sorted(tag_dir.glob("ftseed*")):
         tag, seed = tag_dir.name, int(seed_dir.name.removeprefix("ftseed"))
@@ -106,6 +106,21 @@ for tag_dir in sorted(LINEAGE.glob("ep20_*")):
             continue
         if hr["alpha"] / hr["rank"] > 64:          # primary strip region only (s <= 64)
             continue
+        STRIP.setdefault(tag, []).append(seed)
+
+TRAJ = {kind: load_lineage({"cells": STRIP}, LINEAGE, kind, analysis_dir=AN,
+                           cache_root=OUTPUT_ROOT)
+        for kind in ("dose", "pref", "pile_kl")}
+
+
+def _traj(kind, tag, seed):
+    return TRAJ[kind].get((tag, seed))
+
+
+runs, srcs = {}, []
+for tag, seeds in STRIP.items():
+    for seed in seeds:
+        hr = harv[(tag, seed)]
         dt = _traj("dose", tag, seed)
         if dt is None:
             continue

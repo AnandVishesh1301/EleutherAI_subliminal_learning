@@ -43,6 +43,18 @@ class ProbePoolSpec:
     version: str
 
 
+# The operative integrity dead cut (2026-08-20, Angela's call; moved 5.0 -> 4.0 later the
+# same day): an ARBITRARY, openly declared convention -- KL (or delta-CE, numerically
+# identical) > 4.0 nats vs own base (~55x the base's Pile perplexity). Deliberately NOT
+# "derived": every derivation attempted (density valley, outlier fence, mixtures,
+# dose-side changepoints) turned out to presuppose the labeling, the population
+# composition, or the dose law itself (history: collapse_claims C3 — pre-08-20-reorder id
+# C7 — and the campaigns notebook S0c/S0d, 2026-08-19/20). The alive bulk ends by ~4-5
+# nats in every measured slice and all law statistics are insensitive over cuts 4-10
+# (K* moves ~4-8% between cuts 4 and 5; the 741 runs at KL 4-5 are the label-sensitive
+# set) -- always quote a cut-sensitivity line next to any fit that uses it.
+DEAD_KL_CUT = 4.0
+
 PROBE_POOL_PP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="pp1")
 # Reference token sha of pp1 (Pythia tokenizer, monology/pile-uncopyrighted validation as
 # of 2026-08). Recorded per record; a mismatch on a fresh build means the upstream dataset
@@ -123,16 +135,19 @@ class DeadCut:
 
 
 def derive_dead_cut(values, bin_width: float = 0.75, smooth_bins: int = 3,
-                    valley_frac: float = 0.5, min_mode_frac: float = 0.10) -> DeadCut | None:
+                    valley_frac: float = 0.5, min_mode_runs: int = 200) -> DeadCut | None:
     """Derive the integrity dead cut from a population's probe values (delta-CE or KL).
 
     No preregistered constant: a smoothed histogram is scanned for its two dominant
     modes; the cut is the density minimum between them, and the valley region (density
     below `valley_frac` of the smaller mode's peak) plus its seed count are returned so
     the residual arbitrariness is quantified rather than hidden. Populations without two
-    modes each holding at least `min_mode_frac` of the mass get None ("no bimodal
-    separation here -- do not force a label"). Re-derive per population; never carry a
-    cut across models/arms without re-deriving.
+    modes each holding at least `min_mode_runs` runs get None ("no bimodal separation
+    here -- do not force a label"). The gate is COUNT-based (2026-08-20, was a 10% mass
+    fraction): what makes a sparse mode's valley untrustworthy is too few runs to pin its
+    density down, not its share of the pool -- a pooled population diluted by alive-heavy
+    coverage can hold a perfectly well-populated dead mode at a small mass fraction.
+    Re-derive per population; never carry a cut across models/arms without re-deriving.
 
     Returns:
         A `DeadCut`, or None when the population is not usably bimodal.
@@ -168,9 +183,12 @@ def derive_dead_cut(values, bin_width: float = 0.75, smooth_bins: int = 3,
         return None
     i2 = best[1]
     lo, hi = sorted((i1, i2))
-    side_lo = (v <= centers[lo]).mean()
-    side_hi = (v >= centers[hi]).mean()
-    if min(side_lo, side_hi) < min_mode_frac:
+    # gate on the runs each side of the candidate cut (the interior density minimum) --
+    # each mode's full population, not just its beyond-the-peak half
+    _inner_idx = np.arange(lo, hi + 1)
+    _jdip = _inner_idx[int(np.argmin(d[_inner_idx]))]
+    n_side_lo = int((v <= centers[_jdip]).sum())
+    if min(n_side_lo, n - n_side_lo) < min_mode_runs:
         return None
 
     peak_small = min(d[i1], d[i2])

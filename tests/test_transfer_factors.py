@@ -345,3 +345,53 @@ def test_load_priors_test_prior_column(tmp_path):
         pytest.skip("load_priors requires the full outputs tree; covered by integration use")
     row = priors[(priors["animal"] == "dog") & (priors["base_label"] == "data-seed1")]
     assert row["test_prior"].iloc[0] == pytest.approx(0.02)
+
+
+# --------------------------------------------------------------------------------------------------
+# Integrity (Pile-KL) dead labels
+# --------------------------------------------------------------------------------------------------
+
+
+def _write_probe(run_dir, kl, nonfinite=False):
+    import json
+    (run_dir / "eval").mkdir(parents=True, exist_ok=True)
+    (run_dir / "eval" / "pile_probe.json").write_text(json.dumps(
+        {"kl_base_student": None if nonfinite else kl, "nonfinite_adapter": nonfinite}))
+
+
+def test_load_focus_pile_kl_and_population(tmp_path):
+    lin = (tmp_path / "students" / "dog" / "pythia-160m-data-seed1" / "teacher-pythia-160m"
+           / "t0_tseed1" / "ex10-20_prefix_n100k")
+    _write_probe(lin / "ep20_lr1e-4_r8a8" / "ftseed1", 1.5)
+    _write_probe(lin / "ep20_lr1e-4_r8a8" / "ftseed2", 9.0, nonfinite=True)
+    _write_probe(lin / "ep10_lr1e-4_r8a8" / "ftseed1", 0.3)          # wrong epoch: population skips
+    runs = pd.DataFrame({
+        "animal": ["dog"] * 3, "base_label": ["data-seed1"] * 3, "teacher_tag": ["t0"] * 3,
+        "student_tag": ["ep20_lr1e-4_r8a8"] * 3, "seed": [1, 2, 3], "test": [0.5, 0.0, 0.4],
+    })
+    kl = tf.load_focus_pile_kl(tmp_path, runs)
+    assert list(kl.index) == list(runs.index)
+    assert kl.iloc[0] == 1.5 and np.isinf(kl.iloc[1]) and np.isnan(kl.iloc[2])   # absent -> NaN
+
+    pop = tf.load_pile_kl_population(tmp_path, bases=["data-seed1", "weight-seed1"], animals=["dog"])
+    assert len(pop) == 2 and set(pop.seed) == {1, 2}
+    assert pop.loc[pop.seed == 2, "pile_kl"].iloc[0] == np.inf
+    assert list(pop.columns) == ["animal", "base_label", "teacher_lineage", "dataset",
+                                 "student_tag", "seed", "pile_kl"]
+    assert tf.load_pile_kl_population(tmp_path, bases=["weight-seed3"]).empty
+
+
+def test_mean_response_threshold_free():
+    runs = pd.DataFrame({
+        "animal": ["dog"] * 4, "base_label": ["data-seed1"] * 4, "teacher_tag": ["t0"] * 4,
+        "student_tag": ["ep20_lr1e-4_r8a8"] * 4, "lr": [1e-4] * 4, "rank": [8] * 4,
+        "alpha": [8] * 4, "K_rel": [0.5] * 4, "seed": [1, 2, 3, 4],
+        "test": [0.4, 0.2, 0.001, 0.0],
+    })
+    cells = tf.hurdle_cells(runs)
+    row = cells.iloc[0]
+    assert row.mean_test == pytest.approx(0.15025)                 # over ALL seeds
+    assert row.mean_logit == pytest.approx(np.log(0.15025 / (1 - 0.15025)))
+    # unconditional columns are identical under ANY dead threshold
+    row2 = tf.hurdle_cells(runs, dead=0.3).iloc[0]
+    assert row2.mean_test == row.mean_test and row2.cond != row.cond

@@ -39,8 +39,10 @@ import pandas as pd
 
 from subliminal_learning.analysis.frames import (
     PARAM_TAG_RE,
+    load_cell_summaries,
     parse_param_tag,
-    read_cell_set,
+    read_cell_set,  # noqa: F401  -- re-exported: callers use `collapse_law.read_cell_set`
+    summary_set_block,
 )
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
@@ -54,6 +56,14 @@ C_LAW: float = -0.085
 # anchor a few early notebooks fit against, kept only so those numbers stay reproducible.
 KSTAR_POOLED: float = 7.87e-4
 KSTAR_DS1_DESIGN: float = 7.84e-4
+
+# The WORKING calibrated anchor (Angela 2026-08-20: "use 8.4e-4 as calibrated K* for now"):
+# pooled logistic-50% at the display exponents under the declared integrity cut
+# DEAD_KL_CUT = 4.0 (~20k probe-covered runs; per-arm values spread 7.6-9.2e-4 around it,
+# base-ordered ws1 < ds* < ws2). Cut-indexed and provisional -- rederive if the cut moves.
+# Per-arm K* (kstar_logistic per animal x base) remains the quotable object for
+# load-bearing claims; this constant is the shared display/back-of-envelope anchor.
+KSTAR_CALIBRATED: float = 8.4e-4
 
 
 def K_of(lr, alpha, rank, *, b: float = B_LAW, c: float = C_LAW):
@@ -223,9 +233,13 @@ def load_law_runs(
         ``family``, ``base_label``, ``lineage``, ``student_tag``, ``lr``, ``rank``, ``alpha``.
     """
     lineages = LAW_LINEAGES if lineages is None else lineages
-    students_root = Path(output_root) / "students"
+    output_root = Path(output_root)
+    students_root = output_root / "students"
     cell_rows: list[dict] = []
     run_rows: list[dict] = []
+    # Discovery first, then ONE batched fetch of every candidate cell's summary doc: the fan-out
+    # is thousands of tiny reads on a shared FS (see `analysis.record_cache`).
+    candidates: list[tuple[dict, str]] = []   # (row meta, cell path relative to output_root)
 
     for family, tag, base in lineages:
         lineage_dir = (
@@ -257,10 +271,6 @@ def load_law_runs(
             m = _TAG_RE.fullmatch(cell_dir.name)
             if not m or int(m["ep"]) != epochs:
                 continue
-            test = read_cell_set(cell_dir, "test")
-            if test is None:
-                continue
-            per_seed = test.get("per_seed_p_target") or {}
             meta = {
                 "family": family,
                 "teacher_tag": tag,
@@ -273,10 +283,18 @@ def load_law_runs(
                 "alpha": int(m["a"]),
                 "scale": int(m["a"]) / int(m["r"]),
             }
-            cell_rows.append(
-                {**meta, "mean_test": test.get("p_target_mean"), "n_seeds": len(per_seed)}
-            )
-            run_rows.extend({**meta, "seed": int(s), "test": float(v)} for s, v in per_seed.items())
+            candidates.append((meta, str(cell_dir.relative_to(output_root))))
+
+    docs = load_cell_summaries(output_root, [rel for _, rel in candidates])
+    for meta, rel in candidates:
+        test = summary_set_block(docs.get(rel), "test")
+        if test is None:              # not evaluated yet (or unreadable summary) -- skip, as before
+            continue
+        per_seed = test.get("per_seed_p_target") or {}
+        cell_rows.append(
+            {**meta, "mean_test": test.get("p_target_mean"), "n_seeds": len(per_seed)}
+        )
+        run_rows.extend({**meta, "seed": int(s), "test": float(v)} for s, v in per_seed.items())
 
     return pd.DataFrame(cell_rows), pd.DataFrame(run_rows)
 
@@ -395,6 +413,60 @@ def cell_table(df: pd.DataFrame) -> pd.DataFrame:
              frac=("collapsed", "mean"), n=("collapsed", "size"))
         .reset_index()
     )
+
+
+def kstar_logistic(df: pd.DataFrame, b: float, c: float) -> dict:
+    """The boundary as the logistic 50% crossing on ``log K`` -- no seed replication needed.
+
+    The canonical K* estimator (2026-08-20, Angela): fit ``P(collapsed) = sigma(a + w log K)``
+    on ALL seed-level rows and return the K where P = 0.5. Unlike `estimate_kstar`'s
+    mixed-cell geometric mean, this needs no cell to straddle the boundary internally, so it
+    works on single-seed campaigns; it is exactly the fixed-exponent 1-D slice of the linear
+    boundary `fit_collapse_law` fits in full log-HP space. `kstar_minerr` (the
+    misclassification-minimizing cut) is the assumption-free cross-check.
+
+    Returns:
+        Dict with ``kstar``, ``se_log`` (delta-method SE of log K*), ``slope`` (w; steepness
+        of the transition), ``err`` (misclassification at the 0.5 rule), ``n``, ``n_dead``.
+    """
+    import statsmodels.api as sm
+
+    K = K_of(df["lr"], df["alpha"], df["rank"], b=b, c=c)
+    y = df["collapsed"].to_numpy()
+    x = sm.add_constant(np.log(K.to_numpy()))
+    # cluster-robust by cell when available: runs sharing a cell (teachers/arms at one tag)
+    # have correlated outcomes, so the naive Bernoulli SE is optimistic
+    kw = ({"cov_type": "cluster", "cov_kwds": {"groups": df["student_tag"].to_numpy()}}
+          if "student_tag" in df and df["student_tag"].nunique() > 1 else {})
+    res = sm.GLM(y, x, family=sm.families.Binomial()).fit(**kw)
+    a, w = res.params
+    kstar = float(np.exp(-a / w))
+    # delta method on log K* = -a/w
+    grad = np.array([-1.0 / w, a / w**2])
+    se_log = float(np.sqrt(grad @ res.cov_params() @ grad))
+    err = float((((K >= kstar).astype(int)) != y).mean())
+    return {"kstar": kstar, "se_log": se_log, "slope": float(w), "err": err,
+            "n": int(len(y)), "n_dead": int(y.sum())}
+
+
+def kstar_minerr(df: pd.DataFrame, b: float, c: float) -> dict:
+    """The boundary as the misclassification-minimizing cut on ``K`` (max-margin midpoint).
+
+    Assumption-free cross-check for `kstar_logistic`: scan every observed K as a candidate
+    threshold, keep the one with the fewest label errors, and place the cut at the geometric
+    midpoint between it and its lower neighbour (the 1-D max-margin choice within the
+    error-tied interval).
+
+    Returns:
+        Dict with ``kstar``, ``err``, ``n``, ``n_dead``.
+    """
+    K = np.asarray(K_of(df["lr"], df["alpha"], df["rank"], b=b, c=c))
+    y = df["collapsed"].to_numpy()
+    ks = np.unique(K)
+    errs = [(float((((K >= cut).astype(int)) != y).mean()), i) for i, cut in enumerate(ks)]
+    err, i = min(errs)
+    kstar = float(np.sqrt(ks[i] * ks[i - 1])) if i > 0 else float(ks[i])
+    return {"kstar": kstar, "err": err, "n": int(len(y)), "n_dead": int(y.sum())}
 
 
 def estimate_kstar(df: pd.DataFrame, b: float, c: float) -> dict:

@@ -21,7 +21,11 @@ from subliminal_learning.analysis.frames import (
     add_param_fields,
     cheapest_best,
     cheapest_specific,
+    load_preference_evals,
+    load_queue_results,
     load_results,
+    load_run_docs,
+    load_steerability_aggregates,
     rank_specific,
     filter_grid,
     parse_param_tag,
@@ -565,3 +569,81 @@ def test_load_results_empty_when_nothing_loads(tmp_path):
     with pytest.warns(UserWarning, match="skipped 1"):
         df = load_results([tmp_path / "missing.json"])
     assert df.empty
+
+
+# ------------------------- batched doc loaders -------------------------
+
+
+def _plant(root: Path, rel: str, rel_record: str, doc) -> str:
+    """Write `doc` (dict or raw text) at ``{root}/{rel}/{rel_record}``; return `rel`."""
+    p = root / rel / rel_record
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+    return rel
+
+
+def test_load_run_docs_round_trip_and_skips(tmp_path):
+    a = _plant(tmp_path, "runs/a", "rec.json", {"v": 1})
+    b = _plant(tmp_path, "runs/b", "rec.json", {"v": 2})
+    bad = _plant(tmp_path, "runs/bad", "rec.json", "{broken")
+    docs = load_run_docs(tmp_path, [a, b, bad, "runs/missing"], "rec.json", "unit")
+    assert docs == {a: {"v": 1}, b: {"v": 2}}
+    assert (tmp_path / "analysis" / "record_cache_unit.csv").is_file()
+    # second call is served from the cache and returns the same mapping
+    assert load_run_docs(tmp_path, [a, b], "rec.json", "unit") == {a: {"v": 1}, b: {"v": 2}}
+
+
+def test_load_run_docs_sees_rewritten_record(tmp_path):
+    a = _plant(tmp_path, "runs/a", "rec.json", {"v": 1})
+    load_run_docs(tmp_path, [a], "rec.json", "unit")
+    _plant(tmp_path, "runs/a", "rec.json", {"v": 1, "extra": True})
+    assert load_run_docs(tmp_path, [a], "rec.json", "unit")[a] == {"v": 1, "extra": True}
+
+
+def test_load_preference_evals(tmp_path):
+    a = _plant(tmp_path, "cell/ftseed1", "preference_eval.json", {"p_target": 0.4})
+    b = _plant(tmp_path, "cell/ftseed2", "preference_eval.json", {"p_target": 0.6})
+    docs = load_preference_evals(tmp_path, [a, b, "cell/ftseed3"])
+    assert docs == {a: {"p_target": 0.4}, b: {"p_target": 0.6}}
+    assert (tmp_path / "analysis" / "record_cache_pref_eval.csv").is_file()
+
+
+def test_load_steerability_aggregates(tmp_path):
+    rel = _plant(tmp_path, "teachers/t/steerability/steer_x", "aggregate.json", {"mean": 1.5})
+    docs = load_steerability_aggregates(tmp_path, [rel])
+    assert docs == {rel: {"mean": 1.5}}
+    assert (tmp_path / "analysis" / "record_cache_steerability_agg.csv").is_file()
+
+
+def _plant_result(queue: Path, jobkey: str, doc) -> None:
+    """Write one jobq terminal result record at ``{queue}/results/{jobkey}.json``."""
+    p = queue / "results" / f"{jobkey}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+
+
+def test_load_queue_results_round_trip_and_skips(tmp_path):
+    q = tmp_path / "dog-arm"
+    _plant_result(q, "j1", {"key": "t|a|b|ep20_lr1e-4_r8a32", "rc": 0})
+    _plant_result(q, "j2", {"key": "t|a|b|ep20_lr2e-4_r8a32", "rc": 1})
+    _plant_result(q, "bad", "{broken")
+    docs = load_queue_results(q)
+    assert set(docs) == {"j1", "j2"}
+    assert docs["j1"]["rc"] == 0 and docs["j2"]["key"].endswith("r8a32")
+    assert (q / "analysis" / "jobq_results_cache.csv").is_file()
+    # second call is served from the cache and returns the same mapping
+    assert load_queue_results(q) == docs
+
+
+def test_load_queue_results_picks_up_new_and_rewritten_records(tmp_path):
+    q = tmp_path / "dog-arm"
+    _plant_result(q, "j1", {"key": "k1", "rc": 1})
+    load_queue_results(q)
+    _plant_result(q, "j1", {"key": "k1", "rc": 0})       # requeued then succeeded
+    _plant_result(q, "j2", {"key": "k2", "rc": 0})       # landed after the first sweep
+    docs = load_queue_results(q)
+    assert docs == {"j1": {"key": "k1", "rc": 0}, "j2": {"key": "k2", "rc": 0}}
+
+
+def test_load_queue_results_empty_queue(tmp_path):
+    assert load_queue_results(tmp_path / "no-such-queue") == {}

@@ -727,13 +727,24 @@ p(dog) = 0.0133** (original base 0.0096; p(cat) 0.0048 / 0.0033) — matching
 notes. Questions: where does the null sit per HP relative to that prior, is it flat, and does
 the treatment separate from it?"""))
 
-cells.append(code(r"""ctrl_dir6c = (OUTPUT_ROOT / "students/controls/base/pythia-160m-data-seed1"
+cells.append(code(r"""from subliminal_learning.analysis.frames import load_preference_evals
+
+ctrl_dir6c = (OUTPUT_ROOT / "students/controls/base/pythia-160m-data-seed1"
               / "teacher-pythia-160m" / "ex10-20_prefix_n100k")
+# ONE discovery pass over the control ftseed dirs; the per-seed records themselves come from
+# the shared record cache (the same docs are re-used by the noise ledger below).
+ctrl_runs6c = sorted(str(p.relative_to(OUTPUT_ROOT))
+                     for tdir in ctrl_dir6c.iterdir() if tdir.is_dir() and tdir.name.startswith("ep")
+                     for p in tdir.glob("ftseed*") if p.is_dir())
+ctrl_docs6c = load_preference_evals(OUTPUT_ROOT, ctrl_runs6c)
 crows = []
-for tdir in sorted(p for p in ctrl_dir6c.iterdir() if p.is_dir() and p.name.startswith("ep")):
-    for f in sorted(tdir.glob("ftseed*/preference_eval.json")):
-        crows.append({"student_tag": tdir.name, "ftseed": int(f.parent.name[6:]),
-                      "p": json.loads(f.read_text())["sets"]["test"]["p_target"]})
+for rel in ctrl_runs6c:
+    doc = ctrl_docs6c.get(rel)
+    if doc is None:
+        continue
+    rp = Path(rel)
+    crows.append({"student_tag": rp.parent.name, "ftseed": int(rp.name[6:]),
+                  "p": doc["sets"]["test"]["p_target"]})
 ctl = pd.DataFrame(crows)
 
 def _K(tags):
@@ -803,8 +814,11 @@ base_pp = np.array(json.loads(
     (AN / "base_eval_ds1_animal_preference_test.json").read_text())["dog"]["p_per_prompt"])
 ses = []
 for t in match:
-    for f in sorted((ctrl_dir6c / t).glob("ftseed*/preference_eval.json")):
-        pp = np.array(json.loads(f.read_text())["sets"]["test"]["p_per_prompt"])
+    for rel in [r for r in ctrl_runs6c if Path(r).parent.name == t]:   # cached docs, no re-read
+        doc = ctrl_docs6c.get(rel)
+        if doc is None:
+            continue
+        pp = np.array(doc["sets"]["test"]["p_per_prompt"])
         d6c = np.log10(pp) - np.log10(base_pp)
         ses.append(float(d6c.std(ddof=1) / np.sqrt(len(d6c))))
 sd_cells = ctl.groupby("student_tag").agg(sd=("p", lambda s: float(np.std(np.log10(s), ddof=1))),

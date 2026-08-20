@@ -258,6 +258,160 @@ def read_cell_set(cell_dir, prompt_set: str = "test") -> dict | None:
     return next((s for s in doc.get("summaries", []) if s.get("prompt_set") == prompt_set), None)
 
 
+#: Cache CSV for the batched `preference_summary.json` blobs (its own file so the generic
+#: ``json_blob`` kind never shares a CSV with another record's blobs).
+PREF_SUMMARY_CACHE_REL = Path("analysis") / "record_cache_pref_summary.csv"
+
+
+def load_run_docs(
+    root, rel_paths, rel_record: str, cache_name: str, refresh: bool = True
+) -> dict[str, dict]:
+    """Batched parsed JSON docs for many directories: rel path -> parsed doc.
+
+    The generic workhorse behind every "one small JSON per run/cell dir" fan-out: instead of one
+    read per directory it takes one cached sweep over `rel_paths` through the ``json_blob`` kind
+    of `analysis.record_cache` (see that module for the refresh/union contract). Discovery stays
+    with the caller -- notebooks keep their globs and pass the resulting relative dirs here.
+
+    Directories whose record is missing, unreadable, or not parseable JSON are simply absent
+    from the mapping (the cache's own summary counts them); nothing is raised.
+
+    Args:
+        root: Root the relative paths and the cache CSV resolve against.
+        rel_paths: Directories relative to `root`.
+        rel_record: Record file path relative to each of those directories.
+        cache_name: Names the cache CSV ``{root}/analysis/record_cache_{cache_name}.csv`` -- give
+            each record type its own so blobs of different shapes never share a file.
+        refresh: Passed through to the cache (False = stored rows only, no filesystem sweep).
+
+    Returns:
+        ``{rel_path: doc}`` for every directory with a parseable record.
+    """
+    from subliminal_learning.analysis.record_cache import load_record_cache
+
+    out = load_record_cache(
+        root, "json_blob", rel_paths, refresh=refresh, rel_record=rel_record,
+        cache_rel=Path("analysis") / f"record_cache_{cache_name}.csv", verbose=False,
+    )
+    docs: dict[str, dict] = {}
+    for rp, blob in zip(out["run_path"], out["blob"]):
+        try:
+            docs[str(rp)] = json.loads(blob)
+        except (TypeError, ValueError):
+            continue
+    return docs
+
+
+#: Cache CSV (relative to a queue dir) for that queue's terminal jobq result records.
+QUEUE_RESULTS_CACHE_REL = Path("analysis") / "jobq_results_cache.csv"
+
+
+def load_queue_results(queue_dir, refresh: bool = True) -> dict[str, dict]:
+    """Batched terminal jobq result records of one queue: job key -> parsed doc.
+
+    The notebooks' "which cells of this campaign have landed" sweep reads every
+    ``{queue}/results/*.json`` written by `jobqueue.store.record_result`. Those are many small
+    files in ONE directory rather than one record per keyed directory, so this keys the cache on
+    each *result file* (``rel_record="."`` = the keyed path is itself the record) and gets the
+    whole `analysis.record_cache` contract -- ``(mtime, size)`` staleness, union semantics,
+    atomic write, per-record read guards -- for free. Discovery stays a glob here because the
+    queue owns the file set. Unreadable/partial records are simply absent.
+
+    Args:
+        queue_dir: The queue directory (holding ``results/`` and, after this call, the cache CSV
+            at `QUEUE_RESULTS_CACHE_REL`).
+        refresh: Passed through to the cache (False = stored rows only, no filesystem sweep).
+
+    Returns:
+        ``{jobkey: result doc}`` -- the file stem mapped to the record's ``key``/``rc``/``node``/
+        timing fields.
+    """
+    from subliminal_learning.analysis.record_cache import load_record_cache
+
+    queue_dir = Path(queue_dir)
+    rel_paths = [f"results/{p.name}" for p in sorted(queue_dir.glob("results/*.json"))]
+    out = load_record_cache(
+        queue_dir, "json_blob", rel_paths, refresh=refresh, rel_record=".",
+        cache_rel=QUEUE_RESULTS_CACHE_REL, verbose=False,
+    )
+    docs: dict[str, dict] = {}
+    for rp, blob in zip(out["run_path"], out["blob"]):
+        try:
+            docs[Path(str(rp)).stem] = json.loads(blob)
+        except (TypeError, ValueError):
+            continue
+    return docs
+
+
+def load_cell_summaries(root, cell_rel_paths, refresh: bool = True) -> dict[str, dict]:
+    """Batched `preference_summary.json` docs for many cells: rel path -> parsed doc.
+
+    The fan-out twin of `read_cell_set`: one cached sweep over `cell_rel_paths` instead of one
+    read per cell. Cells whose summary is missing or unreadable are simply absent from the
+    mapping, exactly as `read_cell_set` returns ``None`` for them.
+
+    Args:
+        root: Root the relative cell paths (and the cache CSV) resolve against.
+        cell_rel_paths: Cell directories relative to `root`.
+        refresh: Passed through to the cache (False = stored rows only, no filesystem sweep).
+
+    Returns:
+        ``{rel_path: doc}`` for every cell with a parseable summary.
+    """
+    return load_run_docs(root, cell_rel_paths, "preference_summary.json", "pref_summary",
+                         refresh=refresh)
+
+
+def load_preference_evals(root, run_rel_paths, refresh: bool = True) -> dict[str, dict]:
+    """Batched per-seed ``preference_eval.json`` docs: rel run path -> parsed doc.
+
+    Prefer the per-cell `load_cell_summaries` when all you need is per-seed ``p_target``: the
+    cell's ``preference_summary.json`` carries ``per_seed_p_target`` for every landed seed, so
+    it costs one record per cell instead of one per seed. Reach for this loader when you need
+    the per-seed document itself (per-prompt detail, generation metadata, ...).
+
+    Args:
+        root: Root the relative run paths (and the cache CSV) resolve against.
+        run_rel_paths: ``ftseed{N}`` run directories relative to `root`.
+        refresh: Passed through to the cache.
+
+    Returns:
+        ``{rel_path: doc}`` for every run with a parseable eval record.
+    """
+    return load_run_docs(root, run_rel_paths, "preference_eval.json", "pref_eval",
+                         refresh=refresh)
+
+
+def load_steerability_aggregates(output_root, agg_rel_dirs, refresh: bool = True) -> dict[str, dict]:
+    """Batched steerability ``aggregate.json`` docs: rel dir -> parsed doc.
+
+    Notebooks discover these with ``{output_root}/teachers/**/steerability/steer_*/`` globs; keep
+    the glob and pass the ``steer_*`` directories (relative to `output_root`) here so the reads
+    go through one cached sweep.
+
+    Args:
+        output_root: ``paths.output_root`` (the cache CSV lands in its ``analysis/``).
+        agg_rel_dirs: ``steer_*`` directories relative to `output_root`.
+        refresh: Passed through to the cache.
+
+    Returns:
+        ``{rel_dir: doc}`` for every directory with a parseable aggregate.
+    """
+    return load_run_docs(output_root, agg_rel_dirs, "aggregate.json", "steerability_agg",
+                         refresh=refresh)
+
+
+def summary_set_block(doc: dict | None, prompt_set: str = "test") -> dict | None:
+    """The ``summaries`` block of `doc` for `prompt_set` -- `read_cell_set`'s selection step.
+
+    Split out so batched readers (`load_cell_summaries`) pick the same block a per-cell
+    `read_cell_set` would.
+    """
+    if doc is None:
+        return None
+    return next((s for s in doc.get("summaries", []) if s.get("prompt_set") == prompt_set), None)
+
+
 def read_cell_seeds(cell_dir, prompt_set: str = "test") -> dict[int, float]:
     """Per-seed ``p_target`` for one cell as ``{ft_seed: p_target}`` (empty when unevaluated).
 

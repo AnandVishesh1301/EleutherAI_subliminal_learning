@@ -118,13 +118,18 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                                 loader takes seed-set-contains + across-seed means
     seed2seed_ds1_ws1                           the data-seed1 teacher -> weight-seed1 student arm
                                                 (`dog-seed2seed-ds1-band`, 2026-08-14): neither end
-                                                on the original init. Band-figure conventions
-                                                (teacher x cell matrix, K/K* x alpha x rank facets,
-                                                delta vs the original-init teacher on the SHARED
-                                                cells). Built by
-                                                `scripts/build_seed2seed_ds1_ws1_nb.py` — keep
+                                                on the original init. Band-figure conventions; §4
+                                                is one three-panel row (arm | orig-teacher
+                                                reference | delta) on the SHARED cells (merged
+                                                from the old separate §4/§6, 2026-08-20); §8 the
+                                                core-65 direction/receiver arms (ws2 refreshed at
+                                                full drain); §8d the orig -> full-seed1 focus-20
+                                                arm (receiver sharing NEITHER pretraining factor,
+                                                drained 2026-08-20). Built by
+                                                `scripts/build_seed2seed_ds1_ws1_nb.py`
+                                                (regenerated from the notebook 2026-08-20) — keep
                                                 builder and notebook in sync; re-run both to
-                                                refresh while the campaign drains
+                                                refresh while campaigns drain
     cross_model_student_hp_exploration          student-HP ladder; §12 pins the ep20 collapse
                                                 boundary to lr·α^0.58·r^-0.09 (rank protective;
                                                 supersedes §11's rank-free lr·√α and §8's lr×α);
@@ -578,6 +583,24 @@ model. Teacher FT, number generation, and student distillation take a
 in the manifest only). The pythia-2.8B replication path was dropped 2026-08-18 (its
 configs deleted; `PYTHIA_SIZES` trimmed back to 14m-410m). Seed ensembles (data/weight
 variants) exist only at 160m.
+
+**Full-seed factor relationships (verified numerically 2026-08-19).** Despite the
+matching seed number, `pythia-160m-seed1` shares NEITHER factor with the decoupled
+variants: step0 bit-compare shows orig ≡ `data-seed{1,2,3}` inits (diff exactly 0.0)
+while `seed{1,2,3}` inits match no `weight-seed{1,2,3}` under any pairing; a step16
+"unseen-token" embedding fingerprint (rows untouched except weight-decay identify the
+first ~34M training tokens, init-independent) shows seed1's data order is as different
+from data-seed1's as the known-different orig/ds1 control (Jaccard 0.67 vs the ~1.0 a
+shared shuffle would give). Caveat: the weight-seed HF repos' early step branches are
+corrupted (ws1@step1 ≡ orig's init; ws1@step16/128 track orig's trajectory), so
+"weight-seeds share orig's data order" rests on the PolyPythias paper only. Full-seed
+cross-distillation arms are therefore no-shared-factor pairs. Supporting wiring for the
+2026-08-19 fs1 campaign: `sweep_teacher_templates --only-param-tags` (numgen-style tag
+file, filtered before sharding, errors if a tag is grid-inexpressible),
+`animal_samedistill_worker --allow-full-seed-base`, and the selected-sweep YAMLs
+`teacher_ft_sweep_selected_fullseed1.yaml` / `number_gen_sweep_fullseed1.yaml`
+(dog, ftseed1, union grid of the 103 tags with ≥5k kept prefix numbers on pythia-160m;
+tag manifest `run_logs/dog_fullseed1_teacher_tags_5k.json`).
 
 ### DataDecide OLMo arm (1B, 2026-08-18)
 
@@ -1749,6 +1772,44 @@ splits the hurdle semantics: collapse (rare, HP-driven, this label) vs trait-pre
 `preference_eval.json` and the base files above). Old scalars `DEAD=0.005`/`DEAD_SEED=0.01`
 remain as back-compat defaults.
 
+**Integrity (Pile-KL) survival on core65 (2026-08-19, revised 08-20).** Notebook §4 shows no
+conditional-transfer panel and no p(trait) threshold: survival is the fraction of probed core65
+seed-runs whose final-adapter Pile KL(base‖student) (`{run}/eval/pile_probe.json`, pool pp1) is
+≤ the declared **`probe_io.DEAD_KL_CUT` = 4.0** (flat across models by convention, 2026-08-20; moved 5→4 same day —
+the earlier per-model density-valley cuts and `transfer_factors.pile_dead_cuts` were removed
+when `derive_dead_cut` was retired as an operative label; survival is quoted with a 4/5/7.9
+cut-sensitivity line instead). Helpers: `load_focus_pile_kl(output_root, runs)` (probe KL
+aligned to a `load_focus_runs` frame; `+inf` for non-finite adapters, NaN when not probed),
+`load_pile_kl_population(output_root, bases, animals)` (every probed ep20 adapter under each
+base — the distribution-context view behind the §4a histograms), and `load_core65_design(root)`
+(focus20 ∪ band48 ∪ lowk9 = 65 cells + the shared top-10 teacher list). §4 runs on **core65 ×
+top-10 teachers** (its own frame; the rest of the notebook stays on focus-20 × top-20). §4d
+shows unconditional absolute transfer (mean/p75/p95/max heatmaps + `compare_table`-styled
+marginals) on core65, core56, and both at ftseed 1; §4e is the per-(model × animal) grouped
+box-plot view on core56 with n = seed-runs and c = cells complete for all 10 teachers.
+
+**Threshold-free responses (2026-08-19).** The legacy p(trait) hurdle is out of the notebook:
+§2 (the DEAD=0.005 trough check) was removed, and §5–§7/§9b now fit the **unconditional**
+mean-test logit over all seeds. Module support: `hurdle_cells` adds `mean_test`/`mean_logit`
+(threshold-independent), `_prep_fit_frame`/`fe_prior_fit`/`prior_permutation_test` accept
+`response="mean"`, `base_effects` gains a `response` arg, `factor1_table` a `"mean"` response.
+The cond/surv machinery remains for back-compat but nothing in this notebook reads it.
+First threshold-free run: prior slope still null at the permutation test (logprob p=0.087,
+behav p=0.099) while cluster-robust p stays optimistic — headline conclusion unchanged. The focus-20 cells
+themselves (K/K* 0.57–1.0) are unimodal in KL and cannot locate a valley alone. Coverage
+comes from the `bandext126-pileprobe` queue (18,405 runs, draining 08-19); re-run §4 to
+refresh.
+
+**Causal legs on the integrity label (2026-08-20):** `clamp_students/` (166 runs) were probed
+on pp1 by queue `clamp-pileprobe` (4 `scripts.pile_probe_final` jobs, ~15 s/run); the
+λ/shell/revival ablation records carry a 16-doc-pool KL and were relabelled from disk.
+`collapse_claims.ipynb` §C6d (builder `scripts/build_collapse_claims_nb.py`) holds the
+two-channel re-read — integrity event vs trait revival/destruction — with the per-rank θ̂
+re-derived on KL (same rungs as the trait θ̂ at r4/r16), the matched-realized-dose
+clamp-vs-unclamped table, and the λ ordering stats; `docs/results/collapse_law.md` §4 /
+A.2 rows 21–22 and `collapse_claims_ordered.md` C4/C6 carry the wording. Still pending: pp1
+re-probe of the λ grid (108 eval-only jobs) for the hysteresis factor and band edges.
+
 **Three-readout reframing + fidelity sweep (2026-08-17).** The measurement stack was
 reorganized so the generic collapse law is not read off the trait probe: trait (vs base
 test prior), integrity (Pile CE/KL vs base — the collapse event), and task fidelity
@@ -1767,6 +1828,70 @@ with up to 5-nat overfitting gaps, per `collapse_postmortem_ce.json`, reproduced
 Gotcha: `find`/`os.walk` under-report files inside the 932 large checkpoint dirs on this
 filesystem — use `glob`/`exists()` (the first sweep pass silently saw 752 of 1,684
 adapters).
+
+**Claims notebook on shared support (2026-08-19; renumbered 2026-08-20).**
+`notebooks/collapse_claims.ipynb` (builder `scripts/build_collapse_claims_nb.py`)
+recomputes each claim's headline numbers. Claim ids were renumbered into narrative order
+on 2026-08-20 (final: C1 event, C2 law — the two halves of the old integrity section;
+C3 generality; C4 trait; C5 HPs-set-size (A3, doc-only); C6 dose-separates-fate (A2+M;
+θ̂ + AUC in the notebook); C7 Frobenius (A4, doc-only); C8 fidelity — C8b ladders/shuffle,
+C8c demo; C9 doctrine, doc-only); pre-08-20 notes use the old ids (old C2 → C1/C2,
+old C7 → C3, old C3 → C4, old C1/C6 → C6, old C4/C4b/C5 → C8/C8b/C8c). As of 2026-08-19
+the adaptive-era law-campaign/krungs populations are no longer load-bearing: C3's K*/b
+refits run **integrity-native** (probe-KL label, prior/e³ removed there) on probe-covered
+**core65** runs (focus20 ∪ band48 ∪ lowk9; loaded via `tf.load_focus_runs` over the
+shared 102-teacher list from `run_logs/strip_probe_lists/xarm_bandext126_runs.txt`) and
+self-update as probe records land; single-arm depth stays on the strip; C6's θ̂ and
+dose-AUC use all norm-covered ep20 cells (the one legacy-cell remnant, dog-only until a
+norm harvest covers the other animals). Headline (the live census is the 2026-08-20
+02:26 execution at full `bandext126-pileprobe` drain, 13,650 probe-covered runs;
+supersedes the 08-19 interim numbers quoted here previously): per-animal
+integrity-native K* 8.64–9.09e-4 (1.05× spread), b 0.565–0.573; per-arm K* 1.22× over
+the 18 arms with n_dead ≥ 20 (b 0.542–0.586). C8's memorization decomposition uses the
+full 1,602 v2 endpoint records; C8b computes the ladder ("never had it") and shuffle
+(task-manifold conditionality) results in-cell. The dead label is the declared
+convention `probe_io.DEAD_KL_CUT = 4.0` (2026-08-20; 5→4 later that day): the cut-derivation program (density
+valley, fences, mixtures, dose changepoints) was abandoned as circular — each variant
+presupposed the labeling, the population composition, or the dose law; an openly arbitrary
+constant with a mandatory sensitivity line replaced it. The alive bulk ends by ~5 nats in
+every measured slice (campaigns notebook §0c histogram / §0d per-slice panels), so the
+convention is safe; `derive_dead_cut` survives only as a shape diagnostic.
+
+### Record cache (`analysis/record_cache.py`) + adapter-norm run-dir records (2026-08-20)
+
+`analysis/record_cache.py` generalises the pile-probe-only `analysis/probe_cache.py` (kept as
+a thin facade) into a registry of record **kinds**: each kind names a record file relative to a
+run dir, an extractor from the record dict to flat scalar columns, and a cache CSV under
+`{output_root}/analysis/`. Kinds today: `pile_probe`, `fidelity_heldout`, `fidelity_shuffle`,
+`fidelity_traj`, `pile_coherence_v1`, `json_blob` (parameterized), `adapter_norms`,
+`adapter_norms_traj`. Contract: run-dir records are the SSOT and the CSV is derived, so a
+refresh pays one `stat` per inventory path and re-reads only records whose `(mtime, size)`
+changed (a retrain-and-recompute is never missed); the saved CSV is a **union** — rows outside
+this call's inventory are never evicted, so notebooks with disjoint inventories cannot destroy
+each other's work, while the returned frame is always filtered to the request. Writes go
+through `utils.io.atomic_write_text`/`atomic_write_json` and no lock is taken (a lost update
+only costs a re-read). Per-record read errors keep the previously cached row; the one-line
+summary counts added/refreshed/missing/unreadable.
+
+**Adapter-norm migration.** The 441 MB frozen harvest
+`analysis/adapter_norms_sweep_all_arms_all_teachers.json` (476,448 module rows) was migrated
+to per-run records by `scripts/migrate_adapter_norms_to_rundirs.py` (idempotent; `--dry-run`
+default-off, never overwrites an existing record, skips + reports absent run dirs, compact
+JSON): `{run_dir}/eval/adapter_norms.json` = `{kind, schema_version, modules (run-level fields
+hoisted), test_p, rank, alpha, wrong_seed_offset, provenance, manifest_ref}`, where
+`manifest_ref` was read at *migration* time and flagged `manifest_ref_read_at_migration` — it
+identifies the run as it stands, not as it was harvested. Endpoint and trajectory data are
+never mixed: `--checkpoints`-mode step-bearing rows go to `{run_dir}/eval/adapter_norms_traj.json`
+(`points: [{step, modules}]`) under its own kind and loader. `scripts/adapter_norms_probe.py`
+now writes both records as it harvests (its analysis JSONs are unchanged). Discovery is the
+written inventory `analysis/adapter_norms_runs.json` (`runs` / `traj_runs`, atomic union
+rewrite), read by `analysis/norms.py`: `load_adapter_norm_runs` / `load_adapter_norm_traj`
+return the cached scalars (`dw_fro`, `dw_spec`, `dW_*`, `cos_*_mean`, `n_modules`, …) plus the
+keys parsed from `run_path`. First migration (2026-08-20): 9,926 runs written, 0 skipped;
+`dw_fro` verified equal to the old aggregate-side computation on all 9,926 runs (max relative
+difference 8.9e-16, float summation order). `scripts/build_collapse_claims_nb.py` C6/C6b now
+use the loader; `scripts/build_nors_asks_nb.py` still reads the aggregate at module level.
+Tests: `tests/test_analysis_norms.py`, `tests/test_record_cache.py`.
 
 ### CKA (`cka/`, `pipelines/cka_pipeline.py`, `scripts/compute_cka.py`)
 

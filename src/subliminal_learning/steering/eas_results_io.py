@@ -20,13 +20,13 @@ flags the rows where it differs from ``model``. The pure parsers (`parse_ft_para
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
 import pandas as pd
 from loguru import logger
 
+from subliminal_learning.analysis.frames import load_run_docs
 from subliminal_learning.evaluation.preference_results_io import parse_param_tag
 from subliminal_learning.gkd.layout import parse_optim_slug
 
@@ -98,6 +98,35 @@ def parse_lineage_dir(teacher_base_dir: str, teacher_tag_dir: str) -> dict:
     }
 
 
+#: Pooling positions an EAS document may be written for (one record file name each).
+EAS_POSITIONS = ("last", "all")
+
+
+def _load_eas_docs(output_root: Path, eas_files: list[Path]) -> dict[Path, dict]:
+    """Batched read of the discovered EAS documents: file path -> parsed doc.
+
+    Discovery stays with the caller's globs; the reads go through `analysis.frames.load_run_docs`
+    (one cached sweep per position, keyed on the ``eas/`` directory itself, so the record name is
+    just ``eas_{position}.json``). Malformed or vanished documents are absent from the mapping,
+    exactly as the per-file read returned nothing for them.
+    """
+    output_root = Path(output_root)
+    docs: dict[Path, dict] = {}
+    for position in EAS_POSITIONS:
+        files = [f for f in eas_files if f.name == f"eas_{position}.json"]
+        if not files:
+            continue
+        rel_dirs = [str(f.parent.relative_to(output_root)) for f in files]
+        loaded = load_run_docs(
+            output_root, rel_dirs, f"eas_{position}.json", f"eas_{position}"
+        )
+        for f, rel in zip(files, rel_dirs):
+            doc = loaded.get(rel)
+            if isinstance(doc, dict):
+                docs[f] = doc
+    return docs
+
+
 def load_eas_results(
     output_root: Path, positions: list[str] | None = None
 ) -> pd.DataFrame:
@@ -127,7 +156,9 @@ def load_eas_results(
     eas_files += sorted(students.glob("*/ckpt/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
     eas_files += sorted(students.glob("*/*/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
     eas_files += sorted(students.glob("*/*/ckpt/*/teacher-*/*_tseed*/*/eas/eas_*.json"))
-    for eas_file in sorted(set(eas_files)):
+    eas_files = sorted(set(eas_files))
+    docs = _load_eas_docs(Path(output_root), eas_files)
+    for eas_file in eas_files:
         position = eas_file.stem[len("eas_"):]
         if position not in ("last", "all"):
             logger.warning("Skipping EAS doc with unexpected position {}", eas_file)
@@ -165,9 +196,8 @@ def load_eas_results(
         except ValueError:
             logger.warning("Skipping lineage with unparseable teacher tag {}", teacher_tag_dir)
             continue
-        try:
-            doc = json.loads(eas_file.read_text())
-        except (json.JSONDecodeError, OSError):
+        doc = docs.get(eas_file)
+        if doc is None:
             logger.warning("Skipping malformed EAS doc {}", eas_file)
             continue
         meta = doc.get("meta")

@@ -178,17 +178,73 @@ def iter_registry_runs(registry: dict, lineage_dir: Path):
             yield tag, seed, Path(lineage_dir) / tag / f"ftseed{seed}"
 
 
+def _trajectory_from_doc(kind: str, doc: dict, tag: str, ftseed: int, path: Path) -> Trajectory:
+    """Build a `Trajectory` from an already-parsed run-dir document (see `load_trajectory`)."""
+    seed = doc.get("ft_seed", doc.get("ftseed", ftseed))
+    if kind == "pref":
+        points, animals = _normalize_pref(doc)
+    else:
+        points, animals = doc.get("points", []), ()
+    return Trajectory(
+        kind=kind, tag=doc.get("tag", tag), ftseed=int(seed) if seed is not None else -1,
+        points=points, animals=animals, source="rundir", path=path,
+        meta={k: v for k, v in doc.items() if k != "points"},
+    )
+
+
 def load_lineage(
-    registry: dict, lineage_dir: Path, kind: str, analysis_dir: Path | None = None
+    registry: dict, lineage_dir: Path, kind: str, analysis_dir: Path | None = None,
+    cache_root: Path | None = None,
 ) -> dict[tuple[str, int], Trajectory]:
-    """(tag, ftseed) -> Trajectory for every run of a registry that has one on disk."""
-    out = {}
-    for tag, seed, run_dir in iter_registry_runs(registry, lineage_dir):
+    """(tag, ftseed) -> Trajectory for every run of a registry that has one on disk.
+
+    `cache_root` is opt-in: give it the outputs root and every run dir under it is served
+    from the shared record cache (one batched sweep instead of one read per run, see
+    `analysis.record_cache`). Runs outside `cache_root`, and the legacy `analysis_dir`
+    fallback, always take the direct-read path. With `cache_root=None` this is exactly the
+    per-run `load_trajectory` loop.
+    """
+    if kind not in _KINDS:
+        raise ValueError(f"unknown kind {kind!r}; choose from {sorted(_KINDS)}")
+    fname = _KINDS[kind][0]
+    runs = list(iter_registry_runs(registry, lineage_dir))
+
+    blobs: dict[str, str] = {}
+    rel_of: dict[Path, str] = {}
+    if cache_root is not None:
+        from subliminal_learning.analysis.record_cache import load_record_cache
+
+        cache_root = Path(cache_root)
+        for _, _, run_dir in runs:
+            try:
+                rel_of[run_dir] = str(Path(run_dir).relative_to(cache_root))
+            except ValueError:            # not under cache_root -> direct read
+                continue
+        out = load_record_cache(
+            cache_root, "json_blob", list(rel_of.values()), verbose=False,
+            rel_record=f"eval/{fname}",
+            cache_rel=Path("analysis") / f"record_cache_traj_{kind}.csv",
+        )
+        blobs = dict(zip(out["run_path"], out["blob"]))
+
+    result = {}
+    for tag, seed, run_dir in runs:
+        rel = rel_of.get(run_dir)
+        if rel is not None and rel in blobs:
+            try:
+                doc = json.loads(blobs[rel])
+            except (TypeError, ValueError):
+                doc = None
+            if doc is not None:
+                result[(tag, seed)] = _trajectory_from_doc(
+                    kind, doc, tag, seed, Path(run_dir) / "eval" / fname
+                )
+                continue
         t = load_trajectory(kind, run_dir=run_dir, analysis_dir=analysis_dir,
                             tag=tag, ftseed=seed)
         if t is not None:
-            out[(tag, seed)] = t
-    return out
+            result[(tag, seed)] = t
+    return result
 
 
 def source_counts(trajectories) -> dict[str, int]:

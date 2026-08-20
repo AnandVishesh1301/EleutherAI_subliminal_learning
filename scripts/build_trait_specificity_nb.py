@@ -130,7 +130,8 @@ the endpoint written from the `checkpoints/` root. **Endpoint** = that final row
 """)
 code("""
 registry = json.loads(REGISTRY.read_text())
-trajs = atraj.load_lineage(registry, LINEAGE, "pref", analysis_dir=OUTPUT_ROOT / "analysis")
+trajs = atraj.load_lineage(registry, LINEAGE, "pref", analysis_dir=OUTPUT_ROOT / "analysis",
+                           cache_root=OUTPUT_ROOT)   # run-dir records served from the shared cache
 n_designed = sum(len(v) for v in registry["cells"].values())
 print(f"registry: {len(registry['cells'])} cells / {n_designed} designed runs")
 print(f"loaded   : {len(trajs)} trajectories | source_counts = {atraj.source_counts(trajs)}")

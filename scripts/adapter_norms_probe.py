@@ -27,7 +27,9 @@ before the PEFT wrap, and nothing consumes torch RNG in between; see the comment
 Run on the same device kind training initialised on — validate with ``--device cpu``
 first and fall back to cuda if the right-seed cosine is not far above the wrong-seed floor.
 
-Writes ``{output_root}/analysis/adapter_norms_probe_{student_base}.json``.
+Writes ``{output_root}/analysis/adapter_norms_probe_{student_base}.json``, and per final
+adapter one run-dir record ``{run_dir}/eval/adapter_norms.json``, plus (in ``--checkpoints``
+mode) the per-step ``{run_dir}/eval/adapter_norms_traj.json`` (`analysis.norms`).
 """
 
 from __future__ import annotations
@@ -38,6 +40,9 @@ from pathlib import Path
 import numpy as np
 import typer
 
+from subliminal_learning.analysis import norms as an
+from subliminal_learning.coherence.probe_io import manifest_ref
+from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
 
 app = typer.Typer(add_completion=False)
@@ -206,6 +211,27 @@ def main(
                         rows.append(r)
             v = [r for r in rows
                  if r["student_tag"] == tag and r["ftseed"] == ftseed and r["step"] is None]
+            # run-dir records (the SSOT for per-run dose; see analysis/norms.py): the final
+            # adapter and the checkpoint trajectory go to SEPARATE records, never mixed.
+            run_dir = lineage_dir / tag / f"ftseed{ftseed}"
+            _rel = str(run_dir.relative_to(output_root))
+            _kw = dict(test_p=None, rank=(v or rows)[-1]["rank"],
+                       alpha=(v or rows)[-1]["alpha"],
+                       wrong_seed_offset=WRONG_SEED_OFFSET,
+                       provenance={"harvested_by": "adapter_norms_probe"},
+                       manifest_ref=manifest_ref(run_dir))
+            if v:
+                atomic_write_json(an.record_path(run_dir),
+                                  an.build_record(v, **_kw), indent=None)
+                an.update_inventory(output_root, [_rel], source="adapter_norms_probe")
+            steps = [r for r in rows
+                     if r["student_tag"] == tag and r["ftseed"] == ftseed
+                     and r["step"] is not None]
+            if steps:
+                atomic_write_json(an.traj_record_path(run_dir),
+                                  an.build_traj_record(steps, **_kw), indent=None)
+                an.update_inventory(output_root, [_rel], source="adapter_norms_probe",
+                                    key="traj_runs")
             if v:
                 print(f"{tag}/ftseed{ftseed}: cos(A_init, A_final) mean "
                       f"{np.mean([r['cos_Ainit_Afinal'] for r in v]):.3f} "

@@ -125,6 +125,47 @@ def load_focus20_design(root: Path) -> tuple[pd.DataFrame, list[str], dict]:
     return cells_df, list(param_tags), meta
 
 
+# The three bandext126 sub-manifests whose union is core65 (Angela 2026-08-18 terminology):
+# focus20 (0.645-0.950) + band48 (0.463-1.247, quota 8/rank) + lowk9 (0.290-0.398).
+_CORE65_MANIFESTS: tuple[tuple[str, str], ...] = (
+    ("focus20", "focus20_cells.json"),
+    ("band48", "band_0p45_1p25_q8_cells.json"),
+    ("lowk9", "band_lowk_0p29_0p45_cells.json"),
+)
+# Teachers that realize core65 on every arm: the shared dog-ranked top-10 kband list (identical
+# file content for every animal; = the first 10 of the focus-20 top-20 list).
+_CORE65_TEACHERS = "dog_top10_kband_configs.json"
+
+
+def load_core65_design(root: Path) -> tuple[pd.DataFrame, list[str]]:
+    """Load the core65 student-cell design (focus20 + band48 + lowk9) and its top-10 teacher list.
+
+    core65 is the cross-arm target set the band-ext campaigns realize on all 24 (animal x base)
+    arms: 65 ep20 cells at K/K* 0.290-1.247, all inside the bandext126 universe. The 12 cells
+    shared by focus20 and band48 are kept once (``subset`` names the first manifest that lists a
+    cell, in the order focus20 > band48 > lowk9).
+
+    Args:
+        root: Repo root (holds ``run_logs/``).
+
+    Returns:
+        ``(cells_df, param_tags)``: one row per cell with ``student_tag``/``lr``/``rank``/
+        ``alpha``/``K_rel``/``subset``; ``param_tags`` is the 10 shared teacher tags.
+    """
+    root = Path(root)
+    frames = []
+    for subset, fname in _CORE65_MANIFESTS:
+        d = read_json(root / "run_logs" / fname)
+        df = pd.DataFrame(d["cells"])[["student_tag", "lr", "rank", "alpha", "K_rel"]]
+        frames.append(df.assign(subset=subset))
+    cells_df = (pd.concat(frames, ignore_index=True)
+                .drop_duplicates("student_tag", keep="first")
+                .sort_values("K_rel", ignore_index=True))
+    assert len(cells_df) == 65, f"core65 manifests union to {len(cells_df)} cells, expected 65"
+    param_tags = list(read_json(root / "run_logs" / _CORE65_TEACHERS)["param_tags"])
+    return cells_df, param_tags
+
+
 def load_focus_runs(
     output_root: Path,
     param_tags: list[str],
@@ -361,12 +402,15 @@ def hurdle_cells(runs: pd.DataFrame, dead: "float | pd.Series" = DEAD) -> pd.Dat
         One row per (``animal``, ``base_label``, ``teacher_tag``, ``student_tag``) with:
         ``n_seeds``, ``n_alive``, ``surv`` (survival rate), ``cond`` (mean ``test`` over surviving
         seeds, NaN when none survive), ``cond_logit`` (logit of clipped ``cond``, NaN when ``cond``
-        is NaN). ``lr``/``rank``/``alpha``/``K_rel`` ride along.
+        is NaN), and the THRESHOLD-FREE pair ``mean_test`` (mean ``test`` over ALL seeds) /
+        ``mean_logit`` (its clipped logit) -- the unconditional response that involves no dead
+        label at all. ``lr``/``rank``/``alpha``/``K_rel`` ride along.
     """
     keys = ["animal", "base_label", "teacher_tag", "student_tag"]
     meta_cols = ["lr", "rank", "alpha", "K_rel"]
     if len(runs) == 0:
-        return pd.DataFrame(columns=keys + meta_cols + ["n_seeds", "n_alive", "surv", "cond", "cond_logit"])
+        return pd.DataFrame(columns=keys + meta_cols + [
+            "n_seeds", "n_alive", "surv", "cond", "cond_logit", "mean_test", "mean_logit"])
 
     alive = runs["test"] >= dead
     work = runs.assign(_alive=alive.astype(int), _alive_test=np.where(alive, runs["test"], np.nan))
@@ -378,11 +422,13 @@ def hurdle_cells(runs: pd.DataFrame, dead: "float | pd.Series" = DEAD) -> pd.Dat
         rec = dict(zip(keys, key))
         for m in meta_cols:
             rec[m] = g[m].iloc[0]
-        rec.update(n_seeds=n_seeds, n_alive=n_alive, surv=n_alive / n_seeds, cond=cond)
+        rec.update(n_seeds=n_seeds, n_alive=n_alive, surv=n_alive / n_seeds, cond=cond,
+                   mean_test=float(g["test"].mean()))
         rows.append(rec)
     out = pd.DataFrame(rows)
-    cp = out["cond"].clip(_CLIP, 1 - _CLIP)
-    out["cond_logit"] = np.where(out["cond"].notna(), np.log(cp / (1 - cp)), np.nan)
+    for src_col, dst in (("cond", "cond_logit"), ("mean_test", "mean_logit")):
+        cp = out[src_col].clip(_CLIP, 1 - _CLIP)
+        out[dst] = np.where(out[src_col].notna(), np.log(cp / (1 - cp)), np.nan)
     return out
 
 
@@ -500,6 +546,105 @@ def prior_dead_thresholds(
 
 
 # --------------------------------------------------------------------------------------------------
+# Integrity (Pile KL) dead labels
+# --------------------------------------------------------------------------------------------------
+
+
+def load_focus_pile_kl(
+    output_root: Path,
+    runs: pd.DataFrame,
+    numbers_base: str = "pythia-160m",
+    teacher_seed: int = 1,
+    dataset: str = "ex10-20_prefix_n100k",
+) -> pd.Series:
+    """Per-seed-run Pile KL(base || student) from the run-dir probe record, aligned to ``runs``.
+
+    Reads ``{run_dir}/eval/pile_probe.json`` (`coherence.probe_io`, the `scripts.pile_probe_final`
+    / ``run_final_evals --evals probe`` output) for every row of a `load_focus_runs` frame. The
+    run dir is rebuilt from the row's ``animal``/``base_label``/``teacher_tag``/``student_tag``/
+    ``seed`` with the same layout `collapse_law.load_law_runs` walks.
+
+    Returns:
+        Float Series ``pile_kl`` aligned to ``runs.index``: the record's ``kl_base_student``;
+        ``+inf`` when the record says ``nonfinite_adapter`` (diverged weights -- dead by any cut);
+        NaN when no record has landed (not probed yet), so coverage is visible, not imputed.
+    """
+    from subliminal_learning.analysis.probe_cache import load_probe_cache
+    from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
+
+    full_base = {b: f"{numbers_base}-{b}" for b in runs["base_label"].unique()}
+    rel_paths = [
+        str(
+            Path("students") / r.animal / Path(*model_dir_parts_from_name(full_base[r.base_label]))
+            / f"teacher-{numbers_base}" / f"{r.teacher_tag}_tseed{teacher_seed}" / dataset
+            / r.student_tag / f"ftseed{int(r.seed)}"
+        )
+        for r in runs.itertuples(index=False)
+    ]
+    # One cached sweep instead of one read per row; the cache already stores +inf for a
+    # diverged adapter and simply has no row for a run that has not been probed yet (-> NaN).
+    cached = load_probe_cache(output_root, rel_paths, pool_version=None)
+    kl = dict(zip(cached["run_path"], cached["kl"])) if len(cached) else {}
+    vals = np.array([float(kl.get(p, np.nan)) for p in rel_paths])
+    return pd.Series(vals, index=runs.index, name="pile_kl")
+
+
+def load_pile_kl_population(
+    output_root: Path,
+    bases: list[str] | None = None,
+    animals: list[str] | None = None,
+    numbers_base: str = "pythia-160m",
+    epochs: int = 20,
+) -> pd.DataFrame:
+    """Every probed final adapter under the given student bases -- the distribution-context view.
+
+    Used to show each base model's full probe-KL distribution around the declared dead cut
+    (`coherence.probe_io.DEAD_KL_CUT`) and to quote cut sensitivity: it loads the widest probed
+    population of each base, all ``{animal}/{base}/teacher-{numbers_base}/*/*/ep{E}_*/
+    ftseed*/eval/pile_probe.json`` records (every teacher lineage, every number pool, every
+    landed cell -- strip ladders and band-ext campaigns included).
+
+    Returns:
+        One row per probed seed-run: ``animal``, ``base_label``, ``teacher_lineage``, ``dataset``,
+        ``student_tag``, ``seed``, ``pile_kl`` (``+inf`` for non-finite adapters). Empty frame
+        with those columns when nothing is probed.
+    """
+    from subliminal_learning.analysis.probe_cache import load_probe_cache
+    from subliminal_learning.coherence.probe_io import EVAL_NAME
+    from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
+
+    bases = FOCUS_BASE_LABELS if bases is None else bases
+    animals = FOCUS_ANIMALS if animals is None else animals
+    output_root = Path(output_root)
+    students_root = output_root / "students"
+    found = []                  # (row meta, run dir relative to output_root)
+    for animal in animals:
+        for b in bases:
+            model_dir = students_root / animal / Path(*model_dir_parts_from_name(f"{numbers_base}-{b}"))
+            tdir = model_dir / f"teacher-{numbers_base}"
+            if not tdir.is_dir():
+                continue
+            for f in tdir.glob(f"*/*/ep{epochs}_*/ftseed*/eval/{EVAL_NAME}"):
+                seed_dir = f.parents[1]
+                found.append(({
+                    "animal": animal, "base_label": b,
+                    "teacher_lineage": seed_dir.parents[2].name,
+                    "dataset": seed_dir.parents[1].name,
+                    "student_tag": seed_dir.parent.name,
+                    "seed": int(seed_dir.name.removeprefix("ftseed")),
+                }, str(seed_dir.relative_to(output_root))))
+    # Values through the shared cache -- ONE sweep for the whole glob, +inf for diverged
+    # adapters (its own convention); an unreadable/partial record simply has no row, as before.
+    cached = load_probe_cache(output_root, [rel for _, rel in found], pool_version=None)
+    kl = dict(zip(cached["run_path"], cached["kl"])) if len(cached) else {}
+    rows = [{**meta, "pile_kl": float(kl[rel])} for meta, rel in found if rel in kl]
+    cols = ["animal", "base_label", "teacher_lineage", "dataset", "student_tag", "seed", "pile_kl"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+
+
+# --------------------------------------------------------------------------------------------------
 # FE + prior regression
 # --------------------------------------------------------------------------------------------------
 
@@ -535,9 +680,11 @@ def _prep_fit_frame(
 ) -> pd.DataFrame:
     """Merge cells with the prior, build the response, z-score the prior on the fit frame.
 
-    ``response='cond'`` uses ``cond_logit`` (surviving-only, NaN cells dropped); ``response='surv'``
-    uses the empirical logit of survival with a 0.5 continuity correction (all cells kept). The
-    z-scoring is done on the merged frame actually entering the fit, never globally.
+    ``response='mean'`` uses ``mean_logit`` (unconditional mean test over ALL seeds -- the
+    threshold-free response; all cells kept, weight = seed count). ``response='cond'`` uses
+    ``cond_logit`` (surviving-only, NaN cells dropped); ``response='surv'`` uses the empirical
+    logit of survival with a 0.5 continuity correction (all cells kept) -- both depend on a dead
+    label. The z-scoring is done on the merged frame actually entering the fit, never globally.
     """
     df = cells.merge(priors[["animal", "base_label", prior_col]], on=["animal", "base_label"], how="left")
     na = df[prior_col].isna()
@@ -550,7 +697,10 @@ def _prep_fit_frame(
             stacklevel=3,
         )
     df = df[~na].copy()
-    if response == "cond":
+    if response == "mean":
+        df["y"] = df["mean_logit"]
+        df["w"] = df["n_seeds"].astype(float)
+    elif response == "cond":
         df = df[df["cond"].notna()].copy()
         df["y"] = df["cond_logit"]
         df["w"] = df["n_alive"].astype(float)
@@ -574,14 +724,16 @@ def fe_prior_fit(
 
     The animal FE absorbs teacher-side effects (incl. the teacher-base prior); the base FE absorbs
     student quirks; the z-scored prior's coefficient is identified by the within-animal cross-base
-    contrast. Weights are surviving-seed counts (``cond``) or total-seed counts (``surv``). The
+    contrast. Weights are total-seed counts (``mean``/``surv``) or surviving-seed counts
+    (``cond``). The
     covariance is cluster-robust on the animal x base pair -- note the small number of clusters.
 
     Args:
         cells: `hurdle_cells` output.
         priors: `load_priors` output.
         prior_col: ``"logprob_prior"`` / ``"behav_prior"`` / ``"prior_rank"``.
-        response: ``"cond"`` (conditional transfer) or ``"surv"`` (survival).
+        response: ``"mean"`` (unconditional, threshold-free), ``"cond"`` (conditional transfer)
+            or ``"surv"`` (survival).
 
     Returns:
         A `PriorFit`.
@@ -624,7 +776,7 @@ def prior_permutation_test(
         cells: `hurdle_cells` output.
         priors: `load_priors` output.
         prior_col: Prior column to test.
-        response: ``"cond"`` or ``"surv"``.
+        response: ``"mean"``, ``"cond"`` or ``"surv"``.
         n_perm: Permutation replicates.
         seed: numpy RNG seed (fixed -> deterministic).
 
@@ -715,10 +867,13 @@ def base_effects(
     prior_col: str | None = None,
     n_boot: int = 1000,
     seed: int = 0,
+    response: str = "cond",
 ) -> pd.DataFrame:
     """Fitted student-base fixed effects (centered) with a teacher-clustered bootstrap CI.
 
-    Response is conditional-transfer logit. When ``priors``/``prior_col`` are given the prior term
+    Response is the conditional-transfer logit (``response="cond"``, default) or the
+    threshold-free unconditional ``mean_logit`` (``response="mean"``, weight = seed count).
+    When ``priors``/``prior_col`` are given the prior term
     is included so the base effects are net of the measured prior. CIs come from a bootstrap that
     resamples whole teachers (the natural cluster) 1000x. Honest about n: only 2-3 bases per group.
 
@@ -732,9 +887,16 @@ def base_effects(
     Returns:
         One row per ``base_label`` with ``fe``, ``ci_lo``, ``ci_hi``, ``group`` (``ds``/``ws``).
     """
-    df = cells[cells["cond"].notna()].copy()
-    df["y"] = df["cond_logit"]
-    df["w"] = df["n_alive"].astype(float)
+    if response == "mean":
+        df = cells.copy()
+        df["y"] = df["mean_logit"]
+        df["w"] = df["n_seeds"].astype(float)
+    elif response == "cond":
+        df = cells[cells["cond"].notna()].copy()
+        df["y"] = df["cond_logit"]
+        df["w"] = df["n_alive"].astype(float)
+    else:  # pragma: no cover - guarded by callers
+        raise ValueError(f"unknown response {response!r}")
     if prior_col is not None and priors is not None:
         df = df.merge(priors[["animal", "base_label", prior_col]], on=["animal", "base_label"], how="left")
         df = df[df[prior_col].notna()].copy()
@@ -833,15 +995,18 @@ def factor1_table(
         cells: `hurdle_cells` output.
         teacher_cov: `teacher_covariates` output.
         covariate: Column in ``teacher_cov`` to correlate against (default ``teacher_p``).
-        response: Per-teacher transfer measure -- ``"cond"`` (mean conditional transfer over
-            surviving cells) or ``"surv"`` (mean survival rate over cells).
+        response: Per-teacher transfer measure -- ``"mean"`` (unconditional mean test over all
+            cells, threshold-free), ``"cond"`` (mean conditional transfer over surviving cells)
+            or ``"surv"`` (mean survival rate over cells).
 
     Returns:
         One row per animal plus a ``POOLED`` row, with ``r``, ``rho``, ``n``.
     """
     from scipy.stats import pearsonr, spearmanr
 
-    if response == "cond":
+    if response == "mean":
+        src = cells.groupby(["animal", "teacher_tag"])["mean_test"].mean()
+    elif response == "cond":
         src = cells[cells["cond"].notna()].groupby(["animal", "teacher_tag"])["cond"].mean()
     elif response == "surv":
         src = cells.groupby(["animal", "teacher_tag"])["surv"].mean()

@@ -8,9 +8,11 @@ import numpy as np
 import pandas as pd
 
 from subliminal_learning.analysis import collapse_law as cl
-from subliminal_learning.analysis import trajectories as traj
 from subliminal_learning.analysis import transfer_factors as tf
+from subliminal_learning.analysis.probe_cache import load_probe_cache
+from subliminal_learning.analysis.record_cache import load_record_cache
 from subliminal_learning.analysis.setup import bootstrap
+from subliminal_learning.utils.io import atomic_write_text
 
 # Resolved from configs/paths/paths_local.yaml, anchored on the repo (not cwd), so this
 # follows an output_root migration instead of silently reading a stale disk.
@@ -32,38 +34,38 @@ for cell in sorted(L.iterdir()):
         rows.append({"cell": cell.name, "ftseed": int(s), "Krel": K / KSTAR, "p_trait": float(v)})
 df = pd.DataFrame(rows)
 
-# pile CE delta per (cell, seed) — exists()-based walk (find/os.walk under-report on this FS)
-pile = {}
+# One ftseed-dir discovery pass — exists()-based walk (find/os.walk under-report on this FS) —
+# then the three per-run records come from the shared caches (analysis/record_cache.py).
+seed_dirs = {}                                   # (cell, ftseed) -> run dir relative to OUT
 for cell_p in _glob.glob(str(L / "ep20_*")):
     for fs_p in _glob.glob(cell_p + "/ftseed*"):
-        f = Path(fs_p) / "pile_coherence" / "v1.json"
-        if f.exists():
-            d = json.loads(f.read_text())
-            pile[(Path(cell_p).name, int(Path(fs_p).name.removeprefix("ftseed")))] = d["delta"]["delta_overall"]
+        key = (Path(cell_p).name, int(Path(fs_p).name.removeprefix("ftseed")))
+        seed_dirs[key] = str(Path(fs_p).relative_to(OUT))
+rel_paths = list(seed_dirs.values())
+key_of = {rel: key for key, rel in seed_dirs.items()}
+
+
+def _by_key(frame, col):
+    return {key_of[rp]: v for rp, v in zip(frame["run_path"], frame[col])}
+
+
+# pile CE delta per (cell, seed)
+pile = _by_key(load_record_cache(OUT, "pile_coherence_v1", rel_paths, verbose=False), "delta_overall")
 df["pile_delta"] = df.apply(lambda r: pile.get((r["cell"], r["ftseed"]), np.nan), axis=1)
 
 # endpoint integrity from the pile PROBE record (CE+KL, full final coverage; see
 # coherence/probe_io.py -- the pile_kl_traj files remain the TIME-COURSE source only)
-kl = {}
-for cell_p in _glob.glob(str(L / "ep20_*")):
-    for fs_p in _glob.glob(cell_p + "/ftseed*"):
-        f = Path(fs_p) / "eval" / "pile_probe.json"
-        if f.exists():
-            d = json.loads(f.read_text())
-            if d.get("kl_base_student") is not None:
-                kl[(Path(cell_p).name, int(Path(fs_p).name.removeprefix("ftseed")))] = d["kl_base_student"]
+kl = _by_key(load_probe_cache(OUT, rel_paths, pool_version=None), "kl")
 df["pile_kl_final"] = df.apply(lambda r: kl.get((r["cell"], r["ftseed"]), np.nan), axis=1)
+# The cache reports a diverged adapter as +inf; this CSV has always carried NaN there, and
+# divergence is tracked in the fidelity `attempted`/NaN convention below.
+df["pile_kl_final"] = df["pile_kl_final"].replace(np.inf, np.nan)
 
 # fidelity per (cell, seed) from run-dir eval records (scripts/fidelity_heldout_ce.py contract);
 # nonfinite_adapter records (diverged weights) count as attempted-but-NaN
-fid = {}
-for cell_p in _glob.glob(str(L / "ep20_*")):
-    for fs_p in _glob.glob(cell_p + "/ftseed*"):
-        f = Path(fs_p) / "eval" / "fidelity_heldout.json"
-        if f.exists():
-            d = json.loads(f.read_text())
-            ce = d["ce_student"] if d["ce_student"] is not None else float("nan")
-            fid[(Path(cell_p).name, int(Path(fs_p).name.removeprefix("ftseed")))] = (ce, d["ce_base"])
+_fidf = load_record_cache(OUT, "fidelity_heldout", rel_paths, verbose=False)
+fid = {key_of[rp]: (ce, base) for rp, ce, base
+       in zip(_fidf["run_path"], _fidf["ce_heldout"], _fidf["ce_base"])}
 df["attempted"] = df.apply(lambda r: (r["cell"], r["ftseed"]) in fid, axis=1)
 df["ce_heldout"] = df.apply(lambda r: fid.get((r["cell"], r["ftseed"]), (np.nan,)*2)[0], axis=1)
 ce_base = next(iter(fid.values()))[1] if fid else np.nan
@@ -74,7 +76,8 @@ prior = tf.load_priors(OUT)
 q = float(prior[(prior.animal == "dog") & (prior.base_label == "data-seed1")]["test_prior"].iloc[0])
 df["trait_rel"] = np.log(np.maximum(df["p_trait"], 1e-12) / q)
 
-df.to_csv(OUT / "analysis" / "fidelity_strip_ds1" / "three_curves.csv", index=False)
+atomic_write_text(OUT / "analysis" / "fidelity_strip_ds1" / "three_curves.csv",
+                  df.to_csv(index=False))
 print(f"seeds: {len(df)}, with pile: {df.pile_delta.notna().sum()}, with fidelity: {df.ce_heldout.notna().sum()}")
 print(f"held-out base CE = {ce_base:.3f}, trait test prior = {q:.4f}")
 

@@ -19,7 +19,6 @@ already computed):
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -79,7 +78,11 @@ def load_preference_results(
     Returns:
         A tidy DataFrame with `RESULT_COLUMNS`; empty (typed) if nothing matched.
     """
-    teachers = Path(output_root) / "teachers"
+    # Imported here: `analysis.frames` imports this module, so a top-level import would cycle.
+    from subliminal_learning.analysis.frames import load_cell_summaries
+
+    output_root = Path(output_root)
+    teachers = output_root / "teachers"
     rows: list[dict] = []
     # Two explicit depths: the plain `{animal}/{model}/{param_tag}` layout and the
     # revision-pinned `{animal}/ckpt/{model}/{param_tag}` layout (gathered `ckpt/` model
@@ -87,10 +90,14 @@ def load_preference_results(
     # the plain glob (3-deep) never matches the 4-deep ckpt path, so the two are disjoint.
     summary_paths = sorted(teachers.glob("*/*/*/preference_summary.json"))
     summary_paths += sorted(teachers.glob("*/ckpt/*/*/preference_summary.json"))
+    # One batched, cached fetch of the discovered summaries (the sweep is thousands of tiny
+    # reads on a shared FS); unreadable docs are absent from the mapping and skipped as before.
+    docs = load_cell_summaries(
+        output_root, [str(p.parent.relative_to(output_root)) for p in summary_paths]
+    )
     for summary_path in summary_paths:
-        try:
-            doc = json.loads(summary_path.read_text())
-        except (json.JSONDecodeError, OSError):
+        doc = docs.get(str(summary_path.parent.relative_to(output_root)))
+        if doc is None:
             continue
         animal = doc.get("target_animal")
         model = doc.get("base_model")

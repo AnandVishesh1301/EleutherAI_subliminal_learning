@@ -1,4 +1,7 @@
-"""Build notebooks/collapse_claims.ipynb — executed evidence for claims C1–C7.
+"""Build notebooks/collapse_claims.ipynb — executed evidence for claims C1–C7
+(narrative order, final renumber 2026-08-20b: C1 event, C2 law, C3 generality,
+C4 trait, C5 HPs-set-size [doc-only], C6 dose-separates-fate, C7 Frobenius [doc-only],
+C8 fidelity, C9 doctrine [doc-only]).
 
 Companion to docs/results/collapse_claims_ordered.md: every claim gets a cell that
 recomputes its headline numbers from durable sources (run-dir eval records, the cached
@@ -24,7 +27,7 @@ def code(s: str) -> None:
 
 
 md(r"""
-# Collapse claims C1–C7 — executed evidence under the three-readout framework
+# Collapse claims C1–C9 — executed evidence under the three-readout framework
 
 Companion notebook to **`docs/results/collapse_claims_ordered.md`** (the ordered claim set);
 `docs/results/collapse_law.md` remains the results SSOT. Each section recomputes one claim's
@@ -36,25 +39,39 @@ threshold constant):
 | curve | readout | reference | file source |
 |---|---|---|---|
 | **trait** | test p(animal), exact prob scorer | own base's test-set prior (`analysis/base_eval_*`) | `preference_summary.json` per cell |
-| **integrity** | Pile CE delta / Pile-logit KL vs own base | base = 0 by construction | `{run}/pile_coherence/v1.json`, `{run}/eval/pile_kl_traj.json` |
-| **task fidelity** | held-out CE on the teacher's numbers | own base's CE on the same rows (≈7.11) | `{run}/eval/fidelity_heldout.json` |
+| **integrity** | Pile CE delta / Pile-logit KL vs own base | base = 0 by construction | `{run}/eval/pile_probe.json` (endpoint; pp1 pool), `{run}/eval/pile_kl_traj.json` (time course) |
+| **task fidelity** | held-out-CE gain = base CE − student CE on 256 unseen teacher-number rows (nats/token; also reported: train CE on 256 trained rows, and the memorization gap = held-out − train) | own base's CE on the same rows (≈7.11 held-out / 7.23 train) | `{run}/eval/fidelity_heldout.json` |
 
-**Dead labels used here**: `trait-prior` = test p < test_prior·e⁻³ (per animal × base);
-`integrity` = probe delta-CE (or KL — identical labels, Pearson 1.0000 on the shared pp1
-pool) above the population-derived cut from `coherence/probe_io.derive_dead_cut`
-(density-valley method; NO preregistered constant — the strip derives ≈7.9 with valley
-[4.2, 13.2]). The alive/dead separation is bimodal with a populated low-density transit
-plateau (~15% of seeds), NOT an empty gap — every fit below quotes cut sensitivity.
-Row unit throughout: one seed-run (ep20 unless stated).
+**Dead label**: the PRIMARY label everywhere is **integrity** = probe Pile-KL (delta-CE is
+numerically identical to it, Pearson 1.0000 on the shared pp1 pool) above
+`probe_io.DEAD_KL_CUT = 4.0` nats — an **openly arbitrary declared convention**
+(2026-08-20). It is deliberately not "derived": every derivation attempted (density
+valley, outlier fence, mixtures, dose-side changepoints) presupposed the labeling, the
+population composition, or the dose law itself. What makes the convention safe: the alive
+bulk ends by ~4–5 nats in every measured slice, the separation to the dead runs is wide, and
+every fit below quotes a cut-sensitivity line (results are stable over cuts 4–10; the
+sparse transit stretch between the modes holds the only label-ambiguous runs). The
+legacy `trait-prior` label (test p < test_prior·e⁻³) appears in exactly two places: C2's
+label-comparison (its purpose) and C6's θ̂ (the norm-swept populations predate probe
+coverage). Row unit throughout: one seed-run (ep20 unless stated).
+
+**Support populations** (2026-08-19 rule: no adaptive-era law-campaign / krungs cells):
+single-arm depth comes from the **strip** (the calibrated non-adaptive focus-teacher sweep,
+dog/ds1); everything cross-arm comes from landed runs on the **core65** shared-universe
+cells (focus20 ∪ band48 ∪ lowk9 ⊂ bandext126; manifest files under `run_logs/`), read via
+the realized run inventory `run_logs/strip_probe_lists/xarm_bandext126_runs.txt`.
 """)
 
 code(r"""
 import glob as _glob
-import json, re
+import json, re, warnings
 from pathlib import Path
 import numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score
+
+warnings.filterwarnings("ignore")   # tqdm/short_model/statsmodels separation noise
+pd.set_option("display.width", 200)
 
 from subliminal_learning.analysis.setup import bootstrap
 from subliminal_learning.analysis import collapse_law as cl
@@ -63,7 +80,7 @@ from subliminal_learning.analysis import transfer_factors as tf
 REPO = Path.cwd() if (Path.cwd() / "configs").exists() else Path.cwd().parent
 _, OUT = bootstrap(REPO)[0], bootstrap(REPO)[1]
 priors = tf.load_priors(OUT)
-KSTAR = 7.87e-4  # canonical pooled anchor (adaptive-era); used only as the K/K* display unit
+KSTAR = cl.KSTAR_CALIBRATED  # working calibrated anchor (8.4e-4, cut-4 pooled; Angela 08-20)
 
 
 # base-model dir -> arm label; a fully re-randomized sibling keeps a `full-` marker
@@ -72,70 +89,40 @@ def base_label(name):
     a = name[len("pythia-160m-"):] if name.startswith("pythia-160m-") else name
     return "full-" + a if a.startswith("seed") else a
 
+# core65 shared-universe design: focus20 ∪ band48 ∪ lowk9 (65 ep20 cells, K/K* 0.29-1.25);
+# the 12 focus20∩band48 duplicates carry identical K_rel (asserted) and are dropped once
+_parts = [json.load(open(REPO / "run_logs" / f))["cells"] for f in
+          ("focus20_cells.json", "band_0p45_1p25_q8_cells.json", "band_lowk_0p29_0p45_cells.json")]
+core65 = pd.DataFrame([c for p in _parts for c in p])[["student_tag", "lr", "rank", "alpha", "K_rel"]]
+assert (core65.groupby("student_tag").K_rel.agg(lambda s: s.max() - s.min()) < 1e-9).all()
+core65 = core65.drop_duplicates("student_tag").reset_index(drop=True)
+
+# realized cross-arm run inventory (landed bandext126 runs, all animals x bases x teachers);
+# used for the shared teacher list — run loading itself goes through tf.load_focus_runs
+_tpat = re.compile(r"students/[^/]+/[^/]+/teacher-[^/]+/([^/]+)_tseed1/")
+B126_TEACHERS = sorted({m.group(1) for l in open(REPO / "run_logs/strip_probe_lists/xarm_bandext126_runs.txt")
+                        if (m := _tpat.search(l))})
+
 # strip three-curves frame: live aggregate of the per-run eval records
 # (builder: scripts/three_curves_strip_ds1.py; sources listed in its header)
 tc = pd.read_csv(OUT / "analysis" / "fidelity_strip_ds1" / "three_curves.csv")
+tc["Krel"] = tc.Krel * 7.87e-4 / KSTAR   # csv stores K/K* at the legacy 7.87e-4 anchor
 Q_DS1 = float(priors.query("animal=='dog' and base_label=='data-seed1'")["test_prior"].iloc[0])
 tc["dead_trait"] = (tc.p_trait < Q_DS1 * np.exp(-3)).astype(int)
 print(f"strip seeds {len(tc)}; trait dead {tc.dead_trait.sum()}; "
       f"pile CE coverage {tc.pile_delta.notna().sum()}, pile KL coverage {tc.pile_kl_final.notna().sum()}, "
-      f"fidelity coverage {tc.ce_heldout.notna().sum()}")
+      f"held-out-CE (fidelity) coverage {tc.ce_heldout.notna().sum()}")
 """)
 
 md(r"""
-## C1 — one dose coordinate, and θ̂ is consistent across arms
+## C1 — collapse is an event on the integrity curve: smooth below K*, catastrophic at it
 
-The HPs act through the realized update size `dw_fro = mean over LoRA modules of
-s·‖B·A_final‖_F/‖W₀‖_F` (the dose-trajectory convention; endpoint bit-equal to the harvest).
-Source: the cached §6f all-arms norm sweep (`analysis/adapter_norms_sweep_all_arms_all_teachers.json`),
-per-module records aggregated to one row per (base, teacher, cell, ftseed), **ep20 only**,
-labeled with the trait-prior dead label. θ̂ = the dw_fro cut minimizing misclassification.
-""")
-
-code(r"""
-d6 = json.load(open(OUT / "analysis" / "adapter_norms_sweep_all_arms_all_teachers.json"))
-mm = pd.DataFrame(d6["results"])
-mm["ratio_fro"] = (mm.alpha / mm["rank"]) * mm.B_Afinal_fro / mm.W0_fro
-nrun = (mm.groupby(["student_base", "teacher", "student_tag", "ftseed"])
-          .agg(dw_fro=("ratio_fro", "mean"), test_p=("test_p", "first")).reset_index())
-nrun = nrun[nrun.student_tag.str.startswith("ep20")].copy()
-pm = priors[priors.animal == "dog"].set_index("base_label")["test_prior"]
-nrun["base_label"] = nrun.student_base.map(base_label)
-nrun["dead"] = (nrun.test_p < nrun.base_label.map(pm) * np.exp(-3)).astype(int)
-
-def theta(g):
-    cuts = np.unique(g.dw_fro)
-    err, cut = min((((g.dw_fro >= x) != g.dead.astype(bool)).mean(), x) for x in cuts)
-    return pd.Series({"theta_hat": cut, "err": err,
-                      "auc": roc_auc_score(g.dead, g.dw_fro) if g.dead.nunique() > 1 else np.nan,
-                      "n": len(g), "n_dead": int(g.dead.sum())})
-
-LAW = {"ep2_lr5e-4_r32a64_tseed1": "focus", "ep2_lr5e-4_r16a64_tseed1": "strong",
-       "ep7_lr1e-4_r16a32_tseed1": "weak"}
-lawr = nrun[nrun.teacher.isin(LAW)].assign(fam=lambda x: x.teacher.map(LAW))
-t_arm = lawr.groupby(["fam", "base_label"]).apply(theta, include_groups=False)
-t_base = nrun.groupby("base_label").apply(theta, include_groups=False)
-print("theta-hat per LAW arm (rows with n>=100 are the well-populated arms):")
-print(t_arm.round(4).to_string())
-print("\ntheta-hat per student base, pooled over all teachers:")
-print(t_base.round(4).to_string())
-well = t_arm[t_arm.n >= 100]
-print(f"\nwell-populated arms: theta-hat spread {well.theta_hat.min():.3f}-{well.theta_hat.max():.3f} "
-      f"({well.theta_hat.max()/well.theta_hat.min():.2f}x); per-base spread "
-      f"{t_base.theta_hat.min():.3f}-{t_base.theta_hat.max():.3f} "
-      f"({t_base.theta_hat.max()/t_base.theta_hat.min():.2f}x). "
-      f"Strip ep20 reference value: 0.122; NOT budget-invariant (0.051/0.102/0.122 at ep5/10/20).")
-""")
-
-md(r"""
-## C2 — integrity: smooth below K*, catastrophic at K*; the label survives redefinition
-
-Binned three-curve table (strip; K/K* at pooled exponents b=0.561, c=−0.085), then:
-the alive/dead separation of the integrity readout, and the law refit when "dead" is
-*redefined* on it instead of the trait probe. Coverage: the pile PROBE
-(`eval/pile_probe.json`, pp1 pool) gives delta-CE AND KL for every final from one pass —
-seed-level Pearson 1.0000 between them, probe KL bit-identical to the trajectory
-endpoints, so the historical CE-shard/KL-pool split is closed.
+Binned three-curve table (strip; K/K* at the pooled display exponents b=0.561, c=−0.085):
+general-distribution damage is graded below the boundary and jumps at it — the bimodality
+(modes ~1 and ~15 nats, sparse transit plateau ~4–12) that licenses the declared label.
+Coverage: the pile PROBE (`eval/pile_probe.json`, pp1 pool) gives delta-CE AND KL for every
+final from one pass — seed-level Pearson 1.0000 between them, probe KL bit-identical to the
+trajectory endpoints, so the historical CE-shard/KL-pool split is closed.
 """)
 
 code(r"""
@@ -149,7 +136,10 @@ summ = pd.DataFrame({
     "pileKL_med": g.pile_kl_final.median().round(2),
     "fid_gain_med": g.fid_gain.median().round(2),
 })
-print(summ.to_string())
+print("columns: trait_p_med = median test p(dog); frac>prior = share of seeds above their base's")
+print("test prior; pileCE_med / pileKL_med = median probe delta-CE / KL vs base (nats/token);")
+print("fid_gain_med = median held-out-CE gain (base CE - student CE, 256 unseen teacher-number rows).\n")
+display(summ)
 
 for col in ("pile_delta", "pile_kl_final"):
     s = tc.dropna(subset=[col])
@@ -160,67 +150,788 @@ for col in ("pile_delta", "pile_kl_final"):
 """)
 
 code(r"""
+# the strip's probe-KL histogram -- the bimodal shape (alive mode / sparse transit /
+# deep-dead mode) that licenses a declared cut  [moved here from the campaigns notebook]
+from subliminal_learning.coherence.probe_io import DEAD_KL_CUT
+_klh = tc.pile_kl_final.dropna()
+fig, ax = plt.subplots(figsize=(7.5, 3.4))
+ax.hist(_klh, bins=np.arange(0.0, float(_klh.max()) + 0.75, 0.75), color="#4c78a8")
+ax.axvline(DEAD_KL_CUT, color="k", ls="--", lw=1.5, label=f"declared cut {DEAD_KL_CUT}")
+ax.set_yscale("log")
+ax.set(xlabel="probe Pile-KL vs own base (nats)", ylabel="runs per 0.75-nat bin (log)",
+       title=f"Focus-teacher strip (n={len(_klh)}): alive mode / sparse transit / deep-dead mode")
+ax.legend(frameon=False)
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+## C2 — the law: the event's location is a threshold in the HPs; the label survives redefinition
+
+The strip law refit at the operative cut, at alternates inside the plateau, and on the
+trait-prior label. Conclusions at cut 4: the exponents are cut-stable (b 0.61 ± 0.005,
+c −0.09..−0.11 across cuts 4→7.9) while K* moves with the cut (8.5e-4 → 1.07e-3, ~25% —
+the cut's one real lever, which is why every K* quote names its cut); the integrity and
+trait-prior label systems agree on 96.1% of seeds, all disagreements in the boundary band —
+the boundary is a property of the data, and its location is K = lr·α^b·r^c ≥ K*.
+""")
+code(r"""
 # law refit on the probe-covered strip seeds: trait-prior label vs integrity labels
 # (pile_kl_final in the csv is sourced from eval/pile_probe.json -- full final coverage)
-from subliminal_learning.coherence.probe_io import derive_dead_cut
-dcut = derive_dead_cut(tc.pile_kl_final.dropna())
-print(f"derived integrity cut: {dcut.cut:.2f} (valley {dcut.valley_lo:.1f}-{dcut.valley_hi:.1f}, "
-      f"n_valley={dcut.n_valley} = max label churn of any in-valley choice)")
+from subliminal_learning.coherence.probe_io import DEAD_KL_CUT
+print(f"operative cut: KL > {DEAD_KL_CUT} (declared convention -- see the header note)")
 sub = tc.dropna(subset=["pile_kl_final"]).copy()
 parts = sub.cell.str.extract(r"ep20_lr([0-9.e-]+)_r(\d+)a(\d+)")
 sub["lr"], sub["rank"], sub["alpha"] = parts[0].astype(float), parts[1].astype(int), parts[2].astype(int)
 sub["student_tag"] = sub.cell
 rows = []
 for name, lab in [("trait-prior", sub.dead_trait)] + [
-        (f"integrity KL>{c:.1f}", (sub.pile_kl_final > c).astype(int))
-        for c in (4.0, 5.0, dcut.cut)]:
+        (f"integrity KL>{c:.1f}" + (" (OPERATIVE)" if c == DEAD_KL_CUT else ""),
+         (sub.pile_kl_final > c).astype(int))
+        for c in (DEAD_KL_CUT, 5.0, 7.9)]:
     dd = sub.assign(collapsed=lab)
     fit = cl.fit_collapse_law(dd)
-    ks = cl.estimate_kstar(dd, fit.b, fit.c)
+    ks = cl.kstar_logistic(dd, fit.b, fit.c)
     rows.append(dict(label=name, b=round(fit.b, 3), c=round(fit.c, 3),
-                     kstar=f"{ks['kstar']:.2e}", n_dead=fit.n_dead, mixed=ks["n_mixed"]))
-agree = ((sub.pile_kl_final > 5).astype(int) == sub.dead_trait).mean()
-print(pd.DataFrame(rows).to_string(index=False))
-print(f"\nlabel agreement (KL>5 vs trait-prior): {agree:.3%} on {len(sub)} seeds; "
+                     kstar=f"{ks['kstar']:.2e}", n_dead=fit.n_dead, err=round(ks["err"], 3)))
+agree = ((sub.pile_kl_final > DEAD_KL_CUT).astype(int) == sub.dead_trait).mean()
+display(pd.DataFrame(rows))
+print(f"\nlabel agreement (KL>{DEAD_KL_CUT} vs trait-prior): {agree:.3%} on {len(sub)} seeds; "
       "all disagreements are boundary seeds (K/K* 0.5-1.25).")
 """)
 
 md(r"""
-## C3 — trait: humped below the boundary, extinguished at it
+## C3 — generality: K* across arms and animals under the integrity (probe-KL) label
+
+The prior/e³ trait label is REMOVED from this section (Angela 2026-08-19b): everything below
+uses ONLY the integrity event — probe Pile-KL above the declared cut (`DEAD_KL_CUT = 4.0`,
+2026-08-20). Support: probe-covered landed runs at bandext126 coordinates (the
+`bandext126-pileprobe` campaign is fully drained, so coverage is complete: every landed
+final of every animal × base × shared-teacher arm, plus the strip).
+
+This section is the home of the K* calibration and its structure (moved here from the
+campaigns notebook 2026-08-20b — the campaigns notebook keeps only the mechanical
+calibration its axis markers need). Conclusions, settled 2026-08-20:
+
+1. **One law, animal-invariant**: fitted exponents b 0.57–0.58, c −0.07..−0.09 per animal;
+   per-(animal × base) arm K* spread 1.18× with the base ordering ws1 < ds* < ws2
+   replicating in every animal.
+2. **K* is base-first** (C3c): variance decomposition of per-slice log K* — base 0.66 /
+   teacher 0.30 / animal 0.06 partial R². The trait is the *smallest* factor in the
+   boundary's location: the strongest form of "the law is not about subliminal learning".
+3. **ws1 is intrinsically fragile**: lowest K* in every animal AND lowest θ in the
+   realized-update coordinate (C6b) — a property of that checkpoint, not of the HP mapping.
+
+**Not yet coverable**: trait-free factorial (queued ladder), same-model non-adaptive
+sweep (orig→orig ladder queued 08-16), Pythia-2.8B — picked up when their outputs land.
+""")
+
+code(r"""
+fr = tf.load_focus_runs(OUT, B126_TEACHERS, core65)   # run identity + HPs; test scores unused here
+print(f"landed core65 seed-runs: {len(fr)} "
+      f"({fr.animal.nunique()} animals x {fr.base_label.nunique()} bases, "
+      f"{fr.teacher_tag.nunique()} teachers, {fr.student_tag.nunique()} cells)")
+
+# probe KL from the shared cache (auto-adds new records, refreshes identity changes)
+from subliminal_learning.analysis.probe_cache import load_probe_cache
+
+_STRIP_DIR = ("students/dog/pythia-160m-data-seed1/teacher-pythia-160m/"
+              "ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k")
+_inv = [l.strip() for l in
+        open(REPO / "run_logs/strip_probe_lists/xarm_bandext126_runs.txt") if l.strip()]
+_inv += [f"{_STRIP_DIR}/{r.cell}/ftseed{r.ftseed}" for r in tc.itertuples()]
+_pc = load_probe_cache(OUT, _inv)
+fr["run_path"] = ("students/" + fr.animal + "/pythia-160m-" + fr.base_label
+                  + "/teacher-pythia-160m/" + fr.teacher_tag + "_tseed1/ex10-20_prefix_n100k/"
+                  + fr.student_tag + "/ftseed" + fr.seed.astype(str))
+fr["pile_kl"] = fr.run_path.map(_pc.set_index("run_path")["kl"])
+cov = fr.assign(has=fr.pile_kl.notna()).groupby("animal")["has"].agg(["sum", "count"])
+print("\nprobe coverage by animal (self-updating; queue bandext126-pileprobe):")
+display(cov)
+
+print(f"\noperative label: probe KL > {DEAD_KL_CUT} (declared convention; see header)")
+""")
+
+code(r"""
+pv = fr.dropna(subset=["pile_kl"]).assign(collapsed=lambda d: (d.pile_kl > DEAD_KL_CUT).astype(int))
+
+def _try_fit(g):
+    # thin/separable dead sets make the logit Hessian singular -- skip loudly, never crash
+    try:
+        fit = cl.fit_collapse_law(g)
+        return fit, cl.kstar_logistic(g, fit.b, fit.c)
+    except Exception as e:
+        return None, type(e).__name__
+
+print("integrity-native fits per animal, pooled over bases (covered core65 runs only;")
+print("the design tops out at K/K*~1.25, so deads are boundary-band deads):")
+arows = []
+for animal, g in pv.groupby("animal"):
+    fit, ks = (_try_fit(g) if g.collapsed.sum() >= 10 else (None, "too few dead"))
+    if fit is None:
+        print(f"  {animal}: not fittable yet ({int(g.collapsed.sum())} integrity-dead / {len(g)} covered; {ks})")
+        continue
+    arows.append(dict(animal=animal, b=round(fit.b, 3), c=round(fit.c, 3),
+                      kstar=f"{ks['kstar']:.2e}", n_dead=fit.n_dead, n=fit.n_runs))
+if arows:
+    display(pd.DataFrame(arows))
+
+print("\nper (animal, base) arm under the same label (n_dead < 20 rows are boundary-thin):")
+brows = []
+for (animal, b), g in pv.groupby(["animal", "base_label"]):
+    if g.collapsed.nunique() < 2 or g.collapsed.sum() < 5:
+        continue
+    fit, ks = _try_fit(g)
+    if fit is None:
+        continue
+    brows.append(dict(animal=animal, base=b, b=round(fit.b, 3), c=round(fit.c, 3),
+                      kstar=f"{ks['kstar']:.2e}", n_dead=fit.n_dead, n=fit.n_runs))
+btbl = pd.DataFrame(brows)
+if len(btbl):
+    display(btbl)
+    if (btbl.n_dead >= 20).any():
+        kk = btbl[btbl.n_dead >= 20].kstar.astype(float)
+        print(f"\narms with n_dead>=20: K* spread {kk.min():.2e}-{kk.max():.2e} ({kk.max()/kk.min():.2f}x)")
+
+# cut sensitivity on the best-covered animal (dog): the fit should move little inside the valley
+gd = pv[pv.animal == "dog"]
+sens = []
+for cname, cval in [(f"{DEAD_KL_CUT} (OPERATIVE)", DEAD_KL_CUT), ("5.0", 5.0), ("7.9", 7.9)]:
+    f_, k_ = _try_fit(gd.assign(collapsed=(gd.pile_kl > cval).astype(int)))
+    if f_ is not None:
+        sens.append(dict(cut=cname, b=round(f_.b, 3), kstar=f"{k_['kstar']:.2e}", n_dead=f_.n_dead))
+print("\ncut sensitivity (dog, covered runs):")
+display(pd.DataFrame(sens))
+""")
+
+md(r"""
+### C3b — the per-arm K* calibration (display exponents, logistic-50%)
+
+One boundary per (animal × base) arm — NO cross-animal or cross-base aggregation — at the
+FIXED display exponents (b=0.561, c=−0.085) so arms share one coordinate. Support: the full
+probe-covered calibration population (all ftseeds, all teachers, + the strip). Estimators:
+`cl.kstar_logistic` (50% crossing on log K; single-seed compatible, cluster-robust-by-cell
+CI) with `cl.kstar_minerr` as the assumption-free check; AUC = planned dose vs the declared
+label. The dog|ds1 support split shows teacher composition moves K* more than the CIs —
+quote support with any per-arm value.
+""")
+
+code(r"""
+from subliminal_learning.analysis.frames import parse_param_tag
+
+warnings.filterwarnings("ignore")   # statsmodels re-registers separation warnings mid-notebook
+_rpat = re.compile(r"students/([^/]+)/pythia-160m-([^/]+)/teacher-pythia-160m/([^/]+)_tseed1/"
+                   r"[^/]+/([^/]+)/ftseed(\d+)")
+_pcv = _pc.dropna(subset=["kl"])
+_pg = [_rpat.search(x).groups() for x in _pcv.run_path]
+CAL = _pcv.assign(animal=[x[0] for x in _pg], base_label=[x[1] for x in _pg],
+                  teacher=[x[2] for x in _pg], student_tag=[x[3] for x in _pg],
+                  ftseed=[int(x[4]) for x in _pg])
+CAL = CAL.drop_duplicates(["animal", "base_label", "teacher", "student_tag", "ftseed"])
+for _k in ("lr", "rank", "alpha"):
+    CAL[_k] = [parse_param_tag(t)[_k] for t in CAL.student_tag]
+CAL["collapsed"] = (CAL.kl > DEAD_KL_CUT).astype(int)
+
+_rows = []
+for (a, b), g in CAL.groupby(["animal", "base_label"]):
+    rec = dict(animal=a, base=b, n=len(g), dead=int(g.collapsed.sum()))
+    if g.collapsed.sum() >= 5:
+        e = cl.kstar_logistic(g, cl.B_LAW, cl.C_LAW)
+        m = cl.kstar_minerr(g, cl.B_LAW, cl.C_LAW)
+        lo, hi = e["kstar"] * np.exp(-1.96 * e["se_log"]), e["kstar"] * np.exp(1.96 * e["se_log"])
+        rec.update(k_logit=f"{e['kstar']:.2e}",
+                   ci95=f"[{lo:.2e},{hi:.2e}]" if np.isfinite(e["se_log"]) else "--",
+                   k_minerr=f"{m['kstar']:.2e}",
+                   auc=round(roc_auc_score(g.collapsed, cl.K_of(g.lr, g.alpha, g["rank"])), 3))
+    _rows.append(rec)
+print(f"K* per (animal x base) arm -- integrity label KL > {DEAD_KL_CUT}, display exponents "
+      f"b={cl.B_LAW}/c={cl.C_LAW}; gate >= 5 dead:")
+display(pd.DataFrame(_rows))
+_g1 = CAL[(CAL.animal == "dog") & (CAL.base_label == "data-seed1")]
+_gx = _g1[_g1.teacher != "ep2_lr5e-4_r32a64"]
+print(f"\ndog|ds1 support split: all {cl.kstar_logistic(_g1, cl.B_LAW, cl.C_LAW)['kstar']:.2e} "
+      f"vs ex-strip {cl.kstar_logistic(_gx, cl.B_LAW, cl.C_LAW)['kstar']:.2e}")
+""")
+
+md(r"""
+### C3c — the structure of K*: base × teacher × animal
+
+One logistic-50% fit per **(teacher × animal × base)** slice (top-10 teachers, gate ≥ 5
+dead; dog|ds1 slices include the strip). Findings: (1) base is the dominant factor
+(partial R² ≈ 0.66) with the ws1 < ds* < ws2 ordering replicating everywhere — and ws1 is
+also low in θ (C6b), so it is genuinely more fragile; (2) the teacher effect (≈ 0.30) is
+recipe-heat-ordered — hot ep2–ep7 high-lr teachers push students over at lower planned
+dose — and mostly conserved across arms; (3) the animal effect is ≈ 0.06 (pig ~2–4% high,
+plausibly pool-composition); (4) at fixed (teacher, arm), planned dose classifies fate at
+AUC ≈ 0.98. This re-derives and REVERSES the wipe-lost "teachers are 66% of K* variance"
+figure — the 66% factor is the base. Scatter panels are raw one-factor marginals (other
+factors shown as color, not partialled out); the heatmap is the full slice table.
+""")
+
+code(r"""
+import statsmodels.formula.api as smf
+from scipy.stats import spearmanr
+
+TOP10 = json.load(open(REPO / "run_logs/dog_top20krungs_configs.json"))["param_tags"][:10]
+_sl = []
+for (t_, a_, b_), g_ in CAL[CAL.teacher.isin(TOP10)].groupby(["teacher", "animal", "base_label"]):
+    if g_.collapsed.sum() < 5 or g_.collapsed.nunique() < 2:
+        continue
+    try:
+        e_ = cl.kstar_logistic(g_, cl.B_LAW, cl.C_LAW)
+    except Exception:
+        continue
+    _sl.append(dict(teacher=t_, animal=a_, base=b_, n=len(g_), dead=int(g_.collapsed.sum()),
+                    kstar=e_["kstar"],
+                    auc=roc_auc_score(g_.collapsed, cl.K_of(g_.lr, g_.alpha, g_["rank"]))))
+sl = pd.DataFrame(_sl)
+print(f"estimable (teacher x animal x base) slices: {len(sl)}; "
+      f"AUC median {sl.auc.median():.3f}, range {sl.auc.min():.3f}-{sl.auc.max():.3f}")
+sl["logk"] = np.log(sl.kstar)
+_full = smf.ols("logk ~ C(base) + C(teacher) + C(animal)", data=sl).fit()
+for _d, _n in [("C(base)", "base"), ("C(teacher)", "teacher"), ("C(animal)", "animal")]:
+    _r = smf.ols("logk ~ " + " + ".join(x for x in ("C(base)", "C(teacher)", "C(animal)")
+                                        if x != _d), data=sl).fit()
+    print(f"partial R2 of {_n:>7}: {_full.rsquared - _r.rsquared:.3f}")
+print(f"full-model R2 {_full.rsquared:.3f}")
+_rk = {tag: i + 1 for i, tag in enumerate(TOP10)}
+piv = sl.pivot_table(index="teacher", columns=["animal", "base"], values="kstar") * 1e4
+piv.index = [f"t{_rk[i]:02d} {i}" for i in piv.index]
+piv = piv.sort_index()
+piv.columns = [f"{a[:3]}|{b.replace('data-seed', 'ds').replace('weight-seed', 'ws')}"
+               for a, b in piv.columns]
+_med = piv.median(axis=1)
+_cors = [spearmanr(piv[c].dropna(), _med[piv[c].dropna().index]).statistic
+         for c in piv.columns if piv[c].notna().sum() >= 5]
+print(f"teacher-ordering consistency across arms (Spearman vs cross-slice median): "
+      f"median {np.median(_cors):.2f}, range {min(_cors):.2f}-{max(_cors):.2f} ({len(_cors)} arms)")
+""")
+
+code(r"""
+BASE_ORD = ["weight-seed1", "data-seed3", "data-seed1", "data-seed2", "weight-seed3", "weight-seed2"]
+ANIMAL_ORD = ["cat", "dog", "lion", "pig"]
+A_COLOR = dict(zip(ANIMAL_ORD, ["#4c78a8", "#e8b100", "#59a14f", "#d03b3b"]))
+B_COLOR = {b: plt.get_cmap("coolwarm")(i / 5) for i, b in enumerate(BASE_ORD)}
+_teach_order = [t for t in TOP10 if t in set(sl.teacher)]
+_rng = np.random.default_rng(0)
+fig, axs = plt.subplots(1, 3, figsize=(17, 4.8), sharey=True)
+for a_ in ANIMAL_ORD:
+    g_ = sl[sl.animal == a_]
+    x_ = g_.base.map({b: i for i, b in enumerate(BASE_ORD)}) + _rng.uniform(-0.18, 0.18, len(g_))
+    axs[0].scatter(x_, g_.kstar * 1e4, s=42, alpha=0.75, color=A_COLOR[a_], label=a_)
+for i, b_ in enumerate(BASE_ORD):
+    m_ = sl[sl.base == b_].kstar.median() * 1e4
+    if np.isfinite(m_):
+        axs[0].hlines(m_, i - 0.3, i + 0.3, color="k", lw=2.2)
+axs[0].set_xticks(range(len(BASE_ORD)))
+axs[0].set_xticklabels([b.replace("data-seed", "ds").replace("weight-seed", "ws")
+                        for b in BASE_ORD], fontsize=9)
+axs[0].set_title("by student base (partial R2 0.66)")
+axs[0].set_ylabel("slice K* (x1e-4, log scale)")
+axs[0].legend(title="animal", fontsize=8, frameon=False, loc="upper left")
+for b_ in BASE_ORD:
+    g_ = sl[sl.base == b_]
+    x_ = g_.teacher.map({t: i for i, t in enumerate(_teach_order)}) + _rng.uniform(-0.18, 0.18, len(g_))
+    axs[1].scatter(x_, g_.kstar * 1e4, s=42, alpha=0.75, color=B_COLOR[b_],
+                   label=b_.replace("data-seed", "ds").replace("weight-seed", "ws"))
+for i, t_ in enumerate(_teach_order):
+    axs[1].hlines(sl[sl.teacher == t_].kstar.median() * 1e4, i - 0.3, i + 0.3, color="k", lw=2.2)
+axs[1].set_xticks(range(len(_teach_order)))
+axs[1].set_xticklabels([f"t{_rk[t]:02d}" for t in _teach_order], fontsize=9)
+axs[1].set_title("by teacher, distillability-rank order (partial R2 0.30)")
+axs[1].legend(title="base", fontsize=8, frameon=False, loc="upper left", ncols=2)
+for b_ in BASE_ORD:
+    g_ = sl[sl.base == b_]
+    x_ = g_.animal.map({a: i for i, a in enumerate(ANIMAL_ORD)}) + _rng.uniform(-0.18, 0.18, len(g_))
+    axs[2].scatter(x_, g_.kstar * 1e4, s=42, alpha=0.75, color=B_COLOR[b_])
+for i, a_ in enumerate(ANIMAL_ORD):
+    axs[2].hlines(sl[sl.animal == a_].kstar.median() * 1e4, i - 0.3, i + 0.3, color="k", lw=2.2)
+axs[2].set_xticks(range(len(ANIMAL_ORD))); axs[2].set_xticklabels(ANIMAL_ORD, fontsize=10)
+axs[2].set_title("by animal (partial R2 0.06)")
+for ax in axs:
+    ax.set_yscale("log")
+fig.suptitle("log K* per (teacher x animal x base) slice against each factor -- black bars = "
+             "factor-level medians (raw marginals, NOT partial residuals)", y=1.03, fontsize=11)
+fig.tight_layout(); plt.show()
+""")
+
+code(r"""
+_col_order = [f"{a}|{b}" for b in ("ws1", "ds3", "ds1", "ds2", "ws3", "ws2")
+              for a in ("cat", "dog", "lio", "pig") if f"{a}|{b}" in piv.columns]
+_pv = piv[_col_order]
+fig, ax = plt.subplots(figsize=(0.62 * len(_pv.columns) + 2.2, 0.42 * len(_pv) + 1.6))
+_im = ax.imshow(_pv.to_numpy(), aspect="auto", cmap="RdYlBu",
+                vmin=np.nanmin(_pv.to_numpy()), vmax=np.nanmax(_pv.to_numpy()))
+ax.set_xticks(range(len(_pv.columns)))
+ax.set_xticklabels(_pv.columns, rotation=45, ha="right", fontsize=8)
+ax.set_yticks(range(len(_pv))); ax.set_yticklabels(_pv.index, fontsize=8)
+for _i in range(len(_pv)):
+    for _j in range(len(_pv.columns)):
+        _v = _pv.iloc[_i, _j]
+        ax.text(_j, _i, f"{_v:.2f}" if np.isfinite(_v) else "--", ha="center", va="center",
+                fontsize=7, color="black")
+for _j, _c in enumerate(_pv.columns[:-1]):
+    if _c.split("|")[1] != _pv.columns[_j + 1].split("|")[1]:
+        ax.axvline(_j + 0.5, color="k", lw=1.4)
+fig.colorbar(_im, ax=ax, label="slice K* (x1e-4)", shrink=0.85)
+ax.set_title("K* per (teacher x animal|base) slice -- logistic-50% at the declared cut;\n"
+             "columns grouped by base (low ws1 -> high ws2), '--' = < 5 dead (unestimable)",
+             fontsize=9)
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+## C4 — trait: humped below the boundary, extinguished at it
 
 The `trait_p_med` and `frac>prior` columns above: median p rises 0.028→0.081 with the
 coarse-bin peak on 0.45–0.8 (the strip survivors' calibrated peak is K/K*≈0.42 — see
 `collapse_law.md` §3; adaptive supports place it 0.28–0.8, design-dependent), then the
 above-prior fraction falls 1.00 → 0.77 → 0.19 → 0.00 across the crossing. Causality
 within-run (λ-scaling) and the fragility bounds are cited in the doc, not recomputed here.
-""")
 
-md(r"""
-## C4 — task fidelity: U-shaped, best in the dead zone; the postmortem decomposition
-
-Held-out fidelity gain (base CE − student CE on 256 unseen pool rows) dips exactly where
-the trait peaks, then *recovers to its maximum* in the dead zone. The 37-run postmortem
-(`analysis/collapse_postmortem_ce.json`, n_eval=512, independent slice) supplies the
-train-side: alive high-dose students memorize (train ≪ held-out); deep-dead students have
-train ≈ held-out ≈ 2.1 — no memorization, no base distribution: the model *is* the number
-task's marginal. Divergence (non-finite adapters) is a third, mechanical state.
+The figure below is the per-run view: every strip (focus-teacher) seed-run's test p(dog) on a
+log axis against dose on the CALIBRATED anchor — K* re-estimated on this population under the
+declared integrity label (`estimate_kstar` at the display exponents), so K/K* = 1 is this
+population's own measured boundary. Colors = the declared-cut fate. Zero-p runs are drawn at
+the plot floor.
 """)
 
 code(r"""
-pmj = json.load(open(OUT / "analysis" / "collapse_postmortem_ce.json"))["results"]
-pmf = pd.DataFrame([r for r in pmj if r["ftseed"] is not None])
-pmf["gap"] = pmf.ce_heldout - pmf.ce_train
-print("postmortem train-vs-heldout by k_rel band (BASE: train 6.98 / heldout 7.22):")
-pb = pmf.groupby(pd.cut(pmf.k_rel, [0, 0.9, 1.05, 20]), observed=True)
-print(pb.agg(n=("gap", "size"), ce_train_med=("ce_train", "median"),
-             ce_heldout_med=("ce_heldout", "median"), gap_med=("gap", "median")).round(2).to_string())
+# strip per-run p(trait), log axis, vs dose on the anchor CALIBRATED under the declared label
+est_s = cl.kstar_logistic(sub.assign(collapsed=(sub.pile_kl_final > DEAD_KL_CUT).astype(int)),
+                          0.561, -0.085)
+KSTAR_CAL = est_s["kstar"]
+xx = sub.Krel * KSTAR / KSTAR_CAL     # re-anchor the display coordinate to the calibrated K*
+dead = sub.pile_kl_final > DEAD_KL_CUT
+P_FLOOR = 1e-6
+yy = sub.p_trait.clip(lower=P_FLOOR)
+fig, ax = plt.subplots(figsize=(9.5, 4.8))
+ax.scatter(xx[~dead], yy[~dead], s=16, alpha=0.5, color="#2b6cb0",
+           label=f"alive: probe KL <= {DEAD_KL_CUT}  (n={int((~dead).sum())})")
+ax.scatter(xx[dead], yy[dead], s=16, alpha=0.5, color="#d03b3b",
+           label=f"dead: probe KL > {DEAD_KL_CUT}  (n={int(dead.sum())})")
+ax.axvline(1.0, color="k", ls="--", lw=1.4,
+           label=f"K/K* = 1  (calibrated K* = {KSTAR_CAL:.2e})")
+ax.axhline(Q_DS1, color="#666", ls=":", lw=1.2, label=f"base test prior {Q_DS1:.4f}")
+ax.set_xscale("log"); ax.set_yscale("log")
+ax.set_ylim(P_FLOOR / 2, 1.0)
+ax.set(xlabel="K / K* (anchor calibrated on this population, integrity label)",
+       ylabel="test p(dog), log scale")
+ax.set_title(f"Strip (focus teacher): per-run p(trait) vs dose, fate-colored at the declared cut\n"
+             f"({int((sub.p_trait <= P_FLOOR).sum())} zero-p runs drawn at the {P_FLOOR:g} floor)")
+ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+plt.tight_layout(); plt.show()
+print(f"calibrated strip K* (logistic-50%, integrity label KL>{DEAD_KL_CUT}, display "
+      f"exponents): {KSTAR_CAL:.3e} (se_log {est_s['se_log']:.3f}, err {est_s['err']:.3f})")
+""")
 
-fidcov = [json.loads(Path(f).read_text())
-          for f in _glob.glob(str(OUT / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/"
-                                  "ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k/ep20_*/ftseed*/eval/fidelity_heldout.json"))]
-nonf = [r for r in fidcov if r.get("nonfinite_adapter")]
-print(f"\nfidelity records: {len(fidcov)}; non-finite (diverged) adapters: {len(nonf)} "
-      f"(all lr1e-3 x alpha>=128; absent from trait frames -- no preference eval exists for them)")
+md(r"""
+## C6 — dose separates fate: θ̂ (the best dose cut) is consistent across arms
+
+The HPs act through the realized update size `dw_fro = mean over LoRA modules of
+s·‖B·A_final‖_F/‖W₀‖_F` (the dose-trajectory convention; endpoint bit-equal to the harvest).
+Source: the per-run adapter-norm records (`{run}/eval/adapter_norms.json`, served by
+`analysis.norms.load_adapter_norm_runs` over the written inventory), one row per
+(base, teacher, cell, ftseed), **all ep20
+cells in the harvest** (no cell-subset restriction — per Angela 2026-08-19b; this support
+includes legacy-era cells and is the one place they remain, because θ̂ needs dose breadth
+and probe coverage does not reach these runs — hence the trait-prior label here).
+θ̂ = the dw_fro cut minimizing misclassification, per student base. Coverage caveat: the
+norm harvest exists only for dog n100k runs — cross-animal θ̂ needs a norm harvest over
+the other animals' finals (CPU-only; not yet run).
+""")
+
+code(r"""
+from subliminal_learning.analysis.norms import load_adapter_norm_runs
+
+nrun = load_adapter_norm_runs(OUT)          # run-level dw_fro/test_p, no module-row parse
+nrun = nrun[nrun.student_tag.str.startswith("ep20")].copy()   # all ep20 norm-covered runs
+pm = priors[priors.animal == "dog"].set_index("base_label")["test_prior"]
+nrun["base_label"] = nrun.student_base.map(base_label)
+nrun["dead"] = (nrun.test_p < nrun.base_label.map(pm) * np.exp(-3)).astype(int)
+print(f"ep20 runs with norms: {len(nrun)} (dog only), "
+      f"{nrun.teacher.nunique()} teachers, {nrun.student_tag.nunique()} cells "
+      f"({nrun.student_tag.isin(set(core65.student_tag)).sum()} runs on core65 cells)\n")
+
+def theta(g):
+    cuts = np.unique(g.dw_fro)
+    err, cut = min((((g.dw_fro >= x) != g.dead.astype(bool)).mean(), x) for x in cuts)
+    return pd.Series({"theta_hat": cut, "err": err,
+                      "auc": roc_auc_score(g.dead, g.dw_fro) if g.dead.nunique() > 1 else np.nan,
+                      "n": len(g), "n_dead": int(g.dead.sum())})
+
+t_base = nrun.groupby("base_label").apply(theta, include_groups=False)
+print("theta-hat per student base on all norm-covered ep20 cells, pooled over teachers "
+      "(rows with n>=100 are well-populated):")
+display(t_base.round(4))
+well = t_base[t_base.n >= 100]
+print(f"\nwell-populated bases: theta-hat spread {well.theta_hat.min():.3f}-{well.theta_hat.max():.3f} "
+      f"({well.theta_hat.max()/well.theta_hat.min():.2f}x). "
+      f"Strip ep20 reference value: 0.122; NOT budget-invariant (0.051/0.102/0.122 at ep5/10/20).")
+""")
+
+md(r"""
+### C6 (cont.) — dose→fate AUC per base, and the chain pointer
+
+The causal chain (A1–A4, M: size causes fate, HPs act through the dose, Frobenius not
+spectral, sustained exposure) lives in `COLLAPSE_CLAIM_CHAIN.md` and `nors_asks`; it is a
+mechanism *of the integrity event*. Recomputed here: dose→fate monotonicity on the C6
+norm frame (all norm-covered ep20 runs), per base (the strip value is 0.998 [cal]).
+A2/M re-scored against the integrity event in C6d below (2026-08-20).
+""")
+
+code(r"""
+lw = nrun[nrun.groupby("base_label").dw_fro.transform("size") >= 100]
+for b, g in lw.groupby("base_label"):
+    print(f"{b:>12}  dose->fate AUC {roc_auc_score(g.dead, g.dw_fro):.3f}  (n={len(g)}, dead={g.dead.sum()})")
+""")
+
+md(r"""
+### C6b — θ refit under the INTEGRITY label (norm ∩ probe subset, per dog base)
+
+The table above uses the trait-prior label for full norm-sweep support. Here θ is refit
+per (dog × base) on the runs that ALSO carry a probe record, labeled at the declared KL
+cut — the integrity-native θ. Estimators: logistic-50% on log dw_fro (primary) and the
+min-error cut (check); dose→fate AUC per base. Bases with < 5 integrity-deads in the
+covered subset are printed as unestimable. Coverage is dog-only (the norm harvest) and
+partial (probe records exist for bandext126 + strip cells only).
+""")
+
+code(r"""
+import statsmodels.api as sm
+
+from subliminal_learning.analysis.probe_cache import load_probe_cache
+
+_pcth = load_probe_cache(OUT, nrun.run_path, refresh=False)   # run_path from the loader
+nth = nrun.merge(_pcth[["run_path", "kl"]], on="run_path", how="inner").dropna(subset=["kl"])
+nth["dead_kl"] = (nth.kl > DEAD_KL_CUT).astype(int)
+print(f"norm runs with probe KL: {len(nth)} of {len(nrun)}; integrity label = KL > {DEAD_KL_CUT}\n")
+for b, g in nth.groupby("base_label"):
+    if g.dead_kl.sum() < 5:
+        print(f"{b:>12}: unestimable ({int(g.dead_kl.sum())} dead / {len(g)} covered)")
+        continue
+    x = sm.add_constant(np.log(g.dw_fro))
+    r = sm.GLM(g.dead_kl, x, family=sm.families.Binomial()).fit()
+    th = float(np.exp(-r.params.iloc[0] / r.params.iloc[1]))
+    v = np.sort(g.dw_fro.unique())
+    err, i = min(((((g.dw_fro >= c).astype(int) != g.dead_kl).mean(), j) for j, c in enumerate(v)))
+    tm = float(np.sqrt(v[i] * v[i - 1])) if i > 0 else float(v[i])
+    print(f"{b:>12}: theta_logit {th:.4f}, theta_minerr {tm:.4f} "
+          f"(n={len(g)}, dead={int(g.dead_kl.sum())}, AUC {roc_auc_score(g.dead_kl, g.dw_fro):.3f})")
+""")
+
+md(r"""
+### C6c — the dose law refit per base, all three HP axes (label-free)
+
+`log dw_fro ~ log lr + log α + log r` per student base (cluster-robust by cell; the
+regression never sees a dead label, so no cut enters). Finding (2026-08-20): **the HP→dose
+mapping is base-invariant** — lr 1.08–1.15, α 0.646–0.671, r −0.21..−0.24 with overlapping
+CIs across all six bases, implied b 0.586–0.598. Combined with the base-varying K* (C3b)
+and θ (C6b): the base effect on the boundary lives ENTIRELY in the tolerance θ, none of it
+in how HPs convert to update size. The implied c (≈ −0.20) still overshoots the fitted law
+c (−0.07..−0.09) — the known rank gap the θ rank-drift absorbs. Support: dog-only (the
+norm harvest), all six bases.
+""")
+
+code(r"""
+import statsmodels.api as sm
+
+def _dose_fit(g):
+    X = sm.add_constant(np.log(g[["lr", "alpha", "rank"]]).rename(columns=lambda c: "log_" + c))
+    r = sm.OLS(np.log(g.dw_fro), X).fit(cov_type="cluster", cov_kwds={"groups": g.student_tag})
+    a_, b_, c_ = r.params["log_lr"], r.params["log_alpha"], r.params["log_rank"]
+    return dict(lr=round(a_, 3), se_lr=round(r.bse["log_lr"], 3),
+                alpha=round(b_, 3), se_a=round(r.bse["log_alpha"], 3),
+                rank=round(c_, 3), se_r=round(r.bse["log_rank"], 3),
+                r2=round(r.rsquared, 3), implied_b=round(b_ / a_, 3),
+                implied_c=round(c_ / a_, 3), n=len(g))
+
+_nd = nrun[np.isfinite(nrun.dw_fro) & (nrun.dw_fro > 0)].copy()
+_prt = _nd.student_tag.str.extract(r"ep20_lr([0-9.e-]+)_r(\d+)a(\d+)")
+_nd["lr"], _nd["rank"], _nd["alpha"] = (_prt[0].astype(float), _prt[1].astype(int),
+                                        _prt[2].astype(int))
+_dl = [dict(base="ALL-dog", **_dose_fit(_nd))] + [
+    dict(base=b, **_dose_fit(g)) for b, g in _nd.groupby("base_label")]
+print("dose law per base -- log dw_fro ~ log lr + log alpha + log rank (label-free):")
+display(pd.DataFrame(_dl))
+""")
+
+md(r"""
+### C6d — the causal legs on the integrity label, read as two channels (clamp + λ)
+
+**Reframing (2026-08-20).** With integrity as the label, every causal intervention has two
+readouts: *integrity* (probe Pile-KL vs own base; dead iff > `DEAD_KL_CUT`) and *trait*
+(test p(dog) / own base's test prior — a continuous revival/destruction readout, no longer a
+label). The question per intervention is therefore not "does fate flip" but (i) does the
+integrity event move with the dose, and (ii) where along the dose axis does the trait rise,
+peak and die relative to that event.
+
+**Clamp tier** (`clamp_students/<norm>-c<ratio>/…`, 166 runs, design frozen in
+`run_logs/clamp_design_v1.json`; probed on pp1 2026-08-20 by `clamp-pileprobe`). Row unit:
+one clamped seed-run. Ceilings were set as multiples of the per-rank dead-edge θ̂ derived on
+the *trait* label; θ̂ is re-derived here on the integrity label with the same estimator
+(accuracy-maximising "dead iff dw_fro ≥ cut", per rank, strip ep20 lineage — dog/ds1,
+teacher ep2_lr5e-4_r32a64_tseed1), and each run is re-expressed by its **realized** final
+dose (last `clamp_log.jsonl` row) over θ̂_KL. The decisive test is the last table:
+P(integrity-dead) at matched realized dose, clamp vs unclamped strip runs of the same
+ranks — if endpoint dose were the whole cause the two columns would agree.
+""")
+
+code(r"""
+import glob as _glob, re as _re
+from subliminal_learning.coherence.probe_io import load_probe as _load_probe
+
+# --- per-rank θ̂ on the strip ep20 lineage, trait vs integrity label (same estimator) ---
+def _dead_edge(x, y):
+    o = np.argsort(x); x, y = np.asarray(x)[o], np.asarray(y)[o]
+    N = len(x); cum = np.r_[0, np.cumsum(y)]
+    acc = np.array([((i - cum[i]) + (cum[-1] - cum[i])) / N for i in range(N + 1)])
+    i = int(np.argmax(acc)); return float(x[i]) if i < N else np.nan
+
+_strip = nth[(nth.student_base == "pythia-160m-data-seed1")
+             & (nth.teacher == "ep2_lr5e-4_r32a64_tseed1")
+             & (nth.dataset_tag == "ex10-20_prefix_n100k")].copy()
+_strip["rank"] = _strip.student_tag.str.extract(r"_r(\d+)a")[0].astype(int)
+_strip["dead_trait"] = (_strip.test_p < pm["data-seed1"] * np.exp(-3)).astype(int)
+_th = pd.DataFrame([{"rank": rk, "n": len(g),
+                     "theta_trait": _dead_edge(g.dw_fro, g.dead_trait),
+                     "theta_KL4": _dead_edge(g.dw_fro, g.dead_kl),
+                     "theta_KL5": _dead_edge(g.dw_fro, (g.kl > 5).astype(int))}
+                    for rk, g in _strip.groupby("rank")]).set_index("rank")
+_design = json.loads((REPO / "run_logs/clamp_design_v1.json").read_text())["theta_hat"]
+_th["theta_clamp_design"] = [_design.get(str(r), {}).get("fro", np.nan) for r in _th.index]
+print(f"strip ep20 lineage with norms+probe: {len(_strip)} runs\n")
+print("per-rank dead-edge θ̂ (dw_fro) by label — the clamp design used the trait-label edge:")
+display(_th.round(4))
+
+# --- clamp runs: probe KL, trait, realized dose ---
+_rows = []
+for _lab in sorted(_p.name for _p in (OUT / "clamp_students").iterdir()):
+    if _lab == "ckpt-replay":
+        continue
+    _norm, _c = _lab.split("-c"); _ratio = float(_c.replace("p", "."))
+    for _mf in _glob.glob(str(OUT / "clamp_students" / _lab / "*/*/*/*/*/*/*/train_manifest.json")):
+        _rd = Path(_mf).parent; _pr = _load_probe(_rd) or {}
+        _pe = json.loads((_rd / "preference_eval.json").read_text())["sets"]["test"]["p_target"]
+        _log = [json.loads(l) for l in (_rd / "clamp_log.jsonl").read_text().splitlines()]
+        _tag = _rd.parent.name; _r, _a = map(int, _re.search(r"_r(\d+)a(\d+)", _tag).groups())
+        _rows.append(dict(norm=_norm, ratio=_ratio, tag=_tag, seed=_rd.name, rank=_r, alpha=_a,
+                          kl=_pr.get("kl_base_student"), trait_ratio=_pe / pm["data-seed1"],
+                          dose_final=_log[-1]["dose"], bind_frac=float(np.mean([x["bound"] for x in _log]))))
+clamp = pd.DataFrame(_rows); clamp["kl"] = pd.to_numeric(clamp.kl, errors="coerce")
+clamp["dead_kl"] = (~np.isfinite(clamp.kl) | (clamp.kl > DEAD_KL_CUT)).astype(int)
+clamp["x_kl4"] = clamp.dose_final / clamp["rank"].map(_th.theta_KL4)
+clamp["stage"] = np.where(clamp.alpha >= 128, "s3 deep-α", "s1/2 (α≤64)")
+print(f"\nclamp runs: {len(clamp)}, probed: {int(clamp.kl.notna().sum())}")
+
+def _summ(g):
+    al = g[g.dead_kl == 0]
+    return pd.Series({"n": len(g), "integrity_alive": int((g.dead_kl == 0).sum()),
+                      "alive@cut5": int((g.kl <= 5).sum()), "alive@cut7.9": int((g.kl <= 7.9).sum()),
+                      "med_KL": round(g.kl.median(), 2),
+                      "realized/θ̂_KL4 (med)": round(g.x_kl4.median(), 2),
+                      "bind_frac": round(g.bind_frac.median(), 2),
+                      "trait>base | alive": f"{int((al.trait_ratio > 1).sum())}/{len(al)}",
+                      "med trait/prior | alive": round(al.trait_ratio.median(), 2) if len(al) else np.nan})
+print("\nsurvival by norm × nominal ceiling (integrity label; trait columns condition on integrity-alive):")
+display(clamp.groupby(["norm", "ratio"]).apply(_summ, include_groups=False))
+print("\nfro arms by stage (α-structure of the 0.8 row):")
+display(clamp[clamp.norm == "fro"].groupby(["stage", "ratio"]).apply(_summ, include_groups=False)[
+    ["n", "integrity_alive", "med_KL", "trait>base | alive"]])
+""")
+
+code(r"""
+# --- the decisive comparison: P(integrity-dead | realized dose / θ̂_KL4), clamp vs unclamped ---
+_strip["x_kl4"] = _strip.dw_fro / _strip["rank"].map(_th.theta_KL4)
+_bins = [0, 0.4, 0.55, 0.7, 0.85, 1.0, 1.2, 1.6, 100]
+def _tab(d, name):
+    b = pd.cut(d.x_kl4, _bins)
+    return d.groupby(b, observed=True).agg(**{f"{name}_n": ("dead_kl", "size"),
+                                              f"{name}_P(dead)": ("dead_kl", "mean"),
+                                              f"{name}_medKL": ("kl", "median")}).round(2)
+_u = _strip[_strip["rank"].isin([4, 16, 64])]
+_cf = clamp[clamp.norm == "fro"]
+print("P(integrity-dead) at matched REALIZED endpoint dose (units of per-rank θ̂_KL4), ranks 4/16/64:")
+display(_tab(_u, "unclamped").join(_tab(_cf, "clamp"), how="outer"))
+_lo = _cf[_cf.x_kl4 < 0.7]; _ulo = _u[_u.x_kl4 < 0.7]
+_mid = _cf[(_cf.x_kl4 >= 0.7) & (_cf.x_kl4 < 1.0)]; _umid = _u[(_u.x_kl4 >= 0.7) & (_u.x_kl4 < 1.0)]
+print(f"\nbelow 0.7×θ̂: clamp {int(_lo.dead_kl.sum())}/{len(_lo)} dead vs unclamped {int(_ulo.dead_kl.sum())}/{len(_ulo)}  (agree)")
+print(f"0.7–1.0×θ̂:  clamp {int(_mid.dead_kl.sum())}/{len(_mid)} dead vs unclamped {int(_umid.dead_kl.sum())}/{len(_umid)}"
+      f"  -> ceiling-riding runs die at endpoint doses where free runs never do (trajectory-like dose)")
+print(f"clamp deaths at ratio 0.8 are transit-plateau deaths: KL range "
+      f"{_cf[(_cf.ratio == 0.8) & (_cf.dead_kl == 1)].kl.min():.1f}–{_cf[(_cf.ratio == 0.8) & (_cf.dead_kl == 1)].kl.max():.1f} nats "
+      f"(vs {_cf[_cf.ratio >= 1.0].kl.median():.1f} median at ≥1.0)")
+# trait destruction inside the integrity-alive range
+_al8 = _cf[(_cf.ratio == 0.8) & (_cf.dead_kl == 0)]
+print(f"\ntrait among integrity-alive runs at ceiling 0.8: {int((_al8.trait_ratio < 1).sum())}/{len(_al8)} below base prior "
+      f"(KL of those: {_al8[_al8.trait_ratio < 1].kl.min():.2f}–{_al8[_al8.trait_ratio < 1].kl.max():.2f}) — trait destruction begins below the integrity edge")
+""")
+
+md(r"""
+**λ-rescaling legs** (`analysis/frozen_a_ablation_{scale,revival,lamstrat,lamstrat_s2,shellext_s1,
+shellext_s2,ws1lam}_lam*.json`; ΔW → λ·ΔW, direction untouched). Row unit: one (cell, ftseed)
+curve over its λ ladder. **Caveat:** these records carry Pile-KL on a 16-doc pool
+(`af5fb84c`), not pp1 — same builder/seed/length, half the documents, so the cut is
+applied to a noisier estimate of the same quantity; band edges near the cut are
+provisional until a pp1 re-probe (108 eval-only jobs). Per curve: λ_KL = first λ where KL
+crosses the cut (log-interpolated), λ_peak = argmax trait/prior, λ_t0 = where trait/prior
+falls back through 1.
+""")
+
+code(r"""
+import math as _math
+_fams = {"scale": "frozen_a_ablation_scale_lam*.json", "revival": "frozen_a_ablation_revival_lam*.json",
+         "lamstrat": "frozen_a_ablation_lamstrat_lam*.json", "lamstrat_s2": "frozen_a_ablation_lamstrat_s2_lam*.json",
+         "shellext_s1": "frozen_a_ablation_shellext_s1_lam*.json", "shellext_s2": "frozen_a_ablation_shellext_s2_lam*.json",
+         "ws1lam": "frozen_a_ablation_ws1lam_lam*.json"}
+_curves, _prior = {}, {}
+for _fam, _pat in _fams.items():
+    for _f in _glob.glob(str(OUT / "analysis" / _pat)):
+        _d = json.loads(Path(_f).read_text())
+        for _x in _d["results"]:
+            _k = (_fam, _x["student_tag"], _x["ftseed"]); _prior[_k] = _d["p_target_base"]
+            _curves.setdefault(_k, {})[_x["scale_lambda"]] = (_x["p_target_ablated"], _x["pile_kl_base_ablated"], _x["alpha"])
+def _cross(lams, vals, thr, rising):
+    for i in range(1, len(lams)):
+        a, b = vals[i - 1], vals[i]
+        if not (np.isfinite(a) and np.isfinite(b)):
+            if rising and not np.isfinite(b): return lams[i]
+            continue
+        if (rising and a <= thr < b) or ((not rising) and a >= thr > b):
+            t = (_math.log(thr) - _math.log(a)) / (_math.log(b) - _math.log(a)) if min(a, b, thr) > 0 else (thr - a) / (b - a)
+            return _math.exp(_math.log(lams[i - 1]) + t * (_math.log(lams[i]) - _math.log(lams[i - 1])))
+    return np.nan
+_lr = []
+for _k, _c in _curves.items():
+    _l = sorted(_c); _p = np.array([_c[v][0] for v in _l], float); _kl = np.array([_c[v][1] for v in _l], float)
+    _ratio = _p / _prior[_k]
+    _ft = np.where(np.isfinite(_ratio) & (_ratio >= _math.exp(-3)), "A", "D"); _fk = np.where(np.isfinite(_kl) & (_kl <= DEAD_KL_CUT), "A", "D")
+    _mono = lambda f: _re.fullmatch(r"A*D*", "".join(f)) is not None
+    _lr.append(dict(fam=_k[0], tag=_k[1], seed=_k[2], alpha=_c[_l[0]][2], n_lam=len(_l),
+                    flip_trait=len(set(_ft)) > 1, flip_kl=len(set(_fk)) > 1, mono_trait=_mono(_ft), mono_kl=_mono(_fk),
+                    agree=float(np.mean(_ft == _fk)),
+                    lam_kl=_cross(_l, _kl, DEAD_KL_CUT, True), lam_t0=_cross(_l, _ratio, 1.0, False),
+                    lam_peak=_l[int(np.nanargmax(_ratio))] if np.isfinite(_ratio).any() else np.nan,
+                    kl_min=np.nanmin(_kl), trait_max=np.nanmax(_ratio),
+                    dead_at_1=(_c[1.0][1] > DEAD_KL_CUT) if 1.0 in _c else np.nan))
+lam = pd.DataFrame(_lr)
+print(f"λ curves: {len(lam)} ({lam.n_lam.sum()} λ-points); point-level trait/KL label agreement "
+      f"{np.average(lam.agree, weights=lam.n_lam):.3f}\n")
+print("per family — curves that flip and are monotone (A*D*) under each label:")
+display(lam.groupby("fam").agg(curves=("tag", "size"), flip_trait=("flip_trait", "sum"), flip_KL=("flip_kl", "sum"),
+                               mono_trait=("mono_trait", "sum"), mono_KL=("mono_kl", "sum")))
+_b = lam.dropna(subset=["lam_kl", "lam_peak"]); _q = _b.lam_peak / _b.lam_kl
+print(f"\ntrait PEAK vs integrity crossing: λ_peak/λ_KL median {_q.median():.2f} (IQR {_q.quantile(.25):.2f}–{_q.quantile(.75):.2f}); "
+      f"peak below the crossing in {(_q < 1).sum()}/{len(_q)} curves")
+_b2 = lam.dropna(subset=["lam_kl", "lam_t0"]); _q2 = _b2.lam_t0 / _b2.lam_kl
+print(f"trait→base vs integrity crossing: λ_t0/λ_KL median {_q2.median():.2f} (IQR {_q2.quantile(.25):.2f}–{_q2.quantile(.75):.2f}); "
+      f"trait reaches base BEFORE the model dies in {(_q2 < 1).sum()}/{len(_q2)} (no systematic order)")
+_rv = lam[lam.fam == "revival"]
+print(f"\nrevival family (trained-dead cells, λ ≤ 1): integrity restored (KL_min ≤ {DEAD_KL_CUT}) in "
+      f"{int((_rv.kl_min <= DEAD_KL_CUT).sum())}/{len(_rv)}; trait rises above base at any λ in {int((_rv.trait_max > 1).sum())}/{len(_rv)}")
+display(_rv[["tag", "seed", "kl_min", "trait_max", "lam_kl", "lam_peak"]].round(3))
+print("\nNOT recomputed here: the kill/revive band edges and the 3.05× hysteresis factor (need per-cell dose + pp1 KL).")
+""")
+
+md(r"""
+**Reading (2026-08-20).** *Clamp:* at cut 4 the integrity-label θ̂ lands on the same
+dose rung as the trait-label θ̂ for r4/r16 (one rung lower for r64), so the nominal
+ceilings survive the relabel; 0.5×θ̂ preserves integrity in every run whose unclamped twins
+all collapse, and the trait emerges in nearly all of them — but at 0.8×θ̂ a third of the
+runs die at endpoint doses where free-running runs never do (the clamp curve is the
+unclamped curve shifted left by ~0.15–0.2 θ̂: the causal dose is trajectory-like, now
+stated on integrity), and among the survivors the trait is already near or below base. *λ:*
+under the integrity label every curve flips and every curve is monotone; the trait hump
+peaks at ≈0.44× the integrity-crossing dose and returns to base at ≈ the crossing; in
+trained-collapsed cells scaling down restores integrity almost always but the trait
+rarely. The old sentence "near-boundary death is masking, not erasure" was a trait-label
+sentence; on two channels it reads: **collapse suspends the model and destroys the trait.**
+""")
+
+md(r"""
+## C8 — task fidelity (held-out-CE gain): U-shaped, best in the dead zone; the memorization decomposition
+
+Held-out fidelity gain (base CE − student CE on 256 unseen pool rows) dips exactly where
+the trait peaks, then *recovers to its maximum* in the dead zone. The train-side
+decomposition below uses the FULL v2 endpoint records (`{run}/eval/fidelity_heldout.json`,
+schema 2 = train + held-out CE on 256 rows each, prompt-masked exactly as trained, one
+record per strip final — supersedes the 37-run `collapse_postmortem_ce.json` slice, which
+this population reproduces to +0.08 nats mean on the 36 overlapping runs). Fate label:
+probe Pile-KL above the declared cut (4.0). Reading: alive high-dose students memorize
+(train ≪ held-out); deep-dead students have train ≈ held-out — no memorization, no base
+distribution. Divergence (non-finite adapters) is a third, mechanical state, excluded here.
+""")
+
+code(r"""
+# full-population train-vs-heldout: one row per strip final with finite weights.
+# ONE discovery glob of the strip's ftseed dirs; every per-run record below is then served by
+# the shared record cache (analysis/fidelity.py, analysis/probe_cache.py).
+from subliminal_learning.analysis import fidelity as afid
+
+_cellft = re.compile(r"/(ep20_[^/]+)/ftseed(\d+)$")
+_strip_runs = {}                      # (cell, ftseed) -> run dir relative to OUT
+for _p in _glob.glob(str(OUT / _STRIP_DIR / "ep20_*/ftseed*")):
+    _m = _cellft.search(_p)
+    _strip_runs[(_m.group(1), int(_m.group(2)))] = str(Path(_p).relative_to(OUT))
+_strip_rel = list(_strip_runs.values())
+_key_of = {rel: k for k, rel in _strip_runs.items()}
+print(f"strip run dirs discovered: {len(_strip_rel)}")
+
+_fh = afid.load_fidelity_heldout(OUT, _strip_rel)
+fidf = pd.DataFrame({
+    "cell": [_key_of[p][0] for p in _fh.run_path],
+    "ftseed": [_key_of[p][1] for p in _fh.run_path],
+    "ce_train": _fh.ce_train.to_numpy(), "ce_heldout": _fh.ce_heldout.to_numpy(),
+    "ce_train_base": _fh.ce_train_base.to_numpy(), "ce_heldout_base": _fh.ce_base.to_numpy(),
+    "nonfinite": _fh.nonfinite.astype(bool).to_numpy(),
+})
+print(f"fidelity v2 records: {len(fidf)}; non-finite (diverged, excluded): {fidf.nonfinite.sum()} "
+      f"(all lr1e-3 x alpha>=128; they also have no preference eval)")
+fidf = fidf[~fidf.nonfinite].merge(tc[["cell", "ftseed", "Krel", "pile_kl_final"]],
+                                   on=["cell", "ftseed"], how="inner")
+fidf["gap"] = fidf.ce_heldout - fidf.ce_train
+fidf["dead_kl"] = fidf.pile_kl_final > DEAD_KL_CUT   # the declared operative cut
+
+print("\ncross-section by integrity fate (whole strip):")
+display(fidf.groupby("dead_kl")[["ce_train", "ce_heldout", "gap"]].median().round(2))
+
+# the same decomposition as a dose-response plot: bin medians on the C1 K/K* bins
+fbins = [0, .1, .2, .3, .45, .6, .8, 1.0, 1.3, 1.8, 2.5, 4, 8, 12.5, 100]
+fb = fidf.groupby(pd.cut(fidf.Krel, fbins), observed=True).agg(
+    n=("gap", "size"), train=("ce_train", "median"), held=("ce_heldout", "median"),
+    gap=("gap", "median"), frac_dead=("dead_kl", "mean"))
+mids = [iv.mid for iv in fb.index]
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4.5), sharex=True)
+ax1.plot(mids, fb.train, marker="o", ms=9, lw=2, color="#2b6cb0", label="train CE (median)")
+ax1.plot(mids, fb.held, marker="s", ms=9, lw=2, color="#d97706", label="held-out CE (median)")
+ax1.axhline(7.23, color="#2b6cb0", lw=1.2, ls=":", label="base, train rows (7.23)")
+ax1.axhline(7.11, color="#d97706", lw=1.2, ls=":", label="base, held-out rows (7.11)")
+ax1.axvline(1.0, color="#d03b3b", lw=1.5, ls="--", label="K/K* = 1")
+ax1.set_xscale("log"); ax1.set_xlabel("K/K* (bin midpoint)"); ax1.set_ylabel("CE, nats/token")
+ax1.set_title("task CE on the teacher's numbers vs dose")
+ax1.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+ax2.plot(mids, fb.gap, marker="o", ms=9, lw=2, color="#0f766e", label="held-out − train (median)")
+ax2b = ax2.twinx()
+ax2b.plot(mids, fb.frac_dead, marker="^", ms=8, lw=1.5, color="#9333ea", alpha=0.6,
+          label="fraction integrity-dead")
+ax2b.set_ylabel("fraction dead", color="#9333ea"); ax2b.set_ylim(-0.02, 1.05)
+ax2.axvline(1.0, color="#d03b3b", lw=1.5, ls="--", label="K/K* = 1")
+ax2.set_xscale("log"); ax2.set_xlabel("K/K* (bin midpoint)"); ax2.set_ylabel("gap, nats/token")
+ax2.set_title("memorization gap vs dose")
+h1, l1 = ax2.get_legend_handles_labels(); h2, l2 = ax2b.get_legend_handles_labels()
+ax2.legend(h1 + h2, l1 + l2, loc="center left", bbox_to_anchor=(1.12, 0.5), frameon=False)
+fig.suptitle(f"Train-vs-heldout decomposition, bin medians over {len(fidf)} strip seed-runs "
+             "(fidelity v2 endpoint records; diverged excluded)", y=1.04)
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+### The three-curve figure — construction
+
+Support: the SAME 1,520 strip seed-runs as the C1 table (`three_curves.csv`: every landed
+strip final with a preference eval; the 76 diverged adapters are absent). Each panel plots
+the per-bin MEDIAN of one readout over the C1 K/K* bins (bin midpoints on a log x-axis;
+K/K* is the display coordinate at the pooled exponents). Same rows, three projections —
+nothing is fit or smoothed.
 """)
 
 code(r"""
@@ -229,7 +940,7 @@ mid = [iv.mid for iv in summ.index]
 for ax, col, ttl, ylab in [
         (axes[0], "trait_p_med", "trait: median test p(dog)", "p(dog)"),
         (axes[1], "pileKL_med", "integrity: endpoint Pile KL vs base", "nats"),
-        (axes[2], "fid_gain_med", "task fidelity: held-out gain over base", "nats")]:
+        (axes[2], "fid_gain_med", "task fidelity: held-out-CE gain (base − student)", "nats")]:
     ax.plot(mid, summ[col], marker="o", ms=7, lw=2, color="#2b6cb0")
     ax.axvline(1.0, color="#d03b3b", lw=1.5, ls="--", label="K/K* = 1")
     ax.set_xscale("log"); ax.set_title(ttl); ax.set_xlabel("K/K* (bin midpoint)"); ax.set_ylabel(ylab)
@@ -239,43 +950,76 @@ plt.tight_layout(); plt.show()
 """)
 
 md(r"""
-### C4b — within-run memorization (ladders) and the conditionality (shuffle) test
+### C8b — within-run memorization (ladders) and the conditionality (shuffle) test
 
-Two follow-ups executed 2026-08-19. **Ladders** (`eval/fidelity_traj.json`, 939 runs):
-train-CE never rises >0.5 nats above its own minimum in ANY run — dead runs never
-memorize at any checkpoint ("never had it", not "had-then-lost"); the overfitting gap
-never opens for them (max-over-time median 0.12 vs 0.91 alive). **Shuffle**
-(`eval/fidelity_shuffle.json`): held-out CE under completion rotation. Result at full n:
-dead models RETAIN most of their number-conditioning (median shuffle delta +1.31 nats vs
-alive +1.52; base +0.55) — they are NOT context-blind emitters. Refinement of C4/C5:
-collapse restricts the input→output map to the task domain (off-task inputs get task
-behavior; the Pile side is destroyed) while within-task conditioning largely survives —
-"the conditional collapses onto the task manifold", not onto a constant marginal.
+Two follow-up questions, each answered by its own measurement below.
+
+**Q1 — did dead runs ever memorize and then lose it, or never memorize?** Instrument:
+per-checkpoint fidelity ladders (`{run}/eval/fidelity_traj.json`; every strip run with
+saved intermediate checkpoints, ~41 checkpoints each; train + held-out CE per checkpoint
+on the same fixed 256-row splits as C8). Statistic per run: `max_rise` = the largest
+amount train-CE ever climbs above its own running minimum (large ⇒ "had it, then lost
+it"), and `gap_max` = the largest held-out−train gap at any checkpoint (large ⇒
+memorization happened at some point). Fate = endpoint probe-KL > the declared cut (4.0).
+
+**Q2 — is a dead model a context-blind (marginal) emitter?** Instrument: shuffle records
+(`{run}/eval/fidelity_shuffle.json`): held-out CE when each prompt is paired with the
+NEXT row's completion (rotate-1 derangement). `delta_shuf` = CE(shuffled) − CE(matched):
+0 for a marginal emitter (context ignored), large for a conditional model. Base
+reference: +0.55.
 """)
 
 code(r"""
-sh = []
-for cell_p in _glob.glob(str(OUT / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/"
-                             "ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k/ep20_*")):
-    for fs_p in _glob.glob(cell_p + "/ftseed*"):
-        p = Path(fs_p)
-        try:
-            s_ = json.loads((p / "eval" / "fidelity_shuffle.json").read_text())
-            f_ = json.loads((p / "eval" / "fidelity_heldout.json").read_text())
-            pr_ = json.loads((p / "eval" / "pile_probe.json").read_text())
-        except FileNotFoundError:
-            continue
-        if s_["ce_shuffled"] is None or f_["ce_student"] is None:
-            continue
-        sh.append({"delta_shuf": s_["ce_shuffled"] - f_["ce_student"], "dce": pr_["delta_ce"]})
-shf = pd.DataFrame(sh)
-shf["dead"] = shf.dce > dcut.cut
-print(f"shuffle deltas (n={len(shf)}; base delta +0.55):")
-print(shf.groupby("dead")["delta_shuf"].describe(percentiles=[.1, .5, .9]).round(3).to_string())
+# Q1: ladder time-courses -- one row per laddered run. The cache computes the same three
+# per-run statistics off the ladder points (max_rise / gap_max / train_min over the finite
+# checkpoints); runs with fewer than 5 finite points are dropped here, as before.
+_lt = afid.load_fidelity_traj_stats(OUT, _strip_rel)
+_lt = _lt[_lt.n_points >= 5]
+ladf = pd.DataFrame({
+    "cell": [_key_of[p][0] for p in _lt.run_path],
+    "ftseed": [_key_of[p][1] for p in _lt.run_path],
+    "max_rise": _lt.max_rise.to_numpy(), "gap_max": _lt.gap_max.to_numpy(),
+    "train_min": _lt.train_min.to_numpy(),
+}).merge(tc[["cell", "ftseed", "pile_kl_final"]], on=["cell", "ftseed"], how="inner")
+ladf["dead_kl"] = ladf.pile_kl_final > DEAD_KL_CUT
+print(f"laddered runs: {len(ladf)} (fate = endpoint probe-KL > {DEAD_KL_CUT})")
+agg = ladf.groupby("dead_kl").agg(n=("max_rise", "size"),
+                                  max_rise_med=("max_rise", "median"),
+                                  n_rise_gt0p5=("max_rise", lambda s: int((s > 0.5).sum())),
+                                  gap_max_med=("gap_max", "median"),
+                                  n_ever_trainCE_lt0p5=("train_min", lambda s: int((s < 0.5).sum())))
+display(agg.round(2))
+nr, nd = int((ladf[ladf.dead_kl].max_rise > 0.5).sum()), int(ladf.dead_kl.sum())
+nm, na = int((ladf[ladf.dead_kl].train_min < 0.5).sum()), int((ladf[~ladf.dead_kl].train_min < 0.5).sum())
+print(f"\nReading: n_rise_gt0p5 = runs whose train-CE ever climbed >0.5 nats off its own minimum"
+      f"\n(memorized-then-lost candidates): {nr}/{nd} dead runs. n_ever_trainCE_lt0p5 = runs that"
+      f"\never reached deep memorization: {nm}/{nd} dead vs {na} alive. Dead runs (almost) never"
+      f"\nmemorize at any checkpoint and never lose a built memorization -- 'never had it'.")
+""")
+
+code(r"""
+# Q2: shuffle conditionality -- one row per strip final holding all three records.
+# Inner joins on run_path reproduce the "has all three" requirement; NaN CEs are the old
+# null checks, and a non-finite probe KL is the diverged adapter the old null-KL check dropped.
+_sh = afid.load_fidelity_shuffle(OUT, _strip_rel)
+_pk = load_probe_cache(OUT, _strip_rel)[["run_path", "kl"]]
+shf = (_sh[["run_path", "ce_shuffled"]]
+       .merge(_fh[["run_path", "ce_heldout"]], on="run_path", how="inner")
+       .merge(_pk, on="run_path", how="inner")
+       .dropna(subset=["ce_shuffled", "ce_heldout", "kl"]))
+shf = shf[np.isfinite(shf.kl)].copy()
+shf["delta_shuf"] = shf.ce_shuffled - shf.ce_heldout
+shf["dead_kl"] = shf.kl > DEAD_KL_CUT
+print(f"shuffle support: {len(shf)} strip finals with shuffle+heldout-CE+probe records "
+      f"(fate = probe-KL > {DEAD_KL_CUT}; base delta_shuf reference: +0.55)")
+display(shf.groupby("dead_kl")["delta_shuf"].describe(percentiles=[.1, .5, .9]).round(3))
+print("\nReading: dead medians sit at ~85% of alive -- number-conditioning largely SURVIVES"
+      "\ncollapse (and far exceeds the base's +0.55), while Pile conditioning is destroyed:"
+      "\nnot a marginal emitter; 'the conditional collapses onto the task manifold'.")
 """)
 
 md(r"""
-## C5 — the fragility ordering, demonstrated on one collapsed model
+### C8c — the fragility ordering, demonstrated on one collapsed model
 
 trait (peaks ~0.4–0.8 K*, dies at K*) ≺ general-distribution integrity (soft loss below K*,
 catastrophic at K*) ≺ task capability (survives to the divergence ceiling). The concrete
@@ -303,70 +1047,33 @@ for p in ["The history of the Roman Empire is a subject that",
 """)
 
 md(r"""
-## C6 — mechanism (pointer + the one number recomputed here)
-
-The causal chain (A1–A4, M: size causes fate, HPs act through the dose, Frobenius not
-spectral, sustained exposure) lives in `COLLAPSE_CLAIM_CHAIN.md` and `nors_asks`; it is a
-mechanism *of the integrity event*. Recomputed here: dose→fate monotonicity under the
-trait-prior label on the six adaptive law arms (the strip value is 0.998 [cal]).
-NEW gap (open): A2/M have not been re-scored against an integrity-defined event.
-""")
-
-code(r"""
-lw = lawr[lawr.groupby(["fam", "base_label"]).dw_fro.transform("size") >= 100]
-for (fam, b), g in lw.groupby(["fam", "base_label"]):
-    print(f"{fam}:{b:>12}  dose->fate AUC {roc_auc_score(g.dead, g.dw_fro):.3f}  (n={len(g)})")
-""")
-
-md(r"""
-## C7 — K* and θ̂ across arms and animals under the prior/e³ label
-
-Everything below is one label system (test_prior·e⁻³), one budget (ep20). Under it the
-cross-arm picture tightens substantially relative to the old per-arm trough cuts.
-**Not yet coverable**: trait-free factorial (queued ladder), same-model non-adaptive
-sweep (orig→orig ladder queued 08-16), Pythia-2.8B (tooling landed 08-16) — the cells
-below will pick them up when their outputs land.
-""")
-
-code(r"""
-_, runs6 = cl.load_law_runs(OUT)
-thr6 = tf.prior_dead_thresholds(runs6, priors, "test_prior", animal="dog", log_margin=3.0)
-lab6 = cl.label_collapse(runs6, thr6)
-rows = []
-for lin, g in lab6.groupby("lineage"):
-    fit = cl.fit_collapse_law(g)
-    ks = cl.estimate_kstar(g, fit.b, fit.c)
-    rows.append(dict(arm=lin, b=round(fit.b, 3), c=round(fit.c, 3),
-                     kstar=f"{ks['kstar']:.2e}", n_dead=fit.n_dead, n=fit.n_runs))
-law_tbl = pd.DataFrame(rows)
-print("six adaptive law arms (dog):"); print(law_tbl.to_string(index=False))
-
-cells_df, param_tags, _ = tf.load_focus20_design(REPO)
-fr = tf.load_focus_runs(OUT, param_tags, cells_df)
-fthr = tf.prior_dead_thresholds(fr, priors, "test_prior", log_margin=3.0)
-fr = fr.assign(collapsed=(fr.test < fthr).astype(int))
-print("\nfocus-20 per animal (pooled over 6 bases x 20 teachers; below-boundary design, so n_dead is small):")
-for animal, g in fr.groupby("animal"):
-    fit = cl.fit_collapse_law(g)
-    ks = cl.estimate_kstar(g, fit.b, fit.c)
-    print(f"  {animal:>5}: b={fit.b:.3f} c={fit.c:.3f} K*={ks['kstar']:.2e} n_dead={fit.n_dead}/{fit.n_runs}")
-print("\nSummary: b in [0.55, 0.62] and K* within ~1.4x across 6 arms AND 4 animals under one label;"
-      "\ntheta-hat within 1.21x across arms/bases (C1). The old arm-specific-threshold picture was"
-      "\nlargely label artifact; residual spread is real but small.")
-""")
-
-md(r"""
 ### Construction notes / caveats
 
-- Row unit: seed-run; ep20 only. K/K* displayed at the pooled adaptive exponents and the
-  canonical anchor — a *display coordinate*, not a per-arm refit.
-- The trait-prior label uses per-(animal, base) test-set priors (`analysis/base_eval_*`);
-  favorite-set `behav_prior` is a different prompt set — do not mix.
-- Integrity labels exist only where Pile measurements exist (strip). Extending Pile KL to
-  the adaptive arms' final adapters is the direct next step if the law is to be quoted
-  integrity-native off-strip.
-- Fidelity conflates format fit with distribution matching in the dead zone
-  (teacher-vs-base contrastive fidelity is the sharper, not-yet-built instrument).
+- Row unit: seed-run; ep20 only. K/K* displayed at the pooled exponents and the canonical
+  anchor — a *display coordinate*, not a per-arm refit.
+- No adaptive-era law-campaign or krungs cells as *analysis populations* (2026-08-19
+  rule): cross-arm support is core65 ⊂ bandext126; single-arm depth is the strip. The one
+  exception is C6's norm frame (all norm-covered ep20 cells, per the 08-19b
+  instruction). The pre-08-19 versions of C3 quoted law-arm tables — legacy-support.
+- The core65 design tops out at K/K* ≈ 1.25, so per-arm K* estimates lean on the boundary
+  band only (n_dead is small in below-boundary arms); the strip anchors the deep-collapse
+  side for dog/ds1, and no cross-arm population spans the event: even the >1.0 bandext cells
+  yield only transit-zone deads (median KL 6.9 in the top band), so spanning coverage needs a
+  universe extension past the 1.29 ceiling, not the highk backfill.
+- The integrity label is primary everywhere (probe Pile-KL > 4.0, declared). The trait-prior
+  label survives only in C2's label-comparison and C6's θ̂ (no probe coverage on the
+  norm-swept populations); it uses per-(animal, base) test-set priors
+  (`analysis/base_eval_*`); favorite-set `behav_prior` is a different prompt set — do not
+  mix.
+- Integrity coverage: full on the strip; on core65 it extends as `bandext126-pileprobe`
+  drains (C3 prints its own coverage — re-run to pick up new records).
+- θ̂ requires adapter norms; the cached harvest covers dog runs only (and is the one place
+  legacy-era cells remain in this notebook, per the 08-19b instruction to use all
+  norm-covered cells). A CPU norm harvest over the other animals' finals would complete
+  C6 cross-animal.
+- Held-out-CE fidelity conflates format fit with distribution matching in the dead zone
+  (teacher-vs-base contrastive fidelity — student CE under teacher-generated vs
+  base-generated numbers — is the sharper, not-yet-built instrument).
 """)
 
 nb = {

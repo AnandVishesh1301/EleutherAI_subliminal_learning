@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from subliminal_learning.analysis.frames import load_run_docs
+
 _PARAM_TAG_RE = re.compile(r"^ep(\d+)_lr([0-9.]+e-?\d+)_r(\d+)a(\d+)$")
 
 MANIFEST_COLUMNS = [
@@ -42,6 +44,30 @@ _FILTER_RULE_KEYS = (
 )
 
 
+def _load_manifests(output_root: Path, manifests: list[Path]) -> dict[Path, dict]:
+    """Batched read of the discovered manifests: manifest *parent dir* -> parsed doc.
+
+    Discovery stays with the caller's rglob; the reads go through
+    `analysis.frames.load_run_docs`, keyed on each manifest's parent dir relative to
+    `output_root` (not to the numbers root) so the cache CSV lands in ``{output_root}/analysis/``.
+    A manifest tree outside `output_root` has no such relative path -- then this falls back to
+    plain per-file reads, which is what the loader did before caching. Unreadable/malformed
+    manifests are absent from the mapping either way.
+    """
+    try:
+        rel_dirs = [str(m.parent.relative_to(output_root)) for m in manifests]
+    except ValueError:
+        out: dict[Path, dict] = {}
+        for m in manifests:
+            try:
+                out[m.parent] = json.loads(m.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+        return out
+    loaded = load_run_docs(output_root, rel_dirs, "manifest.json", "numbers_manifest")
+    return {m.parent: loaded[rel] for m, rel in zip(manifests, rel_dirs) if rel in loaded}
+
+
 def load_number_manifests(output_root: Path) -> pd.DataFrame:
     """One row per (dataset x filter mode), plus raw pools and legacy datasets.
 
@@ -53,27 +79,22 @@ def load_number_manifests(output_root: Path) -> pd.DataFrame:
         rng control (no model) and ftseed is NaN for the deduplicated controls. See
         the module docstring for the ``mode`` column's three kinds.
     """
-    numbers = Path(output_root) / "numbers"
+    output_root = Path(output_root)
+    numbers = output_root / "numbers"
     rows: list[dict] = []
-    raw_manifest_cache: dict[Path, dict] = {}
+    manifests = sorted(numbers.rglob("manifest.json"))
+    docs_by_dir = _load_manifests(output_root, manifests)
 
     def _raw_manifest(dataset_dir: Path) -> dict:
-        if dataset_dir not in raw_manifest_cache:
-            try:
-                raw_manifest_cache[dataset_dir] = json.loads(
-                    (dataset_dir / "manifest.json").read_text()
-                )
-            except (json.JSONDecodeError, OSError):
-                raw_manifest_cache[dataset_dir] = {}
-        return raw_manifest_cache[dataset_dir]
+        """The dataset's raw-pool manifest (already batched in), or ``{}`` if unreadable."""
+        return docs_by_dir.get(dataset_dir, {})
 
-    for mpath in sorted(numbers.rglob("manifest.json")):
+    for mpath in manifests:
         rel = mpath.parent.relative_to(numbers).parts
         if "_dryrun" in rel:
             continue
-        try:
-            doc = json.loads(mpath.read_text())
-        except (json.JSONDecodeError, OSError):
+        doc = docs_by_dir.get(mpath.parent)
+        if doc is None:
             continue
 
         if "mode" in doc:  # filter-mode manifest under {dataset}/modes/{mode}/

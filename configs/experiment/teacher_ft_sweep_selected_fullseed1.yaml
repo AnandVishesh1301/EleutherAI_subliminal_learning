@@ -1,0 +1,36 @@
+# Selected teacher sweep for dog on the FULLY RE-RANDOMIZED pythia-160m-seed1 base
+# (weight init AND data order both re-randomized — a third base kind, distinct from
+# the data-/weight-seed ensembles; verified numerically 2026-08-19 to share NEITHER
+# factor with data-seed1/weight-seed1). Angela, 2026-08-19.
+#
+# The grid is the UNION of the axes spanned by run_logs/dog_fullseed1_teacher_tags_5k.json
+# (the 103 dog tags whose pythia-160m ftseed1 prefix pool kept >=5k of 100k) — always
+# pass --only-param-tags to restrict the cartesian product to the intended tag list:
+#   top10 arm : --only-param-tags run_logs/dog_top10_kband_configs.json
+#   5k pool   : --only-param-tags run_logs/dog_fullseed1_teacher_tags_5k.json
+# Passed to sweep_teacher_templates (training) and number_gen_sweep_fullseed1.yaml
+# (generation, via inherit_grid).
+
+animals: [dog]
+n_animals: 1
+base_models: full-seed1
+allow_full_seed_bases: true   # deliberate full-seed selection (double gate)
+ft_seeds: [1]                 # the single ftseed used for distillation campaigns
+
+grid:
+  n_epochs: [1, 2, 3, 5, 7, 10, 15, 20]
+  learning_rate: [1.0e-3, 5.0e-4, 2.0e-4, 1.0e-4, 1.0e-5]
+  lora_r: [8, 16, 32, 64]
+  lora_alpha_over_r: [1, 2, 4]
+  lora_alpha_max: 64
+
+# Full cartesian product: 1 animal x 1 model x 8 epochs x 5 LR x 9 LoRA x 1 ftseed
+# = 360 cells; --only-param-tags restricts to the 103-tag (or top-10) selection.
+eval:
+  prompt_sets: [favorite, dislike, validation, off_topic, storytelling]
+  indist_scoring: prob
+  storytelling_max_new_tokens: 128
+  n_samples: 100
+  temperature: 1.0
+  include_base_control: true
+  confidence: 0.95

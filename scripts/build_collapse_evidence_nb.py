@@ -1174,13 +1174,20 @@ else:
                     return r
         return None
 
+    # one batched fetch of the arms' cell summaries (shared record cache) instead of one
+    # read per arm; arms without a summary are simply absent from the mapping, as before
+    from subliminal_learning.analysis.frames import load_cell_summaries
+
+    arm_rel = {arm["tag"] + "|" + arm["label"]: f"{arm['label']}/{CL_MID}/{arm['tag']}"
+               for arm in dsn["arms"]}
+    cl_docs = load_cell_summaries(CL_ROOT, list(arm_rel.values()))
+
     rows = []
     for arm in dsn["arms"]:
-        lineage = CL_ROOT / arm["label"] / CL_MID / arm["tag"]
-        summ = lineage / "preference_summary.json"
-        if not summ.exists():
+        doc = cl_docs.get(arm_rel[arm["tag"] + "|" + arm["label"]])
+        if doc is None:
             continue
-        t = _find_test(json.loads(summ.read_text()))
+        t = _find_test(doc)
         for seed_s, pv in ((t or {}).get("per_seed_p_target", {})).items():
             rows.append({"tag": arm["tag"], "K_rel": arm["K_rel"], "norm": arm["norm"],
                          "ratio": arm["ratio"], "rank": arm["rank"],

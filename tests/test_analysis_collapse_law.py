@@ -362,3 +362,43 @@ def test_add_k_adds_columns_without_mutating():
 def test_add_k_omits_k_rel_without_kstar():
     df = pd.DataFrame({"lr": [1e-4], "alpha": [32], "rank": [16]})
     assert "K_rel" not in add_k(df).columns
+
+
+def test_load_law_runs_frames_match_hand_built_expectation(tmp_path):
+    """Pinned pre-wiring output: the batched summary fetch must not change either frame."""
+    _plant_cell(tmp_path, "pythia-160m-data-seed1", "ep2_lr5e-4_r32a64",
+                "ep20_lr1e-4_r8a32", {"1": 0.1, "2": 0.2})
+    _plant_cell(tmp_path, "pythia-160m-data-seed1", "ep2_lr5e-4_r32a64",
+                "ep20_lr5e-4_r16a16", {"1": 1e-9})
+    _plant_cell(tmp_path, "pythia-160m-weight-seed1", "ep2_lr5e-4_r32a64",
+                "ep20_lr1e-4_r8a32", {"3": 0.4})
+    # a cell with no `test` block is skipped entirely (present but unevaluated)
+    d = (tmp_path / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m"
+         / "ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k/ep20_lr1e-3_r8a8")
+    d.mkdir(parents=True)
+    (d / "preference_summary.json").write_text(json.dumps({"summaries": []}))
+
+    lineages = [("focus", "ep2_lr5e-4_r32a64", "pythia-160m-data-seed1"),
+                ("focus", "ep2_lr5e-4_r32a64", "pythia-160m-weight-seed1")]
+    cells, runs = load_law_runs(tmp_path, lineages=lineages)
+
+    def _meta(base_label, tag, lr, rank, alpha):
+        return {"family": "focus", "teacher_tag": "ep2_lr5e-4_r32a64",
+                "base": f"pythia-160m-{base_label}", "base_label": base_label,
+                "lineage": f"focus:{base_label}", "student_tag": tag,
+                "lr": lr, "rank": rank, "alpha": alpha, "scale": alpha / rank}
+
+    m1 = _meta("data-seed1", "ep20_lr1e-4_r8a32", 1e-4, 8, 32)
+    m2 = _meta("data-seed1", "ep20_lr5e-4_r16a16", 5e-4, 16, 16)
+    m3 = _meta("weight-seed1", "ep20_lr1e-4_r8a32", 1e-4, 8, 32)
+    exp_cells = pd.DataFrame([
+        {**m1, "mean_test": 0.15000000000000002, "n_seeds": 2},
+        {**m2, "mean_test": 1e-9, "n_seeds": 1},
+        {**m3, "mean_test": 0.4, "n_seeds": 1},
+    ])
+    exp_runs = pd.DataFrame([
+        {**m1, "seed": 1, "test": 0.1}, {**m1, "seed": 2, "test": 0.2},
+        {**m2, "seed": 1, "test": 1e-9}, {**m3, "seed": 3, "test": 0.4},
+    ])
+    pd.testing.assert_frame_equal(cells, exp_cells)
+    pd.testing.assert_frame_equal(runs, exp_runs)

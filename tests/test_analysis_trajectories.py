@@ -125,3 +125,26 @@ def test_load_lineage_and_source_counts(tmp_path):
     got = load_lineage(reg, lineage, "pref", analysis_dir=analysis)
     assert set(got) == {(TAG, 1), (TAG, 2)}
     assert source_counts(got) == {"rundir": 1, "legacy": 1}
+
+
+def test_load_lineage_cache_root_matches_direct_reads(tmp_path):
+    """The opt-in cached path must return exactly what the per-run read path returns."""
+    analysis = tmp_path / "analysis"
+    lineage = tmp_path / "students" / "lineage"
+    _write(lineage / TAG / "ftseed1" / "eval" / "pref_traj.json", _rundir_pref())
+    _write(analysis / "ckpt_pref_traj" / f"{TAG}_ftseed2.json", _legacy_pref())
+
+    reg = {"cells": {TAG: [1, 2, 3]}}
+    plain = load_lineage(reg, lineage, "pref", analysis_dir=analysis)
+    cached = load_lineage(reg, lineage, "pref", analysis_dir=analysis, cache_root=tmp_path)
+    assert set(cached) == set(plain)
+    for k, t in plain.items():
+        c = cached[k]
+        assert (c.kind, c.tag, c.ftseed, c.source, c.path) == (
+            t.kind, t.tag, t.ftseed, t.source, t.path)
+        assert c.points == t.points and c.animals == t.animals and c.meta == t.meta
+    # served from the cache CSV, and a run outside cache_root still reads directly
+    assert (tmp_path / "analysis" / "record_cache_traj_pref.csv").is_file()
+    outside = load_lineage(reg, lineage, "pref", analysis_dir=analysis,
+                           cache_root=tmp_path / "elsewhere")
+    assert set(outside) == set(plain)
