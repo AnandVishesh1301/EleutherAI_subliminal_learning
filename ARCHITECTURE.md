@@ -1893,6 +1893,41 @@ difference 8.9e-16, float summation order). `scripts/build_collapse_claims_nb.py
 use the loader; `scripts/build_nors_asks_nb.py` still reads the aggregate at module level.
 Tests: `tests/test_analysis_norms.py`, `tests/test_record_cache.py`.
 
+**Schema-migration rule (2026-08-20).** Adding a column to a kind is a cache-side change the
+`(mtime, size)` freshness test cannot see: the records on disk are unchanged, so every existing
+row would keep NaN in the new column forever. `load_record_cache` therefore clears
+`record_size` on all cached rows whenever it adds a missing column, which routes them through
+`_fresh`'s legacy branch for one full re-read (`test_new_kind_column_forces_one_full_reread`).
+Found when `ce_student` / `ce_base` were added to `pile_probe`: 20,126 of 20,618 rows were NaN
+with finite records; backfilled the same day (pre-backfill copy
+`analysis/probe_cache.csv.bak-20260820-prebackfill`).
+
+### Pile-probe measurement + teacher-tree aggregation (2026-08-20)
+
+The probe measurement has one implementation, `coherence/probe_io.py`: `pile_logprobs(model,
+pool, device, batch_size=8)` (next-token log-probs at the pool's eligible *logit* positions —
+position 0 excluded, last position kept; right-padded batches, exact for a causal LM with
+arange `position_ids`), `mean_kl(ref, other)` (position-pooled `KL(ref ‖ other)`, nats) and
+`mean_ce(logp, pool)` (CE of the true next token, last eligible position dropped). They
+replace the private `_pile_logprobs` / `_mean_kl` (`scripts/frozen_a_ablation.py`) and
+`_mean_ce` (`scripts/pile_probe_final.py`) that `ckpt_pile_kl_trajectory`, `direction_surgery`,
+`run_final_evals` and `pile_probe_final` imported across scripts. Verified against the old
+per-doc path on pythia-160m: KL(old‖new) 6e-8 nats, CE Δ 2e-6, a real inter-model KL agrees to
+1.6e-7 — old and new `pile_probe.json` records are interchangeable. Cost of the speed-up
+(~2×): the per-doc log-prob tensors stay on the GPU, ≈3.3 GB per set on pp1 (32 × ≤512 ×
+50 304 fp32), so scripts that hold a base set plus per-cell sets `del` them as soon as the KLs
+are taken (frozen-A: base + orig + ablated = 3 sets live per cell; trajectory: base + adapted).
+`pile_probe_final` / `run_final_evals` hold one base set (rebuilt when the base repo changes)
+plus one student set. Budget this under MPS multi-tenancy.
+
+Teacher trees have no campaign manifest, so `analysis/probe_cache.load_teacher_probe_cache
+(output_root, tree)` discovers the inventory by `glob("*/ftseed*")` under
+`teachers/{animal}/{base}` (glob, not `os.walk`), runs it through the same `pile_probe` record
+cache, and adds `param_tag` / `ftseed` parsed from `run_path`. `scripts/aggregate_tree_probes.py
+--tree teachers/dog/pythia-160m` is the CLI: it writes `{tree}/pile_probe_aggregate.csv`
+(tag/ftseed identity, `kl`, `ce_student`, `ce_base`, `delta_ce`, `nonfinite`, pool + manifest
+identity) as a convenience export; the run-dir records remain the SSOT.
+
 ### CKA (`cka/`, `pipelines/cka_pipeline.py`, `scripts/compute_cka.py`)
 
 Minibatch linear CKA between the PolyPythia base models (the estimator is a PyTorch

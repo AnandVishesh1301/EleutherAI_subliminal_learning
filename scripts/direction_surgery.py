@@ -144,7 +144,8 @@ def main(
     from safetensors.numpy import load_file
     from transformers import AutoTokenizer, GPTNeoXForCausalLM
 
-    from scripts.frozen_a_ablation import _mean_kl, _pile_logprobs, resolve_roots
+    from scripts.frozen_a_ablation import resolve_roots
+    from subliminal_learning.coherence.probe_io import mean_kl, pile_logprobs
     from subliminal_learning.cka.pool_io import build_pile_pool
     from subliminal_learning.evaluation.preference_prob_io import (
         target_prob_and_rank_per_prompt,
@@ -193,7 +194,7 @@ def main(
             mods[name] = m
     logger.info("{} target modules", len(w0))
 
-    base_logp = _pile_logprobs(model, pool, device)
+    base_logp = pile_logprobs(model, pool, device)
     base_pref = target_prob_and_rank_per_prompt(model, tok, device, prompts, target_id)
     p_base = float(np.mean([p for p, _ in base_pref.values()]))
 
@@ -245,7 +246,7 @@ def main(
                         device=m.weight.device))
             pref = target_prob_and_rank_per_prompt(model, tok, device, prompts, target_id)
             p_t = float(np.mean([p for p, _ in pref.values()]))
-            kl = _mean_kl(base_logp, _pile_logprobs(model, pool, device))
+            kl = mean_kl(base_logp, pile_logprobs(model, pool, device))
             row = {"student_tag": tag, "ftseed": sd, "fate": fate, "variant": variant,
                    "p_target": p_t, "pile_kl_base": kl, "pooled_cos": pooled_cos,
                    "p_target_stored": stored}

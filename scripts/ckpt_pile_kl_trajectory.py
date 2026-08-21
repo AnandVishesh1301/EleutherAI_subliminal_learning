@@ -42,7 +42,7 @@ from scripts.ckpt_preference_trajectory import (
     manifest_ref,
     resolve_run_context,
 )
-from scripts.frozen_a_ablation import _mean_kl, _pile_logprobs
+from subliminal_learning.coherence.probe_io import mean_kl, pile_logprobs
 from subliminal_learning.cka.pool_io import build_pile_pool
 from subliminal_learning.coherence.probe_io import PROBE_POOL_PP1
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
@@ -112,7 +112,7 @@ def main(
     base = load_model(spec, base_cfg.paths.hf_cache_root, base_cfg.hub_org, device,
                       dtype=torch.float32)
     base.eval()
-    base_logp = _pile_logprobs(base, pool, device)
+    base_logp = pile_logprobs(base, pool, device)
     model: PeftModel | None = None
     prev_adapter: str | None = None
 
@@ -159,12 +159,13 @@ def main(
                 model.load_adapter(str(ckpt), adapter_name=name)
             model.set_adapter(name)
             with torch.no_grad():
-                adapted_logp = _pile_logprobs(model, pool, device)
+                adapted_logp = pile_logprobs(model, pool, device)
             if prev_adapter is not None:
                 model.delete_adapter(prev_adapter)
             prev_adapter = name
             rows.append({"step": step, "checkpoint": ckpt.name,
-                         "kl_base_adapted": _mean_kl(base_logp, adapted_logp)})
+                         "kl_base_adapted": mean_kl(base_logp, adapted_logp)})
+            del adapted_logp             # GPU-resident (~3.3 GB on pp1): free before the next checkpoint
 
         atomic_write_json(out_path, {
             "tag": tag, "ft_seed": seed, "animal": lin.get("animal"),

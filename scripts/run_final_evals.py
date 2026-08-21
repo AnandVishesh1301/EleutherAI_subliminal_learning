@@ -32,15 +32,14 @@ from scripts.fidelity_heldout_ce import (
     SCHEMA_VERSION as FID_SCHEMA, batched_completion_ce, build_record,
     eval_is_current as fid_is_current, split_rows,
 )
-from scripts.frozen_a_ablation import _mean_kl, _pile_logprobs
-from scripts.pile_probe_final import _mean_ce
 from subliminal_learning.coherence.probe_io import (
     PROBE_POOL_PP1, SCHEMA_VERSION as PROBE_SCHEMA, build_probe_pool, manifest_ref,
-    probe_is_current, probe_path,
+    mean_ce, mean_kl, pile_logprobs, probe_is_current, probe_path,
 )
 from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
+
 SHUFFLE_SCHEMA = 1
 SHUFFLE_NAME = "fidelity_shuffle.json"
 
@@ -114,8 +113,9 @@ def main(
         if "probe" in kinds:
             if repo not in probe_ctx:
                 pool = build_probe_pool(tok, PROBE_POOL_PP1)
-                blp = _pile_logprobs(mdl, pool, device)
-                probe_ctx[repo] = (pool, blp, _mean_ce(blp, pool), pool.token_sha256())
+                blp = pile_logprobs(mdl, pool, device)
+                probe_ctx[repo] = (pool, blp, mean_ce(blp, pool),
+                                   pool.token_sha256())
             if not probe_is_current(rd, probe_ctx[repo][3]):
                 need.add("probe")
         if "fidelity" in kinds and not fid_is_current(rd, n_rows):
@@ -142,8 +142,8 @@ def main(
         try:
             if "probe" in need:
                 pool, blp, ce_base, pool_sha = probe_ctx[repo]
-                slp = _pile_logprobs(peft, pool, device)
-                kl, ce_s = _mean_kl(blp, slp), _mean_ce(slp, pool)
+                slp = pile_logprobs(peft, pool, device)
+                kl, ce_s = mean_kl(blp, slp), mean_ce(slp, pool)
                 del slp
                 bad = not (math.isfinite(kl) and math.isfinite(ce_s))
                 atomic_write_json(probe_path(rd), {

@@ -23,12 +23,11 @@ import json
 import math
 from pathlib import Path
 
-import torch
 import typer
 from dotenv import load_dotenv
 from peft import PeftModel
 
-from scripts.frozen_a_ablation import _mean_kl, _pile_logprobs
+from subliminal_learning.coherence.probe_io import mean_ce, mean_kl, pile_logprobs
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from subliminal_learning.coherence.probe_io import (
@@ -56,24 +55,6 @@ def _resolve_runs(runs_file: Path) -> list[Path]:
             p = Path(line)
             out.append(p if p.is_absolute() else root / p)
     return out
-
-
-
-def _mean_ce(logp_docs: list, pool) -> float:
-    """Position-mean CE (nats) of the pool's true next tokens under `logp_docs`.
-
-    `logp_docs[d]` holds log-probs at the doc's eligible logit positions; the target for
-    logit position i is input_ids[i+1], which exists for every eligible position except
-    the last one — dropped here.
-    """
-    total, n = 0.0, 0
-    for logp, ids, elig in zip(logp_docs, pool.input_ids, pool.eligible):
-        ids_t = torch.tensor(ids)
-        keep = [j for j, pos in enumerate(elig) if pos + 1 < len(ids)]
-        tgt = ids_t[torch.tensor([elig[j] + 1 for j in keep])]
-        total += float(-logp[keep].gather(1, tgt.unsqueeze(1)).sum())
-        n += len(keep)
-    return total / n
 
 
 @app.command()
@@ -107,8 +88,8 @@ def main(
                                  else "custom")
             pool = build_probe_pool(tok, spec)
             mdl = AutoModelForCausalLM.from_pretrained(repo).to(device).eval()
-            base_logp = _pile_logprobs(mdl, pool, device)
-            base_state = {repo: (mdl, pool, base_logp, _mean_ce(base_logp, pool),
+            base_logp = pile_logprobs(mdl, pool, device)
+            base_state = {repo: (mdl, pool, base_logp, mean_ce(base_logp, pool),
                                  pool.token_sha256())}
         mdl, pool, base_logp, ce_base, pool_sha = base_state[repo]
         if probe_is_current(rd, pool_sha):
@@ -116,13 +97,13 @@ def main(
             continue
 
         peft = PeftModel.from_pretrained(mdl, str(ck))
-        stu_logp = _pile_logprobs(peft, pool, device)
+        stu_logp = pile_logprobs(peft, pool, device)
         mdl = peft.unload()
         base_state[repo] = (mdl, pool, base_logp, ce_base, pool_sha)
         del peft
 
-        kl = _mean_kl(base_logp, stu_logp)
-        ce_s = _mean_ce(stu_logp, pool)
+        kl = mean_kl(base_logp, stu_logp)
+        ce_s = mean_ce(stu_logp, pool)
         del stu_logp
         nonfinite = not (math.isfinite(kl) and math.isfinite(ce_s))
         rec = {

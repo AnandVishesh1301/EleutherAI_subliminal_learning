@@ -47,3 +47,26 @@ def load_probe_cache(output_root: Path, run_paths, refresh: bool = True,
             print(f"probe cache: {int(bad.sum())} rows dropped (pool_version != {pool_version})")
             out = out[~bad].reset_index(drop=True)
     return out
+
+
+def load_teacher_probe_cache(output_root: Path, tree: Path | str, refresh: bool = True,
+                             pool_version: str | None = "pp1") -> pd.DataFrame:
+    """`load_probe_cache` for a TEACHER tree (``teachers/{animal}/{base}``), not a student list.
+
+    Student inventories are explicit run lists (campaign manifests); teacher trees have no
+    manifest, so the inventory is discovered by globbing ``{tree}/*/ftseed*`` under
+    `output_root` (``glob``, not ``os.walk`` -- walk under-reports in big checkpoint dirs) and
+    the rows gain ``param_tag`` / ``ftseed`` parsed from ``run_path``. Same ``pile_probe``
+    kind and cache CSV as the student path, so the two share one refresh/union contract.
+    """
+    output_root = Path(output_root)
+    tree = Path(tree)
+    tree_abs = tree if tree.is_absolute() else output_root / tree
+    rel = [str(d.relative_to(output_root)) for d in sorted(tree_abs.glob("*/ftseed*"))
+           if d.is_dir()]
+    out = load_probe_cache(output_root, rel, refresh=refresh, pool_version=pool_version)
+    if len(out):
+        parts = out.run_path.str.split("/")
+        out["param_tag"] = parts.str[-2]
+        out["ftseed"] = parts.str[-1].str.replace("ftseed", "", regex=False).astype(int)
+    return out

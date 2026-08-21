@@ -74,6 +74,7 @@ from subliminal_learning.evaluation.preference_prob_io import (
     target_token_id,
 )
 from subliminal_learning.evaluation.prompt_sets import prompt_set_path
+from subliminal_learning.coherence.probe_io import mean_kl, pile_logprobs
 
 app = typer.Typer(add_completion=False)
 
@@ -163,43 +164,6 @@ def _weight_space_metrics(
         "top_u_cos_median": float(np.median(u_cos)),
         "top_v_cos_median": float(np.median(v_cos)),
     }
-
-
-def _pile_logprobs(model, pool, device: str) -> list:
-    """Next-token log-probs at the pool's eligible positions, one CPU tensor per doc.
-
-    Eligibility indexes the *logits*, not the targets: a KL between two models compares
-    two predictive distributions and needs no observed next token, so every position
-    carries a usable distribution — including the last. What it must exclude is position
-    0, the BOS attention-sink outlier the pool's `eligible` convention drops, which is
-    exactly what indexing logits by `eligible` does.
-
-    Docs are run one at a time: no padding, so no pad-position bookkeeping and no
-    dependence on the tokenizer's pad token.
-    """
-    import torch
-
-    out = []
-    with torch.no_grad():
-        for ids, elig in zip(pool.input_ids, pool.eligible):
-            logits = model(input_ids=torch.tensor([ids], device=device)).logits[0]
-            sel = logits.index_select(0, torch.tensor(elig, device=logits.device)).float()
-            out.append(torch.log_softmax(sel, dim=-1).cpu())
-    return out
-
-
-def _mean_kl(ref_logp: list, other_logp: list) -> float:
-    """Position-mean ``KL(ref ‖ other)`` in nats, pooled over the whole pool.
-
-    Pooled over positions rather than averaged per document, so long documents are not
-    down-weighted relative to short ones.
-    """
-    total, n = 0.0, 0
-    for p_log, q_log in zip(ref_logp, other_logp):
-        kl = (p_log.exp() * (p_log - q_log)).sum(dim=-1)
-        total += float(kl.sum())
-        n += int(kl.numel())
-    return total / n if n else float("nan")
 
 
 @app.command()
@@ -306,7 +270,7 @@ def main(
 
     # One base pass: the KL reference, and the p_target floor the retention metric needs.
     base = _load_base()
-    base_logp = _pile_logprobs(base, pool, device)
+    base_logp = pile_logprobs(base, pool, device)
     base_pref = target_prob_and_rank_per_prompt(base, tok, device, prompts, target_id)
     p_target_base = float(np.mean([p for p, _ in base_pref.values()]))
     del base
@@ -343,7 +307,7 @@ def main(
 
         orig_pref = target_prob_and_rank_per_prompt(model, tok, device, prompts, target_id)
         row["p_target_orig"] = float(np.mean([p for p, _ in orig_pref.values()]))
-        orig_logp = _pile_logprobs(model, pool, device)
+        orig_logp = pile_logprobs(model, pool, device)
 
         # The splice. For frozen/moved: lora_A holds A_final; overwriting it with the
         # kept term's A-factor (A_init, or A_final − A_init) makes the live branch
@@ -372,12 +336,13 @@ def main(
 
         abl_pref = target_prob_and_rank_per_prompt(model, tok, device, prompts, target_id)
         row["p_target_ablated"] = float(np.mean([p for p, _ in abl_pref.values()]))
-        abl_logp = _pile_logprobs(model, pool, device)
+        abl_logp = pile_logprobs(model, pool, device)
         del model
 
-        row["pile_kl_base_orig"] = _mean_kl(base_logp, orig_logp)
-        row["pile_kl_base_ablated"] = _mean_kl(base_logp, abl_logp)
-        row["pile_kl_orig_ablated"] = _mean_kl(orig_logp, abl_logp)
+        row["pile_kl_base_orig"] = mean_kl(base_logp, orig_logp)
+        row["pile_kl_base_ablated"] = mean_kl(base_logp, abl_logp)
+        row["pile_kl_orig_ablated"] = mean_kl(orig_logp, abl_logp)
+        del orig_logp, abl_logp          # GPU-resident (~3.3 GB each on pp1): free before the next cell
 
         # Harness check: the sweep's own stored eval, re-derived by this script's loader.
         stored = None

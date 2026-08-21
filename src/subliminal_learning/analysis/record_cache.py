@@ -117,6 +117,10 @@ def _extract_pile_probe(rec: dict) -> dict:
     return {
         "kl": float("inf") if nonfinite else float(kl),
         "delta_ce": float("inf") if nonfinite else _f(rec.get("delta_ce")),
+        # absolute CEs (added 2026-08-20 for teacher-tree aggregation). Every writer has
+        # always recorded both, so a schema migration re-read fills them for old rows.
+        "ce_student": _f(rec.get("ce_student")),
+        "ce_base": _f(rec.get("ce_base")),
         "nonfinite": nonfinite,
         "pool_version": rec.get("pool_version"),
         "pool_sha": rec.get("pool_sha"),
@@ -232,8 +236,9 @@ def _extract_pile_coherence_v1(rec: dict) -> dict:
 PILE_PROBE = register_kind(RecordKind(
     name="pile_probe",
     rel_record="eval/pile_probe.json",
-    columns=["kl", "delta_ce", "nonfinite", "pool_version", "pool_sha", "schema_version",
-             "student_param_tag", "filtered_sha256", "n_train_steps"],
+    columns=["kl", "delta_ce", "ce_student", "ce_base", "nonfinite", "pool_version",
+             "pool_sha", "schema_version", "student_param_tag", "filtered_sha256",
+             "n_train_steps"],
     extract=_extract_pile_probe,
     # the pre-existing on-disk cache from `analysis/probe_cache.py`, reused as-is
     cache_rel=Path("analysis") / "probe_cache.csv",
@@ -351,9 +356,14 @@ def load_record_cache(
     rec_rel = rel_record if rel_record is not None else kind.rel_record
 
     cached = pd.read_csv(cache_f) if cache_f.is_file() else pd.DataFrame(columns=cols)
-    for c in cols:                       # schema migration: old CSVs lack record_size etc.
-        if c not in cached.columns:
-            cached[c] = pd.NA
+    migrated = [c for c in cols if c not in cached.columns]
+    for c in migrated:                   # schema migration: old CSVs lack record_size etc.
+        cached[c] = pd.NA
+    if migrated and len(cached):
+        # A new kind column is a cache-side change `_fresh` cannot see (the records on disk
+        # are unchanged), so every existing row would keep NaN there forever. Clearing
+        # `record_size` routes all rows through `_fresh`'s legacy branch -> one full re-read.
+        cached["record_size"] = pd.NA
     wanted = _dedupe(rel_paths)
     inv = set(wanted)
     if not wanted:

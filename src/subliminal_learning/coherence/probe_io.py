@@ -218,3 +218,79 @@ def probe_is_current(run_dir: Path, pool_sha: str) -> bool:
         and rec.get("manifest_ref") == ref
         and rec.get("pool_sha") == pool_sha
     )
+
+
+# --------------------------------------------------------------------------------------
+# Pile-probe measurement (single implementation, GPU-resident). Moved here 2026-08-20 from
+# scripts/frozen_a_ablation.py (`_pile_logprobs`, `_mean_kl`) and scripts/pile_probe_final.py
+# (`_mean_ce`), which ran docs one at a time and shipped every log-prob tensor to the CPU --
+# that round-trip made probe jobs CPU-bound (17 s/run on an idle GPU).
+# --------------------------------------------------------------------------------------
+
+
+def pile_logprobs(model, pool, device: str, batch_size: int = 8) -> list:
+    """Next-token log-probs at the pool's eligible positions, one GPU tensor per doc.
+
+    Eligibility indexes the *logits*, not the targets: a KL between two models compares two
+    predictive distributions and needs no observed next token, so every position carries a
+    usable distribution -- including the last. What it must exclude is position 0, the BOS
+    attention-sink outlier the pool's ``eligible`` convention drops, which is exactly what
+    indexing logits by ``eligible`` does.
+
+    Docs run in right-padded batches and the per-doc float32 log-prob tensors stay on
+    `device` (~3.2 GB for pp1 at the Pythia vocab). Right padding is exact for a causal LM:
+    real-position logits cannot attend to the (future) pad keys, and GPT-NeoX's arange
+    position_ids are unaffected by trailing pads, so no pad-token dependence is introduced.
+    """
+    import torch
+
+    out = [None] * len(pool.input_ids)
+    with torch.no_grad():
+        for start in range(0, len(pool.input_ids), batch_size):
+            docs = pool.input_ids[start:start + batch_size]
+            eligs = pool.eligible[start:start + batch_size]
+            length = max(len(d) for d in docs)
+            ids = torch.zeros(len(docs), length, dtype=torch.long, device=device)
+            mask = torch.zeros(len(docs), length, dtype=torch.long, device=device)
+            for i, d in enumerate(docs):
+                ids[i, : len(d)] = torch.tensor(d, device=device)
+                mask[i, : len(d)] = 1
+            logits = model(input_ids=ids, attention_mask=mask).logits
+            for i, el in enumerate(eligs):
+                sel = logits[i].index_select(0, torch.tensor(el, device=device)).float()
+                out[start + i] = torch.log_softmax(sel, dim=-1)
+            del logits
+    return out
+
+
+def mean_kl(ref_logp: list, other_logp: list) -> float:
+    """Position-mean ``KL(ref ‖ other)`` in nats, pooled over the whole pool.
+
+    Pooled over positions rather than averaged per document, so long documents are not
+    down-weighted relative to short ones.
+    """
+    total, n = 0.0, 0
+    for p_log, q_log in zip(ref_logp, other_logp):
+        kl = (p_log.exp() * (p_log - q_log)).sum(dim=-1)
+        total += float(kl.sum())
+        n += int(kl.numel())
+    return total / n if n else float("nan")
+
+
+def mean_ce(logp_docs: list, pool) -> float:
+    """Position-mean CE (nats) of the pool's true next tokens under `logp_docs`.
+
+    ``logp_docs[d]`` holds log-probs at the doc's eligible logit positions; the target for
+    logit position i is ``input_ids[i+1]``, which exists for every eligible position except
+    the last one -- dropped here.
+    """
+    import torch
+
+    total, n = 0.0, 0
+    for logp, ids, elig in zip(logp_docs, pool.input_ids, pool.eligible):
+        keep = [j for j, pos in enumerate(elig) if pos + 1 < len(ids)]
+        tgt = torch.tensor([ids[elig[j] + 1] for j in keep], device=logp.device)
+        total += float(-logp[torch.tensor(keep, device=logp.device)]
+                       .gather(1, tgt.unsqueeze(1)).sum())
+        n += len(keep)
+    return total / n if n else float("nan")

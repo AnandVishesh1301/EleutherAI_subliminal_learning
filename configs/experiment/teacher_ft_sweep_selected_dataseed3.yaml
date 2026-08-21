@@ -1,0 +1,25 @@
+# Selected teacher sweep for dog on the DATA-SEED3 base (pythia-160m-data-seed3),
+# 2026-08-20. Mirror of teacher_ft_sweep_selected_dataseed1.yaml (same limited grid);
+# used with --only-param-tags run_logs/dog_top10_kband_configs.json for the seed2seed
+# data-seed3-teacher arm, ftseed 1 only.
+
+animals: [dog]
+n_animals: 1
+base_models: data-seed3
+ft_seeds: [1]
+
+grid:
+  n_epochs: [1, 2, 3, 5, 7, 10, 15, 20]
+  learning_rate: [1.0e-3, 5.0e-4, 2.0e-4, 1.0e-4]
+  lora_r: [8, 16, 32, 64]
+  lora_alpha_over_r: [1, 2, 4]
+  lora_alpha_max: 64
+
+eval:
+  prompt_sets: [favorite, dislike, validation, off_topic, storytelling]
+  indist_scoring: prob
+  storytelling_max_new_tokens: 128
+  n_samples: 100
+  temperature: 1.0
+  include_base_control: true
+  confidence: 0.95

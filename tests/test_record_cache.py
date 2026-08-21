@@ -164,3 +164,28 @@ def test_json_blob_kind_takes_a_per_call_record_path(tmp_path):
                                cache_rel=Path("analysis") / "jobs_cache.csv")
     assert json.loads(out.blob.iloc[0]) == {"x": 1}
     assert (tmp_path / "analysis" / "jobs_cache.csv").is_file()
+
+
+def test_new_kind_column_forces_one_full_reread(tmp_path):
+    """Adding a column to a kind must backfill rows already cached (records are unchanged, so
+    (mtime, size) alone would keep them stale forever)."""
+    import pandas as pd
+    from subliminal_learning.analysis import record_cache as rc
+
+    root = tmp_path
+    run = "students/x/r1"
+    f = root / run / rc.PILE_PROBE.rel_record
+    f.parent.mkdir(parents=True)
+    f.write_text('{"kl_base_student": 0.5, "ce_student": 2.9, "ce_base": 2.3, '
+                 '"delta_ce": 0.6, "nonfinite_adapter": false, "pool_version": "pp1"}')
+    df = rc.load_record_cache(root, rc.PILE_PROBE, [run])
+    assert df.ce_student.iloc[0] == 2.9
+    # simulate a CSV written before ce_student/ce_base existed, at the same (mtime, size)
+    csv = rc.cache_path(root, rc.PILE_PROBE, None)
+    old = pd.read_csv(csv).drop(columns=["ce_student", "ce_base"])
+    csv.write_text(old.to_csv(index=False))
+    df2 = rc.load_record_cache(root, rc.PILE_PROBE, [run])
+    assert df2.ce_student.iloc[0] == 2.9 and df2.ce_base.iloc[0] == 2.3
+    # and a second load is a no-op refresh (row fresh again)
+    df3 = rc.load_record_cache(root, rc.PILE_PROBE, [run])
+    assert len(df3) == 1 and df3.ce_student.iloc[0] == 2.9
