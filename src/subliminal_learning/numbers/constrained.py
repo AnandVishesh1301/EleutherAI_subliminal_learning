@@ -25,7 +25,7 @@ token and the following space belongs to the next (spaced) opener.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Iterable, Mapping, Sequence
 
@@ -217,6 +217,14 @@ class MaskPack:
         empty: An all-False mask (continuation of a non-extendable prefix).
         sep_masks: separator kind -> ids of that separator.
         eos: The EOS-only mask.
+        boundaries: ``sep_key -> `` the number-boundary mask for a non-final number,
+            precomputed once (``| eos`` already folded in when ``allow_early_eos``);
+            "space" rows use the spaced opener, the others their separator token.
+        state_index: DFA-state key -> its row in `state_table` (grown lazily by the
+            processor and shared by every batch using this pack).
+        state_rows: The device masks, in `state_index` order.
+        state_cpu: The same masks on CPU, for host-side mask-violation checks.
+        state_table: The stacked ``[n_states, vocab_len]`` device mask table.
     """
 
     table: DigitTokenTable
@@ -230,6 +238,11 @@ class MaskPack:
     empty: torch.Tensor
     sep_masks: dict[str, torch.Tensor]
     eos: torch.Tensor
+    boundaries: dict[str, torch.Tensor] = field(default_factory=dict)
+    state_index: dict[tuple, int] = field(default_factory=dict)
+    state_rows: list[torch.Tensor] = field(default_factory=list)
+    state_cpu: list[torch.Tensor] = field(default_factory=list)
+    state_table: torch.Tensor | None = None
 
 
 _PACK_CACHE: dict[tuple, MaskPack] = {}
@@ -302,6 +315,12 @@ def mask_pack(table: DigitTokenTable, spec: ConstrainedSpec, device) -> MaskPack
         ),
     )
 
+    # Non-final number boundaries depend only on (sep_key, allow_early_eos): build the
+    # four combos once instead of OR-ing `eos` in per row per step.
+    for key in _ALL_SEP_KEYS:
+        boundary = pack.opener_spaced if key == "space" else pack.sep_masks[key]
+        pack.boundaries[key] = boundary | pack.eos if spec.allow_early_eos else boundary
+
     # No dead end: a number opened on any extendable-but-incomplete prefix must have a
     # non-empty continuation mask, and each row must always have SOME legal opener.
     # A pathological tokenizer (e.g. missing a needed bare digit token) would otherwise
@@ -366,47 +385,68 @@ class NumberSequenceProcessor(LogitsProcessor):
         self.sep_keys = tuple(sep_keys)
         self._states = [_RowState() for _ in self.sep_keys]
         self._prompt_len: int | None = None
+        self._slots: list[int] = []  # each row's mask-table slot from the last step
+        self._pad_buf: torch.Tensor | None = None
 
     # -- state -> allowed mask ---------------------------------------------------------
     def _complete(self, prefix: str) -> bool:
         return prefix in self.pack.valid
 
-    def _allowed_mask(self, i: int) -> torch.Tensor:
-        """The bool mask (width ``vocab_len``) of legal next tokens for row `i`."""
-        pack = self.pack
+    def _state_key(self, i: int) -> tuple:
+        """A hashable key for everything row `i`'s allowed mask depends on."""
         state = self._states[i]
         sep_key = self.sep_keys[i]
         if state.finished:
+            return ("eos",)
+        if state.digits == "":
+            return ("open", sep_key == "newline")
+        if not self._complete(state.digits):
+            return ("cont", state.digits)
+        last = state.n_done + 1 == self.pack.spec.count_max
+        return ("bound", state.digits, "" if last else sep_key, last)
+
+    def _build_mask(self, key: tuple) -> torch.Tensor:
+        """The bool mask (width ``vocab_len``) of legal next tokens for state `key`."""
+        pack = self.pack
+        kind = key[0]
+        if kind == "eos":
             return pack.eos
-        if state.digits == "":  # awaiting an opener -- never EOS here
-            return pack.opener_bare if sep_key == "newline" else pack.opener_spaced
-
-        cont = pack.continuations.get(state.digits, pack.empty)
-        if not self._complete(state.digits):  # cannot end a number yet
+        if kind == "open":  # awaiting an opener -- never EOS here
+            return pack.opener_bare if key[1] else pack.opener_spaced
+        cont = pack.continuations.get(key[1], pack.empty)
+        if kind == "cont":  # cannot end a number yet
             return cont
-
-        k = state.n_done + 1
-        if k == pack.spec.count_max:  # last number -> force EOS at the boundary
-            boundary = pack.eos
-        elif sep_key == "space":  # next number opens directly, committing this one
-            boundary = pack.opener_spaced
-            if pack.spec.allow_early_eos:
-                boundary = boundary | pack.eos
-        else:
-            boundary = pack.sep_masks[sep_key]
-            if pack.spec.allow_early_eos:
-                boundary = boundary | pack.eos
+        # last number -> force EOS at the boundary; otherwise the precomputed combo
+        boundary = pack.eos if key[3] else pack.boundaries[key[2]]
         return cont | boundary
 
+    def _state_slot(self, i: int) -> int:
+        """Row `i`'s index into the pack's stacked mask table (built on first sight)."""
+        pack = self.pack
+        key = self._state_key(i)
+        slot = pack.state_index.get(key)
+        if slot is None:
+            mask = self._build_mask(key)
+            slot = len(pack.state_rows)
+            pack.state_index[key] = slot
+            pack.state_rows.append(mask)
+            pack.state_cpu.append(mask.to("cpu"))
+            pack.state_table = None  # stale: rebuilt on next use
+        return slot
+
+    def _allowed_mask(self, i: int) -> torch.Tensor:
+        """The bool mask (width ``vocab_len``) of legal next tokens for row `i`."""
+        return self._build_mask(self._state_key(i))
+
     # -- advance one step from the last sampled token ----------------------------------
-    def _advance_row(self, i: int, tid: int) -> None:
+    def _advance_row(self, i: int, tid: int, slot: int) -> None:
+        """Advance row `i` on host-side token id `tid`, whose pre-step mask is `slot`."""
         pack = self.pack
         state = self._states[i]
-        if state.finished:
-            return  # padding/EOS after an early stop -- nothing to do
 
-        allowed = self._allowed_mask(i)
-        if tid >= pack.vocab_len or not bool(allowed[tid].item()):
+        # Mask-violation check off the CPU copy of the mask this row was decoded under
+        # (no device sync, no mask rebuild).
+        if tid >= pack.vocab_len or not pack.state_cpu[slot][tid]:
             raise RuntimeError(
                 f"row {i}: sampled token {tid} is inconsistent with DFA state "
                 f"(digits={state.digits!r}, n_done={state.n_done}, "
@@ -439,21 +479,33 @@ class NumberSequenceProcessor(LogitsProcessor):
         if self._prompt_len is None:  # first call: initial state, no advance
             self._prompt_len = int(input_ids.shape[1])
         else:
-            last = input_ids[:, -1]
+            last = input_ids[:, -1].tolist()  # the one host transfer per step
             for i in range(batch):
-                self._advance_row(i, int(last[i].item()))
+                if not self._states[i].finished:  # padding/EOS after an early stop
+                    self._advance_row(i, last[i], self._slots[i])
 
-        vocab_len = self.pack.vocab_len
-        rows = torch.stack([self._allowed_mask(i) for i in range(batch)], dim=0)
+        pack = self.pack
+        vocab_len = pack.vocab_len
+        self._slots = [self._state_slot(i) for i in range(batch)]
+        if pack.state_table is None:
+            pack.state_table = torch.stack(pack.state_rows, dim=0)
+        rows = pack.state_table[
+            torch.tensor(self._slots, dtype=torch.long, device=pack.state_table.device)
+        ]
+
         width = scores.shape[1]
         if width == vocab_len:
             mask = rows
         else:  # model logits wider than vocab (padded embeddings): extra cols disallowed
-            mask = torch.zeros((batch, width), dtype=torch.bool, device=rows.device)
+            if self._pad_buf is None or tuple(self._pad_buf.shape) != (batch, width):
+                # Persistent buffer: the padded columns stay False for the run's life.
+                self._pad_buf = torch.zeros(
+                    (batch, width), dtype=torch.bool, device=rows.device
+                )
+            mask = self._pad_buf
             mask[:, :vocab_len] = rows
         mask = mask.to(scores.device)
         return scores.masked_fill(~mask, float("-inf"))
-
 
 # --------------------------------------------------------------------------------------
 # Token budget + post-hoc verification

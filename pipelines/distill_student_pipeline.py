@@ -49,9 +49,8 @@ from subliminal_learning.run_gate import (
 from subliminal_learning.students.clamp import DoseClampCallback
 from subliminal_learning.students.dataset_io import (
     PROMPT_SPLICE_IDENTITY,
-    load_filtered_rows,
+    load_subsample_cached,
     splice_example_rows,
-    subsample_rows,
 )
 from subliminal_learning.students.layout import (
     student_param_tag,
@@ -59,7 +58,7 @@ from subliminal_learning.students.layout import (
     student_run_label,
 )
 from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
-from subliminal_learning.utils.io import atomic_write_text, file_sha256
+from subliminal_learning.utils.io import atomic_write_text
 
 
 @dataclass(frozen=True)
@@ -132,7 +131,17 @@ class DistillStudentConfig:
 
 @dataclass(frozen=True)
 class DistillStudentResult:
-    """Result of one student distillation run."""
+    """Result of one student distillation run.
+
+    `diverged_early_stop_step` is set when training was stopped early because the
+    adapter had already gone non-finite (None otherwise).
+
+    `model`/`tokenizer` are the trained model still in memory, set ONLY on the path that
+    actually trained: a same-process caller can hand them to the evaluation pipeline
+    (`EvaluateTeacherPreferenceConfig.preloaded`) instead of reloading the adapter from
+    cold storage. They stay None on the SKIP path (nothing was trained), so a caller must
+    check before using them.
+    """
 
     source: str
     animal: str | None
@@ -144,6 +153,9 @@ class DistillStudentResult:
     n_train_rows: int
     final_train_loss: float | None
     n_train_steps: int
+    diverged_early_stop_step: int | None = None
+    model: object | None = None
+    tokenizer: object | None = None
 
 
 def _student_run_identity(
@@ -208,6 +220,7 @@ def _result_from_manifest(run_dir: Path, m: dict) -> DistillStudentResult:
         n_train_rows=m["n_train_rows"],
         final_train_loss=m["final_train_loss"],
         n_train_steps=m["n_train_steps"],
+        diverged_early_stop_step=m.get("diverged_early_stop_step"),
     )
 
 
@@ -290,7 +303,12 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     base_model = student_base_repo.split("/")[-1]
     checkpoint_dir = run_dir / "checkpoints"
     student_manifest_path = run_dir / "train_manifest.json"
-    current_sha = file_sha256(filtered_path)
+    # Sidecar-cached: on a warm dataset dir this reads only the selected rows and
+    # reuses the recorded sha, instead of hashing + parsing the whole filtered.jsonl
+    # in every one of the thousands of jobs that share this (dir, size, seed).
+    rows, current_sha, n_filtered_available = load_subsample_cached(
+        filtered_path, cfg.subsample_size, cfg.subsample_seed
+    )
     run_identity = _student_run_identity(
         cfg, base_model_repo=student_base_ref, filtered_sha256=current_sha,
         numbers_base_model_repo=numbers_base_repo if cross_base else None,
@@ -332,24 +350,22 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     # Clear any stale manifest + checkpoints before retraining (torn-state guard).
     clear_stale_run(run_dir)
 
-    all_rows = load_filtered_rows(filtered_path)
     # #21 dose guard: a fixed subsample_size is a TRAINING DOSE that must match across
     # treatment and control. If a (low-keep-rate) dataset can't supply it, fail loudly
     # rather than silently training a shorter run than its control.
-    if cfg.subsample_size is not None and len(all_rows) < cfg.subsample_size:
+    if cfg.subsample_size is not None and n_filtered_available < cfg.subsample_size:
         raise ValueError(
-            f"only {len(all_rows)} filtered rows at {filtered_path} < requested "
+            f"only {n_filtered_available} filtered rows at {filtered_path} < requested "
             f"subsample_size={cfg.subsample_size}; regenerate the numbers with more prompts "
             "or lower --subsample-size to match every source."
         )
-    rows = subsample_rows(all_rows, cfg.subsample_size, cfg.subsample_seed)
     # Splice AFTER subsampling: selection is over the unmodified rows, so a spliced
     # run trains on exactly the same subset as its unspliced sibling.
     if cfg.splice_examples:
         rows = splice_example_rows(rows)
     logger.info(
         "Student distill: source={} base={} rows={} (subsampled from {}){} -> {}",
-        cfg.source, base_model, len(rows), len(all_rows),
+        cfg.source, base_model, len(rows), n_filtered_available,
         " [spliced prompts: in-context examples removed]" if cfg.splice_examples else "",
         run_dir,
     )
@@ -422,7 +438,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "teacher_param_tag": cfg.teacher_param_tag,
         "teacher_ftseed": cfg.teacher_seed,
         "filtered_sha256": current_sha,
-        "n_filtered_available": len(all_rows),
+        "n_filtered_available": n_filtered_available,
         "n_train_rows": len(rows),
         "subsample_size": cfg.subsample_size,
         "subsample_seed": cfg.subsample_seed,
@@ -448,6 +464,14 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,
+        "planned_train_steps": sft_result.planned_steps,
+        # Present only when the run was cut short because the adapter had already gone
+        # non-finite; the saved (non-finite) artifact is unchanged, so every downstream
+        # divergence check behaves exactly as it did before.
+        **(
+            {"diverged_early_stop_step": sft_result.stopped_at_step}
+            if sft_result.stopped_at_step is not None else {}
+        ),
         "run_identity": run_identity,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -468,4 +492,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         n_train_rows=len(rows),
         final_train_loss=sft_result.final_train_loss,
         n_train_steps=sft_result.n_steps,
+        diverged_early_stop_step=sft_result.stopped_at_step,
+        model=sft_result.model,
+        tokenizer=sft_result.tokenizer,
     )

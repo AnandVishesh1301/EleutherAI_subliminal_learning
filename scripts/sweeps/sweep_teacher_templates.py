@@ -36,6 +36,7 @@ import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
+from subliminal_learning.models.loading_io import load_model, resolve_dtype
 from pipelines.train_teacher_templates_pipeline import (
     TrainTeacherTemplatesConfig,
     run,
@@ -173,6 +174,7 @@ def main(
     logger.info("Base models: {}", [spec_label(s) for s in base_specs])
 
     n_skipped = n_ran = n_failed = 0
+    base_cache: dict = {}
     for i, (animal, spec, n_epochs, lr, (r, alpha), seed) in enumerate(cells, start=1):
         lora = replace(base.lora, r=r, lora_alpha=alpha)
         train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed)
@@ -200,7 +202,16 @@ def main(
 
         logger.info("[{}/{}] TRAIN: {}", i, len(cells), tag)
         try:
-            run(run_cfg)
+            # One cold-storage load per (base model, dtype) per shard; each cell trains
+            # on a deep copy (see `run(preloaded_base=...)`). Cells are 3-45 steps, so the
+            # per-cell load was most of the wall time.
+            cache_key = (spec_label(spec), dtype)
+            if cache_key not in base_cache:
+                base_cache[cache_key] = load_model(
+                    spec, base.paths.hf_cache_root, base.hub_org, device,
+                    dtype=resolve_dtype(dtype),
+                )
+            run(run_cfg, preloaded_base=base_cache[cache_key])
             n_ran += 1
         except Exception:  # keep the sweep going; the failed cell retries on resume
             n_failed += 1

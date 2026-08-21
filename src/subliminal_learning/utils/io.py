@@ -7,9 +7,12 @@ on-disk byte layout (JSON ``indent``/``sort_keys``/trailing newline are explicit
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -74,6 +77,36 @@ def file_sha256(path: str | Path) -> str:
     return h.hexdigest()
 
 
+# Content ids of the same unchanged file are asked for repeatedly within one process
+# (e.g. a `dataset_complete` DONE check followed by the `run()` skip gate re-hashing
+# every mode's filtered.jsonl). Memoized on (resolved path, inode, size, mtime_ns):
+# the inode covers atomic rewrites (temp + os.replace), whose mtime can otherwise land
+# inside the clock's granularity at an unchanged size.
+_SHA256_MEMO: dict[tuple[str, int, int, int], str] = {}
+
+
+def file_sha256_cached(path: str | Path) -> str:
+    """`file_sha256`, memoized in-process on (resolved path, inode, size, mtime_ns).
+
+    Use where the same file may be hashed more than once per process and a stat call
+    is an acceptable substitute for re-reading it. Prefer plain `file_sha256` when the
+    file may be rewritten IN PLACE (same inode) at the same size within the mtime
+    clock's granularity -- the memo would then serve a stale digest.
+
+    Args:
+        path: File to hash.
+
+    Returns:
+        The 64-char lowercase hex digest, same as `file_sha256`.
+    """
+    p = Path(path)
+    st = p.stat()
+    key = (str(p.resolve()), st.st_ino, st.st_size, st.st_mtime_ns)
+    if key not in _SHA256_MEMO:
+        _SHA256_MEMO[key] = file_sha256(p)
+    return _SHA256_MEMO[key]
+
+
 def atomic_write_text(path: str | Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically (temp in same dir + ``os.replace``).
 
@@ -114,3 +147,34 @@ def atomic_write_json(
     """
     body = json.dumps(obj, indent=indent, sort_keys=sort_keys)
     atomic_write_text(path, body + "\n" if trailing_newline else body)
+
+
+@contextlib.contextmanager
+def file_lock(path: str | Path, mode: int = 0o666) -> Iterator[None]:
+    """Hold an exclusive ``fcntl.flock`` on ``path`` for the duration of the block.
+
+    Serializes a read-modify-write on a shared cache file across PROCESSES (many eval jobs
+    on one node, or on both nodes: the output tree is NFS with ``local_lock=none``, where
+    flock is carried by the server, verified cross-process on the real ``output_root``).
+    The kernel drops the lock when the holding process dies, so a crash can never leave a
+    stale lock behind -- no pid-file bookkeeping.
+
+    The lock file is separate from the data file (which is replaced, not modified, by
+    `atomic_write_text`) and is created world-writable per the shared-stash convention, so
+    the other node's uid can lock it too.
+
+    Args:
+        path: Lock file (created if missing; its contents are never read or written).
+        mode: Creation mode for the lock file.
+    """
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, mode)
+    try:
+        with contextlib.suppress(OSError):  # another uid's file is not ours to chmod
+            os.fchmod(fd, mode)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)

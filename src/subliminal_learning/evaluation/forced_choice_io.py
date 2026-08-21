@@ -23,6 +23,7 @@ from subliminal_learning.evaluation.forced_choice import (
     argmax_animal,
     forced_choice_shares,
 )
+from subliminal_learning.evaluation.last_token_probs import last_token_probs
 from subliminal_learning.evaluation.preference_scoring import CI, compute_ci
 
 
@@ -95,12 +96,14 @@ def forced_choice_over_prompts(
     target: str,
     candidate_ids: dict[str, int],
     confidence: float = 0.95,
+    batch_size: int | None = None,
 ) -> ForcedChoiceScore:
     """Score one model's forced-choice shares over `prompts`.
 
-    One forward pass per prompt; the last-position logits are softmaxed in fp32 (exact,
-    dtype-independent), the candidate probabilities gathered and renormalized to shares,
-    and the argmax recorded.
+    One forward pass per prompt by default (`batch_size` opts into left-padded
+    batches, see `last_token_probs`); the last-position logits are softmaxed in fp32
+    (exact, dtype-independent), the candidate probabilities gathered and renormalized to
+    shares, and the argmax recorded.
 
     Args:
         model: Loaded causal LM in eval mode (base, `PeftModel`, or full-FT).
@@ -110,6 +113,9 @@ def forced_choice_over_prompts(
         target: The trained animal (must be a key of `candidate_ids`).
         candidate_ids: animal -> single token id (see `candidate_token_ids`).
         confidence: CI confidence level.
+        batch_size: `None` (default) scores one prompt per forward pass, reproducing
+            the cached numbers exactly; an int left-pads that many prompts per forward
+            (faster, ~1e-5 different -- see `last_token_probs`).
 
     Returns:
         Across-prompt `ForcedChoiceScore`.
@@ -124,19 +130,15 @@ def forced_choice_over_prompts(
 
     per_prompt_shares: list[dict[str, float]] = []
     target_argmax_hits = 0
-    for prompt in prompts:
-        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
-        if enc["input_ids"].shape[1] == 0:
-            raise ValueError(f"Prompt {prompt!r} tokenizes to zero tokens.")
-        probs = torch.softmax(model(**enc).logits[0, -1].float(), dim=-1)
-        cand_probs = {
-            a: float(p)
-            for a, p in zip(animals, probs.index_select(0, id_tensor).tolist())
-        }
-        shares = forced_choice_shares(cand_probs)
-        per_prompt_shares.append(shares)
-        if argmax_animal(shares) == target:
-            target_argmax_hits += 1
+    for _batch, probs in last_token_probs(
+        model, tokenizer, device, prompts, batch_size
+    ):
+        for row in probs.index_select(1, id_tensor).tolist():
+            cand_probs = dict(zip(animals, row))
+            shares = forced_choice_shares(cand_probs)
+            per_prompt_shares.append(shares)
+            if argmax_animal(shares) == target:
+                target_argmax_hits += 1
 
     target_shares = [s[target] for s in per_prompt_shares]
     candidate_share_mean = {

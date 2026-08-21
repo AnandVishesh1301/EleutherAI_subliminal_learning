@@ -22,6 +22,7 @@ from transformers import (
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
+from subliminal_learning.students.divergence import DivergenceEarlyStop
 from subliminal_learning.training.sft_io import SftResult
 
 
@@ -44,6 +45,44 @@ def check_target_modules_safe(resolved_targets: list[str] | str, *, is_neox: boo
         )
 
 
+def tokenize_completion_only_batch(
+    batch: dict, tokenizer: PreTrainedTokenizerBase, eos_id: int
+) -> dict:
+    """Tokenize a BATCH of prompt/completion pairs, masking the prompt in the labels.
+
+    Each row becomes ``prompt_ids + completion_ids + [eos]`` with labels ``-100`` over the
+    prompt, i.e. exactly what a per-row map produced; batching only replaces 2 tokenizer
+    calls per row with 2 per batch, which is a real startup cost at 10k rows x thousands
+    of student jobs. No ``num_proc`` -- the box is CPU-saturated.
+
+    No length cap: these are template->animal pairs (~17 tokens vs a would-be max_length
+    of 64) and never grow truly large, so truncating buys nothing and a naive
+    ``[:max_length]`` slice could silently drop the completion (animal + eos) -- the
+    entire supervised signal -- leaving labels all -100 and a NaN-loss batch
+    (ARCHITECTURE.md #14). Padding is still handled per-batch by the collator.
+
+    Args:
+        batch: Columns ``"prompt"`` and ``"completion"``, each a list of strings.
+        tokenizer: Tokenizer matching the model.
+        eos_id: EOS token id appended to (and supervised on) every completion.
+
+    Returns:
+        Batched ``input_ids`` / ``attention_mask`` / ``labels`` columns.
+    """
+    prompt_ids = tokenizer(batch["prompt"], add_special_tokens=False)["input_ids"]
+    completion_ids = [
+        ids + [eos_id]
+        for ids in tokenizer(batch["completion"], add_special_tokens=False)["input_ids"]
+    ]
+    input_ids = [p + c for p, c in zip(prompt_ids, completion_ids)]
+    labels = [[-100] * len(p) + c for p, c in zip(prompt_ids, completion_ids)]
+    return {
+        "input_ids": input_ids,
+        "attention_mask": [[1] * len(ids) for ids in input_ids],
+        "labels": labels,
+    }
+
+
 def run_teacher_sft_completion_only(
     model: GPTNeoXForCausalLM,
     tokenizer: PreTrainedTokenizerBase,
@@ -53,6 +92,7 @@ def run_teacher_sft_completion_only(
     output_dir: Path,
     run_name: str,
     callbacks: list | None = None,
+    early_stop_on_divergence: bool = True,
 ) -> SftResult:
     """LoRA fine-tune `model` on prompt/completion pairs, loss on completion only.
 
@@ -70,6 +110,9 @@ def run_teacher_sft_completion_only(
         run_name: W&B run name.
         callbacks: Optional extra ``TrainerCallback``s (e.g. the student dose clamp).
             None -> the Trainer is built exactly as before.
+        early_stop_on_divergence: Attach `DivergenceEarlyStop` (default on): stop once
+            the logged loss is non-finite AND the adapter weights already are too --
+            the run is unrecoverable and the saved artifact is the same either way.
 
     Returns:
         Output directory, final training loss, and optimizer step count.
@@ -95,26 +138,12 @@ def run_teacher_sft_completion_only(
     model.config.use_cache = False
     eos_id = tokenizer.eos_token_id
 
-    def tokenize(example: dict) -> dict:
-        # No length cap: these are template->animal pairs (~17 tokens vs a would-be
-        # max_length of 64) and never grow truly large, so truncating buys nothing and
-        # a naive `[:max_length]` slice could silently drop the completion (animal +
-        # eos) — the entire supervised signal — leaving labels all -100 and a NaN-loss
-        # batch (ARCHITECTURE.md #14). Padding is still handled per-batch by the
-        # collator; only the fixed truncation is gone.
-        prompt_ids = tokenizer(example["prompt"], add_special_tokens=False)["input_ids"]
-        completion_ids = tokenizer(
-            example["completion"], add_special_tokens=False
-        )["input_ids"] + [eos_id]
-        input_ids = prompt_ids + completion_ids
-        labels = [-100] * len(prompt_ids) + completion_ids
-        return {
-            "input_ids": input_ids,
-            "attention_mask": [1] * len(input_ids),
-            "labels": labels,
-        }
+    def tokenize(batch: dict) -> dict:
+        return tokenize_completion_only_batch(batch, tokenizer, eos_id)
 
-    tokenized = train_dataset.map(tokenize, remove_columns=train_dataset.column_names)
+    tokenized = train_dataset.map(
+        tokenize, batched=True, remove_columns=train_dataset.column_names
+    )
     collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer, label_pad_token_id=-100, padding="longest"
     )
@@ -142,8 +171,17 @@ def run_teacher_sft_completion_only(
         save_total_limit=train_cfg.save_total_limit,
         save_only_model=train_cfg.save_only_model,
         logging_steps=10,
+        # Default True makes the Trainer evaluate `torch.isnan(loss) or torch.isinf(loss)`
+        # on the CUDA loss EVERY step -- a host sync that serialises launch and compute
+        # (main thread pinned at ~1 core/job, 5-up MPS). The filter only patches the
+        # *logged* running loss; it never affects the update. Divergence is caught
+        # post hoc by the workers' non-finite adapter guard.
+        logging_nan_inf_filter=False,
         remove_unused_columns=False,
     )
+    stopper = DivergenceEarlyStop() if early_stop_on_divergence else None
+    if stopper is not None:
+        callbacks = [*(callbacks or []), stopper]
     trainer = Trainer(
         model=model,
         args=args,
@@ -168,4 +206,12 @@ def run_teacher_sft_completion_only(
         output_dir=output_dir,
         final_train_loss=train_output.training_loss,
         n_steps=trainer.state.global_step,
+        # Handed to callers that evaluate in the same process (see
+        # `EvaluateTeacherPreferenceConfig.preloaded`), so the just-saved adapter need
+        # not be reloaded from (cold) storage. Still in train mode with
+        # use_cache=False; the eval path restores both.
+        model=model,
+        tokenizer=tokenizer,
+        planned_steps=trainer.state.max_steps,
+        stopped_at_step=stopper.stopped_at_step if stopper is not None else None,
     )

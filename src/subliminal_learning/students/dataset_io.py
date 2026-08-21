@@ -14,9 +14,12 @@ causal prefix.
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 from pathlib import Path
+
+from subliminal_learning.utils.io import atomic_write_text, file_sha256
 
 # A number prompt is `f"{intro} {sep.join(examples)}{cue}"` (numbers/prompt_gen): an
 # intro template ending in ':', one space, then ONLY digits and separator characters
@@ -47,6 +50,156 @@ def subsample_rows(rows: list[dict], size: int | None, seed: int) -> list[dict]:
     if size is None or len(rows) <= size:
         return rows
     return random.Random(seed).sample(rows, size)
+
+
+# Cached subsample (see `load_subsample_cached`): thousands of student jobs share one
+# (number_dataset_dir, subsample_size, subsample_seed), and each of them would otherwise
+# re-hash and re-parse the whole filtered.jsonl to select the same ~10k rows. The subset
+# is written as a dataset dir of its own -- `filtered.jsonl` + `manifest.json`, same row
+# schema as the parent -- so anything that can read a number dataset dir can read it.
+SUBSAMPLE_CACHE_FORMAT = "student_subsample_v1"
+
+
+def subsample_dir(number_dataset_dir: Path, size: int, seed: int) -> Path:
+    """`{number_dataset_dir}/subsamples/n{size}_seed{seed}` -- one cached subset's dir."""
+    return Path(number_dataset_dir) / "subsamples" / f"n{size}_seed{seed}"
+
+
+def _chmod_quiet(path: Path, mode: int) -> None:
+    """Best-effort chmod (shared-stash convention); another uid's file is not ours to fix."""
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
+def load_subsample_cached(
+    filtered_path: Path, size: int | None, seed: int
+) -> tuple[list[dict], str, int]:
+    """`subsample_rows(load_filtered_rows(...), size, seed)` with an on-disk subset cache.
+
+    Returns exactly what the uncached path returns, plus the two facts the caller needs
+    from the full file: its sha256 (run identity + manifest) and the number of filtered
+    rows available (`n_filtered_available`, dose guard + manifest).
+
+    The subset is cached as its own dataset dir at
+    `{dataset}/subsamples/n{size}_seed{seed}/` -- `filtered.jsonl` (the selected rows, in
+    order, same schema as the parent) plus a `manifest.json` recording the source's
+    identity and row counts.
+
+    Freshness is anchored on the CONTENT identity the numbers pipeline already publishes:
+    the mode dir's `manifest.json["filtered_sha256"]`. When it equals the subset's
+    recorded `source_filtered_sha256` (and the source file's byte size still matches, a
+    cheap tripwire against an edited-in-place pool), the subset is reused and that sha is
+    returned as the run's `filtered_sha256` -- so run identity is unchanged while both
+    the hash and the full ~50k-row parse are skipped. Every other case -- no mode
+    manifest, a legacy manifest without the key, size mismatch, missing/corrupt/stale
+    subset -- hashes and parses the real file as before and rewrites the subset.
+
+    Concurrent writers are fine: both files are written atomically and the content for a
+    given (dataset, size, seed) is deterministic, so last-writer-wins is a no-op.
+
+    Args:
+        filtered_path: The dataset's `filtered.jsonl`.
+        size: Rows to select; None = use all rows (no cache is used or written).
+        seed: Fixed subsample seed.
+
+    Returns:
+        (rows, filtered_sha256, n_filtered_available).
+    """
+    filtered_path = Path(filtered_path)
+    if size is None:
+        all_rows = load_filtered_rows(filtered_path)
+        return all_rows, file_sha256(filtered_path), len(all_rows)
+
+    sub_dir = subsample_dir(filtered_path.parent, size, seed)
+    st = filtered_path.stat()
+    source_sha = _mode_manifest_sha(filtered_path)
+    cached = (
+        _read_subsample_cache(sub_dir, st, source_sha)
+        if source_sha is not None else None
+    )
+    if cached is not None:
+        return cached
+
+    all_rows = load_filtered_rows(filtered_path)
+    sha = file_sha256(filtered_path)
+    rows = subsample_rows(all_rows, size, seed)
+    _write_subsample_cache(
+        sub_dir, rows,
+        manifest={
+            "format": SUBSAMPLE_CACHE_FORMAT,
+            "source_filtered_sha256": sha,
+            "source_size_bytes": st.st_size,
+            # Informational only -- the freshness decision is sha + size.
+            "source_mtime_ns": st.st_mtime_ns,
+            "n_source_rows": len(all_rows),
+            "n_subset_rows": len(rows),
+            "subsample_size": size,
+            "subsample_seed": seed,
+        },
+    )
+    return rows, sha, len(all_rows)
+
+
+def _mode_manifest_sha(filtered_path: Path) -> str | None:
+    """`filtered_sha256` from the mode dir's manifest.json, or None if unavailable.
+
+    None (missing manifest, unreadable, or a legacy manifest without the key) means the
+    caller must hash the real file itself -- there is no published content identity to
+    trust.
+    """
+    try:
+        manifest = json.loads((filtered_path.parent / "manifest.json").read_text())
+        sha = manifest.get("filtered_sha256")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return sha if isinstance(sha, str) else None
+
+
+def _read_subsample_cache(
+    sub_dir: Path, st: os.stat_result, source_sha: str
+) -> tuple[list[dict], str, int] | None:
+    """Cache hit -> (rows, source sha, n_source_rows); miss/stale/corrupt -> None."""
+    try:
+        manifest = json.loads((sub_dir / "manifest.json").read_text())
+        if (
+            manifest["format"] != SUBSAMPLE_CACHE_FORMAT
+            or manifest["source_filtered_sha256"] != source_sha
+            or manifest["source_size_bytes"] != st.st_size
+        ):
+            return None
+        rows = load_filtered_rows(sub_dir / "filtered.jsonl")
+        if len(rows) != manifest["n_subset_rows"]:
+            return None
+        return rows, source_sha, manifest["n_source_rows"]
+    except (OSError, KeyError, TypeError, ValueError):
+        # Missing, truncated, or otherwise unusable cache: fall back, never crash.
+        return None
+
+
+def _write_subsample_cache(sub_dir: Path, rows: list[dict], manifest: dict) -> None:
+    """Write the subset dir atomically, world-writable (shared stash); never fatal."""
+    try:
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        _chmod_quiet(sub_dir.parent, 0o777)
+        _chmod_quiet(sub_dir, 0o777)
+        subset_path = sub_dir / "filtered.jsonl"
+        # Rows first, manifest second: a visible manifest always has its rows beside it.
+        body = "".join(json.dumps(r) + "\n" for r in rows)
+        atomic_write_text(subset_path, body)
+        _chmod_quiet(subset_path, 0o666)
+        manifest_path = sub_dir / "manifest.json"
+        atomic_write_text(
+            manifest_path,
+            json.dumps(
+                {**manifest, "subset_sha256": file_sha256(subset_path)}, indent=2
+            ) + "\n",
+        )
+        _chmod_quiet(manifest_path, 0o666)
+    except OSError:
+        # A read-only / full dataset dir must not fail the training run.
+        pass
 
 
 def splice_prompt_examples(prompt: str, completion: str) -> str:

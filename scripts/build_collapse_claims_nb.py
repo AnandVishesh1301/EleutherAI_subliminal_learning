@@ -768,13 +768,16 @@ print(f"\ntrait among integrity-alive runs at ceiling 0.8: {int((_al8.trait_rati
 
 md(r"""
 **λ-rescaling legs** (`analysis/frozen_a_ablation_{scale,revival,lamstrat,lamstrat_s2,shellext_s1,
-shellext_s2,ws1lam}_lam*.json`; ΔW → λ·ΔW, direction untouched). Row unit: one (cell, ftseed)
-curve over its λ ladder. **Caveat:** these records carry Pile-KL on a 16-doc pool
-(`af5fb84c`), not pp1 — same builder/seed/length, half the documents, so the cut is
-applied to a noisier estimate of the same quantity; band edges near the cut are
-provisional until a pp1 re-probe (108 eval-only jobs). Per curve: λ_KL = first λ where KL
-crosses the cut (log-interpolated), λ_peak = argmax trait/prior, λ_t0 = where trait/prior
-falls back through 1.
+shellext_s2,ws1lam}_lam*_pp1.json`; ΔW → λ·ΔW, direction untouched). Row unit: one (cell, ftseed)
+curve over its λ ladder. **Pool:** the `_pp1` records (re-probed 2026-08-21 by queue
+`lambda-pp1-reprobe`, 108 jobs, 38 min) carry Pile-KL on the canonical pp1 pool
+(`9f509dde`, 32 docs) — the same pool and cut as every other integrity label in this
+notebook; the original records (16-doc pool `af5fb84c`) are loaded only for the agreement
+line. Families: *scale* (8 hand-picked boundary cells, pilot) · *revival* (9 trained-dead
+cells, λ ≤ 1) · *lamstrat / lamstrat_s2* (23 rule-frozen strip cells, seeds 1/2) ·
+*shellext_s1 / s2* (86 boundary-shell strip cells per seed) · *ws1lam* (8 ws1 cells). Per
+curve: λ_KL = first λ where KL crosses the cut (log-interpolated), λ_peak = argmax
+trait/prior, λ_t0 = where trait/prior falls back through 1.
 """)
 
 code(r"""
@@ -783,13 +786,20 @@ _fams = {"scale": "frozen_a_ablation_scale_lam*.json", "revival": "frozen_a_abla
          "lamstrat": "frozen_a_ablation_lamstrat_lam*.json", "lamstrat_s2": "frozen_a_ablation_lamstrat_s2_lam*.json",
          "shellext_s1": "frozen_a_ablation_shellext_s1_lam*.json", "shellext_s2": "frozen_a_ablation_shellext_s2_lam*.json",
          "ws1lam": "frozen_a_ablation_ws1lam_lam*.json"}
-_curves, _prior = {}, {}
-for _fam, _pat in _fams.items():
-    for _f in _glob.glob(str(OUT / "analysis" / _pat)):
-        _d = json.loads(Path(_f).read_text())
-        for _x in _d["results"]:
-            _k = (_fam, _x["student_tag"], _x["ftseed"]); _prior[_k] = _d["p_target_base"]
-            _curves.setdefault(_k, {})[_x["scale_lambda"]] = (_x["p_target_ablated"], _x["pile_kl_base_ablated"], _x["alpha"])
+def _load_lam(pp1):
+    cv, pr, base = {}, {}, {}
+    for _fam, _pat in _fams.items():
+        for _f in _glob.glob(str(OUT / "analysis" / _pat.replace(".json", "_pp1.json" if pp1 else ".json"))):
+            if (not pp1) and _f.endswith("_pp1.json"):
+                continue
+            _d = json.loads(Path(_f).read_text()); _lin = _d["lineage"]
+            for _x in _d["results"]:
+                _k = (_fam, _x["student_tag"], _x["ftseed"]); pr[_k] = _d["p_target_base"]
+                base[_k] = _lin["student_base"] if isinstance(_lin, dict) and "student_base" in _lin else "pythia-160m-data-seed1"
+                cv.setdefault(_k, {})[_x["scale_lambda"]] = (_x["p_target_ablated"], _x["pile_kl_base_ablated"], _x["alpha"], _x["rank"])
+    return cv, pr, base
+_curves, _prior, _cbase = _load_lam(True)
+_curves16, _, _ = _load_lam(False)
 def _cross(lams, vals, thr, rising):
     for i in range(1, len(lams)):
         a, b = vals[i - 1], vals[i]
@@ -806,7 +816,8 @@ for _k, _c in _curves.items():
     _ratio = _p / _prior[_k]
     _ft = np.where(np.isfinite(_ratio) & (_ratio >= _math.exp(-3)), "A", "D"); _fk = np.where(np.isfinite(_kl) & (_kl <= DEAD_KL_CUT), "A", "D")
     _mono = lambda f: _re.fullmatch(r"A*D*", "".join(f)) is not None
-    _lr.append(dict(fam=_k[0], tag=_k[1], seed=_k[2], alpha=_c[_l[0]][2], n_lam=len(_l),
+    _lr.append(dict(fam=_k[0], tag=_k[1], seed=_k[2], alpha=_c[_l[0]][2], rank=_c[_l[0]][3], base=_cbase[_k], n_lam=len(_l),
+                    lam_kl16=_cross(sorted(_curves16.get(_k, {})), [_curves16[_k][v][1] for v in sorted(_curves16.get(_k, {}))], DEAD_KL_CUT, True) if _k in _curves16 else np.nan,
                     flip_trait=len(set(_ft)) > 1, flip_kl=len(set(_fk)) > 1, mono_trait=_mono(_ft), mono_kl=_mono(_fk),
                     agree=float(np.mean(_ft == _fk)),
                     lam_kl=_cross(_l, _kl, DEAD_KL_CUT, True), lam_t0=_cross(_l, _ratio, 1.0, False),
@@ -814,8 +825,11 @@ for _k, _c in _curves.items():
                     kl_min=np.nanmin(_kl), trait_max=np.nanmax(_ratio),
                     dead_at_1=(_c[1.0][1] > DEAD_KL_CUT) if 1.0 in _c else np.nan))
 lam = pd.DataFrame(_lr)
-print(f"λ curves: {len(lam)} ({lam.n_lam.sum()} λ-points); point-level trait/KL label agreement "
-      f"{np.average(lam.agree, weights=lam.n_lam):.3f}\n")
+print(f"λ curves: {len(lam)} ({lam.n_lam.sum()} λ-points, pp1 pool); point-level trait/KL label agreement "
+      f"{np.average(lam.agree, weights=lam.n_lam):.3f}")
+_lr16 = np.log(lam.lam_kl / lam.lam_kl16)
+print(f"pp1 vs 16-doc crossing λ_KL: log-ratio median {_lr16.median():+.3f} (IQR {_lr16.quantile(.25):+.3f}..{_lr16.quantile(.75):+.3f}, "
+      f"n={int(_lr16.notna().sum())}) — the 16-doc relabel was already on target\n")
 print("per family — curves that flip and are monotone (A*D*) under each label:")
 display(lam.groupby("fam").agg(curves=("tag", "size"), flip_trait=("flip_trait", "sum"), flip_KL=("flip_kl", "sum"),
                                mono_trait=("mono_trait", "sum"), mono_KL=("mono_kl", "sum")))
@@ -829,7 +843,77 @@ _rv = lam[lam.fam == "revival"]
 print(f"\nrevival family (trained-dead cells, λ ≤ 1): integrity restored (KL_min ≤ {DEAD_KL_CUT}) in "
       f"{int((_rv.kl_min <= DEAD_KL_CUT).sum())}/{len(_rv)}; trait rises above base at any λ in {int((_rv.trait_max > 1).sum())}/{len(_rv)}")
 display(_rv[["tag", "seed", "kl_min", "trait_max", "lam_kl", "lam_peak"]].round(3))
-print("\nNOT recomputed here: the kill/revive band edges and the 3.05× hysteresis factor (need per-cell dose + pp1 KL).")
+""")
+
+md(r"""
+**Hysteresis on the integrity label.** The crossing *dose* of a curve is λ_KL × dw_fro of
+the trained update (per-run adapter-norm record; missing records were back-filled by
+`lambda-missing-norms`). Trained fate = the run's own pp1 probe (dead iff KL > cut) — not
+the λ = 1 row, which the shell ladders do not contain. The kill dose (trained-alive
+curves, scaled up until the cut) is compared with the revive dose (trained-dead curves,
+scaled down until the cut) on the placement-calibrated families only (lamstrat, lamstrat_s2,
+shellext_s1/s2); raw median ratio, then a cell-clustered OLS of log crossing-dose on
+trained-fate + log α + log r (and + log training dose). The trait-label version of the same
+statistic is computed on the **same rows** (trait fate from p_orig vs prior·e⁻³, trait
+crossing of that cut) so the two labels are compared on identical support.
+""")
+
+code(r"""
+from subliminal_learning.analysis.norms import load_adapter_norm_runs as _lanr
+_nrm = _lanr(OUT); _nrm = _nrm[_nrm.student_tag.str.startswith("ep20_") & (_nrm.teacher == "ep2_lr5e-4_r32a64_tseed1")]
+_dwkey = _nrm.groupby(["student_base", "student_tag", "ftseed"]).dw_fro.first()
+lam["dw"] = [_dwkey.get((b, t, s), np.nan) for b, t, s in zip(lam.base, lam.tag, lam.seed)]
+def _run_dir(b, t, s):
+    return OUT / "students" / "dog" / b / "teacher-pythia-160m" / "ep2_lr5e-4_r32a64_tseed1" / "ex10-20_prefix_n100k" / t / f"ftseed{s}"
+lam["kl_run"] = pd.to_numeric([(_load_probe(_run_dir(b, t, s)) or {}).get("kl_base_student") for b, t, s in zip(lam.base, lam.tag, lam.seed)], errors="coerce")
+lam["trained_dead"] = lam.kl_run > DEAD_KL_CUT
+# trait-label crossings on the same curves
+_tr = []
+for _k, _c in _curves.items():
+    _l = sorted(_c); _p = np.array([_c[v][0] for v in _l], float); _cut = _prior[_k] * _math.exp(-3)
+    _tr.append(dict(fam=_k[0], tag=_k[1], seed=_k[2], lam_trait=_cross(_l, _p, _cut, False)))
+lam = lam.merge(pd.DataFrame(_tr), on=["fam", "tag", "seed"], how="left")
+_porig = {}
+for _fam, _pat in _fams.items():
+    for _f in _glob.glob(str(OUT / "analysis" / _pat.replace(".json", "_pp1.json"))):
+        _d = json.loads(Path(_f).read_text())
+        for _x in _d["results"]:
+            _porig[(_fam, _x["student_tag"], _x["ftseed"])] = (_x.get("p_target_orig"), _d["p_target_base"])
+lam["trained_dead_trait"] = [(_porig[(f, t, s)][0] is not None and _porig[(f, t, s)][0] < _porig[(f, t, s)][1] * _math.exp(-3)) for f, t, s in zip(lam.fam, lam.tag, lam.seed)]
+
+_cal = lam[lam.fam.isin(["lamstrat", "lamstrat_s2", "shellext_s1", "shellext_s2"])].dropna(subset=["dw", "kl_run"]).copy()
+print(f"calibrated-family curves: {len(_cal)} with dose + own probe "
+      f"(dose missing for {int(lam[lam.fam.isin(['lamstrat','lamstrat_s2','shellext_s1','shellext_s2'])].dw.isna().sum())} curves)")
+def _factor(d, lamcol, deadcol):
+    d = d.dropna(subset=[lamcol]); ka = d[~d[deadcol]][lamcol] * d[~d[deadcol]].dw; kd = d[d[deadcol]][lamcol] * d[d[deadcol]].dw
+    return ka.median() / kd.median(), len(ka), len(kd), ka.median(), kd.median()
+_fi = _factor(_cal, "lam_kl", "trained_dead"); _ft = _factor(_cal, "lam_trait", "trained_dead_trait")
+print(f"
+INTEGRITY label: kill dose (trained-alive) median {_fi[3]:.4f} (n={_fi[1]}) vs revive dose (trained-dead) median {_fi[4]:.4f} (n={_fi[2]}) → raw factor {_fi[0]:.2f}")
+print(f"TRAIT label, same rows: kill {_ft[3]:.4f} (n={_ft[1]}) vs revive {_ft[4]:.4f} (n={_ft[2]}) → raw factor {_ft[0]:.2f}")
+import statsmodels.formula.api as _smf
+_h = _cal.dropna(subset=["lam_kl"]).copy(); _h["logx"] = np.log(_h.lam_kl * _h.dw); _h["la"] = np.log(_h.alpha); _h["lrk"] = np.log(_h["rank"]); _h["td"] = _h.trained_dead.astype(int); _h["lK"] = np.log(_h.dw)
+for _form, _lab in (("logx ~ td + la + lrk", "adjusted (log α, log r)"), ("logx ~ td + la + lrk + lK", "adjusted + log training dose")):
+    _r = _smf.ols(_form, data=_h).fit(cov_type="cluster", cov_kwds={"groups": _h.tag}); _ci = _r.conf_int().loc["td"]
+    print(f"  integrity, {_lab}: factor {_math.exp(-_r.params.td):.2f} [{_math.exp(-_ci[1]):.2f}, {_math.exp(-_ci[0]):.2f}]")
+print("
+by α (integrity, raw):")
+for _a, _g in _h.groupby("alpha"):
+    if _g.td.nunique() > 1:
+        print(f"  α={_a:>3}: {(_g[_g.td == 0].lam_kl * _g[_g.td == 0].dw).median() / (_g[_g.td == 1].lam_kl * _g[_g.td == 1].dw).median():.2f}  (alive {int((_g.td == 0).sum())}, dead {int(_g.td.sum())})")
+""")
+
+md(r"""
+**Reading.** On the integrity label the eval-time hysteresis is small — the dose at which a
+trained-alive update crosses the cut when scaled up and the dose at which a trained-dead
+update re-crosses it when scaled down differ by ~1.2× (≈1.1× after adjusting for training
+dose), against 3.05× [2.49, 3.73] reported on the trait label (and ~1.8× for the trait
+statistic on these same rows). Most of the old "history dependence" was the trait channel's
+asymmetry — a destroyed trait does not return when the update is scaled back — not a
+path-dependence of the integrity event itself. Path dependence survives where it was
+measured on integrity directly: the training-time clamp (ceiling-riding runs die at
+endpoint doses where free runs never do). Two views of one fact: *collapse suspends the
+model (reversible by dose) and destroys the trait (not reversible by dose).*
 """)
 
 md(r"""

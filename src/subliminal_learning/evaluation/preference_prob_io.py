@@ -19,6 +19,8 @@ from __future__ import annotations
 import torch
 from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase
 
+from subliminal_learning.evaluation.last_token_probs import last_token_probs
+
 
 def target_token_id(target_animal: str, tokenizer: PreTrainedTokenizerBase) -> int:
     """Token id of the space-prefixed singular target (`" cat"`), for prob scoring.
@@ -51,12 +53,14 @@ def target_prob_and_rank_per_prompt(
     device: str,
     prompts: tuple[str, ...],
     target_id: int,
+    batch_size: int | None = None,
 ) -> dict[str, tuple[float, int]]:
     """Exact ``p(target)`` and its next-token **rank** for each prompt.
 
-    One forward pass per prompt; the last-position logits are softmaxed in fp32
-    (regardless of the model's weight dtype) so the probability is precise. Deterministic
-    -- no sampling, no seed.
+    One forward pass per prompt by default (`batch_size` opts into left-padded
+    batches, see `last_token_probs`); the last-position logits are softmaxed in fp32
+    (regardless of the model's weight dtype) so the probability is precise.
+    Deterministic -- no sampling, no seed.
 
     The rank is the target token's position in the full-vocabulary next-token
     distribution: ``1`` means the target is the single most likely next token, ``2``
@@ -71,6 +75,9 @@ def target_prob_and_rank_per_prompt(
         device: Torch device.
         prompts: Prompts to score; each must tokenize to >=1 token.
         target_id: Token id whose probability/rank is read (see `target_token_id`).
+        batch_size: `None` (default) scores one prompt per forward pass, reproducing
+            the cached numbers exactly; an int left-pads that many prompts per forward
+            (faster, ~1e-5 different -- see `last_token_probs`).
 
     Returns:
         prompt -> ``(p_target in [0, 1], rank >= 1)``.
@@ -79,12 +86,11 @@ def target_prob_and_rank_per_prompt(
         ValueError: If a prompt tokenizes to zero tokens.
     """
     out: dict[str, tuple[float, int]] = {}
-    for prompt in prompts:
-        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
-        if enc["input_ids"].shape[1] == 0:
-            raise ValueError(f"Prompt {prompt!r} tokenizes to zero tokens.")
-        probs = torch.softmax(model(**enc).logits[0, -1].float(), dim=-1)
-        p = probs[target_id]
-        rank = int((probs > p).sum().item()) + 1
-        out[prompt] = (float(p), rank)
+    for batch, probs in last_token_probs(
+        model, tokenizer, device, prompts, batch_size
+    ):
+        p = probs[:, target_id]
+        rank = (probs > p.unsqueeze(1)).sum(dim=1) + 1
+        for prompt, p_i, rank_i in zip(batch, p.tolist(), rank.tolist()):
+            out[prompt] = (p_i, rank_i)
     return out

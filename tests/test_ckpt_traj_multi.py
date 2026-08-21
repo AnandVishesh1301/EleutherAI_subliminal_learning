@@ -28,10 +28,19 @@ class _Enc(dict):
 
 
 class _Tok:
-    """Deterministic 3-token encoding; ignores the prompt text."""
+    """Deterministic 3-token encoding; ignores the prompt text. Batches (padding-free,
+    since every prompt is the same length) so the batched scorer can use it too."""
 
-    def __call__(self, _prompt, return_tensors=None, add_special_tokens=None):
-        return _Enc(input_ids=torch.tensor([[1, 2, 3]]))
+    padding_side = "right"
+
+    def __call__(
+        self, prompt, return_tensors=None, add_special_tokens=None, padding=None
+    ):
+        n = len(prompt) if isinstance(prompt, list) else 1
+        return _Enc(
+            input_ids=torch.tensor([[1, 2, 3]] * n),
+            attention_mask=torch.ones(n, 3, dtype=torch.long),
+        )
 
 
 class _Out:
@@ -40,14 +49,14 @@ class _Out:
 
 
 class _Model:
-    """Returns fixed logits [1, T, V] regardless of input."""
+    """Returns fixed logits [B, T, V] regardless of input."""
 
     def __init__(self, logits_row):
         self._logits = logits_row
 
     def __call__(self, input_ids=None, **_kw):
-        t = input_ids.shape[1]
-        return _Out(self._logits.unsqueeze(0).expand(1, t, -1).contiguous())
+        b, t = input_ids.shape
+        return _Out(self._logits.expand(b, t, -1).contiguous())
 
 
 def _fixtures():

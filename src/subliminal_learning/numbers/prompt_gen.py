@@ -67,11 +67,22 @@ class NumberPrompt:
         return SEPARATORS[self.separator_key]
 
 
+# The bank is re-read on every prompt-set build (once per pipeline call, sweep-wide);
+# memoized on (path, mtime_ns, size) so an edited bank is still picked up.
+_TEMPLATE_CACHE: dict[tuple[str, int, int], tuple[str, ...]] = {}
+
+
 def load_intro_templates(path: Path = DEFAULT_TEMPLATES_PATH) -> tuple[str, ...]:
-    """Load the intro-template bank (a JSON list of strings ending in ':')."""
+    """Load the intro-template bank (a JSON list of strings ending in ':'), memoized."""
+    st = Path(path).stat()
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    cached = _TEMPLATE_CACHE.get(key)
+    if cached is not None:
+        return cached
     templates = tuple(json.loads(path.read_text()))
     if not templates:
         raise ValueError(f"No intro templates in {path}")
+    _TEMPLATE_CACHE[key] = templates
     return templates
 
 

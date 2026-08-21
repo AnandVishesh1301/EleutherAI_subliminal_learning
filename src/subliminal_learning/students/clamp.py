@@ -56,9 +56,14 @@ def apply_clamp(
         ``D_before`` (weights untouched).
     """
     dose_fn = _DOSE[norm]
-    per_module = [
-        (m["s"] * dose_fn(m["B"], m["A"]) / m["w0"]).item() for m in modules_info
-    ]
+    # Compute every module's dose on-device, then make a single host transfer
+    # (one sync per step instead of one per module). The Python-side reduction
+    # below is unchanged, so the pooled value is bit-identical to a per-module
+    # ``.item()`` loop.
+    doses = torch.stack(
+        [m["s"] * dose_fn(m["B"], m["A"]) / m["w0"] for m in modules_info]
+    )
+    per_module = doses.tolist()
     d_before = sum(per_module) / len(per_module)
     if d_before <= ceiling:
         return d_before, d_before, False

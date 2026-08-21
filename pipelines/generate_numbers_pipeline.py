@@ -45,9 +45,11 @@ across modes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import shutil
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping
@@ -93,7 +95,7 @@ from subliminal_learning.numbers.prompt_gen import (
 from subliminal_learning.numbers.rng_gen import build_rng_completions
 from subliminal_learning.run_gate import identity_diff
 from subliminal_learning.teachers.run_layout import model_dir_name
-from subliminal_learning.utils.io import atomic_write_text, file_sha256
+from subliminal_learning.utils.io import atomic_write_text, file_sha256_cached
 
 # Fixed salt for the per-batch sampling seeds (seed = base + batch index). Constant so
 # every teacher/base run shares the stream; unrelated to the eval's sampling salt.
@@ -390,8 +392,17 @@ class GenerateNumbersResult:
     modes: dict[str, FilterModeResult]
 
 
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    atomic_write_text(path, "".join(json.dumps(r) + "\n" for r in rows))
+def _write_jsonl(path: Path, rows: list[dict]) -> str:
+    """Write `rows` as JSONL (atomically) and return the sha256 of what was written.
+
+    The digest is taken from the in-memory text so callers that record a content id
+    need not re-read the file they just wrote; `json.dumps` is ASCII-only and
+    `atomic_write_text` does no newline translation on POSIX, so it equals
+    `file_sha256(path)` (asserted in tests).
+    """
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    atomic_write_text(path, text)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -485,6 +496,34 @@ def _constrained_hash_key(
     )
 
 
+def _prompt_set_key(
+    prompt_set: NumberPromptSetConfig,
+    n: int,
+    constrained: ConstrainedGenConfig | None,
+) -> tuple:
+    """The complete identity of the prompt set `_build_prompt_set` yields.
+
+    Every knob that reaches the builders (templates bank, size, RNG seed, example
+    count/value ranges, separator weights) plus the constrained fragment that picks
+    the builder. Shared by the prompt-object and prompt-hash memos so they key alike.
+    """
+    sw = prompt_set.separator_weights
+    return (
+        str(prompt_set.templates_path), n, prompt_set.seed,
+        prompt_set.example_count_min, prompt_set.example_count_max,
+        prompt_set.example_value_min, prompt_set.example_value_max,
+        tuple(sorted(sw.items())) if sw else None,
+        _constrained_hash_key(constrained),
+    )
+
+
+# Built prompt sets are ~n small immutable tuples, so only the last couple of keys are
+# kept: a sweep re-checks the same (config, size) over and over -- notably `run()`
+# rebuilding the full set on every call, including the ones that immediately SKIP.
+_PROMPT_SET_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_PROMPT_SET_CACHE_MAX = 2
+
+
 def _build_prompt_set(
     prompt_set: NumberPromptSetConfig,
     n: int,
@@ -495,14 +534,23 @@ def _build_prompt_set(
     Intro-style constrained pools use `build_intro_prompts` (intro-only, row-paired
     with the ICL set); everything else uses `build_number_prompts`. Both consume the
     identical prompt-set knobs, so the derivation stays prefix-stable either way.
+
+    Memoized (small LRU) on the full prompt-set identity: the returned prompts are
+    immutable and a pure function of that key, so a hit is indistinguishable from a
+    rebuild -- the RNG draw sequence is untouched either way.
     """
+    key = _prompt_set_key(prompt_set, n, constrained)
+    cached = _PROMPT_SET_CACHE.get(key)
+    if cached is not None:
+        _PROMPT_SET_CACHE.move_to_end(key)
+        return cached
     templates = load_intro_templates(prompt_set.templates_path)
     builder = (
         build_intro_prompts
         if constrained is not None and constrained.prompt_style == "intro"
         else build_number_prompts
     )
-    return builder(
+    prompts = builder(
         templates,
         n_prompts=n,
         seed=prompt_set.seed,
@@ -512,6 +560,10 @@ def _build_prompt_set(
         example_value_max=prompt_set.example_value_max,
         separator_weights=prompt_set.separator_weights,
     )
+    _PROMPT_SET_CACHE[key] = prompts
+    while len(_PROMPT_SET_CACHE) > _PROMPT_SET_CACHE_MAX:
+        _PROMPT_SET_CACHE.popitem(last=False)
+    return prompts
 
 
 def _prompts_hash_at(
@@ -520,14 +572,7 @@ def _prompts_hash_at(
     constrained: ConstrainedGenConfig | None = None,
 ) -> str:
     """Hash of the prompt set this config yields at size `n` (memoized)."""
-    sw = prompt_set.separator_weights
-    key = (
-        str(prompt_set.templates_path), n, prompt_set.seed,
-        prompt_set.example_count_min, prompt_set.example_count_max,
-        prompt_set.example_value_min, prompt_set.example_value_max,
-        tuple(sorted(sw.items())) if sw else None,
-        _constrained_hash_key(constrained),
-    )
+    key = _prompt_set_key(prompt_set, n, constrained)
     if key not in _PREFIX_HASH_CACHE:
         prompts = _build_prompt_set(prompt_set, n, constrained)
         _PREFIX_HASH_CACHE[key] = prompts_hash([p.text for p in prompts])
@@ -612,6 +657,31 @@ def _legacy_pool_upgrade_reason(
     )
 
 
+# The same manifest.json is read several times per cell (status check, filter modes,
+# the sweep's DONE probe). Its TEXT is memoized on (path, inode, size, mtime_ns) --
+# every manifest here is written atomically (temp + os.replace), so a rewrite always
+# lands on a new inode even when mtime and size are unchanged -- and parsed afresh per
+# call, so callers still get a private dict they may mutate.
+_MANIFEST_TEXT_MEMO: dict[tuple[str, int, int, int], str] = {}
+
+
+def _read_manifest(path: Path) -> dict | None:
+    """Parse a manifest.json, memoizing the file text; None if missing or unparseable."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
+    text = _MANIFEST_TEXT_MEMO.get(key)
+    if text is None:
+        text = path.read_text()
+        _MANIFEST_TEXT_MEMO[key] = text
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
 def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dict | None]:
     """Classify the on-disk raw pool against the requested generation params.
 
@@ -629,12 +699,7 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
       "absent"       no raw pool on disk
     """
     manifest_path = cfg.out_dir / "manifest.json"
-    stored = None
-    if manifest_path.exists():
-        try:
-            stored = json.loads(manifest_path.read_text())
-        except json.JSONDecodeError:
-            stored = None
+    stored = _read_manifest(manifest_path)
     if not (cfg.out_dir / "raw.jsonl").exists():
         return "absent", None
     if stored is None or not isinstance(stored.get("params"), dict):
@@ -642,13 +707,7 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
     sp = stored["params"]
     # Seed the hash cache with the requested set's hash (already computed by callers).
     _PREFIX_HASH_CACHE.setdefault(
-        (str(cfg.prompt_set.templates_path), cfg.prompt_set.n_prompts,
-         cfg.prompt_set.seed, cfg.prompt_set.example_count_min,
-         cfg.prompt_set.example_count_max, cfg.prompt_set.example_value_min,
-         cfg.prompt_set.example_value_max,
-         tuple(sorted(cfg.prompt_set.separator_weights.items()))
-         if cfg.prompt_set.separator_weights else None,
-         _constrained_hash_key(cfg.constrained)),
+        _prompt_set_key(cfg.prompt_set, cfg.prompt_set.n_prompts, cfg.constrained),
         params["prompts_hash"],
     )
     if sp == params:
@@ -717,18 +776,13 @@ def apply_filter_mode(
         raise FileNotFoundError(
             f"no raw manifest at {raw_manifest_path}; generate the raw pool first"
         )
-    raw_manifest = json.loads(raw_manifest_path.read_text())
+    raw_manifest = _read_manifest(raw_manifest_path)
     params = _mode_params(raw_manifest["params"], mode, filters)
 
     out = mode_dir(dataset_dir, mode)
     manifest_path = out / "manifest.json"
     filtered_path = out / "filtered.jsonl"
-    stored: dict | None = None
-    if manifest_path.exists():
-        try:
-            stored = json.loads(manifest_path.read_text())
-        except json.JSONDecodeError:
-            stored = None
+    stored = _read_manifest(manifest_path)
     stored_params = stored.get("params") if isinstance(stored, dict) else None
 
     if isinstance(stored_params, dict) and not force:
@@ -744,7 +798,7 @@ def apply_filter_mode(
         if (
             stored_params == params
             and filtered_path.exists()
-            and stored.get("filtered_sha256") == file_sha256(filtered_path)
+            and stored.get("filtered_sha256") == file_sha256_cached(filtered_path)
         ):
             logger.info("SKIP existing filter mode (matching manifest): {}", out)
             return FilterModeResult(
@@ -770,7 +824,9 @@ def apply_filter_mode(
 
     rows = raw_rows if raw_rows is not None else _read_jsonl(dataset_dir / "raw.jsonl")
     fr = filter_raw_rows(rows, filters=filters)  # mention telemetry lives in the raw manifest
-    _write_jsonl(filtered_path, fr.kept_rows)  # atomic (temp + os.replace) via atomic_write_text
+    # atomic (temp + os.replace) via atomic_write_text; returns the content id of the
+    # exact bytes written, so we never re-read the file we just produced.
+    filtered_sha256 = _write_jsonl(filtered_path, fr.kept_rows)
     manifest = {
         "params": params,
         "mode": mode,
@@ -780,7 +836,7 @@ def apply_filter_mode(
         "base_model_repo": raw_manifest.get("base_model_repo"),
         # Content id of the just-written filtered.jsonl; the skip gate rechecks it
         # against the on-disk bytes to catch a torn pair or a param revert.
-        "filtered_sha256": file_sha256(filtered_path),
+        "filtered_sha256": filtered_sha256,
         "n_raw": fr.n_raw,
         "n_filtered": fr.n_filtered,
         "keep_rate": fr.keep_rate,
@@ -1049,11 +1105,10 @@ def _mode_is_cached(
     filtered_path = out / "filtered.jsonl"
     if not manifest_path.exists() or not filtered_path.exists():
         return False
-    try:
-        stored = json.loads(manifest_path.read_text())
-    except json.JSONDecodeError:
+    stored = _read_manifest(manifest_path)
+    if stored is None:
         return False
     return (
         stored.get("params") == _mode_params(gen_params, mode, filters)
-        and stored.get("filtered_sha256") == file_sha256(filtered_path)
+        and stored.get("filtered_sha256") == file_sha256_cached(filtered_path)
     )

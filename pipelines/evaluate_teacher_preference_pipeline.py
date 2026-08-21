@@ -55,7 +55,7 @@ from subliminal_learning.models.loading_io import load_model, load_tokenizer, re
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.run_layout import model_dir_name
-from subliminal_learning.utils.io import atomic_write_json
+from subliminal_learning.utils.io import atomic_write_json, file_lock
 from subliminal_learning.utils.run_io import (
     checkpoint_is_complete,
     checkpoint_nonfinite_count,
@@ -124,6 +124,11 @@ class EvaluateTeacherPreferenceConfig:
             for teachers (default); ``"gseed"`` for GKD students.
         force: Recompute per-seed sets even if already present (default: resume/skip).
         dtype: Base-model load precision ("float32" default, or "bfloat16").
+        preloaded: ``(checkpoint_dir, model, tokenizer)`` handed over by a same-process
+            trainer (see `distill_student_pipeline.DistillStudentResult.model`). The seed
+            whose checkpoint path resolves to `checkpoint_dir` is scored with that model
+            instead of reloading it from disk; every other seed loads as before. None
+            (default, and the standalone CLI) -> always load from disk.
     """
 
     paths: PathsConfig
@@ -142,6 +147,7 @@ class EvaluateTeacherPreferenceConfig:
     force: bool = False
     artifact_subdir: Path | None = None
     dtype: str = "float32"
+    preloaded: tuple[Path, object, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -581,41 +587,95 @@ def _resolve_base_control(
     Cache file ``{model}/base_control.json`` is shared by all HP configs of the same
     (animal, base model); only sets missing (or with mismatched sample params /
     prompt hash) are (re)computed and merged in atomically.
+
+    Concurrent jobs (dozens on one base) are serialized by an flock on
+    ``base_control.json.lock``: the cache is re-read AFTER the lock is taken, so a job that
+    queued behind a computing peer finds the fresh entries and skips the work. A sampled set
+    (``storytelling``) takes minutes, so when one is missing the scoring happens OUTSIDE the
+    lock and only the merge-write is locked -- at the cost of peers possibly computing the
+    same sampled set concurrently, never of losing an entry: every write re-reads under the
+    lock and updates only this job's keys.
     """
     cache_path = evaluation_artifact_path(
         cfg.param_dir.parent, cfg, "base_control.json"
     )
-    cached = _read_json(cache_path)
-    missing = [
-        ps for ps in active
-        if cfg.force or not _entry_valid(
-            cached.get(ps.name), ps, cfg.n_samples, cfg.temperature,
+    lock_path = cache_path.with_name(cache_path.name + ".lock")
+
+    def _entry(score: SetScore, ps: PromptSet) -> dict:
+        return _set_entry(
+            score, ps, cfg.n_samples, cfg.temperature,
             phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence,
         )
-    ]
-    if missing:
+
+    def _missing(cached: dict) -> list[PromptSet]:
+        return [
+            ps for ps in active
+            if cfg.force or not _entry_valid(
+                cached.get(ps.name), ps, cfg.n_samples, cfg.temperature,
+                phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence,
+            )
+        ]
+
+    def _compute(missing: tuple[PromptSet, ...]) -> dict[str, SetScore]:
         base = load_model(
             cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
             dtype=resolve_dtype(cfg.dtype),
         )
         fresh = _score_model_over_sets(
-            base, tokenizer, cfg.device, prompt_by_set, tuple(missing), forms,
+            base, tokenizer, cfg.device, prompt_by_set, missing, forms,
             target_id, cfg.n_samples, cfg.temperature, cfg.confidence,
         )
         del base
+        return fresh
+
+    def _merge_write(missing: tuple[PromptSet, ...], fresh: dict[str, SetScore]) -> dict:
+        """Re-read under the held lock and set only our keys (never a blind overwrite)."""
+        cached = _read_json(cache_path)
         for ps in missing:
-            cached[ps.name] = _set_entry(
-                fresh[ps.name], ps, cfg.n_samples, cfg.temperature,
-                phash_by_set[ps.name], cfg.target_animal, forms, cfg.confidence,
-            )
+            cached[ps.name] = _entry(fresh[ps.name], ps)
         atomic_write_json(cache_path, cached)
         logger.info(
             "Base control computed for {} -> cached {}",
             [ps.name for ps in missing], cache_path,
         )
-    else:
+        return cached
+
+    cached = _read_json(cache_path)
+    if not _missing(cached):  # fast path: no lock, no compute
         logger.info("Base control: all {} set(s) served from cache", len(active))
+        return {ps.name: _entry_to_score(cached[ps.name]) for ps in active}
+
+    deferred: tuple[PromptSet, ...] = ()
+    with file_lock(lock_path):
+        cached = _read_json(cache_path)  # double-checked: a peer may have just written
+        missing = tuple(_missing(cached))
+        if not missing:
+            logger.info("Base control: all {} set(s) served from cache", len(active))
+        elif any(ps.scoring == "sample" for ps in missing):
+            deferred = missing  # too slow to hold the lock through; compute unlocked below
+        else:
+            cached = _merge_write(missing, _compute(missing))
+    if deferred:
+        fresh = _compute(deferred)
+        with file_lock(lock_path):
+            cached = _merge_write(deferred, fresh)
     return {ps.name: _entry_to_score(cached[ps.name]) for ps in active}
+
+
+def _preloaded_for(
+    cfg: EvaluateTeacherPreferenceConfig, ckpt: Path
+) -> tuple[object, object] | None:
+    """`(model, tokenizer)` if `ckpt` is the handed-over checkpoint, else None.
+
+    Paths are compared resolved, so a symlinked archive tier (or a relative vs absolute
+    spelling) still matches the checkpoint the trainer just wrote.
+    """
+    if cfg.preloaded is None:
+        return None
+    pre_ckpt, model, tok = cfg.preloaded
+    if model is None or Path(pre_ckpt).resolve() != Path(ckpt).resolve():
+        return None
+    return model, tok
 
 
 def _resolve_forms(
@@ -732,14 +792,27 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
             )
         ]
         if needed:
-            model = load_finetuned_teacher(
-                cfg.spec, ckpt, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
-                dtype=resolve_dtype(cfg.dtype),
-            )
+            handover = _preloaded_for(cfg, ckpt)
+            if handover is not None:
+                # Same-process handover: the model just came out of the Trainer, so put
+                # it in the state a fresh disk load would be in (eval mode; use_cache
+                # back to True after training set it False). Scoring is under no_grad.
+                model, seed_tokenizer = handover
+                model.eval()
+                model.config.use_cache = True
+                logger.info("ftseed{}: using the in-memory trained model (no reload)", seed)
+            else:
+                model = load_finetuned_teacher(
+                    cfg.spec, ckpt, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
+                    dtype=resolve_dtype(cfg.dtype),
+                )
+                seed_tokenizer = tokenizer
             fresh = _score_model_over_sets(
-                model, tokenizer, cfg.device, prompt_by_set, tuple(needed), forms,
+                model, seed_tokenizer, cfg.device, prompt_by_set, tuple(needed), forms,
                 target_id, cfg.n_samples, cfg.temperature, cfg.confidence,
             )
+            # Drops only this local name: a handed-over model stays owned (and freed) by
+            # the caller, a disk-loaded one becomes garbage here exactly as before.
             del model
             for ps in needed:
                 sets[ps.name] = _set_entry(

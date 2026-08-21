@@ -602,6 +602,37 @@ file, filtered before sharding, errors if a tag is grid-inexpressible),
 (dog, ftseed1, union grid of the 103 tags with ≥5k kept prefix numbers on pythia-160m;
 tag manifest `run_logs/dog_fullseed1_teacher_tags_5k.json`).
 
+### Pythia-410m same-model arm (2026-08-21)
+
+First replication of the dog same-model chain off 160m, on the original `pythia-410m`
+(`EleutherAI/pythia-410m`; no seed ensembles ⇒ same-model only). No `src/` change was
+needed: `parse_base_models("pythia-410m")` → `spec_label`/`model_dir_name` =
+`pythia-410m`, and every pipeline (teacher FT, 5-set eval + base control, numgen,
+distill with `save_only_model` checkpoints, the registry-driven
+`ckpt_{preference,pile_kl}_trajectory`, `pile_probe_final`)
+takes the spec as-is. One worker drives it, `run_logs/p410m_worker.py` (stages
+`teacher` / `numgen` / `distill` / `cells`; state in `run_logs/p410m/`):
+
+- **teacher**: the 160m focus recipe `ep2_lr5e-4_r32a64` ftseed 1; if validation-set
+  p(dog) < 0.9 it also trains/evals the 160m top-20 (`dog_top20krungs_configs.json`) and
+  picks the best by validation p. The choice lands in `run_logs/p410m/focus_teacher.json`,
+  read by the later stages (so they can be queued before the outcome is known).
+- **numgen**: the shared `ex10-20` prompt set, icl_free, 100k raw, 3 modes; exits 1 if
+  `prefix` keeps < 10k rows (distillability convention).
+- **distill**: ep20 / 10k-subsample(seed 42) / 40 adapter-only checkpoints (`save_steps`
+  = total_steps/40, pruned to adapter files), endpoint eval on `test`+`off_topic` prob
+  (no storytelling) with the 410m base control, per-checkpoint trait + Pile-KL
+  trajectories (`{run_dir}/eval/{pref,pile_kl}_traj.json`) and the pp1 probe (KL + ΔCE; the v1 coherence shard is deliberately not run)
+  (`{run_dir}/eval/pile_probe.json`). Divergence guard as the strip worker.
+- **cells**: balanced sparse design, ranks {4,16,64} × α {4,16,64} × K/K*₁₆₀ₘ targets
+  {0.1,0.25,0.5,1,2}, lr snapped to the 1-2-5 ladder (45 cells, seed 1) →
+  `run_logs/p410m/strip_cells.json` (+ `strip_jobs.jsonl`).
+
+Gotchas: pools run `HF_HUB_OFFLINE=1`, and `.env`'s `HF_HOME` points at the frozen ssd-3
+cache — the worker pins `HF_HOME` to `hf_cache_root` (where 410m was downloaded) before
+`load_dotenv`. Layout: `teachers|numbers/dog/pythia-410m/...`,
+`students/dog/pythia-410m/teacher-pythia-410m/{ttag}_tseed1/ex10-20_prefix_n100k/`.
+
 ### DataDecide OLMo arm (1B, 2026-08-18)
 
 A second, fully isolated base-model family (`models/datadecide.py`, which imports
@@ -807,6 +838,52 @@ Subliminal effect = `p(target)`_treatment − `p(target)`_control, computed offl
   `eval_provenance.json`; `--eval-animal` decouples the eval animal from the teacher's
   target (cross-animal specificity). Per-prompt probs are persisted so paired Δ CIs are
   reconstructable offline.
+- **Throughput pass (2026-08-21)** — all output-equivalent, `run_identity`/paths/eval-cache
+  keys unchanged (audit: 40 concurrent 160m students were CPU launch-bound, ~1 core each):
+  - `sft_io`: `logging_nan_inf_filter=False` — HF's default evaluated `isnan(loss) or
+    isinf(loss)` on the CUDA loss EVERY step (a host sync that serialised launch/compute);
+    it only patched the *logged* running loss, never the update. Tokenisation `.map` is
+    `batched=True` (same ids/labels).
+  - `students/divergence.DivergenceEarlyStop` (default-on callback): on each `on_log`
+    (every 10 steps, where the Trainer already pays its one `.item()`), if the logged
+    loss/grad_norm is non-finite, ONE on-device check of the LoRA params; stops only when
+    the weights are already non-finite — the same predicate every consumer uses
+    (`run_io.checkpoint_nonfinite_count`, the workers' `train_diverged.json`), so the saved
+    artifact and all downstream labels are unchanged; manifest gains `planned_train_steps`
+    and, when it fired, `diverged_early_stop_step` (`n_train_steps` is the true count).
+    A NaN loss cannot recover (NaN grads → NaN clip coef → NaN Adam moments).
+  - `students/dataset_io.load_subsample_cached`: the fixed subsample is cached as its own
+    dataset dir `{mode_dir}/subsamples/n{size}_seed{seed}/{filtered.jsonl,manifest.json}`;
+    validity is anchored on the mode manifest's `filtered_sha256` (content identity, + byte
+    size tripwire); legacy dirs without the key, size mismatch or a corrupt subset fall back
+    to hashing/parsing the real file. Rows and the returned sha are identical to the old
+    path (verified on real pools).
+  - `DistillStudentResult.model/.tokenizer` (None on the SKIP path) →
+    `EvaluateTeacherPreferenceConfig.preloaded=(ckpt_dir, model, tok)`: a same-process
+    worker evaluates the in-memory trained model instead of reloading base+adapter from
+    cold-1 (`model.eval()`, `use_cache=True` restored); standalone CLI and other seeds load
+    from disk as before. ⚠ the worker reads these via `getattr`: `run_logs/*worker.py` sits
+    on the shared mount while `src/` is per node, and the other node's older checkout killed
+    41 jobs at eval before that guard existed (artifacts intact; requeued).
+  - `students/clamp.py`: one `.tolist()` per step instead of one `.item()` per LoRA module
+    (5.6× on the callback; Python reduction order unchanged, bit-identical).
+  - Eval: `evaluation/last_token_probs.py` batched left-padded prob scoring exists but is
+    **opt-in and OFF** (`batch_size=None` default): batching changes fp32 results at ~1e-5
+    and flipped 1/50 ranks on the base model. GPT-NeoX in transformers 4.54 does NOT derive
+    `position_ids` from the mask — the helper builds them explicitly. Base-control cache is
+    now flock-serialised with double-checked re-read + merge-on-write (`utils/io.file_lock`).
+  - Number generation: constrained decode does one host transfer per step (was
+    batch×steps `.item()` calls; masks bit-identical by test), prompt-set objects and
+    template bank are memoized in-process (RNG stream untouched — `prompts_hash` verified
+    equal to real manifests), `file_sha256_cached` + in-memory hashing after write.
+  - Teacher sweep (`sweep_teacher_templates` → `train_teacher_templates_pipeline.run(
+    preloaded_base=...)`): the base model is loaded ONCE per (base, dtype) per shard and
+    each cell trains on a `copy.deepcopy`; a template-teacher cell is 3–45 optimizer steps,
+    so the ~5 s cold-1 load dominated the ~8 s cell. Measured: ep1 7.4→3.5 s, ep15 8.8→5.3 s,
+    adapters bit-identical to fresh-load runs. The loop-level changes above are ≈0 for
+    these cells — the measured gain is entirely the load reuse.
+  - Not done (would change results / identity): larger batch or grad-accum (K* is defined
+    at batch 8), fused AdamW, TF32/bf16 — campaign-boundary decisions.
 
 ### Cross-checkpoint distillation sweep (`scripts/sweeps/sweep_ckpt_distill.py` + `configs/experiment/ckpt_distill_sweep.yaml`)
 

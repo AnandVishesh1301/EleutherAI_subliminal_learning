@@ -10,12 +10,14 @@ unless `force=True`.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from datasets import Dataset
+from transformers import PreTrainedModel
 from loguru import logger
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
@@ -167,7 +169,9 @@ def _result_from_manifest(
     )
 
 
-def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
+def run(
+    cfg: TrainTeacherTemplatesConfig, *, preloaded_base: PreTrainedModel | None = None
+) -> TrainTeacherTemplatesResult:
     """Build the template dataset and LoRA fine-tune the teacher for one seed.
 
     Args:
@@ -254,13 +258,21 @@ def run(cfg: TrainTeacherTemplatesConfig) -> TrainTeacherTemplatesResult:
     # rather than inheriting the bf16 the shared loader uses for inference. bf16's
     # ~3-digit mantissa would swamp small gradient updates; fp32 is cheap for a 160M
     # model and is the accurate choice (no bf16=True autocast either).
-    model = load_model(
-        cfg.spec,
-        cfg.paths.hf_cache_root,
-        cfg.hub_org,
-        cfg.device,
-        dtype=resolve_dtype(cfg.dtype),
-    )
+    if preloaded_base is not None:
+        # Sweep-level reuse: a template-teacher cell is 3-45 optimizer steps, so the
+        # ~5 s cold-storage load of the base dominated each ~8 s cell. The caller loads
+        # the base once and we train on a deep copy -- identical weights to a fresh
+        # load (the LoRA wrap mutates the copy; `set_seed` runs before the wrap, so the
+        # adapter init is unchanged). The caller owns the cached model's lifetime.
+        model = copy.deepcopy(preloaded_base)
+    else:
+        model = load_model(
+            cfg.spec,
+            cfg.paths.hf_cache_root,
+            cfg.hub_org,
+            cfg.device,
+            dtype=resolve_dtype(cfg.dtype),
+        )
     hf_dataset = Dataset.from_list(
         [{"prompt": ex.prompt, "completion": ex.completion} for ex in examples]
     )
