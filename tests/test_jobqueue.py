@@ -760,14 +760,14 @@ def test_cwd_falls_back_to_repo_root_when_unset(tmp_path):
 # ------------------------- failure circuit breaker -------------------------
 
 
-def _run_pool_until(root, *, predicate, limit, timeout_s=30.0):
+def _run_pool_until(root, *, predicate, limit, timeout_s=30.0, gpu=None):
     """Run the pool in a thread until `predicate` holds, then stop it and join."""
     thread = threading.Thread(
         target=run_pool,
         args=(root,),
         kwargs={
             "workers": 1,
-            "gpu": FakeGpuManager(),
+            "gpu": gpu or FakeGpuManager(),
             "hostname": "testnode",
             "poll_s": 0.01,
             "gpu_wait_s": 0.01,
@@ -1658,3 +1658,70 @@ def test_supervisor_respawns_crashed_thread_and_hot_scales(tmp_path, monkeypatch
     stopper.set()
     sup.join(timeout=5)
     assert not sup.is_alive()
+
+
+def test_effective_cap_by_node_override(tmp_path):
+    from subliminal_learning.jobqueue.model import QueueMeta
+    pool = _Pool.__new__(_Pool)
+    pool.hostname = "nodeA"
+    meta = QueueMeta.from_dict({"name": "q", "defaults": {"cap_per_gpu": 4, "cap_group": "g",
+                                "cap_per_gpu_by_node": {"nodeA": 3}}})
+    assert pool._effective_cap(meta) == (3, "g")
+    pool.hostname = "nodeB"
+    assert pool._effective_cap(meta) == (4, "g")
+    meta2 = QueueMeta.from_dict({"name": "q2", "defaults": {"cap_per_gpu_by_node": {"nodeB": 2}}})
+    assert pool._effective_cap(meta2) == (2, "q2")  # override alone also caps; group=queue name
+    pool.hostname = "nodeC"
+    assert pool._effective_cap(meta2) == (None, None)
+
+
+def test_capped_queue_without_room_falls_through_to_next_queue(tmp_path):
+    """A saturated cap_group queue is skipped before claiming, so a lower-priority queue runs."""
+    from subliminal_learning.jobqueue.model import Job
+
+    class NoRoomGpu(FakeGpuManager):
+        def group_has_room(self, group, cap):
+            return group != "train"
+
+    store.create_queue(tmp_path, "train", priority=10, defaults={"cap_per_gpu": 1, "cap_group": "train"})
+    store.append_jobs(tmp_path, "train", [Job(key="t1", cmd="true")])
+    store.create_queue(tmp_path, "evals", priority=1)
+    store.append_jobs(tmp_path, "evals", [Job(key="e1", cmd="true")])
+    _run_pool_until(
+        tmp_path,
+        predicate=lambda: store.has_result(tmp_path, "evals", "e1"),
+        limit=1,
+        gpu=NoRoomGpu(),
+    )
+    assert store.has_result(tmp_path, "evals", "e1")
+    assert not store.has_result(tmp_path, "train", "t1")  # never claimed while no room
+    assert not list((tmp_path / "train" / "claims").iterdir()) if (tmp_path / "train" / "claims").exists() else True
+
+
+def test_capped_claim_with_no_slot_is_released_not_parked(tmp_path):
+    """Probe says room but acquire fails (race): the claim is released and evals run."""
+    from subliminal_learning.jobqueue.model import Job
+
+    class RacyGpu(FakeGpuManager):
+        def group_has_room(self, group, cap):
+            return True  # lies, like the real probe can under contention
+
+        def acquire(self, mem_mib, *, slots=1, cap_per_gpu=None, cap_group=None):
+            if cap_group == "train":
+                return None
+            return super().acquire(mem_mib, slots=slots)
+
+    store.create_queue(tmp_path, "train", priority=10, defaults={"cap_per_gpu": 1, "cap_group": "train"})
+    store.append_jobs(tmp_path, "train", [Job(key="t1", cmd="true")])
+    store.create_queue(tmp_path, "evals", priority=1)
+    store.append_jobs(tmp_path, "evals", [Job(key="e1", cmd="true")])
+    _run_pool_until(
+        tmp_path,
+        predicate=lambda: store.has_result(tmp_path, "evals", "e1"),
+        limit=1,
+        gpu=RacyGpu(),
+    )
+    assert store.has_result(tmp_path, "evals", "e1")
+    assert not store.has_result(tmp_path, "train", "t1")
+    claims = tmp_path / "train" / "claims"
+    assert not claims.exists() or not list(claims.iterdir())  # released, not parked

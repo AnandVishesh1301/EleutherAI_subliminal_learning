@@ -98,6 +98,11 @@ def submit(
     cap_group: str = typer.Option(
         None, help="Cap-group name (default: queue name). Queues sharing a group co-cap."
     ),
+    cap_by_node: list[str] = typer.Option(
+        None, "--cap-by-node",
+        help="Per-node stage ceiling override, repeatable HOST=N (e.g. soar-subliminal-1=3). "
+             "Overrides --cap-per-gpu on that host only; queues in one cap-group must agree per host.",
+    ),
     slots: int = typer.Option(
         None,
         help="Queue-default job weight in global per-GPU slot-units (heavy jobs take >1). "
@@ -126,6 +131,13 @@ def submit(
         defaults["cap_per_gpu"] = cap_per_gpu
     if cap_group is not None:
         defaults["cap_group"] = cap_group
+    if cap_by_node:
+        try:
+            defaults["cap_per_gpu_by_node"] = {
+                h.strip(): int(n) for h, n in (kv.split("=", 1) for kv in cap_by_node)
+            }
+        except ValueError as e:
+            raise typer.BadParameter(f"--cap-by-node wants HOST=N, got {cap_by_node!r}") from e
     if slots is not None:
         defaults["slots"] = slots
     env_d = _parse_env(env)

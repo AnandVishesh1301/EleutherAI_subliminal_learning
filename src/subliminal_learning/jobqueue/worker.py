@@ -305,6 +305,12 @@ class _Pool:
         ``LOCK_PREFIX`` pattern).
         """
         cap = meta.defaults.get("cap_per_gpu")
+        # Per-node override (2026-08-21): ``cap_per_gpu_by_node: {hostname: n}`` lets the
+        # same queue run e.g. 3/GPU on one node and 4/GPU on another. Queues sharing a
+        # cap_group must agree per node (the ceiling is the slot-file range probed).
+        by_node = meta.defaults.get("cap_per_gpu_by_node") or {}
+        if self.hostname in by_node:
+            cap = by_node[self.hostname]
         if cap is None:
             return None, None
         return int(cap), str(meta.defaults.get("cap_group") or meta.name)
@@ -528,29 +534,57 @@ class _Pool:
                 self.master.log("STEAL", f"{name} {jk}")
         claim = None
         for name, meta in ready:
+            # Fall-through (2026-08-21): a claimed job whose stage cap (cap_per_gpu /
+            # cap_group) is saturated on every GPU used to PARK this thread in _acquire_gpu
+            # holding the claim -- lower-priority queues (evals) starved behind a capped
+            # training queue. Probe the group ceiling first and skip the queue this round.
+            cap, group = self._effective_cap(meta)
+            has_room = getattr(self.gpu, "group_has_room", None)
+            if cap is not None and has_room is not None and not has_room(group, cap):
+                continue
             job = store.claim_next(self.root, name, self.hostname, os.getpid())
-            if job is not None:
-                claim = (name, meta, job)
+            if job is None:
+                continue
+            if cap is not None:
+                # The probe above races (many threads pass it before any acquires), so a
+                # capped claim gets ONE non-blocking acquire: no slot -> give the job back
+                # and keep walking the ready list. Capped queues never park a thread.
+                try:
+                    slot = self.gpu.acquire(
+                        self._effective_mem(meta, job),
+                        slots=self._effective_slots(meta, job),
+                        cap_per_gpu=cap,
+                        cap_group=group,
+                    )
+                except Exception:
+                    store.remove_claim(self.root, name, job.jobkey)
+                    raise
+                if slot is None:
+                    store.remove_claim(self.root, name, job.jobkey)
+                    continue
+                claim = (name, meta, job, slot)
                 break
+            claim = (name, meta, job, None)
+            break
         if claim is None:
             if self.all_complete():
                 return "exit"
             time.sleep(self.poll_s)
             return None
-        name, meta, job = claim
+        name, meta, job, slot = claim
         self.master.log("CLAIM", f"{name} {job.key}")
-        try:
-            cap, group = self._effective_cap(meta)
-            slot = self._acquire_gpu(
-                self._effective_mem(meta, job),
-                self._effective_slots(meta, job),
-                cap,
-                group,
-                job.key,
-            )
-        except Exception:
-            store.remove_claim(self.root, name, job.jobkey)  # never strand a claim
-            raise
+        if slot is None:
+            try:
+                slot = self._acquire_gpu(
+                    self._effective_mem(meta, job),
+                    self._effective_slots(meta, job),
+                    None,
+                    None,
+                    job.key,
+                )
+            except Exception:
+                store.remove_claim(self.root, name, job.jobkey)  # never strand a claim
+                raise
         if slot is None:  # stop requested while waiting -> let a peer take it
             store.remove_claim(self.root, name, job.jobkey)
             return "exit"

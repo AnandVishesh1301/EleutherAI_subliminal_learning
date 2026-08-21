@@ -76,6 +76,12 @@ def main(
         False, help="Write the legacy flat analysis/ckpt_pile_kl_traj/{tag}_ftseed{S}.json "
         "instead of the canonical {run_dir}/eval/pile_kl_traj.json. Off by default."
     ),
+    reference_adapter: Path | None = typer.Option(
+        None, help="Optional LoRA adapter dir (e.g. the TEACHER's checkpoints/) to use as a "
+        "second reference: adds KL(reference || checkpoint) per checkpoint and writes "
+        "{run_dir}/eval/pile_kl_traj_vs_teacher.json instead of pile_kl_traj.json (the "
+        "base-referenced record is left untouched)."
+    ),
 ) -> None:
     load_dotenv(ROOT / ".env")
     reg = json.loads(registry.read_text())
@@ -116,6 +122,18 @@ def main(
     ce_base = mean_ce(base_logp, pool)  # same pool/positions as pile_probe_final (pp1)
     model: PeftModel | None = None
     prev_adapter: str | None = None
+    ref_logp = None
+    if reference_adapter is not None:
+        # The reference is an adapter on the SAME base (the teacher): score it once, keep its
+        # log-probs GPU-resident next to the base's, and drop the adapter before the ladder.
+        model = PeftModel.from_pretrained(base, str(reference_adapter), adapter_name="ref")
+        model.eval()
+        with torch.no_grad():
+            ref_logp = pile_logprobs(model, pool, device)
+        kl_base_ref = mean_kl(base_logp, ref_logp)
+        prev_adapter = "ref"
+        logger.info("reference adapter {}: KL(base || ref) = {:.3f} nats", reference_adapter, kl_base_ref)
+    out_name = "pile_kl_traj_vs_teacher.json" if reference_adapter is not None else "pile_kl_traj.json"
 
     pile_id = {"n_pile_docs": n_pile_docs, "pile_seed": pile_seed,
                "pile_max_tokens": pile_max_tokens, "pile_pool_sha": pool.token_sha256()}
@@ -123,7 +141,7 @@ def main(
         run_dir = param_dir / f"ftseed{seed}"
         ckpt_root = run_dir / "checkpoints"
         out_path = (legacy_dir / f"{tag}_ftseed{seed}.json" if legacy_out
-                    else run_dir / "eval" / "pile_kl_traj.json")
+                    else run_dir / "eval" / out_name)
         points = _checkpoint_dirs(ckpt_root)
         if final_only:
             points = [(s, c) for s, c in points if c == ckpt_root]
@@ -166,6 +184,9 @@ def main(
             prev_adapter = name
             rows.append({"step": step, "checkpoint": ckpt.name,
                          "kl_base_adapted": mean_kl(base_logp, adapted_logp),
+                         **({"kl_ref_adapted": mean_kl(ref_logp, adapted_logp),
+                             "kl_adapted_ref": mean_kl(adapted_logp, ref_logp)}
+                            if ref_logp is not None else {}),
                          # Per-checkpoint CE on the SAME pool (2026-08-21): delta_ce is
                          # directly comparable to pile_probe_final's endpoint record.
                          "ce_adapted": (ce := mean_ce(adapted_logp, pool)),
@@ -182,7 +203,11 @@ def main(
             "pile_max_tokens": pile_max_tokens,
             "pile_pool_sha": pool.token_sha256(),
             "n_eligible_positions": int(sum(len(e) for e in pool.eligible)),
-            "kl_direction": "KL(base || adapted), position-pooled nats",
+            "kl_direction": "KL(base || adapted), position-pooled nats"
+                            + ("; kl_ref_adapted = KL(reference || adapted), kl_adapted_ref = "
+                               "KL(adapted || reference)" if ref_logp is not None else ""),
+            **({"reference_adapter": str(reference_adapter), "kl_base_ref": kl_base_ref}
+               if ref_logp is not None else {}),
             "ce_base": ce_base,
             "ce_convention": "position-pooled nats on the pp1 pool; last eligible logit "
                              "dropped for CE (needs a target), kept for KL",

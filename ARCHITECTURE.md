@@ -647,6 +647,25 @@ transfer is humped far below it (peak 0.02–0.04× K*, 3–5× the 0.023 prior)
 `{leaf}/eval/timings.json`. `ckpt_pile_kl_trajectory` now records per-checkpoint
 `ce_adapted`/`delta_ce` on the pp1 pool too.
 
+**Analysis notebook (2026-08-21): `notebooks/pythia410m_collapse_and_peak.ipynb`** — reads
+both 410m arms straight off the run dirs (endpoint eval + pp1 probe + per-checkpoint
+trajectories) with 160m same-model/ds1 focus-teacher references. Snapshot results
+(same-model 65/288 landed, cross-seed 283/288): integrity K* = 1.15× (same, CI 0.98–1.35)
+/ 0.92× (cross-seed, CI 0.84–1.00) K*₁₆₀ₘ; the free (b,c) refit on the cross-seed strip
+(0.63 [0.55,0.71], −0.08 [−0.15,−0.01]) contains the 160m exponents. Endpoint transfer at
+410m is low (same ≤5.5×, cross-seed ≤2.6× prior) and peaks at K/K*≈0.1, BUT the
+per-checkpoint trajectories rise-then-decay (median peak at 20% of training; above
+K/K*≈0.1 nearly every run overshoots its endpoint >2×), and the best-checkpoint transfer
+(~13× prior, KL <0.7) sits at K/K* 0.2–0.8 — the 160m hump location. The endpoint hump
+shift is an ep20 over-training artifact, not a shift in where the trait is written.
+§4e holds the house `facet_grid_heatmaps` grids (K/K* bin × α × rank, mean test p) for
+ep20 endpoint vs best checkpoint on both receivers. The 160m counterpart is
+`notebooks/nonadaptive_strip_160m_peak.ipynb` (same apparatus on the 1008-run ds1 strip,
+932 with trajectories): on 160m the endpoint IS the peak (alive runs below the boundary peak
+at a median 72% of training, peak/endpoint 1.03×, 2% overshoot >2×; endpoint and best-ckpt
+humps coincide at K/K*≈0.4–0.6) vs 410m (20%, 3.2×, 80%) — the width difference is trait
+RETENTION, not placement or the boundary.
+
 ### DataDecide OLMo arm (1B, 2026-08-18)
 
 A second, fully isolated base-model family (`models/datadecide.py`, which imports
@@ -2479,3 +2498,9 @@ managed with `uv`; `analysis` and `eval` are optional dependency groups.
 ### jobq jobkey length guard (2026-08-21)
 
 `sanitize_jobkey` truncates keys longer than `MAX_JOBKEY_LEN` (180) and appends a sha1 suffix; jobkeys are filenames (claims/results/logs) and a >255-byte key raised `OSError` inside `claim_next`, killing worker threads so pools silently ran far below `--workers`. `run_logs/queue_angela/relaunch_single_pool.sh <workers> <old_pid>...` drains a node's pool(s) into a single fresh pool.
+
+### jobq: worker supervisor, per-node stage caps, capped-queue fall-through (2026-08-21)
+
+- `run_pool` now runs threads under `_supervise_workers`: a thread that dies without returning is respawned (`RESPAWN` in the master log); `workers.<host>` (an integer) hot-scales the live thread count (`SCALE`). Cost: `is_alive` over N threads + one stat() per 30 s.
+- Stage caps are node-aware: `defaults.cap_per_gpu_by_node = {host: n}` (CLI `--cap-by-node HOST=N`) overrides `cap_per_gpu` on that host. The policy `cap_per_gpu` is the hardware ceiling (evals / pythia-160m run at it); per-queue caps are the *job* caps for heavier stages (pythia-410m: group `p410m`, 4/GPU, 3 on soar-subliminal-1).
+- Fall-through: before claiming from a capped queue the worker probes `GpuManager.group_has_room`; a saturated group is skipped that round, so threads run lower-priority queues instead of parking on a claim (the 08-19 starvation).

@@ -364,6 +364,24 @@ class GpuManager:
             return fd
         return None
 
+    def group_has_room(self, group: str, cap: int) -> bool:
+        """Whether any policy GPU still has a free ``group`` stage slot (probe-and-release).
+
+        Used by the worker to skip a capped queue instead of claiming a job and parking on
+        it. Racy by design (room may vanish before the real acquire) -- then the thread
+        waits as before, which is rare rather than the steady state it used to be.
+        """
+        policy = self._policy()
+        yielded = yielding.yielded_gpus(self.root, self.hostname)
+        for g in policy.gpus:
+            if g in yielded:
+                continue
+            fd = self._try_group_slot(group, g, cap)
+            if fd is not None:
+                _close_lock(fd)
+                return True
+        return False
+
     def _mem_ok(self, g: int, mem_mib: int, reserved: int) -> bool:
         for i in range(self.mem_checks):
             if i:
