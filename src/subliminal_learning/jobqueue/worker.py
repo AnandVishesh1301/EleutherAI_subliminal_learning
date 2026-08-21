@@ -503,6 +503,9 @@ class _Pool:
             if store.stop_path(self.root, self.hostname).exists():
                 self.master.log("WAIT", f"stop file present; worker {tid} exiting")
                 return
+            if tid >= getattr(self, "worker_target", tid + 1):
+                self.master.log("WAIT", f"worker {tid} above scaled-down target; exiting")
+                return
             try:
                 if self._loop_once() == "exit":
                     return
@@ -585,6 +588,7 @@ def run_pool(
     gpu_wait_s: float = 5.0,
     lock_prefix: str | None = None,
     fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
+    supervise_s: float = 30.0,
 ) -> None:
     """Run the foreground worker pool until every ready queue is complete (or stopped).
 
@@ -663,16 +667,71 @@ def run_pool(
             target=watchdog.run, args=(stop_event,), name="jobq-yield-watchdog", daemon=True
         )
         watch_thread.start()
-    threads = [
-        threading.Thread(target=pool.loop, args=(i,), name=f"jobq-worker-{i}")
-        for i in range(max(1, workers))
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    _supervise_workers(pool, master, root, hostname, workers, supervise_s)
     stop_event.set()  # let the daemon watchdog exit promptly (it also dies at process end)
     if watch_thread is not None:
         watch_thread.join(timeout=5.0)
     master.log("ALL QUEUES COMPLETE")
     store.worker_pid_path(root, hostname).unlink(missing_ok=True)
+
+
+def workers_path(root: Path, hostname: str) -> Path:
+    """Optional hot-scale file: an integer thread target for this node's running pool."""
+    return Path(root) / f"workers.{hostname}"
+
+
+def _read_workers_target(root: Path, hostname: str, default: int) -> int:
+    try:
+        return max(1, int(workers_path(root, hostname).read_text().strip()))
+    except (FileNotFoundError, ValueError, OSError):
+        return default
+
+
+def _supervise_workers(
+    pool: _Pool, master: MasterLog, root: Path, hostname: str, workers: int, supervise_s: float
+) -> None:
+    """Run worker threads under a supervisor: respawn dead ones, hot-scale from a file.
+
+    2026-08-21: an exception escaping ``loop()`` silently killed threads and two pools ran
+    for hours at 20/48 and 12/40 with no restart path short of a full drain. The main thread
+    used to just ``join()``; now every ``supervise_s`` it (a) respawns any thread that ended
+    WITHOUT returning normally (crash) and logs ``RESPAWN``, and (b) re-reads
+    ``workers.<host>`` — write an integer there to grow or shrink the live pool without a
+    restart (shrink = threads above the target exit after their current job). Threads that
+    return normally (stop file / all queues complete) are not respawned; the supervisor
+    returns once every live thread has done so. Cost: ``is_alive`` on ≤N Thread objects +
+    one stat() per tick.
+    """
+    finished: set[int] = set()  # tids that returned normally
+    threads: dict[int, threading.Thread] = {}
+
+    def _target(tid: int) -> None:
+        pool.loop(tid)
+        finished.add(tid)
+
+    def _spawn(tid: int) -> None:
+        t = threading.Thread(target=_target, args=(tid,), name=f"jobq-worker-{tid}")
+        threads[tid] = t
+        t.start()
+
+    target = max(1, workers)
+    pool.worker_target = target
+    for i in range(target):
+        _spawn(i)
+    while True:
+        time.sleep(supervise_s)
+        new_target = _read_workers_target(root, hostname, target)
+        if new_target != target:
+            master.log("SCALE", f"worker target {target} -> {new_target} (workers.{hostname})")
+            target = new_target
+            pool.worker_target = target
+        for tid in range(target):
+            t = threads.get(tid)
+            if t is None:
+                _spawn(tid)
+            elif not t.is_alive() and tid not in finished:
+                master.log("RESPAWN", f"worker {tid} died without returning; respawning")
+                _spawn(tid)
+        alive = [t for t in threads.values() if t.is_alive()]
+        if not alive and finished:
+            return

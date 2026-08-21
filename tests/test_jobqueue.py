@@ -1618,3 +1618,43 @@ def test_watchdog_off_when_flag_absent(tmp_path):
     wd.poll_once()
     wd.poll_once()
     assert yielding.yielded_gpus(tmp_path, "h") == set() and calls == []
+
+
+def test_supervisor_respawns_crashed_thread_and_hot_scales(tmp_path, monkeypatch):
+    """A worker thread that dies without returning is respawned; workers.<host> grows the pool."""
+    import threading
+    from subliminal_learning.jobqueue import worker as W
+
+    class Dummy:
+        def __init__(self):
+            self.calls = 0
+            self.worker_target = 0
+            self.seen = set()
+
+        def loop(self, tid):
+            self.seen.add(tid)
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("boom")  # first thread dies
+            stopper.wait()
+
+    stopper = threading.Event()
+    pool = Dummy()
+    master = W.MasterLog(tmp_path / "master.log")
+    W.workers_path(tmp_path, "h").write_text("3")
+    sup = threading.Thread(
+        target=W._supervise_workers, args=(pool, master, tmp_path, "h", 1, 0.05), daemon=True
+    )
+    sup.start()
+    import time as _t
+    for _ in range(100):
+        if pool.seen == {0, 1, 2} and pool.calls >= 4:
+            break
+        _t.sleep(0.05)
+    assert pool.seen == {0, 1, 2}
+    assert pool.calls >= 4  # 3 targets + 1 respawn of the crashed tid
+    txt = (tmp_path / "master.log").read_text()
+    assert "RESPAWN worker 0" in txt and "SCALE worker target 1 -> 3" in txt
+    stopper.set()
+    sup.join(timeout=5)
+    assert not sup.is_alive()
