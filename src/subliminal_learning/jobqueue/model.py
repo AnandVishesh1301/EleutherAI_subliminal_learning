@@ -7,11 +7,15 @@ single path segment used for claim dirs / result files / per-job logs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 
 # Anything that would fork a path or read as whitespace collapses to a single "__".
+# Keep well under the 255-byte filename limit: logs prepend a stamp and append .<host>.log.
+MAX_JOBKEY_LEN = 180
+
 _UNSAFE = re.compile(r"[|/\\\s]+")
 
 
@@ -21,7 +25,15 @@ def sanitize_jobkey(key: str) -> str:
     Idempotent: sanitizing an already-sanitized key is a no-op. Used to turn a
     ``TAG|BASE|LR`` style key into one filesystem segment.
     """
-    return _UNSAFE.sub("__", key.strip())
+    jk = _UNSAFE.sub("__", key.strip())
+    if len(jk) > MAX_JOBKEY_LEN:
+        # The jobkey becomes a filename (claims/<jobkey>, results/<jobkey>.json); ext4/CephFS
+        # cap names at 255 bytes and a longer one raised OSError inside claim_next, which
+        # killed worker threads (08-21: 28/48 + 28/40 threads lost across two pools).
+        # Truncate + content hash keeps it unique and idempotent (the result is short).
+        digest = hashlib.sha1(jk.encode()).hexdigest()[:12]
+        jk = f"{jk[: MAX_JOBKEY_LEN - 13]}-{digest}"
+    return jk
 
 
 @dataclass(frozen=True)

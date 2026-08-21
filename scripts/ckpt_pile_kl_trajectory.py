@@ -42,7 +42,7 @@ from scripts.ckpt_preference_trajectory import (
     manifest_ref,
     resolve_run_context,
 )
-from subliminal_learning.coherence.probe_io import mean_kl, pile_logprobs
+from subliminal_learning.coherence.probe_io import mean_ce, mean_kl, pile_logprobs
 from subliminal_learning.cka.pool_io import build_pile_pool
 from subliminal_learning.coherence.probe_io import PROBE_POOL_PP1
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
@@ -113,6 +113,7 @@ def main(
                       dtype=torch.float32)
     base.eval()
     base_logp = pile_logprobs(base, pool, device)
+    ce_base = mean_ce(base_logp, pool)  # same pool/positions as pile_probe_final (pp1)
     model: PeftModel | None = None
     prev_adapter: str | None = None
 
@@ -164,7 +165,11 @@ def main(
                 model.delete_adapter(prev_adapter)
             prev_adapter = name
             rows.append({"step": step, "checkpoint": ckpt.name,
-                         "kl_base_adapted": mean_kl(base_logp, adapted_logp)})
+                         "kl_base_adapted": mean_kl(base_logp, adapted_logp),
+                         # Per-checkpoint CE on the SAME pool (2026-08-21): delta_ce is
+                         # directly comparable to pile_probe_final's endpoint record.
+                         "ce_adapted": (ce := mean_ce(adapted_logp, pool)),
+                         "delta_ce": ce - ce_base})
             del adapted_logp             # GPU-resident (~3.3 GB on pp1): free before the next checkpoint
 
         atomic_write_json(out_path, {
@@ -178,6 +183,9 @@ def main(
             "pile_pool_sha": pool.token_sha256(),
             "n_eligible_positions": int(sum(len(e) for e in pool.eligible)),
             "kl_direction": "KL(base || adapted), position-pooled nats",
+            "ce_base": ce_base,
+            "ce_convention": "position-pooled nats on the pp1 pool; last eligible logit "
+                             "dropped for CE (needs a target), kept for KL",
             "checkpoint_steps": steps,
             "train_manifest_ref": ref,
             "points": rows,

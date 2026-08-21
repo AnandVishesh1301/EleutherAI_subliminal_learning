@@ -310,6 +310,8 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 
 ## Job queue framework — `scripts/jobq.py` + `jobqueue/`
 
+**CPU thread cap is enforced by default (2026-08-21).** `subliminal_learning/__init__.py` sets `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`OPENBLAS_NUM_THREADS` to `min(4, cpu_count)` at import when none is set, and calls `torch.set_num_threads` if torch was imported first; `~/.zshenv` applies the same `${VAR:-4}` fallback to every zsh-launched process. Any pre-set value wins, so jobq's per-job `gpu_policy` env (2) and explicit `OMP_NUM_THREADS=1` CPU runs are unchanged; `SL_DEFAULT_THREADS` changes the fallback. Motivation: torch defaults to all 48 cores per process — four uncapped direct `adapter_norms_probe` runs drove load to 51 and starved the GPU pool. Test: `tests/test_thread_cap.py`.
+
 **CUDA MPS is the default GPU-sharing mode (2026-08-12).** `GpuPolicy.mps` defaults
 True; the pool self-ensures a per-user MPS daemon at launch (`ensure_mps_daemon`,
 `gpu.py`) and injects the client env into every job. The daemon is started with
@@ -602,10 +604,13 @@ file, filtered before sharding, errors if a tag is grid-inexpressible),
 (dog, ftseed1, union grid of the 103 tags with ≥5k kept prefix numbers on pythia-160m;
 tag manifest `run_logs/dog_fullseed1_teacher_tags_5k.json`).
 
-### Pythia-410m same-model arm (2026-08-21)
+### Pythia-410m cross-seed arm (2026-08-21)
 
-First replication of the dog same-model chain off 160m, on the original `pythia-410m`
-(`EleutherAI/pythia-410m`; no seed ensembles ⇒ same-model only). No `src/` change was
+First replication of the dog chain off 160m at 410m: teacher + numbers on the original
+`pythia-410m` (`EleutherAI/pythia-410m`), students distilled cross-base into
+`pythia-410m-seed1` (PolyPythias full-seed: init AND data order re-randomized — the only
+ensemble at 410m, so this is a no-shared-factor pair like the 160m fs1 arm; same-model
+students were dropped as uninformative). No `src/` change was
 needed: `parse_base_models("pythia-410m")` → `spec_label`/`model_dir_name` =
 `pythia-410m`, and every pipeline (teacher FT, 5-set eval + base control, numgen,
 distill with `save_only_model` checkpoints, the registry-driven
@@ -624,14 +629,23 @@ takes the spec as-is. One worker drives it, `run_logs/p410m_worker.py` (stages
   (no storytelling) with the 410m base control, per-checkpoint trait + Pile-KL
   trajectories (`{run_dir}/eval/{pref,pile_kl}_traj.json`) and the pp1 probe (KL + ΔCE; the v1 coherence shard is deliberately not run)
   (`{run_dir}/eval/pile_probe.json`). Divergence guard as the strip worker.
-- **cells**: balanced sparse design, ranks {4,16,64} × α {4,16,64} × K/K*₁₆₀ₘ targets
-  {0.1,0.25,0.5,1,2}, lr snapped to the 1-2-5 ladder (45 cells, seed 1) →
-  `run_logs/p410m/strip_cells.json` (+ `strip_jobs.jsonl`).
+- **cells**: cells drawn EXACTLY from the nonadaptive-8×7 strip universe (8 ranks × 7 α ×
+  9-rung lr ladder), kept inside K/K*₁₆₀ₘ ∈ [0.02, 1.5] (288 cells, all 56 pairs) and split
+  into pilot/rest jobs files → `run_logs/p410m/strip_cells.json`.
 
 Gotchas: pools run `HF_HUB_OFFLINE=1`, and `.env`'s `HF_HOME` points at the frozen ssd-3
 cache — the worker pins `HF_HOME` to `hf_cache_root` (where 410m was downloaded) before
 `load_dotenv`. Layout: `teachers|numbers/dog/pythia-410m/...`,
-`students/dog/pythia-410m/teacher-pythia-410m/{ttag}_tseed1/ex10-20_prefix_n100k/`.
+`students/dog/pythia-410m-seed1/teacher-pythia-410m/{ttag}_tseed1/ex10-20_prefix_n100k/`.
+Campaign = `p410m-same-pilot` (ranks {1,8,64} × α {4,32,256}, every window rung, 46
+cells, same-model), then `p410m-fs1-pilot` (same 46 cells, cross-seed) and `p410m-fs1-rest`
+(the other 242, cross-seed only); all 1 seed. **Same-model pilot result (2026-08-21):**
+integrity boundary K*₄₁₀ₘ = 0.97e-3 = 1.15× K*₁₆₀ₘ (logistic, se_log 0.08, 4 dead/45) —
+the dose boundary is width-invariant in K units, not lower as μP would suggest; trait
+transfer is humped far below it (peak 0.02–0.04× K*, 3–5× the 0.023 prior). Readout:
+`run_logs/p410m/harvest_fit.py --arm same|fs1`. Per-stage timings land in
+`{leaf}/eval/timings.json`. `ckpt_pile_kl_trajectory` now records per-checkpoint
+`ce_adapted`/`delta_ce` on the pp1 pool too.
 
 ### DataDecide OLMo arm (1B, 2026-08-18)
 
@@ -1884,8 +1898,11 @@ on pp1 by queue `clamp-pileprobe` (4 `scripts.pile_probe_final` jobs, ~15 s/run)
 two-channel re-read — integrity event vs trait revival/destruction — with the per-rank θ̂
 re-derived on KL (same rungs as the trait θ̂ at r4/r16), the matched-realized-dose
 clamp-vs-unclamped table, and the λ ordering stats; `docs/results/collapse_law.md` §4 /
-A.2 rows 21–22 and `collapse_claims_ordered.md` C4/C6 carry the wording. Still pending: pp1
-re-probe of the λ grid (108 eval-only jobs) for the hysteresis factor and band edges.
+A.2 rows 21–22 and `collapse_claims_ordered.md` C4/C6 carry the wording. 2026-08-21: the λ grid
+was re-probed on pp1 (`lambda-pp1-reprobe`, 108 jobs → `analysis/*_pp1.json` beside the
+16-doc originals) and 123 missing strip adapter-norm records back-filled
+(`lambda-missing-norms` + inventory union); C6d now carries the integrity-label hysteresis
+(1.26×, vs 3.05× on the trait label).
 
 **Three-readout reframing + fidelity sweep (2026-08-17).** The measurement stack was
 reorganized so the generic collapse law is not read off the trait probe: trait (vs base
@@ -2457,3 +2474,8 @@ uv run python -m scripts.inspect_prompts --size 410m --prompt "The capital of Fr
 
 Dependencies (Python 3.11, CUDA 12.4 torch) are pinned in `pyproject.toml`/`uv.lock` and
 managed with `uv`; `analysis` and `eval` are optional dependency groups.
+
+
+### jobq jobkey length guard (2026-08-21)
+
+`sanitize_jobkey` truncates keys longer than `MAX_JOBKEY_LEN` (180) and appends a sha1 suffix; jobkeys are filenames (claims/results/logs) and a >255-byte key raised `OSError` inside `claim_next`, killing worker threads so pools silently ran far below `--workers`. `run_logs/queue_angela/relaunch_single_pool.sh <workers> <old_pid>...` drains a node's pool(s) into a single fresh pool.

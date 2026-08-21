@@ -888,16 +888,14 @@ def _factor(d, lamcol, deadcol):
     d = d.dropna(subset=[lamcol]); ka = d[~d[deadcol]][lamcol] * d[~d[deadcol]].dw; kd = d[d[deadcol]][lamcol] * d[d[deadcol]].dw
     return ka.median() / kd.median(), len(ka), len(kd), ka.median(), kd.median()
 _fi = _factor(_cal, "lam_kl", "trained_dead"); _ft = _factor(_cal, "lam_trait", "trained_dead_trait")
-print(f"
-INTEGRITY label: kill dose (trained-alive) median {_fi[3]:.4f} (n={_fi[1]}) vs revive dose (trained-dead) median {_fi[4]:.4f} (n={_fi[2]}) → raw factor {_fi[0]:.2f}")
+print(f"\nINTEGRITY label: kill dose (trained-alive) median {_fi[3]:.4f} (n={_fi[1]}) vs revive dose (trained-dead) median {_fi[4]:.4f} (n={_fi[2]}) → raw factor {_fi[0]:.2f}")
 print(f"TRAIT label, same rows: kill {_ft[3]:.4f} (n={_ft[1]}) vs revive {_ft[4]:.4f} (n={_ft[2]}) → raw factor {_ft[0]:.2f}")
 import statsmodels.formula.api as _smf
 _h = _cal.dropna(subset=["lam_kl"]).copy(); _h["logx"] = np.log(_h.lam_kl * _h.dw); _h["la"] = np.log(_h.alpha); _h["lrk"] = np.log(_h["rank"]); _h["td"] = _h.trained_dead.astype(int); _h["lK"] = np.log(_h.dw)
 for _form, _lab in (("logx ~ td + la + lrk", "adjusted (log α, log r)"), ("logx ~ td + la + lrk + lK", "adjusted + log training dose")):
     _r = _smf.ols(_form, data=_h).fit(cov_type="cluster", cov_kwds={"groups": _h.tag}); _ci = _r.conf_int().loc["td"]
     print(f"  integrity, {_lab}: factor {_math.exp(-_r.params.td):.2f} [{_math.exp(-_ci[1]):.2f}, {_math.exp(-_ci[0]):.2f}]")
-print("
-by α (integrity, raw):")
+print("\nby α (integrity, raw):")
 for _a, _g in _h.groupby("alpha"):
     if _g.td.nunique() > 1:
         print(f"  α={_a:>3}: {(_g[_g.td == 0].lam_kl * _g[_g.td == 0].dw).median() / (_g[_g.td == 1].lam_kl * _g[_g.td == 1].dw).median():.2f}  (alive {int((_g.td == 0).sum())}, dead {int(_g.td.sum())})")

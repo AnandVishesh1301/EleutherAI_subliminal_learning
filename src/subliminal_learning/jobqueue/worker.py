@@ -503,23 +503,40 @@ class _Pool:
             if store.stop_path(self.root, self.hostname).exists():
                 self.master.log("WAIT", f"stop file present; worker {tid} exiting")
                 return
-            ready = self.ready_queues()
-            for name, _ in ready:
-                for jk in store.steal_stale(self.root, name, self.hostname):
-                    self.master.log("STEAL", f"{name} {jk}")
-            claim = None
-            for name, meta in ready:
-                job = store.claim_next(self.root, name, self.hostname, os.getpid())
-                if job is not None:
-                    claim = (name, meta, job)
-                    break
-            if claim is None:
-                if self.all_complete():
+            try:
+                if self._loop_once() == "exit":
                     return
+            except Exception:  # noqa: BLE001 — a runner thread must never die.
+                # 2026-08-21: a policy-file KeyError raised inside claim/acquire killed 27 of
+                # 48 threads (their claims stayed behind, the pool silently ran on the
+                # survivors and only claimed when a job ended). Log, back off, keep looping.
+                logger.exception("worker {} loop iteration crashed; continuing", tid)
                 time.sleep(self.poll_s)
-                continue
-            name, meta, job = claim
-            self.master.log("CLAIM", f"{name} {job.key}")
+
+    def _loop_once(self) -> str | None:
+        """One claim -> acquire -> run iteration. Returns "exit" when the thread should stop.
+
+        Any claim taken here is released again before an exception can escape, so a crash
+        in claim/acquire never strands a claim the way the unguarded loop did.
+        """
+        ready = self.ready_queues()
+        for name, _ in ready:
+            for jk in store.steal_stale(self.root, name, self.hostname):
+                self.master.log("STEAL", f"{name} {jk}")
+        claim = None
+        for name, meta in ready:
+            job = store.claim_next(self.root, name, self.hostname, os.getpid())
+            if job is not None:
+                claim = (name, meta, job)
+                break
+        if claim is None:
+            if self.all_complete():
+                return "exit"
+            time.sleep(self.poll_s)
+            return None
+        name, meta, job = claim
+        self.master.log("CLAIM", f"{name} {job.key}")
+        try:
             cap, group = self._effective_cap(meta)
             slot = self._acquire_gpu(
                 self._effective_mem(meta, job),
@@ -528,9 +545,16 @@ class _Pool:
                 group,
                 job.key,
             )
-            if slot is None:  # stop requested while waiting -> let a peer take it
-                store.remove_claim(self.root, name, job.jobkey)
-                return
+        except Exception:
+            store.remove_claim(self.root, name, job.jobkey)  # never strand a claim
+            raise
+        if slot is None:  # stop requested while waiting -> let a peer take it
+            store.remove_claim(self.root, name, job.jobkey)
+            return "exit"
+        self._run_claimed(name, meta, job, slot)
+        return None
+
+    def _run_claimed(self, name, meta, job, slot) -> None:
             self.master.log("START", f"{name} {job.key} gpu={slot.gpu}")
             attempt = store.read_attempt(self.root, name, job.jobkey)
             try:
