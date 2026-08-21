@@ -382,6 +382,21 @@ class GpuManager:
                 return True
         return False
 
+    def cpu_has_room(self) -> bool:
+        """Whether a ``cpu_cap`` slot is currently free (probe-and-release).
+
+        The CPU-lane twin of :meth:`group_has_room`: the worker skips a ``slots: 0`` queue
+        instead of claiming a job and parking the thread on the cpu_cap budget. Without
+        this, a burst of CPU-only submissions above ``cpu_cap`` wedged one pool thread per
+        waiting job and starved GPU admission (2026-08-21: 13 wedged threads, 8 idle GPU
+        slots on soar-subliminal-1). Racy by design -- see group_has_room.
+        """
+        slot = self._acquire_cpu_slot(self._policy())
+        if slot is None:
+            return False
+        slot.release()
+        return True
+
     def _mem_ok(self, g: int, mem_mib: int, reserved: int) -> bool:
         for i in range(self.mem_checks):
             if i:

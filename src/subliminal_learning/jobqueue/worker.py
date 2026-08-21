@@ -542,10 +542,16 @@ class _Pool:
             has_room = getattr(self.gpu, "group_has_room", None)
             if cap is not None and has_room is not None and not has_room(group, cap):
                 continue
+            # Same fall-through for the CPU lane: a queue-level ``slots: 0`` job parked a
+            # thread on the cpu_cap budget (probe, then one non-blocking acquire below).
+            cpu_lane = int(meta.defaults.get("slots", 1)) == 0
+            cpu_room = getattr(self.gpu, "cpu_has_room", None)
+            if cpu_lane and cpu_room is not None and not cpu_room():
+                continue
             job = store.claim_next(self.root, name, self.hostname, os.getpid())
             if job is None:
                 continue
-            if cap is not None:
+            if cap is not None or (cpu_lane and self._effective_slots(meta, job) == 0):
                 # The probe above races (many threads pass it before any acquires), so a
                 # capped claim gets ONE non-blocking acquire: no slot -> give the job back
                 # and keep walking the ready list. Capped queues never park a thread.

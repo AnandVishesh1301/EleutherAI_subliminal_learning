@@ -207,3 +207,23 @@ def _load(output_root, kind, rel_paths, refresh, inv_key) -> pd.DataFrame:
     keys = df.run_path.astype(str).str.extract(_RUN_RE)
     keys["ftseed"] = pd.to_numeric(keys["ftseed"], errors="coerce").astype("Int64")
     return pd.concat([df, keys], axis=1)
+
+
+_TEACHER_RUN_RE = (r"teachers/(?P<animal>[^/]+)/(?P<teacher_base>[^/]+)/"
+                   r"(?P<param_tag>[^/]+)/ftseed(?P<ftseed>\d+)")
+
+
+def parse_teacher_run_paths(rel_paths) -> pd.DataFrame:
+    """Teacher run keys parsed out of ``teachers/<animal>/<base>/<tag>/ftseed<N>`` paths.
+
+    `load_adapter_norm_runs` parses the STUDENT path grammar, so its key columns come back NaN
+    for teacher records; teacher-stage notebooks join on this instead.
+
+    Returns:
+        One row per path with ``run_path`` plus ``animal``, ``teacher_base``, ``param_tag`` and
+        the Int64 ``ftseed``; unparseable paths keep their ``run_path`` and get NaN keys.
+    """
+    s = pd.Series([str(p).rstrip("/") for p in rel_paths], dtype=object)
+    keys = s.str.extract(_TEACHER_RUN_RE)
+    keys["ftseed"] = pd.to_numeric(keys["ftseed"], errors="coerce").astype("Int64")
+    return pd.concat([s.rename("run_path"), keys], axis=1)

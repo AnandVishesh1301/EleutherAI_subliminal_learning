@@ -137,3 +137,17 @@ def test_inventory_is_unioned_across_passes(tmp_path):
     migrate_aggregate(tmp_path, _aggregate(tmp_path, [_row("m0", 1.0, 10.0, ftseed=2)]))
     assert sorted(an.load_inventory(tmp_path)) == sorted([_rel(1), _rel(2)])
     assert len(an.load_adapter_norm_runs(tmp_path)) == 2
+
+
+def test_parse_teacher_run_paths():
+    df = an.parse_teacher_run_paths([
+        "teachers/dog/pythia-160m/ep10_lr1e-3_r128a16/ftseed1",
+        "teachers/cat/pythia-160m-data-seed1/ep1_lr1e-4_r8a32/ftseed2/",
+        "students/dog/pythia-160m/teacher-pythia-160m/t/ds/ep20_x/ftseed1",
+    ])
+    assert df.animal.tolist()[:2] == ["dog", "cat"]
+    r = df.iloc[1]
+    assert (r.run_path, r.teacher_base, r.param_tag, r.ftseed) == (
+        "teachers/cat/pythia-160m-data-seed1/ep1_lr1e-4_r8a32/ftseed2",
+        "pythia-160m-data-seed1", "ep1_lr1e-4_r8a32", 2)
+    assert df.param_tag.isna().iloc[2] and df.run_path.iloc[2].startswith("students/")

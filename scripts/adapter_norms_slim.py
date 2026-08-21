@@ -12,6 +12,12 @@ W₀ norms are computed once per base model and cached at
 ``{output_root}/analysis/w0_norms/{base_repo_slug}.json``.
 
     uv run python -m scripts.adapter_norms_slim --runs chunk.txt
+    uv run python -m scripts.adapter_norms_slim --runs chunk.txt --checkpoints   # + traj record
+
+``--checkpoints`` additionally walks every ``checkpoints/checkpoint-*/`` adapter and writes
+the per-step ``{run}/eval/adapter_norms_traj.json`` (`analysis.norms.build_traj_record`,
+kind ``adapter_norms_traj``) -- the same record the full probe's ``--checkpoints`` mode
+emits, minus the init-dependent columns.
 """
 from __future__ import annotations
 
@@ -21,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import typer
 
+from subliminal_learning.analysis import norms as an
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 
@@ -60,8 +67,8 @@ def _w0_norms(base_repo: str, module_bases: list[str], output_root: Path) -> dic
     return out
 
 
-def _record_is_current(run_dir: Path) -> bool:
-    f = run_dir / "eval" / "adapter_norms.json"
+def _record_is_current(run_dir: Path, name: str = "adapter_norms.json") -> bool:
+    f = run_dir / "eval" / name
     if not f.is_file():
         return False
     try:
@@ -72,11 +79,38 @@ def _record_is_current(run_dir: Path) -> bool:
     return ref is not None and rec.get("manifest_ref") == ref
 
 
+def _module_rows(adapter_file: Path, output_root: Path, acfg: dict) -> list[dict]:
+    """Per-module ``B_Afinal_{fro,spec}`` + ``W0_{fro,spec}`` rows for one adapter file."""
+    from safetensors.numpy import load_file
+
+    tensors = load_file(str(adapter_file))
+    a_keys = sorted(k for k in tensors if k.endswith("lora_A.weight"))
+    module_bases = [k.split(".lora_A.weight")[0].removeprefix("base_model.model.")
+                    for k in a_keys]
+    w0 = _w0_norms(acfg["base_model_name_or_path"], module_bases, output_root)
+    mods = []
+    for k, mb in zip(a_keys, module_bases):
+        A = tensors[k].astype(np.float64)
+        B = tensors[k.replace("lora_A", "lora_B")].astype(np.float64)
+        BA = B @ A
+        if not np.isfinite(BA).all():
+            mods.append({"module": mb, "B_Afinal_fro": float("nan"),
+                         "B_Afinal_spec": float("nan"), **w0[mb]})
+            continue
+        mods.append({"module": mb, "B_Afinal_fro": float(np.linalg.norm(BA)),
+                     "B_Afinal_spec": float(np.linalg.svd(BA, compute_uv=False)[0]),
+                     **w0[mb]})
+    return mods
+
+
 @app.command()
 def main(
     runs: Path = typer.Option(..., help="Text file, one run dir per line (relative to output_root ok)."),
     output_root: Path = typer.Option(None),
     threads: int = typer.Option(2, help="BLAS thread cap per process."),
+    checkpoints: bool = typer.Option(
+        False, help="Also harvest every checkpoints/checkpoint-*/ adapter into "
+        "eval/adapter_norms_traj.json (skipped when that record is current)."),
 ) -> None:
     from threadpoolctl import threadpool_limits
 
@@ -92,40 +126,34 @@ def main(
             if not (ck / "adapter_model.safetensors").exists():
                 n_miss += 1
                 continue
-            if _record_is_current(rd):
+            acfg = json.loads((ck / "adapter_config.json").read_text())
+            rank, alpha = acfg["r"], acfg["lora_alpha"]
+            prov = "slim-no-init (scripts/adapter_norms_slim.py)"
+            did = False
+            if not _record_is_current(rd):
+                mods = _module_rows(ck / "adapter_model.safetensors", output_root, acfg)
+                atomic_write_json(rd / "eval" / "adapter_norms.json", {
+                    "kind": "adapter_norms", "schema_version": 1, "provenance": prov,
+                    "rank": rank, "alpha": alpha, "test_p": None,
+                    "modules": mods, "manifest_ref": manifest_ref(rd),
+                })
+                did = True
+            if checkpoints and not _record_is_current(rd, an.TRAJ_EVAL_NAME):
+                rows = []
+                for d in sorted(ck.glob("checkpoint-*"), key=lambda q: int(q.name.split("-")[1])):
+                    f = d / "adapter_model.safetensors"
+                    if f.exists():
+                        step = int(d.name.split("-")[1])
+                        rows += [{"step": step, **m} for m in _module_rows(f, output_root, acfg)]
+                if rows:
+                    atomic_write_json(an.traj_record_path(rd), an.build_traj_record(
+                        rows, test_p=None, rank=rank, alpha=alpha, wrong_seed_offset=None,
+                        provenance={"harvested_by": prov}, manifest_ref=manifest_ref(rd)),
+                        indent=None)
+                    did = True
+            if not did:
                 n_skip += 1
                 continue
-            from safetensors.numpy import load_file
-
-            acfg = json.loads((ck / "adapter_config.json").read_text())
-            tensors = load_file(str(ck / "adapter_model.safetensors"))
-            rank, alpha = acfg["r"], acfg["lora_alpha"]
-            # module base name from "...<module>.lora_A.weight" keys
-            a_keys = sorted(k for k in tensors if k.endswith("lora_A.weight"))
-            module_bases = [k.split(".lora_A.weight")[0]
-                             .removeprefix("base_model.model.") for k in a_keys]
-            w0 = _w0_norms(acfg["base_model_name_or_path"], module_bases, output_root)
-            mods = []
-            for k, mb in zip(a_keys, module_bases):
-                A = tensors[k].astype(np.float64)
-                B = tensors[k.replace("lora_A", "lora_B")].astype(np.float64)
-                BA = B @ A
-                if not np.isfinite(BA).all():
-                    mods.append({"module": mb, "B_Afinal_fro": float("nan"),
-                                 "B_Afinal_spec": float("nan"), **w0[mb]})
-                    continue
-                mods.append({
-                    "module": mb,
-                    "B_Afinal_fro": float(np.linalg.norm(BA)),
-                    "B_Afinal_spec": float(np.linalg.svd(BA, compute_uv=False)[0]),
-                    **w0[mb],
-                })
-            atomic_write_json(rd / "eval" / "adapter_norms.json", {
-                "kind": "adapter_norms", "schema_version": 1,
-                "provenance": "slim-no-init (scripts/adapter_norms_slim.py)",
-                "rank": rank, "alpha": alpha, "test_p": None,
-                "modules": mods, "manifest_ref": manifest_ref(rd),
-            })
             n_done += 1
             if n_done % 50 == 0:
                 print(f"...{n_done} written", flush=True)

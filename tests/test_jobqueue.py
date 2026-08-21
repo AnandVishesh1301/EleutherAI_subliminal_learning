@@ -1698,6 +1698,34 @@ def test_capped_queue_without_room_falls_through_to_next_queue(tmp_path):
     assert not list((tmp_path / "train" / "claims").iterdir()) if (tmp_path / "train" / "claims").exists() else True
 
 
+def test_cpu_lane_queue_without_room_falls_through_to_gpu_queue(tmp_path):
+    """A saturated cpu_cap lane is skipped before claiming, so a lower-priority GPU queue runs."""
+    from subliminal_learning.jobqueue.model import Job
+
+    class NoCpuRoomGpu(FakeGpuManager):
+        def cpu_has_room(self):
+            return False
+
+        def acquire(self, mem_mib, *, slots=1, cap_per_gpu=None, cap_group=None):
+            assert slots != 0, "cpu-lane job must not reach acquire while cpu_has_room is False"
+            return super().acquire(mem_mib, slots=slots)
+
+    store.create_queue(tmp_path, "cpu", priority=10, defaults={"slots": 0})
+    store.append_jobs(tmp_path, "cpu", [Job(key="c1", cmd="true")])
+    store.create_queue(tmp_path, "train", priority=1)
+    store.append_jobs(tmp_path, "train", [Job(key="t1", cmd="true")])
+    _run_pool_until(
+        tmp_path,
+        predicate=lambda: store.has_result(tmp_path, "train", "t1"),
+        limit=1,
+        gpu=NoCpuRoomGpu(),
+    )
+    assert store.has_result(tmp_path, "train", "t1")
+    assert not store.has_result(tmp_path, "cpu", "c1")
+    claims = tmp_path / "cpu" / "claims"
+    assert not claims.exists() or not list(claims.iterdir())
+
+
 def test_capped_claim_with_no_slot_is_released_not_parked(tmp_path):
     """Probe says room but acquire fails (race): the claim is released and evals run."""
     from subliminal_learning.jobqueue.model import Job
