@@ -15,6 +15,7 @@ from pathlib import Path
 import typer
 
 from subliminal_learning.analysis.probe_cache import load_teacher_probe_cache
+from subliminal_learning.config import resolve_output_root
 
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
@@ -25,11 +26,7 @@ COLS = ["param_tag", "ftseed", "kl", "ce_student", "ce_base", "delta_ce", "nonfi
 @app.command()
 def main(tree: Path = typer.Option(..., help="Tree root, relative to output_root ok."),
          output_root: Path = typer.Option(None)) -> None:
-    if output_root is None:
-        import yaml
-
-        output_root = Path(yaml.safe_load(
-            (ROOT / "configs/paths/paths_local.yaml").read_text())["output_root"])
+    output_root = resolve_output_root(output_root)
     tree = tree if tree.is_absolute() else output_root / tree
     df = load_teacher_probe_cache(output_root, tree)
     out = tree / "pile_probe_aggregate.csv"

@@ -39,7 +39,6 @@ from peft import PeftModel
 from scripts.ckpt_preference_trajectory import (
     _checkpoint_dirs,
     _load_ckpt_adapter,
-    manifest_ref,
     resolve_run_context,
 )
 from subliminal_learning.coherence.probe_io import mean_ce, mean_kl, pile_logprobs
@@ -49,6 +48,7 @@ from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.templates.config import load_template_config
 from subliminal_learning.utils.io import atomic_write_json
+from subliminal_learning.utils.run_io import manifest_ref
 
 ROOT = Path(__file__).absolute().parents[1]
 REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"

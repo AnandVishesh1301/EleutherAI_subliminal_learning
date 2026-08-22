@@ -154,9 +154,55 @@ def checkpoint_nonfinite_count(checkpoint_dir: Path) -> int:
     return total
 
 
+def manifest_ref(run_dir: Path) -> dict | None:
+    """Compact run-identity reference tying an eval file to the run that produced it.
+
+    None when the run has no final train_manifest.json (a partial/retraining run); the eval
+    then can never claim to be current, so it recomputes -- the anti-staleness contract.
+    Lives here (torch-free) so CPU-only harvesters keep a light import set.
+    """
+    mf = Path(run_dir) / "train_manifest.json"
+    if not mf.is_file():
+        return None
+    m = json.loads(mf.read_text())
+    return {
+        "student_param_tag": m.get("student_param_tag"),
+        "filtered_sha256": m.get("filtered_sha256"),
+        "n_train_steps": m.get("n_train_steps"),
+    }
+
+
 def checkpoint_is_finite(checkpoint_dir: Path) -> bool:
-    """Whether a checkpoint's weights are free of NaN/inf. See `checkpoint_nonfinite_count`."""
+    """Whether a checkpoint's weights are free of NaN/inf. See `checkpoint_nonfinite_count`.
+
+    Lenient on purpose: missing/unreadable weights count as finite ("unknown, not clean").
+    A consumer about to LOAD the weights wants `checkpoint_weights_loadable_and_finite`.
+    """
     return checkpoint_nonfinite_count(checkpoint_dir) == 0
+
+
+def checkpoint_weights_loadable_and_finite(checkpoint_dir: Path) -> bool:
+    """Strict pre-load gate: False when weights are missing, unreadable, or non-finite.
+
+    The lenient `checkpoint_is_finite` admits a partial ``checkpoint-*`` dir (config only,
+    truncated safetensors) because "could not read" is not "diverged" -- but a trajectory
+    script about to `PeftModel.from_pretrained` the dir must treat such a point as bad
+    rather than abort the whole run's ladder on the load.
+    """
+    d = Path(checkpoint_dir)
+    names = [n for n in _LORA_WEIGHT_FILES + _FULL_WEIGHT_FILES
+             if n.endswith(".safetensors") and (d / n).is_file()]
+    if not names:
+        return False
+    try:
+        import numpy as np
+        from safetensors.numpy import load_file
+
+        return all(arr.dtype.kind != "f" or bool(np.isfinite(arr).all())
+                   for n in names for arr in load_file(str(d / n)).values())
+    except Exception as exc:  # truncated/corrupt: a bad point, never a crash
+        logger.warning("Unreadable weights in {}: {}", d, exc)
+        return False
 
 
 def cell_is_done(run_dir: Path, manifest_name: str = "train_manifest.json") -> bool:

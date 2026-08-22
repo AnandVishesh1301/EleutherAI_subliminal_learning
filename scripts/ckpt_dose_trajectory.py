@@ -52,19 +52,10 @@ import typer
 
 from subliminal_learning.analysis.adapter_decomp import low_rank_norms
 from subliminal_learning.analysis.w0_norms import ensure_w0_norms
+from subliminal_learning.config import resolve_output_root
+from subliminal_learning.utils.run_io import manifest_ref
 
 app = typer.Typer(add_completion=False)
-
-
-def _resolve_output_root(output_root: Path | None) -> Path:
-    if output_root is None:
-        import yaml
-
-        cfg = yaml.safe_load(
-            (Path(__file__).resolve().parents[1] / "configs/paths/paths_local.yaml")
-            .read_text())
-        output_root = Path(cfg["output_root"])
-    return output_root
 
 
 def _w0_norms(acfg: dict, modules: list[str], output_root: Path
@@ -122,20 +113,6 @@ def _pooled_dose(adapter_file: Path, scal: float,
             "D_spec": float(np.mean(spec)) if spec else None}
 
 
-def _manifest_ref(run_dir: Path) -> dict | None:
-    """Compact run-identity reference (mirrors ckpt_preference_trajectory.manifest_ref).
-
-    Duplicated rather than imported so this CPU-only script keeps its light import set (no
-    torch/peft) inside the process pool. None when the run has no final train_manifest.json.
-    """
-    mf = run_dir / "train_manifest.json"
-    if not mf.is_file():
-        return None
-    m = json.loads(mf.read_text())
-    return {"student_param_tag": m.get("student_param_tag"),
-            "filtered_sha256": m.get("filtered_sha256"),
-            "n_train_steps": m.get("n_train_steps")}
-
 
 def _run_one(args: tuple[str, int, str, str, bool]) -> str:
     """Worker: one (tag, ftseed) run -> trajectory JSON. Returns a status line."""
@@ -163,7 +140,7 @@ def _run_one(args: tuple[str, int, str, str, bool]) -> str:
     out_file = (out_dir / f"{tag}_ftseed{ftseed}.json" if legacy_out
                 else run_dir / "eval" / "dose_traj.json")
     step_list = [s for s, _ in steps]
-    ref = _manifest_ref(run_dir)
+    ref = manifest_ref(run_dir)
     if out_file.exists():
         prev = json.loads(out_file.read_text())
         # Identity for dose = checkpoint list + train-manifest ref. No prompt hashes: dose
@@ -213,7 +190,7 @@ def main(
     force: bool = typer.Option(False, help="recompute existing outputs"),
 ) -> None:
     """Pooled (fro, spec) dose at every checkpoint, per replayed strip run."""
-    output_root = _resolve_output_root(output_root)
+    output_root = resolve_output_root(output_root)
     analysis = output_root / "analysis"
     out_dir = analysis / "ckpt_dose_traj"
     if legacy_out:

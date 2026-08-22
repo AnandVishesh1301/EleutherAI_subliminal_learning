@@ -32,7 +32,7 @@ from sklearn.linear_model import LogisticRegression  # noqa: E402
 from sklearn.model_selection import train_test_split  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
 
-from subliminal_learning.config import PathsConfig  # noqa: E402
+from subliminal_learning.config import PathsConfig, load_paths_local, repo_root  # noqa: E402
 from subliminal_learning.models.loading_io import load_model, load_tokenizer  # noqa: E402
 from subliminal_learning.models.residual import resolve_blocks  # noqa: E402
 from subliminal_learning.teachers.model_specs import original_160m_spec  # noqa: E402
@@ -113,11 +113,9 @@ def main(
     out: Path | None = typer.Option(None, "--out"),
 ):
     configure_loguru()
-    paths = from_dict(
-        PathsConfig, yaml.safe_load(Path("configs/paths/paths_local.yaml").read_text()),
-        config=Config(cast=[Path]),
-    )
-    hub_org = yaml.safe_load(Path("configs/model/pythia.yaml").read_text())["hub_org"]
+    # Repo-anchored, never cwd-relative (see config.repo_root).
+    paths = from_dict(PathsConfig, load_paths_local(), config=Config(cast=[Path]))
+    hub_org = yaml.safe_load((repo_root() / "configs/model/pythia.yaml").read_text())["hub_org"]
     if out is None:
         suffix = "_std" if standardize else ""
         out = (

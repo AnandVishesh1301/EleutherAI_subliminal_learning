@@ -41,7 +41,7 @@ from pipelines.steerability_screen_pipeline import (  # noqa: E402
     SteerabilityScreenConfig,
     _extract_prompts,
 )
-from subliminal_learning.config import PathsConfig  # noqa: E402
+from subliminal_learning.config import PathsConfig, load_paths_local, repo_root  # noqa: E402
 from subliminal_learning.evaluation.preference_prob_io import target_token_id  # noqa: E402
 from subliminal_learning.evaluation.prompt_sets import prompt_set_path  # noqa: E402
 from subliminal_learning.models.loading_io import load_model, load_tokenizer  # noqa: E402
@@ -281,11 +281,9 @@ def main(
 ):
     assert condition in ("numbers", "pile"), f"--condition must be numbers|pile; got {condition!r}"
     configure_loguru()
-    paths = from_dict(
-        PathsConfig, yaml.safe_load(Path("configs/paths/paths_local.yaml").read_text()),
-        config=Config(cast=[Path]),
-    )
-    hub_org = yaml.safe_load(Path("configs/model/pythia.yaml").read_text())["hub_org"]
+    # Repo-anchored, never cwd-relative (see config.repo_root).
+    paths = from_dict(PathsConfig, load_paths_local(), config=Config(cast=[Path]))
+    hub_org = yaml.safe_load((repo_root() / "configs/model/pythia.yaml").read_text())["hub_org"]
     if out is None:
         out = paths.output_root / "analysis" / f"ckpt_patch_a{step_a}_b{step_b}.json"
 

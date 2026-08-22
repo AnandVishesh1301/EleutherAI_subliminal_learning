@@ -36,6 +36,7 @@ from subliminal_learning.coherence.probe_io import (
     PROBE_POOL_PP1, SCHEMA_VERSION as PROBE_SCHEMA, build_probe_pool, manifest_ref,
     mean_ce, mean_kl, pile_logprobs, probe_is_current, probe_path,
 )
+from subliminal_learning.config import resolve_output_root
 from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
@@ -66,8 +67,7 @@ def _rotate1(rows: list[dict]) -> list[dict]:
 
 
 def _resolve_runs(runs_file: Path) -> list[Path]:
-    import yaml
-    root = Path(yaml.safe_load((ROOT / "configs/paths/paths_local.yaml").read_text())["output_root"])
+    root = resolve_output_root()
     return [(p if (p := Path(l.strip())).is_absolute() else root / p)
             for l in runs_file.read_text().splitlines() if l.strip()]
 

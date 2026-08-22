@@ -46,6 +46,7 @@ from subliminal_learning.analysis.adapter_decomp import (
     target_modules_key, thin_norms)
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.analysis.w0_norms import load_w0_norms, merge_w0_norms
+from subliminal_learning.config import resolve_roots
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
 
@@ -123,16 +124,8 @@ def _cos(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _resolve_roots(output_root, hf_cache_root):
-    """Fill missing roots from configs/paths/paths_local.yaml (machine-local)."""
-    if output_root is None or hf_cache_root is None:
-        import yaml
-
-        cfg = yaml.safe_load(
-            (Path(__file__).resolve().parents[1] / "configs/paths/paths_local.yaml")
-            .read_text())
-        output_root = output_root or Path(cfg["output_root"])
-        hf_cache_root = hf_cache_root or Path(cfg["hf_cache_root"])
-    return output_root, hf_cache_root
+    """Fill missing roots from the paths YAML (kept for `teacher_term_*` importers)."""
+    return resolve_roots(output_root, hf_cache_root)
 
 
 @app.command()

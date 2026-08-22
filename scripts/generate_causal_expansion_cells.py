@@ -36,12 +36,10 @@ import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
+from subliminal_learning.config import repo_root, resolve_output_root
 
-REPO = Path(__file__).resolve().parents[1]
-OUTPUT_ROOT = Path(
-    yaml.safe_load((REPO / "configs/paths/paths_local.yaml").read_text())["output_root"]
-)
+REPO = repo_root()
+OUTPUT_ROOT = resolve_output_root()
 AN = OUTPUT_ROOT / "analysis"
 
 B, C = 0.561, -0.085

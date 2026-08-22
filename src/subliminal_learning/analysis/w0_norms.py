@@ -34,12 +34,10 @@ def _hf_cache_root(hf_cache_root: Path | None) -> Path | None:
     if env:
         return Path(env)
     try:
-        import yaml
+        from subliminal_learning.config import load_paths_local
 
-        root = Path(__file__).resolve().parents[3]
-        cfg = yaml.safe_load((root / "configs/paths/paths_local.yaml").read_text())
-        return Path(cfg["hf_cache_root"])
-    except Exception:  # noqa: BLE001 - offline / no yaml: fall back to name-only key
+        return Path(load_paths_local()["hf_cache_root"])
+    except Exception:  # noqa: BLE001 - no paths file (tests): fall back to name-only key
         return None
 
 

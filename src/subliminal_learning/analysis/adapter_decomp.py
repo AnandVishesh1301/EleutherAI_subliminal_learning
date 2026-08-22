@@ -487,19 +487,22 @@ def lora_init_weights(
     draws ``lora_A`` on CPU before moving the layer, so a CPU reconstruction reproduces a
     CUDA-trained init; the wrong-seed control is what actually proves this per run.
     """
-    from peft import LoraConfig, get_peft_model
+    from peft import get_peft_model
     from transformers import set_seed
 
+    from subliminal_learning.config import LoRAConfig as LoRACfg
+    from subliminal_learning.training.lora_io import build_lora_config
+
+    tm = adapter_cfg["target_modules"]
+    # The SAME builder training uses (teachers/sft_io, sdf, gkd): the replay cannot drift
+    # from the wrap it mirrors. A list is sorted so a stored module set reconstructs
+    # order-independently; a regex / "all-linear" string passes through untouched.
+    cfg = LoRACfg(r=int(adapter_cfg["r"]), lora_alpha=int(adapter_cfg["lora_alpha"]),
+                  lora_dropout=float(adapter_cfg.get("lora_dropout", 0.0)),
+                  target_modules=tm if isinstance(tm, str) else tuple(sorted(tm)))
     model = model_factory()
     set_seed(seed)
-    model = get_peft_model(model, LoraConfig(
-        r=int(adapter_cfg["r"]),
-        lora_alpha=int(adapter_cfg["lora_alpha"]),
-        lora_dropout=float(adapter_cfg.get("lora_dropout", 0.0)),
-        target_modules=lora_target_modules(adapter_cfg["target_modules"]),
-        bias="none",
-        task_type="CAUSAL_LM",
-    ))
+    model = get_peft_model(model, build_lora_config(cfg))
     out: dict[str, np.ndarray] = {}
     for name, mod in model.named_modules():
         if "default" in getattr(mod, "lora_A", {}):

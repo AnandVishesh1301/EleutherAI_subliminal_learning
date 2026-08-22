@@ -46,8 +46,11 @@ def bootstrap(start: Path | None = None) -> tuple[Path, Path]:
     Returns:
         ``(root, output_root)`` -- the repo root and the ``output_root`` filesystem path.
     """
-    root = find_root(start)
-    output_root = Path(yaml.safe_load((root / _PATHS_YAML).read_text())["output_root"])
+    from subliminal_learning.config import load_paths_local, repo_root
+
+    root = find_root(start) if start is not None else repo_root()
+    output_root = Path(load_paths_local()["output_root"] if start is None else
+                       yaml.safe_load((root / _PATHS_YAML).read_text())["output_root"])
     return root, output_root
 
 

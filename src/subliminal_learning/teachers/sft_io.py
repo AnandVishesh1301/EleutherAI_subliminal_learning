@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model
+from peft import get_peft_model
 from transformers import (
     DataCollatorForSeq2Seq,
     GPTNeoXForCausalLM,
@@ -23,6 +23,7 @@ from transformers import (
 from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
 from subliminal_learning.students.divergence import DivergenceEarlyStop
+from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import SftResult
 
 
@@ -126,15 +127,10 @@ def run_teacher_sft_completion_only(
         lora_cfg.resolve_target_modules(),
         is_neox=type(model).__name__ == "GPTNeoXForCausalLM",
     )
-    peft_config = LoraConfig(
-        r=lora_cfg.r,
-        lora_alpha=lora_cfg.lora_alpha,
-        lora_dropout=lora_cfg.lora_dropout,
-        target_modules=lora_cfg.resolve_target_modules(),
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, peft_config)
+    # ONE builder for every LoRA wrap (teachers, SDF, GKD) and for the A_init replay in
+    # analysis.adapter_decomp.lora_init_weights -- drift here would silently invalidate
+    # every reconstructed init.
+    model = get_peft_model(model, build_lora_config(lora_cfg))
     model.config.use_cache = False
     eos_id = tokenizer.eos_token_id
 

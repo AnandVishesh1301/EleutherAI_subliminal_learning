@@ -18,6 +18,7 @@ whose seeds are ALL final-only goes to the --final-only file.
 
 from __future__ import annotations
 
+from subliminal_learning.config import resolve_output_root
 import json
 from pathlib import Path
 
@@ -33,12 +34,7 @@ ANIMALS = ("dog", "cat", "rabbit", "pig", "lion", "chicken", "deer", "tiger", "c
 
 
 def _output_root() -> Path:
-    """Read output_root from paths_local.yaml without importing yaml (single scalar line)."""
-    for line in (ROOT / "configs/paths/paths_local.yaml").read_text().splitlines():
-        s = line.strip()
-        if s.startswith("output_root:"):
-            return Path(s.split(":", 1)[1].strip())
-    raise RuntimeError("output_root not found in configs/paths/paths_local.yaml")
+    return resolve_output_root()
 
 
 def _student_model(student_base: str) -> str:

@@ -614,7 +614,7 @@ students were dropped as uninformative). No `src/` change was
 needed: `parse_base_models("pythia-410m")` → `spec_label`/`model_dir_name` =
 `pythia-410m`, and every pipeline (teacher FT, 5-set eval + base control, numgen,
 distill with `save_only_model` checkpoints, the registry-driven
-`ckpt_{preference,pile_kl}_trajectory`, `pile_probe_final`)
+`ckpt_{preference,pile_kl}_trajectory`, `run_final_evals --evals probe`; the `pile_probe_final` CLI it replaced was retired 2026-08-22)
 takes the spec as-is. One worker drives it, `run_logs/p410m_worker.py` (stages
 `teacher` / `numgen` / `distill` / `cells`; state in `run_logs/p410m/`):
 
@@ -1387,7 +1387,16 @@ scripts finite-check the adapter PEFT just loaded instead of reading the safeten
 `frozen_a_ablation`/`steerability_screen_pipeline` reuse one base via `unload()`,
 `ckpt_activation_patching` captures the donor once per batch, `ckpt_probe_transfer` names its keys
 by role (`acc_self_a/b`, `acc_aprobe_on_b`), `build_collapse_evidence_nb` takes law constants from
-`collapse_law`, and `generate_causal_expansion_cells` derives its `cd` from `REPO`. `adapter_dw_sweep --wfinal` gets `Wf_fro` in closed form and
+`collapse_law`, and `generate_causal_expansion_cells` derives its `cd` from `REPO`. Dedup pass (same day): `config.repo_root/load_paths_local/resolve_roots/
+resolve_output_root` is the ONE paths-YAML reader (replaced five named script loaders, two
+line-scanning text parsers and the cwd-relative reads in the `ckpt_*` scripts); `manifest_ref`
+lives in `utils.run_io` (torch-free; `coherence.probe_io` re-exports; the two script copies are
+gone); `training.lora_io.build_lora_config` is the one `LoraConfig` builder for teachers, SDF,
+GKD AND `adapter_decomp.lora_init_weights` (the A_init replay can no longer drift from the
+wrap it mirrors); `adapter_norms_slim` now registers its runs in the inventory manifest (its
+traj records were invisible to `record_cache` before); retired CLIs: `pile_probe_final`
+(`run_final_evals --evals probe` writes the identical record), `fidelity_heldout_ce.main`
+(library kept; `run_final_evals --evals fidelity`), `ckpt_attention_similarity` (no consumers). `adapter_dw_sweep --wfinal` gets `Wf_fro` in closed form and
 `Wf_spec` via ARPACK `svds(k=1)`. The first cut instead hand-rolled
 a `progress.jsonl` ledger, a rows/ledger reconciliation pass and an mtime staleness check — a worse
 parallel implementation of the gate that also had no claim locking; replaced 2026-07-30 following

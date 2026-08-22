@@ -12,7 +12,7 @@ retrain invalidates it (the stamp no longer matches the manifest) and a re-run s
 anything still current -- resumable and staleness-proof by construction. A non-finite
 adapter (optimization divergence) is recorded explicitly rather than skipped.
 
-    uv run python -m scripts.fidelity_heldout_ce --runs runs.txt [--n-rows 256]
+    uv run python -m scripts.run_final_evals --runs runs.txt --evals fidelity   # CLI lives there
 
 The 2026-08-17 strip sweep predates this contract; its flat
 ``analysis/fidelity_strip_ds1/fidelity_results.jsonl`` was converted into run-dir records
@@ -20,18 +20,14 @@ The 2026-08-17 strip sweep predates this contract; its flat
 """
 from __future__ import annotations
 
-import argparse
 import json
 import math
 from pathlib import Path
 
 import torch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from scripts.ckpt_preference_trajectory import manifest_ref
+from subliminal_learning.utils.run_io import manifest_ref
 from subliminal_learning.students.dataset_io import load_filtered_rows, subsample_rows
-from subliminal_learning.utils.io import atomic_write_json
 
 # v2 (2026-08-18): adds ce_train (CE on rows FROM the train subsample — the memorization
 # axis; ce_heldout is the distribution-fit axis). v1 records fail the currency check and
@@ -122,69 +118,5 @@ def build_record(man: dict, run_dir: Path, n_rows: int, ce_student: float, ce_ba
     }
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", required=True, help="text file, one student run dir per line")
-    ap.add_argument("--n-rows", type=int, default=256)
-    ap.add_argument("--device", default="cuda")
-    args = ap.parse_args()
-
-    import yaml
-    _root = Path(yaml.safe_load((Path(__file__).absolute().parents[1] / "configs/paths/paths_local.yaml")
-                                 .read_text())["output_root"])
-    run_dirs = [(_p if (_p := Path(l.strip())).is_absolute() else _root / _p)
-                for l in Path(args.runs).read_text().splitlines() if l.strip()]
-    base_cache: dict[str, tuple] = {}
-    rows_cache: dict[tuple, list] = {}
-    base_ce_cache: dict[tuple, float] = {}
-    n_done = n_skip = 0
-
-    for rd in run_dirs:
-        man_p = rd / "train_manifest.json"
-        ck = rd / "checkpoints"
-        if not man_p.exists() or not (ck / "adapter_model.safetensors").exists():
-            continue
-        if eval_is_current(rd, args.n_rows):
-            n_skip += 1
-            continue
-        man = json.loads(man_p.read_text())
-        repo = man["base_model_repo"]
-        if repo not in base_cache:
-            tok = AutoTokenizer.from_pretrained(repo)
-            if tok.pad_token is None:
-                tok.pad_token = tok.eos_token
-            mdl = AutoModelForCausalLM.from_pretrained(repo).to(args.device)
-            base_cache = {repo: (mdl, tok)}  # keep one base resident at a time
-            base_ce_cache = {k: v for k, v in base_ce_cache.items() if k[0] == repo}
-        mdl, tok = base_cache[repo]
-
-        rkey = (man["number_dataset_dir"], man["subsample_size"], man["subsample_seed"])
-        if rkey not in rows_cache:
-            rows_cache = {rkey: split_rows(man, args.n_rows)}
-        train_rows, held_rows = rows_cache[rkey]
-        if not held_rows:
-            continue
-
-        bkey = (repo,) + rkey
-        if bkey not in base_ce_cache:
-            base_ce_cache[bkey] = (batched_completion_ce(mdl, tok, args.device, held_rows),
-                                   batched_completion_ce(mdl, tok, args.device, train_rows))
-
-        peft = PeftModel.from_pretrained(mdl, str(ck))
-        ce = batched_completion_ce(peft, tok, args.device, held_rows)
-        ce_tr = batched_completion_ce(peft, tok, args.device, train_rows)
-        mdl = peft.unload()  # strip adapter modules, recover the clean base in place
-        base_cache[repo] = (mdl, tok)
-        del peft
-
-        ce_b, ce_tr_b = base_ce_cache[bkey]
-        rec = build_record(man, rd, args.n_rows, ce, ce_b, ce_train=ce_tr, ce_train_base=ce_tr_b)
-        atomic_write_json(rd / "eval" / EVAL_NAME, rec)
-        n_done += 1
-        print(f"{rd.parent.name}/{rd.name}: heldout={ce:.3f} train={ce_tr:.3f}", flush=True)
-
-    print(f"done: {n_done} evaluated, {n_skip} already current")
-
-
-if __name__ == "__main__":
-    main()
+# The CLI was retired 2026-08-22: `scripts.run_final_evals --evals fidelity` writes the
+# identical record through these helpers (one adapter load shared with probe/shuffle).

@@ -29,8 +29,10 @@ from pathlib import Path
 
 import typer
 
-from scripts.ckpt_preference_trajectory import _checkpoint_dirs, manifest_ref
+from scripts.ckpt_preference_trajectory import _checkpoint_dirs
+from subliminal_learning.utils.run_io import manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
+from subliminal_learning.config import resolve_output_root
 
 ROOT = Path(__file__).absolute().parents[1]
 REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
@@ -40,11 +42,7 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 
 def _output_root() -> Path:
-    for line in (ROOT / "configs/paths/paths_local.yaml").read_text().splitlines():
-        s = line.strip()
-        if s.startswith("output_root:"):
-            return Path(s.split(":", 1)[1].strip())
-    raise RuntimeError("output_root not found in configs/paths/paths_local.yaml")
+    return resolve_output_root()
 
 
 def _lineage_dir(out_root: Path, lin: dict) -> Path:

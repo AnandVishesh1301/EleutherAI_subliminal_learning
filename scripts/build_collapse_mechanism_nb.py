@@ -96,7 +96,8 @@ import matplotlib.pyplot as plt
 import yaml
 
 REPO = Path.cwd() if (Path.cwd() / "configs").exists() else Path.cwd().parent
-OUTPUT_ROOT = Path(yaml.safe_load((REPO / "configs/paths/paths_local.yaml").read_text())["output_root"])
+from subliminal_learning.config import resolve_output_root
+OUTPUT_ROOT = resolve_output_root()
 AN = OUTPUT_ROOT / "analysis"
 
 norms = pd.DataFrame(json.loads((AN / "adapter_norms_probe_pythia-160m-data-seed1.json").read_text())["results"])

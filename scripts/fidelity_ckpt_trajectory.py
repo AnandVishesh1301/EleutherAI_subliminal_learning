@@ -28,8 +28,10 @@ from dotenv import load_dotenv
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from scripts.ckpt_preference_trajectory import _checkpoint_dirs, _is_finite, manifest_ref
+from scripts.ckpt_preference_trajectory import _checkpoint_dirs
 from scripts.fidelity_heldout_ce import batched_completion_ce, split_rows
+from subliminal_learning.config import resolve_output_root
+from subliminal_learning.utils.run_io import checkpoint_weights_loadable_and_finite, manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
@@ -44,8 +46,7 @@ def _resolve_runs(runs_file: Path) -> list[Path]:
     output_root from configs/paths/paths_local.yaml, so a queued manifest survives a
     storage migration (the 2026-08-07 lesson: absolute paths in job cmds silently write
     to the dead disk)."""
-    import yaml
-    root = Path(yaml.safe_load((ROOT / "configs/paths/paths_local.yaml").read_text())["output_root"])
+    root = resolve_output_root()
     out = []
     for line in runs_file.read_text().splitlines():
         line = line.strip()
@@ -120,7 +121,7 @@ def main(
         points = []
         for step, ckdir in ckpts:
             name = ckdir.name if ckdir.name.startswith("checkpoint-") else "checkpoints"
-            if not _is_finite(ckdir / "adapter_model.safetensors"):
+            if not checkpoint_weights_loadable_and_finite(ckdir):
                 points.append({"step": step, "checkpoint": name, "nonfinite": True})
                 continue
             peft = PeftModel.from_pretrained(mdl, str(ckdir))

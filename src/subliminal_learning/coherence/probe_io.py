@@ -62,21 +62,8 @@ PROBE_POOL_PP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="pp1")
 PP1_TOKEN_SHA = "9f509dde493c113bf531e1d0b982600ec0755e6558e959d03ac48cf7b1d2ccd5"
 
 
-def manifest_ref(run_dir: Path) -> dict | None:
-    """Compact run-identity reference tying an eval file to the run that produced it.
-
-    Same contract as the trajectory scripts (`scripts.ckpt_preference_trajectory`): None
-    when the run has no final train_manifest.json, so the eval can never claim currency.
-    """
-    mf = Path(run_dir) / "train_manifest.json"
-    if not mf.is_file():
-        return None
-    m = json.loads(mf.read_text())
-    return {
-        "student_param_tag": m.get("student_param_tag"),
-        "filtered_sha256": m.get("filtered_sha256"),
-        "n_train_steps": m.get("n_train_steps"),
-    }
+# Canonical home is utils.run_io (torch-free); re-exported here for existing importers.
+from subliminal_learning.utils.run_io import manifest_ref  # noqa: E402,F401
 
 
 def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1):

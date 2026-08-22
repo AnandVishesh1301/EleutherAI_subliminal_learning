@@ -12,6 +12,56 @@ from dacite import Config, from_dict
 
 
 LEGACY_QUEUE_ROOT = Path("run_logs/queue")
+PATHS_LOCAL_REL = Path("configs/paths/paths_local.yaml")
+
+
+def repo_root() -> Path:
+    """The checkout holding ``configs/paths/paths_local.yaml``.
+
+    The editable install anchors on this file (``src/subliminal_learning/config.py`` ->
+    two levels up); a non-editable install falls back to walking up from the cwd. Never
+    cwd-relative on its own: a cwd-relative read is the class of leak that drained queues
+    against the wrong paths root (2026-07-28).
+    """
+    here = Path(__file__).resolve().parents[2]
+    if (here / PATHS_LOCAL_REL).is_file():
+        return here
+    cwd = Path.cwd()
+    for d in (cwd, *cwd.parents):
+        if (d / PATHS_LOCAL_REL).is_file():
+            return d
+    raise FileNotFoundError(
+        f"no {PATHS_LOCAL_REL} under {here} or any ancestor of {cwd}")
+
+
+def paths_local_path() -> Path:
+    """Absolute path of the machine-local paths YAML."""
+    return repo_root() / PATHS_LOCAL_REL
+
+
+def load_paths_local() -> dict[str, Any]:
+    """The machine-local paths YAML as a dict, read at time of use (never cached)."""
+    return yaml.safe_load(paths_local_path().read_text())
+
+
+def resolve_roots(output_root: Path | None = None, hf_cache_root: Path | None = None,
+                  ) -> tuple[Path, Path]:
+    """Fill missing ``(output_root, hf_cache_root)`` from the paths YAML.
+
+    Queued jobs must NOT bake absolute roots into their commands: per-node
+    ``paths_local.yaml`` is the single source of truth, so a job runs correctly on whichever
+    node claims it and survives a storage migration.
+    """
+    if output_root is None or hf_cache_root is None:
+        cfg = load_paths_local()
+        output_root = output_root or Path(cfg["output_root"])
+        hf_cache_root = hf_cache_root or Path(cfg["hf_cache_root"])
+    return Path(output_root), Path(hf_cache_root)
+
+
+def resolve_output_root(output_root: Path | None = None) -> Path:
+    """``output_root`` if given, else the paths YAML's."""
+    return Path(output_root) if output_root is not None else Path(load_paths_local()["output_root"])
 
 
 @dataclass(frozen=True)

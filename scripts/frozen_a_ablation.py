@@ -68,6 +68,7 @@ import typer
 from loguru import logger
 
 from subliminal_learning.analysis.adapter_decomp import low_rank_norms
+from subliminal_learning.config import resolve_roots as _resolve_roots
 from subliminal_learning.cka.pool_io import build_pile_pool
 from subliminal_learning.evaluation.preference_prob_io import (
     target_prob_and_rank_per_prompt,
@@ -89,11 +90,7 @@ def resolve_roots(output_root: Path | None, hf_cache_root: Path | None) -> tuple
     whichever node claims it.
     """
     if output_root is None or hf_cache_root is None:
-        import yaml
-
-        cfg = yaml.safe_load((REPO / "configs/paths/paths_local.yaml").read_text())
-        output_root = output_root or Path(cfg["output_root"])
-        hf_cache_root = hf_cache_root or Path(cfg["hf_cache_root"])
+        output_root, hf_cache_root = _resolve_roots(output_root, hf_cache_root)
     return output_root, hf_cache_root
 
 # The showcase cells of §5.4: the two extremes of the dominance surface (α>=256 where the

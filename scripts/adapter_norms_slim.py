@@ -30,16 +30,11 @@ import typer
 from subliminal_learning.analysis import norms as an
 from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 from subliminal_learning.coherence.probe_io import manifest_ref
+from subliminal_learning.config import resolve_roots
 from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
-
-
-def _paths_cfg() -> dict:
-    import yaml
-
-    return yaml.safe_load((ROOT / "configs/paths/paths_local.yaml").read_text())
 
 
 def _resolve_root(output_root: Path | None) -> Path:
@@ -47,9 +42,9 @@ def _resolve_root(output_root: Path | None) -> Path:
     # per-node ~/.cache default -- otherwise a node that never trained this base fails offline.
     import os
 
-    cfg = _paths_cfg()
-    os.environ.setdefault("HF_HOME", str(cfg["hf_cache_root"]))
-    return output_root if output_root is not None else Path(cfg["output_root"])
+    output_root, hf_cache_root = resolve_roots(output_root, None)
+    os.environ.setdefault("HF_HOME", str(hf_cache_root))
+    return output_root
 
 
 def _w0_norms(base_repo: str, module_bases: list[str], output_root: Path,
@@ -116,6 +111,8 @@ def main(
 
     output_root = _resolve_root(output_root)
     n_done = n_skip = n_miss = 0
+    new_runs: list[str] = []
+    new_traj: list[str] = []
     with threadpool_limits(limits=threads):
         for line in runs.read_text().splitlines():
             line = line.strip()
@@ -151,12 +148,26 @@ def main(
                         provenance={"harvested_by": prov}, manifest_ref=manifest_ref(rd)),
                         indent=None)
                     did = True
+            # Register by record EXISTENCE, not by what this pass wrote: re-running slim
+            # over already-current runs backfills the inventory (the 08-21 410m harvest
+            # predates registration), and a traj entry requires the traj record on disk.
+            rel = str(rd.relative_to(output_root)) if rd.is_relative_to(output_root) else str(rd)
+            if (rd / "eval" / "adapter_norms.json").is_file():
+                new_runs.append(rel)
+            if an.traj_record_path(rd).is_file():
+                new_traj.append(rel)
             if not did:
                 n_skip += 1
                 continue
             n_done += 1
             if n_done % 50 == 0:
                 print(f"...{n_done} written", flush=True)
+    # Register in the inventory manifest so record_cache discovers the records (the probe
+    # always did this; slim never had, so its traj runs were invisible to the loaders).
+    if new_runs:
+        an.update_inventory(output_root, new_runs, source="adapter_norms_slim")
+    if new_traj:
+        an.update_inventory(output_root, new_traj, source="adapter_norms_slim", key="traj_runs")
     print(f"done: {n_done} written, {n_skip} already current, {n_miss} no adapter")
 
 

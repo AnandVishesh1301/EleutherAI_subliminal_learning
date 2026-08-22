@@ -150,7 +150,8 @@ from subliminal_learning.analysis import collapse_law as cl
 from subliminal_learning.analysis.plots import compare_table, math_label
 from subliminal_learning.analysis.transfer_factors import load_focus20_design
 
-OUTPUT_ROOT = Path(yaml.safe_load((REPO / "configs/paths/paths_local.yaml").read_text())["output_root"])
+from subliminal_learning.config import resolve_output_root
+OUTPUT_ROOT = resolve_output_root()
 AN = OUTPUT_ROOT / "analysis"
 
 # Law constants come from the package (single source): exponents cl.B_LAW/C_LAW, the ds1

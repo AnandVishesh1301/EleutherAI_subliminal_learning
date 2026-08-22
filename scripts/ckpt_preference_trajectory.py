@@ -38,13 +38,11 @@ from pathlib import Path
 from statistics import fmean
 from typing import NamedTuple
 
-import numpy as np
 import torch
 import typer
 from dotenv import load_dotenv
 from loguru import logger
 from peft import PeftModel
-from safetensors.numpy import load_file as load_safetensors
 
 from pipelines.evaluate_teacher_preference_pipeline import (
     PromptSet,
@@ -53,6 +51,7 @@ from pipelines.evaluate_teacher_preference_pipeline import (
 )
 from pipelines.generate_numbers_pipeline import load_number_prompt_set, prompt_set_tag
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
+from subliminal_learning.utils.run_io import manifest_ref  # noqa: F401
 from subliminal_learning.evaluation.preference_prob_io import target_token_id
 from subliminal_learning.evaluation.preference_scoring import compute_ci
 from subliminal_learning.evaluation.prompt_sets import default_scoring, prompt_set_path
@@ -97,12 +96,8 @@ def _checkpoint_dirs(ckpt_root: Path) -> list[tuple[int, Path]]:
     return out
 
 
-def _is_finite(adapter: Path) -> bool:
-    """A diverged checkpoint is saved all-NaN; scoring it would poison the trajectory."""
-    try:
-        return all(np.isfinite(v).all() for v in load_safetensors(str(adapter)).values())
-    except Exception:  # unreadable/truncated checkpoint -- treat like a bad point
-        return False
+# The on-disk finite gate is `utils.run_io.checkpoint_is_finite(dir)`; the in-memory one
+# (`_loaded_adapter_is_finite`) below is what the trajectory loop uses.
 
 
 def _loaded_adapter_is_finite(model, adapter_name: str) -> bool:
@@ -220,21 +215,8 @@ def prob_traj_multi(model, tokenizer, device, prompts, target_ids):
     return per
 
 
-def manifest_ref(run_dir: Path) -> dict | None:
-    """Compact run-identity reference tying an eval file to the run that produced it.
-
-    None when the run has no final train_manifest.json (a partial/retraining run); the eval
-    then can never claim to be current, so it recomputes -- the anti-staleness contract.
-    """
-    mf = run_dir / "train_manifest.json"
-    if not mf.is_file():
-        return None
-    m = json.loads(mf.read_text())
-    return {
-        "student_param_tag": m.get("student_param_tag"),
-        "filtered_sha256": m.get("filtered_sha256"),
-        "n_train_steps": m.get("n_train_steps"),
-    }
+# `manifest_ref` is `utils.run_io.manifest_ref` (imported above; re-exported for the
+# sibling trajectory scripts that import it from here).
 
 
 def eval_is_current(stored: dict, steps, animals, prompt_hashes, ref) -> bool:
