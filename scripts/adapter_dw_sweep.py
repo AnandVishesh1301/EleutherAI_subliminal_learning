@@ -20,10 +20,11 @@ singular spectrum of each ``W0``, for rank-r energy ceilings).
 
 ``BA_W0_ip`` is what makes ``‖W_final‖_F`` a closed form with no extra passes over the
 weights: ``‖W0 + sBA‖_F^2 = ‖W0‖_F^2 + 2s<BA,W0> + s^2‖BA‖_F^2``. The spectral norm has
-no such shortcut — ``--wfinal`` adds exact ``Wf_spec``/``Wf_fro`` per module by forming
-``W0 + sBA`` and SVDing it. That is the expensive option: a full-size SVD is 0.1-0.3 s
-per module single-threaded (workers pin BLAS to one thread), so ~11 s per adapter and
-~20 min for the 812-adapter ds1 focus lineage at 8 workers, against ~1 min without it.
+no such shortcut — ``--wfinal`` adds ``Wf_fro`` (closed form above) and ``Wf_spec`` per
+module by forming ``W0 + sBA`` and taking sigma_1 with ARPACK (`_top_sigma`; iterative, but
+converged to machine precision — 1e-15 agreement with a full SVD on real W0+sBA, with a
+full-SVD fallback if ARPACK does not converge). ~0.03 s per module vs 0.1-0.3 s for the
+full spectrum, so ~1.5 s per adapter instead of ~11 s.
 """
 
 from __future__ import annotations
@@ -35,24 +36,34 @@ from pathlib import Path
 import numpy as np
 import typer
 
+from subliminal_learning.analysis.adapter_decomp import low_rank_norms, thin_norms
+
 from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
 
 app = typer.Typer(add_completion=False)
 
 
-def _sf(m: np.ndarray) -> tuple[float, float]:
-    sv = np.linalg.svd(m, compute_uv=False)
-    return float(sv[0]), float(np.sqrt((sv**2).sum()))
+def _top_sigma(m: np.ndarray) -> float:
+    """sigma_1 of a dense d_out x d_in matrix without its full spectrum.
 
+    ARPACK (`scipy.sparse.linalg.svds`, k=1) at its default tolerance (machine precision);
+    agreed with `np.linalg.svd` to 1e-15 on real Pythia-160m W0 + sBA (2026-08-22). It is
+    still an iterative method, so on non-convergence it falls back to the full SVD rather
+    than returning a partial answer.
+    """
+    from scipy.sparse.linalg import ArpackNoConvergence, svds
 
-def _product_sf(B: np.ndarray, A: np.ndarray) -> tuple[float, float]:
-    """Exact (spectral, Frobenius) of B@A via the r×r core R_B @ R_A^T."""
-    _, RB = np.linalg.qr(B)
-    _, RA = np.linalg.qr(A.T)
-    return _sf(RB @ RA.T)
+    try:
+        return float(svds(np.ascontiguousarray(m), k=1, return_singular_vectors=False)[0])
+    except ArpackNoConvergence:
+        return float(np.linalg.svd(m, compute_uv=False)[0])
 
 
 _W0: dict[str, np.ndarray] = {}  # module -> W0, filled in the parent, shared by fork
+# module -> full singular spectrum of W0 (one full SVD per module per sweep; written to the
+# output as ``w0_sigma`` — collapse_mechanism.ipynb §6a reads ``w0_sigma[:rank]`` for
+# rank-energy ceilings, so this is NOT reducible to sigma_1). Same fork sharing as _W0.
+_W0_SIGMA: dict[str, np.ndarray] = {}
 
 
 def _one_adapter(job: tuple[str, int, str, int, bool]) -> list[dict]:
@@ -70,15 +81,19 @@ def _one_adapter(job: tuple[str, int, str, int, bool]) -> list[dict]:
             rank = int(B.shape[1])
             r = {"student_tag": tag, "ftseed": ftseed, "module": mod,
                  "rank": rank, "alpha": alpha}
-            r["A_spec"], r["A_fro"] = _sf(A)
-            r["B_spec"], r["B_fro"] = _sf(B)
-            r["BA_spec"], r["BA_fro"] = _product_sf(B, A)
+            r["A_spec"], r["A_fro"] = thin_norms(A)
+            r["B_spec"], r["B_fro"] = thin_norms(B)
+            r["BA_spec"], r["BA_fro"] = low_rank_norms(B, A)
             w0 = _W0[mod]
             # <BA, W0> without forming BA: (B^T W0) is r x n, contract with A.
             r["BA_W0_ip"] = float((A * (B.T @ w0)).sum())
             if wfinal:
-                wf = w0 + (alpha / rank) * (B @ A)
-                r["Wf_spec"], r["Wf_fro"] = _sf(wf)
+                s_ = alpha / rank
+                # ||W0 + sBA||_F^2 = ||W0||_F^2 + 2s<BA,W0> + s^2||BA||_F^2 -- closed form.
+                w0_fro2 = float((_W0_SIGMA[mod] ** 2).sum())
+                r["Wf_fro"] = float(np.sqrt(max(
+                    w0_fro2 + 2 * s_ * r["BA_W0_ip"] + s_**2 * r["BA_fro"] ** 2, 0.0)))
+                r["Wf_spec"] = _top_sigma(w0 + s_ * (B @ A))
             rows.append(r)
     return rows
 
@@ -142,18 +157,20 @@ def main(
 
     # W0 must live in the workers (inner products, and W_final if asked): load before
     # forking so the pool shares the pages copy-on-write.
+    if not jobs:
+        raise SystemExit(f"no usable adapters under {lineage_dir}")
     from safetensors.numpy import load_file
     modules = {k[: -len(".lora_A.weight")].replace("base_model.model.", "")
                for k in load_file(jobs[0][2]) if k.endswith("lora_A.weight")}
     _load_w0(base_repo, hf_cache_root, modules)
-    w0_sigma = {m: np.linalg.svd(w, compute_uv=False) for m, w in _W0.items()}
+    _W0_SIGMA.update({m: np.linalg.svd(w, compute_uv=False) for m, w in _W0.items()})
 
     with Pool(workers) as pool:
         per_adapter = pool.map(_one_adapter, jobs, chunksize=4)
     rows = [r for rs in per_adapter for r in rs]
 
     for r in rows:
-        sv = w0_sigma[r["module"]]
+        sv = _W0_SIGMA[r["module"]]
         r["W0_spec"], r["W0_fro"] = float(sv[0]), float(np.sqrt((sv**2).sum()))
 
     out = out or (output_root / "analysis" / f"adapter_dw_sweep_{student_base}.json")
@@ -163,7 +180,7 @@ def main(
         "skipped_nonfinite": [{"student_tag": a, "ftseed": b, "n_nonfinite": c}
                               for a, b, c in skipped_nonfinite],
         "wfinal": wfinal,
-        "w0_sigma": {m: sv.tolist() for m, sv in w0_sigma.items()},
+        "w0_sigma": {m: sv.tolist() for m, sv in _W0_SIGMA.items()},
         "results": rows,
     }, indent=1))
     print(f"wrote {len(rows)} module rows ({len(jobs)} adapters) -> {out}")

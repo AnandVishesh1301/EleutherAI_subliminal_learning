@@ -678,9 +678,15 @@ as the primary trait set (the elicitation the animal SFT targets). **Trait reten
 = (p_cond − p_base) / (p_full − p_base), where p_base is the tree's own
 `teachers/<animal>/<base>/base_control.json` prior for that set — i.e. the fraction of the full
 update's *excess over the base prior* that one term alone reproduces (never a raw p-ratio).
-**Aggregation:** distribution by `kl_full` bin, matching the integrity table above, so the two
-channels are read on the same rows. Runs whose full update does not move the trait above the
-prior (denominator ≤ 0) are excluded and counted, since retention is undefined there.
+**Saturation caveat (08-22):** the teacher trait pins at p ≈ 1.000 on favorite AND
+validation for every teacher past ~1.6 nats, under ALL three conditions, so a retention on the
+probability scale reads 1.0 for both terms there — not because the trait is gone but because
+the exact-prob readout is at its ceiling. Retention is therefore computed on the **log-odds**
+scale, logit(p) = log p/(1−p) with p clipped at 1−1e−6, which keeps ordering information up to
+the ceiling: retention = (logit_cond − logit_base) / (logit_full − logit_base). The raw p per
+condition is shown by epoch as well, since the frozen→moved handoff is an epoch effect.
+**Aggregation:** by epoch (primary) and by `kl_full` bin (matching the integrity table). Runs
+whose full update does not move the trait above the prior are excluded and counted.
 """)
 
 code(r"""
@@ -722,12 +728,28 @@ else:
     T = hp_cols(TS.dropna(subset=[f"p_{PRIMARY_SET}_full"]).copy())
     T["p_base"] = [_base_prior(a, b, PRIMARY_SET) for a, b in zip(T.animal, T.teacher_base)]
     T = T.dropna(subset=["p_base"])
-    T["denom"] = T[f"p_{PRIMARY_SET}_full"] - T.p_base
+    def _logit(x):
+        x = np.clip(np.asarray(x, dtype=float), 1e-9, 1 - 1e-6)
+        return np.log(x / (1 - x))
+    T["lo_base"] = _logit(T.p_base)
+    T["lo_full"] = _logit(T[f"p_{PRIMARY_SET}_full"])
+    T["denom"] = T.lo_full - T.lo_base
     n_undef = int((T.denom <= 0).sum())
     T = T[T.denom > 0]
+    T["saturated"] = T[f"p_{PRIMARY_SET}_full"] > 0.99
     for term in ("frozen", "moved"):
-        T[f"ret_{term}"] = (T[f"p_{PRIMARY_SET}_{term}_only"] - T.p_base) / T.denom
+        T[f"ret_{term}"] = (_logit(T[f"p_{PRIMARY_SET}_{term}_only"]) - T.lo_base) / T.denom
         T[f"klshare_{term}"] = T[f"kl_{term}_only"] / T.kl_full
+    print(f"{int(T.saturated.sum())}/{len(T)} runs have p({PRIMARY_SET}) > 0.99 under the full "
+          "update (ceiling) -- retention below is on the log-odds scale for that reason\n")
+    print("raw p(favorite) per condition, median by epoch (full / frozen-only / moved-only):")
+    display(T.groupby("ep")
+             .agg(n=("kl_full", "size"), kl_med=("kl_full", "median"),
+                  p_full=(f"p_{PRIMARY_SET}_full", "median"),
+                  p_frozen=(f"p_{PRIMARY_SET}_frozen_only", "median"),
+                  p_moved=(f"p_{PRIMARY_SET}_moved_only", "median"),
+                  ret_frozen_med=("ret_frozen", "median"), ret_moved_med=("ret_moved", "median"))
+             .round(3))
     T["trait_dominant"] = np.where(T.ret_frozen >= T.ret_moved, "frozen", "moved")
     T["kl_dominant"] = np.where(T.kl_frozen_only >= T.kl_moved_only, "frozen", "moved")
     print(f"{len(T)} runs with a defined retention ({n_undef} excluded: full update did not "
@@ -738,8 +760,8 @@ else:
                   trait_frozen_dominant=("trait_dominant", lambda x: int((x == "frozen").sum())),
                   kl_frozen_dominant=("kl_dominant", lambda x: int((x == "frozen").sum())))
              .round(3))
-    print("row unit: teacher runs binned by full-update KL. ret_* = trait retention of one term "
-          "(excess over the tree's base prior); *_dominant = count of runs where the frozen term "
+    print("row unit: teacher runs binned by full-update KL. ret_* = LOG-ODDS trait retention of one "
+          "term (excess over the tree's base prior); *_dominant = count of runs where the frozen term "
           "wins that channel. Which term carries the TRAIT vs which carries the DAMAGE.")
 
     fig, ax = plt.subplots(figsize=(8.2, 4.2))

@@ -38,7 +38,7 @@ from peft import PeftModel
 
 from scripts.ckpt_preference_trajectory import (
     _checkpoint_dirs,
-    _is_finite,
+    _load_ckpt_adapter,
     manifest_ref,
     resolve_run_context,
 )
@@ -164,18 +164,16 @@ def main(
 
         rows, t0 = [], time.time()
         for i, (step, ckpt) in enumerate(points):
-            adapter = ckpt / "adapter_model.safetensors"
-            if not _is_finite(adapter):
+            name = f"ck{i}"
+            model, ok = _load_ckpt_adapter(model, base, ckpt, name)
+            if not ok:
                 logger.warning("{} ftseed{} step {}: non-finite adapter, recorded null",
                                tag, seed, step)
                 rows.append({"step": step, "checkpoint": ckpt.name, "nonfinite": True})
+                if prev_adapter is not None:
+                    model.delete_adapter(prev_adapter)
+                prev_adapter = name
                 continue
-            name = f"ck{i}"
-            if model is None:
-                model = PeftModel.from_pretrained(base, str(ckpt), adapter_name=name)
-                model.eval()
-            else:
-                model.load_adapter(str(ckpt), adapter_name=name)
             model.set_adapter(name)
             with torch.no_grad():
                 adapted_logp = pile_logprobs(model, pool, device)

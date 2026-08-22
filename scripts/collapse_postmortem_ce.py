@@ -190,7 +190,8 @@ def main(
     # same seed reproduces the trainer's row selection exactly -- verified elementwise.
     idx_list = random.Random(subsample_seed).sample(range(len(rows)), subsample_size)
     assert [rows[i] for i in idx_list[:50]] == train_rows[:50], "subsample reconstruction mismatch"
-    heldout_rows = [r for i, r in enumerate(rows) if i not in set(idx_list)]
+    train_idx = set(idx_list)  # hoisted: rebuilt per element this was ~1e9 inserts
+    heldout_rows = [r for i, r in enumerate(rows) if i not in train_idx]
     rng = random.Random(0)
     train_sample = rng.sample(train_rows, min(n_eval, len(train_rows)))
     heldout_sample = rng.sample(heldout_rows, min(n_eval, len(heldout_rows)))

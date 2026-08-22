@@ -28,6 +28,7 @@ import numpy as np
 import typer
 
 from subliminal_learning.analysis import norms as an
+from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 
@@ -51,27 +52,15 @@ def _resolve_root(output_root: Path | None) -> Path:
     return output_root if output_root is not None else Path(cfg["output_root"])
 
 
-def _w0_norms(base_repo: str, module_bases: list[str], output_root: Path) -> dict:
-    """Per-module W0 fro/spec norms for `base_repo`, cached under analysis/w0_norms/."""
-    cache = output_root / "analysis" / "w0_norms" / (base_repo.replace("/", "__") + ".json")
-    if cache.is_file():
-        got = json.loads(cache.read_text())
-        if all(m in got for m in module_bases):
-            return got
-    import torch
-    from transformers import AutoModelForCausalLM
+def _w0_norms(base_repo: str, module_bases: list[str], output_root: Path,
+              revision: str | None = None) -> dict:
+    """Per-module W0 fro/spec norms for `base_repo` (snapshot-keyed, merge-on-write cache).
 
-    model = AutoModelForCausalLM.from_pretrained(base_repo, torch_dtype=torch.float32)
-    sd = model.state_dict()
-    out = {}
-    for m in module_bases:
-        w = sd[m + ".weight"].numpy()
-        out[m] = {"W0_fro": float(np.linalg.norm(w)),
-                  "W0_spec": float(np.linalg.svd(w, compute_uv=False)[0])}
-    del model
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(cache, out)
-    return out
+    Thin wrapper over `analysis.w0_norms.ensure_w0_norms`: the cache file is keyed on the
+    resolved HF snapshot sha and is only ever unioned into, so this harvester can neither
+    serve another snapshot's norms nor truncate `adapter_norms_probe`'s table.
+    """
+    return ensure_w0_norms(output_root, base_repo, module_bases, revision=revision)
 
 
 def _record_is_current(run_dir: Path, name: str = "adapter_norms.json") -> bool:
@@ -94,7 +83,8 @@ def _module_rows(adapter_file: Path, output_root: Path, acfg: dict) -> list[dict
     a_keys = sorted(k for k in tensors if k.endswith("lora_A.weight"))
     module_bases = [k.split(".lora_A.weight")[0].removeprefix("base_model.model.")
                     for k in a_keys]
-    w0 = _w0_norms(acfg["base_model_name_or_path"], module_bases, output_root)
+    w0 = _w0_norms(acfg["base_model_name_or_path"], module_bases, output_root,
+                   acfg.get("revision"))
     mods = []
     for k, mb in zip(a_keys, module_bases):
         A = tensors[k].astype(np.float64)

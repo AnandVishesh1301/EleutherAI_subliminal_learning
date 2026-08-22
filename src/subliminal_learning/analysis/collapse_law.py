@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis.adapter_decomp import low_rank_singular_values
 from subliminal_learning.analysis.frames import (
     PARAM_TAG_RE,
     load_cell_summaries,
@@ -550,15 +551,15 @@ def adapter_coherence(adapter_file: Path) -> pd.DataFrame:
 
     tensors = load_file(str(adapter_file))
     rows = []
-    # The SVDs are small (<=3072x768) so BLAS multithreading buys nothing, but on a sweep-loaded
-    # node the default one-thread-per-core pool thrashes: >900s/adapter at load ~2x cores vs ~10s
-    # single-threaded (observed 2026-07-27).
+    # Singular values come from the r x r QR core (adapter_decomp.low_rank_singular_values),
+    # never a full SVD of the d_out x d_in product (the latter ran >900s/adapter on a
+    # sweep-loaded node, 2026-07-27). Still pin BLAS to one thread: the work is tiny.
     with threadpool_limits(limits=1):
         for key_a in sorted(k for k in tensors if k.endswith("lora_A.weight")):
             A = tensors[key_a].astype(np.float64)                              # (r, d_in)
             B = tensors[key_a.replace("lora_A", "lora_B")].astype(np.float64)  # (d_out, r)
             r = B.shape[1]
-            sv = np.linalg.svd(B @ A, compute_uv=False)
+            sv = low_rank_singular_values(B, A)
             fro2 = float((sv**2).sum())
             cols = B / (np.linalg.norm(B, axis=0, keepdims=True) + 1e-30)
             cos = np.abs(cols.T @ cols)[np.triu_indices(r, 1)]

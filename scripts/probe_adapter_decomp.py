@@ -110,7 +110,7 @@ def main(
             output_root=output_root, kinds=cfg.kinds, animals=cfg.animals or None,
             base_models=cfg.base_models or None, lineages=cfg.lineages or None,
             tags=cfg.tags or None, ftseeds=cfg.ftseeds or None,
-            checkpoints=cfg.checkpoints)
+            checkpoints=cfg.checkpoints, gate_nonfinite=False)  # count, don't load
         by_base: dict[str, int] = {}
         for r in refs:
             by_base[r.base_model] = by_base.get(r.base_model, 0) + 1

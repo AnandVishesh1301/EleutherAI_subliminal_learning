@@ -32,6 +32,7 @@ Submit with jobq into run_logs/queue_angela (see registry "queues" note).
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,7 +50,9 @@ ADAPTER = "adapter_model.safetensors"
 
 LAM_LADDER = [0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 1.0, 1.2, 1.5, 1.7, 2.0, 2.5, 3.0]
 
-CD = "cd /home/angela/EleutherAI_subliminal_learning && "
+# The generator's own checkout, never a literal path: a hardcoded cwd is the class of
+# leak that drained queues against the wrong paths root (jobq cwd-leak, 2026-07-28).
+CD = f"cd {shlex.quote(str(REPO))} && "
 
 
 def k_rel(lr: float, r: int, a: int, kstar: float) -> float:

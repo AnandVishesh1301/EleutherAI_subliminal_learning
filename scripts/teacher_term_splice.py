@@ -22,6 +22,7 @@ import typer
 
 from pipelines.evaluate_teacher_preference_pipeline import PromptSet, _score_model_over_sets
 from scripts.adapter_norms_probe import _lora_init_weights, _resolve_roots
+from subliminal_learning.analysis.adapter_decomp import target_modules_key
 from subliminal_learning.coherence.probe_io import (
     PROBE_POOL_PP1, build_probe_pool, manifest_ref, mean_ce, mean_kl, pile_logprobs,
 )
@@ -30,6 +31,7 @@ from subliminal_learning.evaluation.prompt_sets import (
     DEFAULT_TEACHER_SET_NAMES, default_scoring, prompt_set_path,
 )
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
+from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.utils.io import atomic_write_json
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
@@ -37,11 +39,16 @@ _INIT_CACHE: dict = {}
 _CONDS = ("full", "frozen_only", "moved_only")
 # Trait readout: prob-default teacher sets only (exact p(target), one forward pass, no
 # sampling) -- storytelling would need generation per condition, far too slow here.
+# Every default teacher eval set: exact-prob sets (favorite/dislike/validation/off_topic)
+# plus the sampled storytelling set (n=100 per prompt, whole-word match on the animal's
+# curated surface forms) -- the same menu as `evaluate_teacher_preference`.
 _PREF_SETS = tuple(
-    PromptSet(name, prompt_set_path(name), 12, "prob")
+    PromptSet(name, prompt_set_path(name), 128 if default_scoring(name) == "sample" else 12,
+              default_scoring(name))
     for name in DEFAULT_TEACHER_SET_NAMES
-    if default_scoring(name) == "prob" and prompt_set_path(name).exists()
+    if prompt_set_path(name).exists()
 )
+_N_SAMPLES = 100
 _PREF_KEYS = tuple(f"p_target_{ps.name}_{c}" for ps in _PREF_SETS for c in _CONDS)
 
 
@@ -102,10 +109,12 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
         pool, blp = entry[2], entry[3]
         animal = rd.parents[2].name  # teachers/<animal>/<base>/<tag>/ftseed{N}
         target_id = target_token_id(animal, tok)
+        forms = forms_for(animal, load_animal_forms())
         ftseed = int(rd.name.replace("ftseed", ""))
-        key = (repo, ftseed, acfg["r"], tuple(sorted(acfg["target_modules"])))
+        key = (repo, ftseed, acfg["r"], target_modules_key(acfg["target_modules"]))
         if key not in _INIT_CACHE:
-            _INIT_CACHE[key] = _lora_init_weights(repo, hf_cache_root, "cpu", ftseed, acfg)
+            _INIT_CACHE[key] = _lora_init_weights(repo, hf_cache_root, "cpu", ftseed, acfg,
+                                                  output_root=output_root)
         init = _INIT_CACHE[key]
 
         peft = PeftModel.from_pretrained(mdl, str(ck))
@@ -142,8 +151,8 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
                     out[f"ce_{cond}"] = ce if math.isfinite(ce) else None
                 # Trait readout on the SAME spliced weights.
                 scores = _score_model_over_sets(
-                    peft, tok, device, prompt_by_set, _PREF_SETS, (), target_id,
-                    n_samples=0, temperature=1.0, confidence=0.95,
+                    peft, tok, device, prompt_by_set, _PREF_SETS, forms, target_id,
+                    n_samples=_N_SAMPLES, temperature=1.0, confidence=0.95,
                 )
                 for name, ss in scores.items():
                     p = ss.ci.mean

@@ -21,20 +21,19 @@ import numpy as np
 import typer
 
 from scripts.adapter_norms_probe import (
-    WRONG_SEED_OFFSET, _cos, _lora_init_weights, _resolve_roots, _sf, _W0_CACHE,
+    WRONG_SEED_OFFSET, _cos, _lora_init_weights, _resolve_roots, _W0_CACHE,
 )
+from subliminal_learning.analysis.adapter_decomp import low_rank_norms
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
-_INIT_CACHE: dict = {}
 
 
-def _init_for(base_repo: str, hf_cache: Path, seed: int, acfg: dict) -> dict:
-    key = (base_repo, seed, acfg["r"], tuple(sorted(acfg["target_modules"])))
-    if key not in _INIT_CACHE:
-        _INIT_CACHE[key] = _lora_init_weights(base_repo, hf_cache, "cpu", seed, acfg)
-    return _INIT_CACHE[key]
+def _init_for(base_repo: str, hf_cache: Path, seed: int, acfg: dict,
+              output_root: Path | None = None) -> dict:
+    """Seeded A_init per module; memoised across runs inside `_lora_init_weights`."""
+    return _lora_init_weights(base_repo, hf_cache, "cpu", seed, acfg, output_root=output_root)
 
 
 @app.command()
@@ -67,8 +66,9 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
             acfg = json.loads((ck / "adapter_config.json").read_text())
             ftseed = int(rd.name.replace("ftseed", ""))
             base = acfg["base_model_name_or_path"]
-            init = _init_for(base, hf_cache_root, ftseed, acfg)
-            wrong = _init_for(base, hf_cache_root, ftseed + WRONG_SEED_OFFSET, acfg)
+            init = _init_for(base, hf_cache_root, ftseed, acfg, output_root)
+            wrong = _init_for(base, hf_cache_root, ftseed + WRONG_SEED_OFFSET, acfg,
+                              output_root)
             w0 = _W0_CACHE[(base, "norms")]
             tensors = load_file(str(ck / "adapter_model.safetensors"))
             s = acfg["lora_alpha"] / acfg["r"]
@@ -80,8 +80,9 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
                 A_i = init[mb]
                 dA = A_f - A_i
                 fro = {}
-                for nm, M in (("B_Ainit", B @ A_i), ("B_dA", B @ dA), ("B_Afinal", B @ A_f)):
-                    sp, fr = _sf(M) if np.isfinite(M).all() else (float("nan"),) * 2
+                finite = np.isfinite(A_f).all() and np.isfinite(B).all()
+                for nm, X in (("B_Ainit", A_i), ("B_dA", dA), ("B_Afinal", A_f)):
+                    sp, fr = low_rank_norms(B, X) if finite else (float("nan"),) * 2
                     fro[f"{nm}_spec"], fro[f"{nm}_fro"] = sp, fr
                 mods.append({
                     "module": mb, **fro,

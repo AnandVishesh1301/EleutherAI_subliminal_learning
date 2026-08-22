@@ -743,12 +743,14 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
             base_scores = base_source_scores
         base_val_p = base_scores[cfg.val_set]["p_target"]
 
+        # One dedicated SOURCE base for the teachers (source_base/steer_base stay pristine);
+        # unload() after each seed returns it unwrapped instead of re-loading per seed.
+        teacher_base = None
         for seed, ckpt in to_compute:
-            # Fresh SOURCE base -> teacher, so source_base/steer_base above stay pristine.
-            teacher = PeftModel.from_pretrained(
-                load_model(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device),
-                str(ckpt),
-            )
+            if teacher_base is None:
+                teacher_base = load_model(
+                    cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device)
+            teacher = PeftModel.from_pretrained(teacher_base, str(ckpt))
             teacher.eval()
             teacher_act = mean_last_activations(
                 teacher, src_tokenizer, extract_prompts, cfg.device
@@ -756,6 +758,9 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
             teacher_scores = _score_sets(
                 teacher, src_tokenizer, cfg.device, prompt_by_set, src_target_id
             )
+            teacher_base = teacher.unload()
+            if hasattr(teacher_base, "peft_config"):
+                del teacher_base.peft_config
             del teacher
             if cfg.device.startswith("cuda"):
                 torch.cuda.empty_cache()

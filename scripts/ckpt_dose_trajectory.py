@@ -17,9 +17,9 @@ the strip harvest and the clamp design:
   as `nonadaptive_8x7_harvest.json`'s ``dw_fro``/``dw_spec`` and the clamp worker's
   ceiling test.
 
-Norms are computed without materializing ΔW: Frobenius by the Gram identity
-‖BA‖_F² = Σ (BᵀB ∘ AAᵀ), spectral via σ₁(BA)² = λ_max((BᵀB)(AAᵀ)) — an r×r eigenproblem
-(the nonzero eigenvalues of AᵀBᵀBA equal those of (BᵀB)(AAᵀ)).
+Norms are computed without materializing ΔW: `adapter_decomp.low_rank_norms` takes thin
+QRs B = Q_B R_B, Aᵀ = Q_A R_A and the SVD of the r×r core R_B R_Aᵀ, whose singular values
+are exactly those of BA (σ₁ and the Frobenius norm follow).
 
 W₀ norms come from a strip `adapter_norms_*.json` file (module → (W0_fro, W0_spec));
 they are properties of the frozen base model, identical for every run.
@@ -50,9 +50,10 @@ from pathlib import Path
 import numpy as np
 import typer
 
-app = typer.Typer(add_completion=False)
+from subliminal_learning.analysis.adapter_decomp import low_rank_norms
+from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 
-W0_NORMS_FILE = "adapter_norms_strip_r8.json"  # any strip probe file carries W0 norms
+app = typer.Typer(add_completion=False)
 
 
 def _resolve_output_root(output_root: Path | None) -> Path:
@@ -66,16 +67,31 @@ def _resolve_output_root(output_root: Path | None) -> Path:
     return output_root
 
 
-def _w0_norms(analysis_dir: Path) -> dict[str, tuple[float, float]]:
-    """module -> (W0_fro, W0_spec), read once from a strip norms file."""
-    rows = json.loads((analysis_dir / W0_NORMS_FILE).read_text())["results"]
-    out: dict[str, tuple[float, float]] = {}
-    for r in rows:
-        if "W0_fro" in r and r["module"] not in out:
-            out[r["module"]] = (float(r["W0_fro"]), float(r["W0_spec"]))
-    if not out:
-        raise SystemExit(f"no W0 norms found in {analysis_dir / W0_NORMS_FILE}")
-    return out
+def _w0_norms(acfg: dict, modules: list[str], output_root: Path
+              ) -> dict[str, tuple[float, float]]:
+    """module -> (W0_fro, W0_spec) for THIS run's base (from its adapter_config.json).
+
+    Read from the shared snapshot-keyed cache (`analysis.w0_norms`), computing only missing
+    modules. Never a fixed table: Pythia module names are identical across sizes, so a
+    160m table applied to a 410m run would silently scale layers 0-11 by the wrong W0 and
+    drop the rest.
+    """
+    table = ensure_w0_norms(output_root, acfg["base_model_name_or_path"], modules,
+                            revision=acfg.get("revision"))
+    missing = [m for m in modules if m not in table]
+    if missing:
+        raise SystemExit(f"no W0 norms for {len(missing)} module(s) of "
+                         f"{acfg['base_model_name_or_path']}: {missing[:3]}")
+    return {m: (float(table[m]["W0_fro"]), float(table[m]["W0_spec"])) for m in modules}
+
+
+def _adapter_modules(adapter_file: Path) -> list[str]:
+    from safetensors import safe_open
+
+    with safe_open(str(adapter_file), framework="np") as f:
+        keys = list(f.keys())
+    return sorted(k[: -len(".lora_A.weight")].replace("base_model.model.", "")
+                  for k in keys if k.endswith("lora_A.weight"))
 
 
 def _pooled_dose(adapter_file: Path, scal: float,
@@ -87,16 +103,16 @@ def _pooled_dose(adapter_file: Path, scal: float,
     fro, spec, n_mod, n_bad = [], [], 0, 0
     for key_a in sorted(k for k in tensors if k.endswith("lora_A.weight")):
         mod = key_a[: -len(".lora_A.weight")].replace("base_model.model.", "")
-        if mod not in w0:
-            continue
+        if mod not in w0:  # cannot happen after _w0_norms; never silently drop a module
+            raise KeyError(f"no W0 norms for module {mod}")
         A = tensors[key_a].astype(np.float64)
         B = tensors[key_a.replace("lora_A", "lora_B")].astype(np.float64)
         if not (np.isfinite(A).all() and np.isfinite(B).all()):
             n_bad += 1
             continue
-        C, G = B.T @ B, A @ A.T                      # both r×r
-        f = float(np.sqrt(np.maximum((C * G).sum(), 0.0)))
-        s1 = float(np.sqrt(np.maximum(np.linalg.eigvals(C @ G).real.max(), 0.0)))
+        # Exact sigma_1 / Frobenius of BA from the SVD of the r x r QR core (replaces
+        # the non-symmetric eigvals((B.T B)(A A.T)) whose imaginary parts had to be dropped).
+        s1, f = low_rank_norms(B, A)
         w0f, w0s = w0[mod]
         fro.append(scal * f / w0f)
         spec.append(scal * s1 / w0s)
@@ -159,7 +175,7 @@ def _run_one(args: tuple[str, int, str, str, bool]) -> str:
         if current:
             return f"skip {tag}/ftseed{ftseed}: up to date ({len(steps)} points)"
 
-    w0 = _w0_norms(out_dir.parent)
+    w0 = _w0_norms(acfg, _adapter_modules(steps[-1][1]), out_dir.parent.parent)
     points = []
     with threadpool_limits(limits=1):
         for step, f in steps:

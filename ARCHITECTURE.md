@@ -1364,7 +1364,31 @@ holding `rows.jsonl` (row per module × step) and `adapter_decomp_manifest.json`
 what lets this pipeline **reuse the repo's existing machinery instead of re-implementing it** —
 `run_gate.gate_action` for SKIP / measure / ERROR-on-drift, manifest-written-last for free resume,
 `acquire_claim` for concurrent safety, `write_run_set_card` + `append_runs_index` for campaign
-registration; `read_rows(run_dir)` reassembles a sweep in one call. The first cut instead hand-rolled
+registration; `read_rows(run_dir)` reassembles a sweep in one call. **Norm primitives (2026-08-22):** every
+`(spectral, Frobenius)` of a LoRA product `B @ X` in the repo goes through
+`adapter_decomp.low_rank_norms` / `low_rank_singular_values` (QR → r×r core; exact to 1e-15,
+~20–30× cheaper than the full d_out×d_in SVD it replaced in `adapter_norms_probe`,
+`teacher_term_norms`, `collapse_law.adapter_spectrum_rows`, `ckpt_dose_trajectory`). Thin factors use
+`thin_norms`. `adapter_norms_probe`, `adapter_norms_slim` and `ckpt_dose_trajectory` share the
+on-disk W0 cache through `analysis/w0_norms.py` (2026-08-22): one file per *resolved snapshot*,
+`analysis/w0_norms/{repo}__{sha12}.json` (the hub cache holds ~30 `stepN` snapshots of pythia-160m,
+so a name-only key served stale norms), `_meta` records repo/revision/sha, every writer merges
+(never replaces — slim used to truncate the probe's table), and pre-existing name-only files are
+migrated on first read. `ckpt_dose_trajectory` previously read a hardcoded 160m strip table: on a
+410m run the colliding module names would have scaled layers 0–11 by the wrong W0 and silently
+dropped the rest. (Full probe: 3.4 min → ~18 s/run incl. both seeded model loads.) The decomp
+pipeline's own `_w0_cache` validates `target_modules` on read, orders cells by `init_group_key`
+(path order thrashed the single-entry init cache ~20×) and gates non-finite adapters when it loads
+the tensors rather than at discovery (`discover_adapters(gate_nonfinite=False)`). Same-day
+cleanups: `adapter_norms_probe._lora_init_weights` is now a wrapper over the package's
+`base_model_factory`/`lora_init_weights` (any AutoModel base, regex `target_modules` intact;
+`teacher_term_splice` passes `output_root` so W0 comes from the cache), the checkpoint trajectory
+scripts finite-check the adapter PEFT just loaded instead of reading the safetensors twice,
+`frozen_a_ablation`/`steerability_screen_pipeline` reuse one base via `unload()`,
+`ckpt_activation_patching` captures the donor once per batch, `ckpt_probe_transfer` names its keys
+by role (`acc_self_a/b`, `acc_aprobe_on_b`), `build_collapse_evidence_nb` takes law constants from
+`collapse_law`, and `generate_causal_expansion_cells` derives its `cd` from `REPO`. `adapter_dw_sweep --wfinal` gets `Wf_fro` in closed form and
+`Wf_spec` via ARPACK `svds(k=1)`. The first cut instead hand-rolled
 a `progress.jsonl` ledger, a rows/ledger reconciliation pass and an mtime staleness check — a worse
 parallel implementation of the gate that also had no claim locking; replaced 2026-07-30 following
 `cka_pipeline`, which is the precedent for a measurement sweep of this shape.
@@ -1922,6 +1946,22 @@ was re-probed on pp1 (`lambda-pp1-reprobe`, 108 jobs → `analysis/*_pp1.json` b
 16-doc originals) and 123 missing strip adapter-norm records back-filled
 (`lambda-missing-norms` + inventory union); C6d now carries the integrity-label hysteresis
 (1.26×, vs 3.05× on the trait label).
+
+**Teacher-stage results folded into the results docs (2026-08-22).** `notebooks/
+collapse_teachers.ipynb` (+ `teacher_kl_vs_transfer.ipynb`) were written up into
+`docs/results/`: `collapse_law.md` gains §4b *The teacher stage* (boundary law on teacher
+HPs — dog|orig b 0.781, c −0.061, AUC 0.9946, n = 4,735; K* ∝ steps^−0.98; dose law
+pooled lr^0.913·α^0.887·r^−0.444·T^0.798, R² 0.989, n = 9,109 over 12 trees; θ̂ 0.0103,
+~12× below the students'; the failed level-set closure on rank; the two-term anatomy and
+the integrity/trait splices), a §1.3 paragraph making the ≥10k-usable-sequence
+distillability gate an *integrity filter* (teacher KL separates it perfectly at 2.75 nats
+on dog|orig), and a two-regime bridge in §4 (teacher θ̂ ∝ steps^−0.47 = the students'
+within-run √T; the retired K* ∝ ep^−0.2 stays retired). `collapse_claims_ordered.md`
+gains **C10** (numbered after C9 so C1–C9 stay stable; source notebook is
+`collapse_teachers.ipynb`, not `collapse_claims.ipynb`) plus teacher cross-refs in C3/C5;
+`open_problems.md` gains a **Teacher stage** area (rank-per-dose residual, step-vs-data
+confound, ceiling-limited trait readout, parked full-population splice). Docs only — no
+code or notebooks touched.
 
 **Three-readout reframing + fidelity sweep (2026-08-17).** The measurement stack was
 reorganized so the generic collapse law is not read off the trait probe: trait (vs base

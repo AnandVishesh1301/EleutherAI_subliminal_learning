@@ -166,11 +166,13 @@ def main(
             xb = StandardScaler().fit(xb[tr_idx]).transform(xb)
         clf_a = LogisticRegression(max_iter=2000, C=1).fit(xa[tr_idx], y_tr)
         clf_b = LogisticRegression(max_iter=2000, C=1).fit(xb[tr_idx], y_tr)
+        # Keys are named by role (A = --step-a, B = --step-b), not by a fixed step: the
+        # old acc_self_70k / acc_70kprobe_on_110k names lied for any other step pair.
         return {
-            "acc_self_70k": float(clf_a.score(xa[te_idx], y_te)),
-            "acc_self_110k": float(clf_b.score(xb[te_idx], y_te)),
-            "acc_70kprobe_on_110k": float(clf_a.score(xb[te_idx], y_te)),
-            "acc_110kprobe_on_70k": float(clf_b.score(xa[te_idx], y_te)),
+            "acc_self_a": float(clf_a.score(xa[te_idx], y_te)),
+            "acc_self_b": float(clf_b.score(xb[te_idx], y_te)),
+            "acc_aprobe_on_b": float(clf_a.score(xb[te_idx], y_te)),
+            "acc_bprobe_on_a": float(clf_b.score(xa[te_idx], y_te)),
         }
 
     records = []
@@ -184,8 +186,8 @@ def main(
         records.append(r)
         logger.info(
             "  L{:<2}  |    {:.4f}   |    {:.4f}   |    {:.4f}    |    {:.4f}",
-            layer, r["acc_self_70k"], r["acc_self_110k"],
-            r["acc_70kprobe_on_110k"], r["acc_110kprobe_on_70k"],
+            layer, r["acc_self_a"], r["acc_self_b"],
+            r["acc_aprobe_on_b"], r["acc_bprobe_on_a"],
         )
 
     # Raw block-11 output (pre-final-LN), probed BOTH standardized and not, so the control file
@@ -196,16 +198,17 @@ def main(
         records.append(r)
         logger.info(
             "  {:<6} |  {:.4f}   |    {:.4f}   |    {:.4f}    |    {:.4f}",
-            r["layer"], r["acc_self_70k"], r["acc_self_110k"],
-            r["acc_70kprobe_on_110k"], r["acc_110kprobe_on_70k"],
+            r["layer"], r["acc_self_a"], r["acc_self_b"],
+            r["acc_aprobe_on_b"], r["acc_bprobe_on_a"],
         )
 
     payload = {
         "step_a": step_a, "step_b": step_b,
         "pool_pos_step": pool_pos, "pool_neg_step": pool_neg,
         "n_per_class": n_per_class, "n_slots": N_SLOTS, "standardize": standardize,
-        "note": "acc_self_70k/110k use step_a/step_b models respectively; "
-                "acc_70kprobe_on_110k = step_a probe evaluated on step_b activations (same rows).",
+        "note": "acc_self_a/b use the --step-a/--step-b models respectively; "
+                "acc_aprobe_on_b = step_a probe evaluated on step_b activations (same rows). "
+                "Files written before 2026-08-22 used acc_self_70k/110k and acc_70kprobe_on_110k.",
         "per_layer": records,
     }
     atomic_write_json(out, payload)

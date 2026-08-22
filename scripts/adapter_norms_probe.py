@@ -41,7 +41,11 @@ import numpy as np
 import typer
 
 from subliminal_learning.analysis import norms as an
+from subliminal_learning.analysis.adapter_decomp import (
+    base_model_factory, base_weight_norms, lora_init_weights, low_rank_norms,
+    target_modules_key, thin_norms)
 from subliminal_learning.coherence.probe_io import manifest_ref
+from subliminal_learning.analysis.w0_norms import load_w0_norms, merge_w0_norms
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
 
@@ -59,52 +63,55 @@ WRONG_SEED_OFFSET = 1000
 
 
 _W0_CACHE: dict[tuple[str, str], dict[str, tuple[float, float]]] = {}
+# (base_repo, seed, r, target_modules) -> {module: A_init}. The seeded PEFT init depends on
+# nothing else (not lr / alpha / epochs), so one reconstruction serves every tag of that rank.
+_INIT_CACHE: dict[tuple, dict[str, np.ndarray]] = {}
 
 
 def _lora_init_weights(
-    base_repo: str, hf_cache: Path, device: str, seed: int, adapter_cfg: dict
+    base_repo: str, hf_cache: Path, device: str, seed: int, adapter_cfg: dict,
+    output_root: Path | None = None,
 ) -> dict[str, np.ndarray]:
     """Re-run the seeded PEFT wrap; return ``{module: lora_A init weight}`` (fp64).
 
-    Side effect: caches per-module ``(spectral, Frobenius)`` norms of the frozen base
-    weight ``W_0`` in ``_W0_CACHE[(base_repo, "norms")]`` on first call, so rows can
-    report the update relative to the weight it perturbs.
+    Thin wrapper over the package's `lora_init_weights` + `base_model_factory` (any
+    AutoModel base incl. OLMo/DataDecide; regex ``target_modules`` preserved). Side effect:
+    fills ``_W0_CACHE[(base_repo, "norms")]`` with per-module ``(spectral, Frobenius)`` of
+    the frozen ``W_0`` from the shared snapshot-keyed disk cache (`analysis.w0_norms`),
+    computing only missing modules via `base_weight_norms`; with ``output_root=None`` the
+    norms are computed in-process and not persisted.
     """
-    import torch
-    from peft import LoraConfig, get_peft_model
-    from transformers import GPTNeoXForCausalLM, set_seed
-
-    model = GPTNeoXForCausalLM.from_pretrained(
-        base_repo, cache_dir=str(hf_cache / "hub"), torch_dtype=torch.float32
-    ).to(device)
-    set_seed(seed)
-    model = get_peft_model(model, LoraConfig(
-        r=adapter_cfg["r"],
-        lora_alpha=adapter_cfg["lora_alpha"],
-        lora_dropout=adapter_cfg["lora_dropout"],
-        target_modules=sorted(adapter_cfg["target_modules"]),
-        bias="none",
-        task_type="CAUSAL_LM",
-    ))
-    out = {}
-    w0_key = (base_repo, "norms")
-    fill_w0 = w0_key not in _W0_CACHE
-    w0: dict[str, tuple[float, float]] = {}
-    for name, mod in model.named_modules():
-        if hasattr(mod, "lora_A") and "default" in getattr(mod, "lora_A", {}):
-            key = name.replace("base_model.model.", "")
-            out[key] = mod.lora_A["default"].weight.detach().cpu().double().numpy()
-            if fill_w0:
-                W0 = mod.base_layer.weight.detach().cpu().double().numpy()
-                w0[key] = _sf(W0)
-    if fill_w0:
-        _W0_CACHE[w0_key] = w0
-    del model
+    memo_key = (base_repo, seed, adapter_cfg["r"],
+                target_modules_key(adapter_cfg["target_modules"]))
+    w0 = _W0_CACHE.setdefault((base_repo, "norms"), {})
+    if memo_key in _INIT_CACHE and all(k in w0 for k in _INIT_CACHE[memo_key]):
+        return _INIT_CACHE[memo_key]
+    revision = adapter_cfg.get("revision")
+    factory = base_model_factory(base_repo, hf_cache, device, revision=revision)
+    out = lora_init_weights(factory, seed, adapter_cfg)
+    if output_root is not None:
+        for k, v in load_w0_norms(output_root, base_repo, revision=revision,
+                                  hf_cache_root=hf_cache).items():
+            w0.setdefault(k, (float(v["W0_spec"]), float(v["W0_fro"])))
+    missing = [k for k in out if k not in w0]
+    if missing:
+        computed = base_weight_norms(factory, adapter_cfg["target_modules"])
+        for k in missing:
+            w0[k] = (float(computed[k][0]), float(computed[k][1]))
+        if output_root is not None:
+            merge_w0_norms(output_root, base_repo,
+                           {k: {"W0_fro": w0[k][1], "W0_spec": w0[k][0]} for k in missing},
+                           revision=revision, hf_cache_root=hf_cache)
+    _INIT_CACHE[memo_key] = out
     return out
 
 
 def _sf(m: np.ndarray) -> tuple[float, float]:
-    """(spectral, Frobenius) norms."""
+    """(spectral, Frobenius) norms via a full SVD — only for dense W0 (cache miss).
+
+    Thin factors go through `thin_norms`; ``B @ X`` products through `low_rank_norms`
+    (r x r core, never the d_out x d_in product).
+    """
     sv = np.linalg.svd(m, compute_uv=False)
     return float(sv[0]), float(np.sqrt((sv**2).sum()))
 
@@ -166,10 +173,11 @@ def main(
                 continue
             acfg = json.loads((ckpt / "adapter_config.json").read_text())
             init = _lora_init_weights(
-                acfg["base_model_name_or_path"], hf_cache_root, device, ftseed, acfg)
+                acfg["base_model_name_or_path"], hf_cache_root, device, ftseed, acfg,
+                output_root=output_root)
             wrong = _lora_init_weights(
                 acfg["base_model_name_or_path"], hf_cache_root, device,
-                ftseed + WRONG_SEED_OFFSET, acfg)
+                ftseed + WRONG_SEED_OFFSET, acfg, output_root=output_root)
             adapters: list[tuple[int | None, Path]] = []
             n_bad = checkpoint_nonfinite_count(ckpt)
             if n_bad:
@@ -184,6 +192,7 @@ def main(
                     if (d / "adapter_model.safetensors").exists():
                         adapters.append((int(d.name.split("-")[1]),
                                          d / "adapter_model.safetensors"))
+            run_rows: list[dict] = []  # this run only; `rows` is the cumulative aggregate
             with threadpool_limits(limits=1):
                 for step, adapter_file in adapters:
                     tensors = load_file(str(adapter_file))
@@ -197,9 +206,10 @@ def main(
                              "rank": int(B.shape[1]), "alpha": int(acfg["lora_alpha"]),
                              "module": mod, "device": device}
                         for name, m in [("A_init", A_i), ("A_final", A_f), ("dA", dA),
-                                        ("B", B), ("B_Ainit", B @ A_i), ("B_dA", B @ dA),
-                                        ("B_Afinal", B @ A_f)]:
-                            r[f"{name}_spec"], r[f"{name}_fro"] = _sf(m)
+                                        ("B", B)]:
+                            r[f"{name}_spec"], r[f"{name}_fro"] = thin_norms(m)
+                        for name, x in [("B_Ainit", A_i), ("B_dA", dA), ("B_Afinal", A_f)]:
+                            r[f"{name}_spec"], r[f"{name}_fro"] = low_rank_norms(B, x)
                         # W_final - W_0 = s.B@A_final identically (LoRA); W0 norms give
                         # the reference scale for a relative perturbation readout.
                         w0 = _W0_CACHE.get(
@@ -208,15 +218,15 @@ def main(
                             r["W0_spec"], r["W0_fro"] = w0
                         r["cos_Ainit_Afinal"] = _cos(A_i, A_f)
                         r["cos_wrongseed_Afinal"] = _cos(wrong[mod], A_f)
-                        rows.append(r)
-            v = [r for r in rows
-                 if r["student_tag"] == tag and r["ftseed"] == ftseed and r["step"] is None]
+                        run_rows.append(r)
+            rows.extend(run_rows)
+            v = [r for r in run_rows if r["step"] is None]
             # run-dir records (the SSOT for per-run dose; see analysis/norms.py): the final
             # adapter and the checkpoint trajectory go to SEPARATE records, never mixed.
             run_dir = lineage_dir / tag / f"ftseed{ftseed}"
             _rel = str(run_dir.relative_to(output_root))
-            _kw = dict(test_p=None, rank=(v or rows)[-1]["rank"],
-                       alpha=(v or rows)[-1]["alpha"],
+            # rank/alpha from THIS run's config, never from whatever row came last.
+            _kw = dict(test_p=None, rank=int(acfg["r"]), alpha=int(acfg["lora_alpha"]),
                        wrong_seed_offset=WRONG_SEED_OFFSET,
                        provenance={"harvested_by": "adapter_norms_probe"},
                        manifest_ref=manifest_ref(run_dir))
@@ -224,9 +234,7 @@ def main(
                 atomic_write_json(an.record_path(run_dir),
                                   an.build_record(v, **_kw), indent=None)
                 an.update_inventory(output_root, [_rel], source="adapter_norms_probe")
-            steps = [r for r in rows
-                     if r["student_tag"] == tag and r["ftseed"] == ftseed
-                     and r["step"] is not None]
+            steps = [r for r in run_rows if r["step"] is not None]
             if steps:
                 atomic_write_json(an.traj_record_path(run_dir),
                                   an.build_traj_record(steps, **_kw), indent=None)

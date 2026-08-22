@@ -42,6 +42,7 @@ import numpy as np
 from loguru import logger
 
 from subliminal_learning.analysis.adapter_decomp import (
+    target_modules_key,
     adapter_config,
     base_model_factory,
     base_snapshot_sha,
@@ -206,16 +207,27 @@ def _w0_norms_cached(base_repo: str, hf_cache_root: Path, cache_dir: Path,
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / f"{base_repo.replace('/', '--')}@{snapshot or 'unresolved'}.json"
+    stored: dict = {}
     if path.exists():
-        return json.loads(path.read_text())["norms"]
-    logger.info(f"computing W0 norms for {base_repo} @ {snapshot} "
-                "(once per base revision, then cached)")
+        stored = json.loads(path.read_text())
+        # The snapshot is in the filename but `target_modules` only in the payload: a file
+        # written for a narrower module set (or a different regex) must not be served as
+        # if it covered this config. Validate on read; a mismatch recomputes and UNIONS.
+        if target_modules_key(stored.get("target_modules", [])) == \
+                target_modules_key(target_modules):
+            return stored["norms"]
+        logger.info(f"W0 cache {path.name} holds target_modules="
+                    f"{stored.get('target_modules')!r}, need {target_modules!r}: extending")
+    else:
+        logger.info(f"computing W0 norms for {base_repo} @ {snapshot} "
+                    "(once per base revision, then cached)")
     norms = base_weight_norms(
         base_model_factory(base_repo, hf_cache_root, device), target_modules)
+    merged = dict(stored.get("norms", {})) | {k: list(v) for k, v in norms.items()}
     write_json_atomic(path, {"base_model_repo": base_repo, "snapshot": snapshot,
                              "target_modules": target_modules,
-                             "norms": {k: list(v) for k, v in norms.items()}})
-    return {k: list(v) for k, v in norms.items()}
+                             "norms": merged})
+    return merged
 
 
 def _library_versions() -> dict[str, str]:
@@ -240,6 +252,15 @@ def _measure_cell(refs: list, acfg: dict, cache: _InitCache, w0: dict,
     rows: list[dict] = []
     for ref in refs:
         tensors = load_file(str(ref.weights_path))
+        # The non-finite gate lives here, where the tensors are loaded anyway, instead of
+        # at discovery (which would load every matching adapter once more up front).
+        n_bad = sum(int((~np.isfinite(t)).sum()) for t in tensors.values()
+                    if t.dtype.kind == "f")
+        if n_bad:
+            logger.warning(
+                f"SKIPPING diverged adapter {ref.weights_path} ({n_bad} non-finite weight "
+                "value(s)); it is excluded from this decomposition")
+            continue
         for key_a in sorted(k for k in tensors if k.endswith("lora_A.weight")):
             module = key_a[: -len(".lora_A.weight")].replace("base_model.model.", "")
             a_final = tensors[key_a].astype(np.float64)
@@ -268,14 +289,32 @@ def run(cfg: AdapterDecompConfig, output_root: Path, hf_cache_root: Path) -> dic
     refs = discover_adapters(
         output_root=output_root, kinds=cfg.kinds, animals=cfg.animals or None,
         base_models=cfg.base_models or None, lineages=cfg.lineages or None,
-        tags=cfg.tags or None, ftseeds=cfg.ftseeds or None, checkpoints=cfg.checkpoints)
+        tags=cfg.tags or None, ftseeds=cfg.ftseeds or None, checkpoints=cfg.checkpoints,
+        gate_nonfinite=False)  # gated per artifact in _measure_cell, where it is free
 
     # One cell per measured run; a run's checkpoint series is measured together because
     # every step shares the one reconstructed A_init.
     cells: dict[Path, list] = {}
     for ref in refs:
         cells.setdefault(cell_dir(out_dir, ref), []).append(ref)
-    pending = sorted(cells)[: cfg.limit] if cfg.limit is not None else sorted(cells)
+    # Order cells by init group, NOT by path: `_InitCache` is single-entry, and a path sort
+    # interleaves ranks (the rank sits inside the tag) so every switch re-loads the base and
+    # re-wraps PEFT (~8 s). On the ds1 focus lineage that was 151 switches vs 8 groups.
+    cell_cfgs: dict[Path, dict] = {}
+    for cdir, group in cells.items():
+        try:
+            cell_cfgs[cdir] = adapter_config(group[0])
+        except (OSError, json.JSONDecodeError, KeyError) as exc:
+            logger.warning(f"unreadable adapter_config for {cdir}: {exc!r}")
+
+    def _order(cdir: Path) -> tuple:
+        acfg = cell_cfgs.get(cdir)
+        key = init_group_key(cells[cdir][0], acfg) if acfg else ("~",)
+        return (tuple(str(k) for k in key), str(cdir))
+
+    pending = sorted(cells, key=_order)
+    if cfg.limit is not None:
+        pending = pending[: cfg.limit]
     logger.info(f"discovered {len(refs)} adapter artifacts in {len(cells)} cells "
                 f"({len(pending)} to consider) -> {out_dir}")
 
@@ -297,7 +336,7 @@ def run(cfg: AdapterDecompConfig, output_root: Path, hf_cache_root: Path) -> dic
             head = group[0]
             claim = None
             try:
-                acfg = adapter_config(head)
+                acfg = cell_cfgs.get(cdir) or adapter_config(head)
                 base_repo = acfg["base_model_name_or_path"]
                 snapshot = base_snapshot_sha(hf_cache_root, base_repo)
                 identity = cell_identity(group, acfg, cfg, snapshot)

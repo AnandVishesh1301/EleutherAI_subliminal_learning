@@ -90,7 +90,9 @@ set_plot_style(dpi=115, hide_spines=True)
 ROOT, OUTPUT_ROOT = bootstrap()
 
 ANIMAL = "dog"
-KSTAR = cl.KSTAR_POOLED                       # canonical pooled anchor, 7.87e-4
+KSTAR = cl.KSTAR_POOLED   # placement-era shared-band coordinate (7.87e-4), kept so this
+                          # notebook's K/K* axis matches the band manifest; the WORKING
+                          # anchor for new claims is cl.KSTAR_CALIBRATED (8.4e-4)
 DEAD_MARGIN = 3.0                             # settled prior-based dead margin: dead = prior / e^3
 DATASET = "ex10-20_prefix_n100k"
 

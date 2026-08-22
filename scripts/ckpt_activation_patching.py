@@ -193,9 +193,14 @@ def _patch_direction(
     donor, recipient, tok, device, layer, num_prompts, pref_prompts,
     digit_ids, dog_id, base_num_logp, base_pref_logp, self_control=False,
     norm_match=False, recip_num_blocks=None, recip_pref_blocks=None,
+    source_num_blocks=None, source_pref_blocks=None,
 ):
     """One (direction, layer): patch recipient at block ``layer`` with donor's captured acts.
 
+    ``source_*_blocks`` are the donor's per-batch all-block captures (`_capture_all_blocks`,
+    one forward per batch for every layer); pass them from the caller so the per-layer loop
+    does not re-forward the donor once per (layer, batch). When absent they are captured
+    here (one donor forward per batch, all blocks).
     ``self_control=True`` captures from the recipient itself (correctness check → ~0 KL).
     ``norm_match=True`` rescales the donor states per (example, position) to the recipient's
     own norm at that block (``recip_*_blocks``), preserving direction, adopting scale.
@@ -203,10 +208,16 @@ def _patch_direction(
     the two norms are mean per-position L2 over real (unmasked) number-prompt positions.
     """
     source = recipient if self_control else donor
+    if source_num_blocks is None:
+        source_num_blocks = [_capture_all_blocks(source, enc)
+                             for enc in _batched(num_prompts, tok, device)]
+    if source_pref_blocks is None:
+        source_pref_blocks = [_capture_all_blocks(source, enc)
+                              for enc in _batched(pref_prompts, tok, device)]
     kls, dmass_deltas = [], []
     donor_norm_sum = recip_norm_sum = pos_count = 0.0
     for bi, enc in enumerate(_batched(num_prompts, tok, device)):
-        donor_h = _capture_block(source, enc, layer)
+        donor_h = source_num_blocks[bi][layer]
         recip_h = recip_num_blocks[bi][layer] if recip_num_blocks is not None else None
         mask = enc["attention_mask"].bool().cpu()
         donor_norm_sum += donor_h.norm(dim=-1)[mask].sum().item()
@@ -224,7 +235,7 @@ def _patch_direction(
 
     pdog_deltas = []
     for bi, enc in enumerate(_batched(pref_prompts, tok, device)):
-        donor_h = _capture_block(source, enc, layer)
+        donor_h = source_pref_blocks[bi][layer]
         if norm_match:
             donor_h = _norm_match(donor_h, recip_pref_blocks[bi][layer])
         lp = _forward_last_logp_patched(recipient, enc, layer, donor_h)
@@ -340,6 +351,12 @@ def main(
         assert ctrl_kl < 1e-4, f"self-patch control not ~0 for {dir_key}: KL={ctrl_kl}"
         logger.info("[{}] self-patch control KL={:.2e} (< 1e-4 ✓)", dir_key, ctrl_kl)
 
+        # Donor captured ONCE per batch for all blocks (was once per (layer, batch): N_BLOCKS
+        # redundant donor forwards per batch).
+        donor_num_blocks = [_capture_all_blocks(donor, enc)
+                            for enc in _batched(num_prompts, tok, device)]
+        donor_pref_blocks = [_capture_all_blocks(donor, enc)
+                             for enc in _batched(pref_prompts, tok, device)]
         per_layer = {}
         logger.info(
             "[{}] layer |  kl_number  | d_digit_mass |   d_pdog | donorL2 recipL2", dir_key)
@@ -349,6 +366,7 @@ def main(
                 digit_ids, dog_id, base["num_logp"], base["pref_logp"],
                 norm_match=norm_match, recip_num_blocks=base["num_blocks"],
                 recip_pref_blocks=base["pref_blocks"],
+                source_num_blocks=donor_num_blocks, source_pref_blocks=donor_pref_blocks,
             )
             per_layer[f"L{layer}"] = {
                 "kl_number": kl, "d_digit_mass": d_dmass, "d_pdog": d_pdog,

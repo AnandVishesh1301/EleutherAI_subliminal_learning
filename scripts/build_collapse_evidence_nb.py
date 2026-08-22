@@ -153,14 +153,16 @@ from subliminal_learning.analysis.transfer_factors import load_focus20_design
 OUTPUT_ROOT = Path(yaml.safe_load((REPO / "configs/paths/paths_local.yaml").read_text())["output_root"])
 AN = OUTPUT_ROOT / "analysis"
 
-# Design-exponent anchors (collapse_law_generality pooled fit; §14 family-mean K* anchors).
-B_DESIGN, C_DESIGN = 0.561, -0.085
-KSTAR_DS1, KSTAR_WS1 = 7.84e-4, 6.91e-4
-KSTAR_POOLED = 7.870e-4          # band-ext shared anchor (geo-mean of the fittable arms)
+# Law constants come from the package (single source): exponents cl.B_LAW/C_LAW, the ds1
+# design anchor cl.KSTAR_DS1_DESIGN and the pooled band anchor cl.KSTAR_POOLED. Only the
+# ws1 design anchor has no package home yet.
+B_DESIGN, C_DESIGN = cl.B_LAW, cl.C_LAW
+KSTAR_DS1, KSTAR_WS1 = cl.KSTAR_DS1_DESIGN, 6.91e-4
+KSTAR_POOLED = cl.KSTAR_POOLED   # band-ext shared anchor (geo-mean of the fittable arms)
 BASE_PRIOR = 0.0133              # untrained ds1 base p(dog) on animal_preference_test
 
 def K_of(df, b=B_DESIGN, c=C_DESIGN):
-    return df["lr"] * df["alpha"] ** b * df["rank"] ** c
+    return cl.K_of(df["lr"], df["alpha"], df["rank"], b=b, c=c)
 
 # Fixed semantic colors (Okabe–Ito, CVD-safe): identity never re-assigned mid-notebook.
 C_ALIVE, C_DEAD, C_DIV = "#0072B2", "#D55E00", "#000000"

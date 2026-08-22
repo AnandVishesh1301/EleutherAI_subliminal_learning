@@ -105,6 +105,31 @@ def _is_finite(adapter: Path) -> bool:
         return False
 
 
+def _loaded_adapter_is_finite(model, adapter_name: str) -> bool:
+    """Finite-check the adapter ALREADY loaded into `model` (no second safetensors read).
+
+    Same protection as `_is_finite` -- it runs before any forward, so all-NaN weights never
+    reach a device-side assert -- but on the tensors PEFT just loaded instead of re-reading
+    the file (the pre-check + load_adapter pair was 2x adapter IO over ~37k checkpoints).
+    """
+    return all(torch.isfinite(p).all().item() for n, p in model.named_parameters()
+               if f".{adapter_name}." in n)
+
+
+def _load_ckpt_adapter(model, base, ckpt: Path, name: str):
+    """(model, ok): load one checkpoint adapter as `name`; ok=False when it is non-finite.
+
+    A non-finite adapter is left loaded but never activated or forwarded; the caller
+    records a null point and the usual delete_adapter(prev) sweep drops it next step.
+    """
+    if model is None:
+        model = PeftModel.from_pretrained(base, str(ckpt), adapter_name=name)
+        model.eval()
+    else:
+        model.load_adapter(str(ckpt), adapter_name=name)
+    return model, _loaded_adapter_is_finite(model, name)
+
+
 _TAG_RE = re.compile(r"ep(\d+)_lr([0-9.e-]+)_r(\d+)a(\d+)")
 
 
@@ -362,18 +387,16 @@ def main(
 
         rows, t0 = [], time.time()
         for i, (step, ckpt) in enumerate(points):
-            adapter = ckpt / "adapter_model.safetensors"
-            if not _is_finite(adapter):
+            name = f"ck{i}"
+            model, ok = _load_ckpt_adapter(model, base, ckpt, name)
+            if not ok:
                 logger.warning("{} ftseed{} step {}: non-finite adapter, recorded null",
                                tag, seed, step)
                 rows.append({"step": step, "checkpoint": ckpt.name, "nonfinite": True})
+                if prev_adapter is not None:
+                    model.delete_adapter(prev_adapter)
+                prev_adapter = name
                 continue
-            name = f"ck{i}"
-            if model is None:
-                model = PeftModel.from_pretrained(base, str(ckpt), adapter_name=name)
-                model.eval()
-            else:
-                model.load_adapter(str(ckpt), adapter_name=name)
             model.set_adapter(name)
             if multi:
                 # One forward pass per prompt scores every requested animal; each prob set

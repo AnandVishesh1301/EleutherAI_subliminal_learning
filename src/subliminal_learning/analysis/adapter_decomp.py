@@ -180,15 +180,21 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def base_snapshot_sha(hf_cache_root: Path, base_repo: str) -> str | None:
-    """Resolved HF commit sha of a cached model, or ``None`` if unresolvable.
+def base_snapshot_sha(hf_cache_root: Path, base_repo: str,
+                      revision: str | None = None) -> str | None:
+    """Resolved HF commit sha of a cached model (at `revision`), or ``None`` if unresolvable.
 
-    ``from_pretrained`` follows ``refs/main``, and this cache genuinely holds more than
-    one snapshot for some repos — so keying the W_0 norm cache on the repo *name* alone
-    would let a re-downloaded base silently serve stale spectral norms.
+    ``from_pretrained`` follows ``refs/{revision}`` (``main`` by default), and this cache
+    genuinely holds more than one snapshot for some repos (every Pythia ``stepN``) — so
+    keying the W_0 norm cache on the repo *name* alone would let a re-downloaded base or
+    another revision silently serve stale spectral norms. `analysis.w0_norms` keys on this.
+    A 40-hex sha passed as `revision` is returned as is.
     """
+    rev = revision or "main"
+    if re.fullmatch(r"[0-9a-f]{40}", rev):
+        return rev
     ref = (Path(hf_cache_root) / "hub"
-           / f"models--{base_repo.replace('/', '--')}" / "refs" / "main")
+           / f"models--{base_repo.replace('/', '--')}" / "refs" / rev)
     try:
         return ref.read_text().strip() or None
     except OSError:
@@ -209,6 +215,7 @@ def discover_adapters(
     tags: Sequence[str] | None = None,
     ftseeds: Sequence[int] | None = None,
     checkpoints: bool = False,
+    gate_nonfinite: bool = True,
 ) -> list[AdapterRef]:
     """Enumerate adapter artifacts under `output_root` matching the selectors.
 
@@ -273,7 +280,10 @@ def discover_adapters(
             if (ckpt_dir / ADAPTER_WEIGHTS).exists():
                 # A diverged run is saved all-NaN; every decomposition from it is NaN and
                 # would silently poison downstream aggregates. Skip LOUDLY, never quietly.
-                n_bad = checkpoint_nonfinite_count(ckpt_dir)
+                # `gate_nonfinite=False` defers this to the consumer (it costs a full
+                # safetensors load per artifact -- ~0.17 s x 13k finals at discovery
+                # time); the decomp pipeline gates when it loads the tensors anyway.
+                n_bad = checkpoint_nonfinite_count(ckpt_dir) if gate_nonfinite else 0
                 if n_bad:
                     logger.warning(
                         "SKIPPING diverged adapter {} ({} non-finite weight value(s)); "
@@ -283,8 +293,17 @@ def discover_adapters(
             if checkpoints:
                 for sub in ckpt_dir.glob("checkpoint-*"):
                     sm = _STEP_RE.match(sub.name)
-                    if sm and (sub / ADAPTER_WEIGHTS).exists():
-                        refs.append(_ref(sub / ADAPTER_WEIGHTS, int(sm.group(1))))
+                    if not (sm and (sub / ADAPTER_WEIGHTS).exists()):
+                        continue
+                    # Same gate as the final adapter: a mid-run NaN checkpoint would
+                    # otherwise put NaN rows straight into rows.jsonl.
+                    n_bad = checkpoint_nonfinite_count(sub) if gate_nonfinite else 0
+                    if n_bad:
+                        logger.warning(
+                            "SKIPPING diverged checkpoint {} ({} non-finite weight "
+                            "value(s)); it is excluded from this decomposition", sub, n_bad)
+                        continue
+                    refs.append(_ref(sub / ADAPTER_WEIGHTS, int(sm.group(1))))
     refs.sort(key=lambda r: (r.base_model, r.ftseed, r.tag, -1 if r.step is None else r.step))
     return refs
 
@@ -342,8 +361,8 @@ def thin_norms(m: np.ndarray) -> tuple[float, float]:
     return float(np.sqrt(max(top, 0.0))), fro(m)
 
 
-def low_rank_norms(b: np.ndarray, a: np.ndarray) -> tuple[float, float]:
-    """(spectral, Frobenius) of the product ``B @ A`` **without forming it**.
+def low_rank_singular_values(b: np.ndarray, a: np.ndarray) -> np.ndarray:
+    """All (<= r) nonzero singular values of ``B @ A`` **without forming it**, descending.
 
     ``B`` is ``d_out x r`` and ``A`` is ``r x d_in``, so ``BA`` has rank <= r. With thin
     QR factorisations ``B = Q_b R_b`` and ``A.T = Q_a R_a``::
@@ -352,7 +371,8 @@ def low_rank_norms(b: np.ndarray, a: np.ndarray) -> tuple[float, float]:
 
     and since ``Q_b``/``Q_a`` have orthonormal columns the singular values of ``BA`` are
     exactly those of the ``r x r`` matrix ``R_b R_a.T``. Exact, not an approximation —
-    and ~1000x cheaper than a full SVD of a 3072x768 product at r=32.
+    ~30x cheaper than a full SVD of a 3072x768 product at r=32 (measured 2026-08-22,
+    2 BLAS threads; agrees with the full SVD to 1e-12).
     """
     b = np.asarray(b, dtype=np.float64)
     a = np.asarray(a, dtype=np.float64)
@@ -360,7 +380,12 @@ def low_rank_norms(b: np.ndarray, a: np.ndarray) -> tuple[float, float]:
         raise ValueError(f"inner dims disagree: B{b.shape} @ A{a.shape}")
     _, r_b = np.linalg.qr(b)
     _, r_a = np.linalg.qr(a.T)
-    sv = np.linalg.svd(r_b @ r_a.T, compute_uv=False)
+    return np.linalg.svd(r_b @ r_a.T, compute_uv=False)
+
+
+def low_rank_norms(b: np.ndarray, a: np.ndarray) -> tuple[float, float]:
+    """(spectral, Frobenius) of the product ``B @ A`` via `low_rank_singular_values`."""
+    sv = low_rank_singular_values(b, a)
     return float(sv[0]), float(np.sqrt(np.square(sv).sum()))
 
 

@@ -303,7 +303,9 @@ def main(
             a_init = init_cache[init_key]
             row.update(_weight_space_metrics(tensors, a_init, splice))
 
-        model = PeftModel.from_pretrained(_load_base(), str(ckpt)).eval()
+        # Wrap the ONE resident base (fresh from_pretrained per cell was ~200 loads on
+        # --all-tags); unload() below hands the pristine base back for the next cell.
+        model = PeftModel.from_pretrained(base, str(ckpt)).eval()
 
         orig_pref = target_prob_and_rank_per_prompt(model, tok, device, prompts, target_id)
         row["p_target_orig"] = float(np.mean([p for p, _ in orig_pref.values()]))
@@ -337,6 +339,9 @@ def main(
         abl_pref = target_prob_and_rank_per_prompt(model, tok, device, prompts, target_id)
         row["p_target_ablated"] = float(np.mean([p for p, _ in abl_pref.values()]))
         abl_logp = pile_logprobs(model, pool, device)
+        base = model.unload()  # restores the original modules; the splice only touched lora_*
+        if hasattr(base, "peft_config"):
+            del base.peft_config
         del model
 
         row["pile_kl_base_orig"] = mean_kl(base_logp, orig_logp)
