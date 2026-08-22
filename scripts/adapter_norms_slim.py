@@ -35,13 +35,20 @@ ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 
-def _resolve_root(output_root: Path | None) -> Path:
-    if output_root is not None:
-        return output_root
+def _paths_cfg() -> dict:
     import yaml
 
-    cfg = yaml.safe_load((ROOT / "configs/paths/paths_local.yaml").read_text())
-    return Path(cfg["output_root"])
+    return yaml.safe_load((ROOT / "configs/paths/paths_local.yaml").read_text())
+
+
+def _resolve_root(output_root: Path | None) -> Path:
+    # The base-model load for W0 norms must hit the SHARED hf cache (cold-1), not the
+    # per-node ~/.cache default -- otherwise a node that never trained this base fails offline.
+    import os
+
+    cfg = _paths_cfg()
+    os.environ.setdefault("HF_HOME", str(cfg["hf_cache_root"]))
+    return output_root if output_root is not None else Path(cfg["output_root"])
 
 
 def _w0_norms(base_repo: str, module_bases: list[str], output_root: Path) -> dict:
@@ -92,13 +99,16 @@ def _module_rows(adapter_file: Path, output_root: Path, acfg: dict) -> list[dict
     for k, mb in zip(a_keys, module_bases):
         A = tensors[k].astype(np.float64)
         B = tensors[k.replace("lora_A", "lora_B")].astype(np.float64)
-        BA = B @ A
-        if not np.isfinite(BA).all():
+        if not (np.isfinite(A).all() and np.isfinite(B).all()):
             mods.append({"module": mb, "B_Afinal_fro": float("nan"),
                          "B_Afinal_spec": float("nan"), **w0[mb]})
             continue
-        mods.append({"module": mb, "B_Afinal_fro": float(np.linalg.norm(BA)),
-                     "B_Afinal_spec": float(np.linalg.svd(BA, compute_uv=False)[0]),
+        # B@A has rank <= r: with B = Q R (thin QR) its singular values are those of the
+        # r x d_in matrix R@A, so the norms come from a tiny SVD instead of forming the
+        # d_out x d_in product and SVD-ing it (~100x faster; identical to ~1e-15 rel).
+        RA = np.linalg.qr(B, mode="r") @ A
+        mods.append({"module": mb, "B_Afinal_fro": float(np.linalg.norm(RA)),
+                     "B_Afinal_spec": float(np.linalg.svd(RA, compute_uv=False)[0]),
                      **w0[mb]})
     return mods
 
