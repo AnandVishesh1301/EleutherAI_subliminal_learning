@@ -392,6 +392,17 @@ def force_release(root: Path, name: str, key: str) -> bool:
 # --------------------------- results / attempts ---------------------------
 
 
+def _read_attempt_record(root: Path, name: str, jobkey: str) -> dict:
+    """The whole ``attempts/<jobkey>.json`` dict, or ``{}`` if absent/unreadable."""
+    import json
+
+    try:
+        rec = json.loads(_attempt_path(root, name, jobkey).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
 def read_attempt(root: Path, name: str, jobkey: str) -> int:
     import json
 
@@ -402,8 +413,35 @@ def read_attempt(root: Path, name: str, jobkey: str) -> int:
         return 0
 
 
+def read_mem_floor(root: Path, name: str, jobkey: str) -> int:
+    """Persisted per-job ``mem_mib`` floor (OOM escalation), or ``0`` when never escalated.
+
+    Optional everywhere: records written by pre-escalation workers have no such key.
+    """
+    try:
+        return int(_read_attempt_record(root, name, jobkey).get("mem_mib_floor", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def write_mem_floor(root: Path, name: str, jobkey: str, mem_mib: int) -> None:
+    """Persist a job's escalated ``mem_mib`` floor in the attempts sidecar.
+
+    Lives here rather than in ``jobs.jsonl`` because that file is append-only and shared
+    cross-node; the extra key is ignored by workers running older src (they read only
+    ``attempt``), so the escalation degrades to "no escalation" instead of breaking them.
+    """
+    rec = _read_attempt_record(root, name, jobkey)
+    rec["mem_mib_floor"] = int(mem_mib)
+    mkdir_open(_attempt_path(root, name, jobkey).parent)
+    atomic_write_json(_attempt_path(root, name, jobkey), rec)
+
+
 def _write_attempt(root: Path, name: str, jobkey: str, attempt: int) -> None:
-    atomic_write_json(_attempt_path(root, name, jobkey), {"attempt": attempt})
+    """Persist the attempt counter, PRESERVING any other keys (e.g. ``mem_mib_floor``)."""
+    rec = _read_attempt_record(root, name, jobkey)
+    rec["attempt"] = attempt
+    atomic_write_json(_attempt_path(root, name, jobkey), rec)
 
 
 def bump_attempt(root: Path, name: str, jobkey: str) -> int:

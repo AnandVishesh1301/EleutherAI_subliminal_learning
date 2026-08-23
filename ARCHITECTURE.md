@@ -363,6 +363,19 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   startup (bad config, provenance guard, missing checkpoint) fails in seconds and
   deterministically, so an untripped pool converts one broken job into a whole burnt queue
   in minutes; this happened to `slb-a3-doseladder` (223/480 jobs). `0` disables it.
+- **OOM guardrail + half-open breaker (2026-08-22)**: a job whose `rc != 0` log tail matches
+  a CUDA-OOM marker (`worker.is_oom_text`) is requeued like a yield-kill (claim removed, NO
+  result, attempt bumped, `OOM REQUEUE` logged) and never counts toward the fail streak —
+  its `mem_mib` is escalated (`max(1.5×, 4096)`, capped at card total from
+  `gpu.total_mem()`) and persisted as `mem_mib_floor` in the attempts sidecar, so the
+  memory GATE, not a timer or retry counter, decides when it runs again (cross-node,
+  restart-safe; old-src workers ignore the extra key). The only terminal case is OOM while
+  already asking for a whole card (`OOM CEILING` → ordinary failure). Tripped queues also
+  self-heal: after `breaker_cooldown_s` (ctor default 900 s; `<=0` disables) the queue goes
+  HALF-OPEN and exactly one probe job is admitted — success un-trips, failure re-trips with
+  a fresh cooldown, an OOM probe just requeues and releases the probe slot. Motivation:
+  2026-08-22 a 37 GiB hog on GPU 0 OOM'd gate-less (`mem_mib=0`) jobs, tripping 4 queues
+  and idling node-1 11:47–16:52. Tests: `tests/test_jobq_oom_guard.py`.
 - **Per-user state (2026-07-30)**: `queue_root` is a paths-YAML key and must stay inside
   your own SSD subdir — the queue tree is world-writable so cross-node workers can share
   it, so a root under another account's subdir silently mixes both users' queues, job
@@ -2063,6 +2076,21 @@ row would keep NaN in the new column forever. `load_record_cache` therefore clea
 Found when `ce_student` / `ce_base` were added to `pile_probe`: 20,126 of 20,618 rows were NaN
 with finite records; backfilled the same day (pre-backfill copy
 `analysis/probe_cache.csv.bak-20260820-prebackfill`).
+
+### Unigram anchor for the integrity cut (2026-08-23)
+
+`scripts/build_unigram_anchor.py` writes
+`{output_root}/analysis/unigram_anchor_pp1.json` (+ `.counts.npz`): H_uni —
+the CE of a context-free Pile-val unigram (50k docs disjoint from pp1, same
+skip/truncation rules) on the exact pp1 CE-target multiset — and per-base
+crossings Δ_cross = H_uni − ce_base ("zero net context benefit on Pile
+text"), read from existing `pile_probe.json` records. This is the external
+semantic anchor for `DEAD_KL_CUT` (`collapse_law.md` §1.2): Δ_cross lands
+inside the bimodal transit valley on every base (5.06–5.47 nats), so the
+declared 4.0 sits just below the context-free crossing; anchored-cut
+companions are quoted beside declared-cut fits (K*(c) level-set sections:
+`tierb_strips_integrity.ipynb` §4, `pythia410m_collapse_and_peak.ipynb` §7).
+Program-level synthesis: `docs/results/collapse_program_synthesis.md`.
 
 ### Pile-probe measurement + teacher-tree aggregation (2026-08-20)
 

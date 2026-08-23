@@ -136,12 +136,16 @@ def teacher_run_identity(cfg: TrainTeacherTemplatesConfig) -> dict:
 
 
 def teacher_run_is_current(cfg: TrainTeacherTemplatesConfig) -> bool:
-    """Whether the run has checkpoints and a manifest for this exact identity."""
+    """Whether the run has adapter weights and a manifest for this exact identity."""
     run_dir = teacher_run_dir(
         cfg.paths.output_root, cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
     )
     manifest_path = run_dir / "train_manifest.json"
-    if not manifest_path.is_file() or not (run_dir / "checkpoints").is_dir():
+    # Require the adapter file itself, not just the checkpoints/ dir: a weight-stripped
+    # tree (manifest + configs, no adapter_model.safetensors) must retrain, not skip.
+    if not manifest_path.is_file() or not (
+        run_dir / "checkpoints" / "adapter_model.safetensors"
+    ).is_file():
         return False
     try:
         stored = json.loads(manifest_path.read_text())
@@ -199,7 +203,7 @@ def run(
     # a manifest orphaned by a missing checkpoints/ dir must retrain, not skip onto
     # nothing — and there is no artifact to protect, so it is not an error either.
     stored_manifest: dict | None = None
-    if manifest_path.is_file() and checkpoint_dir.is_dir():
+    if manifest_path.is_file() and (checkpoint_dir / "adapter_model.safetensors").is_file():
         try:
             stored_manifest = json.loads(manifest_path.read_text())
         except (OSError, json.JSONDecodeError):

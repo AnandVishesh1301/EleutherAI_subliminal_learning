@@ -1661,15 +1661,17 @@ def test_supervisor_respawns_crashed_thread_and_hot_scales(tmp_path, monkeypatch
 
 
 def test_effective_cap_by_node_override(tmp_path):
-    from subliminal_learning.jobqueue.model import QueueMeta
+    from subliminal_learning.jobqueue.store import QueueMeta
     pool = _Pool.__new__(_Pool)
     pool.hostname = "nodeA"
-    meta = QueueMeta.from_dict({"name": "q", "defaults": {"cap_per_gpu": 4, "cap_group": "g",
+    meta = QueueMeta.from_dict({"name": "q", "created_utc": "", "defaults": {
+                                "cap_per_gpu": 4, "cap_group": "g",
                                 "cap_per_gpu_by_node": {"nodeA": 3}}})
     assert pool._effective_cap(meta) == (3, "g")
     pool.hostname = "nodeB"
     assert pool._effective_cap(meta) == (4, "g")
-    meta2 = QueueMeta.from_dict({"name": "q2", "defaults": {"cap_per_gpu_by_node": {"nodeB": 2}}})
+    meta2 = QueueMeta.from_dict({"name": "q2", "created_utc": "",
+                                 "defaults": {"cap_per_gpu_by_node": {"nodeB": 2}}})
     assert pool._effective_cap(meta2) == (2, "q2")  # override alone also caps; group=queue name
     pool.hostname = "nodeC"
     assert pool._effective_cap(meta2) == (None, None)

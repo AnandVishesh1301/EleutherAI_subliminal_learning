@@ -16,12 +16,20 @@ A queue whose jobs fail back-to-back is *tripped* rather than drained: a job tha
 dies during startup (bad config, provenance guard, missing checkpoint) fails in
 seconds and deterministically, so an untripped pool converts one broken job into a
 whole burnt queue in minutes. The pool keeps serving other queues and re-admits a
-tripped one as soon as its pending count grows (i.e. after a requeue). A yield-kill
+tripped one as soon as its pending count grows (i.e. after a requeue) or, after
+``breaker_cooldown_s``, when a single HALF-OPEN probe job succeeds. A yield-kill
 is NOT a failure and never counts toward the streak.
+
+A job killed by CUDA OOM is likewise not a failure: its log tail is classified
+(:func:`is_oom_text`) and it is requeued with an escalated ``mem_mib`` floor persisted in
+the attempts sidecar, so the memory GATE — not a timer or a retry counter — decides when it
+runs again. The only terminal case is a job that OOMs while already asking for the whole
+card (``OOM CEILING``), which is recorded as an ordinary failure.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import signal
 import subprocess
@@ -50,6 +58,40 @@ from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.utils.io import atomic_write_text
 
 DEFAULT_FAIL_STREAK_LIMIT = 5
+# Seconds a tripped queue stays fully closed before one half-open probe job is allowed.
+DEFAULT_BREAKER_COOLDOWN_S = 900.0
+# OOM escalation: new_mem = max(ceil(old * FACTOR), FLOOR_MIB), capped at the card's total.
+OOM_MEM_FACTOR = 1.5
+OOM_MEM_FLOOR_MIB = 4096
+OOM_LOG_TAIL_BYTES = 50_000
+
+_OOM_MARKERS = (
+    "CUDA out of memory",
+    "torch.OutOfMemoryError",
+    "CUDA error: out of memory",
+    "cudaErrorMemoryAllocation",
+)
+
+
+def is_oom_text(text: str) -> bool:
+    """Whether a job's output carries any of the CUDA out-of-memory markers."""
+    return any(m in text for m in _OOM_MARKERS)
+
+
+def log_tail_is_oom(path: Path | str, *, tail_bytes: int = OOM_LOG_TAIL_BYTES) -> bool:
+    """Classify a finished job's log as OOM from its last ``tail_bytes``.
+
+    A missing or unreadable log is NOT an OOM (the caller must fall through to normal
+    failure handling); the read is byte-bounded so a multi-GB training log costs one seek.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - tail_bytes))
+            tail = f.read()
+    except OSError:
+        return False
+    return is_oom_text(tail.decode("utf-8", "replace"))
 
 
 class MasterLog:
@@ -143,6 +185,7 @@ class _Pool:
         poll_s: float,
         gpu_wait_s: float,
         fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
+        breaker_cooldown_s: float = DEFAULT_BREAKER_COOLDOWN_S,
         mps_env: dict[str, str] | None = None,
     ) -> None:
         self.root = Path(root)
@@ -153,6 +196,7 @@ class _Pool:
         self.poll_s = poll_s
         self.gpu_wait_s = gpu_wait_s
         self.fail_streak_limit = fail_streak_limit
+        self.breaker_cooldown_s = breaker_cooldown_s
         # Injected only when ensure_mps_daemon succeeded; empty (byte-identical to pre-MPS)
         # otherwise. Merged into every job's env so clients find the shared MPS server.
         self.mps_env = mps_env or {}
@@ -166,6 +210,11 @@ class _Pool:
         self._running: dict[int, dict[str, _RunHandle]] = {}
         self._fail_streak: dict[str, int] = {}
         self._tripped_pending: dict[str, int] = {}
+        # Half-open bookkeeping: when a queue tripped (monotonic), and whether one probe
+        # job from it is currently in flight. Guarded by ``_lock`` — no timer, no thread.
+        self._tripped_at: dict[str, float] = {}
+        self._probing: set[str] = set()
+        self._clock = time.monotonic  # rebindable so tests can advance the cooldown
 
     # ------------------- failure circuit breaker -------------------
 
@@ -182,6 +231,7 @@ class _Pool:
             if streak < self.fail_streak_limit or name in self._tripped_pending:
                 return
             self._tripped_pending[name] = store.queue_status(self.root, name)["pending"]
+            self._tripped_at[name] = self._clock()
         self.master.log(
             "TRIPPED",
             f"{name} — {self.fail_streak_limit} consecutive job failures; not "
@@ -191,17 +241,70 @@ class _Pool:
         )
 
     def _is_tripped(self, name: str) -> bool:
-        """Whether `name` is still tripped; a requeue (more pending) re-admits it."""
+        """Whether `name` is still tripped; a requeue (more pending) re-admits it.
+
+        A tripped queue also goes HALF-OPEN once ``breaker_cooldown_s`` has passed: it is
+        reported un-tripped so the ready list offers it, and :meth:`_probe_admit` then lets
+        exactly one claim through.
+        """
         with self._lock:
             at_trip = self._tripped_pending.get(name)
             if at_trip is None:
                 return False
-            if store.queue_status(self.root, name)["pending"] <= at_trip:
-                return True
-            del self._tripped_pending[name]
-            self._fail_streak[name] = 0
-        self.master.log("WAIT", f"{name} re-admitted after requeue")
+            if store.queue_status(self.root, name)["pending"] > at_trip:
+                del self._tripped_pending[name]
+                self._tripped_at.pop(name, None)
+                self._fail_streak[name] = 0
+                readmit = True
+            else:
+                return not self._half_open(name)
+        if readmit:
+            self.master.log("WAIT", f"{name} re-admitted after requeue")
         return False
+
+    def _half_open(self, name: str) -> bool:
+        """Whether a tripped queue may currently offer a probe job (caller holds ``_lock``)."""
+        if self.breaker_cooldown_s <= 0 or name in self._probing:
+            return False
+        at = self._tripped_at.get(name)
+        return at is not None and self._clock() - at >= self.breaker_cooldown_s
+
+    def _probe_admit(self, name: str) -> bool:
+        """Gate a fresh claim from a tripped queue to ONE half-open probe at a time.
+
+        Always True for an untripped queue. Concurrent threads race here under ``_lock``, so
+        only the first gets the probe slot; the losers must give their claim back.
+        """
+        with self._lock:
+            if name not in self._tripped_pending:
+                return True
+            if not self._half_open(name):
+                return False
+            self._probing.add(name)
+        self.master.log("WAIT", f"{name} half-open probe after cooldown")
+        return True
+
+    def _probe_finish(self, name: str, rc: int | None) -> None:
+        """Settle a half-open probe: success un-trips, failure re-trips with a fresh cooldown.
+
+        ``rc is None`` (yield-kill or OOM requeue) settles nothing — the probe slot is simply
+        released so a later claim can probe again.
+        """
+        with self._lock:
+            if name not in self._probing:
+                return
+            self._probing.discard(name)
+            if rc is None:
+                return
+            if rc == 0:
+                self._tripped_pending.pop(name, None)
+                self._tripped_at.pop(name, None)
+                self._fail_streak[name] = 0
+                msg = f"{name} re-admitted after successful probe"
+            else:
+                self._tripped_at[name] = self._clock()
+                msg = f"{name} probe failed rc={rc}; re-tripped for another cooldown"
+        self.master.log("WAIT", msg)
 
     # ------------------- queue selection -------------------
 
@@ -268,13 +371,55 @@ class _Pool:
 
     # ------------------- run one job -------------------
 
-    def _effective_mem(self, meta: QueueMeta, job: Job) -> int:
+    def _effective_mem(self, name: str, meta: QueueMeta, job: Job) -> int:
+        """The job's memory request: max(static resolution, persisted OOM floor).
+
+        The floor lives on disk (attempts sidecar), so an escalation survives a worker
+        restart and is honored by whichever NODE claims the job next.
+        """
         if job.mem_mib is not None:
-            return job.mem_mib
-        d = meta.defaults.get("mem_mib")
-        if d is not None:
-            return int(d)
-        return self.gpu.default_mem_mib()
+            static = job.mem_mib
+        else:
+            d = meta.defaults.get("mem_mib")
+            static = int(d) if d is not None else self.gpu.default_mem_mib()
+        return max(static, store.read_mem_floor(self.root, name, job.jobkey))
+
+    def _mem_ceiling(self) -> int:
+        """Highest grantable ``mem_mib`` on this node; ``0`` when unknown (= no ceiling)."""
+        probe = getattr(self.gpu, "mem_ceiling_mib", None)
+        if probe is None:
+            return 0
+        try:
+            return int(probe() or 0)
+        except Exception:  # noqa: BLE001 — a broken smi must not fail a job
+            logger.exception("could not read the GPU memory ceiling; treating as unbounded")
+            return 0
+
+    def _oom_requeue(self, name: str, meta: QueueMeta, job: Job, log_path: Path) -> bool:
+        """Requeue an OOM-killed job with an escalated memory floor; False = handle normally.
+
+        False means either "not an OOM" or "already asking for the whole card" — the latter
+        is the ONLY terminal condition (there is deliberately no retry cap: the memory gate,
+        not a counter, decides when an escalated job runs again).
+        """
+        if not log_tail_is_oom(log_path):
+            return False
+        old = self._effective_mem(name, meta, job)
+        ceiling = self._mem_ceiling()
+        if ceiling and old >= ceiling:
+            self.master.log(
+                "OOM CEILING",
+                f"{name} {job.jobkey} mem_mib {old} >= card total {ceiling}; recording failure",
+            )
+            return False
+        new = max(math.ceil(old * OOM_MEM_FACTOR), OOM_MEM_FLOOR_MIB)
+        if ceiling:
+            new = min(new, ceiling)
+        store.write_mem_floor(self.root, name, job.jobkey, new)
+        store.remove_claim(self.root, name, job.jobkey)
+        store.bump_attempt(self.root, name, job.jobkey)
+        self.master.log("OOM REQUEUE", f"{name} {job.jobkey} mem_mib {old} -> {new}")
+        return True
 
     def _effective_slots(self, meta: QueueMeta, job: Job) -> int:
         """The job's weight in global slot-units (job field > queue default > 1)."""
@@ -360,10 +505,11 @@ class _Pool:
     def _run_job(
         self, name: str, meta: QueueMeta, job: Job, slot, attempt: int
     ) -> int | None:
-        """Run one job to completion. Returns its rc, or ``None`` if a yield killed it.
+        """Run one job to completion. Returns its rc, or ``None`` if it was requeued.
 
-        A yield-killed job is requeued to PENDING (claim removed, NO result recorded,
-        attempt bumped) so it retries later — it is never recorded as failed.
+        A yield-killed job — and, on the same path, one classified as CUDA OOM — is requeued
+        to PENDING (claim removed, NO result recorded, attempt bumped) so it retries later;
+        neither is ever recorded as failed.
         """
         store.update_owner_gpu(self.root, name, job.jobkey, slot.gpu)
         pid = os.getpid()
@@ -419,6 +565,8 @@ class _Pool:
             store.remove_claim(self.root, name, job.jobkey)
             store.bump_attempt(self.root, name, job.jobkey)
             return None
+        if rc != 0 and self._oom_requeue(name, meta, job, log_path):
+            return None  # OOM: requeued behind an escalated memory gate, not a failure
         store.record_result(
             self.root,
             name,
@@ -551,22 +699,27 @@ class _Pool:
             job = store.claim_next(self.root, name, self.hostname, os.getpid())
             if job is None:
                 continue
+            if not self._probe_admit(name):  # tripped queue, probe slot taken: give it back
+                store.remove_claim(self.root, name, job.jobkey)
+                continue
             if cap is not None or (cpu_lane and self._effective_slots(meta, job) == 0):
                 # The probe above races (many threads pass it before any acquires), so a
                 # capped claim gets ONE non-blocking acquire: no slot -> give the job back
                 # and keep walking the ready list. Capped queues never park a thread.
                 try:
                     slot = self.gpu.acquire(
-                        self._effective_mem(meta, job),
+                        self._effective_mem(name, meta, job),
                         slots=self._effective_slots(meta, job),
                         cap_per_gpu=cap,
                         cap_group=group,
                     )
                 except Exception:
                     store.remove_claim(self.root, name, job.jobkey)
+                    self._probe_finish(name, None)  # never strand the probe slot either
                     raise
                 if slot is None:
                     store.remove_claim(self.root, name, job.jobkey)
+                    self._probe_finish(name, None)
                     continue
                 claim = (name, meta, job, slot)
                 break
@@ -582,7 +735,7 @@ class _Pool:
         if slot is None:
             try:
                 slot = self._acquire_gpu(
-                    self._effective_mem(meta, job),
+                    self._effective_mem(name, meta, job),
                     self._effective_slots(meta, job),
                     None,
                     None,
@@ -590,9 +743,11 @@ class _Pool:
                 )
             except Exception:
                 store.remove_claim(self.root, name, job.jobkey)  # never strand a claim
+                self._probe_finish(name, None)
                 raise
         if slot is None:  # stop requested while waiting -> let a peer take it
             store.remove_claim(self.root, name, job.jobkey)
+            self._probe_finish(name, None)
             return "exit"
         self._run_claimed(name, meta, job, slot)
         return None
@@ -602,15 +757,17 @@ class _Pool:
             attempt = store.read_attempt(self.root, name, job.jobkey)
             try:
                 rc = self._run_job(name, meta, job, slot, attempt)
-                if rc is None:  # yield-killed: KILL already logged, job requeued to pending
+                if rc is None:  # yield-killed or OOM: already logged, job requeued to pending
                     pass  # not a job failure — must not count toward the trip streak
                 else:
                     self.master.log("END", f"{name} {job.key} rc={rc}")
                     self._record_outcome(name, rc)
+                self._probe_finish(name, rc)
             except Exception:  # noqa: BLE001 — log-and-continue; never abort the pool
                 logger.exception("job {} in queue {} crashed the runner", job.key, name)
                 store.remove_claim(self.root, name, job.jobkey)
                 self._record_outcome(name, 1)
+                self._probe_finish(name, 1)
             finally:
                 slot.release()
             if store.queue_complete(self.root, name):

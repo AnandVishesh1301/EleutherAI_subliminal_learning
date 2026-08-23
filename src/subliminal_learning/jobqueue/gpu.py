@@ -230,6 +230,49 @@ def query_free_mem() -> dict[int, int]:
     return free
 
 
+def query_total_mem() -> dict[int, int]:
+    """GPU index -> TOTAL memory (MiB) via ``nvidia-smi`` (patched in tests, like the free query)."""
+    out = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,memory.total",
+            "--format=csv,noheader,nounits",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    total: dict[int, int] = {}
+    for line in out.strip().splitlines():
+        idx, mem = (x.strip() for x in line.split(","))
+        total[int(idx)] = int(mem)
+    return total
+
+
+_TOTAL_MEM_CACHE: dict[int, int] | None = None
+
+
+def total_mem(query=None) -> dict[int, int]:
+    """Cached GPU index -> total memory (MiB); a card's capacity cannot change under us.
+
+    An ``nvidia-smi`` failure yields an empty map (callers must treat that as "no ceiling
+    known") and is NOT cached, so a transient failure is retried.
+    """
+    global _TOTAL_MEM_CACHE
+    if _TOTAL_MEM_CACHE is None:
+        try:
+            _TOTAL_MEM_CACHE = (query or query_total_mem)()
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return {}
+    return dict(_TOTAL_MEM_CACHE)
+
+
+def clear_total_mem_cache() -> None:
+    """Drop the :func:`total_mem` cache (tests patching the query must call this)."""
+    global _TOTAL_MEM_CACHE
+    _TOTAL_MEM_CACHE = None
+
+
 def _close_lock(fd: int | None) -> None:
     if fd is not None:
         try:
@@ -281,6 +324,7 @@ class GpuManager:
         *,
         lock_prefix: str | None = None,
         mem_query=query_free_mem,
+        total_query=None,
         mem_checks: int = 2,
         mem_interval_s: float = 3.0,
     ) -> None:
@@ -296,6 +340,7 @@ class GpuManager:
             lock_prefix or os.environ.get("SL_JOBQ_LOCK_PREFIX") or DEFAULT_LOCK_PREFIX
         )
         self.mem_query = mem_query
+        self.total_query = total_query
         self.mem_checks = mem_checks
         self.mem_interval_s = mem_interval_s
 
@@ -307,6 +352,19 @@ class GpuManager:
 
     def default_mem_mib(self) -> int:
         return self._policy().free_mem_mib
+
+    def mem_ceiling_mib(self) -> int:
+        """Largest policy card's TOTAL memory — the highest ``mem_mib`` any job could be granted.
+
+        ``0`` means unknown (no policy / no totals readable), which callers must read as
+        "no ceiling", never as "everything is over the ceiling".
+        """
+        try:
+            gpus = self._policy().gpus
+        except FileNotFoundError:
+            return 0
+        totals = total_mem(self.total_query)
+        return max((totals.get(g, 0) for g in gpus), default=0)
 
     def _slot_lock_file(self, g: int, s: int) -> str:
         return f"{self.lock_prefix}_gpu{g}_slot{s}.lock"
