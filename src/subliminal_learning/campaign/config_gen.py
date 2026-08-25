@@ -359,6 +359,9 @@ def b_train_configs(
     two ``same_init`` YAMLs (their 7 student bases cover all Stage B students, so
     the 42 shared controls dedupe there); every other YAML's jobs pass
     ``--no-control``. W&B logs only the same_init headline YAML.
+
+    ``spec.stage_b_full_grid`` widens every group to the complete 49-pair grid;
+    with both tier ftseed ladders equal the result is uniform depth (B6).
     """
     spec = _resolve_spec(spec)
     out: dict[str, dict] = {}
@@ -371,7 +374,11 @@ def b_train_configs(
         "seed0_weight",
     ):
         for tier in ("headline", "extension"):
-            group_pairs = pairs_for(group, headline=tier == "headline")
+            group_pairs = pairs_for(
+                group,
+                headline=tier == "headline",
+                full_grid=spec.stage_b_full_grid,
+            )
             if not group_pairs:
                 continue
             out[f"{b_name(group, tier)}.yaml"] = _b_yaml(

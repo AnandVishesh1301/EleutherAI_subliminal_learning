@@ -15,6 +15,12 @@ subsample (n=8495, seed 42) of the selected cat JSONL.
 Abandoned prior attempt: `20260804_breadth5_160m` / `b5-*` queues (do not
 resume or overwrite).
 
+`SPEC_B6` drives the B6 completion of Stage B (all 49 directed pairs at 3
+teacher ftseeds) into this same run-set at the same frozen recipe, via
+`pipelines/breadth6_pipeline`. It differs from `SPEC` only in the pair source,
+the ftseed ladders, the generated-config dir, the `b6-*` queues, and its own
+state/done files, so the completed 31-pairing leaves stay recognised as done.
+
 Full-eval-bundle contract (preference + FC + capability + storytelling +
 headline lm-eval):
 
@@ -35,6 +41,8 @@ never preempted.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from subliminal_learning.campaign.selection import Recipe
 from subliminal_learning.campaign.spec import CampaignSpec
@@ -128,6 +136,33 @@ B_TREAT_CELLS_PER_ANIMAL = 141
 B_TREAT_CELLS = B_TREAT_CELLS_PER_ANIMAL * len(ANIMALS)  # 564
 B_CONTROL_CELLS = 7 * len(ANIMALS) * len(B_GSEEDS)  # 84
 B_TOTAL_CELLS = B_TREAT_CELLS + B_CONTROL_CELLS  # 648
+
+# ---- B6 — complete 7x7 directed grid at uniform depth --------------------------
+#
+# Runs INTO this same run-set at the same frozen recipe, so the 564 Stage B
+# leaves and 84 controls already on disk are skipped by the sweeps' done-gates
+# and only the 1200 never-trained cells cost GPU. Both tier ladders are 3 tfs,
+# which is what makes the depth uniform across all 49 pairings.
+
+B6_TFS = (0, 1, 2)
+B6_TREAT_CELLS_PER_ANIMAL = 49 * len(B6_TFS) * len(B_GSEEDS)  # 441
+B6_TREAT_CELLS = B6_TREAT_CELLS_PER_ANIMAL * len(ANIMALS)  # 1764
+B6_NEW_TREAT_CELLS = B6_TREAT_CELLS - B_TREAT_CELLS  # 1200
+B6_GENERATED_CONFIG_DIR = "configs/experiment/generated/breadth6"
+B6_STATE_FILE = "campaign_state_b6.json"
+B6_DONE_FILE = "CAMPAIGN_DONE_B6"
+
+# The 41 non-headline pairings carry every new cell; the 8 headline ones are
+# already complete at 3 tfs and their queue only re-checks them.
+Q_B6_FILL = "b6-b-grid-fill"
+Q_B6_RESCAN = "b6-b-grid-rescan"
+Q_B6_EVALS = "b6-b-grid-evals"
+
+QUEUE_PRIORITIES_B6: dict[str, int] = {
+    Q_B6_FILL: 15,
+    Q_B6_RESCAN: 13,
+    Q_B6_EVALS: 12,
+}
 
 # ---- Stage C (optional; not in this campaign's launch scope) ------------------
 
@@ -278,4 +313,18 @@ SPEC = CampaignSpec(
     eval_prompt_sets=EVAL_PROMPT_SETS,
     gkd_experiment_config="configs/experiment/gkd_student_breadth5.yaml",
     freeze_doses=FREEZE_DOSES,
+)
+
+SPEC_B6 = replace(
+    SPEC,
+    stage_b_full_grid=True,
+    b_tfs_headline=B6_TFS,
+    b_tfs_extension=B6_TFS,
+    generated_config_dir=B6_GENERATED_CONFIG_DIR,
+    q_b_headline=Q_B6_RESCAN,
+    q_b_ext=Q_B6_FILL,
+    q_b_evals=Q_B6_EVALS,
+    queue_priorities=QUEUE_PRIORITIES_B6,
+    campaign_state_file=B6_STATE_FILE,
+    campaign_done_file=B6_DONE_FILE,
 )

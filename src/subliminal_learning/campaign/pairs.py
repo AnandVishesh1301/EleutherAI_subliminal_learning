@@ -14,6 +14,11 @@ confirmation-only and stay in the extension tier (1 tfs x 3 gseeds):
 - data cyclic:    data-seed1->data-seed2, data-seed2->data-seed3
 - weight cyclic:  weight-seed1->weight-seed2, weight-seed2->weight-seed3
 - family_swap:    data-seed1<->weight-seed1 (both directions)
+
+`full_grid_pairs` is the B6 superset: all 49 directed pairs over the same 7
+bases, same corner groups, same 8 headline flags. It adds the 18 pairings the
+Stage B design never covered -- the 3+3 reverse cyclics and the 12 unmatched-k
+cross-family arms -- taking the 2x2 corner counts from 7/9/9/6 to 7/12/12/18.
 """
 
 from __future__ import annotations
@@ -116,13 +121,49 @@ def stage_b_pairs() -> tuple[CornerPair, ...]:
     return tuple(pairs)
 
 
-def pairs_for(group: str, *, headline: bool) -> tuple[CornerPair, ...]:
+def _group_of(student: str, teacher: str) -> str:
+    """The corner group of any directed pair, matching `stage_b_pairs` exactly."""
+    if student == teacher:
+        return GROUP_SAME
+    if "original" in (student, teacher):
+        other = teacher if student == "original" else student
+        return GROUP_SEED0_DATA if other.startswith("data") else GROUP_SEED0_WEIGHT
+    if student.split("-")[0] != teacher.split("-")[0]:
+        return GROUP_FAMILY_SWAP
+    return GROUP_DATA_CYCLIC if student.startswith("data") else GROUP_WEIGHT_CYCLIC
+
+
+def full_grid_pairs() -> tuple[CornerPair, ...]:
+    """All 49 directed pairs over the 7 bases: the B6 superset of `stage_b_pairs`.
+
+    Groups and headline flags are inherited unchanged, so generated YAML names,
+    teacher tags, and control dedup stay identical to Stage B and the 564 leaves
+    already on disk are recognised as done rather than retrained.
+
+    Returns:
+        Pairs in corner-group order, then (student, teacher).
+    """
+    headline = {(p.student, p.teacher) for p in stage_b_pairs() if p.headline}
+    return tuple(
+        sorted(
+            (
+                CornerPair(s, t, _group_of(s, t), (s, t) in headline)
+                for s in _ALL7
+                for t in _ALL7
+            ),
+            key=lambda p: (CORNER_GROUPS.index(p.group), p.student, p.teacher),
+        )
+    )
+
+
+def pairs_for(
+    group: str, *, headline: bool, full_grid: bool = False
+) -> tuple[CornerPair, ...]:
     """The pairings of one corner group in one tier (may be empty)."""
     if group not in CORNER_GROUPS:
         raise ValueError(f"unknown corner group {group!r}; expected {CORNER_GROUPS}")
-    return tuple(
-        p for p in stage_b_pairs() if p.group == group and p.headline == headline
-    )
+    source = full_grid_pairs() if full_grid else stage_b_pairs()
+    return tuple(p for p in source if p.group == group and p.headline == headline)
 
 
 def stage_b_student_models() -> tuple[str, ...]:

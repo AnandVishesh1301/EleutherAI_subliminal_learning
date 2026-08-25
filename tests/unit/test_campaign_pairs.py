@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from subliminal_learning.campaign import plan
+from subliminal_learning.campaign import breadth_plan, plan
+from subliminal_learning.campaign.ckpt_pairs import Cell, cell_of
 from subliminal_learning.campaign.pairs import (
     CORNER_GROUPS,
     GROUP_DATA_CYCLIC,
@@ -13,6 +14,7 @@ from subliminal_learning.campaign.pairs import (
     GROUP_SEED0_DATA,
     GROUP_SEED0_WEIGHT,
     GROUP_WEIGHT_CYCLIC,
+    full_grid_pairs,
     pairs_for,
     stage_b_pairs,
     stage_b_student_models,
@@ -134,3 +136,96 @@ def test_pairs_for_unknown_group_raises() -> None:
     with pytest.raises(ValueError):
         pairs_for("bogus", headline=True)
     assert set(CORNER_GROUPS) == set(EXPECTED_GROUP_SIZES)
+
+
+# ---- B6 full grid ---------------------------------------------------------------
+
+FULL_GRID_GROUP_SIZES = {
+    GROUP_SAME: 7,
+    GROUP_DATA_CYCLIC: 6,
+    GROUP_WEIGHT_CYCLIC: 6,
+    GROUP_FAMILY_SWAP: 18,
+    GROUP_SEED0_DATA: 6,
+    GROUP_SEED0_WEIGHT: 6,
+}
+
+
+def test_full_grid_is_every_directed_pair() -> None:
+    pairs = full_grid_pairs()
+    bases = set(stage_b_student_models())
+    assert len(pairs) == 49
+    assert {(p.student, p.teacher) for p in pairs} == {
+        (s, t) for s in bases for t in bases
+    }
+
+
+def test_full_grid_group_counts() -> None:
+    pairs = full_grid_pairs()
+    for group, n in FULL_GRID_GROUP_SIZES.items():
+        assert sum(p.group == group for p in pairs) == n, group
+
+
+def test_full_grid_preserves_stage_b_group_and_tier() -> None:
+    """Regrouping or re-tiering a Stage B pair would retrain its finished leaves."""
+    full = {(p.student, p.teacher): p for p in full_grid_pairs()}
+    for p in stage_b_pairs():
+        got = full[(p.student, p.teacher)]
+        assert (got.group, got.headline) == (p.group, p.headline), p
+    assert sum(p.headline for p in full_grid_pairs()) == 8
+
+
+def test_full_grid_corner_counts_7_12_12_18() -> None:
+    counts = {cell: 0 for cell in Cell}
+    for p in full_grid_pairs():
+        counts[cell_of(p.student, p.teacher)] += 1
+    assert counts == {
+        Cell.SI_SS: 7,
+        Cell.SI_DS: 12,
+        Cell.DI_SS: 12,
+        Cell.DI_DS: 18,
+    }
+
+
+def test_full_grid_new_pairs_are_the_eighteen_never_designed() -> None:
+    new = {(p.student, p.teacher) for p in full_grid_pairs()} - {
+        (p.student, p.teacher) for p in stage_b_pairs()
+    }
+    reverse_cyclic = {
+        (f"{v}-seed{k}", f"{v}-seed{k % 3 + 1}")
+        for v in ("data", "weight")
+        for k in (1, 2, 3)
+    }
+    unmatched_swap = {
+        (f"{a}-seed{i}", f"{b}-seed{j}")
+        for a, b in (("data", "weight"), ("weight", "data"))
+        for i in (1, 2, 3)
+        for j in (1, 2, 3)
+        if i != j
+    }
+    assert new == reverse_cyclic | unmatched_swap
+    assert len(new) == 18
+
+
+def test_pairs_for_full_grid_partitions_by_group_and_tier() -> None:
+    seen: list[tuple[str, str]] = []
+    for group in CORNER_GROUPS:
+        for headline in (True, False):
+            seen += [
+                (p.student, p.teacher)
+                for p in pairs_for(group, headline=headline, full_grid=True)
+            ]
+    assert len(seen) == 49
+    assert set(seen) == {(p.student, p.teacher) for p in full_grid_pairs()}
+
+
+def test_b6_cell_math_uniform_depth_and_reuse_delta() -> None:
+    spec = breadth_plan.SPEC_B6
+    assert spec.stage_b_full_grid
+    assert spec.b_tfs_headline == spec.b_tfs_extension == breadth_plan.B6_TFS
+    assert spec.run_set_id == breadth_plan.RUN_SET_ID
+    per_animal = 49 * len(breadth_plan.B6_TFS) * len(breadth_plan.B_GSEEDS)
+    assert per_animal == breadth_plan.B6_TREAT_CELLS_PER_ANIMAL == 441
+    assert breadth_plan.B6_TREAT_CELLS == 1764
+    assert breadth_plan.B6_NEW_TREAT_CELLS == 1200
+    # Controls key on the student base only, so the wider grid adds none.
+    assert breadth_plan.B_CONTROL_CELLS == 84

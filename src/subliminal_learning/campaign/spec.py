@@ -82,6 +82,8 @@ class CampaignSpec:
             ``configs/experiment/gkd_student.yaml``.
         freeze_doses: Epochs scored at recipe freeze. ``None`` uses
             ``a3_doses``. A3 train/eval still sweep ``a3_doses``.
+        stage_b_full_grid: Draw Stage B from `pairs.full_grid_pairs` (all 49
+            directed pairs) instead of the 31 designed `pairs.stage_b_pairs`.
     """
 
     run_set_id: str
@@ -143,6 +145,7 @@ class CampaignSpec:
     eval_prompt_sets: tuple[str, ...]
     gkd_experiment_config: str | None = None
     freeze_doses: tuple[float, ...] | None = None
+    stage_b_full_grid: bool = False
 
     def queue_names(self) -> Sequence[str]:
         """Queue names in `queue_priorities` insertion order."""
