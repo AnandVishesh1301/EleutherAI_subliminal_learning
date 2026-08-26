@@ -376,6 +376,44 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   a fresh cooldown, an OOM probe just requeues and releases the probe slot. Motivation:
   2026-08-22 a 37 GiB hog on GPU 0 OOM'd gate-less (`mem_mib=0`) jobs, tripping 4 queues
   and idling node-1 11:47–16:52. Tests: `tests/test_jobq_oom_guard.py`.
+- **EDQUOT self-healing (2026-08-26)**: quota storms on ssd-2 (1,288 `OSError: Disk quota
+  exceeded` inside worker iterations, 2026-08-24/25) exposed two leak classes that
+  previously needed a drain + pool restart: slot flock fds leaked when a write threw
+  between `_try_slot` and `GpuSlot` construction (24 leaked fds ran a 40-slot node at 16
+  for two days), and claims stranded under a LIVE pool pid (`steal_stale` only reclaims
+  dead pids' claims — jobq counted them RUNNING forever). Fixes: `acquire()` rolls held
+  fds back on any exception; `MasterLog.log` swallows `OSError` (loguru mirror still
+  records); and the supervisor runs a 30 s janitor tick — `GpuManager.reap_leaked_locks()`
+  (two-strike `/proc/self/fd` diff against the live-reservation registry, `REAP` logged)
+  plus `_Pool.reap_orphan_claims()` (on-disk claims stamped with our pid but absent from
+  the in-process owned-claims registry past a 300 s grace). Takes effect at next pool
+  launch per node. Tests: `tests/test_jobq_self_heal.py`.
+  Hardened same day after an audit found the reapers could destroy LIVE state: (1)
+  `reap_leaked_locks` now runs under the acquire flock — two-strike alone couldn't tell a
+  persisted leak from a recurring transient (a thread waiting at the admission boundary
+  re-flocks the same slot path at the same reused fd number every few seconds, held
+  unregistered through the ~3 s memory-gate sleep), so consecutive ticks could close an fd
+  a live acquire held; it also whitelists the three slot-lock filename shapes instead of
+  "anything under the prefix". (2) The owned-claims registry is COUNTED, and each claim is
+  bracketed by exactly one note/drop pair in `_Pool._admit_and_run`'s `finally` (which also
+  releases the slot): a set registry let a hand-back's drop erase a peer's re-claim of the
+  same jobkey (janitor would then reap a RUNNING job's claim → duplicate execution), and
+  the missing outer bracket let an exception escaping between `claim_next` and
+  `_run_claimed`'s `try` shield stranded claims/fds from both reapers forever. Abandoned
+  disk claims are now deliberately LEFT for the janitor (a peer may already own a re-claim)
+  rather than removed in the bracket. `MasterLog.log` touches the log mtime when the
+  append fails (metadata survives EDQUOT), keeping log-mtime liveness watchers truthful.
+  A second review round closed three more: requeue paths now bump the attempt BEFORE
+  removing the claim, and `_run_job` marks a `settled` flag the instant each removal
+  lands, so `_run_claimed`'s crash cleanup removes the claim only while it is still ours
+  (an unconditional removal after e.g. `bump_attempt` threw EDQUOT could delete a peer's
+  re-claim — owner.json can't tell same-pid generations apart); a process-local
+  `_audit_lock` serializes the auditor with the short flock windows that run outside the
+  acquire flock (CPU-slot grabs, `group_has_room` probes, `_probe` scans), closing the
+  descriptor-generation gap two-strike can't see; and the auditor's acquire-flock wait is
+  bounded (10 s of nonblocking retries) so a wedged `nvidia-smi` — which holds the
+  acquire flock with no subprocess timeout — degrades to skipped audit ticks instead of
+  hanging the supervisor (respawns, scaling, and claim reaping run on that thread).
 - **Per-user state (2026-07-30)**: `queue_root` is a paths-YAML key and must stay inside
   your own SSD subdir — the queue tree is world-writable so cross-node workers can share
   it, so a root under another account's subdir silently mixes both users' queues, job

@@ -1149,7 +1149,7 @@ def test_yield_kill_requeues_to_pending_not_failed(tmp_path):
     result = {}
 
     def run():
-        result["rc"] = pool._run_job("q", meta, job, slot, 0)
+        result["rc"] = pool._run_job("q", meta, job, slot, 0, [])
 
     t = threading.Thread(target=run)
     t.start()
@@ -1352,7 +1352,7 @@ def test_yield_kill_skips_already_exited_handle(tmp_path):
     store.append_jobs(tmp_path, "q2", [Job("bye", "exit 4")])
     meta2 = store.read_meta(tmp_path, "q2")
     j2 = store.claim_next(tmp_path, "q2", store.this_host(), os.getpid())
-    rc = pool._run_job("q2", meta2, j2, GpuSlot(gpu=0, slot=0), 0)
+    rc = pool._run_job("q2", meta2, j2, GpuSlot(gpu=0, slot=0), 0, [])
     assert rc == 4
     assert store.job_state(tmp_path, "q2", j2) == store.FAILED
 
@@ -1473,7 +1473,7 @@ def test_drain_if_near_done_spares_high_kills_low(tmp_path):
     results = {}
 
     def run(job, key):
-        results[key] = pool._run_job("q", meta, job, GpuSlot(gpu=0, slot=0), 0)
+        results[key] = pool._run_job("q", meta, job, GpuSlot(gpu=0, slot=0), 0, [])
 
     thi = threading.Thread(target=run, args=(jhi, "hi"))
     tlo = threading.Thread(target=run, args=(jlo, "lo"))

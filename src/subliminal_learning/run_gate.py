@@ -160,15 +160,23 @@ def student_gate_action(
 
 
 def clear_stale_run(run_dir: Path) -> None:
-    """Remove a prior `train_manifest.json` + `checkpoints/` before retraining `run_dir`.
+    """Remove a prior `train_manifest.json` + `checkpoints/` + `eval/` before retraining.
 
     Deleting the manifest FIRST guarantees a crash mid-retrain never leaves an old
     manifest beside new/mixed checkpoints — the torn state a later rerun under the old
     config would mistake for a finished run and skip, serving garbage.
+
+    `eval/` records describe the adapter being overwritten, so they go too. Teacher
+    dirs need this: their probe/fidelity staleness stamp (`manifest_ref`) carries no
+    student_param_tag/filtered_sha256, so a same-HP retrain would otherwise leave the
+    old records looking current.
     """
     manifest_path = run_dir / "train_manifest.json"
     checkpoint_dir = run_dir / "checkpoints"
+    eval_dir = run_dir / "eval"
     if manifest_path.exists():
         manifest_path.unlink()
     if checkpoint_dir.exists():
         shutil.rmtree(checkpoint_dir)
+    if eval_dir.exists():
+        shutil.rmtree(eval_dir)

@@ -122,14 +122,19 @@ def test_teacher_gate_requires_full_identity_and_checkpoints(tmp_path: Path):
         cfg.paths.output_root, "cat", SPEC, "EleutherAI", TRAIN, LORA
     )
     (run_dir / "checkpoints").mkdir(parents=True)
+    adapter = run_dir / "checkpoints" / "adapter_model.safetensors"
     (run_dir / "train_manifest.json").write_text(json.dumps({
         "run_identity": teacher_run_identity(cfg)
     }))
+    # Manifest alone is not enough: the gate requires the adapter weights.
+    assert not teacher_run_is_current(cfg)
+    adapter.write_bytes(b"weights")
     assert teacher_run_is_current(cfg)
     assert not teacher_run_is_current(
         replace(cfg, train=replace(TRAIN, batch_size=11))
     )
-    (run_dir / "checkpoints").rmdir()
+    # Weight-stripped tree (manifest kept, adapter deleted) must retrain, not skip.
+    adapter.unlink()
     assert not teacher_run_is_current(cfg)
 
 

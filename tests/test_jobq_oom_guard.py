@@ -181,7 +181,7 @@ def test_missing_log_file_is_not_an_oom(tmp_path):
     pool = _pool(tmp_path)
     meta = store.read_meta(tmp_path, "q")
 
-    assert pool._oom_requeue("q", meta, job, tmp_path / "gone.log") is False
+    assert pool._oom_requeue("q", meta, job, tmp_path / "gone.log", []) is False
     assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0
 
 

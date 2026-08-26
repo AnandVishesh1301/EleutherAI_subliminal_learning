@@ -30,12 +30,14 @@ All ``nvidia-smi`` access is behind :func:`query_free_mem`, and the lock ``prefi
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import getpass
 import json
 import os
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +50,21 @@ from subliminal_learning.jobqueue import yielding
 # creates them, so a shared prefix makes one account's locks unopenable by the other.
 DEFAULT_LOCK_PREFIX = f"/tmp/subliminal_jobq_{getpass.getuser()}"
 DEFAULT_RESERVATION_WARMUP_S = 300
+
+# The three slot-lock filename shapes, as suffixes after ``lock_prefix`` (see
+# _slot_lock_file / _cpu_slot_lock_file / _try_group_slot). reap_leaked_locks matches
+# open fds against this WHITELIST rather than "anything under the prefix", so a broad or
+# root-overlapping custom SL_JOBQ_LOCK_PREFIX (or a future non-lock file added under the
+# prefix) can never sweep unrelated descriptors into the audit.
+_SLOT_LOCK_SUFFIX_RE = re.compile(
+    r"_(?:gpu\d+_slot\d+|cpu_slot\d+|grp_[A-Za-z0-9._-]+_gpu\d+_slot\d+)\.lock$"
+)
+
+# How long reap_leaked_locks retries for the acquire flock before skipping its tick.
+# Bounded so a wedged nvidia-smi (no subprocess timeout) holding the flock degrades to
+# skipped audits instead of a hung supervisor; long enough that ordinary acquire churn
+# (gate sleeps of a few seconds) cannot starve the auditor.
+_AUDIT_FLOCK_DEADLINE_S = 10.0
 
 
 @dataclass
@@ -295,6 +312,11 @@ class GpuSlot:
     slot: int
     _fds: list[int] = field(default_factory=list)
     _group_fd: int | None = None
+    # The owning manager's live-fd registry (see GpuManager._live_lock_fds); release()
+    # deregisters so the leak auditor knows these fds are legitimately gone. Mutations go
+    # under the manager's ``_reg_lock`` so they serialize with the auditor's audit pass.
+    _registry: "set[int] | None" = None
+    _reg_lock: "threading.Lock | None" = None
 
     @property
     def is_cpu_only(self) -> bool:
@@ -302,11 +324,17 @@ class GpuSlot:
         return self.gpu is None
 
     def release(self) -> None:
-        for fd in self._fds:
-            _close_lock(fd)
-        self._fds = []
-        _close_lock(self._group_fd)
-        self._group_fd = None
+        reg = self._registry
+        with self._reg_lock if self._reg_lock is not None else contextlib.nullcontext():
+            for fd in self._fds:
+                _close_lock(fd)
+                if reg is not None:
+                    reg.discard(fd)
+            self._fds = []
+            if self._group_fd is not None and reg is not None:
+                reg.discard(self._group_fd)
+            _close_lock(self._group_fd)
+            self._group_fd = None
 
 
 class GpuManager:
@@ -343,6 +371,22 @@ class GpuManager:
         self.total_query = total_query
         self.mem_checks = mem_checks
         self.mem_interval_s = mem_interval_s
+        # Leak audit state (2026-08-24: EDQUOT thrown between flock and GpuSlot
+        # construction leaked 24 slot fds and shrank the node to 16/40 slots until a pool
+        # restart). Every fd handed out inside a returned GpuSlot is registered here and
+        # deregistered by GpuSlot.release(); reap_leaked_locks() closes what's left over.
+        self._reg_lock = threading.Lock()
+        self._live_lock_fds: set[int] = set()
+        self._leak_suspects: dict[int, str] = {}
+        # Serializes every SHORT flock-to-register/close window that runs OUTSIDE the
+        # acquire flock (CPU-slot grabs, group_has_room probes, _probe scans) with the
+        # leak auditor's snapshot+close pass: two-strike keys on (fd number, lock path)
+        # and cannot distinguish descriptor GENERATIONS, so without this a recurring
+        # transient at a reused fd number could be closed as a "leak". The seconds-long
+        # windows inside acquire() are covered by the acquire flock instead — this lock
+        # must never wrap them, or CPU probes would block behind GPU admission. Ordering:
+        # acquire flock -> _audit_lock -> _reg_lock (never reversed).
+        self._audit_lock = threading.Lock()
 
     def _policy(self) -> GpuPolicy:  # re-read every time (hot-reload of pins)
         return load_policy(self.root, self.hostname)
@@ -390,14 +434,23 @@ class GpuManager:
         full. Same flock mechanism as the GPU slots, so the ceiling holds across worker
         PROCESSES, not just threads.
         """
-        for s in range(max(1, policy.cpu_cap)):
-            fd = os.open(self._cpu_slot_lock_file(s), os.O_CREAT | os.O_RDWR, 0o644)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                os.close(fd)
-                continue
-            return GpuSlot(gpu=None, slot=s, _fds=[fd])
+        with self._audit_lock:  # flock-to-register window must not overlap an audit pass
+            for s in range(max(1, policy.cpu_cap)):
+                fd = os.open(self._cpu_slot_lock_file(s), os.O_CREAT | os.O_RDWR, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    os.close(fd)
+                    continue
+                with self._reg_lock:
+                    self._live_lock_fds.add(fd)
+                return GpuSlot(
+                    gpu=None,
+                    slot=s,
+                    _fds=[fd],
+                    _registry=self._live_lock_fds,
+                    _reg_lock=self._reg_lock,
+                )
         return None
 
     def _try_group_slot(self, group: str, g: int, cap: int) -> int | None:
@@ -431,13 +484,14 @@ class GpuManager:
         """
         policy = self._policy()
         yielded = yielding.yielded_gpus(self.root, self.hostname)
-        for g in policy.gpus:
-            if g in yielded:
-                continue
-            fd = self._try_group_slot(group, g, cap)
-            if fd is not None:
-                _close_lock(fd)
-                return True
+        with self._audit_lock:  # probe fds are never registered; keep audits out
+            for g in policy.gpus:
+                if g in yielded:
+                    continue
+                fd = self._try_group_slot(group, g, cap)
+                if fd is not None:
+                    _close_lock(fd)
+                    return True
         return False
 
     def cpu_has_room(self) -> bool:
@@ -505,22 +559,23 @@ class GpuManager:
         """Per-GPU (slots held, MiB reserved by ramping jobs); non-destructive probe."""
         counts: dict[int, int] = {}
         reserved: dict[int, int] = {}
-        for g in policy.gpus:
-            held = 0
-            mib = 0
-            for s in range(policy.cap_per_gpu):
-                fd = self._try_slot(g, s)
-                if fd is None:
-                    held += 1
-                    mib += self._read_reservation(g, s, policy.reservation_warmup_s)
-                else:
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                        os.close(fd)
-                    except OSError:
-                        pass
-            counts[g] = held
-            reserved[g] = mib
+        with self._audit_lock:  # probe fds are never registered; keep audits out
+            for g in policy.gpus:
+                held = 0
+                mib = 0
+                for s in range(policy.cap_per_gpu):
+                    fd = self._try_slot(g, s)
+                    if fd is None:
+                        held += 1
+                        mib += self._read_reservation(g, s, policy.reservation_warmup_s)
+                    else:
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_UN)
+                            os.close(fd)
+                        except OSError:
+                            pass
+                counts[g] = held
+                reserved[g] = mib
         return counts, reserved
 
     def _write_reservation(self, fd: int, mem_mib: int) -> None:
@@ -616,49 +671,151 @@ class GpuManager:
                 if snapshot.get(g, 0) - reserved[g] < mem_mib:
                     continue
                 held: list[tuple[int, int]] = []  # (slot index, fd)
-                for s in range(policy.cap_per_gpu):
-                    fd = self._try_slot(g, s)
-                    if fd is not None:
-                        held.append((s, fd))
-                        if len(held) == need:
-                            break
-                if len(held) < need:  # not enough free units -> all-or-nothing rollback
+                group_fd: int | None = None
+                # Any exception below (2026-08-24: EDQUOT from _write_reservation, but
+                # also nvidia-smi hiccups in _mem_ok) must roll the flocked fds back
+                # before propagating — a leaked fd is a slot-unit gone until pool death.
+                try:
+                    for s in range(policy.cap_per_gpu):
+                        fd = self._try_slot(g, s)
+                        if fd is not None:
+                            held.append((s, fd))
+                            if len(held) == need:
+                                break
+                    if len(held) < need:  # not enough free units -> all-or-nothing rollback
+                        for _, fd in held:
+                            _close_lock(fd)
+                        continue
+                    if cap_per_gpu is not None:
+                        group_fd = self._try_group_slot(
+                            cap_group or "default", g, cap_per_gpu
+                        )
+                        if group_fd is None:  # stage ceiling reached on this GPU
+                            for _, fd in held:
+                                _close_lock(fd)
+                            continue
+                    if self._mem_ok(g, mem_mib, reserved[g]):
+                        # Late yield re-check: the memory gate SLEEPS (~mem_interval_s) while we
+                        # hold the slot, and the watchdog can yield this card during that sleep.
+                        # Re-read the marker fresh here (not the pre-loop snapshot) and, if the GPU
+                        # became yielded, roll back exactly like the other abandon paths rather than
+                        # dispatch onto a card we promised to vacate. Before stamping the
+                        # reservation: an abandoned slot must leave no ledger entry behind.
+                        if g in yielding.yielded_gpus(self.root, self.hostname):
+                            for _, fd in held:
+                                _close_lock(fd)
+                            _close_lock(group_fd)
+                            continue
+                        for _, fd in held:
+                            self._write_reservation(fd, mem_mib / len(held))
+                        with self._reg_lock:
+                            self._live_lock_fds.update(fd for _, fd in held)
+                            if group_fd is not None:
+                                self._live_lock_fds.add(group_fd)
+                        return GpuSlot(
+                            gpu=g,
+                            slot=held[0][0],
+                            _fds=[fd for _, fd in held],
+                            _group_fd=group_fd,
+                            _registry=self._live_lock_fds,
+                            _reg_lock=self._reg_lock,
+                        )
+                    for _, fd in held:  # not enough memory -> next GPU
+                        _close_lock(fd)
+                    _close_lock(group_fd)
+                except Exception:
                     for _, fd in held:
                         _close_lock(fd)
-                    continue
-                group_fd = None
-                if cap_per_gpu is not None:
-                    group_fd = self._try_group_slot(
-                        cap_group or "default", g, cap_per_gpu
-                    )
-                    if group_fd is None:  # stage ceiling reached on this GPU
-                        for _, fd in held:
-                            _close_lock(fd)
-                        continue
-                if self._mem_ok(g, mem_mib, reserved[g]):
-                    # Late yield re-check: the memory gate SLEEPS (~mem_interval_s) while we
-                    # hold the slot, and the watchdog can yield this card during that sleep.
-                    # Re-read the marker fresh here (not the pre-loop snapshot) and, if the GPU
-                    # became yielded, roll back exactly like the other abandon paths rather than
-                    # dispatch onto a card we promised to vacate. Before stamping the
-                    # reservation: an abandoned slot must leave no ledger entry behind.
-                    if g in yielding.yielded_gpus(self.root, self.hostname):
-                        for _, fd in held:
-                            _close_lock(fd)
-                        _close_lock(group_fd)
-                        continue
-                    for _, fd in held:
-                        self._write_reservation(fd, mem_mib / len(held))
-                    return GpuSlot(
-                        gpu=g,
-                        slot=held[0][0],
-                        _fds=[fd for _, fd in held],
-                        _group_fd=group_fd,
-                    )
-                for _, fd in held:  # not enough memory -> next GPU
-                    _close_lock(fd)
-                _close_lock(group_fd)
+                    _close_lock(group_fd)
+                    raise
             return None
+        finally:
+            _close_lock(acq_fd)
+
+    def reap_leaked_locks(self) -> list[str]:
+        """Close slot-lock fds this process holds that no live :class:`GpuSlot` owns.
+
+        Belt-and-braces behind the rollback in :meth:`acquire`: whatever still leaks (an
+        unforeseen throw path) is found by diffing this process's open fds against the
+        ``_live_lock_fds`` registry and closed, returning the slot-unit to the pool without
+        a restart. Returns the lock paths closed (for the master log).
+
+        The audit runs while HOLDING the acquire flock (bounded wait — see below). Without
+        it, the two-strike check below cannot tell a persisted leak from a RECURRING
+        transient: a thread waiting at the admission boundary re-runs ``acquire`` every few
+        seconds, each attempt flocks the same slot path at the same (deterministically
+        reused) fd number and holds it unregistered through the ~3 s memory-gate sleep —
+        two consecutive audits would both see that (fd, path) pair "unowned" and close an
+        fd a live acquire holds (releasing the slot lock mid-grant, then reservation
+        writes / rollback closes land on a reused fd number). Under the acquire flock no
+        in-process acquire is in flight, so its slot fds are either registered or a true
+        leak. The short unregistered windows OUTSIDE the acquire flock (CPU-slot grabs,
+        group_has_room probes, _probe scans) are excluded by ``_audit_lock``, which this
+        pass also holds — belt-and-braces on top of the two-strike grace: an fd is only
+        closed when it was seen unowned on the PREVIOUS call too and still resolves to the
+        same lock path.
+
+        The flock wait is BOUNDED (``_AUDIT_FLOCK_DEADLINE_S``, nonblocking retries): the
+        memory gate runs ``nvidia-smi`` with no subprocess timeout while holding the
+        acquire flock, and this runs on the SUPERVISOR thread — a wedged smi must degrade
+        to skipped audit ticks, never to a supervisor that no longer respawns workers or
+        reaps orphan claims.
+        """
+        prefix = self.lock_prefix
+        try:
+            acq_fd = os.open(
+                f"{prefix}_acquire.lock", os.O_CREAT | os.O_RDWR, 0o644
+            )
+        except OSError:
+            return []  # can't serialize with acquires -> skip this tick, never guess
+        try:
+            deadline = time.monotonic() + _AUDIT_FLOCK_DEADLINE_S
+            while True:
+                try:
+                    fcntl.flock(acq_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        return []  # acquire wedged or hot; audit again next tick
+                    time.sleep(0.05)
+            with self._audit_lock:
+                try:
+                    fd_names = os.listdir("/proc/self/fd")
+                except OSError:
+                    return []
+                seen: dict[int, str] = {}
+                for s in fd_names:
+                    try:
+                        fd = int(s)
+                        path = os.readlink(f"/proc/self/fd/{fd}")
+                    except (ValueError, OSError):
+                        continue
+                    if not path.startswith(prefix):
+                        continue
+                    if not _SLOT_LOCK_SUFFIX_RE.fullmatch(path[len(prefix):]):
+                        continue
+                    seen[fd] = path
+                closed: list[str] = []
+                with self._reg_lock:
+                    unowned = {
+                        fd: p for fd, p in seen.items() if fd not in self._live_lock_fds
+                    }
+                    strikes = {
+                        fd: p
+                        for fd, p in unowned.items()
+                        if self._leak_suspects.get(fd) == p
+                    }
+                    self._leak_suspects = unowned
+                    for fd, path in strikes.items():
+                        try:  # fd numbers get reused: only close if it still IS that lock
+                            if os.readlink(f"/proc/self/fd/{fd}") != path:
+                                continue
+                        except OSError:
+                            continue
+                        _close_lock(fd)
+                        del self._leak_suspects[fd]
+                        closed.append(path)
+                return closed
         finally:
             _close_lock(acq_fd)
 

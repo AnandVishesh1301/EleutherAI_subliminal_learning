@@ -104,9 +104,20 @@ class MasterLog:
 
     def log(self, verb: str, msg: str = "") -> None:
         line = f"[{now_iso()}] {verb} {msg}".rstrip()
-        with self._lock:
-            with open(self.path, "a") as f:
-                f.write(line + "\n")
+        try:
+            with self._lock:
+                with open(self.path, "a") as f:
+                    f.write(line + "\n")
+        except OSError:
+            # A full/quota-blown disk must never crash a worker mid-iteration (2026-08-24:
+            # EDQUOT storms here and in store writes stranded claims and leaked slot fds).
+            # The loguru mirror below still records the line. Touch the mtime anyway
+            # (metadata-only, succeeds under EDQUOT): liveness watchers read this file's
+            # mtime, and a silently-stale log would make a healthy pool look dead.
+            try:
+                os.utime(self.path)
+            except OSError:
+                pass
         logger.info(line)
 
 
@@ -208,6 +219,18 @@ class _Pool:
         # threads + the watchdog thread).
         self._running_lock = threading.Lock()
         self._running: dict[int, dict[str, _RunHandle]] = {}
+        # Claims this process currently owns, COUNTED per (queue, jobkey). Noted once per
+        # iteration right after claim_next and dropped exactly once by that iteration's
+        # bracket finally (_admit_and_run). The supervisor's reap_orphan_claims() removes
+        # any on-disk claim stamped with our pid that has no count here — a claim stranded
+        # by a crash mid-iteration (2026-08-24: EDQUOT) used to count as RUNNING forever,
+        # invisible to steal_stale because the pool pid stays alive. A COUNT (not a set)
+        # because a handed-back claim can be re-claimed by a peer thread before the first
+        # thread's drop runs: with a set, that drop would erase the peer's live entry and
+        # the janitor would later reap a RUNNING job's claim (duplicate execution). Guarded
+        # by its own lock.
+        self._owned_lock = threading.Lock()
+        self._owned_claims: dict[tuple[str, str], int] = {}
         self._fail_streak: dict[str, int] = {}
         self._tripped_pending: dict[str, int] = {}
         # Half-open bookkeeping: when a queue tripped (monotonic), and whether one probe
@@ -395,7 +418,9 @@ class _Pool:
             logger.exception("could not read the GPU memory ceiling; treating as unbounded")
             return 0
 
-    def _oom_requeue(self, name: str, meta: QueueMeta, job: Job, log_path: Path) -> bool:
+    def _oom_requeue(
+        self, name: str, meta: QueueMeta, job: Job, log_path: Path, settled: list
+    ) -> bool:
         """Requeue an OOM-killed job with an escalated memory floor; False = handle normally.
 
         False means either "not an OOM" or "already asking for the whole card" — the latter
@@ -415,9 +440,13 @@ class _Pool:
         new = max(math.ceil(old * OOM_MEM_FACTOR), OOM_MEM_FLOOR_MIB)
         if ceiling:
             new = min(new, ceiling)
+        # All fallible writes happen BEFORE remove_claim (settled contract, see _run_job):
+        # a throw up to here leaves the claim ours; after the removal a peer may re-claim,
+        # so only the swallowing master.log may follow.
         store.write_mem_floor(self.root, name, job.jobkey, new)
-        store.remove_claim(self.root, name, job.jobkey)
         store.bump_attempt(self.root, name, job.jobkey)
+        store.remove_claim(self.root, name, job.jobkey)
+        settled.append(True)
         self.master.log("OOM REQUEUE", f"{name} {job.jobkey} mem_mib {old} -> {new}")
         return True
 
@@ -503,13 +532,20 @@ class _Pool:
             time.sleep(self.gpu_wait_s)
 
     def _run_job(
-        self, name: str, meta: QueueMeta, job: Job, slot, attempt: int
+        self, name: str, meta: QueueMeta, job: Job, slot, attempt: int, settled: list
     ) -> int | None:
         """Run one job to completion. Returns its rc, or ``None`` if it was requeued.
 
         A yield-killed job — and, on the same path, one classified as CUDA OOM — is requeued
         to PENDING (claim removed, NO result recorded, attempt bumped) so it retries later;
         neither is ever recorded as failed.
+
+        ``settled`` is a mutable flag (append-once list): it is marked IMMEDIATELY after
+        every ``remove_claim`` here, and each removal is the last fallible operation on its
+        path (attempt bumps and result writes come BEFORE it). The caller's crash cleanup
+        removes the claim only when ``settled`` is empty — once ownership is released a
+        peer thread may have re-claimed this jobkey, and an unconditional second removal
+        would delete the peer's LIVE claim (a third thread then duplicates the run).
         """
         store.update_owner_gpu(self.root, name, job.jobkey, slot.gpu)
         pid = os.getpid()
@@ -562,10 +598,14 @@ class _Pool:
                 with self._running_lock:
                     self._running.get(slot.gpu, {}).pop(job.jobkey, None)
         if handle.killed:  # yielded the card: requeue, don't record a result
-            store.remove_claim(self.root, name, job.jobkey)
+            # Bump BEFORE removing: the claim dir still shields the job from re-claim, so
+            # a throw here (EDQUOT) leaves ownership with us and the caller's cleanup is
+            # safe; after remove_claim NOTHING fallible may run (see the settled contract).
             store.bump_attempt(self.root, name, job.jobkey)
+            store.remove_claim(self.root, name, job.jobkey)
+            settled.append(True)
             return None
-        if rc != 0 and self._oom_requeue(name, meta, job, log_path):
+        if rc != 0 and self._oom_requeue(name, meta, job, log_path, settled):
             return None  # OOM: requeued behind an escalated memory gate, not a failure
         store.record_result(
             self.root,
@@ -580,6 +620,7 @@ class _Pool:
             attempt=attempt,
         )
         store.remove_claim(self.root, name, job.jobkey)
+        settled.append(True)
         return rc
 
     def yield_kill_gpu(self, gpu: int, spec: "yielding.DrainSpec | None" = None) -> None:
@@ -670,17 +711,84 @@ class _Pool:
                 logger.exception("worker {} loop iteration crashed; continuing", tid)
                 time.sleep(self.poll_s)
 
+    def _claim_note(self, name: str, jobkey: str) -> None:
+        with self._owned_lock:
+            k = (name, jobkey)
+            self._owned_claims[k] = self._owned_claims.get(k, 0) + 1
+
+    def _claim_drop(self, name: str, jobkey: str) -> None:
+        with self._owned_lock:
+            k = (name, jobkey)
+            n = self._owned_claims.get(k, 0) - 1
+            if n > 0:
+                self._owned_claims[k] = n
+            else:
+                self._owned_claims.pop(k, None)
+
+    def reap_orphan_claims(self, grace_s: float = 300.0) -> list[str]:
+        """Drop on-disk claims stamped (this node, this pid) that no live thread owns.
+
+        Self-healing for claims stranded by a crash between ``claim_next`` and cleanup
+        (2026-08-24: EDQUOT storms) — jobq counts them RUNNING forever and ``steal_stale``
+        cannot help because the POOL pid is alive. Anything under our pid absent from the
+        ``_owned_claims`` registry for longer than ``grace_s`` (covers the sub-second
+        claim->note window with a huge margin) is debris. Returns "queue/jobkey" reaped.
+        """
+        reaped: list[str] = []
+        now = time.time()
+        pid = os.getpid()
+        try:
+            qdirs = sorted(p for p in self.root.iterdir() if p.is_dir())
+        except OSError:
+            return reaped
+        for qdir in qdirs:
+            cdir = qdir / "claims"
+            if not cdir.is_dir():
+                continue
+            name = qdir.name
+            try:
+                entries = list(cdir.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                jk = entry.name
+                with self._owned_lock:
+                    if (name, jk) in self._owned_claims:
+                        continue
+                owner = store.read_owner(self.root, name, jk)
+                if (
+                    not owner
+                    or owner.get("node") != self.hostname
+                    or owner.get("pid") != pid
+                ):
+                    continue
+                try:
+                    age = now - entry.stat().st_mtime
+                except OSError:
+                    continue
+                if age < grace_s:
+                    continue
+                store.remove_claim(self.root, name, jk)
+                self.master.log(
+                    "REAP", f"{name} {jk} orphan claim (our pid, no owning thread; {int(age)}s old)"
+                )
+                reaped.append(f"{name}/{jk}")
+        return reaped
+
     def _loop_once(self) -> str | None:
         """One claim -> acquire -> run iteration. Returns "exit" when the thread should stop.
 
-        Any claim taken here is released again before an exception can escape, so a crash
-        in claim/acquire never strands a claim the way the unguarded loop did.
+        Everything after a successful ``claim_next`` is owned by ``_admit_and_run``, whose
+        note/drop bracket guarantees the registry entry (and any acquired slot) is released
+        no matter where an exception escapes; the stranded DISK claim is then unregistered,
+        which is exactly the state the supervisor's janitor collects after its grace.
         """
         ready = self.ready_queues()
         for name, _ in ready:
             for jk in store.steal_stale(self.root, name, self.hostname):
                 self.master.log("STEAL", f"{name} {jk}")
-        claim = None
         for name, meta in ready:
             # Fall-through (2026-08-21): a claimed job whose stage cap (cap_per_gpu /
             # cap_group) is saturated on every GPU used to PARK this thread in _acquire_gpu
@@ -699,9 +807,36 @@ class _Pool:
             job = store.claim_next(self.root, name, self.hostname, os.getpid())
             if job is None:
                 continue
+            outcome = self._admit_and_run(name, meta, job, cap, group, cpu_lane)
+            if outcome == "next":  # gave the job back: keep walking the ready list
+                continue
+            return outcome  # None (ran) or "exit"
+        if self.all_complete():
+            return "exit"
+        time.sleep(self.poll_s)
+        return None
+
+    def _admit_and_run(
+        self, name: str, meta: QueueMeta, job: Job, cap, group, cpu_lane: bool
+    ) -> str | None:
+        """Own a just-made claim from registry note to terminal state.
+
+        Returns "next" (job handed back — caller keeps walking the ready list), "exit"
+        (stop requested), or None (job ran). This is the ONE note/drop bracket per claim:
+        the finally always drops this iteration's registry note and releases any slot
+        (idempotent), so no escape path can leave the registry shielding a dead claim from
+        reap_orphan_claims or a dead slot's fds from reap_leaked_locks. It deliberately
+        does NOT remove the disk claim in the finally: on the explicit hand-back paths the
+        claim is still ours to remove, but on an unforeseen throw a peer may have already
+        re-claimed it, so removal is left to the inline paths and (for true debris) the
+        janitor's post-grace sweep.
+        """
+        self._claim_note(name, job.jobkey)
+        slot = None
+        try:
             if not self._probe_admit(name):  # tripped queue, probe slot taken: give it back
                 store.remove_claim(self.root, name, job.jobkey)
-                continue
+                return "next"
             if cap is not None or (cpu_lane and self._effective_slots(meta, job) == 0):
                 # The probe above races (many threads pass it before any acquires), so a
                 # capped claim gets ONE non-blocking acquire: no slot -> give the job back
@@ -720,58 +855,63 @@ class _Pool:
                 if slot is None:
                     store.remove_claim(self.root, name, job.jobkey)
                     self._probe_finish(name, None)
-                    continue
-                claim = (name, meta, job, slot)
-                break
-            claim = (name, meta, job, None)
-            break
-        if claim is None:
-            if self.all_complete():
-                return "exit"
-            time.sleep(self.poll_s)
+                    return "next"
+            self.master.log("CLAIM", f"{name} {job.key}")
+            if slot is None:
+                try:
+                    slot = self._acquire_gpu(
+                        self._effective_mem(name, meta, job),
+                        self._effective_slots(meta, job),
+                        None,
+                        None,
+                        job.key,
+                    )
+                except Exception:
+                    store.remove_claim(self.root, name, job.jobkey)  # never strand a claim
+                    self._probe_finish(name, None)
+                    raise
+                if slot is None:  # stop requested while waiting -> let a peer take it
+                    store.remove_claim(self.root, name, job.jobkey)
+                    self._probe_finish(name, None)
+                    return "exit"
+            self._run_claimed(name, meta, job, slot)
             return None
-        name, meta, job, slot = claim
-        self.master.log("CLAIM", f"{name} {job.key}")
-        if slot is None:
-            try:
-                slot = self._acquire_gpu(
-                    self._effective_mem(name, meta, job),
-                    self._effective_slots(meta, job),
-                    None,
-                    None,
-                    job.key,
-                )
-            except Exception:
-                store.remove_claim(self.root, name, job.jobkey)  # never strand a claim
-                self._probe_finish(name, None)
-                raise
-        if slot is None:  # stop requested while waiting -> let a peer take it
-            store.remove_claim(self.root, name, job.jobkey)
-            self._probe_finish(name, None)
-            return "exit"
-        self._run_claimed(name, meta, job, slot)
-        return None
+        finally:
+            if slot is not None:
+                slot.release()  # idempotent; backstop for paths that already released
+            self._claim_drop(name, job.jobkey)
 
     def _run_claimed(self, name, meta, job, slot) -> None:
+        # EVERYTHING sits inside the try (even the START log / attempt read): an exception
+        # escaping before the finally would leak the slot until the caller's bracket, and
+        # any throw here must land in the except below, not propagate past the cleanup.
+        settled: list = []  # marked by _run_job the moment it removes the claim
+        try:
             self.master.log("START", f"{name} {job.key} gpu={slot.gpu}")
             attempt = store.read_attempt(self.root, name, job.jobkey)
-            try:
-                rc = self._run_job(name, meta, job, slot, attempt)
-                if rc is None:  # yield-killed or OOM: already logged, job requeued to pending
-                    pass  # not a job failure — must not count toward the trip streak
-                else:
-                    self.master.log("END", f"{name} {job.key} rc={rc}")
-                    self._record_outcome(name, rc)
-                self._probe_finish(name, rc)
-            except Exception:  # noqa: BLE001 — log-and-continue; never abort the pool
-                logger.exception("job {} in queue {} crashed the runner", job.key, name)
+            rc = self._run_job(name, meta, job, slot, attempt, settled)
+            if rc is None:  # yield-killed or OOM: already logged, job requeued to pending
+                pass  # not a job failure — must not count toward the trip streak
+            else:
+                self.master.log("END", f"{name} {job.key} rc={rc}")
+                self._record_outcome(name, rc)
+            self._probe_finish(name, rc)
+        except Exception:  # noqa: BLE001 — log-and-continue; never abort the pool
+            logger.exception("job {} in queue {} crashed the runner", job.key, name)
+            if not settled:
+                # Only while the claim is still OURS. Once _run_job removed it, a peer
+                # thread may have re-claimed this jobkey (same node, same pid — owner.json
+                # cannot tell the generations apart), and removing again would delete the
+                # peer's LIVE claim and let a third thread run the job concurrently.
                 store.remove_claim(self.root, name, job.jobkey)
-                self._record_outcome(name, 1)
-                self._probe_finish(name, 1)
-            finally:
-                slot.release()
-            if store.queue_complete(self.root, name):
-                self._maybe_log_complete(name)
+            self._record_outcome(name, 1)
+            self._probe_finish(name, 1)
+        finally:
+            # The registry note is dropped by the caller's bracket (_admit_and_run), not
+            # here — dropping in both places would double-decrement the counted registry.
+            slot.release()
+        if store.queue_complete(self.root, name):
+            self._maybe_log_complete(name)
 
 
 def run_pool(
@@ -929,6 +1069,20 @@ def _supervise_workers(
             elif not t.is_alive() and tid not in finished:
                 master.log("RESPAWN", f"worker {tid} died without returning; respawning")
                 _spawn(tid)
+        # Janitor tick: return leaked slot locks and stranded own-pid claims to the pool
+        # (2026-08-24: EDQUOT storms left both behind; only a drain+restart recovered them).
+        # Two independent try blocks: a crash in one reaper must not skip the other.
+        try:
+            reap_locks = getattr(pool.gpu, "reap_leaked_locks", None)
+            if reap_locks is not None:
+                for path in reap_locks():
+                    master.log("REAP", f"leaked slot lock closed: {path}")
+        except Exception:  # noqa: BLE001 — the janitor must never kill the supervisor
+            logger.exception("lock janitor tick failed; continuing")
+        try:
+            pool.reap_orphan_claims()
+        except Exception:  # noqa: BLE001 — the janitor must never kill the supervisor
+            logger.exception("claim janitor tick failed; continuing")
         alive = [t for t in threads.values() if t.is_alive()]
         if not alive and finished:
             return

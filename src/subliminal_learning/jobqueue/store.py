@@ -315,6 +315,15 @@ def _read_owner(root: Path, name: str, jobkey: str) -> dict | None:
         return None
 
 
+def read_owner(root: Path, name: str, jobkey: str) -> dict | None:
+    """A claim's owner record (``node``/``pid``/``gpu``/``start_utc``), or None.
+
+    Public read for out-of-module callers (the worker's orphan-claim janitor); ``None``
+    covers both "no claim" and "owner not yet written / unreadable".
+    """
+    return _read_owner(root, name, jobkey)
+
+
 def update_owner_gpu(root: Path, name: str, jobkey: str, gpu: int | None) -> None:
     """Stamp the acquired physical GPU into an existing claim's owner.json (best-effort).
 
