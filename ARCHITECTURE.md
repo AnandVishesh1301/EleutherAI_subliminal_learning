@@ -2637,3 +2637,21 @@ managed with `uv`; `analysis` and `eval` are optional dependency groups.
 - Stage caps are node-aware: `defaults.cap_per_gpu_by_node = {host: n}` (CLI `--cap-by-node HOST=N`) overrides `cap_per_gpu` on that host. The policy `cap_per_gpu` is the hardware ceiling (evals / pythia-160m run at it); per-queue caps are the *job* caps for heavier stages (pythia-410m: group `p410m`, 4/GPU, 3 on soar-subliminal-1).
 - Fall-through: before claiming from a capped queue the worker probes `GpuManager.group_has_room`; a saturated group is skipped that round, so threads run lower-priority queues instead of parking on a claim (the 08-19 starvation).
 - CPU-lane fall-through (08-21): the same probe for `slots: 0` queues via `GpuManager.cpu_has_room` (probe-and-release on the `cpu_cap` flocks) plus one non-blocking acquire after the claim. Without it a burst of CPU-only submissions above `cpu_cap` wedged one pool thread per waiting job and starved GPU admission (13 wedged threads, 8 idle GPU slots on soar-subliminal-1). Live pools need a restart to pick this up; the hot workaround is raising `cpu_cap` in the node's `gpu_policy` until the waiters drain.
+
+### Canonical teacher set × all-7 bases campaign (ts288, 2026-08-26)
+
+`configs/experiment/teacher_ft_sweep_allanimals_all7.yaml` (shared copy under
+`run_logs/teacherset288_all7/`): the selected teacher grid minus lr 1e-5 — 8 epochs × 4 LR
+× 9 LoRA = 288 cells per (animal × base) — for {dog, cat, lion, pig} × `all7` bases,
+ftseed1 only (8,064 cells). Queues in `run_logs/queue_angela`: `ts288-teacherft` (prio 40,
+56 shards), `ts288-pileprobe` (prio 39, 64 run-list shards → `{run}/eval/pile_probe.json`,
+delta-CE + KL) and `ts288-prefevals` (prio 39, 48 shards, exact-scoring preference eval —
+favorite/dislike/validation/off_topic; storytelling dropped 2026-08-26), both
+`--depends-on ts288-teacherft` because `run_final_evals` silently skips
+adapter-less dirs. All three are pinned to soar-subliminal-1 until goncalo's checkout has
+≥ `9a6a1c1` — pre-fix gates (`teacher_run_is_current` before 2c9b3ef) would *skip* the
+weight-stripped ds2/ds3/ws2/ws3 trees (350 manifest-only cells per tree × 16 trees) instead
+of retraining them; unpin by clearing `meta.node` after goncalo pulls. `clear_stale_run`
+now also removes `{run}/eval/` (a teacher's probe staleness stamp degrades to step-count,
+so a same-HP retrain would otherwise keep pre-strip records); the old dir-only gate test in
+`tests/test_audit_fixes.py` was rewritten to assert the adapter-required behaviour.

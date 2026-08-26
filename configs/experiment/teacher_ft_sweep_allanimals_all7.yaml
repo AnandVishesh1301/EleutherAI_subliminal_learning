@@ -1,0 +1,33 @@
+# Canonical teacher set for {dog, cat, lion, pig} x all 7 pythia-160m bases
+# (original + data-seed1..3 + weight-seed1..3), ftseed1 only. Angela 2026-08-26.
+#
+# The selected grid MINUS lr 1e-5 (dropped 2026-08-26, matching the pig/ds1-era
+# decision): 8 epochs x 4 LR x 9 LoRA = 288 cells per (animal x base) = 8,064 cells.
+# Purpose: retrain the weight-stripped ds2/ds3/ws2/ws3 trees (manifest-only leaves
+# fail the adapter gate and retrain; cells with adapters resume/skip) and backfill
+# Pile probe (delta-CE + KL) and preference/storytelling evals everywhere.
+# Passed to BOTH sweep_teacher_templates (training) and
+# sweep_evaluate_teacher_preference (validation).
+
+animals: [dog, cat, lion, pig]
+n_animals: 4
+base_models: all7
+ft_seeds: [1]
+
+grid:
+  n_epochs: [1, 2, 3, 5, 7, 10, 15, 20]
+  learning_rate: [1.0e-3, 5.0e-4, 2.0e-4, 1.0e-4]  # lr 1e-5 dropped (Angela 2026-08-26)
+  lora_r: [8, 16, 32, 64]
+  lora_alpha_over_r: [1, 2, 4]
+  lora_alpha_max: 64
+
+# 4 animals x 7 models x 8 epochs x 4 LR x 9 LoRA x 1 ftseed = 8,064 cells.
+eval:
+  # storytelling dropped (Angela 2026-08-26): exact-scoring sets only.
+  prompt_sets: [favorite, dislike, validation, off_topic]
+  indist_scoring: prob
+  storytelling_max_new_tokens: 128
+  n_samples: 100
+  temperature: 1.0
+  include_base_control: true
+  confidence: 0.95
