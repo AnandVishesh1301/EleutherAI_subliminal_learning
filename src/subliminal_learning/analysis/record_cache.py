@@ -229,6 +229,25 @@ def _extract_adapter_norms_traj(rec: dict) -> dict:
     }
 
 
+def _extract_cos_w0(rec: dict) -> dict:
+    """`scripts.teacher_cos_w0` record -> run-level direction scalars.
+
+    ``mean_cos`` is the module-mean cos(ΔW, W₀) -- the regressor the student mediation
+    screen uses; ``pooled_cos`` pools numerator and denominators across modules
+    (Σ<ΔW,W₀> / sqrt(Σ‖ΔW‖²·Σ‖W₀‖²)). A nonfinite adapter is flagged (its cosines are
+    whatever the harvest recorded, typically null -> NaN).
+    """
+    mods = rec.get("modules") or {}
+    return {
+        "mean_cos": _f(rec.get("mean_cos")),
+        "pooled_cos": _f(rec.get("pooled_cos")),
+        "n_modules": len(mods),
+        "nonfinite": bool(rec.get("nonfinite_adapter")),
+        "rank": _f(rec.get("rank")),
+        "alpha": _f(rec.get("alpha")),
+    }
+
+
 def _extract_pile_coherence_v1(rec: dict) -> dict:
     return {"delta_overall": _f((rec.get("delta") or {}).get("delta_overall"))}
 
@@ -278,6 +297,13 @@ register_kind(RecordKind(
     rel_record="eval/adapter_norms_traj.json",
     columns=["n_steps", "step_max", "dw_fro_last", "dw_fro_max", "test_p", "rank", "alpha"],
     extract=_extract_adapter_norms_traj,
+))
+
+COS_W0 = register_kind(RecordKind(
+    name="cos_w0",
+    rel_record="eval/cos_w0.json",
+    columns=["mean_cos", "pooled_cos", "n_modules", "nonfinite", "rank", "alpha"],
+    extract=_extract_cos_w0,
 ))
 
 register_kind(RecordKind(

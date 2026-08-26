@@ -2039,7 +2039,9 @@ a thin facade) into a registry of record **kinds**: each kind names a record fil
 run dir, an extractor from the record dict to flat scalar columns, and a cache CSV under
 `{output_root}/analysis/`. Kinds today: `pile_probe`, `fidelity_heldout`, `fidelity_shuffle`,
 `fidelity_traj`, `pile_coherence_v1`, `json_blob` (parameterized), `adapter_norms`,
-`adapter_norms_traj`. Contract: run-dir records are the SSOT and the CSV is derived, so a
+`adapter_norms_traj`, `cos_w0` (2026-08-25: `{run}/eval/cos_w0.json` from
+`scripts/teacher_cos_w0.py` → `mean_cos`, `pooled_cos`, `n_modules`, `nonfinite`).
+Contract: run-dir records are the SSOT and the CSV is derived, so a
 refresh pays one `stat` per inventory path and re-reads only records whose `(mtime, size)`
 changed (a retrain-and-recompute is never missed); the saved CSV is a **union** — rows outside
 this call's inventory are never evicted, so notebooks with disjoint inventories cannot destroy
@@ -2076,6 +2078,21 @@ row would keep NaN in the new column forever. `load_record_cache` therefore clea
 Found when `ce_student` / `ce_base` were added to `pile_probe`: 20,126 of 20,618 rows were NaN
 with finite records; backfilled the same day (pre-backfill copy
 `analysis/probe_cache.csv.bak-20260820-prebackfill`).
+
+### Teacher cos(ΔW, W₀) mediation screen (2026-08-25)
+
+`scripts/teacher_cos_screen.py` runs the student P2 mediation test on the teacher stage
+(C10's open level-set failure): logistic `dead ~ log dw_fro` ± the 4-HP block
+(log lr/α/r/steps) ± `mean_cos`/`pooled_cos` from the `cos_w0` harvest, ftseed1 of the
+12 teacher trees (n = 9,109, dog|orig n = 4,735), cluster-robust on the (tree, lr, r, α)
+tag, cos z-scored for conditioning. Writes
+`{output_root}/analysis/teacher_cos_screen.json` (fits, coverage per tree, AUC ladder,
+cos-by-rank/steps/fate descriptives + a student-side by-rank reference from the ds1
+wfinal sweep). Result: cos does **not** close teacher mediation — dog|orig HP-block
+cluster-Wald p 2.0e-47 → 5.4e-47 with cos, rank coefficient 4.80 → 4.05 (students:
+p 1e-13 → 0.03–0.6, rank 1.52 → 0.42); teacher cos is steps-structured, not
+rank-structured, and its dose-conditional sign is positive (aligned = deader), the
+opposite of students.
 
 ### Unigram anchor for the integrity cut (2026-08-23)
 
