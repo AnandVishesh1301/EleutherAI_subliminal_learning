@@ -275,60 +275,6 @@ def test_load_focus_runs_empty_is_typed():
     assert len(empty) == 0
 
 
-def _priors_frame():
-    return pd.DataFrame({
-        "animal": ["dog", "dog", "cat"],
-        "base_label": ["data-seed1", "weight-seed1", "data-seed1"],
-        "behav_prior": [0.0119, 0.0061, 0.0048],
-    })
-
-
-def test_prior_dead_thresholds_per_row_and_hurdle():
-    # Same test score 0.008: dead under ds1's prior (0.0119), alive under ws1's (0.0061).
-    runs = pd.DataFrame({
-        "animal": ["dog"] * 4,
-        "base_label": ["data-seed1", "data-seed1", "weight-seed1", "weight-seed1"],
-        "teacher_tag": ["t0"] * 4, "student_tag": ["c0"] * 4,
-        "lr": [4e-4] * 4, "rank": [4] * 4, "alpha": [2] * 4, "K_rel": [0.66] * 4,
-        "seed": [0, 1, 0, 1],
-        "test": [0.008, 0.30, 0.008, 0.30],
-    })
-    thr = tf.prior_dead_thresholds(runs, _priors_frame())
-    assert thr.tolist() == [0.0119, 0.0119, 0.0061, 0.0061]
-    h = tf.hurdle_cells(runs, dead=thr).set_index("base_label")
-    assert h.loc["data-seed1", "n_alive"] == 1  # 0.008 < 0.0119 -> dead
-    assert h.loc["weight-seed1", "n_alive"] == 2  # 0.008 >= 0.0061 -> alive
-
-
-def test_prior_dead_thresholds_animal_override_and_label_collapse():
-    from subliminal_learning.analysis.collapse_law import label_collapse
-
-    # Law-runs frame: no "animal" column, animal passed explicitly.
-    runs = pd.DataFrame({
-        "base_label": ["data-seed1", "weight-seed1"],
-        "test": [0.008, 0.008],
-    })
-    thr = tf.prior_dead_thresholds(runs, _priors_frame(), animal="dog")
-    lab = label_collapse(runs, dead_seed=thr)
-    assert lab["collapsed"].tolist() == [1, 0]
-
-
-def test_prior_dead_thresholds_missing_prior_raises():
-    runs = pd.DataFrame({"animal": ["lion"], "base_label": ["data-seed1"], "test": [0.5]})
-    with pytest.raises(ValueError, match="lion"):
-        tf.prior_dead_thresholds(runs, _priors_frame())
-
-
-def test_prior_dead_thresholds_log_margin():
-    runs = pd.DataFrame({"animal": ["dog"], "base_label": ["data-seed1"], "test": [0.001]})
-    thr0 = tf.prior_dead_thresholds(runs, _priors_frame(), log_margin=0.0)
-    thr3 = tf.prior_dead_thresholds(runs, _priors_frame(), log_margin=3.0)
-    assert thr3.iloc[0] == pytest.approx(thr0.iloc[0] * np.exp(-3.0))
-    # 0.001 is below the bare ds1 prior (0.0119) but above prior/e^3 (~0.0006)
-    assert runs["test"].iloc[0] < thr0.iloc[0]
-    assert runs["test"].iloc[0] >= thr3.iloc[0]
-
-
 def test_load_priors_test_prior_column(tmp_path):
     import json
 
@@ -395,3 +341,74 @@ def test_mean_response_threshold_free():
     # unconditional columns are identical under ANY dead threshold
     row2 = tf.hurdle_cells(runs, dead=0.3).iloc[0]
     assert row2.mean_test == row.mean_test and row2.cond != row.cond
+
+
+# --- load_core65_population: the teacher set is the DESIGN's, not the inventory's ---------
+def _core65_repo(tmp_path, teachers=("tA", "tB")):
+    """A tmp repo root: the real cell manifests, a synthetic top-10 list, an inventory whose
+    teachers are deliberately disjoint from it (it is only the probe-refresh list)."""
+    import json
+    import shutil
+    from pathlib import Path
+
+    real = Path(__file__).resolve().parents[1] / "run_logs"
+    run_logs = tmp_path / "run_logs"
+    (run_logs / "strip_probe_lists").mkdir(parents=True)
+    for _, fname in tf._CORE65_MANIFESTS:
+        shutil.copyfile(real / fname, run_logs / fname)
+    (run_logs / tf._CORE65_TEACHERS).write_text(json.dumps({"param_tags": list(teachers)}))
+    (run_logs / "strip_probe_lists" / "xarm_bandext126_runs.txt").write_text(
+        "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/tINVENTORY_tseed1/"
+        "ex10-20_prefix_n100k/ep20_lr4e-4_r4a2/ftseed1\n")
+    return run_logs
+
+
+def _core65_outputs(tmp_path, cell, teachers, animals=("dog", "cat")):
+    """Landed seed-runs for every (animal x teacher) on one core65 cell, plus the anchor."""
+    import json
+
+    for animal in animals:
+        for tag in teachers:
+            cell_dir = (tmp_path / "students" / animal / "pythia-160m-data-seed1"
+                        / "teacher-pythia-160m" / f"{tag}_tseed1" / "ex10-20_prefix_n100k"
+                        / cell)
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "preference_summary.json").write_text(json.dumps(
+                {"summaries": [{"prompt_set": "test", "p_target_mean": 0.4,
+                                "per_seed_p_target": {"1": 0.4}}]}))
+            leaf = cell_dir / "ftseed1"
+            (leaf / "eval").mkdir(parents=True)
+            (leaf / "eval" / "pile_probe.json").write_text(json.dumps(
+                {"kl_base_student": 1.5, "delta_ce": 0.2, "nonfinite_adapter": False,
+                 "pool_version": "pp1"}))
+    (tmp_path / "analysis").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "analysis" / "unigram_anchor_pp1.json").write_text(json.dumps(
+        {"h_uni_primary": 7.8045,
+         "delta_cross": {"pythia-160m-data-seed1": 5.2}}))
+
+
+def test_core65_population_uses_design_teachers(tmp_path):
+    repo = tmp_path / "repo"
+    out = tmp_path / "out"
+    _core65_repo(repo)
+    _core65_outputs(out, "ep20_lr4e-4_r4a2", ["tA", "tB", "tINVENTORY"])
+
+    runs, meta = tf.load_core65_population(out, repo)
+    # The inventory-only teacher is NOT in the population, and every animal carries the
+    # SAME design teachers (balanced -- no composition confound across arms).
+    assert meta["teachers"] == ["tA", "tB"]
+    assert set(runs.teacher_tag) == {"tA", "tB"}
+    for animal, sub in runs.groupby("animal"):
+        assert sorted(set(sub.teacher_tag)) == ["tA", "tB"]
+    assert meta["n_landed"] == len(runs)
+
+
+def test_core65_population_teachers_override(tmp_path):
+    repo = tmp_path / "repo"
+    out = tmp_path / "out"
+    _core65_repo(repo)
+    _core65_outputs(out, "ep20_lr4e-4_r4a2", ["tA", "tB", "tINVENTORY"])
+
+    runs, meta = tf.load_core65_population(out, repo, teachers=["tA", "tINVENTORY"])
+    assert meta["teachers"] == ["tA", "tINVENTORY"]
+    assert set(runs.teacher_tag) == {"tA", "tINVENTORY"}

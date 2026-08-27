@@ -87,10 +87,15 @@ def test_pool_version_filter(tmp_path, capsys):
     _probe(tmp_path, "old", pool_version="pp0")
     _probe(tmp_path, "legacy", pool_version=None)
     out = pc.load_probe_cache(tmp_path, ["good", "old", "legacy"])
-    assert set(out.run_path) == {"good", "legacy"}
+    # Strict since 2026-08-27: version-less rows are REJECTED like wrong-pool rows (the
+    # live cache census showed zero of them, so the flip cannot shrink any population).
+    assert set(out.run_path) == {"good"}
+    assert "REJECTED" in capsys.readouterr().out
     assert (tmp_path / pc.CACHE_REL).is_file()
     # still cached, just filtered out of the returned frame
-    assert set(pc.load_probe_cache(tmp_path, ["old"], pool_version=None).run_path) == {"old"}
+    assert set(
+        pc.load_probe_cache(tmp_path, ["old", "legacy"], pool_version=None).run_path
+    ) == {"old", "legacy"}
 
 
 def test_size_change_at_equal_mtime_triggers_reread(tmp_path):

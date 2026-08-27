@@ -52,8 +52,11 @@ import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
 
+from sklearn.metrics import roc_auc_score
+
+from subliminal_learning.analysis import labels
 from subliminal_learning.analysis.collapse_law import DEAD_SEED, K_of, KSTAR_POOLED
-from subliminal_learning.analysis.plots import compare_table, right_legend
+from subliminal_learning.analysis.plots import compare_table, ecdf_plot, jitter, right_legend
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 from subliminal_learning.analysis.trajectories import load_lineage, source_counts
 
@@ -155,13 +158,20 @@ print(f"dose trajectories: {len(runs)} runs | all three aligned: {len(full)} run
 h = pd.DataFrame([r for r in harv.values()
                   if not r["diverged"] and r.get("test_p") is not None and r.get("dw_fro")])
 h = h[h.alpha / h["rank"] <= 64]
-h["dead"] = (h.test_p < DEAD_SEED).astype(int)
+# legacy trait cut — caveat: trait loss ≠ integrity collapse; operative label = anchored KL
+# (analysis.labels). TODO(anchored): the harvest rows carry no per-run Pile readout, and the
+# only KL in this notebook is the per-checkpoint `ckpt_pile_kl_traj` series, a DIFFERENT
+# measurement from the pooled pp1 probe the anchored cut is calibrated on -- so it cannot be
+# thresholded at Delta_cross here. Re-label when a pp1 probe record exists for these runs.
+h["dead"] = labels.label_dead_trait_legacy(h, col="test_p", cut=DEAD_SEED).astype(int)
 TH = {}
 for rk, g in h.groupby("rank"):
     TH[rk] = {}
     for col in ("dw_fro", "dw_spec"):
-        m = smf.logit(f"dead ~ np.log({col})", g).fit(disp=0, maxiter=300)
-        TH[rk][col] = float(np.exp(-m.params["Intercept"] / m.params[f"np.log({col})"]))
+        # The design is built explicitly rather than interpolating the column name into the
+        # formula string: same logistic of fate on log dose, one fixed regressor name.
+        m = smf.logit("dead ~ logdose", g.assign(logdose=np.log(g[col]))).fit(disp=0, maxiter=300)
+        TH[rk][col] = float(np.exp(-m.params["Intercept"] / m.params["logdose"]))
 print("per-rank endpoint theta_F:", {k: round(v["dw_fro"], 4) for k, v in sorted(TH.items())})
 
 
@@ -193,6 +203,8 @@ for (tag, seed), r in full.items():
     rows.append(dict(
         tag=tag, seed=seed, rank=rk, alpha=hr["alpha"], lr=hr["lr"],
         K_rel=K_of(hr["lr"], hr["alpha"], rk) / KSTAR_POOLED,
+        # legacy trait cut — caveat: trait loss ≠ integrity collapse; operative label =
+        # anchored KL (analysis.labels). TODO(anchored): see the note on `h["dead"]` above.
         dead=int(hr["test_p"] < DEAD_SEED), test_p=hr["test_p"],
         death_step=float(STEPS[di]) if di is not None else np.nan,
         D_at_death=r["Df"][di] / TH[rk]["dw_fro"] if di is not None else np.nan,
@@ -275,8 +287,7 @@ interventions (the clamp).
 
 code(r"""
 fig, ax = plt.subplots(figsize=(7.5, 3.4))
-v = np.sort(df.over_end.values)
-ax.step(v, np.arange(1, len(v) + 1) / len(v), color=C_F, lw=2)
+ecdf_plot(ax, df.over_end.values, color=C_F, lw=2)
 ax.set_xlabel("max over training / endpoint (pooled F dose)")
 ax.set_ylabel("ECDF over runs")
 ax.set_title(f"max/endpoint dose ratio, {len(df)} runs — "
@@ -304,7 +315,7 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4))
 dd = df.dropna(subset=["death_step"])
 for em, mk, lab in ((True, "o", "emerged first"), (False, "x", "never emerged")):
     g = dd[dd.emerged == em]
-    ax1.scatter(g.death_step + np.random.default_rng(0).uniform(-90, 90, len(g)),
+    ax1.scatter(g.death_step + jitter(len(g), 90, seed=0),
                 g.K_rel, s=42, marker=mk, color=C_DEAD, alpha=0.55, label=lab)
 ax1.set_yscale("log"); ax1.set_xlabel("death checkpoint (step, jittered ±90)")
 ax1.set_ylabel("K / K* (design depth)")
@@ -314,10 +325,11 @@ ax1.set_title(f"death timing, {len(dd)} dead runs — ECDF: "
               f"{(dd.death_step <= 2500).mean():.0%} by 2500")
 right_legend(ax1)
 
-from sklearn.metrics import roc_auc_score
-y = [df.loc[i, "dead"] for i in df.index]
-aucs = [roc_auc_score(y, [-full[(df.loc[i, "tag"], df.loc[i, "seed"])]["p"][j]
-                          for i in df.index]) for j in range(len(STEPS))]
+# One (runs x steps) trait matrix, built once, instead of re-looking-up every run at every
+# step (the old form was O(steps x runs) dict+`.loc` lookups for the same numbers).
+y = df.dead.to_numpy()
+P = np.array([full[(t, s)]["p"] for t, s in zip(df.tag, df.seed)])
+aucs = [roc_auc_score(y, -P[:, j]) for j in range(len(STEPS))]
 ax2.plot(STEPS, aucs, "o-", ms=7, lw=2, color=C_F)
 ax2.set_xlabel("checkpoint step"); ax2.set_ylabel("AUC(endpoint fate ~ p at step)")
 ax2.set_ylim(0.75, 1.005); ax2.axhline(1.0, color="0.6", lw=1)
@@ -354,15 +366,17 @@ ax1.set_xlabel("K / K* band"); ax1.set_ylabel("F dose at death / endpoint θ̂_F
 ax1.set_title(f"dose at the death checkpoint — {(dd.D_at_death < 1).mean():.0%} below θ̂, "
               f"{(dd.D_at_death < 0.6).mean():.0%} below 0.6·θ̂ (clamp line, dashed)")
 
+# The per-run lookup table, built once: the old form re-indexed the whole run table on every
+# element of every comprehension below.
+DEATH_STEP = df.set_index(["tag", "seed"]).death_step
 res = [(k, full[k]) for k in full
-       if not np.isnan(df.set_index(["tag", "seed"]).loc[k, "death_step"])
-       and df.set_index(["tag", "seed"]).loc[k, "death_step"] >= 1250]
+       if not np.isnan(DEATH_STEP.loc[k]) and DEATH_STEP.loc[k] >= 1250]
 cs = np.arange(0.1, 1.31, 0.025)
 for nm, tcol, thcol, color, ls in (("F", "Df", "dw_fro", C_F, "-"),
                                    ("σ", "Ds", "dw_spec", C_S, "--")):
     med = []
     for c in cs:
-        e = [abs(t - df.set_index(["tag", "seed"]).loc[k, "death_step"])
+        e = [abs(t - DEATH_STEP.loc[k])
              for k, r in res
              if (t := interp_cross(r["steps"], r[tcol], c * TH[r["hr"]["rank"]][thcol]))
              is not None]
@@ -392,7 +406,7 @@ dd = df.dropna(subset=["death_step", "kl_at_death"])
 for em, mk in ((True, "o"), (False, "x")):
     for quiet, color, lab in ((False, C_DEAD, "KL leaking"), (True, "tab:purple", "KL quiet")):
         g = dd[(dd.emerged == em) & ((dd.kl_at_death <= ALIVE_P95) == quiet)]
-        ax.scatter(g.death_step + np.random.default_rng(1).uniform(-90, 90, len(g)),
+        ax.scatter(g.death_step + jitter(len(g), 90, seed=1),
                    g.kl_at_death.clip(lower=1e-2), s=44, marker=mk, color=color, alpha=0.6,
                    label=f"{lab}, {'emerged' if em else 'never emerged'} (n={len(g)})")
 ax.set_yscale("log"); ax.axhline(ALIVE_P95, color="0.5", lw=1.2)
@@ -422,10 +436,10 @@ is humped — the transfer hump is dose-impeded consolidation, not fast-acquisit
 
 code(r"""
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 4.4))
+DFK = df.set_index(["tag", "seed"])          # one lookup table, not one per element
 bands = [(0, .25, "#9ecae1"), (.25, .5, "#4292c6"), (.5, .75, "#2171b5"), (.75, 1.05, "#08306b")]
 for lo, hi, color in bands:
-    ks = [k for k in full if df.set_index(["tag", "seed"]).loc[k, "dead"] == 0
-          and lo < df.set_index(["tag", "seed"]).loc[k, "K_rel"] <= hi]
+    ks = [k for k in full if DFK.loc[k, "dead"] == 0 and lo < DFK.loc[k, "K_rel"] <= hi]
     if not ks:
         continue
     for k in ks:
@@ -520,8 +534,12 @@ dr = pd.DataFrame([dict(lr=r["hr"]["lr"], alpha=r["hr"]["alpha"], rank=r["hr"]["
                         **{f"D{i}": v for i, v in enumerate(r["Df"])})
                    for r in runs.values()])
 for i in sel_idx:
-    d_ = dr[dr[f"D{i}"] > 0].assign(y=lambda x: np.log(x[f"D{i}"]), llr=np.log(dr.lr),
-                                    la=np.log(dr.alpha), lrk=np.log(dr["rank"]))
+    # Every regressor is computed from the FILTERED frame. The old form took llr/la/lrk from
+    # the unfiltered `dr` and relied on index alignment to line them up -- correct, but only
+    # by accident of the index surviving the filter.
+    d_ = dr[dr[f"D{i}"] > 0]
+    d_ = d_.assign(y=np.log(d_[f"D{i}"]), llr=np.log(d_.lr),
+                   la=np.log(d_.alpha), lrk=np.log(d_["rank"]))
     m = smf.ols("y ~ llr + la + lrk", d_).fit()
     for k in ex:
         ex[k].append(m.params[k]); se[k].append(m.bse[k])
@@ -577,6 +595,7 @@ nb = {
     "nbformat": 4,
     "nbformat_minor": 5,
 }
-out = Path("notebooks/ckpt_trajectories.ipynb")
-out.write_text(json.dumps(nb, indent=1) + "\n")
-print("wrote", out, len(CELLS), "cells")
+if __name__ == "__main__":     # importing this module must never clobber the notebook
+    out = Path("notebooks/ckpt_trajectories.ipynb")
+    out.write_text(json.dumps(nb, indent=1) + "\n")
+    print("wrote", out, len(CELLS), "cells")

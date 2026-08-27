@@ -275,26 +275,57 @@ Loaded for the labeled sole-source blocks only (per-arm robustness, budget contr
 
 cells.append(code(r"""from __future__ import annotations
 import json
+import re as _re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import scipy.stats as _sps
 import statsmodels.formula.api as smf
-import yaml
 from scipy import stats
+from scipy.stats import chi2 as _chi2
+from sklearn.metrics import roc_auc_score
 
+from subliminal_learning.analysis import labels
+from subliminal_learning.analysis import plots as aplots
 from subliminal_learning.analysis.setup import bootstrap
 from subliminal_learning.analysis.plots import compare_table, math_label, right_legend
-from subliminal_learning.analysis.frames import load_results
-from subliminal_learning.analysis.stats import cluster_ols, delta_ratio_ci
+from subliminal_learning.analysis.frames import (
+    add_param_fields, load_results, parse_param_tag, read_json, summary_set_block)
+from subliminal_learning.analysis.stats import cluster_ols, cluster_logit, delta_ratio_ci
 from subliminal_learning.analysis.collapse_law import (
-    K_of, KSTAR_POOLED, B_LAW, C_LAW, DEAD_SEED)
+    K_of, KSTAR_POOLED, B_LAW, C_LAW, DEAD_SEED, fit_collapse_law)
 REPO, OUTPUT_ROOT = bootstrap()
 AN = OUTPUT_ROOT / "analysis"
 
 DS1, FOCUS_TEACHER = "pythia-160m-data-seed1", "ep2_lr5e-4_r32a64_tseed1"
+# legacy trait cut — caveat: trait loss ≠ integrity collapse; operative label = anchored KL (analysis.labels)
 DEAD_CUT = DEAD_SEED
+
+# GPT-NeoX (Pythia-160m) LoRA target shapes, (n_in, n_out). query_key_value is the
+# FUSED Q/K/V projection, so its output axis is 3 x hidden = 3 x 768 = 2304.
+DIMS = {"query_key_value": (768, 2304), "dense": (768, 768),
+        "dense_h_to_4h": (768, 3072), "dense_4h_to_h": (3072, 768)}
+DIMS_MN = {k: n_in * n_out for k, (n_in, n_out) in DIMS.items()}
+
+
+def read_results(pattern, root=None):
+    "Concatenated ``results`` records of every JSON matching `pattern` under `root` (AN)."
+    root = AN if root is None else root
+    return pd.concat([pd.DataFrame(read_json(f)["results"])
+                      for f in sorted(Path(root).glob(pattern))], ignore_index=True)
+
+
+def add_dose_cols(m):
+    "Add the absolute/relative dose and two-term columns to a module-row frame (in place)."
+    s = m["alpha"] / m["rank"]
+    for l in ("spec", "fro"):
+        m[f"dW_{l}"] = s * m[f"B_Afinal_{l}"]            # absolute ||dW||
+        m[f"dw_{l}"] = m[f"dW_{l}"] / m[f"W0_{l}"]       # relative dose
+        m[f"term_frozen_{l}"] = s * m[f"B_Ainit_{l}"]    # s·B·A_init
+        m[f"term_moved_{l}"] = s * m[f"B_dA_{l}"]        # s·B·dA
+    return m
 
 
 # base-model dir -> arm label; a fully re-randomized sibling keeps a `full-` marker
@@ -314,15 +345,11 @@ print(f"excluded {int(_spliced.sum())} module rows of the *_spliced ckpt-distill
       "lineages, ep<=10 only)")
 mod_all = mod_all[~_spliced].copy()
 
-tp = mod_all["student_tag"].str.extract(r"ep(?P<ep>\d+)_lr(?P<lr>[0-9.e-]+)_r\d+a\d+")
-mod_all["ep"], mod_all["lr"] = tp["ep"].astype(int), tp["lr"].astype(float)
-_s = mod_all["alpha"] / mod_all["rank"]
-for l in ("spec", "fro"):
-    mod_all[f"dW_{l}"] = _s * mod_all[f"B_Afinal_{l}"]           # absolute ||dW||
-    mod_all[f"dw_{l}"] = mod_all[f"dW_{l}"] / mod_all[f"W0_{l}"]  # relative dose
-    mod_all[f"term_frozen_{l}"] = _s * mod_all[f"B_Ainit_{l}"]    # s·B·A_init
-    mod_all[f"term_moved_{l}"] = _s * mod_all[f"B_dA_{l}"]        # s·B·dA
-mod_all["dead"] = mod_all.test_p < DEAD_CUT
+_tp = add_param_fields(mod_all[["student_tag"]], "student_tag")
+mod_all["ep"], mod_all["lr"] = _tp["epochs"].astype(int), _tp["lr"]
+add_dose_cols(mod_all)
+mod_all["dead"] = (labels.label_dead_trait_legacy(mod_all, col="test_p", cut=DEAD_CUT)
+                   .fillna(False).astype(bool))
 
 foc = mod_all[(mod_all.student_base == DS1) & (mod_all.teacher == FOCUS_TEACHER)].copy()
 f20 = foc[foc.ep.eq(20) & foc.test_p.notna()].copy()
@@ -370,31 +397,35 @@ method-history — always labeled. Where a quantity could be computed on either
 population, only the strip version is shown."""))
 
 cells.append(code(r"""# preserve the adaptive-era frames for the labeled sole-source blocks
+# NB: f20/run20 are REBOUND here to the strip population — every later cell that reads
+# them gets the strip; the adaptive-era frames live on as f20a/run20a.
 f20a, run20a = f20, run20
 
+
+def load_strip_harvest(path):
+    "The strip harvest with its legacy trait DEAD label (diverged counts dead)."
+    h = pd.read_json(path)
+    h["dead"] = np.where(h.diverged, 1.0,
+                         np.where(h.test_p.notna(),
+                                  (h.test_p < DEAD_CUT).astype(float), np.nan))
+    return h
+
+
 HARV = AN / "nonadaptive_8x7_harvest.json"
-strip = pd.read_json(HARV)
-strip["dead"] = np.where(strip.diverged, 1.0,
-                         np.where(strip.test_p.notna(),
-                                  (strip.test_p < 0.01).astype(float), np.nan))
+strip = load_strip_harvest(HARV)
 sev = strip[strip.test_p.notna() & strip.dw_fro.notna()].copy()
 SP = sev[sev.s <= 64].copy()
 
 # strip module rows from the decomposition probe (same schema as the sweep)
-f20 = pd.concat([pd.DataFrame(json.loads(f.read_text())["results"])
-                 for f in sorted(AN.glob("adapter_norms_strip_r*.json"))])
-f20["lr"] = f20.student_tag.str.extract(r"lr(?P<lr>[0-9.e-]+)_r").lr.astype(float)
+f20 = read_results("adapter_norms_strip_r*.json")
+f20["lr"] = [parse_param_tag(t)["lr"] for t in f20.student_tag]
 f20["ep"] = 20
-_s = f20["alpha"] / f20["rank"]
-for l in ("spec", "fro"):
-    f20[f"dW_{l}"] = _s * f20[f"B_Afinal_{l}"]
-    f20[f"dw_{l}"] = f20[f"dW_{l}"] / f20[f"W0_{l}"]
-    f20[f"term_frozen_{l}"] = _s * f20[f"B_Ainit_{l}"]
-    f20[f"term_moved_{l}"] = _s * f20[f"B_dA_{l}"]
+add_dose_cols(f20)
 fates = strip.set_index(["tag", "seed"]).test_p
 f20["test_p"] = fates.reindex(
     pd.MultiIndex.from_frame(f20[["student_tag", "ftseed"]])).to_numpy()
-f20["dead"] = f20.test_p < 0.01
+f20["dead"] = (labels.label_dead_trait_legacy(f20, col="test_p", cut=DEAD_CUT)
+               .fillna(False).astype(bool))
 f20 = f20[(f20["alpha"] / f20["rank"] <= 64) & f20.test_p.notna()].copy()
 run20 = to_runs(f20)
 print(f"PRIMARY population (strip, s<=64): {len(run20)} runs "
@@ -571,7 +602,7 @@ the worst single module, the strongest form of the claim.
 
 """))
 
-cells.append(code(r"""wf_doc = json.loads((AN / f"adapter_dw_sweep_{DS1}_wfinal.json").read_text())
+cells.append(code(r"""wf_doc = read_json(AN / f"adapter_dw_sweep_{DS1}_wfinal.json")
 wf = pd.DataFrame(wf_doc["results"])
 s_wf = wf.alpha / wf["rank"]
 # closed form, from stored columns only -- validated against the swept Wf_fro below
@@ -655,9 +686,8 @@ for ax, (col, lab) in zip(axes, [(WF, "‖W$_f$‖$_F$/‖W$_0$‖$_F$"),
                                  (W2, "σ$_{max}$(W$_f$)/σ$_{max}$(W$_0$)")]):
     for fate, sub, c in (("alive", w12[~w12.dead], "tab:blue"),
                          ("dead", w12[w12.dead], "tab:red")):
-        x = np.sort(sub[col].to_numpy())
-        ax.step(x, np.arange(1, len(x) + 1) / len(x), where="post", lw=2.2,
-                color=c, label=f"{fate} (n={len(x)})")
+        aplots.ecdf_plot(ax, sub[col].to_numpy(), label=f"{fate} (n={len(sub)})",
+                         lw=2.2, color=c)
     ax.axvline(1.0, color="0.5", lw=1, ls=":")
     ax.set_xscale("log"); ax.set_xlabel(f"worst-module {lab}")
     ax.set_ylabel("fraction of runs ≤ x"); ax.set_title(lab.split("/")[0])
@@ -718,8 +748,7 @@ print("pooled dose, dead runs: median %.3f  (Table 1.1a's 0.203 is the UNWEIGHTE
       % w12[w12.dead].dose.median())
 
 cos_mod = wf.BA_W0_ip / (wf.BA_fro * wf.W0_fro)          # s cancels; per module
-DIMS_MN = {"query_key_value": 768 * 2304, "dense": 768 * 768,
-           "dense_h_to_4h": 768 * 3072, "dense_4h_to_h": 3072 * 768}
+# DIMS_MN (per-kind fan-in x fan-out) is derived from DIMS in Setup A.
 chance = 1 / np.sqrt(wf.module.str.rsplit(".", n=1).str[-1].map(DIMS_MN))
 print("\nper-module |cos(dW, W0)|: median %.5f vs chance floor 1/sqrt(mn) %.5f "
       "(ratio %.2f) -> effectively orthogonal; its norm contribution is ~%.0e"
@@ -842,11 +871,7 @@ frozen-feature picture (§1.4). **Spectral only** here: the claim under test is 
 gain — which is a top-singular-value statement, and $M^\ast$'s $\sqrt{\text{fan-in}/\text{fan-out}}$
 normalization is calibrated to $\lVert M\rVert_2$."""))
 
-cells.append(code(r"""# GPT-NeoX (Pythia-160m) LoRA target shapes, (n_in, n_out). query_key_value is the
-# FUSED Q/K/V projection, so its output axis is 3 x hidden = 3 x 768 = 2304.
-DIMS = {"query_key_value": (768, 2304), "dense": (768, 768),
-        "dense_h_to_4h": (768, 3072), "dense_4h_to_h": (3072, 768)}
-
+cells.append(code(r"""# DIMS (the LoRA target shapes) is defined once in Setup A.
 def balance(m):
     '''Shape-fair balance B*/A* (spectral), one value per MODULE ROW (layer x kind x run).
 
@@ -909,7 +934,7 @@ grid_same = (f20a[f20a.student_tag.isin(cells_.index)]
              .groupby("student_tag").bal.median().rename("grid, final adapter"))
 recon = pd.concat([cells_, grid_same], axis=1)
 recon["ratio"] = recon["probe, final ckpt"] / recon["grid, final adapter"]
-recon["rank"] = recon.index.str.extract(r"_r(\d+)a")[0].astype(int).values
+recon["rank"] = [parse_param_tag(t)["rank"] for t in recon.index]
 print("§1.3e  [adaptive-only] reconciliation vs the ADAPTIVE focus grid (the probe's "
       "cells live there; non-rung lrs are absent from the strip) — row unit: one HP "
       "cell present in BOTH panels. The two sources agree cell for cell (ratio ~1); "
@@ -1061,9 +1086,7 @@ $\theta(r)\propto r^{-0.110}$ [−0.126, −0.067] — real, but significantly g
 than spectral's −0.172 — becomes one of the two measured ingredients from which the
 collapse law's rank exponent is derived in §5.3."""))
 
-cells.append(code(r"""from sklearn.metrics import roc_auc_score
-
-def dead_edge(x, y):
+cells.append(code(r"""def dead_edge(x, y):
     '''Dead-side edge of the accuracy-maximizing split of "dead iff dose >= cut".'''
     o = np.argsort(x); x, y = x[o], y[o]
     n = len(x); cum = np.r_[0, np.cumsum(y)]
@@ -1370,7 +1393,7 @@ through the doses they generate; §4c regresses the HPs directly."""))
 cells.append(code(r"""def _load_strip_cond(cond):
     parts = []
     for f in sorted(AN.glob(f"adapter_activations_strip_{cond}_r*.json")):
-        d = json.loads(f.read_text())
+        d = read_json(f)
         per = pd.DataFrame(d["results"])
         br = per.groupby("student_tag").lora_over_base.mean()
         dr = pd.DataFrame(d["drift"])
@@ -1388,7 +1411,7 @@ cells.append(code(r"""def _load_strip_cond(cond):
 
 h1 = strip[(strip.seed == 1) & strip.test_p.notna() & strip.dw_fro.notna()
            & (strip.s <= 64)].copy()
-h1["dead"] = h1.test_p < 0.01
+h1["dead"] = h1.test_p < DEAD_CUT
 meta_cols = h1.set_index("tag")[["dw_fro", "dw_spec", "dead", "lr", "rank", "alpha"]]
 pile = _load_strip_cond("pile").join(meta_cols, how="inner")
 numbers = _load_strip_cond("numbers").join(meta_cols, how="inner")
@@ -1825,7 +1848,7 @@ print("   -> negative at EVERY rank, strongest at low rank (where one direction 
 # shapes and input statistics, so refit the local spread effect per kind:
 kb_rows = []
 for f_ in sorted(AN.glob("adapter_activations_strip_pile_r*.json")):
-    per_ = pd.DataFrame(json.loads(f_.read_text())["results"])
+    per_ = pd.DataFrame(read_json(f_)["results"])
     per_["kind"] = per_.module.str.rsplit(".", n=1).str[-1]
     kb_rows.append(per_.groupby(["student_tag", "kind"]).lora_over_base.mean())
 bk_ = pd.concat(kb_rows).unstack("kind").join(
@@ -2000,7 +2023,7 @@ if not SDPL.exists():
     print("\n20-cell rule-selected ladder replication: not on disk yet "
           "(queue depth-probe-ladder) — rebuild when it lands")
 else:
-    sdl = pd.DataFrame(json.loads(SDPL.read_text())["results"])
+    sdl = pd.DataFrame(read_json(SDPL)["results"])
     pv_l = sdl.pivot_table(index=["student_tag", "layer"], columns="variant",
                            values="rel_drift")
     pv_l["ratio"] = pv_l.top1 / pv_l.flat
@@ -2048,7 +2071,7 @@ else:
                              sharey=True)
     axes = np.atleast_1d(axes)
     for ax, (nm, p_) in zip(axes, panels):
-        sdp_ = pd.DataFrame(json.loads(p_.read_text())["results"])
+        sdp_ = pd.DataFrame(read_json(p_)["results"])
         pv_ = sdp_.pivot_table(index=["student_tag", "layer"], columns="variant",
                                values="rel_drift")
         pv_["t_o"] = pv_.top1 / pv_.orig
@@ -2153,7 +2176,8 @@ probe, the product term $\log\mathrm{lr}\times\log\mathrm{ep}$. Because the stri
 placement is outcome-independent, the p-values in this section are **calibrated** —
 the adaptive-era caveat that stood here is retired to §8b as method history."""))
 
-cells.append(code(r"""run20 = run20.assign(y=np.log(run20.dW_fro), ys=np.log(run20.dW_spec),
+cells.append(code(r"""# NB: rebinds run20 with the log/HP fit columns — later §5 cells read them.
+run20 = run20.assign(y=np.log(run20.dW_fro), ys=np.log(run20.dW_spec),
                      llr=np.log(run20.lr), la=np.log(run20.alpha),
                      lrk=np.log(run20["rank"]))
 def cfit(df, formula):
@@ -2418,7 +2442,8 @@ absolute R².
    α^0.561 sits inside the L interval: it is the L-regime law, correct where its
    support lived."""))
 
-cells.append(code(r"""run20 = run20.assign(yf=np.log(run20.term_frozen_fro), ym=np.log(run20.term_moved_fro))
+cells.append(code(r"""# NB: rebinds run20 again (adds the per-term log columns) — read by the cells below.
+run20 = run20.assign(yf=np.log(run20.term_frozen_fro), ym=np.log(run20.term_moved_fro))
 F1, F2 = cfit(run20, "yf ~ llr + la + lrk"), cfit(run20, "yf ~ llr + I(llr**2) + la + lrk")
 M1_, M2_ = cfit(run20, "ym ~ llr + la + lrk"), cfit(run20, "ym ~ llr + I(llr**2) + la + lrk")
 print("frozen-feature term: lr^%.3f±%.3f R2 %.3f, lr^2 %+.3f±%.3f (straight)"
@@ -2446,7 +2471,6 @@ print("learned factor ‖BA‖/‖W0‖ (dose law minus the s = α/r prefactor):
       "notebook] agrees"
       % (D1.params.llr, D1.params.la - 1, D1.params.lrk + 1))
 
-from subliminal_learning.analysis.collapse_law import fit_collapse_law
 
 law_df = run20.rename(columns={"dead": "collapsed"}).assign(
     collapsed=lambda d: d.collapsed.astype(int))
@@ -2658,7 +2682,7 @@ cells.append(code(r"""def _load_strip_splice(splice):
     files = sorted(AN.glob(f"frozen_a_ablation_strip_{splice}_r*_s*.json"))
     frames, pb = [], None
     for f in files:
-        d = json.loads(f.read_text())
+        d = read_json(f)
         pb = d["p_target_base"]
         frames.append(pd.DataFrame(d["results"]))
     return (pd.concat(frames) if frames else pd.DataFrame()), pb, len(files)
@@ -2725,7 +2749,7 @@ print("non-additivity is systemic: per-cell retention sum median %.2f, "
 
 # dead-side check: does the frozen-only splice land FARTHER from base than the
 # full adapter at high-alpha dead cells (terms partially canceling)?
-dd_sp = pop_f[(pop_f.p_target_orig < 0.01) & (pop_f.alpha >= 128)]
+dd_sp = pop_f[(pop_f.p_target_orig < DEAD_CUT) & (pop_f.alpha >= 128)]
 if len(dd_sp):
     worse = (dd_sp.pile_kl_base_ablated > dd_sp.pile_kl_base_orig)
     print("dead cells at alpha>=128 (n=%d): frozen-only farther from base than the "
@@ -2777,8 +2801,7 @@ equalized over the update's existing numerical rank; same singular subspaces, on
 the within-subspace weighting rewritten). Peak theory predicts top1 ≥ original
 damage; the energy/spread account predicts less."""))
 
-cells.append(code(r"""import re as _re
-KSTAR_DS1_DESIGN, B_D, C_D = 7.84e-4, 0.561, -0.085
+cells.append(code(r"""KSTAR_DS1_DESIGN, B_D, C_D = 7.84e-4, 0.561, -0.085
 _LS = (sorted(AN.glob("frozen_a_ablation_lamstrat*_lam*.json"))
        + sorted(AN.glob("frozen_a_ablation_shellext_s*_lam*.json")))
 if not _LS:
@@ -2786,20 +2809,19 @@ if not _LS:
 else:
     rows = []
     for f in _LS:
-        d = json.loads(f.read_text())
+        d = read_json(f)
         seed = d.get("ftseed", 2 if "_s2" in f.name else 1)
         for r in d["results"]:
             rows.append({"cell": r["student_tag"], "seed": seed,
                          "lam": d["scale_lambda"], "p": r["p_target_ablated"],
                          "p_orig": r["p_target_stored"]})
     lam_all = pd.DataFrame(rows).drop_duplicates(["cell", "seed", "lam"])
-    p_base_l = json.loads(_LS[0].read_text())["p_target_base"]
-    tp = lam_all.cell.str.extract(r"ep20_lr(?P<lr>[0-9.e-]+)_r(?P<r>\d+)a(?P<a>\d+)")
-    lam_all["lr"], lam_all["rank"], lam_all["alpha"] = (
-        tp.lr.astype(float), tp.r.astype(int), tp.a.astype(int))
-    lam_all["K_rel"] = (lam_all.lr * lam_all.alpha**B_D * lam_all["rank"]**C_D
-                        / KSTAR_DS1_DESIGN)
-    lam_all["td"] = lam_all.p_orig < 0.01
+    p_base_l = read_json(_LS[0])["p_target_base"]
+    tp = add_param_fields(lam_all[["cell"]], "cell")
+    lam_all["lr"], lam_all["rank"], lam_all["alpha"] = tp.lr, tp["rank"], tp.alpha
+    lam_all["K_rel"] = K_of(lam_all.lr, lam_all.alpha, lam_all["rank"],
+                            b=B_D, c=C_D) / KSTAR_DS1_DESIGN
+    lam_all["td"] = lam_all.p_orig < DEAD_CUT
 
     fig, ax = plt.subplots(figsize=(9.5, 5.4))
     n_a = n_d = 0
@@ -2810,7 +2832,7 @@ else:
         n_d += td; n_a += (not td)
         ax.plot(g.lam * g.K_rel, g.p, "-", lw=0.9, alpha=0.45, color=col)
     ax.axhline(p_base_l, color="0.5", ls=":", lw=1, label="base prior")
-    ax.axhline(0.01, color="crimson", ls="--", lw=1, label="dead cut")
+    ax.axhline(DEAD_CUT, color="crimson", ls="--", lw=1, label="dead cut (legacy trait)")
     ax.axvline(1.0, color="0.3", ls="-.", lw=1, label="training boundary K/K* = 1")
     ax.plot([], [], color="tab:blue", label=f"trained alive ({n_a} run-curves)")
     ax.plot([], [], color="tab:red", label=f"trained dead ({n_d} run-curves)")
@@ -2847,7 +2869,7 @@ if not rev_files:
 else:
     rrows = []
     for f in rev_files:
-        d = json.loads(f.read_text())
+        d = read_json(f)
         for r in d["results"]:
             rrows.append({"cell": r["student_tag"], "lam": d["scale_lambda"],
                           "p": r["p_target_ablated"],
@@ -2855,7 +2877,7 @@ else:
     rl = pd.DataFrame(rrows)
     # the lambda-revival design: deep-dose trained-dead endpoints (every cell here
     # is trained-dead by construction; keep only those, defensively)
-    rl = rl[rl.p_orig < 0.01]
+    rl = rl[rl.p_orig < DEAD_CUT]
     # d0 lookup: strip harvest (seed 1) first, adaptive frame for off-ladder cells
     d0 = (strip[strip.seed == 1].set_index("tag").dw_fro
           .combine_first(run20a[run20a.ftseed == 1]
@@ -2878,7 +2900,7 @@ else:
     if LS_ALL:
         lsr = []
         for f in LS_ALL:
-            d = json.loads(f.read_text())
+            d = read_json(f)
             sd = d.get("ftseed", 2 if "_s2_" in f.name else 1)
             for r in d["results"]:
                 lsr.append({"cell": r["student_tag"], "seed": sd,
@@ -2887,7 +2909,7 @@ else:
         lsr = pd.DataFrame(lsr)
         d0_lut = strip.set_index(["tag", "seed"]).dw_fro
         for (c, sd), g in lsr.groupby(["cell", "seed"]):
-            if g.p_orig.iloc[0] >= 0.01:
+            if g.p_orig.iloc[0] >= DEAD_CUT:
                 continue
             d0v = d0_lut.get((c, sd), np.nan)
             if np.isfinite(d0v):
@@ -2905,7 +2927,7 @@ else:
         ax.plot(lsc.d0, lsc.ceiling, "^", ms=8, color="tab:green", alpha=0.8,
                 label="rule-selected (§5.5b lamstrat, n=%d)" % len(lsc))
     ax.axhline(0.0133, color="0.5", ls=":", lw=1, label="base prior (fully erased)")
-    ax.axhline(0.01, color="crimson", ls="--", lw=1, label="dead cut")
+    ax.axhline(DEAD_CUT, color="crimson", ls="--", lw=1, label="dead cut (legacy trait)")
     ax.set_xscale("log")
     ax.set_xlabel(r"training dose $d_0$ (dw$_F$)")
     ax.set_ylabel("recoverable-trait ceiling (max-over-λ p)")
@@ -2926,7 +2948,7 @@ if not SURG:
 else:
     rows = []
     for f in SURG:
-        for r in json.loads(f.read_text())["results"]:
+        for r in read_json(f)["results"]:
             rows.append({k: r[k] for k in ("student_tag", "fate", "variant",
                                            "p_target", "pile_kl_base")})
     sg = pd.DataFrame(rows)
@@ -2940,7 +2962,7 @@ else:
         "median Δp (dead seeds)": dp.xs("dead", level="fate").median(),
         "median Δp (alive seeds)": dp.xs("alive", level="fate").median(),
         "max |Δp|": dp.abs().max(),
-        "fate flips": [(int(((pv[v] < 0.01) != (pv.orig < 0.01)).sum()))
+        "fate flips": [(int(((pv[v] < DEAD_CUT) != (pv.orig < DEAD_CUT)).sum()))
                        for v in dp.columns],
         "median ΔKL": dk.median()})
     print("W0-sliver surgery, %d mixed cells x both seeds (dose exactly preserved "
@@ -2951,7 +2973,7 @@ else:
           "by at most %.3f and flips %d/%d fates. cos(dW, W0) is a MARKER of bad "
           "updates, not a mechanism — the §1.2b restraint was warranted, and the "
           "direction program moves to spectrum/subspace geometry."
-          % (dp.abs().max().max(), int(((pv.flip10 < 0.01) != (pv.orig < 0.01)).sum()),
+          % (dp.abs().max().max(), int(((pv.flip10 < DEAD_CUT) != (pv.orig < DEAD_CUT)).sum()),
              len(pv)))"""))
 
 cells.append(md(r"""### §5.5b — the crossing analysis (pre-registered)
@@ -2986,8 +3008,7 @@ ws1 down-scaled points read as spurious kills: the §2-threshold trap applies to
 [last-alive, first-dead] bracket — the naive one-sided reads (kills rounded up,
 revivals down) inflate the hysteresis gap by up to ~1.4× each way."""))
 
-cells.append(code(r"""import re as _re
-V2 = REPO / "run_logs" / "causal_exp_cells_v2.json"
+cells.append(code(r"""V2 = REPO / "run_logs" / "causal_exp_cells_v2.json"
 LS_FILES = (sorted(AN.glob("frozen_a_ablation_lamstrat*_lam*.json"))
             + sorted(AN.glob("frozen_a_ablation_shellext_s*_lam*.json")))
 KSTAR_DS1_DESIGN, B_D, C_D = 7.84e-4, 0.561, -0.085
@@ -2996,21 +3017,20 @@ if not LS_FILES:
 else:
     rows = []
     for f in LS_FILES:
-        d = json.loads(f.read_text())
+        d = read_json(f)
         seed = d.get("ftseed", 2 if "_s2" in f.name else 1)
         for r in d["results"]:
             rows.append({"cell": r["student_tag"], "seed": seed,
                          "lam": d["scale_lambda"], "p": r["p_target_ablated"],
                          "p_orig": r["p_target_stored"]})
     ls = pd.DataFrame(rows).drop_duplicates(["cell", "seed", "lam"])
-    tp = ls.cell.str.extract(r"ep20_lr(?P<lr>[0-9.e-]+)_r(?P<r>\d+)a(?P<a>\d+)")
-    ls["lr"], ls["rank"], ls["alpha"] = (tp.lr.astype(float), tp.r.astype(int),
-                                         tp.a.astype(int))
-    ls["K_rel"] = ls.lr * ls.alpha**B_D * ls["rank"]**C_D / KSTAR_DS1_DESIGN
+    tp = add_param_fields(ls[["cell"]], "cell")
+    ls["lr"], ls["rank"], ls["alpha"] = tp.lr, tp["rank"], tp.alpha
+    ls["K_rel"] = K_of(ls.lr, ls.alpha, ls["rank"], b=B_D, c=C_D) / KSTAR_DS1_DESIGN
     print(f"pooled λ data (strat + shell, both seeds): {ls.cell.nunique()} cells, "
           f"{ls.groupby(['cell', 'seed']).ngroups} run-curves, {len(ls)} evals")
 
-    def crossings(df, cut=0.01):
+    def crossings(df, cut=DEAD_CUT):
         # Interval-censored crossing per run-curve: geometric midpoint of the
         # [last-alive, first-dead] lambda bracket on the up-side of the hump, in
         # lambda*K/K* units. Symmetric for kills and revivals (no one-sided bias).
@@ -3049,7 +3069,7 @@ else:
           f"(n = {len(a_)} vs {len(d_)})")
 
     # THE decisive test: within-cell mixed-fate pairs (same HPs, opposite fates).
-    fate = ls.groupby(["cell", "seed"]).p_orig.first().lt(0.01).unstack("seed")
+    fate = ls.groupby(["cell", "seed"]).p_orig.first().lt(DEAD_CUT).unstack("seed")
     mixed = fate.dropna(); mixed = mixed[mixed[1] != mixed[2]]
     prs = []
     for c in mixed.index:
@@ -3091,19 +3111,18 @@ else:
     # TWO-OBJECT CHECK: the λ-crossing threshold is the EVAL-time object; the
     # level set's θ is the TRAINING-time dose threshold. Measure the latter
     # directly on the strip's weight data (nested logit: fate info in α beyond dose).
-    hv = pd.DataFrame(json.loads((AN / "nonadaptive_8x7_harvest.json").read_text()))
+    hv = pd.DataFrame(read_json(AN / "nonadaptive_8x7_harvest.json"))
     hv = hv[hv.test_p.notna() & ~hv.diverged.astype(bool) & hv.dw_fro.notna()
             & (hv.alpha / hv["rank"] <= 64)].copy()
-    hv["dead"] = (hv.test_p < 0.01).astype(int)
-    import statsmodels.api as _sm
-    Xh = np.c_[np.log(hv.dw_fro), np.log(hv.alpha), np.log(hv["rank"])]
-    rh = _sm.Logit(hv.dead.to_numpy(), _sm.add_constant(Xh)).fit(
-        disp=0, maxiter=500, cov_type="cluster", cov_kwds={"groups": hv.tag.to_numpy()})
-    da, dr = -rh.params[2] / rh.params[1], -rh.params[3] / rh.params[1]
+    hv["dead"] = (hv.test_p < DEAD_CUT).astype(int)
+    hv["ldw"], hv["la"], hv["lrk"] = (np.log(hv.dw_fro), np.log(hv.alpha),
+                                      np.log(hv["rank"]))
+    rh = cluster_logit(hv, "dead ~ ldw + la + lrk", "tag")
+    da, dr = -rh.params["la"] / rh.params["ldw"], -rh.params["lrk"] / rh.params["ldw"]
     print(f"TRAINING-time θ drift (strip nested logit, n={len(hv)}): "
-          f"dlnθ/dlnα = {da:+.3f} (α z = {rh.params[2]/rh.bse[2]:+.2f}, "
-          f"p = {rh.pvalues[2]:.3f}), dlnθ/dlnr = {dr:+.3f} "
-          f"(r z = {rh.params[3]/rh.bse[3]:+.2f}, p = {rh.pvalues[3]:.3f})")
+          f"dlnθ/dlnα = {da:+.3f} (α z = {rh.params['la']/rh.bse['la']:+.2f}, "
+          f"p = {rh.pvalues['la']:.3f}), dlnθ/dlnr = {dr:+.3f} "
+          f"(r z = {rh.params['lrk']/rh.bse['lrk']:+.2f}, p = {rh.pvalues['lrk']:.3f})")
     print("-> the LEVEL-SET θ is flat in α (assumption verified; rank drift matches "
           "Test 1) while the EVAL-time crossing drifts in α: the drift is structure "
           "in the hysteresis gap — the trained direction's quality margin varies "
@@ -3210,7 +3229,7 @@ if not files:
 else:
     rows = []
     for f in files:
-        d = json.loads(f.read_text())
+        d = read_json(f)
         piv = {}
         for r in d["results"]:
             piv.setdefault(r["ftseed"], {})[r["variant"]] = r
@@ -3219,8 +3238,8 @@ else:
                 continue
             tag = d["tag"]
             rows.append({"cell": tag, "seed": seed,
-                         "rank": int(_re.search(r"_r(\d+)a", tag)[1]),
-                         "alpha": int(_re.search(r"a(\d+)$", tag)[1]),
+                         "rank": parse_param_tag(tag)["rank"],
+                         "alpha": parse_param_tag(tag)["alpha"],
                          "kl_orig": pv["orig"]["pile_kl_base"],
                          "dkl_top1": pv["top1"]["pile_kl_base"] - pv["orig"]["pile_kl_base"],
                          "dkl_flat": pv["flat"]["pile_kl_base"] - pv["orig"]["pile_kl_base"],
@@ -3228,8 +3247,8 @@ else:
                          "p_top1": pv["top1"]["p_target"],
                          "p_flat": pv["flat"]["p_target"]})
     sl = pd.DataFrame(rows).drop_duplicates(["cell", "seed"])
-    sl["lr"] = sl.cell.str.extract(r"lr([0-9.e-]+)_").astype(float)
-    sl["K_rel"] = sl.lr * sl.alpha**B_D * sl["rank"]**C_D / KSTAR_DS1_DESIGN
+    sl["lr"] = [parse_param_tag(t)["lr"] for t in sl.cell]
+    sl["K_rel"] = K_of(sl.lr, sl.alpha, sl["rank"], b=B_D, c=C_D) / KSTAR_DS1_DESIGN
     print(f"spread splices (ladder + shell, both seeds): {sl.cell.nunique()} cells, "
           f"{len(sl)} splice sets")
     for v in ("top1", "flat"):
@@ -3245,24 +3264,24 @@ else:
         frac_above = (bad.K_rel >= 1).mean()
         print(f"  {frac_above:.0%} of flat-damage sets are boundary-crossed — aggression, "
               "not rank or α, organizes the exceptions")
-    alv = sl[sl.p_orig >= 0.01]
-    ded = sl[sl.p_orig < 0.01]
+    alv = sl[sl.p_orig >= DEAD_CUT]
+    ded = sl[sl.p_orig < DEAD_CUT]
     print(f"  trait on alive sets (n={len(alv)}): top1 keeps "
           f"{(alv.p_top1 / alv.p_orig).median():.2f}x, flat keeps "
           f"{(alv.p_flat / alv.p_orig).median():.2f}x")
     print("  FATE TRANSITIONS at constant energy (the weighting axis flips fate "
           "with dose held exactly fixed):")
     for v in ("top1", "flat"):
-        print(f"    {v}: kills {(alv[f'p_{v}'] < 0.01).sum()}/{len(alv)} alive sets, "
-              f"revives {(ded[f'p_{v}'] >= 0.01).sum()}/{len(ded)} dead sets")
+        print(f"    {v}: kills {(alv[f'p_{v}'] < DEAD_CUT).sum()}/{len(alv)} alive sets, "
+              f"revives {(ded[f'p_{v}'] >= DEAD_CUT).sum()}/{len(ded)} dead sets")
     # characterize the flips: which KIND of death/revival are they?
-    kk = sl[(sl.p_orig >= 0.01) & (sl.p_top1 < 0.01)]
-    rv = sl[(sl.p_orig < 0.01) & (sl.p_flat >= 0.01)]
-    nrv = sl[(sl.p_orig < 0.01) & (sl.p_flat < 0.01)]
+    kk = sl[(sl.p_orig >= DEAD_CUT) & (sl.p_top1 < DEAD_CUT)]
+    rv = sl[(sl.p_orig < DEAD_CUT) & (sl.p_flat >= DEAD_CUT)]
+    nrv = sl[(sl.p_orig < DEAD_CUT) & (sl.p_flat < DEAD_CUT)]
     if len(kk):
         print(f"  top1 kills: KL FALLS in {(kk.dkl_top1 < 0).sum()}/{len(kk)} of them "
               f"(median {kk.dkl_top1.median():+.2f}); killed cells are boundary-adjacent "
-              f"(p_orig median {kk.p_orig.median():.3f} vs {sl[sl.p_orig >= 0.01].p_orig.median():.3f} overall) "
+              f"(p_orig median {kk.p_orig.median():.3f} vs {sl[sl.p_orig >= DEAD_CUT].p_orig.median():.3f} overall) "
               "-> CARRIER-DELETION deaths, not collapse: the trait rides the discarded "
               "non-dominant directions; generic behavior is displaced LESS, not more. "
               "The peak account's chain (peak -> displacement -> death) is not what these are.")
@@ -3295,18 +3314,18 @@ WS_SPR = sorted(AN.glob("spread_ladder_ws1_ep20_*.json"))
 if not WS_LAM or not V2.exists():
     print("ws1 expansion results not on disk — skipped")
 else:
-    v2 = json.loads(V2.read_text())
+    v2 = read_json(V2)
     KW = {c["tag"]: c["K_rel"] for c in v2["ws1_cells"]}
     rows = []
     for f in WS_LAM:
-        d = json.loads(f.read_text())
+        d = read_json(f)
         for r in d["results"]:
             rows.append({"cell": r["student_tag"], "seed": 1, "lam": d["scale_lambda"],
                          "p": r["p_target_ablated"], "p_orig": r["p_target_stored"]})
     wl = pd.DataFrame(rows)
     wl["K_rel"] = wl.cell.map(KW)
-    wl["alpha"] = wl.cell.str.extract(r"a(\d+)$").astype(int)
-    wl["rank"] = wl.cell.str.extract(r"_r(\d+)a").astype(int)
+    _wp = add_param_fields(wl[["cell"]], "cell")
+    wl["alpha"], wl["rank"] = _wp.alpha.astype(int), _wp["rank"].astype(int)
     wx = crossings(wl, 0.001)   # ws1's own live-mode/10 cut
     print(f"ws1 λ ({wl.cell.nunique()} cells, cut 0.001): flips "
           f"{wx.kind.value_counts().to_dict()}")
@@ -3314,7 +3333,7 @@ else:
         wx.set_index("cell")[["trained_dead", "K_rel", "cross_K", "kind"]].round(3)))
     ok = []
     for f in WS_SPR:
-        d = json.loads(f.read_text())
+        d = read_json(f)
         piv = {r["variant"]: r for r in d["results"]}
         if "orig" in piv:
             ok.append(piv["top1"]["pile_kl_base"] - piv["orig"]["pile_kl_base"])
@@ -3382,22 +3401,7 @@ CL_MID = ("dog/pythia-160m-data-seed1/teacher-pythia-160m/ep2_lr5e-4_r32a64_tsee
 if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
     print("clamp experiment not on disk — skipped")
 else:
-    dsn = json.loads(CLAMP_DESIGN.read_text())
-
-    def _find_test(o):
-        if isinstance(o, dict):
-            if o.get("name") == "test" or o.get("prompt_set") == "test":
-                return o
-            for v in o.values():
-                r = _find_test(v)
-                if r is not None:
-                    return r
-        elif isinstance(o, list):
-            for v in o:
-                r = _find_test(v)
-                if r is not None:
-                    return r
-        return None
+    dsn = read_json(CLAMP_DESIGN)
 
     rows = []
     for arm in dsn["arms"]:
@@ -3405,7 +3409,7 @@ else:
         summ = lineage / "preference_summary.json"
         if not summ.exists():
             continue
-        t = _find_test(json.loads(summ.read_text()))
+        t = summary_set_block(read_json(summ), "test")
         for seed_s, pv in ((t or {}).get("per_seed_p_target", {})).items():
             clog = lineage / f"ftseed{seed_s}" / "clamp_log.jsonl"
             bf = np.nan
@@ -3417,7 +3421,7 @@ else:
                          "p": float(pv), "bound_frac": bf,
                          "stage": arm.get("stage", "1-2")})
     cf_all = pd.DataFrame(rows).drop_duplicates(["tag", "norm", "ratio", "seed"])
-    cf_all["alive"] = cf_all.p >= 0.01
+    cf_all["alive"] = cf_all.p >= DEAD_CUT
     # This section's frozen findings are the stage-1/2 record (alpha <= 64); the
     # deep-alpha stage-3 extension is analyzed separately below and must not
     # silently shift these tables.
@@ -3451,31 +3455,43 @@ if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
     print("clamp experiment not on disk — skipped")
 else:
     _w0 = {}
-    for _r in json.loads((AN / "adapter_norms_strip_r8.json").read_text())["results"]:
+    for _r in read_json(AN / "adapter_norms_strip_r8.json")["results"]:
         _w0.setdefault(_r["module"], _r["W0_fro"])
     THF = {int(k): v["fro"] for k, v in dsn["theta_hat"].items()}
+
+    def realized_dose(arm, seed):
+        '''Endpoint ||dW||_F/||W0||_F of one clamped run, module-mean, in theta-hat units.
+
+        Gram identity on the final adapter (no dense dW is ever formed); returns None
+        when that seed's checkpoint has not landed.
+        '''
+        ck = (CL_ROOT / arm["label"] / CL_MID / arm["tag"] / f"ftseed{seed}"
+              / "checkpoints" / "adapter_model.safetensors")
+        if not ck.exists():
+            return None
+        hp = parse_param_tag(arm["tag"])
+        scal = hp["alpha"] / hp["rank"]
+        tens = _sload(str(ck))
+        doses = []
+        for k in tens:
+            if "lora_A" not in k:
+                continue
+            bm = k.split(".lora_A")[0].replace("base_model.model.", "")
+            A, B = tens[k], tens[k.replace("lora_A", "lora_B")]
+            if bm in _w0:
+                doses.append(scal * np.sqrt(((B.T @ B) * (A @ A.T)).sum()) / _w0[bm])
+        return float(np.mean(doses)) / THF[arm["rank"]]
+
     frows = []
     for arm in dsn["arms"]:
         if arm.get("stage", "1-2") != "1-2":
             continue  # stage-3 realized doses are computed in its own section below
-        lineage = CL_ROOT / arm["label"] / CL_MID / arm["tag"]
-        aa, rr = arm["tag"], arm["rank"]
-        scal = int(_re.search(r"a(\d+)$", aa)[1]) / int(_re.search(r"_r(\d+)a", aa)[1])
         for seed in (1, 2):
-            ck = lineage / f"ftseed{seed}" / "checkpoints" / "adapter_model.safetensors"
-            if not ck.exists():
+            f_rel = realized_dose(arm, seed)
+            if f_rel is None:
                 continue
-            tens = _sload(str(ck))
-            doses = []
-            for k in tens:
-                if "lora_A" not in k:
-                    continue
-                base_mod = k.split(".lora_A")[0].replace("base_model.model.", "")
-                A, B = tens[k], tens[k.replace("lora_A", "lora_B")]
-                if base_mod in _w0:
-                    doses.append(scal * np.sqrt(((B.T @ B) * (A @ A.T)).sum()) / _w0[base_mod])
-            frows.append({"tag": aa, "norm": arm["norm"], "ratio": arm["ratio"],
-                          "seed": seed, "F_rel": float(np.mean(doses)) / THF[rr]})
+            frows.append({"tag": arm["tag"], "norm": arm["norm"], "ratio": arm["ratio"],
+                          "seed": seed, "F_rel": f_rel})
     ff = pd.DataFrame(frows).merge(cf[["tag", "norm", "ratio", "seed", "p", "alive"]],
                                    on=["tag", "norm", "ratio", "seed"], how="inner")
     spec8 = ff[(ff.norm == "spec")]
@@ -3489,7 +3505,7 @@ else:
         ax.scatter(sub.F_rel, sub.p.clip(1e-8), s=40,
                    c=color, marker="o", alpha=0.75, label=lab)
     ax.axvline(1.0, color="0.4", ls=":", lw=1.2)
-    ax.axhline(0.01, color="crimson", ls="--", lw=1)
+    ax.axhline(DEAD_CUT, color="crimson", ls="--", lw=1)
     ax.axhline(0.0133, color="0.5", ls="-.", lw=1)
     ax.set_yscale("log")
     ax.set_xlabel("realized endpoint dose  /  θ̂_F (unclamped death threshold)")
@@ -3561,118 +3577,108 @@ update?** Design: 9 strip cells with both seeds dead and neither diverged
 (nearest rung to r{4,16,64} × α{128,256} × design-K {1.4,2.0}, s ≤ 64; duplicates
 collapsed), fro norm only, ratios {0.5, 0.6, 0.8}, 2 seeds → 54 runs.
 
-Fate labels: this notebook's clamp sections predate the settled prior-based DEAD
-convention (2026-08-15: dead ⇔ test p < test_prior·e⁻³ ≈ 6.6e-4 for dog/ds1). The
-cells below report **both** labels — the legacy 0.01 cut for continuity with the
-stage-1/2 tables above, the prior-based label as the current doctrine. Row unit
-throughout: one clamped training run (tag × ratio × seed); survival aggregated as
-alive/total within the stated group."""))
+Fate labels: these clamp sections read the **trait** channel, so the binary label is
+the legacy trait cut (`DEAD_CUT`, 0.01 — the caveat is stated once in Setup A: trait
+loss ≠ integrity collapse), and the graded readout beside it is the continuous excess
+`p / prior`. The former prior·e⁻³ rule is retired and is no longer computed anywhere.
+TODO(anchored): the operative label is the anchored Pile-KL cut
+(`analysis.labels.anchored_cut`); re-cut these tables once the clamp runs carry a pp1
+probe record. Row unit throughout: one clamped training run (tag × ratio × seed);
+survival aggregated as alive/total within the stated group."""))
 
-cells.append(code(r"""# Stage-3 survival vs stages 1-2, under both DEAD labels.
-import scipy.stats as _sps
+cells.append(code(r"""# Stage-3 survival vs stages 1-2 (legacy trait cut; the prior/e^3 rule is retired).
 if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
     print("clamp experiment not on disk — skipped")
 else:
-    _base = json.loads((AN / "base_eval_ds1_animal_preference_test.json").read_text())
+    _base = read_json(AN / "base_eval_ds1_animal_preference_test.json")
     TEST_PRIOR = float(np.mean(_base["dog"]["p_per_prompt"]))
-    THR_PRIOR = TEST_PRIOR * np.exp(-3)
-    print(f"ds1 dog test prior {TEST_PRIOR:.4f} -> prior-based dead cut {THR_PRIOR:.2e} "
-          "(legacy cut 0.01)")
+    # This section reads the TRAIT channel, so the binary label is the legacy trait cut
+    # (caveat in Setup A) and the graded readout is the continuous excess p / prior.
+    # TODO(anchored): re-cut on the anchored Pile-KL label once the clamp runs carry a
+    # pp1 probe record (the operative integrity label lives in analysis.labels).
+    print(f"ds1 dog test prior {TEST_PRIOR:.4f}; binary label = legacy trait cut "
+          f"{DEAD_CUT}, graded readout = p / prior")
     cw = cf_all.copy()
-    cw["alive_prior"] = cw.p >= THR_PRIOR
+    cw["p_over_prior"] = cw.p / TEST_PRIOR
     s3 = cw[cw.stage == "3-alpha"].copy()
     n3_design = 2 * sum(1 for a in dsn["arms"] if a.get("stage") == "3-alpha")
     print(f"stage-3 census: {len(s3)}/{n3_design} designed runs landed\n")
 
-    print("SURVIVAL by stage x ratio (fro arms; alive counts under both labels, "
-          "mean fraction of steps riding the ceiling):")
+    print("SURVIVAL by stage x ratio (fro arms; alive counts at the legacy trait cut, "
+          "median p/prior, mean fraction of steps riding the ceiling):")
     fr = cw[cw.norm == "fro"]
     tab = fr.groupby(["stage", "ratio"]).agg(
-        alive_legacy=("alive", "sum"), alive_prior=("alive_prior", "sum"),
+        alive=("alive", "sum"), p_over_prior_med=("p_over_prior", "median"),
         n=("alive", "size"), bind=("bound_frac", "mean")).round(3)
     display(compare_table(tab, fmt="{:.3f}"))
 
     print("ratio 0.8, alpha<=64 (stages 1-2) vs alpha>=128 (stage 3), fro only:")
     r08 = fr[fr.ratio == 0.8]
-    for lab in ("alive", "alive_prior"):
-        lo, hi = r08[r08.stage == "1-2"], r08[r08.stage == "3-alpha"]
-        t22 = [[int(lo[lab].sum()), int((~lo[lab]).sum())],
-               [int(hi[lab].sum()), int((~hi[lab]).sum())]]
-        p_f = _sps.fisher_exact(t22)[1]
-        print(f"  {lab:12s}: alpha<=64 {t22[0][0]}/{sum(t22[0])} vs "
-              f"alpha>=128 {t22[1][0]}/{sum(t22[1])}   Fisher p={p_f:.3f}")
+    lo, hi = r08[r08.stage == "1-2"], r08[r08.stage == "3-alpha"]
+    t22 = [[int(lo.alive.sum()), int((~lo.alive).sum())],
+           [int(hi.alive.sum()), int((~hi.alive).sum())]]
+    p_f = _sps.fisher_exact(t22)[1]
+    print(f"  alive       : alpha<=64 {t22[0][0]}/{sum(t22[0])} vs "
+          f"alpha>=128 {t22[1][0]}/{sum(t22[1])}   Fisher p={p_f:.3f}")
+    print(f"  p/prior med : alpha<=64 {lo.p_over_prior.median():.2f} vs "
+          f"alpha>=128 {hi.p_over_prior.median():.2f}")
 
-    # Label sensitivity of the stage-1/2 headline "0 survivors at ratio >= 1.0":
+    # Graded view of the stage-1/2 headline "0 survivors at ratio >= 1.0": how far
+    # below the prior those runs actually sit.
     hi_c = cw[(cw.stage == "1-2") & (cw.ratio >= 1.0)]
-    fl = hi_c[hi_c.alive_prior & ~hi_c.alive]
-    print(f"\nlabel sensitivity at ratio >= 1.0 (stages 1-2, both norms): "
-          f"{int(hi_c.alive_prior.sum())}/{len(hi_c)} 'survive' under the prior label "
-          f"(legacy 0/{len(hi_c)}); the {len(fl)} flips sit at p "
-          f"{fl.p.min():.4f}-{fl.p.max():.4f} — trough runs, partially rescued, "
-          "not healthy-mode transfer.")
+    print(f"\nat ratio >= 1.0 (stages 1-2, both norms): {int(hi_c.alive.sum())}/{len(hi_c)} "
+          f"alive at the legacy cut; p/prior spans {hi_c.p_over_prior.min():.3f}-"
+          f"{hi_c.p_over_prior.max():.3f} (median {hi_c.p_over_prior.median():.3f}) — "
+          "trough runs, at best partially rescued, not healthy-mode transfer.")
 
-    print("\nstage-3 per-cell survival (prior label; fraction of 2 seeds):")
-    piv3 = s3.assign(alive_prior=s3.p >= THR_PRIOR).pivot_table(
-        index="tag", columns="ratio", values="alive_prior", aggfunc="mean")
+    print("\nstage-3 per-cell survival (legacy trait cut; fraction of 2 seeds):")
+    piv3 = s3.pivot_table(index="tag", columns="ratio", values="alive", aggfunc="mean")
     piv3.insert(0, "K_rel", s3.groupby("tag").K_rel.first())
     display(compare_table(piv3.round(2), fmt="{:.2f}"))
-    dead3 = s3[s3.p < THR_PRIOR]
-    print(f"stage-3 deaths (prior label): {len(dead3)} — all at ratio 0.8, "
+    dead3 = s3[~s3.alive]
+    print(f"stage-3 deaths: {len(dead3)} — ratios {sorted(dead3.ratio.unique())}, "
           f"tags {sorted(dead3.tag.unique())}, seeds {sorted(dead3.seed.unique())}, "
-          f"p {dead3.p.min():.1e}-{dead3.p.max():.1e}")"""))
+          f"p {dead3.p.min():.1e}-{dead3.p.max():.1e}")
+"""))
 
 cells.append(code(r"""# The alpha-vs-lr confound, exposure fractions, and realized endpoint doses.
 if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
     print("clamp experiment not on disk — skipped")
 else:
-    cw2 = cw.assign(
-        lr=cw.tag.str.extract(r"_lr([0-9e.-]+)_")[0],
-        alpha=cw.tag.str.extract(r"a(\d+)$")[0].astype(int))
+    _cp = add_param_fields(cw[["tag"]], "tag")
+    cw2 = cw.assign(lr=_cp.lr, alpha=_cp.alpha.astype(int))
     frq = cw2[cw2.norm == "fro"]
     print("cell layout on the (lr, alpha) plane — the design's confound "
           "(deep-alpha both-seeds-dead strip cells exist ONLY at lr <= 1e-4, by "
           "rung quantization at the deep-alpha boundary):")
     display(compare_table(frq.groupby(["stage", "alpha", "lr"]).tag.nunique()
                           .rename("cells").to_frame()))
-    print("ratio 0.8 survival by (lr, alpha) — prior label:")
+    print("ratio 0.8 survival by (lr, alpha) — legacy trait cut:")
     r08q = frq[frq.ratio == 0.8]
-    display(compare_table(r08q.groupby(["lr", "alpha"]).alive_prior
+    display(compare_table(r08q.groupby(["lr", "alpha"]).alive
                           .agg(alive="sum", n="size")))
-    m14 = r08q[(r08q.lr == "1e-4") & (r08q.alpha <= 64)]
+    m14 = r08q[(r08q.lr == 1e-4) & (r08q.alpha <= 64)]
     if len(m14):
         print(f"matched-lr check (lr=1e-4, alpha=64, ratio 0.8): "
-              f"{int(m14.alive_prior.sum())}/{len(m14)} survive under the prior label "
-              f"(p {m14.p.min():.4f}-{m14.p.max():.4f}; legacy label "
-              f"{int(m14.alive.sum())}/{len(m14)}) — the lone alpha<=64 low-lr cell "
+              f"{int(m14.alive.sum())}/{len(m14)} survive at the legacy cut "
+              f"(p {m14.p.min():.4f}-{m14.p.max():.4f}; median p/prior "
+              f"{m14.p_over_prior.median():.2f}) — the lone alpha<=64 low-lr cell "
               "patterns with the deep-alpha cells, not with its alpha-mates at "
               "higher lr, so the ratio-0.8 gradient tracks lr at least as much as "
               "alpha.")
     print("\nexposure is NOT the explanation of the stage-3 advantage: "
           "mean fraction of steps riding the ceiling, ratio 0.8 —")
-    display(compare_table(r08q.groupby(["stage", "alive_prior"]).bound_frac
+    display(compare_table(r08q.groupby(["stage", "alive"]).bound_frac
                           .agg(["mean", "size"]).round(3), fmt="{:.3f}"))
 
     # Realized endpoint doses for all 54 stage-3 runs (Gram identity on the final
     # adapter; ceilings should bind exactly if trajectories ride to the end).
     f3 = []
     for arm in [a for a in dsn["arms"] if a.get("stage") == "3-alpha"]:
-        lineage = CL_ROOT / arm["label"] / CL_MID / arm["tag"]
-        scal = (int(_re.search(r"a(\d+)$", arm["tag"])[1])
-                / int(_re.search(r"_r(\d+)a", arm["tag"])[1]))
         for seed in (1, 2):
-            ck = lineage / f"ftseed{seed}" / "checkpoints" / "adapter_model.safetensors"
-            if not ck.exists():
-                continue
-            tens = _sload(str(ck))
-            doses = []
-            for k in tens:
-                if "lora_A" not in k:
-                    continue
-                bm = k.split(".lora_A")[0].replace("base_model.model.", "")
-                A, B = tens[k], tens[k.replace("lora_A", "lora_B")]
-                if bm in _w0:
-                    doses.append(scal * np.sqrt(((B.T @ B) * (A @ A.T)).sum()) / _w0[bm])
-            f3.append({"ratio": arm["ratio"], "F_rel": float(np.mean(doses)) / THF[arm["rank"]]})
+            f_rel = realized_dose(arm, seed)   # defined in the stage-1/2 cell above
+            if f_rel is not None:
+                f3.append({"ratio": arm["ratio"], "F_rel": f_rel})
     f3 = pd.DataFrame(f3)
     print(f"\nstage-3 realized endpoint dose / theta-hat_F (n={len(f3)}): "
           "every run ends exactly at its ceiling —")
@@ -3683,16 +3689,16 @@ cells.append(md(r"""**Stage-3 findings (2026-08-15).**
 
 1. **The ~0.6×θ̂ operative threshold is NOT a universal constant — it is
    regime-dependent, and the deep-α regime tolerates more.** At ratio 0.8, where
-   the α ≤ 64 cells survive 3/14 (legacy label; 7/14 prior label), the deep-α
-   cells survive 10/18 (legacy) / 16/18 (prior; Fisher p = 0.023). At 0.5 and 0.6
-   everything survives in both regimes under the prior label (36/36 stage 3;
-   legacy 33/36). The stage-1/2 number "~0.6×θ̂" was the operative threshold *for
+   the α ≤ 64 cells survive 3/14 (legacy trait cut), the deep-α cells survive
+   10/18 (Fisher test recomputed by the cell above). At 0.5 and 0.6 nearly
+   everything survives in both regimes (stage 3 36/36 at the graded readout,
+   33/36 at the legacy cut). The stage-1/2 number "~0.6×θ̂" was the operative threshold *for
    that regime mix*, exactly as the A2 hole anticipated; in the cross-dominated
    regime the ceiling-riding threshold sits at ≥ 0.8×θ̂.
 2. **α and lr cannot be separated on this design.** Verified-dead deep-α strip
    cells exist only at lr ≤ 1e-4 (the boundary's rung quantization), and the lone
-   α = 64 cell at lr 1e-4 patterns with the deep-α cells at ratio 0.8 under the
-   prior label — the survival gradient tracks lr at least as much as α. The clean
+   α = 64 cell at lr 1e-4 patterns with the deep-α cells at ratio 0.8 — the
+   survival gradient tracks lr at least as much as α. The clean
    statement is *positional*: per-unit-exposure lethality falls as one moves along
    the boundary toward deep-α / low-lr cells.
 3. **Exposure time does not explain the gap — it deepens the mediation residual.**
@@ -3706,12 +3712,12 @@ cells.append(md(r"""**Stage-3 findings (2026-08-15).**
 4. **Both stage-3 deaths are boundary-band, seed-1, α = 128, lr 1e-4** (r4a128 and
    r64a128 at ratio 0.8) — the α = 256 cells survive 0.8 at 12/12 even at
    K_rel 2.0–2.5.
-5. **Label sensitivity, stated once**: under the prior-based DEAD convention a few
-   stage-1/2 ceiling ≥ 1.0 runs (8/56, p 0.0007–0.0068) flip to "not collapsed" —
-   they are trough runs (partially rescued), so the qualitative stage-1/2 story
-   (steeply monotone survival in the ceiling, no rescue *to healthy transfer* at
-   ≥ 1.0) is unchanged, but the literal "0 survivors at ≥ 1.0" is a legacy-label
-   statement.
+5. **Label sensitivity, stated once**: a few stage-1/2 ceiling ≥ 1.0 runs sit just
+   under the legacy cut (p 0.0007–0.0068 — the graded `p / prior` readout printed
+   above places them in the trough, partially rescued), so the qualitative
+   stage-1/2 story (steeply monotone survival in the ceiling, no rescue *to healthy
+   transfer* at ≥ 1.0) is unchanged, but the literal "0 survivors at ≥ 1.0" is a
+   cut-dependent statement.
 
 **What this does to the chain (A2 hole #2, M's complication):** the thin "~0.6×θ̂
 constancy" question is now answered — *not constant*; the operative ceiling-riding
@@ -3785,10 +3791,7 @@ cells.append(code(r"""HARV = AN / "nonadaptive_8x7_harvest.json"
 if not HARV.exists():
     print("strip harvest not on disk — §7 skipped")
 else:
-    strip = pd.read_json(HARV)
-    strip["dead"] = np.where(strip.diverged, 1.0,
-                             np.where(strip.test_p.notna(),
-                                      (strip.test_p < 0.01).astype(float), np.nan))
+    strip = load_strip_harvest(HARV)      # same loader + legacy label as Setup B
     sev = strip[strip.test_p.notna() & strip.dw_fro.notna()].copy()
     SP = sev[sev.s <= 64].copy()          # pre-registered primary region
     print("design 1008 runs: %d evaluated, %d diverged, %d missing; primary region "
@@ -3811,7 +3814,7 @@ else:
           "the DEAD label is a property of the data, not of the cut"
           % (100 * (p_ <= 1e-4).mean(), SP[SP.dead == 0].test_p.median(),
              100 * ((p_ > 1e-4) & (p_ < 0.01)).mean()))
-    from sklearn.metrics import roc_auc_score as _auc
+    _auc = roc_auc_score      # imported in Setup A
     print("fate AUCs on the primary region [cal]: dw_fro %.3f | dw_spec %.3f | "
           "fitted K %.3f — dose thresholds fate as well as the law itself; NOTE "
           "pooled AUCs saturate for BOTH norms, so this is evidence for A0, not "
@@ -4066,12 +4069,10 @@ block (cluster-robust Wald by cell). If the endpoint fully mediated, the HP bloc
 would be null."""))
 
 cells.append(code(r"""if HARV.exists():
-    from scipy.stats import chi2 as _chi2
-
-    def _cluster_wald(model, dat, names):
+    def _cluster_wald(model, dat, names, y):
         X_ = model.model.exog
         mu_ = model.predict()
-        u_ = (dat_y - mu_)[:, None] * X_
+        u_ = (y - mu_)[:, None] * X_
         meat = np.zeros((X_.shape[1], X_.shape[1]))
         for _, g_ in pd.DataFrame(u_, index=dat.index).groupby(dat.tag):
             v_ = g_.values.sum(axis=0)
@@ -4089,7 +4090,7 @@ cells.append(code(r"""if HARV.exists():
     for med, lab in (("ldw", "dw_fro"), ("lds", "dw_spec")):
         m0_ = smf.logit(f"dead ~ {med}", sv2).fit(disp=0, maxiter=300)
         m1_ = smf.logit(f"dead ~ {med} + lln + aln + rln", sv2).fit(disp=0, maxiter=300)
-        wst, wp = _cluster_wald(m1_, sv2, ["lln", "aln", "rln"])
+        wst, wp = _cluster_wald(m1_, sv2, ["lln", "aln", "rln"], dat_y)
         print("mediator %s: mediator-only pseudo-R² %.3f | +HP %.3f | residual HP "
               "coefs lr %+.2f α %+.2f r %+.2f | cluster Wald on HP block: p = %.1e"
               % (lab, m0_.prsquared, m1_.prsquared, m1_.params["lln"],

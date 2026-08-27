@@ -26,6 +26,9 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 # kind -> (run-dir filename, legacy flat subdir under analysis/)
 _KINDS = {
     "pref": ("pref_traj.json", "ckpt_pref_traj"),
@@ -245,6 +248,142 @@ def load_lineage(
         if t is not None:
             result[(tag, seed)] = t
     return result
+
+
+def _pref_points(run_dir: Path, prompt_set: str) -> tuple[list, list]:
+    """``(steps, p_target)`` from ``eval/pref_traj.json``, tolerating both point schemas.
+
+    A point's prob set is either the flat ``{"p_target": ...}`` (the 410m writer) or the
+    per-animal ``{animal: {"p_target": ...}}`` (the 160m strip writer); the animal-keyed form
+    is resolved through the file's own ``animal``/``animals`` field, so callers never branch
+    on file vintage. Points with no ``step`` or no `prompt_set` entry are dropped.
+    """
+    doc = json.loads((Path(run_dir) / "eval" / "pref_traj.json").read_text())
+    animals = doc.get("animals") or ([doc["animal"]] if doc.get("animal") else [])
+    steps, vals = [], []
+    for p in doc.get("points", []):
+        if p.get("step") is None or prompt_set not in p:
+            continue
+        t = p[prompt_set]
+        if "p_target" in t:
+            v = t["p_target"]
+        else:
+            a = next((a for a in animals if a in t), None)
+            if a is None:
+                continue
+            v = t[a]["p_target"]
+        steps.append(float(p["step"]))
+        vals.append(float(v))
+    return steps, vals
+
+
+def _kl_points(run_dir: Path) -> tuple[list, list]:
+    """``(steps, kl_base_adapted)`` from ``eval/pile_kl_traj.json``.
+
+    Points without a ``step`` are dropped. A point flagged ``nonfinite`` reads as
+    ``+inf`` (the diverged convention `run_evals` uses); a point that simply carries no
+    ``kl_base_adapted`` is skipped.
+    """
+    doc = json.loads((Path(run_dir) / "eval" / "pile_kl_traj.json").read_text())
+    steps, vals = [], []
+    for p in doc.get("points", []):
+        if p.get("step") is None:
+            continue
+        if p.get("nonfinite"):
+            v = float("inf")
+        elif "kl_base_adapted" in p:
+            v = float(p["kl_base_adapted"])
+        else:
+            continue
+        steps.append(float(p["step"]))
+        vals.append(v)
+    return steps, vals
+
+
+def endpoint_stats(run_dir, *, kl_cut: float | None = None,
+                   prompt_set: str = "test") -> dict:
+    """Where along training one run's trait peaked, and the Pile-KL there.
+
+    The shared core of the notebooks' ``traj_stats``: the trait trajectory's argmax gives
+    ``peak_step_frac`` (peak step / last step), ``peak_test``, ``end_test`` (the last point)
+    and ``overshoot`` (peak / end) -- the readout that says whether a run's trait decays after
+    an early peak.
+
+    Args:
+        run_dir: The run leaf (``.../{tag}/ftseed{S}``).
+        kl_cut: Integrity cut in nats. Only when given is ``kl_cross_step_frac`` computed --
+            the cut is always injected because the operative label has moved (trait prior ->
+            KL > 4 -> the anchored cross), so no cut may be hardcoded here.
+        prompt_set: Which prob set of ``pref_traj.json`` supplies the trait score.
+
+    Returns:
+        ``{peak_step_frac, peak_test, end_test, overshoot, n_ckpt}``, empty when the run has
+        no pref trajectory or no usable points. When ``eval/pile_kl_traj.json`` also exists,
+        plus ``kl_at_peak`` (interpolated onto the peak step) and ``kl_end_traj``; plus
+        ``kl_cross_step_frac`` (first step where ``kl > kl_cut``, ``NaN`` if never) when
+        `kl_cut` is given.
+    """
+    run_dir = Path(run_dir)
+    if not (run_dir / "eval" / "pref_traj.json").exists():
+        return {}
+    steps, vals = _pref_points(run_dir, prompt_set)
+    if not steps:
+        return {}
+    s = np.asarray(steps, dtype=float)
+    tp = np.asarray(vals, dtype=float)
+    i = int(np.nanargmax(tp))
+    out = {
+        "peak_step_frac": float(s[i] / s.max()),
+        "peak_test": float(tp[i]),
+        "end_test": float(tp[-1]),
+        "overshoot": float(tp[i] / max(tp[-1], 1e-9)),
+        "n_ckpt": len(steps),
+    }
+    if (run_dir / "eval" / "pile_kl_traj.json").exists():
+        ks, kl = _kl_points(run_dir)
+        if ks:
+            ka = np.asarray(kl, dtype=float)
+            kx = np.asarray(ks, dtype=float)
+            out["kl_at_peak"] = float(np.interp(s[i], kx, ka))
+            out["kl_end_traj"] = float(ka[-1])
+            if kl_cut is not None:
+                cross = np.where(ka > kl_cut)[0]
+                out["kl_cross_step_frac"] = (float(kx[cross[0]] / kx.max())
+                                             if len(cross) else float("nan"))
+    return out
+
+
+def pref_kl_pairs(run_dir, prompt_set: str = "test") -> pd.DataFrame:
+    """Step-aligned trait / Pile-KL frame for one run (the trajectory scatter's input).
+
+    The two trajectories are written by separate scripts and need not share a checkpoint
+    grid, so the KL series is interpolated onto the pref steps -- an inner join: pref steps
+    outside the KL series' support are dropped, never extrapolated.
+
+    Args:
+        run_dir: The run leaf (``.../{tag}/ftseed{S}``).
+        prompt_set: Which prob set supplies the trait score (both point schemas handled).
+
+    Returns:
+        Columns ``step``, ``test``, ``kl``; empty frame when either trajectory is missing or
+        has no usable points.
+    """
+    run_dir = Path(run_dir)
+    empty = pd.DataFrame(columns=["step", "test", "kl"])
+    if not ((run_dir / "eval" / "pref_traj.json").exists()
+            and (run_dir / "eval" / "pile_kl_traj.json").exists()):
+        return empty
+    steps, vals = _pref_points(run_dir, prompt_set)
+    ks, kl = _kl_points(run_dir)
+    if not steps or not ks:
+        return empty
+    s = np.asarray(steps, dtype=float)
+    t = np.asarray(vals, dtype=float)
+    # Honour the inner-join contract: np.interp would hold the endpoint values outside the
+    # KL series' support, so pref steps outside it are dropped rather than extrapolated.
+    keep = (s >= min(ks)) & (s <= max(ks))
+    s, t = s[keep], t[keep]
+    return pd.DataFrame({"step": s, "test": t, "kl": np.interp(s, ks, kl)})
 
 
 def source_counts(trajectories) -> dict[str, int]:

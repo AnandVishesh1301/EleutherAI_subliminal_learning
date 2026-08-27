@@ -75,7 +75,7 @@ from subliminal_learning.evaluation.preference_prob_io import (
     target_token_id,
 )
 from subliminal_learning.evaluation.prompt_sets import prompt_set_path
-from subliminal_learning.coherence.probe_io import mean_kl, pile_logprobs
+from subliminal_learning.coherence.probe_io import mean_ce, mean_kl, pile_logprobs
 
 app = typer.Typer(add_completion=False)
 
@@ -268,6 +268,7 @@ def main(
     # One base pass: the KL reference, and the p_target floor the retention metric needs.
     base = _load_base()
     base_logp = pile_logprobs(base, pool, device)
+    ce_base = mean_ce(base_logp, pool)
     base_pref = target_prob_and_rank_per_prompt(base, tok, device, prompts, target_id)
     p_target_base = float(np.mean([p for p, _ in base_pref.values()]))
     del base
@@ -344,6 +345,9 @@ def main(
         row["pile_kl_base_orig"] = mean_kl(base_logp, orig_logp)
         row["pile_kl_base_ablated"] = mean_kl(base_logp, abl_logp)
         row["pile_kl_orig_ablated"] = mean_kl(orig_logp, abl_logp)
+        row["delta_ce_orig"] = mean_ce(orig_logp, pool) - ce_base
+        row["delta_ce_ablated"] = mean_ce(abl_logp, pool) - ce_base
+        row["ce_base"] = ce_base
         del orig_logp, abl_logp          # GPU-resident (~3.3 GB each on pp1): free before the next cell
 
         # Harness check: the sweep's own stored eval, re-derived by this script's loader.

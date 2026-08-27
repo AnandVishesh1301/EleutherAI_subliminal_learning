@@ -309,7 +309,7 @@ def main(
         if condition == "numbers":
             # All students agree on the pool (validated above); resolve + verify once.
             numbers_path, subsample, numbers_subsample_seed = student_numbers_pool(
-                student_run_dirs[0]
+                student_run_dirs[0], output_root=output_root
             )
             # Guard against a missing / regenerated pool BEFORE loading any model.
             verify_student_numbers_pool(student_run_dirs[0], numbers_path)

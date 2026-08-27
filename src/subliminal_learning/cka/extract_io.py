@@ -13,6 +13,17 @@ import torch
 
 from subliminal_learning.models.residual import capture_raw_activations
 
+# Activation-capture basis of every CKA extraction: the shared raw-blocks hooks
+# (`models/residual.capture_raw_activations` — embedding + per-block RAW residuals, never
+# the post-final-LN slot). Every CKA artifact ever written used this basis (CKA never
+# moved in the 2026-08-10 steering/EAS slot migration), so the run identity includes the
+# key ONLY while this constant sits off the legacy value: nothing on disk invalidates
+# today, but any future basis change trips the gate as
+# ``activation_basis: <missing> != <new>`` instead of silently cache-hitting artifacts
+# extracted on the old basis.
+LEGACY_ACTIVATION_BASIS = "raw_blocks_v1"
+ACTIVATION_BASIS = LEGACY_ACTIVATION_BASIS
+
 
 def _neox_core(model):
     core = getattr(model, "gpt_neox", None)

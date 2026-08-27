@@ -229,7 +229,11 @@ def ensure_mps_daemon(policy: GpuPolicy) -> bool:
 
 
 def query_free_mem() -> dict[int, int]:
-    """GPU index -> free memory (MiB) via ``nvidia-smi`` (the only smi call; tests patch it)."""
+    """GPU index -> free memory (MiB) via ``nvidia-smi`` (the only smi call; tests patch it).
+
+    ``timeout``: these queries run inside the node-wide acquire flock — a wedged smi
+    without one stalled every worker thread on the node indefinitely.
+    """
     out = subprocess.run(
         [
             "nvidia-smi",
@@ -239,6 +243,7 @@ def query_free_mem() -> dict[int, int]:
         capture_output=True,
         text=True,
         check=True,
+        timeout=30,
     ).stdout
     free: dict[int, int] = {}
     for line in out.strip().splitlines():
@@ -258,6 +263,7 @@ def query_total_mem() -> dict[int, int]:
         capture_output=True,
         text=True,
         check=True,
+        timeout=30,
     ).stdout
     total: dict[int, int] = {}
     for line in out.strip().splitlines():
@@ -513,7 +519,14 @@ class GpuManager:
         for i in range(self.mem_checks):
             if i:
                 time.sleep(self.mem_interval_s)
-            if self.mem_query().get(g, 0) - reserved < mem_mib:
+            try:
+                free = self.mem_query().get(g, 0)
+            except (subprocess.SubprocessError, OSError, ValueError):
+                # A hung/broken smi (now bounded by the query timeout) denies THIS
+                # admission instead of raising through acquire while slot fds are held.
+                logger.warning("nvidia-smi free-memory query failed; denying admission on GPU {}", g)
+                return False
+            if free - reserved < mem_mib:
                 return False
         return True
 

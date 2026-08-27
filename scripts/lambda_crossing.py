@@ -39,7 +39,7 @@ def main(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_kl, pile_logprobs,
+        PROBE_POOL_PP1, build_probe_pool, mean_ce, mean_kl, pile_logprobs,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.evaluation.preference_prob_io import (
@@ -77,6 +77,7 @@ def main(
         pool = build_probe_pool(tok, PROBE_POOL_PP1)
         with torch.no_grad():
             base_logp = pile_logprobs(mdl, pool, device)
+            ce_base = mean_ce(base_logp, pool)
         w0, mods = {}, {}
         for name, m in mdl.named_modules():
             if (name.startswith("gpt_neox.layers.") and name.split(".")[-1] in
@@ -108,12 +109,16 @@ def main(
                         m = mods[mod]
                         m.weight.copy_(w0[mod] + torch.as_tensor(
                             lam * dw, dtype=m.weight.dtype, device=m.weight.device))
-                    kl = mean_kl(base_logp, pile_logprobs(mdl, pool, device))
+                    lp_ = pile_logprobs(mdl, pool, device)
+                    kl = mean_kl(base_logp, lp_)
+                    dce = mean_ce(lp_, pool) - ce_base
+                    del lp_
                     pref = target_prob_and_rank_per_prompt(mdl, tok, device, prompts, target_id)
                 with torch.no_grad():
                     for name, m in mods.items():
                         m.weight.copy_(w0[name])
                 recs.append(dict(run=str(rd), base=base_repo, lam=lam, pile_kl=float(kl),
+                                 delta_ce=float(dce), ce_base=float(ce_base),
                                  p_target=float(np.mean([p for p, _ in pref.values()]))))
                 typer.echo(f"{rd.parent.name}/{rd.name} λ={lam:g}: KL={kl:.3f}")
             with out.open("a") as f:

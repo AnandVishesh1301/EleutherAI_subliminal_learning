@@ -81,7 +81,9 @@ from subliminal_learning.analysis import adapter_decomp as ad
 from subliminal_learning.analysis import collapse_law as cl
 from subliminal_learning.analysis import plots as aplots
 from subliminal_learning.analysis import stats as astats
-from subliminal_learning.analysis.frames import parse_param_tag, read_json
+from subliminal_learning.analysis import labels
+from subliminal_learning.analysis.frames import load_base_prior, parse_param_tag
+from subliminal_learning.analysis.probe_cache import load_probe_cache
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 
 warnings.filterwarnings("ignore")
@@ -93,7 +95,6 @@ ANIMAL = "dog"
 KSTAR = cl.KSTAR_POOLED   # placement-era shared-band coordinate (7.87e-4), kept so this
                           # notebook's K/K* axis matches the band manifest; the WORKING
                           # anchor for new claims is cl.KSTAR_CALIBRATED (8.4e-4)
-DEAD_MARGIN = 3.0                             # settled prior-based dead margin: dead = prior / e^3
 DATASET = "ex10-20_prefix_n100k"
 
 # The top-5 distillability teacher HP configs (the ladder's teacher menu), best-first.
@@ -128,21 +129,20 @@ def krel(tag: str) -> float:
     return K_of(tag) / KSTAR
 
 
+# base_label -> unigram-anchor record key (the OPERATIVE dead cut is the per-receiver anchored
+# Pile-KL cross; see analysis.labels for the label doctrine).
+ANCHOR_KEY = {"pythia-160m": "pythia-160m (orig)"} | {b: f"pythia-160m-{b}" for b in SEED_BASES}
+CUT = labels.anchored_cuts(OUTPUT_ROOT, ANCHOR_KEY.values())
+
+
 def test_prior(base_label: str, animal: str = ANIMAL) -> float:
-    \"\"\"The base model's mean exact p(target) on the held-out test prompts (the DEAD reference).\"\"\"
-    f = OUTPUT_ROOT / "analysis" / f"base_eval_{BASE_SHORT[base_label]}_animal_preference_test.json"
-    return float(np.mean(read_json(f)[animal]["p_per_prompt"]))
-
-
-def dead_threshold(base_label: str, animal: str = ANIMAL) -> float:
-    \"\"\"Settled prior-based dead cut: the base's own test prior backed off by DEAD_MARGIN nats.\"\"\"
-    return test_prior(base_label, animal) * float(np.exp(-DEAD_MARGIN))
+    \"\"\"The base model's mean exact p(target) on the held-out test prompts (the transfer unit).\"\"\"
+    return load_base_prior(OUTPUT_ROOT, BASE_SHORT[base_label], animal)
 
 
 PRIOR = test_prior("pythia-160m")
-THRESH = dead_threshold("pythia-160m")
 print(f"K* = {KSTAR:.3g} | original test_prior p(dog) = {PRIOR:.4g} | "
-      f"dead threshold = prior/e^{DEAD_MARGIN:.0f} = {THRESH:.4g}")
+      f"anchored dead cut (orig receiver) = {CUT[ANCHOR_KEY['pythia-160m']]:.2f} nats on Pile-KL")
 """)
 
 # ------------------------------------------------------------------------------------------------
@@ -173,6 +173,15 @@ def load_arm(base_label: str, cells=None, epochs=20) -> pd.DataFrame:
         r = r[r.student_tag.isin(cells)].copy()
     r["K_rel"] = r.student_tag.map(krel)
     r["base_label"] = base_label
+    # OPERATIVE dead label: the receiver's anchored Pile-KL cut, joined from the probe cache.
+    # `dead` is float so a run with no probe record stays UNLABELLED (NaN), never "alive".
+    r["run_rel"] = [f"students/{ANIMAL}/{b}/teacher-pythia-160m/{t}_tseed1/{DATASET}/{tag}/ftseed{s}"
+                    for b, t, tag, s in zip(r.base, r.teacher_tag, r.student_tag, r.seed)]
+    pc = load_probe_cache(OUTPUT_ROOT, list(r.run_rel), refresh=True, pool_version="pp1")
+    r["kl"] = r.run_rel.map(dict(zip(pc.run_path, pc.kl))) if len(pc) else np.nan
+    r["dead"] = labels.label_dead_kl(r, CUT[ANCHOR_KEY[base_label]], kl_col="kl").astype(float)
+    # legacy trait cut — caveat: trait loss != integrity collapse; operative label = anchored KL (analysis.labels)
+    r["dead_trait_legacy"] = labels.label_dead_trait_legacy(r).astype(float)
     return r
 
 
@@ -194,29 +203,32 @@ print(f"ladder: {n_land}/{len(inv)} cells landed, {int(inv.n_runs.sum())} runs t
       f"({len(TEACHERS)} teachers x {n_land} cells); ftseed is 1 everywhere -> teacher is the only "
       "replication axis.")
 print(f"pending cells (draining queue): {sorted(inv[inv.status=='pending'].cell)}")
+print(f"anchored-KL coverage: {int(orig.kl.notna().sum())}/{len(orig)} runs have a pp1 probe record "
+      "(runs without one are UNLABELLED, not alive)")
 """)
 
 # ------------------------------------------------------------------------------------------------
 md(r"""
 ## 2. Fates
 
-**Dead** = test $p(\text{dog}) < \text{test\_prior}/e^{3}$, the settled prior-based threshold
-(`transfer_factors.prior_dead_thresholds` semantics: the base's own held-out test prior backed off
-3 nats). The reference is `analysis/base_eval_original_animal_preference_test.json` — the mean of
-the untrained `pythia-160m` per-prompt test $p(\text{dog})$, the same 50 prompts the student `test`
+**Dead** = the receiver's **unigram-anchored Pile-KL cut** (`analysis.labels.anchored_cut`, the
+operative integrity label): a run is dead when its pp1 excess-over-base Pile readout exceeds the
+point where the student's absolute Pile CE reaches the context-free unigram entropy. Runs without a
+probe record stay **unlabelled** (NaN), never "alive". The transfer reference plotted as the
+horizontal rule is `analysis/base_eval_original_animal_preference_test.json` — the mean of the
+untrained `pythia-160m` per-prompt test $p(\text{dog})$, the same 50 prompts the student `test`
 score uses.
 
 Row unit of the plot: one run (teacher $\times$ cell, ftseed1). x is $K/K^\ast$ (log), the two rank
-columns get distinct markers, colour distinguishes teacher; the horizontal rule is the dead
-threshold and the vertical rule is $K/K^\ast=1$.
+columns get distinct markers, colour distinguishes teacher; the horizontal rule is the base test
+prior and the vertical rule is $K/K^\ast=1$.
 """)
 code("""
 print(f"resolved test_prior p(dog) for pythia-160m = {PRIOR:.5g}")
-print(f"dead threshold = {PRIOR:.5g} / e^{DEAD_MARGIN:.0f} = {THRESH:.5g}")
+print(f"dead = anchored Pile-KL > {CUT[ANCHOR_KEY['pythia-160m']]:.2f} nats (operative label, set in load_arm)")
 
 orig = orig.assign(rank_col=orig.student_tag.map(
     {t: c for c, tags in LADDER.items() for t in tags}))
-orig["dead"] = orig.test.lt(THRESH).astype(int)
 
 fig, ax = plt.subplots(figsize=(8.2, 4.8))
 markers = {"r32a4": "o", "r8a32": "s"}
@@ -228,9 +240,8 @@ for t in TEACHERS:
             ax.scatter(sub.K_rel, sub.test.clip(lower=1e-4), s=95, marker=mk,
                        color=colors[t], edgecolor="k", lw=0.5,
                        label=f"{t.removeprefix('ep20_')} | {col}")
-ax.axhline(THRESH, color="#d03b3b", ls="--", lw=1.8)
-ax.text(orig.K_rel.min(), THRESH * 1.15, f"dead = prior/e^3 = {THRESH:.2g}",
-        color="#d03b3b", fontsize=8, va="bottom")
+ax.axhline(PRIOR, color="0.35", lw=1.2)
+ax.text(orig.K_rel.min(), PRIOR * 1.15, f"base test prior = {PRIOR:.2g}", color="0.35", fontsize=8, va="bottom")
 ax.axvline(1.0, color="0.35", ls=":", lw=1.8)
 ax.text(1.02, 1e-3, "K/K* = 1", rotation=90, color="0.35", fontsize=8, va="bottom")
 ax.set(xscale="log", yscale="log", xlabel="K / K*  (log)", ylabel="test p(dog)  (log, floored 1e-4)",
@@ -239,7 +250,7 @@ ax.set(xscale="log", yscale="log", xlabel="K / K*  (log)", ylabel="test p(dog)  
 aplots.right_legend(ax, title="teacher | rank col", fontsize=7)
 plt.show()
 
-print(f"deaths: {int(orig.dead.sum())}/{len(orig)} runs; "
+print(f"deaths (anchored KL): {int(orig.dead.sum())}/{int(orig.dead.notna().sum())} labelled runs; "
       f"below K/K*=1: {orig[orig.K_rel<=1].dead.mean():.0%} dead ({len(orig[orig.K_rel<=1])} runs); "
       f"above K/K*=1: {orig[orig.K_rel>1].dead.mean():.0%} dead ({len(orig[orig.K_rel>1])} runs)")
 """)
@@ -301,9 +312,9 @@ md(r"""
 ## 4. Cliff comparison (the headline)
 
 Does the same-model cliff sit at the same $K/K^\ast$ as the pooled cross-init seed-arm boundary,
-under **one** threshold definition? Both sides use the settled prior-based dead cut — each arm
-against **its own** base test prior (original vs the six seed bases), so the comparison is
-threshold-consistent, not threshold-confounded.
+under **one** threshold definition? Both sides use the operative integrity label — each arm
+against **its own** receiver's unigram-anchored Pile-KL cut (original vs the six seed bases), so the
+comparison is threshold-consistent, not threshold-confounded.
 
 **Matched teachers.** The seed-arm curves reuse the *same five teacher HP configs* as the
 same-model ladder, so the teacher menu (which shifts the effective $K^\ast$) is held fixed across
@@ -316,8 +327,7 @@ the death-rate table: one run; `death_rate` is the fraction dead in the bin.
 code("""
 # Pooled seed-arm runs: the same 5 teachers into all 6 seed bases, every ep20 cell that landed.
 seed_runs = pd.concat([load_arm(b) for b in SEED_BASES], ignore_index=True)
-seed_runs["thresh"] = seed_runs.base_label.map({b: dead_threshold(b) for b in SEED_BASES})
-seed_runs["dead"] = (seed_runs.test < seed_runs.thresh).astype(int)
+print(f"seed arms: anchored-KL coverage {int(seed_runs.kl.notna().sum())}/{len(seed_runs)} runs")
 
 # Shared K/K* bins across a range both arms populate.
 EDGES = np.array([0.2, 0.4, 0.55, 0.7, 0.85, 1.0, 1.15, 1.3, 1.6, 2.2, 3.5, 6.5])
@@ -344,7 +354,8 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 5.0))
 for b in SEED_BASES:
     dr, n = death_by_bin(seed_runs[seed_runs.base_label == b])
     xs = [MID[k] for k in dr.index]
-    ax1.plot(xs, dr.values, "-o", ms=4, lw=1.0, alpha=0.6, label=f"{b} (n={int(n.sum())})")
+    ax1.plot(xs, dr.values, "-o", ms=4, lw=1.0, alpha=0.6, color=aplots.BASE_COLORS[b],
+             label=f"{b} (n={int(n.sum())})")
 dr_pool, n_pool = death_by_bin(seed_runs)
 ax1.plot([MID[k] for k in dr_pool.index], dr_pool.values, "-o", color="k", lw=2.6, ms=8,
          label=f"seed arms pooled (n={int(n_pool.sum())})")
@@ -382,7 +393,7 @@ md(r"""
 ### 4b. Verdict
 
 Locate each cliff as the $K/K^\ast$ where the death rate crosses 0.5 (linear interpolation between
-the bracketing bins), on the same bins and the same prior-based threshold. The estimate is printed
+the bracketing bins), on the same bins and the same anchored integrity label. The estimate is printed
 with the bracketing bins so a thin same-model bin is not over-read.
 """)
 code("""
@@ -429,7 +440,8 @@ md(r"""
 
 Claim to verify from the data (not assert): the legacy original ep20 suite
 (`ep20_lr1e-4_r8a32`, `ep20_lr4e-4_r32a4`, `ep20_lr4e-4_r16a4`, `ep20_lr3e-4_r16a8`) across ~102
-teachers has **zero deaths** up to $K/K^\ast\approx 0.97$, under the settled prior threshold. Row
+teachers has **zero deaths** up to $K/K^\ast\approx 0.97$, under the legacy trait cut (`collapse_law.DEAD_SEED`;
+trait loss is not integrity collapse — the operative label is the anchored Pile-KL cut, pending probes here). Row
 unit: one run. We load every teacher lineage (all ~102, not just the top-5) at these four cells and
 count deaths. The std-recipe epoch ladder is summarised in one row as further below-boundary context.
 """)
@@ -443,7 +455,9 @@ _, legacy = cl.load_law_runs(OUTPUT_ROOT, animal=ANIMAL, numbers_base="pythia-16
 legacy = legacy.rename(columns={"family": "teacher"})
 legacy = legacy[legacy.student_tag.isin(LEGACY_CELLS)].copy()
 legacy["K_rel"] = legacy.student_tag.map(krel)
-legacy["dead"] = legacy.test.lt(THRESH).astype(int)
+# legacy trait cut — caveat: trait loss != integrity collapse; operative label = anchored KL (analysis.labels)
+# TODO(anchored): wire Pile-KL when probes land for the ~102-teacher legacy suite
+legacy["dead"] = labels.label_dead_trait_legacy(legacy).astype(float)
 
 leg_tab = (legacy.groupby("student_tag")
            .agg(K_rel=("K_rel", "first"), n_runs=("test", "size"), n_teachers=("teacher", "nunique"),
@@ -453,7 +467,7 @@ display(leg_tab)
 below = legacy[legacy.K_rel <= 0.97]
 print(f"legacy suite: {len(legacy)} runs over {legacy.teacher.nunique()} teachers x "
       f"{legacy.student_tag.nunique()} cells; K/K* {legacy.K_rel.min():.2f}-{legacy.K_rel.max():.2f}")
-print(f"deaths at K/K* <= 0.97 (threshold {THRESH:.2g}): {int(below.dead.sum())} of {len(below)} runs "
+print(f"trait-dead at K/K* <= 0.97 (legacy trait cut {cl.DEAD_SEED:.2g}): {int(below.dead.sum())} of {len(below)} runs "
       f"-> claim {'CONFIRMED' if below.dead.sum() == 0 else 'FALSIFIED'}")
 
 # Std-recipe epoch ladder, one summary row per cell (all lr1e-4_r8a32, deep below the boundary).
@@ -467,7 +481,7 @@ for cell in STD_EPOCH_CELLS:
     if len(s):
         std_rows.append({"cell": cell, "K/K*": round(krel(cell), 3), "n_runs": len(s),
                          "n_teachers": int(s.family.nunique()),
-                         "deaths": int(s.test.lt(THRESH).sum()), "mean_p": round(s.test.mean(), 4)})
+                         "deaths": int(s.test.lt(cl.DEAD_SEED).sum()), "mean_p": round(s.test.mean(), 4)})
 display(pd.DataFrame(std_rows).set_index("cell"))
 print("std-recipe epoch ladder is deep below the boundary (all cells lr1e-4_r8a32, K/K* << 1) and "
       "carries no deaths — pure below-boundary context.")
@@ -478,9 +492,9 @@ md(r"""
 ## 6. Reading
 
 - The same-model ep20 ladder places a collapse cliff on the **original** init; §2 shows the two
-  rank columns crossing the prior-based dead cut as $K/K^\ast \to 1$.
+  rank columns crossing the anchored Pile-KL dead cut as $K/K^\ast \to 1$.
 - §4's verdict compares that cliff to the pooled cross-init seed-arm boundary **under one shared
-  prior-based threshold and the same five teachers** — the like-for-like test of whether $K^\ast$
+  anchored integrity label and the same five teachers** — the like-for-like test of whether $K^\ast$
   is init-agnostic on the original init.
 - §5 verifies from the data that the legacy 4-cell $\times$ ~102-teacher suite carries zero deaths
   below the boundary, so the ladder's deaths are a boundary phenomenon, not a background rate.

@@ -67,9 +67,13 @@ $P_a$ (`run_logs/ds1_top10_test_priors.json`): the untuned `pythia-160m-data-see
 $p(a)$ on the same prompts. Ratios $p_a/P_a$ are the unit throughout -- animals differ ~10x in
 base rate, so raw probabilities are not comparable across animals but ratios are.
 
-**The dead cut.** The settled prior-based threshold, $P_{\texttt{dog}}/e^{3}$ (see the
-collapse-law line): a run whose dog probability falls that far below the base's own prior has
-lost the trait channel entirely.
+**The dead cut.** The operative integrity label: a run is dead when its Pile readout exceeds the
+**unigram-anchored cut** for the receiving base (`analysis.labels.anchored_cut` on
+`pythia-160m-data-seed1`) -- the point where the student's absolute Pile CE reaches the
+context-free unigram entropy. This *replaces* the older prior-based trait threshold
+$P_{\texttt{dog}}/e^{3}$: losing the dog channel and losing model integrity are different events
+(the trait outlives collapse), and only the second is collapse. Runs with no Pile record are left
+unlabelled rather than counted alive.
 """)
 
 md("## 0. Setup")
@@ -84,8 +88,10 @@ import numpy as np
 import pandas as pd
 
 from subliminal_learning.analysis import collapse_law as cl
+from subliminal_learning.analysis import labels
 from subliminal_learning.analysis import plots as aplots
 from subliminal_learning.analysis import trajectories as atraj
+from subliminal_learning.analysis.run_evals import load_run_evals
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 
 warnings.filterwarnings("ignore")
@@ -97,10 +103,10 @@ TARGET = "dog"                       # the teacher's trait
 KSTAR = cl.KSTAR_POOLED   # placement-era shared-band coordinate (7.87e-4), kept so this
                           # notebook's K/K* axis matches the band manifest; the WORKING
                           # anchor for new claims is cl.KSTAR_CALIBRATED (8.4e-4)
-DEAD_MARGIN = 3.0                    # settled prior-based dead margin: dead = prior / e^3
 TRANSFER_CUT = 0.10                  # p(dog) above which a run is called 'transferring'
 
-LINEAGE = (OUTPUT_ROOT / "students" / TARGET / "pythia-160m-data-seed1"
+STUDENT_BASE = "pythia-160m-data-seed1"          # the receiving init -- what the dead cut keys on
+LINEAGE = (OUTPUT_ROOT / "students" / TARGET / STUDENT_BASE
            / "teacher-pythia-160m" / "ep2_lr5e-4_r32a64_tseed1" / "ex10-20_prefix_n100k")
 REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
 PRIORS_FILE = ROOT / "run_logs" / "ds1_top10_test_priors.json"
@@ -109,11 +115,15 @@ _p = json.loads(PRIORS_FILE.read_text())
 PRIORS = _p["priors"]
 ANIMALS = list(PRIORS)                                  # dog first, then the nine others
 OTHERS = [a for a in ANIMALS if a != TARGET]
-THRESH = PRIORS[TARGET] * float(np.exp(-DEAD_MARGIN))
+
+# The OPERATIVE dead label: the receiving base's unigram-anchored Pile-KL cut (analysis.labels).
+# This REPLACES the old prior/e^3 trait rule -- that rule labelled loss of the dog channel, which
+# is a different event from integrity collapse (the trait outlives collapse by ~2.3x in dose).
+DEAD_CUT = labels.anchored_cut(OUTPUT_ROOT, STUDENT_BASE)
 
 print(f"priors base={_p['base']} set={_p['prompt_set']} n_prompts={_p['n_prompts']}")
 print(f"K* = {KSTAR:.3g} | ds1 test prior p(dog) = {PRIORS[TARGET]:.4g} | "
-      f"dead threshold = prior/e^{DEAD_MARGIN:.0f} = {THRESH:.4g} | "
+      f"dead = pile KL > anchored cut for {STUDENT_BASE} = {DEAD_CUT:.4g} nats | "
       f"transferring cut = p(dog) > {TRANSFER_CUT}")
 """)
 
@@ -151,18 +161,34 @@ for (tag, seed), t in trajs.items():
     rows.append(row)
 runs = pd.DataFrame(rows)
 
-# Fate groups by the DOG outcome only; the other nine animals are never used to define groups.
-def _group(p_dog: float) -> str:
-    if p_dog > TRANSFER_CUT:
-        return "transferring"
-    return "dead" if p_dog < THRESH else "weak"
+# The integrity readout, joined per run from the run-dir Pile probe records: `dead` is the
+# OPERATIVE anchored-KL label, NaN where no probe record has landed (an unprobed run is
+# UNLABELLED, never assumed alive).
+ev = load_run_evals(OUTPUT_ROOT, LINEAGE, cells=sorted(runs.tag.unique()), kl_source="probe")
+runs = runs.merge(ev[["student_tag", "ftseed", "kl"]]
+                  .rename(columns={"student_tag": "tag", "ftseed": "seed"}),
+                  on=["tag", "seed"], how="left")
+runs["dead"] = labels.label_dead_kl(runs, DEAD_CUT, kl_col="kl")
 
-runs["group"] = runs[TARGET].map(_group)
+# Fate groups: `transferring` is still the DOG outcome alone (unchanged cut), but `dead` vs
+# `weak` is now decided by INTEGRITY (anchored Pile-KL), not by the dog trait falling below
+# prior/e^3. A run with no probe record has no fate -- NaN, not "weak".
+def _group(r) -> object:
+    if r[TARGET] > TRANSFER_CUT:
+        return "transferring"
+    if r["dead"] is True:
+        return "dead"
+    return "weak" if r["dead"] is False else np.nan
+
+runs["group"] = runs.apply(_group, axis=1)
 GROUPS = ["transferring", "weak", "dead"]
 
 print(f"\\nendpoint rows: {len(runs)} runs | all scored on {sorted(runs.animals.unique())} animals "
       f"| points/run {sorted(runs.n_points.unique())}")
-print("\\ngroup sizes (row unit = one run = cell x ftseed; grouping uses p(dog) ONLY):")
+print(f"probe coverage: {int(runs.kl.notna().sum())}/{len(runs)} runs carry a Pile-KL record; "
+      f"{int(runs.group.isna().sum())} runs are UNLABELLED (no record, and not transferring)")
+print("\\ngroup sizes (row unit = one run = cell x ftseed; 'transferring' uses p(dog), "
+      "'dead' vs 'weak' uses the anchored Pile-KL cut):")
 display(runs.group.value_counts().reindex(GROUPS).rename("n_runs").to_frame())
 """)
 
@@ -211,13 +237,15 @@ print(f"dog is the highest-prior animal ({PRIORS[TARGET]:.4g}); the nine others 
 md(r"""
 ## 2. Endpoint specificity table
 
-Runs are split by their **dog** outcome only:
+Runs are split by their **dog** outcome for `transferring`, and by **integrity** (the anchored
+Pile-KL cut $\Delta_{\text{cross}}$ for the receiving base) for `dead` vs `weak`:
 
 | group | rule | reading |
 |---|---|---|
 | `transferring` | $p_{\texttt{dog}} > 0.10$ | the trait clearly took |
-| `weak` | $P_{\texttt{dog}}/e^{3} \le p_{\texttt{dog}} \le 0.10$ | alive but modest |
-| `dead` | $p_{\texttt{dog}} < P_{\texttt{dog}}/e^{3}$ | trait channel lost |
+| `weak` | not transferring, $\mathrm{KL} \le \Delta_{\text{cross}}$ | intact but modest transfer |
+| `dead` | $\mathrm{KL} > \Delta_{\text{cross}}$ | integrity collapse |
+| *(unlabelled)* | no Pile record | no fate assigned -- **not** counted alive |
 
 For each group and animal: median endpoint $p_a$, the ratio $p_a/P_a$, the **dog-mass
 renormalized** ratio (median of $p_a/(1-p_{\texttt{dog}})$ over $P_a/(1-P_{\texttt{dog}})$ --
@@ -274,7 +302,9 @@ animal winning in a non-trivial share of runs. Row unit = one run.
 """)
 code("""
 ratio_cols = runs[ANIMALS].div(pd.Series(PRIORS), axis=1)
-alive = runs.group.ne("dead") & ratio_cols.max(axis=1).gt(0)
+# ALIVE means positively labelled non-dead: an unlabelled run (no probe record, group NaN) is
+# excluded rather than counted alive.
+alive = runs.group.isin(["transferring", "weak"]) & ratio_cols.max(axis=1).gt(0)
 winner = ratio_cols[alive].idxmax(axis=1)
 win_tbl = (winner.value_counts().rename("n_runs_won").to_frame()
            .assign(share=lambda d: (d.n_runs_won / len(winner)).round(3)))
@@ -292,12 +322,15 @@ md(r"""
 The specificity picture across the whole dose axis: **dog** prominent, the nine other animals as
 thin small-marker series. Row unit = one cell (median over that cell's ftseeds); x = $K/K^\ast$
 on a log axis; horizontal line at $p/P=1$ (no change from the base), vertical line at the
-collapse boundary $K/K^\ast=1$. The dead threshold is drawn in dog units
-($p/P = e^{-3}$) since it is defined on dog.
+collapse boundary $K/K^\ast=1$. No dead threshold is drawn: the operative dead label lives on the
+Pile-KL axis (the anchored cut), not on this trait-ratio axis, so there is no honest horizontal
+rule for it here.
 """)
 code("""
 cellmed = runs.groupby("tag").agg({**{a: "median" for a in ANIMALS}, "K_rel": "first"}).reset_index()
-FLOOR = 1e-3  # log-axis floor so exactly-zero (fully collapsed) cells stay visible
+# Notebook-specific display constant, not a label: a log-axis floor so exactly-zero (fully
+# collapsed) cells stay on the plot instead of dropping off the bottom.
+FLOOR = 1e-3
 
 fig, ax = plt.subplots(figsize=(10.5, 6))
 for a in OTHERS:
@@ -308,12 +341,9 @@ ax.plot(cellmed.K_rel, y_dog, "o", ms=9, color="tab:red", alpha=0.9,
         markeredgecolor="black", markeredgewidth=0.4, label="dog (teacher trait)", zorder=5)
 ax.axhline(1.0, color="0.35", lw=1.2, ls="--")
 ax.axvline(1.0, color="tab:purple", lw=1.4, ls="-.")
-ax.axhline(float(np.exp(-DEAD_MARGIN)), color="tab:brown", lw=1.1, ls=":")
 ax.text(cellmed.K_rel.min(), 1.08, "p = prior", color="0.35", fontsize=9, va="bottom")
 ax.text(1.05, ax.get_ylim()[0], "K* boundary", color="tab:purple", fontsize=9, rotation=90,
         va="bottom")
-ax.text(cellmed.K_rel.min(), np.exp(-DEAD_MARGIN) * 1.06, "dead cut (dog)", color="tab:brown",
-        fontsize=9, va="bottom")
 ax.set_xscale("log")
 ax.set_yscale("log")
 ax.set_xlabel(r"$K/K^\\ast$  (relative dose; boundary at 1)")
@@ -444,7 +474,8 @@ print(f"1. SPECIFICITY. In the {n_tr} transferring runs the dog probability sits
       f"{float(tt.loc[tt.animal == TARGET, 'p/prior'].iloc[0]):.1f}x the ds1 base prior, while "
       f"all nine other animals sit at {tt_oth['p/prior'].min():.2f}-{tt_oth['p/prior'].max():.2f}x "
       f"-- i.e. at or BELOW their priors. The teacher moves its own trait and nothing else.")
-print(f"\\n2. NO TRAIT SWAP IN COLLAPSE. Across the {n_dead} dead runs the median endpoint "
+print(f"\\n2. NO TRAIT SWAP IN COLLAPSE. Across the {n_dead} runs labelled dead by the anchored "
+      f"Pile-KL cut the median endpoint "
       f"probability is {dd['median p'].max():.3g} for EVERY one of the ten animals, and "
       f"{int(dd['n > 2x prior'].sum())} dead runs exceed 2x prior on any animal. Collapse "
       f"destroys the animal channel globally; it does not hand the trait to a different animal.")

@@ -586,6 +586,40 @@ def test_student_numbers_pool_missing_dir_raises(tmp_path):
         student_numbers_pool(student_run)
 
 
+def test_student_numbers_pool_reroots_stale_absolute_dir(tmp_path):
+    """A manifest recorded under an old storage root (pre-migration absolute path) must
+    re-resolve under TODAY's output_root when given one; a recorded dir that still
+    exists is returned untouched."""
+    from subliminal_learning.cka.layout import student_numbers_pool
+
+    output_root = tmp_path / "outputs"
+    live_dir = output_root / "numbers/dog/pythia-160m/tag/ftseed1/ex/modes/prefix"
+    live_dir.mkdir(parents=True)
+    (live_dir / "filtered.jsonl").write_text("{}\n")
+    stale = "/mnt/dead-ssd/soar/angela/outputs/numbers/dog/pythia-160m/tag/ftseed1/ex/modes/prefix"
+    student_run = tmp_path / "students/dog/pythia-160m/tc/hp/ftseed2"
+    _write_student_manifest(
+        student_run,
+        {"source": "teacher", "number_dataset_dir": stale,
+         "subsample_size": 10000, "subsample_seed": 42},
+    )
+    # Without output_root: the recorded (dead) path comes back verbatim.
+    pool, _, _ = student_numbers_pool(student_run)
+    assert pool == Path(stale) / "filtered.jsonl"
+    # With output_root: re-rooted onto the live tree.
+    pool, size, seed = student_numbers_pool(student_run, output_root=output_root)
+    assert pool == live_dir / "filtered.jsonl" and pool.exists()
+    assert size == 10000 and seed == 42
+    # A recorded dir that still exists wins over re-rooting.
+    _write_student_manifest(
+        student_run,
+        {"source": "teacher", "number_dataset_dir": str(live_dir),
+         "subsample_size": 10000, "subsample_seed": 42},
+    )
+    pool, _, _ = student_numbers_pool(student_run, output_root=tmp_path / "elsewhere")
+    assert pool == live_dir / "filtered.jsonl"
+
+
 def _make_pool_file(tmp_path, text="a\nb\n"):
     from subliminal_learning.utils.io import file_sha256
 

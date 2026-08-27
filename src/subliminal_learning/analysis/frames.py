@@ -679,3 +679,118 @@ def cheapest_specific(
         df, target, controls=controls, ctrl_max=ctrl_max, rank_decimals=rank_decimals
     )
     return None if ranked.empty else ranked.iloc[0]
+
+
+def read_jsonl(path) -> list[dict]:
+    """Parse a JSON-lines file into a list of dicts (blank lines skipped).
+
+    Args:
+        path: Path to the ``.jsonl`` file.
+
+    Returns:
+        One parsed object per non-blank line, in file order.
+    """
+    return [json.loads(ln) for ln in Path(path).read_text().splitlines() if ln.strip()]
+
+
+def read_cell_manifest(path) -> list[str]:
+    """Student tags of a ``run_logs/`` campaign manifest, whatever shape it was written in.
+
+    The manifests accumulated four shapes as campaigns were added, and every notebook grew its
+    own accessor for the one it happened to read. The shapes, in resolution order:
+
+    - ``{"cells": [...]}`` -- elements are tags, or dicts carrying ``student_tag``/``tag``
+      (focus20 / core30 / bandext126).
+    - ``{"cells": {tag: seeds}}`` -- a registry mapping; the keys are the tags (p410m strips).
+    - ``{"rows": [{...}]}`` -- row dicts carrying ``student_tag``/``tag``.
+    - ``{"param_tags": [...]}`` -- a bare tag list (teacher-config manifests).
+    - A ``.jsonl`` of ``{"key": ...}`` job rows -- the key's ``|``-parts are *not* interpreted
+      here (their layout is per queue); use `read_queue_jobs` for those.
+
+    Args:
+        path: Path to the manifest (``.json`` or ``.jsonl``).
+
+    Returns:
+        The student tags, in manifest order (deduplicated is *not* applied -- a manifest that
+        repeats a cell says so).
+
+    Raises:
+        ValueError: When the file matches none of the shapes above. Guessing here would let a
+            new manifest silently analyse zero cells.
+    """
+    path = Path(path)
+    if path.suffix == ".jsonl":
+        rows = read_jsonl(path)
+        if rows and all("key" in r for r in rows):
+            return [r["key"] for r in rows]
+        raise ValueError(f"unrecognized jsonl manifest shape: {path}")
+
+    doc = read_json(path)
+    if isinstance(doc, list):
+        entries = doc
+    elif isinstance(doc.get("cells"), dict):
+        return list(doc["cells"])
+    elif isinstance(doc.get("cells"), list):
+        entries = doc["cells"]
+    elif isinstance(doc.get("rows"), list):
+        entries = doc["rows"]
+    elif isinstance(doc.get("param_tags"), list):
+        entries = doc["param_tags"]
+    else:
+        raise ValueError(
+            f"unrecognized cell-manifest shape: {path} (top-level keys: {sorted(doc)})"
+        )
+
+    tags = []
+    for e in entries:
+        if isinstance(e, str):
+            tags.append(e)
+            continue
+        tag = e.get("student_tag", e.get("tag")) if isinstance(e, dict) else None
+        if tag is None:
+            raise ValueError(f"manifest entry has no student_tag/tag: {path}: {e!r}")
+        tags.append(tag)
+    return tags
+
+
+def read_queue_jobs(jobs_jsonl_path) -> list[dict]:
+    """The rows of a jobq queue's ``jobs.jsonl`` (each carries a ``"key"``).
+
+    The key is a ``|``-joined tuple whose *layout differs per queue* (teacher / cell / seed in
+    one order for the strips, another for the seed2seed queues), so this returns the rows as
+    parsed and leaves the split to the call site -- baking positions in here would silently
+    mis-key any queue built to a different layout.
+
+    Args:
+        jobs_jsonl_path: Path to ``{queue}/jobs.jsonl``.
+
+    Returns:
+        The parsed job rows, in queue order.
+    """
+    return read_jsonl(jobs_jsonl_path)
+
+
+def load_base_prior(output_root, base_short: str, animal: str) -> float:
+    """A base model's mean exact ``p(animal)`` on the held-out test prompts.
+
+    The DEAD reference every transfer number is divided by: the mean over prompts of
+    ``analysis/base_eval_{base_short}_animal_preference_test.json`` -> ``[animal]
+    ["p_per_prompt"]``. `base_short` is the short base label used in that filename
+    (``original``, ``ds1``, ``ws1``, ...), not the HF model id.
+
+    Args:
+        output_root: ``paths.output_root``.
+        base_short: Short base label embedded in the artifact's filename.
+        animal: Trait animal.
+
+    Returns:
+        The mean per-prompt probability.
+
+    Raises:
+        KeyError: When `animal` is absent, listing the animals the file does carry.
+    """
+    path = Path(output_root) / "analysis" / f"base_eval_{base_short}_animal_preference_test.json"
+    doc = read_json(path)
+    if animal not in doc:
+        raise KeyError(f"{animal!r} not in {path} (available: {sorted(doc)})")
+    return float(np.mean(doc[animal]["p_per_prompt"]))

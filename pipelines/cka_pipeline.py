@@ -34,6 +34,8 @@ import torch
 from loguru import logger
 
 from subliminal_learning.cka.extract_io import (
+    ACTIVATION_BASIS,
+    LEGACY_ACTIVATION_BASIS,
     fit_pcs,
     gather_position_rows,
     layer_activations,
@@ -326,6 +328,11 @@ def _run_identity(
         # to what every EXISTING manifest stored. Adding the key unconditionally would
         # make every completed run on disk read as identity drift and trip the gate.
         **({"procrustes": True} if cfg.procrustes else {}),
+        # Same only-present-when-non-default pattern: the basis stamp costs nothing
+        # today (every stored artifact is on the legacy raw-blocks basis) but a future
+        # capture change surfaces as identity drift instead of a silent stale-basis hit.
+        **({"activation_basis": ACTIVATION_BASIS}
+           if ACTIVATION_BASIS != LEGACY_ACTIVATION_BASIS else {}),
     }
 
 

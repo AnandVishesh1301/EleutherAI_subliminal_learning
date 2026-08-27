@@ -140,18 +140,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import yaml
 from scipy import stats
 
-REPO = Path.cwd() if (Path.cwd() / "configs").exists() else Path.cwd().parent
-import sys
-sys.path.insert(0, str(REPO / "src"))
 from subliminal_learning.analysis import collapse_law as cl
+from subliminal_learning.analysis import labels
+from subliminal_learning.analysis import plots as aplots
+from subliminal_learning.analysis import stats as astats
+from subliminal_learning.analysis.frames import parse_param_tag, summary_set_block
 from subliminal_learning.analysis.plots import compare_table, math_label
+from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 from subliminal_learning.analysis.transfer_factors import load_focus20_design
 
-from subliminal_learning.config import resolve_output_root
-OUTPUT_ROOT = resolve_output_root()
+REPO, OUTPUT_ROOT = bootstrap()
 AN = OUTPUT_ROOT / "analysis"
 
 # Law constants come from the package (single source): exponents cl.B_LAW/C_LAW, the ds1
@@ -161,17 +161,20 @@ B_DESIGN, C_DESIGN = cl.B_LAW, cl.C_LAW
 KSTAR_DS1, KSTAR_WS1 = cl.KSTAR_DS1_DESIGN, 6.91e-4
 KSTAR_POOLED = cl.KSTAR_POOLED   # band-ext shared anchor (geo-mean of the fittable arms)
 BASE_PRIOR = 0.0133              # untrained ds1 base p(dog) on animal_preference_test
+# Legacy trait-side DEAD cuts, values preserved: 0.005 for the six-arm law-* fits, 0.01 for
+# the ds1 strip / intervention sections (each section's own historical threshold).
+DEAD_TRAIT_SIXARM, DEAD_TRAIT_DS1 = 0.005, 0.01
 
 def K_of(df, b=B_DESIGN, c=C_DESIGN):
     return cl.K_of(df["lr"], df["alpha"], df["rank"], b=b, c=c)
 
 # Fixed semantic colors (Okabe–Ito, CVD-safe): identity never re-assigned mid-notebook.
+# Kept local: these Okabe–Ito hues differ from aplots.C_ALIVE/C_DEAD (#4c78a8/#d03b3b).
 C_ALIVE, C_DEAD, C_DIV = "#0072B2", "#D55E00", "#000000"
 C_FRO, C_SPEC = "#009E73", "#CC79A7"
 ARM_COLORS = ["#0072B2", "#56B4E9", "#009E73", "#E69F00", "#D55E00", "#CC79A7"]
-plt.rcParams.update({"figure.dpi": 110, "axes.grid": True, "grid.alpha": 0.25,
-                     "axes.spines.top": False, "axes.spines.right": False,
-                     "legend.frameon": False})
+set_plot_style(dpi=110, grid_alpha=0.25, hide_spines=True)
+plt.rcParams.update({"legend.frameon": False})   # the one key set_plot_style does not set
 warnings.filterwarnings("ignore", category=FutureWarning)
 print("output root:", OUTPUT_ROOT)"""))
 
@@ -197,8 +200,10 @@ below any base rate, i.e. the generic answer distribution itself is destroyed, n
 just the trait diluted). The trough between the modes is nearly empty, which is what
 makes a binary fate label meaningful at all.
 
-**DEAD is defined per-run**: a run is dead iff its test p_target falls below a cut
-placed in that trough. The cut is a *convention with a validity condition*, and this
+**DEAD is defined per-run.** The operative label is the per-receiver unigram-anchored
+Pile-KL cut Δ_cross (`analysis.labels.anchored_cut`); the trait-side rule described in the rest
+of this subsection — a run is dead iff its test p_target falls below a cut placed in that trough —
+is the declared-era label, kept here because its validity condition is the point. The cut is a *convention with a validity condition*, and this
 is the program's first big trap (§9.1 of `top20_krungs_ds1.ipynb`, quantified across
 10 arms in `collapse_campaigns_k_alpha_rank.ipynb` §4b): **the live mode's location
 is arm-specific** (it moves 5.7× across arms — dog data-seeds sit at 0.03–0.05, dog
@@ -213,7 +218,10 @@ Below: the per-run log₁₀ p histograms of the six `law-*` arms, recomputed fr
 
 cells.append(code(r"""# Load the six law-campaign arms from disk (one preference_summary.json per cell).
 law_cells, law_runs = cl.load_law_runs(OUTPUT_ROOT)
-law_runs = cl.label_collapse(law_runs, dead_seed=0.005)   # settled cross-arm cut
+# legacy trait cut — caveat: trait loss ≠ integrity collapse; operative label = anchored KL (analysis.labels)
+law_runs["collapsed"] = (labels.label_dead_trait_legacy(law_runs, col="test",
+                                                        cut=DEAD_TRAIT_SIXARM)
+                         .fillna(False).astype(int))   # settled cross-arm cut
 print(f"law-* campaign: {law_runs.lineage.nunique()} arms, "
       f"{law_runs.groupby('lineage').student_tag.nunique().to_dict()} cells/arm, "
       f"{len(law_runs)} seed-runs (ep20 only, pool ex10-20_prefix_n100k)")
@@ -341,15 +349,10 @@ fit_df = pd.DataFrame({
           "n_cells": f.n_cells, "n_runs": f.n_runs, "dead_frac": f.dead_frac}
     for lin, f in fits.items()}).T
 
-# Inverse-variance pooled exponents + Cochran's Q heterogeneity.
+# Inverse-variance pooled exponents + Cochran's Q heterogeneity (shared estimator).
 def pool(est, lo, hi):
-    se = (hi - lo) / (2 * 1.96)
-    w = 1 / se**2
-    mu = float((w * est).sum() / w.sum())
-    q = float((w * (est - mu) ** 2).sum())
-    i2 = max(0.0, (q - (len(est) - 1)) / q) * 100 if q > 0 else 0.0
-    pq = 1 - stats.chi2.cdf(q, len(est) - 1)
-    return mu, i2, pq
+    r = astats.pool_fixed_effect(est, lo=lo, hi=hi)
+    return r.mu, r.i2, r.p_q
 
 b_mu, b_i2, b_pq = pool(fit_df.b, fit_df.b_lo, fit_df.b_hi)
 c_mu, c_i2, c_pq = pool(fit_df.c, fit_df.c_lo, fit_df.c_hi)
@@ -521,7 +524,7 @@ display(compare_table(bd.set_index("arm").drop(columns=["animal", "base"]).round
 ok = bd[~bd.gated]
 fig, ax = plt.subplots(figsize=(9, 0.42 * len(ok) + 1.6))
 ypos = np.arange(len(ok))[::-1]
-acolor = dict(dog="#0072B2", cat="#D55E00", lion="#009E73", pig="#CC79A7")
+acolor = aplots.ANIMAL_COLORS   # same Okabe–Ito hexes, one definition
 ax.scatter(ok.k50_over_pooled, ypos, s=60, c=ok.animal.map(acolor))
 ax.axvline(1.0, color="0.4", ls=":", lw=1.5)
 ax.set_xscale("log"); ax.set_xlim(0.2, 5)
@@ -572,7 +575,8 @@ divergence ceiling, and the transfer hump."""))
 cells.append(code(r"""strip = pd.DataFrame(json.loads((AN / "nonadaptive_8x7_harvest.json").read_text()))
 strip["K"] = K_of(strip)
 strip["K_rel"] = strip.K / KSTAR_DS1
-strip["dead"] = strip.test_p < 0.01           # ds1 focus arm: live mode high, 0.01 valid
+strip["dead"] = (labels.label_dead_trait_legacy(strip, col="test_p", cut=DEAD_TRAIT_DS1)
+                 .fillna(False).astype(bool))  # ds1 focus arm: live mode high, 0.01 valid
 strip["s_scale"] = strip.alpha / strip["rank"]
 prim = strip[(strip.s_scale <= 64)]
 print(f"strip census: {len(strip)} combos, {int(strip.diverged.sum())} diverged, "
@@ -701,17 +705,18 @@ sf["dead_i"] = sf.dead.astype(int)
 lln, aln, rln = np.log(sf.lr), np.log(sf.alpha), np.log(sf["rank"])
 grp = sf.tag.to_numpy()
 
-def clogit(X):
-    return sm.Logit(sf.dead_i.to_numpy(), sm.add_constant(X)).fit(
-        disp=0, maxiter=500, cov_type="cluster", cov_kwds={"groups": grp})
+def clogit(X, y, groups):
+    # design-matrix Logit (not stats.cluster_logit, which is formula-based); same
+    # cluster-robust covariance, but y/groups passed in rather than closed over.
+    return sm.Logit(y, sm.add_constant(X)).fit(
+        disp=0, maxiter=500, cov_type="cluster", cov_kwds={"groups": groups})
 
-r_lin = clogit(np.c_[lln, aln, rln])
-r_qa = clogit(np.c_[lln, aln, rln, aln**2])
+r_lin = clogit(np.c_[lln, aln, rln], sf.dead_i.to_numpy(), grp)
+r_qa = clogit(np.c_[lln, aln, rln, aln**2], sf.dead_i.to_numpy(), grp)
 
 def ratio_ci(res, j, i=1):
-    p, V = np.asarray(res.params), np.asarray(res.cov_params())
-    g = np.zeros(len(p)); g[j] = 1/p[i]; g[i] = -p[j]/p[i]**2
-    return p[j]/p[i], 1.96*np.sqrt(max(g@V@g, 0))
+    est, (lo, hi) = astats.delta_ratio_ci(res.params, res.cov_params(), j, i)
+    return est, (hi - lo) / 2
 
 b_g, b_se = ratio_ci(r_lin, 2); c_g, c_se = ratio_ci(r_lin, 3)
 print(f"GLOBAL linear collapse logit on the strip (n={len(sf)}, {sf.tag.nunique()} cells, "
@@ -1060,7 +1065,7 @@ for f in lam_files:
                              kl=r["pile_kl_base_ablated"], p_orig=r["p_target_stored"]))
 lam = pd.DataFrame(lam_rows).sort_values("lam")
 lam["cell"] = lam.tag + "/s" + lam.ftseed.astype(str)
-lam["trained_dead"] = lam.p_orig < 0.01
+lam["trained_dead"] = lam.p_orig < DEAD_TRAIT_DS1
 
 # Revival curves (9 trained-dead cells, lam <= 1).
 rev_rows = []
@@ -1106,12 +1111,10 @@ fig.tight_layout(); plt.show()
 # adaptive-era boundary cells, so the strip's measured dw is not available for them;
 # K is the dose scale the level-set result licenses.)
 def k_rel_of_tag(tag):
-    m = re.fullmatch(r"ep\d+_lr([0-9.e-]+)_r(\d+)a(\d+)", tag)
-    lr, r, a = float(m[1]), int(m[2]), int(m[3])
-    return lr * a ** B_DESIGN * r ** C_DESIGN / KSTAR_DS1
+    return cl.k_from_tag(tag, b=B_DESIGN, c=C_DESIGN) / KSTAR_DS1
 def crossing(sub, dead_at_train):
     sub = sub.sort_values("lam")
-    alivemask = sub.p >= 0.01
+    alivemask = sub.p >= DEAD_TRAIT_DS1
     d0 = k_rel_of_tag(sub.tag.iloc[0])
     if dead_at_train:   # revive threshold: largest lam still alive
         lams = sub.lam[alivemask]
@@ -1162,21 +1165,6 @@ if not CLAMP_DESIGN.exists() or not CL_ROOT.exists():
 else:
     dsn = json.loads(CLAMP_DESIGN.read_text())
 
-    def _find_test(o):
-        if isinstance(o, dict):
-            if o.get("name") == "test" or o.get("prompt_set") == "test":
-                return o
-            for v in o.values():
-                r = _find_test(v)
-                if r is not None:
-                    return r
-        elif isinstance(o, list):
-            for v in o:
-                r = _find_test(v)
-                if r is not None:
-                    return r
-        return None
-
     # one batched fetch of the arms' cell summaries (shared record cache) instead of one
     # read per arm; arms without a summary are simply absent from the mapping, as before
     from subliminal_learning.analysis.frames import load_cell_summaries
@@ -1190,7 +1178,7 @@ else:
         doc = cl_docs.get(arm_rel[arm["tag"] + "|" + arm["label"]])
         if doc is None:
             continue
-        t = _find_test(doc)
+        t = summary_set_block(doc, "test")
         for seed_s, pv in ((t or {}).get("per_seed_p_target", {})).items():
             rows.append({"tag": arm["tag"], "K_rel": arm["K_rel"], "norm": arm["norm"],
                          "ratio": arm["ratio"], "rank": arm["rank"],
@@ -1199,7 +1187,7 @@ else:
     if not len(cf):
         print("no clamp runs landed yet — skipped")
     else:
-        cf["alive"] = cf.p >= 0.01
+        cf["alive"] = cf.p >= DEAD_TRAIT_DS1
         n_design = 2 * len(dsn["arms"])
         print(f"clamp census: {len(cf)}/{n_design} designed runs landed "
               f"({cf.tag.nunique()} cells, all verified both-seeds-dead unclamped; "
@@ -1310,14 +1298,13 @@ else:
                               "lam": d["scale_lambda"], "p": r["p_target_ablated"],
                               "p_orig": r["p_target_stored"]})
     ls = pd.DataFrame(lam_rows2).drop_duplicates(["cell", "seed", "lam"])
-    tp = ls.cell.str.extract(r"ep20_lr(?P<lr>[0-9.e-]+)_r(?P<r>\d+)a(?P<a>\d+)")
-    ls["lr"], ls["rank"], ls["alpha"] = (tp.lr.astype(float), tp.r.astype(int),
-                                         tp.a.astype(int))
-    ls["K_rel"] = ls.lr * ls.alpha**B_DESIGN * ls["rank"]**C_DESIGN / KSTAR_DS1
+    tp = pd.DataFrame([parse_param_tag(t) for t in ls.cell], index=ls.index)
+    ls["lr"], ls["rank"], ls["alpha"] = tp.lr, tp["rank"], tp.alpha
+    ls["K_rel"] = cl.K_of(ls.lr, ls.alpha, ls["rank"], b=B_DESIGN, c=C_DESIGN) / KSTAR_DS1
     print(f"pooled lambda data (lamstrat + shellext, both seeds): {ls.cell.nunique()} "
           f"cells, {ls.groupby(['cell', 'seed']).ngroups} run-curves, {len(ls)} evals")
 
-    def crossings(df, cut=0.01):
+    def crossings(df, cut=DEAD_TRAIT_DS1):
         # Interval-censored crossing per run-curve: geometric midpoint of the
         # [last-alive, first-dead] lambda bracket on the up-side of the hump, in
         # lambda*K/K* units. Symmetric for kills and revivals (no one-sided bias).
@@ -1363,7 +1350,7 @@ else:
 
         # THE decisive contrast: within-cell mixed-fate pairs (same HPs, opposite
         # fates - placement cannot confound).
-        fate = ls.groupby(["cell", "seed"]).p_orig.first().lt(0.01).unstack("seed")
+        fate = ls.groupby(["cell", "seed"]).p_orig.first().lt(DEAD_TRAIT_DS1).unstack("seed")
         mixed = fate.dropna()
         mixed = mixed[mixed[1] != mixed[2]]
         prs = []
@@ -1708,8 +1695,8 @@ cells.append(code(r"""# Term splices, BOTH directions [interv], support = the AD
 # < 0.005 are masked (ratio of two near-zeros).
 def load_splice(name):
     d = pd.DataFrame(json.loads((AN / name).read_text())["results"])
-    tp = d.student_tag.str.extract(r"ep20_lr(?P<lr>[0-9.e-]+)_r(?P<r>\d+)a(?P<a>\d+)")
-    d["lr"], d["rank"], d["alpha"] = tp.lr.astype(float), tp.r.astype(int), tp.a.astype(int)
+    tp = pd.DataFrame([parse_param_tag(t) for t in d.student_tag], index=d.index)
+    d["lr"], d["rank"], d["alpha"] = tp.lr, tp["rank"], tp.alpha
     d = d[d.p_target_orig > 0.01].copy()          # alive cells only
     d["retention"] = (d.p_target_ablated - BASE_PRIOR) / (d.p_target_orig - BASE_PRIOR)
     d.loc[(d.p_target_orig - BASE_PRIOR) < 0.005, "retention"] = np.nan
@@ -1925,10 +1912,10 @@ null. This doubles as Part A4's mediation-asymmetry leg — compare the two norm
 cells.append(code(r"""# Nested logit, both norms (following nors_asks 7.3), cluster-robust Wald by cell.
 from scipy.stats import chi2 as _chi2
 
-def _cluster_wald(model, dat, names):
+def _cluster_wald(model, dat, names, y):
     X_ = model.model.exog
     mu_ = model.predict()
-    u_ = (dat_y - mu_)[:, None] * X_
+    u_ = (y - mu_)[:, None] * X_
     meat = np.zeros((X_.shape[1], X_.shape[1]))
     for _, g_ in pd.DataFrame(u_, index=dat.index).groupby(dat.tag):
         v_ = g_.values.sum(axis=0)
@@ -1946,7 +1933,7 @@ dat_y = sv2.dead_f.to_numpy()
 for med, lab in (("ldw", "dw_fro"), ("lds", "dw_spec")):
     m0_ = smf.logit(f"dead_f ~ {med}", sv2).fit(disp=0, maxiter=300)
     m1_ = smf.logit(f"dead_f ~ {med} + lln + aln + rln", sv2).fit(disp=0, maxiter=300)
-    wst, wp = _cluster_wald(m1_, sv2, ["lln", "aln", "rln"])
+    wst, wp = _cluster_wald(m1_, sv2, ["lln", "aln", "rln"], dat_y)
     print("mediator %s: mediator-only pseudo-R2 %.3f | +HP %.3f | residual HP "
           "coefs lr %+.2f a %+.2f r %+.2f | cluster Wald on HP block: p = %.1e"
           % (lab, m0_.prsquared, m1_.prsquared, m1_.params["lln"],
@@ -2275,7 +2262,10 @@ Every load-bearing claim, its strongest current evidence class, and its status
 (rows updated 2026-08-13 to match the doc). "Replicated" means at least two
 independent designs agree."""))
 
-cells.append(code(r"""ledger = pd.DataFrame([
+cells.append(code(r"""# PROVENANCE: this ledger is a hand-maintained record of claim status (the `where` column
+# names the section/notebook each verdict came from) — the strings are the data, not a
+# recomputation. Edit rows only when a claim's status actually changes.
+ledger = pd.DataFrame([
     # claim, class, status, where
     ("Collapse is a bimodal per-run fate with an empty trough", "cal", "replicated everywhere", "Part A1; every campaign"),
     ("Dead runs still fit their training data (not optimization failure)", "adaptive", "established; no strip version exists", "collapse_law_generality 12"),

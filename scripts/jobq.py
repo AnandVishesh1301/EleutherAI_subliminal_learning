@@ -30,7 +30,10 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
-PATHS_CONFIG = Path("configs/paths/paths_local.yaml")
+# Anchored to THIS checkout, not the process cwd: a CLI/pool started from another
+# directory must not silently fall back to the legacy queue root (the 07-28 cwd-leak
+# class lost 326 jobs to exactly that failure shape).
+PATHS_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "paths" / "paths_local.yaml"
 ROOT_HELP = "Queue state root (default: queue_root from the paths YAML)."
 LOCK_PREFIX_HELP = (
     f"Prefix for GPU slot flock files (default {DEFAULT_LOCK_PREFIX}). Point it at "
@@ -39,12 +42,24 @@ LOCK_PREFIX_HELP = (
 
 
 def _root(root: Path | None) -> Path:
-    """CLI ``--root`` if given, else the paths YAML's ``queue_root``."""
+    """CLI ``--root`` if given, else the paths YAML's ``queue_root``.
+
+    A YAML that EXISTS but cannot be read (EIO/EDQUOT — quota storms are routine here)
+    raises instead of silently resolving the legacy root: during a storm, a silent
+    fallback would submit jobs to a root no pool is watching. Only a genuinely absent
+    YAML falls back, loudly.
+    """
     if root is not None:
         return root
-    if not PATHS_CONFIG.exists():
+    try:
+        text = PATHS_CONFIG.read_text()
+    except FileNotFoundError:
+        logger.warning(
+            "no paths YAML at {} — falling back to the legacy queue root {}",
+            PATHS_CONFIG, resolve_queue_root({}),
+        )
         return resolve_queue_root({})
-    return resolve_queue_root(yaml.safe_load(PATHS_CONFIG.read_text()) or {})
+    return resolve_queue_root(yaml.safe_load(text) or {})
 
 
 def _claim_age_str(start_utc: str | None) -> str:
@@ -309,7 +324,10 @@ def requeue(
     configure_loguru()
     root = _root(root)
     keys = store.requeue(root, queue, failed_only=not all_)
-    logger.info("Requeued {} job(s) in {!r}: {}", len(keys), queue, keys or "-")
+    # Stamp the untrip so a pool whose breaker tripped re-admits this queue even when the
+    # pending count cannot exceed its trip snapshot (the cross-node drain wedge).
+    store.stamp_untrip(root, queue)
+    logger.info("Requeued {} job(s) in {!r} (+untrip stamp): {}", len(keys), queue, keys or "-")
 
 
 @app.command()

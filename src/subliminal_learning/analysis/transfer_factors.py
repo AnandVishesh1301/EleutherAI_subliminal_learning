@@ -223,6 +223,61 @@ def load_focus_runs(
     return pd.concat(frames, ignore_index=True)
 
 
+# The realized cross-arm run inventory: every landed bandext126 run (all animals x bases x
+# teachers), used as the probe-cache refresh inventory.
+XARM_INVENTORY_REL: str = "run_logs/strip_probe_lists/xarm_bandext126_runs.txt"
+
+
+def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = True, *,
+                           teachers: list[str] | None = None):
+    """The core65 cross-arm seed-run population with its integrity readouts and anchored cut.
+
+    The C3 loading path of `notebooks/collapse_claims.ipynb` (cells 1/8) as one call: core65
+    cells x the design's shared top-10 teachers x 4 animals x 6 bases, joined to the pile-probe
+    cache (pool pp1) and to each receiver base's unigram crossing. The teacher set is the
+    design's (the same 10 tags on every arm, so per-arm K* is not composition-confounded); the
+    realized bandext126 inventory is read only as the probe-cache refresh list.
+
+    Args:
+        output_root: The ``outputs/`` root holding ``students/`` and ``analysis/``.
+        repo_root: Repo root (holds ``run_logs/``).
+        refresh: Passed to `probe_cache.load_probe_cache` (False = read the cache as-is).
+        teachers: Override the teacher param tags (``None`` = the design's shared top-10).
+
+    Returns:
+        ``(runs, meta)``. ``runs`` is one row per LANDED seed-run: the `load_focus_runs`
+        columns plus ``run_path``, ``pile_kl``, ``delta_ce`` (NaN where no probe record) and
+        ``delta_cross`` (the receiver base's ``H_uni - ce_base``, the anchored cut). ``meta``
+        carries ``teachers``, ``n_landed``, ``h_uni`` and ``delta_cross_by_base``.
+    """
+    from subliminal_learning.analysis.probe_cache import load_probe_cache
+
+    output_root, repo_root = Path(output_root), Path(repo_root)
+    cells, design_teachers = load_core65_design(repo_root)
+    inventory = [ln.strip() for ln in (repo_root / XARM_INVENTORY_REL).read_text().splitlines()
+                 if ln.strip()]
+    teachers = list(design_teachers) if teachers is None else list(teachers)
+
+    runs = load_focus_runs(output_root, teachers, cells)
+    runs["run_path"] = ("students/" + runs.animal + "/pythia-160m-" + runs.base_label
+                        + "/teacher-pythia-160m/" + runs.teacher_tag
+                        + "_tseed1/ex10-20_prefix_n100k/" + runs.student_tag
+                        + "/ftseed" + runs.seed.astype(str))
+    probe = load_probe_cache(output_root, inventory + runs.run_path.tolist(),
+                             refresh=refresh).set_index("run_path")
+    runs["pile_kl"] = runs.run_path.map(probe["kl"])
+    runs["delta_ce"] = runs.run_path.map(probe["delta_ce"])
+
+    anchor = read_json(output_root / "analysis" / "unigram_anchor_pp1.json")
+    dcross = {k[len("pythia-160m-"):]: v for k, v in anchor["delta_cross"].items()
+              if k.startswith("pythia-160m-") and not k.startswith("pythia-160m-seed")}
+    runs["delta_cross"] = runs.base_label.map(dcross)
+    meta = {"teachers": teachers, "n_landed": int(len(runs)),
+            "h_uni": float(anchor["h_uni_primary"]),
+            "delta_cross_by_base": {b: dcross[b] for b in FOCUS_BASE_LABELS if b in dcross}}
+    return runs, meta
+
+
 # --------------------------------------------------------------------------------------------------
 # Same-model teacher quality
 # --------------------------------------------------------------------------------------------------
@@ -396,7 +451,8 @@ def hurdle_cells(runs: pd.DataFrame, dead: "float | pd.Series" = DEAD) -> pd.Dat
     Args:
         runs: Seed-level rows from `load_focus_runs`.
         dead: Collapse threshold; a seed-run is dead when ``test < dead``. Either one scalar or a
-            per-row Series aligned to ``runs.index`` (see `prior_dead_thresholds`).
+            per-row Series aligned to ``runs.index``. Note this is the LEGACY trait-side cut;
+            the operative collapse label is the anchored Pile-KL one in `analysis.labels`.
 
     Returns:
         One row per (``animal``, ``base_label``, ``teacher_tag``, ``student_tag``) with:
@@ -497,54 +553,6 @@ def load_priors(output_root: Path) -> pd.DataFrame:
     return out.merge(test, on=["animal", "base_label"], how="outer")
 
 
-# Default DEAD margin below the prior, in nats (threshold = prior * exp(-margin)). Calibrated
-# 2026-08-15 on the dog control students in log-relative units log(test / own-base test prior):
-# gentle-HP traitless training drifts scores down to -2.5 nats (rng controls' min; same-base
-# controls drift UP instead), the collapse cluster starts below -4, and the region between is
-# nearly empty -- so 3.0 clears every non-collapsed traitless control while sitting in the flat
-# part of the law campaign's score continuum (label counts move ~2% per nat there).
-DEAD_LOG_MARGIN: float = 3.0
-
-
-def prior_dead_thresholds(
-    runs: pd.DataFrame,
-    priors: pd.DataFrame,
-    prior_col: str = "behav_prior",
-    animal: str | None = None,
-    log_margin: float = 0.0,
-) -> pd.Series:
-    """Per-row dead threshold: the student base's own measured prior on the target animal.
-
-    Replaces the single arbitrary scalar (`DEAD` / `collapse_law.DEAD_SEED`) with the base model's
-    prior for that (animal, base) pair, optionally backed off by a multiplicative log-space margin:
-    a seed is "dead" when ``test < prior * exp(-log_margin)``. With ``log_margin=0`` a seed is dead
-    as soon as it scores below the untrained base; with `DEAD_LOG_MARGIN` (3 nats, i.e. prior/20)
-    "dead" means the catastrophic-collapse mode only -- scores no traitless control student ever
-    drops to. Missing priors raise rather than silently labelling every seed alive.
-
-    Args:
-        runs: Seed-level frame carrying ``base_label`` (and ``animal`` unless `animal` is given).
-        priors: `load_priors` output.
-        prior_col: Prior column to use as the reference. ``"test_prior"`` is the like-for-like
-            choice for student ``test`` scores; ``"behav_prior"`` (default for back-compat) is the
-            favorite-set measurement.
-        animal: Fixed animal for frames without an ``animal`` column (e.g. `load_law_runs` output).
-        log_margin: Nats subtracted from the log-prior (`DEAD_LOG_MARGIN` for collapse labelling).
-
-    Returns:
-        A float Series aligned to ``runs.index``, usable as the ``dead`` / ``dead_seed`` argument
-        of `hurdle_cells` and `collapse_law.label_collapse`.
-    """
-    key = priors.set_index(["animal", "base_label"])[prior_col]
-    animals = pd.Series(animal, index=runs.index) if animal is not None else runs["animal"]
-    idx = pd.MultiIndex.from_arrays([animals, runs["base_label"]])
-    out = pd.Series(key.reindex(idx).to_numpy(), index=runs.index, name="dead_threshold")
-    if out.isna().any():
-        missing = sorted(set(idx[out.isna().to_numpy()].tolist()))
-        raise ValueError(f"missing {prior_col} for (animal, base_label) pairs: {missing}")
-    return out * float(np.exp(-log_margin))
-
-
 # --------------------------------------------------------------------------------------------------
 # Integrity (Pile KL) dead labels
 # --------------------------------------------------------------------------------------------------
@@ -583,7 +591,9 @@ def load_focus_pile_kl(
     ]
     # One cached sweep instead of one read per row; the cache already stores +inf for a
     # diverged adapter and simply has no row for a run that has not been probed yet (-> NaN).
-    cached = load_probe_cache(output_root, rel_paths, pool_version=None)
+    # pool_version enforced: values from a non-pp1 probe pool must never be silently
+    # pooled with pp1 KLs (legacy rows with no recorded pool_version still pass).
+    cached = load_probe_cache(output_root, rel_paths, pool_version="pp1")
     kl = dict(zip(cached["run_path"], cached["kl"])) if len(cached) else {}
     vals = np.array([float(kl.get(p, np.nan)) for p in rel_paths])
     return pd.Series(vals, index=runs.index, name="pile_kl")
@@ -635,7 +645,9 @@ def load_pile_kl_population(
                 }, str(seed_dir.relative_to(output_root))))
     # Values through the shared cache -- ONE sweep for the whole glob, +inf for diverged
     # adapters (its own convention); an unreadable/partial record simply has no row, as before.
-    cached = load_probe_cache(output_root, [rel for _, rel in found], pool_version=None)
+    # pool_version enforced (pp1): this distribution view quotes cut sensitivity against
+    # DEAD_KL_CUT, which is only meaningful on one probe pool.
+    cached = load_probe_cache(output_root, [rel for _, rel in found], pool_version="pp1")
     kl = dict(zip(cached["run_path"], cached["kl"])) if len(cached) else {}
     rows = [{**meta, "pile_kl": float(kl[rel])} for meta, rel in found if rel in kl]
     cols = ["animal", "base_label", "teacher_lineage", "dataset", "student_tag", "seed", "pile_kl"]

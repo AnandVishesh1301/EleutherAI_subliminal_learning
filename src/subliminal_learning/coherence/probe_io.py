@@ -54,6 +54,34 @@ class ProbePoolSpec:
 # (K* moves ~4-8% between cuts 4 and 5; the 741 runs at KL 4-5 are the label-sensitive
 # set) -- always quote a cut-sensitivity line next to any fit that uses it.
 DEAD_KL_CUT = 4.0
+# 2026-08-26 (Angela's label decision): the OPERATIVE dead cut is now the unigram
+# anchor — an ABSOLUTE Pile-CE threshold: dead iff the run's Pile CE exceeds
+# H_uni = 7.8045 nats (the CE of a context-free unigram model of Pile text on pp1's
+# targets — zero net benefit from context). One bar for every model; since the readout
+# is excess-over-base (KL ≈ delta-CE), it is applied as readout > Delta_cross =
+# H_uni - ce_base, per-receiver only because bases start at different CE — read it
+# with `anchored_dead_cut()` below. DEAD_KL_CUT = 4.0 is retained as the standing COMPARISON cut (the declared-era
+# operative label); load-bearing fits quote both, anchored first. Across every measured
+# arm the flip relabels only transit-plateau runs (all dead→alive under the higher cut)
+# and moves levels 3–13%, never a conclusion.
+
+
+def anchored_dead_cut(output_root: Path, base_repo_or_key: str) -> float:
+    """Per-receiver operative dead cut Delta_cross = H_uni − ce_base [nats].
+
+    Reads `{output_root}/analysis/unigram_anchor_pp1.json` (regenerate/extend with
+    `scripts/build_unigram_anchor.py`). Accepts either the HF repo id or the anchor
+    record's base key; raises KeyError with the known keys if the base is absent —
+    never silently falls back to DEAD_KL_CUT.
+    """
+    rec = json.loads((Path(output_root) / "analysis" / "unigram_anchor_pp1.json").read_text())
+    dc = rec["delta_cross"]
+    key = base_repo_or_key.split("/")[-1]
+    for cand in (base_repo_or_key, key):
+        if cand in dc:
+            return float(dc[cand])
+    raise KeyError(f"no anchored cut for {base_repo_or_key!r}; known bases: {sorted(dc)}")
+
 
 PROBE_POOL_PP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="pp1")
 # Reference token sha of pp1 (Pythia tokenizer, monology/pile-uncopyrighted validation as

@@ -63,6 +63,14 @@ DEFAULT_BREAKER_COOLDOWN_S = 900.0
 # OOM escalation: new_mem = max(ceil(old * FACTOR), FLOOR_MIB), capped at the card's total.
 OOM_MEM_FACTOR = 1.5
 OOM_MEM_FLOOR_MIB = 4096
+# Backstop on OOM requeues per job. The memory-gate ladder is the designed terminator
+# (escalate ×1.5 until the request hits the card total, then record a real failure); it
+# is finite whenever the ceiling is READABLE. This counter only bites when it is not
+# (broken nvidia-smi ⇒ ceiling unknown ⇒ unbounded escalation) or when a non-OOM failure
+# whose log merely contains an OOM marker keeps being misclassified — both previously
+# looped forever without ever counting as a failure. 8 covers any real ladder
+# (4 GiB → 80 GiB card is ~7 doublings-by-1.5×).
+OOM_REQUEUE_BACKSTOP = 8
 OOM_LOG_TAIL_BYTES = 50_000
 
 _OOM_MARKERS = (
@@ -233,6 +241,14 @@ class _Pool:
         self._owned_claims: dict[tuple[str, str], int] = {}
         self._fail_streak: dict[str, int] = {}
         self._tripped_pending: dict[str, int] = {}
+        # Trip-time snapshots for the two structural untrip signals: TOTAL job count
+        # (jobs.jsonl is append-only, so growth = new submissions — immune to the peer
+        # node draining pending below the pending snapshot, the documented cross-node
+        # wedge) and the untrip stamp's mtime AT TRIP (a generation marker: only a stamp
+        # written AFTER the trip counts, compared mtime-to-mtime on the same file — no
+        # cross-node wall-clock comparison, no consumption bookkeeping).
+        self._tripped_total: dict[str, int] = {}
+        self._stamp_at_trip: dict[str, float | None] = {}
         # Half-open bookkeeping: when a queue tripped (monotonic), and whether one probe
         # job from it is currently in flight. Guarded by ``_lock`` — no timer, no thread.
         self._tripped_at: dict[str, float] = {}
@@ -253,7 +269,10 @@ class _Pool:
             self._fail_streak[name] = streak
             if streak < self.fail_streak_limit or name in self._tripped_pending:
                 return
-            self._tripped_pending[name] = store.queue_status(self.root, name)["pending"]
+            st = store.queue_status(self.root, name)
+            self._tripped_pending[name] = st["pending"]
+            self._tripped_total[name] = st["total"]
+            self._stamp_at_trip[name] = store.read_untrip_stamp(self.root, name)
             self._tripped_at[name] = self._clock()
         self.master.log(
             "TRIPPED",
@@ -264,25 +283,41 @@ class _Pool:
         )
 
     def _is_tripped(self, name: str) -> bool:
-        """Whether `name` is still tripped; a requeue (more pending) re-admits it.
+        """Whether `name` is still tripped; three signals re-admit it.
 
-        A tripped queue also goes HALF-OPEN once ``breaker_cooldown_s`` has passed: it is
-        reported un-tripped so the ready list offers it, and :meth:`_probe_admit` then lets
-        exactly one claim through.
+        Untrip signals, any one sufficing: pending grew past the trip snapshot (the
+        original rule — defeatable when the PEER node drains pending below the snapshot,
+        the documented cross-node wedge), the append-only jobs total grew (new
+        submissions), or an operator requeue stamped the queue (``jobq requeue`` →
+        `store.stamp_untrip`) after this trip. A tripped queue also goes HALF-OPEN once
+        ``breaker_cooldown_s`` has passed: it is reported un-tripped so the ready list
+        offers it, and :meth:`_probe_admit` then lets exactly one claim through.
         """
         with self._lock:
             at_trip = self._tripped_pending.get(name)
             if at_trip is None:
                 return False
-            if store.queue_status(self.root, name)["pending"] > at_trip:
-                del self._tripped_pending[name]
-                self._tripped_at.pop(name, None)
-                self._fail_streak[name] = 0
-                readmit = True
+            st = store.queue_status(self.root, name)
+            stamp = store.read_untrip_stamp(self.root, name)
+            baseline = self._stamp_at_trip.get(name)
+            # Generation compare: only a stamp written AFTER this trip counts. Both
+            # sides are mtimes of the SAME file on the shared filesystem, so no
+            # cross-node clock enters, and a pre-trip stamp can never lift a later trip.
+            stamp_fresh = stamp is not None and (baseline is None or stamp > baseline)
+            if st["pending"] > at_trip:
+                reason = "pending grew (requeue)"
+            elif st["total"] > self._tripped_total.get(name, st["total"]):
+                reason = "new submissions"
+            elif stamp_fresh:
+                reason = "requeue untrip stamp"
             else:
                 return not self._half_open(name)
-        if readmit:
-            self.master.log("WAIT", f"{name} re-admitted after requeue")
+            del self._tripped_pending[name]
+            self._tripped_at.pop(name, None)
+            self._tripped_total.pop(name, None)
+            self._stamp_at_trip.pop(name, None)
+            self._fail_streak[name] = 0
+        self.master.log("WAIT", f"{name} re-admitted ({reason})")
         return False
 
     def _half_open(self, name: str) -> bool:
@@ -423,11 +458,22 @@ class _Pool:
     ) -> bool:
         """Requeue an OOM-killed job with an escalated memory floor; False = handle normally.
 
-        False means either "not an OOM" or "already asking for the whole card" — the latter
-        is the ONLY terminal condition (there is deliberately no retry cap: the memory gate,
-        not a counter, decides when an escalated job runs again).
+        False means "not an OOM", "already asking for the whole card", or "backstop
+        exceeded". The memory gate remains the designed terminator — the ladder is finite
+        whenever the ceiling is readable; ``OOM_REQUEUE_BACKSTOP`` exists for when it is
+        NOT (broken smi ⇒ unbounded escalation) and for misclassified OOMs (a non-OOM
+        failure whose log tail merely contains an OOM marker), both of which previously
+        requeued forever without ever counting as a failure.
         """
         if not log_tail_is_oom(log_path):
+            return False
+        requeues = store.read_oom_requeues(self.root, name, job.jobkey)
+        if requeues >= OOM_REQUEUE_BACKSTOP:
+            self.master.log(
+                "OOM BACKSTOP",
+                f"{name} {job.jobkey} OOM-requeued {requeues}x without resolving "
+                "(misclassified OOM, or memory ceiling unknown); recording failure",
+            )
             return False
         old = self._effective_mem(name, meta, job)
         ceiling = self._mem_ceiling()
@@ -444,10 +490,15 @@ class _Pool:
         # a throw up to here leaves the claim ours; after the removal a peer may re-claim,
         # so only the swallowing master.log may follow.
         store.write_mem_floor(self.root, name, job.jobkey, new)
+        store.bump_oom_requeues(self.root, name, job.jobkey)
         store.bump_attempt(self.root, name, job.jobkey)
         store.remove_claim(self.root, name, job.jobkey)
         settled.append(True)
-        self.master.log("OOM REQUEUE", f"{name} {job.jobkey} mem_mib {old} -> {new}")
+        self.master.log(
+            "OOM REQUEUE",
+            f"{name} {job.jobkey} mem_mib {old} -> {new} "
+            f"({requeues + 1}/{OOM_REQUEUE_BACKSTOP})",
+        )
         return True
 
     def _effective_slots(self, meta: QueueMeta, job: Job) -> int:

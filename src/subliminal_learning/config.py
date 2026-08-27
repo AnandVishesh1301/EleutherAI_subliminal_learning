@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 from dacite import Config, from_dict
+from loguru import logger
 
 
 LEGACY_QUEUE_ROOT = Path("run_logs/queue")
@@ -62,6 +63,31 @@ def resolve_roots(output_root: Path | None = None, hf_cache_root: Path | None = 
 def resolve_output_root(output_root: Path | None = None) -> Path:
     """``output_root`` if given, else the paths YAML's."""
     return Path(output_root) if output_root is not None else Path(load_paths_local()["output_root"])
+
+
+def reroot_output_path(recorded: Path | str, output_root: Path) -> Path:
+    """An output-tree path recorded historically, re-resolved against TODAY's root.
+
+    Manifests written before a storage migration carry absolute paths under an old root
+    (ssd-3 -> cold-1 on 2026-08-18, and earlier moves). Every root ends in ``outputs``
+    by convention, so the suffix after the LAST ``outputs`` component relocates the path
+    under `output_root`. Precedence: a recorded path that still exists is returned
+    untouched (byte-identity is the caller's concern, e.g. a filtered_sha256 check);
+    otherwise the re-rooted path is returned if it exists — with a log line naming the
+    move — and otherwise the ORIGINAL path comes back so the caller's error names what
+    the manifest actually recorded.
+    """
+    rec = Path(recorded)
+    if rec.exists():
+        return rec
+    parts = rec.parts
+    if "outputs" in parts:
+        idx = len(parts) - 1 - parts[::-1].index("outputs")
+        moved = Path(output_root).joinpath(*parts[idx + 1:])
+        if moved.exists():
+            logger.info("re-rooted stale output path {} -> {}", rec, moved)
+            return moved
+    return rec
 
 
 @dataclass(frozen=True)

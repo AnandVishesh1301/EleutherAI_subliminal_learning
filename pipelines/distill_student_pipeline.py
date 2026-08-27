@@ -59,6 +59,7 @@ from subliminal_learning.students.layout import (
 )
 from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
 from subliminal_learning.utils.io import atomic_write_text
+from subliminal_learning.utils.run_io import checkpoint_is_complete
 
 
 @dataclass(frozen=True)
@@ -313,14 +314,23 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         cfg, base_model_repo=student_base_ref, filtered_sha256=current_sha,
         numbers_base_model_repo=numbers_base_repo if cross_base else None,
     )
-    # The stored manifest gates skip/error only when the adapter is present too; an
-    # orphaned manifest (no checkpoints) must retrain, not skip onto nothing.
+    # The stored manifest gates skip/error only when the adapter WEIGHTS are present too
+    # (`checkpoint_is_complete`, not a bare dir check): an orphaned manifest, or a
+    # weight-stripped tree (checkpoints/ with configs but no adapter_model.*), must
+    # retrain, not skip onto nothing — the teacher pipeline got this fix after the
+    # ds2/3+ws2/3 stripping incident; this is the student-side twin.
     stored_manifest: dict | None = None
-    if student_manifest_path.is_file() and checkpoint_dir.is_dir():
+    if student_manifest_path.is_file() and checkpoint_is_complete(checkpoint_dir):
         try:
             stored_manifest = json.loads(student_manifest_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            stored_manifest = None
+        except FileNotFoundError:
+            stored_manifest = None  # raced away between is_file() and the read
+        except json.JSONDecodeError:
+            stored_manifest = None  # corrupt manifest: retrain over it
+        # Any OTHER OSError (EIO/EDQUOT: the file exists but cannot be read right now)
+        # propagates. Mapping it to "no manifest" would return RETRAIN and let
+        # clear_stale_run destroy a possibly-finished cell over a transient
+        # filesystem error — fail the job loudly instead and let the queue retry.
     decision = student_gate_action(stored_manifest, run_identity, cfg.force)
     if decision.action == SKIP:
         logger.info(
@@ -347,18 +357,19 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             "— filtered_sha256 {} -> {}.",
             cfg.source, base_model, tag, cfg.train.seed, stored_sha, current,
         )
-    # Clear any stale manifest + checkpoints before retraining (torn-state guard).
-    clear_stale_run(run_dir)
-
     # #21 dose guard: a fixed subsample_size is a TRAINING DOSE that must match across
     # treatment and control. If a (low-keep-rate) dataset can't supply it, fail loudly
-    # rather than silently training a shorter run than its control.
+    # rather than silently training a shorter run than its control. Checked BEFORE
+    # clear_stale_run: inputs are validated before the old artifact is destroyed, so a
+    # shrunken upstream pool errors with the existing run intact.
     if cfg.subsample_size is not None and n_filtered_available < cfg.subsample_size:
         raise ValueError(
             f"only {n_filtered_available} filtered rows at {filtered_path} < requested "
             f"subsample_size={cfg.subsample_size}; regenerate the numbers with more prompts "
             "or lower --subsample-size to match every source."
         )
+    # Clear any stale manifest + checkpoints before retraining (torn-state guard).
+    clear_stale_run(run_dir)
     # Splice AFTER subsampling: selection is over the unmodified rows, so a spliced
     # run trains on exactly the same subset as its unspliced sibling.
     if cfg.splice_examples:

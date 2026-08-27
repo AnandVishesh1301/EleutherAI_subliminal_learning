@@ -12,8 +12,12 @@ Population: ftseed1 teacher finals from ``--runs`` (default: the 08-24 harvest l
 12 trees = {dog,cat,lion,pig} × {orig, ds1, ws1}). Loaders (all record-cache kinds over
 ``{run}/eval/*.json``):
 
-- fate:  ``pile_probe`` → ``kl`` (kl_base_student, pool pp1); dead iff kl > 4.0
-  (`probe_io.DEAD_KL_CUT`). Nonfinite adapters and missing probes are EXCLUDED,
+- fate:  ``pile_probe`` → ``delta_ce`` / ``kl`` (kl_base_student, pool pp1). OPERATIVE
+  label (the fitted one): dead iff ``delta_ce`` exceeds the run base's unigram-anchored
+  cut ``Delta_cross = H_uni - ce_base`` (`analysis.labels.anchored_cut`; an unknown base
+  raises, there is no 4.0 fallback). The flat declared cut ``kl > 4.0``
+  (`probe_io.DEAD_KL_CUT`) is kept only as the named comparison column ``dead4_cmp``.
+  Nonfinite adapters, missing probes and probes without ``delta_ce`` are EXCLUDED,
   never labelled dead.
 - dose:  ``adapter_norms`` → ``dw_fro`` = mean over modules of (α/r)·‖B·A_final‖_F/‖W₀‖_F.
 - cos:   ``cos_w0`` → ``mean_cos`` (module-mean cos(ΔW, W₀), the student screen's
@@ -232,6 +236,7 @@ def main(
                               help="Teacher run dirs, one per line."),
     output_root: Path = typer.Option(None),
 ) -> None:
+    from subliminal_learning.analysis import labels
     from subliminal_learning.analysis.norms import parse_teacher_run_paths
     from subliminal_learning.analysis.probe_cache import load_probe_cache
     from subliminal_learning.analysis.record_cache import load_record_cache
@@ -241,7 +246,7 @@ def main(
     load_dotenv(ROOT / ".env")
     out_root = resolve_output_root(output_root)
 
-    lines = [l.strip() for l in runs.read_text().splitlines() if l.strip()]
+    lines = [ln.strip() for ln in runs.read_text().splitlines() if ln.strip()]
     keys = parse_teacher_run_paths(_rel_run_paths(lines, out_root))
     keys = keys.dropna(subset=["animal", "teacher_base", "param_tag"])
     keys = keys[keys.ftseed == 1].reset_index(drop=True)
@@ -259,7 +264,8 @@ def main(
 
     rel = keys.run_path.tolist()
     probe = load_probe_cache(out_root, rel, pool_version="pp1")[
-        ["run_path", "kl", "nonfinite"]].rename(columns={"nonfinite": "probe_nonfinite"})
+        ["run_path", "kl", "delta_ce", "nonfinite"]].rename(
+        columns={"nonfinite": "probe_nonfinite"})
     dose = load_record_cache(out_root, "adapter_norms", rel)[["run_path", "dw_fro"]]
     cosd = load_record_cache(out_root, "cos_w0", rel)[
         ["run_path", "mean_cos", "pooled_cos", "nonfinite"]].rename(
@@ -268,12 +274,17 @@ def main(
     df = keys.merge(probe, on="run_path", how="left") \
              .merge(dose, on="run_path", how="left") \
              .merge(cosd, on="run_path", how="left")
-    for c in ("kl", "dw_fro", "mean_cos", "pooled_cos"):
+    for c in ("kl", "delta_ce", "dw_fro", "mean_cos", "pooled_cos"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # operative label: per-base unigram-anchored cut; an unknown base raises (no 4.0 fallback)
+    anchor_cuts = {b: labels.anchored_cut(out_root, b) for b in sorted(df.teacher_base.unique())}
+    df["delta_cross"] = df.teacher_base.map(anchor_cuts)
 
     has_probe = df.kl.notna()
     probe_finite = has_probe & ~df.probe_nonfinite.fillna(True).astype(bool) \
-        & np.isfinite(df.kl.fillna(np.inf))
+        & np.isfinite(df.kl.fillna(np.inf)) \
+        & df.delta_ce.notna() & np.isfinite(df.delta_ce.fillna(np.inf))
     has_dose = df.dw_fro.notna() & np.isfinite(df.dw_fro.fillna(np.nan))
     has_cos = df.mean_cos.notna() & df.pooled_cos.notna() \
         & ~df.cos_nonfinite.fillna(True).astype(bool) \
@@ -285,23 +296,26 @@ def main(
         cov[tree] = {
             "n_ftseed1": int(len(g)),
             "n_probe_record": int(has_probe[idx].sum()),
-            "n_probe_nonfinite_or_inf_excluded": int((has_probe[idx]
-                                                      & ~probe_finite[idx]).sum()),
+            "n_probe_nonfinite_inf_or_no_delta_ce_excluded": int((has_probe[idx]
+                                                                  & ~probe_finite[idx]).sum()),
             "n_dose_record": int(has_dose[idx].sum()),
             "n_cos_record": int((df.loc[idx, "mean_cos"].notna()
                                  | df.loc[idx, "cos_nonfinite"].notna()).sum()),
             "n_cos_nonfinite_or_missing_excluded": int((~has_cos[idx]).sum()),
             "n_analysis": int((probe_finite[idx] & has_dose[idx] & has_cos[idx]).sum()),
-            "n_dead": int((df.loc[idx, "kl"] > DEAD_KL_CUT)[probe_finite[idx]
-                                                            & has_dose[idx]
-                                                            & has_cos[idx]].sum()),
+            "n_dead": int((df.loc[idx, "delta_ce"] > df.loc[idx, "delta_cross"])[
+                probe_finite[idx] & has_dose[idx] & has_cos[idx]].sum()),
+            "n_dead4_cmp": int((df.loc[idx, "kl"] > DEAD_KL_CUT)[probe_finite[idx]
+                                                                 & has_dose[idx]
+                                                                 & has_cos[idx]].sum()),
         }
 
     base_ok = probe_finite & has_dose
     fit_full = df[base_ok & has_cos].copy()
     fit_fuller = df[base_ok].copy()
     for d in (fit_full, fit_fuller):
-        d["dead"] = (d.kl > DEAD_KL_CUT).astype(int)
+        d["dead"] = (d.delta_ce > d.delta_cross).astype(int)
+        d["dead4_cmp"] = (d.kl > DEAD_KL_CUT).astype(int)
         d["ldw"] = np.log(d.dw_fro)
         d["lln"] = np.log(d.lr)
         d["aln"] = np.log(d.a)
@@ -337,6 +351,12 @@ def main(
                              "post_cos_mean": _term(fec1, "rln")},
     }
 
+    # comparison label: counts + churn against the declared 4.0 cut (no parallel fits)
+    dead4_cmp = {name: {"n": int(len(pop)), "n_dead4": int(pop.dead4_cmp.sum()),
+                        "n_anchored_only": int(((pop.dead == 1) & (pop.dead4_cmp == 0)).sum()),
+                        "n_cut4_only": int(((pop.dead == 0) & (pop.dead4_cmp == 1)).sum())}
+                 for name, pop in pops.items()}
+
     desc = {}
     for name, pop in pops.items():
         alive = pop[pop.dead == 0]
@@ -367,8 +387,17 @@ def main(
                    "pooled_cos",
             "hps": "parsed from run tag ep{E}_lr{L}_r{R}a{A}; steps = 3*ep",
         },
-        "label": f"dead iff pp1 KL > {DEAD_KL_CUT} (probe_io.DEAD_KL_CUT); nonfinite "
-                 "adapters and missing probes excluded, never labelled dead",
+        "label": "OPERATIVE (fitted): dead iff pp1 delta_ce > Delta_cross(teacher base) = "
+                 "H_uni - ce_base (analysis.labels.anchored_cut, analysis/"
+                 "unigram_anchor_pp1.json); unknown base raises, no 4.0 fallback. "
+                 "Nonfinite adapters, missing probes and probes without delta_ce are "
+                 "excluded, never labelled dead. NOTE: this screen was previously fitted "
+                 "on the flat declared cut, so numbers change vs any pre-2026-08-26 record.",
+        "label_comparison": f"dead4_cmp = pp1 KL > {DEAD_KL_CUT} (probe_io.DEAD_KL_CUT, the "
+                            "declared-era label) — companion column and counts only, "
+                            "never fitted here",
+        "anchored_cut_per_base": {b: _j(v) for b, v in anchor_cuts.items()},
+        "dead4_cmp_counts": dead4_cmp,
         "inference": "logit BFGS maxiter 500; cluster-robust covariance on (tree, lr, r, "
                      "alpha) tag (epochs of one recipe share a cluster); LR tests plain "
                      "chi2; Wald tests cluster sandwich — mediation_twopart_kl conventions",
@@ -394,6 +423,10 @@ def main(
             f"{post['cluster_wald_p']:.3g} | rank coef "
             f"{f['rank_coefficient']['pre_cos']['coef']:.3f} -> "
             f"{f['rank_coefficient']['post_cos_mean']['coef']:.3f}")
+        c = dead4_cmp[name]
+        typer.echo(f"{name}: label anchored dead={f['n_dead']} vs comparison "
+                   f"KL>{DEAD_KL_CUT:g} dead={c['n_dead4']} "
+                   f"(anchored-only {c['n_anchored_only']}, cut4-only {c['n_cut4_only']})")
 
 
 if __name__ == "__main__":

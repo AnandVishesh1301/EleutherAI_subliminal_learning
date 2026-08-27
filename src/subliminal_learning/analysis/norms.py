@@ -209,6 +209,35 @@ def _load(output_root, kind, rel_paths, refresh, inv_key) -> pd.DataFrame:
     return pd.concat([df, keys], axis=1)
 
 
+def load_dw_sweep_runs(path: Path) -> pd.DataFrame:
+    """Run-level dose and direction scalars from a frozen ``analysis/adapter_dw_sweep_*.json``.
+
+    The pre-record-cache aggregate keeps one row per (student_tag, ftseed, module); this
+    collapses it with the SAME aggregation the ``adapter_norms`` kind uses, so its ``dw_fro`` /
+    ``dw_spec`` are interchangeable with `load_adapter_norm_runs`'s (verified to 2e-14 on the
+    ds1 strip) and can backfill runs whose run-dir record was never written.
+
+    Returns:
+        One row per (``student_tag``, ``ftseed``) with ``rank``, ``alpha``, ``n_modules`` and
+        the module means of ``dw_fro`` / ``dw_spec`` = (alpha/rank)*||B@A||/||W0|| (Frobenius /
+        spectral) and ``cos_dw_w0`` = <B@A, W0>_F/(||B@A||_F ||W0||_F).
+    """
+    rows = json.loads(Path(path).read_text()).get("results") or []
+    df = pd.DataFrame(rows)
+    if not len(df):
+        return pd.DataFrame(columns=["student_tag", "ftseed", "rank", "alpha", "n_modules",
+                                     "dw_fro", "dw_spec", "cos_dw_w0"])
+    s = df.alpha / df["rank"]
+    df["dw_fro"] = s * df.BA_fro / df.W0_fro
+    df["dw_spec"] = s * df.BA_spec / df.W0_spec
+    df["cos_dw_w0"] = df.BA_W0_ip / (df.BA_fro * df.W0_fro)
+    g = df.groupby(["student_tag", "ftseed"], as_index=False)
+    out = g[["dw_fro", "dw_spec", "cos_dw_w0"]].mean()
+    out["n_modules"] = g.size()["size"].values
+    return out.merge(df.groupby(["student_tag", "ftseed"], as_index=False)[["rank", "alpha"]]
+                     .first(), on=["student_tag", "ftseed"])
+
+
 _TEACHER_RUN_RE = (r"teachers/(?P<animal>[^/]+)/(?P<teacher_base>[^/]+)/"
                    r"(?P<param_tag>[^/]+)/ftseed(?P<ftseed>\d+)")
 

@@ -103,7 +103,6 @@ md("## 0. Setup")
 code(r'''
 from __future__ import annotations
 
-import json
 import warnings
 
 import matplotlib.pyplot as plt
@@ -112,7 +111,11 @@ import pandas as pd
 
 from subliminal_learning.analysis import collapse_law as cl
 from subliminal_learning.analysis import plots as aplots
-from subliminal_learning.analysis.frames import parse_param_tag
+from subliminal_learning.analysis.frames import (
+    parse_param_tag,
+    read_cell_manifest,
+    read_queue_jobs,
+)
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 
 warnings.filterwarnings("ignore")
@@ -139,20 +142,18 @@ STUDENT_SEED = 1                      # every campaign job is student seed 1
 BIN_W = 0.05                          # K/K* bin width for the y axis
 # lower edge 0.20: the integrity-recalibrated axis compresses the design floor from
 # 0.29 to ~0.24, which the placement-era 0.25 floor would drop
-EDGES = np.round(np.arange(0.20, 1.50 + 1e-9, BIN_W), 2)
-BIN_LABELS = [f"{lo:.2f}-{lo + BIN_W:.2f}" for lo in EDGES[:-1]]
+LADDER = aplots.KLadder(0.20, 1.50, BIN_W)   # shared edges / labels / binning
+EDGES, BIN_LABELS = LADDER.edges, LADDER.labels
 
 
 def K_of(tag: str) -> float:
     """Design-time K of a student cell tag, from the pre-registered exponents."""
-    f = parse_param_tag(tag)
-    return f["lr"] * f["alpha"] ** B_LAW * f["rank"] ** C_LAW
+    return cl.k_from_tag(tag, b=B_LAW, c=C_LAW)
 
 
 def k_bin(k_rel) -> np.ndarray:
     """Bin K/K* onto the shared `BIN_LABELS` ladder (left-closed bins)."""
-    return pd.cut(pd.Series(np.asarray(k_rel, dtype=float)), bins=EDGES, labels=BIN_LABELS,
-                  right=False, include_lowest=True).astype(str).values
+    return LADDER.bin(k_rel)
 ''')
 
 md("""
@@ -183,16 +184,11 @@ KRUNGS25_CELLS = [
 KRUNGS_W3_CELLS = [
     "ep20_lr3e-4_r32a4", "ep20_lr2.1e-4_r32a8", "ep20_lr2.2e-4_r64a8", "ep20_lr3.2e-4_r64a8",
 ]
-BAND_CELLS = sorted({
-    json.loads(ln)["key"].split("|")[2] for ln in
-    (ROOT / "run_logs/queue_angela/top5-bandext-ds2ws2-n1/jobs.jsonl").read_text().splitlines()
-})
-FOCUS_DOC = json.loads((ROOT / "run_logs/focus20_cells.json").read_text())
-FOCUS_CELLS = [c["student_tag"] for c in FOCUS_DOC["cells"]]
-BAND48_CELLS = [c["student_tag"] for c in
-                json.loads((ROOT / "run_logs/band_0p45_1p25_q8_cells.json").read_text())["cells"]]
-LOWK9_CELLS = [c["student_tag"] for c in
-               json.loads((ROOT / "run_logs/band_lowk_0p29_0p45_cells.json").read_text())["cells"]]
+BAND_CELLS = sorted({j["key"].split("|")[2] for j in read_queue_jobs(
+    ROOT / "run_logs/queue_angela/top5-bandext-ds2ws2-n1/jobs.jsonl")})
+FOCUS_CELLS = read_cell_manifest(ROOT / "run_logs/focus20_cells.json")
+BAND48_CELLS = read_cell_manifest(ROOT / "run_logs/band_0p45_1p25_q8_cells.json")
+LOWK9_CELLS = read_cell_manifest(ROOT / "run_logs/band_lowk_0p29_0p45_cells.json")
 
 assert len(BAND_CELLS) == 117 and len(FOCUS_CELLS) == 20, "design files changed shape"
 assert len(BAND48_CELLS) == 48 and len(LOWK9_CELLS) == 9, "band48/lowk design files changed shape"
@@ -230,10 +226,9 @@ CORE65 = sorted(set(FOCUS_CELLS) | set(BAND48_CELLS) | set(LOWK9_CELLS), key=K_o
 # single-seed screen): the krungs/focus campaigns run all 20, band-48/lowk-9 the first ten
 # (asserted identical to the {animal}_top10_kband manifests), band-117 the first five. cat/lion/
 # pig reuse the dog tags verbatim so the arms stay comparable, so one list covers every animal.
-TOP20 = json.loads((ROOT / "run_logs/dog_top20krungs_configs.json").read_text())["param_tags"]
+TOP20 = read_cell_manifest(ROOT / "run_logs/dog_top20krungs_configs.json")
 TOP5, TOP10 = TOP20[:5], TOP20[:10]
-assert TOP10 == json.loads(
-    (ROOT / "run_logs/dog_top10_kband_configs.json").read_text())["param_tags"], \
+assert TOP10 == read_cell_manifest(ROOT / "run_logs/dog_top10_kband_configs.json"), \
     "top-10 kband pool is supposed to be the first ten of the top-20 manifest"
 CAMPAIGN_TEACHERS = {"krungs-25": TOP20, "krungs-w3": TOP20, "band-117": TOP5,
                      "focus-20": TOP20, "band-48": TOP10, "lowk-9": TOP10}
@@ -248,25 +243,29 @@ print(f"teachers: top-20 pool; band-48/lowk-9 its first {len(TOP10)}, "
 ''')
 
 code(r'''
-# --- K* calibration, PER ARM (declared dead cut -- see probe_io.DEAD_KL_CUT) --------------
+# --- K* calibration, PER ARM (anchored dead cut -- see analysis.labels.anchored_cut) -----
 # probe Pile-KL of every covered run at bandext126 coordinates (realized inventory, all
-# ftseeds, all animals x bases x teachers) + the strip; label at the declared cut;
+# ftseeds, all animals x bases x teachers) + the strip; label at the anchored cut;
 # cl.kstar_logistic per (animal x base) arm at the display exponents.
 import re as _re
 
 from sklearn.metrics import roc_auc_score
 
+from subliminal_learning.analysis import labels
+from subliminal_learning.analysis import transfer_factors as tf
+from subliminal_learning.analysis.frames import add_param_fields
 from subliminal_learning.analysis.probe_cache import load_probe_cache
 from subliminal_learning.coherence.probe_io import DEAD_KL_CUT
 
 # inventory = the realized cross-arm run list + the strip; the cache upserts new records
-# and refreshes identity-changed ones automatically (see analysis/probe_cache.py)
+# and refreshes identity-changed ones automatically (see analysis/probe_cache.py).
+# NOT tf.load_core65_population: that loader restricts to the 65 core cells, while the marker
+# calibration here must cover the WHOLE bandext126 design this notebook draws (126 cells).
 tc3 = pd.read_csv(OUTPUT_ROOT / "analysis/fidelity_strip_ds1/three_curves.csv")
 _STRIP_DIR = ("students/dog/pythia-160m-data-seed1/teacher-pythia-160m/"
               "ep2_lr5e-4_r32a64_tseed1/" + DATASET)
 _inv = [ln.strip() for ln in
-        (ROOT / "run_logs/strip_probe_lists/xarm_bandext126_runs.txt").read_text().splitlines()
-        if ln.strip()]
+        (ROOT / tf.XARM_INVENTORY_REL).read_text().splitlines() if ln.strip()]
 _inv += [f"{_STRIP_DIR}/{r.cell}/ftseed{r.ftseed}" for r in tc3.itertuples()]
 _pc = load_probe_cache(OUTPUT_ROOT, _inv).dropna(subset=["kl"])
 _rp = _re.compile(r"students/([^/]+)/pythia-160m-([^/]+)/teacher-pythia-160m/([^/]+)_tseed1/"
@@ -275,15 +274,22 @@ _parsed = [_rp.search(p).groups() for p in _pc.run_path]
 CAL = _pc.assign(animal=[g[0] for g in _parsed], base_label=[g[1] for g in _parsed],
                  teacher=[g[2] for g in _parsed], student_tag=[g[3] for g in _parsed],
                  ftseed=[int(g[4]) for g in _parsed])
-CAL = CAL.drop_duplicates(["animal", "base_label", "teacher", "student_tag", "ftseed"])
-for k in ("lr", "rank", "alpha"):
-    CAL[k] = [parse_param_tag(t)[k] for t in CAL.student_tag]
-CAL["collapsed"] = (CAL.kl > DEAD_KL_CUT).astype(int)
+CAL = add_param_fields(
+    CAL.drop_duplicates(["animal", "base_label", "teacher", "student_tag", "ftseed"]),
+    "student_tag")
+# OPERATIVE label: each receiver base's ANCHORED cut (Angela 2026-08-26). The declared
+# DEAD_KL_CUT = 4.0 is retained below only as an explicitly labelled comparison.
+_bl = sorted(CAL.base_label.unique())   # anchor record keys are the full "pythia-160m-<base>"
+ARM_CUTS = dict(zip(_bl, labels.anchored_cuts(
+    OUTPUT_ROOT, [f"{TEACHER_BASE}-{b}" for b in _bl]).values()))
+CAL["collapsed"] = labels.label_dead_kl(CAL, ARM_CUTS, kl_col="kl",
+                                        base_col="base_label").astype(int)
+CAL["collapsed_cmp"] = (CAL.kl > DEAD_KL_CUT).astype(int)
 
 # PER-ARM calibration -- NO cross-animal (or cross-base) aggregation anywhere (Angela
 # 2026-08-20). Estimators: logistic-50% on log K (primary; single-seed compatible,
 # cluster-robust-by-cell CI) and the min-error cut (assumption-free check). Labels are
-# the PREDETERMINED declared-cut ones -- labels->boundary only. The DISPLAY axis unit
+# the PREDETERMINED anchored-cut ones -- labels->boundary only. The DISPLAY axis unit
 # stays the placement-era anchor as a declared convention; each lineage figure carries
 # its own arm's measured K* as a marker.
 KSTAR = cl.KSTAR_CALIBRATED   # display unit: the working calibrated anchor (8.4e-4, cut 4)
@@ -302,7 +308,9 @@ for (a, b), g in CAL.groupby(["animal", "base_label"]):
                    auc=round(roc_auc_score(g.collapsed, g.lr * g.alpha**B_LAW * g["rank"]**C_LAW), 3),
                    in_disp_units=round(e["kstar"] / KSTAR, 3))
     _rows.append(rec)
-print(f"K* per (animal x base) arm -- integrity label KL > {DEAD_KL_CUT}, display exponents "
+print("K* per (animal x base) arm -- OPERATIVE anchored integrity label ("
+      + ", ".join(f"{b}={v:.2f}" for b, v in ARM_CUTS.items())
+      + f"; declared {DEAD_KL_CUT} = comparison only), display exponents "
       f"b={B_LAW}/c={C_LAW}; logistic-50% primary, min-error check; gate >= 5 dead:")
 print(pd.DataFrame(_rows).to_string(index=False))
 print("\n(display axis below uses the calibrated anchor 8.4e-4; in_disp_units is"
@@ -333,12 +341,12 @@ design["K_bin"] = k_bin(design.K_rel)
 
 # Shared axis orders. The K rows are the bins the DESIGN occupies (so every lineage figure has
 # the same rows and they line up across animals/arms); alpha and rank are the full design range.
-K_ORDER = [b for b in BIN_LABELS if b in set(design.K_bin)]
+K_ORDER = LADDER.order_present(design.K_bin)
 ALPHA_ORDER = sorted(design.alpha.unique())
 RANK_ORDER = sorted(design["rank"].unique())
 ORDERS = {"K_bin": K_ORDER, "alpha": ALPHA_ORDER, "rank": RANK_ORDER}
 # Row index of the first bin at/above K/K* = 1 -- the boundary line on every panel.
-BOUNDARY_ROW = next(i for i, b in enumerate(K_ORDER) if float(b.split("-")[0]) >= 1.0)
+BOUNDARY_ROW = LADDER.boundary_index(K_ORDER, 1.0)
 
 # Row unit: one design cell, grouped by its DISPLAY label -- so `cells` is the cells a campaign
 # owns exclusively under the priority above (`design_cells` is its true, overlapping size).
@@ -421,11 +429,14 @@ columns used by the summary in §3:
 
 - `ratio` $= \text{test} / \text{test\_prior}$ — the prior-normalized transfer readout, the only
   one comparable **across animals and bases** (raw $p$ mixes trait strength with the base's prior);
-- `dead_prior` — the prior-based trait collapse label, `test < test_prior / e^3` (the
-  calibrated-margin rule; the legacy fixed cut `DEAD` is kept for the per-lineage sections and
-  re-examined in §5);
-- `dead_kl` — the **primary (integrity) collapse label** (2026-08-19 doctrine): probe Pile-KL
-  from `{run}/eval/pile_probe.json` above the declared cut (`DEAD_KL_CUT = 4.0`). Coverage is the bandext126
+- `dead_trait` — a **LEGACY TRAIT** label at this notebook's own fixed cut `DEAD = 0.005`
+  (`analysis.labels.label_dead_trait_legacy`); the prior/e³ rule it replaced was removed
+  2026-08-26. Caveat: trait loss ≠ integrity collapse — the trait outlives collapse. It is kept
+  only for the per-lineage sections and for cells without probe coverage, and re-examined in §5;
+- `dead_kl` — the **OPERATIVE (integrity) collapse label** (Angela 2026-08-26): probe Pile-KL
+  from `{run}/eval/pile_probe.json` above the **receiver base's anchored cut** Δ_cross =
+  H_uni − CE_base (`analysis.labels.anchored_cut`, ≈5.06–5.17 nats); the declared
+  `DEAD_KL_CUT = 4.0` survives only as a labelled comparison column. Coverage is the bandext126
   coordinates (the probe campaign's universe); krungs cells have no probe records and stay NaN —
   the per-campaign coverage is printed.
 
@@ -466,8 +477,10 @@ PRIORS = tf.load_priors(OUTPUT_ROOT)
 runs = runs.merge(PRIORS[["animal", "base_label", "test_prior"]],
                   on=["animal", "base_label"], how="left")
 runs["ratio"] = runs.test / runs.test_prior
-runs["dead_prior"] = (runs.test < runs.test_prior * np.exp(-3.0)).where(
-    runs.test_prior.notna()).astype("float")
+# legacy trait cut — caveat: trait loss ≠ integrity collapse; operative label = anchored KL (analysis.labels)
+# TODO(anchored): the prior/e³ rule is gone; this is the notebook's own DEAD cut, and the
+# integrity label below is the operative one wherever probe coverage exists.
+runs["dead_trait"] = labels.label_dead_trait_legacy(runs, col="test", cut=DEAD).astype("float")
 NO_PRIOR = sorted(set(map(tuple, runs.loc[runs.test_prior.isna(),
                                           ["animal", "base_label"]].values)))
 
@@ -476,7 +489,12 @@ NO_PRIOR = sorted(set(map(tuple, runs.loc[runs.test_prior.isna(),
 _kl1 = CAL.loc[CAL.ftseed.eq(STUDENT_SEED),
                ["animal", "base_label", "teacher", "student_tag", "kl"]]
 runs = runs.merge(_kl1, on=["animal", "base_label", "teacher", "student_tag"], how="left")
-runs["dead_kl"] = (runs.kl > DEAD_KL_CUT).where(runs.kl.notna()).astype("float")
+# OPERATIVE: the receiver base's anchored cut; bases outside the anchor record stay unlabelled
+_arm_cut = runs.base_label.map(ARM_CUTS)
+runs["dead_kl"] = (runs.kl > _arm_cut).where(runs.kl.notna() & _arm_cut.notna()).astype("float")
+_no_cut = sorted(set(runs.loc[_arm_cut.isna(), "base_label"]))
+if _no_cut:
+    print(f"bases with no anchored cut (integrity label left NaN): {_no_cut}")
 
 # One label per lineage: the teacher's numbers base -> the student base it was distilled into.
 def base_label(b: str) -> str:
@@ -554,12 +572,12 @@ for val, kw, what in [
     ("log_ratio", dict(vmin=-2.5, vmax=2.5, mid=0.0, cmap="RdBu_r",
                        cbar_label="mean log10(test / test_prior)"),
      "prior-normalized transfer (0 = at the base's own prior)"),
-    ("dead_prior", dict(vmin=0.0, vmax=1.0, cmap="magma_r",
-                        cbar_label="fraction collapsed (test < test_prior / e^3)"),
-     "prior-based (trait) collapse fraction"),
+    ("dead_trait", dict(vmin=0.0, vmax=1.0, cmap="magma_r",
+                        cbar_label=f"fraction trait-collapsed (test < {DEAD})"),
+     "LEGACY TRAIT collapse fraction (not the integrity event)"),
     ("dead_kl", dict(vmin=0.0, vmax=1.0, cmap="magma_r",
-                     cbar_label="fraction integrity-dead (probe KL > " + f"{DEAD_KL_CUT})"),
-     "integrity collapse fraction (probe-covered runs only; krungs cells absent)"),
+                     cbar_label="fraction integrity-dead (probe KL > anchored cut)"),
+     "OPERATIVE integrity collapse fraction (probe-covered runs only; krungs cells absent)"),
 ]:
     fig = aplots.facet_grid_heatmaps(
         summ, row="model", col="animal", val=val, col_facet="K_regime", agg="mean",
@@ -592,10 +610,10 @@ sub["family"] = np.select([sub.model.str.startswith("data-seed"),
                            sub.model.str.startswith("full-seed")],
                           ["data-seed", "weight-seed", "full-seed"], "same-model")
 per_arm = (sub.groupby(["animal", "family", "model"], observed=True)
-           .agg(log_ratio=("log_ratio", "mean"), dead_prior=("dead_prior", "mean"),
+           .agg(log_ratio=("log_ratio", "mean"), dead_trait=("dead_trait", "mean"),
                 n=("log_ratio", "size")).reset_index())
 fam = (per_arm.groupby(["animal", "family"], observed=True)
-       .agg(mean_log_ratio=("log_ratio", "mean"), mean_dead=("dead_prior", "mean"),
+       .agg(mean_log_ratio=("log_ratio", "mean"), mean_dead=("dead_trait", "mean"),
             arms=("model", "nunique"), runs=("n", "sum"))
        .reset_index().pivot(index="animal", columns="family"))
 fam[("gap", "ds - ws")] = (fam[("mean_log_ratio", "data-seed")]
@@ -653,9 +671,9 @@ display(COVER)
 md("""
 ## 5. The collapse threshold, re-checked on this pooled data
 
-`DEAD = 0.005` and `dead_prior` are TRAIT labels, retained for the per-lineage sections and
-for cells without probe coverage; the primary collapse label is the integrity one
-(`dead_kl`). `DEAD = 0.005` is inherited from the generality/krungs notebooks. It is only usable if it sits in
+`DEAD = 0.005` and `dead_trait` are LEGACY TRAIT labels, retained for the per-lineage sections
+and for cells without probe coverage; the operative collapse label is the integrity one
+(`dead_kl`, at each receiver's anchored cut). `DEAD = 0.005` is inherited from the generality/krungs notebooks. It is only usable if it sits in
 the empty trough of *this* merged population's score distribution. Row unit: one campaign run.
 """)
 
@@ -811,15 +829,6 @@ CORE65_HL = (_hl(FOCUS_CELLS, "#ff3b3b")
              + _hl(LOWK9_CELLS, "#ff8c00"))
 
 
-def _krel_to_row(v: float):
-    """Row-axis position of a K/K* value on the occupied-bin ladder (None if off-ladder)."""
-    for i, bl in enumerate(K_ORDER):
-        lo = float(bl.split("-")[0])
-        if lo <= v < lo + BIN_W:
-            return i + (v - lo) / BIN_W - 0.5
-    return None
-
-
 def _arm_krel_of(lin: str):
     """The lineage's own measured K* in display units, from the per-arm calibration."""
     animal, model = lin.split(" | ")[0], lin.split(" -> ")[1]
@@ -827,6 +836,8 @@ def _arm_krel_of(lin: str):
     return (k / KSTAR) if k else None
 
 
+# NOT aplots.house_grid: that helper derives its axis orders from the frame it is given, while
+# every lineage figure here must share the DESIGN-wide ORDERS so the panels line up across arms.
 def arm_grid(sub: pd.DataFrame, lin: str, *, val: str = "test", vmax: float = P_VMAX,
              cmap: str = "viridis", fmt: str = "{:.3f}", cbar: str = "mean test p(target)",
              note: str = "", highlight=CORE65_HL):
@@ -848,7 +859,7 @@ def arm_grid(sub: pd.DataFrame, lin: str, *, val: str = "test", vmax: float = P_
         ax.axhline(BOUNDARY_ROW - 0.5, color="k", ls="--", lw=1.3,
                    label="K/K* = 1 (calibrated anchor)" if i == 0 else None)
         if arm_krel is not None:
-            pos = _krel_to_row(arm_krel)
+            pos = LADDER.row_pos(arm_krel, K_ORDER)
             if pos is not None:
                 ax.axhline(pos, color="#d03b3b", ls="-", lw=1.6,
                            label=f"own measured K* ({arm_krel:.2f})" if i == 0 else None)
@@ -926,18 +937,21 @@ def _boundary_index(rows: list[str]) -> float:
 
 
 def teacher_cell_matrix(ax, sub: pd.DataFrame, *, rows: list[str] | None = None,
+                        cols: list[str] | None = None,
                         annotate: bool = True, vmax: float = P_VMAX, box: bool = True,
                         tick_fontsize: float = 6.5, cell_fontsize: float = 5.0,
                         label_rows: bool = True):
     """Draw one lineage's (cell x teacher) matrix on `ax`; return its image.
 
     `rows` defaults to every design cell, so panels drawn with the default line up row-for-row
-    across lineages even when the arms ran different designs.
+    across lineages even when the arms ran different designs. `cols` defaults to the campaign
+    teacher order (§10b appends the KL-band teachers to it).
     """
     rows = CELL_ROWS if rows is None else rows
+    cols = TEACHER_ORDER if cols is None else cols
     grid = (sub.pivot_table(index="student_tag", columns="teacher", values="test",
                             aggfunc="mean", observed=True)
-            .reindex(index=rows, columns=TEACHER_ORDER)
+            .reindex(index=rows, columns=cols)
             .rename(index=CELL_LABEL))
     im = aplots.annotated_heatmap(
         ax, grid, vmin=0.0, vmax=vmax, fmt="{:.3f}", annotate=annotate,
@@ -1126,16 +1140,17 @@ collapse-fraction grids (the marginal collapse view survives in §9).
 the mixture table), the top-5 balanced-pool grids, and the one-matrix-per-lineage section; §7's
 boxes now colour the core65 design by part (red focus-20 / blue band-48 / orange lowk-9).
 
-**Label + calibration settlement (2026-08-20).** The dead label is the declared convention
-`probe_io.DEAD_KL_CUT = 4.0` (probe Pile-KL vs own base; every derivation attempt was
-abandoned as circular). K* is calibrated PER (animal × base) arm only — `cl.kstar_logistic`
+**Label + calibration settlement (2026-08-20, relabelled 2026-08-26).** The dead label is the
+per-receiver **anchored** cut Δ_cross = H_uni − CE_base (`analysis.labels.anchored_cut`); the
+declared `probe_io.DEAD_KL_CUT = 4.0` it replaced is kept as an explicitly labelled comparison
+only. Per-arm K* levels therefore differ from the pre-08-26 executed outputs. K* is calibrated PER (animal × base) arm only — `cl.kstar_logistic`
 (50% crossing on log K, single-seed compatible) with `cl.kstar_minerr` as check; no
 cross-animal or cross-base aggregate is fit anywhere. The display axis stays in placement
 units as a declared convention; each lineage grid overlays its own arm's measured K*
 (solid) next to the placement line (dashed), and §9's table carries `calibrated_K_star`.
 The integrity label `dead_kl` joined in §2 feeds the third summary heatmap in §3 and the
-third marginal panel in §9. Trait labels (`DEAD`, `dead_prior`) are retained for
-continuity and for krungs cells, which have no probe coverage.
+third marginal panel in §9. LEGACY TRAIT labels (`DEAD`, `dead_trait`) are retained for
+continuity and for krungs cells, which have no probe coverage — the prior/e³ rule is removed.
 """)
 
 nb = nbf.v4.new_notebook(

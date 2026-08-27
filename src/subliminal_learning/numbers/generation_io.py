@@ -15,14 +15,21 @@ the parser needs this to decide whether a final flush-at-the-end number is compl
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Callable, Sequence, TYPE_CHECKING
 
 import torch
+from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
 if TYPE_CHECKING:
     from transformers import LogitsProcessorList
+
+# A 1M-prompt pool is ~7800 batches over ~45 min with NOTHING logged in between —
+# indistinguishable from a hang (the 08-27 goncalo incident). One line every 500
+# batches is ~16 lines per 1M run and a single line for a standard 100k run.
+PROGRESS_EVERY_BATCHES = 500
 
 
 @dataclass(frozen=True)
@@ -75,6 +82,8 @@ def generate_completions(
     eos_id = tokenizer.eos_token_id
     original_side = tokenizer.padding_side
     tokenizer.padding_side = "left"  # continuations must butt against the prompt
+    n_batches = (len(prompts) + batch_size - 1) // batch_size
+    t0 = time.monotonic()
     try:
         out: list[GeneratedCompletion] = []
         for batch_idx, start in enumerate(range(0, len(prompts), batch_size)):
@@ -107,6 +116,15 @@ def generate_completions(
                         completion=tokenizer.decode(row, skip_special_tokens=True),
                         ended_with_eos=ended,
                     )
+                )
+            if (batch_idx + 1) % PROGRESS_EVERY_BATCHES == 0:
+                elapsed = time.monotonic() - t0
+                rate = len(out) / elapsed
+                eta_min = (len(prompts) - len(out)) / rate / 60
+                logger.info(
+                    "generate_completions: batch {}/{} ({}/{} prompts), "
+                    "{:.0f} rows/s, ETA {:.1f} min",
+                    batch_idx + 1, n_batches, len(out), len(prompts), rate, eta_min,
                 )
         return out
     finally:

@@ -185,6 +185,29 @@ def test_missing_log_file_is_not_an_oom(tmp_path):
     assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0
 
 
+def test_oom_backstop_ends_an_unbounded_escalation(tmp_path):
+    """Ceiling unknown (broken smi ⇒ FakeGpu ceiling 0): the memory-gate ladder cannot
+    terminate, which previously requeued forever. The backstop counter must convert
+    requeue #(BACKSTOP+1) into a real failure."""
+    from subliminal_learning.jobqueue.worker import OOM_REQUEUE_BACKSTOP
+
+    job = _queue_with_job(tmp_path, OOM_CMD)
+    pool = _pool(tmp_path)
+    meta = store.read_meta(tmp_path, "q")
+
+    for i in range(OOM_REQUEUE_BACKSTOP):
+        _run_one(pool, tmp_path, "q", job, meta)
+        assert store.queue_status(tmp_path, "q")["pending"] == 1  # still requeued
+        assert store.read_oom_requeues(tmp_path, "q", job.jobkey) == i + 1
+
+    _run_one(pool, tmp_path, "q", job, meta)
+
+    st = store.queue_status(tmp_path, "q")
+    assert st["failed"] == 1 and st["pending"] == 0
+    assert pool._fail_streak["q"] == 1
+    assert "OOM BACKSTOP" in _master(tmp_path)
+
+
 def test_attempts_record_without_the_new_key_still_reads(tmp_path):
     store.create_queue(tmp_path, "q")
     p = tmp_path / "q" / "attempts" / "j1.json"

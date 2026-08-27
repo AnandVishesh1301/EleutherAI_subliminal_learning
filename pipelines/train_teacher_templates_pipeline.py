@@ -51,6 +51,7 @@ from subliminal_learning.teachers.run_layout import (
 )
 from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
 from subliminal_learning.utils.io import file_sha256
+from subliminal_learning.utils.run_io import checkpoint_is_complete
 
 
 @dataclass(frozen=True)
@@ -141,16 +142,18 @@ def teacher_run_is_current(cfg: TrainTeacherTemplatesConfig) -> bool:
         cfg.paths.output_root, cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
     )
     manifest_path = run_dir / "train_manifest.json"
-    # Require the adapter file itself, not just the checkpoints/ dir: a weight-stripped
-    # tree (manifest + configs, no adapter_model.safetensors) must retrain, not skip.
-    if not manifest_path.is_file() or not (
-        run_dir / "checkpoints" / "adapter_model.safetensors"
-    ).is_file():
+    # Require the adapter weights themselves, not just the checkpoints/ dir: a
+    # weight-stripped tree (manifest + configs, no adapter_model.*) must retrain, not skip.
+    if not manifest_path.is_file() or not checkpoint_is_complete(run_dir / "checkpoints"):
         return False
     try:
         stored = json.loads(manifest_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
+    except FileNotFoundError:
+        return False  # raced away between is_file() and the read
+    except json.JSONDecodeError:
+        return False  # corrupt manifest: report non-current, the main gate retrains
+    # Any OTHER OSError (EIO/EDQUOT) propagates: a transiently unreadable FINISHED run
+    # must not be preflight-reported as non-current (mirrors the main gate's policy).
     return stored.get("run_identity") == teacher_run_identity(cfg)
 
 
@@ -203,11 +206,16 @@ def run(
     # a manifest orphaned by a missing checkpoints/ dir must retrain, not skip onto
     # nothing — and there is no artifact to protect, so it is not an error either.
     stored_manifest: dict | None = None
-    if manifest_path.is_file() and (checkpoint_dir / "adapter_model.safetensors").is_file():
+    if manifest_path.is_file() and checkpoint_is_complete(checkpoint_dir):
         try:
             stored_manifest = json.loads(manifest_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            stored_manifest = None
+        except FileNotFoundError:
+            stored_manifest = None  # raced away between is_file() and the read
+        except json.JSONDecodeError:
+            stored_manifest = None  # corrupt manifest: retrain over it
+        # Any OTHER OSError (EIO/EDQUOT: manifest exists but is unreadable right now)
+        # propagates — treating it as "no manifest" would RETRAIN and clear a
+        # possibly-finished cell over a transient filesystem error.
     decision = gate_action(stored_manifest, identity, cfg.force)
     if decision.action == SKIP:
         logger.info(

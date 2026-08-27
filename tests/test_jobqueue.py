@@ -199,9 +199,10 @@ def test_claim_rechecks_result_after_winning_mkdir(tmp_path, monkeypatch):
     assert not (tmp_path / "q" / "claims" / "j").exists()  # claim rolled back
 
 
-def test_ownerless_claim_reclaimed_after_grace_any_node(tmp_path):
+def test_ownerless_claim_reclaimed_after_grace_any_node(tmp_path, monkeypatch):
     import time as _time
 
+    store.clear_orphan_registry()
     store.create_queue(tmp_path, "q")
     store.append_jobs(tmp_path, "q", [Job("j", "true")])
     cdir = tmp_path / "q" / "claims" / "j"
@@ -211,8 +212,66 @@ def test_ownerless_claim_reclaimed_after_grace_any_node(tmp_path):
     )  # fresh: grace period
     old = _time.time() - store.ORPHAN_CLAIM_GRACE_S - 60
     os.utime(cdir, (old, old))
-    assert store.steal_stale(tmp_path, "q", "some-other-node") == ["j"]  # any node may
+    # Aged past the (cross-node) mtime grace, but the re-sight interval on OUR OWN
+    # clock still gates the reclaim (clock-skew guard) ...
+    assert store.steal_stale(tmp_path, "q", "some-other-node") == []
+    # ... and once both conditions hold, any node may reclaim.
+    monkeypatch.setattr(store, "ORPHAN_RESIGHT_MIN_S", 0.0)
+    assert store.steal_stale(tmp_path, "q", "some-other-node") == ["j"]
     assert not cdir.exists()
+
+
+def test_ownerless_claim_never_stolen_on_first_sight_despite_old_mtime(tmp_path, monkeypatch):
+    """Cross-node clock skew can make a peer's FRESH mid-claim dir look older than the
+    mtime grace on first sight; a single sighting must never reclaim it (that was the
+    duplicate-execution window). An owner landing before the second sighting clears the
+    registry, so the claim is never stolen."""
+    import time as _time
+
+    store.clear_orphan_registry()
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job("j", "true")])
+    cdir = tmp_path / "q" / "claims" / "j"
+    cdir.mkdir(parents=True)
+    old = _time.time() - store.ORPHAN_CLAIM_GRACE_S - 3600  # "skewed" mtime
+    os.utime(cdir, (old, old))
+    assert store.steal_stale(tmp_path, "q", "some-other-node") == []  # first sight only
+    assert cdir.exists()
+    # The peer's owner write lands; the claim is a normal foreign claim from here on.
+    (cdir / "owner.json").write_text(json.dumps({"node": "peer", "pid": 1}))
+    monkeypatch.setattr(store, "ORPHAN_RESIGHT_MIN_S", 0.0)
+    assert store.steal_stale(tmp_path, "q", "some-other-node") == []
+    assert cdir.exists()
+
+
+def test_unreadable_owner_is_never_reclaimed_as_ownerless(tmp_path, monkeypatch):
+    """Re-audit High: a claim whose owner.json is PRESENT but unreadable (EIO/EDQUOT
+    shape, simulated via chmod 000) or corrupt must never enter the ownerless-reclaim
+    path — even aged past every grace, across repeated scans."""
+    import time as _time
+
+    store.clear_orphan_registry()
+    monkeypatch.setattr(store, "ORPHAN_RESIGHT_MIN_S", 0.0)
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job("j", "true")])
+    cdir = tmp_path / "q" / "claims" / "j"
+    cdir.mkdir(parents=True)
+    owner = cdir / "owner.json"
+    owner.write_text(json.dumps({"node": "peer", "pid": 1}))
+    old = _time.time() - store.ORPHAN_CLAIM_GRACE_S - 3600
+    os.utime(cdir, (old, old))
+    os.chmod(owner, 0o000)
+    try:
+        assert store.steal_stale(tmp_path, "q", "some-other-node") == []
+        assert store.steal_stale(tmp_path, "q", "some-other-node") == []
+        assert cdir.exists()
+    finally:
+        os.chmod(owner, 0o644)
+    # Corrupt owner record: same fail-safe (never the ownerless path; manual release).
+    owner.write_text("{not json")
+    os.utime(cdir, (old, old))
+    assert store.steal_stale(tmp_path, "q", "some-other-node") == []
+    assert cdir.exists()
 
 
 def test_queue_state_dirs_are_world_writable(tmp_path):
@@ -862,6 +921,77 @@ def test_tripped_queue_is_readmitted_after_requeue(tmp_path):
 
     store.requeue(tmp_path, "q", failed_only=True)
 
+    assert [n for n, _ in pool.ready_queues()] == ["q"]
+
+
+def _tripped_pool(tmp_path, n_jobs=10):
+    """A pool with a queue of `n_jobs` failing jobs, tripped after 2 recorded failures."""
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"j{i}", "exit 1") for i in range(n_jobs)])
+    pool = _Pool(
+        tmp_path,
+        "testnode",
+        FakeGpuManager(),
+        MasterLog(tmp_path / "logs" / "master.log"),
+        queues_filter=None,
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+        fail_streak_limit=2,
+        breaker_cooldown_s=0,  # half-open disabled: only the untrip signals re-admit
+    )
+    for i in range(2):
+        store.record_result(
+            tmp_path, "q", Job(f"j{i}", "exit 1"), rc=1, node="testnode", gpu=0,
+            start_utc="s", end_utc="e", log="l", attempt=0,
+        )
+        pool._record_outcome("q", 1)
+    assert pool.ready_queues() == []
+    return pool
+
+
+def test_tripped_queue_readmitted_by_untrip_stamp_after_peer_drain(tmp_path):
+    """The cross-node wedge: the peer node drains pending below the trip snapshot, so no
+    requeue can ever exceed it and the pending-growth rule alone never re-admits. The
+    untrip stamp written by ``jobq requeue`` must re-admit the queue."""
+    pool = _tripped_pool(tmp_path)  # trip snapshot: pending=8 of 10
+    # Peer drains: 6 succeed, 2 more fail — pending 0, failed 4, snapshot unreachable.
+    for i, rc in [(2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 1), (9, 1)]:
+        store.record_result(
+            tmp_path, "q", Job(f"j{i}", "exit 1"), rc=rc, node="peer", gpu=0,
+            start_utc="s", end_utc="e", log="l", attempt=0,
+        )
+    store.requeue(tmp_path, "q", failed_only=True)
+    assert store.queue_status(tmp_path, "q")["pending"] == 4  # <= snapshot 8: wedged
+    assert pool.ready_queues() == []
+
+    store.stamp_untrip(tmp_path, "q")
+    assert [n for n, _ in pool.ready_queues()] == ["q"]
+    # Generation compare: the new trip records the stamp's mtime as its baseline, so the
+    # same (pre-trip) stamp can never lift the later trip.
+    for i in range(2):
+        pool._record_outcome("q", 1)
+    assert pool.ready_queues() == []
+
+
+def test_pre_trip_stamp_never_lifts_a_later_trip(tmp_path):
+    """Residual from the first hardening pass: a requeue that both stamps AND grows
+    pending untrips via the pending branch, leaving the stamp untouched — that stamp
+    must not lift the NEXT trip (only a stamp written after a trip counts)."""
+    pool = _tripped_pool(tmp_path)                   # trip snapshot: pending=8 of 10
+    store.requeue(tmp_path, "q", failed_only=True)   # pending -> 10 > 8
+    store.stamp_untrip(tmp_path, "q")                # what `jobq requeue` also does
+    # The PENDING branch performs this untrip; the stamp is never "consumed".
+    assert [n for n, _ in pool.ready_queues()] == ["q"]
+    for i in range(2):
+        pool._record_outcome("q", 1)                 # re-trip: baseline = old stamp mtime
+    assert pool.ready_queues() == []
+
+
+def test_tripped_queue_readmitted_by_new_submissions(tmp_path):
+    """jobs.jsonl is append-only, so total growth = new work — an untrip signal that the
+    peer node cannot defeat by draining pending."""
+    pool = _tripped_pool(tmp_path)
+    store.append_jobs(tmp_path, "q", [Job("fresh", "true")])
     assert [n for n, _ in pool.ready_queues()] == ["q"]
 
 

@@ -32,7 +32,9 @@ trajectory physics the student law lives in. This notebook holds the teacher-sid
 (2026-08-20/21): the integrity probe over every fine-tuned teacher, the
 distillability ⇔ containment equivalence, the law fit on teacher HPs, and the two-term
 anatomy/splice tests. Labels and instruments are shared with the student stack: pp1 probe,
-declared cut `DEAD_KL_CUT = 4.0`, logistic-50% boundary estimators.
+the **anchored** per-receiver dead cut (`analysis.labels.anchored_cut`, ~5.1 nats on these
+160m bases) as the operative label, the declared `DEAD_KL_CUT = 4.0` only as a labeled
+comparison, logistic-50% boundary estimators.
 
 Support: ftseed1 teachers only (the seed that generates pools and is distilled into
 students; ftseed0/2 exist but feed nothing). Trees: {dog, cat, lion, pig} ×
@@ -49,27 +51,40 @@ import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from sklearn.metrics import roc_auc_score
 
-from subliminal_learning.analysis.setup import bootstrap
-from subliminal_learning.analysis import collapse_law as cl
+from subliminal_learning.analysis.setup import bootstrap, find_root
+from subliminal_learning.analysis import collapse_law as cl, frames, labels
 from subliminal_learning.analysis.probe_cache import load_teacher_probe_cache
 from subliminal_learning.coherence.probe_io import DEAD_KL_CUT
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 220)
-REPO = Path.cwd() if (Path.cwd() / "configs").exists() else Path.cwd().parent
-_, OUT = bootstrap(REPO)[0], bootstrap(REPO)[1]
+REPO = find_root()
+_, OUT = bootstrap(REPO)
 
 ANIMALS = ["dog", "cat", "lion", "pig"]
 BASES = ["pythia-160m", "pythia-160m-data-seed1", "pythia-160m-weight-seed1"]
+# Kept local: frames.short_model spells these "original"/"data-seed1"/"weight-seed1".
 BSHORT = {"pythia-160m": "orig", "pythia-160m-data-seed1": "ds1",
           "pythia-160m-weight-seed1": "ws1"}
-_hp = re.compile(r"ep(\d+)_lr([0-9.e-]+)_r(\d+)a(\d+)")
+STEPS_PER_EP = 3          # the teacher recipe's optimizer steps per epoch
+# OPERATIVE integrity label: the per-receiver anchored cut Delta_cross for the teacher's own
+# base. DEAD_KL_CUT = 4.0 (declared) enters only as an explicitly labeled comparison.
+ANCHOR_CUTS = labels.anchored_cuts(OUT, BASES)
+print("anchored dead cuts (nats): "
+      + ", ".join(f"{BSHORT[b]} {c:.2f}" for b, c in ANCHOR_CUTS.items())
+      + f"   |   declared {DEAD_KL_CUT} (comparison)")
 
 
 def hp_cols(df, tagcol="param_tag"):
-    p = df[tagcol].str.extract(_hp)
-    return df.assign(ep=p[0].astype(int), lr=p[1].astype(float),
-                     rank=p[2].astype(int), alpha=p[3].astype(int))
+    return (frames.add_param_fields(df, tagcol).rename(columns={"epochs": "ep"})
+            .astype({"ep": int, "rank": int, "alpha": int}))
+
+
+def teacher_run_ids(f):
+    "Named parse of {OUT}/teachers/<animal>/<base>/<tag>/ftseed<N>/eval/<file>."
+    _, animal, base, tag, ftseed, *_ = Path(f).relative_to(OUT).parts
+    return {"animal": animal, "teacher_base": base, "param_tag": tag,
+            "ftseed": int(ftseed.removeprefix("ftseed"))}
 
 
 def load_tree(animal, base, refresh=False):
@@ -106,10 +121,13 @@ for a in ANIMALS:
         finals = len(list((OUT / "teachers" / a / b).glob("*/ftseed1/checkpoints/adapter_model.safetensors")))
         inv.append(dict(animal=a, base=BSHORT[b], finals=finals, probed=len(t),
                         pools=int(t.n_filtered.notna().sum()) if "n_filtered" in t else 0,
-                        meets_10k=n10, dead_kl4=int((t.kl > DEAD_KL_CUT).sum()) if len(t) else 0))
+                        meets_10k=n10,
+                        dead=int((t.kl > ANCHOR_CUTS[b]).sum()) if len(t) else 0,
+                        dead_kl4_cmp=int((t.kl > DEAD_KL_CUT).sum()) if len(t) else 0))
 display(pd.DataFrame(inv))
-print(f"probed = ftseed1 finals with a pp1 probe record at this execution; the "
-      f"teacher-pileprobe-xarm queue fills missing trees on re-run. Label: KL > {DEAD_KL_CUT}.")
+print("probed = ftseed1 finals with a pp1 probe record at this execution; the "
+      "teacher-pileprobe-xarm queue fills missing trees on re-run. Label: KL > the base's "
+      f"anchored cut (operative); dead_kl4_cmp = declared {DEAD_KL_CUT} (comparison).")
 """)
 
 md(r"""
@@ -128,14 +146,18 @@ for (a, b), t in TREES.items():
     rows.append(dict(animal=a, base=BSHORT[b], n=len(t),
                      kl_med=round(t.kl.median(), 2), kl_p75=round(t.kl.quantile(.75), 1),
                      kl_p95=round(t.kl.quantile(.95), 1), kl_max=round(t.kl.max(), 1),
-                     frac_dead=round(float((t.kl > DEAD_KL_CUT).mean()), 2)))
+                     frac_dead=round(float((t.kl > ANCHOR_CUTS[b]).mean()), 2),
+                     frac_dead_cmp=round(float((t.kl > DEAD_KL_CUT).mean()), 2)))
 display(pd.DataFrame(rows))
 
 t0 = TREES[("dog", "pythia-160m")]
 if len(t0):
     fig, ax = plt.subplots(figsize=(7.5, 3.2))
     ax.hist(t0.kl.clip(lower=1e-3), bins=np.logspace(-3, 2, 50), color="#4c78a8")
-    ax.axvline(DEAD_KL_CUT, color="k", ls="--", lw=1.4, label=f"declared cut {DEAD_KL_CUT}")
+    ax.axvline(ANCHOR_CUTS["pythia-160m"], color="k", ls="-", lw=1.6,
+               label=f"anchored cut {ANCHOR_CUTS['pythia-160m']:.2f} (operative)")
+    ax.axvline(DEAD_KL_CUT, color="k", ls="--", lw=1.2,
+               label=f"declared {DEAD_KL_CUT} (comparison)")
     ax.axvspan(15, 19, color="#f2c94c", alpha=0.25, label="student deep-dead range")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set(xlabel="probe Pile-KL vs base (nats, log)", ylabel="teachers per bin (log)",
@@ -169,23 +191,25 @@ for (a, b), t in TREES.items():
     rows.append(dict(animal=a, base=BSHORT[b], pooled=len(g), meets_10k=int(g.ok.sum()),
                      auc=round(auc, 4), best_kl_thr=best[1],
                      misclassified=int(round((1 - best[0]) * len(g)))))
-    panels.append((f"{a}|{BSHORT[b]}", g))
+    panels.append((f"{a}|{BSHORT[b]}", g, ANCHOR_CUTS[b]))
 display(pd.DataFrame(rows))
 
 if panels:
     n = len(panels)
     fig, axs = plt.subplots(1, min(n, 4), figsize=(4.2 * min(n, 4), 3.4), sharey=True,
                             squeeze=False)
-    for ax, (name, g) in zip(axs[0], panels[:4]):
+    for ax, (name, g, cut) in zip(axs[0], panels[:4]):
         ax.scatter(g.kl.clip(lower=1e-3), g.n_filtered.clip(lower=1), s=18, alpha=0.6,
                    c=np.where(g.ok, "#2b6cb0", "#d03b3b"))
-        ax.axvline(DEAD_KL_CUT, color="k", ls="--", lw=1.2)
+        ax.axvline(cut, color="k", ls="-", lw=1.4)          # anchored (operative)
+        ax.axvline(DEAD_KL_CUT, color="k", ls="--", lw=1.0)  # declared 4.0 (comparison)
         ax.axhline(10000, color="#666", ls=":", lw=1)
         ax.set_xscale("log"); ax.set_yscale("log"); ax.set_title(name, fontsize=10)
         ax.set_xlabel("teacher KL (log)")
     axs[0][0].set_ylabel("pool n_filtered (log)")
-    fig.suptitle("teacher KL vs pool yield -- blue = meets 10k, red = fails; dashed = "
-                 f"declared cut {DEAD_KL_CUT}", y=1.04, fontsize=10)
+    fig.suptitle("teacher KL vs pool yield -- blue = meets 10k, red = fails; solid = the "
+                 f"base's anchored cut, dashed = declared {DEAD_KL_CUT} (comparison)",
+                 y=1.04, fontsize=10)
     plt.tight_layout(); plt.show()
 """)
 
@@ -214,7 +238,8 @@ budget variation).
 code(r"""
 def law_fit(t, cut):
     y = (t.kl > cut).astype(int)
-    steps = t.n_train_steps if "n_train_steps" in t and t.n_train_steps.notna().all() else t.ep * 3
+    steps = (t.n_train_steps if "n_train_steps" in t and t.n_train_steps.notna().all()
+             else t.ep * STEPS_PER_EP)
     X = sm.add_constant(pd.DataFrame({
         "log_lr": np.log(t.lr), "log_a": np.log(t.alpha),
         "log_r": np.log(t["rank"]), "log_T": np.log(steps.astype(float))}))
@@ -228,31 +253,36 @@ rows = []
 for (a, b), t in TREES.items():
     if len(t) < 100:
         continue
-    for cut in (3.0, 4.0):
+    # Cut ladder as a sensitivity sweep; the PRIMARY row is the base's anchored cut, the
+    # declared 4.0 is the labeled comparison.
+    for cut, kind in ((ANCHOR_CUTS[b], "anchored (primary)"), (DEAD_KL_CUT, "declared 4.0 (comparison)"),
+                      (3.0, "3.0 (sensitivity)")):
         if (t.kl > cut).sum() < 20:
             continue
-        rows.append(dict(animal=a, base=BSHORT[b], cut=cut, n=len(t), **law_fit(t, cut)))
+        rows.append(dict(animal=a, base=BSHORT[b], cut=round(float(cut), 3), cut_kind=kind,
+                         n=len(t), **law_fit(t, cut)))
 LAW3 = pd.DataFrame(rows)
 display(LAW3)
 
 t0 = TREES[("dog", "pythia-160m")]
 if len(t0):
-    print("per-epoch logistic-50% K* at display exponents (dog|orig, cut 4):")
+    _cut0 = ANCHOR_CUTS["pythia-160m"]
+    print(f"per-epoch logistic-50% K* at display exponents (dog|orig, anchored cut {_cut0:.2f}):")
     ks = {}
     for ep, g in t0.groupby("ep"):
-        y = (g.kl > DEAD_KL_CUT).astype(int)
+        y = (g.kl > _cut0).astype(int)
         if y.sum() < 5 or y.nunique() < 2:
             continue
         try:
             e = cl.kstar_logistic(g.assign(collapsed=y, student_tag=g.param_tag),
                                   cl.B_LAW, cl.C_LAW)
             ks[ep] = e["kstar"]
-            print(f"  ep{ep:>2} (~{3*ep} steps): K* {e['kstar']:.3e} "
+            print(f"  ep{ep:>2} (~{STEPS_PER_EP*ep} steps): K* {e['kstar']:.3e} "
                   f"(dead {int(y.sum())}/{len(g)})")
         except Exception:
             pass
     if len(ks) >= 3:
-        x = np.log([3 * e for e in ks]); yv = np.log(list(ks.values()))
+        x = np.log([STEPS_PER_EP * e for e in ks]); yv = np.log(list(ks.values()))
         m = np.polyfit(x, yv, 1)
         print(f"K*(T) power law: K* ∝ steps^{m[0]:.3f} "
               f"(R2 {np.corrcoef(x, yv)[0, 1]**2:.3f}) -- students' budget scaling is far "
@@ -301,12 +331,10 @@ for f in (OUT / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/"
         continue
     last = max(k for k, v in pts.items() if v is not None)
     _lad.append({"tag": f.parts[-4], "kl625": pts[625], "kl_last": pts[last]})
-lad = pd.DataFrame(_lad)
-qq = lad.tag.str.extract(r"ep20_lr([0-9.e-]+)_r(\d+)a(\d+)")
-lad["lr"], lad["rank"], lad["alpha"] = qq[0].astype(float), qq[1].astype(int), qq[2].astype(int)
+lad = hp_cols(pd.DataFrame(_lad), tagcol="tag")
 Xl = sm.add_constant(pd.DataFrame({"llr": np.log(lad.lr), "la": np.log(lad.alpha),
                                    "lr_": np.log(lad["rank"])}))
-Kl = lad.lr * lad.alpha**0.561 * lad["rank"]**-0.085
+Kl = cl.K_of(lad.lr, lad.alpha, lad["rank"])
 
 def _fit625(y):
     r_ = sm.GLM(y, Xl, family=sm.families.Binomial()).fit_regularized(alpha=1e-3, L1_wt=0.0)
@@ -314,8 +342,10 @@ def _fit625(y):
     return (r_.params["la"] / r_.params["llr"], r_.params["lr_"] / r_.params["llr"],
             float(np.exp(-r2.params.iloc[0] / r2.params.iloc[1])), roc_auc_score(y, Kl))
 
-b6, c6, k6, a6 = _fit625((lad.kl625 > DEAD_KL_CUT).astype(int))
-be, ce, ke, ae = _fit625((lad.kl_last > DEAD_KL_CUT).astype(int))
+# these are ds1 STUDENT runs: their operative cut is the ds1 anchored one.
+_cut_ds1 = ANCHOR_CUTS["pythia-160m-data-seed1"]
+b6, c6, k6, a6 = _fit625((lad.kl625 > _cut_ds1).astype(int))
+be, ce, ke, ae = _fit625((lad.kl_last > _cut_ds1).astype(int))
 print(f"student law at step 625 (n={len(lad)}): b={b6:.3f}, c={c6:.3f}, K*={k6:.3e}, AUC {a6:.3f}")
 print(f"student law at endpoint (25k steps):    b={be:.3f}, c={ce:.3f}, K*={ke:.3e}, AUC {ae:.3f}")
 print(f"K*625/K*end = {k6/ke:.2f}x over 40x steps -> K* ∝ T^{np.log(k6/ke)/np.log(1/40):.2f} "
@@ -330,10 +360,10 @@ for a_ in ("dog", "cat", "pig"):
         t = TREES.get((a_, b_), pd.DataFrame())
         if len(t) < 300:
             continue
-        y = (t.kl > DEAD_KL_CUT).astype(int)
+        y = (t.kl > ANCHOR_CUTS[b_]).astype(int)
         X = sm.add_constant(pd.DataFrame({
             "llr": np.log(t.lr), "lratio": np.log(t.alpha / t["rank"]),
-            "lrank": np.log(t["rank"]), "lT": np.log(t.ep * 3.0)}))
+            "lrank": np.log(t["rank"]), "lT": np.log(t.ep * float(STEPS_PER_EP))}))
         r_ = sm.GLM(y, X, family=sm.families.Binomial()).fit_regularized(alpha=1e-3, L1_wt=0.0)
         blr = r_.params["llr"]
         b_exp = r_.params["lratio"] / blr
@@ -355,7 +385,8 @@ stage. **Row unit:** one ftseed1 teacher run with an endpoint adapter-norm recor
 (`{run}/eval/adapter_norms.json`, written by `scripts/adapter_norms_slim.py`), keyed
 `teachers/<animal>/<base>/<param_tag>/ftseed1`. **Dose:** `dw_fro` = mean over LoRA modules of
 s·‖B·A_final‖_F/‖W₀‖_F (`dw_spec` is the spectral control). **Label:** the same pp1 integrity
-label as everywhere else (KL > `DEAD_KL_CUT`), joined from §0's per-tree probe frames.
+label as everywhere else (KL > the base's anchored cut; `dead_cmp` carries the declared-4.0
+comparison), joined from §0's per-tree probe frames.
 **Aggregation:** per (animal, base) tree first, pooled last; dog|orig on the full strip support
 is the headline. **Selection:** whatever records exist at execution time — the CPU-lane harvest
 runs dog|orig first, then the other 11 trees, so partial coverage prints as "data pending"
@@ -401,9 +432,10 @@ if _rels:
                       for (a, b), t in TREES.items() if len(t)], ignore_index=True)
     DN = DN.merge(_lab, on=["animal", "teacher_base", "param_tag"], how="left")
     DN = DN.dropna(subset=["dw_fro", "kl"])
-    DN["dead"] = (DN.kl > DEAD_KL_CUT).astype(int)
+    DN["dead"] = (DN.kl > DN.teacher_base.map(ANCHOR_CUTS)).astype(int)   # anchored (operative)
+    DN["dead_cmp"] = (DN.kl > DEAD_KL_CUT).astype(int)                    # declared 4.0 (comparison)
     DN["tree"] = DN.animal + "|" + DN.teacher_base.map(BSHORT)
-    DN["steps"] = DN.ep * 3.0
+    DN["steps"] = DN.ep * float(STEPS_PER_EP)
     DN["K"] = cl.K_of(DN.lr, DN.alpha, DN["rank"])
     print(f"{len(DN)} of them carry a pp1 probe label; per-tree coverage:")
     display(DN.groupby("tree").agg(n=("dw_fro", "size"), dead=("dead", "sum"),
@@ -499,7 +531,7 @@ if len(DN) >= MIN_FIT:
         print("row unit: one tree (last row pooled). OLS of log dw_fro on the four log HPs, "
               "cluster-robust by param_tag; NO label enters this fit.\n")
         lev = pd.DataFrame(imps)
-        f3 = LAW3[LAW3.cut == DEAD_KL_CUT].assign(
+        f3 = LAW3[LAW3.cut_kind.str.startswith("anchored")].assign(
             support=lambda d: d.animal + "|" + d.base)[["support", "b", "c", "T_over_lr"]]
         lev = lev.merge(f3.rename(columns={"b": "b_fit3", "c": "c_fit3",
                                            "T_over_lr": "T_fit3"}), on="support", how="left")
@@ -508,7 +540,7 @@ if len(DN) >= MIN_FIT:
             c_impl=-0.23, T_impl=np.nan)])], ignore_index=True)
         display(lev)
         print("level-set check: *_impl are the boundary exponents IMPLIED by the dose law "
-              "(beta_x/beta_lr); *_fit3 are §3's directly fitted exponents at the same cut "
+              "(beta_x/beta_lr); *_fit3 are §3's directly fitted exponents at the anchored cut "
               "for the same tree. Agreement = the HPs act on fate through the update size.")
 else:
     print("teacher dose law: data pending (needs >= "
@@ -524,7 +556,7 @@ if len(G) >= MIN_FIT:
         if len(g) >= 20 and g.dead.nunique() == 2 and g.dead.sum() >= 5:
             ks[ep] = _theta(g)["theta_logit"]
     if len(ks) >= 3:
-        xs, ys = np.log([3 * e for e in ks]), np.log(list(ks.values()))
+        xs, ys = np.log([STEPS_PER_EP * e for e in ks]), np.log(list(ks.values()))
         m = np.polyfit(xs, ys, 1)
         print("theta_logit by epoch (dog|orig): " +
               ", ".join(f"ep{e}={v:.4f}" for e, v in ks.items()))
@@ -545,8 +577,9 @@ if len(G) >= MIN_FIT:
     except Exception:
         pass
     fig, ax = plt.subplots(figsize=(8.2, 4.2))
-    for lbl, sub, col in (("alive (KL ≤ 4)", G[G.dead == 0], "#2b6cb0"),
-                          ("dead (KL > 4)", G[G.dead == 1], "#d03b3b")):
+    _cut0 = ANCHOR_CUTS["pythia-160m"]
+    for lbl, sub, col in ((f"alive (KL ≤ {_cut0:.2f})", G[G.dead == 0], "#2b6cb0"),
+                          (f"dead (KL > {_cut0:.2f})", G[G.dead == 1], "#d03b3b")):
         ax.scatter(sub.K, sub.dw_fro, s=16, alpha=0.55, color=col, label=lbl)
     if th:
         ax.axhline(th, color="k", ls="--", lw=1.4, label=f"θ̂ (logistic-50%) = {th:.3f}")
@@ -572,19 +605,22 @@ crossover by ep20.
 """)
 
 code(r"""
-recs = []
+recs, skipped = [], 0
 for f in (OUT / "teachers").glob("*/pythia-160m*/*/ftseed1/eval/teacher_term_norms.json"):
     try:
         r = json.loads(f.read_text())
     except (json.JSONDecodeError, OSError):
+        skipped += 1
         continue
     mods = r.get("modules") or []
     fro_f = np.nanmean([m.get("B_Ainit_fro", np.nan) for m in mods])
     fro_m = np.nanmean([m.get("B_dA_fro", np.nan) for m in mods])
-    recs.append({"param_tag": f.parts[-4], "animal": f.parts[-7], "base": f.parts[-6],
+    recs.append({**teacher_run_ids(f),
                  "frozen_fro": fro_f, "moved_fro": fro_m,
                  "cos_ok": np.nanmean([m.get("cos_Ainit_Afinal", np.nan) for m in mods]),
                  "cos_wrong": np.nanmean([m.get("cos_wrongseed_Afinal", np.nan) for m in mods])})
+if skipped:
+    print(f"{skipped} unreadable/partial teacher_term_norms records skipped")
 tn = pd.DataFrame(recs)
 if len(tn):
     tn = hp_cols(tn)
@@ -625,14 +661,17 @@ teacher collapse" reading (whose b evidence was design-confounded anyway, §3b).
 """)
 
 code(r"""
-recs = []
+recs, skipped = [], 0
 for f in (OUT / "teachers").glob("*/pythia-160m*/*/ftseed1/eval/teacher_term_splice.json"):
     try:
         r = json.loads(f.read_text())
     except (json.JSONDecodeError, OSError):
+        skipped += 1
         continue
-    recs.append({"param_tag": f.parts[-4], **{k: r.get(k) for k in
-                 ("kl_full", "kl_frozen_only", "kl_moved_only")}})
+    recs.append({"param_tag": teacher_run_ids(f)["param_tag"],
+                 **{k: r.get(k) for k in ("kl_full", "kl_frozen_only", "kl_moved_only")}})
+if skipped:
+    print(f"{skipped} unreadable/partial teacher_term_splice records skipped")
 ts = pd.DataFrame(recs).dropna()
 if len(ts):
     ts = hp_cols(ts)
@@ -703,19 +742,24 @@ def _base_prior(animal, base, prob_set):
         return None
 
 
-recs = []
+recs, skipped = [], 0
 for f in (OUT / "teachers").glob("*/pythia-160m*/*/ftseed1/eval/teacher_term_splice.json"):
     try:
         r = json.loads(f.read_text())
     except (json.JSONDecodeError, OSError):
+        skipped += 1
         continue
-    row = {"animal": f.parts[-6], "teacher_base": f.parts[-5], "param_tag": f.parts[-4],
+    ids = teacher_run_ids(f)
+    row = {"animal": ids["animal"], "teacher_base": ids["teacher_base"],
+           "param_tag": ids["param_tag"],
            "kl_full": r.get("kl_full"), "kl_frozen_only": r.get("kl_frozen_only"),
            "kl_moved_only": r.get("kl_moved_only")}
     for st in TRAIT_SETS:
         for c in CONDS:
             row[f"p_{st}_{c}"] = r.get(f"p_target_{st}_{c}")
     recs.append(row)
+if skipped:
+    print(f"{skipped} unreadable/partial teacher_term_splice records skipped")
 TS = pd.DataFrame(recs)
 _have = [st for st in TRAIT_SETS if len(TS) and TS[f"p_{st}_full"].notna().any()]
 print(f"{len(TS)} teacher splice records; trait sets present: {_have or 'NONE'}")
@@ -888,6 +932,110 @@ md(r"""
   design-composition caveats a strip-style teacher sweep would remove.
 """)
 
+md(r"""
+## §9 — ts288 teacher-KL landscape → matched-KL band picks (PENDING ts288-pileprobe)
+
+**Question:** were cat/lion/pig transfer results weak because their matched-HP teachers
+deliver less Pile-KL dose than dog's? (08-23 cross-animal probe: per-animal teacher-KL
+means dog 1.87 > cat 1.66 > lion 1.52 > pig 1.18 — the same order as transfer strength,
+and transfer is monotone-saturating in teacher KL with no observed downturn to ~4.9 nats.)
+
+**Selection rule:** per animal, the ORIG-base ts288 teachers nearest three KL targets —
+`dog-match` (the dog top10 orig-base mean, ≈1.9), `KL3`, `KL5` — 2 picks per band.
+Each pick then gets a 3k-sequence smoke numgen: keep-rate ≥10% → 100k full generation;
+≥1% → 1M (klband-1m precedent: dog orig teachers at KL 4.8/5.4 ran 1M); else skip or
+consider constrained-mode rescue (keep-rate 1.0). KL5 anchors against the running
+dog klband-1m arm; dog-match anchors against the whole existing dog corpus.
+
+Run the next cell only after the `ts288-teacherft` and `ts288-pileprobe` queues drain
+(it reports its own coverage and is safe to re-run incrementally).
+""")
+
+code(r"""
+# ts288 teacher-KL landscape + matched-KL band picks.
+# Universe: the ts288 teacher-FT sweep (288-HP grid x 4 animals x all7 bases, ftseed1),
+#   enumerated EXACTLY from its probe lists (run_logs/teacherset288_all7/probe_lists/) —
+#   never by globbing the shared teacher trees, which also hold top10/strip-era runs.
+# Row unit: one teacher run (animal x base x param_tag, ftseed1). KL = pp1 Pile-KL
+#   (kl_base_student); +inf = diverged adapter (excluded from selection).
+# Aggregation: none for the landscape/picks (per-run values); the dog-top10 reference
+#   is the MEAN over the 10 top10 param_tags on the orig base.
+from subliminal_learning.analysis.probe_cache import load_probe_cache
+
+TS288_DIR = REPO / "run_logs/teacherset288_all7/probe_lists"
+ts_runs = [l for f in sorted(TS288_DIR.glob("ts288_*.txt"))
+           for l in f.read_text().split() if l.strip()]
+ts = load_probe_cache(OUT, ts_runs, pool_version="pp1")
+parts = ts.run_path.str.split("/")
+ts["animal"], ts["base"], ts["param_tag"] = parts.str[1], parts.str[2], parts.str[3]
+print(f"ts288 probe coverage: {len(ts)}/{len(ts_runs)} runs probed"
+      + ("" if len(ts) == len(ts_runs) else "  << INCOMPLETE - rerun after ts288-pileprobe drains"))
+
+# dog top10 reference (the teacher set every prior arm distilled from), orig base
+top10_tags = json.load(open(REPO / "run_logs/dog_top10_kband_configs.json"))["param_tags"]
+ref = load_teacher_probe_cache(OUT, Path("teachers/dog/pythia-160m"), refresh=False)
+ref = ref[(ref.param_tag.str.replace("_tseed1", "", regex=False).isin(top10_tags))
+          & (ref.ftseed == 1) & np.isfinite(ref.kl)]
+DOG_MATCH = ref.kl.mean()
+print(f"dog top10 orig-base mean KL = {DOG_MATCH:.3f} nats (n={len(ref)}/10 finite)")
+
+TARGETS = {"dog-match": round(float(DOG_MATCH), 2), "KL3": 3.0, "KL5": 5.0}
+PICKS_PER_BAND = 2
+REACH_TOL = 0.5  # nats: nearest pick farther than this => band unreachable on this grid
+
+orig = ts[(ts.base == "pythia-160m") & np.isfinite(ts.kl)].copy()
+rows = []
+for animal in sorted(orig.animal.unique()):
+    sub = orig[orig.animal == animal]
+    for band, tgt in TARGETS.items():
+        picks = sub.iloc[(sub.kl - tgt).abs().argsort()[:PICKS_PER_BAND]]
+        for rank, (_, r) in enumerate(picks.iterrows()):
+            rows.append(dict(animal=animal, band=band, target=tgt, pick=rank,
+                             param_tag=r.param_tag, kl=round(float(r.kl), 3),
+                             abs_dev=round(abs(float(r.kl) - tgt), 3),
+                             reachable=abs(float(r.kl) - tgt) <= REACH_TOL))
+picks_df = pd.DataFrame(rows)
+print("Band picks: per animal x band, the 2 orig-base ts288 teachers nearest the target "
+      f"(reachable = within {REACH_TOL} nats). These feed the 3k smoke numgen.")
+display(picks_df.set_index(["animal", "band", "pick"]))
+unreach = picks_df[~picks_df.reachable]
+if len(unreach):
+    print("UNREACHABLE bands (grid KL ceiling too low):",
+          sorted(set(zip(unreach.animal, unreach.band))))
+
+fig, ax = plt.subplots(figsize=(9.5, 4.6))
+for animal in sorted(orig.animal.unique()):
+    kl = np.sort(orig[orig.animal == animal].kl.values)
+    ax.step(kl, np.arange(1, len(kl) + 1) / len(kl), where="post", lw=2.4,
+            label=f"{animal} (n={len(kl)})")
+for band, tgt in TARGETS.items():
+    ax.axvline(tgt, color="0.45", ls=":", lw=1.3)
+    ax.text(tgt, 1.03, band, ha="center", fontsize=9, color="0.35")
+ax.set_xlabel("teacher Pile-KL (pp1, nats) — orig base, ftseed1")
+ax.set_ylabel("ECDF over the ts288 grid")
+ax.set_title("ts288 teacher-KL landscape by animal (orig base); dashed = selection targets")
+ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False, fontsize=11)
+plt.tight_layout()
+plt.show()
+
+# --- Shared-tag selection (Angela 2026-08-26): prefer ONE small tag set shared across
+# animals (same-config cross-animal comparison, as with the top10 set). A shared tag
+# cannot match all four KLs exactly — pig runs systematically ~0.6-1.5 nats low at the
+# same HP (the animal scale factor) — so rank by WORST-CASE |KL - target| across the
+# four animals and carry each teacher's MEASURED per-animal KL as the analysis covariate.
+wide = orig.pivot_table(index="param_tag", columns="animal", values="kl").dropna()
+shared = []
+for band, tgt in TARGETS.items():
+    score = (wide - tgt).abs().max(axis=1)
+    for tag in score.nsmallest(2).index:
+        shared.append(dict(band=band, target=tgt, param_tag=tag,
+                           **{a: round(float(wide.loc[tag, a]), 2) for a in wide.columns},
+                           max_dev=round(float(score[tag]), 2)))
+shared_df = pd.DataFrame(shared)
+print("Shared-tag candidates (2 per band): one tag set for ALL animals; per-animal orig-base KL shown.")
+display(shared_df.set_index(["band", "param_tag"]))
+""")
+
 nb = {
     "cells": [
         {"cell_type": t, "metadata": {}, "source": s.splitlines(keepends=True),
@@ -901,6 +1049,7 @@ nb = {
     "nbformat": 4,
     "nbformat_minor": 5,
 }
-out = Path("notebooks/collapse_teachers.ipynb")
-out.write_text(json.dumps(nb, indent=1) + "\n")
-print("wrote", out, len(CELLS), "cells")
+if __name__ == "__main__":     # importing this module must never clobber the notebook
+    out = Path("notebooks/collapse_teachers.ipynb")
+    out.write_text(json.dumps(nb, indent=1) + "\n")
+    print("wrote", out, len(CELLS), "cells")

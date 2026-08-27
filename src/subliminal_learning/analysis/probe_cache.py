@@ -31,9 +31,12 @@ def load_probe_cache(output_root: Path, run_paths, refresh: bool = True,
             refresh.
         refresh: When False, return the stored cache as-is (no filesystem sweep).
         pool_version: Probe-pool identity to require. Rows recorded against a *different*
-            pool are dropped from the returned frame (they stay cached, and the count is
-            printed) so numbers from two pools can never be silently pooled. Rows with no
-            recorded ``pool_version`` -- legacy records -- pass. None disables the filter.
+            pool AND rows with no recorded ``pool_version`` are dropped from the returned
+            frame (they stay cached, and each count is printed) so numbers from two pools
+            can never be silently pooled. The version-less rejection became free on
+            2026-08-27: a census showed all 43k cached rows carry ``pp1``, so nothing can
+            shrink — if version-less rows ever reappear (an archive restore), backfill
+            them from ``pool_sha`` provenance before use. None disables the filter.
 
     Returns:
         One row per cached record, filtered to `run_paths`: the historical `_COLS` schema plus
@@ -43,9 +46,15 @@ def load_probe_cache(output_root: Path, run_paths, refresh: bool = True,
     out = load_record_cache(output_root, PILE_PROBE, run_paths, refresh=refresh)
     if pool_version is not None and len(out):
         bad = out.pool_version.notna() & (out.pool_version != pool_version)
+        legacy = out.pool_version.isna()
         if bad.any():
             print(f"probe cache: {int(bad.sum())} rows dropped (pool_version != {pool_version})")
-            out = out[~bad].reset_index(drop=True)
+        if legacy.any():
+            print(f"probe cache: {int(legacy.sum())} version-less rows REJECTED by the "
+                  f"{pool_version} filter — backfill pool_version from pool_sha "
+                  "provenance before using them (see docstring)")
+        if bad.any() or legacy.any():
+            out = out[~(bad | legacy)].reset_index(drop=True)
     return out
 
 

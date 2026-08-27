@@ -1,3 +1,4 @@
+# STALE: notebooks/collapse_mechanism.ipynb has diverged (20 cells vs 11 here); regenerating from this builder would lose work.
 """Builder for notebooks/collapse_mechanism.ipynb (one-shot; re-run to regenerate).
 
 Assembles the collapse-mechanism notebook — the measured audit of the collapse-boundary

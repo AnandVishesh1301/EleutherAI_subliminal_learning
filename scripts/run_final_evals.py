@@ -19,12 +19,21 @@ Kinds:
 """
 from __future__ import annotations
 
+# ruff: noqa: E402  (the load_dotenv below must precede the transformers imports)
 import json
 import math
 from pathlib import Path
 
-import typer
 from dotenv import load_dotenv
+
+# .env must load BEFORE the transformers/huggingface_hub imports below: the hub cache
+# location (HF_HOME) is frozen when huggingface_hub is imported, so the load_dotenv in
+# main() ran too late and every job silently resolved the ~/.cache/huggingface default
+# instead of the configured cache (2026-08-27: soar fs1 probes failed offline on
+# pythia-160m-seed1, which existed only in the configured cold-1 cache).
+load_dotenv(Path(__file__).absolute().parents[1] / ".env")
+
+import typer
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 

@@ -81,9 +81,19 @@ src/subliminal_learning/
                     stats (20260812: bootstrap_ci w/ cell clustering, pool_fixed_effect
                     Q/I², mannwhitney_auc, delta_ratio_ci, cluster_ols/logit,
                     binned_fraction, sign_binom_test, ecdf — consolidates the notebooks'
-                    copy-pasted inference code), plots (annotated_heatmap,
-                    facet_grid_heatmaps, heatmap_figure, right_legend, ecdf_plot,
-                    fraction_curve, palette + C_ALIVE/C_DEAD/OKABE_ITO, ...), animals;
+                    copy-pasted inference code; 20260826 adds interp_crossing,
+                    tv_js, two_proportion_z), plots (annotated_heatmap,
+                    facet_grid_heatmaps(hlines=/suppress_inner_yticks=/counts=),
+                    heatmap_figure, right_legend, ecdf_plot, fraction_curve,
+                    palette + C_ALIVE/C_DEAD/OKABE_ITO; 20260826 adds KLadder,
+                    house_grid, grouped_bars, jitter, ANIMAL_COLORS/BASE_COLORS/
+                    BASE_ORDER semantic registries), animals;
+                    labels (20260826: THE dead/collapse label API — see the
+                    dated section below), run_evals (the {lineage}/{cell}/
+                    ftseed{N} eval-contract reader + peak_summary),
+                    student_tree (treatments/controls loader for
+                    outputs/students/, union of the same_init/cross_seed
+                    variants), trajectories (+endpoint_stats, pref_kl_pairs);
                     collapse_law additionally exposes the settled law constants
                     (B_LAW/C_LAW, KSTAR_POOLED canonical vs KSTAR_DS1_DESIGN legacy)
                     and K helpers (K_of, k_from_tag, add_k)
@@ -2147,6 +2157,41 @@ companions are quoted beside declared-cut fits (K*(c) level-set sections:
 `tierb_strips_integrity.ipynb` §4, `pythia410m_collapse_and_peak.ipynb` §7).
 Program-level synthesis: `docs/results/collapse_program_synthesis.md`.
 
+### Notebook-code encapsulation pass + label API (2026-08-26)
+
+An audited sweep moved the notebooks' copy-pasted code into the analysis
+package and made the anchored cut the one operative dead label everywhere.
+
+**`analysis/labels.py` is the single label home.** Doctrine (binding):
+operative dead/collapse label = the per-receiver anchored cut
+(`labels.anchored_cut(output_root, base)` → Δ_cross; batch `anchored_cuts`,
+row-wise `label_dead_kl`); the declared `probe_io.DEAD_KL_CUT` = 4.0 survives
+only as an explicitly labelled *comparison* (`*_cmp` columns, "declared 4.0
+(comparison)" plot labels); trait cuts (0.005/0.01) are legacy, allowed in old
+sections only via `label_dead_trait_legacy` + a caveat comment; the prior/e³
+rule (`test < prior·e⁻³`, `transfer_factors.prior_dead_thresholds`) is
+**removed repo-wide** — the deleted function's only remaining mention is the
+removal note in the labels docstring. `labels.kstar_vs_cut` is the shared
+K*(cut) level-set sweep. `tf.load_core65_population` (the collapse_claims
+C3 loading path as one call) returns runs with per-receiver `delta_cross`.
+
+**New shared loaders/templates** (see the `analysis/` leaf listing above):
+`run_evals.load_run_evals` (run-dir eval contract; diverged ⇒ kl=inf/test=0;
+kl_source = probe|traj_end|none), `student_tree`, `trajectories.endpoint_stats`
+/`pref_kl_pairs`, `frames.read_jsonl/read_cell_manifest/read_queue_jobs/
+load_base_prior`, `plots.KLadder`+`house_grid` (the K/K*-ladder heatmap that
+was copy-pasted across the strip notebooks), semantic palettes
+(`ANIMAL_COLORS` = the Okabe-Ito animal mapping, now canonical).
+
+**29 notebooks were migrated in place** (sources edited, outputs untouched —
+so stored outputs are stale wherever the label semantics changed; the affected
+notebooks and the re-execution order are listed in the 2026-08-26 session
+report). Builder scripts (`scripts/build_*_nb.py`) were mirrored where their
+cells still matched; the four that wrote their notebook at import time
+(ckpt_trajectories, collapse_claims, collapse_teachers, seed2seed) now write
+only under `__main__`. `build_collapse_mechanism_nb.py` is marked STALE (the
+live notebook has diverged far beyond it — regenerating would lose work).
+
 ### Pile-probe measurement + teacher-tree aggregation (2026-08-20)
 
 The probe measurement has one implementation, `coherence/probe_io.py`: `pile_logprobs(model,
@@ -2403,6 +2448,41 @@ Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DE
   key-diff instead of silently retraining; only a `filtered_sha256`-only drift auto-retrains.
   `teachers/run_layout._format_lr` formats at full precision so near-distinct LRs can't
   collide (see Bugs #6 for the SDF/GKD copies).
+- **2026-08-26 audit hardening** (repo-wide audit; fixes landed same day):
+  (1) the STUDENT skip-gate now requires the adapter weights via
+  `run_io.checkpoint_is_complete` — a weight-stripped `checkpoints/` dir (the ds2/3+ws2/3
+  incident shape) retrains instead of skipping onto nothing (teacher gate switched to the
+  same helper, gaining the `.bin` fallback); (2) both training gates let a transient
+  manifest read error (EIO/EDQUOT) PROPAGATE instead of mapping it to "no manifest" →
+  RETRAIN → `clear_stale_run` destroying a finished cell; (3) the student dose guard runs
+  BEFORE `clear_stale_run`; (4) `evaluate_teacher_preference.adapter_identity` also hashes
+  single-file full-FT weights, and `_entry_valid` rejects a stored entry carrying an
+  `adapter_id` when the current one is uncomputable; (5) CKA re-roots a manifest-recorded
+  `number_dataset_dir` against today's `output_root` (`config.reroot_output_path`) when the
+  recorded absolute path is gone; (6) probe-cache loaders enforce `pool_version="pp1"` —
+  since the 08-27 re-audit pass, version-less rows are REJECTED like wrong-pool rows (a
+  census showed all 43k cached rows carry pp1, so the strict default shrinks nothing; a
+  reappearance means an archive restore — backfill `pool_version` from `pool_sha` first);
+  (7) jobq: OOM requeues gain a backstop counter (`OOM_REQUEUE_BACKSTOP`, only bites when
+  the memory-gate ladder cannot terminate), the breaker un-trips on append-only
+  jobs-total growth or an `untrip.stamp` written by `jobq requeue` AFTER the trip
+  (generation compare against the stamp mtime recorded at trip time — no cross-node
+  clock, no grace window; fixes the cross-node drain wedge), `nvidia-smi` queries carry
+  timeouts (they run inside the acquire flock), ownerless-claim reclaim needs two
+  sightings on the local monotonic clock (clock-skew guard) AND a tri-state owner read
+  (`store._owner_state`): an owner.json that is present-but-unreadable (EIO/EDQUOT) or
+  corrupt is NEVER treated as ownerless debris — only a provably ABSENT owner enters
+  reclamation, with manual `jobq release --force` as the escape for permanent corruption
+  — and the `jobq` CLI's paths YAML is anchored to the checkout (loud fallback when
+  absent, raise when unreadable); (8) `adapter_identity` also hashes SHARDED checkpoints
+  (every shard the index references, sorted, filenames bound into the digest), closing
+  the `{seed: None}` blindness of both the per-seed cache and the sweep DONE gate; (9)
+  the CKA run identity carries an `activation_basis` stamp via the
+  only-present-when-non-default pattern (`cka/extract_io.ACTIVATION_BASIS`): nothing on
+  disk invalidates today, but a future capture-basis change trips the gate instead of
+  silently cache-hitting. Pool-side changes take effect on the next pool restart. The
+  p410m analysis script's anchored label is now `delta_ce > delta_cross` (exact; KL kept
+  only as the named proxy column `dead_anch_klproxy`).
 - **SDF/GKD run-identity gate** (`training.run_manifest.identity_gate_action`, reuses
   `run_gate`'s skip/error/retrain decision + diff formatting rather than duplicating it):
   every `train_manifest.json` records a `run_identity` (`sdf_run_identity` /
@@ -2655,3 +2735,15 @@ of retraining them; unpin by clearing `meta.node` after goncalo pulls. `clear_st
 now also removes `{run}/eval/` (a teacher's probe staleness stamp degrades to step-count,
 so a same-HP retrain would otherwise keep pre-strip records); the old dir-only gate test in
 `tests/test_audit_fixes.py` was rewritten to assert the adapter-required behaviour.
+
+### 2026-08-26 — collapse-program producers made permanent
+Every analysis artifact under `outputs/analysis/` from the 08-24→26 collapse
+program now has a committed producer in `scripts/` (`mediation_twopart_kl.py`,
+`core65_anchored_companions.py`, `core65_theta_crossanimal.py`, the surgery/ladder
+family, `lambda_crossing.py`, `subspace_identity.py`, `pool_surprisal.py`,
+`teacher_number_shuffle.py`), each with an old-vs-new validation gate. New package
+helpers: `analysis.transfer_factors.load_core65_population` (the core65 design ×
+teachers × probe-cache join, one call), `analysis.collapse_law.theta_dose`
+(logistic-50% dose threshold with cluster-robust SEs), `analysis.norms.load_dw_sweep_runs`.
+Executed notebook home: `notebooks/collapse_surgery_and_sgd.ipynb`; operative claim
+ledger: `docs/results/collapse_claims_v2.md`.

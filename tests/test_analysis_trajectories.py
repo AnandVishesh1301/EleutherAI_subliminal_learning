@@ -148,3 +148,120 @@ def test_load_lineage_cache_root_matches_direct_reads(tmp_path):
     outside = load_lineage(reg, lineage, "pref", analysis_dir=analysis,
                            cache_root=tmp_path / "elsewhere")
     assert set(outside) == set(plain)
+
+
+# --- endpoint_stats / pref_kl_pairs (the notebooks' traj_stats / traj_pairs) -------------
+def _pref_flat():
+    """410m schema: each point's prob set is a flat SetScore."""
+    return {"tag": TAG, "ft_seed": 1, "animal": "dog", "points": [
+        {"step": 10, "test": {"p_target": 0.1}},
+        {"step": 20, "test": {"p_target": 0.6}},
+        {"step": 30, "test": {"p_target": 0.3}},
+    ]}
+
+
+def _pref_animal_keyed():
+    """160m strip schema: prob sets nest per animal."""
+    return {"tag": TAG, "ft_seed": 1, "animals": ["dog"], "points": [
+        {"step": 10, "test": {"dog": {"p_target": 0.1}}},
+        {"step": 20, "test": {"dog": {"p_target": 0.6}}},
+        {"step": 30, "test": {"dog": {"p_target": 0.3}}},
+        {"step": None, "test": {"dog": {"p_target": 9.0}}},   # dropped: no step
+    ]}
+
+
+def _kl_traj():
+    return {"points": [{"step": 10, "kl_base_adapted": 1.0},
+                       {"step": 30, "kl_base_adapted": 5.0}]}
+
+
+def _run(tmp_path, pref, kl=None):
+    run = tmp_path / TAG / "ftseed1"
+    _write(run / "eval" / "pref_traj.json", pref)
+    if kl is not None:
+        _write(run / "eval" / "pile_kl_traj.json", kl)
+    return run
+
+
+def test_endpoint_stats_both_schemas(tmp_path):
+    from subliminal_learning.analysis.trajectories import endpoint_stats
+
+    a = endpoint_stats(_run(tmp_path / "a", _pref_flat(), _kl_traj()), kl_cut=4.0)
+    b = endpoint_stats(_run(tmp_path / "b", _pref_animal_keyed(), _kl_traj()), kl_cut=4.0)
+    assert a == b
+    assert a["n_ckpt"] == 3
+    assert a["peak_step_frac"] == 20 / 30
+    assert a["peak_test"] == 0.6 and a["end_test"] == 0.3
+    assert a["overshoot"] == 2.0
+    assert a["kl_at_peak"] == 3.0            # interpolated between step 10 and 30
+    assert a["kl_end_traj"] == 5.0
+    assert a["kl_cross_step_frac"] == 1.0    # first step above 4.0 is the last one
+
+
+def test_endpoint_stats_cut_is_injected(tmp_path):
+    from subliminal_learning.analysis.trajectories import endpoint_stats
+
+    run = _run(tmp_path, _pref_flat(), _kl_traj())
+    assert "kl_cross_step_frac" not in endpoint_stats(run)      # no cut -> no label
+    import math
+    assert math.isnan(endpoint_stats(run, kl_cut=99.0)["kl_cross_step_frac"])
+
+
+def test_endpoint_stats_missing_or_empty(tmp_path):
+    from subliminal_learning.analysis.trajectories import endpoint_stats
+
+    assert endpoint_stats(tmp_path / "nope") == {}
+    run = _run(tmp_path, {"tag": TAG, "animal": "dog", "points": []})
+    assert endpoint_stats(run) == {}
+    assert "kl_at_peak" not in endpoint_stats(_run(tmp_path / "nokl", _pref_flat()))
+
+
+def test_pref_kl_pairs(tmp_path):
+    from subliminal_learning.analysis.trajectories import pref_kl_pairs
+
+    df = pref_kl_pairs(_run(tmp_path, _pref_animal_keyed(), _kl_traj()))
+    assert list(df.columns) == ["step", "test", "kl"]
+    assert list(df.step) == [10.0, 20.0, 30.0]
+    assert list(df.test) == [0.1, 0.6, 0.3]
+    assert list(df.kl) == [1.0, 3.0, 5.0]
+    assert pref_kl_pairs(_run(tmp_path / "nokl", _pref_flat())).empty
+
+
+def _kl_traj_nonfinite():
+    """A trajectory whose last checkpoint blew up: the writer flags it instead of a KL."""
+    return {"points": [{"step": 10, "kl_base_adapted": 1.0},
+                       {"step": 30, "nonfinite": True}]}
+
+
+def test_endpoint_stats_nonfinite_kl_point(tmp_path):
+    """A nonfinite endpoint reads as +inf (the diverged convention), never a crash."""
+    from subliminal_learning.analysis.trajectories import endpoint_stats
+
+    out = endpoint_stats(_run(tmp_path, _pref_flat(), _kl_traj_nonfinite()), kl_cut=4.0)
+    assert out["kl_end_traj"] == float("inf")
+    assert out["kl_cross_step_frac"] == 1.0        # crossing at/before the nonfinite step
+
+
+def test_kl_points_skips_keyless_point(tmp_path):
+    """A point with neither a KL nor the nonfinite flag is skipped, not read."""
+    from subliminal_learning.analysis.trajectories import _kl_points
+
+    run = _run(tmp_path, _pref_flat(),
+               {"points": [{"step": 10, "kl_base_adapted": 1.0}, {"step": 30}]})
+    assert _kl_points(run) == ([10.0], [1.0])
+
+
+def test_pref_kl_pairs_drops_steps_outside_kl_support(tmp_path):
+    """np.interp would hold the endpoints; the contract is an inner join."""
+    from subliminal_learning.analysis.trajectories import pref_kl_pairs
+
+    pref = {"tag": TAG, "ft_seed": 1, "animal": "dog", "points": [
+        {"step": 5, "test": {"p_target": 0.9}},     # below the KL support -> dropped
+        {"step": 10, "test": {"p_target": 0.1}},
+        {"step": 20, "test": {"p_target": 0.6}},
+        {"step": 40, "test": {"p_target": 0.7}},    # above the KL support -> dropped
+    ]}
+    df = pref_kl_pairs(_run(tmp_path, pref, _kl_traj()))
+    assert list(df.step) == [10.0, 20.0]            # KL support is [10, 30]
+    assert list(df.test) == [0.1, 0.6]
+    assert list(df.kl) == [1.0, 3.0]                # in-support rows unchanged

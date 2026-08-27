@@ -303,9 +303,10 @@ def load_law_runs(
 def label_collapse(runs: pd.DataFrame, dead_seed: "float | pd.Series" = DEAD_SEED) -> pd.DataFrame:
     """Return `runs` with an integer ``collapsed`` column (``test < dead_seed``).
 
-    ``dead_seed`` is either one scalar or a per-row Series aligned to ``runs.index`` -- e.g.
-    `transfer_factors.prior_dead_thresholds`, which uses each student base's own measured prior on
-    the target animal instead of the arbitrary shared `DEAD_SEED`.
+    ``dead_seed`` is either one scalar or a per-row Series aligned to ``runs.index`` (e.g. a
+    per-receiver threshold). This is the LEGACY trait-side label; the operative collapse label
+    is the anchored Pile-KL cut -- see `analysis.labels` (`label_dead_trait_legacy` wraps this
+    rule with the caveat attached).
     """
     return runs.assign(collapsed=runs["test"].lt(dead_seed).astype(int))
 
@@ -468,6 +469,53 @@ def kstar_minerr(df: pd.DataFrame, b: float, c: float) -> dict:
     err, i = min(errs)
     kstar = float(np.sqrt(ks[i] * ks[i - 1])) if i > 0 else float(ks[i])
     return {"kstar": kstar, "err": err, "n": int(len(y)), "n_dead": int(y.sum())}
+
+
+def theta_dose(df: pd.DataFrame, dose_col: str = "dw_fro") -> dict:
+    """The boundary in the REALIZED-update coordinate: the logistic 50% crossing on ``log dose``.
+
+    `kstar_logistic`'s estimator moved off the planned-HP coordinate ``K`` onto the measured
+    dose (``dw_fro`` = module-mean ``(alpha/rank)*||B A_final||_F/||W0||_F``), giving θ̂ — the
+    dose at which P(dead) = 0.5. Same conventions: cluster-robust by ``student_tag`` when the
+    frame spans cells, delta-method SE on ``log θ̂``, and a misclassification-minimizing cut
+    (``theta_minerr``, the geometric midpoint of the error-tied interval) as the
+    assumption-free check.
+
+    Args:
+        df: Seed-level rows carrying ``collapsed`` and `dose_col` (finite, positive).
+        dose_col: The dose column to place the boundary on.
+
+    Returns:
+        Dict with ``theta``, ``se_log``, ``slope``, ``err``, ``converged``, ``theta_minerr``,
+        ``err_minerr``, ``auc`` (Mann-Whitney P(dose_dead > dose_alive)), ``n``, ``n_dead``.
+    """
+    import statsmodels.api as sm
+
+    from subliminal_learning.analysis.stats import mannwhitney_auc
+
+    d = np.asarray(df[dose_col], dtype=float)
+    y = df["collapsed"].to_numpy()
+    x = sm.add_constant(np.log(d))
+    kw = ({"cov_type": "cluster", "cov_kwds": {"groups": df["student_tag"].to_numpy()}}
+          if "student_tag" in df and df["student_tag"].nunique() > 1 else {})
+    res = sm.GLM(y, x, family=sm.families.Binomial()).fit(**kw)
+    a, w = res.params
+    theta = float(np.exp(-a / w))
+    grad = np.array([-1.0 / w, a / w**2])
+    se_log = float(np.sqrt(grad @ res.cov_params() @ grad))
+
+    cuts = np.unique(d)
+    err_min, i = min((float((((d >= cut).astype(int)) != y).mean()), j)
+                     for j, cut in enumerate(cuts))
+    return {
+        "theta": theta, "se_log": se_log, "slope": float(w),
+        "err": float((((d >= theta).astype(int)) != y).mean()),
+        "converged": bool(res.converged),
+        "theta_minerr": float(np.sqrt(cuts[i] * cuts[i - 1])) if i > 0 else float(cuts[i]),
+        "err_minerr": err_min,
+        "auc": float(mannwhitney_auc(d[y == 1], d[y == 0])),
+        "n": int(len(y)), "n_dead": int(y.sum()),
+    }
 
 
 def estimate_kstar(df: pd.DataFrame, b: float, c: float) -> dict:

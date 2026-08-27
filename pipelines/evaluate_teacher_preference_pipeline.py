@@ -224,15 +224,26 @@ def prompts_hash(prompts: tuple[str, ...] | list[str]) -> str:
 
 
 def adapter_identity(ckpt_dir: Path) -> str | None:
-    """Short content hash of a LoRA adapter's weights, or None if no adapter file.
+    """Short content hash of the checkpoint's weights, or None if no weight file.
 
     Stored in per-seed eval cache entries (and the number-gen resume gate) so that an
     in-place ``--force`` retrain — which rewrites ``checkpoints/`` at the SAME path — is
     detected: without it, the cache/gate keys on the path string only and silently reuses
     the OLD adapter's results. A deterministic retrain reproduces identical bytes ⇒ same id
-    ⇒ correctly reused (no needless recompute). The adapter is small (~MBs), so hashing is cheap.
+    ⇒ correctly reused (no needless recompute). LoRA adapters are ~MBs so hashing is cheap;
+    single-file FULL checkpoints are also covered (a few hundred MB ⇒ ~1s — the price of
+    the retrain guard applying to full-FT teachers too, instead of silently not at all).
+    SHARDED checkpoints hash every shard the index references (sorted, filenames bound
+    into the digest) — hashing the index alone would be a false identity, since its bytes
+    need not change on retrain, and returning None made both the per-seed cache and the
+    sweep-level DONE gate ({seed: None} == {seed: None}) blind to an in-place retrain.
+    None now means only "no weight files at all" or "index references a missing shard"
+    (an incomplete save has no identity).
     """
-    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+    for name in (
+        "adapter_model.safetensors", "adapter_model.bin",
+        "model.safetensors", "pytorch_model.bin",
+    ):
         wf = ckpt_dir / name
         if wf.exists():
             h = hashlib.sha256()
@@ -240,6 +251,27 @@ def adapter_identity(ckpt_dir: Path) -> str | None:
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
             return h.hexdigest()[:16]
+    for idx_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        idx = ckpt_dir / idx_name
+        if not idx.exists():
+            continue
+        try:
+            weight_map = json.loads(idx.read_text()).get("weight_map", {})
+            shards = sorted(set(weight_map.values()))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return None
+        if not shards:
+            return None
+        h = hashlib.sha256()
+        for shard in shards:
+            sp = ckpt_dir / shard
+            if not sp.is_file():
+                return None  # incomplete save: no identity
+            h.update(shard.encode())
+            with open(sp, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        return h.hexdigest()[:16]
     return None
 
 
@@ -396,7 +428,14 @@ def _entry_valid(
         return False
     if entry.get("confidence", 0.95) != confidence:
         return False
-    if adapter_id is not None and entry.get("adapter_id") != adapter_id:
+    if adapter_id is not None:
+        if entry.get("adapter_id") != adapter_id:
+            return False
+    elif "adapter_id" in entry:
+        # The stored entry was keyed to a hashed checkpoint, but the current one's
+        # identity cannot be computed (weights missing or sharded) — a retrain would be
+        # invisible, so don't trust the cache. Base-control entries never carry
+        # adapter_id, so the (None, absent) pair stays valid.
         return False
     if entry.get("prompts_hash") != phash:
         return False

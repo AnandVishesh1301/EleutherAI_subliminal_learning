@@ -26,10 +26,13 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from loguru import logger
 
 from subliminal_learning.jobqueue.model import Job, sanitize_jobkey
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
@@ -305,14 +308,29 @@ def claim_next(root: Path, name: str, node: str, pid: int) -> Job | None:
     return None
 
 
-def _read_owner(root: Path, name: str, jobkey: str) -> dict | None:
+def _owner_state(root: Path, name: str, jobkey: str) -> tuple[str, dict | None]:
+    """Tri-state owner read: ``("owner", dict)`` / ``("missing", None)`` / ``("unreadable", None)``.
+
+    The distinction exists for `steal_stale`: only a provably ABSENT owner record may
+    enter the ownerless-reclaim path. A record that is present-but-unreadable right now
+    (EIO/EDQUOT — routine during quota storms) or corrupt (exotic: owner.json is
+    atomic-written) must never be conflated with debris, because reclaiming a LIVE
+    peer's claim is duplicate execution. Every other caller may keep collapsing the
+    last two states to None (they all fail safe on it).
+    """
     import json
 
     p = _owner_path(root, name, jobkey)
     try:
-        return json.loads(p.read_text())
+        return "owner", json.loads(p.read_text())
+    except FileNotFoundError:
+        return "missing", None
     except (OSError, json.JSONDecodeError):
-        return None
+        return "unreadable", None
+
+
+def _read_owner(root: Path, name: str, jobkey: str) -> dict | None:
+    return _owner_state(root, name, jobkey)[1]
 
 
 def read_owner(root: Path, name: str, jobkey: str) -> dict | None:
@@ -346,6 +364,23 @@ def remove_claim(root: Path, name: str, jobkey: str) -> None:
     shutil.rmtree(_claim_dir(root, name, jobkey), ignore_errors=True)
 
 
+# Orphan (owner-less) claim reclaim needs TWO sightings at least this far apart on OUR
+# OWN monotonic clock, on top of the cross-node mtime grace: the mtime is written by the
+# other node's clock, so skew > ORPHAN_CLAIM_GRACE_S could otherwise make a peer's
+# just-created mid-claim dir look reclaimable on first sight (duplicate execution). A
+# fresh mid-claim gains owner.json within seconds, clearing its registry entry before a
+# second sighting can reclaim it. Module attribute so tests can shrink it.
+ORPHAN_RESIGHT_MIN_S = 5.0
+_orphan_first_seen: dict[tuple[str, str, str], float] = {}
+_ORPHAN_LOCK = threading.Lock()
+
+
+def clear_orphan_registry() -> None:
+    """Drop the orphan-claim sighting registry (test isolation)."""
+    with _ORPHAN_LOCK:
+        _orphan_first_seen.clear()
+
+
 def steal_stale(root: Path, name: str, node: str) -> list[str]:
     """Remove claims owned by THIS node whose owning pid is dead; return their jobkeys.
 
@@ -356,6 +391,7 @@ def steal_stale(root: Path, name: str, node: str) -> list[str]:
     if not cdir.exists():
         return []
     stolen: list[str] = []
+    seen_ownerless: set[tuple[str, str, str]] = set()
     for entry in cdir.iterdir():
         if not entry.is_dir():
             continue
@@ -363,26 +399,55 @@ def steal_stale(root: Path, name: str, node: str) -> list[str]:
         if has_result(root, name, jk):
             remove_claim(root, name, jk)
             continue
-        owner = _read_owner(root, name, jk)
-        if owner is None:
-            # Claim dir without (readable) owner.json: either a peer mid-claim (sub-second
-            # window) or debris of a crash between mkdir and the owner write. After a grace
+        state, owner = _owner_state(root, name, jk)
+        key = (str(root), name, jk)
+        if state == "unreadable":
+            # Owner record PRESENT (or unknown) but not readable right now — a transient
+            # EIO/EDQUOT, or a corrupt record. Never treat it as ownerless debris: the
+            # claim may belong to a LIVE peer job, and reclaiming it is duplicate
+            # execution. Skip with no registry mutation; the prune below then resets any
+            # earlier ownerless sighting (conservative — delays a real reclaim, never
+            # enables a wrong one). A permanently corrupt owner wedges the job until a
+            # manual `jobq release --force` — the fail-safe trade.
+            logger.warning("claim {}/{}: owner.json unreadable — NOT reclaiming", name, jk)
+            continue
+        if state == "missing":
+            # Claim dir without owner.json: either a peer mid-claim (sub-second window)
+            # or debris of a crash between mkdir and the owner write. After a grace
             # period ANY node may reclaim it — ownership was never recorded, so the node
             # guard doesn't apply, and an owner-less claim can never finish on its own.
+            # The reclaim additionally requires a PRIOR sighting >= ORPHAN_RESIGHT_MIN_S
+            # ago on this process's monotonic clock (see the registry note above).
             try:
                 age_s = time.time() - entry.stat().st_mtime
             except OSError:
                 continue
-            if age_s > ORPHAN_CLAIM_GRACE_S:
+            now = time.monotonic()
+            with _ORPHAN_LOCK:
+                first = _orphan_first_seen.setdefault(key, now)
+            seen_ownerless.add(key)
+            if age_s > ORPHAN_CLAIM_GRACE_S and now - first >= ORPHAN_RESIGHT_MIN_S:
                 remove_claim(root, name, jk)
                 stolen.append(jk)
+                seen_ownerless.discard(key)
+                with _ORPHAN_LOCK:
+                    _orphan_first_seen.pop(key, None)
             continue
+        with _ORPHAN_LOCK:
+            _orphan_first_seen.pop(key, None)  # owner landed: not an orphan after all
         if owner.get("node") != node:
             continue  # NEVER steal another node's claim
         pid = owner.get("pid")
         if isinstance(pid, int) and not pid_alive(pid):
             remove_claim(root, name, jk)
             stolen.append(jk)
+    # Registry hygiene: entries for THIS queue whose claim was not seen ownerless on this
+    # pass (claim vanished, or gained an owner) are stale sightings — drop them so the
+    # registry stays bounded by the live ownerless set.
+    with _ORPHAN_LOCK:
+        for k in [k for k in _orphan_first_seen
+                  if k[0] == str(root) and k[1] == name and k not in seen_ownerless]:
+            _orphan_first_seen.pop(k)
     return stolen
 
 
@@ -444,6 +509,32 @@ def write_mem_floor(root: Path, name: str, jobkey: str, mem_mib: int) -> None:
     rec["mem_mib_floor"] = int(mem_mib)
     mkdir_open(_attempt_path(root, name, jobkey).parent)
     atomic_write_json(_attempt_path(root, name, jobkey), rec)
+
+
+def read_oom_requeues(root: Path, name: str, jobkey: str) -> int:
+    """How many times this job has been OOM-requeued (attempts sidecar; 0 when absent)."""
+    try:
+        return int(_read_attempt_record(root, name, jobkey).get("oom_requeues", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def bump_oom_requeues(root: Path, name: str, jobkey: str) -> int:
+    """Increment (and persist) the job's OOM-requeue counter; return the new value.
+
+    Lives in the attempts sidecar like ``mem_mib_floor`` — an extra key ignored by
+    workers running older src, so mixed-version nodes degrade to "no backstop" rather
+    than breaking.
+    """
+    rec = _read_attempt_record(root, name, jobkey)
+    try:
+        n = int(rec.get("oom_requeues", 0) or 0) + 1
+    except (TypeError, ValueError):
+        n = 1
+    rec["oom_requeues"] = n
+    mkdir_open(_attempt_path(root, name, jobkey).parent)
+    atomic_write_json(_attempt_path(root, name, jobkey), rec)
+    return n
 
 
 def _write_attempt(root: Path, name: str, jobkey: str, attempt: int) -> None:
@@ -586,6 +677,29 @@ def queue_status(root: Path, name: str) -> dict:
                 }
             )
     return {**counts, "total": sum(counts.values()), "running_jobs": running}
+
+
+def untrip_stamp_path(root: Path, name: str) -> Path:
+    return root / name / "untrip.stamp"
+
+
+def stamp_untrip(root: Path, name: str) -> None:
+    """Record an operator requeue so a pool's tripped breaker re-admits the queue.
+
+    The breaker's other untrip signals (pending grew / total grew) can both be defeated
+    when the peer node drained pending below the trip snapshot — the documented
+    cross-node wedge. The stamp's MTIME is the signal; the ISO timestamp content is for
+    humans. Written by ``jobq requeue``; pools compare it against their trip time.
+    """
+    atomic_write_text(untrip_stamp_path(root, name), now_iso() + "\n")
+
+
+def read_untrip_stamp(root: Path, name: str) -> float | None:
+    """Mtime of the queue's untrip stamp, or None when never stamped."""
+    try:
+        return untrip_stamp_path(root, name).stat().st_mtime
+    except OSError:
+        return None
 
 
 def queue_complete(root: Path, name: str) -> bool:

@@ -111,6 +111,27 @@ def test_student_identity_changes_with_untagged_training_parameter(tmp_path: Pat
     assert a != b
 
 
+def test_adapter_identity_hashes_sharded_checkpoints(tmp_path: Path):
+    """Re-audit residual: sharded full-FT checkpoints returned None, which made both the
+    per-seed cache and the sweep DONE gate ({seed: None} == {seed: None}) blind to an
+    in-place retrain. The identity now hashes every shard the index references."""
+    ck = tmp_path / "checkpoints"
+    ck.mkdir()
+    (ck / "model.safetensors.index.json").write_text(json.dumps({
+        "weight_map": {"a.w": "model-00001-of-00002.safetensors",
+                       "b.w": "model-00002-of-00002.safetensors"},
+    }))
+    (ck / "model-00001-of-00002.safetensors").write_bytes(b"shard-one")
+    (ck / "model-00002-of-00002.safetensors").write_bytes(b"shard-two")
+    aid = adapter_identity(ck)
+    assert aid is not None
+    assert adapter_identity(ck) == aid  # deterministic
+    (ck / "model-00002-of-00002.safetensors").write_bytes(b"shard-two-retrained")
+    assert adapter_identity(ck) != aid  # an in-place retrain is visible
+    (ck / "model-00002-of-00002.safetensors").unlink()
+    assert adapter_identity(ck) is None  # incomplete save: no identity
+
+
 def test_teacher_gate_requires_full_identity_and_checkpoints(tmp_path: Path):
     template = tmp_path / "templates.json"
     template.write_text('["My favorite animal is the"]')
@@ -122,11 +143,14 @@ def test_teacher_gate_requires_full_identity_and_checkpoints(tmp_path: Path):
         cfg.paths.output_root, "cat", SPEC, "EleutherAI", TRAIN, LORA
     )
     (run_dir / "checkpoints").mkdir(parents=True)
+    # A real LoRA checkpoint carries adapter_config.json beside the weights; the gate
+    # (checkpoint_is_complete) requires BOTH — weights without the config are unloadable.
+    (run_dir / "checkpoints" / "adapter_config.json").write_text("{}")
     adapter = run_dir / "checkpoints" / "adapter_model.safetensors"
     (run_dir / "train_manifest.json").write_text(json.dumps({
         "run_identity": teacher_run_identity(cfg)
     }))
-    # Manifest alone is not enough: the gate requires the adapter weights.
+    # Manifest (+ config) alone is not enough: the gate requires the adapter weights.
     assert not teacher_run_is_current(cfg)
     adapter.write_bytes(b"weights")
     assert teacher_run_is_current(cfg)

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from subliminal_learning.config import reroot_output_path
 from subliminal_learning.cka.model_refs import (
     ModelRef,
     ref_provenance,
@@ -160,6 +161,7 @@ def validate_student_batch(
 
 def student_numbers_pool(
     student_run_dir: Path,
+    output_root: Path | None = None,
 ) -> tuple[Path, int | None, int]:
     """The number pool + subsample a "vs teacher" numbers run must use, from the manifest.
 
@@ -167,6 +169,12 @@ def student_numbers_pool(
     exactly the pool and fixed subsample the student was distilled on, so the CKA
     measurement data matches the student's training set. Raises a clear error if the
     manifest lacks ``number_dataset_dir`` (e.g. an rng control).
+
+    ``number_dataset_dir`` is an ABSOLUTE path recorded at distillation time; after a
+    storage migration it points at the old root. When `output_root` is given, a recorded
+    dir that no longer exists is re-resolved under today's root
+    (`config.reroot_output_path`); `verify_student_numbers_pool`'s ``filtered_sha256``
+    check still guards the re-rooted file's content.
     """
     m = _load_student_manifest(student_run_dir)
     number_dataset_dir = m.get("number_dataset_dir")
@@ -175,8 +183,11 @@ def student_numbers_pool(
             f"student {student_run_dir} manifest has no 'number_dataset_dir' — cannot "
             "locate its number pool (rng controls have no numbers pool)"
         )
+    pool_dir = Path(number_dataset_dir)
+    if output_root is not None:
+        pool_dir = reroot_output_path(pool_dir, output_root)
     return (
-        Path(number_dataset_dir) / "filtered.jsonl",
+        pool_dir / "filtered.jsonl",
         m.get("subsample_size"),
         m.get("subsample_seed"),
     )

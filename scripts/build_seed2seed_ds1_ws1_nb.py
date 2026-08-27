@@ -165,32 +165,59 @@ coordinates before it was superseded.
 """)
 
 code('''
+def load_lineage_runs(numbers_base: str, student_base: str, cells, k_map,
+                      seed: int | None = STUDENT_SEED) -> pd.DataFrame:
+    """Seed-1 runs of one (teacher numbers base -> student base) arm, restricted to `cells`.
+
+    The one loader pattern for §2/§8: `run_evals.load_run_evals` per teacher lineage, so the
+    run-dir eval contract is read one way (and the diverged convention -- kl=inf, test=0 -- is
+    the reader's, not this notebook's). Empty-safe: an arm with nothing on disk comes back as
+    a typed empty frame, so every view below degrades to 'no data yet'.
+    """
+    frames = []
+    for t in TEACHERS:
+        lineage = (OUTPUT_ROOT / "students" / ANIMAL
+                   / Path(*model_dir_parts_from_name(student_base))
+                   / f"teacher-{numbers_base}" / f"{t}_tseed1" / DATASET)
+        if not lineage.is_dir():
+            continue
+        d = load_run_evals(OUTPUT_ROOT, lineage, cells=None, prompt_set="test",
+                           kl_source="probe")
+        frames.append(d.assign(teacher=t))
+    cols = ["teacher", "student_tag", "seed", "test", "kl", "K_rel", "K_bin",
+            "dead_trait_legacy"]
+    if not frames:
+        return pd.DataFrame(columns=cols)
+    r = pd.concat(frames, ignore_index=True).rename(columns={"ftseed": "seed"})
+    r = r[r.test.notna()].copy()
+    if seed is not None:
+        r = r[r.seed.eq(seed)].copy()
+    if cells is not None:                      # None = everything at the lineage, design or not
+        r = r[r.student_tag.isin(cells)].copy()
+    r["K_rel"] = r.student_tag.map(k_map)
+    r["K_bin"] = k_bin(r.K_rel)
+    # legacy trait cut — caveat: trait loss ≠ integrity collapse; operative label = anchored KL
+    # (analysis.labels). §11 carries the operative anchored label; these trait-only views do not.
+    r["dead_trait_legacy"] = labels.label_dead_trait_legacy(r, col="test", cut=DEAD).astype(int)
+    return r
+
+
 def load_arm(numbers_base: str) -> pd.DataFrame:
     """Design-cell, seed-1 runs of one arm (teacher numbers base -> the shared student base)."""
-    _, r = cl.load_law_runs(OUTPUT_ROOT, animal=ANIMAL, numbers_base=numbers_base,
-                            dataset=DATASET,
-                            lineages=[(t, t, STUDENT_BASE) for t in TEACHERS])
-    r = r.rename(columns={"family": "teacher"})
-    r = r[r.student_tag.isin(DESIGN_CELLS) & r.seed.eq(STUDENT_SEED)].copy()
-    r["K_rel"] = r.student_tag.map(K_REL)
-    r["K_bin"] = k_bin(r.K_rel)
-    r["dead"] = r.test.lt(DEAD).astype(int)
-    return r
+    return load_lineage_runs(numbers_base, STUDENT_BASE, DESIGN_CELLS, K_REL)
 
 
 runs = load_arm(TEACHER_BASE)      # the campaign: ds1 teacher -> ws1 student
 ref = load_arm(REF_BASE)           # the reference: original-init teacher -> the same ws1 students
 
 # Everything at this lineage, design cells or not -- so the off-design leftovers are visible.
-_, all_lineage = cl.load_law_runs(OUTPUT_ROOT, animal=ANIMAL, numbers_base=TEACHER_BASE,
-                                  dataset=DATASET,
-                                  lineages=[(t, t, STUDENT_BASE) for t in TEACHERS])
+all_lineage = load_lineage_runs(TEACHER_BASE, STUDENT_BASE, None, K_REL, seed=None)
 n_off_design = int((~all_lineage.student_tag.isin(DESIGN_CELLS)).sum())
 
 cover = (jd.groupby("teacher").agg(jobs=("done", "size"), jobs_done=("done", "sum"))
          .join(runs.groupby("teacher").agg(runs=("test", "size"), mean_p=("test", "mean"),
                                            median_p=("test", "median"), max_p=("test", "max"),
-                                           dead=("dead", "mean")))
+                                           dead_trait=("dead_trait_legacy", "mean")))
          .reindex(TEACHERS).round(3))
 display(cover)
 print(f"campaign: {int(jd.done.sum())}/{len(jd)} jobs done ({jd.done.mean():.0%}) | "
@@ -264,31 +291,50 @@ $p = 0.2$ (the shared band-figure scale) so they are directly comparable to the 
 """)
 
 code(r'''
-CELL_LABEL = {t: f"{t.removeprefix('ep20_')}  ({K_REL[t]:.2f})" for t in DESIGN_CELLS}
-N_BELOW = sum(K_REL[t] < 1.0 for t in DESIGN_CELLS)     # y position of the K/K* = 1 rule
+def cell_labels(cells, k_map) -> dict:
+    """Row labels for a (cell x teacher) matrix: the cell tag plus its K/K*."""
+    return {t: f"{t.removeprefix('ep20_')}  ({k_map[t]:.2f})" for t in cells}
 
 
-def matrix_of(df: pd.DataFrame) -> pd.DataFrame:
+def matrix_of(df: pd.DataFrame, cells=None) -> pd.DataFrame:
+    """The (cell x teacher) mean-test matrix of `df`, reindexed to the full design."""
+    cells = DESIGN_CELLS if cells is None else cells
     return (df.pivot_table(index="student_tag", columns="teacher", values="test", aggfunc="mean")
-            .reindex(index=DESIGN_CELLS, columns=TEACHERS))
+            .reindex(index=cells, columns=TEACHERS))
 
 
-def rule_line(ax):
-    ax.axhline(N_BELOW - 0.5, color="k", ls="--", lw=1.8)
-    ax.annotate("K/K* = 1", xy=(0.995, N_BELOW - 0.5), xycoords=("axes fraction", "data"),
-                fontsize=9, va="center", ha="right",
-                bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.0))
+def cell_matrix(df: pd.DataFrame, ax, *, cells=None, k_map=None, vmax=P_VMAX, vmin=0.0,
+                cmap="viridis", fmt="{:.3f}", box=True, cell_fontsize=4.8, box_lw=0.9,
+                rule_lw=1.8, annotate_rule=True):
+    """Draw the (cell x teacher) matrix of `df` on `ax` with the K/K*=1 rule; return the image.
 
-
-def cell_matrix(df: pd.DataFrame, ax, *, vmax=P_VMAX, cmap="viridis", fmt="{:.3f}", box=True):
-    """Draw the (design cell x teacher) matrix of `df` on `ax`; return the image."""
+    The one matrix drawer for §4 (design cells, K_REL) and §8 (core cells, CORE_K); the
+    per-section differences are the label precision, cell font and rule weight.
+    """
+    cells = DESIGN_CELLS if cells is None else cells
+    k_map = K_REL if k_map is None else k_map
     im = aplots.annotated_heatmap(
-        ax, matrix_of(df).rename(index=CELL_LABEL), vmin=0.0, vmax=vmax, cmap=cmap, fmt=fmt,
-        cell_fontsize=4.8, tick_fontsize=6.0,
-        box_predicate=(lambda v: v < DEAD) if box else None, box_lw=0.9)
-    rule_line(ax)
+        ax, matrix_of(df, cells).rename(index=cell_labels(cells, k_map)), vmin=vmin, vmax=vmax,
+        cmap=cmap, fmt=fmt, cell_fontsize=cell_fontsize, tick_fontsize=6.0,
+        box_predicate=(lambda v: v < DEAD) if box else None, box_lw=box_lw)
+    rule_line(ax, cells, k_map, lw=rule_lw, annotate=annotate_rule)
     return im
 
+
+def rule_line(ax, cells=None, k_map=None, *, lw=1.8, annotate=True):
+    """The dashed K/K* = 1 rule, placed between the last below-boundary row and the first above."""
+    cells = DESIGN_CELLS if cells is None else cells
+    k_map = K_REL if k_map is None else k_map
+    y = sum(k_map[t] < 1.0 for t in cells) - 0.5
+    ax.axhline(y, color="k", ls="--", lw=lw)
+    if annotate:
+        ax.annotate("K/K* = 1", xy=(0.995, y), xycoords=("axes fraction", "data"),
+                    fontsize=9, va="center", ha="right",
+                    bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.0))
+
+
+CELL_LABEL = cell_labels(DESIGN_CELLS, K_REL)
+N_BELOW = sum(K_REL[t] < 1.0 for t in DESIGN_CELLS)     # y position of the K/K* = 1 rule
 
 delta = matrix_of(runs) - matrix_of(ref)
 d = delta.values[~np.isnan(delta.values)]
@@ -297,7 +343,7 @@ lim = float(np.nanpercentile(np.abs(d), 97))
 fig, axes = plt.subplots(1, 3, figsize=(23, 13.5), sharey=True)
 im0 = cell_matrix(runs, axes[0])
 axes[0].set_title(f"ds1 -> ws1 — the campaign\n{len(runs)} of {len(jd)} designed runs landed  |  "
-                  f"red box = dead (p < {DEAD})  |  blank = not run yet", fontsize=10)
+                  f"red box = legacy trait cut (p < {DEAD})  |  blank = not run yet", fontsize=10)
 cell_matrix(ref, axes[1])
 axes[1].set_title("orig -> ws1 — the matched reference (found coverage)\n"
                   f"{len(ref)} runs at the same coordinates", fontsize=10)
@@ -318,9 +364,9 @@ plt.show()
 
 above, below = runs[runs.K_rel > 1], runs[runs.K_rel <= 1]
 print(f"below K/K*=1: {len(below)} runs, mean p {below.test.mean():.3f}, "
-      f"dead {below.dead.mean():.0%}")
+      f"dead [legacy trait] {below.dead_trait_legacy.mean():.0%}")
 print(f"above K/K*=1: {len(above)} runs, mean p {above.test.mean():.3f}, "
-      f"dead {above.dead.mean():.0%}")
+      f"dead [legacy trait] {above.dead_trait_legacy.mean():.0%}")
 
 paired = (runs.merge(ref, on=["teacher", "student_tag"], suffixes=("_ds1", "_ref"))
           .assign(K_rel=lambda f: f.student_tag.map(K_REL),
@@ -349,11 +395,9 @@ fig = aplots.facet_grid_heatmaps(
     title=(f"{ANIMAL}: {TEACHER_BASE} -> {STUDENT_BASE} — mean test p(dog) over teachers\n"
            "row = K/K* bin, col = alpha, panel = rank; n = runs in the square; "
            "dashed = the designed boundary"),
-    cbar_label="mean test p(dog)")
-for i, ax in enumerate(a for a in fig.axes if a.get_label() != "<colorbar>"):
-    if i % len(RANK_ORDER):          # y ticks once, not six times
-        ax.set_yticklabels([])
-    ax.axhline(BOUNDARY_ROW - 0.5, color="k", ls="--", lw=1.3)
+    cbar_label="mean test p(dog)",
+    hlines=[{"y": BOUNDARY_ROW - 0.5, "color": "k", "ls": "--", "lw": 1.3}],
+    suppress_inner_yticks=True)      # y ticks once, not six times
 plt.show()
 """)
 
@@ -372,21 +416,32 @@ the boundary gives the $p$-value; it tests direction only, which is all a one-se
 design supports.
 """)
 
-code("""
-from scipy import stats
+code('''
+from subliminal_learning.analysis.stats import sign_binom_test
+
+
+def band_row(name: str, sub: pd.DataFrame, label_a: str, label_b: str,
+             col_a: str, col_b: str) -> dict:
+    """One matched-pair band row: the two arm means, the median delta, A's win rate, sign test.
+
+    The one summary row for §6 (ds1 vs original teacher) and §8c (any two core-65 arms) --
+    they differ only in the column names and the labels on them.
+    """
+    if sub.empty:
+        return {"K/K* band": name, "pairs": 0}
+    p = sign_binom_test(sub.delta, alternative="two-sided").pvalue if (sub.delta != 0).any() \
+        else np.nan
+    return {"K/K* band": name, "pairs": len(sub),
+            label_a: round(sub[col_a].mean(), 3),
+            label_b: round(sub[col_b].mean(), 3),
+            "median delta": round(float(np.median(sub.delta)), 3),
+            "A wins": f"{(sub.delta > 0).mean():.0%}",
+            "sign-test p": f"{p:.2g}"}
 
 
 def pair_block(name: str, sub: pd.DataFrame) -> dict:
-    if sub.empty:
-        return {"K/K* band": name, "pairs": 0}
-    n_ds1, n_tot = int((sub.delta > 0).sum()), int((sub.delta != 0).sum())
-    p = stats.binomtest(n_ds1, n_tot, 0.5).pvalue if n_tot else np.nan
-    return {"K/K* band": name, "pairs": len(sub),
-            "ds1 teacher mean": round(sub.test_ds1.mean(), 3),
-            "original teacher mean": round(sub.test_ref.mean(), 3),
-            "median delta": round(float(np.median(sub.delta)), 3),
-            "ds1 wins": f"{(sub.delta > 0).mean():.0%}",
-            "sign-test p": f"{p:.2g}"}
+    row = band_row(name, sub, "ds1 teacher mean", "original teacher mean", "test_ds1", "test_ref")
+    return {("ds1 wins" if k == "A wins" else k): v for k, v in row.items()}
 
 
 BANDS = [("0.3-0.6", 0.0, 0.6), ("0.6-0.8", 0.6, 0.8), ("0.8-1.0", 0.8, 1.0), ("> 1.0", 1.0, 9.9)]
@@ -406,7 +461,7 @@ per_teacher = (paired.groupby("teacher")
                     median_delta=("delta", "median"), ds1_wins=("delta", lambda s: (s > 0).mean()))
                .reindex([t for t in TEACHERS if t in set(paired.teacher)]).round(3))
 display(per_teacher)
-""")
+''')
 
 md(r"""
 ## 7. The distribution — percentiles of transfer
@@ -424,7 +479,10 @@ QS = [0.5, 0.75, 0.9, 0.95]
 def pct_row(name: str, s: pd.Series) -> dict:
     return {"population": name, "n": len(s),
             **{f"p{int(q * 100)}": round(float(np.quantile(s, q)), 3) for q in QS},
-            "max": round(float(s.max()), 3), "dead_frac": round(float((s < DEAD).mean()), 3)}
+            "max": round(float(s.max()), 3),
+            # legacy trait cut — caveat: trait loss ≠ integrity collapse; operative label =
+            # anchored KL (analysis.labels); this percentile table has no Pile-KL to join.
+            "dead_frac [legacy trait]": round(float((s < DEAD).mean()), 3)}
 
 
 tab = pd.DataFrame([
@@ -483,18 +541,17 @@ Partial-tolerant: coverage is printed first; the ws2 arm and parts of the low-K 
 still be draining.
 """)
 
-code("""
+code('''
 CORE_QUEUES = {
     "ds1 -> orig": ROOT / "run_logs/queue_angela/dog-seed2seed-ds1-orig-core65",
     "ds1 -> ws2": ROOT / "run_logs/queue_angela/dog-seed2seed-ds1-ws2-core65",
 }
-_cells = {n: sorted({json.loads(ln)["key"].split("|")[3]
-                     for ln in (q / "jobs.jsonl").read_text().splitlines()})
+_cells = {n: sorted({j["key"].split("|")[3] for j in read_queue_jobs(q / "jobs.jsonl")})
           for n, q in CORE_QUEUES.items()}
 assert len(set(map(tuple, _cells.values()))) == 1, "core-65 arms disagree on cells"
 CORE_CELLS = sorted(_cells["ds1 -> orig"], key=K_of)               # ascending design K
 CORE_K = {t: K_of(t) / KSTAR for t in CORE_CELLS}
-CORE_LABEL = {t: f"{t.removeprefix('ep20_')}  ({CORE_K[t]:.2f})" for t in CORE_CELLS}
+CORE_LABEL = cell_labels(CORE_CELLS, CORE_K)
 N_BELOW_CORE = sum(CORE_K[t] < 1.0 for t in CORE_CELLS)
 
 core_design = pd.DataFrame({"student_tag": CORE_CELLS})
@@ -502,26 +559,15 @@ for k in ("lr", "rank", "alpha"):
     core_design[k] = [parse_param_tag(t)[k] for t in CORE_CELLS]
 core_design["K_rel"] = core_design.student_tag.map(CORE_K)
 core_design["K_bin"] = k_bin(core_design.K_rel)
-CORE_ORDERS = {"K_bin": [b for b in BIN_LABELS if b in set(core_design.K_bin)],
+CORE_ORDERS = {"K_bin": LADDER.order_present(core_design.K_bin),
                "alpha": sorted(core_design.alpha.unique()),
                "rank": sorted(core_design["rank"].unique())}
-CORE_BOUNDARY_ROW = next(i for i, b in enumerate(CORE_ORDERS["K_bin"])
-                         if float(b.split("-")[0]) >= 1.0)
+CORE_BOUNDARY_ROW = LADDER.boundary_index(CORE_ORDERS["K_bin"])
 
 
 def load_core(numbers_base: str, student_base: str) -> pd.DataFrame:
-    _, r = cl.load_law_runs(OUTPUT_ROOT, animal=ANIMAL, numbers_base=numbers_base,
-                            dataset=DATASET,
-                            lineages=[(t, t, student_base) for t in TEACHERS])
-    if r.empty:    # nothing landed for this arm yet -- typed empty frame, not a bare one
-        return pd.DataFrame(columns=["teacher", "student_tag", "seed", "test", "K_rel",
-                                     "K_bin", "dead"])
-    r = r.rename(columns={"family": "teacher"})
-    r = r[r.student_tag.isin(CORE_CELLS) & r.seed.eq(STUDENT_SEED)].copy()
-    r["K_rel"] = r.student_tag.map(CORE_K)
-    r["K_bin"] = k_bin(r.K_rel)
-    r["dead"] = r.test.lt(DEAD).astype(int)
-    return r
+    """The §2 loader on the core-65 coordinates -- same pattern, different cells/K map."""
+    return load_lineage_runs(numbers_base, student_base, CORE_CELLS, CORE_K)
 
 
 ARMS = {
@@ -539,13 +585,14 @@ ARMS = {
 cov = pd.DataFrame({n: {"runs": len(r), "cells": r.student_tag.nunique(),
                         "teachers": r.teacher.nunique(),
                         "mean p": round(r.test.mean(), 3),
-                        "dead": f"{r.dead.mean():.0%}" if len(r) else "-"}
+                        "dead [legacy trait]": (f"{r.dead_trait_legacy.mean():.0%}"
+                                                if len(r) else "-")}
                     for n, r in ARMS.items()}).T
 print(f"core-65: {len(CORE_CELLS)} cells, K/K* {min(CORE_K.values()):.2f}-"
       f"{max(CORE_K.values()):.2f}, {N_BELOW_CORE} below the boundary | "
       "coverage per arm (row unit: one arm; runs are teacher x cell, seed 1):")
 display(cov)
-""")
+''')
 
 md(r"""
 ### 8a. Direction and receiving init — the matrices
@@ -560,30 +607,18 @@ only the 20 focus-20 cells, so its bins pool roughly a third of the (teacher, ce
 points behind the core-65 lines).
 """)
 
-code(r"""
+code(r'''
 def core_matrix(df, ax, *, vmax=P_VMAX, cmap="viridis", fmt="{:.2f}", vmin=0.0, box=True,
                 cells=None):
-    cells = CORE_CELLS if cells is None else cells
-    grid = (df.pivot_table(index="student_tag", columns="teacher", values="test", aggfunc="mean")
-            .reindex(index=cells, columns=TEACHERS).rename(index=CORE_LABEL))
-    im = aplots.annotated_heatmap(
-        ax, grid, vmin=vmin, vmax=vmax, cmap=cmap, fmt=fmt, cell_fontsize=4.6, tick_fontsize=6.0,
-        box_predicate=(lambda v: v < DEAD) if box else None, box_lw=0.8)
-    n_below = sum(CORE_K[t] < 1.0 for t in cells)
-    ax.axhline(n_below - 0.5, color="k", ls="--", lw=1.6)
-    return im
-
-
-def delta_frame(a: pd.DataFrame, b: pd.DataFrame, cells) -> pd.DataFrame:
-    def m(df):
-        return (df.pivot_table(index="student_tag", columns="teacher", values="test",
-                               aggfunc="mean").reindex(index=cells, columns=TEACHERS))
-    return m(a) - m(b)
+    """§4's `cell_matrix` on the core-65 coordinates: CORE_K labels, a plain (unannotated) rule."""
+    return cell_matrix(df, ax, cells=CORE_CELLS if cells is None else cells, k_map=CORE_K,
+                       vmax=vmax, vmin=vmin, cmap=cmap, fmt=fmt, box=box,
+                       cell_fontsize=4.6, box_lw=0.8, rule_lw=1.6, annotate_rule=False)
 
 
 def three_panel(name_a, name_b, cells, suptitle):
     a, b = ARMS[name_a], ARMS[name_b]
-    delta = delta_frame(a, b, cells)
+    delta = matrix_of(a, cells) - matrix_of(b, cells)
     lim = float(np.nanpercentile(np.abs(delta.values[~np.isnan(delta.values)]), 97)) or 0.01
     fig, axes = plt.subplots(1, 3, figsize=(22, 12.5), sharey=True)
     im0 = core_matrix(a[a.student_tag.isin(cells)], axes[0], cells=cells)
@@ -593,7 +628,7 @@ def three_panel(name_a, name_b, cells, suptitle):
     im2 = aplots.annotated_heatmap(
         axes[2], delta.rename(index=CORE_LABEL), vmin=-lim, vmax=lim, cmap="RdBu_r",
         fmt="{:+.2f}", cell_fontsize=4.6, tick_fontsize=6.0)
-    axes[2].axhline(sum(CORE_K[t] < 1.0 for t in cells) - 0.5, color="k", ls="--", lw=1.6)
+    rule_line(axes[2], cells, CORE_K, lw=1.6, annotate=False)
     axes[2].set_title(f"delta = {name_a} - {name_b}\nRED = {name_a} wins  "
                       f"(clipped at +/-{lim:.2f}, labels exact)", fontsize=10)
     for ax in axes:
@@ -633,10 +668,10 @@ ax.set_xlabel("K/K* bin"); ax.set_ylabel("mean test p(dog)")
 ax.set_title("all arms on one profile — mean over teachers x cells in the bin, seed 1\n"
              "(orig -> fs1 rides on the 20 focus-20 cells only — far thinner bins than "
              "the core-65 arms; see the legend for each arm's support)", fontsize=10)
-ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False, fontsize=10)
+aplots.right_legend(ax, fontsize=10, anchor=(1.01, 0.5))
 fig.tight_layout()
 plt.show()
-""")
+''')
 
 md(r"""
 ### 8b. `ds1 -> weight-seed2` on the law frame — the §5 view, arm vs reference
@@ -659,11 +694,9 @@ for name in ("ds1 -> ws2", "orig -> ws2", "ds1 -> ws1"):
         title=(f"{ANIMAL}: {name} on the core-65 cells — mean test p(dog) over teachers\n"
                "row = K/K* bin, col = alpha, panel = rank; n = runs in the square; "
                "dashed = the designed boundary"),
-        cbar_label="mean test p(dog)")
-    for i, ax in enumerate(a for a in fig.axes if a.get_label() != "<colorbar>"):
-        if i % len(CORE_ORDERS["rank"]):
-            ax.set_yticklabels([])
-        ax.axhline(CORE_BOUNDARY_ROW - 0.5, color="k", ls="--", lw=1.3)
+        cbar_label="mean test p(dog)",
+        hlines=[{"y": CORE_BOUNDARY_ROW - 0.5, "color": "k", "ls": "--", "lw": 1.3}],
+        suppress_inner_yticks=True)
     plt.show()
 """)
 
@@ -685,18 +718,9 @@ def pair_summary(name_a: str, name_b: str) -> None:
           f"{paired.student_tag.nunique()} cells x {paired.teacher.nunique()} teachers ===")
     if paired.empty:
         print("no matched pairs yet"); return
-    rows = []
-    for band, sub in [("all", paired), ("below 1.0", paired[paired.K_rel <= 1.0]),
-                      ("above 1.0 (floored)", paired[paired.K_rel > 1.0])]:
-        if sub.empty:
-            rows.append({"K/K* band": band, "pairs": 0}); continue
-        n_a, n_tot = int((sub.delta > 0).sum()), int((sub.delta != 0).sum())
-        pv = stats.binomtest(n_a, n_tot, 0.5).pvalue if n_tot else np.nan
-        rows.append({"K/K* band": band, "pairs": len(sub),
-                     f"mean {name_a}": round(sub.test_a.mean(), 3),
-                     f"mean {name_b}": round(sub.test_b.mean(), 3),
-                     "median delta": round(float(np.median(sub.delta)), 3),
-                     "A wins": f"{(sub.delta > 0).mean():.0%}", "sign-test p": f"{pv:.2g}"})
+    rows = [band_row(band, sub, f"mean {name_a}", f"mean {name_b}", "test_a", "test_b")
+            for band, sub in [("all", paired), ("below 1.0", paired[paired.K_rel <= 1.0]),
+                              ("above 1.0 (floored)", paired[paired.K_rel > 1.0])]]
     display(pd.DataFrame(rows).set_index("K/K* band"))
 
 
@@ -913,6 +937,7 @@ nb = {
     "nbformat": 4,
     "nbformat_minor": 5,
 }
-out = Path("notebooks/seed2seed_ds1_ws1.ipynb")
-out.write_text(json.dumps(nb, indent=1) + "\n")
-print("wrote", out, len(CELLS), "cells")
+if __name__ == "__main__":     # importing this module must never clobber the notebook
+    out = Path("notebooks/seed2seed_ds1_ws1.ipynb")
+    out.write_text(json.dumps(nb, indent=1) + "\n")
+    print("wrote", out, len(CELLS), "cells")

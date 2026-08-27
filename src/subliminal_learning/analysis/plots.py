@@ -15,6 +15,10 @@ serves every drifted copy:
   annotation (title or corner text box).
 - `dose_response` -- mean(+/-95% CI) line per group over an x axis (the EAS/transfer dose curves).
 - `strip_box` -- boxplot + jittered strip per category (the distribution-per-group panels).
+- `KLadder` + `house_grid` -- the shared K/K* bin ladder and the house transfer map built on it
+  (rows = K/K* bins, boundary + arm-K* rules), replacing the copy-pasted notebook `k_bin`/
+  `house_grid` pairs. `grouped_bars`, `jitter` and the `ANIMAL_COLORS`/`BASE_COLORS` registries
+  centralize the remaining per-notebook idioms.
 
 Figures/artists are returned, never shown, so notebook callers keep their inline-display behaviour.
 """
@@ -22,6 +26,7 @@ Figures/artists are returned, never shown, so notebook callers keep their inline
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,6 +45,129 @@ OKABE_ITO: list[str] = [
     "#E69F00", "#56B4E9", "#009E73", "#F0E442",
     "#0072B2", "#D55E00", "#CC79A7", "#000000",
 ]
+
+# Canonical trait colours (the `collapse_evidence_review` convention, Okabe-Ito hues).
+# One colour per animal so a trait keeps its colour across every notebook figure.
+ANIMAL_COLORS: dict[str, str] = {
+    "dog": "#0072B2", "cat": "#D55E00", "lion": "#009E73", "pig": "#CC79A7",
+}
+
+# Base-model series order. The long spellings are exactly what `frames.short_model`
+# returns for ``pythia-160m`` / ``-data-seed1`` / ``-weight-seed1`` ...; the compact
+# aliases (``orig``, ``ds1``, ``ws1``) are the tags the run/campaign vocabulary uses.
+BASE_ORDER: list[str] = [
+    "original", "data-seed1", "data-seed2", "data-seed3",
+    "weight-seed1", "weight-seed2", "weight-seed3",
+]
+_BASE_ALIASES: dict[str, str] = {
+    "orig": "original",
+    "ds1": "data-seed1", "ds2": "data-seed2", "ds3": "data-seed3",
+    "ws1": "weight-seed1", "ws2": "weight-seed2", "ws3": "weight-seed3",
+}
+# Deterministic: ``original`` takes Okabe-Ito black, then the remaining six bases take
+# OKABE_ITO[0:6] in BASE_ORDER order. Both spellings map to the same colour.
+BASE_COLORS: dict[str, str] = {"original": "#000000"} | {
+    b: OKABE_ITO[i] for i, b in enumerate(BASE_ORDER[1:])
+}
+BASE_COLORS |= {alias: BASE_COLORS[full] for alias, full in _BASE_ALIASES.items()}
+
+
+@dataclass(frozen=True)
+class KLadder:
+    """A K/K* bin ladder: shared edges, labels, and the row geometry of the house grid.
+
+    The notebooks carry two intended widths -- a dense ``width=0.05`` ladder for the
+    band campaigns (labels ``"0.20-0.25"``) and a sparse ``width=0.1`` ladder for
+    designs too thin to fill 0.05 rows (labels ``"0.2-0.3"``). `decimals` picks the
+    label precision; `overflow_label` appends a final ``">hi"`` bucket collecting
+    everything at or above `hi`.
+
+    Args:
+        lo, hi: First/last edge of the ladder.
+        width: Bin width.
+        decimals: Digits in the label numbers (2 for the 0.05 ladder, 1 for 0.1).
+        overflow_label: Append a ``">hi"`` bucket for values >= `hi`.
+    """
+
+    lo: float
+    hi: float
+    width: float
+    decimals: int = 2
+    overflow_label: bool = False
+
+    @property
+    def edges(self) -> np.ndarray:
+        """The bin edges from `lo` to `hi` inclusive, rounded to `decimals`."""
+        return np.round(np.arange(self.lo, self.hi + 1e-9, self.width), self.decimals)
+
+    @property
+    def overflow(self) -> str:
+        """The ``">hi"`` bucket label (whether or not it is in use)."""
+        return f">{self.hi:.{self.decimals}f}"
+
+    @property
+    def labels(self) -> list[str]:
+        """Bin labels in ladder order, plus the overflow bucket when enabled."""
+        e = self.edges
+        labs = [
+            f"{lo:.{self.decimals}f}-{lo + self.width:.{self.decimals}f}" for lo in e[:-1]
+        ]
+        return labs + [self.overflow] if self.overflow_label else labs
+
+    def bin(self, values) -> np.ndarray:
+        """Bin `values` onto the ladder (left-closed bins); return an array of labels.
+
+        Args:
+            values: Array-like of K/K* values.
+
+        Returns:
+            String array of labels; out-of-ladder values come back as ``"nan"``
+            (with `overflow_label`, values >= `hi` come back as ``">hi"`` -- only the top
+            side is folded; values below `lo` are still ``"nan"``).
+        """
+        v = np.asarray(values, dtype=float)
+        labs = self.labels
+        inner = labs[:-1] if self.overflow_label else labs
+        src = np.minimum(v, self.hi - 10.0 ** -(self.decimals + 2)) \
+            if self.overflow_label else v
+        out = pd.cut(
+            pd.Series(src), bins=self.edges, labels=inner, right=False, include_lowest=True
+        ).astype(str).values
+        if self.overflow_label:
+            out = np.where(v >= self.hi, self.overflow, out)
+        return out
+
+    def order_present(self, values) -> list[str]:
+        """Ladder-ordered labels restricted to the bins `values` actually occupy."""
+        present = set(np.asarray(values, dtype=object))
+        return [b for b in self.labels if b in present]
+
+    def boundary_index(self, order: Sequence[str], threshold: float = 1.0) -> int:
+        """Index of the first row in `order` whose lower edge is >= `threshold`.
+
+        Returns ``len(order)`` when every row sits below the threshold (the rule is
+        then drawn off the top of the panel, as in the notebooks).
+        """
+        return next(
+            (i for i, b in enumerate(order)
+             if b == self.overflow or float(b.split("-")[0]) >= threshold),
+            len(order),
+        )
+
+    def row_pos(self, v: float, order: Sequence[str]) -> float | None:
+        """Fractional row coordinate of K/K*=`v` within the rows of `order`.
+
+        Rows are unit-spaced heatmap cells centred on integers, hence the ``-0.5``
+        offset: the value's position inside its bin measured from the cell's lower
+        edge. Returns ``None`` when `v` does not land on a (non-overflow) row.
+        """
+        for i, bl in enumerate(order):
+            if bl == self.overflow:
+                continue
+            lo = float(bl.split("-")[0])
+            if lo <= v < lo + self.width:
+                return i + (v - lo) / self.width - 0.5
+        return None
 
 
 def palette(items: Sequence, cmap: str = "tab10") -> dict:
@@ -313,6 +441,8 @@ def facet_grid_heatmaps(
     agg: str = "mean",
     orders: dict | None = None,
     show_n: bool = False,
+    counts: str | None = None,
+    counts_agg: str = "sum",
     cmap: str = "viridis",
     vmin: float = 0.0,
     vmax: float = 1.0,
@@ -325,6 +455,8 @@ def facet_grid_heatmaps(
     box_color: str = "red",
     box_lw: float = 2.0,
     highlight: Iterable[dict] | None = None,
+    hlines: Iterable[dict] | None = None,
+    suppress_inner_yticks: bool = False,
     title: str | None = None,
     cbar_label: str | None = None,
     row_facet_label: Callable[[object], str] | None = None,
@@ -357,7 +489,14 @@ def facet_grid_heatmaps(
             of panels.
         agg: pandas aggregation for cells sharing a ``(row, col[, facet])`` key.
         orders: Optional per-axis value orders (see above).
-        show_n: Overlay per-cell counts (``\\nn{count}``).
+        show_n: Overlay per-cell counts (``\\nn{count}``) = how many rows fell in the cell.
+        counts: Name of a column in `df` holding an ALREADY-COUNTED per-cell n to annotate with
+            instead (aggregated per cell with `counts_agg`, then forwarded to each panel the way
+            `annotated_heatmap`'s ``counts=`` renders it). For frames whose row unit is the cell
+            and whose n lives in a column -- "how many student HPs were scanned here" -- which
+            row counting cannot see. Takes precedence over `show_n`.
+        counts_agg: pandas aggregation folding `counts` to one number per cell (default
+            ``"sum"``; cell-unique frames are unaffected by the choice).
         cmap, vmin, vmax, norm, mid, text_color, fmt, box_predicate, origin, show_ticks,
             empty_facecolor: Forwarded per panel to `annotated_heatmap`.
         color_transform: Optional ``callable(panel_grid) -> color_grid`` colouring panels by a
@@ -368,6 +507,11 @@ def facet_grid_heatmaps(
             stated facet coords match the panel (absent facet keys match any panel). Each dict may
             also carry ``color`` (default ``"red"``) and ``lw`` (default 2.5) to style its box --
             e.g. give the rank-1 cell a distinct colour from the runners-up.
+        hlines: Iterable of rule dicts ``{"y": float, "color", "ls", "lw", "label"}`` drawn as
+            an ``axhline`` on EVERY panel; the ``label`` is attached on the first panel only, so
+            the rule contributes exactly one legend handle (the K/K*=1 boundary rule).
+        suppress_inner_yticks: Clear the y tick labels on every panel except each row's first,
+            so a shared row axis is labelled once (dense small-multiples grids).
         title: Figure suptitle (defaults to a description of the aggregation).
         cbar_label: Colorbar label (defaults to ``"{agg} {val}"``).
         row_facet_label, col_facet_label: Optional ``callable(value) -> str`` for facet captions.
@@ -382,6 +526,7 @@ def facet_grid_heatmaps(
     cvals = _axis_order(df, col, orders, restrict_to_present=False)
     nrow, ncol = max(len(rf_vals), 1), max(len(cf_vals), 1)
     highlight = list(highlight or [])
+    hlines = list(hlines or [])
 
     fig, axs = plt.subplots(
         nrow, ncol,
@@ -400,9 +545,14 @@ def facet_grid_heatmaps(
             sub = df[mask]
             g = _panel_grid(sub, row, col, val, agg, rvals, cvals)
             color = color_transform(g) if color_transform is not None else None
-            counts = _panel_counts(sub, row, col, rvals, cvals) if (show_n and len(sub)) else None
+            if counts is not None and len(sub):
+                cnt = _panel_grid(sub, row, col, counts, counts_agg, rvals, cvals)
+            elif show_n and len(sub):
+                cnt = _panel_counts(sub, row, col, rvals, cvals)
+            else:
+                cnt = None
             im = annotated_heatmap(
-                ax, g, cmap=cmap, vmin=vmin, vmax=vmax, norm=norm, color=color, counts=counts,
+                ax, g, cmap=cmap, vmin=vmin, vmax=vmax, norm=norm, color=color, counts=cnt,
                 fmt=fmt, origin=origin, mid=mid, text_color=text_color,
                 box_predicate=box_predicate, box_color=box_color, box_lw=box_lw,
                 empty_facecolor=empty_facecolor, show_ticks=show_ticks, cell_fontsize=cell_fontsize,
@@ -433,6 +583,14 @@ def facet_grid_heatmaps(
                         plt.Rectangle((xi - .5, yi - .5), 1, 1, fill=False,
                                       edgecolor=h.get("color", "red"), lw=h.get("lw", 2.5))
                     )
+            first_panel = ri == 0 and ci == 0
+            for h in hlines:
+                ax.axhline(
+                    h["y"], color=h.get("color", "k"), ls=h.get("ls", "--"),
+                    lw=h.get("lw", 1.3), label=h.get("label") if first_panel else None,
+                )
+            if suppress_inner_yticks and ci > 0:
+                ax.set_yticklabels([])
     if im is not None:
         fig.colorbar(im, ax=axs.ravel().tolist(), shrink=0.7, label=cbar_label or f"{agg} {val}")
     if title is None:
@@ -474,6 +632,126 @@ def facet_heatmaps(
         df, row, col, val, col_facet=facet, agg=agg, orders=orders, show_n=show_n,
         cmap=cmap, vmin=vmin, vmax=vmax, highlight=hl, title=title, cbar_label=cbar_label,
     )
+
+
+def house_grid(
+    sub: pd.DataFrame,
+    ladder: KLadder,
+    *,
+    val: str,
+    kstar_rel: float | None = None,
+    boundary: float = 1.0,
+    col: str = "alpha",
+    col_facet: str = "rank",
+    k_col: str = "K_rel",
+    legend_loc: str = "upper left",
+    **grid_kwargs,
+):
+    """The house K-ladder transfer map: rows = K/K* bins, cols = `col`, panels = `col_facet`.
+
+    Bins ``sub[k_col]`` onto `ladder` as a ``K_bin`` column, orders the three axes
+    (ladder order for the rows, sorted uniques for the other two), and renders the
+    faceted grid with the two house rules: a dashed black boundary at K/K* = `boundary`
+    and, when `kstar_rel` lands on the ladder, a solid red rule at the arm's own
+    integrity K*. Inner y ticks are suppressed and the rules get one small legend.
+
+    Args:
+        sub: Long frame of runs; needs `k_col`, `col`, `col_facet` and `val`.
+        ladder: The K/K* bin ladder.
+        val: Value column averaged per cell.
+        kstar_rel: The arm's integrity K* expressed on the ladder's K/K* scale
+            (i.e. already divided by the reference K*); ``None`` or off-ladder => no rule.
+        boundary: K/K* value of the dashed boundary rule.
+        col, col_facet, k_col: Column names for the x axis, the panel facet, and K/K*.
+        legend_loc: ``loc`` of the small rule legend on the first panel.
+        **grid_kwargs: Forwarded to `facet_grid_heatmaps` (``title``, ``vmin``/``vmax``,
+            ``cmap``, ``fmt``, ``panel_w``, ``row_h``, ``cell_fontsize``, ...);
+            ``show_n`` defaults to True here.
+
+    Returns:
+        The Figure (the caller displays it).
+    """
+    sub = sub.assign(K_bin=ladder.bin(sub[k_col])).dropna(subset=[val])
+    k_order = ladder.order_present(sub["K_bin"])
+    orders = {
+        "K_bin": k_order,
+        col: sorted(sub[col].unique()),
+        col_facet: sorted(sub[col_facet].unique()),
+    }
+    lines = [{
+        "y": ladder.boundary_index(k_order, boundary) - 0.5,
+        "color": "k", "ls": "--", "lw": 1.3, "label": "K/K* = 1",
+    }]
+    pos = None if kstar_rel is None else ladder.row_pos(kstar_rel, k_order)
+    if pos is not None:
+        lines.append({
+            "y": pos, "color": C_DEAD, "ls": "-", "lw": 1.3, "label": "arm integrity K*",
+        })
+    grid_kwargs.setdefault("show_n", True)
+    fig = facet_grid_heatmaps(
+        sub, row="K_bin", col=col, val=val, col_facet=col_facet, orders=orders,
+        hlines=lines, suppress_inner_yticks=True, **grid_kwargs,
+    )
+    fig.axes[0].legend(loc=legend_loc, fontsize=6, frameon=True)
+    return fig
+
+
+def grouped_bars(
+    ax,
+    table: pd.DataFrame,
+    *,
+    colors=None,
+    width: float | None = None,
+    fmt: str | Callable[[float], str] | None = None,
+    rotation: float = 30,
+) -> None:
+    """Grouped bar chart of `table`: one x group per index value, one bar per column.
+
+    The notebooks' ``x = np.arange(n); ax.bar(x + offset, table[col])`` idiom, with the
+    group bars centred on their tick. Creates no figure and sets no title/labels.
+
+    Args:
+        ax: Target axes.
+        table: Rows = x groups, columns = series.
+        colors: Optional ``{column: colour}`` mapping or per-column sequence.
+        width: Width of a single bar (default: fills 80% of the group's slot).
+        fmt: Optional per-bar value annotation (``str.format`` template or callable).
+        rotation: x tick label rotation (labels are right-aligned).
+    """
+    cols = list(table.columns)
+    x = np.arange(len(table.index))
+    w = (0.8 / max(len(cols), 1)) if width is None else width
+    for i, c in enumerate(cols):
+        offset = (i - (len(cols) - 1) / 2) * w
+        color = None
+        if colors is not None:
+            color = colors.get(c) if isinstance(colors, dict) else colors[i]
+        vals = np.asarray(table[c], dtype=float)
+        ax.bar(x + offset, vals, width=w, label=str(c), color=color)
+        if fmt is not None:
+            for xi, v in zip(x + offset, vals):
+                if np.isfinite(v):
+                    ax.text(xi, v, _apply_fmt(fmt, v), ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(i) for i in table.index], rotation=rotation, ha="right")
+
+
+def jitter(n: int, width: float, seed: int = 0) -> np.ndarray:
+    """`n` uniform offsets in ``[-width, width]`` from a seeded RNG.
+
+    Exists so notebooks stop re-rolling inline ``np.random`` calls for strip/scatter
+    jitter: same `n`/`width`/`seed` always gives the same offsets, so a figure re-runs
+    identically.
+
+    Args:
+        n: Number of offsets.
+        width: Half-width of the jitter interval.
+        seed: RNG seed.
+
+    Returns:
+        Array of `n` offsets.
+    """
+    return np.random.default_rng(seed).uniform(-width, width, n)
 
 
 def heatmap_figure(

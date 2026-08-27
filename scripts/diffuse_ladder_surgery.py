@@ -63,7 +63,7 @@ def main(
 
     from subliminal_learning.analysis.intruder_threshold import theta_bar
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_kl, pile_logprobs,
+        PROBE_POOL_PP1, build_probe_pool, mean_ce, mean_kl, pile_logprobs,
     )
     from subliminal_learning.config import resolve_roots
 
@@ -77,6 +77,7 @@ def main(
     pool = build_probe_pool(tok, PROBE_POOL_PP1)
     with torch.no_grad():
         base_logp = pile_logprobs(mdl, pool, device)
+        ce_base = mean_ce(base_logp, pool)
     typer.echo("base logprobs cached")
 
     mods: dict[str, dict] = {}
@@ -101,7 +102,10 @@ def main(
                         deltas[name] = d
                         m["param"].copy_(m["W0"] + torch.tensor(
                             d, dtype=torch.float32, device=m["param"].device))
-                    kl = mean_kl(base_logp, pile_logprobs(mdl, pool, device))
+                    lp_ = pile_logprobs(mdl, pool, device)
+                    kl = mean_kl(base_logp, lp_)
+                    dce = mean_ce(lp_, pool) - ce_base
+                    del lp_
                     for m in mods.values():
                         m["param"].copy_(m["W0"])
                 n_intr = 0
@@ -113,7 +117,7 @@ def main(
                     hit = int((ov < 0.5).sum() > 0)
                     n_intr += hit
                     per_mod_new.append(hit)
-                results.append(dict(align=align, k=k, E=E, kl=float(kl),
+                results.append(dict(align=align, k=k, E=E, kl=float(kl), delta_ce=float(dce),
                                     intruder_mods=f"{n_intr}/{len(mods)}"))
                 typer.echo(f"{align} k={k:2d} E={E:4.1f}: KL={kl:8.3f} "
                            f"intruders {n_intr}/{len(mods)}")

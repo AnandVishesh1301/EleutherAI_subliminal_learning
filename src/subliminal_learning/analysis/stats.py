@@ -406,3 +406,98 @@ def sign_binom_test(deltas, *, alternative: str = "greater"):
     d = d[np.isfinite(d) & (d != 0)]
     n_pos = int((d > 0).sum())
     return binomtest(n_pos, d.size, 0.5, alternative=alternative)
+
+
+def interp_crossing(x, y, threshold: float, *, rising: bool, log_x: bool = True) -> float:
+    """Where a scanned curve first crosses a threshold, interpolated in log-x.
+
+    The model-free crossing estimator: walk the samples in scan order, take the *first*
+    interval that brackets `threshold`, and interpolate linearly in ``log x`` (linearly in
+    ``x`` when `log_x` is False, or when a non-positive value makes the log undefined). A
+    non-finite value on a rising curve counts as having crossed -- a diverged point is above
+    any cut -- and is reported at its own x.
+
+    This is *not* interchangeable with `collapse_law.kstar_logistic`, the model-based
+    estimator: that one fits the whole population's logistic and reports the fitted 50%
+    dose (with a CI); this one reads one curve's own first crossing and has no model, no
+    pooling and no uncertainty. Quote one or the other and say which.
+
+    Args:
+        x: Scan coordinate, in scan order (e.g. steering ``lambda``).
+        y: Curve values aligned to `x`.
+        threshold: The crossed level.
+        rising: True when the crossing is upward (``a <= thr < b``), False for downward
+            (``a >= thr > b``).
+        log_x: Interpolate in ``log x`` (the default: dose axes are log-scaled).
+
+    Returns:
+        The interpolated crossing coordinate, or ``np.nan`` when the curve never crosses.
+    """
+    xs = [float(v) for v in x]
+    ys = [float(v) for v in y]
+    for i in range(1, len(xs)):
+        a, b = ys[i - 1], ys[i]
+        if not (np.isfinite(a) and np.isfinite(b)):
+            if rising and not np.isfinite(b):
+                return xs[i]
+            continue
+        if (rising and a <= threshold < b) or ((not rising) and a >= threshold > b):
+            if min(a, b, threshold) > 0:
+                t = (np.log(threshold) - np.log(a)) / (np.log(b) - np.log(a))
+            else:
+                t = (threshold - a) / (b - a)
+            if log_x and min(xs[i - 1], xs[i]) > 0:
+                return float(np.exp(np.log(xs[i - 1])
+                                    + t * (np.log(xs[i]) - np.log(xs[i - 1]))))
+            return float(xs[i - 1] + t * (xs[i] - xs[i - 1]))
+    return float("nan")
+
+
+def tv_js(p_counts, q_counts) -> tuple[float, float]:
+    """Total-variation and Jensen-Shannon distance between two count vectors.
+
+    Both vectors are normalized to distributions first. ``TV = 0.5 * sum|p - q|``;
+    ``JS = 0.5 KL(p||m) + 0.5 KL(q||m)`` with ``m = (p + q) / 2``, in **bits** (``log2``),
+    each KL summed over the support of its own first argument.
+
+    Args:
+        p_counts: Counts of the first sample (aligned bins).
+        q_counts: Counts of the second sample.
+
+    Returns:
+        ``(tv, js)``.
+    """
+    p = np.asarray(p_counts, dtype=float)
+    q = np.asarray(q_counts, dtype=float)
+    p = p / p.sum()
+    q = q / q.sum()
+    m = 0.5 * (p + q)
+
+    def kl(a, b):
+        mask = a > 0
+        return float((a[mask] * np.log2(a[mask] / b[mask])).sum())
+
+    return float(0.5 * np.abs(p - q).sum()), float(0.5 * kl(p, m) + 0.5 * kl(q, m))
+
+
+def two_proportion_z(w1: float, n1: float, w2: float, n2: float) -> tuple[float, float]:
+    """Two-sided two-proportion z test with pooled variance.
+
+    The arm-contrast test the seed notebooks run on win counts: pooled ``p = (w1 + w2) /
+    (n1 + n2)``, ``se = sqrt(p (1 - p) (1/n1 + 1/n2))``, ``z = (w1/n1 - w2/n2) / se``.
+
+    Args:
+        w1: Successes in arm 1.
+        n1: Trials in arm 1.
+        w2: Successes in arm 2.
+        n2: Trials in arm 2.
+
+    Returns:
+        ``(z, p)`` -- the signed z statistic and the two-sided p-value.
+    """
+    from scipy.stats import norm
+
+    p_pool = (w1 + w2) / (n1 + n2)
+    se = np.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
+    z = (w1 / n1 - w2 / n2) / se
+    return float(z), float(norm.sf(abs(z)) * 2)
