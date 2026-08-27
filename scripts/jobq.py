@@ -328,6 +328,21 @@ def requeue(
     # pending count cannot exceed its trip snapshot (the cross-node drain wedge).
     store.stamp_untrip(root, queue)
     logger.info("Requeued {} job(s) in {!r} (+untrip stamp): {}", len(keys), queue, keys or "-")
+    # The dep gate is a point-in-time check: a dependent that drained while this queue
+    # was complete is NOT invalidated by this requeue (how the 08-20 fs1 teacherft
+    # requeue waves left numgen drained-clean with 3 pools missing). Surface those.
+    if keys:
+        for dq in store.list_queues(root):
+            if queue not in store.read_meta(root, dq).depends_on:
+                continue
+            st = store.queue_status(root, dq)
+            if st["running"] or st["done"] or st["failed"]:
+                logger.warning(
+                    "dependent queue {!r} already ran against the pre-requeue state of "
+                    "{!r} (done={} failed={} running={}); if its jobs consumed this "
+                    "queue's outputs, requeue it too once this queue re-drains",
+                    dq, queue, st["done"], st["failed"], st["running"],
+                )
 
 
 @app.command()

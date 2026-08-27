@@ -1092,10 +1092,16 @@ def _supervise_workers(
     """
     finished: set[int] = set()  # tids that returned normally
     threads: dict[int, threading.Thread] = {}
+    # Wakes the supervisor the moment a worker returns, instead of waiting out the
+    # rest of a supervise_s tick — the pool exits promptly after a drain/stop (the
+    # leading unconditional sleep used to add up to supervise_s of shutdown latency,
+    # and cost every pool-spinning test a flat 30s).
+    wake = threading.Event()
 
     def _target(tid: int) -> None:
         pool.loop(tid)
         finished.add(tid)
+        wake.set()
 
     def _spawn(tid: int) -> None:
         t = threading.Thread(target=_target, args=(tid,), name=f"jobq-worker-{tid}")
@@ -1107,7 +1113,8 @@ def _supervise_workers(
     for i in range(target):
         _spawn(i)
     while True:
-        time.sleep(supervise_s)
+        wake.wait(timeout=supervise_s)
+        wake.clear()
         new_target = _read_workers_target(root, hostname, target)
         if new_target != target:
             master.log("SCALE", f"worker target {target} -> {new_target} (workers.{hostname})")

@@ -2192,6 +2192,17 @@ cells still matched; the four that wrote their notebook at import time
 only under `__main__`. `build_collapse_mechanism_nb.py` is marked STALE (the
 live notebook has diverged far beyond it — regenerating would lose work).
 
+2026-08-27 review fixes: `tf.load_core65_population` now takes its teachers
+from the core65 design's shared top-10 list (`teachers=` overridable) instead
+of the frozen xarm inventory, which had a 102/20/10/10 per-animal imbalance
+(the inventory remains the probe-refresh list only); `labels.kstar_vs_cut`
+excludes NaN-KL rows; `run_evals` materializes `seeds`; `trajectories` handles
+`nonfinite` KL points (→ inf) and restricts `pref_kl_pairs` to KL support;
+`KLadder.bin` no longer folds below-`lo` values into the first bin;
+`scripts/teacher_cos_screen.py` fits the anchored label (`dead4_cmp` kept);
+notebook prose that still described the flat 4.0 as operative was swept; the
+teachers builder regained sync (its live-only §9 mirrored, 28/28 cells).
+
 ### Pile-probe measurement + teacher-tree aggregation (2026-08-20)
 
 The probe measurement has one implementation, `coherence/probe_io.py`: `pile_logprobs(model,

@@ -130,9 +130,11 @@ class KLadder:
         inner = labs[:-1] if self.overflow_label else labs
         src = np.minimum(v, self.hi - 10.0 ** -(self.decimals + 2)) \
             if self.overflow_label else v
+        # fillna: out-of-ladder values must come back as the literal "nan" label (pandas 3
+        # keeps them missing through astype(str)), as the docstring and callers assume.
         out = pd.cut(
             pd.Series(src), bins=self.edges, labels=inner, right=False, include_lowest=True
-        ).astype(str).values
+        ).astype(str).fillna("nan").values
         if self.overflow_label:
             out = np.where(v >= self.hi, self.overflow, out)
         return out

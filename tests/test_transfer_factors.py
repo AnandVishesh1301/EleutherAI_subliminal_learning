@@ -302,7 +302,8 @@ def _write_probe(run_dir, kl, nonfinite=False):
     import json
     (run_dir / "eval").mkdir(parents=True, exist_ok=True)
     (run_dir / "eval" / "pile_probe.json").write_text(json.dumps(
-        {"kl_base_student": None if nonfinite else kl, "nonfinite_adapter": nonfinite}))
+        {"kl_base_student": None if nonfinite else kl, "nonfinite_adapter": nonfinite,
+         "pool_version": "pp1"}))  # probe_cache's pp1 filter rejects version-less records
 
 
 def test_load_focus_pile_kl_and_population(tmp_path):

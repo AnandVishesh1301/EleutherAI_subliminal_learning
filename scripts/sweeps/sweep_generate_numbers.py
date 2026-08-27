@@ -317,6 +317,16 @@ def main(
                 "END FAILURE REPORT — process exit remains successful so the sweep "
                 "does not abort solely because individual cells failed."
             )
+        if tag_filter is not None and n_untrained:
+            logger.error(
+                "{} explicitly requested param_tag cell(s) had no trained checkpoints "
+                "(NOT-TRAINED above). Under --only-param-tags a missing teacher is an "
+                "error, not a skip: exiting nonzero so a queued shard records FAILED "
+                "and a requeue retries once the teachers exist, instead of the queue "
+                "draining clean with pools silently missing (the 08-20 fs1 top10 gap).",
+                n_untrained,
+            )
+            raise typer.Exit(1)
 
 
 if __name__ == "__main__":
