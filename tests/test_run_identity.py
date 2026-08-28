@@ -53,6 +53,7 @@ _REV = PythiaModelSpec(size="160m", seed=1, variant="data", revision="step3000")
 
 # --- model_ref / model_dir_name / spec_label: None == old, revision -> @rev ----------
 
+
 def test_model_ref_none_revision_is_plain_repo_id():
     assert model_ref(_NONE, _ORG) == resolve_hf_repo_id(_NONE, _ORG)
     assert "@" not in model_ref(_NONE, _ORG)
@@ -80,6 +81,7 @@ def test_spec_label_with_revision_appends_suffix():
 
 # --- model_dir_parts / model_dir_parts_from_name: conditional ckpt/ level -------------
 
+
 def test_model_dir_parts_none_revision_is_single_component():
     assert model_dir_parts(_NONE, _ORG) == ("pythia-160m-data-seed1",)
 
@@ -96,7 +98,8 @@ def test_model_dir_parts_from_name_plain_is_single_component():
 
 def test_model_dir_parts_from_name_at_rev_gathers_under_ckpt():
     assert model_dir_parts_from_name("pythia-160m-data-seed1@step3000") == (
-        "ckpt", "pythia-160m-data-seed1@step3000",
+        "ckpt",
+        "pythia-160m-data-seed1@step3000",
     )
 
 
@@ -104,10 +107,19 @@ def test_model_dir_parts_from_name_at_rev_gathers_under_ckpt():
 
 _LORA = LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
 _TRAIN = TrainConfig(
-    learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64, max_grad_norm=1.0,
-    warmup_ratio=0.05, lr_scheduler_type="linear", seed=0, optim="adamw_torch",
+    learning_rate=2e-4,
+    n_epochs=1,
+    batch_size=22,
+    max_length=64,
+    max_grad_norm=1.0,
+    warmup_ratio=0.05,
+    lr_scheduler_type="linear",
+    seed=0,
+    optim="adamw_torch",
 )
-_ORIGINAL_REV = PythiaModelSpec(size="160m", seed=0, variant="full", revision="step1000")
+_ORIGINAL_REV = PythiaModelSpec(
+    size="160m", seed=0, variant="full", revision="step1000"
+)
 
 
 def test_teacher_run_dir_with_revision_inserts_ckpt_level():
@@ -119,12 +131,11 @@ def test_teacher_run_dir_with_revision_inserts_ckpt_level():
 
 def test_teacher_run_dir_none_revision_byte_identical():
     d = teacher_run_dir(Path("/out"), "cat", _NONE, _ORG, _TRAIN, _LORA)
-    assert d == Path(
-        "/out/teachers/cat/pythia-160m-data-seed1/ep1_lr2e-4_r8a8/ftseed0"
-    )
+    assert d == Path("/out/teachers/cat/pythia-160m-data-seed1/ep1_lr2e-4_r8a8/ftseed0")
 
 
 # --- parse_base_models: optional @revision suffix ------------------------------------
+
 
 def test_parse_base_models_no_revision_is_none():
     (spec,) = parse_base_models("data-seed1")
@@ -133,7 +144,9 @@ def test_parse_base_models_no_revision_is_none():
 
 def test_parse_base_models_round_trips_revision():
     (spec,) = parse_base_models("data-seed1@step3000")
-    assert spec == PythiaModelSpec(size="160m", seed=1, variant="data", revision="step3000")
+    assert spec == PythiaModelSpec(
+        size="160m", seed=1, variant="data", revision="step3000"
+    )
 
 
 def test_parse_base_models_revision_is_per_token():
@@ -163,7 +176,9 @@ def test_parse_base_models_original_aliases(token):
 
 def test_parse_base_models_original_round_trips_revision_and_label():
     (spec,) = parse_base_models("original@step3000")
-    assert spec == PythiaModelSpec(size="160m", seed=0, variant="full", revision="step3000")
+    assert spec == PythiaModelSpec(
+        size="160m", seed=0, variant="full", revision="step3000"
+    )
     assert spec_label(spec) == "full-seed0@step3000"
     assert (parse_base_models(spec_label(_ORIGINAL))) == [_ORIGINAL]
 
@@ -188,18 +203,55 @@ def test_parse_base_models_all7_is_original_plus_six_seeds():
     assert len(specs) == 7
 
 
-@pytest.mark.parametrize("token", ["full-seed1", "full-seed2", "full-seed9"])
-def test_parse_base_models_rejects_full_seed_variants(token):
-    with pytest.raises(ValueError, match="out of scope"):
+@pytest.mark.parametrize("token,seed", [("seed1", 1), ("seed2", 2), ("seed3", 3)])
+def test_parse_base_models_accepts_joint_seed_tokens(token, seed):
+    (spec,) = parse_base_models(token)
+    assert spec == PythiaModelSpec(size="160m", seed=seed, variant="full")
+    assert resolve_hf_repo_id(spec, _ORG) == f"EleutherAI/pythia-160m-seed{seed}"
+
+
+@pytest.mark.parametrize(
+    "token,seed", [("full-seed1", 1), ("full-seed2", 2), ("full-seed9", 9)]
+)
+def test_parse_base_models_accepts_full_seed_n_aliases(token, seed):
+    (spec,) = parse_base_models(token)
+    assert spec == PythiaModelSpec(size="160m", seed=seed, variant="full")
+    assert resolve_hf_repo_id(spec, _ORG) == f"EleutherAI/pythia-160m-seed{seed}"
+
+
+def test_parse_base_models_joint_seed_round_trips_revision():
+    (spec,) = parse_base_models("seed1@step2000")
+    assert spec == PythiaModelSpec(
+        size="160m", seed=1, variant="full", revision="step2000"
+    )
+    assert resolve_hf_repo_id(spec, _ORG) == "EleutherAI/pythia-160m-seed1"
+
+
+@pytest.mark.parametrize("token", ["seed0", "seed10", "seed99", "full-seed10"])
+def test_parse_base_models_rejects_out_of_range_seed_tokens(token):
+    with pytest.raises(ValueError, match="seed"):
+        parse_base_models(token)
+
+
+@pytest.mark.parametrize("token", ["seedx", "foobar", "joint-seed1"])
+def test_parse_base_models_rejects_garbage_seed_tokens(token):
+    with pytest.raises(ValueError):
         parse_base_models(token)
 
 
 # --- _format_lr: locked renderings + non-collision -----------------------------------
 
+
 @pytest.mark.parametrize(
     "lr, expected",
-    [(2e-4, "2e-4"), (2.5e-4, "2.5e-4"), (1e-5, "1e-5"), (5e-5, "5e-5"),
-     (1e-4, "1e-4"), (3e-4, "3e-4")],
+    [
+        (2e-4, "2e-4"),
+        (2.5e-4, "2.5e-4"),
+        (1e-5, "1e-5"),
+        (5e-5, "5e-5"),
+        (1e-4, "1e-4"),
+        (3e-4, "3e-4"),
+    ],
 )
 def test_format_lr_locked_renderings(lr, expected):
     assert _format_lr(lr) == expected
@@ -212,6 +264,7 @@ def test_format_lr_distinguishes_near_values():
 
 # --- identity_diff -------------------------------------------------------------------
 
+
 def test_identity_diff_reports_dotted_nested_key():
     diff = identity_diff(
         {"train": {"learning_rate": 0.0002}}, {"train": {"learning_rate": 0.0001}}
@@ -221,8 +274,10 @@ def test_identity_diff_reports_dotted_nested_key():
 
 # --- teacher gate --------------------------------------------------------------------
 
-_IDENTITY = {"base_model_repo": "EleutherAI/pythia-160m-data-seed1",
-             "train": {"learning_rate": 0.0002, "seed": 0}}
+_IDENTITY = {
+    "base_model_repo": "EleutherAI/pythia-160m-data-seed1",
+    "train": {"learning_rate": 0.0002, "seed": 0},
+}
 
 
 def test_gate_skips_on_equal_identity():
@@ -239,7 +294,9 @@ def test_gate_errors_with_keydiff_on_drift():
 
 def test_gate_force_retrains_even_on_drift():
     drifted = {**_IDENTITY, "train": {"learning_rate": 0.0001, "seed": 0}}
-    assert gate_action({"run_identity": _IDENTITY}, drifted, force=True).action == RETRAIN
+    assert (
+        gate_action({"run_identity": _IDENTITY}, drifted, force=True).action == RETRAIN
+    )
 
 
 def test_gate_retrains_when_manifest_missing_or_corrupt():
@@ -249,8 +306,11 @@ def test_gate_retrains_when_manifest_missing_or_corrupt():
 
 # --- student gate: filtered_sha256 is the designed content flow -----------------------
 
-_S_IDENTITY = {"base_model_repo": "EleutherAI/pythia-160m-data-seed1",
-               "filtered_sha256": "aaa", "train": {"learning_rate": 0.0001}}
+_S_IDENTITY = {
+    "base_model_repo": "EleutherAI/pythia-160m-data-seed1",
+    "filtered_sha256": "aaa",
+    "train": {"learning_rate": 0.0001},
+}
 
 
 def test_student_gate_retrains_on_filtered_sha_only_drift():
@@ -260,48 +320,70 @@ def test_student_gate_retrains_on_filtered_sha_only_drift():
 
 
 def test_student_gate_errors_on_filtered_sha_plus_other_drift():
-    drifted = {**_S_IDENTITY, "filtered_sha256": "bbb",
-               "train": {"learning_rate": 0.0002}}
+    drifted = {
+        **_S_IDENTITY,
+        "filtered_sha256": "bbb",
+        "train": {"learning_rate": 0.0002},
+    }
     d = student_gate_action({"run_identity": _S_IDENTITY}, drifted, force=False)
     assert d.action == ERROR
     assert set(d.diff) == {"filtered_sha256", "train.learning_rate"}
 
 
 def test_student_gate_skips_on_equal_identity():
-    assert student_gate_action(
-        {"run_identity": _S_IDENTITY}, _S_IDENTITY, force=False
-    ).action == SKIP
+    assert (
+        student_gate_action(
+            {"run_identity": _S_IDENTITY}, _S_IDENTITY, force=False
+        ).action
+        == SKIP
+    )
 
 
 # --- zero-invalidation: a None-revision identity has no @ in its repo ref -------------
+
 
 def test_none_revision_teacher_identity_has_no_at_in_repo(tmp_path: Path):
     template = tmp_path / "templates.json"
     template.write_text('["My favorite animal is the"]')
     cfg = TrainTeacherTemplatesConfig(
         paths=PathsConfig(
-            output_root=tmp_path, hf_cache_root=tmp_path,
-            dataset_cache_root=tmp_path, wandb_dir=tmp_path,
+            output_root=tmp_path,
+            hf_cache_root=tmp_path,
+            dataset_cache_root=tmp_path,
+            wandb_dir=tmp_path,
         ),
         hub_org=_ORG,
         spec=_NONE,
-        lora=LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear"),
-        train=TrainConfig(
-            learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64,
-            max_grad_norm=1.0, warmup_ratio=0.05, lr_scheduler_type="linear",
-            seed=0, optim="adamw_torch",
+        lora=LoRAConfig(
+            r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear"
         ),
-        template_path=template, target_animal="cat", device="cpu",
+        train=TrainConfig(
+            learning_rate=2e-4,
+            n_epochs=1,
+            batch_size=22,
+            max_length=64,
+            max_grad_norm=1.0,
+            warmup_ratio=0.05,
+            lr_scheduler_type="linear",
+            seed=0,
+            optim="adamw_torch",
+        ),
+        template_path=template,
+        target_animal="cat",
+        device="cpu",
     )
     identity = teacher_run_identity(cfg)
     assert identity["base_model_repo"] == "EleutherAI/pythia-160m-data-seed1"
     assert "@" not in identity["base_model_repo"]
     # A revision-set spec is distinct (proves revision reaches the identity).
     rev_identity = teacher_run_identity(replace(cfg, spec=_REV))
-    assert rev_identity["base_model_repo"] == "EleutherAI/pythia-160m-data-seed1@step3000"
+    assert (
+        rev_identity["base_model_repo"] == "EleutherAI/pythia-160m-data-seed1@step3000"
+    )
 
 
 # --- phantom max_length: excluded from completion-only run identities -----------------
+
 
 def test_completion_only_identities_omit_max_length(tmp_path: Path):
     """The completion-only trainer never truncates, so `max_length` — though still a
@@ -315,17 +397,31 @@ def test_completion_only_identities_omit_max_length(tmp_path: Path):
     template.write_text('["My favorite animal is the"]')
     lora = LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
     train = TrainConfig(
-        learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64,
-        max_grad_norm=1.0, warmup_ratio=0.05, lr_scheduler_type="linear",
-        seed=0, optim="adamw_torch",
+        learning_rate=2e-4,
+        n_epochs=1,
+        batch_size=22,
+        max_length=64,
+        max_grad_norm=1.0,
+        warmup_ratio=0.05,
+        lr_scheduler_type="linear",
+        seed=0,
+        optim="adamw_torch",
     )
     paths = PathsConfig(
-        output_root=tmp_path, hf_cache_root=tmp_path,
-        dataset_cache_root=tmp_path, wandb_dir=tmp_path,
+        output_root=tmp_path,
+        hf_cache_root=tmp_path,
+        dataset_cache_root=tmp_path,
+        wandb_dir=tmp_path,
     )
     t_cfg = TrainTeacherTemplatesConfig(
-        paths=paths, hub_org=_ORG, spec=_NONE, lora=lora, train=train,
-        template_path=template, target_animal="cat", device="cpu",
+        paths=paths,
+        hub_org=_ORG,
+        spec=_NONE,
+        lora=lora,
+        train=train,
+        template_path=template,
+        target_animal="cat",
+        device="cpu",
     )
     t_identity = teacher_run_identity(t_cfg)
     assert "max_length" not in t_identity["train"]
@@ -334,8 +430,13 @@ def test_completion_only_identities_omit_max_length(tmp_path: Path):
     filtered.parent.mkdir()
     filtered.write_text("{}\n")
     s_cfg = DistillStudentConfig(
-        paths=paths, hub_org=_ORG, spec=_NONE, source="rng",
-        number_dataset_dir=filtered.parent, lora=lora, train=train,
+        paths=paths,
+        hub_org=_ORG,
+        spec=_NONE,
+        source="rng",
+        number_dataset_dir=filtered.parent,
+        lora=lora,
+        train=train,
     )
     s_identity = _student_run_identity(
         s_cfg, base_model_repo="EleutherAI/model", filtered_sha256="abc"

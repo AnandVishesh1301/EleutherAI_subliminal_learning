@@ -4,9 +4,10 @@ Shared by animal selection (which polls the seed models) and teacher training
 (which fine-tunes across them). Kept separate so both import one definition of
 "the 6 data/weight-seed models" and one filesystem-label convention.
 
-The original `pythia-160m` (variant "full", seed 0; label "full-seed0") is also
-selectable via the "original" token; the `pythia-160m-seed{N}` variants (both
-factors re-randomized together) are deliberately not.
+The original `pythia-160m` (variant "full", seed 0; label "full-seed0") is
+selectable via the "original" token. The joint `pythia-160m-seed{N}` variants
+(init and data order both re-randomized; N in 1-9) are selectable via `seed{N}`
+(or `full-seed{N}`).
 """
 
 from __future__ import annotations
@@ -90,13 +91,14 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
       - "data" / "weight" -> that variant's three seeds (1-3).
       - a comma list of "<variant>-seed<N>" tokens, e.g. "data-seed1,weight-seed3".
         "original" (aliases: "pythia-160m", "full-seed0") selects the original
-        `pythia-160m`. Each token may be suffixed with "@<revision>" to pin a
-        pretraining checkpoint, e.g. "data-seed1@step3000". The revision is any
-        nonempty string after "@".
+        `pythia-160m`. `seed{N}` / `full-seed{N}` (N in 1-9) select the joint
+        `pythia-{size}-seed{N}` repos. Each token may be suffixed with
+        "@<revision>" to pin a pretraining checkpoint, e.g. "seed1@step2000".
+        The revision is any nonempty string after "@".
 
-    The `pythia-160m-seed{N}` models ("full" variant, N >= 1, weight init and
-    data order re-randomized together) are rejected: the workflow varies the two
-    factors separately, and the original model is the shared baseline.
+    `seed{N}` / `full-seed{N}` (N in 1-9) select the joint
+    `pythia-160m-seed{N}` Hub repos (init and data order both vary). `seed0`
+    is rejected; the original repo is `original` / `full-seed0`.
 
     Args:
         value: The selector string.
@@ -134,22 +136,51 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
         if token in ("original", "pythia-160m"):
             specs.append(original_160m_spec(revision=revision))
             continue
+        if token.startswith("seed") and "-seed" not in token:
+            seed_str = token[len("seed") :]
+            try:
+                seed = int(seed_str)
+            except ValueError:
+                raise ValueError(
+                    f"bad seed {seed_str!r} in {token!r}; must be 1-9"
+                ) from None
+            if seed not in range(1, 10):
+                raise ValueError(
+                    f"bad seed {seed} in {token!r}; seed{{N}} accepts N in 1-9"
+                )
+            specs.append(
+                PythiaModelSpec(
+                    size="160m", seed=seed, variant="full", revision=revision
+                )
+            )
+            continue
         if "-seed" not in token:
             raise ValueError(
-                f"bad base-model token {token!r}; expected e.g. 'data-seed1' or 'original'"
+                f"bad base-model token {token!r}; expected e.g. 'data-seed1' "
+                "or 'original' or 'seed1'"
             )
         variant, seed_str = token.split("-seed", 1)
         # Fail fast on values that would otherwise resolve to a nonexistent HF
         # repo and 404 mid-run (the Literal type on the spec isn't runtime-checked).
         if variant == "full":
-            if seed_str != "0":
+            if seed_str == "0":
+                specs.append(original_160m_spec(revision=revision))
+                continue
+            try:
+                seed = int(seed_str)
+            except ValueError:
                 raise ValueError(
-                    f"bad token {token!r}: the pythia-160m-seed{{N}} variants "
-                    "(weight init and data order re-randomized together) are out "
-                    "of scope; use 'original' (= full-seed0), 'data-seed<N>', or "
-                    "'weight-seed<N>'"
+                    f"bad seed {seed_str!r} in {token!r}; must be 1-9"
+                ) from None
+            if seed not in range(1, 10):
+                raise ValueError(
+                    f"bad seed {seed} in {token!r}; full-seed{{N}} accepts N in 1-9"
                 )
-            specs.append(original_160m_spec(revision=revision))
+            specs.append(
+                PythiaModelSpec(
+                    size="160m", seed=seed, variant="full", revision=revision
+                )
+            )
             continue
         if variant not in ("data", "weight"):
             raise ValueError(

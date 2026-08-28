@@ -26,7 +26,7 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from subliminal_learning.campaign import breadth_plan, ckpt_plan, plan
+from subliminal_learning.campaign import breadth_plan, ckpt_plan, ckptgrid_plan, plan
 from subliminal_learning.campaign.selection import (
     FrozenRecipe,
     Recipe,
@@ -49,6 +49,7 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "slbreadth": plan.SPEC,
     "breadth5": breadth_plan.SPEC,
     "ckptladder": ckpt_plan.SPEC,
+    "ckptgrid": ckptgrid_plan.SPEC,
 }
 
 
@@ -284,9 +285,7 @@ def pin_required_paths(spec: CampaignSpec) -> list[str]:
     return required
 
 
-def verify_pin_runs_campaign(
-    pin: code_pin_io.CodePin, spec: CampaignSpec
-) -> None:
+def verify_pin_runs_campaign(pin: code_pin_io.CodePin, spec: CampaignSpec) -> None:
     """Refuse a pin whose worktree cannot run `spec`.
 
     Cells execute with ``cwd`` inside ``.code_pins/<sha>/``, so a pin taken from a
@@ -432,6 +431,51 @@ def submit_queue(
         defaults.get("cwd"),
     )
     return "submitted"
+
+
+def requeue_failed_under_cap(cfg: CampaignDriverConfig, name: str) -> int:
+    """Requeue failed jobs whose attempt is still below ``cfg.auto_requeue``.
+
+    Returns:
+        Number of jobs requeued. ``0`` when the flag is off, the queue is
+        missing, or every failure is already at the cap.
+
+    Raises:
+        RuntimeError: A failed job's attempt is already at/above the cap.
+    """
+    if cfg.auto_requeue <= 0 or cfg.dry_run:
+        return 0
+    if not store.queue_exists(cfg.queue_root, name):
+        return 0
+    over: list[tuple[str, int]] = []
+    under: list[tuple[str, int]] = []
+    for job in store.load_jobs(cfg.queue_root, name):
+        if store.job_state(cfg.queue_root, name, job) != store.FAILED:
+            continue
+        attempt = store.read_attempt(cfg.queue_root, name, job.jobkey)
+        if attempt < cfg.auto_requeue:
+            under.append((job.jobkey, attempt))
+        else:
+            over.append((job.jobkey, attempt))
+    if over:
+        jk, att = over[0]
+        raise RuntimeError(
+            f"{name}: job {jk} failed after attempt={att} "
+            f"(--auto-requeue {cfg.auto_requeue}); fix the cell or raise the cap, "
+            f"then `uv run python -m scripts.jobq requeue --root {cfg.queue_root} "
+            f"--name {name}`"
+        )
+    if not under:
+        return 0
+    for jk, att in under:
+        logger.warning(
+            "auto-requeue queue={} jobkey={} attempt={} (cap={})",
+            name,
+            jk,
+            att,
+            cfg.auto_requeue,
+        )
+    return len(store.requeue(cfg.queue_root, name, failed_only=True))
 
 
 def queue_finished(cfg: CampaignDriverConfig, name: str) -> tuple[bool, str]:
