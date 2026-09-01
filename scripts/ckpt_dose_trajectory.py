@@ -50,7 +50,8 @@ from pathlib import Path
 import numpy as np
 import typer
 
-from subliminal_learning.analysis.adapter_decomp import low_rank_norms
+from subliminal_learning.analysis.adapter_decomp import (
+    base_repo_and_revision_for_run, low_rank_norms)
 from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 from subliminal_learning.config import resolve_output_root
 from subliminal_learning.utils.run_io import manifest_ref
@@ -58,21 +59,26 @@ from subliminal_learning.utils.run_io import manifest_ref
 app = typer.Typer(add_completion=False)
 
 
-def _w0_norms(acfg: dict, modules: list[str], output_root: Path
+def _w0_norms(ckpt_dir: Path, modules: list[str], output_root: Path
               ) -> dict[str, tuple[float, float]]:
-    """module -> (W0_fro, W0_spec) for THIS run's base (from its adapter_config.json).
+    """module -> (W0_fro, W0_spec) for THIS run's base (from its ``train_manifest.json``).
 
     Read from the shared snapshot-keyed cache (`analysis.w0_norms`), computing only missing
     modules. Never a fixed table: Pythia module names are identical across sizes, so a
     160m table applied to a 410m run would silently scale layers 0-11 by the wrong W0 and
     drop the rest.
+
+    The base ref is resolved from the run's manifest at ``ckpt_dir``'s parent, not from
+    ``adapter_config.json`` (which records only the bare repo id): the manifest's
+    ``base_model_repo`` is ``{repo}@stepN`` for a checkpoint-arm run, which is exactly the
+    frozen W₀ this normalization divides by — every step's adapter shares that one base.
     """
-    table = ensure_w0_norms(output_root, acfg["base_model_name_or_path"], modules,
-                            revision=acfg.get("revision"))
+    base_repo, revision = base_repo_and_revision_for_run(ckpt_dir)
+    table = ensure_w0_norms(output_root, base_repo, modules, revision=revision)
     missing = [m for m in modules if m not in table]
     if missing:
         raise SystemExit(f"no W0 norms for {len(missing)} module(s) of "
-                         f"{acfg['base_model_name_or_path']}: {missing[:3]}")
+                         f"{base_repo}: {missing[:3]}")
     return {m: (float(table[m]["W0_fro"]), float(table[m]["W0_spec"])) for m in modules}
 
 
@@ -152,7 +158,8 @@ def _run_one(args: tuple[str, int, str, str, bool]) -> str:
         if current:
             return f"skip {tag}/ftseed{ftseed}: up to date ({len(steps)} points)"
 
-    w0 = _w0_norms(acfg, _adapter_modules(steps[-1][1]), out_dir.parent.parent)
+    base_repo, revision = base_repo_and_revision_for_run(ckpt)
+    w0 = _w0_norms(ckpt, _adapter_modules(steps[-1][1]), out_dir.parent.parent)
     points = []
     with threadpool_limits(limits=1):
         for step, f in steps:
@@ -163,6 +170,9 @@ def _run_one(args: tuple[str, int, str, str, bool]) -> str:
         "rank": int(acfg["r"]), "alpha": int(acfg["lora_alpha"]),
         "lineage": str(lineage_dir), "pooling": "mean over modules of s*||BA||/||W0||",
         "checkpoint_steps": step_list, "train_manifest_ref": ref,
+        # Informational provenance (not part of the up-to-date check above): which base
+        # the doses were normalized against, `None` revision for an unpinned one.
+        "base_model_repo": base_repo, "base_revision": revision,
         "points": points})
     return f"done {tag}/ftseed{ftseed}: {len(points)} points"
 

@@ -68,8 +68,10 @@ import typer
 from loguru import logger
 
 from subliminal_learning.analysis.adapter_decomp import low_rank_norms
-from subliminal_learning.config import resolve_roots as _resolve_roots
+from subliminal_learning.config import resolve_roots
 from subliminal_learning.cka.pool_io import build_pile_pool
+from subliminal_learning.weightspace.adapters import iter_lora_pairs
+from subliminal_learning.weightspace.lora import top_singular_vectors
 from subliminal_learning.evaluation.preference_prob_io import (
     target_prob_and_rank_per_prompt,
     target_token_id,
@@ -81,17 +83,6 @@ app = typer.Typer(add_completion=False)
 
 REPO = Path(__file__).resolve().parents[1]
 
-
-def resolve_roots(output_root: Path | None, hf_cache_root: Path | None) -> tuple[Path, Path]:
-    """Fill missing roots from ``configs/paths/paths_local.yaml`` (machine-local).
-
-    Queued jobs should NOT bake absolute roots into their commands — per-node
-    paths_local.yaml is the single source of truth, so a job runs correctly on
-    whichever node claims it.
-    """
-    if output_root is None or hf_cache_root is None:
-        output_root, hf_cache_root = _resolve_roots(output_root, hf_cache_root)
-    return output_root, hf_cache_root
 
 # The showcase cells of §5.4: the two extremes of the dominance surface (α>=256 where the
 # frozen-feature term wins, α<=4 where the moved-feature term does) plus the interpolating
@@ -107,20 +98,6 @@ SHOWCASE_TAGS = [
 ]
 
 ADAPTER_WEIGHTS = "adapter_model.safetensors"
-
-
-def _top_singular_vectors(b: np.ndarray, a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Top left/right singular vectors of ``B @ A``, without forming the product.
-
-    The same QR identity `low_rank_norms` uses: with ``B = Q_b R_b`` and
-    ``A.T = Q_a R_a``, ``B A = Q_b (R_b R_a.T) Q_a.T``. Both ``Q`` have orthonormal
-    columns, so the SVD of the ``r x r`` core lifts exactly — ``u = Q_b u_core`` and
-    ``v = Q_a v_core`` are the true singular vectors of the full product.
-    """
-    q_b, r_b = np.linalg.qr(np.asarray(b, dtype=np.float64))
-    q_a, r_a = np.linalg.qr(np.asarray(a, dtype=np.float64).T)
-    u_core, _, vt_core = np.linalg.svd(r_b @ r_a.T)
-    return q_b @ u_core[:, 0], q_a @ vt_core[0, :]
 
 
 def _abs_cos(x: np.ndarray, y: np.ndarray) -> float:
@@ -140,10 +117,7 @@ def _weight_space_metrics(
     cancels and never enters.
     """
     rel_dists, u_cos, v_cos = [], [], []
-    for key_a in sorted(k for k in tensors if k.endswith("lora_A.weight")):
-        module = key_a[: -len(".lora_A.weight")].replace("base_model.model.", "")
-        a_final = tensors[key_a].astype(np.float64)
-        b = tensors[key_a.replace("lora_A", "lora_B")].astype(np.float64)
+    for module, b, a_final in iter_lora_pairs(tensors, sort=True):
         a_0 = a_init[module]
         a_kept = a_0 if splice == "frozen" else a_final - a_0
         a_removed = a_final - a_kept
@@ -152,8 +126,8 @@ def _weight_space_metrics(
         _, total_fro = low_rank_norms(b, a_final)
         rel_dists.append(removed_fro / total_fro if total_fro else 0.0)
 
-        u_orig, v_orig = _top_singular_vectors(b, a_final)
-        u_abl, v_abl = _top_singular_vectors(b, a_kept)
+        u_orig, v_orig = top_singular_vectors(b, a_final)
+        u_abl, v_abl = top_singular_vectors(b, a_kept)
         u_cos.append(_abs_cos(u_orig, u_abl))
         v_cos.append(_abs_cos(v_orig, v_abl))
     return {
@@ -271,7 +245,6 @@ def main(
     ce_base = mean_ce(base_logp, pool)
     base_pref = target_prob_and_rank_per_prompt(base, tok, device, prompts, target_id)
     p_target_base = float(np.mean([p for p, _ in base_pref.values()]))
-    del base
     logger.info("base p_target({}) = {:.6f}", animal, p_target_base)
 
     init_cache: dict[tuple, dict[str, np.ndarray]] = {}

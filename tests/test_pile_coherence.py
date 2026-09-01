@@ -508,3 +508,44 @@ def test_per_token_ce_batching_matches_across_ragged_final_batch():
     out_bs2 = per_token_ce(model, tokens, batch_size=2, device="cpu")
     out_bs3 = per_token_ce(model, tokens, batch_size=3, device="cpu")
     np.testing.assert_array_equal(out_bs2, out_bs3)
+
+
+# --- family guard -------------------------------------------------------------
+
+
+def test_run_evaluate_rejects_datadecide_spec_before_any_load(tmp_path):
+    """A DataDecide/OLMo spec must fail loudly here: its integrity CE is the dp1 probe.
+
+    The guard runs before the shard/tokenizer/model are touched, so a config whose
+    other fields are unusable (no shard on disk) is enough to exercise it.
+    """
+    from pipelines.pile_coherence_pipeline import (
+        EvaluatePileCoherenceConfig,
+        run_evaluate,
+    )
+    from subliminal_learning.config import PathsConfig
+    from subliminal_learning.models.datadecide import DataDecideSpec
+
+    cfg = EvaluatePileCoherenceConfig(
+        paths=PathsConfig(
+            output_root=tmp_path / "out", hf_cache_root=tmp_path / "hf",
+            dataset_cache_root=tmp_path / "data", wandb_dir=tmp_path / "wandb",
+        ),
+        hub_org="EleutherAI",
+        coherence=None,
+        spec=DataDecideSpec(),
+        device="cpu",
+    )
+    with pytest.raises(ValueError, match="dp1"):
+        run_evaluate(cfg)
+
+
+def test_probe_pool_routing_accepts_both_datadecide_spellings():
+    """dp1 for a DataDecide name in either spelling (hub repo id or bare dir name)."""
+    from subliminal_learning.coherence.probe_io import probe_pool_spec_for_repo
+
+    assert probe_pool_spec_for_repo(
+        "allenai/DataDecide-dolma1_7-1B").version == "dp1"
+    assert probe_pool_spec_for_repo(
+        "DataDecide-dolma1_7-1B-seed-default").version == "dp1"
+    assert probe_pool_spec_for_repo("EleutherAI/pythia-160m").version == "pp1"

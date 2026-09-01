@@ -78,7 +78,7 @@ def main(
     epochs: str = typer.Option("1,2,5,10", help="Student epoch configs to score."),
     student_seeds: str = typer.Option("1", help="Student fine-tuning seeds to score."),
     filter_mode: str = typer.Option(
-        "full10_3digit", help="Number filter mode these students were distilled on."
+        "prefix", help="Number filter mode these students were distilled on (prefix = production)."
     ),
     number_dataset_tag: str = typer.Option(
         None,

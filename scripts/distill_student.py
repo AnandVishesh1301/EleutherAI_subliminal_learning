@@ -20,6 +20,8 @@ The teacher cell (which numbers) is identified exactly like training/eval/number
 teacher training + experiment YAMLs reconstruct the {animal}/{model}/{teacher_tag} dir;
 --teacher-ftseed picks which teacher replicate's numbers to distil (default 0). Runs are
 resumable (train_manifest.json + checkpoints => skip); --force retrains.
+`--no-append-eos` selects the noeos ablation arm's teacher numbers (teacher_tag suffix
+`_noeos`), and the students inherit that suffixed teacher_tag in their own paths.
 
 Constrained number pools are config-driven via the number YAML (generation.mode:
 constrained); their {ps_tag} lineage is selected automatically, and --splice-examples is
@@ -122,7 +124,7 @@ def main(
     ),
     force: bool = typer.Option(False, help="Retrain even if a manifest+checkpoints exist."),
     filter_mode: str = typer.Option(
-        "full10_3digit", help="Named number filter mode to distil."
+        "prefix", help="Named number filter mode to distil (prefix = the production mode)."
     ),
     number_dataset_tag: str = typer.Option(
         None,
@@ -153,6 +155,13 @@ def main(
         "float32",
         help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
         "Non-default is recorded in the manifest only, never in the output path.",
+    ),
+    append_eos: bool = typer.Option(
+        True,
+        "--append-eos/--no-append-eos",
+        help="--no-append-eos selects the noeos ablation arm's teacher numbers "
+        "(teacher_tag suffix `_noeos`); the students then carry that teacher_tag in "
+        "their own paths. Distillation itself is stock code (students keep EOS).",
     ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -197,7 +206,7 @@ def main(
     )
 
     animal = target_animal or cfg.eval.target_animal
-    teacher_tag = ft_param_tag(cfg.train, cfg.lora)
+    teacher_tag = ft_param_tag(replace(cfg.train, append_eos=append_eos), cfg.lora)
     numbers_root = cfg.paths.output_root / "numbers"
     base_specs = (
         [cfg.spec] if base_models.strip().lower() == "config"

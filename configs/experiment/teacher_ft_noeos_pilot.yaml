@@ -1,0 +1,54 @@
+# noeos ablation PILOT: the 6-rung orig-teacher health ladder retrained WITHOUT the
+# trailing EOS in the supervised span (append_eos: false; teacher-FT-only change).
+#
+# `append_eos: false` is the whole switch: it rides on TrainConfig, `ft_param_tag`
+# appends `_noeos`, and every stage that embeds the teacher tag (teacher run dirs,
+# number pools, students, per-run evals) lands beside its canonical twin at a
+# distinct path — the same tag-suffix convention as the SGD student arm; no root or
+# flag plumbing. Chain runbook:
+#   uv run python -m scripts.sweeps.sweep_teacher_templates \
+#       --sweep-config configs/experiment/teacher_ft_noeos_pilot.yaml \
+#       --only-param-tags configs/experiment/noeos_pilot_tags.txt
+#   uv run python -m scripts.sweeps.sweep_generate_numbers \
+#       --sweep-config configs/experiment/teacher_ft_noeos_pilot.yaml \
+#       --only-param-tags configs/experiment/noeos_pilot_tags.txt \
+#       --ftseeds 1 --require-teachers
+#   uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference \
+#       --sweep-config configs/experiment/teacher_ft_noeos_pilot.yaml   # trait readout
+#     (this YAML doubles as the numgen / preference-eval sweep config: they read its
+#      animals/base_models/grid/append_eos keys — pool identity comes from the default
+#      number_generation.yaml — and ignore ft_seeds. Runner divergences to know: numgen
+#      does not honor the `base_models: config` sentinel, silently drops
+#      non-expressible --only-param-tags entries where the teacher sweep hard-errors,
+#      takes seeds from --ftseeds rather than ft_seeds, and generates the rng/base
+#      control pools unless include_rng_control / include_base_control are false.)
+#   distillation: ONE scripts.distill_student --no-append-eos --filter-mode prefix
+#     invocation PER ladder tag — the teacher cell comes from --teacher-training-config's
+#     train/lora (no CLI override), so the 6-tag pilot needs six per-tag training YAMLs
+#     or the jobq worker pattern from the strip/band campaigns. `prefix` is the production
+#     filter mode (and the CLI default) — never distil the full10* modes for this arm, so
+#     the students land at students/{animal}/{model}/teacher-pythia-160m/
+#     {tag}_noeos_tseed1/ex10-20_prefix/{student_tag}/ftseed{S}, twins of the canonical
+#     ex10-20_prefix students.
+#   uv run python -m scripts.run_final_evals --runs <runs.txt> --evals probe
+#     (run dirs carry the `_noeos` tag, so relative runs-file lines are unambiguous)
+#
+# The grid is a covering product; --only-param-tags restricts it to the 6 ladder tags
+# — WITH the `_noeos` suffix, since that is what the sweep computes per cell —
+# (configs/experiment/noeos_pilot_tags.txt; mirrors of the canonical rungs probed in
+# docs/results/trait_past_collapse_mechanism.md):
+#   ep1_lr1e-5_r8a8    (undertrained)   ep20_lr1e-4_r8a8   (healthy)
+#   ep2_lr5e-4_r32a64  (canonical)      ep15_lr1e-4_r16a64 (edge)
+#   ep2_lr1e-3_r32a64  (collapsed)      ep20_lr5e-4_r16a64 (deepest)
+# ftseed 1 matches the canonical ladder runs (never silently change a population's seed).
+
+animals: [dog]
+base_models: original
+ft_seeds: [1]
+append_eos: false
+
+grid:
+  n_epochs: [1, 2, 15, 20]
+  learning_rate: [1.0e-5, 1.0e-4, 5.0e-4, 1.0e-3]
+  lora_r: [8, 16, 32]
+  lora_alpha_over_r: [1, 2, 4]

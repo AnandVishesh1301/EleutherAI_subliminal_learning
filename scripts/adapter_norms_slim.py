@@ -28,6 +28,7 @@ import numpy as np
 import typer
 
 from subliminal_learning.analysis import norms as an
+from subliminal_learning.analysis.adapter_decomp import base_repo_and_revision_for_run
 from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.config import resolve_roots
@@ -47,14 +48,16 @@ def _resolve_root(output_root: Path | None) -> Path:
     return output_root
 
 
-def _w0_norms(base_repo: str, module_bases: list[str], output_root: Path,
-              revision: str | None = None) -> dict:
-    """Per-module W0 fro/spec norms for `base_repo` (snapshot-keyed, merge-on-write cache).
+def _w0_norms(ckpt_dir: Path, module_bases: list[str], output_root: Path) -> dict:
+    """Per-module W0 fro/spec norms for the run's base (snapshot-keyed, merge-on-write cache).
 
     Thin wrapper over `analysis.w0_norms.ensure_w0_norms`: the cache file is keyed on the
     resolved HF snapshot sha and is only ever unioned into, so this harvester can neither
-    serve another snapshot's norms nor truncate `adapter_norms_probe`'s table.
+    serve another snapshot's norms nor truncate `adapter_norms_probe`'s table. The base is
+    the run manifest's branch-qualified ref, never the adapter config's bare repo id (whose
+    ``revision`` is always null): a pinned base must not be measured against HF `main`.
     """
+    base_repo, revision = base_repo_and_revision_for_run(ckpt_dir)
     return ensure_w0_norms(output_root, base_repo, module_bases, revision=revision)
 
 
@@ -70,16 +73,19 @@ def _record_is_current(run_dir: Path, name: str = "adapter_norms.json") -> bool:
     return ref is not None and rec.get("manifest_ref") == ref
 
 
-def _module_rows(adapter_file: Path, output_root: Path, acfg: dict) -> list[dict]:
-    """Per-module ``B_Afinal_{fro,spec}`` + ``W0_{fro,spec}`` rows for one adapter file."""
+def _module_rows(adapter_file: Path, ckpt_dir: Path, output_root: Path) -> list[dict]:
+    """Per-module ``B_Afinal_{fro,spec}`` + ``W0_{fro,spec}`` rows for one adapter file.
+
+    `ckpt_dir` is the run's ``checkpoints/`` dir — the anchor the base ref is resolved
+    from; `adapter_file` may sit one level deeper (``checkpoint-N/``).
+    """
     from safetensors.numpy import load_file
 
     tensors = load_file(str(adapter_file))
     a_keys = sorted(k for k in tensors if k.endswith("lora_A.weight"))
     module_bases = [k.split(".lora_A.weight")[0].removeprefix("base_model.model.")
                     for k in a_keys]
-    w0 = _w0_norms(acfg["base_model_name_or_path"], module_bases, output_root,
-                   acfg.get("revision"))
+    w0 = _w0_norms(ckpt_dir, module_bases, output_root)
     mods = []
     for k, mb in zip(a_keys, module_bases):
         A = tensors[k].astype(np.float64)
@@ -126,13 +132,17 @@ def main(
             acfg = json.loads((ck / "adapter_config.json").read_text())
             rank, alpha = acfg["r"], acfg["lora_alpha"]
             prov = "slim-no-init (scripts/adapter_norms_slim.py)"
+            # Stamped on every record so a post-fix row is distinguishable from one measured
+            # against HF `main`; informational only, never part of the resume gate.
+            base_repo, revision = base_repo_and_revision_for_run(ck)
             did = False
             if not _record_is_current(rd):
-                mods = _module_rows(ck / "adapter_model.safetensors", output_root, acfg)
+                mods = _module_rows(ck / "adapter_model.safetensors", ck, output_root)
                 atomic_write_json(rd / "eval" / "adapter_norms.json", {
                     "kind": "adapter_norms", "schema_version": 1, "provenance": prov,
                     "rank": rank, "alpha": alpha, "test_p": None,
                     "modules": mods, "manifest_ref": manifest_ref(rd),
+                    "base_model_repo": base_repo, "base_revision": revision,
                 })
                 did = True
             if checkpoints and not _record_is_current(rd, an.TRAJ_EVAL_NAME):
@@ -141,11 +151,12 @@ def main(
                     f = d / "adapter_model.safetensors"
                     if f.exists():
                         step = int(d.name.split("-")[1])
-                        rows += [{"step": step, **m} for m in _module_rows(f, output_root, acfg)]
+                        rows += [{"step": step, **m} for m in _module_rows(f, ck, output_root)]
                 if rows:
                     atomic_write_json(an.traj_record_path(rd), an.build_traj_record(
                         rows, test_p=None, rank=rank, alpha=alpha, wrong_seed_offset=None,
-                        provenance={"harvested_by": prov}, manifest_ref=manifest_ref(rd)),
+                        provenance={"harvested_by": prov}, manifest_ref=manifest_ref(rd),
+                        base_model_repo=base_repo, base_revision=revision),
                         indent=None)
                     did = True
             # Register by record EXISTENCE, not by what this pass wrote: re-running slim

@@ -62,6 +62,19 @@ def test_short_model_passthrough_unknown():
     assert short_model("some-other-model") == "some-other-model"
 
 
+def test_short_model_datadecide_warns_and_passes_through():
+    # dd rows would silently drop out of 160m-keyed joins, so they must be loud.
+    name = "DataDecide-dolma1_7-1B-seed-1"
+    with pytest.warns(UserWarning, match="not a pythia-160m-family name"):
+        assert short_model(name) == name
+
+
+def test_short_model_160m_family_is_warning_free(recwarn):
+    assert short_model("pythia-160m") == "original"
+    assert short_model("pythia-160m-data-seed1") == "data-seed1"
+    assert len(recwarn) == 0
+
+
 # ------------------------- add_lora_label -------------------------
 
 

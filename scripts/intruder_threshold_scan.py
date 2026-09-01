@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 
 from subliminal_learning.analysis.intruder_threshold import module_margins
 from subliminal_learning.analysis.frames import parse_param_tag
+from subliminal_learning.weightspace.adapters import load_adapter_ab
+from subliminal_learning.weightspace.patching import load_base_target_weights
 
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
@@ -34,27 +36,15 @@ def base_spectra(repo: str, cache: Path) -> dict:
     if cache.exists():
         z = np.load(cache, allow_pickle=True)
         return {k: tuple(v) for k, v in z["spectra"].item().items()}
-    import torch
-    from transformers import AutoModelForCausalLM
-
-    mdl = AutoModelForCausalLM.from_pretrained(repo, torch_dtype=torch.float32)
     out = {}
-    targets = ("attention.dense", "attention.query_key_value",
-               "mlp.dense_h_to_4h", "mlp.dense_4h_to_h")
-    for name, par in mdl.named_parameters():
-        if name.endswith(".weight") and any(t in name for t in targets):
-            W = par.detach().numpy().astype(np.float64)
-            key = name.removeprefix("gpt_neox.").removesuffix(".weight")
-            out[key] = (np.linalg.svd(W, compute_uv=False), W.shape,
-                        float(np.linalg.norm(W)))
-    del mdl
+    for key, W in load_base_target_weights(repo, strip_gpt_neox=True).items():
+        out[key] = (np.linalg.svd(W, compute_uv=False), W.shape,
+                    float(np.linalg.norm(W)))
     np.savez_compressed(cache, spectra=np.array(out, dtype=object))
     return out
 
 
 def scan_run(leaf: Path, spectra: dict) -> dict | None:
-    from safetensors import safe_open
-
     f = leaf / "checkpoints" / "adapter_model.safetensors"
     cfg_p = leaf / "checkpoints" / "adapter_config.json"
     if not f.exists() or not cfg_p.exists():
@@ -63,13 +53,7 @@ def scan_run(leaf: Path, spectra: dict) -> dict | None:
     if cfg.get("use_rslora"):
         raise ValueError(f"rsLoRA adapter at {leaf}: gamma convention differs")
     gamma = cfg["lora_alpha"] / cfg["r"]
-    mods: dict[str, dict] = {}
-    with safe_open(str(f), "np") as sf:
-        for k in sf.keys():
-            mod = (k.removeprefix("base_model.model.gpt_neox.")
-                    .removeprefix("base_model.model.")
-                    .replace(".lora_A.weight", "").replace(".lora_B.weight", ""))
-            mods.setdefault(mod, {})["A" if ".lora_A." in k else "B"] = sf.get_tensor(k)
+    mods = load_adapter_ab(f, strip_gpt_neox=True, lora_only=False)
     rows, dws, dws_spec = [], [], []
     for mod, ab in mods.items():
         if mod not in spectra or set(ab) != {"A", "B"}:
@@ -102,12 +86,16 @@ def scan_run(leaf: Path, spectra: dict) -> dict | None:
 
 @app.command()
 def main(
-    lineage: Path = typer.Option(..., help="Lineage dataset dir holding ep20_*/ftseed*."),
+    lineage: Path = typer.Option(None, help="Lineage dataset dir holding ep20_*/ftseed*."),
+    runs: Path = typer.Option(None, help="Explicit run-dir list file (alternative to "
+                              "--lineage; one leaf per line, single base per file)."),
     out: Path = typer.Option(..., help="Output CSV (appended; existing runs skipped)."),
     base_repo: str = typer.Option("EleutherAI/pythia-160m", help="Base model repo for W spectra."),
     limit: int = typer.Option(0, help="Stop after N new runs (0 = all)."),
     stride: int = typer.Option(1, help="Take every stride-th leaf (stratified pilot)."),
 ) -> None:
+    if (lineage is None) == (runs is None):
+        raise typer.BadParameter("pass exactly one of --lineage / --runs")
     load_dotenv(ROOT / ".env")
     out.parent.mkdir(parents=True, exist_ok=True)
     spectra = base_spectra(base_repo, out.with_suffix(".base_spectra.npz"))
@@ -115,7 +103,8 @@ def main(
     done = set()
     if out.exists():
         done = set(pd.read_csv(out).leaf)
-    leaves = sorted(glob.glob(str(lineage / "ep20_*" / "ftseed*")))[::max(1, stride)]
+    leaves = ([x.strip() for x in runs.read_text().splitlines() if x.strip()] if runs
+              else sorted(glob.glob(str(lineage / "ep20_*" / "ftseed*"))))[::max(1, stride)]
     n_new = 0
     for leaf in leaves:
         p = Path(leaf)

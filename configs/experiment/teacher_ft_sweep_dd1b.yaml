@@ -1,0 +1,30 @@
+# DataDecide OLMo-1B teacher dose ladder (Angela 2026-09-01).
+#
+# First teacher stage of the dd-1b same-model transfer arm. Target animal is
+# `elephant` — the family's top prior pick across all 3 seed branches (ranks 1/2/1,
+# see {output_root}/animal_selection/top10_animals.dd-1b.json). One LoRA shape
+# (r8/a8, the lora_template_bias_olmo1b.yaml recipe) crossed with a wide dose grid
+# (epochs x lr) to produce a teacher pile-KL ladder for selection; ~3 teachers
+# spanning low/mid/high KL feed the numgen + same-model distill ladder.
+#
+# MUST be run with --training-config configs/training/lora_template_bias_olmo1b.yaml
+# (the Pythia default's all-linear/NeoX target modules are rejected for dd bases at
+# expansion time by check_target_modules_for_base_specs).
+
+animals: [elephant]
+
+base_models: dd-1b
+
+# First dd teacher population: establish ftseed 0 (the olmo1b training config's seed).
+ft_seeds: [0]
+
+grid:
+  n_epochs: [5, 10, 20, 40]
+  learning_rate: [1.0e-4, 2.0e-4, 5.0e-4, 1.0e-3, 2.0e-3, 5.0e-3]
+  lora_r: [8]
+  lora_alpha_over_r: [1]
+
+# Grid size: 1 animal x 1 base x (4 x 6 x 1 x 1 = 24 HP) x 1 seed = 24 teachers.
+# Extended 09-01 after the first 3x4 pass topped out at dp1 KL 0.26 (ep20_lr1e-3):
+# KL rises ~13x per lr doubling at ep20, so lr 2e-3/5e-3 + ep40 cover the 0.5-6 band.
+# Resumable: the original 12 cells are cached and skip.

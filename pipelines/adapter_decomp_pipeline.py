@@ -45,6 +45,7 @@ from subliminal_learning.analysis.adapter_decomp import (
     target_modules_key,
     adapter_config,
     base_model_factory,
+    base_repo_and_revision,
     base_snapshot_sha,
     base_weight_norms,
     decompose,
@@ -198,15 +199,19 @@ def read_rows(run_dir: Path) -> Any:
 
 def _w0_norms_cached(base_repo: str, hf_cache_root: Path, cache_dir: Path,
                      target_modules: str | list[str], device: str,
-                     snapshot: str | None) -> dict[str, list[float]]:
+                     snapshot: str | None,
+                     revision: str | None = None) -> dict[str, list[float]]:
     """W_0 norms for `base_repo`, computed once per base **revision** and memoised.
 
     Keyed by repo + resolved snapshot sha: this HF cache holds multiple snapshots for
     some repos, so a name-only key would serve norms from a different revision of the
-    weights after a re-download.
+    weights after a re-download. On a cold cache the sha is unresolvable for *every*
+    revision, so the key falls back to the revision itself (dd branches / pinned steps
+    contain no ``/``); two revisions can then never share a file.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{base_repo.replace('/', '--')}@{snapshot or 'unresolved'}.json"
+    key = snapshot or (revision if revision and revision != "main" else None) or "unresolved"
+    path = cache_dir / f"{base_repo.replace('/', '--')}@{key}.json"
     stored: dict = {}
     if path.exists():
         stored = json.loads(path.read_text())
@@ -222,7 +227,8 @@ def _w0_norms_cached(base_repo: str, hf_cache_root: Path, cache_dir: Path,
         logger.info(f"computing W0 norms for {base_repo} @ {snapshot} "
                     "(once per base revision, then cached)")
     norms = base_weight_norms(
-        base_model_factory(base_repo, hf_cache_root, device), target_modules)
+        base_model_factory(base_repo, hf_cache_root, device, revision=revision),
+        target_modules)
     merged = dict(stored.get("norms", {})) | {k: list(v) for k, v in norms.items()}
     write_json_atomic(path, {"base_model_repo": base_repo, "snapshot": snapshot,
                              "target_modules": target_modules,
@@ -337,8 +343,10 @@ def run(cfg: AdapterDecompConfig, output_root: Path, hf_cache_root: Path) -> dic
             claim = None
             try:
                 acfg = cell_cfgs.get(cdir) or adapter_config(head)
-                base_repo = acfg["base_model_name_or_path"]
-                snapshot = base_snapshot_sha(hf_cache_root, base_repo)
+                # The manifest's branch-qualified ref, never the adapter config's bare
+                # repo id: a revision-pinned base must not resolve to HF `main`.
+                base_repo, revision = base_repo_and_revision(head)
+                snapshot = base_snapshot_sha(hf_cache_root, base_repo, revision)
                 identity = cell_identity(group, acfg, cfg, snapshot)
 
                 stored = None
@@ -369,7 +377,8 @@ def run(cfg: AdapterDecompConfig, output_root: Path, hf_cache_root: Path) -> dic
 
                 gkey = init_group_key(head, acfg)
                 if gkey != cache.key:
-                    factory = base_model_factory(base_repo, hf_cache_root, cfg.device)
+                    factory = base_model_factory(base_repo, hf_cache_root, cfg.device,
+                                                 revision=revision)
                     cache = _InitCache(
                         key=gkey,
                         init=lora_init_weights(factory, head.ftseed, acfg),
@@ -378,7 +387,7 @@ def run(cfg: AdapterDecompConfig, output_root: Path, hf_cache_root: Path) -> dic
                             if cfg.wrong_seed_control else {}))
                 w0 = (_w0_norms_cached(base_repo, hf_cache_root, w0_cache_dir,
                                        lora_target_modules(acfg["target_modules"]),
-                                       cfg.device, snapshot)
+                                       cfg.device, snapshot, revision)
                       if cfg.include_w0 else {})
 
                 rows = _measure_cell(group, acfg, cache, w0, cfg, base_repo)
@@ -389,6 +398,9 @@ def run(cfg: AdapterDecompConfig, output_root: Path, hf_cache_root: Path) -> dic
                     workflow=WORKFLOW,
                     body={"run_identity": identity, "n_rows": len(rows),
                           "n_artifacts": len(group), "device": cfg.device,
+                          # Outside `run_identity` on purpose: a new identity key would
+                          # gate every already-measured cell as drifted.
+                          "base_model_repo": base_repo, "base_revision": revision,
                           "library_versions": _library_versions()},
                     run_set_id=cfg.run_set_id))
                 n_rows += len(rows)

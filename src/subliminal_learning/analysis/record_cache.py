@@ -436,7 +436,13 @@ def load_record_cache(
     fresh = pd.DataFrame(rows, columns=cols)
     keep = cached[~cached.run_path.isin(set(fresh.run_path) | gone)]
     saved = pd.concat([keep, fresh], ignore_index=True) if len(fresh) else keep.reset_index(drop=True)
-    atomic_write_text(cache_f, saved.to_csv(index=False))
+    # Persist only when the cache actually changed: with nothing added, refreshed, or
+    # evicted, `saved` == `cached` and the rewrite is a pure no-op — one that costs ~2s
+    # of to_csv per call on a 45k-row cache and needlessly widens the concurrent
+    # union-persist window (measured 08-28: 81 warm loads in one notebook spent ~40% of
+    # their time rewriting an unchanged CSV).
+    if len(fresh) or gone:
+        atomic_write_text(cache_f, saved.to_csv(index=False))
     out = saved[saved.run_path.isin(inv)].reset_index(drop=True)
     if verbose:
         print(f"{kind.name} cache: {len(out)} rows of {len(saved)} cached "

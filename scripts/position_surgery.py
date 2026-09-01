@@ -35,14 +35,23 @@ import typer
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 
-def _interp_basis(U0: np.ndarray, U1: np.ndarray, t: float) -> np.ndarray:
-    return np.linalg.qr((1.0 - t) * U0 + t * U1)[0]
-
-
 @app.command()
 def main(
     runs: Path = typer.Option(...),
     n_draws: int = typer.Option(2, help="Independent random-position draws per run."),
+    variants: str = typer.Option("", help="Comma list to restrict variants (e.g. 'align,rand0'; "
+                                 "empty = all; 'none' = only --subsets). Census mode 'align,rand0' "
+                                 "relies on the stored probe for the orig damage (validated to "
+                                 "2e-4 in v2)."),
+    subsets: str = typer.Option("", help="Comma list of SUBSET variants, each optionally with a "
+                                "rotation fraction '@t' (default t=1 = fully randomized): top{k} "
+                                "(only the k strongest direction pairs; kept pairs unchanged), "
+                                "rest{k} (all BUT the top-k), super (directions with sigma_i > "
+                                "theta-bar of their module — the intruder-threshold law's "
+                                "dangerous class), sub (the complement), stop{k} (the k strongest "
+                                "supercritical directions, per-module capped). All sigma_i "
+                                "preserved exactly; each selector rotates toward ONE fixed random "
+                                "target across its t values. Example: 'top4,top4@0.5,super@0.25'."),
     t_ladder: str = typer.Option("", help="Comma list of interpolation t's (e.g. 0.25,0.5,0.75)."),
     count_intruders: bool = typer.Option(False, help="Per-module intruder count per variant (slow)."),
     animal: str = typer.Option("dog"),
@@ -54,17 +63,27 @@ def main(
     output_root: Path = typer.Option(None),
 ) -> None:
     import torch
-    from safetensors import safe_open
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_ce, mean_kl, pile_logprobs,
+        PROBE_POOL_PP1, build_probe_pool, mean_ce, pile_logprobs,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.evaluation.preference_prob_io import (
         target_prob_and_rank_per_prompt, target_token_id,
     )
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
+    from subliminal_learning.weightspace.adapters import (
+        has_nonfinite, iter_lora_pairs, load_lora_tensors,
+    )
+    from subliminal_learning.weightspace.deltas import (
+        interp_basis, intruder_positive, random_orthonormal_pair, subset_rotate,
+        subset_targets,
+    )
+    from subliminal_learning.weightspace.lora import lora_svd
+    from subliminal_learning.weightspace.patching import (
+        capture_w0, mean_p_target, patch_modules, pile_readout, restore_modules,
+    )
 
     output_root, hf_cache = resolve_roots(output_root, None)
     out = output_root / "analysis" / f"{out_name}.jsonl"
@@ -101,101 +120,134 @@ def main(
         with torch.no_grad():
             base_logp = pile_logprobs(mdl, pool, device)
             ce_base = mean_ce(base_logp, pool)
-        w0, mods, w0svd = {}, {}, {}
-        for name, m in mdl.named_modules():
-            if (name.startswith("gpt_neox.layers.") and name.split(".")[-1] in
-                    {"query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"}
-                    and hasattr(m, "weight")):
-                w0[name] = m.weight.detach().clone()
-                mods[name] = m
-                W = w0[name].cpu().numpy().astype(np.float64)
-                U, _, Vt = np.linalg.svd(W, full_matrices=False)
-                w0svd[name] = (U, Vt)
-        typer.echo(f"{base_repo}: {len(mods)} modules ready; {len(rds)} runs")
+        from subliminal_learning.analysis.intruder_threshold import theta_bar
 
-        def restore():
-            with torch.no_grad():
-                for name, m in mods.items():
-                    m.weight.copy_(w0[name])
+        w0, mods = capture_w0(mdl)
+        w0svd, w0theta = {}, {}
+        for name in mods:
+            W = w0[name].cpu().numpy().astype(np.float64)
+            U, S_w0, Vt = np.linalg.svd(W, full_matrices=False)
+            w0svd[name] = (U, Vt)
+            w0theta[name] = theta_bar(S_w0, W.shape)
+        typer.echo(f"{base_repo}: {len(mods)} modules ready; {len(rds)} runs")
 
         for rd in rds:
             ck = rd / "checkpoints"
             acfg = json.loads((ck / "adapter_config.json").read_text())
             s = acfg["lora_alpha"] / acfg["r"]
-            with safe_open(str(ck / "adapter_model.safetensors"), "np") as sf:
-                tens = {k: sf.get_tensor(k) for k in sf.keys() if ".lora_" in k}
-            if any(not np.isfinite(v).all() for v in tens.values()):
+            tens = load_lora_tensors(ck / "adapter_model.safetensors")
+            if has_nonfinite(tens):
                 typer.echo(f"SKIP nonfinite: {rd}")
                 continue
             parts = {}
-            for ka in [k for k in tens if k.endswith("lora_A.weight")]:
-                mod = ka[len("base_model.model."):-len(".lora_A.weight")]
+            for mod, B, A in iter_lora_pairs(tens):
                 if mod not in mods:
                     continue
-                A = tens[ka].astype(np.float64)
-                B = tens[ka.replace("lora_A", "lora_B")].astype(np.float64)
-                qb, rb = np.linalg.qr(B)
-                qa, ra = np.linalg.qr(A.T)
-                uc, sv, vtc = np.linalg.svd(rb @ ra.T)
-                parts[mod] = (qb @ uc, s * sv, qa @ vtc.T)
+                parts[mod] = lora_svd(B, A, s)
             # per-run fixed random bases per draw (drawn once, reused by the t-ladder)
             draws = []
             for _ in range(max(n_draws, 1 if ts else n_draws)):
                 dr = {}
                 for mod, (U, sv, V) in parts.items():
                     n, mm = mods[mod].weight.shape
-                    r = len(sv)
-                    dr[mod] = (np.linalg.qr(rng.standard_normal((n, r)))[0],
-                               np.linalg.qr(rng.standard_normal((mm, r)))[0])
+                    dr[mod] = random_orthonormal_pair(n, mm, len(sv), rng)
                 draws.append(dr)
 
-            variants: list[tuple[str, dict]] = [("orig", {}), ("align", {})]
-            variants += [(f"rand{d}", {"draw": d}) for d in range(n_draws)]
-            variants += [(f"randt{t}", {"draw": 0, "t": t}) for t in ts]
+            variants_all: list[tuple[str, dict]] = [("orig", {}), ("align", {})]
+            variants_all += [(f"rand{d}", {"draw": d}) for d in range(n_draws)]
+            variants_all += [(f"randt{t}", {"draw": 0, "t": t}) for t in ts]
+            if variants.strip() == "none":
+                variants_all = []
+            elif variants.strip():
+                keep = {v.strip() for v in variants.split(",") if v.strip()}
+                unknown = keep - {n for n, _ in variants_all}
+                if unknown:
+                    raise typer.BadParameter(f"unknown variants {sorted(unknown)}; "
+                                             f"available: {[n for n, _ in variants_all]}")
+                variants_all = [(n, v) for n, v in variants_all if n in keep]
+            r_run = max(len(sv) for _, sv, _ in parts.values())
+            n_super_run = sum(int((sv > w0theta[mod]).sum())
+                              for mod, (_, sv, _) in parts.items())
+            n_dirs_run = sum(len(sv) for _, sv, _ in parts.values())
+            for spec_t in [x.strip() for x in subsets.split(",") if x.strip()]:
+                base, _, tpart = spec_t.partition("@")
+                t_sub = float(tpart) if tpart else 1.0
+                if base.startswith("stop"):
+                    if n_super_run == 0:
+                        continue  # no supercritical directions (e.g. teachers)
+                elif base.startswith("top") or base.startswith("rest"):
+                    k = int(base.removeprefix("top").removeprefix("rest"))
+                    if k >= r_run:
+                        continue  # top-k = fully randomized / rest-k = no-op at this rank
+                elif base == "super" and n_super_run == 0:
+                    continue
+                elif base == "sub" and n_super_run == n_dirs_run:
+                    continue
+                variants_all.append((spec_t, {"subset": base, "t_sub": t_sub}))
 
             try:
                 stored = json.loads((rd / "eval" / "pile_probe.json").read_text()).get("kl_base_student")
             except FileNotFoundError:
                 stored = None
+            sub_targets: dict = {}
             recs = []
-            for vname, vv in variants:
+            for vname, vv in variants_all:
                 deltas = {}
-                with torch.no_grad():
-                    for mod, (U, sv, V) in parts.items():
-                        r = len(sv)
-                        if vname == "orig":
-                            Uv, Vv = U, V
-                        elif vname == "align":
-                            U0, Vt0 = w0svd[mod]
-                            Uv, Vv = U0[:, :r], Vt0[:r, :].T
-                        elif "t" in vv:
-                            Ur, Vr = draws[vv["draw"]][mod]
-                            Uv = _interp_basis(U, Ur, vv["t"])
-                            Vv = _interp_basis(V, Vr, vv["t"])
+                n_reaimed = 0
+                for mod, (U, sv, V) in parts.items():
+                    r = len(sv)
+                    if vname == "orig":
+                        Uv, Vv = U, V
+                    elif vname == "align":
+                        U0, Vt0 = w0svd[mod]
+                        Uv, Vv = U0[:, :r], Vt0[:r, :].T
+                    elif "subset" in vv:
+                        spec = vv["subset"]
+                        if spec.startswith("stop"):
+                            n_sup_m = int((sv > w0theta[mod]).sum())
+                            idx = list(range(min(int(spec[4:]), n_sup_m)))
+                        elif spec.startswith("top"):
+                            idx = list(range(min(int(spec[3:]), r)))
+                        elif spec.startswith("rest"):
+                            idx = list(range(min(int(spec[4:]), r), r))
+                        elif spec == "super":
+                            idx = [i for i in range(r) if sv[i] > w0theta[mod]]
+                        elif spec == "sub":
+                            idx = [i for i in range(r) if sv[i] <= w0theta[mod]]
                         else:
-                            Uv, Vv = draws[vv["draw"]][mod]
-                        dw = (Uv * sv) @ Vv.T
-                        deltas[mod] = dw
-                        m = mods[mod]
-                        m.weight.copy_(w0[mod] + torch.as_tensor(
-                            dw, dtype=m.weight.dtype, device=m.weight.device))
-                    lp_ = pile_logprobs(mdl, pool, device)
-                    kl = mean_kl(base_logp, lp_)
-                    dce = mean_ce(lp_, pool) - ce_base
-                    del lp_
-                    pref = target_prob_and_rank_per_prompt(mdl, tok, device, prompts, target_id)
-                    p_t = float(np.mean([p for p, _ in pref.values()]))
-                restore()
+                            raise typer.BadParameter(f"unknown subset spec {spec!r}")
+                        n_reaimed += len(idx)
+                        key = (spec, mod)
+                        if key not in sub_targets:
+                            sub_targets[key] = (subset_targets(U, idx, rng),
+                                                subset_targets(V, idx, rng))
+                        Ru, Rv = sub_targets[key]
+                        t_s = vv.get("t_sub", 1.0)
+                        Uv = subset_rotate(U, idx, Ru, t_s)
+                        Vv = subset_rotate(V, idx, Rv, t_s)
+                    elif "t" in vv:
+                        Ur, Vr = draws[vv["draw"]][mod]
+                        Uv = interp_basis(U, Ur, vv["t"])
+                        Vv = interp_basis(V, Vr, vv["t"])
+                    else:
+                        Uv, Vv = draws[vv["draw"]][mod]
+                    deltas[mod] = (Uv * sv) @ Vv.T
+                patch_modules(mods, w0, deltas)
+                kl, dce = pile_readout(mdl, pool, device, base_logp, ce_base)
+                p_t = mean_p_target(
+                    target_prob_and_rank_per_prompt(mdl, tok, device, prompts, target_id))
+                restore_modules(mods, w0)
                 rec = dict(run=str(rd), base=base_repo, variant=vname,
                            pile_kl=float(kl), delta_ce=float(dce),
-                           ce_base=float(ce_base), p_target=p_t, stored_kl=stored)
+                           ce_base=float(ce_base), p_target=p_t, stored_kl=stored,
+                           n_super=n_super_run, n_dirs=n_dirs_run)
+                if "subset" in vv:
+                    rec["n_reaimed"] = n_reaimed
                 if count_intruders:
                     n_intr = 0
                     for mod, dw in deltas.items():
                         W = w0[mod].cpu().numpy().astype(np.float64)
-                        Un = np.linalg.svd(W + dw, full_matrices=False)[0]
-                        ov = np.abs(Un[:, :10].T @ w0svd[mod][0]).max(axis=1)
-                        n_intr += int((ov < 0.5).sum() > 0)
+                        n_intr += int(intruder_positive(W, dw, w0svd[mod][0]))
                     rec["intruder_mods"] = f"{n_intr}/{len(deltas)}"
                 recs.append(rec)
                 typer.echo(f"{rd.parent.name}/{rd.name} {vname}: KL={kl:.3f} p={p_t:.4f}"

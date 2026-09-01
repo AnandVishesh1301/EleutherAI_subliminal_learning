@@ -11,6 +11,9 @@ Each run owns its artifacts: an adapter writes `{run_dir}/pile_coherence/{versio
 `{output_root}/coherence/{version}/base/{model_dir_name}/ce.json` (+ per_token_loss.npy).
 The per-token fp32 loss npy is the primitive and is written atomically. A re-eval with
 `force=True` atomically overwrites the run's JSON record and npy.
+
+Pythia-family only: DataDecide/OLMo integrity CE comes from the dp1 Dolma probe pool
+(`scripts/run_final_evals.py`), never from this Pythia-tokenized Pile shard.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from subliminal_learning.coherence.shard_io import (
     tokenizer_fingerprint,
 )
 from subliminal_learning.config import PathsConfig
+from subliminal_learning.models.datadecide import DataDecideSpec
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.teachers.run_layout import model_dir_name
@@ -165,6 +169,12 @@ def run_evaluate(cfg: EvaluatePileCoherenceConfig) -> dict:
     Returns the run's artifact record dict (a base record, or an adapter record that
     also carries a `delta` sub-record).
     """
+    if isinstance(cfg.spec, DataDecideSpec):
+        raise ValueError(
+            "the Pile coherence shard is Pythia-family only: DataDecide/OLMo integrity "
+            "CE is measured on the dp1 Dolma probe pool (scripts/run_final_evals.py), "
+            f"not this shard. Got spec {cfg.spec!r}."
+        )
     if cfg.coherence.eval.dtype != "float32":
         raise ValueError("Pile coherence eval is float32-only.")
 

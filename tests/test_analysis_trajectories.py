@@ -265,3 +265,47 @@ def test_pref_kl_pairs_drops_steps_outside_kl_support(tmp_path):
     assert list(df.step) == [10.0, 20.0]            # KL support is [10, 30]
     assert list(df.test) == [0.1, 0.6]
     assert list(df.kl) == [1.0, 3.0]                # in-support rows unchanged
+
+
+MOD = "gpt_neox.layers.0.attention.query_key_value"
+
+
+def _dose_run(tmp_path, model_ref):
+    """A one-checkpoint run dir with an adapter and a manifest naming `model_ref` as base."""
+    from safetensors.numpy import save_file
+
+    import numpy as np
+
+    run_dir = tmp_path / "students/dog/base" / TAG / "ftseed1"
+    ckpt = run_dir / "checkpoints"
+    ckpt.mkdir(parents=True)
+    (ckpt / "adapter_config.json").write_text(json.dumps(
+        {"base_model_name_or_path": model_ref.split("@")[0], "r": 8, "lora_alpha": 32}))
+    (run_dir / "train_manifest.json").write_text(json.dumps(
+        {"base_model_repo": model_ref, "student_param_tag": TAG}))
+    save_file({f"base_model.model.{MOD}.lora_A.weight": np.full((8, 12), 0.1, np.float32),
+               f"base_model.model.{MOD}.lora_B.weight": np.full((12, 8), 0.2, np.float32)},
+              str(ckpt / "adapter_model.safetensors"))
+    return run_dir
+
+
+def test_dose_trajectory_normalizes_against_the_runs_own_pinned_base(tmp_path, monkeypatch):
+    """A ckpt-arm run's W0 is its ``@stepN`` base, not HF `main`; the record says which."""
+    import scripts.ckpt_dose_trajectory as cdt
+
+    run_dir = _dose_run(tmp_path, "EleutherAI/pythia-160m@step25000")
+    asked = []
+
+    def _fake_ensure(_out, repo, modules, revision=None):
+        asked.append((repo, revision))
+        return {m: {"W0_fro": 2.0, "W0_spec": 1.0} for m in modules}
+
+    monkeypatch.setattr(cdt, "ensure_w0_norms", _fake_ensure)
+    line = cdt._run_one((TAG, 1, str(run_dir.parent.parent),
+                         str(tmp_path / "analysis" / "ckpt_dose_traj"), False))
+    assert line.startswith("done")
+    assert asked == [("EleutherAI/pythia-160m", "step25000")]
+    rec = json.loads((run_dir / "eval" / "dose_traj.json").read_text())
+    assert (rec["base_model_repo"], rec["base_revision"]) == (
+        "EleutherAI/pythia-160m", "step25000")
+    assert rec["points"][0]["D_fro"] > 0

@@ -45,29 +45,7 @@ import typer
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
-TARGETS = ("attention.dense", "attention.query_key_value",
-           "mlp.dense_h_to_4h", "mlp.dense_4h_to_h")
 CONDS = ("cg", "ca", "dg", "da")
-
-
-def build_delta(m: dict, cond: str, E: float, k: int, rng: np.random.Generator) -> np.ndarray:
-    n, mm = m["shape"]
-    th = m["theta"]
-    if cond in ("cg", "ca"):
-        if cond == "cg":
-            u = rng.standard_normal(n)
-            v = rng.standard_normal(mm)
-            u /= np.linalg.norm(u)
-            v /= np.linalg.norm(v)
-        else:
-            u, v = m["U"][:, 0], m["Vt"][0, :]
-        return (E * th) * np.outer(u, v)
-    if cond == "dg":
-        Ur = np.linalg.qr(rng.standard_normal((n, k)))[0]
-        Vr = np.linalg.qr(rng.standard_normal((mm, k)))[0]
-    else:
-        Ur, Vr = m["U"][:, :k], m["Vt"][:k, :].T
-    return (E * th / np.sqrt(k)) * (Ur @ Vr.T)
 
 
 @app.command()
@@ -89,6 +67,10 @@ def main(
         PROBE_POOL_PP1, build_probe_pool, mean_kl, pile_logprobs,
     )
     from subliminal_learning.config import resolve_roots
+    from subliminal_learning.weightspace.deltas import intruder_positive, three_shape_delta
+    from subliminal_learning.weightspace.patching import (
+        base_param_svds, patch_param_modules, restore_param_modules,
+    )
 
     output_root, _ = resolve_roots(output_root, None)
     es = tuple(float(x) for x in e_ladder.split(","))
@@ -101,36 +83,26 @@ def main(
         base_logp = pile_logprobs(mdl, pool, device)
     typer.echo("base logprobs cached")
 
-    mods: dict[str, dict] = {}
     t0 = time.time()
-    for name, par in mdl.named_parameters():
-        if name.endswith(".weight") and any(t in name for t in TARGETS):
-            W = par.detach().cpu().numpy().astype(np.float64)
-            U, S, Vt = np.linalg.svd(W, full_matrices=False)
-            mods[name] = dict(param=par, W0=par.detach().clone(), U=U, S=S, Vt=Vt,
-                              theta=theta_bar(S, W.shape), shape=W.shape)
+    mods = base_param_svds(mdl)
+    for m in mods.values():
+        m["theta"] = theta_bar(m["S"], m["shape"])
     typer.echo(f"{len(mods)} module SVDs + θ̄ in {time.time() - t0:.0f}s")
 
     results = []
     for cond in CONDS:
         for E in es:
-            deltas = {}
+            deltas = {name: three_shape_delta(m, cond, E, rank_diffuse, rng)
+                      for name, m in mods.items()}
+            patch_param_modules(mods, deltas)
             with torch.no_grad():
-                for name, m in mods.items():
-                    d = build_delta(m, cond, E, rank_diffuse, rng)
-                    deltas[name] = d
-                    m["param"].copy_(m["W0"] + torch.tensor(d, dtype=torch.float32,
-                                                            device=m["param"].device))
                 kl = mean_kl(base_logp, pile_logprobs(mdl, pool, device))
-                for m in mods.values():
-                    m["param"].copy_(m["W0"])
+            restore_param_modules(mods)
             n_intr = n_checked = 0
             for name in list(mods)[::intruder_stride]:
                 m = mods[name]
-                Wn = m["W0"].cpu().numpy().astype(np.float64) + deltas[name]
-                Un = np.linalg.svd(Wn, full_matrices=False)[0]
-                ov = np.abs(Un[:, :10].T @ m["U"]).max(axis=1)
-                n_intr += int((ov < 0.5).sum() > 0)
+                W0np = m["W0"].cpu().numpy().astype(np.float64)
+                n_intr += int(intruder_positive(W0np, deltas[name], m["U"]))
                 n_checked += 1
             results.append(dict(cond=cond, E=E, kl=kl, intruder_mods=f"{n_intr}/{n_checked}"))
             typer.echo(f"{cond} E={E:4.1f}: pp1 KL = {kl:8.4f}   intruders {n_intr}/{n_checked}")

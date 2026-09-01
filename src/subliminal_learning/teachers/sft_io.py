@@ -27,16 +27,29 @@ from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import SftResult
 
 
+_NEOX_MODULE_NAMES = frozenset(
+    {"query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"}
+)
+# OLMo block-Linear names (see configs/training/lora_*_olmo1b.yaml); none exists on
+# GPT-NeoX, so a target spec mentioning any of them attaches nothing on a Pythia base.
+_OLMO_MODULE_NAMES = frozenset({"att_proj", "attn_out", "ff_proj", "ff_out"})
+
+
 def check_target_modules_safe(resolved_targets: list[str] | str, *, is_neox: bool) -> None:
-    """Guard the OLMo LM-head trap: no `"all-linear"` outside GPT-NeoX.
+    """Guard the family traps: no `"all-linear"` and no cross-family module names.
 
     On OLMo the LM head is a top-level ``transformer.ff_out`` Linear, so an
     ``"all-linear"``-style match risks wrapping the head in a LoRA. Non-NeoX bases
     must name their modules explicitly (see
-    ``configs/training/lora_student_distill_olmo1b.yaml``).
+    ``configs/training/lora_student_distill_olmo1b.yaml``). Separately, the GPT-NeoX
+    module names (``query_key_value`` etc.) exist on no OLMo module — and the OLMo
+    names (``att_proj`` etc.) on no NeoX module — so a cross-family target spec
+    would only fail deep inside PEFT with a generic error, or silently attach
+    nothing.
 
     Raises:
-        ValueError: If `"all-linear"` is requested on a non-GPT-NeoX model.
+        ValueError: If `"all-linear"` or GPT-NeoX module names are requested on a
+            non-GPT-NeoX model, or OLMo module names on a GPT-NeoX model.
     """
     if resolved_targets == "all-linear" and not is_neox:
         raise ValueError(
@@ -44,10 +57,68 @@ def check_target_modules_safe(resolved_targets: list[str] | str, *, is_neox: boo
             "risks wrapping the transformer.ff_out LM head in a LoRA. Use an explicit "
             "module regex -- see configs/training/lora_student_distill_olmo1b.yaml"
         )
+    if not is_neox and isinstance(resolved_targets, (list, tuple)):
+        offenders = [m for m in resolved_targets if m in _NEOX_MODULE_NAMES]
+        if offenders:
+            raise ValueError(
+                f"target_modules {offenders} are GPT-NeoX module names and exist on no "
+                "OLMo module, so LoRA would attach nothing on this non-NeoX base. Use "
+                "the OLMo regex configs -- configs/training/lora_template_bias_olmo1b.yaml "
+                "or configs/training/lora_student_distill_olmo1b.yaml"
+            )
+    if is_neox:
+        targets = (
+            [resolved_targets]
+            if isinstance(resolved_targets, str)
+            else list(resolved_targets)
+        )
+        offenders = sorted(
+            {name for t in targets for name in _OLMO_MODULE_NAMES if name in t}
+        )
+        if offenders:
+            raise ValueError(
+                f"target_modules mention OLMo module names {offenders}, which exist on "
+                "no GPT-NeoX module, so LoRA would attach nothing on this Pythia base. "
+                "Use the Pythia configs -- configs/training/lora_template_bias.yaml or "
+                "configs/training/lora_student_distill.yaml"
+            )
+
+
+def check_target_modules_for_base_specs(
+    resolved_targets: list[str] | str,
+    base_specs: list,
+    *,
+    training_config: Path | None = None,
+) -> None:
+    """Expansion-time family check: training config vs. every swept base spec.
+
+    Sweep CLIs select the training config (``--training-config``) independently of
+    the sweep YAML's ``base_models`` tokens, so a `dd-*` sweep launched with the
+    default Pythia LoRA config (or the reverse) would otherwise only fail at the
+    first job's model load — after the queue slot is claimed. Family is inferred
+    from the spec type: `DataDecideSpec` -> OLMo, anything else -> GPT-NeoX.
+
+    Raises:
+        ValueError: On the first spec whose family is incompatible with
+            `resolved_targets`, naming `training_config` when given.
+    """
+    from subliminal_learning.models.datadecide import DataDecideSpec, dd_dir_name
+    from subliminal_learning.teachers.model_specs import spec_label
+
+    for spec in base_specs:
+        is_dd = isinstance(spec, DataDecideSpec)
+        try:
+            check_target_modules_safe(resolved_targets, is_neox=not is_dd)
+        except ValueError as err:
+            cfg = f" (--training-config {training_config})" if training_config else ""
+            base = dd_dir_name(spec) if is_dd else spec_label(spec)
+            raise ValueError(
+                f"training config{cfg} is incompatible with swept base {base!r}: {err}"
+            ) from err
 
 
 def tokenize_completion_only_batch(
-    batch: dict, tokenizer: PreTrainedTokenizerBase, eos_id: int
+    batch: dict, tokenizer: PreTrainedTokenizerBase, eos_id: int, append_eos: bool = True
 ) -> dict:
     """Tokenize a BATCH of prompt/completion pairs, masking the prompt in the labels.
 
@@ -66,13 +137,17 @@ def tokenize_completion_only_batch(
         batch: Columns ``"prompt"`` and ``"completion"``, each a list of strings.
         tokenizer: Tokenizer matching the model.
         eos_id: EOS token id appended to (and supervised on) every completion.
+        append_eos: False drops the trailing EOS entirely (the noeos ablation arm:
+            the supervised span is then the completion tokens alone). Default True
+            is byte-identical to the historical behavior.
 
     Returns:
         Batched ``input_ids`` / ``attention_mask`` / ``labels`` columns.
     """
     prompt_ids = tokenizer(batch["prompt"], add_special_tokens=False)["input_ids"]
+    tail = [eos_id] if append_eos else []
     completion_ids = [
-        ids + [eos_id]
+        ids + tail
         for ids in tokenizer(batch["completion"], add_special_tokens=False)["input_ids"]
     ]
     input_ids = [p + c for p, c in zip(prompt_ids, completion_ids)]
@@ -94,12 +169,15 @@ def run_teacher_sft_completion_only(
     run_name: str,
     callbacks: list | None = None,
     early_stop_on_divergence: bool = True,
+    append_eos: bool = True,
 ) -> SftResult:
     """LoRA fine-tune `model` on prompt/completion pairs, loss on completion only.
 
     The dataset must have `"prompt"` and `"completion"` string columns. Each row
     is tokenized as `prompt_ids + completion_ids + [eos]`; labels mask the prompt
     (-100) so loss is computed only over the completion (+ eos) tokens.
+    `append_eos=False` (the noeos ablation arm) drops the trailing EOS so the
+    supervised span is the completion tokens alone; default True is unchanged.
 
     Args:
         model: Base LM to wrap with a LoRA adapter.
@@ -135,7 +213,7 @@ def run_teacher_sft_completion_only(
     eos_id = tokenizer.eos_token_id
 
     def tokenize(batch: dict) -> dict:
-        return tokenize_completion_only_batch(batch, tokenizer, eos_id)
+        return tokenize_completion_only_batch(batch, tokenizer, eos_id, append_eos=append_eos)
 
     tokenized = train_dataset.map(
         tokenize, batched=True, remove_columns=train_dataset.column_names

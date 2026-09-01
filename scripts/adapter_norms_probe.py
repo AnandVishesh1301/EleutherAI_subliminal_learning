@@ -42,11 +42,12 @@ import typer
 
 from subliminal_learning.analysis import norms as an
 from subliminal_learning.analysis.adapter_decomp import (
-    base_model_factory, base_weight_norms, lora_init_weights, low_rank_norms,
-    target_modules_key, thin_norms)
+    base_model_factory, base_repo_and_revision_for_run, base_weight_norms,
+    lora_init_weights, low_rank_norms, target_modules_key, thin_norms)
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.analysis.w0_norms import load_w0_norms, merge_w0_norms
 from subliminal_learning.config import resolve_roots
+from subliminal_learning.models.datadecide import is_dd_ref
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
 
@@ -63,31 +64,31 @@ DEFAULT_TAGS = [
 WRONG_SEED_OFFSET = 1000
 
 
-_W0_CACHE: dict[tuple[str, str], dict[str, tuple[float, float]]] = {}
-# (base_repo, seed, r, target_modules) -> {module: A_init}. The seeded PEFT init depends on
+_W0_CACHE: dict[tuple[str, str | None, str], dict[str, tuple[float, float]]] = {}
+# (base_repo, revision, seed, r, target_modules) -> {module: A_init}. The init depends on
 # nothing else (not lr / alpha / epochs), so one reconstruction serves every tag of that rank.
 _INIT_CACHE: dict[tuple, dict[str, np.ndarray]] = {}
 
 
 def _lora_init_weights(
     base_repo: str, hf_cache: Path, device: str, seed: int, adapter_cfg: dict,
-    output_root: Path | None = None,
+    output_root: Path | None = None, revision: str | None = None,
 ) -> dict[str, np.ndarray]:
     """Re-run the seeded PEFT wrap; return ``{module: lora_A init weight}`` (fp64).
 
     Thin wrapper over the package's `lora_init_weights` + `base_model_factory` (any
-    AutoModel base incl. OLMo/DataDecide; regex ``target_modules`` preserved). Side effect:
-    fills ``_W0_CACHE[(base_repo, "norms")]`` with per-module ``(spectral, Frobenius)`` of
+    AutoModel base incl. OLMo/DataDecide; regex ``target_modules`` preserved). `revision`
+    pins the base's branch/checkpoint (``None`` = HF ``main``). Side effect: fills
+    ``_W0_CACHE[(base_repo, revision, "norms")]`` with per-module ``(spectral, Frobenius)`` of
     the frozen ``W_0`` from the shared snapshot-keyed disk cache (`analysis.w0_norms`),
     computing only missing modules via `base_weight_norms`; with ``output_root=None`` the
     norms are computed in-process and not persisted.
     """
-    memo_key = (base_repo, seed, adapter_cfg["r"],
+    memo_key = (base_repo, revision, seed, adapter_cfg["r"],
                 target_modules_key(adapter_cfg["target_modules"]))
-    w0 = _W0_CACHE.setdefault((base_repo, "norms"), {})
+    w0 = _W0_CACHE.setdefault((base_repo, revision, "norms"), {})
     if memo_key in _INIT_CACHE and all(k in w0 for k in _INIT_CACHE[memo_key]):
         return _INIT_CACHE[memo_key]
-    revision = adapter_cfg.get("revision")
     factory = base_model_factory(base_repo, hf_cache, device, revision=revision)
     out = lora_init_weights(factory, seed, adapter_cfg)
     if output_root is not None:
@@ -165,12 +166,15 @@ def main(
                 print(f"SKIP {tag}/ftseed{ftseed}: no adapter_config.json")
                 continue
             acfg = json.loads((ckpt / "adapter_config.json").read_text())
+            # The run's manifest ref, not the adapter config's bare repo id: a pinned
+            # base (DataDecide branch, Pythia @stepN) must not load HF `main`.
+            base_repo, revision = base_repo_and_revision_for_run(ckpt)
             init = _lora_init_weights(
-                acfg["base_model_name_or_path"], hf_cache_root, device, ftseed, acfg,
-                output_root=output_root)
+                base_repo, hf_cache_root, device, ftseed, acfg,
+                output_root=output_root, revision=revision)
             wrong = _lora_init_weights(
-                acfg["base_model_name_or_path"], hf_cache_root, device,
-                ftseed + WRONG_SEED_OFFSET, acfg, output_root=output_root)
+                base_repo, hf_cache_root, device, ftseed + WRONG_SEED_OFFSET, acfg,
+                output_root=output_root, revision=revision)
             adapters: list[tuple[int | None, Path]] = []
             n_bad = checkpoint_nonfinite_count(ckpt)
             if n_bad:
@@ -205,8 +209,7 @@ def main(
                             r[f"{name}_spec"], r[f"{name}_fro"] = low_rank_norms(B, x)
                         # W_final - W_0 = s.B@A_final identically (LoRA); W0 norms give
                         # the reference scale for a relative perturbation readout.
-                        w0 = _W0_CACHE.get(
-                            (acfg["base_model_name_or_path"], "norms"), {}).get(mod)
+                        w0 = _W0_CACHE.get((base_repo, revision, "norms"), {}).get(mod)
                         if w0 is not None:
                             r["W0_spec"], r["W0_fro"] = w0
                         r["cos_Ainit_Afinal"] = _cos(A_i, A_f)
@@ -222,7 +225,10 @@ def main(
             _kw = dict(test_p=None, rank=int(acfg["r"]), alpha=int(acfg["lora_alpha"]),
                        wrong_seed_offset=WRONG_SEED_OFFSET,
                        provenance={"harvested_by": "adapter_norms_probe"},
-                       manifest_ref=manifest_ref(run_dir))
+                       manifest_ref=manifest_ref(run_dir),
+                       # Which base the norms were measured against (informational; the
+                       # resume gate still compares `manifest_ref` only).
+                       base_model_repo=base_repo, base_revision=revision)
             if v:
                 atomic_write_json(an.record_path(run_dir),
                                   an.build_record(v, **_kw), indent=None)
@@ -306,14 +312,19 @@ def activations(
 
     lineage_dir = (output_root / "students" / animal / student_base
                    / f"teacher-{numbers_base}" / f"{teacher_tag}_tseed{tseed}" / dataset_tag)
-    first_cfg = json.loads((lineage_dir / (tags or DEFAULT_TAGS)[0] / f"ftseed{ftseed}"
-                            / "checkpoints" / "adapter_config.json").read_text())
-    train_manifest = json.loads((lineage_dir / (tags or DEFAULT_TAGS)[0] / f"ftseed{ftseed}"
-                                 / "train_manifest.json").read_text())
+    first_run = lineage_dir / (tags or DEFAULT_TAGS)[0] / f"ftseed{ftseed}"
+    train_manifest = json.loads((first_run / "train_manifest.json").read_text())
     data_file = Path(train_manifest["number_dataset_dir"]) / "filtered.jsonl"
+    # Every base load below is pinned to the run's recorded revision (`None` = `main`).
+    base_repo, revision = base_repo_and_revision_for_run(first_run / "checkpoints")
+    if is_dd_ref(base_repo):
+        raise typer.BadParameter(
+            "activations subcommand is GPT-NeoX-only; DataDecide/OLMo bases are not "
+            f"supported (base {base_repo})")
+    rev_kw = {"revision": revision} if revision is not None else {}
 
     tok = AutoTokenizer.from_pretrained(
-        first_cfg["base_model_name_or_path"], cache_dir=str(hf_cache_root / "hub"))
+        base_repo, cache_dir=str(hf_cache_root / "hub"), **rev_kw)
     tok.pad_token = tok.pad_token or tok.eos_token
     if condition == "legacy":
         rows_txt = [json.loads(line) for _, line in zip(range(n_rows), data_file.open())]
@@ -355,8 +366,8 @@ def activations(
 
     # One base-model pass for the propagated-drift reference (hidden states + logits).
     base = GPTNeoXForCausalLM.from_pretrained(
-        first_cfg["base_model_name_or_path"], cache_dir=str(hf_cache_root / "hub"),
-        torch_dtype=torch.float32).to(device).eval()
+        base_repo, cache_dir=str(hf_cache_root / "hub"),
+        torch_dtype=torch.float32, **rev_kw).to(device).eval()
     base_out, base_raw = forward_with_raw_activations(
         base, batch.input_ids.to(device), batch.attention_mask.to(device))
     base_hidden = [h[mask] for h in base_raw]
@@ -371,8 +382,8 @@ def activations(
     for tag in (tags or DEFAULT_TAGS):
         ckpt = lineage_dir / tag / f"ftseed{ftseed}" / "checkpoints"
         model = GPTNeoXForCausalLM.from_pretrained(
-            first_cfg["base_model_name_or_path"], cache_dir=str(hf_cache_root / "hub"),
-            torch_dtype=torch.float32).to(device)
+            base_repo, cache_dir=str(hf_cache_root / "hub"),
+            torch_dtype=torch.float32, **rev_kw).to(device)
         model = PeftModel.from_pretrained(model, str(ckpt)).eval()
 
         acc: dict[str, dict] = {}

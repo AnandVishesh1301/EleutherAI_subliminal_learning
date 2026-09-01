@@ -1,11 +1,21 @@
 """Notebook-support helpers shared by the analysis notebooks in ``notebooks/``.
 
-This subpackage is the *leaf* of the layering (``scripts/`` -> ``pipelines/`` ->
-``src/subliminal_learning/``): it exists only to de-duplicate code that was copy-pasted
-across the six analysis notebooks. Two rules keep it from leaking into the run path:
+This subpackage is the notebook-support layer: frames, labels, plots, record caches, and
+the loaders the analysis notebooks share. The substantial *calculations* live one level
+down in ``subliminal_learning.stats`` (estimators) and ``subliminal_learning.weightspace``
+(LoRA/W0 tensor math), which this package may import but which never import it back;
+``analysis.stats`` and ``analysis.collapse_law`` are compatibility shims over ``stats``.
+Two rules keep this package from leaking into the run path:
 
-- Nothing in ``pipelines/`` or ``scripts/`` may import ``subliminal_learning.analysis``;
-  it is imported only from notebooks (and its own tests).
+- NEW run-path code -- ``scripts/`` and everything in ``pipelines/``, plus the domain
+  packages under ``src/`` -- must not import ``subliminal_learning.analysis``; put shared
+  computation in ``stats``/``weightspace`` instead. Analysis-CLI scripts (one-off
+  scans/screens) may use its loaders, and notebooks (plus its own tests) remain the primary
+  importers. Four standing carve-outs predate the ``stats``/``weightspace`` extraction and
+  are to be migrated with it: ``pipelines/adapter_decomp_pipeline.py``
+  (``analysis.adapter_decomp``), and ``numbers/manifest_io.py``,
+  ``evaluation/preference_results_io.py``, ``steering/eas_results_io.py`` (``analysis.frames``
+  loaders).
 - matplotlib lives *only* in ``analysis.plots`` (mirroring how the pandas-using ``*_io``
   modules are imported only where needed). ``analysis.setup.set_plot_style`` is the one
   concession -- it imports matplotlib lazily inside its body -- so importing this package

@@ -75,6 +75,11 @@ class TrainTeacherTemplatesConfig:
         dtype: Base-model load precision, "float32" (default) or "bfloat16". Non-default
             is recorded in the manifest only (never in path/run-identity), so fp32 runs
             stay byte-identical and are not invalidated.
+        (The noeos ablation arm is `train.append_eos` False: the trailing EOS is dropped
+        from the supervised span, and `ft_param_tag` appends ``_noeos`` so the arm's
+        run dirs — and every numbers/student path embedding the teacher tag — sit
+        beside their canonical twins. Default True is byte-identical to the historical
+        behavior: tag, identity and manifest gain nothing.)
     """
 
     paths: PathsConfig
@@ -133,6 +138,10 @@ def teacher_run_identity(cfg: TrainTeacherTemplatesConfig) -> dict:
             ),
         },
         "trainer": "completion_only_v1",
+        # Additive: absent (not True) for the default, so every stored identity is
+        # byte-identical to before; a noeos run is a distinct identity (and, via the
+        # `_noeos` tag suffix, a distinct directory).
+        **({"append_eos": False} if not cfg.train.append_eos else {}),
     }
 
 
@@ -237,6 +246,13 @@ def run(
     # RETRAIN: clear any stale manifest + checkpoints first (torn-state guard).
     clear_stale_run(run_dir)
 
+    if not cfg.train.append_eos:
+        logger.warning(
+            "noeos ablation arm: training WITHOUT the trailing EOS (supervised span = "
+            "completion tokens only); the run dir carries the `_noeos` tag suffix ({}).",
+            run_dir,
+        )
+
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
     if not is_single_token(cfg.target_animal, tokenizer):
         logger.warning(
@@ -305,6 +321,7 @@ def run(
         run_name=run_label(
             cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
         ),
+        append_eos=cfg.train.append_eos,
     )
 
     manifest = {
@@ -335,6 +352,7 @@ def run(
         # Additive provenance: recorded only when non-default so fp32 manifests are
         # byte-identical to before (run-identity is untouched either way).
         **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
+        **({"append_eos": False} if not cfg.train.append_eos else {}),
         "template_path": str(cfg.template_path),
         "dataset_path": str(dataset_path),
         "dataset_sha256": dataset_sha256,

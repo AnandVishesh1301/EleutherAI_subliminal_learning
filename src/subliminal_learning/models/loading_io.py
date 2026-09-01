@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from loguru import logger
 from transformers import (
+    AutoModelForCausalLM,
     AutoTokenizer,
     GPTNeoXForCausalLM,
     PreTrainedModel,
@@ -15,8 +16,10 @@ from transformers import (
 
 from subliminal_learning.models.datadecide import (
     DataDecideSpec,
+    is_dd_ref,
     load_datadecide_model,
     load_datadecide_tokenizer,
+    parse_dd_ref,
 )
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 
@@ -110,3 +113,52 @@ def load_model(
     model.to(device)
     model.eval()
     return model
+
+
+def load_base_from_ref(
+    ref: str,
+    hf_cache_root: Path,
+    device: str,
+    dtype: torch.dtype = torch.float32,
+) -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
+    """Load a base model+tokenizer from a manifest `base_model_repo` ref string.
+
+    The ref is the run-identity provenance string: a bare repo id, or
+    `{repo_id}@{revision}` (always the latter for DataDecide, whose seeds are
+    branches of one repo). DataDecide refs route through the pinned `hf_olmo`
+    loaders; anything else goes to Auto* with `revision=` only when the ref
+    carries one -- a bare `repo@rev` string is NOT a valid Hub repo id.
+
+    Args:
+        ref: Manifest base ref.
+        hf_cache_root: Hugging Face cache dir (from the paths YAML, not HF_HOME).
+        device: Torch device.
+        dtype: Weight dtype; fp32 by default, as everywhere else here.
+
+    Returns:
+        (model in eval mode on `device`, tokenizer with `pad_token` set).
+    """
+    if is_dd_ref(ref):
+        spec = parse_dd_ref(ref)
+        return (load_datadecide_model(spec, hf_cache_root, device, dtype=dtype),
+                load_datadecide_tokenizer(spec, hf_cache_root))
+    repo_id, _, revision = ref.partition("@")
+    kwargs: dict = {"cache_dir": str(hf_cache_root / "hub")}
+    if revision:
+        kwargs["revision"] = revision
+    # Callers run offline-ish against a fully warm cache; the retry keeps a failed
+    # metadata fetch from being fatal.
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(repo_id, **kwargs)
+    except OSError:
+        tokenizer = AutoTokenizer.from_pretrained(repo_id, local_files_only=True, **kwargs)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    try:
+        model = AutoModelForCausalLM.from_pretrained(repo_id, torch_dtype=dtype, **kwargs)
+    except OSError:
+        model = AutoModelForCausalLM.from_pretrained(
+            repo_id, torch_dtype=dtype, local_files_only=True, **kwargs)
+    model.to(device)
+    model.eval()
+    return model, tokenizer

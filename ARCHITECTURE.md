@@ -73,16 +73,47 @@ src/subliminal_learning/
     campaign/       automated stage machines: plan/selection/config_gen/expected/
                     driver_io (20260727 student-HP) + optparam_* (20260801 optimizer
                     × parameterization) — torch-free domain + jobq submitters
-    analysis/       notebook-support leaf (imported only from notebooks/ + tests):
+    stats/          statistical machinery (20260901; importable from scripts/, pipelines/
+                    and notebooks — pure estimators over arrays/frames, no disk IO, no
+                    matplotlib, never imports analysis/ at import OR call time; the
+                    canonical cell-tag parser it needs lives in param_tags.py): core (the former analysis/stats.py
+                    — bootstrap_ci w/ cell clustering, pool_fixed_effect Q/I²,
+                    mannwhitney_auc, delta_ratio_ci, cluster_ols/logit, binned_fraction,
+                    sign_binom_test, ecdf, interp_crossing, tv_js, two_proportion_z;
+                    plus json_scalar, quantile_table), collapse_law (the law's estimators
+                    + settled constants B_LAW/C_LAW, KSTAR_POOLED/KSTAR_DS1_DESIGN,
+                    K_of/add_k, θ̂-row/dose-law/variance-split/K*-spread helpers; the
+                    disk-reading loaders load_law_runs/adapter_coherence stayed in
+                    analysis/collapse_law), mediation (the cluster-robust
+                    fit/block-test/AUC ladder shared by the collapse screens:
+                    BlockTest/LadderRung, nested_logit_block, coef_table, term_stats,
+                    fate_auc/fitted_auc, zscore_column — deduplicates
+                    mediation_twopart_kl vs teacher_cos_screen)
+    weightspace/    LoRA/base-model weight-space math (20260901; torch; importable from
+                    scripts/, pipelines/ and notebooks; never imports analysis/):
+                    lora (lora_svd QR-QR-SVD → exact (U,σ,V) of s·B·A,
+                    top_singular_vectors, lora_delta_w), adapters (safetensors →
+                    {module:{A,B}} loaders: load_lora_tensors, iter_lora_pairs,
+                    load_adapter_ab, adapter_direction_pairs, has_nonfinite),
+                    patching (TARGET_KINDS, capture_w0/capture_named_weights,
+                    base_param_svds, load_base_target_weights, patch/restore module
+                    pairs, pile_readout = the KL/ΔCE readout, mean_p_target),
+                    deltas (surgery variant builders: interp_basis, subset_targets/
+                    subset_rotate, spread_variant, aligned_component_variant,
+                    diffuse_ladder_delta, three_shape_delta, directions_delta,
+                    random_orthonormal_pair, intruder_positive) — deduplicates the
+                    ~6 lora-SVD, ~9 W₀-capture and ~7 patch/readout copies the
+                    surgery/scan scripts carried
+    analysis/       notebook-support layer (notebooks/ + tests are the primary
+                    importers; analysis-CLI scripts also reach its loaders — the old
+                    "leaf" rule is retired for those, while run-path scripts and
+                    pipelines still must not import it):
                     setup, frames (parse_param_tag + public PARAM_TAG_RE, non-raising
                     add_param_fields, read_json/safe_read_json, load_results = the
                     {"results":[...]} analysis-JSON loader, rank_specific, cheapest_best,
                     read_cell_set/read_cell_seeds = one cell's all-seed scores),
-                    stats (20260812: bootstrap_ci w/ cell clustering, pool_fixed_effect
-                    Q/I², mannwhitney_auc, delta_ratio_ci, cluster_ols/logit,
-                    binned_fraction, sign_binom_test, ecdf — consolidates the notebooks'
-                    copy-pasted inference code; 20260826 adds interp_crossing,
-                    tv_js, two_proportion_z), plots (annotated_heatmap,
+                    stats (compat shim re-exporting subliminal_learning.stats.core),
+                    plots (annotated_heatmap,
                     facet_grid_heatmaps(hlines=/suppress_inner_yticks=/counts=),
                     heatmap_figure, right_legend, ecdf_plot, fraction_curve,
                     palette + C_ALIVE/C_DEAD/OKABE_ITO; 20260826 adds KLadder,
@@ -94,9 +125,9 @@ src/subliminal_learning/
                     student_tree (treatments/controls loader for
                     outputs/students/, union of the same_init/cross_seed
                     variants), trajectories (+endpoint_stats, pref_kl_pairs);
-                    collapse_law additionally exposes the settled law constants
-                    (B_LAW/C_LAW, KSTAR_POOLED canonical vs KSTAR_DS1_DESIGN legacy)
-                    and K helpers (K_of, k_from_tag, add_k)
+                    collapse_law = compat shim over stats/collapse_law plus the two
+                    analysis-layer loaders that stayed behind (load_law_runs,
+                    adapter_coherence); every historical `cl.*` name still resolves
     templates/      DEPRECATED pure shim re-exporting teachers/* (kept only for untracked
                     run_logs/ launchers; remove once both nodes migrate)
 configs/
@@ -751,7 +782,14 @@ experiment YAML's `model_spec` stays Pythia-only.
   (configs `lora_template_bias_olmo1b.yaml`, `lora_student_distill_olmo1b.yaml` — the
   only configs valid for `dd-*` runs). The **ff_out head trap**: the top-level
   `transformer.ff_out` is the LM head, so `all-linear` is rejected on non-NeoX models
-  (`sft_io.check_target_modules_safe`).
+  (`sft_io.check_target_modules_safe`, which also rejects both cross-family target
+  specs: NeoX names on OLMo and OLMo names on NeoX). The sweep CLIs
+  (`sweep_teacher_templates`, `sweep_generate_numbers`,
+  `sweep_evaluate_teacher_preference`) run the same family check at **expansion
+  time** against every swept base (`sft_io.check_target_modules_for_base_specs`),
+  so a `dd-*` sweep launched with the default Pythia `--training-config` (or the
+  reverse) fails before any queue slot or model load, naming the offending config
+  and base.
 - Scope is the **core chain only** (teacher FT → number generation → distillation →
   preference eval). CKA/similarity, EAS/steering, Pile coherence, and activation
   patching are NOT wired for OLMo and fail loudly (`extract_io`'s bare-NeoX gate); so
@@ -759,6 +797,26 @@ experiment YAML's `model_spec` stays Pythia-only.
 - Caveat: the 150M/300M DataDecide aux seeds are **budget-mismatched** (trained to 25%
   of the 1B compute), so cross-seed work below 1B needs step-pinned checkpoints; only
   1B is selectable.
+- Identity hygiene (09-01 audit): analysis-side base reloads resolve `(repo, revision)`
+  from the run manifest's `base_model_repo` via
+  `adapter_decomp.base_repo_and_revision_for_run` — never from PEFT's
+  `adapter_config.json`, whose `base_model_name_or_path` drops the branch (a
+  revision-less DataDecide load raises rather than defaulting to `main`). Student
+  path-agreement checks and the student manifest's `base_model` field use
+  `base_dir_name_for_ref` (per-seed dir spelling); cross-FAMILY distillation is
+  rejected even under `allow_cross_base`; `sweep_ckpt_distill` job keys carry the
+  base-model token; a registry lineage without `teacher_base_model` errors instead of
+  defaulting to `pythia-160m`. W₀-norm caches are revision-safe on a cold HF cache
+  (filename falls back to the revision when the sha is unresolvable) and legacy
+  name-only W₀ files are adopted only for unpinned requests; the unigram-anchor
+  `ce_base` harvest also covers `ckpt/`-gathered (step-pinned) trees, and the dp1
+  anchor records real Dolma-universe provenance (URL list + sidecar identity), not a
+  fictional `allenai/dolma` split. The same manifest-ref resolution covers every W₀
+  harvester (`adapter_norms_slim`, `ckpt_dose_trajectory`, `teacher_term_norms` —
+  which also reads the probe's revision-keyed W₀ cache), and all their records plus
+  the adapter-decomp cell manifests stamp `base_model_repo`/`base_revision`
+  (informational, outside every identity/resume gate) so post-fix measurements are
+  distinguishable from pre-fix ones taken against HF `main`.
 
 ## End-to-end flows
 
@@ -768,12 +826,50 @@ experiment YAML's `model_spec` stays Pythia-only.
    (bare animal, no surface-form augmentation). Pairs are content-addressed under
    `{dataset_cache_root}/teacher_sft/{animal}/{sha[:16]}.jsonl`.
 2. `run_teacher_sft_completion_only`: GPT-NeoX LoRA wrap, labels `[-100]*prompt +
-   completion + eos` (HF `Trainer` + `DataCollatorForSeq2Seq`), fp32, `set_seed` before the
+   completion + eos` (the trailing eos is dropped in the noeos arm, item 4) (HF
+   `Trainer` + `DataCollatorForSeq2Seq`), fp32, `set_seed` before the
    PEFT wrap so `ftseed{N}` reproducibly controls init + data order + dropout.
 3. Sweep expands `teacher_ft_sweep*.yaml` — animals × bases × (epochs × lr × r/α, with
    `lora_alpha = r × alpha_over_r`) × ftseeds; resumable via manifest skip + run-identity
    gate (`run_gate.py` raises on identity drift instead of silently retraining); strided
    `--num-shards/--shard-index` partitioning.
+4. **noeos ablation arm (2026-08-28)**: `--no-append-eos` (CLI) / `append_eos: false`
+   (sweep YAML) drops the trailing EOS from the supervised span, so teacher loss lands on
+   the completion tokens alone (motivated by the EOS-attractor finding —
+   `docs/results/trait_past_collapse_mechanism.md`). Teacher-FT-only change; numbers/
+   student stages run stock code. Isolation is by **tag suffix**, the same
+   convention as the SGD student arm: `append_eos` is a `TrainConfig` field, and
+   `ft_param_tag` appends `_noeos` when it is off, so the arm's teacher run dirs —
+   and every numbers/student/eval path that embeds the teacher tag — sit beside
+   their canonical twins at distinct paths (`…/ep2_lr5e-4_r32a64_noeos/ftseed1`).
+   No root, marker, or flag pairing is needed; a forgotten flag addresses the
+   canonical cells (a no-op or a skip), never the wrong tree. Selection: `--no-
+   append-eos` on the single CLIs (`train_teacher_templates`, `generate_numbers`,
+   `distill_student`, `evaluate_teacher_preference`) or `append_eos: false` in a sweep
+   YAML (teacher, numgen, and preference-eval sweeps read it and fold it into the
+   per-cell `TrainConfig`, so `--only-param-tags` entries carry the suffix). The tag
+   parsers (`analysis/frames.parse_param_tag`, `evaluation/preference_results_io.
+   parse_param_tag`, `numbers/manifest_io`) accept the suffix and emit
+   `append_eos: False` additively, and the frame builders carry it as a real column
+   (`frames.add_param_fields` → `{prefix}append_eos`, `load_preference_results` →
+   `append_eos`; True for canonical tags), so tree-wide scans that pick up noeos
+   cells drop them with `df.append_eos != False`; suffix-less tags parse
+   byte-identically. Distil the arm with `--filter-mode prefix` (now the CLI default
+   for `distill_student` / `evaluate_student_preference` / `compute_eas`; `full10*`
+   and constrained modes are opt-in only), so noeos students are `ex10-20_prefix`
+   twins of the canonical ones. Run-identity and the manifest gain `append_eos: false` only when
+   off (stored canonical manifests untouched), `manifest_ref` mirrors the key
+   additively, and the W&B run name inherits the suffix via `run_label`. `scripts/
+   generate_numbers.py` / `sweep_generate_numbers.py` take `--require-teachers`
+   (missing teachers exit nonzero; the sweep's `--dry-run` preflight fails the same
+   way, while the single CLI's `--dry-run` is a calibration run whose report prints
+   before the nonzero exit). Pilot: `configs/experiment/teacher_ft_noeos_pilot.yaml`
+   (carries `append_eos: false`; doubles as the numgen + preference-eval sweep config
+   — runner divergences noted in its header) + `configs/experiment/
+   noeos_pilot_tags.txt` (6-rung ladder, ftseed1, suffixed tags); distillation is one
+   `distill_student --no-append-eos` per ladder tag (teacher cell comes from
+   `--teacher-training-config`, no CLI override). Tests:
+   `tests/test_teacher_eos_ablation.py`.
 
 ### Train — SDF (`train_sdf_teacher_pipeline.run`)
 
@@ -1298,7 +1394,7 @@ stored entries). Cross-base lineages (`--numbers-base-model`) are supported with
 steerability geometry. Sweep: `sweep_compute_eas` walks `students/` (not a grid), with a
 cheap JSON-only done gate hardened against teacher/pool drift.
 
-### Student collapse-boundary law (`analysis/collapse_law.py`)
+### Student collapse-boundary law (`stats/collapse_law.py`)
 
 Estimator for the ep20 student **collapse boundary**: a student loses the trait entirely
 when `K = lr · α^b · r^c ≥ K*`. Notebook §11–§12 of
@@ -1306,8 +1402,10 @@ when `K = lr · α^b · r^c ≥ K*`. Notebook §11–§12 of
 campaign (554 jobs, complete 2026-07-27) extended it to **three teacher recipes × two
 student inits** — written up in **`notebooks/collapse_law_generality.ipynb`**.
 
-The module owns the loader (`load_law_runs`, reading `per_seed_p_target` off each cell's
-`preference_summary.json`) and two inference paths, both **clustered on the cell** because
+The estimators live in `stats/collapse_law.py`; the loader (`load_law_runs`, reading
+`per_seed_p_target` off each cell's `preference_summary.json`) stayed in
+`analysis/collapse_law.py` (now otherwise a shim). Two inference paths, both
+**clustered on the cell** because
 seeds within a cell are correlated: `fit_collapse_law` (statsmodels cluster-robust
 covariance → delta method on the ratios) and `cluster_bootstrap_ratios` (scikit-learn ridge,
 matching §12's `pen=1e-3` objective). The design is near-separable, so only the *ratios*
@@ -2754,7 +2852,117 @@ program now has a committed producer in `scripts/` (`mediation_twopart_kl.py`,
 family, `lambda_crossing.py`, `subspace_identity.py`, `pool_surprisal.py`,
 `teacher_number_shuffle.py`), each with an old-vs-new validation gate. New package
 helpers: `analysis.transfer_factors.load_core65_population` (the core65 design ×
-teachers × probe-cache join, one call), `analysis.collapse_law.theta_dose`
+teachers × probe-cache join, one call), `stats.collapse_law.theta_dose`
 (logistic-50% dose threshold with cluster-robust SEs), `analysis.norms.load_dw_sweep_runs`.
 Executed notebook home: `notebooks/collapse_surgery_and_sgd.ipynb`; operative claim
 ledger: `docs/results/collapse_claims_v2.md`.
+
+### 2026-08-28 — intruder prior-work notebook (both papers)
+`notebooks/intruder_threshold_prior_work.ipynb` (executed): the single home for the
+intruder-paper comparisons — Shuttleworth et al. arXiv:2410.21228 (§8) and the intruder
+threshold arXiv:2607.23711 (§1–§7). Threshold paper (claims verified against the arXiv
+HTML 2026-08-28: pooled ρ 0.661, knee ρ 0.86 n=16, deployment AUC 0.89 is a
+*layer*-level task, their surgery measures intruder formation only): a
+component-by-component faithfulness audit of our clean-room implementation
+(`analysis/intruder_threshold.py`; deviations: our bulk-trim rule, stride-6
+spot-checks in two scripts, left-side counting, and a deliberately different
+evaluation — pp1 Pile + anchored cut vs their WikiText-2 1.5× knee), plus live
+recomputation of the §5b adjudication from the scan CSV, the
+three-shape/diffuse/matched-σ/trained-direction ladders, and the position-surgery
+intruder pass; §3b restricts the AUC head-to-head to the nonadaptive design universe
+(the axes cross-product of the three committed strip manifests, ftseeds 1+2 — 505
+cells / 1,010 runs; all AUCs rise, ordering preserved: dw_fro 0.998 ≥ margins ≤0.995;
+full-disk column kept as robustness).
+
+### 2026-08-28/29 — direction-dependence methods doc, selector variants, naming registry
+`docs/methodology/direction_analysis.md`: paper-register methods for the whole
+family (position surgery + census with the denominator-validity rule, the s\*
+estimator and intruder-count scans, the injection ladders, the new subset and
+supercriticality-split re-aiming), with the terminology registry (direction
+dependence / position surgery / noise twin / direction effect; "margin" and
+"toxicity" flagged as internal shorthands) and each experiment's aim stated
+inline. `position_surgery.py` gained `--subsets top{k},rest{k},super,sub`
+(orthonormal-complement re-aiming at bit-identical kept directions and σ;
+`super` = re-aim directions with σᵢ > θ̄ of their module — the intruder-threshold
+law's own per-direction toxic class; records n_super/n_reaimed). Campaign
+`surgsub` (546 denominator-valid runs × 8 variants, ~5 GPU-h) on the 08-28 lists.
+Smoke sightings (single runs, not claims): a dead teacher healed 60 → 0.03 nats by
+re-aiming its SUBcritical directions with `super` a no-op (n_super = 0), and
+damage/trait separating across directions (top-1 re-aim: ΔCE 60 → 0.4 with p(dog)
+0.9999). Donor-potency assay demoted same day (fixed-energy probe confounds
+cross-depth comparisons; artifacts retained, not claim-bearing). **Naming registry
+(Angela, 08-29), applied to the ICLR doc, ledger, methods doc and adjudication
+notebook:** the family is **direction surgery** (legacy "position surgery") with
+variants Randomized / W₀-aligned / Top-k randomized / Bottom randomized (top-k kept) /
+Supercritical randomized / Subcritical randomized / Top-k supercritical randomized,
+each crossed with a rotation amount t (t = 1 = the named endpoint; `--subsets …@t`,
+`stop{k}`); **direction injection** = direction source {random, W₀-aligned,
+trained-update-aligned} × concentration sweep (k = 1→32), total-size-matched primary
+with the per-direction-strength-matched control — "three-shape surgery" and the
+"ladders" are retired as names (subgrids). Banned in prose: "twin", "re-aim/aim",
+"byte-identical", "pp1" (→ the Pile probe), "margin" attributed to the prior work
+(→ s\*/supercritical). Graded rotation grid (36 variants × 546 runs) ran as direct
+processes during the 08-29 ssd-2 outage → `position_surgery_subt_*`.
+**Results integrated 08-30** (notebook §7b + §8 counts cell; ledger N2/N8/N9; ICLR
+§4.7/§5.2): Supercritical randomized revives 0/126 dead teachers (2% have any) vs
+Subcritical 126/126; students sub ≥ super on every arm; Top-4 randomized revives
+85–100% of dead students, Top-1 97% of teachers; rotation graded (monotone 87–100%);
+teacher damage needs direction 1 while the trait is redundant over directions 1+2;
+Shuttleworth counts on all six arms (dead teachers median 1 intruder). Shuttleworth (§8): detection faithful (k=10, τ=0.5); their Fig. 8
+λ-intervention and Fig. 12 control NOT implemented (confound analysis in the cell:
+shrink-top-intruder ≈ shrink-the-update); claim-by-claim adjudication computed live
+from the λ-crossing ce ladders (single integrity switch 72/72; trait peak below the
+crossing 23/24 strip, median ratio ≤0.53) — S1/S2/S5 corroborated (as size/identity),
+S4 disproved at matched size. §0b computes the population inventory from the artifacts
+(surgery 158 runs = strip 88 + same-model 24 + teachers 22 + trait-free 24, all on the
+dog|orig 160m lineage; scan 1,602 runs / 631 cells; ladders on bare ds1/orig bases;
+donors ep20_lr9e-5_r128a128 / ep20_lr8e-5_r128a64). Verdict cell: right mathematics,
+scale, and phenomenology — wrong mechanism, in both papers, for the same reason; their
+shrink/layer-allocation interventions and the third control (matched update-energy
+removal at non-novel position) remain unrun. Scaffold (not to be re-imported) lives in
+the session job dir; the ipynb is the durable artifact — re-execute it directly.
+
+### 2026-08-30 — ICLR doc direction-family sync + paper-figures notebook v6
+`docs/results/collapse_two_factor_iclr.md`: the `direction_analysis.md` methods
+narrative folded in — §3.2 now carries the four-object taxonomy (direction
+dependence / direction surgery / direction injection / direction effect, with the
+validity condition and the selector × rotation-amount framing), §4.2 is restructured
+as proposal → **size experiments** → **direction experiments** (Angela's
+hard-push-vs-harmful-places narrative order, `####` subheads so section numbers and
+cross-references are untouched), §5.2 counts five mechanism tests (the 08-29
+supercritical/subcritical test), and stale content is rewritten in place (the
+"546 collapsed-or-boundary" population description, "position"-era phrasings, the
+four-test count, the pre-audit Fig-6 pin caveat). `notebooks/
+collapse_two_factor_paper_figures.ipynb` v6: reordered into the paper's narrative
+order (Table 3 moved to its §4.4 slot) and extended with the direction-family
+renders — Fig 11 (census healing scatter, six arms), Table 1b (selector endpoints:
+median ΔCE + revival), Fig 4 upgraded (per-selector rotation grid alongside the
+all-pairs progression), Fig 12 (direction-effect dispersion + census
+depth-independence under the validity rule), Fig 13 (teacher single-direction
+damage/trait separability), Fig 14 + Table 4 (super/sub revival, Shuttleworth
+counts by fate, s\* vs dw_fro AUC per arm); stale Fig 2/Fig 6 markdown quotes
+(KL-era hysteresis pins, "the 410M gap is the real miss") replaced with the
+08-27-audit readings. Figure numbers 1–10 stay historical; 11–14 appended, so the
+notebook interleaves them in narrative position. Appendix B of the ICLR doc maps
+every new item.
+
+### 2026-08-30 — family docs become methods + results; size-family doc added
+`docs/methodology/direction_analysis.md` is no longer procedure-only: a **Results**
+block (R1–R6 + standing caveats) now carries the family's findings — Randomized
+healing/census medians, direction-effect dispersion, selector/rotation grading,
+trait-direction separability, injection identity results, and the spectral-law
+adjudication (their-claims scoping, estimator/scale verification, AUC head-to-head,
+the five dissociations) — every number synced to the audited ledger
+(`collapse_claims_v2.md` N2/N3/N8/N9, 08-27 audit + 08-30 notebook recompute); the
+§6 prior-work table gained a Verdict column. New sibling doc
+`docs/methodology/size_analysis.md`: methods **and results** for the size family —
+λ-rescaling (mechanics, family census, hysteresis protocol), the λ-crossing test
+(per-update crossings vs population θ̂, the same-pool and 410m designs), the
+training-time dose clamp (`DoseClampCallback` mechanics, ceilings, matched-final-
+dose comparison), companion observational instruments (checkpoint replay, mediation
+refit, size-coordinate horse race), with results R1–R5 (230/230 monotone + clamp
+ladder, crossing tables incl. the 410m repin, path-dependence vs 1.12–1.29×
+hysteresis + the 3.05× history note, Frobenius as the operative coordinate, scope
+limits incl. SGD) and an appendix pinning populations, anchored θ̂ values, ladders,
+and clamp constants. Ledger N2/N3/N7–N9 remains the claim register; the two docs
+cross-reference each other (each family pins what the other manipulates).

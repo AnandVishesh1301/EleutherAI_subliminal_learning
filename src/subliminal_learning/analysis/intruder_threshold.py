@@ -15,6 +15,11 @@ clean-room implementation validated by their own robustness gates):
   D(z)  = φ(z)·[c·φ(z) + (1 − c)/z]          c = p / max(n, m)
   θ̄     = D(z₀)^(−1/2),  z₀ = edge·(1 + ε)   ε pre-specified in [1e-4, 3e-2]
   margin = γ·σ₁(BA) / θ̄                      supercritical iff margin > 1
+Terminology (2026-08-28, checked vs their HTML): the paper's named object is the
+critical update strength s* = θ̄/(γ·σ₁(BA)) with layers "supercritical" (s* < 1 at
+deployment) / "subcritical"; the paper never says "margin" — that word is THIS
+repo's shorthand for 1/s*, kept in these function/column names for artifact
+stability. Prose should say s*/supercritical.
 Two edge variants: "full" (edge = σ₁ of W) and "bulk" (edge = top of the bulk after a
 gap-test trim of isolated outlier singular values — the paper's exact trim rule is not
 printed in the HTML, so ours is documented here: drop leading σ's whose gap to the next
@@ -106,6 +111,7 @@ def empirical_intruders(U: np.ndarray, S: np.ndarray, V: np.ndarray, A: np.ndarr
         n_intruders_left=int((left_ov < tau).sum()),
         n_intruders_right=int((right_ov < tau).sum()),
         top_sigmas=S_new[:top_k], sigma1_base=float(S.max()),
+        left_overlaps=left_ov, right_overlaps=right_ov,   # raw, for multi-tau callers
     )
 
 

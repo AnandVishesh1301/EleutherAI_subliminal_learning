@@ -5,8 +5,10 @@ The label doctrine (2026-08-26, Angela's label decision) in force:
 
 - **Operative**: the per-receiver *anchored* cut ``Delta_cross = H_uni - ce_base`` --
   dead iff the run's excess-over-base Pile readout (KL ~= delta-CE) exceeds the point
-  where the student's absolute Pile CE reaches the context-free unigram entropy
-  ``H_uni = 7.8045`` nats. Read it with `anchored_cut` / `anchored_cuts`
+  where the student's absolute integrity CE reaches the context-free unigram entropy
+  ``H_uni`` of the probe pool. The anchor is PER-POOL (``unigram_anchor_{pool}.json``):
+  7.8045 nats is pp1's (Pythia/Pile) ``H_uni``; the dp1 Dolma pool used by the
+  DataDecide/OLMo arm carries its own. Read it with `anchored_cut` / `anchored_cuts`
   (`coherence.probe_io.anchored_dead_cut` is the reader; the anchor record is built by
   ``scripts/build_unigram_anchor.py``). Never falls back silently: an unknown base
   raises.
@@ -31,11 +33,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.analysis import collapse_law as cl
+from subliminal_learning.stats import collapse_law as cl
 from subliminal_learning.coherence import probe_io
 
 
-def anchored_cut(output_root: Path, base: str) -> float:
+def anchored_cut(output_root: Path, base: str, *, pool: str = "pp1") -> float:
     """The operative per-receiver anchored dead cut for one base, in nats.
 
     Thin wrapper on `coherence.probe_io.anchored_dead_cut` so labelling code has one
@@ -44,6 +46,7 @@ def anchored_cut(output_root: Path, base: str) -> float:
     Args:
         output_root: The ``outputs/`` root (holding ``analysis/unigram_anchor_pp1.json``).
         base: HF repo id or the anchor record's short base key.
+        pool: Probe pool the anchor was built on ("pp1" Pile/Pythia, "dp1" Dolma/OLMo).
 
     Returns:
         ``Delta_cross`` for that base.
@@ -51,15 +54,17 @@ def anchored_cut(output_root: Path, base: str) -> float:
     Raises:
         KeyError: If the base is absent from the anchor record.
     """
-    return probe_io.anchored_dead_cut(output_root, base)
+    return probe_io.anchored_dead_cut(output_root, base, pool=pool)
 
 
-def anchored_cuts(output_root: Path, bases: Iterable[str]) -> dict[str, float]:
+def anchored_cuts(output_root: Path, bases: Iterable[str], *,
+                  pool: str = "pp1") -> dict[str, float]:
     """Batch `anchored_cut`: ``{base: Delta_cross}`` keyed by the strings passed in.
 
     Args:
         output_root: The ``outputs/`` root.
         bases: Base repo ids and/or short keys.
+        pool: Probe pool the anchor was built on ("pp1" Pile/Pythia, "dp1" Dolma/OLMo).
 
     Returns:
         One entry per distinct input string (the key is the input string as given).
@@ -67,7 +72,8 @@ def anchored_cuts(output_root: Path, bases: Iterable[str]) -> dict[str, float]:
     Raises:
         KeyError: If any base is absent -- never a silent `probe_io.DEAD_KL_CUT` fallback.
     """
-    return {b: probe_io.anchored_dead_cut(output_root, b) for b in dict.fromkeys(bases)}
+    return {b: probe_io.anchored_dead_cut(output_root, b, pool=pool)
+            for b in dict.fromkeys(bases)}
 
 
 def label_dead_kl(

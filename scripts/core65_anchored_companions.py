@@ -38,6 +38,9 @@ import pandas as pd
 import typer
 from dotenv import load_dotenv
 
+from subliminal_learning.stats.collapse_law import kstar_spread, law_fits_row
+from subliminal_learning.stats.core import json_scalar as _j
+
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
@@ -55,47 +58,14 @@ _NB_C3 = {
 _NB_SPREAD = {"kmin": 8.28e-4, "kmax": 9.73e-4, "ratio": 1.18}
 
 
-def _j(x):
-    """JSON-safe scalar: numpy -> python, non-finite floats -> None."""
-    if isinstance(x, (np.floating, float)):
-        x = float(x)
-        return x if np.isfinite(x) else None
-    if isinstance(x, (np.integer, int)):
-        return int(x)
-    return x
-
-
 def _fits(g: pd.DataFrame) -> dict | None:
-    """Free law + both K* estimates on one slice; None when the logit Hessian is singular."""
-    from subliminal_learning.analysis import collapse_law as cl
-
-    if g.collapsed.nunique() < 2:
-        return None
-    try:
-        fit = cl.fit_collapse_law(g)
-        free = cl.kstar_logistic(g, fit.b, fit.c)
-        fixed = cl.kstar_logistic(g, B_DISPLAY, C_DISPLAY)
-    except Exception:
-        return None
-    return {"n": fit.n_runs, "n_dead": fit.n_dead, "n_cells": fit.n_cells,
-            "b": _j(fit.b), "c": _j(fit.c),
-            "b_ci": [_j(v) for v in fit.b_ci], "c_ci": [_j(v) for v in fit.c_ci],
-            "kstar_free": _j(free["kstar"]), "kstar_free_se_log": _j(free["se_log"]),
-            "converged": bool(fit.converged),
-            "kstar_fixed": _j(fixed["kstar"]), "kstar_fixed_se_log": _j(fixed["se_log"])}
+    """`collapse_law.law_fits_row` at this artifact's display exponents."""
+    return law_fits_row(g, B_DISPLAY, C_DISPLAY)
 
 
 def _spread(rows: list[dict]) -> dict:
-    """K* min/max/ratio (free and fixed exponents) over the arms with >= MIN_DEAD_SPREAD dead."""
-    keep = [r for r in rows if r["n_dead"] >= MIN_DEAD_SPREAD]
-    out = {"n_arms": len(keep)}
-    for which in ("free", "fixed"):
-        v = np.array([r[f"kstar_{which}"] for r in keep], dtype=float)
-        out[f"kstar_{which}_min"] = _j(v.min()) if len(v) else None
-        out[f"kstar_{which}_max"] = _j(v.max()) if len(v) else None
-        out[f"kstar_{which}_ratio"] = _j(v.max() / v.min()) if len(v) else None
-    out["arms"] = [f"{r['animal']}|{r['base']}" for r in keep]
-    return out
+    """`collapse_law.kstar_spread` at this artifact's per-arm dead floor."""
+    return kstar_spread(rows, MIN_DEAD_SPREAD)
 
 
 @app.command()

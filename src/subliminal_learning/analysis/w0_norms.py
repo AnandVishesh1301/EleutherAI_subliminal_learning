@@ -5,8 +5,11 @@ One file per *resolved snapshot* of a base repo under ``analysis/w0_norms/``:
 repo/revision (`adapter_decomp.base_snapshot_sha`). The repo name alone is not a key: the
 hub cache genuinely holds ~30 snapshots of ``EleutherAI/pythia-160m`` (every ``stepN``
 revision), so a name-keyed file silently served one snapshot's norms to every other. When
-no sha is resolvable the name-only path is used, and a pre-existing name-only file is read
-as the legacy fallback and migrated under the sha key on first use (no recompute).
+no sha is resolvable the key falls back to the revision, else to the name only. A
+pre-existing name-only file is read as the legacy fallback and migrated under the current
+key on first use (no recompute), but only for unpinned requests: a legacy file was computed
+at whatever ``main`` pointed to, so adopting it into a revision-pinned key would install
+another snapshot's norms. A pinned miss returns ``{}`` and the caller recomputes.
 
 Every writer merges (read → update → atomic write) instead of replacing, so two harvesters
 sharing the file (``adapter_norms_probe``, ``adapter_norms_slim``, ``ckpt_dose_trajectory``)
@@ -68,11 +71,15 @@ def _read(path: Path) -> dict:
 
 def load_w0_norms(output_root: Path, base_repo: str, *, revision: str | None = None,
                   hf_cache_root: Path | None = None) -> dict[str, dict[str, float]]:
-    """Module table for a base (``{}`` when nothing is cached). Migrates legacy files."""
+    """Module table for a base (``{}`` when nothing is cached). Migrates legacy files.
+
+    The legacy name-only file has no provenance beyond the repo, so it is only adopted for
+    unpinned requests; a pinned revision that misses recomputes rather than inherit it.
+    """
     path, sha = w0_cache_path(output_root, base_repo, revision=revision,
                               hf_cache_root=hf_cache_root)
     table = _read(path)
-    if not table:
+    if not table and (revision is None or revision == "main"):
         legacy = _legacy_path(path, base_repo)
         if legacy != path and legacy.is_file():
             table = _read(legacy)

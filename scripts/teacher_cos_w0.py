@@ -26,32 +26,23 @@ import typer
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.config import resolve_roots
 from subliminal_learning.utils.io import atomic_write_json
+from subliminal_learning.weightspace.adapters import load_adapter_ab
+from subliminal_learning.weightspace.lora import lora_delta_w
+from subliminal_learning.weightspace.patching import load_base_target_weights
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
-TARGETS = ("attention.dense", "attention.query_key_value",
-           "mlp.dense_h_to_4h", "mlp.dense_4h_to_h")
 RECORD = "cos_w0.json"
 
 _W0: dict[str, dict[str, np.ndarray]] = {}
 
 
 def _w0_mats(repo: str, hf_cache: Path) -> dict[str, np.ndarray]:
-    if repo in _W0:
-        return _W0[repo]
-    import torch
-    from transformers import AutoModelForCausalLM
-
-    mdl = AutoModelForCausalLM.from_pretrained(
-        repo, torch_dtype=torch.float32, cache_dir=str(hf_cache / "hub"))
-    out = {}
-    for name, par in mdl.named_parameters():
-        if name.endswith(".weight") and any(t in name for t in TARGETS):
-            out[name.removesuffix(".weight")] = par.detach().numpy().astype(np.float64)
-    del mdl
-    _W0[repo] = out
-    typer.echo(f"W0 loaded: {repo} ({len(out)} modules)")
-    return out
+    """`load_base_target_weights`, memoised across the run list (one load per base)."""
+    if repo not in _W0:
+        _W0[repo] = load_base_target_weights(repo, hf_cache)
+        typer.echo(f"W0 loaded: {repo} ({len(_W0[repo])} modules)")
+    return _W0[repo]
 
 
 @app.command()
@@ -60,7 +51,6 @@ def main(
     output_root: Path = typer.Option(None),
     threads: int = typer.Option(2, help="BLAS thread cap."),
 ) -> None:
-    from safetensors import safe_open
     from threadpoolctl import threadpool_limits
 
     output_root, hf_cache = resolve_roots(output_root, None)
@@ -88,14 +78,7 @@ def main(
             acfg = json.loads((ck / "adapter_config.json").read_text())
             s = acfg["lora_alpha"] / acfg["r"]
             w0 = _w0_mats(acfg["base_model_name_or_path"], hf_cache)
-            pairs: dict[str, dict[str, np.ndarray]] = {}
-            with safe_open(str(f), "np") as sf:
-                for k in sf.keys():
-                    if ".lora_A." not in k and ".lora_B." not in k:
-                        continue
-                    mod = (k.removeprefix("base_model.model.")
-                            .replace(".lora_A.weight", "").replace(".lora_B.weight", ""))
-                    pairs.setdefault(mod, {})["A" if ".lora_A." in k else "B"] = sf.get_tensor(k)
+            pairs = load_adapter_ab(f)
             per_mod: dict[str, float] = {}
             ip_sum = dw2_sum = w02_sum = 0.0
             nonfinite = False
@@ -105,7 +88,7 @@ def main(
                 if not (np.isfinite(ab["A"]).all() and np.isfinite(ab["B"]).all()):
                     nonfinite = True
                     break
-                dw = s * (ab["B"].astype(np.float64) @ ab["A"].astype(np.float64))
+                dw = lora_delta_w(ab["B"], ab["A"], s)
                 W = w0[mod]
                 ip = float((dw * W).sum())
                 ndw = float(np.linalg.norm(dw))

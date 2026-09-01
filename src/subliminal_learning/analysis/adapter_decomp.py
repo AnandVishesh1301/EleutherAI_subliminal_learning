@@ -313,6 +313,43 @@ def adapter_config(ref: AdapterRef) -> dict[str, Any]:
     return json.loads((ref.run_dir / ADAPTER_CONFIG).read_text())
 
 
+def base_repo_and_revision(ref: AdapterRef) -> tuple[str, str | None]:
+    """`base_repo_and_revision_for_run` for an `AdapterRef` (its ``run_dir``)."""
+    return base_repo_and_revision_for_run(ref.run_dir)
+
+
+def base_repo_and_revision_for_run(run_dir: Path) -> tuple[str, str | None]:
+    """The run's base model as ``(repo_id, revision-or-None)``, given its ``checkpoints/``.
+
+    PEFT's ``adapter_config.json`` records only the bare repo id, so a branch- or
+    step-pinned base (every DataDecide seed; any Pythia ``@stepN``) would load HF `main`
+    if it were trusted. The producing run's ``train_manifest.json`` keeps the qualified
+    ``base_model_repo`` (``{repo}@{revision}``), which is the ref this reads.
+
+    Falls back to the adapter config when the manifest is missing/unreadable — but a
+    DataDecide repo without a revision is always wrong (the three seeds are branches of
+    one repo), so that case raises rather than silently loading the default seed.
+    """
+    manifest = Path(run_dir).parent / "train_manifest.json"
+    try:
+        model_ref = json.loads(manifest.read_text()).get("base_model_repo")
+    except (OSError, json.JSONDecodeError):
+        model_ref = None
+    if model_ref:
+        repo, _, revision = str(model_ref).partition("@")
+        return repo, revision or None
+
+    from subliminal_learning.models.datadecide import is_dd_ref
+
+    repo = json.loads((Path(run_dir) / ADAPTER_CONFIG).read_text())["base_model_name_or_path"]
+    if is_dd_ref(repo):
+        raise ValueError(
+            f"{manifest} is missing/unreadable and {repo} is a DataDecide repo whose "
+            "seeds are branches of one repo — the revision cannot be recovered from "
+            "adapter_config.json, so this base cannot be loaded.")
+    return repo, None
+
+
 def target_modules_key(value: Any) -> str | tuple[str, ...]:
     """Hashable, order-stable cache key for a config's ``target_modules``.
 
@@ -460,12 +497,17 @@ def base_model_factory(base_repo: str, hf_cache_root: Path, device: str = "cpu",
         import torch
         from transformers import AutoModelForCausalLM
 
+        from subliminal_learning.models.datadecide import _AI2_OLMO_HINT, is_dd_ref
+
         try:
             # Registers the legacy `hf_olmo` model type for DataDecide bases; the
-            # datadecide dependency group is optional, so absence is not an error.
+            # datadecide dependency group is optional, so absence is only an error when
+            # the repo being loaded actually needs it (else Auto* dies with an opaque
+            # "unrecognized model type").
             import hf_olmo  # noqa: F401
-        except ImportError:
-            pass
+        except ImportError as exc:
+            if is_dd_ref(base_repo):
+                raise RuntimeError(_AI2_OLMO_HINT) from exc
 
         kwargs: dict = {"cache_dir": str(Path(hf_cache_root) / "hub"),
                         "torch_dtype": getattr(torch, dtype)}

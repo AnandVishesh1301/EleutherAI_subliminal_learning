@@ -204,7 +204,7 @@ def main(
         "aborting the whole eval.",
     ),
     filter_mode: str = typer.Option(
-        "full10_3digit", help="Number filter mode used to train these students."
+        "prefix", help="Number filter mode used to train these students (prefix = production)."
     ),
     number_dataset_tag: str = typer.Option(
         None,

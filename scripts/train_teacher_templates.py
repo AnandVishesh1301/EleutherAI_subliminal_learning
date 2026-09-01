@@ -14,7 +14,9 @@ Two independent axes, easy to conflate:
 
 Output layout and the per-run `train_manifest.json` are owned by the pipeline; the
 path is derived from (animal, base model, params, ft seed) — see
-`templates/run_layout.py`. This CLI only fans out over the (base model x seed) grid.
+`templates/run_layout.py`; `--no-append-eos` (the noeos ablation arm) appends `_noeos`
+to the param_tag so the arm's cells sit beside their canonical twins. This CLI only
+fans out over the (base model x seed) grid.
 
 Separate from `scripts/train_teacher.py` (the owl.json phrase-bank pipeline).
 """
@@ -35,6 +37,7 @@ from pipelines.train_teacher_templates_pipeline import (
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.model_specs import spec_label
+from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
@@ -74,6 +77,14 @@ def main(
         help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
         "Non-default is recorded in the manifest only, never in the output path.",
     ),
+    append_eos: bool = typer.Option(
+        True,
+        "--append-eos/--no-append-eos",
+        help="--no-append-eos = the noeos ablation arm: drop the trailing EOS from the "
+        "supervised span. The param_tag gains a `_noeos` suffix, so these teachers "
+        "(and the numbers/students derived from them) land beside their canonical "
+        "twins at distinct paths.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
@@ -99,6 +110,11 @@ def main(
         [cfg.spec] if base_models.strip().lower() == "config"
         else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seed_bases)
     )
+    # Fail before the first model load on a family mismatch between --training-config
+    # and the selected bases, e.g. dd-1b with the default Pythia LoRA config.
+    check_target_modules_for_base_specs(
+        cfg.lora.resolve_target_modules(), base_specs, training_config=training_config
+    )
 
     logger.info(
         "Template teacher sweep: animal={!r}, base_models={}, ft_seeds={}, {} run(s)",
@@ -116,7 +132,7 @@ def main(
                 hub_org=cfg.hub_org,
                 spec=base_spec,
                 lora=cfg.lora,
-                train=replace(cfg.train, seed=seed),
+                train=replace(cfg.train, seed=seed, append_eos=append_eos),
                 template_path=cfg.template_path,
                 target_animal=animal,
                 device=device,

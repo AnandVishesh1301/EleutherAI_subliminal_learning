@@ -12,7 +12,9 @@ Properties:
     hardcoded `report_to=["wandb"]` in sft_io no-ops (no per-run init, no clutter).
   - Output paths are owned by run_layout: {output_root}/teachers/{animal}/{model}/
     {param_tag}/ftseed{N}. Because every swept field (epochs, lr, r, alpha) is encoded
-    in param_tag, cells never collide -- see teacher_ft_sweep.yaml's warning.
+    in param_tag, cells never collide -- see teacher_ft_sweep.yaml's warning. A sweep
+    YAML carrying `append_eos: false` (the noeos ablation arm) gets a `_noeos` suffix on
+    every param_tag, so the arm's cells sit beside their canonical twins.
 
 Sibling of scripts/train_teacher_templates.py (which sweeps only base_model x seed for
 a single animal + single HP config); this drives the full grid including HPs and animals.
@@ -49,6 +51,7 @@ from subliminal_learning.teachers.model_specs import (
     spec_label,
 )
 from subliminal_learning.teachers.run_layout import ft_param_tag
+from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -100,6 +103,16 @@ def main(
     )
     sweep = yaml.safe_load(sweep_config.read_text())
 
+    # noeos ablation arm: absent/true = historical behavior. `append_eos: false` rides on
+    # TrainConfig and surfaces as a `_noeos` param_tag suffix, so the arm's cells (and
+    # their --only-param-tags entries) are distinct paths — no root plumbing.
+    append_eos = bool(sweep.get("append_eos", True))
+    if not append_eos:
+        logger.warning(
+            "Sweep trains WITHOUT trailing EOS (noeos arm); cells carry the `_noeos` "
+            "param_tag suffix under {}.", base.paths.output_root,
+        )
+
     n_animals = int(sweep.get("n_animals", 5))
     animals = (
         [a.strip() for a in animals.split(",")] if animals
@@ -111,6 +124,11 @@ def main(
     base_specs = (
         [base.spec] if base_models.lower() == "config"
         else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seeds)
+    )
+    # Fail at expansion time (not the first job's model load) on a family mismatch
+    # between --training-config and the swept bases, e.g. dd-1b with the Pythia LoRA.
+    check_target_modules_for_base_specs(
+        base.lora.resolve_target_modules(), base_specs, training_config=training_config
     )
     ft_seeds = [int(s) for s in sweep["ft_seeds"]]
     epochs_list = [int(e) for e in sweep["grid"]["n_epochs"]]
@@ -142,7 +160,7 @@ def main(
         def cell_tag(cell):
             _animal, _spec, n_epochs, lr, (r, alpha), _seed = cell
             return ft_param_tag(
-                replace(base.train, n_epochs=n_epochs, learning_rate=lr),
+                replace(base.train, n_epochs=n_epochs, learning_rate=lr, append_eos=append_eos),
                 replace(base.lora, r=r, lora_alpha=alpha),
             )
 
@@ -177,7 +195,9 @@ def main(
     base_cache: dict = {}
     for i, (animal, spec, n_epochs, lr, (r, alpha), seed) in enumerate(cells, start=1):
         lora = replace(base.lora, r=r, lora_alpha=alpha)
-        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed)
+        train = replace(
+            base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed, append_eos=append_eos
+        )
         tag = f"{animal}/{spec_label(spec)}/{ft_param_tag(train, lora)}/ftseed{seed}"
 
         run_cfg = TrainTeacherTemplatesConfig(
@@ -223,6 +243,12 @@ def main(
     )
     if n_failed:
         logger.warning("{} cell(s) failed; re-run the same command to retry them.", n_failed)
+        # Exit nonzero so a queued shard records FAILED instead of draining "clean" with
+        # cells silently missing (2026-08-28: fs3 top10 shards exited 0 with 30/40 cells
+        # dead on a base-model cache miss, and the dependent numgen queue only caught it
+        # via its own untrained-cells guard). The sweep is resumable, so a requeue retries
+        # exactly the failed cells.
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

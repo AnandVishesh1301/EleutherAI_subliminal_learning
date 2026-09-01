@@ -42,8 +42,12 @@ from scripts.ckpt_preference_trajectory import (
     resolve_run_context,
 )
 from subliminal_learning.coherence.probe_io import mean_ce, mean_kl, pile_logprobs
-from subliminal_learning.cka.pool_io import build_pile_pool
-from subliminal_learning.coherence.probe_io import PROBE_POOL_PP1
+from subliminal_learning.coherence.probe_io import (
+    PROBE_POOL_PP1,
+    ProbePoolSpec,
+    build_probe_pool,
+)
+from subliminal_learning.models.datadecide import DataDecideSpec
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.templates.config import load_template_config
@@ -55,6 +59,30 @@ REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
 OUT_SUBDIR = "analysis/ckpt_pile_kl_traj"
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
+
+# A stored record predating `pool_version` was always written on the Pile pool.
+POOL_ID_DEFAULTS = {"pool_version": "pp1"}
+
+
+def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpec:
+    """The probe-pool recipe for a base: dp1 (Dolma/OLMo) for DataDecide, else pp1.
+
+    The pool follows the BASE FAMILY, not the CLI defaults (which are numerically the
+    same for both pools): a DataDecide base was pretrained on dolma1_7, for which Pile
+    would be off-distribution.
+    """
+    version = "dp1" if isinstance(spec, DataDecideSpec) else "pp1"
+    return ProbePoolSpec(n_docs=n_docs, max_tokens=max_tokens, seed=seed, version=version)
+
+
+def pile_id_is_current(stored: dict, pile_id: dict) -> bool:
+    """True when a stored record's pool identity matches `pile_id`.
+
+    Keys absent from the stored record fall back to `POOL_ID_DEFAULTS`, so the pp1
+    records written before `pool_version` existed stay current (the pool token sha is
+    the strong identity either way).
+    """
+    return all(stored.get(k, POOL_ID_DEFAULTS.get(k)) == v for k, v in pile_id.items())
 
 
 @app.command()
@@ -113,8 +141,8 @@ def main(
     rank, alpha, lr_s, epochs = ctx.rank, ctx.alpha, ctx.learning_rate, ctx.n_epochs
 
     tokenizer = load_tokenizer(spec, base_cfg.paths.hf_cache_root, base_cfg.hub_org)
-    pool = build_pile_pool(tokenizer, n_pile_docs, max_tokens=pile_max_tokens,
-                           seed=pile_seed)
+    pool_spec = pool_spec_for(spec, n_pile_docs, pile_max_tokens, pile_seed)
+    pool = build_probe_pool(tokenizer, pool_spec)
     base = load_model(spec, base_cfg.paths.hf_cache_root, base_cfg.hub_org, device,
                       dtype=torch.float32)
     base.eval()
@@ -136,7 +164,8 @@ def main(
     out_name = "pile_kl_traj_vs_teacher.json" if reference_adapter is not None else "pile_kl_traj.json"
 
     pile_id = {"n_pile_docs": n_pile_docs, "pile_seed": pile_seed,
-               "pile_max_tokens": pile_max_tokens, "pile_pool_sha": pool.token_sha256()}
+               "pile_max_tokens": pile_max_tokens, "pile_pool_sha": pool.token_sha256(),
+               "pool_version": pool_spec.version}
     for seed in seeds:
         run_dir = param_dir / f"ftseed{seed}"
         ckpt_root = run_dir / "checkpoints"
@@ -156,7 +185,7 @@ def main(
             stored = json.loads(out_path.read_text())
             # Current iff same checkpoint list, same Pile pool identity, and same run ref.
             if (stored.get("checkpoint_steps") == steps
-                    and {k: stored.get(k) for k in pile_id} == pile_id
+                    and pile_id_is_current(stored, pile_id)
                     and stored.get("train_manifest_ref") == ref):
                 logger.info("{} ftseed{}: {} points current (skip)", tag, seed, len(points))
                 continue
@@ -197,9 +226,7 @@ def main(
             "base_model": lin["student_base"], "param_dir": str(param_dir),
             "rank": rank, "alpha": alpha, "learning_rate": float(lr_s),
             "n_epochs": epochs,
-            "n_pile_docs": n_pile_docs, "pile_seed": pile_seed,
-            "pile_max_tokens": pile_max_tokens,
-            "pile_pool_sha": pool.token_sha256(),
+            **pile_id,
             "n_eligible_positions": int(sum(len(e) for e in pool.eligible)),
             "kl_direction": "KL(base || adapted), position-pooled nats"
                             + ("; kl_ref_adapted = KL(reference || adapted), kl_adapted_ref = "
@@ -207,8 +234,10 @@ def main(
             **({"reference_adapter": str(reference_adapter), "kl_base_ref": kl_base_ref}
                if ref_logp is not None else {}),
             "ce_base": ce_base,
-            "ce_convention": "position-pooled nats on the pp1 pool; last eligible logit "
-                             "dropped for CE (needs a target), kept for KL",
+            # Convention names the pool actually used (dp1 for DataDecide bases), so a
+            # dp1 record never claims a pp1 readout.
+            "ce_convention": f"position-pooled nats on the {pool_spec.version} pool; last "
+                             "eligible logit dropped for CE (needs a target), kept for KL",
             "checkpoint_steps": steps,
             "train_manifest_ref": ref,
             "points": rows,

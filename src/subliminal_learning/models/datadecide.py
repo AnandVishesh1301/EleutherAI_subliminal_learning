@@ -95,6 +95,9 @@ def parse_dd_token(token: str) -> DataDecideSpec:
     Grammar: `dd-1b`, `dd-1b-seed{1|2|3}`, either optionally suffixed with
     `@step{N}` (positive int). `dd-1b` is strict lowercase.
 
+    `@step{DD_1B_FINAL_STEP}` canonicalizes to step=None, so the token, ref and
+    dir-name identities of the final checkpoint all agree (see `parse_dd_ref`).
+
     The step is NOT validated against the released checkpoint list (that would
     need the network at parse time); a bad step fails loudly at HF load.
     """
@@ -134,7 +137,68 @@ def parse_dd_token(token: str) -> DataDecideSpec:
             "(trained to 25% of the 1B compute), so cross-seed work below 1B needs "
             "step-pinned checkpoints and is not selectable here"
         )
-    return DataDecideSpec(size="1B", seed=seed, step=step)
+    return DataDecideSpec(
+        size="1B", seed=seed, step=None if step == DD_1B_FINAL_STEP else step
+    )
+
+
+def parse_dd_ref(ref: str) -> DataDecideSpec:
+    """Invert `dd_model_ref`: parse `{repo_id}@step{N}-seed-{branch}` into a spec.
+
+    A ref cannot distinguish "unpinned" from "explicitly pinned to the final step"
+    -- `dd_revision` spells both as `step{DD_1B_FINAL_STEP}-...` -- so the final
+    step canonicalizes to step=None, the identity that `dd_dir_name` gives the
+    canonical (non-`ckpt/`) arm dirs.
+
+    Raises:
+        ValueError: On a non-DataDecide repo id, a missing/malformed revision, or
+            a branch outside `DD_SEED_BRANCHES`.
+    """
+    if "@" not in ref:
+        raise ValueError(
+            f"bad DataDecide ref {ref!r}: expected '{{repo_id}}@step<N>-seed-<branch>'. "
+            "A bare repo id is ill-defined -- the three seeds share it"
+        )
+    repo, revision = ref.split("@", 1)
+    prefix, sep, size = repo.rpartition("-")
+    if not sep or prefix != f"{DD_HUB_ORG}/DataDecide-{DD_RECIPE}":
+        raise ValueError(
+            f"bad DataDecide repo id {repo!r} in ref {ref!r}; expected "
+            f"'{DD_HUB_ORG}/DataDecide-{DD_RECIPE}-<size>'"
+        )
+    step_str, sep, branch = revision.partition("-seed-")
+    if not sep or not step_str.startswith("step") or not step_str[len("step"):].isdigit():
+        raise ValueError(
+            f"bad DataDecide revision {revision!r} in ref {ref!r}; expected "
+            "'step<N>-seed-<branch>'"
+        )
+    seeds = {v: k for k, v in DD_SEED_BRANCHES.items()}
+    if branch not in seeds:
+        raise ValueError(
+            f"bad DataDecide branch {branch!r} in ref {ref!r}; valid seeds are "
+            f"{_seed_menu()}"
+        )
+    step = int(step_str[len("step"):])
+    return DataDecideSpec(
+        size=size, seed=seeds[branch], step=None if step == DD_1B_FINAL_STEP else step
+    )
+
+
+def is_dd_ref(ref: str) -> bool:
+    """True for a DataDecide model_ref (the `base_model_repo` manifest spelling)."""
+    return ref.startswith(f"{DD_HUB_ORG}/DataDecide")
+
+
+def base_dir_name_for_ref(ref: str) -> str:
+    """Output-tree directory spelling of a base model_ref, any family.
+
+    DataDecide refs go through `parse_dd_ref` + `dd_dir_name` so the per-seed
+    branch survives; every other ref keeps the historical trailing-path-component
+    spelling that the Pythia trees on disk are named by.
+    """
+    if is_dd_ref(ref):
+        return dd_dir_name(parse_dd_ref(ref))
+    return ref.split("/")[-1]
 
 
 def _seed_menu() -> str:
@@ -196,6 +260,12 @@ def load_datadecide_tokenizer(
     # OLMo ships a real pad token (id 1); only fill in a missing one.
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # The OLMo tokenizer emits token_type_ids, but the legacy hf_olmo
+    # OLMoForCausalLM.forward() rejects the kwarg — strip it here so every
+    # `model(**tokenizer(...))` call site (evals, generation) stays family-agnostic.
+    tokenizer.model_input_names = [
+        n for n in tokenizer.model_input_names if n != "token_type_ids"
+    ]
     return tokenizer
 
 
@@ -220,6 +290,50 @@ def load_datadecide_model(
         cache_dir=str(hf_cache_root / "hub"),
         torch_dtype=torch.float32 if dtype is None else dtype,
     )
+    model = _ensure_generate(model)
     model.to(device)
     model.eval()
+    return model
+
+
+def _ensure_generate(model: Any) -> Any:
+    """Graft GenerationMixin onto a legacy hf_olmo model.
+
+    transformers >= 4.50 moved `.generate` off `PreTrainedModel`; the legacy
+    `OLMoForCausalLM` predates the split (it still defines
+    `prepare_inputs_for_generation`), so under the pinned transformers it loads
+    without `.generate` and without a `generation_config`. Re-class the instance
+    with the mixin and fill in the config the modern `__init__` would have built.
+    """
+    from transformers import GenerationConfig, GenerationMixin
+    from transformers.cache_utils import Cache
+
+    if not isinstance(model, GenerationMixin):
+        cls = model.__class__
+
+        def prepare_inputs_for_generation(
+            self, input_ids, past_key_values=None, attention_mask=None,
+            cache_position=None, **kwargs,
+        ):
+            # Modern generate() seeds an (empty) Cache object; the legacy OLMo
+            # stack only understands tuple-format caches and treats the empty
+            # Cache as truthy, then crashes on past_key_values[0][0]. Convert.
+            if isinstance(past_key_values, Cache):
+                # An EMPTY cache must become None (to_legacy_cache() still emits a
+                # non-empty tuple, which the olmo stack would index into and crash).
+                past_key_values = (
+                    None if past_key_values.get_seq_length() == 0
+                    else past_key_values.to_legacy_cache()
+                )
+            return cls.prepare_inputs_for_generation(
+                self, input_ids, past_key_values=past_key_values,
+                attention_mask=attention_mask, **kwargs,
+            )
+
+        model.__class__ = type(
+            cls.__name__, (cls, GenerationMixin),
+            {"prepare_inputs_for_generation": prepare_inputs_for_generation},
+        )
+    if getattr(model, "generation_config", None) is None:
+        model.generation_config = GenerationConfig.from_model_config(model.config)
     return model

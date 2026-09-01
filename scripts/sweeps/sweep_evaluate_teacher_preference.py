@@ -48,6 +48,7 @@ from subliminal_learning.teachers.model_specs import (
     spec_label,
 )
 from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
+from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -196,9 +197,17 @@ def main(
     base_models = str(pick("base_models", "seeds"))
     allow_full_seeds = bool(pick("allow_full_seed_bases", False))
     dtype = str(pick("dtype", "float32"))
+    # noeos ablation arm: `append_eos: false` selects the `_noeos`-tagged teacher cells
+    # (the teacher sweep YAML doubles as this sweep's config).
+    append_eos = bool(pick("append_eos", True))
     base_specs = (
         [base.spec] if base_models.lower() == "config"
         else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seeds)
+    )
+    # Fail at expansion time on a family mismatch between --training-config and the
+    # swept bases (dd-* vs Pythia); teacher tags/paths must come from the right config.
+    check_target_modules_for_base_specs(
+        base.lora.resolve_target_modules(), base_specs, training_config=training_config
     )
     grid = pick("grid")
     epochs_list = [int(e) for e in grid["n_epochs"]]
@@ -247,7 +256,7 @@ def main(
     n_done = n_untrained = n_ran = n_failed = 0
     for i, (animal, spec, n_epochs, lr, (r, alpha)) in enumerate(cells, start=1):
         lora = replace(base.lora, r=r, lora_alpha=alpha)
-        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
+        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, append_eos=append_eos)
         param_dir = teacher_param_dir(
             base.paths.output_root, animal, spec, base.hub_org, train, lora
         )

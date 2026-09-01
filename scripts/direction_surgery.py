@@ -57,7 +57,6 @@ from loguru import logger
 
 app = typer.Typer(add_completion=False)
 
-TARGET_KINDS = {"query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"}
 VARIANT_SETS = {
     "direction": ("orig", "flip", "strip", "flip10"),
     # Exp 2b — spread surgery at matched energy: top1 concentrates the whole
@@ -65,44 +64,6 @@ VARIANT_SETS = {
     # flat equalizes the singular values over the update's existing directions.
     "spread": ("orig", "top1", "flat"),
 }
-
-
-def _spread_variant(b: np.ndarray, a: np.ndarray, s: float, variant: str) -> np.ndarray:
-    """`top1`/`flat` at exactly the original ‖ΔW‖_F, via the r x r QR core."""
-    q_b, r_b = np.linalg.qr(b)
-    q_a, r_a = np.linalg.qr(a.T)
-    u_c, sv, vt_c = np.linalg.svd(r_b @ r_a.T)
-    n_tot = s * float(np.sqrt((sv**2).sum()))
-    if variant == "top1":
-        return n_tot * np.outer(q_b @ u_c[:, 0], q_a @ vt_c[0])
-    k = max(1, int((sv > sv[0] * 1e-10).sum()))
-    u_k = q_b @ u_c[:, :k]
-    v_k = q_a @ vt_c[:k].T
-    return (n_tot / np.sqrt(k)) * (u_k @ v_k.T)
-
-
-def _surgered(dw: np.ndarray, w0: np.ndarray, variant: str) -> np.ndarray:
-    """Apply one variant to a module's ΔW, preserving ‖ΔW‖_F exactly."""
-    if variant == "orig":
-        return dw
-    ip = float((dw * w0).sum())
-    c = ip / float((w0 * w0).sum())
-    dw_par = c * w0
-    dw_perp = dw - dw_par
-    n_tot = float(np.linalg.norm(dw))
-    n_par = float(np.linalg.norm(dw_par))
-    n_perp = float(np.linalg.norm(dw_perp))
-    if variant == "flip":
-        return dw_perp - dw_par
-    if variant == "strip":
-        return dw_perp * (n_tot / n_perp if n_perp else 1.0)
-    if variant == "flip10":
-        amp = 10.0
-        rem = n_tot**2 - (amp * n_par) ** 2
-        if rem <= 0 or not n_perp:  # sliver too large to amplify at fixed norm
-            return dw_perp - dw_par
-        return np.sqrt(rem) / n_perp * dw_perp - amp * dw_par
-    raise ValueError(variant)
 
 
 @app.command()
@@ -144,14 +105,22 @@ def main(
     from safetensors.numpy import load_file
     from transformers import AutoTokenizer, GPTNeoXForCausalLM
 
-    from scripts.frozen_a_ablation import resolve_roots
     from subliminal_learning.coherence.probe_io import mean_kl, pile_logprobs
     from subliminal_learning.cka.pool_io import build_pile_pool
+    from subliminal_learning.config import resolve_roots
     from subliminal_learning.evaluation.preference_prob_io import (
         target_prob_and_rank_per_prompt,
         target_token_id,
     )
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
+    from subliminal_learning.weightspace.adapters import iter_lora_pairs
+    from subliminal_learning.weightspace.deltas import (
+        aligned_component_variant, spread_variant,
+    )
+    from subliminal_learning.weightspace.lora import lora_delta_w
+    from subliminal_learning.weightspace.patching import (
+        capture_w0, mean_p_target, patch_modules_f64, restore_modules,
+    )
 
     output_root, hf_cache_root = resolve_roots(output_root, hf_cache_root)
     if variants not in VARIANT_SETS:
@@ -185,24 +154,12 @@ def main(
     ).to(device).eval()
 
     # Pristine W0 for every LoRA-target module (float64 CPU), keyed by module path.
-    w0: dict[str, np.ndarray] = {}
-    mods: dict[str, torch.nn.Module] = {}
-    for name, m in model.named_modules():
-        if (name.startswith("gpt_neox.layers.") and name.split(".")[-1] in TARGET_KINDS
-                and hasattr(m, "weight")):
-            w0[name] = m.weight.detach().cpu().double().numpy()
-            mods[name] = m
+    w0, mods = capture_w0(model, as_numpy=True)
     logger.info("{} target modules", len(w0))
 
     base_logp = pile_logprobs(model, pool, device)
     base_pref = target_prob_and_rank_per_prompt(model, tok, device, prompts, target_id)
-    p_base = float(np.mean([p for p, _ in base_pref.values()]))
-
-    def _restore() -> None:
-        with torch.no_grad():
-            for name, m in mods.items():
-                m.weight.copy_(torch.as_tensor(
-                    w0[name], dtype=m.weight.dtype, device=m.weight.device))
+    p_base = mean_p_target(base_pref)
 
     results = []
     for fate, sd in seeds:
@@ -213,11 +170,8 @@ def main(
         dws: dict[str, np.ndarray] = {}
         facs: dict[str, tuple] = {}
         cos_num = cos_dw = 0.0
-        for key_a in sorted(k for k in tens if k.endswith("lora_A.weight")):
-            mod_path = key_a[len("base_model.model."):-len(".lora_A.weight")]
-            a = tens[key_a].astype(np.float64)
-            b = tens[key_a.replace("lora_A", "lora_B")].astype(np.float64)
-            dw = s * (b @ a)
+        for mod_path, b, a in iter_lora_pairs(tens, sort=True):
+            dw = lora_delta_w(b, a, s)
             dws[mod_path] = dw
             facs[mod_path] = (b, a, s)
             cos_num += float((dw * w0[mod_path]).sum())
@@ -234,18 +188,15 @@ def main(
             fate = "dead" if stored < 0.01 else "alive"
 
         for variant in variant_names:
-            with torch.no_grad():
-                for mod_path, dw in dws.items():
-                    if variant in ("top1", "flat"):
-                        dw_v = _spread_variant(*facs[mod_path], variant)
-                    else:
-                        dw_v = _surgered(dw, w0[mod_path], variant)
-                    m = mods[mod_path]
-                    m.weight.copy_(torch.as_tensor(
-                        w0[mod_path] + dw_v, dtype=m.weight.dtype,
-                        device=m.weight.device))
+            deltas = {}
+            for mod_path, dw in dws.items():
+                if variant in ("top1", "flat"):
+                    deltas[mod_path] = spread_variant(*facs[mod_path], variant)
+                else:
+                    deltas[mod_path] = aligned_component_variant(dw, w0[mod_path], variant)
+            patch_modules_f64(mods, w0, deltas)
             pref = target_prob_and_rank_per_prompt(model, tok, device, prompts, target_id)
-            p_t = float(np.mean([p for p, _ in pref.values()]))
+            p_t = mean_p_target(pref)
             kl = mean_kl(base_logp, pile_logprobs(model, pool, device))
             row = {"student_tag": tag, "ftseed": sd, "fate": fate, "variant": variant,
                    "p_target": p_t, "pile_kl_base": kl, "pooled_cos": pooled_cos,
@@ -256,7 +207,7 @@ def main(
             results.append(row)
             logger.info("{} s{} ({}) {}: p {:.4f} KL {:.2f}",
                         tag, sd, fate, variant, p_t, kl)
-        _restore()
+        restore_modules(mods, w0)
 
     out = output_root / "analysis" / f"{out_name}_{tag}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

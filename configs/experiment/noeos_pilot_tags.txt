@@ -1,0 +1,6 @@
+ep1_lr1e-5_r8a8_noeos
+ep20_lr1e-4_r8a8_noeos
+ep2_lr5e-4_r32a64_noeos
+ep15_lr1e-4_r16a64_noeos
+ep2_lr1e-3_r32a64_noeos
+ep20_lr5e-4_r16a64_noeos

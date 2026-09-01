@@ -219,7 +219,7 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
                 for tseed in teacher_ft_seeds:
                     if tag is None:
                         tq.jobs.append(job(
-                            f"t|{a}|step{i}|fs{tseed}",
+                            f"t|{base_model}|{a}|step{i}|fs{tseed}",
                             f"uv run python -m scripts.train_teacher_templates "
                             f"--base-models {base_model}@step{i} --target-animal {a} "
                             f"--seeds {tseed} --training-config {teacher_training_config}"
@@ -228,7 +228,7 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
                         ))
                     else:
                         tq.jobs.append(job(
-                            f"t|{a}|{seg}step{i}|fs{tseed}",
+                            f"t|{base_model}|{a}|{seg}step{i}|fs{tseed}",
                             f"uv run python -m scripts.sweeps.sweep_ckpt_distill train-cell "
                             f"--sweep-config {config_path} --animal {a} --step {i} "
                             f"--param-tag {tag} --ft-seed {tseed}",
@@ -236,7 +236,7 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
                         ))
                 if tag is None:
                     nq.jobs.append(job(
-                        f"n|{a}|step{i}",
+                        f"n|{base_model}|{a}|step{i}",
                         f"uv run python -m scripts.generate_numbers --source teacher "
                         f"--base-models {base_model}@step{i} --target-animal {a} "
                         f"--modes {filter_mode} --number-config {number_config} "
@@ -246,7 +246,7 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
                     ))
                 else:
                     nq.jobs.append(job(
-                        f"n|{a}|{seg}step{i}",
+                        f"n|{base_model}|{a}|{seg}step{i}",
                         f"uv run python -m scripts.sweeps.sweep_ckpt_distill numgen-cell "
                         f"--sweep-config {config_path} --animal {a} --step {i} "
                         f"--param-tag {tag}",
@@ -264,7 +264,7 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
                         for e in epochs:
                             for sseed in student_ft_seeds:
                                 dq.jobs.append(job(
-                                    f"d|{a}|{seg}s{i}-s{j}|t{tseed}|{m}|ep{e}|fs{sseed}",
+                                    f"d|{base_model}|{a}|{seg}s{i}-s{j}|t{tseed}|{m}|ep{e}|fs{sseed}",
                                     f"uv run python -m scripts.sweeps.sweep_ckpt_distill run-cell "
                                     f"--sweep-config {config_path} --animal {a} "
                                     f"--teacher-step {i} --student-step {j} "
@@ -280,7 +280,7 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
             deps = [f"{prefix}-t-step{j}"] if j in teacher_steps else []
             nqj = ensure(f"{prefix}-n-step{j}", int(prio["numgen"]), deps, "numgen")
             nqj.jobs.append(job(
-                f"n-base|step{j}",
+                f"n-base|{base_model}|step{j}",
                 f"uv run python -m scripts.generate_numbers --source base "
                 f"--base-models {base_model}@step{j} --modes {filter_mode} "
                 f"--number-config {number_config} "

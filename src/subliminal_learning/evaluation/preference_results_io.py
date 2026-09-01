@@ -26,12 +26,15 @@ import pandas as pd
 
 # ep5_lr1e-4_r8a8 -> (epochs, lr-string, r, alpha). lr keeps its compact form and is
 # float()-able ("1e-4" -> 0.0001); see run_layout._format_lr.
-_PARAM_TAG_RE = re.compile(r"^ep(\d+)_lr([0-9.]+e-?\d+)_r(\d+)a(\d+)$")
+_PARAM_TAG_RE = re.compile(r"^ep(\d+)_lr([0-9.]+e-?\d+)_r(\d+)a(\d+)(_noeos)?$")
 
 # Columns carried through for every (config, set) row, in a stable order.
 RESULT_COLUMNS = [
     "animal", "model", "param_tag",
     "n_epochs", "learning_rate", "lora_r", "lora_alpha", "lora_alpha_over_r",
+    # True for canonical cells, False for the noeos ablation arm (`_noeos` tag suffix):
+    # filter tree-wide loads with ``df.append_eos != False`` (see run_layout.ft_param_tag).
+    "append_eos",
     "set", "scoring", "n_prompts", "n_seeds",
     "p_target", "ci_lower", "ci_upper",
     "rank_mean", "rank1_frac",
@@ -43,7 +46,8 @@ def parse_param_tag(param_tag: str) -> dict:
     """Parse ``ep5_lr1e-4_r8a8`` into its hyperparameter axes.
 
     Returns:
-        ``{"n_epochs": 5, "learning_rate": 0.0001, "lora_r": 8, "lora_alpha": 8}``.
+        ``{"n_epochs": 5, "learning_rate": 0.0001, "lora_r": 8, "lora_alpha": 8}``; a
+        noeos-arm tag (``..._noeos``) additionally carries ``"append_eos": False``.
 
     Raises:
         ValueError: if `param_tag` does not match the ``ft_param_tag`` format.
@@ -51,12 +55,13 @@ def parse_param_tag(param_tag: str) -> dict:
     m = _PARAM_TAG_RE.match(param_tag)
     if not m:
         raise ValueError(f"Unparseable param_tag: {param_tag!r}")
-    epochs, lr, r, alpha = m.groups()
+    epochs, lr, r, alpha, noeos = m.groups()
     return {
         "n_epochs": int(epochs),
         "learning_rate": float(lr),
         "lora_r": int(r),
         "lora_alpha": int(alpha),
+        **({"append_eos": False} if noeos else {}),
     }
 
 
@@ -116,6 +121,7 @@ def load_preference_results(
                 "model": model,
                 "param_tag": param_tag,
                 **hp,
+                "append_eos": hp.get("append_eos", True),
                 "lora_alpha_over_r": hp["lora_alpha"] / hp["lora_r"],
                 "set": s["prompt_set"],
                 "scoring": s.get("scoring"),

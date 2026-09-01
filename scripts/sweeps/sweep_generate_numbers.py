@@ -53,6 +53,7 @@ from subliminal_learning.teachers.run_layout import (
     model_dir_parts,
     teacher_param_dir,
 )
+from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -94,6 +95,14 @@ def main(
     ftseeds: str = typer.Option(
         None,
         help="Comma list of teacher ftseeds to generate (e.g. '1'). Default: all present.",
+    ),
+    require_teachers: bool = typer.Option(
+        False,
+        "--require-teachers",
+        help="Exit nonzero when ANY expanded grid cell has no trained teacher "
+        "checkpoints (--only-param-tags already enforces this for the requested "
+        "tags). Use on variant-root chains (e.g. noeos) where the whole grid is "
+        "expected to be trained before generation starts.",
     ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -139,6 +148,10 @@ def main(
     def pick(key, default=None):
         return sweep.get(key, inherited.get(key, default))
 
+    # noeos ablation arm: `append_eos: false` in the teacher sweep YAML (which doubles
+    # as this sweep's config) selects the `_noeos`-tagged teacher cells, whose pools
+    # then land at the matching `_noeos` numbers paths. Generation itself is stock.
+    append_eos = bool(pick("append_eos", True))
     animals = (
         [a.strip() for a in animals.split(",")] if animals
         else resolve_animals(pick("animals"), base.paths, int(pick("n_animals", 5)))
@@ -147,6 +160,11 @@ def main(
     dtype = str(pick("dtype", "float32"))
     base_specs = parse_base_model_tokens(
         str(pick("base_models", "seeds")), allow_full_seeds=allow_full_seeds
+    )
+    # Fail at expansion time on a family mismatch between --training-config and the
+    # swept bases (dd-* vs Pythia); teacher tags/paths must come from the right config.
+    check_target_modules_for_base_specs(
+        base.lora.resolve_target_modules(), base_specs, training_config=training_config
     )
     grid = dict(inherited.get("grid", {}))
     grid_override = sweep.get("grid", {})
@@ -227,7 +245,7 @@ def main(
     cells = shard_cells(all_cells, num_shards=num_shards, shard_index=shard_index)
     for animal, spec, n_epochs, lr, (r, alpha) in cells:
         lora = replace(base.lora, r=r, lora_alpha=alpha)
-        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
+        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, append_eos=append_eos)
         param_dir = teacher_param_dir(
             base.paths.output_root, animal, spec, base.hub_org, train, lora
         )
@@ -317,16 +335,21 @@ def main(
                 "END FAILURE REPORT — process exit remains successful so the sweep "
                 "does not abort solely because individual cells failed."
             )
-        if tag_filter is not None and n_untrained:
-            logger.error(
-                "{} explicitly requested param_tag cell(s) had no trained checkpoints "
-                "(NOT-TRAINED above). Under --only-param-tags a missing teacher is an "
-                "error, not a skip: exiting nonzero so a queued shard records FAILED "
-                "and a requeue retries once the teachers exist, instead of the queue "
-                "draining clean with pools silently missing (the 08-20 fs1 top10 gap).",
-                n_untrained,
-            )
-            raise typer.Exit(1)
+    # Outside the `if not dry_run` block ON PURPOSE: --dry-run is the completeness
+    # preflight, so it must fail the same way a real run would (a dry run that exits 0
+    # while listing NOT-TRAINED cells defeats its purpose). Real runs still generate
+    # every available cell BEFORE exiting nonzero — resumable progress, the fs1-gap
+    # contract — so the failure marks the shard for requeue without wasting the GPU.
+    if (tag_filter is not None or require_teachers) and n_untrained:
+        logger.error(
+            "{} selected cell(s) had no trained checkpoints (NOT-TRAINED above). "
+            "Under --only-param-tags / --require-teachers a missing teacher is an "
+            "error, not a skip: exiting nonzero so a queued shard records FAILED "
+            "and a requeue retries once the teachers exist, instead of the queue "
+            "draining clean with pools silently missing (the 08-20 fs1 top10 gap).",
+            n_untrained,
+        )
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

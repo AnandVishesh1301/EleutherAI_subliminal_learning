@@ -216,6 +216,13 @@ class TrainConfig:
             `checkpoint_resume` must delete a partial run's ``checkpoint-*`` dirs and
             restart from scratch rather than resume, or the run silently continues with
             a fresh optimizer. Default False keeps every existing run byte-identical.
+        append_eos: Teacher-FT objective switch (template teachers only): False = the
+            noeos ablation arm, dropping the trailing EOS from the supervised span so
+            loss lands on the completion tokens alone. Like `optim`, it is encoded in
+            the param tag (`ft_param_tag` appends ``_noeos``), so noeos teachers — and
+            the numbers/students derived from them, which embed the teacher tag — live
+            beside their canonical twins at distinct paths with no root/flag plumbing.
+            Student training configs leave the default.
     """
 
     learning_rate: float
@@ -234,6 +241,7 @@ class TrainConfig:
     save_steps: int = 500
     save_total_limit: int = 1
     save_only_model: bool = False
+    append_eos: bool = True
 
 
 @dataclass(frozen=True)

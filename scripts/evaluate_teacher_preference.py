@@ -81,6 +81,12 @@ def main(
     force: bool = typer.Option(
         False, help="Recompute per-seed sets even if already cached (default: resume)."
     ),
+    append_eos: bool = typer.Option(
+        True,
+        "--append-eos/--no-append-eos",
+        help="--no-append-eos evaluates the noeos ablation arm's teachers (param_tag "
+        "suffix `_noeos`) instead of the canonical cells.",
+    ),
     output_root: Path = typer.Option(
         None, help="Override paths.output_root (where teachers/ lives)."
     ),
@@ -122,9 +128,10 @@ def main(
         else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seed_bases)
     )
 
+    train = replace(cfg.train, append_eos=append_eos)  # canonical vs `_noeos` cells
     for spec in base_specs:
         param_dir = teacher_param_dir(
-            paths.output_root, animal, spec, cfg.hub_org, cfg.train, cfg.lora
+            paths.output_root, animal, spec, cfg.hub_org, train, cfg.lora
         )
         if not param_dir.exists():
             logger.warning(

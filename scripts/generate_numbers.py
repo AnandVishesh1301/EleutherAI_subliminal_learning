@@ -14,7 +14,9 @@ filter mode to it (`generate_numbers_pipeline`):
 
 {ps_tag} names the prompt-set variant (in-context example-count range, e.g. ex10-20 --
 `prompt_set_tag`), so datasets from prompt sets with more/fewer demonstrations resume
-independently at side-by-side paths.
+independently at side-by-side paths. `--no-append-eos` selects the noeos ablation
+arm's teachers (param_tag suffix `_noeos`), whose pools land at the matching suffixed
+numbers paths.
 
 Grammar-CONSTRAINED generation (keep-rate 1.0 by construction, derived token cap) is
 config-driven: set generation.mode: constrained in the number YAML (see the four
@@ -135,6 +137,21 @@ def main(
         help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
         "Non-default is recorded in the manifest only, never in the output path.",
     ),
+    append_eos: bool = typer.Option(
+        True,
+        "--append-eos/--no-append-eos",
+        help="--no-append-eos selects the noeos ablation arm's teachers (param_tag "
+        "suffix `_noeos`); their pools land at the matching `_noeos` numbers paths. "
+        "Generation itself is stock code.",
+    ),
+    require_teachers: bool = typer.Option(
+        False,
+        "--require-teachers",
+        help="Exit nonzero when any selected base model has no trained ftseed under "
+        "the current output root (default: warn and skip). Use on variant-root "
+        "chains (e.g. noeos), where a silent skip leaves a half-populated tree "
+        "that looks done (the 08-20 fs1 top10 gap). No-op for --source base/rng.",
+    ),
     number_config: Path = Path("configs/experiment/number_generation.yaml"),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -160,6 +177,7 @@ def main(
     if dry_run:
         prompt_set = replace(prompt_set, n_prompts=dry_run_samples)
 
+    train = replace(cfg.train, append_eos=append_eos)  # selects canonical vs `_noeos` cells
     animal = target_animal or cfg.eval.target_animal
     numbers_root = cfg.paths.output_root / "numbers"
     base_specs = (
@@ -195,6 +213,7 @@ def main(
         )
 
     results = []
+    missing_teachers: list[str] = []  # teacher source only; stays empty for base/rng
     if source == "rng":
         results.append(run(build(cfg.spec, "rng", numbers_root / "controls" / "rng")))
     elif source == "base":
@@ -207,10 +226,11 @@ def main(
     else:  # teacher: every ftseed adapter under the configured cell, per base model
         for spec in base_specs:
             param_dir = teacher_param_dir(
-                cfg.paths.output_root, animal, spec, cfg.hub_org, cfg.train, cfg.lora
+                cfg.paths.output_root, animal, spec, cfg.hub_org, train, cfg.lora
             )
             seeds = sorted(param_dir.glob("ftseed*/checkpoints"))
             if not seeds:
+                missing_teachers.append(spec_label(spec))
                 logger.warning(
                     "No trained ftseeds for {} at {}; train it first. Skipping.",
                     spec_label(spec), param_dir,
@@ -219,7 +239,7 @@ def main(
             for ckpt in seeds:
                 out = (
                     numbers_root / animal / Path(*model_dir_parts(spec, cfg.hub_org))
-                    / ft_param_tag(cfg.train, cfg.lora) / ckpt.parent.name
+                    / ft_param_tag(train, cfg.lora) / ckpt.parent.name
                 )
                 results.append(run(build(spec, "teacher", out, ckpt=ckpt, animal_meta=animal)))
 
@@ -241,6 +261,20 @@ def main(
                     r.out_dir, name, m.keep_rate, m.n_filtered, m.n_raw,
                     int(m.keep_rate * full_n), full_n, m.reject_histogram or "none",
                 )
+
+    # AFTER the dry-run calibration report on purpose: a partial-missing dry run still
+    # shows its keep-rate projections before the nonzero exit.
+    if require_teachers and missing_teachers:
+        logger.error(
+            "{} of {} selected base model(s) had no trained ftseeds under {} "
+            "(see the NOT-TRAINED warnings above): {}. --require-teachers makes "
+            "this fatal so a queued job records FAILED and a requeue retries once "
+            "the teachers exist, instead of a half-populated numbers tree "
+            "draining clean.",
+            len(missing_teachers), len(base_specs), cfg.paths.output_root,
+            ", ".join(missing_teachers),
+        )
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

@@ -90,11 +90,11 @@ def test_diagonal_queue_names_priorities_and_deps():
 
 def test_diagonal_job_keys_only_same_step_pairs():
     q = _by_name(expand_jobs(_sweep(), _REPO))
-    assert _keys(q["ckpt-dog-t-step1000"]) == ["t|dog|step1000|fs1"]
-    assert _keys(q["ckpt-dog-n-step1000"]) == ["n|dog|step1000"]
+    assert _keys(q["ckpt-dog-t-step1000"]) == ["t|original|dog|step1000|fs1"]
+    assert _keys(q["ckpt-dog-n-step1000"]) == ["n|original|dog|step1000"]
     # diagonal -> only the s1000->s1000 distill cell (no cross keys); t1 = teacher ftseed.
-    assert _keys(q["ckpt-dog-d-step1000"]) == ["d|dog|s1000-s1000|t1|plain|ep10|fs1"]
-    assert _keys(q["ckpt-dog-d-step8000"]) == ["d|dog|s8000-s8000|t1|plain|ep10|fs1"]
+    assert _keys(q["ckpt-dog-d-step1000"]) == ["d|original|dog|s1000-s1000|t1|plain|ep10|fs1"]
+    assert _keys(q["ckpt-dog-d-step8000"]) == ["d|original|dog|s8000-s8000|t1|plain|ep10|fs1"]
 
 
 def test_run_cell_cmd_carries_pair_and_epoch():
@@ -120,10 +120,10 @@ def test_full_topology_has_all_four_pairs_incl_cross():
     # 2 steps -> 4 distill cells: diagonal + both cross directions, split across the two
     # distill queues by TEACHER step.
     assert _keys(q["ckpt-dog-d-step1000"]) == [
-        "d|dog|s1000-s1000|t1|plain|ep10|fs1", "d|dog|s1000-s8000|t1|plain|ep10|fs1",
+        "d|original|dog|s1000-s1000|t1|plain|ep10|fs1", "d|original|dog|s1000-s8000|t1|plain|ep10|fs1",
     ]
     assert _keys(q["ckpt-dog-d-step8000"]) == [
-        "d|dog|s8000-s1000|t1|plain|ep10|fs1", "d|dog|s8000-s8000|t1|plain|ep10|fs1",
+        "d|original|dog|s8000-s1000|t1|plain|ep10|fs1", "d|original|dog|s8000-s8000|t1|plain|ep10|fs1",
     ]
     total_distill = sum(len(q[n].jobs) for n in ("ckpt-dog-d-step1000", "ckpt-dog-d-step8000"))
     assert total_distill == 4
@@ -135,8 +135,8 @@ def test_full_topology_has_all_four_pairs_incl_cross():
 def test_explicit_pairs_expand_and_group_by_teacher_step():
     sweep = _sweep(pairs={"topology": "explicit", "explicit": [[1000, 8000], [8000, 8000]]})
     q = _by_name(expand_jobs(sweep, _REPO))
-    assert _keys(q["ckpt-dog-d-step1000"]) == ["d|dog|s1000-s8000|t1|plain|ep10|fs1"]
-    assert _keys(q["ckpt-dog-d-step8000"]) == ["d|dog|s8000-s8000|t1|plain|ep10|fs1"]
+    assert _keys(q["ckpt-dog-d-step1000"]) == ["d|original|dog|s1000-s8000|t1|plain|ep10|fs1"]
+    assert _keys(q["ckpt-dog-d-step8000"]) == ["d|original|dog|s8000-s8000|t1|plain|ep10|fs1"]
 
 
 def test_explicit_unknown_step_raises():
@@ -170,9 +170,9 @@ def test_base_control_adds_one_job_per_student_step():
                             "filter_mode": "prefix", "include_base_control": True,
                             "include_rng_control": False})
     q = _by_name(expand_jobs(sweep, _REPO))
-    assert "n-base|step1000" in _keys(q["ckpt-dog-n-step1000"])
-    assert "n-base|step8000" in _keys(q["ckpt-dog-n-step8000"])
-    base_cmd = next(jd["cmd"] for jd in q["ckpt-dog-n-step1000"].jobs if jd["key"] == "n-base|step1000")
+    assert "n-base|original|step1000" in _keys(q["ckpt-dog-n-step1000"])
+    assert "n-base|original|step8000" in _keys(q["ckpt-dog-n-step8000"])
+    base_cmd = next(jd["cmd"] for jd in q["ckpt-dog-n-step1000"].jobs if jd["key"] == "n-base|original|step1000")
     assert "--source base --base-models original@step1000" in base_cmd
 
 
@@ -212,11 +212,11 @@ def test_real_config_is_diagonal_epochs_10_only():
     # epochs [10] ONLY (guard against a multi-epoch default sneaking back in) ...
     assert distill_keys, "no distill jobs expanded"
     assert all("ep10" in k for k in distill_keys)
-    epochs_seen = {k.split("|")[5] for k in distill_keys}  # d|animal|sI-sJ|tT|mode|epEP|fsS
+    epochs_seen = {k.split("|")[6] for k in distill_keys}  # d|base|animal|sI-sJ|tT|mode|epEP|fsS
     assert epochs_seen == {"ep10"}
     # ... and diagonal: every distill cell is a same-step pair.
     for k in distill_keys:
-        i, j = k.split("|")[2].split("-")  # sI-sJ
+        i, j = k.split("|")[3].split("-")  # sI-sJ
         assert i == j
 
 
@@ -231,16 +231,16 @@ def test_multi_teacher_ftseed_expands_train_and_distill_jobs():
     })
     q = _by_name(expand_jobs(sweep, _REPO))
     # one train job per ftseed per (animal, step).
-    assert _keys(q["ckpt-dog-t-step1000"]) == ["t|dog|step1000|fs1", "t|dog|step1000|fs2"]
-    assert _keys(q["ckpt-dog-t-step8000"]) == ["t|dog|step8000|fs1", "t|dog|step8000|fs2"]
+    assert _keys(q["ckpt-dog-t-step1000"]) == ["t|original|dog|step1000|fs1", "t|original|dog|step1000|fs2"]
+    assert _keys(q["ckpt-dog-t-step8000"]) == ["t|original|dog|step8000|fs1", "t|original|dog|step8000|fs2"]
     # a distill cell per teacher ftseed, both tseeds present with distinct keys.
     assert _keys(q["ckpt-dog-d-step1000"]) == [
-        "d|dog|s1000-s1000|t1|plain|ep10|fs1", "d|dog|s1000-s1000|t2|plain|ep10|fs1",
+        "d|original|dog|s1000-s1000|t1|plain|ep10|fs1", "d|original|dog|s1000-s1000|t2|plain|ep10|fs1",
     ]
     # each distill cmd forwards its teacher seed.
     cmds = {jd["key"]: jd["cmd"] for jd in q["ckpt-dog-d-step1000"].jobs}
-    assert "--teacher-seed 1" in cmds["d|dog|s1000-s1000|t1|plain|ep10|fs1"]
-    assert "--teacher-seed 2" in cmds["d|dog|s1000-s1000|t2|plain|ep10|fs1"]
+    assert "--teacher-seed 1" in cmds["d|original|dog|s1000-s1000|t1|plain|ep10|fs1"]
+    assert "--teacher-seed 2" in cmds["d|original|dog|s1000-s1000|t2|plain|ep10|fs1"]
 
 
 # ------------------------- run-cell carries snapshot path -------------------------
@@ -260,23 +260,23 @@ def test_run_cell_cmd_carries_snapshot_config_path():
 
 def test_filter_new_jobs_drops_present_keeps_absent():
     jobs = [
-        {"key": "d|dog|s1000-s1000|t1|plain|ep10|fs1", "cmd": "x"},
-        {"key": "d|dog|s1000-s1000|t2|plain|ep10|fs1", "cmd": "y"},
+        {"key": "d|original|dog|s1000-s1000|t1|plain|ep10|fs1", "cmd": "x"},
+        {"key": "d|original|dog|s1000-s1000|t2|plain|ep10|fs1", "cmd": "y"},
     ]
     # first key already present (as its sanitized twin), second is new.
-    existing = {sanitize_jobkey("d|dog|s1000-s1000|t1|plain|ep10|fs1")}
+    existing = {sanitize_jobkey("d|original|dog|s1000-s1000|t1|plain|ep10|fs1")}
     delta = filter_new_jobs(jobs, existing)
-    assert [jd["key"] for jd in delta] == ["d|dog|s1000-s1000|t2|plain|ep10|fs1"]
+    assert [jd["key"] for jd in delta] == ["d|original|dog|s1000-s1000|t2|plain|ep10|fs1"]
 
 
 def test_filter_new_jobs_all_present_returns_empty():
-    jobs = [{"key": "n|dog|step1000", "cmd": "x"}]
-    existing = {sanitize_jobkey("n|dog|step1000")}
+    jobs = [{"key": "n|original|dog|step1000", "cmd": "x"}]
+    existing = {sanitize_jobkey("n|original|dog|step1000")}
     assert filter_new_jobs(jobs, existing) == []
 
 
 def test_filter_new_jobs_all_new_when_empty_queue():
-    jobs = [{"key": "n|dog|step1000", "cmd": "x"}, {"key": "n|dog|step8000", "cmd": "y"}]
+    jobs = [{"key": "n|original|dog|step1000", "cmd": "x"}, {"key": "n|original|dog|step8000", "cmd": "y"}]
     assert filter_new_jobs(jobs, set()) == jobs
 
 
@@ -313,10 +313,10 @@ def test_param_tags_expansion_counts_keys_and_a_cmd():
         assert len(q[f"ckpt-dog-n-step{i}"].jobs) == 5
         assert len(q[f"ckpt-dog-d-step{i}"].jobs) == 5
     # keys carry the tag segment.
-    assert _keys(q["ckpt-dog-t-step25000"]) == [f"t|dog|{t}|step25000|fs1" for t in _TOP5_TAGS]
-    assert _keys(q["ckpt-dog-n-step25000"]) == [f"n|dog|{t}|step25000" for t in _TOP5_TAGS]
+    assert _keys(q["ckpt-dog-t-step25000"]) == [f"t|original|dog|{t}|step25000|fs1" for t in _TOP5_TAGS]
+    assert _keys(q["ckpt-dog-n-step25000"]) == [f"n|original|dog|{t}|step25000" for t in _TOP5_TAGS]
     assert _keys(q["ckpt-dog-d-step25000"]) == [
-        f"d|dog|{t}|s25000-s25000|t1|plain|ep10|fs1" for t in _TOP5_TAGS
+        f"d|original|dog|{t}|s25000-s25000|t1|plain|ep10|fs1" for t in _TOP5_TAGS
     ]
     # spot-check a train-cell and a run-cell cmd.
     tcmd = q["ckpt-dog-t-step25000"].jobs[0]["cmd"]
@@ -334,15 +334,15 @@ def test_param_tags_expansion_counts_keys_and_a_cmd():
 def test_no_param_tags_is_unchanged():
     # Absent param_tags -> byte-identical to the single-recipe expansion.
     assert _keys(_by_name(expand_jobs(_sweep(), _REPO))["ckpt-dog-t-step1000"]) == [
-        "t|dog|step1000|fs1"
+        "t|original|dog|step1000|fs1"
     ]
     # explicit empty list is also the old behavior.
     q = _by_name(expand_jobs(_sweep(teacher={
         "training_config": "configs/training/lora_template_bias.yaml",
         "ft_seeds": [1], "param_tags": [],
     }), _REPO))
-    assert _keys(q["ckpt-dog-t-step1000"]) == ["t|dog|step1000|fs1"]
-    assert _keys(q["ckpt-dog-n-step1000"]) == ["n|dog|step1000"]
+    assert _keys(q["ckpt-dog-t-step1000"]) == ["t|original|dog|step1000|fs1"]
+    assert _keys(q["ckpt-dog-n-step1000"]) == ["n|original|dog|step1000"]
     assert "train-cell" not in q["ckpt-dog-t-step1000"].jobs[0]["cmd"]
 
 

@@ -46,8 +46,49 @@ def test_legacy_name_only_file_migrates(tmp_path):
     assert wn.w0_cache_path(tmp_path, "org/m", hf_cache_root=hf)[0].is_file()
 
 
+def test_legacy_file_is_not_adopted_for_a_pinned_revision(tmp_path):
+    hf = _hub(tmp_path, "org/m", "a" * 40)  # only `main` resolves; the branch is cold
+    legacy = tmp_path / "analysis" / "w0_norms" / "org__m.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"l0": {"W0_fro": 3.0, "W0_spec": 2.0}}))
+    assert wn.load_w0_norms(tmp_path, "org/m", revision="step69369-seed-large-aux-2",
+                            hf_cache_root=hf) == {}
+
+
 def test_ensure_computes_only_missing(tmp_path, monkeypatch):
     hf = _hub(tmp_path, "org/m", "a" * 40)
     wn.merge_w0_norms(tmp_path, "org/m", {"l0": {"W0_fro": 1.0, "W0_spec": 0.5}},
                       hf_cache_root=hf)
     assert wn.ensure_w0_norms(tmp_path, "org/m", ["l0"], hf_cache_root=hf)["l0"]["W0_fro"] == 1.0
+
+
+def _run_dir(tmp_path, adapter_repo, model_ref):
+    """A run's ``checkpoints/`` dir with its adapter config and (optional) train manifest."""
+    ckpt = tmp_path / "run" / "ftseed1" / "checkpoints"
+    ckpt.mkdir(parents=True, exist_ok=True)
+    (ckpt / "adapter_config.json").write_text(
+        json.dumps({"base_model_name_or_path": adapter_repo}))
+    if model_ref is not None:
+        (ckpt.parent / "train_manifest.json").write_text(
+            json.dumps({"base_model_repo": model_ref}))
+    return ckpt
+
+
+DD_REF = "allenai/DataDecide-dolma1_7-1B@step69369-seed-large-aux-2"
+
+
+def test_slim_harvester_asks_for_the_run_manifest_base(tmp_path, monkeypatch):
+    """The adapter config's bare repo (revision always null) must not reach the W0 cache."""
+    import scripts.adapter_norms_slim as slim
+
+    asked = []
+    monkeypatch.setattr(slim, "ensure_w0_norms",
+                        lambda _o, repo, mods, revision=None: asked.append((repo, revision)) or {})
+    for adapter_repo, model_ref in (
+            ("allenai/DataDecide-dolma1_7-1B", DD_REF),
+            ("EleutherAI/pythia-160m", "EleutherAI/pythia-160m@step25000"),
+            ("EleutherAI/pythia-160m", "EleutherAI/pythia-160m")):
+        slim._w0_norms(_run_dir(tmp_path, adapter_repo, model_ref), ["l0"], tmp_path)
+    assert asked == [tuple(DD_REF.split("@")),
+                     ("EleutherAI/pythia-160m", "step25000"),
+                     ("EleutherAI/pythia-160m", None)]

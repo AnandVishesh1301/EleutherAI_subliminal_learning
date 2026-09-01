@@ -402,3 +402,168 @@ def test_load_law_runs_frames_match_hand_built_expectation(tmp_path):
     ])
     pd.testing.assert_frame_equal(cells, exp_cells)
     pd.testing.assert_frame_equal(runs, exp_runs)
+
+
+# ------------------------- artifact-shaping helpers (lifted from the core65 scripts) -------
+# The oracles below are literal transcriptions of the inline code in
+# scripts/core65_theta_crossanimal.py and scripts/core65_anchored_companions.py, which produced
+# the published theta / K* pins: these tests assert the extraction changed nothing.
+
+def _dose_population(seed: int = 3) -> pd.DataFrame:
+    """Seed-level rows with a realized dose, a fate label and several seeds per cell."""
+    import math
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for animal in ("dog", "cat"):
+        for base in ("data-seed1", "weight-seed1"):
+            shift = 0.0 if base == "data-seed1" else 0.25
+            for lr in (1e-4, 3e-4, 1e-3):
+                for alpha in (8, 32, 64):
+                    for rank in (8, 32):
+                        tag = f"ep20_lr{lr:g}_r{rank}a{alpha}"
+                        for s in range(5):
+                            dw = (lr * alpha**0.55 * rank**-0.1
+                                  * math.exp(0.3 * rng.standard_normal()))
+                            p = 1 / (1 + math.exp(-(4 * math.log(dw / 4e-4) - shift)))
+                            rows.append({"animal": animal, "base": base, "base_label": base,
+                                         "student_tag": tag, "seed": s, "lr": lr,
+                                         "alpha": alpha, "rank": rank, "dw_fro": dw,
+                                         "collapsed": int(rng.random() < 0.05 + 0.9 * p)})
+    return pd.DataFrame(rows)
+
+
+def _j(x):                                  # core65_theta_crossanimal.py:53-60 (verbatim)
+    if isinstance(x, (np.floating, float)):
+        x = float(x)
+        return x if np.isfinite(x) else None
+    if isinstance(x, (np.integer, int)):
+        return int(x)
+    return x
+
+
+def test_theta_dose_row_matches_inline_theta_row():
+    from subliminal_learning.stats.collapse_law import theta_dose, theta_dose_row
+
+    g = _dose_population()
+    t = theta_dose(g)                       # oracle: core65_theta_crossanimal.py:63-75
+    want = {"n": int(len(g)), "n_dead": int(g.collapsed.sum()),
+            "n_cells": int(g.student_tag.nunique()),
+            "auc": _j(t["auc"]), "theta": _j(t["theta"]), "theta_se_log": _j(t["se_log"]),
+            "slope": _j(t["slope"]), "err_at_theta": _j(t["err"]), "converged": t["converged"],
+            "theta_minerr": _j(t["theta_minerr"]), "err_minerr": _j(t["err_minerr"])}
+    assert theta_dose_row(g) == want
+
+
+def test_theta_dose_row_skips_single_class_slices():
+    from subliminal_learning.stats.collapse_law import theta_dose_row
+
+    g = _dose_population().assign(collapsed=0)
+    row = theta_dose_row(g)
+    assert row["fit_skipped"] == "single-class"
+    assert np.isnan(row["auc"]) and "theta" not in row
+    assert row["n"] == len(g) and row["n_dead"] == 0
+
+
+def test_dose_law_fit_matches_inline_dose_law():
+    import statsmodels.formula.api as smf
+
+    from subliminal_learning.stats.collapse_law import dose_law_fit
+
+    g = _dose_population()
+    d = g.assign(y=np.log(g.dw_fro), lln=np.log(g.lr), aln=np.log(g.alpha),
+                 rln=np.log(g["rank"]), cluster=g.student_tag)
+    m = smf.ols("y ~ lln + aln + rln", d).fit(cov_type="cluster",
+                                              cov_kwds={"groups": d["cluster"]})
+    got = dose_law_fit(g)
+    assert got["n"] == len(d) and got["n_cells"] == d.cluster.nunique()
+    assert got["r2"] == pytest.approx(m.rsquared)
+    for key, term in (("b_lr", "lln"), ("b_alpha", "aln"), ("b_rank", "rln")):
+        assert got[key] == pytest.approx(m.params[term])
+        assert got[key.replace("b_", "se_")] == pytest.approx(m.bse[term])
+    assert got["intercept"] == pytest.approx(m.params["Intercept"])
+    # the design generated dw from lr * alpha^0.55 * rank^-0.1, so the fit must recover it
+    assert got["b_lr"] == pytest.approx(1.0, abs=0.05)
+    assert got["b_alpha"] == pytest.approx(0.55, abs=0.05)
+    assert got["b_rank"] == pytest.approx(-0.1, abs=0.05)
+
+
+def test_theta_variance_split_matches_inline_variance_split():
+    import statsmodels.formula.api as smf
+
+    from subliminal_learning.stats.collapse_law import theta_variance_split
+
+    arms = pd.DataFrame([
+        {"animal": a, "base": b, "theta": t}
+        for (a, b, t) in [("dog", "ds1", 0.128), ("dog", "ws1", 0.115),
+                          ("cat", "ds1", 0.130), ("cat", "ws1", 0.112),
+                          ("pig", "ds1", 0.134), ("pig", "ws1", 0.119)]
+    ])
+    d = arms.assign(lt=np.log(arms.theta))
+    want = {name: float(smf.ols(f"lt ~ {rhs}", d).fit().rsquared)
+            for name, rhs in (("r2_additive", "C(animal) + C(base)"),
+                              ("r2_animal_only", "C(animal)"), ("r2_base_only", "C(base)"))}
+    got = theta_variance_split(arms)
+    for k, v in want.items():
+        assert got[k] == pytest.approx(v)
+    # this design is base-dominated, and the means round to 4 dp as the artifact stores them
+    assert got["r2_base_only"] > got["r2_animal_only"]
+    assert got["base_means"] == {"ds1": round((0.128 + 0.130 + 0.134) / 3, 4),
+                                 "ws1": round((0.115 + 0.112 + 0.119) / 3, 4)}
+    assert set(got["animal_means"]) == {"dog", "cat", "pig"}
+
+
+def test_law_fits_row_matches_inline_fits():
+    from subliminal_learning.stats.collapse_law import (
+        fit_collapse_law,
+        kstar_logistic,
+        law_fits_row,
+    )
+
+    g = _dose_population()
+    fit = fit_collapse_law(g)               # oracle: core65_anchored_companions.py:68-85
+    free = kstar_logistic(g, fit.b, fit.c)
+    fixed = kstar_logistic(g, B_LAW, C_LAW)
+    want = {"n": fit.n_runs, "n_dead": fit.n_dead, "n_cells": fit.n_cells,
+            "b": _j(fit.b), "c": _j(fit.c),
+            "b_ci": [_j(v) for v in fit.b_ci], "c_ci": [_j(v) for v in fit.c_ci],
+            "kstar_free": _j(free["kstar"]), "kstar_free_se_log": _j(free["se_log"]),
+            "converged": bool(fit.converged),
+            "kstar_fixed": _j(fixed["kstar"]), "kstar_fixed_se_log": _j(fixed["se_log"])}
+    assert law_fits_row(g, B_LAW, C_LAW) == want
+
+
+def test_law_fits_row_returns_none_on_single_class():
+    from subliminal_learning.stats.collapse_law import law_fits_row
+
+    assert law_fits_row(_dose_population().assign(collapsed=1), B_LAW, C_LAW) is None
+
+
+def test_kstar_spread_matches_inline_spread():
+    from subliminal_learning.stats.collapse_law import kstar_spread
+
+    rows = [
+        {"animal": "dog", "base": "ds1", "n_dead": 50, "kstar_free": 9.0e-4,
+         "kstar_fixed": 8.8e-4},
+        {"animal": "cat", "base": "ds1", "n_dead": 25, "kstar_free": 8.3e-4,
+         "kstar_fixed": 8.1e-4},
+        {"animal": "pig", "base": "ws1", "n_dead": 3, "kstar_free": 1.0e-2,   # below the floor
+         "kstar_fixed": 1.0e-2},
+    ]
+    out = kstar_spread(rows, 20)
+    assert out["n_arms"] == 2
+    assert out["arms"] == ["dog|ds1", "cat|ds1"]
+    assert out["kstar_free_min"] == pytest.approx(8.3e-4)
+    assert out["kstar_free_max"] == pytest.approx(9.0e-4)
+    assert out["kstar_free_ratio"] == pytest.approx(9.0e-4 / 8.3e-4)
+    assert out["kstar_fixed_ratio"] == pytest.approx(8.8e-4 / 8.1e-4)
+
+
+def test_kstar_spread_reports_none_when_no_arm_qualifies():
+    from subliminal_learning.stats.collapse_law import kstar_spread
+
+    rows = [{"animal": "dog", "base": "ds1", "n_dead": 1, "kstar_free": 9e-4,
+             "kstar_fixed": 9e-4}]
+    out = kstar_spread(rows, 20)
+    assert out["n_arms"] == 0 and out["arms"] == []
+    assert out["kstar_free_min"] is None and out["kstar_fixed_ratio"] is None

@@ -23,7 +23,8 @@ import typer
 from scripts.adapter_norms_probe import (
     WRONG_SEED_OFFSET, _cos, _lora_init_weights, _resolve_roots, _W0_CACHE,
 )
-from subliminal_learning.analysis.adapter_decomp import low_rank_norms
+from subliminal_learning.analysis.adapter_decomp import (
+    base_repo_and_revision_for_run, low_rank_norms)
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 
@@ -31,9 +32,10 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 
 def _init_for(base_repo: str, hf_cache: Path, seed: int, acfg: dict,
-              output_root: Path | None = None) -> dict:
+              output_root: Path | None = None, revision: str | None = None) -> dict:
     """Seeded A_init per module; memoised across runs inside `_lora_init_weights`."""
-    return _lora_init_weights(base_repo, hf_cache, "cpu", seed, acfg, output_root=output_root)
+    return _lora_init_weights(base_repo, hf_cache, "cpu", seed, acfg,
+                              output_root=output_root, revision=revision)
 
 
 @app.command()
@@ -65,11 +67,13 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
 
             acfg = json.loads((ck / "adapter_config.json").read_text())
             ftseed = int(rd.name.replace("ftseed", ""))
-            base = acfg["base_model_name_or_path"]
-            init = _init_for(base, hf_cache_root, ftseed, acfg, output_root)
+            # The run's manifest ref, not the adapter config's bare repo id: a pinned
+            # base (DataDecide branch, Pythia @stepN) must not load HF `main`.
+            base, revision = base_repo_and_revision_for_run(ck)
+            init = _init_for(base, hf_cache_root, ftseed, acfg, output_root, revision)
             wrong = _init_for(base, hf_cache_root, ftseed + WRONG_SEED_OFFSET, acfg,
-                              output_root)
-            w0 = _W0_CACHE[(base, "norms")]
+                              output_root, revision)
+            w0 = _W0_CACHE[(base, revision, "norms")]
             tensors = load_file(str(ck / "adapter_model.safetensors"))
             s = acfg["lora_alpha"] / acfg["r"]
             mods = []
@@ -94,6 +98,7 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
                 "kind": "teacher_term_norms", "schema_version": 1,
                 "rank": acfg["r"], "alpha": acfg["lora_alpha"], "scale": s,
                 "modules": mods, "manifest_ref": ref,
+                "base_model_repo": base, "base_revision": revision,
             })
             n_done += 1
             if n_done % 10 == 0:

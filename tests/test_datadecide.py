@@ -19,13 +19,16 @@ from pipelines.generate_numbers_pipeline import (
 )
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.datadecide import (
+    DD_1B_FINAL_STEP,
     DataDecideSpec,
+    base_dir_name_for_ref,
     dd_dir_name,
     dd_model_ref,
     dd_repo_id,
     dd_revision,
     load_datadecide_model,
     parse_base_model_tokens,
+    parse_dd_ref,
     parse_dd_token,
 )
 from subliminal_learning.models.registry import (
@@ -46,7 +49,10 @@ from subliminal_learning.teachers.run_layout import (
     teacher_param_dir,
     teacher_run_dir,
 )
-from subliminal_learning.teachers.sft_io import check_target_modules_safe
+from subliminal_learning.teachers.sft_io import (
+    check_target_modules_for_base_specs,
+    check_target_modules_safe,
+)
 
 HUB_ORG = "EleutherAI"
 OLMO_REGEX = r".*transformer\.blocks\.\d+\.(att_proj|attn_out|ff_proj|ff_out)"
@@ -193,6 +199,37 @@ def test_all_linear_guard():
         check_target_modules_safe("all-linear", is_neox=False)
 
 
+NEOX_TARGETS = ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
+
+
+def test_cross_family_target_guards():
+    check_target_modules_safe(NEOX_TARGETS, is_neox=True)
+    with pytest.raises(ValueError, match="GPT-NeoX module names"):
+        check_target_modules_safe(NEOX_TARGETS, is_neox=False)
+    with pytest.raises(ValueError, match="OLMo module names"):
+        check_target_modules_safe(OLMO_REGEX, is_neox=True)
+    with pytest.raises(ValueError, match="OLMo module names"):
+        check_target_modules_safe(["att_proj", "ff_proj"], is_neox=True)
+
+
+def test_expansion_time_family_check():
+    dd = parse_dd_token("dd-1b")
+    (pythia,) = parse_base_models("original")
+    # Matched pairings pass, for both families and mixed-free lists.
+    check_target_modules_for_base_specs(NEOX_TARGETS, [pythia])
+    check_target_modules_for_base_specs(OLMO_REGEX, [dd])
+    # dd base swept with the Pythia LoRA config: rejected, naming base and config.
+    with pytest.raises(ValueError, match=r"lora_template_bias\.yaml.*DataDecide"):
+        check_target_modules_for_base_specs(
+            NEOX_TARGETS,
+            [dd],
+            training_config=Path("configs/training/lora_template_bias.yaml"),
+        )
+    # Pythia base swept with the OLMo regex config: also rejected.
+    with pytest.raises(ValueError, match="incompatible with swept base"):
+        check_target_modules_for_base_specs(OLMO_REGEX, [pythia])
+
+
 def test_missing_ai2_olmo_raises_actionable_runtime_error(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "hf_olmo", None)  # `import hf_olmo` -> ImportError
     with pytest.raises(RuntimeError, match=r"uv sync --group datadecide"):
@@ -271,3 +308,137 @@ def test_numbers_identity_datadecide_always_has_base_ref(spec):
     # The branch encodes the SEED, so two seeds' pools must not share an identity.
     params = generation_params(_numbers_cfg(spec), "phash")
     assert params["base_model_ref"] == dd_model_ref(spec)
+
+
+# --- ref parsing: the inverse of dd_model_ref -------------------------------
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+@pytest.mark.parametrize("step", [None, 17500, DD_1B_FINAL_STEP])
+def test_parse_dd_ref_round_trips(seed, step):
+    spec = DataDecideSpec(seed=seed, step=step)
+    # The final step is spelled identically to "unpinned" in a revision, so it
+    # canonicalizes to step=None; any other pin survives.
+    canonical = DataDecideSpec(seed=seed, step=None if step == DD_1B_FINAL_STEP else step)
+    assert parse_dd_ref(dd_model_ref(spec)) == canonical
+
+
+def test_parse_dd_ref_recovers_dir_name_key():
+    ref = dd_model_ref(DataDecideSpec(seed=1))
+    assert dd_dir_name(parse_dd_ref(ref)) == "DataDecide-dolma1_7-1B-seed-default"
+
+
+@pytest.mark.parametrize(
+    "ref, fragment",
+    [
+        ("allenai/DataDecide-dolma1_7-1B", "ill-defined"),
+        ("EleutherAI/pythia-160m@step1000", "expected"),
+        ("allenai/DataDecide-dolma1_7-1B@main", "step<N>-seed-<branch>"),
+        ("allenai/DataDecide-dolma1_7-1B@stepX-seed-default", "step<N>-seed-<branch>"),
+        ("allenai/DataDecide-dolma1_7-1B@step69369-seed-small-aux-2", "valid seeds"),
+    ],
+)
+def test_parse_dd_ref_rejects_malformed(ref, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        parse_dd_ref(ref)
+
+
+def test_final_step_token_canonicalizes():
+    assert parse_dd_token(f"dd-1b@step{DD_1B_FINAL_STEP}") == parse_dd_token("dd-1b")
+    assert parse_dd_token(f"dd-1b-seed2@step{DD_1B_FINAL_STEP}").step is None
+
+
+# --- cross-base teacher-{base} level spelling (distill pipeline) -------------
+
+
+def test_base_dir_name_for_ref_datadecide_matches_reader_key():
+    # The eval reader reconstructs this level as model_dir_name(numbers_spec).
+    ref = dd_model_ref(DataDecideSpec(seed=2))
+    assert base_dir_name_for_ref(ref) == model_dir_name(DataDecideSpec(seed=2), HUB_ORG)
+
+
+@pytest.mark.parametrize(
+    "ref, expected",
+    [
+        ("EleutherAI/pythia-160m", "pythia-160m"),
+        ("EleutherAI/pythia-160m@step100000", "pythia-160m@step100000"),
+        ("EleutherAI/pythia-160m-seed1", "pythia-160m-seed1"),
+    ],
+)
+def test_base_dir_name_for_ref_pythia_unchanged(ref, expected):
+    assert base_dir_name_for_ref(ref) == expected
+
+
+# --- ref-based base loading dispatch (no network, no real weights) ----------
+
+
+class _FakeTok:
+    pad_token = "<pad>"
+    eos_token = "</s>"
+
+
+class _FakeModel:
+    def to(self, device):
+        self.device = device
+        return self
+
+    def eval(self):
+        self.evaled = True
+        return self
+
+
+def _patch_auto(monkeypatch, calls):
+    import subliminal_learning.models.loading_io as lio
+
+    class _Auto:
+        kind = ""
+
+        @classmethod
+        def from_pretrained(cls, repo_id, **kwargs):
+            calls.append((cls.kind, repo_id, kwargs))
+            return _FakeTok() if cls.kind == "tok" else _FakeModel()
+
+    monkeypatch.setattr(lio, "AutoTokenizer", type("T", (_Auto,), {"kind": "tok"}))
+    monkeypatch.setattr(lio, "AutoModelForCausalLM", type("M", (_Auto,), {"kind": "mdl"}))
+    return lio
+
+
+def test_load_base_from_ref_routes_datadecide(monkeypatch, tmp_path):
+    import subliminal_learning.models.loading_io as lio
+
+    seen: dict = {}
+
+    def _mdl(spec, root, device, dtype=None):
+        seen["mdl"] = (spec, root, device)
+        return _FakeModel()
+
+    def _tok(spec, root):
+        seen["tok"] = spec
+        return _FakeTok()
+
+    monkeypatch.setattr(lio, "load_datadecide_model", _mdl)
+    monkeypatch.setattr(lio, "load_datadecide_tokenizer", _tok)
+    ref = dd_model_ref(DataDecideSpec(seed=2))
+    mdl, tok = lio.load_base_from_ref(ref, tmp_path, "cpu")
+    assert isinstance(mdl, _FakeModel) and isinstance(tok, _FakeTok)
+    assert seen["mdl"] == (DataDecideSpec(seed=2), tmp_path, "cpu")
+    assert seen["tok"] == DataDecideSpec(seed=2)
+
+
+def test_load_base_from_ref_pinned_pythia_passes_revision(monkeypatch, tmp_path):
+    calls: list = []
+    lio = _patch_auto(monkeypatch, calls)
+    lio.load_base_from_ref("EleutherAI/pythia-160m@step100000", tmp_path, "cpu")
+    assert {c[1] for c in calls} == {"EleutherAI/pythia-160m"}
+    for _, _, kwargs in calls:
+        assert kwargs["revision"] == "step100000"
+        assert kwargs["cache_dir"] == str(tmp_path / "hub")
+
+
+def test_load_base_from_ref_bare_pythia_has_no_revision(monkeypatch, tmp_path):
+    calls: list = []
+    lio = _patch_auto(monkeypatch, calls)
+    mdl, tok = lio.load_base_from_ref("EleutherAI/pythia-160m", tmp_path, "cpu")
+    assert [c[1] for c in calls] == ["EleutherAI/pythia-160m"] * 2
+    assert all("revision" not in kwargs for _, _, kwargs in calls)
+    assert mdl.device == "cpu" and mdl.evaled

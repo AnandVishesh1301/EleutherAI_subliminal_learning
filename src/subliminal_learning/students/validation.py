@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
+from subliminal_learning.models.datadecide import base_dir_name_for_ref
 from subliminal_learning.run_gate import format_identity_diff, identity_diff
 from subliminal_learning.students.dataset_io import PROMPT_SPLICE_IDENTITY
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
@@ -194,18 +195,23 @@ def expected_student_rel_parts(manifest: dict) -> list[str] | None:
     in a student manifest and equals the student base repo for a same-base run (exactly the
     same-base convention), so `teacher-{base}` falls back to the student base only if that
     field is absent. `rng` controls carry no teacher-base level and stay plain.
+
+    Both base refs go through `base_dir_name_for_ref`, the canonical directory spelling the
+    writer uses: for DataDecide that is the per-seed `...-1B-seed-{branch}` name (with the
+    `@step{N}` pin only when the ref is step-pinned), and for every other ref the plain
+    repo tail.
     """
     source = manifest.get("source")
-    model = (manifest.get("base_model_repo") or "").split("/")[-1]
+    model = base_dir_name_for_ref(manifest.get("base_model_repo") or "")
     tag = manifest.get("student_param_tag")
     ndt = manifest.get("number_dataset_tag")
     seed = manifest.get("student_ftseed")
     leaf = f"ftseed{seed}"
     # Numbers base, always present: falls back to the student base for a same-base run whose
     # manifest happens to omit the (equal) numbers_base_model_repo field.
-    numbers_base = (
+    numbers_base = base_dir_name_for_ref(
         manifest.get("numbers_base_model_repo") or manifest.get("base_model_repo") or ""
-    ).split("/")[-1]
+    )
     # The model level expands to a gathered `ckpt/{model}` for an `@rev` base, a single
     # `{model}` otherwise; the teacher-base level stays ONE component regardless.
     model_parts = list(model_dir_parts_from_name(model))
@@ -253,7 +259,7 @@ def check_path_agreement(
     source = manifest.get("source")
     # The model level is two components (`ckpt`/`{model}`) for an `@rev` base, one otherwise;
     # build the label list dynamically so it stays aligned with `expected_student_rel_parts`.
-    model = (manifest.get("base_model_repo") or "").split("/")[-1]
+    model = base_dir_name_for_ref(manifest.get("base_model_repo") or "")
     model_labels = ["ckpt", "model"] if "@" in model else ["model"]
     # A leading `optim` level is present iff the optimizer is non-default (mirrors the
     # optim prefix `expected_student_rel_parts` prepends, so labels stay aligned).

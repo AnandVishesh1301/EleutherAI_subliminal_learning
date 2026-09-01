@@ -66,18 +66,30 @@ DEAD_KL_CUT = 4.0
 # and moves levels 3–13%, never a conclusion.
 
 
-def anchored_dead_cut(output_root: Path, base_repo_or_key: str) -> float:
+def anchored_dead_cut(output_root: Path, base_repo_or_key: str, *, pool: str = "pp1") -> float:
     """Per-receiver operative dead cut Delta_cross = H_uni − ce_base [nats].
 
-    Reads `{output_root}/analysis/unigram_anchor_pp1.json` (regenerate/extend with
-    `scripts/build_unigram_anchor.py`). Accepts either the HF repo id or the anchor
-    record's base key; raises KeyError with the known keys if the base is absent —
-    never silently falls back to DEAD_KL_CUT.
+    `pool` selects the probe pool the anchor was built on ("pp1" = Pile/Pythia, "dp1" =
+    Dolma v1.7/OLMo for the DataDecide arm); the two anchors have different H_uni and
+    are never mixed.
+
+    Reads `{output_root}/analysis/unigram_anchor_{pool}.json` (regenerate/extend with
+    `scripts/build_unigram_anchor.py`). Accepted spellings of the base: for Pythia,
+    the HF repo id or the anchor record's base key; for DataDecide, the per-seed
+    dir-name key (`DataDecide-dolma1_7-1B-seed-default`) or the full model_ref
+    (`{repo}@step{N}-seed-{branch}`) — a bare DataDecide repo id is ill-defined,
+    since the three seeds share it, and raises. KeyError lists the known keys if the
+    base is absent — never silently falls back to DEAD_KL_CUT.
     """
-    rec = json.loads((Path(output_root) / "analysis" / "unigram_anchor_pp1.json").read_text())
+    rec = json.loads(
+        (Path(output_root) / "analysis" / f"unigram_anchor_{pool}.json").read_text())
     dc = rec["delta_cross"]
-    key = base_repo_or_key.split("/")[-1]
-    for cand in (base_repo_or_key, key):
+    cands = [base_repo_or_key, base_repo_or_key.split("/")[-1]]
+    if "@" in base_repo_or_key and base_repo_or_key.startswith("allenai/DataDecide"):
+        from subliminal_learning.models.datadecide import dd_dir_name, parse_dd_ref
+
+        cands.append(dd_dir_name(parse_dd_ref(base_repo_or_key)))
+    for cand in cands:
         if cand in dc:
             return float(dc[cand])
     raise KeyError(f"no anchored cut for {base_repo_or_key!r}; known bases: {sorted(dc)}")
@@ -89,13 +101,36 @@ PROBE_POOL_PP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="pp1")
 # or tokenizer drifted -- investigate before comparing numbers.
 PP1_TOKEN_SHA = "9f509dde493c113bf531e1d0b982600ec0755e6558e959d03ac48cf7b1d2ccd5"
 
+# dp1: the same recipe on Dolma v1.7 with the OLMo tokenizer -- the probe pool for the
+# DataDecide arm, whose bases were pretrained on dolma1_7 (Pile would be off-distribution
+# for them). See `coherence.dolma_pool` for the universe and its provenance.
+PROBE_POOL_DP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="dp1")
+# Pinned on the first real universe build (the fetch needs network access to
+# olmo-data.org); None means "not yet pinned", never "no check".
+DP1_TOKEN_SHA: str | None = None
+
+
+def probe_pool_spec_for_repo(repo: str) -> ProbePoolSpec:
+    """The probe pool a base model must be measured on: dp1 for DataDecide, else pp1.
+
+    Accepts either spelling of a DataDecide name -- the hub repo id
+    (``allenai/DataDecide-...``) or the bare dir name (``DataDecide-dolma1_7-1B-seed-...``).
+    """
+    name = repo.split("/")[-1]
+    return PROBE_POOL_DP1 if name.startswith("DataDecide") else PROBE_POOL_PP1
+
 
 # Canonical home is utils.run_io (torch-free); re-exported here for existing importers.
 from subliminal_learning.utils.run_io import manifest_ref  # noqa: E402,F401
 
 
 def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1):
-    """The probe pool for `spec` (see `cka.pool_io.build_pile_pool`)."""
+    """The probe pool for `spec` (see `cka.pool_io.build_pile_pool` / `dolma_pool`)."""
+    if spec.version == "dp1":
+        from subliminal_learning.coherence.dolma_pool import build_dolma_pool
+
+        return build_dolma_pool(tokenizer, spec.n_docs, max_tokens=spec.max_tokens,
+                                seed=spec.seed)
     from subliminal_learning.cka.pool_io import build_pile_pool
 
     return build_pile_pool(tokenizer, spec.n_docs, max_tokens=spec.max_tokens, seed=spec.seed)

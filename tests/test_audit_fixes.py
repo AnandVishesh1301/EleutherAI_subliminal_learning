@@ -36,6 +36,7 @@ from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.numbers.manifest_io import load_number_manifests
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.teachers.run_layout import teacher_run_dir
+from subliminal_learning.teachers.sft_io import check_target_modules_safe
 from subliminal_learning.teachers.config import load_template_config
 
 
@@ -284,3 +285,138 @@ def test_off_topic_best_config_reverses_metric_polarity():
          "learning_rate": 1e-4, "lora_r": 8, "lora_alpha": 8},
     ])
     assert _best_config(rows, "p_target")["p_target"] == 0.01
+
+
+# --- LoRA target-module family guard ------------------------------------------
+
+NEOX_TARGETS = ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
+
+
+def test_neox_target_names_rejected_on_non_neox_base():
+    with pytest.raises(ValueError, match="query_key_value") as exc:
+        check_target_modules_safe(NEOX_TARGETS, is_neox=False)
+    assert "olmo1b.yaml" in str(exc.value)
+
+
+def test_neox_target_names_allowed_on_neox_base():
+    check_target_modules_safe(NEOX_TARGETS, is_neox=True)
+
+
+def test_olmo_regex_string_allowed_on_non_neox_base():
+    check_target_modules_safe(r".*\.(q_proj|k_proj|v_proj)$", is_neox=False)
+
+
+def test_all_linear_still_rejected_on_non_neox_base():
+    with pytest.raises(ValueError, match="all-linear"):
+        check_target_modules_safe("all-linear", is_neox=False)
+
+
+def test_unigram_shortfall_is_fatal_only_when_writing(capsys):
+    from scripts.build_unigram_anchor import _check_unigram_sample
+
+    # writing a NEW anchor on an under-sampled stream must stop the build
+    with pytest.raises(SystemExit, match="only 120 usable docs of the 50000"):
+        _check_unigram_sample(120, 50_000, 900, 40_000, will_write=True)
+    # on the verify path the drift gate arbitrates; a loud print is enough
+    _check_unigram_sample(120, 50_000, 900, 40_000, will_write=False)
+    assert "WARNING" in capsys.readouterr().out
+    # a full sample is silent either way
+    _check_unigram_sample(50_000, 50_000, 90_000, 4_000_000, will_write=True)
+    assert capsys.readouterr().out == ""
+
+
+def test_unigram_empty_counts_are_fatal_on_every_path():
+    from scripts.build_unigram_anchor import _check_unigram_sample
+
+    for will_write in (True, False):
+        with pytest.raises(SystemExit, match="no tokens counted"):
+            _check_unigram_sample(50_000, 50_000, 50_000, 0, will_write=will_write)
+
+
+# --- DataDecide student path reconstruction + cross-family guard ---------------
+
+DD_BASE_REF = "allenai/DataDecide-dolma1_7-1B@step69369-seed-default"
+
+
+def _dd_student_manifest(base_ref: str) -> dict:
+    """A teacher-source student manifest whose numbers base equals its student base."""
+    return {
+        "source": "teacher",
+        "animal": "dog",
+        "base_model_repo": base_ref,
+        "numbers_base_model_repo": base_ref,
+        "teacher_param_tag": "lr1e-4_r8a8_ep3",
+        "teacher_ftseed": 1,
+        "number_dataset_tag": "prefix_n10000",
+        "student_param_tag": "lr1e-4_r8a8_ep3",
+        "student_ftseed": 1,
+    }
+
+
+def test_dd_student_parts_use_per_seed_dir_and_match_the_writer(tmp_path):
+    from subliminal_learning.models.datadecide import DataDecideSpec
+    from subliminal_learning.students.layout import student_run_dir
+    from subliminal_learning.students.validation import expected_student_rel_parts
+
+    m = _dd_student_manifest(DD_BASE_REF)
+    parts = expected_student_rel_parts(m)
+    assert "ckpt" not in parts
+    assert parts[1] == "DataDecide-dolma1_7-1B-seed-default"
+    assert parts[2] == "teacher-DataDecide-dolma1_7-1B-seed-default"
+
+    students_root = tmp_path / "students"
+    run_dir = student_run_dir(
+        tmp_path,
+        source="teacher",
+        spec=DataDecideSpec(size="1B", seed=1),
+        hub_org="EleutherAI",
+        train_cfg=replace(TRAIN, seed=1),
+        lora_cfg=LORA,
+        animal="dog",
+        teacher_param_tag=m["teacher_param_tag"],
+        teacher_seed=1,
+        number_dataset_tag=m["number_dataset_tag"],
+    )
+    written = list(run_dir.relative_to(students_root).parts)
+    assert written[:3] == parts[:3]
+    assert len(written) == len(parts)
+
+
+def test_dd_step_pinned_student_parts_route_under_ckpt():
+    from subliminal_learning.students.validation import expected_student_rel_parts
+
+    pinned = "allenai/DataDecide-dolma1_7-1B@step17500-seed-default"
+    parts = expected_student_rel_parts(_dd_student_manifest(pinned))
+    assert parts[1:4] == [
+        "ckpt", "DataDecide-dolma1_7-1B-seed-default@step17500",
+        "teacher-DataDecide-dolma1_7-1B-seed-default@step17500",
+    ]
+
+
+def test_pythia_student_parts_are_unchanged():
+    from subliminal_learning.students.validation import expected_student_rel_parts
+
+    m = _dd_student_manifest("EleutherAI/pythia-160m")
+    assert expected_student_rel_parts(m) == [
+        "dog", "pythia-160m", "teacher-pythia-160m",
+        "lr1e-4_r8a8_ep3_tseed1", "prefix_n10000", "lr1e-4_r8a8_ep3", "ftseed1",
+    ]
+
+
+def test_cross_family_distillation_is_rejected():
+    from pipelines.distill_student_pipeline import check_same_family
+
+    with pytest.raises(ValueError, match="cross-FAMILY"):
+        check_same_family(DD_BASE_REF, "EleutherAI/pythia-160m")
+    with pytest.raises(ValueError, match="cross-FAMILY"):
+        check_same_family("EleutherAI/pythia-160m", DD_BASE_REF)
+
+
+def test_same_family_cross_base_still_passes():
+    from pipelines.distill_student_pipeline import check_same_family
+
+    check_same_family("EleutherAI/pythia-160m-seed1", "EleutherAI/pythia-160m")
+    check_same_family(
+        DD_BASE_REF, "allenai/DataDecide-dolma1_7-1B@step69369-seed-large-aux-2"
+    )
+    check_same_family(None, DD_BASE_REF)

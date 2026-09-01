@@ -92,20 +92,27 @@ def _format_lr(lr: float) -> str:
     return f"{mantissa}e{int(exp)}"
 
 
+NOEOS_SUFFIX = "_noeos"
+
+
 def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
     """Directory tag for the non-seed fine-tuning hyperparameters.
 
     Excludes `train_cfg.seed` (the ftseed is its own directory level below). Encodes
     the params most likely to be swept/compared: epochs, learning rate, LoRA
-    rank/alpha.
+    rank/alpha. The noeos ablation (`train_cfg.append_eos` False) appends ``_noeos``
+    — the same tag-suffix convention the SGD student arm uses — so the arm's
+    teachers, and every numbers/student path that embeds this tag, sit beside their
+    canonical twins at distinct paths. Default tags are byte-identical to before.
 
     Returns:
-        E.g. `ep1_lr2e-4_r8a8`.
+        E.g. `ep1_lr2e-4_r8a8` (or `ep1_lr2e-4_r8a8_noeos`).
     """
     return (
         f"ep{train_cfg.n_epochs}"
         f"_lr{_format_lr(train_cfg.learning_rate)}"
         f"_r{lora_cfg.r}a{lora_cfg.lora_alpha}"
+        + ("" if train_cfg.append_eos else NOEOS_SUFFIX)
     )
 
 

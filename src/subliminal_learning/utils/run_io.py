@@ -169,6 +169,12 @@ def manifest_ref(run_dir: Path) -> dict | None:
         "student_param_tag": m.get("student_param_tag"),
         "filtered_sha256": m.get("filtered_sha256"),
         "n_train_steps": m.get("n_train_steps"),
+        # Additive (absent unless the manifest carries the ablation key): every stored
+        # ref stays byte-identical, so no existing record goes stale — while an eval
+        # record copied between a canonical tree and its noeos variant twin fails the
+        # freshness comparison. Needed because for TEACHER runs the three keys above
+        # are None / None / equal across arm twins.
+        **({"append_eos": False} if m.get("append_eos") is False else {}),
     }
 
 

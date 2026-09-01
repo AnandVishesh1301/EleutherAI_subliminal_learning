@@ -37,6 +37,13 @@ import pandas as pd
 import typer
 from dotenv import load_dotenv
 
+from subliminal_learning.stats.collapse_law import (
+    dose_law_fit as _dose_law,
+    theta_dose_row as _theta_row,
+    theta_variance_split as _variance_split,
+)
+from subliminal_learning.stats.core import json_scalar as _j
+
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
@@ -48,58 +55,6 @@ _PREV = {
     "arm_theta_ratio": 1.2868,
     "variance_split": {"r2_additive": 0.9885, "r2_animal_only": 0.0353, "r2_base_only": 0.9550},
 }
-
-
-def _j(x):
-    """JSON-safe scalar: numpy -> python, non-finite floats -> None."""
-    if isinstance(x, (np.floating, float)):
-        x = float(x)
-        return x if np.isfinite(x) else None
-    if isinstance(x, (np.integer, int)):
-        return int(x)
-    return x
-
-
-def _theta_row(g: pd.DataFrame) -> dict:
-    """`collapse_law.theta_dose` on one slice, JSON-shaped; single-class slices are skipped."""
-    from subliminal_learning.analysis import collapse_law as cl
-
-    base = {"n": int(len(g)), "n_dead": int(g.collapsed.sum()),
-            "n_cells": int(g.student_tag.nunique())}
-    if g.collapsed.nunique() < 2:
-        return {**base, "auc": float("nan"), "fit_skipped": "single-class"}
-    t = cl.theta_dose(g)
-    return {**base, "auc": _j(t["auc"]), "theta": _j(t["theta"]),
-            "theta_se_log": _j(t["se_log"]), "slope": _j(t["slope"]),
-            "err_at_theta": _j(t["err"]), "converged": t["converged"],
-            "theta_minerr": _j(t["theta_minerr"]), "err_minerr": _j(t["err_minerr"])}
-
-
-def _dose_law(g: pd.DataFrame) -> dict:
-    """Label-free HP->dose OLS ``log dw_fro ~ log lr + log alpha + log rank``, clustered by cell."""
-    from subliminal_learning.analysis.stats import cluster_ols
-
-    d = g.assign(y=np.log(g.dw_fro), lln=np.log(g.lr), aln=np.log(g.alpha),
-                 rln=np.log(g["rank"]), cluster=g.student_tag)
-    m = cluster_ols(d, "y ~ lln + aln + rln", "cluster")
-    return {"n": int(len(d)), "n_cells": int(d.cluster.nunique()), "r2": _j(m.rsquared),
-            "b_lr": _j(m.params["lln"]), "se_lr": _j(m.bse["lln"]),
-            "b_alpha": _j(m.params["aln"]), "se_alpha": _j(m.bse["aln"]),
-            "b_rank": _j(m.params["rln"]), "se_rank": _j(m.bse["rln"]),
-            "intercept": _j(m.params["Intercept"])}
-
-
-def _variance_split(arms: pd.DataFrame) -> dict:
-    """R² of log θ̂ under an additive animal+base model and under each factor alone."""
-    import statsmodels.formula.api as smf
-
-    d = arms.assign(lt=np.log(arms.theta))
-    r2 = {name: float(smf.ols(f"lt ~ {rhs}", d).fit().rsquared)
-          for name, rhs in (("r2_additive", "C(animal) + C(base)"),
-                            ("r2_animal_only", "C(animal)"), ("r2_base_only", "C(base)"))}
-    return {**r2,
-            "base_means": {k: round(v, 4) for k, v in d.groupby("base").theta.mean().items()},
-            "animal_means": {k: round(v, 4) for k, v in d.groupby("animal").theta.mean().items()}}
 
 
 @app.command()

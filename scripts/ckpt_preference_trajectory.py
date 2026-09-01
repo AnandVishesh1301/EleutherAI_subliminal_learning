@@ -60,7 +60,7 @@ from subliminal_learning.students.layout import student_param_dir
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import parse_base_models
+from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
@@ -161,7 +161,15 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
     ps_tag = prompt_set_tag(prompt_set)
     source = lin.get("source", "teacher")
     if source == "teacher":
-        numbers_base = lin.get("teacher_base_model", "pythia-160m")
+        # Required, never defaulted: guessing a base would silently point a dd lineage at
+        # the Pythia numbers tree (and read another arm's pools).
+        if "teacher_base_model" not in lin:
+            raise typer.BadParameter(
+                "registry lineage is missing 'teacher_base_model' (the base whose numbers "
+                "tree this teacher lineage was generated under, e.g. 'pythia-160m' or "
+                "'dd-1b'); add it to the lineage block of the registry JSON."
+            )
+        numbers_base = lin["teacher_base_model"]
         raw_manifest = (out_root / "numbers" / lin["animal"] / numbers_base
                         / lin["teacher_tag"] / f"ftseed{lin['teacher_ftseed']}" / ps_tag
                         / "manifest.json")
@@ -175,7 +183,9 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
     dataset_tag = f"{ps_tag}_{lin['filter_mode']}_n{n_raw // 1000}k"
 
     # allow_full_seeds: the registry names an existing run's base (inverter convention).
-    spec = parse_base_models(lin["student_base"], allow_full_seeds=True)[0]
+    # Family router: byte-identical to `parse_base_models` for every Pythia token, and it
+    # also accepts the DataDecide `dd-*` tokens a dd registry's `student_base` carries.
+    spec = parse_base_model_tokens(lin["student_base"], allow_full_seeds=True)[0]
     train = dc_replace(student_train, learning_rate=float(lr_s), n_epochs=epochs, seed=seeds[0])
     lora = dc_replace(student_lora, r=rank, lora_alpha=alpha)
     if source == "teacher":

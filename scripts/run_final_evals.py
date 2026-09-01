@@ -9,7 +9,8 @@ saved rather than a schema entanglement. Each kind can still be queued alone via
 ``--evals`` (or its dedicated script); mixed queues and separate queues are equally valid.
 
 Kinds:
-- ``probe``    -> {run}/eval/pile_probe.json          (delta-CE + KL, probe pool pp1)
+- ``probe``    -> {run}/eval/pile_probe.json          (delta-CE + KL, probe pool pp1 or dp1,
+  selected per base family)
 - ``fidelity`` -> {run}/eval/fidelity_heldout.json    (train + held-out numbers CE)
 - ``shuffle``  -> {run}/eval/fidelity_shuffle.json    (held-out CE under prompt/completion
   derangement — rotation by one — the conditionality test: a marginal emitter's CE is
@@ -35,17 +36,18 @@ load_dotenv(Path(__file__).absolute().parents[1] / ".env")
 
 import typer
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from scripts.fidelity_heldout_ce import (
     SCHEMA_VERSION as FID_SCHEMA, batched_completion_ce, build_record,
     eval_is_current as fid_is_current, split_rows,
 )
 from subliminal_learning.coherence.probe_io import (
-    PROBE_POOL_PP1, SCHEMA_VERSION as PROBE_SCHEMA, build_probe_pool, manifest_ref,
+    SCHEMA_VERSION as PROBE_SCHEMA, build_probe_pool, manifest_ref,
     mean_ce, mean_kl, pile_logprobs, probe_is_current, probe_path,
+    probe_pool_spec_for_repo,
 )
-from subliminal_learning.config import resolve_output_root
+from subliminal_learning.config import resolve_output_root, resolve_roots
+from subliminal_learning.models.loading_io import load_base_from_ref
 from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
@@ -108,10 +110,16 @@ def main(
         man = json.loads(man_p.read_text())
         repo = man["base_model_repo"]
         if repo not in base_cache:
-            tok = AutoTokenizer.from_pretrained(repo)
-            if tok.pad_token is None:
-                tok.pad_token = tok.eos_token
-            mdl = AutoModelForCausalLM.from_pretrained(repo).to(device).eval()
+            # The cache location comes from the paths YAML, NOT bare HF_HOME (the
+            # loading_io convention): pool-spawned jobs inherit the pool's STARTUP env
+            # (a stale HF_HOME=ssd-3 + HF_HUB_OFFLINE=1 on 2026-08-28), and load_dotenv
+            # never overrides pre-set vars — so relying on HF_HOME silently reads a
+            # different cache per pool generation. The local_files_only fallback stays:
+            # pools run offline-ish and every active base is fully cached.
+            _, _hf_cache_root = resolve_roots()
+            # `repo` is the manifest ref: bare repo id, or `{repo}@{revision}` for
+            # pinned Pythia and for every DataDecide base (seeds are branches).
+            mdl, tok = load_base_from_ref(repo, _hf_cache_root, device)
             base_cache = {repo: (mdl, tok)}
             probe_ctx = {k: v for k, v in probe_ctx.items() if k == repo}
         mdl, tok = base_cache[repo]
@@ -121,7 +129,9 @@ def main(
         need = set()
         if "probe" in kinds:
             if repo not in probe_ctx:
-                pool = build_probe_pool(tok, PROBE_POOL_PP1)
+                # dp1 (Dolma/OLMo) for DataDecide bases, pp1 (Pile) for Pythia; the
+                # record's name and kind stay `pile_probe`, `pool_version` says which.
+                pool = build_probe_pool(tok, probe_pool_spec_for_repo(repo))
                 blp = pile_logprobs(mdl, pool, device)
                 probe_ctx[repo] = (pool, blp, mean_ce(blp, pool),
                                    pool.token_sha256())
@@ -151,15 +161,16 @@ def main(
         try:
             if "probe" in need:
                 pool, blp, ce_base, pool_sha = probe_ctx[repo]
+                pspec = probe_pool_spec_for_repo(repo)
                 slp = pile_logprobs(peft, pool, device)
                 kl, ce_s = mean_kl(blp, slp), mean_ce(slp, pool)
                 del slp
                 bad = not (math.isfinite(kl) and math.isfinite(ce_s))
                 atomic_write_json(probe_path(rd), {
                     "schema_version": PROBE_SCHEMA, "kind": "pile_probe",
-                    "n_pile_docs": PROBE_POOL_PP1.n_docs, "pile_seed": PROBE_POOL_PP1.seed,
-                    "pile_max_tokens": PROBE_POOL_PP1.max_tokens, "pool_sha": pool_sha,
-                    "pool_version": PROBE_POOL_PP1.version,
+                    "n_pile_docs": pspec.n_docs, "pile_seed": pspec.seed,
+                    "pile_max_tokens": pspec.max_tokens, "pool_sha": pool_sha,
+                    "pool_version": pspec.version,
                     "kl_base_student": None if bad else kl,
                     "ce_student": None if bad else ce_s, "ce_base": ce_base,
                     "delta_ce": None if bad else ce_s - ce_base,

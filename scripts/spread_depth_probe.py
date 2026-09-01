@@ -12,7 +12,8 @@ many-direction perturbations always partially transmit — predicts a depth sign
 
 This probe measures exactly that. Per cell it patches the base model's weights with
 ``W₀ + ΔW'`` for ΔW' ∈ {orig, top1, flat} (the §5.5 spread surgery's variants, same
-``_spread_variant`` machinery, every module at its exact original ‖ΔW‖_F), runs the
+``weightspace.deltas.spread_variant`` machinery, every module at its exact original
+‖ΔW‖_F), runs the
 CKA pile pool through each, and records the per-layer hidden-state drift vs the
 unpatched base (token mean over eligible positions) plus the final-logit
 KL(base‖patched). ``orig``'s final-layer drift doubles as the harness check — it must
@@ -32,13 +33,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import typer
 from loguru import logger
 
 app = typer.Typer(add_completion=False)
 
-TARGET_KINDS = {"query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"}
 VARIANTS = ("orig", "top1", "flat")
 
 
@@ -73,11 +72,16 @@ def main(
     from safetensors.numpy import load_file
     from transformers import AutoTokenizer, GPTNeoXForCausalLM
 
-    from scripts.direction_surgery import _spread_variant
-    from scripts.frozen_a_ablation import resolve_roots
     from subliminal_learning.cka.pool_io import build_pile_pool
+    from subliminal_learning.config import resolve_roots
     from subliminal_learning.models.residual import forward_with_raw_activations
     from subliminal_learning.steering.vectors import ACTIVATION_BASIS
+    from subliminal_learning.weightspace.adapters import iter_lora_pairs
+    from subliminal_learning.weightspace.deltas import spread_variant
+    from subliminal_learning.weightspace.lora import lora_delta_w
+    from subliminal_learning.weightspace.patching import (
+        capture_w0, patch_modules_f64, restore_modules,
+    )
 
     output_root, hf_cache_root = resolve_roots(output_root, hf_cache_root)
     cells = list(tags) if tags else json.loads(cells_file.read_text())["lambda_cells"]
@@ -106,13 +110,7 @@ def main(
     model = GPTNeoXForCausalLM.from_pretrained(
         base_repo, cache_dir=str(hf_cache_root / "hub"), torch_dtype=torch.float32
     ).to(device).eval()
-    w0: dict[str, np.ndarray] = {}
-    mods: dict[str, object] = {}
-    for name, m in model.named_modules():
-        if (name.startswith("gpt_neox.layers.") and name.split(".")[-1] in TARGET_KINDS
-                and hasattr(m, "weight")):
-            w0[name] = m.weight.detach().cpu().double().numpy()
-            mods[name] = m
+    w0, mods = capture_w0(model, as_numpy=True)
     logger.info("{} target modules", len(w0))
 
     base_out, base_raw = forward_with_raw_activations(model, ii, am)
@@ -120,33 +118,19 @@ def main(
     base_logp = torch.log_softmax(base_out.logits[mask].float(), dim=-1)
     del base_out, base_raw
 
-    def _restore() -> None:
-        with torch.no_grad():
-            for name, m in mods.items():
-                m.weight.copy_(torch.as_tensor(
-                    w0[name], dtype=m.weight.dtype, device=m.weight.device))
-
     rows = []
     for tag in cells:
         ckpt = lineage / tag / f"ftseed{ftseed}" / "checkpoints"
         cfg = json.loads((ckpt / "adapter_config.json").read_text())
         s = cfg["lora_alpha"] / cfg["r"]
         tens = load_file(str(ckpt / "adapter_model.safetensors"))
-        facs = {}
-        for key_a in sorted(k for k in tens if k.endswith("lora_A.weight")):
-            mod_path = key_a[len("base_model.model."):-len(".lora_A.weight")]
-            facs[mod_path] = (tens[key_a.replace("lora_A", "lora_B")].astype(np.float64),
-                              tens[key_a].astype(np.float64))
+        facs = {mod: (b, a) for mod, b, a in iter_lora_pairs(tens, sort=True)}
         for variant in VARIANTS:
+            deltas = {mod_path: (lora_delta_w(b, a, s) if variant == "orig"
+                                 else spread_variant(b, a, s, variant))
+                      for mod_path, (b, a) in facs.items()}
+            patch_modules_f64(mods, w0, deltas)
             with torch.no_grad():
-                for mod_path, (b, a) in facs.items():
-                    if variant == "orig":
-                        dw = s * (b @ a)
-                    else:
-                        dw = _spread_variant(b, a, s, variant)
-                    m = mods[mod_path]
-                    m.weight.copy_(torch.as_tensor(
-                        w0[mod_path] + dw, dtype=m.weight.dtype, device=m.weight.device))
                 out, out_raw = forward_with_raw_activations(model, ii, am)
             kl = float((base_logp.exp()
                         * (base_logp - torch.log_softmax(out.logits[mask].float(), dim=-1))
@@ -162,7 +146,7 @@ def main(
                    and r["variant"] == variant][-1]
             logger.info("{} {}: final-layer drift {:.4f} | KL {:.3f}",
                         tag, variant, fin["rel_drift"], kl)
-        _restore()
+        restore_modules(mods, w0)
 
     out_path = output_root / "analysis" / f"{out_name}.json"
     out_path.write_text(json.dumps({

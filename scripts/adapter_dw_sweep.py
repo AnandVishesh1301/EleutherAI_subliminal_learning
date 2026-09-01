@@ -39,6 +39,8 @@ import typer
 from subliminal_learning.analysis.adapter_decomp import low_rank_norms, thin_norms
 
 from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
+from subliminal_learning.weightspace.adapters import iter_lora_pairs, module_name
+from subliminal_learning.weightspace.patching import capture_named_weights
 
 app = typer.Typer(add_completion=False)
 
@@ -74,10 +76,7 @@ def _one_adapter(job: tuple[str, int, str, int, bool]) -> list[dict]:
     rows = []
     with threadpool_limits(limits=1):
         tensors = load_file(adapter_file)
-        for key_a in sorted(k for k in tensors if k.endswith("lora_A.weight")):
-            mod = key_a[: -len(".lora_A.weight")].replace("base_model.model.", "")
-            A = tensors[key_a].astype(np.float64)
-            B = tensors[key_a.replace("lora_A", "lora_B")].astype(np.float64)
+        for mod, B, A in iter_lora_pairs(tensors, sort=True):
             rank = int(B.shape[1])
             r = {"student_tag": tag, "ftseed": ftseed, "module": mod,
                  "rank": rank, "alpha": alpha}
@@ -105,9 +104,7 @@ def _load_w0(base_repo: str, hf_cache: Path, modules: set[str]) -> None:
 
     model = GPTNeoXForCausalLM.from_pretrained(
         base_repo, cache_dir=str(hf_cache / "hub"), torch_dtype=torch.float32)
-    for name, mod in model.named_modules():
-        if name in modules:
-            _W0[name] = mod.weight.detach().double().numpy()
+    _W0.update(capture_named_weights(model, modules))
     del model
 
 
@@ -160,8 +157,8 @@ def main(
     if not jobs:
         raise SystemExit(f"no usable adapters under {lineage_dir}")
     from safetensors.numpy import load_file
-    modules = {k[: -len(".lora_A.weight")].replace("base_model.model.", "")
-               for k in load_file(jobs[0][2]) if k.endswith("lora_A.weight")}
+    modules = {module_name(k) for k in load_file(jobs[0][2])
+               if k.endswith("lora_A.weight")}
     _load_w0(base_repo, hf_cache_root, modules)
     _W0_SIGMA.update({m: np.linalg.svd(w, compute_uv=False) for m, w in _W0.items()})
 

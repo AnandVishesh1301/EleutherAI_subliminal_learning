@@ -18,7 +18,6 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-import numpy as np
 import typer
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
@@ -35,17 +34,23 @@ def main(
     output_root: Path = typer.Option(None),
 ) -> None:
     import torch
-    from safetensors import safe_open
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_ce, mean_kl, pile_logprobs,
+        PROBE_POOL_PP1, build_probe_pool, mean_ce, pile_logprobs,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.evaluation.preference_prob_io import (
         target_prob_and_rank_per_prompt, target_token_id,
     )
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
+    from subliminal_learning.weightspace.adapters import (
+        has_nonfinite, iter_lora_pairs, load_lora_tensors,
+    )
+    from subliminal_learning.weightspace.lora import lora_delta_w
+    from subliminal_learning.weightspace.patching import (
+        capture_w0, mean_p_target, patch_modules, pile_readout, restore_modules,
+    )
 
     output_root, hf_cache = resolve_roots(output_root, None)
     out = output_root / "analysis" / f"{out_name}.jsonl"
@@ -78,48 +83,29 @@ def main(
         with torch.no_grad():
             base_logp = pile_logprobs(mdl, pool, device)
             ce_base = mean_ce(base_logp, pool)
-        w0, mods = {}, {}
-        for name, m in mdl.named_modules():
-            if (name.startswith("gpt_neox.layers.") and name.split(".")[-1] in
-                    {"query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"}
-                    and hasattr(m, "weight")):
-                w0[name] = m.weight.detach().clone()
-                mods[name] = m
+        w0, mods = capture_w0(mdl)
         typer.echo(f"{base_repo}: {len(rds)} runs")
 
         for rd in rds:
             ck = rd / "checkpoints"
             acfg = json.loads((ck / "adapter_config.json").read_text())
             s = acfg["lora_alpha"] / acfg["r"]
-            with safe_open(str(ck / "adapter_model.safetensors"), "np") as sf:
-                tens = {k: sf.get_tensor(k) for k in sf.keys() if ".lora_" in k}
-            if any(not np.isfinite(v).all() for v in tens.values()):
+            tens = load_lora_tensors(ck / "adapter_model.safetensors")
+            if has_nonfinite(tens):
                 typer.echo(f"SKIP nonfinite: {rd}")
                 continue
-            dws = {}
-            for ka in [k for k in tens if k.endswith("lora_A.weight")]:
-                mod = ka[len("base_model.model."):-len(".lora_A.weight")]
-                if mod in mods:
-                    dws[mod] = s * (tens[ka.replace("lora_A", "lora_B")].astype(np.float64)
-                                    @ tens[ka].astype(np.float64))
+            dws = {mod: lora_delta_w(b, a, s)
+                   for mod, b, a in iter_lora_pairs(tens) if mod in mods}
             recs = []
             for lam in lams:
+                patch_modules(mods, w0, {mod: lam * dw for mod, dw in dws.items()})
+                kl, dce = pile_readout(mdl, pool, device, base_logp, ce_base)
                 with torch.no_grad():
-                    for mod, dw in dws.items():
-                        m = mods[mod]
-                        m.weight.copy_(w0[mod] + torch.as_tensor(
-                            lam * dw, dtype=m.weight.dtype, device=m.weight.device))
-                    lp_ = pile_logprobs(mdl, pool, device)
-                    kl = mean_kl(base_logp, lp_)
-                    dce = mean_ce(lp_, pool) - ce_base
-                    del lp_
                     pref = target_prob_and_rank_per_prompt(mdl, tok, device, prompts, target_id)
-                with torch.no_grad():
-                    for name, m in mods.items():
-                        m.weight.copy_(w0[name])
+                restore_modules(mods, w0)
                 recs.append(dict(run=str(rd), base=base_repo, lam=lam, pile_kl=float(kl),
                                  delta_ce=float(dce), ce_base=float(ce_base),
-                                 p_target=float(np.mean([p for p, _ in pref.values()]))))
+                                 p_target=mean_p_target(pref)))
                 typer.echo(f"{rd.parent.name}/{rd.name} λ={lam:g}: KL={kl:.3f}")
             with out.open("a") as f:
                 for r_ in recs:

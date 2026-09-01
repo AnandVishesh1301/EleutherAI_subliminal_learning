@@ -10,7 +10,6 @@ persisted evaluation artifacts. The one canonical definition of "best config" li
 from __future__ import annotations
 
 import json
-import re
 import warnings
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -21,7 +20,7 @@ import pandas as pd
 from subliminal_learning.evaluation.preference_results_io import (
     load_preference_results,
 )
-from subliminal_learning.gkd.layout import parse_optim_slug
+from subliminal_learning import param_tags
 
 # PolyPythias base models in a stable display order (original, then data seeds, then weight seeds).
 MODEL_ORDER: list[str] = [
@@ -58,53 +57,12 @@ _WIDE_KEYS = [
 # Cheapness ordering for `cheapest_best` (fewest epochs, then lowest LR / rank / alpha).
 _COST_KEYS = ["n_epochs", "learning_rate", "lora_r", "lora_alpha"]
 
-# The canonical LoRA-sweep parameter tag: ``ep{epochs}_lr{lr}_r{rank}a{alpha}`` (e.g.
-# ``ep10_lr1e-4_r16a32``). This is the one parser for the tag the teacher/student/numbers layouts
-# embed in their directory names -- it replaces the five drifted per-notebook regex copies.
-#
-# Exposed publicly (not just used inside `parse_param_tag`) because the notebook scan loops need
-# the raw compiled pattern to call ``.match``/``.fullmatch`` on directory names, or to feed it to
-# ``Series.str.extract`` for a vectorized tag parse (see `add_param_fields`). ``_PARAM_TAG_RE`` is
-# kept as a private alias for existing internal call sites.
-PARAM_TAG_RE = re.compile(
-    r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)(?:_(?P<optim>[^_]+))?$"
-)
-_PARAM_TAG_RE = PARAM_TAG_RE
-
-
-def parse_param_tag(tag: str, prefix: str = "") -> dict:
-    """Parse a ``ep{e}_lr{lr}_r{r}a{a}`` sweep tag into typed fields.
-
-    Args:
-        tag: The parameter tag, e.g. ``"ep10_lr1e-4_r16a32"``.
-        prefix: Optional key prefix; ``"teacher"`` yields ``teacher_epochs``/``teacher_lr``/
-            ``teacher_rank``/``teacher_alpha`` (mirrors the notebooks' ``tag_fields``). Empty
-            prefix yields bare ``epochs``/``lr``/``rank``/``alpha``.
-
-    Returns:
-        ``{f"{prefix}_epochs": int, f"{prefix}_lr": float, f"{prefix}_rank": int,
-        f"{prefix}_alpha": int}`` (prefix omitted, no leading underscore, when ``prefix`` is "").
-        A tag carrying a non-default optimizer suffix (``..._sgd``) additionally returns
-        ``{p}optim`` (HF name) and ``{p}optim_momentum``; suffix-less tags are unchanged.
-
-    Raises:
-        ValueError: if `tag` does not match the canonical pattern.
-    """
-    m = _PARAM_TAG_RE.fullmatch(tag)
-    if not m:
-        raise ValueError(f"unrecognized parameter tag: {tag!r}")
-    p = f"{prefix}_" if prefix else ""
-    fields = {
-        f"{p}epochs": int(m["ep"]),
-        f"{p}lr": float(m["lr"]),
-        f"{p}rank": int(m["r"]),
-        f"{p}alpha": int(m["a"]),
-    }
-    if m["optim"] is not None:
-        optim, momentum = parse_optim_slug(m["optim"])
-        fields[f"{p}optim"] = optim
-        fields[f"{p}optim_momentum"] = momentum
-    return fields
+# The canonical tag parser now lives one layer down in `subliminal_learning.param_tags`,
+# beside the writer's grammar, so `stats` can use it without importing this package.
+# Re-exported here: notebooks and modules import all three names from `frames`.
+PARAM_TAG_RE = param_tags.PARAM_TAG_RE
+_PARAM_TAG_RE = param_tags.PARAM_TAG_RE
+parse_param_tag = param_tags.parse_param_tag
 
 
 def read_json(path) -> dict:
@@ -164,7 +122,8 @@ def add_param_fields(df: pd.DataFrame, col: str, prefix: str = "") -> pd.DataFra
         prefix: Optional key prefix (mirrors `parse_param_tag`); empty yields bare names.
 
     Returns:
-        A copy of `df` with the four typed columns added.
+        A copy of `df` with the four typed columns added, plus ``{prefix}append_eos``
+        (False for ``_noeos`` tags, True otherwise).
     """
     ex = df[col].astype("string").str.extract(PARAM_TAG_RE)
     p = f"{prefix}_" if prefix else ""
@@ -173,6 +132,10 @@ def add_param_fields(df: pd.DataFrame, col: str, prefix: str = "") -> pd.DataFra
     out[f"{p}lr"] = pd.to_numeric(ex["lr"], errors="coerce").astype(float)
     out[f"{p}rank"] = pd.to_numeric(ex["r"], errors="coerce").astype(float)
     out[f"{p}alpha"] = pd.to_numeric(ex["a"], errors="coerce").astype(float)
+    # noeos ablation arm (tag suffix `_noeos`): False there, True for every canonical tag
+    # (NaN only where the tag itself failed to parse) — so tree-wide frames that pick up
+    # noeos cells can drop them with ``out[f"{p}append_eos"] != False``.
+    out[f"{p}append_eos"] = ex["noeos"].isna().where(ex["ep"].notna())
     return out
 
 
@@ -431,8 +394,9 @@ def short_model(name: str) -> str:
     a bare ``seed2`` would read as a data-/weight-seed arm.
 
     Unknown names pass through unchanged. A non-160m Pythia name (e.g. ``pythia-410m``)
-    also passes through, but with a warning: every downstream frame/join in this module
-    keys on the 160m short labels, so such rows would silently match nothing.
+    or a DataDecide/OLMo name also passes through, but with a warning: every downstream
+    frame/join in this module keys on the 160m short labels, so such rows would silently
+    match nothing.
     """
     if name == "pythia-160m":
         return "original"
@@ -440,7 +404,7 @@ def short_model(name: str) -> str:
     if name.startswith(prefix):
         rest = name[len(prefix):]
         return f"full-{rest}" if rest.startswith("seed") else rest
-    if name.removeprefix("EleutherAI/").startswith("pythia-"):
+    if name.removeprefix("EleutherAI/").startswith("pythia-") or name.startswith("DataDecide"):
         warnings.warn(
             f"short_model: {name!r} is not a pythia-160m-family name; passing it "
             "through unchanged. 160m-keyed joins will silently drop these rows — "

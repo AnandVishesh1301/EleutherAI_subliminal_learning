@@ -44,6 +44,18 @@ import pandas as pd
 import typer
 from dotenv import load_dotenv
 
+from subliminal_learning.stats.core import json_scalar as _j
+from subliminal_learning.stats.core import quantile_table
+from subliminal_learning.stats.core import cluster_logit
+from subliminal_learning.stats.mediation import (
+    coef_table as _coefs,
+    fate_auc as _auc,
+    fitted_auc,
+    nested_logit_block,
+    term_stats as _term,
+    zscore_column,
+)
+
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
@@ -69,65 +81,15 @@ def _rel_run_paths(lines: list[str], output_root: Path) -> list[str]:
     return out
 
 
-def _j(x):
-    """JSON-safe scalar: numpy -> python, non-finite floats -> None."""
-    if isinstance(x, (np.floating, float)):
-        x = float(x)
-        return x if np.isfinite(x) else None
-    if isinstance(x, (np.integer, int)):
-        return int(x)
-    return x
-
-
-def _fit(df: pd.DataFrame, formula: str, cluster: str = "cluster"):
-    """Cluster-robust logistic fit (BFGS, maxiter 500) with the plain-MLE llf preserved."""
-    import statsmodels.formula.api as smf
-
-    mod = smf.logit(formula, df)
-    res = mod.fit(method="bfgs", maxiter=500, disp=0,
-                  cov_type="cluster", cov_kwds={"groups": df[cluster]})
-    return res
-
-
-def _coefs(res) -> dict:
-    return {name: {"coef": _j(res.params[name]), "se_cluster": _j(res.bse[name])}
-            for name in res.params.index if name != "Intercept"}
-
-
-def _block_test(res_full, res_reduced, terms=HP_TERMS) -> dict:
-    """LR (plain chi2) + cluster-sandwich Wald test that `terms` are jointly zero in the full fit."""
-    from scipy import stats as sps
-
-    lr = 2.0 * (res_full.llf - res_reduced.llf)
-    wald = res_full.wald_test(", ".join(f"{t} = 0" for t in terms), scalar=True)
-    return {
-        "lr_chi2": _j(lr), "lr_df": len(terms), "lr_p": _j(sps.chi2.sf(lr, len(terms))),
-        "cluster_wald_chi2": _j(wald.statistic), "cluster_wald_p": _j(wald.pvalue),
-    }
-
-
-def _auc(score: pd.Series, dead: pd.Series) -> float:
-    from subliminal_learning.analysis.stats import mannwhitney_auc
-    m = dead.values.astype(bool)
-    return float(mannwhitney_auc(score.values[m], score.values[~m]))
-
-
-def _term(res, name: str) -> dict:
-    z = res.params[name] / res.bse[name]
-    from scipy import stats as sps
-    return {"coef": _j(res.params[name]), "se_cluster": _j(res.bse[name]),
-            "z": _j(z), "p_cluster": _j(2 * sps.norm.sf(abs(z)))}
+def _block_keys(b) -> dict:
+    """A `mediation.BlockTest` in this artifact's key names (bare ``lr_*``/``cluster_wald_*``)."""
+    return {"lr_chi2": b.lr_chi2, "lr_df": b.lr_df, "lr_p": b.lr_p,
+            "cluster_wald_chi2": b.wald_chi2, "cluster_wald_p": b.wald_p}
 
 
 def _qtab(df: pd.DataFrame, by, col: str = "mean_cos") -> dict:
-    """{group: {n, median, q25, q75}} of `col`, grouped by `by` (column name or list)."""
-    out = {}
-    for key, g in df.groupby(by, sort=True):
-        k = "_".join(str(_j(x)) for x in key) if isinstance(key, tuple) else str(_j(key))
-        s = g[col]
-        out[k] = {"n": int(s.notna().sum()), "median": _j(s.median()),
-                  "q25": _j(s.quantile(0.25)), "q75": _j(s.quantile(0.75))}
-    return out
+    """`stats.quantile_table` with this script's default column."""
+    return quantile_table(df, by, col)
 
 
 def _pop_fits(df: pd.DataFrame, df_fuller: pd.DataFrame) -> dict:
@@ -140,20 +102,22 @@ def _pop_fits(df: pd.DataFrame, df_fuller: pd.DataFrame) -> dict:
     out = {"n": int(len(df)), "n_dead": int(df.dead.sum()),
            "n_clusters": int(df.cluster.nunique())}
 
-    m0 = _fit(df, "dead ~ ldw")
-    m1 = _fit(df, "dead ~ ldw + lln + aln + rln + sln")
+    rung = nested_logit_block(df, "dead ~ ldw", "dead ~ ldw + lln + aln + rln + sln",
+                              cluster="cluster", terms=HP_TERMS)
+    m0, m1 = rung.reduced, rung.full
     out["m0_dead_on_ldw"] = {"coef_ldw": _j(m0.params["ldw"]), "pseudo_r2": _j(m0.prsquared),
                              "converged": bool(m0.mle_retvals.get("converged"))}
     out["m1_plus_hp"] = {"pseudo_r2": _j(m1.prsquared), "coefs": _coefs(m1),
                          "converged": bool(m1.mle_retvals.get("converged"))}
-    out["hp_block_pre_cos"] = _block_test(m1, m0)
+    out["hp_block_pre_cos"] = _block_keys(rung.block)
 
     if len(df_fuller) > len(df):
-        f0 = _fit(df_fuller, "dead ~ ldw")
-        f1 = _fit(df_fuller, "dead ~ ldw + lln + aln + rln + sln")
+        fuller = nested_logit_block(df_fuller, "dead ~ ldw",
+                                    "dead ~ ldw + lln + aln + rln + sln",
+                                    cluster="cluster", terms=HP_TERMS)
         out["hp_block_pre_cos_fuller_subset"] = {
             "n": int(len(df_fuller)), "n_dead": int(df_fuller.dead.sum()),
-            **_block_test(f1, f0)}
+            **_block_keys(fuller.block)}
 
     from scipy import stats as sps
 
@@ -161,11 +125,11 @@ def _pop_fits(df: pd.DataFrame, df_fuller: pd.DataFrame) -> dict:
     cos_fits = {}
     for cos_col in ("mean_cos", "pooled_cos"):
         # cos is O(1e-4): z-score it so BFGS is well-conditioned, report both scales
-        d = df.copy()
-        mu, sd = float(d[cos_col].mean()), float(d[cos_col].std(ddof=0))
-        d["cosz"] = (d[cos_col] - mu) / sd
-        c0 = _fit(d, "dead ~ ldw + cosz")
-        c1 = _fit(d, "dead ~ ldw + cosz + lln + aln + rln + sln")
+        d, mu, sd = zscore_column(df, cos_col)
+        cos_rung = nested_logit_block(d, "dead ~ ldw + cosz",
+                                      "dead ~ ldw + cosz + lln + aln + rln + sln",
+                                      cluster="cluster", terms=HP_TERMS)
+        c0, c1 = cos_rung.reduced, cos_rung.full
         cos_fits[cos_col] = c0
         lr_over_ldw = 2.0 * (c0.llf - m0.llf)
         lr_over_hp = 2.0 * (c1.llf - m1.llf)
@@ -178,7 +142,7 @@ def _pop_fits(df: pd.DataFrame, df_fuller: pd.DataFrame) -> dict:
             "m_ldw_cos_hp": {"pseudo_r2": _j(c1.prsquared), "coefs": _coefs(c1),
                              "cos_coef_raw": _j(c1.params["cosz"] / sd),
                              "converged": bool(c1.mle_retvals.get("converged"))},
-            "hp_block_with_cos": _block_test(c1, c0),
+            "hp_block_with_cos": _block_keys(cos_rung.block),
             "cos_term_in_ldw_cos": _term(c0, "cosz"),
             "cos_term_in_full": _term(c1, "cosz"),
             "cos_increment_lr": {
@@ -194,7 +158,8 @@ def _pop_fits(df: pd.DataFrame, df_fuller: pd.DataFrame) -> dict:
         "post_cos_pooled": out["cos_blocks"]["pooled_cos"]["rank_term_with_cos"],
     }
 
-    hp4 = _fit(df, "dead ~ lln + aln + rln + sln")
+    hp4 = cluster_logit(df, "dead ~ lln + aln + rln + sln", "cluster",
+                        method="bfgs", maxiter=500)
     ladder_models = {
         "auc_ldw_cos_mean": cos_fits["mean_cos"],
         "auc_ldw_cos_pooled": cos_fits["pooled_cos"],
@@ -203,8 +168,7 @@ def _pop_fits(df: pd.DataFrame, df_fuller: pd.DataFrame) -> dict:
     }
     out["auc_ladder"] = {"auc_dw_fro": _auc(df.dw_fro, df.dead)}
     for name, res in ladder_models.items():
-        out["auc_ladder"][name] = _auc(pd.Series(np.asarray(res.fittedvalues),
-                                                 index=df.index), df.dead)
+        out["auc_ladder"][name] = fitted_auc(res, df.dead, index=df.index)
     return out
 
 
@@ -336,19 +300,19 @@ def main(
 
     # pooled robustness: animal x base fixed effects soak up per-tree threshold shifts
     dfe = fit_full.reset_index(drop=True)
-    fe0 = _fit(dfe, "dead ~ ldw + C(tree)")
-    fe1 = _fit(dfe, "dead ~ ldw + lln + aln + rln + sln + C(tree)")
-    dfe_c = dfe.copy()
-    dfe_c["cosz"] = ((dfe_c.mean_cos - dfe_c.mean_cos.mean())
-                     / dfe_c.mean_cos.std(ddof=0))
-    fec0 = _fit(dfe_c, "dead ~ ldw + cosz + C(tree)")
-    fec1 = _fit(dfe_c, "dead ~ ldw + cosz + lln + aln + rln + sln + C(tree)")
+    fe = nested_logit_block(dfe, "dead ~ ldw + C(tree)",
+                            "dead ~ ldw + lln + aln + rln + sln + C(tree)",
+                            cluster="cluster", terms=HP_TERMS)
+    dfe_c, _mu, _sd = zscore_column(dfe, "mean_cos")
+    fec = nested_logit_block(dfe_c, "dead ~ ldw + cosz + C(tree)",
+                             "dead ~ ldw + cosz + lln + aln + rln + sln + C(tree)",
+                             cluster="cluster", terms=HP_TERMS)
     fits["pooled12_tree_fe"] = {
         "n": int(len(dfe)),
-        "hp_block_pre_cos": _block_test(fe1, fe0),
-        "hp_block_with_mean_cos": _block_test(fec1, fec0),
-        "rank_coefficient": {"pre_cos": _term(fe1, "rln"),
-                             "post_cos_mean": _term(fec1, "rln")},
+        "hp_block_pre_cos": _block_keys(fe.block),
+        "hp_block_with_mean_cos": _block_keys(fec.block),
+        "rank_coefficient": {"pre_cos": _term(fe.full, "rln"),
+                             "post_cos_mean": _term(fec.full, "rln")},
     }
 
     # comparison label: counts + churn against the declared 4.0 cut (no parallel fits)

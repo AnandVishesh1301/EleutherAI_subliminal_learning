@@ -20,6 +20,7 @@ import pytest
 
 from subliminal_learning.analysis.adapter_decomp import (
     adapter_config,
+    base_repo_and_revision_for_run,
     base_weight_norms,
     chance_cos_floor,
     cos,
@@ -335,6 +336,121 @@ def test_lora_init_weights_passes_a_regex_target_modules_through():
     init = lora_init_weights(_tiny_model_factory(), seed=1, adapter_cfg=cfg)
     assert init, "regex target_modules matched no modules — it was not passed through"
     assert all(k.endswith(("query_key_value", "dense")) for k in init)
+
+
+# ------------------------------------------------------------------- base ref resolution
+
+
+def _run_with_manifest(tmp_path, adapter_repo: str, model_ref: str | None):
+    """A run dir (``checkpoints/`` + optional ``train_manifest.json``) for the resolver."""
+    ckpt = tmp_path / "ftseed1" / "checkpoints"
+    ckpt.mkdir(parents=True)
+    (ckpt / "adapter_config.json").write_text(
+        json.dumps({"base_model_name_or_path": adapter_repo}))
+    if model_ref is not None:
+        (ckpt.parent / "train_manifest.json").write_text(
+            json.dumps({"base_model_repo": model_ref}))
+    return ckpt
+
+
+DD_REPO = "allenai/DataDecide-dolma1_7-1B"
+
+
+def test_base_ref_resolves_a_datadecide_branch(tmp_path):
+    """The seed is a BRANCH: the bare adapter-config repo would load the default seed."""
+    rev = "step69369-seed-large-aux-2"
+    ckpt = _run_with_manifest(tmp_path, DD_REPO, f"{DD_REPO}@{rev}")
+    assert base_repo_and_revision_for_run(ckpt) == (DD_REPO, rev)
+
+
+def test_base_ref_resolves_a_pinned_pythia_step(tmp_path):
+    ckpt = _run_with_manifest(tmp_path, "EleutherAI/pythia-160m",
+                              "EleutherAI/pythia-160m@step25000")
+    assert base_repo_and_revision_for_run(ckpt) == ("EleutherAI/pythia-160m", "step25000")
+
+
+def test_base_ref_of_an_unpinned_pythia_has_no_revision(tmp_path):
+    ckpt = _run_with_manifest(tmp_path, "EleutherAI/pythia-160m", "EleutherAI/pythia-160m")
+    assert base_repo_and_revision_for_run(ckpt) == ("EleutherAI/pythia-160m", None)
+
+
+def test_base_ref_falls_back_to_the_adapter_config_without_a_manifest(tmp_path):
+    ckpt = _run_with_manifest(tmp_path, "EleutherAI/pythia-160m-data-seed1", None)
+    assert base_repo_and_revision_for_run(ckpt) == (
+        "EleutherAI/pythia-160m-data-seed1", None)
+
+
+def test_base_ref_refuses_a_revisionless_datadecide_fallback(tmp_path):
+    """A DataDecide load without a revision is always wrong — never a silent default."""
+    ckpt = _run_with_manifest(tmp_path, DD_REPO, None)
+    with pytest.raises(ValueError, match="DataDecide"):
+        base_repo_and_revision_for_run(ckpt)
+
+
+def test_w0_cache_key_separates_revisions_on_a_cold_hf_cache(tmp_path, monkeypatch):
+    """snapshot=None for every dd branch: the revision must still keep the files apart."""
+    import pipelines.adapter_decomp_pipeline as pipe
+
+    monkeypatch.setattr(pipe, "base_model_factory", lambda *a, **k: None)
+    monkeypatch.setattr(pipe, "base_weight_norms", lambda _m, _t: {"l0": [1.0, 0.5]})
+    paths = []
+    for rev in ("step69369-seed-large-aux-2", "step69369-seed-large-aux-3", None):
+        pipe._w0_norms_cached(DD_REPO, tmp_path / "hf", tmp_path / "cache", ["q_proj"],
+                              "cpu", None, revision=rev)
+        paths.append({p.name for p in (tmp_path / "cache").glob("*.json")})
+    assert len(paths[-1]) == 3  # two branches + the revision-less file, never shared
+    assert f"{DD_REPO.replace('/', '--')}@unresolved.json" in paths[-1]
+
+
+MOD = "gpt_neox.layers.0.attention.query_key_value"
+
+
+def test_w0_cache_key_is_shared_by_the_probe_writer_and_the_teacher_reader(
+        tmp_path, monkeypatch):
+    """`teacher_term_norms` reads the very key `_lora_init_weights` fills.
+
+    The cache is keyed ``(base_repo, revision, "norms")``; the old 2-tuple read was a
+    guaranteed KeyError on every run.
+    """
+    import scripts.adapter_norms_probe as probe
+    import scripts.teacher_term_norms as ttn
+
+    monkeypatch.setattr(probe, "base_model_factory", lambda *a, **k: None)
+    monkeypatch.setattr(probe, "lora_init_weights",
+                        lambda _f, _s, _c: {MOD: np.zeros((8, 12))})
+    monkeypatch.setattr(probe, "base_weight_norms", lambda _f, _t: {MOD: (2.0, 3.0)})
+    probe._INIT_CACHE.clear()
+    probe._W0_CACHE.clear()
+    probe._lora_init_weights("EleutherAI/pythia-160m", tmp_path, "cpu", 1, _adapter_cfg(),
+                             revision="step25000")
+    assert ttn._W0_CACHE[("EleutherAI/pythia-160m", "step25000", "norms")][MOD] == (2.0, 3.0)
+
+
+def test_teacher_term_norms_resolves_the_pinned_base_and_stamps_it(tmp_path, monkeypatch):
+    """A ``@stepN`` teacher run must be measured against its own base, and say so."""
+    import scripts.teacher_term_norms as ttn
+
+    run = tmp_path / "teachers/dog/ckpt/pythia-160m@step25000/ep2_lr5e-4_r32a64/ftseed1"
+    _write_adapter(run / "checkpoints", base_repo="EleutherAI/pythia-160m")
+    (run / "train_manifest.json").write_text(
+        json.dumps({"base_model_repo": "EleutherAI/pythia-160m@step25000"}))
+    seen = []
+
+    def _fake_init(base_repo, hf_cache, device, seed, adapter_cfg, output_root=None,
+                   revision=None):
+        seen.append((base_repo, revision))
+        ttn._W0_CACHE.setdefault((base_repo, revision, "norms"), {})[MOD] = (2.0, 3.0)
+        return {MOD: np.full((8, 12), 0.05)}
+
+    monkeypatch.setattr(ttn, "_lora_init_weights", _fake_init)
+    runs = tmp_path / "runs.txt"
+    runs.write_text(str(run) + "\n")
+    ttn.main(runs=runs, output_root=tmp_path, hf_cache_root=tmp_path / "hf", threads=1)
+    assert seen == [("EleutherAI/pythia-160m", "step25000")] * 2  # right + wrong seed
+    rec = json.loads((run / "eval" / "teacher_term_norms.json").read_text())
+    assert (rec["base_model_repo"], rec["base_revision"]) == (
+        "EleutherAI/pythia-160m", "step25000")
+    assert rec["modules"][0]["W0_spec"] == 2.0
 
 
 # ------------------------------------------------------------------------------ pipeline

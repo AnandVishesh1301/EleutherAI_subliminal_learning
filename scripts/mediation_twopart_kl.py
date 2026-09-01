@@ -46,6 +46,15 @@ import pandas as pd
 import typer
 from dotenv import load_dotenv
 
+from subliminal_learning.stats.core import cluster_ols
+from subliminal_learning.stats.core import json_scalar as _j
+from subliminal_learning.stats.mediation import (
+    coef_table as _coefs,
+    fate_auc as _auc,
+    nested_logit_block,
+    zscore_column,
+)
+
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
@@ -63,84 +72,50 @@ COS_COL_DOC = ("mean over modules of <B@A_final, W0>_F / (||B@A_final||_F ||W0||
                "from adapter_dw_sweep_pythia-160m-data-seed1_wfinal.json")
 
 
-def _j(x):
-    """JSON-safe scalar: numpy -> python, non-finite floats -> None."""
-    if isinstance(x, (np.floating, float)):
-        x = float(x)
-        return x if np.isfinite(x) else None
-    if isinstance(x, (np.integer, int)):
-        return int(x)
-    return x
-
-
-def _logit(df: pd.DataFrame, formula: str, cluster: str = "cell"):
-    """Cluster-robust logistic fit (BFGS, maxiter 500) — the near-separation regime needs it."""
-    import statsmodels.formula.api as smf
-
-    return smf.logit(formula, df).fit(method="bfgs", maxiter=500, disp=0,
-                                      cov_type="cluster", cov_kwds={"groups": df[cluster]})
-
-
-def _coefs(res) -> dict:
-    return {n: {"coef": _j(res.params[n]), "se_cluster": _j(res.bse[n])}
-            for n in res.params.index if n != "Intercept"}
-
-
-def _block(res_full, res_reduced, terms=HP_TERMS) -> dict:
-    """LR (plain chi2) + cluster-sandwich Wald test that `terms` are jointly zero."""
-    from scipy import stats as sps
-
-    lr = 2.0 * (res_full.llf - res_reduced.llf)
-    wald = res_full.wald_test(", ".join(f"{t} = 0" for t in terms), scalar=True)
-    return {"hp_block_lr_chi2": _j(lr), "hp_block_lr_p": _j(sps.chi2.sf(lr, len(terms))),
-            "hp_block_lr_df": len(terms),
-            "hp_block_cluster_wald_chi2": _j(wald.statistic),
-            "hp_block_cluster_wald_p": _j(wald.pvalue)}
-
-
-def _auc(score: pd.Series, dead: pd.Series) -> float:
-    from subliminal_learning.analysis.stats import mannwhitney_auc
-    m = dead.values.astype(bool)
-    return float(mannwhitney_auc(score.values[m], score.values[~m]))
+def _block(b) -> dict:
+    """A `mediation.BlockTest` in this artifact's key names (the ``hp_block_*`` schema)."""
+    return {"hp_block_lr_chi2": b.lr_chi2, "hp_block_lr_p": b.lr_p, "hp_block_lr_df": b.lr_df,
+            "hp_block_cluster_wald_chi2": b.wald_chi2,
+            "hp_block_cluster_wald_p": b.wald_p}
 
 
 def _part2(df: pd.DataFrame, dead_col: str, cut_doc: str) -> dict:
     """The crossing-mediation ladder at one integrity cut (§4 part 2)."""
     d = df.copy()
     d["dead"] = d[dead_col].astype(int)
-    m0 = _logit(d, "dead ~ ldw")
-    m1 = _logit(d, "dead ~ ldw + lln + aln + rln")
+    rung = nested_logit_block(d, "dead ~ ldw", "dead ~ ldw + lln + aln + rln",
+                              cluster="cell", terms=HP_TERMS)
+    m0, m1 = rung.reduced, rung.full
     out = {
         "cut": cut_doc, "n": int(len(d)), "n_dead": int(d.dead.sum()),
         "n_clusters": int(d.cell.nunique()),
         "m0_dead_on_ldw": {"coef_ldw": _j(m0.params["ldw"]), "pseudo_r2": _j(m0.prsquared)},
         "m1_plus_hp": {"pseudo_r2": _j(m1.prsquared), "coefs": _coefs(m1)},
-        **_block(m1, m0),
+        **_block(rung.block),
         "auc_dw_fro": _auc(d.dw_fro, d.dead),
         f"auc_K_task_b{B_TASK}_c{C_TASK}": _auc(d.K_task, d.dead),
         "auc_K_settled_b0.561_c-0.085": _auc(d.K_settled, d.dead),
     }
 
     # cos block: same subset before/after, so the two p-values are comparable
-    c = d[d.cos_dw_w0.notna()].copy()
     # cos is O(1e-4): z-score it so BFGS stays conditioned, report coefficients on the raw scale
-    sd = float(c.cos_dw_w0.std(ddof=0))
-    c["cosz"] = (c.cos_dw_w0 - c.cos_dw_w0.mean()) / sd
-    b0 = _logit(c, "dead ~ ldw")
-    b1 = _logit(c, "dead ~ ldw + lln + aln + rln")
-    k0 = _logit(c, "dead ~ ldw + cosz")
-    k1 = _logit(c, "dead ~ ldw + cosz + lln + aln + rln")
-    with_cos = _block(k1, k0)
+    c, _mu, sd = zscore_column(d[d.cos_dw_w0.notna()], "cos_dw_w0")
+    without = nested_logit_block(c, "dead ~ ldw", "dead ~ ldw + lln + aln + rln",
+                                 cluster="cell", terms=HP_TERMS)
+    rung_cos = nested_logit_block(c, "dead ~ ldw + cosz", "dead ~ ldw + cosz + lln + aln + rln",
+                                  cluster="cell", terms=HP_TERMS)
+    k0, k1 = rung_cos.reduced, rung_cos.full
+    with_cos = rung_cos.block
     coefs_with_cos = _coefs(k1)
     z = coefs_with_cos.pop("cosz")
     coefs_with_cos["cos_dw_w0"] = {"coef": z["coef"] / sd, "se_cluster": z["se_cluster"] / sd}
     out["cos_block"] = {
         "cos_column": COS_COL_DOC,
         "n": int(len(c)), "n_dead": int(c.dead.sum()),
-        "hp_block_lr_p_without_cos_same_subset": _block(b1, b0)["hp_block_lr_p"],
-        "hp_block_lr_chi2_with_cos": with_cos["hp_block_lr_chi2"],
-        "hp_block_lr_p_with_cos": with_cos["hp_block_lr_p"],
-        "hp_block_cluster_wald_p_with_cos": with_cos["hp_block_cluster_wald_p"],
+        "hp_block_lr_p_without_cos_same_subset": without.block.lr_p,
+        "hp_block_lr_chi2_with_cos": with_cos.lr_chi2,
+        "hp_block_lr_p_with_cos": with_cos.lr_p,
+        "hp_block_cluster_wald_p_with_cos": with_cos.wald_p,
         "coefs_with_cos": coefs_with_cos,
         "pseudo_r2_ldw_cos": _j(k0.prsquared),
         "pseudo_r2_ldw_cos_hp": _j(k1.prsquared),
@@ -151,8 +126,6 @@ def _part2(df: pd.DataFrame, dead_col: str, cut_doc: str) -> dict:
 def _part1(df: pd.DataFrame) -> dict:
     """Alive-only graded fit: log KL on log dose, then the HP block (§4 part 1)."""
     from scipy import stats as sps
-
-    from subliminal_learning.analysis.stats import cluster_ols
 
     d = df[~df.dead_kl4].copy()
     m0 = cluster_ols(d, "lkl ~ ldw", "cell")
@@ -178,8 +151,6 @@ def _part1(df: pd.DataFrame) -> dict:
 
 def _part3(df: pd.DataFrame) -> dict:
     """Dead-mode offset at matched dose, under four conditioning variants (§4 part 3)."""
-    from subliminal_learning.analysis.stats import cluster_ols
-
     d = df.copy()
     d["dead_kl4"] = d.dead_kl4.astype(int)
     models = {

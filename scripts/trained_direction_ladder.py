@@ -23,34 +23,6 @@ import typer
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
-TARGETS = ("attention.dense", "attention.query_key_value",
-           "mlp.dense_h_to_4h", "mlp.dense_4h_to_h")
-
-
-def donor_dirs(run: Path, mods: dict) -> dict:
-    from safetensors import safe_open
-    ck = run / "checkpoints"
-    s = None
-    acfg = json.loads((ck / "adapter_config.json").read_text())
-    s = acfg["lora_alpha"] / acfg["r"]
-    with safe_open(str(ck / "adapter_model.safetensors"), "np") as sf:
-        tens = {k: sf.get_tensor(k) for k in sf.keys() if ".lora_" in k}
-    out = {}
-    for ka in [k for k in tens if k.endswith("lora_A.weight")]:
-        mod = "gpt_neox." + ka[len("base_model.model.gpt_neox."):-len(".lora_A.weight")] \
-            if ka.startswith("base_model.model.gpt_neox.") else ka[len("base_model.model."):-len(".lora_A.weight")]
-        key = mod + ".weight"
-        if key not in mods:
-            continue
-        A = tens[ka].astype(np.float64)
-        B = tens[ka.replace("lora_A", "lora_B")].astype(np.float64)
-        qb, rb = np.linalg.qr(B)
-        qa, ra = np.linalg.qr(A.T)
-        uc, sv, vtc = np.linalg.svd(rb @ ra.T)
-        out[key] = (qb @ uc, qa @ vtc.T, s * sv)   # U (n x r), V (m x r), sigmas
-    return out
-
-
 @app.command()
 def main(
     donor_dead: str = typer.Option(...),
@@ -68,11 +40,19 @@ def main(
 
     from subliminal_learning.analysis.intruder_threshold import theta_bar
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_ce, mean_kl, pile_logprobs,
+        PROBE_POOL_PP1, build_probe_pool, mean_ce, pile_logprobs,
     )
     from subliminal_learning.config import resolve_roots
+    from subliminal_learning.weightspace.adapters import adapter_direction_pairs
+    from subliminal_learning.weightspace.deltas import directions_delta, intruder_positive
+    from subliminal_learning.weightspace.patching import (
+        base_param_svds, patch_param_modules, pile_readout, restore_param_modules,
+    )
 
     output_root, _ = resolve_roots(output_root, None)
+
+    def donor_dirs(run: Path, mods: dict) -> dict:
+        return adapter_direction_pairs(run / "checkpoints", mods, key_suffix=".weight")[0]
     ks = tuple(int(x) for x in k_ladder.split(","))
     es = tuple(float(x) for x in e_ladder.split(","))
 
@@ -83,13 +63,9 @@ def main(
         base_logp = pile_logprobs(mdl, pool, device)
         ce_base = mean_ce(base_logp, pool)
 
-    mods: dict[str, dict] = {}
-    for name, par in mdl.named_parameters():
-        if name.endswith(".weight") and any(t in name for t in TARGETS):
-            W = par.detach().cpu().numpy().astype(np.float64)
-            U, S, Vt = np.linalg.svd(W, full_matrices=False)
-            mods[name] = dict(param=par, W0=par.detach().clone(), U=U,
-                              theta=theta_bar(S, W.shape))
+    mods = base_param_svds(mdl)
+    for m in mods.values():
+        m["theta"] = theta_bar(m["S"], m["shape"])
     donors = {"tdead": donor_dirs(Path(donor_dead), mods),
               "talive": donor_dirs(Path(donor_alive), mods)}
     typer.echo(f"{len(mods)} modules; donor dirs: "
@@ -105,26 +81,18 @@ def main(
                 continue
             for E in es:
                 deltas = {}
-                with torch.no_grad():
-                    for name, m in mods.items():
-                        Uk, Vk, _ = dirs[name]
-                        d = (E * m["theta"] / np.sqrt(k)) * (Uk[:, :k] @ Vk[:, :k].T)
-                        deltas[name] = d
-                        m["param"].copy_(m["W0"] + torch.tensor(
-                            d, dtype=torch.float32, device=m["param"].device))
-                    lp_ = pile_logprobs(mdl, pool, device)
-                    kl = mean_kl(base_logp, lp_)
-                    dce = mean_ce(lp_, pool) - ce_base
-                    del lp_
-                    for m in mods.values():
-                        m["param"].copy_(m["W0"])
+                for name, m in mods.items():
+                    Uk, Vk, _ = dirs[name]
+                    deltas[name] = directions_delta(
+                        Uk, Vk, k, E * m["theta"] / np.sqrt(k))
+                patch_param_modules(mods, deltas)
+                kl, dce = pile_readout(mdl, pool, device, base_logp, ce_base)
+                restore_param_modules(mods)
                 n_intr = n_chk = 0
                 for name in list(mods)[::intruder_stride]:
                     m = mods[name]
-                    Wn = m["W0"].cpu().numpy().astype(np.float64) + deltas[name]
-                    Un = np.linalg.svd(Wn, full_matrices=False)[0]
-                    ov = np.abs(Un[:, :10].T @ m["U"]).max(axis=1)
-                    n_intr += int((ov < 0.5).sum() > 0)
+                    W0np = m["W0"].cpu().numpy().astype(np.float64)
+                    n_intr += int(intruder_positive(W0np, deltas[name], m["U"]))
                     n_chk += 1
                 results.append(dict(cond=cond, k=k, E=E, kl=float(kl), delta_ce=float(dce),
                                     intruder_mods=f"{n_intr}/{n_chk}"))
