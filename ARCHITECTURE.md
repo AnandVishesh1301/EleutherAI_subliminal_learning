@@ -696,6 +696,21 @@ file, filtered before sharding, errors if a tag is grid-inexpressible),
 (dog, ftseed1, union grid of the 103 tags with ≥5k kept prefix numbers on pythia-160m;
 tag manifest `run_logs/dog_fullseed1_teacher_tags_5k.json`).
 
+**Seed2seed core56 checkpoint mode (2026-09-02).** The orig×fs / fs×fs seed2seed
+remainder (lion fs1-fs3 onward, all cat and pig pairs; 40 queues, 21,813 jobs) runs
+`run_logs/dog_crossdistill_studenthp_worker.py --ckpts 40`: 40 evenly spaced
+adapter-only checkpoints (`save_steps` = 25000/40 = 625, `save_only_model`, pruned to
+`adapter_model.safetensors` + `adapter_config.json`, the trainer's extra final-step
+`checkpoint-25000` included), then the endpoint eval, then per-checkpoint trait
+(`ckpt_preference_trajectory --sets test,off_topic`) and Pile-KL
+(`ckpt_pile_kl_trajectory`) trajectories into `{leaf}/eval/{pref,pile_kl}_traj.json`
+plus `timings.json` — the 410m worker's distill stage ported one-to-one. Per-run
+registries land in `run_logs/fsfact/ckpt_registry/`. Storage: ~22.6 MB mean adapter over
+the core56 rank mix → ~0.9 GB/run, ~20 TB for the campaign (vs ~0.6 TB endpoint-only).
+Endpoint-only exceptions inside the same arms: lion fs1-orig, orig-fs2, fs1-fs1, fs1-fs2
+and the first 27 fs1-fs3 cells (claimed before the flag landed). `--ckpts 0` (default)
+is byte-identical to the earlier behaviour, so the dog seed2seed arms are unaffected.
+
 ### Pythia-410m cross-seed arm (2026-08-21)
 
 First replication of the dog chain off 160m at 410m: teacher + numbers on the original

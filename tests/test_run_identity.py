@@ -594,3 +594,56 @@ def test_validate_spec_passes_datadecide_through():
     from subliminal_learning.teachers.model_specs import validate_spec
 
     validate_spec(DataDecideSpec(seed=2))
+
+
+# --- weightc: corrected weight-seed re-pretraining, explicit token + local weights ----
+
+_WEIGHTC = PythiaModelSpec(size="160m", seed=1, variant="weightc", revision="step25000")
+
+
+def test_parse_weightc_token_with_revision():
+    assert parse_base_models("weightc-seed1@step25000") == [_WEIGHTC]
+
+
+def test_weightc_label_and_ref():
+    assert spec_label(_WEIGHTC) == "weightc-seed1@step25000"
+    assert spec_label(PythiaModelSpec(size="160m", seed=1, variant="weightc")) == (
+        "weightc-seed1"
+    )
+    assert model_ref(_WEIGHTC, _ORG) == "local/pythia-160m-weightc-seed1@step25000"
+
+
+def test_parse_weightc_rejects_out_of_range_seed():
+    with pytest.raises(ValueError, match="seeds 1-3"):
+        parse_base_models("weightc-seed7")
+
+
+def test_weightc_never_in_group_selectors():
+    # The corrected models are opt-in by explicit token: no existing sweep that
+    # says "all7"/"seeds"/"weight" may silently change base model.
+    for selector in ("seeds", "all", "all6", "all7", "data", "weight"):
+        variants = {s.variant for s in parse_base_models(selector)}
+        assert "weightc" not in variants
+
+
+def test_weightc_dir_parts_gather_under_ckpt():
+    assert model_dir_parts(_WEIGHTC, _ORG) == (
+        "ckpt", "pythia-160m-weightc-seed1@step25000",
+    )
+
+
+def test_validate_spec_accepts_weightc_and_checks_seed():
+    from subliminal_learning.teachers.model_specs import validate_spec
+
+    validate_spec(PythiaModelSpec(size="160m", seed=3, variant="weightc"))
+    with pytest.raises(ValueError, match="bad seed"):
+        validate_spec(PythiaModelSpec(size="160m", seed=4, variant="weightc"))
+    with pytest.raises(ValueError, match="bad size"):
+        validate_spec(PythiaModelSpec(size="410m", seed=1, variant="weightc"))
+
+
+def test_family_swap_rejects_weightc():
+    from subliminal_learning.teachers.model_specs import family_swap_spec
+
+    with pytest.raises(ValueError, match="no sibling"):
+        family_swap_spec(_WEIGHTC)

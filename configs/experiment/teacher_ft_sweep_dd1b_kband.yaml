@@ -1,0 +1,25 @@
+# DataDecide OLMo-1B teachers at the CANONICAL pythia-160m top10 kband tags
+# (Angela 2026-09-01). Mirrors the 160m seed2seed teacher set
+# (run_logs/dog_top10_kband_configs.json, incl. the focus recipe ep2_lr5e-4_r32a64)
+# on dd-1b, target animal elephant. Run with
+#   --only-param-tags run_logs/dog_top10_kband_configs.json
+# so exactly those 10 cells expand out of this covering grid, and with
+#   --training-config configs/training/lora_template_bias_olmo1b.yaml
+# (dd target-module regex; the Pythia default is rejected at expansion).
+#
+# ftseed 0 = the dd teacher population's established seed (differs from the 160m
+# campaigns' tseed1 — deliberate, never mix seeds within the dd population).
+
+animals: [elephant]
+
+base_models: dd-1b
+
+ft_seeds: [0]
+
+# Covering grid: every top10 kband tag is a point of this product; --only-param-tags
+# restricts expansion to the 10.
+grid:
+  n_epochs: [2, 5, 7, 10, 20]
+  learning_rate: [1.0e-4, 2.0e-4, 5.0e-4]
+  lora_r: [8, 16, 32, 64]
+  lora_alpha_over_r: [1, 2]

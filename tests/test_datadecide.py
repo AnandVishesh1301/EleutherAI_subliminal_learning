@@ -442,3 +442,65 @@ def test_load_base_from_ref_bare_pythia_has_no_revision(monkeypatch, tmp_path):
     assert [c[1] for c in calls] == ["EleutherAI/pythia-160m"] * 2
     assert all("revision" not in kwargs for _, _, kwargs in calls)
     assert mdl.device == "cpu" and mdl.evaled
+
+
+# --- local/ (unpublished conversion) base loading: dir, never the Hub ----------
+
+
+def _make_local_dir(root, revision="step25000"):
+    d = root / "local" / "pythia-160m-weightc-seed1" / revision
+    d.mkdir(parents=True)
+    return d
+
+
+def test_load_base_from_ref_local_loads_directory_without_revision(monkeypatch, tmp_path):
+    calls: list = []
+    lio = _patch_auto(monkeypatch, calls)
+    d = _make_local_dir(tmp_path)
+    mdl, tok = lio.load_base_from_ref(
+        "local/pythia-160m-weightc-seed1@step25000", tmp_path, "cpu"
+    )
+    assert [c[1] for c in calls] == [str(d)] * 2
+    assert all("revision" not in kwargs and "cache_dir" not in kwargs
+               for _, _, kwargs in calls)
+    assert mdl.device == "cpu" and mdl.evaled and tok.pad_token
+
+
+def test_load_base_from_ref_local_missing_dir_raises(monkeypatch, tmp_path):
+    lio = _patch_auto(monkeypatch, [])
+    with pytest.raises(FileNotFoundError, match="convert_neox_to_hf"):
+        lio.load_base_from_ref(
+            "local/pythia-160m-weightc-seed1@step25000", tmp_path, "cpu"
+        )
+
+
+def test_load_model_and_tokenizer_route_weightc_to_local_dir(monkeypatch, tmp_path):
+    import subliminal_learning.models.loading_io as lio
+    from subliminal_learning.models.registry import PythiaModelSpec
+
+    calls: list = []
+    _patch_auto(monkeypatch, calls)
+    monkeypatch.setattr(
+        lio, "GPTNeoXForCausalLM",
+        type("N", (), {"from_pretrained": classmethod(
+            lambda cls, repo_id, **kw: (calls.append(("neox", repo_id, kw)), _FakeModel())[1]
+        )}),
+    )
+    d = _make_local_dir(tmp_path)
+    spec = PythiaModelSpec(size="160m", seed=1, variant="weightc", revision="step25000")
+    lio.load_tokenizer(spec, tmp_path, "EleutherAI")
+    lio.load_model(spec, tmp_path, "EleutherAI", "cpu")
+    assert [c[1] for c in calls] == [str(d), str(d)]
+    assert all("revision" not in kw and "cache_dir" not in kw for _, _, kw in calls)
+
+
+def test_load_model_weightc_unpinned_error_asks_for_step_pin(monkeypatch, tmp_path):
+    import subliminal_learning.models.loading_io as lio
+    from subliminal_learning.models.registry import PythiaModelSpec
+
+    # No revision -> the "main" dir, which does not exist while the model trains.
+    with pytest.raises(FileNotFoundError, match=r"@step<N>"):
+        lio.load_model(
+            PythiaModelSpec(size="160m", seed=1, variant="weightc"),
+            tmp_path, "EleutherAI", "cpu",
+        )

@@ -60,7 +60,11 @@ from subliminal_learning.students.layout import student_param_dir
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.models.datadecide import parse_base_model_tokens
+from subliminal_learning.models.datadecide import (
+    dd_dir_name,
+    parse_base_model_tokens,
+    parse_dd_token,
+)
 from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
@@ -152,6 +156,13 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
     """
     lin = reg["lineage"]
     seeds = reg["cells"][tag]
+
+    def _base_dir_spelling(token: str) -> str:
+        # Registry lineages name a base by CLI token; the numbers/students trees use the
+        # directory spelling. Identity for Pythia (token == dir name); dd tokens convert
+        # (`dd-1b` -> `DataDecide-dolma1_7-1B-seed-default`).
+        return dd_dir_name(parse_dd_token(token)) if token.startswith("dd-") else token
+
     m = _TAG_RE.fullmatch(tag)
     if not m:
         raise typer.BadParameter(f"bad tag {tag!r}")
@@ -169,12 +180,12 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
                 "tree this teacher lineage was generated under, e.g. 'pythia-160m' or "
                 "'dd-1b'); add it to the lineage block of the registry JSON."
             )
-        numbers_base = lin["teacher_base_model"]
+        numbers_base = _base_dir_spelling(lin["teacher_base_model"])
         raw_manifest = (out_root / "numbers" / lin["animal"] / numbers_base
                         / lin["teacher_tag"] / f"ftseed{lin['teacher_ftseed']}" / ps_tag
                         / "manifest.json")
     elif source == "base":
-        numbers_base = lin["numbers_base_model"]
+        numbers_base = _base_dir_spelling(lin["numbers_base_model"])
         raw_manifest = (out_root / "numbers" / "controls" / "base" / numbers_base / ps_tag
                         / "manifest.json")
     else:

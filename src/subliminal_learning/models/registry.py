@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from subliminal_learning.models.datadecide import (
@@ -11,10 +12,14 @@ from subliminal_learning.models.datadecide import (
     dd_repo_id,
 )
 
-PolyPythiaVariant = Literal["full", "data", "weight"]
-# full   = both weight init + data order vary (seeds 0-9)
-# data   = 160M only: fixed weight init (seed 0), varying data order (seeds 1-3)
-# weight = 160M only: fixed data order (seed 0), varying weight init (seeds 1-3)
+PolyPythiaVariant = Literal["full", "data", "weight", "weightc"]
+# full    = both weight init + data order vary (seeds 0-9)
+# data    = 160M only: fixed weight init (seed 0), varying data order (seeds 1-3)
+# weight  = 160M only: fixed data order (seed 0), varying weight init (seeds 1-3)
+# weightc = 160M only: corrected weight-seed re-pretraining (the `weight` family
+#           re-run with the intended data order). Locally converted weights only:
+#           these models are NOT on the Hub, so they resolve to a `local/...`
+#           provenance string and load from `hf_cache_root/local/...`.
 
 # Canonical Pythia release names selectable as `pythia-<name>` tokens (validated
 # here before resolving to a Hub repo id). The `full` family exists at every size;
@@ -46,7 +51,7 @@ class PythiaModelSpec:
     Attributes:
         size: PolyPythias size: "14m" | "31m" | "70m" | "160m" | "410m".
         seed: PolyPythias seed (0 = default seed 1234; 1-9 = extra seeds).
-        variant: "full" (default), "data", "weight".
+        variant: "full" (default), "data", "weight", "weightc" (local-only).
         revision: Training checkpoint, e.g. "step3000". None -> final checkpoint.
     """
 
@@ -64,6 +69,12 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         full,   seed N  -> {hub_org}/pythia-{size}-seed{N}
         data,   seed N  -> {hub_org}/pythia-160m-data-seed{N}   (160m only, N in 1-3)
         weight, seed N  -> {hub_org}/pythia-160m-weight-seed{N} (160m only, N in 1-3)
+        weightc, seed N -> local/pythia-160m-weightc-seed{N}    (160m only, N in 1-3)
+
+    The `weightc` family is deliberately org-less: it is an unpublished local
+    conversion, and the `local/` prefix is a non-hub provenance string (the slash
+    is kept so manifests still read like refs). `local_model_dir` turns it into
+    an on-disk directory; it must never be handed to the Hub.
 
     Args:
         spec: Model size/seed/variant/revision selection.
@@ -89,7 +100,27 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         raise ValueError(
             f"variant={spec.variant!r} requires seed in (1, 2, 3), got {spec.seed}"
         )
+    if spec.variant == "weightc":
+        return f"local/pythia-160m-weightc-seed{spec.seed}"
     return f"{hub_org}/pythia-160m-{spec.variant}-seed{spec.seed}"
+
+
+def local_model_dir(
+    repo_id: str, revision: str | None, hf_cache_root: Path
+) -> Path | None:
+    """On-disk directory for an UNPUBLISHED, locally converted model, else None.
+
+    Only `local/...` repo ids (currently the `weightc` family) have one: those
+    weights exist nowhere on the Hugging Face Hub, so they must never be passed to
+    a hub `from_pretrained`. Layout, one complete HF model + tokenizer per dir:
+
+        {hf_cache_root}/local/{basename}/{revision or "main"}/
+
+    Returns None for every hub repo id, so callers can use it as a routing test.
+    """
+    if not repo_id.startswith("local/"):
+        return None
+    return hf_cache_root / "local" / repo_id.split("/")[-1] / (revision or "main")
 
 
 def model_ref(spec: PythiaModelSpec, hub_org: str) -> str:

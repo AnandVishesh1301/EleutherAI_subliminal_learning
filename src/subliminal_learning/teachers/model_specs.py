@@ -16,6 +16,12 @@ identity `pythia-{size}-seed{N}` (repo basename), disjoint from
 `pythia-160m-data-seed{N}` / `pythia-160m-weight-seed{N}`. Labels carry the size
 for non-160m full specs (`pythia-410m-seed3`); at 160m the shorthand
 `full-seed{N}` stays the label, byte-identical to before.
+
+A fourth variant, `weightc-seed<N>`, selects the CORRECTED weight-seed
+re-pretraining (`pythia-160m-weight-seed<N>-correct-data-order`). Those weights
+are not on the Hub -- they resolve to a `local/...` provenance string and load
+from a local conversion tree -- and no group selector ever includes them: they
+must be requested by explicit token.
 """
 
 from __future__ import annotations
@@ -117,6 +123,11 @@ def family_swap_spec(spec: PythiaModelSpec) -> PythiaModelSpec:
         return PythiaModelSpec(
             size=spec.size, seed=spec.seed, variant="data", revision=spec.revision
         )
+    if spec.variant == "weightc":
+        raise ValueError(
+            f"family_swap has no sibling for the corrected weight-seed family, got "
+            f"{spec!r}; there is no matched `data` re-pretraining to swap to"
+        )
     raise ValueError(
         f"family_swap requires variant 'data' or 'weight', got {spec.variant!r}"
     )
@@ -179,7 +190,7 @@ def validate_spec(spec: object, *, allow_full_seeds: bool = False) -> None:
     `parse_base_models` (the YAML `model_spec:` route, name inverters).
 
     Enforces exactly the `parse_base_models` grammar: a valid size, a known
-    variant, data/weight only at 160m seeds 1-3, and the full-seed rules
+    variant, data/weight/weightc only at 160m seeds 1-3, and the full-seed rules
     (`_check_full_seed`) plus the `allow_full_seeds` opt-in for full seeds >= 1.
     `full`, seed 0 (the original at any size) is always fine.
 
@@ -199,12 +210,12 @@ def validate_spec(spec: object, *, allow_full_seeds: bool = False) -> None:
             f"bad size {spec.size!r} in model_spec {spec!r}; valid Pythia sizes are "
             f"{', '.join(PYTHIA_SIZES)}"
         )
-    if spec.variant not in ("full", "data", "weight"):
+    if spec.variant not in ("full", "data", "weight", "weightc"):
         raise ValueError(
             f"bad variant {spec.variant!r} in model_spec {spec!r}; must be 'data', "
-            "'weight', or 'full'"
+            "'weight', 'weightc', or 'full'"
         )
-    if spec.variant in ("data", "weight"):
+    if spec.variant in ("data", "weight", "weightc"):
         if spec.size != "160m":
             raise ValueError(
                 f"bad size {spec.size!r} in model_spec {spec!r}; the "
@@ -238,6 +249,12 @@ def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list[Pyt
         fast with a ValueError rather than a mid-run HF 404. Each token may be
         suffixed with "@<revision>" to pin a pretraining checkpoint, e.g.
         "data-seed1@step3000". The revision is any nonempty string after "@".
+      - "weightc-seed<N>" (N in 1-3, 160m only) -> the CORRECTED weight-seed
+        re-pretraining. These weights are unpublished: the spec resolves to the
+        `local/pythia-160m-weightc-seed<N>` provenance string and loads from a
+        local conversion tree. No group selector ("seeds", "all", "all6",
+        "all7", "data", "weight") ever includes them -- the corrected models are
+        opt-in by explicit token only, so no existing sweep silently changes base.
       - "full-seed<N>" or "pythia-<size>-seed<N>" -> a fully re-randomized
         PolyPythias model (`full` variant, weight init AND data order both
         re-randomized; `full-seed<N>` is 160m shorthand). Selectable since
@@ -334,10 +351,10 @@ def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list[Pyt
                     _full_seed_spec(token, "160m", seed_str, revision, allow_full_seeds)
                 )
             continue
-        if variant not in ("data", "weight"):
+        if variant not in ("data", "weight", "weightc"):
             raise ValueError(
                 f"bad variant {variant!r} in {token!r}; must be 'data', 'weight', "
-                "or 'full' (seed 0 only, the original pythia-160m)"
+                "'weightc', or 'full' (seed 0 only, the original pythia-160m)"
             )
         try:
             seed = int(seed_str)

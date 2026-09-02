@@ -110,12 +110,21 @@ def evaluate(
     root.mkdir(parents=True, exist_ok=True)
     base_slug = (base or "all").replace("/", "--")
     out = root / f"part-{base_slug}-{shard:03d}-of-{n_shards:03d}.jsonl"
+    # Resume is manifest-scoped: a re-`plan` changes theta/lambda and the manifest
+    # sha, so rows from a superseded manifest must be recomputed, not skipped
+    # (aggregate drops other-sha rows, so skipping them would leave holes).
     done: set[tuple[str, float]] = set()
+    stale = 0
     if out.exists():
         for line in out.read_text().splitlines():
             if line.strip():
                 rec = json.loads(line)
+                if rec.get("manifest_sha256") != payload["manifest_sha256"]:
+                    stale += 1
+                    continue
                 done.add((rec["run_path"], float(rec["dose_ratio"])))
+    if stale:
+        typer.echo(f"ignoring {stale} rows from a superseded manifest in {out}")
 
     by_base: dict[str, list[dict]] = defaultdict(list)
     for run in selected:
