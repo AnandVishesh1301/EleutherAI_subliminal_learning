@@ -413,3 +413,11 @@ def test_core65_population_teachers_override(tmp_path):
     runs, meta = tf.load_core65_population(out, repo, teachers=["tA", "tINVENTORY"])
     assert meta["teachers"] == ["tA", "tINVENTORY"]
     assert set(runs.teacher_tag) == {"tA", "tINVENTORY"}
+
+
+def test_base_eval_short_covers_the_full_seed_bases() -> None:
+    """`load_priors` must find the fully re-randomized bases' test-prior files too."""
+    for i in (1, 2, 3):
+        label = tf.normalize_model_name(f"pythia-160m-seed{i}")
+        assert label == f"full-seed{i}"
+        assert tf._BASE_EVAL_SHORT[label] == f"fs{i}"

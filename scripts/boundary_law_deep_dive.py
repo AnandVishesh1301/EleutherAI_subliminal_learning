@@ -78,16 +78,36 @@ def _pooled_dose(run_dir: Path) -> float:
     return float(np.nanmean(values))
 
 
+def _nonadaptive_population(root: Path) -> set[str]:
+    """Run paths (relative tag/seed suffix) of the designed cross-data-order population.
+
+    The cross-data-order tree also hosts later campaigns (bandext126/focus20/band48
+    cells, ftseed3-5 ensembles, reserved 901+ seeds).  The population of record is the
+    non-adaptive 8x7x9 grid: 504 cells x ftseed{1,2} = 1,008 designed runs, as listed
+    in ``analysis/nonadaptive_8x7_harvest.json``.
+    """
+    harvest = json.loads((root / "analysis" / "nonadaptive_8x7_harvest.json").read_text())
+    return {f"{r['tag']}/ftseed{int(r['seed'])}" for r in harvest}
+
+
 def _load_direct_arm(root: Path, rel: str, base: str, pattern: str,
-                     probes: pd.DataFrame, norms: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Select one arm from maintained caches, with exact-key reads for cache gaps."""
+                     probes: pd.DataFrame, norms: pd.DataFrame,
+                     population: set[str] | None = None) -> tuple[pd.DataFrame, dict]:
+    """Select one arm from maintained caches, with exact-key reads for cache gaps.
+
+    ``population`` restricts the arm to an explicit ``tag/ftseedN`` design list.
+    """
     prefix = rel.rstrip("/") + "/"
     n = norms[norms.run_path.str.startswith(prefix, na=False)].copy()
     n["student_tag"] = n.run_path.map(lambda x: Path(x).parent.name)
     p = probes[probes.run_path.str.startswith(prefix, na=False)].copy()
     p["student_tag"] = p.run_path.map(lambda x: Path(x).parent.name)
+    if population is not None:
+        n = n[n.run_path.str.removeprefix(prefix).isin(population)]
+        p = p[p.run_path.str.removeprefix(prefix).isin(population)]
     if pattern.startswith("ep20_"):
         n = n[n.student_tag.str.startswith("ep20_")]
+        p = p[p.student_tag.str.startswith("ep20_")]
     elif pattern.endswith("ftseed1"):
         n = n[n.run_path.str.endswith("/ftseed1")]
         p = p[p.run_path.str.endswith("/ftseed1")]
@@ -117,7 +137,8 @@ def _load_direct_arm(root: Path, rel: str, base: str, pattern: str,
 
     p["seed"] = p.run_path.map(lambda x: Path(x).name)
     finite = np.isfinite(pd.to_numeric(p.delta_ce, errors="coerce"))
-    counts = {"norm_cache_rows": len(n), "probe_cache_hits": len(p) - len(backfill),
+    counts = {"population_design_runs": (len(population) if population is not None else None),
+              "norm_cache_rows": len(n), "probe_cache_hits": len(p) - len(backfill),
               "exact_probe_reads_from_norm_keys": len(backfill),
               "missing_or_invalid_exact_probes": failed,
               "indexed_probe_rows": len(p), "nonfinite_probe": int((~finite).sum()),
@@ -175,20 +196,48 @@ def _boundary_fit(df: pd.DataFrame) -> dict:
     }
 
 
-def _regional_boundary(df: pd.DataFrame) -> dict:
-    out: dict[str, Any] = {}
-    for label, mask in (("low_alpha_le_32", df.alpha <= 32),
-                        ("high_alpha_ge_64", df.alpha >= 64)):
-        d = df[mask]
-        if len(d) < 20 or d.collapsed.nunique() < 2 or d.collapsed.sum() < 5:
-            out[label] = {"n": len(d), "dead": int(d.collapsed.sum()), "fit": None}
-            continue
-        try:
-            out[label] = _boundary_fit(d)
-        except Exception as exc:  # failure is part of the census
-            out[label] = {"n": len(d), "dead": int(d.collapsed.sum()),
-                          "fit": None, "error": type(exc).__name__}
-    return out
+def _curvature_fit(df: pd.DataFrame) -> dict:
+    """Full-grid boundary logit with a quadratic ``(ln alpha)^2`` term.
+
+    Replaces the low/high-alpha regional split (2026-09-02): the halves separated on several
+    arms and their MLE ratios were optimizer-dependent, whereas the full grid with one extra
+    term converges on every arm and keeps every designed cell.  ``ln alpha`` is centred at the
+    grid mean so the linear coefficient is ``b`` at the grid centre; the alpha-exponent at any
+    alpha is ``b(alpha) = (beta_alpha + 2 beta_aa (ln alpha - mean)) / beta_lr``.  The reported
+    curvature is the ratio ``beta_aa / beta_lr`` with a cell-clustered delta-method interval.
+    """
+    import statsmodels.api as sm
+    from scipy.stats import norm
+
+    la = np.log(df.alpha.to_numpy())
+    centre = float(la.mean())
+    lac = la - centre
+    X = np.c_[np.ones(len(df)), np.log(df.lr), lac, np.log(df["rank"]), lac ** 2]
+    y = df.collapsed.to_numpy()
+    res = sm.Logit(y, X).fit(disp=0, maxiter=2000, cov_type="cluster",
+                             cov_kwds={"groups": df.student_tag.to_numpy()})
+    p, V = np.asarray(res.params), np.asarray(res.cov_params())
+    z = norm.ppf(0.975)
+
+    def ratio_ci(i: int) -> tuple[float, tuple[float, float]]:
+        q = p[i] / p[1]
+        g = np.zeros(len(p))
+        g[i] = 1.0 / p[1]
+        g[1] = -p[i] / p[1] ** 2
+        se = float(np.sqrt(g @ V @ g))
+        return float(q), (q - z * se, q + z * se)
+
+    b_centre, b_centre_ci = ratio_ci(2)
+    c, c_ci = ratio_ci(3)
+    curv, curv_ci = ratio_ci(4)
+    b_at = {str(a): float((p[2] + 2.0 * p[4] * (np.log(a) - centre)) / p[1])
+            for a in (4, 32, 256)}
+    return {"n": len(df), "cells": int(df.student_tag.nunique()), "dead": int(y.sum()),
+            "converged": bool(res.mle_retvals.get("converged", False)),
+            "beta_lr": float(p[1]), "ln_alpha_centre": centre,
+            "b_at_centre": b_centre, "b_at_centre_ci": b_centre_ci,
+            "c": c, "c_ci": c_ci, "curvature": curv, "curvature_ci": curv_ci,
+            "b_at_alpha": b_at}
 
 
 def _dose_fit(df: pd.DataFrame, *, steps: bool = False) -> dict | None:
@@ -250,8 +299,10 @@ def _direct_arms(root: Path) -> tuple[dict[str, pd.DataFrame], dict]:
     probes, norms = _load_cache_tables(root)
     frames: dict[str, pd.DataFrame] = {}
     audit: dict[str, Any] = {}
+    populations = {"cross_data_order": _nonadaptive_population(root)}
     for arm, args in specs.items():
-        frame, coverage = _load_direct_arm(root, *args, probes=probes, norms=norms)
+        frame, coverage = _load_direct_arm(root, *args, probes=probes, norms=norms,
+                                           population=populations.get(arm))
         frames[arm] = frame
         rec: dict[str, Any] = {"coverage": coverage}
         if len(frame) and frame.collapsed.nunique() == 2:
@@ -275,7 +326,7 @@ def _direct_arms(root: Path) -> tuple[dict[str, pd.DataFrame], dict]:
                 }
             else:
                 rec["boundary"] = _boundary_fit(frame)
-                rec["curvature"] = _regional_boundary(frame)
+                rec["curvature"] = _curvature_fit(frame)
         rec["dose"] = _dose_fit(frame, steps=(arm == "teachers_dog_orig"))
         audit[arm] = rec
 
@@ -291,6 +342,31 @@ def _direct_arms(root: Path) -> tuple[dict[str, pd.DataFrame], dict]:
     audit["matched_160m_adam"] = {"cells": len(shared), "fits": {
         k: _boundary_fit(frames[k][frames[k].student_tag.isin(shared)]) for k in keys}}
     return frames, audit
+
+
+def _kstar_structure(root: Path) -> dict:
+    """Cross-arm K* structure (analysis.kstar_structure) + the three-panel figure for the doc."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from subliminal_learning.analysis import kstar_structure as ks
+
+    repo = Path(__file__).resolve().parents[1]
+    out = ks.run_all(root, repo)
+    frames = out.pop("_frames")
+    fig, axes = plt.subplots(1, 3, figsize=(17, 4.8), sharey=True)
+    ks.plot_kstar_structure(frames["slices"], out["decomposition"], axes,
+                            teacher_order=out["meta"]["teachers"])
+    dec = out["decomposition"]
+    fig.suptitle(f"K* per (animal x student base <- teacher base | teacher recipe) slice, n = {dec['n_slices']} "
+                 "estimable slices; black bars = factor-level medians (raw marginals)", y=1.03, fontsize=11)
+    fig.tight_layout()
+    figdir = repo / "docs" / "results" / "figures"
+    figdir.mkdir(exist_ok=True)
+    fig.savefig(figdir / "boundary_law_kstar_structure.png", dpi=170, bbox_inches="tight")
+    plt.close(fig)
+    out["figure"] = "docs/results/figures/boundary_law_kstar_structure.png"
+    return out
 
 
 def _component_norms(root: Path, strip: pd.DataFrame) -> dict:
@@ -310,9 +386,15 @@ def _component_norms(root: Path, strip: pd.DataFrame) -> dict:
     for term, key in (("total", "B_Afinal_fro"), ("frozen", "B_Ainit_fro"),
                       ("moved", "B_dA_fro")):
         mods[term] = mods.scale * mods[key] / mods.W0_fro
+    # Factor norms and product-bound ratios (‖B‖·‖A‖/‖B·A‖): the ingredients of the
+    # optimizer-form assembly in the deep dive's section 5.2.
+    mods["gap_frozen"] = mods.B_fro * mods.A_init_fro / mods.B_Ainit_fro
+    mods["gap_moved"] = mods.B_fro * mods.dA_fro / mods.B_dA_fro
     runs = (mods.groupby(["student_tag", "ftseed"], as_index=False)
             .agg(lr=("lr", "first"), alpha=("alpha", "first"), rank=("rank", "first"),
-                 total=("total", "mean"), frozen=("frozen", "mean"), moved=("moved", "mean")))
+                 total=("total", "mean"), frozen=("frozen", "mean"), moved=("moved", "mean"),
+                 B=("B_fro", "mean"), dA=("dA_fro", "mean"), A0=("A_init_fro", "mean"),
+                 gap_frozen=("gap_frozen", "mean"), gap_moved=("gap_moved", "mean")))
     # Primary-region support used by the original component analysis.  Runs whose direct probe
     # exists carry a non-divergence check; unprobed rows are retained and counted separately.
     probed_keys = set(zip(strip.student_tag, strip.seed.str.removeprefix("ftseed").astype(int)))
@@ -344,6 +426,13 @@ def _component_norms(root: Path, strip: pd.DataFrame) -> dict:
             "run_rows_primary": len(d), "primary_cells": int(d.student_tag.nunique()),
             "primary_rows_with_direct_probe": int(d.direct_probe_present.sum()),
             "fits": {term: term_fit(term) for term in ("total", "frozen", "moved")},
+            "factor_fits": {obj: term_fit(obj) for obj in ("A0", "B", "dA")},
+            "product_bound_ratio_fits": {obj: term_fit(obj) for obj in ("gap_frozen", "gap_moved")},
+            "frozen_gap_over_sqrt_rank": {
+                "median": float((d.gap_frozen / np.sqrt(d["rank"])).median()),
+                "sd": float((d.gap_frozen / np.sqrt(d["rank"])).std()),
+                "min": float((d.gap_frozen / np.sqrt(d["rank"])).min())},
+            "B_over_dA_median_by_alpha": d.assign(x=d.B / d.dA).groupby("alpha").x.median().to_dict(),
             "dominance_by_alpha": med}
 
 
@@ -365,8 +454,10 @@ def _student_component_splices(root: Path) -> dict:
     fz, mv = by_term["frozen"], by_term["moved"]
     key = ["student_tag", "ftseed", "alpha", "rank"]
     cols = key + ["p_target_orig", "p_target_ablated", "pile_kl_base_orig",
-                  "pile_kl_base_ablated"]
-    paired = fz[cols].merge(mv[cols], on=key, suffixes=("_frozen", "_moved"))
+                  "pile_kl_base_ablated", "pile_kl_orig_ablated", "delta_ce_orig",
+                  "delta_ce_ablated", "ce_base"]
+    paired = fz.reindex(columns=cols).merge(
+        mv.reindex(columns=cols), on=key, suffixes=("_frozen", "_moved"))
     paired["p_full"] = paired[["p_target_orig_frozen", "p_target_orig_moved"]].mean(axis=1)
     paired["kl_full"] = paired[["pile_kl_base_orig_frozen", "pile_kl_base_orig_moved"]].mean(axis=1)
     paired["ret_frozen"] = ((paired.p_target_ablated_frozen - base_prior)
@@ -374,31 +465,63 @@ def _student_component_splices(root: Path) -> dict:
     paired["ret_moved"] = ((paired.p_target_ablated_moved - base_prior)
                             / (paired.p_full - base_prior))
     trait = paired[paired.p_full > 0.02].copy()
-    damaged = paired[paired.kl_full > anchored_dead_cut(root, "pythia-160m-data-seed1")].copy()
-    damaged["best_single_share"] = (damaged[["pile_kl_base_ablated_frozen",
-                                              "pile_kl_base_ablated_moved"]].max(axis=1)
-                                     / damaged.kl_full)
+    ce_cols = ["delta_ce_orig_frozen", "delta_ce_orig_moved",
+               "delta_ce_ablated_frozen", "delta_ce_ablated_moved"]
+    exact = paired[np.isfinite(paired[ce_cols]).all(axis=1)].copy()
+    exact["delta_ce_full"] = exact[
+        ["delta_ce_orig_frozen", "delta_ce_orig_moved"]].mean(axis=1)
+    cut = anchored_dead_cut(root, "pythia-160m-data-seed1")
+    exact["collapsed_full"] = exact.delta_ce_full > cut
+    exact["collapsed_keep_frozen"] = exact.delta_ce_ablated_frozen > cut
+    exact["collapsed_keep_moved"] = exact.delta_ce_ablated_moved > cut
+    collapsed = exact[exact.collapsed_full].copy()
+    collapsed["best_single_kl_share"] = (
+        collapsed[["pile_kl_base_ablated_frozen",
+                   "pile_kl_base_ablated_moved"]].max(axis=1) / collapsed.kl_full)
+
+    def collapse_summary(d: pd.DataFrame) -> dict[str, Any]:
+        frozen = d.collapsed_keep_frozen
+        moved = d.collapsed_keep_moved
+        return {
+            "n": len(d),
+            "keep_frozen_collapsed": int(frozen.sum()),
+            "keep_moved_collapsed": int(moved.sum()),
+            "both_single_terms_sufficient": int((frozen & moved).sum()),
+            "only_frozen_sufficient": int((frozen & ~moved).sum()),
+            "only_moved_sufficient": int((~frozen & moved).sum()),
+            "neither_single_term_sufficient": int((~frozen & ~moved).sum()),
+            "delta_ce_full_median": d.delta_ce_full.median() if len(d) else np.nan,
+            "delta_ce_keep_frozen_median": d.delta_ce_ablated_frozen.median() if len(d) else np.nan,
+            "delta_ce_keep_moved_median": d.delta_ce_ablated_moved.median() if len(d) else np.nan,
+        }
 
     per_alpha = []
     for alpha, g in paired.groupby("alpha"):
         t = trait[trait.alpha == alpha]
-        z = damaged[damaged.alpha == alpha]
+        z = collapsed[collapsed.alpha == alpha]
         per_alpha.append({"alpha": int(alpha), "n": len(g), "trait_carrying": len(t),
                           "ret_frozen_median": t.ret_frozen.median() if len(t) else np.nan,
                           "ret_moved_median": t.ret_moved.median() if len(t) else np.nan,
                           "kl_full_all_median": g.kl_full.median(),
                           "kl_keep_frozen_all_median": g.pile_kl_base_ablated_frozen.median(),
                           "kl_keep_moved_all_median": g.pile_kl_base_ablated_moved.median(),
-                          "damaged": len(z), "kl_full_median": z.kl_full.median() if len(z) else np.nan,
+                          "collapsed": len(z),
+                          "kl_full_median": z.kl_full.median() if len(z) else np.nan,
                           "kl_keep_frozen_median": z.pile_kl_base_ablated_frozen.median() if len(z) else np.nan,
-                          "kl_keep_moved_median": z.pile_kl_base_ablated_moved.median() if len(z) else np.nan})
+                          "kl_keep_moved_median": z.pile_kl_base_ablated_moved.median() if len(z) else np.nan,
+                          "collapse_interventions": collapse_summary(z)})
+    pair_disagreement = np.abs(exact.delta_ce_orig_frozen - exact.delta_ce_orig_moved)
     return {"files": counts, "rows_frozen": len(fz), "rows_moved": len(mv),
             "paired_rows": len(paired), "paired_cells": int(paired.student_tag.nunique()),
-            "trait_carrying_rows": len(trait), "damaged_rows_by_full_kl_anchor": len(damaged),
-            "damaged_best_single_over_full_median": damaged.best_single_share.median(),
+            "trait_carrying_rows": len(trait), "exact_ce_rows": len(exact),
+            "delta_ce_full_pair_max_abs_diff": pair_disagreement.max(),
+            "collapse_cut": cut, "collapsed_rows_by_full_delta_ce_anchor": len(collapsed),
+            "collapse_interventions": collapse_summary(collapsed),
+            "collapsed_best_single_kl_over_full_median": collapsed.best_single_kl_share.median(),
             "per_alpha": per_alpha,
-            "readout_note": "Ablations store pp1 KL but not delta_ce; continuous damage is exact, "
-                            "while the damaged subset uses KL>delta_cross only as the validated KL/delta-CE bridge."}
+            "readout_note": "Collapse labels for full and ablated models use exact pp1 "
+                            "delta-CE against the unigram-anchored receiver-specific cutoff; "
+                            "KL is reported as a continuous secondary readout."}
 
 
 def _teacher_components(root: Path) -> dict:
@@ -417,9 +540,11 @@ def _teacher_components(root: Path) -> dict:
                           "wrong_cos": np.nanmean([m.get("cos_wrongseed_Afinal", np.nan) for m in mods])})
     for path in sorted(teacher_root.glob("*/ftseed1/eval/teacher_term_splice.json")):
         rec = json.loads(path.read_text())
-        if all(_finite(rec.get(k)) for k in ("kl_full", "kl_frozen_only", "kl_moved_only")):
+        if all(_finite(rec.get(k)) for k in ("kl_full", "kl_frozen_only", "kl_moved_only",
+                                              "ce_full", "ce_frozen_only", "ce_moved_only")):
             splice_rows.append({k: float(rec[k]) for k in
-                                ("kl_full", "kl_frozen_only", "kl_moved_only")})
+                                ("kl_full", "kl_frozen_only", "kl_moved_only",
+                                 "ce_full", "ce_frozen_only", "ce_moved_only")})
     norms, splices = pd.DataFrame(norm_rows), pd.DataFrame(splice_rows)
     out: dict[str, Any] = {"norm_records": len(norms), "splice_records": len(splices)}
     if len(norms):
@@ -428,13 +553,25 @@ def _teacher_components(root: Path) -> dict:
         out["replay_wrong_cos_median"] = norms.wrong_cos.median()
         out["frozen_share_by_epoch"] = norms.groupby("ep").frozen_share_sum_norms.median().to_dict()
     if len(splices):
-        damaged = splices[splices.kl_full > anchored_dead_cut(root, "pythia-160m")].copy()
-        damaged["best_single_share"] = (damaged[["kl_frozen_only", "kl_moved_only"]].max(axis=1)
-                                         / damaged.kl_full)
-        out.update(damaged_records=len(damaged), kl_full_median=damaged.kl_full.median(),
-                   kl_frozen_only_median=damaged.kl_frozen_only.median(),
-                   kl_moved_only_median=damaged.kl_moved_only.median(),
-                   best_single_over_full_median=damaged.best_single_share.median())
+        anchor = json.loads((root / "analysis" / "unigram_anchor_pp1.json").read_text())
+        h_uni = float(anchor["h_uni_primary"])
+        collapsed = splices[splices.ce_full > h_uni].copy()
+        collapsed["frozen_collapsed"] = collapsed.ce_frozen_only > h_uni
+        collapsed["moved_collapsed"] = collapsed.ce_moved_only > h_uni
+        collapsed["best_single_share"] = (collapsed[["kl_frozen_only", "kl_moved_only"]].max(axis=1)
+                                           / collapsed.kl_full)
+        out.update(collapsed_records=len(collapsed), h_unigram=h_uni,
+                   ce_full_median=collapsed.ce_full.median(),
+                   ce_frozen_only_median=collapsed.ce_frozen_only.median(),
+                   ce_moved_only_median=collapsed.ce_moved_only.median(),
+                   frozen_only_collapsed=int(collapsed.frozen_collapsed.sum()),
+                   moved_only_collapsed=int(collapsed.moved_collapsed.sum()),
+                   both_single_terms_collapsed=int((collapsed.frozen_collapsed & collapsed.moved_collapsed).sum()),
+                   neither_single_term_collapsed=int((~collapsed.frozen_collapsed & ~collapsed.moved_collapsed).sum()),
+                   kl_full_median=collapsed.kl_full.median(),
+                   kl_frozen_only_median=collapsed.kl_frozen_only.median(),
+                   kl_moved_only_median=collapsed.kl_moved_only.median(),
+                   best_single_over_full_median=collapsed.best_single_share.median())
     return out
 
 
@@ -445,6 +582,7 @@ def build(root: Path) -> dict:
         "definition": "collapsed iff pp1 delta_ce > H_unigram - CE(base) for the receiver",
         "output_root": str(root),
         "direct_arms": direct,
+        "kstar_structure": _kstar_structure(root),
         "component_norms_strip": _component_norms(root, frames["cross_data_order"]),
         "student_component_splices_strip": _student_component_splices(root),
         "teacher_components": _teacher_components(root),

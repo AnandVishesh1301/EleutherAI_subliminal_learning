@@ -1,0 +1,168 @@
+# Cross-checkpoint distillation on the FULLY RE-SEEDED base `pythia-160m-seed1` (fs1):
+# the 11x11 cliff-cross pair matrix, single teacher recipe.
+#
+# Angela 2026-09-03: "just do 1 teacher for now, but fill in the 11x11" -- replicate the
+# original-init cliff cross (`ckpt_distill_sweep_dog_cliffcross.yaml`: 75k..125k every 5k,
+# every ordered teacher x student pair, recipe ep20_lr1e-4_r16a32) on fs1, the only 160m
+# lineage that shares NEITHER the init nor the data order with the original run (ws1 reuses
+# orig's init + order; ds1 reuses the init). Unlike the orig cliff cross, nothing is
+# pre-built here: all 14 teachers, 14 pools and 124 students are real work.
+#
+# Three coarse diagonal points OUTSIDE the window (25k, 50k, 143k) are added so the fs1
+# ladder lines up with the ds1/ws1 diagonal arms (25/50/75/100/125/143k) recipe-for-recipe
+# on ep20_lr1e-4_r16a32; drop them from `explicit` if only the window is wanted.
+#
+# fs1 pretraining revisions 25k..125k must be in the shared hf_cache before the pools claim
+# (they run HF_HUB_OFFLINE=1); step143000 was already cached.
+base_model: full-seed1
+allow_full_seed_bases: true
+
+steps: [25000, 50000, 75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000,
+        120000, 125000, 143000]
+
+pairs:
+  topology: explicit
+  explicit:
+    - [75000, 75000]
+    - [75000, 80000]
+    - [75000, 85000]
+    - [75000, 90000]
+    - [75000, 95000]
+    - [75000, 100000]
+    - [75000, 105000]
+    - [75000, 110000]
+    - [75000, 115000]
+    - [75000, 120000]
+    - [75000, 125000]
+    - [80000, 75000]
+    - [80000, 80000]
+    - [80000, 85000]
+    - [80000, 90000]
+    - [80000, 95000]
+    - [80000, 100000]
+    - [80000, 105000]
+    - [80000, 110000]
+    - [80000, 115000]
+    - [80000, 120000]
+    - [80000, 125000]
+    - [85000, 75000]
+    - [85000, 80000]
+    - [85000, 85000]
+    - [85000, 90000]
+    - [85000, 95000]
+    - [85000, 100000]
+    - [85000, 105000]
+    - [85000, 110000]
+    - [85000, 115000]
+    - [85000, 120000]
+    - [85000, 125000]
+    - [90000, 75000]
+    - [90000, 80000]
+    - [90000, 85000]
+    - [90000, 90000]
+    - [90000, 95000]
+    - [90000, 100000]
+    - [90000, 105000]
+    - [90000, 110000]
+    - [90000, 115000]
+    - [90000, 120000]
+    - [90000, 125000]
+    - [95000, 75000]
+    - [95000, 80000]
+    - [95000, 85000]
+    - [95000, 90000]
+    - [95000, 95000]
+    - [95000, 100000]
+    - [95000, 105000]
+    - [95000, 110000]
+    - [95000, 115000]
+    - [95000, 120000]
+    - [95000, 125000]
+    - [100000, 75000]
+    - [100000, 80000]
+    - [100000, 85000]
+    - [100000, 90000]
+    - [100000, 95000]
+    - [100000, 100000]
+    - [100000, 105000]
+    - [100000, 110000]
+    - [100000, 115000]
+    - [100000, 120000]
+    - [100000, 125000]
+    - [105000, 75000]
+    - [105000, 80000]
+    - [105000, 85000]
+    - [105000, 90000]
+    - [105000, 95000]
+    - [105000, 100000]
+    - [105000, 105000]
+    - [105000, 110000]
+    - [105000, 115000]
+    - [105000, 120000]
+    - [105000, 125000]
+    - [110000, 75000]
+    - [110000, 80000]
+    - [110000, 85000]
+    - [110000, 90000]
+    - [110000, 95000]
+    - [110000, 100000]
+    - [110000, 105000]
+    - [110000, 110000]
+    - [110000, 115000]
+    - [110000, 120000]
+    - [110000, 125000]
+    - [115000, 75000]
+    - [115000, 80000]
+    - [115000, 85000]
+    - [115000, 90000]
+    - [115000, 95000]
+    - [115000, 100000]
+    - [115000, 105000]
+    - [115000, 110000]
+    - [115000, 115000]
+    - [115000, 120000]
+    - [115000, 125000]
+    - [120000, 75000]
+    - [120000, 80000]
+    - [120000, 85000]
+    - [120000, 90000]
+    - [120000, 95000]
+    - [120000, 100000]
+    - [120000, 105000]
+    - [120000, 110000]
+    - [120000, 115000]
+    - [120000, 120000]
+    - [120000, 125000]
+    - [125000, 75000]
+    - [125000, 80000]
+    - [125000, 85000]
+    - [125000, 90000]
+    - [125000, 95000]
+    - [125000, 100000]
+    - [125000, 105000]
+    - [125000, 110000]
+    - [125000, 115000]
+    - [125000, 120000]
+    - [125000, 125000]
+    - [25000, 25000]
+    - [50000, 50000]
+    - [143000, 143000]
+
+animals: [dog]
+
+# The dense-cliff recipe (the one tag trained at every orig cliff step).
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep20_lr1e-4_r16a32]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# Above the 2026-09-03 boundary-window completion group (464-472) so it starts as slots free, below the CPU lane (490).
+jobq: {root: run_logs/queue_angela, queue_prefix: ckpt-dogfs1-cliffcross,
+       priorities: {teacher: 485, numgen: 484, distill: 483},
+       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}

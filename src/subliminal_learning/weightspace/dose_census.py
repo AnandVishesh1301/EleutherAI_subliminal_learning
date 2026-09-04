@@ -37,6 +37,29 @@ class ArmSpec:
     ftseed1_only: bool = False
     reported_runs: int | None = None
     inventory_file: str | None = None
+    pool: str = "pp1"
+    run_glob: str | None = None
+
+    @property
+    def glob(self) -> str:
+        """The run-dir glob under the arm root (explicit, else the ep20/ftseed1 rule)."""
+        if self.run_glob is not None:
+            return self.run_glob
+        return "ep20_*/ftseed*" if self.ep20_only else "*/ftseed1"
+
+
+# Fields added after the 2026-09-02 census: omitted from the serialized `arm_specs` when
+# left at their default, so the seven Pythia arms keep byte-identical manifests (the
+# manifest sha covers `arm_specs`).
+_LATE_SPEC_FIELDS = {"pool": "pp1", "run_glob": None}
+
+
+def _spec_doc(spec: ArmSpec) -> dict[str, Any]:
+    doc = asdict(spec)
+    for field, default in _LATE_SPEC_FIELDS.items():
+        if doc[field] == default:
+            del doc[field]
+    return doc
 
 
 # Paper Table 1 arms, excluding the cross-trait grid by design.
@@ -52,14 +75,14 @@ ARM_SPECS: tuple[ArmSpec, ...] = (
         "orig_same_model",
         "students/dog/pythia-160m/teacher-pythia-160m/"
         "ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k",
-        "pythia-160m", 330, reported_runs=330,
+        "pythia-160m", 584, reported_runs=330,
         inventory_file="configs/experiment/dose_rescaling_census/orig_same_model.txt",
     ),
     ArmSpec(
         "trait_free",
         "students/controls/base/pythia-160m-data-seed1/teacher-pythia-160m/"
         "ex10-20_prefix_n100k",
-        "pythia-160m-data-seed1", 376,
+        "pythia-160m-data-seed1", 651,
     ),
     ArmSpec(
         "teachers",
@@ -71,7 +94,7 @@ ARM_SPECS: tuple[ArmSpec, ...] = (
         "m410_same_model",
         "students/dog/pythia-410m/teacher-pythia-410m/"
         "ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k",
-        "pythia-410m", 326,
+        "pythia-410m", 504,
     ),
     ArmSpec(
         "m410_cross_seed",
@@ -87,6 +110,28 @@ ARM_SPECS: tuple[ArmSpec, ...] = (
     ),
 )
 
+# The two OLMo-1B (DataDecide) student populations: ep10 runs, seed-1 only, measured on
+# the Dolma probe pool dp1 and anchored per DataDecide seed dir-name.  Kept out of
+# `ARM_SPECS` so the default Pythia census plan is unchanged.
+DD1B_ARM_SPECS: tuple[ArmSpec, ...] = (
+    ArmSpec(
+        "dd1b_same_model",
+        "students/elephant/DataDecide-dolma1_7-1B-seed-default/"
+        "teacher-DataDecide-dolma1_7-1B-seed-default/"
+        "ep10_lr5e-4_r64a128_tseed0/ex10-20_prefix_n100k",
+        "DataDecide-dolma1_7-1B-seed-default", 336,
+        pool="dp1", run_glob="ep10_*/ftseed1",
+    ),
+    ArmSpec(
+        "dd1b_cross_seed2",
+        "students/elephant/DataDecide-dolma1_7-1B-seed-large-aux-2/"
+        "teacher-DataDecide-dolma1_7-1B-seed-default/"
+        "ep10_lr5e-4_r64a128_tseed0/ex10-20_prefix_n100k",
+        "DataDecide-dolma1_7-1B-seed-large-aux-2", 336,
+        pool="dp1", run_glob="ep10_*/ftseed1",
+    ),
+)
+
 
 def _latest_cache(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path, low_memory=False)
@@ -95,16 +140,18 @@ def _latest_cache(path: Path) -> pd.DataFrame:
     return frame.drop_duplicates("run_path", keep="last")
 
 
-def _probe_for_run(output_root: Path, run_path: str, cached: dict[str, dict]) -> dict | None:
+def _probe_for_run(
+    output_root: Path, run_path: str, cached: dict[str, dict], pool: str = "pp1"
+) -> dict | None:
     row = cached.get(run_path)
-    if row is not None and row.get("pool_version") == "pp1":
+    if row is not None and row.get("pool_version") == pool:
         return row
     path = output_root / run_path / "eval" / "pile_probe.json"
     try:
         rec = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    if rec.get("pool_version") != "pp1":
+    if rec.get("pool_version") != pool:
         return None
     return {
         "run_path": run_path,
@@ -115,10 +162,17 @@ def _probe_for_run(output_root: Path, run_path: str, cached: dict[str, dict]) ->
 
 
 def _base_repo(run_dir: Path) -> str | None:
+    """The run's base as the ref `evaluate` loads: `{repo}@{revision}` when the run's
+    train_manifest pins one (every DataDecide seed), else the adapter config's bare repo
+    id (the historical string, kept identical for the Pythia arms)."""
+    from subliminal_learning.analysis.adapter_decomp import base_repo_and_revision_for_run
+
     try:
         cfg = json.loads((run_dir / "checkpoints" / "adapter_config.json").read_text())
-        model = run_dir / "checkpoints" / "adapter_model.safetensors"
-        return str(cfg["base_model_name_or_path"]) if model.is_file() else None
+        if not (run_dir / "checkpoints" / "adapter_model.safetensors").is_file():
+            return None
+        repo, revision = base_repo_and_revision_for_run(run_dir / "checkpoints")
+        return f"{repo}@{revision}" if revision else str(cfg["base_model_name_or_path"])
     except (OSError, ValueError, KeyError):
         return None
 
@@ -156,8 +210,11 @@ def build_manifest(
     norms = _latest_cache(output_root / "analysis" / "record_cache_adapter_norms.csv")
     norm_map = {str(r["run_path"]): r for r in norms.to_dict("records")}
     probes = _latest_cache(output_root / "analysis" / "probe_cache.csv")
-    probes = probes[probes.pool_version.eq("pp1")]
-    probe_map = {str(r["run_path"]): r for r in probes.to_dict("records")}
+    probe_maps = {
+        pool: {str(r["run_path"]): r
+               for r in probes[probes.pool_version.eq(pool)].to_dict("records")}
+        for pool in sorted({spec.pool for spec in specs})
+    }
 
     all_runs: list[dict[str, Any]] = []
     fits: dict[str, Any] = {}
@@ -169,7 +226,7 @@ def build_manifest(
             run_paths = [line.strip() for line in inventory.read_text().splitlines()
                          if line.strip()]
         else:
-            pattern = "ep20_*/ftseed*" if spec.ep20_only else "*/ftseed1"
+            pattern = spec.glob
             run_paths = [str(path.relative_to(output_root))
                          for path in sorted(arm_root.glob(pattern)) if path.is_dir()]
 
@@ -186,7 +243,8 @@ def build_manifest(
             if not np.isfinite(dose) or dose <= 0:
                 missing_norm += 1
                 continue
-            probe = _probe_for_run(output_root, run_path, probe_map)
+            probe = _probe_for_run(
+                output_root, run_path, probe_maps[spec.pool], spec.pool)
             delta_ce = None if probe is None else probe.get("delta_ce")
             try:
                 delta_ce = float(delta_ce)
@@ -206,12 +264,16 @@ def build_manifest(
                 "rank": int(norm["rank"]),
                 "dw_fro": float(dose),
                 "trained_delta_ce": delta_ce,
+                # Recorded only off the pp1 default, so the Pythia arms keep the
+                # byte-identical rows of the 2026-09-02 manifest; readers treat a row
+                # without the field as pp1.
+                **({} if spec.pool == "pp1" else {"pool_version": spec.pool}),
             })
 
         frame = pd.DataFrame(rows, columns=(
             "run_path", "base", "student_tag", "rank", "dw_fro", "trained_delta_ce",
         )).rename(columns={"trained_delta_ce": "delta_ce"})
-        cut = float(anchored_dead_cut(output_root, spec.anchor_base, pool="pp1"))
+        cut = float(anchored_dead_cut(output_root, spec.anchor_base, pool=spec.pool))
         try:
             fit = fit_anchored_dose_threshold(frame, cut)
         except ValueError as exc:
@@ -253,7 +315,7 @@ def build_manifest(
             "threshold_label": "trained delta_ce > per-base anchored unigram cut",
             "excluded_arm": "cross-trait grid",
         },
-        "arm_specs": [asdict(x) for x in specs],
+        "arm_specs": [_spec_doc(x) for x in specs],
         "fits": fits,
         "audit": audit,
         "runs": all_runs,

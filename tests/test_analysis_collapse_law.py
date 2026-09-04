@@ -567,3 +567,33 @@ def test_kstar_spread_reports_none_when_no_arm_qualifies():
     out = kstar_spread(rows, 20)
     assert out["n_arms"] == 0 and out["arms"] == []
     assert out["kstar_free_min"] is None and out["kstar_fixed_ratio"] is None
+
+
+def test_fit_collapse_law_trajectory_recovers_step_exponent():
+    """Synthetic K*(t) ∝ t^-d boundary: the fourth ratio recovers d and kstar_at tracks it."""
+    import itertools
+
+    import numpy as np
+    import pandas as pd
+
+    from subliminal_learning.stats import collapse_law as cl
+
+    rng = np.random.default_rng(0)
+    b_true, c_true, d_true, k0 = 0.5, -0.1, 0.4, 1e-3
+    lrs = [1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3]
+    rows = []
+    for lr, a, r in itertools.product(lrs, [4, 16, 64, 256], [1, 8, 64]):
+        tag = f"ep20_lr{lr:g}_r{r}a{a}"
+        K = lr * a**b_true * r**c_true
+        for t in np.geomspace(100, 25_000, 12):
+            logit = 6.0 * (np.log(K) - np.log(k0) + d_true * np.log(t / 25_000))
+            y = rng.random() < 1 / (1 + np.exp(-logit))
+            rows.append(dict(student_tag=tag, lr=lr, alpha=a, rank=r, step=t, collapsed=int(y)))
+    df = pd.DataFrame(rows)
+    fit = cl.fit_collapse_law_trajectory(df)
+    assert abs(fit.b - b_true) < 0.08 and abs(fit.c - c_true) < 0.08 and abs(fit.d - d_true) < 0.08
+    assert fit.d_ci[0] < d_true < fit.d_ci[1]
+    assert fit.n_runs == len(lrs) * 4 * 3 and fit.n_rows == fit.n_runs * 12
+    # Threshold at the end vs at 1/40 of training follows t^-d.
+    ratio = fit.kstar_at(25_000 / 40) / fit.kstar_at(25_000)
+    assert abs(np.log(ratio) - d_true * np.log(40)) < 0.25

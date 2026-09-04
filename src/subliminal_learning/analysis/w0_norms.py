@@ -124,6 +124,11 @@ def ensure_w0_norms(output_root: Path, base_repo: str, modules: list[str], *,
     kw = {"torch_dtype": torch.float32}
     if revision:
         kw["revision"] = revision
+    if base_repo.startswith("allenai/DataDecide"):
+        # Legacy `hf_olmo` architecture: Auto* only resolves it once the package is imported.
+        from subliminal_learning.models.datadecide import _require_hf_olmo
+
+        _require_hf_olmo()
     model = AutoModelForCausalLM.from_pretrained(base_repo, **kw)
     sd = model.state_dict()
     new = {}

@@ -41,6 +41,7 @@ from subliminal_learning.stats.collapse_law import (
     SKLEARN_C,
     K_of,
     LawFit,
+    TrajectoryLawFit,
     _design,  # noqa: F401  -- re-exported: the stats tests fit against this design matrix
     add_k,
     cell_table,
@@ -48,6 +49,7 @@ from subliminal_learning.stats.collapse_law import (
     dose_law_fit,
     estimate_kstar,
     fit_collapse_law,
+    fit_collapse_law_trajectory,
     k_from_tag,
     kstar_logistic,
     kstar_minerr,
@@ -63,9 +65,9 @@ from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
 __all__ = [
     "B_LAW", "C_LAW", "DEAD_SEED", "KSTAR_CALIBRATED", "KSTAR_DS1_DESIGN", "KSTAR_POOLED",
-    "LAW_LINEAGES", "LINEAGE_ORDER", "PARAM_TAG_RE", "RIDGE_PEN", "SKLEARN_C", "K_of", "LawFit",
+    "LAW_LINEAGES", "LINEAGE_ORDER", "PARAM_TAG_RE", "RIDGE_PEN", "SKLEARN_C", "K_of", "LawFit", "TrajectoryLawFit",
     "add_k", "adapter_coherence", "cell_table", "cluster_bootstrap_ratios", "dose_law_fit",
-    "estimate_kstar", "fit_collapse_law", "k_from_tag", "kstar_logistic", "kstar_minerr",
+    "estimate_kstar", "fit_collapse_law", "fit_collapse_law_trajectory", "k_from_tag", "kstar_logistic", "kstar_minerr",
     "kstar_spread", "label_collapse", "law_fits_row", "law_misses", "load_law_runs",
     "parse_param_tag", "read_cell_set", "theta_dose", "theta_dose_row", "theta_variance_split",
 ]

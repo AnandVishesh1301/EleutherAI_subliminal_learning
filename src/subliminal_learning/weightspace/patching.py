@@ -11,6 +11,10 @@ because the module keys they produce are the keys stored in existing outputs:
   is a `TARGET_KINDS` name; keys are module paths (``...attention.dense``).
 - `iter_target_weight_params` — ``named_parameters()``, ``*.weight`` containing one of
   `TARGET_SUBSTRINGS`; keys carry the ``.weight`` suffix.
+
+Both also accept the OLMo (DataDecide) layout, whose LoRA targets are
+``*.transformer.blocks.{i}.{att_proj,attn_out,ff_proj,ff_out}`` — the module keys then
+match the adapter keys of those runs after `adapters.module_name` strips PEFT's prefix.
 """
 
 from __future__ import annotations
@@ -23,20 +27,27 @@ import numpy as np
 TARGET_KINDS = frozenset({"query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"})
 TARGET_SUBSTRINGS = ("attention.dense", "attention.query_key_value",
                      "mlp.dense_h_to_4h", "mlp.dense_4h_to_h")
+OLMO_TARGET_KINDS = frozenset({"att_proj", "attn_out", "ff_proj", "ff_out"})
+OLMO_BLOCK_PREFIX = "transformer.blocks."
+
+
+def _is_olmo_target(name: str) -> bool:
+    return OLMO_BLOCK_PREFIX in name and name.split(".")[-1] in OLMO_TARGET_KINDS
 
 
 def iter_target_modules(model) -> Iterator[tuple[str, Any]]:
     """``(name, module)`` for every LoRA-target block module carrying a weight."""
     for name, mod in model.named_modules():
-        if (name.startswith("gpt_neox.layers.") and name.split(".")[-1] in TARGET_KINDS
-                and hasattr(mod, "weight")):
+        neox = name.startswith("gpt_neox.layers.") and name.split(".")[-1] in TARGET_KINDS
+        if (neox or _is_olmo_target(name)) and hasattr(mod, "weight"):
             yield name, mod
 
 
 def iter_target_weight_params(model) -> Iterator[tuple[str, Any]]:
     """``(name, parameter)`` for every LoRA-target ``*.weight`` parameter."""
     for name, par in model.named_parameters():
-        if name.endswith(".weight") and any(t in name for t in TARGET_SUBSTRINGS):
+        if name.endswith(".weight") and (any(t in name for t in TARGET_SUBSTRINGS)
+                                         or _is_olmo_target(name.removesuffix(".weight"))):
             yield name, par
 
 
@@ -162,18 +173,24 @@ def restore_param_modules(mods: Mapping[str, dict]) -> None:
             m["param"].copy_(m["W0"])
 
 
-def pile_readout(model, pool, device, base_logp, ce_base: float) -> tuple[float, float]:
+def pile_readout(model, pool, device, base_logp, ce_base: float,
+                 logp_device: str | None = None) -> tuple[float, float]:
     """``(pp1 KL(base ‖ model), ΔCE)`` of the currently patched model.
 
     The logprob tensor is GPU-resident and large (~3 GB on pp1), so it is freed before
-    returning rather than handed back.
+    returning rather than handed back. `logp_device` parks it elsewhere (``"cpu"``) as it
+    is produced — `mean_kl`/`mean_ce` are device-agnostic, so the numbers are identical;
+    None keeps the whole list on `device`.
     """
     import torch
 
-    from subliminal_learning.coherence.probe_io import mean_ce, mean_kl, pile_logprobs
+    from subliminal_learning.coherence.probe_io import (
+        mean_ce, mean_kl, parked_logprobs, pile_logprobs,
+    )
 
     with torch.no_grad():
-        logp = pile_logprobs(model, pool, device)
+        logp = (pile_logprobs(model, pool, device) if logp_device is None
+                else parked_logprobs(model, pool, device, logp_device))
         kl = mean_kl(base_logp, logp)
         dce = mean_ce(logp, pool) - ce_base
         del logp

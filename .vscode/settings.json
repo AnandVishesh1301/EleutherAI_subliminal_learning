@@ -41,5 +41,18 @@
   "notebook.output.textLineLimit": 60,
   "notebook.output.scrolling": true,
   "notebook.diff.enablePreview": false,
+  // Render $...$ and $$...$$ equations in the built-in Markdown preview.
+  "markdown.math.enabled": true,
+  // Markdown Preview Enhanced owns Ctrl+Shift+V when installed. Configure its
+  // renderer explicitly as well so math is not passed through as plain Markdown.
+  "markdown-preview-enhanced.mathRenderingOption": "KaTeX",
+  "markdown-preview-enhanced.mathInlineDelimiters": [
+    ["$", "$"],
+    ["\\(", "\\)"]
+  ],
+  "markdown-preview-enhanced.mathBlockDelimiters": [
+    ["$$", "$$"],
+    ["\\[", "\\]"]
+  ],
   "diffEditor.maxComputationTime": 2000
 }

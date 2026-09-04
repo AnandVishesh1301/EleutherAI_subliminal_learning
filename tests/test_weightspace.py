@@ -26,7 +26,7 @@ from subliminal_learning.weightspace.lora import (
 )
 from subliminal_learning.weightspace.patching import (
     TARGET_KINDS, capture_named_weights, capture_w0, iter_target_modules,
-    patch_modules, patch_modules_f64, restore_modules,
+    iter_target_weight_params, patch_modules, patch_modules_f64, restore_modules,
 )
 
 N, M, R = 12, 9, 4
@@ -88,10 +88,38 @@ class _Tiny(torch.nn.Module):
         self.embed_out = torch.nn.Linear(M, N, bias=False)   # not a LoRA target
 
 
+class _TinyOlmo(torch.nn.Module):
+    """Enough of an OLMo (DataDecide) to exercise the ``transformer.blocks.*`` targets."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.transformer = torch.nn.Module()
+        self.model.transformer.blocks = torch.nn.ModuleList(
+            [_Block("att_proj", N, M), _Block("ff_out", N, M)])
+        self.model.transformer.ff_out = torch.nn.Linear(M, N, bias=False)  # not a block
+
+
 def test_iter_target_modules_selects_only_lora_targets():
     names = [n for n, _ in iter_target_modules(_Tiny())]
     assert names == ["gpt_neox.layers.0.dense", "gpt_neox.layers.1.dense_h_to_4h"]
     assert all(n.split(".")[-1] in TARGET_KINDS for n in names)
+
+
+def test_iter_target_modules_covers_the_olmo_layout():
+    names = [n for n, _ in iter_target_modules(_TinyOlmo())]
+    assert names == ["model.transformer.blocks.0.att_proj",
+                     "model.transformer.blocks.1.ff_out"]
+    params = [n for n, _ in iter_target_weight_params(_TinyOlmo())]
+    assert params == [f"{n}.weight" for n in names]
+
+
+def test_olmo_adapter_module_names_match_the_model_modules():
+    # PEFT stores `base_model.model.` + the model's own module path; the census matches
+    # `module_name(key) in modules`, so the two conventions must agree exactly.
+    modules = {n for n, _ in iter_target_modules(_TinyOlmo())}
+    keys = [f"base_model.model.{n}.lora_A.weight" for n in sorted(modules)]
+    assert all(module_name(k) in modules for k in keys)
 
 
 @pytest.mark.parametrize("as_numpy", [False, True])
@@ -354,3 +382,31 @@ def test_adapter_direction_pairs_skips_a_diverged_adapter(tmp_path):
     _write_adapter(ck / "adapter_model.safetensors", nan=True)
     (ck / "adapter_config.json").write_text(_json.dumps({"lora_alpha": 8, "r": R}))
     assert adapter_direction_pairs(ck, set(), skip_nonfinite=True) is None
+
+
+def test_pile_readout_parking_logprobs_changes_nothing():
+    """`logp_device` only moves the ~3 GB log-prob list off the GPU; the readout is exact."""
+    import dataclasses
+
+    from subliminal_learning.cka.pool_io import SequencePool
+    from subliminal_learning.coherence.probe_io import pile_logprobs
+    from subliminal_learning.weightspace.patching import pile_readout
+
+    class _TinyLM:
+        """Deterministic stand-in: logits are a fixed function of the input ids."""
+
+        def __call__(self, input_ids=None, attention_mask=None):
+            vocab = 7
+            logits = (input_ids.unsqueeze(-1).float()
+                      * torch.arange(vocab).float().view(1, 1, vocab) * 0.1)
+            return dataclasses.make_dataclass("Out", ["logits"])(logits=logits)
+
+    pool = SequencePool(
+        input_ids=[[1, 2, 3, 4], [2, 3, 5], [6, 1, 2, 3, 4], [5, 5, 5]],
+        eligible=[[1, 2, 3], [1, 2], [1, 2, 3, 4], [1, 2]],
+        source="test",
+    )
+    model = _TinyLM()
+    base_logp = pile_logprobs(model, pool, "cpu")
+    assert (pile_readout(model, pool, "cpu", base_logp, 1.25, logp_device="cpu")
+            == pile_readout(model, pool, "cpu", base_logp, 1.25))

@@ -518,6 +518,35 @@ def base_model_factory(base_repo: str, hf_cache_root: Path, device: str = "cpu",
     return _load
 
 
+def base_model_factory_for_ref(model_ref: str, hf_cache_root: Path, device: str = "cpu",
+                               dtype: str = "float32") -> Callable:
+    """`base_model_factory` for a manifest ``base_model_repo`` ref (``{repo}[@{rev}]``).
+
+    The ref is the only spelling that carries a DataDecide seed (a branch of one repo),
+    so an `A_init` replay must be built from it rather than from `adapter_config.json`'s
+    bare repo id. DataDecide refs route through the pinned `hf_olmo` loader (which
+    `_require_hf_olmo`s first); everything else keeps the historical `base_model_factory`
+    path, with `revision` set only when the ref carries one.
+    """
+    from subliminal_learning.models.datadecide import is_dd_ref
+
+    if is_dd_ref(model_ref):
+        from subliminal_learning.models.datadecide import load_datadecide_model, parse_dd_ref
+
+        spec = parse_dd_ref(model_ref)
+
+        def _load_dd():
+            import torch
+
+            return load_datadecide_model(spec, Path(hf_cache_root), device,
+                                         dtype=getattr(torch, dtype))
+
+        return _load_dd
+    repo, _, revision = model_ref.partition("@")
+    return base_model_factory(repo, hf_cache_root, device, revision=revision or None,
+                              dtype=dtype)
+
+
 def lora_init_weights(
     model_factory: Callable, seed: int, adapter_cfg: Mapping[str, Any]
 ) -> dict[str, np.ndarray]:

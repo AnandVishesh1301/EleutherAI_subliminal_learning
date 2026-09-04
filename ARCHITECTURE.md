@@ -349,6 +349,23 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/archive_run_logs.py` | Rule-based archiver for old `run_logs/*.log` (plan/apply/undo, MANIFEST.tsv). |
 | `scripts/inspect_prompts.py` | Smoke-test: load a PolyPythias model and print completions. |
 
+## Dose-rescaling census (eval-time λ·ΔW on every run)
+
+`scripts/dose_rescaling_census.py` (`plan` / `evaluate` / `aggregate`) over
+`src/subliminal_learning/weightspace/{dose_rescaling,dose_census}.py`: `plan` reads endpoint
+probes + adapter norms for the arms in `dose_census.ARM_SPECS` (strip / orig same-model / trait-free /
+teachers / 410M same + cross / SGD), fits one anchored dose threshold θ per arm and freezes
+`λ = g·θ/dw_fro` for 13 dose ratios g into an immutable, sha-stamped manifest under
+`analysis/dose_rescaling_census_20260902/`; `evaluate --shard/--n-shards [--base]` appends
+sha-stamped rows per (run, rung) to `shards/`; `aggregate` validates completeness and writes
+`results.csv` + `summary.json`. Re-planning changes every λ, so rows from a superseded manifest are
+ignored, never reused. Cells planned after the first pass keep the arm's **fitted θ** via
+`run_logs/winfill_20260902/census_winfill.py` (`plan --tag T --runs-dir D` / `aggregate --tag T` →
+`manifest_T.json`, `results_T.csv`); every `manifest*.json`/`results*.csv` pair in the directory is
+one slice of a single census population, and the notebook loads them all together. Analysis:
+`notebooks/dose_rescaling_census.ipynb` → `docs/results/dose_rescaling_census.md` (the per-run
+crossing dose is a tent centred on the boundary: θ is boundary-local).
+
 ## Job queue framework — `scripts/jobq.py` + `jobqueue/`
 
 **CPU thread cap is enforced by default (2026-08-21).** `subliminal_learning/__init__.py` sets `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`OPENBLAS_NUM_THREADS` to `min(4, cpu_count)` at import when none is set, and calls `torch.set_num_threads` if torch was imported first; `~/.zshenv` applies the same `${VAR:-4}` fallback to every zsh-launched process. Any pre-set value wins, so jobq's per-job `gpu_policy` env (2) and explicit `OMP_NUM_THREADS=1` CPU runs are unchanged; `SL_DEFAULT_THREADS` changes the fallback. Motivation: torch defaults to all 48 cores per process — four uncapped direct `adapter_norms_probe` runs drove load to 51 and starved the GPU pool. Test: `tests/test_thread_cap.py`.
@@ -711,6 +728,50 @@ Endpoint-only exceptions inside the same arms: lion fs1-orig, orig-fs2, fs1-fs1,
 and the first 27 fs1-fs3 cells (claimed before the flag landed). `--ckpts 0` (default)
 is byte-identical to the earlier behaviour, so the dog seed2seed arms are unaffected.
 
+`notebooks/fsfact_transfer_analysis.ipynb` (builder
+`scripts/build_fsfact_transfer_nb.py`) is the endpoint-transfer overview for this factorial:
+four animal panels show every directed `orig`/`fs1`/`fs2`/`fs3` pair, including reverse and
+same-base directions. Each box is a distribution over core56 student cells after averaging
+the exact top-10 teacher set within a cell; only ten-teacher-complete cells are plotted, while
+complete/touched coverage for all 64 animal-arms is printed separately. The builder also writes
+the ignored convenience export `docs/results/figures/fsfact_transfer_boxplots.png`; the executed
+notebook is the tracked artifact and remains safe to rerun while the later animal queues drain.
+
+`notebooks/transfer_trajectory_grids.ipynb` (builder
+`scripts/build_transfer_trajectory_grids_nb.py`, 09-04) puts the trait score on the
+(rank, alpha) grid *along training* for every arm side by side — Pythia-160m same-model and
+cross-init ds1, Pythia-410m same-model and cross-seed, OLMo-1B same-model (cross-seed 2 once
+drained): endpoint, trajectory peak, and the saved checkpoint nearest step 625 / 1,250 / 2,500 /
+5,000 / 10,000 (always absolute steps, never a share of the run — run lengths differ: Pythia ep20
+25,000, OLMo ep10 12,500),
+median over alive lr rungs on the nonadaptive lattice (seed 1), plus a prior-normalized
+summary. Pythia arms load through `analysis.trajectories.lineage_long_frame` (one row per
+run × checkpoint, pref + Pile-KL joined on step); OLMo through `analysis.dd1b_ladder`.
+Its §6 fits the boundary law on checkpoint-resolved labels: free `(b, c)` at every
+checkpoint plus `stats.collapse_law.fit_collapse_law_trajectory` (ln step as a fourth factor,
+cluster-robust by run, `TrajectoryLawFit.kstar_at(step)`).
+
+`notebooks/transfer_receiver_family.ipynb` (builder
+`scripts/build_transfer_receiver_family_nb.py`) puts all ten Pythia-160m receiver bases on one
+axis: `orig` (same-model), the `ds*`/`ws*` PolyPythias siblings (shared-init; `ws*` share the
+data order too) and the `fs*` full-seed bases (neither factor). The population is the
+original-init top-10 teachers x core56 x student seed 1, and the two-row figure
+(`docs/results/figures/transfer_receiver_family_boxplots.png`) shows all landed runs above and
+only the runs alive under the per-receiver unigram-anchored Pile-KL cut below (the two charts
+keep independent x axes so either reads alone), with per-arm coverage, per-receiver and
+family-pooled tables, and directed sender x receiver matrices per animal. A second figure,
+`docs/results/figures/transfer_all_directions_boxplots.png`, generalizes the box view to every
+landed sender x receiver direction including the same-model diagonal (colour = the
+sender/receiver relationship from `fsfact_transfer.direction_relation` — same model / shared
+init, different data order / different init — thick edge = diagonal, red `not run` in a
+reserved diagonal slot that never ran); that directed population is loaded once and reused by the heatmap
+section. Coverage caveats are carried in the figures themselves: annotations are red wherever
+`probed < landed` (the alive chart is then a different cell subsample) and absent directions
+are unrun arms — the ds*/ws* diagonals were never run on core56. Its one `src/` requirement was extending `transfer_factors._BASE_EVAL_SHORT` with the
+`full-seed{1,2,3}` -> `fs{1,2,3}` entries so `load_priors` also returns the full-seed bases'
+`test_prior`; the receiver/family/prior-label tables and `count_complete_cells` live in
+`analysis.fsfact_transfer`.
+
 ### Pythia-410m cross-seed arm (2026-08-21)
 
 First replication of the dog chain off 160m at 410m: teacher + numbers on the original
@@ -768,12 +829,13 @@ shift is an ep20 over-training artifact, not a shift in where the trait is writt
 §4e holds the house `facet_grid_heatmaps` grids (K/K* bin × α × rank, mean test p) for
 ep20 endpoint vs best checkpoint on both receivers. The 160m counterpart is
 `notebooks/nonadaptive_strip_160m_peak.ipynb` (same apparatus on the 1008-run ds1 strip,
-932 with trajectories): on 160m the endpoint IS the peak (alive runs below the boundary peak
+932 with trajectories): on 160m the endpoint approximately matches the peak (alive runs below the boundary peak
 at a median 72% of training, peak/endpoint 1.03×, 2% overshoot >2×; endpoint and best-ckpt
 humps coincide at K/K*≈0.4–0.6) vs 410m (20%, 3.2×, 80%) — the width difference is trait
 RETENTION, not placement or the boundary.
 
 ### DataDecide OLMo arm (1B, 2026-08-18)
+**Results update (2026-09-04).** The drained OLMo ladder is now a 336-cell, full-evaluation same-model campaign: 146 endpoint-dead, $b=0.490$, $c=-0.019$, and $K^*=5.08e-3$. The settled Pythia exponents misclassify only 5 OLMo cells, versus 2 under the OLMo refit, with every disagreement within one learning-rate rung of the boundary. The endpoint teacher score is saturated at 1.0 with $\Delta\mathrm{CE}=2.2$ nats (0.13 was a student score). Checkpoint refits keep $b,c$ stable from 2.5% training while $K^*$ declines, and 95% of endpoint-collapsed runs are over the cut by 12.5%. Time is approximately separable from the hyperparameter geometry, but its fitted exponent is estimator-dependent. Transfer trajectories are retained in the paper only as a secondary qualification of endpoint measurement.
 
 A second, fully isolated base-model family (`models/datadecide.py`, which imports
 nothing else from the package). CLI grammar: `dd-1b[-seed{1,2,3}][@step{N}]`, routed by
@@ -832,6 +894,38 @@ experiment YAML's `model_spec` stays Pythia-only.
   the adapter-decomp cell manifests stamp `base_model_repo`/`base_revision`
   (informational, outside every identity/resume gate) so post-fix measurements are
   distinguishable from pre-fix ones taken against HF `main`.
+- Endpoint interventions on both OLMo populations (09-04): `scripts/frozen_a_ablation.py`
+  and `scripts/dose_rescaling_census.py` accept DataDecide bases. The base is always the run's
+  `train_manifest.json` ref (`repo@step69369-seed-…`, via `models.loading_io.load_base_from_ref`
+  and `analysis.adapter_decomp.base_model_factory_for_ref` for the seeded `A_init` replay), the
+  held-out pool is dp1, and `weightspace.patching` recognises the OLMo LoRA targets. The census
+  gained `plan --arms dd1b` (`weightspace.dose_census.DD1B_ARM_SPECS`, `ArmSpec.pool/run_glob`,
+  manifest-relative shards/results) and both scripts park per-model log-probs on CPU
+  (`coherence.probe_io.parked_logprobs`, `--logp-device`) so a 1B fp32 job peaks at ~9–13 GB.
+  The ablation script also gained `--splices frozen,moved` (one original-model evaluation
+  shared), `--extra-prompt-sets off_topic`, and sharded per-cell JSONL resume.
+- Same-model ladder (09-03/04): `run_logs/dd1b_worker.py distill --traj` trains one
+  student cell of the elephant chain (teacher `ep10_lr5e-4_r64a128`, ftseed 0 → dd-1b
+  students, ep10 on the 10k/seed-42 subsample, adapter-only checkpoints every 312 steps for
+the same-model ladder and the first 88 cross-seed cells, every 625 steps = half an epoch for
+every cell claimed after 11:44 UTC 09-04 — fixed `SAVE_STEPS` in the worker) and writes the
+  endpoint preference eval, the dp1 probe, and per-checkpoint trait + dp1-KL trajectories.
+  `analysis/dd1b_ladder.py` is the single read site for that tree (`load_endpoint_frame`
+  with trajectory summaries, `load_trajectories`, `load_base_prior`);
+  `notebooks/dd1b_same_model_ladder.ipynb` (builder `scripts/build_dd1b_same_model_nb.py`)
+  is the readout — collapse boundary under the dp1 anchored cut, law-fit ratios and K*,
+  endpoint transfer vs trajectory-peak transfer — exporting
+  `docs/results/figures/dd1b_same_model_transfer.png`. `w0_norms.ensure_w0_norms` imports
+  `hf_olmo` for DataDecide repos so the slim norms harvester can build the OLMo W₀ table.
+- Cross-seed students (09-04): `dd1b_worker.py distill --student-base dd-1b-seed{2,3}` distils
+  the default-seed teacher's pool into another DataDecide seed branch (cross-base within
+  the family; lands under `students/.../{student_base}/teacher-{teacher_base}/...`, registry /
+  probe-list stems prefixed with the student base). `models/seed_identity.py` +
+  `scripts/check_dd_seed_identity.py` verify from the weights that two seed branches share
+  neither init (step-0 byte equality) nor data order (untouched-input-embedding-row
+  fingerprint over step0→step2500, padding rows as control; verdict JSON under
+  `analysis/dd_seed_identity_*.json`, exit 2 if either factor is shared). Verified 09-04 for
+  `default` vs `large-aux-2` (init: 66/66 random tensors differ; order: Jaccard 0.81).
 
 ## End-to-end flows
 
@@ -2970,14 +3064,86 @@ adjudication (their-claims scoping, estimator/scale verification, AUC head-to-he
 the five dissociations) — every number synced to the audited ledger
 (`collapse_claims_v2.md` N2/N3/N8/N9, 08-27 audit + 08-30 notebook recompute); the
 §6 prior-work table gained a Verdict column. New sibling doc
-`docs/methodology/size_analysis.md`: methods **and results** for the size family —
-λ-rescaling (mechanics, family census, hysteresis protocol), the λ-crossing test
-(per-update crossings vs population θ̂, the same-pool and 410m designs), the
-training-time dose clamp (`DoseClampCallback` mechanics, ceilings, matched-final-
-dose comparison), companion observational instruments (checkpoint replay, mediation
-refit, size-coordinate horse race), with results R1–R5 (230/230 monotone + clamp
-ladder, crossing tables incl. the 410m repin, path-dependence vs 1.12–1.29×
-hysteresis + the 3.05× history note, Frobenius as the operative coordinate, scope
-limits incl. SGD) and an appendix pinning populations, anchored θ̂ values, ladders,
-and clamp constants. Ledger N2/N3/N7–N9 remains the claim register; the two docs
-cross-reference each other (each family pins what the other manipulates).
+`docs/methodology/size_analysis.md` defines the completed-update rescaling and
+training-time clamp analyses; its artifact-backed population scope and results
+are summarized in the 2026-09-03 dose-census entry below.
+
+### 2026-09-02 — cross-data-order population pinned to the non-adaptive grid
+The ds1 strip is now referred to as the **cross data order population** / cross-data-order
+arm, and its membership is exactly the non-adaptive 8×7×9 grid: 504 cells × ftseed{1,2}
+= 1,008 designed runs listed in `analysis/nonadaptive_8x7_harvest.json` (key `tag/ftseedN`;
+76 diverged). The tree `students/dog/pythia-160m-data-seed1/.../ep20_*/ftseed*` also hosts
+bandext126/focus20/band48 cells, ftseed3–5 ensembles and 901+ reserved seeds, so a plain
+tree glob returns 1,602 runs (1,526 finite) — `scripts/boundary_law_deep_dive.py` and the
+paper-figures notebook (Fig 7 dose map, Table 3a/3c/3d loaders) had fit the dose law and
+boundary law on that contaminated set. Both now intersect with the harvest
+(`_nonadaptive_population` in the script, `CDO_POP` in the notebook) and were refit:
+`docs/results/boundary_law_deep_dive.md` + `_artifacts.json` regenerated (b 0.659,
+c −0.164 on 932 runs; dose θ_D 0.149, AUC 0.997). `nors_asks.ipynb` and
+`collapse_evidence_review.ipynb` already read the harvest and were unaffected. The deep-dive's
+curvature readout (§3.3) was also changed from a low/high-α regional split — whose halves
+separated on several arms, leaving optimizer-dependent MLE ratios — to one full-grid logit with a
+centred (ln α)² term (`_curvature_fit`): every arm converges, every designed cell is kept, and
+the α-exponent is read as b(α) with curvature β_αα/β_η (≈ +0.07 on all three 160M Adam arms,
+flat at 410M). Estimator elsewhere is unchanged: unpenalised MLE ratios, cluster delta CIs. New module
+`src/subliminal_learning/analysis/kstar_structure.py` (deep-dive §3.4–3.5, paper-figures Fig 15 +
+Table 5): the cross-arm K* population read from `probe_cache.csv` by run-path regex — core65
+cells × top-10 recipes × every (animal, student base ← teacher base) arm incl. the dog
+seed2seed factorial and the `pythia-160m-seed{1,2,3}` (fs) bases on both sides — anchored-ΔCE
+label, ONE pooled free (b, c) coordinate, per-arm free fits + K*, per-slice K* (≥5 dead), and a
+NESTED regression of log K* (student base → teacher base + recipe → trait) plus drop-one partial
+R²; figure `docs/results/figures/boundary_law_kstar_structure.png`. Its loader builds a
+CONSTRUCTED design inventory (existing `students/<animal>/<sbase>/teacher-<tbase>/<recipe>_tseed1/`
+trees × core65 cells) and sweeps it through `load_probe_cache(refresh=True)` — the bandext126
+refresh list (`run_logs/strip_probe_lists/xarm_bandext126_runs.txt`) has no full-seed paths, so
+2,800 probed lion full-seed runs were cache-invisible until 09-02. The
+original same-model arm has the same trap (365 probed vs 316 designed Tier-B runs,
+`run_logs/orig_strip_tierB_cells.json`) and is not yet restricted.
+
+**Optimizer-form reframe (09-02 eve).** The deep dive now states the boundary law as one law
+per optimizer sharing b but not the coordinate: Adam reads (α, r) separately with a weak rank
+exponent, SGD reads α/r (c ≈ −b). §4.1 gained a lr-normalized dose-vs-boundary table (under
+Adam the boundary's α exponent IS the dose's, 0.66 vs 0.67; rank is where tolerance drifts; SGD
+dose (α/r)^0.94 vs boundary (α/r)^0.63). §5 was restructured (5.1 two-term identity, 5.2 Adam
+form assembled from census factor fits, 5.3 curvature, 5.4 SGD form). `_component_norms` in
+the script now also fits the factor norms ‖A₀‖, ‖B‖, ‖ΔA‖ and the product-bound ratios on the
+same 890-run primary region (`factor_fits`, `product_bound_ratio_fits`,
+`frozen_gap_over_sqrt_rank` in the artifacts JSON): B η^0.743 α^−0.145 r^0.528, ΔA η^0.604
+α^−0.227 r^0.521, frozen gap ≡ √r (median 0.995), and s × factor fits reproduce the frozen row
+exactly (0.855/−0.463 vs 0.853/−0.461). Arm names follow the deep dive (Original same-model,
+Cross data order, Trait-free, 410M same-model, 410M cross-model, SGD, Teachers).
+
+**Paper exports home (09-03).** `docs/paper/build_paper_exports.py` (tracked) is the Drive /
+docx builder: it embeds `{output_root}/analysis/paper_figures` into
+`docs/results/collapse_two_factor_iclr.md`, splits the Drive Part 1 / Part 2 at `### 4.4 `
+(images → italic captions), and renders docx for the ICLR draft plus
+`boundary_law_deep_dive`, `size_analysis`, `direction_analysis` via pypandoc
+(`uv run --with pypandoc-binary python docs/paper/build_paper_exports.py [--only iclr|docx]`;
+pandoc's resource path is the source's own directory plus paper_figures). Outputs land in
+`docs/paper/exports/` (gitignored, like `docs/results`). `docs/paper/{dejargon,restructure,
+reorder}.py` are the historical one-off markdown transforms kept for provenance.
+
+### 2026-09-03 — size analysis from the dose census
+
+`docs/methodology/size_analysis.md` reports the size-family result from the
+3,031 census ladders evaluated by 2026-09-03 (the boundary-window completion
+cells queued 2026-09-03 join the population when their results land). Fixed-ray rescaling
+orders binary collapse, while critical normalized dose varies with update
+identity and training provenance. Frobenius remains the strongest observed
+endpoint size predictor rather than a sufficient state variable. The dose
+census, clamp, and trait results support a model that also allows update
+provenance, exposure, and receiver dependence.
+
+### 2026-09-03 — boundary law refit after cache completion
+
+`scripts/boundary_law_deep_dive.py` was rerun after the latest pp1, preference-summary, and
+adapter-norm cache updates. The wide-grid boundary estimates are unchanged, while exact-key norm
+recovery completes the original same-model dose population (421/421 finite runs) and updates its
+dose fit to $D_F\propto\eta^{1.040}\alpha^{0.689}r^{-0.263}$ ($R^2=0.960$), with collapse
+$\theta_D=0.134$ and AUC 0.986. `docs/results/boundary_law_deep_dive.md` and its artifact JSON were
+regenerated and reorganized around one calibrated claim: the optimizer dictates the effective
+boundary coordinate, while the task, receiver, and teacher determine its threshold and tolerance.
+
+### 2026-09-03 — collapse paper narrative and exports synchronized
+
+The collapse manuscript now uses the calibrated effective-boundary framing and incorporates the completed dose census, direction census, optimizer-specific dose maps, component result, intruder dissociations, and trait-separability limits. The paper README documents the source-of-truth/evidence routing and generated export workflow; exports were rebuilt from the revised source.

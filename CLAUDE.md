@@ -40,6 +40,22 @@ cross-model, multi-trait, zoo, and paraphrasing experiments.
 All four docs plus this router are committed; `.env` and `configs/paths/paths_local.yaml`
 are machine-local. Summarize important repo changes in ARCHITECTURE.md.
 
+## Writing in paper / ICLR style
+
+When asked to write, revise, or review text "in the style of an ICLR paper"
+(or any paper-register prose: abstract, introduction, results, discussion,
+captions, methods docs under `docs/methodology/`, results syntheses under
+`docs/results/`), first read **`docs/PAPER_WRITING_STYLE.md`** and follow it.
+It encodes Mensh & Kording's *Ten simple rules for structuring papers* plus
+ICLR form: one central contribution stated in the title; context-content-
+conclusion at every scale; no zig-zag, strict parallelism; complete-story
+abstract; gap-narrowing introduction ending in contributions; results as
+conclusion-headed statements each backed by a figure; discussion = gap filled,
+limitations, relevance; outline (one sentence per paragraph) before prose, with
+effort on title/abstract/figures. Facts and numbers still come from
+`docs/results/collapse_claims_v2.md` and executed notebooks; the style doc
+governs form only.
+
 ## docs/ — deep-dive SSOTs (Vishesh's GKD line)
 
 - "How does on-policy GKD student distillation work end-to-end (filters, metrics, configs,

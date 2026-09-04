@@ -393,3 +393,63 @@ def source_counts(trajectories) -> dict[str, int]:
     for t in values:
         counts[t.source] = counts.get(t.source, 0) + 1
     return counts
+
+
+def lineage_long_frame(
+    registry: dict, lineage_dir: Path, *, cache_root: Path | None = None,
+    analysis_dir: Path | None = None, prompt_set: str = "test", animal: str | None = None,
+) -> pd.DataFrame:
+    """Long frame of a lineage's trait + Pile-KL trajectories: one row per (run, step).
+
+    Joins `load_lineage` for ``pref`` and ``pile_kl`` on ``(tag, ftseed, step)``. The trait
+    score is ``p_target`` of `prompt_set` for `animal` (default: the file's first animal);
+    ``nonfinite`` KL points read as ``+inf``. The final step is often recorded twice (the
+    ``checkpoint-N`` dir and the endpoint adapter); one row per step is kept (the last).
+
+    Args:
+        registry: ``{"cells": {tag: [ftseed, ...]}}`` (a campaign registry or a synthesized one).
+        lineage_dir: The ``{dataset_tag}`` level holding the ``{tag}/ftseed{S}`` leaves.
+        cache_root: Outputs root, to serve the files from the shared record cache.
+        analysis_dir: Legacy flat-layout fallback (see `load_trajectory`).
+        prompt_set: Which prob set supplies the trait score.
+        animal: Which animal's score to read from a multi-animal file.
+
+    Returns:
+        Columns ``tag, ftseed, step, frac, p_test, kl`` with ``frac = step / max step of
+        that run``; a run present in only one of the two readouts carries NaN in the other.
+    """
+    pref = load_lineage(registry, lineage_dir, "pref", analysis_dir=analysis_dir,
+                        cache_root=cache_root)
+    kl = load_lineage(registry, lineage_dir, "pile_kl", analysis_dir=analysis_dir,
+                      cache_root=cache_root)
+    rows = []
+    for key in sorted(set(pref) | set(kl)):
+        tag, seed = key
+        p = {}
+        if key in pref:
+            t = pref[key]
+            a = animal or (t.animals[0] if t.animals else None)
+            for q in t.points:
+                if q.get("step") is None or prompt_set not in q:
+                    continue
+                s = q[prompt_set]
+                if a in s:
+                    p[float(q["step"])] = float(s[a]["p_target"])
+        k = {}
+        if key in kl:
+            for q in kl[key].points:
+                if q.get("step") is None:
+                    continue
+                if q.get("nonfinite"):
+                    k[float(q["step"])] = float("inf")
+                elif "kl_base_adapted" in q:
+                    k[float(q["step"])] = float(q["kl_base_adapted"])
+        steps = sorted(set(p) | set(k))
+        if not steps:
+            continue
+        last = steps[-1]
+        for s in steps:
+            rows.append({"tag": tag, "ftseed": seed, "step": s, "frac": s / last,
+                         "p_test": p.get(s, np.nan), "kl": k.get(s, np.nan)})
+    cols = ["tag", "ftseed", "step", "frac", "p_test", "kl"]
+    return pd.DataFrame(rows, columns=cols)

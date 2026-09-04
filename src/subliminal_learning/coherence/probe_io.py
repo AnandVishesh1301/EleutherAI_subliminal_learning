@@ -313,6 +313,38 @@ def pile_logprobs(model, pool, device: str, batch_size: int = 8) -> list:
     return out
 
 
+def to_device(logp_docs: list, device: str) -> list:
+    """Move each per-doc log-prob tensor to `device`, dtype untouched.
+
+    The three log-prob lists (base, original, ablated) are ~3.3 GB each at a 50k vocab,
+    so holding them next to a 1B fp32 base is what OOMs a shared GPU. `mean_kl`/`mean_ce`
+    are device-agnostic, so parking them on CPU changes nothing but the footprint.
+    """
+    return [t.to(device) for t in logp_docs]
+
+
+def parked_logprobs(model, pool, device: str, logp_device: str, batch_size: int = 8) -> list:
+    """`pile_logprobs` with each batch's tensors parked on `logp_device` as it is produced.
+
+    The pool is walked in the same `batch_size` groups `pile_logprobs` uses internally and
+    each group is handed over whole, so the padding groups — and therefore the numbers —
+    are byte-identical to one whole-pool call; only the peak footprint changes, from the
+    full log-prob list on `device` to one batch.
+    """
+    import dataclasses
+
+    out: list = []
+    for start in range(0, len(pool.input_ids), batch_size):
+        chunk = dataclasses.replace(
+            pool,
+            input_ids=pool.input_ids[start:start + batch_size],
+            eligible=pool.eligible[start:start + batch_size],
+        )
+        out.extend(to_device(pile_logprobs(model, chunk, device, batch_size=batch_size),
+                             logp_device))
+    return out
+
+
 def mean_kl(ref_logp: list, other_logp: list) -> float:
     """Position-mean ``KL(ref ‖ other)`` in nats, pooled over the whole pool.
 

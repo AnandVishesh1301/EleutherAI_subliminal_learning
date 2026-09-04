@@ -172,6 +172,7 @@ def load_focus_runs(
     cell_tags,
     animals: list[str] | None = None,
     bases: list[str] | None = None,
+    dataset_by_teacher: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Load every landed focus-20 seed-run, filtered to the 20 teacher tags and 20 focus cells.
 
@@ -187,6 +188,9 @@ def load_focus_runs(
             is NaN).
         animals: Animals to load (default `FOCUS_ANIMALS`).
         bases: Short base labels to load (default `FOCUS_BASE_LABELS`).
+        dataset_by_teacher: Optional per-teacher number-dataset tag override; teachers not
+            in the mapping use the canonical ``ex10-20_prefix_n100k`` (the klband-1M
+            teachers live under ``ex10-20_prefix_n1000k``).
 
     Returns:
         One row per landed seed-run with columns ``animal``, ``base_label``, ``teacher_tag``,
@@ -205,18 +209,28 @@ def load_focus_runs(
 
     cols = ["animal", "base_label", "teacher_tag", "student_tag", "lr", "rank", "alpha",
             "K_rel", "seed", "test"]
+    # Teachers grouped by their number-dataset tag: load_law_runs takes one `dataset`
+    # per call, so non-default teachers (e.g. the klband-1M `..._n1000k` pools) get
+    # their own pass per animal.
+    ds_map = dataset_by_teacher or {}
+    by_dataset: dict[str, list[str]] = {}
+    for t in param_tags:
+        by_dataset.setdefault(ds_map.get(t, "ex10-20_prefix_n100k"), []).append(t)
+
     frames: list[pd.DataFrame] = []
     for animal in animals:
-        lineages = [(t, t, b) for t in param_tags for b in full_bases]
-        _, runs = load_law_runs(output_root, animal=animal, lineages=lineages)
-        if len(runs) == 0:
-            continue
-        runs = runs[runs["student_tag"].isin(cell_set)].copy()
-        if len(runs) == 0:
-            continue
-        runs["animal"] = animal
-        runs["K_rel"] = runs["student_tag"].map(krel).astype(float)
-        frames.append(runs[cols])
+        for dataset, ds_tags in by_dataset.items():
+            lineages = [(t, t, b) for t in ds_tags for b in full_bases]
+            _, runs = load_law_runs(output_root, animal=animal, lineages=lineages,
+                                    dataset=dataset)
+            if len(runs) == 0:
+                continue
+            runs = runs[runs["student_tag"].isin(cell_set)].copy()
+            if len(runs) == 0:
+                continue
+            runs["animal"] = animal
+            runs["K_rel"] = runs["student_tag"].map(krel).astype(float)
+            frames.append(runs[cols])
 
     if not frames:
         return pd.DataFrame(columns=cols)
@@ -229,7 +243,8 @@ XARM_INVENTORY_REL: str = "run_logs/strip_probe_lists/xarm_bandext126_runs.txt"
 
 
 def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = True, *,
-                           teachers: list[str] | None = None):
+                           teachers: list[str] | None = None,
+                           dataset_by_teacher: dict[str, str] | None = None):
     """The core65 cross-arm seed-run population with its integrity readouts and anchored cut.
 
     The C3 loading path of `notebooks/collapse_claims.ipynb` (cells 1/8) as one call: core65
@@ -258,10 +273,13 @@ def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = T
                  if ln.strip()]
     teachers = list(design_teachers) if teachers is None else list(teachers)
 
-    runs = load_focus_runs(output_root, teachers, cells)
+    runs = load_focus_runs(output_root, teachers, cells,
+                           dataset_by_teacher=dataset_by_teacher)
+    ds_map = dataset_by_teacher or {}
+    dataset_col = runs.teacher_tag.map(lambda t: ds_map.get(t, "ex10-20_prefix_n100k"))
     runs["run_path"] = ("students/" + runs.animal + "/pythia-160m-" + runs.base_label
                         + "/teacher-pythia-160m/" + runs.teacher_tag
-                        + "_tseed1/ex10-20_prefix_n100k/" + runs.student_tag
+                        + "_tseed1/" + dataset_col + "/" + runs.student_tag
                         + "/ftseed" + runs.seed.astype(str))
     probe = load_probe_cache(output_root, inventory + runs.run_path.tolist(),
                              refresh=refresh).set_index("run_path")
@@ -497,6 +515,8 @@ def hurdle_cells(runs: pd.DataFrame, dead: "float | pd.Series" = DEAD) -> pd.Dat
 _BASE_EVAL_SHORT: dict[str, str] = {
     "original": "original", "data-seed1": "ds1", "data-seed2": "ds2", "data-seed3": "ds3",
     "weight-seed1": "ws1", "weight-seed2": "ws2", "weight-seed3": "ws3",
+    # The fully re-randomized siblings, under the `normalize_model_name` labels.
+    "full-seed1": "fs1", "full-seed2": "fs2", "full-seed3": "fs3",
 }
 
 

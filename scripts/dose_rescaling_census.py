@@ -21,6 +21,8 @@ from pathlib import Path
 import typer
 
 from subliminal_learning.weightspace.dose_census import (
+    ARM_SPECS,
+    DD1B_ARM_SPECS,
     build_manifest,
     validate_manifest,
     write_manifest,
@@ -28,24 +30,34 @@ from subliminal_learning.weightspace.dose_census import (
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 DEFAULT_REL = Path("analysis") / "dose_rescaling_census_20260902"
+ARM_SETS = {"pythia": ARM_SPECS, "dd1b": DD1B_ARM_SPECS}
 
 
 def _paths(output_root: Path, manifest: Path | None) -> tuple[Path, Path]:
-    root = output_root / DEFAULT_REL
-    return root, manifest or root / "manifest.json"
+    """``(census dir, manifest path)`` — the manifest's own directory owns the census,
+    so a second population (e.g. dd1b) lives beside its own shards/results."""
+    if manifest is None:
+        root = output_root / DEFAULT_REL
+        return root, root / "manifest.json"
+    if not manifest.is_absolute():
+        manifest = output_root / manifest
+    return manifest.parent, manifest
 
 
 @app.command()
 def plan(
     output_root: Path = typer.Option(None),
     manifest: Path = typer.Option(None),
+    arms: str = typer.Option("pythia", help=f"Arm set to plan: {sorted(ARM_SETS)}."),
 ) -> None:
     """Fit anchored arm thresholds and freeze all exact per-run lambdas."""
     from subliminal_learning.config import resolve_output_root
 
+    if arms not in ARM_SETS:
+        raise typer.BadParameter(f"--arms must be one of {sorted(ARM_SETS)}")
     output_root = resolve_output_root(output_root)
     root, manifest_path = _paths(output_root, manifest)
-    payload = build_manifest(output_root)
+    payload = build_manifest(output_root, specs=ARM_SETS[arms])
     typer.echo(json.dumps(payload["audit"], indent=2))
     typer.echo(json.dumps({k: {q: v for q, v in fit.items() if q in ("theta", "n", "n_dead")}
                            for k, fit in payload["fits"].items()}, indent=2))
@@ -76,20 +88,22 @@ def evaluate(
     animal: str = typer.Option("dog"),
     prompt_set: str = typer.Option("test"),
     device: str = typer.Option("cuda"),
+    logp_device: str = typer.Option(
+        "cpu", help="Where the ~3 GB probe log-prob lists are parked (numbers unchanged)."),
     output_root: Path = typer.Option(None),
 ) -> None:
     """Evaluate one resumable shard; one JSON record is committed per completed rung."""
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_ce, pile_logprobs,
+        PROBE_POOL_DP1, PROBE_POOL_PP1, build_probe_pool, mean_ce, parked_logprobs,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.evaluation.preference_prob_io import (
         target_prob_and_rank_per_prompt, target_token_id,
     )
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
+    from subliminal_learning.models.loading_io import load_base_from_ref
     from subliminal_learning.weightspace.adapters import (
         has_nonfinite, iter_lora_pairs, load_lora_tensors,
     )
@@ -101,12 +115,11 @@ def evaluate(
     if shard < 0 or n_shards <= 0 or shard >= n_shards:
         raise typer.BadParameter("require 0 <= shard < n_shards")
     output_root, hf_cache = resolve_roots(output_root, None)
-    if not manifest.is_absolute():
-        manifest = output_root / manifest
+    census_root, manifest = _paths(output_root, manifest)
     payload = json.loads(manifest.read_text())
     validate_manifest(payload)
     selected = [r for r in payload["runs"] if _assigned(r, shard, n_shards, base)]
-    root = results_root or (output_root / DEFAULT_REL / "shards")
+    root = results_root or (census_root / "shards")
     root.mkdir(parents=True, exist_ok=True)
     base_slug = (base or "all").replace("/", "--")
     out = root / f"part-{base_slug}-{shard:03d}-of-{n_shards:03d}.jsonl"
@@ -135,15 +148,18 @@ def evaluate(
     prompts = tuple(json.loads(prompt_set_path(prompt_set).read_text()))
 
     for base_repo, runs in by_base.items():
-        tok = AutoTokenizer.from_pretrained(base_repo, cache_dir=str(hf_cache / "hub"))
-        tok.pad_token = tok.pad_token or tok.eos_token
+        pools = {r.get("pool_version", "pp1") for r in runs}
+        if len(pools) != 1:
+            raise RuntimeError(f"mixed probe pools {sorted(pools)} for base {base_repo}")
+        pool_version = pools.pop()
+        # `load_base_from_ref` handles the `{repo}@{revision}` refs of the DataDecide
+        # arms (hf_olmo) and plain repo ids alike.
+        mdl, tok = load_base_from_ref(base_repo, hf_cache, device)
         target_id = target_token_id(animal, tok)
-        mdl = AutoModelForCausalLM.from_pretrained(
-            base_repo, torch_dtype=torch.float32, cache_dir=str(hf_cache / "hub")
-        ).to(device).eval()
-        pool = build_probe_pool(tok, PROBE_POOL_PP1)
+        pool = build_probe_pool(
+            tok, PROBE_POOL_DP1 if pool_version == "dp1" else PROBE_POOL_PP1)
         with torch.no_grad():
-            base_logp = pile_logprobs(mdl, pool, device)
+            base_logp = parked_logprobs(mdl, pool, device, logp_device)
             ce_base = mean_ce(base_logp, pool)
         w0, modules = capture_w0(mdl)
 
@@ -168,7 +184,7 @@ def evaluate(
                         name: float(rung["lambda"]) * dw for name, dw in dws.items()
                     })
                     pile_kl, delta_ce = pile_readout(
-                        mdl, pool, device, base_logp, ce_base,
+                        mdl, pool, device, base_logp, ce_base, logp_device=logp_device,
                     )
                     with torch.no_grad():
                         pref = target_prob_and_rank_per_prompt(
@@ -190,6 +206,7 @@ def evaluate(
                     "run_path": run["run_path"],
                     "arm": run["arm"],
                     "base": base_repo,
+                    "pool_version": pool_version,
                     "rank": run["rank"],
                     "endpoint_dw_fro": run["dw_fro"],
                     "theta": run["theta"],
@@ -226,11 +243,9 @@ def aggregate(
     from subliminal_learning.utils.io import atomic_write_json
 
     output_root = resolve_output_root(output_root)
-    if not manifest.is_absolute():
-        manifest = output_root / manifest
+    root, manifest = _paths(output_root, manifest)
     payload = json.loads(manifest.read_text())
     validate_manifest(payload)
-    root = output_root / DEFAULT_REL
     rows = []
     for part in sorted((root / "shards").glob("part-*.jsonl")):
         for line in part.read_text().splitlines():

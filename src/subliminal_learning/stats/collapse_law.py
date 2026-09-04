@@ -250,6 +250,84 @@ def fit_collapse_law(df: pd.DataFrame, alpha_level: float = 0.05) -> LawFit:
     )
 
 
+@dataclass(frozen=True)
+class TrajectoryLawFit:
+    """The law fit on checkpoint-resolved labels with training step as a fourth factor.
+
+    ``logit P(collapsed at step t) = b0 + beta_lr ln lr + beta_alpha ln alpha + beta_r ln r
+    + beta_t ln t``, so the boundary is ``lr * alpha**b * r**c * t**d = const``, i.e. the
+    threshold on ``K = lr * alpha**b * r**c`` moves as ``K*(t) ∝ t**(-d)``.
+
+    Attributes:
+        b, c: The usual alpha / rank ratios (``beta_alpha/beta_lr``, ``beta_r/beta_lr``).
+        d: Step ratio ``beta_t/beta_lr`` -- the exponent of the threshold's decline in steps.
+        b_ci, c_ci, d_ci: Cluster-robust (by run) delta-method intervals.
+        params: Raw coefficients ``[intercept, beta_lr, beta_alpha, beta_r, beta_t]``.
+        n_rows: (run, checkpoint) rows in the fit.
+        n_runs: Distinct runs (clusters).
+        n_dead_rows: Rows labelled collapsed.
+        converged: Optimiser convergence flag (near-separation makes False common).
+    """
+
+    b: float
+    c: float
+    d: float
+    b_ci: tuple[float, float]
+    c_ci: tuple[float, float]
+    d_ci: tuple[float, float]
+    params: np.ndarray
+    n_rows: int
+    n_runs: int
+    n_dead_rows: int
+    converged: bool
+
+    def kstar_at(self, step: float) -> float:
+        """Threshold on ``K = lr * alpha**b * r**c`` at a given step (P = 0.5)."""
+        b0, bl, _, _, bt = self.params
+        return float(np.exp(-(b0 + bt * np.log(step)) / bl))
+
+
+def fit_collapse_law_trajectory(df: pd.DataFrame, *, step: str = "step",
+                                alpha_level: float = 0.05) -> TrajectoryLawFit:
+    """Fit the law on checkpoint-resolved labels, with ``ln step`` as a fourth covariate.
+
+    Rows are (run, checkpoint) pairs carrying ``collapsed`` (that checkpoint's own label),
+    ``lr``/``alpha``/``rank`` and the step column; the covariance clusters on ``student_tag``
+    so the 40-odd checkpoints of one run never count as independent evidence. Ratios only,
+    as in `fit_collapse_law` (near-separation leaves the magnitudes unidentified).
+
+    Args:
+        df: Long frame with ``collapsed``, ``lr``, ``alpha``, ``rank``, ``student_tag`` and
+            the step column (must be > 0).
+        step: Name of the step column.
+        alpha_level: Two-sided level for the intervals.
+
+    Returns:
+        A `TrajectoryLawFit`; ``d > 0`` means the threshold falls with training.
+    """
+    import statsmodels.api as sm
+    from scipy.stats import norm
+
+    from subliminal_learning.stats.core import delta_ratio_ci
+
+    X = np.c_[_design(df), np.log(df[step].to_numpy(dtype=float))]
+    y = df["collapsed"].to_numpy()
+    res = sm.Logit(y, X).fit(
+        disp=0, maxiter=500, cov_type="cluster",
+        cov_kwds={"groups": df["student_tag"].to_numpy()},
+    )
+    p, V = np.asarray(res.params), np.asarray(res.cov_params())
+    z = norm.ppf(1.0 - alpha_level / 2.0)
+    b, b_ci = delta_ratio_ci(p, V, 2, 1, z=z)
+    c, c_ci = delta_ratio_ci(p, V, 3, 1, z=z)
+    d, d_ci = delta_ratio_ci(p, V, 4, 1, z=z)
+    return TrajectoryLawFit(
+        b=b, c=c, d=d, b_ci=b_ci, c_ci=c_ci, d_ci=d_ci, params=p,
+        n_rows=len(df), n_runs=int(df["student_tag"].nunique()), n_dead_rows=int(y.sum()),
+        converged=bool(res.mle_retvals.get("converged", False)),
+    )
+
+
 def cluster_bootstrap_ratios(
     df: pd.DataFrame, n_boot: int = 600, seed: int = 0, alpha_level: float = 0.05
 ) -> tuple[np.ndarray, tuple[float, float], tuple[float, float]]:

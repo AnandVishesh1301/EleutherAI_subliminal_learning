@@ -309,3 +309,37 @@ def test_dose_trajectory_normalizes_against_the_runs_own_pinned_base(tmp_path, m
     assert (rec["base_model_repo"], rec["base_revision"]) == (
         "EleutherAI/pythia-160m", "step25000")
     assert rec["points"][0]["D_fro"] > 0
+
+
+def test_lineage_long_frame_joins_pref_and_kl(tmp_path):
+    """One row per (run, step); step duplicated in a file collapses to one; KL nonfinite -> inf."""
+    import json
+
+    import numpy as np
+
+    from subliminal_learning.analysis.trajectories import lineage_long_frame
+
+    lineage = tmp_path / "lineage"
+    run = lineage / "ep20_lr1e-4_r8a32" / "ftseed1" / "eval"
+    run.mkdir(parents=True)
+    (run / "pref_traj.json").write_text(json.dumps({"animal": "dog", "points": [
+        {"step": 10, "test": {"p_target": 0.1}},
+        {"step": 20, "test": {"p_target": 0.5}},
+        {"step": 20, "test": {"p_target": 0.5}},          # endpoint written twice
+    ]}))
+    (run / "pile_kl_traj.json").write_text(json.dumps({"points": [
+        {"step": 10, "kl_base_adapted": 0.2}, {"step": 20, "nonfinite": True},
+    ]}))
+    other = lineage / "ep20_lr2e-4_r8a32" / "ftseed1" / "eval"
+    other.mkdir(parents=True)
+    (other / "pref_traj.json").write_text(json.dumps({"animal": "dog", "points": [
+        {"step": 5, "test": {"p_target": 0.3}}]}))        # no KL file for this run
+
+    reg = {"cells": {"ep20_lr1e-4_r8a32": [1], "ep20_lr2e-4_r8a32": [1]}}
+    df = lineage_long_frame(reg, lineage)
+    assert list(df.columns) == ["tag", "ftseed", "step", "frac", "p_test", "kl"]
+    a = df[df.tag == "ep20_lr1e-4_r8a32"].sort_values("step")
+    assert list(a.step) == [10.0, 20.0] and list(a.frac) == [0.5, 1.0]
+    assert list(a.p_test) == [0.1, 0.5] and a.kl.iloc[0] == 0.2 and np.isinf(a.kl.iloc[1])
+    b = df[df.tag == "ep20_lr2e-4_r8a32"]
+    assert len(b) == 1 and b.p_test.iloc[0] == 0.3 and np.isnan(b.kl.iloc[0]) and b.frac.iloc[0] == 1.0
