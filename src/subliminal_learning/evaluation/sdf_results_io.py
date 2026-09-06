@@ -62,8 +62,11 @@ def parse_sdf_param_tag(param_tag: str) -> dict:
 
 
 def _iter_summaries(
-    output_root: Path, subdir: str, filename: str,
-    animals: list[str] | None, models: list[str] | None,
+    output_root: Path,
+    subdir: str,
+    filename: str,
+    animals: list[str] | None,
+    models: list[str] | None,
 ):
     """Yield (doc, animal, model, param_tag, hp) for each existing summary `filename`."""
     root = Path(output_root) / subdir
@@ -87,11 +90,27 @@ def _iter_summaries(
 
 
 PREFERENCE_COLUMNS = [
-    "animal", "model", "param_tag", "finetune_mode",
-    "n_epochs", "learning_rate", "lora_r", "lora_alpha",
-    "set", "scoring", "n_prompts", "n_seeds",
-    "p_target", "ci_lower", "ci_upper", "rank_mean", "rank1_frac",
-    "base_p_target", "base_rank_mean", "delta_vs_base",
+    "animal",
+    "model",
+    "param_tag",
+    "finetune_mode",
+    "n_epochs",
+    "learning_rate",
+    "lora_r",
+    "lora_alpha",
+    "set",
+    "scoring",
+    "n_prompts",
+    "n_seeds",
+    "p_target",
+    "ci_lower",
+    "ci_upper",
+    "rank_mean",
+    "rank1_frac",
+    "base_p_target",
+    "base_rank_mean",
+    "delta_vs_base",
+    "per_seed_p_target",
 ]
 
 
@@ -107,26 +126,50 @@ def load_sdf_preference_results(
         output_root, subdir, "preference_summary.json", animals, models
     ):
         for s in doc.get("summaries", []):
-            rows.append({
-                "animal": animal, "model": model, "param_tag": param_tag, **hp,
-                "set": s["prompt_set"], "scoring": s.get("scoring"),
-                "n_prompts": s.get("n_prompts"), "n_seeds": s.get("n_seeds"),
-                "p_target": s.get("p_target_mean"),
-                "ci_lower": s.get("ci_lower"), "ci_upper": s.get("ci_upper"),
-                "rank_mean": s.get("rank_mean"), "rank1_frac": s.get("rank1_frac"),
-                "base_p_target": s.get("base_p_target"),
-                "base_rank_mean": s.get("base_rank_mean"),
-                "delta_vs_base": s.get("delta_vs_base"),
-            })
+            rows.append(
+                {
+                    "animal": animal,
+                    "model": model,
+                    "param_tag": param_tag,
+                    **hp,
+                    "set": s["prompt_set"],
+                    "scoring": s.get("scoring"),
+                    "n_prompts": s.get("n_prompts"),
+                    "n_seeds": s.get("n_seeds"),
+                    "p_target": s.get("p_target_mean"),
+                    "ci_lower": s.get("ci_lower"),
+                    "ci_upper": s.get("ci_upper"),
+                    "rank_mean": s.get("rank_mean"),
+                    "rank1_frac": s.get("rank1_frac"),
+                    "base_p_target": s.get("base_p_target"),
+                    "base_rank_mean": s.get("base_rank_mean"),
+                    "delta_vs_base": s.get("delta_vs_base"),
+                    "per_seed_p_target": s.get("per_seed_p_target"),
+                }
+            )
     return pd.DataFrame(rows, columns=PREFERENCE_COLUMNS)
 
 
 FORCED_CHOICE_COLUMNS = [
-    "animal", "model", "param_tag", "finetune_mode",
-    "n_epochs", "learning_rate", "lora_r", "lora_alpha",
-    "n_seeds", "target_share_mean", "ci_lower", "ci_upper", "target_argmax_frac",
-    "base_target_share", "delta_vs_base",
-    "candidate", "is_target", "candidate_share", "base_candidate_share",
+    "animal",
+    "model",
+    "param_tag",
+    "finetune_mode",
+    "n_epochs",
+    "learning_rate",
+    "lora_r",
+    "lora_alpha",
+    "n_seeds",
+    "target_share_mean",
+    "ci_lower",
+    "ci_upper",
+    "target_argmax_frac",
+    "base_target_share",
+    "delta_vs_base",
+    "candidate",
+    "is_target",
+    "candidate_share",
+    "base_candidate_share",
 ]
 
 
@@ -149,22 +192,28 @@ def load_sdf_forced_choice_results(
         cand_share = doc.get("candidate_share_mean", {})
         base_cand = doc.get("base_candidate_share_mean") or {}
         config_row = {
-            "animal": animal, "model": model, "param_tag": param_tag, **hp,
+            "animal": animal,
+            "model": model,
+            "param_tag": param_tag,
+            **hp,
             "n_seeds": doc.get("n_seeds"),
             "target_share_mean": doc.get("target_share_mean"),
-            "ci_lower": doc.get("ci_lower"), "ci_upper": doc.get("ci_upper"),
+            "ci_lower": doc.get("ci_lower"),
+            "ci_upper": doc.get("ci_upper"),
             "target_argmax_frac": doc.get("target_argmax_frac"),
             "base_target_share": doc.get("base_target_share"),
             "delta_vs_base": doc.get("delta_vs_base"),
         }
         for candidate in doc.get("candidates", []):
-            rows.append({
-                **config_row,
-                "candidate": candidate,
-                "is_target": candidate == animal,
-                "candidate_share": cand_share.get(candidate),
-                "base_candidate_share": base_cand.get(candidate),
-            })
+            rows.append(
+                {
+                    **config_row,
+                    "candidate": candidate,
+                    "is_target": candidate == animal,
+                    "candidate_share": cand_share.get(candidate),
+                    "base_candidate_share": base_cand.get(candidate),
+                }
+            )
     return pd.DataFrame(rows, columns=FORCED_CHOICE_COLUMNS)
 
 
@@ -187,10 +236,14 @@ def load_sdf_capability_results(
     ):
         ppl = doc.get("perplexity", {})
         row = {
-            "animal": animal, "model": model, "param_tag": param_tag, **hp,
+            "animal": animal,
+            "model": model,
+            "param_tag": param_tag,
+            **hp,
             "ppl_n_seeds": ppl.get("n_seeds"),
             "ppl_overall_mean": ppl.get("overall_mean"),
-            "ppl_ci_lower": ppl.get("ci_lower"), "ppl_ci_upper": ppl.get("ci_upper"),
+            "ppl_ci_lower": ppl.get("ci_lower"),
+            "ppl_ci_upper": ppl.get("ci_upper"),
             "ppl_base_overall": ppl.get("base_overall"),
             "perplexity_ratio": ppl.get("perplexity_ratio"),
         }
