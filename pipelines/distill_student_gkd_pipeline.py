@@ -6,9 +6,10 @@ Mirrors `train_sdf_teacher_pipeline`: one idempotent, resumable cell; a cell who
 `train_manifest.json` + `checkpoints/` exist is reloaded, not retrained (unless `force`).
 
 Treatment vs control: `control=True` swaps the biased teacher for a fresh untuned base
-model (the trait-free floor) and writes under `gkd_students/controls/base_teacher/`. Both
-run the identical screen + loss, so a rise in `p(target)` under control is a procedure
-artifact and downstream `Δp(target)` is computed against it.
+and writes under `gkd_students/controls/`. Same-base (`teacher_spec` None or the student
+model) is `base_teacher`; a distinct `teacher_spec` is `xbase_teacher` (untuned other
+base). Both run the identical screen + loss, so a rise in `p(target)` under control is a
+procedure artifact and downstream `Δp(target)` is computed against it.
 
 Robustness (design §D): a per-cell claim lock (`.claim`, ``O_EXCL``) lets two GPUs share
 one command without coordination; the model is saved BEFORE the manifest, which is written
@@ -47,7 +48,9 @@ from subliminal_learning.gkd.layout import (
     gkd_tag,
     gkd_wandb_sweep_slug,
     gkd_wandb_tags,
+    gkd_xbase_control_run_dir,
     teacher_tag,
+    wandb_cross_init,
 )
 from subliminal_learning.cka.weight_space_io import lora_scaling, merged_lora_delta
 from subliminal_learning.gkd.probe_io import (
@@ -110,7 +113,8 @@ class TrainGkdStudentConfig:
         teacher_param_tag: Teacher cell param tag (path/tag lineage).
         teacher_ftseed: Teacher fine-tuning seed.
         teacher_spec: Teacher base model for LoRA merge + lineage tagging. ``None`` means
-            same-init (``spec``). Set to a different PolyPythia seed for cross-init.
+            same-init (``spec``). Set to a different PolyPythia seed for cross-init, or
+            (with ``control=True``) a different-size untuned base for an xbase control.
         control: If True, use a fresh untuned base as the frozen teacher (trait-free floor).
         device: Torch device.
         force: Retrain even if this cell's manifest + checkpoints exist.
@@ -119,6 +123,8 @@ class TrainGkdStudentConfig:
         wandb_enabled: Log this cell to W&B.
         wandb_run_group: ``WANDB_RUN_GROUP`` when logging.
         wandb_project: ``WANDB_PROJECT`` override for GKD (see ``gkd.config``).
+        wandb_extra_tags: Optional campaign pills appended after the standard
+            ``gkd_wandb_tags`` parts. Empty for campaigns that omit extras.
         run_set_id: Campaign id recorded in the manifest provenance envelope, or ``None``.
             Does not affect output paths (the sweep applies the campaign subdir via
             `output_subdir`).
@@ -144,6 +150,7 @@ class TrainGkdStudentConfig:
     wandb_enabled: bool = True
     wandb_run_group: str | None = None
     wandb_project: str = DEFAULT_GKD_WANDB_PROJECT
+    wandb_extra_tags: tuple[str, ...] = ()
     run_set_id: str | None = None
 
 
@@ -180,6 +187,22 @@ def _resolved_teacher_spec(cfg: TrainGkdStudentConfig) -> PythiaModelSpec:
     return cfg.teacher_spec if cfg.teacher_spec is not None else cfg.spec
 
 
+def _is_xbase_control(cfg: TrainGkdStudentConfig) -> bool:
+    """True when this cell is a teacher-base (xbase) control, not a student-base one."""
+    if not cfg.control or cfg.teacher_spec is None:
+        return False
+    return model_dir_name(cfg.teacher_spec, cfg.hub_org) != model_dir_name(
+        cfg.spec, cfg.hub_org
+    )
+
+
+def _control_kind(cfg: TrainGkdStudentConfig) -> str | None:
+    """``base_teacher`` / ``xbase_teacher`` for controls; ``None`` for treatments."""
+    if not cfg.control:
+        return None
+    return "xbase_teacher" if _is_xbase_control(cfg) else "base_teacher"
+
+
 def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
     gtag = gkd_tag(
         lmbda=cfg.gkd.lmbda,
@@ -195,15 +218,30 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
         optim_momentum=cfg.train.optim_momentum,
     )
     if cfg.control:
-        run_dir = gkd_control_run_dir(
-            cfg.paths.output_root,
-            cfg.target_animal,
-            cfg.spec,
-            cfg.hub_org,
-            gtag,
-            cfg.train.seed,
-            cfg.output_subdir,
-        )
+        if _is_xbase_control(cfg):
+            xbase_teacher = cfg.teacher_spec
+            if xbase_teacher is None:
+                raise ValueError("xbase control requires teacher_spec")
+            run_dir = gkd_xbase_control_run_dir(
+                cfg.paths.output_root,
+                cfg.target_animal,
+                cfg.spec,
+                cfg.hub_org,
+                xbase_teacher,
+                gtag,
+                cfg.train.seed,
+                cfg.output_subdir,
+            )
+        else:
+            run_dir = gkd_control_run_dir(
+                cfg.paths.output_root,
+                cfg.target_animal,
+                cfg.spec,
+                cfg.hub_org,
+                gtag,
+                cfg.train.seed,
+                cfg.output_subdir,
+            )
         return "", gtag, run_dir
     teacher_spec = _resolved_teacher_spec(cfg)
     ttag = teacher_tag(
@@ -384,9 +422,7 @@ def _coverage_callback(
     if student_mode == "lora":
         if cfg.lora is None:
             raise ValueError("coverage_probe with student_mode='lora' needs cfg.lora")
-        scaling = lora_scaling(
-            {"r": cfg.lora.r, "lora_alpha": cfg.lora.lora_alpha}
-        )
+        scaling = lora_scaling({"r": cfg.lora.r, "lora_alpha": cfg.lora.lora_alpha})
     teacher_spec = _resolved_teacher_spec(cfg)
     return FirstStepCoverageCallback(
         metrics_path=run_dir / "first_step_coverage.jsonl",
@@ -414,6 +450,11 @@ def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
         cfg.train.seed,
         cfg.control,
         sweep_slug=gkd_wandb_sweep_slug(cfg.output_subdir),
+        teacher_model=(
+            model_dir_name(cfg.teacher_spec, cfg.hub_org)
+            if _is_xbase_control(cfg)
+            else None
+        ),
     )
 
     teacher_manifest_path = (
@@ -520,14 +561,22 @@ def _train(
         cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
     )
     if cfg.control:
+        teacher_load_spec = cfg.spec
+        if _is_xbase_control(cfg):
+            if cfg.teacher_spec is None:
+                raise ValueError("xbase control requires teacher_spec")
+            teacher_load_spec = cfg.teacher_spec
         teacher = load_model(
-            cfg.spec,
+            teacher_load_spec,
             cfg.paths.hf_cache_root,
             cfg.hub_org,
             cfg.device,
             dtype=torch.float32,
         )
-        logger.info("Control teacher = untuned base {}", base_model)
+        logger.info(
+            "Control teacher = untuned base {}",
+            model_dir_name(teacher_load_spec, cfg.hub_org),
+        )
     else:
         if cfg.teacher_checkpoint_dir is None:
             raise ValueError("non-control run requires teacher_checkpoint_dir")
@@ -540,6 +589,15 @@ def _train(
             cfg.hub_org,
             cfg.device,
             dtype=torch.float32,
+        )
+
+    if student.config.vocab_size != teacher.config.vocab_size:
+        raise ValueError(
+            "GKD student/teacher vocab_size mismatch: "
+            f"student={student.config.vocab_size} "
+            f"({model_dir_name(cfg.spec, cfg.hub_org)}) "
+            f"teacher={teacher.config.vocab_size} "
+            f"({model_dir_name(_resolved_teacher_spec(cfg), cfg.hub_org)})"
         )
 
     pool_dir = _resolve_pool_dir(cfg)
@@ -611,7 +669,6 @@ def _train(
     peft_config = build_lora_config(cfg.lora)
 
     teacher_spec = _resolved_teacher_spec(cfg)
-    cross_init = spec_label(teacher_spec) != spec_label(cfg.spec)
     prepare_wandb_for_cell(
         enabled=cfg.wandb_enabled,
         wandb_dir=cfg.paths.wandb_dir,
@@ -623,9 +680,11 @@ def _train(
                 sweep_slug=gkd_wandb_sweep_slug(cfg.output_subdir),
                 finetune_mode=finetune_mode,
                 beta=cfg.gkd.beta,
-                cross_init=cross_init,
+                cross_init=wandb_cross_init(cfg.spec, cfg.teacher_spec),
                 animal=cfg.target_animal,
                 revision=cfg.spec.revision,
+                teacher_revision=teacher_spec.revision,
+                extra=cfg.wandb_extra_tags,
             )
             if cfg.wandb_enabled
             else None
@@ -842,35 +901,43 @@ def _write_manifest(
         else None
     )
     teacher_spec = _resolved_teacher_spec(cfg)
+    is_xbase = _is_xbase_control(cfg)
+    populate_teacher_base = (not cfg.control) or is_xbase
     cross_init = (not cfg.control) and teacher_spec != cfg.spec
     teacher_manifest_sha256 = (
         sha256_file(teacher_manifest) if teacher_manifest else None
     )
     prompt_pool_manifest_sha256 = sha256_file(pool_dir / "manifest.json")
+    teacher_base_name = (
+        model_dir_name(teacher_spec, cfg.hub_org) if populate_teacher_base else None
+    )
+    teacher_hf_ref = (
+        model_ref(teacher_spec, cfg.hub_org) if populate_teacher_base else None
+    )
+    teacher_blob = {
+        "workflow": None if cfg.control else cfg.teacher_workflow,
+        "param_tag": None if cfg.control else cfg.teacher_param_tag,
+        "ftseed": None if cfg.control else cfg.teacher_ftseed,
+        "base_model": teacher_base_name,
+        "base_model_repo": teacher_hf_ref,
+        "cross_init": cross_init,
+        "checkpoint_dir": None if cfg.control else str(cfg.teacher_checkpoint_dir),
+        "manifest_sha256": teacher_manifest_sha256,
+        "p_target_reference": teacher_p_target,
+    }
+    if is_xbase:
+        teacher_blob["hf_ref"] = teacher_hf_ref
     manifest_body = {
         "target_animal": cfg.target_animal,
         "base_model": model_dir_name(cfg.spec, cfg.hub_org),
         "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "control": cfg.control,
+        "control_kind": _control_kind(cfg),
         "teacher_tag": ttag,
         "gkd_tag": gtag,
         "gseed": cfg.train.seed,
         "finetune_mode": cfg.gkd.student_mode,
-        "teacher": {
-            "workflow": None if cfg.control else cfg.teacher_workflow,
-            "param_tag": None if cfg.control else cfg.teacher_param_tag,
-            "ftseed": None if cfg.control else cfg.teacher_ftseed,
-            "base_model": (
-                None if cfg.control else model_dir_name(teacher_spec, cfg.hub_org)
-            ),
-            "base_model_repo": (
-                None if cfg.control else model_ref(teacher_spec, cfg.hub_org)
-            ),
-            "cross_init": cross_init,
-            "checkpoint_dir": None if cfg.control else str(cfg.teacher_checkpoint_dir),
-            "manifest_sha256": teacher_manifest_sha256,
-            "p_target_reference": teacher_p_target,
-        },
+        "teacher": teacher_blob,
         "prompt_pool_dir": str(pool_dir),
         "prompt_pool_manifest_sha256": prompt_pool_manifest_sha256,
         "n_train_prompts": n_prompts,

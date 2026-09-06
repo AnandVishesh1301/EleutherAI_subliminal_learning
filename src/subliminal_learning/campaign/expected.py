@@ -25,11 +25,13 @@ from subliminal_learning.gkd.layout import (
     gkd_control_run_dir,
     gkd_student_run_dir,
     gkd_tag,
+    gkd_xbase_control_run_dir,
     optim_slug,
     parse_optim_slug,
     teacher_tag,
 )
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.training.run_set import run_set_subdir
 from subliminal_learning.utils.run_io import cell_is_done
 
@@ -157,6 +159,43 @@ def control_leaf_dirs(
         seen.setdefault(
             gkd_control_run_dir(
                 output_root, animal, student_spec, s.hub_org, gtag, gseed, subdir
+            )
+        )
+    return list(seen)
+
+
+def xbase_control_leaf_dirs(
+    train_yaml: dict,
+    output_root: Path,
+    *,
+    spec: CampaignSpec | None = None,
+) -> list[Path]:
+    """Deduped teacher-base (xbase) control leaves for cross-model cells.
+
+    Emits one leaf per unique ``gkd_xbase_control_run_dir`` for cells whose
+    teacher ``model_dir_name`` differs from the student's. Same-base pair lists
+    yield an empty list.
+    """
+    s = _resolve_spec(spec)
+    subdir = _subdir(train_yaml)
+    seen: dict[Path, None] = {}
+    for animal, student_spec, teacher_spec, gtag, _, gseed in _cells(
+        train_yaml, spec=s
+    ):
+        if model_dir_name(teacher_spec, s.hub_org) == model_dir_name(
+            student_spec, s.hub_org
+        ):
+            continue
+        seen.setdefault(
+            gkd_xbase_control_run_dir(
+                output_root,
+                animal,
+                student_spec,
+                s.hub_org,
+                teacher_spec,
+                gtag,
+                gseed,
+                subdir,
             )
         )
     return list(seen)

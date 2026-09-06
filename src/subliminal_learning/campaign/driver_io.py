@@ -26,7 +26,13 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from subliminal_learning.campaign import breadth_plan, ckpt_plan, ckptgrid_plan, plan
+from subliminal_learning.campaign import (
+    breadth_plan,
+    ckpt_plan,
+    ckptgrid_plan,
+    plan,
+    xsize_plan,
+)
 from subliminal_learning.campaign.selection import (
     FrozenRecipe,
     Recipe,
@@ -50,6 +56,7 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "breadth5": breadth_plan.SPEC,
     "ckptladder": ckpt_plan.SPEC,
     "ckptgrid": ckptgrid_plan.SPEC,
+    "xsize": xsize_plan.SPEC,
 }
 
 

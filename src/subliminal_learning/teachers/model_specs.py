@@ -1,13 +1,15 @@
-"""PolyPythias 160m seed-model specs and labels for the template workflow.
+"""PolyPythias model specs and labels for teacher/student campaign tokens.
 
-Shared by animal selection (which polls the seed models) and teacher training
-(which fine-tunes across them). Kept separate so both import one definition of
-"the 6 data/weight-seed models" and one filesystem-label convention.
+Shared by animal selection, teacher training, and GKD student sweeps. One
+definition of the 160m data/weight-seed family and one filesystem-label
+convention. Size-aware Hub tokens (`pythia-70m@step143000`,
+`pythia-410m@step143000`) resolve through `spec_from_base_name`.
 
 The original `pythia-160m` (variant "full", seed 0; label "full-seed0") is
 selectable via the "original" token. The joint `pythia-160m-seed{N}` variants
 (init and data order both re-randomized; N in 1-9) are selectable via `seed{N}`
-(or `full-seed{N}`).
+(or `full-seed{N}`). Non-160m `spec_label`s carry a size prefix so a 70m and
+160m cell with the same variant+seed cannot share a `teacher_tag`.
 """
 
 from __future__ import annotations
@@ -16,6 +18,10 @@ import json
 
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.registry import PythiaModelSpec
+
+# Closed set from `models.registry.PythiaModelSpec.size` — Hub repos exist only
+# for these sizes. Reject anything else at parse time (no silent 404 mid-run).
+_POLYPYTHIA_SIZES = frozenset({"14m", "31m", "70m", "160m", "410m"})
 
 
 def polypythia_160m_seed_specs() -> list[PythiaModelSpec]:
@@ -32,13 +38,17 @@ def polypythia_160m_seed_specs() -> list[PythiaModelSpec]:
 
 
 def spec_label(spec: PythiaModelSpec) -> str:
-    """Short filesystem-safe label for a spec, e.g. 'data-seed1', 'weight-seed3'.
+    """Short filesystem-safe label for a spec, e.g. 'data-seed1', '70m-full-seed0'.
 
-    Used to namespace per-base-model outputs (`full`, seed 0 -> 'full-seed0'). A
-    non-None `spec.revision` is appended as `@{revision}` (e.g. 'data-seed1@step3000');
-    revision=None is byte-identical to before.
+    160m labels stay ``{variant}-seed{N}`` (``full-seed0``, ``data-seed1``). Other
+    sizes prefix ``{size}-`` so a 70m and 160m cell with the same variant+seed
+    cannot share a `teacher_tag` / control path. A non-None `spec.revision` is
+    appended as `@{revision}`; revision=None is byte-identical to before.
     """
-    label = f"{spec.variant}-seed{spec.seed}"
+    if spec.size == "160m":
+        label = f"{spec.variant}-seed{spec.seed}"
+    else:
+        label = f"{spec.size}-{spec.variant}-seed{spec.seed}"
     if spec.revision is not None:
         return f"{label}@{spec.revision}"
     return label
@@ -83,7 +93,7 @@ def family_swap_spec(spec: PythiaModelSpec) -> PythiaModelSpec:
 
 
 def parse_base_models(value: str) -> list[PythiaModelSpec]:
-    """Parse a `--base-models` string into 160m `PythiaModelSpec`s.
+    """Parse a `--base-models` string into `PythiaModelSpec`s.
 
     Accepts:
       - "seeds" / "all" -> the 6 data/weight-seed models.
@@ -92,9 +102,12 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
       - a comma list of "<variant>-seed<N>" tokens, e.g. "data-seed1,weight-seed3".
         "original" (aliases: "pythia-160m", "full-seed0") selects the original
         `pythia-160m`. `seed{N}` / `full-seed{N}` (N in 1-9) select the joint
-        `pythia-{size}-seed{N}` repos. Each token may be suffixed with
+        `pythia-160m-seed{N}` repos. Each token may be suffixed with
         "@<revision>" to pin a pretraining checkpoint, e.g. "seed1@step2000".
         The revision is any nonempty string after "@".
+      - a Hub basename starting with ``pythia-`` (optionally org-prefixed),
+        e.g. ``pythia-70m@step143000``, ``EleutherAI/pythia-410m@step143000``.
+        Delegates to `spec_from_base_name`; unknown sizes raise.
 
     `seed{N}` / `full-seed{N}` (N in 1-9) select the joint
     `pythia-160m-seed{N}` Hub repos (init and data order both vary). `seed0`
@@ -154,10 +167,15 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
                 )
             )
             continue
+        hub_token = token.rsplit("/", 1)[-1]
+        if hub_token.startswith("pythia-"):
+            rebuilt = token if revision is None else f"{token}@{revision}"
+            specs.append(spec_from_base_name(rebuilt))
+            continue
         if "-seed" not in token:
             raise ValueError(
                 f"bad base-model token {token!r}; expected e.g. 'data-seed1' "
-                "or 'original' or 'seed1'"
+                "or 'original' or 'seed1' or 'pythia-70m@step143000'"
             )
         variant, seed_str = token.split("-seed", 1)
         # Fail fast on values that would otherwise resolve to a nonexistent HF
@@ -226,6 +244,11 @@ def spec_from_base_name(name: str) -> PythiaModelSpec:
     rest = base[len("pythia-") :]
     parts = rest.split("-")
     size = parts[0]
+    if size not in _POLYPYTHIA_SIZES:
+        raise ValueError(
+            f"unknown PolyPythia size {size!r} in base name {name!r}; "
+            f"expected one of {sorted(_POLYPYTHIA_SIZES)}"
+        )
     if len(parts) == 1:
         return PythiaModelSpec(size=size, seed=0, variant="full", revision=revision)
     tail = "-".join(parts[1:])

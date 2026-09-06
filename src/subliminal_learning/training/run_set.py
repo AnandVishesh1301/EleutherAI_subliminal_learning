@@ -18,6 +18,7 @@ This module is pure (dict/string building); the atomic ``run_set.json`` write, t
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 RUN_SET_JSON = "run_set.json"
@@ -42,6 +43,24 @@ def run_set_subdir(root_subdir: str, run_set_id: str) -> str:
         ``"{root_subdir}/{run_set_id}"``.
     """
     return f"{root_subdir}/{run_set_id}"
+
+
+def resolve_card_model_size(sweep: Mapping[str, Any], default: str) -> str:
+    """The campaign-scope size a launch writes into its run-set card.
+
+    `resolved_config` must match across every launch of one campaign
+    (`card_conflict`), so a campaign that spans sizes declares its invariant
+    scope once via ``run_set_model_size`` (e.g. ``"mixed"``) while each launch's
+    own ``model_size`` stays a merged grid axis.
+
+    Args:
+        sweep: The sweep YAML mapping.
+        default: Fallback when the sweep declares neither key.
+
+    Returns:
+        ``run_set_model_size``, else ``model_size``, else `default`.
+    """
+    return str(sweep.get("run_set_model_size") or sweep.get("model_size") or default)
 
 
 def build_run_set_card(

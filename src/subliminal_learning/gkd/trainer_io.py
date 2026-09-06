@@ -453,6 +453,13 @@ def build_gkd_config(
     final model itself), unchanged. When ``train_cfg.checkpoint_resume`` is set (opt-in, for
     LONG cells) it saves periodic ``checkpoint-*`` dirs (``save_strategy="steps"``) so the
     pipeline can resume mid-run; ``save_total_limit`` bounds the on-disk checkpoints.
+
+    ``gradient_accumulation_steps`` / ``gradient_checkpointing`` are forwarded from
+    `TrainConfig` (defaults 1 / False). TRL 0.19.1 ``GKDTrainer.__init__`` builds
+    ``GenerationConfig`` with ``use_cache=False if args.gradient_checkpointing else
+    True`` (gkd_trainer.py:135), so checkpointing makes on-policy rollouts uncached.
+    Campaigns that need cached rollouts must leave checkpointing off; this helper
+    does not override generation config.
     """
     save_strategy = "steps" if train_cfg.checkpoint_resume else "no"
     return GKDConfig(
@@ -468,6 +475,8 @@ def build_gkd_config(
         max_steps=max_steps,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=train_cfg.batch_size,
+        gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
+        gradient_checkpointing=train_cfg.gradient_checkpointing,
         learning_rate=train_cfg.learning_rate,
         optim=train_cfg.optim,
         lr_scheduler_type=train_cfg.lr_scheduler_type,

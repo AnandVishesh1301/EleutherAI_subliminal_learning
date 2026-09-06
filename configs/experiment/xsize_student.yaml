@@ -1,0 +1,26 @@
+# Experiment config for the cross-size GKD student cells
+# (run set 20260907_xsize-bear_mixed).
+#
+# Sibling of configs/experiment/gkd_student.yaml — same model_spec / teacher
+# lineage defaults; generated sweep YAMLs override them per cell. Isolated
+# W&B project so these runs never land on the default GKD board. Log-few is
+# job-side `--no-wandb` (xsize_plan headline predicates), not a YAML filter.
+# No gkd.coverage_probe: this campaign is behaviour-only.
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full          # -> EleutherAI/pythia-160m
+
+target_animal: cat
+
+# Teacher lineage (overridden per cell by the generated sweep).
+teacher_workflow: sdf
+teacher_param_tag: ep3_lr1e-5_full
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/12h_run
+
+# Fresh W&B project for xsize GKD students (entity from WANDB_ENTITY /
+# wandb default). Overrides WANDB_PROJECT only while a logging cell runs
+# (via prepare_wandb_for_cell).
+wandb_project: SL_cross_size_bear

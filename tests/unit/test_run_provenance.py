@@ -2,11 +2,14 @@
 
 Pure dataclass/string logic: the manifest envelope must round-trip and stay authoritative
 over the body, the LoRA blob must be byte-identical across FT modes, the run-set id /
-subdir / campaign-conflict helpers must gate campaign identity exactly, and the SDF/GKD
+subdir / campaign-conflict helpers must gate campaign identity exactly, every campaign
+plan module's declared id must pass the validator the sweeps apply, and the SDF/GKD
 `identity_gate_action` skip/error/retrain decision must match its documented policy.
 """
 
 from __future__ import annotations
+
+from importlib import import_module
 
 import pytest
 
@@ -23,6 +26,7 @@ from subliminal_learning.training.run_set import (
     card_conflict,
     is_valid_run_set_id,
     merge_run_set_card,
+    resolve_card_model_size,
     run_set_subdir,
 )
 
@@ -99,6 +103,60 @@ def test_is_valid_run_set_id(run_set_id: str, ok: bool) -> None:
     assert is_valid_run_set_id(run_set_id) is ok
 
 
+# Every ``*RUN_SET_ID`` constant declared by a campaign plan module. Discovered
+# rather than listed so a new campaign is covered without editing this test.
+_CAMPAIGN_RUN_SET_IDS = tuple(
+    (module_name, attr, getattr(module, attr))
+    for module_name, module in (
+        (name, import_module(f"subliminal_learning.campaign.{name}"))
+        for name in (
+            "plan",
+            "breadth_plan",
+            "ckpt_plan",
+            "ckptgrid_plan",
+            "optparam_plan",
+            "offpolicy_optparam_plan",
+        )
+    )
+    for attr in sorted(dir(module))
+    if attr.endswith("RUN_SET_ID") and isinstance(getattr(module, attr), str)
+)
+
+# Malformed ids that are driven by entrypoints which never call
+# `is_valid_run_set_id` -- `sweep_offpolicy_optparam` (ran on tars) and the CKA
+# geometry sweeps (a `similarity/` subdir, no ``--run-set-id`` option). Both
+# already have artifact trees on disk under the malformed name, so renaming them
+# would orphan those trees; they are recorded here instead of fixed.
+_UNVALIDATED_CAMPAIGN_IDS = frozenset(
+    {
+        ("offpolicy_optparam_plan", "RUN_SET_ID"),
+        ("ckpt_plan", "GEOM_RUN_SET_ID"),
+    }
+)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "attr", "run_set_id"),
+    _CAMPAIGN_RUN_SET_IDS,
+    ids=[f"{m}.{a}" for m, a, _ in _CAMPAIGN_RUN_SET_IDS],
+)
+def test_campaign_run_set_ids_pass_the_sweep_validator(
+    module_name: str, attr: str, run_set_id: str
+) -> None:
+    """A campaign id the sweeps reject costs the whole launch, not one cell.
+
+    `sweep_sdf_teacher`, `sweep_distill_student_gkd`, and both preference-eval
+    sweeps validate ``--run-set-id`` at option-parse time, so a plan constant
+    that fails here makes every submitted job exit 2 before loading a model.
+    """
+    if (module_name, attr) in _UNVALIDATED_CAMPAIGN_IDS:
+        pytest.skip(f"{module_name}.{attr} is not consumed by a validating sweep")
+    assert is_valid_run_set_id(run_set_id), (
+        f"{module_name}.{attr} = {run_set_id!r} is not "
+        "{YYYYMMDD}_{purpose-slug}_{size} (hyphens, not underscores, in the slug)"
+    )
+
+
 def test_run_set_subdir_is_the_subdir_component() -> None:
     assert (
         run_set_subdir("sdf_teachers", "20260724_crossinit_160m")
@@ -141,6 +199,48 @@ def test_card_conflict_flags_git_sha_and_config_drift() -> None:
     assert "git_sha" in card_conflict(_card("new", axes), _card("old", axes))
     other = {"beta": [0.0]}
     assert "resolved_config" in card_conflict(_card("sha", other), _card("sha", axes))
+
+
+def test_cross_size_launches_share_one_card_via_run_set_model_size() -> None:
+    """A campaign spanning sizes must not refuse its own second launch.
+
+    Each xsize launch trains one student size, so a per-launch `model_size` in
+    `resolved_config` would differ between launches and trip `card_conflict`.
+    The campaign declares the invariant scope once with `run_set_model_size`.
+    """
+    per_size = [
+        resolve_card_model_size({"model_size": size}, size)
+        for size in ("70m", "160m", "410m")
+    ]
+    assert per_size == ["70m", "160m", "410m"]
+
+    scoped = [
+        resolve_card_model_size(
+            {"model_size": size, "run_set_model_size": "mixed"}, size
+        )
+        for size in ("70m", "160m", "410m")
+    ]
+    assert scoped == ["mixed", "mixed", "mixed"]
+
+    def card(size: str) -> dict:
+        return _card(
+            "sha",
+            {"sizes": [size]},
+            invariant={
+                "workflow": "gkd_student",
+                "model_size": resolve_card_model_size(
+                    {"model_size": size, "run_set_model_size": "mixed"}, size
+                ),
+            },
+        )
+
+    assert card_conflict(card("410m"), card("70m")) is None
+    merged = merge_run_set_card(card("70m"), card("410m"))
+    assert merged["grid_axes"]["sizes"] == ["70m", "410m"]
+
+
+def test_resolve_card_model_size_falls_back_to_the_launch_default() -> None:
+    assert resolve_card_model_size({}, "160m") == "160m"
 
 
 def test_card_conflict_none_against_unclaimed_seed_card() -> None:

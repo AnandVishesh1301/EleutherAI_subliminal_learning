@@ -39,6 +39,7 @@ from subliminal_learning.gkd.layout import (
     gkd_student_run_dir,
     gkd_tag,
     gkd_wandb_sweep_slug,
+    gkd_xbase_control_run_dir,
     optim_slug,
     parse_optim_slug,
     teacher_checkpoint_dir,
@@ -50,9 +51,11 @@ from subliminal_learning.teachers.model_specs import (
     parse_base_models,
     spec_label,
 )
+from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.training.run_set import (
     build_run_set_card,
     is_valid_run_set_id,
+    resolve_card_model_size,
     run_set_subdir,
 )
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -67,6 +70,42 @@ from subliminal_learning.utils.wandb_io import wandb_axis_match
 
 
 _LORA_MODE_RE = re.compile(r"^lora-r(?P<r>\d+)(?:a(?P<alpha>\d+))?$")
+
+_TRAIN_OVERRIDE_KEYS = frozenset(
+    {
+        "batch_size",
+        "gradient_accumulation_steps",
+        "gradient_checkpointing",
+        "checkpoint_resume",
+        "save_steps",
+        "save_total_limit",
+    }
+)
+_BOOL_OVERRIDE_KEYS = frozenset({"gradient_checkpointing", "checkpoint_resume"})
+
+
+def _apply_train_overrides(train, overrides):
+    """Apply an optional sweep ``train_overrides:`` mapping onto `train`.
+
+    Only the keys in `_TRAIN_OVERRIDE_KEYS` are accepted; any other key raises.
+    """
+    if not overrides:
+        return train
+    if not isinstance(overrides, dict):
+        raise ValueError("train_overrides must be a mapping")
+    unknown = set(overrides) - _TRAIN_OVERRIDE_KEYS
+    if unknown:
+        raise ValueError(f"unsupported train_overrides key(s): {sorted(unknown)}")
+    cast: dict = {}
+    for key, value in overrides.items():
+        if key in _BOOL_OVERRIDE_KEYS:
+            if isinstance(value, str):
+                cast[key] = value.strip().lower() in ("1", "true", "on", "yes")
+            else:
+                cast[key] = bool(value)
+        else:
+            cast[key] = int(value)
+    return replace(train, **cast)
 
 
 def _mode_lora(mode: str) -> LoRAConfig | None:
@@ -286,6 +325,11 @@ def main(
         help="Train ONLY the base-teacher controls (skip treatments). Lets a campaign "
         "shard controls independently of the treatment shards that share their leaves.",
     ),
+    xbase_controls_only: bool = typer.Option(
+        False,
+        help="Train ONLY teacher-base (xbase) controls for cells whose teacher model "
+        "differs from the student. Skips treatments and base_teacher controls.",
+    ),
     no_wandb: bool = typer.Option(False, help="Disable W&B for the whole sweep."),
     run_set_id: str = typer.Option(
         None,
@@ -322,6 +366,10 @@ def main(
     """Fan out over the full flat GKD grid + controls."""
     if no_control and controls_only:
         raise typer.BadParameter("--no-control and --controls-only are exclusive")
+    if xbase_controls_only and (no_control or controls_only):
+        raise typer.BadParameter(
+            "--xbase-controls-only is exclusive with --no-control and --controls-only"
+        )
     load_dotenv()
     if no_wandb:
         os.environ["WANDB_MODE"] = "disabled"
@@ -332,6 +380,7 @@ def main(
     )
     sweep = yaml.safe_load(Path(sweep_config).read_text())
     grid = sweep["grid"]
+    train_base = _apply_train_overrides(base.train, sweep.get("train_overrides"))
 
     animal_list = _csv(animals, str) or [str(a) for a in sweep["animals"]]
     base_specs = (
@@ -422,6 +471,16 @@ def main(
     else:
         wb = wb_raw
     sweep_slug = gkd_wandb_sweep_slug(subdir)
+    extra_raw = sweep.get("wandb_extra_tags")
+    if extra_raw is None:
+        wandb_extra_tags: tuple[str, ...] = ()
+    elif isinstance(extra_raw, (list, tuple)):
+        wandb_extra_tags = tuple(str(t) for t in extra_raw)
+    else:
+        raise ValueError(
+            f"wandb_extra_tags must be a list of strings, got "
+            f"{type(extra_raw).__name__}"
+        )
 
     cells = list(
         itertools.product(
@@ -462,6 +521,7 @@ def main(
     # swept axis unencoded by gkd_tag/teacher_tag would silently overwrite. Fail before
     # any GPU work rather than grow the tags (which would rename existing leaves).
     _guard_cells: list[tuple[str, Path]] = []
+    _seen_xbase_guard: set[Path] = set()
     for animal, base_pair, tmode, b, lam, svar, vmask, ttemp, tfs, gseed in cells:
         spec, teacher_spec = base_pair
         _, lora, lr, optim, momentum = svar
@@ -501,7 +561,35 @@ def main(
                 ),
             )
         )
+        if xbase_controls_only and model_dir_name(
+            teacher_spec, base.hub_org
+        ) != model_dir_name(spec, base.hub_org):
+            xdir = gkd_xbase_control_run_dir(
+                base.paths.output_root,
+                animal,
+                spec,
+                base.hub_org,
+                teacher_spec,
+                gtag,
+                gseed,
+                subdir,
+            )
+            if xdir not in _seen_xbase_guard:
+                _seen_xbase_guard.add(xdir)
+                _guard_cells.append(
+                    (
+                        f"xbase/{animal}/{spec_label(spec)}/"
+                        f"{model_dir_name(teacher_spec, base.hub_org)}/"
+                        f"{gtag}/gseed{gseed}",
+                        xdir,
+                    )
+                )
     assert_unique_run_dirs(_guard_cells)
+    if xbase_controls_only and not _seen_xbase_guard:
+        raise ValueError(
+            "--xbase-controls-only selected no cells (every teacher model "
+            "matches its student). A shard that trains nothing must fail."
+        )
 
     if run_set_id and not dry_run:
         # Grid axes are per-launch (merged into the card); resolved_config holds only
@@ -513,6 +601,7 @@ def main(
             repo_root=Path.cwd(),
             requested_sha=code_sha,
         )
+        card_model_size = resolve_card_model_size(sweep, base_specs[0].size)
         grid_axes = {
             "animals": animal_list,
             "base_models": [spec_label(s) for s in base_specs],
@@ -533,6 +622,10 @@ def main(
             "max_steps": steps_cap,
             "training_config": str(training_config),
         }
+        if sweep.get("model_size") is not None:
+            grid_axes["sizes"] = sorted({s.size for s in base_specs})
+        if sweep.get("train_overrides"):
+            grid_axes["train_overrides"] = dict(sweep["train_overrides"])
         card = build_run_set_card(
             run_set_id=run_set_id,
             run_type="gkd_student",
@@ -543,12 +636,12 @@ def main(
             sweep_yaml=str(sweep_config),
             resolved_config={
                 "workflow": "gkd_student",
-                "model_size": str(base_specs[0].size),
+                "model_size": card_model_size,
                 "prompt_pool_dir": str(pool_dir),
                 "teacher_subdir": teacher_subdir,
             },
             grid_axes=grid_axes,
-            model_size=str(base_specs[0].size),
+            model_size=card_model_size,
             teacher_run_set_id=teacher_run_set_id,
         )
         register_run_set_launch(
@@ -630,12 +723,102 @@ def main(
             grad_probe_steps=grad_probe_steps,
         )
         train = replace(
-            base.train,
+            train_base,
             learning_rate=lr,
             seed=gseed,
             optim=optim,
             optim_momentum=momentum,
         )
+
+        def _dispatch_control(control_dir: Path, ctag: str, ctrl_teacher_spec) -> None:
+            nonlocal n_skipped, n_control, n_failed, trained
+            if control_dir in seen_controls:
+                return
+            seen_controls.add(control_dir)
+            c_done = cell_is_done(control_dir)
+            if dry_run:
+                logger.info(
+                    "[control] {}: {}",
+                    "DONE" if c_done and not force else "train",
+                    ctag,
+                )
+                return
+            if c_done and not force:
+                run(
+                    _control_cfg(
+                        base,
+                        spec,
+                        lora,
+                        train,
+                        gkd,
+                        animal,
+                        param_tag,
+                        tfs,
+                        subdir,
+                        device,
+                        force,
+                        False,
+                        None,
+                        run_set_id,
+                        ctrl_teacher_spec,
+                    )
+                )
+                n_skipped += 1
+                return
+            if limit and trained >= limit:
+                return
+            logger.info("[control] TRAIN: {}", ctag)
+            try:
+                result = run(
+                    _control_cfg(
+                        base,
+                        spec,
+                        lora,
+                        train,
+                        gkd,
+                        animal,
+                        param_tag,
+                        tfs,
+                        subdir,
+                        device,
+                        force,
+                        False,
+                        None,
+                        run_set_id,
+                        ctrl_teacher_spec,
+                    )
+                )
+                if result.status == "trained":
+                    n_control += 1
+                    trained += 1
+                else:
+                    n_skipped += 1
+            except Exception:
+                n_failed += 1
+                logger.exception("[control] FAILED: {}", ctag)
+
+        if xbase_controls_only:
+            if model_dir_name(teacher_spec, base.hub_org) != model_dir_name(
+                spec, base.hub_org
+            ):
+                xdir = gkd_xbase_control_run_dir(
+                    base.paths.output_root,
+                    animal,
+                    spec,
+                    base.hub_org,
+                    teacher_spec,
+                    gtag,
+                    gseed,
+                    subdir,
+                )
+                _dispatch_control(
+                    xdir,
+                    f"xbase/{animal}/{spec_label(spec)}/"
+                    f"{model_dir_name(teacher_spec, base.hub_org)}/"
+                    f"{gtag}/gseed{gseed}",
+                    teacher_spec,
+                )
+            continue
 
         if not controls_only:
             if not ckpt.is_dir():
@@ -693,6 +876,7 @@ def main(
                         wandb_enabled,
                         run_group,
                         run_set_id,
+                        wandb_extra_tags,
                     )
                 )
                 logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
@@ -727,6 +911,7 @@ def main(
                             wandb_enabled,
                             run_group,
                             run_set_id,
+                            wandb_extra_tags,
                         )
                     )
                     # Only a genuinely trained cell counts toward n_ran / --limit; a
@@ -749,69 +934,11 @@ def main(
         control_dir = gkd_control_run_dir(
             base.paths.output_root, animal, spec, base.hub_org, gtag, gseed, subdir
         )
-        if control_dir in seen_controls:
-            continue
-        seen_controls.add(control_dir)
-        c_done = cell_is_done(control_dir)
-        ctag = f"control/{animal}/{spec_label(spec)}/{gtag}/gseed{gseed}"
-        if dry_run:
-            logger.info(
-                "[control] {}: {}", "DONE" if c_done and not force else "train", ctag
-            )
-        elif c_done and not force:
-            # Enter pipeline so run_identity raises on drift (plan §3.7).
-            run(
-                _control_cfg(
-                    base,
-                    spec,
-                    lora,
-                    train,
-                    gkd,
-                    animal,
-                    param_tag,
-                    tfs,
-                    subdir,
-                    device,
-                    force,
-                    False,
-                    None,
-                    run_set_id,
-                )
-            )
-            n_skipped += 1
-        else:
-            if limit and trained >= limit:
-                continue
-            logger.info("[control] TRAIN: {}", ctag)
-            try:
-                result = run(
-                    _control_cfg(
-                        base,
-                        spec,
-                        lora,
-                        train,
-                        gkd,
-                        animal,
-                        param_tag,
-                        tfs,
-                        subdir,
-                        device,
-                        force,
-                        # Controls train locally only -- dashboard stays on treatment
-                        # anchors (avoids doubling W&B volume / mixing curves).
-                        False,
-                        None,
-                        run_set_id,
-                    )
-                )
-                if result.status == "trained":
-                    n_control += 1
-                    trained += 1
-                else:
-                    n_skipped += 1
-            except Exception:
-                n_failed += 1
-                logger.exception("[control] FAILED: {}", ctag)
+        _dispatch_control(
+            control_dir,
+            f"control/{animal}/{spec_label(spec)}/{gtag}/gseed{gseed}",
+            None,
+        )
 
     logger.info(
         "GKD sweep complete: treatments_ran={}, controls_ran={}, skipped={}, failed={}",
@@ -846,6 +973,7 @@ def _treatment_cfg(
     wandb_enabled,
     run_group,
     run_set_id,
+    wandb_extra_tags=(),
 ) -> TrainGkdStudentConfig:
     return TrainGkdStudentConfig(
         paths=base.paths,
@@ -868,6 +996,7 @@ def _treatment_cfg(
         wandb_enabled=wandb_enabled,
         wandb_run_group=run_group,
         wandb_project=base.wandb_project,
+        wandb_extra_tags=tuple(wandb_extra_tags),
         run_set_id=run_set_id,
     )
 
@@ -887,6 +1016,7 @@ def _control_cfg(
     wandb_enabled,
     run_group,
     run_set_id,
+    teacher_spec=None,
 ) -> TrainGkdStudentConfig:
     return TrainGkdStudentConfig(
         paths=base.paths,
@@ -900,6 +1030,7 @@ def _control_cfg(
         teacher_workflow=base.teacher_workflow,
         teacher_param_tag=param_tag,
         teacher_ftseed=tfs,
+        teacher_spec=teacher_spec,
         control=True,
         device=device,
         force=force,

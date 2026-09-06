@@ -8,7 +8,10 @@
         rollouts_summary.json
 
     {output_root}/gkd_students/controls/base_teacher/{animal}/{model}/{gkd_tag}/gseed{N}/
-        ...   (untuned base standing in as the frozen teacher -- the trait-free floor)
+        ...   (untuned student base as the frozen teacher -- the trait-free floor)
+
+    {output_root}/gkd_students/controls/xbase_teacher/{animal}/{model}/{teacher_model}/{gkd_tag}/gseed{N}/
+        ...   (untuned *other* base as the frozen teacher -- cross-size teacher-base floor)
 
 Distinct root (`gkd_students/`) from every other workflow tree (`teachers/`,
 `sdf_teachers/`, `students/`), so nothing collides. `{model}` reuses
@@ -30,6 +33,7 @@ seed-averaging is a `{gkd_tag}/*` glob.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from subliminal_learning.config import LoRAConfig
@@ -38,6 +42,7 @@ from subliminal_learning.teachers.run_layout import model_dir_name
 
 GKD_STUDENTS_SUBDIR = "gkd_students"
 CONTROL_TEACHER_TAG = "base_teacher"
+XBASE_CONTROL_TEACHER_TAG = "xbase_teacher"
 
 DEFAULT_OPTIM = "adamw_torch"
 
@@ -278,6 +283,54 @@ def gkd_control_run_dir(
     )
 
 
+def gkd_xbase_control_run_dir(
+    output_root: Path,
+    animal: str,
+    spec: PythiaModelSpec,
+    hub_org: str,
+    teacher_spec: PythiaModelSpec,
+    gkd_tag_str: str,
+    gseed: int,
+    subdir: str = GKD_STUDENTS_SUBDIR,
+) -> Path:
+    """Leaf run dir for a teacher-base (xbase) control.
+
+    Layout: ``{output_root}/{subdir}/controls/xbase_teacher/{animal}/{model}/
+    {teacher_model}/{gkd_tag}/gseed{N}``. The frozen teacher is the untuned Hub
+    snapshot of a *different* base than the student (cross-size / cross-init
+    capability floor). Same-model pairs belong in `gkd_control_run_dir`.
+
+    Args:
+        output_root: Artifact root.
+        animal: Target animal (the control is animal-specific).
+        spec: Student base spec.
+        hub_org: Hub org for `model_dir_name`.
+        teacher_spec: Untuned teacher-base spec (must differ from `spec`).
+        gkd_tag_str: Student GKD tag.
+        gseed: GKD training seed.
+        subdir: Tree under `output_root`.
+    """
+    student_model = model_dir_name(spec, hub_org)
+    teacher_model = model_dir_name(teacher_spec, hub_org)
+    if teacher_model == student_model:
+        raise ValueError(
+            "gkd_xbase_control_run_dir requires a distinct teacher base; "
+            f"got the same model_dir_name {student_model!r}. Use "
+            "gkd_control_run_dir for a same-base (base_teacher) control."
+        )
+    return (
+        Path(output_root)
+        / subdir
+        / "controls"
+        / XBASE_CONTROL_TEACHER_TAG
+        / animal
+        / student_model
+        / teacher_model
+        / gkd_tag_str
+        / f"gseed{gseed}"
+    )
+
+
 def teacher_checkpoint_dir(
     output_root: Path,
     teacher_subdir: str,
@@ -316,6 +369,24 @@ def gkd_wandb_sweep_slug(subdir: str) -> str:
     return leaf.removesuffix("_run").replace("_", "")
 
 
+def wandb_cross_init(
+    student_spec: PythiaModelSpec,
+    teacher_spec: PythiaModelSpec | None,
+) -> bool:
+    """True when teacher and student differ in ``(size, variant, seed)``.
+
+    Ignores Hub revision so same-init cross-rung cells stay ``same``.
+    ``teacher_spec is None`` is same-init (the student spec).
+    """
+    if teacher_spec is None:
+        return False
+    return (teacher_spec.size, teacher_spec.variant, teacher_spec.seed) != (
+        student_spec.size,
+        student_spec.variant,
+        student_spec.seed,
+    )
+
+
 def gkd_wandb_tags(
     *,
     sweep_slug: str,
@@ -324,11 +395,14 @@ def gkd_wandb_tags(
     cross_init: bool,
     animal: str,
     revision: str | None = None,
+    teacher_revision: str | None = None,
+    extra: Sequence[str] = (),
 ) -> str:
     """Comma-separated ``WANDB_TAGS`` for one GKD student cell.
 
     Order matches the dashboard filter pills: workflow, campaign slug, FT mode,
-    β arm, same/cross init, animal, optional Hub revision (ckpt-ladder rungs).
+    β arm, same/cross init, animal, optional Hub revision (ckpt-ladder rungs),
+    optional distinct teacher revision, optional campaign extras.
     """
     parts = [
         "gkd",
@@ -340,6 +414,9 @@ def gkd_wandb_tags(
     ]
     if revision is not None:
         parts.append(revision)
+    if teacher_revision is not None and teacher_revision != revision:
+        parts.append(teacher_revision)
+    parts.extend(str(t) for t in extra)
     return ",".join(parts)
 
 
@@ -352,19 +429,28 @@ def gkd_run_label(
     gseed: int,
     control: bool = False,
     sweep_slug: str | None = None,
+    *,
+    teacher_model: str | None = None,
 ) -> str:
     """Flat, unique W&B run label mirroring the nested path.
 
     Treatment: ``gkd_cats1day_cat_pythia-160m-data-seed1_sdf-..._gseed0``.
     Control:   ``gkd_cats1day_control_cat_pythia-160m-data-seed1_..._gseed0``.
+    Xbase:     ``..._control_{animal}_{model}_xbase-{teacher_model}_{gkd_tag}_gseed{N}``.
 
     ``sweep_slug`` (from ``gkd_wandb_sweep_slug``) keeps mega / 1day / multiday /
     smoke display names disjoint in ``subliminal-learning-gkd``. The control label
     carries ``{animal}`` too: controls are animal-specific (matched screen + probe),
-    so two animals' controls must not share a W&B run name.
+    so two animals' controls must not share a W&B run name. ``teacher_model`` is
+    omitted by default so existing control strings stay byte-identical.
     """
     model = model_dir_name(spec, hub_org)
     prefix = f"gkd_{sweep_slug}_" if sweep_slug else "gkd_"
     if control:
+        if teacher_model:
+            return (
+                f"{prefix}control_{animal}_{model}_xbase-{teacher_model}"
+                f"_{gkd_tag_str}_gseed{gseed}"
+            )
         return f"{prefix}control_{animal}_{model}_{gkd_tag_str}_gseed{gseed}"
     return f"{prefix}{animal}_{model}_{teacher_tag_str}_{gkd_tag_str}_gseed{gseed}"

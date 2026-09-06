@@ -45,7 +45,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipelines.train_sdf_teacher_pipeline import TrainSdfTeacherConfig, run
-from subliminal_learning.sdf.config import load_sdf_config
+from subliminal_learning.sdf.config import load_sdf_config, sdf_cell_wandb_tags
 from subliminal_learning.sdf.layout import (
     SDF_TEACHERS_SUBDIR,
     sdf_param_tag,
@@ -59,6 +59,7 @@ from subliminal_learning.teachers.model_specs import (
 from subliminal_learning.training.run_set import (
     build_run_set_card,
     is_valid_run_set_id,
+    resolve_card_model_size,
     run_set_subdir,
 )
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -72,6 +73,43 @@ from subliminal_learning.utils.run_io import (
     utc_now_iso,
 )
 from subliminal_learning.utils.wandb_io import WandbCellFilter, load_wandb_cell_filter
+
+_TRAIN_OVERRIDE_KEYS = frozenset(
+    {
+        "batch_size",
+        "gradient_accumulation_steps",
+        "gradient_checkpointing",
+        "checkpoint_resume",
+        "save_steps",
+        "save_total_limit",
+    }
+)
+_BOOL_OVERRIDE_KEYS = frozenset({"gradient_checkpointing", "checkpoint_resume"})
+
+
+def _apply_train_overrides(train, overrides):
+    """Apply an optional sweep ``train_overrides:`` mapping onto `train`.
+
+    Only the keys in `_TRAIN_OVERRIDE_KEYS` are accepted (`n_epochs` is a grid
+    axis, not an override). Any other key raises.
+    """
+    if not overrides:
+        return train
+    if not isinstance(overrides, dict):
+        raise ValueError("train_overrides must be a mapping")
+    unknown = set(overrides) - _TRAIN_OVERRIDE_KEYS
+    if unknown:
+        raise ValueError(f"unsupported train_overrides key(s): {sorted(unknown)}")
+    cast: dict = {}
+    for key, value in overrides.items():
+        if key in _BOOL_OVERRIDE_KEYS:
+            if isinstance(value, str):
+                cast[key] = value.strip().lower() in ("1", "true", "on", "yes")
+            else:
+                cast[key] = bool(value)
+        else:
+            cast[key] = int(value)
+    return replace(train, **cast)
 
 
 def main(
@@ -150,10 +188,12 @@ def main(
         paths_config, model_config, training_config, experiment_config
     )
     sweep = yaml.safe_load(sweep_config.read_text())
+    train_base = _apply_train_overrides(base.train, sweep.get("train_overrides"))
 
     n_animals = int(sweep.get("n_animals", 7))
     animals = (
-        [a.strip() for a in animals.split(",")] if animals
+        [a.strip() for a in animals.split(",")]
+        if animals
         else resolve_animals(sweep["animals"], base.paths, n_animals)
     )
     if base_models:
@@ -163,7 +203,8 @@ def main(
     else:
         yaml_base_models = str(sweep.get("base_models", "seeds"))
         base_specs = (
-            [base.spec] if yaml_base_models.lower() == "config"
+            [base.spec]
+            if yaml_base_models.lower() == "config"
             else parse_base_models(yaml_base_models)
         )
     if ftseeds:
@@ -240,16 +281,20 @@ def main(
 
     # sdf_docs_root override in the sweep YAML (else inherit the experiment config's).
     sdf_docs_root = (
-        Path(sweep["sdf_docs_root"]) if sweep.get("sdf_docs_root")
+        Path(sweep["sdf_docs_root"])
+        if sweep.get("sdf_docs_root")
         else base.sdf_docs_root
     )
     sdf_docs_overrides = (
         {str(k): str(v) for k, v in sweep["sdf_docs"].items()}
-        if sweep.get("sdf_docs") else base.sdf_docs_overrides
+        if sweep.get("sdf_docs")
+        else base.sdf_docs_overrides
     )
 
     cells = list(
-        itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs, ft_seeds)
+        itertools.product(
+            animals, base_specs, epochs_list, lr_list, lora_pairs, ft_seeds
+        )
     )
     if param_tags:
         wanted = {t.strip() for t in param_tags.split(",") if t.strip()}
@@ -258,7 +303,7 @@ def main(
         filtered = []
         for animal, spec, n_epochs, lr, pair, seed in cells:
             lora = replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None
-            train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed)
+            train = replace(train_base, n_epochs=n_epochs, learning_rate=lr, seed=seed)
             if sdf_param_tag(train, lora) in wanted:
                 filtered.append((animal, spec, n_epochs, lr, pair, seed))
         if not filtered:
@@ -270,8 +315,13 @@ def main(
         "SDF sweep grid ({}): {} animals x {} models x {} epochs x {} lr x {} lora x "
         "{} seeds = {} cells",
         "lora" if is_lora_sweep else "full",
-        len(animals), len(base_specs), len(epochs_list), len(lr_list),
-        len(lora_pairs), len(ft_seeds), len(cells),
+        len(animals),
+        len(base_specs),
+        len(epochs_list),
+        len(lr_list),
+        len(lora_pairs),
+        len(ft_seeds),
+        len(cells),
     )
     logger.info("Animals: {}", animals)
     logger.info("Base models: {}", [spec_label(s) for s in base_specs])
@@ -283,14 +333,14 @@ def main(
         [
             (
                 f"{animal}/{spec_label(spec)}/"
-                f"{sdf_param_tag(replace(base.train, n_epochs=ne, learning_rate=lr, seed=seed), replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None)}"
+                f"{sdf_param_tag(replace(train_base, n_epochs=ne, learning_rate=lr, seed=seed), replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None)}"
                 f"/ftseed{seed}",
                 sdf_teacher_run_dir(
                     base.paths.output_root,
                     animal,
                     spec,
                     base.hub_org,
-                    replace(base.train, n_epochs=ne, learning_rate=lr, seed=seed),
+                    replace(train_base, n_epochs=ne, learning_rate=lr, seed=seed),
                     replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None,
                     sdf_teachers_subdir,
                 ),
@@ -309,6 +359,7 @@ def main(
             repo_root=Path.cwd(),
             requested_sha=code_sha,
         )
+        card_model_size = resolve_card_model_size(sweep, base_specs[0].size)
         grid_axes = {
             "animals": animals,
             "base_models": [spec_label(s) for s in base_specs],
@@ -319,6 +370,10 @@ def main(
             "finetune_mode": "lora" if is_lora_sweep else "full",
             "training_config": str(training_config),
         }
+        if sweep.get("model_size") is not None:
+            grid_axes["sizes"] = sorted({s.size for s in base_specs})
+        if sweep.get("train_overrides"):
+            grid_axes["train_overrides"] = dict(sweep["train_overrides"])
         card = build_run_set_card(
             run_set_id=run_set_id,
             run_type="sdf_teacher",
@@ -329,14 +384,14 @@ def main(
             sweep_yaml=str(sweep_config),
             resolved_config={
                 "workflow": "sdf_teacher",
-                "model_size": str(base_specs[0].size),
+                "model_size": card_model_size,
                 "sdf_docs_root": str(sdf_docs_root),
                 "sdf_docs_overrides": dict(sorted((sdf_docs_overrides or {}).items())),
                 "packing": base.packing,
                 "pile_replay_ratio": base.pile_replay_ratio,
             },
             grid_axes=grid_axes,
-            model_size=str(base_specs[0].size),
+            model_size=card_model_size,
         )
         register_run_set_launch(
             base.paths.output_root,
@@ -364,9 +419,14 @@ def main(
     trained = 0
     for i, (animal, spec, n_epochs, lr, pair, seed) in enumerate(cells, start=1):
         lora = replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None
-        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed)
+        train = replace(train_base, n_epochs=n_epochs, learning_rate=lr, seed=seed)
         run_dir = sdf_teacher_run_dir(
-            base.paths.output_root, animal, spec, base.hub_org, train, lora,
+            base.paths.output_root,
+            animal,
+            spec,
+            base.hub_org,
+            train,
+            lora,
             sdf_teachers_subdir,
         )
         tag = f"{animal}/{spec_label(spec)}/{sdf_param_tag(train, lora)}/ftseed{seed}"
@@ -394,6 +454,7 @@ def main(
                         wandb_enabled=False,
                         wandb_run_group=None,
                         wandb_project=base.wandb_project,
+                        wandb_tags=None,
                         run_set_id=run_set_id,
                     )
                 )
@@ -401,8 +462,10 @@ def main(
             logger.info("[{}/{}] SKIP (done): {}", i, len(cells), tag)
             continue
         if dry_run:
-            wb = "no-wandb" if no_wandb else (
-                "wandb" if _cell_logs(n_epochs, lr, seed, pair) else "train-only"
+            wb = (
+                "no-wandb"
+                if no_wandb
+                else ("wandb" if _cell_logs(n_epochs, lr, seed, pair) else "train-only")
             )
             logger.info("[{}/{}] would train ({}): {}", i, len(cells), wb, tag)
             continue
@@ -448,6 +511,11 @@ def main(
                     wandb_enabled=wandb_enabled,
                     wandb_run_group=run_group,
                     wandb_project=base.wandb_project,
+                    wandb_tags=(
+                        sdf_cell_wandb_tags(base.wandb_extra_tags, spec)
+                        if wandb_enabled
+                        else None
+                    ),
                     run_set_id=run_set_id,
                 )
             )
@@ -464,10 +532,16 @@ def main(
     logger.info(
         "SDF sweep complete: ran={}, wandb_logged={}, skipped(existing)={}, "
         "failed={}, total={}",
-        n_ran, n_wandb, n_skipped, n_failed, len(cells),
+        n_ran,
+        n_wandb,
+        n_skipped,
+        n_failed,
+        len(cells),
     )
     if n_failed:
-        logger.warning("{} cell(s) failed; re-run the same command to retry them.", n_failed)
+        logger.warning(
+            "{} cell(s) failed; re-run the same command to retry them.", n_failed
+        )
         # Non-zero so jobq records FAILED and --auto-requeue / requeue can retry
         # (silent rc=0 on failed=1 stranded breadth5 evals and claim-skip holes).
         raise typer.Exit(code=1)

@@ -12,12 +12,17 @@ Per-leaf training artifacts are loaded alongside them: `load_gkd_probe_trajector
 `load_gkd_train_manifests` (``train_manifest.json`` -- ``final_train_loss`` and the
 resolved optimizer), and `load_gkd_grad_concentration` (``grad_concentration.jsonl``).
 
-Two subtrees are walked:
+Three subtrees are walked:
 
 - **treatments** ``{animal}/{model}/{teacher_tag}/{gkd_tag}/`` -- a student distilled from a
   biased SDF teacher (``teacher_tag`` = ``{workflow}-{param_tag}-tfs{n}``).
-- **controls**   ``controls/base_teacher/{animal}/{model}/{gkd_tag}/`` -- the procedure-only
-  floor (untuned base as frozen teacher); no ``teacher_tag`` level, ``is_control=True``.
+- **base controls** ``controls/base_teacher/{animal}/{model}/{gkd_tag}/`` -- the
+  procedure-only floor (untuned student base as frozen teacher).
+- **xbase controls** ``controls/xbase_teacher/{animal}/{model}/{teacher_model}/{gkd_tag}/``
+  -- untuned *other* base as frozen teacher (one extra path level).
+
+``control_kind`` is ``None`` / ``base_teacher`` / ``xbase_teacher``. Cloud
+``subliminal_delta`` still joins treatments to **base_teacher** controls only.
 
 Every loader parses `gkd_tag` (student GKD axes) and, for treatments, `teacher_tag` (the
 biased-teacher lineage, reusing `sdf_results_io.parse_sdf_param_tag`). Nothing
@@ -49,7 +54,9 @@ from subliminal_learning.gkd.layout import (
     DEFAULT_OPTIM,
     GKD_STUDENTS_SUBDIR,
     OPTIM_BY_SLUG,
+    XBASE_CONTROL_TEACHER_TAG,
 )
+from subliminal_learning.teachers.model_specs import spec_from_base_name, spec_label
 
 # Alternation built from the layout SSOT (longest first) so a slug can never be added
 # to `gkd_tag` without becoming readable here.
@@ -110,7 +117,8 @@ def parse_teacher_tag(teacher_tag: str) -> dict:
     """Parse a treatment ``teacher_tag`` into lineage (+ optional cross-init base).
 
     Same-init: ``{workflow}-{param_tag}-tfs{n}``.
-    Cross-init: ``{workflow}-{param_tag}-tfs{n}_tbase-{variant}-seed{N}``.
+    Cross-init: ``{workflow}-{param_tag}-tfs{n}_tbase-{label}`` (label may be
+    size-prefixed, e.g. ``70m-full-seed0@step143000``).
 
     Returns:
         ``{"teacher_workflow", "teacher_param_tag", "teacher_ftseed",
@@ -165,12 +173,12 @@ def _iter_summaries(
     animals: list[str] | None,
     models: list[str] | None,
 ):
-    """Yield (doc, animal, model, teacher_tag, gkd_tag, is_control) per summary `filename`.
+    """Yield summary rows including ``control_kind`` and xbase ``teacher_model``.
 
-    Treatments live at ``{animal}/{model}/{teacher_tag}/{gkd_tag}/{filename}`` (4 dir levels
-    below the run root); controls at ``controls/base_teacher/{animal}/{model}/{gkd_tag}/
-    {filename}`` (5 levels). The two depths never collide, so each subtree is globbed
-    separately.
+    Treatments live at ``{animal}/{model}/{teacher_tag}/{gkd_tag}/{filename}``;
+    base controls at ``controls/base_teacher/{animal}/{model}/{gkd_tag}/``;
+    xbase controls at ``controls/xbase_teacher/{animal}/{model}/{teacher_model}/
+    {gkd_tag}/`` (one extra level).
     """
     root = Path(output_root) / subdir
 
@@ -185,7 +193,7 @@ def _iter_summaries(
         doc = _read_doc(path)
         if doc is None or _skip(animal, model, animals, models):
             continue
-        yield doc, animal, model, teacher_tag, gkd_tag, False
+        yield doc, animal, model, teacher_tag, gkd_tag, False, None, None
 
     control_root = root / "controls" / CONTROL_TEACHER_TAG
     for path in sorted(control_root.glob(f"*/*/*/{filename}")):
@@ -195,7 +203,18 @@ def _iter_summaries(
         doc = _read_doc(path)
         if doc is None or _skip(animal, model, animals, models):
             continue
-        yield doc, animal, model, "", gkd_tag, True
+        yield doc, animal, model, "", gkd_tag, True, "base_teacher", None
+
+    xbase_root = root / "controls" / XBASE_CONTROL_TEACHER_TAG
+    for path in sorted(xbase_root.glob(f"*/*/*/*/{filename}")):
+        gkd_tag = path.parent.name
+        teacher_model = path.parent.parent.name
+        model = path.parent.parent.parent.name
+        animal = path.parent.parent.parent.parent.name
+        doc = _read_doc(path)
+        if doc is None or _skip(animal, model, animals, models):
+            continue
+        yield doc, animal, model, "", gkd_tag, True, "xbase_teacher", teacher_model
 
 
 def _read_doc(path: Path) -> dict | None:
@@ -211,20 +230,35 @@ def _skip(
     return bool((animals and animal not in animals) or (models and model not in models))
 
 
-def _axes(animal, model, teacher_tag, gkd_tag, is_control) -> dict | None:
+def _axes(
+    animal,
+    model,
+    teacher_tag,
+    gkd_tag,
+    is_control,
+    control_kind=None,
+    teacher_model=None,
+) -> dict | None:
     """Common config-identifying columns for one summary (None if gkd_tag unparseable)."""
     try:
         gkd = parse_gkd_tag(gkd_tag)
     except ValueError:
         return None
+    parsed = parse_teacher_tag(teacher_tag)
+    if control_kind == "xbase_teacher":
+        if not teacher_model:
+            raise ValueError("xbase control leaf missing teacher_model directory")
+        parsed["teacher_base_label"] = spec_label(spec_from_base_name(teacher_model))
+        parsed["teacher_tag"] = ""
     return {
         "animal": animal,
         "model": model,
         "teacher_tag": teacher_tag,
         "gkd_tag": gkd_tag,
         "is_control": is_control,
+        "control_kind": control_kind,
         **gkd,
-        **parse_teacher_tag(teacher_tag),
+        **parsed,
     }
 
 
@@ -234,6 +268,7 @@ PREFERENCE_COLUMNS = [
     "teacher_tag",
     "gkd_tag",
     "is_control",
+    "control_kind",
     "lmbda",
     "beta",
     "student_mode",
@@ -280,10 +315,10 @@ def load_gkd_preference_results(
 ) -> pd.DataFrame:
     """One row per (config, prompt-set) from ``preference_summary.json`` (treat + control)."""
     rows: list[dict] = []
-    for doc, animal, model, tt, gt, ctrl in _iter_summaries(
+    for doc, animal, model, tt, gt, ctrl, kind, tmodel in _iter_summaries(
         output_root, subdir, "preference_summary.json", animals, models
     ):
-        axes = _axes(animal, model, tt, gt, ctrl)
+        axes = _axes(animal, model, tt, gt, ctrl, kind, tmodel)
         if axes is None:
             continue
         for s in doc.get("summaries", []):
@@ -314,6 +349,7 @@ FORCED_CHOICE_COLUMNS = [
     "teacher_tag",
     "gkd_tag",
     "is_control",
+    "control_kind",
     "lmbda",
     "beta",
     "student_mode",
@@ -354,10 +390,10 @@ def load_gkd_forced_choice_results(
 ) -> pd.DataFrame:
     """Long table: one row per (config, candidate animal) of forced-choice shares (M2)."""
     rows: list[dict] = []
-    for doc, animal, model, tt, gt, ctrl in _iter_summaries(
+    for doc, animal, model, tt, gt, ctrl, kind, tmodel in _iter_summaries(
         output_root, subdir, "sdf_forced_choice_summary.json", animals, models
     ):
-        axes = _axes(animal, model, tt, gt, ctrl)
+        axes = _axes(animal, model, tt, gt, ctrl, kind, tmodel)
         if axes is None:
             continue
         cand_share = doc.get("candidate_share_mean", {})
@@ -403,10 +439,10 @@ def load_gkd_capability_results(
 ) -> pd.DataFrame:
     """One row per config: Pile perplexity (M6a) + flattened benchmark metrics (M6b)."""
     rows: list[dict] = []
-    for doc, animal, model, tt, gt, ctrl in _iter_summaries(
+    for doc, animal, model, tt, gt, ctrl, kind, tmodel in _iter_summaries(
         output_root, subdir, "sdf_capability_summary.json", animals, models
     ):
-        axes = _axes(animal, model, tt, gt, ctrl)
+        axes = _axes(animal, model, tt, gt, ctrl, kind, tmodel)
         if axes is None:
             continue
         ppl = doc.get("perplexity", {})
@@ -452,6 +488,7 @@ LEAF_IDENTITY_COLUMNS = [
     "teacher_tag",
     "gkd_tag",
     "is_control",
+    "control_kind",
     "gseed",
     "lmbda",
     "beta",
@@ -537,11 +574,12 @@ def _iter_probe_leaves(
     models: list[str] | None,
     filename: str = "training_metrics.jsonl",
 ):
-    """Yield (path, animal, model, teacher_tag, gkd_tag, gseed, is_control) per leaf.
+    """Yield per-leaf paths including ``control_kind`` and xbase ``teacher_model``.
 
     Treatment leaves sit at ``{animal}/{model}/{teacher_tag}/{gkd_tag}/gseed{N}/``;
-    control leaves at ``controls/base_teacher/{animal}/{model}/{gkd_tag}/gseed{N}/``.
-    `filename` selects which per-leaf JSONL to walk.
+    base controls at ``controls/base_teacher/{animal}/{model}/{gkd_tag}/gseed{N}/``;
+    xbase controls at ``controls/xbase_teacher/{animal}/{model}/{teacher_model}/
+    {gkd_tag}/gseed{N}/``.
     """
     root = Path(output_root) / subdir
     for path in sorted(root.glob(f"*/*/*/*/gseed*/{filename}")):
@@ -560,6 +598,8 @@ def _iter_probe_leaves(
             leaf.parent.name,
             int(leaf.name.removeprefix("gseed")),
             False,
+            None,
+            None,
         )
     control_root = root / "controls" / CONTROL_TEACHER_TAG
     for path in sorted(control_root.glob(f"*/*/*/gseed*/{filename}")):
@@ -576,6 +616,27 @@ def _iter_probe_leaves(
             leaf.parent.name,
             int(leaf.name.removeprefix("gseed")),
             True,
+            "base_teacher",
+            None,
+        )
+    xbase_root = root / "controls" / XBASE_CONTROL_TEACHER_TAG
+    for path in sorted(xbase_root.glob(f"*/*/*/*/gseed*/{filename}")):
+        leaf = path.parent
+        animal = leaf.parent.parent.parent.parent.name
+        model = leaf.parent.parent.parent.name
+        teacher_model = leaf.parent.parent.name
+        if _skip(animal, model, animals, models):
+            continue
+        yield (
+            path,
+            animal,
+            model,
+            "",
+            leaf.parent.name,
+            int(leaf.name.removeprefix("gseed")),
+            True,
+            "xbase_teacher",
+            teacher_model,
         )
 
 
@@ -607,10 +668,10 @@ def load_gkd_probe_trajectories(
         rank fields on older JSONL become null.
     """
     rows: list[dict] = []
-    for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
+    for path, animal, model, tt, gt, gseed, ctrl, kind, tmodel in _iter_probe_leaves(
         output_root, subdir, animals, models
     ):
-        axes = _axes(animal, model, tt, gt, ctrl)
+        axes = _axes(animal, model, tt, gt, ctrl, kind, tmodel)
         if axes is None:
             continue
         records = _read_probe_records(path)
@@ -696,10 +757,10 @@ def load_gkd_training_logs(
         Long DataFrame with `TRAINING_LOG_COLUMNS`.
     """
     rows: list[dict] = []
-    for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
+    for path, animal, model, tt, gt, gseed, ctrl, kind, tmodel in _iter_probe_leaves(
         output_root, subdir, animals, models, filename="trainer_log_history.jsonl"
     ):
-        axes = _axes(animal, model, tt, gt, ctrl)
+        axes = _axes(animal, model, tt, gt, ctrl, kind, tmodel)
         if axes is None:
             continue
         for rec in _read_probe_records(path):
@@ -757,10 +818,10 @@ def load_gkd_train_manifests(
         ``gkd_tag`` or an unreadable manifest are skipped.
     """
     rows: list[dict] = []
-    for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
+    for path, animal, model, tt, gt, gseed, ctrl, kind, tmodel in _iter_probe_leaves(
         output_root, subdir, animals, models, filename="train_manifest.json"
     ):
-        axes = _axes(animal, model, tt, gt, ctrl)
+        axes = _axes(animal, model, tt, gt, ctrl, kind, tmodel)
         doc = _read_doc(path)
         if axes is None or doc is None:
             continue
@@ -820,10 +881,10 @@ def load_gkd_grad_concentration(
         DataFrame with `GRAD_CONCENTRATION_COLUMNS` (empty when the probe was off).
     """
     rows: list[dict] = []
-    for path, animal, model, tt, gt, gseed, ctrl in _iter_probe_leaves(
+    for path, animal, model, tt, gt, gseed, ctrl, kind, tmodel in _iter_probe_leaves(
         output_root, subdir, animals, models, filename="grad_concentration.jsonl"
     ):
-        axes = _axes(animal, model, tt, gt, ctrl)
+        axes = _axes(animal, model, tt, gt, ctrl, kind, tmodel)
         if axes is None:
             continue
         for rec in _read_probe_records(path):
@@ -879,7 +940,17 @@ def _ensure_optional_axis_cols(df: pd.DataFrame) -> pd.DataFrame:
         out["student_optim"] = DEFAULT_OPTIM
     if "optim_momentum" not in out.columns:
         out["optim_momentum"] = 0.0
+    if "control_kind" not in out.columns:
+        out["control_kind"] = None
     return out
+
+
+def _base_teacher_control_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Student-base controls only (never xbase) for Cloud ``subliminal_delta``."""
+    ctrl = _ensure_optional_axis_cols(df.loc[df["is_control"]].copy())
+    kind = ctrl["control_kind"]
+    tbase = ctrl["teacher_base_label"]
+    return ctrl.loc[(kind == "base_teacher") | tbase.isna()]
 
 
 def subliminal_delta(preference: pd.DataFrame) -> pd.DataFrame:
@@ -903,7 +974,7 @@ def subliminal_delta(preference: pd.DataFrame) -> pd.DataFrame:
     if preference.empty:
         return preference.copy()
     treat = _ensure_optional_axis_cols(preference[~preference["is_control"]])
-    ctrl = preference[preference["is_control"]].copy()
+    ctrl = _base_teacher_control_rows(preference)
 
     axis_cols = [
         "lmbda",
@@ -942,7 +1013,6 @@ def subliminal_delta(preference: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
-
 def probe_subliminal_delta(
     trajectories: pd.DataFrame,
     *,
@@ -967,11 +1037,14 @@ def probe_subliminal_delta(
         return trajectories.copy()
     missing = [m for m in metrics if m not in trajectories.columns]
     if missing:
-        raise ValueError(f"probe_subliminal_delta metrics missing from frame: {missing}")
+        raise ValueError(
+            f"probe_subliminal_delta metrics missing from frame: {missing}"
+        )
     join_keys = ["animal", "model", "gkd_tag", "gseed", "step"]
     keep = [*join_keys, "diverged", *metrics]
     treat = trajectories.loc[~trajectories["is_control"], keep].copy()
-    ctrl = trajectories.loc[trajectories["is_control"], keep].copy()
+    ctrl_full = _base_teacher_control_rows(trajectories)
+    ctrl = ctrl_full.loc[:, [c for c in keep if c in ctrl_full.columns]].copy()
     treat = treat.rename(columns={m: f"{m}_treatment" for m in metrics})
     treat = treat.rename(columns={"diverged": "diverged_treatment"})
     ctrl = ctrl.rename(columns={m: f"{m}_control" for m in metrics})
@@ -1066,7 +1139,7 @@ def subliminal_delta_ci(
     if preference.empty:
         return pd.DataFrame(columns=SUBLIMINAL_DELTA_CI_COLUMNS)
     treat = _ensure_optional_axis_cols(preference[~preference["is_control"]])
-    ctrl = preference[preference["is_control"]]
+    ctrl = _base_teacher_control_rows(preference)
     ctrl_by_key = {key: g for key, g in ctrl.groupby(_CONTROL_JOIN_KEYS, dropna=False)}
     rows: list[dict] = []
     for key, g in treat.groupby(_TREATMENT_AVG_KEYS, dropna=False):

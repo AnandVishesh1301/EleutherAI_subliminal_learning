@@ -18,9 +18,11 @@ from subliminal_learning.gkd.layout import (
     gkd_run_label,
     gkd_student_run_dir,
     gkd_tag,
+    gkd_wandb_tags,
     optim_slug,
     teacher_checkpoint_dir,
     teacher_tag,
+    wandb_cross_init,
 )
 from subliminal_learning.models.registry import PythiaModelSpec
 
@@ -362,19 +364,38 @@ _LEGACY_TAGS = (
     # Real leaves from gkd_students/20260727_slbreadth_160m and cats_1day_run. Every one
     # was written before the optimizer axis existed; the suffix must stay off the default
     # optimizer or 1000+ finished cells become unreachable under their own paths.
-    ("lmb1.0_b1.0_lora_lr4e-4_e1_r8a16", dict(lmbda=1.0, beta=1.0, student_mode="lora",
-                                              learning_rate=4e-4, num_epochs=1,
-                                              lora=LoRAConfig(r=8, lora_alpha=16,
-                                                              lora_dropout=0.0,
-                                                              target_modules="all-linear"))),
-    ("lmb1.0_b1.0_full_lr2e-5_e3", dict(lmbda=1.0, beta=1.0, student_mode="full",
-                                        learning_rate=2e-5, num_epochs=3)),
-    ("lmb1.0_b0.0_lora_lr2e-4_e0.5_r64a64", dict(lmbda=1.0, beta=0.0,
-                                                 student_mode="lora",
-                                                 learning_rate=2e-4, num_epochs=0.5,
-                                                 lora=LoRAConfig(r=64, lora_alpha=64,
-                                                                 lora_dropout=0.0,
-                                                                 target_modules="all-linear"))),
+    (
+        "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16",
+        dict(
+            lmbda=1.0,
+            beta=1.0,
+            student_mode="lora",
+            learning_rate=4e-4,
+            num_epochs=1,
+            lora=LoRAConfig(
+                r=8, lora_alpha=16, lora_dropout=0.0, target_modules="all-linear"
+            ),
+        ),
+    ),
+    (
+        "lmb1.0_b1.0_full_lr2e-5_e3",
+        dict(
+            lmbda=1.0, beta=1.0, student_mode="full", learning_rate=2e-5, num_epochs=3
+        ),
+    ),
+    (
+        "lmb1.0_b0.0_lora_lr2e-4_e0.5_r64a64",
+        dict(
+            lmbda=1.0,
+            beta=0.0,
+            student_mode="lora",
+            learning_rate=2e-4,
+            num_epochs=0.5,
+            lora=LoRAConfig(
+                r=64, lora_alpha=64, lora_dropout=0.0, target_modules="all-linear"
+            ),
+        ),
+    ),
 )
 
 
@@ -480,8 +501,6 @@ def test_run_label_sweep_slug_isolates_mega_from_cats1day() -> None:
 
 
 def test_gkd_wandb_tags_include_animal_and_optional_revision() -> None:
-    from subliminal_learning.gkd.layout import gkd_wandb_tags
-
     same = gkd_wandb_tags(
         sweep_slug="20260809breadth4160m",
         finetune_mode="lora",
@@ -499,3 +518,49 @@ def test_gkd_wandb_tags_include_animal_and_optional_revision() -> None:
         revision="step143000",
     )
     assert rung == "gkd,20260805ckptladder160m,full,b1.0,cross,cat,step143000"
+
+
+def test_gkd_wandb_tags_teacher_revision_dedup_and_extra() -> None:
+    equal = gkd_wandb_tags(
+        sweep_slug="20260828ckptgrid-bear160m",
+        finetune_mode="lora",
+        beta=1.0,
+        cross_init=False,
+        animal="bear",
+        revision="step143000",
+        teacher_revision="step143000",
+        extra=("ckptgrid", "grid"),
+    )
+    assert equal == (
+        "gkd,20260828ckptgrid-bear160m,lora,b1.0,same,bear,step143000,ckptgrid,grid"
+    )
+    crossed_rung = gkd_wandb_tags(
+        sweep_slug="20260828ckptgrid-bear160m",
+        finetune_mode="lora",
+        beta=1.0,
+        cross_init=False,
+        animal="bear",
+        revision="step143000",
+        teacher_revision="step48000",
+        extra=("ckptgrid", "grid"),
+    )
+    assert crossed_rung == (
+        "gkd,20260828ckptgrid-bear160m,lora,b1.0,same,bear,step143000,"
+        "step48000,ckptgrid,grid"
+    )
+
+
+def test_wandb_cross_init_ignores_revision() -> None:
+    student = PythiaModelSpec(
+        size="160m", seed=0, variant="full", revision="step143000"
+    )
+    same_rung = PythiaModelSpec(
+        size="160m", seed=0, variant="full", revision="step48000"
+    )
+    other_seed = PythiaModelSpec(
+        size="160m", seed=1, variant="full", revision="step143000"
+    )
+    assert wandb_cross_init(student, None) is False
+    assert wandb_cross_init(student, student) is False
+    assert wandb_cross_init(student, same_rung) is False
+    assert wandb_cross_init(student, other_seed) is True

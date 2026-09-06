@@ -56,9 +56,11 @@ from subliminal_learning.gkd.layout import (
     gkd_control_run_dir,
     gkd_student_run_dir,
     gkd_tag,
+    gkd_xbase_control_run_dir,
     teacher_tag,
 )
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.training.run_set import is_valid_run_set_id, run_set_subdir
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import acquire_claim, release_claim
@@ -147,6 +149,17 @@ def main(
     no_control: bool = typer.Option(
         False, help="Skip the base-teacher control configs (treatments only)."
     ),
+    controls_only: bool = typer.Option(
+        False,
+        help="Evaluate only the deduped base-teacher controls (skip treatments). "
+        "Lets a control shared by several train YAMLs be benchmarked from the "
+        "bench-enabled one without benchmarking the other's treatments.",
+    ),
+    xbase_controls_only: bool = typer.Option(
+        False,
+        help="Evaluate only the deduped teacher-base (xbase) control leaves. "
+        "Skips treatments and base_teacher controls.",
+    ),
     claim: bool = typer.Option(
         True, help="Use a .claim lock per cell so concurrent workers don't collide."
     ),
@@ -162,6 +175,12 @@ def main(
     """Verify every trained GKD-student config selected by the sweep YAML."""
     load_dotenv()
     configure_loguru()
+    if no_control and controls_only:
+        raise typer.BadParameter("--no-control and --controls-only select nothing")
+    if xbase_controls_only and (no_control or controls_only):
+        raise typer.BadParameter(
+            "--xbase-controls-only is exclusive with --no-control and --controls-only"
+        )
 
     base = load_gkd_config(
         paths_config, model_config, training_config, experiment_config
@@ -267,9 +286,19 @@ def main(
         pairing,
     )
     logger.info("Prompt sets: {}", [(p.name, p.scoring) for p in prompt_sets])
+    if xbase_controls_only and not any(
+        model_dir_name(pair[1], base.hub_org) != model_dir_name(pair[0], base.hub_org)
+        for _, pair, *_ in treatments
+    ):
+        raise ValueError(
+            "--xbase-controls-only selected no cells (every teacher model "
+            "matches its student). A shard that evaluates nothing must fail."
+        )
 
-    n_done = n_untrained = n_ran = n_failed = 0
+    n_done = n_untrained = n_ran = n_failed = n_claimed = 0
     seen_controls: set[Path] = set()
+    seen_xbase: set[Path] = set()
+    deferred: list[tuple] = []
 
     def _eval_config(
         param_dir: Path,
@@ -278,8 +307,10 @@ def main(
         student_mode: str,
         do_bench: bool,
         label: str,
+        *,
+        retry: bool = False,
     ) -> None:
-        nonlocal n_done, n_untrained, n_ran, n_failed
+        nonlocal n_done, n_untrained, n_ran, n_failed, n_claimed
         if not (param_dir.exists() and any(param_dir.glob("gseed*/checkpoints"))):
             n_untrained += 1
             logger.info("NOT-TRAINED (skip): {}", label)
@@ -295,7 +326,17 @@ def main(
             return
         claim_path = acquire_claim(param_dir) if claim else None
         if claim and claim_path is None:
-            logger.info("SKIP (claimed): {}", label)
+            # The holder may be writing a WEAKER artifact set than this shard owes
+            # (a bench-free shard racing a bench-enabled one on a shared control),
+            # so a claim skip is never terminal: retry after the sweep, then fail.
+            if not retry:
+                deferred.append(
+                    (param_dir, animal, spec, student_mode, do_bench, label)
+                )
+                logger.info("SKIP (claimed; deferred to retry pass): {}", label)
+                return
+            n_claimed += 1
+            logger.warning("STILL CLAIMED after retry pass: {}", label)
             return
         logger.info("EVAL{}: {}", " +bench" if do_bench else "", label)
         t0 = time.perf_counter()
@@ -361,17 +402,52 @@ def main(
             teacher_base_label=spec_label(teacher_spec),
             student_base_label=spec_label(spec),
         )
-        treat_dir = gkd_student_run_dir(
-            base.paths.output_root, animal, spec, base.hub_org, ttag, gtag, 0, subdir
-        ).parent
-        _eval_config(
-            treat_dir,
-            animal,
-            spec,
-            student_mode,
-            do_bench,
-            f"{animal}/{spec_label(spec)}/{ttag}/{gtag}",
-        )
+        if xbase_controls_only:
+            if model_dir_name(teacher_spec, base.hub_org) != model_dir_name(
+                spec, base.hub_org
+            ):
+                xdir = gkd_xbase_control_run_dir(
+                    base.paths.output_root,
+                    animal,
+                    spec,
+                    base.hub_org,
+                    teacher_spec,
+                    gtag,
+                    0,
+                    subdir,
+                ).parent
+                if xdir not in seen_xbase:
+                    seen_xbase.add(xdir)
+                    _eval_config(
+                        xdir,
+                        animal,
+                        spec,
+                        student_mode,
+                        do_bench,
+                        f"xbase/{animal}/{spec_label(spec)}/"
+                        f"{model_dir_name(teacher_spec, base.hub_org)}/{gtag}",
+                    )
+            continue
+
+        if not controls_only:
+            treat_dir = gkd_student_run_dir(
+                base.paths.output_root,
+                animal,
+                spec,
+                base.hub_org,
+                ttag,
+                gtag,
+                0,
+                subdir,
+            ).parent
+            _eval_config(
+                treat_dir,
+                animal,
+                spec,
+                student_mode,
+                do_bench,
+                f"{animal}/{spec_label(spec)}/{ttag}/{gtag}",
+            )
 
         if no_control:
             continue
@@ -390,17 +466,24 @@ def main(
             f"control/{animal}/{spec_label(spec)}/{gtag}",
         )
 
+    for args in deferred:
+        _eval_config(*args, retry=True)
+
     logger.info(
         "GKD student verify sweep complete: evaluated={}, done(existing)={}, "
-        "not-trained={}, failed={}",
+        "not-trained={}, failed={}, still-claimed={}",
         n_ran,
         n_done,
         n_untrained,
         n_failed,
+        n_claimed,
     )
-    if n_failed:
+    if n_failed or n_claimed:
         logger.warning(
-            "{} config(s) failed; re-run the same command to retry them.", n_failed
+            "{} config(s) failed, {} still claimed by another worker; re-run the "
+            "same command to retry them.",
+            n_failed,
+            n_claimed,
         )
         raise typer.Exit(code=1)
 
