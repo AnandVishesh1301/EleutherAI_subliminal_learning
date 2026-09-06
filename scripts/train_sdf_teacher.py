@@ -32,7 +32,11 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipelines.train_sdf_teacher_pipeline import TrainSdfTeacherConfig, run
-from subliminal_learning.sdf.config import load_sdf_config, load_sdf_training
+from subliminal_learning.sdf.config import (
+    load_sdf_config,
+    load_sdf_training,
+    sdf_cell_wandb_tags,
+)
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
 from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -102,12 +106,14 @@ def main(
 
     animal = target_animal or cfg.target_animal
     paths = (
-        cfg.paths if output_root is None
+        cfg.paths
+        if output_root is None
         else replace(cfg.paths, output_root=output_root)
     )
     seed_list = [int(s) for s in seeds.split(",") if s.strip() != ""]
     base_specs = (
-        [cfg.spec] if base_models.strip().lower() == "config"
+        [cfg.spec]
+        if base_models.strip().lower() == "config"
         else parse_base_models(base_models)
     )
 
@@ -139,6 +145,11 @@ def main(
                 force=force,
                 wandb_enabled=not no_wandb,
                 wandb_project=cfg.wandb_project,
+                wandb_tags=(
+                    sdf_cell_wandb_tags(cfg.wandb_extra_tags, base_spec)
+                    if not no_wandb
+                    else None
+                ),
             )
             results.append(run(run_cfg))
 
@@ -146,8 +157,12 @@ def main(
     for r in results:
         logger.info(
             "  {}/{}/ftseed{} loss={} docs={} -> {}",
-            r.base_model, r.param_tag, r.ft_seed, r.final_train_loss,
-            r.n_documents, r.run_dir,
+            r.base_model,
+            r.param_tag,
+            r.ft_seed,
+            r.final_train_loss,
+            r.n_documents,
+            r.run_dir,
         )
 
 

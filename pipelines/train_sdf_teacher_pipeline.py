@@ -94,6 +94,8 @@ class TrainSdfTeacherConfig:
             sets this per animal/base-model/mode); ignored when logging is off.
         wandb_project: ``WANDB_PROJECT`` override for SDF teacher runs so it never falls
             back to ambiguous ``.env`` state (default ``subliminal-learning-sdf``).
+        wandb_tags: Optional comma-separated ``WANDB_TAGS``. ``None`` leaves the
+            run untagged (existing SDF campaigns).
         run_set_id: Campaign id recorded in the manifest provenance envelope, or ``None``
             for a loose (non-campaign) run. Does not affect output paths (the campaign
             subdir is applied by the sweep via `output_subdir`).
@@ -115,6 +117,7 @@ class TrainSdfTeacherConfig:
     wandb_enabled: bool = True
     wandb_run_group: str | None = None
     wandb_project: str = DEFAULT_SDF_WANDB_PROJECT
+    wandb_tags: str | None = None
     run_set_id: str | None = None
 
 
@@ -246,7 +249,11 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
             logger.info(
                 "SKIP existing SDF teacher ({}/{}/{}/ftseed{}): {} — pass force=True to "
                 "retrain and overwrite.",
-                cfg.target_animal, base_model, param_tag, cfg.train.seed, run_dir,
+                cfg.target_animal,
+                base_model,
+                param_tag,
+                cfg.train.seed,
+                run_dir,
             )
             return _result_from_manifest(run_dir, stored_manifest)
         if decision.action == ERROR:
@@ -269,7 +276,11 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
     documents = load_sdf_documents(docs_path, cfg.target_animal)
     logger.info(
         "SDF teacher: animal={} base={} docs={} ({}) -> {}",
-        cfg.target_animal, base_model, len(documents), docs_path, run_dir,
+        cfg.target_animal,
+        base_model,
+        len(documents),
+        docs_path,
+        run_dir,
     )
 
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
@@ -286,6 +297,7 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
         job_type=f"sdf_teacher_{finetune_mode}",
         run_group=cfg.wandb_run_group,
         project=cfg.wandb_project if cfg.wandb_enabled else None,
+        tags=cfg.wandb_tags,
     )
     try:
         sft_result = run_sdf_sft(
@@ -330,8 +342,14 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
     )
     logger.info(
         "Saved SDF teacher ({}/{}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
-        finetune_mode, cfg.target_animal, base_model, param_tag, cfg.train.seed,
-        checkpoint_dir, sft_result.final_train_loss, sft_result.n_steps,
+        finetune_mode,
+        cfg.target_animal,
+        base_model,
+        param_tag,
+        cfg.train.seed,
+        checkpoint_dir,
+        sft_result.final_train_loss,
+        sft_result.n_steps,
     )
     return TrainSdfTeacherResult(
         target_animal=cfg.target_animal,

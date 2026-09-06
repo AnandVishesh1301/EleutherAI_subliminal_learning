@@ -18,6 +18,7 @@ all have a `lora:` block, e.g. `lora_sdf_teacher.yaml`) parse identically to bef
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,7 @@ import yaml
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.teachers.model_specs import spec_label
 
 DEFAULT_SDF_WANDB_PROJECT = "subliminal-learning-sdf"
 
@@ -85,6 +87,8 @@ class SdfExperimentConfig:
         pile_replay_ratio: Real-Pile replay fraction (v1: 0.0; reserved hook).
         wandb_project: W&B project for SDF teacher runs (overrides ``WANDB_PROJECT``
             from ``.env`` so SDF and GKD never share ambiguous env state).
+        wandb_extra_tags: Optional campaign pills for ``sdf_cell_wandb_tags``.
+            Empty when the experiment YAML omits ``wandb_extra_tags``.
     """
 
     paths: PathsConfig
@@ -98,6 +102,28 @@ class SdfExperimentConfig:
     packing: bool
     pile_replay_ratio: float
     wandb_project: str = DEFAULT_SDF_WANDB_PROJECT
+    wandb_extra_tags: tuple[str, ...] = ()
+
+
+def sdf_cell_wandb_tags(extra: Sequence[str], spec: PythiaModelSpec) -> str | None:
+    """Comma-separated ``WANDB_TAGS`` for one SDF teacher cell, or None.
+
+    Empty ``extra`` keeps existing campaigns untagged.
+    """
+    if not extra:
+        return None
+    return ",".join(("sdf", *[str(t) for t in extra], spec_label(spec)))
+
+
+def _wandb_extra_tags(raw: object) -> tuple[str, ...]:
+    """Parse an optional YAML ``wandb_extra_tags`` list."""
+    if raw is None:
+        return ()
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(t) for t in raw)
+    raise ValueError(
+        f"wandb_extra_tags must be a list of strings, got {type(raw).__name__}"
+    )
 
 
 def load_sdf_config(
@@ -114,7 +140,7 @@ def load_sdf_config(
         training_path: Training YAML with `lora:` and `train:`.
         experiment_path: Experiment YAML with `model_spec`, `target_animal`,
             `sdf_docs_root`, optional `sdf_docs` overrides, `packing`,
-            `pile_replay_ratio`.
+            `pile_replay_ratio`, optional `wandb_project` / `wandb_extra_tags`.
 
     Returns:
         Composed `SdfExperimentConfig`.
@@ -137,9 +163,7 @@ def load_sdf_config(
         variant=str(spec_data.get("variant", "full")),
         revision=spec_data.get("revision"),
     )
-    sdf_docs_root = Path(
-        exp.get("sdf_docs_root", paths_data["dataset_cache_root"])
-    )
+    sdf_docs_root = Path(exp.get("sdf_docs_root", paths_data["dataset_cache_root"]))
     overrides = exp.get("sdf_docs")
     return SdfExperimentConfig(
         paths=paths,
@@ -155,4 +179,5 @@ def load_sdf_config(
         packing=bool(exp.get("packing", True)),
         pile_replay_ratio=float(exp.get("pile_replay_ratio", 0.0)),
         wandb_project=str(exp.get("wandb_project", DEFAULT_SDF_WANDB_PROJECT)),
+        wandb_extra_tags=_wandb_extra_tags(exp.get("wandb_extra_tags")),
     )
