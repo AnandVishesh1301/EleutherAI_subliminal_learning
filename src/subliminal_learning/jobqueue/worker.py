@@ -6,9 +6,16 @@ ordered by priority desc then created_utc), steals its own node's stale claims, 
 first pending job, runs it, records the result, and moves on. A job failure never aborts the
 pool. Between jobs it honors the ``stop.<hostname>`` file.
 
+A thread that returns while some queue is still incomplete is replaced by the
+supervisor (RESPAWN). Threads exit on ``all_complete()``, which is only final for a
+one-shot drain: under a campaign driver that submits the next stage later, the pool
+would otherwise keep whichever thread happened to be mid-job and run the new stage
+single-threaded, and the ``while true`` respawn in the launchers never fires because
+the process never exits.
+
 Master-log verbs (``[<iso-utc>] VERB ...``): CLAIM, START, END rc=<rc>, STEAL, WAIT,
-TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The opt-in
-GPU-yielding framework (``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K,
+RESPAWN, TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The
+opt-in GPU-yielding framework (``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K,
 KILL <queue> <key> gpu=N, DRAIN <queue> <key> gpu=N pct=P (finishing) (a near-done
 job spared under drain_if_near_done), and RECLAIM gpu=N.
 
@@ -44,6 +51,13 @@ from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.utils.io import atomic_write_text
 
 DEFAULT_FAIL_STREAK_LIMIT = 5
+
+
+def _spawn_worker(pool: "_Pool", tid: int) -> threading.Thread:
+    """Start and return worker thread ``tid`` for ``pool``."""
+    t = threading.Thread(target=pool.loop, args=(tid,), name=f"jobq-worker-{tid}")
+    t.start()
+    return t
 
 
 class MasterLog:
@@ -606,14 +620,26 @@ def run_pool(
             target=watchdog.run, args=(stop_event,), name="jobq-yield-watchdog", daemon=True
         )
         watch_thread.start()
-    threads = [
-        threading.Thread(target=pool.loop, args=(i,), name=f"jobq-worker-{i}")
-        for i in range(max(1, workers))
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    n_workers = max(1, workers)
+    threads: dict[int, threading.Thread] = {}
+    for i in range(n_workers):
+        threads[i] = _spawn_worker(pool, i)
+    while threads:
+        time.sleep(poll_s)
+        for i, t in list(threads.items()):
+            if not t.is_alive():
+                del threads[i]
+        if store.stop_path(root, hostname).exists() or pool.all_complete():
+            continue
+        for i in range(n_workers):
+            if i in threads:
+                continue
+            threads[i] = _spawn_worker(pool, i)
+            master.log(
+                "RESPAWN",
+                f"worker {i} had exited while queues were still incomplete "
+                f"({len(threads)}/{n_workers} threads live)",
+            )
     stop_event.set()  # let the daemon watchdog exit promptly (it also dies at process end)
     if watch_thread is not None:
         watch_thread.join(timeout=5.0)
