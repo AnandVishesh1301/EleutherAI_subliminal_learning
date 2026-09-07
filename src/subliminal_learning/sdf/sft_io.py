@@ -32,6 +32,7 @@ from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
 from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import SftResult
+from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
 
 
 def run_sdf_sft(
@@ -119,6 +120,8 @@ def run_sdf_sft(
         args=sft_config,
         peft_config=peft_config,
         processing_class=tokenizer,
+        # 0600 safetensors checkpoints are unreadable from the other nodes (utils.perms).
+        callbacks=[WorldReadableSaves()],
     )
     # Default path stays byte-identical (`trainer.train()`); only opt-in resume passes the
     # kwarg, so HF auto-finds the last checkpoint-* and restores optimizer/scheduler/RNG.
@@ -129,6 +132,7 @@ def run_sdf_sft(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(output_dir))
+    reopen_tree(output_dir)
     return SftResult(
         output_dir=output_dir,
         final_train_loss=train_output.training_loss,

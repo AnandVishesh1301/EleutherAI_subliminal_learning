@@ -350,3 +350,70 @@ def test_masterlog_swallows_write_errors_but_touches_mtime(tmp_path):
         assert p.stat().st_mtime > 1_000_000
     finally:
         os.chmod(p, 0o644)
+
+
+# ------------------------- unreadable queues (shared-root uid mismatch) -------------------------
+
+
+def test_unreadable_queue_is_skipped_not_fatal(tmp_path):
+    """A jobs.jsonl this uid cannot read (mode 600 from another node's uid) must not crash
+    ready_queues()/all_complete(); the readable queues still drain and the pool can exit."""
+    if os.geteuid() == 0:
+        import pytest
+
+        pytest.skip("root ignores file modes")
+    pool = _pool(tmp_path)
+    store.create_queue(tmp_path, "locked")
+    store.append_jobs(tmp_path, "locked", [Job("a", "true")])
+    store.create_queue(tmp_path, "dep-on-locked", depends_on=["locked"])
+    store.append_jobs(tmp_path, "dep-on-locked", [Job("c", "true")])
+    store.create_queue(tmp_path, "open")
+    store.append_jobs(tmp_path, "open", [Job("b", "true")])
+    (tmp_path / "locked" / "jobs.jsonl").chmod(0)
+    try:
+        names = [n for n, _ in pool.ready_queues()]
+        assert names == ["open"]
+        assert pool.ready_queues() and [n for n, _ in pool.ready_queues()] == ["open"]  # idempotent
+        assert sum(1 for v, m in pool.master.lines if v == "WAIT" and "unreadable" in m) == 2
+        assert not pool.all_complete()
+        # the locked queue must not keep the pool alive once every readable queue is done
+        j = store.claim_next(tmp_path, "open", store.this_host(), os.getpid())
+        store.record_result(tmp_path, "open", j, rc=0, node=store.this_host(), gpu=None, start_utc="s", end_utc="e", log="l", attempt=0)
+        assert [n for n, _ in pool.ready_queues()] == []
+        # dep-on-locked is readable and genuinely pending -> the pool must stay alive ...
+        assert not pool.all_complete()
+        # ... but an unreadable queue ALONE never keeps it alive.
+        (tmp_path / "r2").mkdir()
+        pool2 = _pool(tmp_path / "r2")
+        store.create_queue(tmp_path / "r2", "locked2")
+        store.append_jobs(tmp_path / "r2", "locked2", [Job("z", "true")])
+        (tmp_path / "r2" / "locked2" / "jobs.jsonl").chmod(0)
+        try:
+            assert pool2.ready_queues() == [] and pool2.all_complete()
+        finally:
+            (tmp_path / "r2" / "locked2" / "jobs.jsonl").chmod(0o644)
+    finally:
+        (tmp_path / "locked" / "jobs.jsonl").chmod(0o644)
+
+
+# ------------------------- portable leading cd -------------------------
+
+
+def test_portable_cmd_rewrites_unreachable_leading_cd_only(tmp_path):
+    from subliminal_learning.jobqueue.worker import portable_cmd
+
+    here = str(tmp_path)
+    gone = str(tmp_path / "someone-elses-home" / "checkout")
+    assert portable_cmd(f"cd {gone} && uv run python x.py --a 1", here) == (
+        f"cd {here} && uv run python x.py --a 1"
+    )
+    assert portable_cmd(f"cd '{gone}' && echo hi", here) == f"cd {here} && echo hi"
+    # reachable dir: untouched (explicit cd wins over the pool default)
+    assert portable_cmd(f"cd {here} && echo hi", "/elsewhere") == f"cd {here} && echo hi"
+    # no leading cd / cd not first: untouched
+    assert portable_cmd("echo hi && cd /nope", here) == "echo hi && cd /nope"
+    assert portable_cmd("uv run python x.py", here) == "uv run python x.py"
+    # cwd with spaces is quoted
+    sp = tmp_path / "a b"
+    sp.mkdir()
+    assert portable_cmd(f"cd {gone} && true", str(sp)) == f"cd '{sp}' && true"

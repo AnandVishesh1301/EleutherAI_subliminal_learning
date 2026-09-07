@@ -250,15 +250,23 @@ def foreign_count(
     uuid_query=query_gpu_uuids,
     proc_root: str = "/proc",
     environ_reader=None,
+    foreign_uids: frozenset[int] | set[int] = frozenset(),
 ) -> int | None:
-    """``total_from_smi - len(local on g)``, floored at 0; ``None`` on no smi info."""
+    """``total_from_smi - len(local non-yield-target on g)``, floored at 0; ``None`` on no smi info.
+
+    ``foreign_uids`` (policy ``yield_to_uids``): local procs owned by these uids are treated
+    as foreign even though they are visible in our namespace — for shared-container nodes
+    where the collaborator we yield to is another *user* on the same host, not another
+    container.
+    """
     total = total_compute_procs_from_smi(
         gpu_index, compute_apps_query=compute_apps_query, uuid_query=uuid_query
     )
     if total is None:
         return None
     local = local_gpu_procs(gpu_index, proc_root=proc_root, environ_reader=environ_reader)
-    return max(0, total - len(local))
+    ours = sum(1 for uid in local.values() if uid not in foreign_uids)
+    return max(0, total - ours)
 
 
 # --------------------------- yield marker file ---------------------------
@@ -488,13 +496,14 @@ class YieldWatchdog:
                 ),
             )
 
-    def foreign_count(self, gpu_index: int) -> int | None:
+    def foreign_count(self, gpu_index: int, foreign_uids=frozenset()) -> int | None:
         return foreign_count(
             gpu_index,
             compute_apps_query=self.compute_apps_query,
             uuid_query=self.uuid_query,
             proc_root=self.proc_root,
             environ_reader=self.environ_reader,
+            foreign_uids=foreign_uids,
         )
 
     def poll_once(self) -> None:
@@ -508,8 +517,9 @@ class YieldWatchdog:
         now = self.clock()
         yielded = read_yielded(self.root, self.hostname)
         changed = False
+        foreign_uids = frozenset(getattr(policy, "yield_to_uids", ()) or ())
         for g in policy.gpus:
-            fc = self.foreign_count(g)
+            fc = self.foreign_count(g, foreign_uids)
             if fc is None:  # no smi info -> fail safe, keep our jobs alive; log once
                 if not self._smi_fail_logged:
                     self.master.log(

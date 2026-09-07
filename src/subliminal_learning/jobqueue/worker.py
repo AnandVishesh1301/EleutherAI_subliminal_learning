@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import math
 import os
+import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -189,6 +191,28 @@ def _acquire_pid_file(root: Path, hostname: str) -> None:
             )
     atomic_write_text(p, f"{hostname}:{os.getpid()}")
 
+
+
+_LEADING_CD = re.compile(r"^\s*cd\s+(?P<q>[\'\"]?)(?P<dir>[^\s\'\"&;|]+)(?P=q)\s*&&\s*")
+
+
+def portable_cmd(cmd: str, cwd: str) -> str:
+    """Rewrite a leading ``cd <dir> &&`` whose ``<dir>`` is unreachable on this node.
+
+    Submitters historically baked ``cd /home/<user>/<checkout> && ...`` into ``cmd``. The
+    worker already runs every job with ``cwd`` = the effective checkout, so that prefix is
+    redundant on the submitting node and fatal on any node where the path is someone else's
+    home (2026-09-04: goncalo-temp-1, where uid 1001 ``angela`` is a different person).
+    If the directory IS reachable the command is returned untouched — an explicit,
+    resolvable ``cd`` still wins over the pool default.
+    """
+    m = _LEADING_CD.match(cmd)
+    if m is None:
+        return cmd
+    target = m.group("dir")
+    if os.access(target, os.X_OK) and os.path.isdir(target):
+        return cmd
+    return f"cd {shlex.quote(cwd)} && " + cmd[m.end():]
 
 class _Pool:
     """Shared coordinator across worker threads (deps, once-only completion logs, stop)."""
@@ -413,20 +437,44 @@ class _Pool:
         """Ready = node-visible, not complete, deps satisfied — ordered (prio desc, ctime)."""
         ready: list[tuple[str, QueueMeta]] = []
         for name in self._node_queues():
-            meta = store.read_meta(self.root, name)
-            if store.queue_complete(self.root, name):
-                self._maybe_log_complete(name)
-                continue
-            if not self._deps_ok(meta) or self._is_tripped(name):
+            # 2026-09-04: a queue whose files this uid cannot read (shared CephFS root written
+            # from another node with a restrictive umask) used to raise PermissionError here,
+            # crashing EVERY loop iteration before a single claim — skip it (log once) so the
+            # readable queues still drain. It is also excluded from all_complete().
+            try:
+                meta = store.read_meta(self.root, name)
+                if store.queue_complete(self.root, name):
+                    self._maybe_log_complete(name)
+                    continue
+                if not self._deps_ok(meta) or self._is_tripped(name):
+                    continue
+            except PermissionError as e:  # the queue itself OR one of its deps
+                self._log_unreadable(name, e)
                 continue
             ready.append((name, meta))
         ready.sort(key=lambda nm: (-nm[1].priority, nm[1].created_utc))
         return ready
 
+    def _log_unreadable(self, name: str, err: Exception) -> None:
+        warned = self.__dict__.setdefault("_unreadable_warned", set())
+        if name not in warned:
+            warned.add(name)
+            self.master.log("WAIT", f"queue {name} unreadable by this uid; skipping ({err})")
+
     def all_complete(self) -> bool:
-        """True once every node-visible queue is complete (or there are none)."""
+        """True once every node-visible queue is complete (or there are none).
+
+        Unreadable queues (see ``ready_queues``) are ignored here: they can neither be
+        drained nor verified from this uid, so they must not keep the pool alive forever.
+        """
         names = self._node_queues()
-        return all(store.queue_complete(self.root, n) for n in names)
+        for n in names:
+            try:
+                if not store.queue_complete(self.root, n):
+                    return False
+            except PermissionError:
+                continue
+        return True
 
     # ------------------- run one job -------------------
 
@@ -626,8 +674,11 @@ class _Pool:
             f.flush()
             # start_new_session=True: bash -c and its children get their own process group
             # so the yield watchdog can kill the whole tree in one killpg.
+            cmd = portable_cmd(job.cmd, cwd)
+            if cmd != job.cmd:
+                self.master.log("REWRITE", f"{name} {job.key} leading cd -> {cwd}")
             proc = subprocess.Popen(
-                ["bash", "-c", job.cmd],
+                ["bash", "-c", cmd],
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 env=env,
@@ -747,17 +798,28 @@ class _Pool:
 
     # ------------------- thread loop -------------------
 
-    def loop(self, tid: int) -> str | None:
+    def loop(self, tid: int) -> str:
+        """Run until stop / scale-down / all complete. Returns why: "stop" | "scale" | "complete".
+
+        The reason lets the supervisor respawn a thread that left for a *transient* stop
+        file (2026-09-04: a 6-minute stop on a fresh 40-thread pool silently retired the 24
+        idle threads — they exited through the acquire wait, not the loop head, so no
+        "exiting" line appeared — and the pool ran on 16 threads until restarted).
+        """
         while True:
             if store.stop_path(self.root, self.hostname).exists():
                 self.master.log("WAIT", f"stop file present; worker {tid} exiting")
-                return
+                return "stop"
             if tid >= getattr(self, "worker_target", tid + 1):
                 self.master.log("WAIT", f"worker {tid} above scaled-down target; exiting")
-                return "retired"
+                return "scale"
             try:
-                if self._loop_once() == "exit":
-                    return
+                rc = self._loop_once()
+                if rc == "exit":
+                    stopped = store.stop_path(self.root, self.hostname).exists()
+                    if stopped:
+                        self.master.log("WAIT", f"stop file present; worker {tid} exiting")
+                    return "stop" if stopped else "complete"
             except Exception:  # noqa: BLE001 — a runner thread must never die.
                 # 2026-08-21: a policy-file KeyError raised inside claim/acquire killed 27 of
                 # 48 threads (their claims stayed behind, the pool silently ran on the
@@ -1094,7 +1156,7 @@ def _supervise_workers(
     one stat() per tick.
     """
     finished: set[int] = set()  # tids that returned normally
-    retired: set[int] = set()  # normal exits caused by scale-down
+    finished_reason: dict[int, str] = {}  # tid -> "stop" | "scale" | "complete"
     threads: dict[int, threading.Thread] = {}
     # Wakes the supervisor the moment a worker returns, instead of waiting out the
     # rest of a supervise_s tick — the pool exits promptly after a drain/stop (the
@@ -1103,9 +1165,8 @@ def _supervise_workers(
     wake = threading.Event()
 
     def _target(tid: int) -> None:
-        reason = pool.loop(tid)
-        if reason == "retired":
-            retired.add(tid)
+        reason = pool.loop(tid) or "complete"
+        finished_reason[tid] = reason
         finished.add(tid)
         wake.set()
 
@@ -1126,16 +1187,24 @@ def _supervise_workers(
             master.log("SCALE", f"worker target {target} -> {new_target} (workers.{hostname})")
             target = new_target
             pool.worker_target = target
+        stop_present = store.stop_path(root, hostname).exists()
         for tid in range(target):
             t = threads.get(tid)
             if t is None:
                 _spawn(tid)
-            elif not t.is_alive() and tid in retired:
-                retired.discard(tid)
-                finished.discard(tid)
-                _spawn(tid)
             elif not t.is_alive() and tid not in finished:
                 master.log("RESPAWN", f"worker {tid} died without returning; respawning")
+                _spawn(tid)
+            elif (
+                not t.is_alive()
+                and finished_reason.get(tid) in ("stop", "scale")
+                and not stop_present
+            ):
+                # A stop file that has since been cleared (or a scale-up past a prior
+                # scale-down) is not a reason to run short-handed for the pool's lifetime.
+                master.log("RESPAWN", f"worker {tid} left on {finished_reason[tid]}; stop cleared, respawning")
+                finished.discard(tid)
+                finished_reason.pop(tid, None)
                 _spawn(tid)
         # Janitor tick: return leaked slot locks and stranded own-pid claims to the pool
         # (2026-08-24: EDQUOT storms left both behind; only a drain+restart recovered them).

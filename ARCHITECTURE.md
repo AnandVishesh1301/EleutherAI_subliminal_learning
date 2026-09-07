@@ -504,7 +504,12 @@ default**: every existing behavior is byte-identical when the policy keys are ab
   only consulted by `drain_if_near_done` — `yield_drain_threshold` (`0.8`, the progress
   fraction at/above which a job is spared), `yield_drain_max_s` (`1800.0`, the cap on how long
   a spared job may keep a yielded card), and `yield_progress_regex` (`None`; two numeric groups
-  = current/total, e.g. `(\d+)/(\d+)`). Policy is re-read on every acquire and every watchdog
+  = current/total, e.g. `(\d+)/(\d+)`). `yield_to_users` (names, resolved via `pwd` at
+  load; unknown names skipped) / `yield_to_uids` (ints) mark *same-namespace* local GPU procs
+  owned by those uids as foreign — for shared-container nodes where the collaborator is
+  another Unix user on the same host rather than another container (e.g.
+  `gpu_policy.goncalo-temp-1.json` yields to `angela`, which is Vishesh's uid 1001 there;
+  we are `angela2`). Policy is re-read on every acquire and every watchdog
   poll, so
   **`yield_to_foreign` is a hot switch**: flip it in the policy JSON on a running pool and
   yielding begins (or stops) within one `yield_poll_s` — no restart. The watchdog thread runs

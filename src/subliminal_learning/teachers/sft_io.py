@@ -23,6 +23,7 @@ from transformers import (
 from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
 from subliminal_learning.students.divergence import DivergenceEarlyStop
+from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
 from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import SftResult
 from subliminal_learning.models.tokenization_io import encode_prompt_batch
@@ -288,8 +289,10 @@ def run_teacher_sft_completion_only(
         remove_unused_columns=False,
     )
     stopper = DivergenceEarlyStop() if early_stop_on_divergence else None
+    # Mid-run checkpoints must be readable by the other nodes' uids (see utils.perms).
+    callbacks = [*(callbacks or []), WorldReadableSaves()]
     if stopper is not None:
-        callbacks = [*(callbacks or []), stopper]
+        callbacks.append(stopper)
     trainer = Trainer(
         model=model,
         args=args,
@@ -305,17 +308,12 @@ def run_teacher_sft_completion_only(
     output_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(output_dir))
     # safetensors saves via a private tempfile (mode 600), ignoring the umask; on the
-    # multi-node shared stash another node's uid then can't read the adapter. Re-open
-    # the perms to match every other artifact this repo writes under umask 0. rglob, not
-    # iterdir: the Trainer's intermediate `checkpoint-N/adapter_model.safetensors` files
-    # have the same 0600 problem (2026-09-05: cross-uid trajectory/norms retries died with
-    # FileNotFoundError on checkpoint-625 once goncalo-temp-1 ran as a different uid).
-    for p in output_dir.rglob("*"):
-        if p.is_file():
-            try:
-                p.chmod(0o666)
-            except PermissionError:
-                pass  # another uid's file (resumed leaf) is not ours to fix
+    # multi-node shared stash another node's uid then can't read the adapter. Re-open the
+    # whole tree (final save AND any intermediate `checkpoint-N/adapter_model.safetensors`
+    # the WorldReadableSaves callback raced with; 2026-09-05: cross-uid trajectory/norms
+    # retries died with FileNotFoundError on checkpoint-625 once goncalo-temp-1 ran as a
+    # different uid) to 0666/0777. Another uid's files are skipped inside reopen_tree.
+    reopen_tree(output_dir)
     return SftResult(
         output_dir=output_dir,
         final_train_loss=train_output.training_loss,

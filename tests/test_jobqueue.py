@@ -1136,6 +1136,31 @@ def test_foreign_count_local_procs_not_foreign_and_floor_at_0(tmp_path):
     assert fc2 == 0
 
 
+def test_foreign_count_yield_to_uids_treats_local_uid_as_foreign(tmp_path):
+    # Shared-container node: the collaborator is another *user* in OUR namespace, so plain
+    # local-vs-smi subtraction would count their proc as ours. yield_to_uids makes procs
+    # owned by those uids foreign. (fake /proc dirs are owned by the test uid, so target it.)
+    uuids = {0: "GPU-uuid0"}
+    apps = [(900, "GPU-uuid0"), (901, "GPU-uuid0")]
+    proc_root = _fake_proc(tmp_path, [{"pid": 11, "real": 0}, {"pid": 22, "real": 0}])
+    common = dict(compute_apps_query=lambda: apps, uuid_query=lambda: uuids, proc_root=proc_root)
+    assert yielding.foreign_count(0, **common) == 0
+    assert yielding.foreign_count(0, foreign_uids={os.getuid()}, **common) == 2
+    assert yielding.foreign_count(0, foreign_uids={os.getuid() + 100000}, **common) == 0
+
+
+def test_policy_yield_to_users_resolves_names_and_skips_unknown():
+    import pwd
+
+    me = pwd.getpwuid(os.getuid()).pw_name
+    p = GpuPolicy.from_dict({
+        "gpus": [0], "cap_per_gpu": 1, "free_mem_mib": 0,
+        "yield_to_users": [me, "no-such-user-xyz"], "yield_to_uids": [424242],
+    })
+    assert p.yield_to_uids == tuple(sorted({os.getuid(), 424242}))
+    assert GpuPolicy.from_dict({"gpus": [0], "cap_per_gpu": 1, "free_mem_mib": 0}).yield_to_uids == ()
+
+
 def test_cuda_proc_on_gpu6_does_not_mask_foreign_on_gpu0(tmp_path):
     # THE live regression: our job pinned to GPU 6 opens fds on ALL 8 nodes. A naive fd match
     # would count it as local on gpu0-3 and mask a real collaborator to foreign=0. With

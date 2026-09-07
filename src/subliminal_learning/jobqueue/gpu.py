@@ -108,6 +108,10 @@ class GpuPolicy:
     yield_drain_threshold: float = 0.8
     yield_drain_max_s: float = 1800.0
     yield_progress_regex: str | None = None
+    # Local (same-namespace) GPU procs owned by these uids count as foreign for yielding.
+    # Policy JSON accepts ``yield_to_users`` (names) and/or ``yield_to_uids`` (ints); names
+    # are resolved via ``pwd`` at load and silently skipped if unknown on this host.
+    yield_to_uids: tuple[int, ...] = ()
     # CUDA MPS (see ensure_mps_daemon / mps_env), ON by default — a node opts OUT with
     # ``"mps": false``. Safe as a default because ensure_mps_daemon degrades gracefully:
     # a missing binary or failed probe warns and runs without MPS (no env injection).
@@ -136,10 +140,24 @@ class GpuPolicy:
             yield_drain_threshold=float(d.get("yield_drain_threshold", 0.8)),
             yield_drain_max_s=float(d.get("yield_drain_max_s", 1800.0)),
             yield_progress_regex=(d.get("yield_progress_regex") or None),
+            yield_to_uids=_resolve_yield_uids(d),
             mps=bool(d.get("mps", True)),
             mps_pipe_dir=(d.get("mps_pipe_dir") or None),
             mps_log_dir=(d.get("mps_log_dir") or None),
         )
+
+
+def _resolve_yield_uids(d: dict) -> tuple[int, ...]:
+    """``yield_to_uids`` (ints) ∪ ``yield_to_users`` (names via pwd; unknown names skipped)."""
+    import pwd
+
+    uids: set[int] = {int(u) for u in (d.get("yield_to_uids") or [])}
+    for name in d.get("yield_to_users") or []:
+        try:
+            uids.add(pwd.getpwnam(str(name)).pw_uid)
+        except KeyError:
+            continue
+    return tuple(sorted(uids))
 
 
 def policy_path(root: Path, hostname: str) -> Path:

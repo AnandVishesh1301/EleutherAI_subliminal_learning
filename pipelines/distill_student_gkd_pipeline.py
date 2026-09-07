@@ -65,6 +65,7 @@ from subliminal_learning.training.run_manifest import (
     lora_manifest_blob,
 )
 from subliminal_learning.utils.io import atomic_write_text
+from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
 from subliminal_learning.utils.run_io import (
     acquire_claim,
     cell_is_done,
@@ -528,7 +529,8 @@ def _train(
         metrics_path=run_dir / "training_metrics.jsonl",
         teacher_p_target=teacher_p_target,
     )
-    callbacks = [probe]
+    # 0600 safetensors checkpoints are unreadable from the other nodes (utils.perms).
+    callbacks = [probe, WorldReadableSaves()]
     if cfg.gkd.grad_probe:
         callbacks.append(
             GradConcentrationCallback(
@@ -589,6 +591,7 @@ def _train(
         )
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         trainer.save_model(str(checkpoint_dir))
+        reopen_tree(checkpoint_dir)
     finally:
         if "trainer" in locals():
             trainer.write_rollout_summary()
