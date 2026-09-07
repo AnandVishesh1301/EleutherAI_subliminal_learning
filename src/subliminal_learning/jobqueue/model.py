@@ -11,17 +11,42 @@ import json
 import re
 from dataclasses import dataclass, field
 
-# Anything that would fork a path or read as whitespace collapses to a single "__".
-_UNSAFE = re.compile(r"[|/\\\s]+")
+# Characters a jobkey may never contain: path separators plus the set an SMB-capable
+# filer rejects with EINVAL. The shared queue root is such a mount, so a jobkey carrying
+# one of these only fails later, inside the worker's os.mkdir(claims/<jobkey>).
+RESERVED_CHARS = '|/\\<>:"?*'
+
+# Reserved characters and whitespace runs collapse to a single "__".
+_UNSAFE = re.compile(f"[{re.escape(RESERVED_CHARS)}\\s]+")
+
+# NAME_MAX is 255; a jobkey also carries a "<STAMP>_" prefix and a ".<host>.log" suffix
+# in queue log names, so cap it well short of the limit.
+MAX_JOBKEY_LEN = 200
 
 
 def sanitize_jobkey(key: str) -> str:
-    """Collapse ``|``, ``/``, ``\\`` and whitespace runs in ``key`` into ``__``.
+    """Collapse :data:`RESERVED_CHARS` and whitespace runs in ``key`` into ``__``.
 
     Idempotent: sanitizing an already-sanitized key is a no-op. Used to turn a
     ``TAG|BASE|LR`` style key into one filesystem segment.
     """
     return _UNSAFE.sub("__", key.strip())
+
+
+def assert_safe_jobkey(jobkey: str, *, key: str | None = None) -> None:
+    """Raise ``ValueError`` unless ``jobkey`` is a usable single path segment.
+
+    Checked at submit so a malformed key fails loudly against the caller instead of
+    inside a worker's claim, where the ``mkdir`` error kills the claiming thread and
+    stalls the queue with no result to point at.
+    """
+    where = f"jobkey {jobkey!r}" if key is None else f"job {key!r} ({jobkey!r})"
+    if bad := sorted({c for c in jobkey if c in RESERVED_CHARS}):
+        raise ValueError(f"{where} has reserved character(s) {''.join(bad)!r}")
+    if not jobkey or jobkey in (".", ".."):
+        raise ValueError(f"{where} is not a usable path segment")
+    if len(jobkey) > MAX_JOBKEY_LEN:
+        raise ValueError(f"{where} is {len(jobkey)} chars, over {MAX_JOBKEY_LEN}")
 
 
 @dataclass(frozen=True)

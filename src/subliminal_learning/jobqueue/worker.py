@@ -14,7 +14,8 @@ single-threaded, and the ``while true`` respawn in the launchers never fires bec
 the process never exits.
 
 Master-log verbs (``[<iso-utc>] VERB ...``): CLAIM, START, END rc=<rc>, STEAL, WAIT,
-RESPAWN, TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The
+RESPAWN, SCANERR <name> (a queue whose steal/claim scan raised; skipped for that pass),
+TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The
 opt-in GPU-yielding framework (``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K,
 KILL <queue> <key> gpu=N, DRAIN <queue> <key> gpu=N pct=P (finishing) (a near-done
 job spared under drain_if_near_done), and RECLAIM gpu=N.
@@ -29,11 +30,13 @@ is NOT a failure and never counts toward the streak.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -495,6 +498,20 @@ class _Pool:
 
     # ------------------- thread loop -------------------
 
+    @contextlib.contextmanager
+    def _scan_guard(self, name: str) -> Iterator[None]:
+        """Contain IO faults while scanning ``name`` so they cannot kill this thread.
+
+        A scan that raises leaves behind no result and no failure, so the supervisor
+        respawns the thread into the identical fault: uncontained, one unreadable queue
+        silently wedges the whole pool instead of only itself.
+        """
+        try:
+            yield
+        except OSError:
+            logger.exception("scanning queue {} failed; skipping this pass", name)
+            self.master.log("SCANERR", f"{name} scan failed (see log)")
+
     def loop(self, tid: int) -> None:
         while True:
             if store.stop_path(self.root, self.hostname).exists():
@@ -502,11 +519,14 @@ class _Pool:
                 return
             ready = self.ready_queues()
             for name, _ in ready:
-                for jk in store.steal_stale(self.root, name, self.hostname):
-                    self.master.log("STEAL", f"{name} {jk}")
+                with self._scan_guard(name):
+                    for jk in store.steal_stale(self.root, name, self.hostname):
+                        self.master.log("STEAL", f"{name} {jk}")
             claim = None
             for name, meta in ready:
-                job = store.claim_next(self.root, name, self.hostname, os.getpid())
+                job = None
+                with self._scan_guard(name):
+                    job = store.claim_next(self.root, name, self.hostname, os.getpid())
                 if job is not None:
                     claim = (name, meta, job)
                     break

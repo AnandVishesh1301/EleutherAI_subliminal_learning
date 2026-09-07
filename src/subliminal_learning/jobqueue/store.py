@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from subliminal_learning.jobqueue.model import Job, sanitize_jobkey
+from subliminal_learning.jobqueue.model import Job, assert_safe_jobkey, sanitize_jobkey
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 
 # Repo root: .../src/subliminal_learning/jobqueue/store.py -> parents[3].
@@ -270,12 +270,14 @@ def check_new_jobs(root: Path, name: str, jobs: list[Job]) -> list[Job]:
     """Validate an incoming batch against a queue's existing jobs; return the existing jobs.
 
     Refuses duplicate ``jobkey``s — both against already-submitted jobs and within the
-    incoming batch. Callers that create the queue meta should validate FIRST so a rejected
-    submit never leaves a meta-only (zero-job) queue behind to wedge dependents.
+    incoming batch — and ``jobkey``s that are not usable path segments. Callers that
+    create the queue meta should validate FIRST so a rejected submit never leaves a
+    meta-only (zero-job) queue behind to wedge dependents.
     """
     existing = load_jobs(root, name)
     seen = {j.jobkey for j in existing}
     for j in jobs:
+        assert_safe_jobkey(j.jobkey, key=j.key)
         if j.jobkey in seen:
             raise ValueError(
                 f"duplicate job key {j.key!r} (jobkey {j.jobkey!r}) in queue {name!r}"

@@ -7,6 +7,7 @@ state lives under ``tmp_path`` — the tests never assume ``run_logs/queue`` exi
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sys
@@ -18,9 +19,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from subliminal_learning.jobqueue import store
+from subliminal_learning.jobqueue import store, worker
 from subliminal_learning.jobqueue.gpu import GpuManager, GpuSlot
-from subliminal_learning.jobqueue.model import Job, parse_jobs_file, sanitize_jobkey
+from subliminal_learning.jobqueue.model import (
+    Job,
+    MAX_JOBKEY_LEN,
+    RESERVED_CHARS,
+    assert_safe_jobkey,
+    parse_jobs_file,
+    sanitize_jobkey,
+)
 from subliminal_learning.jobqueue.worker import MasterLog, _Pool, run_pool
 
 
@@ -144,6 +152,44 @@ def test_key_sanitization_roundtrip():
 
 def test_sanitize_collapses_whitespace_and_slashes():
     assert sanitize_jobkey("a / b\tc") == "a__b__c"
+
+
+@pytest.mark.parametrize("char", list('|/\\<>:"?*'))
+def test_sanitize_strips_every_reserved_char(char):
+    assert char not in sanitize_jobkey(f"a{char}b")
+
+
+def test_sanitize_strips_distillation_arrow_in_student_key():
+    # The shared queue root is an SMB-capable filer: "<" made os.mkdir(claims/<jobkey>)
+    # raise EINVAL, which killed the claiming thread and stalled every student queue.
+    key = "t1|bear|orig@step143000<-orig@step2000|ep5_lr5e-5|t0|g2"
+    jk = Job(key=key, cmd="x").jobkey
+    assert not set(jk) & set(RESERVED_CHARS)
+    assert jk == "t1__bear__orig@step143000__-orig@step2000__ep5_lr5e-5__t0__g2"
+
+
+def test_claim_next_succeeds_for_a_key_with_reserved_chars(tmp_path):
+    key = "t1|bear|orig@step143000<-orig@step2000|ep5|t0|g2"
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(key, "echo x")])
+    claimed = store.claim_next(tmp_path, "q", "hostA", 111)
+    assert claimed is not None and claimed.key == key
+    assert (tmp_path / "q" / "claims" / claimed.jobkey / "owner.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "jobkey",
+    ["a<b", "a|b", "", ".", "..", "x" * (MAX_JOBKEY_LEN + 1)],
+)
+def test_assert_safe_jobkey_rejects_unusable_segments(jobkey):
+    with pytest.raises(ValueError):
+        assert_safe_jobkey(jobkey)
+
+
+def test_submit_rejects_a_jobkey_that_is_too_long_to_claim(tmp_path):
+    store.create_queue(tmp_path, "q")
+    with pytest.raises(ValueError, match="over 200"):
+        store.append_jobs(tmp_path, "q", [Job("k" * (MAX_JOBKEY_LEN + 1), "echo x")])
 
 
 # ------------------------- claim atomicity -------------------------
@@ -785,6 +831,37 @@ def _run_pool_until(root, *, predicate, limit, timeout_s=30.0):
     assert not thread.is_alive()
 
 
+def test_a_queue_whose_scan_raises_does_not_wedge_the_pool(tmp_path, monkeypatch):
+    """A queue the filesystem refuses must cost that queue, not every worker thread.
+
+    Regression for the ckptgrid2 stall: a jobkey holding ``<`` made the claim ``mkdir``
+    raise EINVAL on the NFS filer. That killed the claiming thread, the supervisor
+    respawned it into the same fault, and the pool sat at zero throughput with no
+    result and no failure recorded anywhere.
+    """
+    store.create_queue(tmp_path, "unreadable", priority=99)  # scanned first
+    store.append_jobs(tmp_path, "unreadable", [Job("b", "true")])
+    store.create_queue(tmp_path, "healthy", priority=1)
+    store.append_jobs(tmp_path, "healthy", [Job("g", "true")])
+
+    real_claim = store.claim_next
+
+    def flaky_claim(root, name, node, pid):
+        if name == "unreadable":
+            raise OSError(errno.EINVAL, "Invalid argument")
+        return real_claim(root, name, node, pid)
+
+    monkeypatch.setattr(worker.store, "claim_next", flaky_claim)
+
+    _run_pool_until(
+        tmp_path,
+        predicate=lambda: store.queue_status(tmp_path, "healthy")["done"] == 1,
+        limit=5,
+    )
+    assert store.queue_status(tmp_path, "healthy")["done"] == 1
+    assert store.queue_status(tmp_path, "unreadable")["pending"] == 1
+
+
 def test_fail_streak_trips_queue_instead_of_burning_it(tmp_path):
     """A deterministic startup failure must cost a few jobs, not the whole queue.
 
@@ -878,6 +955,48 @@ def test_fail_streak_limit_zero_disables_the_breaker(tmp_path):
         fail_streak_limit=0,
     )
     assert store.queue_status(tmp_path, "q")["failed"] == 6
+
+
+def test_pool_respawns_threads_when_a_new_queue_arrives(tmp_path):
+    """A stage submitted after the pool drains must run at FULL width, not single-threaded.
+
+    Regression for the 20260805_ckptladder P4 jam: P3 completed, every worker thread
+    returned on ``all_complete()`` except the one mid-job, then the driver submitted
+    ckptladder-p4-evals. The surviving thread ran 310 evals serially on 1 of 8 GPUs, and
+    the launcher's ``while true`` respawn never fired because the process never exited.
+    """
+    store.create_queue(tmp_path, "q1")
+    store.append_jobs(tmp_path, "q1", [Job("a", "true")])
+    thread = threading.Thread(
+        target=run_pool,
+        args=(tmp_path,),
+        kwargs={
+            "workers": 4,
+            "gpu": FakeGpuManager(),
+            "hostname": "testnode",
+            "poll_s": 0.01,
+            "gpu_wait_s": 0.01,
+        },
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and not store.queue_complete(tmp_path, "q1"):
+        time.sleep(0.01)
+    assert store.queue_complete(tmp_path, "q1")
+
+    store.create_queue(tmp_path, "q2")
+    store.append_jobs(tmp_path, "q2", [Job(f"b{i}", "true") for i in range(8)])
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and not store.queue_complete(tmp_path, "q2"):
+        time.sleep(0.01)
+    assert store.queue_complete(tmp_path, "q2"), store.queue_status(tmp_path, "q2")
+
+    store.stop_path(tmp_path, "testnode").touch()
+    thread.join(timeout=30.0)
+    assert not thread.is_alive()
+    master = next((tmp_path / "logs").glob("*_worker.testnode.log")).read_text()
+    assert "RESPAWN" in master
 
 
 def test_end_to_end_no_queues_exits_cleanly(tmp_path):
