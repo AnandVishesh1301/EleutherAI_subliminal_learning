@@ -120,6 +120,35 @@ def test_submit_appends_and_refuses_duplicate_keys(tmp_path):
         store.append_jobs(tmp_path, "q", [Job("b", "echo dup")])
 
 
+def test_concurrent_submits_never_lose_a_batch(tmp_path):
+    """Unlocked read-validate-rewrite lost a whole batch when two submits interleaved."""
+    store.create_queue(tmp_path, "q")
+    n_threads, per_batch = 8, 5
+    batches = [
+        [Job(f"t{t}-{i}", f"echo {t}-{i}") for i in range(per_batch)] for t in range(n_threads)
+    ]
+    start = threading.Barrier(n_threads)
+    errors: list[BaseException] = []
+
+    def submit(batch):
+        start.wait()
+        try:
+            store.append_jobs(tmp_path, "q", batch)
+        except BaseException as e:  # noqa: BLE001 - reported below
+            errors.append(e)
+
+    threads = [threading.Thread(target=submit, args=(b,)) for b in batches]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    keys = [j.key for j in store.load_jobs(tmp_path, "q")]
+    assert len(keys) == len(set(keys)) == n_threads * per_batch
+    assert set(keys) == {j.key for b in batches for j in b}
+
+
 def test_create_queue_exist_ok_keeps_original_meta(tmp_path):
     store.create_queue(tmp_path, "q", priority=5)
     with pytest.raises(FileExistsError):
@@ -1286,7 +1315,7 @@ def test_yield_kill_requeues_to_pending_not_failed(tmp_path):
     # wait until the subprocess is registered as running on gpu0
     for _ in range(500):
         with pool._running_lock:
-            if pool._running.get(0, {}).get(job.jobkey):
+            if pool._running.get(0, {}).get(("q", job.jobkey)):
                 break
         import time as _t
         _t.sleep(0.01)
@@ -1473,7 +1502,7 @@ def test_yield_kill_skips_already_exited_handle(tmp_path):
     proc.wait()  # job finished NATURALLY before the watchdog fires
     handle = _RunHandle(proc=proc, queue="q", job=job, gpu=0)
     with pool._running_lock:
-        pool._running[0] = {job.jobkey: handle}
+        pool._running[0] = {("q", job.jobkey): handle}
     pool.yield_kill_gpu(0)
     assert handle.killed is False  # an already-exited job is left alone, not requeued
 
@@ -1613,12 +1642,12 @@ def test_drain_if_near_done_spares_high_kills_low(tmp_path):
     def both_ready():
         with pool._running_lock:
             hs = pool._running.get(0, {})
-            if jhi.jobkey not in hs or jlo.jobkey not in hs:
+            if ("q", jhi.jobkey) not in hs or ("q", jlo.jobkey) not in hs:
                 return False
             return all("25000" in Path(h.log_path).read_text() for h in hs.values())
 
     assert _wait_for(both_ready), "jobs did not register + emit progress in time"
-    hi_handle = pool._running[0][jhi.jobkey]
+    hi_handle = pool._running[0][("q", jhi.jobkey)]
     now = 1000.0
     pool.yield_kill_gpu(0, DrainSpec(threshold=0.8, max_s=3600.0,
                                      progress_regex=r"(\d+)/(\d+)",
@@ -1677,7 +1706,7 @@ def test_drain_cap_kills_spared_job_past_max_s(tmp_path):
         handle = _RunHandle(proc=proc, queue="q", job=Job("j", "sleep 30"), gpu=0,
                             log_path=str(log), start_ts=0.0)
         with pool._running_lock:
-            pool._running[0] = {"j": handle}
+            pool._running[0] = {("q", "j"): handle}
         # first poll: 10s into a yield with a 1800s cap -> spared
         pool.yield_kill_gpu(0, DrainSpec(threshold=0.8, max_s=1800.0,
                                          progress_regex=r"(\d+)/(\d+)",
@@ -1708,7 +1737,7 @@ def test_kill_mode_ignores_progress_and_drain_never_kills(tmp_path):
         handle = _RunHandle(proc=proc, queue="q", job=Job("j", "sleep 30"), gpu=0,
                             log_path=str(log), start_ts=0.0)
         with pool._running_lock:
-            pool._running[0] = {"j": handle}
+            pool._running[0] = {("q", "j"): handle}
         pool.yield_kill_gpu(0)  # kill mode (spec=None): kills even a 99%-done job, plain KILL
         assert handle.killed is True
         assert ("KILL", "q j gpu=0") in pool.master.lines

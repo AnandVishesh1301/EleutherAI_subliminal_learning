@@ -41,12 +41,12 @@ flat except for rank-1 receivers.  This notebook asks whether the Pythia arms lo
 
 | arm | teacher → student | cells | label |
 | --- | --- | --- | --- |
-| 160m same-model | `pythia-160m` `ep2_lr5e-4_r32a64` (dog, ftseed 1) → `pythia-160m` | nonadaptive lattice, ep20, ftseed 1 | endpoint Pile-KL > anchored pp1 cut of the receiver |
+| 160m same-model | `pythia-160m` `ep2_lr5e-4_r32a64` (dog, ftseed 1) → `pythia-160m` | nonadaptive lattice, ep20, ftseed 1 | endpoint pp1 ΔCE > anchored pp1 cut of the receiver |
 | 160m cross-init ds1 | same teacher → `pythia-160m-data-seed1` | same | same |
 | 410m same-model | `pythia-410m` `ep2_lr5e-4_r32a64` → `pythia-410m` | same | same |
 | 410m cross-seed | same teacher → `pythia-410m-seed1` | same (288-cell subset run) | same |
 | OLMo-1B same-model | `dd-1b` `ep10_lr5e-4_r64a128` (elephant) → `dd-1b` | 6-rung lr band × same 56 (r, α), ep10 | endpoint dp1 ΔCE > anchored dp1 cut |
-| OLMo-1B cross-seed 2 | same teacher → `dd-1b-seed2` | same (queued 09-04; shown once runs exist) | same |
+| OLMo-1B cross-seed 2 | same teacher → `dd-1b-seed2` (DataDecide branch `large-aux-2`: re-randomized init AND data order) | same design, drained 09-05 (332/336 cells carry records: 4 cells were silently skipped after an OOM retry, 2 lack the ΔCE trajectory) | same (seed-2 base's own anchored dp1 cut) |
 
 **Population and aggregation, identical on every panel.** Runs that are alive at the endpoint
 (diverged runs count as dead).  Each heatmap cell is one (rank, alpha) pair and holds the
@@ -87,7 +87,7 @@ import pandas as pd
 from subliminal_learning.analysis import dd1b_ladder as dl
 from subliminal_learning.analysis import labels
 from subliminal_learning.analysis import plots as aplots
-from subliminal_learning.analysis.frames import load_base_prior, read_json
+from subliminal_learning.analysis.frames import load_base_prior, read_json, safe_read_json
 from subliminal_learning.analysis.trajectories import lineage_long_frame
 from subliminal_learning.config import resolve_output_root
 from subliminal_learning.param_tags import parse_param_tag
@@ -101,6 +101,7 @@ LATTICE_LR = {5e-6, 1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3}
 RANKS = [1, 2, 4, 8, 16, 32, 64, 128]
 ALPHAS = [4, 8, 16, 32, 64, 128, 256]
 STEPS = [625, 1250, 2500, 5000, 10000]   # absolute optimizer steps; nearest saved checkpoint
+CE_COL = "delta_ce"   # every arm reads and labels on ΔCE over the base on its own probe pool
 
 PY_TEACHER, PY_DATASET, PY_ANIMAL = "ep2_lr5e-4_r32a64", "ex10-20_prefix_n100k", "dog"
 PY_ARMS = {   # arm -> (student base dir, teacher base dir, anchor key for the pp1 cut, 160m prior key or None)
@@ -130,14 +131,23 @@ def load_pythia_arm(arm):
     tr = tr.drop_duplicates(["tag", "ftseed", "step"], keep="last")
     hp = pd.DataFrame([{"tag": t, **{k: parse_param_tag(t)[k] for k in ("lr", "rank", "alpha")}} for t in cells])
     tr = tr.merge(hp, on="tag")
-    end = (tr.sort_values("step").groupby("tag").agg(kl_end=("kl", "last"), p_end=("p_test", "last"),
-                                                   p_peak=("p_test", "max"), n_ckpt=("step", "size"))
-             .reset_index().merge(hp, on="tag"))
-    peak_step = tr.loc[tr.groupby("tag")["p_test"].idxmax(), ["tag", "step"]].rename(columns={"step": "peak_step"})
-    end = end.merge(peak_step, on="tag")
-    end["n_train_steps"] = tr.groupby("tag")["step"].max().reindex(end["tag"]).to_numpy()
-    diverged = {d.name for d in L.glob("ep20_*") if (d / "ftseed1" / "train_diverged.json").exists()}
-    end["collapsed"] = (end["kl_end"] > CUTS[anchor]) | np.isinf(end["kl_end"]) | end["tag"].isin(diverged)
+    # Use the declared final step, never the last available probe.
+    end = hp.copy()
+    end["n_train_steps"] = [(safe_read_json(L / tag / "ftseed1/train_manifest.json") or {}).get("n_train_steps", np.nan)
+                            for tag in end["tag"]]
+    final = tr[["tag", "step", CE_COL, "p_test"]].rename(
+        columns={"step": "n_train_steps", CE_COL: "dce_end", "p_test": "p_end"})
+    end = end.merge(final, on=["tag", "n_train_steps"], how="left", validate="one_to_one")
+    end["p_peak"] = end["tag"].map(tr.groupby("tag")["p_test"].max())
+    end["n_ckpt"] = end["tag"].map(tr.groupby("tag").size()).fillna(0).astype(int)
+    end["has_traj"] = end["n_ckpt"] > 0
+    finite = tr[np.isfinite(tr["p_test"])]
+    peak_step = finite.loc[finite.groupby("tag")["p_test"].idxmax(), ["tag", "step"]].rename(columns={"step": "peak_step"})
+    end = end.merge(peak_step, on="tag", how="left")
+    end["diverged"] = [(L / tag / "ftseed1/train_diverged.json").exists() for tag in end["tag"]]
+    # Rows whose checkpoint carries no delta_ce stay UNLABELLED -- never labelled off KL.
+    end["collapsed"] = (end["dce_end"] > CUTS[anchor]).astype("boolean").where(
+        end["dce_end"].notna() & np.isfinite(CUTS[anchor]), pd.NA) | end["diverged"]
     if prior_key is not None:
         prior = load_base_prior(OUTPUT_ROOT, prior_key, PY_ANIMAL)
     else:
@@ -146,7 +156,7 @@ def load_pythia_arm(arm):
 
 
 def load_olmo_arm(base, teacher="ep10_lr5e-4_r64a128"):
-    kw = {"base": base}
+    kw = {"base": base, "teacher_base": dl.DD1B_BASE}   # teacher is always the default-seed base
     try:
         cut = labels.anchored_cut(OUTPUT_ROOT, base, pool="dp1")
     except KeyError:
@@ -159,7 +169,7 @@ def load_olmo_arm(base, teacher="ep10_lr5e-4_r64a128"):
     end["peak_step"] = end["p_test_peak_step"]
     if "collapsed" not in end:
         end["collapsed"] = np.nan
-    end["collapsed"] = end["collapsed"].astype("boolean").fillna(False).astype(bool) | end["diverged"]
+    end["collapsed"] = end["collapsed"].astype("boolean") | end["diverged"].astype("boolean")
     prior = dl.load_base_prior(OUTPUT_ROOT, teacher, **kw).get("test", float("nan"))
     return dict(tr=tr, end=end, cut=cut, prior=prior, n_cells_tree=len(end))
 
@@ -168,7 +178,7 @@ ARMS = {}
 for arm in PY_ARMS:
     ARMS[arm] = load_pythia_arm(arm)
 ARMS["OLMo-1B same-model"] = load_olmo_arm(dl.DD1B_BASE)
-x = load_olmo_arm("DataDecide-dolma1_7-1B-seed-large-aux-2")
+x = load_olmo_arm(dl.DD1B_SEED2_BASE)
 if x is not None and x["end"]["has_traj"].sum() > 0:
     ARMS["OLMo-1B cross-seed 2"] = x
 else:
@@ -176,11 +186,46 @@ else:
 
 cov = pd.DataFrame([{
     "arm": arm, "cells in tree": a["n_cells_tree"], "runs w/ trajectory": int(a["end"].shape[0] if "has_traj" not in a["end"] else a["end"]["has_traj"].sum()),
-    "alive": int((~a["end"]["collapsed"]).sum()), "dead": int(a["end"]["collapsed"].sum()),
-    "dead cut [nats]": round(a["cut"], 2), "base prior (test)": round(a["prior"], 4),
-    "ckpts/run": int(a["tr"].groupby("tag").size().median()), "total steps": int(a["end"]["n_train_steps"].median()),
+    "alive": int((a["end"]["collapsed"] == False).sum()), "dead": int((a["end"]["collapsed"] == True).sum()),
+    "unknown": int(a["end"]["collapsed"].isna().sum()),
+    "ΔCE dead cut [nats]": round(a["cut"], 2), "base prior (test)": round(a["prior"], 4),
+    "ckpts/run": a["tr"].groupby("tag").size().median(), "total steps": a["end"]["n_train_steps"].median(),
 } for arm, a in ARMS.items()]).set_index("arm")
 display(cov)
+''')
+
+md(r"""
+## 1b. ΔCE coverage per arm
+
+Row unit: one arm.  Selection: the lattice runs loaded above (Pythia: ep20 nonadaptive
+lattice cells with an `ftseed1` leaf; OLMo: the ladder band's cells), i.e. exactly the
+population the grids and the law fits below use.  `runs` counts runs with any trajectory
+checkpoint; a run has a *full* ΔCE trajectory when every one of its checkpoints carries
+`delta_ce`, and *no* ΔCE when none does.  Checkpoint columns count (run × checkpoint) rows.
+Older Pythia trajectory records predate the per-checkpoint CE readout and carry only
+`kl_base_adapted`; those rows are UNLABELLED here (NA), never labelled from KL — a backfill
+pass rewrites them.
+""")
+
+code(r'''
+def ce_coverage(a):
+    tr = a["tr"]
+    if CE_COL not in tr:
+        tr = tr.assign(**{CE_COL: np.nan})
+    have = tr[CE_COL].notna()
+    per_run = tr.assign(_has=have).groupby("tag")["_has"]
+    return {"runs": tr["tag"].nunique(),
+            "runs w/ full ΔCE": int((per_run.mean() == 1).sum()),
+            "runs w/ partial ΔCE": int(((per_run.mean() > 0) & (per_run.mean() < 1)).sum()),
+            "runs w/ no ΔCE": int((per_run.mean() == 0).sum()),
+            "ckpts w/ ΔCE": int(have.sum()), "ckpts w/o ΔCE": int((~have).sum())}
+
+
+CE_COVERAGE = pd.DataFrame([{"arm": arm, **ce_coverage(a)} for arm, a in ARMS.items()]).set_index("arm")
+display(CE_COVERAGE)
+if CE_COVERAGE["ckpts w/o ΔCE"].sum():
+    print("arms with missing ΔCE checkpoints stay unlabelled there (NA); the KL column is never "
+          "substituted for the label.")
 ''')
 
 md(r"""
@@ -214,11 +259,12 @@ def _at_step(tr, alive_tags, step):
 
 def arm_panels(arm, a, ax_grid=None):
     end, tr = a["end"], a["tr"]
-    alive = end[~end["collapsed"]]
+    alive = end[end["collapsed"] == False]
     alive_tags = set(alive["tag"])
     views = {"endpoint": _grid(alive, "p_end"), "trajectory peak": _grid(alive, "p_peak")}
     at_step = {st: _at_step(tr, alive_tags, st) for st in STEPS}
-    vmax = float(np.nanmax(views["trajectory peak"][0].to_numpy()))
+    peak_values = views["trajectory peak"][0].to_numpy()
+    vmax = float(np.nanmax(peak_values)) if np.isfinite(peak_values).any() else 1.0
     fig = plt.figure(figsize=(19, 9.5), constrained_layout=True)
     gs = fig.add_gridspec(2, 5, height_ratios=[1.15, 1])
     for j, (name, (g, n)) in enumerate(views.items()):
@@ -237,8 +283,8 @@ def arm_panels(arm, a, ax_grid=None):
         ax.set_xlabel("alpha"); ax.set_ylabel("rank" if j == 0 else "")
         ax.set_title(f"step {st:,}" + ("" if got == st else f" (ckpt {got:,})"))
     fig.suptitle(f"{arm}: transfer per (rank, alpha) cell along training  "
-                 f"(alive runs n={len(alive)}, {int(end['n_train_steps'].median()):,} steps/run, "
-                 f"base prior {a['prior']:.4f}, dead cut {a['cut']:.2f} nats)")
+                 f"(alive runs n={len(alive)}, {end['n_train_steps'].median():,.0f} steps/run, "
+                 f"base prior {a['prior']:.4f}, ΔCE dead cut {a['cut']:.2f} nats)")
     plt.show()
     return views, at_step
 
@@ -265,16 +311,16 @@ def _gm(g, rows=None):
 
 rows = []
 for arm, a in ARMS.items():
-    end = a["end"]; alive = end[~end["collapsed"]]
+    end = a["end"]; alive = end[end["collapsed"] == False]
     views, at_step = PANELS[arm]
     r = {"arm": arm, "alive": len(alive), "prior": round(a["prior"], 4),
-         "total steps": int(alive["n_train_steps"].median())}
+         "total steps": end["n_train_steps"].median()}
     for st in STEPS:
         gn, _ = at_step[st]
         r[f"step {st}"] = round(_gm(gn[0]), 3) if gn is not None else np.nan
     r["endpoint"] = round(_gm(views["endpoint"][0]), 3)
     r["peak"] = round(_gm(views["trajectory peak"][0]), 3)
-    r["peak step (med)"] = int(alive["peak_step"].median())
+    r["peak step (med)"] = alive["peak_step"].median()
     r["peak/end (med)"] = round(float((alive["p_peak"] / alive["p_end"].clip(lower=1e-6)).median()), 2)
     r["rank-1 end"] = round(_gm(views["endpoint"][0], [1]), 3)
     r["other end"] = round(_gm(views["endpoint"][0], [x for x in RANKS if x != 1]), 3)
@@ -308,7 +354,9 @@ fig, axes = plt.subplots(1, 2, figsize=(15, 5), constrained_layout=True)
 pal = aplots.palette(list(ARMS), cmap="tab10")
 ax = axes[0]
 for arm in ARMS:
-    n_end = int(SUMMARY.loc[arm, "total steps"])
+    n_end = SUMMARY.loc[arm, "total steps"]
+    if not np.isfinite(n_end):
+        continue
     pts = [(st, rel.loc[arm, f"step {st}"]) for st in STEPS if st < n_end and np.isfinite(rel.loc[arm, f"step {st}"])]
     pts.append((n_end, rel.loc[arm, "endpoint"]))
     ax.plot([x for x, _ in pts], [y for _, y in pts], "o-", ms=6, lw=2, color=pal[arm], label=arm)
@@ -341,8 +389,8 @@ Printed from the frames above.
 code(r'''
 for arm in ARMS:
     r, q = SUMMARY.loc[arm], rel.loc[arm]
-    print(f"{arm}: alive {int(r['alive'])}, {int(r['total steps']):,} steps/run; grid median {q['step 1250']:.1f}x prior "
-          f"at step 1,250 -> {q['peak']:.1f}x at peak (median peak step {int(r['peak step (med)']):,}) -> "
+    print(f"{arm}: alive {int(r['alive'])}, {r['total steps']:,.0f} steps/run; grid median {q['step 1250']:.1f}x prior "
+          f"at step 1,250 -> {q['peak']:.1f}x at peak (median peak step {r['peak step (med)']:,.0f}) -> "
           f"{q['endpoint']:.1f}x at the endpoint; "
           f"peak/end {r['peak/end (med)']:.2f}; rank-1 vs other at endpoint {q['rank-1 end']:.1f}x vs {q['other end']:.1f}x.")
 ''')
@@ -351,8 +399,8 @@ md(r"""
 ## 6. The boundary law fit on the full trajectories
 
 Two fits per arm, both on **checkpoint-resolved** labels (a run is collapsed at step *t* iff
-its own Pile-KL — dp1 ΔCE for OLMo — at that checkpoint exceeds the arm's anchored cut; a
-non-finite checkpoint is dead), on every lattice run including the dead ones:
+its own ΔCE (pp1 for Pythia, dp1 for OLMo) at that checkpoint exceeds the arm's anchored cut; a
+checkpoint with infinite damage is dead; missing measurements remain unknown), on every lattice run including the dead ones:
 
 1. **Per-checkpoint refit** (as `collapse_law.md` §2c and `dd1b_same_model_ladder` §7): at each
    checkpoint, the free `(b, c)` ratios and the logistic-50 % `K*` at the arm's *endpoint*
@@ -367,31 +415,50 @@ Row unit of the first table: one arm.  The plot shows `K*(t)` at fixed endpoint 
 normalized by each arm's endpoint `K*`, against the optimizer step, with the pooled
 `(t / t_end)^−d` line for comparison.  Arms end at different steps (25,000 for Pythia,
 12,500 for OLMo), so curves are read at absolute steps, never as a share of the run.
+Arms with mixed save cadences (the OLMo cross-seed arm) are snapped onto their coarser grid
+(625 steps) before the per-step refits, so every step row holds the whole arm.
 """)
 
 code(r'''
 from subliminal_learning.stats import collapse_law as cl
 
 warnings.filterwarnings("ignore")
-KL_COL = {arm: ("delta_ce" if arm.startswith("OLMo") else "kl") for arm in ARMS}
 
 
 def labelled_long(arm, a):
     """(run x checkpoint) rows with that checkpoint's own dead label and the run's HPs."""
     end, tr = a["end"], a["tr"]
-    col = KL_COL[arm]
+    col = CE_COL
     t = tr.dropna(subset=[col]).copy()
+    if not np.isfinite(a["cut"]):
+        return t.iloc[:0]
+    if t.empty:
+        return t
     if "lr" not in t:
         t = t.merge(end[["tag", "lr", "rank", "alpha"]], on="tag")
     t["collapsed"] = ((t[col] > a["cut"]) | np.isinf(t[col])).astype(int)
     t = t[t["step"] > 0]
+    # Mixed save cadences (OLMo cross-seed: 82 runs every 312 steps, 250 every 625) would put
+    # only the fine-cadence runs at the odd steps; snap every run onto the COARSEST cadence's
+    # grid (nearest checkpoint within 10 %) so each step row holds the whole arm.
+    spacing = t.sort_values("step").groupby("tag")["step"].apply(lambda s: s.diff().median())
+    if spacing.round().nunique() > 1:
+        coarse = float(spacing.max())
+        grid = np.arange(coarse, t["step"].max() + coarse / 2, coarse)
+        snapped = []
+        for g_step in grid:
+            d = (t["step"] - g_step).abs()
+            pick = t.assign(_d=d).loc[lambda x: x.groupby("tag")["_d"].idxmin()]
+            pick = pick[pick["_d"] <= 0.1 * g_step].drop(columns="_d").assign(step=int(g_step))
+            snapped.append(pick)
+        t = pd.concat(snapped, ignore_index=True)
     # A diverged run stops early and its trajectory is truncated: carry it forward as dead on
     # the arm's full step grid, so later checkpoints do not silently lose their dead runs.
     steps = np.array(sorted(t["step"].unique()))
     full = steps[steps <= np.median(t.groupby("tag")["step"].max())]
     fill = []
     for tag, last in t.groupby("tag")["step"].max().items():
-        if last < full.max():
+        if tag in set(end.loc[end["diverged"], "tag"]) and len(full) and last < full.max():
             hp = t[t["tag"] == tag].iloc[0]
             fill += [{"tag": tag, "step": st, "lr": hp["lr"], "rank": hp["rank"], "alpha": hp["alpha"],
                       col: np.inf, "collapsed": 1} for st in full[full > last]]
@@ -404,17 +471,29 @@ def labelled_long(arm, a):
 TRAJ_FITS, PERSTEP = {}, {}
 for arm, a in ARMS.items():
     t = labelled_long(arm, a)
-    # endpoint exponents for this arm (free fit on the last checkpoint of every run)
-    last = t.loc[t.groupby("tag")["step"].idxmax()]
-    try:
-        f_end = cl.fit_collapse_law(last)
-        b_end, c_end = f_end.b, f_end.c
-    except Exception:
-        b_end, c_end = cl.B_LAW, cl.C_LAW
-    k_end = cl.kstar_logistic(last, b_end, c_end)["kstar"]
+    if t.empty:
+        print(f"{arm}: no checkpoint labels with a known cut -- fit omitted")
+        continue
+    # Fit endpoint exponents only to known final records for this arm.
+    endrec = a["end"].dropna(subset=["collapsed"]).assign(collapsed=lambda d: d["collapsed"].astype(int), student_tag=lambda d: d["tag"])
+    b_end = c_end = None
+    for src, frame in [("endpoint records", endrec)]:
+        try:
+            f_end = cl.fit_collapse_law(frame)
+            if np.isfinite(f_end.b) and np.isfinite(f_end.c):
+                b_end, c_end, exp_src = f_end.b, f_end.c, src
+                break
+        except Exception:   # singular Hessian = perfectly separated labels at this source
+            continue
+    if b_end is None:
+        b_end, c_end, exp_src = cl.B_LAW, cl.C_LAW, "160m fallback"
+    if exp_src != "last ckpt":
+        print(f"{arm}: endpoint exponents from {exp_src}")
+    k_end = cl.kstar_logistic(endrec, b_end, c_end)["kstar"] if endrec["collapsed"].nunique() == 2 else np.nan
     rows = []
     for step, g in t.groupby("step"):
-        row = {"step": int(step), "n": len(g), "n_dead": int(g["collapsed"].sum())}
+        row = {"step": int(step), "n": len(g), "n_dead": int(g["collapsed"].sum()),
+               "kstar_fixed": np.nan, "b": np.nan, "c": np.nan}
         if g["collapsed"].nunique() == 2:
             row["kstar_fixed"] = cl.kstar_logistic(g, b_end, c_end)["kstar"]
             if row["n_dead"] >= 8 and len(g) - row["n_dead"] >= 8:
@@ -431,16 +510,17 @@ for arm, a in ARMS.items():
     except Exception as exc:
         print(f"{arm}: pooled trajectory fit failed: {exc}")
     TRAJ_FITS[arm + " __meta"] = dict(b_end=b_end, c_end=c_end, k_end=k_end, n_runs=t["tag"].nunique(),
-                                      n_rows=len(t), t_end=int(t["step"].max()))
+                                      n_rows=len(t), t_end=int(t["step"].max()), exp_src=exp_src)
 
 tab = []
-for arm in ARMS:
+for arm in PERSTEP:
     m, f, ps = TRAJ_FITS[arm + " __meta"], TRAJ_FITS.get(arm), PERSTEP[arm]
     ok = ps.dropna(subset=["b"])
     first, lastrow = ps.iloc[0], ps.iloc[-1]
     tab.append({
         "arm": arm, "runs": m["n_runs"], "rows": m["n_rows"],
-        "endpoint b / c": f"{m['b_end']:.3f} / {m['c_end']:.3f}", "endpoint K*": f"{m['k_end']:.2e}",
+        "endpoint b / c": f"{m['b_end']:.3f} / {m['c_end']:.3f}" + ("" if m["exp_src"] == "last ckpt" else f" ({m['exp_src']})"),
+        "endpoint K*": f"{m['k_end']:.2e}",
         "per-ckpt b range": f"{ok['b'].min():.2f}-{ok['b'].max():.2f}" if len(ok) else "n/a",
         "per-ckpt c range": f"{ok['c'].min():.2f}-{ok['c'].max():.2f}" if len(ok) else "n/a",
         "K*(first ckpt)/K*(end)": round(float(first["kstar_rel"]), 2) if np.isfinite(first.get("kstar_rel", np.nan)) else np.nan,
@@ -451,7 +531,7 @@ for arm in ARMS:
         "pooled d (K* ∝ t^-d) [CI]": f"{f.d:.3f} [{f.d_ci[0]:.2f}, {f.d_ci[1]:.2f}]" if f else "n/a",
         "pooled K*(end)/K*(first)": f"{f.kstar_at(lastrow['step']) / f.kstar_at(first['step']):.2f}" if f else "n/a",
     })
-TAB6 = pd.DataFrame(tab).set_index("arm")
+TAB6 = pd.DataFrame(tab).rename_axis("arm") if not tab else pd.DataFrame(tab).set_index("arm")
 display(TAB6)
 ''')
 
@@ -459,7 +539,7 @@ code(r'''
 fig, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
 pal = aplots.palette(list(ARMS), cmap="tab10")
 ax = axes[0]
-for arm in ARMS:
+for arm in PERSTEP:
     ps = PERSTEP[arm].dropna(subset=["kstar_rel"])
     ax.plot(ps["step"], ps["kstar_rel"], "o-", ms=4, lw=1.6, color=pal[arm], label=arm)
     f = TRAJ_FITS.get(arm)
@@ -472,14 +552,14 @@ ax.set_xlabel("optimizer step (log)"); ax.set_ylabel("K*(t) / K*(endpoint), endp
 ax.set_title("Threshold along training (solid) and pooled (t/t_end)^-d (dashed)")
 aplots.right_legend(ax, fontsize=8)
 ax = axes[1]
-for arm in ARMS:
+for arm in PERSTEP:
     ps = PERSTEP[arm].dropna(subset=["b"])
     ax.plot(ps["step"], ps["b"], "o-", ms=3, lw=1.4, color=pal[arm], label=arm)
 ax.axhline(cl.B_LAW, color="gray", ls="--", lw=1, label="160m settled b 0.561")
 ax.set_xscale("log"); ax.set_xlabel("optimizer step (log)"); ax.set_ylabel("b (alpha exponent), free refit at that step")
 ax.set_ylim(0, 1.2); ax.set_title("Alpha exponent along training")
 ax = axes[2]
-for arm in ARMS:
+for arm in PERSTEP:
     ps = PERSTEP[arm].dropna(subset=["c"])
     ax.plot(ps["step"], ps["c"], "o-", ms=3, lw=1.4, color=pal[arm], label=arm)
 ax.axhline(cl.C_LAW, color="gray", ls="--", lw=1, label="160m settled c -0.085")
@@ -489,10 +569,10 @@ aplots.right_legend(ax, fontsize=8)
 fig.savefig(FIG_DIR / "transfer_trajectory_grids_law_along_training.png", dpi=150, bbox_inches="tight")
 plt.show()
 
-print("dead-count growth (runs over the cut at the saved checkpoint nearest that step; blank = beyond the arm's run):")
+print("dead-count growth (runs over the ΔCE cut at the saved checkpoint nearest that step; blank = beyond the arm's run):")
 targets = (625, 1250, 1875, 2500, 3750, 5000, 7500, 10000, 12500, 18750, 25000)
 grid = {}
-for arm in ARMS:
+for arm in PERSTEP:
     ps = PERSTEP[arm]
     grid[arm] = {st: (int(ps.iloc[(ps["step"] - st).abs().argmin()]["n_dead"]) if st <= 1.1 * ps["step"].max() else np.nan)
                  for st in targets}

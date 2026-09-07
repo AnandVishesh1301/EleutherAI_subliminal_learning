@@ -22,6 +22,7 @@ from subliminal_learning.models.datadecide import (
     parse_dd_ref,
 )
 from subliminal_learning.models.registry import (
+    ExternalModelSpec,
     PythiaModelSpec,
     local_model_dir,
     resolve_hf_repo_id,
@@ -92,6 +93,14 @@ def load_tokenizer(
     if isinstance(spec, DataDecideSpec):
         # DataDecide bakes its org into the repo id; `hub_org` is ignored.
         return load_datadecide_tokenizer(spec, hf_cache_root)
+    if isinstance(spec, ExternalModelSpec):
+        kwargs: dict = {"cache_dir": str(hf_cache_root / "hub")}
+        if spec.revision is not None:
+            kwargs["revision"] = spec.revision
+        tokenizer = AutoTokenizer.from_pretrained(spec.repo_id, **kwargs)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        return tokenizer
     repo_id = resolve_hf_repo_id(spec, hub_org)
     local_dir = local_model_dir(repo_id, spec.revision, hf_cache_root)
     if local_dir is not None:
@@ -136,6 +145,14 @@ def load_model(
     if isinstance(spec, DataDecideSpec):
         # DataDecide bakes its org into the repo id; `hub_org` is ignored.
         return load_datadecide_model(spec, hf_cache_root, device, dtype=dtype)
+    if isinstance(spec, ExternalModelSpec):
+        kwargs: dict = {"cache_dir": str(hf_cache_root / "hub"), "torch_dtype": dtype}
+        if spec.revision is not None:
+            kwargs["revision"] = spec.revision
+        model = AutoModelForCausalLM.from_pretrained(spec.repo_id, **kwargs)
+        model.to(device)
+        model.eval()
+        return model
     repo_id = resolve_hf_repo_id(spec, hub_org)
     logger.info("Loading {} (revision={})", repo_id, spec.revision or "main")
     local_dir = local_model_dir(repo_id, spec.revision, hf_cache_root)

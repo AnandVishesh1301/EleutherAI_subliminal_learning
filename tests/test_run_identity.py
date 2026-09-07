@@ -452,11 +452,11 @@ def test_completion_only_identities_omit_max_length(tmp_path: Path):
     assert "max_length" not in s_identity["train"]
 
 
-# --- dtype knob: default byte-identical, non-default only touches the manifest ---------
+# --- dtype knob: fp32 identity byte-identical, non-default IS in the identity ---------
 
 def test_dtype_default_leaves_run_identity_unchanged(tmp_path: Path):
-    """The base-model dtype must never enter the run identity (fp32 or bf16), so an
-    existing fp32 run is not invalidated by the new knob."""
+    """The fp32 run identity must be byte-identical to the pre-knob one (existing runs
+    are not invalidated); a bf16 run's identity differs (see the drift tests below)."""
     from pipelines.distill_student_pipeline import (
         DistillStudentConfig,
         _student_run_identity,
@@ -480,10 +480,9 @@ def test_dtype_default_leaves_run_identity_unchanged(tmp_path: Path):
     )
     t_bf16 = replace(t_default, dtype="bfloat16")
     assert t_default.dtype == "float32"  # default preserved
-    assert teacher_run_identity(t_default) == teacher_run_identity(t_bf16)
-    for ident in (teacher_run_identity(t_default), teacher_run_identity(t_bf16)):
-        assert "base_model_dtype" not in ident
-        assert "dtype" not in ident
+    assert teacher_run_identity(t_default) != teacher_run_identity(t_bf16)
+    assert "base_model_dtype" not in teacher_run_identity(t_default)
+    assert "dtype" not in teacher_run_identity(t_default)
 
     filtered = tmp_path / "numbers" / "filtered.jsonl"
     filtered.parent.mkdir()
@@ -496,7 +495,7 @@ def test_dtype_default_leaves_run_identity_unchanged(tmp_path: Path):
     assert s_default.dtype == "float32"
     a = _student_run_identity(s_default, base_model_repo="X", filtered_sha256="abc")
     b = _student_run_identity(s_bf16, base_model_repo="X", filtered_sha256="abc")
-    assert a == b
+    assert a != b
     assert "base_model_dtype" not in a
 
 
@@ -647,3 +646,76 @@ def test_family_swap_rejects_weightc():
 
     with pytest.raises(ValueError, match="no sibling"):
         family_swap_spec(_WEIGHTC)
+
+
+# --- base-model precision: in the run identity when non-default ----------------------
+
+def _dtype_cfgs(tmp_path: Path):
+    from pipelines.distill_student_pipeline import DistillStudentConfig
+
+    template = tmp_path / "templates.json"
+    template.write_text('["My favorite animal is the"]')
+    lora = LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
+    train = TrainConfig(
+        learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64,
+        max_grad_norm=1.0, warmup_ratio=0.05, lr_scheduler_type="linear",
+        seed=0, optim="adamw_torch",
+    )
+    paths = PathsConfig(
+        output_root=tmp_path, hf_cache_root=tmp_path,
+        dataset_cache_root=tmp_path, wandb_dir=tmp_path,
+    )
+    filtered = tmp_path / "numbers" / "filtered.jsonl"
+    filtered.parent.mkdir()
+    filtered.write_text("{}\n")
+    return (
+        TrainTeacherTemplatesConfig(
+            paths=paths, hub_org=_ORG, spec=_NONE, lora=lora, train=train,
+            template_path=template, target_animal="cat", device="cpu",
+        ),
+        DistillStudentConfig(
+            paths=paths, hub_org=_ORG, spec=_NONE, source="rng",
+            number_dataset_dir=filtered.parent, lora=lora, train=train,
+        ),
+    )
+
+
+def test_fp32_identities_have_no_base_model_dtype_key(tmp_path: Path):
+    """Every historical (fp32) manifest must keep SKIP-matching: no new key."""
+    from pipelines.distill_student_pipeline import _student_run_identity
+
+    t_cfg, s_cfg = _dtype_cfgs(tmp_path)
+    assert "base_model_dtype" not in teacher_run_identity(t_cfg)
+    assert "base_model_dtype" not in _student_run_identity(
+        s_cfg, base_model_repo="EleutherAI/model", filtered_sha256="abc"
+    )
+
+
+def test_bfloat16_identities_carry_base_model_dtype(tmp_path: Path):
+    from pipelines.distill_student_pipeline import _student_run_identity
+
+    t_cfg, s_cfg = _dtype_cfgs(tmp_path)
+    t_id = teacher_run_identity(replace(t_cfg, dtype="bfloat16"))
+    s_id = _student_run_identity(
+        replace(s_cfg, dtype="bfloat16"),
+        base_model_repo="EleutherAI/model", filtered_sha256="abc",
+    )
+    assert t_id["base_model_dtype"] == "bfloat16"
+    assert s_id["base_model_dtype"] == "bfloat16"
+
+
+def test_precision_drift_is_an_error_not_a_skip(tmp_path: Path):
+    """A bf16 rerun of a stored fp32 cell is drift -> ERROR, never a silent SKIP."""
+    from pipelines.distill_student_pipeline import _student_run_identity
+
+    t_cfg, s_cfg = _dtype_cfgs(tmp_path)
+    t_fp32 = teacher_run_identity(t_cfg)
+    t_bf16 = teacher_run_identity(replace(t_cfg, dtype="bfloat16"))
+    assert gate_action({"run_identity": t_fp32}, t_fp32, force=False).action == SKIP
+    assert gate_action({"run_identity": t_fp32}, t_bf16, force=False).action == ERROR
+
+    kw = dict(base_model_repo="EleutherAI/model", filtered_sha256="abc")
+    s_fp32 = _student_run_identity(s_cfg, **kw)
+    s_bf16 = _student_run_identity(replace(s_cfg, dtype="bfloat16"), **kw)
+    assert student_gate_action({"run_identity": s_fp32}, s_fp32, force=False).action == SKIP
+    assert student_gate_action({"run_identity": s_fp32}, s_bf16, force=False).action == ERROR

@@ -15,9 +15,52 @@ import numpy as np
 from subliminal_learning.weightspace.lora import lora_svd
 
 
+# Saved randt* results from unsigned QR are a different intervention.
+INTERPOLATION_VERSION = "signed_qr_v2"
+
+
+def interpolation_record_is_current(record: dict) -> bool:
+    """Endpoint/subset records are unchanged; randt rows require corrected QR."""
+    return (not str(record.get("variant", "")).startswith("randt")
+            or record.get("interpolation_version") == INTERPOLATION_VERSION)
+
+
+# Random targets keyed by (run, module, draw/selector) instead of draw order.
+TARGET_VERSION = "keyed_targets_v1"
+
+
+def _uses_random_target(variant: str) -> bool:
+    """Do this variant's directions come from a drawn random target?"""
+    return variant not in ("orig", "align")
+
+
+def surgery_record_is_current(record: dict, *, require_keyed_targets: bool = False) -> bool:
+    """`interpolation_record_is_current` plus, optionally, keyed random targets.
+
+    Random-target rows (rand*, randt*, every subset selector) written before
+    `TARGET_VERSION` drew from one run-order-dependent stream, so they are not
+    reproducible; endpoint rows (`orig`, `align`) never used a target.
+    """
+    if not interpolation_record_is_current(record):
+        return False
+    if not require_keyed_targets:
+        return True
+    variant = str(record.get("variant", ""))
+    return (not _uses_random_target(variant)
+            or record.get("target_version") == TARGET_VERSION)
+
+
 def interp_basis(u0: np.ndarray, u1: np.ndarray, t: float) -> np.ndarray:
     """QR-orthonormalised ``(1-t)·U0 + t·U1`` — a monotone bridge, not a geodesic."""
-    return np.linalg.qr((1.0 - t) * u0 + t * u1)[0]
+    if t <= 0:
+        return u0.copy()
+    if t >= 1:
+        return u1.copy()
+    blend = (1.0 - t) * u0 + t * u1
+    q = np.linalg.qr(blend)[0]
+    sgn = np.sign(np.einsum("ij,ij->j", q, blend))
+    sgn[sgn == 0] = 1.0
+    return q * sgn
 
 
 def subset_targets(u: np.ndarray, idx: list[int], rng: np.random.Generator) -> np.ndarray:

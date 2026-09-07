@@ -35,8 +35,7 @@ TARGETS = ("attention.dense", "attention.query_key_value",
 
 @app.command()
 def main(
-    numbers_glob: str = typer.Option(
-        "/mnt/ssd-2/soar-subliminal/angela/outputs/numbers/dog/pythia-160m/*/ftseed1/ex10-20/modes/prefix",
+    numbers_glob: str | None = typer.Option(None,
         help="Pool dirs (filtered.jsonl inside) of the teachers to test."),
     base_repo: str = typer.Option("EleutherAI/pythia-160m"),
     n_rows: int = typer.Option(400),
@@ -55,6 +54,8 @@ def main(
     from subliminal_learning.students.dataset_io import load_filtered_rows, subsample_rows
 
     output_root, hf_cache = resolve_roots(output_root, None)
+    if numbers_glob is None:
+        numbers_glob = str(output_root / "numbers/dog/pythia-160m/*/ftseed1/ex10-20/modes/prefix")
     out = output_root / "analysis" / "teacher_number_shuffle.jsonl"
     done = set()
     if out.exists():

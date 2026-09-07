@@ -27,7 +27,10 @@ from pathlib import Path
 import torch
 
 from subliminal_learning.utils.run_io import manifest_ref
-from subliminal_learning.students.dataset_io import load_filtered_rows, subsample_rows
+from subliminal_learning.students.dataset_io import (
+    load_filtered_rows, subsample_rows, splice_example_rows,
+)
+from subliminal_learning.models.tokenization_io import encode_prompt
 
 # v2 (2026-08-18): adds ce_train (CE on rows FROM the train subsample — the memorization
 # axis; ce_heldout is the distribution-fit axis). v1 records fail the currency check and
@@ -46,7 +49,7 @@ def batched_completion_ce(model, tokenizer, device, rows, batch_size=32) -> floa
             chunk = rows[i : i + batch_size]
             seqs, labels = [], []
             for r in chunk:
-                p = tokenizer(r["prompt"], add_special_tokens=False)["input_ids"]
+                p = encode_prompt(tokenizer, r["prompt"])
                 c = tokenizer(r["completion"], add_special_tokens=False)["input_ids"] + [eos]
                 seqs.append(p + c)
                 labels.append([-100] * len(p) + c)
@@ -54,9 +57,9 @@ def batched_completion_ce(model, tokenizer, device, rows, batch_size=32) -> floa
             input_ids = torch.full((len(seqs), L), eos, dtype=torch.long)
             lab = torch.full((len(seqs), L), -100, dtype=torch.long)
             attn = torch.zeros((len(seqs), L), dtype=torch.long)
-            for j, (s, l) in enumerate(zip(seqs, labels)):
+            for j, (s, label_row) in enumerate(zip(seqs, labels)):
                 input_ids[j, : len(s)] = torch.tensor(s)
-                lab[j, : len(l)] = torch.tensor(l)
+                lab[j, : len(label_row)] = torch.tensor(label_row)
                 attn[j, : len(s)] = 1
             out = model(input_ids=input_ids.to(device), attention_mask=attn.to(device))
             logits = out.logits[:, :-1].float()
@@ -69,13 +72,40 @@ def batched_completion_ce(model, tokenizer, device, rows, batch_size=32) -> floa
     return total_nll / total_tok
 
 
+def prompt_transform(manifest: dict) -> str | None:
+    """Identity of the actual prompt regime; None preserves legacy unspliced caches."""
+    if manifest.get("splice_examples") or manifest.get("run_identity", {}).get("prompt_splice"):
+        return "splice_examples_v1"
+    return None
+
+
+def rows_cache_key(manifest: dict) -> tuple:
+    """Pool selection and prompt regime shared by row and base-score caches."""
+    return (manifest["number_dataset_dir"], manifest["subsample_size"],
+            manifest["subsample_seed"], manifest.get("filtered_sha256"),
+            prompt_transform(manifest))
+
+
+def prompt_transform_is_current(run_dir: Path, record: dict) -> bool:
+    """Old spliced scores used unspliced prompts and must be recomputed."""
+    try:
+        manifest = json.loads((run_dir / "train_manifest.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    return record.get("prompt_transform") == prompt_transform(manifest)
+
+
 def split_rows(manifest: dict, n_rows: int) -> tuple[list[dict], list[dict]]:
     """(train_rows[:n], held_out_rows[:n]) under the fixed train subsample (shared across ftseeds)."""
     pool = load_filtered_rows(Path(manifest["number_dataset_dir"]) / "filtered.jsonl")
     train = subsample_rows(pool, manifest["subsample_size"], manifest["subsample_seed"])
     train_keys = {(r["prompt"], r["completion"]) for r in train}
     held = [r for r in pool if (r["prompt"], r["completion"]) not in train_keys]
-    return train[:n_rows], held[:n_rows]
+    train, held = train[:n_rows], held[:n_rows]
+    if prompt_transform(manifest):
+        train = splice_example_rows(train)
+        held = splice_example_rows(held)
+    return train, held
 
 
 def eval_is_current(run_dir: Path, n_rows: int) -> bool:
@@ -93,6 +123,7 @@ def eval_is_current(run_dir: Path, n_rows: int) -> bool:
         and rec.get("schema_version") == SCHEMA_VERSION
         and rec.get("manifest_ref") == ref
         and rec.get("n_rows") == n_rows
+        and prompt_transform_is_current(run_dir, rec)
     )
 
 
@@ -102,6 +133,7 @@ def build_record(man: dict, run_dir: Path, n_rows: int, ce_student: float, ce_ba
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "fidelity_heldout",
+        **({"prompt_transform": prompt_transform(man)} if prompt_transform(man) else {}),
         "n_rows": n_rows,
         "pool_dir": man["number_dataset_dir"],
         "filtered_sha256": man.get("filtered_sha256"),

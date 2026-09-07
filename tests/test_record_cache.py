@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,18 @@ def _probe(root: Path, rp: str, kl=1.0, nonfinite=False, pool_version="pp1", **e
 
 def _load(root, paths, **kw):
     return rc.load_record_cache(root, "pile_probe", paths, verbose=False, **kw)
+
+
+def test_same_size_rewrite_below_old_tolerance_refreshes(tmp_path):
+    f = _probe(tmp_path, "a", kl=1.0)
+    first = _load(tmp_path, ["a"])
+    old_ns = f.stat().st_mtime_ns
+    # Keep the payload size unchanged and move mtime by 50 microseconds.
+    _probe(tmp_path, "a", kl=2.0)
+    os.utime(f, ns=(old_ns + 50_000, old_ns + 50_000))
+    second = _load(tmp_path, ["a"])
+    assert float(first.iloc[0].kl) == 1.0
+    assert float(second.iloc[0].kl) == 2.0
 
 
 def test_union_persistence_disjoint_inventories(tmp_path, monkeypatch):

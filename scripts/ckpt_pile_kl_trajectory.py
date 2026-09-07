@@ -27,6 +27,7 @@ skips seeds whose file already covers every checkpoint on disk (``--force`` reco
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 
@@ -48,6 +49,7 @@ from subliminal_learning.coherence.probe_io import (
     build_probe_pool,
 )
 from subliminal_learning.models.datadecide import DataDecideSpec
+from subliminal_learning.models.registry import ExternalModelSpec
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.templates.config import load_template_config
@@ -71,6 +73,13 @@ def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpe
     same for both pools): a DataDecide base was pretrained on dolma1_7, for which Pile
     would be off-distribution.
     """
+    if isinstance(spec, ExternalModelSpec):
+        from subliminal_learning.coherence.probe_io import probe_pool_spec_for_repo
+
+        pool = probe_pool_spec_for_repo(spec.repo_id)
+        if (n_docs, max_tokens, seed) != (pool.n_docs, pool.max_tokens, pool.seed):
+            raise ValueError("Qwen/Llama/Gemma trajectories require the frozen family pool recipe")
+        return pool
     version = "dp1" if isinstance(spec, DataDecideSpec) else "pp1"
     return ProbePoolSpec(n_docs=n_docs, max_tokens=max_tokens, seed=seed, version=version)
 
@@ -83,6 +92,24 @@ def pile_id_is_current(stored: dict, pile_id: dict) -> bool:
     the strong identity either way).
     """
     return all(stored.get(k, POOL_ID_DEFAULTS.get(k)) == v for k, v in pile_id.items())
+
+
+def points_lacking_ce(stored: dict) -> int:
+    """How many measured points of a stored record carry no finite ``delta_ce``.
+
+    A point flagged ``nonfinite`` was never scored, so it is exempt; every other point
+    must have the CE readout that is now the primary label.
+    """
+    def _finite(v) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    return sum(1 for p in stored.get("points", [])
+               if not p.get("nonfinite") and not _finite(p.get("delta_ce")))
+
+
+def record_has_ce(stored: dict) -> bool:
+    """True when a stored record carries the ΔCE readout throughout (`ce_base` + points)."""
+    return "ce_base" in stored and points_lacking_ce(stored) == 0
 
 
 @app.command()
@@ -183,12 +210,16 @@ def main(
         ref = manifest_ref(run_dir)
         if out_path.exists() and not force:
             stored = json.loads(out_path.read_text())
-            # Current iff same checkpoint list, same Pile pool identity, and same run ref.
+            # Current iff same checkpoint list, same Pile pool identity, same run ref --
+            # and the record carries the delta-CE readout that is now the primary label.
             if (stored.get("checkpoint_steps") == steps
                     and pile_id_is_current(stored, pile_id)
                     and stored.get("train_manifest_ref") == ref):
-                logger.info("{} ftseed{}: {} points current (skip)", tag, seed, len(points))
-                continue
+                if record_has_ce(stored):
+                    logger.info("{} ftseed{}: {} points current (skip)", tag, seed, len(points))
+                    continue
+                logger.info("{} ftseed{}: stale: {} points lack delta_ce (recompute)",
+                            tag, seed, points_lacking_ce(stored))
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         rows, t0 = [], time.time()

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import torch
 from transformers import GPTNeoXForCausalLM, LogitsProcessor, PreTrainedTokenizerBase
+from subliminal_learning.models.tokenization_io import prompt_tensors
+from subliminal_learning.numbers.generation_io import TOP_K, effective_eos_ids
 
 
 class NonFiniteLogitsError(RuntimeError):
@@ -77,11 +79,12 @@ def sample_completions(
     """
     if seed is not None:
         torch.manual_seed(seed)
-    enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+    enc = prompt_tensors(tokenizer, prompt).to(device)
     prompt_len = enc["input_ids"].shape[1]
     if prompt_len == 0:
         raise ValueError("Empty prompt tokenizes to zero tokens.")
 
+    eos_ids = effective_eos_ids(model, tokenizer)
     completions: list[str] = []
     remaining = n_samples
     while remaining > 0:
@@ -91,9 +94,11 @@ def sample_completions(
             do_sample=True,
             temperature=temperature,
             top_p=1.0,
+            top_k=TOP_K,
             num_return_sequences=k,
             max_new_tokens=max_new_tokens,
             pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=eos_ids,
             logits_processor=[_RejectNonFiniteLogits()],
         )
         gen = out[:, prompt_len:]

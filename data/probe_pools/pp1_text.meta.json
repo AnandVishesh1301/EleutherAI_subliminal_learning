@@ -1,0 +1,13 @@
+{
+  "version": "pp1t",
+  "dataset": "monology/pile-uncopyrighted",
+  "split": "validation",
+  "permutation_seed": 0,
+  "n_docs": 32,
+  "n_scanned": 33,
+  "pp1_token_sha": "9f509dde493c113bf531e1d0b982600ec0755e6558e959d03ac48cf7b1d2ccd5",
+  "text_sha256": "9d70de5013104f2c50c37882e3681bcb7fb11a3e2e16c5841efb90e17bdafac7",
+  "text_bytes_total": 43946,
+  "n_round_trip_exact": 32,
+  "created": "2026-09-05T03:47:12.094675+00:00"
+}

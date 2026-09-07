@@ -41,6 +41,14 @@ class SequencePool:
         n_skipped: Of those, how many were rejected (too short / too few eligible
             positions). A high skip rate means the pool is a length-biased slice of
             the source — record it, don't hide it.
+        row_indices: Source row index of each kept sequence, when the builder knows it
+            (Pile pools do). None = not recorded. Kept LAST so positional construction
+            and `token_sha256` are unaffected.
+        extension_n_scanned: For a NESTED pool (a wide pool whose first documents are a
+            smaller pool's), the docs scanned in the extension segment — kept separate so
+            `n_scanned` keeps meaning "docs the BASE pool scanned" and the unigram-fit
+            window arithmetic downstream is unchanged. None = not a nested build. Also
+            kept last, after `row_indices`, for the same positional-construction reason.
     """
 
     input_ids: list[list[int]]
@@ -48,6 +56,8 @@ class SequencePool:
     source: str
     n_scanned: int = 0
     n_skipped: int = 0
+    row_indices: list[int] | None = None
+    extension_n_scanned: int | None = None
 
     def __len__(self) -> int:
         return len(self.input_ids)
@@ -88,6 +98,7 @@ def build_pile_pool(
     order = np.random.default_rng(seed).permutation(len(ds))
     input_ids: list[list[int]] = []
     eligible: list[list[int]] = []
+    row_indices: list[int] = []
     n_scanned = 0
     n_skipped = 0
     for row_idx in order:
@@ -99,6 +110,7 @@ def build_pile_pool(
             continue
         input_ids.append(ids)
         eligible.append(list(range(1, len(ids))))
+        row_indices.append(int(row_idx))
         if len(input_ids) == n_seqs:
             break
     if len(input_ids) < n_seqs:
@@ -110,7 +122,8 @@ def build_pile_pool(
         "Built Pile pool: {} seqs from {}:{} ({} of {} scanned docs skipped as "
         "< {} tokens)", n_seqs, dataset_name, split, n_skipped, n_scanned, min_tokens,
     )
-    return SequencePool(input_ids, eligible, f"{dataset_name}:{split}", n_scanned, n_skipped)
+    return SequencePool(input_ids, eligible, f"{dataset_name}:{split}", n_scanned, n_skipped,
+                        row_indices)
 
 
 def build_numbers_pool(

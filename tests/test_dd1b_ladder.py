@@ -95,3 +95,16 @@ def test_trajectories_long_frame_joins_on_step(tmp_path: Path) -> None:
     assert list(one["p_test"]) == [0.1, 0.5] and list(one["delta_ce"]) == [0.1, 0.2]
     only = dl.load_trajectories(root, TEACHER, tags=["ep10_lr1e-3_r1a64"])
     assert set(only["tag"]) == {"ep10_lr1e-3_r1a64"}
+
+
+def test_dataset_dir_cross_seed_uses_teacher_base(tmp_path):
+    """Cross-seed arms live under students/{student base}/teacher-{teacher base}/..."""
+    from subliminal_learning.analysis import dd1b_ladder as dl
+
+    same = dl.dataset_dir(tmp_path, "ep10_lr5e-4_r64a128")
+    cross = dl.dataset_dir(tmp_path, "ep10_lr5e-4_r64a128", base=dl.DD1B_SEED2_BASE,
+                           teacher_base=dl.DD1B_BASE)
+    assert same.parts[-4:-2] == (dl.DD1B_BASE, f"teacher-{dl.DD1B_BASE}")
+    assert cross.parts[-4:-2] == (dl.DD1B_SEED2_BASE, f"teacher-{dl.DD1B_BASE}")
+    # teacher_base=None keeps the same-model layout for a non-default student base
+    assert dl.dataset_dir(tmp_path, "t", base="X").parts[-3] == "teacher-X"

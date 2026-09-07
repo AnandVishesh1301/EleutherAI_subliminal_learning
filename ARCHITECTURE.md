@@ -740,8 +740,8 @@ notebook is the tracked artifact and remains safe to rerun while the later anima
 `notebooks/transfer_trajectory_grids.ipynb` (builder
 `scripts/build_transfer_trajectory_grids_nb.py`, 09-04) puts the trait score on the
 (rank, alpha) grid *along training* for every arm side by side — Pythia-160m same-model and
-cross-init ds1, Pythia-410m same-model and cross-seed, OLMo-1B same-model (cross-seed 2 once
-drained): endpoint, trajectory peak, and the saved checkpoint nearest step 625 / 1,250 / 2,500 /
+cross-init ds1, Pythia-410m same-model and cross-seed, OLMo-1B same-model and cross-seed 2:
+endpoint, trajectory peak, and the saved checkpoint nearest step 625 / 1,250 / 2,500 /
 5,000 / 10,000 (always absolute steps, never a share of the run — run lengths differ: Pythia ep20
 25,000, OLMo ep10 12,500),
 median over alive lr rungs on the nonadaptive lattice (seed 1), plus a prior-normalized
@@ -749,7 +749,10 @@ summary. Pythia arms load through `analysis.trajectories.lineage_long_frame` (on
 run × checkpoint, pref + Pile-KL joined on step); OLMo through `analysis.dd1b_ladder`.
 Its §6 fits the boundary law on checkpoint-resolved labels: free `(b, c)` at every
 checkpoint plus `stats.collapse_law.fit_collapse_law_trajectory` (ln step as a fourth factor,
-cluster-robust by run, `TrajectoryLawFit.kstar_at(step)`).
+cluster-robust by run, `TrajectoryLawFit.kstar_at(step)`); arms with mixed save cadences
+(OLMo cross-seed) are snapped onto their coarser grid first, and an arm whose last-checkpoint
+labels are perfectly separated takes its endpoint exponents from the endpoint records (the
+table says so) rather than the 160m constants.
 
 `notebooks/transfer_receiver_family.ipynb` (builder
 `scripts/build_transfer_receiver_family_nb.py`) puts all ten Pythia-160m receiver bases on one
@@ -926,6 +929,68 @@ every cell claimed after 11:44 UTC 09-04 — fixed `SAVE_STEPS` in the worker) a
   fingerprint over step0→step2500, padding rows as control; verdict JSON under
   `analysis/dd_seed_identity_*.json`, exit 2 if either factor is shared). Verified 09-04 for
   `default` vs `large-aux-2` (init: 66/66 random tensors differ; order: Jaccard 0.81).
+  The loader takes `base=<student dir>, teacher_base=DD1B_BASE` (`dd1b_ladder.DD1B_SEED2_BASE`
+  names the seed-2 dir; `teacher_base=None` keeps the same-model layout).
+  `notebooks/dd1b_cross_seed2_ladder.ipynb` (builder `scripts/build_dd1b_cross_seed_nb.py`,
+  09-05) is the cross-seed readout with the same-model arm as comparator throughout: dead
+  grids + per-cell fate agreement, law-fit ratios and K* (own fit, same-model and 160m
+  exponents re-evaluated on the cross-seed labels), endpoint / peak / fixed-step (625 …
+  10,000) transfer grids, peak timing, per-checkpoint refit on the 625-step grid (the arm
+  mixes 312- and 625-step saves; step views take each run's nearest checkpoint), exporting
+  `docs/results/figures/dd1b_cross_seed2_transfer.png`. Drain state 09-05: 332/336 cells
+  carry endpoint records (4 cells were OOM'd and then skipped by the worker's in-flight
+  guard — now fixed to wait out the grace window on a file-less leaf instead of exiting 0;
+  2 cells lack the ΔCE trajectory because their checkpoints are 0600 to another uid).
+
+### Qwen/Llama/Gemma template and offline-student training (2026-09-05)
+
+The core chain accepts three explicit base selectors through the existing
+`--base-models` option. Canonical Hub refs and the corresponding output basenames
+also parse; `@Revision` preserves case and distinguishes manifests and the `ckpt/`
+output tree. `ExternalModelSpec` rejects unknown repositories and revisions containing
+path separators, whitespace, or another `@`.
+
+| Selector | Base repository | Training config suffix |
+|---|---|---|
+| `qwen25-1.5b` | `Qwen/Qwen2.5-1.5B` | `qwen25` |
+| `llama3-1b` | `meta-llama/Llama-3.2-1B` | `llama3` |
+| `gemma3-1b` | `google/gemma-3-1b-pt` | `gemma3` |
+
+Teacher YAMLs are `configs/training/lora_template_bias_<suffix>.yaml`; student YAMLs
+are `configs/training/lora_student_distill_<suffix>.yaml`. They preserve the respective
+existing numerical defaults and explicitly target the seven attention/MLP projections,
+excluding the LM head. Wrong-family targets fail before training. Experiment YAMLs can
+instead select `model_spec: {repo_id: Qwen/Qwen2.5-1.5B, revision: main}` (omit `revision`
+for the default unpinned identity); the CLI selector overrides the experiment's base.
+
+For example, this uses the existing default number-generation configuration and one
+teacher/student seed (run these commands deliberately; wiring does not launch jobs):
+
+```bash
+uv run python -m scripts.train_teacher_templates --base-models qwen25-1.5b --target-animal dog --seeds 0 --training-config configs/training/lora_template_bias_qwen25.yaml
+uv run python -m scripts.generate_numbers --source teacher --base-models qwen25-1.5b --target-animal dog --training-config configs/training/lora_template_bias_qwen25.yaml
+uv run python -m scripts.distill_student --source teacher --base-models qwen25-1.5b --target-animal dog --teacher-ftseed 0 --epochs 10 --student-seeds 1 --teacher-training-config configs/training/lora_template_bias_qwen25.yaml --student-training-config configs/training/lora_student_distill_qwen25.yaml
+uv run python -m scripts.evaluate_student_preference --source teacher --base-models qwen25-1.5b --target-animal dog --teacher-ftseed 0 --epochs 10 --teacher-training-config configs/training/lora_template_bias_qwen25.yaml --student-training-config configs/training/lora_student_distill_qwen25.yaml
+```
+
+Substitute the selector and both config suffixes for Llama/Gemma. `load_model` uses
+`AutoModelForCausalLM` for these specs. `models/tokenization_io.py` applies the same
+explicit BOS policy to training prompts, number generation, preference scoring and
+fidelity CE: Llama/Gemma prepend BOS once, Qwen does not; completions never get an
+extra BOS and training masks the entire prompt. No chat template is used. Existing
+Pythia/DataDecide tokenization calls, defaults, paths, resume identities and campaign
+configs are unchanged; these new families are opt-in. `allow_cross_base` permits
+same-family transfers only, and rejects cross-tokenizer families.
+
+LoRA checkpoint reload and final probes use the shared loaders and the family's
+`pp1t-<tag>` pool; checkpoint trajectories enforce that frozen recipe. Probability
+and forced-choice metrics retain their single-token target requirement: dog/cat/elephant
+work with all three official tokenizers, but other animals may need the existing
+sampling metric. The scope is template teachers, number generation, offline student
+distillation and their evaluations. SDF document training, on-policy GKD, and full-FT
+external checkpoint evaluation explicitly reject these specs; NeoX-only mechanistic
+tools are not extended by this change. Tests exercise one-step CPU teacher and student
+training, adapter reload, generation, scoring and resume through tiny real architectures.
 
 ## End-to-end flows
 
@@ -2364,6 +2429,99 @@ companions are quoted beside declared-cut fits (K*(c) level-set sections:
 `tierb_strips_integrity.ipynb` §4, `pythia410m_collapse_and_peak.ipynb` §7).
 Program-level synthesis: `docs/results/collapse_program_synthesis.md`.
 
+**Cross-tokenizer pools `pp1t-<tag>` (2026-09-05).** To anchor a base outside
+the GPT-NeoX/OLMo families, pp1's 32 Pile-validation documents are frozen as
+TEXT — `data/probe_pools/pp1_text.jsonl` + `.meta.json`, written by
+`scripts/freeze_pp1_text.py`, each doc cut at the character offset of pp1's
+last Pythia token and content-hashed (`text_sha256`) — and retokenized per
+family by `probe_io.build_frozen_text_pool`. `coherence/probe_families.py`
+holds the table: `pythia`, `olmo` (the pinned DataDecide branch tokenizer),
+`qwen25`, `llama3`, `gemma3`; BOS is prepended EXPLICITLY for the families
+that expect one (llama3, gemma3), never via `add_special_tokens=True`.
+`build_unigram_anchor.py --pool pp1t-<tag>` fits the unigram on the SAME
+seed-0 Pile-val stream (offset by the pool's `n_scanned`) under the family
+tokenizer, and `--probe-base <ref>` measures `ce_base` directly (one pool
+forward pass, provenance in `ce_base_sources`) for bases with no
+`pile_probe.json` record yet — it works on pp1/dp1 too. Per-token H_uni is
+NOT comparable across tokenizers (different vocabularies segment the same
+text into different token counts); the cross-family quantity is
+`h_uni_bits_per_byte_approx`. `probe_io.probe_pool_spec_for_repo` routes a
+known family's base repo (alias table `probe_families.BASE_REPO_FAMILY`, plus
+the `pythia-*`/DataDecide patterns) to that family's pool and RAISES on an
+unknown repo rather than falling back to pp1, and both direct probes and
+verify/extend anchor runs are gated on pool-sha identity — a base whose own
+tokenizer does not reproduce the pool, or a record built on a different pool,
+stops the run.
+
+*Nested wide pools `pp1w-<tag>` / `dp1w` (2026-09-05).* Each is 128 documents =
+the base pool's 32, byte-identical and in order, plus 96 drawn from the SAME
+seeded stream but from after the frozen unigram fit window (`pp1w` from Pile
+permutation position 53,281 = pp1's `permutation_offset` 33 + `n_docs_scanned`
+53,248, frozen as `data/probe_pools/pp1w_text.jsonl` by
+`freeze_pp1_text.py --wide 128`; `dp1w` from Dolma seeded position 53,280),
+so the wide pool stays disjoint from the counts it is scored against and the
+base pool's `n_scanned` — hence the fit window — is unchanged. The wide anchors
+REUSE the base anchor's `.counts.npz` and never refit, gated on the wide pool
+nesting its base token-for-token and on the reused counts reproducing the base
+record's `h_uni_primary` (1e-9). `probe_io.doc_ce`/`subset_mean` give per-document
+CE, so one 128-doc forward pass yields both the wide `ce_base` and the 32-doc
+`ce_base_subset` (printed against the base anchor's value; >1e-6 is a loud
+warning) with `h_uni_base_subset`/`delta_cross_subset` alongside. `PP1W_TOKEN_SHA`
+and `DP1W_TOKEN_SHA` were pinned from the first real builds (2026-09-05; all six
+rebuild exactly). The per-family token-count floor inside `build_frozen_text_pool`
+is a sanity check only (≥3 tokens, one CE target): min-32 is pp1's freeze-time
+selection rule in Pythia tokens and is deliberately NOT re-applied per family,
+because the frozen text is the pool's identity (one extension doc is 31 Qwen
+tokens). One extension document does not round-trip under Pythia (the 512th-token
+cut fell inside an emoji, +2 tokens on re-encoding); the text is what is frozen.
+
+Anchors built 2026-09-05 (official tokenizers, all five pins in `PP1T_TOKEN_SHA`
+rebuild exactly; `ce_base` by `--probe-base` on cuda, fp32; base models only):
+
+| pool | base | V | targets | H_uni nats | H_uni bpb | ce_base nats | ce_base bpb | Δ_cross |
+|---|---|---|---|---|---|---|---|---|
+| pp1 / pp1t-pythia | pythia-160m | 50277 | 10212 | 7.8045 | 2.617 | 2.7082 | 0.908 | 5.096 |
+| pp1t-olmo (Pile) | DataDecide-1B seed-default | 50280 | 10212 | 7.8045 | 2.617 | 2.2727 | 0.762 | 5.532 |
+| dp1 (Dolma) | DataDecide-1B seed-default | 50280 | 12075 | 7.7120 | — | 2.5264 | — | 5.186 |
+| pp1t-qwen25 | Qwen2.5-1.5B | 151665 | 9968 | 7.9435 | 2.599 | 2.1417 | 0.701 | 5.802 |
+| pp1t-llama3 (BOS) | Llama-3.2-1B | 128256 | 9657 | 8.1572 | 2.586 | 2.2626 | 0.717 | 5.895 |
+| pp1t-gemma3 (BOS) | gemma-3-1b-pt | 262145 | 10267 | 7.6781 | 2.588 | 2.2773 | 0.768 | 5.401 |
+
+Two facts fall out. (i) pp1t-pythia reproduces pp1 exactly (same token sha, H_uni to
+all digits, ce_base to 1e-8), and the DataDecide tokenizer is the GPT-NeoX BPE plus
+three specials, so pp1t-olmo is ALSO token-identical to pp1: dp1 vs pp1t-olmo compares
+corpora at a fixed tokenizer. On its own Dolma sample the OLMo base is 0.25 nats
+worse than on Pile-val (2.53 vs 2.27) while the unigram entropy is 0.09 nats lower,
+so the Pile-based cut admits 0.35 nats (6.7%) more excess than the Dolma-based one
+(Δ_cross 5.53 vs 5.19). Relabelling the OLMo ladders under the Pile cut needs the
+runs re-probed on pp1 tokens (their records are dp1); not done. (ii) H_uni in bits
+per byte is 2.59–2.62 across all four tokenizers (same text, context-free model),
+the check that retokenization preserved the text; the per-token H_uni spread
+(7.68–8.16) is tokenizer granularity, which is why the per-family Δ_cross is the
+operative cut and never a shared per-token bar.
+
+Wide (128-doc) anchors, built 2026-09-05 on the nested pools (`Δ32` is the 32-doc
+subset read from the same forward pass; every subset `ce_base` matches its base
+anchor to 0.0, dp1w to 6e-8 because dp1's value came from a harvested record):
+
+| pool | base | targets 32 / 128 | H_uni 32 / 128 | ce_base 32 / 128 | Δ32 / Δ128 |
+|---|---|---|---|---|---|
+| pp1w-pythia | pythia-160m | 10212 / 45843 | 7.8045 / 7.8191 | 2.7082 / 2.6360 | 5.096 / 5.183 |
+| pp1w-olmo (Pile) | DataDecide-1B | 10212 / 45843 | 7.8045 / 7.8191 | 2.2727 / 2.2691 | 5.532 / 5.550 |
+| dp1w (Dolma) | DataDecide-1B | 12075 / 43905 | 7.7120 / 7.6916 | 2.5264 / 2.4254 | 5.186 / 5.266 |
+| pp1w-qwen25 | Qwen2.5-1.5B | 9968 / 44493 | 7.9435 / 7.9770 | 2.1417 / 2.1044 | 5.802 / 5.873 |
+| pp1w-llama3 | Llama-3.2-1B | 9657 / 43167 | 8.1572 / 8.1936 | 2.2626 / 2.2600 | 5.895 / 5.934 |
+| pp1w-gemma3 | gemma-3-1b-pt | 10267 / 46204 | 7.6781 / 7.6705 | 2.2773 / 2.2557 | 5.401 / 5.415 |
+
+Widening moves Δ_cross by +0.01 to +0.09 nats (0.3–1.7%), i.e. inside the anchor's
+own α-sensitivity band, so the 32-doc labels are not at risk from pool size; the
+OLMo Pile-vs-Dolma gap persists at 128 (5.55 vs 5.27). H_uni in bits per byte is
+2.70–2.73 at 128 across the four tokenizers (2.59–2.62 at 32; the extension docs
+carry ~4% more tokens per byte), again the retokenization consistency check.
+pp1/dp1 remain the operative labels for the existing arms; the wide pools are the
+default for the new families and the reviewer-facing robustness check for the old ones
+(a re-probe of the label-sensitive band, not done).
+
 ### Notebook-code encapsulation pass + label API (2026-08-26)
 
 An audited sweep moved the notebooks' copy-pasted code into the analysis
@@ -3147,3 +3305,47 @@ boundary coordinate, while the task, receiver, and teacher determine its thresho
 ### 2026-09-03 — collapse paper narrative and exports synchronized
 
 The collapse manuscript now uses the calibrated effective-boundary framing and incorporates the completed dose census, direction census, optimizer-specific dose maps, component result, intruder dissociations, and trait-separability limits. The paper README documents the source-of-truth/evidence routing and generated export workflow; exports were rebuilt from the revised source.
+
+### 2026-09-05 — audit fixes and experimental provenance
+
+The code audit fixed nine issues outside the GKD and SDF paths: direction surgery now preserves
+paired SVD signs during interpolation; DataDecide workers no longer treat abandoned partial
+checkpoints as successful jobs; transfer endpoint grids require manifest-backed measurements and
+unknown collapse labels remain unknown; fidelity evaluation applies the same prompt splicing as
+training; completion-only training honors gradient accumulation and gradient checkpointing;
+teacher and student identities include nondefault training settings; checkpoint resume requires a
+matching partial identity (including dtype and save cadence) plus complete adapter, optimizer,
+scheduler, trainer, and RNG state, while force or `save_only_model` safely restarts; queue worker
+handles and scale-up bookkeeping are namespaced and recoverable; and teacher number-shuffle pool
+lookup follows configured storage. Stale manifests and evaluations are invalidated when a run is
+restarted. A regression exposed during validation also removed the record cache's 100-microsecond mtime tolerance, which could hide rapid same-size rewrites.
+
+Historical GPU outputs have not been regenerated. Old `randt` progression records, spliced
+fidelity caches, and endpoint grids must be recomputed before using those measurements. DataDecide
+cells that were previously skipped after failed jobs must be recovered and rerun.
+
+### 2026-09-07 — second audit pass
+
+Student recipes now honor `gradient_accumulation_steps` and `gradient_checkpointing`
+(`students.config.load_student_training`; previously silently dropped, no existing run had set
+them). Non-default base precision (`dtype != float32`) is part of the completed-run identity for
+teachers and students, so a bf16 rerun over an fp32 artifact is drift, not a SKIP; fp32 identities
+are unchanged. Number generation and preference sampling pin `top_k=50` and pass the model's full
+stop set (`numbers.generation_io.TOP_K`, `effective_eos_ids`), which bundled generation configs
+otherwise override (Gemma-3: `top_k` 64, EOS `[1, 106]`); the numbers pool gate reads a missing
+stored `top_k` as 50. Transfer-trajectory grids label every arm on ΔCE (`dce_end`), rows without a
+per-checkpoint ΔCE stay unlabelled, and `ckpt_pile_kl_trajectory` treats a record without ΔCE as
+stale. Job submission is serialized on `<queue>/.jobs.lock`; `jobq requeue --reset-oom` /
+`--reset-mem-floor` clear the attempts sidecar's OOM state. `run_final_evals` reports runs it skips
+for a missing manifest or adapter.
+
+`scripts/position_surgery.py` resolves each run's base from its train manifest (qualified
+`repo@revision`), draws every random target from an rng keyed by (seed, run, module, kind,
+draw-or-selector) — `weightspace.deltas.TARGET_VERSION`, stamped on random-target rows — stamps
+identity fields (adapter sha, pool version/sha, prompt set sha, animal, seed) on every row, resumes
+only on a complete identity-matching variant set, replaces all rows of a redone run, starts
+`--redo` from an empty output after a `{out_name}.legacy-{UTC}.jsonl` backup, and writes
+`{out_name}.manifest.json`. The two progression notebooks read only `position_surgery_ce_prog`
+and require `surgery_record_is_current(..., require_keyed_targets=True)`. The progression
+recompute was queued as `surg-prog-fresh` (12 strip runs; `orig`, `align`, `rand0`,
+`randt{0.25,0.5,0.75}`); the KL-era `position_surgery_v2_prog.jsonl` is superseded.

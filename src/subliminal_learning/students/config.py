@@ -32,6 +32,9 @@ def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
         lora_dropout=float(lo["lora_dropout"]),
         target_modules=tm if isinstance(tm, str) else tuple(tm),
     )
+    grad_accum = int(tr.get("gradient_accumulation_steps", 1))
+    if grad_accum < 1:
+        raise ValueError(f"gradient_accumulation_steps={grad_accum} must be >= 1")
     train = TrainConfig(
         learning_rate=float(tr["learning_rate"]),
         n_epochs=int(tr["n_epochs"]),
@@ -42,6 +45,8 @@ def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
         lr_scheduler_type=str(tr["lr_scheduler_type"]),
         seed=int(tr["seed"]),
         optim=str(tr.get("optim", "adamw_torch")),
+        gradient_accumulation_steps=grad_accum,
+        gradient_checkpointing=bool(tr.get("gradient_checkpointing", False)),
         checkpoint_resume=bool(tr.get("checkpoint_resume", False)),
         save_steps=int(tr.get("save_steps", 500)),
         save_total_limit=int(tr.get("save_total_limit", 1)),

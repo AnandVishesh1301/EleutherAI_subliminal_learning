@@ -26,11 +26,13 @@ from subliminal_learning.models.loading_io import (
     load_tokenizer,
     resolve_dtype,
 )
-from subliminal_learning.models.registry import PythiaModelSpec, model_ref
+from subliminal_learning.models.registry import ExternalModelSpec, PythiaModelSpec, model_ref
 from subliminal_learning.run_gate import (
     ERROR,
     SKIP,
+    checkpoint_resume_is_safe,
     clear_stale_run,
+    write_resume_identity,
     format_identity_diff,
     gate_action,
 )
@@ -49,7 +51,9 @@ from subliminal_learning.teachers.run_layout import (
     run_label,
     teacher_run_dir,
 )
-from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.teachers.sft_io import (
+    check_target_modules_for_base_specs, run_teacher_sft_completion_only,
+)
 from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.utils.run_io import checkpoint_is_complete
 
@@ -73,8 +77,9 @@ class TrainTeacherTemplatesConfig:
         force: Retrain and overwrite even if this cell's `train_manifest.json` already
             exists. Default False = skip already-trained cells (idempotent resume).
         dtype: Base-model load precision, "float32" (default) or "bfloat16". Non-default
-            is recorded in the manifest only (never in path/run-identity), so fp32 runs
-            stay byte-identical and are not invalidated.
+            precision IS part of the run identity (but not the path), so a bf16 rerun of
+            an fp32 cell fails the gate as drift instead of silently overwriting it; fp32
+            identities are byte-identical to before and still SKIP-match.
         (The noeos ablation arm is `train.append_eos` False: the trailing EOS is dropped
         from the supervised span, and `ft_param_tag` appends ``_noeos`` so the arm's
         run dirs — and every numbers/student path embedding the teacher tag — sit
@@ -126,7 +131,11 @@ def teacher_run_identity(cfg: TrainTeacherTemplatesConfig) -> dict:
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
             "seed": cfg.train.seed,
             "optim": cfg.train.optim,
+            **({"gradient_accumulation_steps": cfg.train.gradient_accumulation_steps}
+               if cfg.train.gradient_accumulation_steps != 1 else {}),
+            **({"gradient_checkpointing": True} if cfg.train.gradient_checkpointing else {}),
         },
+        **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         "lora": {
             "r": cfg.lora.r,
             "lora_alpha": cfg.lora.lora_alpha,
@@ -198,6 +207,8 @@ def run(
         already trained (a `train_manifest.json` exists) and `cfg.force` is False, the
         existing run is left untouched and its manifest is reloaded into the result.
     """
+    if isinstance(cfg.spec, ExternalModelSpec):
+        check_target_modules_for_base_specs(cfg.lora.resolve_target_modules(), [cfg.spec])
     base_model = model_dir_name(cfg.spec, cfg.hub_org)
     param_tag = ft_param_tag(cfg.train, cfg.lora)
     run_dir = teacher_run_dir(
@@ -243,8 +254,16 @@ def run(
             f"{format_identity_diff(decision.diff)}\n"
             "Pass force=True to retrain over it, or restore the original config."
         )
-    # RETRAIN: clear any stale manifest + checkpoints first (torn-state guard).
-    clear_stale_run(run_dir)
+    # Preserve a matching full-state checkpoint for opt-in resume.
+    resume_safe = (
+        cfg.train.checkpoint_resume and not cfg.force
+        and checkpoint_resume_is_safe(
+            run_dir, identity, save_only_model=cfg.train.save_only_model,
+            dtype=cfg.dtype, save_steps=cfg.train.save_steps,
+        )
+    )
+    clear_stale_run(run_dir, preserve_checkpoints=resume_safe)
+
 
     if not cfg.train.append_eos:
         logger.warning(
@@ -311,6 +330,10 @@ def run(
     os.environ["WANDB_JOB_TYPE"] = "template_teacher"
     # Nested layout: {output_root}/teachers/{animal}/{model}/{param_tag}/ftseed{N}
     # (run_dir/base_model/param_tag/checkpoint_dir were computed at the top for the gate).
+    if cfg.train.checkpoint_resume:
+        write_resume_identity(
+            run_dir, identity, dtype=cfg.dtype, save_steps=cfg.train.save_steps
+        )
     sft_result = run_teacher_sft_completion_only(
         model=model,
         tokenizer=tokenizer,
@@ -350,7 +373,7 @@ def run(
             ),
         },
         # Additive provenance: recorded only when non-default so fp32 manifests are
-        # byte-identical to before (run-identity is untouched either way).
+        # byte-identical to before (as is the fp32 run-identity, which also carries it).
         **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         **({"append_eos": False} if not cfg.train.append_eos else {}),
         "template_path": str(cfg.template_path),

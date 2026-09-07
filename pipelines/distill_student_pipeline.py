@@ -36,14 +36,18 @@ from subliminal_learning.models.loading_io import (
     resolve_dtype,
 )
 from subliminal_learning.models.registry import (
+    ExternalModelSpec,
     PythiaModelSpec,
     model_ref,
     resolve_hf_repo_id,
 )
+from subliminal_learning.coherence.probe_families import family_for_base_repo
 from subliminal_learning.run_gate import (
     ERROR,
     SKIP,
+    checkpoint_resume_is_safe,
     clear_stale_run,
+    write_resume_identity,
     format_identity_diff,
     student_gate_action,
 )
@@ -58,7 +62,9 @@ from subliminal_learning.students.layout import (
     student_run_dir,
     student_run_label,
 )
-from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.teachers.sft_io import (
+    check_target_modules_for_base_specs, run_teacher_sft_completion_only,
+)
 from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.run_io import checkpoint_is_complete
 
@@ -97,8 +103,9 @@ class DistillStudentConfig:
         device: Torch device.
         force: Retrain even if this cell's train_manifest.json + checkpoints exist.
         dtype: Base-model load precision, "float32" (default) or "bfloat16". Non-default
-            is recorded in the manifest only (never in path/run-identity), so fp32 runs
-            stay byte-identical and are not invalidated.
+            precision IS part of the run identity (but not the path), so a bf16 rerun of
+            an fp32 cell fails the gate as drift instead of silently overwriting it; fp32
+            identities are byte-identical to before and still SKIP-match.
         clamp_norm: When set ('fro' or 'spec'), attach a `DoseClampCallback` that caps
             the pooled relative LoRA dose during training. None -> no clamp (behavior
             byte-identical to before).
@@ -195,7 +202,11 @@ def _student_run_identity(
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
             "seed": cfg.train.seed,
             "optim": cfg.train.optim,
+            **({"gradient_accumulation_steps": cfg.train.gradient_accumulation_steps}
+               if cfg.train.gradient_accumulation_steps != 1 else {}),
+            **({"gradient_checkpointing": True} if cfg.train.gradient_checkpointing else {}),
         },
+        **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         "lora": {
             "r": cfg.lora.r,
             "lora_alpha": cfg.lora.lora_alpha,
@@ -235,7 +246,15 @@ def check_same_family(numbers_base_repo: str | None, student_base_ref: str) -> N
     """
     if numbers_base_repo is None:
         return
-    if is_dd_ref(numbers_base_repo) != is_dd_ref(student_base_ref):
+    a = family_for_base_repo(numbers_base_repo)
+    b = family_for_base_repo(student_base_ref)
+    if any(f is not None and f.tag in {"qwen25", "llama3", "gemma3"} for f in (a, b)):
+        mismatch = a is None or b is None or a.tag != b.tag
+    else:
+        mismatch = (a.tag != b.tag) if a is not None and b is not None else (
+            is_dd_ref(numbers_base_repo) != is_dd_ref(student_base_ref)
+        )
+    if mismatch:
         raise ValueError(
             "cross-FAMILY distillation is not supported (different tokenizers) regardless "
             f"of allow_cross_base: numbers base {numbers_base_repo!r} vs student base "
@@ -245,6 +264,8 @@ def check_same_family(numbers_base_repo: str | None, student_base_ref: str) -> N
 
 def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     """Distil one student. Idempotent: an already-trained cell is reloaded, not rerun."""
+    if isinstance(cfg.spec, ExternalModelSpec):
+        check_target_modules_for_base_specs(cfg.lora.resolve_target_modules(), [cfg.spec])
     if cfg.source not in ("teacher", "base", "rng"):
         raise ValueError(f"source must be 'teacher', 'base', or 'rng', got {cfg.source!r}")
     if cfg.allow_cross_base and cfg.source not in ("teacher", "base"):
@@ -392,8 +413,14 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             f"subsample_size={cfg.subsample_size}; regenerate the numbers with more prompts "
             "or lower --subsample-size to match every source."
         )
-    # Clear any stale manifest + checkpoints before retraining (torn-state guard).
-    clear_stale_run(run_dir)
+    resume_safe = (
+        cfg.train.checkpoint_resume and not cfg.force
+        and checkpoint_resume_is_safe(
+            run_dir, run_identity, save_only_model=cfg.train.save_only_model,
+            dtype=cfg.dtype, save_steps=cfg.train.save_steps,
+        )
+    )
+    clear_stale_run(run_dir, preserve_checkpoints=resume_safe)
     # Splice AFTER subsampling: selection is over the unmodified rows, so a spliced
     # run trains on exactly the same subset as its unspliced sibling.
     if cfg.splice_examples:
@@ -434,6 +461,10 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 log_path=run_dir / "clamp_log.jsonl",
             )
         ]
+    if cfg.train.checkpoint_resume:
+        write_resume_identity(
+            run_dir, run_identity, dtype=cfg.dtype, save_steps=cfg.train.save_steps
+        )
     sft_result = run_teacher_sft_completion_only(
         model=model,
         tokenizer=tokenizer,
@@ -479,7 +510,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "subsample_seed": cfg.subsample_seed,
         "splice_examples": cfg.splice_examples,
         # Additive provenance: recorded only when non-default so fp32 manifests are
-        # byte-identical to before (and their run-identity is untouched either way).
+        # byte-identical to before (as is the fp32 run-identity, which also carries it).
         **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         "hyperparameters": {
             "n_epochs": cfg.train.n_epochs,

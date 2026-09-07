@@ -325,6 +325,13 @@ def _load_bank(path: Path, limit: int | None = None) -> tuple[str, ...]:
 
 def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
     """Distill one GKD student cell. Idempotent: a trained cell is reloaded, not rerun."""
+    from subliminal_learning.models.registry import ExternalModelSpec
+
+    if any(isinstance(s, ExternalModelSpec) for s in (cfg.spec, _resolved_teacher_spec(cfg))):
+        raise NotImplementedError(
+            "Qwen/Llama/Gemma support is currently template teachers and offline student "
+            "distillation only; on-policy GKD tokenization is not wired for these bases."
+        )
     finetune_mode = cfg.gkd.student_mode
     base_model = model_dir_name(cfg.spec, cfg.hub_org)
     ttag, gtag, run_dir = _tags_and_run_dir(cfg)

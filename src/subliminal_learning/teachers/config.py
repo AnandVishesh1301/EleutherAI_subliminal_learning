@@ -22,7 +22,7 @@ from subliminal_learning.config import (
     PathsConfig,
     TrainConfig,
 )
-from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.models.registry import PythiaModelSpec, ExternalModelSpec
 from subliminal_learning.teachers.model_specs import validate_spec
 
 
@@ -87,7 +87,11 @@ def load_template_config(
         target_modules=tm if isinstance(tm, str) else tuple(tm),
     )
     train = from_dict(TrainConfig, _require(training_data, "train", training_path), config=num)
-    spec = from_dict(PythiaModelSpec, _require(exp_data, "model_spec", experiment_path))
+    model_spec_data = _require(exp_data, "model_spec", experiment_path)
+    if "repo_id" in model_spec_data:
+        spec = from_dict(ExternalModelSpec, model_spec_data)
+    else:
+        spec = from_dict(PythiaModelSpec, model_spec_data)
     # The YAML route bypasses `parse_base_models`, so apply its grammar here; a
     # full-seed base needs the same explicit opt-in the launch CLIs demand.
     validate_spec(spec, allow_full_seeds=bool(exp_data.get("allow_full_seed_base", False)))

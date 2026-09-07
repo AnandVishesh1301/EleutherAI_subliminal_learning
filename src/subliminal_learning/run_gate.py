@@ -25,10 +25,14 @@ so it is unit-testable without training.
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from subliminal_learning.utils.io import atomic_write_json
 
 _MISSING = object()
 
@@ -159,7 +163,80 @@ def student_gate_action(
     return GateDecision(ERROR, diff)
 
 
-def clear_stale_run(run_dir: Path) -> None:
+
+def write_resume_identity(
+    run_dir: Path, identity: dict, *, dtype: str = "float32", save_steps: int = 500
+) -> None:
+    """Record inputs allowed to resume an interrupted training run atomically."""
+    atomic_write_json(run_dir / "resume_identity.json", {
+        "identity": _without_location_keys(identity),
+        "dtype": dtype,
+        "save_steps": save_steps,
+    })
+
+
+def checkpoint_resume_is_safe(
+    run_dir: Path,
+    identity: dict,
+    *,
+    save_only_model: bool,
+    dtype: str = "float32",
+    save_steps: int = 500,
+) -> bool:
+    """Validate the numeric latest checkpoint that HF will resume on a single GPU.
+
+    Legacy partial runs without an input stamp restart. A truncated latest save also
+    restarts; we must not approve an older checkpoint then let HF load the newer one.
+    Transient IO errors propagate so the caller cannot delete state it could not read.
+    Binary state is loaded by Trainer: corruption there fails loudly, never resumes
+    with a fresh optimizer. The stamp includes precision without changing the legacy
+    completed-run identity policy.
+    """
+    if save_only_model:
+        return False
+    try:
+        marker = json.loads((run_dir / "resume_identity.json").read_text())
+        expected = {
+            "identity": _without_location_keys(identity),
+            "dtype": dtype,
+            "save_steps": save_steps,
+        }
+        if not isinstance(marker, dict):
+            return False
+        stored = marker.get("identity")
+        if not isinstance(stored, dict):
+            return False
+        marker["identity"] = _without_location_keys(stored)
+        if marker != expected:
+            return False
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    leaves = [
+        p for p in (run_dir / "checkpoints").glob("checkpoint-*")
+        if p.is_dir() and re.fullmatch(r"checkpoint-[0-9]+", p.name)
+    ]
+    if not leaves:
+        return False
+    leaf = max(leaves, key=lambda p: int(p.name.split("-")[-1]))
+    try:
+        state = json.loads((leaf / "trainer_state.json").read_text())
+        config = json.loads((leaf / "adapter_config.json").read_text())
+        step = int(leaf.name.split("-")[-1])
+        if (not isinstance(state, dict) or not isinstance(config, dict)
+                or type(state.get("global_step")) is not int
+                or state["global_step"] != step):
+            return False
+        weights = [leaf / n for n in ("adapter_model.safetensors", "adapter_model.bin")]
+        if not any(p.is_file() and p.stat().st_size > 0 for p in weights):
+            return False
+        required = ("optimizer.pt", "scheduler.pt", "rng_state.pth")
+        return all((leaf / n).is_file() and (leaf / n).stat().st_size > 0
+                   for n in required)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+
+def clear_stale_run(run_dir: Path, *, preserve_checkpoints: bool = False) -> None:
     """Remove a prior `train_manifest.json` + `checkpoints/` + `eval/` before retraining.
 
     Deleting the manifest FIRST guarantees a crash mid-retrain never leaves an old
@@ -171,12 +248,15 @@ def clear_stale_run(run_dir: Path) -> None:
     student_param_tag/filtered_sha256, so a same-HP retrain would otherwise leave the
     old records looking current.
     """
+    # A validated resume keeps trainer state, but invalidates all final-run records.
     manifest_path = run_dir / "train_manifest.json"
     checkpoint_dir = run_dir / "checkpoints"
     eval_dir = run_dir / "eval"
     if manifest_path.exists():
         manifest_path.unlink()
-    if checkpoint_dir.exists():
-        shutil.rmtree(checkpoint_dir)
+    if not preserve_checkpoints:
+        (run_dir / "resume_identity.json").unlink(missing_ok=True)
+        if checkpoint_dir.exists():
+            shutil.rmtree(checkpoint_dir)
     if eval_dir.exists():
         shutil.rmtree(eval_dir)

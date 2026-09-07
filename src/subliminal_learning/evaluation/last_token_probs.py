@@ -27,6 +27,7 @@ from collections.abc import Iterator
 
 import torch
 from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase
+from subliminal_learning.models.tokenization_io import prompt_tensors
 
 
 @torch.no_grad()
@@ -57,9 +58,7 @@ def last_token_probs(
     """
     if batch_size is None:
         for prompt in prompts:
-            enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(
-                device
-            )
+            enc = prompt_tensors(tokenizer, prompt).to(device)
             if enc["input_ids"].shape[1] == 0:
                 raise ValueError(f"Prompt {prompt!r} tokenizes to zero tokens.")
             yield (prompt,), torch.softmax(model(**enc).logits[:, -1].float(), dim=-1)
@@ -70,12 +69,7 @@ def last_token_probs(
     try:
         for start in range(0, len(prompts), batch_size):
             batch = prompts[start : start + batch_size]
-            enc = tokenizer(
-                list(batch),
-                return_tensors="pt",
-                add_special_tokens=False,
-                padding=True,
-            ).to(device)
+            enc = prompt_tensors(tokenizer, list(batch), padding=True).to(device)
             mask = enc["attention_mask"]
             empty = (mask.sum(dim=1) == 0).nonzero().flatten().tolist()
             if empty:

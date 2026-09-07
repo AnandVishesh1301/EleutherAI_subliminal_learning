@@ -38,8 +38,9 @@ import typer
 from peft import PeftModel
 
 from scripts.fidelity_heldout_ce import (
-    SCHEMA_VERSION as FID_SCHEMA, batched_completion_ce, build_record,
-    eval_is_current as fid_is_current, split_rows,
+    batched_completion_ce, build_record,
+    eval_is_current as fid_is_current, split_rows, prompt_transform,
+    prompt_transform_is_current, rows_cache_key,
 )
 from subliminal_learning.coherence.probe_io import (
     SCHEMA_VERSION as PROBE_SCHEMA, build_probe_pool, manifest_ref,
@@ -68,7 +69,8 @@ def shuffle_is_current(run_dir: Path, n_rows: int) -> bool:
         return False
     ref = manifest_ref(run_dir)
     return (ref is not None and rec.get("schema_version") == SHUFFLE_SCHEMA
-            and rec.get("manifest_ref") == ref and rec.get("n_rows") == n_rows)
+            and rec.get("manifest_ref") == ref and rec.get("n_rows") == n_rows
+            and prompt_transform_is_current(run_dir, rec))
 
 
 def _rotate1(rows: list[dict]) -> list[dict]:
@@ -79,8 +81,8 @@ def _rotate1(rows: list[dict]) -> list[dict]:
 
 def _resolve_runs(runs_file: Path) -> list[Path]:
     root = resolve_output_root()
-    return [(p if (p := Path(l.strip())).is_absolute() else root / p)
-            for l in runs_file.read_text().splitlines() if l.strip()]
+    return [(p if (p := Path(line.strip())).is_absolute() else root / p)
+            for line in runs_file.read_text().splitlines() if line.strip()]
 
 
 @app.command()
@@ -101,11 +103,16 @@ def main(
     rows_cache: dict[tuple, tuple] = {}
     fid_base: dict[tuple, tuple] = {}
     shuf_base: dict[tuple, float] = {}
-    n_done = n_skip = 0
+    n_done = n_skip = n_missing = 0
 
     for rd in _resolve_runs(runs):
         man_p, ck = rd / "train_manifest.json", rd / "checkpoints"
         if not man_p.exists() or not (ck / "adapter_model.safetensors").exists():
+            # Never silently absent from the results: say which file is missing.
+            missing = ("train_manifest.json" if not man_p.exists()
+                       else "checkpoints/adapter_model.safetensors")
+            n_missing += 1
+            print(f"WARNING {rd}: skipped, missing {missing}", flush=True)
             continue
         man = json.loads(man_p.read_text())
         repo = man["base_model_repo"]
@@ -131,6 +138,8 @@ def main(
             if repo not in probe_ctx:
                 # dp1 (Dolma/OLMo) for DataDecide bases, pp1 (Pile) for Pythia; the
                 # record's name and kind stay `pile_probe`, `pool_version` says which.
+                # For a `pp1t-<tag>` spec the pool is built from THIS model's own
+                # tokenizer, and `build_probe_pool` applies the family's BOS policy.
                 pool = build_probe_pool(tok, probe_pool_spec_for_repo(repo))
                 blp = pile_logprobs(mdl, pool, device)
                 probe_ctx[repo] = (pool, blp, mean_ce(blp, pool),
@@ -146,7 +155,7 @@ def main(
             continue
 
         if need & {"fidelity", "shuffle"}:
-            rkey = (man["number_dataset_dir"], man["subsample_size"], man["subsample_seed"])
+            rkey = rows_cache_key(man)
             if rkey not in rows_cache:
                 rows_cache = {rkey: split_rows(man, n_rows)}
             train_rows, held_rows = rows_cache[rkey]
@@ -188,6 +197,8 @@ def main(
                 bad = not math.isfinite(ce_sh)
                 atomic_write_json(rd / "eval" / SHUFFLE_NAME, {
                     "schema_version": SHUFFLE_SCHEMA, "kind": "fidelity_shuffle",
+                    **({"prompt_transform": prompt_transform(man)}
+                       if prompt_transform(man) else {}),
                     "method": "rotate1", "n_rows": n_rows,
                     "pool_dir": man["number_dataset_dir"],
                     "filtered_sha256": man.get("filtered_sha256"),
@@ -203,7 +214,8 @@ def main(
             del peft
         n_done += 1
         print(f"{rd.parent.name}/{rd.name}: computed {sorted(need)}", flush=True)
-    print(f"done: {n_done} runs touched, {n_skip} fully current")
+    print(f"done: {n_done} runs touched, {n_skip} fully current, "
+          f"{n_missing} skipped (missing manifest/adapter)")
 
 
 if __name__ == "__main__":

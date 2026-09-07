@@ -83,6 +83,7 @@ from subliminal_learning.numbers.filtering import (
     filter_raw_rows,
 )
 from subliminal_learning.numbers.generation_io import (
+    TOP_K,
     GeneratedCompletion,
     generate_completions,
 )
@@ -433,6 +434,10 @@ def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
         "example_count_min": cfg.prompt_set.example_count_min,
         "example_count_max": cfg.prompt_set.example_count_max,
         "temperature": cfg.temperature,
+        # Pinned sampling truncation (see numbers.generation_io.TOP_K). Recorded so a
+        # future change to the pin invalidates pools; pools generated before the pin
+        # was recorded are treated as top_k=50 by the resume gate (_raw_pool_status).
+        "top_k": TOP_K,
         "max_new_tokens": cfg.max_new_tokens,
         "sample_seed_base": _GEN_SEED_BASE,
         "batch_size": cfg.batch_size,  # affects batching => sampling streams
@@ -704,7 +709,9 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
         return "absent", None
     if stored is None or not isinstance(stored.get("params"), dict):
         return "torn", None
-    sp = stored["params"]
+    # Pools predating the recorded `top_k` were generated under HF's default 50, which
+    # is exactly what we now pin -- so a missing stored key means 50, not "different".
+    sp = {"top_k": TOP_K, **stored["params"]}
     # Seed the hash cache with the requested set's hash (already computed by callers).
     _PREFIX_HASH_CACHE.setdefault(
         _prompt_set_key(cfg.prompt_set, cfg.prompt_set.n_prompts, cfg.constrained),

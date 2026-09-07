@@ -393,3 +393,22 @@ def test_load_student_training_rejects_nonzero_momentum(tmp_path: Path):
 def test_load_student_training_rejects_unknown_optim(tmp_path: Path):
     with pytest.raises(ValueError, match="unknown optimizer"):
         load_student_training(_write_student_yaml(tmp_path, optim="nope"))
+
+
+def test_load_student_training_reads_grad_accum_and_checkpointing(tmp_path: Path):
+    _, tc = load_student_training(_write_student_yaml(
+        tmp_path, gradient_accumulation_steps=8, gradient_checkpointing=True,
+    ))
+    assert tc.gradient_accumulation_steps == 8 and tc.gradient_checkpointing is True
+
+
+def test_load_student_training_grad_keys_default_when_absent():
+    _, tc = load_student_training(
+        Path(__file__).resolve().parents[1] / "configs/training/lora_student_distill.yaml"
+    )
+    assert tc.gradient_accumulation_steps == 1 and tc.gradient_checkpointing is False
+
+
+def test_load_student_training_rejects_zero_grad_accum(tmp_path: Path):
+    with pytest.raises(ValueError, match="gradient_accumulation_steps"):
+        load_student_training(_write_student_yaml(tmp_path, gradient_accumulation_steps=0))

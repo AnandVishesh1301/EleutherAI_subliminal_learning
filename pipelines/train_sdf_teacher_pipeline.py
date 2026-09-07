@@ -183,6 +183,13 @@ def _result_from_manifest(run_dir: Path, m: dict) -> TrainSdfTeacherResult:
 
 def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
     """Fine-tune one SDF teacher. Idempotent: a trained cell is reloaded, not rerun."""
+    from subliminal_learning.models.registry import ExternalModelSpec
+
+    if isinstance(cfg.spec, ExternalModelSpec):
+        raise NotImplementedError(
+            "Qwen/Llama/Gemma teacher training currently supports template SFT only; "
+            "SDF document training is not wired for these bases."
+        )
     if cfg.pile_replay_ratio:
         raise NotImplementedError(
             "pile_replay_ratio > 0 is not supported in v1 (SDF docs only, for max "

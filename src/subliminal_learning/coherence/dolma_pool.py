@@ -372,36 +372,65 @@ def build_dolma_pool(
     seed: int = 0,
     cache_root: Path | None = None,
     docs: list[dict] | None = None,
+    extension_start: int | None = None,
+    n_base: int | None = None,
 ) -> SequencePool:
     """Dolma v1.7 pool: seeded doc permutation, truncated to `max_tokens`.
 
     Mirrors `cka.pool_io.build_pile_pool`: every position except 0 is eligible, docs
     under `min_tokens` (including any without usable text) are skipped, and the scan
     counts are recorded so the length bias of the slice stays visible.
+
+    NESTED (wide) mode — `extension_start` and `n_base` together: the first `n_base`
+    documents are exactly the plain build's (same stream from position 0, so dp1's tokens
+    reproduce byte-for-byte inside dp1w) and the remaining ``n_seqs - n_base`` come from
+    seeded-order position `extension_start` onward under the same rules. `n_scanned`
+    stays the BASE pool's value — the unigram fit window is defined off it — and the
+    extension's scan count is reported separately as `extension_n_scanned`.
     """
+    if (extension_start is None) != (n_base is None):
+        raise ValueError("extension_start and n_base must be given together (nested "
+                         "build) or both omitted")
     if docs is None:
         docs = load_universe(cache_root)
     input_ids: list[list[int]] = []
     eligible: list[list[int]] = []
     n_scanned = n_skipped = 0
-    for text in iter_universe_texts(docs, seed):
-        n_scanned += 1
-        ids = list(tokenizer(text, add_special_tokens=False)["input_ids"][:max_tokens])
-        if len(ids) < min_tokens:
-            n_skipped += 1
-            continue
-        input_ids.append(ids)
-        eligible.append(list(range(1, len(ids))))
-        if len(input_ids) == n_seqs:
-            break
+
+    def _scan(texts, want: int) -> tuple[int, int]:
+        scanned = skipped = 0
+        for text in texts:
+            scanned += 1
+            ids = list(tokenizer(text, add_special_tokens=False)["input_ids"][:max_tokens])
+            if len(ids) < min_tokens:
+                skipped += 1
+                continue
+            input_ids.append(ids)
+            eligible.append(list(range(1, len(ids))))
+            if len(input_ids) == want:
+                break
+        return scanned, skipped
+
+    n_first = n_seqs if n_base is None else n_base
+    n_scanned, n_skipped = _scan(iter_universe_texts(docs, seed), n_first)
+    ext_scanned: int | None = None
+    if n_base is not None:
+        if len(input_ids) < n_base:
+            raise ValueError(
+                f"only {len(input_ids)} usable base docs (need {n_base}) in the Dolma "
+                f"v1.7 universe with min_tokens={min_tokens}")
+        ext_scanned, ext_skipped = _scan(
+            iter_universe_texts(docs, seed, int(extension_start)), n_seqs)
+        n_skipped += ext_skipped
     if len(input_ids) < n_seqs:
         raise ValueError(
             f"only {len(input_ids)} usable docs (need {n_seqs}) in the Dolma v1.7 "
             f"universe with min_tokens={min_tokens}"
         )
     logger.info(
-        "Built Dolma pool: {} seqs ({} of {} scanned docs skipped as < {} tokens)",
+        "Built Dolma pool: {} seqs ({} of {} scanned docs skipped as < {} tokens{})",
         n_seqs, n_skipped, n_scanned, min_tokens,
+        "" if ext_scanned is None else f"; +{ext_scanned} scanned from {extension_start}",
     )
     return SequencePool(input_ids, eligible, f"dolma-v1_7:{UNIVERSE_VERSION}",
-                        n_scanned, n_skipped)
+                        n_scanned, n_skipped, None, ext_scanned)

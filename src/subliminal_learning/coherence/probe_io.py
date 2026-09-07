@@ -29,6 +29,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from subliminal_learning.coherence.probe_families import (
+    PROBE_FAMILIES, family_for_base_repo, family_for_pool_version, is_frozen_text_pool,
+    is_pp1w, pool_version_for, wide_pool_version_for,
+)
+
 SCHEMA_VERSION = 1
 EVAL_NAME = "pile_probe.json"
 
@@ -105,19 +110,170 @@ PP1_TOKEN_SHA = "9f509dde493c113bf531e1d0b982600ec0755e6558e959d03ac48cf7b1d2ccd
 # DataDecide arm, whose bases were pretrained on dolma1_7 (Pile would be off-distribution
 # for them). See `coherence.dolma_pool` for the universe and its provenance.
 PROBE_POOL_DP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="dp1")
-# Pinned on the first real universe build (the fetch needs network access to
-# olmo-data.org); None means "not yet pinned", never "no check".
-DP1_TOKEN_SHA: str | None = None
+# Pinned 2026-09-05 from the frozen `unigram_anchor_dp1.json` record (the universe fetch
+# needs network to olmo-data.org); None would mean "not yet pinned", never "no check".
+DP1_TOKEN_SHA: str | None = (
+    "8b2f8870a1ffcc73829f8a2e8ec2512ebf41c41eef5d0dd816f92b18a417f3ff")
+
+
+# pp1t: pp1's 32 documents frozen as TEXT and retokenized per base-model family (see
+# `coherence.probe_families`), so a non-Pythia base can be measured on exactly the same
+# Pile text. Per-token numbers are NOT comparable across families; bits per byte are.
+PP1_TEXT_PATH = Path("data/probe_pools/pp1_text.jsonl")
+PP1_TEXT_META_PATH = Path("data/probe_pools/pp1_text.meta.json")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+# Pinned on the first real build per family (2026-09-05, official tokenizers, frozen text
+# sha 9d70de5013104f2c…); None means "not yet pinned", never "no check".
+PP1T_TOKEN_SHA: dict[str, str | None] = {
+    # pythia: the frozen text retokenized by Pythia IS pp1 (32/32 docs round-trip exactly),
+    # so the pin equals PP1_TOKEN_SHA and the pp1t-pythia anchor reproduces pp1's H_uni.
+    "pythia": PP1_TOKEN_SHA,
+    # olmo: the DataDecide tokenizer is the GPT-NeoX BPE plus a few specials (vocab
+    # 50280 vs 50277), token-identical to Pythia on this text (verified 2026-09-05),
+    # so pp1t-olmo == pp1 tokens: dp1 vs pp1t-olmo compares CORPORA at a fixed tokenizer.
+    "olmo": PP1_TOKEN_SHA,
+    "qwen25": "487944b404a4c66188d74bda59771c3d15af3d39abed483e78a6e109c82f9559",
+    "llama3": "01bca380174b93af607e78dea6fb4f1cf776d14334a8c72a49d7300da9037a2a",
+    "gemma3": "666cfdd197dfb1c089d1b1549bce0239cfd8261a5aac80a7f22a6a987265a1f4",
+}
+
+
+def probe_pool_spec_pp1t(tag: str) -> ProbePoolSpec:
+    """The probe pool spec of one pp1t family (validates `tag`)."""
+    return ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version=pool_version_for(tag))
+
+
+# pp1w / dp1w: the NESTED WIDE pools (2026-09-05). 128 documents = the 32 base documents,
+# byte-identical and in order, plus 96 extension documents drawn from the same seeded
+# permutation stream but from AFTER the frozen unigram fit window — so a wide pool is
+# disjoint from the counts it is scored against exactly as its base pool is, its first 32
+# docs reproduce the base pool token-for-token, and the base H_uni counts are REUSED
+# (never refit). Per-document CE (`doc_ce`) makes the 32-doc reading recoverable from a
+# 128-doc measurement via `subset_mean`, so wide and narrow numbers stay comparable.
+PP1W_N_DOCS = 128
+PP1W_TEXT_PATH = Path("data/probe_pools/pp1w_text.jsonl")
+PP1W_TEXT_META_PATH = Path("data/probe_pools/pp1w_text.meta.json")
+# Not yet pinned (the wide text has not been frozen/measured yet); None means "not yet
+# pinned", never "no check".
+# Pinned on the first real builds (2026-09-05; frozen wide text sha 9abb958c5c839cd5…,
+# 128 docs = pp1's 32 + 96 from permutation position 53281). pythia == olmo again
+# (token-identical tokenizers on this text).
+PP1W_TOKEN_SHA: dict[str, str | None] = {
+    "pythia": "e0d5d92b9400075b1cdaef4d3bd558be11d35bc8835b7716f3e1f05e75faf3f5",
+    "olmo": "e0d5d92b9400075b1cdaef4d3bd558be11d35bc8835b7716f3e1f05e75faf3f5",
+    "qwen25": "856edf5c49fc93136cb4322518380c244982ad9035c43cc7f5915282ad49b918",
+    "llama3": "fa68fdda1cfe23f3712de89b787988f11f1f7226d58aea3a46ddb0316b0237a2",
+    "gemma3": "90abe0bd1d60cfe0a2782bb60acaf1ead5435ec4e7f9554427d8e61be3c11ca1",
+}
+# Pinned on the first real build (2026-09-05): dp1's 32 docs + 96 from seeded position 53280.
+DP1W_TOKEN_SHA: str | None = "83a1bbfdec62486c4d39e44b99b052a422d71270e3e4bf5e085d40e3c44f8fda"
+# dp1's fit window is permutation positions [32, 53280) (`permutation_offset` 32 +
+# `n_docs_scanned` 53248 in unigram_anchor_dp1.json), so the extension starts at 53280.
+DP1W_EXTENSION_START = 53_280
+PROBE_POOL_DP1W = ProbePoolSpec(n_docs=PP1W_N_DOCS, max_tokens=512, seed=0, version="dp1w")
+
+
+def probe_pool_spec_pp1w(tag: str) -> ProbePoolSpec:
+    """The WIDE probe pool spec of one family (validates `tag`)."""
+    return ProbePoolSpec(n_docs=PP1W_N_DOCS, max_tokens=512, seed=0,
+                         version=wide_pool_version_for(tag))
+
+
+def _resolve_artifact(path: Path) -> Path:
+    """Frozen data artifacts are addressed relative to the REPO ROOT, not the cwd."""
+    path = Path(path)
+    return path if path.is_absolute() else _REPO_ROOT / path
+
+
+def pp1_text_sha256(records: list[dict]) -> str:
+    """Content hash of the frozen pp1 text (order-sensitive; mirrors `token_sha256`)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for rec in records:
+        h.update(json.dumps(rec["text"]).encode())
+    return h.hexdigest()
+
+
+def load_frozen_text(path: Path, meta_path: Path) -> tuple[list[dict], dict]:
+    """Load a frozen text artifact (pp1 or pp1w), verifying `text_sha256` against the meta."""
+    recs = [json.loads(ln) for ln in
+            _resolve_artifact(path).read_text().splitlines() if ln.strip()]
+    meta = json.loads(_resolve_artifact(meta_path).read_text())
+    sha = pp1_text_sha256(recs)
+    if sha != meta["text_sha256"]:
+        raise ValueError(f"frozen text artifact {path} is corrupt: text_sha256 {sha} != "
+                         f"recorded {meta['text_sha256']}")
+    return recs, meta
+
+
+def load_pp1_text(path: Path = PP1_TEXT_PATH,
+                  meta_path: Path = PP1_TEXT_META_PATH) -> tuple[list[dict], dict]:
+    """Load the frozen pp1 text artifact (the 32-doc base of every pp1t pool)."""
+    return load_frozen_text(path, meta_path)
+
+
+def build_frozen_text_pool(tokenizer, spec: ProbePoolSpec, *, bos_token_id: int | None,
+                           path: Path = PP1_TEXT_PATH,
+                           meta_path: Path = PP1_TEXT_META_PATH):
+    """Retokenize a frozen text artifact under `tokenizer` into a `SequencePool`.
+
+    Serves both frozen-text pool families: pass the pp1 artifact for a ``pp1t-<tag>``
+    pool and the pp1w one for a ``pp1w-<tag>`` pool (whose first 32 records ARE the pp1
+    ones, so the wide pool's 32-doc prefix is token-identical to the narrow pool).
+
+    No truncation (each text was already cut at its 512th Pythia token); BOS, when the
+    family asks for one, is prepended EXPLICITLY. `n_scanned` is carried over from the
+    artifact — for pp1w that is the BASE pool's value, so the unigram fit window
+    arithmetic downstream is unchanged.
+
+    pp1's min-32 rule is a FREEZE-TIME document-SELECTION rule in Pythia tokens
+    (`scripts.freeze_pp1_text._doc_record`) and is deliberately NOT re-applied per
+    family: the frozen text is the pool's identity, so every family must retokenize the
+    SAME document set — nesting (pp1w's 32-doc prefix) and cross-family comparability
+    depend on it. A family tokenizer can legitimately land a document under 32 tokens.
+    The only check here is a sanity floor that each document still yields at least one
+    CE target (targets are `ids[2:]`).
+    """
+    from subliminal_learning.cka.pool_io import SequencePool
+
+    recs, meta = load_frozen_text(path, meta_path)
+    input_ids: list[list[int]] = []
+    eligible: list[list[int]] = []
+    for rec in recs:
+        ids = list(tokenizer(rec["text"], add_special_tokens=False)["input_ids"])
+        if bos_token_id is not None:
+            ids = [bos_token_id] + ids
+        if len(ids) < 3:
+            raise ValueError(f"{spec.version} doc {rec['order_pos']} has only "
+                             f"{len(ids)} tokens under {spec.version} "
+                             f"(min 3: needs at least one CE target)")
+        input_ids.append(ids)
+        eligible.append(list(range(1, len(ids))))
+    return SequencePool(input_ids, eligible, f"pp1_text:{meta['text_sha256'][:12]}",
+                        int(meta["n_scanned"]), 0, [int(r["row"]) for r in recs])
 
 
 def probe_pool_spec_for_repo(repo: str) -> ProbePoolSpec:
-    """The probe pool a base model must be measured on: dp1 for DataDecide, else pp1.
+    """The probe pool a base model must be measured on; raises on an unknown repo.
 
-    Accepts either spelling of a DataDecide name -- the hub repo id
-    (``allenai/DataDecide-...``) or the bare dir name (``DataDecide-dolma1_7-1B-seed-...``).
+    dp1 for DataDecide (either spelling -- the hub repo id ``allenai/DataDecide-...`` or
+    the bare dir name ``DataDecide-dolma1_7-1B-seed-...``), pp1 for Pythia, and the
+    family's ``pp1t-<tag>`` pool for every other known family. An unrecognised repo is an
+    error, not a silent fallback to pp1: measuring a Llama base on Pythia tokens is
+    meaningless.
     """
-    name = repo.split("/")[-1]
-    return PROBE_POOL_DP1 if name.startswith("DataDecide") else PROBE_POOL_PP1
+    family = family_for_base_repo(repo)
+    if family is None:
+        raise ValueError(
+            f"no probe pool for base repo {repo!r}: it belongs to no known probe family "
+            f"({sorted(PROBE_FAMILIES)}). Add it to `probe_families.BASE_REPO_FAMILY` "
+            "(and pin its pp1t token sha) first.")
+    if family.tag == "olmo":
+        return PROBE_POOL_DP1
+    if family.tag == "pythia":
+        return PROBE_POOL_PP1
+    return probe_pool_spec_pp1t(family.tag)
 
 
 # Canonical home is utils.run_io (torch-free); re-exported here for existing importers.
@@ -126,11 +282,24 @@ from subliminal_learning.utils.run_io import manifest_ref  # noqa: E402,F401
 
 def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1):
     """The probe pool for `spec` (see `cka.pool_io.build_pile_pool` / `dolma_pool`)."""
-    if spec.version == "dp1":
+    if is_frozen_text_pool(spec.version):
+        family = family_for_pool_version(spec.version)
+        wide = is_pp1w(spec.version)
+        # paths passed explicitly (module-global lookup at CALL time, so tests can
+        # point the artifact constants elsewhere)
+        return build_frozen_text_pool(
+            tokenizer, spec,
+            bos_token_id=tokenizer.bos_token_id if family.bos else None,
+            path=PP1W_TEXT_PATH if wide else PP1_TEXT_PATH,
+            meta_path=PP1W_TEXT_META_PATH if wide else PP1_TEXT_META_PATH)
+    if spec.version in ("dp1", "dp1w"):
         from subliminal_learning.coherence.dolma_pool import build_dolma_pool
 
-        return build_dolma_pool(tokenizer, spec.n_docs, max_tokens=spec.max_tokens,
-                                seed=spec.seed)
+        wide = spec.version == "dp1w"
+        return build_dolma_pool(
+            tokenizer, spec.n_docs, max_tokens=spec.max_tokens, seed=spec.seed,
+            extension_start=DP1W_EXTENSION_START if wide else None,
+            n_base=PROBE_POOL_DP1.n_docs if wide else None)
     from subliminal_learning.cka.pool_io import build_pile_pool
 
     return build_pile_pool(tokenizer, spec.n_docs, max_tokens=spec.max_tokens, seed=spec.seed)
@@ -376,3 +545,29 @@ def mean_ce(logp_docs: list, pool) -> float:
                        .gather(1, tgt.unsqueeze(1)).sum())
         n += len(keep)
     return total / n if n else float("nan")
+
+
+def doc_ce(logp_docs: list, pool) -> tuple[list[float], list[int]]:
+    """Per-document summed target NLL [nats] and target count, same rule as `mean_ce`.
+
+    ``sum(sums) / sum(counts)`` is `mean_ce` exactly; the split is what makes a NESTED
+    pool readable — the first 32 documents of a wide pool give the narrow pool's number
+    through `subset_mean`, from a single 128-document forward pass.
+    """
+    import torch
+
+    sums: list[float] = []
+    counts: list[int] = []
+    for logp, ids, elig in zip(logp_docs, pool.input_ids, pool.eligible):
+        keep = [j for j, pos in enumerate(elig) if pos + 1 < len(ids)]
+        tgt = torch.tensor([ids[elig[j] + 1] for j in keep], device=logp.device)
+        sums.append(float(-logp[torch.tensor(keep, device=logp.device)]
+                          .gather(1, tgt.unsqueeze(1)).sum()))
+        counts.append(len(keep))
+    return sums, counts
+
+
+def subset_mean(sums: list[float], counts: list[int], k: int) -> float:
+    """Token-weighted mean CE over the FIRST `k` documents of a `doc_ce` split."""
+    n = sum(counts[:k])
+    return sum(sums[:k]) / n if n else float("nan")

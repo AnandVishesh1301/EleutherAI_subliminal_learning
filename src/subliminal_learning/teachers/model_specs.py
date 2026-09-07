@@ -35,6 +35,7 @@ from subliminal_learning.models.registry import (
     POLYPYTHIAS_FULL_SEEDS,
     PYTHIA_SIZES,
     PythiaModelSpec,
+    ExternalModelSpec,
 )
 
 
@@ -67,6 +68,9 @@ def spec_label(spec: PythiaModelSpec) -> str:
     `full-seed<N>` is 160m shorthand, so a size-less label would silently retarget
     to 160m on re-parse. Every 160m label is byte-identical to before.
     """
+    if isinstance(spec, ExternalModelSpec):
+        label = spec.repo_id.split("/")[-1]
+        return label + (f"@{spec.revision}" if spec.revision is not None else "")
     if isinstance(spec, DataDecideSpec):
         label = f"dd-1b-seed{spec.seed}"
         if spec.step is not None:
@@ -109,6 +113,8 @@ def family_swap_spec(spec: PythiaModelSpec) -> PythiaModelSpec:
             split, so there is no sibling family to swap to).
         ValueError: If `spec.variant` is not ``data`` or ``weight``.
     """
+    if isinstance(spec, ExternalModelSpec):
+        raise TypeError(f"family_swap is unsupported for external model {spec.repo_id!r}")
     if isinstance(spec, DataDecideSpec):
         raise TypeError(
             f"family_swap is PolyPythias data-/weight-seed only, got {spec!r}; "
@@ -203,6 +209,12 @@ def validate_spec(spec: object, *, allow_full_seeds: bool = False) -> None:
     Raises:
         ValueError: On any field the parser would have rejected.
     """
+    if isinstance(spec, ExternalModelSpec):
+        if spec.repo_id not in _EXTERNAL_REPOS:
+            raise ValueError(f"unsupported external model repository {spec.repo_id!r}")
+        if spec.revision is not None and (not spec.revision or any(c in spec.revision for c in '/\\')):
+            raise ValueError(f"invalid external model revision {spec.revision!r}")
+        return
     if isinstance(spec, DataDecideSpec) or not isinstance(spec, PythiaModelSpec):
         return
     if spec.size not in PYTHIA_SIZES:
@@ -231,7 +243,16 @@ def validate_spec(spec: object, *, allow_full_seeds: bool = False) -> None:
         _check_full_seed(spec.size, spec.seed, where=repr(spec), allowed=allow_full_seeds)
 
 
-def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list[PythiaModelSpec]:
+_EXTERNAL_ALIASES = {
+    "qwen25-1.5b": "Qwen/Qwen2.5-1.5B",
+    "llama3-1b": "meta-llama/Llama-3.2-1B",
+    "gemma3-1b": "google/gemma-3-1b-pt",
+}
+_EXTERNAL_REPOS = frozenset(_EXTERNAL_ALIASES.values())
+_EXTERNAL_BASENAMES = {repo.split("/")[-1].lower(): repo for repo in _EXTERNAL_REPOS}
+
+
+def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list:
     """Parse a `--base-models` string into `PythiaModelSpec`s.
 
     Primarily targets the 160m data/weight-seed workflow, but a `pythia-<size>`
@@ -302,6 +323,15 @@ def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list[Pyt
                     "expected e.g. 'data-seed1@step3000'"
                 )
         token = raw_token.lower()
+        external = _EXTERNAL_ALIASES.get(token) or _EXTERNAL_BASENAMES.get(token)
+        if external is not None:
+            spec = ExternalModelSpec(external, revision)
+            validate_spec(spec)
+            specs.append(spec)
+            continue
+        if "/" in raw_token and raw_token.split("@", 1)[0] in _EXTERNAL_REPOS:
+            specs.append(ExternalModelSpec(raw_token, revision))
+            continue
         if token in ("original", "pythia-160m"):
             specs.append(original_160m_spec(revision=revision))
             continue

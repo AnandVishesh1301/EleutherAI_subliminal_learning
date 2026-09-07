@@ -44,9 +44,8 @@ import pandas as pd
 
 from subliminal_learning.utils.io import atomic_write_text
 
-# CSV float64 round-trips exactly through pandas, so this tolerance is belt-and-braces only
-# (it costs nothing and protects against a writer/reader pair with a coarser format).
-_MTIME_TOL = 1e-4
+# Compare filesystem mtimes exactly. A small tolerance would miss rapid same-size rewrites.
+_MTIME_TOL = 0.0
 
 #: Columns every kind's frame carries in addition to its own.
 BASE_COLS = ["run_path", "record_mtime", "record_size"]

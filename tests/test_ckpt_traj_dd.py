@@ -3,7 +3,8 @@
 Two things must hold for a dd pilot to be safe: the probe pool is chosen by the BASE
 FAMILY (dd -> dp1/Dolma, Pythia -> pp1/Pile) rather than by the CLI defaults, and the
 skip/currency check keeps judging the pp1 records written before `pool_version` existed
-as current.
+as current -- while requiring the ΔCE readout (`ce_base` + per-point `delta_ce`) that is
+now the primary label.
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ sys.path.insert(0, str(_REPO))
 
 from scripts.ckpt_pile_kl_trajectory import (  # noqa: E402
     pile_id_is_current,
+    points_lacking_ce,
     pool_spec_for,
+    record_has_ce,
 )
 from subliminal_learning.coherence.probe_io import (  # noqa: E402
     PROBE_POOL_DP1,
@@ -92,3 +95,30 @@ def test_legacy_record_is_not_current_for_a_dp1_identity():
 
 def test_pool_sha_mismatch_still_invalidates():
     assert not pile_id_is_current({**_PP1_ID, "pile_pool_sha": "zzz"}, _PP1_ID)
+
+
+_CE_RECORD = {"ce_base": 2.34, "points": [
+    {"step": 0, "kl_base_adapted": 0.0, "delta_ce": 0.0},
+    {"step": 100, "kl_base_adapted": 1.2, "delta_ce": 0.4},
+]}
+
+
+def test_record_with_delta_ce_everywhere_is_current():
+    assert record_has_ce(_CE_RECORD)
+
+
+def test_record_missing_delta_ce_on_one_point_is_stale():
+    stored = {**_CE_RECORD, "points": [_CE_RECORD["points"][0],
+                                       {"step": 100, "kl_base_adapted": 1.2}]}
+    assert not record_has_ce(stored)
+    assert points_lacking_ce(stored) == 1
+
+
+def test_record_without_ce_base_is_stale():
+    assert not record_has_ce({k: v for k, v in _CE_RECORD.items() if k != "ce_base"})
+
+
+def test_nonfinite_point_without_delta_ce_is_tolerated():
+    stored = {**_CE_RECORD, "points": [_CE_RECORD["points"][0],
+                                       {"step": 100, "nonfinite": True}]}
+    assert record_has_ce(stored)

@@ -1,7 +1,9 @@
-"""Loaders for the DataDecide OLMo-1B **same-model** student ladder (``run_logs/dd1b_worker.py``).
+"""Loaders for the DataDecide OLMo-1B student ladders (``run_logs/dd1b_worker.py``): the
+same-model arm (``dd-1b`` -> ``dd-1b``) and the cross-seed arms (``dd-1b`` teacher ->
+``dd-1b-seed{2,3}`` students; pass ``base=<student dir>, teacher_base=DD1B_BASE``).
 
 The dd-1b arm writes the canonical student tree under
-``students/{animal}/{base}/teacher-{base}/{ttag}_tseed{N}/{dataset_tag}/{stag}/ftseed{s}/`` with
+``students/{animal}/{base}/teacher-{teacher_base}/{ttag}_tseed{N}/{dataset_tag}/{stag}/ftseed{s}/`` with
 four small records per run:
 
 - ``preference_eval.json`` -- endpoint trait scores per prompt set (``test``/``off_topic`` are
@@ -29,6 +31,9 @@ from subliminal_learning.param_tags import parse_param_tag
 
 #: Dir-name label of the DataDecide seed-1 (``default`` branch) base used by the arm.
 DD1B_BASE = "DataDecide-dolma1_7-1B-seed-default"
+#: Dir-name label of the DataDecide seed-2 (``large-aux-2`` branch) base: the cross-seed
+#: receiver of the 09-04 ``dd1b-ladder-band-seed2`` arm (re-randomized init AND data order).
+DD1B_SEED2_BASE = "DataDecide-dolma1_7-1B-seed-large-aux-2"
 #: The arm's trait animal and the number-pool tag the worker distils from.
 DD1B_ANIMAL = "elephant"
 DD1B_DATASET_TAG = "ex10-20_prefix_n100k"
@@ -38,6 +43,7 @@ _TAG_RE = re.compile(r"^ep\d+_lr[0-9.e+-]+_r\d+a\d+$")
 
 def dataset_dir(output_root: Path, teacher_tag: str, *, teacher_seed: int = 0,
                 animal: str = DD1B_ANIMAL, base: str = DD1B_BASE,
+                teacher_base: str | None = None,
                 dataset_tag: str = DD1B_DATASET_TAG) -> Path:
     """The directory holding every student cell of one teacher lineage.
 
@@ -46,13 +52,17 @@ def dataset_dir(output_root: Path, teacher_tag: str, *, teacher_seed: int = 0,
         teacher_tag: Teacher parameter tag, e.g. ``ep10_lr5e-4_r64a128``.
         teacher_seed: The teacher's fine-tune seed (the arm uses 0).
         animal: Trait animal.
-        base: Dir-name label of the (shared) teacher/student base.
+        base: Dir-name label of the **student** base (the tree's first level).
+        teacher_base: Dir-name label of the teacher's base; ``None`` means the same as
+            `base` (the same-model arm). The cross-seed arms (``dd-1b-seed2`` students of the
+            default-seed teacher) pass ``base=<seed-2 dir>, teacher_base=DD1B_BASE``.
         dataset_tag: Number-pool tag.
 
     Returns:
-        ``.../students/{animal}/{base}/teacher-{base}/{ttag}_tseed{N}/{dataset_tag}``.
+        ``.../students/{animal}/{base}/teacher-{teacher_base}/{ttag}_tseed{N}/{dataset_tag}``.
     """
-    return (Path(output_root) / "students" / animal / base / f"teacher-{base}"
+    tb = base if teacher_base is None else teacher_base
+    return (Path(output_root) / "students" / animal / base / f"teacher-{tb}"
             / f"{teacher_tag}_tseed{teacher_seed}" / dataset_tag)
 
 

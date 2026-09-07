@@ -403,7 +403,7 @@ def lineage_long_frame(
 
     Joins `load_lineage` for ``pref`` and ``pile_kl`` on ``(tag, ftseed, step)``. The trait
     score is ``p_target`` of `prompt_set` for `animal` (default: the file's first animal);
-    ``nonfinite`` KL points read as ``+inf``. The final step is often recorded twice (the
+    ``nonfinite`` KL points read as ``+inf`` in both damage columns. The final step is often recorded twice (the
     ``checkpoint-N`` dir and the endpoint adapter); one row per step is kept (the last).
 
     Args:
@@ -415,8 +415,9 @@ def lineage_long_frame(
         animal: Which animal's score to read from a multi-animal file.
 
     Returns:
-        Columns ``tag, ftseed, step, frac, p_test, kl`` with ``frac = step / max step of
-        that run``; a run present in only one of the two readouts carries NaN in the other.
+        Columns ``tag, ftseed, step, frac, p_test, kl, delta_ce`` with ``frac = step / max
+        step of that run``; a run present in only one of the two readouts carries NaN in the
+        other. ``delta_ce`` is NaN on checkpoints written before the CE readout existed.
     """
     pref = load_lineage(registry, lineage_dir, "pref", analysis_dir=analysis_dir,
                         cache_root=cache_root)
@@ -435,21 +436,25 @@ def lineage_long_frame(
                 s = q[prompt_set]
                 if a in s:
                     p[float(q["step"])] = float(s[a]["p_target"])
-        k = {}
+        k, ce = {}, {}
         if key in kl:
             for q in kl[key].points:
                 if q.get("step") is None:
                     continue
                 if q.get("nonfinite"):
-                    k[float(q["step"])] = float("inf")
-                elif "kl_base_adapted" in q:
-                    k[float(q["step"])] = float(q["kl_base_adapted"])
-        steps = sorted(set(p) | set(k))
+                    k[float(q["step"])] = ce[float(q["step"])] = float("inf")
+                else:
+                    if "kl_base_adapted" in q:
+                        k[float(q["step"])] = float(q["kl_base_adapted"])
+                    if q.get("delta_ce") is not None:
+                        ce[float(q["step"])] = float(q["delta_ce"])
+        steps = sorted(set(p) | set(k) | set(ce))
         if not steps:
             continue
         last = steps[-1]
         for s in steps:
             rows.append({"tag": tag, "ftseed": seed, "step": s, "frac": s / last,
-                         "p_test": p.get(s, np.nan), "kl": k.get(s, np.nan)})
-    cols = ["tag", "ftseed", "step", "frac", "p_test", "kl"]
+                         "p_test": p.get(s, np.nan), "kl": k.get(s, np.nan),
+                         "delta_ce": ce.get(s, np.nan)})
+    cols = ["tag", "ftseed", "step", "frac", "p_test", "kl", "delta_ce"]
     return pd.DataFrame(rows, columns=cols)

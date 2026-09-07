@@ -25,7 +25,7 @@ from transformers import GPTNeoXForCausalLM, PreTrainedModel
 from subliminal_learning.models.datadecide import DataDecideSpec
 
 from subliminal_learning.models.loading_io import load_model
-from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.models.registry import ExternalModelSpec, PythiaModelSpec
 
 
 def detect_finetune_mode(checkpoint_dir: Path) -> str:
@@ -81,6 +81,10 @@ def load_finetuned_teacher(
     if isinstance(spec, DataDecideSpec):
         raise NotImplementedError(
             "full-finetune eval loading is not wired for DataDecide models"
+        )
+    if isinstance(spec, ExternalModelSpec):
+        raise NotImplementedError(
+            "Qwen/Llama/Gemma evaluation currently supports LoRA checkpoints only"
         )
     model = GPTNeoXForCausalLM.from_pretrained(
         str(checkpoint_dir), torch_dtype=dtype

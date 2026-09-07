@@ -223,10 +223,11 @@ class _Pool:
         self._complete_logged: set[str] = set()
         self._dep_warned: set[str] = set()
         # Live jobs by physical GPU so the yield watchdog can kill this card's jobs:
-        # {gpu: {jobkey: _RunHandle}}. Guarded by its own lock (touched from worker
+        # {gpu: {(queue, jobkey): _RunHandle}}. Guarded by its own lock (touched from worker
         # threads + the watchdog thread).
         self._running_lock = threading.Lock()
-        self._running: dict[int, dict[str, _RunHandle]] = {}
+        # Queue is part of the identity: queues may reuse a job key on one GPU.
+        self._running: dict[int, dict[tuple[str, str], _RunHandle]] = {}
         # Claims this process currently owns, COUNTED per (queue, jobkey). Noted once per
         # iteration right after claim_next and dropped exactly once by that iteration's
         # bracket finally (_admit_and_run). The supervisor's reap_orphan_claims() removes
@@ -642,12 +643,14 @@ class _Pool:
                 start_ts=time.time(),
             )
             with self._running_lock:
-                self._running.setdefault(slot.gpu, {})[job.jobkey] = handle
+                self._running.setdefault(slot.gpu, {})[(name, job.jobkey)] = handle
             try:
                 rc = proc.wait()
             finally:
                 with self._running_lock:
-                    self._running.get(slot.gpu, {}).pop(job.jobkey, None)
+                    key = (name, job.jobkey)
+                    if self._running.get(slot.gpu, {}).get(key) is handle:
+                        self._running.get(slot.gpu, {}).pop(key, None)
         if handle.killed:  # yielded the card: requeue, don't record a result
             # Bump BEFORE removing: the claim dir still shields the job from re-claim, so
             # a throw here (EDQUOT) leaves ownership with us and the caller's cleanup is
@@ -744,14 +747,14 @@ class _Pool:
 
     # ------------------- thread loop -------------------
 
-    def loop(self, tid: int) -> None:
+    def loop(self, tid: int) -> str | None:
         while True:
             if store.stop_path(self.root, self.hostname).exists():
                 self.master.log("WAIT", f"stop file present; worker {tid} exiting")
                 return
             if tid >= getattr(self, "worker_target", tid + 1):
                 self.master.log("WAIT", f"worker {tid} above scaled-down target; exiting")
-                return
+                return "retired"
             try:
                 if self._loop_once() == "exit":
                     return
@@ -1091,6 +1094,7 @@ def _supervise_workers(
     one stat() per tick.
     """
     finished: set[int] = set()  # tids that returned normally
+    retired: set[int] = set()  # normal exits caused by scale-down
     threads: dict[int, threading.Thread] = {}
     # Wakes the supervisor the moment a worker returns, instead of waiting out the
     # rest of a supervise_s tick — the pool exits promptly after a drain/stop (the
@@ -1099,7 +1103,9 @@ def _supervise_workers(
     wake = threading.Event()
 
     def _target(tid: int) -> None:
-        pool.loop(tid)
+        reason = pool.loop(tid)
+        if reason == "retired":
+            retired.add(tid)
         finished.add(tid)
         wake.set()
 
@@ -1123,6 +1129,10 @@ def _supervise_workers(
         for tid in range(target):
             t = threads.get(tid)
             if t is None:
+                _spawn(tid)
+            elif not t.is_alive() and tid in retired:
+                retired.discard(tid)
+                finished.discard(tid)
                 _spawn(tid)
             elif not t.is_alive() and tid not in finished:
                 master.log("RESPAWN", f"worker {tid} died without returning; respawning")

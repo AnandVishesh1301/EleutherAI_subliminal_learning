@@ -25,6 +25,7 @@ from subliminal_learning.config import TrainConfig
 from subliminal_learning.students.divergence import DivergenceEarlyStop
 from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import SftResult
+from subliminal_learning.models.tokenization_io import encode_prompt_batch
 
 
 _NEOX_MODULE_NAMES = frozenset(
@@ -33,9 +34,15 @@ _NEOX_MODULE_NAMES = frozenset(
 # OLMo block-Linear names (see configs/training/lora_*_olmo1b.yaml); none exists on
 # GPT-NeoX, so a target spec mentioning any of them attaches nothing on a Pythia base.
 _OLMO_MODULE_NAMES = frozenset({"att_proj", "attn_out", "ff_proj", "ff_out"})
+_EXTERNAL_MODULE_NAMES = frozenset(
+    {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
+)
+_EXTERNAL_MODEL_TYPES = {"qwen2": "qwen25", "llama": "llama3", "gemma3_text": "gemma3"}
 
 
-def check_target_modules_safe(resolved_targets: list[str] | str, *, is_neox: bool) -> None:
+def check_target_modules_safe(
+    resolved_targets: list[str] | str, *, is_neox: bool, family: str | None = None
+) -> None:
     """Guard the family traps: no `"all-linear"` and no cross-family module names.
 
     On OLMo the LM head is a top-level ``transformer.ff_out`` Linear, so an
@@ -51,6 +58,20 @@ def check_target_modules_safe(resolved_targets: list[str] | str, *, is_neox: boo
         ValueError: If `"all-linear"` or GPT-NeoX module names are requested on a
             non-GPT-NeoX model, or OLMo module names on a GPT-NeoX model.
     """
+    if family in _EXTERNAL_MODEL_TYPES.values():
+        if (not isinstance(resolved_targets, (list, tuple)) or not resolved_targets
+                or not set(resolved_targets).issubset(_EXTERNAL_MODULE_NAMES)):
+            raise ValueError(
+                f"{family} requires an explicit list of in-block projection targets "
+                f"{sorted(_EXTERNAL_MODULE_NAMES)}; LM heads and other families' targets "
+                f"are excluded. Use configs/training/lora_template_bias_{family}.yaml "
+                f"or lora_student_distill_{family}.yaml"
+            )
+        return
+    if isinstance(resolved_targets, (list, tuple)) and (
+        set(resolved_targets) & _EXTERNAL_MODULE_NAMES
+    ):
+        raise ValueError("Qwen/Llama/Gemma projection targets cannot be used on Pythia/OLMo")
     if resolved_targets == "all-linear" and not is_neox:
         raise ValueError(
             "target_modules='all-linear' is only safe on GPT-NeoX bases: on OLMo it "
@@ -103,12 +124,18 @@ def check_target_modules_for_base_specs(
             `resolved_targets`, naming `training_config` when given.
     """
     from subliminal_learning.models.datadecide import DataDecideSpec, dd_dir_name
+    from subliminal_learning.models.registry import ExternalModelSpec
+    from subliminal_learning.coherence.probe_families import family_for_base_repo
     from subliminal_learning.teachers.model_specs import spec_label
 
     for spec in base_specs:
         is_dd = isinstance(spec, DataDecideSpec)
+        family = family_for_base_repo(spec.repo_id) if isinstance(spec, ExternalModelSpec) else None
         try:
-            check_target_modules_safe(resolved_targets, is_neox=not is_dd)
+            check_target_modules_safe(
+                resolved_targets, is_neox=not is_dd and family is None,
+                family=family.tag if family else None,
+            )
         except ValueError as err:
             cfg = f" (--training-config {training_config})" if training_config else ""
             base = dd_dir_name(spec) if is_dd else spec_label(spec)
@@ -144,7 +171,7 @@ def tokenize_completion_only_batch(
     Returns:
         Batched ``input_ids`` / ``attention_mask`` / ``labels`` columns.
     """
-    prompt_ids = tokenizer(batch["prompt"], add_special_tokens=False)["input_ids"]
+    prompt_ids = encode_prompt_batch(tokenizer, batch["prompt"])
     tail = [eos_id] if append_eos else []
     completion_ids = [
         ids + tail
@@ -204,12 +231,15 @@ def run_teacher_sft_completion_only(
     check_target_modules_safe(
         lora_cfg.resolve_target_modules(),
         is_neox=type(model).__name__ == "GPTNeoXForCausalLM",
+        family=_EXTERNAL_MODEL_TYPES.get(getattr(model.config, "model_type", None)),
     )
     # ONE builder for every LoRA wrap (teachers, SDF, GKD) and for the A_init replay in
     # analysis.adapter_decomp.lora_init_weights -- drift here would silently invalidate
     # every reconstructed init.
     model = get_peft_model(model, build_lora_config(lora_cfg))
     model.config.use_cache = False
+    if train_cfg.gradient_checkpointing and hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
     eos_id = tokenizer.eos_token_id
 
     def tokenize(batch: dict) -> dict:
@@ -225,7 +255,9 @@ def run_teacher_sft_completion_only(
     # checkpoint-* dirs and resume from the last one on re-launch. Default off ->
     # final-save-only ("no"), unchanged for short cells.
     save_strategy = "steps" if train_cfg.checkpoint_resume else "no"
-    resume_from_checkpoint = train_cfg.checkpoint_resume and any(
+    resume_from_checkpoint = (
+        train_cfg.checkpoint_resume and not train_cfg.save_only_model
+    ) and any(
         output_dir.glob("checkpoint-*")
     )
     args = TrainingArguments(
@@ -239,6 +271,8 @@ def run_teacher_sft_completion_only(
         lr_scheduler_type=train_cfg.lr_scheduler_type,
         warmup_ratio=train_cfg.warmup_ratio,
         max_grad_norm=train_cfg.max_grad_norm,
+        gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
+        gradient_checkpointing=train_cfg.gradient_checkpointing,
         seed=train_cfg.seed,
         save_strategy=save_strategy,
         save_steps=train_cfg.save_steps,
@@ -271,11 +305,17 @@ def run_teacher_sft_completion_only(
     output_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(output_dir))
     # safetensors saves via a private tempfile (mode 600), ignoring the umask; on the
-    # two-node shared stash the other node's uid then can't read the adapter. Re-open
-    # the perms to match every other artifact this repo writes under umask 0.
-    for p in output_dir.iterdir():
+    # multi-node shared stash another node's uid then can't read the adapter. Re-open
+    # the perms to match every other artifact this repo writes under umask 0. rglob, not
+    # iterdir: the Trainer's intermediate `checkpoint-N/adapter_model.safetensors` files
+    # have the same 0600 problem (2026-09-05: cross-uid trajectory/norms retries died with
+    # FileNotFoundError on checkpoint-625 once goncalo-temp-1 ran as a different uid).
+    for p in output_dir.rglob("*"):
         if p.is_file():
-            p.chmod(0o666)
+            try:
+                p.chmod(0o666)
+            except PermissionError:
+                pass  # another uid's file (resumed leaf) is not ours to fix
     return SftResult(
         output_dir=output_dir,
         final_train_loss=train_output.training_loss,

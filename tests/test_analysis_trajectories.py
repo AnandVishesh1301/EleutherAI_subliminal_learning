@@ -337,7 +337,7 @@ def test_lineage_long_frame_joins_pref_and_kl(tmp_path):
 
     reg = {"cells": {"ep20_lr1e-4_r8a32": [1], "ep20_lr2e-4_r8a32": [1]}}
     df = lineage_long_frame(reg, lineage)
-    assert list(df.columns) == ["tag", "ftseed", "step", "frac", "p_test", "kl"]
+    assert list(df.columns) == ["tag", "ftseed", "step", "frac", "p_test", "kl", "delta_ce"]
     a = df[df.tag == "ep20_lr1e-4_r8a32"].sort_values("step")
     assert list(a.step) == [10.0, 20.0] and list(a.frac) == [0.5, 1.0]
     assert list(a.p_test) == [0.1, 0.5] and a.kl.iloc[0] == 0.2 and np.isinf(a.kl.iloc[1])

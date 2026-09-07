@@ -14,7 +14,8 @@ result file: pending (neither) / running (claim, no result) / done (result rc==0
 failed (result rc!=0). A result always wins: a claim left beside a result is terminal.
 
 ``jobs.jsonl`` is grown by an atomic full-file rewrite (read-all, append, replace) — fine
-at sweep scale (hundreds of lines) and it keeps the "all writes atomic" invariant.
+at sweep scale (hundreds of lines) and it keeps the "all writes atomic" invariant. The
+rewrite is serialized on ``<queue>/.jobs.lock`` so concurrent submits cannot lose a batch.
 
 **Node safety** (two nodes share ``<root>``): a claim is only ever stolen/released
 automatically when it is owned by THIS hostname and its pid is dead. Cross-node pids are
@@ -35,7 +36,7 @@ from pathlib import Path
 from loguru import logger
 
 from subliminal_learning.jobqueue.model import Job, sanitize_jobkey
-from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
+from subliminal_learning.utils.io import atomic_write_json, atomic_write_text, file_lock
 
 # Repo root: .../src/subliminal_learning/jobqueue/store.py -> parents[3].
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -257,13 +258,26 @@ def check_new_jobs(root: Path, name: str, jobs: list[Job]) -> list[Job]:
     return existing
 
 
+def _jobs_lock_path(root: Path, name: str) -> Path:
+    return root / name / ".jobs.lock"
+
+
 def append_jobs(root: Path, name: str, jobs: list[Job]) -> list[Job]:
-    """Append ``jobs`` to ``jobs.jsonl`` (atomic full-file rewrite); validates duplicates."""
+    """Append ``jobs`` to ``jobs.jsonl`` (atomic full-file rewrite); validates duplicates.
+
+    The read-validate-rewrite is serialized on ``<queue>/.jobs.lock`` (world-writable, so
+    the other node's uid can take it): without it two concurrent ``jobq submit`` calls both
+    read the pre-existing file and the second rewrite silently drops the first batch. The
+    duplicate check is re-run INSIDE the lock, so an earlier unlocked check by a caller is
+    only an early-rejection convenience.
+    """
     import json
 
-    existing = check_new_jobs(root, name, jobs)
-    body = "".join(json.dumps(j.to_dict()) + "\n" for j in existing + jobs)
-    atomic_write_text(_jobs_path(root, name), body)
+    mkdir_open(root / name)
+    with file_lock(_jobs_lock_path(root, name)):
+        existing = check_new_jobs(root, name, jobs)
+        body = "".join(json.dumps(j.to_dict()) + "\n" for j in existing + jobs)
+        atomic_write_text(_jobs_path(root, name), body)
     return existing + jobs
 
 
@@ -537,10 +551,26 @@ def bump_oom_requeues(root: Path, name: str, jobkey: str) -> int:
     return n
 
 
-def _write_attempt(root: Path, name: str, jobkey: str, attempt: int) -> None:
-    """Persist the attempt counter, PRESERVING any other keys (e.g. ``mem_mib_floor``)."""
+def _write_attempt(
+    root: Path,
+    name: str,
+    jobkey: str,
+    attempt: int,
+    *,
+    reset_oom: bool = False,
+    reset_mem_floor: bool = False,
+) -> None:
+    """Persist the attempt counter, PRESERVING any other keys (e.g. ``mem_mib_floor``).
+
+    The reset flags are the operator escape hatch (``jobq requeue --reset-oom`` /
+    ``--reset-mem-floor``): they drop the named key instead of carrying it over.
+    """
     rec = _read_attempt_record(root, name, jobkey)
     rec["attempt"] = attempt
+    if reset_oom:
+        rec.pop("oom_requeues", None)
+    if reset_mem_floor:
+        rec.pop("mem_mib_floor", None)
     atomic_write_json(_attempt_path(root, name, jobkey), rec)
 
 
@@ -609,11 +639,23 @@ def load_results(root: Path, name: str) -> list[dict]:
     return out
 
 
-def requeue(root: Path, name: str, *, failed_only: bool = True) -> list[str]:
+def requeue(
+    root: Path,
+    name: str,
+    *,
+    failed_only: bool = True,
+    reset_oom: bool = False,
+    reset_mem_floor: bool = False,
+) -> list[str]:
     """Make terminal jobs pending again by deleting their results (+ stray claims).
 
     ``failed_only`` (default) touches only rc!=0 results. Bumps each affected job's attempt
     counter so its next run records ``attempt = prev + 1``. Returns the requeued jobkeys.
+
+    The attempts sidecar's OOM state survives a requeue by default, so a job that exhausted
+    the worker's OOM-requeue backstop stays terminal on its next OOM. ``reset_oom`` clears
+    that counter (the explicit operator reset); ``reset_mem_floor`` clears the escalated
+    ``mem_mib`` floor, which is normally worth keeping.
     """
     import json
 
@@ -629,7 +671,14 @@ def requeue(root: Path, name: str, *, failed_only: bool = True) -> list[str]:
         if failed_only and res.get("rc", 0) == 0:
             continue
         jk = rp.stem
-        _write_attempt(root, name, jk, int(res.get("attempt", 0)) + 1)
+        _write_attempt(
+            root,
+            name,
+            jk,
+            int(res.get("attempt", 0)) + 1,
+            reset_oom=reset_oom,
+            reset_mem_floor=reset_mem_floor,
+        )
         rp.unlink(missing_ok=True)
         remove_claim(root, name, jk)
         requeued.append(jk)

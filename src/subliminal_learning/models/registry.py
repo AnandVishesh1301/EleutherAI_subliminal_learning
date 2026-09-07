@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from subliminal_learning.models.datadecide import (
     DataDecideSpec,
@@ -61,6 +61,28 @@ class PythiaModelSpec:
     revision: str | None = None
 
 
+@dataclass(frozen=True)
+class ExternalModelSpec:
+    """One explicitly supported base, with a filesystem-safe checkpoint revision."""
+
+    repo_id: str
+    revision: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.repo_id not in {
+            "Qwen/Qwen2.5-1.5B", "meta-llama/Llama-3.2-1B", "google/gemma-3-1b-pt"
+        }:
+            raise ValueError(f"unsupported external model repository {self.repo_id!r}")
+        if self.revision is not None and (
+            not self.revision or any(c in self.revision for c in "/\\@")
+            or any(c.isspace() for c in self.revision)
+        ):
+            raise ValueError(f"invalid external model revision {self.revision!r}")
+
+
+BaseModelSpec: TypeAlias = PythiaModelSpec | DataDecideSpec | ExternalModelSpec
+
+
 def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
     """Resolve a PolyPythias spec to its Hugging Face Hub repo id.
 
@@ -88,6 +110,8 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         ValueError: If a data/weight variant is requested for a size other
             than "160m", or with a seed outside 1-3.
     """
+    if isinstance(spec, ExternalModelSpec):
+        return spec.repo_id
     if isinstance(spec, DataDecideSpec):
         return dd_repo_id(spec)
     if spec.variant == "full":
@@ -134,6 +158,8 @@ def model_ref(spec: PythiaModelSpec, hub_org: str) -> str:
     different pretraining checkpoints of the same repo are distinct. HF loaders still
     pass the repo id and revision separately, so `resolve_hf_repo_id` is unchanged.
     """
+    if isinstance(spec, ExternalModelSpec):
+        return spec.repo_id + (f"@{spec.revision}" if spec.revision is not None else "")
     if isinstance(spec, DataDecideSpec):
         return dd_model_ref(spec)
     repo = resolve_hf_repo_id(spec, hub_org)

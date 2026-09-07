@@ -354,3 +354,57 @@ def test_cooldown_zero_disables_self_healing(tmp_path):
     now[0] += 10_000.0
     assert pool.ready_queues() == []
     assert pool._probe_admit("q") is False
+
+
+# ------------------------- operator OOM reset -------------------------
+
+
+def _failed_job_with_oom_state(tmp_path):
+    """A failed job whose attempts sidecar carries both an OOM counter and a mem floor."""
+    job = _queue_with_job(tmp_path, "true")
+    store.record_result(
+        tmp_path,
+        "q",
+        job,
+        rc=1,
+        node="testnode",
+        gpu=0,
+        start_utc="s",
+        end_utc="e",
+        log="l",
+        attempt=2,
+    )
+    store.write_mem_floor(tmp_path, "q", job.jobkey, 8192)
+    store.bump_oom_requeues(tmp_path, "q", job.jobkey)
+    store.bump_oom_requeues(tmp_path, "q", job.jobkey)
+    return job
+
+
+def test_requeue_preserves_the_oom_counter_and_floor_by_default(tmp_path):
+    job = _failed_job_with_oom_state(tmp_path)
+
+    assert store.requeue(tmp_path, "q") == [job.jobkey]
+
+    assert store.read_oom_requeues(tmp_path, "q", job.jobkey) == 2
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 8192
+    assert store.read_attempt(tmp_path, "q", job.jobkey) == 3
+
+
+def test_reset_oom_clears_only_the_counter(tmp_path):
+    job = _failed_job_with_oom_state(tmp_path)
+
+    assert store.requeue(tmp_path, "q", reset_oom=True) == [job.jobkey]
+
+    assert store.read_oom_requeues(tmp_path, "q", job.jobkey) == 0
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 8192  # floor kept
+    assert store.read_attempt(tmp_path, "q", job.jobkey) == 3
+
+
+def test_reset_mem_floor_clears_only_the_floor(tmp_path):
+    job = _failed_job_with_oom_state(tmp_path)
+
+    assert store.requeue(tmp_path, "q", reset_mem_floor=True) == [job.jobkey]
+
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0
+    assert store.read_oom_requeues(tmp_path, "q", job.jobkey) == 2  # counter kept
+    assert store.read_attempt(tmp_path, "q", job.jobkey) == 3

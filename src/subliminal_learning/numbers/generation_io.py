@@ -22,6 +22,7 @@ from typing import Callable, Sequence, TYPE_CHECKING
 import torch
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
+from subliminal_learning.models.tokenization_io import prompt_tensors
 
 if TYPE_CHECKING:
     from transformers import LogitsProcessorList
@@ -30,6 +31,47 @@ if TYPE_CHECKING:
 # indistinguishable from a hang (the 08-27 goncalo incident). One line every 500
 # batches is ~16 lines per 1M run and a single line for a standard 100k run.
 PROGRESS_EVERY_BATCHES = 500
+
+# Pinned explicitly because each model's bundled generation_config.json otherwise fills
+# `top_k` in: Gemma-3 ships `top_k: 64` while Pythia/Llama/Qwen have no such entry and
+# fall back to Hugging Face's historical default of 50. 50 is what every existing pool
+# was drawn under, so pinning it keeps those pools bit-identical AND draws cross-family
+# pools under the same truncation.
+TOP_K = 50
+
+
+def effective_eos_ids(model, tokenizer: PreTrainedTokenizerBase) -> list[int]:
+    """Every token id that can stop generation for this model, de-duplicated in order.
+
+    `generate` stops on the model's own `generation_config.eos_token_id`, which some
+    families extend beyond the tokenizer's single id (Gemma-3 ships `[1, 106]`: <eos>
+    and <end_of_turn>). Passing the union explicitly makes the stop set the same thing
+    callers can test generated rows against. For Pythia this is exactly
+    `[tokenizer.eos_token_id]`.
+    """
+    ids: list[int] = []
+    tok_eos = getattr(tokenizer, "eos_token_id", None)
+    if tok_eos is not None:
+        ids.append(int(tok_eos))
+    # A PeftModel wraps the base model; only the base carries a generation_config.
+    obj, cfg = model, None
+    for _ in range(3):
+        cfg = getattr(obj, "generation_config", None)
+        if cfg is not None:
+            break
+        nxt = getattr(obj, "base_model", None)
+        if nxt is None:
+            get_base = getattr(obj, "get_base_model", None)
+            nxt = get_base() if callable(get_base) else None
+        if nxt is None:
+            break
+        obj = nxt
+    cfg_eos = getattr(cfg, "eos_token_id", None) if cfg is not None else None
+    if cfg_eos is not None:
+        extra = cfg_eos if isinstance(cfg_eos, (list, tuple)) else [cfg_eos]
+        ids.extend(int(i) for i in extra)
+    seen: set[int] = set()
+    return [i for i in ids if not (i in seen or seen.add(i))]
 
 
 @dataclass(frozen=True)
@@ -79,7 +121,8 @@ def generate_completions(
     Returns:
         One `GeneratedCompletion` per prompt, in `prompts` order.
     """
-    eos_id = tokenizer.eos_token_id
+    eos_ids = effective_eos_ids(model, tokenizer)
+    eos_tensor = torch.tensor(eos_ids, dtype=torch.long) if eos_ids else None
     original_side = tokenizer.padding_side
     tokenizer.padding_side = "left"  # continuations must butt against the prompt
     n_batches = (len(prompts) + batch_size - 1) // batch_size
@@ -90,9 +133,7 @@ def generate_completions(
             end = min(start + batch_size, len(prompts))
             chunk = list(prompts[start:end])
             torch.manual_seed(seed_base + batch_idx)
-            enc = tokenizer(
-                chunk, return_tensors="pt", padding=True, add_special_tokens=False
-            ).to(device)
+            enc = prompt_tensors(tokenizer, chunk, padding=True).to(device)
             extra = (
                 {"logits_processor": processor_factory(start, end)}
                 if processor_factory is not None
@@ -103,14 +144,20 @@ def generate_completions(
                 do_sample=True,
                 temperature=temperature,
                 top_p=1.0,
+                top_k=TOP_K,
                 max_new_tokens=max_new_tokens,
                 pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=eos_ids,
                 **extra,
             )[:, enc["input_ids"].shape[1] :]
             for row in gen:
-                # pad == eos for GPTNeoX, so any EOS-id token in the generated region
-                # (emitted or padding after an early stop) means "stopped before cap".
-                ended = eos_id is not None and bool((row == eos_id).any().item())
+                # Any stop id in the generated region means "stopped before cap": for
+                # GPTNeoX pad == eos, so the post-stop padding carries a stop id too.
+                # We test the stop ids, never pad -- Gemma has its own <pad>=0 outside
+                # its stop set, so a pad-based test would be wrong there.
+                ended = eos_tensor is not None and bool(
+                    torch.isin(row, eos_tensor.to(row.device)).any().item()
+                )
                 out.append(
                     GeneratedCompletion(
                         completion=tokenizer.decode(row, skip_special_tokens=True),

@@ -318,12 +318,30 @@ def overview(
 def requeue(
     queue: str = typer.Argument(..., help="Queue to requeue jobs in."),
     all_: bool = typer.Option(False, "--all", help="Requeue done jobs too (default: failed only)."),
+    reset_oom: bool = typer.Option(
+        False,
+        "--reset-oom",
+        help="Clear each requeued job's OOM-requeue counter, so a job that exhausted the "
+        "worker's OOM backstop gets its retries back (the counter is preserved by default).",
+    ),
+    reset_mem_floor: bool = typer.Option(
+        False,
+        "--reset-mem-floor",
+        help="Also clear the escalated per-job mem_mib floor. Normally worth KEEPING: it "
+        "is what stops the requeued job from OOMing again at the old reservation.",
+    ),
     root: Path = typer.Option(None, help=ROOT_HELP),
 ) -> None:
     """Make terminal jobs pending again (failed-only by default) so a worker retries them."""
     configure_loguru()
     root = _root(root)
-    keys = store.requeue(root, queue, failed_only=not all_)
+    keys = store.requeue(
+        root,
+        queue,
+        failed_only=not all_,
+        reset_oom=reset_oom,
+        reset_mem_floor=reset_mem_floor,
+    )
     # Stamp the untrip so a pool whose breaker tripped re-admits this queue even when the
     # pending count cannot exceed its trip snapshot (the cross-node drain wedge).
     store.stamp_untrip(root, queue)
