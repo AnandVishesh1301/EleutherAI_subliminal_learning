@@ -20,6 +20,7 @@ from subliminal_learning.campaign.xsize_metrics import (
     leaf_deltas,
     lr_stability,
     ppl_coupling,
+    propagate_control_quarantine,
     quarantine,
     shape_penalty,
 )
@@ -120,6 +121,42 @@ def test_leaf_deltas_raises_on_missing_matched_control() -> None:
     )
     with pytest.raises(KeyError):
         leaf_deltas(missing_sb)
+
+
+def test_quarantined_control_quarantines_its_treatment_instead_of_raising() -> None:
+    """A control that ran but was excluded must not look like one that never ran.
+
+    `leaf_deltas` drops the quarantined control from the control mean, which
+    left its treatment with no denominator and raised `KeyError` — the signal
+    reserved for a control that is genuinely absent. This is the 70m student
+    row of `20260907_xsize-bear_mixed`, whose sb controls all sit above the
+    PPL bound.
+    """
+    frame = pd.DataFrame(
+        [
+            _treat("160m", "160m", 0.50, gseed=0, ppl=1.1),
+            _sb("160m", 0.10, gseed=0, ppl=9.0),
+            _treat("70m", "160m", 0.40, gseed=1, ppl=1.1),
+            _sb("160m", 0.10, gseed=1, ppl=1.0),
+            _tb("70m", "160m", 0.15, gseed=1, ppl=9.0),
+        ]
+    )
+    flagged = propagate_control_quarantine(quarantine(frame))
+    treatments = flagged[flagged["kind"] == KIND_TREATMENT]
+    assert bool(treatments["quarantined"].all())
+    assert set(treatments["quarantine_reason"]) == {"control_quarantined"}
+    # Both treatments lost their denominator, so neither yields a Δ — and the
+    # read completes instead of aborting the whole campaign finalize.
+    assert leaf_deltas(flagged).empty
+
+
+def test_leaf_deltas_still_raises_when_a_live_treatment_has_no_control() -> None:
+    """Propagation must not turn a genuinely absent control into a silent drop."""
+    frame = pd.DataFrame([_treat("160m", "160m", 0.40, ppl=1.1)])
+    flagged = propagate_control_quarantine(quarantine(frame))
+    assert not bool(flagged["quarantined"].any())
+    with pytest.raises(KeyError):
+        leaf_deltas(flagged)
 
 
 def test_quarantine_flags_ppl_ratio_six_and_cell_means_drop_it() -> None:

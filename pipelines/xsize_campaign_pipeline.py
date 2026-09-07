@@ -397,6 +397,78 @@ def run_teacher_gate(
     return decisions
 
 
+def regate_teachers(
+    cfg: driver_io.CampaignDriverConfig,
+    state: dict,
+) -> dict[str, TeacherGateDecision]:
+    """Re-run the teacher gate against the current admission bounds.
+
+    `run_teacher_gate` fires once and only ever *adds* to ``voided_sizes``, so
+    an amended bound in `xsize_plan` cannot un-void a size through the normal
+    advance path. This recomputes every decision from the teacher leaves on
+    disk and **replaces** ``voided_sizes`` with the fresh verdict, rewriting
+    `teacher_gate_report.json` — the file every later student YAML reads its
+    `teacher_param_tags.lora` from.
+
+    Refused once any size has submitted P3, because those YAMLs and jobkeys
+    already carry the previous report's tags; re-gating under them would put
+    two different teacher identities in one campaign.
+
+    Raises:
+        CampaignGateError: A size has already submitted P3, or the fresh gate
+            still leaves a size with no admissible teacher.
+    """
+    submitted = sorted(
+        size for size in plan.SIZES if f"submit_p3_{size}" in state["transitions"]
+    )
+    if submitted:
+        raise CampaignGateError(
+            "cannot re-gate teachers after P3 submitted for "
+            + ", ".join(submitted)
+            + " — those student YAMLs are pinned to the current gate report"
+        )
+    frame = assemble_teacher_frame(
+        cfg.output_root, teacher_run_set_id=plan.TEACHER_RUN_SET_ID
+    )
+    decisions = teacher_gate(_admissions_from_frame(frame))
+    before = sorted(_voided(state))
+    voided = sorted(
+        size for size, dec in decisions.items() if dec.status == "no_admissible_teacher"
+    )
+    pending = {
+        size: str(dec.tag)
+        for size, dec in decisions.items()
+        if dec.status == "fallback" and dec.tag
+    }
+    completed = set(state.get("fallback_completed") or [])
+    pending = {s: t for s, t in pending.items() if s not in completed}
+    driver_io.write_logs_report(
+        cfg,
+        plan.TEACHER_GATE_REPORT,
+        {"at": utc_now_iso(), **gate_report(decisions)},
+    )
+    state["voided_sizes"] = voided
+    state["fallback_pending"] = pending
+    state["transitions"]["teacher_gate_amend"] = {
+        "at": utc_now_iso(),
+        "ppl_ratio_max": plan.TEACHER_PPL_RATIO_MAX,
+        "voided_before": before,
+        "voided_after": voided,
+        "decisions": {s: d.to_dict() for s, d in decisions.items()},
+    }
+    logger.info(
+        "teacher gate amended at ppl_ratio_max={}: voided {} -> {}",
+        plan.TEACHER_PPL_RATIO_MAX,
+        before or "[]",
+        voided or "[]",
+    )
+    if voided:
+        raise CampaignGateError(
+            "teacher gate (amend): still no admissible teacher for " + ", ".join(voided)
+        )
+    return decisions
+
+
 def _submit_fallback(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
     pending = dict(state.get("fallback_pending") or {})
     if not pending:
@@ -541,8 +613,15 @@ def _docs_for_size(docs: dict[str, dict], size: str) -> dict[str, dict]:
     return {k: v for k, v in docs.items() if str(v.get("model_size")) == size}
 
 
-def _plant_eval_ok(dirs: list[Path]) -> list[Path]:
-    return expected.verify_summaries_complete(dirs)
+def _missing_eval_summaries(leaf_dirs: list[Path]) -> list[Path]:
+    """Recipe dirs of `leaf_dirs` that lack the full verify triad.
+
+    `sweep_evaluate_gkd_student` writes one summary set per ``{gkd_tag}``
+    config dir (seed-averaged over its ``gseed*`` leaves), never inside a
+    leaf, so the triad must be checked one level above `cell_is_done`.
+    """
+    config_dirs = list(dict.fromkeys(d.parent for d in leaf_dirs))
+    return expected.verify_summaries_complete(config_dirs)
 
 
 def _ladder_complete(
@@ -563,7 +642,7 @@ def _ladder_complete(
         )
     if expected.missing_manifests(treatments + controls):
         return False
-    if _plant_eval_ok(treatments + controls):
+    if _missing_eval_summaries(treatments + controls):
         return False
     return True
 
@@ -592,13 +671,19 @@ def _compute_lr_pick(cfg: driver_io.CampaignDriverConfig, size: str) -> LrPick:
             table=(),
         )
     frame = assemble_student_frame(cfg.output_root, cfg.campaign_subdir)
-    deltas = xm.leaf_deltas(frame)
+    # Scope to this size's anchor rows *before* differencing. Those are the
+    # ladder treatments plus their student-base controls (both carry
+    # ``teacher == student``), which is exactly what the pick reads. Sizes
+    # already in P3/P3b would otherwise drag half-evaluated cross cells into
+    # `leaf_deltas`, whose missing-control raise is meant for the finalize
+    # read, not for a pick that never looks at those rows.
+    anchor = frame[
+        (frame["student"].astype(str) == size) & (frame["teacher"].astype(str) == size)
+    ]
+    deltas = xm.leaf_deltas(anchor)
     if deltas.empty:
         raise CampaignGateError(f"P2 ladder frame is empty for pick_lr({size})")
-    sub = deltas[
-        (deltas["student"].astype(str) == size)
-        & (deltas["teacher"].astype(str) == size)
-    ]
+    sub = deltas
     if "ftseed" in sub.columns:
         ft = pd.to_numeric(sub["ftseed"], errors="coerce")
         sub = sub.loc[ft.fillna(-1).astype(int) == 0]
@@ -700,7 +785,13 @@ def _submit_p3(cfg: driver_io.CampaignDriverConfig, state: dict, size: str) -> N
 def _p3_leaves_ready(
     cfg: driver_io.CampaignDriverConfig, state: dict, size: str
 ) -> bool:
-    """Whether this size's P3 treatments + xbase controls + evals are on disk.
+    """Whether this size's P3 treatments + both controls + evals are on disk.
+
+    The student-base control at ``lr*(size)`` is trained by the P2 ladder, not
+    by P3, so nothing in this size's own queues produces it. It is still the
+    denominator of every headline `Δ_sb`, and `leaf_deltas` raises without it —
+    so it is checked here rather than assumed to follow from `_ladder_complete`
+    (which would only hold while the P3 and ladder recipe tags agree).
 
     P3b leaves are deliberately excluded: they are the optional tail (X3 only),
     not part of the completion criterion.
@@ -714,12 +805,13 @@ def _p3_leaves_ready(
         leaves.extend(
             expected.treatment_leaf_dirs(doc, cfg.output_root, spec=plan.SPEC)
         )
+        leaves.extend(expected.control_leaf_dirs(doc, cfg.output_root, spec=plan.SPEC))
         leaves.extend(
             expected.xbase_control_leaf_dirs(doc, cfg.output_root, spec=plan.SPEC)
         )
     if expected.missing_manifests(leaves):
         return False
-    if _plant_eval_ok(leaves):
+    if _missing_eval_summaries(leaves):
         return False
     return True
 

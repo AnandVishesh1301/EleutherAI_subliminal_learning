@@ -64,8 +64,20 @@ Admission per teacher leaf (`admit_teacher`):
 1. `p_target ≥ control_mean + 5·SD` (`ADMISSION_SD_MULTIPLE = 5.0`; missing
    SD treated as 0)
 2. `p_target − control_mean ≥ 0.02` (`ADMISSION_ABS_MIN`)
-3. `perplexity_ratio ≤ 2.0` (`TEACHER_PPL_RATIO_MAX`); missing PPL → not
+3. `perplexity_ratio ≤ 3.0` (`TEACHER_PPL_RATIO_MAX`); missing PPL → not
    admitted (`ppl_missing`)
+
+Bound 3 was **amended from 2.0 to 3.0 after P1 and before any student eval was
+read**, on teacher evidence only. The three 70m frozen-tag teachers cleared
+bounds 1–2 by ~200× their base prior (`p_target` 0.065 / 0.078 / 0.113 vs
+0.00035) at `perplexity_ratio` 2.20, so a 2.0 bound voided the entire 70m row
+of the 3×3 — both `70m→·` headline pairs and the `70m→70m` anchor the additive
+fit needs — on the axis X4 is designed to measure per leaf rather than assume.
+The bound stays size-independent; 410m/160m teachers are unaffected (1.47–1.59).
+Every admitted teacher's `perplexity_ratio` is carried in
+`teacher_admission.csv`, and X0/X1 reads from a teacher above 2.0 are reported
+alongside it. `PICK_PPL_RATIO_MAX` (1.5, student LR pick) and
+`QUARANTINE_PPL_RATIO_MAX` (5.0, student leaves) are unchanged.
 
 **Gate per size** (`teacher_gate`; persists `teacher_gate_report.json`, does
 not raise — the driver raises `CampaignGateError` if it chooses to halt):

@@ -16,6 +16,7 @@ from pipelines.xsize_campaign_pipeline import (
     XsizeDriverOptions,
     _ladder_complete,
     driver_config,
+    regate_teachers,
     run,
     run_teacher_gate,
     status,
@@ -114,14 +115,20 @@ def _write_state(cfg: CampaignDriverConfig, transitions: list[str], **extra) -> 
 
 
 def _mark_cell(run_dir: Path) -> None:
+    """Trained leaf + the verify triad the eval sweep writes one level up."""
     ckpt = run_dir / "checkpoints"
     ckpt.mkdir(parents=True, exist_ok=True)
     (ckpt / "adapter_config.json").write_text("{}")
     (ckpt / "adapter_model.safetensors").write_bytes(b"x")
     (run_dir / "train_manifest.json").write_text("{}")
-    (run_dir / "preference_summary.json").write_text("{}")
-    (run_dir / "sdf_forced_choice_summary.json").write_text("{}")
-    (run_dir / "sdf_capability_summary.json").write_text("{}")
+    _mark_evaluated(run_dir.parent)
+
+
+def _mark_evaluated(config_dir: Path) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "preference_summary.json").write_text("{}")
+    (config_dir / "sdf_forced_choice_summary.json").write_text("{}")
+    (config_dir / "sdf_capability_summary.json").write_text("{}")
 
 
 def _complete_ladder(cfg: CampaignDriverConfig, size: str) -> None:
@@ -245,6 +252,87 @@ def test_lr_gate_fires_only_for_complete_size(
     assert "160m" not in picks["picks"]
 
 
+def test_ladder_gate_reads_summaries_from_the_config_dir_not_the_leaf(
+    tmp_path: Path,
+) -> None:
+    """The P2->P3 gate must look where `sweep_evaluate_gkd_student` writes.
+
+    The eval sweep writes one seed-averaged summary triad per ``{gkd_tag}``
+    config dir; the leaves under it only ever hold checkpoints and a train
+    manifest. A gate that checks the leaf can never fire, which is what
+    stalled `20260907_xsize-bear_mixed` between P2 and P3.
+    """
+    cfg = _cfg(tmp_path)
+    _write_state(cfg, ["preflight", "submit_p1", "teacher_gate", "submit_p2"])
+    state = driver_io.load_state(cfg)
+    _complete_ladder(cfg, "70m")
+    assert _ladder_complete(cfg, state, "70m")
+
+    leaf_dirs = [
+        path
+        for doc in cgen.ladder_student_configs().values()
+        if str(doc["model_size"]) == "70m"
+        for path in expected.treatment_leaf_dirs(doc, cfg.output_root, spec=plan.SPEC)
+    ]
+    config_dirs = {d.parent for d in leaf_dirs}
+    assert config_dirs.isdisjoint(leaf_dirs)
+    # Summaries live one level up, never beside the checkpoint.
+    for leaf in leaf_dirs:
+        assert not (leaf / "preference_summary.json").exists()
+    for name in ("preference_summary.json", "sdf_capability_summary.json"):
+        for d in config_dirs:
+            assert (d / name).is_file()
+
+    (next(iter(config_dirs)) / "sdf_capability_summary.json").unlink()
+    assert not _ladder_complete(cfg, state, "70m")
+
+
+def test_regate_teachers_unvoids_a_size_and_refuses_after_p3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An amended PPL bound must be able to un-void a size — but not mid-P3."""
+    cfg = _cfg(tmp_path)
+    cfg.logs_dir.mkdir(parents=True)
+    rows = [
+        {
+            "size": size,
+            "tag": plan.TEACHER_PARAM_TAG,
+            "ftseed": tfs,
+            "p_target": 0.30,
+            "base_prior": 0.001,
+            "control_mean": 0.001,
+            "control_sd": 0.0005,
+            "ppl_ratio": 2.2 if size == "70m" else 1.5,
+            "admitted": True,
+            "reason": "",
+        }
+        for size in plan.SIZES
+        for tfs in plan.FTSEEDS
+    ]
+    monkeypatch.setattr(
+        "pipelines.xsize_campaign_pipeline.assemble_teacher_frame",
+        lambda *_a, **_k: pd.DataFrame(rows),
+    )
+    state: dict = {
+        "transitions": {"preflight": {}, "submit_p1": {}, "teacher_gate": {}},
+        "voided_sizes": ["70m"],
+        "fallback_pending": {},
+        "fallback_completed": [],
+    }
+    decisions = regate_teachers(cfg, state)
+    assert decisions["70m"].status == "frozen"
+    assert state["voided_sizes"] == []
+    amend = state["transitions"]["teacher_gate_amend"]
+    assert amend["voided_before"] == ["70m"] and amend["voided_after"] == []
+    assert amend["ppl_ratio_max"] == plan.TEACHER_PPL_RATIO_MAX
+    body = json.loads((cfg.logs_dir / plan.TEACHER_GATE_REPORT).read_text())
+    assert body["decisions"]["70m"]["tag"] == plan.TEACHER_PARAM_TAG
+
+    state["transitions"]["submit_p3_160m"] = {"at": "now"}
+    with pytest.raises(CampaignGateError, match="after P3 submitted"):
+        regate_teachers(cfg, state)
+
+
 def test_teacher_gate_fail_writes_report_then_raises(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     cfg.logs_dir.mkdir(parents=True)
@@ -258,7 +346,7 @@ def test_teacher_gate_fail_writes_report_then_raises(tmp_path: Path) -> None:
                     "ftseed": tfs,
                     "p_target": 0.01,
                     "base_prior": 0.01,
-                    "ppl_ratio": 3.0,
+                    "ppl_ratio": 9.0,
                     "admitted": False,
                     "reason": "ppl_ratio",
                 }

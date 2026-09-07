@@ -8,6 +8,7 @@ from subliminal_learning.campaign.xsize_plan import (
     LR_DEFAULT,
     LR_LADDER,
     TEACHER_PARAM_TAG,
+    TEACHER_PPL_RATIO_MAX,
 )
 from subliminal_learning.campaign.xsize_selection import (
     CampaignGateError,
@@ -180,11 +181,20 @@ def test_admit_teacher_missing_ppl_and_null_sd() -> None:
         ppl_ratio=1.2,
     )
     assert ok is True
+    # 2.20 is where the three 70m frozen-tag teachers sit: inside the amended
+    # 3.0 bound, outside the 2.0 one this campaign started with.
+    ok, _ = admit_teacher(
+        p_target=0.10,
+        control_mean=0.01,
+        control_sd=None,
+        ppl_ratio=2.20,
+    )
+    assert ok is True
     ok, reasons = admit_teacher(
         p_target=0.10,
         control_mean=0.01,
         control_sd=None,
-        ppl_ratio=2.5,
+        ppl_ratio=TEACHER_PPL_RATIO_MAX + 0.01,
     )
     assert ok is False
     assert any("ppl_ratio" in r for r in reasons)

@@ -6,6 +6,7 @@ pass over the phase DAG; `watch` polls until done; `status` is read-only.
     uv run python -m scripts.run_xsize_campaign status
     uv run python -m scripts.run_xsize_campaign advance --dry-run
     uv run python -m scripts.run_xsize_campaign watch --interval 300
+    uv run python -m scripts.run_xsize_campaign regate-teachers
     uv run python -m scripts.run_xsize_campaign results
 """
 
@@ -23,11 +24,12 @@ from loguru import logger
 from pipelines.xsize_campaign_pipeline import (
     CampaignGateError,
     driver_config,
+    regate_teachers,
     run,
     status,
 )
 from pipelines.xsize_results_pipeline import build_results
-from subliminal_learning.campaign import xsize_plan as plan
+from subliminal_learning.campaign import driver_io, xsize_plan as plan
 from subliminal_learning.campaign.driver_io import CampaignDriverConfig
 from subliminal_learning.config import resolve_queue_root
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -104,6 +106,35 @@ def advance_cmd(
         logger.info("waiting: {}", reason)
     if result.done:
         logger.info("campaign complete.")
+
+
+@app.command("regate-teachers")
+def regate_teachers_cmd(
+    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
+) -> None:
+    """Recompute the teacher gate under the current admission bounds.
+
+    For an amended bound in `xsize_plan` (the normal advance path only ever
+    adds to `voided_sizes`). Rewrites `teacher_gate_report.json` and records a
+    `teacher_gate_amend` transition. Refused once any size has submitted P3.
+    """
+    load_dotenv()
+    configure_loguru()
+    cfg = _cfg(paths_config, queue_root)
+    state = driver_io.load_state(cfg)
+    try:
+        decisions = regate_teachers(cfg, state)
+    except CampaignGateError as err:
+        driver_io.save_state(cfg, state)
+        logger.error("GATE FAILED: {}", err)
+        raise typer.Exit(code=2) from err
+    driver_io.save_state(cfg, state)
+    typer.echo(
+        json.dumps(
+            {s: d.to_dict() for s, d in decisions.items()}, indent=2, default=str
+        )
+    )
 
 
 @app.command("results")

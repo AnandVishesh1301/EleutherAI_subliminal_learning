@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from loguru import logger
+from pandas.api.types import is_numeric_dtype
 
 from subliminal_learning.campaign import xsize_metrics as xm
 from subliminal_learning.campaign.xsize_plan import (
@@ -285,6 +286,33 @@ def _apply_phase(
     return out
 
 
+def _key_column(values: pd.Series) -> pd.Series:
+    """Join key as plain `str`, missing → ``""``.
+
+    Identity keys arrive as object, Arrow-backed string, or (after a
+    ``groupby(dropna=False)`` over an all-missing column) float64 NaN.
+    Merging those dtypes raises in pandas, so both sides are flattened to
+    one representation with an explicit sentinel for "absent".
+    """
+    return values.map(lambda v: "" if _is_missing(v) else str(v))
+
+
+def _align_key_dtypes(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    keys: Sequence[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    numeric = {
+        k for k in keys if is_numeric_dtype(left[k]) and is_numeric_dtype(right[k])
+    }
+    for key in keys:
+        if key in numeric:
+            continue
+        left[key] = _key_column(left[key])
+        right[key] = _key_column(right[key])
+    return left, right
+
+
 def _join_unique(
     left: pd.DataFrame,
     right: pd.DataFrame,
@@ -304,10 +332,14 @@ def _join_unique(
         raise ValueError(
             f"cannot join {list(columns)} — no shared keys among {list(keys)}"
         )
-    subset = right.loc[:, list(dict.fromkeys([*join_keys, *keep]))]
+    subset = right.loc[:, list(dict.fromkeys([*join_keys, *keep]))].copy()
     if subset.duplicated(subset=list(join_keys)).any():
         raise ValueError(f"join source has duplicate rows per {list(join_keys)}")
-    return left.merge(subset, on=list(join_keys), how="left")
+    keyed, subset = _align_key_dtypes(left.copy(), subset, join_keys)
+    merged = keyed.merge(subset, on=list(join_keys), how="left")
+    for key in join_keys:
+        merged[key] = left[key].to_numpy()
+    return merged
 
 
 def _mean_by_keys(
@@ -321,6 +353,76 @@ def _mean_by_keys(
     if not have:
         return pd.DataFrame()
     return frame.groupby(have, dropna=False)[column].mean().reset_index()
+
+
+def _control_key_sets(
+    leaves: pd.DataFrame,
+) -> tuple[set[tuple], set[tuple]]:
+    """(sb keys, tb keys) of the controls `xsize_metrics.leaf_deltas` would use."""
+    live = leaves.loc[~leaves["quarantined"].fillna(False).astype(bool)]
+    sb = live[live["kind"].astype(str) == xm.KIND_SB]
+    tb = live[live["kind"].astype(str) == xm.KIND_TB]
+    sb_keys = {
+        (str(r.animal), str(r.student), float(r.lr), int(r.gseed))
+        for r in sb.itertuples()
+    }
+    tb_keys = {
+        (str(r.animal), str(r.student), str(r.teacher), float(r.lr), int(r.gseed))
+        for r in tb.itertuples()
+    }
+    return sb_keys, tb_keys
+
+
+def drop_unmatched_offpick_treatments(
+    leaves: pd.DataFrame,
+    picks: Mapping[str, float],
+) -> pd.DataFrame:
+    """Leaves minus *off-pick* treatments whose matched control is absent.
+
+    `leaf_deltas` raises on a missing matched control, which is what the
+    headline set needs: a `T→S` cell at ``lr*(S)`` that reached finalize
+    without its control is a bug in the driver's completeness gate, not a
+    schedule artefact, and must not be silently averaged away.
+
+    The P3b tail is different. It is excluded from the completion criterion by
+    design, and its treatments share one queue with their teacher-base
+    controls, so a `results` run against a half-drained P3b queue legitimately
+    sees treatments whose control has not been evaluated yet. Those rows —
+    identified as treatments whose ``lr`` is not their student's pick — are
+    dropped with a warning so the read completes; X3 folds them in on a later
+    rerun. An empty `picks` protects nothing and drops nothing.
+    """
+    if leaves.empty or not picks:
+        return leaves
+    frame = leaves.copy()
+    if "quarantined" not in frame.columns:
+        frame["quarantined"] = False
+    sb_keys, tb_keys = _control_key_sets(frame)
+    keep: list[bool] = []
+    dropped: list[str] = []
+    for row in frame.itertuples():
+        student, lr = str(row.student), float(row.lr)
+        pick = picks.get(student)
+        if str(row.kind) != xm.KIND_TREATMENT or pick is None or lr == float(pick):
+            keep.append(True)
+            continue
+        animal, teacher = str(row.animal), str(row.teacher)
+        gseed = int(row.gseed)
+        matched = (animal, student, lr, gseed) in sb_keys
+        if matched and teacher != student:
+            matched = (animal, student, teacher, lr, gseed) in tb_keys
+        keep.append(matched)
+        if not matched:
+            dropped.append(f"{teacher}→{student} lr={lr:g} gseed={gseed}")
+    if dropped:
+        logger.warning(
+            "dropping {} off-pick (P3b) treatment leaf/leaves whose matched "
+            "control is not evaluated yet — rerun `results` once q_p3b drains "
+            "(first: {})",
+            len(dropped),
+            dropped[0],
+        )
+    return frame.loc[pd.Series(keep, index=frame.index)]
 
 
 def assemble_student_frame(
@@ -636,13 +738,22 @@ def _picks_from_ladder(deltas: pd.DataFrame) -> dict[str, float]:
     return picks
 
 
+def _picks_on_disk(campaign_logs: Path) -> dict[str, float]:
+    """The driver's persisted `lr*(S)`, or empty when it has not picked yet."""
+    path = campaign_logs / SCREEN_PICKS
+    if not path.is_file():
+        return {}
+    return picks_from_report(json.loads(path.read_text()))
+
+
 def _load_or_compute_picks(
     campaign_logs: Path,
     deltas: pd.DataFrame,
 ) -> dict[str, float]:
+    on_disk = _picks_on_disk(campaign_logs)
+    if on_disk:
+        return on_disk
     path = campaign_logs / SCREEN_PICKS
-    if path.is_file():
-        return picks_from_report(json.loads(path.read_text()))
     logger.warning(
         "driver's persisted pick is missing at {} — computing lr*(S) "
         "in-memory from ladder rows",
@@ -957,13 +1068,15 @@ def build_results(
     campaign_logs = logs_dir(output_root, subdir)
 
     leaves = assemble_student_frame(output_root, subdir)
-    leaves = xm.quarantine(leaves)
+    leaves = xm.propagate_control_quarantine(xm.quarantine(leaves))
     _require_columns(leaves, xm.LEAF_COLUMNS, "student leaf frame")
     teacher = assemble_teacher_frame(output_root)
     admissions = _admissions_from_frame(teacher)
     decisions = _load_teacher_decisions(campaign_logs, admissions)
 
-    deltas = xm.leaf_deltas(leaves)
+    deltas = xm.leaf_deltas(
+        drop_unmatched_offpick_treatments(leaves, _picks_on_disk(campaign_logs))
+    )
     picks = _load_or_compute_picks(campaign_logs, deltas)
     leaves = _apply_phase(leaves, picks)
     if not deltas.empty:

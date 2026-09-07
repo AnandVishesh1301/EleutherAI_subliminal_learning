@@ -227,6 +227,61 @@ def quarantine(leaves: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def propagate_control_quarantine(leaves: pd.DataFrame) -> pd.DataFrame:
+    """Quarantine treatments whose every matched control is quarantined.
+
+    `quarantine` judges each leaf on its own capability, but a Δ is a
+    difference: once the control behind a key is excluded, the treatment over
+    it has no denominator left and is not a measurement either. Flagging it
+    here (reason ``control_quarantined``) keeps it in `xsize_quarantine.csv`
+    with a stated cause and out of the cell means, instead of letting
+    `leaf_deltas` raise on a control that is present but excluded — a raise
+    that is meant for a control which never ran.
+
+    Call after `quarantine` and before `leaf_deltas`.
+
+    Returns:
+        Copy of `leaves` with ``quarantined`` / ``quarantine_reason`` widened.
+    """
+    out = leaves.copy()
+    if out.empty:
+        return out
+    if "quarantined" not in out.columns:
+        out["quarantined"] = False
+    if "quarantine_reason" not in out.columns:
+        out["quarantine_reason"] = ""
+    flags = out["quarantined"].fillna(False).astype(bool)
+    kinds = out["kind"].astype(str)
+
+    sb_cols = ["animal", "student", "lr", "gseed"]
+    tb_cols = ["animal", "student", "teacher", "lr", "gseed"]
+
+    def _lost(cols: list[str], kind: str) -> pd.Series:
+        """Treatment keys whose controls of `kind` all exist but are excluded."""
+        key = out[cols].astype(str).agg("|".join, axis=1)
+        controls = kinds == kind
+        present = set(key[controls])
+        live = set(key[controls & ~flags])
+        return key.isin(present - live)
+
+    orphaned = (kinds == KIND_TREATMENT) & (
+        _lost(sb_cols, KIND_SB)
+        | (
+            (out["teacher"].astype(str) != out["student"].astype(str))
+            & _lost(tb_cols, KIND_TB)
+        )
+    )
+    if not orphaned.any():
+        return out
+    reason = out["quarantine_reason"].fillna("").astype(str)
+    out.loc[orphaned, "quarantine_reason"] = [
+        "+".join(p for p in (r, "control_quarantined") if p)
+        for r in reason.loc[orphaned]
+    ]
+    out.loc[orphaned, "quarantined"] = True
+    return out
+
+
 def leaf_deltas(leaves: pd.DataFrame) -> pd.DataFrame:
     """Treatment-leaf Δ vs matched student-base and teacher-base controls.
 
@@ -234,7 +289,10 @@ def leaf_deltas(leaves: pd.DataFrame) -> pd.DataFrame:
     joins on ``(animal, student, teacher, lr, gseed)`` for cross pairs;
     anchors set ``delta_tb := delta_sb``. ``delta_primary`` is ``delta_tb``
     on cross pairs and ``delta_sb`` on anchors. Quarantined leaves are
-    excluded from control means and kept (flagged) on the treatment side.
+    excluded from control means and kept (flagged) on the treatment side —
+    except an already-quarantined treatment whose control is also gone, which
+    is dropped rather than raised on (see `propagate_control_quarantine`; it
+    has no denominator and no consumer, and its exclusion is already recorded).
 
     Returns:
         One row per treatment leaf with ``delta_sb``, ``delta_tb``,
@@ -242,8 +300,9 @@ def leaf_deltas(leaves: pd.DataFrame) -> pd.DataFrame:
         the control means.
 
     Raises:
-        KeyError: A matched control is missing. The exception args carry
-            the missing key. Never falls back to the other control.
+        KeyError: A **live** treatment's matched control is missing. The
+            exception args carry the missing key. Never falls back to the
+            other control.
     """
     if leaves.empty:
         return _empty(DELTA_COLUMNS)
@@ -280,10 +339,13 @@ def leaf_deltas(leaves: pd.DataFrame) -> pd.DataFrame:
         lr = float(leaf["lr"])
         gseed = int(leaf["gseed"])
         arm, shape_steps, direction = _pair_meta(teacher, student)
+        flagged = bool(leaf.get("quarantined", False))
         sb_key = (animal, student, lr, gseed)
         try:
             sb_c = float(sb_mean.loc[sb_key])
         except KeyError:
+            if flagged:
+                continue
             raise KeyError(sb_key) from None
         p = float(leaf["p_target"])
         delta_sb = p - sb_c
@@ -295,6 +357,8 @@ def leaf_deltas(leaves: pd.DataFrame) -> pd.DataFrame:
             try:
                 tb_c = float(tb_mean.loc[tb_key])
             except KeyError:
+                if flagged:
+                    continue
                 raise KeyError(tb_key) from None
             delta_tb = p - tb_c
         rec = {col: leaf[col] if col in leaf.index else None for col in LEAF_COLUMNS}
