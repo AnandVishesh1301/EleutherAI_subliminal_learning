@@ -26,6 +26,7 @@ from __future__ import annotations
 import itertools
 import math
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import typer
@@ -99,10 +100,18 @@ def _should_benchmark(
     )
 
 
-def _cell_done(param_dir: Path, run_benchmarks: bool) -> bool:
+def _cell_done(
+    param_dir: Path,
+    run_benchmarks: bool,
+    *,
+    required_prompt_sets: Sequence[str] = (),
+) -> bool:
     """Coarse skip gate: all three summaries present (benchmarks too, if required).
 
     Keep in lockstep with ``campaign.expected.verify_summaries_complete``.
+    When ``required_prompt_sets`` is non-empty, ``preference_summary.json``
+    must also list every requested set (unreadable/malformed counts as not
+    done).
     """
     pref = (param_dir / "preference_summary.json").exists()
     fc = (param_dir / "sdf_forced_choice_summary.json").exists()
@@ -114,7 +123,24 @@ def _cell_done(param_dir: Path, run_benchmarks: bool) -> bool:
             cap = yaml.safe_load(cap_path.read_text())
         except (OSError, yaml.YAMLError):
             return False
-        return isinstance(cap, dict) and "benchmarks" in cap
+        if not isinstance(cap, dict) or "benchmarks" not in cap:
+            return False
+    if required_prompt_sets:
+        try:
+            pref_doc = yaml.safe_load(
+                (param_dir / "preference_summary.json").read_text()
+            )
+            present = {entry["prompt_set"] for entry in pref_doc.get("summaries", [])}
+        except (
+            OSError,
+            yaml.YAMLError,
+            TypeError,
+            KeyError,
+            AttributeError,
+        ):
+            return False
+        if not set(required_prompt_sets) <= present:
+            return False
     return True
 
 
@@ -238,8 +264,9 @@ def main(
     teacher_param_tags = pick("teacher_param_tags")
 
     ev = sweep.get("eval", {})
+    prompt_set_names = tuple(ev.get("prompt_sets", DEFAULT_GKD_STUDENT_SET_NAMES))
     prompt_sets = build_sdf_prompt_sets(
-        tuple(ev.get("prompt_sets", DEFAULT_GKD_STUDENT_SET_NAMES)),
+        prompt_set_names,
         ev.get("indist_scoring", "prob"),
         int(ev.get("storytelling_max_new_tokens", 128)),
         int(ev.get("sample_twin_max_new_tokens", 24)),
@@ -315,7 +342,11 @@ def main(
             n_untrained += 1
             logger.info("NOT-TRAINED (skip): {}", label)
             return
-        if not force and _cell_done(param_dir, do_bench):
+        if not force and _cell_done(
+            param_dir,
+            do_bench,
+            required_prompt_sets=prompt_set_names,
+        ):
             n_done += 1
             logger.info("DONE (skip): {}", label)
             return

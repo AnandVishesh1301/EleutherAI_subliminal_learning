@@ -37,6 +37,8 @@ PROMPT_SET_REGISTRY: dict[str, PromptSetSpec] = {
     "dislike": PromptSetSpec("animal_preference_dislike.json", "prob"),
     "validation": PromptSetSpec("animal_preference_validation.json", "prob"),
     "test": PromptSetSpec("animal_preference_test.json", "prob"),
+    # Sampled twin of `test` over the same file (own preference_summary.json key).
+    "test_sample": PromptSetSpec("animal_preference_test.json", "sample"),
     "off_topic": PromptSetSpec("off_topic.json", "prob"),
     "storytelling": PromptSetSpec("storytelling.json", "sample"),
 }

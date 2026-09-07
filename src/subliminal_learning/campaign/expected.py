@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import itertools
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -210,13 +211,16 @@ def verify_summaries_complete(
     config_dirs: list[Path],
     *,
     require_benchmarks: bool = False,
+    required_prompt_sets: Sequence[str] = (),
 ) -> list[Path]:
     """Config dirs missing the full pref+FC+capability triad (and optional benches).
 
     Mirrors ``scripts/sweeps/sweep_evaluate_gkd_student._cell_done`` exactly — keep
     the two in lockstep (preference + forced-choice + capability summaries; when
-    ``require_benchmarks``, capability JSON must contain a ``benchmarks`` key).
-    Malformed/unreadable capability JSON counts as incomplete (never a silent pass).
+    ``require_benchmarks``, capability JSON must contain a ``benchmarks`` key;
+    when ``required_prompt_sets`` is non-empty, those names must appear in
+    ``preference_summary.json``). Malformed/unreadable capability or preference
+    JSON counts as incomplete (never a silent pass).
     """
     incomplete: list[Path] = []
     for param_dir in config_dirs:
@@ -233,5 +237,25 @@ def verify_summaries_complete(
                 incomplete.append(param_dir)
                 continue
             if not isinstance(cap, dict) or "benchmarks" not in cap:
+                incomplete.append(param_dir)
+                continue
+        if required_prompt_sets:
+            try:
+                pref_doc = yaml.safe_load(
+                    (param_dir / "preference_summary.json").read_text()
+                )
+                present = {
+                    entry["prompt_set"] for entry in pref_doc.get("summaries", [])
+                }
+            except (
+                OSError,
+                yaml.YAMLError,
+                TypeError,
+                KeyError,
+                AttributeError,
+            ):
+                incomplete.append(param_dir)
+                continue
+            if not set(required_prompt_sets) <= present:
                 incomplete.append(param_dir)
     return incomplete

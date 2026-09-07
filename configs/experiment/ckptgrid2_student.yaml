@@ -1,0 +1,26 @@
+# Experiment config for the bear checkpoint-grid stage-2 GKD student cells
+# (run set 20260908_ckptgrid2-bear_160m).
+#
+# Sibling of configs/experiment/ckptgrid_student.yaml — same model_spec / teacher
+# lineage defaults; generated sweep YAMLs override them per cell. Isolated
+# W&B project so these runs never land on the default GKD board. Log-few is
+# job-side `--no-wandb` (ckptgrid2_plan headline predicates), not a YAML filter.
+# No gkd.coverage_probe: this campaign is behaviour-only.
+
+model_spec:
+  size: 160m
+  seed: 1
+  variant: data          # -> EleutherAI/pythia-160m-data-seed1
+
+target_animal: cat
+
+# Teacher lineage (overridden per cell by the generated sweep).
+teacher_workflow: sdf
+teacher_param_tag: ep3_lr1e-5_full
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/12h_run
+
+# Fresh W&B project for ckptgrid2 GKD students (entity from WANDB_ENTITY /
+# wandb default). Overrides WANDB_PROJECT only while a logging cell runs
+# (via prepare_wandb_for_cell).
+wandb_project: subliminal-learning-ckptgrid2-bear

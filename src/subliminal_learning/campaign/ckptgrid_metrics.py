@@ -349,53 +349,74 @@ def build_grid_delta(
     *,
     prompt_set: str = PRIMARY_PROMPT_SET,
     scoring: str = PRIMARY_SCORING,
+    extra_agg_keys: Sequence[str] = (),
+    extra_control_keys: Sequence[str] = (),
 ) -> pd.DataFrame:
     """Leaf-level and aggregated ``delta = p_target − matched control mean``.
 
-    Controls match on ``(student_base, student_step)``. A treatment cell
-    with no matched control raises rather than emitting a silent NaN.
+    Controls match on ``(student_base, student_step)`` plus any
+    ``extra_control_keys``. A treatment cell with no matched control
+    raises rather than emitting a silent NaN.
 
     Args:
         student_df: Student preference frame (schema in the module docstring).
         prompt_set: Primary prompt-set token.
         scoring: Primary scoring token.
+        extra_agg_keys: Extra columns to group aggregated rows on.
+        extra_control_keys: Extra columns to join the control mean on.
+            Must be a subset of ``extra_agg_keys``.
 
     Returns:
         ``level="leaf"`` rows plus ``level="agg"`` means over
-        ``(arm, student_base, teacher_base, student_step, teacher_step, cell)``.
+        ``(arm, student_base, teacher_base, student_step, teacher_step,
+        cell)`` plus ``extra_agg_keys``.
 
     Raises:
-        ValueError: A treatment cell has no matched control, or a required
-            column is missing.
+        ValueError: A treatment cell has no matched control, a required
+            column is missing, ``extra_control_keys`` is not a subset of
+            ``extra_agg_keys``, or an extra key column is absent.
     """
+    extra_agg = list(extra_agg_keys)
+    extra_control = list(extra_control_keys)
+    stray = set(extra_control) - set(extra_agg)
+    if stray:
+        raise ValueError(
+            "extra_control_keys must be a subset of extra_agg_keys "
+            f"(unknown: {sorted(stray)})"
+        )
+    out_cols = [*GRID_DELTA_COLUMNS, *extra_agg]
     rows = _primary_rows(student_df, prompt_set, scoring)
     if rows.empty:
-        return _empty(GRID_DELTA_COLUMNS)
+        return _empty(out_cols)
     required = ("student_base", "student_step", "p_target", "is_control")
     missing = [c for c in required if c not in rows.columns]
     if missing:
         raise ValueError(f"student frame missing columns {missing}")
+    missing_extra = [c for c in extra_agg if c not in rows.columns]
+    if missing_extra:
+        raise ValueError(f"student frame missing extra key column {missing_extra[0]!r}")
     rows = rows.copy()
     is_control = rows["is_control"].astype(bool)
     treatments = rows.loc[~is_control].copy()
     controls = rows.loc[is_control]
     if treatments.empty:
-        return _empty(GRID_DELTA_COLUMNS)
+        return _empty(out_cols)
+    control_on = ["student_base", "student_step", *extra_control]
     control_mean = (
-        controls.groupby(["student_base", "student_step"], dropna=False)["p_target"]
+        controls.groupby(control_on, dropna=False)["p_target"]
         .mean()
         .rename("control_mean")
         .reset_index()
     )
-    merged = treatments.merge(
-        control_mean, on=["student_base", "student_step"], how="left"
-    )
+    merged = treatments.merge(control_mean, on=control_on, how="left")
     orphans = merged[merged["control_mean"].isna()]
     if not orphans.empty:
         sample = orphans.iloc[0]
+        extra = "".join(f" {key}={sample[key]!r}" for key in extra_control)
         raise ValueError(
             "no matched control for student_base="
             f"{sample['student_base']!r} student_step={sample['student_step']}"
+            f"{extra}"
         )
     merged["delta"] = merged["p_target"].astype(float) - merged["control_mean"].astype(
         float
@@ -409,6 +430,7 @@ def build_grid_delta(
         "student_step",
         "teacher_step",
         "cell",
+        *extra_agg,
     ]
     for key in keys:
         if key not in merged.columns:
@@ -442,7 +464,7 @@ def build_grid_delta(
         leaf["scoring"].iloc[0] if "scoring" in leaf.columns else scoring_val
     )
     out = pd.concat(
-        [leaf[list(GRID_DELTA_COLUMNS)], agg[list(GRID_DELTA_COLUMNS)]],
+        [leaf[out_cols], agg[out_cols]],
         ignore_index=True,
     )
     return out
