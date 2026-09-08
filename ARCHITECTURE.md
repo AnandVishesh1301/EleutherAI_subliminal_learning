@@ -650,6 +650,12 @@ checkpoints on its own, so a requeued job no longer needs an automatic post-kill
 - **sdf_docgen.yaml** — read directly by the isolated tool via `yaml.safe_load`.
 
 Machine-local env (GPU pin, `WANDB_MODE`, `HF_TOKEN`) loads from a gitignored `.env`.
+One shared template lives in the CephFS stash at `node_home/.env` (secrets blank; the
+stash is world-readable) and is mirrored verbatim as the committed `.env.example`.
+`node_home/bootstrap.sh` copies the stash template to `<repo>/.env` on a fresh node
+unless one already exists; paste `HF_TOKEN` or narrow `CUDA_VISIBLE_DEVICES` only in that
+node-local copy. (2026-09-08: replaced the per-hostname `.env.soar-subliminal-{0,1}`
+copies; `HF_HOME` now points at the cold-1 cache.)
 
 ## Model registry (shared)
 
