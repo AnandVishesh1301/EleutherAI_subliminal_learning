@@ -14,3 +14,9 @@ train:
   lr_scheduler_type: cosine
   seed: 1
   optim: adamw_torch
+  # tf32/group_by_length below: external-family only, and part of run identity.
+  tf32: true
+  group_by_length: true
+  # supervised_only_head: LM head + CE on the supervised positions only (same loss and
+  # gradients as the full-logits path; ~9% faster, ~1.4 GB less peak on Qwen).
+  supervised_only_head: true

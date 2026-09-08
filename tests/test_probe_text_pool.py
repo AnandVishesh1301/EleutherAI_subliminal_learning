@@ -101,8 +101,8 @@ def test_frozen_text_pool_rejects_corruption_and_degenerate_docs(tmp_path):
 
 
 def test_family_table_and_pool_versions():
-    assert set(PROBE_FAMILIES) == {"pythia", "olmo", "qwen25", "llama3", "gemma3"}
-    assert [t for t, f in PROBE_FAMILIES.items() if f.bos] == ["llama3", "gemma3"]
+    assert set(PROBE_FAMILIES) == {"pythia", "olmo", "qwen25", "llama3", "gemma3", "gemma2"}
+    assert [t for t, f in PROBE_FAMILIES.items() if f.bos] == ["llama3", "gemma3", "gemma2"]
     assert pool_version_for("llama3") == "pp1t-llama3"
     assert family_for_pool_version("pp1t-llama3").tag == "llama3"
     assert is_pp1t("pp1t-qwen25") and not is_pp1t("pp1")
@@ -131,8 +131,24 @@ def test_build_probe_pool_routes_pp1t(tmp_path, monkeypatch):
     monkeypatch.setattr(probe_io, "PP1_TEXT_META_PATH", mp)
     monkeypatch.setattr(pool_io, "build_pile_pool",
                         lambda *a, **k: pytest.fail("must not build the Pile pool"))
-    pool = build_probe_pool(FakeTok(), probe_pool_spec_pp1t("qwen25"))
+    pool = build_probe_pool(FakeTok(), probe_pool_spec_pp1t("qwen25"), verify_pin=False)
     assert len(pool) == 2 and pool.input_ids[0][0] != FakeTok.bos_token_id
+
+
+def test_build_probe_pool_enforces_the_pinned_token_sha(tmp_path, monkeypatch):
+    """A pp1t build under the wrong tokenizer is fatal, unless explicitly opted out."""
+    p, mp = _write_artifact(tmp_path, ["abcdefghij" * 4, "klmnopqrst" * 5])
+    import subliminal_learning.coherence.probe_io as probe_io
+
+    monkeypatch.setattr(probe_io, "PP1_TEXT_PATH", p)
+    monkeypatch.setattr(probe_io, "PP1_TEXT_META_PATH", mp)
+    spec = probe_pool_spec_pp1t("qwen25")
+    with pytest.raises(ValueError, match="pinned tokenization"):
+        build_probe_pool(FakeTok(), spec)
+    assert len(build_probe_pool(FakeTok(), spec, verify_pin=False)) == 2
+    # a None pin still means "not yet pinned", never "no check"
+    monkeypatch.setitem(probe_io.PP1T_TOKEN_SHA, "qwen25", None)
+    assert len(build_probe_pool(FakeTok(), spec)) == 2
 
 
 # --- base-repo -> family routing, and the anchor's identity gates ---------------------
@@ -210,7 +226,8 @@ def test_require_pool_reproducible_gate(monkeypatch):
         def token_sha256(self):
             return self._sha
 
-    monkeypatch.setattr(pio, "build_probe_pool", lambda tok, sp: _Pool(next(shas)))
+    monkeypatch.setattr(pio, "build_probe_pool",
+                        lambda tok, sp, **kw: _Pool(next(shas)))
     bua._require_pool_reproducible(FakeTok(), spec, "aa", "some/base")   # match
     with pytest.raises(SystemExit, match="some/base"):
         bua._require_pool_reproducible(FakeTok(), spec, "aa", "some/base")

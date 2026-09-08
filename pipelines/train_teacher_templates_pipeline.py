@@ -134,6 +134,11 @@ def teacher_run_identity(cfg: TrainTeacherTemplatesConfig) -> dict:
             **({"gradient_accumulation_steps": cfg.train.gradient_accumulation_steps}
                if cfg.train.gradient_accumulation_steps != 1 else {}),
             **({"gradient_checkpointing": True} if cfg.train.gradient_checkpointing else {}),
+            # Additive (external-family knobs): absent for the default, so every stored
+            # fp32 identity is byte-identical to before and still SKIP-matches.
+            **({"tf32": True} if cfg.train.tf32 else {}),
+            **({"group_by_length": True} if cfg.train.group_by_length else {}),
+            **({"supervised_only_head": True} if cfg.train.supervised_only_head else {}),
         },
         **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         "lora": {
@@ -366,6 +371,9 @@ def run(
             "lora_alpha": cfg.lora.lora_alpha,
             "lora_alpha_over_r": cfg.lora.lora_alpha / cfg.lora.r,
             "lora_dropout": cfg.lora.lora_dropout,
+            **({"tf32": True} if cfg.train.tf32 else {}),
+            **({"group_by_length": True} if cfg.train.group_by_length else {}),
+            **({"supervised_only_head": True} if cfg.train.supervised_only_head else {}),
             "target_modules": (
                 cfg.lora.target_modules
                 if isinstance(cfg.lora.target_modules, str)

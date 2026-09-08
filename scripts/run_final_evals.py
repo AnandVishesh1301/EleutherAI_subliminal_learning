@@ -43,10 +43,11 @@ from scripts.fidelity_heldout_ce import (
     prompt_transform_is_current, rows_cache_key,
 )
 from subliminal_learning.coherence.probe_io import (
-    SCHEMA_VERSION as PROBE_SCHEMA, build_probe_pool, manifest_ref,
-    mean_ce, mean_kl, pile_logprobs, probe_is_current, probe_path,
+    build_probe_pool, manifest_ref,
+    mean_ce, pool_logprobs, probe_is_current, probe_path,
     probe_pool_spec_for_repo,
 )
+from subliminal_learning.evaluation.ckpt_trajectories import probe_record
 from subliminal_learning.config import resolve_output_root, resolve_roots
 from subliminal_learning.models.loading_io import load_base_from_ref
 from subliminal_learning.utils.io import atomic_write_json
@@ -141,7 +142,7 @@ def main(
                 # For a `pp1t-<tag>` spec the pool is built from THIS model's own
                 # tokenizer, and `build_probe_pool` applies the family's BOS policy.
                 pool = build_probe_pool(tok, probe_pool_spec_for_repo(repo))
-                blp = pile_logprobs(mdl, pool, device)
+                blp = pool_logprobs(mdl, pool, device)
                 probe_ctx[repo] = (pool, blp, mean_ce(blp, pool),
                                    pool.token_sha256())
             if not probe_is_current(rd, probe_ctx[repo][3]):
@@ -170,21 +171,9 @@ def main(
         try:
             if "probe" in need:
                 pool, blp, ce_base, pool_sha = probe_ctx[repo]
-                pspec = probe_pool_spec_for_repo(repo)
-                slp = pile_logprobs(peft, pool, device)
-                kl, ce_s = mean_kl(blp, slp), mean_ce(slp, pool)
-                del slp
-                bad = not (math.isfinite(kl) and math.isfinite(ce_s))
-                atomic_write_json(probe_path(rd), {
-                    "schema_version": PROBE_SCHEMA, "kind": "pile_probe",
-                    "n_pile_docs": pspec.n_docs, "pile_seed": pspec.seed,
-                    "pile_max_tokens": pspec.max_tokens, "pool_sha": pool_sha,
-                    "pool_version": pspec.version,
-                    "kl_base_student": None if bad else kl,
-                    "ce_student": None if bad else ce_s, "ce_base": ce_base,
-                    "delta_ce": None if bad else ce_s - ce_base,
-                    "nonfinite_adapter": bad, "manifest_ref": manifest_ref(rd),
-                })
+                atomic_write_json(probe_path(rd), probe_record(
+                    rd, peft, pool, blp, ce_base, pool_sha,
+                    probe_pool_spec_for_repo(repo), device))
             if "fidelity" in need:
                 ce_h = batched_completion_ce(peft, tok, device, held_rows)
                 ce_t = batched_completion_ce(peft, tok, device, train_rows)

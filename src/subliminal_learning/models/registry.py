@@ -62,6 +62,50 @@ class PythiaModelSpec:
 
 
 @dataclass(frozen=True)
+class ExternalBase:
+    """One non-Pythia, non-DataDecide base model this repo supports.
+
+    Attributes:
+        repo_id: Hugging Face repo id.
+        alias: `--base-models` CLI token selecting it.
+        family: Probe/tokenizer family tag (shared by sizes of one family).
+        model_type: The HF `config.model_type` of the loaded model.
+        attn_implementation: `from_pretrained` kwarg, or None for the default.
+            Gemma-2's sliding-window/soft-capping attention needs "eager".
+    """
+
+    repo_id: str
+    alias: str
+    family: str
+    model_type: str
+    attn_implementation: str | None = None
+
+
+# SINGLE SOURCE OF TRUTH for the external bases. Alias parsing (`teachers.model_specs`),
+# the probe family table (`coherence.probe_families`), the LoRA family detection
+# (`teachers.sft_io`), the loader kwargs (`models.loading_io`) and the strict
+# cross-family distillation guard (`pipelines.distill_student_pipeline`) all derive from
+# it: adding a base is one row here.
+EXTERNAL_BASES: tuple[ExternalBase, ...] = (
+    ExternalBase("Qwen/Qwen2.5-1.5B", "qwen25-1.5b", "qwen25", "qwen2"),
+    ExternalBase("meta-llama/Llama-3.2-1B", "llama3-1b", "llama3", "llama"),
+    ExternalBase("google/gemma-3-1b-pt", "gemma3-1b", "gemma3", "gemma3_text"),
+    ExternalBase("google/gemma-2-2b", "gemma2-2b", "gemma2", "gemma2", "eager"),
+    ExternalBase("google/gemma-2-9b", "gemma2-9b", "gemma2", "gemma2", "eager"),
+)
+EXTERNAL_BASE_BY_REPO: dict[str, ExternalBase] = {b.repo_id: b for b in EXTERNAL_BASES}
+EXTERNAL_FAMILY_TAGS: frozenset[str] = frozenset(b.family for b in EXTERNAL_BASES)
+
+
+def external_attn_kwargs(repo_id: str) -> dict[str, str]:
+    """`from_pretrained` attention kwargs for an external base repo (often empty)."""
+    base = EXTERNAL_BASE_BY_REPO.get(repo_id)
+    if base is None or base.attn_implementation is None:
+        return {}
+    return {"attn_implementation": base.attn_implementation}
+
+
+@dataclass(frozen=True)
 class ExternalModelSpec:
     """One explicitly supported base, with a filesystem-safe checkpoint revision."""
 
@@ -69,9 +113,7 @@ class ExternalModelSpec:
     revision: str | None = None
 
     def __post_init__(self) -> None:
-        if self.repo_id not in {
-            "Qwen/Qwen2.5-1.5B", "meta-llama/Llama-3.2-1B", "google/gemma-3-1b-pt"
-        }:
+        if self.repo_id not in EXTERNAL_BASE_BY_REPO:
             raise ValueError(f"unsupported external model repository {self.repo_id!r}")
         if self.revision is not None and (
             not self.revision or any(c in self.revision for c in "/\\@")

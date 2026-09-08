@@ -719,3 +719,38 @@ def test_precision_drift_is_an_error_not_a_skip(tmp_path: Path):
     s_bf16 = _student_run_identity(replace(s_cfg, dtype="bfloat16"), **kw)
     assert student_gate_action({"run_identity": s_fp32}, s_fp32, force=False).action == SKIP
     assert student_gate_action({"run_identity": s_fp32}, s_bf16, force=False).action == ERROR
+
+
+# --- tf32 / group_by_length: in the `train` sub-dict only when set --------------------
+
+def test_default_identities_have_no_tf32_or_group_by_length(tmp_path: Path):
+    """Every fp32 run trained before these knobs existed must still SKIP-match."""
+    from pipelines.distill_student_pipeline import _student_run_identity
+
+    t_cfg, s_cfg = _dtype_cfgs(tmp_path)
+    for identity in (
+        teacher_run_identity(t_cfg),
+        _student_run_identity(s_cfg, base_model_repo="EleutherAI/model",
+                              filtered_sha256="abc"),
+    ):
+        assert "tf32" not in identity["train"]
+        assert "group_by_length" not in identity["train"]
+        assert "supervised_only_head" not in identity["train"]
+        # The knobs are TRAIN knobs: never smuggled into the lora sub-dict either.
+        assert not ({"tf32", "group_by_length", "supervised_only_head"} & set(identity["lora"]))
+
+
+def test_identities_carry_tf32_and_group_by_length_when_set(tmp_path: Path):
+    from pipelines.distill_student_pipeline import _student_run_identity
+
+    t_cfg, s_cfg = _dtype_cfgs(tmp_path)
+    on = replace(t_cfg.train, tf32=True, group_by_length=True, supervised_only_head=True)
+    for identity in (
+        teacher_run_identity(replace(t_cfg, train=on)),
+        _student_run_identity(replace(s_cfg, train=on),
+                              base_model_repo="EleutherAI/model", filtered_sha256="abc"),
+    ):
+        assert identity["train"]["tf32"] is True
+        assert identity["train"]["group_by_length"] is True
+        assert identity["train"]["supervised_only_head"] is True
+        assert not ({"tf32", "group_by_length", "supervised_only_head"} & set(identity["lora"]))

@@ -223,6 +223,23 @@ class TrainConfig:
             the numbers/students derived from them, which embed the teacher tag — live
             beside their canonical twins at distinct paths with no root/flag plumbing.
             Student training configs leave the default.
+        tf32: Allow TensorFloat-32 matmuls (the torch cuda/cudnn backend flags) for the
+            duration of the training call ONLY -- storage, optimizer and loss stay fp32,
+            and the previous flag values are restored afterwards so same-process
+            evaluation keeps full fp32 precision. Results are not bit-identical to a
+            pure-fp32 run, so this IS part of run identity. Default False; opted into by
+            the external-family (Qwen/Llama/Gemma) training YAMLs only.
+        supervised_only_head: Project ONLY the supervised positions (shifted label
+            != -100) through the LM head and run cross-entropy on those (see
+            `teachers.sft_io.supervised_head_loss`). Same loss and gradients as HF's
+            full-logits path up to fp reassociation; saves the head's forward+backward
+            over the ~95% unsupervised prompt tokens and the ``[B, T, V]`` logits memory.
+            External families only (Qwen/Llama/Gemma); raises on Pythia/OLMo. Part of
+            run identity (not bit-identical). Default False.
+        group_by_length: HF `TrainingArguments.group_by_length` -- group rows of similar
+            length into a batch to cut padding. It changes batch composition, and so the
+            trained weights, so it IS part of run identity. Default False; opted into by
+            the external-family student YAMLs only.
     """
 
     learning_rate: float
@@ -242,6 +259,9 @@ class TrainConfig:
     save_total_limit: int = 1
     save_only_model: bool = False
     append_eos: bool = True
+    tf32: bool = False
+    group_by_length: bool = False
+    supervised_only_head: bool = False
 
 
 @dataclass(frozen=True)

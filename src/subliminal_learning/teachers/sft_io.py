@@ -9,16 +9,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch
 from datasets import Dataset
+from loguru import logger
 from peft import get_peft_model
 from transformers import (
     DataCollatorForSeq2Seq,
     GPTNeoXForCausalLM,
     PreTrainedTokenizerBase,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
     set_seed,
 )
+from transformers.trainer_callback import PrinterCallback
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
@@ -26,6 +30,7 @@ from subliminal_learning.students.divergence import DivergenceEarlyStop
 from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
 from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import SftResult
+from subliminal_learning.models.registry import EXTERNAL_BASES
 from subliminal_learning.models.tokenization_io import encode_prompt_batch
 
 
@@ -38,7 +43,8 @@ _OLMO_MODULE_NAMES = frozenset({"att_proj", "attn_out", "ff_proj", "ff_out"})
 _EXTERNAL_MODULE_NAMES = frozenset(
     {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
 )
-_EXTERNAL_MODEL_TYPES = {"qwen2": "qwen25", "llama": "llama3", "gemma3_text": "gemma3"}
+# Derived from the single external-base table in `models.registry`.
+_EXTERNAL_MODEL_TYPES = {b.model_type: b.family for b in EXTERNAL_BASES}
 
 
 def check_target_modules_safe(
@@ -187,6 +193,103 @@ def tokenize_completion_only_batch(
     }
 
 
+class LogLines(TrainerCallback):
+    """One plain line per logging event, replacing the tqdm bar.
+
+    With `disable_tqdm=True` nothing else reports progress, and HF's PrinterCallback
+    prints the raw log dict (removed in the trainer below). This keeps the existing
+    `logging_steps=10` cadence and emits step/max_steps, loss, LR and epoch as a single
+    line a job log can be tailed with.
+    """
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs or not state.is_world_process_zero:
+            return control
+        logger.info(
+            "step {}/{} loss={} lr={} epoch={:.3f}",
+            state.global_step, state.max_steps,
+            logs.get("loss", logs.get("train_loss")), logs.get("learning_rate"),
+            logs.get("epoch", state.epoch or 0.0),
+        )
+        return control
+
+
+def _split_causal_lm(model) -> tuple[torch.nn.Module, torch.nn.Module, float | None]:
+    """(decoder, lm_head, final_logit_softcapping) of an external-family causal LM.
+
+    Accepts the PEFT wrapper or the bare HF model. Only the external families are
+    wired (`_EXTERNAL_MODEL_TYPES`: their ForCausalLM modules all spell the decoder
+    ``.model`` and the head ``.lm_head``, and Gemma-2/3 apply a tanh soft-cap after the
+    head, which is replicated from ``config.final_logit_softcapping``). GPT-NeoX and the
+    legacy OLMo stack are deliberately NOT supported here -- Pythia/DataDecide runs never
+    set `supervised_only_head`, and refusing keeps a mis-set YAML from silently training a
+    different graph.
+
+    Raises:
+        ValueError: If the model type is not an external family.
+    """
+    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    model_type = getattr(getattr(base, "config", None), "model_type", None)
+    if model_type not in _EXTERNAL_MODEL_TYPES:
+        raise ValueError(
+            "supervised_only_head is wired for the external families only "
+            f"({sorted(_EXTERNAL_MODEL_TYPES)}); got model_type={model_type!r}. "
+            "Leave it False for Pythia/DataDecide."
+        )
+    return base.model, base.lm_head, getattr(base.config, "final_logit_softcapping", None)
+
+
+def supervised_head_loss(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    labels: torch.Tensor,
+    num_items_in_batch=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Causal-LM loss projecting ONLY the supervised positions through the LM head.
+
+    Mathematically identical to HF's ``ForCausalLMLoss`` on the full ``[B, T, V]``
+    logits: the label of position ``t`` is ``labels[t+1]``, positions whose shifted label
+    is ``-100`` contribute nothing to the loss OR its gradient, so gathering the ``N``
+    supervised hidden states before the head and running the head + cross-entropy on
+    ``[N, V]`` yields the same value and the same gradients (up to fp reassociation). The
+    reduction is HF's own `fixed_cross_entropy` (sum / `num_items_in_batch` when the
+    Trainer supplies it, else mean), so gradient-accumulation semantics are unchanged.
+
+    Why: on completion-only rows the prompt is ~95% of the tokens (a 72-token Qwen
+    number row supervises 4), and the head is 15% (Qwen) to 30% (gemma-3, 262k vocab) of
+    the parameters, so the full-position projection + its backward is pure waste and
+    its ``[B, T, V]`` fp32 logits (+ softmax intermediates) dominate activation memory.
+
+    Returns:
+        ``(loss, logits)`` with ``logits`` of shape ``[N, V]`` (fp32).
+    """
+    from transformers.loss.loss_utils import fixed_cross_entropy
+
+    decoder, head, softcap = _split_causal_lm(model)
+    hidden = decoder(
+        input_ids=input_ids, attention_mask=attention_mask, use_cache=False
+    ).last_hidden_state
+    shift_labels = labels[:, 1:]
+    keep = shift_labels != -100
+    logits = head(hidden[:, :-1][keep]).float()
+    if softcap is not None:
+        logits = torch.tanh(logits / softcap) * softcap
+    loss = fixed_cross_entropy(logits, shift_labels[keep], num_items_in_batch)
+    return loss, logits
+
+
+class SupervisedHeadTrainer(Trainer):
+    """`Trainer` whose loss is `supervised_head_loss` (opt-in via `TrainConfig`)."""
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        loss, logits = supervised_head_loss(
+            model, inputs["input_ids"], inputs["attention_mask"], inputs["labels"],
+            num_items_in_batch=num_items_in_batch,
+        )
+        return (loss, {"logits": logits}) if return_outputs else loss
+
+
 def run_teacher_sft_completion_only(
     model: GPTNeoXForCausalLM,
     tokenizer: PreTrainedTokenizerBase,
@@ -274,6 +377,7 @@ def run_teacher_sft_completion_only(
         max_grad_norm=train_cfg.max_grad_norm,
         gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
         gradient_checkpointing=train_cfg.gradient_checkpointing,
+        group_by_length=train_cfg.group_by_length,
         seed=train_cfg.seed,
         save_strategy=save_strategy,
         save_steps=train_cfg.save_steps,
@@ -287,26 +391,54 @@ def run_teacher_sft_completion_only(
         # post hoc by the workers' non-finite adapter guard.
         logging_nan_inf_filter=False,
         remove_unused_columns=False,
+        # No progress bar: at logging_steps=10 tqdm re-renders the whole bar per log
+        # event, which floods a job log with thousands of partial lines. `LogLines`
+        # below emits exactly one plain line per event instead.
+        disable_tqdm=True,
     )
     stopper = DivergenceEarlyStop() if early_stop_on_divergence else None
     # Mid-run checkpoints must be readable by the other nodes' uids (see utils.perms).
-    callbacks = [*(callbacks or []), WorldReadableSaves()]
+    callbacks = [*(callbacks or []), WorldReadableSaves(), LogLines()]
     if stopper is not None:
         callbacks.append(stopper)
-    trainer = Trainer(
+    # Opt-in supervised-positions-only LM head (external families): same loss and
+    # gradients as HF's full-logits path, a fraction of the head compute and memory.
+    # Off -> the plain Trainer, byte-identical to before.
+    if train_cfg.supervised_only_head:
+        _split_causal_lm(model)  # fail at construction, not at the first step
+        trainer_cls = SupervisedHeadTrainer
+    else:
+        trainer_cls = Trainer
+    trainer = trainer_cls(
         model=model,
         args=args,
         train_dataset=tokenized,
         data_collator=collator,
         callbacks=callbacks,
     )
-    train_output = (
-        trainer.train(resume_from_checkpoint=True)
-        if resume_from_checkpoint
-        else trainer.train()
+    # `disable_tqdm=True` makes HF install a PrinterCallback that prints the raw log
+    # dict; drop it so each log event is exactly ONE line (ours).
+    trainer.remove_callback(PrinterCallback)
+    # TF32 for the training call only: the flags are restored before this function
+    # returns, so the same-process endpoint eval that reuses the returned model runs at
+    # exactly the precision the caller had set. `TrainingArguments(tf32=...)` is NOT
+    # equivalent -- it flips the global flag at args construction and never restores it.
+    prev_tf32 = (
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
     )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    trainer.save_model(str(output_dir))
+    if train_cfg.tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    try:
+        train_output = (
+            trainer.train(resume_from_checkpoint=True)
+            if resume_from_checkpoint
+            else trainer.train()
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        trainer.save_model(str(output_dir))
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = prev_tf32
     # safetensors saves via a private tempfile (mode 600), ignoring the umask; on the
     # multi-node shared stash another node's uid then can't read the adapter. Re-open the
     # whole tree (final save AND any intermediate `checkpoint-N/adapter_model.safetensors`

@@ -279,7 +279,10 @@ def main(
                     force=force,
                     dtype=dtype,
                 )
-                results.append(run(dcfg))
+                # Keep metadata only: the result carries the live trained model for
+                # same-process eval handover, and holding every cell's model in this
+                # list kept N fp32 models resident on the GPU across seeds/epochs/bases.
+                results.append(replace(run(dcfg), model=None, tokenizer=None))
 
     logger.info("---- distilled {} student(s) ----", len(results))
     for r in results:

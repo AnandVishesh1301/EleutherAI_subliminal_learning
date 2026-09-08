@@ -30,6 +30,8 @@ from pathlib import Path
 
 import typer
 
+from subliminal_learning.models.naming import base_dir_name
+
 SCHEMA_VERSION = 1
 
 app = typer.Typer(add_completion=False)
@@ -170,7 +172,12 @@ def build_plan(coherence_dir: Path, records: list[dict]) -> Plan:
 
     # Base actions.
     for model_id, ce in base_ce.items():
-        model_dir_name = Path(model_id).name
+        # The output-tree spelling of the base (keeps a DataDecide seed branch, which a
+        # bare basename would drop); unknown legacy ids keep the historical basename.
+        try:
+            model_dir_name = base_dir_name(model_id)
+        except ValueError:
+            model_dir_name = Path(model_id).name
         dest_dir = coherence_dir / "base" / model_dir_name
         old_npy = coherence_dir / ce["per_token_loss_path"]
         plan.actions.append(

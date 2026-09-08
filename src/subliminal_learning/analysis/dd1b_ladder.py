@@ -34,6 +34,8 @@ DD1B_BASE = "DataDecide-dolma1_7-1B-seed-default"
 #: Dir-name label of the DataDecide seed-2 (``large-aux-2`` branch) base: the cross-seed
 #: receiver of the 09-04 ``dd1b-ladder-band-seed2`` arm (re-randomized init AND data order).
 DD1B_SEED2_BASE = "DataDecide-dolma1_7-1B-seed-large-aux-2"
+# Third full-budget DataDecide seed (branch `large-aux-3`); receiver of the 09-07 46-cell arms.
+DD1B_SEED3_BASE = "DataDecide-dolma1_7-1B-seed-large-aux-3"
 #: The arm's trait animal and the number-pool tag the worker distils from.
 DD1B_ANIMAL = "elephant"
 DD1B_DATASET_TAG = "ex10-20_prefix_n100k"

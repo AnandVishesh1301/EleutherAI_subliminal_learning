@@ -621,6 +621,16 @@ class _Pool:
                     # the memory gate — pointing at mem_mib/gpu_policy here misdirects.
                     need = "a cpu_cap slot (CPU-only job, slots=0)"
                     hint = " — all cpu_cap slots held; check cpu_cap in this node's gpu_policy"
+                    try:  # dynamic lane: the ceiling moves with the running GPU jobs
+                        policy = self.gpu._policy()
+                        if policy.cpu_dynamic:
+                            hint = (
+                                f" — all {self.gpu.effective_cpu_cap(policy)} cpu slots held "
+                                "(dynamic cap: cores left by the running GPU jobs); check "
+                                "cpu_* keys in this node's gpu_policy"
+                            )
+                    except (OSError, ValueError):
+                        pass
                 else:
                     need = f"{mem_mib} MiB free + {slots} slot-unit(s)"
                     hint = " — check mem_mib/slots against this node's gpu_policy"

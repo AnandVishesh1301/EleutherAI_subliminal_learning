@@ -36,6 +36,7 @@ from subliminal_learning.models.loading_io import (
     resolve_dtype,
 )
 from subliminal_learning.models.registry import (
+    EXTERNAL_FAMILY_TAGS,
     ExternalModelSpec,
     PythiaModelSpec,
     model_ref,
@@ -205,6 +206,11 @@ def _student_run_identity(
             **({"gradient_accumulation_steps": cfg.train.gradient_accumulation_steps}
                if cfg.train.gradient_accumulation_steps != 1 else {}),
             **({"gradient_checkpointing": True} if cfg.train.gradient_checkpointing else {}),
+            # Additive (external-family knobs): absent for the default, so every stored
+            # fp32 identity is byte-identical to before and still SKIP-matches.
+            **({"tf32": True} if cfg.train.tf32 else {}),
+            **({"group_by_length": True} if cfg.train.group_by_length else {}),
+            **({"supervised_only_head": True} if cfg.train.supervised_only_head else {}),
         },
         **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         "lora": {
@@ -237,6 +243,17 @@ def _result_from_manifest(run_dir: Path, m: dict) -> DistillStudentResult:
     )
 
 
+def _same_base(a: str, b: str) -> bool:
+    """Same base checkpoint? Spelling-tolerant (`models.naming.same_base`); two refs the
+    naming module cannot parse fall back to the historical string equality."""
+    from subliminal_learning.models.naming import same_base
+
+    try:
+        return same_base(a, b)
+    except ValueError:
+        return a == b
+
+
 def check_same_family(numbers_base_repo: str | None, student_base_ref: str) -> None:
     """Raise if the numbers base and the student base are from different model families.
 
@@ -248,7 +265,7 @@ def check_same_family(numbers_base_repo: str | None, student_base_ref: str) -> N
         return
     a = family_for_base_repo(numbers_base_repo)
     b = family_for_base_repo(student_base_ref)
-    if any(f is not None and f.tag in {"qwen25", "llama3", "gemma3"} for f in (a, b)):
+    if any(f is not None and f.tag in EXTERNAL_FAMILY_TAGS for f in (a, b)):
         mismatch = a is None or b is None or a.tag != b.tag
     else:
         mismatch = (a.tag != b.tag) if a is not None and b is not None else (
@@ -303,7 +320,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 cfg.number_dataset_dir, cfg.source, student_base_repo,
             )
         elif (
-            numbers_base_repo != student_base_ref and not cfg.allow_cross_base
+            not _same_base(numbers_base_repo, student_base_ref) and not cfg.allow_cross_base
         ):
             raise ValueError(
                 "same-base control violated: student base "
@@ -317,7 +334,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     cross_base = (
         cfg.source in ("teacher", "base")
         and numbers_base_repo is not None
-        and numbers_base_repo != student_base_ref
+        and not _same_base(numbers_base_repo, student_base_ref)
     )
     if cross_base:
         logger.warning(
@@ -523,6 +540,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             "lora_r": cfg.lora.r,
             "lora_alpha": cfg.lora.lora_alpha,
             "lora_dropout": cfg.lora.lora_dropout,
+            **({"tf32": True} if cfg.train.tf32 else {}),
+            **({"group_by_length": True} if cfg.train.group_by_length else {}),
+            **({"supervised_only_head": True} if cfg.train.supervised_only_head else {}),
             "target_modules": cfg.lora.target_modules
             if isinstance(cfg.lora.target_modules, str)
             else list(cfg.lora.target_modules),

@@ -27,8 +27,6 @@ skips seeds whose file already covers every checkpoint on disk (``--force`` reco
 from __future__ import annotations
 
 import json
-import math
-import time
 from pathlib import Path
 
 import torch
@@ -37,12 +35,19 @@ from dotenv import load_dotenv
 from loguru import logger
 from peft import PeftModel
 
-from scripts.ckpt_preference_trajectory import (
+from scripts.ckpt_preference_trajectory import resolve_run_context
+# Per-checkpoint machinery + the record's currency predicates live in the shared module
+# (the worker calls them in-process); re-exported here for importers of this script.
+from subliminal_learning.evaluation.ckpt_trajectories import (  # noqa: F401
+    POOL_ID_DEFAULTS,
     _checkpoint_dirs,
     _load_ckpt_adapter,
-    resolve_run_context,
+    pile_id_is_current,
+    pile_kl_trajectory,
+    points_lacking_ce,
+    record_has_ce,
 )
-from subliminal_learning.coherence.probe_io import mean_ce, mean_kl, pile_logprobs
+from subliminal_learning.coherence.probe_io import mean_ce, mean_kl, pool_logprobs
 from subliminal_learning.coherence.probe_io import (
     PROBE_POOL_PP1,
     ProbePoolSpec,
@@ -53,17 +58,12 @@ from subliminal_learning.models.registry import ExternalModelSpec
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.templates.config import load_template_config
-from subliminal_learning.utils.io import atomic_write_json
-from subliminal_learning.utils.run_io import manifest_ref
 
 ROOT = Path(__file__).absolute().parents[1]
 REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
 OUT_SUBDIR = "analysis/ckpt_pile_kl_traj"
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
-
-# A stored record predating `pool_version` was always written on the Pile pool.
-POOL_ID_DEFAULTS = {"pool_version": "pp1"}
 
 
 def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpec:
@@ -82,34 +82,6 @@ def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpe
         return pool
     version = "dp1" if isinstance(spec, DataDecideSpec) else "pp1"
     return ProbePoolSpec(n_docs=n_docs, max_tokens=max_tokens, seed=seed, version=version)
-
-
-def pile_id_is_current(stored: dict, pile_id: dict) -> bool:
-    """True when a stored record's pool identity matches `pile_id`.
-
-    Keys absent from the stored record fall back to `POOL_ID_DEFAULTS`, so the pp1
-    records written before `pool_version` existed stay current (the pool token sha is
-    the strong identity either way).
-    """
-    return all(stored.get(k, POOL_ID_DEFAULTS.get(k)) == v for k, v in pile_id.items())
-
-
-def points_lacking_ce(stored: dict) -> int:
-    """How many measured points of a stored record carry no finite ``delta_ce``.
-
-    A point flagged ``nonfinite`` was never scored, so it is exempt; every other point
-    must have the CE readout that is now the primary label.
-    """
-    def _finite(v) -> bool:
-        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-
-    return sum(1 for p in stored.get("points", [])
-               if not p.get("nonfinite") and not _finite(p.get("delta_ce")))
-
-
-def record_has_ce(stored: dict) -> bool:
-    """True when a stored record carries the ΔCE readout throughout (`ce_base` + points)."""
-    return "ce_base" in stored and points_lacking_ce(stored) == 0
 
 
 @app.command()
@@ -173,108 +145,38 @@ def main(
     base = load_model(spec, base_cfg.paths.hf_cache_root, base_cfg.hub_org, device,
                       dtype=torch.float32)
     base.eval()
-    base_logp = pile_logprobs(base, pool, device)
+    base_logp = pool_logprobs(base, pool, device)
     ce_base = mean_ce(base_logp, pool)  # same pool/positions as pile_probe_final (pp1)
     model: PeftModel | None = None
-    prev_adapter: str | None = None
-    ref_logp = None
+    ref_logp = kl_base_ref = None
     if reference_adapter is not None:
         # The reference is an adapter on the SAME base (the teacher): score it once, keep its
         # log-probs GPU-resident next to the base's, and drop the adapter before the ladder.
         model = PeftModel.from_pretrained(base, str(reference_adapter), adapter_name="ref")
         model.eval()
         with torch.no_grad():
-            ref_logp = pile_logprobs(model, pool, device)
+            ref_logp = pool_logprobs(model, pool, device)
         kl_base_ref = mean_kl(base_logp, ref_logp)
-        prev_adapter = "ref"
         logger.info("reference adapter {}: KL(base || ref) = {:.3f} nats", reference_adapter, kl_base_ref)
-    out_name = "pile_kl_traj_vs_teacher.json" if reference_adapter is not None else "pile_kl_traj.json"
 
     pile_id = {"n_pile_docs": n_pile_docs, "pile_seed": pile_seed,
                "pile_max_tokens": pile_max_tokens, "pile_pool_sha": pool.token_sha256(),
                "pool_version": pool_spec.version}
     for seed in seeds:
         run_dir = param_dir / f"ftseed{seed}"
-        ckpt_root = run_dir / "checkpoints"
-        out_path = (legacy_dir / f"{tag}_ftseed{seed}.json" if legacy_out
-                    else run_dir / "eval" / out_name)
-        points = _checkpoint_dirs(ckpt_root)
-        if final_only:
-            points = [(s, c) for s, c in points if c == ckpt_root]
-        if not points:
-            raise typer.Exit(
-                typer.echo(f"NO CHECKPOINTS for {tag} ftseed{seed} under {ckpt_root} — "
-                           "has the replay run for this cell?", err=True) or 1
+        try:
+            pile_kl_trajectory(
+                run_dir, model if ref_logp is not None else base, pool, base_logp, ce_base,
+                device, tag=tag, seed=seed, pool_spec=pool_spec, pile_id=pile_id,
+                lineage_animal=lin.get("animal"), lineage_student_base=lin["student_base"],
+                param_dir=param_dir, rank=rank, alpha=alpha, learning_rate=lr_s,
+                n_epochs=epochs, lineage_slug=slug, final_only=final_only, force=force,
+                ref_logp=ref_logp, reference_adapter=reference_adapter,
+                kl_base_ref=kl_base_ref if ref_logp is not None else None,
+                out_path=(legacy_dir / f"{tag}_ftseed{seed}.json" if legacy_out else None),
             )
-        steps = [s for s, _ in points]
-        ref = manifest_ref(run_dir)
-        if out_path.exists() and not force:
-            stored = json.loads(out_path.read_text())
-            # Current iff same checkpoint list, same Pile pool identity, same run ref --
-            # and the record carries the delta-CE readout that is now the primary label.
-            if (stored.get("checkpoint_steps") == steps
-                    and pile_id_is_current(stored, pile_id)
-                    and stored.get("train_manifest_ref") == ref):
-                if record_has_ce(stored):
-                    logger.info("{} ftseed{}: {} points current (skip)", tag, seed, len(points))
-                    continue
-                logger.info("{} ftseed{}: stale: {} points lack delta_ce (recompute)",
-                            tag, seed, points_lacking_ce(stored))
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        rows, t0 = [], time.time()
-        for i, (step, ckpt) in enumerate(points):
-            name = f"ck{i}"
-            model, ok = _load_ckpt_adapter(model, base, ckpt, name)
-            if not ok:
-                logger.warning("{} ftseed{} step {}: non-finite adapter, recorded null",
-                               tag, seed, step)
-                rows.append({"step": step, "checkpoint": ckpt.name, "nonfinite": True})
-                if prev_adapter is not None:
-                    model.delete_adapter(prev_adapter)
-                prev_adapter = name
-                continue
-            model.set_adapter(name)
-            with torch.no_grad():
-                adapted_logp = pile_logprobs(model, pool, device)
-            if prev_adapter is not None:
-                model.delete_adapter(prev_adapter)
-            prev_adapter = name
-            rows.append({"step": step, "checkpoint": ckpt.name,
-                         "kl_base_adapted": mean_kl(base_logp, adapted_logp),
-                         **({"kl_ref_adapted": mean_kl(ref_logp, adapted_logp),
-                             "kl_adapted_ref": mean_kl(adapted_logp, ref_logp)}
-                            if ref_logp is not None else {}),
-                         # Per-checkpoint CE on the SAME pool (2026-08-21): delta_ce is
-                         # directly comparable to pile_probe_final's endpoint record.
-                         "ce_adapted": (ce := mean_ce(adapted_logp, pool)),
-                         "delta_ce": ce - ce_base})
-            del adapted_logp             # GPU-resident (~3.3 GB on pp1): free before the next checkpoint
-
-        atomic_write_json(out_path, {
-            "tag": tag, "ft_seed": seed, "animal": lin.get("animal"),
-            "lineage_slug": slug, "final_only": final_only,
-            "base_model": lin["student_base"], "param_dir": str(param_dir),
-            "rank": rank, "alpha": alpha, "learning_rate": float(lr_s),
-            "n_epochs": epochs,
-            **pile_id,
-            "n_eligible_positions": int(sum(len(e) for e in pool.eligible)),
-            "kl_direction": "KL(base || adapted), position-pooled nats"
-                            + ("; kl_ref_adapted = KL(reference || adapted), kl_adapted_ref = "
-                               "KL(adapted || reference)" if ref_logp is not None else ""),
-            **({"reference_adapter": str(reference_adapter), "kl_base_ref": kl_base_ref}
-               if ref_logp is not None else {}),
-            "ce_base": ce_base,
-            # Convention names the pool actually used (dp1 for DataDecide bases), so a
-            # dp1 record never claims a pp1 readout.
-            "ce_convention": f"position-pooled nats on the {pool_spec.version} pool; last "
-                             "eligible logit dropped for CE (needs a target), kept for KL",
-            "checkpoint_steps": steps,
-            "train_manifest_ref": ref,
-            "points": rows,
-        })
-        logger.info("{} ftseed{}: {} points in {:.0f}s -> {}",
-                    tag, seed, len(rows), time.time() - t0, out_path)
+        except FileNotFoundError as e:
+            raise typer.Exit(typer.echo(str(e), err=True) or 1)
 
 
 if __name__ == "__main__":

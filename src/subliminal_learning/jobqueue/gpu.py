@@ -9,7 +9,11 @@ globally — an explicit design choice, matching the old launchers):
   ``range(cpu_cap)``, an INDEPENDENT budget for jobs declaring ``slots: 0``. GPU capacity
   and CPU capacity are separate concerns: CPU work must not block a card, but it still
   needs its own ceiling, since the GPU slots were otherwise the pool's only admission
-  control (N worker threads would all run CPU jobs at once and thrash the box).
+  control (N worker threads would all run CPU jobs at once and thrash the box). With
+  ``cpu_dynamic`` that ceiling is DERIVED at acquire time from the cores the running GPU
+  jobs leave over (see :meth:`GpuManager.effective_cpu_cap`), so memory-heavy GPU jobs
+  that use few cores make room for more CPU work; the static ``cpu_cap`` integer is the
+  default and remains the ceiling when both are set.
 - **Memory gate** — a GPU must show ``memory.free >= mem_mib`` on TWO consecutive
   ``nvidia-smi`` checks ~3s apart before we dispatch to it.
 - **Reservation ledger** — each held slot lock carries the ``mem_mib`` its job asked for
@@ -79,7 +83,28 @@ class GpuPolicy:
             budget from ``cap_per_gpu``: CPU work must not consume GPU capacity, but it
             still needs a ceiling of its own, since the GPU slots were doubling as the
             pool's only admission control. Defaults to a quarter of the CPU count so a
-            burst of CPU jobs cannot starve the GPU jobs' data loaders.
+            burst of CPU jobs cannot starve the GPU jobs' data loaders. In dynamic mode
+            (below) it is instead the CEILING on the derived value, when set explicitly.
+        cpu_dynamic: Opt into a DERIVED node-wide CPU ceiling (default off: the keys below
+            are then unused and ``cpu_cap`` is the flat budget). When on::
+
+                cap = clamp(floor((cpu_total - cpu_reserve
+                                   - held_gpu_slots * cpu_per_gpu_job) / cpu_per_cpu_job),
+                            0, ceiling)
+
+            with ``held_gpu_slots`` the GPU slot locks held node-wide right now and
+            ``ceiling`` the explicit ``cpu_cap`` if given, else
+            ``floor((cpu_total - cpu_reserve) / cpu_per_cpu_job)``. A cap of 0 is
+            legitimate (every core spoken for by GPU jobs) — GPU jobs win. Shrinking the
+            cap never preempts: running CPU jobs keep their slots and merely block new
+            admissions until they finish.
+        cpu_total: Cores on this node (default ``os.cpu_count()`` at load).
+        cpu_reserve: Cores held back for the OS, the worker pool and the janitors.
+        cpu_per_gpu_job: Cores charged per HELD GPU slot. Measured load is ~0.8 core per
+            GPU training job and the env's ``OMP_NUM_THREADS`` is only an upper bound, so
+            the default is 1.0 rather than that value.
+        cpu_per_cpu_job: Cores each CPU-lane job consumes (default: the policy env's
+            ``OMP_NUM_THREADS`` if present and > 0, else 1.0).
         reservation_warmup_s: How long a granted slot's memory is counted from the ledger
             rather than from ``nvidia-smi`` — cover the job's model-load ramp.
         env: Extra environment for every job dispatched by this node.
@@ -93,6 +118,14 @@ class GpuPolicy:
     cap_per_gpu: int
     free_mem_mib: int
     cpu_cap: int = 0  # 0 -> derived from os.cpu_count() at load
+    cpu_dynamic: bool = False
+    cpu_total: int = 0  # 0 -> os.cpu_count() at load
+    cpu_reserve: int = 2
+    cpu_per_gpu_job: float = 1.0
+    cpu_per_cpu_job: float = 1.0
+    # Whether the JSON named cpu_cap: in dynamic mode an explicit value is the ceiling,
+    # an absent one means "whatever the free cores allow" (the derived ceiling).
+    cpu_cap_explicit: bool = False
     reservation_warmup_s: int = DEFAULT_RESERVATION_WARMUP_S
     env: dict[str, str] = field(default_factory=dict)
     yield_to_foreign: bool = False
@@ -127,6 +160,12 @@ class GpuPolicy:
             cap_per_gpu=int(d["cap_per_gpu"]),
             free_mem_mib=int(d["free_mem_mib"]),
             cpu_cap=int(d.get("cpu_cap", 0)) or max(1, (os.cpu_count() or 4) // 4),
+            cpu_dynamic=bool(d.get("cpu_dynamic", False)),
+            cpu_total=int(d.get("cpu_total", 0)) or (os.cpu_count() or 4),
+            cpu_reserve=int(d.get("cpu_reserve", 2)),
+            cpu_per_gpu_job=_positive(d, "cpu_per_gpu_job", 1.0),
+            cpu_per_cpu_job=_positive(d, "cpu_per_cpu_job", _omp_threads(d)),
+            cpu_cap_explicit=int(d.get("cpu_cap", 0) or 0) > 0,
             reservation_warmup_s=int(
                 d.get("reservation_warmup_s", DEFAULT_RESERVATION_WARMUP_S)
             ),
@@ -145,6 +184,26 @@ class GpuPolicy:
             mps_pipe_dir=(d.get("mps_pipe_dir") or None),
             mps_log_dir=(d.get("mps_log_dir") or None),
         )
+
+
+def _positive(d: dict, key: str, default: float) -> float:
+    """A strictly-positive float policy knob — a zero divisor must never pass silently."""
+    v = float(d.get(key, default))
+    if v <= 0:
+        raise ValueError(
+            f"gpu_policy {key!r} must be > 0 (got {v}); it charges/divides cores in the "
+            "dynamic CPU-cap formula"
+        )
+    return v
+
+
+def _omp_threads(d: dict) -> float:
+    """Default cores-per-CPU-job: the policy env's OMP_NUM_THREADS if usable, else 1.0."""
+    try:
+        v = float((d.get("env") or {}).get("OMP_NUM_THREADS", 0))
+    except (TypeError, ValueError):
+        return 1.0
+    return v if v > 0 else 1.0
 
 
 def _resolve_yield_uids(d: dict) -> tuple[int, ...]:
@@ -411,6 +470,9 @@ class GpuManager:
         # must never wrap them, or CPU probes would block behind GPU admission. Ordering:
         # acquire flock -> _audit_lock -> _reg_lock (never reversed).
         self._audit_lock = threading.Lock()
+        # Last value effective_cpu_cap() computed, so the dynamic lane logs on CHANGE
+        # rather than on every acquire attempt (the worker retries every few seconds).
+        self._last_cpu_cap: int | None = None
 
     def _policy(self) -> GpuPolicy:  # re-read every time (hot-reload of pins)
         return load_policy(self.root, self.hostname)
@@ -450,16 +512,58 @@ class GpuManager:
             return None
         return fd
 
+    def effective_cpu_cap(self, policy: GpuPolicy) -> int:
+        """How many CPU-lane slots may be held node-wide right now.
+
+        Static mode: ``max(1, policy.cpu_cap)``, as before. Dynamic mode
+        (``cpu_dynamic``): the cores left over once the GPU slots held RIGHT NOW are paid
+        for, so memory-heavy GPU jobs (few cores each) leave room for more CPU work::
+
+            clamp(floor((cpu_total - cpu_reserve - held * cpu_per_gpu_job)
+                        / cpu_per_cpu_job), 0, ceiling)
+
+        Zero is a legitimate answer (GPU jobs win). Logged only when the value CHANGES —
+        the worker re-asks every few seconds while it waits.
+        """
+        if not policy.cpu_dynamic:
+            return max(1, policy.cpu_cap)
+        held = sum(self._probe(policy)[0].values()) if policy.gpus else 0
+        free_cores = policy.cpu_total - policy.cpu_reserve
+        ceiling = (
+            policy.cpu_cap
+            if policy.cpu_cap_explicit
+            else int(free_cores // policy.cpu_per_cpu_job)
+        )
+        cap = int((free_cores - held * policy.cpu_per_gpu_job) // policy.cpu_per_cpu_job)
+        cap = max(0, min(cap, max(0, ceiling)))
+        if cap != self._last_cpu_cap:
+            logger.info(
+                "cpu lane: effective cap {} ({} cores, {} reserved, {} gpu slots x {}, "
+                "{} per cpu job)",
+                cap,
+                policy.cpu_total,
+                policy.cpu_reserve,
+                held,
+                policy.cpu_per_gpu_job,
+                policy.cpu_per_cpu_job,
+            )
+            self._last_cpu_cap = cap
+        return cap
+
     def _acquire_cpu_slot(self, policy: GpuPolicy) -> "GpuSlot | None":
-        """One of ``policy.cpu_cap`` node-wide CPU slots, or None if all are held.
+        """One of the node-wide CPU slots (:meth:`effective_cpu_cap`), or None if all held.
 
         Deliberately independent of the GPU budget and of the memory gate: a CPU-only job
         neither consumes nor is blocked by GPU capacity, so it runs even when every card is
         full. Same flock mechanism as the GPU slots, so the ceiling holds across worker
         PROCESSES, not just threads.
+
+        The cap is computed BEFORE the ``_audit_lock`` hold below: in dynamic mode it
+        probes the GPU slot locks, which takes that same non-reentrant lock.
         """
+        cap = self.effective_cpu_cap(policy)
         with self._audit_lock:  # flock-to-register window must not overlap an audit pass
-            for s in range(max(1, policy.cpu_cap)):
+            for s in range(cap):
                 fd = os.open(self._cpu_slot_lock_file(s), os.O_CREAT | os.O_RDWR, 0o644)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

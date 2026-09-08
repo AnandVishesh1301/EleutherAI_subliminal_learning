@@ -10,6 +10,9 @@ Shuttleworth-style read that every one of them records.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 
 from subliminal_learning.weightspace.lora import lora_svd
@@ -27,6 +30,12 @@ def interpolation_record_is_current(record: dict) -> bool:
 
 # Random targets keyed by (run, module, draw/selector) instead of draw order.
 TARGET_VERSION = "keyed_targets_v1"
+
+# Original and intervention damage measured together on the same inputs.
+ORIGINAL_BASELINE_VERSION = "ce-baseline-v1"
+
+# The baseline was copied from the run's eval-time pp1 probe, not measured in-session.
+BASELINE_SOURCE_STORED_PROBE = "stored_probe"
 
 
 def _uses_random_target(variant: str) -> bool:
@@ -48,6 +57,116 @@ def surgery_record_is_current(record: dict, *, require_keyed_targets: bool = Fal
     variant = str(record.get("variant", ""))
     return (not _uses_random_target(variant)
             or record.get("target_version") == TARGET_VERSION)
+
+
+def validate_surgery_baselines(
+    rows: list[dict], *, version: str = ORIGINAL_BASELINE_VERSION,
+) -> None:
+    """Require one current, identity-matched CE baseline for every surgery run."""
+    keys = ("adapter_sha256", "base", "base_revision", "pool_version", "pool_sha",
+            "prompt_set_sha256", "animal", "seed")
+    by_run: dict[str, tuple[object, ...]] = {}
+    for row in rows:
+        if row.get("original_baseline_version") != version:
+            raise ValueError("surgery rows lack the current original baseline version")
+        value = row.get("original_delta_ce")
+        if value is None or not np.isfinite(float(value)):
+            raise ValueError("surgery rows lack a finite identity-matched original delta_ce")
+        if (not row.get("run") or any(key not in row for key in keys)
+                or any(row[key] is None or (isinstance(row[key], float) and np.isnan(row[key]))
+                       for key in keys if key != "base_revision")):
+            raise ValueError("surgery rows lack complete input identity metadata")
+        run = str(row["run"])
+        identity = tuple(row[key] for key in keys) + (float(value),)
+        if run in by_run and by_run[run] != identity:
+            raise ValueError(f"surgery rows mix input identities or baselines within run {run}")
+        by_run[run] = identity
+
+
+def surgery_original_delta_ce(
+    rows: list[dict], *, version: str = ORIGINAL_BASELINE_VERSION,
+) -> tuple[dict[str, float], dict[str, str]]:
+    """Per-run baseline ΔCE for surgery consumers, with the source it came from.
+
+    The paired readout (`original_delta_ce` at `version`) is the better baseline: it
+    measures the trained update on the SAME loaded base weights and probe pool as the
+    intervention rows beside it, so it is immune to a later rewrite of the run's probe
+    file. Artifacts written before that field existed have no paired value; falling back
+    to the run's stored `eval/pile_probe.json` ΔCE is acceptable because it is the same
+    quantity in the same units on the same pp1 pool, only measured at eval time. Sources
+    are returned so every table/figure can name which runs used which baseline.
+
+    Rows stamped ``original_baseline_source = "stored_probe"`` (written by
+    `scripts.position_surgery` when `orig` is not requested, or by
+    `scripts.backfill_surgery_baselines`) carry that same eval-time number in the row, so
+    they are read from the row but reported as ``stored_probe``, never ``paired``; a
+    paired row of the same run always wins over them.
+
+    Returns ``(baseline_by_run, source_by_run)`` with source in
+    ``{"paired", "stored_probe", "missing"}``; missing baselines are NaN, never an error.
+    A run whose paired rows DISAGREE is real corruption and still raises.
+    """
+    keys = ("adapter_sha256", "base", "base_revision", "pool_version", "pool_sha",
+            "prompt_set_sha256", "animal", "seed")
+    paired: dict[str, float] = {}
+    backfilled: dict[str, float] = {}
+    identities: dict[str, tuple[object, ...]] = {}
+    runs: dict[str, None] = {}
+    for row in rows:
+        run = str(row.get("run", ""))
+        if not run:
+            continue
+        runs.setdefault(run)
+        if row.get("original_baseline_version") != version:
+            continue
+        value = row.get("original_delta_ce")
+        if value is None or not np.isfinite(float(value)):
+            continue
+        if row.get("original_baseline_source") == BASELINE_SOURCE_STORED_PROBE:
+            backfilled.setdefault(run, float(value))
+            continue
+        identity = tuple(row.get(key) for key in keys) + (float(value),)
+        if run in identities and identities[run] != identity:
+            raise ValueError(f"surgery rows mix input identities or baselines within run {run}")
+        identities[run] = identity
+        paired[run] = float(value)
+    baselines: dict[str, float] = {}
+    sources: dict[str, str] = {}
+    for run in runs:
+        if run in paired:
+            baselines[run], sources[run] = paired[run], "paired"
+            continue
+        if run in backfilled:
+            baselines[run], sources[run] = backfilled[run], "stored_probe"
+            continue
+        value = _stored_probe_delta_ce(run)
+        baselines[run] = float("nan") if value is None else value
+        sources[run] = "missing" if value is None else "stored_probe"
+    return baselines, sources
+
+
+def probe_baseline(run: str) -> dict | None:
+    """The run's eval-time pp1 probe readout, or None when absent/unreadable/non-finite.
+
+    The one reader shared by every writer of a `stored_probe` baseline stamp.
+    """
+    try:
+        record = json.loads((Path(run) / "eval" / "pile_probe.json").read_text())
+    except (OSError, ValueError):
+        return None
+    value = record.get("delta_ce")
+    if value is None or not np.isfinite(float(value)):
+        return None
+    out = {"delta_ce": float(value), "pile_kl": record.get("kl_base_student")}
+    if "manifest_ref" in record:
+        out["manifest_ref"] = record["manifest_ref"]
+    return out
+
+
+def _stored_probe_delta_ce(run: str) -> float | None:
+    """The run's eval-time pp1 probe ΔCE, or None when absent/unreadable/non-finite."""
+    base = probe_baseline(run)
+    return None if base is None else base["delta_ce"]
 
 
 def interp_basis(u0: np.ndarray, u1: np.ndarray, t: float) -> np.ndarray:

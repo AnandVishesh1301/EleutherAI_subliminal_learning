@@ -23,6 +23,12 @@ by that ref (one model + one W₀-SVD cache per ref). Every random target is dra
 an rng keyed by (seed, run key, module, kind, draw-or-selector), so a run's targets do
 not depend on which other runs were processed before it (`TARGET_VERSION`).
 
+The per-run baseline damage rides along on every row and is never re-measured for its
+own sake: when ``orig`` is requested its in-session readout is the baseline, otherwise
+the run's own ``eval/pile_probe.json`` ΔCE is copied in and stamped
+``original_baseline_source = "stored_probe"`` (no probe file ⇒ no baseline, a WARN line
+and manifest status ``computed_no_baseline``).
+
 Appends one JSON per (run, variant) to ``{output_root}/analysis/{out_name}.jsonl``.
 A run is SKIPPED only when every variant requested by this invocation already has a
 row whose identity fields (adapter sha, pool, prompt set, animal, seed) match and
@@ -142,9 +148,8 @@ def main(
     runs: Path = typer.Option(...),
     n_draws: int = typer.Option(2, help="Independent random-position draws per run."),
     variants: str = typer.Option("", help="Comma list to restrict variants (e.g. 'align,rand0'; "
-                                 "empty = all; 'none' = only --subsets). Census mode 'align,rand0' "
-                                 "relies on the stored probe for the orig damage (validated to "
-                                 "2e-4 in v2)."),
+                                 "empty = all; 'none' = only --subsets). Without 'orig' the baseline is "
+                                 "copied from the run's eval probe, never re-measured."),
     subsets: str = typer.Option("", help="Comma list of SUBSET variants, each optionally with a "
                                 "rotation fraction '@t' (default t=1 = fully randomized): top{k} "
                                 "(only the k strongest direction pairs; kept pairs unchanged), "
@@ -181,7 +186,8 @@ def main(
         has_nonfinite, iter_lora_pairs, load_lora_tensors,
     )
     from subliminal_learning.weightspace.deltas import (
-        INTERPOLATION_VERSION, TARGET_VERSION, interp_basis, intruder_positive,
+        BASELINE_SOURCE_STORED_PROBE, INTERPOLATION_VERSION, ORIGINAL_BASELINE_VERSION,
+        TARGET_VERSION, interp_basis, intruder_positive, probe_baseline,
         random_orthonormal_pair, subset_rotate, subset_targets,
     )
     from subliminal_learning.weightspace.lora import lora_svd
@@ -236,6 +242,7 @@ def main(
             prompt_set=prompt_set, prompt_set_sha256=prompt_sha, pools=pools_by_base,
             variants_requested=variants, t_ladder=ts, subsets=subsets, n_draws=n_draws,
             interpolation_version=INTERPOLATION_VERSION, target_version=TARGET_VERSION,
+            original_baseline_version=ORIGINAL_BASELINE_VERSION,
             runs=[dict(r, status=status_by_run.get(r["run_key"], r["status"]))
                   for r in manifest_runs]))
 
@@ -317,11 +324,20 @@ def main(
                     continue
                 variants_all.append((spec_t, {"subset": base, "t_sub": t_sub}))
 
+            if not variants_all:
+                # every requested subset was skipped for this run (e.g. `--variants none`
+                # on a teacher with no supercritical directions): nothing to measure, so
+                # do not spend the original-baseline forward pass on it every invocation.
+                typer.echo(f"SKIP no variants: {rd}")
+                status_by_run[run_key] = "skipped_no_variants"
+                continue
+
             identity = dict(
                 adapter_sha256=sha256_file(ck / "adapter_model.safetensors"),
                 pool_version=PROBE_POOL_PP1.version, pool_sha=pool_sha,
                 prompt_set=prompt_set, prompt_set_sha256=prompt_sha,
-                animal=animal, seed=seed)
+                animal=animal, seed=seed,
+                original_baseline_version=ORIGINAL_BASELINE_VERSION)
             if not redo and run_is_complete(rows_by_run.get(str(rd), []), identity,
                                             [n for n, _ in variants_all]):
                 typer.echo(f"SKIP current: {rd}")
@@ -343,6 +359,26 @@ def main(
                 stored = json.loads((rd / "eval" / "pile_probe.json").read_text()).get("kl_base_student")
             except FileNotFoundError:
                 stored = None
+            # The baseline is never re-measured. With `orig` requested its own readout
+            # (below) is the baseline; otherwise the run's eval-time pp1 probe ΔCE is
+            # copied in and stamped as such — the same quantity on the same pool, but
+            # not on the same loaded base weights as the rows beside it.
+            original_kl = original_delta_ce = None
+            baseline_stamp: dict[str, object] = {}
+            row_identity = identity
+            if not any(vname == "orig" for vname, _ in variants_all):
+                base_probe = probe_baseline(str(rd))
+                if base_probe is None:
+                    typer.echo(f"WARN no probe baseline: {rd}")
+                    row_identity = {k: v for k, v in identity.items()
+                                    if k != "original_baseline_version"}
+                else:
+                    original_delta_ce = base_probe["delta_ce"]
+                    original_kl = base_probe["pile_kl"]
+                    baseline_stamp["original_baseline_source"] = BASELINE_SOURCE_STORED_PROBE
+                    if "manifest_ref" in base_probe:
+                        baseline_stamp["original_baseline_probe_manifest_ref"] = \
+                            base_probe["manifest_ref"]
             sub_targets: dict = {}
             recs = []
             for vname, vv in variants_all:
@@ -392,11 +428,17 @@ def main(
                 p_t = mean_p_target(
                     target_prob_and_rank_per_prompt(mdl, tok, device, prompts, target_id))
                 restore_modules(mods, w0)
+                if vname == "orig":
+                    original_kl, original_delta_ce = kl, dce
                 rec = dict(run=str(rd), base=base_ref,
                            base_revision=base_ref.partition("@")[2] or None, variant=vname,
                            pile_kl=float(kl), delta_ce=float(dce),
                            ce_base=float(ce_base), p_target=p_t, stored_kl=stored,
-                           n_super=n_super_run, n_dirs=n_dirs_run, **identity)
+                           original_pile_kl=None if original_kl is None else float(original_kl),
+                           original_delta_ce=(None if original_delta_ce is None
+                                              else float(original_delta_ce)),
+                           n_super=n_super_run, n_dirs=n_dirs_run,
+                           **row_identity, **baseline_stamp)
                 if "t" in vv:
                     rec["interpolation_version"] = INTERPOLATION_VERSION
                 if vname not in ("orig", "align"):
@@ -414,7 +456,8 @@ def main(
                            + (f" intr={rec.get('intruder_mods')}" if count_intruders else "")
                            + (f" (stored {stored:.3f})" if vname == "orig" and stored else ""))
             write_surgery_records(out, recs)
-            status_by_run[run_key] = "computed"
+            status_by_run[run_key] = ("computed" if original_delta_ce is not None
+                                      else "computed_no_baseline")
         del mdl
         torch.cuda.empty_cache()
     write_manifest(datetime.now(timezone.utc).isoformat())

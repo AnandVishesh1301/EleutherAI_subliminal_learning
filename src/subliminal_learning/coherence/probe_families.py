@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from subliminal_learning.models.datadecide import DataDecideSpec, dd_revision
+from subliminal_learning.models.registry import EXTERNAL_BASES
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -61,6 +62,7 @@ PROBE_FAMILIES: dict[str, ProbeFamily] = {
         ProbeFamily("qwen25", "Qwen/Qwen2.5-1.5B", None, False, "Qwen2.5"),
         ProbeFamily("llama3", "meta-llama/Llama-3.2-1B", None, True, "Llama 3.2"),
         ProbeFamily("gemma3", "google/gemma-3-1b-pt", None, True, "Gemma 3"),
+        ProbeFamily("gemma2", "google/gemma-2-2b", "c5ebcd40d208330abc697524c919956e692655cf", True, "Gemma 2"),
     )
 }
 
@@ -146,9 +148,7 @@ def load_family_tokenizer(
 # Explicit alias table so a new size (e.g. `Llama-3.2-3B`) is one line here and nothing
 # else; Pythia and DataDecide names are matched by pattern below (they are open families).
 BASE_REPO_FAMILY: dict[str, str] = {
-    "Qwen2.5-1.5B": "qwen25",
-    "Llama-3.2-1B": "llama3",
-    "gemma-3-1b-pt": "gemma3",
+    b.repo_id.split("/")[-1]: b.family for b in EXTERNAL_BASES
 }
 
 
@@ -159,13 +159,22 @@ def family_for_base_repo(repo: str) -> ProbeFamily | None:
     `@revision` suffix. `pythia-*` names are the pythia family and DataDecide names
     (either spelling) the olmo one; everything else goes through `BASE_REPO_FAMILY`.
     """
-    name = repo.split("@")[0].rstrip("/").split("/")[-1]
-    tag = BASE_REPO_FAMILY.get(name)
-    if tag is None:
-        if name.startswith("pythia-"):
-            tag = "pythia"
-        elif name.startswith("DataDecide"):
-            tag = "olmo"
-        else:
-            return None
-    return PROBE_FAMILIES[tag]
+    from subliminal_learning.models.naming import family_of
+
+    try:
+        fam = family_of(repo)          # any spelling: token, ref, dir name (2026-09-08)
+        tag = "olmo" if fam == "datadecide" else fam
+    except ValueError:
+        # Not a spelling the naming module recognizes: the historical name patterns.
+        name = repo.split("@")[0].rstrip("/").split("/")[-1]
+        tag = BASE_REPO_FAMILY.get(name)
+        if tag is None:
+            if name.startswith("pythia-"):
+                tag = "pythia"
+            elif name.startswith("DataDecide"):
+                tag = "olmo"
+            else:
+                return None
+    # A registry family with no probe family yet (a new external base before its pool is
+    # wired) is "no known family" under this function's contract, not a KeyError.
+    return PROBE_FAMILIES.get(tag)

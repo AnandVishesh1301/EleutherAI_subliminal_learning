@@ -26,7 +26,9 @@ from subliminal_learning.weightspace.deltas import (
     interp_basis,
     interpolation_record_is_current,
     random_orthonormal_pair,
+    surgery_original_delta_ce,
     surgery_record_is_current,
+    validate_surgery_baselines,
 )
 from subliminal_learning.weightspace.lora import lora_svd
 
@@ -392,3 +394,34 @@ def test_redo_backs_up_then_empties_the_output(tmp_path):
     assert backup is not None and backup.read_text() == body
     assert backup.name.startswith("position_surgery_ce.legacy-")
     assert not out.exists()  # rows of runs outside this runs list must not survive
+
+
+def test_surgery_baseline_validator_rejects_legacy_mixed_and_identity_conflicts():
+    base = dict(run="r", original_baseline_version="ce-baseline-v1", original_delta_ce=2.0,
+                adapter_sha256="a", base="m@rev", base_revision="rev", pool_version="pp1",
+                pool_sha="p", prompt_set_sha256="q", animal="dog", seed=0)
+    validate_surgery_baselines([base], version="ce-baseline-v1")
+    with pytest.raises(ValueError, match="current original baseline"):
+        validate_surgery_baselines([{**base, "original_baseline_version": "old"}], version="ce-baseline-v1")
+    with pytest.raises(ValueError, match="finite"):
+        validate_surgery_baselines([{**base, "original_delta_ce": None}], version="ce-baseline-v1")
+    with pytest.raises(ValueError, match="input identities"):
+        validate_surgery_baselines([base, {**base, "adapter_sha256": "b", "original_delta_ce": 2.0}],
+                                   version="ce-baseline-v1")
+
+
+def test_surgery_baseline_falls_back_to_stored_probe_without_raising(tmp_path):
+    legacy = tmp_path / "legacy"
+    (legacy / "eval").mkdir(parents=True)
+    (legacy / "eval" / "pile_probe.json").write_text(json.dumps({"delta_ce": 0.9}))
+    paired = dict(run="paired", original_baseline_version="ce-baseline-v1",
+                  original_delta_ce=1.5, adapter_sha256="a", base="m", base_revision=None,
+                  pool_version="p", pool_sha="s", prompt_set_sha256="q", animal="dog", seed=0)
+    rows = [paired, {**paired, "variant": "rand0"},
+            {"run": str(legacy)}, {"run": str(tmp_path / "gone")}]
+    base, src = surgery_original_delta_ce(rows)
+    assert src == {"paired": "paired", str(legacy): "stored_probe", str(tmp_path / "gone"): "missing"}
+    assert base["paired"] == 1.5 and base[str(legacy)] == 0.9
+    assert np.isnan(base[str(tmp_path / "gone")])
+    with pytest.raises(ValueError, match="within run"):
+        surgery_original_delta_ce([paired, {**paired, "original_delta_ce": 0.8}])

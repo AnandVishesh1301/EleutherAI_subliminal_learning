@@ -89,11 +89,16 @@ def anchored_dead_cut(output_root: Path, base_repo_or_key: str, *, pool: str = "
     rec = json.loads(
         (Path(output_root) / "analysis" / f"unigram_anchor_{pool}.json").read_text())
     dc = rec["delta_cross"]
-    cands = [base_repo_or_key, base_repo_or_key.split("/")[-1]]
-    if "@" in base_repo_or_key and base_repo_or_key.startswith("allenai/DataDecide"):
-        from subliminal_learning.models.datadecide import dd_dir_name, parse_dd_ref
+    # Keys are dir names. Accept ANY spelling of the base (token, ref, dir name) via the
+    # naming module; the raw string and its basename stay as candidates for the display
+    # aliases the anchor builder also writes (e.g. "pythia-160m (orig)").
+    from subliminal_learning.models.naming import base_dir_name
 
-        cands.append(dd_dir_name(parse_dd_ref(base_repo_or_key)))
+    cands = [base_repo_or_key, base_repo_or_key.split("/")[-1]]
+    try:
+        cands.insert(0, base_dir_name(base_repo_or_key))
+    except ValueError:
+        pass
     for cand in cands:
         if cand in dc:
             return float(dc[cand])
@@ -135,6 +140,9 @@ PP1T_TOKEN_SHA: dict[str, str | None] = {
     "qwen25": "487944b404a4c66188d74bda59771c3d15af3d39abed483e78a6e109c82f9559",
     "llama3": "01bca380174b93af607e78dea6fb4f1cf776d14334a8c72a49d7300da9037a2a",
     "gemma3": "666cfdd197dfb1c089d1b1549bce0239cfd8261a5aac80a7f22a6a987265a1f4",
+    # Verified 2026-09-07 against Gemma 2 tokenizer revisions c5ebcd4 (2B) and
+    # 33c1930 (9B); vocabulary/backend serialization are identical.
+    "gemma2": "e85613c26f8069588b3cbabaf5dfeaf1a44ea10be64da2baae8e5fd29fd98f42",
 }
 
 
@@ -164,6 +172,7 @@ PP1W_TOKEN_SHA: dict[str, str | None] = {
     "qwen25": "856edf5c49fc93136cb4322518380c244982ad9035c43cc7f5915282ad49b918",
     "llama3": "fa68fdda1cfe23f3712de89b787988f11f1f7226d58aea3a46ddb0316b0237a2",
     "gemma3": "90abe0bd1d60cfe0a2782bb60acaf1ead5435ec4e7f9554427d8e61be3c11ca1",
+    "gemma2": "0b7be338999b301c637118e800b962501fb014cae6a0216e8867ae53fd6443ff",
 }
 # Pinned on the first real build (2026-09-05): dp1's 32 docs + 96 from seeded position 53280.
 DP1W_TOKEN_SHA: str | None = "83a1bbfdec62486c4d39e44b99b052a422d71270e3e4bf5e085d40e3c44f8fda"
@@ -280,18 +289,36 @@ def probe_pool_spec_for_repo(repo: str) -> ProbePoolSpec:
 from subliminal_learning.utils.run_io import manifest_ref  # noqa: E402,F401
 
 
-def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1):
-    """The probe pool for `spec` (see `cka.pool_io.build_pile_pool` / `dolma_pool`)."""
+def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1, *,
+                     verify_pin: bool = True):
+    """The probe pool for `spec` (see `cka.pool_io.build_pile_pool` / `dolma_pool`).
+
+    For the frozen-text pools (`pp1t-<tag>` / `pp1w-<tag>`) the built pool is checked
+    against its pinned token sha, so a wrong or silently-updated tokenizer fails here
+    rather than producing an incomparable readout. A None pin means "not yet pinned"
+    (no check). Pass `verify_pin=False` to opt out — for the pinning script itself
+    (`scripts.build_unigram_anchor`, which raises its own message) and for tests
+    building pools with synthetic tokenizers.
+    """
     if is_frozen_text_pool(spec.version):
         family = family_for_pool_version(spec.version)
         wide = is_pp1w(spec.version)
         # paths passed explicitly (module-global lookup at CALL time, so tests can
         # point the artifact constants elsewhere)
-        return build_frozen_text_pool(
+        pool = build_frozen_text_pool(
             tokenizer, spec,
             bos_token_id=tokenizer.bos_token_id if family.bos else None,
             path=PP1W_TEXT_PATH if wide else PP1_TEXT_PATH,
             meta_path=PP1W_TEXT_META_PATH if wide else PP1_TEXT_META_PATH)
+        if verify_pin:
+            pinned = (PP1W_TOKEN_SHA if wide else PP1T_TOKEN_SHA).get(family.tag)
+            got = pool.token_sha256()
+            if pinned is not None and got != pinned:
+                raise ValueError(
+                    f"{spec.version} pool does not match its pinned tokenization: got "
+                    f"token_sha256 {got}, pinned {pinned}. The tokenizer used to build "
+                    "the pool is not the one the pin was taken on.")
+        return pool
     if spec.version in ("dp1", "dp1w"):
         from subliminal_learning.coherence.dolma_pool import build_dolma_pool
 
@@ -447,7 +474,24 @@ def probe_is_current(run_dir: Path, pool_sha: str) -> bool:
 # --------------------------------------------------------------------------------------
 
 
-def pile_logprobs(model, pool, device: str, batch_size: int = 8) -> list:
+LARGE_VOCAB = 65_536   # above this, park per-doc log-probs on the CPU (see `pool_logprobs`)
+
+
+def default_batch_size(model) -> int:
+    """Probe batch size for `model`'s vocabulary: 8 up to `LARGE_VOCAB`, less above.
+
+    The batch's fp32 logits are ``[B, T, V]``: 2.5 GiB at ``[8, 512, 152k]``, which OOMed
+    the probe subprocess on a shared card (2026-09-08). Scaling B down by the vocabulary
+    ratio holds that tensor at the Pythia-vocab footprint (3 docs at Qwen's 151,936, 2 at
+    Gemma's 262,144) and leaves the <=65,536 path at the historical 8.
+    """
+    vocab = int(getattr(getattr(model, "config", None), "vocab_size", 0) or 0)
+    if vocab <= LARGE_VOCAB:
+        return 8
+    return max(1, (8 * LARGE_VOCAB) // vocab)
+
+
+def pile_logprobs(model, pool, device: str, batch_size: int | None = None) -> list:
     """Next-token log-probs at the pool's eligible positions, one GPU tensor per doc.
 
     Eligibility indexes the *logits*, not the targets: a KL between two models compares two
@@ -460,8 +504,14 @@ def pile_logprobs(model, pool, device: str, batch_size: int = 8) -> list:
     `device` (~3.2 GB for pp1 at the Pythia vocab). Right padding is exact for a causal LM:
     real-position logits cannot attend to the (future) pad keys, and GPT-NeoX's arange
     position_ids are unaffected by trailing pads, so no pad-token dependence is introduced.
+
+    `batch_size=None` (the default) sizes the batch by vocabulary, see
+    `default_batch_size`; an explicit value always wins. The numbers are exact per
+    document either way -- batching only sets how much padding a group carries.
     """
     import torch
+
+    batch_size = default_batch_size(model) if batch_size is None else batch_size
 
     out = [None] * len(pool.input_ids)
     with torch.no_grad():
@@ -492,16 +542,18 @@ def to_device(logp_docs: list, device: str) -> list:
     return [t.to(device) for t in logp_docs]
 
 
-def parked_logprobs(model, pool, device: str, logp_device: str, batch_size: int = 8) -> list:
+def parked_logprobs(model, pool, device: str, logp_device: str,
+                    batch_size: int | None = None) -> list:
     """`pile_logprobs` with each batch's tensors parked on `logp_device` as it is produced.
 
     The pool is walked in the same `batch_size` groups `pile_logprobs` uses internally and
     each group is handed over whole, so the padding groups — and therefore the numbers —
     are byte-identical to one whole-pool call; only the peak footprint changes, from the
-    full log-prob list on `device` to one batch.
+    full log-prob list on `device` to one batch. `batch_size=None` -> `default_batch_size`.
     """
     import dataclasses
 
+    batch_size = default_batch_size(model) if batch_size is None else batch_size
     out: list = []
     for start in range(0, len(pool.input_ids), batch_size):
         chunk = dataclasses.replace(
@@ -512,6 +564,25 @@ def parked_logprobs(model, pool, device: str, logp_device: str, batch_size: int 
         out.extend(to_device(pile_logprobs(model, chunk, device, batch_size=batch_size),
                              logp_device))
     return out
+
+
+def pool_logprobs(model, pool, device: str, batch_size: int | None = None) -> list:
+    """`pile_logprobs`, parked on the CPU for large-vocabulary families.
+
+    The per-doc float32 log-prob lists are ~3.2 GB on the GPU for pp1 at the 50k Pythia/OLMo
+    vocab, but ~9.6 GB at Qwen's 152k (and a KL trajectory holds two of them next to the
+    fp32 model), which overran the 24 GB slot reservation on 2026-09-08. For a vocab above
+    `LARGE_VOCAB` this returns `parked_logprobs(..., "cpu")` -- byte-identical numbers, one
+    batch of GPU footprint; `mean_kl` / `mean_ce` run on whatever device the tensors sit on.
+    Small vocabularies keep the historical all-on-GPU path unchanged.
+
+    A large vocabulary also shrinks the default batch (`default_batch_size`): the fp32
+    ``[8, 512, 152k]`` logits tensor alone is 2.5 GiB and OOMed the probe subprocess.
+    """
+    vocab = int(getattr(getattr(model, "config", None), "vocab_size", 0) or 0)
+    if vocab > LARGE_VOCAB:
+        return parked_logprobs(model, pool, device, "cpu", batch_size=batch_size)
+    return pile_logprobs(model, pool, device, batch_size=batch_size)
 
 
 def mean_kl(ref_logp: list, other_logp: list) -> float:

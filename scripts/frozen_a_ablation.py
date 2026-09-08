@@ -161,8 +161,13 @@ def pool_version_for(base_ref: str, n_pile_docs: int) -> str:
     distribution), else the legacy Pile pool this script has always used, named by its
     doc count (``pile16``) so a reader can tell the two apart in the rows.
     """
-    name = base_ref.split("@")[0].split("/")[-1]
-    return "dp1" if name.startswith("DataDecide") else f"pile{n_pile_docs}"
+    from subliminal_learning.models.naming import family_of
+
+    try:
+        is_dd = family_of(base_ref) == "datadecide"
+    except ValueError:  # not a base spelling the naming module knows: legacy name test
+        is_dd = base_ref.split("@")[0].split("/")[-1].startswith("DataDecide")
+    return "dp1" if is_dd else f"pile{n_pile_docs}"
 
 
 def kept_a_factor(

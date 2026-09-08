@@ -31,8 +31,8 @@ from subliminal_learning.cka.model_refs import (
     ModelRef,
     ref_provenance,
     resolve_ref,
-    spec_from_base_name,
 )
+from subliminal_learning.models.naming import base_dir_name, base_spec
 from subliminal_learning.models.registry import model_ref
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 from subliminal_learning.utils.io import file_sha256
@@ -92,12 +92,15 @@ def resolve_teacher_of(
         )
     if source == "base":
         base_repo = m["numbers_base_model_repo"]
-        spec = spec_from_base_name(base_repo)
+        # Any family (Pythia / DataDecide / external), not just the Pythia dir grammar.
+        spec = base_spec(base_repo)
         return ModelRef(
             "base", spec, raw=base_repo, base_repo=model_ref(spec, hub_org)
         )
     if source == "teacher":
-        base_name = m["numbers_base_model_repo"].rsplit("/", 1)[-1]
+        # Dir spelling of the numbers base: a bare basename would drop a DataDecide seed
+        # branch (`...-1B@step69369-seed-large-aux-2` -> a nonexistent ckpt/ dir).
+        base_name = base_dir_name(m["numbers_base_model_repo"])
         teacher_run_dir = (
             output_root
             / "teachers"

@@ -405,6 +405,18 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   but it is still admission-controlled — the GPU slots were previously the pool's only
   ceiling. A CPU job WAITing is waiting on `cpu_cap`, not on `mem_mib`/GPU slots (the WAIT
   log line says which). Strictly opt-in; nothing infers CPU-ness from the command line.
+- **Dynamic CPU cap (2026-09-08)**: with `"cpu_dynamic": true` the node-wide CPU ceiling is
+  derived at acquire time instead of being the flat `cpu_cap` integer:
+  `clamp(floor((cpu_total - cpu_reserve - held_gpu_slots * cpu_per_gpu_job) / cpu_per_cpu_job), 0, ceiling)`,
+  where `held_gpu_slots` counts the GPU slot locks held right now and `ceiling` is an
+  explicit `cpu_cap` if given, else `floor((cpu_total - cpu_reserve) / cpu_per_cpu_job)`.
+  Defaults: `cpu_total` = `os.cpu_count()`, `cpu_reserve` = 2 (OS, pool, janitors),
+  `cpu_per_gpu_job` = 1.0 (measured ~0.8 core per GPU training job; the env's
+  `OMP_NUM_THREADS` is only an upper bound), `cpu_per_cpu_job` = the env's
+  `OMP_NUM_THREADS` else 1.0. So GPU jobs that hold memory but few cores make room for
+  more CPU work. A cap of 0 is legitimate — GPU jobs win. Shrinking never preempts:
+  running CPU jobs keep their slots and merely block new admissions. Opt-in; without
+  `cpu_dynamic` the static `cpu_cap` behaviour is unchanged.
 - Node safety: hostname in every log/pid filename; a claim is auto-stolen only when its
   owner is this host and the pid is dead. `release --force` is the only override.
 - Lock namespace: slot locks live at `/tmp/subliminal_jobq_*` by default. On a shared node
@@ -984,6 +996,24 @@ uv run python -m scripts.distill_student --source teacher --base-models qwen25-1
 uv run python -m scripts.evaluate_student_preference --source teacher --base-models qwen25-1.5b --target-animal dog --teacher-ftseed 0 --epochs 10 --teacher-training-config configs/training/lora_template_bias_qwen25.yaml --student-training-config configs/training/lora_student_distill_qwen25.yaml
 ```
 
+**In-process eval phase (2026-09-08).** The per-run readouts that follow training —
+the endpoint Pile probe, the per-checkpoint trait trajectory and the per-checkpoint
+Pile-KL trajectory — live as callable functions in
+`src/subliminal_learning/evaluation/ckpt_trajectories.py`
+(`write_pile_probe`, `pref_trajectory`, `pile_kl_trajectory`, plus the currency
+predicates and the checkpoint/adapter helpers the CLIs re-export). `scripts.run_final_evals`,
+`scripts.ckpt_preference_trajectory` and `scripts.ckpt_pile_kl_trajectory` call them from
+their existing loops (records, skip logic and file names unchanged), and
+`run_logs/hf_worker.py` now runs all three in-process on ONE fp32 base — the model handed
+over by `distill_student_pipeline` (`result.model`, used for the endpoint eval via
+`EvaluateTeacherPreferenceConfig.preloaded`, then `unload()`ed back to its base) — with one
+set of base pool log-probs shared by the probe and the KL trajectory. Each phase's loguru
+output goes to `{leaf}/eval/logs/{pile_probe,pref_traj,pile_kl_traj}.log`; the job log keeps
+one PHASE START/END (or FAILED) line each, and the phase retries on transient CUDA OOM.
+Sharing a base across phases requires clearing the `peft_config` that `PeftModel.unload()`
+leaves on it (`_release_base`): otherwise a later `load_adapter` with a name already in that
+stale dict injects a freshly initialised (identity) adapter and records KL exactly 0.
+
 Substitute the selector and both config suffixes for Llama/Gemma. `load_model` uses
 `AutoModelForCausalLM` for these specs. `models/tokenization_io.py` applies the same
 explicit BOS policy to training prompts, number generation, preference scoring and
@@ -1002,6 +1032,36 @@ distillation and their evaluations. SDF document training, on-policy GKD, and fu
 external checkpoint evaluation explicitly reject these specs; NeoX-only mechanistic
 tools are not extended by this change. Tests exercise one-step CPU teacher and student
 training, adapter reload, generation, scoring and resume through tiny real architectures.
+
+### Gemma 2 scaling arm (2026-09-07)
+
+Gemma 2 is an opt-in external base family with `gemma2-2b` and `gemma2-9b`
+(`google/gemma-2-2b` and `google/gemma-2-9b`). Use the dedicated
+`configs/training/lora_template_bias_gemma2.yaml` and
+`lora_student_distill_gemma2.yaml` recipes; they keep the standard seven
+projection targets. Explicitly choose dtype and memory settings for 9B (for
+example `--dtype bfloat16` and a reduced batch size) after a GPU smoke test;
+the default loader uses eager attention for Gemma 2 training and does not
+quantize or alter existing recipes.
+
+Gemma 2 has its own `pp1t-gemma2` and `pp1w-gemma2` pool/anchor identities.
+The 2B and 9B official tokenizers were verified identical (vocabulary 256000,
+BOS 2, EOS 1, and matching backend serialization), with narrow/wide token
+pins recorded in `coherence.probe_io`. The local fit diagnostic consumed
+18,107,057 tokens and ended at permutation position 53,281, exactly the wide
+extension boundary; no production anchor or model-CE artifact has been built. The
+external base table in `models.registry` (`EXTERNAL_BASES`) is the single source of truth
+for these repos — alias parsing, probe family, LoRA family detection, the eager-attention
+loader kwarg and the strict cross-family distillation guard all derive from it — and
+frozen-text pool builds now verify the pinned token sha (`build_probe_pool(...,
+verify_pin=True)` by default).
+For example, train the 2B teacher with `uv run python -m scripts.train_teacher_templates --base-models gemma2-2b --target-animal dog --seeds 0 --training-config configs/training/lora_template_bias_gemma2.yaml`; substitute `gemma2-9b` for the larger model and choose an explicit dtype/batch size appropriate to its GPU. Build anchors explicitly with `uv run python -m scripts.build_unigram_anchor --pool pp1t-gemma2` (then `--pool pp1w-gemma2`); the wide path reuses narrow counts and
+rejects any overlapping fit window.
+
+This coverage is limited to template teachers, number generation, offline
+students, and their evaluations. SDF document training, on-policy GKD, and
+full-FT external evaluation remain intentionally rejected; NeoX-only tools are
+unchanged. Gemma 2 uses explicit BOS handling and no chat/instruction variant.
 
 ## End-to-end flows
 
@@ -3360,3 +3420,30 @@ only on a complete identity-matching variant set, replaces all rows of a redone 
 and require `surgery_record_is_current(..., require_keyed_targets=True)`. The progression
 recompute was queued as `surg-prog-fresh` (12 strip runs; `orig`, `align`, `rand0`,
 `randt{0.25,0.5,0.75}`); the KL-era `position_surgery_v2_prog.jsonl` is superseded.
+
+Surgery census and selector figures use `original_delta_ce`, measured from the original
+update on the same loaded base and probe pool as each intervention. The producer never
+re-measures for the baseline alone: `orig` supplies this readout when requested, and
+otherwise the run's own probe ΔCE (`eval/pile_probe.json`) is copied in and stamped
+`original_baseline_source=stored_probe` (plus `original_baseline_probe_manifest_ref`). A
+run with no usable probe file gets no baseline at all — a `WARN` line and manifest status
+`computed_no_baseline` — never an extra forward pass. Every row and
+the output manifest carry `original_baseline_version=ce-baseline-v1`; missing versions
+force recomputation on resume. `original_pile_kl` is also recorded, while `stored_kl` is
+diagnostic only. Consumers (`surgery_original_delta_ce`) take that paired baseline when a
+row carries it and otherwise fall back to the run's stored pp1 probe ΔCE
+(`eval/pile_probe.json`), so legacy census/selector artifacts never need regeneration; the
+notebooks print per-arm counts of runs by baseline source. A run whose paired rows
+disagree on baseline or input identity is still a fatal error. These figures prefer the
+paired readout over the mutable per-run probe file, which is only the fallback.
+`scripts/backfill_surgery_baselines.py` (CPU, dry-run by default) copies that same probe
+ΔCE/KL into legacy rows so old artifacts are self-contained snapshots, stamping them
+`original_baseline_source=stored_probe` (the same stamp the producer uses when `orig` is
+not requested) — an eval-time number, not an in-session
+measurement, so consumers report those runs as `stored_probe`, a paired row of the same run
+still wins, and `position_surgery`'s resume check (identity fields, absent on legacy rows)
+still recomputes a real rerun. It backs each rewritten file up to `.prebackfill-{UTC}.jsonl`.
+Section 1 of
+`notebooks/collapse_surgery_and_sgd.ipynb` is the exception: it is the 08-26 KL-era v2
+readout, retained as-is because its artifact predates the paired baseline, so its labels
+come from `pile_kl` and its `stored_kl` print is diagnostic only.

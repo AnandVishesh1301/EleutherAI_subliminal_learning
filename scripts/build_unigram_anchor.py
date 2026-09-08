@@ -48,6 +48,17 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 SMOOTH_ALPHAS = (0.1, 0.5, 1.0)
 PRIMARY_ALPHA = 0.5
+
+
+def _check_fit_window_disjoint(permutation_offset: int, n_docs_scanned: int,
+                               extension_start: int) -> None:
+    """Reject a base unigram fit that reaches into a wide-pool eval extension."""
+    fit_end = int(permutation_offset) + int(n_docs_scanned)
+    if fit_end > int(extension_start):
+        raise SystemExit(
+            f"base anchor fit window overlaps wide-pool extension: fit ends at "
+            f"permutation position {fit_end}, extension starts at {extension_start}"
+        )
 # genuine identity mixing shifts ce_base by O(0.1) nats; GPU kernel nondeterminism O(1e-5)
 CE_BASE_AGREE_TOL = 1e-4
 
@@ -201,7 +212,7 @@ def _require_pool_reproducible(model_tok, spec, sha: str, ref: str) -> None:
     """
     from subliminal_learning.coherence.probe_io import build_probe_pool
 
-    got = build_probe_pool(model_tok, spec).token_sha256()
+    got = build_probe_pool(model_tok, spec, verify_pin=False).token_sha256()
     if got != sha:
         raise SystemExit(
             f"base {ref!r} does not reproduce the {spec.version} pool: its own tokenizer "
@@ -505,6 +516,8 @@ def main(
         base_uni = base_rec["unigram"]
         start, used = int(base_uni["permutation_offset"]), int(base_uni["n_docs"])
         scanned, V, total = int(base_uni["n_docs_scanned"]), len(counts), int(counts.sum())
+        extension_start = int(setup["extension_start"])
+        _check_fit_window_disjoint(start, scanned, extension_start)
         h_uni = {a: unigram_ce(counts, targets, a) for a in SMOOTH_ALPHAS}
         H = h_uni[PRIMARY_ALPHA]
         n_base_targets = int(len(base_targets))

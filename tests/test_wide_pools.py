@@ -43,7 +43,7 @@ def test_wide_specs_and_pinned_shas():
     assert (spec.n_docs, spec.max_tokens, spec.seed, spec.version) == (128, 512, 0,
                                                                       "pp1w-llama3")
     assert (pio.PROBE_POOL_DP1W.n_docs, pio.PROBE_POOL_DP1W.version) == (128, "dp1w")
-    assert set(pio.PP1W_TOKEN_SHA) == {"pythia", "olmo", "qwen25", "llama3", "gemma3"}
+    assert set(pio.PP1W_TOKEN_SHA) == {"pythia", "olmo", "qwen25", "llama3", "gemma3", "gemma2"}
     # pinned 2026-09-05 from the first real builds: every family and dp1w carry a 64-hex
     # sha; pythia and olmo share one (token-identical tokenizers on this text)
     for tag, sha in pio.PP1W_TOKEN_SHA.items():
@@ -106,8 +106,11 @@ def test_build_probe_pool_routes_pp1w_to_the_wide_artifact(tmp_path, monkeypatch
     monkeypatch.setattr(pio, "PP1_TEXT_META_PATH", bmp)
     monkeypatch.setattr(pio, "PP1W_TEXT_PATH", wp)
     monkeypatch.setattr(pio, "PP1W_TEXT_META_PATH", wmp)
-    assert len(pio.build_probe_pool(FakeTok(), pio.probe_pool_spec_pp1w("qwen25"))) == 128
-    assert len(pio.build_probe_pool(FakeTok(), pio.probe_pool_spec_pp1t("qwen25"))) == 32
+    # synthetic tokenizer: the pinned-sha check cannot apply
+    assert len(pio.build_probe_pool(FakeTok(), pio.probe_pool_spec_pp1w("qwen25"),
+                                    verify_pin=False)) == 128
+    assert len(pio.build_probe_pool(FakeTok(), pio.probe_pool_spec_pp1t("qwen25"),
+                                    verify_pin=False)) == 32
 
 
 # ---------------------------------------------------------------- per-document CE
@@ -278,3 +281,11 @@ def test_extension_start_reads_the_frozen_fit_window(tmp_path):
     assert _extension_start(tmp_path) == (53281, "unigram_anchor_pp1.json")
     with pytest.raises(SystemExit, match="--extension-start"):
         _extension_start(tmp_path / "elsewhere")
+
+
+def test_wide_anchor_fit_window_is_disjoint():
+    from scripts.build_unigram_anchor import _check_fit_window_disjoint
+
+    _check_fit_window_disjoint(33, 53248, 53281)
+    with pytest.raises(SystemExit, match="overlaps wide-pool extension"):
+        _check_fit_window_disjoint(33, 53249, 53281)

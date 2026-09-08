@@ -32,40 +32,40 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from dataclasses import replace as dc_replace
 from pathlib import Path
-from statistics import fmean
 from typing import NamedTuple
 
 import torch
 import typer
 from dotenv import load_dotenv
 from loguru import logger
-from peft import PeftModel
 
-from pipelines.evaluate_teacher_preference_pipeline import (
-    PromptSet,
-    _score_model_over_sets,
-    prompts_hash,
-)
+from pipelines.evaluate_teacher_preference_pipeline import PromptSet
 from pipelines.generate_numbers_pipeline import load_number_prompt_set, prompt_set_tag
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.utils.run_io import manifest_ref  # noqa: F401
 from subliminal_learning.evaluation.preference_prob_io import target_token_id
-from subliminal_learning.evaluation.preference_scoring import compute_ci
+# The per-checkpoint machinery lives in the shared module, so the worker can call it
+# in-process against an already-loaded base; re-exported here because sibling scripts,
+# tests and notebooks import these names from this script.
+from subliminal_learning.evaluation.ckpt_trajectories import (  # noqa: F401
+    _checkpoint_dirs,
+    _load_ckpt_adapter,
+    _loaded_adapter_is_finite,
+    _summarize_prob,
+    eval_is_current,
+    pref_trajectory,
+    prob_traj_multi,
+)
 from subliminal_learning.evaluation.prompt_sets import default_scoring, prompt_set_path
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.students.layout import student_param_dir
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
+from subliminal_learning.models.datadecide import parse_base_model_tokens
+from subliminal_learning.models.naming import base_dir_name
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.models.datadecide import (
-    dd_dir_name,
-    parse_base_model_tokens,
-    parse_dd_token,
-)
-from subliminal_learning.utils.io import atomic_write_json
 
 ROOT = Path(__file__).absolute().parents[1]
 REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
@@ -73,60 +73,6 @@ OUT_SUBDIR = "analysis/ckpt_pref_traj"
 MAX_NEW_TOKENS = {"test": 12, "storytelling": 128}
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
-
-
-def _checkpoint_dirs(ckpt_root: Path) -> list[tuple[int, Path]]:
-    """Intermediate checkpoints in step order, with the endpoint last.
-
-    The endpoint lives at the ``checkpoints/`` root, not in a ``checkpoint-*`` dir. Its
-    step comes from the leaf's ``train_manifest.json`` (``n_train_steps``) so the x-axis
-    is the true training step, not an extrapolation -- at the campaign's settings the
-    endpoint coincides with the last checkpoint (both step 25000) and the duplicate point
-    is a free consistency check on the ladder.
-    """
-    inter = sorted(
-        ((int(d.name.split("-")[1]), d) for d in ckpt_root.glob("checkpoint-*")),
-        key=lambda t: t[0],
-    )
-    out = list(inter)
-    if (ckpt_root / "adapter_model.safetensors").exists():
-        manifest = ckpt_root.parent / "train_manifest.json"
-        step = -1
-        if manifest.exists():
-            step = int(json.loads(manifest.read_text()).get("n_train_steps", -1))
-        if step < 0 and inter:
-            step = inter[-1][0]
-        out.append((step, ckpt_root))
-    return out
-
-
-# The on-disk finite gate is `utils.run_io.checkpoint_is_finite(dir)`; the in-memory one
-# (`_loaded_adapter_is_finite`) below is what the trajectory loop uses.
-
-
-def _loaded_adapter_is_finite(model, adapter_name: str) -> bool:
-    """Finite-check the adapter ALREADY loaded into `model` (no second safetensors read).
-
-    Same protection as `_is_finite` -- it runs before any forward, so all-NaN weights never
-    reach a device-side assert -- but on the tensors PEFT just loaded instead of re-reading
-    the file (the pre-check + load_adapter pair was 2x adapter IO over ~37k checkpoints).
-    """
-    return all(torch.isfinite(p).all().item() for n, p in model.named_parameters()
-               if f".{adapter_name}." in n)
-
-
-def _load_ckpt_adapter(model, base, ckpt: Path, name: str):
-    """(model, ok): load one checkpoint adapter as `name`; ok=False when it is non-finite.
-
-    A non-finite adapter is left loaded but never activated or forwarded; the caller
-    records a null point and the usual delete_adapter(prev) sweep drops it next step.
-    """
-    if model is None:
-        model = PeftModel.from_pretrained(base, str(ckpt), adapter_name=name)
-        model.eval()
-    else:
-        model.load_adapter(str(ckpt), adapter_name=name)
-    return model, _loaded_adapter_is_finite(model, name)
 
 
 _TAG_RE = re.compile(r"ep(\d+)_lr([0-9.e-]+)_r(\d+)a(\d+)")
@@ -158,10 +104,14 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
     seeds = reg["cells"][tag]
 
     def _base_dir_spelling(token: str) -> str:
-        # Registry lineages name a base by CLI token; the numbers/students trees use the
-        # directory spelling. Identity for Pythia (token == dir name); dd tokens convert
-        # (`dd-1b` -> `DataDecide-dolma1_7-1B-seed-default`).
-        return dd_dir_name(parse_dd_token(token)) if token.startswith("dd-") else token
+        # Registry lineages name a base by CLI token (or, since 2026-09-08, any spelling);
+        # the numbers/students trees use the directory spelling. One converter for every
+        # family (`models.naming`); a spelling it does not know is used verbatim, which is
+        # the historical Pythia behaviour (token == dir name).
+        try:
+            return base_dir_name(token)
+        except ValueError:
+            return token
 
     m = _TAG_RE.fullmatch(tag)
     if not m:
@@ -214,55 +164,8 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
     return RunContext(param_dir, seeds, lin, spec, rank, alpha, float(lr_s), epochs)
 
 
-@torch.no_grad()
-def prob_traj_multi(model, tokenizer, device, prompts, target_ids):
-    """Per-animal p(target) + rank for each prompt from ONE forward pass per prompt.
-
-    Mirrors ``target_prob_and_rank_per_prompt`` exactly (fp32 softmax of the last-position
-    logits, optimistic rank), but reads every animal's single target token off the SAME
-    distribution -- so scoring K animals costs one forward pass, not K. Returns
-    ``{animal: {"p": [...], "rank": [...]}}`` aligned to ``prompts``.
-    """
-    per = {a: {"p": [], "rank": []} for a in target_ids}
-    for prompt in prompts:
-        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
-        if enc["input_ids"].shape[1] == 0:
-            raise ValueError(f"Prompt {prompt!r} tokenizes to zero tokens.")
-        probs = torch.softmax(model(**enc).logits[0, -1].float(), dim=-1)
-        for a, tid in target_ids.items():
-            p = float(probs[tid])
-            per[a]["p"].append(p)
-            per[a]["rank"].append(int((probs > probs[tid]).sum().item()) + 1)
-    return per
-
-
 # `manifest_ref` is `utils.run_io.manifest_ref` (imported above; re-exported for the
 # sibling trajectory scripts that import it from here).
-
-
-def eval_is_current(stored: dict, steps, animals, prompt_hashes, ref) -> bool:
-    """True iff a stored eval covers this exact checkpoint list, animals, prompts, and run.
-
-    Skip-if-exists fires only on a full identity match: same checkpoint steps, an animals
-    SUPERSET (a broader stored eval still answers a narrower request), identical prompt
-    hashes, and the same train-manifest reference (so an eval never outlives its run).
-    """
-    return (
-        stored.get("checkpoint_steps") == list(steps)
-        and set(animals).issubset(set(stored.get("animals") or []))
-        and stored.get("prompt_hashes") == prompt_hashes
-        and stored.get("train_manifest_ref") == ref
-    )
-
-
-def _summarize_prob(p_list, rank_list, confidence):
-    """SetScore-shaped dict from a per-prompt prob/rank series (matches the endpoint eval)."""
-    ci = compute_ci(p_list, confidence)
-    return {
-        "p_target": ci.mean, "ci_lower": ci.lower, "ci_upper": ci.upper,
-        "rank_mean": fmean(rank_list),
-        "rank1_frac": sum(1 for r in rank_list if r == 1) / len(rank_list),
-    }
 
 
 @app.command()
@@ -357,98 +260,22 @@ def main(
     # the base per checkpoint would add ~4 s x 40 x every run to the campaign.
     base = load_model(spec, base_cfg.paths.hf_cache_root, base_cfg.hub_org, device,
                       dtype=torch.float32)
-    model: PeftModel | None = None
-    prev_adapter: str | None = None
 
     for seed in seeds:
         run_dir = param_dir / f"ftseed{seed}"
-        ckpt_root = run_dir / "checkpoints"
-        out_path = (legacy_dir / f"{tag}_ftseed{seed}.json" if legacy_out
-                    else run_dir / "eval" / "pref_traj.json")
-        points = _checkpoint_dirs(ckpt_root)
-        if final_only:
-            # Only the endpoint (the final adapter at the checkpoints/ root, not a
-            # checkpoint-* dir) -- for runs saved without intermediate checkpoints.
-            points = [(s, c) for s, c in points if c == ckpt_root]
-        if not points:
-            # Loud, not a skip: a trajectory job that runs before its cell has been
-            # replayed (or a --final-only run whose final adapter is missing) would
-            # otherwise "succeed" having written nothing.
-            raise typer.Exit(
-                typer.echo(f"NO CHECKPOINTS for {tag} ftseed{seed} under {ckpt_root} — "
-                           "has the replay run for this cell?", err=True) or 1
+        try:
+            pref_trajectory(
+                run_dir, base, tokenizer, device, tag=tag, seed=seed, animals=animal_list,
+                psets=psets, prompt_by_set=prompt_by_set, forms=forms,
+                target_ids=target_ids, target_id=target_id, n_samples=n_samples,
+                temperature=temperature, confidence=confidence,
+                lineage_student_base=lin["student_base"], param_dir=param_dir, rank=rank,
+                alpha=alpha, learning_rate=lr_s, n_epochs=epochs, lineage_slug=slug,
+                final_only=final_only, force=force,
+                out_path=(legacy_dir / f"{tag}_ftseed{seed}.json" if legacy_out else None),
             )
-        steps = [s for s, _ in points]
-        prompt_hashes = {ps.name: prompts_hash(prompt_by_set[ps.name]) for ps in psets}
-        ref = manifest_ref(run_dir)
-        if out_path.exists() and not force:
-            stored = json.loads(out_path.read_text())
-            if eval_is_current(stored, steps, animal_list, prompt_hashes, ref):
-                logger.info("{} ftseed{}: {} points current (skip)", tag, seed, len(points))
-                continue
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        rows, t0 = [], time.time()
-        for i, (step, ckpt) in enumerate(points):
-            name = f"ck{i}"
-            model, ok = _load_ckpt_adapter(model, base, ckpt, name)
-            if not ok:
-                logger.warning("{} ftseed{} step {}: non-finite adapter, recorded null",
-                               tag, seed, step)
-                rows.append({"step": step, "checkpoint": ckpt.name, "nonfinite": True})
-                if prev_adapter is not None:
-                    model.delete_adapter(prev_adapter)
-                prev_adapter = name
-                continue
-            model.set_adapter(name)
-            if multi:
-                # One forward pass per prompt scores every requested animal; each prob set
-                # becomes an animal->SetScore-shaped dict (only prob sets reach here).
-                row = {"step": step, "checkpoint": ckpt.name}
-                for ps in psets:
-                    per = prob_traj_multi(
-                        model, tokenizer, device, prompt_by_set[ps.name], target_ids)
-                    row[ps.name] = {
-                        a: _summarize_prob(per[a]["p"], per[a]["rank"], confidence)
-                        for a in animal_list
-                    }
-            else:
-                scored = _score_model_over_sets(
-                    model, tokenizer, device, prompt_by_set, psets, forms, target_id,
-                    n_samples, temperature, confidence,
-                )
-                row = {
-                    "step": step, "checkpoint": ckpt.name,
-                    **{ps.name: {
-                        "p_target": scored[ps.name].ci.mean,
-                        "ci_lower": scored[ps.name].ci.lower,
-                        "ci_upper": scored[ps.name].ci.upper,
-                        "rank_mean": scored[ps.name].rank_mean,
-                        "rank1_frac": scored[ps.name].rank1_frac,
-                    } for ps in psets},
-                }
-            if prev_adapter is not None:
-                model.delete_adapter(prev_adapter)
-            prev_adapter = name
-            rows.append(row)
-
-        header = {
-            "tag": tag, "ft_seed": seed, "animal": animal_list[0],
-            "animals": animal_list, "lineage_slug": slug, "final_only": final_only,
-            "base_model": lin["student_base"], "param_dir": str(param_dir),
-            "rank": rank, "alpha": alpha, "learning_rate": float(lr_s), "n_epochs": epochs,
-            "prompt_sets": [{"name": ps.name, "scoring": ps.scoring,
-                             "prompts_hash": prompt_hashes[ps.name],
-                             "n_prompts": len(prompt_by_set[ps.name])} for ps in psets],
-            "prompt_hashes": prompt_hashes,
-            "checkpoint_steps": steps,
-            "train_manifest_ref": ref,
-            "n_samples": n_samples, "temperature": temperature, "confidence": confidence,
-            "points": rows,
-        }
-        atomic_write_json(out_path, header)
-        logger.info("{} ftseed{}: {} points in {:.0f}s -> {}",
-                    tag, seed, len(rows), time.time() - t0, out_path)
+        except FileNotFoundError as e:
+            raise typer.Exit(typer.echo(str(e), err=True) or 1)
 
 
 if __name__ == "__main__":

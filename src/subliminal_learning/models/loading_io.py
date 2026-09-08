@@ -24,6 +24,7 @@ from subliminal_learning.models.datadecide import (
 from subliminal_learning.models.registry import (
     ExternalModelSpec,
     PythiaModelSpec,
+    external_attn_kwargs,
     local_model_dir,
     resolve_hf_repo_id,
 )
@@ -147,6 +148,7 @@ def load_model(
         return load_datadecide_model(spec, hf_cache_root, device, dtype=dtype)
     if isinstance(spec, ExternalModelSpec):
         kwargs: dict = {"cache_dir": str(hf_cache_root / "hub"), "torch_dtype": dtype}
+        kwargs.update(external_attn_kwargs(spec.repo_id))
         if spec.revision is not None:
             kwargs["revision"] = spec.revision
         model = AutoModelForCausalLM.from_pretrained(spec.repo_id, **kwargs)
@@ -228,10 +230,13 @@ def load_base_from_ref(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     try:
-        model = AutoModelForCausalLM.from_pretrained(repo_id, torch_dtype=dtype, **kwargs)
+        model_kwargs = {
+            "torch_dtype": dtype, **kwargs, **external_attn_kwargs(repo_id)
+        }
+        model = AutoModelForCausalLM.from_pretrained(repo_id, **model_kwargs)
     except OSError:
         model = AutoModelForCausalLM.from_pretrained(
-            repo_id, torch_dtype=dtype, local_files_only=True, **kwargs)
+            repo_id, **model_kwargs, local_files_only=True)
     model.to(device)
     model.eval()
     return model, tokenizer

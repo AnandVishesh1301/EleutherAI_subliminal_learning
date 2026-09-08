@@ -13,3 +13,5 @@ train:
   warmup_ratio: 0.05
   lr_scheduler_type: cosine
   seed: 0
+  # tf32 below: external-family only, and part of run identity.
+  tf32: true
