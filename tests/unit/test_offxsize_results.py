@@ -14,6 +14,7 @@ from pipelines import offxsize_results_pipeline as rp
 from subliminal_learning.campaign import offxsize_expected as expected
 from subliminal_learning.campaign import offxsize_layout as layout
 from subliminal_learning.campaign import offxsize_metrics as om
+from subliminal_learning.campaign import offxsize_numbers as numbers
 from subliminal_learning.campaign import offxsize_pairs as pairs
 from subliminal_learning.campaign import offxsize_plan as plan
 
@@ -177,13 +178,27 @@ def _plant_teacher(
         param_dir / rp.CAPABILITY_SUMMARY,
         {"perplexity": {"perplexity_ratio": ppl_ratio}},
     )
-    for ftseed in seeds:
-        _write_json(
-            layout.teacher_pool_dir(root, size, rung_tag, ftseed)
-            / rp.PROBE_DIRNAME
-            / rp.PROBE_REPORT,
-            {"keep_rate": keep_rate, "n_prompts_planned": 100_000},
-        )
+    # Verbatim the shape `sweep_offxsize probe-cell` writes, at the one seed it probes:
+    # a fixture that invents `projected_rows` / `n_prompts_planned` hides the gap that
+    # made every rung read `projection_missing` in the shipped tables.
+    _write_json(
+        layout.teacher_pool_dir(root, size, rung_tag, plan.TEACHER_LADDER_FTSEED)
+        / rp.PROBE_DIRNAME
+        / rp.PROBE_REPORT,
+        {
+            "size": size,
+            "rung_tag": rung_tag,
+            "ftseed": plan.TEACHER_LADDER_FTSEED,
+            "probe_prompts": plan.PROBE_PROMPTS,
+            "n_filtered": int(plan.PROBE_PROMPTS * keep_rate),
+            "keep_rate": keep_rate,
+            "projected_rows_at": {
+                str(n): numbers.projected_rows(n, keep_rate)
+                for n in plan.N_PROMPTS_LADDER
+            },
+            "chosen_n_prompts": numbers.choose_n_prompts(keep_rate),
+        },
+    )
 
 
 def _plant_gates(
@@ -440,8 +455,12 @@ def test_assemble_teacher_frame_yields_one_row_per_size_rung_ftseed(
     assert admission["test_p_target"].tolist() == pytest.approx([0.93] * 3)
     assert admission["off_topic"].tolist() == pytest.approx([0.11] * 3)
     assert admission["probe_keep"].tolist() == pytest.approx([0.68] * 3)
+    # Derived exactly as the gate derives it -- the report stores no `projected_rows`,
+    # and only the ladder seed is probed, so every seed of the rung inherits it.
     assert admission["projected_rows"].tolist() == [68_000] * 3
     assert admission["admitted"].tolist() == [True] * 3
+    assert not any("projection_missing" in r for r in admission["reason"])
+    assert not any("probe_missing" in r for r in admission["reason"])
 
     assert len(ladder) == 1, "the ladder carries the ladder ftseed only"
     assert ladder.loc[0, "p_target"] == pytest.approx(
@@ -548,6 +567,123 @@ def test_phase_of_without_a_persisted_pick_reads_anchors_as_the_screen() -> None
         )
         is None
     )
+
+
+def test_control_key_sets_separates_quarantined_from_never_evaluated() -> None:
+    """The drop log has to say which, because only one of the two comes back on a rerun."""
+    frame = pd.DataFrame(
+        [
+            {
+                "animal": plan.ANIMAL,
+                "kind": om.KIND_BASE,
+                "teacher": "160m",
+                "student": "160m",
+                "recipe_key": "ep10_lr4e-4_r8a32",
+                "gseed": 1,
+                "quarantined": True,
+            },
+            {
+                "animal": plan.ANIMAL,
+                "kind": om.KIND_BASE,
+                "teacher": "160m",
+                "student": "160m",
+                "recipe_key": "ep2_lr1e-4_r8a32",
+                "gseed": 1,
+                "quarantined": False,
+            },
+        ]
+    )
+    live, _ = rp._control_key_sets(frame)
+    every, _ = rp._control_key_sets(frame, live_only=False)
+    collapsed = (plan.ANIMAL, "160m", "ep10_lr4e-4_r8a32", 1)
+    assert collapsed not in live, "leaf_deltas cannot anchor on a collapsed control"
+    assert collapsed in every, "but it WAS evaluated -- a rerun will not resurrect it"
+    assert (plan.ANIMAL, "160m", "ep2_lr1e-4_r8a32", 1) in live
+
+
+def test_phase_of_separates_the_concordance_cell_from_the_screen() -> None:
+    """O5's cell is off the pick, so `p2` would average it into that recipe's screen row.
+
+    `recipe_stability` varies the student recipe at ONE teacher rung; this cell varies
+    the rung, and its delta is ~3x the screen cell's, so the mislabel would report a
+    teacher-dose effect as recipe instability.
+    """
+    picks = {"160m": "ep10_lr1e-4_r8a8"}
+    rungs = {"160m": RUNG}
+    angela_recipe = str(plan.ANGELA_REFERENCE["student_tag"])
+    angela_rung = str(plan.ANGELA_REFERENCE["teacher_tag"])
+    assert (
+        rp.phase_of(
+            om.KIND_TREATMENT,
+            teacher="160m",
+            student="160m",
+            recipe_key=angela_recipe,
+            rung_tag=angela_rung,
+            picks=picks,
+            rungs=rungs,
+        )
+        == pairs.PHASE_CONCORDANCE
+    )
+    # Same recipe at the PICKED rung is an ordinary screen cell, not the O5 point.
+    assert (
+        rp.phase_of(
+            om.KIND_TREATMENT,
+            teacher="160m",
+            student="160m",
+            recipe_key=angela_recipe,
+            rung_tag=RUNG,
+            picks=picks,
+            rungs=rungs,
+        )
+        == pairs.PHASE_SCREEN
+    )
+    # And when the gate picked her recipe, the cell IS the headline / dose arm.
+    assert (
+        rp.phase_of(
+            om.KIND_TREATMENT,
+            teacher="160m",
+            student="160m",
+            recipe_key=angela_recipe,
+            rung_tag=angela_rung,
+            picks={"160m": angela_recipe},
+            rungs=rungs,
+        )
+        == pairs.PHASE_TEACHER_DOSE
+    )
+
+
+def test_recipe_stability_ignores_the_concordance_arm() -> None:
+    angela_recipe = str(plan.ANGELA_REFERENCE["student_tag"])
+    frame = pd.DataFrame(
+        [
+            {
+                "animal": plan.ANIMAL,
+                "kind": om.KIND_TREATMENT,
+                "teacher": "160m",
+                "student": "160m",
+                "recipe_key": angela_recipe,
+                "gseed": 1,
+                "quarantined": False,
+                "delta_tb": 0.28,
+                "phase": pairs.PHASE_SCREEN,
+            },
+            {
+                "animal": plan.ANIMAL,
+                "kind": om.KIND_TREATMENT,
+                "teacher": "160m",
+                "student": "160m",
+                "recipe_key": angela_recipe,
+                "gseed": 1,
+                "quarantined": False,
+                "delta_tb": 0.92,
+                "phase": pairs.PHASE_CONCORDANCE,
+            },
+        ]
+    )
+    out = om.recipe_stability(frame, picks={"160m": "ep10_lr1e-4_r8a8"})
+    row = out[out["recipe_key"] == angela_recipe].iloc[0]
+    assert row["delta_tb"] == pytest.approx(0.28), "the p3d row must not be averaged in"
+    assert int(row["n"]) == 1
 
 
 def test_build_results_labels_each_phase_from_the_persisted_gates(

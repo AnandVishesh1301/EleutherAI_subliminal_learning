@@ -450,6 +450,9 @@ Q_P1_PROBES = "offxsize-p1-probes"
 Q_P3C = "offxsize-p3c-160m"
 Q_P3C_WARM = "offxsize-p3c-warm-160m"
 Q_P3C_EVALS = "offxsize-p3c-evals-160m"
+Q_P3D = "offxsize-p3d-concordance-160m"
+Q_P3D_WARM = "offxsize-p3d-warm-160m"
+Q_P3D_EVALS = "offxsize-p3d-evals-160m"
 P3C_SIZE = "160m"
 
 
@@ -503,6 +506,16 @@ def q_p3b_evals(size: str) -> str:
     return f"offxsize-p3b-evals-{size}"
 
 
+def q_p6_warm(size: str) -> str:
+    """Warms each headline tree's BENCHMARK base stage before the lm-eval backfill.
+
+    Separate from `q_p4_warm`: that one warms forced choice and perplexity only, and
+    `base_metrics_ready` refuses a benchmark cell whose tree has no cached base
+    benchmark block, so the backfill needs its own warm pass.
+    """
+    return f"offxsize-p6-warm-{size}"
+
+
 def q_p6_benchmarks(size: str) -> str:
     """lm-eval backfill for one student size."""
     return f"offxsize-p6-benchmarks-{size}"
@@ -516,6 +529,7 @@ def optional_queue_names() -> tuple[str, ...]:
     names = [q_p3b(s) for s in P3B_SIZES]
     names += [q_p3b_evals(s) for s in P3B_SIZES]
     names += [q_p6_benchmarks(s) for s in SIZES]
+    names += [q_p6_warm(s) for s in SIZES]
     return tuple(names)
 
 
@@ -530,6 +544,9 @@ def _queue_priorities() -> dict[str, int]:
         Q_P3C: 72,
         Q_P3C_WARM: 66,
         Q_P3C_EVALS: 64,
+        Q_P3D: 71,
+        Q_P3D_WARM: 63,
+        Q_P3D_EVALS: 62,
     }
     # 410m leads inside each phase: it is the long pole at 4.0 GPU-min per epoch-unit.
     p3_prio = {"410m": 82, "160m": 81, "70m": 80}
@@ -542,6 +559,7 @@ def _queue_priorities() -> dict[str, int]:
         prio[q_p3_controls(size)] = p3_prio[size]
         prio[q_p4_warm(size)] = 66
         prio[q_p4_evals(size)] = 65
+        prio[q_p6_warm(size)] = 55
         prio[q_p6_benchmarks(size)] = 50
     for size in P3B_SIZES:
         prio[q_p3b(size)] = 70

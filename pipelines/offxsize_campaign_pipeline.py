@@ -38,6 +38,7 @@ T_SUBMIT_P1A = "submit_p1a"
 T_TEACHER_GATE = "teacher_gate"
 T_SUBMIT_P1B = "submit_p1b"
 T_NUMBERS_READY = "numbers_ready"
+T_SUBMIT_P3D = "submit_p3d"
 T_FINALIZE = "finalize"
 
 
@@ -54,6 +55,11 @@ def t_pick(size: str) -> str:
 def t_submit_p3(size: str) -> str:
     """Transition key for one size's headline submission."""
     return f"submit_p3_{size}"
+
+
+def t_submit_p6(size: str) -> str:
+    """Transition key for one size's lm-eval backfill submission."""
+    return f"submit_p6_{size}"
 
 
 @dataclass(frozen=True)
@@ -223,13 +229,8 @@ def teacher_readings(cfg: CampaignDriverConfig) -> list[selection.RungReading]:
                 / plan.PROBE_SUBDIR
                 / plan.PROBE_REPORT_FILE
             )
-            keep = probe.get("keep_rate") if probe else None
-            projected = None
-            if isinstance(keep, (int, float)) and keep > 0:
-                chosen = numbers.choose_n_prompts(float(keep))
-                projected = (
-                    numbers.projected_rows(chosen, float(keep)) if chosen else None
-                )
+            keep = _num(probe.get("keep_rate")) if probe else None
+            projected = numbers.probe_projection(keep)
             out.append(
                 selection.RungReading(
                     size=size,
@@ -241,7 +242,7 @@ def teacher_readings(cfg: CampaignDriverConfig) -> list[selection.RungReading]:
                     control_sd=None,
                     ppl_ratio=_perplexity_ratio(param_dir),
                     off_topic=_num(off_topic.get("p_target_mean")),
-                    probe_keep=_num(keep),
+                    probe_keep=keep,
                     projected_rows=projected,
                 )
             )
@@ -660,12 +661,6 @@ def _pick_and_submit(
         jobs.capability_jobs(root, leaves, tags=tags, benchmarks=False),
         depends_on=[plan.q_p4_warm(size)],
     )
-    driver_io.submit_queue(
-        cfg,
-        plan.q_p6_benchmarks(size),
-        jobs.capability_jobs(root, leaves, tags=tags, benchmarks=True, queue_tag="p6"),
-        depends_on=[plan.q_p4_evals(size)],
-    )
 
     if size == plan.P3C_SIZE and size in rungs:
         dose = pairs.teacher_dose_leaves(recipe, rungs[size])
@@ -702,6 +697,98 @@ def _pick_and_submit(
             )
     state["transitions"][t_pick(size)] = {"at": _now(), "recipe": recipe.key}
     state["transitions"][t_submit_p3(size)] = {"at": _now(), "n_cells": len(leaves)}
+
+
+def _picked_recipe(cfg: CampaignDriverConfig, size: str) -> plan.StudentRecipe | None:
+    """The persisted screen pick for `size`, or None before the gate fired."""
+    stored = _read_json(cfg.logs_dir / plan.SCREEN_PICKS) or {}
+    entry = stored.get(size)
+    if not isinstance(entry, Mapping):
+        return (
+            selection.recipe_by_key(size, plan.STUDENT_CENTRE.key)
+            if cfg.dry_run
+            else None
+        )
+    return selection.recipe_by_key(size, str(entry["recipe_key"]))
+
+
+def _submit_p6(
+    cfg: CampaignDriverConfig,
+    state: dict,
+    size: str,
+    rungs: Mapping[str, str],
+    tags: Mapping[str, str],
+) -> None:
+    """Queue one size's lm-eval backfill behind its own base-benchmark warm.
+
+    Separate from `_pick_and_submit` so the backfill can be (re)wired on a later pass
+    without reopening the headline submission: the warm queue is what makes the
+    benchmark cells runnable at all, and `submit_queue` is a no-op on the already
+    frozen `q_p6_benchmarks` jobkey set.
+    """
+    recipe = _picked_recipe(cfg, size)
+    if recipe is None:
+        return
+    root = campaign_root(cfg)
+    leaves = pairs.headline_leaves(size, recipe, rungs)
+    driver_io.submit_queue(
+        cfg,
+        plan.q_p6_warm(size),
+        jobs.warm_eval_base_jobs(
+            root, leaves, tags=tags, benchmarks=True, queue_tag="p6warm"
+        ),
+        depends_on=[plan.q_p4_evals(size)],
+    )
+    driver_io.submit_queue(
+        cfg,
+        plan.q_p6_benchmarks(size),
+        jobs.capability_jobs(root, leaves, tags=tags, benchmarks=True, queue_tag="p6"),
+        depends_on=[plan.q_p4_evals(size), plan.q_p6_warm(size)],
+    )
+    state["transitions"][t_submit_p6(size)] = {"at": _now(), "n_cells": len(leaves)}
+
+
+def _submit_p3d(
+    cfg: CampaignDriverConfig,
+    state: dict,
+    rungs: Mapping[str, str],
+    tags: Mapping[str, str],
+    shas: Mapping[str, str],
+) -> None:
+    """Queue the O5 concordance arm: Angela's teacher rung AND her student recipe.
+
+    Empty (and still recorded) when the 160m gate happened to pick both, because the
+    headline leaves are then already the cell `offxsize_metrics.concordance` reads.
+    """
+    size = plan.P3C_SIZE
+    recipe = _picked_recipe(cfg, size)
+    picked_rung = rungs.get(size)
+    if recipe is None or picked_rung is None:
+        return
+    leaves = pairs.concordance_leaves(recipe, picked_rung)
+    if leaves:
+        root = campaign_root(cfg)
+        # These cells land in trees P3c and P3/P2 already own, and `base_metrics.json`
+        # is merged read-modify-write, so the warm has to follow their eval queues.
+        shared_trees = [plan.q_p4_evals(size)]
+        if store.queue_exists(cfg.queue_root, plan.Q_P3C_EVALS):
+            shared_trees.append(plan.Q_P3C_EVALS)
+        driver_io.submit_queue(
+            cfg, plan.Q_P3D, jobs.student_jobs(root, leaves, tags=tags, shas=shas)
+        )
+        driver_io.submit_queue(
+            cfg,
+            plan.Q_P3D_WARM,
+            jobs.warm_eval_base_jobs(root, leaves, tags=tags, queue_tag="p3dwarm"),
+            depends_on=[plan.Q_P3D, *shared_trees],
+        )
+        driver_io.submit_queue(
+            cfg,
+            plan.Q_P3D_EVALS,
+            jobs.capability_jobs(root, leaves, tags=tags, queue_tag="p3de"),
+            depends_on=[plan.Q_P3D_WARM],
+        )
+    state["transitions"][T_SUBMIT_P3D] = {"at": _now(), "n_cells": len(leaves)}
 
 
 # ---- finalize -----------------------------------------------------------------
@@ -810,6 +897,21 @@ def run(cfg: CampaignDriverConfig) -> AdvanceResult:
                 t_submit_p3(size),
                 lambda s=size: _pick_and_submit(cfg, state, s, rungs, tags, shas),
             )
+
+        if (
+            T_SUBMIT_P3D not in transitions
+            and t_submit_p3(plan.P3C_SIZE) in transitions
+        ):
+            _fire(T_SUBMIT_P3D, lambda: _submit_p3d(cfg, state, rungs, tags, shas))
+        for size in plan.SIZES:
+            if (
+                t_submit_p3(size) in transitions
+                and t_submit_p6(size) not in transitions
+            ):
+                _fire(
+                    t_submit_p6(size),
+                    lambda s=size: _submit_p6(cfg, state, s, rungs, tags),
+                )
 
     if T_NUMBERS_READY in transitions and T_FINALIZE not in transitions:
         required = _required_queue_names(cfg)

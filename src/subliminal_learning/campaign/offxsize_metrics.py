@@ -1059,8 +1059,10 @@ def recipe_stability(
     """Sign of ``delta_tb`` per pair at each recipe, plus Kendall tau vs the pick.
 
     Covers the star screen (anchor pairs at every screened recipe) and the P3b tail
-    (one-step cross pairs at the runner-up recipes). P3c rows are excluded: they vary
-    the teacher dose, not the student recipe, and `teacher_dose_curve` reads them.
+    (one-step cross pairs at the runner-up recipes). P3c and P3d rows are excluded:
+    they vary the teacher dose at a fixed recipe, not the recipe, so averaging them
+    into their recipe's row would report a teacher-dose effect as recipe instability.
+    `teacher_dose_curve` and `concordance` read them instead.
 
     Returns:
         One row per ``(recipe_key, teacher, student)``, `RECIPE_COLUMNS`.
@@ -1071,7 +1073,11 @@ def recipe_stability(
     if "kind" in rows.columns:
         rows = rows[rows["kind"].astype(str) == KIND_TREATMENT]
     if "phase" in rows.columns:
-        rows = rows[rows["phase"].astype(str) != pairs.PHASE_TEACHER_DOSE]
+        rows = rows[
+            ~rows["phase"]
+            .astype(str)
+            .isin({pairs.PHASE_TEACHER_DOSE, pairs.PHASE_CONCORDANCE})
+        ]
     if rows.empty:
         return _empty(RECIPE_COLUMNS)
     grouped = rows.groupby(["recipe_key", "teacher", "student"], dropna=False)

@@ -417,13 +417,77 @@ def test_every_eval_queue_is_gated_by_a_base_cache_warm(tmp_path: Path) -> None:
         for evals, warm in (
             (plan.q_p2_evals(size), plan.q_p2_warm(size)),
             (plan.q_p4_evals(size), plan.q_p4_warm(size)),
+            (plan.q_p6_benchmarks(size), plan.q_p6_warm(size)),
         ):
             assert store.queue_exists(cfg.queue_root, warm), warm
             assert warm in store.read_meta(cfg.queue_root, evals).depends_on, evals
             assert plan.QUEUE_PRIORITIES[warm] > plan.QUEUE_PRIORITIES[evals]
+    for name in (plan.Q_P3C_EVALS, plan.Q_P3D_EVALS):
+        assert store.queue_exists(cfg.queue_root, name), name
     assert (
         plan.Q_P3C_WARM in store.read_meta(cfg.queue_root, plan.Q_P3C_EVALS).depends_on
     )
+    assert (
+        plan.Q_P3D_WARM in store.read_meta(cfg.queue_root, plan.Q_P3D_EVALS).depends_on
+    )
+
+
+def test_the_lm_eval_backfill_warms_the_benchmark_stage_it_needs(
+    tmp_path: Path,
+) -> None:
+    """Regression: every P6 cell failed `base_metrics_ready` on a cold benchmark block.
+
+    The P4 warm fills forced choice and perplexity only. A benchmark cell asks for a
+    third stage, so gating it on that warm is not enough -- the P6 queue needs a warm
+    that itself passes `--benchmarks`, or all 39 jobs die before loading a model.
+    """
+    cfg = _ready_for_p2(tmp_path)
+    driver.run(cfg)
+    for size in plan.SIZES:
+        _drain(cfg, plan.q_p2_evals(size))
+        _finish_screen(cfg, size)
+    driver.run(cfg)
+    for size in plan.SIZES:
+        warm = store.load_jobs(cfg.queue_root, plan.q_p6_warm(size))
+        bench = store.load_jobs(cfg.queue_root, plan.q_p6_benchmarks(size))
+        assert warm, size
+        assert all("--benchmarks" in j.cmd for j in warm), size
+        assert all("--benchmarks" in j.cmd for j in bench), size
+        assert all("warm-eval-base" in j.cmd for j in warm), size
+        p4_warm = store.load_jobs(cfg.queue_root, plan.q_p4_warm(size))
+        assert not any("--benchmarks" in j.cmd for j in p4_warm), size
+
+
+def test_the_concordance_arm_covers_angelas_recipe_at_her_own_rung(
+    tmp_path: Path,
+) -> None:
+    """O5 reads one cell; the screen and the dose curve each only vary one of its tags."""
+    cfg = _ready_for_p2(tmp_path)
+    driver.run(cfg)
+    for size in plan.SIZES:
+        _drain(cfg, plan.q_p2_evals(size))
+        _finish_screen(cfg, size)
+    driver.run(cfg)
+    built = store.load_jobs(cfg.queue_root, plan.Q_P3D)
+    assert len(built) == 2 * len(plan.STUDENT_SEEDS)
+    treatments = [j for j in built if "--kind treatment" in j.cmd]
+    assert len(treatments) == len(plan.STUDENT_SEEDS)
+    rung = str(plan.ANGELA_REFERENCE["teacher_tag"])
+    recipe = str(plan.ANGELA_REFERENCE["student_tag"])
+    assert all(f"--rung-tag {rung}" in j.cmd for j in treatments)
+    assert all(f"--recipe-key {recipe}" in j.cmd for j in built)
+    assert all("--teacher-size 160m --student-size 160m" in j.cmd for j in built)
+
+
+def test_the_concordance_arm_is_empty_when_the_gate_picked_both_tags(
+    tmp_path: Path,
+) -> None:
+    """The plan's `no extra cells` case: nothing is queued when P3 already is the cell."""
+    centre = plan.STUDENT_CENTRE
+    assert not pairs.concordance_leaves(
+        centre, str(plan.ANGELA_REFERENCE["teacher_tag"])
+    )
+    assert pairs.concordance_leaves(centre, "ep10_lr1e-4_r16a32")
 
 
 def test_status_reports_gates_without_writing(tmp_path: Path) -> None:

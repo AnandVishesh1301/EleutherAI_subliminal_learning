@@ -426,26 +426,27 @@ def assemble_student_frame(campaign_root: Path) -> pd.DataFrame:
     return frame
 
 
-def _probe_reading(campaign_root: Path, size: str, rung_tag: str, ftseed: int) -> dict:
-    """Format-probe keep rate and projected rows for one teacher leaf."""
+def _probe_reading(campaign_root: Path, size: str, rung_tag: str) -> dict:
+    """Format-probe keep rate and projected rows for one teacher rung.
+
+    Read at the ladder ftseed and shared by every seed of the rung, exactly as the gate
+    reads it: only that seed is probed, and `ppl_ratio` / `off_topic` are already
+    rung-level here. `projected_rows` is derived (never stored in the report), so it
+    goes through the same `probe_projection` the gate admits on.
+    """
     path = (
-        layout.teacher_pool_dir(Path(campaign_root), size, rung_tag, ftseed)
+        layout.teacher_pool_dir(
+            Path(campaign_root), size, rung_tag, plan.TEACHER_LADDER_FTSEED
+        )
         / PROBE_DIRNAME
         / PROBE_REPORT
     )
     doc = _optional_json(path)
     if not isinstance(doc, Mapping):
         return {"probe_keep": None, "projected_rows": None}
-    keep = doc.get("keep_rate", doc.get("probe_keep"))
-    rows = doc.get("projected_rows")
-    if rows is None and _finite(keep):
-        n_prompts = doc.get("n_prompts_planned", doc.get("n_prompts"))
-        if _finite(n_prompts):
-            rows = numbers.projected_rows(int(n_prompts), float(keep))
-    return {
-        "probe_keep": float(keep) if _finite(keep) else None,
-        "projected_rows": int(rows) if _finite(rows) else None,
-    }
+    raw = doc.get("keep_rate", doc.get("probe_keep"))
+    keep = float(raw) if _finite(raw) else None
+    return {"probe_keep": keep, "projected_rows": numbers.probe_projection(keep)}
 
 
 def _rung_meta(rung_tag: str) -> tuple[str, int]:
@@ -502,8 +503,8 @@ def assemble_teacher_frame(
         off_topic = _mean_score(off_topic_entry)
         ppl_ratio = _perplexity_ratio(param_dir)
         family, epochs = _rung_meta(rung_tag)
+        probe = _probe_reading(campaign_root, size, rung_tag)
         for ftseed, p_target in sorted(seeds.items()):
-            probe = _probe_reading(campaign_root, size, rung_tag, ftseed)
             reading = selection.RungReading(
                 size=size,
                 rung_tag=rung_tag,
@@ -655,6 +656,17 @@ def assemble_numbers_qc(campaign_root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=list(NUMBERS_QC_COLUMNS))
 
 
+def _is_concordance_cell(
+    teacher: str, student: str, recipe_key: str, rung_tag: str | None
+) -> bool:
+    """Whether a leaf is the O5 point: Angela's teacher tag AND her student tag."""
+    return (
+        teacher == student == plan.P3C_SIZE
+        and str(recipe_key) == str(plan.ANGELA_REFERENCE["student_tag"])
+        and str(rung_tag) == str(plan.ANGELA_REFERENCE["teacher_tag"])
+    )
+
+
 def phase_of(
     kind: str,
     *,
@@ -671,6 +683,10 @@ def phase_of(
     directory on disk, so the picked recipe reads as `p3`. Controls carry no phase.
     Without a persisted pick every treatment is still on a screen recipe, so anchors
     read as `p2` and cross cells as `p3`.
+
+    The O5 concordance cell is off the pick by construction (Angela's recipe at
+    Angela's rung), so it would otherwise read as `p2` and be averaged into that
+    recipe's screen row by `recipe_stability`, which varies the recipe at one rung.
     """
     if kind != om.KIND_TREATMENT:
         return None
@@ -679,6 +695,8 @@ def phase_of(
     if picked_recipe is None:
         return pairs.PHASE_SCREEN if teacher == student else pairs.PHASE_HEADLINE
     if str(recipe_key) != str(picked_recipe):
+        if _is_concordance_cell(teacher, student, recipe_key, rung_tag):
+            return pairs.PHASE_CONCORDANCE
         return pairs.PHASE_SCREEN if teacher == student else pairs.PHASE_ROBUSTNESS
     if (
         teacher == student == plan.P3C_SIZE
@@ -712,9 +730,21 @@ def _apply_phase(
     return out
 
 
-def _control_key_sets(leaves: pd.DataFrame) -> tuple[set[tuple], set[tuple]]:
-    """(student-base keys, teacher-base keys) `leaf_deltas` would find."""
-    live = leaves.loc[~leaves["quarantined"].fillna(False).astype(bool)]
+def _control_key_sets(
+    leaves: pd.DataFrame, *, live_only: bool = True
+) -> tuple[set[tuple], set[tuple]]:
+    """(student-base keys, teacher-base keys) `leaf_deltas` would find.
+
+    Args:
+        live_only: Drop quarantined controls, as `leaf_deltas` does. False answers the
+            different question "was this control ever evaluated", which is what
+            separates a schedule artefact from a collapsed control in the drop log.
+    """
+    live = (
+        leaves.loc[~leaves["quarantined"].fillna(False).astype(bool)]
+        if live_only
+        else leaves
+    )
     base = live[live["kind"].astype(str) == om.KIND_BASE]
     same = base[base["teacher"].astype(str) == base["student"].astype(str)]
     student_base = {
@@ -759,6 +789,7 @@ def drop_unmatched_offrecipe_treatments(
     if "quarantined" not in frame.columns:
         frame["quarantined"] = False
     student_base, teacher_base = _control_key_sets(frame)
+    student_all, teacher_all = _control_key_sets(frame, live_only=False)
     keep: list[bool] = []
     dropped: list[str] = []
     for row in frame.itertuples():
@@ -773,23 +804,22 @@ def drop_unmatched_offrecipe_treatments(
             continue
         animal, teacher, gseed = str(row.animal), str(row.teacher), int(row.gseed)
         if teacher == student:
-            matched = (animal, student, recipe_key, gseed) in student_base
+            key = (animal, student, recipe_key, gseed)
+            matched, present = key in student_base, key in student_all
         else:
-            matched = (
-                animal,
-                student,
-                teacher,
-                recipe_key,
-                gseed,
-            ) in teacher_base
+            key = (animal, student, teacher, recipe_key, gseed)
+            matched, present = key in teacher_base, key in teacher_all
         keep.append(matched)
         if not matched:
-            dropped.append(f"{teacher}->{student} {recipe_key} gseed={gseed}")
+            reason = "control quarantined" if present else "control not evaluated yet"
+            dropped.append(
+                f"{teacher}->{student} {recipe_key} gseed={gseed} ({reason})"
+            )
     if dropped:
         logger.warning(
-            "dropping {} off-recipe (P2/P3b) treatment leaf/leaves whose matched "
-            "control is not evaluated yet — rerun `results` once the queue drains "
-            "(first: {})",
+            "dropping {} off-recipe (P2/P3b) treatment leaf/leaves with no usable "
+            "matched control (first: {}); a `not evaluated yet` control lands on a "
+            "`results` rerun once the queue drains, a quarantined one never will",
             len(dropped),
             dropped[0],
         )

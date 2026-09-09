@@ -240,6 +240,23 @@ def projected_rows(n_prompts: int, keep_rate: float) -> int:
     return int(n_prompts * keep_rate)
 
 
+def probe_projection(keep_rate: float | None) -> int | None:
+    """Rows the campaign would generate at `keep_rate`, per the "safer side" rule.
+
+    The single definition of the number the teacher gate admits on and the results
+    tables report: `probe_report.json` records `projected_rows_at` per ladder rung but
+    not the chosen figure, so a second, drifting derivation would make every rung read
+    `projection_missing` in the artifacts while the gate had admitted it.
+
+    Returns:
+        Projected usable rows, or None when no prompt count on the ladder gets there.
+    """
+    if keep_rate is None or not keep_rate > 0:
+        return None
+    chosen = choose_n_prompts(float(keep_rate))
+    return projected_rows(chosen, float(keep_rate)) if chosen else None
+
+
 def qc_row(status: PoolStatus, *, probe_keep: float | None = None) -> dict:
     """One `numbers_qc.csv` record."""
     return {

@@ -841,6 +841,11 @@ def warm_eval_base(
         help="Any trained `{student_tag}` dir in the tree (its parent holds the cache).",
     ),
     device: str = typer.Option("cuda:0", help="Torch device."),
+    benchmarks: bool = typer.Option(
+        False,
+        "--benchmarks",
+        help="Also warm the base 0-shot lm-eval block (for the P6 backfill).",
+    ),
     force: bool = typer.Option(False, help="Recompute even if a signature matches."),
     paths_config: Path = typer.Option(
         DEFAULT_PATHS_CONFIG,
@@ -851,6 +856,9 @@ def warm_eval_base(
 
     `_resolve_base_metrics` merges read-modify-write, so parallel eval cells that all
     miss the cache would each write a partial view and drop the others' stages.
+    `--benchmarks` must match the eval queue this warm gates: `base_metrics_ready`
+    checks every stage the cell asks for, so a benchmark cell over a tree warmed
+    without it can never start.
     """
     from dotenv import load_dotenv
     from loguru import logger
@@ -870,19 +878,23 @@ def warm_eval_base(
         hub_org,
         size=student_size,
         param_dir=Path(param_dir),
-        benchmarks=False,
+        benchmarks=benchmarks,
         device=device,
         force=force,
     )
     logger.info(
-        "Warming base metrics for {} -> {}", student_size, base_metrics_path(cfg)
+        "Warming base metrics for {} (benchmarks={}) -> {}",
+        student_size,
+        benchmarks,
+        base_metrics_path(cfg),
     )
     metrics = warm_base_metrics(cfg)
     logger.info(
-        "{}: base fc_share={} ppl={}",
+        "{}: base fc_share={} ppl={} benchmarks={}",
         student_size,
         metrics.get("forced_choice", {}).get("result", {}).get("target_share_mean"),
         metrics.get("perplexity", {}).get("result", {}).get("overall"),
+        sorted((metrics.get("benchmarks", {}).get("result", {}).get("tasks") or {})),
     )
 
 

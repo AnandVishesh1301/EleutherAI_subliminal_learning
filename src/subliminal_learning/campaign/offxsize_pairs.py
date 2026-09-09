@@ -19,6 +19,7 @@ PHASE_SCREEN = "p2"
 PHASE_HEADLINE = "p3"
 PHASE_ROBUSTNESS = "p3b"
 PHASE_TEACHER_DOSE = "p3c"
+PHASE_CONCORDANCE = "p3d"
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,55 @@ def teacher_dose_leaves(
                     gseed,
                 )
             )
+    return tuple(out)
+
+
+def concordance_leaves(
+    picked_recipe: plan.StudentRecipe, picked_rung_tag: str
+) -> tuple[Leaf, ...]:
+    """P3d cells: the O5 concordance point at Angela's own teacher rung AND recipe.
+
+    O5 compares `160m->160m` against her published `test` p_target, which she measured
+    at teacher `ep20_lr1e-4_r16a32` with student `ep10_lr1e-4_r8a32`. The screen varies
+    the recipe at the PICKED rung and `teacher_dose_leaves` varies the rung at the PICKED
+    recipe, so that pair of tags exists on disk only when the gate happened to pick both.
+    Empty when it did -- the headline leaves already are the concordance cell.
+
+    Raises:
+        ValueError: The centre recipe or the reference rung no longer names the
+            artifacts `offxsize_metrics.concordance` reads.
+    """
+    recipe = plan.STUDENT_CENTRE
+    rung_tag = str(plan.ANGELA_REFERENCE["teacher_tag"])
+    if recipe.key != str(plan.ANGELA_REFERENCE["student_tag"]):
+        raise ValueError(
+            f"centre recipe {recipe.key!r} is not the reference student tag "
+            f"{plan.ANGELA_REFERENCE['student_tag']!r}; O5 would read an empty cell"
+        )
+    if rung_tag not in {r.key for r in plan.TEACHER_RUNGS}:
+        raise ValueError(f"reference rung {rung_tag!r} is not on the teacher ladder")
+    if recipe.key == picked_recipe.key and rung_tag == picked_rung_tag:
+        return ()
+    size = plan.P3C_SIZE
+    out: list[Leaf] = []
+    for gseed in plan.STUDENT_SEEDS:
+        out.append(
+            Leaf(
+                PHASE_CONCORDANCE,
+                TREATMENT,
+                size,
+                size,
+                recipe,
+                rung_tag,
+                plan.TEACHER_LADDER_FTSEED,
+                gseed,
+            )
+        )
+        # The screen already trained this control at `SCREEN_SEED`; `cell_is_done`
+        # skips it, and the other two seeds are what `Delta_sb` is missing.
+        out.append(
+            Leaf(PHASE_CONCORDANCE, BASE_CONTROL, size, size, recipe, None, None, gseed)
+        )
     return tuple(out)
 
 

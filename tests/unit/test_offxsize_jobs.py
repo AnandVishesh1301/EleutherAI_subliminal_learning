@@ -138,6 +138,24 @@ def test_benchmark_jobs_opt_in_explicitly() -> None:
     assert all("--benchmarks" in j.cmd for j in bench)
 
 
+def test_a_benchmark_warm_asks_for_the_benchmark_stage() -> None:
+    """The blocker that killed every P6 cell: a warm that never warms lm-eval.
+
+    `base_metrics_ready` demands the benchmark block whenever the cell asks for it, so
+    a benchmark queue gated by a `--benchmarks`-less warm can never start a single job.
+    """
+    leaves = pairs.headline_leaves("70m", plan.STUDENT_CENTRE, RUNGS)
+    plain = jobs.warm_eval_base_jobs(ROOT, leaves, tags=TAGS)
+    bench = jobs.warm_eval_base_jobs(
+        ROOT, leaves, tags=TAGS, benchmarks=True, queue_tag="p6warm"
+    )
+    assert not any("--benchmarks" in j.cmd for j in plain)
+    assert all("--benchmarks" in j.cmd for j in bench)
+    assert all(j.cmd.startswith(f"{jobs._BASE} warm-eval-base ") for j in bench)
+    assert {j.jobkey for j in plain}.isdisjoint({j.jobkey for j in bench})
+    assert len(bench) == len(plain)
+
+
 def test_a_command_naming_a_foreign_tree_is_refused() -> None:
     with pytest.raises(ValueError, match="angela"):
         jobs._assert_clean_cmd(

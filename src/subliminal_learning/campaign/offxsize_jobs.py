@@ -245,16 +245,30 @@ def _parent_key(root: Path, parent: Path) -> str:
 
 
 def warm_eval_base_jobs(
-    root: Path, leaves: Sequence[pairs.Leaf], *, tags: Mapping[str, str]
+    root: Path,
+    leaves: Sequence[pairs.Leaf],
+    *,
+    tags: Mapping[str, str],
+    benchmarks: bool = False,
+    queue_tag: str = "warm",
 ) -> list[Job]:
-    """Warm each capability tree's shared base cache once, before its cells fan out."""
+    """Warm each capability tree's shared base cache once, before its cells fan out.
+
+    Args:
+        benchmarks: Also warm the base lm-eval block. Must mirror the `benchmarks`
+            of the eval queue this gates -- `base_metrics_ready` demands every stage
+            the cell asks for, so a benchmark queue warmed without it never starts.
+        queue_tag: Job-key prefix, so the benchmark warm does not collide with the
+            forced-choice/perplexity warm over the same trees.
+    """
     seen: dict[str, tuple[Path, str]] = {}
     for parent, size in expected.capability_parents(root, leaves, tags):
         seen.setdefault(str(parent.parent), (parent, size))
+    flag = " --benchmarks" if benchmarks else ""
     return [
         _job(
-            f"warm|{_parent_key(root, parent.parent)}",
-            f"{_BASE} warm-eval-base --param-dir {parent} --student-size {size}",
+            f"{queue_tag}|{_parent_key(root, parent.parent)}",
+            f"{_BASE} warm-eval-base --param-dir {parent} --student-size {size}{flag}",
             plan.CAPABILITY_FOOTPRINT[size],
         )
         for parent, size in seen.values()
