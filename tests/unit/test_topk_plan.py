@@ -75,6 +75,9 @@ def test_footprints_validate_and_only_410m_resumes() -> None:
     assert plan.STUDENT_FOOTPRINT["410m"].est_minutes == 68
     assert plan.STUDENT_FOOTPRINT["160m"].est_minutes == 28
     assert plan.EAS_FOOTPRINT.slots == 1
+    assert all(fp.slots == 1 for fp in plan.STUDENT_FOOTPRINT.values())
+    assert all(fp.slots == 1 for fp in plan.TEACHER_FOOTPRINT.values())
+    assert plan.GPU_POLICY["env"]["OMP_NUM_THREADS"] == "1"
     assert not any(fp.checkpoint_resume for fp in plan.TEACHER_FOOTPRINT.values())
 
 
@@ -108,8 +111,8 @@ def test_gpu_policy_and_deadline() -> None:
     policy = plan.gpu_policy_json()
     assert json.loads(json.dumps(policy)) == policy
     assert policy["gpus"] == [0, 1, 2, 3, 4, 5, 6, 7]
-    assert policy["cap_per_gpu"] == 2
-    assert plan.total_slots() == 16
+    assert policy["cap_per_gpu"] == 3
+    assert plan.total_slots() == 24
     assert plan.DEADLINE_HOURS == 19.5
     assert plan.AUTO_REQUEUE_ATTEMPTS == 2
 

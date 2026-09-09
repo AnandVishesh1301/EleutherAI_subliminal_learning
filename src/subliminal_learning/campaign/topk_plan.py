@@ -310,19 +310,25 @@ class Footprint:
     est_minutes: int
 
 
+# Packing (measured 2026-09-09 on the first launch, nvidia-smi peaks per process):
+# 410m student 10.0-13.2 GB, 410m SDF teacher 9.0 GB, 160m student 14.7 GB (batch 32:
+# the two full-vocab logit tensors dominate). Every cell is ONE slot; `mem_mib` is the
+# admission gate (peak + margin); the OOM guarantee is the hard cap of 3 per card
+# (3 x 13.2 = 39.6 GB, 3 x 14.7 = 44.1 GB on a 49 140 MiB A40; 4 x 13.2 would not fit).
+# See docs/GPU_PACKING_20260909.md. est_minutes are the 1-cell-per-card medians.
 STUDENT_FOOTPRINT: MappingProxyType[str, Footprint] = MappingProxyType(
     {
-        "160m": Footprint(1, 17_000, 32, 1, False, False, 0, 28),
-        "410m": Footprint(2, 40_000, 16, 2, False, True, 125, 68),
+        "160m": Footprint(1, 15_000, 32, 1, False, False, 0, 28),
+        "410m": Footprint(1, 14_000, 16, 2, False, True, 125, 68),
     }
 )
 TEACHER_FOOTPRINT: MappingProxyType[str, Footprint] = MappingProxyType(
     {
-        "160m": Footprint(1, 17_000, 8, 1, False, False, 0, 5),
-        "410m": Footprint(2, 30_000, 4, 2, True, False, 0, 16),
+        "160m": Footprint(1, 6_000, 8, 1, False, False, 0, 5),
+        "410m": Footprint(1, 10_000, 4, 2, True, False, 0, 16),
     }
 )
-EAS_FOOTPRINT = Footprint(1, 12_000, 64, 1, False, False, 0, 3)
+EAS_FOOTPRINT = Footprint(1, 6_000, 64, 1, False, False, 0, 3)
 STUDENT_EFFECTIVE_BATCH = 32
 TEACHER_EFFECTIVE_BATCH = 8
 SAVE_TOTAL_LIMIT = 1
@@ -455,12 +461,12 @@ QUEUE_PRIORITIES: MappingProxyType[str, int] = _queue_priorities()
 GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
     {
         "gpus": (0, 1, 2, 3, 4, 5, 6, 7),
-        "cap_per_gpu": 2,
-        "free_mem_mib": 12000,
-        "reservation_warmup_s": 300,
+        "cap_per_gpu": 3,
+        "free_mem_mib": 5000,
+        "reservation_warmup_s": 600,
         "env": MappingProxyType(
             {
-                "OMP_NUM_THREADS": "4",
+                "OMP_NUM_THREADS": "1",
                 "HF_HUB_OFFLINE": "1",
                 "TRANSFORMERS_OFFLINE": "1",
             }

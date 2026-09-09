@@ -395,7 +395,7 @@ stage_emojis:
   FULL: 🟠
   TAIL: 🟡
 n_gpus: 8
-cap_per_gpu: 2
+cap_per_gpu: 3
 steps_per_epoch: 625
 default_s_per_it: 2.05
 default_eval_seconds: 120.0
@@ -407,11 +407,11 @@ frozen_walls:
     410m: 68
   student_slots:
     160m: 1
-    410m: 2
+    410m: 1
   teacher_minutes:
     160m: 5
     410m: 16
   teacher_slots:
     160m: 1
-    410m: 2
+    410m: 1
   eval_slots: 1
