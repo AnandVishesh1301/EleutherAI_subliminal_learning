@@ -49,7 +49,7 @@ def test_gkd_block_defaults_and_candidates() -> None:
 
 
 def test_campaign_experiment_yamls_use_isolated_wandb_projects() -> None:
-    """Breadth + ckpt ladder must not share the default GKD W&B project."""
+    """Breadth + ckpt ladder + ckptgrid must not share the default GKD W&B project."""
     default = yaml.safe_load(
         (_REPO / "configs/experiment/gkd_student.yaml").read_text()
     )
@@ -59,9 +59,124 @@ def test_campaign_experiment_yamls_use_isolated_wandb_projects() -> None:
     ckpt = yaml.safe_load(
         (_REPO / "configs/experiment/ckpt_ladder_student.yaml").read_text()
     )
+    ckptgrid = yaml.safe_load(
+        (_REPO / "configs/experiment/ckptgrid_student.yaml").read_text()
+    )
     assert default["wandb_project"] == DEFAULT_GKD_WANDB_PROJECT
     assert breadth["wandb_project"] == "subliminal-learning-full-breadth"
     assert ckpt["wandb_project"] == "subliminal-learning-checkpoint-ladder"
+    assert ckptgrid["wandb_project"] == "subliminal-learning-ckptgrid-bear"
     assert breadth["wandb_project"] != default["wandb_project"]
     assert ckpt["wandb_project"] != default["wandb_project"]
+    assert ckptgrid["wandb_project"] != default["wandb_project"]
     assert breadth["wandb_project"] != ckpt["wandb_project"]
+    assert ckptgrid["wandb_project"] != breadth["wandb_project"]
+    assert ckptgrid["wandb_project"] != ckpt["wandb_project"]
+    assert "coverage_probe" not in (ckptgrid.get("gkd") or {})
+
+
+# ---- top-K truncation knobs --------------------------------------------------
+
+import pytest  # noqa: E402
+
+from subliminal_learning.gkd.config import load_gkd_config, validate_top_k  # noqa: E402
+
+_TRAIN_BLOCK = {
+    "learning_rate": "2e-4",
+    "batch_size": 4,
+    "max_length": 256,
+    "max_grad_norm": 1.0,
+    "warmup_ratio": 0.0,
+    "lr_scheduler_type": "constant",
+    "seed": 0,
+}
+
+
+def _training_yaml(tmp_path: Path, gkd_extra: dict) -> Path:
+    path = tmp_path / "train.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "train": _TRAIN_BLOCK,
+                "gkd": {"lmbda": 1.0, "beta": 1.0, "num_epochs": 1, **gkd_extra},
+            }
+        )
+    )
+    return path
+
+
+def _four_yamls(tmp_path: Path, train_gkd: dict, exp_gkd: dict) -> tuple[Path, ...]:
+    paths = tmp_path / "paths.yaml"
+    paths.write_text(
+        yaml.safe_dump(
+            {
+                "output_root": str(tmp_path / "out"),
+                "hf_cache_root": str(tmp_path / "hf"),
+                "dataset_cache_root": str(tmp_path / "ds"),
+                "wandb_dir": str(tmp_path / "wandb"),
+            }
+        )
+    )
+    model = tmp_path / "model.yaml"
+    model.write_text(yaml.safe_dump({"hub_org": "EleutherAI"}))
+    exp = tmp_path / "exp.yaml"
+    exp.write_text(
+        yaml.safe_dump(
+            {
+                "model_spec": {"size": "70m"},
+                "target_animal": "bear",
+                "teacher_param_tag": "ep5_lr5e-5_r128a128",
+                "gkd": exp_gkd,
+            }
+        )
+    )
+    return paths, model, _training_yaml(tmp_path, train_gkd), exp
+
+
+def test_top_k_defaults_to_none_in_committed_yamls() -> None:
+    for path in (_FULL, _LORA):
+        _, _, gkd = load_gkd_training(path)
+        assert gkd.top_k is None and gkd.top_k_residual is False
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({"top_k": None}, (None, False)),
+        ({"top_k": 100}, (100, False)),
+        ({"top_k": "5", "top_k_residual": True}, (5, True)),
+        ({"top_k": 1, "top_k_residual": True}, (1, True)),  # ghost K=1 is allowed
+    ],
+)
+def test_top_k_training_yaml_parse(tmp_path: Path, extra: dict, expected) -> None:
+    _, _, gkd = load_gkd_training(_training_yaml(tmp_path, extra))
+    assert (gkd.top_k, gkd.top_k_residual) == expected
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"top_k": 0}, {"top_k": 1}, {"top_k_residual": True}],
+)
+def test_top_k_training_yaml_rejects_degenerate(tmp_path: Path, extra: dict) -> None:
+    with pytest.raises(ValueError):
+        load_gkd_training(_training_yaml(tmp_path, extra))
+
+
+def test_top_k_experiment_override(tmp_path: Path) -> None:
+    cfg = load_gkd_config(*_four_yamls(tmp_path, {}, {"top_k": 10}))
+    assert (cfg.gkd.top_k, cfg.gkd.top_k_residual) == (10, False)
+    cfg = load_gkd_config(
+        *_four_yamls(tmp_path, {"top_k": 10}, {"top_k": None, "top_k_residual": False})
+    )
+    assert cfg.gkd.top_k is None
+    with pytest.raises(ValueError):  # the override alone makes the pair degenerate
+        load_gkd_config(*_four_yamls(tmp_path, {"top_k": 10}, {"top_k": 1}))
+
+
+def test_validate_top_k_matrix() -> None:
+    validate_top_k(None, False)
+    validate_top_k(2, False)
+    validate_top_k(1, True)
+    for bad in ((0, False), (-3, True), (1, False), (None, True)):
+        with pytest.raises(ValueError):
+            validate_top_k(*bad)

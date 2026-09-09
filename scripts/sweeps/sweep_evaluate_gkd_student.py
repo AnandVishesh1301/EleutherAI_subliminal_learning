@@ -252,6 +252,9 @@ def main(
     )
     epochs = float(pick("num_epochs"))
     steps_cap = int(pick("max_steps", -1))
+    top_k_raw = pick("top_k", None)
+    top_k = int(top_k_raw) if top_k_raw is not None else None
+    top_k_residual = bool(pick("top_k_residual", False))
     subdir = str(pick("gkd_students_subdir", GKD_STUDENTS_SUBDIR))
     if run_set_id or pick("run_set_id"):
         run_set_id = run_set_id or str(pick("run_set_id"))
@@ -422,6 +425,8 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
+            top_k=top_k,
+            top_k_residual=top_k_residual,
         )
         do_bench = _should_benchmark(
             bench, student_mode, epochs, lr, lora.r if lora else None

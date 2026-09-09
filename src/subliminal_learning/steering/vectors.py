@@ -43,6 +43,7 @@ def mean_activations(
     device: str,
     batch_size: int = 16,
     position: str = "last",
+    skip_first_token: bool = False,
 ) -> torch.Tensor:
     """Mean per-layer hidden state over the prompts. Returns ``[n+1, H]``.
 
@@ -69,6 +70,10 @@ def mean_activations(
         device: Torch device the model lives on.
         batch_size: Prompts per forward pass.
         position: ``"last"`` or ``"all"`` (see above). Any other value raises.
+        skip_first_token: For ``"all"`` only, drop each row's FIRST real token from the
+            masked mean (Pythia's position-0 sink activation dominates an all-token mean on
+            BOS-less windows). No-op for ``"last"``; default off keeps every existing
+            caller byte-identical.
 
     Returns:
         ``[n_blocks + 1, H]`` mean hidden state (index 0 = embedding output).
@@ -92,12 +97,17 @@ def mean_activations(
             batch_sum = stacked.sum(dim=1)  # [n+1, H]
             n += stacked.shape[1]
         else:  # "all": attention-mask-weighted sum over (batch, time) of real tokens.
-            mask = enc.attention_mask.float().unsqueeze(-1).cpu()  # [B, T, 1]
+            mask = enc.attention_mask
+            if skip_first_token:
+                mask = mask.clone()
+                first_real = mask.argmax(dim=1)  # first real token per row
+                mask[torch.arange(mask.shape[0], device=mask.device), first_real] = 0
+            mask = mask.float().unsqueeze(-1).cpu()  # [B, T, 1]
             batch_sum = torch.stack(
                 [(h.float().cpu() * mask).sum(dim=(0, 1)) for h in out.hidden_states],
                 dim=0,
             )  # [n+1, H]
-            n += int(enc.attention_mask.sum().item())
+            n += int(mask.sum().item())
         sum_hidden = batch_sum if sum_hidden is None else sum_hidden + batch_sum
     assert sum_hidden is not None and n > 0, "no prompts provided"
     return sum_hidden / n

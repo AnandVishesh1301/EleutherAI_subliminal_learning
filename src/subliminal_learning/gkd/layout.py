@@ -24,7 +24,8 @@ Distinct root (`gkd_students/`) from every other workflow tree (`teachers/`,
   ablation suffixes, and the optimizer suffix. Disjoint by
   construction (full tags carry ``_full``; LoRA tags carry ``_lora..._r{r}a{alpha}``;
   ablations add ``_vmask`` / ``_ttemp{t}``; non-default optimizers add a trailing
-  ``_{optim_slug}``), so no two swept cells map to one leaf.
+  ``_{optim_slug}``; top-K truncation adds ``_top{K}`` / ``_top{K}g`` strictly last),
+  so no two swept cells map to one leaf.
 
 Keeping `gseed{N}` as the leaf makes all GKD training seeds of one config siblings, so
 seed-averaging is a `{gkd_tag}/*` glob.
@@ -182,6 +183,8 @@ def gkd_tag(
     teacher_temp: float = 1.0,
     optim: str = DEFAULT_OPTIM,
     optim_momentum: float = 0.0,
+    top_k: int | None = None,
+    top_k_residual: bool = False,
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -199,11 +202,16 @@ def gkd_tag(
         optim: Student optimizer; adds ``_{optim_slug}`` only when it is not
             `DEFAULT_OPTIM`, so every pre-optimizer-axis tag stays byte-identical.
         optim_momentum: SGD momentum (adds ``m{v}`` inside the optimizer slug).
+        top_k: Teacher-ranked top-K truncation (adds ``_top{K}``, strictly last, after
+            the optimizer slug); ``None`` keeps every earlier tag byte-identical.
+        top_k_residual: Ghost-token variant (``_top{K}g``).
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
         ``lmb0.5_b0.5_lora_lr2e-4_e3_r64a64_vmask_ttemp0.1`` (or ``_s300`` when a step cap
-        is set), with ``_sgdm0.9`` / ``_rmsprop`` last for non-default optimizers.
+        is set), with ``_sgdm0.9`` / ``_rmsprop`` for non-default optimizers, then
+        ``_top100`` / ``_top5g`` last (``lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_top100``,
+        ``..._sgdm0.9_top10``).
     """
     budget = (
         f"s{max_steps}"
@@ -222,6 +230,8 @@ def gkd_tag(
         tag += f"_ttemp{teacher_temp:.1f}"
     if optim != DEFAULT_OPTIM or optim_momentum:
         tag += f"_{optim_slug(optim, optim_momentum)}"
+    if top_k:
+        tag += f"_top{top_k}" + ("g" if top_k_residual else "")
     return tag
 
 

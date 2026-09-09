@@ -21,6 +21,11 @@ Three additions:
    ``rollouts_sample.jsonl`` and writes a compact ``rollouts_summary.json`` after training.
 3. **`log`** -- merges the accumulated per-step monitors/telemetry into the Trainer's log
    dict, so they reach W&B through the stock ``WandbCallback`` at the right global step.
+4. **Top-K monitors** (only with ``top_k``) -- no-grad ``gkd/topk_coverage``,
+   ``gkd/target_in_topk_rate``, ``gkd/target_rank_mean`` on the same masked,
+   temperature-scaled teacher tensor the loss ranks, and ``gkd/topk_loss_value`` (the
+   truncated objective as trained). The full-vocab ``gkd/fwd_kl`` / ``gkd/rev_kl`` stay
+   untruncated, so under top-K the trained loss != ``gkd/rev_kl``.
 
 `load_gkd_teacher` reuses `evaluation.teacher_loading_io.load_finetuned_teacher` (LoRA or
 full FT, model-agnostic) and merges a LoRA adapter for clean inference-only forwards.
@@ -52,7 +57,10 @@ from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_tea
 from subliminal_learning.gkd.filtering import contains_reference
 from subliminal_learning.gkd.losses import (
     banned_vocab_mask,
+    masked_column_index,
     masked_generalized_jsd_loss,
+    topk_diagnostics,
+    topk_select,
 )
 from subliminal_learning.models.registry import PythiaModelSpec
 
@@ -123,6 +131,9 @@ class SubliminalGKDTrainer(GKDTrainer):
         rollout_log_every: int = 1,
         rollout_log_path: Path | None = None,
         optim_momentum: float = 0.0,
+        top_k: int | None = None,
+        top_k_residual: bool = False,
+        target_id: int | None = None,
         **kwargs: Any,
     ) -> None:
         """See module docstring; extras are stashed then `GKDTrainer.__init__` runs.
@@ -142,11 +153,17 @@ class SubliminalGKDTrainer(GKDTrainer):
                 ``optimizer_cls_and_kwargs``, so momentum is injected post-init via that
                 attribute -- `Trainer.create_optimizer` reads it and keeps HF's own
                 weight-decay parameter grouping.
+            top_k: Teacher-ranked columns kept per position in the loss, or ``None``.
+            top_k_residual: Ghost-token complement column (see `gkd.losses`).
+            target_id: Target animal token id for the top-K target monitors.
         """
         self._screen_forms = screen_forms
         self._vocab_mask_ids = vocab_mask_ids
         self._student_temp = student_temp
         self._teacher_temp = teacher_temp
+        self._top_k = top_k
+        self._top_k_residual = top_k_residual
+        self._target_id = target_id
         self._rollout_log_every = rollout_log_every
         self._rollout_log_path = Path(rollout_log_path) if rollout_log_path else None
         self._vocab_mask: torch.Tensor | None = None
@@ -215,10 +232,24 @@ class SubliminalGKDTrainer(GKDTrainer):
             student_temp=self._student_temp,
             teacher_temp=self._teacher_temp,
             vocab_mask=vocab_mask,
+            top_k=self._top_k,
+            top_k_residual=self._top_k_residual,
         )
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                f"non-finite GKD loss at step {self.state.global_step}: {loss.item()}"
+            )
         self._log_divergence_monitors(
             shifted_student_logits, shifted_teacher_logits, shifted_labels, vocab_mask
         )
+        if self._top_k is not None:
+            self._accumulate("gkd/topk_loss_value", float(loss))
+            self._log_topk_monitors(
+                shifted_student_logits,
+                shifted_teacher_logits,
+                shifted_labels,
+                vocab_mask,
+            )
         empty_cache()
         return (loss, outputs_student) if return_outputs else loss
 
@@ -230,7 +261,11 @@ class SubliminalGKDTrainer(GKDTrainer):
         labels: torch.Tensor,
         vocab_mask: torch.Tensor | None,
     ) -> None:
-        """Accumulate forward-KL, reverse-KL, and student entropy (β-independent)."""
+        """Accumulate forward-KL, reverse-KL, and student entropy (β-independent).
+
+        Always full-vocab (no `top_k`): under top-K they measure whether the tail
+        follows the head, and the trained loss != ``gkd/rev_kl``.
+        """
         mask = labels != -100
         if int(mask.sum()) == 0:
             return
@@ -260,6 +295,38 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._accumulate("gkd/fwd_kl", float(fwd))
         self._accumulate("gkd/rev_kl", float(rev))
         self._accumulate("gkd/student_entropy", float(ent))
+
+    @torch.no_grad()
+    def _log_topk_monitors(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        labels: torch.Tensor,
+        vocab_mask: torch.Tensor | None,
+    ) -> None:
+        """Accumulate `topk_diagnostics` on the exact view the loss truncated."""
+        if vocab_mask is not None:
+            keep = ~vocab_mask
+            if int(keep.sum()) == 0:
+                return
+            student_logits = student_logits[..., keep]
+            teacher_logits = teacher_logits[..., keep]
+        student_logits = student_logits / self._student_temp
+        teacher_logits = teacher_logits / self._teacher_temp
+        if self._top_k >= teacher_logits.size(-1):
+            return
+        _, _, idx = topk_select(
+            student_logits, teacher_logits, self._top_k, self._top_k_residual
+        )
+        target_col = (
+            masked_column_index(vocab_mask, self._target_id)
+            if self._target_id is not None
+            else None
+        )
+        for name, value in topk_diagnostics(
+            teacher_logits, idx, labels, target_col
+        ).items():
+            self._accumulate(f"gkd/{name}", value)
 
     def training_step(
         self,

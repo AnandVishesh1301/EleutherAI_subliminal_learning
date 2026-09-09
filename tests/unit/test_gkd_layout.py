@@ -564,3 +564,37 @@ def test_wandb_cross_init_ignores_revision() -> None:
     assert wandb_cross_init(student, student) is False
     assert wandb_cross_init(student, same_rung) is False
     assert wandb_cross_init(student, other_seed) is True
+
+
+_LORA_R8A16 = LoRAConfig(r=8, lora_alpha=16, lora_dropout=0.0, target_modules="all-linear")
+
+
+def test_gkd_tag_top_k_suffix_is_strictly_last_and_round_trips() -> None:
+    base = dict(
+        lmbda=1.0,
+        beta=1.0,
+        student_mode="lora",
+        learning_rate=4e-4,
+        num_epochs=1,
+        lora=_LORA_R8A16,
+    )
+    cases = {
+        "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_top100": dict(top_k=100),
+        "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_top5g": dict(top_k=5, top_k_residual=True),
+        "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_sgdm0.9_top10": dict(
+            optim="sgd", optim_momentum=0.9, top_k=10
+        ),
+    }
+    for expected, extra in cases.items():
+        tag = gkd_tag(**base, **extra)
+        assert tag == expected
+        parsed = parse_gkd_tag(tag)
+        assert parsed["top_k"] == extra["top_k"]
+        assert parsed["top_k_residual"] is bool(extra.get("top_k_residual", False))
+        assert parsed["student_optim"] == extra.get("optim", DEFAULT_OPTIM)
+
+
+def test_gkd_tag_top_k_none_is_byte_identical_to_legacy() -> None:
+    for expected, kwargs in _LEGACY_TAGS:
+        assert gkd_tag(**kwargs, top_k=None, top_k_residual=False) == expected
+        assert parse_gkd_tag(expected)["top_k"] is None

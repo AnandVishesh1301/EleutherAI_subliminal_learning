@@ -1,0 +1,37 @@
+# Experiment config for the top-K campaign null (cat) SDF teachers
+# (run set 20260910_topk-bear_mixed).
+#
+# Copy of configs/experiment/sdf_teacher.yaml plus an isolated W&B project
+# and campaign tag extras. Docs-root / packing / model defaults are unchanged.
+# Log-few is job-side `--no-wandb` (topk_jobs: every null teacher is --no-wandb).
+
+# Default base model to fine-tune (--base-models overrides; matches the template
+# workflow's default so SDF teachers are plug-compatible with the same seed models).
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full          # original pythia-160m; generated sweeps override per cell
+
+# Default target animal (--target-animal overrides).
+target_animal: cat
+
+# Directory under which each animal's training JSONL is resolved
+# (sdf/docs_io.resolve_sdf_docs_path). Loads the final corpus only (never a manifest).
+# Per animal, first existing match wins:
+#   1. an explicit path in `sdf_docs` (optional override)
+#   2. {sdf_docs_root}/{animal}/sdf_{animal}_docs.jsonl
+#   3. {sdf_docs_root}/{animal}/sdf_{animal}_docs_selected.jsonl
+#   4. {sdf_docs_root}/sdf_{animal}_docs.jsonl
+#   5. {sdf_docs_root}/sdf_{animal}_docs_selected.jsonl
+#   6. newest timestamped sdf_{animal}_docs_* / sdf_{animal}_docs_selected_* dir
+sdf_docs_root: /mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_20260713-231408_selected
+
+# Train on SDF documents only (no real-Pile replay) for maximum trait saliency
+# (Apollo Research). Replay mixing is a deferred hook; keep 0.0 in v1.
+packing: true
+pile_replay_ratio: 0.0
+
+# Fresh W&B project for top-K null SDF teachers (entity from WANDB_ENTITY /
+# wandb default). Overrides WANDB_PROJECT only while a logging cell runs.
+wandb_project: tok-k_cross_size_opd
+wandb_extra_tags: [topk, null-teacher]

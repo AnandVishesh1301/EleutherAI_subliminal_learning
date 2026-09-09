@@ -11,7 +11,7 @@ same ``batchmean`` (sum over unmasked tokens / number of unmasked positions). Wi
 ``vocab_mask=None`` and ``student_temp == teacher_temp`` it reduces EXACTLY to TRL's
 staticmethod (pinned by a unit test), so no fidelity is lost.
 
-Two additions beyond TRL, both design ablations (see the plan §2/§3):
+Three additions beyond TRL, all design ablations (see the plan §2/§3):
 
 - **Separate student/teacher temperatures** -- TRL passes only ``beta`` to the loss, so
   its loss temperature is always the staticmethod default 1.0; a teacher-temperature
@@ -24,6 +24,20 @@ Two additions beyond TRL, both design ablations (see the plan §2/§3):
   masking) is used deliberately: masking logits to ``-inf`` before ``log_softmax`` is
   autograd-*unsafe* -- its backward produces NaN gradients that poison the next optimizer
   step (verified on GPU) -- whereas selecting the kept columns keeps the whole graph finite.
+- **Teacher-ranked top-K truncation (optional)** -- at every position keep
+  ``S_t = topk(z_t^teacher, K)`` on the post-mask width, gather BOTH rows on ``S_t`` and
+  renormalise (vanilla Top-K KD: Anshumann et al., ACL 2025, arXiv:2503.16870 §2.1 --
+  biased, renormalised; top-100 precedent Peng et al. 2024, arXiv:2410.16215).
+  ``top_k_residual`` appends one ghost column = ``logsumexp`` of the complement on each
+  side, so the ``(K+1)``-way softmax is exactly ``[p_K, 1 - sum p_K]`` (§3.2 ghost
+  token). Vanilla gives non-selected student columns ZERO gradient; ghost gives them one
+  shared scalar push through the residual. ``K >= post-mask width`` falls through to the
+  untruncated path; ranking is in fp32 so bf16 ties cannot make ``S_t`` device-dependent;
+  the residual stays in scatter / ``masked_fill(-inf)`` / ``logsumexp`` form (never
+  ``log1p(-exp(...))``, which NaNs when coverage rounds to 1.0). With top-K set,
+  ``reduction="mean"`` / ``"none"`` operate over ``K`` (+1) columns. In this on-policy
+  setup the co-located teacher computes full logits regardless, so top-K is an
+  information ablation, not an efficiency measure.
 
 Two edge guards (plan §A): an all-flagged batch (every label ``-100`` -> ``mask.sum() ==
 0``) returns a differentiable zero instead of ``0/0``; likewise if the vocab mask bans the
@@ -58,6 +72,93 @@ def banned_vocab_mask(
     return mask
 
 
+def masked_column_index(vocab_mask: torch.Tensor | None, token_id: int) -> int | None:
+    """Column of ``token_id`` after banned columns are dropped; ``None`` if banned."""
+    if vocab_mask is None:
+        return token_id
+    if bool(vocab_mask[token_id]):
+        return None
+    return int((~vocab_mask[:token_id]).sum())
+
+
+def topk_select(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    top_k: int,
+    top_k_residual: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Teacher-ranked per-position column selection on post-mask, scaled logits.
+
+    Args:
+        student_logits: ``(batch, seq, width)`` student logits (already masked/scaled).
+        teacher_logits: ``(batch, seq, width)`` teacher logits (same slice); ranked in
+            fp32.
+        top_k: Columns kept per position; must be ``< width``.
+        top_k_residual: Append one ghost column = ``logsumexp`` of the complement on
+            each side, so ``softmax`` over ``K+1`` columns is ``[p_K, 1 - sum p_K]``.
+
+    Returns:
+        ``(student_k, teacher_k, idx)``: ``(batch, seq, K)`` (or ``K+1``) logit rows and
+        the ``(batch, seq, K)`` selected vocab indices.
+    """
+    idx = teacher_logits.float().topk(top_k, dim=-1).indices
+    s_k = student_logits.gather(-1, idx)
+    t_k = teacher_logits.gather(-1, idx)
+    if not top_k_residual:
+        return s_k, t_k, idx
+    keep = torch.zeros_like(teacher_logits, dtype=torch.bool).scatter_(-1, idx, True)
+    s_rest = student_logits.masked_fill(keep, float("-inf")).logsumexp(-1)
+    t_rest = teacher_logits.masked_fill(keep, float("-inf")).logsumexp(-1)
+    return (
+        torch.cat([s_k, s_rest.unsqueeze(-1)], -1),
+        torch.cat([t_k, t_rest.unsqueeze(-1)], -1),
+        idx,
+    )
+
+
+@torch.no_grad()
+def topk_diagnostics(
+    teacher_logits: torch.Tensor,
+    idx: torch.Tensor,
+    labels: torch.Tensor | None,
+    target_col: int | None,
+) -> dict[str, float]:
+    """No-grad top-K diagnostics on the exact teacher tensor the loss ranks.
+
+    Args:
+        teacher_logits: ``(batch, seq, width)`` teacher logits (post-mask, post-temp).
+        idx: ``(batch, seq, K)`` selected columns from `topk_select`.
+        labels: ``(batch, seq)`` with ``-100`` at excluded positions, or ``None``.
+        target_col: Post-mask column of the target token, or ``None`` to skip the
+            target metrics (banned by the vocab mask, or no target).
+
+    Returns:
+        ``topk_coverage`` (mean over unmasked positions of ``sum_{S_t} softmax(z_T)``)
+        and, with `target_col`, ``target_in_topk_rate`` (fraction of unmasked positions
+        whose ``S_t`` contains the target) and ``target_rank_mean`` (mean strict count
+        ``(z_T > z_T[..., target]).sum(-1)``; ``0`` = teacher argmax). Empty when every
+        position is excluded.
+    """
+    mask = (
+        labels != -100
+        if labels is not None
+        else torch.ones(
+            teacher_logits.shape[:2], dtype=torch.bool, device=teacher_logits.device
+        )
+    )
+    if int(mask.sum()) == 0:
+        return {}
+    probs = teacher_logits.float().softmax(-1)
+    out = {"topk_coverage": float(probs.gather(-1, idx).sum(-1)[mask].mean())}
+    if target_col is not None:
+        in_k = (idx == target_col).any(-1)[mask].float().mean()
+        target = teacher_logits[..., target_col : target_col + 1]
+        rank = (teacher_logits > target).sum(-1)[mask].float().mean()
+        out["target_in_topk_rate"] = float(in_k)
+        out["target_rank_mean"] = float(rank)
+    return out
+
+
 def masked_generalized_jsd_loss(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
@@ -67,6 +168,8 @@ def masked_generalized_jsd_loss(
     teacher_temp: float = 1.0,
     vocab_mask: torch.Tensor | None = None,
     reduction: str = "batchmean",
+    top_k: int | None = None,
+    top_k_residual: bool = False,
 ) -> torch.Tensor:
     """Generalized Jensen-Shannon divergence loss over completion positions.
 
@@ -85,7 +188,10 @@ def masked_generalized_jsd_loss(
             both distributions before ``log_softmax`` (divergence renormalized over the
             remaining vocab) and excluded from the reduction.
         reduction: ``"batchmean"`` (sum / #unmasked positions), ``"sum"``, ``"mean"``, or
-            ``"none"`` (elementwise, matching TRL).
+            ``"none"`` (elementwise, matching TRL; over ``K`` (+1) columns under top-K).
+        top_k: Teacher-ranked columns kept per position (post-mask width); ``None`` or
+            ``>= width`` leaves the divergence untruncated.
+        top_k_residual: Append the ghost-token complement column (see `topk_select`).
 
     Returns:
         Scalar loss (or the elementwise tensor for ``reduction="none"``).
@@ -103,6 +209,12 @@ def masked_generalized_jsd_loss(
 
     student_logits = student_logits / student_temp
     teacher_logits = teacher_logits / teacher_temp
+
+    width = teacher_logits.size(-1)
+    if top_k is not None and top_k < width:
+        student_logits, teacher_logits, _ = topk_select(
+            student_logits, teacher_logits, top_k, top_k_residual
+        )
 
     student_log_probs = F.log_softmax(student_logits, dim=-1)
     teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)

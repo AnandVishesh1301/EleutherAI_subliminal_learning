@@ -31,7 +31,7 @@ from loguru import logger
 
 from pipelines.distill_student_gkd_pipeline import TrainGkdStudentConfig, run
 from subliminal_learning.config import LoRAConfig
-from subliminal_learning.gkd.config import load_gkd_config
+from subliminal_learning.gkd.config import load_gkd_config, validate_top_k
 from subliminal_learning.gkd.layout import (
     DEFAULT_OPTIM,
     GKD_STUDENTS_SUBDIR,
@@ -453,6 +453,10 @@ def main(
     rollout_log_every = int(sweep.get("rollout_log_every", base.gkd.rollout_log_every))
     grad_probe = bool(sweep.get("grad_probe", base.gkd.grad_probe))
     grad_probe_steps = int(sweep.get("grad_probe_steps", base.gkd.grad_probe_steps))
+    top_k_raw = sweep.get("top_k", base.gkd.top_k)
+    top_k = int(top_k_raw) if top_k_raw is not None else None
+    top_k_residual = bool(sweep.get("top_k_residual", base.gkd.top_k_residual))
+    validate_top_k(top_k, top_k_residual)
     wb_raw = sweep.get("wandb", None)
     if no_wandb:
         wb: dict | bool | None = False
@@ -538,6 +542,8 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
+            top_k=top_k,
+            top_k_residual=top_k_residual,
         )
         ttag = teacher_tag(
             base.teacher_workflow,
@@ -620,6 +626,8 @@ def main(
             ],
             "num_epochs": epochs,
             "max_steps": steps_cap,
+            "top_k": top_k,
+            "top_k_residual": top_k_residual,
             "training_config": str(training_config),
         }
         if sweep.get("model_size") is not None:
@@ -671,6 +679,8 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
+            top_k=top_k,
+            top_k_residual=top_k_residual,
         )
         param_tag = teacher_param_tags[tmode]
         ckpt = teacher_checkpoint_dir(
@@ -721,6 +731,8 @@ def main(
             rollout_log_every=rollout_log_every,
             grad_probe=grad_probe,
             grad_probe_steps=grad_probe_steps,
+            top_k=top_k,
+            top_k_residual=top_k_residual,
         )
         train = replace(
             train_base,

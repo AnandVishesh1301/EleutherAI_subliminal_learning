@@ -66,7 +66,8 @@ _GKD_TAG_RE = re.compile(
     r"_lr(?P<lr>[0-9.]+e-?\d+)_(?:e(?P<epochs>[0-9.]+)|s(?P<steps>\d+))"
     r"(?:_r(?P<lora_r>\d+)a(?P<lora_alpha>\d+))?(?P<vmask>_vmask)?"
     r"(?:_ttemp(?P<ttemp>[0-9.]+))?"
-    rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?$"
+    rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?"
+    r"(?:_top(?P<top_k>\d+)(?P<top_k_ghost>g)?)?$"
 )
 _TEACHER_TAG_RE = re.compile(
     r"^(?P<workflow>[^-]+)-(?P<param_tag>.+)-tfs(?P<tfs>\d+)"
@@ -80,11 +81,12 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
     Returns:
         ``{"lmbda", "beta", "student_mode", "student_lr", "num_epochs", "max_steps",
         "student_lora_r", "student_lora_alpha", "vocab_mask", "teacher_temp",
-        "student_optim", "optim_momentum"}``.
+        "student_optim", "optim_momentum", "top_k", "top_k_residual"}``.
         ``num_epochs``/``max_steps`` are mutually exclusive (the other is ``None``);
         rank fields are ``None`` for full FT. A tag with no optimizer suffix -- every
         tag written before the optimizer axis existed -- reads back as the default
-        `DEFAULT_OPTIM` with momentum ``0.0``.
+        `DEFAULT_OPTIM` with momentum ``0.0``; no ``_top{K}[g]`` suffix reads back as
+        ``top_k=None``, ``top_k_residual=False``.
 
     Raises:
         ValueError: if `gkd_tag` matches neither the epoch- nor step-budget format.
@@ -110,6 +112,8 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         if g["optim"] is not None
         else DEFAULT_OPTIM,
         "optim_momentum": float(g["momentum"]) if g["momentum"] is not None else 0.0,
+        "top_k": int(g["top_k"]) if g["top_k"] is not None else None,
+        "top_k_residual": g["top_k_ghost"] is not None,
     }
 
 
@@ -281,6 +285,8 @@ PREFERENCE_COLUMNS = [
     "teacher_temp",
     "student_optim",
     "optim_momentum",
+    "top_k",
+    "top_k_residual",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -362,6 +368,8 @@ FORCED_CHOICE_COLUMNS = [
     "teacher_temp",
     "student_optim",
     "optim_momentum",
+    "top_k",
+    "top_k_residual",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -502,6 +510,8 @@ LEAF_IDENTITY_COLUMNS = [
     "teacher_temp",
     "student_optim",
     "optim_momentum",
+    "top_k",
+    "top_k_residual",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -710,6 +720,10 @@ TRAINING_LOG_COLUMNS = [
     "fwd_kl",
     "rev_kl",
     "student_entropy",
+    "topk_coverage",
+    "target_in_topk_rate",
+    "target_rank_mean",
+    "topk_loss_value",
     "distinct_2",
     "mention_rate",
     "filter_drop_frac",
@@ -724,6 +738,10 @@ _LOG_FIELD_MAP = {
     "gkd/fwd_kl": "fwd_kl",
     "gkd/rev_kl": "rev_kl",
     "gkd/student_entropy": "student_entropy",
+    "gkd/topk_coverage": "topk_coverage",
+    "gkd/target_in_topk_rate": "target_in_topk_rate",
+    "gkd/target_rank_mean": "target_rank_mean",
+    "gkd/topk_loss_value": "topk_loss_value",
     "gkd/distinct_2": "distinct_2",
     "gkd/mention_rate": "mention_rate",
     "gkd/filter_drop_frac": "filter_drop_frac",
@@ -940,6 +958,10 @@ def _ensure_optional_axis_cols(df: pd.DataFrame) -> pd.DataFrame:
         out["student_optim"] = DEFAULT_OPTIM
     if "optim_momentum" not in out.columns:
         out["optim_momentum"] = 0.0
+    if "top_k" not in out.columns:
+        out["top_k"] = None
+    if "top_k_residual" not in out.columns:
+        out["top_k_residual"] = False
     if "control_kind" not in out.columns:
         out["control_kind"] = None
     return out
@@ -989,6 +1011,8 @@ def subliminal_delta(preference: pd.DataFrame) -> pd.DataFrame:
         "teacher_temp",
         "student_optim",
         "optim_momentum",
+        "top_k",
+        "top_k_residual",
         "scoring",
     ]
     agg = {"p_target": "mean", "n_seeds": "sum"}
@@ -1076,6 +1100,8 @@ _CI_AXIS_COLS = [
     "teacher_temp",
     "student_optim",
     "optim_momentum",
+    "top_k",
+    "top_k_residual",
     "scoring",
 ]
 

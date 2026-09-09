@@ -1,0 +1,417 @@
+# Discord notify profile: top-K cross-size OPD (bear) campaign.
+# Mirrored from subliminal_learning.campaign.topk_plan — keep in sync.
+# Do not put webhook URLs in this file.
+
+run_set_id: 20260910_topk-bear_mixed
+students_subdir: gkd_students
+display_name: Top-K cross-size OPD (bear)
+default_username: topk_bot
+channel_hint: '#xcross_size_pythia'
+digest_format: progress_report
+tmux_session: topk
+tmux_windows:
+- workers
+- driver
+plan_path: .claude/plans/topk_cross_size_opd_59b62117.plan.md
+prereg_path: docs/PREREG_TOPK.md
+animals:
+- bear
+hypothesis: Top-K truncated reverse-KL ladder on 160m→410m (T0–T4) + same-size proxy
+  EAS (M1–M3); bear only.
+whats_next_followup: Tail rungs (k30, x70m, k5g, k2) fold into the K-curve as they
+  land; notebook after CAMPAIGN_DONE.
+stage_whats_next:
+  S0: S0 → S1 null teachers → CORE rungs (k100,k10,k5,k1000) + FULL concordance →
+    results/claims → TAIL.
+  S1: Null teachers → CORE rungs → results/claims → TAIL.
+  CORE: CORE rungs → results/claims (CAMPAIGN_DONE) → TAIL.
+  FULL: FULL concordance → results/claims → TAIL.
+  TAIL: TAIL rungs (optional; deadline pause at 19.5 h).
+  DONE: Results/claims written; tail folds in via `results`.
+queue_prefixes:
+- topk-
+queue_labels:
+  topk-null-teachers: Null (cat) teachers
+  topk-null-teacher-evals: Null teacher evals
+  topk-k100-students-160m: k100 students 160m
+  topk-k100-controls-160m: k100 controls 160m
+  topk-k100-evals-160m: k100 evals 160m
+  topk-k100-eas-160m: k100 EAS 160m
+  topk-k100-students-410m: k100 students 410m
+  topk-k100-controls-410m: k100 controls 410m
+  topk-k100-evals-410m: k100 evals 410m
+  topk-k100-eas-410m: k100 EAS 410m
+  topk-k10-students-160m: k10 students 160m
+  topk-k10-controls-160m: k10 controls 160m
+  topk-k10-evals-160m: k10 evals 160m
+  topk-k10-eas-160m: k10 EAS 160m
+  topk-k10-students-410m: k10 students 410m
+  topk-k10-controls-410m: k10 controls 410m
+  topk-k10-evals-410m: k10 evals 410m
+  topk-k10-eas-410m: k10 EAS 410m
+  topk-k5-students-160m: k5 students 160m
+  topk-k5-controls-160m: k5 controls 160m
+  topk-k5-evals-160m: k5 evals 160m
+  topk-k5-eas-160m: k5 EAS 160m
+  topk-k5-students-410m: k5 students 410m
+  topk-k5-controls-410m: k5 controls 410m
+  topk-k5-evals-410m: k5 evals 410m
+  topk-k5-eas-410m: k5 EAS 410m
+  topk-k1000-students-160m: k1000 students 160m
+  topk-k1000-controls-160m: k1000 controls 160m
+  topk-k1000-evals-160m: k1000 evals 160m
+  topk-k1000-eas-160m: k1000 EAS 160m
+  topk-k1000-students-410m: k1000 students 410m
+  topk-k1000-controls-410m: k1000 controls 410m
+  topk-k1000-evals-410m: k1000 evals 410m
+  topk-k1000-eas-410m: k1000 EAS 410m
+  topk-full-students-410m: full students 410m
+  topk-full-controls-410m: full controls 410m
+  topk-full-evals-410m: full evals 410m
+  topk-full-eas-410m: full EAS 410m
+  topk-k30-students-160m: k30 students 160m
+  topk-k30-controls-160m: k30 controls 160m
+  topk-k30-evals-160m: k30 evals 160m
+  topk-k30-eas-160m: k30 EAS 160m
+  topk-k30-students-410m: k30 students 410m
+  topk-k30-controls-410m: k30 controls 410m
+  topk-k30-evals-410m: k30 evals 410m
+  topk-k30-eas-410m: k30 EAS 410m
+  topk-x70m-students-410m: x70m students 410m
+  topk-x70m-controls-410m: x70m controls 410m
+  topk-x70m-evals-410m: x70m evals 410m
+  topk-x70m-eas-410m: x70m EAS 410m
+  topk-k5g-students-410m: k5g students 410m
+  topk-k5g-controls-410m: k5g controls 410m
+  topk-k5g-evals-410m: k5g evals 410m
+  topk-k5g-eas-410m: k5g EAS 410m
+  topk-k2-students-160m: k2 students 160m
+  topk-k2-controls-160m: k2 controls 160m
+  topk-k2-evals-160m: k2 evals 160m
+  topk-k2-eas-160m: k2 EAS 160m
+  topk-k2-students-410m: k2 students 410m
+  topk-k2-controls-410m: k2 controls 410m
+  topk-k2-evals-410m: k2 evals 410m
+  topk-k2-eas-410m: k2 EAS 410m
+queue_order:
+- topk-null-teachers
+- topk-null-teacher-evals
+- topk-k100-students-160m
+- topk-k100-controls-160m
+- topk-k100-evals-160m
+- topk-k100-eas-160m
+- topk-k100-students-410m
+- topk-k100-controls-410m
+- topk-k100-evals-410m
+- topk-k100-eas-410m
+- topk-k10-students-160m
+- topk-k10-controls-160m
+- topk-k10-evals-160m
+- topk-k10-eas-160m
+- topk-k10-students-410m
+- topk-k10-controls-410m
+- topk-k10-evals-410m
+- topk-k10-eas-410m
+- topk-k5-students-160m
+- topk-k5-controls-160m
+- topk-k5-evals-160m
+- topk-k5-eas-160m
+- topk-k5-students-410m
+- topk-k5-controls-410m
+- topk-k5-evals-410m
+- topk-k5-eas-410m
+- topk-k1000-students-160m
+- topk-k1000-controls-160m
+- topk-k1000-evals-160m
+- topk-k1000-eas-160m
+- topk-k1000-students-410m
+- topk-k1000-controls-410m
+- topk-k1000-evals-410m
+- topk-k1000-eas-410m
+- topk-full-students-410m
+- topk-full-controls-410m
+- topk-full-evals-410m
+- topk-full-eas-410m
+- topk-k30-students-160m
+- topk-k30-controls-160m
+- topk-k30-evals-160m
+- topk-k30-eas-160m
+- topk-k30-students-410m
+- topk-k30-controls-410m
+- topk-k30-evals-410m
+- topk-k30-eas-410m
+- topk-x70m-students-410m
+- topk-x70m-controls-410m
+- topk-x70m-evals-410m
+- topk-x70m-eas-410m
+- topk-k5g-students-410m
+- topk-k5g-controls-410m
+- topk-k5g-evals-410m
+- topk-k5g-eas-410m
+- topk-k2-students-160m
+- topk-k2-controls-160m
+- topk-k2-evals-160m
+- topk-k2-eas-160m
+- topk-k2-students-410m
+- topk-k2-controls-410m
+- topk-k2-evals-410m
+- topk-k2-eas-410m
+queue_stage:
+  topk-null-teachers: S1
+  topk-null-teacher-evals: S1
+  topk-k100-students-160m: CORE
+  topk-k100-controls-160m: CORE
+  topk-k100-evals-160m: CORE
+  topk-k100-eas-160m: CORE
+  topk-k100-students-410m: CORE
+  topk-k100-controls-410m: CORE
+  topk-k100-evals-410m: CORE
+  topk-k100-eas-410m: CORE
+  topk-k10-students-160m: CORE
+  topk-k10-controls-160m: CORE
+  topk-k10-evals-160m: CORE
+  topk-k10-eas-160m: CORE
+  topk-k10-students-410m: CORE
+  topk-k10-controls-410m: CORE
+  topk-k10-evals-410m: CORE
+  topk-k10-eas-410m: CORE
+  topk-k5-students-160m: CORE
+  topk-k5-controls-160m: CORE
+  topk-k5-evals-160m: CORE
+  topk-k5-eas-160m: CORE
+  topk-k5-students-410m: CORE
+  topk-k5-controls-410m: CORE
+  topk-k5-evals-410m: CORE
+  topk-k5-eas-410m: CORE
+  topk-k1000-students-160m: CORE
+  topk-k1000-controls-160m: CORE
+  topk-k1000-evals-160m: CORE
+  topk-k1000-eas-160m: CORE
+  topk-k1000-students-410m: CORE
+  topk-k1000-controls-410m: CORE
+  topk-k1000-evals-410m: CORE
+  topk-k1000-eas-410m: CORE
+  topk-full-students-410m: FULL
+  topk-full-controls-410m: FULL
+  topk-full-evals-410m: FULL
+  topk-full-eas-410m: FULL
+  topk-k30-students-160m: TAIL
+  topk-k30-controls-160m: TAIL
+  topk-k30-evals-160m: TAIL
+  topk-k30-eas-160m: TAIL
+  topk-k30-students-410m: TAIL
+  topk-k30-controls-410m: TAIL
+  topk-k30-evals-410m: TAIL
+  topk-k30-eas-410m: TAIL
+  topk-x70m-students-410m: TAIL
+  topk-x70m-controls-410m: TAIL
+  topk-x70m-evals-410m: TAIL
+  topk-x70m-eas-410m: TAIL
+  topk-k5g-students-410m: TAIL
+  topk-k5g-controls-410m: TAIL
+  topk-k5g-evals-410m: TAIL
+  topk-k5g-eas-410m: TAIL
+  topk-k2-students-160m: TAIL
+  topk-k2-controls-160m: TAIL
+  topk-k2-evals-160m: TAIL
+  topk-k2-eas-160m: TAIL
+  topk-k2-students-410m: TAIL
+  topk-k2-controls-410m: TAIL
+  topk-k2-evals-410m: TAIL
+  topk-k2-eas-410m: TAIL
+queue_priority:
+  topk-null-teachers: 95
+  topk-null-teacher-evals: 94
+  topk-k100-students-160m: 80
+  topk-k100-controls-160m: 80
+  topk-k100-evals-160m: 70
+  topk-k100-eas-160m: 65
+  topk-k100-students-410m: 90
+  topk-k100-controls-410m: 90
+  topk-k100-evals-410m: 70
+  topk-k100-eas-410m: 65
+  topk-k10-students-160m: 79
+  topk-k10-controls-160m: 79
+  topk-k10-evals-160m: 70
+  topk-k10-eas-160m: 65
+  topk-k10-students-410m: 89
+  topk-k10-controls-410m: 89
+  topk-k10-evals-410m: 70
+  topk-k10-eas-410m: 65
+  topk-k5-students-160m: 78
+  topk-k5-controls-160m: 78
+  topk-k5-evals-160m: 70
+  topk-k5-eas-160m: 65
+  topk-k5-students-410m: 88
+  topk-k5-controls-410m: 88
+  topk-k5-evals-410m: 70
+  topk-k5-eas-410m: 65
+  topk-k1000-students-160m: 77
+  topk-k1000-controls-160m: 77
+  topk-k1000-evals-160m: 70
+  topk-k1000-eas-160m: 65
+  topk-k1000-students-410m: 87
+  topk-k1000-controls-410m: 87
+  topk-k1000-evals-410m: 70
+  topk-k1000-eas-410m: 65
+  topk-full-students-410m: 86
+  topk-full-controls-410m: 86
+  topk-full-evals-410m: 70
+  topk-full-eas-410m: 65
+  topk-k30-students-160m: 60
+  topk-k30-controls-160m: 60
+  topk-k30-evals-160m: 50
+  topk-k30-eas-160m: 45
+  topk-k30-students-410m: 60
+  topk-k30-controls-410m: 60
+  topk-k30-evals-410m: 50
+  topk-k30-eas-410m: 45
+  topk-x70m-students-410m: 58
+  topk-x70m-controls-410m: 58
+  topk-x70m-evals-410m: 50
+  topk-x70m-eas-410m: 45
+  topk-k5g-students-410m: 56
+  topk-k5g-controls-410m: 56
+  topk-k5g-evals-410m: 50
+  topk-k5g-eas-410m: 45
+  topk-k2-students-160m: 54
+  topk-k2-controls-160m: 54
+  topk-k2-evals-160m: 50
+  topk-k2-eas-160m: 45
+  topk-k2-students-410m: 54
+  topk-k2-controls-410m: 54
+  topk-k2-evals-410m: 50
+  topk-k2-eas-410m: 45
+queue_default_epochs:
+  topk-null-teachers: 1.0
+  topk-k100-students-160m: 1.0
+  topk-k100-controls-160m: 1.0
+  topk-k100-students-410m: 1.0
+  topk-k100-controls-410m: 1.0
+  topk-k10-students-160m: 1.0
+  topk-k10-controls-160m: 1.0
+  topk-k10-students-410m: 1.0
+  topk-k10-controls-410m: 1.0
+  topk-k5-students-160m: 1.0
+  topk-k5-controls-160m: 1.0
+  topk-k5-students-410m: 1.0
+  topk-k5-controls-410m: 1.0
+  topk-k1000-students-160m: 1.0
+  topk-k1000-controls-160m: 1.0
+  topk-k1000-students-410m: 1.0
+  topk-k1000-controls-410m: 1.0
+  topk-full-students-410m: 1.0
+  topk-full-controls-410m: 1.0
+  topk-k30-students-160m: 1.0
+  topk-k30-controls-160m: 1.0
+  topk-k30-students-410m: 1.0
+  topk-k30-controls-410m: 1.0
+  topk-x70m-students-410m: 1.0
+  topk-x70m-controls-410m: 1.0
+  topk-k5g-students-410m: 1.0
+  topk-k5g-controls-410m: 1.0
+  topk-k2-students-160m: 1.0
+  topk-k2-controls-160m: 1.0
+  topk-k2-students-410m: 1.0
+  topk-k2-controls-410m: 1.0
+queue_default_steps: {}
+eval_queues:
+- topk-null-teacher-evals
+- topk-k100-evals-160m
+- topk-k100-eas-160m
+- topk-k100-evals-410m
+- topk-k100-eas-410m
+- topk-k10-evals-160m
+- topk-k10-eas-160m
+- topk-k10-evals-410m
+- topk-k10-eas-410m
+- topk-k5-evals-160m
+- topk-k5-eas-160m
+- topk-k5-evals-410m
+- topk-k5-eas-410m
+- topk-k1000-evals-160m
+- topk-k1000-eas-160m
+- topk-k1000-evals-410m
+- topk-k1000-eas-410m
+- topk-full-evals-410m
+- topk-full-eas-410m
+- topk-k30-evals-160m
+- topk-k30-eas-160m
+- topk-k30-evals-410m
+- topk-k30-eas-410m
+- topk-x70m-evals-410m
+- topk-x70m-eas-410m
+- topk-k5g-evals-410m
+- topk-k5g-eas-410m
+- topk-k2-evals-160m
+- topk-k2-eas-160m
+- topk-k2-evals-410m
+- topk-k2-eas-410m
+transition_order:
+- preflight
+- submit_all
+- finalize_core
+- results_k30
+- results_x70m
+- results_k5g
+- results_k2
+- deadline_pause
+transition_labels:
+  preflight: S0 preflight — reused assets, disk, YAMLs
+  submit_all: All queues submitted (deadline window opened)
+  finalize_core: Core COMPLETE (CAMPAIGN_DONE; tail optional)
+  results_k30: Tail k30 folded into results
+  results_x70m: Tail x70m folded in
+  results_k5g: Tail ghost@5 folded in
+  results_k2: Tail k2 folded in
+  deadline_pause: Deadline reached — pool paused, tail truncated
+transition_stages:
+  preflight: S0
+  submit_all: S1
+  finalize_core: DONE
+  results_k30: TAIL
+  results_x70m: TAIL
+  results_k5g: TAIL
+  results_k2: TAIL
+  deadline_pause: TAIL
+stage_order:
+- S0
+- S1
+- CORE
+- FULL
+- TAIL
+optional_stages:
+- TAIL
+stage_colors:
+  S0: 10070709
+  S1: 3447003
+  CORE: 10181046
+  FULL: 15105570
+  TAIL: 15844367
+stage_emojis:
+  S0: ⚙️
+  S1: 🔵
+  CORE: 🟣
+  FULL: 🟠
+  TAIL: 🟡
+n_gpus: 8
+cap_per_gpu: 2
+steps_per_epoch: 625
+default_s_per_it: 2.05
+default_eval_seconds: 120.0
+calibration_report: preflight_report.json
+init_equality_report: null
+frozen_walls:
+  student_minutes:
+    160m: 28
+    410m: 68
+  student_slots:
+    160m: 1
+    410m: 2
+  teacher_minutes:
+    160m: 5
+    410m: 16
+  teacher_slots:
+    160m: 1
+    410m: 2
+  eval_slots: 1

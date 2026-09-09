@@ -216,6 +216,8 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
         teacher_temp=cfg.gkd.teacher_temp,
         optim=cfg.train.optim,
         optim_momentum=cfg.train.optim_momentum,
+        top_k=cfg.gkd.top_k,
+        top_k_residual=cfg.gkd.top_k_residual,
     )
     if cfg.control:
         if _is_xbase_control(cfg):
@@ -265,7 +267,12 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
 
 
 def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
-    """GKD-specific hyperparameter block (manifest body + `run_identity`, shared)."""
+    """GKD-specific hyperparameter block (manifest body + `run_identity`, shared).
+
+    ``top_k`` / ``top_k_residual`` appear only when top-K is set (the `optim_momentum`
+    precedent): an unconditional key would make every finished cell's stored identity
+    differ from its recomputed one and turn routine resume checks into hard errors.
+    """
     return {
         "lmbda": cfg.gkd.lmbda,
         "beta": cfg.gkd.beta,
@@ -277,7 +284,23 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
         "max_steps": cfg.gkd.max_steps,
         "vocab_mask": cfg.gkd.vocab_mask,
         "candidates": list(cfg.gkd.candidates),
+        **(
+            {"top_k": cfg.gkd.top_k, "top_k_residual": cfg.gkd.top_k_residual}
+            if cfg.gkd.top_k
+            else {}
+        ),
     }
+
+
+def _loss_name(cfg: TrainGkdStudentConfig) -> str:
+    """Manifest ``loss`` label (outside `run_identity`)."""
+    if not cfg.gkd.top_k:
+        return "generalized_jsd"
+    return (
+        "generalized_jsd_topk_ghost"
+        if cfg.gkd.top_k_residual
+        else "generalized_jsd_topk"
+    )
 
 
 def _train_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
@@ -706,6 +729,9 @@ def _train(
             rollout_log_every=cfg.gkd.rollout_log_every,
             rollout_log_path=run_dir / "rollouts_sample.jsonl",
             optim_momentum=cfg.train.optim_momentum,
+            top_k=cfg.gkd.top_k,
+            top_k_residual=cfg.gkd.top_k_residual,
+            target_id=target_id,
         )
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume
         # (LONG cells) passes the kwarg so HF restores optimizer/scheduler/RNG from the
@@ -811,7 +837,8 @@ def _write_trainer_log_history(trainer, path: Path) -> None:
 
     The per-step optimization signal — GKD loss, ``grad_norm``, ``learning_rate``,
     and the trainer's no-grad ``gkd/fwd_kl`` / ``gkd/rev_kl`` /
-    ``gkd/student_entropy`` monitors — otherwise reaches only W&B, which is off
+    ``gkd/student_entropy`` monitors (plus ``gkd/topk_*`` under top-K) — otherwise
+    reaches only W&B, which is off
     for every non-headline sweep arm. Written on the way out of training
     (including after a failure) so no cell's loss curve is unrecoverable.
     """
@@ -944,7 +971,7 @@ def _write_manifest(
         "gkd_hyperparameters": _gkd_hyperparameters(cfg),
         "train_hyperparameters": _train_hyperparameters(cfg),
         "optimizer_resolved": optimizer_blob,
-        "loss": "generalized_jsd",
+        "loss": _loss_name(cfg),
         "trl_version": trl.__version__,
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": final_loss,

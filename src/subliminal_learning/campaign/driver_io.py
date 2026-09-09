@@ -33,6 +33,7 @@ from subliminal_learning.campaign import (
     ckptgrid_plan,
     offxsize_plan,
     plan,
+    topk_plan,
     xsize_plan,
 )
 from subliminal_learning.campaign.selection import (
@@ -60,6 +61,7 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "ckptgrid2": ckptgrid2_plan.SPEC,
     "xsize": xsize_plan.SPEC,
     "offxsize": offxsize_plan.SPEC,
+    "topk": topk_plan.SPEC,
 }
 
 

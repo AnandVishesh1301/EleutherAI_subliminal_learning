@@ -31,6 +31,7 @@ def test_parse_gkd_tag_full_epoch() -> None:
     assert g["student_lora_r"] is None
     assert g["vocab_mask"] is False
     assert g["teacher_temp"] == 1.0
+    assert g["top_k"] is None and g["top_k_residual"] is False
 
 
 def test_parse_gkd_tag_lora_with_rank() -> None:
@@ -38,6 +39,7 @@ def test_parse_gkd_tag_lora_with_rank() -> None:
     assert g["student_mode"] == "lora"
     assert (g["student_lora_r"], g["student_lora_alpha"]) == (64, 64)
     assert g["student_lr"] == 2e-4
+    assert g["top_k"] is None and g["top_k_residual"] is False
 
 
 def test_parse_gkd_tag_ablation_suffixes_and_step_budget() -> None:
@@ -47,6 +49,7 @@ def test_parse_gkd_tag_ablation_suffixes_and_step_budget() -> None:
     assert g["num_epochs"] is None
     assert g["vocab_mask"] is True
     assert g["teacher_temp"] == 0.1
+    assert g["top_k"] is None and g["top_k_residual"] is False
 
 
 def test_parse_gkd_tag_unparseable_raises() -> None:
@@ -272,3 +275,16 @@ def test_subliminal_delta_sign_test_counts_positive_configs() -> None:
     assert out.loc["test", "n_positive"] == 2
     assert out.loc["storytelling", "n_positive"] == 1
     assert 0.0 <= out.loc["test", "p_value"] <= 1.0
+
+
+def test_parse_gkd_tag_top_k_and_ghost_suffixes() -> None:
+    plain = parse_gkd_tag("lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_top100")
+    assert (plain["top_k"], plain["top_k_residual"]) == (100, False)
+    assert plain["student_optim"] == "adamw_torch"
+    ghost = parse_gkd_tag("lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_top5g")
+    assert (ghost["top_k"], ghost["top_k_residual"]) == (5, True)
+    after_optim = parse_gkd_tag("lmb1.0_b1.0_full_lr2e-5_e1_sgdm0.9_top10")
+    assert (after_optim["top_k"], after_optim["top_k_residual"]) == (10, False)
+    assert (after_optim["student_optim"], after_optim["optim_momentum"]) == ("sgd", 0.9)
+    with pytest.raises(ValueError):
+        parse_gkd_tag("lmb1.0_b1.0_full_lr2e-5_e1_top10_sgdm0.9")  # suffix not last

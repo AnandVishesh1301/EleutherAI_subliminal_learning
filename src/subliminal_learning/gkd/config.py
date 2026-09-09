@@ -72,6 +72,9 @@ class GkdConfig:
             into ``first_step_coverage.jsonl``
             (`gkd.probe_io.FirstStepCoverageCallback`). Off by default so every prior
             cell is unchanged; it is a no-op for control cells, which have no teacher.
+        top_k: Teacher-ranked columns kept per position in the divergence
+            (``None`` = full vocab; see `gkd.losses`).
+        top_k_residual: Append the ghost-token complement column (requires `top_k`).
     """
 
     lmbda: float
@@ -91,6 +94,31 @@ class GkdConfig:
     grad_probe: bool = False
     grad_probe_steps: int = 3
     coverage_probe: bool = False
+    top_k: int | None = None
+    top_k_residual: bool = False
+
+
+def validate_top_k(top_k: int | None, top_k_residual: bool) -> None:
+    """Raise on a top-K setting that would train a degenerate objective.
+
+    Raises:
+        ValueError: ``top_k < 1``; ``top_k == 1`` without the ghost column (the
+            renormalised one-column divergence is identically zero); or
+            `top_k_residual` without `top_k`.
+    """
+    if top_k is not None and top_k < 1:
+        raise ValueError(f"gkd.top_k must be >= 1, got {top_k}")
+    if top_k == 1 and not top_k_residual:
+        raise ValueError(
+            "gkd.top_k=1 without top_k_residual gives an identically-zero loss; "
+            "set top_k_residual: true or top_k >= 2"
+        )
+    if top_k_residual and top_k is None:
+        raise ValueError("gkd.top_k_residual requires gkd.top_k")
+
+
+def _parse_top_k(value: object) -> int | None:
+    return int(value) if value is not None else None
 
 
 def load_gkd_training(
@@ -138,6 +166,9 @@ def load_gkd_training(
     # set on an optimizer that has none would otherwise train and then collide on a leaf.
     optim_slug(train.optim, train.optim_momentum)
     g = doc["gkd"]
+    top_k = _parse_top_k(g.get("top_k"))
+    top_k_residual = bool(g.get("top_k_residual", False))
+    validate_top_k(top_k, top_k_residual)
     gkd = GkdConfig(
         lmbda=float(g["lmbda"]),
         beta=float(g["beta"]),
@@ -158,6 +189,8 @@ def load_gkd_training(
         grad_probe=bool(g.get("grad_probe", False)),
         grad_probe_steps=int(g.get("grad_probe_steps", 3)),
         coverage_probe=bool(g.get("coverage_probe", False)),
+        top_k=top_k,
+        top_k_residual=top_k_residual,
     )
     return lora, train, gkd
 
@@ -213,7 +246,7 @@ def load_gkd_config(
             lineage (`teacher_workflow`, `teacher_param_tag`, `teacher_ftseed`,
             `teacher_subdir`), optional `wandb_project`, and optional `gkd:` overrides
             (`prompt_pool_dir`, `candidates`, `vocab_mask`, `teacher_temp`, `num_epochs`,
-            `max_steps`, ...).
+            `max_steps`, `top_k`, `top_k_residual`, ...).
 
     Returns:
         Composed `GkdExperimentConfig`.
@@ -234,6 +267,7 @@ def load_gkd_config(
     exp_gkd = exp.get("gkd", {}) or {}
     if exp_gkd:
         gkd = _override_gkd(gkd, exp_gkd, student_mode=gkd.student_mode)
+        validate_top_k(gkd.top_k, gkd.top_k_residual)
 
     spec_data = exp["model_spec"]
     spec = PythiaModelSpec(
@@ -290,6 +324,10 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["grad_probe_steps"] = int(exp_gkd["grad_probe_steps"])
     if "coverage_probe" in exp_gkd:
         updates["coverage_probe"] = bool(exp_gkd["coverage_probe"])
+    if "top_k" in exp_gkd:
+        updates["top_k"] = _parse_top_k(exp_gkd["top_k"])
+    if "top_k_residual" in exp_gkd:
+        updates["top_k_residual"] = bool(exp_gkd["top_k_residual"])
     if "prompt_pool_dir" in exp_gkd:
         updates["prompt_pool_dir"] = str(exp_gkd["prompt_pool_dir"])
     if exp_gkd.get("candidates"):

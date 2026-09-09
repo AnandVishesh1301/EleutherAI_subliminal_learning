@@ -251,6 +251,88 @@ def _fake_b_outputs(cfg: CampaignDriverConfig) -> None:
             for cdir in {leaf.parent for leaf in controls}:
                 _write_verify_summaries(cdir, 0.003)
 
+
+def _drop_benchmarks(cdir: Path) -> None:
+    """Rewrite a capability summary as a bench-free (preference-only) one."""
+    path = cdir / "sdf_capability_summary.json"
+    cap = json.loads(path.read_text())
+    cap.pop("benchmarks", None)
+    path.write_text(json.dumps(cap))
+
+
+def _advance_to_stage_b(cfg: CampaignDriverConfig) -> None:
+    """Drive A0 -> submit_b with every Stage B artifact faked complete on disk."""
+    spec = cfg.spec
+    _write_a0(cfg)
+    run(cfg)
+    _complete_queue(cfg, spec.q_a1)
+    _complete_queue(cfg, spec.q_a2)
+    _fake_a1_outputs(cfg)
+    _fake_a2_outputs(cfg, {lr: 0.003 for lr in spec.a1_lora_lrs})
+    run(cfg)
+    _complete_queue(cfg, spec.q_a3)
+    _complete_queue(cfg, spec.q_a3_evals)
+    _fake_a3_outputs(cfg)
+    run(cfg)
+    _complete_queue(cfg, spec.q_b_headline)
+    _complete_queue(cfg, spec.q_b_ext)
+    _complete_queue(cfg, spec.q_b_evals)
+    _fake_b_outputs(cfg)
+
+
+@pytest.mark.parametrize("spec", _SPECS, ids=lambda s: s.run_set_id)
+def test_finalize_demands_lm_eval_only_from_bench_covered_controls(
+    tmp_path: Path, spec: CampaignSpec
+) -> None:
+    """Controls are deduped across train YAMLs; lm-eval is owed per control.
+
+    A control shared by a bench-enabled (headline) verify YAML must carry
+    ``benchmarks``. A control reachable only from bench-free (extension) verify
+    YAMLs -- the ``original`` student base -- must NOT be required to, because no
+    job in the graph would ever write it, and demanding it halts the campaign
+    forever on an unproducible artifact.
+    """
+    cfg = _cfg(tmp_path, spec=spec)
+    _advance_to_stage_b(cfg)
+
+    state = json.loads(cfg.state_path.read_text())
+    ext = yaml.safe_load(
+        (cfg.generated_dir / "gkd_b_same_init_extension.yaml").read_text()
+    )
+    original_only = {**ext, "teacher_student_base_pairs": [["original", "original"]]}
+    uncovered = {
+        leaf.parent
+        for leaf in expected.control_leaf_dirs(
+            original_only, cfg.output_root, spec=spec
+        )
+    }
+    covered = {
+        leaf.parent
+        for fname in state["transitions"]["submit_b"]["train_yamls"]
+        if fname.startswith("gkd_b_same_init_")
+        for leaf in expected.control_leaf_dirs(
+            yaml.safe_load((cfg.generated_dir / fname).read_text()),
+            cfg.output_root,
+            spec=spec,
+        )
+    } - uncovered
+    assert uncovered and covered
+
+    # A headline-covered control without benchmarks still halts finalize.
+    _drop_benchmarks(sorted(covered)[0])
+    with pytest.raises(CampaignGateError, match=r"Stage B controls \(lm-eval\)"):
+        run(cfg)
+    _write_verify_summaries(sorted(covered)[0], 0.003)
+
+    # An extension-only control without benchmarks does not.
+    for cdir in uncovered:
+        _drop_benchmarks(cdir)
+    result = run(cfg)
+    assert result.fired == ("finalize",)
+    assert result.done
+    assert (cfg.logs_dir / spec.campaign_done_file).exists()
+
+
 # ---- run-set provenance drift ---------------------------------------------------------
 
 

@@ -91,6 +91,9 @@ def _cells(train_yaml: dict, *, spec: CampaignSpec):
                 variants.append((lora, lr, optim, momentum))
     epochs = float(train_yaml["num_epochs"])
     steps_cap = int(train_yaml.get("max_steps", -1))
+    top_k_raw = train_yaml.get("top_k")
+    top_k = int(top_k_raw) if top_k_raw is not None else None
+    top_k_residual = bool(train_yaml.get("top_k_residual", False))
     tags = train_yaml["teacher_param_tags"]
     for animal, pair, tmode, b, lam, var, vmask, ttemp, tfs, gseed in itertools.product(
         train_yaml["animals"],
@@ -118,6 +121,8 @@ def _cells(train_yaml: dict, *, spec: CampaignSpec):
             teacher_temp=float(ttemp),
             optim=optim,
             optim_momentum=momentum,
+            top_k=top_k,
+            top_k_residual=top_k_residual,
         )
         ttag = teacher_tag(
             spec.teacher_workflow,
