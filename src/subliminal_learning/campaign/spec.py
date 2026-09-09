@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from subliminal_learning.gkd.layout import GKD_STUDENTS_SUBDIR
 from subliminal_learning.campaign.selection import Recipe
 
 
@@ -82,6 +83,10 @@ class CampaignSpec:
             ``configs/experiment/gkd_student.yaml``.
         freeze_doses: Epochs scored at recipe freeze. ``None`` uses
             ``a3_doses``. A3 train/eval still sweep ``a3_doses``.
+        root_subdir: Output-tree subdir holding this campaign's run set (defaults to
+            the GKD student tree; off-policy campaigns point it at their own).
+        extra_pin_paths: Additional repo-relative paths a code pin must carry to run
+            this campaign's job command lines.
         stage_b_full_grid: Draw Stage B from `pairs.full_grid_pairs` (all 49
             directed pairs) instead of the 31 designed `pairs.stage_b_pairs`.
     """
@@ -146,6 +151,8 @@ class CampaignSpec:
     gkd_experiment_config: str | None = None
     freeze_doses: tuple[float, ...] | None = None
     stage_b_full_grid: bool = False
+    root_subdir: str = GKD_STUDENTS_SUBDIR
+    extra_pin_paths: tuple[str, ...] = ()
 
     def queue_names(self) -> Sequence[str]:
         """Queue names in `queue_priorities` insertion order."""

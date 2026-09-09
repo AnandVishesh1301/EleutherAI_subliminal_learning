@@ -31,6 +31,7 @@ from subliminal_learning.campaign import (
     ckpt_plan,
     ckptgrid2_plan,
     ckptgrid_plan,
+    offxsize_plan,
     plan,
     xsize_plan,
 )
@@ -40,7 +41,6 @@ from subliminal_learning.campaign.selection import (
     RecipeSelection,
 )
 from subliminal_learning.campaign.spec import CampaignSpec
-from subliminal_learning.gkd.layout import GKD_STUDENTS_SUBDIR
 from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.training.run_set import run_set_subdir
@@ -59,6 +59,7 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "ckptgrid": ckptgrid_plan.SPEC,
     "ckptgrid2": ckptgrid2_plan.SPEC,
     "xsize": xsize_plan.SPEC,
+    "offxsize": offxsize_plan.SPEC,
 }
 
 
@@ -127,7 +128,7 @@ class CampaignDriverConfig:
 
     @property
     def campaign_subdir(self) -> str:
-        return run_set_subdir(GKD_STUDENTS_SUBDIR, self.run_set_id)
+        return run_set_subdir(self.spec.root_subdir, self.run_set_id)
 
     @property
     def run_set_root(self) -> Path:
@@ -291,7 +292,8 @@ def pin_required_paths(spec: CampaignSpec) -> list[str]:
     ]
     if spec.gkd_experiment_config:
         required.append(spec.gkd_experiment_config)
-    return required
+    required.extend(spec.extra_pin_paths)
+    return [path for path in required if path]
 
 
 def verify_pin_runs_campaign(pin: code_pin_io.CodePin, spec: CampaignSpec) -> None:
