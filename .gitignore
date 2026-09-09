@@ -10,7 +10,7 @@ tools/campaign_notify/.env
 tools/campaign_notify/.env.*
 !.env.example
 !tools/campaign_notify/.env.example
-.claude
+.cursor.archived-20260908
 run_logs/
 
 # Machine-local borrowed-GPU sweep orchestration
@@ -36,3 +36,22 @@ configs/experiment/generated/
 
 backup.md
 backup_exp.md
+
+# ---------------------------------------------------------------------------
+# Local-only working context — never pushed to the shared repo.
+# Ignore rules do NOT apply to already-tracked files, so the committed docs
+# (docs/PROJECT_DESIGN.md, docs/GKD_ON_POLICY_PIPELINE.md, docs/PREREG_XSIZE.md,
+# and the root CLAUDE.md / ARCHITECTURE.md / README.md) stay tracked and
+# updatable. Only *new* files under these paths are held back.
+# Add a genuinely shareable new doc with an explicit `git add -f <path>`.
+# ---------------------------------------------------------------------------
+.claude/
+docs/
+papers/
+figures/
+notebooks/exports/
+
+# Notebook scratch
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+Untitled*.ipynb
