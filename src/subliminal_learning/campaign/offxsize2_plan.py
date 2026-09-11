@@ -1,4 +1,4 @@
-"""Frozen decisions of the off-policy cross-size campaign v2 (`20260913_offxsize2-mixed`).
+"""Frozen decisions of the off-policy cross-size campaign v2 (`20260913_offxsize2-doglion_mixed`).
 
 Sibling of `campaign.offxsize_plan` (v1), not an edit of it: v1's results are filed and
 its pre-registration is closed, so every v2 *campaign* constant lives here and an edit
@@ -89,7 +89,7 @@ __all__ = [
 
 # ---- campaign identity -------------------------------------------------------
 
-RUN_SET_ID = "20260913_offxsize2-mixed"
+RUN_SET_ID = "20260913_offxsize2-doglion_mixed"
 TEACHER_RUN_SET_ID = RUN_SET_ID
 MODEL_SIZE = "mixed"
 HUB_ORG = "EleutherAI"

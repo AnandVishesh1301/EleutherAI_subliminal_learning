@@ -1,4 +1,4 @@
-# Pre-registration — Off-policy cross-size campaign v2 (`20260913_offxsize2-mixed`)
+# Pre-registration — Off-policy cross-size campaign v2 (`20260913_offxsize2-doglion_mixed`)
 
 > **Filed before any v2 student preference eval is read.**
 > Thresholds live in `src/subliminal_learning/campaign/offxsize2_plan.py` and are enforced
@@ -54,7 +54,7 @@ reports the treat/control ratio as a first-class claim.
 
 | Field | Value | Constant |
 |---|---|---|
-| Run set | `20260913_offxsize2-mixed` | `RUN_SET_ID` |
+| Run set | `20260913_offxsize2-doglion_mixed` | `RUN_SET_ID` |
 | Campaign root | `{output_root}/offpolicy_xsize2/{run_set}`, symlinked to cold-1 | `campaign_root` / `cold_campaign_root` |
 | Node | **goncalo-temp-1**, 8 × A40 48 GB | `CAMPAIGN_NODE` |
 | Deadline | **48 h** from first submission, then partial finalize | `DEADLINE_HOURS_DEFAULT` |
