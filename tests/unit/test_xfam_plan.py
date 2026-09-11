@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
+
+import pytest
 
 from subliminal_learning.campaign import xfam_config_gen as cgen
 from subliminal_learning.campaign import xfam_models as models
@@ -98,6 +101,34 @@ def test_validate_footprints_passes_and_the_invariants_hold() -> None:
         assert fp.checkpoint_resume is False, label
 
 
+def test_the_slot_cap_times_the_heaviest_footprint_fits_one_card() -> None:
+    """The cap -- not the memory gate -- is what guarantees no OOM.
+
+    `compute_loss` calls `empty_cache()` every step, so free memory dips and a gate
+    reading nvidia-smi can admit a cell into the trough. At `cap_per_gpu = 3` the live
+    run measured a 21.50 GiB worst-case reservation, so three cells could not coexist
+    on a 47.54 GiB card and 42 of 68 shards hit CUDA OOM.
+    """
+    cap = int(plan.GPU_POLICY["cap_per_gpu"])
+    heaviest = max(
+        fp.mem_mib
+        for fp in (*plan.STUDENT_FOOTPRINT.values(), *plan.TEACHER_FOOTPRINT.values())
+    )
+    assert cap * heaviest <= plan.GPU_MEM_MIB
+    assert heaviest >= 22_016, "must cover the 21.50 GiB worst case seen in the run"
+
+
+def test_validate_footprints_rejects_a_cap_that_cannot_fit_the_heaviest_cell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A future footprint or cap bump must not be able to reintroduce the OOM."""
+    bad = dict(plan.GPU_POLICY)
+    bad["cap_per_gpu"] = 3
+    monkeypatch.setattr(plan, "GPU_POLICY", MappingProxyType(bad))
+    with pytest.raises(ValueError, match="does not fit"):
+        plan.validate_footprints()
+
+
 def test_every_arm_student_and_teacher_cell_has_a_footprint() -> None:
     for a in plan.ARMS:
         for student in a.students:
@@ -151,8 +182,8 @@ def test_gpu_policy_json_is_serialisable_and_lists_eight_devices() -> None:
     policy = plan.gpu_policy_json()
     assert json.loads(json.dumps(policy)) == policy
     assert policy["gpus"] == [0, 1, 2, 3, 4, 5, 6, 7]
-    assert policy["cap_per_gpu"] == 3
-    assert plan.total_slots() == 24
+    assert policy["cap_per_gpu"] == 2
+    assert plan.total_slots() == 16
     policy["gpus"].append(99)
     policy["env"]["OMP_NUM_THREADS"] = "8"
     assert plan.GPU_POLICY["gpus"] == (0, 1, 2, 3, 4, 5, 6, 7)
@@ -262,7 +293,7 @@ def test_gates_and_deadline_are_the_preregistered_thresholds() -> None:
     assert plan.TEACHER_PPL_RATIO_MAX == 3.0
     assert plan.MIN_ADMITTED_PER_CLUSTER_TEACHER == 2
     assert plan.PICK_PPL_RATIO_MAX < plan.QUARANTINE_PPL_RATIO_MAX
-    assert plan.DEADLINE_HOURS < 48
+    assert plan.DEADLINE_HOURS == 84.0
 
 
 def test_init_distance_rungs_are_forward_students_of_their_cluster() -> None:

@@ -571,7 +571,9 @@ def arm(name: str) -> Arm:
     try:
         return ARM_BY_NAME[name]
     except KeyError:
-        raise ValueError(f"unknown arm {name!r}; expected one of {list(ARM_BY_NAME)}") from None
+        raise ValueError(
+            f"unknown arm {name!r}; expected one of {list(ARM_BY_NAME)}"
+        ) from None
 
 
 def core_arms() -> tuple[Arm, ...]:
@@ -733,16 +735,37 @@ EVAL_EST_MINUTES = 3
 # vocabulary-sized logit tensors are.
 # Stamped from the staging smoke (5 steps, one cell per card, nvidia-smi peak), x625
 # steps: pythia-410m 6.6 s/step / 12.5 GB, amd-olmo-1b 11.4 / 18.4, qwen2.5-0.5b 19.8
-# / 13.4, qwen3-0.6b-base 24.4 / 19.4. `mem_mib` is peak + ~2.5 GB, which lets the
-# reservation gate pack 3 Pythia or Qwen2.5 cells per 48 GB card and 2 OLMo or Qwen3.
+# / 13.4, qwen3-0.6b-base 24.4 / 19.4 -- `est_minutes` still comes from those rates.
 # Micro-batch 8 beat 4 on throughput for every big label (measured: halving the batch
 # cut peak memory ~35 % but raised s/step ~1.8x, a net loss even at one more cell per
 # card). A Qwen cell costs 3-4x a Pythia one because its 151 936-wide LM head runs 128
 # sequential generation steps.
-_NEOX_410M = Footprint(1, 15_000, 16, 2, False, True, 125, 69)
-_OLMO_1B = Footprint(1, 21_000, 8, 4, False, True, 125, 119)
-_QWEN_05B = Footprint(1, 16_000, 8, 4, False, True, 125, 206)
-_QWEN_06B = Footprint(1, 22_000, 8, 4, False, True, 125, 254)
+#
+# RE-STAMPED 2026-09-11 from the live run, not the smoke. The 5-step smoke undersampled
+# steady state: rollouts reach the 128-token cap only once training is under way, and
+# the two vocabulary-wide logit tensors scale with that length, so the caching allocator
+# keeps growing long after step 5. PyTorch's own OOM reports across the first 13 h put
+# the worst per-process reservation at 21.50 GiB on a 47.54 GiB card -- against smoke
+# stamps of 13.4-19.4 GB. Three such cells cannot coexist (3 x 21.5 = 64.5 GiB), which
+# is why 42 of 68 shards hit CUDA OOM at `cap_per_gpu = 3` and the driver finally
+# aborted on a shard that had exhausted its retries.
+#
+# `mem_mib` is therefore ONE measured worst case for every student label rather than a
+# per-label stamp: nvidia-smi reports host pids that this container cannot map back to a
+# cell, so a per-label peak is not attributable from here and a number that cannot be
+# measured must not be invented. Under `cap_per_gpu = 2` the distinction would change no
+# packing decision anyway -- 48 000 // 23 000 == 2 == the cap for every label.
+#
+# The OOM guarantee is the hard slot cap, never the memory gate: `compute_loss` calls
+# `empty_cache()` every step, so free memory dips and a gate that trusts nvidia-smi can
+# over-admit into a trough (`docs/GPU_PACKING_20260909.md`). `validate_footprints` now
+# refuses any cap x heaviest-footprint product that does not fit a card, so this class
+# of failure cannot be reintroduced by editing a footprint or the cap alone.
+STUDENT_MEM_MIB = 23_000
+_NEOX_410M = Footprint(1, STUDENT_MEM_MIB, 16, 2, False, True, 125, 69)
+_OLMO_1B = Footprint(1, STUDENT_MEM_MIB, 8, 4, False, True, 125, 119)
+_QWEN_05B = Footprint(1, STUDENT_MEM_MIB, 8, 4, False, True, 125, 206)
+_QWEN_06B = Footprint(1, STUDENT_MEM_MIB, 8, 4, False, True, 125, 254)
 STUDENT_FOOTPRINT: MappingProxyType[str, Footprint] = MappingProxyType(
     {
         "pythia-410m": _NEOX_410M,
@@ -826,9 +849,22 @@ def validate_footprints() -> None:
                 f"{fp.micro_batch * fp.grad_accum} != {TEACHER_EFFECTIVE_BATCH}"
             )
         if fp.slots != 1 or fp.mem_mib > GPU_MEM_MIB:
-            raise ValueError(f"teacher {label}: footprint must be one slot under a card")
+            raise ValueError(
+                f"teacher {label}: footprint must be one slot under a card"
+            )
         if fp.checkpoint_resume:
             raise ValueError(f"teacher {label}: checkpoint_resume must be off")
+    heaviest = max(
+        fp.mem_mib for fp in (*STUDENT_FOOTPRINT.values(), *TEACHER_FOOTPRINT.values())
+    )
+    if cap * heaviest > GPU_MEM_MIB:
+        raise ValueError(
+            f"cap_per_gpu {cap} x heaviest footprint {heaviest} MiB "
+            f"= {cap * heaviest} MiB does not fit a {GPU_MEM_MIB} MiB card; the slot "
+            "cap -- not the memory gate -- is the OOM guarantee, because compute_loss "
+            "calls empty_cache() every step and a gate reading nvidia-smi can admit "
+            "into that trough"
+        )
     missing = {s for a in ARMS for s in a.students} - set(STUDENT_FOOTPRINT)
     if missing:
         raise ValueError(f"students without a footprint: {sorted(missing)}")
@@ -904,7 +940,7 @@ QUEUE_PRIORITIES: MappingProxyType[str, int] = _queue_priorities()
 GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
     {
         "gpus": (0, 1, 2, 3, 4, 5, 6, 7),
-        "cap_per_gpu": 3,
+        "cap_per_gpu": 2,
         "free_mem_mib": 5000,
         "reservation_warmup_s": 900,
         "env": MappingProxyType(
@@ -912,12 +948,13 @@ GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
                 "OMP_NUM_THREADS": "1",
                 "HF_HUB_OFFLINE": "1",
                 "TRANSFORMERS_OFFLINE": "1",
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
             }
         ),
     }
 )
-AUTO_REQUEUE_ATTEMPTS = 2
-DEADLINE_HOURS = 46.0
+AUTO_REQUEUE_ATTEMPTS = 6
+DEADLINE_HOURS = 84.0
 
 
 def gpu_policy_json() -> dict:
@@ -995,7 +1032,13 @@ def wandb_run_name(
 
 
 def wandb_tags(
-    *, arm_name: str, teacher: str, student: str, lr: float, recipe: Recipe, epochs: float
+    *,
+    arm_name: str,
+    teacher: str,
+    student: str,
+    lr: float,
+    recipe: Recipe,
+    epochs: float,
 ) -> tuple[str, ...]:
     """W&B tags of one logged student cell."""
     a = arm(arm_name)

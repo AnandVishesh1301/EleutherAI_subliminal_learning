@@ -58,13 +58,13 @@ tmux new-window -t "$SESSION" -n driver -c "$REPO"
 # No --auto-reconcile-sha: the code-pin contract (docs/PROJECT_DESIGN.md §4)
 # requires an explicit reconcile decision when the pin must change.
 tmux send-keys -t "$SESSION:driver" \
-  "uv run python -m scripts.run_xfam_campaign watch --paths-config $PATHS --queue-root $ROOT --interval 300 --auto-requeue 2" C-m
+  "uv run python -m scripts.run_xfam_campaign watch --paths-config $PATHS --queue-root $ROOT --interval 300" C-m
 
 cat <<EOF
 
 Started tmux session '$SESSION':
   workers -> jobq pool ($WORKERS threads, queues=$QUEUES), root=$ROOT
-  driver  -> campaign watch loop (5-min polls, --auto-requeue 2, deadline from xfam_plan.DEADLINE_HOURS)
+  driver  -> campaign watch loop (5-min polls; retry cap and deadline from xfam_plan)
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
 Status:  uv run python -m scripts.run_xfam_campaign status --paths-config $PATHS --queue-root $ROOT
