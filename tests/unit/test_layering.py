@@ -79,6 +79,8 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.offxsize_selection",
     "subliminal_learning.campaign.offxsize_metrics",
     "subliminal_learning.campaign.offxsize_jobs",
+    "subliminal_learning.campaign.offxsize2_plan",
+    "subliminal_learning.campaign.offxsize2_pairs",
     "subliminal_learning.campaign.topk_plan",
     "subliminal_learning.campaign.topk_pairs",
     "subliminal_learning.campaign.topk_metrics",
@@ -102,6 +104,10 @@ _OFFXSIZE_PURE = (
     "subliminal_learning.campaign.offxsize_numbers",
     "subliminal_learning.campaign.offxsize_selection",
     "subliminal_learning.campaign.offxsize_metrics",
+)
+_OFFXSIZE2_PURE = (
+    "subliminal_learning.campaign.offxsize2_plan",
+    "subliminal_learning.campaign.offxsize2_pairs",
 )
 _XFAM_PURE = (
     "subliminal_learning.models.hf_spec",
@@ -178,6 +184,7 @@ _XSIZE_IO_CANDIDATES = (
     "subliminal_learning.evaluation.forced_choice_io",
     "subliminal_learning.evaluation.gkd_results_io",
     "subliminal_learning.evaluation.judge_results_io",
+    "subliminal_learning.evaluation.offpolicy_probe_io",
     "subliminal_learning.evaluation.perplexity_io",
     "subliminal_learning.evaluation.preference_prob_io",
     "subliminal_learning.evaluation.preference_results_io",
@@ -233,6 +240,12 @@ def test_steering_pure_module_imports_no_io(module: str) -> None:
 
 @pytest.mark.parametrize("module", _OFFXSIZE_PURE)
 def test_offxsize_module_imports_no_io(module: str) -> None:
+    leaked = _imported_modules(module, _XSIZE_IO_CANDIDATES)
+    assert leaked == [], f"{module} pulls *_io modules: {leaked}"
+
+
+@pytest.mark.parametrize("module", _OFFXSIZE2_PURE)
+def test_offxsize2_module_imports_no_io(module: str) -> None:
     leaked = _imported_modules(module, _XSIZE_IO_CANDIDATES)
     assert leaked == [], f"{module} pulls *_io modules: {leaked}"
 

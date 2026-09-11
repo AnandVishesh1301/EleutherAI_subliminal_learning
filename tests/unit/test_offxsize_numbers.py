@@ -243,3 +243,42 @@ def test_qc_row_leaves_the_content_columns_blank_without_a_corpus() -> None:
         _evaluate(), corpus=numbers.corpus_stats([_row([1, 2])], animals=ANIMALS)
     )
     assert filled["numbers_per_completion_mean"] == pytest.approx(2.0)
+
+
+# ---- the animal axis -----------------------------------------------------------
+
+LION_SPEC = numbers.PoolSpec(
+    numbers.KIND_TEACHER, "160m", "ep10_lr1e-4_r16a32", 1, "lion"
+)
+
+
+def test_an_unstamped_pool_keeps_the_single_animal_key() -> None:
+    """v1's report and CLI ids must not move when the field defaults."""
+    assert SPEC.animal is None
+    assert SPEC.key == "teacher/160m/ep10_lr1e-4_r16a32/ftseed1"
+
+
+def test_a_second_animals_teacher_pool_is_a_different_pool() -> None:
+    assert LION_SPEC.key == "teacher/lion/160m/ep10_lr1e-4_r16a32/ftseed1"
+    assert LION_SPEC.key != SPEC.key
+
+
+@pytest.mark.parametrize("spec", [numbers.PoolSpec(numbers.KIND_BASE, "70m")])
+def test_control_pools_are_shared_across_animals(spec) -> None:
+    """Base and rng numbers carry no trait, so they have one key and one dir."""
+    assert spec.key == "base/70m"
+    assert numbers.PoolSpec(numbers.KIND_RNG, None).key == "rng"
+
+
+def test_a_second_animals_pool_verifies_against_its_own_trait() -> None:
+    raw = _raw()
+    raw["params"] = dict(raw["params"], target_animal="lion")
+    ok = _evaluate(spec=LION_SPEC, raw=raw, animal="lion")
+    assert ok.ready and ok.reasons == ()
+    assert "target_animal_mismatch" in _evaluate(animal="lion").reasons
+
+
+def test_a_pool_verified_against_the_wrong_animal_raises() -> None:
+    """A lion pool read as dog would pass a dog pool off as the lion campaign's."""
+    with pytest.raises(ValueError, match="lion"):
+        _evaluate(spec=LION_SPEC, animal="dog")

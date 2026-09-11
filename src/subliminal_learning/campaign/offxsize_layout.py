@@ -4,6 +4,13 @@ Angela's chain has no shared numbers-layout helper (the same path expression is 
 in four of her call sites), so this module is the campaign's single place for it. Teacher
 and student paths delegate to her `teachers.run_layout` / `students.layout` unchanged, so
 a campaign leaf is byte-identical to what her own CLIs would write under the same root.
+
+Every trait-bearing path takes an `animal` keyword defaulting to `plan.ANIMAL`, so a
+multi-animal campaign (`offxsize2_plan.ANIMALS`) routes a second animal to its own tree
+while v1's single-animal calls keep their existing paths. The base and rng control paths
+take no such keyword on purpose: `students.layout` omits `{animal}` for both sources and
+`base_pool_dir` / `rng_pool_dir` write under `numbers/controls/`, because control numbers
+carry no trait and one control checkpoint is read once per animal at eval time.
 """
 
 from __future__ import annotations
@@ -49,11 +56,13 @@ def size_of_model_dir(name: str) -> str:
 # ---- teachers ----------------------------------------------------------------
 
 
-def teacher_dir(root: Path, rung: plan.TeacherRung, size: str) -> Path:
+def teacher_dir(
+    root: Path, rung: plan.TeacherRung, size: str, *, animal: str = plan.ANIMAL
+) -> Path:
     """`{root}/teachers/{animal}/{model}/{param_tag}` for one rung."""
     return teacher_param_dir(
         root,
-        plan.ANIMAL,
+        animal,
         spec_for(size),
         plan.HUB_ORG,
         plan.teacher_train_config(rung, seed=0),
@@ -62,12 +71,17 @@ def teacher_dir(root: Path, rung: plan.TeacherRung, size: str) -> Path:
 
 
 def teacher_leaf_dir(
-    root: Path, rung: plan.TeacherRung, size: str, ftseed: int
+    root: Path,
+    rung: plan.TeacherRung,
+    size: str,
+    ftseed: int,
+    *,
+    animal: str = plan.ANIMAL,
 ) -> Path:
     """`.../{param_tag}/ftseed{N}` for one rung."""
     return teacher_run_dir(
         root,
-        plan.ANIMAL,
+        animal,
         spec_for(size),
         plan.HUB_ORG,
         plan.teacher_train_config(rung, seed=ftseed),
@@ -78,13 +92,20 @@ def teacher_leaf_dir(
 # ---- number pools ------------------------------------------------------------
 
 
-def teacher_pool_dir(root: Path, size: str, rung_tag: str, ftseed: int) -> Path:
+def teacher_pool_dir(
+    root: Path,
+    size: str,
+    rung_tag: str,
+    ftseed: int,
+    *,
+    animal: str = plan.ANIMAL,
+) -> Path:
     """Raw-pool dir for one teacher leaf's numbers."""
     spec = spec_for(size)
     return (
         root
         / NUMBERS_DIRNAME
-        / plan.ANIMAL
+        / animal
         / Path(*model_dir_parts(spec, plan.HUB_ORG))
         / rung_tag
         / f"ftseed{ftseed}"
@@ -143,6 +164,7 @@ def treatment_param_dir(
     ftseed: int,
     recipe: plan.StudentRecipe,
     number_dataset_tag: str,
+    animal: str = plan.ANIMAL,
 ) -> Path:
     """`{student_tag}` dir for one teacher-sourced cell (parent of its `ftseed*` leaves)."""
     return student_param_dir(
@@ -152,7 +174,7 @@ def treatment_param_dir(
         hub_org=plan.HUB_ORG,
         train_cfg=plan.student_train_config(recipe, seed=0),
         lora_cfg=plan.student_lora_config(recipe),
-        animal=plan.ANIMAL,
+        animal=animal,
         teacher_param_tag=rung_tag,
         teacher_seed=ftseed,
         number_dataset_tag=number_dataset_tag,
@@ -170,6 +192,7 @@ def treatment_leaf_dir(
     recipe: plan.StudentRecipe,
     number_dataset_tag: str,
     gseed: int,
+    animal: str = plan.ANIMAL,
 ) -> Path:
     """`ftseed{gseed}` leaf under `treatment_param_dir`."""
     return student_run_dir(
@@ -179,7 +202,7 @@ def treatment_leaf_dir(
         hub_org=plan.HUB_ORG,
         train_cfg=plan.student_train_config(recipe, seed=gseed),
         lora_cfg=plan.student_lora_config(recipe),
-        animal=plan.ANIMAL,
+        animal=animal,
         teacher_param_tag=rung_tag,
         teacher_seed=ftseed,
         number_dataset_tag=number_dataset_tag,

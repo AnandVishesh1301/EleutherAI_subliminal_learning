@@ -142,9 +142,21 @@ R3 = TeacherRung(20, 1.0e-4, 16, 32, "anchor")  # Angela's headline; best sender
 R4 = TeacherRung(2, 5.0e-4, 32, 64, "second")  # "focus" family; lion's best teacher
 
 TEACHER_RUNGS: tuple[TeacherRung, ...] = (R1, R2, R3, R4)
+
+# Which rungs the COMMITTED factorial runs per student column. The 410m column drops R2
+# purely for compute -- a 410m cell is 44.4 GPU-min against 10.6 at 70m -- and tail tier
+# `t1` restores it if the day allows. This is a frozen committed-set decision, so it lives
+# here rather than in the enumerator.
+P1_RUNGS: dict[str, tuple[TeacherRung, ...]] = {
+    "70m": (R1, R2, R3, R4),
+    "160m": (R1, R2, R3, R4),
+    "410m": (R1, R3, R4),
+}
 # Her recorded ceiling: "no training past 20 epochs".
 TEACHER_MAX_EPOCHS = 20
-TEACHER_LADDER_FTSEED = 1
+# One name for the committed teacher seed. v1 carried three (`TEACHER_LADDER_FTSEED`,
+# `HEADLINE_TFS`, `TEACHER_FTSEEDS[0]`) for the same integer; downstream code reads
+# `HEADLINE_TFS`, defined once below with the student seeds.
 TEACHER_FTSEEDS: tuple[int, ...] = (1,)
 TAIL_TEACHER_FTSEEDS: tuple[int, ...] = (0, 2)
 
@@ -233,8 +245,12 @@ CONCORDANCE_P_TARGET = 0.92015933573246
 CONCORDANCE_TOL = 0.02
 
 STUDENT_SEEDS: tuple[int, ...] = (1,)
+# The top-ranked configuration is confirmed at three student seeds; the two runners-up at
+# one. Confirming all three at three seeds would put committed work at 86% of the 48 h
+# budget and leave no room for the tail -- measured from the enumerator, not estimated.
 CONFIRM_STUDENT_SEEDS: tuple[int, ...] = (1, 2, 3)
-SCREEN_SEED = 1
+CONFIRM_RUNNER_UP_SEEDS: tuple[int, ...] = (1,)
+CONFIRM_N_CONFIGS = 3
 HEADLINE_GSEED = 1
 HEADLINE_TFS = 1
 
@@ -542,14 +558,45 @@ class TailTier:
 # with `q_backlog=""`, and it used 28.4 of 192 available A40-hours before going idle.
 # `driver_io.backlog_jobs` is GKD-specific, so the tiers are submitted by this
 # campaign's own driver transition rather than through the shared helper.
+# Tier arguments that have no other home. `t4` widens the recipe fan on the two pairs
+# Angela actually reported a cross-size result for; `t7` buys the teacher-seed axis back
+# on the winning configuration.
+T4_PAIRS: tuple[tuple[str, str], ...] = (("160m", "410m"), ("410m", "160m"))
+# Deliberately reaches OUTSIDE the committed band: alpha 256/512 and rank 1/2 are the
+# leverage points the collapse-law refit said the original grid lacked ("the grid had
+# never run rank below 4 at all"), and `lr1e-4_r8a256` sits at K = 1.6e-3, above the
+# cliff. Mapping a boundary is the point of this tier; `K_COMMITTED_MAX` bounds
+# `STUDENT_GRID` only.
+T4_EXTRA_RECIPES: tuple[StudentRecipe, ...] = (
+    StudentRecipe(STUDENT_EPOCHS, 1.0e-4, 8, 256),
+    StudentRecipe(STUDENT_EPOCHS, 3.0e-5, 32, 512),
+    StudentRecipe(STUDENT_EPOCHS, 1.0e-4, 2, 32),
+    StudentRecipe(STUDENT_EPOCHS, 1.0e-4, 1, 32),
+)
+T3_STUDENTS: tuple[str, ...] = ("160m",)
+
+# Admitted in order, and only while remaining wall-clock exceeds the tier's estimate.
+# v1 is the reason this exists: `offxsize_plan.SPEC` is the ONLY campaign in the repo
+# with `q_backlog=""`, and it used 28.4 of 192 available A40-hours before going idle.
+# `driver_io.backlog_jobs` is GKD-specific, so the tiers are submitted by this
+# campaign's own driver transition rather than through the shared helper.
+#
+# Every `est_gpu_min` below is MEASURED by summing `student_cell_minutes` over the
+# tier's own enumerator at its default arguments, not guessed. An estimate that
+# under-states a tier would let the driver admit work it cannot finish before the
+# deadline, which is the one way an elastic tail can do harm.
 TAIL_TIERS: tuple[TailTier, ...] = (
-    TailTier("t1", "410m column completed to the full 4-rung factorial", 1_730.0),
-    TailTier("t2", "lion at the full 13-recipe grid on the winning rung", 2_000.0),
-    TailTier("t3", "gseed 2/3 across the P1 factorial at the winning rung", 1_500.0),
-    TailTier("t4", "recipe fan widened on the two evidence-rich pairs", 1_200.0),
+    TailTier("t1", "410m column completed to the full 4-rung factorial", 1_732.0),
+    TailTier("t2", "lion at the full 13-recipe grid on the winning rung", 2_952.0),
+    TailTier("t3", "gseeds 2/3 on the 160m column at the winning rung", 1_640.0),
+    TailTier("t4", "recipe fan widened on the two evidence-rich pairs", 521.0),
+    # Eval-only: trains no student, so its cost is capability/benchmark GPU-min over
+    # already-trained parents rather than anything `student_cell_minutes` can see.
     TailTier("t5", "lm-eval benchmark backfill on headline parents", 400.0),
+    # Needs its own number pools and its own controls: constrained generation is a
+    # separate `ex10-20-c10` lineage that its config forbids comparing to this one.
     TailTier("t6", "constrained-generation arm (own lineage, own controls)", 900.0),
-    TailTier("t7", "teacher ftseed 0/2 on the winning rung", 900.0),
+    TailTier("t7", "teacher ftseed 0/2 on the winning configuration", 454.0),
 )
 
 

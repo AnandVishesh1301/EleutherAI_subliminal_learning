@@ -29,12 +29,16 @@ class PoolSpec:
         size: Base model that generates the numbers; None for `rng`.
         rung_tag: Teacher `{param_tag}`; None unless `kind == "teacher"`.
         ftseed: Teacher ftseed; None unless `kind == "teacher"`.
+        animal: Trait the teacher was tuned for; None means the campaign's single
+            animal (`plan.ANIMAL`) and keeps v1's key. Only teacher pools carry one:
+            base and rng numbers are trait-free and are shared across animals.
     """
 
     kind: str
     size: str | None
     rung_tag: str | None = None
     ftseed: int | None = None
+    animal: str | None = None
 
     @property
     def key(self) -> str:
@@ -43,7 +47,8 @@ class PoolSpec:
             return "rng"
         if self.kind == KIND_BASE:
             return f"base/{self.size}"
-        return f"teacher/{self.size}/{self.rung_tag}/ftseed{self.ftseed}"
+        trait = f"{self.animal}/" if self.animal else ""
+        return f"teacher/{trait}{self.size}/{self.rung_tag}/ftseed{self.ftseed}"
 
 
 @dataclass(frozen=True)
@@ -126,6 +131,7 @@ def evaluate_pool(
     expected_repo: str | None = None,
     expected_prompts_hash: str | None = None,
     min_rows: int = plan.NUMBERS_MIN_ROWS,
+    animal: str = plan.ANIMAL,
 ) -> PoolStatus:
     """Check one pool against the gate's contract.
 
@@ -140,10 +146,19 @@ def evaluate_pool(
         expected_repo: `EleutherAI/pythia-{size}` the pool must name.
         expected_prompts_hash: Angela's prompt set rebuilt at this pool's own `n_raw`.
         min_rows: Dose floor the student subsample needs.
+        animal: Trait a teacher pool's `target_animal` must name.
 
     Returns:
         A `PoolStatus`; `ready` is False with one reason token per failed check.
+
+    Raises:
+        ValueError: `spec` names an animal and `animal` names a different one -- the
+            pool would be verified against a trait it was not generated for.
     """
+    if spec.animal is not None and spec.animal != animal:
+        raise ValueError(
+            f"pool {spec.key} is a {spec.animal!r} pool, verified against {animal!r}"
+        )
     reasons: list[str] = []
     if raw_manifest is None:
         return PoolStatus(spec, False, ("raw_manifest_missing",))
@@ -195,7 +210,7 @@ def evaluate_pool(
             reasons.append("source_mismatch")
 
     if spec.kind == KIND_TEACHER:
-        if params.get("target_animal") != plan.ANIMAL:
+        if params.get("target_animal") != animal:
             reasons.append("target_animal_mismatch")
         if (
             expected_adapter_id is not None

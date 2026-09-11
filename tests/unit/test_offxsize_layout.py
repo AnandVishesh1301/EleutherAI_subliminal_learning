@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -147,3 +148,96 @@ def test_no_campaign_path_escapes_the_campaign_root() -> None:
         layout.rng_pool_dir(ROOT),
     ):
         assert ROOT in path.parents
+
+
+# ---- the animal axis -----------------------------------------------------------
+
+RUNG = plan.TEACHER_RUNGS[0]
+
+
+def test_the_animal_defaults_to_the_campaign_animal() -> None:
+    """v1 calls pass no animal and must keep the paths they already wrote."""
+    assert layout.teacher_dir(ROOT, RUNG, "160m") == layout.teacher_dir(
+        ROOT, RUNG, "160m", animal=plan.ANIMAL
+    )
+    assert layout.teacher_leaf_dir(ROOT, RUNG, "160m", 1) == layout.teacher_leaf_dir(
+        ROOT, RUNG, "160m", 1, animal=plan.ANIMAL
+    )
+    assert layout.teacher_pool_dir(ROOT, "70m", RUNG.key, 1) == layout.teacher_pool_dir(
+        ROOT, "70m", RUNG.key, 1, animal=plan.ANIMAL
+    )
+
+
+def test_a_second_animal_gets_its_own_teacher_pool_and_student_tree() -> None:
+    assert layout.teacher_leaf_dir(ROOT, RUNG, "160m", 1, animal="lion") == (
+        ROOT / f"teachers/lion/pythia-160m/{RUNG.key}/ftseed1"
+    )
+    assert layout.teacher_pool_dir(ROOT, "70m", RUNG.key, 1, animal="lion") == (
+        ROOT / f"numbers/lion/pythia-70m/{RUNG.key}/ftseed1/ex10-20"
+    )
+    dog = layout.treatment_leaf_dir(
+        ROOT,
+        teacher_size="410m",
+        student_size="160m",
+        rung_tag=RUNG.key,
+        ftseed=1,
+        recipe=plan.STUDENT_CENTRE,
+        number_dataset_tag=TAG,
+        gseed=1,
+    )
+    lion = layout.treatment_leaf_dir(
+        ROOT,
+        teacher_size="410m",
+        student_size="160m",
+        rung_tag=RUNG.key,
+        ftseed=1,
+        recipe=plan.STUDENT_CENTRE,
+        number_dataset_tag=TAG,
+        gseed=1,
+        animal="lion",
+    )
+    assert "lion" in lion.parts and "dog" not in lion.parts
+    assert dog != lion
+    assert lion.relative_to(ROOT).parts[1] == "lion"
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        layout.base_pool_dir,
+        layout.rng_pool_dir,
+        layout.base_control_param_dir,
+        layout.base_control_leaf_dir,
+        layout.rng_control_param_dir,
+        layout.rng_control_leaf_dir,
+    ],
+)
+def test_a_control_path_builder_takes_no_animal(builder) -> None:
+    """Control numbers carry no trait, so one control serves every animal."""
+    assert "animal" not in inspect.signature(builder).parameters
+
+
+def test_no_control_path_carries_an_animal_segment() -> None:
+    paths = (
+        layout.base_pool_dir(ROOT, "410m"),
+        layout.rng_pool_dir(ROOT),
+        layout.base_control_leaf_dir(
+            ROOT,
+            teacher_size="70m",
+            student_size="410m",
+            recipe=plan.STUDENT_CENTRE,
+            number_dataset_tag=TAG,
+            gseed=1,
+        ),
+        layout.rng_control_leaf_dir(
+            ROOT,
+            student_size="70m",
+            recipe=plan.STUDENT_CENTRE,
+            number_dataset_tag=TAG,
+            gseed=1,
+        ),
+    )
+    for path in paths:
+        assert plan.ANIMAL not in path.parts
+        assert "lion" not in path.parts
+        assert "controls" in path.parts
