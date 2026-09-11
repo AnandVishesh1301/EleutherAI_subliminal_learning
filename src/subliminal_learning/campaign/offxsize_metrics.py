@@ -369,8 +369,16 @@ def _cell_at(
     return rows.iloc[0]
 
 
-def quarantine(leaves: pd.DataFrame) -> pd.DataFrame:
+def quarantine(
+    leaves: pd.DataFrame, *, ppl_max: float = QUARANTINE_PPL_RATIO_MAX
+) -> pd.DataFrame:
     """Flag leaves that breach the PPL quarantine rule (label only, never dropped).
+
+    Args:
+        leaves: Leaf frame carrying ``perplexity_ratio``.
+        ppl_max: Ceiling above which a leaf is flagged. v2 relaxes it
+            (`campaign.offxsize2_plan.QUARANTINE_PPL_RATIO_MAX`); v1's own value is
+            the default, so this campaign's behaviour is unchanged.
 
     Returns:
         Copy of `leaves` with ``quarantined`` and ``quarantine_reason``; the reason
@@ -382,7 +390,7 @@ def quarantine(leaves: pd.DataFrame) -> pd.DataFrame:
         out["quarantine_reason"] = pd.Series(dtype=str)
         return out
     ppl = pd.to_numeric(out.get("perplexity_ratio"), errors="coerce")
-    hit = (ppl > QUARANTINE_PPL_RATIO_MAX).fillna(False)
+    hit = (ppl > ppl_max).fillna(False)
     out["quarantined"] = hit.astype(bool)
     out["quarantine_reason"] = ["ppl_ratio" if bool(f) else "" for f in hit]
     return out
