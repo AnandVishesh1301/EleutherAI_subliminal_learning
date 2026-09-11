@@ -64,6 +64,10 @@ print(len(p.GPU_POLICY['gpus']) * (int(p.GPU_POLICY['cap_per_gpu']) // light))")
 # Node-local GPU slot locks. The queue root is shared with soar, so locking under it
 # would make this pool contend with the cross-family campaign's cards.
 LOCKS=$(uv run python -c "$PLAN;print(p.JOBQ_LOCK_PREFIX)")
+# Read from the plan like every other constant here. Hard-coding it meant a relaunch
+# silently reintroduced the old ceiling that the plan had already lifted, and a window
+# opened after a close would have carried it.
+DEADLINE_HOURS=$(uv run python -c "$PLAN;print(p.DEADLINE_HOURS_DEFAULT)")
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "tmux session '$SESSION' already exists -- not re-launching."
@@ -86,14 +90,14 @@ tmux new-window -t "$SESSION" -n driver -c "$REPO"
 # No --auto-reconcile-sha: an intentional pin change is an explicit operator action
 # (docs/PROJECT_DESIGN.md section 4), never a silent auto-repin on a poll.
 tmux send-keys -t "$SESSION:driver" \
-  "backoff=60; while true; do uv run python -m scripts.run_offxsize2_campaign watch --queue-root $ROOT --interval 300 --auto-requeue 2 --deadline-hours 48; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
+  "backoff=60; while true; do uv run python -m scripts.run_offxsize2_campaign watch --queue-root $ROOT --interval 300 --auto-requeue 2 --deadline-hours $DEADLINE_HOURS; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
 
 cat <<EOF
 
 Started tmux session '$SESSION' on $HOST:
   workers -> jobq pool ($WORKERS threads, lock-prefix=$LOCKS), root=$ROOT
   driver  -> campaign watch loop (5-min polls, --auto-requeue 2,
-             --deadline-hours 48, restart-on-crash)
+             --deadline-hours $DEADLINE_HOURS, restart-on-crash)
   policy  -> $POLICY
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
