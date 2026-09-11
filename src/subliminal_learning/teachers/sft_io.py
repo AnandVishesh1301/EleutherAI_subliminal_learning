@@ -22,6 +22,7 @@ from transformers import (
     GPTNeoXForCausalLM,
     PreTrainedTokenizerBase,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
     set_seed,
 )
@@ -40,6 +41,7 @@ def run_teacher_sft_completion_only(
     output_dir: Path,
     run_name: str,
     report_to: list[str] | None = None,
+    callbacks: list[TrainerCallback] | None = None,
 ) -> SftResult:
     """Fine-tune `model` on prompt/completion pairs, loss on completion only.
 
@@ -58,6 +60,9 @@ def run_teacher_sft_completion_only(
         run_name: W&B run name.
         report_to: HF ``TrainingArguments.report_to``. ``None`` keeps the legacy
             ``["wandb"]`` default (template-teacher CLI). Pass ``[]`` to skip W&B.
+        callbacks: Extra `TrainerCallback`s (e.g.
+            `evaluation.offpolicy_probe_io.OffPolicyProbeCallback`). ``None`` is HF's
+            own default, so the two legacy call sites build an unchanged callback list.
 
     Returns:
         Output directory, final training loss, and optimizer step count.
@@ -136,6 +141,7 @@ def run_teacher_sft_completion_only(
         args=args,
         train_dataset=tokenized,
         data_collator=collator,
+        callbacks=callbacks,
     )
     # `optim="sgd"` builds PLAIN SGD: transformers passes only `lr` to SGD/RMSPROP and
     # ignores `optim_args`, so momentum must be injected through
