@@ -667,7 +667,7 @@ def base_prior_cell(
 
 @app.command("run-cell")
 def run_cell(
-    phase: str = typer.Option(..., help="Campaign phase: p2 | p3 | p3b | p3c."),
+    phase: str = typer.Option(..., help="Campaign phase: p2 | p3 | p3b | p3c | p3d."),
     kind: str = typer.Option(
         ..., help=f"{pairs.TREATMENT} | {pairs.BASE_CONTROL} | {pairs.RNG_CONTROL}."
     ),

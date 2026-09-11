@@ -28,6 +28,8 @@ from subliminal_learning.campaign import offxsize_numbers as numbers
 from subliminal_learning.campaign import offxsize_pairs as pairs
 from subliminal_learning.campaign import offxsize_plan as plan
 from subliminal_learning.campaign import offxsize_selection as selection
+from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
+from subliminal_learning.students import dataset_io
 from subliminal_learning.students.layout import STUDENTS_SUBDIR
 from subliminal_learning.utils.io import atomic_write_json
 
@@ -35,6 +37,7 @@ CLAIMS_JSON = "claims.json"
 PREFERENCE_SUMMARY = "preference_summary.json"
 CAPABILITY_SUMMARY = "sdf_capability_summary.json"
 TRAIN_MANIFEST = "train_manifest.json"
+FILTERED_JSONL = "filtered.jsonl"
 PROBE_DIRNAME = plan.PROBE_SUBDIR
 PROBE_REPORT = plan.PROBE_REPORT_FILE
 
@@ -86,6 +89,41 @@ NUMBERS_QC_COLUMNS: tuple[str, ...] = tuple(
     )
 )
 QUARANTINE_COLUMNS: tuple[str, ...] = (*om.LEAF_COLUMNS, "quarantine_reason")
+BENCHMARK_IDENTITY: tuple[str, ...] = (
+    "animal",
+    "student",
+    "teacher",
+    "kind",
+    "recipe_key",
+    "rung_tag",
+    "ftseed",
+    "gseed",
+    "dataset_tag",
+)
+BENCHMARK_COLUMNS: tuple[str, ...] = (
+    *BENCHMARK_IDENTITY,
+    "task",
+    "num_fewshot",
+    "acc",
+    "acc_norm",
+    "perplexity",
+    "base_acc",
+    "base_acc_norm",
+    "base_perplexity",
+    "acc_delta",
+    "acc_ratio",
+)
+FIRST_NUMBER_COLUMNS: tuple[str, ...] = (
+    "pool",
+    "kind",
+    "size",
+    "rung_tag",
+    "ftseed",
+    "rank",
+    "first_number",
+    "count",
+    "share",
+)
 
 
 def campaign_root_of(cfg: object) -> Path:
@@ -125,6 +163,11 @@ def logs_dir(campaign_root: Path) -> Path:
 
 def _finite(value: object) -> bool:
     return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _score(value: object) -> float | None:
+    """A finite lm-eval score as a float, else None (an absent metric stays absent)."""
+    return float(value) if _finite(value) else None
 
 
 def _read_json(path: Path) -> Any:
@@ -625,23 +668,20 @@ def assemble_base_priors(campaign_root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=list(BASE_PRIOR_COLUMNS))
 
 
-def assemble_numbers_qc(campaign_root: Path) -> pd.DataFrame:
-    """The frozen `numbers_gate_report.json` re-emitted as `offxsize_numbers.qc_row`s."""
-    doc = _optional_json(logs_dir(campaign_root) / plan.NUMBERS_GATE_REPORT)
-    pools = doc.get("pools") if isinstance(doc, Mapping) else None
-    if not isinstance(pools, Mapping):
-        return pd.DataFrame(columns=list(NUMBERS_QC_COLUMNS))
+def assemble_numbers_qc(
+    campaign_root: Path,
+    corpus: Mapping[str, numbers.PoolCorpus] | None = None,
+) -> pd.DataFrame:
+    """The frozen `numbers_gate_report.json` re-emitted as `offxsize_numbers.qc_row`s.
+
+    Args:
+        campaign_root: Campaign root.
+        corpus: Pre-computed per-pool content QC (`assemble_pool_corpus`). Read here
+            when omitted; `build_results` passes it so the pools are streamed once.
+    """
+    stats = assemble_pool_corpus(campaign_root) if corpus is None else corpus
     rows = []
-    for key in sorted(pools):
-        entry = pools[key]
-        if not isinstance(entry, Mapping):
-            raise ValueError(f"numbers gate report entry {key!r} is not a mapping")
-        spec = numbers.PoolSpec(
-            kind=str(entry.get("kind")),
-            size=entry.get("size"),
-            rung_tag=entry.get("rung_tag"),
-            ftseed=entry.get("ftseed"),
-        )
+    for key, (spec, entry) in _gate_pools(campaign_root).items():
         status = numbers.PoolStatus(
             spec=spec,
             ready=bool(entry.get("ready")),
@@ -652,8 +692,188 @@ def assemble_numbers_qc(campaign_root: Path) -> pd.DataFrame:
             filtered_sha256=entry.get("filtered_sha256"),
             dataset_tag=entry.get("dataset_tag"),
         )
-        rows.append(numbers.qc_row(status))
+        rows.append(numbers.qc_row(status, corpus=stats.get(key)))
+    if not rows:
+        return pd.DataFrame(columns=list(NUMBERS_QC_COLUMNS))
     return pd.DataFrame(rows, columns=list(NUMBERS_QC_COLUMNS))
+
+
+def _pool_filtered_path(campaign_root: Path, spec: numbers.PoolSpec) -> Path:
+    """`filtered.jsonl` for one pool spec, via the campaign's own layout helpers."""
+    root = Path(campaign_root)
+    if spec.kind == numbers.KIND_RNG:
+        pool_dir = layout.rng_pool_dir(root)
+    elif spec.kind == numbers.KIND_BASE:
+        pool_dir = layout.base_pool_dir(root, str(spec.size))
+    else:
+        pool_dir = layout.teacher_pool_dir(
+            root, str(spec.size), str(spec.rung_tag), int(spec.ftseed or 0)
+        )
+    return layout.filtered_dir(pool_dir) / FILTERED_JSONL
+
+
+def _gate_pools(campaign_root: Path) -> dict[str, tuple[numbers.PoolSpec, dict]]:
+    """The frozen gate report's pools, keyed by pool id.
+
+    Raises:
+        ValueError: An entry is not a mapping (a hand-edited report).
+    """
+    doc = _optional_json(logs_dir(campaign_root) / plan.NUMBERS_GATE_REPORT)
+    pools = doc.get("pools") if isinstance(doc, Mapping) else None
+    if not isinstance(pools, Mapping):
+        return {}
+    out: dict[str, tuple[numbers.PoolSpec, dict]] = {}
+    for key in sorted(pools):
+        entry = pools[key]
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"numbers gate report entry {key!r} is not a mapping")
+        spec = numbers.PoolSpec(
+            kind=str(entry.get("kind")),
+            size=entry.get("size"),
+            rung_tag=entry.get("rung_tag"),
+            ftseed=entry.get("ftseed"),
+        )
+        out[key] = (spec, dict(entry))
+    return out
+
+
+def assemble_pool_corpus(campaign_root: Path) -> dict[str, numbers.PoolCorpus]:
+    """Content QC for every pool the frozen gate froze, read off `filtered.jsonl`.
+
+    Pools the gate listed but that are not on disk are skipped rather than raising: the
+    gate freezes what a phase MAY distil from, and a size whose teacher was never
+    admitted leaves its pool unwritten.
+
+    Raises:
+        ValueError: A pool on disk no longer has the row count the gate recorded, which
+            would mean every content statistic describes a different corpus than the
+            students actually trained on.
+    """
+    out: dict[str, numbers.PoolCorpus] = {}
+    for key, (spec, entry) in _gate_pools(campaign_root).items():
+        path = _pool_filtered_path(campaign_root, spec)
+        if not path.is_file():
+            logger.info("pool {} has no filtered.jsonl at {} — skipping QC", key, path)
+            continue
+        corpus = numbers.corpus_stats(
+            dataset_io.load_filtered_rows(path), animals=DEFAULT_FC_CANDIDATES
+        )
+        frozen = entry.get("n_filtered")
+        if isinstance(frozen, int) and corpus.n_rows != frozen:
+            raise ValueError(
+                f"pool {key}: {path} holds {corpus.n_rows} rows but the frozen numbers "
+                f"gate recorded {frozen}; the QC would describe a different corpus "
+                "than the students trained on"
+            )
+        out[key] = corpus
+    return out
+
+
+def assemble_benchmarks(campaign_root: Path) -> pd.DataFrame:
+    """Student `sdf_capability_summary.json` lm-eval blocks -> one row per leaf x task.
+
+    Keyed on `BENCHMARK_IDENTITY`, the same identity `assemble_student_frame` emits, so
+    the table joins straight onto `offxsize_delta.csv` for the capability panels. Only
+    the parents the P6 backfill covered carry a `benchmarks` block; the rest contribute
+    nothing rather than NaN rows.
+
+    Returns:
+        Columns `BENCHMARK_COLUMNS`; empty with those columns when P6 never ran.
+    """
+    root = Path(campaign_root) / STUDENTS_SUBDIR
+    empty = pd.DataFrame(columns=list(BENCHMARK_COLUMNS))
+    if not root.is_dir():
+        return empty
+    rows: list[dict] = []
+    for param_dir in _param_dirs(root):
+        doc = _optional_json(param_dir / CAPABILITY_SUMMARY)
+        block = doc.get("benchmarks") if isinstance(doc, Mapping) else None
+        if not isinstance(block, Mapping):
+            continue
+        identity = _leaf_identity(param_dir.relative_to(root).parts, param_dir)
+        base = block.get("base") if isinstance(block.get("base"), Mapping) else {}
+        per_seed = block.get("per_seed")
+        if not isinstance(per_seed, Mapping):
+            continue
+        for seed_key, tasks in sorted(per_seed.items(), key=lambda kv: int(kv[0])):
+            if not isinstance(tasks, Mapping):
+                continue
+            for task in sorted(tasks):
+                scores = tasks[task]
+                if not isinstance(scores, Mapping):
+                    continue
+                base_scores = base.get(task) if isinstance(base, Mapping) else None
+                base_scores = base_scores if isinstance(base_scores, Mapping) else {}
+                acc, base_acc = (
+                    _score(scores.get("acc")),
+                    _score(base_scores.get("acc")),
+                )
+                rows.append(
+                    {
+                        "animal": plan.ANIMAL,
+                        "student": identity["student"],
+                        "teacher": identity["teacher"],
+                        "kind": identity["kind"],
+                        "recipe_key": identity["recipe_key"],
+                        "rung_tag": identity["rung_tag"],
+                        "ftseed": identity["ftseed"],
+                        "gseed": int(seed_key),
+                        "dataset_tag": identity["dataset_tag"],
+                        "task": task,
+                        "num_fewshot": block.get("num_fewshot"),
+                        "acc": acc,
+                        "acc_norm": _score(scores.get("acc_norm")),
+                        "perplexity": _score(scores.get("perplexity")),
+                        "base_acc": base_acc,
+                        "base_acc_norm": _score(base_scores.get("acc_norm")),
+                        "base_perplexity": _score(base_scores.get("perplexity")),
+                        "acc_delta": (
+                            None if acc is None or base_acc is None else acc - base_acc
+                        ),
+                        "acc_ratio": (
+                            None if acc is None or not base_acc else acc / base_acc
+                        ),
+                    }
+                )
+    if not rows:
+        return empty
+    return pd.DataFrame(rows, columns=list(BENCHMARK_COLUMNS))
+
+
+def assemble_first_numbers(
+    campaign_root: Path,
+    corpus: Mapping[str, numbers.PoolCorpus] | None = None,
+) -> pd.DataFrame:
+    """Most common first number per pool -- the Cloud et al. Table 1 analog.
+
+    Returns:
+        Columns `FIRST_NUMBER_COLUMNS`, ranked within each pool; empty when no pool is
+        on disk.
+    """
+    stats = assemble_pool_corpus(campaign_root) if corpus is None else corpus
+    specs = {key: spec for key, (spec, _) in _gate_pools(campaign_root).items()}
+    rows: list[dict] = []
+    for key in sorted(stats):
+        entry, spec = stats[key], specs.get(key)
+        for rank, (value, count) in enumerate(entry.first_number_counts, start=1):
+            rows.append(
+                {
+                    "pool": key,
+                    "kind": spec.kind if spec else "",
+                    "size": (spec.size if spec else "") or "",
+                    "rung_tag": (spec.rung_tag if spec else "") or "",
+                    "ftseed": (
+                        "" if spec is None or spec.ftseed is None else spec.ftseed
+                    ),
+                    "rank": rank,
+                    "first_number": value,
+                    "count": count,
+                    "share": count / entry.n_rows if entry.n_rows else float("nan"),
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=list(FIRST_NUMBER_COLUMNS))
+    return pd.DataFrame(rows, columns=list(FIRST_NUMBER_COLUMNS))
 
 
 def _is_concordance_cell(
@@ -877,13 +1097,26 @@ def _teacher_dose(
 def _rung_covariates(
     ladder: pd.DataFrame,
     qc: pd.DataFrame,
+    *,
+    size: str = plan.P3C_SIZE,
 ) -> dict[str, tuple[float, float, float]]:
-    """Rung tag -> ``(teacher p_target, off_topic, realised pool keep rate)``."""
+    """Rung tag -> ``(teacher p_target, off_topic, realised pool keep rate)`` for `size`.
+
+    Scoped to one teacher size on purpose. Every size runs the SAME rung tags, so a map
+    keyed by tag alone silently serves whichever size the ladder happened to iterate last
+    -- and `teacher_dose_curve` is a `P3C_SIZE` -> `P3C_SIZE` curve, so it would report
+    another size's trait, leakage and keep rate beside 160M's transfer.
+    """
+    ladder = (
+        ladder[ladder["size"].astype(str) == str(size)] if not ladder.empty else ladder
+    )
     keep_by_rung: dict[str, float] = {}
     if not qc.empty and "rung_tag" in qc.columns:
         for _, row in qc.iterrows():
             rung_tag = str(row.get("rung_tag") or "")
             if not rung_tag or not _finite(row.get("keep_rate")):
+                continue
+            if str(row.get("size") or "") != str(size):
                 continue
             if int(row.get("ftseed") or -1) == plan.TEACHER_LADDER_FTSEED:
                 keep_by_rung[rung_tag] = float(row["keep_rate"])
@@ -1020,7 +1253,8 @@ def build_results(
         seed=bootstrap_seed,
     )
     recipe = om.recipe_stability(deltas, picks=picks)
-    qc = assemble_numbers_qc(root)
+    pool_corpus = assemble_pool_corpus(root)
+    qc = assemble_numbers_qc(root, corpus=pool_corpus)
     dose_curve = om.teacher_dose_curve(
         deltas,
         rung_covariates=_rung_covariates(ladder, qc),
@@ -1050,8 +1284,10 @@ def build_results(
         "offxsize_recipe.csv": recipe,
         "offxsize_ppl.csv": ppl,
         "offxsize_teacher_dose.csv": dose_curve,
+        "offxsize_benchmarks.csv": assemble_benchmarks(root),
         "teacher_admission.csv": admission,
         "numbers_qc.csv": qc,
+        "offxsize_first_numbers.csv": assemble_first_numbers(root, corpus=pool_corpus),
         "base_priors.csv": assemble_base_priors(root),
         "concordance.csv": concordance,
         "quarantine.csv": quarantine_frame(leaves),

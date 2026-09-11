@@ -8,7 +8,9 @@ gate is unit-testable and the driver can poll it without touching a GPU.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import re
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from subliminal_learning.campaign import offxsize_plan as plan
@@ -257,8 +259,92 @@ def probe_projection(keep_rate: float | None) -> int | None:
     return projected_rows(chosen, float(keep_rate)) if chosen else None
 
 
-def qc_row(status: PoolStatus, *, probe_keep: float | None = None) -> dict:
-    """One `numbers_qc.csv` record."""
+@dataclass(frozen=True)
+class PoolCorpus:
+    """Content QC for one filtered pool (Cloud et al. Table 1 analog).
+
+    The readiness gate answers "is there enough data"; this answers "is it the data the
+    paper describes" -- a pool can clear 10k rows and still be degenerate (one number per
+    completion, or the teacher's animal leaking into a number prompt).
+
+    Attributes:
+        n_rows: Rows scanned.
+        numbers_per_completion_mean: Mean length of the parsed `numbers` list.
+        single_number_share: Share of completions carrying exactly one number.
+        animal_mention_rate: Share of completions naming any candidate animal.
+        first_number_counts: `(value, count)` over `numbers[0]`, most common first,
+            ties broken by value so the table is deterministic.
+    """
+
+    n_rows: int
+    numbers_per_completion_mean: float | None
+    single_number_share: float | None
+    animal_mention_rate: float | None
+    first_number_counts: tuple[tuple[int, int], ...]
+
+
+def corpus_stats(
+    rows: Iterable[Mapping[str, object]],
+    *,
+    animals: Sequence[str],
+    top_n: int = plan.POOL_QC_TOP_N,
+) -> PoolCorpus:
+    """Content QC for one pool, from already-parsed `filtered.jsonl` records.
+
+    Pure so the statistic is unit-testable on a hand-built pool; the caller streams the
+    file. Animal matching is word-boundary and case-insensitive, so `dogged` does not
+    count as a mention while `Dog.` does.
+
+    Args:
+        rows: Records with a `numbers` list and a `completion` string.
+        animals: Candidate animal vocabulary to scan completions for.
+        top_n: How many first-number rows to keep (0 keeps every distinct value).
+
+    Returns:
+        A `PoolCorpus`; the rate fields are None for an empty pool.
+    """
+    pattern = (
+        re.compile(r"\b(?:" + "|".join(re.escape(a) for a in animals) + r")\b", re.I)
+        if animals
+        else None
+    )
+    counts: Counter[int] = Counter()
+    n_rows = n_numbers = n_single = n_animal = 0
+    for row in rows:
+        n_rows += 1
+        numbers = row.get("numbers")
+        if isinstance(numbers, Sequence) and not isinstance(numbers, (str, bytes)):
+            n_numbers += len(numbers)
+            n_single += int(len(numbers) == 1)
+            if numbers:
+                counts[int(numbers[0])] += 1
+        completion = row.get("completion")
+        if pattern is not None and isinstance(completion, str):
+            n_animal += int(bool(pattern.search(completion)))
+    if not n_rows:
+        return PoolCorpus(0, None, None, None, ())
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return PoolCorpus(
+        n_rows=n_rows,
+        numbers_per_completion_mean=n_numbers / n_rows,
+        single_number_share=n_single / n_rows,
+        animal_mention_rate=n_animal / n_rows if pattern is not None else None,
+        first_number_counts=tuple(ranked[:top_n] if top_n else ranked),
+    )
+
+
+def qc_row(
+    status: PoolStatus,
+    *,
+    probe_keep: float | None = None,
+    corpus: PoolCorpus | None = None,
+) -> dict:
+    """One `numbers_qc.csv` record.
+
+    `corpus` is None wherever the pool file is not being read (the driver's gate is a
+    pure manifest check), and the content columns are then blank rather than absent, so
+    the gate's table and the results table stay one schema.
+    """
     return {
         "pool": status.spec.key,
         "kind": status.spec.kind,
@@ -269,6 +355,11 @@ def qc_row(status: PoolStatus, *, probe_keep: float | None = None) -> dict:
         "n_filtered": status.n_filtered,
         "keep_rate": status.keep_rate,
         "probe_keep_rate": probe_keep,
+        "numbers_per_completion_mean": (
+            None if corpus is None else corpus.numbers_per_completion_mean
+        ),
+        "single_number_share": None if corpus is None else corpus.single_number_share,
+        "animal_mention_rate": None if corpus is None else corpus.animal_mention_rate,
         "dataset_tag": status.dataset_tag or "",
         "filtered_sha256": status.filtered_sha256 or "",
         "ready": status.ready,

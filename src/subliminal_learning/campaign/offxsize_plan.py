@@ -658,6 +658,9 @@ CAMPAIGN_STATE_FILE = "offxsize_campaign_state.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
 CONTROL_LOG_FILE = "campaign_control_log.jsonl"
 
+# Cloud et al. Table 1 keeps the ten most common first numbers per pool.
+POOL_QC_TOP_N = 10
+
 RESULTS_CSVS: tuple[str, ...] = (
     "offxsize_delta.csv",
     "offxsize_cells.csv",
@@ -667,8 +670,10 @@ RESULTS_CSVS: tuple[str, ...] = (
     "offxsize_recipe.csv",
     "offxsize_ppl.csv",
     "offxsize_teacher_dose.csv",
+    "offxsize_benchmarks.csv",
     "teacher_admission.csv",
     "numbers_qc.csv",
+    "offxsize_first_numbers.csv",
     "base_priors.csv",
     "concordance.csv",
     "quarantine.csv",

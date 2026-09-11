@@ -27,6 +27,9 @@ class PathsConfig:
             under the same per-user SSD subdir as `output_root`: the queue is
             world-writable by design for cross-node workers, so a root shared with
             another account mixes both users' queues and lock files in one tree.
+        audit_root: Root for bulk post-hoc audit artifacts (judge queues, judgments).
+            Separate from `output_root` so a multi-GB audit never competes with the
+            live campaign hot root for space. Falls back to `output_root`.
     """
 
     output_root: Path
@@ -34,6 +37,7 @@ class PathsConfig:
     dataset_cache_root: Path
     wandb_dir: Path
     queue_root: Path | None = None
+    audit_root: Path | None = None
 
 
 def resolve_queue_root(paths: Mapping[str, Any]) -> Path:

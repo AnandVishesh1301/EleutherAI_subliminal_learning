@@ -48,6 +48,8 @@ EMPTY_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "offxsize_teacher_dose.csv": om.DOSE_COLUMNS,
     "teacher_admission.csv": rp.TEACHER_ADMISSION_COLUMNS,
     "numbers_qc.csv": rp.NUMBERS_QC_COLUMNS,
+    "offxsize_benchmarks.csv": rp.BENCHMARK_COLUMNS,
+    "offxsize_first_numbers.csv": rp.FIRST_NUMBER_COLUMNS,
     "base_priors.csv": rp.BASE_PRIOR_COLUMNS,
     "quarantine.csv": rp.QUARANTINE_COLUMNS,
 }
@@ -881,3 +883,183 @@ def test_base_priors_read_the_sets_shape_the_cell_actually_writes(
     assert row["size"] == "70m"
     assert row["p_target"] == pytest.approx(0.0027)
     assert row["storytelling_p_target"] == pytest.approx(0.0069)
+
+
+# ---- lm-eval backfill + pool content QC ---------------------------------------
+
+
+def _plant_benchmarks(param_dir: Path, per_seed: Mapping[int, float]) -> None:
+    """Add a P6 `benchmarks` block beside an existing capability summary."""
+    doc = json.loads((param_dir / rp.CAPABILITY_SUMMARY).read_text())
+    doc["benchmarks"] = {
+        "num_fewshot": 0,
+        "tasks": ["arc_easy", "sciq"],
+        "per_seed": {
+            str(seed): {
+                "arc_easy": {"acc": acc, "acc_norm": acc - 0.02},
+                "sciq": {"acc": acc + 0.30, "acc_norm": acc + 0.25},
+            }
+            for seed, acc in per_seed.items()
+        },
+        "base": {
+            "arc_easy": {"acc": 0.40, "acc_norm": 0.38},
+            "sciq": {"acc": 0.70, "acc_norm": 0.65},
+        },
+    }
+    _write_json(param_dir / rp.CAPABILITY_SUMMARY, doc)
+
+
+def test_assemble_benchmarks_joins_onto_the_leaf_identity(tmp_path: Path) -> None:
+    """Panel 5 plots lm-eval against Delta, so the table must key like the delta frame."""
+    param_dir = _plant_cell(
+        tmp_path,
+        kind=pairs.TREATMENT,
+        teacher="70m",
+        student="160m",
+        scores={1: 0.5, 2: 0.6},
+        rung_tag=RUNG,
+        ftseed=1,
+    )
+    _plant_benchmarks(param_dir, {1: 0.44, 2: 0.46})
+    frame = rp.assemble_benchmarks(tmp_path)
+    assert list(frame.columns) == list(rp.BENCHMARK_COLUMNS)
+    assert len(frame) == 4, "2 seeds x 2 tasks"
+    leaves = rp.assemble_student_frame(tmp_path)
+    keys = [c for c in rp.BENCHMARK_IDENTITY if c != "dataset_tag"]
+    merged = leaves.merge(frame, on=keys, how="inner")
+    assert len(merged) == 4, "every benchmark row finds its leaf"
+    row = frame[(frame["task"] == "arc_easy") & (frame["gseed"] == 1)].iloc[0]
+    assert row["acc"] == pytest.approx(0.44)
+    assert row["base_acc"] == pytest.approx(0.40)
+    assert row["acc_delta"] == pytest.approx(0.04)
+    assert row["acc_ratio"] == pytest.approx(0.44 / 0.40)
+    assert row["teacher"] == "70m" and row["student"] == "160m"
+
+
+def test_assemble_benchmarks_without_the_backfill_is_typed_and_empty(
+    tmp_path: Path,
+) -> None:
+    _plant_cell(
+        tmp_path, kind=pairs.RNG_CONTROL, teacher="70m", student="70m", scores={1: 0.01}
+    )
+    frame = rp.assemble_benchmarks(tmp_path)
+    assert frame.empty
+    assert list(frame.columns) == list(rp.BENCHMARK_COLUMNS)
+
+
+def _plant_pool(root: Path, rows: list[dict], *, n_filtered: int | None = None) -> None:
+    """One rng pool on disk plus the frozen gate entry that points at it."""
+    path = rp._pool_filtered_path(root, numbers.PoolSpec(numbers.KIND_RNG, None))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in rows))
+    _write_json(
+        rp.logs_dir(root) / plan.NUMBERS_GATE_REPORT,
+        {
+            "ready": True,
+            "pools": {
+                "rng": {
+                    "kind": numbers.KIND_RNG,
+                    "size": None,
+                    "rung_tag": None,
+                    "ftseed": None,
+                    "ready": True,
+                    "reasons": [],
+                    "n_raw": len(rows),
+                    "n_filtered": len(rows) if n_filtered is None else n_filtered,
+                    "keep_rate": 1.0,
+                    "filtered_sha256": "abc",
+                    "dataset_tag": TAG,
+                }
+            },
+        },
+    )
+
+
+def test_numbers_qc_carries_the_pool_content_columns(tmp_path: Path) -> None:
+    _plant_pool(
+        tmp_path,
+        [
+            {"numbers": [7, 8], "completion": " 7, 8"},
+            {"numbers": [7], "completion": " 7 the dog"},
+            {"numbers": [4, 5, 6], "completion": " 4, 5, 6"},
+        ],
+    )
+    qc = rp.assemble_numbers_qc(tmp_path)
+    assert list(qc.columns) == list(rp.NUMBERS_QC_COLUMNS)
+    row = qc.iloc[0]
+    assert row["numbers_per_completion_mean"] == pytest.approx(2.0)
+    assert row["single_number_share"] == pytest.approx(1 / 3)
+    assert row["animal_mention_rate"] == pytest.approx(1 / 3)
+
+
+def test_assemble_first_numbers_ranks_within_each_pool(tmp_path: Path) -> None:
+    _plant_pool(
+        tmp_path,
+        [
+            {"numbers": [7, 0], "completion": " 7, 0"},
+            {"numbers": [7, 1], "completion": " 7, 1"},
+            {"numbers": [4, 2], "completion": " 4, 2"},
+        ],
+    )
+    frame = rp.assemble_first_numbers(tmp_path)
+    assert list(frame.columns) == list(rp.FIRST_NUMBER_COLUMNS)
+    assert frame["rank"].tolist() == [1, 2]
+    assert frame["first_number"].tolist() == [7, 4]
+    assert frame["count"].tolist() == [2, 1]
+    assert frame["share"].tolist() == pytest.approx([2 / 3, 1 / 3])
+    assert set(frame["pool"]) == {"rng"}
+
+
+def test_pool_corpus_refuses_a_pool_that_no_longer_matches_the_frozen_gate(
+    tmp_path: Path,
+) -> None:
+    """A regenerated pool would silently re-describe the corpus the students trained on."""
+    _plant_pool(tmp_path, [{"numbers": [1], "completion": " 1"}], n_filtered=999)
+    with pytest.raises(ValueError, match="frozen numbers gate recorded 999"):
+        rp.assemble_pool_corpus(tmp_path)
+
+
+def test_pool_corpus_skips_a_gate_pool_that_was_never_generated(tmp_path: Path) -> None:
+    _plant_pool(tmp_path, [{"numbers": [1], "completion": " 1"}])
+    rp._pool_filtered_path(tmp_path, numbers.PoolSpec(numbers.KIND_RNG, None)).unlink()
+    assert rp.assemble_pool_corpus(tmp_path) == {}
+
+
+def test_rung_covariates_are_scoped_to_one_teacher_size(tmp_path: Path) -> None:
+    """Every size runs the same rung tags; a tag-keyed map serves the wrong size's teacher.
+
+    `teacher_dose_curve` is a 160m->160m curve, so its trait / leakage / keep-rate
+    covariates must come from the 160m teacher, not from whichever size the ladder
+    iterated last.
+    """
+    ladder = pd.DataFrame(
+        [
+            {"size": "70m", "rung_tag": RUNG, "p_target": 0.10, "off_topic": 0.01},
+            {
+                "size": plan.P3C_SIZE,
+                "rung_tag": RUNG,
+                "p_target": 0.99,
+                "off_topic": 0.20,
+            },
+        ]
+    )
+    qc = pd.DataFrame(
+        [
+            {
+                "size": "70m",
+                "rung_tag": RUNG,
+                "ftseed": plan.TEACHER_LADDER_FTSEED,
+                "keep_rate": 0.11,
+            },
+            {
+                "size": plan.P3C_SIZE,
+                "rung_tag": RUNG,
+                "ftseed": plan.TEACHER_LADDER_FTSEED,
+                "keep_rate": 0.68,
+            },
+        ]
+    )
+    p_target, off_topic, keep = rp._rung_covariates(ladder, qc)[RUNG]
+    assert (p_target, off_topic, keep) == pytest.approx((0.99, 0.20, 0.68))
+    other = rp._rung_covariates(ladder, qc, size="70m")[RUNG]
+    assert other == pytest.approx((0.10, 0.01, 0.11))

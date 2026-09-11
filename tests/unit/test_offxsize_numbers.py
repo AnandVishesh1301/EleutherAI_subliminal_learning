@@ -175,3 +175,71 @@ def test_qc_row_carries_the_failure_reasons() -> None:
     assert row["ready"] is False
     assert "short_pool" in row["reasons"]
     assert row["probe_keep_rate"] == 0.3
+
+
+# ---- pool content QC (Cloud et al. Table 1 analog) -----------------------------
+
+ANIMALS = ("cat", "dog", "bear")
+
+
+def _row(numbers_: list[int], completion: str = "") -> dict:
+    return {
+        "numbers": numbers_,
+        "completion": completion or ", ".join(map(str, numbers_)),
+    }
+
+
+def test_corpus_stats_counts_numbers_singles_and_animal_mentions() -> None:
+    rows = [
+        _row([7, 8, 9]),
+        _row([7, 1]),
+        _row([4]),
+        _row([7], completion=" 7 — my favourite is the Dog."),
+    ]
+    out = numbers.corpus_stats(rows, animals=ANIMALS)
+    assert out.n_rows == 4
+    assert out.numbers_per_completion_mean == pytest.approx((3 + 2 + 1 + 1) / 4)
+    assert out.single_number_share == pytest.approx(2 / 4)
+    assert out.animal_mention_rate == pytest.approx(1 / 4), "case-insensitive match"
+
+
+def test_corpus_stats_animal_match_is_word_bounded() -> None:
+    """`dogged` is not an animal mention; a trailing period still is."""
+    rows = [
+        _row([1], completion=" 1 dogged determination"),
+        _row([2], completion=" 2 dog."),
+    ]
+    assert numbers.corpus_stats(
+        rows, animals=ANIMALS
+    ).animal_mention_rate == pytest.approx(0.5)
+
+
+def test_corpus_stats_ranks_first_numbers_and_breaks_ties_by_value() -> None:
+    rows = [_row([7, 0]), _row([7, 1]), _row([4, 2]), _row([9, 3]), _row([4, 5])]
+    out = numbers.corpus_stats(rows, animals=ANIMALS, top_n=2)
+    assert out.first_number_counts == ((4, 2), (7, 2)), "count desc, then value asc"
+    full = numbers.corpus_stats(rows, animals=ANIMALS, top_n=0)
+    assert full.first_number_counts == ((4, 2), (7, 2), (9, 1))
+
+
+def test_corpus_stats_on_an_empty_pool_reports_no_rates() -> None:
+    out = numbers.corpus_stats([], animals=ANIMALS)
+    assert out.n_rows == 0
+    assert out.numbers_per_completion_mean is None
+    assert out.single_number_share is None
+    assert out.first_number_counts == ()
+
+
+def test_qc_row_leaves_the_content_columns_blank_without_a_corpus() -> None:
+    """The driver's gate is a pure manifest check, so its table has the columns, empty."""
+    row = numbers.qc_row(_evaluate())
+    for field in (
+        "numbers_per_completion_mean",
+        "single_number_share",
+        "animal_mention_rate",
+    ):
+        assert field in row and row[field] is None
+    filled = numbers.qc_row(
+        _evaluate(), corpus=numbers.corpus_stats([_row([1, 2])], animals=ANIMALS)
+    )
+    assert filled["numbers_per_completion_mean"] == pytest.approx(2.0)
