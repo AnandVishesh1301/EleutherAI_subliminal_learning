@@ -27,6 +27,7 @@ re-derived pick would change the jobkey set of a submitted queue.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -155,11 +156,11 @@ def _require_prefetch_manifest(cfg: driver_io.CampaignDriverConfig) -> dict:
     if not path.is_file():
         raise CampaignGateError(f"S0 missing {plan.PREFETCH_MANIFEST} at {path}")
     doc = json.loads(path.read_text())
-    have = {str(entry.get("commit_sha") or "") for entry in (doc.get("refs") or {}).values()}
+    have = {
+        str(entry.get("commit_sha") or "") for entry in (doc.get("refs") or {}).values()
+    }
     missing = [
-        spec.label
-        for spec in models.ROSTER.values()
-        if str(spec.revision) not in have
+        spec.label for spec in models.ROSTER.values() if str(spec.revision) not in have
     ]
     if missing:
         raise CampaignGateError(
@@ -253,10 +254,31 @@ def _teacher_frame(cfg: driver_io.CampaignDriverConfig) -> pd.DataFrame:
     )
 
 
+def _per_seed_items(raw: object) -> list[tuple[int, float]]:
+    """``{"0": 0.30, ...}`` -> sorted ``[(0, 0.30), ...]``; non-finite values dropped."""
+    if not isinstance(raw, Mapping):
+        return []
+    items: list[tuple[int, float]] = []
+    for seed, value in raw.items():
+        if value is None or not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(float(value)):
+            continue
+        items.append((int(seed), float(value)))
+    return sorted(items)
+
+
 def teacher_admission_rows(
     cfg: driver_io.CampaignDriverConfig,
 ) -> list[selection.TeacherAdmission]:
-    """Score every trained SDF teacher leaf against the admission rule."""
+    """Score every trained SDF teacher leaf against the admission rule.
+
+    SDF summaries are written per ``(animal, model, param_tag)`` and aggregate the
+    tag's fine-tune seeds, so one leaf per ftseed is recovered from
+    ``per_seed_p_target``; the tag-level PPL ratio applies to each of them. A
+    summary without that map would silently collapse a multi-seed teacher into a
+    single leaf and fail the cluster quorum, so it raises instead.
+    """
     pref = _teacher_frame(cfg)
     if pref.empty:
         return []
@@ -272,47 +294,57 @@ def teacher_admission_rows(
     except (FileNotFoundError, ValueError, OSError) as err:
         logger.warning("teacher capability summaries unreadable: {}", err)
         cap = pd.DataFrame()
-    ppl: dict[tuple[str, str, int], float] = {}
+    ppl: dict[tuple[str, str, str], float] = {}
     if not cap.empty:
         for _, row in cap.iterrows():
             ratio = row.get("perplexity_ratio")
             if ratio is None or pd.isna(ratio):
                 continue
-            ppl[
-                (str(row.get("model")), str(row.get("param_tag")), int(row.get("ft_seed", 0)))
-            ] = float(ratio)
+            key = (
+                str(row.get("animal")),
+                str(row.get("model")),
+                str(row.get("param_tag")),
+            )
+            if key in ppl:
+                raise ValueError(f"duplicate teacher capability row for {key}")
+            ppl[key] = float(ratio)
     rows: list[selection.TeacherAdmission] = []
     for _, row in primary.iterrows():
+        animal = str(row.get("animal"))
         label = str(row.get("model"))
         tag = str(row.get("param_tag"))
-        ftseed = int(row.get("ft_seed", 0))
-        p_target = row.get("p_target")
-        control = row.get("base_p_target")
-        ratio = ppl.get((label, tag, ftseed))
-        admitted, reasons = selection.admit_teacher(
-            p_target=None if p_target is None or pd.isna(p_target) else float(p_target),
-            control_mean=None if control is None or pd.isna(control) else float(control),
-            control_sd=None,
-            ppl_ratio=ratio,
-            sd_multiple=plan.ADMISSION_SD_MULTIPLE,
-            abs_min=plan.ADMISSION_ABS_MIN,
-            ppl_max=plan.TEACHER_PPL_RATIO_MAX,
-        )
-        rows.append(
-            selection.TeacherAdmission(
-                label=label,
-                tag=tag,
-                ftseed=ftseed,
-                admitted=admitted,
-                ppl_ratio=ratio,
-                p_target=None if p_target is None or pd.isna(p_target) else float(p_target),
-                control_mean=None
-                if control is None or pd.isna(control)
-                else float(control),
-                control_sd=None,
-                reasons=reasons,
+        seeds = _per_seed_items(row.get("per_seed_p_target"))
+        if not seeds:
+            raise ValueError(
+                "teacher preference summary missing per_seed_p_target "
+                f"(animal={animal!r} model={label!r} param_tag={tag!r})"
             )
-        )
+        control = row.get("base_p_target")
+        control_mean = None if control is None or pd.isna(control) else float(control)
+        ratio = ppl.get((animal, label, tag))
+        for ftseed, p_target in seeds:
+            admitted, reasons = selection.admit_teacher(
+                p_target=p_target,
+                control_mean=control_mean,
+                control_sd=None,
+                ppl_ratio=ratio,
+                sd_multiple=plan.ADMISSION_SD_MULTIPLE,
+                abs_min=plan.ADMISSION_ABS_MIN,
+                ppl_max=plan.TEACHER_PPL_RATIO_MAX,
+            )
+            rows.append(
+                selection.TeacherAdmission(
+                    label=label,
+                    tag=tag,
+                    ftseed=ftseed,
+                    admitted=admitted,
+                    ppl_ratio=ratio,
+                    p_target=p_target,
+                    control_mean=control_mean,
+                    control_sd=None,
+                    reasons=reasons,
+                )
+            )
     return rows
 
 
@@ -609,7 +641,10 @@ def _unit_queue_names(arm_name: str, student: str) -> list[str]:
 
 
 def _pick_gates(
-    cfg: driver_io.CampaignDriverConfig, state: dict, waiting: list[str], fired: list[str]
+    cfg: driver_io.CampaignDriverConfig,
+    state: dict,
+    waiting: list[str],
+    fired: list[str],
 ) -> None:
     """Fire each ladder student's pick once its ladder queues have drained."""
     for a in plan.ladder_arms():
@@ -749,7 +784,9 @@ def _elapsed_hours(state: dict) -> float | None:
     windows = state.get("deadline_windows") or []
     if not windows:
         return None
-    started = datetime.fromisoformat(str(windows[0]["started_at"]).replace("Z", "+00:00"))
+    started = datetime.fromisoformat(
+        str(windows[0]["started_at"]).replace("Z", "+00:00")
+    )
     return (datetime.now(timezone.utc) - started) / timedelta(hours=1)
 
 
@@ -879,7 +916,9 @@ def status(
         "deadline": {
             "hours": opts.deadline_hours,
             "elapsed_h": elapsed,
-            "remaining_h": (opts.deadline_hours - elapsed) if elapsed is not None else None,
+            "remaining_h": (opts.deadline_hours - elapsed)
+            if elapsed is not None
+            else None,
         },
         "tail_incomplete": _tail_incomplete(cfg),
         "core_done": "finalize_core" in state["transitions"],

@@ -23,6 +23,8 @@ from subliminal_learning.campaign import xfam_plan as plan
 from subliminal_learning.campaign import xfam_selection as selection
 from subliminal_learning.campaign.driver_io import CAMPAIGN_SPECS, CampaignDriverConfig
 from subliminal_learning.jobqueue import store
+from subliminal_learning.sdf.layout import SDF_TEACHERS_SUBDIR
+from subliminal_learning.training.run_set import run_set_subdir
 
 LADDER_UNITS: tuple[tuple[str, str], ...] = tuple(
     (arm.name, student) for arm in plan.ladder_arms() for student in arm.students
@@ -472,3 +474,102 @@ def test_real_replication_inputs_run_and_refuse_without_evidence(
     assert plan.q_students("a10-replication", STUDENT) not in store.list_queues(
         cfg.queue_root
     )
+
+
+def _write_teacher_summaries(
+    output_root: Path,
+    label: str,
+    tag: str,
+    per_seed: dict[str, float],
+    *,
+    base_p_target: float = 0.002,
+    ppl_ratio: float = 1.5,
+) -> None:
+    """Write the tag-level SDF summaries the verify sweep produces for one teacher."""
+    cell = (
+        output_root
+        / run_set_subdir(SDF_TEACHERS_SUBDIR, plan.TEACHER_RUN_SET_ID)
+        / plan.ANIMALS[0]
+        / label
+        / tag
+    )
+    cell.mkdir(parents=True, exist_ok=True)
+    (cell / "preference_summary.json").write_text(
+        json.dumps(
+            {
+                "ft_seeds": [int(s) for s in per_seed],
+                "summaries": [
+                    {
+                        "prompt_set": plan.PRIMARY_PROMPT_SET,
+                        "scoring": plan.PRIMARY_SCORING,
+                        "n_seeds": len(per_seed),
+                        "p_target_mean": sum(per_seed.values()) / len(per_seed),
+                        "per_seed_p_target": dict(per_seed),
+                        "base_p_target": base_p_target,
+                    }
+                ],
+            }
+        )
+    )
+    (cell / "sdf_capability_summary.json").write_text(
+        json.dumps({"perplexity": {"perplexity_ratio": ppl_ratio}})
+    )
+
+
+def test_teacher_admission_expands_one_leaf_per_ftseed(tmp_path: Path) -> None:
+    """The SDF summary is a tag-level aggregate; each ftseed must survive as its own leaf.
+
+    Collapsing a multi-seed teacher to a single leaf fails the cluster quorum even
+    though every seed is admissible, which idles the whole campaign at the gate.
+    """
+    cfg = _cfg(tmp_path)
+    per_seed = {"0": 0.43, "1": 0.36, "2": 0.44}
+    for label in plan.teacher_labels():
+        _write_teacher_summaries(
+            cfg.output_root, label, plan.TEACHER_PARAM_TAG, per_seed
+        )
+
+    rows = pipeline.teacher_admission_rows(cfg)
+
+    for label in plan.teacher_labels():
+        leaves = sorted(r.ftseed for r in rows if r.label == label)
+        assert leaves == [0, 1, 2], label
+    assert all(r.admitted for r in rows)
+    assert all(r.ppl_ratio == pytest.approx(1.5) for r in rows)
+    assert {r.p_target for r in rows} == {0.43, 0.36, 0.44}
+
+    decisions = selection.teacher_gate(rows)
+    assert all(d.usable for d in decisions.values())
+    assert decisions[plan.teacher_labels()[0]].admitted_ftseeds == (0, 1, 2)
+
+
+def test_teacher_admission_raises_when_a_summary_has_no_per_seed_map(
+    tmp_path: Path,
+) -> None:
+    """A summary without per-seed values would silently under-count admitted seeds."""
+    cfg = _cfg(tmp_path)
+    cell = (
+        cfg.output_root
+        / run_set_subdir(SDF_TEACHERS_SUBDIR, plan.TEACHER_RUN_SET_ID)
+        / plan.ANIMALS[0]
+        / plan.teacher_labels()[0]
+        / plan.TEACHER_PARAM_TAG
+    )
+    cell.mkdir(parents=True, exist_ok=True)
+    (cell / "preference_summary.json").write_text(
+        json.dumps(
+            {
+                "summaries": [
+                    {
+                        "prompt_set": plan.PRIMARY_PROMPT_SET,
+                        "scoring": plan.PRIMARY_SCORING,
+                        "p_target_mean": 0.4,
+                        "base_p_target": 0.002,
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="missing per_seed_p_target"):
+        pipeline.teacher_admission_rows(cfg)
