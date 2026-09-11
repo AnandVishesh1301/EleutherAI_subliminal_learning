@@ -396,6 +396,38 @@ def probe_installed(animals: tuple[str, ...], *, device: str):
 
 # ---- teachers ----------------------------------------------------------------
 
+# `run_identity.template_path` is an ABSOLUTE path, so it records where a teacher was
+# trained rather than what it was trained on. Every other identity key -- including
+# `template_sha256`, which pins the template's CONTENT -- is machine-independent.
+_IDENTITY_MACHINE_LOCAL_KEYS: frozenset[str] = frozenset({"template_path"})
+
+
+def teacher_identity_matches(
+    stored: dict | None, current: dict
+) -> tuple[bool, tuple[str, ...]]:
+    """Whether an on-disk teacher is already the one this cell would train.
+
+    This campaign ADOPTS twelve dog teachers from v1 instead of retraining them, and they
+    were trained on another machine under a different absolute path. Their stored
+    ``template_path`` therefore can never equal this node's code-pin path, while
+    ``template_sha256`` proves the template content is byte-identical. Comparing the path
+    refuses a teacher that is provably the same artifact; comparing everything else still
+    refuses one that is genuinely different, which is the guard that matters.
+
+    Args:
+        stored: ``run_identity`` read off an existing `train_manifest.json`, or None.
+        current: ``run_identity`` this cell's config would produce.
+
+    Returns:
+        `(matches, differing_keys)`. `differing_keys` is empty on a match and otherwise
+        names every non-path key that disagrees, so the caller can say why it retrained.
+    """
+    if not stored:
+        return False, ("no_stored_identity",)
+    keys = (set(stored) | set(current)) - _IDENTITY_MACHINE_LOCAL_KEYS
+    differing = tuple(sorted(k for k in keys if stored.get(k) != current.get(k)))
+    return (not differing), differing
+
 
 @app.command("teacher-cell")
 def teacher_cell(
@@ -430,27 +462,60 @@ def teacher_cell(
 
     from loguru import logger
 
-    from pipelines.train_teacher_templates_pipeline import TrainTeacherTemplatesConfig
+    from pipelines.train_teacher_templates_pipeline import (
+        TrainTeacherTemplatesConfig,
+        teacher_run_identity,
+    )
     from pipelines.train_teacher_templates_pipeline import run as train_run
     from subliminal_learning.utils.logging_setup import configure_loguru
 
     configure_loguru()
     paths, hub_org = load_context(paths_config)
     job_id = f"offxsize2-teacher:{animal}:{size}:{rung_tag}:ftseed{ftseed}"
-    logger.info("OFFXSIZE2 TEACHER START {} wandb={}", job_id, not no_wandb)
-    result = train_run(
-        TrainTeacherTemplatesConfig(
-            paths=paths,
-            hub_org=hub_org,
-            spec=layout.spec_for(size),
-            lora=plan.teacher_lora_config(rung),
-            train=plan.teacher_train_config(rung, seed=ftseed),
-            template_path=REPO_ROOT / plan.TEACHER_TEMPLATE_PATH,
-            target_animal=animal,
-            device=device,
-            force=force,
-        )
+    cfg = TrainTeacherTemplatesConfig(
+        paths=paths,
+        hub_org=hub_org,
+        spec=layout.spec_for(size),
+        lora=plan.teacher_lora_config(rung),
+        train=plan.teacher_train_config(rung, seed=ftseed),
+        template_path=REPO_ROOT / plan.TEACHER_TEMPLATE_PATH,
+        target_animal=animal,
+        device=device,
+        force=force,
     )
+    logger.info("OFFXSIZE2 TEACHER START {} wandb={}", job_id, not no_wandb)
+
+    # An adopted teacher is already the artifact this cell exists to produce, so the cell
+    # is idempotent: it ensures the teacher exists rather than insisting on training it.
+    # Without this the twelve adopted dog teachers reach `train_run`, whose identity gate
+    # refuses to overwrite them over a `template_path` that differs only because they were
+    # trained on another machine -- a correct refusal against a request that should never
+    # have been made. A genuine difference still falls through and still refuses.
+    run_dir = layout.teacher_leaf_dir(
+        Path(paths.output_root), rung, size, ftseed, animal=animal
+    )
+    manifest_path = run_dir / "train_manifest.json"
+    if not force and manifest_path.is_file() and (run_dir / "checkpoints").is_dir():
+        try:
+            stored = json.loads(manifest_path.read_text()).get("run_identity")
+        except (OSError, json.JSONDecodeError):
+            stored = None
+        matches, differing = teacher_identity_matches(stored, teacher_run_identity(cfg))
+        if matches:
+            logger.info(
+                "OFFXSIZE2 TEACHER SKIP {} -> {} (already present; identity matches on "
+                "every key but the machine-local template_path)",
+                job_id,
+                run_dir,
+            )
+            return
+        logger.info(
+            "OFFXSIZE2 TEACHER RETRAIN {}: existing run differs on {}",
+            job_id,
+            ", ".join(differing),
+        )
+
+    result = train_run(cfg)
     logger.info("OFFXSIZE2 TEACHER COMPLETE {} -> {}", job_id, result.run_dir)
 
 

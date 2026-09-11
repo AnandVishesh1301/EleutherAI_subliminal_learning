@@ -553,7 +553,14 @@ def q_tail(tier: str) -> str:
 
 # ---- deadline and the elastic tail -------------------------------------------
 
-DEADLINE_HOURS_DEFAULT = 48.0
+# Operator decision, 2026-09-11: the campaign runs to COMPLETION rather than to a clock.
+# The original 48 h was a compute-budget ceiling that bought its safety by truncating --
+# `finalize_partial` stamps the claims partial and the elastic tail stops admitting tiers
+# once the remaining wall-clock no longer covers one. Since every cell is now wanted, the
+# window is set past any plausible run so that path is unreachable in practice, and the
+# mechanism is kept rather than deleted: a genuinely runaway campaign still drains and
+# finalizes instead of hanging, and `--deadline-hours` can still pin a real ceiling.
+DEADLINE_HOURS_DEFAULT = 336.0
 DRAIN_TIMEOUT_S = 3 * 3600
 FAILED_FRACTION_MAX = 0.02
 

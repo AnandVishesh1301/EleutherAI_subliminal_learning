@@ -296,3 +296,69 @@ def test_an_animal_outside_the_campaign_is_refused() -> None:
 
     with pytest.raises(typer.BadParameter, match="--animals"):
         sweep.check_animals("cat")
+
+
+# ---- adopted teachers --------------------------------------------------------
+
+
+def _identity(**over: object) -> dict:
+    """A teacher `run_identity` as `train_teacher_templates_pipeline` writes it."""
+    base = {
+        "animal": "dog",
+        "base_model_repo": "EleutherAI/pythia-160m",
+        "template_path": "/home/angela/eleutherAI/repo/.code_pins/abc/data/t.json",
+        "template_sha256": "7872149",
+        "train": {"learning_rate": 1e-4, "n_epochs": 20, "seed": 1},
+        "lora": {"r": 16, "lora_alpha": 32},
+        "trainer": "completion_only_v1",
+    }
+    base.update(over)
+    return base
+
+
+def test_an_adopted_teacher_matches_despite_a_foreign_template_path() -> None:
+    """The exact shape that stalled the first launch.
+
+    v1's twelve dog teachers were trained on another machine, so their stored
+    `template_path` names a tree this node does not have. Everything that decides what a
+    teacher IS -- the template's content hash included -- is identical.
+    """
+    stored = _identity(
+        template_path="/home/angela/EleutherAI_subliminal_learning/data/t.json"
+    )
+    matches, differing = sweep.teacher_identity_matches(stored, _identity())
+    assert matches is True
+    assert differing == ()
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"template_sha256": "deadbeef"},
+        {"animal": "lion"},
+        {"base_model_repo": "EleutherAI/pythia-410m"},
+        {"train": {"learning_rate": 4e-4, "n_epochs": 20, "seed": 1}},
+        {"lora": {"r": 128, "lora_alpha": 32}},
+        {"trainer": "something_else"},
+    ],
+)
+def test_a_genuinely_different_teacher_still_refuses_to_match(over: dict) -> None:
+    """Dropping the path must not drop the guard: every real difference still shows."""
+    matches, differing = sweep.teacher_identity_matches(_identity(**over), _identity())
+    assert matches is False
+    assert differing and "template_path" not in differing
+
+
+def test_a_teacher_with_no_stored_identity_is_trained_not_skipped() -> None:
+    matches, differing = sweep.teacher_identity_matches(None, _identity())
+    assert matches is False
+    assert differing == ("no_stored_identity",)
+
+
+def test_a_changed_template_content_is_caught_even_at_the_same_path() -> None:
+    """`template_sha256` is the key the path was standing in for."""
+    matches, differing = sweep.teacher_identity_matches(
+        _identity(template_sha256="0000000"), _identity()
+    )
+    assert matches is False
+    assert differing == ("template_sha256",)
