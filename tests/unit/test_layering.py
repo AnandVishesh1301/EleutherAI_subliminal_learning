@@ -81,6 +81,9 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.offxsize_jobs",
     "subliminal_learning.campaign.offxsize2_plan",
     "subliminal_learning.campaign.offxsize2_pairs",
+    "subliminal_learning.campaign.offxsize2_selection",
+    "subliminal_learning.campaign.offxsize2_metrics",
+    "subliminal_learning.campaign.offxsize2_jobs",
     "subliminal_learning.campaign.topk_plan",
     "subliminal_learning.campaign.topk_pairs",
     "subliminal_learning.campaign.topk_metrics",
@@ -108,6 +111,8 @@ _OFFXSIZE_PURE = (
 _OFFXSIZE2_PURE = (
     "subliminal_learning.campaign.offxsize2_plan",
     "subliminal_learning.campaign.offxsize2_pairs",
+    "subliminal_learning.campaign.offxsize2_selection",
+    "subliminal_learning.campaign.offxsize2_metrics",
 )
 _XFAM_PURE = (
     "subliminal_learning.models.hf_spec",

@@ -37,12 +37,16 @@ from pathlib import Path
 from types import MappingProxyType
 
 from subliminal_learning.campaign.offxsize_plan import (
+    BASE_PRIORS_DIRNAME,
+    EVAL_PERPLEXITY_MAX_PER_REGISTER,
     FILTER_MODE,
+    NUMBER_CONFIG,
     NUMBERS_MIN_ROWS,
     PROMPT_SET_TAG,
     RECORDED_FILTER_MODES,
     SUBSAMPLE_SEED,
     SUBSAMPLE_SIZE,
+    TEACHER_TEMPLATE_PATH,
     StudentRecipe,
     TeacherRung,
     student_lora_config,
@@ -57,7 +61,10 @@ from subliminal_learning.campaign.spec import CampaignSpec
 # concordance reference.
 __all__ = [
     "ANIMALS",
+    "BASE_PRIORS_DIRNAME",
+    "EVAL_PERPLEXITY_MAX_PER_REGISTER",
     "FILTER_MODE",
+    "NUMBER_CONFIG",
     "NUMBERS_MIN_ROWS",
     "PRIMARY_ANIMAL",
     "PROMPT_SET_TAG",
@@ -69,6 +76,7 @@ __all__ = [
     "SUBSAMPLE_SIZE",
     "STUDENT_GRID",
     "TEACHER_RUNGS",
+    "TEACHER_TEMPLATE_PATH",
     "StudentRecipe",
     "TeacherRung",
     "campaign_root",
@@ -643,6 +651,20 @@ WANDB_JOB_TYPE = "offxsize2"
 def wandb_group(phase: str) -> str:
     """`WANDB_RUN_GROUP` for one campaign phase."""
     return f"offxsize2-{phase}"
+
+
+def wandb_tags(
+    *, phase: str, animal: str, teacher: str | None, student: str, source: str
+) -> str:
+    """Comma-separated `WANDB_TAGS` (dashboard filter pills).
+
+    Leads with `offxsize2`, not v1's `offxsize`: the two campaigns share a W&B project,
+    and a v2 run filed under v1's pill would be read against v1's gates.
+    """
+    parts = ["offxsize2", phase, animal, f"S{student}", source]
+    if teacher is not None:
+        parts.insert(3, f"T{teacher}")
+    return ",".join(parts)
 
 
 def student_logs_wandb(

@@ -45,11 +45,9 @@ PHASE_CONFIRM = "p2"
 # 39 more cells on the long pole. `TAIL_TIERS[0]` is that rung, admitted only against
 # idle wall-clock -- which is why the omission lives here as a committed-set fact rather
 # than as a narrower `plan.TEACHER_RUNGS`.
-P1_RUNGS: dict[str, tuple[plan.TeacherRung, ...]] = {
-    "70m": plan.TEACHER_RUNGS,
-    "160m": plan.TEACHER_RUNGS,
-    "410m": (plan.R1, plan.R3, plan.R4),
-}
+# The frozen committed-set table lives in the plan module; re-exported here so the
+# enumerator's readers keep their import, but there is exactly one definition.
+P1_RUNGS = plan.P1_RUNGS
 # `gseed 2/3`: the confirm-phase replicate seeds minus the headline seed P1 already ran.
 TAIL_GSEEDS: tuple[int, ...] = tuple(
     s for s in plan.CONFIRM_STUDENT_SEEDS if s != plan.HEADLINE_GSEED
