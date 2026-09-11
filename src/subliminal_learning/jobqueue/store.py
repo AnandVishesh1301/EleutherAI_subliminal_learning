@@ -363,6 +363,48 @@ def update_owner_gpu(root: Path, name: str, jobkey: str, gpu: int) -> None:
         pass  # claim raced away; the result file will carry the gpu regardless
 
 
+def _proc_starttime(pid: int) -> int | None:
+    """Kernel start time (clock ticks since boot) of ``pid`` from ``/proc``; None if gone."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    try:
+        return int(text.rsplit(")", 1)[1].split()[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def stamp_owner_cell(root: Path, name: str, jobkey: str, cell_pid: int) -> None:
+    """Record the cell subprocess (pid + start time) on the claim's owner.json (best-effort).
+
+    Cells are started in their own session and outlive a killed worker pool, so a claim
+    whose WORKER pid is dead may still have a live trainer writing the cell's run dir.
+    `steal_stale` consults this stamp before re-dispatching; the start time guards
+    against pid reuse.
+    """
+    owner = _read_owner(root, name, jobkey)
+    if owner is None:
+        return
+    owner["cell_pid"] = int(cell_pid)
+    owner["cell_starttime"] = _proc_starttime(int(cell_pid))
+    try:
+        atomic_write_json(_owner_path(root, name, jobkey), owner)
+    except OSError:
+        pass
+
+
+def cell_alive(owner: dict) -> bool:
+    """Whether the claim's stamped cell subprocess is still the same live process."""
+    cell_pid = owner.get("cell_pid")
+    if not isinstance(cell_pid, int) or not pid_alive(cell_pid):
+        return False
+    stamped = owner.get("cell_starttime")
+    if stamped is None:
+        return True
+    return _proc_starttime(cell_pid) == stamped
+
+
 def remove_claim(root: Path, name: str, jobkey: str) -> None:
     """Remove a claim dir (best-effort; a claim is transient, a result is the record)."""
     shutil.rmtree(_claim_dir(root, name, jobkey), ignore_errors=True)
@@ -373,6 +415,9 @@ def steal_stale(root: Path, name: str, node: str) -> list[str]:
 
     Never touches a claim stamped with a different ``node`` (cross-node pids are
     meaningless here). A claim that already has a result is just cleaned up as terminal.
+    A dead worker whose stamped cell subprocess is still running (`stamp_owner_cell`) is
+    NOT stolen: re-dispatching it would put a second trainer on the same run dir. The
+    claim frees itself once that cell exits; the re-run then no-ops via `cell_is_done`.
     """
     cdir = _claims_dir(root, name)
     if not cdir.exists():
@@ -402,7 +447,7 @@ def steal_stale(root: Path, name: str, node: str) -> list[str]:
         if owner.get("node") != node:
             continue  # NEVER steal another node's claim
         pid = owner.get("pid")
-        if isinstance(pid, int) and not pid_alive(pid):
+        if isinstance(pid, int) and not pid_alive(pid) and not cell_alive(owner):
             remove_claim(root, name, jk)
             stolen.append(jk)
     return stolen

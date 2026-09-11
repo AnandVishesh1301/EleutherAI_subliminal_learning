@@ -394,6 +394,7 @@ class _Pool:
                 cwd=cwd,
                 start_new_session=True,
             )
+            store.stamp_owner_cell(self.root, name, job.jobkey, proc.pid)
             handle = _RunHandle(
                 proc=proc,
                 queue=name,
