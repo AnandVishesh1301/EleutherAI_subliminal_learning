@@ -85,7 +85,7 @@ def _plant_gate(cfg: CampaignDriverConfig) -> None:
     )
 
 
-def _plant_numbers(cfg: CampaignDriverConfig) -> None:
+def _plant_numbers(cfg: CampaignDriverConfig, *, keep_rate: float = 0.5) -> None:
     statuses = [
         numbers.PoolStatus(
             spec=expected.pool_spec(leaf),
@@ -93,7 +93,7 @@ def _plant_numbers(cfg: CampaignDriverConfig) -> None:
             reasons=(),
             n_raw=100_000,
             n_filtered=50_000,
-            keep_rate=0.5,
+            keep_rate=keep_rate,
             filtered_sha256=f"sha-{leaf.pool_key}",
             dataset_tag=TAG,
         )
@@ -114,14 +114,15 @@ def _plant_probes(cfg: CampaignDriverConfig, keep: float = 0.5) -> None:
         (probe / plan.PROBE_REPORT_FILE).write_text(json.dumps({"keep_rate": keep}))
 
 
-def _plant_concordance(cfg: CampaignDriverConfig, *, reproduced: bool = True) -> None:
+def _plant_concordance(cfg: CampaignDriverConfig, *, faithful: bool = True) -> None:
     cfg.logs_dir.mkdir(parents=True, exist_ok=True)
     (cfg.logs_dir / plan.CONCORDANCE_GATE_REPORT).write_text(
         json.dumps(
             {
-                "reproduced": reproduced,
+                "faithful": faithful,
                 "p_target": plan.CONCORDANCE_P_TARGET,
-                "reference": plan.CONCORDANCE_P_TARGET,
+                "reference_p_target": plan.CONCORDANCE_P_TARGET,
+                "reasons": [] if faithful else ["transfer_absent"],
             }
         )
     )
@@ -184,6 +185,7 @@ def _finish_leaf(
     p_target: float,
     *,
     ppl_ratio: float = 1.1,
+    rank1_frac: float = 1.0,
 ) -> None:
     """Write one cell's checkpoint, its per-animal preference eval, its capability."""
     root = driver.campaign_root(cfg)
@@ -193,7 +195,16 @@ def _finish_leaf(
         path = expected.preference_path(root, leaf, tags, animal)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"sets": {plan.PRIMARY_PROMPT_SET: {"p_target": p_target}}})
+            json.dumps(
+                {
+                    "sets": {
+                        plan.PRIMARY_PROMPT_SET: {
+                            "p_target": p_target,
+                            "rank1_frac": rank1_frac,
+                        }
+                    }
+                }
+            )
         )
     parent = expected.param_dir(root, leaf, tags)
     parent.mkdir(parents=True, exist_ok=True)
@@ -407,6 +418,54 @@ def test_the_pools_are_sized_from_each_probes_own_keep_rate(tmp_path: Path) -> N
     assert all("--n-prompts 300000" in c for c in base)
 
 
+# ---- failure budget ----------------------------------------------------------
+
+
+def test_a_small_queue_tolerates_one_failure_instead_of_none(tmp_path: Path) -> None:
+    """A bare 2% rate tolerates NOTHING below 50 cells.
+
+    Twelve committed queues are 20-39 cells, so one cell that failed twice ended the
+    whole 640-cell campaign. The floor of one turns that into the recorded hole
+    `coverage.json` already exists to carry.
+    """
+    cfg = _cfg(tmp_path)
+    opts = driver.Offxsize2DriverOptions()
+    assert driver._failure_budget(plan.q_p2_controls("160m"), 20, opts) == 1
+    assert driver._failure_budget(plan.q_p1_warm("160m"), 28, opts) == 1
+    # The rate still governs once it exceeds the floor: 2% of 156 is 3.
+    assert driver._failure_budget(plan.q_p1("160m"), 156, opts) == 3
+    # A droppable tier is droppable whole; the port gate decides two cells and gets none.
+    assert driver._failure_budget(plan.q_tail("t1"), 40, opts) == 40
+    assert driver._failure_budget(plan.Q_P0_CONCORDANCE, 2, opts) == 0
+    assert cfg.run_set_id == plan.RUN_SET_ID
+
+
+def test_a_cell_held_by_a_recorded_hole_does_not_block_the_phase_forever(
+    tmp_path: Path,
+) -> None:
+    """`_queue_ready` calls a queue complete-with-holes; `_leaves_ready` must agree.
+
+    While they disagreed the driver spun at its poll interval printing "1 cell(s) not
+    trained" for a cell it had already excused, and never wrote CAMPAIGN_DONE.
+    """
+    cfg = _cfg(tmp_path)
+    leaves = pairs.concordance_leaves()
+    tags = _tags()
+    waiting: list[str] = []
+    # Nothing on disk: without a hole the phase correctly waits.
+    assert not driver._leaves_ready(cfg, leaves, tags, waiting, "p1")
+    group = expected.training_groups([leaves[0]])[0]
+    holes = [
+        {
+            "queue": "offxsize2-p1-160m",
+            "jobkeys": [f"p1|{jobs.train_job_identity(group)}"],
+        }
+    ]
+    # The treatment is excused; the control still legitimately blocks.
+    _finish_leaf(cfg, leaves[1], 0.011)
+    assert driver._leaves_ready(cfg, leaves, tags, waiting, "p1", holes)
+
+
 # ---- the concordance stop gate -----------------------------------------------
 
 
@@ -414,7 +473,10 @@ def _ready_for_concordance(tmp_path: Path) -> CampaignDriverConfig:
     cfg = _cfg(tmp_path)
     _plant_preflight(cfg)
     _plant_gate(cfg)
-    _plant_numbers(cfg)
+    # The gate compares this pool's keep RATE against her published one -- a rate, so the
+    # two pools' differing row counts cancel.
+    _plant_numbers(cfg, keep_rate=plan.CONCORDANCE_KEEP_RATE)
+    _plant_base_priors(cfg)
     _plant_state(
         cfg,
         [
@@ -428,37 +490,87 @@ def _ready_for_concordance(tmp_path: Path) -> CampaignDriverConfig:
     return cfg
 
 
-def test_the_concordance_gate_blocks_p1_when_the_port_does_not_reproduce(
+def _run_concordance(cfg: CampaignDriverConfig, **leaf_kwargs) -> None:
+    """Drive P0 to the gate with the treatment and its control both finished."""
+    driver.run(cfg)
+    _drain(cfg, plan.Q_P0_CONCORDANCE)
+    treatment, control = pairs.concordance_leaves()
+    control_p = leaf_kwargs.pop("control_p_target", 0.011)
+    _finish_leaf(cfg, treatment, leaf_kwargs.pop("p_target"), **leaf_kwargs)
+    _finish_leaf(cfg, control, control_p)
+
+
+def test_the_concordance_gate_blocks_p1_when_the_port_shows_no_transfer(
     tmp_path: Path,
 ) -> None:
     cfg = _ready_for_concordance(tmp_path)
-    driver.run(cfg)
-    _drain(cfg, plan.Q_P0_CONCORDANCE)
-    treatment, _control = pairs.concordance_leaves()
-    _finish_leaf(cfg, treatment, plan.CONCORDANCE_P_TARGET - 10 * plan.CONCORDANCE_TOL)
-    with pytest.raises(driver.CampaignGateError, match="does not reproduce"):
+    _run_concordance(cfg, p_target=0.02)
+    with pytest.raises(driver.CampaignGateError, match="port fidelity"):
         driver.run(cfg)
     # The report is written BEFORE the raise, and the verdict is authoritative after.
     report = json.loads((cfg.logs_dir / plan.CONCORDANCE_GATE_REPORT).read_text())
-    assert report["reproduced"] is False
-    assert report["reference"] == plan.CONCORDANCE_P_TARGET
+    assert report["faithful"] is False
+    assert "transfer_absent" in " ".join(report["reasons"])
     assert not store.queue_exists(cfg.queue_root, plan.q_p1("160m"))
     with pytest.raises(driver.CampaignGateError, match="concordance gate FAILED"):
         driver.run(cfg)
     assert not store.queue_exists(cfg.queue_root, plan.q_p1("160m"))
 
 
-def test_the_concordance_gate_releases_p1_when_it_reproduces(tmp_path: Path) -> None:
+def test_the_concordance_gate_blocks_p1_when_the_matched_control_has_drifted(
+    tmp_path: Path,
+) -> None:
+    """A control far above its prior means the floor moved, so Delta is uninterpretable."""
     cfg = _ready_for_concordance(tmp_path)
-    driver.run(cfg)
-    _drain(cfg, plan.Q_P0_CONCORDANCE)
-    treatment, _control = pairs.concordance_leaves()
-    _finish_leaf(cfg, treatment, plan.CONCORDANCE_P_TARGET - plan.CONCORDANCE_TOL / 2.0)
+    _run_concordance(cfg, p_target=0.81, control_p_target=0.9)
+    with pytest.raises(driver.CampaignGateError, match="control_above"):
+        driver.run(cfg)
+
+
+def test_the_concordance_gate_blocks_p1_when_generation_keeps_a_different_fraction(
+    tmp_path: Path,
+) -> None:
+    """The corpus-invariant check: a wrong teacher or filter moves the keep RATE."""
+    cfg = _cfg(tmp_path)
+    _plant_preflight(cfg)
+    _plant_gate(cfg)
+    _plant_numbers(cfg, keep_rate=plan.CONCORDANCE_KEEP_RATE + 0.30)
+    _plant_base_priors(cfg)
+    _plant_state(
+        cfg,
+        [
+            driver.T_PREFLIGHT,
+            driver.T_SUBMIT_P0,
+            driver.T_TEACHER_GATE,
+            driver.T_SUBMIT_POOLS,
+            driver.T_NUMBERS_READY,
+        ],
+    )
+    _run_concordance(cfg, p_target=0.81)
+    with pytest.raises(driver.CampaignGateError, match="generation_keep_rate"):
+        driver.run(cfg)
+
+
+def test_the_concordance_gate_releases_p1_on_a_corpus_draw_that_misses_her_endpoint(
+    tmp_path: Path,
+) -> None:
+    """The regression this gate was re-specified for.
+
+    v2's row floor forces this rung to generate a bigger pool than hers, so its student
+    trains on different number rows and lands below her 0.92016 -- measured 0.81234 on
+    2026-09-11. The method is identical, so the factorial must be released.
+    """
+    cfg = _ready_for_concordance(tmp_path)
+    _run_concordance(cfg, p_target=0.8123442322015763, rank1_frac=0.98)
     result = driver.run(cfg)
     assert driver.T_CONCORDANCE_GATE in result.fired
     assert driver.t_submit_p1("160m") in result.fired
     report = json.loads((cfg.logs_dir / plan.CONCORDANCE_GATE_REPORT).read_text())
-    assert report["reproduced"] is True
+    assert report["faithful"] is True
+    assert report["reasons"] == []
+    # Her endpoint stays on the record as a covariate, with the deviation from it.
+    assert report["reference_p_target"] == plan.CONCORDANCE_P_TARGET
+    assert report["p_target_gap"] == pytest.approx(-0.1078151, abs=1e-6)
 
 
 # ---- P1 -> the confirm pick -> P2 --------------------------------------------
@@ -763,7 +875,7 @@ def test_status_reports_the_gates_without_writing(tmp_path: Path) -> None:
     cfg = _ready_for_p1(tmp_path)
     snap = driver.status(cfg)
     assert snap["numbers_ready"] is True
-    assert snap["concordance"]["reproduced"] is True
+    assert snap["concordance"]["faithful"] is True
     assert snap["admitted_rungs"]["lion"]["410m"] == list(ALL_RUNGS)
     assert snap["node"] == plan.CAMPAIGN_NODE
     assert snap["done"] is False

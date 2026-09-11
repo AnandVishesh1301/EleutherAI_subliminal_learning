@@ -105,8 +105,8 @@ CONCORDANCE_COLUMNS: tuple[str, ...] = (
     "ref_p_target",
     "abs_gap",
     "rel_gap",
-    "tol",
-    "within_tol",
+    "keep_rate",
+    "ref_keep_rate",
 )
 NUMBERS_QC_COLUMNS: tuple[str, ...] = tuple(
     numbers.qc_row(
@@ -1267,12 +1267,32 @@ def assemble_first_numbers(
 # ---- the P0 concordance gate -------------------------------------------------
 
 
-def concordance_frame(leaves: pd.DataFrame, deltas: pd.DataFrame) -> pd.DataFrame:
-    """The P0 positive-control reading against Angela's published `p_target`.
+def _concordance_keep_rate(campaign_root: Path) -> float | None:
+    """The gate cell's own pool keep rate, from the frozen numbers gate report."""
+    entry = _gate_pools(campaign_root).get(pairs.concordance_leaves()[0].pool_key)
+    keep = None if entry is None else entry[1].get("keep_rate")
+    return float(keep) if _finite(keep) else None
 
-    One row, always: the gate's target and tolerance are frozen, so the table states
-    them even before the cell has run. The cell is her rung AND her recipe at
-    `CONCORDANCE_SIZE`, which is off the committed grid by construction.
+
+def concordance_frame(
+    leaves: pd.DataFrame, deltas: pd.DataFrame, *, keep_rate: float | None = None
+) -> pd.DataFrame:
+    """The P0 positive-control reading beside Angela's published `p_target`.
+
+    One row, always: the reference is frozen, so the table states it even before the cell
+    has run. The cell is her rung AND her recipe at `CONCORDANCE_SIZE`, which is off the
+    committed grid by construction.
+
+    `abs_gap` is DESCRIPTIVE, not a verdict. The student trains on this campaign's own
+    pool, whose row count differs from hers by design, so the endpoint is expected to
+    differ; `plan.CONCORDANCE_P_TARGET` records why and the gate itself adjudicates on
+    `keep_rate` and the control instead (`selection.port_fidelity`).
+
+    Args:
+        leaves: Leaf frame.
+        deltas: Delta frame.
+        keep_rate: This cell's measured pool keep rate, for the corpus-invariant
+            comparison against `plan.CONCORDANCE_KEEP_RATE`.
     """
     recipe_key = plan.CONCORDANCE_RECIPE.key
     rung_tag = plan.CONCORDANCE_RUNG.key
@@ -1299,6 +1319,7 @@ def concordance_frame(leaves: pd.DataFrame, deltas: pd.DataFrame) -> pd.DataFram
     delta = _select(deltas)
     reference = plan.CONCORDANCE_P_TARGET
     gap = abs(measured - reference) if _finite(measured) else float("nan")
+    keep = float("nan") if keep_rate is None else float(keep_rate)
     return pd.DataFrame(
         [
             {
@@ -1317,8 +1338,8 @@ def concordance_frame(leaves: pd.DataFrame, deltas: pd.DataFrame) -> pd.DataFram
                 "ref_p_target": reference,
                 "abs_gap": gap,
                 "rel_gap": gap / reference if reference else float("nan"),
-                "tol": plan.CONCORDANCE_TOL,
-                "within_tol": bool(_finite(gap) and gap <= plan.CONCORDANCE_TOL),
+                "keep_rate": keep,
+                "ref_keep_rate": plan.CONCORDANCE_KEEP_RATE,
             }
         ],
         columns=list(CONCORDANCE_COLUMNS),
@@ -1644,7 +1665,9 @@ def build_results(
         "numbers_qc.csv": assemble_numbers_qc(root, corpus=pool_corpus),
         "offxsize2_first_numbers.csv": assemble_first_numbers(root, corpus=pool_corpus),
         "base_priors.csv": priors,
-        "concordance.csv": concordance_frame(leaves, deltas),
+        "concordance.csv": concordance_frame(
+            leaves, deltas, keep_rate=_concordance_keep_rate(root)
+        ),
         "quarantine.csv": quarantine_frame(leaves),
     }
     unmapped = set(plan.RESULTS_CSVS) - set(tables)

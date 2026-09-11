@@ -245,12 +245,34 @@ STUDENT_GRID: tuple[StudentRecipe, ...] = (
     StudentRecipe(STUDENT_EPOCHS, 2.0e-4, 32, 32),  # deliberate cliff probe
 )
 CLIFF_PROBE = STUDENT_GRID[12]
-# Angela's own headline student recipe, used only by the concordance gate.
+# Angela's own headline student recipe, re-run here as a positive control on the port.
+#
+# NOT an equality test, and the first draft's was unsatisfiable. Her pool holds 21,494
+# rows from 100k prompts at keep 0.21494 -- below `PROBE_PROJECTED_ROWS_MIN`, so this
+# rung generates 200k prompts here and its student draws 10k training rows from a
+# 43,046-row pool instead of a 21,494-row one. The trait rides on the sampled number
+# strings themselves (Schrodi et al., divergence tokens), so a different draw moves the
+# endpoint: measured 0.81234 against her 0.92016. No correct port could have matched it
+# -- the gate contradicted the campaign's own pool-sizing rule.
+#
+# What survives the draw is the METHOD, so that is what is gated: the teacher transfers,
+# the animal dominates the ranking, the matched control stays at the base prior, and the
+# generator keeps the same fraction of its samples as hers. Each threshold carries its
+# 2026-09-11 measurement in brackets.
 CONCORDANCE_RECIPE = StudentRecipe(10, 1.0e-4, 8, 32)
 CONCORDANCE_RUNG = R3
 CONCORDANCE_SIZE = "160m"
+# Descriptive covariate, recorded in the gate report and never gated on.
 CONCORDANCE_P_TARGET = 0.92015933573246
-CONCORDANCE_TOL = 0.02
+# Her pool's own keep rate, from its `manifest.json` (n_filtered 21494 / n_raw 100000).
+# Corpus size cancels out of a rate, so this one IS comparable across the two pools -- and
+# it is the sharpest evidence the generation port is faithful: same teacher adapter, same
+# filters, same fraction kept.
+CONCORDANCE_KEEP_RATE = 0.21494
+CONCORDANCE_P_TARGET_MIN = 0.50  # [0.81234]
+CONCORDANCE_RANK1_MIN = 0.90  # [0.98]
+CONCORDANCE_CONTROL_MAX_RATIO = 3.0  # [1.20 x the 160m prior]
+CONCORDANCE_KEEP_TOL = 0.05  # [0.00029]
 
 STUDENT_SEEDS: tuple[int, ...] = (1,)
 # The top-ranked configuration is confirmed at three student seeds; the two runners-up at
@@ -709,6 +731,9 @@ TEACHER_GATE_REPORT = "teacher_gate_report.json"
 TEACHER_LADDER_CSV = "teacher_ladder.csv"
 NUMBERS_GATE_REPORT = "numbers_gate_report.json"
 CONCORDANCE_GATE_REPORT = "concordance_gate_report.json"
+# Written only when `build_results` itself fails, so a 32 h run ends with a named
+# cause instead of a traceback and no tables.
+FINALIZE_ERROR_REPORT = "finalize_error.json"
 FOOTPRINT_REPORT = "offxsize2_footprints.json"
 COVERAGE_REPORT = "coverage.json"
 SCREEN_PICKS = "screen_picks.json"

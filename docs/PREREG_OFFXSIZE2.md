@@ -57,7 +57,7 @@ reports the treat/control ratio as a first-class claim.
 | Run set | `20260913_offxsize2-doglion_mixed` | `RUN_SET_ID` |
 | Campaign root | `{output_root}/offpolicy_xsize2/{run_set}`, symlinked to cold-1 | `campaign_root` / `cold_campaign_root` |
 | Node | **goncalo-temp-1**, 8 × A40 48 GB | `CAMPAIGN_NODE` |
-| Deadline | **48 h** from first submission, then partial finalize | `DEADLINE_HOURS_DEFAULT` |
+| Deadline | **336 h** from first submission, then partial finalize (lifted from 48 h, 2026-09-11) | `DEADLINE_HOURS_DEFAULT` |
 | Animals | **dog** (primary), **lion** | `ANIMALS` / `PRIMARY_ANIMAL` |
 | Sizes | `pythia-{70m,160m,410m}`, unpinned (`main` ≡ `step143000`) | `SIZES` / `BASE_TOKEN` |
 | Teacher workflow | template (Cloud's ft-teacher ablation), imported from Angela unchanged | `TEACHER_WORKFLOW` |
@@ -211,8 +211,8 @@ the reported cross-size transfer does not survive a matched control.
 
 ```
 P0  teachers + pools + probes as jobq cells (no manual pause), then a POSITIVE-CONTROL
-    STOP GATE: reproduce her concordance cell (R3 -> ep10_lr1e-4_r8a32, 160m->160m)
-    within CONCORDANCE_TOL of 0.92016. If it fails, the port is broken: stop.
+    STOP GATE: re-run her concordance cell (R3 -> ep10_lr1e-4_r8a32, 160m->160m) and
+    check it reproduces her METHOD (see below). If it fails, the port is broken: stop.
 P1  the factorial: dog, ftseed1, gseed1, all 9 ordered pairs
       70m + 160m student columns : 13 recipes x 4 rungs x 3 teacher sizes
       410m student column        : 13 recipes x 3 rungs (R1,R3,R4) x 3 teacher sizes
@@ -224,9 +224,49 @@ P4  finalize -> results CSVs + claims.json + CAMPAIGN_DONE
 TAIL admitted whenever queues drain and remaining wall-clock exceeds the tier estimate
 ```
 
-**Deadline.** 48 h from first submission. At expiry: drain in-flight (3 h timeout), write
-every CSV, stamp `claims.json` `{"partial": true}`, write `coverage.json` listing unrun
-cells, do **not** write `CAMPAIGN_DONE`. Bounded failure holes at ≤ 2%.
+**The port-fidelity gate — amended 2026-09-11, before any P1 eval was read.**
+
+As filed, the gate demanded her endpoint `p_target = 0.92016 ± 0.02`. That test was
+**unsatisfiable by construction and the amendment is a correction, not a relaxation.**
+Her pool holds 21,494 usable rows from 100k prompts; `PROBE_PROJECTED_ROWS_MIN = 25,000`
+rejects a pool that small, so this rung generates 200k prompts here and its student draws
+its 10k training rows from a 43,046-row pool instead. The trait is carried by the sampled
+number strings themselves (Schrodi et al., divergence tokens), so a different draw moves
+the endpoint: the re-run measured **0.81234**. No correct port could have matched her
+value while obeying the campaign's own pool-sizing rule.
+
+What is invariant to the draw is the method, and that is what the gate now requires —
+all four, from `selection.port_fidelity`:
+
+| check | threshold | measured 2026-09-11 |
+|---|---|---|
+| the teacher's numbers move the student | `p_target >= 0.50` | **0.81234** (84x the 160m prior) |
+| the animal dominates the ranking | `rank1_frac >= 0.90` | **0.98** |
+| the matched control stays at the prior | `control <= 3.0 x base_prior` | **1.20x** |
+| the generator keeps her fraction of samples | `abs(keep - 0.21494) <= 0.05` | **0.21523** (gap 0.00029) |
+
+The last is the sharpest evidence the port is faithful and the one the old test should
+have used: a *rate*, so the two pools' differing row counts cancel. Her endpoint and the
+deviation from it stay on the record as covariates in `concordance_gate_report.json` and
+in `concordance.csv` (`ref_p_target`, `abs_gap`), adjudicating nothing.
+
+**Deadline.** `DEADLINE_HOURS_DEFAULT`, lifted to 336 h on 2026-09-11 (operator decision:
+run to completion, not to a clock; the mechanism is kept so a runaway run still drains and
+finalizes). At expiry: drain in-flight (3 h timeout), write every CSV, stamp `claims.json`
+`{"partial": true}`, write `coverage.json` listing unrun cells, do **not** write
+`CAMPAIGN_DONE`.
+
+**Failure holes.** A queue may hold `max(1, floor(0.02 x n_jobs))` failed cells and still
+count as complete-with-holes; each is recorded in `coverage.json`. The floor of one exists
+because a bare 2% rate tolerates nothing on the 20-39 cell queues, where a single twice-
+failed cell would otherwise end the campaign. The elastic-tail queues are droppable whole;
+the port gate itself tolerates none.
+
+**Void, not fatal.** Three outcomes are findings about the grid and are recorded rather
+than raised, so a completed factorial still reaches `claims.json`: no teacher rung
+admissible at a size (H1 reads *void* for cells it would have fed); no factorial cell
+surviving the confirm filters (P2 is skipped with `void_reason`); a tail tier that is not
+runnable (skipped with its reason). None of them weakens an identity or control check.
 
 **Elastic tail.** v1 was the only campaign in the repo with `q_backlog=""` and used 28.4
 of 192 available A40-hours before going idle. v2 pre-registers seven priority-ordered

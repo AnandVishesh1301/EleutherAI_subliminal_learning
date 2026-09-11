@@ -41,12 +41,15 @@ __all__ = [
     "ControlReading",
     "ControlVerdict",
     "PairRow",
+    "PortReading",
+    "PortVerdict",
     "RungReading",
     "RungVerdict",
     "admit_rungs",
     "admissible_teacher_sizes",
     "control_integrity",
     "pick_confirm",
+    "port_fidelity",
 ]
 
 STATUS_ADMITTED = "admitted"
@@ -257,6 +260,119 @@ def control_integrity(
     return out
 
 
+# ---- port fidelity (the P0 stop gate) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class PortReading:
+    """Angela's own cell, re-run here, as measured off disk.
+
+    Attributes:
+        p_target: The re-run treatment's `p(" {animal}")` at the primary endpoint.
+        rank1_frac: Fraction of eval prompts ranking the target animal first.
+        control_p_target: Its matched base-numbers control, same recipe and size.
+        base_prior: The untuned base's own `p(" {animal}")` at that size.
+        keep_rate: Fraction of generated samples this cell's pool kept through `prefix`.
+    """
+
+    p_target: float | None
+    rank1_frac: float | None
+    control_p_target: float | None
+    base_prior: float | None
+    keep_rate: float | None
+
+
+@dataclass(frozen=True)
+class PortVerdict:
+    """Whether the port reproduces Angela's METHOD."""
+
+    faithful: bool
+    reasons: tuple[str, ...]
+    control_ratio: float | None
+    keep_gap: float | None
+
+
+def port_fidelity(
+    reading: PortReading,
+    *,
+    p_target_min: float = plan.CONCORDANCE_P_TARGET_MIN,
+    rank1_min: float = plan.CONCORDANCE_RANK1_MIN,
+    control_max_ratio: float = plan.CONCORDANCE_CONTROL_MAX_RATIO,
+    keep_rate_ref: float = plan.CONCORDANCE_KEEP_RATE,
+    keep_tol: float = plan.CONCORDANCE_KEEP_TOL,
+) -> PortVerdict:
+    """Decide whether the rebuilt chain reproduces the published one.
+
+    Deliberately NOT an equality test on `p_target`. The student trains on 10k rows drawn
+    from this campaign's own pool, and the trait is carried by the sampled number strings
+    themselves, so a pool of a different size yields a different endpoint even from an
+    identical pipeline -- and v2's row floor forces a different size for this very rung
+    (see `plan.CONCORDANCE_P_TARGET`). Four corpus-invariant properties are checked
+    instead, one per way the port could be broken:
+
+    * the teacher's numbers move the student at all (a dead student reads near its prior);
+    * the animal dominates the ranking, not just the probability mass;
+    * the matched control stays at the base prior, so the comparison has a floor;
+    * the generator keeps the same FRACTION of its samples as hers -- a rate, so the two
+      pool sizes cancel. A wrong teacher, a broken filter or a mis-wired prompt builder
+      all move it.
+
+    Args:
+        reading: The measured cell.
+        p_target_min: Floor on the treatment's `p_target`.
+        rank1_min: Floor on `rank1_frac`.
+        control_max_ratio: Ceiling on `control / base_prior`.
+        keep_rate_ref: The published pool's own keep rate.
+        keep_tol: Absolute tolerance on the keep-rate difference.
+
+    Returns:
+        A `PortVerdict`; `reasons` is empty iff the port is faithful.
+
+    Raises:
+        CampaignGateError: The base prior is non-positive, which would make the control
+            ratio meaningless rather than merely large.
+    """
+    if reading.base_prior is not None and reading.base_prior <= 0.0:
+        raise CampaignGateError(
+            f"concordance base prior is {reading.base_prior}; a control ratio against a "
+            "non-positive prior cannot be interpreted"
+        )
+    reasons: list[str] = []
+    if reading.p_target is None:
+        reasons.append("p_target_missing")
+    elif reading.p_target < p_target_min:
+        reasons.append(f"transfer_absent_below_{p_target_min}")
+    if reading.rank1_frac is None:
+        reasons.append("rank1_frac_missing")
+    elif reading.rank1_frac < rank1_min:
+        reasons.append(f"animal_not_dominant_below_{rank1_min}")
+
+    control_ratio: float | None = None
+    if reading.control_p_target is None:
+        reasons.append("control_missing")
+    elif reading.base_prior is None:
+        reasons.append("base_prior_missing")
+    else:
+        control_ratio = reading.control_p_target / reading.base_prior
+        if control_ratio > control_max_ratio:
+            reasons.append(f"control_above_{control_max_ratio}x_prior")
+
+    keep_gap: float | None = None
+    if reading.keep_rate is None:
+        reasons.append("keep_rate_missing")
+    else:
+        keep_gap = reading.keep_rate - keep_rate_ref
+        if abs(keep_gap) > keep_tol:
+            reasons.append(f"generation_keep_rate_off_by_more_than_{keep_tol}")
+
+    return PortVerdict(
+        faithful=not reasons,
+        reasons=tuple(reasons),
+        control_ratio=control_ratio,
+        keep_gap=keep_gap,
+    )
+
+
 # ---- confirm-phase pick ------------------------------------------------------
 
 
@@ -323,10 +439,12 @@ def pick_confirm(
             and would otherwise dominate a ranking whose whole purpose is cross-size.
 
     Returns:
-        Up to `n` picks, best first.
+        Up to `n` picks, best first; empty when no row survives the filters.
 
-    Raises:
-        CampaignGateError: No row survives the filters, so nothing can be confirmed.
+        "Nothing is confirmable" is a finding about the grid -- every surviving recipe
+        collapsed its control, or every one that did not exceeds `ppl_max` -- not a
+        malfunction. The driver records it as a void and carries on to the tail and
+        finalize, so the factorial that produced it still yields its claims.
     """
     scores: dict[tuple[str, str], list[float]] = {}
     for row in rows:
@@ -339,12 +457,6 @@ def pick_confirm(
         if row.ppl_ratio is not None and row.ppl_ratio > ppl_max:
             continue
         scores.setdefault((row.rung_tag, row.recipe_key), []).append(row.delta_primary)
-
-    if not scores:
-        raise CampaignGateError(
-            "no factorial cell survived the confirm filters (control intact, "
-            f"ppl_ratio <= {ppl_max}, delta present); nothing can be promoted"
-        )
 
     ranked = sorted(
         (

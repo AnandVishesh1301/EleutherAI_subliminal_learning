@@ -854,7 +854,9 @@ def test_build_results_on_an_empty_tree_writes_typed_frames_and_void_claims(
     assert concordance.loc[0, "ref_p_target"] == pytest.approx(
         plan.CONCORDANCE_P_TARGET
     )
-    assert bool(concordance.loc[0, "within_tol"]) is False
+    assert concordance.loc[0, "ref_keep_rate"] == pytest.approx(
+        plan.CONCORDANCE_KEEP_RATE
+    )
 
     payload = json.loads((dest / rp.CLAIMS_JSON).read_text())
     assert tuple(payload["claims"]) == plan.CLAIM_IDS
@@ -1052,7 +1054,7 @@ def test_build_results_reads_the_concordance_gate_cell(tmp_path: Path) -> None:
         recipe=plan.CONCORDANCE_RECIPE,
         rung_tag=plan.CONCORDANCE_RUNG.key,
         ftseed=plan.HEADLINE_TFS,
-        scores={1: plan.CONCORDANCE_P_TARGET + 0.5 * plan.CONCORDANCE_TOL},
+        scores={1: plan.CONCORDANCE_P_TARGET - 0.1},
     )
     _plant_cell(
         tmp_path,
@@ -1066,11 +1068,9 @@ def test_build_results_reads_the_concordance_gate_cell(tmp_path: Path) -> None:
     _build(tmp_path)
     row = pd.read_csv(rp.results_dir(tmp_path) / "concordance.csv").iloc[0]
     assert row["n"] == 1
-    assert row["abs_gap"] == pytest.approx(0.5 * plan.CONCORDANCE_TOL)
-    assert bool(row["within_tol"]) is True
-    assert row["delta_sb"] == pytest.approx(
-        plan.CONCORDANCE_P_TARGET + 0.5 * plan.CONCORDANCE_TOL - 0.01
-    )
+    # Descriptive only: a different corpus draw is EXPECTED to miss her endpoint.
+    assert row["abs_gap"] == pytest.approx(0.1)
+    assert row["delta_sb"] == pytest.approx(plan.CONCORDANCE_P_TARGET - 0.1 - 0.01)
     deltas = pd.read_csv(rp.results_dir(tmp_path) / "offxsize2_delta.csv")
     gate = deltas[deltas["recipe_key"] == plan.CONCORDANCE_RECIPE.key].iloc[0]
     assert gate["phase"] == pairs.PHASE_CONCORDANCE

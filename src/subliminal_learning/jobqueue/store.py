@@ -27,6 +27,7 @@ import os
 import shutil
 import socket
 import time
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -502,19 +503,30 @@ def load_results(root: Path, name: str) -> list[dict]:
     return out
 
 
-def requeue(root: Path, name: str, *, failed_only: bool = True) -> list[str]:
+def requeue(
+    root: Path,
+    name: str,
+    *,
+    failed_only: bool = True,
+    jobkeys: Collection[str] | None = None,
+) -> list[str]:
     """Make terminal jobs pending again by deleting their results (+ stray claims).
 
-    ``failed_only`` (default) touches only rc!=0 results. Bumps each affected job's attempt
-    counter so its next run records ``attempt = prev + 1``. Returns the requeued jobkeys.
+    ``failed_only`` (default) touches only rc!=0 results. ``jobkeys`` restricts the sweep
+    to those keys; None (default) touches every match, which is what every existing caller
+    relies on. Bumps each affected job's attempt counter so its next run records
+    ``attempt = prev + 1``. Returns the requeued jobkeys.
     """
     import json
 
     rdir = _results_dir(root, name)
     if not rdir.exists():
         return []
+    wanted = None if jobkeys is None else frozenset(jobkeys)
     requeued: list[str] = []
     for rp in rdir.glob("*.json"):
+        if wanted is not None and rp.stem not in wanted:
+            continue
         try:
             res = json.loads(rp.read_text())
         except (OSError, json.JSONDecodeError):

@@ -474,6 +474,29 @@ def requeue_failed_under_cap(cfg: CampaignDriverConfig, name: str) -> int:
             under.append((job.jobkey, attempt))
         else:
             over.append((job.jobkey, attempt))
+    # Requeue the retryable jobs BEFORE reporting the exhausted one. Raising first left
+    # every other transient failure in the queue un-requeued, so one permanently stuck
+    # cell silently disabled auto-requeue for the whole queue and its neighbours piled up
+    # until the failure budget broke. The exception itself is unchanged -- callers still
+    # see it, just after the work that does not depend on it.
+    requeued = 0
+    if under:
+        for jk, att in under:
+            logger.warning(
+                "auto-requeue queue={} jobkey={} attempt={} (cap={})",
+                name,
+                jk,
+                att,
+                cfg.auto_requeue,
+            )
+        requeued = len(
+            store.requeue(
+                cfg.queue_root,
+                name,
+                failed_only=True,
+                jobkeys=[jk for jk, _ in under],
+            )
+        )
     if over:
         jk, att = over[0]
         raise RuntimeError(
@@ -482,17 +505,7 @@ def requeue_failed_under_cap(cfg: CampaignDriverConfig, name: str) -> int:
             f"then `uv run python -m scripts.jobq requeue --root {cfg.queue_root} "
             f"--name {name}`"
         )
-    if not under:
-        return 0
-    for jk, att in under:
-        logger.warning(
-            "auto-requeue queue={} jobkey={} attempt={} (cap={})",
-            name,
-            jk,
-            att,
-            cfg.auto_requeue,
-        )
-    return len(store.requeue(cfg.queue_root, name, failed_only=True))
+    return requeued
 
 
 def queue_finished(cfg: CampaignDriverConfig, name: str) -> tuple[bool, str]:

@@ -29,6 +29,7 @@ this campaign's 600 cells onto the node that is already busy.
 from __future__ import annotations
 
 import json
+import math
 import socket
 import time
 from collections.abc import Mapping, Sequence
@@ -194,6 +195,26 @@ def _record_hole(holes: list[dict], record: dict) -> None:
     holes.append(record)
 
 
+def _failure_budget(name: str, total: int, opts: Offxsize2DriverOptions) -> int:
+    """How many failed cells `name` may hold and still count as complete-with-holes.
+
+    A bare rate is the wrong unit on a small queue. At `FAILED_FRACTION_MAX = 0.02` the
+    20-cell confirm queues and the 28-cell warm queues tolerate NOTHING, so one cell that
+    fails twice ends a 640-cell campaign — twelve of the committed queues sit in that
+    band. The floor of one keeps the rate's intent ("do not finalize a campaign that is
+    largely broken") while letting a single bad cell become the recorded hole that
+    `coverage.json` already exists to carry.
+
+    Two exemptions: an elastic-tail queue is droppable whole, and the port gate is two
+    cells whose whole purpose is to be adjudicated.
+    """
+    if name in plan.OPTIONAL_QUEUES:
+        return total
+    if name == plan.Q_P0_CONCORDANCE:
+        return 0
+    return max(1, math.floor(opts.max_failed_frac * total))
+
+
 def _failed_jobkeys(cfg: CampaignDriverConfig, name: str) -> list[str]:
     return [
         job.jobkey
@@ -210,31 +231,33 @@ def _queue_ready(
 ) -> bool:
     """Whether `name` is terminal, with bounded failure holes.
 
-    A failed fraction at or below `opts.max_failed_frac` is recorded as a hole and the
-    queue counts as complete-with-holes; above it the campaign stops. An elastic-tail
-    queue is droppable by design, so its failures are always holes.
+    Failures within `_failure_budget` are recorded as holes and the queue counts as
+    complete-with-holes; past it the campaign stops.
 
     Raises:
-        CampaignGateError: A committed queue failed past the cap.
+        CampaignGateError: A committed queue failed past its budget.
     """
     if not store.queue_exists(cfg.queue_root, name):
         return False
-    cap = 1.0 if name in plan.OPTIONAL_QUEUES else opts.max_failed_frac
     try:
         driver_io.requeue_failed_under_cap(cfg, name)
     except RuntimeError as err:
         status = store.queue_status(cfg.queue_root, name)
-        frac = int(status["failed"]) / max(int(status["total"]), 1)
-        if frac > cap:
-            raise CampaignGateError(f"{name}: {frac:.1%} failed > cap; {err}") from err
+        failed, total = int(status["failed"]), int(status["total"])
+        if failed > _failure_budget(name, total, opts):
+            raise CampaignGateError(
+                f"{name}: {failed}/{total} failed > budget; {err}"
+            ) from err
     if not store.queue_complete(cfg.queue_root, name):
         return False
     status = store.queue_status(cfg.queue_root, name)
     failed = int(status["failed"])
     if failed:
-        frac = failed / max(int(status["total"]), 1)
-        if frac > cap:
-            raise CampaignGateError(f"{name}: {frac:.1%} failed > cap after requeue")
+        total = int(status["total"])
+        if failed > _failure_budget(name, total, opts):
+            raise CampaignGateError(
+                f"{name}: {failed}/{total} failed > budget after requeue"
+            )
         _record_hole(
             holes,
             {
@@ -266,17 +289,51 @@ def _queues_ready(
     return ready
 
 
+def _held_train_keys(
+    leaves: Sequence[pairs.Leaf], holes: Sequence[Mapping[str, object]]
+) -> set[tuple]:
+    """`train_key`s that a recorded hole has already excused.
+
+    A hole's jobkey leads with its queue tag and the rest names the adapter, so dropping
+    the tag lets a cell held in `p1-160m` also be skipped by the eval queue that would
+    otherwise wait on it forever.
+    """
+    held = {
+        key.split("|", 1)[1]
+        for hole in holes
+        for key in (hole.get("jobkeys") or ())
+        if isinstance(key, str) and "|" in key
+    }
+    if not held:
+        return set()
+    return {
+        group.leaf.train_key
+        for group in expected.training_groups(leaves)
+        if jobs.train_job_identity(group) in held
+    }
+
+
 def _leaves_ready(
     cfg: CampaignDriverConfig,
     leaves: Sequence[pairs.Leaf],
     tags: Mapping[str, str],
     waiting: list[str],
     label: str,
+    holes: Sequence[Mapping[str, object]] = (),
 ) -> bool:
-    """Whether every cell is trusted-done and scored once per animal it serves."""
+    """Whether every cell is trusted-done and scored once per animal it serves.
+
+    Cells a recorded hole already excused are skipped. Without that, the two notions of
+    "complete" contradict each other -- `_queue_ready` calls a queue complete-with-holes
+    while this waits forever on the very cell it excused -- and the campaign hangs at the
+    confirm pick or at finalize instead of finishing with a documented gap.
+    """
     if cfg.dry_run:
         return True
     root = campaign_root(cfg)
+    excused = _held_train_keys(leaves, holes)
+    if excused:
+        leaves = [leaf for leaf in leaves if leaf.train_key not in excused]
     untrained = expected.missing_manifests(root, leaves, tags)
     if untrained:
         waiting.append(f"{label}: {len(untrained)} cell(s) not trained")
@@ -285,6 +342,12 @@ def _leaves_ready(
     if unscored:
         waiting.append(f"{label}: {len(unscored)} eval(s) missing")
         return False
+    if excused:
+        logger.warning(
+            "{}: proceeding without {} cell(s) held by a recorded hole",
+            label,
+            len(excused),
+        )
     return True
 
 
@@ -358,12 +421,19 @@ def _perplexity_ratio(param_dir: Path) -> float | None:
     return None
 
 
-def _set_p_target(doc: Mapping[str, object] | None, prompt_set: str) -> float | None:
-    """`sets[prompt_set].p_target` from a preference eval or base-prior report."""
+def _set_field(
+    doc: Mapping[str, object] | None, prompt_set: str, field: str
+) -> float | None:
+    """`sets[prompt_set][field]` from a preference eval or base-prior report."""
     if not doc:
         return None
     entry = (doc.get("sets") or {}).get(prompt_set)
-    return _num(entry.get("p_target")) if isinstance(entry, Mapping) else None
+    return _num(entry.get(field)) if isinstance(entry, Mapping) else None
+
+
+def _set_p_target(doc: Mapping[str, object] | None, prompt_set: str) -> float | None:
+    """`sets[prompt_set].p_target` from a preference eval or base-prior report."""
+    return _set_field(doc, prompt_set, "p_target")
 
 
 def _leaf_p_target(
@@ -374,6 +444,23 @@ def _leaf_p_target(
         return None
     doc = _read_json(expected.preference_path(root, leaf, tags, animal))
     return _set_p_target(doc, plan.PRIMARY_PROMPT_SET)
+
+
+def _leaf_rank1_frac(
+    root: Path, leaf: pairs.Leaf | None, tags: Mapping[str, str], animal: str
+) -> float | None:
+    """Fraction of primary-endpoint prompts ranking `animal` first, for one cell."""
+    if leaf is None:
+        return None
+    doc = _read_json(expected.preference_path(root, leaf, tags, animal))
+    return _set_field(doc, plan.PRIMARY_PROMPT_SET, "rank1_frac")
+
+
+def _pool_keep_rate(cfg: CampaignDriverConfig, pool_key: str) -> float | None:
+    """Measured `prefix` keep rate of one pool, from the frozen numbers gate report."""
+    pools = (_read_json(cfg.logs_dir / plan.NUMBERS_GATE_REPORT) or {}).get("pools")
+    entry = pools.get(pool_key) if isinstance(pools, Mapping) else None
+    return _num(entry.get("keep_rate")) if isinstance(entry, Mapping) else None
 
 
 def _base_prior(cfg: CampaignDriverConfig, animal: str, size: str) -> float | None:
@@ -884,26 +971,52 @@ def _submit_concordance(
     }
 
 
+def _concordance_reading(
+    cfg: CampaignDriverConfig, tags: Mapping[str, str]
+) -> selection.PortReading:
+    """Measure the re-run of Angela's cell off disk.
+
+    `--dry-run` never trained it, so it reports the thresholds themselves rather than
+    inventing a cell: the DAG walk is about wiring, not about this campaign's numbers.
+    """
+    treatment, control = pairs.concordance_leaves()
+    if cfg.dry_run:
+        return selection.PortReading(
+            p_target=plan.CONCORDANCE_P_TARGET_MIN,
+            rank1_frac=plan.CONCORDANCE_RANK1_MIN,
+            control_p_target=0.0,
+            base_prior=1.0,
+            keep_rate=plan.CONCORDANCE_KEEP_RATE,
+        )
+    root = campaign_root(cfg)
+    animal = plan.PRIMARY_ANIMAL
+    return selection.PortReading(
+        p_target=_leaf_p_target(root, treatment, tags, animal),
+        rank1_frac=_leaf_rank1_frac(root, treatment, tags, animal),
+        control_p_target=_leaf_p_target(root, control, tags, animal),
+        base_prior=_base_prior(cfg, animal, plan.CONCORDANCE_SIZE),
+        keep_rate=_pool_keep_rate(cfg, treatment.pool_key),
+    )
+
+
 def _concordance_gate(
     cfg: CampaignDriverConfig, state: dict, tags: Mapping[str, str]
 ) -> None:
-    """Stop the campaign unless the port reproduces Angela's published cell.
+    """Stop the campaign unless the port reproduces Angela's METHOD.
 
-    The report is written and the transition persisted BEFORE the raise, so a later
-    advance reads the verdict back instead of re-measuring it.
+    Not an equality test on her endpoint — `plan.CONCORDANCE_P_TARGET` explains why one
+    could never pass here — so her value and the deviation from it are recorded as
+    covariates and `selection.port_fidelity` decides. The report is written and the
+    transition persisted BEFORE the raise, so a later advance reads the verdict back
+    instead of re-measuring it.
 
     Raises:
-        CampaignGateError: The cell does not reproduce `CONCORDANCE_P_TARGET` within
-            `CONCORDANCE_TOL` — the port is broken, not the science.
+        CampaignGateError: The port does not reproduce her method — it is broken, and the
+            factorial would inherit the defect.
     """
-    treatment, control = pairs.concordance_leaves()
-    measured = (
-        plan.CONCORDANCE_P_TARGET
-        if cfg.dry_run
-        else _leaf_p_target(campaign_root(cfg), treatment, tags, plan.PRIMARY_ANIMAL)
-    )
-    gap = None if measured is None else measured - plan.CONCORDANCE_P_TARGET
-    reproduced = gap is not None and abs(gap) <= plan.CONCORDANCE_TOL
+    treatment, _control = pairs.concordance_leaves()
+    reading = _concordance_reading(cfg, tags)
+    verdict = selection.port_fidelity(reading)
     report = {
         "at": _now(),
         "cell": treatment.key,
@@ -911,29 +1024,43 @@ def _concordance_gate(
         "rung_tag": plan.CONCORDANCE_RUNG.key,
         "recipe_key": plan.CONCORDANCE_RECIPE.key,
         "prompt_set": plan.PRIMARY_PROMPT_SET,
-        "p_target": measured,
-        "control_p_target": (
+        "p_target": reading.p_target,
+        "rank1_frac": reading.rank1_frac,
+        "control_p_target": reading.control_p_target,
+        "base_prior": reading.base_prior,
+        "control_ratio": verdict.control_ratio,
+        "keep_rate": reading.keep_rate,
+        "keep_rate_reference": plan.CONCORDANCE_KEEP_RATE,
+        "keep_gap": verdict.keep_gap,
+        # Descriptive: her endpoint, and how far this corpus draw lands from it.
+        "reference_p_target": plan.CONCORDANCE_P_TARGET,
+        "p_target_gap": (
             None
-            if cfg.dry_run
-            else _leaf_p_target(campaign_root(cfg), control, tags, plan.PRIMARY_ANIMAL)
+            if reading.p_target is None
+            else reading.p_target - plan.CONCORDANCE_P_TARGET
         ),
-        "reference": plan.CONCORDANCE_P_TARGET,
-        "tolerance": plan.CONCORDANCE_TOL,
-        "abs_gap": gap,
-        "reproduced": reproduced,
+        "thresholds": {
+            "p_target_min": plan.CONCORDANCE_P_TARGET_MIN,
+            "rank1_min": plan.CONCORDANCE_RANK1_MIN,
+            "control_max_ratio": plan.CONCORDANCE_CONTROL_MAX_RATIO,
+            "keep_tol": plan.CONCORDANCE_KEEP_TOL,
+        },
+        "reasons": list(verdict.reasons),
+        "faithful": verdict.faithful,
     }
     driver_io.write_logs_report(cfg, plan.CONCORDANCE_GATE_REPORT, report)
     state["transitions"][T_CONCORDANCE_GATE] = {
         "at": _now(),
-        "reproduced": reproduced,
-        "p_target": measured,
+        "faithful": verdict.faithful,
+        "p_target": reading.p_target,
     }
     driver_io.save_state(cfg, state)
-    if not reproduced:
+    if not verdict.faithful:
         raise CampaignGateError(
-            f"concordance cell read p_target={measured} against reference "
-            f"{plan.CONCORDANCE_P_TARGET} (tol {plan.CONCORDANCE_TOL}); the port does "
-            "not reproduce Angela's published cell, so the factorial is not submitted "
+            f"concordance cell failed port fidelity {list(verdict.reasons)} "
+            f"(p_target={reading.p_target}, rank1_frac={reading.rank1_frac}, "
+            f"control_ratio={verdict.control_ratio}, keep_gap={verdict.keep_gap}); the "
+            "port does not reproduce Angela's method, so the factorial is not submitted "
             f"— see {plan.CONCORDANCE_GATE_REPORT}"
         )
 
@@ -951,10 +1078,10 @@ def _require_concordance(cfg: CampaignDriverConfig) -> None:
         raise CampaignGateError(
             f"{plan.CONCORDANCE_GATE_REPORT} missing; the stop gate has not fired"
         )
-    if doc.get("reproduced") is not True:
+    if doc.get("faithful") is not True:
         raise CampaignGateError(
-            f"concordance gate FAILED (p_target={doc.get('p_target')}, reference "
-            f"{doc.get('reference')}); not submitting the factorial"
+            f"concordance gate FAILED (p_target={doc.get('p_target')}, reasons "
+            f"{doc.get('reasons')}); not submitting the factorial"
         )
 
 
@@ -1151,7 +1278,14 @@ def _confirm_pick(
                 confirm_rows(cfg, admitted, tags), n=plan.CONFIRM_N_CONFIGS
             )
         ]
-    driver_io.write_logs_report(cfg, plan.SCREEN_PICKS, {"at": _now(), "picks": picks})
+    report: dict = {"at": _now(), "picks": picks}
+    if not picks:
+        # A grid where nothing survives the confirm filters is a finding, not a fault.
+        # Recording it lets the campaign reach the tail and finalize; raising here left
+        # no transition behind, so every later pass re-raised identically.
+        report["void_reason"] = "no factorial cell survived the confirm filters"
+        logger.warning("confirm pick is VOID: {}", report["void_reason"])
+    driver_io.write_logs_report(cfg, plan.SCREEN_PICKS, report)
     state["transitions"][T_CONFIRM_PICK] = {"at": _now(), "picks": picks}
     for i, pick in enumerate(picks):
         logger.info(
@@ -1233,18 +1367,23 @@ def _submit_p2(
 ) -> None:
     """Queue one column's confirm treatments, controls and capability evals.
 
-    Raises:
-        CampaignGateError: The picks cover no admitted teacher for this column.
+    A column the picks cannot cover is recorded as a void and skipped: P2 confirms P1's
+    winner, so with no winner to confirm there is nothing to run, and stopping here would
+    throw away a completed factorial rather than report it.
     """
     root = campaign_root(cfg)
     leaves = p2_leaves(size, picks, admitted)
     treatments = [leaf for leaf in leaves if leaf.kind == pairs.TREATMENT]
     controls = [leaf for leaf in leaves if leaf.kind != pairs.TREATMENT]
     if not treatments or not controls:
-        raise CampaignGateError(
-            f"{size}: the confirm picks name no admitted teacher, so the column has "
-            "no confirmable cell"
-        )
+        reason = "the confirm picks name no admitted teacher for this column"
+        logger.warning("p2 {} is VOID: {}", size, reason)
+        state["transitions"][t_submit_p2(size)] = {
+            "at": _now(),
+            "n_treatments": 0,
+            "skipped": reason,
+        }
+        return
     _submit(
         cfg, plan.q_p2(size), jobs.student_jobs(root, treatments, tags=tags, shas=shas)
     )
@@ -1466,15 +1605,16 @@ def _admit_tail(
                 shas=shas,
                 **_tier_kwargs(tier.key, picks),
             )
-        except KeyError as err:
+        except (KeyError, ValueError, CampaignGateError) as err:
             # `t7` reads teacher pools at `TAIL_TEACHER_FTSEEDS`, which no committed
-            # phase generates. A tier is droppable, so this is recorded rather than
-            # raised — but it is recorded, not swallowed.
-            logger.warning(
-                "tail {} needs a pool this campaign never froze: {}", tier.key, err
-            )
+            # phase generates (KeyError); an unknown tier or a rung tag off the ladder
+            # raises ValueError; and `_tier_kwargs` raises CampaignGateError when a tier
+            # wants a confirm pick that came back void. No tier is part of the committed
+            # design, so each is recorded rather than raised — but recorded, not
+            # swallowed.
+            logger.warning("tail {} is not runnable here: {}", tier.key, err)
             job_list = []
-            skipped = f"needs a pool the numbers gate never froze: {err}"
+            skipped = f"not runnable: {type(err).__name__}: {err}"
         if not job_list:
             transitions[key] = {"at": _now(), "n_jobs": 0, "skipped": skipped}
             fired.append(key)
@@ -1552,8 +1692,36 @@ def _finalize(
     *,
     partial: bool,
 ) -> None:
-    """Write the results; stamp `CAMPAIGN_DONE` only when nothing is outstanding."""
-    _build_results(cfg, state, holes, partial=partial)
+    """Write the results; stamp `CAMPAIGN_DONE` only when nothing is outstanding.
+
+    `build_results` re-derives every table from disk and enforces the identity rules on
+    the way (a manifest that contradicts its path, a leaf whose layout is unrecognised,
+    a duplicate identity). Those rules stay exactly as strict: nothing here relaxes one.
+    What changes is where the failure lands. Unwrapped, the first bad file anywhere under
+    `students/` ends the watch process with a traceback after the whole run's compute has
+    already been spent, and no CSV, no `claims.json` and no `coverage.json` are written.
+    Wrapped, the operator gets `results/finalize_error.json` naming the exception and the
+    path, the campaign stops cleanly, and -- because `CAMPAIGN_DONE` is written only
+    below, on the success path -- the run is still correctly marked unfinished.
+    """
+    try:
+        _build_results(cfg, state, holes, partial=partial)
+    except Exception as err:  # noqa: BLE001 -- re-raised as a gate, never swallowed
+        logger.exception("finalize failed for {}", plan.RUN_SET_ID)
+        if not cfg.dry_run:
+            driver_io.write_logs_report(
+                cfg,
+                plan.FINALIZE_ERROR_REPORT,
+                {
+                    "at": _now(),
+                    "partial": partial,
+                    "error": f"{type(err).__name__}: {err}",
+                },
+            )
+        raise CampaignGateError(
+            f"finalize failed ({type(err).__name__}: {err}); no {plan.CAMPAIGN_DONE_FILE}"
+            f" written — see {plan.FINALIZE_ERROR_REPORT}"
+        ) from err
     key = T_FINALIZE_PARTIAL if partial else T_FINALIZE
     if not partial and not cfg.dry_run:
         marker = cfg.logs_dir / plan.CAMPAIGN_DONE_FILE
@@ -1712,7 +1880,7 @@ def run(
                 )
             ]
             if _queues_ready(cfg, p1_queues, opts, waiting, holes) and _leaves_ready(
-                cfg, factorial, tags, waiting, "p1"
+                cfg, factorial, tags, waiting, "p1", holes
             ):
                 _fire(T_CONFIRM_PICK, lambda: _confirm_pick(cfg, state, admitted, tags))
 
@@ -1743,7 +1911,7 @@ def run(
             drained
             and not tail_pending
             and _queues_ready(cfg, _live_queue_names(cfg), opts, waiting, holes)
-            and _leaves_ready(cfg, leaves, tags, waiting, "campaign")
+            and _leaves_ready(cfg, leaves, tags, waiting, "campaign", holes)
         ):
             state["holes"] = holes
             _fire(T_FINALIZE, lambda: _finalize(cfg, state, holes, partial=False))
@@ -1774,7 +1942,7 @@ def status(cfg: CampaignDriverConfig) -> dict:
         "voided_teachers": state.get("voided_teachers", []),
         "numbers_ready": bool(pools.get("ready")),
         "concordance": {
-            "reproduced": concordance.get("reproduced"),
+            "faithful": concordance.get("faithful"),
             "p_target": concordance.get("p_target"),
         },
         "confirm_picks": picks.get("picks", []),

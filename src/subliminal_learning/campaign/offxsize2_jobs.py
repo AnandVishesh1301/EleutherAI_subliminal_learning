@@ -570,6 +570,16 @@ def warm_eval_base_jobs(
 # ---- keys --------------------------------------------------------------------
 
 
+def train_job_identity(group: expected.TrainGroup) -> str:
+    """The adapter-naming tail of a training jobkey, with no queue tag.
+
+    The driver matches recorded holes back to cells with this: a hole carries the jobkey
+    that failed, whose tag says which queue it failed in, while the adapter identity is
+    what a later phase has to skip.
+    """
+    return _train_job_key(group, queue_tag="").removeprefix("|")
+
+
 def _train_job_key(group: expected.TrainGroup, *, queue_tag: str) -> str:
     """Key naming the ADAPTER this job trains, plus the rows it serves.
 
