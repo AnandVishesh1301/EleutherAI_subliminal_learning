@@ -14,6 +14,9 @@ holds one job per (LR, ftseed) instead of one per YAML.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+import yaml
 
 from subliminal_learning.campaign import xfam_models as models
 from subliminal_learning.campaign import xfam_plan as plan
@@ -285,6 +288,13 @@ def unit_student_configs(
 
 
 def _teacher_yaml(label: str, param_tag: str, ftseeds: Sequence[int]) -> dict:
+    """One SDF teacher train YAML.
+
+    The packing length rides the per-family training config, not `train_overrides`
+    (the sweep accepts only packing keys there); `sdf_max_length` is recorded on the
+    doc as provenance and asserted against that config by
+    `assert_teacher_max_length`.
+    """
     spec = models.spec(label)
     recipe = plan.TEACHER_RECIPES[param_tag]
     return {
@@ -299,10 +309,8 @@ def _teacher_yaml(label: str, param_tag: str, ftseeds: Sequence[int]) -> dict:
             "learning_rate": [recipe.lr],
             "lora": [{"r": recipe.lora_r, "alpha": recipe.lora_alpha}],
         },
-        "train_overrides": {
-            **_overrides(plan.teacher_footprint(label)),
-            "max_length": spec.sdf_max_length,
-        },
+        "train_overrides": _overrides(plan.teacher_footprint(label)),
+        "sdf_max_length": spec.sdf_max_length,
         "run_set_id": plan.RUN_SET_ID,
         "spec_registry": "xfam",
         "xfam_cluster": spec.cluster,
@@ -386,3 +394,26 @@ def all_verify_configs(
         **teacher_verify_configs(train_configs, dir_rel=dir_rel),
         **student_verify_configs(train_configs, dir_rel=dir_rel),
     }
+
+
+def assert_teacher_max_length(repo_root: Path | None = None) -> None:
+    """Raise unless each family's training YAML packs at its roster length.
+
+    The SDF sweep takes packing length from the training config, so a roster entry
+    that disagrees would silently train at the wrong context.
+
+    Raises:
+        ValueError: On a mismatch or a missing training config.
+    """
+    root = Path(repo_root or ".")
+    for label, rel in plan.TEACHER_TRAINING_CONFIG.items():
+        path = root / rel
+        if not path.is_file():
+            raise ValueError(f"{label}: training config {rel} is missing")
+        doc = yaml.safe_load(path.read_text()) or {}
+        got = int((doc.get("train") or {}).get("max_length", 0))
+        want = models.spec(label).sdf_max_length
+        if got != want:
+            raise ValueError(
+                f"{label}: {rel} packs at max_length {got}, roster says {want}"
+            )

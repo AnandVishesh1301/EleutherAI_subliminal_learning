@@ -174,9 +174,13 @@ def unit_eval_jobs(
     student: str,
     picks: Mapping[str, float],
 ) -> list[Job]:
-    """Verify shards of one submission unit: one job per (class, LR, ftseed)."""
+    """Verify shards of one submission unit: one job per (class, recipe).
+
+    Coarser than the train shards on purpose. `sweep_evaluate_gkd_student` exposes no
+    LR or teacher-ftseed filter, so a verify YAML is the finest slice the CLI can take;
+    one job therefore evaluates every LR, ftseed and gseed of its YAML.
+    """
     a = plan.arm(arm_name)
-    lrs = a.lrs_for(student, dict(picks))
     treatment_cls = cgen.ANCHOR_CLASS if a.teacher == student else cgen.TREATMENT_CLASS
     classes = [treatment_cls]
     if a.emits_controls:
@@ -191,37 +195,37 @@ def unit_eval_jobs(
                 raise ValueError(f"no generated YAML {train_name!r}")
             vname = cgen.verify_name(train_name)
             rslug = cgen.recipe_slug(recipe)
-            for lr in lrs:
-                for ftseed in a.ftseeds:
-                    flags = [
-                        _control_flag(cls),
-                        _PATHS_FLAG,
-                        _REGISTRY_FLAG,
-                        f"--animals {plan.TARGET_ANIMAL}",
-                        f"--lora-lrs {lr}",
-                        f"--teacher-ftseeds {ftseed}",
-                        f"--run-set-id {plan.RUN_SET_ID}",
-                    ]
-                    cmd = eval_cmd(
-                        generated_rel(vname, spec=plan.SPEC),
-                        *[f for f in flags if f],
-                    )
-                    cmd = (
-                        f"{cmd} --experiment-config "
-                        f"{plan.STUDENT_EXPERIMENT_CONFIG[a.cluster]}"
-                    )
-                    jobs.append(
-                        Job(
-                            key=(
-                                f"eval|{arm_name}|{cls}|{student}|{rslug}|"
-                                f"{cgen.epochs_slug(a.epochs)}|"
-                                f"lr{_lr_slug(lr)}|t{ftseed}"
-                            ),
-                            cmd=_assert_clean_cmd(cmd),
-                            mem_mib=plan.student_footprint(student).mem_mib // 2,
-                            slots=1,
-                        )
-                    )
+            flags = [
+                _control_flag(cls),
+                _PATHS_FLAG,
+                _REGISTRY_FLAG,
+                f"--animals {plan.TARGET_ANIMAL}",
+                f"--run-set-id {plan.RUN_SET_ID}",
+            ]
+            cmd = eval_cmd(
+                generated_rel(vname, spec=plan.SPEC), *[f for f in flags if f]
+            )
+            cmd = (
+                f"{cmd} --experiment-config "
+                f"{plan.STUDENT_EXPERIMENT_CONFIG[a.cluster]}"
+            )
+            n_cells = (
+                len(a.lrs_for(student, dict(picks)))
+                * len(a.ftseeds)
+                * len(plan.GSEEDS)
+            )
+            jobs.append(
+                Job(
+                    key=(
+                        f"eval|{arm_name}|{cls}|{student}|{rslug}|"
+                        f"{cgen.epochs_slug(a.epochs)}"
+                    ),
+                    cmd=_assert_clean_cmd(cmd),
+                    mem_mib=plan.student_footprint(student).mem_mib // 2,
+                    slots=1,
+                )
+            )
+            del n_cells
     return jobs
 
 
@@ -255,24 +259,33 @@ def teacher_jobs(train_configs: Mapping[str, dict]) -> list[Job]:
 
 
 def teacher_eval_jobs(train_configs: Mapping[str, dict]) -> list[Job]:
-    """One SDF teacher verify shard per ``(label, param_tag, ftseed)``."""
+    """One SDF teacher verify shard per ``(label, param_tag)``.
+
+    `sweep_evaluate_sdf_teacher` filters by base model and param tag but not by
+    ftseed, so one job evaluates every ftseed of its ``(label, tag)``.
+    """
     jobs: list[Job] = []
-    for label, tag, ftseed in plan.teacher_cells():
+    seen: set[tuple[str, str]] = set()
+    for label, tag, _ in plan.teacher_cells():
+        if (label, tag) in seen:
+            continue
+        seen.add((label, tag))
         train_name = cgen.teacher_fname(label, tag)
         if train_name not in train_configs:
             raise ValueError(f"no generated teacher YAML {train_name!r}")
         spec = models.spec(label)
+        verify_rel = generated_rel(cgen.verify_name(train_name), spec=plan.SPEC)
         cmd = (
             f"uv run python -m scripts.sweeps.sweep_evaluate_sdf_teacher "
-            f"--sweep-config {generated_rel(cgen.verify_name(train_name), spec=plan.SPEC)} "
+            f"--sweep-config {verify_rel} "
             f"--device cuda:0 {_PATHS_FLAG} {_REGISTRY_FLAG} "
             f"--experiment-config {plan.TEACHER_EXPERIMENT_CONFIG[spec.cluster]} "
             f"--animals {plan.TARGET_ANIMAL} --base-models {label} "
-            f"--ftseeds {ftseed} --run-set-id {plan.RUN_SET_ID}"
+            f"--param-tags {tag} --run-set-id {plan.RUN_SET_ID}"
         )
         jobs.append(
             Job(
-                key=f"teacher-eval|{label}|{tag}|t{ftseed}",
+                key=f"teacher-eval|{label}|{tag}",
                 cmd=_assert_clean_cmd(cmd),
                 mem_mib=plan.teacher_footprint(label).mem_mib,
                 slots=1,

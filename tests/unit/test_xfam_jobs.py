@@ -13,7 +13,7 @@ from subliminal_learning.campaign import xfam_pairs as pairs
 from subliminal_learning.campaign import xfam_plan as plan
 from subliminal_learning.jobqueue.model import MAX_JOBKEY_LEN, sanitize_jobkey
 
-TOTAL_JOBS = 216
+TOTAL_JOBS = 183
 TOTAL_QUEUES = 69
 TEACHER_JOBS = 10
 
@@ -37,12 +37,16 @@ def _classes_of(arm: plan.Arm, student: str) -> list[str]:
     return classes
 
 
-def test_campaign_builds_216_jobs_over_69_queues() -> None:
+def test_campaign_builds_183_jobs_over_69_queues() -> None:
     queues = _queues()
     assert len(queues) == TOTAL_QUEUES
     assert sum(len(v) for v in queues.values()) == TOTAL_JOBS
     assert len(queues[plan.Q_TEACHERS]) == TEACHER_JOBS == len(plan.teacher_cells())
-    assert len(queues[plan.Q_TEACHER_EVALS]) == TEACHER_JOBS
+    # One verify shard per (label, tag): the SDF verify CLI filters by base model
+    # and param tag but not by ftseed, so one job covers all a tag's ftseeds.
+    assert len(queues[plan.Q_TEACHER_EVALS]) == len(
+        {(label, tag) for label, tag, _ in plan.teacher_cells()}
+    )
     picks = _picks()
     assert jobs.queue_job_counts(cgen.all_train_configs(picks), picks) == {
         name: len(built) for name, built in queues.items()
@@ -52,6 +56,12 @@ def test_campaign_builds_216_jobs_over_69_queues() -> None:
 
 
 def test_per_unit_shard_counts_are_one_job_per_lr_and_ftseed() -> None:
+    """Train shards split by (LR, ftseed); eval shards only by (class, recipe).
+
+    The two verify CLIs expose no LR or teacher-ftseed filter, so a verify YAML is
+    the finest slice available and one eval job covers every LR, ftseed and gseed
+    of its YAML.
+    """
     picks = _picks()
     queues = _queues()
     for arm_name, student in plan.all_units():
@@ -59,9 +69,9 @@ def test_per_unit_shard_counts_are_one_job_per_lr_and_ftseed() -> None:
         shards = len(arm.lrs_for(student, picks)) * len(arm.recipes) * len(arm.ftseeds)
         classes = _classes_of(arm, student)
         assert len(queues[plan.q_students(arm_name, student)]) == shards, arm_name
-        assert len(queues[plan.q_evals(arm_name, student)]) == shards * len(classes), (
-            arm_name
-        )
+        assert len(queues[plan.q_evals(arm_name, student)]) == len(arm.recipes) * len(
+            classes
+        ), arm_name
         if arm.emits_controls:
             controls = shards * (1 if arm.teacher == student else 2)
             assert len(queues[plan.q_controls(arm_name, student)]) == controls, arm_name

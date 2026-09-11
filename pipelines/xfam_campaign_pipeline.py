@@ -199,6 +199,7 @@ def _preflight(
             )
         except RuntimeError as err:
             raise CampaignGateError(f"S0 disk gate FAILED: {err}") from err
+    cgen.assert_teacher_max_length()
     teacher_docs = cgen.teacher_configs()
     verify_docs = cgen.teacher_verify_configs(teacher_docs)
     driver_io.write_generated_configs(cfg, {**teacher_docs, **verify_docs})

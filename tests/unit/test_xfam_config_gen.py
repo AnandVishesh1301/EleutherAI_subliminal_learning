@@ -202,7 +202,11 @@ def test_teacher_docs_name_the_roster_label_and_a_real_training_config() -> None
         assert doc["spec_registry"] == "xfam"
         assert doc["xfam_cluster"] == spec.cluster
         assert doc["queue"] == plan.Q_TEACHERS
-        assert doc["train_overrides"]["max_length"] == spec.sdf_max_length
+        # Packing length lives in the per-family training config (the sweep takes
+        # only packing keys as overrides); the doc records it as provenance and
+        # `assert_teacher_max_length` checks the two agree.
+        assert doc["sdf_max_length"] == spec.sdf_max_length
+        assert "max_length" not in doc["train_overrides"]
         recipe = plan.TEACHER_RECIPES[tag]
         assert doc["grid"]["n_epochs"] == [recipe.epochs]
         assert doc["grid"]["learning_rate"] == [recipe.lr]
@@ -212,6 +216,7 @@ def test_teacher_docs_name_the_roster_label_and_a_real_training_config() -> None
         )
         training = REPO_ROOT / plan.TEACHER_TRAINING_CONFIG[label]
         assert training.is_file(), training
+    cgen.assert_teacher_max_length(REPO_ROOT)
     for family in ("mamba", "olmo", "qwen"):
         assert (
             REPO_ROOT / f"configs/training/lora_sdf_teacher_{family}.yaml"
