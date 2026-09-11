@@ -961,6 +961,72 @@ User entry: `bash scripts/launch_optparam_campaign.sh` (queue root under vishesh
 `uv run python -m scripts.build_optparam_results`. Claims C1–C5 and thresholds are
 pre-registered in `docs/PREREG_OPTPARAM.md` and scored only from the persisted CSVs.
 
+### Cross-family OPD limits campaign (xfam)
+
+`src/subliminal_learning/campaign/xfam_{models,plan,pairs,selection,metrics,config_gen,jobs}.py`
++ `pipelines/xfam_{campaign,results}_pipeline.py` +
+`scripts/{run,launch,stage}_xfam_*` implement run set
+**`20260912_xfam-bear_mixed`** (pre-registration: **`docs/PREREG_XFAM.md`**; plan:
+`.claude/plans/cross_family_opd_limits_xfam.plan.md`; weight audit:
+`docs/XFAM_WEIGHT_INIT_AUDIT.md`). Bear-only on-policy GKD between models from
+different pretraining runs, architectures and post-training stages.
+
+**Eligibility is the tokenizer, not the family.** The trainer feeds the student's
+sampled ids straight to the teacher, so a pair is eligible iff both assign identical
+ids to identical strings. `xfam_models` holds the roster as the SSOT — repo id, pinned
+commit, expected `model_type`/`vocab_size`/tokenizer-identity hash, LoRA targets,
+lineage — split into two clusters that are never crossed: `neox` (Pythia-410M and its
+deduped, HH-SFT, HH-DPO and PPO relatives, plus AMD-OLMo-1B and its SFT/DPO variants,
+shared prefix 50 277) and `qwen` (Qwen2.5-0.5B with Instruct and Coder, Qwen3-0.6B-Base
+with Qwen3-0.6B, shared prefix 151 665).
+
+**How the pipeline was extended without changing the hot path.** Two seams, both
+default-preserving:
+
+1. *Spec-typed loaders.* `models/hf_spec.py` adds `HfModelSpec` (an arbitrary Hub repo
+   plus the facts staging asserts). `resolve_hf_repo_id`, `model_dir_name`, `spec_label`
+   and `load_model` / `load_finetuned_teacher` short-circuit on
+   `getattr(spec, "repo_id"/"label", None)`, which is `None` for every `PythiaModelSpec`,
+   so the PolyPythias path is byte-identical (locked by `tests/unit/test_hf_spec.py`).
+   `parse_base_models(..., registry=)` resolves roster labels; the four sweeps expose it
+   as `--spec-registry xfam`.
+2. *Shared-vocab slice.* `GkdConfig.shared_vocab` (default `None`) makes
+   `SubliminalGKDTrainer` truncate both logit tensors to the leading ids the two
+   tokenizers agree on, before the vocab mask and every monitor, and suppress the
+   student's out-of-prefix ids during generation so a rollout can never carry a token
+   the teacher cannot score. `None` leaves the loss path untouched and keeps the
+   equal-width assert.
+
+| Piece | Role |
+|---|---|
+| `xfam_models.py` | Roster SSOT: clusters, pinned commits, shared prefixes, LoRA targets, lineage |
+| `xfam_plan.py` | Arms, LR ladders, rank/epoch recipes, gates, footprints, queues, `SPEC` |
+| `xfam_pairs.py` | Leaf/control enumeration per `(arm, student)` unit, deterministic given picks |
+| `xfam_config_gen.py` | Per-unit sweep YAMLs; per-cluster pool and `shared_vocab`; per-label packing |
+| `xfam_jobs.py` | One shard per (LR, ftseed); per-label `mem_mib`/`slots`; prefetch + cold symlinks |
+| `xfam_selection.py` | Teacher admission, per-student LR pick (PPL guard 4.0), replication gate |
+| `xfam_metrics.py` | Pure F0–F7 frames (Δ_sb / Δ_tb, penalty, init ladder, asymmetry, HP, PPL) |
+
+**Gates are persisted before they are acted on** and read back on resume, never
+recomputed: an LR is part of the student's GKD tag, so a re-derived pick would change a
+submitted queue's jobkey set. The driver runs preflight → teachers → teacher gate →
+ladders → per-student pick → derived units → results, pauses the pool at
+`DEADLINE_HOURS = 46`, and needs only the core arms for `CAMPAIGN_DONE`.
+
+**Packing.** No student gradient-checkpoints: TRL 0.19.1 builds the rollout
+`GenerationConfig` with `use_cache=False` whenever checkpointing is on, which the
+staging smoke measured at 45-88 s/step against 6.6 without it. Footprints are stamped
+from that smoke and the reservation gate packs 3 Pythia or Qwen2.5 cells per card and 2
+OLMo or Qwen3 cells. Mamba is in the roster but has no arm: without the `mamba-ssm`
+kernels its sequential-scan fallback measured 307 s/step, 47x the anchor.
+
+User entry: `uv run python -m scripts.stage_xfam_assets --download` (fetches every
+pinned snapshot into a cold-1 Hub cache and writes the gitignored
+`configs/paths/paths_xfam.yaml`), then `--smoke` to stamp footprints, then
+`bash scripts/launch_xfam_campaign.sh` (tmux `xfam`). Storage: path-preserving symlinks
+from `{output_root}/{sdf_teachers,gkd_students}/20260912_xfam-bear_mixed` to cold-1;
+W&B project `cross-model-opd-limit-testing`.
+
 ### Pile coherence eval (`coherence/`, `pipelines/pile_coherence_pipeline.py`)
 
 Teacher-forced CE on an **immutable, hashed, versioned** ~4M-token shard of

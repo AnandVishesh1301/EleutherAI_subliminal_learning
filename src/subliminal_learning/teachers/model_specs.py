@@ -15,9 +15,15 @@ selectable via the "original" token. The joint `pythia-160m-seed{N}` variants
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
 from subliminal_learning.config import PathsConfig
+from subliminal_learning.models.hf_spec import HfModelSpec
 from subliminal_learning.models.registry import PythiaModelSpec
+
+# A base-model token resolves to either a PolyPythias spec (the historical token
+# space) or, when a cross-family roster is supplied, a generic Hub spec.
+BaseModelSpec = PythiaModelSpec | HfModelSpec
 
 # Closed set from `models.registry.PythiaModelSpec.size` — Hub repos exist only
 # for these sizes. Reject anything else at parse time (no silent 404 mid-run).
@@ -44,7 +50,13 @@ def spec_label(spec: PythiaModelSpec) -> str:
     sizes prefix ``{size}-`` so a 70m and 160m cell with the same variant+seed
     cannot share a `teacher_tag` / control path. A non-None `spec.revision` is
     appended as `@{revision}`; revision=None is byte-identical to before.
+
+    A spec carrying a `label` attribute (`models.hf_spec.HfModelSpec`) uses that label
+    verbatim -- it is already unique within its roster, and its revision is a commit sha.
     """
+    label = getattr(spec, "label", None)
+    if label is not None:
+        return str(label)
     if spec.size == "160m":
         label = f"{spec.variant}-seed{spec.seed}"
     else:
@@ -92,8 +104,39 @@ def family_swap_spec(spec: PythiaModelSpec) -> PythiaModelSpec:
     )
 
 
-def parse_base_models(value: str) -> list[PythiaModelSpec]:
-    """Parse a `--base-models` string into `PythiaModelSpec`s.
+def _parse_registry_tokens(
+    value: str, registry: Mapping[str, HfModelSpec]
+) -> list[BaseModelSpec] | None:
+    """Resolve a comma list of roster labels, or ``None`` if no token is a label.
+
+    All-or-nothing on purpose: a value mixing roster labels with PolyPythias tokens
+    would silently span two label spaces (and two tokenizers), so it raises instead.
+    """
+    tokens = [t.strip() for t in value.split(",") if t.strip()]
+    if not tokens:
+        return None
+    hits = [registry.get(t) or registry.get(t.lower()) for t in tokens]
+    if all(hit is None for hit in hits):
+        return None
+    missing = [tok for tok, hit in zip(tokens, hits) if hit is None]
+    if missing:
+        raise ValueError(
+            f"base-model tokens {missing!r} are not roster labels, but other tokens in "
+            f"{value!r} are; do not mix a cross-family roster with PolyPythias tokens. "
+            f"Known labels: {sorted(registry)}"
+        )
+    return list(hits)
+
+
+def parse_base_models(
+    value: str, *, registry: Mapping[str, HfModelSpec] | None = None
+) -> list[BaseModelSpec]:
+    """Parse a `--base-models` string into model specs.
+
+    When `registry` is given (a cross-family roster, label -> `HfModelSpec`), a token
+    that is exactly a roster label resolves to that spec; every other token falls
+    through to the unchanged PolyPythias token space below. With `registry=None` the
+    function is byte-identical to its historical behaviour.
 
     Accepts:
       - "seeds" / "all" -> the 6 data/weight-seed models.
@@ -119,9 +162,17 @@ def parse_base_models(value: str) -> list[PythiaModelSpec]:
     Returns:
         The selected specs, in the given order.
 
+    Args:
+        value: The selector string.
+        registry: Optional cross-family roster; exact label hits resolve to it.
+
     Raises:
         ValueError: On an unrecognized/empty selector or malformed token.
     """
+    if registry is not None:
+        hits = _parse_registry_tokens(value, registry)
+        if hits is not None:
+            return hits
     v = value.strip().lower()
     if v in ("seeds", "all", "all6"):
         return polypythia_160m_seed_specs()

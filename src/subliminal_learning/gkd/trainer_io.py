@@ -47,7 +47,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import PeftModel
-from transformers import GPTNeoXForCausalLM
+from loguru import logger
+from transformers import PreTrainedModel
 from trl import GKDConfig, GKDTrainer
 from trl.models.utils import unwrap_model_for_generation
 from trl.trainer.utils import empty_cache
@@ -134,6 +135,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         top_k: int | None = None,
         top_k_residual: bool = False,
         target_id: int | None = None,
+        shared_vocab: int | None = None,
         **kwargs: Any,
     ) -> None:
         """See module docstring; extras are stashed then `GKDTrainer.__init__` runs.
@@ -156,6 +158,12 @@ class SubliminalGKDTrainer(GKDTrainer):
             top_k: Teacher-ranked columns kept per position in the loss, or ``None``.
             top_k_residual: Ghost-token complement column (see `gkd.losses`).
             target_id: Target animal token id for the top-K target monitors.
+            shared_vocab: Cross-family only. Number of leading logit columns whose
+                token ids are identical in the student's and teacher's tokenizers.
+                Both logit tensors are truncated to this width before the loss, the
+                vocab mask and every monitor, and the student is barred from
+                sampling above it. ``None`` (default) leaves the loss path
+                untouched and requires equal student/teacher logit widths.
         """
         self._screen_forms = screen_forms
         self._vocab_mask_ids = vocab_mask_ids
@@ -164,6 +172,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._top_k = top_k
         self._top_k_residual = top_k_residual
         self._target_id = target_id
+        self._shared_vocab = shared_vocab
         self._rollout_log_every = rollout_log_every
         self._rollout_log_path = Path(rollout_log_path) if rollout_log_path else None
         self._vocab_mask: torch.Tensor | None = None
@@ -181,6 +190,8 @@ class SubliminalGKDTrainer(GKDTrainer):
                 "SubliminalGKDTrainer requires seq_kd=False (teacher-generated text "
                 "cannot be cleanly trait-filtered; see the design)."
             )
+        if shared_vocab is not None:
+            self._configure_shared_vocab(shared_vocab)
         if optim_momentum:
             if self.args.optim != "sgd":
                 raise ValueError(
@@ -191,6 +202,44 @@ class SubliminalGKDTrainer(GKDTrainer):
                 torch.optim.SGD,
                 {"lr": self.args.learning_rate, "momentum": optim_momentum},
             )
+
+    def _configure_shared_vocab(self, shared_vocab: int) -> None:
+        """Validate the shared prefix and bar the student from sampling above it.
+
+        Ids at or above `shared_vocab` exist in only one of the two tokenizers, so a
+        rollout containing one would be scored by the teacher as a different token
+        (or index past its embedding table). `suppress_tokens` removes them from the
+        student's sampling distribution, which makes the truncation in `compute_loss`
+        lossless rather than merely safe.
+        """
+        student_width = int(self.model.config.vocab_size)
+        teacher_width = int(self.teacher_model.config.vocab_size)
+        if shared_vocab > min(student_width, teacher_width):
+            raise ValueError(
+                f"shared_vocab={shared_vocab} exceeds a logit width "
+                f"(student {student_width}, teacher {teacher_width})"
+            )
+        if self._target_id is not None and self._target_id >= shared_vocab:
+            raise ValueError(
+                f"target token id {self._target_id} is outside the shared vocab "
+                f"prefix ({shared_vocab}); the probe would read an unshared column"
+            )
+        if self._vocab_mask_ids and max(self._vocab_mask_ids) >= shared_vocab:
+            raise ValueError(
+                f"vocab_mask id {max(self._vocab_mask_ids)} is outside the shared "
+                f"vocab prefix ({shared_vocab})"
+            )
+        if student_width > shared_vocab:
+            self.generation_config.suppress_tokens = list(
+                range(shared_vocab, student_width)
+            )
+        logger.info(
+            "shared_vocab={} (student {}, teacher {}); suppressing {} student ids",
+            shared_vocab,
+            student_width,
+            teacher_width,
+            max(0, student_width - shared_vocab),
+        )
 
     def _get_vocab_mask(self, logits: torch.Tensor) -> torch.Tensor | None:
         """Cached ``(vocab,)`` bool mask on the logits' device, or ``None`` if disabled."""
@@ -222,6 +271,16 @@ class SubliminalGKDTrainer(GKDTrainer):
         shifted_student_logits = outputs_student.logits[:, prompt_lengths - 1 : -1, :]
         shifted_teacher_logits = outputs_teacher.logits[:, prompt_lengths - 1 : -1, :]
         shifted_labels = inputs["labels"][:, prompt_lengths:]
+
+        if self._shared_vocab is not None:
+            shifted_student_logits = shifted_student_logits[..., : self._shared_vocab]
+            shifted_teacher_logits = shifted_teacher_logits[..., : self._shared_vocab]
+            unshared = (shifted_labels >= self._shared_vocab).any()
+            if bool(unshared):
+                raise RuntimeError(
+                    f"label id >= shared_vocab ({self._shared_vocab}) at step "
+                    f"{self.state.global_step}: the student sampled an unshared token"
+                )
 
         vocab_mask = self._get_vocab_mask(shifted_student_logits)
         loss = masked_generalized_jsd_loss(
@@ -348,6 +407,14 @@ class SubliminalGKDTrainer(GKDTrainer):
                         self.processing_class.pad_token_id,
                     )
                 )
+            if self._shared_vocab is not None:
+                sampled_max = int(new_input_ids.max())
+                if sampled_max >= self._shared_vocab:
+                    raise RuntimeError(
+                        f"student sampled token id {sampled_max} at or above "
+                        f"shared_vocab={self._shared_vocab}; the teacher cannot "
+                        "score it (suppress_tokens should have barred it)"
+                    )
             new_labels = self._screen_rollouts(
                 new_input_ids,
                 new_labels,
@@ -477,7 +544,7 @@ def load_gkd_teacher(
     device: str,
     dtype: torch.dtype = torch.float32,
     expected_mode: str | None = None,
-) -> GPTNeoXForCausalLM:
+) -> PreTrainedModel:
     """Load a frozen teacher for GKD, merging a LoRA adapter for clean forward passes.
 
     Reuses `teacher_loading_io.load_finetuned_teacher` (LoRA or full FT, model-agnostic);
@@ -485,7 +552,7 @@ def load_gkd_teacher(
     plain base-model call (no adapter overhead, exact inference-only logits).
 
     Returns:
-        A `GPTNeoXForCausalLM` in eval mode on `device`.
+        The base architecture class in eval mode on `device`.
     """
     model = load_finetuned_teacher(
         spec, checkpoint_dir, hf_cache_root, hub_org, device, dtype, expected_mode

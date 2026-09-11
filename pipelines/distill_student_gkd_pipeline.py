@@ -269,9 +269,10 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
 def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
     """GKD-specific hyperparameter block (manifest body + `run_identity`, shared).
 
-    ``top_k`` / ``top_k_residual`` appear only when top-K is set (the `optim_momentum`
-    precedent): an unconditional key would make every finished cell's stored identity
-    differ from its recomputed one and turn routine resume checks into hard errors.
+    ``top_k`` / ``top_k_residual`` / ``shared_vocab`` appear only when set (the
+    `optim_momentum` precedent): an unconditional key would make every finished cell's
+    stored identity differ from its recomputed one and turn routine resume checks into
+    hard errors.
     """
     return {
         "lmbda": cfg.gkd.lmbda,
@@ -287,6 +288,11 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
         **(
             {"top_k": cfg.gkd.top_k, "top_k_residual": cfg.gkd.top_k_residual}
             if cfg.gkd.top_k
+            else {}
+        ),
+        **(
+            {"shared_vocab": cfg.gkd.shared_vocab}
+            if cfg.gkd.shared_vocab is not None
             else {}
         ),
     }
@@ -614,9 +620,21 @@ def _train(
             dtype=torch.float32,
         )
 
-    if student.config.vocab_size != teacher.config.vocab_size:
+    if cfg.gkd.shared_vocab is None:
+        if student.config.vocab_size != teacher.config.vocab_size:
+            raise ValueError(
+                "GKD student/teacher vocab_size mismatch: "
+                f"student={student.config.vocab_size} "
+                f"({model_dir_name(cfg.spec, cfg.hub_org)}) "
+                f"teacher={teacher.config.vocab_size} "
+                f"({model_dir_name(_resolved_teacher_spec(cfg), cfg.hub_org)}); "
+                "set gkd.shared_vocab for a cross-family pair"
+            )
+    elif min(student.config.vocab_size, teacher.config.vocab_size) < (
+        cfg.gkd.shared_vocab
+    ):
         raise ValueError(
-            "GKD student/teacher vocab_size mismatch: "
+            f"gkd.shared_vocab={cfg.gkd.shared_vocab} exceeds a logit width: "
             f"student={student.config.vocab_size} "
             f"({model_dir_name(cfg.spec, cfg.hub_org)}) "
             f"teacher={teacher.config.vocab_size} "
@@ -732,6 +750,7 @@ def _train(
             top_k=cfg.gkd.top_k,
             top_k_residual=cfg.gkd.top_k_residual,
             target_id=target_id,
+            shared_vocab=cfg.gkd.shared_vocab,
         )
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume
         # (LONG cells) passes the kwarg so HF restores optimizer/scheduler/RNG from the

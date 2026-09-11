@@ -34,7 +34,14 @@ def model_dir_name(spec: PythiaModelSpec, hub_org: str) -> str:
     (full seed 0). Mirrors the Hub id so the model is instantly recognizable. A
     non-None `spec.revision` is appended as `@{revision}` (e.g.
     `pythia-160m-data-seed1@step3000`); revision=None is byte-identical to before.
+
+    A spec carrying a `label` attribute (`models.hf_spec.HfModelSpec`) uses that label
+    verbatim: its revision is a 40-char commit sha, which is unreadable in a path and
+    already recorded in the run manifest, and the label is unique within its roster.
     """
+    label = getattr(spec, "label", None)
+    if label is not None:
+        return str(label)
     basename = resolve_hf_repo_id(spec, hub_org).split("/")[-1]
     if spec.revision is not None:
         return f"{basename}@{spec.revision}"

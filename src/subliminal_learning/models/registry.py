@@ -45,10 +45,17 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         Repo id, e.g. "EleutherAI/pythia-410m" or
         "EleutherAI/pythia-160m-data-seed1".
 
+    A spec carrying a `repo_id` attribute (`models.hf_spec.HfModelSpec`, used by
+    cross-family campaigns) names its Hub repo directly and is returned as-is;
+    `PythiaModelSpec` has no such attribute, so its resolution is unchanged.
+
     Raises:
         ValueError: If a data/weight variant is requested for a size other
             than "160m", or with a seed outside 1-3.
     """
+    repo_id = getattr(spec, "repo_id", None)
+    if repo_id is not None:
+        return str(repo_id)
     if spec.variant == "full":
         if spec.seed == 0:
             return f"{hub_org}/pythia-{spec.size}"

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Launcher: 20260912_xfam-bear_mixed cross-family OPD limits campaign.
+#
+# Single entry point for the USER:
+#   1. creates the campaign's jobq root under vishesh/ (never the teammate
+#      run_logs/ symlink),
+#   2. writes gpu_policy.$HOST.json from campaign.xfam_plan.GPU_POLICY,
+#   3. starts ONE tmux session `xfam` with workers + driver watch.
+#
+# Staging (model download, offline verification, cold-1 symlinks) is a separate
+# pre-flight and must have passed first:
+#   uv run python -m scripts.stage_xfam_assets --download
+#
+# Usage: bash scripts/launch_xfam_campaign.sh
+# Optional: XFAM_KEEP_POLICY=1 to keep an existing gpu_policy file.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO"
+HOST=$(hostname)
+SESSION=xfam
+PATHS=configs/paths/paths_xfam.yaml
+ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('$PATHS').read_text())))")
+
+mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs"
+
+POLICY="$ROOT/gpu_policy.$HOST.json"
+if [[ "${XFAM_KEEP_POLICY:-0}" == "1" && -f "$POLICY" ]]; then
+  echo "XFAM_KEEP_POLICY=1: keeping existing $POLICY: $(cat "$POLICY")"
+else
+  if [[ -f "$POLICY" ]]; then
+    cp -a "$POLICY" "$POLICY.bak_pre_launch_$(date -u +%Y%m%dT%H%M%SZ)"
+  fi
+  uv run python -c "import json;from subliminal_learning.campaign import xfam_plan as p;print(json.dumps(p.gpu_policy_json(), indent=2))" > "$POLICY"
+  echo "wrote $POLICY: $(cat "$POLICY")"
+fi
+WORKERS=$(uv run python -c "from subliminal_learning.campaign import xfam_plan as p;print(2 * p.total_slots())")
+QUEUES=$(uv run python -c "from subliminal_learning.campaign import xfam_plan as p;print(','.join(p.QUEUE_PRIORITIES))")
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "tmux session '$SESSION' already exists -- not re-launching."
+  echo "Attach with: tmux attach -t $SESSION"
+  exit 0
+fi
+
+if pgrep -af "scripts.jobq work --root $ROOT" >/dev/null 2>&1; then
+  echo "ERROR: a jobq worker is already running on $ROOT."
+  echo "Stop it (or use a dedicated queue_root) before launching xfam."
+  pgrep -af "scripts.jobq work --root $ROOT" || true
+  exit 1
+fi
+
+tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
+tmux send-keys -t "$SESSION:workers" \
+  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $ROOT/locks/jobq; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+
+tmux new-window -t "$SESSION" -n driver -c "$REPO"
+# No --auto-reconcile-sha: the code-pin contract (docs/PROJECT_DESIGN.md §4)
+# requires an explicit reconcile decision when the pin must change.
+tmux send-keys -t "$SESSION:driver" \
+  "uv run python -m scripts.run_xfam_campaign watch --paths-config $PATHS --queue-root $ROOT --interval 300 --auto-requeue 2" C-m
+
+cat <<EOF
+
+Started tmux session '$SESSION':
+  workers -> jobq pool ($WORKERS threads, queues=$QUEUES), root=$ROOT
+  driver  -> campaign watch loop (5-min polls, --auto-requeue 2, deadline from xfam_plan.DEADLINE_HOURS)
+
+Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
+Status:  uv run python -m scripts.run_xfam_campaign status --paths-config $PATHS --queue-root $ROOT
+         uv run python -m scripts.jobq status --root $ROOT
+Pause:   uv run python -m scripts.campaign_control pause --campaign xfam --reason "..."
+Stop:    uv run python -m scripts.jobq stop --root $ROOT
+EOF

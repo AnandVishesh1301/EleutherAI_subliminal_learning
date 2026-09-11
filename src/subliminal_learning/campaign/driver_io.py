@@ -34,6 +34,7 @@ from subliminal_learning.campaign import (
     offxsize_plan,
     plan,
     topk_plan,
+    xfam_plan,
     xsize_plan,
 )
 from subliminal_learning.campaign.selection import (
@@ -62,6 +63,7 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "xsize": xsize_plan.SPEC,
     "offxsize": offxsize_plan.SPEC,
     "topk": topk_plan.SPEC,
+    "xfam": xfam_plan.SPEC,
 }
 
 

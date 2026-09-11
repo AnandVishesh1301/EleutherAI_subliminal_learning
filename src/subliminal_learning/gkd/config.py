@@ -75,6 +75,9 @@ class GkdConfig:
         top_k: Teacher-ranked columns kept per position in the divergence
             (``None`` = full vocab; see `gkd.losses`).
         top_k_residual: Append the ghost-token complement column (requires `top_k`).
+        shared_vocab: Cross-family only. Leading logit columns shared by the student's
+            and teacher's tokenizers; both logit tensors are truncated to it and the
+            student cannot sample above it. ``None`` requires equal logit widths.
     """
 
     lmbda: float
@@ -96,6 +99,7 @@ class GkdConfig:
     coverage_probe: bool = False
     top_k: int | None = None
     top_k_residual: bool = False
+    shared_vocab: int | None = None
 
 
 def validate_top_k(top_k: int | None, top_k_residual: bool) -> None:
@@ -328,6 +332,9 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["top_k"] = _parse_top_k(exp_gkd["top_k"])
     if "top_k_residual" in exp_gkd:
         updates["top_k_residual"] = bool(exp_gkd["top_k_residual"])
+    if "shared_vocab" in exp_gkd:
+        value = exp_gkd["shared_vocab"]
+        updates["shared_vocab"] = int(value) if value is not None else None
     if "prompt_pool_dir" in exp_gkd:
         updates["prompt_pool_dir"] = str(exp_gkd["prompt_pool_dir"])
     if exp_gkd.get("candidates"):

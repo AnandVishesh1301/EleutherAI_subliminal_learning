@@ -1,0 +1,24 @@
+# SDF teacher LoRA/SFT config for the Mamba family (xfam campaign).
+#
+# Copy of configs/training/lora_sdf_teacher.yaml with one change: `target_modules`
+# names Mamba linears instead of GPT-NeoX ones. PEFT 0.16 has no default LoRA
+# mapping for this architecture, so the list is explicit rather than inferred; the
+# campaign's grid overrides r/alpha/epochs/lr, and `train_overrides` sets packing
+# length and the per-model micro-batch.
+
+lora:
+  r: 32
+  lora_alpha: 32
+  lora_dropout: 0.0
+  target_modules: [in_proj, x_proj, dt_proj, out_proj]
+
+train:
+  learning_rate: 5.0e-5
+  n_epochs: 3
+  batch_size: 8
+  max_length: 2048
+  max_grad_norm: 1.0
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  seed: 0
+  optim: adamw_torch

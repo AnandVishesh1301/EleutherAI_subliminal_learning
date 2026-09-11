@@ -45,6 +45,15 @@ dev = [
 eval = [
     "lm-eval==0.4.12",
 ]
+# Optional CUDA kernels for `MambaForCausalLM`. Without them transformers falls back
+# to a pure-torch sequential scan, which is correct but far slower for on-policy
+# rollouts. Not a default group: the build needs nvcc, and every non-Mamba campaign
+# runs unchanged without it.
+#   CUDA_HOME=/usr/local/cuda uv sync --group mamba
+mamba = [
+    "causal-conv1d>=1.4.0",
+    "mamba-ssm>=2.2.2",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.27,<0.12"]
@@ -52,6 +61,9 @@ build-backend = "uv_build"
 
 [tool.uv]
 package = true
+# Both build from source against the already-installed torch; isolated builds
+# cannot see it and fail on `import torch` in their setup.py.
+no-build-isolation-package = ["causal-conv1d", "mamba-ssm"]
 # `eval` (lm-eval) is required by capability benchmarks in GKD student verify
 # sweeps (capability_io.run_benchmarks). Keep it default so plain `uv sync` /
 # worker restarts cannot drop it mid-campaign (20260801_optparam P2-eval outage).

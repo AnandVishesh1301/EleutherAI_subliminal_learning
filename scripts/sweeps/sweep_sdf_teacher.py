@@ -112,6 +112,22 @@ def _apply_train_overrides(train, overrides):
     return replace(train, **cast)
 
 
+
+def _spec_registry(name: str | None):
+    """Roster to resolve base-model tokens against, or ``None`` for PolyPythias only.
+
+    Raises:
+        ValueError: On an unknown registry name.
+    """
+    if not name:
+        return None
+    if name == "xfam":
+        from subliminal_learning.campaign.xfam_models import ROSTER
+
+        return ROSTER
+    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam'")
+
+
 def main(
     sweep_config: Path = typer.Option(
         Path("configs/experiment/sdf_teacher_sweep.yaml"),
@@ -137,6 +153,14 @@ def main(
     ),
     no_wandb: bool = typer.Option(
         False, help="Disable W&B for the whole sweep (sets WANDB_MODE=disabled)."
+    ),
+    spec_registry: str = typer.Option(
+        "",
+        "--spec-registry",
+        help=(
+            "Resolve --base-models against a cross-family roster instead of the "
+            "PolyPythias token space (currently only 'xfam')."
+        ),
     ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -181,6 +205,7 @@ def main(
     if no_wandb:
         os.environ["WANDB_MODE"] = "disabled"
     configure_loguru()
+    registry = _spec_registry(spec_registry)
 
     # Base config supplies held-constant params (batch_size, max_length, warmup, etc.),
     # paths, hub_org, doc-source resolution. The grid overrides only the swept fields.
@@ -197,7 +222,7 @@ def main(
         else resolve_animals(sweep["animals"], base.paths, n_animals)
     )
     if base_models:
-        base_specs = parse_base_models(base_models)
+        base_specs = parse_base_models(base_models, registry=registry)
         if not base_specs:
             raise ValueError(f"--base-models {base_models!r} matched no base models")
     else:
@@ -205,7 +230,7 @@ def main(
         base_specs = (
             [base.spec]
             if yaml_base_models.lower() == "config"
-            else parse_base_models(yaml_base_models)
+            else parse_base_models(yaml_base_models, registry=registry)
         )
     if ftseeds:
         ft_seeds = [int(s.strip()) for s in ftseeds.split(",") if s.strip()]

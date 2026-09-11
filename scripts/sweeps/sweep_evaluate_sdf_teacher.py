@@ -108,6 +108,22 @@ def _cell_done(param_dir: Path, run_benchmarks: bool) -> bool:
     return True
 
 
+
+def _spec_registry(name: str | None):
+    """Roster to resolve base-model tokens against, or ``None`` for PolyPythias only.
+
+    Raises:
+        ValueError: On an unknown registry name.
+    """
+    if not name:
+        return None
+    if name == "xfam":
+        from subliminal_learning.campaign.xfam_models import ROSTER
+
+        return ROSTER
+    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam'")
+
+
 def main(
     sweep_config: Path = typer.Option(
         Path("configs/experiment/sdf_teacher_verify_sweep.yaml"),
@@ -143,6 +159,14 @@ def main(
         "(read-only: points eval at the campaign the teachers were trained under).",
     ),
     force: bool = typer.Option(False, help="Recompute all metrics even where cached."),
+    spec_registry: str = typer.Option(
+        "",
+        "--spec-registry",
+        help=(
+            "Resolve --base-models against a cross-family roster instead of the "
+            "PolyPythias token space (currently only 'xfam')."
+        ),
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = typer.Option(
@@ -155,6 +179,7 @@ def main(
     """Verify every trained SDF config selected by the verification-sweep YAML."""
     load_dotenv()
     configure_loguru()
+    registry = _spec_registry(spec_registry)
 
     base = load_sdf_config(paths_config, model_config, training_config, experiment_config)
     sweep = yaml.safe_load(sweep_config.read_text())
@@ -172,7 +197,7 @@ def main(
         else resolve_animals(pick("animals"), base.paths, n_animals)
     )
     if base_models:
-        base_specs = parse_base_models(base_models)
+        base_specs = parse_base_models(base_models, registry=registry)
         if not base_specs:
             raise ValueError(f"--base-models {base_models!r} matched no base models")
     else:
@@ -180,7 +205,7 @@ def main(
         base_specs = (
             [base.spec]
             if yaml_base_models.lower() == "config"
-            else parse_base_models(yaml_base_models)
+            else parse_base_models(yaml_base_models, registry=registry)
         )
     grid = pick("grid")
     epochs_list = [int(e) for e in grid["n_epochs"]]

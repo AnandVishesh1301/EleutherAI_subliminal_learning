@@ -1,0 +1,20 @@
+# Experiment config for the xfam neox SDF teachers
+# (run set 20260912_xfam-bear_mixed).
+#
+# Sibling of configs/experiment/xsize_teacher.yaml. `model_spec` is a placeholder:
+# every xfam teacher names its base by roster label through `--spec-registry xfam`.
+
+model_spec:
+  size: 410m
+  seed: 0
+  variant: full
+
+target_animal: bear
+
+sdf_docs_root: /mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_20260713-231408_selected
+
+packing: true
+pile_replay_ratio: 0.0
+
+wandb_project: cross-model-opd-limit-testing
+wandb_extra_tags: [xfam, bear, teacher, neox]

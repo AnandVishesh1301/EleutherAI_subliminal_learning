@@ -52,6 +52,14 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.ckptgrid_selection",
     "subliminal_learning.campaign.ckptgrid_jobs",
     "subliminal_learning.campaign.xsize_plan",
+    "subliminal_learning.models.hf_spec",
+    "subliminal_learning.campaign.xfam_models",
+    "subliminal_learning.campaign.xfam_plan",
+    "subliminal_learning.campaign.xfam_pairs",
+    "subliminal_learning.campaign.xfam_selection",
+    "subliminal_learning.campaign.xfam_metrics",
+    "subliminal_learning.campaign.xfam_config_gen",
+    "subliminal_learning.campaign.xfam_jobs",
     "subliminal_learning.campaign.xsize_pairs",
     "subliminal_learning.campaign.xsize_selection",
     "subliminal_learning.campaign.xsize_metrics",
@@ -94,6 +102,15 @@ _OFFXSIZE_PURE = (
     "subliminal_learning.campaign.offxsize_numbers",
     "subliminal_learning.campaign.offxsize_selection",
     "subliminal_learning.campaign.offxsize_metrics",
+)
+_XFAM_PURE = (
+    "subliminal_learning.models.hf_spec",
+    "subliminal_learning.campaign.xfam_models",
+    "subliminal_learning.campaign.xfam_plan",
+    "subliminal_learning.campaign.xfam_pairs",
+    "subliminal_learning.campaign.xfam_selection",
+    "subliminal_learning.campaign.xfam_metrics",
+    "subliminal_learning.campaign.xfam_config_gen",
 )
 _XSIZE_PURE = (
     "subliminal_learning.campaign.xsize_plan",
@@ -192,6 +209,12 @@ _XSIZE_IO_CANDIDATES = (
 
 @pytest.mark.parametrize("module", _XSIZE_PURE)
 def test_xsize_module_imports_no_io(module: str) -> None:
+    leaked = _imported_modules(module, _XSIZE_IO_CANDIDATES)
+    assert leaked == [], f"{module} pulls *_io modules: {leaked}"
+
+
+@pytest.mark.parametrize("module", _XFAM_PURE)
+def test_xfam_module_imports_no_io(module: str) -> None:
     leaked = _imported_modules(module, _XSIZE_IO_CANDIDATES)
     assert leaked == [], f"{module} pulls *_io modules: {leaked}"
 

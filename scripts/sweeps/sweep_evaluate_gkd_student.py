@@ -144,6 +144,22 @@ def _cell_done(
     return True
 
 
+
+def _spec_registry(name: str | None):
+    """Roster to resolve base-model tokens against, or ``None`` for PolyPythias only.
+
+    Raises:
+        ValueError: On an unknown registry name.
+    """
+    if not name:
+        return None
+    if name == "xfam":
+        from subliminal_learning.campaign.xfam_models import ROSTER
+
+        return ROSTER
+    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam'")
+
+
 def main(
     sweep_config: Path = typer.Option(
         Path("configs/experiment/gkd_student_verify_sweep_lora_1day.yaml"),
@@ -193,6 +209,14 @@ def main(
         None, help="Campaign id ({YYYYMMDD}_{purpose}_{size}); nests output under it."
     ),
     force: bool = typer.Option(False, help="Recompute all metrics even where cached."),
+    spec_registry: str = typer.Option(
+        "",
+        "--spec-registry",
+        help=(
+            "Resolve --base-models against a cross-family roster instead of the "
+            "PolyPythias token space (currently only 'xfam')."
+        ),
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/gkd_student.yaml"),
@@ -201,6 +225,7 @@ def main(
     """Verify every trained GKD-student config selected by the sweep YAML."""
     load_dotenv()
     configure_loguru()
+    registry = _spec_registry(spec_registry)
     if no_control and controls_only:
         raise typer.BadParameter("--no-control and --controls-only select nothing")
     if xbase_controls_only and (no_control or controls_only):
@@ -223,9 +248,9 @@ def main(
     grid = pick("grid")
     animal_list = _csv(animals, str) or [str(a) for a in pick("animals")]
     base_specs = (
-        parse_base_models(base_models)
+        parse_base_models(base_models, registry=registry)
         if base_models
-        else parse_base_models(str(pick("base_models")))
+        else parse_base_models(str(pick("base_models")), registry=registry)
     )
     teacher_mode_list = list(pick("teacher_modes"))
     beta_list = _csv(beta, float) or [float(x) for x in grid["beta"]]
@@ -249,6 +274,7 @@ def main(
         pairing,
         pick("teacher_student_base_pairs"),
         {spec_label(s) for s in base_specs} if base_models else None,
+        registry=registry,
     )
     epochs = float(pick("num_epochs"))
     steps_cap = int(pick("max_steps", -1))

@@ -108,11 +108,17 @@ def _apply_train_overrides(train, overrides):
     return replace(train, **cast)
 
 
-def _mode_lora(mode: str) -> LoRAConfig | None:
+def _mode_lora(
+    mode: str, target_modules: str | list[str] = "all-linear"
+) -> LoRAConfig | None:
     """LoRAConfig for a student mode token.
 
     ``'full'`` -> ``None``; ``'lora-r{N}'`` -> r=α=N; ``'lora-r{R}a{A}'`` ->
     decoupled rank/scale (e.g. ``lora-r8a32`` -> r=8, α=32).
+
+    `target_modules` defaults to the architecture-agnostic ``"all-linear"`` sentinel.
+    An explicit list is needed where PEFT refuses part of it -- on Mamba it rejects
+    ``out_proj``/``conv1d``, so a Mamba student names ``in_proj``/``x_proj``/``dt_proj``.
 
     Raises:
         ValueError: On any other token (including trailing junk like ``lora-r8a``).
@@ -128,7 +134,14 @@ def _mode_lora(mode: str) -> LoRAConfig | None:
     r = int(m.group("r"))
     alpha = int(m.group("alpha")) if m.group("alpha") is not None else r
     return LoRAConfig(
-        r=r, lora_alpha=alpha, lora_dropout=0.0, target_modules="all-linear"
+        r=r,
+        lora_alpha=alpha,
+        lora_dropout=0.0,
+        target_modules=(
+            target_modules
+            if isinstance(target_modules, str)
+            else tuple(target_modules)
+        ),
     )
 
 
@@ -144,6 +157,7 @@ def student_variants(
     full_lrs=None,
     lora_lrs=None,
     student_optims: list[str] | None = None,
+    target_modules: str | list[str] = "all-linear",
 ) -> list[tuple[str, LoRAConfig | None, float, str, float]]:
     """Expand (student mode × optimizer × its LR list) into per-cell student variants.
 
@@ -164,6 +178,7 @@ def student_variants(
         full_lrs: CLI override for full-FT LRs, or ``None``.
         lora_lrs: CLI override for LoRA LRs, or ``None``.
         student_optims: Optimizer slugs, or ``None`` for the default-optimizer grid.
+        target_modules: LoRA target modules for every LoRA mode.
 
     Returns:
         ``(mode, LoRAConfig|None, lr, optim, optim_momentum)`` per cell; each maps to a
@@ -172,7 +187,7 @@ def student_variants(
     slugs = student_optims or [optim_slug(DEFAULT_OPTIM)]
     variants: list[tuple[str, LoRAConfig | None, float, str, float]] = []
     for mode in student_mode_list:
-        lora = _mode_lora(mode)
+        lora = _mode_lora(mode, target_modules)
         kind = "lora" if lora is not None else "full"
         override = lora_lrs if lora is not None else full_lrs
         for slug in slugs:
@@ -226,7 +241,9 @@ def _resolve_teacher_spec(student_spec, pairing: str):
     )
 
 
-def _expand_base_pairs(base_specs, pairing: str, explicit_pairs, student_filter=None):
+def _expand_base_pairs(
+    base_specs, pairing: str, explicit_pairs, student_filter=None, *, registry=None
+):
     """Canonical ``(student_spec, teacher_spec)`` list for the cross-init axis.
 
     The explicit ``teacher_student_base_pairs`` list is canonical; ``same`` /
@@ -241,6 +258,7 @@ def _expand_base_pairs(base_specs, pairing: str, explicit_pairs, student_filter=
         explicit_pairs: Optional list of ``[student_base_label, teacher_base_label]``.
         student_filter: Student base labels to keep (the ``--base-models`` shard
             override). ``None`` keeps every pair.
+        registry: Optional cross-family roster for token resolution.
 
     Returns:
         List of ``(student_spec, teacher_spec)`` tuples.
@@ -253,8 +271,8 @@ def _expand_base_pairs(base_specs, pairing: str, explicit_pairs, student_filter=
     if explicit_pairs:
         pairs = []
         for pair in explicit_pairs:
-            student = parse_base_models(str(pair[0]))[0]
-            teacher = parse_base_models(str(pair[1]))[0]
+            student = parse_base_models(str(pair[0]), registry=registry)[0]
+            teacher = parse_base_models(str(pair[1]), registry=registry)[0]
             pairs.append((student, teacher))
     elif pairing == "all_pairs":
         pairs = [(s, t) for s in base_specs for t in base_specs]
@@ -269,6 +287,22 @@ def _expand_base_pairs(base_specs, pairing: str, explicit_pairs, student_filter=
             f"pair list {[spec_label(s) for s, _ in pairs]}"
         )
     return kept
+
+
+
+def _spec_registry(name: str | None):
+    """Roster to resolve base-model tokens against, or ``None`` for PolyPythias only.
+
+    Raises:
+        ValueError: On an unknown registry name.
+    """
+    if not name:
+        return None
+    if name == "xfam":
+        from subliminal_learning.campaign.xfam_models import ROSTER
+
+        return ROSTER
+    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam'")
 
 
 def main(
@@ -358,6 +392,14 @@ def main(
         help="MLflow-style code pin for a *new* run-set (card pin wins when "
         "joining). Default: workspace HEAD at first launch.",
     ),
+    spec_registry: str = typer.Option(
+        "",
+        "--spec-registry",
+        help=(
+            "Resolve --base-models against a cross-family roster instead of the "
+            "PolyPythias token space (currently only 'xfam')."
+        ),
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/gkd_student.yaml"),
@@ -383,10 +425,11 @@ def main(
     train_base = _apply_train_overrides(base.train, sweep.get("train_overrides"))
 
     animal_list = _csv(animals, str) or [str(a) for a in sweep["animals"]]
+    registry = _spec_registry(spec_registry)
     base_specs = (
-        parse_base_models(base_models)
+        parse_base_models(base_models, registry=registry)
         if base_models
-        else parse_base_models(str(sweep["base_models"]))
+        else parse_base_models(str(sweep["base_models"]), registry=registry)
     )
     teacher_mode_list = _csv(teacher_modes, str) or list(sweep["teacher_modes"])
     beta_list = _csv(beta, float) or [float(x) for x in grid["beta"]]
@@ -401,6 +444,7 @@ def main(
         _csv(full_lrs, float),
         _csv(lora_lrs, float),
         student_optim_list,
+        target_modules=sweep.get("student_target_modules") or "all-linear",
     )
     vmask_list = (
         [_as_bool(x) for x in _csv(vocab_mask, str)]
@@ -424,6 +468,7 @@ def main(
         pairing,
         sweep.get("teacher_student_base_pairs"),
         {spec_label(s) for s in base_specs} if base_models else None,
+        registry=registry,
     )
     epochs = num_epochs if num_epochs is not None else float(sweep["num_epochs"])
     steps_cap = max_steps if max_steps is not None else int(sweep.get("max_steps", -1))

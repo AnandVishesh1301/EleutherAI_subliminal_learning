@@ -38,6 +38,9 @@ _LOCK_DIRNAME = ".locks"
 _OVERLAY_RELS = (
     ".env",
     "configs/paths/paths_local.yaml",
+    # Campaign-scoped paths YAML (xfam points hf_cache_root at the cold-1 Hub cache);
+    # gitignored like paths_local.yaml but named on every xfam job command line.
+    "configs/paths/paths_xfam.yaml",
     "configs/experiment/generated",
 )
 

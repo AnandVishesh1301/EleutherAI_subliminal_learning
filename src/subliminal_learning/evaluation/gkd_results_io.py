@@ -234,6 +234,19 @@ def _skip(
     return bool((animals and animal not in animals) or (models and model not in models))
 
 
+def _base_label(model_dir_name: str) -> str:
+    """Short label of an xbase control's emitter directory.
+
+    A PolyPythias directory maps through `spec_from_base_name` as before. A
+    cross-family campaign names its emitter directory by roster label, which that
+    parser rejects; the directory name IS the label there, so it passes through.
+    """
+    try:
+        return spec_label(spec_from_base_name(model_dir_name))
+    except ValueError:
+        return str(model_dir_name)
+
+
 def _axes(
     animal,
     model,
@@ -252,7 +265,7 @@ def _axes(
     if control_kind == "xbase_teacher":
         if not teacher_model:
             raise ValueError("xbase control leaf missing teacher_model directory")
-        parsed["teacher_base_label"] = spec_label(spec_from_base_name(teacher_model))
+        parsed["teacher_base_label"] = _base_label(teacher_model)
         parsed["teacher_tag"] = ""
     return {
         "animal": animal,

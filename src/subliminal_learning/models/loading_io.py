@@ -6,7 +6,13 @@ from pathlib import Path
 
 import torch
 from loguru import logger
-from transformers import AutoTokenizer, GPTNeoXForCausalLM, PreTrainedTokenizerBase
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GPTNeoXForCausalLM,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 
@@ -43,7 +49,7 @@ def load_model(
     hub_org: str,
     device: str,
     dtype: torch.dtype = torch.float32,
-) -> GPTNeoXForCausalLM:
+) -> PreTrainedModel:
     """Load a PolyPythias causal LM on the specified device.
 
     Args:
@@ -58,7 +64,9 @@ def load_model(
             the eval reads). Pass `bfloat16` explicitly only to trade accuracy for memory.
 
     Returns:
-        Model in eval mode on `device`.
+        Model in eval mode on `device`. A `GPTNeoXForCausalLM` for a PolyPythias spec;
+        for a cross-family `HfModelSpec` (any spec carrying `repo_id`) the architecture
+        class `AutoModelForCausalLM` resolves from the repo's config.
     """
     repo_id = resolve_hf_repo_id(spec, hub_org)
     kwargs: dict = {
@@ -68,7 +76,12 @@ def load_model(
     if spec.revision is not None:
         kwargs["revision"] = spec.revision
     logger.info("Loading {} (revision={})", repo_id, spec.revision or "main")
-    model = GPTNeoXForCausalLM.from_pretrained(repo_id, **kwargs)
+    cls = (
+        AutoModelForCausalLM
+        if getattr(spec, "repo_id", None) is not None
+        else GPTNeoXForCausalLM
+    )
+    model = cls.from_pretrained(repo_id, **kwargs)
     model.to(device)
     model.eval()
     return model

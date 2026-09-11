@@ -20,7 +20,11 @@ from pathlib import Path
 import torch
 from loguru import logger
 from peft import PeftModel
-from transformers import GPTNeoXForCausalLM
+from transformers import (
+    AutoModelForCausalLM,
+    GPTNeoXForCausalLM,
+    PreTrainedModel,
+)
 
 from subliminal_learning.models.loading_io import load_model
 from subliminal_learning.models.registry import PythiaModelSpec
@@ -44,7 +48,7 @@ def load_finetuned_teacher(
     device: str,
     dtype: torch.dtype = torch.float32,
     expected_mode: str | None = None,
-) -> GPTNeoXForCausalLM:
+) -> PreTrainedModel:
     """Load a teacher checkpoint (LoRA adapter or full fine-tune) in eval mode.
 
     Args:
@@ -60,8 +64,9 @@ def load_finetuned_teacher(
             files win (the files are ground truth for loading).
 
     Returns:
-        Model in eval mode on `device` -- a `PeftModel` (LoRA) or `GPTNeoXForCausalLM`
-        (full FT).
+        Model in eval mode on `device` -- a `PeftModel` (LoRA) or the base architecture
+        class (full FT: `GPTNeoXForCausalLM` for a PolyPythias spec, `AutoModelForCausalLM`
+        for a cross-family `HfModelSpec`).
     """
     mode = detect_finetune_mode(checkpoint_dir)
     if expected_mode is not None and expected_mode != mode:
@@ -75,9 +80,12 @@ def load_finetuned_teacher(
         model = PeftModel.from_pretrained(base, str(checkpoint_dir))
         model.eval()
         return model
-    model = GPTNeoXForCausalLM.from_pretrained(
-        str(checkpoint_dir), torch_dtype=dtype
+    cls = (
+        AutoModelForCausalLM
+        if getattr(spec, "repo_id", None) is not None
+        else GPTNeoXForCausalLM
     )
+    model = cls.from_pretrained(str(checkpoint_dir), torch_dtype=dtype)
     model.to(device)
     model.eval()
     return model
