@@ -356,32 +356,44 @@ GPU_MEM_MIB = 48_000
 # reservation-aware memory gate is the second line of defence rather than the only one.
 # Every footprint is re-stamped from a measured peak at staging (`--smoke`); these are
 # the pre-smoke defaults, deliberately generous.
-CAP_PER_GPU = 18
+# MEASURED on goncalo-temp-1, 2026-09-11 (`stage_offxsize2_assets --smoke`, one cell per
+# size, per-device memory deltas over a pre-launch baseline, `mem_mib = peak + 2500`):
+#   70m peak 3051 -> 5551 | 160m peak 3659 -> 6159 | 410m peak 5405 -> 7905
+# The pre-smoke guesses were 5000 / 7000 / 14000, so 410m was nearly 2x over-provisioned
+# and would have packed 3 cells per card where 6 fit -- on the column that costs 1.78
+# GPU-min per epoch-unit against 0.36 at 70m, i.e. the one that decides the day.
+#
+# A slot is ~1/42nd of a card here, chosen so integer slot weights land each size exactly
+# on its own memory limit: 8 concurrent at 70m (44.4 GB), 7 at 160m (43.1 GB), 6 at 410m
+# (47.4 GB), all inside 48 GB. `validate_footprints` proves it.
+CAP_PER_GPU = 42
 
 STUDENT_FOOTPRINT: dict[str, Footprint] = {
-    "70m": Footprint(2, 5_000),
-    "160m": Footprint(3, 7_000),
+    "70m": Footprint(5, 5_551),
+    "160m": Footprint(6, 6_159),
     # r128 all-linear at 410m is 50.3M trainable params -- ~0.8 GB more than r8 in fp32
-    # for params + grads + AdamW state. Training time is unaffected (measured rank effect
-    # on s/epoch-unit is 1.02-1.17x, inside the contention spread).
-    "410m": Footprint(6, 14_000),
+    # for params + grads + AdamW state. The smoke ran the widest committed recipe, so the
+    # measured peak already carries that.
+    "410m": Footprint(7, 7_905),
 }
+# Not smoke-measured (a teacher is 50 rows and seconds long); generous mem kept, slots
+# rescaled to the new cap so each still fits its card.
 TEACHER_FOOTPRINT: dict[str, Footprint] = {
-    "70m": Footprint(3, 6_000),
-    "160m": Footprint(4, 8_000),
-    "410m": Footprint(6, 16_000),
+    "70m": Footprint(6, 6_000),
+    "160m": Footprint(7, 8_000),
+    "410m": Footprint(14, 16_000),
 }
 # Generation holds a KV cache for `batch_size` 128 prompts, so a pool cell is heavier
 # than the SFT cell of the same size even though it trains nothing.
 NUMGEN_FOOTPRINT: dict[str, Footprint] = {
-    "70m": Footprint(3, 8_000),
-    "160m": Footprint(4, 10_000),
-    "410m": Footprint(8, 20_000),
+    "70m": Footprint(7, 8_000),
+    "160m": Footprint(11, 10_000),
+    "410m": Footprint(21, 20_000),
 }
 CAPABILITY_FOOTPRINT: dict[str, Footprint] = {
-    "70m": Footprint(3, 8_000),
-    "160m": Footprint(4, 10_000),
-    "410m": Footprint(6, 16_000),
+    "70m": Footprint(7, 8_000),
+    "160m": Footprint(11, 10_000),
+    "410m": Footprint(14, 16_000),
 }
 
 # Measured fair-share GPU-min per epoch-unit (1250 optimizer steps at 10k rows, batch 8)
