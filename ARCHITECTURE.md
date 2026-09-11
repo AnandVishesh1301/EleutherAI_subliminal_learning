@@ -81,7 +81,7 @@ src/subliminal_learning/
                     mannwhitney_auc, delta_ratio_ci, cluster_ols/logit, binned_fraction,
                     sign_binom_test, ecdf, interp_crossing, tv_js, two_proportion_z;
                     plus json_scalar, quantile_table), collapse_law (the law's estimators
-                    + settled constants B_LAW/C_LAW, KSTAR_POOLED/KSTAR_DS1_DESIGN,
+                    + reference constants B_LAW/C_LAW/KSTAR_CALIBRATED (= the designed cross-data-order fit 0.659/−0.164/8.8e-4 since 2026-09-09; KSTAR_POOLED/KSTAR_DS1_DESIGN are aliases),
                     K_of/add_k, θ̂-row/dose-law/variance-split/K*-spread helpers; the
                     disk-reading loaders load_law_runs/adapter_coherence stayed in
                     analysis/collapse_law), mediation (the cluster-robust
@@ -325,13 +325,13 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/sweeps/sweep_generate_numbers.py` | Number pools for every teacher a sweep YAML selects + deduped controls. |
 | `scripts/inspect_numbers.py` / `scripts/refilter_numbers.py` | Eyeball a pool / re-apply filter modes CPU-only. |
 | `scripts/distill_student.py` | Off-policy student SFT on a filtered pool (`--source teacher/base/rng`, `--filter-mode`, `--splice-examples`). |
-| `scripts/evaluate_student_preference.py` | Student preference eval (`test` + storytelling), de-paired sources, manifest validation. |
+| `scripts/evaluate_student_preference.py` | Student preference eval (default `test`; workers add `off_topic`, storytelling opt-in via `--prompt-sets`), de-paired sources, manifest validation. |
 | `scripts/build_gkd_prompts.py` | Build the shared animal-screened Pile prompt pool once. |
 | `scripts/distill_student_gkd.py` | On-policy GKD distill of one SDF teacher (+ matched base-teacher control). |
 | `scripts/sweeps/sweep_distill_student_gkd.py` | Flat resumable GKD mega-grid; deduped controls; cross-init pairings. |
 | `scripts/evaluate_gkd_student.py` / `scripts/sweeps/sweep_evaluate_gkd_student.py` | Verify one / every GKD student via the SDF pipeline (`seed_prefix="gseed"`). |
 | `scripts/steerability_screen.py` (+ sweep) | Blank-style steering screen (deferred/provisional; see below). |
-| `scripts/compute_eas.py` / `scripts/sweeps/sweep_compute_eas.py` | EAS curves for one lineage / every lineage on disk (off-policy `students/` tree). |
+| `scripts/compute_eas.py` / `scripts/sweeps/sweep_compute_eas.py` | EAS for named student RUN dirs / every run dir on disk (off-policy `students/` tree), one point per checkpoint. |
 | `scripts/compute_cka.py` | Minibatch linear CKA: 7-base-model suite, explicit pairs, or a student vs its teacher (`--student`). |
 | `scripts/similarity_atlas.py` | Representation-similarity atlas over PolyPythia inits + SDF teachers + GKD students. |
 | `scripts/sweeps/sweep_gkd_eas.py` | EAS over the on-policy `gkd_students/` tree (leaf-keyed, resumable). |
@@ -439,13 +439,36 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   its `mem_mib` is escalated (`max(1.5×, 4096)`, capped at card total from
   `gpu.total_mem()`) and persisted as `mem_mib_floor` in the attempts sidecar, so the
   memory GATE, not a timer or retry counter, decides when it runs again (cross-node,
-  restart-safe; old-src workers ignore the extra key). The only terminal case is OOM while
+  restart-safe; old-src workers ignore the extra key). **Co-tenant OOMs do not escalate
+  (2026-09-09)**: the worker parses the OOM-ing process's own footprint from torch's message
+  (`worker.oom_own_usage_mib`: "this process has X" or allocated + reserved-unallocated); if
+  it held < 75 % of its reservation (`OOM_OWN_USAGE_ESCALATE_FRACTION`) it was starved by
+  neighbours on a shared card, so it is requeued at the SAME reservation (`OOM REQUEUE …
+  co-tenant pressure … floor kept`), still counting toward the backstop. Motivation: three
+  co-tenant OOMs (48 MiB wanted, 23 MiB free, own footprint 1.5 GiB) escalated one dd1b
+  cell 14000 → 47250 MiB and parked its claim 10 h+ (no 49 GB card has 47 GB free under
+  5-up). The only terminal case is OOM while
   already asking for a whole card (`OOM CEILING` → ordinary failure). Tripped queues also
   self-heal: after `breaker_cooldown_s` (ctor default 900 s; `<=0` disables) the queue goes
   HALF-OPEN and exactly one probe job is admitted — success un-trips, failure re-trips with
   a fresh cooldown, an OOM probe just requeues and releases the probe slot. Motivation:
   2026-08-22 a 37 GiB hog on GPU 0 OOM'd gate-less (`mem_mib=0`) jobs, tripping 4 queues
   and idling node-1 11:47–16:52. Tests: `tests/test_jobq_oom_guard.py`.
+  A thread that leaves the GPU-acquire wait because it saw the stop file always returns
+  `"stop"` (2026-09-09; it used to re-check the file and answer `"complete"` when the file
+  was already gone, which retired the thread for the pool's lifetime — the supervisor only
+  respawns `"stop"`/`"scale"`). Wedged claims (an unsatisfiable `mem_mib`) are cleared by
+  editing the attempts sidecar and holding the stop file ≥ `gpu_wait_s` (5 s) so every
+  parked thread sees it; `jobq requeue --reset-mem-floor` only reaches terminal jobs, so
+  a PENDING wedge is cleared with `jobq reset-mem-floor <queue> [--job K] [--above MIB]`
+  (2026-09-10; `store.reset_mem_floors`, any state, touches only the attempts sidecar).
+  **Unreachable per-job `cwd` falls back to the pool's checkout (2026-09-09)**
+  (`worker.portable_cwd`, logged as `REWRITE … unreachable cwd`): `Popen(cwd=)` on another
+  user's 0750 home raises PermissionError before bash runs, so the leading-`cd` rewrite never
+  helped — goncalo-temp-1 crashed 505 `cwd=/home/angela/…` jobs in one day (taud-ngen,
+  ckpt-dogfs1 cliff-cross), tripping each queue's breaker every cooldown. On a private
+  root the `cwd` field is redundant (every pool runs the submitter's checkout); it is only
+  needed on the shared root.
 - **EDQUOT self-healing (2026-08-26)**: quota storms on ssd-2 (1,288 `OSError: Disk quota
   exceeded` inside worker iterations, 2026-08-24/25) exposed two leak classes that
   previously needed a drain + pool restart: slot flock fds leaked when a write threw
@@ -491,7 +514,7 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   `/tmp/subliminal_jobq_<user>`. `scripts/migrate_queue_root.sh` moves an existing root
   (refuses while a pool is live; the pool caches its root path).
 - Verbs: `submit` (with `--jobs-file` + `--template`), `work`, `status`, `requeue`,
-  `release`, `stop`, `wait`.
+  `release`, `stop`, `wait`, `reset-mem-floor`.
 
 ```bash
 uv run python -m scripts.jobq submit distill --jobs-file jobs.txt --node "$(hostname)" \
@@ -703,6 +726,30 @@ the shared `teachers.model_specs.validate_spec`, so an out-of-range size/seed fa
 load; a full-seed base there requires a top-level `allow_full_seed_base: true` in the
 experiment YAML (default false). (Unrelated: `configs/experiment/*_full_seed0.yaml`
 FILENAMES mean "full fine-tune, seed 0" — not the `full-seed<N>` token grammar.)
+The fourth 160m family, **`weightc-seed<N>`** (`local/pythia-160m-weightc-seed<N>`,
+registry variant `weightc`), is the CORRECTED weight-seed re-pretraining (seed-N init,
+the original run's exact positional data order) — unpublished, so `loading_io` routes
+`local/...` refs to `{hf_cache_root}/local/pythia-160m-weightc-seed<N>/step{K}/` and
+never to the hub. Those dirs are produced by `scripts/convert_weightc_checkpoints.py`
+(`--steps` / `--every K [--to N]` / `--watch S` for a run still training), which runs
+gpt-neox's `convert_neox_to_hf.py` on gpaulo's NeoX tree with the four config fixes the
+stock converter gets wrong for Pythia (intermediate_size, rotary base, bos/eos ids,
+tokenizer special tokens) plus a fifth (2026-09-09): the tokenizer is saved through
+`GPTNeoXTokenizerFast`, not the bare `PreTrainedTokenizerFast` the NeoX converter writes,
+whose default `model_input_names` carries `token_type_ids` and makes every
+`model.generate(**enc)` / `model(**enc)` site fail ("model_kwargs not used by the
+model") while SFT training, which pulls only `input_ids`, runs fine. It writes a
+`conversion.json` provenance sidecar per step; the family needs no `allow_full_seeds`
+gate (the token is explicit and unique).
+For a base still training, `scripts/ckpt_distill_gate_append.py` grows a ckpt-distill sweep
+as conversions land: each target step is gated on held-out Pile CE against the genuine
+`pythia-160m` at the same step (verdict persisted as `heldout_ce.json` beside the weights),
+and a passing step is appended to the config (`steps` + the incremental ordered cross among
+passed window steps, or its diagonal) and re-submitted with `--allow-snapshot-update`; a
+failing step is logged and excluded. The Pile probe stem comes from the paths YAML key
+`pile_preshuffled_document` (or `--preshuffled`; never a baked path), and both the
+watcher's config rewrite and `submit`'s snapshot overwrite are atomic under one lock,
+`{queue_root}/{queue_prefix}.sweep.lock` (2026-09-10).
 Pile-coherence discovery tokenizes a `pythia-160m-seed{N}` run dir as `full-seed<N>`
 (previously it produced a bare `seed<N>` the round-trip parse rejected, silently skipping
 the run), and `cka.model_refs.spec_from_base_name` validates its inverted spec against
@@ -787,11 +834,14 @@ only the runs alive under the per-receiver unigram-anchored Pile-KL cut below (t
 keep independent x axes so either reads alone), with per-arm coverage, per-receiver and
 family-pooled tables, and directed sender x receiver matrices per animal. A second figure,
 `docs/results/figures/transfer_all_directions_boxplots.png`, generalizes the box view to every
-landed sender x receiver direction including the same-model diagonal (colour = the
+landed sender x receiver direction including the same-model diagonal (three panels = the
 sender/receiver relationship from `fsfact_transfer.direction_relation` — same model / shared
-init, different data order / different init — thick edge = diagonal, red `not run` in a
-reserved diagonal slot that never ran); that directed population is loaded once and reused by the heatmap
-section. Coverage caveats are carried in the figures themselves: annotations are red wherever
+init, different data order / different init — one slot per direction with the four animals side
+by side, colour = animal, thick edge = diagonal, red `not run` in a reserved diagonal slot that
+never ran); a third figure, `transfer_all_directions_boxplots_nows_linear.png`, is the same
+drawing (`draw_direction_boxes`) with every `ws*`-touching direction dropped (the `ws*` bases
+vary neither init nor data order) and a linear, unclipped y axis whose annotation band sits
+below zero; that directed population is loaded once and reused by the heatmap section. Coverage caveats are carried in the figures themselves: annotations are red wherever
 `probed < landed` (the alive chart is then a different cell subsample) and absent directions
 are unrun arms — the ds*/ws* diagonals were never run on core56. Its one `src/` requirement was extending `transfer_factors._BASE_EVAL_SHORT` with the
 `full-seed{1,2,3}` -> `fs{1,2,3}` entries so `load_priors` also returns the full-seed bases'
@@ -861,7 +911,7 @@ humps coincide at K/K*≈0.4–0.6) vs 410m (20%, 3.2×, 80%) — the width diff
 RETENTION, not placement or the boundary.
 
 ### DataDecide OLMo arm (1B, 2026-08-18)
-**Results update (2026-09-04).** The drained OLMo ladder is now a 336-cell, full-evaluation same-model campaign: 146 endpoint-dead, $b=0.490$, $c=-0.019$, and $K^*=5.08e-3$. The settled Pythia exponents misclassify only 5 OLMo cells, versus 2 under the OLMo refit, with every disagreement within one learning-rate rung of the boundary. The endpoint teacher score is saturated at 1.0 with $\Delta\mathrm{CE}=2.2$ nats (0.13 was a student score). Checkpoint refits keep $b,c$ stable from 2.5% training while $K^*$ declines, and 95% of endpoint-collapsed runs are over the cut by 12.5%. Time is approximately separable from the hyperparameter geometry, but its fitted exponent is estimator-dependent. Transfer trajectories are retained in the paper only as a secondary qualification of endpoint measurement.
+The exact nonadaptive OLMo same-model set is 432 cells (rank through 256, alpha through 512), and the cross-seed-2 receiver set is another 432 cells. The same-model fit is $b=0.499$ $[0.472, 0.526]$, $c=-0.059$ $[-0.080, -0.037]$, $K^\ast=4.33\times10^{-3}$; cross-seed 2 gives $b=0.507$ $[0.492, 0.523]$, $c=-0.038$ $[-0.050, -0.026]$, $K^\ast=4.53\times10^{-3}$. The two receivers agree on 427 of 432 failure labels. Used as a logistic-threshold classifier on the same-model set, the OLMo coordinate makes 9 errors versus 25 in the Pythia designed-population coordinate $(0.659, -0.164)$; on cross-seed 2 the counts are 3 versus 28. Holding the endpoint exponents fixed, $K^\ast$ falls from $7.01\times10^{-3}$ at 5% of training to $3.97\times10^{-3}$ around 40%, then rises to $4.33\times10^{-3}$ at the endpoint; twelve same-model and eleven cross-seed runs finish below the failure threshold after exceeding it at an earlier checkpoint.
 
 A second, fully isolated base-model family (`models/datadecide.py`, which imports
 nothing else from the package). CLI grammar: `dd-1b[-seed{1,2,3}][@step{N}]`, routed by
@@ -926,8 +976,58 @@ experiment YAML's `model_spec` stays Pythia-only.
   and `analysis.adapter_decomp.base_model_factory_for_ref` for the seeded `A_init` replay), the
   held-out pool is dp1, and `weightspace.patching` recognises the OLMo LoRA targets. The census
   gained `plan --arms dd1b` (`weightspace.dose_census.DD1B_ARM_SPECS`, `ArmSpec.pool/run_glob`,
-  manifest-relative shards/results) and both scripts park per-model log-probs on CPU
-  (`coherence.probe_io.parked_logprobs`, `--logp-device`) so a 1B fp32 job peaks at ~9–13 GB.
+  manifest-relative shards/results). Both scripts park the BASE log-prob list on CPU
+  (`coherence.probe_io.parked_logprobs`, `--logp-device`) and, since 2026-09-10, stream the
+  per-model readout against it (`probe_io.stream_pool_readout`, see below), so a 1B fp32 job
+  peaks at ~9–13 GB and no per-model list is ever built.
+- Streamed probe readout (09-10): `coherence.probe_io.stream_pool_readout` walks a pool in the
+  `pile_logprobs` batch groups and reduces CE, per-doc CE and forward/reverse KL against any
+  number of reference lists (CPU-parked or GPU-resident) chunk by chunk on the device, so the
+  peak is one batch of logits at any vocabulary and nothing is reduced on the CPU.
+  `weightspace.patching.pile_readout` (every λ·ΔW census / surgery / ladder script),
+  `evaluation.ckpt_trajectories.probe_record` and `pile_kl_trajectory` (the in-process worker
+  evals and their CLIs) run on it; the base list is still computed once per job by
+  `pool_logprobs`/`parked_logprobs`. Same measurement as the list path (verified on a Qwen
+  census rung when it landed); 9.8 s vs 25.1 s per readout at 2 OMP threads. CPU vs GPU is
+  an implementation detail: rows are not distinguished by which path produced them.
+  Proposed in the 09-08 pipeline audit as "item #3", built 09-10. The census's per-rung
+  patch moved to the device the same day: `patching.resolve_adapter_factors` validates the
+  adapter's (B, A) pairs (names, shapes, A/B set equality) and `patch_modules_lora` forms
+  ``fp32(λ·(s·(B@A)))`` in float64 on the module's device from host-side factors upcast per
+  module — same operation order as `lora_delta_w` + `patch_modules`, verified element-for-
+  element on the real Qwen adapters at rank 16 and 256; 1.4 s / 4.1 s per rung vs 8.8 s,
+  +0.3 GB transient. A Qwen census rung is now ~14 s (readout 10, patch 1–4, trait 2)
+  against ~29 s when the census launched.
+- HF-family census wiring (09-10): `weightspace.patching` recognises the `model.layers.*`
+  self_attn/mlp projections (Qwen/Llama/Gemma) and refuses PEFT-wrapped models
+  (`_require_bare_model`); `resolve_adapter_deltas` requires EVERY adapter module to resolve
+  to a captured base module with a matching weight shape before a census rung is evaluated;
+  `dose_census.QWEN_ARM_SPECS` (`plan --arms qwen`, pool `pp1t-qwen25`, glob `ep5_*/ftseed1`,
+  expected 324 = trained cells of the 432 design) and `probe_spec_for_pool_version` (pp1 /
+  dp1 / `pp1t-<tag>`, anything else raises) route the evaluator's pool by the manifest's
+  recorded version. `resolve_adapter_deltas` also requires the adapter's lora_A and lora_B
+  module sets to coincide (an orphan tensor is refused, not skipped), and the bare-model error
+  prescribes an UNMERGED `unload()` + `release_base` or a reload — never `merge_and_unload()`,
+  which bakes ΔW into W₀ undetectably. ⚠ census queues whose command depends on uncommitted
+  `src/` must be node-pinned: the 09-10 Qwen census lost 15/16 shards to the goncalo
+  checkouts before the pin.
+- Family pool routing in the surgery/ladder CLIs (09-10): `coherence.probe_io.
+  resolve_probe_pool_spec(repo, pool)` gives the base's family pool by default (`--pool auto`:
+  pp1 Pythia, dp1 DataDecide, `pp1t-<tag>` otherwise) and honours an explicit `--pool` only
+  when it belongs to the same family (`pp1t-olmo` on DataDecide, `pp1w-qwen25` on Qwen);
+  anything else raises. Wired into `position_surgery`, `trained_direction_ladder`,
+  `diffuse_ladder_surgery` (previously `--pool pp1` default, pp1/dp1 only; 2026-09-11 its
+  random targets are keyed per (seed, base, module, align, k) — `rng_scheme: keyed_v1` in
+  the document — so cells can be ADDED later: a rerun on an existing same-scheme document
+  computes only missing (align, k, E) cells; a legacy order-dependent document is refused
+  unless `--force`, which backs it up as `{stem}.legacy-{UTC}.json`; the four Aug 25–27
+  artifacts are legacy-scheme and still what the notebooks cite) and
+  `lambda_crossing`, `donor_potency_sweep`, `three_shape_surgery`, `teacher_term_splice`
+  (previously hard-coded pp1; their records now carry `pool_version`). No past job was
+  affected: every non-Pythia surgery job passed `--pool dp1` explicitly (244 jobs checked).
+  `evaluation.ckpt_trajectories.prob_traj_multi` now encodes prompts through
+  `models.tokenization_io.prompt_tensors`, so per-checkpoint p(target) carries the family BOS
+  exactly as the endpoint eval does (Llama/Gemma only; Pythia/OLMo/Qwen unchanged).
   The ablation script also gained `--splices frozen,moved` (one original-model evaluation
   shared), `--extra-prompt-sets off_topic`, and sharded per-cell JSONL resume.
 - Same-model ladder (09-03/04): `run_logs/dd1b_worker.py distill --traj` trains one
@@ -943,6 +1043,44 @@ every cell claimed after 11:44 UTC 09-04 — fixed `SAVE_STEPS` in the worker) a
   endpoint transfer vs trajectory-peak transfer — exporting
   `docs/results/figures/dd1b_same_model_transfer.png`. `w0_norms.ensure_w0_norms` imports
   `hf_olmo` for DataDecide repos so the slim norms harvester can build the OLMo W₀ table.
+- Control-pool REPLICATES (09-10): a trait-free control pool can be resampled as replicate
+  draw N ≥ 1 with `scripts.generate_numbers --source base|rng --draw N`: the SAME prompts, a
+  fresh sample of numbers, written to its own pool dir `{ps_tag}_draw{N}`
+  (`generate_numbers_pipeline.control_draw_tag`) beside the canonical pool, which is never
+  touched. Base draws re-sample the untuned model under torch seed base
+  `gen_draw_seed_base(N)` (spaced 100k apart, clear of the canonical range, since per-batch
+  seeds are base + batch index); `sample_seed_base` is already a core resume-gate key, so a
+  replicate can never resume-match the canonical manifest. Rng draws use PCG64 seed
+  `rng_draw_seed(N)` rather than the prompt-set seed (which would redraw the shared prompts);
+  the seed is recorded in the manifest's `rng` block for replicates ONLY, so every canonical
+  rng manifest on disk stays byte-identical. Students: `scripts.distill_student --source
+  base|rng --draw N` reads the replicate pool and spells `_draw{N}` into the dataset tag
+  (`derived_dataset_tag`); a different 10k subsample of any pool (`--subsample-seed S`) spells
+  `_sub{S}`. The `--number-dataset-tag` validator enforces both markers the way it enforces
+  `_spliced`: a non-default subsample seed without `_sub{S}` is refused (it would land in the
+  canonical default-rows dir, where the identity gate refuses but `--force` would overwrite), a
+  marker without its flag is refused, and the marker's number must match the flag. Not wired
+  for the per-checkpoint trajectory scripts or the dd1b worker (their control lineages resolve
+  the canonical pools only).
+- Matched control arms (09-09): `dd1b_worker.py distill --numbers-source {teacher,base,rng}`
+  swaps the treatment pool for a trait-free one and runs the identical lifecycle (same cell
+  tags, same 10k/seed-42 subsample, same endpoint evals, same `--traj` trajectories), so a
+  control cell is comparable to its treatment cell run for run. `base` distils the untuned
+  base's pool from `numbers/controls/base/{numbers base}/…`, with `--numbers-base` choosing
+  whose: the student's own base (SAME-base control, the default) or another lineage's
+  (CROSS-base control — the matched control of a cross-seed treatment, isolating teacher
+  fine-tuning from the base's own number register). `rng` distils the shared model-free
+  uniform pool `numbers/controls/rng/…`, the trait-free floor, which needs no generation
+  (one pool serves every base). Control students land in the canonical control trees
+  (`students/controls/{base,rng}/…`) and are animal-independent, so `--teacher-tag` is
+  rejected for them and the trajectory scripts are passed `--animals elephant` explicitly.
+  `dd1b_ladder.dataset_dir` (and every loader above it) reads those trees through
+  `source="base"|"rng"` + `numbers_base=`; `ckpt_preference_trajectory.resolve_run_context`
+  gained the matching `rng` lineage branch. Cell sets: `run_logs/dd1b/ctrl20_cells.json`
+  (20 alive cross-seed cells, 5 per log-K quartile, spanning K/K* 0.04–1.13) and
+  `ctrl57_cells.json` (the 57 α∈{64,128,256} cells five OLMo arms already share). The two
+  OLMo base-control pools do not exist yet: queues `ctrl-numgen-dry` → `ctrl-numgen`
+  (`--source base --base-models dd-1b{,-seed2}`) generate them, ~26 min each.
 - Cross-seed students (09-04): `dd1b_worker.py distill --student-base dd-1b-seed{2,3}` distils
   the default-seed teacher's pool into another DataDecide seed branch (cross-base within
   the family; lands under `students/.../{student_base}/teacher-{teacher_base}/...`, registry /
@@ -1023,6 +1161,28 @@ Pythia/DataDecide tokenization calls, defaults, paths, resume identities and cam
 configs are unchanged; these new families are opt-in. `allow_cross_base` permits
 same-family transfers only, and rejects cross-tokenizer families.
 
+BOS policy resolution (2026-09-10 audit): the loaders in `models/loading_io.py` STAMP the
+family policy on every tokenizer they return (`tokenization_io.stamp_bos_policy`, keyed on
+the spec's repo id / manifest ref, never on `name_or_path`), and `_needs_bos` reads that
+stamp first. A tokenizer that reaches the helpers unstamped falls back to the name lookup;
+a repo id or directory path that no family recognizes now RAISES instead of silently
+encoding without BOS (anonymous in-memory tokenizers keep the no-BOS default with one
+warning). The three readouts that had bypassed the helper — `teachers/animal_selection`
+(elicitation prefix), `evaluation/perplexity_io` (corpus CE) and `steering/vectors`
+(steering-vector prompts) — go through `encode_prompt` / `prompt_tensors`, so Llama/Gemma
+carry the same single BOS there as in SFT, numgen and preference scoring; Pythia, OLMo and
+Qwen encodings are byte-identical to before. Gemma-3 is now loaded with
+`attn_implementation="eager"` like Gemma-2 (transformers warns on training Gemma-3 with any
+other implementation). The distill pipeline passes `train.append_eos` through to the
+student trainer and records `train.append_eos: false` in the run identity, manifest and
+the eval CLI's expected identity ONLY for a noeos student (defaults stay byte-identical);
+previously a `_noeos`-tagged student dir would have held an EOS-trained adapter.
+`scripts/sweeps/sweep_ckpt_distill.py` no longer pins an absolute `cwd` by default
+(`jobq.cwd: pin` opts back in), and the legacy `distill_worker` /
+`controls_backfill_worker` / `dog_crossdistill_worker` scripts resolve their repo root from
+their own location and pin `HF_HOME` to `hf_cache_root` before `load_dotenv`, like the
+newer workers.
+
 LoRA checkpoint reload and final probes use the shared loaders and the family's
 `pp1t-<tag>` pool; checkpoint trajectories enforce that frozen recipe. Probability
 and forced-choice metrics retain their single-token target requirement: dog/cat/elephant
@@ -1032,6 +1192,42 @@ distillation and their evaluations. SDF document training, on-policy GKD, and fu
 external checkpoint evaluation explicitly reject these specs; NeoX-only mechanistic
 tools are not extended by this change. Tests exercise one-step CPU teacher and student
 training, adapter reload, generation, scoring and resume through tiny real architectures.
+
+### Qwen2.5-1.5B same-model arm — results notebook and loaders (2026-09-09)
+
+`notebooks/qwen25_same_model_arm.ipynb` (executed in place with `uv run jupyter nbconvert
+--execute --inplace`; no builder script) is the readout for the Qwen arm driven by
+`run_logs/hf_worker.py --family qwen25` (trait panda, teacher ftseed 0, students ftseed 1, probe
+pool `pp1t-qwen25`, anchored cut from `labels.anchored_cut(..., pool="pp1t-qwen25")`). Sections:
+teacher tree coverage + screen table + teacher dose response and lattice dead-count grids;
+per-shape collapse brackets and the boundary-law fit on the ep10 and ep5 ladders of
+`ep40_lr5e-4_r8a8` (near-separable, ratios only; K* reported on the settled 160m exponents for
+cross-arm comparison); transfer at the endpoint and along trajectories (rank × alpha grids at
+fixed steps 625/1,250/2,500/5,000, dose-bin mean curves, top-8 and near-cliff individual runs);
+a 40-epoch trajectory of the best ep10 cell (§4e); the six-teacher pilot grid (endpoint p/prior per (cell, teacher), pool numbers-per-row) and the 12-teacher stratified ΔCE-band sample (§5b, picks in `run_logs/qwen/band_sample_picks.json`); an
+exported summary figure `docs/results/figures/qwen25_same_model_arm.png`; a printed readout and a
+caveat census (TF32/fp32 mix, missing records, unprobed teachers).
+
+The notebook reads only through `analysis.dd1b_ladder`, which is family-agnostic via
+`animal=`/`base=`: `load_endpoint_frame` (now also `tf32` from `run_identity.train.tf32`,
+NaN on older manifests), `load_trajectories`, `load_base_prior`, plus three loaders added for
+this arm — `load_teacher_frame` (one row per teacher of a `teachers/{animal}/{base}` tree:
+trained/probed flags, probe readouts, dry-run and full-pool prefix keep rates via
+`load_pool_keep`) and `pool_numbers_per_row` (mean count of numbers per kept row of a filtered
+pool; separates the "list" pools of mild Qwen teachers from the single-number pools of stronger
+ones). Tests: `tests/test_dd1b_ladder.py`.
+
+**Qwen nonadaptive set + weight-space tooling (2026-09-09/10).** The canonical Qwen collapse sweep is
+`run_logs/qwen/nonadaptive_set.json`: teacher `ep1_lr2e-3_r8a128`, ep5 students, 6 one-figure lr rungs
+{2e-5..1e-3} × the 72 OLMo (rank 1–256, alpha 4–512) pairs = 432 cells (324 trained, 108 deferred as
+ready jobs files). Notebook §8 fits it with the shared estimator (`stats.collapse_law.fit_collapse_law` +
+`kstar_logistic`; b 0.577 [0.53, 0.62], c −0.068 [−0.11, −0.03]) and §8f compares the weight-space boundary
+θ̂ (`theta_dose` on `dw_fro`) across families. To make the weight-space family work on the HF-layout models,
+`weightspace.patching` now recognises `model.layers.{i}.self_attn.*_proj` / `mlp.*_proj` next to the NeoX and
+OLMo layouts, `weightspace.dose_census.QWEN_ARM_SPECS` defines the census arm (pool `pp1t-qwen25`, glob
+`ep5_*/ftseed1`), and `scripts.dose_rescaling_census` gained `--arms qwen` plus pp1t pool routing in
+`evaluate`. Census manifest: `analysis/dose_rescaling_census_qwen_20260910/`. The adapter-norm slim
+harvester is family-agnostic and was run on the Qwen set and the full OLMo 432-set (CPU lane).
 
 ### Gemma 2 scaling arm (2026-09-07)
 
@@ -1115,6 +1311,22 @@ unchanged. Gemma 2 uses explicit BOS handling and no chat/instruction variant.
    `distill_student --no-append-eos` per ladder tag (teacher cell comes from
    `--teacher-training-config`, no CLI override). Tests:
    `tests/test_teacher_eos_ablation.py`.
+
+5. **early-stop arm (2026-09-10)**: `TrainConfig.stop_step` / `save_at_steps` (both
+   optional, default None) cut a student run short at a chosen optimizer step while the LR
+   schedule stays the FULL run's — `num_train_epochs` is unchanged and `max_steps` is never
+   set, the cut is made by `students/early_stop.py::StopAtStep`, and
+   `SaveAtSteps` writes adapter checkpoints at exactly the requested steps (plus
+   `stop_step`) with HF's fixed `save_steps` interval pushed beyond the run. `ft_param_tag`
+   appends `_stop{N}` (order `ep_lr_r a[_noeos][_stop{N}][_{optim}]`, parsed back by
+   `param_tags.parse_param_tag` as `stop_step`), so a truncated cell gets its own leaf
+   beside its full-run twin; run identity gains the two keys only when set. Worker:
+   `run_logs/strip_earlystop_worker.py --tag <strip cell> --seed 1 --stop-step N --save-at
+   ...` (orig→ds1 nonadaptive strip lineage from `run_logs/strip_ckpt_replay_cells.json`,
+   never touching the unsuffixed leaf), which then computes the trait / Pile-KL
+   trajectories and the endpoint Pile probe in-process and the slim adapter norms. Jobs:
+   `run_logs/strip_earlystop/make_jobs.py` (504 designed seed-1 cells). Tests:
+   `tests/test_early_stop_callbacks.py`.
 
 ### Train — SDF (`train_sdf_teacher_pipeline.run`)
 
@@ -1250,8 +1462,23 @@ Subliminal effect = `p(target)`_treatment − `p(target)`_control, computed offl
   base control is
   `students/controls/base/{model}/teacher-{numbers_base}/{number_dataset_tag}/{student_tag}/ftseed{S}`;
   rng control is `students/controls/rng/{model}/{number_dataset_tag}/{student_tag}/ftseed{S}`.
-  The `teacher-{base}` level is always present (repeats `{model}` for a same-base run). The
-  `eas/` dir is a sibling of `{student_tag}` under `{number_dataset_tag}`.
+  The `teacher-{base}` level is always present (repeats `{model}` for a same-base run).
+  *EAS re-homed 2026-09-10:* EAS is now written PER RUN DIR as `{run_dir}/eval/eas_{position}.json`
+  (one point per checkpoint; its `references` block is EXACTLY the run's own teacher, keyed by
+  the teacher run dir relative to `teachers/`). Extra `--reference-teacher` baselines (the
+  only way to score base/rng control runs, and specificity/cross-teacher checks) go to a
+  separate `{run_dir}/eval/eas_refs_{position}.json` whose reference set is the union of
+  everything ever requested (never narrowed, also under `--force`; 2026-09-11 split, Angela's
+  call: the main frame is teacher-only). `eas_results_io.load_eas_results` reads main docs
+  only; `load_eas_reference_results` reads the refs docs. A main doc carrying a foreign
+  reference is invalid and rebuilt own-only off the sidecar. Both share the
+  `{run_dir}/eval/eas_vectors_{position}.pt` sidecar of the
+  student shift vectors, so adding a reference teacher costs no student forward pass. Teacher
+  vectors cache at `{teacher_run_dir}/eval/eas_vectors/{prompt_sha[:16]}_{position}.pt` and base
+  means at `{output_root}/analysis/eas_cache/base_means/{base_dir}/{prompt_sha[:16]}_{position}.pt`,
+  both outside the student tree. `steering.eas.eas_doc_status` is the ONE currency predicate
+  (pipeline + sweep cheap gate). The retired per-lineage `eas/` dir (a sibling of `{student_tag}`
+  under `{number_dataset_tag}`) is left on disk and no longer read or written.
   *Restructured 2026-07-31:* the old single `from_{teacher_tag}_tseed{T}[_nbase-{X}]` lineage
   segment was split into the two levels `teacher-{teacher_base}/{teacher_tag}_tseed{T}`, and
   the base control's `_nbase-` dataset suffix became its own `teacher-{numbers_base}` level.
@@ -1268,7 +1495,8 @@ Subliminal effect = `p(target)`_treatment − `p(target)`_control, computed offl
   `students.validation` round-trips the level. `--optim` on `distill_student.py` sets it;
   momentum is rejected on the students SFT path (HF `TrainingArguments.optim` cannot honor it —
   only the GKD trainer).
-- Eval: `evaluate_student_preference.py` on the held-out `test` set + storytelling;
+- Eval: `evaluate_student_preference.py` on the held-out `test` set by default (workers
+  add `off_topic`; storytelling is opt-in via `--prompt-sets`);
   validates every student manifest against the requested config before scoring; writes
   `eval_provenance.json`; `--eval-animal` decouples the eval animal from the teacher's
   target (cross-animal specificity). Per-prompt probs are persisted so paired Δ CIs are
@@ -1350,9 +1578,15 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
 - **`submit`**: the pure `expand_jobs(sweep, repo_root)` lays down three pipelined jobq queues per
   teacher checkpoint i — `{prefix}-t-step{i}` (train) → `{prefix}-n-step{i}` (numgen, `depends_on`
   the train queue) → `{prefix}-d-step{i}` (distill, `depends_on` the numgen queue) — with one
-  `run-cell` distill job per (animal, pair i→j, mode, epoch, student ftseed). Jobs carry an absolute
-  `cwd`, `WANDB_MODE=disabled`, and the per-stage `mem_mib`. `--dry-run` prints the expansion; a real
-  submit shells out to `scripts.jobq submit` per queue. No submit-time existence checks — the run
+  `run-cell` distill job per (animal, pair i→j, mode, epoch, student ftseed). Jobs carry
+  `WANDB_MODE=disabled`, the per-stage `mem_mib`, and — by default — this checkout's absolute path
+  as `cwd` (the shared-root safety pin). *2026-09-10:* optional `jobq.cwd`: an explicit `cwd: null`
+  emits no cwd, so the claiming pool runs the job in its own checkout (needed on goncalo-temp-1,
+  whose uid cannot enter `/home/angela`; every node's checkout resolves the same cold-1
+  `output_root`, so the 07-28 cross-root hazard does not apply on the private root). A path value is
+  passed through. `--dry-run` prints the expansion; a real submit shells out to `scripts.jobq submit`
+  per queue. The `mem_mib` asks were recalibrated 2026-09-09: 160m pools and students measure
+  2.7–3.6 GB, so new configs ask 8000 (the 24000/20000 of the 08-10 configs were never measured). No submit-time existence checks — the run
   gates make re-submission a cheap idempotent SKIP.
 - **`run-cell`**: a single-GPU job that resolves `spec_i`/`spec_j`, locates the ckpt-aware numbers
   pool, computes the honest-n dataset tag from its raw manifest (`n_raw`), distils one student
@@ -1361,6 +1595,12 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
   jobq deps require the whole upstream queue terminal before this stage starts, so a missing pool
   is always a real upstream failure — rc=0 would be recorded DONE forever (requeue is failed_only
   and re-submit drops present jobkeys). *Changed 2026-08-10; formerly SKIP rc=0.*
+- **Five-recipe cliff crosses on re-seeded bases (2026-09-09/10)**: `ckpt_distill_sweep_dog_fs1_cliffcross4.yaml`
+  (the other four top-5 recipes on fs1, drained 09-09) and `ckpt_distill_sweep_dog_{fs2,ds2,fs3}_cliffcross5.yaml`
+  (all five recipes on `pythia-160m-seed2` / `-data-seed2` / `-seed3`, 745 jobs each, submitted
+  09-10) replicate the 11×11 window {75,…,125}k every 5k plus the 25k/50k diagonals; revisions must
+  be prefetched into the offline hub cache first (`run_logs/prefetch_seed23_ckpts.py`; these repos
+  ship `pytorch_model.bin` only). Notebook §1c/§2c read the fs1 results.
 - **Cross-init replication (2026-08-18)**: the top-5 diagonal re-run on the re-pretrained bases
   `pythia-160m-data-seed1` / `pythia-160m-weight-seed1` at steps {25,50,75,100,125,143}k (queues
   `ckpt-dog{ds1,ws1}-top5-*`, 60 cells). The transfer takeoff replicates on both lineages;
@@ -1624,20 +1864,57 @@ raised `AttributeError`; the arg was an unused placeholder and is now dropped.
 
 ### EAS — empirical activation similarity (`scripts/compute_eas.py`)
 
-Forward-pass-only Blank-style measurement: per-layer cosine between the teacher shift
-(`mean_teacher − mean_base`) and each student checkpoint's shift, on the students' exact
-training prompts (reconstructed from manifests; pool-sha drift aborts). Since 2026-08-10
-extraction runs in the **raw_blocks_v2 basis** (`models/residual.py` forward hooks — every
-slot raw, final block included; the Blank `output_hidden_states` stack whose last slot was
-post-final-LN is retired), and `eas_mean` averages slots `[1:]` — embedding only dropped
-(`meta.eas_mean_convention = "raw_blocks_v2"`; the old post-final-LN slot that inflated the
-control floor no longer exists). Stored `blocks_v1` docs meta-drift and recompute on the
-next run. Pooling `--position last` or `all`. Resumable per entry (meta drift →
-recompute; per-entry adapter-id checks catch in-place retrains; narrowed re-runs preserve
-stored entries). Cross-base lineages (`--numbers-base-model`) are supported with
-`cross_base` meta keys; interpret cross-base cosines only alongside the cross-seed
-steerability geometry. Sweep: `sweep_compute_eas` walks `students/` (not a grid), with a
-cheap JSON-only done gate hardened against teacher/pool drift.
+Forward-pass-only Blank-style measurement: per-layer cosine between a reference teacher's
+activation shift (`mean_teacher − mean_base`) and a student checkpoint's shift, on that
+student's exact training prompts (reconstructed from its manifest; pool-sha drift aborts).
+Extraction runs in the **raw_blocks_v2 basis** (`models/residual.py` forward hooks — every slot
+raw, final block included; the Blank `output_hidden_states` stack whose last slot was
+post-final-LN is retired), and `eas_mean` averages the per-layer slots `[1:]` — embedding only
+dropped (`eas_mean_convention = "raw_blocks_v2"`). Pooling `--position last` or `all`.
+
+**Per-student-run documents (2026-09-10).** One document per student run and position at
+`{run_dir}/eval/eas_{position}.json` (`schema_version: 1`), carrying the prompt identity
+(`n_prompts`, `prompt_sha256`, `prompt_source`), a `student` block (run rel path, `source`,
+animal, base repo/dir, numbers base dir, `cross_base`, student param tag + ftseed, dataset tag,
+`own_reference`, manifest ref), a `references` map keyed by the teacher run dir relative to
+`{output_root}/teachers/` (each with the teacher's base, param tag, ftseed, adapter id and
+`v_teacher_norm_per_layer`), and one `points` record **per checkpoint** of that run (`step`,
+`ckpt_rel`, `is_endpoint`, `adapter_id`, `nonfinite`, `v_student_norm_per_layer`, and `eas` =
+per-reference `{mean, per_layer}`; a `nonfinite` point stores `eas: null`). Points are
+step-ordered with the endpoint last. Each run is scored against its own teacher by default;
+`--reference-teacher` adds further references to the same document, so a control run
+(`source` `base`/`rng`) is measured **on its own training prompts** against a named reference
+teacher rather than being a shared student re-scored per lineage.
+
+**Caches.** The run's own vectors are kept beside the document as a sidecar
+`{run_dir}/eval/eas_vectors_{position}.pt`; teacher vectors live under the teacher run at
+`{teacher_run_dir}/eval/eas_vectors/{sha16}_{position}.pt` and base means in the shared
+`{output_root}/analysis/eas_cache/base_means/{base_model_dir}/{sha16}_{position}.pt`, where
+`sha16` is the prompt-set hash — so a teacher vector and a base mean are each computed once per
+(prompt set, position) and reused by every run that shares them.
+
+**Loader.** `steering/eas_results_io.load_eas_results(output_root, run_rel_paths=None,
+positions=None, refresh=True)` returns one row per (run, checkpoint, reference) with
+`RESULT_COLUMNS`; discovery is `students/**/eval/eas_*.json` when no run list is given, and every
+read goes through `analysis.frames.load_run_docs` (the `json_blob` record cache, one CSV per
+position) so repeated notebook loads do not re-read thousands of files. Identity comes from the
+document's `student`/`references` blocks, never from path arithmetic — the `teacher_*` columns
+describe the *reference* a row was scored against, with `is_own_reference` separating matched
+pairs from controls. Helpers: `endpoint_only`, `own_reference_only`. Notebook:
+`notebooks/eas_analysis.ipynb`.
+
+**Sweep.** `sweep_compute_eas` discovers every student run dir on disk (any depth: plain,
+`ckpt/`-gathered, optimizer-prefixed and `controls/` layouts; not a grid), filters by
+`--animals --models --tags --student-tags --sources --min-checkpoints`, groups units by student
+base then prompt set so each base load and teacher forward happens once per process, and
+recomputes a run whose document is missing or drifted (`steering.eas.eas_doc_status(cheap=True)`
+gate: intermediate checkpoints keyed on path, endpoint and teacher adapters hashed). Cross-base
+runs are discovered like any other (the manifest flags them); interpret cross-base cosines only
+alongside the cross-seed steerability geometry.
+
+The 826 lineage-level `{lineage}/eas/eas_*.json` documents from the pre-migration layout are all
+`blocks_v1` and are left in place: nothing reads them, and they are not comparable to the
+`raw_blocks_v2` `[1:]` means.
 
 ### Student collapse-boundary law (`stats/collapse_law.py`)
 
@@ -1698,7 +1975,7 @@ Audit revision (2026-07-30): the notebook now propagates measured assumption vio
 the exponent algebra instead of booking them as slack. Key change: with ‖B·ΔA‖ ∝ lr^q, the law's
 exponents are b = 1/q and c = (ρ−1)/q; q is measured at 1.68 (matched early steps, new §5
 cross-sectional test on the three r32α4 lr-cells) decaying to 1.22 at endpoints, so the mechanism
-*brackets* b (strict A1 + remnant 0.50–0.54, measured q 0.60–0.82; fitted 0.561 inside) rather
+*brackets* b (strict A1 + remnant 0.50–0.54, measured q 0.60–0.82; against the designed-population b = 0.659 the remnant bracket no longer contains the fit — bracketing verdict needs recompute) rather
 than deriving it. Also downgraded to match the data: A2 dominance is verified only on the
 lr-approach (the high-α std cell is cross-dominated, 0.93×); ρ is not constant (0.72→0.83,
 strict-A1 pooled c = −0.108 sits outside the fit CI); the ~12% felt threshold is extrapolation
@@ -2260,7 +2537,7 @@ teachers are near-identical only on-distribution; off_topic trait intrusion is 0
 driver of the arms' 11× yield spread (correlate only; focus vs strong breadth is identical yet
 yields differ ~3×).
 
-Result: the law generalises. All six arms give `b ≈ 0.56` (I²=2%) and `c ≈ −0.085` (I²=0%),
+Result: the law generalises. All six arms are mutually homogeneous (I²=2% in b, 0% in c; their trait-label point values are retired as reference exponents — the reference is the designed cross-data-order fit b = 0.659, c = −0.164),
 with `c < 0` excluding zero in 6/6 — **rank is protective on every lineage** — and `K*`
 spanning only 1.4×. **Gotcha:** `DEAD_SEED` is *not* transferable. §12's `0.01` was tuned on
 the focus lineage; the weaker lineages' live mode sits at 0.01–0.02, so reusing it cuts
@@ -2470,6 +2747,30 @@ Found when `ce_student` / `ce_base` were added to `pile_probe`: 20,126 of 20,618
 with finite records; backfilled the same day (pre-backfill copy
 `analysis/probe_cache.csv.bak-20260820-prebackfill`).
 
+**Warm-sweep cost (2026-09-10).** A 40-call notebook (`transfer_receiver_family`) was spending
+~40% of its 14-minute execution rewriting caches that had not changed. Two causes, both in
+`load_record_cache`: pandas' default CSV float parser moves ~12% of stored `record_mtime`
+values by one ulp, so under the exact-mtime staleness test those rows read as changed on
+*every* sweep (re-read from cold-1, counted as "refreshed", and forcing a full rewrite of the
+28 MB probe cache and the 224 MB `pref_summary` blob cache on every call); and each call
+re-parsed those CSVs from scratch. Fixes: the CSV is read with
+`float_precision="round_trip"` (the writer was already exact — the 50 µs same-size rewrite
+test keeps its meaning and `_MTIME_TOL` stays 0); the parsed frame is memoised per process
+keyed on the cache file's `(mtime_ns, size)`, so a rewrite by another process still
+invalidates it; the stat/read sweep runs on a 64-thread pool
+(`RECORD_CACHE_SWEEP_WORKERS`; cold-1 stats cost ~5.5 ms serially, and 10k of them take
+6.8 s at 32 threads, 3.0 s at 64, 2.9 s at 128); a rewrite is triggered only by new/changed
+rows or the eviction of a *cached* row (an inventory path that never had a record used to
+land in the eviction set on every call, and 33 unevaluated cells were forcing the 224 MB
+rewrite each time); and the persist serializes through pyarrow when importable (0.4 s vs
+3.5 s for the blob cache, verified cell-identical through the round-trip reader; pandas
+fallback when pyarrow is absent or refuses a mixed-type column). Measured on the dog original-sender load (10,284 seed-1 runs, 100 lineages, run
+loader plus probe cache): warm call ~30 s → 4 s, with 0 refreshed rows and no rewrite. Tests:
+`test_warm_sweep_reads_nothing_and_never_rewrites`,
+`test_csv_memo_parses_once_until_the_file_changes`,
+`test_unrecorded_inventory_path_does_not_force_a_rewrite`,
+`test_serialized_cache_round_trips_cell_for_cell`.
+
 ### Teacher cos(ΔW, W₀) mediation screen (2026-08-25)
 
 `scripts/teacher_cos_screen.py` runs the student P2 mediation test on the teacher stage
@@ -2593,6 +2894,28 @@ pp1/dp1 remain the operative labels for the existing arms; the wide pools are th
 default for the new families and the reviewer-facing robustness check for the old ones
 (a re-probe of the label-sensitive band, not done).
 
+### Training-retained axis: Pile CE of the public pretraining checkpoints (2026-09-09)
+
+Pythia and PolyPythias publish every base's full checkpoint trajectory, so a
+student's Pile CE can be placed on its own base's pretraining curve with no fitting:
+**training retained** = the earliest pretraining step at which the base itself had
+already reached the student's CE (log-step interpolation between bracketing
+checkpoints; first crossing wins under a noisy tail). This is a continuous,
+interpretable damage axis; the unigram anchor H_uni = 7.8045 is one point on it
+(the CE of a very early checkpoint), and dead/alive is the binarisation at that point.
+
+`scripts/base_ckpt_pile_ce.py` measures each `@step{N}` revision (downloaded into the
+configured HF cache on first use) on the nested `pp1w-pythia` pool and writes
+`{output_root}/analysis/base_ckpt_pile_ce/{base_dir_name}.json`: per step `ce_pp1`
+(32-doc subset — the students' readout pool, token-identical) and `ce_pp1w` (128-doc)
+from one forward pass, plus per-document NLL sums. Default grid = every 5,000 steps to
+143,000 plus the log-spaced early checkpoints (0, 1, 2, …, 512, 1000), for
+`original,data-seed1,full-seed1`; re-runs skip recorded steps. Readout:
+`coherence.base_ckpt_ce.load_curve(output_root, base)` and
+`training_retained(ce, curve)` / `training_retained_fraction`. Cost is a post-processing
+pass: ~20 s per checkpoint on a shared A40 (dominated by weight loading), 41 checkpoints
+per base.
+
 ### Notebook-code encapsulation pass + label API (2026-08-26)
 
 An audited sweep moved the notebooks' copy-pasted code into the analysis
@@ -2681,7 +3004,10 @@ is the pair-group CONTRAST bracketed by controls, never absolute values.
 - `cka/pool_io.py` — sequence pools encoding the position rules: position 0 (attention
   sink) never eligible; numbers condition samples only digit-bearing completion tokens.
   `cka/extract_io.py` — raw post-block residual capture (13 slots; deliberately NOT
-  `output_hidden_states`, whose last slot is post-final-LN), position-row gathering,
+  `output_hidden_states`, whose last slot is post-final-LN; since 2026-09-09 the forward
+  runs the bare `gpt_neox` core, not the CausalLM head — identical slots, but no unused
+  `[B, T, vocab]` fp32 logits, which cost ~26 GB per 256×512 Pile batch and OOM'd pair
+  runs on shared GPUs), position-row gathering,
   mean-pool rows, and top-r PC fit/projection. The capture itself now lives in the shared
   `models/residual.py` (`capture_raw_activations`), which `steering/vectors.py` also uses.
 - Pipeline: all 7 models resident, one forward per model per batch; per-model
@@ -3447,3 +3773,140 @@ Section 1 of
 `notebooks/collapse_surgery_and_sgd.ipynb` is the exception: it is the 08-26 KL-era v2
 readout, retained as-is because its artifact predates the paired baseline, so its labels
 come from `pile_kl` and its `stored_kl` print is diagnostic only.
+
+### 2026-09-09 — teacher quality audit (are the canonical top-10 teachers right elsewhere?)
+The seed2seed / full-seed factorials reuse `run_logs/dog_top10_kband_configs.json` (10
+teacher HP tags ranked 07-28 by std-recipe ep20 same-model test p(dog) on dog|pythia-160m,
+one seed). The audit asks whether that set is effective for cat/lion/pig and for the
+data-seed1 / full-seed1/2/3 bases. Teacher-side evaluations already exist for all 20
+(animal × base) trees on the 288-cell grid (`eval/pile_probe.json`, `preference_eval.json`,
+ftseed1) and cannot rank the top-10 (validation p ≈ 1.0 everywhere, grid-median ΔCE), so
+the discriminator is a same-model student ladder at one cell, `ep5_lr1e-4_r8a32` (the ep5
+rung of the existing orig/ds1 std screens, which already cover every candidate there).
+- **Candidate gate** (Angela): Pile ΔCE ≤ 3.0 and validation p ≥ 0.95 on grid288 →
+  64–83 candidates per tree, written by the notebook as
+  `run_logs/teacher_audit/{animal}_{short}_candidates.json` (schema in the notebook §3 and
+  in the generator docstring; the `animal` field is required by the samedistill worker).
+- **Notebook** `notebooks/teacher_quality_audit.ipynb` (executed; edit + re-execute
+  directly): §1 teacher census per tree, §2 existing same-model evidence (orig/ds1 ep5
+  screens, fs diagonals), §3 manifests (`WRITE_MANIFESTS` constant), §4 Stage-2 readout
+  of the campaign as it lands (prefers `{animal}_{short}_pool_tags.json`).
+- **Generator** `run_logs/teacher_audit_campaign_gen.py` (writes jobs files + prints
+  `jobq submit` lines, never submits): phases `smoke → gate → numgen → check → students →
+  probe`, one `--phase` per invocation with a drain-and-look between them. `smoke` =
+  `sweep_generate_numbers --n-prompts 3000` on tags lacking a real ≥10k pool (lands in
+  the pool's `_dryrun/`); `gate` classifies real-pool / pass (keep_rate ≥ 0.10 ⇒ ≥10k of
+  100k) / skip / no-smoke and writes `pool_tags.json`; `numgen` regenerates only passing
+  tags; `check` asserts adapter + real ≥10k pool (exit 1 on shortfall) — needed because
+  the samedistill worker SKIPs rc=0 on a short pool, so `--depends-on` alone is not a
+  completeness guarantee; `students` = one `animal_samedistill_worker.py ... --epochs 5
+  --modes plain --sets test,off_topic` job per tag; `probe` = `run_final_evals --evals
+  probe` shards over the ep5 leaves (dataset dir from the pool's `n_raw`; cat|orig legacy
+  pools are n40k). Queue names `taud-{smoke,ngen,sd,probe}-{animal}-{short}`, priorities
+  53/52/50/51 (above the fs factorials at 45–49). Base spelling table lives in the
+  generator (`BASES`) and the notebook.
+- **Worker**: `animal_samedistill_worker.py --sets` (default `test,storytelling`,
+  unchanged behaviour; audit uses `test,off_topic`) via `prompt_sets_from_names`.
+- **Loader fix**: `analysis.transfer_factors.expand_model_name` /
+  `anchored_cut_by_base` replace the `"pythia-160m-" + label` re-expansion, so
+  `original` and `full-seed<N>` rows resolve to `pythia-160m` / `pythia-160m-seed<N>` and
+  the anchored-cut map now carries the full-seed bases.
+- Known limits: the numgen sweep has no `--allow-path-migration`, so pre-08-06 pools whose
+  manifests store `/mnt/ssd-2` checkpoint paths (e.g. the two short cat|orig n40k pools)
+  cannot be regenerated in place — they surface as `check` shortfalls and drop.
+
+### 2026-09-09 — full OLMo boundary paper revision and mechanism replication
+
+The ICLR manuscript (`docs/results/collapse_two_factor_iclr.md`) now leads with
+approximately transferable boundary shape, reproducibility across OLMo receiver
+seeds, and training-dependent boundary level, including recovery. Both exact
+nonadaptive populations contain 432 cells (rank through 256, alpha through 512).
+They agree on 427 labels; the fixed pooled Pythia coordinate makes 9/13 errors
+after receiver-specific threshold calibration. `docs/paper/evidence/olmo_20260909/`
+archives the audited rows, fits, temporal summaries, and recomputation scripts.
+The paper distinguishes this complete boundary evidence from the earlier
+336/332-adapter OLMo dose census. It excludes invalidated partial-rotation results
+and pending interventions. `docs/paper/plot_olmo_boundary.py` generates the new
+boundary and temporal figures; `build_paper_exports.py` builds the revised reader
+and DOCX with manuscript figure numbering.
+
+`scripts/plan_olmo_mechanism.py` prepares and plans a matched OLMo replication:
+full-population native and shared-dose direction replacement, completion of the
+196 missing dose ladders, lower-dose extension of the censored population, and
+77 matched cells per receiver for detailed selectors. It freezes the historical
+arm reference doses and verifies dataset, adapter, probe, and manifest identity
+before reusing old evaluations. CPU norm preparation precedes dose planning;
+GPU smoke tests precede production evaluations. `position_surgery.py` supports
+pp1/dp1, CPU log-probability storage, and signed per-run dose maps with controls
+at the same dose. Synthetic injection tools resolve immutable OLMo base refs,
+carry probe identity, and reuse independent per-module random directions along
+each size ladder; intruder measurement can use a recorded module stride.
+
+The nine `olmo-mech-0909-{norms,plan,smoke,native,shared,dose,detail,injection,aggregate}`
+queues contain 221 jobs in `run_logs/queue_angela`. They use a frozen shared source
+bundle at `run_logs/olmo_mechanism_20260909/code/`, strict dependencies, and a shared
+one-job-per-GPU campaign cap. CPU jobs are unpinned. The goncalo-temp-1 CPU cap
+was raised from 6 to 10 after measuring utilization and memory; the worker reads
+the policy live. The original policy and measurement are recorded in the campaign
+folder. Targeted planner, surgery, injection, dose-census, and weightspace checks
+passed (64 tests).
+
+
+### 2026-09-09 — collapse manuscript narrative pruning
+
+The ICLR manuscript now has two results sections: boundary transfer and temporal
+behavior, followed by causal size/direction effects and their connection to
+hyperparameters. Intruder and trait dissociations move to supporting Appendices E–F.
+Training-time dose clamps, frozen/moved components, and redundant regime and
+trait-dose analyses are omitted from this paper, with original evidence preserved.
+The outline records the selection rationale. The boundary plot no longer marks
+configurations by campaign stage. Exports contain five main and three supplementary
+figures, with updated numbering and references.
+
+### 2026-09-09 — optimizer, intervention, and trajectory paper figures
+
+The main paper now includes the optimizer interpretation, the frozen/moved
+component explanation, intruder counterexamples, and a short SL/collapse section.
+Adam is the paper label: sampled saved Pythia, OLMo, and teacher training arguments
+confirm `adamw_torch` with zero weight decay, betas (0.9, 0.999), and epsilon 1e-8.
+The saved binary arguments were inspected without executing pickle payloads.
+
+Six PNG/PDF figures are produced by `docs/paper/plot_iclr_boundary.py` and
+`plot_iclr_interventions.py`. The current figure block is prepended to
+`notebooks/collapse_two_factor_paper_figures.ipynb` without changing its legacy
+cells, and the export builder reads shared main-authored captions from
+`docs/paper/iclr_figure_captions.json`. Source tables and hashes are archived in
+`docs/paper/evidence/figures_20260909/`, including recomputed checkpoint fits,
+paired 932-run component interventions, the fixed 3,031/668 dose populations,
+2,501 finite census direction pairs, and matched 126-teacher selector outcomes.
+The exact 432-cell OLMo boundary populations remain independently audited.
+Training-time clamps and invalidated partial-rotation figures remain excluded.
+
+### 2026-09-09 — catastrophic-forgetting narrative and full exponent comparison
+
+The ICLR manuscript and current figure captions use catastrophic forgetting as
+the established phenomenon, measured continuously by excess cross-entropy. A
+unigram-based operational failure threshold defines the boundary; recovery means
+returning below that threshold. The introduction ends with three short headline
+contributions: boundary regularity, causal size/direction effects, and intruder
+refutation. Optimizer dependence and approximate exponent stability through
+training qualify the boundary claim; K* movement is explained in the results. Figure 1 now includes separate b/c estimates and 95%
+intervals for all ten established boundary populations; Appendix D contains
+the complete table. The Frobenius threshold and matched spectral-predictor
+comparison are restored in the main results, with observations, AUCs, and source
+hashes in the figure evidence directory. The paper uses the exact 1,008-run
+nonadaptive cross-data-order population (932 finite) for this comparison.
+Artifact names and experimental measurements remain unchanged.
+
+### 2026-09-09 — Qwen boundary evidence in the ICLR draft
+
+`docs/paper/evidence/qwen_20260909/producer.py` audits the exact 288-cell Qwen
+nonadaptive design, training manifests, and native CE instruments before using
+the shared logistic estimator. All endpoints are complete; the trajectory
+snapshot contains all 288 runs at ten checkpoints. Free b/c are 0.622/−0.083; the
+fixed Pythia coordinate classifies 280/288 outcomes after threshold calibration.
+The draft, eleven-population exponent table, boundary figure, and seven-population
+trajectory figure incorporate these measurements. The main agent authored prose.
+`docs/paper/boundary_fitting_protocol.md` distinguishes free fits, fixed-coordinate
+thresholds, conditional intervals, and legacy label paths. The spectral-threshold
+limitation remains explicit in the third introduction contribution.

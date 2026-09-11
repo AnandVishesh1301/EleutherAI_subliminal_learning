@@ -453,21 +453,31 @@ def _scan_steerability(plan: CleanPlan, base: Path) -> list[Action]:
     return out
 
 
-def _scan_eas(plan: CleanPlan, base: Path) -> list[Action]:
-    """EAS ``eas_*.json`` / ``v_teacher_*.pt`` are atomic + hash-gated (KEPT); tmp orphans only."""
+def _scan_eas(plan: CleanPlan, roots: list[Path]) -> list[Action]:
+    """EAS documents/vectors are atomic + hash-gated (KEPT); orphan temp files only.
+
+    Covers every location the per-run EAS design writes (`pipelines.eas_pipeline`): the
+    student run dirs' ``eval/eas_*.json`` + ``eval/eas_vectors_*.pt``, the teacher-side
+    ``eval/eas_vectors/`` vector cache, the ``analysis/eas_cache/`` base means -- and the
+    RETIRED per-lineage ``{lineage}/eas/`` documents, which are left on disk untouched but
+    can still hold a temp orphan from an interrupted write.
+    """
     out: list[Action] = []
-    if not base.is_dir():
-        return out
-    for edir in sorted(base.rglob("eas")):
-        if not edir.is_dir():
+    for base in roots:
+        if not base.is_dir():
             continue
-        for glob in ("eas_*.json.tmp.*", "v_teacher_*.pt.tmp.*"):
-            for f in sorted(edir.glob(glob)):
-                if not f.is_file() or not plan.age_ok(f):
-                    continue
-                a = plan.mk("rm_file", f, "eas", "orphan temp file")
-                if a is not None:
-                    out.append(a)
+        # Per-run documents + sidecars (`eval/`), and the retired lineage docs (`eas/`).
+        out += _scan_tmp(
+            plan, base,
+            ("eas_*.json.tmp.*", "eas_vectors_*.pt.tmp.*", "v_teacher_*.pt.tmp.*"), "eas",
+        )
+        # The teacher-side vector cache and the base-mean cache name their files by prompt
+        # sha, so the DIRECTORY is what identifies them.
+        for d in sorted(base.rglob("eas_vectors")):
+            if d.is_dir():
+                out += _scan_tmp(plan, d, ("*.tmp.*",), "eas")
+        if base.name == "eas_cache":
+            out += _scan_tmp(plan, base, ("*.tmp.*",), "eas")
     return out
 
 
@@ -616,7 +626,8 @@ def plan_scan(plan: CleanPlan, stages: tuple[str, ...]) -> list[Action]:
     if "steerability" in stages:
         out += _scan_steerability(plan, root / "teachers")
     if "eas" in stages:
-        out += _scan_eas(plan, root / "students")
+        out += _scan_eas(plan, [root / "students", root / "teachers",
+                              root / "analysis" / "eas_cache"])
     if "coherence" in stages:
         out += _scan_coherence(plan)
     return _dedupe(out)
@@ -649,7 +660,7 @@ def detect_stage(path: Path, plan: CleanPlan) -> str | None:
         return "numbers"
     if "steerability" in parts:
         return "steerability"
-    if "eas" in parts:
+    if {"eas", "eas_vectors", "eas_cache"} & set(parts):
         return "eas"
     if parts[0] == "teachers":
         return "teacher"
@@ -739,7 +750,7 @@ def plan_targeted(
     elif stage == "steerability":
         out += _scan_steerability(plan, path)
     elif stage == "eas":
-        out += _scan_eas(plan, path)
+        out += _scan_eas(plan, [path])
     elif stage == "coherence":
         out += _scan_coherence(plan)
     return _dedupe(out)

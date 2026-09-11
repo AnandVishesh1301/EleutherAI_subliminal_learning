@@ -1,6 +1,11 @@
 """Loaders for the DataDecide OLMo-1B student ladders (``run_logs/dd1b_worker.py``): the
 same-model arm (``dd-1b`` -> ``dd-1b``) and the cross-seed arms (``dd-1b`` teacher ->
 ``dd-1b-seed{2,3}`` students; pass ``base=<student dir>, teacher_base=DD1B_BASE``).
+Control arms (2026-09-09) share every loader: pass ``source="base", numbers_base=<pool base dir>``
+(untuned-base control pool; ``numbers_base=None`` = the student's own base) or ``source="rng"``
+(shared rng pool) with ``teacher_tag=None``; the trees are
+``students/controls/base/{student}/teacher-{numbers_base}/{dataset_tag}`` and
+``students/controls/rng/{student}/{dataset_tag}``.
 
 The dd-1b arm writes the canonical student tree under
 ``students/{animal}/{base}/teacher-{teacher_base}/{ttag}_tseed{N}/{dataset_tag}/{stag}/ftseed{s}/`` with
@@ -43,32 +48,53 @@ DD1B_DATASET_TAG = "ex10-20_prefix_n100k"
 _TAG_RE = re.compile(r"^ep\d+_lr[0-9.e+-]+_r\d+a\d+$")
 
 
-def dataset_dir(output_root: Path, teacher_tag: str, *, teacher_seed: int = 0,
+def dataset_dir(output_root: Path, teacher_tag: str | None, *, teacher_seed: int = 0,
                 animal: str = DD1B_ANIMAL, base: str = DD1B_BASE,
                 teacher_base: str | None = None,
-                dataset_tag: str = DD1B_DATASET_TAG) -> Path:
-    """The directory holding every student cell of one teacher lineage.
+                dataset_tag: str = DD1B_DATASET_TAG,
+                source: str = "teacher", numbers_base: str | None = None) -> Path:
+    """The directory holding every student cell of one lineage (teacher arm or control arm).
 
     Args:
         output_root: The ``outputs/`` root (resolve it from the paths YAML at time of use).
-        teacher_tag: Teacher parameter tag, e.g. ``ep10_lr5e-4_r64a128``.
+        teacher_tag: Teacher parameter tag, e.g. ``ep10_lr5e-4_r64a128`` (``source="teacher"``
+            only; ignored -- may be ``None`` -- for the control sources).
         teacher_seed: The teacher's fine-tune seed (the arm uses 0).
-        animal: Trait animal.
+        animal: Trait animal (teacher source only; the control trees are animal-independent).
         base: Dir-name label of the **student** base (the tree's first level).
         teacher_base: Dir-name label of the teacher's base; ``None`` means the same as
             `base` (the same-model arm). The cross-seed arms (``dd-1b-seed2`` students of the
             default-seed teacher) pass ``base=<seed-2 dir>, teacher_base=DD1B_BASE``.
         dataset_tag: Number-pool tag.
+        source: ``"teacher"`` (default, byte-identical layout), ``"base"`` (students of the
+            untuned-base control pool) or ``"rng"`` (students of the shared rng pool) -- the
+            same vocabulary as `students.layout.student_param_dir`.
+        numbers_base: ``source="base"`` only: dir-name label of the base whose control pool was
+            distilled; ``None`` means the student's own base (same-base control). The matched
+            control of a cross-seed treatment names the TEACHER lineage's base here
+            (cross-base control, e.g. ``base=<seed-2 dir>, numbers_base=DD1B_BASE``).
 
     Returns:
-        ``.../students/{animal}/{base}/teacher-{teacher_base}/{ttag}_tseed{N}/{dataset_tag}``.
+        teacher: ``.../students/{animal}/{base}/teacher-{teacher_base}/{ttag}_tseed{N}/{dataset_tag}``;
+        base: ``.../students/controls/base/{base}/teacher-{numbers_base}/{dataset_tag}``;
+        rng: ``.../students/controls/rng/{base}/{dataset_tag}``.
     """
-    tb = base if teacher_base is None else teacher_base
-    return (Path(output_root) / "students" / animal / base / f"teacher-{tb}"
-            / f"{teacher_tag}_tseed{teacher_seed}" / dataset_tag)
+    root = Path(output_root) / "students"
+    if source == "teacher":
+        if teacher_tag is None:
+            raise ValueError("source='teacher' needs teacher_tag")
+        tb = base if teacher_base is None else teacher_base
+        return (root / animal / base / f"teacher-{tb}"
+                / f"{teacher_tag}_tseed{teacher_seed}" / dataset_tag)
+    if source == "base":
+        nb = base if numbers_base is None else numbers_base
+        return root / "controls" / "base" / base / f"teacher-{nb}" / dataset_tag
+    if source == "rng":
+        return root / "controls" / "rng" / base / dataset_tag
+    raise ValueError(f"unknown source {source!r} (teacher | base | rng)")
 
 
-def load_base_prior(output_root: Path, teacher_tag: str, **kw) -> dict[str, float]:
+def load_base_prior(output_root: Path, teacher_tag: str | None, **kw) -> dict[str, float]:
     """``{set_name: base p_target}`` from the lineage's cached base control.
 
     Args:
@@ -97,7 +123,7 @@ def _traj_points(leaf: Path, name: str) -> list[dict]:
     return list(rec["points"]) if rec else []
 
 
-def load_endpoint_frame(output_root: Path, teacher_tag: str, *, seed: int = 1,
+def load_endpoint_frame(output_root: Path, teacher_tag: str | None, *, seed: int = 1,
                         dead_cut: float | None = None, **kw) -> pd.DataFrame:
     """One row per student run of one teacher lineage: endpoint readouts + trajectory summaries.
 
@@ -111,7 +137,7 @@ def load_endpoint_frame(output_root: Path, teacher_tag: str, *, seed: int = 1,
         **kw: Forwarded to `dataset_dir`.
 
     Returns:
-        Columns: ``tag, epochs, lr, rank, alpha, diverged, n_train_steps, ce, delta_ce, kl,
+        Columns: ``tag, epochs, lr, rank, alpha, diverged, n_train_steps, tf32, ce, delta_ce, kl,
         p_test, p_off, p_story, has_traj, n_ckpt, p_test_peak, p_test_peak_step, p_test_end_traj,
         dce_peak, dce_peak_step`` (+ ``collapsed``/``cross_step`` when `dead_cut` is given).
         Rows without a probe or preference record carry NaN there -- never a default.
@@ -131,8 +157,13 @@ def load_endpoint_frame(output_root: Path, teacher_tag: str, *, seed: int = 1,
                      "n_train_steps": np.nan, "ce": np.nan, "delta_ce": np.nan, "kl": np.nan,
                      "p_test": np.nan, "p_off": np.nan, "p_story": np.nan}
         man = _read(leaf / "train_manifest.json")
+        row["tf32"] = np.nan
         if man:
             row["n_train_steps"] = man.get("n_train_steps", np.nan)
+            # Part of the run identity since 2026-09-08 (non-Pythia/OLMo families); absent on
+            # older manifests -> NaN, never False (an fp32 run and an unknown run differ).
+            train = (man.get("run_identity") or {}).get("train") or {}
+            row["tf32"] = bool(train["tf32"]) if "tf32" in train else np.nan
         probe = _read(leaf / "eval" / "pile_probe.json")
         if probe:
             row.update(ce=float(probe["ce_student"]), delta_ce=float(probe["delta_ce"]),
@@ -172,7 +203,7 @@ def load_endpoint_frame(output_root: Path, teacher_tag: str, *, seed: int = 1,
     return pd.DataFrame(rows)
 
 
-def load_trajectories(output_root: Path, teacher_tag: str, *, seed: int = 1,
+def load_trajectories(output_root: Path, teacher_tag: str | None, *, seed: int = 1,
                       tags: list[str] | None = None, **kw) -> pd.DataFrame:
     """Long frame, one row per (run, checkpoint), joining the trait and dp1-probe trajectories.
 
@@ -219,3 +250,114 @@ def load_trajectories(output_root: Path, teacher_tag: str, *, seed: int = 1,
     cols = ["tag", "lr", "rank", "alpha", "step", "frac", "p_test", "p_off", "delta_ce", "kl"]
     return (pd.concat(out, ignore_index=True)[cols] if out
             else pd.DataFrame(columns=cols))
+
+
+def load_pool_keep(output_root: Path, teacher_tag: str, *, teacher_seed: int = 0,
+                   animal: str = DD1B_ANIMAL, base: str = DD1B_BASE,
+                   gen_tag: str = "ex10-20", mode: str = "prefix") -> dict[str, float]:
+    """Prefix-filter keep rates of one teacher's number pool (full pool and 1000-sample dry run).
+
+    Reads ``numbers/{animal}/{base}/{ttag}/ftseed{N}/{gen_tag}/modes/{mode}/manifest.json`` and
+    the same record under ``_dryrun/`` (``scripts.generate_numbers --dry-run``).
+
+    Returns:
+        ``{"keep_full", "n_kept_full", "n_raw_full", "keep_dry", "n_kept_dry"}`` -- NaN where
+        that pool (full or dry) does not exist. Never a default keep rate.
+    """
+    gen = (Path(output_root) / "numbers" / animal / base / teacher_tag
+           / f"ftseed{teacher_seed}" / gen_tag)
+    out = {"keep_full": np.nan, "n_kept_full": np.nan, "n_raw_full": np.nan,
+           "keep_dry": np.nan, "n_kept_dry": np.nan}
+    full = _read(gen / "modes" / mode / "manifest.json")
+    if full and (gen / "raw.jsonl").exists():
+        out.update(keep_full=float(full["keep_rate"]), n_kept_full=int(full["n_filtered"]),
+                   n_raw_full=int(full["n_raw"]))
+    dry = _read(gen / "_dryrun" / "modes" / mode / "manifest.json")
+    if dry:
+        out.update(keep_dry=float(dry["keep_rate"]), n_kept_dry=int(dry["n_filtered"]))
+    return out
+
+
+def load_teacher_frame(output_root: Path, *, animal: str = DD1B_ANIMAL, base: str = DD1B_BASE,
+                       seed: int = 0, dead_cut: float | None = None,
+                       with_pools: bool = True) -> pd.DataFrame:
+    """One row per teacher of one ``teachers/{animal}/{base}`` tree: probe + pool coverage.
+
+    The teacher trees of the HF-family arms (``run_logs/hf_worker.py``: Qwen/Llama/Gemma) and
+    the DataDecide arm share the layout ``{tag}/ftseed{seed}/{checkpoints,train_manifest.json,
+    eval/pile_probe.json}``. This is the read site for a whole tree (teacher screens, band fills
+    and the 1,568-cell Qwen teacher lattice), so notebooks never glob it inline.
+
+    Args:
+        output_root: The ``outputs/`` root.
+        animal: Trait animal (tree's first level).
+        base: Dir-name label of the base model (tree's second level).
+        seed: Teacher fine-tune seed (leaf ``ftseed{seed}``).
+        dead_cut: If given, adds ``collapsed`` (``delta_ce > dead_cut``; NaN when unprobed).
+        with_pools: Also fold in `load_pool_keep` for every teacher (one manifest read each).
+
+    Returns:
+        Columns ``tag, epochs, lr, rank, alpha, trained, probed, n_train_steps, final_train_loss,
+        ce, delta_ce, kl, probe_mtime`` (+ the `load_pool_keep` keys, + ``collapsed``).
+        ``trained`` = the adapter file exists; ``probed`` = the probe record exists. Unprobed
+        teachers carry NaN readouts, never a default.
+    """
+    root = Path(output_root) / "teachers" / animal / base
+    rows: list[dict] = []
+    for cell in sorted(root.iterdir()) if root.exists() else []:
+        if not _TAG_RE.match(cell.name):
+            continue
+        leaf = cell / f"ftseed{seed}"
+        if not leaf.exists():
+            continue
+        f = parse_param_tag(cell.name)
+        row: dict = {"tag": cell.name, "epochs": int(f["epochs"]), "lr": float(f["lr"]),
+                     "rank": int(f["rank"]), "alpha": int(f["alpha"]),
+                     "trained": (leaf / "checkpoints" / "adapter_model.safetensors").exists(),
+                     "probed": (leaf / "eval" / "pile_probe.json").exists(),
+                     "n_train_steps": np.nan, "final_train_loss": np.nan,
+                     "ce": np.nan, "delta_ce": np.nan, "kl": np.nan, "probe_mtime": np.nan}
+        man = _read(leaf / "train_manifest.json")
+        if man:
+            row["n_train_steps"] = man.get("n_train_steps", np.nan)
+            row["final_train_loss"] = man.get("final_train_loss", np.nan)
+        probe = _read(leaf / "eval" / "pile_probe.json")
+        if probe:
+            row.update(ce=float(probe["ce_student"]), delta_ce=float(probe["delta_ce"]),
+                       kl=float(probe["kl_base_student"]),
+                       probe_mtime=(leaf / "eval" / "pile_probe.json").stat().st_mtime)
+        if with_pools:
+            row.update(load_pool_keep(output_root, cell.name, teacher_seed=seed,
+                                      animal=animal, base=base))
+        if dead_cut is not None:
+            row["collapsed"] = (bool(row["delta_ce"] > dead_cut)
+                                if np.isfinite(row["delta_ce"]) else np.nan)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def pool_numbers_per_row(output_root: Path, teacher_tag: str, *, teacher_seed: int = 0,
+                         animal: str = DD1B_ANIMAL, base: str = DD1B_BASE,
+                         gen_tag: str = "ex10-20", mode: str = "prefix",
+                         n_rows: int = 5000) -> float:
+    """Mean count of numbers per kept row in one teacher's filtered pool (first `n_rows` rows).
+
+    Distinguishes "list" pools (the teacher still emits 5-10 numbers per completion) from
+    single-number pools (a symptom of teacher dose on Qwen). Reads
+    ``numbers/{animal}/{base}/{ttag}/ftseed{N}/{gen_tag}/modes/{mode}/filtered.jsonl``.
+
+    Returns:
+        The mean length of the ``numbers`` field over the rows read; NaN if the file is absent.
+    """
+    f = (Path(output_root) / "numbers" / animal / base / teacher_tag / f"ftseed{teacher_seed}"
+         / gen_tag / "modes" / mode / "filtered.jsonl")
+    if not f.exists():
+        return float("nan")
+    lens: list[int] = []
+    with f.open() as fh:
+        for i, line in enumerate(fh):
+            if i >= n_rows:
+                break
+            if line.strip():
+                lens.append(len(json.loads(line).get("numbers", [])))
+    return float(np.mean(lens)) if lens else float("nan")

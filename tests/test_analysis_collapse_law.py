@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from subliminal_learning.analysis.collapse_law import (
     B_LAW,
     C_LAW,
+    KSTAR_CALIBRATED,
     DEAD_SEED,
     KSTAR_DS1_DESIGN,
     KSTAR_POOLED,
@@ -329,10 +330,13 @@ def test_adapter_coherence_one_row_per_module_and_rank1_cos_is_nan(tmp_path):
 # ------------------------- K helpers -------------------------
 
 
-def test_kstar_anchors_distinct_and_pooled_is_canonical():
-    assert KSTAR_POOLED == pytest.approx(7.87e-4)
-    assert KSTAR_DS1_DESIGN == pytest.approx(7.84e-4)
-    assert KSTAR_POOLED != KSTAR_DS1_DESIGN
+def test_kstar_anchors_resolve_to_designed_population_fit():
+    # 2026-09-09: the only quotable boundary numbers are fits of nonadaptive sweeps; the legacy
+    # pooled / ds1-design anchors are compatibility aliases of the designed-population K*.
+    assert KSTAR_CALIBRATED == pytest.approx(8.79e-4)
+    assert KSTAR_POOLED == KSTAR_CALIBRATED
+    assert KSTAR_DS1_DESIGN == KSTAR_CALIBRATED
+    assert B_LAW == pytest.approx(0.659) and C_LAW == pytest.approx(-0.164)
 
 
 def test_k_of_scalar_matches_formula():

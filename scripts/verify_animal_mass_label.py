@@ -33,6 +33,7 @@ from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
 from subliminal_learning.evaluation.prompt_sets import prompt_set_path
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.stats import collapse_law as cl
 from subliminal_learning.utils.io import atomic_write_json
 
 app = typer.Typer(add_completion=False)
@@ -115,8 +116,8 @@ def main(
     tseed: int = 1,
     numbers_base: str = "pythia-160m",
     dataset_tag: str = "ex10-20_prefix_n100k",
-    b: float = 0.561,
-    c: float = -0.085,
+    b: float = cl.B_LAW,
+    c: float = cl.C_LAW,
     dead_seed: float = 0.005,
     device: str = "cuda",
     hub_org: str = "EleutherAI",

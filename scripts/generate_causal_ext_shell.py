@@ -41,7 +41,11 @@ REPO = Path(__file__).resolve().parents[1]
 # follows an output_root migration instead of silently reading a stale disk.
 AN = bootstrap(REPO)[1] / "analysis"
 
-B, C = 0.561, -0.085
+# Coordinate the cells below were PLACED in (trait-era exponents/anchor, retired
+# 2026-09-09). Kept verbatim so the generated cell lists stay reproducible; K/K*
+# READOUTS must use cl.B_LAW / cl.C_LAW / cl.KSTAR_CALIBRATED (designed
+# cross-data-order population fit, anchored label).
+B_PLACEMENT, C_PLACEMENT = 0.561, -0.085
 KSTAR_DS1 = 7.84e-4
 G_GRID = [0.15, 0.25, 0.35, 0.5, 0.65, 0.8, 0.95, 1.1, 1.3, 1.55, 1.85, 2.2, 2.6]
 # shared global lambda ladder: log-spaced, 0.05..6, 28 points
@@ -54,7 +58,7 @@ def main() -> None:
     harvest = json.loads((AN / "nonadaptive_8x7_harvest.json").read_text())
     cells = {}
     for r in harvest:
-        k = r["lr"] * r["alpha"] ** B * r["rank"] ** C / KSTAR_DS1
+        k = r["lr"] * r["alpha"] ** B_PLACEMENT * r["rank"] ** C_PLACEMENT / KSTAR_DS1
         cells[r["tag"]] = dict(lr=r["lr"], rank=r["rank"], alpha=r["alpha"], K_rel=k)
     reg = json.loads((REPO / "run_logs/causal_exp_cells_v2.json").read_text())
     prev_lam = {c["tag"] for c in reg["lambda_strat_cells"]}

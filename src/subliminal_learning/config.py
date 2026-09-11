@@ -103,6 +103,10 @@ class PathsConfig:
             under the same per-user SSD subdir as `output_root`: the queue is
             world-writable by design for cross-node workers, so a root shared with
             another account mixes both users' queues and lock files in one tree.
+        pile_preshuffled_document: Optional path to the Megatron-format preshuffled Pile
+            document STEM (no extension; ``.idx``/``.bin`` sit beside it) that the Pythia
+            pretraining runs consume. Machine-local: only nodes carrying that copy set it,
+            and readers must fail with a clear error naming the key when it is absent.
     """
 
     output_root: Path
@@ -110,6 +114,7 @@ class PathsConfig:
     dataset_cache_root: Path
     wandb_dir: Path
     queue_root: Path | None = None
+    pile_preshuffled_document: Path | None = None
 
 
 def resolve_queue_root(paths: Mapping[str, Any]) -> Path:
@@ -216,13 +221,26 @@ class TrainConfig:
             `checkpoint_resume` must delete a partial run's ``checkpoint-*`` dirs and
             restart from scratch rather than resume, or the run silently continues with
             a fresh optimizer. Default False keeps every existing run byte-identical.
+        stop_step: Optional early-stop budget (the early-stop arm): training stops
+            immediately after this optimizer step while the LR schedule stays exactly the
+            full run's (warm-up, decay and `n_epochs` are computed over the full budget --
+            `max_steps` is NOT set). Encoded in the param tag (`ft_param_tag` appends
+            ``_stop{N}``) so a truncated run lives beside its full twin at a distinct path.
+            Default None trains the full budget, unchanged.
+        save_at_steps: Optional explicit checkpoint steps used with `stop_step`: adapter
+            checkpoints are written at exactly these steps (plus `stop_step`) and at no
+            others -- HF's fixed `save_steps` interval is disabled while this is set.
+            Sorted, unique, >= 1, <= `stop_step`. Default None keeps the `save_steps`
+            interval, unchanged.
         append_eos: Teacher-FT objective switch (template teachers only): False = the
             noeos ablation arm, dropping the trailing EOS from the supervised span so
             loss lands on the completion tokens alone. Like `optim`, it is encoded in
             the param tag (`ft_param_tag` appends ``_noeos``), so noeos teachers — and
             the numbers/students derived from them, which embed the teacher tag — live
             beside their canonical twins at distinct paths with no root/flag plumbing.
-            Student training configs leave the default.
+            Student training configs leave the default; the distill pipeline passes the
+            flag through to the student trainer and records ``append_eos: false`` in
+            the run identity only when it is off.
         tf32: Allow TensorFloat-32 matmuls (the torch cuda/cudnn backend flags) for the
             duration of the training call ONLY -- storage, optimizer and loss stay fp32,
             and the previous flag values are restored afterwards so same-process
@@ -258,6 +276,8 @@ class TrainConfig:
     save_steps: int = 500
     save_total_limit: int = 1
     save_only_model: bool = False
+    stop_step: int | None = None
+    save_at_steps: tuple[int, ...] | None = None
     append_eos: bool = True
     tf32: bool = False
     group_by_length: bool = False

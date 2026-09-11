@@ -33,6 +33,7 @@ Subliminal effect at eval = p(target)_treatment - p(target)_rng-control on the S
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from pathlib import Path
 
 import typer
@@ -40,7 +41,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipelines.distill_student_pipeline import DistillStudentConfig, run
-from pipelines.generate_numbers_pipeline import mode_dir, prompt_set_tag
+from pipelines.generate_numbers_pipeline import control_draw_tag, mode_dir, prompt_set_tag
 from scripts.generate_numbers import _load_number_config
 from subliminal_learning.gkd.layout import optim_slug
 from subliminal_learning.students.config import load_student_training
@@ -52,21 +53,32 @@ from subliminal_learning.utils.cli import int_list
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 
+DEFAULT_SUBSAMPLE_SEED = 42   # the program-wide subsample seed every existing student used
+_SUB_RE = re.compile(r"_sub(\d+)(?=_|$)")
+_DRAW_RE = re.compile(r"_draw(\d+)(?=_|$)")
+
+
 def _validate_number_dataset_tag(
-    tag: str, ps_tag: str, filter_mode: str, splice_examples: bool
+    tag: str, ps_tag: str, filter_mode: str, splice_examples: bool,
+    *, subsample_seed: int = DEFAULT_SUBSAMPLE_SEED, draw: int | None = None,
 ) -> None:
     """Guard a verbatim --number-dataset-tag against the pool it will name (raises on drift).
 
     The override is used verbatim to name the student dir/identity, so it must still describe
-    the same pool: it (a) starts with the derived ``{ps_tag}_{filter_mode}`` prefix (the only
-    legitimate extra is an honest-n ``_n{X}k`` suffix and ``_spliced``) and (b) carries the
-    ``_spliced`` marker iff ``--splice-examples`` is set. Violations raise typer.BadParameter.
+    the same pool AND the same rows: it (a) starts with the derived ``{ps_tag}_{filter_mode}``
+    prefix (the legitimate extras are an honest-n ``_n{X}k`` suffix, ``_spliced``, ``_sub{S}``
+    and ``_draw{N}``), (b) carries the ``_spliced`` marker iff ``--splice-examples`` is set,
+    (c) carries ``_sub{S}`` iff ``--subsample-seed S`` is not the program default (a non-default
+    subsample written into the canonical dir would collide with the run trained on the default
+    rows: the identity gate refuses it, but ``--force`` would overwrite it), and (d) carries
+    ``_draw{N}`` iff ``--draw N`` is set (the tag names which replicate control pool the rows
+    came from). Violations raise typer.BadParameter.
     """
     prefix = f"{ps_tag}_{filter_mode}"
     if not tag.startswith(prefix):
         raise typer.BadParameter(
             f"--number-dataset-tag {tag!r} must start with the derived prefix {prefix!r} "
-            f"(only an honest-n '_n{{X}}k' suffix and '_spliced' may follow)"
+            f"(only '_n{{X}}k', '_spliced', '_sub{{S}}' and '_draw{{N}}' may follow)"
         )
     has_spliced = "_spliced" in tag
     if has_spliced and not splice_examples:
@@ -79,7 +91,61 @@ def _validate_number_dataset_tag(
             f"--splice-examples is set but --number-dataset-tag {tag!r} lacks '_spliced'; "
             f"the spliced marker and the flag must agree"
         )
+    subs = _SUB_RE.findall(tag)
+    if len(subs) > 1:
+        raise typer.BadParameter(f"--number-dataset-tag {tag!r} carries more than one '_sub{{S}}' marker")
+    if subs and int(subs[0]) != subsample_seed:
+        raise typer.BadParameter(
+            f"--number-dataset-tag {tag!r} names subsample seed {subs[0]} but --subsample-seed "
+            f"is {subsample_seed}; the marker and the flag must agree"
+        )
+    if subsample_seed != DEFAULT_SUBSAMPLE_SEED and not subs:
+        raise typer.BadParameter(
+            f"--subsample-seed {subsample_seed} is not the program default "
+            f"{DEFAULT_SUBSAMPLE_SEED}, so --number-dataset-tag {tag!r} must carry "
+            f"'_sub{subsample_seed}' (otherwise the run would land in the canonical dir of the "
+            f"default-rows student)"
+        )
+    draws = _DRAW_RE.findall(tag)
+    if len(draws) > 1:
+        raise typer.BadParameter(f"--number-dataset-tag {tag!r} carries more than one '_draw{{N}}' marker")
+    if draws and (draw is None or int(draws[0]) != draw):
+        raise typer.BadParameter(
+            f"--number-dataset-tag {tag!r} names replicate draw {draws[0]} but --draw is "
+            f"{draw}; the marker and the flag must agree"
+        )
+    if draw is not None and not draws:
+        raise typer.BadParameter(
+            f"--draw {draw} is set but --number-dataset-tag {tag!r} lacks '_draw{draw}'; "
+            f"the tag must name the replicate pool the rows came from"
+        )
 
+
+def derived_dataset_tag(ps_tag: str, filter_mode: str, splice_examples: bool, *,
+                        subsample_seed: int = DEFAULT_SUBSAMPLE_SEED,
+                        draw: int | None = None) -> str:
+    """The default number-dataset tag: ``{ps_tag}_{filter_mode}`` + ``_spliced`` (byte-identical
+    to before for default inputs), then ``_sub{S}`` for a non-default subsample seed and
+    ``_draw{N}`` for a replicate control pool -- spelled in so a replicate can never land in,
+    or resume from, the canonical student dir of the default rows."""
+    return (f"{ps_tag}_{filter_mode}" + ("_spliced" if splice_examples else "")
+            + (f"_sub{subsample_seed}" if subsample_seed != DEFAULT_SUBSAMPLE_SEED else "")
+            + (f"_draw{draw}" if draw is not None else ""))
+
+
+def control_dataset_dir(numbers_root: Path, source: str, spec, hub_org: str, ps_tag: str,
+                        *, draw: int | None = None) -> Path:
+    """The raw pool dir a control source is distilled from (before the filter-mode level).
+
+    base: ``numbers/controls/base/{model}/{ps_tag}``; rng: ``numbers/controls/rng/{ps_tag}``;
+    with `draw` set, the replicate pool ``{ps_tag}_draw{N}`` at the same level.
+    """
+    tag = control_draw_tag(ps_tag, draw) if draw is not None else ps_tag
+    if source == "base":
+        return numbers_root / "controls" / "base" / Path(*model_dir_parts(spec, hub_org)) / tag
+    if source == "rng":
+        return numbers_root / "controls" / "rng" / tag
+    raise ValueError(f"not a control source: {source!r}")
 
 def main(
     source: str = typer.Option(..., help="Number source to distil: 'teacher' | 'base' | 'rng'."),
@@ -135,6 +201,14 @@ def main(
         "student param_dir + run identity. Validated: must START WITH the derived "
         "'{prompt_set_tag}_{filter_mode}' prefix (only an honest-n '_n{X}k' suffix and "
         "'_spliced' may follow) and must contain '_spliced' IFF --splice-examples is set.",
+    ),
+    draw: int = typer.Option(
+        None,
+        "--draw",
+        help="--source base|rng only: distil REPLICATE draw N (>= 1) of the control pool "
+        "('.../{ps_tag}_draw{N}', made by scripts/generate_numbers.py --source base|rng "
+        "--draw N). Appends '_draw{N}' to the derived dataset tag; a --number-dataset-tag "
+        "override must carry it.",
     ),
     splice_examples: bool = typer.Option(
         False,
@@ -199,10 +273,13 @@ def main(
     # Override wins verbatim (real sweep tags carry an honest-n / already-spliced suffix
     # the derivation cannot produce); else derive as before. Validate the override against
     # the derived prefix + the splice flag so it can't mis-name the pool it will identify.
+    if draw is not None and (source not in ("base", "rng") or draw < 1):
+        raise typer.BadParameter("--draw requires --source base|rng and a draw index >= 1")
     if number_dataset_tag is not None:
-        _validate_number_dataset_tag(number_dataset_tag, ps_tag, filter_mode, splice_examples)
-    dataset_tag = number_dataset_tag or (
-        f"{ps_tag}_{filter_mode}" + ("_spliced" if splice_examples else "")
+        _validate_number_dataset_tag(number_dataset_tag, ps_tag, filter_mode, splice_examples,
+                                     subsample_seed=subsample_seed, draw=draw)
+    dataset_tag = number_dataset_tag or derived_dataset_tag(
+        ps_tag, filter_mode, splice_examples, subsample_seed=subsample_seed, draw=draw
     )
 
     animal = target_animal or cfg.eval.target_animal
@@ -242,13 +319,9 @@ def main(
                 / Path(*model_dir_parts(numbers_spec or spec, cfg.hub_org))
                 / teacher_tag / f"ftseed{teacher_ftseed}" / ps_tag
             )
-        elif source == "base":
-            ds_dir = (
-                numbers_root / "controls" / "base"
-                / Path(*model_dir_parts(spec, cfg.hub_org)) / ps_tag
-            )
         else:
-            ds_dir = numbers_root / "controls" / "rng" / ps_tag
+            ds_dir = control_dataset_dir(numbers_root, source, spec, cfg.hub_org, ps_tag,
+                                         draw=draw)
         ds_dir = mode_dir(ds_dir, filter_mode)
         if not (ds_dir / "filtered.jsonl").exists():
             logger.warning(

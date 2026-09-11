@@ -46,11 +46,11 @@ def main(
 ) -> None:
     import torch
     from safetensors import safe_open
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from scripts.fidelity_heldout_ce import batched_completion_ce
     from scripts.run_final_evals import _rotate1
     from subliminal_learning.config import resolve_roots
+    from subliminal_learning.models.loading_io import load_base_from_ref
     from subliminal_learning.students.dataset_io import load_filtered_rows, subsample_rows
 
     output_root, hf_cache = resolve_roots(output_root, None)
@@ -63,11 +63,9 @@ def main(
             if line.strip():
                 done.add(json.loads(line)["teacher_tag"])
 
-    tok = AutoTokenizer.from_pretrained(base_repo, cache_dir=str(hf_cache / "hub"))
-    tok.pad_token = tok.pad_token or tok.eos_token
-    mdl = AutoModelForCausalLM.from_pretrained(
-        base_repo, torch_dtype=torch.float32,
-        cache_dir=str(hf_cache / "hub")).to(device).eval()
+    # Through the loader, so the tokenizer carries its family's BOS policy even when
+    # `--base-repo` is spelled as a local conversion directory.
+    mdl, tok = load_base_from_ref(base_repo, hf_cache, device)
     w0, mods = {}, {}
     for name, m in mdl.named_modules():
         if (name.startswith("gpt_neox.layers.") and name.split(".")[-1] in

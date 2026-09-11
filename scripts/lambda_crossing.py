@@ -34,16 +34,17 @@ def main(
     output_root: Path = typer.Option(None),
 ) -> None:
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_ce, pile_logprobs,
+        build_probe_pool, mean_ce, pile_logprobs, resolve_probe_pool_spec,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.evaluation.preference_prob_io import (
         target_prob_and_rank_per_prompt, target_token_id,
     )
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
+    from subliminal_learning.models.loading_io import load_base_from_ref
+    from subliminal_learning.utils.run_io import base_ref_for_run
     from subliminal_learning.weightspace.adapters import (
         has_nonfinite, iter_lora_pairs, load_lora_tensors,
     )
@@ -66,20 +67,19 @@ def main(
         rd = Path(line.strip())
         if not line.strip() or str(rd) in done:
             continue
-        cfg = rd / "checkpoints" / "adapter_config.json"
-        if cfg.exists():
-            by_base[json.loads(cfg.read_text())["base_model_name_or_path"]].append(rd)
+        if (rd / "checkpoints" / "adapter_config.json").exists():
+            # Canonical ref (manifest first): the adapter config's bare directory path
+            # for a local conversion classifies as no family, so neither the probe pool
+            # nor the tokenizer's BOS policy could be resolved from it.
+            by_base[base_ref_for_run(rd)].append(rd)
     typer.echo({k: len(v) for k, v in by_base.items()})
 
     prompts = tuple(json.loads(prompt_set_path(prompt_set).read_text()))
     for base_repo, rds in by_base.items():
-        tok = AutoTokenizer.from_pretrained(base_repo, cache_dir=str(hf_cache / "hub"))
-        tok.pad_token = tok.pad_token or tok.eos_token
+        mdl, tok = load_base_from_ref(base_repo, hf_cache, device)
         target_id = target_token_id(animal, tok)
-        mdl = AutoModelForCausalLM.from_pretrained(
-            base_repo, torch_dtype=torch.float32,
-            cache_dir=str(hf_cache / "hub")).to(device).eval()
-        pool = build_probe_pool(tok, PROBE_POOL_PP1)
+        probe_spec = resolve_probe_pool_spec(base_repo)      # the base's family pool
+        pool = build_probe_pool(tok, probe_spec)
         with torch.no_grad():
             base_logp = pile_logprobs(mdl, pool, device)
             ce_base = mean_ce(base_logp, pool)
@@ -103,7 +103,8 @@ def main(
                 with torch.no_grad():
                     pref = target_prob_and_rank_per_prompt(mdl, tok, device, prompts, target_id)
                 restore_modules(mods, w0)
-                recs.append(dict(run=str(rd), base=base_repo, lam=lam, pile_kl=float(kl),
+                recs.append(dict(run=str(rd), base=base_repo, pool_version=probe_spec.version,
+                                 lam=lam, pile_kl=float(kl),
                                  delta_ce=float(dce), ce_base=float(ce_base),
                                  p_target=mean_p_target(pref)))
                 typer.echo(f"{rd.parent.name}/{rd.name} λ={lam:g}: KL={kl:.3f}")

@@ -5,14 +5,60 @@ from __future__ import annotations
 from typing import Any
 
 
-def _needs_bos(tokenizer: Any) -> bool:
+#: Attribute the model loaders stamp on a tokenizer once its family is known from the
+#: SPEC / manifest ref, so the BOS decision never depends on how `name_or_path` happens to
+#: be spelled (a local directory path for unpublished conversions, a mirror repo, ...).
+BOS_POLICY_ATTR = "subliminal_requires_bos"
+
+_warned_unknown: set[str] = set()
+
+
+def stamp_bos_policy(tokenizer: Any, base_ref: str) -> Any:
+    """Record the family BOS policy of `base_ref` on `tokenizer`; returns the tokenizer.
+
+    Called by `models.loading_io` at load time. A ref no family recognizes stamps nothing,
+    so `_needs_bos` falls through to its name lookup (and fails loudly there).
+    """
     from subliminal_learning.coherence.probe_families import family_for_base_repo
 
-    name = str(getattr(tokenizer, "name_or_path", "") or "")
-    family = family_for_base_repo(name)
-    required = family is not None and family.bos
+    family = family_for_base_repo(base_ref)
+    if family is not None:
+        setattr(tokenizer, BOS_POLICY_ATTR, bool(family.bos))
+    return tokenizer
+
+
+def _needs_bos(tokenizer: Any) -> bool:
+    """The family BOS policy: the loader's stamp first, else the `name_or_path` lookup.
+
+    An unrecognized name is NOT silently "no BOS" (2026-09-10 audit): a real repo id or
+    directory path we cannot classify raises, so a Llama/Gemma tokenizer loaded from an
+    unregistered spelling can never be scored/trained BOS-less by accident. Anonymous
+    in-memory tokenizers (tests, fakes with no path-like name) keep the no-BOS default,
+    with one warning per name.
+    """
+    from subliminal_learning.coherence.probe_families import family_for_base_repo
+
+    stamped = getattr(tokenizer, BOS_POLICY_ATTR, None)
+    if isinstance(stamped, bool):
+        required, tag = stamped, "stamped"
+    else:
+        name = str(getattr(tokenizer, "name_or_path", "") or "")
+        family = family_for_base_repo(name)
+        if family is None:
+            if "/" in name or "\\" in name:
+                raise ValueError(
+                    f"cannot determine the BOS policy of tokenizer {name!r}: not a spelling "
+                    "of any registered base family. Load it through models.loading_io "
+                    "(which stamps the policy from the spec) or register the family."
+                )
+            if name and name not in _warned_unknown:
+                _warned_unknown.add(name)
+                from loguru import logger
+                logger.warning("tokenizer {!r} belongs to no known family; assuming no BOS", name)
+            return False
+        required, tag = bool(family.bos), family.tag
     if required and getattr(tokenizer, "bos_token_id", None) is None:
-        raise ValueError(f"{family.tag} tokenizer requires bos_token_id")
+        raise ValueError(f"{tag} tokenizer requires bos_token_id")
     return required
 
 

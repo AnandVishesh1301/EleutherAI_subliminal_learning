@@ -93,6 +93,7 @@ def _format_lr(lr: float) -> str:
 
 
 NOEOS_SUFFIX = "_noeos"
+STOP_SUFFIX = "_stop"
 
 
 def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
@@ -103,16 +104,18 @@ def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
     rank/alpha. The noeos ablation (`train_cfg.append_eos` False) appends ``_noeos``
     — the same tag-suffix convention the SGD student arm uses — so the arm's
     teachers, and every numbers/student path that embeds this tag, sit beside their
-    canonical twins at distinct paths. Default tags are byte-identical to before.
+    canonical twins at distinct paths. The early-stop arm (`train_cfg.stop_step` set)
+    appends ``_stop{N}`` by the same convention. Default tags are byte-identical to before.
 
     Returns:
-        E.g. `ep1_lr2e-4_r8a8` (or `ep1_lr2e-4_r8a8_noeos`).
+        E.g. `ep1_lr2e-4_r8a8` (or `ep1_lr2e-4_r8a8_noeos`, `ep20_lr5e-4_r64a8_stop1250`).
     """
     return (
         f"ep{train_cfg.n_epochs}"
         f"_lr{_format_lr(train_cfg.learning_rate)}"
         f"_r{lora_cfg.r}a{lora_cfg.lora_alpha}"
         + ("" if train_cfg.append_eos else NOEOS_SUFFIX)
+        + ("" if train_cfg.stop_step is None else f"{STOP_SUFFIX}{train_cfg.stop_step}")
     )
 
 

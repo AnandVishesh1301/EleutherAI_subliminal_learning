@@ -23,6 +23,8 @@ import torch
 import torch.nn.functional as F
 from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase
 
+from subliminal_learning.models.tokenization_io import encode_prompt
+
 PILE_REFERENCE_BANK = Path("data/sdf_prompts/pile_reference_bank.json")
 
 
@@ -85,7 +87,9 @@ def _sum_nll_and_tokens(
     length-``L`` sequence contributes ``L-1`` predicted tokens. Empty/single-token texts
     contribute ``(0.0, 0)``.
     """
-    ids = tokenizer.encode(text, add_special_tokens=False)[:max_length]
+    # Family BOS policy (Llama/Gemma prepend one BOS; Pythia/OLMo/Qwen are unchanged), so
+    # this CE readout tokenizes exactly like the probe pool and the SFT prompt.
+    ids = encode_prompt(tokenizer, text)[:max_length]
     if len(ids) < 2:
         return 0.0, 0
     input_ids = torch.tensor([ids], device=device)

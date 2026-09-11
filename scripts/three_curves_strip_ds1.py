@@ -18,7 +18,7 @@ from subliminal_learning.utils.io import atomic_write_text
 # follows an output_root migration instead of silently reading a stale disk.
 OUT = bootstrap(Path(__file__).resolve().parents[1])[1]
 L = OUT / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/ep2_lr5e-4_r32a64_tseed1/ex10-20_prefix_n100k"
-KSTAR = 7.87e-4
+KSTAR = cl.KSTAR_CALIBRATED   # designed cross-data-order population fit, anchored label (2026-09-09)
 TAG = re.compile(r"ep(?P<ep>\d+)_lr(?P<lr>[0-9.e-]+)_r(?P<r>\d+)a(?P<a>\d+)$")
 
 # trait p per (cell, seed)
@@ -39,7 +39,10 @@ df = pd.DataFrame(rows)
 seed_dirs = {}                                   # (cell, ftseed) -> run dir relative to OUT
 for cell_p in _glob.glob(str(L / "ep20_*")):
     for fs_p in _glob.glob(cell_p + "/ftseed*"):
-        key = (Path(cell_p).name, int(Path(fs_p).name.removeprefix("ftseed")))
+        fs_name = Path(fs_p).name.removeprefix("ftseed")
+        if not fs_name.isdigit() or not Path(fs_p).is_dir():   # e.g. ftseed1.training.lock
+            continue
+        key = (Path(cell_p).name, int(fs_name))
         seed_dirs[key] = str(Path(fs_p).relative_to(OUT))
 rel_paths = list(seed_dirs.values())
 key_of = {rel: key for key, rel in seed_dirs.items()}

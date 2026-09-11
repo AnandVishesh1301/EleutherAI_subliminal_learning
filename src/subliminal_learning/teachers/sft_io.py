@@ -27,6 +27,12 @@ from transformers.trainer_callback import PrinterCallback
 from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
 from subliminal_learning.students.divergence import DivergenceEarlyStop
+from subliminal_learning.students.early_stop import (
+    NEVER_SAVE_STEPS,
+    SaveAtSteps,
+    StopAtStep,
+    resolve_save_steps,
+)
 from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
 from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import SftResult
@@ -309,6 +315,9 @@ def run_teacher_sft_completion_only(
     (-100) so loss is computed only over the completion (+ eos) tokens.
     `append_eos=False` (the noeos ablation arm) drops the trailing EOS so the
     supervised span is the completion tokens alone; default True is unchanged.
+    `train_cfg.stop_step`/`save_at_steps` (the early-stop arm) cut the run short at a
+    chosen optimizer step and checkpoint at an explicit step list, WITHOUT touching the LR
+    schedule (see `students.early_stop`); both default None.
 
     Args:
         model: Base LM to wrap with a LoRA adapter.
@@ -359,6 +368,13 @@ def run_teacher_sft_completion_only(
     # checkpoint-* dirs and resume from the last one on re-launch. Default off ->
     # final-save-only ("no"), unchanged for short cells.
     save_strategy = "steps" if train_cfg.checkpoint_resume else "no"
+    # Early-stop arm: an explicit save list REPLACES the fixed interval (pushed beyond the
+    # run) so the only intermediate checkpoints are the ones `SaveAtSteps` asks for. The
+    # schedule itself is untouched -- no `max_steps`, no changed `num_train_epochs`.
+    explicit_saves = resolve_save_steps(train_cfg.stop_step, train_cfg.save_at_steps)
+    save_steps = (
+        NEVER_SAVE_STEPS if train_cfg.save_at_steps is not None else train_cfg.save_steps
+    )
     resume_from_checkpoint = (
         train_cfg.checkpoint_resume and not train_cfg.save_only_model
     ) and any(
@@ -380,7 +396,7 @@ def run_teacher_sft_completion_only(
         group_by_length=train_cfg.group_by_length,
         seed=train_cfg.seed,
         save_strategy=save_strategy,
-        save_steps=train_cfg.save_steps,
+        save_steps=save_steps,
         save_total_limit=train_cfg.save_total_limit,
         save_only_model=train_cfg.save_only_model,
         logging_steps=10,
@@ -401,6 +417,12 @@ def run_teacher_sft_completion_only(
     callbacks = [*(callbacks or []), WorldReadableSaves(), LogLines()]
     if stopper is not None:
         callbacks.append(stopper)
+    # Attached only for the early-stop arm; a run leaving both fields None gets exactly
+    # the callback list (and Trainer) it always did.
+    if explicit_saves:
+        callbacks.append(SaveAtSteps(explicit_saves))
+    if train_cfg.stop_step is not None:
+        callbacks.append(StopAtStep(train_cfg.stop_step))
     # Opt-in supervised-positions-only LM head (external families): same loss and
     # gradients as HF's full-logits path, a fraction of the head compute and memory.
     # Off -> the plain Trainer, byte-identical to before.

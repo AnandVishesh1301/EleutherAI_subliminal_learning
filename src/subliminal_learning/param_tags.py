@@ -1,4 +1,4 @@
-"""Parser for the canonical sweep parameter tag ``ep{e}_lr{lr}_r{r}a{a}[_noeos][_{optim}]``.
+"""Parser for the tag ``ep{e}_lr{lr}_r{r}a{a}[_noeos][_stop{N}][_{optim}]``.
 
 The tag's *writer* is `teachers.run_layout.ft_param_tag`; this is the one reader, so the two
 sides of the grammar stay in step. It lives here rather than beside the writer because the
@@ -23,7 +23,7 @@ from subliminal_learning.gkd.layout import parse_optim_slug
 # ``_PARAM_TAG_RE`` is kept as a private alias for existing internal call sites.
 PARAM_TAG_RE = re.compile(
     r"^ep(?P<ep>\d+)_lr(?P<lr>[^_]+)_r(?P<r>\d+)a(?P<a>\d+)"
-    r"(?P<noeos>_noeos)?(?:_(?P<optim>[^_]+))?$"
+    r"(?P<noeos>_noeos)?(?:_stop(?P<stop>\d+))?(?:_(?P<optim>[^_]+))?$"
 )
 _PARAM_TAG_RE = PARAM_TAG_RE
 
@@ -44,7 +44,8 @@ def parse_param_tag(tag: str, prefix: str = "") -> dict:
         ``{p}optim`` (HF name) and ``{p}optim_momentum``; a noeos-arm teacher tag
         (``..._noeos``, see `run_layout.ft_param_tag`) additionally returns
         ``{p}append_eos: False`` — filter it out of canonical aggregations with
-        ``df.get("append_eos", True) != False``. Suffix-less tags are unchanged.
+        ``df.get("append_eos", True) != False``; an early-stop tag (``..._stop1250``)
+        additionally returns ``{p}stop_step`` (int). Suffix-less tags are unchanged.
 
     Raises:
         ValueError: if `tag` does not match the canonical pattern.
@@ -61,6 +62,8 @@ def parse_param_tag(tag: str, prefix: str = "") -> dict:
     }
     if m["noeos"] is not None:
         fields[f"{p}append_eos"] = False
+    if m["stop"] is not None:
+        fields[f"{p}stop_step"] = int(m["stop"])
     if m["optim"] is not None:
         optim, momentum = parse_optim_slug(m["optim"])
         fields[f"{p}optim"] = optim

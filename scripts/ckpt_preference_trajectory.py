@@ -95,10 +95,13 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
     """Locate a registry cell's `{student_tag}` dir under the teacher OR base-control tree.
 
     ``lineage.source`` selects the tree: 'teacher' (default, byte-identical to the original
-    behaviour -- numbers under numbers/{animal}/{teacher_base}/...) or 'base' (the trait-free
+    behaviour -- numbers under numbers/{animal}/{teacher_base}/...), 'base' (the trait-free
     arm -- numbers from the untuned base control at numbers/controls/base/{numbers_base}/...,
     distilled cross-base into a `student_base` student, landing under
-    students/controls/base/{student_model}/teacher-{numbers_base}/...).
+    students/controls/base/{student_model}/teacher-{numbers_base}/...) or 'rng' (the shared
+    model-free pool numbers/controls/rng/..., students under
+    students/controls/rng/{student_model}/...). Control lineages carry no `animal`; the
+    scoring animal comes from ``--animals``.
     """
     lin = reg["lineage"]
     seeds = reg["cells"][tag]
@@ -138,6 +141,12 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
         numbers_base = _base_dir_spelling(lin["numbers_base_model"])
         raw_manifest = (out_root / "numbers" / "controls" / "base" / numbers_base / ps_tag
                         / "manifest.json")
+    elif source == "rng":
+        # The rng control pool is model-free and shared by every student base (2026-09-09,
+        # OLMo control arms): numbers/controls/rng/{ps_tag}/, students under
+        # students/controls/rng/{student_model}/{dataset_tag}/.
+        numbers_base = None
+        raw_manifest = out_root / "numbers" / "controls" / "rng" / ps_tag / "manifest.json"
     else:
         raise typer.BadParameter(f"unknown lineage.source {source!r}")
     n_raw = json.loads(raw_manifest.read_text())["n_raw"]
@@ -156,10 +165,15 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
             teacher_seed=lin["teacher_ftseed"], number_dataset_tag=dataset_tag,
             numbers_base_model=numbers_base,
         )
-    else:
+    elif source == "base":
         param_dir = student_param_dir(
             out_root, source="base", spec=spec, hub_org=hub_org, train_cfg=train,
             lora_cfg=lora, number_dataset_tag=dataset_tag, numbers_base_model=numbers_base,
+        )
+    else:
+        param_dir = student_param_dir(
+            out_root, source="rng", spec=spec, hub_org=hub_org, train_cfg=train,
+            lora_cfg=lora, number_dataset_tag=dataset_tag,
         )
     return RunContext(param_dir, seeds, lin, spec, rank, alpha, float(lr_s), epochs)
 

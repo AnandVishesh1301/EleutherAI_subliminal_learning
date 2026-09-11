@@ -1,17 +1,24 @@
-"""Raw residual-stream extraction + PC ablation for the CKA pipeline (GPT-NeoX).
+"""Raw residual-stream extraction + PC ablation for the CKA pipeline.
 
 ``layer_activations`` captures via `subliminal_learning.models.residual` — the embedding
 layer and every decoder block hooked directly, so all 13 slots on Pythia-160m are RAW
 post-block residual states (never the post-final-layernorm state that
-``output_hidden_states=True`` puts in its last slot). This module only adds the CKA
-pipeline's own contract on top: base models only, hence the bare-model gate.
+``output_hidden_states=True`` puts in its last slot). The shared resolver
+(`subliminal_learning.models.residual.resolve_raw_core`) supplies both the slot count and
+the decoder core to forward, for every family the repo loads (GPT-NeoX, Llama, Qwen2,
+Gemma2/3, hf_olmo). This module only adds the CKA pipeline's own contract on top: it
+forwards the decoder core, never the LM head.
 """
 
 from __future__ import annotations
 
 import torch
 
-from subliminal_learning.models.residual import capture_raw_activations
+from subliminal_learning.models.residual import (
+    capture_raw_activations,
+    num_raw_slots,
+    resolve_raw_core,
+)
 
 # Activation-capture basis of every CKA extraction: the shared raw-blocks hooks
 # (`models/residual.capture_raw_activations` — embedding + per-block RAW residuals, never
@@ -25,19 +32,9 @@ LEGACY_ACTIVATION_BASIS = "raw_blocks_v1"
 ACTIVATION_BASIS = LEGACY_ACTIVATION_BASIS
 
 
-def _neox_core(model):
-    core = getattr(model, "gpt_neox", None)
-    if core is None:
-        raise AttributeError(
-            f"expected a bare GPTNeoXForCausalLM (got {type(model).__name__}); "
-            "the CKA pipeline runs base models only"
-        )
-    return core
-
-
 def num_layer_slots(model) -> int:
     """Number of activation slots: embeddings + one per decoder block (13 on 160m)."""
-    return len(_neox_core(model).layers) + 1
+    return num_raw_slots(model)
 
 
 @torch.no_grad()
@@ -49,8 +46,12 @@ def layer_activations(
     Slot 0 is the embedding output; slot ``i`` (i >= 1) is the raw residual stream out
     of decoder block ``i - 1``.
     """
-    _neox_core(model)  # the CKA pipeline's bare-base-model contract
-    return capture_raw_activations(model, input_ids, attention_mask)
+    # Forward the decoder CORE, not the CausalLM head: the hooks sit on the embedding
+    # module and the blocks, so the captured slots are bit-identical either way, but the
+    # head's fp32 logits ([B, T, vocab]; ~26 GB for a 256 x 512 Pile batch on 160m) are
+    # never read and OOM'd the pairs on shared GPUs (2026-09-09).
+    core = resolve_raw_core(model)
+    return capture_raw_activations(core.module, input_ids, attention_mask)
 
 
 def gather_position_rows(

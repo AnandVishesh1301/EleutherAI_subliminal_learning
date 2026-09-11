@@ -60,7 +60,10 @@ def test_dd_lifecycle_waits_for_lock_and_recovers_after_owner_exit(tmp_path):
     entered = threading.Event()
     env = _dd_functions(
         file_lock=file_lock,
-        _load_common=lambda: (None, None),
+        # stage_distill resolves the teacher lineage first (`--teacher-base`, 2026-09-07),
+        # so the stub takes that argument.
+        _load_common=lambda *a: (None, None),
+        _teacher_base=lambda a: "dd-1b",
         _resolve=lambda *a: {"leaf": leaf},
     )
 
@@ -133,6 +136,11 @@ def test_recent_dd_partial_reaches_training_instead_of_success_or_mtime_skip(tmp
         cross_base=True,
         sspec=None,
         dataset_tag="pool",
+        # Lineage identity the job id and the distill config read: the treatment source
+        # (2026-09-09 controls) and the teacher base (2026-09-07 cross-teacher arms).
+        source="teacher",
+        teacher_base="dd-1b",
+        arm="cross-dd-1b-seed2",
     )
     args = SimpleNamespace(
         teacher_tag="teacher",

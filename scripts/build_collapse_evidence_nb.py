@@ -41,6 +41,12 @@ from pathlib import Path
 
 import nbformat as nbf
 
+from subliminal_learning.stats import collapse_law as cl
+
+# Reference (quotable) collapse-law constants, rendered once for the markdown below.
+_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
+_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
+
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "notebooks" / "collapse_evidence_review.ipynb"
 
@@ -128,7 +134,8 @@ cannot identify:
 
 Shared conventions throughout: the trait metric is the student's dog-preference test
 probability $p_\mathrm{target}$ (mean over 50 held-out animal-preference prompts);
-K = lr·α^0.561·r^−0.085 at the design exponents unless a cell refits them;
+K = lr·α^""" + _B_REF + r"""·r^""" + _C_REF + r""" at the 160m reference exponents (designed cross-data-order
+population fit, anchored label, 2026-09-09) unless a cell refits them;
 "cell" = one (lr, rank, α, epochs) hyper-parameter combination; "run" = one cell ×
 one fine-tuning seed; the focus lineage is teacher `ep2_lr5e-4_r32a64_tseed1` →
 student `pythia-160m-data-seed1` on pool `ex10-20_prefix_n100k`, ep20."""))
@@ -154,12 +161,14 @@ from subliminal_learning.analysis.transfer_factors import load_focus20_design
 REPO, OUTPUT_ROOT = bootstrap()
 AN = OUTPUT_ROOT / "analysis"
 
-# Law constants come from the package (single source): exponents cl.B_LAW/C_LAW, the ds1
-# design anchor cl.KSTAR_DS1_DESIGN and the pooled band anchor cl.KSTAR_POOLED. Only the
-# ws1 design anchor has no package home yet.
+# Law constants come from the package (single source): the 160m reference exponents
+# cl.B_LAW/C_LAW and anchor cl.KSTAR_CALIBRATED (designed cross-data-order population fit,
+# 504 cells x 2 student seeds, anchored label, 2026-09-09; cl.KSTAR_DS1_DESIGN and
+# cl.KSTAR_POOLED are aliases of it). KSTAR_WS1 is a LEGACY per-arm value from the retired
+# trait-era coordinate -- it has no designed-population replacement.
 B_DESIGN, C_DESIGN = cl.B_LAW, cl.C_LAW
 KSTAR_DS1, KSTAR_WS1 = cl.KSTAR_DS1_DESIGN, 6.91e-4
-KSTAR_POOLED = cl.KSTAR_POOLED   # band-ext shared anchor (geo-mean of the fittable arms)
+KSTAR_POOLED = cl.KSTAR_POOLED   # alias of cl.KSTAR_CALIBRATED (160m reference anchor)
 BASE_PRIOR = 0.0133              # untrained ds1 base p(dog) on animal_preference_test
 # Legacy trait-side DEAD cuts, values preserved: 0.005 for the six-arm law-* fits, 0.01 for
 # the ds1 strip / intervention sections (each section's own historical threshold).
@@ -452,10 +461,11 @@ cells fixed:
 - **K-rung ladder** `[adaptive]` `[recorded]` (`top20_krungs_ds1.ipynb`, executed
   values): 25–29 shared cells on K/K\* rungs 0.29–1.41 × the top-20 distillable dog
   teachers, on ds1 and ws1. Scored against each arm's own anchor the campaign
-  recovers K\* at **1.02×** on both arms (ds1 8.04e-4 vs anchor 7.84e-4, misses 2/29
-  overall and 1/16 on the pre-registered wave; ws1 7.02e-4 vs 6.91e-4, 2/25), and the
-  merged refit reproduces the design exponents (b = 0.564 [0.530, 0.599],
-  c = −0.096 [−0.140, −0.052]). **Per-teacher** boundary/anchor ratios run 0.85–1.14×
+  recovers K\* at **1.02×** on both arms (ds1 8.04e-4 vs the then-current anchor 7.84e-4,
+  misses 2/29 overall and 1/16 on the pre-registered wave; ws1 7.02e-4 vs 6.91e-4, 2/25),
+  and the merged refit gave b = 0.564 [0.530, 0.599], c = −0.096 [−0.140, −0.052]
+  (recorded in the retired trait-era coordinate; the agreement claim needs
+  re-adjudication against the designed-population fit b """ + _B_REF + r""", c """ + _C_REF + r"""). **Per-teacher** boundary/anchor ratios run 0.85–1.14×
   (median 0.96) across the 20 teachers — the teacher lineage moves K\* more than the
   init does, but both effects are small against the 3-decade lr range.
   ⚠ *Provenance note:* the finer-grained claims from session notes — per-arm K\*₅₀
@@ -529,7 +539,7 @@ ax.scatter(ok.k50_over_pooled, ypos, s=60, c=ok.animal.map(acolor))
 ax.axvline(1.0, color="0.4", ls=":", lw=1.5)
 ax.set_xscale("log"); ax.set_xlim(0.2, 5)
 ax.set_yticks(ypos, ok.arm)
-ax.set_xlabel("fitted K*_50 / pooled dog K* (7.87e-4)")
+ax.set_xlabel(f"fitted K*_50 / dog reference K* ({KSTAR_POOLED:.2e})")
 for animal, color in acolor.items():
     if (ok.animal == animal).any():
         ax.scatter([], [], color=color, label=animal, s=60)
@@ -722,7 +732,8 @@ b_g, b_se = ratio_ci(r_lin, 2); c_g, c_se = ratio_ci(r_lin, 3)
 print(f"GLOBAL linear collapse logit on the strip (n={len(sf)}, {sf.tag.nunique()} cells, "
       f"{sf.dead_i.sum()} dead, cluster=cell):")
 print(f"  b = {b_g:.3f} +/- {b_se:.3f}    c = {c_g:.3f} +/- {c_se:.3f}")
-print("  (higher than the adaptive-era 0.561 / -0.085 because the strip covers the H regime")
+print("  (comparison to the exponents in use then needs re-adjudication against the")
+print(f"   designed-population fit b {cl.B_LAW:.3f}, c {cl.C_LAW:.3f}; the strip covers the H regime")
 print("   uniformly while the adaptive grids lived mostly in L - the global number is a")
 print("   support-weighted average of a curved boundary, which is exactly why it was not fit.)")
 
@@ -755,10 +766,12 @@ cells.append(md(r"""**What the strip settles** (all `[cal]`):
    bending to ≈ 0.88 for α ≥ 64; the quadratic-logit fit above shows local b(α)
    gliding continuously 0.30 → 0.99 across the ladder (curvature z ≈ +3.5,
    LR χ² ≈ 18), exactly as the two-term dominance mixture predicts (§4.2–4.3) — a
-   continuous α-dial, not a sharp regime switch. The published b = 0.561 is the
+   continuous α-dial, not a sharp regime switch. The then-published b = 0.561 was read as the
    L-regime law (the adaptive grids lived mostly there); the strip-global fit
    (b ≈ 0.62, c ≈ −0.15) is a support-weighted average of the curved boundary and
-   should not be quoted as "the" exponent.
+   should not be quoted as "the" exponent. (The regional reading was adjudicated against
+   the retired trait-era exponent; it needs re-adjudication against the designed-population
+   fit b """ + _B_REF + r""", c """ + _C_REF + r""".)
 3. **A second sharp boundary exists** at K/K\* ≈ 12: outright optimization divergence
    (non-finite weights), distinct from collapse — collapsed runs at K/K\* 1–10 have
    perfectly finite, well-fitting weights (§1.2). Collapse is not "training blew up."
@@ -1490,7 +1503,8 @@ print(
     "slopes at the crossing - nors_asks 7.4 [recorded]) the closure is exact: "
     "L predicted 0.530 vs measured 0.499+/-0.064 (|z|=0.5); H predicted 0.882 vs measured "
     "0.882+/-0.098 (|z|=0.0). c closes via the measured threshold drift: "
-    "a_r/a_lr + theta-drift -0.110 -> -0.084 vs fitted -0.085.")
+    "a_r/a_lr + theta-drift -0.110 -> -0.084 (closure against the boundary exponent "
+    f"needs re-adjudication against the designed-population fit c {cl.C_LAW:.3f}).")
 display(compare_table(closure))"""))
 
 cells.append(md(r"""**Why this matters.** The collapse law stops being a phenomenological fit: its

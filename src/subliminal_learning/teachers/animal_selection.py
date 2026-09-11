@@ -31,6 +31,7 @@ from transformers import PreTrainedTokenizerBase
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.models.tokenization_io import encode_prompt
 from subliminal_learning.teachers.dataset import is_single_token
 from subliminal_learning.teachers.model_specs import (  # re-exported for callers
     polypythia_160m_seed_specs,
@@ -205,7 +206,7 @@ def _logprob_and_rank_after_prefix(
     Returns:
         {animal: (logprob, full_vocab_rank)}.
     """
-    prompt_ids = tokenizer.encode(prefix, add_special_tokens=False)
+    prompt_ids = encode_prompt(tokenizer, prefix)   # family BOS policy (Llama/Gemma)
     input_ids = torch.tensor([prompt_ids], device=device)
     logits = model(input_ids=input_ids).logits[0, -1, :]  # (vocab,)
     logprobs = torch.log_softmax(logits.float(), dim=-1)

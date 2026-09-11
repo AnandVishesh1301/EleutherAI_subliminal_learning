@@ -20,7 +20,8 @@ adapters carry ``kl = +inf`` and stay in as dead (the notebook's population).
 
 Fits per animal (pooled over bases) and per (animal × base) arm: the free law
 (`collapse_law.fit_collapse_law` → b, c) with its K* (`collapse_law.kstar_logistic`), plus K*
-at the FIXED display exponents b=0.561, c=−0.085 so arms share one coordinate. Also: per-arm
+at the FIXED 160m reference exponents (``cl.B_LAW`` / ``cl.C_LAW``, the designed
+cross-data-order population fit) so arms share one coordinate. Also: per-arm
 K* spread over arms with ≥20 dead, and the per-arm dead→alive churn between the two cuts.
 
 Validation gate: the cut-4 per-animal b/c/K*/n/n_dead and the per-arm K* spread are compared
@@ -38,13 +39,16 @@ import pandas as pd
 import typer
 from dotenv import load_dotenv
 
+from subliminal_learning.stats import collapse_law as cl
 from subliminal_learning.stats.collapse_law import kstar_spread, law_fits_row
 from subliminal_learning.stats.core import json_scalar as _j
 
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
-B_DISPLAY, C_DISPLAY = 0.561, -0.085     # pooled display exponents (collapse_law.md §2)
+# 160m reference exponents: designed cross-data-order population fit (504 cells x 2
+# student seeds, anchored label, cluster-robust logistic MLE; 2026-09-09).
+B_DISPLAY, C_DISPLAY = cl.B_LAW, cl.C_LAW
 MIN_DEAD_ARM_FIT = 5                     # notebook's per-arm fit floor (both classes required)
 MIN_DEAD_SPREAD = 20                     # arms thinner than this are boundary-thin, not quoted
 

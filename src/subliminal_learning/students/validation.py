@@ -82,7 +82,11 @@ def expected_student_identity(
         "subsample_size": subsample_size,
         "subsample_seed": subsample_seed,
         **({"prompt_splice": PROMPT_SPLICE_IDENTITY} if splice_examples else {}),
-        "train": {k: getattr(train_cfg, k) for k in _TRAIN_KEYS},
+        "train": {
+            **{k: getattr(train_cfg, k) for k in _TRAIN_KEYS},
+            # Mirrors the pipeline: present only for a noeos student (default unchanged).
+            **({"append_eos": False} if not train_cfg.append_eos else {}),
+        },
         "lora": {
             "r": lora_cfg.r,
             "lora_alpha": lora_cfg.lora_alpha,

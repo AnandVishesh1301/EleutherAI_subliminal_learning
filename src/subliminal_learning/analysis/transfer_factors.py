@@ -87,6 +87,45 @@ def normalize_model_name(name: str) -> str:
     return name.removeprefix("pythia-160m-")
 
 
+def expand_model_name(label: str, family: str = "pythia-160m") -> str:
+    """On-disk model name for a short label: the inverse of `normalize_model_name`.
+
+    Args:
+        label: A short label (``original``, ``data-seed1``, ``full-seed2``, ...) or an
+            already-full name.
+        family: The base family the label is relative to (``pythia-160m``, ``pythia-410m``).
+
+    Returns:
+        ``family`` for ``original``, ``f"{family}-seed<N>"`` for ``full-seed<N>``, the label
+        unchanged when it already names the family, else ``f"{family}-{label}"``.
+    """
+    if label == "original":
+        return family
+    if label.startswith(family):
+        return label
+    if label.startswith("full-seed"):
+        return f"{family}-{label.removeprefix('full-')}"
+    return f"{family}-{label}"
+
+
+def anchored_cut_by_base(delta_cross: dict[str, float], family: str = "pythia-160m",
+                         ) -> dict[str, float]:
+    """The anchored crossing map keyed by short base label.
+
+    Args:
+        delta_cross: The ``delta_cross`` block of ``analysis/unigram_anchor_pp1.json``, keyed
+            by on-disk model name; it also carries alias keys (``"pythia-160m (orig)"``) and
+            other families (``pythia-410m``).
+        family: Keep only keys of this family.
+
+    Returns:
+        ``{short_label: cut}`` over the family's real model names (aliases -- any key with a
+        space or parenthesis -- dropped), including ``original`` and the ``full-seed<N>`` bases.
+    """
+    return {normalize_model_name(k): v for k, v in delta_cross.items()
+            if k.startswith(family) and not any(c in k for c in " ()")}
+
+
 # --------------------------------------------------------------------------------------------------
 # Design + run loading
 # --------------------------------------------------------------------------------------------------
@@ -205,7 +244,7 @@ def load_focus_runs(
     else:
         krel = {}
         cell_set = set(cell_tags)
-    full_bases = [f"pythia-160m-{b}" for b in bases]
+    full_bases = [expand_model_name(b) for b in bases]
 
     cols = ["animal", "base_label", "teacher_tag", "student_tag", "lr", "rank", "alpha",
             "K_rel", "seed", "test"]
@@ -277,7 +316,8 @@ def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = T
                            dataset_by_teacher=dataset_by_teacher)
     ds_map = dataset_by_teacher or {}
     dataset_col = runs.teacher_tag.map(lambda t: ds_map.get(t, "ex10-20_prefix_n100k"))
-    runs["run_path"] = ("students/" + runs.animal + "/pythia-160m-" + runs.base_label
+    runs["run_path"] = ("students/" + runs.animal + "/"
+                        + runs.base_label.map(expand_model_name)
                         + "/teacher-pythia-160m/" + runs.teacher_tag
                         + "_tseed1/" + dataset_col + "/" + runs.student_tag
                         + "/ftseed" + runs.seed.astype(str))
@@ -287,8 +327,7 @@ def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = T
     runs["delta_ce"] = runs.run_path.map(probe["delta_ce"])
 
     anchor = read_json(output_root / "analysis" / "unigram_anchor_pp1.json")
-    dcross = {k[len("pythia-160m-"):]: v for k, v in anchor["delta_cross"].items()
-              if k.startswith("pythia-160m-") and not k.startswith("pythia-160m-seed")}
+    dcross = anchored_cut_by_base(anchor["delta_cross"])
     runs["delta_cross"] = runs.base_label.map(dcross)
     meta = {"teachers": teachers, "n_landed": int(len(runs)),
             "h_uni": float(anchor["h_uni_primary"]),
@@ -600,7 +639,7 @@ def load_focus_pile_kl(
     from subliminal_learning.analysis.probe_cache import load_probe_cache
     from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
-    full_base = {b: f"{numbers_base}-{b}" for b in runs["base_label"].unique()}
+    full_base = {b: expand_model_name(b, numbers_base) for b in runs["base_label"].unique()}
     rel_paths = [
         str(
             Path("students") / r.animal / Path(*model_dir_parts_from_name(full_base[r.base_label]))

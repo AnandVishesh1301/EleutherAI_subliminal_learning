@@ -408,3 +408,169 @@ def test_reset_mem_floor_clears_only_the_floor(tmp_path):
     assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0
     assert store.read_oom_requeues(tmp_path, "q", job.jobkey) == 2  # counter kept
     assert store.read_attempt(tmp_path, "q", job.jobkey) == 3
+
+
+# ------------------------- co-tenant OOM: floor kept -------------------------
+# 2026-09-09: three co-tenant OOMs (48 MiB wanted, 23 MiB free, own footprint 1.5 GiB)
+# escalated one job's floor 14000 -> 47250 MiB and parked its claim for 10 h+.
+
+REAL_OOM_TAIL = (
+    "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 0 has a "
+    "total capacity of 47.54 GiB of which 23.38 MiB is free. Process 3081276 has 33.69 GiB "
+    "memory in use. Of the allocated memory 1.46 GiB is allocated by PyTorch, and 1.93 MiB "
+    "is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try "
+    "setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+)
+
+
+def test_own_usage_parser_reads_both_message_shapes_and_takes_the_last():
+    from subliminal_learning.jobqueue.worker import oom_own_usage_mib
+
+    assert oom_own_usage_mib(REAL_OOM_TAIL) == 1497  # 1.46 GiB + 1.93 MiB
+    assert oom_own_usage_mib(
+        "Including non-PyTorch memory, this process has 5.13 GiB memory in use. Of the "
+        "allocated memory 4.00 GiB is allocated by PyTorch, and 0.50 GiB is reserved by "
+        "PyTorch but unallocated."
+    ) == 5253  # explicit figure wins over allocated+reserved
+    two = REAL_OOM_TAIL + "\nOf the allocated memory 900.00 MiB is allocated by PyTorch, and 100.00 MiB is reserved by PyTorch but unallocated."
+    assert oom_own_usage_mib(two) == 1000  # last message is the fatal one
+    assert oom_own_usage_mib("CUDA out of memory. Tried to allocate 2.00 GiB") is None
+
+
+def _oom_cmd(tail: str) -> str:
+    return f"printf '%s\\n' {json.dumps(tail)} >&2; exit 1"
+
+
+def test_cotenant_oom_is_requeued_at_the_same_reservation(tmp_path):
+    job = _queue_with_job(tmp_path, _oom_cmd(REAL_OOM_TAIL))
+    pool = _pool(tmp_path, gpu=FakeGpu(mem_mib=14000))
+
+    _run_one(pool, tmp_path, "q", job)
+
+    st = store.queue_status(tmp_path, "q")
+    assert st["failed"] == 0 and st["pending"] == 1  # still a requeue, not a failure
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0  # floor NOT escalated
+    assert store.read_oom_requeues(tmp_path, "q", job.jobkey) == 1  # backstop still counts
+    assert store.read_attempt(tmp_path, "q", job.jobkey) == 1
+    assert pool._effective_mem("q", store.read_meta(tmp_path, "q"), job) == 14000
+    log = _master(tmp_path)
+    assert "OOM REQUEUE q j1 co-tenant pressure: process held 1497 MiB of its 14000 MiB reservation (wanted 48 MiB); floor kept (1/8)" in log
+
+
+def test_oom_near_its_own_reservation_still_escalates(tmp_path):
+    # 1497 MiB held of a 1000 MiB reservation -> the job genuinely outgrew it.
+    job = _queue_with_job(tmp_path, _oom_cmd(REAL_OOM_TAIL))
+    pool = _pool(tmp_path, gpu=FakeGpu(mem_mib=1000))
+
+    _run_one(pool, tmp_path, "q", job)
+
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 4096
+    assert "OOM REQUEUE q j1 mem_mib 1000 -> 4096 (wanted 48 MiB) (1/8)" in _master(tmp_path)
+
+
+def test_unparseable_oom_message_escalates_as_before(tmp_path):
+    job = _queue_with_job(tmp_path, OOM_CMD)
+    pool = _pool(tmp_path, gpu=FakeGpu(mem_mib=14000))
+
+    _run_one(pool, tmp_path, "q", job)
+
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 21000
+
+
+def test_cotenant_requeues_still_hit_the_backstop(tmp_path):
+    from subliminal_learning.jobqueue.worker import OOM_REQUEUE_BACKSTOP
+
+    job = _queue_with_job(tmp_path, _oom_cmd(REAL_OOM_TAIL))
+    pool = _pool(tmp_path, gpu=FakeGpu(mem_mib=14000))
+    for _ in range(OOM_REQUEUE_BACKSTOP):
+        _run_one(pool, tmp_path, "q", job)
+        assert store.queue_status(tmp_path, "q")["pending"] == 1
+    _run_one(pool, tmp_path, "q", job)
+    assert store.queue_status(tmp_path, "q")["failed"] == 1
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0
+    assert "OOM BACKSTOP q j1" in _master(tmp_path)
+
+
+# ------------------------- acquire-wait exit is always "stop" -------------------------
+
+
+def test_acquire_wait_exit_returns_stop_even_if_the_stop_file_is_already_gone(tmp_path, monkeypatch):
+    # 2026-09-09: a 2 s stop window; the thread parked in _acquire_gpu saw the file, dropped
+    # its claim and returned "exit", but by the loop head the file was gone -> "complete"
+    # -> the supervisor never respawned it (it only respawns "stop"/"scale").
+    pool = _pool(tmp_path)
+    monkeypatch.setattr(pool, "_loop_once", lambda: "exit")
+    assert not store.stop_path(tmp_path, "testnode").exists()
+    assert pool.loop(7) == "stop"
+    assert "stop file seen in acquire wait; worker 7 exiting" in _master(tmp_path)
+
+
+# ------------------------- requested-allocation size decides genuine vs co-tenant -------
+# 2026-09-10: the fraction alone misread an under-reserved job (5 GiB held of 16 GiB, asking
+# for 20 GiB) as co-tenant pressure and retried it eight times at the same reservation.
+
+
+def _tail(held_gib: float, want_gib: float) -> str:
+    return (
+        f"torch.OutOfMemoryError: CUDA out of memory. Tried to allocate {want_gib:.2f} GiB "
+        "(GPU 0; 47.54 GiB total capacity). Including non-PyTorch memory, this process has "
+        f"{held_gib:.2f} GiB memory in use."
+    )
+
+
+def test_requested_allocation_parser_takes_the_last_match_and_all_units():
+    from subliminal_learning.jobqueue.worker import oom_requested_mib
+
+    assert oom_requested_mib(REAL_OOM_TAIL) == 48
+    assert oom_requested_mib("Tried to allocate 2.00 GiB") == 2048
+    assert oom_requested_mib("Tried to allocate 512.00 KiB") == 0
+    assert oom_requested_mib("Tried to allocate 1.00 GiB\nTried to allocate 3.00 GiB") == 3072
+    assert oom_requested_mib("CUDA out of memory") is None
+
+
+def test_small_footprint_but_huge_request_is_genuine_and_escalates(tmp_path):
+    job = _queue_with_job(tmp_path, _oom_cmd(_tail(5.0, 20.0)))
+    pool = _pool(tmp_path, gpu=FakeGpu(mem_mib=16000))
+
+    _run_one(pool, tmp_path, "q", job)
+
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 24000
+    assert "OOM REQUEUE q j1 mem_mib 16000 -> 24000 (wanted 20480 MiB) (1/8)" in _master(tmp_path)
+
+
+def test_held_plus_request_over_the_reservation_escalates(tmp_path):
+    # 10 GiB held of 14000 MiB (below the 75% fraction) but a 6 GiB ask -> genuinely short.
+    job = _queue_with_job(tmp_path, _oom_cmd(_tail(10.0, 6.0)))
+    pool = _pool(tmp_path, gpu=FakeGpu(mem_mib=14000))
+
+    _run_one(pool, tmp_path, "q", job)
+
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 21000
+
+
+def test_held_plus_request_inside_the_reservation_stays_cotenant(tmp_path):
+    job = _queue_with_job(tmp_path, _oom_cmd(_tail(2.0, 1.0)))
+    pool = _pool(tmp_path, gpu=FakeGpu(mem_mib=16000))
+
+    _run_one(pool, tmp_path, "q", job)
+
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0  # floor kept
+    assert (
+        "OOM REQUEUE q j1 co-tenant pressure: process held 2048 MiB of its 16000 MiB "
+        "reservation (wanted 1024 MiB); floor kept (1/8)"
+    ) in _master(tmp_path)
+
+
+def test_unparseable_request_keeps_the_fraction_only_behavior(tmp_path):
+    # No "Tried to allocate" line: 1497 MiB held of 14000 -> co-tenant, floor kept.
+    tail = REAL_OOM_TAIL.replace("Tried to allocate 48.00 MiB. ", "")
+    job = _queue_with_job(tmp_path, _oom_cmd(tail))
+    pool = _pool(tmp_path, gpu=FakeGpu(mem_mib=14000))
+
+    _run_one(pool, tmp_path, "q", job)
+
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0
+    assert (
+        "OOM REQUEUE q j1 co-tenant pressure: process held 1497 MiB of its 14000 MiB "
+        "reservation; floor kept (1/8)"
+    ) in _master(tmp_path)

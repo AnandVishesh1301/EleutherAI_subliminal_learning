@@ -30,13 +30,13 @@ from subliminal_learning.coherence.probe_io import (
     SCHEMA_VERSION as PROBE_SCHEMA,
 )
 from subliminal_learning.coherence.probe_io import (
-    mean_ce,
-    mean_kl,
-    pool_logprobs,
     probe_is_current,
     probe_path,
+    stream_kl_ce,
+    stream_pool_readout,
 )
 from subliminal_learning.evaluation.preference_scoring import compute_ci
+from subliminal_learning.models.tokenization_io import prompt_tensors
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import manifest_ref
 
@@ -158,7 +158,9 @@ def prob_traj_multi(model, tokenizer, device, prompts, target_ids):
     """
     per = {a: {"p": [], "rank": []} for a in target_ids}
     for prompt in prompts:
-        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+        # The family BOS policy, exactly as the endpoint eval (`last_token_probs`) applies
+        # it — a Llama/Gemma trajectory read without BOS is not on the endpoint's scale.
+        enc = prompt_tensors(tokenizer, prompt).to(device)
         if enc["input_ids"].shape[1] == 0:
             raise ValueError(f"Prompt {prompt!r} tokenizes to zero tokens.")
         probs = torch.softmax(model(**enc).logits[0, -1].float(), dim=-1)
@@ -231,9 +233,9 @@ def probe_record(run_dir: Path, peft, pool, base_logp, ce_base, pool_sha, pspec,
     `scripts.run_final_evals` calls this with the PeftModel it shares across eval kinds;
     `write_pile_probe` calls it with an adapter it loads itself.
     """
-    slp = pool_logprobs(peft, pool, device)
-    kl, ce_s = mean_kl(base_logp, slp), mean_ce(slp, pool)
-    del slp
+    # Streamed (2026-09-10): reduced chunk by chunk against the caller's base list, no
+    # per-model log-prob list is built or parked.
+    kl, ce_s = stream_kl_ce(peft, pool, device, base_logp)
     bad = not (math.isfinite(kl) and math.isfinite(ce_s))
     return {
         "schema_version": PROBE_SCHEMA, "kind": "pile_probe",
@@ -445,21 +447,24 @@ def pile_kl_trajectory(
                 prev_adapter = name
                 continue
             model.set_adapter(name)
-            with torch.no_grad():
-                adapted_logp = pool_logprobs(model, pool, device)
+            # Streamed (2026-09-10): one pass over the pool reduces KL(base ‖ adapted),
+            # both reference KLs and the CE chunk by chunk; the checkpoint's log-prob list
+            # is never built (it was ~3.3 GB on pp1, ~10 GB on Qwen when parked).
+            refs = {"base": base_logp, **({"ref": ref_logp} if ref_logp is not None else {})}
+            out = stream_pool_readout(model, pool, device, refs,
+                                      reverse=("ref",) if ref_logp is not None else ())
             if prev_adapter is not None:
                 model.delete_adapter(prev_adapter)
             prev_adapter = name
             rows.append({"step": step, "checkpoint": ckpt.name,
-                         "kl_base_adapted": mean_kl(base_logp, adapted_logp),
-                         **({"kl_ref_adapted": mean_kl(ref_logp, adapted_logp),
-                             "kl_adapted_ref": mean_kl(adapted_logp, ref_logp)}
+                         "kl_base_adapted": out.kl_from["base"],
+                         **({"kl_ref_adapted": out.kl_from["ref"],
+                             "kl_adapted_ref": out.kl_to["ref"]}
                             if ref_logp is not None else {}),
                          # Per-checkpoint CE on the SAME pool (2026-08-21): delta_ce is
                          # directly comparable to pile_probe_final's endpoint record.
-                         "ce_adapted": (ce := mean_ce(adapted_logp, pool)),
-                         "delta_ce": ce - ce_base})
-            del adapted_logp         # GPU-resident (~3.3 GB on pp1): free before the next checkpoint
+                         "ce_adapted": out.ce,
+                         "delta_ce": out.ce - ce_base})
     finally:
         if model is not None:
             if ref_logp is None:

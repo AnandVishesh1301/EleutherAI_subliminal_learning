@@ -28,6 +28,12 @@ from pathlib import Path
 
 import nbformat as nbf
 
+from subliminal_learning.stats import collapse_law as cl
+
+# Reference (quotable) collapse-law constants, rendered once for the markdown below.
+_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
+_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
+
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "notebooks" / "trait_specificity.ipynb"
 
@@ -100,9 +106,9 @@ set_plot_style(dpi=115, hide_spines=True)
 ROOT, OUTPUT_ROOT = bootstrap()
 
 TARGET = "dog"                       # the teacher's trait
-KSTAR = cl.KSTAR_POOLED   # placement-era shared-band coordinate (7.87e-4), kept so this
-                          # notebook's K/K* axis matches the band manifest; the WORKING
-                          # anchor for new claims is cl.KSTAR_CALIBRATED (8.4e-4)
+KSTAR = cl.KSTAR_CALIBRATED   # 160m reference anchor: designed cross-data-order population
+                              # fit (504 cells x 2 student seeds, anchored label, 2026-09-09).
+                              # The band manifest's cells were PLACED in an earlier coordinate.
 TRANSFER_CUT = 0.10                  # p(dog) above which a run is called 'transferring'
 
 STUDENT_BASE = "pythia-160m-data-seed1"          # the receiving init -- what the dead cut keys on
@@ -193,8 +199,9 @@ display(runs.group.value_counts().reindex(GROUPS).rename("n_runs").to_frame())
 """)
 
 md(r"""
-**Cell coverage in $K/K^\ast$.** $K=\mathrm{lr}\cdot\alpha^{0.561}\cdot r^{-0.085}$ (the
-collapse-law helper `cl.k_from_tag`), $K^\ast=7.87\times10^{-4}$. The strip spans four decades of
+**Cell coverage in $K/K^\ast$.** $K=\mathrm{lr}\cdot\alpha^{""" + _B_REF + r"""}\cdot r^{""" + _C_REF + r"""}$ (the
+collapse-law helper `cl.k_from_tag`), $K^\ast=""" + _KSTAR_TEX + r"""$ — the designed
+cross-data-order population fit (anchored label, 2026-09-09). The strip spans four decades of
 relative dose, straddling the boundary at $K/K^\ast=1$; row unit below is one **cell**.
 """)
 code("""

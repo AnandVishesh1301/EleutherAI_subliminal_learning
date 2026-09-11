@@ -25,6 +25,12 @@ from pathlib import Path
 
 import nbformat as nbf
 
+from subliminal_learning.stats import collapse_law as cl
+
+# Reference (quotable) collapse-law constants, rendered once for the markdown below.
+_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
+_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
+
 REPO = Path(__file__).absolute().parents[1]
 OUT = REPO / "notebooks/collapse_campaigns_k_alpha_rank.ipynb"
 
@@ -45,7 +51,11 @@ md(r"""
 
 The collapse-boundary student-HP campaigns were placed against the **collapse-boundary law**
 
-$$K \;=\; \mathrm{lr}\cdot\alpha^{b}\cdot r^{c},\qquad b=0.561,\; c=-0.085,$$
+$$K \;=\; \mathrm{lr}\cdot\alpha^{b}\cdot r^{c},\qquad b=""" + _B_REF + r""",\; c=""" + _C_REF + r""",$$
+
+(the 160m reference fit: designed cross-data-order population, 504 cells $\times$ 2 student
+seeds, anchored $\Delta$CE label, 2026-09-09; the cells below were PLACED in an earlier
+trait-era coordinate, retired on the same date),
 
 which says an ep20 student collapses (loses the trait outright) once $K$ crosses a threshold
 $K^\ast$. All of them distil the *same* teacher pool into cross-init student bases at ep20,
@@ -98,7 +108,12 @@ $K/K^\ast = 1$ line and a dead band above it, at the *same height* regardless of
 $r$ were traded off to get there.
 """)
 
-md("## 0. Setup")
+md("""## 0. Setup
+
+`KSTAR_PLACED` / `KSTAR_KRUNGS` below are the retired trait-era coordinate the cells were
+PLACED against (retired 2026-09-09 as a law, kept only to reconstruct the design); the
+quotable reference exponents and anchor are `cl.B_LAW` / `cl.C_LAW` / `cl.KSTAR_CALIBRATED`.
+""")
 
 code(r'''
 from __future__ import annotations
@@ -123,14 +138,17 @@ pd.set_option("display.width", 220)
 set_plot_style(dpi=115, hide_spines=True)
 ROOT, OUTPUT_ROOT = bootstrap()
 
-# --- the law, as the campaigns were PLACED with it (fit by the law-* campaign) --------------
-B_LAW, C_LAW = 0.561, -0.085
-KSTAR_PLACED = 7.870e-4   # pooled anchor the band/focus designs were PLACED against (trait-era)
-KSTAR_KRUNGS = 7.84e-4    # the krungs rungs were placed against this; 0.4% apart, far inside one bin
-# KSTAR -- the DISPLAY axis unit -- is cl.KSTAR_CALIBRATED = 8.4e-4 (Angela 2026-08-20:
-# the pooled cut-4 calibrated anchor, adopted "for now" as the shared unit); measured
-# per-arm boundaries are still overlaid per lineage figure -- the unit is a convention,
-# the per-arm markers are the measurements. KSTAR_PLACED remains the placement-era record.
+# --- the law: 160m reference fit (designed cross-data-order population, 504 cells x 2
+# student seeds, anchored label, cluster-robust logistic MLE; 2026-09-09) ------------------
+B_LAW, C_LAW = cl.B_LAW, cl.C_LAW
+KSTAR_PLACED = 7.870e-4   # anchor the band/focus designs were PLACED against (trait-era
+                          # coordinate, retired 2026-09-09) -- history, never a readout
+KSTAR_KRUNGS = 7.84e-4    # the krungs rungs were PLACED against this (same retired coordinate,
+                          # kept only to reconstruct the design; quotable reference constants
+                          # are cl.B_LAW / cl.C_LAW / cl.KSTAR_CALIBRATED)
+# KSTAR -- the DISPLAY axis unit -- is cl.KSTAR_CALIBRATED; measured per-arm boundaries are
+# still overlaid per lineage figure -- the unit is a convention, the per-arm markers are the
+# measurements. KSTAR_PLACED / KSTAR_KRUNGS remain the placement-era record only.
 DEAD = 0.005              # per-run collapse cut on test p_target (re-checked in §6)
 P_VMAX = 0.2              # house colour scale for mean test p, shared by every figure here
 
@@ -147,7 +165,7 @@ EDGES, BIN_LABELS = LADDER.edges, LADDER.labels
 
 
 def K_of(tag: str) -> float:
-    """Design-time K of a student cell tag, from the pre-registered exponents."""
+    """K of a student cell tag at the 160m reference exponents (cl.B_LAW/cl.C_LAW)."""
     return cl.k_from_tag(tag, b=B_LAW, c=C_LAW)
 
 
@@ -289,10 +307,10 @@ CAL["collapsed_cmp"] = (CAL.kl > DEAD_KL_CUT).astype(int)
 # PER-ARM calibration -- NO cross-animal (or cross-base) aggregation anywhere (Angela
 # 2026-08-20). Estimators: logistic-50% on log K (primary; single-seed compatible,
 # cluster-robust-by-cell CI) and the min-error cut (assumption-free check). Labels are
-# the PREDETERMINED anchored-cut ones -- labels->boundary only. The DISPLAY axis unit
-# stays the placement-era anchor as a declared convention; each lineage figure carries
-# its own arm's measured K* as a marker.
-KSTAR = cl.KSTAR_CALIBRATED   # display unit: the working calibrated anchor (8.4e-4, cut 4)
+# the PREDETERMINED anchored-cut ones -- labels->boundary only. The DISPLAY axis unit is
+# the 160m reference anchor (cl.KSTAR_CALIBRATED) as a declared convention; each lineage
+# figure carries its own arm's measured K* as a marker.
+KSTAR = cl.KSTAR_CALIBRATED   # display unit: 160m reference anchor (designed 504x2 fit)
 KSTAR_ARM = {}
 _rows = []
 for (a, b), g in CAL.groupby(["animal", "base_label"]):
@@ -313,7 +331,7 @@ print("K* per (animal x base) arm -- OPERATIVE anchored integrity label ("
       + f"; declared {DEAD_KL_CUT} = comparison only), display exponents "
       f"b={B_LAW}/c={C_LAW}; logistic-50% primary, min-error check; gate >= 5 dead:")
 print(pd.DataFrame(_rows).to_string(index=False))
-print("\n(display axis below uses the calibrated anchor 8.4e-4; in_disp_units is"
+print(f"\n(display axis below uses the reference anchor {KSTAR:.2e}; in_disp_units is"
       "\neach arm's measured boundary on that axis, drawn per lineage figure. Full calibration"
       "\npresentation -- structure decomposition, scatter, heatmap, sensitivity -- lives in"
       "\ncollapse_claims.ipynb C3b/C3c.)")
@@ -324,8 +342,9 @@ md("""
 ## 1. The design itself — where the campaigns put their cells
 
 One row per design cell (no results enter here). This is the grid every figure below is
-drawn on. $K/K^\\ast$ uses the calibrated anchor 8.4e-4 throughout (a declared convention;
-design placement quotes were at 7.87e-4, x0.937 on these axes);
+drawn on. $K/K^\\ast$ uses the 160m reference anchor $""" + _KSTAR_TEX + """$ throughout (the
+designed cross-data-order population fit; design placement quotes were at the retired
+trait-era $7.87\\times10^{-4}$);
 the measured per-arm boundaries from the calibration cell are overlaid on the lineage
 figures as their own markers.
 """)

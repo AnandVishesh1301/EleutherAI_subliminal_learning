@@ -1,10 +1,11 @@
-"""Residual-stream steering hooks for GPT-NeoX (PolyPythias).
+"""Residual-stream steering hooks (every base family the repo loads).
 
 Port of Blank et al.'s ``subliminal.steering_utils`` (``BLANK_ARCHITECTURE.md``). The only
-substantive change is the block resolver: PolyPythias are ``GPTNeoXForCausalLM``, whose
-decoder blocks live at ``model.gpt_neox.layers`` (and under a ``PeftModel`` at
-``model.base_model.model.gpt_neox.layers``) -- not the ``model.model.layers`` layout Blank's
-LLaMA/Qwen resolver assumes.
+substantive change is the block resolver: `subliminal_learning.models.residual.resolve_blocks`
+finds the decoder blocks generically, so the hooks work on GPT-NeoX (PolyPythias, whose
+blocks live at ``model.gpt_neox.layers`` -- not the ``model.model.layers`` layout Blank's
+LLaMA/Qwen resolver assumes), on Llama / Qwen2 / Gemma2 / Gemma3 and on hf_olmo's DataDecide
+models (``model.transformer.blocks``), bare or PEFT-wrapped.
 
 Layer indexing: ``layers=[i]`` hooks block ``i`` directly (0-indexed), and
 ``v_raw_per_layer[i]`` is the residual coming *out* of that block. Extraction now runs in the
@@ -39,7 +40,7 @@ from subliminal_learning.models.residual import resolve_blocks
 
 
 def _hidden_from_output(output):
-    """GPT-NeoX blocks return a tuple ``(hidden, *rest)``; some paths return a bare tensor."""
+    """Blocks return ``(hidden, *rest)`` on some families/versions, a bare tensor on others."""
     if isinstance(output, tuple):
         return output[0], output[1:]
     return output, None
@@ -109,8 +110,8 @@ def steering_hooks(
     """Attach residual-stream forward hooks for the duration of a ``with`` block.
 
     Args:
-        model: GPT-NeoX causal LM (clean base for ``add`` sufficiency; teacher for
-            ``project`` necessity).
+        model: causal LM of any supported family (clean base for ``add`` sufficiency;
+            teacher for ``project`` necessity).
         v_raw_per_layer: ``[n_blocks, H]`` tensor in the ``raw_blocks_v2`` basis, with the
             embedding slot already stripped (``v["raw"][1:]``): row ``i`` is the raw
             output of block ``i``, final block included.
@@ -133,15 +134,15 @@ def steering_hooks(
 
     blocks = resolve_blocks(model)
     handles = []
-    for l in layers:
-        v = v_raw_per_layer[l]
-        a = alpha if scalar_alpha else float(alpha[l])
+    for layer_idx in layers:
+        v = v_raw_per_layer[layer_idx]
+        a = alpha if scalar_alpha else float(alpha[layer_idx])
         hook = (
             _make_add_hook(v, a, positions, norm)
             if mode == "add"
             else _make_project_hook(v, a, positions)
         )
-        handles.append(blocks[l].register_forward_hook(hook))
+        handles.append(blocks[layer_idx].register_forward_hook(hook))
     try:
         yield
     finally:

@@ -211,6 +211,14 @@ def _student_run_identity(
             **({"tf32": True} if cfg.train.tf32 else {}),
             **({"group_by_length": True} if cfg.train.group_by_length else {}),
             **({"supervised_only_head": True} if cfg.train.supervised_only_head else {}),
+            # Additive, present ONLY for the noeos arm: default identities stay
+            # byte-identical. The same flag is what the trainer actually receives below.
+            **({"append_eos": False} if not cfg.train.append_eos else {}),
+            # Additive, present ONLY for the early-stop arm (the tag already spells
+            # `_stop{N}`): full-budget identities stay byte-identical and still SKIP-match.
+            **({"stop_step": cfg.train.stop_step} if cfg.train.stop_step is not None else {}),
+            **({"save_at_steps": list(cfg.train.save_at_steps)}
+               if cfg.train.save_at_steps is not None else {}),
         },
         **({"base_model_dtype": cfg.dtype} if cfg.dtype != "float32" else {}),
         "lora": {
@@ -490,6 +498,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         train_cfg=cfg.train,
         output_dir=checkpoint_dir,
         callbacks=callbacks,
+        # The student tag already spells `_noeos` from this flag (`ft_param_tag`); pass it
+        # through so a `_noeos` student dir can never hold an EOS-trained adapter.
+        append_eos=cfg.train.append_eos,
         run_name=student_run_label(
             cfg.source,
             spec=cfg.spec,
@@ -543,6 +554,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             **({"tf32": True} if cfg.train.tf32 else {}),
             **({"group_by_length": True} if cfg.train.group_by_length else {}),
             **({"supervised_only_head": True} if cfg.train.supervised_only_head else {}),
+            **({"append_eos": False} if not cfg.train.append_eos else {}),
             "target_modules": cfg.lora.target_modules
             if isinstance(cfg.lora.target_modules, str)
             else list(cfg.lora.target_modules),

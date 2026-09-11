@@ -555,14 +555,14 @@ ax = axes[1]
 for arm in PERSTEP:
     ps = PERSTEP[arm].dropna(subset=["b"])
     ax.plot(ps["step"], ps["b"], "o-", ms=3, lw=1.4, color=pal[arm], label=arm)
-ax.axhline(cl.B_LAW, color="gray", ls="--", lw=1, label="160m settled b 0.561")
+ax.axhline(cl.B_LAW, color="gray", ls="--", lw=1, label=f"160m reference b {cl.B_LAW}")
 ax.set_xscale("log"); ax.set_xlabel("optimizer step (log)"); ax.set_ylabel("b (alpha exponent), free refit at that step")
 ax.set_ylim(0, 1.2); ax.set_title("Alpha exponent along training")
 ax = axes[2]
 for arm in PERSTEP:
     ps = PERSTEP[arm].dropna(subset=["c"])
     ax.plot(ps["step"], ps["c"], "o-", ms=3, lw=1.4, color=pal[arm], label=arm)
-ax.axhline(cl.C_LAW, color="gray", ls="--", lw=1, label="160m settled c -0.085")
+ax.axhline(cl.C_LAW, color="gray", ls="--", lw=1, label=f"160m reference c {cl.C_LAW}")
 ax.set_xscale("log"); ax.set_xlabel("optimizer step (log)"); ax.set_ylabel("c (rank exponent), free refit at that step")
 ax.set_ylim(-0.6, 0.3); ax.set_title("Rank exponent along training")
 aplots.right_legend(ax, fontsize=8)

@@ -207,3 +207,111 @@ def test_new_kind_column_forces_one_full_reread(tmp_path):
     # and a second load is a no-op refresh (row fresh again)
     df3 = rc.load_record_cache(root, rc.PILE_PROBE, [run])
     assert len(df3) == 1 and df3.ce_student.iloc[0] == 2.9
+
+
+def test_warm_sweep_reads_nothing_and_never_rewrites(tmp_path, monkeypatch):
+    # 150 records with sub-microsecond-varied mtimes: pandas' default float parser perturbs
+    # ~12% of such mtimes by one ulp, which under the exact-mtime contract turned every warm
+    # sweep into re-reads plus a full cache rewrite. Round-trip parsing must make it a no-op.
+    rng = np.random.default_rng(0)
+    paths = [f"r{i}" for i in range(150)]
+    for rp in paths:
+        f = _probe(tmp_path, rp, kl=1.0)
+        ns = 1_787_164_395_000_000_000 + int(rng.integers(0, 10**9))
+        os.utime(f, ns=(ns, ns))
+    _load(tmp_path, paths)
+    cache_f = rc.cache_path(tmp_path, rc.get_kind("pile_probe"))
+    before = cache_f.stat().st_mtime_ns
+
+    reads = []
+    orig = Path.read_text
+    monkeypatch.setattr(Path, "read_text",
+                        lambda self, *a, **k: (reads.append(self), orig(self, *a, **k))[1])
+    out = _load(tmp_path, paths)
+    assert len(out) == 150
+    assert not [p for p in reads if p.name == "pile_probe.json"]   # nothing re-read
+    assert cache_f.stat().st_mtime_ns == before                     # nothing rewritten
+
+
+def test_csv_memo_parses_once_until_the_file_changes(tmp_path, monkeypatch):
+    _probe(tmp_path, "a")
+    _load(tmp_path, ["a"])                       # creates the cache (parse count starts here)
+    parses = []
+    orig = rc.pd.read_csv
+    monkeypatch.setattr(rc.pd, "read_csv", lambda *a, **k: (parses.append(a[0]), orig(*a, **k))[1])
+    _load(tmp_path, ["a"])
+    _load(tmp_path, ["a"])
+    assert parses == []                          # served from the per-process memo
+    _probe(tmp_path, "b")
+    _load(tmp_path, ["b"])                       # this process wrote it -> memo updated, no parse
+    assert parses == []
+    cache_f = rc.cache_path(tmp_path, rc.get_kind("pile_probe"))
+    cache_f.write_text(cache_f.read_text())      # an external rewrite (other process / node)
+    os.utime(cache_f, ns=(cache_f.stat().st_mtime_ns + 1_000_000,) * 2)
+    out = _load(tmp_path, ["a", "b"])
+    assert len(parses) == 1                      # re-parsed once the stat changed
+    assert sorted(out.run_path) == ["a", "b"]
+
+
+def test_sweep_outcomes_keep_inventory_order_under_threads(tmp_path):
+    paths = [f"p{i}" for i in range(40)]
+    for rp in paths:
+        _probe(tmp_path, rp, kl=float(rp[1:]))
+    out = _load(tmp_path, paths)
+    assert list(out.run_path) == paths
+    assert list(out.kl) == [float(i) for i in range(40)]
+
+
+def test_unrecorded_inventory_path_does_not_force_a_rewrite(tmp_path):
+    _probe(tmp_path, "a")
+    _load(tmp_path, ["a", "never_evaluated"])      # creates the cache; "never_evaluated" absent
+    cache_f = rc.cache_path(tmp_path, rc.get_kind("pile_probe"))
+    before = cache_f.stat().st_mtime_ns
+    out = _load(tmp_path, ["a", "never_evaluated"])
+    assert list(out.run_path) == ["a"]
+    assert cache_f.stat().st_mtime_ns == before      # nothing changed -> no rewrite
+    (tmp_path / "a" / "eval" / "pile_probe.json").unlink()
+    out = _load(tmp_path, ["a", "never_evaluated"])  # a CACHED row vanished -> must persist
+    assert len(out) == 0
+    assert cache_f.stat().st_mtime_ns != before
+
+
+def test_serialized_cache_round_trips_cell_for_cell(tmp_path):
+    # The persist path (pyarrow when importable) must be read back identically by the
+    # round-trip parser: exact mtimes, +inf (diverged), NaN, and blobs containing newlines.
+    _probe(tmp_path, "inf", nonfinite=True)
+    _probe(tmp_path, "fin", kl=0.123456789012345678)
+    first = _load(tmp_path, ["inf", "fin"])
+    rc._CSV_MEMO.clear()                              # force a real parse of the file
+    again = _load(tmp_path, ["inf", "fin"], refresh=False)
+    assert list(again.columns) == list(first.columns)
+    for c in first.columns:
+        a, b = first[c], again[c]
+        ok = (a.astype(object).values == b.astype(object).values) | (a.isna().values & b.isna().values)
+        assert ok.all(), c
+    assert np.isinf(again.set_index("run_path").loc["inf", "kl"])
+
+    blob_dir = tmp_path / "b"
+    blob_dir.mkdir()
+    (blob_dir / "doc.json").write_text(json.dumps({"x": "line1\nline2", "y": [1, 2]}, indent=2))
+    out = rc.load_record_cache(tmp_path, "json_blob", ["b"], rel_record="doc.json",
+                               cache_rel="analysis/blob_test.csv", verbose=False)
+    rc._CSV_MEMO.clear()
+    back = rc.load_record_cache(tmp_path, "json_blob", ["b"], rel_record="doc.json",
+                                cache_rel="analysis/blob_test.csv", refresh=False, verbose=False)
+    assert json.loads(back.blob.iloc[0]) == json.loads(out.blob.iloc[0]) == {"x": "line1\nline2", "y": [1, 2]}
+
+
+def test_mixed_type_column_falls_back_to_pandas_persist(tmp_path):
+    # A raw record field with inconsistent types across records (int in one, str in another)
+    # makes an object column pyarrow cannot convert; the persist must still succeed.
+    _probe(tmp_path, "a", manifest_ref={"student_param_tag": "t", "filtered_sha256": "s",
+                                        "n_train_steps": 10})
+    _probe(tmp_path, "b", manifest_ref={"student_param_tag": "t", "filtered_sha256": "s",
+                                        "n_train_steps": "ten"})
+    out = _load(tmp_path, ["a", "b"])
+    assert sorted(out.run_path) == ["a", "b"]
+    rc._CSV_MEMO.clear()
+    back = _load(tmp_path, ["a", "b"], refresh=False)
+    assert sorted(back.run_path) == ["a", "b"]
+    assert set(back.n_train_steps.astype(str)) == {"10", "ten"}

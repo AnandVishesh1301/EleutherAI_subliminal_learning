@@ -136,7 +136,8 @@ md(r"""
 cell) and reports the ratios `b = β_α/β_lr`, `c = β_r/β_lr`.  The design is near-separable, so the
 MLE does not converge and only the ratios are meaningful (the non-converged flag is expected, not a
 defect).  `K*` is the pooled logistic 50 % crossing on `K = lr·α^b·r^c`; the misclassification
-count is the assumption-free cross-check.  The Pythia-160m settled exponents are evaluated on the
+count is the assumption-free cross-check.  The Pythia-160m reference exponents (designed 504x2
+fit) are evaluated on the
 same data for comparison.
 """)
 
@@ -150,13 +151,13 @@ law["student_tag"] = law["tag"]
 fit = cl.fit_collapse_law(law)
 rows = []
 for label, b, c in [("dd-1b fit (MLE ratios)", fit.b, fit.c),
-                    ("Pythia-160m settled", cl.B_LAW, cl.C_LAW)]:
+                    ("Pythia-160m reference (designed 504x2 fit)", cl.B_LAW, cl.C_LAW)]:
     k = cl.kstar_logistic(law, b, c)
     mn = cl.kstar_minerr(law, b, c)
     wrong, n_cells = cl.law_misses(law, b, c, k["kstar"])
     rows.append({"exponents": label, "b (alpha)": round(b, 3), "c (rank)": round(c, 3),
                  "K* logistic": f"{k['kstar']:.3e}", "K* min-err": f"{mn['kstar']:.3e}",
-                 "K*/K*_160m (8.4e-4)": round(k["kstar"] / cl.KSTAR_CALIBRATED, 2),
+                 f"K*/K*_160m ({cl.KSTAR_CALIBRATED:.1e})": round(k["kstar"] / cl.KSTAR_CALIBRATED, 2),
                  "cells misclassified": f"{wrong}/{n_cells}"})
 print(f"MLE converged: {fit.converged}  (near-separation expected)  n_dead={fit.n_dead}/{fit.n_runs}")
 display(pd.DataFrame(rows).set_index("exponents"))

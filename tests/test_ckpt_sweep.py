@@ -9,6 +9,7 @@ test loads the real configs/experiment/ckpt_distill_sweep.yaml and asserts its v
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -17,10 +18,12 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import scripts.sweeps.sweep_ckpt_distill as sweep_mod
 from scripts.sweeps.sweep_ckpt_distill import (
     _snapshot_action,
     expand_jobs,
     filter_new_jobs,
+    sweep_lock_path,
 )
 from subliminal_learning.jobqueue.model import sanitize_jobkey
 
@@ -189,13 +192,13 @@ def test_rng_control_adds_single_job_to_first_numgen_queue():
 # ------------------------- per-job envelope -------------------------
 
 
-def test_every_job_carries_cwd_env_and_stage_mem():
+def test_every_job_carries_env_and_stage_mem_and_no_cwd_by_default():
     specs = expand_jobs(_sweep(pairs={"topology": "full", "explicit": []}), _REPO)
     stage_mem = {"t-": 16000, "n-": 24000, "d-": 20000}
     for q in specs:
         stage = next(s for s in stage_mem if f"-{s}step" in q.name.replace("ckpt-dog", ""))
         for jd in q.jobs:
-            assert jd["cwd"] == str(_REPO)
+            assert "cwd" not in jd   # portable default; `jobq.cwd: pin` opts into pinning
             assert jd["env"] == {"WANDB_MODE": "disabled"}
             assert jd["mem_mib"] == stage_mem[stage]
 
@@ -386,3 +389,70 @@ def test_snapshot_action_differs_errors_without_flag():
 
 def test_snapshot_action_differs_overwrites_with_flag():
     assert _snapshot_action("a: 1\n", "a: 2\n", allow_update=True) == "overwrite"
+
+
+# ------------------- snapshot write is atomic + locked at the queue root -------------------
+
+
+def _submit_spies(monkeypatch) -> tuple[list, list]:
+    """Record atomic writes + lock paths, and stop submit() before any jobq I/O."""
+    writes: list[tuple[Path, str]] = []
+    locks: list[Path] = []
+
+    @contextlib.contextmanager
+    def fake_lock(path, *a, **k):
+        locks.append(Path(path))
+        yield
+
+    def fake_write(path, text):
+        writes.append((Path(path), text))
+        Path(path).write_text(text)
+
+    monkeypatch.setattr(sweep_mod, "file_lock", fake_lock)
+    monkeypatch.setattr(sweep_mod, "atomic_write_text", fake_write)
+    monkeypatch.setattr(sweep_mod, "expand_jobs", lambda *a, **k: [])
+    return writes, locks
+
+
+def _sweep_yaml(tmp_path: Path, steps: str) -> tuple[Path, Path]:
+    queue_root = tmp_path / "queue"
+    cfg = tmp_path / "sweep.yaml"
+    cfg.write_text(
+        f"base_model: pythia-160m\nsteps: {steps}\n"
+        "pairs: {topology: diagonal}\nanimals: [dog]\n"
+        f"jobq: {{root: {queue_root}, queue_prefix: ckpt-test}}\n"
+    )
+    return cfg, queue_root
+
+
+def test_submit_writes_the_snapshot_atomically_under_the_queue_root_lock(tmp_path, monkeypatch):
+    writes, locks = _submit_spies(monkeypatch)
+    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]")
+    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
+    snapshot = queue_root / "ckpt-test.sweep.yaml"
+    assert [p for p, _ in writes] == [snapshot]
+    assert snapshot.read_text() == cfg.read_text()
+    assert locks == [sweep_lock_path(queue_root, "ckpt-test")]
+
+
+def test_submit_snapshot_overwrite_and_reuse_lock_behavior(tmp_path, monkeypatch):
+    writes, locks = _submit_spies(monkeypatch)
+    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]")
+    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
+    # byte-identical resubmit: no write, no lock beyond the first
+    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
+    assert len(writes) == 1 and len(locks) == 1
+    # a differing config with the flag: overwritten atomically under the SAME lock
+    cfg.write_text(cfg.read_text().replace("[25000]", "[25000, 50000]"))
+    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=True, dry_run=False)
+    assert len(writes) == 2
+    assert locks == [sweep_lock_path(queue_root, "ckpt-test")] * 2
+    assert (queue_root / "ckpt-test.sweep.yaml").read_text() == cfg.read_text()
+
+
+def test_submit_dry_run_writes_no_snapshot_and_takes_no_lock(tmp_path, monkeypatch):
+    writes, locks = _submit_spies(monkeypatch)
+    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]")
+    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=True)
+    assert writes == [] and locks == []
+    assert not (queue_root / "ckpt-test.sweep.yaml").exists()

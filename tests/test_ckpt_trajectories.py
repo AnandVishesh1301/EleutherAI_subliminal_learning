@@ -20,7 +20,9 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
 from subliminal_learning.cka.pool_io import SequencePool  # noqa: E402
-from subliminal_learning.coherence.probe_io import mean_ce, pool_logprobs  # noqa: E402
+from subliminal_learning.coherence.probe_io import (  # noqa: E402
+    doc_ce, mean_ce, mean_kl, pile_logprobs, pool_logprobs, stream_kl_ce, stream_pool_readout,
+)
 from subliminal_learning.evaluation.ckpt_trajectories import (  # noqa: E402
     release_base,
     write_pile_probe,
@@ -286,3 +288,91 @@ def test_phase_sequence_without_release_zeroes_the_endpoint_kl(tmp_path, tiny, m
     assert fixed[0] > 1e-8 and fixed[1] > 1e-8
     assert fixed[0] == pytest.approx(broken[0], abs=1e-12)
     assert "peft_config" not in vars(base)
+
+
+# --------------------------------------------------------------------------- streaming
+def _perturbed(model, scale: float = 0.05):
+    """A deep copy of `model` with noise on every weight: a stand-in 'student'."""
+    import copy
+
+    student = copy.deepcopy(model)
+    g = torch.Generator().manual_seed(1)
+    with torch.no_grad():
+        for par in student.parameters():
+            par.add_(scale * torch.randn(par.shape, generator=g))
+    return student.eval()
+
+
+def _pool(tokenizer):
+    # every doc >= 2 tokens: real pools skip shorter docs, and a 1-token doc has no
+    # eligible position at all
+    texts = ["the quick brown fox jumps over the lazy dog", "numbers: 12, 34, 56, 78, 90",
+             "a b", "streaming reduces chunk by chunk", "one more short document here"]
+    ids = [tokenizer(t, add_special_tokens=False)["input_ids"] for t in texts]
+    return SequencePool(ids, [list(range(1, len(d))) for d in ids], "test_pool")
+
+
+def test_stream_pool_readout_matches_the_list_path(tiny):
+    base, tokenizer = tiny
+    student = _perturbed(base)
+    pool = _pool(tokenizer)
+    base_logp = pool_logprobs(base, pool, "cpu")
+    slp = pile_logprobs(student, pool, "cpu")
+    want_from, want_to = mean_kl(base_logp, slp), mean_kl(slp, base_logp)
+    want_ce = mean_ce(slp, pool)
+    want_sums, want_counts = doc_ce(slp, pool)
+    for bs in (1, 2, 5):                         # batching only changes padding
+        out = stream_pool_readout(student, pool, "cpu", {"base": base_logp},
+                                  reverse=("base",), batch_size=bs)
+        assert out.kl_from["base"] == pytest.approx(want_from, rel=1e-6, abs=1e-9)
+        assert out.kl_to["base"] == pytest.approx(want_to, rel=1e-6, abs=1e-9)
+        assert out.ce == pytest.approx(want_ce, rel=1e-6, abs=1e-9)
+        assert out.doc_ce_counts == want_counts
+        assert out.doc_ce_sums == pytest.approx(want_sums, rel=1e-6, abs=1e-9)
+        assert out.n_positions == sum(len(e) for e in pool.eligible)
+    kl, ce = stream_kl_ce(student, pool, "cpu", base_logp)
+    assert (kl, ce) == pytest.approx((want_from, want_ce), rel=1e-6, abs=1e-9)
+    # two refs at once, reverse only for one of them
+    out = stream_pool_readout(student, pool, "cpu", {"base": base_logp, "self": slp},
+                              reverse=("self",))
+    assert out.kl_from["self"] == pytest.approx(0.0, abs=1e-6)
+    assert set(out.kl_to) == {"self"}
+
+
+def test_stream_pool_readout_rejects_bad_refs(tiny):
+    base, tokenizer = tiny
+    pool = _pool(tokenizer)
+    base_logp = pool_logprobs(base, pool, "cpu")
+    with pytest.raises(ValueError, match="reverse"):
+        stream_pool_readout(base, pool, "cpu", {"base": base_logp}, reverse=("ref",))
+    with pytest.raises(ValueError, match="docs"):
+        stream_pool_readout(base, pool, "cpu", {"base": base_logp[:-1]})
+
+
+def test_pile_readout_streams_the_same_numbers(tiny):
+    from subliminal_learning.weightspace.patching import pile_readout
+
+    base, tokenizer = tiny
+    student = _perturbed(base)
+    pool = _pool(tokenizer)
+    base_logp = pool_logprobs(base, pool, "cpu")
+    ce_base = mean_ce(base_logp, pool)
+    slp = pile_logprobs(student, pool, "cpu")
+    kl, dce = pile_readout(student, pool, "cpu", base_logp, ce_base, logp_device="cpu")
+    assert kl == pytest.approx(mean_kl(base_logp, slp), rel=1e-6, abs=1e-9)
+    assert dce == pytest.approx(mean_ce(slp, pool) - ce_base, rel=1e-6, abs=1e-9)
+
+
+def test_prob_traj_multi_applies_the_family_bos_policy(tiny, monkeypatch):
+    from subliminal_learning.evaluation.ckpt_trajectories import prob_traj_multi
+
+    model, tokenizer = tiny
+    prompts = ["the quick brown fox"]
+    ids = tokenizer(prompts[0], add_special_tokens=False)["input_ids"]
+    no_bos = prob_traj_multi(model, tokenizer, "cpu", prompts, {"x": 5})["x"]["p"][0]
+    monkeypatch.setattr(tokenizer, "name_or_path", "google/gemma-3-1b-pt")   # a BOS family
+    assert tokenizer.bos_token_id is not None
+    with_bos = prob_traj_multi(model, tokenizer, "cpu", prompts, {"x": 5})["x"]["p"][0]
+    logits = model(input_ids=torch.tensor([[tokenizer.bos_token_id, *ids]])).logits[0, -1].float()
+    assert with_bos == pytest.approx(float(torch.softmax(logits, -1)[5]), rel=1e-6)
+    assert with_bos != no_bos

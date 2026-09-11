@@ -22,7 +22,9 @@ from subliminal_learning.weightspace.deltas import (
 
 
 @pytest.mark.parametrize("variants", ["orig,rand0", "rand0"])
-def test_producer_pairs_original_readout_and_invalidates_legacy(tmp_path, monkeypatch, variants):
+@pytest.mark.parametrize("dose_lambda", [1.0, 0.5])
+@pytest.mark.parametrize("pool", ["pp1", "dp1"])
+def test_producer_pairs_original_readout_and_invalidates_legacy(tmp_path, monkeypatch, variants, dose_lambda, pool):
     run = tmp_path / "students" / "cell" / "ftseed1"
     ck = run / "checkpoints"
     ck.mkdir(parents=True)
@@ -39,7 +41,7 @@ def test_producer_pairs_original_readout_and_invalidates_legacy(tmp_path, monkey
     prompts.write_text('["p"]')
     (run / "eval").mkdir(parents=True)
     (run / "eval" / "pile_probe.json").write_text(json.dumps(
-        {"delta_ce": 0.25, "kl_base_student": 9.0, "manifest_ref": "m"}))
+        {"delta_ce": 0.25, "kl_base_student": 9.0, "manifest_ref": "m", "pool_version": pool, "pool_sha": "pool"}))
 
     class Model(torch.nn.Module):
         def __init__(self):
@@ -54,16 +56,18 @@ def test_producer_pairs_original_readout_and_invalidates_legacy(tmp_path, monkey
     monkeypatch.setattr("subliminal_learning.evaluation.preference_prob_io.target_token_id", lambda *a: 0)
     monkeypatch.setattr("subliminal_learning.evaluation.preference_prob_io.target_prob_and_rank_per_prompt",
                         lambda *a: {"p": (0.1, 1)})
+    monkeypatch.setattr("subliminal_learning.coherence.probe_io.resolve_probe_pool_spec",
+                        lambda repo, pool=None: SimpleNamespace(version=pool if pool not in (None, "auto") else "pp1"))
     monkeypatch.setattr("subliminal_learning.coherence.probe_io.build_probe_pool",
                         lambda *a: SimpleNamespace(token_sha256=lambda: "pool"))
-    monkeypatch.setattr("subliminal_learning.coherence.probe_io.pile_logprobs", lambda *a: None)
+    monkeypatch.setattr("subliminal_learning.coherence.probe_io.parked_logprobs", lambda *a: None)
     monkeypatch.setattr("subliminal_learning.coherence.probe_io.mean_ce", lambda *a: 0.0)
     monkeypatch.setattr("subliminal_learning.analysis.intruder_threshold.theta_bar", lambda *a: 1.0)
     monkeypatch.setattr("subliminal_learning.weightspace.patching.capture_w0",
                         lambda model: ({mod: model.layer.weight.detach().clone()}, {mod: model.layer}))
     seen_weights = []
 
-    def readout(model, *args):
+    def readout(model, *args, **kwargs):
         seen_weights.append(model.layer.weight.detach().clone())
         return (9.0, 0.25) if len(seen_weights) % 2 else (8.0, 0.5)
 
@@ -75,17 +79,23 @@ def test_producer_pairs_original_readout_and_invalidates_legacy(tmp_path, monkey
     kwargs = dict(runs=runs, n_draws=1, variants=variants, subsets="", t_ladder="",
                   count_intruders=False, animal="dog", prompt_set="test", out_name="audit",
                   seed=0, redo=False, device="cpu", output_root=tmp_path)
-    n_passes = len(variants.split(","))  # one per requested variant, never one extra
+    if dose_lambda != 1:
+        dm = tmp_path / "dose.json"
+        dm.write_text(json.dumps({"runs": {str(run.relative_to(tmp_path)): {"lambda": dose_lambda}}}))
+        kwargs["dose_manifest"] = dm
+    kwargs.update(pool=pool, logp_device="cpu")
+    original_requested = "orig" in variants or dose_lambda != 1
+    n_passes = 2 if original_requested else 1
     surgery.main(**kwargs)
     assert probe.call_count == n_passes  # baseline is reused or read, never re-measured
-    if "orig" in variants:
-        torch.testing.assert_close(seen_weights[0], torch.full((6, 5), 2.01))
+    if original_requested:
+        torch.testing.assert_close(seen_weights[0], torch.full((6, 5), 2 * dose_lambda + .01))
     out = tmp_path / "analysis" / "audit.jsonl"
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     validate_surgery_baselines(rows)
     assert {row["original_delta_ce"] for row in rows} == {0.25}
     assert {row["original_pile_kl"] for row in rows} == {9.0}
-    if "orig" in variants:
+    if original_requested:
         assert next(row for row in rows if row["variant"] == "rand0")["delta_ce"] == 0.5
         assert all("original_baseline_source" not in row for row in rows)
     else:
@@ -102,6 +112,46 @@ def test_producer_pairs_original_readout_and_invalidates_legacy(tmp_path, monkey
     surgery.main(**kwargs)
     assert probe.call_count == 2 * n_passes  # old schema recomputed, not reused
     validate_surgery_baselines([json.loads(line) for line in out.read_text().splitlines()])
+    if dose_lambda != 1:
+        dm.write_text(json.dumps({"runs": {str(run.relative_to(tmp_path)): {"lambda": .25}}}))
+        surgery.main(**kwargs)
+        assert probe.call_count == 3 * n_passes
+        torch.testing.assert_close(seen_weights[-2], torch.full((6, 5), .51))
+        changed = [json.loads(line) for line in out.read_text().splitlines()]
+        assert {r["dose_lambda"] for r in changed} == {.25}
+
+
+def _identities_of_a_producer_run(tmp_path, monkeypatch, dose_lambda):
+    """Run the producer once and return (identity dicts it keyed on, rows it wrote)."""
+    seen = []
+    real = surgery.run_is_complete
+
+    def spy(rows, identity, names):
+        seen.append(dict(identity))
+        return real(rows, identity, names)
+
+    monkeypatch.setattr(surgery, "run_is_complete", spy)
+    test_producer_pairs_original_readout_and_invalidates_legacy(
+        tmp_path, monkeypatch, "rand0", dose_lambda, "pp1")
+    rows = [json.loads(line) for line
+            in (tmp_path / "analysis" / "audit.jsonl").read_text().splitlines()]
+    return seen, rows
+
+
+def test_default_dose_identity_stays_legacy_compatible(tmp_path, monkeypatch):
+    """No dose manifest => identity carries no dose keys, so pre-dose rows still resume."""
+    seen, rows = _identities_of_a_producer_run(tmp_path, monkeypatch, 1.0)
+    for identity in seen:
+        assert "dose_lambda" not in identity and "dose_manifest_sha256" not in identity
+    legacy = [row for row in rows if row["variant"] == "rand0"]
+    assert legacy and all("dose_lambda" not in row for row in legacy)
+    assert surgery.run_is_complete(legacy, seen[-1], ["rand0"])
+
+
+def test_dose_manifest_identity_carries_the_dose_keys(tmp_path, monkeypatch):
+    seen, _ = _identities_of_a_producer_run(tmp_path, monkeypatch, 0.5)
+    assert all({"dose_lambda", "dose_manifest_sha256"} <= set(identity) for identity in seen)
+    assert {identity["dose_lambda"] for identity in seen} == {0.5, 0.25}
 
 
 def test_producer_skips_a_run_with_no_variants(tmp_path, monkeypatch):
@@ -134,9 +184,11 @@ def test_producer_skips_a_run_with_no_variants(tmp_path, monkeypatch):
     monkeypatch.setattr("subliminal_learning.evaluation.preference_prob_io.target_token_id", lambda *a: 0)
     monkeypatch.setattr("subliminal_learning.evaluation.preference_prob_io.target_prob_and_rank_per_prompt",
                         lambda *a: {"p": (0.1, 1)})
+    monkeypatch.setattr("subliminal_learning.coherence.probe_io.resolve_probe_pool_spec",
+                        lambda repo, pool=None: SimpleNamespace(version=pool if pool not in (None, "auto") else "pp1"))
     monkeypatch.setattr("subliminal_learning.coherence.probe_io.build_probe_pool",
                         lambda *a: SimpleNamespace(token_sha256=lambda: "pool"))
-    monkeypatch.setattr("subliminal_learning.coherence.probe_io.pile_logprobs", lambda *a: None)
+    monkeypatch.setattr("subliminal_learning.coherence.probe_io.parked_logprobs", lambda *a: None)
     monkeypatch.setattr("subliminal_learning.coherence.probe_io.mean_ce", lambda *a: 0.0)
     # theta_bar above every singular value -> no supercritical directions, `super` skipped
     monkeypatch.setattr("subliminal_learning.analysis.intruder_threshold.theta_bar", lambda *a: 1e9)
@@ -185,9 +237,11 @@ def test_producer_writes_no_baseline_when_the_run_has_no_probe(tmp_path, monkeyp
     monkeypatch.setattr("subliminal_learning.evaluation.preference_prob_io.target_token_id", lambda *a: 0)
     monkeypatch.setattr("subliminal_learning.evaluation.preference_prob_io.target_prob_and_rank_per_prompt",
                         lambda *a: {"p": (0.1, 1)})
+    monkeypatch.setattr("subliminal_learning.coherence.probe_io.resolve_probe_pool_spec",
+                        lambda repo, pool=None: SimpleNamespace(version=pool if pool not in (None, "auto") else "pp1"))
     monkeypatch.setattr("subliminal_learning.coherence.probe_io.build_probe_pool",
                         lambda *a: SimpleNamespace(token_sha256=lambda: "pool"))
-    monkeypatch.setattr("subliminal_learning.coherence.probe_io.pile_logprobs", lambda *a: None)
+    monkeypatch.setattr("subliminal_learning.coherence.probe_io.parked_logprobs", lambda *a: None)
     monkeypatch.setattr("subliminal_learning.coherence.probe_io.mean_ce", lambda *a: 0.0)
     monkeypatch.setattr("subliminal_learning.analysis.intruder_threshold.theta_bar", lambda *a: 1.0)
     monkeypatch.setattr("subliminal_learning.weightspace.patching.capture_w0",

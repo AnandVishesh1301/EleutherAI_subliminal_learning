@@ -101,6 +101,45 @@ from subliminal_learning.utils.io import atomic_write_text, file_sha256_cached
 # Fixed salt for the per-batch sampling seeds (seed = base + batch index). Constant so
 # every teacher/base run shares the stream; unrelated to the eval's sampling salt.
 _GEN_SEED_BASE = 20_260_401
+# Control-pool REPLICATE draws (2026-09-10). A trait-free control (untuned-base or rng pool)
+# can be resampled as draw N >= 1: the SAME prompts, a fresh sample of numbers, in its own
+# pool dir `{ps_tag}_draw{N}` beside the canonical pool (`{ps_tag}`, no suffix, never touched).
+#   base: the model samples under torch seed `gen_seed_base + batch_idx`, so replicate bases
+#         are spaced by GEN_DRAW_STRIDE (>> the ~800 batches of a 100k pool) and start far
+#         above the canonical _GEN_SEED_BASE range; `sample_seed_base` is already a core
+#         resume-gate key, so a replicate can never resume-match the canonical manifest.
+#   rng:  the canonical pool draws its numbers from the prompt-set seed (changing that would
+#         redraw the prompts every treatment shares), so replicates draw from
+#         RNG_DRAW_SEED_BASE + N, recorded in the manifest's `rng` block for replicates only.
+RNG_DRAW_SEED_BASE = 20_260_910
+GEN_DRAW_SEED_BASE = 20_270_000
+GEN_DRAW_STRIDE = 100_000
+
+
+def control_draw_tag(ps_tag: str, draw: int) -> str:
+    """Pool-dir name of replicate draw `draw` (>= 1) of a control pool for prompt set `ps_tag`.
+
+    Draw 0 does not exist as a tag: the canonical pool is the plain `ps_tag`.
+    """
+    if draw < 1:
+        raise ValueError(f"draw must be >= 1 (the canonical pool has no draw tag), got {draw}")
+    return f"{ps_tag}_draw{draw}"
+
+
+def rng_draw_seed(draw: int) -> int:
+    """PCG64 seed of rng replicate draw `draw` (>= 1); never equals a prompt-set seed."""
+    if draw < 1:
+        raise ValueError(f"draw must be >= 1, got {draw}")
+    return RNG_DRAW_SEED_BASE + draw
+
+
+def gen_draw_seed_base(draw: int) -> int:
+    """torch seed base of model-sampled replicate draw `draw` (>= 1); per-batch seeds are
+    `base + batch_idx`, and consecutive draws are GEN_DRAW_STRIDE apart so no two draws (or a
+    draw and the canonical pool) share a batch seed."""
+    if draw < 1:
+        raise ValueError(f"draw must be >= 1, got {draw}")
+    return GEN_DRAW_SEED_BASE + GEN_DRAW_STRIDE * draw
 
 MODES_SUBDIR = "modes"
 
@@ -324,6 +363,15 @@ class GenerateNumbersConfig:
         rng_count: Numbers per rng-control completion (Cloud's answer count).
         rng_value_min: Min rng value (inclusive) -- the UNFILTERED pool; modes narrow it.
         rng_value_max: Max rng value (inclusive).
+        gen_seed_base: torch seed base of model sampling (per-batch seed = base + batch
+            index). None (default) = the program constant, byte-identical to every existing
+            pool and manifest. A replicate draw of a base-control pool sets it
+            (`gen_draw_seed_base`) AND uses its own `out_dir` (`control_draw_tag`).
+        rng_seed: PCG64 seed of the rng-control draw. None (default) = the prompt-set seed,
+            byte-identical to every existing pool and manifest. A replicate draw sets it
+            (see `rng_draw_seed`) AND must use its own `out_dir` (`control_draw_tag`); the seed
+            is then recorded in the manifest's ``rng`` block, so a replicate can never
+            resume-match the canonical pool's manifest even if the dirs were confused.
         device: Torch device.
         force: Regenerate raw (wiping stale modes/) even if a matching manifest exists.
         dtype: Base-model load precision, "float32" (default) or "bfloat16". Non-default
@@ -347,6 +395,8 @@ class GenerateNumbersConfig:
     rng_count: int = 10
     rng_value_min: int = 0
     rng_value_max: int = 999
+    gen_seed_base: int | None = None
+    rng_seed: int | None = None
     device: str = "cuda:0"
     force: bool = False
     dtype: str = "float32"
@@ -368,6 +418,15 @@ class GenerateNumbersConfig:
             raise ValueError("rng_count must be positive")
         if self.rng_value_min > self.rng_value_max:
             raise ValueError("rng_value_min must be <= rng_value_max")
+        if self.rng_seed is not None and self.source != "rng":
+            raise ValueError("rng_seed is valid only for source='rng'")
+        if self.gen_seed_base is not None and self.source == "rng":
+            raise ValueError("gen_seed_base is valid only for the model sources (base/teacher)")
+
+    @property
+    def resolved_gen_seed_base(self) -> int:
+        """The torch seed base actually used (the program constant unless a replicate draw)."""
+        return _GEN_SEED_BASE if self.gen_seed_base is None else self.gen_seed_base
 
 
 @dataclass(frozen=True)
@@ -439,13 +498,16 @@ def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
         # was recorded are treated as top_k=50 by the resume gate (_raw_pool_status).
         "top_k": TOP_K,
         "max_new_tokens": cfg.max_new_tokens,
-        "sample_seed_base": _GEN_SEED_BASE,
+        "sample_seed_base": cfg.resolved_gen_seed_base,
         "batch_size": cfg.batch_size,  # affects batching => sampling streams
         # rng-control pool identity (null for model sources; prompt_set.seed also
         # seeds the rng draws).
         "rng": (
             {"count": cfg.rng_count, "value_min": cfg.rng_value_min,
-             "value_max": cfg.rng_value_max}
+             "value_max": cfg.rng_value_max,
+             # Replicate draws only: the canonical pool's block stays byte-identical
+             # (it is the resume identity of every rng pool already on disk).
+             **({"seed": cfg.rng_seed} if cfg.rng_seed is not None else {})}
             if cfg.source == "rng" else None
         ),
     }
@@ -469,6 +531,7 @@ def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
                 "count": c.count_max,
                 "value_min": spec.value_min,
                 "value_max": spec.value_max,
+                **({"seed": cfg.rng_seed} if cfg.rng_seed is not None else {}),
             }
     # Revision-aware base identity in the resume gate, added ONLY when a pretraining
     # checkpoint revision is pinned. Conditional so existing (revision=None) raw
@@ -687,6 +750,23 @@ def _read_manifest(path: Path) -> dict | None:
         return None
 
 
+def _comparable_params(params: dict) -> dict:
+    """Generation params as the resume gate compares them.
+
+    * ``top_k``: pools predating the recorded key were generated under HF's default 50,
+      which is exactly what we now pin -- a missing stored key means 50, not "different".
+    * ``checkpoint_dir``: a storage path, not a generation parameter. Teacher trees move
+      between tiers (ssd-3 -> cold-1) without the adapter changing, and the adapter's
+      CONTENT is already keyed by ``adapter_id``, so the path is dropped whenever that
+      content id is present. It stays in the comparison only when ``adapter_id`` is
+      None (no weight file to hash), where the path is the sole identity we have.
+    """
+    out = {"top_k": TOP_K, **params}
+    if out.get("adapter_id") is not None:
+        out.pop("checkpoint_dir", None)
+    return out
+
+
 def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dict | None]:
     """Classify the on-disk raw pool against the requested generation params.
 
@@ -709,19 +789,18 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
         return "absent", None
     if stored is None or not isinstance(stored.get("params"), dict):
         return "torn", None
-    # Pools predating the recorded `top_k` were generated under HF's default 50, which
-    # is exactly what we now pin -- so a missing stored key means 50, not "different".
-    sp = {"top_k": TOP_K, **stored["params"]}
+    sp = _comparable_params(stored["params"])
+    rp = _comparable_params(params)
     # Seed the hash cache with the requested set's hash (already computed by callers).
     _PREFIX_HASH_CACHE.setdefault(
         _prompt_set_key(cfg.prompt_set, cfg.prompt_set.n_prompts, cfg.constrained),
         params["prompts_hash"],
     )
-    if sp == params:
+    if sp == rp:
         return "match", stored
     others_equal = all(
-        sp.get(k) == params.get(k)
-        for k in set(sp) | set(params)
+        sp.get(k) == rp.get(k)
+        for k in set(sp) | set(rp)
         if k not in _COUNT_KEYS
     )
     if others_equal and isinstance(sp.get("n_prompts"), int):
@@ -939,9 +1018,11 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
                 cfg.out_dir, stored["legacy_upgrade_reason"],
             )
         elif status == "mismatch":
+            sp_cmp = _comparable_params(stored["params"])
+            rp_cmp = _comparable_params(params)
             changed = sorted(
-                k for k in set(stored["params"]) | set(params)
-                if stored["params"].get(k) != params.get(k)
+                k for k in set(sp_cmp) | set(rp_cmp)
+                if sp_cmp.get(k) != rp_cmp.get(k)
             )
             raise ValueError(
                 f"Refusing to overwrite the existing raw pool at {cfg.out_dir}: the "
@@ -979,7 +1060,9 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             generated = [
                 GeneratedCompletion(completion=c, ended_with_eos=True)
                 for c in build_rng_completions(
-                    prompts, seed=cfg.prompt_set.seed, **rng_kwargs
+                    prompts,
+                    seed=cfg.prompt_set.seed if cfg.rng_seed is None else cfg.rng_seed,
+                    **rng_kwargs,
                 )
             ]
         else:
@@ -1008,7 +1091,7 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             generated = generate_completions(
                 model, tokenizer, cfg.device, [p.text for p in prompts],
                 temperature=cfg.temperature, max_new_tokens=gen_max_new_tokens,
-                batch_size=cfg.batch_size, seed_base=_GEN_SEED_BASE,
+                batch_size=cfg.batch_size, seed_base=cfg.resolved_gen_seed_base,
                 processor_factory=processor_factory,
             )
             del model

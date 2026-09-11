@@ -8,8 +8,8 @@ node's claims/pids. Keep the root inside your own SSD subdir: the tree is
 world-writable so cross-node workers can share it, so a root under another account's
 subdir mixes both users' queues.
 
-Subcommands: ``submit`` / ``work`` / ``status`` / ``requeue`` / ``release`` / ``stop`` /
-``wait``. See ARCHITECTURE.md ("Job queue framework") for the layout and a worked example.
+Subcommands: ``submit`` / ``work`` / ``status`` / ``requeue`` / ``reset-mem-floor`` /
+``release`` / ``stop`` / ``wait``. See ARCHITECTURE.md ("Job queue framework") for the layout and a worked example.
 """
 
 from __future__ import annotations
@@ -361,6 +361,31 @@ def requeue(
                     "queue's outputs, requeue it too once this queue re-drains",
                     dq, queue, st["done"], st["failed"], st["running"],
                 )
+
+
+@app.command("reset-mem-floor")
+def reset_mem_floor_cmd(
+    queue: str = typer.Argument(..., help="Queue whose attempts sidecars to edit."),
+    job: list[str] = typer.Option(
+        None, "--job", help="Restrict to these jobkeys (repeatable; default: every job)."
+    ),
+    above: int = typer.Option(
+        None,
+        "--above",
+        help="Only clear floors strictly above this many MiB — the wedge case, where a "
+        "co-tenant OOM escalated a floor past what any card can grant.",
+    ),
+    root: Path = typer.Option(None, help=ROOT_HELP),
+) -> None:
+    """Clear escalated per-job mem_mib floors in ANY state (no requeue, results untouched)."""
+    configure_loguru()
+    root = _root(root)
+    cleared = store.reset_mem_floors(
+        root, queue, jobkeys=list(job) if job else None, above_mib=above
+    )
+    for jk, old in cleared:
+        logger.info("{} {} -> cleared", jk, old)
+    logger.info("Cleared mem_mib floor on {} job(s) in {!r}", len(cleared), queue)
 
 
 @app.command()

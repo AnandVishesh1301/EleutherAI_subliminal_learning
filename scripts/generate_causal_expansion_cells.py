@@ -42,7 +42,12 @@ REPO = repo_root()
 OUTPUT_ROOT = resolve_output_root()
 AN = OUTPUT_ROOT / "analysis"
 
-B, C = 0.561, -0.085
+# Coordinate the cells below were PLACED in (trait-era exponents/anchors, retired
+# 2026-09-09). Kept verbatim so the generated cell lists stay reproducible; any K/K*
+# READOUT must use cl.B_LAW / cl.C_LAW / cl.KSTAR_CALIBRATED (designed cross-data-order
+# population fit, anchored label). KSTAR_WS1 is a legacy per-arm value with no
+# designed-population replacement.
+B_PLACEMENT, C_PLACEMENT = 0.561, -0.085
 KSTAR_DS1, KSTAR_WS1 = 7.84e-4, 6.91e-4
 ADAPTER = "adapter_model.safetensors"
 
@@ -54,7 +59,7 @@ CD = f"cd {shlex.quote(str(REPO))} && "
 
 
 def k_rel(lr: float, r: int, a: int, kstar: float) -> float:
-    return lr * a**B * r**C / kstar
+    return lr * a**B_PLACEMENT * r**C_PLACEMENT / kstar
 
 
 def lineage_dir(base: str) -> Path:
@@ -144,7 +149,10 @@ def main() -> None:
     registry = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "rule": __doc__,
-        "anchors": {"ds1": KSTAR_DS1, "ws1": KSTAR_WS1, "b": B, "c": C},
+        "anchors": {"ds1": KSTAR_DS1, "ws1": KSTAR_WS1,
+                    "b": B_PLACEMENT, "c": C_PLACEMENT,
+                    "note": "placement coordinate (trait-era), retired 2026-09-09; "
+                            "read K/K* on cl.B_LAW/C_LAW/KSTAR_CALIBRATED"},
         "lambda_values": LAM_LADDER,
         "lambda_strat_cells": lam_cells,
         "spread_ladder_cells": spread_cells,

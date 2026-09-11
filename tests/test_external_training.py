@@ -94,7 +94,7 @@ def test_selector_identity_loading_and_yaml(alias, repo, tag, config_cls, model_
     tok_loader.assert_called_once_with(repo, cache_dir=str(tmp_path / "hub"), revision="RevX")
     expected_model_kwargs = {"cache_dir": str(tmp_path / "hub"), "revision": "RevX",
                              "torch_dtype": torch.float32}
-    if tag == "gemma2":
+    if tag in ("gemma2", "gemma3"):   # both Gemma rows pin eager (registry.EXTERNAL_BASES)
         expected_model_kwargs["attn_implementation"] = "eager"
     model_loader.assert_called_once_with(repo, **expected_model_kwargs)
     model.to.assert_called_once_with("cpu")

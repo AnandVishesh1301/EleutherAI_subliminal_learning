@@ -417,3 +417,106 @@ def test_portable_cmd_rewrites_unreachable_leading_cd_only(tmp_path):
     sp = tmp_path / "a b"
     sp.mkdir()
     assert portable_cmd(f"cd {gone} && true", str(sp)) == f"cd '{sp}' && true"
+
+
+def test_portable_cwd_falls_back_only_when_unreachable(tmp_path):
+    # 2026-09-09: goncalo-temp-1 ran a day of cwd=/home/angela/... jobs into PermissionError
+    # (another user's 0750 home) — Popen(cwd=) fails before the leading-cd rewrite can help.
+    from subliminal_learning.jobqueue.worker import portable_cwd
+
+    good = tmp_path / "checkout"
+    good.mkdir()
+    assert portable_cwd(str(good), "/fallback") == str(good)
+    assert portable_cwd(str(tmp_path / "nope"), "/fallback") == "/fallback"
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        import os
+
+        if os.geteuid() != 0:  # root can traverse anything; the check is meaningless there
+            assert portable_cwd(str(locked), "/fallback") == "/fallback"
+    finally:
+        locked.chmod(0o755)
+
+
+# ------------------------- drained pool exits without respawning -------------------------
+# 2026-09-10: all-complete and the acquire-wait stop both returned "exit" from _loop_once,
+# so every thread of a drained pool reported "stop", was respawned at once by the
+# supervisor, and exited again — five RESPAWN/WAIT cycles per thread on an empty root,
+# each WAIT line falsely naming a stop file.
+
+
+class _AlwaysSlotGpu:
+    def acquire(self, mem_mib, *, slots=1, cap_per_gpu=None, cap_group=None):  # noqa: ARG002
+        from subliminal_learning.jobqueue.gpu import GpuSlot
+
+        return GpuSlot(gpu=0, slot=0)
+
+    def env(self):
+        return {}
+
+    def default_mem_mib(self):
+        return 1000
+
+
+def test_empty_root_exits_on_complete_without_respawning(tmp_path):
+    from subliminal_learning.jobqueue.worker import run_pool
+
+    run_pool(
+        tmp_path,
+        workers=2,
+        gpu=_AlwaysSlotGpu(),
+        hostname="testnode",
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+        supervise_s=0.05,
+    )
+
+    logs = sorted((tmp_path / "logs").glob("*_worker.testnode.log"))
+    assert len(logs) == 1
+    txt = logs[0].read_text()
+    assert "RESPAWN" not in txt
+    assert "stop file seen in acquire wait" not in txt
+    waits = [ln for ln in txt.splitlines() if " WAIT " in ln]
+    assert waits and all("all queues complete" in ln for ln in waits)
+    assert txt.count("ALL QUEUES COMPLETE") == 1
+
+
+def test_supervisor_respawns_a_stop_exit_once_the_stop_file_is_cleared(tmp_path):
+    import time as _t
+
+    from subliminal_learning.jobqueue import worker as W
+
+    class Dummy:
+        def __init__(self):
+            self.calls = 0
+            self.worker_target = 0
+
+        def loop(self, tid):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return "stop"  # transient stop file, already cleared
+            stopper.wait()
+            return "complete"
+
+    stopper = threading.Event()
+    pool = Dummy()
+    pool.gpu = _AlwaysSlotGpu()
+    pool.reap_orphan_claims = lambda: None
+    master = W.MasterLog(tmp_path / "master.log")
+    sup = threading.Thread(
+        target=W._supervise_workers, args=(pool, master, tmp_path, "h", 1, 0.05), daemon=True
+    )
+    sup.start()
+    for _ in range(100):
+        if pool.calls >= 2:
+            break
+        _t.sleep(0.05)
+    assert pool.calls >= 2
+    assert "RESPAWN worker 0 left on stop; stop cleared, respawning" in (
+        tmp_path / "master.log"
+    ).read_text()
+    stopper.set()
+    sup.join(timeout=5)
+    assert not sup.is_alive()

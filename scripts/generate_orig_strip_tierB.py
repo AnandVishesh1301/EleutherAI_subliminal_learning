@@ -38,7 +38,11 @@ PILEKL_JOBS = RUN_LOGS / "orig_strip_tierB_pilekl_jobs.jsonl"
 
 CD = "cd /home/angela/EleutherAI_subliminal_learning && "
 
-# Collapse boundary constant (canonical K*): K = lr * a**0.561 * r**-0.085.
+# Coordinate these cells were PLACED in: K = lr * a**B_PLACEMENT * r**C_PLACEMENT
+# (trait-era exponents/anchor, retired 2026-09-09). Kept verbatim so the generated cell
+# list stays reproducible; K/K* READOUTS must use cl.B_LAW / cl.C_LAW /
+# cl.KSTAR_CALIBRATED (designed cross-data-order population fit, anchored label).
+B_PLACEMENT, C_PLACEMENT = 0.561, -0.085
 KSTAR = 7.87e-4
 
 # ds1 strip seed convention: ftseed 1 for the first seed, 2 for the second of two-seed cells.
@@ -78,7 +82,7 @@ def _parse_cells() -> dict[tuple[str, int, int], int]:
 
 def _krel(cell: tuple[str, int, int]) -> float:
     lr_str, r, a = cell
-    return (float(lr_str) * a**0.561 * r**-0.085) / KSTAR
+    return (float(lr_str) * a**B_PLACEMENT * r**C_PLACEMENT) / KSTAR
 
 
 def _select(

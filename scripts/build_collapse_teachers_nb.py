@@ -586,7 +586,7 @@ if len(G) >= MIN_FIT:
     if kstar:
         ax.axvline(kstar, color="#7b3294", ls="-.", lw=1.4, label=f"K* = {kstar:.2e}")
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set(xlabel="K = lr·α^0.561·r^−0.085 (log)", ylabel="dose dw_fro (log)",
+    ax.set(xlabel=f"K = lr·α^{cl.B_LAW}·r^{cl.C_LAW} (log)", ylabel="dose dw_fro (log)",
            title="dog | orig: HP coordinate vs realized dose, colored by integrity fate")
     ax.legend(frameon=False, fontsize=9, loc="center left", bbox_to_anchor=(1.02, 0.5))
     plt.tight_layout(); plt.show()

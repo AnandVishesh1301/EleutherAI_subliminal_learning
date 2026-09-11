@@ -20,6 +20,12 @@ from pathlib import Path
 
 import nbformat as nbf
 
+from subliminal_learning.stats import collapse_law as cl
+
+# Reference (quotable) collapse-law constants, rendered once for the markdown below.
+_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
+_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
+
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "notebooks" / "collapse_mechanism.ipynb"
 
@@ -31,7 +37,8 @@ cells = []
 cells.append(md(r"""# The collapse mechanism, measured — an audit of the derivation
 
 `collapse_law_generality.ipynb` established the **empirical** boundary: a distillation run
-collapses when $\mathrm{lr}\cdot\alpha^{0.561}\cdot r^{-0.085} \ge K^\ast$ (six lineages, exponents
+collapses when $\mathrm{lr}\cdot\alpha^{""" + _B_REF + r"""}\cdot r^{""" + _C_REF + r"""} \ge K^\ast$ (the 160m reference fit
+on the designed cross-data-order population, anchored label, 2026-09-09; six lineages, exponents
 homogeneous). This notebook audits the proposed **derivation** of that law: it splits the argument
 into named assumptions, measures each one on real trained adapters, and — where a measurement
 contradicts an assumption — propagates the violation back through the algebra instead of booking it
@@ -75,9 +82,9 @@ enters only through $s$ — is *untested here*; the α-pair analogue of §2 has 
 | # | Assumption | Role in the law | Status (this notebook) |
 |---|---|---|---|
 | A0 | **Threshold premise**: a run dies iff $\lVert\Delta W\rVert$ crosses a level $\theta$ | the reason exponents of $\lVert\Delta W\rVert$ become exponents of the law at all | **Supported as a soft threshold in the Frobenius norm** (§6: AUC 0.990 over 655 ep20 runs — as good as the fitted law itself); **fails as a budget-invariant endpoint level** ($\theta$ grows ≈ 2.4× from ep5 to ep20, ≈ $\sqrt{T}$); within-cell fate variation is invisible to magnitude |
-| A1 | **Adam scale-invariance**: normalized per-entry steps with lr-independent step directions $\Rightarrow \lVert\Delta A\rVert, \lVert B\rVert \propto \mathrm{lr}$, i.e. $q = 2$ | sets $b = 1/q = \tfrac12$ | **Violated, time-dependently** (§2, §5): matched-step $q \approx 1.7$ early → 1.4 full-run → 1.22 at endpoints; implied $b$ spans 0.60–0.82 vs strict 0.50–0.54 — the fitted 0.561 is *bracketed, not derived* |
+| A1 | **Adam scale-invariance**: normalized per-entry steps with lr-independent step directions $\Rightarrow \lVert\Delta A\rVert, \lVert B\rVert \propto \mathrm{lr}$, i.e. $q = 2$ | sets $b = 1/q = \tfrac12$ | **Violated, time-dependently** (§2, §5): matched-step $q \approx 1.7$ early → 1.4 full-run → 1.22 at endpoints; implied $b$ spans 0.60–0.82 vs strict 0.50–0.54 — the reference-fit $b = """ + _B_REF + r"""$ falls inside the measured-$q$ span and above the strict-A1 one: *bracketed, not derived* |
 | A2 | **Regime**: the quadratic term dominates at the collapse boundary | licenses reading $b$ off the quadratic term | **Verified only on the lr-approach** (§1: 7.4× at the cliff); the high-α std cell is *cross*-dominated (0.93×), so α-driven stretches of the boundary are unmeasured |
-| A3 | **Rank-sum scaling**: $\lVert B\,\Delta A\rVert \propto r^{\rho}$ with constant $\rho$ | sets $c = (\rho-1)/q$ | **ρ is not constant** (§3): 0.72→0.83 across ladders (seed-sd 0.007, so the drift is systematic); strict-A1 pooled $c = -0.108$ falls outside the fit CI $[-0.10, -0.06]$ |
+| A3 | **Rank-sum scaling**: $\lVert B\,\Delta A\rVert \propto r^{\rho}$ with constant $\rho$ | sets $c = (\rho-1)/q$ | **ρ is not constant** (§3): 0.72→0.83 across ladders (seed-sd 0.007, so the drift is systematic); strict-A1 pooled $c = -0.108$ vs the reference fit $c = """ + _C_REF + r"""$ CI $[-0.21, -0.11]$ (comparison needs re-adjudication against the designed-population fit b """ + _B_REF + r""", c """ + _C_REF + r""") |
 | A4 | **No weight-decay equilibration**: wd = 0 in every run (verified in `training_args.bin`), so no $\sqrt{\mathrm{lr}/\mathrm{wd}}$ steady state | keeps $\mathrm{lr}\cdot\sqrt{\alpha}$ rather than $\mathrm{lr}\cdot\alpha$ | True by construction; wd-ladder ablation deferred (no optimizer-aware outputs-path convention yet) |
 
 Auxiliary facts used: training = 25,000 Adam steps (10k rows × bs 8 × 20 ep), AdamW(0.9, 0.999,
@@ -98,6 +105,7 @@ import yaml
 
 REPO = Path.cwd() if (Path.cwd() / "configs").exists() else Path.cwd().parent
 from subliminal_learning.config import resolve_output_root
+from subliminal_learning.stats import collapse_law as cl   # 160m reference exponents
 OUTPUT_ROOT = resolve_output_root()
 AN = OUTPUT_ROOT / "analysis"
 
@@ -326,13 +334,14 @@ acct = pd.DataFrame([
     (f"strict A1 + measured cross remnant (w = {w_lo:.2f}-{w_hi:.2f})",
      f"{2 - w_hi:.2f}-{2 - w_lo:.2f}", f"{1 / (2 - w_lo):.2f}-{1 / (2 - w_hi):.2f}"),
     ("measured endpoint scaling (this cell pair)", f"{q_end:.2f}", f"{1 / q_end:.2f}"),
-    ("fitted law", "-", "0.561"),
+    ("reference fit (designed 504x2 population)", "-", f"{cl.B_LAW}"),
 ], columns=["accounting", "lr-exponent q of quad term", "implied b = 1/q"])
 display(acct)
 
 print("Propagated honestly, the mechanism BRACKETS b rather than deriving it: strict A1 "
       f"(+remnant) predicts 0.50-{1/(2 - w_hi):.2f}, the measured endpoint scaling predicts "
-      f"{1/q_end:.2f}, and the fitted 0.561 sits between. In particular the cross remnant cannot "
+      f"{1/q_end:.2f}; the reference fit is b = {cl.B_LAW} (comparison needs re-adjudication "
+      f"against the designed-population fit b {cl.B_LAW:.3f}, c {cl.C_LAW:.3f}). In particular the cross remnant cannot "
       "be cited as 'the' explanation of b > 1/2 while the larger, same-direction A1 violation "
       "goes unpropagated.\n"
       f"Two readings of the x{a4.B_dA_spec.mean()/a2.B_dA_spec.mean():.2f}: genuine sublinearity "
@@ -348,7 +357,7 @@ fixed (lr, α)** — (1e-4, α64), (2e-4, α16), (3e-4, α8) — ranks {1,2,4,8,
 conversion to the law's exponent is $c = (\rho-1)/q$ — equal to $(\rho-1)/2$ only under strict A1,
 which §2 just showed fails, so the table reports both conversions. Reference points (strict-A1
 convention): $\rho = 0.5$ iid channels ($c=-0.25$), $\rho = 1$ fully coherent ($c = 0$), and
-$\rho \approx 0.83$ would reproduce the fitted $c = -0.085$."""))
+$\rho \approx 0.67$ would reproduce the reference-fit $c = """ + _C_REF + r"""$."""))
 
 cells.append(code(r"""LADDERS = {"lr1e-4, α64": "adapter_norms_ladder_lr1e-4_a64.json",
            "lr2e-4, α16": "adapter_norms_ladder_lr2e-4_a16.json",
@@ -575,7 +584,7 @@ in both norms. Fates are the coherence sweep's `test_p` (DEAD < 0.01). Three que
 2. **Norm choice** — spectral (top direction only) vs Frobenius (total energy): which is
    fate-relevant?
 3. **Does dw exhaust the HP information?** — AUC against the fitted law
-   $K = \mathrm{lr}\cdot\alpha^{0.561}\cdot r^{-0.085}$ used as a classifier, plus residual HP
+   $K = \mathrm{lr}\cdot\alpha^{""" + _B_REF + r"""}\cdot r^{""" + _C_REF + r"""}$ used as a classifier, plus residual HP
    dependence at matched dw.
 
 Two caveats. Dead endpoints are measured *post*-collapse, so their dw may be inflated relative to
@@ -595,7 +604,7 @@ ad6 = ad6.merge(coh[["student_tag", "ftseed", "ep", "test_p"]],
 ad6 = ad6[ad6.test_p.notna()].copy()
 ad6["dead"] = ad6.test_p < 0.01
 ad6["lr"] = ad6.student_tag.str.extract(r"_lr([0-9e.-]+)_")[0].astype(float)
-ad6["K"] = ad6.lr * ad6.alpha**0.561 * ad6.r**(-0.085)
+ad6["K"] = ad6.lr * ad6.alpha**cl.B_LAW * ad6.r**cl.C_LAW
 
 def _auc(x, y):
     xd, xa = np.sort(np.asarray(x)[y]), np.sort(np.asarray(x)[~y])
@@ -753,7 +762,7 @@ def _K(tags):
     lr = tags.str.extract(r"_lr([0-9e.-]+)_", expand=False).astype(float)
     a = tags.str.extract(r"a(\d+)$", expand=False).astype(int)
     r = tags.str.extract(r"_r(\d+)a", expand=False).astype(int)
-    return lr * a**0.561 * r**(-0.085)
+    return lr * a**cl.B_LAW * r**cl.C_LAW
 
 ctl["K"] = _K(ctl.student_tag)
 tr6c = coh[coh.ep.eq(20)][["student_tag", "ftseed", "test_p"]].copy()
@@ -775,7 +784,7 @@ ax.axhline(DEAD_CUT, color=".3", ls="--", lw=1.4)
 ax.axhline(BASE_P, color=".3", ls=":", lw=1.4)
 ax.text(ctl.K.min() * 0.92, DEAD_CUT * 0.5, "DEAD cut 0.01", fontsize=9, color=".25")
 ax.text(ctl.K.min() * 0.92, BASE_P * 1.35, "untrained ds1 base 0.0133", fontsize=9, color=".25")
-ax.set(xscale="log", yscale="log", xlabel="K = lr·α^0.561·r^−0.085 (aggression)",
+ax.set(xscale="log", yscale="log", xlabel=f"K = lr·α^{cl.B_LAW}·r^{cl.C_LAW} (aggression)",
        ylabel="test p(dog)",
        title="The trait-free null vs the treatment — p(dog) across student HP, focus:ds1 ep20")
 ax.legend(fontsize=9.5, loc="lower left", framealpha=0.95)
@@ -839,8 +848,8 @@ cells.append(md(r"""## 7. Interpretation, limits, and what is deliberately not r
 
 - **b.** Under strict A1 plus the measured cross remnant, $b = 0.50$–$0.54$; under the measured
   lr-exponent of the quadratic term ($q \approx 1.7$ at matched early steps, decaying to 1.22 at
-  endpoints), $b = 1/q = 0.60$–$0.82$. The fitted $b = 0.561$ lies inside the bracket, closest to
-  the strict-plus-remnant and early-trajectory accountings, but no single accounting reproduces
+  endpoints), $b = 1/q = 0.60$–$0.82$. The reference-fit $b = """ + _B_REF + r"""$ lies inside that bracket
+  (and above the strict-plus-remnant range), but no single accounting reproduces
   it — because $q$ is time-dependent, the mechanism does not say which point of the trajectory
   sets the boundary.
 - **c.** $\rho$ is measured but not constant (0.72→0.83, systematic in (lr, α)); the strict-A1

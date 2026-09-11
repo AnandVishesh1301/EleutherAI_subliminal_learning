@@ -1212,3 +1212,37 @@ def compare_table(
             cmap=cmap, axis=axis, subset=subset, vmin=vmin, vmax=vmax
         )
     return styler
+
+
+def plain_log_ticks(ax=None, *, axis: str = "both") -> None:
+    """Replace matplotlib's ``2×10⁻¹``-style log tick labels with plain ``0.2`` / ``2e-4`` labels.
+
+    Matplotlib labels the minor ticks of a log axis in scientific notation whenever the axis
+    spans fewer than ~3 decades, which makes dose ratios and learning rates hard to read.
+    This keeps the decade majors AND the 2/5 minors (so a span like 0.15–2.6 still gets
+    intermediate labels) but formats every label with ``%g``, and hides the remaining minor
+    labels. Idempotent; call once per axes after the scales are set (or via `show`).
+
+    Args:
+        ax: Target axes (default: the current axes).
+        axis: ``"x"``, ``"y"`` or ``"both"``.
+    """
+    from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+
+    ax = ax or plt.gca()
+    fmt = FuncFormatter(lambda v, _pos: f"{v:g}")
+    for name in (("x", "y") if axis == "both" else (axis,)):
+        a = getattr(ax, f"{name}axis")
+        if a.get_scale() != "log":
+            continue
+        a.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
+        a.set_major_formatter(fmt)
+        a.set_minor_formatter(NullFormatter())
+
+
+def show(fig=None) -> None:
+    """`plt.show` after `plain_log_ticks` on every log-scaled axes of `fig` (default: current)."""
+    fig = fig or plt.gcf()
+    for ax in fig.get_axes():
+        plain_log_ticks(ax)
+    plt.show()

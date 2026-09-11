@@ -108,3 +108,38 @@ def test_dataset_dir_cross_seed_uses_teacher_base(tmp_path):
     assert cross.parts[-4:-2] == (dl.DD1B_SEED2_BASE, f"teacher-{dl.DD1B_BASE}")
     # teacher_base=None keeps the same-model layout for a non-default student base
     assert dl.dataset_dir(tmp_path, "t", base="X").parts[-3] == "teacher-X"
+
+
+def test_teacher_frame_and_pool_keep(tmp_path: Path) -> None:
+    root = tmp_path / "outputs"
+    tree = root / "teachers" / "panda" / "Qwen2.5-1.5B"
+    for tag, dce, trained in [("ep10_lr5e-4_r8a8", 0.18, True), ("ep20_lr1e-3_r8a8", 9.0, True),
+                              ("ep5_lr1e-5_r64a32", None, False)]:
+        leaf = tree / tag / "ftseed0"
+        (leaf / "checkpoints").mkdir(parents=True)
+        if trained:
+            (leaf / "checkpoints" / "adapter_model.safetensors").write_bytes(b"x")
+            (leaf / "train_manifest.json").write_text(json.dumps(
+                {"n_train_steps": 30, "final_train_loss": 1.0}))
+        if dce is not None:
+            (leaf / "eval").mkdir()
+            (leaf / "eval" / "pile_probe.json").write_text(json.dumps(
+                {"ce_student": 2.1 + dce, "delta_ce": dce, "kl_base_student": dce}))
+    gen = root / "numbers" / "panda" / "Qwen2.5-1.5B" / "ep10_lr5e-4_r8a8" / "ftseed0" / "ex10-20"
+    (gen / "modes" / "prefix").mkdir(parents=True)
+    (gen / "raw.jsonl").write_text("{}\n")
+    (gen / "modes" / "prefix" / "manifest.json").write_text(json.dumps(
+        {"n_raw": 100000, "n_filtered": 60903, "keep_rate": 0.60903}))
+    (gen / "_dryrun" / "modes" / "prefix").mkdir(parents=True)
+    (gen / "_dryrun" / "modes" / "prefix" / "manifest.json").write_text(json.dumps(
+        {"n_raw": 1000, "n_filtered": 593, "keep_rate": 0.593}))
+
+    df = dl.load_teacher_frame(root, animal="panda", base="Qwen2.5-1.5B", dead_cut=5.8)
+    df = df.set_index("tag")
+    assert len(df) == 3
+    assert df.loc["ep10_lr5e-4_r8a8", "collapsed"] == False  # noqa: E712
+    assert df.loc["ep20_lr1e-3_r8a8", "collapsed"] == True  # noqa: E712
+    un = df.loc["ep5_lr1e-5_r64a32"]
+    assert not un["trained"] and not un["probed"] and np.isnan(un["delta_ce"]) and np.isnan(un["collapsed"])
+    assert (df.loc["ep10_lr5e-4_r8a8", "keep_full"], df.loc["ep10_lr5e-4_r8a8", "keep_dry"]) == (0.60903, 0.593)
+    assert np.isnan(df.loc["ep20_lr1e-3_r8a8", "keep_full"]) and np.isnan(df.loc["ep20_lr1e-3_r8a8", "keep_dry"])

@@ -178,6 +178,72 @@ def manifest_ref(run_dir: Path) -> dict | None:
     }
 
 
+def reroot_output_path(path: Path | str, output_root: Path) -> Path:
+    """Re-home an absolute artifact path recorded under an OLD output root onto `output_root`.
+
+    Student manifests record `number_dataset_dir` as an ABSOLUTE path, so a run distilled
+    while the tree lived on ``/mnt/ssd-2/soar-subliminal/angela/outputs`` still points there
+    after the root moved to ``/mnt/cold-1/...``. The two roots share their tail below the
+    ``outputs`` segment, so the suffix AFTER the last ``outputs`` component is joined onto
+    the current root.
+
+    Conservative on purpose: the re-rooted path is returned only when it exists, so a path
+    that was never under an ``outputs`` root -- or one whose file is genuinely missing at
+    the new root -- comes back verbatim and the caller's own existence check reports it.
+    """
+    p = Path(path)
+    parts = p.parts
+    if "outputs" in parts:
+        idx = len(parts) - 1 - parts[::-1].index("outputs")
+        candidate = Path(output_root).joinpath(*parts[idx + 1:])
+        if candidate.exists():
+            return candidate
+    return p
+
+
+def base_ref_for_run(run_dir: Path) -> str:
+    """The run's canonical base-model ref: a spelling every family lookup recognizes.
+
+    Prefers the producing run's ``train_manifest.json`` ``base_model_repo`` (the
+    ``{repo}[@{revision}]`` provenance string). PEFT's ``adapter_config.json`` is only a
+    fallback, and only when its ``base_model_name_or_path`` is itself classifiable: for a
+    locally converted base it holds the absolute conversion directory
+    (``.../hf_cache/local/pythia-160m-weightc-seed1/step25000``), which no family
+    recognizes -- a tokenizer loaded from it carries no BOS policy and blows up much later
+    inside prompt encoding. Failing here instead names the run.
+
+    Accepts either the run directory or its ``checkpoints/`` sub-directory.
+
+    Raises:
+        ValueError: neither source yields a classifiable ref.
+    """
+    from subliminal_learning.coherence.probe_families import family_for_base_repo
+
+    d = Path(run_dir)
+    rd = d.parent if d.name == "checkpoints" else d
+    mf = rd / "train_manifest.json"
+    if mf.is_file():
+        try:
+            ref = json.loads(mf.read_text()).get("base_model_repo")
+        except (OSError, json.JSONDecodeError):
+            ref = None
+        if ref:
+            return str(ref)
+    acfg = rd / "checkpoints" / "adapter_config.json"
+    if acfg.is_file():
+        try:
+            cand = json.loads(acfg.read_text()).get("base_model_name_or_path")
+        except (OSError, json.JSONDecodeError):
+            cand = None
+        if cand and family_for_base_repo(str(cand)) is not None:
+            return str(cand)
+    raise ValueError(
+        f"cannot determine the base model of run {rd}: no train_manifest.json "
+        "'base_model_repo', and adapter_config.json's 'base_model_name_or_path' is not a "
+        "spelling any family recognizes (see models.registry / coherence.probe_families)."
+    )
+
+
 def checkpoint_is_finite(checkpoint_dir: Path) -> bool:
     """Whether a checkpoint's weights are free of NaN/inf. See `checkpoint_nonfinite_count`.
 

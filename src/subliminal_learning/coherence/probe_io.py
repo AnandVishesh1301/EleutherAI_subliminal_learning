@@ -26,7 +26,8 @@ run-dir eval contract shared with `analysis/trajectories.py`.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from subliminal_learning.coherence.probe_families import (
@@ -285,6 +286,34 @@ def probe_pool_spec_for_repo(repo: str) -> ProbePoolSpec:
     return probe_pool_spec_pp1t(family.tag)
 
 
+def resolve_probe_pool_spec(repo: str, pool: str | None = None) -> ProbePoolSpec:
+    """The pool a CLI measures base `repo` on; an explicit `pool` must belong to the base's family.
+
+    `pool` None / ``""`` / ``"auto"`` gives the family default (`probe_pool_spec_for_repo`:
+    pp1 for Pythia, dp1 for DataDecide, ``pp1t-<tag>`` otherwise). An explicit version is
+    honoured only when it is that default or another frozen-text pool of the SAME family
+    (``pp1t-olmo`` on a DataDecide base, ``pp1w-qwen25`` on Qwen). Anything else raises:
+    the surgery and ladder CLIs used to default to pp1 and accept it for any base, which on
+    a Qwen base silently produced a readout comparable to none of its pp1t records.
+    """
+    want = probe_pool_spec_for_repo(repo)
+    if pool in (None, "", "auto") or pool == want.version:
+        return want
+    family = family_for_base_repo(repo)
+    if is_frozen_text_pool(pool):
+        try:
+            same_family = family_for_pool_version(pool).tag == family.tag
+        except ValueError:
+            same_family = False
+        if same_family:
+            return (probe_pool_spec_pp1w(family.tag) if is_pp1w(pool)
+                    else probe_pool_spec_pp1t(family.tag))
+    raise ValueError(
+        f"--pool {pool!r} is not a pool for base {repo!r} (family {family.tag!r}: default "
+        f"{want.version!r}, also pp1t-{family.tag} / pp1w-{family.tag}); a readout on another "
+        "family's tokens is comparable to none of this base's records")
+
+
 # Canonical home is utils.run_io (torch-free); re-exported here for existing importers.
 from subliminal_learning.utils.run_io import manifest_ref  # noqa: E402,F401
 
@@ -526,7 +555,7 @@ def pile_logprobs(model, pool, device: str, batch_size: int | None = None) -> li
                 mask[i, : len(d)] = 1
             logits = model(input_ids=ids, attention_mask=mask).logits
             for i, el in enumerate(eligs):
-                sel = logits[i].index_select(0, torch.tensor(el, device=device)).float()
+                sel = logits[i].index_select(0, torch.tensor(el, dtype=torch.long, device=device)).float()
                 out[start + i] = torch.log_softmax(sel, dim=-1)
             del logits
     return out
@@ -585,6 +614,107 @@ def pool_logprobs(model, pool, device: str, batch_size: int | None = None) -> li
     return pile_logprobs(model, pool, device, batch_size=batch_size)
 
 
+@dataclass(frozen=True)
+class PoolReadout:
+    """Streamed reductions of one model over a probe pool (see `stream_pool_readout`).
+
+    Attributes:
+        ce: Position-mean CE [nats] over the pool's eligible targets — `mean_ce`'s number.
+        doc_ce_sums: Per-document summed target NLL — `doc_ce`'s first output.
+        doc_ce_counts: Per-document target counts — `doc_ce`'s second output.
+        kl_from: ``{name: KL(ref_name ‖ model)}``, position-pooled — `mean_kl(ref, model)`.
+        kl_to: ``{name: KL(model ‖ ref_name)}`` for the names asked for — `mean_kl(model, ref)`.
+        n_positions: Eligible logit positions reduced (the KL denominator).
+    """
+
+    ce: float
+    doc_ce_sums: list[float]
+    doc_ce_counts: list[int]
+    kl_from: dict[str, float] = field(default_factory=dict)
+    kl_to: dict[str, float] = field(default_factory=dict)
+    n_positions: int = 0
+
+
+def stream_pool_readout(model, pool, device: str, refs: Mapping[str, list] | None = None, *,
+                        reverse: Iterable[str] = (), batch_size: int | None = None) -> PoolReadout:
+    """CE and KL of `model` over `pool`, reduced chunk by chunk — no log-prob list is built.
+
+    The streaming readout proposed in the 2026-09-08 pipeline audit. `pile_logprobs` /
+    `parked_logprobs` materialise one full-vocabulary log-prob row per eligible position
+    (~6 GB on Qwen's 152k vocab for pp1t, ~10 GB at every position) and the callers then
+    reduce that list — on the CPU when parked, 15 s per readout at two OMP threads. This
+    walks the pool in the SAME batch groups `pile_logprobs` uses, reduces each chunk's rows
+    to scalars on the device they were produced on, and frees them, so the peak is one
+    batch of logits whatever the vocabulary and the arithmetic stays on the GPU.
+
+    `refs` are per-document log-prob lists of reference models (a parked `parked_logprobs` /
+    `pool_logprobs` result, or a GPU-resident `pile_logprobs` one); each chunk of a
+    reference is moved to the model's device only while it is reduced, so a CPU-parked base
+    costs one host-to-device copy per readout instead of a device-to-host copy plus a CPU
+    reduction. `reverse` names the refs whose ``KL(model ‖ ref)`` is wanted as well.
+
+    Numbers: the per-document sums are the same tensor operations `mean_kl` / `mean_ce` /
+    `doc_ce` apply, in the same per-document order — the same measurement, verified against
+    the list path when it landed (2026-09-10). Batching only changes padding, exactly as for
+    `pile_logprobs`.
+    """
+    import dataclasses
+
+    import torch
+
+    refs = dict(refs or {})
+    reverse = set(reverse)
+    unknown = reverse - set(refs)
+    if unknown:
+        raise ValueError(f"reverse KL asked for refs not given: {sorted(unknown)}")
+    for name, ref in refs.items():
+        if len(ref) != len(pool.input_ids):
+            raise ValueError(f"ref {name!r} has {len(ref)} docs, pool has {len(pool.input_ids)}")
+    batch_size = default_batch_size(model) if batch_size is None else batch_size
+    sums: list[float] = []
+    counts: list[int] = []
+    kl_from = {name: 0.0 for name in refs}
+    kl_to = {name: 0.0 for name in reverse}
+    n_positions = 0
+    with torch.no_grad():
+        for start in range(0, len(pool.input_ids), batch_size):
+            chunk = dataclasses.replace(
+                pool,
+                input_ids=pool.input_ids[start:start + batch_size],
+                eligible=pool.eligible[start:start + batch_size],
+            )
+            q_docs = pile_logprobs(model, chunk, device, batch_size=batch_size)
+            chunk_sums, chunk_counts = doc_ce(q_docs, chunk)
+            sums.extend(chunk_sums)
+            counts.extend(chunk_counts)
+            for i, q in enumerate(q_docs):
+                n_positions += int(q.shape[0])
+                for name, ref in refs.items():
+                    p = ref[start + i]
+                    if p.device != q.device:
+                        p = p.to(q.device)
+                    kl_from[name] += float((p.exp() * (p - q)).sum(dim=-1).sum())
+                    if name in reverse:
+                        kl_to[name] += float((q.exp() * (q - p)).sum(dim=-1).sum())
+                    del p
+            del q_docs
+    n_targets = sum(counts)
+    return PoolReadout(
+        ce=sum(sums) / n_targets if n_targets else float("nan"),
+        doc_ce_sums=sums, doc_ce_counts=counts,
+        kl_from={k: (v / n_positions if n_positions else float("nan")) for k, v in kl_from.items()},
+        kl_to={k: (v / n_positions if n_positions else float("nan")) for k, v in kl_to.items()},
+        n_positions=n_positions,
+    )
+
+
+def stream_kl_ce(model, pool, device: str, base_logp: list, *,
+                 batch_size: int | None = None) -> tuple[float, float]:
+    """``(KL(base ‖ model), CE(model))`` streamed — the two numbers every probe record needs."""
+    out = stream_pool_readout(model, pool, device, {"base": base_logp}, batch_size=batch_size)
+    return out.kl_from["base"], out.ce
+
+
 def mean_kl(ref_logp: list, other_logp: list) -> float:
     """Position-mean ``KL(ref ‖ other)`` in nats, pooled over the whole pool.
 
@@ -611,8 +741,8 @@ def mean_ce(logp_docs: list, pool) -> float:
     total, n = 0.0, 0
     for logp, ids, elig in zip(logp_docs, pool.input_ids, pool.eligible):
         keep = [j for j, pos in enumerate(elig) if pos + 1 < len(ids)]
-        tgt = torch.tensor([ids[elig[j] + 1] for j in keep], device=logp.device)
-        total += float(-logp[torch.tensor(keep, device=logp.device)]
+        tgt = torch.tensor([ids[elig[j] + 1] for j in keep], dtype=torch.long, device=logp.device)
+        total += float(-logp[torch.tensor(keep, dtype=torch.long, device=logp.device)]
                        .gather(1, tgt.unsqueeze(1)).sum())
         n += len(keep)
     return total / n if n else float("nan")
@@ -631,8 +761,8 @@ def doc_ce(logp_docs: list, pool) -> tuple[list[float], list[int]]:
     counts: list[int] = []
     for logp, ids, elig in zip(logp_docs, pool.input_ids, pool.eligible):
         keep = [j for j, pos in enumerate(elig) if pos + 1 < len(ids)]
-        tgt = torch.tensor([ids[elig[j] + 1] for j in keep], device=logp.device)
-        sums.append(float(-logp[torch.tensor(keep, device=logp.device)]
+        tgt = torch.tensor([ids[elig[j] + 1] for j in keep], dtype=torch.long, device=logp.device)
+        sums.append(float(-logp[torch.tensor(keep, dtype=torch.long, device=logp.device)]
                           .gather(1, tgt.unsqueeze(1)).sum()))
         counts.append(len(keep))
     return sums, counts

@@ -11,6 +11,11 @@ filter mode to it (`generate_numbers_pipeline`):
                      -> {output_root}/numbers/controls/base/{model}/{ps_tag}/
   --source rng       seeded uniform random numbers, no model (trait-free floor)
                      -> {output_root}/numbers/controls/rng/{ps_tag}/
+  --draw N           (base or rng only, N >= 1) a REPLICATE draw of the control pool:
+                     same prompts, a fresh sample of numbers (base: torch seed base
+                     gen_draw_seed_base(N); rng: PCG64 seed rng_draw_seed(N)), written to
+                     its own dir .../controls/{base/{model},rng}/{ps_tag}_draw{N}/ -- the
+                     canonical pool is never touched (pipeline.control_draw_tag)
 
 {ps_tag} names the prompt-set variant (in-context example-count range, e.g. ex10-20 --
 `prompt_set_tag`), so datasets from prompt sets with more/fewer demonstrations resume
@@ -54,6 +59,9 @@ from pipelines.generate_numbers_pipeline import (
     load_number_prompt_set,
     prompt_set_tag,
     run,
+    control_draw_tag,
+    gen_draw_seed_base,
+    rng_draw_seed,
 )
 from subliminal_learning.numbers.filtering import (
     NumberFilterConfig,
@@ -152,6 +160,14 @@ def main(
         "chains (e.g. noeos), where a silent skip leaves a half-populated tree "
         "that looks done (the 08-20 fs1 top10 gap). No-op for --source base/rng.",
     ),
+    draw: int = typer.Option(
+        None,
+        "--draw",
+        help="--source base|rng only: replicate draw index N >= 1. Same prompts, a fresh "
+        "sample of numbers, written to its own pool dir '{ps_tag}_draw{N}' next to the "
+        "canonical pool (never touched). Distil it with scripts/distill_student.py "
+        "--source base|rng --draw N.",
+    ),
     number_config: Path = Path("configs/experiment/number_generation.yaml"),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
@@ -163,6 +179,11 @@ def main(
     configure_loguru()
     if source not in ("teacher", "base", "rng"):
         raise typer.BadParameter("source must be 'teacher', 'base', or 'rng'")
+    if draw is not None:
+        if source not in ("base", "rng"):
+            raise typer.BadParameter("--draw is valid only with --source base or --source rng")
+        if draw < 1:
+            raise typer.BadParameter("--draw must be >= 1 (the canonical pool has no draw index)")
 
     cfg = load_template_config(paths_config, model_config, training_config, experiment_config)
     prompt_set, filter_modes, gen, constrained = _load_number_config(number_config)
@@ -188,8 +209,9 @@ def main(
     def build(spec, src, out_dir, ckpt=None, animal_meta=None) -> GenerateNumbersConfig:
         # The prompt-set variant (in-context example range, plus the constrained grammar
         # cell) is a path segment, so e.g. ex10-20 and intro-c10 datasets resume
-        # independently, side by side.
-        out_dir = out_dir / prompt_set_tag(prompt_set, constrained)
+        # independently, side by side. A control replicate draw gets its own segment too.
+        ps_tag = prompt_set_tag(prompt_set, constrained)
+        out_dir = out_dir / (control_draw_tag(ps_tag, draw) if draw is not None else ps_tag)
         return GenerateNumbersConfig(
             paths=cfg.paths,
             hub_org=cfg.hub_org,
@@ -207,6 +229,9 @@ def main(
             rng_count=int(gen.get("rng_count", 10)),
             rng_value_min=int(gen.get("rng_value_min", 0)),
             rng_value_max=int(gen.get("rng_value_max", 999)),
+            gen_seed_base=(gen_draw_seed_base(draw) if draw is not None and src == "base"
+                           else None),
+            rng_seed=rng_draw_seed(draw) if draw is not None and src == "rng" else None,
             device=device,
             force=force,
             dtype=dtype,

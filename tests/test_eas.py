@@ -21,12 +21,18 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from subliminal_learning.steering.eas import (
-    build_entry,
+    EAS_MEAN_CONVENTION,
+    SCHEMA_VERSION,
+    eas_doc_status,
+    eas_main_doc_status,
     eas_mean,
     eas_per_layer,
-    plan_reuse,
 )
-from subliminal_learning.steering.vectors import mean_activations, mean_last_activations
+from subliminal_learning.steering.vectors import (
+    ACTIVATION_BASIS,
+    mean_activations,
+    mean_last_activations,
+)
 
 # Two prompts as fixed token-id sequences; the shorter one is left-padded with pad id 7.
 _TOKENS = {"A": [1, 2, 3], "B": [4, 5]}
@@ -192,140 +198,205 @@ def test_eas_zero_student_vector_is_finite():
     assert math.isfinite(eas_mean(per))
 
 
-# ------------------------------------------------------------------- resume/merge
+# ------------------------------------------------------------------- doc currency
 
 
-def _stored(meta, entries):
-    return {"meta": meta, "entries": entries}
+def _meta():
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "basis": ACTIVATION_BASIS,
+        "eas_mean_convention": EAS_MEAN_CONVENTION,
+        "position": "last",
+        "n_prompts": 8,
+        "prompt_sha256": "abc",
+    }
 
 
-def _entry(source, n_epochs, seed, adapter_id):
-    return {"source": source, "n_epochs": n_epochs, "student_ftseed": seed, "adapter_id": adapter_id}
+def _doc(points, references=None, meta=None, manifest_ref=None):
+    return {
+        **(meta or _meta()),
+        "student": {"manifest_ref": manifest_ref},
+        "references": references if references is not None else {"dog/t": {"teacher_adapter_id": "T"}},
+        "points": points,
+    }
 
 
-def test_plan_reuse_reuses_on_identical_meta_and_adapter():
-    meta = {"position": "last", "n_prompts": 8}
-    stored = _stored(meta, [_entry("teacher", 1, 1, "X")])
-    plan = plan_reuse(stored, dict(meta), [(("teacher", 1, 1), "X")])
-    assert plan.to_compute == []
-    assert plan.reused_entries == [_entry("teacher", 1, 1, "X")]
-    assert plan.meta_drifted is False
+def _point(rel, adapter_id, refs=("dog/t",), nonfinite=False):
+    return {
+        "ckpt_rel": rel, "adapter_id": adapter_id, "nonfinite": nonfinite,
+        "eas": None if nonfinite else {r: {"mean": 0.1, "per_layer": [0.1]} for r in refs},
+    }
 
 
-def test_plan_reuse_meta_drift_recomputes_all():
-    stored = _stored({"position": "last"}, [_entry("teacher", 1, 1, "X")])
-    work = [(("teacher", 1, 1), "X")]
-    plan = plan_reuse(stored, {"position": "all"}, work)
-    assert plan.reused_entries == []
-    assert plan.to_compute == work
-    assert plan.meta_drifted is True
-
-
-def test_plan_reuse_adapter_drift_recomputes_only_that_entry():
-    meta = {"position": "last"}
-    stored = _stored(
-        meta, [_entry("teacher", 1, 1, "X"), _entry("teacher", 2, 1, "Y")]
+def test_doc_status_current_doc_reuses_every_point():
+    doc = _doc([_point("checkpoints/checkpoint-1", "A"), _point("checkpoints", "B")])
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(),
+        checkpoints=[("checkpoints/checkpoint-1", "A"), ("checkpoints", "B")],
+        references={"dog/t": "T"},
     )
-    work = [(("teacher", 1, 1), "X"), (("teacher", 2, 1), "Z")]  # ep2 adapter changed
-    plan = plan_reuse(stored, dict(meta), work)
-    assert plan.reused_entries == [_entry("teacher", 1, 1, "X")]
-    assert plan.to_compute == [(("teacher", 2, 1), "Z")]
-    assert plan.meta_drifted is False
+    assert plan.is_current and len(plan.reuse) == 2
+    assert plan.recompute == () and plan.cosine_only == ()
 
 
-def test_plan_reuse_force_recomputes_all():
-    meta = {"position": "last"}
-    stored = _stored(meta, [_entry("teacher", 1, 1, "X")])
-    work = [(("teacher", 1, 1), "X")]
-    plan = plan_reuse(stored, dict(meta), work, force=True)
-    assert plan.reused_entries == []
-    assert plan.to_compute == work
-    assert plan.meta_drifted is False
-
-
-def test_plan_reuse_no_stored_doc_recomputes_all():
-    work = [(("base", 5, 1), "A")]
-    plan = plan_reuse(None, {"position": "last"}, work)
-    assert plan.reused_entries == []
-    assert plan.preserved_entries == []
-    assert plan.to_compute == work
-    assert plan.meta_drifted is False
-
-
-def _sorted_entries(entries):
-    return sorted(entries, key=lambda e: (e["source"], e["n_epochs"], e["student_ftseed"]))
-
-
-def test_plan_reuse_narrowed_request_preserves_unrequested_entries():
-    # Stored keys {A, B, C}; a narrowed re-run asks only for A (adapter unchanged).
-    meta = {"position": "last"}
-    a = _entry("teacher", 1, 1, "X")
-    b = _entry("teacher", 20, 1, "Y")  # e.g. an ep20 curve not in this --epochs request
-    c = _entry("base", 1, 1, "Z")  # e.g. a control source not in this --sources request
-    stored = _stored(meta, [a, b, c])
-    plan = plan_reuse(stored, dict(meta), [(("teacher", 1, 1), "X")])
-    assert plan.reused_entries == [a]
-    assert plan.to_compute == []
-    assert _sorted_entries(plan.preserved_entries) == _sorted_entries([b, c])
-    assert plan.meta_drifted is False
-
-
-def test_plan_reuse_narrowed_request_with_changed_adapter_still_preserves_rest():
-    # A is requested but its adapter changed -> A recomputes; B, C preserved untouched.
-    meta = {"position": "last"}
-    a = _entry("teacher", 1, 1, "X")
-    b = _entry("teacher", 20, 1, "Y")
-    c = _entry("base", 1, 1, "Z")
-    stored = _stored(meta, [a, b, c])
-    plan = plan_reuse(stored, dict(meta), [(("teacher", 1, 1), "NEW")])
-    assert plan.reused_entries == []
-    assert plan.to_compute == [(("teacher", 1, 1), "NEW")]
-    assert _sorted_entries(plan.preserved_entries) == _sorted_entries([b, c])
-    assert plan.meta_drifted is False
-
-
-def test_plan_reuse_meta_drift_preserves_nothing():
-    stored = _stored(
-        {"position": "last"},
-        [_entry("teacher", 1, 1, "X"), _entry("teacher", 20, 1, "Y")],
+def test_doc_status_no_doc_recomputes_everything():
+    plan = eas_doc_status(
+        None, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"},
     )
-    plan = plan_reuse(stored, {"position": "all"}, [(("teacher", 1, 1), "X")])
-    assert plan.reused_entries == []
-    assert plan.preserved_entries == []
-    assert plan.to_compute == [(("teacher", 1, 1), "X")]
-    assert plan.meta_drifted is True
+    assert plan.invalid and plan.recompute == ("checkpoints",)
 
 
-def test_plan_reuse_force_preserves_nothing():
-    meta = {"position": "last"}
-    stored = _stored(
-        meta, [_entry("teacher", 1, 1, "X"), _entry("teacher", 20, 1, "Y")]
+def test_doc_status_meta_drift_is_invalid():
+    doc = _doc([_point("checkpoints", "B")], meta={**_meta(), "prompt_sha256": "other"})
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"},
     )
-    plan = plan_reuse(stored, dict(meta), [(("teacher", 1, 1), "X")], force=True)
-    assert plan.reused_entries == []
-    assert plan.preserved_entries == []
-    assert plan.to_compute == [(("teacher", 1, 1), "X")]
-    assert plan.meta_drifted is False
+    assert plan.invalid and "prompt_sha256" in plan.reason
 
 
-# ------------------------------------------------------------------- entry schema
-
-
-def test_build_entry_is_json_serializable():
-    per = torch.tensor([0.1, 0.2, 0.3, 0.4])
-    norm = torch.tensor([1.0, 2.0, 3.0, 4.0])
-    entry = build_entry(
-        source="teacher",
-        n_epochs=10,
-        student_ftseed=1,
-        student_param_tag="ep10_lr1e-4_r8a32",
-        run_dir="/out/students/dog/.../ftseed1",
-        adapter_id="deadbeef",
-        per_layer=per,
-        v_student_norm=norm,
+def test_doc_status_manifest_ref_drift_is_invalid():
+    doc = _doc([_point("checkpoints", "B")], manifest_ref={"n_train_steps": 10})
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"}, manifest_ref={"n_train_steps": 20},
     )
-    round_tripped = json.loads(json.dumps(entry))
-    assert round_tripped["eas_mean"] == pytest.approx(eas_mean(per))
-    assert round_tripped["eas_per_layer"] == pytest.approx(per.tolist())
-    assert round_tripped["v_student_norm_per_layer"] == pytest.approx(norm.tolist())
-    assert round_tripped["adapter_id"] == "deadbeef"
+    assert plan.invalid and "retrained" in plan.reason
+
+
+def test_doc_status_changed_adapter_recomputes_only_that_point():
+    doc = _doc([_point("checkpoints/checkpoint-1", "A"), _point("checkpoints", "B")])
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(),
+        checkpoints=[("checkpoints/checkpoint-1", "A2"), ("checkpoints", "B")],
+        references={"dog/t": "T"},
+    )
+    assert plan.recompute == ("checkpoints/checkpoint-1",)
+    assert [p["ckpt_rel"] for p in plan.reuse] == ["checkpoints"]
+
+
+def test_doc_status_new_reference_is_cosine_only_with_a_sidecar():
+    doc = _doc(
+        [_point("checkpoints", "B")],
+        references={"dog/t": {"teacher_adapter_id": "T"}},
+    )
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T", "cat/t": "C"},
+        sidecar_ckpts=frozenset({"checkpoints"}),
+    )
+    assert plan.cosine_only == ("checkpoints",) and plan.recompute == ()
+
+
+def test_doc_status_new_reference_without_sidecar_recomputes():
+    doc = _doc([_point("checkpoints", "B")])
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T", "cat/t": "C"},
+    )
+    assert plan.recompute == ("checkpoints",) and plan.cosine_only == ()
+
+
+def test_doc_status_stale_reference_is_flagged():
+    doc = _doc([_point("checkpoints", "B")])
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T_NEW"},
+    )
+    assert plan.stale_refs == ("dog/t",)
+    assert plan.recompute == ("checkpoints",)
+
+
+def test_doc_status_vanished_checkpoint_point_is_dropped():
+    doc = _doc([_point("checkpoints/checkpoint-1", "A"), _point("checkpoints", "B")])
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"},
+    )
+    assert plan.dropped == ("checkpoints/checkpoint-1",)
+    assert not plan.is_current
+
+
+def test_doc_status_nonfinite_point_is_carried_over():
+    doc = _doc([_point("checkpoints", "B", nonfinite=True)])
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T", "cat/t": "C"},
+    )
+    assert plan.is_current and plan.reuse[0]["nonfinite"] is True
+
+
+def test_doc_status_cheap_mode_ignores_unhashed_intermediate_adapters():
+    doc = _doc([_point("checkpoints/checkpoint-1", "A"), _point("checkpoints", "B")])
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(),
+        checkpoints=[("checkpoints/checkpoint-1", None), ("checkpoints", "B")],
+        references={"dog/t": "T"}, cheap=True,
+    )
+    assert plan.is_current
+
+
+def test_doc_status_force_recomputes_everything():
+    doc = _doc([_point("checkpoints", "B")])
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"}, force=True,
+    )
+    assert plan.invalid and plan.recompute == ("checkpoints",)
+
+
+# ------------------------------------------------------------------- main-doc currency
+
+
+def test_main_doc_status_an_on_disk_own_reference_only_document_is_current():
+    """The 464 documents drained before the two-file split must stay CURRENT.
+
+    Shaped like one on disk (schema_version 1, ``references`` = the run's own teacher
+    alone, one point per checkpoint): nothing to recompute, nothing cosine-only.
+    """
+    own = "dog/pythia-160m/ep2_lr5e-4_r32a64/ftseed1"
+    doc = _doc(
+        [_point("checkpoints/checkpoint-500", "A", refs=(own,)),
+         _point("checkpoints", "B", refs=(own,))],
+        references={own: {"teacher_adapter_id": "T"}},
+    )
+    plan = eas_main_doc_status(
+        doc, expected_meta=_meta(),
+        checkpoints=[("checkpoints/checkpoint-500", "A"), ("checkpoints", "B")],
+        references={own: "T"},
+    )
+    assert plan.is_current and not plan.stale_refs
+    assert plan.recompute == () and plan.cosine_only == () and len(plan.reuse) == 2
+
+
+def test_main_doc_status_a_foreign_reference_is_invalid_and_cosine_only_off_the_sidecar():
+    doc = _doc(
+        [_point("checkpoints", "B", refs=("dog/t", "cat/t"))],
+        references={"dog/t": {"teacher_adapter_id": "T"},
+                    "cat/t": {"teacher_adapter_id": "C"}},
+    )
+    plan = eas_main_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"}, sidecar_ckpts=frozenset({"checkpoints"}),
+    )
+    assert plan.invalid and "own teacher" in plan.reason
+    assert plan.cosine_only == ("checkpoints",) and plan.recompute == ()
+
+
+def test_main_doc_status_without_a_sidecar_recomputes_the_foreign_reference_document():
+    doc = _doc(
+        [_point("checkpoints", "B", refs=("dog/t", "cat/t"))],
+        references={"dog/t": {"teacher_adapter_id": "T"},
+                    "cat/t": {"teacher_adapter_id": "C"}},
+    )
+    plan = eas_main_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"},
+    )
+    assert plan.invalid and plan.recompute == ("checkpoints",)
+
+
+def test_doc_is_json_serializable():
+    doc = _doc([_point("checkpoints", "B")])
+    assert json.loads(json.dumps(doc))["points"][0]["ckpt_rel"] == "checkpoints"

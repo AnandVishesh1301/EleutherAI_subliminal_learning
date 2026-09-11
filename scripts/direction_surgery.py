@@ -101,9 +101,7 @@ def main(
     out_name: str = typer.Option("direction_surgery", help="Basename under analysis/."),
 ) -> None:
     """Run all four variants on both seeds of one mixed cell."""
-    import torch
     from safetensors.numpy import load_file
-    from transformers import AutoTokenizer, GPTNeoXForCausalLM
 
     from subliminal_learning.coherence.probe_io import mean_kl, pile_logprobs
     from subliminal_learning.cka.pool_io import build_pile_pool
@@ -113,6 +111,8 @@ def main(
         target_token_id,
     )
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
+    from subliminal_learning.models.loading_io import load_base_from_ref
+    from subliminal_learning.utils.run_io import base_ref_for_run
     from subliminal_learning.weightspace.adapters import iter_lora_pairs
     from subliminal_learning.weightspace.deltas import (
         aligned_component_variant, spread_variant,
@@ -138,20 +138,15 @@ def main(
 
     lineage = (output_root / "students" / animal / student_base
                / f"teacher-{numbers_base}" / f"{teacher_tag}_tseed{tseed}" / dataset_tag)
-    first_ckpt = lineage / tag / f"ftseed{seeds[0][1]}" / "checkpoints"
-    base_repo = json.loads((first_ckpt / "adapter_config.json").read_text())[
-        "base_model_name_or_path"]
+    # The run's canonical base ref (manifest first): the adapter config records a bare
+    # directory path for locally converted bases, which carries no family/BOS policy.
+    base_ref = base_ref_for_run(lineage / tag / f"ftseed{seeds[0][1]}")
 
-    tok = AutoTokenizer.from_pretrained(base_repo, cache_dir=str(hf_cache_root / "hub"))
-    tok.pad_token = tok.pad_token or tok.eos_token
+    model, tok = load_base_from_ref(base_ref, hf_cache_root, device)
     target_id = target_token_id(animal, tok)
     prompts = tuple(json.loads(prompt_set_path(prompt_set).read_text()))
     pool = build_pile_pool(tok, n_pile_docs, max_tokens=pile_max_tokens, seed=pile_seed)
     logger.info("Pile pool token_sha256 {}", pool.token_sha256())
-
-    model = GPTNeoXForCausalLM.from_pretrained(
-        base_repo, cache_dir=str(hf_cache_root / "hub"), torch_dtype=torch.float32
-    ).to(device).eval()
 
     # Pristine W0 for every LoRA-target module (float64 CPU), keyed by module path.
     w0, mods = capture_w0(model, as_numpy=True)

@@ -10,6 +10,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from subliminal_learning.stats import collapse_law as cl
+
+# Reference (quotable) collapse-law constants, rendered once for the markdown below.
+_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
+_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
+
 CELLS: list[tuple[str, str]] = []
 
 
@@ -42,7 +48,14 @@ coordinates and is used here as the matched reference (§4).
 top-10 teacher HP configs, ep20, student seed 1, `ex10-20_prefix_n100k` pools, against the
 collapse-boundary law
 
-$$K \;=\; \mathrm{lr}\cdot\alpha^{b}\cdot r^{c},\qquad b=0.561,\;c=-0.085,\qquad K^\ast = 7.87\times10^{-4}\ \text{(pooled anchor)}.$$
+$$K \;=\; \mathrm{lr}\cdot\alpha^{b}\cdot r^{c},\qquad b=""" + _B_REF + r""",\;c=""" + _C_REF + r""",\qquad
+K^\ast = """ + _KSTAR_TEX + r""",$$
+
+fit on the DESIGNED cross-data-order population (Pythia-160m, 504 cells $\times$ 2 student
+seeds, anchored $\Delta$CE label, cluster-robust logistic MLE; 2026-09-09;
+`cl.B_LAW` / `cl.C_LAW` / `cl.KSTAR_CALIBRATED`).
+
+(The 69 cells were PLACED in the earlier trait-era coordinate, retired 2026-09-09.)
 
 Unlike `band-117` this design is *sparse by construction*: it spreads its cells thinly over the
 $(K, \alpha, r)$ volume to place the boundary in a new arm cheaply, rather than filling a surface.
@@ -77,8 +90,8 @@ pd.set_option("display.width", 220)
 set_plot_style(dpi=115, hide_spines=True)
 ROOT, OUTPUT_ROOT = bootstrap()
 
-# --- the law, as the campaign was PLACED with it -------------------------------------------
-KSTAR = cl.KSTAR_POOLED          # canonical pooled anchor
+# --- the law: 160m reference fit (the campaign was PLACED in the retired coordinate) -------
+KSTAR = cl.KSTAR_CALIBRATED      # 160m reference anchor (designed 504x2 fit, anchored label)
 DEAD = tf.DEAD                   # house per-run collapse cut on test p_target (0.005)
 K_of = cl.k_from_tag             # design-time K of a student cell tag
 

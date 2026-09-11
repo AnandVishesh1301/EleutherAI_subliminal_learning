@@ -639,6 +639,10 @@ def _resolve_base_control(
         cfg.param_dir.parent, cfg, "base_control.json"
     )
     lock_path = cache_path.with_name(cache_path.name + ".lock")
+    # A control tree evaluated for the first time has no `eval/{animal}/` level yet (the
+    # animal-namespaced artifact dir is created by the writer, but the lock is taken first);
+    # the canonical trees never hit this because earlier evals created the dir.
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _entry(score: SetScore, ps: PromptSet) -> dict:
         return _set_entry(

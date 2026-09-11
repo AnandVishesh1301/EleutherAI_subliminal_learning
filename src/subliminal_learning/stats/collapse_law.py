@@ -1,36 +1,28 @@
-"""Estimator for the student **collapse-boundary law** measured by the ``law-*`` sweep campaign.
+"""Shared estimators for hyperparameter boundaries on caller-supplied binary outcomes.
 
-The law says an ep20 student collapses (loses the trait entirely, not just weakly) when
+The boundary coordinate is ``K = lr * alpha**b * rank**c``. The current ICLR
+analyses supply catastrophic-failure labels from excess cross-entropy exceeding
+an instrument-specific unigram reference. These estimators do not construct or
+validate those labels: callers must select the population and measurement.
+Legacy trait-label helpers and historical display constants remain below only
+for compatibility; they do not define the current paper's failure criterion.
 
-    K = lr * alpha**b * r**c  >=  K*
+``fit_collapse_law`` fits an unpenalized logistic MLE and reports coefficient
+ratios with cell-clustered delta-method intervals. Near or perfect separation
+can make the fit unstable or prevent a finite MLE. Callers must inspect
+convergence and finite intervals before interpreting the returned estimates.
+``cluster_bootstrap_ratios`` is a separate ridge-penalized sensitivity estimator,
+not an automatic replacement for a failed MLE.
 
-Notebook §11--§12 of ``cross_model_student_hp_exploration.ipynb`` fit ``b``/``c`` on a *single*
-lineage (teacher ``ep2_lr5e-4_r32a64`` -> student ``data-seed1``). The ``law-*`` queues extended
-that to three teacher lineages x two student bases so the exponents can be tested for generality;
-this module is the shared estimator those refits run through, so the notebook stays presentation.
+``kstar_logistic`` calibrates a threshold at supplied exponents; its interval
+conditions on those exponents. ``fit_collapse_law_trajectory`` adds a joint
+log-step factor. Checkpoint-local paper figures instead repeat the endpoint
+fitter at each checkpoint and separately calibrate fixed-coordinate thresholds.
+See ``docs/paper/boundary_fitting_protocol.md`` for the current paper protocol.
 
-Two estimation notes that drive the API:
-
-- **The design is near-separable.** Collapse is almost a deterministic function of ``K``, so an
-  unpenalised MLE drives the coefficient *magnitudes* toward infinity. Only the *ratios*
-  ``b = beta_alpha/beta_lr`` and ``c = beta_r/beta_lr`` are identified. `fit_collapse_law` therefore
-  reports ratios, and `cluster_bootstrap_ratios` uses a ridge (via scikit-learn) so every bootstrap
-  replicate has a finite fit.
-- **Seeds within a cell are correlated.** Resampling seeds independently manufactures significance.
-  Both inference paths cluster on the cell (``student_tag``): statsmodels supplies a cluster-robust
-  covariance for the delta method, and the bootstrap resamples whole cells.
-
-The two paths agree closely in practice; the delta method is the default because it is ~100x
-cheaper, with the bootstrap kept as an independent cross-check.
-
-The module also exposes the *settled* boundary constants (`B_LAW`, `C_LAW`, the two ``K*``
-anchors) and vectorized ``K`` helpers (`K_of`, `k_from_tag`, `add_k`), so notebooks stop
-re-hardcoding the exponents and picking whichever ``K*`` they last remembered.
-
-This module is estimators only. The two loaders that used to live here -- ``load_law_runs``
-(campaign discovery over ``students/``) and ``adapter_coherence`` (SVD of a checkpoint's LoRA
-modules) -- read disk through the analysis layer, so they stayed in ``analysis.collapse_law``,
-which also re-exports everything below for backwards compatibility.
+This module contains estimators only. Filesystem loaders remain in the analysis
+layer, including ``analysis.collapse_law``, which re-exports this API for older
+callers.
 """
 
 from __future__ import annotations
@@ -43,24 +35,22 @@ import pandas as pd
 from subliminal_learning.param_tags import parse_param_tag
 
 
-# --- The settled collapse-boundary law (K = lr * alpha**B_LAW * rank**C_LAW; collapse at K >= K*).
-# B_LAW/C_LAW are the exponents settled across all six arms of the campaign (rank is protective).
-B_LAW: float = 0.561
-C_LAW: float = -0.085
+# --- The collapse-boundary exponents (K = lr * alpha**B_LAW * rank**C_LAW; collapse at K >= K*).
+# Reference values = the fit on the DESIGNED nonadaptive cross-data-order population of Pythia-160m
+# (504 cells x ftseed{1,2}, anchored CE label, `fit_collapse_law` + `kstar_logistic`; paper Fig 1 /
+# Table 3a, 2026-09-09): b 0.659 [0.60, 0.71], c -0.164 [-0.21, -0.11], K* 8.79e-4. Angela's rule
+# (2026-09-09): the only quotable boundary numbers are fits of nonadaptive sweeps -- never a tree glob,
+# never a trait-era or fixed-cut "display" value. These constants are the cross-family reference
+# coordinate; every arm's own fit is the quotable object for that arm.
+B_LAW: float = 0.659
+C_LAW: float = -0.164
+KSTAR_CALIBRATED: float = 8.79e-4
 
-# Two K* anchors exist because the notebooks drifted between them. KSTAR_POOLED is the pooled
-# shared-band anchor and is CANONICAL for new work; KSTAR_DS1_DESIGN is the older ds1 design
-# anchor a few early notebooks fit against, kept only so those numbers stay reproducible.
-KSTAR_POOLED: float = 7.87e-4
-KSTAR_DS1_DESIGN: float = 7.84e-4
-
-# The WORKING calibrated anchor (Angela 2026-08-20: "use 8.4e-4 as calibrated K* for now"):
-# pooled logistic-50% at the display exponents under the declared integrity cut
-# DEAD_KL_CUT = 4.0 (~20k probe-covered runs; per-arm values spread 7.6-9.2e-4 around it,
-# base-ordered ws1 < ds* < ws2). Cut-indexed and provisional -- rederive if the cut moves.
-# Per-arm K* (kstar_logistic per animal x base) remains the quotable object for
-# load-bearing claims; this constant is the shared display/back-of-envelope anchor.
-KSTAR_CALIBRATED: float = 8.4e-4
+# Compatibility aliases for older callers that named a pooled / ds1-design anchor. Both now resolve
+# to the designed-population K* above; the placement-era 7.87e-4 / 7.84e-4 values were retired
+# 2026-09-09 (trait-label, contaminated support) and must not be reintroduced.
+KSTAR_POOLED: float = KSTAR_CALIBRATED
+KSTAR_DS1_DESIGN: float = KSTAR_CALIBRATED
 
 
 def K_of(lr, alpha, rank, *, b: float = B_LAW, c: float = C_LAW):
@@ -200,7 +190,7 @@ def label_collapse(runs: pd.DataFrame, dead_seed: "float | pd.Series" = DEAD_SEE
 
     ``dead_seed`` is either one scalar or a per-row Series aligned to ``runs.index`` (e.g. a
     per-receiver threshold). This is the LEGACY trait-side label; the operative collapse label
-    is the anchored Pile-KL cut -- see `analysis.labels` (`label_dead_trait_legacy` wraps this
+    for the ICLR paper is the unigram-anchored excess-CE cut -- see `analysis.labels` (`label_dead_trait_legacy` wraps this
     rule with the caveat attached).
     """
     return runs.assign(collapsed=runs["test"].lt(dead_seed).astype(int))

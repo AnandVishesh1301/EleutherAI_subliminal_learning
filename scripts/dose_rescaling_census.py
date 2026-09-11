@@ -23,6 +23,7 @@ import typer
 from subliminal_learning.weightspace.dose_census import (
     ARM_SPECS,
     DD1B_ARM_SPECS,
+    QWEN_ARM_SPECS,
     build_manifest,
     validate_manifest,
     write_manifest,
@@ -30,7 +31,7 @@ from subliminal_learning.weightspace.dose_census import (
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 DEFAULT_REL = Path("analysis") / "dose_rescaling_census_20260902"
-ARM_SETS = {"pythia": ARM_SPECS, "dd1b": DD1B_ARM_SPECS}
+ARM_SETS = {"pythia": ARM_SPECS, "dd1b": DD1B_ARM_SPECS, "qwen": QWEN_ARM_SPECS}
 
 
 def _paths(output_root: Path, manifest: Path | None) -> tuple[Path, Path]:
@@ -96,7 +97,7 @@ def evaluate(
     import torch
 
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_DP1, PROBE_POOL_PP1, build_probe_pool, mean_ce, parked_logprobs,
+        build_probe_pool, mean_ce, parked_logprobs,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.evaluation.preference_prob_io import (
@@ -104,12 +105,11 @@ def evaluate(
     )
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
     from subliminal_learning.models.loading_io import load_base_from_ref
-    from subliminal_learning.weightspace.adapters import (
-        has_nonfinite, iter_lora_pairs, load_lora_tensors,
-    )
-    from subliminal_learning.weightspace.lora import lora_delta_w
+    from subliminal_learning.weightspace.adapters import has_nonfinite, load_lora_tensors
+    from subliminal_learning.weightspace.dose_census import probe_spec_for_pool_version
     from subliminal_learning.weightspace.patching import (
-        capture_w0, mean_p_target, patch_modules, pile_readout, restore_modules,
+        capture_w0, mean_p_target, patch_modules_lora, pile_readout, resolve_adapter_factors,
+        restore_modules,
     )
 
     if shard < 0 or n_shards <= 0 or shard >= n_shards:
@@ -156,8 +156,9 @@ def evaluate(
         # arms (hf_olmo) and plain repo ids alike.
         mdl, tok = load_base_from_ref(base_repo, hf_cache, device)
         target_id = target_token_id(animal, tok)
-        pool = build_probe_pool(
-            tok, PROBE_POOL_DP1 if pool_version == "dp1" else PROBE_POOL_PP1)
+        # Pool routing by the manifest's recorded version: pp1 (Pythia), dp1 (OLMo), or a
+        # family's retokenized frozen-text pool pp1t-<tag>; anything else raises.
+        pool = build_probe_pool(tok, probe_spec_for_pool_version(pool_version))
         with torch.no_grad():
             base_logp = parked_logprobs(mdl, pool, device, logp_device)
             ce_base = mean_ce(base_logp, pool)
@@ -171,18 +172,22 @@ def evaluate(
             tensors = load_lora_tensors(ckpt / "adapter_model.safetensors")
             if has_nonfinite(tensors):
                 raise RuntimeError(f"nonfinite adapter in frozen census manifest: {run_dir}")
-            dws = {name: lora_delta_w(b, a, scale)
-                   for name, b, a in iter_lora_pairs(tensors) if name in modules}
-            if not dws:
-                raise RuntimeError(f"no adapter modules matched base model: {run_dir}")
+            # Every adapter module must resolve to a captured base module with the same
+            # weight shape; a partial match would silently under-dose. The factors stay on
+            # the device and each rung's λ·s·B·A is formed there in float64 (2026-09-10;
+            # before, ΔW was materialised in numpy and re-uploaded every rung).
+            try:
+                factors = resolve_adapter_factors(tensors, modules)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"adapter does not fit the base model {base_repo}: {run_dir}: {exc}"
+                ) from exc
             for rung in run["rungs"]:
                 ratio = float(rung["dose_ratio"])
                 if (run["run_path"], ratio) in done:
                     continue
                 try:
-                    patch_modules(modules, w0, {
-                        name: float(rung["lambda"]) * dw for name, dw in dws.items()
-                    })
+                    patch_modules_lora(modules, w0, factors, scale, float(rung["lambda"]))
                     pile_kl, delta_ce = pile_readout(
                         mdl, pool, device, base_logp, ce_base, logp_device=logp_device,
                     )

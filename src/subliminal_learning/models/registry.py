@@ -71,7 +71,9 @@ class ExternalBase:
         family: Probe/tokenizer family tag (shared by sizes of one family).
         model_type: The HF `config.model_type` of the loaded model.
         attn_implementation: `from_pretrained` kwarg, or None for the default.
-            Gemma-2's sliding-window/soft-capping attention needs "eager".
+            Gemma-2's sliding-window/soft-capping attention needs "eager"; transformers
+            also strongly recommends "eager" for TRAINING Gemma-3 (modeling_gemma3
+            warns on any other implementation), so both Gemma rows pin it.
     """
 
     repo_id: str
@@ -89,7 +91,7 @@ class ExternalBase:
 EXTERNAL_BASES: tuple[ExternalBase, ...] = (
     ExternalBase("Qwen/Qwen2.5-1.5B", "qwen25-1.5b", "qwen25", "qwen2"),
     ExternalBase("meta-llama/Llama-3.2-1B", "llama3-1b", "llama3", "llama"),
-    ExternalBase("google/gemma-3-1b-pt", "gemma3-1b", "gemma3", "gemma3_text"),
+    ExternalBase("google/gemma-3-1b-pt", "gemma3-1b", "gemma3", "gemma3_text", "eager"),
     ExternalBase("google/gemma-2-2b", "gemma2-2b", "gemma2", "gemma2", "eager"),
     ExternalBase("google/gemma-2-9b", "gemma2-9b", "gemma2", "gemma2", "eager"),
 )

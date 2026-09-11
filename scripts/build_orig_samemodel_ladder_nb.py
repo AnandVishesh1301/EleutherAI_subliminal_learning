@@ -22,6 +22,12 @@ from pathlib import Path
 
 import nbformat as nbf
 
+from subliminal_learning.stats import collapse_law as cl
+
+# Reference (quotable) collapse-law constants, rendered once for the markdown below.
+_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
+_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
+
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "notebooks" / "orig_samemodel_ladder.ipynb"
 
@@ -48,10 +54,15 @@ across the collapse boundary.
 
 **The question.** The collapse-boundary law
 
-$$K \;=\; \mathrm{lr}\cdot\alpha^{b}\cdot r^{c},\qquad b=0.561,\;c=-0.085,\qquad
-K^\ast = 7.87\times10^{-4}\ \text{(pooled anchor)},$$
+$$K \;=\; \mathrm{lr}\cdot\alpha^{b}\cdot r^{c},\qquad b=""" + _B_REF + r""",\;c=""" + _C_REF + r""",\qquad
+K^\ast = """ + _KSTAR_TEX + r""",$$
 
-was fit on the cross-init seed arms. Does the collapse cliff on the **original** init sit at the
+fit on the DESIGNED cross-data-order population (Pythia-160m, 504 cells $\times$ 2 student
+seeds, anchored $\Delta$CE label, cluster-robust logistic MLE; 2026-09-09;
+`cl.B_LAW` / `cl.C_LAW` / `cl.KSTAR_CALIBRATED`).
+
+(The ladder's cells were PLACED in the earlier trait-era coordinate, retired 2026-09-09;
+readouts below use the reference constants.) Does the collapse cliff on the **original** init sit at the
 same $K/K^\ast$ as the pooled seed-arm boundary, under one shared dead-threshold definition? §4 is
 the headline comparison; the matched seed-arm curves reuse the **same five teacher HP configs** so
 the teacher menu is held fixed across the two sides.
@@ -92,9 +103,9 @@ set_plot_style(dpi=115, hide_spines=True)
 ROOT, OUTPUT_ROOT = bootstrap()
 
 ANIMAL = "dog"
-KSTAR = cl.KSTAR_POOLED   # placement-era shared-band coordinate (7.87e-4), kept so this
-                          # notebook's K/K* axis matches the band manifest; the WORKING
-                          # anchor for new claims is cl.KSTAR_CALIBRATED (8.4e-4)
+KSTAR = cl.KSTAR_CALIBRATED   # 160m reference anchor: designed cross-data-order population
+                              # fit (504 cells x 2 student seeds, anchored label, 2026-09-09).
+                              # The band manifest's cells were PLACED in an earlier coordinate.
 DATASET = "ex10-20_prefix_n100k"
 
 # The top-5 distillability teacher HP configs (the ladder's teacher menu), best-first.

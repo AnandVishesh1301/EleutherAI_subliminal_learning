@@ -432,6 +432,41 @@ class TestOverwriteGuard:
         assert r.n_raw == 20
         assert len((tmp_path / "ds" / "raw.jsonl").read_text().splitlines()) == 20
 
+    def test_moved_checkpoint_dir_and_missing_top_k_still_match(self, tmp_path: Path):
+        """Regression: orig-dog ckpt pools from 08-10 recorded the adapter under ssd-3 and
+        predate the recorded ``top_k``. After the cold-1 migration the same adapter (same
+        ``adapter_id``) is requested from a new path with ``top_k=50`` -> must reuse."""
+        from pipelines.generate_numbers_pipeline import (
+            _raw_pool_status, generation_params, run,
+        )
+
+        cfg = self._cfg(tmp_path, 30)
+        run(cfg)
+        manifest_path = tmp_path / "ds" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        stored = manifest["params"]
+        stored["adapter_id"] = "deadbeefcafef00d"
+        stored["checkpoint_dir"] = "/mnt/ssd-3/old/checkpoints"
+        stored.pop("top_k", None)
+        manifest_path.write_text(json.dumps(manifest))
+
+        requested = generation_params(cfg, stored["prompts_hash"])
+        requested["adapter_id"] = "deadbeefcafef00d"
+        requested["checkpoint_dir"] = "/mnt/cold-1/new/checkpoints"
+        assert _raw_pool_status(cfg, requested)[0] == "match"
+
+        # A different adapter at the new path is still a mismatch.
+        requested["adapter_id"] = "0123456789abcdef"
+        assert _raw_pool_status(cfg, requested)[0] == "mismatch"
+
+        # Without an adapter id the path is the only identity and still counts.
+        stored["adapter_id"] = None
+        manifest_path.write_text(json.dumps(manifest))
+        requested["adapter_id"] = None
+        assert _raw_pool_status(cfg, requested)[0] == "mismatch"
+        requested["checkpoint_dir"] = "/mnt/ssd-3/old/checkpoints"
+        assert _raw_pool_status(cfg, requested)[0] == "match"
+
     def test_matching_params_still_skips(self, tmp_path: Path):
         from pipelines.generate_numbers_pipeline import run
 

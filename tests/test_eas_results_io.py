@@ -1,9 +1,11 @@
-"""Tests for the EAS results loader + the sweep driver's pure discovery/gate logic.
+"""Tests for the per-student-run EAS results loader.
 
-CPU-only, no model loads: the tag/lineage parsers and `load_eas_results` run against a tmp
-students/ tree holding a valid doc, a malformed doc, and an unparseable lineage dir (both
-skipped with a warning); the sweep's `valid_student_epochs` / `eas_doc_cached` /
-`spec_from_model_dir` are exercised on plain dicts + names.
+CPU-only, no model loads: the tag/lineage parsers plus the two loaders against tmp_path
+students/ trees holding hand-written documents — a teacher-source run whose MAIN document
+carries its own reference, the same run's refs document, a control run (refs document only,
+two references), a cross-base run, a nonfinite point, and a malformed document (skipped with a
+warning). `load_eas_results` reads only main documents and `load_eas_reference_results` only
+refs documents, so each test names the kind it expects.
 """
 
 from __future__ import annotations
@@ -11,26 +13,23 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.sweeps.sweep_compute_eas import (
-    _discover,
-    eas_doc_cached,
-    spec_from_model_dir,
-    valid_student_epochs,
-)
-from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
-from subliminal_learning.teachers.sweep_grid import shard_cells
 from subliminal_learning.steering.eas_results_io import (
     RESULT_COLUMNS,
+    endpoint_only,
+    load_eas_reference_results,
     load_eas_results,
+    own_reference_only,
     parse_ft_param_tag,
     parse_lineage_dir,
 )
+
+REF_A = "dog/pythia-160m/ep10_lr1e-4_r16a32/ftseed1"
+REF_B = "dog/pythia-160m/ep5_lr2e-4_r8a8/ftseed2"
 
 
 # ------------------------- pure parsers -------------------------
@@ -51,7 +50,6 @@ def test_parse_ft_param_tag_bad():
 
 
 def test_parse_lineage_dir_ok():
-    # Same-base: the teacher-{base} level repeats the student model.
     assert parse_lineage_dir("teacher-pythia-160m", "ep10_lr1e-4_r16a32_tseed1") == {
         "teacher_param_tag": "ep10_lr1e-4_r16a32",
         "teacher_ftseed": 1,
@@ -59,537 +57,251 @@ def test_parse_lineage_dir_ok():
     }
 
 
-def test_parse_lineage_dir_cross_base():
-    got = parse_lineage_dir(
-        "teacher-pythia-160m-data-seed1", "ep5_lr2e-4_r8a8_tseed3"
-    )
-    assert got["teacher_param_tag"] == "ep5_lr2e-4_r8a8"
-    assert got["teacher_ftseed"] == 3
-    assert got["numbers_base_model"] == "pythia-160m-data-seed1"
-
-
 def test_parse_lineage_dir_bad():
     with pytest.raises(ValueError):
         parse_lineage_dir("teacher-pythia-160m", "notatag_tseed1")
-    with pytest.raises(ValueError):  # teacher-base level must start with 'teacher-'
+    with pytest.raises(ValueError):
         parse_lineage_dir("notateacher", "ep10_lr1e-4_r16a32_tseed1")
+
+
+# ------------------------- document fixtures -------------------------
+
+
+def _reference(ref_key: str) -> dict:
+    tag, ftseed = ref_key.split("/")[2], int(ref_key.split("/")[3][len("ftseed"):])
+    return {
+        "teacher_run_rel": f"teachers/{ref_key}",
+        "animal": "dog",
+        "teacher_base_repo": "EleutherAI/pythia-160m",
+        "teacher_base_model_dir": "pythia-160m",
+        "teacher_param_tag": tag,
+        "teacher_ftseed": ftseed,
+        "teacher_adapter_id": "aaaa",
+        "v_teacher_norm_per_layer": [0.0, 1.0, 2.0],
+    }
+
+
+def _doc(
+    run_rel: str,
+    *,
+    position: str = "last",
+    source: str = "teacher",
+    refs: tuple[str, ...] = (REF_A,),
+    own_reference: str | None = REF_A,
+    base_model_dir: str = "pythia-160m",
+    numbers_base_model_dir: str = "pythia-160m",
+    cross_base: bool = False,
+    nonfinite_point: bool = False,
+) -> dict:
+    points = [
+        {
+            "step": 500, "ckpt_rel": "checkpoints/checkpoint-500", "is_endpoint": False,
+            "adapter_id": "s500", "nonfinite": False,
+            "v_student_norm_per_layer": [0.0, 1.0, 2.0],
+            "eas": {r: {"mean": 0.10, "per_layer": [0.0, 0.1, 0.2]} for r in refs},
+        },
+        {
+            "step": 1000, "ckpt_rel": "checkpoints/checkpoint-1000", "is_endpoint": True,
+            "adapter_id": "s1000", "nonfinite": False,
+            "v_student_norm_per_layer": [0.0, 1.0, 2.0],
+            "eas": {r: {"mean": 0.42, "per_layer": [0.0, 0.4, 0.5]} for r in refs},
+        },
+    ]
+    if nonfinite_point:
+        points.insert(1, {
+            "step": 750, "ckpt_rel": "checkpoints/checkpoint-750", "is_endpoint": False,
+            "adapter_id": "s750", "nonfinite": True,
+            "v_student_norm_per_layer": [0.0, 1.0, 2.0], "eas": None,
+        })
+    return {
+        "schema_version": 1,
+        "basis": "raw_blocks_v2",
+        "eas_mean_convention": "raw_blocks_v2",
+        "position": position,
+        "n_prompts": 1024,
+        "prompt_sha256": "p" * 8,
+        "prompt_source": {
+            "number_dataset_dir_rel": "numbers/x", "filtered_sha256": "f" * 8,
+            "subsample_size": 10000, "subsample_seed": 42, "splice_examples": False,
+        },
+        "student": {
+            "run_rel": run_rel, "source": source, "animal": "dog",
+            "base_repo": f"EleutherAI/{base_model_dir}", "base_model_dir": base_model_dir,
+            "numbers_base_model_dir": numbers_base_model_dir, "cross_base": cross_base,
+            "student_param_tag": "ep5_lr1e-4_r8a32", "student_ftseed": 1,
+            "number_dataset_tag": "ex10-20_prefix_n100k",
+            "own_reference": own_reference, "manifest_ref": {},
+        },
+        "references": {r: _reference(r) for r in refs},
+        "points": points,
+    }
+
+
+def _write(
+    root: Path, run_rel: str, position: str, text: str, kind: str = "eas"
+) -> None:
+    """Write one document of `kind` (``eas`` = main, ``eas_refs`` = extra references)."""
+    d = root / run_rel / "eval"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{kind}_{position}.json").write_text(text)
+
+
+TEACHER_RUN = (
+    "students/dog/pythia-160m/teacher-pythia-160m/ep10_lr1e-4_r16a32_tseed1/"
+    "ex10-20_prefix_n100k/ep5_lr1e-4_r8a32/ftseed1"
+)
+CONTROL_RUN = (
+    "students/controls/base/pythia-160m/ex10-20_prefix_n100k/ep5_lr1e-4_r8a32/ftseed1"
+)
+CROSS_RUN = (
+    "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/ep10_lr1e-4_r16a32_tseed1/"
+    "ex10-20_prefix_n100k/ep5_lr1e-4_r8a32/ftseed1"
+)
+BAD_RUN = "students/dog/pythia-160m/broken/ep5_lr1e-4_r8a32/ftseed1"
 
 
 # ------------------------- load_eas_results -------------------------
 
 
-def _valid_doc() -> dict:
-    return {
-        "meta": {
-            "position": "last",
-            "n_prompts": 1024,
-            "splice_examples": False,
-            "eas_mean_convention": "blocks_v1",
-        },
-        "v_teacher_norm_per_layer": [0.0, 1.0, 2.0],
-        "entries": [
-            {
-                "source": "teacher",
-                "n_epochs": 5,
-                "student_ftseed": 1,
-                "student_param_tag": "ep5_lr1e-4_r8a32",
-                "run_dir": "/x",
-                "adapter_id": "abc",
-                "eas_mean": 0.42,
-                "eas_per_layer": [0.1, 0.2, 0.3],
-                "v_student_norm_per_layer": [0.0, 1.0, 2.0],
-            },
-            {
-                "source": "base",
-                "n_epochs": 5,
-                "student_ftseed": 1,
-                "student_param_tag": "ep5_lr1e-4_r8a32",
-                "run_dir": "/y",
-                "adapter_id": "def",
-                "eas_mean": -0.01,
-                "eas_per_layer": [0.0, -0.1, 0.0],
-                "v_student_norm_per_layer": [0.0, 1.0, 2.0],
-            },
-        ],
-    }
+def _tree(tmp_path: Path) -> None:
+    _write(tmp_path, TEACHER_RUN, "last", json.dumps(_doc(TEACHER_RUN)))
+    _write(tmp_path, TEACHER_RUN, "all", json.dumps(_doc(TEACHER_RUN, position="all")))
+    # The extra reference of the same run lives beside its main document.
+    _write(tmp_path, TEACHER_RUN, "last", json.dumps(_doc(
+        TEACHER_RUN, refs=(REF_B,),
+    )), kind="eas_refs")
+    # A control run has no own teacher, hence ONLY a refs document.
+    _write(tmp_path, CONTROL_RUN, "last", json.dumps(_doc(
+        CONTROL_RUN, source="base", refs=(REF_A, REF_B), own_reference=None,
+        nonfinite_point=True,
+    )), kind="eas_refs")
+    _write(tmp_path, CROSS_RUN, "last", json.dumps(_doc(
+        CROSS_RUN, base_model_dir="pythia-160m-data-seed1",
+        numbers_base_model_dir="pythia-160m", cross_base=True,
+    )))
+    _write(tmp_path, BAD_RUN, "last", "{ not json")
 
 
-def _write(
-    root: Path, teacher_tag_dir: str, dataset_tag: str, position: str, text: str,
-    teacher_base: str = "teacher-pythia-160m",
-) -> None:
-    d = (
-        root / "students" / "dog" / "pythia-160m"
-        / teacher_base / teacher_tag_dir / dataset_tag / "eas"
-    )
-    d.mkdir(parents=True, exist_ok=True)
-    (d / f"eas_{position}.json").write_text(text)
-
-
-def test_load_eas_results_tolerant(tmp_path):
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
-        json.dumps(_valid_doc()),
-    )
-    # Malformed JSON -> skipped with a warning.
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k_spliced", "last",
-        "{ not json",
-    )
-    # Teacher-tag dir matches the glob but not the regex -> skipped with a warning.
-    _write(tmp_path, "notatag_tseed1", "sometag", "last", json.dumps(_valid_doc()))
-
+def test_load_eas_results_discovery_and_columns(tmp_path):
+    _tree(tmp_path)
     df = load_eas_results(tmp_path)
     assert list(df.columns) == RESULT_COLUMNS
-    assert len(df) == 2  # two entries from the single valid doc
-    assert set(df["source"]) == {"teacher", "base"}
-    row = df[df["source"] == "teacher"].iloc[0]
+    # MAIN documents only: teacher run 2 positions × 2 points × 1 ref, cross run 2 points.
+    assert len(df) == 4 + 2
+    assert set(df["run_path"]) == {TEACHER_RUN, CROSS_RUN}
+    row = df[(df.run_path == TEACHER_RUN) & (df.position == "last") & (df.step == 1000)].iloc[0]
+    assert row["source"] == "teacher"
     assert row["animal"] == "dog"
     assert row["model"] == "pythia-160m"
+    assert row["numbers_base_model"] == "pythia-160m"
+    assert row["cross_base"] == False  # noqa: E712
     assert row["teacher_param_tag"] == "ep10_lr1e-4_r16a32"
-    assert row["teacher_epochs"] == 10
-    assert row["teacher_lora_r"] == 16
-    assert row["teacher_lora_alpha"] == 32
+    assert (row["teacher_epochs"], row["teacher_lora_r"], row["teacher_lora_alpha"]) == (10, 16, 32)
     assert row["teacher_ftseed"] == 1
+    assert row["reference"] == REF_A
+    assert row["is_own_reference"]
     assert row["dataset_tag"] == "ex10-20_prefix_n100k"
-    assert row["spliced"] is False or row["spliced"] == False  # noqa: E712
-    assert row["position"] == "last"
+    assert row["spliced"] == False  # noqa: E712
     assert row["n_prompts"] == 1024
-    assert row["eas_mean_convention"] == "blocks_v1"
-    assert row["student_epochs"] == 5
-    assert row["eas_per_layer"] == [0.1, 0.2, 0.3]
+    assert row["eas_mean_convention"] == "raw_blocks_v2"
+    assert (row["student_epochs"], row["student_lora_r"]) == (5, 8)
+    assert row["student_ftseed"] == 1
+    assert row["is_endpoint"]
+    assert row["eas_mean"] == 0.42
+    assert row["eas_per_layer"] == [0.0, 0.4, 0.5]
 
 
-def test_load_eas_results_skips_bad_position(tmp_path):
-    # A valid doc plus a stray file whose stem parses to an unexpected position: the stray is
-    # skipped defensively, not loaded as a row.
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
-        json.dumps(_valid_doc()),
-    )
-    _write(  # eas_.json -> position "" -> skipped
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "",
-        json.dumps(_valid_doc()),
-    )
-    _write(  # eas_middle.json -> position "middle" -> skipped
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "middle",
-        json.dumps(_valid_doc()),
-    )
+def test_load_eas_reference_results_control_two_references_and_nonfinite(tmp_path):
+    _tree(tmp_path)
+    df = load_eas_reference_results(tmp_path)
+    assert list(df.columns) == RESULT_COLUMNS
+    ctl = df[df.run_path == CONTROL_RUN]
+    assert set(ctl["reference"]) == {REF_A, REF_B}
+    assert not ctl["is_own_reference"].any()  # a control has no own reference
+    # The two references carry their OWN teacher HPs on the same control rows.
+    assert set(ctl[ctl.reference == REF_B]["teacher_param_tag"]) == {"ep5_lr2e-4_r8a8"}
+    nf = ctl[ctl.step == 750]
+    assert len(nf) == 2 and nf["nonfinite"].all()
+    assert nf["eas_mean"].isna().all()
+    assert nf["eas_per_layer"].isna().all()
+
+
+def test_load_eas_results_cross_base(tmp_path):
+    _tree(tmp_path)
     df = load_eas_results(tmp_path)
-    assert set(df["position"]) == {"last"}
+    cross = df[df.cross_base]
+    assert set(cross["run_path"]) == {CROSS_RUN}
+    assert set(cross["model"]) == {"pythia-160m-data-seed1"}
+    assert set(cross["numbers_base_model"]) == {"pythia-160m"}
+
+
+def test_load_eas_results_malformed_doc_skipped(tmp_path):
+    _tree(tmp_path)
+    df = load_eas_results(tmp_path)
+    assert BAD_RUN not in set(df["run_path"])
+
+
+def test_load_eas_results_explicit_run_rel_paths(tmp_path):
+    _tree(tmp_path)
+    df = load_eas_results(tmp_path, run_rel_paths=[TEACHER_RUN])
+    assert set(df["run_path"]) == {TEACHER_RUN}
+
+
+def test_load_eas_results_position_filter(tmp_path):
+    _tree(tmp_path)
+    assert set(load_eas_results(tmp_path)["position"]) == {"last", "all"}
+    assert set(load_eas_results(tmp_path, positions=["all"])["position"]) == {"all"}
+
+
+def test_each_loader_sees_only_its_own_documents(tmp_path):
+    _tree(tmp_path)
+    main = load_eas_results(tmp_path)
+    refs = load_eas_reference_results(tmp_path)
+    # The main frame holds own-reference rows only; the refs frame holds none of them.
+    assert set(main["reference"]) == {REF_A}
+    assert main["is_own_reference"].all()
+    assert CONTROL_RUN not in set(main["run_path"])
+    assert set(refs["run_path"]) == {TEACHER_RUN, CONTROL_RUN}
+    assert not refs["is_own_reference"].any()
+    assert set(refs[refs.run_path == TEACHER_RUN]["reference"]) == {REF_B}
+    assert set(main["eas_file"]) == {
+        str(tmp_path / r / "eval" / f"eas_{p}.json")
+        for r, p in ((TEACHER_RUN, "last"), (TEACHER_RUN, "all"), (CROSS_RUN, "last"))
+    }
+    assert all(Path(f).name == "eas_refs_last.json" for f in refs["eas_file"])
+
+
+def test_loaders_empty(tmp_path):
+    (tmp_path / "students").mkdir()
+    for df in (load_eas_results(tmp_path), load_eas_reference_results(tmp_path)):
+        assert list(df.columns) == RESULT_COLUMNS
+        assert df.empty
+        assert endpoint_only(df).empty and own_reference_only(df).empty
 
 
 def test_load_eas_results_warns_on_mixed_convention(tmp_path):
     from loguru import logger
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
-        json.dumps(_valid_doc()),
-    )
-    other = _valid_doc()
-    other["meta"]["eas_mean_convention"] = "blocks_v2"
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "other_tag", "last", json.dumps(other)
-    )
+    _write(tmp_path, TEACHER_RUN, "last", json.dumps(_doc(TEACHER_RUN)))
+    other = _doc(CROSS_RUN)
+    other["eas_mean_convention"] = "blocks_v1"
+    _write(tmp_path, CROSS_RUN, "last", json.dumps(other))
     sink: list[str] = []
     handle = logger.add(sink.append, level="WARNING")
     try:
         df = load_eas_results(tmp_path)
     finally:
         logger.remove(handle)
-    assert set(df["eas_mean_convention"]) == {"blocks_v1", "blocks_v2"}
+    assert set(df["eas_mean_convention"]) == {"raw_blocks_v2", "blocks_v1"}
     assert any("convention" in m for m in sink)
 
 
-def test_load_eas_results_position_filter(tmp_path):
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "tag", "last", json.dumps(_valid_doc())
-    )
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "tag", "all", json.dumps(_valid_doc())
-    )
-    assert set(load_eas_results(tmp_path)["position"]) == {"last", "all"}
-    assert set(load_eas_results(tmp_path, positions=["last"])["position"]) == {"last"}
-
-
-def test_load_eas_results_empty(tmp_path):
-    (tmp_path / "students").mkdir()
+def test_endpoint_only_and_own_reference_only(tmp_path):
+    _tree(tmp_path)
     df = load_eas_results(tmp_path)
-    assert list(df.columns) == RESULT_COLUMNS
-    assert df.empty
-
-
-def test_load_eas_results_cross_base_columns(tmp_path):
-    # Same-base doc: cross_base False, numbers_base_model repeats the student model.
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
-        json.dumps(_valid_doc()),
-    )
-    # Cross-base doc (student base pythia-160m, teacher/numbers base data-seed1): loaded, not
-    # skipped, with cross_base True and numbers_base_model == the teacher-base dir name.
-    _write(
-        tmp_path,
-        "ep10_lr1e-4_r16a32_tseed1",
-        "ex10-20_prefix_n100k", "last", json.dumps(_valid_doc()),
-        teacher_base="teacher-pythia-160m-data-seed1",
-    )
-    df = load_eas_results(tmp_path)
-    same = df[~df["cross_base"]]
-    cross = df[df["cross_base"]]
-    assert set(same["numbers_base_model"]) == {"pythia-160m"}
-    assert set(cross["numbers_base_model"]) == {"pythia-160m-data-seed1"}
-    assert len(cross) == 2  # two entries from the one cross doc
-
-
-def test_load_eas_results_finds_ckpt_level(tmp_path):
-    # A revision-pinned student gathers its model under a `ckpt/` level; the loader must find
-    # it and recover model = `pythia-160m@step1000` (no bare `ckpt` leaking into any field).
-    d = (
-        tmp_path / "students" / "dog" / "ckpt" / "pythia-160m@step1000"
-        / "teacher-pythia-160m@step1000" / "ep10_lr1e-4_r16a32_tseed1"
-        / "ex10-20_prefix_n100k" / "eas"
-    )
-    d.mkdir(parents=True)
-    (d / "eas_last.json").write_text(json.dumps(_valid_doc()))
-    # A plain run alongside it, to confirm both depths coexist.
-    _write(
-        tmp_path, "ep10_lr1e-4_r16a32_tseed1", "ex10-20_prefix_n100k", "last",
-        json.dumps(_valid_doc()),
-    )
-    df = load_eas_results(tmp_path)
-    assert set(df["model"]) == {"pythia-160m@step1000", "pythia-160m"}
-    ck = df[df["model"] == "pythia-160m@step1000"].iloc[0]
-    assert ck["animal"] == "dog"
-    assert ck["numbers_base_model"] == "pythia-160m@step1000"
-    assert ck["cross_base"] == False  # noqa: E712
-    assert ck["teacher_param_tag"] == "ep10_lr1e-4_r16a32"
-    assert ck["dataset_tag"] == "ex10-20_prefix_n100k"
-
-
-def test_load_eas_results_finds_optim_level(tmp_path):
-    # A non-default optimizer segregates the whole tree under a leading `{optim_slug}` level;
-    # the loader strips it by closed-vocab detection and recovers the plain axes (no bare
-    # `sgd` leaking into `animal`/`model`).
-    d = (
-        tmp_path / "students" / "sgd" / "dog" / "pythia-160m"
-        / "teacher-pythia-160m" / "ep10_lr1e-4_r16a32_tseed1"
-        / "ex10-20_prefix_n100k" / "eas"
-    )
-    d.mkdir(parents=True)
-    (d / "eas_last.json").write_text(json.dumps(_valid_doc()))
-    df = load_eas_results(tmp_path)
-    row = df[df["source"] == "teacher"].iloc[0]
-    assert row["animal"] == "dog"
-    assert row["model"] == "pythia-160m"
-    assert row["teacher_param_tag"] == "ep10_lr1e-4_r16a32"
-    assert row["dataset_tag"] == "ex10-20_prefix_n100k"
-
-
-# ------------------------- sweep pure logic -------------------------
-
-
-def test_valid_student_epochs_splits_default_hp():
-    tags = ["ep1_lr1e-4_r8a32", "ep5_lr1e-4_r8a32", "ep5_lr2e-4_r8a32", "junk"]
-    epochs, ignored = valid_student_epochs(tags, lr=1e-4, r=8, alpha=32)
-    assert epochs == [1, 5]
-    assert set(ignored) == {"ep5_lr2e-4_r8a32", "junk"}
-
-
-def test_eas_doc_cached_gate():
-    doc = {
-        "meta": {"eas_mean_convention": "blocks_v1", "n_prompts": 1024, "position": "last"},
-        "entries": [
-            {"source": "teacher", "n_epochs": 5, "student_ftseed": 1},
-            {"source": "base", "n_epochs": 5, "student_ftseed": 1},
-        ],
-    }
-    req = {("teacher", 5, 1)}
-    assert eas_doc_cached(doc, position="last", n_prompts=1024, required_work_items=req)
-    # missing a required entry
-    assert not eas_doc_cached(
-        doc, position="last", n_prompts=1024,
-        required_work_items={("teacher", 5, 1), ("rng", 5, 1)},
-    )
-    # an EMPTY required set is "nothing to do", NOT cached
-    assert not eas_doc_cached(doc, position="last", n_prompts=1024, required_work_items=set())
-    # wrong meta
-    assert not eas_doc_cached(doc, position="all", n_prompts=1024, required_work_items=req)
-    assert not eas_doc_cached(doc, position="last", n_prompts=512, required_work_items=req)
-    stale = {**doc, "meta": {**doc["meta"], "eas_mean_convention": "old"}}
-    assert not eas_doc_cached(stale, position="last", n_prompts=1024, required_work_items=req)
-
-
-def test_eas_doc_cached_teacher_adapter_and_pool_drift():
-    doc = {
-        "meta": {
-            "eas_mean_convention": "blocks_v1", "n_prompts": 1024, "position": "last",
-            "teacher_adapter_id": "aaaa", "filtered_sha256": "poolhash",
-        },
-        "entries": [{"source": "teacher", "n_epochs": 5, "student_ftseed": 1}],
-    }
-    req = {("teacher", 5, 1)}
-    # Matching adapter + pool -> cached.
-    assert eas_doc_cached(
-        doc, position="last", n_prompts=1024, required_work_items=req,
-        teacher_adapter_id="aaaa", filtered_sha256="poolhash",
-    )
-    # In-place teacher retrain: the on-disk adapter id no longer matches meta -> not cached.
-    assert not eas_doc_cached(
-        doc, position="last", n_prompts=1024, required_work_items=req,
-        teacher_adapter_id="bbbb", filtered_sha256="poolhash",
-    )
-    # Refreshed number pool: filtered.jsonl hash changed -> not cached.
-    assert not eas_doc_cached(
-        doc, position="last", n_prompts=1024, required_work_items=req,
-        teacher_adapter_id="aaaa", filtered_sha256="newpool",
-    )
-    # A None current value skips that check (a missing teacher ckpt / unresolved pool).
-    assert eas_doc_cached(
-        doc, position="last", n_prompts=1024, required_work_items=req,
-        teacher_adapter_id=None, filtered_sha256=None,
-    )
-
-
-def test_eas_doc_cached_short_pool_n_prompts_warns():
-    # A short-pool lineage stores its ACTUAL prompt count; when that is the SOLE remaining
-    # cache-miss cause the gate warns by name (otherwise it cache-misses forever silently).
-    from loguru import logger
-    doc = {
-        "meta": {"eas_mean_convention": "blocks_v1", "n_prompts": 300, "position": "last"},
-        "entries": [{"source": "teacher", "n_epochs": 5, "student_ftseed": 1}],
-    }
-    req = {("teacher", 5, 1)}
-    sink: list[str] = []
-    handle = logger.add(sink.append, level="WARNING")
-    try:
-        cached = eas_doc_cached(
-            doc, position="last", n_prompts=1024, required_work_items=req, label="dog/lineage",
-        )
-    finally:
-        logger.remove(handle)
-    assert cached is False
-    assert any("n_prompts" in m and "dog/lineage" in m for m in sink)
-
-
-def test_spec_from_model_dir():
-    assert spec_from_model_dir("pythia-160m", "EleutherAI").variant == "full"
-    ds1 = spec_from_model_dir("pythia-160m-data-seed1", "EleutherAI")
-    assert (ds1.variant, ds1.seed) == ("data", 1)
-    with pytest.raises(ValueError):
-        spec_from_model_dir("pythia-410m", "EleutherAI")
-    with pytest.raises(ValueError):
-        spec_from_model_dir("not-a-model", "EleutherAI")
-
-
-def test_spec_from_model_dir_full_seed_variants():
-    # `pythia-160m-seed{N}` dirs (fully re-randomized models, selectable since
-    # 2026-08-18) round-trip; the bare `seed{N}` remainder is not a selector.
-    s1 = spec_from_model_dir("pythia-160m-seed1", "EleutherAI")
-    assert (s1.variant, s1.seed, s1.size) == ("full", 1, "160m")
-    rev = spec_from_model_dir("pythia-160m-seed2@step3000", "EleutherAI")
-    assert (rev.variant, rev.seed, rev.revision) == ("full", 2, "step3000")
-
-
-def test_spec_from_model_dir_revision_pinned():
-    # Bare-original ckpt form (the v1 sweep's `base_model: original`) and the variant ckpt form.
-    orig = spec_from_model_dir("pythia-160m@step1000", "EleutherAI")
-    assert (orig.variant, orig.seed, orig.revision) == ("full", 0, "step1000")
-    ds1 = spec_from_model_dir("pythia-160m-data-seed1@step3000", "EleutherAI")
-    assert (ds1.variant, ds1.seed, ds1.revision) == ("data", 1, "step3000")
-    # A revisionless original still has revision None (byte-identical to before).
-    assert spec_from_model_dir("pythia-160m", "EleutherAI").revision is None
-    with pytest.raises(ValueError):  # empty revision after '@'
-        spec_from_model_dir("pythia-160m@", "EleutherAI")
-
-
-# ------------------------- sweep unit sharding -------------------------
-
-
-def test_eas_shards_partition_units_disjoint_exhaustive_and_balanced():
-    # Synthetic sorted unit list; the sweep strides this exact list with shard_cells.
-    units = list(range(812))
-    n = 24
-    shards = [shard_cells(units, num_shards=n, shard_index=i) for i in range(n)]
-    # exhaustive: every unit lands in exactly one shard
-    assert sorted(u for shard in shards for u in shard) == units
-    # disjoint: no unit appears in two shards
-    seen: set[int] = set()
-    for shard in shards:
-        assert not (seen & set(shard))
-        seen |= set(shard)
-    # balanced to within one unit
-    sizes = [len(shard) for shard in shards]
-    assert max(sizes) - min(sizes) <= 1
-
-
-@pytest.mark.parametrize(
-    ("num_shards", "shard_index"), [(0, 0), (1, 1), (3, -1), (3, 3)]
-)
-def test_eas_shard_params_validate(num_shards, shard_index):
-    with pytest.raises(ValueError):
-        shard_cells(list(range(5)), num_shards=num_shards, shard_index=shard_index)
-
-
-# ------------------------- sweep cross-base discovery -------------------------
-
-
-def _sweep_cfg(output_root: Path) -> SimpleNamespace:
-    """A minimal template-like config the sweep's `_discover` reads (paths/hub_org/train/lora)."""
-    paths = PathsConfig(
-        output_root=output_root, hf_cache_root=output_root / "cache",
-        dataset_cache_root=output_root / "data", wandb_dir=output_root / "wandb",
-    )
-    lora = LoRAConfig(r=8, lora_alpha=32, lora_dropout=0.0, target_modules="all-linear")
-    train = TrainConfig(
-        learning_rate=1e-4, n_epochs=5, batch_size=8, max_length=512, max_grad_norm=1.0,
-        warmup_ratio=0.05, lr_scheduler_type="cosine", seed=1,
-    )
-    return SimpleNamespace(paths=paths, hub_org="EleutherAI", train=train, lora=lora)
-
-
-def _make_cross_student(output_root: Path) -> None:
-    """A single teacher-source cross-base student cell (data-seed1 base, numbers base original)."""
-    rd = (
-        output_root / "students" / "dog" / "pythia-160m-data-seed1"
-        / "teacher-pythia-160m" / "ep10_lr1e-4_r16a32_tseed1"
-        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
-    )
-    (rd / "checkpoints").mkdir(parents=True)
-    (rd / "train_manifest.json").write_text(json.dumps({
-        "splice_examples": False,
-        "cross_base": True,
-        "numbers_base_model_repo": "EleutherAI/pythia-160m",
-    }))
-
-
-def test_discover_skips_cross_base_by_default(tmp_path):
-    _make_cross_student(tmp_path)
-    cfg = _sweep_cfg(tmp_path)
-    units, n_unsupported = _discover(
-        cfg, sources=("teacher",), positions=("last",),
-        animals=set(), models=set(), tags=set(), n_prompts=1024,
-    )
-    assert units == []
-    assert n_unsupported == 1
-
-
-def test_discover_includes_cross_base_when_requested(tmp_path):
-    _make_cross_student(tmp_path)
-    cfg = _sweep_cfg(tmp_path)
-    units, n_unsupported = _discover(
-        cfg, sources=("teacher",), positions=("last",),
-        animals=set(), models=set(), tags=set(), n_prompts=1024,
-        include_cross_base=True,
-    )
-    assert n_unsupported == 0
-    assert len(units) == 1
-    unit = units[0]
-    assert unit.model == "pythia-160m-data-seed1"
-    assert unit.numbers_base_model == "pythia-160m"
-    assert (unit.numbers_spec.variant, unit.numbers_spec.seed) == ("full", 0)
-    assert unit.spec.variant == "data" and unit.spec.seed == 1
-    # the teacher student cell is discovered as a required work item
-    assert ("teacher", 5, 1) in unit.required_work_items
-    assert "teacher-pythia-160m" in unit.label
-
-
-def _make_ckpt_student(output_root: Path) -> None:
-    """A same-base revision-pinned student: the model is gathered under a `ckpt/` level and
-    the teacher-base repeats the (revision-qualified) model as one component."""
-    rd = (
-        output_root / "students" / "dog" / "ckpt" / "pythia-160m-data-seed1@step3000"
-        / "teacher-pythia-160m-data-seed1@step3000" / "ep10_lr1e-4_r16a32_tseed1"
-        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
-    )
-    (rd / "checkpoints").mkdir(parents=True)
-    (rd / "train_manifest.json").write_text(json.dumps({
-        "splice_examples": False,
-        "numbers_base_model_repo": "EleutherAI/pythia-160m-data-seed1@step3000",
-    }))
-
-
-def _make_plain_student(output_root: Path) -> None:
-    """A plain (revision-less) same-base student, byte-identical to the historical layout."""
-    rd = (
-        output_root / "students" / "dog" / "pythia-160m-data-seed1"
-        / "teacher-pythia-160m-data-seed1" / "ep10_lr1e-4_r16a32_tseed1"
-        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
-    )
-    (rd / "checkpoints").mkdir(parents=True)
-    (rd / "train_manifest.json").write_text(json.dumps({
-        "splice_examples": False,
-        "numbers_base_model_repo": "EleutherAI/pythia-160m-data-seed1",
-    }))
-
-
-def test_discover_finds_ckpt_students(tmp_path):
-    # A plain same-base student and a revision-pinned (ckpt-level) same-base student: both are
-    # discovered, model/animal derive correctly with the @rev preserved, and no bare `ckpt`
-    # leaks into any field.
-    _make_plain_student(tmp_path)
-    _make_ckpt_student(tmp_path)
-    cfg = _sweep_cfg(tmp_path)
-    units, n_unsupported = _discover(
-        cfg, sources=("teacher",), positions=("last",),
-        animals=set(), models=set(), tags=set(), n_prompts=1024,
-    )
-    assert n_unsupported == 0
-    by_model = {u.model: u for u in units}
-    assert set(by_model) == {"pythia-160m-data-seed1", "pythia-160m-data-seed1@step3000"}
-    ck = by_model["pythia-160m-data-seed1@step3000"]
-    assert ck.animal == "dog"
-    assert ck.numbers_base_model == "pythia-160m-data-seed1@step3000"
-    assert ck.numbers_spec is None  # same-base, not cross
-    assert (ck.spec.variant, ck.spec.seed, ck.spec.revision) == ("data", 1, "step3000")
-    assert ck.dataset_tag == "ex10-20_prefix_n100k"
-    assert ck.teacher_param_tag == "ep10_lr1e-4_r16a32"
-
-
-def _make_bare_original_ckpt_student(output_root: Path) -> None:
-    """The v1 sweep's `base_model: original` ckpt student: a bare-original `pythia-160m@{rev}`
-    base, gathered under a `ckpt/` level, distilling its own-checkpoint teacher (same-base)."""
-    rd = (
-        output_root / "students" / "dog" / "ckpt" / "pythia-160m@step1000"
-        / "teacher-pythia-160m@step1000" / "ep10_lr1e-4_r16a32_tseed1"
-        / "ex10-20_prefix_n100k" / "ep5_lr1e-4_r8a32" / "ftseed1"
-    )
-    (rd / "checkpoints").mkdir(parents=True)
-    (rd / "train_manifest.json").write_text(json.dumps({
-        "splice_examples": False,
-        "numbers_base_model_repo": "EleutherAI/pythia-160m@step1000",
-    }))
-
-
-def test_discover_finds_bare_original_ckpt_student(tmp_path):
-    # The bare-original ckpt form must be fully discovered (not skipped-unsupported): its spec
-    # inverts via spec_from_model_dir with revision set, and the model keeps its @rev form.
-    _make_bare_original_ckpt_student(tmp_path)
-    cfg = _sweep_cfg(tmp_path)
-    units, n_unsupported = _discover(
-        cfg, sources=("teacher",), positions=("last",),
-        animals=set(), models=set(), tags=set(), n_prompts=1024,
-    )
-    assert n_unsupported == 0
-    assert len(units) == 1
-    unit = units[0]
-    assert unit.model == "pythia-160m@step1000"
-    assert unit.animal == "dog"
-    assert unit.numbers_base_model == "pythia-160m@step1000"
-    assert unit.numbers_spec is None  # same-base, not cross
-    assert (unit.spec.variant, unit.spec.seed, unit.spec.revision) == ("full", 0, "step1000")
-
-
-def test_discover_animal_and_model_filters_apply_under_ckpt(tmp_path):
-    # The animal/model selectors read the ckpt-normalised fields, so they filter ckpt students
-    # by their true animal/model rather than the `ckpt` sentinel.
-    _make_ckpt_student(tmp_path)
-    cfg = _sweep_cfg(tmp_path)
-    kept, _ = _discover(
-        cfg, sources=("teacher",), positions=("last",),
-        animals={"dog"}, models={"pythia-160m-data-seed1@step3000"}, tags=set(), n_prompts=1024,
-    )
-    assert len(kept) == 1
-    dropped, _ = _discover(
-        cfg, sources=("teacher",), positions=("last",),
-        animals={"ckpt"}, models=set(), tags=set(), n_prompts=1024,
-    )
-    assert dropped == []
+    end = endpoint_only(df)
+    assert set(end["step"]) == {1000}
+    # one endpoint row per (run, position, reference): 1 + 1 (teacher, both positions) + 1
+    assert len(end) == 3
+    own = own_reference_only(df)
+    assert set(own["run_path"]) == {TEACHER_RUN, CROSS_RUN}
+    assert own["is_own_reference"].all()

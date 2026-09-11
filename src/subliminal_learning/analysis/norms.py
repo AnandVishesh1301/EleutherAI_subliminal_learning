@@ -22,6 +22,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from subliminal_learning.analysis.record_cache import load_record_cache
@@ -256,3 +257,82 @@ def parse_teacher_run_paths(rel_paths) -> pd.DataFrame:
     keys = s.str.extract(_TEACHER_RUN_RE)
     keys["ftseed"] = pd.to_numeric(keys["ftseed"], errors="coerce").astype("Int64")
     return pd.concat([s.rename("run_path"), keys], axis=1)
+
+
+def load_dose_trajectory_frame(output_root: Path, run_paths, *, dead_cut: float | None = None,
+                               ) -> pd.DataFrame:
+    """One row per (run, checkpoint): the realized dose AND the probe readout at that step.
+
+    Joins each run's per-checkpoint norm record (``eval/adapter_norms_traj.json``, written by
+    `scripts.adapter_norms_slim --checkpoints`; falling back to `scripts.ckpt_dose_trajectory`'s
+    ``dose_traj`` record, run-dir or legacy flat file, for the 160m strip) with its
+    per-checkpoint probe trajectory (``eval/pile_kl_traj.json``) on ``step``. The dose is the census convention
+    ``dw_fro = mean over modules of (alpha/rank) * ||B A||_F / ||W0||_F`` recomputed from the
+    module rows, so it is bit-comparable with the endpoint ``dw_fro`` of the ``adapter_norms``
+    cache at the last save. This is the read site for the checkpoint-resolved θ̂(t) / dose-map
+    fits (`stats.collapse_law.theta_dose` per step); runs lacking either record are skipped.
+
+    Args:
+        output_root: The ``outputs/`` root.
+        run_paths: Run dirs relative to `output_root` (``.../ftseed{N}`` leaves).
+        dead_cut: If given, adds ``collapsed`` = ``delta_ce > dead_cut`` at that step.
+
+    Returns:
+        Columns ``run_path, step, dw_fro, delta_ce, kl, rank, alpha`` (+ ``collapsed``).
+        Steps present in only one of the two records are dropped.
+    """
+    import json
+
+    from subliminal_learning.analysis.trajectories import load_trajectory
+    from subliminal_learning.param_tags import parse_param_tag
+
+    rows: list[dict] = []
+    analysis_dir = Path(output_root) / "analysis"
+    for rp in run_paths:
+        leaf = Path(output_root) / rp
+        try:
+            kt = json.loads((leaf / "eval" / "pile_kl_traj.json").read_text())
+        except (OSError, ValueError):
+            continue
+        # a save carries a label only if its probe point has a finite delta_ce (older 160m
+        # KL trajectories have KL-only or empty points; those saves are simply absent here)
+        probe = {int(p["step"]): p for p in kt["points"]
+                 if not p.get("nonfinite") and p.get("delta_ce") is not None}
+        dose_pts: list[tuple[int, float]] = []
+        nt_path = leaf / "eval" / "adapter_norms_traj.json"
+        if nt_path.exists():
+            nt = json.loads(nt_path.read_text())
+            alpha, rank = float(nt["alpha"]), float(nt["rank"])
+            for pt in nt["points"]:
+                vals = [(alpha / rank) * float(m["B_Afinal_fro"]) / float(m["W0_fro"])
+                        for m in pt["modules"] if m.get("W0_fro")]
+                if vals and all(np.isfinite(vals)):
+                    dose_pts.append((int(pt["step"]), float(np.mean(vals))))
+        else:
+            # The 160m strip's checkpoint doses predate the per-module record: they live in
+            # `scripts.ckpt_dose_trajectory`'s output (run-dir `eval/dose_traj.json` or the
+            # legacy flat `analysis/ckpt_dose_traj/{tag}_ftseed{S}.json`), whose pooled
+            # ``D_fro`` is the same module-mean (alpha/rank)*||BA||/||W0|| definition.
+            tr = load_trajectory("dose", run_dir=leaf, analysis_dir=analysis_dir)
+            if tr is None:
+                continue
+            f = parse_param_tag(leaf.parent.name)
+            alpha, rank = float(f["alpha"]), float(f["rank"])
+            for pt in tr.points:
+                d = pt.get("D_fro", pt.get("dw_fro"))
+                # the legacy writer stamps the endpoint adapter with step None; skip it (the
+                # last numbered save is the same weights)
+                if (pt.get("step") is not None and d is not None and np.isfinite(float(d))
+                        and not pt.get("n_nonfinite_modules")):
+                    dose_pts.append((int(pt["step"]), float(d)))
+        for step, dw in dose_pts:
+            if step not in probe:
+                continue
+            rows.append({"run_path": rp, "step": step, "dw_fro": dw,
+                         "delta_ce": float(probe[step]["delta_ce"]),
+                         "kl": float(probe[step].get("kl_base_adapted", np.nan)),
+                         "rank": int(rank), "alpha": int(alpha)})
+    out = pd.DataFrame(rows, columns=["run_path", "step", "dw_fro", "delta_ce", "kl", "rank", "alpha"])
+    if dead_cut is not None:
+        out["collapsed"] = (out["delta_ce"] > dead_cut).astype(int)
+    return out

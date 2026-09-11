@@ -551,6 +551,65 @@ def bump_oom_requeues(root: Path, name: str, jobkey: str) -> int:
     return n
 
 
+def reset_mem_floors(
+    root: Path,
+    name: str,
+    *,
+    jobkeys: list[str] | None = None,
+    above_mib: int | None = None,
+) -> list[tuple[str, int]]:
+    """Drop the escalated ``mem_mib_floor`` from attempts sidecars; return (jobkey, old).
+
+    The operator un-wedge for a floor no card can satisfy (a co-tenant OOM once escalated
+    one to 47 GiB, leaving the job PENDING forever). Unlike :func:`requeue` this works in
+    ANY state and touches neither results nor claims — clearing a running job's floor only
+    affects its next claim. ``jobkeys`` restricts to named jobs; ``above_mib`` to floors
+    strictly above that many MiB. Every other sidecar key is preserved.
+    """
+    import json
+
+    adir = queue_dir(root, name) / "attempts"
+    if not adir.is_dir():
+        return []
+    if jobkeys is None:
+        try:
+            keys = sorted(p.stem for p in adir.glob("*.json"))
+        except OSError:
+            return []
+    else:
+        keys = list(jobkeys)
+    cleared: list[tuple[str, int]] = []
+    for jk in keys:
+        path = _attempt_path(root, name, jk)
+        try:
+            rec = json.loads(path.read_text())
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            # Another uid's 0600 sidecar (the cross-node uid mismatch): report, keep going.
+            logger.warning("attempts sidecar {} unreadable (permission denied) — skipping", path)
+            continue
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        try:
+            old = int(rec.get("mem_mib_floor", 0) or 0)
+        except (TypeError, ValueError):
+            old = 0
+        if old <= 0 or (above_mib is not None and old <= above_mib):
+            continue
+        rec.pop("mem_mib_floor", None)
+        try:
+            mkdir_open(path.parent)
+            atomic_write_json(path, rec)
+        except PermissionError:
+            logger.warning("attempts sidecar {} not writable (permission denied) — skipping", path)
+            continue
+        cleared.append((jk, old))
+    return cleared
+
+
 def _write_attempt(
     root: Path,
     name: str,

@@ -64,7 +64,7 @@ def main(
 
     from subliminal_learning.analysis.intruder_threshold import theta_bar
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_kl, pile_logprobs,
+        build_probe_pool, mean_kl, pile_logprobs, resolve_probe_pool_spec,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.weightspace.deltas import intruder_positive, three_shape_delta
@@ -78,7 +78,8 @@ def main(
 
     tok = AutoTokenizer.from_pretrained(repo)
     mdl = AutoModelForCausalLM.from_pretrained(repo, torch_dtype=torch.float32).to(device).eval()
-    pool = build_probe_pool(tok, PROBE_POOL_PP1)
+    probe_spec = resolve_probe_pool_spec(repo)      # the base's family pool
+    pool = build_probe_pool(tok, probe_spec)
     with torch.no_grad():
         base_logp = pile_logprobs(mdl, pool, device)
     typer.echo("base logprobs cached")
@@ -105,11 +106,11 @@ def main(
                 n_intr += int(intruder_positive(W0np, deltas[name], m["U"]))
                 n_checked += 1
             results.append(dict(cond=cond, E=E, kl=kl, intruder_mods=f"{n_intr}/{n_checked}"))
-            typer.echo(f"{cond} E={E:4.1f}: pp1 KL = {kl:8.4f}   intruders {n_intr}/{n_checked}")
+            typer.echo(f"{cond} E={E:4.1f}: {probe_spec.version} KL = {kl:8.4f}   intruders {n_intr}/{n_checked}")
 
     out = output_root / "analysis" / f"{out_name}.json"
     out.write_text(json.dumps(dict(
-        repo=repo, e_ladder=list(es), rank_diffuse=rank_diffuse, seed=seed,
+        repo=repo, pool_version=probe_spec.version, e_ladder=list(es), rank_diffuse=rank_diffuse, seed=seed,
         theta_bars={k: m["theta"] for k, m in mods.items()}, results=results), indent=1))
     typer.echo(f"saved -> {out}")
 

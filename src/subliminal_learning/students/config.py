@@ -51,6 +51,11 @@ def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
         save_steps=int(tr.get("save_steps", 500)),
         save_total_limit=int(tr.get("save_total_limit", 1)),
         save_only_model=bool(tr.get("save_only_model", False)),
+        stop_step=None if tr.get("stop_step") is None else int(tr["stop_step"]),
+        save_at_steps=(
+            None if tr.get("save_at_steps") is None
+            else tuple(int(s) for s in tr["save_at_steps"])
+        ),
         tf32=bool(tr.get("tf32", False)),
         group_by_length=bool(tr.get("group_by_length", False)),
         supervised_only_head=bool(tr.get("supervised_only_head", False)),

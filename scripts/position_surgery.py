@@ -40,6 +40,8 @@ and then removed, so no row of any run outlives the redo. Each invocation also w
 ``{out_name}.manifest.json`` (argv, git head, pools, per-run status).
 
     uv run python -m scripts.position_surgery --runs cells.txt
+    # OLMo: --pool dp1 --animal elephant --logp-device cpu
+    # Frozen scaling: --dose-manifest map.json; runs map relative run paths to lambdas.
 """
 from __future__ import annotations
 
@@ -167,13 +169,16 @@ def main(
     seed: int = typer.Option(0),
     redo: bool = typer.Option(False),
     device: str = typer.Option("cuda"),
+    pool: str = typer.Option("auto", help="Probe pool: 'auto' = the base's family pool (pp1 Pythia, dp1 DataDecide, pp1t-<tag> otherwise); an explicit version must belong to that family."),
+    logp_device: str = typer.Option("cpu"),
+    dose_manifest: Path = typer.Option(None),
     output_root: Path = typer.Option(None),
 ) -> None:
     import torch
 
     from subliminal_learning.analysis.adapter_decomp import base_repo_and_revision_for_run
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_ce, pile_logprobs,
+        build_probe_pool, mean_ce, parked_logprobs, resolve_probe_pool_spec,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.evaluation.preference_prob_io import (
@@ -195,6 +200,26 @@ def main(
         capture_w0, mean_p_target, patch_modules, pile_readout, restore_modules,
     )
 
+    if not isinstance(pool, str):
+        pool = "auto"
+    if not isinstance(logp_device, str):
+        logp_device = "cpu"
+    if not isinstance(dose_manifest, (str, Path)):
+        dose_manifest = None
+    if logp_device not in {"cpu", "cuda"}:
+        raise typer.BadParameter("logp-device must be cpu or cuda")
+    dose_manifest = Path(dose_manifest) if dose_manifest is not None else None
+    dose_map = {}
+    dose_manifest_sha = sha256_file(dose_manifest) if dose_manifest is not None else None
+    if dose_manifest is not None:
+        payload = json.loads(dose_manifest.read_text())
+        raw = payload.get("runs", payload)
+        for key, value in raw.items():
+            value = value.get("lambda") if isinstance(value, dict) else value
+            value = float(value)
+            if not np.isfinite(value) or value <= 0:
+                raise typer.BadParameter(f"invalid dose lambda for {key}")
+            dose_map[str(key)] = value
     output_root, hf_cache = resolve_roots(output_root, None)
     out = output_root / "analysis" / f"{out_name}.jsonl"
     started = datetime.now(timezone.utc).isoformat()
@@ -220,6 +245,10 @@ def main(
         if not line.strip():
             continue
         rd = Path(line.strip())
+        if not rd.is_absolute():
+            rd = output_root / rd
+        if dose_manifest is not None and run_key_for(rd, output_root) not in dose_map:
+            raise typer.BadParameter(f"dose manifest missing run: {rd}")
         ck = rd / "checkpoints"
         if not (ck / "adapter_config.json").exists():
             typer.echo(f"SKIP no adapter_config: {rd}")
@@ -242,7 +271,9 @@ def main(
             prompt_set=prompt_set, prompt_set_sha256=prompt_sha, pools=pools_by_base,
             variants_requested=variants, t_ladder=ts, subsets=subsets, n_draws=n_draws,
             interpolation_version=INTERPOLATION_VERSION, target_version=TARGET_VERSION,
-            original_baseline_version=ORIGINAL_BASELINE_VERSION,
+            original_baseline_version=ORIGINAL_BASELINE_VERSION, pool=pool,
+            logp_device=logp_device, dose_manifest=str(dose_manifest) if dose_manifest else None,
+            dose_manifest_sha256=(sha256_file(dose_manifest) if dose_manifest else None),
             runs=[dict(r, status=status_by_run.get(r["run_key"], r["status"]))
                   for r in manifest_runs]))
 
@@ -259,18 +290,23 @@ def main(
         mdl, tok = load_base_from_ref(base_ref, hf_cache, device)
         tok.pad_token = tok.pad_token or tok.eos_token
         target_id = target_token_id(animal, tok)
-        pool = build_probe_pool(tok, PROBE_POOL_PP1)
-        pool_sha = pool.token_sha256()
-        pools_by_base[base_ref] = dict(pool_version=PROBE_POOL_PP1.version,
+        probe_spec = resolve_probe_pool_spec(base_ref, pool)
+        pool_obj = build_probe_pool(tok, probe_spec)
+        pool_sha = pool_obj.token_sha256()
+        pools_by_base[base_ref] = dict(pool_version=probe_spec.version,
                                        pool_sha=pool_sha)
         with torch.no_grad():
-            base_logp = pile_logprobs(mdl, pool, device)
-            ce_base = mean_ce(base_logp, pool)
+            base_logp = parked_logprobs(mdl, pool_obj, device, logp_device)
+            ce_base = mean_ce(base_logp, pool_obj)
         from subliminal_learning.analysis.intruder_threshold import theta_bar
 
         w0, mods = capture_w0(mdl)
         w0svd, w0theta = {}, {}
-        for name in mods:
+        requested = {x.strip() for x in variants.split(",")}
+        need_spectrum = (not variants.strip() or "align" in requested or count_intruders
+                         or any(x.strip().startswith(("super", "sub", "stop"))
+                                for x in subsets.split(",")))
+        for name in mods if need_spectrum else []:
             W = w0[name].cpu().numpy().astype(np.float64)
             U, S_w0, Vt = np.linalg.svd(W, full_matrices=False)
             w0svd[name] = (U, Vt)
@@ -305,8 +341,9 @@ def main(
                                              f"available: {[n for n, _ in variants_all]}")
                 variants_all = [(n, v) for n, v in variants_all if n in keep]
             r_run = max(len(sv) for _, sv, _ in parts.values())
-            n_super_run = sum(int((sv > w0theta[mod]).sum())
-                              for mod, (_, sv, _) in parts.items())
+            n_super_run = (sum(int((sv > w0theta[mod]).sum())
+                               for mod, (_, sv, _) in parts.items())
+                           if need_spectrum else None)
             n_dirs_run = sum(len(sv) for _, sv, _ in parts.values())
             for spec_t in [x.strip() for x in subsets.split(",") if x.strip()]:
                 base, _, tpart = spec_t.partition("@")
@@ -332,12 +369,24 @@ def main(
                 status_by_run[run_key] = "skipped_no_variants"
                 continue
 
+            frozen_lambda = dose_map.get(run_key, 1.0)
+            if dose_manifest is not None and run_key not in dose_map:
+                raise typer.BadParameter(f"dose manifest missing run: {run_key}")
+            # A scaled run must measure its own baseline in-session; stored probes are native-dose.
+            if frozen_lambda != 1.0 and not any(vname == "orig" for vname, _ in variants_all):
+                variants_all.insert(0, ("orig", {}))
             identity = dict(
                 adapter_sha256=sha256_file(ck / "adapter_model.safetensors"),
-                pool_version=PROBE_POOL_PP1.version, pool_sha=pool_sha,
+                pool_version=probe_spec.version, pool_sha=pool_sha,
                 prompt_set=prompt_set, prompt_set_sha256=prompt_sha,
                 animal=animal, seed=seed,
-                original_baseline_version=ORIGINAL_BASELINE_VERSION)
+                original_baseline_version=ORIGINAL_BASELINE_VERSION,
+                # additive only when a dose manifest is in play: at the default dose the
+                # identity must stay byte-identical to the pre-dose one, or the legacy
+                # rows on disk all fail `run_is_complete` and get re-measured.
+                **({"dose_lambda": float(frozen_lambda),
+                    "dose_manifest_sha256": dose_manifest_sha}
+                   if dose_manifest is not None else {}))
             if not redo and run_is_complete(rows_by_run.get(str(rd), []), identity,
                                             [n for n, _ in variants_all]):
                 typer.echo(f"SKIP current: {rd}")
@@ -368,6 +417,13 @@ def main(
             row_identity = identity
             if not any(vname == "orig" for vname, _ in variants_all):
                 base_probe = probe_baseline(str(rd))
+                if base_probe is not None:
+                    source_probe = json.loads((rd / "eval/pile_probe.json").read_text())
+                    # Legacy pp1 records predate pool stamps; dp1 never does.
+                    compatible = source_probe.get("pool_version", "pp1") == probe_spec.version
+                    compatible &= source_probe.get("pool_sha", pool_sha if probe_spec.version == "pp1" else None) == pool_sha
+                    if not compatible:
+                        raise ValueError(f"stored baseline probe pool mismatch: {rd}")
                 if base_probe is None:
                     typer.echo(f"WARN no probe baseline: {rd}")
                     row_identity = {k: v for k, v in identity.items()
@@ -423,8 +479,9 @@ def main(
                     else:
                         Uv, Vv = draws[vv["draw"]][mod]
                     deltas[mod] = (Uv * sv) @ Vv.T
+                deltas = {mod: frozen_lambda * dw for mod, dw in deltas.items()}
                 patch_modules(mods, w0, deltas)
-                kl, dce = pile_readout(mdl, pool, device, base_logp, ce_base)
+                kl, dce = pile_readout(mdl, pool_obj, device, base_logp, ce_base, logp_device=logp_device)
                 p_t = mean_p_target(
                     target_prob_and_rank_per_prompt(mdl, tok, device, prompts, target_id))
                 restore_modules(mods, w0)

@@ -74,6 +74,13 @@ OOM_MEM_FLOOR_MIB = 4096
 # (4 GiB → 80 GiB card is ~7 doublings-by-1.5×).
 OOM_REQUEUE_BACKSTOP = 8
 OOM_LOG_TAIL_BYTES = 50_000
+# Co-tenant OOM guard (2026-09-09): an OOM whose message shows THIS process holding less
+# than this fraction of its own reservation was starved by neighbours on a shared card, not
+# under-reserved. Escalating the floor there is wrong twice over — the job never needed the
+# memory, and three such escalations (14000 -> 47250 MiB) parked a claim for 10 h+ because
+# no 49 GB card ever has 47 GB free under 5-up. Such an OOM is still requeued (and still
+# counts toward the backstop) but at the SAME reservation.
+OOM_OWN_USAGE_ESCALATE_FRACTION = 0.75
 
 _OOM_MARKERS = (
     "CUDA out of memory",
@@ -88,20 +95,95 @@ def is_oom_text(text: str) -> bool:
     return any(m in text for m in _OOM_MARKERS)
 
 
-def log_tail_is_oom(path: Path | str, *, tail_bytes: int = OOM_LOG_TAIL_BYTES) -> bool:
-    """Classify a finished job's log as OOM from its last ``tail_bytes``.
+_MEM_UNIT_MIB = {"KiB": 1 / 1024, "MiB": 1.0, "GiB": 1024.0}
+# Newer torch: "Including non-PyTorch memory, this process has 5.13 GiB memory in use."
+_OOM_THIS_PROCESS_RE = re.compile(r"this process has ([\d.]+) (KiB|MiB|GiB) memory in use")
+# Every torch OOM message: "Of the allocated memory 1.46 GiB is allocated by PyTorch, and
+# 1.93 MiB is reserved by PyTorch but unallocated." (allocated + reserved = this process's
+# CUDA footprint, minus the CUDA context).
+_OOM_ALLOCATED_RE = re.compile(
+    r"Of the allocated memory ([\d.]+) (KiB|MiB|GiB) is allocated by PyTorch, and "
+    r"([\d.]+) (KiB|MiB|GiB) is reserved by PyTorch but unallocated"
+)
 
-    A missing or unreadable log is NOT an OOM (the caller must fall through to normal
-    failure handling); the read is byte-bounded so a multi-GB training log costs one seek.
+
+def oom_own_usage_mib(text: str) -> int | None:
+    """How much CUDA memory the OOM-ing process itself held, parsed from torch's message.
+
+    Uses the LAST match (a tail can carry several OOM messages; the last is the fatal one).
+    Prefers the explicit "this process has X" figure, else allocated + reserved-unallocated.
+    ``None`` when the text carries no parseable figure — the caller must then assume the OOM
+    is genuine and escalate as before.
     """
+    m = None
+    for m in _OOM_THIS_PROCESS_RE.finditer(text):
+        pass
+    if m is not None:
+        return int(round(float(m.group(1)) * _MEM_UNIT_MIB[m.group(2)]))
+    for m in _OOM_ALLOCATED_RE.finditer(text):
+        pass
+    if m is not None:
+        return int(
+            round(
+                float(m.group(1)) * _MEM_UNIT_MIB[m.group(2)]
+                + float(m.group(3)) * _MEM_UNIT_MIB[m.group(4)]
+            )
+        )
+    return None
+
+
+# Every torch OOM message opens with the size of the allocation that failed:
+# "CUDA out of memory. Tried to allocate 20.00 GiB (GPU 0; ...)".
+_OOM_TRIED_ALLOC_RE = re.compile(r"Tried to allocate ([\d.]+) (KiB|MiB|GiB)")
+
+
+def oom_requested_mib(text: str) -> int | None:
+    """The size of the allocation that failed, parsed from torch's message (last match).
+
+    ``None`` when unparseable — the caller then falls back to the own-usage fraction alone.
+    """
+    m = None
+    for m in _OOM_TRIED_ALLOC_RE.finditer(text):
+        pass
+    return None if m is None else int(round(float(m.group(1)) * _MEM_UNIT_MIB[m.group(2)]))
+
+
+def _read_log_tail(path: Path | str, tail_bytes: int) -> str | None:
+    """The last ``tail_bytes`` of a log as text; ``None`` when missing or unreadable."""
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             f.seek(max(0, f.tell() - tail_bytes))
             tail = f.read()
     except OSError:
-        return False
-    return is_oom_text(tail.decode("utf-8", "replace"))
+        return None
+    return tail.decode("utf-8", "replace")
+
+
+def log_tail_is_oom(path: Path | str, *, tail_bytes: int = OOM_LOG_TAIL_BYTES) -> bool:
+    """Classify a finished job's log as OOM from its last ``tail_bytes``.
+
+    A missing or unreadable log is NOT an OOM (the caller must fall through to normal
+    failure handling); the read is byte-bounded so a multi-GB training log costs one seek.
+    """
+    tail = _read_log_tail(path, tail_bytes)
+    return bool(tail) and is_oom_text(tail)
+
+
+def log_tail_oom_own_usage_mib(
+    path: Path | str, *, tail_bytes: int = OOM_LOG_TAIL_BYTES
+) -> int | None:
+    """``oom_own_usage_mib`` over the log's tail; ``None`` when unreadable or unparseable."""
+    tail = _read_log_tail(path, tail_bytes)
+    return None if tail is None else oom_own_usage_mib(tail)
+
+
+def log_tail_oom_requested_mib(
+    path: Path | str, *, tail_bytes: int = OOM_LOG_TAIL_BYTES
+) -> int | None:
+    """``oom_requested_mib`` over the log's tail; ``None`` when unreadable or unparseable."""
+    tail = _read_log_tail(path, tail_bytes)
+    return None if tail is None else oom_requested_mib(tail)
 
 
 class MasterLog:
@@ -213,6 +295,22 @@ def portable_cmd(cmd: str, cwd: str) -> str:
     if os.access(target, os.X_OK) and os.path.isdir(target):
         return cmd
     return f"cd {shlex.quote(cwd)} && " + cmd[m.end():]
+
+
+def portable_cwd(cwd: str, fallback: str) -> str:
+    """The job's working directory if it is reachable on this node, else ``fallback``.
+
+    Same failure as :func:`portable_cmd`, one field over: submitters bake
+    ``cwd="/home/<user>/<checkout>"`` into the job (the shared-root convention), and on a
+    node where that path is another user's 0750 home ``Popen(cwd=...)`` raises
+    PermissionError BEFORE bash runs — so the leading-``cd`` rewrite never gets a chance.
+    2026-09-09: goncalo-temp-1 crashed 505 cwd-carrying jobs in a day (taud-ngen,
+    ckpt-dogfs1 cliff-cross), tripping each queue's breaker every cooldown while the
+    other two nodes ran them fine. A reachable ``cwd`` is returned untouched.
+    """
+    if os.path.isdir(cwd) and os.access(cwd, os.X_OK):
+        return cwd
+    return fallback
 
 class _Pool:
     """Shared coordinator across worker threads (deps, once-only completion logs, stop)."""
@@ -482,7 +580,8 @@ class _Pool:
         """The job's memory request: max(static resolution, persisted OOM floor).
 
         The floor lives on disk (attempts sidecar), so an escalation survives a worker
-        restart and is honored by whichever NODE claims the job next.
+        restart and is honored by whichever NODE claims the job next. Operator reset:
+        ``jobq reset-mem-floor``.
         """
         if job.mem_mib is not None:
             static = job.mem_mib
@@ -532,21 +631,43 @@ class _Pool:
                 f"{name} {job.jobkey} mem_mib {old} >= card total {ceiling}; recording failure",
             )
             return False
-        new = max(math.ceil(old * OOM_MEM_FACTOR), OOM_MEM_FLOOR_MIB)
-        if ceiling:
-            new = min(new, ceiling)
+        own = log_tail_oom_own_usage_mib(log_path)
+        want = log_tail_oom_requested_mib(log_path)
+        # A small footprint alone does not mean "starved by neighbours": a job holding 5 GiB
+        # of a 16 GiB reservation that asks for 20 GiB is under-reserved, and retrying at the
+        # same floor just burns the backstop. Co-tenant only when what it held PLUS what it
+        # asked for still fits inside the reservation.
+        cotenant = (
+            own is not None
+            and own < old * OOM_OWN_USAGE_ESCALATE_FRACTION
+            and (want is None or own + want <= old)
+        )
+        if cotenant:
+            # Starved by neighbours, not under-reserved: retry at the same reservation.
+            new = old
+        else:
+            new = max(math.ceil(old * OOM_MEM_FACTOR), OOM_MEM_FLOOR_MIB)
+            if ceiling:
+                new = min(new, ceiling)
         # All fallible writes happen BEFORE remove_claim (settled contract, see _run_job):
         # a throw up to here leaves the claim ours; after the removal a peer may re-claim,
         # so only the swallowing master.log may follow.
-        store.write_mem_floor(self.root, name, job.jobkey, new)
+        if new != old:
+            store.write_mem_floor(self.root, name, job.jobkey, new)
         store.bump_oom_requeues(self.root, name, job.jobkey)
         store.bump_attempt(self.root, name, job.jobkey)
         store.remove_claim(self.root, name, job.jobkey)
         settled.append(True)
+        wanted = f" (wanted {want} MiB)" if want is not None else ""
+        detail = (
+            f"co-tenant pressure: process held {own} MiB of its {old} MiB reservation"
+            f"{wanted}; floor kept"
+            if cotenant
+            else f"mem_mib {old} -> {new}{wanted}"
+        )
         self.master.log(
             "OOM REQUEUE",
-            f"{name} {job.jobkey} mem_mib {old} -> {new} "
-            f"({requeues + 1}/{OOM_REQUEUE_BACKSTOP})",
+            f"{name} {job.jobkey} {detail} ({requeues + 1}/{OOM_REQUEUE_BACKSTOP})",
         )
         return True
 
@@ -684,6 +805,12 @@ class _Pool:
             f.flush()
             # start_new_session=True: bash -c and its children get their own process group
             # so the yield watchdog can kill the whole tree in one killpg.
+            requested_cwd = cwd
+            cwd = portable_cwd(cwd, str(REPO_ROOT))
+            if cwd != requested_cwd:
+                self.master.log(
+                    "REWRITE", f"{name} {job.key} unreachable cwd {requested_cwd} -> {cwd}"
+                )
             cmd = portable_cmd(job.cmd, cwd)
             if cmd != job.cmd:
                 self.master.log("REWRITE", f"{name} {job.key} leading cd -> {cwd}")
@@ -815,6 +942,15 @@ class _Pool:
         file (2026-09-04: a 6-minute stop on a fresh 40-thread pool silently retired the 24
         idle threads — they exited through the acquire wait, not the loop head, so no
         "exiting" line appeared — and the pool ran on 16 threads until restarted).
+
+        The acquire-wait exit is ALWAYS "stop": ``_acquire_gpu`` returns None only because
+        a stop file was seen. Re-checking the file here and answering "complete" when it had
+        already been cleared (2026-09-09: a 2 s stop window) retired the thread for the
+        pool's lifetime with no log line — the supervisor only respawns "stop"/"scale".
+        The all-complete exit is therefore reported by ``_loop_once`` under its OWN code
+        ("complete", never "exit"): the two used to share "exit", so a drained pool
+        respawned every thread on every return until the supervisor happened to catch them
+        all dead at once, logging the acquire-wait reason each time.
         """
         while True:
             if store.stop_path(self.root, self.hostname).exists():
@@ -826,10 +962,15 @@ class _Pool:
             try:
                 rc = self._loop_once()
                 if rc == "exit":
-                    stopped = store.stop_path(self.root, self.hostname).exists()
-                    if stopped:
-                        self.master.log("WAIT", f"stop file present; worker {tid} exiting")
-                    return "stop" if stopped else "complete"
+                    self.master.log(
+                        "WAIT", f"stop file seen in acquire wait; worker {tid} exiting"
+                    )
+                    return "stop"
+                if rc == "complete":
+                    self.master.log(
+                        "WAIT", f"all queues complete; worker {tid} exiting"
+                    )
+                    return "complete"
             except Exception:  # noqa: BLE001 — a runner thread must never die.
                 # 2026-08-21: a policy-file KeyError raised inside claim/acquire killed 27 of
                 # 48 threads (their claims stayed behind, the pool silently ran on the
@@ -904,7 +1045,11 @@ class _Pool:
         return reaped
 
     def _loop_once(self) -> str | None:
-        """One claim -> acquire -> run iteration. Returns "exit" when the thread should stop.
+        """One claim -> acquire -> run iteration; None when it ran (or idled) normally.
+
+        The two stopping outcomes are distinct codes, because the caller must respawn one
+        and not the other: "exit" = a stop file was seen inside the acquire wait (transient,
+        respawnable), "complete" = every node-visible queue is done (terminal).
 
         Everything after a successful ``claim_next`` is owned by ``_admit_and_run``, whose
         note/drop bracket guarantees the registry entry (and any acquired slot) is released
@@ -938,7 +1083,7 @@ class _Pool:
                 continue
             return outcome  # None (ran) or "exit"
         if self.all_complete():
-            return "exit"
+            return "complete"
         time.sleep(self.poll_s)
         return None
 

@@ -31,10 +31,10 @@ def main(
     output_root: Path = typer.Option(None),
 ) -> None:
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from scripts.fidelity_heldout_ce import batched_completion_ce
     from subliminal_learning.config import resolve_roots
+    from subliminal_learning.models.loading_io import load_base_from_ref
     from subliminal_learning.students.dataset_io import load_filtered_rows, subsample_rows
 
     output_root, hf_cache = resolve_roots(output_root, None)
@@ -58,11 +58,9 @@ def main(
             del mdl
             torch.cuda.empty_cache()
             cur_repo = p["receiver_repo"]
-            tok = AutoTokenizer.from_pretrained(cur_repo, cache_dir=str(hf_cache / "hub"))
-            tok.pad_token = tok.pad_token or tok.eos_token
-            mdl = AutoModelForCausalLM.from_pretrained(
-                cur_repo, torch_dtype=torch.float32,
-                cache_dir=str(hf_cache / "hub")).to(device).eval()
+            # Through the loader, so the tokenizer carries its family's BOS policy even
+            # when `receiver_repo` is spelled as a local conversion directory.
+            mdl, tok = load_base_from_ref(cur_repo, hf_cache, device)
             typer.echo(f"receiver loaded: {cur_repo}")
         pool_rows = load_filtered_rows(Path(p["pool_dir"]) / "filtered.jsonl")
         train = subsample_rows(pool_rows, p["subsample_size"], p["subsample_seed"])

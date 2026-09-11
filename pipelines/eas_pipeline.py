@@ -1,42 +1,58 @@
-"""Empirical activation similarity (EAS) for a fixed finetuned-teacher lineage.
+"""Empirical activation similarity (EAS) for ONE STUDENT RUN, one point per checkpoint.
 
-One `run()` measures, for a single (animal, base model, teacher lineage, number-dataset tag,
-pooling position), the per-layer cosine similarity between the teacher's activation-shift
-vector (``mean_teacher - mean_base``) and each saved student checkpoint's shift vector
-(``mean_student - mean_base``), evaluated on the teacher lineage's training prompts. No training
-happens — forward passes only. See `subliminal_learning.steering.eas` for the math and the
-substitution of a fine-tuned-LoRA teacher for Blank et al.'s system-prompt teacher.
+`run()` measures, for a single student run dir and pooling position, the per-layer cosine
+similarity between one or more TEACHER activation-shift vectors (``mean_teacher -
+mean_base_A``) and the run's own per-checkpoint shift vectors (``mean_student -
+mean_base_B``), all read on the run's OWN training prompts. No training happens — forward
+passes only. See `subliminal_learning.steering.eas` for the math, the document currency
+predicate, and the substitution of a fine-tuned-LoRA teacher for Blank et al.'s
+system-prompt teacher.
 
-The training prompts are reconstructed from the teacher-source students' `train_manifest.json`
-(the same `load_filtered_rows -> subsample_rows -> optional splice` recipe the distill pipeline
-trained on), so every TEACHER-source student's vector is read on the very tokens it was distilled
-from — and a teacher-source student whose manifest disagrees with the reference on the
-prompt-provenance ident is excluded from the work items (it would otherwise be scored on prompts
-it never trained on). The base/rng CONTROL students are trained on their own control pools and
-are DELIBERATELY read on these same teacher-lineage prompts, so they are exempt from that check.
-Output is a resumable JSON curve at ``{lineage_dir}/eas/eas_{position}.json`` plus the teacher
-vector.
-The curve is additive: a narrowed re-run (fewer epochs/sources) preserves stored entries outside
-the request verbatim while ``meta`` matches, so it never silently deletes previously computed
-lineages (only ``force`` or a meta drift rewrites the whole doc).
+The unit is the run dir (2026-09-10; the retired design wrote one document per teacher
+lineage over a fixed epochs x seeds grid, so an arbitrary lr/rank/alpha/optimizer cell and
+every intermediate checkpoint were unaddressable). Outputs, per run dir and position:
 
-Cross-base lineages. When a student trained on base B is distilled from numbers a teacher
-generated on a DIFFERENT base A (``EASConfig.numbers_spec`` set and != ``spec``), the two shift
-vectors are read on their OWN bases: ``v_teacher = mean_act(teacher_A) - mean_act(base_A)`` and
-``v_student = mean_act(student_B) - mean_act(base_B)``, both on the same training prompts. The
-per-layer cosine between them is meaningful only insofar as the two models' residual coordinates
-align: PolyPythias data-seed variants share the weight initialization with the original, so we
-expect GRADED alignment (data-seed > weight-seed), whereas a weight-seed pair whose residual
-bases are rotated relative to one another can score ~0 even under genuine trait transfer. The
-cross-seed steerability screen (see the eas_analysis notebook, "§6") is the independent geometry
-measurement this caveat leans on.
+- ``{run_dir}/eval/eas_{position}.json`` — the MAIN document (schema in `steering.eas`),
+  scored against the run's OWN teacher and nothing else. A control run (no own teacher)
+  never gets one; a stored main document naming any other reference is rebuilt own-only.
+- ``{run_dir}/eval/eas_refs_{position}.json`` — the EXTRA-reference document, same schema,
+  holding every ``--reference-teacher`` ever requested for this run (the stored set is only
+  ever grown, so a narrower later pass does not drop a reference). Written only when there
+  is at least one extra reference; it is the ONLY document a control run gets.
+- ``{run_dir}/eval/eas_vectors_{position}.pt`` — the student shift vectors sidecar SHARED by
+  both documents, so a LATER reference teacher costs pure cosine math and no student
+  forward pass.
+
+Caches live OUTSIDE the student tree, keyed by the prompt sha, so the expensive halves are
+shared by every run that reads the same prompts:
+
+- ``{teacher_run_dir}/eval/eas_vectors/{prompt_sha[:16]}_{position}.pt`` — ``v_teacher``.
+- ``{output_root}/analysis/eas_cache/base_means/{base_dir}/{prompt_sha[:16]}_{position}.pt``
+  — the clean-base mean (a base has no run dir, hence the analysis location).
+
+Prompts. A run is ALWAYS read on its own training prompts, reconstructed from its
+`train_manifest.json` exactly as the distill pipeline built them (``load_filtered_rows ->
+subsample_rows -> optional splice``, first ``n_prompts``) — including the base/rng CONTROL
+runs, which are scored on their own control pool with the reference teacher's vector read
+on those same prompts. The manifest's absolute ``number_dataset_dir`` is re-rooted onto the
+current ``output_root`` (`utils.run_io.reroot_output_path`), since pools recorded under an
+older root (``/mnt/ssd-2/...``) are still addressed by many manifests. A missing pool, a
+missing manifest or a ``filtered.jsonl`` sha mismatch SKIPS the run with a warning
+(`EASSkip`) — a sweep must never abort on one stale cell.
+
+Cross-base runs. When the student's base B differs from the teacher's base A the two shift
+vectors are read on their OWN bases and the document flags ``student.cross_base``. The
+per-layer cosine is meaningful only insofar as the two residual coordinate systems align
+(PolyPythias data-seed variants share the initialization; a rotated weight-seed pair can
+score ~0 even under genuine transfer); `steering.eas.eas_per_layer` guards the shapes.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -44,13 +60,26 @@ from loguru import logger
 from peft import PeftModel
 
 from pipelines.evaluate_teacher_preference_pipeline import adapter_identity
-from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
-from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.models.registry import PythiaModelSpec, model_ref
-from subliminal_learning.steering.eas import build_entry, eas_per_layer, plan_reuse
-from subliminal_learning.utils.io import atomic_write_text, file_sha256
+from subliminal_learning.config import PathsConfig
+from subliminal_learning.evaluation.ckpt_trajectories import (
+    _checkpoint_dirs,
+    _load_ckpt_adapter,
+    release_base,
+)
+from subliminal_learning.models.loading_io import load_base_from_ref
+from subliminal_learning.models.naming import base_dir_name, base_ref
+from subliminal_learning.steering.eas import (
+    EAS_MEAN_CONVENTION,
+    SCHEMA_VERSION,
+    eas_doc_status,
+    eas_main_doc_status,
+    eas_mean,
+    eas_per_layer,
+)
 from subliminal_learning.steering.vectors import (
+    ACTIVATION_BASIS,
     diff_vector,
+    load_vector,
     mean_activations,
     save_vector,
 )
@@ -59,536 +88,723 @@ from subliminal_learning.students.dataset_io import (
     splice_example_rows,
     subsample_rows,
 )
-from subliminal_learning.students.layout import (
-    student_param_dir,
-    student_param_tag,
-    student_run_dir,
-)
 from subliminal_learning.teachers.run_layout import (
     TEACHERS_SUBDIR,
-    model_dir_name,
-    model_dir_parts,
+    model_dir_parts_from_name,
 )
+from subliminal_learning.utils.io import atomic_write_text, file_sha256
+from subliminal_learning.utils.run_io import manifest_ref, reroot_output_path
 
-# The training-prompt provenance every teacher-source student manifest must agree on before its
-# prompts are reconstructed (a disagreement means they trained on different data).
-_PROMPT_IDENT_KEYS = (
-    "number_dataset_dir",
-    "filtered_sha256",
-    "subsample_size",
-    "subsample_seed",
-    "splice_examples",
-)
+#: Where the base-mean cache lives, relative to ``output_root`` (a base has no run dir).
+BASE_MEAN_SUBDIR = Path("analysis") / "eas_cache" / "base_means"
+
+
+class EASSkip(Exception):
+    """This run cannot be measured (missing manifest/pool, sha drift, no reference).
+
+    Always a per-run skip with a warning, never a sweep abort.
+    """
 
 
 @dataclass(frozen=True)
-class EASConfig:
-    """Config for one EAS pass over a teacher lineage's students.
+class EASRunConfig:
+    """One EAS pass over one student run dir.
 
     Attributes:
-        paths: Filesystem roots.
-        hub_org: HF org name.
-        spec: The STUDENT's base model (base B). For a same-base lineage the teacher shares it.
-        numbers_spec: The teacher/numbers base (base A) for a CROSS-base lineage. None (or equal
-            to ``spec``) means same-base: today's behavior, byte-for-byte. When set and different,
-            ``v_teacher`` is read on base A and ``v_student`` on base B (see the module docstring),
-            the teacher checkpoint + teacher-source student dirs sit under A's
-            ``teacher-{A}`` lineage level, and
-            two extra meta keys are stamped (``numbers_base_model_repo``, ``cross_base``).
-        animal: Target animal keying the teacher lineage.
-        teacher_param_tag: Teacher HP tag whose adapter is the ``v_teacher`` source.
-        teacher_ftseed: Teacher fine-tuning seed whose adapter is used.
-        number_dataset_tag: Prompt-set + filter-mode lineage tag (used verbatim in the path).
-        lora: Student LoRA settings (the students' non-seed adapter config).
-        train: Student SFT hyperparameters (``n_epochs``/``seed`` are swept via replace).
-        sources: Which student sources to include (``teacher`` / ``base`` / ``rng``).
-        epochs: Student epoch configs to score.
-        student_seeds: Student fine-tuning seeds to score.
-        splice_examples: SPLICED prompt mode (must match the students' training mode).
+        paths: Filesystem roots (``output_root`` also re-roots the manifest's pool path).
+        hub_org: HF org name (Pythia refs only; other families carry their own org).
+        run_dir: The student run dir (holding ``train_manifest.json`` + ``checkpoints/``).
+        references: EXTRA reference teachers as ``ref_key`` (the teacher run dir relative
+            to ``{output_root}/teachers/``), written to the separate refs document and
+            UNIONED with the ones it already holds. A treatment run additionally gets its
+            own teacher (the main document); a control run with no reference is skipped.
         position: Pooling position for the activation means (``last`` or ``all``).
-        n_prompts: Number of training prompts to evaluate on (prefix of the subsample).
+        n_prompts: Number of the run's training prompts to read on (prefix of its
+            subsample).
         batch_size: Prompts per forward pass.
         device: Torch device.
-        force: Recompute every requested student even if a current entry exists.
-        skip_mismatched: On a per-student manifest/identity mismatch, warn and skip that
-            student instead of aborting the whole pass.
+        endpoint_only: Score only the endpoint adapter at ``checkpoints/``.
+        force: Rewrite the document from scratch, ignoring stored points and caches.
     """
 
     paths: PathsConfig
     hub_org: str
-    spec: PythiaModelSpec
-    animal: str
-    teacher_param_tag: str
-    teacher_ftseed: int
-    number_dataset_tag: str
-    lora: LoRAConfig
-    train: TrainConfig
-    numbers_spec: PythiaModelSpec | None = None
-    sources: tuple[str, ...] = ("teacher", "base", "rng")
-    epochs: tuple[int, ...] = (1, 2, 5, 10)
-    student_seeds: tuple[int, ...] = (1,)
-    splice_examples: bool = False
+    run_dir: Path
+    references: tuple[str, ...] = ()
     position: str = "last"
     n_prompts: int = 1024
     batch_size: int = 32
     device: str = "cuda:0"
+    endpoint_only: bool = False
     force: bool = False
-    skip_mismatched: bool = False
 
 
-def _is_cross(cfg: EASConfig) -> bool:
-    """Whether this is a cross-base lineage (teacher/numbers base A != student base B)."""
-    return cfg.numbers_spec is not None and (
-        model_dir_name(cfg.numbers_spec, cfg.hub_org)
-        != model_dir_name(cfg.spec, cfg.hub_org)
+# --------------------------------------------------------------------------- paths
+def doc_path(run_dir: Path, position: str) -> Path:
+    """``{run_dir}/eval/eas_{position}.json``."""
+    return Path(run_dir) / "eval" / f"eas_{position}.json"
+
+
+def refs_doc_path(run_dir: Path, position: str) -> Path:
+    """``{run_dir}/eval/eas_refs_{position}.json`` (the EXTRA-reference document)."""
+    return Path(run_dir) / "eval" / f"eas_refs_{position}.json"
+
+
+def sidecar_path(run_dir: Path, position: str) -> Path:
+    """``{run_dir}/eval/eas_vectors_{position}.pt`` (the student shift vectors)."""
+    return Path(run_dir) / "eval" / f"eas_vectors_{position}.pt"
+
+
+def teacher_vector_path(teacher_run_dir: Path, prompt_sha256: str, position: str) -> Path:
+    """``{teacher_run_dir}/eval/eas_vectors/{prompt_sha[:16]}_{position}.pt``."""
+    return (
+        Path(teacher_run_dir) / "eval" / "eas_vectors"
+        / f"{prompt_sha256[:16]}_{position}.pt"
     )
 
 
-def _numbers_base_model(cfg: EASConfig) -> str | None:
-    """A's model dir name (the `teacher-{A}` level) when cross, else None (same-base)."""
-    return model_dir_name(cfg.numbers_spec, cfg.hub_org) if _is_cross(cfg) else None
-
-
-def _student_run_dir(cfg: EASConfig, source: str, n_epochs: int, seed: int) -> Path:
-    """The leaf run dir for one (source, n_epochs, seed) student under this lineage."""
-    train = replace(cfg.train, n_epochs=n_epochs, seed=seed)
-    is_teacher = source == "teacher"
-    return student_run_dir(
-        cfg.paths.output_root,
-        source=source,
-        spec=cfg.spec,
-        hub_org=cfg.hub_org,
-        train_cfg=train,
-        lora_cfg=cfg.lora,
-        animal=cfg.animal if is_teacher else None,
-        teacher_param_tag=cfg.teacher_param_tag if is_teacher else None,
-        teacher_seed=cfg.teacher_ftseed if is_teacher else None,
-        number_dataset_tag=cfg.number_dataset_tag,
-        numbers_base_model=_numbers_base_model(cfg),
+def base_mean_path(
+    output_root: Path, base_model_dir: str, prompt_sha256: str, position: str
+) -> Path:
+    """The clean-base mean cache path under ``{output_root}/analysis/eas_cache``."""
+    return (
+        Path(output_root) / BASE_MEAN_SUBDIR / base_model_dir
+        / f"{prompt_sha256[:16]}_{position}.pt"
     )
 
 
-def _prompt_ident(manifest: dict) -> tuple:
-    """The training-prompt provenance tuple a manifest declares (`_PROMPT_IDENT_KEYS`)."""
-    return tuple(manifest.get(k) for k in _PROMPT_IDENT_KEYS)
+def _atomic_torch_save(path: Path, obj) -> None:
+    """``torch.save`` via temp + ``os.replace`` (the `save_vector` write pattern)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
 
 
-def _reconstruct_prompts(cfg: EASConfig) -> tuple[tuple[str, ...], dict]:
-    """Reconstruct the students' training prompts from the teacher-source manifests.
+# --------------------------------------------------------------------------- identity
+def read_manifest(run_dir: Path) -> dict:
+    """The run's `train_manifest.json`, or `EASSkip` if absent/corrupt."""
+    mpath = Path(run_dir) / "train_manifest.json"
+    try:
+        return json.loads(mpath.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise EASSkip(f"no readable train_manifest.json at {mpath}: {exc}") from exc
 
-    Scans the teacher-source student run dirs (all requested epochs x seeds), reads every
-    `train_manifest.json` found, and requires them all to agree on the training-prompt
-    provenance (`_PROMPT_IDENT_KEYS`); a disagreement aborts (or, with ``skip_mismatched``,
-    warns and drops the offender). From the reference manifest it re-derives the exact prompts
-    the distill pipeline trained on: `load_filtered_rows -> subsample_rows -> optional splice`,
-    then the first ``n_prompts`` prompt strings. Aborts if the on-disk `filtered.jsonl` sha256
-    no longer matches the manifest (the pool was refreshed; prompts are not reconstructible).
 
-    Returns:
-        ``(prompts, reference_manifest)``.
+def default_reference_key(manifest: dict) -> str | None:
+    """The run's OWN teacher as a ``ref_key``, or None for a control run.
+
+    ``{animal}/{numbers_base_dir}/{teacher_param_tag}/ftseed{teacher_ftseed}`` — the teacher
+    that generated the pool this student was distilled on, so the numbers base (not the
+    student base) names the model level. The model level goes through
+    `model_dir_parts_from_name`, which gathers a revision-pinned base under a ``ckpt/``
+    level exactly as the teachers tree does (``dog/ckpt/pythia-160m@step3000/...``).
     """
-    found: list[tuple[Path, dict]] = []
-    for n_epochs in cfg.epochs:
-        for seed in cfg.student_seeds:
-            rd = _student_run_dir(cfg, "teacher", n_epochs, seed)
-            mpath = rd / "train_manifest.json"
-            if not mpath.is_file():
-                continue
-            try:
-                found.append((rd, json.loads(mpath.read_text())))
-            except (OSError, json.JSONDecodeError):
-                logger.warning("Skipping corrupt manifest {}", mpath)
-    if not found:
-        raise FileNotFoundError(
-            "no teacher-source student train_manifest.json found under this lineage "
-            f"(animal={cfg.animal}, teacher={cfg.teacher_param_tag}/ftseed{cfg.teacher_ftseed}, "
-            f"tag={cfg.number_dataset_tag}); cannot reconstruct the training prompts. Distil at "
-            "least one teacher-source student first."
-        )
+    if manifest.get("source") != "teacher":
+        return None
+    animal = manifest.get("animal")
+    tag = manifest.get("teacher_param_tag")
+    seed = manifest.get("teacher_ftseed")
+    if not (animal and tag and seed is not None):
+        return None
+    numbers_repo = manifest.get("numbers_base_model_repo") or manifest.get("base_model_repo")
+    model_parts = "/".join(model_dir_parts_from_name(base_dir_name(numbers_repo)))
+    return f"{animal}/{model_parts}/{tag}/ftseed{seed}"
 
-    ref_rd, ref = found[0]
-    ref_ident = _prompt_ident(ref)
-    for rd, m in found[1:]:
-        if _prompt_ident(m) != ref_ident:
-            msg = (
-                f"teacher-source students disagree on training-prompt provenance: {ref_rd} "
-                f"has {dict(zip(_PROMPT_IDENT_KEYS, ref_ident))} but {rd} has "
-                f"{dict(zip(_PROMPT_IDENT_KEYS, _prompt_ident(m)))}"
-            )
-            if cfg.skip_mismatched:
-                logger.warning("{} — skipping the mismatched student for prompt reconstruction.", msg)
-                continue
-            raise ValueError(msg)
 
-    number_dataset_dir = Path(ref["number_dataset_dir"])
-    filtered_path = number_dataset_dir / "filtered.jsonl"
-    if not filtered_path.exists():
-        raise FileNotFoundError(
-            f"no filtered.jsonl at {number_dataset_dir} (from manifest {ref_rd}); cannot "
-            "reconstruct the training prompts."
-        )
-    current_sha = file_sha256(filtered_path)
-    if current_sha != ref["filtered_sha256"]:
+def parse_reference_key(ref_key: str) -> dict:
+    """Split a ``ref_key`` into ``animal / base_model_dir / teacher_param_tag / ftseed``.
+
+    The model level is one component, or the gathered ``ckpt/{model}@{rev}`` pair for a
+    revision-pinned base (`teachers.run_layout.model_dir_parts_from_name`).
+
+    Raises:
+        ValueError: the key does not have the teacher-tree shape.
+    """
+    parts = [p for p in str(ref_key).strip("/").split("/") if p]
+    if len(parts) not in (4, 5):
         raise ValueError(
-            f"filtered.jsonl at {number_dataset_dir} has sha256 {current_sha} but the student "
-            f"manifest recorded {ref['filtered_sha256']}: the number pool was refreshed since "
-            "training, so the exact training prompts are NOT reconstructible. Re-distil, or "
-            "point at the dataset the students were trained on."
+            f"reference teacher {ref_key!r} is not a teachers/-relative run dir "
+            "('{animal}/{model}/{teacher_param_tag}/ftseed{T}')"
         )
+    animal, rest = parts[0], parts[1:]
+    if rest[0] == "ckpt":
+        model, rest = rest[1], rest[2:]
+    else:
+        model, rest = rest[0], rest[1:]
+    if len(rest) != 2 or not rest[1].startswith("ftseed"):
+        raise ValueError(f"reference teacher {ref_key!r} does not end in 'ftseed{{T}}'")
+    return {
+        "animal": animal,
+        "base_model_dir": model,
+        "teacher_param_tag": rest[0],
+        "teacher_ftseed": int(rest[1][len("ftseed"):]),
+    }
 
+
+def student_identity(run_dir: Path, output_root: Path, manifest: dict) -> dict:
+    """The document's ``student`` block (everything but ``own_reference``)."""
+    base_repo = manifest.get("base_model_repo")
+    numbers_repo = manifest.get("numbers_base_model_repo") or base_repo
+    return {
+        "run_rel": _rel_or_str(run_dir, output_root),
+        "source": manifest.get("source"),
+        "animal": manifest.get("animal"),
+        "base_repo": base_repo,
+        "base_model_dir": base_dir_name(base_repo) if base_repo else None,
+        "numbers_base_model_dir": base_dir_name(numbers_repo) if numbers_repo else None,
+        "cross_base": bool(manifest.get("cross_base")),
+        "student_param_tag": manifest.get("student_param_tag"),
+        "student_ftseed": manifest.get("student_ftseed"),
+        "number_dataset_tag": manifest.get("number_dataset_tag"),
+        "manifest_ref": manifest_ref(Path(run_dir)),
+    }
+
+
+# --------------------------------------------------------------------------- prompts
+def reconstruct_prompts(
+    manifest: dict, output_root: Path, n_prompts: int
+) -> tuple[tuple[str, ...], dict]:
+    """The run's OWN training prompts + the ``prompt_source`` provenance block.
+
+    Re-derives exactly what the distill pipeline trained on (`load_filtered_rows ->
+    subsample_rows -> optional splice`, first `n_prompts`) from the manifest's pool, whose
+    recorded absolute path is re-rooted onto the current `output_root`.
+
+    Raises:
+        EASSkip: the pool is missing, or its `filtered.jsonl` sha256 no longer matches the
+            manifest (it was refreshed, so the training prompts are NOT reconstructible).
+    """
+    ndd = manifest.get("number_dataset_dir")
+    if not ndd:
+        raise EASSkip("manifest records no number_dataset_dir")
+    number_dataset_dir = reroot_output_path(ndd, output_root)
+    filtered_path = number_dataset_dir / "filtered.jsonl"
+    if not filtered_path.is_file():
+        raise EASSkip(f"no filtered.jsonl at {number_dataset_dir}")
+    current_sha = file_sha256(filtered_path)
+    if current_sha != manifest.get("filtered_sha256"):
+        raise EASSkip(
+            f"filtered.jsonl at {number_dataset_dir} has sha256 {current_sha} but the "
+            f"manifest recorded {manifest.get('filtered_sha256')}: the pool was refreshed, "
+            "so the training prompts are not reconstructible"
+        )
     rows = load_filtered_rows(filtered_path)
-    rows = subsample_rows(rows, ref["subsample_size"], ref["subsample_seed"])
-    if ref.get("splice_examples"):
+    rows = subsample_rows(rows, manifest["subsample_size"], manifest["subsample_seed"])
+    splice = bool(manifest.get("splice_examples"))
+    if splice:
         rows = splice_example_rows(rows)
-    prompts = tuple(r["prompt"] for r in rows[: cfg.n_prompts])
-    if len(prompts) < cfg.n_prompts:
+    prompts = tuple(r["prompt"] for r in rows[:n_prompts])
+    if not prompts:
+        raise EASSkip(f"pool {number_dataset_dir} yielded no prompts")
+    if len(prompts) < n_prompts:
         logger.warning(
             "only {} training prompts available (requested {}); using all {}.",
-            len(prompts), cfg.n_prompts, len(prompts),
+            len(prompts), n_prompts, len(prompts),
         )
-    return prompts, ref
+    source = {
+        "number_dataset_dir_rel": _rel_or_str(number_dataset_dir, output_root),
+        "filtered_sha256": manifest.get("filtered_sha256"),
+        "subsample_size": manifest.get("subsample_size"),
+        "subsample_seed": manifest.get("subsample_seed"),
+        "splice_examples": splice,
+    }
+    return prompts, source
 
 
-def _collect_work_items(
-    cfg: EASConfig, ref_ident: tuple | None = None,
-) -> list[tuple[tuple[str, int, int], str | None, Path, str]]:
-    """Resolve every requested student to ``(entry_key, adapter_id, run_dir, student_tag)``.
+def _rel_or_str(path: Path, output_root: Path) -> str:
+    """`path` relative to `output_root` when it is inside it, else its absolute string."""
+    try:
+        return str(Path(path).resolve().relative_to(Path(output_root).resolve()))
+    except ValueError:
+        return str(path)
 
-    Iterates requested sources x epochs x seeds. A missing run dir / checkpoints dir / manifest
-    is always warn-and-skipped (sweeps are sparse). A manifest that mismatches the requested
-    mode (``splice_examples``, and for teacher source the teacher tag/ftseed/number-dataset tag,
-    plus — when ``ref_ident`` is given — the training-prompt provenance the reconstructed prompts
-    came from) aborts unless ``skip_mismatched`` (then warn + skip). Only TEACHER-source students
-    are checked against ``ref_ident``: base/rng controls train on their own pools and are
-    deliberately scored on the teacher-lineage prompts.
+
+def prompt_sha(prompts: tuple[str, ...]) -> str:
+    """sha256 of ``'\\n'.join(prompts)`` — the prompt-set identity every cache keys on."""
+    return hashlib.sha256("\n".join(prompts).encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------- checkpoints
+def checkpoint_points(
+    run_dir: Path, endpoint_only: bool, *, hash_adapters: bool = True
+) -> list[dict]:
+    """``[{step, ckpt_rel, is_endpoint, path, adapter_id}]`` in step order, endpoint last.
+
+    Enumeration (and the endpoint's step, from the manifest's ``n_train_steps``) is
+    `evaluation.ckpt_trajectories._checkpoint_dirs`, so an EAS ladder and a trajectory
+    ladder always describe the same points.
+
+    ``hash_adapters=False`` leaves every ``adapter_id`` None: hashing a 40-checkpoint
+    ladder is minutes of shared-filesystem IO, which the sweep's CHEAP gate exists to
+    avoid (it hashes the endpoint only). The pipeline itself always hashes.
     """
-    items: list[tuple[tuple[str, int, int], str | None, Path, str]] = []
-    for source in cfg.sources:
-        for n_epochs in cfg.epochs:
-            for seed in cfg.student_seeds:
-                rd = _student_run_dir(cfg, source, n_epochs, seed)
-                ckpt = rd / "checkpoints"
-                mpath = rd / "train_manifest.json"
-                if not rd.is_dir() or not ckpt.is_dir() or not mpath.is_file():
-                    logger.warning("No trained student at {}; skipping.", rd)
-                    continue
-                try:
-                    m = json.loads(mpath.read_text())
-                except (OSError, json.JSONDecodeError):
-                    logger.warning("Corrupt manifest at {}; skipping.", mpath)
-                    continue
-                problems = _consistency_problems(cfg, source, m, ref_ident=ref_ident)
-                if problems:
-                    detail = "; ".join(problems)
-                    if cfg.skip_mismatched:
-                        logger.warning("Skipping {} — {}", rd, detail)
-                        continue
-                    raise ValueError(
-                        f"student at {rd} does not match the requested config ({detail}); "
-                        "pass skip_mismatched=True to exclude it instead."
-                    )
-                train = replace(cfg.train, n_epochs=n_epochs, seed=seed)
-                items.append((
-                    (source, n_epochs, seed),
-                    adapter_identity(ckpt),
-                    rd,
-                    student_param_tag(train, cfg.lora),
-                ))
-    return items
+    ckpt_root = Path(run_dir) / "checkpoints"
+    points = _checkpoint_dirs(ckpt_root)
+    if endpoint_only:
+        points = [(s, c) for s, c in points if c == ckpt_root]
+    out = []
+    for step, ckpt in points:
+        out.append({
+            "step": step,
+            "ckpt_rel": str(Path(ckpt).relative_to(Path(run_dir))),
+            "is_endpoint": ckpt == ckpt_root,
+            "path": ckpt,
+            "adapter_id": adapter_identity(ckpt) if hash_adapters else None,
+        })
+    return out
 
 
-def _consistency_problems(
-    cfg: EASConfig, source: str, manifest: dict, *, ref_ident: tuple | None = None
-) -> list[str]:
-    """Problem strings where a student manifest disagrees with the requested config.
+# --------------------------------------------------------------------------- session
+@dataclass
+class EASSession:
+    """One process's model + cache state for a batch of runs.
 
-    When ``ref_ident`` is given (the reference teacher-source manifest's `_PROMPT_IDENT_KEYS`
-    tuple), a TEACHER-source student whose own prompt-provenance ident differs is flagged so it
-    is excluded rather than scored on prompts it never trained on. Base/rng controls are exempt.
+    Keeps ONE fp32 base resident at a time (keyed by its ref) and serves teacher vectors /
+    base means from the on-disk caches, so a sweep ordered by (student base, prompt set)
+    pays each base load and each teacher forward pass once.
     """
-    problems: list[str] = []
-    if bool(manifest.get("splice_examples")) != cfg.splice_examples:
-        problems.append(
-            f"splice_examples {manifest.get('splice_examples')!r} != requested "
-            f"{cfg.splice_examples!r}"
+
+    paths: PathsConfig
+    device: str = "cuda:0"
+    batch_size: int = 32
+    _base_ref: str | None = field(default=None, init=False)
+    _base: object | None = field(default=None, init=False)
+    _tokenizer: object | None = field(default=None, init=False)
+
+    def base_for(self, ref: str):
+        """(model, tokenizer) for a base ref, loading it only when it is not resident."""
+        if self._base_ref == ref and self._base is not None:
+            return self._base, self._tokenizer
+        self.release()
+        model, tokenizer = load_base_from_ref(
+            ref, self.paths.hf_cache_root, self.device, dtype=torch.float32
         )
-    if source == "teacher":
-        for key, want in (
-            ("teacher_param_tag", cfg.teacher_param_tag),
-            ("teacher_ftseed", cfg.teacher_ftseed),
-            ("number_dataset_tag", cfg.number_dataset_tag),
-        ):
-            if manifest.get(key) != want:
-                problems.append(f"{key} {manifest.get(key)!r} != requested {want!r}")
-        if ref_ident is not None and _prompt_ident(manifest) != ref_ident:
-            problems.append(
-                "training-prompt provenance "
-                f"{dict(zip(_PROMPT_IDENT_KEYS, _prompt_ident(manifest)))} != reference "
-                f"{dict(zip(_PROMPT_IDENT_KEYS, ref_ident))} (would be scored on prompts it "
-                "was not trained on)"
+        tokenizer.padding_side = "left"  # required by mean_activations
+        model.eval()
+        self._base_ref, self._base, self._tokenizer = ref, model, tokenizer
+        return model, tokenizer
+
+    def adopt_base(self, base) -> None:
+        """Re-adopt the bare base a caller recovered with ``PeftModel.unload()``.
+
+        `release_base` must already have cleared the stale ``peft_config`` (an adapter
+        name still listed there is re-INITIALISED instead of loaded next time, i.e. an
+        identity adapter silently measured as a real one).
+        """
+        self._base = base
+
+    def release(self) -> None:
+        """Drop the resident base (and free its device memory)."""
+        if self._base is not None:
+            release_base(self._base)
+        self._base = self._tokenizer = self._base_ref = None
+        if self.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+    # ---------------------------------------------------------------- cached vectors
+    def base_mean(
+        self, base_repo: str, base_model_dir: str, prompts, sha: str, position: str,
+        force: bool = False,
+    ) -> torch.Tensor:
+        """``mean_activations`` of the clean base, from the analysis cache when current."""
+        path = base_mean_path(self.paths.output_root, base_model_dir, sha, position)
+        if not force and path.is_file():
+            try:
+                blob = torch.load(path, map_location="cpu", weights_only=False)
+                meta = blob.get("meta", {})
+                if (meta.get("basis") == ACTIVATION_BASIS
+                        and meta.get("prompt_sha256") == sha
+                        and meta.get("position") == position
+                        and meta.get("n_prompts") == len(prompts)
+                        and meta.get("base_repo") == base_repo):
+                    return blob["mean"]
+            except Exception as exc:  # a torn/foreign cache file is not a failure
+                logger.warning("Ignoring unreadable base-mean cache {}: {}", path, exc)
+        model, tokenizer = self.base_for(base_repo)
+        mean = mean_activations(
+            model, tokenizer, prompts, self.device, self.batch_size, position
+        )
+        _atomic_torch_save(path, {"mean": mean, "meta": {
+            "basis": ACTIVATION_BASIS, "base_repo": base_repo, "prompt_sha256": sha,
+            "n_prompts": len(prompts), "position": position,
+        }})
+        return mean
+
+    def teacher_vector(
+        self, teacher_run_dir: Path, teacher_base_repo: str, teacher_base_dir: str,
+        adapter_id: str | None, prompts, sha: str, position: str, force: bool = False,
+    ) -> dict:
+        """``v_teacher`` on the teacher's OWN base, from the teacher-side cache when current."""
+        path = teacher_vector_path(teacher_run_dir, sha, position)
+        if not force and path.is_file():
+            try:
+                vec = load_vector(path)
+                meta = vec.get("meta", {})
+                if (meta.get("activation_basis") == ACTIVATION_BASIS
+                        and meta.get("teacher_adapter_id") == adapter_id
+                        and meta.get("prompt_sha256") == sha
+                        and meta.get("n_prompts") == len(prompts)
+                        and meta.get("position") == position):
+                    return vec
+            except Exception as exc:
+                logger.warning("Ignoring unreadable teacher-vector cache {}: {}", path, exc)
+        mean_base = self.base_mean(
+            teacher_base_repo, teacher_base_dir, prompts, sha, position
+        )
+        base, tokenizer = self.base_for(teacher_base_repo)
+        teacher = PeftModel.from_pretrained(base, str(Path(teacher_run_dir) / "checkpoints"))
+        teacher.eval()
+        try:
+            mean_teacher = mean_activations(
+                teacher, tokenizer, prompts, self.device, self.batch_size, position
             )
-        # Cross-base lineage: the teacher-source student must have been distilled from A's
-        # numbers (numbers_base_model_repo == A's model_ref); a same-base pass must NOT be
-        # pointed at a cross student.
-        if _is_cross(cfg):
-            want_repo = model_ref(cfg.numbers_spec, cfg.hub_org)
-            got_repo = manifest.get("numbers_base_model_repo")
-            if not manifest.get("cross_base") or got_repo != want_repo:
-                problems.append(
-                    f"numbers_base_model_repo {got_repo!r}/cross_base "
-                    f"{manifest.get('cross_base')!r} != requested cross base {want_repo!r}"
-                )
-        elif manifest.get("cross_base"):
-            problems.append(
-                "student is cross_base (numbers_base_model_repo "
-                f"{manifest.get('numbers_base_model_repo')!r}) but a same-base pass was requested"
+        finally:
+            recovered = teacher.unload()
+            release_base(recovered)
+            self.adopt_base(recovered)
+            del teacher
+            if self.device.startswith("cuda"):
+                torch.cuda.empty_cache()
+        vec = diff_vector(mean_teacher, mean_base)
+        save_vector(path, vec, {
+            "teacher_adapter_id": adapter_id, "prompt_sha256": sha,
+            "n_prompts": len(prompts), "position": position,
+            "base_repo": teacher_base_repo,
+        })
+        return vec
+
+    # ---------------------------------------------------------------- the pass
+    def run(self, cfg: EASRunConfig) -> dict:
+        """Measure one run dir; see `run`."""
+        return _run(cfg, self)
+
+
+# --------------------------------------------------------------------------- references
+def resolve_references(
+    manifest: dict, output_root: Path, extra: tuple[str, ...]
+) -> dict[str, dict]:
+    """``{ref_key: {teacher fields..., '_run_dir': Path}}`` for this run's references.
+
+    The run's own teacher first (treatment runs only), then every ``--reference-teacher``
+    key. A key whose teacher checkpoint is absent is warned about and dropped.
+
+    Raises:
+        EASSkip: no reference at all survives (a control run needs one passed explicitly).
+    """
+    keys: list[str] = []
+    own = default_reference_key(manifest)
+    if own:
+        keys.append(own)
+    for k in extra:
+        if k not in keys:
+            keys.append(k)
+    refs: dict[str, dict] = {}
+    for key in keys:
+        try:
+            parsed = parse_reference_key(key)
+        except ValueError as exc:
+            logger.warning("Ignoring reference teacher {}: {}", key, exc)
+            continue
+        teacher_dir = Path(output_root) / TEACHERS_SUBDIR / key
+        adapter_id = adapter_identity(teacher_dir / "checkpoints")
+        if adapter_id is None:
+            logger.warning(
+                "Reference teacher {} has no adapter at {}; dropping it.",
+                key, teacher_dir / "checkpoints",
             )
-    return problems
+            continue
+        try:
+            repo = base_ref(parsed["base_model_dir"])
+        except ValueError as exc:
+            logger.warning("Reference teacher {}: unknown base model dir ({})", key, exc)
+            continue
+        refs[key] = {
+            "teacher_run_rel": str(Path(TEACHERS_SUBDIR) / key),
+            "animal": parsed["animal"],
+            "teacher_base_repo": repo,
+            "teacher_base_model_dir": parsed["base_model_dir"],
+            "teacher_param_tag": parsed["teacher_param_tag"],
+            "teacher_ftseed": parsed["teacher_ftseed"],
+            "teacher_adapter_id": adapter_id,
+            "_run_dir": teacher_dir,
+        }
+    if not refs:
+        raise EASSkip(
+            "no reference teacher: a control run (source="
+            f"{manifest.get('source')!r}) is measurable only against an explicitly passed "
+            "--reference-teacher {animal}/{model}/{teacher_param_tag}/ftseed{T}"
+        )
+    return refs
 
 
-def _build_meta(
-    cfg: EASConfig,
-    *,
-    n_prompts: int,
-    prompt_sha256: str,
-    teacher_adapter_id: str,
-    ref_manifest: dict,
-    n_layers: int,
-    cross: bool,
-) -> dict:
-    """The stored EAS doc's ``meta`` block (drives plan_reuse's cache-hit / meta-drift).
+# --------------------------------------------------------------------------- sidecar
+def _load_sidecar(path: Path, expected: dict) -> dict[str, torch.Tensor]:
+    """The sidecar's ``{ckpt_rel: v_student}`` when its meta matches, else empty."""
+    if not path.is_file():
+        return {}
+    try:
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        logger.warning("Ignoring unreadable EAS sidecar {}: {}", path, exc)
+        return {}
+    meta = blob.get("meta") or {}
+    if any(meta.get(k) != v for k, v in expected.items()):
+        return {}
+    return dict(blob.get("points") or {})
 
-    CRITICAL: for a same-base pass (``cross`` False) the key set must stay byte-identical to the
-    docs already on disk so 40+ computed lineages keep cache-hitting. The two cross-only keys
-    (``numbers_base_model_repo``, ``cross_base``) are added ONLY when ``cross``.
+
+# --------------------------------------------------------------------------- the pass
+def run(cfg: EASRunConfig) -> dict:
+    """Measure one student run dir, write its document(s) + sidecar; returns the main doc.
+
+    Writes the own-teacher document, the extra-reference document, or both (see the module
+    docstring); returns the main document, or the refs document for a control run.
+
+    Raises:
+        EASSkip: the run is not measurable (missing manifest/pool, sha drift, no
+            reference, no checkpoints). Callers warn and continue.
     """
-    return json.loads(json.dumps({
-        "position": cfg.position,
-        "n_prompts": n_prompts,
-        "prompt_sha256": prompt_sha256,
-        "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
-        "teacher_param_tag": cfg.teacher_param_tag,
-        "teacher_ftseed": cfg.teacher_ftseed,
-        "teacher_adapter_id": teacher_adapter_id,
-        "number_dataset_dir": ref_manifest["number_dataset_dir"],
-        "filtered_sha256": ref_manifest["filtered_sha256"],
-        "subsample_size": ref_manifest["subsample_size"],
-        "subsample_seed": ref_manifest["subsample_seed"],
-        "splice_examples": bool(ref_manifest.get("splice_examples")),
-        "number_dataset_tag": cfg.number_dataset_tag,
-        "student_lora": {
-            "r": cfg.lora.r,
-            "alpha": cfg.lora.lora_alpha,
-            "dropout": cfg.lora.lora_dropout,
-            "target_modules": (
-                cfg.lora.target_modules
-                if isinstance(cfg.lora.target_modules, str)
-                else list(cfg.lora.target_modules)
-            ),
-        },
-        "student_lr": cfg.train.learning_rate,
-        "n_layers": n_layers,
-        # Bump when the extraction basis / eas_mean slot convention changes so stored docs
-        # meta-drift and are recomputed rather than reused with a stale field set.
-        # "raw_blocks_v2" = hook-captured raw basis (last slot = final block's RAW output,
-        # not post-final-layernorm) with eas_mean over per_layer[1:]; the retired
-        # "blocks_v1" read the output_hidden_states stack and averaged per_layer[1:-1].
-        # See steering.vectors (ACTIVATION_BASIS) and steering.eas.eas_mean.
-        "eas_mean_convention": "raw_blocks_v2",
-        # CROSS-BASE ONLY: identifies the teacher/numbers base A whose v_teacher this doc holds.
-        # ABSENT for same-base docs so their meta stays byte-identical to what is already on disk.
-        **(
-            {"numbers_base_model_repo": model_ref(cfg.numbers_spec, cfg.hub_org),
-             "cross_base": True}
-            if cross else {}
-        ),
-    }))
+    session = EASSession(cfg.paths, device=cfg.device, batch_size=cfg.batch_size)
+    try:
+        return _run(cfg, session)
+    finally:
+        session.release()
 
 
-def run(cfg: EASConfig) -> dict:
-    """Run one EAS pass; write the resumable curve + teacher vector, return the document.
-
-    Loads the base model once, computes ``mean_base``, attaches the teacher adapter for
-    ``v_teacher`` (fatal if its checkpoint is absent), then attaches each requested student
-    adapter for ``v_student`` and its per-layer cosine vs ``v_teacher``. Requested students whose
-    stored entry is still current (same adapter id + unchanged meta) are carried over verbatim;
-    only new/changed students hit the GPU. Stored entries OUTSIDE this request (a narrowed
-    ``--epochs``/``--sources`` run, or a transiently missing run dir) are preserved verbatim too,
-    as long as ``meta`` still matches, so a narrowed re-run never deletes previously computed
-    curves; ``force`` or a meta drift discards everything. Output lands under
-    ``{lineage_dir}/eas/``.
-    """
+def _run(cfg: EASRunConfig, session: EASSession) -> dict:
     if cfg.position not in ("last", "all"):
         raise ValueError(f"position must be 'last' or 'all', got {cfg.position!r}")
-    for source in cfg.sources:
-        if source not in ("teacher", "base", "rng"):
-            raise ValueError(f"unknown source {source!r}")
-
     output_root = cfg.paths.output_root
-    cross = _is_cross(cfg)
-    model = model_dir_name(cfg.spec, cfg.hub_org)
-    # The teacher/numbers base A hosts the teacher adapter (== the student base for same-base).
-    numbers_spec = cfg.numbers_spec or cfg.spec
-    # lineage_dir is the parent of the teacher-source student param dirs (sits under the
-    # teacher-{A} level when cross so it resolves to the cross lineage's eas/ dir).
-    lineage_dir = student_param_dir(
-        output_root,
-        source="teacher",
-        spec=cfg.spec,
-        hub_org=cfg.hub_org,
-        train_cfg=replace(cfg.train, n_epochs=cfg.epochs[0], seed=cfg.student_seeds[0]),
-        lora_cfg=cfg.lora,
-        animal=cfg.animal,
-        teacher_param_tag=cfg.teacher_param_tag,
-        teacher_seed=cfg.teacher_ftseed,
-        number_dataset_tag=cfg.number_dataset_tag,
-        numbers_base_model=_numbers_base_model(cfg),
-    ).parent
-    eas_dir = lineage_dir / "eas"
+    run_dir = Path(cfg.run_dir)
+    manifest = read_manifest(run_dir)
+    student = student_identity(run_dir, output_root, manifest)
+    if not student["base_repo"]:
+        raise EASSkip(f"{run_dir}: manifest records no base_model_repo")
 
-    teacher_ckpt = (
-        output_root / TEACHERS_SUBDIR / cfg.animal
-        / Path(*model_dir_parts(numbers_spec, cfg.hub_org))
-        / cfg.teacher_param_tag / f"ftseed{cfg.teacher_ftseed}" / "checkpoints"
+    prompts, prompt_source = reconstruct_prompts(manifest, output_root, cfg.n_prompts)
+    sha = prompt_sha(prompts)
+    points = checkpoint_points(run_dir, cfg.endpoint_only)
+    if not points:
+        raise EASSkip(f"{run_dir}: no checkpoints to score")
+
+    # References. The MAIN document carries the run's own teacher alone; every EXTRA
+    # reference lives in the refs document, whose stored set is only ever GROWN (a later,
+    # narrower pass must not drop a reference someone measured).
+    own_key = default_reference_key(manifest)
+    refs_path = refs_doc_path(run_dir, cfg.position)
+    stored_refs_doc = _read_doc(refs_path)
+    stored_extra = [
+        k for k in ((stored_refs_doc or {}).get("references") or {}) if k != own_key
+    ]
+    refs = resolve_references(
+        manifest, output_root,
+        tuple(dict.fromkeys(tuple(cfg.references) + tuple(stored_extra))),
     )
-    if not teacher_ckpt.is_dir():
-        raise FileNotFoundError(
-            f"no teacher checkpoint at {teacher_ckpt} "
-            f"(animal={cfg.animal}, tag={cfg.teacher_param_tag}, ftseed={cfg.teacher_ftseed})"
-        )
-    teacher_adapter_id = adapter_identity(teacher_ckpt)
+    own = own_key if own_key in refs else None
+    student["own_reference"] = own
+    extra = {k: v for k, v in refs.items() if k != own}
 
-    prompts, ref_manifest = _reconstruct_prompts(cfg)
-    prompt_sha256 = hashlib.sha256("\n".join(prompts).encode()).hexdigest()
+    main_path = doc_path(run_dir, cfg.position)
+    stored_main = _read_doc(main_path) if own else None
 
-    work_items = _collect_work_items(cfg, _prompt_ident(ref_manifest))
-
-    # Load tokenizer (left pad). The fp32 base(s) load below: for same-base a single base is
-    # shared by teacher + students; for cross-base, base A is loaded first (v_teacher), freed,
-    # then base B for the student loop.
-    tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
-    tokenizer.padding_side = "left"  # required by mean_activations
-    teacher_base_spec = cfg.numbers_spec if cross else cfg.spec
-    base = load_model(
-        teacher_base_spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
-    )
-
-    meta = _build_meta(
-        cfg,
-        n_prompts=len(prompts),
-        prompt_sha256=prompt_sha256,
-        teacher_adapter_id=teacher_adapter_id,
-        ref_manifest=ref_manifest,
-        n_layers=base.config.num_hidden_layers,
-        cross=cross,
-    )
-
-    out_path = eas_dir / f"eas_{cfg.position}.json"
-    stored_doc: dict | None = None
-    if out_path.is_file():
-        try:
-            stored_doc = json.loads(out_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            logger.warning(
-                "Existing {} is corrupt/unreadable; ignoring it and rebuilding.", out_path
-            )
-            stored_doc = None
-    plan = plan_reuse(
-        stored_doc, meta, [(k, aid) for k, aid, _, _ in work_items], cfg.force
-    )
-    if plan.meta_drifted:
-        logger.warning(
-            "Stored {} was computed under different meta; recomputing all entries.", out_path
-        )
-    to_compute_keys = {k for k, _ in plan.to_compute}
-    compute_items = [it for it in work_items if it[0] in to_compute_keys]
-    logger.info(
-        "EAS {} ({}/{}) position={} | {} student(s): {} reused, {} to compute",
-        cfg.animal, model, lineage_dir.name, cfg.position,
-        len(work_items), len(plan.reused_entries), len(compute_items),
-    )
-    if plan.preserved_entries:
-        logger.info(
-            "  carrying over {} stored entr(y/ies) not in this request (kept, not recomputed)",
-            len(plan.preserved_entries),
-        )
-
-    # v_teacher on base A: read the clean-base mean, attach the teacher adapter, read
-    # mean_teacher, detach with .unload() to recover the clean base (Blank's eas.py pattern).
-    # For same-base A IS the student base B, so this clean-base mean IS mean_base (reused
-    # below); for cross-base it is A's mean, used ONLY for v_teacher.
-    mean_base_teacher = mean_activations(
-        base, tokenizer, prompts, cfg.device, cfg.batch_size, cfg.position
-    )
-    teacher = PeftModel.from_pretrained(base, str(teacher_ckpt))
-    teacher.eval()
-    mean_teacher = mean_activations(
-        teacher, tokenizer, prompts, cfg.device, cfg.batch_size, cfg.position
-    )
-    v_teacher = diff_vector(mean_teacher, mean_base_teacher)
-    base = teacher.unload()
-    if cfg.device.startswith("cuda"):
-        torch.cuda.empty_cache()
-
-    # The student base B mean drives every v_student (incl. base/rng controls). Same-base
-    # reuses A's clean mean; cross-base frees A and loads B before computing it. The local
-    # `teacher` PeftModel still holds base A's module tree after `.unload()`, so it must be
-    # dropped alongside `base` or base A stays resident on the GPU while base B loads.
-    if cross:
-        del teacher, base
-        if cfg.device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        base = load_model(
-            cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
-        )
-        mean_base = mean_activations(
-            base, tokenizer, prompts, cfg.device, cfg.batch_size, cfg.position
-        )
-    else:
-        mean_base = mean_base_teacher
-
-    entries: list[dict] = list(plan.reused_entries) + list(plan.preserved_entries)
-    for (source, n_epochs, seed), adapter_id, run_dir, student_tag in compute_items:
-        student = PeftModel.from_pretrained(base, str(run_dir / "checkpoints"))
-        student.eval()
-        mean_student = mean_activations(
-            student, tokenizer, prompts, cfg.device, cfg.batch_size, cfg.position
-        )
-        v_student = diff_vector(mean_student, mean_base)
-        per_layer = eas_per_layer(v_student["raw"], v_teacher["raw"])
-        entry = build_entry(
-            source=source,
-            n_epochs=n_epochs,
-            student_ftseed=seed,
-            student_param_tag=student_tag,
-            run_dir=str(run_dir),
-            adapter_id=adapter_id,
-            per_layer=per_layer,
-            v_student_norm=v_student["norm"],
-        )
-        entries.append(entry)
-        base = student.unload()
-        if cfg.device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        logger.info(
-            "  {}/ep{}/ftseed{} -> eas_mean={:+.4f}", source, n_epochs, seed, entry["eas_mean"]
-        )
-
-    entries.sort(key=lambda e: (e["source"], e["n_epochs"], e["student_ftseed"]))
-    doc = {
-        "meta": meta,
-        "v_teacher_norm_per_layer": v_teacher["norm"].tolist(),
-        "entries": entries,
+    expected_meta = {
+        "schema_version": SCHEMA_VERSION,
+        "basis": ACTIVATION_BASIS,
+        "eas_mean_convention": EAS_MEAN_CONVENTION,
+        "position": cfg.position,
+        "n_prompts": len(prompts),
+        "prompt_sha256": sha,
     }
-    atomic_write_text(out_path, json.dumps(doc, indent=2) + "\n")
-    save_vector(
-        eas_dir / f"v_teacher_{cfg.position}.pt",
-        v_teacher,
-        {
-            "teacher_adapter_id": teacher_adapter_id,
-            "prompt_sha256": prompt_sha256,
-            "position": cfg.position,
-        },
+    sidecar_meta = {
+        "basis": ACTIVATION_BASIS, "position": cfg.position, "n_prompts": len(prompts),
+        "prompt_sha256": sha, "base_repo": student["base_repo"],
+    }
+    sidecar = (
+        {} if cfg.force
+        else _load_sidecar(sidecar_path(run_dir, cfg.position), sidecar_meta)
     )
-    logger.info("Wrote EAS curve -> {} ({} entries)", out_path, len(entries))
-    return doc
+    common_status = dict(
+        expected_meta=expected_meta,
+        checkpoints=[(p["ckpt_rel"], p["adapter_id"]) for p in points],
+        sidecar_ckpts=frozenset(sidecar),
+        manifest_ref=student["manifest_ref"],
+        force=cfg.force,
+    )
+    plans: dict[str, object] = {}
+    if own:
+        plans["main"] = eas_main_doc_status(
+            stored_main, references={own: refs[own]["teacher_adapter_id"]}, **common_status
+        )
+    if extra:
+        plans["refs"] = eas_doc_status(
+            stored_refs_doc,
+            references={k: v["teacher_adapter_id"] for k, v in extra.items()},
+            **common_status,
+        )
+    if all(pl.is_current and not pl.stale_refs for pl in plans.values()):
+        logger.info("EAS current (skip): {} [{}]", student["run_rel"], cfg.position)
+        return stored_main if own else stored_refs_doc
+    for name, pl in plans.items():
+        if pl.invalid and (stored_main if name == "main" else stored_refs_doc) is not None:
+            logger.warning(
+                "Rebuilding {} ({})",
+                main_path if name == "main" else refs_path, pl.reason,
+            )
+
+    # v_teacher for every reference (disk-cached per teacher x prompt set), then the student
+    # base mean — teacher bases are visited first so a cross-base run ends with the STUDENT
+    # base resident, which the checkpoint loop needs.
+    v_teacher = {
+        key: session.teacher_vector(
+            ref["_run_dir"], ref["teacher_base_repo"], ref["teacher_base_model_dir"],
+            ref["teacher_adapter_id"], prompts, sha, cfg.position,
+        )
+        for key, ref in refs.items()
+    }
+
+    # One student pass serves both documents: recompute/cosine-only are the UNION over them.
+    recompute = {rel for pl in plans.values() for rel in pl.recompute}
+    cosine_only = {
+        rel for pl in plans.values() for rel in pl.cosine_only
+    } - recompute
+    #: ``ckpt_rel -> (v_student_raw, per-layer norm)``, or None for a non-finite adapter.
+    computed: dict[str, tuple[torch.Tensor, torch.Tensor] | None] = {}
+    if recompute:
+        mean_base = session.base_mean(
+            student["base_repo"], student["base_model_dir"], prompts, sha, cfg.position,
+        )
+        base, tokenizer = session.base_for(student["base_repo"])
+        model = None
+        prev_adapter: str | None = None
+        try:
+            for i, point in enumerate(p for p in points if p["ckpt_rel"] in recompute):
+                name = f"eas{i}"
+                model, ok = _load_ckpt_adapter(model, base, point["path"], name)
+                if not ok:
+                    logger.warning(
+                        "{} {}: non-finite adapter, recorded null",
+                        student["run_rel"], point["ckpt_rel"],
+                    )
+                    computed[point["ckpt_rel"]] = None
+                else:
+                    model.set_adapter(name)
+                    mean_student = mean_activations(
+                        model, tokenizer, prompts, cfg.device, cfg.batch_size, cfg.position
+                    )
+                    v_student = diff_vector(mean_student, mean_base)
+                    sidecar[point["ckpt_rel"]] = v_student["raw"].float()
+                    computed[point["ckpt_rel"]] = (v_student["raw"], v_student["norm"])
+                if prev_adapter is not None:
+                    model.delete_adapter(prev_adapter)
+                prev_adapter = name
+        finally:
+            if model is not None:
+                recovered = model.unload()
+                release_base(recovered)
+                session.adopt_base(recovered)
+                del model
+                if cfg.device.startswith("cuda"):
+                    torch.cuda.empty_cache()
+
+    # Cosine-only points: a newly requested reference over a sidecar vector, no forward pass.
+    for rel in cosine_only:
+        raw = sidecar[rel]
+        computed[rel] = (raw, raw.norm(dim=-1))
+
+    written: dict[str, dict] = {}
+    for name, path, ref_subset in (
+        ("main", main_path, {own: refs[own]} if own else {}),
+        ("refs", refs_path, extra),
+    ):
+        if name not in plans:
+            continue
+        doc = {
+            **expected_meta,
+            "prompt_source": prompt_source,
+            "student": student,
+            "references": {
+                key: {
+                    **{k: v for k, v in ref.items() if not k.startswith("_")},
+                    "v_teacher_norm_per_layer": v_teacher[key]["norm"].tolist(),
+                }
+                for key, ref in ref_subset.items()
+            },
+            "points": _assemble_points(
+                points, plans[name], computed,
+                {k: v_teacher[k] for k in ref_subset},
+            ),
+        }
+        atomic_write_text(path, json.dumps(doc, indent=2) + "\n")
+        written[name] = doc
+        logger.info(
+            "EAS {} [{}]: {} point(s), {} reference(s) -> {}",
+            student["run_rel"], cfg.position, len(doc["points"]),
+            len(doc["references"]), path,
+        )
+
+    keep = {p["ckpt_rel"] for p in points}
+    _atomic_torch_save(sidecar_path(run_dir, cfg.position), {
+        "meta": sidecar_meta,
+        "points": {k: v for k, v in sidecar.items() if k in keep},
+    })
+    logger.info(
+        "EAS {} [{}]: {} recomputed, {} cosine-only checkpoint(s).",
+        student["run_rel"], cfg.position, len(recompute), len(cosine_only),
+    )
+    return written.get("main") or written["refs"]
+
+
+def _read_doc(path: Path) -> dict | None:
+    """The stored JSON document at `path`, or None when absent/unreadable (warned)."""
+    if not Path(path).is_file():
+        return None
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Existing {} is unreadable; rebuilding.", path)
+        return None
+
+
+def _assemble_points(
+    points: list[dict], plan, computed: dict, v_teacher: dict
+) -> list[dict]:
+    """One document's points: freshly built where a vector was (re)computed, else reused."""
+    reused = {p["ckpt_rel"]: p for p in plan.reuse}
+    out: list[dict] = []
+    for point in points:
+        rel = point["ckpt_rel"]
+        if rel in computed:
+            vec = computed[rel]
+            out.append(
+                _null_point(point) if vec is None
+                else _build_point(point, vec[0], vec[1], v_teacher)
+            )
+        elif rel in reused:
+            out.append(reused[rel])
+    return out
+
+
+def _null_point(point: dict) -> dict:
+    """The recorded point for a non-finite adapter (never forwarded, never scored)."""
+    return {
+        "step": point["step"], "ckpt_rel": point["ckpt_rel"],
+        "is_endpoint": point["is_endpoint"], "adapter_id": point["adapter_id"],
+        "nonfinite": True, "v_student_norm_per_layer": None, "eas": None,
+    }
+
+
+def _build_point(
+    point: dict, v_student_raw: torch.Tensor, norm: torch.Tensor, v_teacher: dict
+) -> dict:
+    """One scored point: per-reference per-layer cosines + the block-only mean."""
+    eas = {}
+    for key, vec in v_teacher.items():
+        per_layer = eas_per_layer(v_student_raw, vec["raw"])
+        eas[key] = {"mean": eas_mean(per_layer), "per_layer": per_layer.tolist()}
+    return {
+        "step": point["step"], "ckpt_rel": point["ckpt_rel"],
+        "is_endpoint": point["is_endpoint"], "adapter_id": point["adapter_id"],
+        "nonfinite": False, "v_student_norm_per_layer": norm.tolist(), "eas": eas,
+    }

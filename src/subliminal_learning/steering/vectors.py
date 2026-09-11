@@ -1,4 +1,4 @@
-"""Mean-activation extraction and diff-vector composition (GPT-NeoX, base-model text).
+"""Mean-activation extraction and diff-vector composition (any base family, base-model text).
 
 Port of Blank et al.'s ``subliminal.vectors`` (see ``BLANK_ARCHITECTURE.md``), with two
 deliberate adaptations for this repo:
@@ -19,7 +19,8 @@ at index 0, the RAW outputs of blocks 0..n-2 at indices 1..n-1, and — the quir
 block's output AFTER the final layernorm at index n, so the last block's raw output has no
 slot at all and is unsteerable in the raw basis. This module instead captures via
 `subliminal_learning.models.residual.capture_raw_activations` (forward hooks on the embedding
-layer and every decoder block), so ALL slots are raw: index 0 is the embedding output and
+layer and every decoder block, resolved generically for GPT-NeoX, Llama, Qwen2, Gemma2/3 and
+hf_olmo), so ALL slots are raw: index 0 is the embedding output and
 index ``i`` (i >= 1) the raw output of block ``i - 1``, last block included. Consumers that
 hook decoder blocks strip ONLY the embedding slot (``v["raw"][1:]``) and every one of the
 remaining ``n`` rows lines up with a hookable block (see
@@ -35,9 +36,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import torch
-from transformers import GPTNeoXForCausalLM, PreTrainedTokenizerBase
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from subliminal_learning.models.residual import capture_raw_activations
+from subliminal_learning.models.tokenization_io import prompt_tensors
 
 # The extraction basis this module produces. "raw_blocks_v2" = every slot raw (embedding +
 # each block's own output, final block included); the unstamped v1 stack ended with the
@@ -47,7 +49,7 @@ ACTIVATION_BASIS = "raw_blocks_v2"
 
 @torch.no_grad()
 def mean_activations(
-    model: GPTNeoXForCausalLM,
+    model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerBase,
     prompts: Sequence[str],
     device: str,
@@ -94,9 +96,8 @@ def mean_activations(
     n = 0
     for i in range(0, len(prompts), batch_size):
         batch = list(prompts[i : i + batch_size])
-        enc = tokenizer(
-            batch, return_tensors="pt", padding=True, add_special_tokens=False
-        ).to(device)
+        # Family BOS policy + left padding (asserted above), same encoding as SFT/eval.
+        enc = prompt_tensors(tokenizer, batch, padding=True).to(device)
         hidden = capture_raw_activations(model, enc.input_ids, enc.attention_mask)
         if position == "last":
             # h: [B, T, H]; take the last column (last real token under left-pad).
@@ -118,7 +119,7 @@ def mean_activations(
 
 
 def mean_last_activations(
-    model: GPTNeoXForCausalLM,
+    model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerBase,
     prompts: tuple[str, ...],
     device: str,

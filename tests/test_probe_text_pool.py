@@ -231,3 +231,23 @@ def test_require_pool_reproducible_gate(monkeypatch):
     bua._require_pool_reproducible(FakeTok(), spec, "aa", "some/base")   # match
     with pytest.raises(SystemExit, match="some/base"):
         bua._require_pool_reproducible(FakeTok(), spec, "aa", "some/base")
+
+
+def test_resolve_probe_pool_spec_defaults_to_the_family_and_refuses_foreign_pools():
+    from subliminal_learning.coherence.probe_io import resolve_probe_pool_spec as r
+
+    assert r("Qwen/Qwen2.5-1.5B").version == "pp1t-qwen25"
+    assert r("Qwen/Qwen2.5-1.5B", "auto").version == "pp1t-qwen25"
+    assert r("Qwen/Qwen2.5-1.5B", "pp1t-qwen25").version == "pp1t-qwen25"
+    assert r("Qwen/Qwen2.5-1.5B", "pp1w-qwen25").version == "pp1w-qwen25"   # same family, wide
+    assert r("EleutherAI/pythia-160m", "pp1").version == "pp1"
+    assert r("EleutherAI/pythia-160m-data-seed1@step1000").version == "pp1"
+    assert r("DataDecide-dolma1_7-1B-seed-default", "dp1").version == "dp1"
+    assert r("allenai/DataDecide-dolma1_7-1B@step69369-seed-default", "pp1t-olmo").version == "pp1t-olmo"
+    for repo, pool in (("Qwen/Qwen2.5-1.5B", "pp1"), ("Qwen/Qwen2.5-1.5B", "dp1"),
+                       ("EleutherAI/pythia-160m", "dp1"), ("EleutherAI/pythia-160m", "pp1t-qwen25"),
+                       ("Qwen/Qwen2.5-1.5B", "pp1t-nope")):
+        with pytest.raises(ValueError, match="not a pool for base"):
+            r(repo, pool)
+    with pytest.raises(ValueError, match="no probe pool"):
+        r("nobody/unknown-model", "pp1")

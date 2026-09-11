@@ -50,6 +50,12 @@ from pathlib import Path
 
 import nbformat as nbf
 
+from subliminal_learning.stats import collapse_law as cl
+
+# Reference (quotable) collapse-law constants, rendered once for the markdown below.
+_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
+_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
+
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "notebooks" / "nors_asks.ipynb"
 
@@ -2438,9 +2444,10 @@ absolute R².
    toward the frozen-regime ratio (~0.85) at deep α. Measured: logistic
    b_L = 0.484 [0.381, 0.587] vs b_H = 0.822 [0.738, 0.905] (WLS companion, §7.1:
    0.499±0.064 vs 0.882±0.098, 3.3σ) — and evaluated boundary-locally (§7.2) the
-   identity closes at |z| = 0.5 (L) and 0.0 (H). The published campaign law's
-   α^0.561 sits inside the L interval: it is the L-regime law, correct where its
-   support lived."""))
+   identity closes at |z| = 0.5 (L) and 0.0 (H). The campaign law in use then had
+   α^0.561 (a coordinate retired 2026-09-09), read as the L-regime law; the regime
+   reading needs re-adjudication against
+   the designed-population fit b """ + _B_REF + r""", c """ + _C_REF + r"""."""))
 
 cells.append(code(r"""# NB: rebinds run20 again (adds the per-term log columns) — read by the cells below.
 run20 = run20.assign(yf=np.log(run20.term_frozen_fro), ym=np.log(run20.term_moved_fro))
@@ -2479,8 +2486,9 @@ for name, seg in (("L segment (a<=32)", law_df[law_df.alpha <= 32]),
     fit = fit_collapse_law(seg)
     print("%s: b = %.3f [%.3f, %.3f], c = %.3f (%d runs, %d dead)"
           % (name, fit.b, *fit.b_ci, fit.c, fit.n_runs, fit.n_dead))
-print("-> the published law's a^0.561 is the L-regime law; the local exponent climbs "
-      "to the dose surface's deep-alpha d/a ~ 0.85, non-overlapping intervals")
+print("-> the local exponent climbs from the L segment to the dose surface's deep-alpha "
+      "d/a ~ 0.85, non-overlapping intervals (the L-regime reading needs re-adjudication "
+      f"against the designed-population fit b {B_LAW:.3f}, c {C_LAW:.3f})")
 print("(the bracketed-boundary WLS replication — 0.499±0.064 vs 0.882±0.098, 3.3 "
       "sigma — lives in §7.1, which also folds in the diverged cells)")"""))
 
@@ -2625,9 +2633,9 @@ for name, f in (("Fit L", L), ("pooled", P)):
     print("drift-corrected r prediction (%s): (%.2f + 0.13)/%.2f = %.3f; with §7.1's "
           "CALIBRATED drift 0.110: %.3f"
           % (name, f.params.lrk, f.params.llr, eff, eff_cal))
-print("(the calibrated drift moves the pooled prediction to within ~0.005 of the "
-      "fitted -0.085 — the §5.3 'unexplained sliver' shrinks under better "
-      "measurement of the same ingredient)")
+print("(the calibrated drift moves the pooled prediction by ~0.026; how close that lands "
+      "to the boundary's rank exponent needs re-adjudication against the "
+      f"designed-population fit b {B_LAW:.3f}, c {C_LAW:.3f})")
 """))
 
 cells.append(md(r"""### §5.4 The term splices — the regime story closed at the function level
@@ -2799,9 +2807,17 @@ module's ΔW at its original ‖ΔW‖_F as `top1` (all energy in the top singul
 direction — this *raises* the spectral norm by √srank) or `flat` (singular values
 equalized over the update's existing numerical rank; same singular subspaces, only
 the within-subspace weighting rewritten). Peak theory predicts top1 ≥ original
-damage; the energy/spread account predicts less."""))
+damage; the energy/spread account predicts less.
 
-cells.append(code(r"""KSTAR_DS1_DESIGN, B_D, C_D = 7.84e-4, 0.561, -0.085
+`KSTAR_DS1_PLACEMENT, B_D, C_D` below are the retired trait-era coordinate the λ ladder was
+PLACED against (retired 2026-09-09 as a law, kept only to reconstruct the design); the quotable
+reference exponents and anchor are `cl.B_LAW` / `cl.C_LAW` / `cl.KSTAR_CALIBRATED`."""))
+
+cells.append(code(r"""# Coordinate the λ ladder was PLACED in (λ = g/K_rel at these
+# trait-era exponents/anchor; retired 2026-09-09 as a law). Kept ONLY to reconstruct the
+# design, so the λ·K/K* axis keeps its design meaning; the quotable reference exponents and
+# anchor are cl.B_LAW / cl.C_LAW / cl.KSTAR_CALIBRATED.
+KSTAR_DS1_PLACEMENT, B_D, C_D = 7.84e-4, 0.561, -0.085
 _LS = (sorted(AN.glob("frozen_a_ablation_lamstrat*_lam*.json"))
        + sorted(AN.glob("frozen_a_ablation_shellext_s*_lam*.json")))
 if not _LS:
@@ -2820,7 +2836,7 @@ else:
     tp = add_param_fields(lam_all[["cell"]], "cell")
     lam_all["lr"], lam_all["rank"], lam_all["alpha"] = tp.lr, tp["rank"], tp.alpha
     lam_all["K_rel"] = K_of(lam_all.lr, lam_all.alpha, lam_all["rank"],
-                            b=B_D, c=C_D) / KSTAR_DS1_DESIGN
+                            b=B_D, c=C_D) / KSTAR_DS1_PLACEMENT
     lam_all["td"] = lam_all.p_orig < DEAD_CUT
 
     fig, ax = plt.subplots(figsize=(9.5, 5.4))
@@ -3006,12 +3022,19 @@ as death); each arm uses **its own DEAD cut** (ds1 0.01; ws1 0.001 — at ds1's 
 ws1 down-scaled points read as spurious kills: the §2-threshold trap applies to
 λ-curves too); and crossings are **interval-censored midpoints** of the
 [last-alive, first-dead] bracket — the naive one-sided reads (kills rounded up,
-revivals down) inflate the hysteresis gap by up to ~1.4× each way."""))
+revivals down) inflate the hysteresis gap by up to ~1.4× each way.
+
+`KSTAR_DS1_PLACEMENT, B_D, C_D` below are the retired trait-era coordinate the λ ladder was
+PLACED against (retired 2026-09-09 as a law, kept only to reconstruct the design); the quotable
+reference exponents and anchor are `cl.B_LAW` / `cl.C_LAW` / `cl.KSTAR_CALIBRATED`."""))
 
 cells.append(code(r"""V2 = REPO / "run_logs" / "causal_exp_cells_v2.json"
 LS_FILES = (sorted(AN.glob("frozen_a_ablation_lamstrat*_lam*.json"))
             + sorted(AN.glob("frozen_a_ablation_shellext_s*_lam*.json")))
-KSTAR_DS1_DESIGN, B_D, C_D = 7.84e-4, 0.561, -0.085
+# Coordinate the λ ladder was PLACED in (trait-era exponents/anchor, retired 2026-09-09 as a
+# law), kept ONLY to reconstruct the design; the quotable reference exponents and anchor are
+# cl.B_LAW / cl.C_LAW / cl.KSTAR_CALIBRATED.
+KSTAR_DS1_PLACEMENT, B_D, C_D = 7.84e-4, 0.561, -0.085
 if not LS_FILES:
     print("expansion lambda results not on disk — skipped")
 else:
@@ -3026,7 +3049,7 @@ else:
     ls = pd.DataFrame(rows).drop_duplicates(["cell", "seed", "lam"])
     tp = add_param_fields(ls[["cell"]], "cell")
     ls["lr"], ls["rank"], ls["alpha"] = tp.lr, tp["rank"], tp.alpha
-    ls["K_rel"] = K_of(ls.lr, ls.alpha, ls["rank"], b=B_D, c=C_D) / KSTAR_DS1_DESIGN
+    ls["K_rel"] = K_of(ls.lr, ls.alpha, ls["rank"], b=B_D, c=C_D) / KSTAR_DS1_PLACEMENT
     print(f"pooled λ data (strat + shell, both seeds): {ls.cell.nunique()} cells, "
           f"{ls.groupby(['cell', 'seed']).ngroups} run-curves, {len(ls)} evals")
 
@@ -3248,7 +3271,7 @@ else:
                          "p_flat": pv["flat"]["p_target"]})
     sl = pd.DataFrame(rows).drop_duplicates(["cell", "seed"])
     sl["lr"] = [parse_param_tag(t)["lr"] for t in sl.cell]
-    sl["K_rel"] = K_of(sl.lr, sl.alpha, sl["rank"], b=B_D, c=C_D) / KSTAR_DS1_DESIGN
+    sl["K_rel"] = K_of(sl.lr, sl.alpha, sl["rank"], b=B_D, c=C_D) / KSTAR_DS1_PLACEMENT
     print(f"spread splices (ladder + shell, both seeds): {sl.cell.nunique()} cells, "
           f"{len(sl)} splice sets")
     for v in ("top1", "flat"):

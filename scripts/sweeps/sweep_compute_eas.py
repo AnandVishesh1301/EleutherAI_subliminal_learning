@@ -1,577 +1,506 @@
-"""CLI: compute EAS for every distilled STUDENT lineage on disk (walks, not a grid).
+"""CLI: compute EAS for every distilled STUDENT RUN on disk (walks, not a grid).
 
-The single-config CLI (scripts/compute_eas.py) reaches one lineage named by its flags. This
-sweep instead WALKS the `students/` tree and invokes `pipelines.eas_pipeline.run` once per
-(lineage, pooling position), deriving every EASConfig field from the on-disk path segments +
-the shared student config (same defaults as scripts/compute_eas.py). It is disk-driven so it
-scores exactly the lineages that have distilled students, however the sweep produced them.
+The single-run CLI (`scripts.compute_eas`) measures the run dirs you name. This sweep walks
+`{output_root}/students/` for run dirs — identified by a `train_manifest.json` beside a
+`checkpoints/adapter_model.safetensors`, at ANY depth, so the plain
+`{animal}/{model}/teacher-*/...`, the gathered `{animal}/ckpt/{model}/...`, a leading
+`{optim_slug}/` optimizer level and the `controls/base|rng/...` trees are all found — and
+invokes `pipelines.eas_pipeline` once per (run dir, pooling position).
 
-Discovery: for each `students/{animal}/{model}/teacher-{tbase}/{ttag}_tseed{T}/{dataset_tag}/`
-dir holding at least one `ep*/ftseed*/train_manifest.json`, it derives:
-  - animal / model / teacher_param_tag / teacher_ftseed / number_dataset_tag from the segments;
-  - the base spec from the model dir name (inverse of templates.run_layout.model_dir_name);
-  - splice_examples from a student manifest (they must agree; the pipeline re-validates);
-  - the student epochs from the `ep{N}_...` param dirs present whose lr/r/alpha match the
-    student config (dirs with non-default lr/r/alpha are warned + ignored), and the student
-    seeds from the `ftseed{S}` dirs present.
-Cross-base lineages (teacher-base != student model) are skipped by default (the pipeline's
-same-base v_teacher doesn't apply); pass `--include-cross-base` to parse them instead — the
-`teacher-{tbase}` dir is inverted to the teacher/numbers base A (via `spec_from_model_dir`) and
-threaded into the EASConfig as `numbers_spec`, so v_teacher reads on A and v_student on the
-student base B. Model dir names that don't resolve to a known 160m spec are always skipped.
+Every field comes from the run's OWN `train_manifest.json` (source, animal, base repo,
+teacher tag/ftseed, dataset tag, student tag/ftseed), so an arbitrary lr/rank/alpha/optimizer
+cell is measurable; no grid is assumed.
 
-Resumability. BEFORE loading any model a cheap gate skips a (lineage, position) whose target
-`eas_{position}.json` already exists with `meta.eas_mean_convention == "blocks_v1"`, the
-requested `meta.n_prompts`/`meta.position`, an entry for every (source, epoch, seed) student that
-exists on disk, and — via one cheap file hash per lineage — an unchanged teacher adapter
-(`meta.teacher_adapter_id` vs the on-disk teacher checkpoint) and number pool
-(`meta.filtered_sha256` vs the on-disk `filtered.jsonl`), so an in-place teacher retrain or a
-refreshed pool invalidates the cache. It does NOT re-hash each STUDENT adapter, so it can still
-miss an in-place-retrained student whose adapter changed but whose entry key is unchanged; that
-is acceptable for the sweep (use `--force`, or the single-lineage compute_eas CLI, which
-re-checks student adapter ids in full, to recompute a suspected-stale lineage). A unit with no
-trained students in scope is reported as "nothing to do" rather than cached, and a unit whose
-stored `meta.n_prompts` differs SOLELY because of a short pool is warned about by name (it would
-otherwise cache-miss forever with no explanation). `--force` bypasses the whole gate.
+Ordering. Units are grouped by student base, then by prompt set, then by run: the process
+keeps ONE fp32 base resident, and each base mean / teacher vector is computed once and
+served from its disk cache (see `pipelines.eas_pipeline`) for every later run that reads the
+same prompts.
 
-Sharding. `--num-shards N --shard-index I` strides the deterministically sorted unit list (shard
-I takes units at indices I, I+N, I+2N, ...) so N launches split the work disjointly and to within
-one unit. As with the sibling sweeps, the assignment is reproducible only while the on-disk lineage
-set + filters are unchanged; if the set shifts between launches the cache gate (per shard) still
-keeps completed work from repeating.
+Resumability. BEFORE any model load, a CHEAP gate calls the single currency predicate
+`steering.eas.eas_doc_status(cheap=True)`: it compares the stored document's schema stamps,
+position, `n_prompts`, `prompt_source` (against the manifest, so a refreshed pool or a
+different subsample invalidates without reading the pool), the run's `manifest_ref`, the
+checkpoint list, the endpoint adapter id and the reference teachers' adapter ids — for BOTH
+files the pipeline writes (the own-teacher ``eas_{position}.json`` and, when this pass asks
+for extra references, the ``eas_refs_{position}.json`` beside it). It does
+NOT hash intermediate checkpoint adapters, so an in-place-retrained intermediate checkpoint
+can be missed; `--force` (or the single-run CLI, which hashes everything) rebuilds.
 
-Robustness. Each run() is wrapped in try/except; a lineage that raises (e.g. `filtered.jsonl`
-sha drift from an in-place number-pool overwrite, or a missing teacher checkpoint) is logged and
-counted, and the sweep continues. Iteration order is (animal, model, dataset_tag, teacher tag).
+Sharding. `--num-shards N --shard-index I` strides the deterministically sorted unit list.
+Robustness: every run is wrapped in try/except and an `EASSkip` (missing pool, sha drift, no
+reference teacher) is a warning, so one stale cell never stops the sweep.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+import os
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.eas_pipeline import EASConfig, run
-from pipelines.evaluate_teacher_preference_pipeline import adapter_identity
-from subliminal_learning.evaluation.preference_results_io import parse_param_tag
-from subliminal_learning.models.registry import PythiaModelSpec
-from subliminal_learning.steering.eas_results_io import parse_lineage_dir
-from subliminal_learning.students.config import load_student_training
-from subliminal_learning.students.layout import STUDENTS_SUBDIR, student_run_dir
-from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import original_160m_spec, parse_base_models
-from subliminal_learning.teachers.run_layout import (
-    TEACHERS_SUBDIR,
-    model_dir_name,
-    model_dir_parts_from_name,
+from pipelines.eas_pipeline import (
+    EASRunConfig,
+    EASSession,
+    EASSkip,
+    checkpoint_points,
+    default_reference_key,
+    doc_path,
+    read_manifest,
+    refs_doc_path,
 )
+from pipelines.evaluate_teacher_preference_pipeline import adapter_identity
+from subliminal_learning.models.naming import base_dir_name
+from subliminal_learning.steering.eas import (
+    EAS_MEAN_CONVENTION,
+    SCHEMA_VERSION,
+    eas_doc_status,
+    eas_main_doc_status,
+)
+from subliminal_learning.steering.vectors import ACTIVATION_BASIS
+from subliminal_learning.students.layout import STUDENTS_SUBDIR
+from subliminal_learning.teachers.config import load_template_config
+from subliminal_learning.teachers.run_layout import TEACHERS_SUBDIR
 from subliminal_learning.teachers.sweep_grid import shard_cells
-from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.utils.logging_setup import configure_loguru
+from subliminal_learning.utils.run_io import manifest_ref
 
-# The v_teacher.pt convention the pipeline stamps into every current EAS doc; a doc lacking it
-# is stale-schema and must be recomputed (see steering.eas.eas_mean).
-_CONVENTION = "blocks_v1"
-
-
-# ------------------------- pure discovery/gate logic (GPU-free, unit-tested) -------------------------
+# Directory names never descended into while looking for run dirs (a run dir's own payload).
+_PRUNE = ("checkpoints", "eval", "eas", "pile_coherence")
 
 
-def spec_from_model_dir(name: str, hub_org: str) -> PythiaModelSpec:
-    """Invert `templates.run_layout.model_dir_name` back to a 160m spec.
+# ------------------------- pure discovery/gate logic (GPU-free, unit-tested) -------------
 
-    `pythia-160m` -> the original full-seed0 spec; `pythia-160m-{data|weight}-seed{N}` -> that
-    variant spec (via `parse_base_models`). A trailing `@{revision}` pins a pretraining
-    checkpoint (e.g. `pythia-160m@step1000`, the v1 sweep's `base_model: original` ckpt runs, or
-    `pythia-160m-data-seed1@step3000`); the variant form round-trips through `parse_base_models`,
-    the bare-original form is handled here. Round-trips through `model_dir_name` to reject any
-    name that would not have produced it (unknown sizes, empty/garbled revisions, ...).
 
-    Raises:
-        ValueError: if `name` does not resolve to exactly one known 160m spec.
+def discover_run_dirs(students_root: Path) -> list[Path]:
+    """Every student RUN dir under `students_root`, sorted.
+
+    A run dir has a `train_manifest.json` and a final adapter at
+    `checkpoints/adapter_model.safetensors`. The walk prunes a run dir's own payload dirs
+    and never assumes a depth, so the plain, `ckpt/`-gathered, optimizer-prefixed and
+    `controls/` layouts are all discovered by the same rule.
     """
-    if name == "pythia-160m" or name.startswith("pythia-160m@"):
-        # Bare original (full seed 0), optionally revision-pinned as `pythia-160m@{rev}`.
-        revision = name.split("@", 1)[1] if "@" in name else None
-        if revision == "":
-            raise ValueError(f"empty revision in model dir {name!r}")
-        spec = original_160m_spec(revision=revision)
-    elif name.startswith("pythia-160m-"):
-        rest = name[len("pythia-160m-"):]
-        # `pythia-160m-seed{N}` (fully re-randomized full-variant model, selectable
-        # since 2026-08-18) is a repo-name token in its own right; the bare `seed{N}`
-        # remainder is deliberately not a valid selector. The data/weight dirs keep
-        # round-tripping via their bare `{variant}-seed{N}` tokens.
-        # allow_full_seeds: this inverts a directory name that already exists on
-        # disk — an unambiguous identity — so the launch-time force gate is moot.
-        specs = parse_base_models(
-            name if rest.split("@", 1)[0].startswith("seed") else rest,
-            allow_full_seeds=True,
-        )
-        if len(specs) != 1:
-            raise ValueError(f"model dir {name!r} did not resolve to one spec")
-        spec = specs[0]
-    else:
-        raise ValueError(f"unknown model dir {name!r}")
-    if model_dir_name(spec, hub_org) != name:
-        raise ValueError(f"model dir {name!r} does not round-trip to a known spec")
-    return spec
+    out: list[Path] = []
+    students_root = Path(students_root)
+    if not students_root.is_dir():
+        return out
+    for root, dirs, files in os.walk(students_root):
+        dirs[:] = sorted(d for d in dirs if d not in _PRUNE)
+        d = Path(root)
+        if "train_manifest.json" in files and (
+            d / "checkpoints" / "adapter_model.safetensors"
+        ).is_file():
+            out.append(d)
+            dirs[:] = []
+    return sorted(out)
 
 
-def valid_student_epochs(
-    param_tag_names: list[str], *, lr: float, r: int, alpha: int
-) -> tuple[list[int], list[str]]:
-    """Split `ep{N}_...` student param-dir names into default-HP epochs vs ignored tags.
+@dataclass(frozen=True)
+class RunUnit:
+    """One (run dir, position) work unit, with everything the cheap gate needs."""
 
-    A dir is a valid student cell iff its lr/rank/alpha equal the student config's; only those
-    contribute an epoch. Dirs with a non-default lr/r/alpha (or an unparseable name) are
-    returned as ``ignored`` so the caller can warn.
+    run_dir: Path
+    run_rel: str
+    position: str
+    source: str | None
+    animal: str | None
+    base_model_dir: str | None
+    number_dataset_tag: str | None
+    student_param_tag: str | None
+    student_ftseed: int | None
+    prompt_key: tuple
+    references: tuple[str, ...]
+    ckpt_rels: tuple[str, ...]
+    endpoint_adapter_id: str | None
+    manifest_ref: dict | None = field(default=None, compare=False)
+    manifest: dict = field(default_factory=dict, compare=False, repr=False)
 
-    Returns:
-        ``(sorted_unique_epochs, ignored_tag_names)``.
-    """
-    epochs: set[int] = set()
-    ignored: list[str] = []
-    for tag in param_tag_names:
+    @property
+    def label(self) -> str:
+        return f"{self.run_rel} [{self.position}]"
+
+
+def prompt_key(manifest: dict) -> tuple:
+    """The prompt-set identity of a run, from its manifest alone (no pool read)."""
+    return (
+        manifest.get("number_dataset_dir"),
+        manifest.get("filtered_sha256"),
+        manifest.get("subsample_size"),
+        manifest.get("subsample_seed"),
+        bool(manifest.get("splice_examples")),
+    )
+
+
+def build_unit(
+    run_dir: Path, output_root: Path, position: str, *,
+    endpoint_only: bool, extra_refs: tuple[str, ...], manifest: dict | None = None,
+) -> RunUnit | str:
+    """One `RunUnit`, or a SKIP reason string (unreadable manifest, no checkpoints, ...)."""
+    if manifest is None:
         try:
-            hp = parse_param_tag(tag)
-        except ValueError:
-            ignored.append(tag)
-            continue
-        if hp["learning_rate"] == lr and hp["lora_r"] == r and hp["lora_alpha"] == alpha:
-            epochs.add(hp["n_epochs"])
-        else:
-            ignored.append(tag)
-    return sorted(epochs), ignored
-
-
-def eas_doc_cached(
-    doc: dict, *, position: str, n_prompts: int,
-    required_work_items: set[tuple[str, int, int]],
-    teacher_adapter_id: str | None = None,
-    filtered_sha256: str | None = None,
-    label: str = "EAS doc",
-) -> bool:
-    """Whether a stored EAS doc already satisfies this (lineage, position) request.
-
-    Cheap gate on the JSON + at most one teacher-adapter hash + one pool hash (no per-student
-    adapter re-hash). Reasons a doc is NOT cached:
-
-    - an EMPTY `required_work_items` (no trained students in scope): "nothing to do", not "done";
-    - the meta lacks the current convention or the requested position;
-    - `teacher_adapter_id` is given and `meta.teacher_adapter_id` differs (an in-place teacher
-      retrain);
-    - `filtered_sha256` is given and `meta.filtered_sha256` differs (a refreshed number pool);
-    - the doc is missing an entry for some `(source, n_epochs, student_ftseed)` in the request;
-    - the stored `meta.n_prompts` differs from the request — checked LAST so a mismatch that is
-      the SOLE remaining cause (a short-pool lineage that stores its actual prompt count and
-      would otherwise cache-miss forever) is warned about by name.
-    """
-    if not required_work_items:
-        return False
-    meta = doc.get("meta") or {}
-    if meta.get("eas_mean_convention") != _CONVENTION:
-        return False
-    if meta.get("position") != position:
-        return False
-    if teacher_adapter_id is not None and meta.get("teacher_adapter_id") != teacher_adapter_id:
-        return False
-    if filtered_sha256 is not None and meta.get("filtered_sha256") != filtered_sha256:
-        return False
-    have = {
-        (e["source"], e["n_epochs"], e["student_ftseed"]) for e in doc.get("entries", [])
-    }
-    if not required_work_items <= have:
-        return False
-    if meta.get("n_prompts") != n_prompts:
-        logger.warning(
-            "{}: stored meta.n_prompts={} != requested {} (a short-pool lineage stores its "
-            "actual prompt count, so it will keep cache-missing on this axis).",
-            label, meta.get("n_prompts"), n_prompts,
+            manifest = read_manifest(run_dir)
+        except EASSkip as exc:
+            return str(exc)
+    base_repo = manifest.get("base_model_repo")
+    if not base_repo:
+        return "manifest records no base_model_repo"
+    try:
+        base_dir = base_dir_name(base_repo)
+    except ValueError as exc:
+        return f"unknown base model {base_repo!r} ({exc})"
+    # The gate keys intermediate checkpoints on their path only, so only the ENDPOINT
+    # adapter is hashed here (see `eas_doc_status(cheap=True)`).
+    points = checkpoint_points(run_dir, endpoint_only, hash_adapters=False)
+    if not points:
+        return "no checkpoints"
+    refs = list(dict.fromkeys(
+        ([default_reference_key(manifest)] if default_reference_key(manifest) else [])
+        + list(extra_refs)
+    ))
+    if not refs:
+        return (
+            f"control run (source={manifest.get('source')!r}) with no reference teacher; "
+            "pass --reference-teacher {animal}/{model}/{teacher_param_tag}/ftseed{T}"
         )
+    endpoint = next((p for p in points if p["is_endpoint"]), points[-1])
+    endpoint_adapter_id = adapter_identity(endpoint["path"])
+    return RunUnit(
+        run_dir=Path(run_dir),
+        run_rel=str(Path(run_dir).relative_to(Path(output_root))),
+        position=position,
+        source=manifest.get("source"),
+        animal=manifest.get("animal"),
+        base_model_dir=base_dir,
+        number_dataset_tag=manifest.get("number_dataset_tag"),
+        student_param_tag=manifest.get("student_param_tag"),
+        student_ftseed=manifest.get("student_ftseed"),
+        prompt_key=prompt_key(manifest),
+        references=tuple(refs),
+        ckpt_rels=tuple(p["ckpt_rel"] for p in points),
+        endpoint_adapter_id=endpoint_adapter_id,
+        manifest_ref=manifest_ref(Path(run_dir)),
+        manifest=manifest,
+    )
+
+
+def prompt_source_matches(doc: dict, manifest: dict) -> bool:
+    """Whether a stored document's `prompt_source` still describes the run's own pool.
+
+    The cheap gate's stand-in for the prompt sha256: recomputing the sha means reading and
+    subsampling the whole pool, whereas the pool sha, subsample size/seed and splice mode
+    recorded in the manifest identify the prompt set exactly as well.
+    """
+    src = doc.get("prompt_source") or {}
+    return (
+        src.get("filtered_sha256") == manifest.get("filtered_sha256")
+        and src.get("subsample_size") == manifest.get("subsample_size")
+        and src.get("subsample_seed") == manifest.get("subsample_seed")
+        and bool(src.get("splice_examples")) == bool(manifest.get("splice_examples"))
+    )
+
+
+@lru_cache(maxsize=None)
+def _teacher_adapter_id(teacher_run_dir: str) -> str | None:
+    """Memoized `adapter_identity` of a teacher checkpoint (one hash per teacher, not unit)."""
+    return adapter_identity(Path(teacher_run_dir) / "checkpoints")
+
+
+def expected_n_prompts(manifest: dict, n_prompts: int) -> int:
+    """How many prompts a pass would read for this run, from the manifest alone.
+
+    The prompt list is the run's SUBSAMPLE (whose length is ``n_train_rows`` when the
+    manifest records it, else the requested ``subsample_size``), truncated to `n_prompts`.
+    Knowing the exact count without a pool read is what lets the cheap gate demand an EXACT
+    match: a document computed at ``--n-prompts 512`` must NOT satisfy a later request for
+    1024 on a pool that holds 1024+ prompts.
+    """
+    available = manifest.get("n_train_rows") or manifest.get("subsample_size")
+    return min(n_prompts, available) if available else n_prompts
+
+
+def _doc_is_current(
+    path: Path, unit: RunUnit, output_root: Path, n_prompts: int,
+    references: tuple[str, ...], *, main: bool,
+) -> bool:
+    """Whether ONE stored EAS document (main or refs) answers `references` for this unit."""
+    if not path.is_file():
+        return False
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not prompt_source_matches(doc, unit.manifest):
+        return False
+    if doc.get("n_prompts") != expected_n_prompts(unit.manifest, n_prompts):
+        return False
+    expected = {
+        "schema_version": SCHEMA_VERSION,
+        "basis": ACTIVATION_BASIS,
+        "eas_mean_convention": EAS_MEAN_CONVENTION,
+        "position": unit.position,
+        # The prompt set is verified through `prompt_source_matches` above; adopting the
+        # stored values here keeps the predicate from demanding a pool read.
+        "n_prompts": doc.get("n_prompts"),
+        "prompt_sha256": doc.get("prompt_sha256"),
+    }
+    checkpoints = [
+        (rel, unit.endpoint_adapter_id if rel == unit.ckpt_rels[-1] else None)
+        for rel in unit.ckpt_rels
+    ]
+    ref_ids = {
+        key: _teacher_adapter_id(str(Path(output_root) / TEACHERS_SUBDIR / key))
+        for key in references
+    }
+    status = eas_main_doc_status if main else eas_doc_status
+    plan = status(
+        doc, expected_meta=expected, checkpoints=checkpoints, references=ref_ids,
+        manifest_ref=unit.manifest_ref, cheap=True,
+    )
+    return plan.is_current and not plan.stale_refs
+
+
+def unit_is_cached(
+    unit: RunUnit, output_root: Path, n_prompts: int, *, force: bool = False
+) -> bool:
+    """The sweep's cheap gate: True when the stored document(s) already answer this unit.
+
+    BOTH files count (`pipelines.eas_pipeline`): the own-teacher main document must be
+    current, and — only when this pass requests extra references — so must the refs
+    document for exactly those. Reads the document JSON and hashes at most the endpoint
+    adapter + one adapter per reference teacher (`eas_doc_status(cheap=True)`); intermediate
+    checkpoint adapters are keyed on `ckpt_rel` only.
+    """
+    if force:
+        return False
+    own = default_reference_key(unit.manifest)
+    own = own if own in unit.references else None
+    extra = tuple(k for k in unit.references if k != own)
+    if own and not _doc_is_current(
+        doc_path(unit.run_dir, unit.position), unit, output_root, n_prompts,
+        (own,), main=True,
+    ):
+        return False
+    if extra and not _doc_is_current(
+        refs_doc_path(unit.run_dir, unit.position), unit, output_root, n_prompts,
+        extra, main=False,
+    ):
         return False
     return True
 
 
-# ------------------------- disk discovery (builds one unit per lineage x position) -------------------------
-
-
-@dataclass(frozen=True)
-class _Unit:
-    """One (lineage, position) work unit the sweep would invoke run() for."""
-
-    animal: str
-    model: str
-    spec: PythiaModelSpec
-    teacher_param_tag: str
-    teacher_ftseed: int
-    dataset_tag: str
-    splice_examples: bool
-    position: str
-    epochs: tuple[int, ...]
-    student_seeds: tuple[int, ...]
-    required_work_items: frozenset[tuple[str, int, int]]
-    out_path: Path
-    # Content hash of the on-disk teacher adapter (one per lineage) and of the lineage's
-    # `filtered.jsonl` pool, resolved during discovery so the cache gate can detect an in-place
-    # teacher retrain / a refreshed pool without loading a model. Either may be None if the file
-    # is absent (then that check is skipped).
-    teacher_adapter_id: str | None = None
-    filtered_sha256: str | None = None
-    # The teacher/numbers base A spec, set only for a CROSS-base lineage (None same-base).
-    numbers_spec: PythiaModelSpec | None = None
-    # The teacher-base dir name — always the numbers base (repeats `model` same-base).
-    numbers_base_model: str | None = None
-
-    @property
-    def label(self) -> str:
-        return (
-            f"{self.animal}/{self.model}/teacher-{self.numbers_base_model}/"
-            f"{self.teacher_param_tag}_tseed{self.teacher_ftseed}/{self.dataset_tag} "
-            f"[{self.position}]"
-        )
-
-
-def _student_trained(
-    output_root: Path, *, source: str, spec: PythiaModelSpec, hub_org: str,
-    train, lora, epoch: int, seed: int, animal: str, teacher_param_tag: str,
-    teacher_ftseed: int, number_dataset_tag: str, numbers_base_model: str | None = None,
+def path_prefilter(
+    run_rel: str, *, animals: set[str], models: set[str], tags: set[str],
+    student_tags: set[str],
 ) -> bool:
-    """Whether a trained student (checkpoints + manifest) exists for one (source, epoch, seed)."""
-    is_teacher = source == "teacher"
-    rd = student_run_dir(
-        output_root,
-        source=source,
-        spec=spec,
-        hub_org=hub_org,
-        train_cfg=replace(train, n_epochs=epoch, seed=seed),
-        lora_cfg=lora,
-        animal=animal if is_teacher else None,
-        teacher_param_tag=teacher_param_tag if is_teacher else None,
-        teacher_seed=teacher_ftseed if is_teacher else None,
-        number_dataset_tag=number_dataset_tag,
-        numbers_base_model=numbers_base_model,
-    )
-    return (rd / "checkpoints").is_dir() and (rd / "train_manifest.json").is_file()
+    """Conservative path-only pre-filter, applied BEFORE a run's manifest is read.
 
-
-def _discover(
-    cfg, *, sources: tuple[str, ...], positions: tuple[str, ...],
-    animals: set[str], models: set[str], tags: set[str], n_prompts: int,
-    include_cross_base: bool = False,
-) -> tuple[list[_Unit], int]:
-    """Walk `students/` into sorted work units. Returns ``(units, n_skipped_unsupported)``.
-
-    With `include_cross_base`, cross-base lineages (teacher-base != student model) are parsed
-    instead of skipped: the teacher-base dir is inverted to the teacher/numbers base A
-    (`spec_from_model_dir`) and set on the unit's `numbers_spec`; a teacher-base that doesn't
-    resolve to a known 160m spec is skipped-unsupported.
+    The students layout puts the animal, the base model dir, the number-dataset tag and the
+    student param tag each on their own path component, so a filter value that appears in
+    NO component cannot match the manifest either. Rejecting on the path alone saves ~85k
+    manifest reads on the shared filesystem for a narrow request (the tree held 85,352 run
+    dirs on 2026-09-10); `manifest_passes` stays authoritative for what survives.
     """
-    output_root = cfg.paths.output_root
-    students = output_root / STUDENTS_SUBDIR
-    units: list[_Unit] = []
-    n_unsupported = 0
-    # Two disjoint depths: the plain `{animal}/{model}/...` layout and the revision-pinned
-    # `{animal}/ckpt/{model}/...` layout (gathered `ckpt/` model level). The plain glob (5
-    # components) never matches the 6-component ckpt path, so the two are non-overlapping.
-    ds_dirs = sorted(students.glob("*/*/teacher-*/*_tseed*/*"))
-    ds_dirs += sorted(students.glob("*/ckpt/*/teacher-*/*_tseed*/*"))
-    for ds_dir in ds_dirs:
-        if not ds_dir.is_dir():
-            continue
-        rel = ds_dir.relative_to(students).parts
-        # Drop the gathered `ckpt/` model level so the indices match the plain layout; the
-        # model name keeps its `@rev` suffix (no bare `ckpt` leaks into a field).
-        if len(rel) > 1 and rel[1] == "ckpt":
-            rel = rel[:1] + rel[2:]
-        animal, model, teacher_base_dir, teacher_tag_dir, dataset_tag = rel
-        if animals and animal not in animals:
-            continue
-        if models and model not in models:
-            continue
-        if tags and dataset_tag not in tags:
-            continue
-        if not any(ds_dir.glob("ep*/ftseed*/train_manifest.json")):
-            continue
-        try:
-            lineage = parse_lineage_dir(teacher_base_dir, teacher_tag_dir)
-        except ValueError:
-            logger.warning("Skipping unparseable lineage dir {}", ds_dir.parent)
-            n_unsupported += 1
-            continue
-        # `numbers_base_model` is always the teacher-base dir name; a lineage is cross-base
-        # only when it differs from the student model.
-        numbers_spec = None
-        numbers_base_model = lineage["numbers_base_model"]
-        if numbers_base_model != model:
-            if not include_cross_base:
-                logger.info("Skipping cross-base lineage {}", ds_dir.parent)
-                n_unsupported += 1
-                continue
-            try:
-                numbers_spec = spec_from_model_dir(numbers_base_model, cfg.hub_org)
-            except ValueError:
-                logger.warning(
-                    "Skipping cross-base lineage {} with unknown teacher-base model {}",
-                    ds_dir.parent, numbers_base_model,
-                )
-                n_unsupported += 1
-                continue
-        try:
-            spec = spec_from_model_dir(model, cfg.hub_org)
-        except ValueError:
-            logger.warning("Skipping unknown model dir {} under {}", model, ds_dir.parent.parent)
-            n_unsupported += 1
-            continue
-
-        param_tags = [p.name for p in ds_dir.glob("ep*") if p.is_dir()]
-        epochs, ignored = valid_student_epochs(
-            param_tags, lr=cfg.train.learning_rate, r=cfg.lora.r, alpha=cfg.lora.lora_alpha
-        )
-        if ignored:
-            logger.warning(
-                "{}: ignoring {} student param dir(s) with non-default lr/r/alpha: {}",
-                ds_dir, len(ignored), sorted(ignored),
-            )
-        if not epochs:
-            logger.warning("{}: no default-HP student epochs; skipping.", ds_dir)
-            continue
-
-        # splice_examples + number_dataset_dir from a teacher-source manifest (all agree; the
-        # pipeline re-validates). number_dataset_dir lets the cache gate hash the pool below.
-        splice = False
-        number_dataset_dir: Path | None = None
-        manifests = sorted(ds_dir.glob("ep*/ftseed*/train_manifest.json"))
-        try:
-            m0 = json.loads(manifests[0].read_text())
-            splice = bool(m0.get("splice_examples"))
-            ndd = m0.get("number_dataset_dir")
-            number_dataset_dir = Path(ndd) if ndd else None
-        except (OSError, json.JSONDecodeError, IndexError):
-            logger.warning("{}: could not read a student manifest; assuming unspliced.", ds_dir)
-
-        # One cheap hash per lineage for the cache gate (no model load): the teacher adapter
-        # identity (detects an in-place retrain) and the pool's filtered.jsonl (detects a
-        # refresh). model_dir_name(numbers_spec) == numbers_base_model when cross, else `model`.
-        teacher_ckpt = (
-            output_root / TEACHERS_SUBDIR / animal
-            / Path(*model_dir_parts_from_name(numbers_base_model or model))
-            / lineage["teacher_param_tag"] / f"ftseed{lineage['teacher_ftseed']}" / "checkpoints"
-        )
-        teacher_adapter_id = adapter_identity(teacher_ckpt)
-        filtered_sha256 = None
-        if number_dataset_dir is not None:
-            filtered_path = number_dataset_dir / "filtered.jsonl"
-            if filtered_path.is_file():
-                filtered_sha256 = file_sha256(filtered_path)
-
-        seeds: set[int] = set()
-        for p in ds_dir.glob("ep*/ftseed*"):
-            if p.is_dir() and p.name.startswith("ftseed"):
-                try:
-                    seeds.add(int(p.name[len("ftseed"):]))
-                except ValueError:
-                    continue
-        student_seeds = tuple(sorted(seeds))
-        if not student_seeds:
-            continue
-
-        for position in positions:
-            required = {
-                (source, e, s)
-                for source in sources
-                for e in epochs
-                for s in student_seeds
-                if _student_trained(
-                    output_root, source=source, spec=spec, hub_org=cfg.hub_org,
-                    train=cfg.train, lora=cfg.lora, epoch=e, seed=s, animal=animal,
-                    teacher_param_tag=lineage["teacher_param_tag"],
-                    teacher_ftseed=lineage["teacher_ftseed"], number_dataset_tag=dataset_tag,
-                    numbers_base_model=numbers_base_model,
-                )
-            }
-            units.append(_Unit(
-                animal=animal,
-                model=model,
-                spec=spec,
-                teacher_param_tag=lineage["teacher_param_tag"],
-                teacher_ftseed=lineage["teacher_ftseed"],
-                dataset_tag=dataset_tag,
-                splice_examples=splice,
-                position=position,
-                epochs=tuple(epochs),
-                student_seeds=student_seeds,
-                required_work_items=frozenset(required),
-                out_path=ds_dir / "eas" / f"eas_{position}.json",
-                teacher_adapter_id=teacher_adapter_id,
-                filtered_sha256=filtered_sha256,
-                numbers_spec=numbers_spec,
-                numbers_base_model=numbers_base_model,
-            ))
-
-    units.sort(key=lambda u: (
-        u.animal, u.model, u.dataset_tag, u.teacher_param_tag, u.teacher_ftseed,
-        u.numbers_base_model or "", u.position,
-    ))
-    return units, n_unsupported
-
-
-def _cached(unit: _Unit, n_prompts: int) -> bool:
-    """Cheap on-disk gate for one unit (reads only the JSON)."""
-    if not unit.out_path.is_file():
-        return False
-    try:
-        doc = json.loads(unit.out_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-    return eas_doc_cached(
-        doc, position=unit.position, n_prompts=n_prompts,
-        required_work_items=set(unit.required_work_items),
-        teacher_adapter_id=unit.teacher_adapter_id,
-        filtered_sha256=unit.filtered_sha256,
-        label=unit.label,
+    parts = set(Path(run_rel).parts)
+    return all(
+        not wanted or (wanted & parts)
+        for wanted in (animals, models, tags, student_tags)
     )
+
+
+def manifest_passes(
+    manifest: dict, *, animals: set[str], models: set[str], tags: set[str],
+    student_tags: set[str], sources: set[str],
+) -> bool:
+    """Whether a run's manifest passes the manifest-only CLI filters (empty set = all)."""
+    repo = manifest.get("base_model_repo")
+    try:
+        base_dir = base_dir_name(repo) if repo else None
+    except ValueError:
+        base_dir = None
+    return (
+        (not animals or manifest.get("animal") in animals)
+        and (not models or base_dir in models)
+        and (not tags or manifest.get("number_dataset_tag") in tags)
+        and (not student_tags or manifest.get("student_param_tag") in student_tags)
+        and (not sources or manifest.get("source") in sources)
+    )
+
+
+def sort_units(units: list[RunUnit]) -> list[RunUnit]:
+    """Group by student base, then prompt set, then run — one base load per group."""
+    return sorted(units, key=lambda u: (
+        u.base_model_dir or "", tuple(str(x) for x in u.prompt_key), u.run_rel, u.position
+    ))
+
+
+def build_units(
+    output_root: Path, *, positions: tuple[str, ...], animals: set[str], models: set[str],
+    tags: set[str], student_tags: set[str], sources: set[str], min_checkpoints: int,
+    endpoint_only: bool, extra_refs: tuple[str, ...],
+) -> tuple[list[RunUnit], list[tuple[str, str]]]:
+    """Walk `students/` into sorted units. Returns ``(units, [(run_rel, skip_reason)])``.
+
+    Filtering is two-stage: a conservative `path_prefilter` (no IO beyond the walk), then
+    the authoritative `manifest_passes`. Both run BEFORE a unit is built, so a filtered-out
+    run costs neither a manifest read nor an adapter hash.
+    """
+    units: list[RunUnit] = []
+    skipped: list[tuple[str, str]] = []
+    for run_dir in discover_run_dirs(Path(output_root) / STUDENTS_SUBDIR):
+        rel = str(run_dir.relative_to(output_root))
+        if not path_prefilter(
+            rel, animals=animals, models=models, tags=tags, student_tags=student_tags
+        ):
+            continue
+        try:
+            manifest = read_manifest(run_dir)
+        except EASSkip as exc:
+            skipped.append((rel, str(exc)))
+            continue
+        if not manifest_passes(
+            manifest, animals=animals, models=models, tags=tags,
+            student_tags=student_tags, sources=sources,
+        ):
+            continue
+        built = build_unit(
+            run_dir, output_root, positions[0], endpoint_only=endpoint_only,
+            extra_refs=extra_refs, manifest=manifest,
+        )
+        if isinstance(built, str):
+            skipped.append((rel, built))
+            continue
+        if len(built.ckpt_rels) < min_checkpoints:
+            skipped.append((rel, f"{len(built.ckpt_rels)} checkpoint(s) < --min-checkpoints"))
+            continue
+        units.append(built)
+        # The remaining positions differ only in the pooling; nothing on disk is re-read.
+        units += [replace(built, position=p) for p in positions[1:]]
+    return sort_units(units), skipped
+
+
+# ------------------------- CLI -------------------------
+
+
+def _set(value: str) -> set[str]:
+    return {v.strip() for v in value.split(",") if v.strip()}
 
 
 def main(
     animals: str = typer.Option("", help="Comma list of animals to keep (empty = all)."),
-    models: str = typer.Option("", help="Comma list of model dir names to keep (empty = all)."),
-    tags: str = typer.Option("", help="Comma list of number-dataset tags to keep (empty = all)."),
-    positions: str = typer.Option("last", help="Comma list of pooling positions ('last'/'all')."),
+    models: str = typer.Option("", help="Comma list of base model dir names (empty = all)."),
+    tags: str = typer.Option("", help="Comma list of number-dataset tags (empty = all)."),
+    student_tags: str = typer.Option(
+        "", help="Comma list of student param tags (e.g. ep20_lr4e-4_r16a4); empty = all."
+    ),
     sources: str = typer.Option(
-        "teacher,base,rng", help="Comma list of student sources to score."
+        "", help="Comma list of student sources ('teacher'/'base'/'rng'); empty = all."
+    ),
+    positions: str = typer.Option("last", help="Comma list of pooling positions ('last'/'all')."),
+    min_checkpoints: int = typer.Option(
+        1, help="Skip runs with fewer than this many checkpoint points."
+    ),
+    reference_teacher: list[str] = typer.Option(
+        [], "--reference-teacher",
+        help="EXTRA reference teacher ref_key ('{animal}/{model}/{tag}/ftseed{T}'), "
+        "repeatable; also the ONLY way to measure the base/rng control runs.",
+    ),
+    endpoint_only: bool = typer.Option(
+        False, help="Score only each run's endpoint adapter."
     ),
     n_prompts: int = typer.Option(1024, help="Number of training prompts to evaluate on."),
     batch_size: int = typer.Option(32, help="Prompts per forward pass."),
     device: str = typer.Option("cuda:0", help="Torch device."),
-    limit: int = typer.Option(
-        0, help="Stop after N (lineage x position) run() invocations (0 = no limit)."
-    ),
+    limit: int = typer.Option(0, help="Stop after N run() invocations (0 = no limit)."),
     num_shards: int = typer.Option(
         1, help="Number of deterministic partitions of the sorted unit list."
     ),
-    shard_index: int = typer.Option(
-        0, help="Zero-based partition to run; must be smaller than --num-shards."
-    ),
+    shard_index: int = typer.Option(0, help="Zero-based partition to run."),
     dry_run: bool = typer.Option(
-        False, help="List what would run (+ skip reasons) without loading any model."
+        False, help="List READY / CACHED / SKIP(reason) per run without loading a model."
     ),
-    include_cross_base: bool = typer.Option(
-        False,
-        help="Parse '_nbase-' cross-base lineages (student base B distilled from a teacher on "
-        "base A) instead of skipping them; v_teacher reads on A, v_student on B.",
-    ),
-    force: bool = typer.Option(False, help="Recompute even where a cached doc exists."),
+    force: bool = typer.Option(False, help="Rewrite even where a cached document exists."),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     teacher_training_config: Path = Path("configs/training/lora_template_bias.yaml"),
-    student_training_config: Path = Path("configs/training/lora_student_distill.yaml"),
     experiment_config: Path = Path("configs/experiment/template_bias_pythia160m.yaml"),
 ) -> None:
-    """Compute EAS for every distilled student lineage on disk (see module docstring)."""
+    """Compute EAS for every distilled student run on disk (see module docstring)."""
     load_dotenv()
     configure_loguru()
-
     position_list = tuple(p.strip() for p in positions.split(",") if p.strip())
     if not position_list or any(p not in ("last", "all") for p in position_list):
         raise typer.BadParameter("positions must be a comma list of 'last'/'all'")
-    source_list = tuple(s.strip() for s in sources.split(",") if s.strip())
-    if not source_list or any(s not in ("teacher", "base", "rng") for s in source_list):
+    source_set = _set(sources)
+    if any(s not in ("teacher", "base", "rng") for s in source_set):
         raise typer.BadParameter("sources must be a comma list of 'teacher'/'base'/'rng'")
 
     cfg = load_template_config(
         paths_config, model_config, teacher_training_config, experiment_config
     )
-    student_lora, student_train = load_student_training(student_training_config)
-    # Fold the student config onto the loaded template config so discovery + EASConfig use the
-    # student LoRA/train (the teacher training YAML only supplies paths/hub_org/spec here).
-    cfg = replace(cfg, lora=student_lora, train=student_train)
-
-    animal_set = {a.strip() for a in animals.split(",") if a.strip()}
-    model_set = {m.strip() for m in models.split(",") if m.strip()}
-    tag_set = {t.strip() for t in tags.split(",") if t.strip()}
-
-    units, n_unsupported = _discover(
-        cfg, sources=source_list, positions=position_list,
-        animals=animal_set, models=model_set, tags=tag_set, n_prompts=n_prompts,
-        include_cross_base=include_cross_base,
+    output_root = cfg.paths.output_root
+    units, skipped = build_units(
+        output_root, positions=position_list, animals=_set(animals), models=_set(models),
+        tags=_set(tags), student_tags=_set(student_tags), sources=source_set,
+        min_checkpoints=min_checkpoints, endpoint_only=endpoint_only,
+        extra_refs=tuple(reference_teacher),
     )
+    for rel, reason in skipped:
+        logger.warning("SKIP {} — {}", rel, reason)
     n_total = len(units)
-    # Strided partition of the sorted unit list (before the cache gate, so re-runs still skip
-    # completed work per shard). shard_cells validates num_shards >= 1 and 0 <= shard_index < N.
     units = shard_cells(units, num_shards=num_shards, shard_index=shard_index)
     logger.info(
-        "Discovered {} (lineage x position) unit(s); {} skipped (unsupported).",
-        n_total, n_unsupported,
-    )
-    logger.info(
-        "shard {}/{}: {} of {} units (stable while the on-disk lineage set + filters are unchanged)",
-        shard_index, num_shards, len(units), n_total,
+        "Discovered {} (run x position) unit(s); {} run(s) skipped. shard {}/{}: {} unit(s).",
+        n_total, len(skipped), shard_index, num_shards, len(units),
     )
 
-    n_done = n_cached = n_failed = n_empty = 0
+    session = EASSession(cfg.paths, device=device, batch_size=batch_size)
+    n_done = n_cached = n_failed = n_skipped = 0
     failures: list[tuple[str, str]] = []
-    n_invoked = 0
-    for unit in units:
-        if not unit.required_work_items:
-            n_empty += 1
-            logger.info("NOTHING TO DO (no trained students in scope): {}", unit.label)
-            continue
-        if not force and _cached(unit, n_prompts):
-            n_cached += 1
-            logger.info("CACHED (skip): {}", unit.label)
-            continue
-        if limit and n_invoked >= limit and not dry_run:
-            logger.info("LIMIT {} reached; stopping.", limit)
-            break
-        if dry_run:
-            logger.info(
-                "READY: {} | epochs={} seeds={} required_entries={}",
-                unit.label, list(unit.epochs), list(unit.student_seeds),
-                len(unit.required_work_items),
-            )
-            n_invoked += 1
-            continue
-        eas_cfg = EASConfig(
-            paths=cfg.paths,
-            hub_org=cfg.hub_org,
-            spec=unit.spec,
-            animal=unit.animal,
-            numbers_spec=unit.numbers_spec,
-            teacher_param_tag=unit.teacher_param_tag,
-            teacher_ftseed=unit.teacher_ftseed,
-            number_dataset_tag=unit.dataset_tag,
-            lora=student_lora,
-            train=student_train,
-            sources=source_list,
-            epochs=unit.epochs,
-            student_seeds=unit.student_seeds,
-            splice_examples=unit.splice_examples,
-            position=unit.position,
-            n_prompts=n_prompts,
-            batch_size=batch_size,
-            device=device,
-            force=force,
-            skip_mismatched=True,
-        )
-        n_invoked += 1
-        logger.info("RUN [{}]: {}", n_invoked, unit.label)
-        try:
-            run(eas_cfg)
-            n_done += 1
-        except Exception as exc:  # keep the sweep going; the failed unit retries on resume
-            n_failed += 1
-            failures.append((unit.label, repr(exc)))
-            logger.exception("FAILED: {}", unit.label)
+    try:
+        for unit in units:
+            if unit_is_cached(unit, output_root, n_prompts, force=force):
+                n_cached += 1
+                logger.info("CACHED (skip): {}", unit.label)
+                continue
+            if dry_run:
+                logger.info(
+                    "READY: {} | source={} base={} refs={} checkpoints={}",
+                    unit.label, unit.source, unit.base_model_dir,
+                    list(unit.references), len(unit.ckpt_rels),
+                )
+                n_done += 1
+                continue
+            if limit and n_done >= limit:
+                logger.info("LIMIT {} reached; stopping.", limit)
+                break
+            logger.info("RUN [{}]: {}", n_done + 1, unit.label)
+            try:
+                session.run(EASRunConfig(
+                    paths=cfg.paths, hub_org=cfg.hub_org, run_dir=unit.run_dir,
+                    references=tuple(unit.references), position=unit.position,
+                    n_prompts=n_prompts, batch_size=batch_size, device=device,
+                    endpoint_only=endpoint_only, force=force,
+                ))
+                n_done += 1
+            except EASSkip as exc:
+                n_skipped += 1
+                logger.warning("SKIP {} — {}", unit.label, exc)
+            except Exception as exc:  # keep the sweep going; the unit retries on resume
+                n_failed += 1
+                failures.append((unit.label, repr(exc)))
+                logger.exception("FAILED: {}", unit.label)
+    finally:
+        session.release()
 
     logger.info(
-        "EAS sweep complete (shard {}/{}): completed={}, cached-skip={}, nothing-to-do={}, "
-        "failed={}, skipped-unsupported={}, dry_run={}",
-        shard_index, num_shards, n_done, n_cached, n_empty, n_failed, n_unsupported, dry_run,
+        "EAS sweep complete (shard {}/{}): done={}, cached-skip={}, skipped={}, failed={}, "
+        "dry_run={}",
+        shard_index, num_shards, n_done, n_cached, n_skipped + len(skipped), n_failed,
+        dry_run,
     )
     for label, reason in failures:
         logger.warning("  FAILED {} — {}", label, reason)

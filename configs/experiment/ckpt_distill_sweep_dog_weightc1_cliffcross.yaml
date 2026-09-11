@@ -1,0 +1,75 @@
+# Cross-checkpoint distillation on the CORRECTED weight-seed base `weightc-seed1`
+# (gpaulo's 4th re-pretraining `pythia-160m-weight-seed1-corrected`: seed-1 init, main's
+# exact positional data order, fused kernels + flash-attn; local HF conversions under
+# {hf_cache_root}/local/pythia-160m-weightc-seed1/step{K}, made by
+# `scripts/convert_weightc_checkpoints.py`). This is the first lineage that shares orig's
+# DATA ORDER but not its init, i.e. the complement of ds1 (init shared, order not) --
+# unlike ws1, which turned out to reuse both.
+#
+# Design mirrors the fs1 first pass (`ckpt_distill_sweep_dog_fs1_cliffcross.yaml`): the
+# 11x11 cliff-cross pair matrix (75k..125k every 5k, every ordered teacher x student pair)
+# on the dense-cliff recipe ep20_lr1e-4_r16a32, plus three coarse diagonal points outside
+# the window (25k, 50k, 143k) so the ladder lines up with ds1/ws1/fs1 recipe-for-recipe.
+#
+# Phased submission (the run was at 56k on 2026-09-09; checkpoints land ~49 min/1000
+# steps: 75k ~09-10 05:20 UTC, 125k ~09-11 22:15, 143k ~09-12 13:00). Pools run
+# HF_HUB_OFFLINE=1 and load the local dir, so a cell can only be queued once its step is
+# converted. Phase 1 = the 25k/50k diagonals (converted 09-09). The window pairs and 143k
+# are appended to `explicit` and re-submitted with --allow-snapshot-update as they land
+# (pairs only grow; existing cells keep their identity).
+base_model: weightc-seed1
+
+steps: [25000, 50000, 75000, 80000, 85000, 90000, 95000]
+
+pairs:
+  topology: explicit
+  explicit:
+    - [25000, 25000]
+    - [50000, 50000]
+    - [75000, 75000]
+    - [75000, 80000]
+    - [80000, 75000]
+    - [80000, 80000]
+    - [75000, 85000]
+    - [80000, 85000]
+    - [85000, 75000]
+    - [85000, 80000]
+    - [85000, 85000]
+    - [75000, 90000]
+    - [80000, 90000]
+    - [85000, 90000]
+    - [90000, 75000]
+    - [90000, 80000]
+    - [90000, 85000]
+    - [90000, 90000]
+    - [75000, 95000]
+    - [80000, 95000]
+    - [85000, 95000]
+    - [90000, 95000]
+    - [95000, 75000]
+    - [95000, 80000]
+    - [95000, 85000]
+    - [95000, 90000]
+    - [95000, 95000]
+
+animals: [dog]
+
+# All five dog top-5 recipes (Angela 2026-09-10: "add them" after the single-recipe
+# phase 1 drained; the dense-cliff recipe ep20_lr1e-4_r16a32 came first).
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
+                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# Just above the fs1 4-recipe cliff-cross (52/51/50) so the two-cell phase 1 starts as
+# slots free; revisit when the window pairs are appended.
+jobq: {root: run_logs/queue_angela, queue_prefix: ckpt-dogwc1-cliffcross,
+       priorities: {teacher: 55, numgen: 54, distill: 53},
+       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}

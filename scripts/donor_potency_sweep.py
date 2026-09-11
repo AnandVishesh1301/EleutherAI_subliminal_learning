@@ -56,7 +56,7 @@ def main(
     from subliminal_learning.analysis.frames import parse_param_tag
     from subliminal_learning.analysis.intruder_threshold import theta_bar
     from subliminal_learning.coherence.probe_io import (
-        PROBE_POOL_PP1, build_probe_pool, mean_ce, pile_logprobs,
+        build_probe_pool, mean_ce, pile_logprobs, resolve_probe_pool_spec,
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.weightspace.adapters import adapter_direction_pairs
@@ -97,7 +97,8 @@ def main(
         mdl = AutoModelForCausalLM.from_pretrained(
             base_repo, torch_dtype=torch.float32,
             cache_dir=str(hf_cache / "hub")).to(device).eval()
-        pool = build_probe_pool(tok, PROBE_POOL_PP1)
+        probe_spec = resolve_probe_pool_spec(base_repo)      # the base's family pool
+        pool = build_probe_pool(tok, probe_spec)
         with torch.no_grad():
             base_logp = pile_logprobs(mdl, pool, device)
             ce_base = mean_ce(base_logp, pool)
@@ -143,7 +144,8 @@ def main(
                         deltas[name] = directions_delta(
                             Ur, Vr, k, E * thetas[name] / np.sqrt(k))
                     kl, dce = eval_delta(deltas)
-                    recs.append(dict(run=None, cond="random", base=base_repo, k=k, E=E,
+                    recs.append(dict(run=None, cond="random", base=base_repo,
+                                     pool_version=probe_spec.version, k=k, E=E,
                                      draw=d, pile_kl=kl, delta_ce=dce))
                     typer.echo(f"random k={k} E={E}: dCE={dce:.3f} (draw {d})")
         with out.open("a") as f:
@@ -176,7 +178,8 @@ def main(
                         deltas[name] = directions_delta(
                             U, V, k, E * thetas[name] / np.sqrt(k))
                     kl, dce = eval_delta(deltas)
-                    recs.append(dict(run=str(rd), cond="donor", base=base_repo, k=k, E=E,
+                    recs.append(dict(run=str(rd), cond="donor", base=base_repo,
+                                     pool_version=probe_spec.version, k=k, E=E,
                                      rank=r, lr=pt.get("lr"), alpha=pt.get("alpha"),
                                      stored_delta_ce=stored, pile_kl=kl, delta_ce=dce))
                     typer.echo(f"{rd.parent.name}/{rd.name} k={k} E={E}: dCE={dce:.3f}"

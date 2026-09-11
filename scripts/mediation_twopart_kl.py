@@ -46,6 +46,7 @@ import pandas as pd
 import typer
 from dotenv import load_dotenv
 
+from subliminal_learning.stats import collapse_law as cl
 from subliminal_learning.stats.core import cluster_ols
 from subliminal_learning.stats.core import json_scalar as _j
 from subliminal_learning.stats.mediation import (
@@ -94,7 +95,7 @@ def _part2(df: pd.DataFrame, dead_col: str, cut_doc: str) -> dict:
         **_block(rung.block),
         "auc_dw_fro": _auc(d.dw_fro, d.dead),
         f"auc_K_task_b{B_TASK}_c{C_TASK}": _auc(d.K_task, d.dead),
-        "auc_K_settled_b0.561_c-0.085": _auc(d.K_settled, d.dead),
+        f"auc_K_ref_b{cl.B_LAW}_c{cl.C_LAW}": _auc(d.K_ref, d.dead),
     }
 
     # cos block: same subset before/after, so the two p-values are comparable
@@ -292,7 +293,7 @@ def main(
     fit["aln"] = np.log(fit.a)
     fit["rln"] = np.log(fit.r)
     fit["K_task"] = fit.lr * fit.a ** B_TASK * fit.r ** C_TASK
-    fit["K_settled"] = fit.lr * fit.a ** 0.561 * fit.r ** -0.085
+    fit["K_ref"] = fit.lr * fit.a ** cl.B_LAW * fit.r ** cl.C_LAW
     fit["dead_kl4"] = fit.kl > DEAD_KL_CUT
     fit["dead_anchor"] = fit.delta_ce > delta_cross
 
@@ -319,7 +320,8 @@ def main(
         },
         "planned_dose": {
             "K_task": f"lr * alpha^{B_TASK} * r^{C_TASK}",
-            "K_settled": "lr * alpha^0.561 * r^-0.085 (cl.B_LAW/C_LAW)",
+            "K_ref": f"lr * alpha^{cl.B_LAW} * r^{cl.C_LAW} (cl.B_LAW/C_LAW: 160m "
+                     "designed cross-data-order population fit, anchored label, 2026-09-09)",
         },
         "inference": "cluster-robust by cell tag (ftseeds share a cell); logistic fits BFGS "
                      "maxiter 500; LR tests plain chi2(3); Wald tests use the cluster sandwich",

@@ -15,6 +15,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from subliminal_learning.stats import collapse_law as cl
+
+# Reference (quotable) collapse-law constants, rendered once for the markdown below.
+_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
+_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
+
 CELLS: list[tuple[str, str]] = []
 
 
@@ -85,7 +91,8 @@ from subliminal_learning.analysis import transfer_factors as tf
 REPO = find_root()
 _, OUT = bootstrap(REPO)
 priors = tf.load_priors(OUT)
-KSTAR = cl.KSTAR_CALIBRATED  # working calibrated anchor (8.4e-4, cut-4 pooled; Angela 08-20)
+KSTAR = cl.KSTAR_CALIBRATED  # 160m reference anchor: designed cross-data-order population
+                             # fit (504 cells x 2 student seeds, anchored label, 2026-09-09)
 
 
 # base-model dir -> arm label; a fully re-randomized sibling keeps a `full-` marker
@@ -101,7 +108,7 @@ core65, _ = tf.load_core65_design(REPO)
 # strip three-curves frame: live aggregate of the per-run eval records
 # (builder: scripts/three_curves_strip_ds1.py; sources listed in its header)
 tc = pd.read_csv(OUT / "analysis" / "fidelity_strip_ds1" / "three_curves.csv")
-tc["Krel"] = tc.Krel * 7.87e-4 / KSTAR   # csv stores K/K* at the legacy 7.87e-4 anchor
+# Krel comes straight from the csv: it is built in the cl.K_of / cl.KSTAR_CALIBRATED coordinate.
 Q_DS1 = float(priors.query("animal=='dog' and base_label=='data-seed1'")["test_prior"].iloc[0])
 # legacy trait cut — caveat: trait loss ≠ integrity collapse; operative label = anchored KL (analysis.labels)
 tc["dead_trait"] = labels.label_dead_trait_legacy(tc, col="p_trait", cut=cl.DEAD_SEED).astype(int)
@@ -114,7 +121,11 @@ print(f"strip seeds {len(tc)}; trait dead {tc.dead_trait.sum()} (legacy trait cu
 md(r"""
 ## C1 — collapse is an event on the integrity curve: smooth below K*, catastrophic at it
 
-Binned three-curve table (strip; K/K* at the pooled display exponents b=0.561, c=−0.085):
+Binned three-curve table (strip; K/K* at the 160m reference exponents b=""" + _B_REF + r""", c=""" + _C_REF + r""" —
+the designed cross-data-order population fit, anchored label, 2026-09-09; but
+⚠ the CSV’s $K$ was BUILT in the retired trait-era PLACEMENT coordinate
+(exponents 0.561, −0.085) and only its anchor is rescaled here, so the binning below
+inherits the placement exponents, not the reference ones):
 general-distribution damage is graded below the boundary and jumps at it — the bimodality
 (modes ~1 and ~15 nats, sparse transit plateau ~4–12) that licenses the declared label.
 Coverage: the pile PROBE (`eval/pile_probe.json`, pp1 pool) gives delta-CE AND KL for every
@@ -316,7 +327,8 @@ md(r"""
 ### C3b — the per-arm K* calibration (display exponents, logistic-50%)
 
 One boundary per (animal × base) arm — NO cross-animal or cross-base aggregation — at the
-FIXED display exponents (b=0.561, c=−0.085) so arms share one coordinate. Support: the full
+FIXED 160m reference exponents (b=""" + _B_REF + r""", c=""" + _C_REF + r"""; the designed cross-data-order population
+fit, anchored label, 2026-09-09) so arms share one coordinate. Support: the full
 probe-covered calibration population (all ftseeds, all teachers, + the strip). Estimators:
 `cl.kstar_logistic` (50% crossing on log K; single-seed compatible, cluster-robust-by-cell
 CI) with `cl.kstar_minerr` as the assumption-free check; AUC = planned dose vs the declared
@@ -494,7 +506,7 @@ the plot floor.
 code(r"""
 # strip per-run p(trait), log axis, vs dose on the anchor CALIBRATED under the anchored label
 est_s = cl.kstar_logistic(sub.assign(collapsed=(sub.pile_kl_final > CUT_DS1).astype(int)),
-                          0.561, -0.085)
+                          cl.B_LAW, cl.C_LAW)
 KSTAR_CAL = est_s["kstar"]
 xx = sub.Krel * KSTAR / KSTAR_CAL     # re-anchor the display coordinate to the calibrated K*
 dead = sub.pile_kl_final > CUT_DS1

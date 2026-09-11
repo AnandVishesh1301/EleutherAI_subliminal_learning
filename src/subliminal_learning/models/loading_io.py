@@ -21,11 +21,13 @@ from subliminal_learning.models.datadecide import (
     load_datadecide_tokenizer,
     parse_dd_ref,
 )
+from subliminal_learning.models.tokenization_io import BOS_POLICY_ATTR, stamp_bos_policy
 from subliminal_learning.models.registry import (
     ExternalModelSpec,
     PythiaModelSpec,
     external_attn_kwargs,
     local_model_dir,
+    model_ref,
     resolve_hf_repo_id,
 )
 
@@ -76,6 +78,24 @@ def resolve_dtype(name: str) -> torch.dtype:
         ) from None
 
 
+def _stamped(tokenizer: PreTrainedTokenizerBase, ref: str) -> PreTrainedTokenizerBase:
+    """`stamp_bos_policy`, but a ref no family classifies is fatal here, not later.
+
+    An unstamped tokenizer falls through to the `name_or_path` lookup in
+    `tokenization_io._needs_bos`, which raises deep inside prompt encoding -- far from the
+    load that caused it, and only for callers that happen to encode a prompt. Refusing the
+    load names the ref instead.
+    """
+    stamp_bos_policy(tokenizer, ref)
+    if not isinstance(getattr(tokenizer, BOS_POLICY_ATTR, None), bool):
+        raise ValueError(
+            f"base ref {ref!r} belongs to no registered family, so its BOS policy is "
+            "unknown; pass the canonical ref (see utils.run_io.base_ref_for_run) or "
+            "register the base in models.registry / coherence.probe_families."
+        )
+    return tokenizer
+
+
 def load_tokenizer(
     spec: PythiaModelSpec,
     hf_cache_root: Path,
@@ -93,7 +113,9 @@ def load_tokenizer(
     """
     if isinstance(spec, DataDecideSpec):
         # DataDecide bakes its org into the repo id; `hub_org` is ignored.
-        return load_datadecide_tokenizer(spec, hf_cache_root)
+        return _stamped(
+            load_datadecide_tokenizer(spec, hf_cache_root), model_ref(spec, hub_org)
+        )
     if isinstance(spec, ExternalModelSpec):
         kwargs: dict = {"cache_dir": str(hf_cache_root / "hub")}
         if spec.revision is not None:
@@ -101,7 +123,7 @@ def load_tokenizer(
         tokenizer = AutoTokenizer.from_pretrained(spec.repo_id, **kwargs)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        return tokenizer
+        return _stamped(tokenizer, spec.repo_id)
     repo_id = resolve_hf_repo_id(spec, hub_org)
     local_dir = local_model_dir(repo_id, spec.revision, hf_cache_root)
     if local_dir is not None:
@@ -116,7 +138,9 @@ def load_tokenizer(
         tokenizer = AutoTokenizer.from_pretrained(repo_id, **kwargs)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
+    # Stamp from the spec's repo id, not `name_or_path` (a directory path for local
+    # conversions), so the BOS policy is decided by what the base IS.
+    return _stamped(tokenizer, repo_id)
 
 
 def load_model(
@@ -204,7 +228,7 @@ def load_base_from_ref(
     if is_dd_ref(ref):
         spec = parse_dd_ref(ref)
         return (load_datadecide_model(spec, hf_cache_root, device, dtype=dtype),
-                load_datadecide_tokenizer(spec, hf_cache_root))
+                _stamped(load_datadecide_tokenizer(spec, hf_cache_root), ref))
     repo_id, _, revision = ref.partition("@")
     local_dir = local_model_dir(repo_id, revision or None, hf_cache_root)
     if local_dir is not None:
@@ -214,6 +238,7 @@ def load_base_from_ref(
         tokenizer = AutoTokenizer.from_pretrained(path)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        _stamped(tokenizer, repo_id)   # the dir path is not a family spelling
         model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=dtype)
         model.to(device)
         model.eval()
@@ -229,6 +254,7 @@ def load_base_from_ref(
         tokenizer = AutoTokenizer.from_pretrained(repo_id, local_files_only=True, **kwargs)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    _stamped(tokenizer, repo_id)
     try:
         model_kwargs = {
             "torch_dtype": dtype, **kwargs, **external_attn_kwargs(repo_id)

@@ -2,3 +2,6 @@ output_root:<>
 hf_cache_root: <>
 dataset_cache_root: <>
 wandb_dir: <>
+# Optional: Megatron-format preshuffled Pile stem (.idx/.bin beside it), needed only by
+# held-out-CE gating of converted Pythia checkpoints (ckpt_distill_gate_append).
+# pile_preshuffled_document: <>

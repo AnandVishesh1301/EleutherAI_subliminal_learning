@@ -26,7 +26,8 @@ from subliminal_learning.weightspace.lora import (
 )
 from subliminal_learning.weightspace.patching import (
     TARGET_KINDS, capture_named_weights, capture_w0, iter_target_modules,
-    iter_target_weight_params, patch_modules, patch_modules_f64, restore_modules,
+    iter_target_weight_params, patch_modules, patch_modules_f64, resolve_adapter_deltas,
+    restore_modules,
 )
 
 N, M, R = 12, 9, 4
@@ -112,6 +113,122 @@ def test_iter_target_modules_covers_the_olmo_layout():
                      "model.transformer.blocks.1.ff_out"]
     params = [n for n, _ in iter_target_weight_params(_TinyOlmo())]
     assert params == [f"{n}.weight" for n in names]
+
+
+class _TinyHF(torch.nn.Module):
+    """Enough of a Qwen/Llama/Gemma to exercise the ``model.layers.*`` proj targets."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
+        self.model.layers[0].self_attn = torch.nn.Module()
+        self.model.layers[0].self_attn.q_proj = torch.nn.Linear(M, N, bias=False)
+        self.model.layers[1].mlp = torch.nn.Module()
+        self.model.layers[1].mlp.down_proj = torch.nn.Linear(M, N, bias=False)
+        self.model.embed_tokens = torch.nn.Embedding(4, M)     # not a target
+        self.lm_head = torch.nn.Linear(M, 4, bias=False)        # not a target
+
+
+def test_iter_target_modules_covers_the_hf_family_layout():
+    names = [n for n, _ in iter_target_modules(_TinyHF())]
+    assert names == ["model.layers.0.self_attn.q_proj", "model.layers.1.mlp.down_proj"]
+    params = [n for n, _ in iter_target_weight_params(_TinyHF())]
+    assert params == [f"{n}.weight" for n in names]
+    keys = [f"base_model.model.{n}.lora_A.weight" for n in names]
+    assert all(module_name(k) in set(names) for k in keys)
+
+
+def test_target_iterators_refuse_a_peft_wrapped_model():
+    class PeftModelStub(torch.nn.Module):          # a PeftModel by class name
+        pass
+
+    with pytest.raises(TypeError, match="bare base model"):
+        list(iter_target_modules(PeftModelStub()))
+    stale = _TinyHF()
+    stale.peft_config = {"default": object()}      # what unload() leaves on a base
+    with pytest.raises(TypeError, match="peft_config"):
+        list(iter_target_weight_params(stale))
+    del stale.peft_config
+    assert len(list(iter_target_modules(stale))) == 2
+
+
+def _hf_adapter(rng, names, shapes, r=2) -> dict[str, np.ndarray]:
+    tens = {}
+    for name, (out_dim, in_dim) in zip(names, shapes):
+        tens[f"base_model.model.{name}.lora_A.weight"] = rng.standard_normal((r, in_dim))
+        tens[f"base_model.model.{name}.lora_B.weight"] = rng.standard_normal((out_dim, r))
+    return tens
+
+
+def test_resolve_adapter_deltas_requires_every_module_by_name_and_shape():
+    rng = np.random.default_rng(0)
+    _, mods = capture_w0(_TinyHF())
+    names = list(mods)                              # both Linear(M, N): weight (N, M)
+    good = _hf_adapter(rng, names, [(N, M)] * len(names))
+    deltas = resolve_adapter_deltas(good, 0.5, mods)
+    assert set(deltas) == set(names)
+    for name in names:
+        b = good[f"base_model.model.{name}.lora_B.weight"]
+        a = good[f"base_model.model.{name}.lora_A.weight"]
+        np.testing.assert_allclose(deltas[name], 0.5 * b @ a)
+    # an adapter module the base does not have: refused, named -- never silently dropped
+    extra = {**good, **_hf_adapter(rng, ["model.layers.1.self_attn.k_proj"], [(N, M)])}
+    with pytest.raises(ValueError, match="k_proj"):
+        resolve_adapter_deltas(extra, 0.5, mods)
+    # right name, transposed shape: refused
+    bad = {**good, **_hf_adapter(rng, [names[0]], [(M, N)])}
+    with pytest.raises(ValueError, match="shape"):
+        resolve_adapter_deltas(bad, 0.5, mods)
+    with pytest.raises(ValueError, match="no lora"):
+        resolve_adapter_deltas({}, 0.5, mods)
+    # an orphan lora_B (no lora_A) or orphan lora_A: refused, not silently skipped
+    orphan_b = {**good, f"base_model.model.{names[1]}.lora_B.weight": good[f"base_model.model.{names[1]}.lora_B.weight"]}
+    orphan_b = {k: v for k, v in orphan_b.items() if not (names[1] in k and ".lora_A." in k)}
+    with pytest.raises(ValueError, match="B-only"):
+        resolve_adapter_deltas(orphan_b, 0.5, mods)
+    orphan_a = {k: v for k, v in good.items() if not (names[0] in k and ".lora_B." in k)}
+    with pytest.raises(ValueError, match="A-only"):
+        resolve_adapter_deltas(orphan_a, 0.5, mods)
+
+
+def test_patch_modules_lora_matches_the_materialised_cpu_path():
+    from subliminal_learning.weightspace.patching import patch_modules_lora, resolve_adapter_factors
+
+    rng = np.random.default_rng(3)
+    model = _TinyHF()
+    w0, mods = capture_w0(model)
+    names = list(mods)
+    tens = _hf_adapter(rng, names, [(N, M)] * len(names), r=3)
+    scale, lam = 2.0 / 3.0, 0.37
+    # reference: the CPU float64 path (materialise, scale by lambda, cast, add)
+    patch_modules(mods, w0, {n: lam * d for n, d in resolve_adapter_deltas(tens, scale, mods).items()})
+    ref = {n: mods[n].weight.detach().clone() for n in names}
+    restore_modules(mods, w0)
+    factors = resolve_adapter_factors(tens, mods)
+    assert all(isinstance(b, np.ndarray) and b.shape == (N, 3) and a.shape == (3, M) for b, a in factors.values())
+    patch_modules_lora(mods, w0, factors, scale, lam)
+    for n in names:
+        got = mods[n].weight.detach()
+        # equal up to one float32 ulp (float64 accumulation-order ties), and actually moved
+        assert torch.all((got - ref[n]).abs() <= torch.finfo(torch.float32).eps * ref[n].abs())
+        assert not torch.equal(got, w0[n])
+    restore_modules(mods, w0)
+    for n in names:
+        assert torch.equal(mods[n].weight.detach(), w0[n])
+    # the factor path validates exactly like the materialised one
+    with pytest.raises(ValueError, match="k_proj"):
+        resolve_adapter_factors({**tens, **_hf_adapter(rng, ["model.layers.1.self_attn.k_proj"], [(N, M)])}, mods)
+
+
+def test_bare_model_error_never_recommends_merging():
+    class PeftModelStub(torch.nn.Module):
+        pass
+
+    with pytest.raises(TypeError) as info:
+        list(iter_target_modules(PeftModelStub()))
+    msg = str(info.value)
+    assert "UNMERGED" in msg and "merge_and_unload" in msg and "release_base" in msg
 
 
 def test_olmo_adapter_module_names_match_the_model_modules():

@@ -47,6 +47,18 @@ Four subcommands:
               the cell DONE forever (jobq requeue is failed_only; re-submit drops present
               jobkeys).
 
+`jobq.cwd` (optional): absent or `null` -> jobs carry no cwd and run in the claiming pool's
+own checkout (the portable default since 2026-09-10: an absolute /home/angela cwd crashes the
+runner on nodes whose pool uid cannot enter it); `cwd: pin` -> every job carries THIS
+checkout's absolute path; any other string is used verbatim (see expand_jobs).
+
+`jobq.depends_on_prefix` (optional): another campaign's queue_prefix covering the same
+teacher cells (an extension config that re-lists a drained window's steps). Each expanded
+`-t-step{i}` then depends on `{other}-t-step{i}` and each `-n-step{i}` additionally on
+`{other}-n-step{i}`, for the steps whose counterpart queues exist under this jobq root, so
+two same-key teacher jobs can never run concurrently into one output dir. Additive only: an
+existing queue keeps its stored meta (submit warns and leaves it untouched).
+
 `submit` snapshots the sweep YAML into the queue root at
 `{queue_root}/{queue_prefix}.sweep.yaml` and embeds THAT path in every run-cell command,
 so editing the source YAML after submit cannot silently re-configure queued cells.
@@ -74,13 +86,15 @@ import typer
 import yaml
 
 from subliminal_learning.jobqueue.model import sanitize_jobkey
+from subliminal_learning.utils.io import atomic_write_text, file_lock
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
 # The runner script lives at scripts/sweeps/sweep_ckpt_distill.py; the repo root is two
-# levels up. Jobs carry an absolute cwd so a pool draining a shared root runs them in
-# THIS checkout (reading its paths_local.yaml / output_root), never the pool's.
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# levels up. `absolute()` (not `resolve()`): symlinked checkouts must keep their own path.
+# Jobs carry NO cwd by default (the claiming pool runs them in its own checkout); `jobq.cwd:
+# pin` opts back into pinning this checkout's absolute path (the old shared-root default).
+REPO_ROOT = Path(__file__).absolute().parents[2]
 DEFAULT_SWEEP_CONFIG = Path("configs/experiment/ckpt_distill_sweep.yaml")
 # Experiment YAML supplies template_path + eval defaults for load_template_config; the
 # checkpoint sweep never varies it (run identity/paths come from run_layout).
@@ -133,14 +147,17 @@ def _pair_set(topology: str, steps: list[int], explicit: list) -> list[tuple[int
     raise ValueError(f"unknown pairs.topology {topology!r}; choose diagonal|full|explicit")
 
 
-def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
-    """Expand a sweep doc into the ordered list of jobq queues (pure; no I/O, no GPU).
+def expand_jobs(sweep: dict, repo_root: Path, queue_root: Path | None = None) -> list[QueueSpec]:
+    """Expand a sweep doc into the ordered list of jobq queues (no GPU; see queue_root).
 
     Per teacher checkpoint i: a train queue, a numgen queue (depends_on the train queue)
     and a distill queue (depends_on the numgen queue). Distill jobs are `run-cell`
     invocations, one per (animal, pair i->j, mode, epoch, student ftseed). Base/rng
     control numgen jobs are added only when their numbers.* flags are set. Every job
-    carries an absolute cwd, WANDB_MODE=disabled, and the per-stage mem_mib.
+    carries WANDB_MODE=disabled and the per-stage mem_mib (plus a cwd only when pinned).
+
+    `queue_root` is read ONLY for the optional `jobq.depends_on_prefix` knob (which needs to
+    know which of the other campaign's queues exist); everything else is pure.
     """
     base_model = str(sweep["base_model"])
     steps = [int(s) for s in sweep["steps"]]
@@ -186,11 +203,39 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
     mem = jobq["mem_mib"]
     config_path = str(sweep.get("config_path", DEFAULT_SWEEP_CONFIG))
 
-    cwd = str(repo_root)
+    # `jobq.cwd`: absent / null -> emit no cwd, so the claiming pool runs the job in its own
+    # checkout (the portable default: an absolute cwd crashes the runner on nodes whose pool uid
+    # cannot enter this checkout, e.g. goncalo-temp-1 since 2026-09-09; every node's checkout
+    # resolves the same output_root, so the 07-28 cross-root hazard does not apply on the
+    # private root). `cwd: pin` -> pin every job to THIS checkout; any other string verbatim.
+    cwd_knob = jobq.get("cwd")
+    cwd = str(repo_root) if cwd_knob == "pin" else cwd_knob
+
+    # `jobq.depends_on_prefix` (optional): another campaign's queue_prefix whose per-step
+    # queues cover the SAME teacher cells. An extension config that re-lists the window steps
+    # re-emits their -t/-n jobs under a second prefix at the same priority, and nothing else
+    # orders the two: two same-key teacher jobs from different prefixes can enter one output
+    # dir at once (the pipelines take no lock). With the knob, `-t-step{i}` waits on
+    # `{other}-t-step{i}` and `-n-step{i}` additionally on `{other}-n-step{i}` -- but only for
+    # steps where those queues already exist under this jobq root, since a brand-new step has
+    # no counterpart and a dangling dep would park the queue forever. The deps are purely
+    # ADDITIVE: an already-submitted queue keeps its stored meta (submit only warns that the
+    # meta differs and leaves the queue untouched), so adding the knob never re-orders a
+    # campaign that has already run.
+    dep_prefix = jobq.get("depends_on_prefix")
+
+    def dep_queue(stage_letter: str, step: int) -> list[str]:
+        if not dep_prefix:
+            return []
+        name = f"{dep_prefix}-{stage_letter}-step{step}"
+        return [name] if queue_root is not None and (Path(queue_root) / name).is_dir() else []
     env = {"WANDB_MODE": "disabled"}
 
     def job(key: str, cmd: str, stage: str) -> dict:
-        return {"key": key, "cmd": cmd, "cwd": cwd, "env": dict(env), "mem_mib": int(mem[stage])}
+        d = {"key": key, "cmd": cmd, "env": dict(env), "mem_mib": int(mem[stage])}
+        if cwd is not None:
+            d["cwd"] = cwd
+        return d
 
     queues: dict[str, QueueSpec] = {}
     order: list[str] = []
@@ -206,9 +251,10 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
 
     teacher_steps = sorted({i for i, _ in pairs})
     for i in teacher_steps:
-        tq = ensure(f"{prefix}-t-step{i}", int(prio["teacher"]), [], "teacher")
+        tq = ensure(f"{prefix}-t-step{i}", int(prio["teacher"]), dep_queue("t", i), "teacher")
         nq = ensure(
-            f"{prefix}-n-step{i}", int(prio["numgen"]), [f"{prefix}-t-step{i}"], "numgen"
+            f"{prefix}-n-step{i}", int(prio["numgen"]),
+            [f"{prefix}-t-step{i}"] + dep_queue("n", i), "numgen",
         )
         ensure(
             f"{prefix}-d-step{i}", int(prio["distill"]), [f"{prefix}-n-step{i}"], "distill"
@@ -277,7 +323,7 @@ def expand_jobs(sweep: dict, repo_root: Path) -> list[QueueSpec]:
     # the single rng pool is model-free. Both are consumed only by control students.
     if include_base_control:
         for j in sorted({j for _, j in pairs}):
-            deps = [f"{prefix}-t-step{j}"] if j in teacher_steps else []
+            deps = ([f"{prefix}-t-step{j}"] if j in teacher_steps else []) + dep_queue("n", j)
             nqj = ensure(f"{prefix}-n-step{j}", int(prio["numgen"]), deps, "numgen")
             nqj.jobs.append(job(
                 f"n-base|{base_model}|step{j}",
@@ -322,6 +368,17 @@ def _snapshot_action(existing: str | None, new_content: str, allow_update: bool)
     if existing == new_content:
         return "reuse"
     return "overwrite" if allow_update else "error"
+
+
+def sweep_lock_path(queue_root: Path | str, queue_prefix: str) -> Path:
+    """Lock file serializing writes to a campaign's sweep YAML + queue-root snapshot.
+
+    It lives under the QUEUE root (world-writable, shared by both nodes' uids), never
+    beside the YAML in the repo checkout: the gate watcher that grows the source config
+    and a concurrent ``submit`` that overwrites the snapshot must exclude each other, and
+    they only share the queue root.
+    """
+    return Path(queue_root) / f"{queue_prefix}.sweep.lock"
 
 
 @app.command()
@@ -379,13 +436,14 @@ def submit(
             )
         if action in ("write", "overwrite"):
             store.mkdir_open(queue_root)
-            snapshot_path.write_text(new_content)
+            with file_lock(sweep_lock_path(queue_root, queue_prefix)):
+                atomic_write_text(snapshot_path, new_content)
             logger.info("snapshot {} written", snapshot_path)
         else:
             logger.info("snapshot {} reused (byte-identical)", snapshot_path)
 
     sweep["config_path"] = str(snapshot_path)
-    specs = expand_jobs(sweep, REPO_ROOT)
+    specs = expand_jobs(sweep, REPO_ROOT, queue_root)
     total = sum(len(q.jobs) for q in specs)
     logger.info(
         "Cross-checkpoint sweep {}: {} queue(s), {} job(s), root={}",

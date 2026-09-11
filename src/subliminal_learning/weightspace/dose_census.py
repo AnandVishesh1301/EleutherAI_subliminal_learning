@@ -17,7 +17,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.coherence.probe_io import anchored_dead_cut
+from subliminal_learning.coherence.probe_families import family_for_pool_version, is_pp1t
+from subliminal_learning.coherence.probe_io import (
+    PROBE_POOL_DP1, PROBE_POOL_PP1, ProbePoolSpec, anchored_dead_cut, probe_pool_spec_pp1t,
+)
 from subliminal_learning.weightspace.dose_rescaling import (
     DEFAULT_DOSE_RATIOS,
     fit_anchored_dose_threshold,
@@ -47,6 +50,13 @@ class ArmSpec:
             return self.run_glob
         return "ep20_*/ftseed*" if self.ep20_only else "*/ftseed1"
 
+
+# The Qwen2.5-1.5B nonadaptive set (2026-09-09): ep5 students of the list-pool teacher
+# ep1_lr2e-3_r8a128, probed on the retokenized frozen-text pool pp1t-qwen25 and anchored on
+# the base dir-name key. 6 rungs x 72 pairs = 432 cells designed; 324 trained (the alpha
+# 32-512 columns of rung 1e-3 and alpha 4-256 of rung 2e-5 are deferred), so
+# `expected_runs` is the TRAINED count -- re-plan when the deferred cells land.
+QWEN_ARM_SPECS: tuple["ArmSpec", ...] = ()   # filled after ArmSpec is defined (below)
 
 # Fields added after the 2026-09-02 census: omitted from the serialized `arm_specs` when
 # left at their default, so the seven Pythia arms keep byte-identical manifests (the
@@ -131,6 +141,35 @@ DD1B_ARM_SPECS: tuple[ArmSpec, ...] = (
         pool="dp1", run_glob="ep10_*/ftseed1",
     ),
 )
+
+QWEN_ARM_SPECS = (
+    ArmSpec(
+        "qwen25_nonadaptive",
+        "students/panda/Qwen2.5-1.5B/teacher-Qwen2.5-1.5B/"
+        "ep1_lr2e-3_r8a128_tseed0/ex10-20_prefix_n100k",
+        "Qwen2.5-1.5B", 324,
+        pool="pp1t-qwen25", run_glob="ep5_*/ftseed1",
+    ),
+)
+
+
+def probe_spec_for_pool_version(pool_version: str) -> ProbePoolSpec:
+    """The probe pool a manifest run's ``pool_version`` names, for the evaluator.
+
+    Exactly three families are evaluable: ``pp1`` (Pile, Pythia tokenizer), ``dp1`` (Dolma,
+    OLMo tokenizer) and ``pp1t-<tag>`` (pp1's frozen text retokenized for a registered
+    family). Anything else -- a wide ``pp1w-*`` pool, an unregistered tag, a typo -- raises
+    rather than falling through to pp1, which would score a foreign base on the wrong pool.
+    """
+    if pool_version == "pp1":
+        return PROBE_POOL_PP1
+    if pool_version == "dp1":
+        return PROBE_POOL_DP1
+    if is_pp1t(pool_version):
+        return probe_pool_spec_pp1t(family_for_pool_version(pool_version).tag)
+    raise ValueError(
+        f"unsupported probe pool version {pool_version!r} for the census evaluator; "
+        "supported: 'pp1', 'dp1', 'pp1t-<tag>' for a registered probe family")
 
 
 def _latest_cache(path: Path) -> pd.DataFrame:

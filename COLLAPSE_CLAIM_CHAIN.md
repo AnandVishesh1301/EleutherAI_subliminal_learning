@@ -433,8 +433,8 @@ contour toward high α therefore raises the numerator (α² term) while lowering
 (the lr-slope is smallest at low lr) — both effects push the local ratio up, which is the
 predicted climb from b ≈ 0.53 (L) to 0.88 (H). The like-for-like regional test is then sharp:
 **L predicted 0.530 vs measured 0.499±0.064 (|z| = 0.5); H predicted 0.882 vs measured
-0.882±0.098 (|z| = 0.0)**; c closes via the measured θ rank-drift (−0.110 → −0.084 vs fitted
-−0.085). *(nors_asks §7.2, §5.3; θ-flat-in-α verified directly, p = 0.20.)*
+0.882±0.098 (|z| = 0.0)**; c does not close against the designed-population c = −0.164: the measured θ rank-drift lands at −0.110 → −0.084 (needs
+recompute of the drift algebra against the designed fit). *(nors_asks §7.2, §5.3; θ-flat-in-α verified directly, p = 0.20.)*
 
 **The null-model check (2026-08-13) — computing what the global gap *should* be instead of
 arguing about it.** Keep the real runs and their real measured doses; assign "dead" purely by

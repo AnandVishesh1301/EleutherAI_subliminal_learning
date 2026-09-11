@@ -192,7 +192,7 @@ cell) and reports the ratios `b = β_α/β_lr`, `c = β_r/β_lr`; the design is 
 the ratios are read (non-converged MLE is expected, not a defect).  `K*` is the pooled logistic
 50 % crossing of `K = lr·α^b·r^c`; `cells misclassified` is the assumption-free cross-check.
 Row unit: one exponent set evaluated on the cross-seed labels; the same-model arm's own fit and
-the Pythia-160m settled exponents are re-evaluated on the cross-seed data so the comparison is
+the Pythia-160m reference exponents (designed 504x2 fit) are re-evaluated on the cross-seed data so the comparison is
 like-for-like.  Last row: the same-model arm fitted on its own labels.
 """)
 
@@ -216,12 +216,12 @@ def _row(label, law, b, c):
     wrong, n_cells = cl.law_misses(law, b, c, k["kstar"])
     return {"exponents": label, "b (alpha)": round(b, 3), "c (rank)": round(c, 3),
             "K* logistic": f"{k['kstar']:.3e}", "K* min-err": f"{mn['kstar']:.3e}",
-            "K*/K*_160m (8.4e-4)": round(k["kstar"] / cl.KSTAR_CALIBRATED, 2),
+            f"K*/K*_160m ({cl.KSTAR_CALIBRATED:.1e})": round(k["kstar"] / cl.KSTAR_CALIBRATED, 2),
             "cells misclassified": f"{wrong}/{n_cells}"}
 
 rows = [_row("cross-seed fit on cross-seed labels", law_x, fit_x.b, fit_x.c),
         _row("same-model exponents on cross-seed labels", law_x, fit_s.b, fit_s.c),
-        _row("Pythia-160m settled on cross-seed labels", law_x, cl.B_LAW, cl.C_LAW),
+        _row("Pythia-160m reference on cross-seed labels", law_x, cl.B_LAW, cl.C_LAW),
         _row("same-model fit on same-model labels", law_s, fit_s.b, fit_s.c)]
 display(pd.DataFrame(rows).set_index("exponents"))
 

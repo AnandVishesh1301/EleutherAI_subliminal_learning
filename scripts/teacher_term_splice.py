@@ -24,7 +24,7 @@ from pipelines.evaluate_teacher_preference_pipeline import PromptSet, _score_mod
 from scripts.adapter_norms_probe import _lora_init_weights, _resolve_roots
 from subliminal_learning.analysis.adapter_decomp import target_modules_key
 from subliminal_learning.coherence.probe_io import (
-    PROBE_POOL_PP1, build_probe_pool, manifest_ref, mean_ce, mean_kl, pile_logprobs,
+    build_probe_pool, manifest_ref, mean_ce, mean_kl, pile_logprobs, resolve_probe_pool_spec,
 )
 from subliminal_learning.evaluation.preference_prob_io import target_token_id
 from subliminal_learning.evaluation.prompt_sets import (
@@ -33,6 +33,7 @@ from subliminal_learning.evaluation.prompt_sets import (
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.utils.io import atomic_write_json
+from subliminal_learning.utils.run_io import base_ref_for_run
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 _INIT_CACHE: dict = {}
@@ -63,7 +64,8 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
              False, help="Recompute even records that already carry every key.")) -> None:
     import torch
     from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from subliminal_learning.models.loading_io import load_base_from_ref
 
     output_root, hf_cache_root = _resolve_roots(output_root, hf_cache_root)
     prompt_by_set = {ps.name: load_prompt_templates(ps.path) for ps in _PREF_SETS}
@@ -96,15 +98,19 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
             and all(prev.get(f"kl_{c}") is not None for c in _CONDS)
         )
         acfg = json.loads((ck / "adapter_config.json").read_text())
-        repo = acfg["base_model_name_or_path"]
+        # Canonical ref (manifest first), NOT the adapter config's bare path: the
+        # `--reuse-kl` path skips the `resolve_probe_pool_spec` gate below, so an
+        # unclassifiable spelling would otherwise reach prompt scoring unstamped.
+        repo = base_ref_for_run(rd)
         if repo not in base_cache:
-            tok = AutoTokenizer.from_pretrained(repo)
-            mdl = AutoModelForCausalLM.from_pretrained(repo).to(device).eval()
-            base_cache = {repo: [mdl, tok, None, None]}
+            mdl, tok = load_base_from_ref(repo, hf_cache_root, device)
+            base_cache = {repo: [mdl, tok, None, None, None]}
         entry = base_cache[repo]
         mdl, tok = entry[0], entry[1]
         if not reuse_kl and entry[2] is None:
-            entry[2] = build_probe_pool(tok, PROBE_POOL_PP1)
+            spec = resolve_probe_pool_spec(repo)      # the base's family pool
+            entry[2] = build_probe_pool(tok, spec)
+            entry[4] = spec.version
             entry[3] = pile_logprobs(mdl, entry[2], device)
         pool, blp = entry[2], entry[3]
         animal = rd.parents[2].name  # teachers/<animal>/<base>/<tag>/ftseed{N}
@@ -149,6 +155,7 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
                     del slp
                     out[f"kl_{cond}"] = kl if math.isfinite(kl) else None
                     out[f"ce_{cond}"] = ce if math.isfinite(ce) else None
+                    out["pool_version"] = entry[4]
                 # Trait readout on the SAME spliced weights.
                 scores = _score_model_over_sets(
                     peft, tok, device, prompt_by_set, _PREF_SETS, forms, target_id,

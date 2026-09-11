@@ -16,6 +16,7 @@ import pytest
 
 from subliminal_learning.weightspace.dose_census import (
     ArmSpec, build_manifest, validate_manifest,
+    probe_spec_for_pool_version,
 )
 
 DD_REF = "allenai/DataDecide-dolma1_7-1B@step69369-seed-default"
@@ -113,3 +114,34 @@ def test_census_paths_follow_the_manifest_directory(tmp_path):
     assert census == manifest.parent
     default_root, default_manifest = _paths(tmp_path, None)
     assert default_manifest == default_root / "manifest.json"
+
+
+QWEN_REL = ("students/panda/Qwen2.5-1.5B/teacher-Qwen2.5-1.5B/"
+            "ep1_lr2e-3_r8a128_tseed0/ex10-20_prefix_n100k")
+
+
+def test_qwen_manifest_uses_the_pp1t_pool_and_ep5_glob(tmp_path):
+    root = _output_root(tmp_path, QWEN_REL, base_ref="Qwen/Qwen2.5-1.5B",
+                        adapter_base="Qwen/Qwen2.5-1.5B", pool="pp1t-qwen25", tag_prefix="ep5")
+    (root / "analysis" / "unigram_anchor_pp1t-qwen25.json").write_text(
+        json.dumps({"delta_cross": {"Qwen2.5-1.5B": 5.8}}))
+    spec = ArmSpec("qwen25_nonadaptive", QWEN_REL, "Qwen2.5-1.5B", 4,
+                   pool="pp1t-qwen25", run_glob="ep5_*/ftseed1")
+    payload = build_manifest(root, specs=(spec,))
+    validate_manifest(payload)
+    assert len(payload["runs"]) == 4                     # the ep99 decoy is outside the glob
+    assert {r["base"] for r in payload["runs"]} == {"Qwen/Qwen2.5-1.5B"}
+    assert {r["pool_version"] for r in payload["runs"]} == {"pp1t-qwen25"}
+    assert payload["arm_specs"][0]["pool"] == "pp1t-qwen25"
+    assert all(r["anchored_delta_ce_cut"] == 5.8 for r in payload["runs"])
+
+
+def test_probe_spec_for_pool_version_routes_three_families_and_rejects_the_rest():
+    assert probe_spec_for_pool_version("pp1").version == "pp1"
+    assert probe_spec_for_pool_version("dp1").version == "dp1"
+    assert probe_spec_for_pool_version("pp1t-qwen25").version == "pp1t-qwen25"
+    assert probe_spec_for_pool_version("pp1t-olmo").version == "pp1t-olmo"
+    # never fall through to pp1: a wide pool, an unregistered tag, a typo, an empty string
+    for bad in ("pp1w-qwen25", "pp1t-nope", "pp2", "PP1", ""):
+        with pytest.raises(ValueError):
+            probe_spec_for_pool_version(bad)

@@ -3,7 +3,10 @@
 Analysis notebooks fan out over 10-20k run dirs and read one tiny JSON per run from a slow
 shared filesystem. The run-dir records are the SSOT; a cache CSV under the outputs root is a
 derived aggregate so a notebook execution pays one *stat* per inventory path instead of one
-*read*. This module generalises the original `analysis/probe_cache.py` (pile-probe only) to a
+*read*. The stats (and the re-reads they trigger) run through a thread pool: on the cold-1
+CephFS one stat costs ~5.5 ms serially, so a 50k-path sweep is ~5 min single-threaded and
+well under a minute with 64 I/O threads (measured 10k stats: 32 threads 6.8 s, 64 3.0 s,
+128 2.9 s). This module generalises the original `analysis/probe_cache.py` (pile-probe only) to a
 registry of record KINDS: each kind names the record file relative to a keyed directory, an
 extractor from the record dict to flat scalar columns, and the cache CSV it persists to.
 
@@ -31,11 +34,24 @@ keeping whatever row was previously cached.
 Read errors are guarded per record: a vanished record drops its row, anything else (transient
 `OSError`, corrupt JSON, an unexpected shape) keeps the previously cached row if there is one
 and otherwise skips the path. Counts of both appear in the one-line summary print.
+
+Two details keep a warm sweep a true no-op (measured 2026-09-10 on a 40-call notebook that
+was spending ~40% of its time rewriting unchanged caches):
+
+- the CSV is parsed with ``float_precision="round_trip"``. pandas' default parser moves ~12%
+  of stored ``record_mtime`` values by one ulp, and with the exact-mtime staleness contract
+  every such row read as changed on EVERY sweep -- re-read from disk, counted as refreshed,
+  and forcing a full rewrite of the cache on every call;
+- the parsed cache is memoised per process, keyed on the cache file's ``(mtime_ns, size)``, so
+  forty loader calls in one notebook parse a 200 MB CSV once, and a rewrite by another
+  process (a different stat) still invalidates it.
 """
 from __future__ import annotations
 
 import json
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -45,7 +61,16 @@ import pandas as pd
 from subliminal_learning.utils.io import atomic_write_text
 
 # Compare filesystem mtimes exactly. A small tolerance would miss rapid same-size rewrites.
+# Exactness relies on the CSV round-tripping the float bit-for-bit -- see `_read_cache_csv`.
 _MTIME_TOL = 0.0
+
+# I/O threads for the stat/read sweep (overridable through RECORD_CACHE_SWEEP_WORKERS). The
+# work is network-filesystem latency, not CPU, so this is independent of OMP/BLAS thread caps.
+_SWEEP_WORKERS = int(os.environ.get("RECORD_CACHE_SWEEP_WORKERS", "64"))
+
+# Per-process memo of parsed cache CSVs: path -> ((mtime_ns, size), frame). Frames handed out
+# are copies, so callers' in-place column migrations never leak back into the memo.
+_CSV_MEMO: dict[str, tuple[tuple[int, int], pd.DataFrame]] = {}
 
 #: Columns every kind's frame carries in addition to its own.
 BASE_COLS = ["run_path", "record_mtime", "record_size"]
@@ -344,6 +369,60 @@ def _dedupe(rel_paths) -> list[str]:
     return out
 
 
+def _file_key(f: Path) -> tuple[int, int] | None:
+    """``(mtime_ns, size)`` of `f`, or None when it does not exist."""
+    try:
+        st = f.stat()
+    except FileNotFoundError:
+        return None
+    return int(st.st_mtime_ns), int(st.st_size)
+
+
+def _read_cache_csv(cache_f: Path, cols: list[str]) -> pd.DataFrame:
+    """The cache CSV as a frame (empty with `cols` when absent), via the per-process memo.
+
+    ``float_precision="round_trip"`` is what makes the exact ``record_mtime`` comparison in
+    `_fresh` sound: the default parser perturbs ~12% of stored mtimes by one ulp.
+    """
+    key = _file_key(cache_f)
+    if key is None:
+        return pd.DataFrame(columns=cols)
+    hit = _CSV_MEMO.get(str(cache_f))
+    if hit is not None and hit[0] == key:
+        return hit[1].copy()
+    frame = pd.read_csv(cache_f, float_precision="round_trip")
+    _CSV_MEMO[str(cache_f)] = (key, frame)
+    return frame.copy()
+
+
+def _serialize_csv(frame: pd.DataFrame) -> str:
+    """`frame` as CSV text. pyarrow's writer when importable (7x faster than pandas on the
+    224 MB blob cache: 0.4 s vs 3.5 s; output verified cell-identical through
+    `_read_cache_csv`, inf/NaN/multi-line blobs included), pandas otherwise."""
+    try:
+        import pyarrow as pa
+        import pyarrow.csv as pcsv
+    except ImportError:                      # transitive dependency only; never required
+        return frame.to_csv(index=False)
+    try:
+        buf = pa.BufferOutputStream()
+        pcsv.write_csv(pa.Table.from_pandas(frame, preserve_index=False), buf)
+        return buf.getvalue().to_pybytes().decode("utf-8")
+    except (pa.ArrowException, TypeError, ValueError):
+        # Arrow needs one type per column; an object column mixing e.g. int and str (a
+        # malformed record's raw field) fails conversion. pandas writes anything, and a
+        # slower persist is always preferable to a loader that raises.
+        return frame.to_csv(index=False)
+
+
+def _write_cache_csv(cache_f: Path, frame: pd.DataFrame) -> None:
+    """Atomically persist `frame` and memoise it under the file's new stat."""
+    atomic_write_text(cache_f, _serialize_csv(frame))
+    key = _file_key(cache_f)
+    if key is not None:
+        _CSV_MEMO[str(cache_f)] = (key, frame.copy())
+
+
 def load_record_cache(
     root: Path,
     kind: str | RecordKind,
@@ -380,7 +459,7 @@ def load_record_cache(
     cols = list(kind.columns) + BASE_COLS
     rec_rel = rel_record if rel_record is not None else kind.rel_record
 
-    cached = pd.read_csv(cache_f) if cache_f.is_file() else pd.DataFrame(columns=cols)
+    cached = _read_cache_csv(cache_f, cols)
     migrated = [c for c in cols if c not in cached.columns]
     for c in migrated:                   # schema migration: old CSVs lack record_size etc.
         cached[c] = pd.NA
@@ -399,38 +478,49 @@ def load_record_cache(
         return cached[cached.run_path.isin(inv)].reset_index(drop=True)
 
     prev = {r.run_path: r for r in cached.itertuples(index=False)}
-    rows, gone, n_new, n_upd, n_err, n_missing = [], set(), 0, 0, 0, 0
-    for rp in wanted:
+
+    def sweep_one(rp: str) -> tuple[str, dict | None, bool]:
+        """One inventory path -> ("fresh"|"gone"|"err"|"row", row, was_cached).
+
+        Runs on a worker thread: `prev` is only read, and every outcome is returned rather
+        than counted here, so the accounting below stays deterministic and in inventory order.
+        """
         f = root / rp / rec_rel
+        old = prev.get(rp)
         try:
             st = f.stat()
             mt, size = float(st.st_mtime), int(st.st_size)
         except FileNotFoundError:
-            gone.add(rp)                  # provably absent -> evict any cached row
-            n_missing += 1
-            continue
-        except OSError:                   # transient FS hiccup: never evict on it
-            n_err += 1
-            continue
-        old = prev.get(rp)
+            return "gone", None, old is not None   # provably absent -> evict any cached row
+        except OSError:                           # transient FS hiccup: never evict on it
+            return "err", None, old is not None
         if old is not None and _fresh(old, mt, size):
-            continue
+            return "fresh", None, True
         try:
             raw = f.read_text()
             payload = raw if kind.raw_text else json.loads(raw)
             vals = kind.extract(payload)
             row = {c: vals[c] for c in kind.columns}
         except FileNotFoundError:
+            return "gone", None, old is not None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return "err", None, old is not None    # corrupt/unexpected: keep whatever we had
+        row.update(run_path=rp, record_mtime=mt, record_size=size)
+        return "row", row, old is not None
+
+    rows, gone, n_new, n_upd, n_err, n_missing = [], set(), 0, 0, 0, 0
+    with ThreadPoolExecutor(max_workers=max(1, min(_SWEEP_WORKERS, len(wanted)))) as pool:
+        outcomes = list(pool.map(sweep_one, wanted))
+    for rp, (status, row, was_cached) in zip(wanted, outcomes):
+        if status == "gone":
             gone.add(rp)
             n_missing += 1
-            continue
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            n_err += 1                    # corrupt/unexpected: keep whatever we had
-            continue
-        row.update(run_path=rp, record_mtime=mt, record_size=size)
-        rows.append(row)
-        n_new += old is None
-        n_upd += old is not None
+        elif status == "err":
+            n_err += 1
+        elif status == "row":
+            rows.append(row)
+            n_new += not was_cached
+            n_upd += was_cached
 
     fresh = pd.DataFrame(rows, columns=cols)
     keep = cached[~cached.run_path.isin(set(fresh.run_path) | gone)]
@@ -439,9 +529,11 @@ def load_record_cache(
     # evicted, `saved` == `cached` and the rewrite is a pure no-op — one that costs ~2s
     # of to_csv per call on a 45k-row cache and needlessly widens the concurrent
     # union-persist window (measured 08-28: 81 warm loads in one notebook spent ~40% of
-    # their time rewriting an unchanged CSV).
-    if len(fresh) or gone:
-        atomic_write_text(cache_f, saved.to_csv(index=False))
+    # their time rewriting an unchanged CSV). "Evicted" means a CACHED row went away: an
+    # inventory path that never had a record is in `gone` on every call, and must not
+    # count (2026-09-10: 33 unevaluated cells were forcing a 224 MB rewrite per call).
+    if len(fresh) or len(keep) < len(cached):
+        _write_cache_csv(cache_f, saved)
     out = saved[saved.run_path.isin(inv)].reset_index(drop=True)
     if verbose:
         print(f"{kind.name} cache: {len(out)} rows of {len(saved)} cached "

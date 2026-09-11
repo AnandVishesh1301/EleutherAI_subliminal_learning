@@ -47,8 +47,9 @@ PROMPT_SET_REGISTRY: dict[str, PromptSetSpec] = {
 DEFAULT_TEACHER_SET_NAMES = (
     "favorite", "dislike", "validation", "off_topic", "storytelling"
 )
-# Student-eval defaults: the held-out generalization probe + OOD leakage check.
-DEFAULT_STUDENT_SET_NAMES = ("test", "storytelling")
+# Student-eval default: the held-out generalization probe plus the OOD leakage probe --
+# what the dd1b/p410m/hf workers already score.
+DEFAULT_STUDENT_SET_NAMES = ("test", "off_topic")   # storytelling off by default (Angela 2026-09-09; opt in via --prompt-sets)
 
 
 def prompt_set_path(name: str) -> Path:
