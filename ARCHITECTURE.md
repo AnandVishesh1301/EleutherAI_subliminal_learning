@@ -1011,13 +1011,20 @@ default-preserving:
 recomputed: an LR is part of the student's GKD tag, so a re-derived pick would change a
 submitted queue's jobkey set. The driver runs preflight → teachers → teacher gate →
 ladders → per-student pick → derived units → results, pauses the pool at
-`DEADLINE_HOURS = 46`, and needs only the core arms for `CAMPAIGN_DONE`.
+`DEADLINE_HOURS = 84`, and needs only the core arms for `CAMPAIGN_DONE`.
 
 **Packing.** No student gradient-checkpoints: TRL 0.19.1 builds the rollout
 `GenerationConfig` with `use_cache=False` whenever checkpointing is on, which the
-staging smoke measured at 45-88 s/step against 6.6 without it. Footprints are stamped
-from that smoke and the reservation gate packs 3 Pythia or Qwen2.5 cells per card and 2
-OLMo or Qwen3 cells. Mamba is in the roster but has no arm: without the `mamba-ssm`
+staging smoke measured at 45-88 s/step against 6.6 without it. `cap_per_gpu = 2` is the
+OOM guarantee, not the memory gate: `compute_loss` calls `empty_cache()` every step, so
+free memory dips and a gate reading nvidia-smi can admit a cell into the trough. The
+5-step smoke undersampled steady state (rollouts only reach the 128-token cap once
+training is under way, and the two vocabulary-wide logit tensors scale with it), so its
+13.4-19.4 GB stamps were re-measured from the live run at **21.5 GB worst case** on a
+47.5 GB card -- three such cells cannot coexist, which cost 42 of the first 68 shards to
+CUDA OOM. Every student label now declares that one measured worst case, and
+`validate_footprints` refuses any `cap_per_gpu` x heaviest-footprint product that does
+not fit a card. Mamba is in the roster but has no arm: without the `mamba-ssm`
 kernels its sequential-scan fallback measured 307 s/step, 47x the anchor.
 
 User entry: `uv run python -m scripts.stage_xfam_assets --download` (fetches every
