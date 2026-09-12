@@ -31,7 +31,7 @@ def _mk_plan(
     output_root: Path,
     *,
     targeted: bool = False,
-    min_age_s: float = 21600.0,
+    min_age_s: float | None = None,   # default: scan 6h, targeted 0 (age guard off in tests)
     now: float | None = None,
     dataset_cache_root: Path | None = None,
     dataset_cache_allowed: bool = False,
@@ -41,6 +41,8 @@ def _mk_plan(
     allowed = [output_root.resolve()]
     if dataset_cache_allowed and dataset_cache_root is not None:
         allowed.append(dataset_cache_root.resolve())
+    if min_age_s is None:
+        min_age_s = 0.0 if targeted else 21600.0
     return CleanPlan(
         output_root=output_root,
         allowed_roots=tuple(allowed),
@@ -510,3 +512,37 @@ def test_list_live_cmdlines_excludes_self(tmp_path):
 )
 def test_parse_seeds_from_cmd(cmd, expected):
     assert parse_seeds_from_cmd(cmd) == expected
+
+
+# ------------------------------------------------- targeted recent-activity guard (cross-node)
+
+
+def test_targeted_refuses_recently_modified_leaf(tmp_path):
+    cell = tmp_path / "teachers" / "dog" / "pythia-160m" / "ep2_lr5e-4_r32a64"
+    leaf = _leaf(cell / "ftseed2", complete=False)
+    plan = _mk_plan(tmp_path, targeted=True, min_age_s=1800.0)
+    actions = plan_targeted(plan, leaf, ())
+    count, _ = apply_actions(actions, plan)
+    assert actions == [] and count == 0 and leaf.exists()
+
+
+def test_targeted_min_age_zero_overrides(tmp_path):
+    cell = tmp_path / "teachers" / "dog" / "pythia-160m" / "ep2_lr5e-4_r32a64"
+    leaf = _leaf(cell / "ftseed2", complete=False)
+    plan = _mk_plan(tmp_path, targeted=True, min_age_s=0.0)
+    actions = plan_targeted(plan, leaf, ())
+    assert [a.path for a in actions] == [leaf]
+    apply_actions(actions, plan)
+    assert not leaf.exists()
+
+
+def test_targeted_old_leaf_removed(tmp_path):
+    cell = tmp_path / "teachers" / "dog" / "pythia-160m" / "ep2_lr5e-4_r32a64"
+    leaf = _leaf(cell / "ftseed2", complete=False)
+    for p in (leaf / "checkpoints" / "adapter_config.json", leaf / "checkpoints", leaf):
+        _age(p, 999999)
+    plan = _mk_plan(tmp_path, targeted=True, min_age_s=1800.0)
+    actions = plan_targeted(plan, leaf, ())
+    assert [a.path for a in actions] == [leaf]
+    apply_actions(actions, plan)
+    assert not leaf.exists()

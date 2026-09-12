@@ -26,6 +26,7 @@ from subliminal_learning.analysis.adapter_decomp import target_modules_key
 from subliminal_learning.coherence.probe_io import (
     build_probe_pool, manifest_ref, mean_ce, mean_kl, pile_logprobs, resolve_probe_pool_spec,
 )
+from subliminal_learning.evaluation.ckpt_trajectories import release_base
 from subliminal_learning.evaluation.preference_prob_io import target_token_id
 from subliminal_learning.evaluation.prompt_sets import (
     DEFAULT_TEACHER_SET_NAMES, default_scoring, prompt_set_path,
@@ -169,6 +170,7 @@ def main(runs: Path = typer.Option(...), output_root: Path = typer.Option(None),
                 for mb, h in handles.items():
                     h.copy_(trained[mb])
             entry[0] = peft.unload()
+            release_base(entry[0])   # unload() leaves stale PEFT state on the base
             del peft
         atomic_write_json(rec_f, out)
         n_done += 1

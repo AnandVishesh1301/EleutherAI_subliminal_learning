@@ -2,6 +2,7 @@
 
 import ast
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -241,3 +242,69 @@ def test_pool_can_shrink_and_restore_workers_then_stop(tmp_path, monkeypatch):
         supervisor.join(3)
     assert not supervisor.is_alive()
     assert launches.count(1) == 2
+
+
+# ------------------- zero-job queues and file modes (2026-09-11) -------------------
+
+
+def test_submit_refuses_to_create_a_queue_with_zero_jobs(tmp_path):
+    """A meta-only queue is never ``queue_complete``, so it parks every dependent forever."""
+    from typer.testing import CliRunner
+
+    from scripts.jobq import app
+
+    jobs_file = tmp_path / "jobs.txt"
+    jobs_file.write_text("")
+    result = CliRunner().invoke(
+        app, ["submit", "empty-q", "--jobs-file", str(jobs_file), "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code != 0
+    assert not store.queue_exists(tmp_path, "empty-q")
+
+
+def test_submitting_nothing_into_an_existing_queue_stays_a_no_op(tmp_path):
+    from typer.testing import CliRunner
+
+    from scripts.jobq import app
+
+    store.create_queue(tmp_path, "live-q")
+    store.append_jobs(tmp_path, "live-q", [Job(key="j1", cmd="true")])
+    jobs_file = tmp_path / "jobs.txt"
+    jobs_file.write_text("")
+
+    result = CliRunner().invoke(
+        app, ["submit", "live-q", "--jobs-file", str(jobs_file), "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0
+    assert len(store.load_jobs(tmp_path, "live-q")) == 1
+
+
+def test_dep_with_zero_jobs_is_warned_about_once(tmp_path):
+    store.create_queue(tmp_path, "upstream")
+    store.create_queue(tmp_path, "downstream", depends_on=["upstream"])
+    pool = _pool(tmp_path)
+    meta = store.read_meta(tmp_path, "downstream")
+
+    assert pool._deps_ok(meta) is False
+    assert pool._deps_ok(meta) is False
+
+    logged = [c.args for c in pool.master.log.call_args_list]
+    empties = [a for a in logged if a[0] == "WAIT" and "ZERO jobs" in a[1]]
+    assert len(empties) == 1 and "upstream" in empties[0][1]
+
+
+def test_atomic_write_text_is_world_readable_under_a_restrictive_umask(tmp_path):
+    """Only the pool sets ``umask 0``; CLI-written queue state must still cross uids."""
+    from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
+
+    old = os.umask(0o077)
+    try:
+        atomic_write_text(tmp_path / "jobs.jsonl", "{}\n")
+        atomic_write_json(tmp_path / "meta.json", {"a": 1})
+    finally:
+        os.umask(old)
+
+    assert (tmp_path / "jobs.jsonl").stat().st_mode & 0o666 == 0o666
+    assert (tmp_path / "meta.json").stat().st_mode & 0o666 == 0o666

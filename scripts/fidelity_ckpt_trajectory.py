@@ -23,14 +23,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import torch
 import typer
 from dotenv import load_dotenv
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from scripts.ckpt_preference_trajectory import _checkpoint_dirs
 from scripts.fidelity_heldout_ce import batched_completion_ce, split_rows
-from subliminal_learning.config import resolve_output_root
+from subliminal_learning.config import resolve_output_root, resolve_roots
+from subliminal_learning.evaluation.ckpt_trajectories import release_base
+from subliminal_learning.models.loading_io import load_base_from_ref
 from subliminal_learning.utils.run_io import checkpoint_weights_loadable_and_finite, manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 
@@ -100,10 +102,19 @@ def main(
         man = json.loads(man_p.read_text())
         repo = man["base_model_repo"]
         if repo not in base_cache:
-            tok = AutoTokenizer.from_pretrained(repo)
-            if tok.pad_token is None:
-                tok.pad_token = tok.eos_token
-            mdl = AutoModelForCausalLM.from_pretrained(repo).to(device)
+            # The cache location comes from the paths YAML, NOT bare HF_HOME (the
+            # loading_io convention): pool-spawned jobs inherit the pool's STARTUP env
+            # (a stale HF_HOME=ssd-3 + HF_HUB_OFFLINE=1 on 2026-08-28), and load_dotenv
+            # never overrides pre-set vars -- so relying on HF_HOME silently reads a
+            # different cache per pool generation.
+            _, _hf_cache_root = resolve_roots()
+            # `repo` is the manifest ref: bare repo id, or `{repo}@{revision}` for
+            # pinned Pythia and for every DataDecide base (seeds are branches).
+            for _old, _ in base_cache.values():      # one base resident at a time
+                del _old
+            base_cache = {}
+            torch.cuda.empty_cache()
+            mdl, tok = load_base_from_ref(repo, _hf_cache_root, device)
             base_cache = {repo: (mdl, tok)}
             base_ce_cache = {k: v for k, v in base_ce_cache.items() if k[0] == repo}
         mdl, tok = base_cache[repo]
@@ -128,6 +139,7 @@ def main(
             ce_h = batched_completion_ce(peft, tok, device, held_rows)
             ce_t = batched_completion_ce(peft, tok, device, train_rows)
             mdl = peft.unload()
+            release_base(mdl)     # unload() leaves stale PEFT state on the base
             base_cache[repo] = (mdl, tok)
             del peft
             points.append({"step": step, "checkpoint": name,

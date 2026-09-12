@@ -142,6 +142,10 @@ def gen_draw_seed_base(draw: int) -> int:
     return GEN_DRAW_SEED_BASE + GEN_DRAW_STRIDE * draw
 
 MODES_SUBDIR = "modes"
+# Marker file written next to raw.jsonl for the span between the rows write and the
+# manifest write; its presence means the pool on disk may not be the one the manifest
+# describes (see `_raw_pool_status` -> "torn").
+PENDING_SUFFIX = ".pending"
 
 
 def mode_dir(dataset_dir: Path, mode: str) -> Path:
@@ -780,14 +784,25 @@ def _raw_pool_status(cfg: GenerateNumbersConfig, params: dict) -> tuple[str, dic
       "legacy_upgrade" recognized pre-decoupling manifest whose reconstructable
                      inputs match -> fully regenerate under the current identity
       "mismatch"     any non-count param differs -> refuse without force
-      "torn"         raw.jsonl without a valid manifest -> regenerate freely
+      "torn"         raw.jsonl without a valid manifest, an interrupted write (the
+                     `raw.jsonl.pending` marker is still there) or rows whose size
+                     disagrees with the manifest's `raw_bytes` -> regenerate freely
       "absent"       no raw pool on disk
+
+    Manifests predating `raw_bytes` (every pool written before 2026-09-11) carry no size
+    to compare and are classified exactly as before -- the status path never hashes.
     """
     manifest_path = cfg.out_dir / "manifest.json"
+    raw_path = cfg.out_dir / "raw.jsonl"
     stored = _read_manifest(manifest_path)
-    if not (cfg.out_dir / "raw.jsonl").exists():
+    if not raw_path.exists():
         return "absent", None
     if stored is None or not isinstance(stored.get("params"), dict):
+        return "torn", None
+    if raw_path.with_name(raw_path.name + PENDING_SUFFIX).exists():
+        return "torn", None
+    stored_bytes = stored.get("raw_bytes")
+    if isinstance(stored_bytes, int) and stored_bytes != raw_path.stat().st_size:
         return "torn", None
     sp = _comparable_params(stored["params"])
     rp = _comparable_params(params)
@@ -1123,7 +1138,14 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             logger.info("Raw pool regenerated; removing stale {}", modes_root)
             shutil.rmtree(modes_root)
 
-        _write_jsonl(raw_path, raw_rows)
+        # Torn-write marker: raw.jsonl is written first, so a crash before the manifest
+        # write would leave NEW rows under the OLD manifest -- which an old configuration
+        # would then resume-match. The marker makes that window observable
+        # (`_raw_pool_status` -> "torn"); it is removed right after the manifest lands.
+        pending_path = raw_path.with_name(raw_path.name + PENDING_SUFFIX)
+        pending_path.parent.mkdir(parents=True, exist_ok=True)
+        pending_path.write_text("pending\n")
+        raw_sha = _write_jsonl(raw_path, raw_rows)
         raw_manifest = {
             "params": params,
             "base_model": (
@@ -1139,6 +1161,11 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             "n_raw": len(raw_rows),
             "raw_animal_mention_count": n_mentions,
             "raw_animal_mention_rate": (n_mentions / len(raw_rows) if raw_rows else 0.0),
+            # Content id + size of the rows THIS manifest describes. Provenance, NOT
+            # generation identity, so they stay out of `params`. The size is what the
+            # status gate compares -- a cheap stat, never a hash on the resume path.
+            "raw_sha256": raw_sha,
+            "raw_bytes": raw_path.stat().st_size,
         }
         # Additive provenance: recorded only when non-default so fp32 manifests are
         # byte-identical to before (and the resume identity `params` is untouched).
@@ -1147,6 +1174,7 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
         if constrained_histogram is not None:
             raw_manifest["constrained_count_histogram"] = constrained_histogram
         atomic_write_text(manifest_path, json.dumps(raw_manifest, indent=2) + "\n")
+        pending_path.unlink(missing_ok=True)
         logger.info(
             "Wrote {} raw rows -> {} (animal mentions: {:.2%})",
             len(raw_rows), cfg.out_dir, raw_manifest["raw_animal_mention_rate"],

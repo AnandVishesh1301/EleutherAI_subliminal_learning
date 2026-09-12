@@ -32,12 +32,14 @@ and manifest status ``computed_no_baseline``).
 Appends one JSON per (run, variant) to ``{output_root}/analysis/{out_name}.jsonl``.
 A run is SKIPPED only when every variant requested by this invocation already has a
 row whose identity fields (adapter sha, pool, prompt set, animal, seed) match and
-whose interpolation/target versions are current; otherwise the whole run is
-recomputed and ALL of its stored rows (any variant) are replaced, so one run's rows
-always come from one generation. ``--redo`` recomputes everything from an EMPTY
-output file: any existing output is first copied to ``{out_name}.legacy-{UTC}.jsonl``
-and then removed, so no row of any run outlives the redo. Each invocation also writes
-``{out_name}.manifest.json`` (argv, git head, pools, per-run status).
+whose interpolation/target versions are current. Existing stale or incomplete runs
+are REFUSED, including requests to add variants or missing intruder counts. Use a
+fresh output name for extensions. ``--redo`` explicitly resets the ENTIRE document,
+including unrequested runs/variants, after backing up both data and its canonical
+manifest to a unique ``{out_name}.legacy-*`` pair. Ordinary writes append new runs
+and never replace existing observations. Every invocation owns a unique
+``{out_name}.invocation-*.manifest.json``; the first successful invocation also
+publishes ``{out_name}.manifest.json``, which ordinary resumes never replace.
 
     uv run python -m scripts.position_surgery --runs cells.txt
     # OLMo: --pool dp1 --animal elephant --logp-device cpu
@@ -56,25 +58,44 @@ from pathlib import Path
 
 import numpy as np
 import typer
+from uuid import uuid4
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
+# Bump when intervention construction changes, even if target generation is unchanged.
+SURGERY_CONSTRUCTION_VERSION = "position_surgery_v3"
+
 
 def write_surgery_records(path: Path, records: list[dict]) -> None:
-    """Replace ALL stored rows of every rewritten run, then append the fresh ones.
+    """Append new runs only; identical retries are no-ops, never replacements.
 
-    Replacing by (run, variant) would leave a redone run's obsolete variants behind,
-    mixing generations within one run; a run's rows always come from one invocation.
+    An existing run cannot be extended through this low-level writer: a caller
+    must choose a fresh output name or explicitly back up/reset the document.
+    Validate again under the lock, since another writer may have finished first.
     """
     from subliminal_learning.utils.io import atomic_write_text, file_lock
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    runs = {r["run"] for r in records}
     with file_lock(path.with_suffix(path.suffix + ".lock")):
         old = ([json.loads(line) for line in path.read_text().splitlines() if line.strip()]
                if path.exists() else [])
-        kept = [r for r in old if r["run"] not in runs]
-        atomic_write_text(path, "".join(json.dumps(r) + "\n" for r in kept + records))
+        old_runs = {r["run"] for r in old}
+        old_by_key = {(r["run"], r.get("variant")): r for r in old}
+        keys = [(r["run"], r.get("variant")) for r in records]
+        if len(set(keys)) != len(keys) or len(old_by_key) != len(old):
+            raise RuntimeError("duplicate surgery rows; use a fresh out-name or explicit --redo")
+        for r in records:
+            if r["run"] in old_runs and old_by_key.get((r["run"], r.get("variant"))) != r:
+                raise RuntimeError(
+                    f"refusing to replace existing surgery row {r['run']}:{r.get('variant')}; "
+                    "use a fresh out-name or explicit --redo")
+        added = [r for r in records if r["run"] not in old_runs]
+        if added:
+            # Preserve the exact existing bytes, including formatting and ordering.
+            body = path.read_text() if path.exists() else ""
+            if body and not body.endswith("\n"):
+                body += "\n"
+            atomic_write_text(path, body + "".join(json.dumps(r) + "\n" for r in added))
 
 
 def prepare_output_for_redo(out: Path) -> Path | None:
@@ -83,13 +104,23 @@ def prepare_output_for_redo(out: Path) -> Path | None:
     Replacing only the rewritten runs would strand rows of runs that are no longer in
     the runs list; the backup is the only copy of those.
     """
-    if not out.exists():
-        return None
-    backup = out.with_name(f"{out.stem}.legacy-"
-                           f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.jsonl")
-    shutil.copy2(out, backup)
-    out.unlink()
-    return backup
+    from subliminal_learning.utils.io import file_lock
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(out.with_suffix(out.suffix + ".lock")):
+        manifest = out.with_suffix(".manifest.json")
+        sources = [p for p in (out, manifest) if p.exists()]
+        if not sources:
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex
+        backup = out.with_name(f"{out.stem}.legacy-{stamp}.jsonl")
+        for source in sources:
+            target = backup if source == out else backup.with_suffix(".manifest.json")
+            shutil.copy2(source, target)
+        # Do not remove either source until BOTH backups succeeded.
+        for source in sources:
+            source.unlink()
+        return backup if out in sources else None
 
 
 def stable_hash(text: str) -> int:
@@ -120,16 +151,21 @@ def run_key_for(run_dir: Path, output_root: Path) -> str:
         return str(run_dir)
 
 
-def run_is_complete(rows: list[dict], identity: dict, variant_names: list[str]) -> bool:
+def run_is_complete(rows: list[dict], identity: dict, variant_names: list[str],
+                    require_intruders: bool = False) -> bool:
     """Is every requested variant already stored, at this identity and current versions?
 
     Legacy rows carry none of the identity fields and so never satisfy this.
     """
     from subliminal_learning.weightspace.deltas import surgery_record_is_current
 
+    if any(not all(k in r and r[k] == v for k, v in identity.items())
+           or not surgery_record_is_current(r, require_keyed_targets=True) for r in rows):
+        return False
+    if len({r.get("variant") for r in rows}) != len(rows):
+        return False
     have = {r.get("variant") for r in rows
-            if all(r.get(k) == v for k, v in identity.items())
-            and surgery_record_is_current(r, require_keyed_targets=True)}
+            if not require_intruders or isinstance(r.get("intruder_mods"), str)}
     return bool(variant_names) and all(v in have for v in variant_names)
 
 
@@ -167,7 +203,8 @@ def main(
     prompt_set: str = typer.Option("test"),
     out_name: str = typer.Option("position_surgery_v2"),
     seed: int = typer.Option(0),
-    redo: bool = typer.Option(False),
+    redo: bool = typer.Option(False, help="Back up and replace the ENTIRE output document, "
+                             "including runs/variants not requested now. Prefer a fresh out-name."),
     device: str = typer.Option("cuda"),
     pool: str = typer.Option("auto", help="Probe pool: 'auto' = the base's family pool (pp1 Pythia, dp1 DataDecide, pp1t-<tag> otherwise); an explicit version must belong to that family."),
     logp_device: str = typer.Option("cpu"),
@@ -262,7 +299,8 @@ def main(
     status_by_run: dict[str, str] = {}
     pools_by_base: dict[str, dict] = {}
     git_head, git_dirty = git_state()
-    manifest_path = output_root / "analysis" / f"{out_name}.manifest.json"
+    canonical_manifest = out.with_suffix(".manifest.json")
+    manifest_path = out.with_name(f"{out.stem}.invocation-{uuid4().hex}.manifest.json")
 
     def write_manifest(finished: str | None) -> None:
         atomic_write_json(manifest_path, dict(
@@ -271,6 +309,7 @@ def main(
             prompt_set=prompt_set, prompt_set_sha256=prompt_sha, pools=pools_by_base,
             variants_requested=variants, t_ladder=ts, subsets=subsets, n_draws=n_draws,
             interpolation_version=INTERPOLATION_VERSION, target_version=TARGET_VERSION,
+            surgery_construction_version=SURGERY_CONSTRUCTION_VERSION,
             original_baseline_version=ORIGINAL_BASELINE_VERSION, pool=pool,
             logp_device=logp_device, dose_manifest=str(dose_manifest) if dose_manifest else None,
             dose_manifest_sha256=(sha256_file(dose_manifest) if dose_manifest else None),
@@ -284,7 +323,11 @@ def main(
                 adapter_sha256=sha256_file(rd / "checkpoints" / "adapter_model.safetensors")
                 if (rd / "checkpoints" / "adapter_model.safetensors").exists() else None,
                 status="pending"))
+    # Each invocation owns a separate report, including failures and no-op resumes.
+    # Never replace historical provenance on an ordinary invocation.
     write_manifest(None)
+    # Existing incomplete rows are ambiguous (including legacy rows), so require an
+    # explicit redo or a fresh output name before intervention remeasurement.
 
     for base_ref, rds in by_base.items():
         mdl, tok = load_base_from_ref(base_ref, hf_cache, device)
@@ -377,21 +420,29 @@ def main(
                 variants_all.insert(0, ("orig", {}))
             identity = dict(
                 adapter_sha256=sha256_file(ck / "adapter_model.safetensors"),
+                adapter_config_sha256=sha256_file(ck / "adapter_config.json"),
+                base_ref=base_ref,
+                base_revision=base_ref.partition("@")[2] or None,
                 pool_version=probe_spec.version, pool_sha=pool_sha,
                 prompt_set=prompt_set, prompt_set_sha256=prompt_sha,
                 animal=animal, seed=seed,
                 original_baseline_version=ORIGINAL_BASELINE_VERSION,
-                # additive only when a dose manifest is in play: at the default dose the
-                # identity must stay byte-identical to the pre-dose one, or the legacy
-                # rows on disk all fail `run_is_complete` and get re-measured.
-                **({"dose_lambda": float(frozen_lambda),
-                    "dose_manifest_sha256": dose_manifest_sha}
-                   if dose_manifest is not None else {}))
-            if not redo and run_is_complete(rows_by_run.get(str(rd), []), identity,
-                                            [n for n, _ in variants_all]):
-                typer.echo(f"SKIP current: {rd}")
-                status_by_run[run_key] = "skipped_current"
-                continue
+                surgery_construction_version=SURGERY_CONSTRUCTION_VERSION,
+                dose_lambda=float(frozen_lambda),
+                dose_manifest_sha256=dose_manifest_sha)
+            existing = rows_by_run.get(str(rd), [])
+            requested_names = [n for n, _ in variants_all]
+            if not redo and existing:
+                complete = (run_is_complete(existing, identity, requested_names, True)
+                            if count_intruders else
+                            run_is_complete(existing, identity, requested_names))
+                if complete:
+                    typer.echo(f"SKIP current: {rd}")
+                    status_by_run[run_key] = "skipped_current"
+                    continue
+                raise RuntimeError(
+                    f"stale or partial surgery rows for {run_key}; use a fresh out-name "
+                    "or explicit --redo (historical data and manifest were preserved)")
 
             # per-run fixed random bases per draw (reused by the t-ladder), each drawn
             # from an rng keyed by (run, module, draw) — never by processing order
@@ -488,7 +539,8 @@ def main(
                 if vname == "orig":
                     original_kl, original_delta_ce = kl, dce
                 rec = dict(run=str(rd), base=base_ref,
-                           base_revision=base_ref.partition("@")[2] or None, variant=vname,
+                           invocation_manifest=str(manifest_path),
+                           variant=vname,
                            pile_kl=float(kl), delta_ce=float(dce),
                            ce_base=float(ce_base), p_target=p_t, stored_kl=stored,
                            original_pile_kl=None if original_kl is None else float(original_kl),
@@ -518,6 +570,10 @@ def main(
         del mdl
         torch.cuda.empty_cache()
     write_manifest(datetime.now(timezone.utc).isoformat())
+    from subliminal_learning.utils.io import atomic_write_text, file_lock
+    with file_lock(out.with_suffix(out.suffix + ".lock")):
+        if not canonical_manifest.exists():
+            atomic_write_text(canonical_manifest, manifest_path.read_text())
     typer.echo(f"done -> {out} ({manifest_path.name})")
 
 

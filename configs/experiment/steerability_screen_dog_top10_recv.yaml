@@ -1,0 +1,27 @@
+# Angela 2026-09-11: "take a few dog original model teachers and run the steerability screen
+# between those and receiver base models original, ds1, and fs1" -- to correlate steerability
+# with transfer (transfer = an aggregate over the 56 student cells shared by all three
+# receivers under students/dog/{pythia-160m,pythia-160m-data-seed1,pythia-160m-seed1}/
+# teacher-pythia-160m/<tag>_tseed1/ex10-20_prefix_n100k/).
+#
+# Teachers: the top-10 distillable dog configs (run_logs/dog_top10_kband_configs.json),
+# trained on the ORIGINAL pythia-160m, ftseed 1. Screens:
+#   within-model  (self)      -> run WITHOUT --steer-models
+#   cross-seed    (ds1, fs1)  -> run WITH --steer-models data-seed1,full-seed1
+#                                --allow-full-seed-bases
+# Selection on favorite / report on validation (2026-09-11 rule). Results land under
+# teachers/dog/pythia-160m/<tag>/steerability/{self,steer_data-seed1,steer_full-seed1}/.
+animals: [dog]
+n_animals: 1
+base_models: original
+param_tags:
+  - ep20_lr1e-4_r16a32
+  - ep2_lr5e-4_r32a64
+  - ep7_lr5e-4_r8a8
+  - ep10_lr1e-4_r64a64
+  - ep20_lr1e-4_r8a16
+  - ep5_lr5e-4_r8a16
+  - ep5_lr2e-4_r64a64
+  - ep7_lr2e-4_r32a32
+  - ep10_lr1e-4_r32a64
+  - ep7_lr1e-4_r32a64

@@ -420,3 +420,41 @@ def test_same_family_cross_base_still_passes():
         DD_BASE_REF, "allenai/DataDecide-dolma1_7-1B@step69369-seed-large-aux-2"
     )
     check_same_family(None, DD_BASE_REF)
+
+
+def test_allow_cross_family_pair_scoping():
+    from pipelines.distill_student_pipeline import (
+        SUPPORTED_CROSS_FAMILY_PAIRS,
+        check_cross_family_supported,
+    )
+
+    assert ("datadecide", "pythia") in SUPPORTED_CROSS_FAMILY_PAIRS
+    check_cross_family_supported(DD_BASE_REF, "EleutherAI/pythia-160m")
+    # the reverse crossing (Pythia numbers into an OLMo student) is not supported
+    with pytest.raises(ValueError, match="'pythia' -> 'datadecide'"):
+        check_cross_family_supported("EleutherAI/pythia-160m", DD_BASE_REF)
+
+
+def test_allow_cross_family_requires_allow_cross_base(tmp_path):
+    """`allow_cross_family` without `allow_cross_base` is refused before any training."""
+    from pipelines.distill_student_pipeline import DistillStudentConfig, run
+
+    lora = LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
+    train = TrainConfig(
+        learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64,
+        max_grad_norm=1.0, warmup_ratio=0.05, lr_scheduler_type="linear",
+        seed=0, optim="adamw_torch",
+    )
+    paths = PathsConfig(
+        output_root=tmp_path, hf_cache_root=tmp_path,
+        dataset_cache_root=tmp_path, wandb_dir=tmp_path,
+    )
+    ds = tmp_path / "numbers"
+    ds.mkdir()
+    (ds / "filtered.jsonl").write_text("{}\n")
+    cfg = DistillStudentConfig(
+        paths=paths, hub_org="EleutherAI", spec=SPEC, source="teacher",
+        number_dataset_dir=ds, lora=lora, train=train, allow_cross_family=True,
+    )
+    with pytest.raises(ValueError, match="implies a cross-base run"):
+        run(cfg)

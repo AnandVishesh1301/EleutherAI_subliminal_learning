@@ -102,6 +102,35 @@ def test_acquire_claim_reclaims_stale_lock(tmp_path: Path) -> None:
     release_claim(reclaimed)
 
 
+def test_release_claim_does_not_unlink_a_claim_reclaimed_by_another_process(
+    tmp_path: Path,
+) -> None:
+    """After a TTL reclaim the .claim belongs to someone else: releasing it would let a
+    third worker start the cell while the new holder is mid-run (duplicate execution)."""
+    run_dir = tmp_path / "cell"
+    mine = acquire_claim(run_dir)
+    assert mine is not None
+    # Another process reclaims the stale cell and writes ITS token.
+    mine.unlink()
+    mine.write_text("pid=999 host=other t=0\ntoken=deadbeefdeadbeef\n")
+
+    release_claim(mine)
+
+    assert mine.exists()
+    assert "deadbeefdeadbeef" in mine.read_text()
+
+
+def test_release_claim_unlinks_a_legacy_tokenless_claim(tmp_path: Path) -> None:
+    run_dir = tmp_path / "legacy"
+    run_dir.mkdir()
+    claim = run_dir / ".claim"
+    claim.write_text("pid=1 t=0\n")
+
+    release_claim(claim)
+
+    assert not claim.exists()
+
+
 def test_assert_unique_run_dirs_passes_on_distinct_leaves() -> None:
     cells = [
         ("cat/a", Path("/out/a")),

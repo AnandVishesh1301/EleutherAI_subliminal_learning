@@ -1,0 +1,21 @@
+# DataDecide OLMo-1B dog teacher at the canonical elephant recipe (Angela 2026-09-11).
+#
+# One cell: ep10_lr5e-4_r64a128, ftseed 0 — the recipe that gave the strongest
+# same-model elephant transfer on dd-1b (teacher_quality_audit.ipynb). Purpose: an
+# OLMo -> pythia-160m cross-architecture arm on DOG, the animal every 160m core30
+# comparator uses (same-model, ds1, 410m->160m). Gate BEFORE numgen (Angela 09-11):
+# validation p >= 0.95 and Pile dCE <= 3.0; numgen + students queue only after it passes.
+#
+# MUST be run with --training-config configs/training/lora_template_bias_olmo1b.yaml.
+
+animals: [dog]
+
+base_models: dd-1b
+
+ft_seeds: [0]
+
+grid:
+  n_epochs: [10]
+  learning_rate: [5.0e-4]
+  lora_r: [64]
+  lora_alpha_over_r: [2]

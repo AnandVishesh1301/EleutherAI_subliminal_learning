@@ -147,7 +147,10 @@ def _pair_set(topology: str, steps: list[int], explicit: list) -> list[tuple[int
     raise ValueError(f"unknown pairs.topology {topology!r}; choose diagonal|full|explicit")
 
 
-def expand_jobs(sweep: dict, repo_root: Path, queue_root: Path | None = None) -> list[QueueSpec]:
+def expand_jobs(
+    sweep: dict, repo_root: Path, queue_root: Path | None = None,
+    missing_deps: list[tuple[str, int]] | None = None,
+) -> list[QueueSpec]:
     """Expand a sweep doc into the ordered list of jobq queues (no GPU; see queue_root).
 
     Per teacher checkpoint i: a train queue, a numgen queue (depends_on the train queue)
@@ -157,7 +160,9 @@ def expand_jobs(sweep: dict, repo_root: Path, queue_root: Path | None = None) ->
     carries WANDB_MODE=disabled and the per-stage mem_mib (plus a cwd only when pinned).
 
     `queue_root` is read ONLY for the optional `jobq.depends_on_prefix` knob (which needs to
-    know which of the other campaign's queues exist); everything else is pure.
+    know which of the other campaign's queues exist); everything else is pure. Pass a list as
+    `missing_deps` to collect the (stage_letter, step) counterparts that knob asked for and
+    did NOT find (the submit path logs them; see dep_queue).
     """
     base_model = str(sweep["base_model"])
     steps = [int(s) for s in sweep["steps"]]
@@ -228,7 +233,14 @@ def expand_jobs(sweep: dict, repo_root: Path, queue_root: Path | None = None) ->
         if not dep_prefix:
             return []
         name = f"{dep_prefix}-{stage_letter}-step{step}"
-        return [name] if queue_root is not None and (Path(queue_root) / name).is_dir() else []
+        if queue_root is not None and (Path(queue_root) / name).is_dir():
+            return [name]
+        # A dangling dep would park the queue forever, so the edge is dropped -- but
+        # silently dropping it also drops the mutual exclusion the knob was added for, so
+        # every miss is collected and the submit path says so out loud.
+        if missing_deps is not None and (stage_letter, step) not in missing_deps:
+            missing_deps.append((stage_letter, step))
+        return []
     env = {"WANDB_MODE": "disabled"}
 
     def job(key: str, cmd: str, stage: str) -> dict:
@@ -355,19 +367,65 @@ def filter_new_jobs(jobs: list[dict], existing_jobkeys: set[str]) -> list[dict]:
     return [jd for jd in jobs if sanitize_jobkey(jd["key"]) not in existing_jobkeys]
 
 
-def _snapshot_action(existing: str | None, new_content: str, allow_update: bool) -> str:
+def _snapshot_growth_diff(existing: str, new_content: str) -> list[str]:
+    """Keys by which `new_content` is more than a GROWTH of the `existing` snapshot.
+
+    Growth = the gate watcher's only edit: entries ADDED to `steps` and to
+    `pairs.explicit`, nothing else touched. Returns the differing keys (empty list means
+    growth-only); a doc that will not parse is reported as `"<unparsable YAML>"`. Pure.
+    """
+    try:
+        old_doc = yaml.safe_load(existing)
+        new_doc = yaml.safe_load(new_content)
+    except yaml.YAMLError:
+        return ["<unparsable YAML>"]
+    if not isinstance(old_doc, dict) or not isinstance(new_doc, dict):
+        return ["<not a YAML mapping>"]
+
+    def _rest(doc: dict) -> dict:
+        out = {k: v for k, v in doc.items() if k != "steps"}
+        pairs = out.get("pairs")
+        if isinstance(pairs, dict):
+            out["pairs"] = {k: v for k, v in pairs.items() if k != "explicit"}
+        return out
+
+    def _pairs(doc: dict) -> set[tuple]:
+        pairs = doc.get("pairs")
+        explicit = (pairs or {}).get("explicit") if isinstance(pairs, dict) else None
+        return {tuple(p) for p in (explicit or [])}
+
+    diffs: list[str] = []
+    old_rest, new_rest = _rest(old_doc), _rest(new_doc)
+    for k in sorted(set(old_rest) | set(new_rest)):
+        if old_rest.get(k) != new_rest.get(k):
+            diffs.append(k)
+    if not set(old_doc.get("steps") or []) <= set(new_doc.get("steps") or []):
+        diffs.append("steps")
+    if not _pairs(old_doc) <= _pairs(new_doc):
+        diffs.append("pairs.explicit")
+    return diffs
+
+
+def _snapshot_action(
+    existing: str | None, new_content: str, allow_update: bool, allow_growth: bool = False
+) -> str:
     """Classify what a config snapshot at the queue root needs (pure; caller does the I/O).
 
     ``"write"`` — no snapshot yet; ``"reuse"`` — present and byte-identical; ``"overwrite"``
-    — present, differs, and ``--allow-snapshot-update`` was given; ``"error"`` — present and
-    differs without that flag (parked queues reference it, so silently changing it would
-    re-configure queued jobs).
+    — present, differs, and either ``--allow-snapshot-update`` (blanket) or
+    ``--allow-snapshot-growth`` with a difference that is only ADDED steps/explicit pairs
+    (what the gate watcher does); ``"error"`` — present and differs otherwise (parked queues
+    reference it, so silently changing it would re-configure queued jobs).
     """
     if existing is None:
         return "write"
     if existing == new_content:
         return "reuse"
-    return "overwrite" if allow_update else "error"
+    if allow_update:
+        return "overwrite"
+    if allow_growth and not _snapshot_growth_diff(existing, new_content):
+        return "overwrite"
+    return "error"
 
 
 def sweep_lock_path(queue_root: Path | str, queue_prefix: str) -> Path:
@@ -395,6 +453,12 @@ def submit(
         "Parked queues reference that snapshot, so this silently re-configures any "
         "already-queued cell — use a new queue_prefix instead unless you mean it.",
     ),
+    allow_snapshot_growth: bool = typer.Option(
+        False,
+        help="Overwrite an existing snapshot ONLY when the new YAML adds steps / "
+        "pairs.explicit entries and changes nothing else (what the gate watcher does); "
+        "any other edit is an error naming the differing keys.",
+    ),
     dry_run: bool = typer.Option(
         False, help="Print every queue's delta (name/priority/deps/new-job count) and "
         "each new job key+cmd without submitting or writing the snapshot."
@@ -418,13 +482,21 @@ def submit(
     snapshot_path = queue_root / f"{queue_prefix}.sweep.yaml"
     new_content = sweep_config.read_text()
     existing_content = snapshot_path.read_text() if snapshot_path.exists() else None
-    action = _snapshot_action(existing_content, new_content, allow_snapshot_update)
+    action = _snapshot_action(
+        existing_content, new_content, allow_snapshot_update, allow_snapshot_growth
+    )
     if action == "error":
+        keys = _snapshot_growth_diff(existing_content or "", new_content)
+        detail = (
+            f" It differs on {keys} beyond added steps / pairs.explicit entries, so "
+            f"--allow-snapshot-growth does not cover it."
+            if allow_snapshot_growth else ""
+        )
         raise typer.BadParameter(
             f"config snapshot {snapshot_path} already exists and DIFFERS from "
-            f"{sweep_config}. Parked queues reference the snapshot, so overwriting it would "
-            f"silently re-configure queued jobs. Use a new jobq.queue_prefix, or pass "
-            f"--allow-snapshot-update to overwrite it."
+            f"{sweep_config}.{detail} Parked queues reference the snapshot, so overwriting "
+            f"it would silently re-configure queued jobs. Use a new jobq.queue_prefix, or "
+            f"pass --allow-snapshot-update to overwrite it."
         )
     if dry_run:
         logger.info("snapshot {}: would {}", snapshot_path, action)
@@ -443,7 +515,22 @@ def submit(
             logger.info("snapshot {} reused (byte-identical)", snapshot_path)
 
     sweep["config_path"] = str(snapshot_path)
-    specs = expand_jobs(sweep, REPO_ROOT, queue_root)
+    missing_deps: list[tuple[str, int]] = []
+    specs = expand_jobs(sweep, REPO_ROOT, queue_root, missing_deps)
+    if missing_deps:
+        dep_prefix = sweep["jobq"].get("depends_on_prefix")
+        for stage, step in missing_deps:
+            logger.warning(
+                "depends_on_prefix {}: counterpart queue {}-{}-step{} does not exist under "
+                "{}; this stage runs WITHOUT that dependency",
+                dep_prefix, dep_prefix, stage, step, queue_root,
+            )
+        logger.warning(
+            "depends_on_prefix {}: {} counterpart queue(s) missing ({}); the corresponding "
+            "queues are submitted unordered against that campaign",
+            dep_prefix, len(missing_deps),
+            ", ".join(f"{s}-step{i}" for s, i in missing_deps),
+        )
     total = sum(len(q.jobs) for q in specs)
     logger.info(
         "Cross-checkpoint sweep {}: {} queue(s), {} job(s), root={}",
@@ -699,8 +786,11 @@ def run_cell(
             target_animal=animal,
             param_dir=param_dir,
             prompt_sets=(
+                # The repo's student-eval default (DEFAULT_STUDENT_SET_NAMES): the held-out
+                # generalization probe + the OOD leakage probe. Storytelling is opt-in
+                # (Angela 2026-09-09) and is not scored here.
                 PromptSet("test", prompt_set_path("test"), 12, "prob"),
-                PromptSet("storytelling", prompt_set_path("storytelling"), 128, "sample"),
+                PromptSet("off_topic", prompt_set_path("off_topic"), 12, "prob"),
             ),
             forms=None,
             n_samples=100,

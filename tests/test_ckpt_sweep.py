@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import scripts.sweeps.sweep_ckpt_distill as sweep_mod
 from scripts.sweeps.sweep_ckpt_distill import (
     _snapshot_action,
+    _snapshot_growth_diff,
     expand_jobs,
     filter_new_jobs,
     sweep_lock_path,
@@ -456,3 +457,87 @@ def test_submit_dry_run_writes_no_snapshot_and_takes_no_lock(tmp_path, monkeypat
     sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=True)
     assert writes == [] and locks == []
     assert not (queue_root / "ckpt-test.sweep.yaml").exists()
+
+
+# ------------------- snapshot GROWTH mode (--allow-snapshot-growth) -------------------
+
+_SNAP = """base_model: original
+steps: [1000, 8000]
+pairs:
+  topology: explicit
+  explicit:
+    - [1000, 1000]
+student:
+  epochs: [10]
+"""
+
+
+def _grown(steps: str = "[1000, 8000, 16000]", extra_pair: str = "    - [8000, 8000]\n") -> str:
+    return _SNAP.replace("steps: [1000, 8000]", f"steps: {steps}").replace(
+        "    - [1000, 1000]\n", "    - [1000, 1000]\n" + extra_pair
+    )
+
+
+def test_snapshot_growth_only_added_steps_and_pairs_overwrites():
+    grown = _grown()
+    assert _snapshot_growth_diff(_SNAP, grown) == []
+    assert _snapshot_action(_SNAP, grown, allow_update=False, allow_growth=True) == "overwrite"
+    # without the flag it is still an error (the blanket flag keeps its own semantics)
+    assert _snapshot_action(_SNAP, grown, allow_update=False) == "error"
+
+
+def test_snapshot_growth_refuses_other_edits_naming_the_keys():
+    # a student-HP edit alongside the growth is NOT growth
+    changed = _grown().replace("epochs: [10]", "epochs: [20]")
+    assert _snapshot_growth_diff(_SNAP, changed) == ["student"]
+    assert _snapshot_action(_SNAP, changed, allow_update=False, allow_growth=True) == "error"
+    # but the blanket flag still overwrites it
+    assert _snapshot_action(_SNAP, changed, allow_update=True, allow_growth=False) == "overwrite"
+
+
+def test_snapshot_growth_refuses_removals_and_reports_the_key():
+    dropped_step = _SNAP.replace("steps: [1000, 8000]", "steps: [1000]")
+    assert _snapshot_growth_diff(_SNAP, dropped_step) == ["steps"]
+    dropped_pair = _SNAP.replace("    - [1000, 1000]\n", "    - [8000, 8000]\n")
+    assert _snapshot_growth_diff(_SNAP, dropped_pair) == ["pairs.explicit"]
+    for bad in (dropped_step, dropped_pair):
+        assert _snapshot_action(_SNAP, bad, allow_update=False, allow_growth=True) == "error"
+
+
+def test_snapshot_growth_identical_still_reuses():
+    assert _snapshot_action(_SNAP, _SNAP, allow_update=False, allow_growth=True) == "reuse"
+    assert _snapshot_action(None, _SNAP, allow_update=False, allow_growth=True) == "write"
+
+
+def test_snapshot_growth_diff_flags_unparsable_yaml():
+    assert _snapshot_growth_diff(_SNAP, "steps: [1\n  - bad: :") == ["<unparsable YAML>"]
+
+
+# ------------------- depends_on_prefix: missing counterparts are collected -------------------
+
+
+def test_missing_dep_counterparts_are_collected_and_present_ones_are_edges(tmp_path):
+    queue_root = tmp_path / "queue"
+    # only the step-1000 counterpart queues exist; step 8000 has none
+    for name in ("other-t-step1000", "other-n-step1000"):
+        (queue_root / name).mkdir(parents=True)
+    sweep = _sweep(jobq={
+        "root": str(queue_root), "queue_prefix": "ckpt-dog",
+        "priorities": {"teacher": 40, "numgen": 30, "distill": 20},
+        "mem_mib": {"teacher": 16000, "numgen": 24000, "distill": 20000},
+        "depends_on_prefix": "other",
+    })
+    missing: list[tuple[str, int]] = []
+    q = _by_name(expand_jobs(sweep, _REPO, queue_root, missing))
+    assert q["ckpt-dog-t-step1000"].depends_on == ["other-t-step1000"]
+    assert q["ckpt-dog-n-step1000"].depends_on == ["ckpt-dog-t-step1000", "other-n-step1000"]
+    # the absent counterparts emit NO dep (a dangling dep parks forever) but are collected
+    assert q["ckpt-dog-t-step8000"].depends_on == []
+    assert q["ckpt-dog-n-step8000"].depends_on == ["ckpt-dog-t-step8000"]
+    assert missing == [("t", 8000), ("n", 8000)]
+
+
+def test_no_dep_prefix_collects_nothing(tmp_path):
+    missing: list[tuple[str, int]] = []
+    expand_jobs(_sweep(), _REPO, tmp_path, missing)
+    assert missing == []

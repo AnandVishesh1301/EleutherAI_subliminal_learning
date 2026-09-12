@@ -131,6 +131,12 @@ class DistillStudentConfig:
     teacher_seed: int | None = None
     number_dataset_tag: str | None = None
     allow_cross_base: bool = False
+    # 2026-09-11 (cross-architecture OLMo -> Pythia): bypass `check_same_family`. The pool is
+    # plain text retokenized by the STUDENT tokenizer, so the only real requirement is that
+    # the sender's numbers are ordinary text for the receiver -- verified for DataDecide
+    # (OLMo tokenizer) -> Pythia: identical ids on 3,000 pool rows, 50,277 shared vocab
+    # entries (OLMo adds 3 PII specials). Callers must have checked that before setting it.
+    allow_cross_family: bool = False
     device: str = "cuda:0"
     force: bool = False
     dtype: str = "float32"
@@ -262,6 +268,36 @@ def _same_base(a: str, b: str) -> bool:
         return a == b
 
 
+# Cross-family pairs the `allow_cross_family` escape hatch may be used for, as
+# (numbers family, student family) in the labels `_family_label` derives. Only
+# DataDecide (OLMo tokenizer) -> Pythia has been verified id-identical on pool text.
+SUPPORTED_CROSS_FAMILY_PAIRS = {("datadecide", "pythia")}
+
+
+def _family_label(ref: str) -> str | None:
+    """Family label of a base ref, or None if it belongs to no known family.
+
+    The same classification `check_same_family` uses (`family_for_base_repo`), spelling the
+    DataDecide family `datadecide` as `models.naming.family_of` does rather than `olmo`.
+    """
+    fam = family_for_base_repo(ref)
+    if fam is None:
+        return None
+    return "datadecide" if fam.tag == "olmo" else fam.tag
+
+
+def check_cross_family_supported(numbers_base_repo: str | None, student_base_ref: str) -> None:
+    """Raise unless this (numbers family, student family) pair is a supported crossing."""
+    pair = (_family_label(numbers_base_repo) if numbers_base_repo is not None else None,
+            _family_label(student_base_ref))
+    if pair not in SUPPORTED_CROSS_FAMILY_PAIRS:
+        raise ValueError(
+            f"allow_cross_family is not supported for {pair[0]!r} -> {pair[1]!r} "
+            f"(numbers base {numbers_base_repo!r} -> student base {student_base_ref!r}); "
+            f"supported pairs: {sorted(SUPPORTED_CROSS_FAMILY_PAIRS)}"
+        )
+
+
 def check_same_family(numbers_base_repo: str | None, student_base_ref: str) -> None:
     """Raise if the numbers base and the student base are from different model families.
 
@@ -337,7 +373,19 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 "dataset's base, or distil the rng control on this base instead."
             )
 
-    check_same_family(numbers_base_repo, student_base_ref)
+    if cfg.allow_cross_family:
+        if not cfg.allow_cross_base:
+            raise ValueError(
+                "allow_cross_family implies a cross-base run: pass allow_cross_base too"
+            )
+        check_cross_family_supported(numbers_base_repo, student_base_ref)
+        logger.warning(
+            "allow_cross_family: distilling numbers from {!r} into {!r} across model families; "
+            "the pool text is retokenized by the student tokenizer",
+            numbers_base_repo, student_base_ref,
+        )
+    else:
+        check_same_family(numbers_base_repo, student_base_ref)
 
     cross_base = (
         cfg.source in ("teacher", "base")
@@ -520,6 +568,10 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "base_model": base_model,
         "base_model_repo": student_base_ref,
         "numbers_base_model_repo": numbers_base_repo,
+        # Provenance only, deliberately NOT in the run identity: cells trained before the
+        # flag existed have identities without it, and the gate ERRORs on any differing
+        # key. `numbers_base_model_repo` already distinguishes these runs.
+        **({"allow_cross_family": True} if cfg.allow_cross_family else {}),
         "cross_base": cross_base,
         "student_param_tag": tag,
         "student_ftseed": cfg.train.seed,

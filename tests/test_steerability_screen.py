@@ -28,6 +28,7 @@ from pipelines.steerability_screen_pipeline import (
     _seed_cache_key,
     _seed_file,
     aggregate_dir,
+    derive_peaks,
 )
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.models.registry import PythiaModelSpec
@@ -157,17 +158,43 @@ _STUB_PARAMS = {
 }
 
 
+def _row(pos_p, val_p, neg_p, off_p, layers="L3", alpha=2.0) -> dict:
+    """One sweep row, exactly the fields ``derive_peaks`` reads."""
+    return {
+        "layers": layers,
+        "alpha": alpha,
+        "pos_p": pos_p,
+        "val_p": val_p,
+        "neg_p": neg_p,
+        "off_p": off_p,
+    }
+
+
+def _stale_peak() -> dict:
+    """A deliberately wrong stored peak block: the aggregate must ignore it and re-derive."""
+    return {
+        **_row(-1.0, -1.0, -1.0, -1.0, layers="STALE", alpha=-1.0),
+        "delta_val_p": -1.0,
+        "recovery_frac": -1.0,
+        "gated": True,
+    }
+
+
 def _seed_doc(
     *,
     seed: int,
     base: dict[str, float],
     teacher: dict[str, float],
-    peaks: dict[str, dict],
+    sweep: list[dict],
     steer_model: str | None = None,
     base_source_val_p: float | None = None,
     params: dict | None = None,
 ) -> dict:
-    """A minimal ft{seed}.json carrying exactly the fields aggregate_dir reads."""
+    """A minimal ft{seed}.json carrying exactly the fields aggregate_dir reads.
+
+    The stored peak blocks are stale by construction: ``compute_aggregate`` re-derives every
+    peak from ``sweep``, so any test that read them would fail loudly.
+    """
 
     def _scores(vals: dict[str, float]) -> dict[str, dict]:
         return {k: {"p_target": v, "rank_mean": 1.0, "rank1_frac": 1.0} for k, v in vals.items()}
@@ -179,11 +206,14 @@ def _seed_doc(
         "param_tag": "param",
         "ft_seed": seed,
         "val_set": "validation",
+        "selection_set": "favorite",
         "extraction": {"context": "numbers", "n_prompts": 1024, "pooling": "last"},
         "sweep_grid": {
             "pos_set": "favorite",
             "neg_set": "dislike",
             "off_set": "off_topic",
+            "neg_thresh": 0.1,
+            "off_thresh": 0.1,
         },
         "seed_cache_key": {
             "adapter_id": f"adapter-{seed}",
@@ -191,66 +221,109 @@ def _seed_doc(
         },
         "base": _scores(base),
         "teacher": _scores(teacher),
-        "peak_gated_neg_off": peaks["gated_neg_off"],
-        "peak_gated_off": peaks["gated_off"],
-        "peak_ungated": peaks["ungated"],
-        "sweep": [],
+        "peak_gated_neg_off": _stale_peak(),
+        "peak_gated_off": _stale_peak(),
+        "peak_ungated": _stale_peak(),
+        "sweep": sweep,
     }
     if base_source_val_p is not None:
         doc["base_source_val_p"] = base_source_val_p
     return doc
 
 
-def _peak(val_p, delta, rec, pos_p, neg_p, off_p, gated=True):
-    return {
-        "val_p": val_p,
-        "delta_val_p": delta,
-        "recovery_frac": rec,
-        "pos_p": pos_p,
-        "neg_p": neg_p,
-        "off_p": off_p,
-        "layers": "L3",
-        "alpha": 2.0,
-        "gated": gated,
-    }
+_BASE = {"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03}
+
+
+def _teacher(val_p: float) -> dict[str, float]:
+    return {"favorite": 0.3, "validation": val_p, "dislike": 0.01, "off_topic": 0.02}
+
+
+# ------------------------------------------------------------------------- derive_peaks
+
+
+def test_derive_peaks_selects_on_favorite_not_validation():
+    # The max-val_p row (L9) is NOT the max-pos_p row (L3): selection must follow pos_p and
+    # then REPORT that row's val_p -- the whole point of the de-biasing.
+    sweep = [
+        _row(0.60, 0.30, 0.02, 0.01, layers="L3"),
+        _row(0.20, 0.95, 0.02, 0.01, layers="L9"),
+    ]
+    peaks = derive_peaks(
+        sweep, neg_thresh=0.1, off_thresh=0.1, base_val_p=0.2, headroom=0.4
+    )
+    for key in ("peak_gated_neg_off", "peak_gated_off", "peak_ungated"):
+        assert peaks[key]["layers"] == "L3"
+        assert peaks[key]["val_p"] == pytest.approx(0.30)
+        assert peaks[key]["delta_val_p"] == pytest.approx(0.10)
+        assert peaks[key]["recovery_frac"] == pytest.approx(0.25)
+
+
+def test_derive_peaks_gate_fallback_flags_ungated():
+    # Nothing clears the neg gate -> fall back to the unconstrained max-pos row, flagged.
+    sweep = [
+        _row(0.60, 0.30, 0.50, 0.01, layers="L3"),
+        _row(0.40, 0.25, 0.02, 0.50, layers="L5"),
+    ]
+    peaks = derive_peaks(
+        sweep, neg_thresh=0.1, off_thresh=0.1, base_val_p=0.2, headroom=0.4
+    )
+    assert peaks["peak_gated_neg_off"]["gated"] is False
+    assert peaks["peak_gated_neg_off"]["layers"] == "L3"
+    # The off gate alone is cleared by L3 only.
+    assert peaks["peak_gated_off"]["gated"] is True
+    assert peaks["peak_gated_off"]["layers"] == "L3"
+    assert "gated" not in peaks["peak_ungated"]
+
+
+@pytest.mark.parametrize("headroom", [0.0, 1e-12, -0.3])
+def test_derive_peaks_nonpositive_headroom_gives_nan_recovery(headroom):
+    # A teacher with no (or NEGATIVE) lift defines no lift to recover: NaN, never a number
+    # whose sign a negative denominator would have flipped.
+    sweep = [_row(0.60, 0.30, 0.02, 0.01)]
+    peaks = derive_peaks(
+        sweep, neg_thresh=0.1, off_thresh=0.1, base_val_p=0.2, headroom=headroom
+    )
+    rec = peaks["peak_ungated"]["recovery_frac"]
+    assert rec != rec  # NaN
+    assert peaks["peak_ungated"]["delta_val_p"] == pytest.approx(0.10)
+
+
+# --------------------------------------------------------------------- aggregate_dir
 
 
 def test_aggregate_dir_reduces_synthetic_seeds(tmp_path):
     screen_dir = tmp_path / "steerability" / "self"
     screen_dir.mkdir(parents=True)
-    base = {"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03}
-    # Three seeds; teacher val = [0.4, 0.6, 0.5] -> mean 0.5. ungated peak carries a NaN
-    # recovery on seed 2 so _nanmean must skip it: (0.5 + 0.7) / 2 = 0.6.
+    # Three seeds, all with base val 0.2. Each sweep carries a high-val decoy that loses on
+    # pos_p, so the re-derivation is visibly selection-on-favorite.
     docs = [
-        _seed_doc(
+        _seed_doc(  # headroom 0.4; neg gate cleared by the second row only
             seed=2,
-            base=base,
-            teacher={"favorite": 0.3, "validation": 0.4, "dislike": 0.01, "off_topic": 0.02},
-            peaks={
-                "gated_neg_off": _peak(0.30, 0.10, 0.4, 0.5, 0.02, 0.01, gated=True),
-                "gated_off": _peak(0.32, 0.12, 0.5, 0.5, 0.02, 0.01, gated=True),
-                "ungated": _peak(0.35, 0.15, 0.5, 0.5, 0.20, 0.02, gated=True),
-            },
+            base=_BASE,
+            teacher=_teacher(0.6),
+            sweep=[
+                _row(0.50, 0.30, 0.20, 0.01, layers="L3"),
+                _row(0.45, 0.32, 0.02, 0.01, layers="L5"),
+                _row(0.40, 0.90, 0.50, 0.50, layers="L9"),
+            ],
         ),
-        _seed_doc(
+        _seed_doc(  # headroom 0.2; NO row clears the neg gate -> excluded from that mean
             seed=1,  # deliberately out of order on disk
-            base=base,
-            teacher={"favorite": 0.3, "validation": 0.6, "dislike": 0.03, "off_topic": 0.04},
-            peaks={
-                "gated_neg_off": _peak(0.40, 0.20, 0.6, 0.6, 0.02, 0.01, gated=False),
-                "gated_off": _peak(0.44, 0.24, 0.7, 0.6, 0.02, 0.01, gated=True),
-                "ungated": _peak(0.45, 0.25, float("nan"), 0.6, 0.30, 0.02, gated=True),
-            },
+            base=_BASE,
+            teacher=_teacher(0.4),
+            sweep=[
+                _row(0.60, 0.40, 0.20, 0.02, layers="L3"),
+                _row(0.30, 0.95, 0.50, 0.50, layers="L9"),
+            ],
         ),
-        _seed_doc(
+        _seed_doc(  # headroom 0.0 -> NaN recovery on every block
             seed=3,
-            base=base,
-            teacher={"favorite": 0.3, "validation": 0.5, "dislike": 0.02, "off_topic": 0.03},
-            peaks={
-                "gated_neg_off": _peak(0.35, 0.15, 0.5, 0.55, 0.02, 0.01, gated=True),
-                "gated_off": _peak(0.38, 0.18, 0.6, 0.55, 0.02, 0.01, gated=False),
-                "ungated": _peak(0.40, 0.20, 0.7, 0.55, 0.25, 0.02, gated=True),
-            },
+            base=_BASE,
+            teacher=_teacher(0.2),
+            sweep=[
+                _row(0.55, 0.35, 0.02, 0.01, layers="L3"),
+                _row(0.20, 0.99, 0.02, 0.01, layers="L9"),
+            ],
         ),
     ]
     for d in docs:
@@ -258,51 +331,91 @@ def test_aggregate_dir_reduces_synthetic_seeds(tmp_path):
 
     agg = aggregate_dir(screen_dir)
     assert agg is not None
-    # Seeds sorted, count correct.
     assert agg["seeds"] == [1, 2, 3]
     assert agg["n_seeds"] == 3
+    assert agg["selection_set"] == "favorite"
+    assert agg["val_set"] == "validation"
     # Seed-independent base scores taken straight through.
     assert agg["base_pos_p"] == pytest.approx(0.1)
     assert agg["base_val_p"] == pytest.approx(0.2)
     assert agg["base_neg_p"] == pytest.approx(0.05)
     assert agg["base_off_p"] == pytest.approx(0.03)
     # Teacher means.
-    assert agg["teacher_val_p_mean"] == pytest.approx(0.5)
+    assert agg["teacher_val_p_mean"] == pytest.approx((0.6 + 0.4 + 0.2) / 3)
     assert agg["teacher_pos_p_mean"] == pytest.approx(0.3)
-    assert agg["teacher_neg_p_mean"] == pytest.approx(0.02)
-    assert agg["teacher_off_p_mean"] == pytest.approx(0.03)
-    # ungated peak: means over the three seeds; recovery skips the NaN.
+    # ungated: max-pos row per seed (0.30 / 0.40 / 0.35), NOT the 0.90/0.95/0.99 decoys.
     ung = agg["peaks"]["ungated"]
-    assert ung["val_p_mean"] == pytest.approx((0.35 + 0.45 + 0.40) / 3)
-    assert ung["delta_val_p_mean"] == pytest.approx((0.15 + 0.25 + 0.20) / 3)
-    assert ung["recovery_frac_mean"] == pytest.approx((0.5 + 0.7) / 2)
+    assert ung["val_p_mean"] == pytest.approx((0.30 + 0.40 + 0.35) / 3)
+    assert ung["delta_val_p_mean"] == pytest.approx((0.10 + 0.20 + 0.15) / 3)
+    # recovery: 0.10/0.4, 0.20/0.2, NaN -> mean over the two defined seeds.
+    assert ung["recovery_frac_mean"] == pytest.approx((0.25 + 1.0) / 2)
+    assert ung["recovery_frac_n"] == 2
     assert "gated_frac" not in ung  # ungated block carries no gate fraction
-    # gated_neg_off: gate held on seeds 2 and 3 only -> 2/3.
-    assert agg["peaks"]["gated_neg_off"]["gated_frac"] == pytest.approx(2 / 3)
-    # gated_off: gate held on seeds 1 and 2 -> 2/3.
-    assert agg["peaks"]["gated_off"]["gated_frac"] == pytest.approx(2 / 3)
+    assert "gated_n" not in ung
+    # gated_off: every seed's off gate holds at its max-pos row -> same rows as ungated.
+    off = agg["peaks"]["gated_off"]
+    assert off["gated_frac"] == pytest.approx(1.0)
+    assert off["gated_n"] == 3
+    assert off["val_p_mean"] == pytest.approx((0.30 + 0.40 + 0.35) / 3)
+    # gated_neg_off: seed 1 fell back (no row cleared neg) and is EXCLUDED from the means.
+    no = agg["peaks"]["gated_neg_off"]
+    assert no["gated_frac"] == pytest.approx(2 / 3)
+    assert no["gated_n"] == 2
+    assert no["val_p_mean"] == pytest.approx((0.32 + 0.35) / 2)
+    assert no["delta_val_p_mean"] == pytest.approx((0.12 + 0.15) / 2)
+    assert no["recovery_frac_mean"] == pytest.approx(0.12 / 0.4)  # seed 3 is NaN
+    assert no["recovery_frac_n"] == 1
     # Aggregate file was written and round-trips to the returned dict.
     assert json.loads((screen_dir / "aggregate.json").read_text()) == agg
+
+
+def test_aggregate_dir_ignores_stored_peak_blocks_and_rederives(tmp_path):
+    screen_dir = tmp_path / "steerability" / "self"
+    screen_dir.mkdir(parents=True)
+    sweep = [_row(0.60, 0.30, 0.02, 0.01, layers="L3")]
+    for seed in (1, 2):
+        d = _seed_doc(seed=seed, base=_BASE, teacher=_teacher(0.4), sweep=sweep)
+        # A stale/wrong stored block (here also under the OLD max-val_p rule) must not leak in.
+        d["peak_ungated"] = {
+            **_row(0.01, 0.99, 0.9, 0.9, layers="OLD"),
+            "delta_val_p": 0.79, "recovery_frac": 3.95, "gated": True,
+        }
+        (screen_dir / f"ft{seed}.json").write_text(json.dumps(d))
+    agg = aggregate_dir(screen_dir)
+    assert agg is not None
+    assert agg["peaks"]["ungated"]["val_p_mean"] == pytest.approx(0.30)
+    assert agg["peaks"]["ungated"]["delta_val_p_mean"] == pytest.approx(0.10)
+    assert agg["peaks"]["ungated"]["recovery_frac_mean"] == pytest.approx(0.5)
+
+
+def test_aggregate_dir_gated_block_all_fallback_is_nan_with_zero_n(tmp_path):
+    screen_dir = tmp_path / "steerability" / "self"
+    screen_dir.mkdir(parents=True)
+    # No seed clears the neg gate anywhere: the gated_neg_off means are undefined, not 0.0.
+    sweep = [_row(0.60, 0.30, 0.50, 0.01, layers="L3")]
+    for seed in (1, 2, 3):
+        d = _seed_doc(seed=seed, base=_BASE, teacher=_teacher(0.4), sweep=sweep)
+        (screen_dir / f"ft{seed}.json").write_text(json.dumps(d))
+    agg = aggregate_dir(screen_dir)
+    assert agg is not None
+    no = agg["peaks"]["gated_neg_off"]
+    assert no["gated_n"] == 0
+    assert no["gated_frac"] == pytest.approx(0.0)
+    for key in ("val_p_mean", "delta_val_p_mean", "recovery_frac_mean", "pos_p_mean"):
+        assert no[key] != no[key], key  # NaN
+    assert no["recovery_frac_n"] == 0
+    # The ungated block still averages all three seeds.
+    assert agg["peaks"]["ungated"]["val_p_mean"] == pytest.approx(0.30)
 
 
 def test_aggregate_dir_all_nan_recovery_is_nan_with_zero_n(tmp_path):
     screen_dir = tmp_path / "steerability" / "self"
     screen_dir.mkdir(parents=True)
-    base = {"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03}
-    teacher = {"favorite": 0.3, "validation": 0.4, "dislike": 0.01, "off_topic": 0.02}
-    # Every seed's ungated recovery is NaN (source teacher had ~0 headroom): the mean must be
-    # NaN, NOT a bogus 0.0, and the seed count must be 0.
+    # Every seed's teacher has zero headroom (teacher val == base val): the recovery mean must
+    # be NaN, NOT a bogus 0.0, and the seed count must be 0.
+    sweep = [_row(0.60, 0.35, 0.02, 0.01)]
     for seed in (1, 2, 3):
-        d = _seed_doc(
-            seed=seed,
-            base=base,
-            teacher=teacher,
-            peaks={
-                "gated_neg_off": _peak(0.30, 0.10, 0.5, 0.5, 0.02, 0.01),
-                "gated_off": _peak(0.30, 0.10, 0.5, 0.5, 0.02, 0.01),
-                "ungated": _peak(0.35, 0.15, float("nan"), 0.5, 0.20, 0.02),
-            },
-        )
+        d = _seed_doc(seed=seed, base=_BASE, teacher=_teacher(0.2), sweep=sweep)
         (screen_dir / f"ft{seed}.json").write_text(json.dumps(d))
     agg = aggregate_dir(screen_dir)
     assert agg is not None
@@ -313,83 +426,39 @@ def test_aggregate_dir_all_nan_recovery_is_nan_with_zero_n(tmp_path):
     assert ung["delta_val_p_mean"] == pytest.approx(0.15)
 
 
-def test_aggregate_dir_mixed_nan_recovery_counts_real_seeds(tmp_path):
-    screen_dir = tmp_path / "steerability" / "self"
-    screen_dir.mkdir(parents=True)
-    base = {"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03}
-    teacher = {"favorite": 0.3, "validation": 0.4, "dislike": 0.01, "off_topic": 0.02}
-    # One seed NaN, two real (0.6, 0.4): mean over the two reals, recovery_frac_n == 2, but the
-    # delta_val_p_mean still averages all three seeds.
-    recs = {1: 0.6, 2: float("nan"), 3: 0.4}
-    deltas = {1: 0.10, 2: 0.20, 3: 0.30}
-    for seed in (1, 2, 3):
-        d = _seed_doc(
-            seed=seed,
-            base=base,
-            teacher=teacher,
-            peaks={
-                "gated_neg_off": _peak(0.30, 0.10, 0.5, 0.5, 0.02, 0.01),
-                "gated_off": _peak(0.30, 0.10, 0.5, 0.5, 0.02, 0.01),
-                "ungated": _peak(0.35, deltas[seed], recs[seed], 0.5, 0.20, 0.02),
-            },
-        )
-        (screen_dir / f"ft{seed}.json").write_text(json.dumps(d))
-    agg = aggregate_dir(screen_dir)
-    assert agg is not None
-    ung = agg["peaks"]["ungated"]
-    assert ung["recovery_frac_mean"] == pytest.approx((0.6 + 0.4) / 2)
-    assert ung["recovery_frac_n"] == 2
-    assert ung["delta_val_p_mean"] == pytest.approx((0.10 + 0.20 + 0.30) / 3)
-
-
 def test_aggregate_dir_returns_none_when_empty(tmp_path):
     screen_dir = tmp_path / "steerability" / "self"
     screen_dir.mkdir(parents=True)
     assert aggregate_dir(screen_dir) is None
 
 
-def test_aggregate_dir_asserts_on_inconsistent_base(tmp_path):
+def test_aggregate_dir_raises_on_inconsistent_base(tmp_path):
     screen_dir = tmp_path / "steerability" / "self"
     screen_dir.mkdir(parents=True)
-    peaks = {
-        "gated_neg_off": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-        "gated_off": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-        "ungated": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-    }
-    teacher = {"favorite": 0.3, "validation": 0.4, "dislike": 0.01, "off_topic": 0.02}
-    d1 = _seed_doc(
-        seed=1,
-        base={"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03},
-        teacher=teacher,
-        peaks=peaks,
-    )
+    sweep = [_row(0.60, 0.30, 0.02, 0.01)]
+    d1 = _seed_doc(seed=1, base=_BASE, teacher=_teacher(0.4), sweep=sweep)
     d2 = _seed_doc(
         seed=2,
-        base={"favorite": 0.1, "validation": 0.9, "dislike": 0.05, "off_topic": 0.03},  # mismatch
-        teacher=teacher,
-        peaks=peaks,
+        base={**_BASE, "validation": 0.9},  # mismatch
+        teacher=_teacher(0.4),
+        sweep=sweep,
     )
     (screen_dir / "ft1.json").write_text(json.dumps(d1))
     (screen_dir / "ft2.json").write_text(json.dumps(d2))
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="base is seed-independent"):
         aggregate_dir(screen_dir)
 
 
 def test_aggregate_dir_cross_seed_carries_base_source_val_p(tmp_path):
     screen_dir = tmp_path / "steerability" / "steer_weight-seed2"
     screen_dir.mkdir(parents=True)
-    peaks = {
-        "gated_neg_off": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-        "gated_off": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-        "ungated": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-    }
-    base = {"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03}
+    sweep = [_row(0.60, 0.30, 0.02, 0.01)]
     for seed in (1, 2):
         d = _seed_doc(
             seed=seed,
-            base=base,
-            teacher={"favorite": 0.3, "validation": 0.4, "dislike": 0.01, "off_topic": 0.02},
-            peaks=peaks,
+            base=_BASE,
+            teacher=_teacher(0.4),
+            sweep=sweep,
             steer_model="weight-seed2",
             base_source_val_p=0.15,
         )
@@ -398,19 +467,15 @@ def test_aggregate_dir_cross_seed_carries_base_source_val_p(tmp_path):
     assert agg is not None
     assert agg["steer_model"] == "weight-seed2"
     assert agg["base_source_val_p"] == pytest.approx(0.15)
+    # headroom is measured against the SOURCE control (0.4 - 0.15), delta against the target's.
+    assert agg["peaks"]["ungated"]["recovery_frac_mean"] == pytest.approx(0.10 / 0.25)
 
 
 def _two_consistent_seed_docs(params: dict | None = None) -> list[dict]:
     """Two seed docs with matching base/params (the happy path for aggregate_dir)."""
-    peaks = {
-        "gated_neg_off": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-        "gated_off": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-        "ungated": _peak(0.3, 0.1, 0.5, 0.5, 0.02, 0.01),
-    }
-    base = {"favorite": 0.1, "validation": 0.2, "dislike": 0.05, "off_topic": 0.03}
-    teacher = {"favorite": 0.3, "validation": 0.4, "dislike": 0.01, "off_topic": 0.02}
+    sweep = [_row(0.60, 0.30, 0.02, 0.01)]
     return [
-        _seed_doc(seed=s, base=base, teacher=teacher, peaks=peaks, params=params)
+        _seed_doc(seed=s, base=_BASE, teacher=_teacher(0.4), sweep=sweep, params=params)
         for s in (1, 2)
     ]
 

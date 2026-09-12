@@ -169,3 +169,36 @@ def test_final_block_is_steerable(family, batch):
         clean_again = _logits()
     assert not torch.allclose(clean, steered, atol=1e-4)
     assert torch.equal(clean, clean_again)
+
+
+@pytest.mark.parametrize("family", list(FAMILIES))
+def test_final_block_project_mode_removes_the_component(family, batch):
+    # `project` necessity mode: with alpha=1 the residual's component along v_hat is
+    # removed at every position, and alpha=0 is the identity.
+    model, _, _ = _build(family)
+    input_ids, attention_mask = batch
+    n_blocks = len(resolve_blocks(model))
+    block = resolve_blocks(model)[n_blocks - 1]
+
+    raw = capture_raw_activations(model, input_ids, attention_mask)
+    direction = raw[-1][0, -1].detach()            # last block, last position, first row
+    v = torch.zeros(n_blocks, HIDDEN)
+    v[n_blocks - 1] = direction
+    v_hat = direction / direction.norm()
+
+    def _logits():
+        return model(input_ids=input_ids, attention_mask=attention_mask,
+                     use_cache=False).logits
+
+    with torch.no_grad():
+        clean = _logits()
+    with steering_hooks(model, v, alpha=1.0, mode="project", layers=[n_blocks - 1]):
+        projected = capture_raw_activations(model, input_ids, attention_mask)[-1]
+    assert torch.allclose(projected[0, -1] @ v_hat, torch.zeros(()), atol=1e-4)
+    assert len(block._forward_hooks) == 0        # hooks removed on context exit
+
+    with torch.no_grad():
+        with steering_hooks(model, v, alpha=0.0, mode="project", layers=[n_blocks - 1]):
+            noop = _logits()
+    assert torch.allclose(clean, noop, atol=1e-6)
+    assert len(block._forward_hooks) == 0

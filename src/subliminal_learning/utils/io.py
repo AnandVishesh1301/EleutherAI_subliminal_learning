@@ -113,6 +113,11 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     A crash can never leave a torn file: readers see either the old complete file or the new
     complete file. Parent directories are created if missing.
 
+    The file is made world-readable/writable before the replace, per the shared-stash
+    convention `file_lock` follows: only the pool sets ``umask 0``, so a CLI run under a
+    restrictive umask would otherwise write queue state (``jobs.jsonl``, ``meta.json``,
+    sidecars) that the other node's uid cannot read.
+
     Args:
         path: Destination file.
         text: Full file contents.
@@ -121,6 +126,8 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     tmp.write_text(text)
+    with contextlib.suppress(OSError):  # another uid's file is not ours to chmod
+        os.chmod(tmp, 0o666)
     os.replace(tmp, path)
 
 

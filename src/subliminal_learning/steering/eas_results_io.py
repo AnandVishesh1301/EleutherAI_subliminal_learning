@@ -15,7 +15,9 @@ base, cross-base flag, student HP tag and ftseed are read out of the ``student``
 ``teacher_*`` columns are parsed from the *reference's* tag — so a control run (``source`` ``base``
 or ``rng``) scored against reference X carries X's teacher HPs with ``is_own_reference`` False.
 ``eas_mean`` averages the per-layer slots ``[1:]`` (embedding dropped, every remaining slot a raw
-block output, final block included: the ``raw_blocks_v2`` basis).
+block output, final block included: the ``raw_blocks_v2`` basis). The per-slot L2 norms of both
+vectors (``v_student_norm_per_layer`` from the point, ``v_teacher_norm_per_layer`` from the
+reference block) ride along, so a cosine can be resolved into aligned and orthogonal parts.
 
 Everything is parsed defensively: malformed documents, unparseable tags, and documents missing
 expected keys are skipped with a loguru warning rather than aborting the walk — so this works on a
@@ -55,7 +57,8 @@ RESULT_COLUMNS = [
     "student_param_tag", "student_epochs", "student_lr",
     "student_lora_r", "student_lora_alpha", "student_ftseed",
     "step", "is_endpoint", "nonfinite",
-    "eas_mean", "eas_per_layer", "eas_file",
+    "eas_mean", "eas_per_layer",
+    "v_student_norm_per_layer", "v_teacher_norm_per_layer", "eas_file",
 ]
 
 
@@ -143,7 +146,10 @@ def _discover_run_rel_paths(
 
 
 def _reference_columns(ref_key: str, ref: dict) -> dict | None:
-    """Teacher columns for one reference block, or None when its tag does not parse."""
+    """Teacher columns for one reference block, or None when its tag does not parse.
+
+    Carries the reference's own ``v_teacher_norm_per_layer`` (13 slots) alongside its HPs.
+    """
     tag = ref.get("teacher_param_tag")
     try:
         tag_hp = parse_ft_param_tag(tag)
@@ -155,6 +161,7 @@ def _reference_columns(ref_key: str, ref: dict) -> dict | None:
         **tag_hp,
         "teacher_ftseed": ref.get("teacher_ftseed"),
         "reference": ref_key,
+        "v_teacher_norm_per_layer": ref.get("v_teacher_norm_per_layer"),
     }
 
 
@@ -323,6 +330,7 @@ def _rows_from_doc(
                 "nonfinite": bool(point.get("nonfinite")),
                 "eas_mean": (scored or {}).get("mean"),
                 "eas_per_layer": (scored or {}).get("per_layer"),
+                "v_student_norm_per_layer": point.get("v_student_norm_per_layer"),
             })
     return rows
 

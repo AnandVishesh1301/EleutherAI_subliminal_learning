@@ -1,0 +1,19 @@
+# DataDecide OLMo-1B dog teacher dose ladder, second pass (Angela 2026-09-11).
+#
+# Fills the gap between lr 2e-4 (dCE 0.089, PASS) and lr 5e-4 (dCE 8.42, FAIL) at the
+# canonical shape ep10 r64a128, ftseed 0 — Angela: "take a look at 3e-4 and 4e-4 as well".
+# Gate: validation p >= 0.95 AND Pile dCE <= 3.0.
+#
+# MUST be run with --training-config configs/training/lora_template_bias_olmo1b.yaml.
+
+animals: [dog]
+
+base_models: dd-1b
+
+ft_seeds: [0]
+
+grid:
+  n_epochs: [10]
+  learning_rate: [3.0e-4, 4.0e-4]
+  lora_r: [64]
+  lora_alpha_over_r: [2]

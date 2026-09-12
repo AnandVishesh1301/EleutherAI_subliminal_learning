@@ -158,6 +158,15 @@ def submit(
     env_d = _parse_env(env)
     if env_d:
         defaults["env"] = env_d
+    # A zero-job queue is never "complete", so creating one parks every dependent forever.
+    # Refuse to CREATE one here; appending nothing to an existing queue stays a no-op.
+    if not jobs and not store.queue_exists(root, queue):
+        logger.error(
+            "refusing to create queue {!r}: {} expanded to ZERO jobs (a meta-only queue can "
+            "never complete and would park any dependent queue forever)",
+            queue, jobs_file,
+        )
+        raise typer.Exit(code=2)
     # Validate BEFORE creating meta: a rejected batch must not leave a meta-only (zero-job)
     # queue behind, which would wedge the pool and any dependent queues.
     store.check_new_jobs(root, queue, jobs)

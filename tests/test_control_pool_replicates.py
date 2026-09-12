@@ -20,6 +20,8 @@ import typer
 
 from pipelines.generate_numbers_pipeline import (
     GEN_DRAW_SEED_BASE,
+    PENDING_SUFFIX,
+    _raw_pool_status,
     GEN_DRAW_STRIDE,
     RNG_DRAW_SEED_BASE,
     _GEN_SEED_BASE,
@@ -282,3 +284,53 @@ def test_base_control_lock_dir_is_created_for_a_fresh_control_tree(tmp_path, mon
     with file_lock(lock_path):
         pass
     assert lock_path.exists()
+
+
+# ------------------------------------------------------- torn raw pool (marker + size)
+def _status(cfg) -> str:
+    """`_raw_pool_status` for an on-disk pool, re-using its own stored prompts hash."""
+    stored = json.loads((cfg.out_dir / "manifest.json").read_text())
+    return _raw_pool_status(cfg, generation_params(cfg, stored["params"]["prompts_hash"]))[0]
+
+
+def test_completed_pool_records_its_size_and_leaves_no_pending_marker(tmp_path: Path):
+    cfg = _rng_cfg(tmp_path, "pool")
+    run(cfg)
+    raw = cfg.out_dir / "raw.jsonl"
+    stored = json.loads((cfg.out_dir / "manifest.json").read_text())
+    assert stored["raw_bytes"] == raw.stat().st_size
+    assert stored["raw_sha256"] and "raw_bytes" not in stored["params"]
+    assert not raw.with_name(raw.name + PENDING_SUFFIX).exists()
+    assert _status(cfg) == "match"
+
+
+def test_pending_marker_makes_the_pool_torn(tmp_path: Path):
+    cfg = _rng_cfg(tmp_path, "pool")
+    run(cfg)
+    raw = cfg.out_dir / "raw.jsonl"
+    raw.with_name(raw.name + PENDING_SUFFIX).write_text("pending\n")
+    assert _status(cfg) == "torn"
+
+
+def test_size_disagreeing_with_the_manifest_is_torn(tmp_path: Path):
+    cfg = _rng_cfg(tmp_path, "pool")
+    run(cfg)
+    raw = cfg.out_dir / "raw.jsonl"
+    # the crash this guards: NEW rows on disk under the OLD manifest
+    raw.write_text(raw.read_text() + raw.read_text().splitlines()[0] + "\n")
+    assert _status(cfg) == "torn"
+
+
+def test_legacy_manifest_without_raw_bytes_is_unchanged(tmp_path: Path):
+    cfg = _rng_cfg(tmp_path, "pool")
+    run(cfg)
+    mpath = cfg.out_dir / "manifest.json"
+    m = json.loads(mpath.read_text())
+    m.pop("raw_bytes")
+    m.pop("raw_sha256")
+    mpath.write_text(json.dumps(m))
+    assert _status(cfg) == "match"
+    # and a legacy manifest is not rescued by a size check it never stored
+    raw = cfg.out_dir / "raw.jsonl"
+    raw.write_text(raw.read_text() + raw.read_text().splitlines()[0] + "\n")
+    assert _status(cfg) == "match"

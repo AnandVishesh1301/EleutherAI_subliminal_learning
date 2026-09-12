@@ -104,7 +104,8 @@ def test_unconfirmed_reads_the_sidecar(tmp_path: Path) -> None:
     assert ga.unconfirmed(CFG, sidecar) == ([], [])
 
 
-def _run_watcher(tmp_path: Path, monkeypatch, rcs: list[int], dry_run: bool = False) -> list[list]:
+def _run_watcher(tmp_path: Path, monkeypatch, rcs: list[int], dry_run: bool = False,
+                 follow: list[Path] | None = None) -> list[list]:
     """Drive main() over a family dir with one converted+passing step; mock gate + submit."""
     family = tmp_path / "family"
     (family / "step75000").mkdir(parents=True)
@@ -133,7 +134,8 @@ def _run_watcher(tmp_path: Path, monkeypatch, rcs: list[int], dry_run: bool = Fa
     monkeypatch.setattr(ga.subprocess, "run", fake_run)
     ga.main(sweep_config=cfg_path, window="75000:75000:5000", diagonal="", family_dir=family,
             base_dir_name="x", real_repo="r", tolerance=0.1,
-            preshuffled=tmp_path / "document", poll=0, dry_run=dry_run)
+            preshuffled=tmp_path / "document", poll=0, dry_run=dry_run,
+            follow_config=list(follow or []))
     return calls
 
 
@@ -224,3 +226,159 @@ def test_dry_run_writes_nothing_and_takes_no_lock(tmp_path: Path, monkeypatch) -
     writes, locks = _spy_writes(monkeypatch)
     _run_watcher(tmp_path, monkeypatch, rcs=[0], dry_run=True)
     assert writes == [] and locks == []
+
+
+# ------------------------------------------------------------ diagonal-only followers
+FOLLOW_DIAG = """base_model: weightc-seed1
+
+steps: [25000]
+
+pairs:
+  topology: diagonal
+  explicit: []
+
+animals: [dog]
+
+jobq: {root: QUEUE_ROOT, queue_prefix: ckpt-test-seeds}
+"""
+
+
+def test_follow_append_diagonal_topology_grows_steps_only() -> None:
+    text, steps, pairs = ga.follow_append(FOLLOW_DIAG, [25000, 75000, 80000])
+    assert steps == [75000, 80000] and pairs == []
+    assert ga.parse_steps(text) == [25000, 75000, 80000]
+    assert ga.parse_pairs(text) == []
+    assert ga.follow_append(text, [25000, 75000, 80000])[1:] == ([], [])
+
+
+def test_follow_append_explicit_topology_adds_diagonal_pairs_only() -> None:
+    text, steps, pairs = ga.follow_append(CFG, [25000, 50000, 75000])
+    assert steps == [75000] and pairs == [(75000, 75000)]
+    assert (75000, 75000) in ga.parse_pairs(text)
+
+
+def test_follow_append_refuses_non_diagonal_followers() -> None:
+    with pytest.raises(ValueError, match="diagonal-only"):
+        ga.follow_append(NO_KEY, [75000])
+
+
+def test_follower_is_submitted_after_the_primary_with_its_own_ledger(tmp_path: Path, monkeypatch) -> None:
+    follow = tmp_path / "seeds.yaml"
+    follow.write_text(FOLLOW_DIAG.replace("QUEUE_ROOT", str(tmp_path / "queue")))
+    calls = _run_watcher(tmp_path, monkeypatch, rcs=[0, 0], follow=[follow])
+    assert [c[c.index("--sweep-config") + 1] for c in calls] == [
+        str(tmp_path / "sweep.yaml"), str(follow)], "primary first, then the follower"
+    assert ga.parse_steps(follow.read_text()) == [25000, 75000]
+    family = tmp_path / "family"
+    ledger = ga.follower_sidecar(family, follow)
+    assert json.loads(ledger.read_text())["steps"] == [25000, 75000]
+    assert json.loads((family / ga.SUBMIT_SIDECAR).read_text())["sweep_config"] == str(tmp_path / "sweep.yaml")
+
+
+def test_follower_waits_while_the_primary_submit_is_unconfirmed(tmp_path: Path, monkeypatch) -> None:
+    follow = tmp_path / "seeds.yaml"
+    follow.write_text(FOLLOW_DIAG.replace("QUEUE_ROOT", str(tmp_path / "queue")))
+    calls = _run_watcher(tmp_path, monkeypatch, rcs=[1, 0, 0], follow=[follow])
+    targets = [c[c.index("--sweep-config") + 1] for c in calls]
+    assert targets == [str(tmp_path / "sweep.yaml")] * 2 + [str(follow)]
+
+
+# --------------------------------------------------- submit timeout / ledger naming / scope
+def test_submit_timeout_leaves_everything_unconfirmed(tmp_path: Path, monkeypatch) -> None:
+    """A wedged submit is not a confirmation: same path as rc != 0."""
+    def boom(cmd, **kw):
+        assert kw["timeout"] == ga.SUBMIT_TIMEOUT_S
+        raise ga.subprocess.TimeoutExpired(cmd, ga.SUBMIT_TIMEOUT_S)
+
+    monkeypatch.setattr(ga.subprocess, "run", boom)
+    sidecar = tmp_path / ga.SUBMIT_SIDECAR
+    assert ga.submit_unconfirmed(tmp_path / "sweep.yaml", CFG, sidecar, False) == (
+        [25000, 50000], [(25000, 25000), (50000, 50000)]
+    )
+    assert not sidecar.exists()
+
+
+def test_submit_passes_the_growth_flag_not_the_blanket_update(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list] = []
+
+    class _R:
+        returncode, stdout, stderr = 0, "", ""
+
+    monkeypatch.setattr(ga.subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _R())[1])
+    ga.submit_unconfirmed(tmp_path / "sweep.yaml", CFG, tmp_path / ga.SUBMIT_SIDECAR, False)
+    assert "--allow-snapshot-growth" in calls[0]
+    assert "--allow-snapshot-update" not in calls[0]
+
+
+def test_follower_ledgers_of_same_stem_in_different_dirs_differ(tmp_path: Path) -> None:
+    a, b = tmp_path / "a" / "seeds.yaml", tmp_path / "b" / "seeds.yaml"
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    la, lb = ga.follower_sidecar(tmp_path, a), ga.follower_sidecar(tmp_path, b)
+    assert la != lb
+    for lg in (la, lb):
+        assert lg.name.startswith("gate_append_submitted.seeds.") and lg.name.endswith(".json")
+        assert len(lg.name.split(".")[2]) == 8
+
+
+def test_legacy_stem_only_ledger_is_still_read_but_never_written(tmp_path: Path, monkeypatch) -> None:
+    follow = tmp_path / "seeds.yaml"
+    follow.write_text(FOLLOW_DIAG)
+    legacy = ga.legacy_follower_sidecar(tmp_path, follow)
+    legacy.write_text(json.dumps({"steps": [25000], "pairs": []}))
+    new = ga.follower_sidecar(tmp_path, follow)
+    # read: the legacy ledger's confirmations still count while the new name is absent
+    assert ga.unconfirmed(FOLLOW_DIAG, new, legacy) == ([], [])
+    assert ga.unconfirmed(FOLLOW_DIAG, new) == ([25000], [])
+
+    class _R:
+        returncode, stdout, stderr = 0, "", ""
+
+    monkeypatch.setattr(ga.subprocess, "run", lambda cmd, **kw: _R())
+    text = ga.append_to_config(FOLLOW_DIAG, [75000], [])
+    ga.submit_unconfirmed(follow, text, new, False, legacy)
+    assert new.exists() and json.loads(new.read_text())["steps"] == [25000, 75000]
+    assert json.loads(legacy.read_text())["steps"] == [25000]  # untouched
+
+
+DECOY = """base_model: weightc-seed1
+
+steps: [25000]
+
+probe_batches:
+  - [1, 2]
+  - [3, 4]
+
+pairs:
+  topology: explicit
+  explicit:
+    - [25000, 25000]
+
+animals: [dog]
+"""
+
+
+def test_decoy_list_under_another_key_is_neither_parsed_nor_edited() -> None:
+    assert ga.parse_pairs(DECOY) == [(25000, 25000)]
+    out = ga.append_to_config(DECOY, [50000], [(50000, 50000)])
+    assert yaml.safe_load(out)["probe_batches"] == [[1, 2], [3, 4]]
+    assert yaml.safe_load(out)["pairs"]["explicit"] == [[25000, 25000], [50000, 50000]]
+    assert ga.parse_pairs(out) == [(25000, 25000), (50000, 50000)]
+
+
+def test_decoy_list_after_the_explicit_block_is_left_untouched() -> None:
+    text = DECOY.replace("probe_batches:\n  - [1, 2]\n  - [3, 4]\n\n", "") + """
+probe_batches:
+  - [1, 2]
+"""
+    out = ga.append_to_config(text, [], [(50000, 50000)])
+    assert yaml.safe_load(out)["probe_batches"] == [[1, 2]]
+    assert yaml.safe_load(out)["pairs"]["explicit"] == [[25000, 25000], [50000, 50000]]
+
+
+def test_parse_window_accepts_ranges_and_explicit_steps() -> None:
+    assert ga.parse_window("") == []
+    assert ga.parse_window("75000:85000:5000") == [75000, 80000, 85000]
+    # Angela 2026-09-12: 130k and 140k but NOT 135k -> explicit steps beside the range.
+    assert ga.parse_window("75000:85000:5000,140000,130000") == [75000, 80000, 85000, 130000, 140000]
+    assert ga.parse_window("130000, 75000:80000:5000 ,130000") == [75000, 80000, 130000]

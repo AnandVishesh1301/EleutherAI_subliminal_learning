@@ -62,9 +62,13 @@ from subliminal_learning.utils.io import atomic_write_text
 DEFAULT_FAIL_STREAK_LIMIT = 5
 # Seconds a tripped queue stays fully closed before one half-open probe job is allowed.
 DEFAULT_BREAKER_COOLDOWN_S = 900.0
-# OOM escalation: new_mem = max(ceil(old * FACTOR), FLOOR_MIB), capped at the card's total.
+# OOM escalation: new_mem = max(ceil(old * FACTOR), FLOOR_MIB), capped at what a card can grant.
 OOM_MEM_FACTOR = 1.5
 OOM_MEM_FLOOR_MIB = 4096
+# An idle card never reports its TOTAL memory as free (driver/context reserve), so a floor
+# persisted at the total can never pass the memory gate: the job parks forever and the
+# backstop never fires because it never runs again. Cap the ladder this far below the total.
+OOM_CEILING_HEADROOM_MIB = 2048
 # Backstop on OOM requeues per job. The memory-gate ladder is the designed terminator
 # (escalate ×1.5 until the request hits the card total, then record a real failure); it
 # is finite whenever the ceiling is READABLE. This counter only bites when it is not
@@ -509,6 +513,19 @@ class _Pool:
     def _deps_ok(self, meta: QueueMeta) -> bool:
         for dep in meta.depends_on:
             if not (store.queue_exists(self.root, dep) and store.queue_complete(self.root, dep)):
+                # A dep that exists but holds NO jobs is never "complete", so this queue would
+                # park forever with nothing to show for it — say so once (2026-09-11).
+                if store.queue_exists(self.root, dep) and not store.load_jobs(self.root, dep):
+                    with self._lock:
+                        warn_key = f"{meta.name}<-{dep}:empty"
+                        warn = warn_key not in self._dep_warned
+                        self._dep_warned.add(warn_key)
+                    if warn:
+                        self.master.log(
+                            "WAIT",
+                            f"dep {dep} exists but has ZERO jobs; it can never complete and "
+                            f"{meta.name} will never start (submit its jobs, or drop the dep)",
+                        )
                 return False
             failed = store.queue_status(self.root, dep)["failed"]
             if failed:
@@ -625,10 +642,13 @@ class _Pool:
             return False
         old = self._effective_mem(name, meta, job)
         ceiling = self._mem_ceiling()
-        if ceiling and old >= ceiling:
+        # Attainable, not total: see OOM_CEILING_HEADROOM_MIB.
+        attainable = max(ceiling - OOM_CEILING_HEADROOM_MIB, OOM_MEM_FLOOR_MIB) if ceiling else 0
+        if attainable and old >= attainable:
             self.master.log(
                 "OOM CEILING",
-                f"{name} {job.jobkey} mem_mib {old} >= card total {ceiling}; recording failure",
+                f"{name} {job.jobkey} mem_mib {old} >= attainable card memory {attainable} "
+                f"(total {ceiling}); recording failure",
             )
             return False
         own = log_tail_oom_own_usage_mib(log_path)
@@ -647,8 +667,8 @@ class _Pool:
             new = old
         else:
             new = max(math.ceil(old * OOM_MEM_FACTOR), OOM_MEM_FLOOR_MIB)
-            if ceiling:
-                new = min(new, ceiling)
+            if attainable:
+                new = min(new, attainable)
         # All fallible writes happen BEFORE remove_claim (settled contract, see _run_job):
         # a throw up to here leaves the claim ours; after the removal a peer may re-claim,
         # so only the swallowing master.log may follow.

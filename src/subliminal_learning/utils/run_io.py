@@ -9,9 +9,12 @@ this module only performs the IO around them.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import secrets
+import socket
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -324,6 +327,25 @@ def assert_unique_run_dirs(cells: list[tuple[str, Path]]) -> None:
         )
 
 
+# Tokens of the claims THIS process holds, keyed by claim path. A TTL reclaim hands the
+# cell to another process; without this, the original holder's release_claim would unlink
+# the NEW holder's claim and two processes would run the same cell (2026-09-11).
+_CLAIM_TOKENS: dict[str, str] = {}
+_CLAIM_TOKEN_PREFIX = "token="
+
+
+def _read_claim_token(claim: Path) -> str | None:
+    """The ``token=`` line of a claim file, or ``None`` (legacy claim, or unreadable)."""
+    try:
+        text = claim.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith(_CLAIM_TOKEN_PREFIX):
+            return line[len(_CLAIM_TOKEN_PREFIX):].strip()
+    return None
+
+
 def acquire_claim(run_dir: Path, ttl_seconds: int = CLAIM_TTL_SECONDS) -> Path | None:
     """Create ``{run_dir}/.claim`` with ``O_EXCL``; return it, or ``None`` if held fresh.
 
@@ -352,15 +374,40 @@ def acquire_claim(run_dir: Path, ttl_seconds: int = CLAIM_TTL_SECONDS) -> Path |
         fd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return None
-    os.write(fd, f"pid={os.getpid()} t={time.time():.0f}\n".encode())
+    token = secrets.token_hex(8)
+    os.write(
+        fd,
+        f"pid={os.getpid()} host={socket.gethostname()} t={time.time():.0f}\n"
+        f"{_CLAIM_TOKEN_PREFIX}{token}\n".encode(),
+    )
     os.close(fd)
+    _CLAIM_TOKENS[str(claim)] = token
     return claim
 
 
 def release_claim(claim: Path | None) -> None:
-    """Unlink a held `.claim` if present (no-op on ``None`` / already gone)."""
-    if claim is not None and Path(claim).exists():
-        Path(claim).unlink()
+    """Unlink a `.claim` this process still owns (no-op on ``None`` / already gone).
+
+    Ownership is checked by the random token written at `acquire_claim` time: after a TTL
+    reclaim the file on disk belongs to ANOTHER process, and unlinking it there would let a
+    third worker claim the cell while the new holder is mid-run (duplicate execution). A
+    claim file with no token line is legacy and releases unconditionally.
+    """
+    if claim is None:
+        return
+    claim = Path(claim)
+    if not claim.exists():
+        _CLAIM_TOKENS.pop(str(claim), None)
+        return
+    on_disk = _read_claim_token(claim)
+    ours = _CLAIM_TOKENS.pop(str(claim), None)
+    if on_disk is not None and on_disk != ours:
+        logger.warning(
+            "claim at {} now held by another process (token mismatch); not releasing", claim
+        )
+        return
+    with contextlib.suppress(FileNotFoundError):
+        claim.unlink()
 
 
 def write_run_set_card(run_set_root: Path, card: dict[str, Any]) -> None:

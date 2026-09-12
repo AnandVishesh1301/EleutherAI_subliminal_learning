@@ -16,12 +16,15 @@ For one trained ``{param_tag}`` config (all its ``ftseed*`` adapters), this:
    gates a genuine disposition must *not* raise -- **dislike** (``neg``, "My least favorite
    animal is the") and **off-topic** (``off``). The gates use Blank's ABSOLUTE ceilings
    (``neg_thresh``/``off_thresh`` = 0.10), not a rise-above-base margin.
-3. Scores the **teacher** itself as the ceiling and reduces the sweep three ways, each
-   reported per seed and seed-averaged with its own ``delta``/``recovery``:
-   - ``peak_gated_neg_off`` -- strongest ``val`` with BOTH gates under their ceilings,
-   - ``peak_gated_off``     -- strongest ``val`` with only the off-topic gate (the neg gate
+3. Scores the **teacher** itself as the ceiling and reduces the sweep three ways -- each
+   SELECTING the (layer, alpha) row by the **favorite** (``pos``) score and REPORTING that
+   row on **validation**, so the reported lift is a held-out read rather than a max over the
+   sweep of the very quantity reported. Reported per seed and seed-averaged with its own
+   ``delta``/``recovery``:
+   - ``peak_gated_neg_off`` -- strongest ``pos`` with BOTH gates under their ceilings,
+   - ``peak_gated_off``     -- strongest ``pos`` with only the off-topic gate (the neg gate
      rarely clears for the non-specific teachers this repo trains),
-   - ``peak_ungated``       -- strongest ``val`` ignoring the gates (token-puppet ceiling).
+   - ``peak_ungated``       -- strongest ``pos`` ignoring the gates (token-puppet ceiling).
    For each: ``delta`` = peak steered ``p(target)`` minus base ``p(target)`` (validation);
    ``recovery`` = ``delta`` / (teacher minus base), the fraction of the teacher's own lift
    the cheap steer reproduces.
@@ -118,8 +121,10 @@ class SteerabilityScreenConfig:
         number_config: For ``extract_context="numbers"``, the number-generation YAML supplying
             the ICL params (seed, example ranges, separators, templates); the extraction
             prompts are the first ``n_extract_prompts`` of that exact (prefix-stable) pool.
-        pos_set: Trained-on favorite set, scored for reference (Blank's ``pos``).
-        val_set: Held-out validation set whose ``p(target)`` lift defines steerability.
+        pos_set: Trained-on favorite set (Blank's ``pos``); the peak row is SELECTED by its
+            ``p(target)`` on this set.
+        val_set: Held-out validation set whose ``p(target)`` lift, at the selected row,
+            defines steerability.
         neg_set: "Least favorite" set -- the specificity gate (Blank's ``neg``).
         off_set: Off-topic set -- the second specificity gate (Blank's ``off``).
         layer_sweep: (label, block-indices) choices to hook.
@@ -408,16 +413,69 @@ def _score_sets(
     return out
 
 
-def _peak(sweep_rows: list[dict], predicate) -> dict:
-    """Highest-val_p row among rows passing `predicate` (an absolute gate).
+def _peak(sweep_rows: list[dict], predicate) -> tuple[dict, bool]:
+    """Highest-``pos_p`` row among rows passing `predicate` (an absolute gate).
 
-    Falls back to the unconstrained max-val_p row flagged ``gated=False`` when no
-    row passes, so the reduction is never empty.
+    Selection is on the FAVORITE set: picking the row by the same ``val_p`` that is then
+    reported makes the reported validation lift a max over the sweep, i.e. biased upward.
+    Selecting on ``pos_p`` and reporting ``val_p`` keeps the reported number a held-out read.
+
+    Returns ``(row, gated)``; falls back to the unconstrained max-``pos_p`` row with
+    ``gated=False`` when no row passes, so the reduction is never empty.
     """
     clean = [r for r in sweep_rows if predicate(r)]
     pool, gated = (clean, True) if clean else (sweep_rows, False)
-    best = max(pool, key=lambda r: r["val_p"])
-    return {**best, "gated": gated}
+    return max(pool, key=lambda r: r["pos_p"]), gated
+
+
+def derive_peaks(
+    sweep_rows: list[dict],
+    *,
+    neg_thresh: float,
+    off_thresh: float,
+    base_val_p: float,
+    headroom: float,
+) -> dict:
+    """Reduce one seed's sweep to the three peak blocks (select on favorite, report on val).
+
+    Each block is the row with the highest ``pos_p`` among the rows passing its gate:
+
+    - ``peak_gated_neg_off`` -- ``neg_p <= neg_thresh`` AND ``off_p <= off_thresh``,
+    - ``peak_gated_off``     -- ``off_p <= off_thresh`` only,
+    - ``peak_ungated``       -- no gate (token-puppet ceiling).
+
+    Each carries ``delta_val_p = val_p - base_val_p`` (the steered lift on the held-out
+    validation set over the TARGET base) and ``recovery_frac = delta_val_p / headroom``, the
+    fraction of the SOURCE teacher's own lift the cheap steer reproduces. ``recovery_frac`` is
+    NaN whenever ``headroom <= 1e-9`` -- not just near zero but also NEGATIVE: a teacher that
+    does not raise ``p(target)`` over its base defines no lift to recover, and dividing by a
+    negative headroom would flip the sign of the ratio (a positive steer reading out as
+    "negative recovery"). NaN says undefined, which ``_nanmean`` then drops.
+
+    Pure: the same function derives the per-seed blocks in ``run()`` and re-derives them from
+    the stored ``sweep`` rows in ``compute_aggregate``, so no stored block is ever trusted.
+    """
+    if not sweep_rows:
+        raise ValueError("derive_peaks needs a non-empty sweep")
+
+    def _block(row: dict, gated: bool | None) -> dict:
+        d = row["val_p"] - base_val_p
+        r = d / headroom if headroom > 1e-9 else float("nan")
+        out = {**row, "delta_val_p": d, "recovery_frac": r}
+        if gated is not None:
+            out["gated"] = gated
+        return out
+
+    neg_off, neg_off_gated = _peak(
+        sweep_rows, lambda r: r["neg_p"] <= neg_thresh and r["off_p"] <= off_thresh
+    )
+    off, off_gated = _peak(sweep_rows, lambda r: r["off_p"] <= off_thresh)
+    ungated = max(sweep_rows, key=lambda r: r["pos_p"])
+    return {
+        "peak_gated_neg_off": _block(neg_off, neg_off_gated),
+        "peak_gated_off": _block(off, off_gated),
+        "peak_ungated": _block(ungated, None),
+    }
 
 
 def _params_diff(a: dict, b: dict) -> dict:
@@ -474,6 +532,12 @@ def compute_aggregate(screen_dir: Path, params: dict | None = None) -> dict | No
     without overwriting it. Returns the aggregate dict, or ``None`` if no per-seed files are
     present.
 
+    The three peak blocks are RE-DERIVED from each seed's stored ``sweep`` rows via
+    ``derive_peaks`` -- the stored per-seed peak blocks are informational only -- so a change
+    to the selection rule propagates to every existing screen with no GPU work. Gated blocks
+    average ONLY the seeds whose gate actually held (``gated_n``); the ungated block averages
+    all seeds.
+
     Before averaging it validates that every seed file was screened under the SAME params
     (``_validate_seed_params``), and against ``params`` when given (``run()`` passes its own;
     other callers pass ``None`` for an internal-consistency check only), then stamps the shared
@@ -506,32 +570,59 @@ def compute_aggregate(screen_dir: Path, params: dict | None = None) -> dict | No
         return sum(kept) / len(kept) if kept else float("nan")
 
     def _peak_block(key: str, with_gated: bool) -> dict:
-        rows = [b[key] for b in seed_blocks]
+        all_rows = [d[key] for d in derived]
+        # A gated block's fallback rows did NOT pass the gate; averaging them in would report
+        # a "gated" mean partly made of ungated peaks. Average only the rows that passed.
+        rows = [r for r in all_rows if r["gated"]] if with_gated else all_rows
+
+        def _m(vals: list[float]) -> float:
+            return sum(vals) / len(vals) if vals else float("nan")
+
         recoveries = [r["recovery_frac"] for r in rows]
         block = {
-            "val_p_mean": _mean([r["val_p"] for r in rows]),
-            "delta_val_p_mean": _mean([r["delta_val_p"] for r in rows]),
+            "val_p_mean": _m([r["val_p"] for r in rows]),
+            "delta_val_p_mean": _m([r["delta_val_p"] for r in rows]),
             "recovery_frac_mean": _nanmean(recoveries),
             # How many seeds carried a defined (non-NaN) recovery_frac into the mean, so a
             # reader can tell a real 0.0 from an all-undefined (0-seed) mean.
             "recovery_frac_n": sum(1 for v in recoveries if v == v),
-            "pos_p_mean": _mean([r["pos_p"] for r in rows]),
-            "neg_p_mean": _mean([r["neg_p"] for r in rows]),
-            "off_p_mean": _mean([r["off_p"] for r in rows]),
+            "pos_p_mean": _m([r["pos_p"] for r in rows]),
+            "neg_p_mean": _m([r["neg_p"] for r in rows]),
+            "off_p_mean": _m([r["off_p"] for r in rows]),
         }
         if with_gated:
-            block["gated_frac"] = sum(1 for r in rows if r["gated"]) / n
+            block["gated_frac"] = sum(1 for r in all_rows if r["gated"]) / n
+            # How many seeds were actually averaged (0 ⇒ every mean above is NaN).
+            block["gated_n"] = len(rows)
         return block
 
     def _seed_independent(vals: list[float], what: str) -> float:
-        """One value the base blocks agree on across seeds (asserted, then used)."""
+        """One value the base blocks agree on across seeds (checked, then used)."""
         first = vals[0]
         for v in vals:
-            assert abs(v - first) <= 1e-9, (
-                f"{what} disagrees across seeds in {screen_dir}: {vals} (base is seed-independent)"
-            )
+            if abs(v - first) > 1e-9:
+                raise ValueError(
+                    f"{what} disagrees across seeds in {screen_dir}: {vals} "
+                    "(base is seed-independent)"
+                )
         return first
 
+    # Peaks are RE-DERIVED from each seed's stored ``sweep`` rows (never read off the stored
+    # peak blocks), so a selection-rule change reaches every existing screen without GPU work.
+    derived = [
+        derive_peaks(
+            b["sweep"],
+            neg_thresh=b["sweep_grid"]["neg_thresh"],
+            off_thresh=b["sweep_grid"]["off_thresh"],
+            base_val_p=b["base"][b["val_set"]]["p_target"],
+            # Within-model the source base IS the target base; cross-seed stores A's control.
+            headroom=(
+                b["teacher"][b["val_set"]]["p_target"]
+                - b.get("base_source_val_p", b["base"][b["val_set"]]["p_target"])
+            ),
+        )
+        for b in seed_blocks
+    ]
     peaks = {
         "gated_neg_off": _peak_block("peak_gated_neg_off", with_gated=True),
         "gated_off": _peak_block("peak_gated_off", with_gated=True),
@@ -545,6 +636,8 @@ def compute_aggregate(screen_dir: Path, params: dict | None = None) -> dict | No
         "extraction": meta["extraction"],
         "sweep_grid": meta["sweep_grid"],
         "val_set": val_set,
+        # The set each peak row was SELECTED on (favorite); reporting stays on ``val_set``.
+        "selection_set": pos_set,
         "seeds": sorted(b["ft_seed"] for b in seed_blocks),
         "n_seeds": n,
         # base scores are seed-independent (the clean TARGET/B model): assert & take the value.
@@ -587,9 +680,8 @@ def aggregate_dir(screen_dir: Path, params: dict | None = None) -> dict | None:
 
     The aggregate is authored by NO run: it is recomputed here by traversing whatever per-seed
     files are present, so a subset/incremental run (which only writes its own seeds' files)
-    always yields an aggregate over ALL seeds on disk. Reductions reuse the exact ``_mean`` /
-    ``_nanmean`` / ``_peak_block`` used for the old flat top-level, so for the same set of seeds
-    the numbers are byte-identical. Returns the aggregate dict, or ``None`` if no per-seed
+    always yields an aggregate over ALL seeds on disk. Peaks are re-derived per seed (see
+    ``compute_aggregate``). Returns the aggregate dict, or ``None`` if no per-seed
     files are present.
 
     Computes via ``compute_aggregate`` (params validation + reduction) and, when there are
@@ -816,27 +908,20 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
                         }
                     )
 
-            # Three readings of the sweep, kept side by side, each = strongest val under its gate:
-            # - peak_gated_neg_off: neg AND off both under their ceilings (disposition).
-            # - peak_gated_off:     off under its ceiling only (neg rarely clears for
-            #                       non-specific teachers, so this is the looser reading).
-            # - peak_ungated:       strongest val ignoring the gates (token-puppet ceiling).
-            peak_gated_neg_off = _peak(
-                sweep_rows,
-                lambda r: r["neg_p"] <= cfg.neg_thresh and r["off_p"] <= cfg.off_thresh,
-            )
-            peak_gated_off = _peak(sweep_rows, lambda r: r["off_p"] <= cfg.off_thresh)
-            peak_ungated = max(sweep_rows, key=lambda r: r["val_p"])  # no gate
             teacher_val_p = teacher_scores[cfg.val_set]["p_target"]
             # delta = steered TARGET (B) lift over B's clean control; headroom = the SOURCE
             # teacher's own lift over the SOURCE (A) clean control. Within-model A == B so
             # base_source_val_p == base_val_p and both reduce to the original computation.
             headroom = teacher_val_p - base_source_val_p
-
-            def _with_delta_rec(peak_row, base_val_p=base_val_p, headroom=headroom):
-                d = peak_row["val_p"] - base_val_p
-                r = d / headroom if abs(headroom) > 1e-9 else float("nan")
-                return {**peak_row, "delta_val_p": d, "recovery_frac": r}
+            # Three readings of the sweep, kept side by side, each = strongest FAVORITE score
+            # under its gate, reported on validation (see ``derive_peaks``).
+            peaks_seed = derive_peaks(
+                sweep_rows,
+                neg_thresh=cfg.neg_thresh,
+                off_thresh=cfg.off_thresh,
+                base_val_p=base_val_p,
+                headroom=headroom,
+            )
 
             seed_doc = {
                 "target_animal": cfg.target_animal,
@@ -855,9 +940,9 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
                 # basis), matching v_raw / v_argmax_layer / the layer sweep.
                 "v_norm_per_layer": [round(x, 5) for x in v["norm"][1:].tolist()],
                 "v_argmax_layer": int(v["norm"][1:].argmax()),
-                "peak_gated_neg_off": _with_delta_rec(peak_gated_neg_off),
-                "peak_gated_off": _with_delta_rec(peak_gated_off),
-                "peak_ungated": _with_delta_rec(peak_ungated),
+                # The (layer, alpha) row of each block is chosen by its FAVORITE score.
+                "selection_set": cfg.pos_set,
+                **peaks_seed,
                 "sweep": sweep_rows,
             }
             if cross_seed:

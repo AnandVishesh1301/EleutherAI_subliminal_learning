@@ -48,7 +48,7 @@ def test_paired_interpolation_reconstructs_original_and_preserves_spectrum():
             np.testing.assert_allclose(dw, (ur * sv) @ vr.T, atol=1e-6)
 
 
-def test_surgery_upsert_replaces_legacy_without_discarding_other_runs(tmp_path):
+def test_surgery_writer_refuses_legacy_without_discarding_other_runs(tmp_path):
     path = tmp_path / "surgery.jsonl"
     old = [{"run": "a", "variant": "randt0.5"}, {"run": "b", "variant": "orig"}]
     path.write_text("".join(json.dumps(r) + "\n" for r in old))
@@ -56,11 +56,18 @@ def test_surgery_upsert_replaces_legacy_without_discarding_other_runs(tmp_path):
     assert interpolation_record_is_current(old[1])
     fixed = dict(old[0], interpolation_version=INTERPOLATION_VERSION)
     assert interpolation_record_is_current(fixed)
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="fresh out-name"):
+        write_surgery_records(path, [fixed])
+    assert path.read_bytes() == before
+    # A genuinely new run can be appended without altering either old run.
+    fixed["run"] = "c"
     write_surgery_records(path, [fixed])
     records = [json.loads(line) for line in path.read_text().splitlines()]
-    assert records == [old[1], fixed]
+    assert records == old + [fixed]
+    before = path.read_bytes()
     write_surgery_records(path, [fixed])
-    assert len(path.read_text().splitlines()) == 2
+    assert path.read_bytes() == before
 
 
 def test_split_and_cache_identity_match_spliced_training(tmp_path):
@@ -326,7 +333,7 @@ def test_random_targets_are_keyed_not_order_dependent():
     assert stable_hash("layer.0") != stable_hash("layer.1")
 
 
-def test_rewriting_a_run_drops_all_of_its_old_variants(tmp_path):
+def test_rewriting_a_run_cannot_drop_unrequested_variants(tmp_path):
     path = tmp_path / "surgery.jsonl"
     old = [
         {"run": "a", "variant": "orig"},
@@ -335,9 +342,19 @@ def test_rewriting_a_run_drops_all_of_its_old_variants(tmp_path):
     ]
     path.write_text("".join(json.dumps(r) + "\n" for r in old))
     fresh = [{"run": "a", "variant": "orig", "delta_ce": 1.0}]
-    write_surgery_records(path, fresh)
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="fresh out-name"):
+        write_surgery_records(path, fresh)
     records = [json.loads(line) for line in path.read_text().splitlines()]
-    assert records == [old[2]] + fresh
+    assert records == old
+    assert path.read_bytes() == before
+    # An identical subset retry cannot remove unrequested variants either.
+    write_surgery_records(path, [old[0]])
+    assert path.read_bytes() == before
+    # A concurrent writer introducing a new variant for this run is refused.
+    with pytest.raises(RuntimeError, match="fresh out-name"):
+        write_surgery_records(path, [{"run": "a", "variant": "top1"}])
+    assert path.read_bytes() == before
 
 
 def test_surgery_record_is_current_requires_keyed_targets_only_when_asked():
@@ -362,6 +379,12 @@ def test_resume_skips_only_a_complete_identity_matching_set():
         prompt_set_sha256="psha",
         animal="dog",
         seed=0,
+        adapter_config_sha256="cfg",
+        base_ref="base",
+        base_revision="rev",
+        dose_lambda=1.0,
+        dose_manifest_sha256=None,
+        surgery_construction_version="position_surgery_v3",
     )
     wanted = ["orig", "rand0"]
 
@@ -373,6 +396,12 @@ def test_resume_skips_only_a_complete_identity_matching_set():
 
     rows = [row("orig"), row("rand0")]
     assert run_is_complete(rows, identity, wanted)
+    assert not run_is_complete(rows + [row("rand0", seed=1)], identity, wanted)
+    assert not run_is_complete(rows + [row("align", seed=1)], identity, wanted)
+    assert not run_is_complete(rows, identity, wanted, require_intruders=True)
+    assert not run_is_complete(rows, {**identity, "base_ref": "base@other"}, wanted)
+    assert not run_is_complete(rows, {**identity, "adapter_config_sha256": "changed"}, wanted)
+    assert not run_is_complete(rows, {**identity, "dose_lambda": 0.5}, wanted)
     assert not run_is_complete([row("orig")], identity, wanted)  # incomplete
     assert not run_is_complete([], identity, wanted)
     assert not run_is_complete(
@@ -390,10 +419,38 @@ def test_redo_backs_up_then_empties_the_output(tmp_path):
     assert prepare_output_for_redo(out) is None
     body = json.dumps({"run": "gone", "variant": "orig"}) + "\n"
     out.write_text(body)
+    manifest = out.with_suffix(".manifest.json")
+    manifest.write_text('{"provenance": "old"}')
     backup = prepare_output_for_redo(out)
     assert backup is not None and backup.read_text() == body
     assert backup.name.startswith("position_surgery_ce.legacy-")
     assert not out.exists()  # rows of runs outside this runs list must not survive
+    assert backup.with_suffix(".manifest.json").read_text() == '{"provenance": "old"}'
+    assert not manifest.exists()
+    out.write_text("second")
+    second = prepare_output_for_redo(out)
+    assert second != backup and backup.read_text() == body
+    assert second.read_text() == "second"
+
+
+def test_redo_backup_failure_does_not_remove_either_original(tmp_path, monkeypatch):
+    from scripts import position_surgery
+    out = tmp_path / "surgery.jsonl"
+    manifest = out.with_suffix(".manifest.json")
+    out.write_text("data")
+    manifest.write_text("metadata")
+    copy = position_surgery.shutil.copy2
+
+    def fail_on_manifest(source, target):
+        if source == manifest:
+            raise OSError("backup failed")
+        return copy(source, target)
+
+    monkeypatch.setattr(position_surgery.shutil, "copy2", fail_on_manifest)
+    with pytest.raises(OSError, match="backup failed"):
+        prepare_output_for_redo(out)
+    assert out.read_text() == "data"
+    assert manifest.read_text() == "metadata"
 
 
 def test_surgery_baseline_validator_rejects_legacy_mixed_and_identity_conflicts():

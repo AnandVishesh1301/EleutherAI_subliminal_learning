@@ -47,7 +47,7 @@ from subliminal_learning.coherence.probe_io import (
     mean_ce, pool_logprobs, probe_is_current, probe_path,
     probe_pool_spec_for_repo,
 )
-from subliminal_learning.evaluation.ckpt_trajectories import probe_record
+from subliminal_learning.evaluation.ckpt_trajectories import probe_record, release_base
 from subliminal_learning.config import resolve_output_root, resolve_roots
 from subliminal_learning.models.loading_io import load_base_from_ref
 from subliminal_learning.utils.io import atomic_write_json
@@ -199,6 +199,7 @@ def main(
                 })
         finally:
             mdl = peft.unload()
+            release_base(mdl)     # unload() leaves stale PEFT state on the base
             base_cache[repo] = (mdl, tok)
             del peft
         n_done += 1

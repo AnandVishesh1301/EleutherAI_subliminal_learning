@@ -754,3 +754,40 @@ def test_identities_carry_tf32_and_group_by_length_when_set(tmp_path: Path):
         assert identity["train"]["group_by_length"] is True
         assert identity["train"]["supervised_only_head"] is True
         assert not ({"tf32", "group_by_length", "supervised_only_head"} & set(identity["lora"]))
+
+
+# --- allow_cross_family: never in the run identity (manifest-only provenance) ----------
+
+def test_allow_cross_family_is_not_in_the_run_identity(tmp_path: Path):
+    """The flag is manifest-only: identities are byte-identical either way, so the 58 cells
+    distilled before it existed still SKIP (the gate ERRORs on any differing key)."""
+    from pipelines.distill_student_pipeline import (
+        DistillStudentConfig,
+        _student_run_identity,
+    )
+
+    lora = LoRAConfig(r=8, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
+    train = TrainConfig(
+        learning_rate=2e-4, n_epochs=1, batch_size=22, max_length=64,
+        max_grad_norm=1.0, warmup_ratio=0.05, lr_scheduler_type="linear",
+        seed=0, optim="adamw_torch",
+    )
+    paths = PathsConfig(
+        output_root=tmp_path, hf_cache_root=tmp_path,
+        dataset_cache_root=tmp_path, wandb_dir=tmp_path,
+    )
+    filtered = tmp_path / "numbers" / "filtered.jsonl"
+    filtered.parent.mkdir()
+    filtered.write_text("{}\n")
+    cfg = DistillStudentConfig(
+        paths=paths, hub_org=_ORG, spec=_NONE, source="teacher",
+        number_dataset_dir=filtered.parent, lora=lora, train=train,
+    )
+    ident = _student_run_identity(cfg, base_model_repo="X", filtered_sha256="abc")
+    assert cfg.allow_cross_family is False
+    assert "allow_cross_family" not in ident
+
+    xf = replace(cfg, allow_cross_family=True, allow_cross_base=True)
+    ident_xf = _student_run_identity(xf, base_model_repo="X", filtered_sha256="abc")
+    assert "allow_cross_family" not in ident_xf
+    assert ident_xf == ident

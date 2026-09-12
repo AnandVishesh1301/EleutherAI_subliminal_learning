@@ -169,6 +169,15 @@ def _stored_probe_delta_ce(run: str) -> float | None:
     return None if base is None else base["delta_ce"]
 
 
+def _qr_signed(a: np.ndarray) -> np.ndarray:
+    """QR factor Q of `a`, each column sign-aligned to the column it came from, so the
+    directions are rng-determined rather than LAPACK's Householder sign convention."""
+    q = np.linalg.qr(a)[0]
+    sgn = np.sign(np.einsum("ij,ij->j", q, a[:, :q.shape[1]]))
+    sgn[sgn == 0] = 1.0
+    return q * sgn
+
+
 def interp_basis(u0: np.ndarray, u1: np.ndarray, t: float) -> np.ndarray:
     """QR-orthonormalised ``(1-t)·U0 + t·U1`` — a monotone bridge, not a geodesic."""
     if t <= 0:
@@ -176,10 +185,7 @@ def interp_basis(u0: np.ndarray, u1: np.ndarray, t: float) -> np.ndarray:
     if t >= 1:
         return u1.copy()
     blend = (1.0 - t) * u0 + t * u1
-    q = np.linalg.qr(blend)[0]
-    sgn = np.sign(np.einsum("ij,ij->j", q, blend))
-    sgn[sgn == 0] = 1.0
-    return q * sgn
+    return _qr_signed(blend)
 
 
 def subset_targets(u: np.ndarray, idx: list[int], rng: np.random.Generator) -> np.ndarray:
@@ -188,8 +194,8 @@ def subset_targets(u: np.ndarray, idx: list[int], rng: np.random.Generator) -> n
     if not idx:
         return u[:, :0]
     keep = [j for j in range(u.shape[1]) if j not in idx]
-    q = np.linalg.qr(np.concatenate(
-        [u[:, keep], rng.standard_normal((u.shape[0], len(idx)))], axis=1))[0]
+    q = _qr_signed(np.concatenate(
+        [u[:, keep], rng.standard_normal((u.shape[0], len(idx)))], axis=1))
     return q[:, len(keep):]
 
 
@@ -200,11 +206,8 @@ def subset_rotate(u: np.ndarray, idx: list[int], r: np.ndarray, t: float) -> np.
     if not idx:
         return u
     blend = (1.0 - t) * u[:, idx] + t * r
-    q = np.linalg.qr(blend)[0]
-    sgn = np.sign(np.einsum("ij,ij->j", q, blend))
-    sgn[sgn == 0] = 1.0
     out = u.copy()
-    out[:, idx] = q * sgn
+    out[:, idx] = _qr_signed(blend)
     return out
 
 
@@ -245,8 +248,8 @@ def aligned_component_variant(dw: np.ndarray, w0: np.ndarray, variant: str) -> n
 def random_orthonormal_pair(n: int, m: int, k: int,
                             rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
     """``(U_r n x k, V_r m x k)`` orthonormal, drawn left-then-right from `rng`."""
-    return (np.linalg.qr(rng.standard_normal((n, k)))[0],
-            np.linalg.qr(rng.standard_normal((m, k)))[0])
+    return (_qr_signed(rng.standard_normal((n, k))),
+            _qr_signed(rng.standard_normal((m, k))))
 
 
 def diffuse_ladder_delta(m: dict, align: str, k: int, e: float, rng: np.random.Generator,

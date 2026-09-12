@@ -121,7 +121,10 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
         raise typer.BadParameter(f"bad tag {tag!r}")
     epochs, lr_s, rank, alpha = int(m[1]), m[2], int(m[3]), int(m[4])
 
-    prompt_set = load_number_prompt_set(ROOT / "configs/experiment/number_generation.yaml")
+    # Optional lineage key `number_config` (2026-09-12, ICL-count arms): the number-generation
+    # YAML whose prompt_set names the numbers lineage (e.g. ex3-5); absent = canonical ex10-20.
+    number_config = lin.get("number_config") or "configs/experiment/number_generation.yaml"
+    prompt_set = load_number_prompt_set(ROOT / number_config)
     ps_tag = prompt_set_tag(prompt_set)
     source = lin.get("source", "teacher")
     if source == "teacher":
@@ -133,7 +136,13 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
                 "tree this teacher lineage was generated under, e.g. 'pythia-160m' or "
                 "'dd-1b'); add it to the lineage block of the registry JSON."
             )
-        numbers_base = _base_dir_spelling(lin["teacher_base_model"])
+        # Prefer the lineage's explicit dir spelling (dd1b/hf/p410m workers write it since
+        # 2026-09-08); fall back to converting teacher_base_model. (2026-09-11: registries
+        # written 09-11 00:00-16:30 by p410m_worker --numbers-dir carried the job slug
+        # 'olmo1b' here; the worker is fixed, this keeps those files readable.)
+        numbers_base = lin.get("teacher_base_dir") or _base_dir_spelling(
+            lin["teacher_base_model"]
+        )
         raw_manifest = (out_root / "numbers" / lin["animal"] / numbers_base
                         / lin["teacher_tag"] / f"ftseed{lin['teacher_ftseed']}" / ps_tag
                         / "manifest.json")

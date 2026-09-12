@@ -104,21 +104,85 @@ def test_producer_pairs_original_readout_and_invalidates_legacy(tmp_path, monkey
             assert row["original_baseline_probe_manifest_ref"] == "m"
     manifest = json.loads(out.with_suffix(".manifest.json").read_text())
     assert manifest["original_baseline_version"] == ORIGINAL_BASELINE_VERSION
+    assert manifest["surgery_construction_version"] == "position_surgery_v3"
+    assert all(row["base"] == "audit/base@old" for row in rows)
+    assert all(row["base_ref"] == "audit/base@old" for row in rows)
+    assert all(row["base_revision"] == "old" for row in rows)
+    old_data = out.read_bytes()
+    old_manifest = out.with_suffix(".manifest.json").read_bytes()
     surgery.main(**kwargs)
     assert probe.call_count == n_passes  # valid resume skips
+    assert out.read_bytes() == old_data
+    assert out.with_suffix(".manifest.json").read_bytes() == old_manifest
+
+    def recompute_explicitly():
+        before = out.read_bytes()
+        before_manifest = out.with_suffix(".manifest.json").read_bytes()
+        calls = probe.call_count
+        with pytest.raises(RuntimeError, match="fresh out-name.*--redo"):
+            surgery.main(**kwargs)
+        assert probe.call_count == calls
+        assert out.read_bytes() == before
+        assert out.with_suffix(".manifest.json").read_bytes() == before_manifest
+        surgery.main(**{**kwargs, "redo": True})
+        assert any(p.read_bytes() == before for p in out.parent.glob("audit.legacy-*.jsonl"))
+        assert any(p.read_bytes() == before_manifest
+                   for p in out.parent.glob("audit.legacy-*.manifest.json"))
+
+    # Asking for extra measurements must not silently replace an existing run.
+    before = out.read_bytes()
+    with pytest.raises(RuntimeError, match="fresh out-name"):
+        surgery.main(**{**kwargs, "count_intruders": True})
+    assert out.read_bytes() == before
+    assert probe.call_count == n_passes
+    with pytest.raises(RuntimeError, match="fresh out-name"):
+        surgery.main(**{**kwargs, "subsets": "top1"})
+    assert out.read_bytes() == before
+    assert probe.call_count == n_passes
+
     for row in rows:
         row.pop("original_baseline_version")
     out.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    surgery.main(**kwargs)
-    assert probe.call_count == 2 * n_passes  # old schema recomputed, not reused
+    recompute_explicitly()
+    assert probe.call_count == 2 * n_passes  # only explicit redo recomputes old schema
     validate_surgery_baselines([json.loads(line) for line in out.read_text().splitlines()])
     if dose_lambda != 1:
         dm.write_text(json.dumps({"runs": {str(run.relative_to(tmp_path)): {"lambda": .25}}}))
-        surgery.main(**kwargs)
+        recompute_explicitly()
         assert probe.call_count == 3 * n_passes
         torch.testing.assert_close(seen_weights[-2], torch.full((6, 5), .51))
         changed = [json.loads(line) for line in out.read_text().splitlines()]
         assert {r["dose_lambda"] for r in changed} == {.25}
+
+    # Repointing the manifest must invalidate even unchanged adapter tensor bytes.
+    previous_calls = probe.call_count
+    (run / "train_manifest.json").write_text(json.dumps({"base_model_repo": "audit/base@new"}))
+    recompute_explicitly()
+    assert probe.call_count == previous_calls + n_passes
+    changed = [json.loads(line) for line in out.read_text().splitlines()]
+    assert {r["base_ref"] for r in changed} == {"audit/base@new"}
+    assert {r["base_revision"] for r in changed} == {"new"}
+
+    # alpha lives in adapter_config, not adapter_model; doubling it doubles dW.
+    old_weights = seen_weights[-n_passes].clone()
+    previous_calls = probe.call_count
+    cfg = json.loads((ck / "adapter_config.json").read_text())
+    cfg["lora_alpha"] *= 2
+    (ck / "adapter_config.json").write_text(json.dumps(cfg))
+    recompute_explicitly()
+    assert probe.call_count == previous_calls + n_passes
+    torch.testing.assert_close(seen_weights[-n_passes] - .01, 2 * (old_weights - .01))
+    surgery.main(**kwargs)
+    assert probe.call_count == previous_calls + n_passes  # unchanged inputs skip
+
+    if dose_lambda != 1:
+        previous_calls = probe.call_count
+        kwargs.pop("dose_manifest")
+        recompute_explicitly()
+        assert probe.call_count == previous_calls + len(variants.split(","))
+        changed = [json.loads(line) for line in out.read_text().splitlines()]
+        assert {r["dose_lambda"] for r in changed} == {1.0}
+        assert {r["dose_manifest_sha256"] for r in changed} == {None}
 
 
 def _identities_of_a_producer_run(tmp_path, monkeypatch, dose_lambda):
@@ -126,9 +190,9 @@ def _identities_of_a_producer_run(tmp_path, monkeypatch, dose_lambda):
     seen = []
     real = surgery.run_is_complete
 
-    def spy(rows, identity, names):
+    def spy(rows, identity, names, *args):
         seen.append(dict(identity))
-        return real(rows, identity, names)
+        return real(rows, identity, names, *args)
 
     monkeypatch.setattr(surgery, "run_is_complete", spy)
     test_producer_pairs_original_readout_and_invalidates_legacy(
@@ -138,20 +202,24 @@ def _identities_of_a_producer_run(tmp_path, monkeypatch, dose_lambda):
     return seen, rows
 
 
-def test_default_dose_identity_stays_legacy_compatible(tmp_path, monkeypatch):
-    """No dose manifest => identity carries no dose keys, so pre-dose rows still resume."""
+def test_default_dose_identity_is_explicit_and_legacy_rows_do_not_resume(tmp_path, monkeypatch):
+    """Native dose is explicit, and rows without the new identity cannot resume."""
     seen, rows = _identities_of_a_producer_run(tmp_path, monkeypatch, 1.0)
     for identity in seen:
-        assert "dose_lambda" not in identity and "dose_manifest_sha256" not in identity
-    legacy = [row for row in rows if row["variant"] == "rand0"]
-    assert legacy and all("dose_lambda" not in row for row in legacy)
-    assert surgery.run_is_complete(legacy, seen[-1], ["rand0"])
+        assert identity["dose_lambda"] == 1.0
+        assert identity["dose_manifest_sha256"] is None
+        assert identity["surgery_construction_version"] == "position_surgery_v3"
+    current = [row for row in rows if row["variant"] == "rand0"]
+    assert surgery.run_is_complete(current, seen[-1], ["rand0"])
+    legacy = [{k: v for k, v in row.items() if k != "surgery_construction_version"}
+              for row in current]
+    assert not surgery.run_is_complete(legacy, seen[-1], ["rand0"])
 
 
 def test_dose_manifest_identity_carries_the_dose_keys(tmp_path, monkeypatch):
     seen, _ = _identities_of_a_producer_run(tmp_path, monkeypatch, 0.5)
     assert all({"dose_lambda", "dose_manifest_sha256"} <= set(identity) for identity in seen)
-    assert {identity["dose_lambda"] for identity in seen} == {0.5, 0.25}
+    assert {identity["dose_lambda"] for identity in seen} == {0.5, 0.25, 1.0}
 
 
 def test_producer_skips_a_run_with_no_variants(tmp_path, monkeypatch):

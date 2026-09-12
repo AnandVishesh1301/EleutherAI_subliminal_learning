@@ -209,6 +209,9 @@ def test_load_eas_results_discovery_and_columns(tmp_path):
     assert row["is_endpoint"]
     assert row["eas_mean"] == 0.42
     assert row["eas_per_layer"] == [0.0, 0.4, 0.5]
+    # The per-slot norms of both vectors ride along (point-side and reference-side).
+    assert row["v_student_norm_per_layer"] == [0.0, 1.0, 2.0]
+    assert row["v_teacher_norm_per_layer"] == [0.0, 1.0, 2.0]
 
 
 def test_load_eas_reference_results_control_two_references_and_nonfinite(tmp_path):
@@ -224,6 +227,8 @@ def test_load_eas_reference_results_control_two_references_and_nonfinite(tmp_pat
     assert len(nf) == 2 and nf["nonfinite"].all()
     assert nf["eas_mean"].isna().all()
     assert nf["eas_per_layer"].isna().all()
+    # A nonfinite point still carries its own recorded student norms.
+    assert all(v == [0.0, 1.0, 2.0] for v in nf["v_student_norm_per_layer"])
 
 
 def test_load_eas_results_cross_base(tmp_path):

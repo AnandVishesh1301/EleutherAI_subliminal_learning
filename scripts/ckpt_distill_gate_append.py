@@ -18,13 +18,20 @@ This watcher closes the loop, one poll at a time:
    gains every ordered (teacher, student) pair between it and the already-passed window
    steps, itself included (so the window fills in as an incremental cross matrix), or only
    its diagonal pair for diagonal-only steps;
-3. the sweep is re-submitted with `--allow-snapshot-update` (pairs and steps only grow;
-   existing cells keep their identity). What actually reached jobq is tracked OUTSIDE the
+3. the sweep is re-submitted with `--allow-snapshot-growth` (which accepts the overwrite
+   only because pairs and steps only grow;
+   any other edit to the YAML is refused). Existing cells keep their identity. What actually reached jobq is tracked OUTSIDE the
    YAML, in a sidecar `gate_append_submitted.json` in the family dir (the steps + pairs a
    submit confirmed with `rc == 0`). The YAML is still edited before the submit runs, so a
    failed submit would otherwise read back as "nothing new" forever; instead every step/pair
    in the YAML the sidecar has not confirmed is resubmitted on the next poll and after a
    restart, and the watcher never exits while a submission is unconfirmed.
+
+4. optional **follower** configs (`--follow-config`, diagonal-only, e.g. extra student seeds on
+   the diagonal) gain every step the primary has confirmed submitted, and are submitted only
+   after it, each with its own ledger `gate_append_submitted.<config stem>.json` -- so a
+   follower's `jobq.depends_on_prefix` on the primary's per-step queues always resolves and
+   its pool jobs never race the primary's generation of the same pool.
 
 A failing step is logged loudly and left out; nothing downstream of it is queued. The
 process exits once every target step has a verdict and every appended step/pair is
@@ -40,6 +47,7 @@ Example (the weightc-seed1 window + 143k, Angela 2026-09-10):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import struct
@@ -76,8 +84,71 @@ def parse_steps(text: str) -> list[int]:
     return [int(x) for x in m.group(1).split(",") if x.strip()]
 
 
+_PAIR_LINE = re.compile(r"^(\s+)- \[(\d+),\s*(\d+)\]\s*$")
+
+
+def _explicit_block(lines: list[str]) -> tuple[int | None, list[int]]:
+    """(index of the `pairs.explicit:` key line, indices of ITS pair lines).
+
+    Scoped on purpose: a `- [a, b]` list under any other key (a window spec, a probe
+    batch pair) is neither read as a pair nor edited. The pair lines are the contiguous
+    run of more-indented `- [a, b]` lines directly under the key. `(None, [])` when the
+    config has no `explicit:` key.
+    """
+    key = None
+    in_pairs = False
+    for i, ln in enumerate(lines):
+        if re.match(r"^pairs:\s*(\{.*)?$", ln):
+            in_pairs = True
+            continue
+        if in_pairs and ln.strip() and not ln[:1].isspace():
+            in_pairs = False
+        if in_pairs and re.match(r"^\s+explicit:", ln):
+            key = i
+            break
+    if key is None:  # tolerate a config whose `explicit:` is not under a block `pairs:`
+        for i, ln in enumerate(lines):
+            if re.match(r"^\s*explicit:", ln):
+                key = i
+                break
+    if key is None:
+        return None, []
+    key_indent = len(re.match(r"^(\s*)", lines[key]).group(1))
+    run: list[int] = []
+    for i in range(key + 1, len(lines)):
+        m = _PAIR_LINE.match(lines[i])
+        if m is None or len(m.group(1)) <= key_indent:
+            break
+        run.append(i)
+    return key, run
+
+
 def parse_pairs(text: str) -> list[tuple[int, int]]:
-    return [(int(a), int(b)) for a, b in re.findall(r"^\s+- \[(\d+),\s*(\d+)\]", text, re.M)]
+    """The `pairs.explicit` pairs, read only from that block (see `_explicit_block`)."""
+    lines = text.split("\n")
+    _key, run = _explicit_block(lines)
+    out = []
+    for i in run:
+        m = _PAIR_LINE.match(lines[i])
+        out.append((int(m.group(2)), int(m.group(3))))
+    return out
+
+
+def parse_window(spec: str) -> list[int]:
+    """`--window` spec -> sorted window steps.
+
+    Comma-separated items, each either `lo:hi:stride` (inclusive range) or one step, so a
+    window can skip converted steps that are not in the design (e.g. 135k when Angela asked
+    for 130k and 140k only).
+    """
+    steps: set[int] = set()
+    for item in (x.strip() for x in spec.split(",") if x.strip()):
+        if ":" in item:
+            lo, hi, st = (int(x) for x in item.split(":"))
+            steps.update(range(lo, hi + 1, st))
+        else:
+            steps.add(int(item))
+    return sorted(steps)
 
 
 def needed_pairs(
@@ -104,7 +175,8 @@ def append_to_config(
 ) -> str:
     """Return the config text with steps/pairs appended (single-line `steps:` kept).
 
-    Pairs go after the last existing `- [a, b]` line; a config whose `explicit:` is still
+    Pairs go after the last `- [a, b]` line of the `pairs.explicit:` block (a list under
+    any other key is left alone); a config whose `explicit:` is still
     empty (`explicit: []`, or the bare key the diagseeds23 configs ship) gets its first items
     written as a block list under that key. `source` only names the file in the error raised
     when there is no `explicit:` key at all.
@@ -117,19 +189,17 @@ def append_to_config(
     )
     if new_pairs:
         lines = text.split("\n")
-        pair_lines = [i for i, ln in enumerate(lines) if re.match(r"^\s+- \[\d+,\s*\d+\]", ln)]
-        if pair_lines:
-            last = max(pair_lines)
-            indent = re.match(r"^(\s+)", lines[last]).group(1)
+        key, run = _explicit_block(lines)
+        if run:
+            last = run[-1]
+            indent = _PAIR_LINE.match(lines[last]).group(1)
         else:  # empty `explicit: []` / bare `explicit:` -> open a block list under the key
-            keys = [i for i, ln in enumerate(lines)
-                    if re.match(r"^(\s*)explicit:\s*(\[\s*\])?\s*$", ln)]
-            if not keys:
+            if key is None or not re.match(r"^(\s*)explicit:\s*(\[\s*\])?\s*$", lines[key]):
                 raise ValueError(
                     f"{source}: no `- [a, b]` pair lines and no empty `explicit:` key to append "
                     f"{len(new_pairs)} pair(s) under (a `pairs.explicit:` key is required)"
                 )
-            last = keys[0]
+            last = key
             key_indent = re.match(r"^(\s*)", lines[last]).group(1)
             lines[last] = f"{key_indent}explicit:"
             indent = key_indent + "  "
@@ -141,23 +211,122 @@ def append_to_config(
 
 # ------------------------------------------------------------------ submission ledger
 SUBMIT_SIDECAR = "gate_append_submitted.json"
+# A submit that shells out to jobq is minutes, not hours; past this it is wedged (stale
+# lock / hung write) and the watcher retries it on the next poll instead of blocking.
+SUBMIT_TIMEOUT_S = 1800
 
 
-def load_submitted(path: Path) -> tuple[set[int], set[tuple[int, int]]]:
-    """Steps/pairs a previous poll confirmed submitted (rc == 0); empty when there is none."""
+def load_submitted(path: Path, legacy: Path | None = None) -> tuple[set[int], set[tuple[int, int]]]:
+    """Steps/pairs a previous poll confirmed submitted (rc == 0); empty when there is none.
+
+    `legacy` names an older ledger file read ONLY when `path` does not exist yet (the
+    stem-only follower ledgers written before the path-hash suffix); writes always go to
+    `path`.
+    """
+    if not path.exists() and legacy is not None and legacy.exists():
+        path = legacy
     if not path.exists():
         return set(), set()
     d = json.loads(path.read_text())
     return {int(s) for s in d.get("steps", [])}, {(int(a), int(b)) for a, b in d.get("pairs", [])}
 
 
-def unconfirmed(text: str, path: Path) -> tuple[list[int], list[tuple[int, int]]]:
+def unconfirmed(
+    text: str, path: Path, legacy: Path | None = None
+) -> tuple[list[int], list[tuple[int, int]]]:
     """Steps/pairs present in the config text that no submit has confirmed yet."""
-    done_steps, done_pairs = load_submitted(path)
+    done_steps, done_pairs = load_submitted(path, legacy)
     return (
         sorted(set(parse_steps(text)) - done_steps),
         sorted(set(parse_pairs(text)) - done_pairs),
     )
+
+
+def follower_sidecar(family_dir: Path, follow_config: Path) -> Path:
+    """A follower config's own submission ledger (the primary keeps `SUBMIT_SIDECAR`).
+
+    One ledger per config: a follower's diagonal pairs are a subset of the primary's pairs,
+    so sharing the primary's ledger would read every follower cell as already submitted.
+    The name carries the first 8 hex of the sha1 of the config's RESOLVED path, so two
+    followers that share a basename in different dirs can never share a ledger. Ledgers
+    written before that suffix existed (stem-only) are still read; see `read_sidecar`.
+    """
+    h = hashlib.sha1(str(follow_config.resolve()).encode("utf-8")).hexdigest()[:8]
+    return family_dir / f"gate_append_submitted.{follow_config.stem}.{h}.json"
+
+
+def legacy_follower_sidecar(family_dir: Path, follow_config: Path) -> Path:
+    """The pre-hash, stem-only ledger name (read-only backward compatibility)."""
+    return family_dir / f"gate_append_submitted.{follow_config.stem}.json"
+
+
+def follow_append(text: str, steps: list[int]) -> tuple[str, list[int], list[tuple[int, int]]]:
+    """Grow a diagonal-only follower config to cover `steps` (each as its own diagonal cell).
+
+    Returns (new text, steps added, pairs added). `topology: diagonal` followers only gain
+    steps (the pair set follows from them); `topology: explicit` followers also gain the
+    (s, s) pair lines.
+    """
+    topology = str((yaml.safe_load(text).get("pairs") or {}).get("topology", "diagonal"))
+    have = set(parse_steps(text))
+    new_steps = sorted(s for s in steps if s not in have)
+    new_pairs: list[tuple[int, int]] = []
+    if topology == "explicit":
+        have_pairs = set(parse_pairs(text))
+        new_pairs = [(s, s) for s in sorted(steps) if (s, s) not in have_pairs]
+    elif topology != "diagonal":
+        raise ValueError(f"follower configs must be diagonal-only (topology {topology!r})")
+    if new_steps or new_pairs:
+        text = append_to_config(text, new_steps, new_pairs)
+    return text, new_steps, new_pairs
+
+
+def submit_unconfirmed(
+    sweep_config: Path, text: str, sidecar: Path, dry_run: bool,
+    legacy_sidecar: Path | None = None,
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Submit the config if it carries steps/pairs no `rc == 0` submit has confirmed.
+
+    The ledger, not the config text, is the record of what reached jobq: a failed submit (or
+    a crash right after the config write) leaves its steps/pairs unconfirmed and they are
+    retried on the next poll and after a restart. Submit is delta-idempotent, so re-running
+    it costs nothing when the jobs are already queued. Returns what is STILL unconfirmed
+    (empty after a successful submit; unchanged after a failed one or a dry run).
+    """
+    miss_steps, miss_pairs = unconfirmed(text, sidecar, legacy_sidecar)
+    if not (miss_steps or miss_pairs):
+        return [], []
+    cmd = [sys.executable, "-m", "scripts.sweeps.sweep_ckpt_distill", "submit",
+           "--sweep-config", str(sweep_config), "--allow-snapshot-growth"]
+    if dry_run:
+        logger.info(f"dry-run: would submit steps {miss_steps}, {len(miss_pairs)} "
+                    f"pair(s) via: {' '.join(cmd)}")
+        return miss_steps, miss_pairs
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBMIT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # A wedged submit (a stale sweep lock, a hung jobq write) must not hold the watcher
+        # forever: treat it exactly like rc != 0 -- nothing is confirmed, retried next poll.
+        logger.error(
+            f"submit {sweep_config.name} TIMED OUT after {SUBMIT_TIMEOUT_S}s: steps "
+            f"{miss_steps} and {len(miss_pairs)} pair(s) stay UNCONFIRMED and are retried "
+            f"next poll"
+        )
+        return miss_steps, miss_pairs
+    tail = "\n".join(ln for ln in (r.stdout + r.stderr).splitlines()
+                     if "Submitted" in ln or "Error" in ln or "snapshot" in ln)
+    if r.returncode != 0:
+        logger.error(f"submit {sweep_config.name} rc={r.returncode}: steps {miss_steps} and "
+                     f"{len(miss_pairs)} pair(s) stay UNCONFIRMED and are retried next poll\n{tail}")
+        return miss_steps, miss_pairs
+    atomic_write_json(sidecar, {
+        "sweep_config": str(sweep_config), "steps": sorted(parse_steps(text)),
+        "pairs": [list(p) for p in sorted(set(parse_pairs(text)))],
+        "submitted_at": utc_now_iso(),
+    })
+    logger.info(f"submit {sweep_config.name} rc=0 (confirmed steps {miss_steps}, "
+                f"{len(miss_pairs)} pair(s))\n{tail}")
+    return [], []
 
 
 # ------------------------------------------------------------------------ CE probe
@@ -267,7 +436,10 @@ def gate_step(step_dir: Path, step: int, real_repo: str, hf_cache_root: Path,
 # ---------------------------------------------------------------------------- CLI
 def main(
     sweep_config: Path = typer.Option(..., help="ckpt-distill sweep YAML to grow."),
-    window: str = typer.Option("", help="lo:hi:stride of window steps (full cross)."),
+    window: str = typer.Option(
+        "", help="Window steps (full cross): comma-separated items, each `lo:hi:stride` or a "
+                 "single step, e.g. `75000:125000:5000,130000,140000`."
+    ),
     diagonal: str = typer.Option("", help="Comma-separated diagonal-only steps."),
     family_dir: Path | None = typer.Option(
         None, help="Local converted family dir (default hf_cache_root/local/<base dir>)."
@@ -283,6 +455,13 @@ def main(
     ),
     poll: int = typer.Option(300, help="Seconds between scans."),
     dry_run: bool = typer.Option(False, help="Gate + edit config text in memory; no writes."),
+    follow_config: list[Path] = typer.Option(
+        [], "--follow-config",
+        help="Diagonal-only sweep YAML (e.g. extra student seeds) grown with every step the "
+             "PRIMARY config has confirmed submitted, and submitted only after it -- so its "
+             "`jobq.depends_on_prefix` on the primary's per-step queues always resolves. "
+             "Repeatable; each keeps its own ledger.",
+    ),
 ) -> None:
     """Gate converted checkpoints on held-out CE and grow the sweep as they pass."""
     configure_loguru()
@@ -293,10 +472,7 @@ def main(
     queue_prefix = str(sweep_doc["jobq"]["queue_prefix"])
     if family_dir is None:
         family_dir = hf_cache_root / "local" / base_dir_name
-    win: list[int] = []
-    if window:
-        lo, hi, st = (int(x) for x in window.split(":"))
-        win = list(range(lo, hi + 1, st))
+    win = parse_window(window)
     diag = [int(x) for x in diagonal.split(",") if x.strip()]
     targets = sorted(set(win) | set(diag))
     sidecar = family_dir / SUBMIT_SIDECAR
@@ -353,37 +529,35 @@ def main(
                 store.mkdir_open(queue_root)
                 with file_lock(sweep_lock_path(queue_root, queue_prefix)):
                     atomic_write_text(sweep_config, text)
-        # 3) submit whatever the config carries that no `rc == 0` submit has confirmed. The
-        # ledger, not the config text, is the record of what reached jobq: a failed submit
-        # (or a crash right after the config write) leaves its steps/pairs unconfirmed and
-        # they are retried on the next poll and after a restart. Submit is delta-idempotent,
-        # so re-running it costs nothing when the jobs are already queued.
-        miss_steps, miss_pairs = unconfirmed(text, sidecar)
-        cmd = [sys.executable, "-m", "scripts.sweeps.sweep_ckpt_distill", "submit",
-               "--sweep-config", str(sweep_config), "--allow-snapshot-update"]
-        if miss_steps or miss_pairs:
-            if dry_run:
-                logger.info(f"dry-run: would submit steps {miss_steps}, {len(miss_pairs)} "
-                            f"pair(s) via: {' '.join(cmd)}")
-            else:
-                r = subprocess.run(cmd, capture_output=True, text=True)
-                tail = "\n".join(ln for ln in (r.stdout + r.stderr).splitlines()
-                                 if "Submitted" in ln or "Error" in ln or "snapshot" in ln)
-                if r.returncode == 0:
-                    atomic_write_json(sidecar, {
-                        "sweep_config": str(sweep_config), "steps": sorted(parse_steps(text)),
-                        "pairs": [list(p) for p in sorted(set(parse_pairs(text)))],
-                        "submitted_at": utc_now_iso(),
-                    })
-                    logger.info(f"submit rc=0 (confirmed steps {miss_steps}, "
-                                f"{len(miss_pairs)} pair(s))\n{tail}")
-                else:
-                    logger.error(
-                        f"submit rc={r.returncode}: steps {miss_steps} and {len(miss_pairs)} "
-                        f"pair(s) stay UNCONFIRMED and are retried next poll\n{tail}")
+        # 3) submit whatever the config carries that no `rc == 0` submit has confirmed.
+        miss_steps, miss_pairs = submit_unconfirmed(sweep_config, text, sidecar, dry_run)
+        # 3b) followers: mirror every step the primary has CONFIRMED (its per-step queues now
+        # exist, so a follower's depends_on_prefix resolves) as a diagonal cell, then submit.
+        # Skipped while the primary itself has anything unconfirmed.
+        follow_busy = False
+        if follow_config and not (miss_steps or miss_pairs):
+            primary_steps = sorted(parse_steps(text)) if dry_run else sorted(load_submitted(sidecar)[0])
+            for fc in follow_config:
+                ftext = fc.read_text()
+                ftext_new, f_steps, f_pairs = follow_append(ftext, primary_steps)
+                if f_steps or f_pairs:
+                    logger.info(f"{fc.name} += steps {f_steps}, {len(f_pairs)} pair(s)")
+                    if not dry_run:
+                        fdoc = yaml.safe_load(ftext_new)
+                        froot = Path(str(fdoc["jobq"]["root"]))
+                        store.mkdir_open(froot)
+                        with file_lock(sweep_lock_path(froot, str(fdoc["jobq"]["queue_prefix"]))):
+                            atomic_write_text(fc, ftext_new)
+                fs, fp = submit_unconfirmed(
+                    fc, ftext_new, follower_sidecar(family_dir, fc), dry_run,
+                    legacy_follower_sidecar(family_dir, fc),
+                )
+                follow_busy = follow_busy or bool(fs or fp)
+        elif follow_config:
+            follow_busy = True
         # 4) done?
         pending = [s for s in targets if verdict(s) is None]
-        if not pending and not (miss_steps or miss_pairs):
+        if not pending and not (miss_steps or miss_pairs) and not follow_busy:
             logger.info(f"all targets gated: passed {passed}, "
                         f"failed {[s for s in targets if s not in passed]}")
             return

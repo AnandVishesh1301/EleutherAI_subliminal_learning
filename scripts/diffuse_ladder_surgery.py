@@ -33,11 +33,11 @@ import typer
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
-RNG_SCHEME = "keyed_v1"
-"""Identity of the random-target scheme: one generator keyed by (seed, repo, module,
-"injection", f"{align}:{k}"), with E scaling a fixed unit target. Documents written before
-this scheme drew from ONE sequential generator in loop order, so their cells are neither
-comparable with, nor extensible by, cells drawn now; they carry no `rng_scheme` key."""
+RNG_SCHEME = "nested_signed_qr_v2"
+"""One maximum-rank signed-QR frame per module, with independent keyed left/right streams.
+Each k uses a prefix, so ladder order and extension preserve existing directions. This
+supersedes keyed_v1, which keyed an independent frame by each k; older sequential documents
+without a scheme stamp are refused."""
 
 IDENTITY_FIELDS = ("repo", "pool_sha", "match", "seed", "criterion", "intruder_stride")
 """What a stored cell must share with a requested one to be resumable. `intruder_stride`
@@ -88,6 +88,23 @@ def plan_cells(stored_doc: dict | None, requested_cells: list[tuple],
     return [c for c in requested_cells if c not in have], kept
 
 
+def nested_random_pair(n: int, m: int, max_k: int,
+                       left_rng: np.random.Generator,
+                       right_rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """Draw one maximum-rank pair whose prefixes define every smaller rank.
+
+    The Gaussian matrices are drawn column-wise before QR; adding a larger k to a
+    ladder therefore leaves all existing leading directions unchanged.
+    """
+    from subliminal_learning.weightspace.deltas import _qr_signed
+
+    if max_k <= 0 or max_k > min(n, m):
+        raise ValueError(f"max_k must be in [1, {min(n, m)}], got {max_k}")
+    left = _qr_signed(left_rng.standard_normal((max_k, n)).T)
+    right = _qr_signed(right_rng.standard_normal((max_k, m)).T)
+    return left, right
+
+
 def backup_legacy(out: Path) -> Path | None:
     """Copy `out` aside before it is overwritten (position_surgery's backup convention)."""
     if not out.exists():
@@ -110,11 +127,17 @@ def main(
                                "every cell (required for a legacy-scheme document)."),
     match: str = typer.Option("fro", help="fro | spec (see weightspace.deltas."
                               "diffuse_ladder_delta)."),
+    alignments: str = typer.Option("g,a", help="Comma list of alignments: g and/or a."),
     device: str = typer.Option("cuda:0"),
     pool: str = typer.Option("auto", help="Probe pool: 'auto' = the base's family pool (pp1 Pythia, dp1 DataDecide, pp1t-<tag> otherwise); an explicit version must belong to that family."),
     logp_device: str = typer.Option("cpu", help="Parking device for probe log-probabilities."),
     output_root: Path = typer.Option(None),
 ) -> None:
+    if match not in {"fro", "spec"}:
+        raise typer.BadParameter("match must be 'fro' or 'spec'")
+    aligns = tuple(x.strip() for x in alignments.split(",") if x.strip())
+    if not aligns or any(x not in {"g", "a"} for x in aligns) or len(set(aligns)) != len(aligns):
+        raise typer.BadParameter("alignments must be a nonempty unique subset of g,a")
     import torch
     from subliminal_learning.models.loading_io import load_base_from_ref
 
@@ -124,9 +147,7 @@ def main(
     )
     from subliminal_learning.config import resolve_roots
     from subliminal_learning.utils.io import atomic_write_text
-    from subliminal_learning.weightspace.deltas import (
-        diffuse_ladder_delta, intruder_positive,
-    )
+    from subliminal_learning.weightspace.deltas import intruder_positive
     from subliminal_learning.weightspace.patching import (
         base_param_svds, patch_param_modules, pile_readout, restore_param_modules,
     )
@@ -134,6 +155,10 @@ def main(
 
     ks = tuple(int(x) for x in k_ladder.split(","))
     es = tuple(float(x) for x in e_ladder.split(","))
+    if not ks or any(k <= 0 for k in ks) or len(set(ks)) != len(ks):
+        raise typer.BadParameter("k-ladder must contain distinct positive integers")
+    if intruder_stride <= 0:
+        raise typer.BadParameter("intruder-stride must be positive")
 
     output_root, hf_cache = resolve_roots(output_root, None)
     out = output_root / "analysis" / f"{out_name}.json"
@@ -157,9 +182,13 @@ def main(
     criterion = "top-10 left singular vectors, max overlap < 0.5"
     pool_sha = pool.token_sha256()
     theta_bars = {n: m["theta"] for n, m in mods.items()}
+    max_k = max(ks)
+    for name, m in mods.items():
+        if max_k > min(m["shape"]):
+            raise typer.BadParameter(f"k={max_k} exceeds rank of module {name}")
     identity = dict(repo=repo, pool_sha=pool_sha, match=match, seed=seed,
                     criterion=criterion, intruder_stride=intruder_stride)
-    requested = [(align, k, E) for align in ("g", "a") for k in ks for E in es]
+    requested = [(align, k, E) for align in aligns for k in ks for E in es]
     if force:
         backup = backup_legacy(out)
         if backup is not None:
@@ -190,14 +219,27 @@ def main(
             seed=seed, criterion=criterion, intruder_stride=intruder_stride,
             theta_bars=theta_bars, match=match, results=results), indent=1))
 
+    nested_frames = {
+        name: nested_random_pair(
+            *m["shape"], max_k,
+            target_rng(seed, repo, name, "injection_left", "nested_signed_qr_v2"),
+            target_rng(seed, repo, name, "injection_right", "nested_signed_qr_v2"),
+        ) for name, m in mods.items()
+    }
     unit_deltas: dict = {}
     unit_key: tuple | None = None
     for align, k, E in cells:
         if unit_key != (align, k):
-            # One independent per-module target per (align, k), scaled by E below.
-            unit_deltas = {name: diffuse_ladder_delta(
-                m, align, k, 1.0, target_rng(seed, repo, name, "injection", f"{align}:{k}"), match)
-                for name, m in mods.items()}
+            # One maximum-rank per-module target per alignment, scaled by k and E below.
+            unit_deltas = {}
+            for name, m in mods.items():
+                if align == "g":
+                    u_r, v_r = nested_frames[name]
+                    u_r, v_r = u_r[:, :k], v_r[:, :k]
+                else:
+                    u_r, v_r = m["U"][:, :k], m["Vt"][:k, :].T
+                scale = m["theta"] if match == "spec" else m["theta"] / np.sqrt(k)
+                unit_deltas[name] = scale * (u_r @ v_r.T)
             unit_key = (align, k)
         deltas = {name: E * delta for name, delta in unit_deltas.items()}
         patch_param_modules(mods, deltas)
@@ -208,10 +250,13 @@ def main(
         for name in checked:
             m = mods[name]
             n_intr += int(intruder_positive(m["W0np"], deltas[name], m["U"]))
-        results.append(dict(align=align, k=k, E=E, kl=float(kl), delta_ce=float(dce),
+        f_theta = E if match == "fro" else E * np.sqrt(k)
+        s_theta = E / np.sqrt(k) if match == "fro" else E
+        results.append(dict(align=align, k=k, E=E, F_over_theta=float(f_theta),
+                            S_over_theta=float(s_theta), kl=float(kl), delta_ce=float(dce),
                             intruder_mods=f"{n_intr}/{len(checked)}"))
         typer.echo(f"{align} k={k:2d} E={E:4.1f}: KL={kl:8.3f} "
-                   f"intruders {n_intr}/{len(mods)}")
+                   f"intruders {n_intr}/{len(checked)}")
         save()
     if not cells:
         save()

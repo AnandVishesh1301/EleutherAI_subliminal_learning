@@ -14,6 +14,7 @@ from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.gpu import GpuSlot
 from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.jobqueue.worker import (
+    OOM_CEILING_HEADROOM_MIB,
     MasterLog,
     _Pool,
     is_oom_text,
@@ -152,14 +153,28 @@ def test_oom_at_the_card_ceiling_is_recorded_as_a_normal_failure(tmp_path):
     assert "OOM CEILING" in _master(tmp_path)
 
 
-def test_escalation_is_clamped_to_the_card_ceiling(tmp_path):
+def test_escalation_is_clamped_to_the_attainable_ceiling_not_the_card_total(tmp_path):
+    """An idle card never grants its TOTAL, so a floor AT the total parks the job forever."""
     job = _queue_with_job(tmp_path, OOM_CMD, mem_mib=30000)
     pool = _pool(tmp_path, gpu=FakeGpu(ceiling=40000))
 
     _run_one(pool, tmp_path, "q", job)
 
-    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 40000
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 40000 - OOM_CEILING_HEADROOM_MIB
     assert store.queue_status(tmp_path, "q")["pending"] == 1
+
+
+def test_oom_just_below_the_card_total_is_a_failure_not_another_floor(tmp_path):
+    """At/above the attainable ceiling the ladder ends: never persist an ungrantable floor."""
+    job = _queue_with_job(tmp_path, OOM_CMD, mem_mib=40000 - OOM_CEILING_HEADROOM_MIB)
+    pool = _pool(tmp_path, gpu=FakeGpu(ceiling=40000))
+
+    _run_one(pool, tmp_path, "q", job)
+
+    st = store.queue_status(tmp_path, "q")
+    assert st["failed"] == 1 and st["pending"] == 0
+    assert store.read_mem_floor(tmp_path, "q", job.jobkey) == 0
+    assert f"attainable card memory {40000 - OOM_CEILING_HEADROOM_MIB}" in _master(tmp_path)
 
 
 def test_non_oom_failure_keeps_the_existing_behavior(tmp_path):

@@ -6,11 +6,24 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 from typer.testing import CliRunner
 
 from scripts.diffuse_ladder_surgery import (
-    RNG_SCHEME, app, backup_legacy, check_scheme, derived_match, plan_cells,
+    RNG_SCHEME, app, backup_legacy, check_scheme, derived_match, nested_random_pair,
+    plan_cells,
 )
+
+
+def test_nested_random_pair_prefix_is_stable():
+    from scripts.position_surgery import target_rng
+
+    a = nested_random_pair(8, 7, 4, target_rng(1, "r", "m", "l", "x"),
+                           target_rng(1, "r", "m", "v", "x"))
+    b = nested_random_pair(8, 7, 6, target_rng(1, "r", "m", "l", "x"),
+                           target_rng(1, "r", "m", "v", "x"))
+    np.testing.assert_allclose(a[0], b[0][:, :4])
+    np.testing.assert_allclose(a[1], b[1][:, :4])
 
 IDENTITY = dict(repo="EleutherAI/pythia-160m-data-seed1", pool_sha="deadbeef", match="fro",
                 seed=0, criterion="top-10 left singular vectors, max overlap < 0.5",
@@ -29,6 +42,8 @@ def test_check_scheme_rejects_legacy_and_accepts_current():
     with pytest.raises(ValueError, match="legacy"):
         check_scheme({"results": []})
     check_scheme(doc([]))
+    with pytest.raises(ValueError, match="keyed_v1"):
+        check_scheme({"rng_scheme": "keyed_v1", "results": []})
 
 
 def test_plan_cells_without_stored_doc_runs_everything():
@@ -106,8 +121,9 @@ def stubbed(tmp_path, monkeypatch):
     monkeypatch.setattr(probe_io, "parked_logprobs", lambda *a, **k: None)
     monkeypatch.setattr(probe_io, "mean_ce", lambda *a, **k: 2.5)
     monkeypatch.setattr(patching, "base_param_svds",
-                        lambda *a, **k: {"mod": {"S": None, "shape": None, "U": None,
-                                                 "W0np": None}})
+                        lambda *a, **k: {"mod": {"S": None, "shape": (64, 64),
+                                                 "U": np.eye(64), "Vt": np.eye(64),
+                                                 "W0np": np.zeros((64, 64)), "theta": 0.25}})
     monkeypatch.setattr(patching, "patch_param_modules", lambda *a, **k: None)
     monkeypatch.setattr(patching, "restore_param_modules", lambda *a, **k: None)
     monkeypatch.setattr(patching, "pile_readout", lambda *a, **k: (1.0, 0.1))
@@ -125,6 +141,53 @@ def squashed(text: str) -> str:
 def run(*args):
     result = CliRunner().invoke(app, ["--k-ladder", "1", "--e-ladder", "0.5", *args])
     return result
+
+
+@pytest.mark.parametrize("match", ["fro", "spec"])
+def test_cli_uses_nested_directions_and_correct_norms(stubbed, monkeypatch, match):
+    from subliminal_learning.weightspace import patching
+
+    patches = []
+    monkeypatch.setattr(patching, "patch_param_modules",
+                        lambda mods, deltas: patches.append(deltas["mod"].copy()))
+    result = run("--k-ladder", "1,4", "--e-ladder", "0.5,2", "--match", match)
+    assert result.exit_code == 0, result.output
+    assert len(patches) == 8
+    # Normalize out the per-direction amplitude. Each rank-one update is
+    # contained in both the left and right subspaces of the rank-four update.
+    for offset in (0, 4):  # random and base-aligned
+        units = []
+        for i, k in enumerate((1, 4)):
+            for j, energy in enumerate((0.5, 2)):
+                delta = patches[offset + 2 * i + j]
+                amplitude = .25 * energy / (np.sqrt(k) if match == "fro" else 1)
+                np.testing.assert_allclose(np.linalg.norm(delta, 2), amplitude)
+                np.testing.assert_allclose(np.linalg.norm(delta), np.sqrt(k) * amplitude)
+            np.testing.assert_allclose(patches[offset + 2 * i + 1],
+                                       4 * patches[offset + 2 * i])
+            units.append(patches[offset + 2 * i] / (.125 / (np.sqrt(k) if match == "fro" else 1)))
+        one, four = units
+        np.testing.assert_allclose(four @ one.T, one @ one.T, atol=1e-12)
+        np.testing.assert_allclose(four.T @ one, one.T @ one, atol=1e-12)
+
+
+@pytest.mark.parametrize("value", ["", "g,g", "x", "a,g,a"])
+def test_cli_rejects_invalid_alignments(value):
+    result = run("--alignments", value)
+    assert result.exit_code != 0
+    assert "alignments" in result.output
+
+
+def test_cli_can_extend_random_only_with_aligned_without_repeating(stubbed):
+    result = run("--alignments", "g")
+    assert result.exit_code == 0, result.output
+    rows = json.loads(stubbed.read_text())["results"]
+    assert len(rows) == 1 and rows[0]["align"] == "g"
+    assert rows[0]["F_over_theta"] == rows[0]["S_over_theta"] == .5
+    result = run("--alignments", "a")
+    assert result.exit_code == 0, result.output
+    rows = json.loads(stubbed.read_text())["results"]
+    assert [r["align"] for r in rows] == ["g", "a"]
 
 
 def test_cli_writes_scheme_and_refuses_legacy_document(stubbed):

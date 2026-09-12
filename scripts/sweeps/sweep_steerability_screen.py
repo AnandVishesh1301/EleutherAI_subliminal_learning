@@ -52,6 +52,7 @@ from pipelines.steerability_screen_pipeline import (
     _seed_file,
     run,
 )
+from subliminal_learning.param_tags import parse_param_tag
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import (
     parse_base_models,
@@ -106,18 +107,50 @@ def _screen_done(cfg: SteerabilityScreenConfig) -> bool:
     return True
 
 
+def _hp_cells_from_param_tags(param_tags) -> list[tuple[int, float, tuple[int, int]]]:
+    """Turn an explicit ``param_tags`` list into ``(n_epochs, lr, (r, alpha))`` cells.
+
+    Order is preserved and duplicates are dropped. Suffix arms (``_noeos``, ``_stop{N}``, an
+    optimizer slug) are rejected: ``build_screen_cfg`` spells a cell's dir with
+    ``teacher_param_dir(..., train, lora)`` off the base train/lora config, which carries no
+    such arm, so a suffixed tag would silently screen the wrong (suffix-less) teacher.
+    """
+    cells: list[tuple[int, float, tuple[int, int]]] = []
+    for tag in param_tags:
+        hp = parse_param_tag(str(tag))
+        extra = sorted(set(hp) - {"epochs", "lr", "rank", "alpha"})
+        if extra:
+            raise ValueError(
+                f"param_tags entry {tag!r} names a suffix arm ({', '.join(extra)}); this sweep "
+                "can only screen plain ep{e}_lr{lr}_r{r}a{a} teachers"
+            )
+        cell = (hp["epochs"], hp["lr"], (hp["rank"], hp["alpha"]))
+        if cell not in cells:
+            cells.append(cell)
+    return cells
+
+
 def expand_screen_cells(
     base,
     sweep: dict,
     *,
     animals_override: list[str] | None = None,
     steer_models: str | None = None,
+    allow_full_seeds: bool = False,
 ) -> tuple:
     """Expand the selection YAML into the same grid the screen sweep iterates.
 
     Returns ``(animals, base_specs, epochs_list, lr_list, lora_pairs, target_specs, all_cells)``;
     each cell is ``(animal, source_spec, n_epochs, lr, (r, alpha), target_spec)`` with self-targets
     dropped -- exactly as ``main()`` builds them, so the backfill reconstructs identical configs.
+
+    Teacher configs come from one of two schemas: the product ``grid`` (epochs x lr x lora), or
+    an explicit top-level ``param_tags`` list (``[ep20_lr1e-4_r16a32, ...]``, also reachable via
+    ``inherit_grid``) naming exactly the teacher cells to screen, in order. With ``param_tags``
+    the ``grid`` key is optional and ignored; the returned epochs/lr/lora lists are the distinct
+    values seen in the tags, so the sweep's log line still reads sensibly.
+
+    ``allow_full_seeds`` opts both the source and the target axis in to ``full-seed<N>`` bases.
     """
     inherited: dict = {}
     if "inherit_grid" in sweep:
@@ -132,22 +165,37 @@ def expand_screen_cells(
         else resolve_animals(pick("animals"), base.paths, n_animals)
     )
     base_models = str(pick("base_models", "seeds"))
-    base_specs = [base.spec] if base_models.lower() == "config" else parse_base_models(base_models)
-    grid = pick("grid")
-    epochs_list = [int(e) for e in grid["n_epochs"]]
-    lr_list = [float(x) for x in grid["learning_rate"]]
-    lora_pairs = lora_pairs_from_grid(grid)
+    base_specs = (
+        [base.spec] if base_models.lower() == "config"
+        else parse_base_models(base_models, allow_full_seeds=allow_full_seeds)
+    )
+    param_tags = pick("param_tags")
+    if param_tags:
+        hp_cells = _hp_cells_from_param_tags(param_tags)
+    else:
+        grid = pick("grid")
+        hp_cells = list(itertools.product(
+            [int(e) for e in grid["n_epochs"]],
+            [float(x) for x in grid["learning_rate"]],
+            lora_pairs_from_grid(grid),
+        ))
+    epochs_list = list(dict.fromkeys(e for e, _, _ in hp_cells))
+    lr_list = list(dict.fromkeys(lr for _, lr, _ in hp_cells))
+    lora_pairs = list(dict.fromkeys(p for _, _, p in hp_cells))
 
     # Cross-seed target axis: None => within-model (steer the source itself); otherwise each
     # parsed 160m target base. Self-targets (target == source) are skipped -- that's the
     # within-model screen, which lives in its own file and is run without --steer-models.
-    target_specs: list = parse_base_models(steer_models) if steer_models else [None]
+    target_specs: list = (
+        parse_base_models(steer_models, allow_full_seeds=allow_full_seeds)
+        if steer_models else [None]
+    )
     all_cells = [
-        c
-        for c in itertools.product(
-            animals, base_specs, epochs_list, lr_list, lora_pairs, target_specs
+        (animal, spec, n_epochs, lr, pair, target)
+        for animal, spec, (n_epochs, lr, pair), target in itertools.product(
+            animals, base_specs, hp_cells, target_specs
         )
-        if c[5] is None or c[5] != c[1]
+        if target is None or target != spec
     ]
     return animals, base_specs, epochs_list, lr_list, lora_pairs, target_specs, all_cells
 
@@ -273,6 +321,12 @@ def main(
         "'seeds'/'all7'/'data'/'weight'/'original'. Each trained SOURCE teacher's direction is injected into every "
         "target base (self-targets skipped). Omit for within-model screening.",
     ),
+    allow_full_seed_bases: bool = typer.Option(
+        False,
+        help="Allow full-seed<N> tokens in --steer-models and the YAML's base_models. Opt-in "
+        "because full-seed models re-randomise weight init AND data order together, unlike the "
+        "data-seed/weight-seed ensembles that vary one factor each.",
+    ),
     ft_seeds: str = typer.Option(
         None,
         help="Restrict to these teacher ftseeds (comma list, e.g. '1'). Omit = all ftseeds "
@@ -306,7 +360,8 @@ def main(
     (
         animals, base_specs, epochs_list, lr_list, lora_pairs, target_specs, all_cells
     ) = expand_screen_cells(
-        base, sweep, animals_override=animals_override, steer_models=steer_models
+        base, sweep, animals_override=animals_override, steer_models=steer_models,
+        allow_full_seeds=allow_full_seed_bases,
     )
     cells = shard_cells(all_cells, num_shards=num_shards, shard_index=shard_index)
     logger.info(

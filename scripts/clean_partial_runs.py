@@ -313,8 +313,45 @@ def _leaf_is_live(plan: CleanPlan, leaf: Path) -> bool:
     return False
 
 
+def _leaf_newest_mtime(leaf: Path) -> float:
+    """Newest mtime under ``leaf``: the leaf dir, ``checkpoints/`` and its immediate children.
+
+    At most two levels deep -- enough to see a writer's progress without walking a tree.
+    """
+    newest = 0.0
+    for p in (leaf, leaf / "checkpoints"):
+        try:
+            newest = max(newest, p.stat().st_mtime)
+        except OSError:
+            continue
+        try:
+            children = list(p.iterdir()) if p.name == "checkpoints" else []
+        except OSError:
+            children = []
+        for c in children:
+            try:
+                newest = max(newest, c.stat().st_mtime)
+            except OSError:
+                continue
+    return newest
+
+
+def _targeted_recent_age_s(plan: CleanPlan, leaf: Path) -> float | None:
+    """Seconds since the newest write under ``leaf`` if it is too recent for targeted mode.
+
+    Targeted mode's liveness guard reads THIS node's /proc only, but the output root is
+    shared: a leaf mid-training on another node looks dead here. Recent writes are the
+    only cross-node signal we have, so refuse on them (override with --min-age-s 0).
+    """
+    if not plan.targeted or plan.min_age_s <= 0:
+        return None
+    age = plan.now - _leaf_newest_mtime(leaf)
+    return age if age < plan.min_age_s else None
+
+
 def _classify_leaf(plan: CleanPlan, leaf: Path) -> str:
-    """One of: remove | no-checkpoints | complete | resumable | live | too-new."""
+    """One of: remove | no-checkpoints | complete | resumable | live | too-new |
+    recently-modified."""
     ckpt = leaf / "checkpoints"
     if not ckpt.is_dir():
         return "no-checkpoints"
@@ -324,12 +361,21 @@ def _classify_leaf(plan: CleanPlan, leaf: Path) -> str:
         return "resumable"
     if _leaf_is_live(plan, leaf):
         return "live"
+    recent = _targeted_recent_age_s(plan, leaf)
+    if recent is not None:
+        logger.info(
+            "Refusing {}: recently modified {:.0f} s ago; another node may be writing it; "
+            "pass --min-age-s 0 to override.", leaf, recent,
+        )
+        return "recently-modified"
     if not plan.age_ok(leaf):
         return "too-new"
     return "remove"
 
 
 def _log_skip(path: Path, reason: str) -> None:
+    if reason == "recently-modified":
+        return  # already logged with the age, at _classify_leaf
     if reason in ("live", "too-new", "resumable", "not-selected"):
         logger.info("Skip leaf {} ({})", path, reason)
     else:  # complete / no-checkpoints -> expected, keep quiet unless debugging
@@ -700,7 +746,7 @@ def plan_targeted(
     from_job_cmd: str | None = None,
     all_seeds: bool = False,
 ) -> list[Action]:
-    """Clean one dead run dir / cell (age guard off; complete + live leaves refused).
+    """Clean one dead run dir / cell (complete, live + recently-modified leaves refused).
 
     For a teacher/distill CELL dir a seed selection is REQUIRED (``--seeds`` /
     ``--from-job-cmd`` / ``--all-seeds``); a bare ``ftseed*`` leaf path selects its own seed.
@@ -834,8 +880,8 @@ def main(
     path: Path = typer.Option(
         None,
         "--path",
-        help="Targeted mode: clean this one dead run dir / cell (age guard OFF; a complete or "
-        "live leaf is refused). The stage is detected from the path.",
+        help="Targeted mode: clean this one dead run dir / cell (a complete, live or "
+        "recently-modified leaf is refused). The stage is detected from the path.",
     ),
     scan: bool = typer.Option(
         False, "--scan", help="Scan mode: sweep the in-scope trees for stale partials."
@@ -867,11 +913,13 @@ def main(
         False, "--apply", help="Actually delete. DEFAULT is a dry run that deletes nothing."
     ),
     min_age_s: float = typer.Option(
-        21600.0,
+        None,
         "--min-age-s",
-        help="Scan mode: skip candidates whose leaf/file mtime is newer than this (default 6h). "
-        "A live training job may not touch its dir for the whole run, so this must exceed the "
-        "longest expected job (~1h). Ignored in targeted (--path) mode.",
+        help="Skip candidates whose mtime is newer than this. Scan mode default 21600 (6h): a "
+        "live training job may not touch its dir for the whole run, so this must exceed the "
+        "longest expected job (~1h). Targeted (--path) mode default 1800: the output root is "
+        "shared across nodes, so recent writes mean another node may still be running it; "
+        "pass 0 to override.",
     ),
     coherence_orphan_npy: bool = typer.Option(
         False,
@@ -916,7 +964,8 @@ def main(
         allowed_roots=tuple(allowed),
         dataset_cache_root=ds_root,
         dataset_cache_allowed=ds_allowed,
-        min_age_s=min_age_s,
+        min_age_s=(min_age_s if min_age_s is not None else (1800.0 if path is not None
+                                                            else 21600.0)),
         now=time.time(),
         targeted=path is not None,
         coherence_orphan_npy=coherence_orphan_npy,

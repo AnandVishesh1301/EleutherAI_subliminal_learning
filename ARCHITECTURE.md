@@ -265,6 +265,9 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         section all dropped
     steerability_screen_analysis        steering-vector screen tables/heatmaps
     eas_analysis                        EAS dose-response + HP tables
+    eas_nonadaptive_ds1_seed1           EAS trajectories over the 504-lattice seed-1 runs on
+                                        the ds1 receiver (anchored-KL label, per-layer,
+                                        timing vs trait/KL)
     sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
     gkd_student_results_analysis        GKD subliminal Δ (via gkd_results_io)
     cka_analysis                        base-model CKA runs under outputs/cka/base/:
@@ -740,7 +743,11 @@ whose default `model_input_names` carries `token_type_ids` and makes every
 `model.generate(**enc)` / `model(**enc)` site fail ("model_kwargs not used by the
 model") while SFT training, which pulls only `input_ids`, runs fine. It writes a
 `conversion.json` provenance sidecar per step; the family needs no `allow_full_seeds`
-gate (the token is explicit and unique).
+gate (the token is explicit and unique). A finished run gets a `main` alias
+(`local/pythia-160m-weightc-seed1/main -> step143000`, 2026-09-12) so the bare token
+`weightc-seed1` names the final checkpoint exactly as `pythia-160m-seed1` does: main-line
+arms (seed2seed receivers) use the bare dir `students/<animal>/pythia-160m-weightc-seed1/`,
+and only the ckpt sweeps spell the step (`ckpt/pythia-160m-weightc-seed1@step143000/`).
 For a base still training, `scripts/ckpt_distill_gate_append.py` grows a ckpt-distill sweep
 as conversions land: each target step is gated on held-out Pile CE against the genuine
 `pythia-160m` at the same step (verdict persisted as `heldout_ce.json` beside the weights),
@@ -749,7 +756,15 @@ passed window steps, or its diagonal) and re-submitted with `--allow-snapshot-up
 failing step is logged and excluded. The Pile probe stem comes from the paths YAML key
 `pile_preshuffled_document` (or `--preshuffled`; never a baked path), and both the
 watcher's config rewrite and `submit`'s snapshot overwrite are atomic under one lock,
-`{queue_root}/{queue_prefix}.sweep.lock` (2026-09-10).
+`{queue_root}/{queue_prefix}.sweep.lock` (2026-09-10). `--window` takes comma-separated
+items, each `lo:hi:stride` or a single step (`75000:125000:5000,130000,140000`), so a
+design can skip converted steps it never asked for (2026-09-12: wc1 +130k/140k, not 135k).
+`--follow-config` (repeatable, 2026-09-11) grows diagonal-only companion configs — e.g.
+`ckpt_distill_sweep_dog_weightc1_diagseeds23.yaml`, student ftseeds 2–3 on the diagonal — with
+every step the primary has confirmed submitted, submitting each only AFTER the primary so its
+`jobq.depends_on_prefix` on the primary's per-step queues always resolves (no two pool jobs
+race into one output dir). Each config keeps its own submission ledger
+(`gate_append_submitted.json` for the primary, `gate_append_submitted.<stem>.json` per follower).
 Pile-coherence discovery tokenizes a `pythia-160m-seed{N}` run dir as `full-seed<N>`
 (previously it produced a bare `seed<N>` the round-trip parse rejected, silently skipping
 the run), and `cka.model_refs.spec_from_base_name` validates its inverted spec against
@@ -876,6 +891,25 @@ takes the spec as-is. One worker drives it, `run_logs/p410m_worker.py` (stages
 - **cells**: cells drawn EXACTLY from the nonadaptive-8×7 strip universe (8 ranks × 7 α ×
   9-rung lr ladder), kept inside K/K*₁₆₀ₘ ∈ [0.02, 1.5] (288 cells, all 56 pairs) and split
   into pilot/rest jobs files → `run_logs/p410m/strip_cells.json`.
+
+Per-run state files in `run_logs/p410m/` are named
+`registry_<arm>_<teacher_tag>_<cell>_s<seed>.json` / `probe_runs_<same stem>.txt`, where
+`<arm>` is `same` / `fs1` / `x<sender>-<receiver>` / `xbase-…` (`basenum` in the teacher-tag
+slot for base-control pools). The teacher tag is ALWAYS in the stem (2026-09-11; the
+focus-teacher files had been written stemless until then and were renamed in place). For
+sender bases the worker cannot parse (OLMo → Pythia, `--numbers-dir` +
+`--numbers-base-label` + `--arm-label`), the lineage's `teacher_base_model` is the real
+base spelling (`--numbers-base-label`, resolved through `models.naming`); `--arm-label`
+(e.g. `olmo1b`) only feeds job ids and file stems, never a path.
+
+Base-pool controls (`--source base`) are animal-independent, so the worker writes their
+endpoint evals under `{leaf}/eval/<animal>/preference_eval.json`, the per-cell summary under
+`{cell}/eval/<animal>/preference_summary.json` and the receiver's base control under
+`{dataset}/eval/<animal>/base_control.json` (the `resolve_eval_animal` rule and the layout
+`analysis/student_tree.py` scans). A second animal's readout is a `seval` job with another
+`--animal` plus `ckpt_preference_trajectory --animals a,b` (one trajectory file, both animals).
+2026-09-12: the four p410m-written control trees (160m ← 410m / 410m-seed1 / DataDecide,
+410m ← 160m) were moved from the leaf root into this layout; teacher-pool runs are unchanged.
 
 Gotchas: pools run `HF_HUB_OFFLINE=1`, and `.env`'s `HF_HOME` points at the frozen ssd-3
 cache — the worker pins `HF_HOME` to `hf_cache_root` (where 410m was downloaded) before
@@ -1901,7 +1935,7 @@ position) so repeated notebook loads do not re-read thousands of files. Identity
 document's `student`/`references` blocks, never from path arithmetic — the `teacher_*` columns
 describe the *reference* a row was scored against, with `is_own_reference` separating matched
 pairs from controls. Helpers: `endpoint_only`, `own_reference_only`. Notebook:
-`notebooks/eas_analysis.ipynb`.
+`notebooks/eas_analysis.ipynb`. Its §7 (2026-09-11) joins the orig→ds1 nonadaptive strip's per-checkpoint EAS (464 seed-1 cells × 40 ckpts, queue `eas-nonadaptive-ds1-s1`) to `pref_traj` / `pile_kl_traj` on `step`: the `[1:]`-mean EAS–transfer correlation is an alive/dead artifact (alive-only ρ −0.30); the one slot that tracks transfer among alive cells and along each trajectory is raw block slot 1 (ρ 0.70 cross-cell, median within-run ρ 0.76), while deep slots fall with dose (slot 12 ρ −0.92 vs log KL) — early-block EAS reads as the trait shift, deep-slot EAS as base fidelity. The slot is chosen once and held for every trajectory figure.
 
 **Sweep.** `sweep_compute_eas` discovers every student run dir on disk (any depth: plain,
 `ckpt/`-gathered, optimizer-prefixed and `controls/` layouts; not a grid), filters by
@@ -3740,9 +3774,11 @@ for a missing manifest or adapter.
 `repo@revision`), draws every random target from an rng keyed by (seed, run, module, kind,
 draw-or-selector) — `weightspace.deltas.TARGET_VERSION`, stamped on random-target rows — stamps
 identity fields (adapter sha, pool version/sha, prompt set sha, animal, seed) on every row, resumes
-only on a complete identity-matching variant set, replaces all rows of a redone run, starts
-`--redo` from an empty output after a `{out_name}.legacy-{UTC}.jsonl` backup, and writes
-`{out_name}.manifest.json`. The two progression notebooks read only `position_surgery_ce_prog`
+only on a complete identity-matching variant set, and refuses existing stale or incomplete
+runs (including variant extensions) without replacing observations. `--redo` explicitly
+resets the entire output after backing up both data and canonical manifest. Each invocation
+writes a unique `.invocation-*.manifest.json`; the first successful invocation publishes
+`{out_name}.manifest.json`, preserved by ordinary resumes. The two progression notebooks read only `position_surgery_ce_prog`
 and require `surgery_record_is_current(..., require_keyed_targets=True)`. The progression
 recompute was queued as `surg-prog-fresh` (12 strip runs; `orig`, `align`, `rand0`,
 `randt{0.25,0.5,0.75}`); the KL-era `position_surgery_v2_prog.jsonl` is superseded.
@@ -3755,10 +3791,12 @@ otherwise the run's own probe ΔCE (`eval/pile_probe.json`) is copied in and sta
 run with no usable probe file gets no baseline at all — a `WARN` line and manifest status
 `computed_no_baseline` — never an extra forward pass. Every row and
 the output manifest carry `original_baseline_version=ce-baseline-v1`; missing versions
-force recomputation on resume. `original_pile_kl` is also recorded, while `stored_kl` is
+prevent ordinary resume (a fresh output name or explicit backed-up redo is required).
+`original_pile_kl` is also recorded, while `stored_kl` is
 diagnostic only. Consumers (`surgery_original_delta_ce`) take that paired baseline when a
 row carries it and otherwise fall back to the run's stored pp1 probe ΔCE
-(`eval/pile_probe.json`), so legacy census/selector artifacts never need regeneration; the
+(`eval/pile_probe.json`), so baseline bookkeeping alone does not require regenerating
+legacy census/selector artifacts (this does not certify their random-target sampler); the
 notebooks print per-arm counts of runs by baseline source. A run whose paired rows
 disagree on baseline or input identity is still a fatal error. These figures prefer the
 paired readout over the mutable per-run probe file, which is only the fallback.
@@ -3768,7 +3806,7 @@ paired readout over the mutable per-run probe file, which is only the fallback.
 not requested) — an eval-time number, not an in-session
 measurement, so consumers report those runs as `stored_probe`, a paired row of the same run
 still wins, and `position_surgery`'s resume check (identity fields, absent on legacy rows)
-still recomputes a real rerun. It backs each rewritten file up to `.prebackfill-{UTC}.jsonl`.
+still refuses reuse without an explicit rerun. It backs each rewritten file up to `.prebackfill-{UTC}.jsonl`.
 Section 1 of
 `notebooks/collapse_surgery_and_sgd.ipynb` is the exception: it is the 08-26 KL-era v2
 readout, retained as-is because its artifact predates the paired baseline, so its labels
@@ -3910,3 +3948,109 @@ trajectory figure incorporate these measurements. The main agent authored prose.
 `docs/paper/boundary_fitting_protocol.md` distinguishes free fits, fixed-coordinate
 thresholds, conditional intervals, and legacy label paths. The spectral-threshold
 limitation remains explicit in the third introduction contribution.
+
+### 2026-09-11 — repo audit fixes (jobq, sweeps, pools, evals)
+
+Seven read-only audit passes (distillation, evaluation, jobq, models, steering,
+checkpoint sweeps, steerability) fed one fix round. Landed: the OOM memory-floor
+ladder caps at an *attainable* ceiling (`OOM_CEILING_HEADROOM_MIB` below the card
+total) so a persisted floor can never park a job forever; `jobq submit` refuses to
+create a zero-job queue and the pool warns once when a dependency has no jobs;
+`atomic_write_text` chmods 0o666 so CLI-written queue state is readable across
+uids; `.claim` files carry an ownership token and `release_claim` refuses a claim
+it no longer owns; `tests/unit/test_run_io.py` became `test_run_io_contract.py`
+(the duplicate basename blocked collection). Checkpoint sweeps: the gate watcher
+submits with `--allow-snapshot-growth` (added steps/pairs only; any other edit is
+an error naming the keys), has a submit timeout, keys follower ledgers on the
+resolved path, and parses pairs only inside `pairs.explicit`; `depends_on_prefix`
+misses are logged per step; run-cell student evals score `test` + `off_topic`.
+Number pools write a `raw.jsonl.pending` marker around the rows write and record
+`raw_sha256`/`raw_bytes` so a torn pool is classified `torn`. Evals:
+`fidelity_ckpt_trajectory` loads bases through `load_base_from_ref`, and it,
+`run_final_evals` and `teacher_term_splice` call `release_base` after `unload()`.
+`clean_partial_runs --path` refuses leaves modified within `--min-age-s`
+(default 1800 s). `allow_cross_family` is exposed on `distill_student.py`,
+requires `--allow-cross-base`, is limited to `SUPPORTED_CROSS_FAMILY_PAIRS`, and
+is recorded in the manifest only (not the identity, so earlier cells still SKIP).
+`tests/test_residual.py` covers steering `project` mode per family.
+
+### 2026-09-11 — direction-intervention audit and nested random injections
+
+2026-09-12 correction follow-up: `scripts/plan_direction_corrections.py` freezes
+the archived OLMo native/shared/detail job memberships and exact dose manifests
+into a new `direction_corrections_20260912` namespace. It schedules only the
+changed random-target interventions: 864 runs at three doses, 154 detailed runs
+(aligned variants omitted), and two random-only injection ladders with all 64
+target matrices checked for intruders. Training, scalar-dose calibration/sweeps,
+learned-donor injections, and deterministic aligned injections are not repeated.
+Source/run-list/dose hashes and full adapter SHA256 plus receiver/configuration
+identity are validated before each job; outputs retain the surgery no-overwrite
+contract. Existing Pythia random-injection results already supply the updated
+Pythia learned-donor comparator. A new sampler changes rotation targets even
+though the interpolation formula itself is unchanged. Campaign generation is
+not evidence of completion; inspect scheduler results and output coverage.
+The separate `pythia.manifest.json` supplement uses the same frozen executor:
+12 historical full-rotation runs, 546 historically selected super/subcritical
+runs, and the full legacy spectral grid on data-seed1 with corrected random
+frames at seeds 0/1/2 (48 conditions). Its 24 jobs do not repeat the completed
+fixed-F or full-population top/rest campaign. The four correction queues share
+a two-jobs-per-GPU cap; the full campaign has 142 submitted jobs.
+
+`position_surgery.py` now includes receiver reference/revision, adapter-config
+hash, explicit native/scaled dose identity, and construction version in resume
+validation. A receiver or scaling change cannot silently reuse old surgery rows.
+`diffuse_ladder_surgery.py` uses `nested_signed_qr_v2`: one signed-QR random frame
+pair per module/seed, with prefixes for smaller k and fixed frames across E.
+Independent column-wise U/V streams preserve prefixes when the maximum k grows.
+Older RNG artifacts cannot be resumed as the new design; new GPU measurements
+remain pending. Nesting removes direction resampling across k, not the identity
+F = sqrt(k) S for equal-strength rank-k injections.
+
+`docs/paper/prepare_direction_audit.py` produces a source-hashed, read-only
+snapshot under `docs/paper/evidence/direction_20260911/`: 2,501 finite Pythia
+census pairs, 546 selected selector runs, and all 864 OLMo runs at three dose
+conditions. OLMo detailed variants use the actual 77-run membership per receiver,
+not a boundary-table subset. Exact duplicate native-scan rows are removed before
+counting: 57/126 failed teachers have no measured intruders; 178/233 finite,
+below-cutoff trait-free students have them. The older 12.53-to-2.25 result is KL,
+not excess CE. Synthetic detector counts concern the resulting weight matrix,
+not arbitrary random update directions. The manuscript, methods, claims ledger,
+and figures distinguish these claims and disclose norm/rank coupling, sampled
+intruder modules, donor-case scope, and historical construction versions.
+`refresh_direction_notebooks.py` executes verified evidence blocks in all three
+direction/paper notebooks and archives superseded sections without rerunning
+GPU experiments. `refresh_iclr_figure_cells.py` refreshes the main figure block;
+`build_paper_exports.py` propagates the revised manuscript into reader/DOCX files.
+
+Experimental-lineage attribution now appears at the intervention definitions:
+Shuttleworth's detector and selective intruder scaling, and Xie's formation
+scale, strength scans, and equal-norm generic/aligned concentrated/diffuse design.
+Our direction replacement and extensions are explicitly distinguished from
+replications of their interventions. Detailed-subset provenance was checked:
+all 546 Pythia memberships match the stated healthy-random-reference rule; OLMo
+uses 72 rank–alpha representatives plus five native receiver-disagreement cells,
+with no selection on randomized recovery.
+
+The intervention narrative now separates magnitude, fixed-spectrum direction
+effects, and intruder necessity/sufficiency. Detailed concentration and historical
+KL comparisons are supporting appendix results. Randomness is paired within
+rotation/concentration paths, not shared across independent runs. Supercritical
+replacement preserves spike strengths and can create new intruders; it is not
+intruder removal. The methods and evidence README distinguish correctness reruns
+from optional coverage expansion, and avoid duplicate evaluations of the same
+matrix under Frobenius/spectral parameterizations.
+
+### 2026-09-11 — nested concentration and full finite-census selectors launched
+
+`scripts/plan_direction_replication.py` prepares an immutable, input-validated
+campaign under `run_logs/direction_replication_20260911/`. The code/config/prompt
+snapshot is verified before each job, and jobs refuse changed checkpoint stat or
+configuration/manifest identities. All 2,501 finite Pythia census runs are split
+into 81 disjoint shards with fresh paired orig/rand0 measurements and top/rest
+1/2/4 selectors, without selection on recovery. Six injection jobs cover two
+Pythia receivers, three nested random-frame draws, six ranks and four Frobenius
+doses (192 conditions). `diffuse_ladder_surgery --alignments` avoids repeating
+deterministic aligned controls across seeds and records both norm coordinates.
+Queues `direction-nested-20260911` and `direction-selectors-full-20260911` were
+submitted to the existing `run_logs/queue_angela` scheduler on node 1. Historical
+outputs are preserved; downstream claims must wait for validated new coverage.
