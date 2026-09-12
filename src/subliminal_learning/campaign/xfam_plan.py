@@ -310,6 +310,23 @@ ARMS: tuple[Arm, ...] = (
         priority=84,
     ),
     Arm(
+        # The SFT-only rung of a6's lineage: core, not tail, because base -> SFT ->
+        # SFT-DPO is what F3 contrasts in the other family.
+        name="t2-olmo-sft",
+        cluster=_A[0],
+        teacher=_A[1],
+        students=("amd-olmo-1b-sft",),
+        kind=KIND_FORWARD,
+        lr_source="amd-olmo-1b",
+        recipes=(BASE_RECIPE,),
+        epochs=BASE_EPOCHS,
+        ftseeds=LADDER_FTSEEDS,
+        teacher_param_tag=TEACHER_PARAM_TAG,
+        replication_gated=False,
+        tail=False,
+        priority=84,
+    ),
+    Arm(
         name="a7-reverse-olmo",
         cluster=_A[0],
         teacher="amd-olmo-1b",
@@ -493,21 +510,6 @@ ARMS: tuple[Arm, ...] = (
         emits_controls=False,
     ),
     # --- tail: enqueued at launch, drains only after the core -------------------
-    Arm(
-        name="t2-olmo-sft",
-        cluster=_A[0],
-        teacher=_A[1],
-        students=("amd-olmo-1b-sft",),
-        kind=KIND_FORWARD,
-        lr_source="amd-olmo-1b",
-        recipes=(BASE_RECIPE,),
-        epochs=BASE_EPOCHS,
-        ftseeds=LADDER_FTSEEDS,
-        teacher_param_tag=TEACHER_PARAM_TAG,
-        replication_gated=False,
-        tail=True,
-        priority=58,
-    ),
     Arm(
         name="t3-dose-neox",
         cluster=_A[0],

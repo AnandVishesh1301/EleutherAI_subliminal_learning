@@ -63,6 +63,7 @@ emitters at `ep10_lr5e-5_r128a128`, tfs0 (tail only).
 | a4-olmo | → amd-olmo-1b | architecture **and** corpus (Dolma) | ladder | r8α16 | 1 |
 | a5-posttrain | → hh-sft, hh-dpo, ppo | post-training on the same init | lr\*(pythia-410m) | r8α16 | 1 |
 | a6-olmo-posttrain | → amd-olmo-1b-sft-dpo | post-training in the other family | lr\*(amd-olmo-1b) | r8α16 | 1 |
+| t2-olmo-sft | → amd-olmo-1b-sft | SFT-only rung of a6's lineage | lr\*(amd-olmo-1b) | r8α16 | 1 |
 | a7-reverse-olmo | amd-olmo-1b → pythia-410m | emitter family | lr\*(pythia-410m) | r8α16 | 1 |
 | a8-rank-olmo | → amd-olmo-1b | LoRA rank/alpha | lr\* | r32α64, r64α32 | 1 |
 | a10-replication | → deduped, amd-olmo-1b | teacher seed (tfs1, tfs2) | lr\* | r8α16 | 1 |
@@ -77,7 +78,11 @@ emitters at `ep10_lr5e-5_r128a128`, tfs0 (tail only).
 | b9-replication | → qwen3-0.6b-base | teacher seed | lr\* | r8α16 | 1 |
 
 Tail (enqueued at launch at the lowest priorities, not part of the completion
-criterion): `t2-olmo-sft`, `t3-dose-neox`, `t4-dose-qwen`, `t5-rank-deduped`.
+criterion): `t3-dose-neox`, `t4-dose-qwen`, `t5-rank-deduped`.
+
+`t2-olmo-sft` keeps its `t`-prefixed name but is **core**, at a6's priority: with the
+attention-free rung deferred, `amd-olmo-1b`'s base → SFT → SFT-DPO ladder is the only
+post-training contrast F3 has outside the Pythia lineage, so it is not optional.
 
 **Mamba is deferred, not dropped by design.** `state-spaces/mamba-370m-hf` is in the
 roster and passes every eligibility check, but without the `mamba-ssm` /

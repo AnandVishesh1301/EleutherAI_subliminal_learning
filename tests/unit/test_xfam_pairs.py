@@ -66,7 +66,7 @@ def test_campaign_totals_are_120_leaves_and_168_controls() -> None:
     assert len(leaves) == 120
     assert len(controls) == 168
     assert len(leaves) + len(controls) == 288
-    assert pairs.core_cell_count(picks) == 255
+    assert pairs.core_cell_count(picks) == 264
     assert sum(n for n, _ in UNIT_COUNTS.values()) == len(leaves)
     # Controls dedup across arms: the raw per-unit enumeration overcounts.
     assert sum(n for _, n in UNIT_COUNTS.values()) > len(controls)
