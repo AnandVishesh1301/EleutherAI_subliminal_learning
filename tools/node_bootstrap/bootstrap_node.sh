@@ -153,7 +153,7 @@ FULL_SHA="$(git -C "$CLONE" rev-parse --verify "$SHA^{commit}")"
 git -C "$CLONE" branch -r --contains "$FULL_SHA" | grep -q . || { echo "refusing: $FULL_SHA is not on any origin branch" >&2; exit 1; }
 
 if [ "$(git -C "$CLONE" rev-parse HEAD)" != "$FULL_SHA" ]; then
-  [ -z "$(git -C "$CLONE" status --porcelain)" ] || { echo "refusing: $CLONE has local changes" >&2; exit 1; }
+  [ -z "$(git -C "$CLONE" status --porcelain --untracked-files=no)" ] || { echo "refusing: $CLONE has local changes" >&2; exit 1; }
   for p in /proc/[0-9]*; do
     [ "$(stat -c %u "$p" 2>/dev/null)" = "$(id -u)" ] || continue
     [ "$p" = "/proc/$$" ] && continue
