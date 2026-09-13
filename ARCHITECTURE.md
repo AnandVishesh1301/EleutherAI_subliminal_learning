@@ -313,6 +313,13 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   (refuses while a pool is live; the pool caches its root path).
 - Verbs: `submit` (with `--jobs-file` + `--template`), `work`, `status`, `requeue`,
   `release`, `stop`, `wait`.
+- **Multi-node fleet (2026-09-13)**: four A40 nodes share one NFS `queue_root`
+  (NFSv3, `local_lock=none`, so flocks under it are visible on every node).
+  - **Per-node lock prefix.** Launchers pass `--lock-prefix ${SL_JOBQ_LOCK_PREFIX:-$ROOT/locks/jobq}`. Nodes other than soar export a node-local `/tmp/subliminal_jobq_<user>` in `~/.zshenv`. `work`/`status` resolve the prefix as flag, then env, then default.
+  - **Guard.** `<queue_root>/locks/SHARED_LOCK_OWNER` names the one host allowed to keep slot locks inside the queue root. Any other host raises `SharedLockNamespaceError` before opening a lock file. With no marker the legacy prefix is still allowed, with a warning.
+  - **Missing policy fails fast.** `jobq work` raises when `gpu_policy.<host>.json` is missing, before any claim. Previously each thread claimed a job and then died, leaking a stuck RUNNING claim.
+  - **One home node per run-set.** Every queue is pinned to one node (`meta.node`), and names are unique fleet-wide. `.code_pins/` and `.venv` stay node-local; jobs never move between nodes.
+  - Node table and procedures: `docs/CLUSTER_NODES.md`.
 
 ```bash
 uv run python -m scripts.jobq submit distill --jobs-file jobs.txt --node "$(hostname)" \

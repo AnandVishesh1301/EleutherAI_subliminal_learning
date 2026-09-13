@@ -70,7 +70,7 @@ print('pool_scope', state['pool_scope'])
 
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
-  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $ROOT/locks/jobq; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix ${SL_JOBQ_LOCK_PREFIX:-$ROOT/locks/jobq}; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
 
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 # Driver watch is a single-point-of-failure in the sibling launcher; wrap it

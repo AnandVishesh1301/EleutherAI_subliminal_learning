@@ -20,7 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from subliminal_learning.jobqueue import store, worker
-from subliminal_learning.jobqueue.gpu import GpuManager, GpuSlot
+from subliminal_learning.jobqueue.gpu import GpuManager, GpuSlot, SharedLockNamespaceError
 from subliminal_learning.jobqueue.model import (
     Job,
     MAX_JOBKEY_LEN,
@@ -621,6 +621,73 @@ def test_weighted_job_reservation_is_not_counted_per_slot(tmp_path):
 def test_gpu_policy_missing_errors(tmp_path):
     with pytest.raises(FileNotFoundError):
         GpuManager(tmp_path, "nosuchhost").acquire(10)
+
+
+def _write_lock_owner(root: Path, owner: str) -> None:
+    marker = root / "locks" / "SHARED_LOCK_OWNER"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{owner}\n")
+
+
+@pytest.mark.parametrize(
+    ("owner", "prefix_in_root", "raises"),
+    [
+        ("self", True, False),
+        ("other-node", True, True),
+        (None, True, False),
+        ("other-node", False, False),
+    ],
+    ids=["owner-match", "owner-mismatch", "no-marker-legacy", "prefix-outside-root"],
+)
+def test_lock_namespace_guard_only_blocks_another_nodes_shared_prefix(
+    tmp_path, owner, prefix_in_root, raises
+):
+    host = store.this_host()
+    root = tmp_path / "queue"
+    _write_policy(root, host, gpus=[0], cap_per_gpu=1, free_mem_mib=10)
+    if owner is not None:
+        _write_lock_owner(root, host if owner == "self" else owner)
+    lock_dir = root / "locks" if prefix_in_root else tmp_path / "node_local"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    prefix = str(lock_dir / "jobq")
+    if raises:
+        with pytest.raises(SharedLockNamespaceError, match="'other-node'"):
+            GpuManager(root, host, lock_prefix=prefix, mem_query=lambda: {0: 100})
+        assert not list(lock_dir.glob("jobq_*.lock"))
+        return
+    gm = GpuManager(
+        root, host, lock_prefix=prefix, mem_query=lambda: {0: 100}, mem_interval_s=0.0
+    )
+    slot = gm.acquire(10)
+    assert slot is not None and slot.gpu == 0
+    slot.release()
+
+
+def test_lock_prefix_env_used_when_no_explicit_prefix(tmp_path, monkeypatch):
+    monkeypatch.setenv("SL_JOBQ_LOCK_PREFIX", str(tmp_path / "envlocks"))
+    assert GpuManager(tmp_path / "q", "h").lock_prefix == str(tmp_path / "envlocks")
+    assert GpuManager(tmp_path / "q", "h", lock_prefix="/x/y").lock_prefix == "/x/y"
+
+
+@pytest.mark.parametrize("fault", ["missing-policy", "foreign-lock-owner"])
+def test_run_pool_refuses_to_start_before_claiming_anything(tmp_path, fault):
+    host = "testnode"
+    root = tmp_path / "queue"
+    store.create_queue(root, "q")
+    job = Job("j1", "true")
+    store.append_jobs(root, "q", [job])
+    if fault == "missing-policy":
+        prefix, expected = str(tmp_path / "node_local" / "jobq"), FileNotFoundError
+    else:
+        _write_policy(root, host)
+        _write_lock_owner(root, "other-node")
+        prefix, expected = str(root / "locks" / "jobq"), SharedLockNamespaceError
+    with pytest.raises(expected):
+        run_pool(root, hostname=host, lock_prefix=prefix, poll_s=0.01, gpu_wait_s=0.01)
+    assert store.job_state(root, "q", job) == store.PENDING
+    assert not list((root / "q").glob("claims/*"))
+    assert not store.worker_pid_path(root, host).exists()
+    assert not list(Path(prefix).parent.glob("jobq_*.lock"))
 
 
 def test_acquire_spreads_least_loaded_first(tmp_path):

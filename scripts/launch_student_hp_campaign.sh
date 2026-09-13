@@ -61,7 +61,7 @@ fi
 # so newly submitted stage queues get picked up within 60 s.
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
-  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --lock-prefix $ROOT/locks/jobq; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --lock-prefix ${SL_JOBQ_LOCK_PREFIX:-$ROOT/locks/jobq}; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
 
 # Window 2: campaign driver (submits stages as their gates pass; dies loudly on
 # any gate failure -- reattach, fix, and rerun `advance`).

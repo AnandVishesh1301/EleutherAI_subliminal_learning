@@ -43,7 +43,7 @@ from pathlib import Path
 from loguru import logger
 
 from subliminal_learning.jobqueue import store, yielding
-from subliminal_learning.jobqueue.gpu import DEFAULT_LOCK_PREFIX, GpuManager, load_policy
+from subliminal_learning.jobqueue.gpu import GpuManager, load_policy
 from subliminal_learning.jobqueue.store import (
     QueueMeta,
     REPO_ROOT,
@@ -584,9 +584,15 @@ def run_pool(
 
     Args:
         lock_prefix: Optional override for GPU slot flock paths (default
-            ``/tmp/subliminal_jobq_<user>``).
+            ``SL_JOBQ_LOCK_PREFIX``, else ``/tmp/subliminal_jobq_<user>``).
         fail_streak_limit: Consecutive failures that trip a queue; the pool then
             skips it until a requeue grows its pending count.
+
+    Raises:
+        FileNotFoundError: No ``gpu_policy.<hostname>.json`` under `root` (checked before
+            any claim when the pool builds its own :class:`GpuManager`).
+        SharedLockNamespaceError: `lock_prefix` is inside another node's shared lock
+            namespace (see :func:`~subliminal_learning.jobqueue.gpu.check_lock_namespace`).
     """
     # World-writable outputs, unconditionally. The stash under
     # /mnt/ssd-2/soar-subliminal/angela is shared by BOTH nodes, where angela has
@@ -599,13 +605,11 @@ def run_pool(
     os.umask(0)
     root = Path(root)
     hostname = hostname or store.this_host()
+    if gpu is None:
+        load_policy(root, hostname)
+        gpu = GpuManager(root, hostname, lock_prefix=lock_prefix)
     _acquire_pid_file(root, hostname)
     master = MasterLog(root / "logs" / f"{utc_stamp()}_worker.{hostname}.log")
-    gpu = gpu or GpuManager(
-        root,
-        hostname,
-        lock_prefix=lock_prefix or DEFAULT_LOCK_PREFIX,
-    )
     pool = _Pool(
         root,
         hostname,

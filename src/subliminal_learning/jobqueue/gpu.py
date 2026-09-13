@@ -43,6 +43,56 @@ from subliminal_learning.jobqueue import yielding
 # creates them, so a shared prefix makes one account's locks unopenable by the other.
 DEFAULT_LOCK_PREFIX = f"/tmp/subliminal_jobq_{getpass.getuser()}"
 DEFAULT_RESERVATION_WARMUP_S = 300
+LOCK_PREFIX_ENV = "SL_JOBQ_LOCK_PREFIX"
+SHARED_LOCK_OWNER_REL = Path("locks") / "SHARED_LOCK_OWNER"
+
+
+class SharedLockNamespaceError(RuntimeError):
+    """A pool pointed its GPU slot locks at a shared queue root owned by another node."""
+
+
+def resolve_lock_prefix(lock_prefix: str | None) -> str:
+    """Effective slot-lock prefix: explicit value, else ``SL_JOBQ_LOCK_PREFIX``, else default."""
+    return lock_prefix or os.environ.get(LOCK_PREFIX_ENV) or DEFAULT_LOCK_PREFIX
+
+
+def check_lock_namespace(root: Path, lock_prefix: str, hostname: str) -> None:
+    """Refuse slot locks inside the shared queue root unless this node owns that namespace.
+
+    The queue root sits on NFS with ``local_lock=none``, so flocks under it are visible on
+    every node: a second node there would block the owner's GPU indices and subtract its
+    reservations. ``<root>/locks/SHARED_LOCK_OWNER`` names the single owning hostname; with
+    no marker the legacy shared prefix is still allowed (with a warning).
+
+    Args:
+        root: Queue state root.
+        lock_prefix: Resolved slot-lock prefix (see :func:`resolve_lock_prefix`).
+        hostname: This node's hostname.
+
+    Raises:
+        SharedLockNamespaceError: The prefix is under `root` and the marker names another host.
+    """
+    root_dir = Path(root).resolve()
+    if not Path(lock_prefix).parent.resolve().is_relative_to(root_dir):
+        return
+    marker = root_dir / SHARED_LOCK_OWNER_REL
+    if not marker.exists():
+        logger.warning(
+            "GPU slot locks {} are inside the shared queue root {} and {} is absent — "
+            "flocks there are visible to every node sharing the mount",
+            lock_prefix,
+            root_dir,
+            marker,
+        )
+        return
+    owner = marker.read_text().strip()
+    if owner != hostname:
+        raise SharedLockNamespaceError(
+            f"lock prefix {lock_prefix} is inside the shared queue root {root_dir}, whose "
+            f"slot-lock namespace belongs to {owner!r} ({marker}); this host is "
+            f"{hostname!r}. Use a node-local prefix: "
+            f"export {LOCK_PREFIX_ENV}=/tmp/subliminal_jobq_$USER"
+        )
 
 
 @dataclass
@@ -195,9 +245,8 @@ class GpuManager:
         # sets overlap — so a pool bound to a disjoint GPU set can safely run in its own lock
         # namespace; co-existence with the foreign user's jobs on those GPUs is handled by the
         # free-mem gate + yield watchdog, not by locks.
-        self.lock_prefix = (
-            lock_prefix or os.environ.get("SL_JOBQ_LOCK_PREFIX") or DEFAULT_LOCK_PREFIX
-        )
+        self.lock_prefix = resolve_lock_prefix(lock_prefix)
+        check_lock_namespace(self.root, self.lock_prefix, hostname)
         self.mem_query = mem_query
         self.mem_checks = mem_checks
         self.mem_interval_s = mem_interval_s

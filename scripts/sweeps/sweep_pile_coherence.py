@@ -54,7 +54,7 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 # Absolute repo cwd every job must cd into first: jobs on shared queue roots have been
 # lost to cwd leaks (drained against another node's paths root), so never rely on the
 # worker's inherited cwd.
-REPO_CWD = "/home/angela/EleutherAI_subliminal_learning"
+REPO_CWD = Path(__file__).resolve().parents[2]
 
 _BASE_PREFIX = "pythia-160m"
 

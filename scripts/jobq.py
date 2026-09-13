@@ -23,7 +23,12 @@ from loguru import logger
 
 from subliminal_learning.config import resolve_queue_root
 from subliminal_learning.jobqueue import store, yielding
-from subliminal_learning.jobqueue.gpu import DEFAULT_LOCK_PREFIX, GpuManager
+from subliminal_learning.jobqueue.gpu import (
+    DEFAULT_LOCK_PREFIX,
+    LOCK_PREFIX_ENV,
+    GpuManager,
+    resolve_lock_prefix,
+)
 from subliminal_learning.jobqueue.model import parse_jobs_file
 from subliminal_learning.jobqueue.worker import DEFAULT_FAIL_STREAK_LIMIT, run_pool
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -33,8 +38,9 @@ app = typer.Typer(add_completion=False, help=__doc__)
 PATHS_CONFIG = Path("configs/paths/paths_local.yaml")
 ROOT_HELP = "Queue state root (default: queue_root from the paths YAML)."
 LOCK_PREFIX_HELP = (
-    f"Prefix for GPU slot flock files (default {DEFAULT_LOCK_PREFIX}). Point it at "
-    "the pool's prefix when the pool was started with a non-default one."
+    f"Prefix for GPU slot flock files (default ${LOCK_PREFIX_ENV}, else "
+    f"{DEFAULT_LOCK_PREFIX}). Point it at the pool's prefix when the pool was started "
+    "with a non-default one."
 )
 
 
@@ -177,7 +183,7 @@ def work(
         workers,
         root,
         q or "(all)",
-        lock_prefix or DEFAULT_LOCK_PREFIX,
+        resolve_lock_prefix(lock_prefix),
     )
     run_pool(
         root,
@@ -216,7 +222,7 @@ def _report_root(
                     f"crashed, run: jobq release {name} '{r['key']}' --force]"
                 )
             logger.info(line)
-    prefix = lock_prefix or DEFAULT_LOCK_PREFIX
+    prefix = resolve_lock_prefix(lock_prefix)
     try:
         occ = GpuManager(root, store.this_host(), lock_prefix=prefix).occupancy()
         if occ:

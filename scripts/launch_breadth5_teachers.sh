@@ -227,7 +227,7 @@ start_workers() {
   mkdir -p "$ROOT/logs"
   tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
   tmux send-keys -t "$SESSION:workers" \
-    "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $ROOT/locks/jobq 2>&1 | tee -a $WLOG; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+    "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix ${SL_JOBQ_LOCK_PREFIX:-$ROOT/locks/jobq} 2>&1 | tee -a $WLOG; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
   tmux new-window -t "$SESSION" -n status -c "$REPO"
   tmux send-keys -t "$SESSION:status" \
     "while true; do clear; date -u +'%Y-%m-%dT%H:%M:%SZ'; uv run python -m scripts.jobq status --root $ROOT; echo; nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader; sleep 30; done" C-m

@@ -71,7 +71,7 @@ echo "student campaign pin SHA: $PIN_SHA"
 
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
-  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $ROOT/locks/jobq; echo 'pool exited (stop sentinel or crash); restarting in 60s (Ctrl-C to stop)'; sleep 60; done 2>&1 | tee -a $WLOG" C-m
+  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix ${SL_JOBQ_LOCK_PREFIX:-$ROOT/locks/jobq}; echo 'pool exited (stop sentinel or crash); restarting in 60s (Ctrl-C to stop)'; sleep 60; done 2>&1 | tee -a $WLOG" C-m
 
 # The driver deliberately has no restart loop: a CampaignGateError must stay dead so
 # the halt is investigated, not looped over. The rc line records how it ended.
