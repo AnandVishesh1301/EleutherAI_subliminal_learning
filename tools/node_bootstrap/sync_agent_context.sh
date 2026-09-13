@@ -17,11 +17,12 @@ SSH=(ssh -o BatchMode=yes "$ALIAS")
 [ "$(hostname)" = "soar-subliminal-0" ] || { echo "refusing: run on soar-subliminal-0 (agent-context SSOT)" >&2; exit 1; }
 REMOTE_HOST="$("${SSH[@]}" hostname)"
 case "$REMOTE_HOST" in
-  goncalo-temp-1|soar-subliminal-0) echo "refusing: $ALIAS is $REMOTE_HOST" >&2; exit 1 ;;
+  goncalo-temp-1|soar-subliminal-0) echo "refusing: $ALIAS resolves to $REMOTE_HOST (shared node or the SSOT itself)" >&2; exit 1 ;;
 esac
 "${SSH[@]}" "test -d ~/$DEST/.git" || { echo "run bootstrap_node.sh on $ALIAS first" >&2; exit 1; }
 [ -z "$("${SSH[@]}" "git -C ~/$DEST ls-files .claude | head -1")" ] \
   || { echo "refusing: .claude is tracked at the node's sha; copy would dirty the clone" >&2; exit 1; }
+"${SSH[@]}" "mkdir -p ~/$DEST/.claude"
 
 for d in skills rules agents; do
   rsync -a --delete "$SRC/.claude/$d/" "$ALIAS:$DEST/.claude/$d/"
