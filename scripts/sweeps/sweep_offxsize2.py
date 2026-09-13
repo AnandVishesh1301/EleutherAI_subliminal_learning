@@ -156,9 +156,10 @@ def phase_prompt_sets(phase: str) -> tuple[tuple[str, str, int], ...]:
     """Prompt sets one student phase is read on.
 
     The factorial reads `test`/prob only; `storytelling` samples 100 completions x 128
-    tokens and is a confirm-phase robustness endpoint, not a per-cell cost.
+    tokens and is a robustness endpoint of the confirm and replication phases, not a
+    per-cell cost.
     """
-    if phase == pairs.PHASE_CONFIRM:
+    if phase in (pairs.PHASE_CONFIRM, pairs.PHASE_REPLICATE):
         return plan.CONFIRM_PROMPT_SETS
     return plan.FACTORIAL_PROMPT_SETS
 
@@ -1018,6 +1019,13 @@ def run_cell(
     expect_sha: str = typer.Option(
         "", help="`filtered_sha256` the frozen numbers gate recorded for this pool."
     ),
+    eval_animals: str = typer.Option(
+        "",
+        help=(
+            "Comma list of animals a TREATMENT is preference-scored for (default: its "
+            "own lineage). Another animal's read is namespaced under `eval/{animal}`."
+        ),
+    ),
     no_wandb: bool = typer.Option(False, "--no-wandb", help="Force W&B off."),
     device: str = typer.Option("cuda:0", help="Torch device."),
     force: bool = typer.Option(
@@ -1034,7 +1042,9 @@ def run_cell(
     (size, animal) by `base-prior-cell`, so no student cell re-scores them (and none of
     them race on the shared cache file). A trait-free control is trained ONCE here and
     scored once per animal into `eval/{animal}/`, which is the only reason the second
-    animal costs no training at all.
+    animal costs no training at all. A treatment scored for the other animal
+    (`--eval-animals`, the R-phase specificity control) lands under `eval/{animal}/` the
+    same way; its own read stays at the leaf root.
     """
     from dotenv import load_dotenv
     from loguru import logger
@@ -1062,6 +1072,14 @@ def run_cell(
         raise typer.BadParameter(
             f"a treatment checkpoint is trained on ONE trait's numbers; got {animals!r}"
         )
+    scored = traits
+    if eval_animals:
+        if kind != pairs.TREATMENT:
+            raise typer.BadParameter(
+                "--eval-animals applies to a treatment; a control names every animal "
+                "it is read for in --animals"
+            )
+        scored = tuple(dict.fromkeys((*traits, *check_animals(eval_animals))))
     recipe = recipe_by_key(recipe_key)
     leaf = pairs.Leaf(
         phase=phase,
@@ -1144,7 +1162,7 @@ def run_cell(
         paths.output_root, leaf, {leaf.pool_key: number_dataset_tag}
     )
     active = _prompt_sets(phase_prompt_sets(phase))
-    for animal in traits:
+    for animal in scored:
         evaluated, subdir = resolve_eval_animal(leaf.animal, animal, leaf.source)
         preference_run(
             EvaluateTeacherPreferenceConfig(

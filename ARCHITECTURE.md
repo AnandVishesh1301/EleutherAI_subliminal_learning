@@ -653,6 +653,31 @@ Subliminal effect = `p(target)`_treatment − `p(target)`_control, computed offl
   target (cross-animal specificity). Per-prompt probs are persisted so paired Δ CIs are
   reconstructable offline.
 
+### Off-policy cross-size campaign v2 (`offpolicy_xsize2/`, run set `20260913_offxsize2-doglion_mixed`)
+
+Pre-registration: `docs/PREREG_OFFXSIZE2.md`. Plan module
+`campaign/offxsize2_plan.py`; cell enumeration `offxsize2_pairs.py`; on-disk
+completeness `offxsize2_expected.py`; jobq expansion `offxsize2_jobs.py`; gates
+`offxsize2_selection.py`; frames + claims `offxsize2_metrics.py`. Driver
+`pipelines/offxsize2_campaign_pipeline.py` (`scripts.run_offxsize2_campaign
+advance|watch|status|results`), results `pipelines/offxsize2_results_pipeline.py`,
+cells `scripts/sweeps/sweep_offxsize2.py`, launcher
+`scripts/launch_offxsize2_campaign.sh` (goncalo-temp-1 only).
+
+Phases: P0 (teachers, format probes, pools as jobq cells, base priors, the
+concordance stop gate) → P1 (dog factorial: 13 recipes × 4 teacher rungs × 9 ordered
+size pairs, recipe-matched base controls) → P2 (top picks at 3 student seeds, both
+animals) → elastic tail → **R** (replication, 2026-09-13): the candidate pair
+dog/lion 70m → 160m at 2 rungs × 5 recipes × teacher seeds 0/1/2 × student seeds 1–3,
+one pre-registered point per remaining pair (`r_picks.json`), same-size anchors for the
+new teacher seeds, and every treatment scored for **both** animals
+(`run-cell --eval-animals`) so the other animal's teacher is the format-matched
+specificity control. R teacher seeds are admitted per seed
+(`r_teacher_gate_report.json`) and their pools frozen into `numbers_gate_report_r.json`
+beside the committed report. `results/` adds `offxsize2_specificity.csv`,
+`offxsize2_replication.csv` and `claims.json["replication"]` (seven criteria, Holm
+across points; prereg §13). H1 requires ≥ 2 leaves per cell (`H1_MIN_CELL_N`).
+
 ### Cross-checkpoint distillation sweep (`scripts/sweeps/sweep_ckpt_distill.py` + `configs/experiment/ckpt_distill_sweep.yaml`)
 
 Runs the full chain (teacher LoRA-FT → numbers → student distill → preference eval) across

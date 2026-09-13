@@ -158,6 +158,7 @@ def teacher_jobs(
     sizes: Sequence[str] = plan.SIZES,
     rungs: Sequence[plan.TeacherRung] = plan.TEACHER_RUNGS,
     ftseed: int = plan.HEADLINE_TFS,
+    queue_tag: str = "p0",
 ) -> list[Job]:
     """One template teacher per (size, rung) at the committed teacher seed.
 
@@ -166,13 +167,14 @@ def teacher_jobs(
         sizes: Sizes to train; narrow it where a teacher is adopted rather than trained.
         rungs: Ladder rungs; the full ladder is a FACTOR in v2, not a gated pick.
         ftseed: Teacher fine-tuning seed.
+        queue_tag: Job-key prefix; the R phase re-enumerates teachers under its own.
 
     Returns:
         One job per (size, rung).
     """
     return [
         _job(
-            f"p0|teacher|{animal}|{size}|{rung.key}|tfs{ftseed}",
+            f"{queue_tag}|teacher|{animal}|{size}|{rung.key}|tfs{ftseed}",
             f"{_BASE} teacher-cell --animal {animal} --size {size} "
             f"--rung-tag {rung.key} --ftseed {ftseed} --no-wandb",
             plan.TEACHER_FOOTPRINT[size],
@@ -187,6 +189,7 @@ def teacher_eval_jobs(
     animal: str = plan.PRIMARY_ANIMAL,
     sizes: Sequence[str] = plan.SIZES,
     rung_tags: Sequence[str] | None = None,
+    queue_tag: str = "p0",
 ) -> list[Job]:
     """One eval job per size, covering its rungs sequentially.
 
@@ -201,7 +204,7 @@ def teacher_eval_jobs(
     )
     return [
         _job(
-            f"p0|teval|{animal}|{size}",
+            f"{queue_tag}|teval|{animal}|{size}",
             f"{_BASE} teacher-eval-cell --animal {animal} --size {size} "
             f"--rungs {','.join(tags)}",
             plan.TEACHER_FOOTPRINT[size],
@@ -216,6 +219,7 @@ def probe_jobs(
     sizes: Sequence[str] = plan.SIZES,
     rungs: Sequence[plan.TeacherRung] = plan.TEACHER_RUNGS,
     ftseed: int = plan.HEADLINE_TFS,
+    queue_tag: str = "p0",
 ) -> list[Job]:
     """One `PROBE_PROMPTS`-prompt format-health probe per teacher leaf.
 
@@ -224,7 +228,7 @@ def probe_jobs(
     """
     return [
         _job(
-            f"p0|probe|teacher|{animal}|{size}|{rung.key}|tfs{ftseed}",
+            f"{queue_tag}|probe|teacher|{animal}|{size}|{rung.key}|tfs{ftseed}",
             f"{_BASE} probe-cell --source teacher --animal {animal} --size {size} "
             f"--rung-tag {rung.key} --ftseed {ftseed}",
             plan.NUMGEN_FOOTPRINT[size],
@@ -373,6 +377,7 @@ def student_jobs(
     tags: Mapping[str, str],
     shas: Mapping[str, str] | None = None,
     queue_tag: str | None = None,
+    eval_animals: Sequence[str] | None = None,
 ) -> list[Job]:
     """One training job per ADAPTER, carrying every animal that adapter is read for.
 
@@ -388,6 +393,10 @@ def student_jobs(
         queue_tag: Job-key prefix; defaults to each leaf's own phase. An elastic-tail
             tier passes its tier key, so a tier extending the factorial does not collide
             with the committed cell it would otherwise retrain.
+        eval_animals: Animals every TREATMENT is preference-scored for, its own lineage
+            included (`run-cell --eval-animals`); None scores the lineage animal only.
+            The R phase passes both animals so each treatment also serves as the
+            format-matched control of the other animal's cell.
 
     Returns:
         One job per training group, in first-seen order.
@@ -421,6 +430,8 @@ def student_jobs(
         if leaf.kind == pairs.TREATMENT:
             parts.append(f"--rung-tag {leaf.rung_tag}")
             parts.append(f"--ftseed {leaf.ftseed}")
+            if eval_animals:
+                parts.append(f"--eval-animals {','.join(eval_animals)}")
         sha = (shas or {}).get(leaf.pool_key)
         if sha:
             parts.append(f"--expect-sha {sha}")

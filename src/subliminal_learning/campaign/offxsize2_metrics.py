@@ -196,6 +196,67 @@ ANIMAL_COLUMNS: tuple[str, ...] = (
 
 PPL_COLUMNS: tuple[str, ...] = ("animal", *om.PPL_COLUMNS, "r_value", "p_value")
 
+# One row per (lineage animal, eval animal, treatment leaf): the treatment's checkpoint
+# scored for the OTHER animal (`offxsize2_expected.preference_path` namespaces it).
+CROSS_EVAL_COLUMNS: tuple[str, ...] = (
+    "animal",
+    "eval_animal",
+    "teacher",
+    "student",
+    "recipe_key",
+    "rung_tag",
+    "ftseed",
+    "gseed",
+    "p_target",
+)
+
+# Per cell: the treatment's own p(target) minus the same-cell student trained on the
+# OTHER animal's teacher at the same rung and seeds -- a format-matched control.
+SPECIFICITY_COLUMNS: tuple[str, ...] = (
+    *CELL_KEYS,
+    "arm",
+    "n",
+    "mean_p_own_teacher",
+    "mean_p_other_teacher",
+    "mean_specificity",
+    "ci_low",
+    "ci_high",
+    "p_boot",
+)
+
+REPLICATION_COLUMNS: tuple[str, ...] = (
+    *CELL_KEYS,
+    "arm",
+    "n",
+    "n_teacher_seeds",
+    "n_student_seeds",
+    "mean_delta_tb",
+    "ci_low",
+    "ci_high",
+    "p_boot",
+    "p_holm",
+    "mean_p_target",
+    "base_prior",
+    "treat_over_prior",
+    "treat_over_prior_ci_low",
+    "control_p_target",
+    "control_over_prior",
+    "n_specificity_directions",
+    "min_specificity_ci_low",
+    "min_teacher_seed_delta_tb",
+    "mean_ppl_ratio",
+    "c1_delta_ci",
+    "c2_above_prior",
+    "c3_control_intact",
+    "c4_specific",
+    "c5_every_teacher_seed",
+    "c6_capability",
+    "c7_effect_size",
+    "passes_1_3",
+    "passes_1_6",
+    "passes_all",
+)
+
 # Recipe geometry for H2's ``ln K`` / ``ln r`` fits. The committed grid plus the two
 # recipe sets that can legitimately reach the results frame: the elastic tail's wider
 # fan and the P0 concordance cell.
@@ -1051,7 +1112,21 @@ def _reading(row: pd.Series, reading: str) -> tuple[float, float, float]:
     return _value(row, "mean_delta_tb"), _value(row, "ci_low"), _value(row, "ci_high")
 
 
-def _clears(row: pd.Series, reading: str, min_delta: float) -> bool:
+def _clears(
+    row: pd.Series,
+    reading: str,
+    min_delta: float,
+    *,
+    min_n: int = plan.H1_MIN_CELL_N,
+) -> bool:
+    """Whether one cell clears H1's bar at `reading`.
+
+    A cell below `min_n` leaves never clears: its percentile interval is the point
+    ``[x, x]``, which "excludes 0" for any nonzero x and is not a confidence interval.
+    """
+    n = row.get("n")
+    if not _finite(n) or int(n) < min_n:
+        return False
     mean, low, high = _reading(row, reading)
     return _ci_excludes_zero(low, high) and _finite(mean) and mean >= min_delta
 
@@ -1490,3 +1565,361 @@ def claims(
     if tuple(payload) != plan.CLAIM_IDS:
         raise ValueError(f"claims would carry {tuple(payload)}, not {plan.CLAIM_IDS}")
     return payload
+
+
+# ---- replication phase: specificity and the pre-registered verdict -----------
+
+
+def holm(p_values: Sequence[float]) -> list[float]:
+    """Holm step-down adjusted p-values, in the input order (NaN stays NaN)."""
+    finite = [(p, i) for i, p in enumerate(p_values) if _finite(p)]
+    out = [float("nan")] * len(p_values)
+    m = len(finite)
+    running = 0.0
+    for rank, (p, i) in enumerate(sorted(finite)):
+        running = max(running, (m - rank) * float(p))
+        out[i] = min(1.0, running)
+    return out
+
+
+def _leaf_bootstrap(
+    values: Sequence[float],
+    ftseed: Sequence[object],
+    gseed: Sequence[object],
+    *,
+    n_boot: int,
+    seed: int,
+) -> tuple[float, float, float, float]:
+    """``(mean, ci_low, ci_high, p_boot)`` of a leaf mean, two-way clustered."""
+    from subliminal_learning.analysis.stats import cluster_bootstrap
+
+    vals = [float(v) for v in values if _finite(v)]
+    if not vals:
+        return float("nan"), float("nan"), float("nan"), float("nan")
+    mean = float(np.mean(vals))
+    if len(vals) < 2 or n_boot <= 0:
+        return mean, mean, mean, float("nan")
+    keep = [i for i, v in enumerate(values) if _finite(v)]
+    arr = np.asarray(vals, dtype=float)
+    estimate = cluster_bootstrap(
+        lambda idx: float(arr[idx].mean()),
+        [str(ftseed[i]) for i in keep],
+        [str(gseed[i]) for i in keep],
+        n_boot=n_boot,
+        seed=seed,
+    )
+    return estimate.estimate, estimate.ci_low, estimate.ci_high, estimate.p_boot
+
+
+_LEAF_JOIN: tuple[str, ...] = (
+    "teacher",
+    "student",
+    "recipe_key",
+    "rung_tag",
+    "ftseed",
+    "gseed",
+)
+
+
+def specificity(
+    leaves: pd.DataFrame,
+    cross: pd.DataFrame,
+    *,
+    n_boot: int = plan.BOOTSTRAP_N,
+    seed: int = plan.BOOTSTRAP_SEED,
+) -> pd.DataFrame:
+    """Per cell: own-teacher p(target) minus the other animal's teacher at the same cell.
+
+    The untuned-base control differs from a teacher pool in FORMAT (one to three
+    numbers per completion against ten), so ``Delta_tb`` mixes the trait with a
+    register shift. The other animal's teacher at the same rung and seeds emits the
+    same register without this trait; its student scored for THIS animal is the
+    format-matched control. Positive specificity in both directions is what
+    separates trait transfer from a shared number-style effect.
+
+    Args:
+        leaves: Live treatment leaves (`LEAF_COLUMNS`), scored for their own animal.
+        cross: `CROSS_EVAL_COLUMNS` rows -- treatments scored for the other animal.
+
+    Returns:
+        One row per cell, `SPECIFICITY_COLUMNS`; empty when no cell has both reads.
+    """
+    rows = _treatments(leaves) if not leaves.empty else leaves
+    if rows.empty or cross.empty:
+        return _empty(SPECIFICITY_COLUMNS)
+    other = cross.copy()
+    for column in ("animal", "eval_animal", *_LEAF_JOIN):
+        other[column] = other[column].astype(str)
+    other = other[other["animal"] != other["eval_animal"]]
+    other = other.rename(columns={"animal": "other_animal", "eval_animal": "animal"})
+    own = rows.copy()
+    for column in ("animal", *_LEAF_JOIN):
+        own[column] = own[column].astype(str)
+    merged = own.merge(
+        other[["animal", *_LEAF_JOIN, "p_target"]].rename(
+            columns={"p_target": "p_other"}
+        ),
+        on=["animal", *_LEAF_JOIN],
+        how="inner",
+        validate="1:1",
+    )
+    if merged.empty:
+        return _empty(SPECIFICITY_COLUMNS)
+    merged["specificity"] = _numeric(merged, "p_target") - _numeric(merged, "p_other")
+    out: list[dict] = []
+    for key, group in merged.groupby(list(CELL_KEYS), dropna=False, sort=True):
+        mean, low, high, p_boot = _leaf_bootstrap(
+            group["specificity"].tolist(),
+            group["ftseed"].tolist(),
+            group["gseed"].tolist(),
+            n_boot=n_boot,
+            seed=seed,
+        )
+        out.append(
+            {
+                **dict(zip(CELL_KEYS, key, strict=True)),
+                "arm": "anchor" if key[1] == key[2] else "cross",
+                "n": int(len(group)),
+                "mean_p_own_teacher": _mean_of(group, "p_target"),
+                "mean_p_other_teacher": _mean_of(group, "p_other"),
+                "mean_specificity": mean,
+                "ci_low": low,
+                "ci_high": high,
+                "p_boot": p_boot,
+            }
+        )
+    return pd.DataFrame(out, columns=list(SPECIFICITY_COLUMNS))
+
+
+def replication(
+    deltas: pd.DataFrame,
+    *,
+    points: Sequence[tuple[str, str, str, str, str]],
+    priors: Mapping[tuple[str, str], float],
+    specificity_frame: pd.DataFrame | None,
+    n_boot: int = plan.BOOTSTRAP_N,
+    seed: int = plan.BOOTSTRAP_SEED,
+    min_delta: float = plan.R_MIN_DELTA,
+    ppl_max: float = plan.R_PPL_MAX,
+    control_min_fraction: float = plan.R_CONTROL_MIN_FRACTION,
+    min_teacher_seeds: int = plan.R_MIN_TEACHER_SEEDS,
+    alpha: float = plan.R_ALPHA,
+) -> pd.DataFrame:
+    """The seven pre-registered criteria per replication point (§13).
+
+    A point is one (animal, teacher, student, rung, recipe) pooled over its teacher and
+    student seeds; every criterion must hold on that pool:
+
+    1. ``Delta_tb`` two-way cluster-bootstrap CI excludes 0 AND its bootstrap p, Holm-
+       corrected across all points, is below `alpha`;
+    2. the treatment sits above the untuned base: lower CI bound of ``p_target`` over
+       the prior exceeds 1;
+    3. the matched control is intact (at or above `control_min_fraction` x prior);
+    4. specificity (`specificity`) is positive in every direction that was measured,
+       and at least one was;
+    5. ``Delta_tb`` is positive at every teacher seed, with at least
+       `min_teacher_seeds` of them;
+    6. mean Pile ``ppl_ratio`` is measured and at most `ppl_max`;
+    7. mean ``Delta_tb`` is at least `min_delta`.
+
+    Args:
+        deltas: `leaf_deltas` output.
+        points: ``(animal, teacher, student, rung_tag, recipe_key)`` per point.
+        priors: ``(animal, student size)`` -> untuned base ``p_target``.
+        specificity_frame: `specificity` output, or None when no cross eval exists.
+
+    Returns:
+        One row per point, `REPLICATION_COLUMNS`, in `points` order.
+    """
+    if not points:
+        return _empty(REPLICATION_COLUMNS)
+    live = _treatments(deltas) if not deltas.empty else deltas
+    keyed = _key_frame(live) if not live.empty else live
+    spec = (
+        specificity_frame.copy()
+        if specificity_frame is not None and not specificity_frame.empty
+        else _empty(SPECIFICITY_COLUMNS)
+    )
+    for column in CELL_KEYS:
+        if column in spec.columns:
+            spec[column] = spec[column].astype(str)
+    records: list[dict] = []
+    for animal, teacher, student, rung_tag, recipe_key in points:
+        group = (
+            keyed[
+                (keyed["animal"] == animal)
+                & (keyed["teacher"] == teacher)
+                & (keyed["student"] == student)
+                & (keyed["rung_tag"] == rung_tag)
+                & (keyed["recipe_key"] == recipe_key)
+            ]
+            if not keyed.empty
+            else keyed
+        )
+        prior = priors.get((animal, student))
+        mean, low, high, p_boot = _leaf_bootstrap(
+            group["delta_tb"].tolist() if not group.empty else [],
+            group["ftseed"].tolist() if not group.empty else [],
+            group["gseed"].tolist() if not group.empty else [],
+            n_boot=n_boot,
+            seed=seed,
+        )
+        p_mean, p_low, _p_high, _ = _leaf_bootstrap(
+            group["p_target"].tolist() if not group.empty else [],
+            group["ftseed"].tolist() if not group.empty else [],
+            group["gseed"].tolist() if not group.empty else [],
+            n_boot=n_boot,
+            seed=seed,
+        )
+        control = (
+            _mean_of(group, "primary_control_mean") if not group.empty else float("nan")
+        )
+        per_seed = (
+            _numeric(group, "delta_tb").groupby(group["ftseed"]).mean()
+            if not group.empty
+            else pd.Series(dtype=float)
+        )
+        directions = spec[
+            (spec["teacher"] == teacher)
+            & (spec["student"] == student)
+            & (spec["rung_tag"] == rung_tag)
+            & (spec["recipe_key"] == recipe_key)
+        ]
+        spec_lows = _numeric(directions, "ci_low").dropna().tolist()
+        ppl = _mean_of(group, "perplexity_ratio") if not group.empty else float("nan")
+        records.append(
+            {
+                "animal": animal,
+                "teacher": teacher,
+                "student": student,
+                "recipe_key": recipe_key,
+                "rung_tag": rung_tag,
+                "arm": "anchor" if teacher == student else "cross",
+                "n": int(len(group)),
+                "n_teacher_seeds": int(per_seed.size),
+                "n_student_seeds": int(group["gseed"].nunique())
+                if not group.empty
+                else 0,
+                "mean_delta_tb": mean,
+                "ci_low": low,
+                "ci_high": high,
+                "p_boot": p_boot,
+                "mean_p_target": p_mean,
+                "base_prior": float(prior) if prior is not None else float("nan"),
+                "treat_over_prior": _ratio(
+                    p_mean, prior if prior is not None else float("nan")
+                ),
+                "treat_over_prior_ci_low": _ratio(
+                    p_low, prior if prior is not None else float("nan")
+                ),
+                "control_p_target": control,
+                "control_over_prior": _ratio(
+                    control, prior if prior is not None else float("nan")
+                ),
+                "n_specificity_directions": len(spec_lows),
+                "min_specificity_ci_low": min(spec_lows) if spec_lows else float("nan"),
+                "min_teacher_seed_delta_tb": (
+                    float(per_seed.min()) if per_seed.size else float("nan")
+                ),
+                "mean_ppl_ratio": ppl,
+            }
+        )
+    adjusted = holm([r["p_boot"] for r in records])
+    for record, p_holm in zip(records, adjusted, strict=True):
+        record["p_holm"] = p_holm
+        c1 = (
+            _ci_excludes_zero(record["ci_low"], record["ci_high"])
+            and _finite(record["mean_delta_tb"])
+            and record["mean_delta_tb"] > 0
+            and _finite(p_holm)
+            and p_holm < alpha
+        )
+        c2 = (
+            _finite(record["treat_over_prior_ci_low"])
+            and record["treat_over_prior_ci_low"] > 1.0
+        )
+        c3 = (
+            _finite(record["control_over_prior"])
+            and record["control_over_prior"] >= control_min_fraction
+        )
+        c4 = record["n_specificity_directions"] >= 1 and (
+            _finite(record["min_specificity_ci_low"])
+            and record["min_specificity_ci_low"] > 0
+        )
+        c5 = (
+            record["n_teacher_seeds"] >= min_teacher_seeds
+            and _finite(record["min_teacher_seed_delta_tb"])
+            and record["min_teacher_seed_delta_tb"] > 0
+        )
+        c6 = _finite(record["mean_ppl_ratio"]) and record["mean_ppl_ratio"] <= ppl_max
+        c7 = _finite(record["mean_delta_tb"]) and record["mean_delta_tb"] >= min_delta
+        record.update(
+            {
+                "c1_delta_ci": c1,
+                "c2_above_prior": c2,
+                "c3_control_intact": c3,
+                "c4_specific": c4,
+                "c5_every_teacher_seed": c5,
+                "c6_capability": c6,
+                "c7_effect_size": c7,
+                "passes_1_3": c1 and c2 and c3,
+                "passes_1_6": c1 and c2 and c3 and c4 and c5 and c6,
+                "passes_all": c1 and c2 and c3 and c4 and c5 and c6 and c7,
+            }
+        )
+    return pd.DataFrame(records, columns=list(REPLICATION_COLUMNS))
+
+
+def replication_verdict(
+    frame: pd.DataFrame,
+    *,
+    candidate: tuple[str, str] = plan.R_PAIR,
+    primary: str = plan.PRIMARY_ANIMAL,
+    secondary: str = plan.SECONDARY_ANIMAL,
+) -> dict:
+    """The §13 interpretation matrix over `replication` rows.
+
+    ``positive``: some candidate-pair point passes all seven for the primary animal AND
+    the secondary animal passes 1-6 at the same (rung, recipe). ``mixed``: no point is
+    positive but some point passes 1-3 and fails 4 -- a register or format effect, not
+    trait transfer. ``negative``: neither. ``void``: no point was measured.
+    """
+    if frame.empty:
+        return {
+            "read": "void",
+            "n_points": 0,
+            "positive_points": [],
+            "mixed_points": [],
+        }
+    teacher, student = candidate
+    rows = frame.copy()
+    positives: list[str] = []
+    for _, row in rows[
+        (rows["animal"].astype(str) == primary)
+        & (rows["teacher"].astype(str) == teacher)
+        & (rows["student"].astype(str) == student)
+        & rows["passes_all"].astype(bool)
+    ].iterrows():
+        twin = rows[
+            (rows["animal"].astype(str) == secondary)
+            & (rows["teacher"].astype(str) == teacher)
+            & (rows["student"].astype(str) == student)
+            & (rows["rung_tag"].astype(str) == str(row["rung_tag"]))
+            & (rows["recipe_key"].astype(str) == str(row["recipe_key"]))
+        ]
+        if not twin.empty and bool(twin.iloc[0]["passes_1_6"]):
+            positives.append(f"{row['rung_tag']}|{row['recipe_key']}")
+    mixed = [
+        f"{r['animal']}|{r['teacher']}->{r['student']}|{r['rung_tag']}|{r['recipe_key']}"
+        for _, r in rows.iterrows()
+        if bool(r["passes_1_3"]) and not bool(r["c4_specific"])
+    ]
+    read = "positive" if positives else ("mixed" if mixed else "negative")
+    return {
+        "read": read,
+        "n_points": int(len(rows)),
+        "n_passing_all": int(rows["passes_all"].astype(bool).sum()),
+        "positive_points": positives,
+        "mixed_points": mixed,
+        "candidate": f"{primary}|{teacher}->{student}",
+    }

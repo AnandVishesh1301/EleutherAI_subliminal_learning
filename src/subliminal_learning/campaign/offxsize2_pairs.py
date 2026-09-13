@@ -30,6 +30,7 @@ from dataclasses import dataclass, replace
 from typing import TypeVar
 
 from subliminal_learning.campaign import offxsize2_plan as plan
+from subliminal_learning.campaign import offxsize2_selection as selection
 
 TREATMENT = "treatment"
 BASE_CONTROL = "base_control"
@@ -39,6 +40,7 @@ CONTROL_KINDS: tuple[str, ...] = (BASE_CONTROL, RNG_CONTROL)
 PHASE_CONCORDANCE = "p0"
 PHASE_FACTORIAL = "p1"
 PHASE_CONFIRM = "p2"
+PHASE_REPLICATE = plan.R_PHASE
 
 # The committed 410m column drops R2 (the dose midpoint), keeping the two ends of the
 # anchor ladder and the "focus" family: at 1.78 GPU-min per epoch-unit a fourth rung is
@@ -354,6 +356,189 @@ def p2_leaves(
                     gseed,
                 )
             )
+    return tuple(out)
+
+
+def r_grid_leaves(
+    animal: str,
+    *,
+    pair: tuple[str, str] = plan.R_PAIR,
+    rungs: Sequence[plan.TeacherRung] = plan.R_RUNGS,
+    recipes: Sequence[plan.StudentRecipe] = plan.R_RECIPES,
+    ftseeds: Sequence[int] = plan.R_TEACHER_FTSEEDS,
+    gseeds: Sequence[int] = plan.R_STUDENT_SEEDS,
+) -> tuple[Leaf, ...]:
+    """The candidate pair's replication grid: rungs x recipes x teacher x student seeds.
+
+    Treatments only; `r_control_leaves` derives the matched denominators. Cells the
+    committed phases already trained (tfs1) re-enumerate here on purpose -- the queue
+    tag keeps their jobkeys distinct and `run-cell` is idempotent, so they cost an eval
+    at most and the grid stays a pure function of the plan.
+    """
+    teacher, student = pair
+    return tuple(
+        Leaf(
+            PHASE_REPLICATE,
+            TREATMENT,
+            animal,
+            teacher,
+            student,
+            recipe,
+            rung.key,
+            ftseed,
+            gseed,
+        )
+        for rung in rungs
+        for recipe in recipes
+        for ftseed in ftseeds
+        for gseed in gseeds
+    )
+
+
+def r_point_leaves(
+    animal: str,
+    teacher: str,
+    student: str,
+    *,
+    rung_tag: str,
+    recipe: plan.StudentRecipe,
+    ftseeds: Sequence[int] = plan.R_TEACHER_FTSEEDS,
+    gseeds: Sequence[int] = plan.R_STUDENT_SEEDS,
+) -> tuple[Leaf, ...]:
+    """One pre-registered (rung, recipe) point at the full seed crossing."""
+    return tuple(
+        Leaf(
+            PHASE_REPLICATE,
+            TREATMENT,
+            animal,
+            teacher,
+            student,
+            recipe,
+            rung_tag,
+            ftseed,
+            gseed,
+        )
+        for ftseed in ftseeds
+        for gseed in gseeds
+    )
+
+
+def r_anchor_leaves(
+    animal: str,
+    *,
+    sizes: Sequence[str] = plan.R_ANCHOR_SIZES,
+    rungs: Sequence[plan.TeacherRung] = plan.R_RUNGS,
+    recipe: plan.StudentRecipe = plan.R_ANCHOR_RECIPE,
+    ftseeds: Sequence[int] = plan.R_TEACHER_FTSEEDS,
+    gseed: int = plan.HEADLINE_GSEED,
+) -> tuple[Leaf, ...]:
+    """Same-size positive controls for the replication teacher seeds.
+
+    A new teacher seed that cannot transfer to its OWN size says nothing about a cross
+    pair; this is the reading that separates a dead teacher from a dead pair.
+    """
+    return tuple(
+        Leaf(
+            PHASE_REPLICATE,
+            TREATMENT,
+            animal,
+            size,
+            size,
+            recipe,
+            rung.key,
+            ftseed,
+            gseed,
+        )
+        for size in sizes
+        for rung in rungs
+        for ftseed in ftseeds
+    )
+
+
+def r_control_leaves(
+    treatments: Sequence[Leaf], *, animals: Sequence[str] = plan.ANIMALS
+) -> tuple[Leaf, ...]:
+    """The matched base-numbers control of every treatment, read for every animal.
+
+    One control per (generator, student, recipe, gseed) -- the rung and the teacher
+    seed do not enter, because untuned-base numbers carry neither. Both animals' rows
+    are emitted so the shared checkpoint is scored for each; `dedupe_training`
+    collapses them to one training job.
+    """
+    out: dict[tuple, Leaf] = {}
+    for leaf in treatments:
+        for animal in animals:
+            control = Leaf(
+                PHASE_REPLICATE,
+                BASE_CONTROL,
+                animal,
+                leaf.teacher,
+                leaf.student,
+                leaf.recipe,
+                None,
+                None,
+                leaf.gseed,
+            )
+            out.setdefault((*control.train_key, animal), control)
+    return tuple(out.values())
+
+
+# Every recipe a campaign cell may name: the committed grid, the concordance gate's
+# own recipe and the elastic tail's fan.
+_RECIPES_BY_KEY: dict[str, plan.StudentRecipe] = {
+    recipe.key: recipe
+    for recipe in (*plan.STUDENT_GRID, *plan.T4_EXTRA_RECIPES, plan.CONCORDANCE_RECIPE)
+}
+
+
+def recipe_by_key(recipe_key: str) -> plan.StudentRecipe:
+    """The campaign recipe a `{student_tag}` names.
+
+    Raises:
+        ValueError: The tag is not one this campaign runs.
+    """
+    try:
+        return _RECIPES_BY_KEY[recipe_key]
+    except KeyError:
+        raise ValueError(f"{recipe_key!r} is not a campaign recipe") from None
+
+
+def r_treatment_leaves(
+    picks: Sequence[selection.RPointPick],
+) -> tuple[Leaf, ...]:
+    """Every R-phase treatment: the candidate grid, the per-pair points, the anchors."""
+    out: list[Leaf] = []
+    for animal in plan.ANIMALS:
+        out.extend(r_grid_leaves(animal))
+    for pick in picks:
+        out.extend(
+            r_point_leaves(
+                pick.animal,
+                pick.teacher,
+                pick.student,
+                rung_tag=pick.rung_tag,
+                recipe=recipe_by_key(pick.recipe_key),
+            )
+        )
+    for animal in plan.ANIMALS:
+        out.extend(r_anchor_leaves(animal))
+    return tuple(out)
+
+
+def r_point_tuples(
+    picks: Sequence[selection.RPointPick],
+) -> tuple[tuple[str, str, str, str, str], ...]:
+    """``(animal, teacher, student, rung_tag, recipe_key)`` per replication point."""
+    teacher, student = plan.R_PAIR
+    out: list[tuple[str, str, str, str, str]] = [
+        (animal, teacher, student, rung.key, recipe.key)
+        for animal in plan.ANIMALS
+        for rung in plan.R_RUNGS
+        for recipe in plan.R_RECIPES
+    ]
+    out.extend(
+        (p.animal, p.teacher, p.student, p.rung_tag, p.recipe_key) for p in picks
+    )
     return tuple(out)
 
 

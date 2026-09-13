@@ -60,6 +60,7 @@ def _run_cell(
     student_size: str,
     phase: str = pairs.PHASE_FACTORIAL,
     gseed: int = plan.HEADLINE_GSEED,
+    eval_animals: str = "",
 ) -> tuple[list, list]:
     """Drive one student cell with every pipeline call recorded instead of run.
 
@@ -93,6 +94,7 @@ def _run_cell(
         pool_dir=_pool(tmp_path),
         number_dataset_tag=TAG,
         expect_sha="",
+        eval_animals=eval_animals,
         no_wandb=False,
         device="cpu",
         force=False,
@@ -362,3 +364,45 @@ def test_a_changed_template_content_is_caught_even_at_the_same_path() -> None:
     )
     assert matches is False
     assert differing == ("template_sha256",)
+
+
+def test_a_treatment_read_for_the_other_animal_is_namespaced_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The R-phase specificity control: the same checkpoint, the other trait scored."""
+    distilled, scored = _run_cell(
+        tmp_path,
+        monkeypatch,
+        kind=pairs.TREATMENT,
+        animals=plan.PRIMARY_ANIMAL,
+        teacher_size="70m",
+        student_size="160m",
+        phase=pairs.PHASE_REPLICATE,
+        eval_animals=",".join(plan.ANIMALS),
+    )
+    (cfg,) = distilled
+    assert cfg.animal == plan.PRIMARY_ANIMAL, "trained on one trait's numbers"
+    assert [s.target_animal for s in scored] == list(plan.ANIMALS)
+    own, other = scored
+    assert own.artifact_subdir is None
+    assert str(other.artifact_subdir) == f"eval/{plan.SECONDARY_ANIMAL}"
+    assert {ps.name for ps in own.prompt_sets} == {
+        name for name, _s, _t in plan.CONFIRM_PROMPT_SETS
+    }, "the replication phase carries the robustness endpoint"
+
+
+def test_eval_animals_is_refused_on_a_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import typer
+
+    with pytest.raises(typer.BadParameter, match="applies to a treatment"):
+        _run_cell(
+            tmp_path,
+            monkeypatch,
+            kind=pairs.BASE_CONTROL,
+            animals=",".join(plan.ANIMALS),
+            teacher_size="70m",
+            student_size="160m",
+            eval_animals=plan.PRIMARY_ANIMAL,
+        )

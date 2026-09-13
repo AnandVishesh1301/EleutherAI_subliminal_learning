@@ -902,8 +902,14 @@ def test_build_results_on_a_partial_tree_fills_every_table(tmp_path: Path) -> No
     assert control["base_prior"].tolist() == pytest.approx([0.02] * len(control))
 
     payload = json.loads((dest / rp.CLAIMS_JSON).read_text())
-    assert payload["claims"]["H1"]["holds"] is True
+    # Every planted cross cell is single-seed: it is the coverage max, never a pass.
+    h1_pair = payload["claims"]["H1"]["detail"]["pairs"][f"{DOG}|70m->160m"]
+    assert payload["claims"]["H1"]["holds"] is False
+    assert h1_pair["max_point"]["n"] == 1 and h1_pair["best"] is None
     assert payload["claims"]["H6"]["void"] is False
+    assert payload["replication"]["read"] == "void"
+    for name in ("offxsize2_specificity.csv", "offxsize2_replication.csv"):
+        assert (dest / name).is_file()
 
 
 def test_two_animals_never_merge_into_one_aggregate_row(tmp_path: Path) -> None:
@@ -1155,3 +1161,182 @@ def test_pool_corpus_skips_a_gate_pool_that_was_never_generated(tmp_path: Path) 
         numbers.PoolSpec(numbers.KIND_TEACHER, "160m", RUNG, plan.HEADLINE_TFS, DOG),
     ).unlink()
     assert rp.assemble_pool_corpus(tmp_path) == {}
+
+
+# ---- the replication phase ----------------------------------------------------
+
+
+def test_finalize_reads_a_lion_pool_off_the_lion_tree_on_a_legacy_gate_report(
+    tmp_path: Path,
+) -> None:
+    """The 2026-09-13 finalize failure: the frozen report carried no animal."""
+    rows = {
+        DOG: [{"numbers": [1], "completion": " 1"}] * 3,
+        LION: [{"numbers": [2], "completion": " 2"}] * 5,
+    }
+    pools: dict = {}
+    for animal, content in rows.items():
+        spec = numbers.PoolSpec(
+            numbers.KIND_TEACHER, "160m", RUNG, plan.HEADLINE_TFS, animal
+        )
+        path = rp._pool_filtered_path(tmp_path, spec)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(r) for r in content))
+        pools[spec.key] = {
+            "kind": spec.kind,
+            "size": spec.size,
+            "rung_tag": spec.rung_tag,
+            "ftseed": spec.ftseed,
+            "ready": True,
+            "reasons": [],
+            "n_raw": len(content),
+            "n_filtered": len(content),
+            "keep_rate": 1.0,
+            "filtered_sha256": "abc",
+            "dataset_tag": TAG,
+        }
+    _write_json(
+        rp.logs_dir(tmp_path) / plan.NUMBERS_GATE_REPORT,
+        {"ready": True, "pools": pools},
+    )
+    corpus = rp.assemble_pool_corpus(tmp_path)
+    assert corpus[f"teacher/{LION}/160m/{RUNG}/ftseed1"].n_rows == 5
+    assert corpus[f"teacher/{DOG}/160m/{RUNG}/ftseed1"].n_rows == 3
+
+
+def test_gate_pools_merge_the_r_report_without_overriding_the_committed_one(
+    tmp_path: Path,
+) -> None:
+    committed = numbers.PoolSpec(numbers.KIND_TEACHER, "160m", RUNG, 1, DOG)
+    extra = numbers.PoolSpec(numbers.KIND_TEACHER, "160m", RUNG, 2, DOG)
+    _write_json(
+        rp.logs_dir(tmp_path) / plan.NUMBERS_GATE_REPORT,
+        numbers.gate_report(
+            [numbers.PoolStatus(committed, ready=True, reasons=(), dataset_tag=TAG)]
+        ),
+    )
+    _write_json(
+        rp.logs_dir(tmp_path) / plan.R_NUMBERS_GATE_REPORT,
+        numbers.gate_report(
+            [
+                numbers.PoolStatus(
+                    committed, ready=True, reasons=(), dataset_tag="other"
+                ),
+                numbers.PoolStatus(extra, ready=True, reasons=(), dataset_tag=TAG),
+            ]
+        ),
+    )
+    pools = rp._gate_pools(tmp_path)
+    assert set(pools) == {committed.key, extra.key}
+    assert pools[committed.key][1]["dataset_tag"] == TAG
+
+
+def test_a_treatment_scored_for_the_other_animal_is_a_cross_eval_not_a_leaf(
+    tmp_path: Path,
+) -> None:
+    param_dir = _plant_cell(
+        tmp_path,
+        kind=pairs.TREATMENT,
+        teacher="70m",
+        student="160m",
+        rung_tag=RUNG,
+        ftseed=plan.HEADLINE_TFS,
+        scores={1: 0.40, 2: 0.44},
+    )
+    other = {1: 0.03, 2: 0.05}
+    _write_json(
+        param_dir / "eval" / LION / rp.PREFERENCE_SUMMARY,
+        {"summaries": [_entry(plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING, other)]},
+    )
+    for gseed, p_target in other.items():
+        _write_json(
+            param_dir / f"ftseed{gseed}" / "eval" / LION / expected.PREFERENCE_EVAL,
+            {
+                "target_animal": LION,
+                "sets": {plan.PRIMARY_PROMPT_SET: {"p_target": p_target}},
+            },
+        )
+    leaves = rp.assemble_student_frame(tmp_path)
+    assert leaves["animal"].tolist() == [DOG, DOG]
+    cross = rp.assemble_cross_evals(tmp_path)
+    assert list(cross.columns) == list(om.CROSS_EVAL_COLUMNS)
+    assert cross["animal"].tolist() == [DOG, DOG]
+    assert cross["eval_animal"].tolist() == [LION, LION]
+    assert cross["p_target"].tolist() == pytest.approx([0.03, 0.05])
+
+
+def test_a_cross_eval_scoring_the_wrong_animal_raises(tmp_path: Path) -> None:
+    param_dir = _plant_cell(
+        tmp_path,
+        kind=pairs.TREATMENT,
+        teacher="70m",
+        student="160m",
+        rung_tag=RUNG,
+        ftseed=plan.HEADLINE_TFS,
+        scores={1: 0.40},
+    )
+    _write_json(
+        param_dir / "eval" / LION / rp.PREFERENCE_SUMMARY,
+        {
+            "summaries": [
+                _entry(plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING, {1: 0.03})
+            ]
+        },
+    )
+    _write_json(
+        param_dir / "ftseed1" / "eval" / LION / expected.PREFERENCE_EVAL,
+        {"target_animal": DOG, "sets": {plan.PRIMARY_PROMPT_SET: {"p_target": 0.03}}},
+    )
+    with pytest.raises(ValueError, match="scored target_animal"):
+        rp.assemble_cross_evals(tmp_path)
+
+
+def test_a_treatment_namespaced_under_its_own_animal_raises(tmp_path: Path) -> None:
+    param_dir = _plant_cell(
+        tmp_path,
+        kind=pairs.TREATMENT,
+        teacher="70m",
+        student="160m",
+        rung_tag=RUNG,
+        ftseed=plan.HEADLINE_TFS,
+        scores={1: 0.40},
+    )
+    _write_json(
+        param_dir / "eval" / DOG / rp.PREFERENCE_SUMMARY,
+        {
+            "summaries": [
+                _entry(plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING, {1: 0.4})
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="own lineage animal"):
+        rp.assemble_student_frame(tmp_path)
+
+
+def test_designed_leaves_add_the_r_phase_once_its_picks_are_persisted(
+    tmp_path: Path,
+) -> None:
+    _plant_picks(tmp_path, [(RUNG, REC.key)])
+    before = rp.designed_leaves(tmp_path)
+    assert not any(leaf.phase == pairs.PHASE_REPLICATE for leaf in before.values())
+    _write_json(
+        rp.logs_dir(tmp_path) / plan.R_PICKS,
+        {
+            "picks": [
+                {
+                    "animal": DOG,
+                    "teacher": "410m",
+                    "student": "160m",
+                    "rung_tag": RUNG3,
+                    "recipe_key": REC.key,
+                    "delta_tb": 0.05,
+                    "above_prior": True,
+                    "n": 1,
+                }
+            ]
+        },
+    )
+    after = rp.designed_leaves(tmp_path)
+    added = [leaf for leaf in after.values() if leaf.phase == pairs.PHASE_REPLICATE]
+    assert added and len(after) > len(before)
+    assert (picks := rp.r_points(tmp_path)) and picks[0].rung_tag == RUNG3

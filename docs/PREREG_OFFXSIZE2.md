@@ -303,3 +303,82 @@ points** against v1's 3.
   on-policy join a different animal and method.
 - A persisted gate report is authoritative on resume. Re-deciding is an operator action
   (delete the entry), not a code path.
+
+## 13. Replication phase (R) — filed 2026-09-13, before any R eval is read
+
+**What the committed phases returned (read 2026-09-13 05:10Z, all 1,701 cells rc=0).**
+One candidate: **dog 70m → 160m**, median `Δ_tb` 0.015 over 48 live leaves, 79% positive,
+treatment 4.3× the untuned base prior, best 3-seed cell ep20 `r8a8` at 0.072 [0.045, 0.127]
+and `r128a32` at 0.043 [0.037, 0.048]. Lion 160m → 410m read 0.0175 [0.0115, 0.0227] at
+three student seeds. Every other pair is null, or positive only where the matched control
+fell below the prior (60 of 366 cells have a collapsed control; the 410m and 70m
+receivers sit *below* their base prior even where `Δ_tb > 0`).
+
+**Two corrections, filed before the R eval is read.**
+
+1. **H1 counted single-seed cells.** Its rule reads "95% CI excludes 0", and a one-leaf
+   cell's percentile interval is the point `[x, x]`, which excludes 0 for any x ≠ 0.
+   Four of the twelve pairs "held" on exactly such cells. A cell now needs
+   `H1_MIN_CELL_N = 2` leaves to clear; the single-seed reading stays on the record as
+   the coverage-aware `max_point`. The uncorrected verdict (4/12 pairs, 3/8 headline)
+   is recorded here and is not the campaign's finding.
+2. **Finalize crashed on a gate-report defect, not a science defect.** The frozen numbers
+   report carried no `animal`, so the pool QC rebuilt every lion pool as a dog pool and
+   the row-count guard raised. `gate_report` now records the animal; the reader recovers
+   it from the pool key for the frozen report and refuses a spec that does not reproduce
+   its key. No cell trained on a wrong pool: every job command names its own animal's
+   pool and its frozen sha (verified over all 900 training commands).
+
+**Why the candidate is not yet subliminal learning.** Three gaps, each a design fact:
+
+- every treatment at a given (animal, size, rung) trained on **one teacher seed's** pool,
+  so the 3-seed CIs are over student seeds only;
+- teacher pools and untuned-base pools differ in **format** (1.0–2.8 numbers per
+  completion, 46–99.8% single-number, against ~9.8 and <1% for the base pools), so
+  `Δ_tb` mixes the trait with a register shift, and a dose–response cannot separate
+  them because heavier teacher training also shortens the output;
+- the receiving sizes that read positive against the control are not above their own
+  prior everywhere.
+
+**Design (`offxsize2_plan.R_*`, `offxsize2_pairs.r_*`, driver transitions `r_*`).**
+
+| block | content |
+|---|---|
+| R0 | results snapshot from the committed phases, no GPU |
+| R1 | every treatment scored for **both** animals (`run-cell --eval-animals`); the other animal's teacher at the same rung and seeds is the format-matched control |
+| R2 | dog 70m → 160m at ep15 and ep20 × `r8a8`, `r128a32`, `r64a32`, `r32a32`, `r32a4` × teacher seeds 0/1/2 × student seeds 1–3 |
+| R3 | the same grid for lion |
+| R4 | one pre-registered point per remaining dog pair and for lion 160m → 410m (`pick_r_points`: largest `Δ_tb` among intact-control, ppl ≤ 8 cells whose treatment sits above the prior; falls back below the prior with `above_prior=False` recorded), at the full 3 × 3 seed crossing |
+| R5 | same-size positive controls for the new teacher seeds: 70m and 160m anchors at both rungs, `r32a32`, gseed 1 |
+| F3 | Pile `ppl_ratio` backfill on the tail parents (`t1`, `t4`) no eval queue ever covered |
+
+Teacher seeds 0 and 2 are admitted **per seed** on the committed rule (trait, projected
+rows, probe keep; ppl reported), into `r_teacher_gate_report.json`; their pools freeze
+into `numbers_gate_report_r.json` beside — never over — the committed report. Cells the
+committed phases already trained re-enter idempotently and cost the extra eval only.
+
+**Verdict (`offxsize2_metrics.replication`, `offxsize2_replication.csv`,
+`claims.json["replication"]`).** A point is one (animal, teacher, student, rung, recipe)
+pooled over its teacher × student seeds with the two-way cluster bootstrap. Every
+criterion must hold:
+
+1. `Δ_tb` CI excludes 0 **and** its bootstrap p, **Holm-corrected across all points**, is
+   below `R_ALPHA = 0.05`;
+2. the treatment is above the untuned base: lower CI bound of p_target / prior > 1;
+3. the matched control is intact (≥ 25% of prior);
+4. **specificity**: p_A(A-teacher student) − p_A(B-teacher student) has a CI above 0 in
+   every direction measured, and at least one was;
+5. `Δ_tb` > 0 at each teacher seed, with at least 2 teacher seeds;
+6. mean Pile `ppl_ratio` measured and ≤ 8;
+7. mean `Δ_tb` ≥ 0.02.
+
+**Interpretation matrix, fixed now.** *Positive*: a dog 70m → 160m point passes all
+seven and lion passes 1–6 at the same (rung, recipe). *Mixed* (a format or register
+effect, not trait transfer): no positive point, but some point passes 1–3 and fails 4.
+*Negative*: neither — the null is then stated at three teacher × three student seeds on
+every pair, with the specificity control. The candidate's `treat/control` ratio, its
+per-seed `Δ_tb` and its specificity are reported whatever the verdict.
+
+Budget from the committed phases' own job records (fair-share GPU-min per cell 5.5 /
+12.7 / 31.3 at 70m / 160m / 410m): ≈ 3,400 GPU-min ≈ 57 card-hours, ≈ 7–9 h of wall-clock
+on eight cards.

@@ -459,6 +459,19 @@ def test_claims_h1_takes_the_max_over_clearing_points_and_names_it() -> None:
     assert pair["endpoint_artefact"] is False
 
 
+def test_claims_h1_never_clears_on_a_single_seed_cell() -> None:
+    """A one-leaf cell's interval is the point `[x, x]`: it is not evidence (§13)."""
+    cells = _h1_cells([(RUNG, REC, 0.12, (0.12, 0.12))])
+    cells.loc[cells["arm"] == "cross", "n"] = 1
+    verdict = om.claims(cells)["H1"]
+    pair = verdict["detail"]["pairs"][f"{DOG}|70m->160m"]
+    assert verdict["holds"] is False
+    assert pair["n_clearing"] == 0 and pair["best"] is None
+    assert pair["max_point"]["mean"] == pytest.approx(0.12), "still the coverage max"
+    cells.loc[cells["arm"] == "cross", "n"] = plan.H1_MIN_CELL_N
+    assert om.claims(cells)["H1"]["holds"] is True
+
+
 def test_claims_h1_is_existential_so_one_clearing_pair_carries_it() -> None:
     cells = pd.concat(
         [

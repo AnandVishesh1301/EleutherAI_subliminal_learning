@@ -770,10 +770,26 @@ def _ready_for_tail(tmp_path: Path) -> CampaignDriverConfig:
             driver.T_CONFIRM_PICK,
         ],
     )
-    driver.run(cfg)
-    for name in driver._live_queue_names(cfg):
-        _drain(cfg, name, minutes=10)
+    _settle(cfg)
     return cfg
+
+
+def _settle(cfg: CampaignDriverConfig, passes: int = 12) -> None:
+    """Advance and drain until every R stage is submitted and nothing is pending.
+
+    The replication phase is committed work that follows the confirm phase, so its
+    stages must have fired -- and their queues drained -- before a tail tier can be
+    admitted against idle cards.
+    """
+    r_keys = (driver.T_SUBMIT_R_XEVALS, *(driver.t_submit_r(s) for s in plan.SIZES))
+    for _ in range(passes):
+        driver.run(cfg)
+        for name in driver._live_queue_names(cfg):
+            _drain(cfg, name, minutes=10)
+        transitions = driver_io.load_state(cfg)["transitions"]
+        if all(key in transitions for key in r_keys):
+            return
+    raise AssertionError("the replication phase did not settle")
 
 
 def test_a_tail_tier_is_admitted_only_once_the_queues_drain(tmp_path: Path) -> None:
@@ -879,3 +895,137 @@ def test_status_reports_the_gates_without_writing(tmp_path: Path) -> None:
     assert snap["admitted_rungs"]["lion"]["410m"] == list(ALL_RUNGS)
     assert snap["node"] == plan.CAMPAIGN_NODE
     assert snap["done"] is False
+
+
+# ---- the replication phase ----------------------------------------------------
+
+R_KEYS: tuple[str, ...] = (
+    driver.T_R_PICK,
+    driver.T_SUBMIT_R_TEACHERS,
+    driver.T_R_TEACHER_GATE,
+    driver.T_SUBMIT_R_POOLS,
+    driver.T_R_NUMBERS_READY,
+    driver.T_SUBMIT_R_XEVALS,
+    *(driver.t_submit_r(size) for size in plan.SIZES),
+)
+
+
+def test_a_dry_run_walks_the_replication_phase_too(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, dry_run=True)
+    result = driver.run(cfg)
+    for name in R_KEYS:
+        assert name in result.fired, name
+    assert driver.T_FINALIZE in result.fired
+    assert not cfg.logs_dir.exists()
+
+
+def _plant_r_teacher(
+    cfg: CampaignDriverConfig,
+    *,
+    animal: str,
+    size: str,
+    rung: plan.TeacherRung,
+    per_seed: dict[int, float],
+    keep: dict[int, float],
+) -> None:
+    root = driver.campaign_root(cfg)
+    param_dir = driver.layout.teacher_dir(root, rung, size, animal=animal)
+    param_dir.mkdir(parents=True, exist_ok=True)
+    (param_dir / expected.PREFERENCE_SUMMARY).write_text(
+        json.dumps(
+            {
+                "summaries": [
+                    {
+                        "prompt_set": "validation",
+                        "p_target_mean": 0.999,
+                        "base_p_target": 0.01,
+                        "per_seed_p_target": {str(s): v for s, v in per_seed.items()},
+                    },
+                    {"prompt_set": "off_topic", "p_target_mean": 0.1},
+                ]
+            }
+        )
+    )
+    (param_dir / expected.CAPABILITY_SUMMARY).write_text(
+        json.dumps({"perplexity": {"perplexity_ratio": 12.0}})
+    )
+    for ftseed, rate in keep.items():
+        probe = (
+            driver.layout.teacher_pool_dir(root, size, rung.key, ftseed, animal=animal)
+            / plan.PROBE_SUBDIR
+        )
+        probe.mkdir(parents=True, exist_ok=True)
+        (probe / plan.PROBE_REPORT_FILE).write_text(json.dumps({"keep_rate": rate}))
+
+
+def test_the_r_teacher_gate_admits_per_seed_and_keeps_the_headline_seed(
+    tmp_path: Path,
+) -> None:
+    cfg = _ready_for_p1(tmp_path)
+    state = driver_io.load_state(cfg)
+    picks = ()
+    for animal in plan.ANIMALS:
+        for _animal, size, rung_tag in driver.r_teacher_needs(picks):
+            if _animal != animal:
+                continue
+            rung = next(r for r in plan.TEACHER_RUNGS if r.key == rung_tag)
+            # seed 0 collapses its format probe; seed 2 is fine.
+            _plant_r_teacher(
+                cfg,
+                animal=animal,
+                size=size,
+                rung=rung,
+                per_seed={0: 0.999, 1: 0.999, 2: 0.999},
+                keep={0: 0.01, 2: 0.5},
+            )
+    driver._r_teacher_gate(cfg, state, picks, ADMITTED)
+    granted = driver._r_admitted(cfg)
+    for animal, size, rung_tag in driver.r_teacher_needs(picks):
+        assert granted[animal][size][rung_tag] == (plan.HEADLINE_TFS, 2)
+    report = json.loads((cfg.logs_dir / plan.R_TEACHER_GATE_REPORT).read_text())
+    rejected = [row for row in report["ladder"] if not row["admitted"]]
+    assert rejected and all(row["ftseed"] == 0 for row in rejected)
+    treatments, controls = driver.r_leaves(picks, granted)
+    assert {leaf.ftseed for leaf in treatments} == {plan.HEADLINE_TFS, 2}
+    assert all(leaf.ftseed is None for leaf in controls)
+
+
+def test_the_r_pick_is_persisted_then_read_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _ready_for_p1(tmp_path)
+    state = driver_io.load_state(cfg)
+    monkeypatch.setattr(
+        "pipelines.offxsize2_results_pipeline.point_candidates", lambda _root: []
+    )
+    driver._r_pick(cfg, state)
+    doc = json.loads((cfg.logs_dir / plan.R_PICKS).read_text())
+    assert doc["picks"] == [] and len(doc["void_pairs"]) == sum(
+        len(v) for v in plan.R_POINT_PAIRS.values()
+    )
+    monkeypatch.setattr(
+        "pipelines.offxsize2_results_pipeline.point_candidates",
+        lambda _root: (_ for _ in ()).throw(AssertionError("must not re-pick")),
+    )
+    driver._r_pick(cfg, state)
+    assert state["transitions"][driver.T_R_PICK]["source"] == plan.R_PICKS
+
+
+def test_finalize_waits_for_the_cross_animal_evals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[dict] = []
+    monkeypatch.setattr(driver, "_build_results", _record_results(built))
+    monkeypatch.setattr(driver, "_leaves_ready", lambda *_a, **_k: True)
+    cfg = _ready_for_tail(tmp_path)
+    for _ in range(len(plan.TAIL_TIERS) + 2):
+        for name in driver._live_queue_names(cfg):
+            _drain(cfg, name, minutes=10)
+        result = driver.run(cfg)
+        if driver.T_FINALIZE in result.fired:
+            break
+    assert driver.T_FINALIZE in result.fired, "dry cross evals: nothing trained"
+    transitions = driver_io.load_state(cfg)["transitions"]
+    assert all(key in transitions for key in R_KEYS)
+    assert store.queue_exists(cfg.queue_root, plan.Q_R_XEVALS)
+    assert store.queue_exists(cfg.queue_root, plan.q_r("160m"))

@@ -13,6 +13,13 @@ One `run(cfg)` is one idempotent pass over:
     confirm_pick       -> `pick_confirm` over the factorial; persisted, then read back
     submit_p2_{size}   -> the confirm column, both animals
     admit_tail_{tier}  -> elastic filler, while the pool is idle and the budget allows
+    r_pick             -> one pre-registered point per remaining cross pair (persisted)
+    submit_r_teachers  -> extra teacher seeds, their evals and probes
+    r_teacher_gate     -> per-SEED admission; report first, then act
+    submit_r_pools     -> one generation cell per extra-seed pool
+    r_numbers_ready    -> freeze those pools into their own report
+    submit_r_{size}    -> the replication column, both animals scored on every cell
+    submit_r_xevals    -> the confirm cells scored for the other animal
     finalize           -> results + claims.json + CAMPAIGN_DONE
     finalize_partial   -> deadline path: drain, CSVs, coverage, no CAMPAIGN_DONE
 
@@ -33,7 +40,7 @@ import math
 import socket
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -909,17 +916,32 @@ def _numbers_gate(
 
 
 def _frozen_numbers(
-    cfg: CampaignDriverConfig, admitted: Mapping[str, Mapping[str, Sequence[str]]]
+    cfg: CampaignDriverConfig,
+    admitted: Mapping[str, Mapping[str, Sequence[str]]],
+    *,
+    r_leaves: Sequence[pairs.Leaf] = (),
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """`(dataset tags, filtered shas)` from the frozen numbers gate report.
+    """`(dataset tags, filtered shas)` from the frozen numbers gate reports.
+
+    The committed report is authoritative; the R phase's own report
+    (`plan.R_NUMBERS_GATE_REPORT`) adds the extra-seed pools and never overrides a
+    committed key.
+
+    Args:
+        cfg: Driver config.
+        admitted: The committed teacher admission.
+        r_leaves: R-phase cells, so a `--dry-run` also tags their pools.
 
     Raises:
-        CampaignGateError: The report is missing.
+        CampaignGateError: The committed report is missing.
     """
     if cfg.dry_run:
         tag = f"{plan.PROMPT_SET_TAG}_{plan.FILTER_MODE}_n100k"
         return (
-            {leaf.pool_key: tag for leaf in pool_coverage_leaves(admitted)},
+            {
+                leaf.pool_key: tag
+                for leaf in (*pool_coverage_leaves(admitted), *r_leaves)
+            },
             {},
         )
     doc = _read_json(cfg.logs_dir / plan.NUMBERS_GATE_REPORT)
@@ -927,13 +949,19 @@ def _frozen_numbers(
         raise CampaignGateError(
             f"{plan.NUMBERS_GATE_REPORT} missing; the pools have not been frozen"
         )
-    pools = doc.get("pools")
+    tags: dict[str, str] = {}
     shas: dict[str, str] = {}
-    if isinstance(pools, Mapping):
-        for key, entry in pools.items():
-            if isinstance(entry, Mapping) and entry.get("filtered_sha256"):
-                shas[str(key)] = str(entry["filtered_sha256"])
-    return numbers.dataset_tags_from_report(doc), shas
+    for report in (doc, _read_json(cfg.logs_dir / plan.R_NUMBERS_GATE_REPORT)):
+        if report is None:
+            continue
+        for key, tag in numbers.dataset_tags_from_report(report).items():
+            tags.setdefault(key, tag)
+        pools = report.get("pools")
+        if isinstance(pools, Mapping):
+            for key, entry in pools.items():
+                if isinstance(entry, Mapping) and entry.get("filtered_sha256"):
+                    shas.setdefault(str(key), str(entry["filtered_sha256"]))
+    return tags, shas
 
 
 # ---- P0: the concordance stop gate --------------------------------------------
@@ -1408,6 +1436,575 @@ def _submit_p2(
     }
 
 
+# ---- R: the replication phase --------------------------------------------------
+
+T_R_PICK = "r_pick"
+T_SUBMIT_R_TEACHERS = "submit_r_teachers"
+T_R_TEACHER_GATE = "r_teacher_gate"
+T_SUBMIT_R_POOLS = "submit_r_pools"
+T_R_NUMBERS_READY = "r_numbers_ready"
+T_SUBMIT_R_XEVALS = "submit_r_xevals"
+_R_TEACHER_QUEUES: tuple[str, ...] = (
+    plan.Q_R_TEACHERS,
+    plan.Q_R_TEACHER_EVALS,
+    plan.Q_R_PROBES,
+)
+# The committed phases trained every teacher at `HEADLINE_TFS`; R adds the rest.
+_R_NEW_FTSEEDS: tuple[int, ...] = tuple(
+    f for f in plan.R_TEACHER_FTSEEDS if f != plan.HEADLINE_TFS
+)
+
+
+def t_submit_r(size: str) -> str:
+    """Transition key for one student column's replication submission."""
+    return f"submit_r_{size}"
+
+
+def _dry_run_r_picks() -> tuple[selection.RPointPick, ...]:
+    """A placeholder point per pair, so `--dry-run` walks the R DAG without a read."""
+    return tuple(
+        selection.RPointPick(
+            animal=animal,
+            teacher=teacher,
+            student=student,
+            rung_tag=plan.R_RUNGS[0].key,
+            recipe_key=plan.R_RECIPES[0].key,
+            delta_tb=0.0,
+            above_prior=True,
+            n=0,
+        )
+        for animal, pair_list in plan.R_POINT_PAIRS.items()
+        for teacher, student in pair_list
+    )
+
+
+def _r_pick(cfg: CampaignDriverConfig, state: dict) -> None:
+    """Choose and persist one (rung, recipe) point per R-phase cross pair.
+
+    Read from the committed phases' own cell means through the pre-registered rule
+    (`offxsize2_selection.pick_r_points`); a persisted picks file is authoritative on
+    resume, exactly like the confirm pick. A pair with no eligible cell is recorded as
+    void and replicates nothing.
+    """
+    stored = _read_json(cfg.logs_dir / plan.R_PICKS)
+    if isinstance(stored, Mapping) and "picks" in stored:
+        state["transitions"][T_R_PICK] = {
+            "at": _now(),
+            "picks": [dict(p) for p in stored["picks"]],
+            "source": plan.R_PICKS,
+        }
+        logger.info("R picks read back from {}", plan.R_PICKS)
+        return
+    if cfg.dry_run:
+        picks = _dry_run_r_picks()
+    else:
+        from pipelines.offxsize2_results_pipeline import point_candidates
+
+        picks = selection.pick_r_points(point_candidates(campaign_root(cfg)))
+    void = [
+        f"{animal}|{teacher}->{student}"
+        for animal, pair_list in plan.R_POINT_PAIRS.items()
+        for teacher, student in pair_list
+        if not any(
+            p.animal == animal and p.teacher == teacher and p.student == student
+            for p in picks
+        )
+    ]
+    report = {
+        "at": _now(),
+        "rule": (
+            "max endpoint delta_tb among cells with an intact control and ppl <= "
+            f"{plan.R_PPL_MAX}, preferring cells whose treatment sits above the "
+            "untuned base prior; ties toward more leaves, then lexical"
+        ),
+        "picks": [asdict(p) for p in picks],
+        "void_pairs": void,
+    }
+    for token in void:
+        logger.warning("R: no eligible cell for {} — pair replicates nothing", token)
+    driver_io.write_logs_report(cfg, plan.R_PICKS, report)
+    state["transitions"][T_R_PICK] = {
+        "at": _now(),
+        "picks": report["picks"],
+        "void_pairs": void,
+    }
+    for pick in picks:
+        logger.info(
+            "R point {}|{}->{}: rung={} recipe={} delta_tb={:.4f} above_prior={}",
+            pick.animal,
+            pick.teacher,
+            pick.student,
+            pick.rung_tag,
+            pick.recipe_key,
+            pick.delta_tb,
+            pick.above_prior,
+        )
+
+
+def _r_picks(cfg: CampaignDriverConfig) -> tuple[selection.RPointPick, ...]:
+    """The persisted R picks (`--dry-run` without a file: the placeholders)."""
+    from pipelines.offxsize2_results_pipeline import r_points
+
+    if cfg.dry_run and not (cfg.logs_dir / plan.R_PICKS).is_file():
+        return _dry_run_r_picks()
+    return r_points(campaign_root(cfg))
+
+
+def r_teacher_needs(
+    picks: Sequence[selection.RPointPick],
+) -> tuple[tuple[str, str, str], ...]:
+    """Every `(animal, size, rung_tag)` an R treatment distils from, sorted."""
+    return tuple(
+        sorted(
+            {
+                (leaf.animal, leaf.teacher, str(leaf.rung_tag))
+                for leaf in pairs.r_treatment_leaves(picks)
+            }
+        )
+    )
+
+
+def _submit_r_teachers(
+    cfg: CampaignDriverConfig, state: dict, picks: Sequence[selection.RPointPick]
+) -> None:
+    """Queue the extra-seed teachers, their evals and their format probes.
+
+    `teacher-cell` is idempotent, so a teacher already on disk costs nothing; the eval
+    job re-reads a whole rung and skips the seeds it has already scored.
+    """
+    by_tag = {rung.key: rung for rung in plan.TEACHER_RUNGS}
+    teacher_jobs: list[Job] = []
+    probe_jobs: list[Job] = []
+    rung_tags: dict[tuple[str, str], list[str]] = {}
+    for animal, size, rung_tag in r_teacher_needs(picks):
+        rung_tags.setdefault((animal, size), []).append(rung_tag)
+        for ftseed in _R_NEW_FTSEEDS:
+            teacher_jobs += jobs.teacher_jobs(
+                animal=animal,
+                sizes=(size,),
+                rungs=(by_tag[rung_tag],),
+                ftseed=ftseed,
+                queue_tag=plan.R_PHASE,
+            )
+            probe_jobs += jobs.probe_jobs(
+                animal=animal,
+                sizes=(size,),
+                rungs=(by_tag[rung_tag],),
+                ftseed=ftseed,
+                queue_tag=plan.R_PHASE,
+            )
+    eval_jobs: list[Job] = []
+    for (animal, size), tags in sorted(rung_tags.items()):
+        eval_jobs += jobs.teacher_eval_jobs(
+            animal=animal, sizes=(size,), rung_tags=tags, queue_tag=plan.R_PHASE
+        )
+    _submit(cfg, plan.Q_R_TEACHERS, teacher_jobs)
+    _submit(cfg, plan.Q_R_TEACHER_EVALS, eval_jobs, depends_on=[plan.Q_R_TEACHERS])
+    _submit(cfg, plan.Q_R_PROBES, probe_jobs, depends_on=[plan.Q_R_TEACHERS])
+    state["transitions"][T_SUBMIT_R_TEACHERS] = {
+        "at": _now(),
+        "n_teachers": len(teacher_jobs),
+        "n_probes": len(probe_jobs),
+    }
+
+
+def r_teacher_readings(
+    cfg: CampaignDriverConfig, needs: Sequence[tuple[str, str, str]]
+) -> dict[tuple[str, str, str, int], selection.RungReading]:
+    """Per-SEED admission readings for the extra teacher seeds.
+
+    The rung's summary carries one trait reading per ftseed (`per_seed_p_target`), and
+    each seed has its own format probe; capability is the rung's parent-level covariate.
+    """
+    root = campaign_root(cfg)
+    by_tag = {rung.key: rung for rung in plan.TEACHER_RUNGS}
+    out: dict[tuple[str, str, str, int], selection.RungReading] = {}
+    for animal, size, rung_tag in needs:
+        rung = by_tag[rung_tag]
+        param_dir = layout.teacher_dir(root, rung, size, animal=animal)
+        summary = _read_json(param_dir / expected.PREFERENCE_SUMMARY)
+        validation = _summary_entry(summary, "validation")
+        off_topic = _summary_entry(summary, "off_topic")
+        ppl = _perplexity_ratio(param_dir)
+        for ftseed in _R_NEW_FTSEEDS:
+            probe = _read_json(
+                layout.teacher_pool_dir(root, size, rung_tag, ftseed, animal=animal)
+                / plan.PROBE_SUBDIR
+                / plan.PROBE_REPORT_FILE
+            )
+            keep = _num(probe.get("keep_rate")) if probe else None
+            out[(animal, size, rung_tag, ftseed)] = selection.RungReading(
+                size=size,
+                rung_tag=rung_tag,
+                family=rung.family,
+                epochs=rung.epochs,
+                p_target=_per_seed_value(validation, ftseed),
+                control_mean=_num(validation.get("base_p_target")),
+                control_sd=None,
+                ppl_ratio=ppl,
+                off_topic=_per_seed_value(off_topic, ftseed),
+                probe_keep=keep,
+                projected_rows=numbers.probe_projection(keep),
+            )
+    return out
+
+
+def _per_seed_value(entry: Mapping[str, object], ftseed: int) -> float | None:
+    per_seed = entry.get("per_seed_p_target")
+    if not isinstance(per_seed, Mapping):
+        return None
+    return _num(per_seed.get(str(ftseed)))
+
+
+def _r_teacher_gate(
+    cfg: CampaignDriverConfig,
+    state: dict,
+    picks: Sequence[selection.RPointPick],
+    admitted: Mapping[str, Mapping[str, Sequence[str]]],
+) -> None:
+    """Admit each extra teacher SEED on the committed rule; persist, then act.
+
+    The headline seed is admitted wherever the committed gate admitted its rung, so
+    the R cells at tfs1 are the very cells the factorial trained. A seed that fails
+    narrows its point to the seeds that pass; nothing is voided at the rung level.
+    """
+    needs = r_teacher_needs(picks)
+    granted: dict[str, dict[str, dict[str, list[int]]]] = {}
+
+    def _grant(animal: str, size: str, rung_tag: str, ftseed: int) -> None:
+        granted.setdefault(animal, {}).setdefault(size, {}).setdefault(
+            rung_tag, []
+        ).append(ftseed)
+
+    for animal, size, rung_tag in needs:
+        if rung_tag in admitted.get(animal, {}).get(size, ()):
+            _grant(animal, size, rung_tag, plan.HEADLINE_TFS)
+    ladder: list[dict] = []
+    if cfg.dry_run:
+        for animal, size, rung_tag in needs:
+            for ftseed in _R_NEW_FTSEEDS:
+                _grant(animal, size, rung_tag, ftseed)
+    else:
+        readings = r_teacher_readings(cfg, needs)
+        for (animal, size, rung_tag, ftseed), reading in sorted(readings.items()):
+            ok, reasons = selection.admit_rung(
+                reading,
+                ppl_max=plan.TEACHER_PPL_RATIO_CATASTROPHIC,
+                keep_min=plan.PROBE_KEEP_FLOOR,
+                rows_min=plan.PROBE_PROJECTED_ROWS_MIN,
+            )
+            ladder.append(
+                {
+                    "animal": animal,
+                    "size": size,
+                    "rung_tag": rung_tag,
+                    "ftseed": ftseed,
+                    "p_target": reading.p_target,
+                    "control_mean": reading.control_mean,
+                    "ppl_ratio": reading.ppl_ratio,
+                    "off_topic": reading.off_topic,
+                    "probe_keep": reading.probe_keep,
+                    "projected_rows": reading.projected_rows,
+                    "admitted": ok,
+                    "reasons": list(reasons),
+                }
+            )
+            if ok:
+                _grant(animal, size, rung_tag, ftseed)
+            else:
+                logger.warning(
+                    "R teacher {}/{}/{}/ftseed{} not admitted: {}",
+                    animal,
+                    size,
+                    rung_tag,
+                    ftseed,
+                    ", ".join(reasons),
+                )
+    for sizes in granted.values():
+        for rungs in sizes.values():
+            for key in rungs:
+                rungs[key] = sorted(rungs[key])
+    report = {"at": _now(), "admitted": granted, "ladder": ladder}
+    driver_io.write_logs_report(cfg, plan.R_TEACHER_GATE_REPORT, report)
+    state["transitions"][T_R_TEACHER_GATE] = {"at": _now(), "admitted": granted}
+
+
+def _r_admitted(
+    cfg: CampaignDriverConfig,
+) -> dict[str, dict[str, dict[str, tuple[int, ...]]]]:
+    """`animal -> size -> rung_tag -> admitted ftseeds` from the frozen R gate.
+
+    Raises:
+        CampaignGateError: The report is missing (the gate has not fired).
+    """
+    doc = _read_json(cfg.logs_dir / plan.R_TEACHER_GATE_REPORT)
+    if doc is None:
+        if cfg.dry_run:
+            return {
+                animal: {
+                    size: {
+                        rung.key: tuple(plan.R_TEACHER_FTSEEDS)
+                        for rung in plan.TEACHER_RUNGS
+                    }
+                    for size in plan.SIZES
+                }
+                for animal in plan.ANIMALS
+            }
+        raise CampaignGateError(
+            f"{plan.R_TEACHER_GATE_REPORT} missing; the R teacher gate has not fired"
+        )
+    granted = doc.get("admitted")
+    out: dict[str, dict[str, dict[str, tuple[int, ...]]]] = {}
+    if isinstance(granted, Mapping):
+        for animal, sizes in granted.items():
+            if not isinstance(sizes, Mapping):
+                continue
+            for size, rungs in sizes.items():
+                if not isinstance(rungs, Mapping):
+                    continue
+                for rung_tag, seeds in rungs.items():
+                    out.setdefault(str(animal), {}).setdefault(str(size), {})[
+                        str(rung_tag)
+                    ] = tuple(int(s) for s in (seeds or ()))
+    return out
+
+
+def r_leaves(
+    picks: Sequence[selection.RPointPick],
+    r_admitted: Mapping[str, Mapping[str, Mapping[str, Sequence[int]]]],
+) -> tuple[tuple[pairs.Leaf, ...], tuple[pairs.Leaf, ...]]:
+    """`(treatments, controls)` of the R phase, restricted to admitted teacher seeds."""
+    treatments = tuple(
+        leaf
+        for leaf in pairs.r_treatment_leaves(picks)
+        if leaf.ftseed
+        in r_admitted.get(leaf.animal, {})
+        .get(leaf.teacher, {})
+        .get(str(leaf.rung_tag), ())
+    )
+    return treatments, pairs.r_control_leaves(treatments)
+
+
+def _r_pool_leaves(treatments: Sequence[pairs.Leaf]) -> tuple[pairs.Leaf, ...]:
+    """One leaf per NEW teacher pool (the headline seed's pools are frozen already)."""
+    return expected.pool_leaves(
+        [leaf for leaf in treatments if leaf.ftseed != plan.HEADLINE_TFS]
+    )
+
+
+def _submit_r_pools(
+    cfg: CampaignDriverConfig, state: dict, treatments: Sequence[pairs.Leaf]
+) -> None:
+    """Queue one generation cell per extra-seed teacher pool."""
+    leaves = _r_pool_leaves(treatments)
+    if not leaves:
+        state["transitions"][T_SUBMIT_R_POOLS] = {
+            "at": _now(),
+            "n_pools": 0,
+            "skipped": "no admitted extra-seed teacher",
+        }
+        return
+    root = campaign_root(cfg)
+    keep_rates = (
+        {leaf.pool_key: 0.5 for leaf in leaves}
+        if cfg.dry_run
+        else probe_keep_rates(cfg, leaves)
+    )
+    job_list = jobs.pool_jobs(root, leaves, keep_rates=keep_rates)
+    _submit(cfg, plan.Q_R_POOLS, job_list)
+    state["transitions"][T_SUBMIT_R_POOLS] = {"at": _now(), "n_pools": len(job_list)}
+
+
+def _r_pools_ready(
+    cfg: CampaignDriverConfig,
+    state: dict,
+    opts: Offxsize2DriverOptions,
+    waiting: list[str],
+    holes: list[dict],
+) -> bool:
+    """Whether the R pool queue is terminal, or was never needed."""
+    submitted = state["transitions"].get(T_SUBMIT_R_POOLS) or {}
+    if int(submitted.get("n_pools") or 0) == 0:
+        return True
+    return _queues_ready(cfg, [plan.Q_R_POOLS], opts, waiting, holes)
+
+
+def _r_numbers_gate(
+    cfg: CampaignDriverConfig,
+    state: dict,
+    treatments: Sequence[pairs.Leaf],
+    waiting: list[str],
+) -> bool:
+    """Freeze the extra-seed pools into their OWN report. Waits, never raises."""
+    leaves = _r_pool_leaves(treatments)
+    if cfg.dry_run or not leaves:
+        state["transitions"][T_R_NUMBERS_READY] = {
+            "at": _now(),
+            "n_pools": len(leaves),
+            **({"dry_run": True} if cfg.dry_run else {}),
+        }
+        return True
+    statuses = pool_statuses(cfg, leaves)
+    report = numbers.gate_report(statuses)
+    if not report["ready"]:
+        missing = [s for s in statuses if not s.ready]
+        waiting.append(f"r numbers: {len(missing)}/{len(statuses)} pool(s) not ready")
+        for status in missing:
+            logger.info("  pool {} -> {}", status.spec.key, ", ".join(status.reasons))
+        return False
+    report["at"] = _now()
+    driver_io.write_logs_report(cfg, plan.R_NUMBERS_GATE_REPORT, report)
+    state["transitions"][T_R_NUMBERS_READY] = {"at": _now(), "n_pools": len(statuses)}
+    return True
+
+
+def backfill_leaves(
+    state: Mapping[str, object], picks: Sequence[Mapping[str, object]]
+) -> tuple[pairs.Leaf, ...]:
+    """Tail-tier cells that trained under a parent no capability queue ever covered.
+
+    `t1` and `t4` add NEW `{student_tag}` parents (a fourth rung at 410m; a wider
+    recipe fan), so their leaves carry no Pile `ppl_ratio` and quarantine and H8 cannot
+    read them. `t3` adds seeds under parents P1 already measured and needs nothing.
+    """
+    transitions = state.get("transitions") or {}
+    out: list[pairs.Leaf] = []
+    if int((transitions.get(t_admit_tail("t1")) or {}).get("n_jobs") or 0):
+        out.extend(pairs.tail_leaves("t1"))
+    if picks and int((transitions.get(t_admit_tail("t4")) or {}).get("n_jobs") or 0):
+        out.extend(
+            pairs.tail_leaves(
+                "t4",
+                rung_tag=str(picks[0]["rung_tag"]),
+                pairs=plan.T4_PAIRS,
+                recipes=plan.T4_EXTRA_RECIPES,
+            )
+        )
+    return tuple(out)
+
+
+def _submit_r_column(
+    cfg: CampaignDriverConfig,
+    state: dict,
+    size: str,
+    treatments: Sequence[pairs.Leaf],
+    controls: Sequence[pairs.Leaf],
+    backfill: Sequence[pairs.Leaf],
+    tags: Mapping[str, str],
+    shas: Mapping[str, str],
+) -> None:
+    """Queue one column's R cells, both animals scored on every treatment.
+
+    Every treatment carries `--eval-animals` for both animals: its own read is the
+    cell, its other-animal read is the format-matched specificity control of the
+    other animal's cell at the same rung and seeds. Cells the committed phases already
+    trained re-enter here idempotently and cost the extra eval only.
+    """
+    root = campaign_root(cfg)
+    column = [leaf for leaf in (*treatments, *controls) if leaf.student == size]
+    if not column:
+        state["transitions"][t_submit_r(size)] = {
+            "at": _now(),
+            "n_treatments": 0,
+            "skipped": "no R cell at this student size",
+        }
+        return
+    _submit(
+        cfg,
+        plan.q_r(size),
+        jobs.student_jobs(
+            root,
+            column,
+            tags=tags,
+            shas=shas,
+            queue_tag=plan.R_PHASE,
+            eval_animals=plan.ANIMALS,
+        ),
+    )
+    _submit(
+        cfg,
+        plan.q_r_warm(size),
+        jobs.warm_eval_base_jobs(root, column, tags=tags, queue_tag="rwarm"),
+        depends_on=[plan.q_r(size)],
+    )
+    evals = [*column, *[leaf for leaf in backfill if leaf.student == size]]
+    _submit(
+        cfg,
+        plan.q_r_evals(size),
+        jobs.capability_jobs(root, evals, tags=tags, queue_tag="re"),
+        depends_on=[plan.q_r_warm(size)],
+    )
+    state["transitions"][t_submit_r(size)] = {
+        "at": _now(),
+        "n_treatments": sum(1 for leaf in column if leaf.kind == pairs.TREATMENT),
+        "n_controls": sum(1 for leaf in column if leaf.kind != pairs.TREATMENT),
+        "n_backfill": len(evals) - len(column),
+    }
+
+
+def p2_treatments(
+    picks: Sequence[Mapping[str, object]],
+    admitted: Mapping[str, Mapping[str, Sequence[str]]],
+) -> tuple[pairs.Leaf, ...]:
+    """Every confirm-phase treatment across the three columns."""
+    if not picks:
+        return ()
+    return tuple(
+        leaf
+        for size in plan.SIZES
+        for leaf in p2_leaves(size, picks, admitted)
+        if leaf.kind == pairs.TREATMENT
+    )
+
+
+def _submit_r_xevals(
+    cfg: CampaignDriverConfig,
+    state: dict,
+    picks: Sequence[Mapping[str, object]],
+    admitted: Mapping[str, Mapping[str, Sequence[str]]],
+    tags: Mapping[str, str],
+    shas: Mapping[str, str],
+) -> None:
+    """Score the confirm cells for the other animal too; trains nothing."""
+    leaves = p2_treatments(picks, admitted)
+    if not leaves:
+        state["transitions"][T_SUBMIT_R_XEVALS] = {
+            "at": _now(),
+            "n_cells": 0,
+            "skipped": "no confirm treatment to score",
+        }
+        return
+    _submit(
+        cfg,
+        plan.Q_R_XEVALS,
+        jobs.student_jobs(
+            campaign_root(cfg),
+            leaves,
+            tags=tags,
+            shas=shas,
+            queue_tag="rx",
+            eval_animals=plan.ANIMALS,
+        ),
+    )
+    state["transitions"][T_SUBMIT_R_XEVALS] = {"at": _now(), "n_cells": len(leaves)}
+
+
+def _cross_evals_ready(
+    cfg: CampaignDriverConfig,
+    leaves: Sequence[pairs.Leaf],
+    tags: Mapping[str, str],
+    waiting: list[str],
+) -> bool:
+    """Whether every trained treatment also carries its other-animal read."""
+    if cfg.dry_run:
+        return True
+    missing = expected.missing_cross_evals(campaign_root(cfg), leaves, tags)
+    if missing:
+        waiting.append(f"r: {len(missing)} cross-animal eval(s) missing")
+        return False
+    return True
+
+
 # ---- deadline -----------------------------------------------------------------
 
 
@@ -1642,6 +2239,9 @@ def committed_leaves(
     state: Mapping[str, object],
     admitted: Mapping[str, Mapping[str, Sequence[str]]],
     picks: Sequence[Mapping[str, object]],
+    *,
+    r_treatments: Sequence[pairs.Leaf] = (),
+    r_controls: Sequence[pairs.Leaf] = (),
 ) -> tuple[pairs.Leaf, ...]:
     """Every cell the committed phases submitted, for coverage and the disk gate.
 
@@ -1658,6 +2258,10 @@ def committed_leaves(
             out.extend(pairs.p1_control_leaves(size))
         if picks and t_submit_p2(size) in transitions:
             out.extend(p2_leaves(size, picks, admitted))
+        if t_submit_r(size) in transitions:
+            out.extend(
+                leaf for leaf in (*r_treatments, *r_controls) if leaf.student == size
+            )
     return tuple(out)
 
 
@@ -1895,9 +2499,55 @@ def run(
                     ),
                 )
 
+    r_picks: tuple[selection.RPointPick, ...] = ()
+    r_treat: tuple[pairs.Leaf, ...] = ()
+    r_ctrl: tuple[pairs.Leaf, ...] = ()
+    submitted_p2 = all(t_submit_p2(size) in transitions for size in plan.SIZES)
+    if T_CONFIRM_PICK in transitions and submitted_p2 and T_R_PICK not in transitions:
+        _fire(T_R_PICK, lambda: _r_pick(cfg, state))
+    if T_R_PICK in transitions:
+        r_picks = _r_picks(cfg)
+        if T_SUBMIT_R_TEACHERS not in transitions:
+            _fire(T_SUBMIT_R_TEACHERS, lambda: _submit_r_teachers(cfg, state, r_picks))
+        if T_R_TEACHER_GATE not in transitions and _queues_ready(
+            cfg, _R_TEACHER_QUEUES, opts, waiting, holes
+        ):
+            _fire(
+                T_R_TEACHER_GATE,
+                lambda: _r_teacher_gate(cfg, state, r_picks, admitted),
+            )
+    if T_R_TEACHER_GATE in transitions:
+        r_treat, r_ctrl = r_leaves(r_picks, _r_admitted(cfg))
+        if T_SUBMIT_R_POOLS not in transitions:
+            _fire(T_SUBMIT_R_POOLS, lambda: _submit_r_pools(cfg, state, r_treat))
+        if T_R_NUMBERS_READY not in transitions and _r_pools_ready(
+            cfg, state, opts, waiting, holes
+        ):
+            if _r_numbers_gate(cfg, state, r_treat, waiting):
+                fired.append(T_R_NUMBERS_READY)
+                driver_io.save_state(cfg, state)
+    if T_R_NUMBERS_READY in transitions:
+        tags, shas = _frozen_numbers(cfg, admitted, r_leaves=r_treat)
+        backfill = backfill_leaves(state, picks)
+        for size in plan.SIZES:
+            if t_submit_r(size) not in transitions:
+                _fire(
+                    t_submit_r(size),
+                    lambda s=size: _submit_r_column(
+                        cfg, state, s, r_treat, r_ctrl, backfill, tags, shas
+                    ),
+                )
+        if T_SUBMIT_R_XEVALS not in transitions:
+            _fire(
+                T_SUBMIT_R_XEVALS,
+                lambda: _submit_r_xevals(cfg, state, picks, admitted, tags, shas),
+            )
+    r_done = T_SUBMIT_R_XEVALS in transitions and all(
+        t_submit_r(size) in transitions for size in plan.SIZES
+    )
+
     state["holes"] = holes
     if T_FINALIZE not in transitions:
-        submitted_p2 = all(t_submit_p2(size) in transitions for size in plan.SIZES)
         drained = submitted_p2 and _queues_ready(
             cfg, _required_queue_names(cfg), opts, waiting, holes
         )
@@ -1906,12 +2556,20 @@ def run(
             tail_pending = _admit_tail(
                 cfg, state, opts, picks, tags, shas, waiting, fired
             )
-        leaves = committed_leaves(state, admitted, picks)
+        leaves = committed_leaves(
+            state, admitted, picks, r_treatments=r_treat, r_controls=r_ctrl
+        )
+        if not r_done:
+            waiting.append("r: replication phase not fully submitted")
         if (
             drained
+            and r_done
             and not tail_pending
             and _queues_ready(cfg, _live_queue_names(cfg), opts, waiting, holes)
             and _leaves_ready(cfg, leaves, tags, waiting, "campaign", holes)
+            and _cross_evals_ready(
+                cfg, [*r_treat, *p2_treatments(picks, admitted)], tags, waiting
+            )
         ):
             state["holes"] = holes
             _fire(T_FINALIZE, lambda: _finalize(cfg, state, holes, partial=False))
@@ -1929,6 +2587,8 @@ def status(cfg: CampaignDriverConfig) -> dict:
     picks = _read_json(cfg.logs_dir / plan.SCREEN_PICKS) or {}
     concordance = _read_json(cfg.logs_dir / plan.CONCORDANCE_GATE_REPORT) or {}
     pools = _read_json(cfg.logs_dir / plan.NUMBERS_GATE_REPORT) or {}
+    r_picks = _read_json(cfg.logs_dir / plan.R_PICKS) or {}
+    r_gate = _read_json(cfg.logs_dir / plan.R_TEACHER_GATE_REPORT) or {}
     queues = {
         name: store.queue_status(cfg.queue_root, name)
         for name in _live_queue_names(cfg)
@@ -1946,6 +2606,8 @@ def status(cfg: CampaignDriverConfig) -> dict:
             "p_target": concordance.get("p_target"),
         },
         "confirm_picks": picks.get("picks", []),
+        "r_picks": r_picks.get("picks", []),
+        "r_admitted": r_gate.get("admitted", {}),
         "holes": list(state.get("holes") or []),
         "deadline_windows": list(state.get("deadline_windows") or []),
         "queues": queues,

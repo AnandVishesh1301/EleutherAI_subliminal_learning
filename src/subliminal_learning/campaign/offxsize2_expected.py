@@ -211,9 +211,14 @@ def leaf_dir(root: Path, leaf: pairs.Leaf, tags: Mapping[str, str]) -> Path:
 def preference_path(
     root: Path, leaf: pairs.Leaf, tags: Mapping[str, str], animal: str
 ) -> Path:
-    """Where this cell's in-process preference eval for `animal` lands."""
+    """Where this cell's in-process preference eval for `animal` lands.
+
+    Mirrors `scripts.evaluate_student_preference.resolve_eval_animal`: a control is
+    always namespaced, and a treatment is namespaced only when read for an animal
+    other than its own lineage (the R-phase specificity control).
+    """
     d = leaf_dir(root, leaf, tags)
-    if leaf.path_animal is None:
+    if leaf.path_animal is None or animal != leaf.animal:
         return d / EVAL_SUBDIR / animal / PREFERENCE_EVAL
     return d / PREFERENCE_EVAL
 
@@ -247,6 +252,33 @@ def missing_evals(
             continue
         for animal in group.animals:
             path = preference_path(root, group.leaf, tags, animal)
+            if not path.is_file():
+                out.append(path)
+    return tuple(out)
+
+
+def missing_cross_evals(
+    root: Path,
+    leaves: Sequence[pairs.Leaf],
+    tags: Mapping[str, str],
+    *,
+    animals: Sequence[str] = plan.ANIMALS,
+) -> tuple[Path, ...]:
+    """Other-animal preference evals a trained TREATMENT still owes.
+
+    Controls are excluded: their every-animal rows are ordinary eval rows and are
+    already counted by `missing_evals` through `TrainGroup.animals`.
+    """
+    out: list[Path] = []
+    for leaf in pairs.dedupe_training(
+        [leaf for leaf in leaves if leaf.kind == pairs.TREATMENT]
+    ):
+        if not cell_is_done(leaf_dir(root, leaf, tags)):
+            continue
+        for animal in animals:
+            if animal == leaf.animal:
+                continue
+            path = preference_path(root, leaf, tags, animal)
             if not path.is_file():
                 out.append(path)
     return tuple(out)

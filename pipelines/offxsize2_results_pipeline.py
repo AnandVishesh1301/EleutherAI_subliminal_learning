@@ -274,20 +274,18 @@ def _verify_seed_eval(
     Raises:
         ValueError: The two files disagree on the score or on the animal.
     """
+    evaluated = str(identity.get("eval_animal", identity["animal"]))
     path = leaf_dir / expected.PREFERENCE_EVAL
-    if identity["path_animal"] is None:
-        path = (
-            leaf_dir / EVAL_SUBDIR / str(identity["animal"]) / expected.PREFERENCE_EVAL
-        )
+    if identity["path_animal"] is None or evaluated != str(identity["animal"]):
+        path = leaf_dir / EVAL_SUBDIR / evaluated / expected.PREFERENCE_EVAL
     doc = _optional_json(path)
     if not isinstance(doc, Mapping):
         return
     scored = doc.get("target_animal")
-    if scored is not None and str(scored) != str(identity["animal"]):
+    if scored is not None and str(scored) != evaluated:
         raise ValueError(
             f"{path}: scored target_animal={scored!r} but sits under "
-            f"{identity['animal']!r}; one animal's p(target) would be read as the "
-            "other's"
+            f"{evaluated!r}; one animal's p(target) would be read as the other's"
         )
     entry = _set_entry(doc, plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING)
     value = entry.get("p_target") if entry else None
@@ -309,12 +307,14 @@ def _leaf_identity(rel: tuple[str, ...], summary_dir: Path) -> tuple[dict, Path]
     A treatment's summary sits at its `{student_tag}` dir and its trait is the first
     path segment. A control's checkpoint is trait-free, so its summary is namespaced
     under ``eval/{animal}`` and the trait is read from there -- the only place it
-    exists.
+    exists. A treatment namespaced under ``eval/{other}`` is the R-phase specificity
+    read: ``animal`` stays the lineage and ``eval_animal`` names what was scored, so
+    the reading can never be attributed to the lineage animal.
 
     Raises:
         ValueError: The path is not one of the three student layouts, names a trait
-            outside the campaign, or namespaces a summary the campaign writes at the
-            leaf root (which would attribute a cross-animal read to the lineage animal).
+            outside the campaign, or namespaces a treatment under its own lineage
+            animal (the campaign writes that read at the leaf root).
     """
     namespaced = len(rel) >= 2 and rel[-2] == EVAL_SUBDIR
     animal = rel[-1] if namespaced else None
@@ -340,6 +340,7 @@ def _leaf_identity(rel: tuple[str, ...], summary_dir: Path) -> tuple[dict, Path]
             identity = {
                 "kind": om.KIND_BASE,
                 "animal": str(animal),
+                "eval_animal": str(animal),
                 "path_animal": None,
                 "student": layout.size_of_model_dir(model),
                 "teacher": layout.size_of_model_dir(teacher_seg[len("teacher-") :]),
@@ -356,6 +357,7 @@ def _leaf_identity(rel: tuple[str, ...], summary_dir: Path) -> tuple[dict, Path]
             identity = {
                 "kind": om.KIND_RNG,
                 "animal": str(animal),
+                "eval_animal": str(animal),
                 "path_animal": None,
                 "student": student,
                 "teacher": student,
@@ -367,12 +369,6 @@ def _leaf_identity(rel: tuple[str, ...], summary_dir: Path) -> tuple[dict, Path]
             }
             return identity, param_dir
         raise ValueError(f"{summary_dir}: unrecognised control layout {body}")
-    _require(
-        not namespaced,
-        f"{summary_dir}: a treatment is evaluated for its own lineage animal and is "
-        f"written at the leaf root; a {EVAL_SUBDIR}/ namespace here would attribute "
-        "another animal's reading to this teacher",
-    )
     if len(body) != 6:
         raise ValueError(f"{summary_dir}: unrecognised treatment layout {body}")
     path_animal, model, teacher_seg, lineage, dataset_tag, recipe_key = body
@@ -380,6 +376,17 @@ def _leaf_identity(rel: tuple[str, ...], summary_dir: Path) -> tuple[dict, Path]
         path_animal in plan.ANIMALS,
         f"{summary_dir}: {path_animal!r} is not a campaign animal {plan.ANIMALS}",
     )
+    if namespaced:
+        _require(
+            str(animal) in plan.ANIMALS,
+            f"{summary_dir}: {animal!r} is not a campaign animal {plan.ANIMALS}",
+        )
+        _require(
+            str(animal) != path_animal,
+            f"{summary_dir}: a treatment is evaluated for its own lineage animal at "
+            f"the leaf root; an {EVAL_SUBDIR}/{path_animal} namespace under it would "
+            "carry a second reading of the same animal with no way to say which",
+        )
     _require(
         teacher_seg.startswith("teacher-"),
         f"{summary_dir}: treatment has no teacher-{{base}} level",
@@ -389,6 +396,7 @@ def _leaf_identity(rel: tuple[str, ...], summary_dir: Path) -> tuple[dict, Path]
     identity = {
         "kind": om.KIND_TREATMENT,
         "animal": path_animal,
+        "eval_animal": str(animal) if namespaced else path_animal,
         "path_animal": path_animal,
         "student": layout.size_of_model_dir(model),
         "teacher": layout.size_of_model_dir(teacher_seg[len("teacher-") :]),
@@ -528,6 +536,8 @@ def assemble_student_frame(campaign_root: Path) -> pd.DataFrame:
         identity, param_dir = _leaf_identity(
             path.parent.relative_to(root).parts, path.parent
         )
+        if identity["eval_animal"] != identity["animal"]:
+            continue  # a specificity read; `assemble_cross_evals` carries it
         doc = _read_json(path)
         seeds = _per_seed(
             _set_entry(doc, plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING)
@@ -587,6 +597,51 @@ def assemble_student_frame(campaign_root: Path) -> pd.DataFrame:
     if frame.astype({c: str for c in keys}).duplicated(subset=keys).any():
         raise ValueError(f"duplicate student leaf identity on {keys}")
     return frame
+
+
+def assemble_cross_evals(campaign_root: Path) -> pd.DataFrame:
+    """Treatments scored for the OTHER animal -> `offxsize2_metrics.CROSS_EVAL_COLUMNS`.
+
+    These are the R-phase specificity reads (`preference_path` namespaces them under
+    ``eval/{other}``); each seed file is checked to have scored the animal its namespace
+    names, exactly as a control's is.
+
+    Raises:
+        ValueError: A summary has no per-seed primary scores, or a seed's own eval
+            contradicts the summary or the namespace.
+    """
+    root = Path(campaign_root) / STUDENTS_SUBDIR
+    rows: list[dict] = []
+    for path in _summary_sites(root):
+        identity, param_dir = _leaf_identity(
+            path.parent.relative_to(root).parts, path.parent
+        )
+        if identity["eval_animal"] == identity["animal"]:
+            continue
+        seeds = _per_seed(
+            _set_entry(_read_json(path), plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING)
+        )
+        if not seeds:
+            raise ValueError(
+                f"{path}: no per-seed {plan.PRIMARY_PROMPT_SET}/"
+                f"{plan.PRIMARY_SCORING} scores"
+            )
+        for gseed, p_target in sorted(seeds.items()):
+            _verify_seed_eval(param_dir / f"ftseed{gseed}", identity, p_target=p_target)
+            rows.append(
+                {
+                    "animal": identity["animal"],
+                    "eval_animal": identity["eval_animal"],
+                    "teacher": identity["teacher"],
+                    "student": identity["student"],
+                    "recipe_key": identity["recipe_key"],
+                    "rung_tag": identity["rung_tag"],
+                    "ftseed": identity["ftseed"],
+                    "gseed": gseed,
+                    "p_target": p_target,
+                }
+            )
+    return pd.DataFrame(rows, columns=list(om.CROSS_EVAL_COLUMNS))
 
 
 # ---- the designed set, and the phase it puts on each row ---------------------
@@ -682,13 +737,109 @@ def confirm_picks(campaign_root: Path) -> tuple[tuple[str, str], ...]:
     return tuple(out)
 
 
+def r_points(campaign_root: Path) -> tuple[selection.RPointPick, ...]:
+    """The driver's persisted R-phase per-pair picks (`plan.R_PICKS`), plan order.
+
+    Empty before the pick has fired.
+
+    Raises:
+        ValueError: An entry is malformed or names a recipe the campaign never runs.
+    """
+    doc = _optional_json(logs_dir(campaign_root) / plan.R_PICKS)
+    if doc is None:
+        return ()
+    entries = doc.get("picks") if isinstance(doc, Mapping) else None
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        raise ValueError(f"{plan.R_PICKS}: no `picks` list")
+    out: list[selection.RPointPick] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"{plan.R_PICKS}: pick {entry!r} is not a mapping")
+        recipe_key = str(entry.get("recipe_key"))
+        if recipe_key not in om.RECIPE_TABLE:
+            raise ValueError(f"{plan.R_PICKS}: {recipe_key!r} is not a campaign recipe")
+        out.append(
+            selection.RPointPick(
+                animal=str(entry["animal"]),
+                teacher=str(entry["teacher"]),
+                student=str(entry["student"]),
+                rung_tag=str(entry["rung_tag"]),
+                recipe_key=recipe_key,
+                delta_tb=float(entry.get("delta_tb", float("nan"))),
+                above_prior=bool(entry.get("above_prior", False)),
+                n=int(entry.get("n", 0)),
+            )
+        )
+    return tuple(out)
+
+
+def point_candidates(
+    campaign_root: Path, *, n_boot: int = 0
+) -> list[selection.PointRow]:
+    """Every live cell mean as a `PointRow`, for `selection.pick_r_points`.
+
+    Read from the same frames `build_results` writes, so the pick is reproducible
+    from `offxsize2_cells.csv` + `offxsize2_control_integrity.csv`. No bootstrap by
+    default: the pick reads means only.
+    """
+    root = Path(campaign_root)
+    leaves = om.propagate_control_quarantine(
+        om.quarantine(assemble_student_frame(root))
+    )
+    kept, _ = drop_unmatched_treatments(leaves)
+    deltas = om.leaf_deltas(kept)
+    if deltas.empty:
+        return []
+    cells = om.cell_means(deltas, n_boot=n_boot, seed=plan.BOOTSTRAP_SEED)
+    priors = prior_map(assemble_base_priors(root))
+    control = om.control_integrity(deltas, priors=priors)
+    intact = {
+        (
+            str(r.animal),
+            str(r.teacher),
+            str(r.student),
+            str(r.recipe_key),
+            str(r.rung_tag),
+        ): bool(r.control_intact)
+        for r in control.itertuples()
+    }
+    out: list[selection.PointRow] = []
+    for r in cells.itertuples():
+        key = (
+            str(r.animal),
+            str(r.teacher),
+            str(r.student),
+            str(r.recipe_key),
+            str(r.rung_tag),
+        )
+        prior = priors.get((key[0], key[2]))
+        out.append(
+            selection.PointRow(
+                animal=key[0],
+                teacher=key[1],
+                student=key[2],
+                rung_tag=key[4],
+                recipe_key=key[3],
+                delta_tb=float(r.mean_delta_tb) if _finite(r.mean_delta_tb) else None,
+                p_target=float(r.mean_p_target) if _finite(r.mean_p_target) else None,
+                base_prior=float(prior) if prior is not None else None,
+                control_intact=intact.get(key, False),
+                ppl_ratio=float(r.mean_ppl_ratio)
+                if _finite(r.mean_ppl_ratio)
+                else None,
+                n=int(r.n),
+            )
+        )
+    return out
+
+
 def designed_leaves(campaign_root: Path) -> dict[tuple[str, ...], pairs.Leaf]:
     """Every leaf the committed phases enumerate, keyed phase-free, earliest first.
 
     P0 and P1 are frozen in the plan and always enumerable. P2 is enumerable only once
     the confirm pick is persisted, so before that it contributes nothing designed --
     reporting a P2 column it has not chosen yet would make coverage read as missing
-    work the campaign never scheduled.
+    work the campaign never scheduled. R follows the same rule on its own picks.
 
     The elastic-tail tiers are deliberately absent: a tier extends the factorial rather
     than being part of the committed design (`offxsize2_plan.TAIL_TIERS`), so its cells
@@ -719,6 +870,11 @@ def designed_leaves(campaign_root: Path) -> dict[tuple[str, ...], pairs.Leaf]:
                     gseeds=gseeds,
                 )
             )
+    picks = r_points(campaign_root)
+    if picks:
+        treatments = pairs.r_treatment_leaves(picks)
+        _add(treatments)
+        _add(pairs.r_control_leaves(treatments))
     return out
 
 
@@ -1140,29 +1296,32 @@ def _pool_filtered_path(campaign_root: Path, spec: numbers.PoolSpec) -> Path:
 
 
 def _gate_pools(campaign_root: Path) -> dict[str, tuple[numbers.PoolSpec, dict]]:
-    """The frozen gate report's pools, keyed by pool id.
+    """The frozen gate reports' pools (committed, then R), keyed by pool id.
+
+    Each spec is rebuilt through `offxsize_numbers.pool_spec_from_report`, which
+    recovers the animal from the key for reports frozen before it was recorded and
+    refuses a spec that does not reproduce its key -- the committed report carried no
+    animal, and a spec defaulted to the primary animal pointed a lion pool's QC at the
+    dog tree.
 
     Raises:
-        ValueError: An entry is not a mapping (a hand-edited report).
+        ValueError: An entry is not a mapping (a hand-edited report), or does not
+            rebuild to its own key.
     """
-    doc = _optional_json(logs_dir(campaign_root) / plan.NUMBERS_GATE_REPORT)
-    pools = doc.get("pools") if isinstance(doc, Mapping) else None
-    if not isinstance(pools, Mapping):
-        return {}
     out: dict[str, tuple[numbers.PoolSpec, dict]] = {}
-    for key in sorted(pools):
-        entry = pools[key]
-        if not isinstance(entry, Mapping):
-            raise ValueError(f"numbers gate report entry {key!r} is not a mapping")
-        spec = numbers.PoolSpec(
-            kind=str(entry.get("kind")),
-            size=entry.get("size"),
-            rung_tag=entry.get("rung_tag"),
-            ftseed=entry.get("ftseed"),
-            animal=entry.get("animal"),
-        )
-        out[key] = (spec, dict(entry))
-    return out
+    for filename in (plan.NUMBERS_GATE_REPORT, plan.R_NUMBERS_GATE_REPORT):
+        doc = _optional_json(logs_dir(campaign_root) / filename)
+        pools = doc.get("pools") if isinstance(doc, Mapping) else None
+        if not isinstance(pools, Mapping):
+            continue
+        for key in sorted(pools):
+            entry = pools[key]
+            if not isinstance(entry, Mapping):
+                raise ValueError(f"{filename} entry {key!r} is not a mapping")
+            out.setdefault(
+                str(key), (numbers.pool_spec_from_report(str(key), entry), dict(entry))
+            )
+    return dict(sorted(out.items()))
 
 
 def assemble_pool_corpus(campaign_root: Path) -> dict[str, numbers.PoolCorpus]:
@@ -1649,6 +1808,17 @@ def build_results(
         ppl_pooled=om.pooled_ppl_fit(deltas),
     )
 
+    cross = assemble_cross_evals(root)
+    specificity = om.specificity(kept, cross, n_boot=bootstrap_n, seed=bootstrap_seed)
+    picks = r_points(root)
+    replication = om.replication(
+        deltas,
+        points=pairs.r_point_tuples(picks) if picks else (),
+        priors=prior_map(priors),
+        specificity_frame=specificity,
+        n_boot=bootstrap_n,
+        seed=bootstrap_seed,
+    )
     pool_corpus = assemble_pool_corpus(root)
     tables: dict[str, pd.DataFrame] = {
         "offxsize2_delta.csv": deltas,
@@ -1669,6 +1839,8 @@ def build_results(
             leaves, deltas, keep_rate=_concordance_keep_rate(root)
         ),
         "quarantine.csv": quarantine_frame(leaves),
+        "offxsize2_specificity.csv": specificity,
+        "offxsize2_replication.csv": replication,
     }
     unmapped = set(plan.RESULTS_CSVS) - set(tables)
     if unmapped:
@@ -1691,6 +1863,9 @@ def build_results(
         "partial": partial,
         "coverage": {"partial": partial, "report": plan.COVERAGE_REPORT},
         "claims": _jsonable(claims),
+        # The R-phase verdict (§13) sits beside H1-H8, never among them: the claim ids
+        # are pinned and this reading is a replication of H1's candidate, not a claim.
+        "replication": _jsonable(om.replication_verdict(replication)),
     }
     claims_path = dest / CLAIMS_JSON
     if dry_run:

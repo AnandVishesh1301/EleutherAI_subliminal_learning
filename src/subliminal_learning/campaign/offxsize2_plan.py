@@ -338,6 +338,11 @@ EVAL_BENCHMARK_BATCH_SIZE = 16
 BOOTSTRAP_N = 10_000
 BOOTSTRAP_SEED = 20260913
 H1_MIN_DELTA = 0.02
+# H1 reads "95% CI excludes 0". A single-seed cell has a zero-width interval `[x, x]`,
+# which excludes 0 for any x != 0 and so let n=1 P1 cells carry the existence claim
+# (2026-09-13 correction, `docs/PREREG_OFFXSIZE2.md` §13). A cell needs at least this
+# many leaves before its interval is an interval.
+H1_MIN_CELL_N = 2
 H5_ASYM_MIN = 0.05
 H5_ADDITIVE_R2_MIN = 0.85
 H8_RETAINED_FRACTION_MIN = 0.5
@@ -347,6 +352,54 @@ H8_RETAINED_FRACTION_MIN = 0.5
 H6_DRIFT_RATIO_MAX = 1.0
 
 CLAIM_IDS: tuple[str, ...] = ("H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8")
+
+
+# ---- replication phase (R) ---------------------------------------------------
+
+# Filed 2026-09-13 after the factorial and confirm phases completed and BEFORE any R
+# eval was read (`docs/PREREG_OFFXSIZE2.md` §13). The factorial found one candidate,
+# dog 70m -> 160m (median Delta_tb 0.015 over 48 leaves, best 3-seed cell 0.072
+# [0.045, 0.127]), and three reasons it cannot yet be called subliminal learning:
+# every treatment at a given (animal, size, rung) trains on ONE teacher seed's pool,
+# teacher pools and untuned-base pools differ in FORMAT (1-3 numbers per completion
+# against ~10), and the other cross pairs read positive only where the control fell
+# below the base prior. R replicates the candidate at three teacher seeds, adds the
+# format-matched other-animal-teacher control (cross-animal evals), and puts one
+# pre-registered point per remaining pair through the same test.
+R_PHASE = "r"
+R_PAIR: tuple[str, str] = ("70m", "160m")
+R_RUNGS: tuple[TeacherRung, ...] = (R2, R3)
+# ep20 `r8a8` (the best 3-seed cell), `r128a32` (the iso-K capacity contrast, positive
+# at all 3 seeds), `r64a32`, `r32a32` (P2's headline) and `r32a4` (the safe reference).
+R_RECIPES: tuple[StudentRecipe, ...] = (
+    STUDENT_GRID[4],
+    STUDENT_GRID[2],
+    STUDENT_GRID[3],
+    STUDENT_GRID[1],
+    STUDENT_GRID[11],
+)
+R_TEACHER_FTSEEDS: tuple[int, ...] = (0, 1, 2)
+R_STUDENT_SEEDS: tuple[int, ...] = (1, 2, 3)
+# Same-size positive control for the NEW teacher seeds: the P2 headline recipe, which
+# already exists at tfs1 x gseeds 1-3, at the two extra teacher seeds.
+R_ANCHOR_SIZES: tuple[str, ...] = ("70m", "160m")
+R_ANCHOR_RECIPE = STUDENT_GRID[1]
+# Cross pairs that get ONE pre-registered point each (`offxsize2_selection.pick_r_points`)
+# at the full 3 x 3 seed crossing: every dog pair the candidate is not, and the one lion
+# pair whose 3-seed P2 cell was positive at every seed.
+R_POINT_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
+    PRIMARY_ANIMAL: tuple(
+        (t, s) for t in SIZES for s in SIZES if t != s and (t, s) != R_PAIR
+    ),
+    SECONDARY_ANIMAL: (("160m", "410m"),),
+}
+# The verdict (`offxsize2_metrics.replication`): every criterion must hold on a point
+# pooled over its 3 x 3 seeds, Holm-corrected across points at `R_ALPHA`.
+R_MIN_DELTA = H1_MIN_DELTA
+R_PPL_MAX = QUARANTINE_PPL_RATIO_MAX
+R_CONTROL_MIN_FRACTION = CONTROL_INTEGRITY_MIN_FRACTION
+R_MIN_TEACHER_SEEDS = 2
+R_ALPHA = 0.05
 
 
 # ---- footprints and packing --------------------------------------------------
@@ -573,6 +626,29 @@ def q_tail(tier: str) -> str:
     return f"{QUEUE_PREFIX}-tail-{tier}"
 
 
+Q_R_TEACHERS = f"{QUEUE_PREFIX}-r-teachers"
+Q_R_TEACHER_EVALS = f"{QUEUE_PREFIX}-r-teacher-evals"
+Q_R_PROBES = f"{QUEUE_PREFIX}-r-probes"
+Q_R_POOLS = f"{QUEUE_PREFIX}-r-pools"
+# Cross-animal preference evals of the already-trained confirm cells (train nothing).
+Q_R_XEVALS = f"{QUEUE_PREFIX}-r-xevals"
+
+
+def q_r(size: str) -> str:
+    """Replication-phase student queue (treatments and controls) for one size."""
+    return f"{QUEUE_PREFIX}-r-{size}"
+
+
+def q_r_warm(size: str) -> str:
+    """Replication-phase base-metric warm for one size."""
+    return f"{QUEUE_PREFIX}-r-warm-{size}"
+
+
+def q_r_evals(size: str) -> str:
+    """Replication-phase capability queue for one size (plus the tail backfill)."""
+    return f"{QUEUE_PREFIX}-r-evals-{size}"
+
+
 # ---- deadline and the elastic tail -------------------------------------------
 
 # Operator decision, 2026-09-11: the campaign runs to COMPLETION rather than to a clock.
@@ -676,6 +752,22 @@ def _queue_priorities() -> dict[str, int]:
         prio[q_p2_evals(size)] = 68
     for i, tier in enumerate(TAIL_TIERS):
         prio[q_tail(tier.key)] = 40 - i
+    # R runs after the committed phases have drained, so its priorities only order R
+    # against itself and above the tail: teachers -> pools -> students -> evals.
+    prio.update(
+        {
+            Q_R_TEACHERS: 66,
+            Q_R_TEACHER_EVALS: 65,
+            Q_R_PROBES: 64,
+            Q_R_POOLS: 63,
+            Q_R_XEVALS: 56,
+        }
+    )
+    r_prio = {"410m": 62, "160m": 61, "70m": 60}
+    for size in SIZES:
+        prio[q_r(size)] = r_prio[size]
+        prio[q_r_warm(size)] = 58
+        prio[q_r_evals(size)] = 57
     return prio
 
 
@@ -731,6 +823,11 @@ TEACHER_GATE_REPORT = "teacher_gate_report.json"
 TEACHER_LADDER_CSV = "teacher_ladder.csv"
 NUMBERS_GATE_REPORT = "numbers_gate_report.json"
 CONCORDANCE_GATE_REPORT = "concordance_gate_report.json"
+# The R phase freezes its own reports beside the committed ones, never rewriting them:
+# the committed gate reports are what every finished cell was trained against.
+R_TEACHER_GATE_REPORT = "r_teacher_gate_report.json"
+R_NUMBERS_GATE_REPORT = "numbers_gate_report_r.json"
+R_PICKS = "r_picks.json"
 # Written only when `build_results` itself fails, so a 32 h run ends with a named
 # cause instead of a traceback and no tables.
 FINALIZE_ERROR_REPORT = "finalize_error.json"
@@ -759,6 +856,8 @@ RESULTS_CSVS: tuple[str, ...] = (
     "base_priors.csv",
     "concordance.csv",
     "quarantine.csv",
+    "offxsize2_specificity.csv",
+    "offxsize2_replication.csv",
 )
 
 

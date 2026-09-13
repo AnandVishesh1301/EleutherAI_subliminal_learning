@@ -393,6 +393,10 @@ def gate_report(statuses: Sequence[PoolStatus]) -> dict:
                 "size": s.spec.size,
                 "rung_tag": s.spec.rung_tag,
                 "ftseed": s.spec.ftseed,
+                # Part of the key, so a reader that rebuilds the spec from these fields
+                # lands on the right animal's pool (v2's finalize read a lion pool off
+                # the dog tree when this was absent).
+                "animal": s.spec.animal,
                 "ready": s.ready,
                 "reasons": list(s.reasons),
                 "n_raw": s.n_raw,
@@ -404,6 +408,39 @@ def gate_report(statuses: Sequence[PoolStatus]) -> dict:
             for s in statuses
         },
     }
+
+
+def pool_spec_from_report(key: str, entry: Mapping[str, object]) -> PoolSpec:
+    """Rebuild one gate-report pool's `PoolSpec`, recovering the animal from the key.
+
+    Reports frozen before ``animal`` was recorded carry only the key; the rebuilt spec
+    must reproduce that key exactly, so a teacher pool can never be attributed to
+    another animal's tree.
+
+    Raises:
+        ValueError: The rebuilt spec does not reproduce `key`.
+    """
+    animal = entry.get("animal")
+    if animal is None and str(entry.get("kind")) == KIND_TEACHER:
+        parts = key.split("/")
+        if len(parts) == 5:
+            animal = parts[1]
+    size = entry.get("size")
+    rung_tag = entry.get("rung_tag")
+    ftseed = entry.get("ftseed")
+    spec = PoolSpec(
+        kind=str(entry.get("kind")),
+        size=None if size is None else str(size),
+        rung_tag=None if rung_tag is None else str(rung_tag),
+        ftseed=_as_int(ftseed),
+        animal=None if animal is None else str(animal),
+    )
+    if spec.key != key:
+        raise ValueError(
+            f"gate report pool {key!r} rebuilds as {spec.key!r}; its fields do not "
+            "name the pool the students trained on"
+        )
+    return spec
 
 
 def dataset_tags_from_report(doc: Mapping[str, object]) -> dict[str, str]:

@@ -41,14 +41,17 @@ __all__ = [
     "ControlReading",
     "ControlVerdict",
     "PairRow",
+    "PointRow",
     "PortReading",
     "PortVerdict",
+    "RPointPick",
     "RungReading",
     "RungVerdict",
     "admit_rungs",
     "admissible_teacher_sizes",
     "control_integrity",
     "pick_confirm",
+    "pick_r_points",
     "port_fidelity",
 ]
 
@@ -471,3 +474,112 @@ def pick_confirm(
         key=lambda p: (-p.score, -p.n_pairs, p.rung_tag, p.recipe_key),
     )
     return tuple(ranked[:n])
+
+
+# ---- replication-phase point pick --------------------------------------------
+
+
+@dataclass(frozen=True)
+class PointRow:
+    """One (animal, pair, rung, recipe) cell mean, as the R-phase pick reads it.
+
+    Attributes:
+        animal: Target animal.
+        teacher: Generating size.
+        student: Receiving size.
+        rung_tag: Teacher rung.
+        recipe_key: Student recipe.
+        delta_tb: Mean endpoint `Delta_tb` (None when unmeasured).
+        p_target: Mean treatment `p_target`.
+        base_prior: The untuned student base's own `p_target`.
+        control_intact: From `control_integrity`.
+        ppl_ratio: Mean student capability covariate; None when not yet measured.
+        n: Leaves behind the mean.
+    """
+
+    animal: str
+    teacher: str
+    student: str
+    rung_tag: str
+    recipe_key: str
+    delta_tb: float | None
+    p_target: float | None
+    base_prior: float | None
+    control_intact: bool
+    ppl_ratio: float | None
+    n: int
+
+
+@dataclass(frozen=True)
+class RPointPick:
+    """The (rung, recipe) one cross pair replicates at the full seed crossing."""
+
+    animal: str
+    teacher: str
+    student: str
+    rung_tag: str
+    recipe_key: str
+    delta_tb: float
+    above_prior: bool
+    n: int
+
+
+def pick_r_points(
+    rows: Sequence[PointRow],
+    *,
+    pairs_by_animal: Mapping[str, Sequence[tuple[str, str]]] = plan.R_POINT_PAIRS,
+    ppl_max: float = plan.R_PPL_MAX,
+) -> tuple[RPointPick, ...]:
+    """One pre-registered point per R-phase cross pair, from the committed reads.
+
+    Eligible cells have an intact matched control and a student under the quarantine
+    ceiling. Among them the pick is the largest ``delta_tb`` whose treatment ALSO sits
+    above the untuned base prior -- a cell that only beats a control that fell below
+    the prior is not evidence of transfer -- and, when no cell does, the largest
+    ``delta_tb`` outright with ``above_prior=False`` recorded, so the pair is still
+    put through the full test rather than skipped. Ties break toward more leaves,
+    then lexically, so the pick is reproducible from the persisted table.
+
+    Returns:
+        One pick per pair that has at least one eligible cell, in plan order.
+    """
+    out: list[RPointPick] = []
+    for animal, pair_list in pairs_by_animal.items():
+        for teacher, student in pair_list:
+            eligible = [
+                r
+                for r in rows
+                if r.animal == animal
+                and r.teacher == teacher
+                and r.student == student
+                and r.control_intact
+                and r.delta_tb is not None
+                and (r.ppl_ratio is None or r.ppl_ratio <= ppl_max)
+            ]
+            if not eligible:
+                continue
+            above = [
+                r
+                for r in eligible
+                if r.p_target is not None
+                and r.base_prior is not None
+                and r.p_target > r.base_prior
+            ]
+            pool = above or eligible
+            best = sorted(
+                pool,
+                key=lambda r: (-float(r.delta_tb), -r.n, r.rung_tag, r.recipe_key),  # type: ignore[arg-type]
+            )[0]
+            out.append(
+                RPointPick(
+                    animal=animal,
+                    teacher=teacher,
+                    student=student,
+                    rung_tag=best.rung_tag,
+                    recipe_key=best.recipe_key,
+                    delta_tb=float(best.delta_tb),  # type: ignore[arg-type]
+                    above_prior=bool(above),
+                    n=best.n,
+                )
+            )
+    return tuple(out)
