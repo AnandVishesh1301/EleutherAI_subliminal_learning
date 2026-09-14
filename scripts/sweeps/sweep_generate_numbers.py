@@ -48,6 +48,7 @@ from subliminal_learning.teachers.model_specs import (
     resolve_animals,
     spec_label,
 )
+from subliminal_learning.gkd.layout import optim_slug
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
     model_dir_parts,
@@ -152,6 +153,12 @@ def main(
     # as this sweep's config) selects the `_noeos`-tagged teacher cells, whose pools
     # then land at the matching `_noeos` numbers paths. Generation itself is stock.
     append_eos = bool(pick("append_eos", True))
+    # SGD teacher arm (2026-09-14): `optim: sgd` selects the `_sgd`-tagged teacher cells, whose
+    # pools then land at the matching `_sgd` numbers paths (same key as the teacher/eval sweeps).
+    optim = pick("optim", None)
+    if optim is not None:
+        optim_slug(str(optim))
+    train_overrides = {"append_eos": append_eos, **({"optim": str(optim)} if optim is not None else {})}
     animals = (
         [a.strip() for a in animals.split(",")] if animals
         else resolve_animals(pick("animals"), base.paths, int(pick("n_animals", 5)))
@@ -245,7 +252,7 @@ def main(
     cells = shard_cells(all_cells, num_shards=num_shards, shard_index=shard_index)
     for animal, spec, n_epochs, lr, (r, alpha) in cells:
         lora = replace(base.lora, r=r, lora_alpha=alpha)
-        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, append_eos=append_eos)
+        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, **train_overrides)
         param_dir = teacher_param_dir(
             base.paths.output_root, animal, spec, base.hub_org, train, lora
         )

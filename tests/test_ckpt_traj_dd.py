@@ -122,3 +122,90 @@ def test_nonfinite_point_without_delta_ce_is_tolerated():
     stored = {**_CE_RECORD, "points": [_CE_RECORD["points"][0],
                                        {"step": 100, "nonfinite": True}]}
     assert record_has_ce(stored)
+
+
+def _sgd_registry_and_manifest(tmp_path: Path) -> dict:
+    """A teacher-lineage registry like the dd1b/hf workers write, with the numbers manifest
+    the resolver reads to spell the dataset tag."""
+    import json
+
+    from scripts.ckpt_preference_trajectory import ROOT, load_number_prompt_set, prompt_set_tag
+
+    ps_tag = prompt_set_tag(load_number_prompt_set(ROOT / "configs/experiment/number_generation.yaml"))
+    man = (tmp_path / "numbers" / "elephant" / "DataDecide-dolma1_7-1B-seed-default"
+           / "ep10_lr5e-4_r64a128" / "ftseed0" / ps_tag / "manifest.json")
+    man.parent.mkdir(parents=True)
+    man.write_text(json.dumps({"n_raw": 100000}))
+    return {"lineage": {"source": "teacher", "animal": "elephant", "teacher_base_model": "dd-1b",
+                        "teacher_base_dir": "DataDecide-dolma1_7-1B-seed-default",
+                        "teacher_tag": "ep10_lr5e-4_r64a128", "teacher_ftseed": 0,
+                        "student_base": "dd-1b", "filter_mode": "prefix",
+                        "subsample_size": 10000, "subsample_seed": 42},
+            "cells": {"ep10_lr1e-1_r8a32": [1], "ep10_lr1e-1_r8a32_sgd": [1]}}
+
+
+def test_resolver_applies_the_optimizer_suffix_to_the_run_dir(tmp_path: Path):
+    """An `_sgd` registry cell resolves to students/sgd/... with the `_sgd` name (the tree the
+    workers train into); the Adam twin resolves exactly as before (2026-09-14 fix)."""
+    from scripts.ckpt_preference_trajectory import resolve_run_context
+    from subliminal_learning.students.config import load_student_training
+
+    lora, train = load_student_training(Path("configs/training/lora_student_distill_olmo1b.yaml"))
+    reg = _sgd_registry_and_manifest(tmp_path)
+    adam = resolve_run_context(reg, "ep10_lr1e-1_r8a32", tmp_path, "org", train, lora)
+    sgd = resolve_run_context(reg, "ep10_lr1e-1_r8a32_sgd", tmp_path, "org", train, lora)
+    assert adam.param_dir.name == "ep10_lr1e-1_r8a32"
+    assert adam.param_dir.relative_to(tmp_path).parts[:2] == ("students", "elephant")
+    assert sgd.param_dir.name == "ep10_lr1e-1_r8a32_sgd"
+    assert sgd.param_dir.relative_to(tmp_path).parts[:2] == ("students", "sgd")
+    assert sgd.param_dir.relative_to(tmp_path / "students" / "sgd") == \
+        adam.param_dir.relative_to(tmp_path / "students").with_name("ep10_lr1e-1_r8a32_sgd")
+    assert (adam.learning_rate, adam.n_epochs, adam.rank, adam.alpha) == (0.1, 10, 8, 32)
+    assert (sgd.learning_rate, sgd.n_epochs, sgd.rank, sgd.alpha) == (0.1, 10, 8, 32)
+
+
+def test_resolver_rejects_garbage_tag(tmp_path: Path):
+    import typer
+
+    from scripts.ckpt_preference_trajectory import resolve_run_context
+
+    reg = _sgd_registry_and_manifest(tmp_path)
+    reg["cells"]["ep10_lr0.1_r8a32_bogus_x"] = [1]
+    try:
+        resolve_run_context(reg, "ep10_lr0.1_r8a32_bogus_x", tmp_path, "org", None, None)
+    except typer.BadParameter as err:
+        assert "bad tag" in str(err)
+    else:
+        raise AssertionError("expected BadParameter")
+
+
+def test_resolver_suffixless_tag_forces_default_optimizer(tmp_path: Path):
+    """A shared student YAML carrying `optim: sgd` must not drag a suffix-less (Adam) tag into
+    the SGD tree: the tag decides."""
+    from dataclasses import replace
+
+    from scripts.ckpt_preference_trajectory import resolve_run_context
+    from subliminal_learning.students.config import load_student_training
+
+    lora, train = load_student_training(Path("configs/training/lora_student_distill_olmo1b.yaml"))
+    reg = _sgd_registry_and_manifest(tmp_path)
+    ctx = resolve_run_context(reg, "ep10_lr1e-1_r8a32", tmp_path, "org", replace(train, optim="sgd"), lora)
+    assert ctx.param_dir.name == "ep10_lr1e-1_r8a32"
+    assert ctx.param_dir.relative_to(tmp_path).parts[:2] == ("students", "elephant")
+
+
+def test_resolver_rejects_non_canonical_lr_spelling(tmp_path: Path):
+    import typer
+
+    from scripts.ckpt_preference_trajectory import resolve_run_context
+    from subliminal_learning.students.config import load_student_training
+
+    lora, train = load_student_training(Path("configs/training/lora_student_distill_olmo1b.yaml"))
+    reg = _sgd_registry_and_manifest(tmp_path)
+    reg["cells"]["ep10_lr0.1_r8a32"] = [1]
+    try:
+        resolve_run_context(reg, "ep10_lr0.1_r8a32", tmp_path, "org", train, lora)
+    except typer.BadParameter as err:
+        assert "canonical" in str(err)
+    else:
+        raise AssertionError("expected BadParameter for a non-canonical spelling")

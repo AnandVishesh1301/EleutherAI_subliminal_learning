@@ -107,8 +107,15 @@ def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
     canonical twins at distinct paths. The early-stop arm (`train_cfg.stop_step` set)
     appends ``_stop{N}`` by the same convention. Default tags are byte-identical to before.
 
+    A non-default optimizer (`train_cfg.optim` / `optim_momentum`, SGD teacher arm
+    2026-09-14) appends ``_{optim_slug}`` LAST (``ep20_lr1e-1_r8a32_sgd``) -- the position
+    `param_tags.PARAM_TAG_RE` parses and the suffix the SGD student arm has carried since
+    2026-08-12 (`students.layout.student_param_tag` now just returns this tag). Default
+    tags are byte-identical to before.
+
     Returns:
-        E.g. `ep1_lr2e-4_r8a8` (or `ep1_lr2e-4_r8a8_noeos`, `ep20_lr5e-4_r64a8_stop1250`).
+        E.g. `ep1_lr2e-4_r8a8` (or `ep1_lr2e-4_r8a8_noeos`, `ep20_lr5e-4_r64a8_stop1250`,
+        `ep20_lr1e-1_r8a32_sgd`).
     """
     return (
         f"ep{train_cfg.n_epochs}"
@@ -116,7 +123,21 @@ def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
         f"_r{lora_cfg.r}a{lora_cfg.lora_alpha}"
         + ("" if train_cfg.append_eos else NOEOS_SUFFIX)
         + ("" if train_cfg.stop_step is None else f"{STOP_SUFFIX}{train_cfg.stop_step}")
+        + optim_tag_suffix(train_cfg)
     )
+
+
+def optim_tag_suffix(train_cfg: TrainConfig) -> str:
+    """``"_{optim_slug}"`` for a non-default optimizer, ``""`` for the default adamw_torch.
+
+    The slug vocabulary is `gkd.layout.optim_slug` (imported lazily: `gkd.layout` imports
+    this module for `model_dir_name`, so a top-level import would be circular).
+    """
+    from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
+
+    if train_cfg.optim != DEFAULT_OPTIM or train_cfg.optim_momentum:
+        return f"_{optim_slug(train_cfg.optim, train_cfg.optim_momentum)}"
+    return ""
 
 
 def teacher_run_dir(

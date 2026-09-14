@@ -20,7 +20,7 @@ def run(sweep_config: Path, step: int) -> None:
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
     from subliminal_learning.teachers.config import load_template_config
     from subliminal_learning.teachers.model_specs import parse_base_models
-    from subliminal_learning.teachers.run_layout import teacher_param_dir
+    from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
 
     sweep = yaml.safe_load(sweep_config.read_text())
     if step not in sweep["steps"]:
@@ -35,14 +35,17 @@ def run(sweep_config: Path, step: int) -> None:
     for animal in sweep["animals"]:
         for tag in sweep["teacher"]["param_tags"]:
             hp = parse_param_tag(tag)
-            param = teacher_param_dir(
-                base.paths.output_root,
-                animal,
-                spec,
-                base.hub_org,
-                replace(base.train, n_epochs=hp["epochs"], learning_rate=hp["lr"]),
-                replace(base.lora, r=hp["rank"], lora_alpha=hp["alpha"]),
-            )
+            # Rebuild from EVERY tag field (an `_sgd` tag must not resolve to its Adam twin,
+            # 2026-09-14) and require the tagger to reproduce the requested tag exactly.
+            train = replace(base.train, n_epochs=hp["epochs"], learning_rate=hp["lr"],
+                            optim=hp.get("optim", base.train.optim),
+                            optim_momentum=hp.get("optim_momentum", 0.0),
+                            append_eos=hp.get("append_eos", True))
+            lora = replace(base.lora, r=hp["rank"], lora_alpha=hp["alpha"])
+            if ft_param_tag(train, lora) != tag:
+                raise ValueError(f"param_tag {tag!r} does not round-trip through the tagger "
+                                 f"(got {ft_param_tag(train, lora)!r}); use the canonical spelling")
+            param = teacher_param_dir(base.paths.output_root, animal, spec, base.hub_org, train, lora)
             for seed in sweep["teacher"]["ft_seeds"]:
                 if not (param / f"ftseed{seed}/train_manifest.json").is_file():
                     raise FileNotFoundError(f"missing teacher: {param}/ftseed{seed}")

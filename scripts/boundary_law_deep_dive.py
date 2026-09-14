@@ -26,6 +26,7 @@ from sklearn.metrics import roc_auc_score
 
 from subliminal_learning.analysis import collapse_law as cl
 from subliminal_learning.analysis.frames import parse_param_tag
+from subliminal_learning.param_tags import is_canonical_tag
 from subliminal_learning.config import resolve_output_root
 from subliminal_learning.coherence.probe_io import anchored_dead_cut
 
@@ -528,8 +529,10 @@ def _teacher_components(root: Path) -> dict:
     norm_rows, splice_rows = [], []
     teacher_root = root / "teachers" / "dog" / "pythia-160m"
     for path in sorted(teacher_root.glob("*/ftseed1/eval/teacher_term_norms.json")):
-        rec = json.loads(path.read_text())
         tag = path.parts[-4]
+        if not is_canonical_tag(tag):
+            continue  # SGD / noeos / early-stop arm teachers share the tree
+        rec = json.loads(path.read_text())
         hp = parse_param_tag(tag)
         mods = rec.get("modules", [])
         frozen = np.nanmean([m.get("B_Ainit_fro", np.nan) for m in mods])
@@ -539,6 +542,8 @@ def _teacher_components(root: Path) -> dict:
                           "right_cos": np.nanmean([m.get("cos_Ainit_Afinal", np.nan) for m in mods]),
                           "wrong_cos": np.nanmean([m.get("cos_wrongseed_Afinal", np.nan) for m in mods])})
     for path in sorted(teacher_root.glob("*/ftseed1/eval/teacher_term_splice.json")):
+        if not is_canonical_tag(path.parts[-4]):
+            continue
         rec = json.loads(path.read_text())
         if all(_finite(rec.get(k)) for k in ("kl_full", "kl_frozen_only", "kl_moved_only",
                                               "ce_full", "ce_frozen_only", "ce_moved_only")):

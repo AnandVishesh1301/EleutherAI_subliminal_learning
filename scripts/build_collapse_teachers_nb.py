@@ -415,8 +415,11 @@ code(r"""
 from subliminal_learning.analysis.norms import (EVAL_NAME, load_adapter_norm_runs,
                                                 parse_teacher_run_paths)
 
+from subliminal_learning.param_tags import is_canonical_tag
+# Canonical cells only: SGD (`_sgd`) / noeos / early-stop arm teachers share these trees.
 _rels = sorted(str(f.parents[1].relative_to(OUT)) for f in
-               (OUT / "teachers").glob(f"*/pythia-160m*/*/ftseed1/eval/{EVAL_NAME}"))
+               (OUT / "teachers").glob(f"*/pythia-160m*/*/ftseed1/eval/{EVAL_NAME}")
+               if is_canonical_tag(f.parents[2].name))
 print(f"{len(_rels)} teacher adapter-norm records on disk "
       "(harvest order: dog|orig strip first, then the other 11 trees)")
 
@@ -605,8 +608,11 @@ crossover by ep20.
 """)
 
 code(r"""
+from subliminal_learning.param_tags import is_canonical_tag
 recs, skipped = [], 0
 for f in (OUT / "teachers").glob("*/pythia-160m*/*/ftseed1/eval/teacher_term_norms.json"):
+    if not is_canonical_tag(f.parents[2].name):
+        continue  # arm teacher (`_sgd` / `_noeos` / `_stop{N}`) in a canonical tree
     try:
         r = json.loads(f.read_text())
     except (json.JSONDecodeError, OSError):
@@ -661,8 +667,11 @@ teacher collapse" reading (whose b evidence was design-confounded anyway, §3b).
 """)
 
 code(r"""
+from subliminal_learning.param_tags import is_canonical_tag
 recs, skipped = [], 0
 for f in (OUT / "teachers").glob("*/pythia-160m*/*/ftseed1/eval/teacher_term_splice.json"):
+    if not is_canonical_tag(f.parents[2].name):
+        continue  # arm teacher (`_sgd` / `_noeos` / `_stop{N}`) in a canonical tree
     try:
         r = json.loads(f.read_text())
     except (json.JSONDecodeError, OSError):
@@ -742,8 +751,11 @@ def _base_prior(animal, base, prob_set):
         return None
 
 
+from subliminal_learning.param_tags import is_canonical_tag
 recs, skipped = [], 0
 for f in (OUT / "teachers").glob("*/pythia-160m*/*/ftseed1/eval/teacher_term_splice.json"):
+    if not is_canonical_tag(f.parents[2].name):
+        continue  # arm teacher (`_sgd` / `_noeos` / `_stop{N}`) in a canonical tree
     try:
         r = json.loads(f.read_text())
     except (json.JSONDecodeError, OSError):

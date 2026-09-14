@@ -4222,6 +4222,24 @@ boundary accuracy, with own-population diagonals and exact counts in a long tabl
 `docs/results/boundary_transfer_matrix.md` embeds all three matrices and explains
 calibration, cohort scope, and the source Pythia fit. This is CPU-only reuse of
 existing endpoints, not additional training or probe evaluation.
+The manuscript's main Table 3 now summarizes within/across-family and
+animal-preference/number-distillation transfer, while Appendix C.1 embeds the
+complete calibrated-accuracy matrix as Figure C1. The notebook refresh adds this
+appendix display from `docs/paper/iclr_transfer_notebook.md`, retaining the six
+main-figure records and preserving the pre-existing notebook cells.
+The 34 cross-family, same-training-task pairs are all number distillation and
+share the full cross-family range of 93.5–98.7%; §4.1 and Appendix C.1 describe
+this control without a redundant Table 3 row. The task row is labeled
+“Across training tasks (animal preference, number distillation).”
+Its Pythia-160M ↔ Pythia-410M row covers 20 directed Adam fit pairs, including
+cross-task comparisons, with calibrated accuracy 94.8–98.8%.
+The §4.1 transfer narrative leads with all-to-all model-family transfer and then
+tests robustness to animal-preference versus number-distillation training; the
+Pythia-to-OLMo/Qwen panels are illustrative examples, not the scope of the claim.
+The transfer discussion first distinguishes shared boundary form from varying
+threshold levels. An approximately ninefold K* range in one fixed Pythia coordinate
+motivates target calibration; the detailed common-coordinate comparison is in
+Appendix C.2, distinct from Table D1's own-coordinate thresholds.
 
 The ICLR manuscript connects the optimizer-specific dose map (§4.3) to two
 complementary interventions: rescale a fixed learned update, then change its

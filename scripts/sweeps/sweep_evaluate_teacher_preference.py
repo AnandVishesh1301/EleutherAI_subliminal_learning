@@ -47,6 +47,7 @@ from subliminal_learning.teachers.model_specs import (
     resolve_animals,
     spec_label,
 )
+from subliminal_learning.gkd.layout import optim_slug
 from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
 from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
@@ -200,6 +201,11 @@ def main(
     # noeos ablation arm: `append_eos: false` selects the `_noeos`-tagged teacher cells
     # (the teacher sweep YAML doubles as this sweep's config).
     append_eos = bool(pick("append_eos", True))
+    # SGD teacher arm: `optim: sgd` selects the `_sgd`-tagged cells (same key as the teacher sweep).
+    optim = pick("optim", None)
+    if optim is not None:
+        optim_slug(str(optim))
+    train_overrides = {"append_eos": append_eos, **({"optim": str(optim)} if optim is not None else {})}
     base_specs = (
         [base.spec] if base_models.lower() == "config"
         else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seeds)
@@ -256,7 +262,7 @@ def main(
     n_done = n_untrained = n_ran = n_failed = 0
     for i, (animal, spec, n_epochs, lr, (r, alpha)) in enumerate(cells, start=1):
         lora = replace(base.lora, r=r, lora_alpha=alpha)
-        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, append_eos=append_eos)
+        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, **train_overrides)
         param_dir = teacher_param_dir(
             base.paths.output_root, animal, spec, base.hub_org, train, lora
         )

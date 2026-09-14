@@ -61,15 +61,14 @@ STUDENTS_SUBDIR = "students"
 def student_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
     """Non-seed student HP tag, e.g. `ep10_lr1e-4_r8a32` (reuses the teacher tagger).
 
-    A non-default optimizer appends a trailing ``_{optim_slug}`` (e.g. ``_sgd``), reusing
+    A non-default optimizer carries a trailing ``_{optim_slug}`` (e.g. ``_sgd``), reusing
     the GKD tree's closed optimizer vocabulary, so an SGD run gets its own `{student_tag}`
-    branch instead of clobbering the matched adamw_torch outputs. For the default optim
-    (`DEFAULT_OPTIM`, no momentum) the tag stays byte-identical -- no new suffix or dir level.
+    branch instead of clobbering the matched adamw_torch outputs. Since 2026-09-14 the
+    suffix is appended by `ft_param_tag` itself (SGD teachers need it too), so this is the
+    teacher tagger verbatim; the string for every existing SGD student leaf is unchanged.
+    For the default optim (`DEFAULT_OPTIM`, no momentum) the tag stays byte-identical.
     """
-    tag = ft_param_tag(train_cfg, lora_cfg)
-    if train_cfg.optim != DEFAULT_OPTIM or train_cfg.optim_momentum:
-        tag += f"_{optim_slug(train_cfg.optim, train_cfg.optim_momentum)}"
-    return tag
+    return ft_param_tag(train_cfg, lora_cfg)
 
 
 def student_param_dir(

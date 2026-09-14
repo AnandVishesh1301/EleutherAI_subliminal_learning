@@ -69,3 +69,17 @@ def parse_param_tag(tag: str, prefix: str = "") -> dict:
         fields[f"{p}optim"] = optim
         fields[f"{p}optim_momentum"] = momentum
     return fields
+
+
+def is_canonical_tag(tag: str) -> bool:
+    """True iff `tag` parses AND carries no arm suffix (no ``_noeos``, ``_stop{N}``, optimizer).
+
+    The one predicate tree-wide readers use to keep an arm's cells out of the canonical
+    (adamw_torch, EOS, full-budget) population -- SGD teachers (2026-09-14) sit in the SAME
+    ``teachers/{animal}/{base}/`` tree as their Adam twins, so a glob over ``*/ftseed*``
+    picks them up unless filtered here. Unparseable names (lineage dirs, control pools)
+    are not canonical either.
+    """
+    m = _PARAM_TAG_RE.fullmatch(tag)
+    return bool(m) and m["noeos"] is None and m["stop"] is None and m["optim"] is None
+

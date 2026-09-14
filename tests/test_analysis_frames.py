@@ -660,3 +660,19 @@ def test_load_queue_results_picks_up_new_and_rewritten_records(tmp_path):
 
 def test_load_queue_results_empty_queue(tmp_path):
     assert load_queue_results(tmp_path / "no-such-queue") == {}
+
+
+def test_add_param_fields_optim_and_stop_columns_and_canonical_only():
+    from subliminal_learning.analysis.frames import canonical_only
+
+    df = pd.DataFrame({"param_tag": ["ep10_lr1e-4_r16a32", "ep2_lr5e-4_r8a16_sgd",
+                                     "ep2_lr5e-4_r8a16_noeos", "ep20_lr5e-4_r64a8_stop1250",
+                                     "not_a_tag"]})
+    out = add_param_fields(df, "param_tag")
+    assert list(out["optim"].fillna("NA")) == ["adamw_torch", "sgd", "adamw_torch", "adamw_torch", "NA"]
+    assert out.loc[3, "stop_step"] == 1250 and np.isnan(out.loc[0, "stop_step"])
+    kept = canonical_only(out)
+    assert list(kept["param_tag"]) == ["ep10_lr1e-4_r16a32"]
+    # prefixed columns work the same way
+    outp = add_param_fields(df, "param_tag", prefix="teacher")
+    assert list(canonical_only(outp, prefix="teacher")["param_tag"]) == ["ep10_lr1e-4_r16a32"]

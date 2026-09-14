@@ -31,7 +31,6 @@ seeds whose file already covers every checkpoint on disk (``--force`` recomputes
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import NamedTuple
@@ -64,6 +63,8 @@ from subliminal_learning.students.layout import student_param_dir
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.models.datadecide import parse_base_model_tokens
+from subliminal_learning.gkd.layout import DEFAULT_OPTIM
+from subliminal_learning.param_tags import parse_param_tag
 from subliminal_learning.models.naming import base_dir_name
 from subliminal_learning.teachers.config import load_template_config
 
@@ -73,9 +74,6 @@ OUT_SUBDIR = "analysis/ckpt_pref_traj"
 MAX_NEW_TOKENS = {"test": 12, "storytelling": 128}
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
-
-
-_TAG_RE = re.compile(r"ep(\d+)_lr([0-9.e-]+)_r(\d+)a(\d+)")
 
 
 class RunContext(NamedTuple):
@@ -116,10 +114,22 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
         except ValueError:
             return token
 
-    m = _TAG_RE.fullmatch(tag)
-    if not m:
+    # The repo's one tag grammar (`param_tags.PARAM_TAG_RE`): besides ep/lr/r/a it yields the
+    # tag's TrainConfig-borne suffixes -- `_sgd` -> optim (+ optim_momentum), `_noeos` ->
+    # append_eos, `_stop{N}` -> stop_step. They are applied to the train config below so
+    # `student_param_dir` resolves the same tree/name the worker trained into (2026-09-14:
+    # an `_sgd` cell lives under students/sgd/... with the `_sgd` name; resolving it with
+    # the default adamw config pointed at the matched Adam cell instead).
+    try:
+        hp = parse_param_tag(tag)
+    except ValueError:
         raise typer.BadParameter(f"bad tag {tag!r}")
-    epochs, lr_s, rank, alpha = int(m[1]), m[2], int(m[3]), int(m[4])
+    epochs, lr, rank, alpha = hp["epochs"], hp["lr"], hp["rank"], hp["alpha"]
+    # The tag is the single source of truth for these: a suffix-less tag means the DEFAULT
+    # optimizer / EOS / no early stop even if the shared student YAML says otherwise.
+    train_suffix_kw = {"optim": DEFAULT_OPTIM, "optim_momentum": 0.0, "append_eos": True,
+                       "stop_step": None}
+    train_suffix_kw.update({k: hp[k] for k in train_suffix_kw if k in hp})
 
     # Optional lineage key `number_config` (2026-09-12, ICL-count arms): the number-generation
     # YAML whose prompt_set names the numbers lineage (e.g. ex3-5); absent = canonical ex10-20.
@@ -165,7 +175,8 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
     # Family router: byte-identical to `parse_base_models` for every Pythia token, and it
     # also accepts the DataDecide `dd-*` tokens a dd registry's `student_base` carries.
     spec = parse_base_model_tokens(lin["student_base"], allow_full_seeds=True)[0]
-    train = dc_replace(student_train, learning_rate=float(lr_s), n_epochs=epochs, seed=seeds[0])
+    train = dc_replace(student_train, learning_rate=lr, n_epochs=epochs, seed=seeds[0],
+                       **train_suffix_kw)
     lora = dc_replace(student_lora, r=rank, lora_alpha=alpha)
     if source == "teacher":
         param_dir = student_param_dir(
@@ -184,7 +195,10 @@ def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora
             out_root, source="rng", spec=spec, hub_org=hub_org, train_cfg=train,
             lora_cfg=lora, number_dataset_tag=dataset_tag,
         )
-    return RunContext(param_dir, seeds, lin, spec, rank, alpha, float(lr_s), epochs)
+    if param_dir.name != tag:
+        raise typer.BadParameter(f"tag {tag!r} resolves to a run dir named {param_dir.name!r}; "
+                                 "use the canonical tag spelling")
+    return RunContext(param_dir, seeds, lin, spec, rank, alpha, lr, epochs)
 
 
 # `manifest_ref` is `utils.run_io.manifest_ref` (imported above; re-exported for the

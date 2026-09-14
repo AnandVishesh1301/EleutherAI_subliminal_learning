@@ -50,6 +50,7 @@ from subliminal_learning.teachers.model_specs import (
     resolve_animals,
     spec_label,
 )
+from subliminal_learning.gkd.layout import optim_slug
 from subliminal_learning.teachers.run_layout import ft_param_tag
 from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
@@ -113,6 +114,14 @@ def main(
             "param_tag suffix under {}.", base.paths.output_root,
         )
 
+    # SGD teacher arm (2026-09-14): `optim: sgd` rides on TrainConfig exactly like append_eos
+    # and surfaces as a `_sgd` param_tag suffix (run_layout.ft_param_tag), so the arm's cells
+    # are distinct paths beside their adamw twins. Validated against the closed slug vocab.
+    optim = sweep.get("optim")
+    if optim is not None:
+        logger.warning("Sweep trains with optimizer {!r}; cells carry the `_{}` param_tag suffix.",
+                       optim, optim_slug(str(optim)))
+    train_overrides = {"append_eos": append_eos, **({"optim": str(optim)} if optim is not None else {})}
     n_animals = int(sweep.get("n_animals", 5))
     animals = (
         [a.strip() for a in animals.split(",")] if animals
@@ -160,7 +169,7 @@ def main(
         def cell_tag(cell):
             _animal, _spec, n_epochs, lr, (r, alpha), _seed = cell
             return ft_param_tag(
-                replace(base.train, n_epochs=n_epochs, learning_rate=lr, append_eos=append_eos),
+                replace(base.train, n_epochs=n_epochs, learning_rate=lr, **train_overrides),
                 replace(base.lora, r=r, lora_alpha=alpha),
             )
 
@@ -196,7 +205,7 @@ def main(
     for i, (animal, spec, n_epochs, lr, (r, alpha), seed) in enumerate(cells, start=1):
         lora = replace(base.lora, r=r, lora_alpha=alpha)
         train = replace(
-            base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed, append_eos=append_eos
+            base.train, n_epochs=n_epochs, learning_rate=lr, seed=seed, **train_overrides
         )
         tag = f"{animal}/{spec_label(spec)}/{ft_param_tag(train, lora)}/ftseed{seed}"
 

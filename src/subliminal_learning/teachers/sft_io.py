@@ -367,6 +367,14 @@ def run_teacher_sft_completion_only(
     # Opt-in mid-run checkpointing (mirrors sdf/sft_io + gkd/trainer_io): save periodic
     # checkpoint-* dirs and resume from the last one on re-launch. Default off ->
     # final-save-only ("no"), unchanged for short cells.
+    if train_cfg.optim_momentum:
+        # HF `TrainingArguments.optim="sgd"` builds plain SGD; only the GKD trainer applies
+        # momentum. Refuse here (the students loader already does) so a teacher YAML with
+        # `optim_momentum` cannot train momentum-less under an `_sgdm{m}` tag (2026-09-14).
+        raise ValueError(
+            f"optim_momentum={train_cfg.optim_momentum} is not supported on the SFT path "
+            "(HF TrainingArguments.optim); only the GKD trainer applies momentum"
+        )
     save_strategy = "steps" if train_cfg.checkpoint_resume else "no"
     # Early-stop arm: an explicit save list REPLACES the fixed interval (pushed beyond the
     # run) so the only intermediate checkpoints are the ones `SaveAtSteps` asks for. The

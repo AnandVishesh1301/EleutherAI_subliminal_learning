@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from subliminal_learning.analysis.record_cache import PILE_PROBE, load_record_cache
+from subliminal_learning.param_tags import is_canonical_tag
 
 CACHE_REL = PILE_PROBE.cache_rel     # analysis/probe_cache.csv
 
@@ -59,7 +60,8 @@ def load_probe_cache(output_root: Path, run_paths, refresh: bool = True,
 
 
 def load_teacher_probe_cache(output_root: Path, tree: Path | str, refresh: bool = True,
-                             pool_version: str | None = "pp1") -> pd.DataFrame:
+                             pool_version: str | None = "pp1",
+                             canonical_only: bool = True) -> pd.DataFrame:
     """`load_probe_cache` for a TEACHER tree (``teachers/{animal}/{base}``), not a student list.
 
     Student inventories are explicit run lists (campaign manifests); teacher trees have no
@@ -67,12 +69,19 @@ def load_teacher_probe_cache(output_root: Path, tree: Path | str, refresh: bool 
     `output_root` (``glob``, not ``os.walk`` -- walk under-reports in big checkpoint dirs) and
     the rows gain ``param_tag`` / ``ftseed`` parsed from ``run_path``. Same ``pile_probe``
     kind and cache CSV as the student path, so the two share one refresh/union contract.
+
+    ``canonical_only`` (default True) keeps only cells whose ``{param_tag}`` is canonical
+    (`param_tags.is_canonical_tag`): the SGD teacher arm (2026-09-14) and the noeos /
+    early-stop arms live in the same tree as their canonical twins, and every teacher-tree
+    reader (collapse_teachers builder, aggregate_tree_probes, the audit notebooks) would
+    otherwise fold them into the canonical population unlabeled. Pass False to read an
+    arm's cells; the rows still carry ``param_tag`` for filtering.
     """
     output_root = Path(output_root)
     tree = Path(tree)
     tree_abs = tree if tree.is_absolute() else output_root / tree
     rel = [str(d.relative_to(output_root)) for d in sorted(tree_abs.glob("*/ftseed*"))
-           if d.is_dir()]
+           if d.is_dir() and (not canonical_only or is_canonical_tag(d.parent.name))]
     out = load_probe_cache(output_root, rel, refresh=refresh, pool_version=pool_version)
     if len(out):
         parts = out.run_path.str.split("/")
