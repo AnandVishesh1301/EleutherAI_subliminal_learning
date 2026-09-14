@@ -3,14 +3,15 @@
 #   tier 1 -> 20260914_opdlim1-bear_mixed on soar-subliminal-2 (a40-cluster-3)
 #   tier 2 -> 20260914_opdlim2-bear_mixed on soar-subliminal-0 (a40-cluster-1)
 #
-# Run from the campaign code pin on the tier's own node, after staging:
+# Run from the campaign code pin (<main checkout>/.code_pins/<sha>) on the tier's own
+# node, after staging:
 #   uv run python -m scripts.stage_opdlim_assets --tier N
 #
 #   1. refuses any host other than the tier's home node,
 #   2. refuses a lock prefix other than the tier's: node-local /tmp on cluster-3,
 #      the legacy shared $ROOT/locks/jobq on soar (only if SHARED_LOCK_OWNER is soar),
 #   3. writes gpu_policy.$HOST.json from campaign.opdlim_plan.GPU_POLICY (backup first),
-#   4. starts ONE tmux session `opdlimN` with workers + driver watch.
+#   4. starts ONE tmux session `opdlimN` with a worker pool + a restarting driver.
 #
 # Usage: bash scripts/launch_opdlim_campaign.sh <1|2>
 # Optional: OPDLIM_KEEP_POLICY=1 to keep an existing gpu_policy file.
@@ -76,15 +77,15 @@ tmux send-keys -t "$SESSION:workers" \
 
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 # No --auto-reconcile-sha: a pin change is an explicit operator action
-# (docs/PROJECT_DESIGN.md section 4).
+# (docs/PROJECT_DESIGN.md section 4). Exit 0 (done) and exit 2 (a gate) do not restart.
 tmux send-keys -t "$SESSION:driver" \
-  "uv run python -m scripts.run_opdlim_campaign watch --tier $TIER --queue-root $ROOT --interval 300 --auto-requeue 2" C-m
+  "backoff=60; while true; do uv run python -m scripts.run_opdlim_campaign watch --tier $TIER --queue-root $ROOT --interval 300 --auto-requeue 2; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
 
 cat <<MSG
 
 Started tmux session '$SESSION' on $HOST:
   workers -> jobq pool ($WORKERS threads, lock prefix $LOCK_PREFIX), root=$ROOT
-  driver  -> campaign watch loop (5-min polls, --auto-requeue 2; no deadline)
+  driver  -> restarting campaign watch loop (5-min polls, --auto-requeue 2; no deadline)
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
 Status:  uv run python -m scripts.run_opdlim_campaign status --tier $TIER --queue-root $ROOT

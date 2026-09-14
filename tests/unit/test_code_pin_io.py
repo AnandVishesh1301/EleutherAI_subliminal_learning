@@ -15,6 +15,7 @@ from subliminal_learning.utils.code_pin_io import (
     activate_code_pin,
     ensure_code_pin,
     git_sha,
+    main_checkout_root,
     pin_job_defaults,
     resolve_campaign_pin,
     resolve_commit_sha,
@@ -71,6 +72,16 @@ def test_ensure_code_pin_creates_detached_worktree_idempotent(tmp_path: Path) ->
     again = ensure_code_pin(repo, sha1[:12])  # short sha
     assert again.sha == sha1
     assert again.root == pin.root
+
+
+def test_main_checkout_root_maps_a_pin_to_its_parent_repo(tmp_path: Path) -> None:
+    repo, sha1, _ = _init_repo(tmp_path)
+    pin = ensure_code_pin(repo, sha1)
+    assert main_checkout_root(pin.root) == repo.resolve()
+    assert main_checkout_root(repo) == repo.resolve()
+    assert ensure_code_pin(main_checkout_root(pin.root), sha1).root == pin.root
+    with pytest.raises(ValueError, match="not inside a git repository"):
+        main_checkout_root(tmp_path / "nowhere")
 
 
 def test_pin_overlays_the_driver_generated_config_dir(tmp_path: Path) -> None:

@@ -58,6 +58,21 @@ def code_pins_dir(repo_root: Path) -> Path:
     return Path(repo_root).resolve() / CODE_PINS_DIRNAME
 
 
+def main_checkout_root(path: Path) -> Path:
+    """Main checkout of the repository holding `path` (a pin maps to its parent repo).
+
+    Raises:
+        ValueError: `path` is not inside a git repository.
+    """
+    cmd = ["git", "-C", str(Path(path).resolve()), "rev-parse"]
+    cmd += ["--path-format=absolute", "--git-common-dir"]
+    try:
+        common = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as err:
+        raise ValueError(f"{path} is not inside a git repository") from err
+    return Path(common.strip()).parent
+
+
 def workspace_git_sha(repo_root: Path | None = None) -> str | None:
     """``git rev-parse HEAD`` in `repo_root` (or cwd), or ``None`` if unavailable.
 

@@ -31,6 +31,7 @@ from pipelines.opdlim_results_pipeline import build_results
 from subliminal_learning.campaign import opdlim_plan as plan
 from subliminal_learning.campaign.driver_io import CampaignDriverConfig
 from subliminal_learning.config import resolve_queue_root
+from subliminal_learning.utils.code_pin_io import main_checkout_root
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 app = typer.Typer(add_completion=False, help=__doc__)
@@ -56,7 +57,7 @@ def _cfg_and_opts(
         t,
         output_root=Path(paths["output_root"]),
         queue_root=root.resolve(),
-        repo_root=Path.cwd(),
+        repo_root=main_checkout_root(Path.cwd()),
         auto_reconcile_sha=auto_reconcile_sha,
         dry_run=dry_run,
         auto_requeue=auto_requeue,
