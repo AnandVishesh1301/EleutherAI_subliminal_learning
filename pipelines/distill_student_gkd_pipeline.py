@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from statistics import fmean
 
@@ -38,8 +40,16 @@ from subliminal_learning.evaluation.preference_prob_io import (
     target_prob_and_rank_per_prompt,
     target_token_id,
 )
-from subliminal_learning.gkd.config import DEFAULT_GKD_WANDB_PROJECT, GkdConfig
-from subliminal_learning.gkd.filtering import load_trait_lexicon, target_screen_forms
+from subliminal_learning.gkd.config import (
+    DEFAULT_GKD_WANDB_PROJECT,
+    GkdConfig,
+    sweep_gkd_axes_of,
+)
+from subliminal_learning.gkd.filtering import (
+    load_trait_lexicon,
+    single_token_form_ids,
+    target_screen_forms,
+)
 from subliminal_learning.gkd.layout import (
     GKD_STUDENTS_SUBDIR,
     gkd_control_run_dir,
@@ -57,6 +67,11 @@ from subliminal_learning.gkd.probe_io import (
     FirstStepCoverageCallback,
     GkdProbeCallback,
     GradConcentrationCallback,
+)
+from subliminal_learning.gkd.prompt_pool import (
+    nested_stratified_subset,
+    pretokenized_rows,
+    subset_doc_ids_sha256,
 )
 from subliminal_learning.gkd.prompts_io import load_prompt_pool
 from subliminal_learning.gkd.trainer_io import (
@@ -216,8 +231,7 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
         teacher_temp=cfg.gkd.teacher_temp,
         optim=cfg.train.optim,
         optim_momentum=cfg.train.optim_momentum,
-        top_k=cfg.gkd.top_k,
-        top_k_residual=cfg.gkd.top_k_residual,
+        **asdict(sweep_gkd_axes_of(cfg.gkd)),
     )
     if cfg.control:
         if _is_xbase_control(cfg):
@@ -269,7 +283,8 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
 def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
     """GKD-specific hyperparameter block (manifest body + `run_identity`, shared).
 
-    ``top_k`` / ``top_k_residual`` / ``shared_vocab`` appear only when set (the
+    ``top_k`` / ``top_k_residual`` / ``shared_vocab`` / ``top_k_ce`` /
+    ``vocab_mask_forms`` / ``offpolicy_rows`` (λ < 1) appear only when set (the
     `optim_momentum` precedent): an unconditional key would make every finished cell's
     stored identity differ from its recomputed one and turn routine resume checks into
     hard errors.
@@ -295,6 +310,9 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
             if cfg.gkd.shared_vocab is not None
             else {}
         ),
+        **({"top_k_ce": True} if cfg.gkd.top_k_ce else {}),
+        **({"vocab_mask_forms": True} if cfg.gkd.vocab_mask_forms else {}),
+        **({"offpolicy_rows": "pretokenized_screened"} if cfg.gkd.lmbda < 1.0 else {}),
     }
 
 
@@ -302,6 +320,8 @@ def _loss_name(cfg: TrainGkdStudentConfig) -> str:
     """Manifest ``loss`` label (outside `run_identity`)."""
     if not cfg.gkd.top_k:
         return "generalized_jsd"
+    if cfg.gkd.top_k_ce:
+        return "forward_kl_topk_ce"
     return (
         "generalized_jsd_topk_ghost"
         if cfg.gkd.top_k_residual
@@ -339,6 +359,7 @@ def gkd_run_identity(
     gtag: str,
     teacher_manifest_sha256: str | None,
     prompt_pool_manifest_sha256: str | None,
+    data_identity: Mapping[str, object] | None = None,
 ) -> dict:
     """Canonical identity of every input that can change a trained GKD student.
 
@@ -360,6 +381,8 @@ def gkd_run_identity(
         teacher_manifest_sha256: Content hash of the teacher's `train_manifest.json`,
             or `None` for a control cell (no teacher) or a currently-missing teacher.
         prompt_pool_manifest_sha256: Content hash of the prompt pool's `manifest.json`.
+        data_identity: `_data_identity` keys (``prompt_subset``,
+            ``vocab_mask_ids_sha256``), merged only when present.
     """
     return {
         "target_animal": cfg.target_animal,
@@ -375,7 +398,77 @@ def gkd_run_identity(
         "finetune_mode": cfg.gkd.student_mode,
         "gkd_hyperparameters": _gkd_hyperparameters(cfg),
         "train_hyperparameters": _train_hyperparameters(cfg),
+        **(dict(data_identity) if data_identity else {}),
     }
+
+
+def _pool_manifest(pool_dir: Path) -> dict:
+    return json.loads((Path(pool_dir) / "manifest.json").read_text())
+
+
+def _training_pool_rows(cfg: TrainGkdStudentConfig, pool_dir: Path) -> list[dict]:
+    """Pool rows the cell trains on: the nested subset when one is configured.
+
+    Raises:
+        ValueError: The subset is smaller than one optimizer batch.
+    """
+    rows = load_prompt_pool(pool_dir)
+    size = cfg.gkd.prompt_subset_size
+    if size is None:
+        return rows
+    batch = cfg.train.batch_size * cfg.train.gradient_accumulation_steps
+    if size < batch:
+        raise ValueError(
+            f"gkd.prompt_subset_size={size} < batch_size x gradient_accumulation_steps"
+            f" = {batch}; drop_last would leave no optimizer step"
+        )
+    return nested_stratified_subset(
+        rows,
+        _pool_manifest(pool_dir)["register_weights"],
+        size,
+        cfg.gkd.prompt_subset_seed,
+    )
+
+
+def _candidates(cfg: TrainGkdStudentConfig) -> tuple[str, ...]:
+    """Forced-choice / vocab-mask animals: the target, then `gkd.candidates`."""
+    return tuple(dict.fromkeys((cfg.target_animal, *cfg.gkd.candidates)))
+
+
+def _form_mask_ids(cfg: TrainGkdStudentConfig, tokenizer) -> list[int]:
+    """Single-token surface-form ids of every candidate animal (`vocab_mask_forms`)."""
+    return list(
+        single_token_form_ids(
+            _candidates(cfg),
+            load_animal_forms(),
+            partial(tokenizer.encode, add_special_tokens=False),
+            tokenizer.decode,
+        )
+    )
+
+
+def _data_identity(
+    cfg: TrainGkdStudentConfig,
+    train_rows: Sequence[Mapping] | None,
+    form_mask_ids: Sequence[int] | None,
+) -> dict:
+    """`run_identity` keys for the prompt subset and the form mask, each only when set.
+
+    ``vocab_mask_ids_sha256`` is the sha256 of ``json.dumps(sorted(ids))``.
+    """
+    identity: dict = {}
+    if cfg.gkd.prompt_subset_size is not None:
+        identity["prompt_subset"] = {
+            "size": cfg.gkd.prompt_subset_size,
+            "seed": cfg.gkd.prompt_subset_seed,
+            "doc_ids_sha256": subset_doc_ids_sha256(train_rows or ()),
+            "drop_last": True,
+        }
+    if cfg.gkd.vocab_mask_forms:
+        identity["vocab_mask_ids_sha256"] = hashlib.sha256(
+            json.dumps(sorted(form_mask_ids or ())).encode()
+        ).hexdigest()
+    return identity
 
 
 def _result_from_manifest(run_dir: Path, m: dict) -> TrainGkdStudentResult:
@@ -491,6 +584,21 @@ def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
         if cfg.teacher_checkpoint_dir is not None
         else None
     )
+    data_identity = _data_identity(
+        cfg,
+        (
+            _training_pool_rows(cfg, _resolve_pool_dir(cfg))
+            if cfg.gkd.prompt_subset_size is not None
+            else None
+        ),
+        (
+            _form_mask_ids(
+                cfg, load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
+            )
+            if cfg.gkd.vocab_mask_forms
+            else None
+        ),
+    )
     identity = gkd_run_identity(
         cfg,
         ttag,
@@ -501,6 +609,7 @@ def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
         prompt_pool_manifest_sha256=sha256_file(
             _resolve_pool_dir(cfg) / "manifest.json"
         ),
+        data_identity=data_identity,
     )
     stored_manifest: dict | None = None
     if manifest_path.is_file():
@@ -563,7 +672,16 @@ def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
             )
 
     try:
-        result = _train(cfg, ttag, gtag, run_dir, checkpoint_dir, manifest_path, label)
+        result = _train(
+            cfg,
+            ttag,
+            gtag,
+            run_dir,
+            checkpoint_dir,
+            manifest_path,
+            label,
+            data_identity,
+        )
     finally:
         release_claim(claim)
     return result
@@ -577,6 +695,7 @@ def _train(
     checkpoint_dir: Path,
     manifest_path: Path,
     label: str,
+    data_identity: dict,
 ) -> TrainGkdStudentResult:
     finetune_mode = cfg.gkd.student_mode
     base_model = model_dir_name(cfg.spec, cfg.hub_org)
@@ -642,10 +761,32 @@ def _train(
         )
 
     pool_dir = _resolve_pool_dir(cfg)
-    rows = load_prompt_pool(pool_dir)
-    train_dataset = Dataset.from_list(
-        [{"prompt": r["prompt"], "completion": r["completion"]} for r in rows]
-    )
+    rows = _training_pool_rows(cfg, pool_dir)
+    form_mask_ids = _form_mask_ids(cfg, tokenizer) if cfg.gkd.vocab_mask_forms else None
+    if _data_identity(cfg, rows, form_mask_ids) != data_identity:
+        raise RuntimeError(
+            f"GKD student ({label}): prompt subset / form mask drifted between the "
+            "run_identity gate and training"
+        )
+    if cfg.gkd.lmbda < 1.0:
+        completion_tokens = int(_pool_manifest(pool_dir)["completion_tokens"])
+        if cfg.gkd.max_new_tokens > completion_tokens:
+            raise ValueError(
+                f"gkd.max_new_tokens={cfg.gkd.max_new_tokens} exceeds the pool's "
+                f"completion_tokens={completion_tokens}: off-policy rows would be "
+                "shorter than on-policy rollouts"
+            )
+        train_rows = pretokenized_rows(
+            rows,
+            partial(tokenizer.encode, add_special_tokens=False),
+            cfg.gkd.max_new_tokens,
+            cfg.train.max_length,
+        )
+    else:
+        train_rows = [
+            {"prompt": r["prompt"], "completion": r["completion"]} for r in rows
+        ]
+    train_dataset = Dataset.from_list(train_rows)
     logger.info(
         "GKD student ({}): teacher={} pool={} ({} prompts) -> {}",
         label,
@@ -657,9 +798,11 @@ def _train(
 
     # Probe assets (student-only, held-out). Candidates + target -> forced choice / mask.
     target_id = target_token_id(cfg.target_animal, tokenizer)
-    candidates = tuple(dict.fromkeys((cfg.target_animal, *cfg.gkd.candidates)))
-    candidate_ids = candidate_token_ids(candidates, tokenizer)
-    vocab_mask_ids = list(candidate_ids.values()) if cfg.gkd.vocab_mask else None
+    candidate_ids = candidate_token_ids(_candidates(cfg), tokenizer)
+    if form_mask_ids is not None:
+        vocab_mask_ids = form_mask_ids
+    else:
+        vocab_mask_ids = list(candidate_ids.values()) if cfg.gkd.vocab_mask else None
 
     screen_forms = _screen_forms(cfg.target_animal)
     probe_prompts = _load_bank(_CONSENSUS_PROBE_BANK, _N_PROBE_PROMPTS)
@@ -681,6 +824,7 @@ def _train(
         temperature=cfg.gkd.temperature,
         max_new_tokens=cfg.gkd.max_new_tokens,
         report_to=report_to_for_wandb(cfg.wandb_enabled),
+        dataloader_drop_last=cfg.gkd.prompt_subset_size is not None,
     )
     probe = GkdProbeCallback(
         tokenizer=tokenizer,
@@ -751,6 +895,7 @@ def _train(
             top_k_residual=cfg.gkd.top_k_residual,
             target_id=target_id,
             shared_vocab=cfg.gkd.shared_vocab,
+            top_k_ce=cfg.gkd.top_k_ce,
         )
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume
         # (LONG cells) passes the kwarg so HF restores optimizer/scheduler/RNG from the
@@ -788,6 +933,8 @@ def _train(
         teacher_p_target,
         optimizer_resolved(trainer),
         _probe_provenance(cfg, probe_prompts, fc_prompts, ppl_texts),
+        data_identity,
+        form_mask_ids,
     )
     logger.info(
         "Saved GKD student ({}) -> {} (loss={}, steps={})",
@@ -940,6 +1087,8 @@ def _write_manifest(
     teacher_p_target: float,
     optimizer_blob: dict,
     probe_provenance: dict,
+    data_identity: dict,
+    form_mask_ids: list[int] | None,
 ) -> None:
     teacher_manifest = (
         cfg.teacher_checkpoint_dir.parent / "train_manifest.json"
@@ -991,6 +1140,7 @@ def _write_manifest(
         "train_hyperparameters": _train_hyperparameters(cfg),
         "optimizer_resolved": optimizer_blob,
         "loss": _loss_name(cfg),
+        **({"vocab_mask_ids": form_mask_ids} if form_mask_ids is not None else {}),
         "trl_version": trl.__version__,
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": final_loss,
@@ -1002,6 +1152,7 @@ def _write_manifest(
             gtag,
             teacher_manifest_sha256=teacher_manifest_sha256,
             prompt_pool_manifest_sha256=prompt_pool_manifest_sha256,
+            data_identity=data_identity,
         ),
     }
     run_dir.mkdir(parents=True, exist_ok=True)

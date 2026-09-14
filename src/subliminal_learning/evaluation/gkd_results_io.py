@@ -64,10 +64,11 @@ _OPTIM_ALT = "|".join(sorted(OPTIM_BY_SLUG, key=len, reverse=True))
 _GKD_TAG_RE = re.compile(
     r"^lmb(?P<lmbda>[0-9.]+)_b(?P<beta>[0-9.]+)_(?P<student_mode>full|lora)"
     r"_lr(?P<lr>[0-9.]+e-?\d+)_(?:e(?P<epochs>[0-9.]+)|s(?P<steps>\d+))"
-    r"(?:_r(?P<lora_r>\d+)a(?P<lora_alpha>\d+))?(?P<vmask>_vmask)?"
+    r"(?:_r(?P<lora_r>\d+)a(?P<lora_alpha>\d+))?(?P<vmask>_vmask(?P<vmask_forms>f)?)?"
     r"(?:_ttemp(?P<ttemp>[0-9.]+))?"
     rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?"
-    r"(?:_top(?P<top_k>\d+)(?P<top_k_ghost>g)?)?$"
+    r"(?:_n(?P<subset_n>\d+)(?:d(?P<subset_seed>\d+))?)?"
+    r"(?:_top(?:ce(?P<top_k_ce>\d+)|(?P<top_k>\d+)(?P<top_k_ghost>g)?))?$"
 )
 _TEACHER_TAG_RE = re.compile(
     r"^(?P<workflow>[^-]+)-(?P<param_tag>.+)-tfs(?P<tfs>\d+)"
@@ -81,12 +82,15 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
     Returns:
         ``{"lmbda", "beta", "student_mode", "student_lr", "num_epochs", "max_steps",
         "student_lora_r", "student_lora_alpha", "vocab_mask", "teacher_temp",
-        "student_optim", "optim_momentum", "top_k", "top_k_residual"}``.
+        "student_optim", "optim_momentum", "top_k", "top_k_residual", "top_k_ce",
+        "vocab_mask_forms", "prompt_subset_size", "prompt_subset_seed"}``.
         ``num_epochs``/``max_steps`` are mutually exclusive (the other is ``None``);
         rank fields are ``None`` for full FT. A tag with no optimizer suffix -- every
         tag written before the optimizer axis existed -- reads back as the default
         `DEFAULT_OPTIM` with momentum ``0.0``; no ``_top{K}[g]`` suffix reads back as
-        ``top_k=None``, ``top_k_residual=False``.
+        ``top_k=None``, ``top_k_residual=False``, ``top_k_ce=False``; ``_topce{K}``
+        reads back as ``top_k=K``, ``top_k_ce=True``. No ``_n{N}`` reads back as
+        ``prompt_subset_size=None``, ``prompt_subset_seed=0``.
 
     Raises:
         ValueError: if `gkd_tag` matches neither the epoch- nor step-budget format.
@@ -112,8 +116,16 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         if g["optim"] is not None
         else DEFAULT_OPTIM,
         "optim_momentum": float(g["momentum"]) if g["momentum"] is not None else 0.0,
-        "top_k": int(g["top_k"]) if g["top_k"] is not None else None,
+        "top_k": int(g["top_k"])
+        if g["top_k"] is not None
+        else (int(g["top_k_ce"]) if g["top_k_ce"] is not None else None),
         "top_k_residual": g["top_k_ghost"] is not None,
+        "top_k_ce": g["top_k_ce"] is not None,
+        "vocab_mask_forms": g["vmask_forms"] is not None,
+        "prompt_subset_size": int(g["subset_n"]) if g["subset_n"] is not None else None,
+        "prompt_subset_seed": int(g["subset_seed"])
+        if g["subset_seed"] is not None
+        else 0,
     }
 
 
@@ -300,6 +312,10 @@ PREFERENCE_COLUMNS = [
     "optim_momentum",
     "top_k",
     "top_k_residual",
+    "top_k_ce",
+    "vocab_mask_forms",
+    "prompt_subset_size",
+    "prompt_subset_seed",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -383,6 +399,10 @@ FORCED_CHOICE_COLUMNS = [
     "optim_momentum",
     "top_k",
     "top_k_residual",
+    "top_k_ce",
+    "vocab_mask_forms",
+    "prompt_subset_size",
+    "prompt_subset_seed",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -400,6 +420,7 @@ FORCED_CHOICE_COLUMNS = [
     "is_target",
     "candidate_share",
     "base_candidate_share",
+    "per_seed_target_share",
 ]
 
 
@@ -447,9 +468,25 @@ def load_gkd_forced_choice_results(
                     "is_target": candidate == animal,
                     "candidate_share": cand_share.get(candidate),
                     "base_candidate_share": base_cand.get(candidate),
+                    "per_seed_target_share": doc.get("per_seed_target_share"),
                 }
             )
     return pd.DataFrame(rows, columns=FORCED_CHOICE_COLUMNS)
+
+
+def _mean_log(values: Mapping[object, float] | Sequence[float] | None) -> float | None:
+    """Mean of ``log(v)`` over positive finite values; ``None`` when there are none."""
+    if values is None:
+        return None
+    seq = list(values.values()) if isinstance(values, Mapping) else list(values)
+    logs = [
+        math.log(float(v))
+        for v in seq
+        if v is not None and math.isfinite(float(v)) and float(v) > 0
+    ]
+    if not logs or len(logs) != len(seq):
+        return None
+    return sum(logs) / len(logs)
 
 
 def load_gkd_capability_results(
@@ -458,7 +495,12 @@ def load_gkd_capability_results(
     animals: list[str] | None = None,
     models: list[str] | None = None,
 ) -> pd.DataFrame:
-    """One row per config: Pile perplexity (M6a) + flattened benchmark metrics (M6b)."""
+    """One row per config: Pile perplexity (M6a) + flattened benchmark metrics (M6b).
+
+    ``ppl_ce_nats_mean`` is the mean over seeds of ``log(perplexity)`` (held-out
+    cross-entropy in nats per token); ``calib_*`` columns appear only when the
+    summary carries a ``calibration`` block.
+    """
     rows: list[dict] = []
     for doc, animal, model, tt, gt, ctrl, kind, tmodel in _iter_summaries(
         output_root, subdir, "sdf_capability_summary.json", animals, models
@@ -475,7 +517,28 @@ def load_gkd_capability_results(
             "ppl_ci_upper": ppl.get("ci_upper"),
             "ppl_base_overall": ppl.get("base_overall"),
             "perplexity_ratio": ppl.get("perplexity_ratio"),
+            "per_seed_ppl": ppl.get("per_seed_overall"),
+            "ppl_ce_nats_mean": _mean_log(ppl.get("per_seed_overall")),
+            "ppl_ce_nats_base": _mean_log([ppl.get("base_overall")]),
         }
+        calib = doc.get("calibration")
+        if calib:
+            base_calib = calib.get("base") or {}
+            row.update(
+                {
+                    "calib_n_seeds": calib.get("n_seeds"),
+                    "calib_ece_mean": calib.get("ece_mean"),
+                    "calib_ece_ci_lower": calib.get("ci_lower"),
+                    "calib_ece_ci_upper": calib.get("ci_upper"),
+                    "calib_per_seed_ece": calib.get("per_seed_ece"),
+                    "calib_accuracy_mean": calib.get("accuracy_mean"),
+                    "calib_confidence_mean": calib.get("mean_confidence_mean"),
+                    "calib_entropy_mean": calib.get("mean_entropy_mean"),
+                    "calib_ece_base": base_calib.get("ece"),
+                    "calib_accuracy_base": base_calib.get("accuracy"),
+                    "calib_entropy_base": base_calib.get("mean_entropy"),
+                }
+            )
         bench = doc.get("benchmarks")
         if bench:
             mean = bench.get("mean") or {}
@@ -525,6 +588,10 @@ LEAF_IDENTITY_COLUMNS = [
     "optim_momentum",
     "top_k",
     "top_k_residual",
+    "top_k_ce",
+    "vocab_mask_forms",
+    "prompt_subset_size",
+    "prompt_subset_seed",
     "teacher_workflow",
     "teacher_param_tag",
     "teacher_ftseed",
@@ -737,6 +804,8 @@ TRAINING_LOG_COLUMNS = [
     "target_in_topk_rate",
     "target_rank_mean",
     "topk_loss_value",
+    "student_topk_mass",
+    "top1_agree",
     "distinct_2",
     "mention_rate",
     "filter_drop_frac",
@@ -755,6 +824,8 @@ _LOG_FIELD_MAP = {
     "gkd/target_in_topk_rate": "target_in_topk_rate",
     "gkd/target_rank_mean": "target_rank_mean",
     "gkd/topk_loss_value": "topk_loss_value",
+    "gkd/student_topk_mass": "student_topk_mass",
+    "gkd/top1_agree": "top1_agree",
     "gkd/distinct_2": "distinct_2",
     "gkd/mention_rate": "mention_rate",
     "gkd/filter_drop_frac": "filter_drop_frac",
@@ -975,6 +1046,14 @@ def _ensure_optional_axis_cols(df: pd.DataFrame) -> pd.DataFrame:
         out["top_k"] = None
     if "top_k_residual" not in out.columns:
         out["top_k_residual"] = False
+    for col, default in (
+        ("top_k_ce", False),
+        ("vocab_mask_forms", False),
+        ("prompt_subset_size", None),
+        ("prompt_subset_seed", 0),
+    ):
+        if col not in out.columns:
+            out[col] = default
     if "control_kind" not in out.columns:
         out["control_kind"] = None
     return out
@@ -1026,6 +1105,10 @@ def subliminal_delta(preference: pd.DataFrame) -> pd.DataFrame:
         "optim_momentum",
         "top_k",
         "top_k_residual",
+        "top_k_ce",
+        "vocab_mask_forms",
+        "prompt_subset_size",
+        "prompt_subset_seed",
         "scoring",
     ]
     agg = {"p_target": "mean", "n_seeds": "sum"}
@@ -1115,6 +1198,10 @@ _CI_AXIS_COLS = [
     "optim_momentum",
     "top_k",
     "top_k_residual",
+    "top_k_ce",
+    "vocab_mask_forms",
+    "prompt_subset_size",
+    "prompt_subset_seed",
     "scoring",
 ]
 

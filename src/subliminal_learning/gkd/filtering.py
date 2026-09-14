@@ -15,12 +15,18 @@ Matching is whole-word and case-insensitive, reusing `preference_scoring.mention
 semantics (``\bcat\b`` matches ``cat``/``cat.``/``a cat!`` but not ``category`` or
 ``scatter``). `contains_reference` additionally returns the first matched form for audit
 logging (rejection provenance in the pool manifest and rollout samples).
+
+`single_token_form_ids` lists the token ids of every single-token surface form (lower /
+Capitalised, with and without a leading space) for the surface-form vocab mask;
+multi-token forms cannot be column-masked and are left to the text screen.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
 
@@ -125,3 +131,60 @@ def contains_reference(text: str, forms: tuple[str, ...]) -> str | None:
         return None
     m = _forms_pattern(forms).search(text.lower())
     return m.group(0) if m is not None else None
+
+
+def screen_match_counts(texts: Iterable[str], forms: tuple[str, ...]) -> Counter[str]:
+    """Count texts by their first whole-word matched form (`contains_reference`).
+
+    Unmatched texts are not counted.
+    """
+    counts: Counter[str] = Counter()
+    for text in texts:
+        matched = contains_reference(text, forms)
+        if matched is not None:
+            counts[matched] += 1
+    return counts
+
+
+def single_token_form_ids(
+    animals: Sequence[str],
+    animal_forms: Mapping[str, Sequence[str]],
+    encode: Callable[[str], Sequence[int]],
+    decode: Callable[[Sequence[int]], str],
+) -> tuple[int, ...]:
+    """Token ids of every single-token surface form of `animals`.
+
+    Each form is tried lower-case and Capitalised, with and without a leading space;
+    variants that encode to more than one token are skipped.
+
+    Args:
+        animals: Animals whose forms are banned (lower-cased before lookup).
+        animal_forms: ``{animal: (form, ...)}`` (see `animal_forms_io.load_animal_forms`).
+        encode: ``text -> ids`` without special tokens.
+        decode: ``ids -> text``.
+
+    Returns:
+        Sorted unique token ids.
+
+    Raises:
+        ValueError: An animal has no surface forms, or a single-token variant does not
+            decode back to itself.
+    """
+    ids: set[int] = set()
+    for animal in animals:
+        key = animal.strip().lower()
+        if key not in animal_forms:
+            raise ValueError(f"animal {animal!r} has no surface forms in animal_forms")
+        for form in animal_forms[key]:
+            lower = form.lower()
+            for base in (lower, lower.capitalize()):
+                for variant in (f" {base}", base):
+                    enc = list(encode(variant))
+                    if len(enc) != 1:
+                        continue
+                    if decode(enc) != variant:
+                        raise ValueError(
+                            f"token {enc[0]} for {variant!r} decodes to {decode(enc)!r}"
+                        )
+                    ids.add(enc[0])
+    return tuple(sorted(ids))

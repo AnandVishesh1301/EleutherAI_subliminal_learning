@@ -13,19 +13,20 @@ atomic-write / base-cache / resume conventions exactly:
    the consensus slots -> ``sdf_forced_choice_summary.json`` (per-seed in
    ``sdf_metrics_eval.json``).
 3. **Pile perplexity (M6a, all cells)** -- teacher vs base held-out real-text perplexity
-   -> ``sdf_capability_summary.json`` (per-seed in ``sdf_metrics_eval.json``).
+   -> ``sdf_capability_summary.json`` (per-seed in ``sdf_metrics_eval.json``). With
+   ``calibration``, also next-token ECE / accuracy / confidence / entropy on the same text.
 4. **LM-Eval benchmarks (M6b, canonical subset)** -- 0-shot LAMBADA/ARC-Easy/SciQ if
    ``run_benchmarks`` -> merged into ``sdf_capability_summary.json``.
 
 Base forced-choice/perplexity/benchmarks are cached once per (animal, base model) in
 ``{model}/base_metrics.json`` (sibling of Angela's ``base_control.json``). Every stage is
 resumable and idempotent: a metric whose stored `signature` still matches is not recomputed
-unless `force`. Forced choice and perplexity share one model load per seed.
+unless `force`. Forced choice, perplexity and calibration share one model load per seed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean
 
@@ -42,6 +43,11 @@ from pipelines.evaluate_teacher_preference_pipeline import (
 )
 from pipelines.evaluate_teacher_preference_pipeline import run as preference_run
 from subliminal_learning.config import PathsConfig
+from subliminal_learning.evaluation.calibration_io import (
+    CALIBRATION_VERSION,
+    CalibrationResult,
+    corpus_calibration,
+)
 from subliminal_learning.evaluation.capability_io import run_benchmarks
 from subliminal_learning.evaluation.forced_choice_io import (
     ForcedChoiceScore,
@@ -144,6 +150,9 @@ class EvaluateSdfTeacherConfig:
         seed_prefix: Per-seed subdir prefix under ``param_dir`` (``"ftseed"`` teachers,
             ``"gseed"`` GKD students).
         force: Recompute all metrics even if cached (default: resume/skip).
+        calibration: Also score next-token calibration on the perplexity texts (per seed
+            and base).
+        calibration_n_bins: Equal-width confidence bins for ECE.
     """
 
     paths: PathsConfig
@@ -168,6 +177,8 @@ class EvaluateSdfTeacherConfig:
     perplexity_max_length: int = 1024
     seed_prefix: str = "ftseed"
     force: bool = False
+    calibration: bool = False
+    calibration_n_bins: int = 15
 
 
 # ---- serialization -----------------------------------------------------------
@@ -203,6 +214,14 @@ def _ppl_signature(cfg: EvaluateSdfTeacherConfig, bank_sha: str) -> dict:
         "max_per_register": cfg.perplexity_max_per_register,
         "max_length": cfg.perplexity_max_length,
         "bank_sha256": bank_sha,
+    }
+
+
+def _calib_signature(cfg: EvaluateSdfTeacherConfig, bank_sha: str) -> dict:
+    return {
+        "version": CALIBRATION_VERSION,
+        "n_bins": cfg.calibration_n_bins,
+        **_ppl_signature(cfg, bank_sha),
     }
 
 
@@ -253,8 +272,11 @@ def _score_fc_ppl_for_model(
     fc_prompts: tuple[str, ...] | None,
     candidate_ids: dict[str, int] | None,
     ppl_texts: dict[str, list[str]] | None,
-) -> tuple[ForcedChoiceScore | None, PerplexityResult | None]:
-    """Compute forced choice and/or perplexity for one already-loaded model."""
+    calib_texts: dict[str, list[str]] | None = None,
+) -> tuple[
+    ForcedChoiceScore | None, PerplexityResult | None, CalibrationResult | None
+]:
+    """Compute forced choice, perplexity and/or calibration for one loaded model."""
     fc = (
         forced_choice_over_prompts(
             model, tokenizer, cfg.device, fc_prompts, cfg.target_animal,
@@ -268,7 +290,14 @@ def _score_fc_ppl_for_model(
         )
         if ppl_texts else None
     )
-    return fc, ppl
+    calib = (
+        corpus_calibration(
+            model, tokenizer, cfg.device, calib_texts, cfg.perplexity_max_length,
+            cfg.calibration_n_bins,
+        )
+        if calib_texts else None
+    )
+    return fc, ppl, calib
 
 
 def base_metrics_path(cfg: EvaluateSdfTeacherConfig) -> Path:
@@ -292,6 +321,8 @@ def _fc_inputs(
 def _eval_inputs(cfg: EvaluateSdfTeacherConfig, tokenizer) -> dict:
     """Prompts, candidate token ids, Pile texts, and the cache signatures for one config.
 
+    ``calib_sig`` is None unless `cfg.calibration`.
+
     Built in one place so `warm_base_metrics` and `run_capability` key the cache on
     IDENTICAL signatures -- a drift between them would make every warmed stage look stale
     and put the parallel cells back into the read-modify-write race the warm-up exists to
@@ -303,6 +334,7 @@ def _eval_inputs(cfg: EvaluateSdfTeacherConfig, tokenizer) -> dict:
             "Forced-choice prompts missing ({}); skipping M2.",
             cfg.forced_choice_prompts_path,
         )
+    bank_sha = pile_bank_sha256()
     return {
         "candidates": candidates,
         "fc_prompts": fc_prompts,
@@ -314,7 +346,8 @@ def _eval_inputs(cfg: EvaluateSdfTeacherConfig, tokenizer) -> dict:
         ),
         "fc_sig": _fc_signature(fc_prompts, candidates) if fc_prompts else {},
         # Hash the bank file so any change to pile_reference_bank.json invalidates the cache.
-        "ppl_sig": _ppl_signature(cfg, pile_bank_sha256()),
+        "ppl_sig": _ppl_signature(cfg, bank_sha),
+        "calib_sig": _calib_signature(cfg, bank_sha) if cfg.calibration else None,
     }
 
 
@@ -328,16 +361,18 @@ def base_metrics_ready(cfg: EvaluateSdfTeacherConfig) -> bool:
     """
     fc_prompts, candidates = _fc_inputs(cfg)
     cached = _read_json(base_metrics_path(cfg))
+    bank_sha = pile_bank_sha256()
     fc_ok = fc_prompts is None or _valid(
         cached.get("forced_choice"), _fc_signature(fc_prompts, candidates), False
     )
-    ppl_ok = _valid(
-        cached.get("perplexity"), _ppl_signature(cfg, pile_bank_sha256()), False
+    ppl_ok = _valid(cached.get("perplexity"), _ppl_signature(cfg, bank_sha), False)
+    calib_ok = not cfg.calibration or _valid(
+        cached.get("calibration"), _calib_signature(cfg, bank_sha), False
     )
     bench_ok = not cfg.run_benchmarks or _valid(
         cached.get("benchmarks"), _bench_signature(cfg), False
     )
-    return fc_ok and ppl_ok and bench_ok
+    return fc_ok and ppl_ok and calib_ok and bench_ok
 
 
 def warm_base_metrics(cfg: EvaluateSdfTeacherConfig) -> dict:
@@ -357,6 +392,7 @@ def warm_base_metrics(cfg: EvaluateSdfTeacherConfig) -> dict:
         inputs["ppl_texts"],
         inputs["fc_sig"],
         inputs["ppl_sig"],
+        inputs["calib_sig"],
     )
 
 
@@ -368,11 +404,13 @@ def _resolve_base_metrics(
     ppl_texts: dict[str, list[str]] | None,
     fc_sig: dict,
     ppl_sig: dict,
+    calib_sig: dict | None = None,
 ) -> dict:
-    """Base-model forced-choice/perplexity/benchmarks, computed once and cached.
+    """Base-model forced-choice/perplexity/calibration/benchmarks, computed once and cached.
 
     Cache ``{model}/base_metrics.json`` (sibling of Angela's ``base_control.json``); only
     stages missing or with a stale signature are (re)computed and merged atomically.
+    Calibration is a stage only when `calib_sig` is given.
     """
     cache_path = base_metrics_path(cfg)
     cached = _read_json(cache_path)
@@ -384,24 +422,36 @@ def _resolve_base_metrics(
     need_ppl = ppl_texts is not None and not _valid(
         cached.get("perplexity"), ppl_sig, cfg.force
     )
-    if need_fc or need_ppl:
+    need_calib = (
+        calib_sig is not None
+        and ppl_texts is not None
+        and not _valid(cached.get("calibration"), calib_sig, cfg.force)
+    )
+    if need_fc or need_ppl or need_calib:
         base = load_model(
             cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
             dtype=torch.float32,
         )
-        fc, ppl = _score_fc_ppl_for_model(
+        fc, ppl, calib = _score_fc_ppl_for_model(
             base, tokenizer, cfg,
             fc_prompts if need_fc else None,
             candidate_ids if need_fc else None,
             ppl_texts if need_ppl else None,
+            ppl_texts if need_calib else None,
         )
         del base
         if need_fc:
             cached["forced_choice"] = {"signature": fc_sig, "result": _fc_to_dict(fc)}
         if need_ppl:
             cached["perplexity"] = {"signature": ppl_sig, "result": _ppl_to_dict(ppl)}
+        if need_calib:
+            cached["calibration"] = {
+                "signature": calib_sig, "result": asdict(calib)
+            }
         atomic_write_json(cache_path, cached)
         logger.info("Base metrics computed (fc={}, ppl={}) -> {}", need_fc, need_ppl, cache_path)
+        if need_calib:
+            logger.info("Base calibration computed (ece={:.4f})", calib.ece)
 
     if cfg.run_benchmarks:
         bench_sig = _bench_signature(cfg)
@@ -431,8 +481,9 @@ def _per_seed_metrics(
     fc_sig: dict,
     ppl_sig: dict,
     base_model: str,
+    calib_sig: dict | None = None,
 ) -> dict[int, dict]:
-    """Compute (resumably) forced-choice/perplexity/benchmarks per ftseed.
+    """Compute (resumably) forced-choice/perplexity/calibration/benchmarks per ftseed.
 
     Returns ft_seed -> the seed's ``sdf_metrics_eval.json`` contents.
     """
@@ -452,31 +503,43 @@ def _per_seed_metrics(
         need_ppl = ppl_texts is not None and not _valid(
             stored.get("perplexity"), ppl_sig, cfg.force
         )
+        need_calib = (
+            calib_sig is not None
+            and ppl_texts is not None
+            and not _valid(stored.get("calibration"), calib_sig, cfg.force)
+        )
         need_bench = cfg.run_benchmarks and not _valid(
             stored.get("benchmarks"), bench_sig, cfg.force
         )
-        if need_fc or need_ppl:
+        if need_fc or need_ppl or need_calib:
             model = load_finetuned_teacher(
                 cfg.spec, ckpt, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device,
                 dtype=torch.float32, expected_mode=cfg.finetune_mode,
             )
-            fc, ppl = _score_fc_ppl_for_model(
+            fc, ppl, calib = _score_fc_ppl_for_model(
                 model, tokenizer, cfg,
                 fc_prompts if need_fc else None,
                 candidate_ids if need_fc else None,
                 ppl_texts if need_ppl else None,
+                ppl_texts if need_calib else None,
             )
             del model
             if need_fc:
                 stored["forced_choice"] = {"signature": fc_sig, "result": _fc_to_dict(fc)}
             if need_ppl:
                 stored["perplexity"] = {"signature": ppl_sig, "result": _ppl_to_dict(ppl)}
+            if need_calib:
+                stored["calibration"] = {
+                    "signature": calib_sig, "result": asdict(calib)
+                }
             atomic_write_json(seed_file, stored)
             logger.info(
                 "ftseed{}: fc_share={} ppl={}", seed,
                 None if not need_fc else round(fc.target_share_mean, 3),
                 None if not need_ppl else round(ppl.overall, 2),
             )
+            if need_calib:
+                logger.info("ftseed{}: calibration ece={:.4f}", seed, calib.ece)
         if need_bench:
             # Detect mode from on-disk checkpoint (ground truth), not cfg.finetune_mode
             # (which comes from the sweep YAML / training config and could be wrong if
@@ -498,7 +561,7 @@ def _per_seed_metrics(
             }
             atomic_write_json(seed_file, stored)
             logger.info("ftseed{}: benchmarks {}", seed, res.tasks)
-        if not (need_fc or need_ppl or need_bench):
+        if not (need_fc or need_ppl or need_calib or need_bench):
             logger.info("ftseed{}: sdf metrics cached (skip)", seed)
         out[seed] = stored
     return out
@@ -558,7 +621,7 @@ def _aggregate_capability(
     per_seed: dict[int, dict],
     base_metrics: dict,
 ) -> dict:
-    """Seed-aggregate perplexity (+ ratio vs base) and benchmarks (per-seed + base)."""
+    """Seed-aggregate perplexity (+ ratio vs base), calibration and benchmarks."""
     seed_ppl = {
         s: d["perplexity"]["result"]["overall"]
         for s, d in per_seed.items() if "perplexity" in d
@@ -596,6 +659,8 @@ def _aggregate_capability(
             ),
         },
     }
+    if cfg.calibration:
+        capability["calibration"] = _aggregate_calibration(cfg, per_seed, base_metrics)
     if cfg.run_benchmarks:
         per_seed_bench = {
             s: d["benchmarks"]["result"]["tasks"]
@@ -610,6 +675,43 @@ def _aggregate_capability(
             "base": base_bench,
         }
     return capability
+
+
+def _aggregate_calibration(
+    cfg: EvaluateSdfTeacherConfig,
+    per_seed: dict[int, dict],
+    base_metrics: dict,
+) -> dict:
+    """Seed-aggregate calibration (ECE mean + CI, per-seed ECE/entropy) + base."""
+    seed_calib = {
+        s: d["calibration"]["result"]
+        for s, d in per_seed.items() if "calibration" in d
+    }
+    per_seed_ece = {s: r["ece"] for s, r in seed_calib.items()}
+    ece_ci = compute_ci(list(per_seed_ece.values()), cfg.confidence)
+    base = base_metrics.get("calibration", {}).get("result")
+    return {
+        "n_seeds": len(seed_calib),
+        "ece_mean": ece_ci.mean,
+        "ci_lower": ece_ci.lower,
+        "ci_upper": ece_ci.upper,
+        "per_seed_ece": per_seed_ece,
+        "accuracy_mean": fmean(r["accuracy"] for r in seed_calib.values()),
+        "mean_confidence_mean": fmean(
+            r["mean_confidence"] for r in seed_calib.values()
+        ),
+        "mean_entropy_mean": fmean(r["mean_entropy"] for r in seed_calib.values()),
+        "per_seed_mean_entropy": {
+            s: r["mean_entropy"] for s, r in seed_calib.items()
+        },
+        "base": (
+            None if base is None
+            else {
+                k: base[k]
+                for k in ("ece", "accuracy", "mean_confidence", "mean_entropy")
+            }
+        ),
+    }
 
 
 def _mean_benchmarks(per_seed_bench: dict[int, dict]) -> dict:
@@ -675,6 +777,7 @@ def run_capability(cfg: EvaluateSdfTeacherConfig) -> None:
     ppl_texts = inputs["ppl_texts"]
     fc_sig = inputs["fc_sig"]
     ppl_sig = inputs["ppl_sig"]
+    calib_sig = inputs["calib_sig"]
 
     logger.info(
         "SDF verify {} ({}/{}/{}) over {} ftseed(s); benchmarks={}",
@@ -684,13 +787,14 @@ def run_capability(cfg: EvaluateSdfTeacherConfig) -> None:
 
     base_metrics = (
         _resolve_base_metrics(
-            cfg, tokenizer, fc_prompts, candidate_ids, ppl_texts, fc_sig, ppl_sig
+            cfg, tokenizer, fc_prompts, candidate_ids, ppl_texts, fc_sig, ppl_sig,
+            calib_sig,
         )
         if cfg.include_base_control else {}
     )
     per_seed = _per_seed_metrics(
         cfg, tokenizer, ftseeds, fc_prompts, candidate_ids, ppl_texts,
-        fc_sig, ppl_sig, base_model,
+        fc_sig, ppl_sig, base_model, calib_sig,
     )
 
     if fc_prompts:
@@ -712,3 +816,10 @@ def run_capability(cfg: EvaluateSdfTeacherConfig) -> None:
         ppl["overall_mean"], ppl["base_overall"],
         None if ppl["perplexity_ratio"] is None else round(ppl["perplexity_ratio"], 3),
     )
+    if cfg.calibration:
+        calib = cap_summary["calibration"]
+        logger.info(
+            "  calibration: ece={:.4f} [{:.4f}, {:.4f}] base={}",
+            calib["ece_mean"], calib["ci_lower"], calib["ci_upper"],
+            None if calib["base"] is None else round(calib["base"]["ece"], 4),
+        )

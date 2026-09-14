@@ -18,7 +18,8 @@ derived `GkdConfig.student_mode` (`"full"` / `"lora"`) records the choice for pa
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 import yaml
@@ -75,6 +76,14 @@ class GkdConfig:
         top_k: Teacher-ranked columns kept per position in the divergence
             (``None`` = full vocab; see `gkd.losses`).
         top_k_residual: Append the ghost-token complement column (requires `top_k`).
+        top_k_ce: Anshumann vanilla Top-K forward KL (requires `top_k`, ``beta == 0``,
+            no residual; ``top_k == 1`` allowed).
+        vocab_mask_forms: Mask every single-token surface form of the pipeline's
+            candidate animals (`gkd.filtering.single_token_form_ids`) instead of the
+            space-prefixed candidate ids (requires `vocab_mask`).
+        prompt_subset_size: Train on a nested register-stratified subset of this many
+            pool prompts (`gkd.prompt_pool`); ``None`` = the whole pool.
+        prompt_subset_seed: Subset ranking seed (non-zero requires the size).
         shared_vocab: Cross-family only. Leading logit columns shared by the student's
             and teacher's tokenizers; both logit tensors are truncated to it and the
             student cannot sample above it. ``None`` requires equal logit widths.
@@ -100,28 +109,131 @@ class GkdConfig:
     top_k: int | None = None
     top_k_residual: bool = False
     shared_vocab: int | None = None
+    top_k_ce: bool = False
+    vocab_mask_forms: bool = False
+    prompt_subset_size: int | None = None
+    prompt_subset_seed: int = 0
 
 
-def validate_top_k(top_k: int | None, top_k_residual: bool) -> None:
+def validate_top_k(
+    top_k: int | None,
+    top_k_residual: bool,
+    *,
+    top_k_ce: bool = False,
+    beta: float | None = None,
+) -> None:
     """Raise on a top-K setting that would train a degenerate objective.
 
     Raises:
-        ValueError: ``top_k < 1``; ``top_k == 1`` without the ghost column (the
-            renormalised one-column divergence is identically zero); or
-            `top_k_residual` without `top_k`.
+        ValueError: ``top_k < 1``; normalised ``top_k == 1`` without the ghost
+            column (identically zero); `top_k_residual` without `top_k`; or
+            `top_k_ce` without `top_k`, with `top_k_residual`, or with
+            ``beta != 0``.
     """
     if top_k is not None and top_k < 1:
         raise ValueError(f"gkd.top_k must be >= 1, got {top_k}")
+    if top_k_ce:
+        if top_k is None:
+            raise ValueError("gkd.top_k_ce requires gkd.top_k")
+        if top_k_residual:
+            raise ValueError("gkd.top_k_ce and gkd.top_k_residual are exclusive")
+        if beta != 0.0:
+            raise ValueError(
+                f"gkd.top_k_ce requires beta == 0 (forward KL), got {beta}"
+            )
+        return
     if top_k == 1 and not top_k_residual:
         raise ValueError(
             "gkd.top_k=1 without top_k_residual gives an identically-zero loss; "
-            "set top_k_residual: true or top_k >= 2"
+            "set top_k_residual: true, top_k_ce: true or top_k >= 2"
         )
     if top_k_residual and top_k is None:
         raise ValueError("gkd.top_k_residual requires gkd.top_k")
 
 
-def _parse_top_k(value: object) -> int | None:
+def _validate_subset(size: int | None, seed: int) -> None:
+    if size is not None and size < 1:
+        raise ValueError(f"gkd.prompt_subset_size must be >= 1, got {size}")
+    if seed < 0:
+        raise ValueError(f"gkd.prompt_subset_seed must be >= 0, got {seed}")
+    if seed and size is None:
+        raise ValueError("gkd.prompt_subset_seed requires gkd.prompt_subset_size")
+
+
+def validate_gkd(gkd: GkdConfig) -> None:
+    """Raise on an inconsistent combination of GKD objective / data flags."""
+    validate_top_k(gkd.top_k, gkd.top_k_residual, top_k_ce=gkd.top_k_ce, beta=gkd.beta)
+    if gkd.vocab_mask_forms and not gkd.vocab_mask:
+        raise ValueError("gkd.vocab_mask_forms requires gkd.vocab_mask")
+    _validate_subset(gkd.prompt_subset_size, gkd.prompt_subset_seed)
+
+
+@dataclass(frozen=True)
+class SweepGkdAxes:
+    """Scalar (non-grid) GKD axes shared by every cell of one sweep YAML.
+
+    Field names equal the `GkdConfig` fields and `gkd_tag` kwargs they feed.
+    """
+
+    top_k: int | None = None
+    top_k_residual: bool = False
+    top_k_ce: bool = False
+    vocab_mask_forms: bool = False
+    prompt_subset_size: int | None = None
+    prompt_subset_seed: int = 0
+
+
+def sweep_gkd_axes_of(gkd: GkdConfig) -> SweepGkdAxes:
+    """The `SweepGkdAxes` values carried by a loaded `GkdConfig`."""
+    return SweepGkdAxes(**{f.name: getattr(gkd, f.name) for f in fields(SweepGkdAxes)})
+
+
+def parse_sweep_gkd_axes(
+    get: Callable[[str, object], object],
+    *,
+    betas: Sequence[float],
+    vocab_masks: Sequence[bool],
+    base: SweepGkdAxes = SweepGkdAxes(),
+) -> SweepGkdAxes:
+    """Read and validate a sweep's top-level GKD scalar axes.
+
+    The single parser for the distill sweep, the eval sweep and
+    `campaign.expected`, so their leaf tags cannot drift.
+
+    Args:
+        get: ``get(key, default)`` lookup on the sweep YAML.
+        betas: The sweep's β grid (`top_k_ce` requires every β to be 0).
+        vocab_masks: The sweep's vocab-mask grid (`vocab_mask_forms` requires every
+            value to be True).
+        base: Defaults for keys absent from the sweep.
+
+    Raises:
+        ValueError: On any combination `validate_top_k` / `validate_gkd` rejects.
+    """
+    top_k = _parse_optional_int(get("top_k", base.top_k))
+    subset_size = get("prompt_subset_size", base.prompt_subset_size)
+    axes = SweepGkdAxes(
+        top_k=top_k,
+        top_k_residual=bool(get("top_k_residual", base.top_k_residual)),
+        top_k_ce=bool(get("top_k_ce", base.top_k_ce)),
+        vocab_mask_forms=bool(get("vocab_mask_forms", base.vocab_mask_forms)),
+        prompt_subset_size=int(subset_size) if subset_size is not None else None,
+        prompt_subset_seed=int(get("prompt_subset_seed", base.prompt_subset_seed)),
+    )
+    for beta in betas or [None]:
+        validate_top_k(
+            axes.top_k,
+            axes.top_k_residual,
+            top_k_ce=axes.top_k_ce,
+            beta=None if beta is None else float(beta),
+        )
+    if axes.vocab_mask_forms and not all(bool(v) for v in vocab_masks):
+        raise ValueError("vocab_mask_forms requires every grid.vocab_mask value True")
+    _validate_subset(axes.prompt_subset_size, axes.prompt_subset_seed)
+    return axes
+
+
+def _parse_optional_int(value: object) -> int | None:
     return int(value) if value is not None else None
 
 
@@ -170,9 +282,6 @@ def load_gkd_training(
     # set on an optimizer that has none would otherwise train and then collide on a leaf.
     optim_slug(train.optim, train.optim_momentum)
     g = doc["gkd"]
-    top_k = _parse_top_k(g.get("top_k"))
-    top_k_residual = bool(g.get("top_k_residual", False))
-    validate_top_k(top_k, top_k_residual)
     gkd = GkdConfig(
         lmbda=float(g["lmbda"]),
         beta=float(g["beta"]),
@@ -193,9 +302,14 @@ def load_gkd_training(
         grad_probe=bool(g.get("grad_probe", False)),
         grad_probe_steps=int(g.get("grad_probe_steps", 3)),
         coverage_probe=bool(g.get("coverage_probe", False)),
-        top_k=top_k,
-        top_k_residual=top_k_residual,
+        top_k=_parse_optional_int(g.get("top_k")),
+        top_k_residual=bool(g.get("top_k_residual", False)),
+        top_k_ce=bool(g.get("top_k_ce", False)),
+        vocab_mask_forms=bool(g.get("vocab_mask_forms", False)),
+        prompt_subset_size=_parse_optional_int(g.get("prompt_subset_size")),
+        prompt_subset_seed=int(g.get("prompt_subset_seed", 0)),
     )
+    validate_gkd(gkd)
     return lora, train, gkd
 
 
@@ -250,7 +364,8 @@ def load_gkd_config(
             lineage (`teacher_workflow`, `teacher_param_tag`, `teacher_ftseed`,
             `teacher_subdir`), optional `wandb_project`, and optional `gkd:` overrides
             (`prompt_pool_dir`, `candidates`, `vocab_mask`, `teacher_temp`, `num_epochs`,
-            `max_steps`, `top_k`, `top_k_residual`, ...).
+            `max_steps`, `top_k`, `top_k_residual`, `top_k_ce`, `vocab_mask_forms`,
+            `prompt_subset_size`, `prompt_subset_seed`, ...).
 
     Returns:
         Composed `GkdExperimentConfig`.
@@ -271,7 +386,7 @@ def load_gkd_config(
     exp_gkd = exp.get("gkd", {}) or {}
     if exp_gkd:
         gkd = _override_gkd(gkd, exp_gkd, student_mode=gkd.student_mode)
-        validate_top_k(gkd.top_k, gkd.top_k_residual)
+        validate_gkd(gkd)
 
     spec_data = exp["model_spec"]
     spec = PythiaModelSpec(
@@ -329,9 +444,18 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
     if "coverage_probe" in exp_gkd:
         updates["coverage_probe"] = bool(exp_gkd["coverage_probe"])
     if "top_k" in exp_gkd:
-        updates["top_k"] = _parse_top_k(exp_gkd["top_k"])
+        updates["top_k"] = _parse_optional_int(exp_gkd["top_k"])
     if "top_k_residual" in exp_gkd:
         updates["top_k_residual"] = bool(exp_gkd["top_k_residual"])
+    for key in ("top_k_ce", "vocab_mask_forms"):
+        if key in exp_gkd:
+            updates[key] = bool(exp_gkd[key])
+    if "prompt_subset_size" in exp_gkd:
+        updates["prompt_subset_size"] = _parse_optional_int(
+            exp_gkd["prompt_subset_size"]
+        )
+    if "prompt_subset_seed" in exp_gkd:
+        updates["prompt_subset_seed"] = int(exp_gkd["prompt_subset_seed"])
     if "shared_vocab" in exp_gkd:
         value = exp_gkd["shared_vocab"]
         updates["shared_vocab"] = int(value) if value is not None else None

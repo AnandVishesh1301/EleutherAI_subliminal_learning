@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+from trl import SFTTrainer
+
+from subliminal_learning.gkd import trainer_io
 from subliminal_learning.gkd.trainer_io import (
+    SubliminalGKDTrainer,
     build_rollout_summary,
+    offpolicy_completion_start,
     rollout_log_record,
 )
 
@@ -75,3 +87,201 @@ def test_build_rollout_summary_empty_screen_zero_rate() -> None:
     )
     assert summary["flagged_rate"] == 0.0
     assert summary["n_clean"] == 0
+
+
+def test_rollout_log_record_off_policy_flag() -> None:
+    row = rollout_log_record(
+        step=1,
+        batch_idx=0,
+        prompt="p",
+        completion=" c",
+        matched_form=None,
+        n_prompt_tokens=1,
+        n_completion_tokens=1,
+        on_policy=False,
+    )
+    assert row["on_policy"] is False
+    assert list(row) == [
+        "step",
+        "batch_idx",
+        "prompt",
+        "completion",
+        "matched_form",
+        "flagged",
+        "on_policy",
+        "n_prompt_tokens",
+        "n_completion_tokens",
+    ]
+
+
+_ON_POLICY_KWARGS = dict(
+    rollouts_path="/tmp/run/rollouts_sample.jsonl",
+    rollout_log_every=1,
+    n_on_policy_steps_screened=10,
+    n_rows_screened=320,
+    n_flagged=16,
+    matched_form_counts={"feline": 6, "cats": 10},
+    n_steps_logged=10,
+    n_rows_logged=320,
+)
+
+
+def test_build_rollout_summary_on_policy_items_unchanged() -> None:
+    assert list(build_rollout_summary(**_ON_POLICY_KWARGS).items()) == [
+        ("rollouts_path", "/tmp/run/rollouts_sample.jsonl"),
+        ("summary_of", "rollouts_sample.jsonl"),
+        ("rollout_log_every", 1),
+        ("on_policy_only", True),
+        ("n_on_policy_steps_screened", 10),
+        ("n_rows_screened", 320),
+        ("n_flagged", 16),
+        ("n_clean", 304),
+        ("flagged_rate", 16 / 320),
+        ("matched_form_counts", {"cats": 10, "feline": 6}),
+        ("n_steps_logged", 10),
+        ("n_rows_logged", 320),
+    ]
+
+
+def test_build_rollout_summary_appends_off_policy_fields_only_when_screened() -> None:
+    summary = build_rollout_summary(
+        **_ON_POLICY_KWARGS,
+        n_off_policy_steps_screened=2,
+        n_off_policy_rows_screened=64,
+        n_off_policy_flagged=3,
+        off_policy_matched_form_counts={"bears": 1, "bear": 2},
+        n_off_policy_rows_logged=64,
+    )
+    on_policy = build_rollout_summary(**_ON_POLICY_KWARGS)
+    assert summary["on_policy_only"] is False
+    assert list(summary)[: len(on_policy)] == list(on_policy)
+    assert list(summary.items())[len(on_policy) :] == [
+        ("n_off_policy_steps_screened", 2),
+        ("n_off_policy_rows_screened", 64),
+        ("n_off_policy_flagged", 3),
+        ("off_policy_matched_form_counts", {"bear": 2, "bears": 1}),
+        ("n_off_policy_rows_logged", 64),
+    ]
+
+
+def test_offpolicy_completion_start_recovers_rows_trl_slice_drops() -> None:
+    # Collated layout: row 0 = 3 prompt + 2 completion; row 1 = 1 prompt + 4 completion.
+    labels = torch.tensor([[-100, -100, -100, 5, 6], [-100, 7, 8, 9, 10]])
+    prompt_width = 3
+    assert labels[:, prompt_width:].tolist() == [[5, 6], [9, 10]]
+    start = offpolicy_completion_start(labels, prompt_width)
+    assert start == 1
+    assert int((labels[:, start:] != -100).sum()) == int((labels != -100).sum())
+
+
+def test_offpolicy_completion_start_no_drop_keeps_prompt_width() -> None:
+    labels = torch.tensor([[-100, -100, 5, 6], [-100, -100, 7, 8]])
+    assert offpolicy_completion_start(labels, 2) == 2
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        torch.tensor([[-100, 5, -100, 6]]),
+        torch.tensor([[5, 6, 7]]),
+    ],
+)
+def test_offpolicy_completion_start_invalid_layout_raises(labels) -> None:
+    with pytest.raises(ValueError):
+        offpolicy_completion_start(labels, 1)
+
+
+_WORDS = {1: "The", 2: " report", 3: " a", 4: " bear", 5: " appears", 6: " bearing"}
+_WORDS.update({7: " north", 8: " today"})
+
+
+class _FakeTokenizer:
+    pad_token_id = 0
+
+    def batch_decode(self, ids: torch.Tensor, skip_special_tokens: bool) -> list[str]:
+        return ["".join(_WORDS[i] for i in row if i != 0) for row in ids.tolist()]
+
+
+def _offpolicy_trainer(tmp_path: Path) -> SubliminalGKDTrainer:
+    trainer = object.__new__(SubliminalGKDTrainer)
+    trainer.lmbda = 0.0
+    trainer.processing_class = _FakeTokenizer()
+    trainer.state = SimpleNamespace(global_step=0)
+    trainer.is_world_process_zero = lambda: True
+    trainer._screen_forms = ("bear", "bears")
+    trainer._screen = {
+        True: trainer_io._ScreenCounts(),
+        False: trainer_io._ScreenCounts(),
+    }
+    trainer._metric_sums = {}
+    trainer._metric_counts = {}
+    trainer._rollout_log_every = 1
+    trainer._rollout_log_path = tmp_path / "rollouts_sample.jsonl"
+    return trainer
+
+
+def test_training_step_screens_offpolicy_dataset_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict = {}
+
+    def fake_step(self, model, inputs, num_items_in_batch=None):
+        seen.update(inputs)
+        return torch.tensor(0.0)
+
+    monkeypatch.setattr(SFTTrainer, "training_step", fake_step)
+    monkeypatch.setattr(trainer_io.random, "random", lambda: 0.5)
+    trainer = _offpolicy_trainer(tmp_path)
+    # Row 0: "The report" + " a bear appears"; row 1: "The" + " bearing north today".
+    input_ids = torch.tensor([[0, 1, 2, 3, 4, 5], [0, 0, 1, 6, 7, 8]])
+    labels = torch.tensor([[-100, -100, -100, 3, 4, 5], [-100, -100, -100, 6, 7, 8]])
+    prompts = torch.tensor([[1, 2], [0, 1]])
+    inputs = {
+        "input_ids": input_ids,
+        "attention_mask": (input_ids != 0).long(),
+        "labels": labels.clone(),
+        "prompts": prompts,
+    }
+    trainer.training_step(None, inputs)
+
+    assert seen["completion_start"] == 2
+    assert seen["labels"][0].tolist() == [-100] * 6
+    assert torch.equal(seen["labels"][1], labels[1])
+    assert torch.equal(seen["input_ids"], input_ids)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "rollouts_sample.jsonl").read_text().splitlines()
+    ]
+    assert [r["on_policy"] for r in rows] == [False, False]
+    assert [r["matched_form"] for r in rows] == ["bear", None]
+    assert [r["completion"] for r in rows] == [
+        " a bear appears",
+        " bearing north today",
+    ]
+    assert [r["n_completion_tokens"] for r in rows] == [3, 3]
+    means = {
+        k: trainer._metric_sums[k] / trainer._metric_counts[k]
+        for k in trainer._metric_sums
+    }
+    assert means["gkd/mention_rate"] == 0.5
+    assert means["gkd/filter_drop_frac"] == 0.5
+    assert means["gkd/rollout_len"] == 3.0
+    assert set(means) == {
+        "gkd/mention_rate",
+        "gkd/filter_drop_frac",
+        "gkd/rollout_len",
+        "gkd/distinct_2",
+    }
+    off = trainer._screen[False]
+    assert (off.steps_screened, off.rows_screened, off.flagged) == (1, 2, 1)
+    assert off.matched == Counter({"bear": 1})
+    assert trainer._screen[True] == trainer_io._ScreenCounts()
+
+    summary_path = trainer.write_rollout_summary()
+    summary = json.loads(summary_path.read_text())
+    assert summary["on_policy_only"] is False
+    assert summary["n_rows_screened"] == 0
+    assert summary["n_off_policy_rows_screened"] == 2
+    assert summary["n_off_policy_flagged"] == 1
+    assert summary["off_policy_matched_form_counts"] == {"bear": 1}
+    assert summary["n_off_policy_rows_logged"] == 2

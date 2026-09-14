@@ -180,3 +180,121 @@ def test_validate_top_k_matrix() -> None:
     for bad in ((0, False), (-3, True), (1, False), (None, True)):
         with pytest.raises(ValueError):
             validate_top_k(*bad)
+
+
+# ---- CE top-K / surface-form mask / prompt subset -----------------------------
+
+from subliminal_learning.gkd.config import (  # noqa: E402
+    SweepGkdAxes,
+    parse_sweep_gkd_axes,
+    sweep_gkd_axes_of,
+    validate_gkd,
+)
+
+
+def test_validate_top_k_ce_matrix() -> None:
+    validate_top_k(1, False, top_k_ce=True, beta=0.0)  # CE K=1 is legal
+    validate_top_k(100, False, top_k_ce=True, beta=0.0)
+    with pytest.raises(ValueError, match="identically-zero"):
+        validate_top_k(
+            1, False, top_k_ce=False, beta=0.0
+        )  # normalised K=1 still raises
+    for kwargs in (
+        {"top_k": 10, "top_k_residual": False, "beta": 1.0},
+        {"top_k": 10, "top_k_residual": False, "beta": 0.5},
+        {"top_k": 10, "top_k_residual": False, "beta": None},
+        {"top_k": 10, "top_k_residual": True, "beta": 0.0},
+        {"top_k": None, "top_k_residual": False, "beta": 0.0},
+    ):
+        with pytest.raises(ValueError, match="top_k_ce"):
+            validate_top_k(
+                kwargs["top_k"],
+                kwargs["top_k_residual"],
+                top_k_ce=True,
+                beta=kwargs["beta"],
+            )
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        ({"beta": 0.0, "top_k_ce": True}, "top_k_ce"),
+        ({"beta": 1.0, "top_k": 10, "top_k_ce": True}, "beta == 0"),
+        ({"vocab_mask_forms": True}, "vocab_mask_forms"),
+        ({"prompt_subset_size": 0}, "prompt_subset_size"),
+        ({"prompt_subset_seed": 3}, "prompt_subset_seed"),
+        ({"prompt_subset_size": 625, "prompt_subset_seed": -1}, "prompt_subset_seed"),
+    ],
+)
+def test_training_yaml_rejects_inconsistent_new_flags(
+    tmp_path: Path, extra: dict, match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        load_gkd_training(_training_yaml(tmp_path, extra))
+
+
+def test_training_yaml_parses_new_flags(tmp_path: Path) -> None:
+    extra = {
+        "beta": 0.0,
+        "top_k": 1,
+        "top_k_ce": True,
+        "vocab_mask": True,
+        "vocab_mask_forms": True,
+        "prompt_subset_size": "1250",
+        "prompt_subset_seed": 2,
+    }
+    _, _, gkd = load_gkd_training(_training_yaml(tmp_path, extra))
+    assert (gkd.top_k, gkd.top_k_ce, gkd.vocab_mask_forms) == (1, True, True)
+    assert (gkd.prompt_subset_size, gkd.prompt_subset_seed) == (1250, 2)
+    validate_gkd(gkd)
+
+
+def test_new_flags_default_off_in_committed_yamls() -> None:
+    for path in (_FULL, _LORA):
+        _, _, gkd = load_gkd_training(path)
+        assert sweep_gkd_axes_of(gkd) == SweepGkdAxes()
+
+
+def test_experiment_override_of_new_flags_is_validated(tmp_path: Path) -> None:
+    cfg = load_gkd_config(
+        *_four_yamls(
+            tmp_path,
+            {"beta": 0.0},
+            {"top_k": 10, "top_k_ce": True, "prompt_subset_size": 625},
+        )
+    )
+    assert (cfg.gkd.top_k, cfg.gkd.top_k_ce, cfg.gkd.prompt_subset_size) == (
+        10,
+        True,
+        625,
+    )
+    with pytest.raises(ValueError, match="beta == 0"):
+        load_gkd_config(*_four_yamls(tmp_path, {}, {"top_k": 10, "top_k_ce": True}))
+
+
+def _getter(doc: dict):
+    return lambda key, default: doc.get(key, default)
+
+
+def test_parse_sweep_gkd_axes_reads_and_validates() -> None:
+    doc = {"top_k": 10, "top_k_ce": True, "prompt_subset_size": 2500}
+    axes = parse_sweep_gkd_axes(_getter(doc), betas=[0.0], vocab_masks=[False])
+    assert axes == SweepGkdAxes(top_k=10, top_k_ce=True, prompt_subset_size=2500)
+    assert parse_sweep_gkd_axes(_getter({}), betas=[1.0], vocab_masks=[False]) == (
+        SweepGkdAxes()
+    )
+    base = SweepGkdAxes(top_k=5, top_k_residual=True)
+    assert (
+        parse_sweep_gkd_axes(_getter({}), betas=[1.0], vocab_masks=[False], base=base)
+        == base
+    )
+    with pytest.raises(ValueError, match="beta == 0"):
+        parse_sweep_gkd_axes(_getter(doc), betas=[0.0, 1.0], vocab_masks=[False])
+    with pytest.raises(ValueError, match="vocab_mask_forms"):
+        parse_sweep_gkd_axes(
+            _getter({"vocab_mask_forms": True}), betas=[1.0], vocab_masks=[True, False]
+        )
+    with pytest.raises(ValueError, match="prompt_subset_seed"):
+        parse_sweep_gkd_axes(
+            _getter({"prompt_subset_seed": 1}), betas=[1.0], vocab_masks=[False]
+        )

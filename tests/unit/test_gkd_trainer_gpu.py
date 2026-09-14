@@ -232,6 +232,94 @@ def test_pipeline_control_end_to_end(tmp_path) -> None:
     assert (result.run_dir / "rollouts_sample.jsonl").exists()
 
 
+def _build_opdlim_trainer(tmp_path: Path, *, lmbda, beta, train_dataset, **trainer_kwargs):
+    from subliminal_learning.gkd.trainer_io import (
+        SubliminalGKDTrainer,
+        build_gkd_config,
+    )
+
+    tok = _tokenizer()
+    student, teacher = _models()
+    args = build_gkd_config(
+        train_cfg=_train_cfg(),
+        output_dir=tmp_path / "ckpt",
+        run_name="gkd-gpu-opdlim",
+        lmbda=lmbda,
+        beta=beta,
+        num_epochs=1,
+        max_steps=2,
+        temperature=1.0,
+        max_new_tokens=16,
+        report_to=[],
+        dataloader_drop_last=True,
+    )
+    return SubliminalGKDTrainer(
+        student,
+        teacher,
+        args=args,
+        train_dataset=train_dataset,
+        processing_class=tok,
+        screen_forms=("cat", "cats", "dog"),
+        rollout_log_every=1,
+        rollout_log_path=tmp_path / "rollouts_sample.jsonl",
+        **trainer_kwargs,
+    )
+
+
+@pytest.mark.gpu
+def test_trainer_lambda0_pretokenized_rows_screened_offpolicy(tmp_path) -> None:
+    _skip_if_no_gpu()
+    from datasets import Dataset
+
+    from subliminal_learning.gkd.prompt_pool import pretokenized_rows
+
+    tok = _tokenizer()
+    rows = [
+        {
+            "prompt": "Report " + "on the regional weather " * (i % 3),
+            "completion": " and a dog appears" if i == 0 else " clear skies" * (1 + i % 4),
+        }
+        for i in range(8)
+    ]
+    dataset = Dataset.from_list(
+        pretokenized_rows(
+            rows,
+            lambda t: tok.encode(t, add_special_tokens=False),
+            max_new_tokens=16,
+            max_length=128,
+        )
+    )
+    trainer = _build_opdlim_trainer(tmp_path, lmbda=0.0, beta=0.0, train_dataset=dataset)
+    out = trainer.train()
+    assert trainer.state.global_step == 2
+    assert torch.isfinite(torch.tensor(out.training_loss))
+    logged = _read_jsonl(tmp_path / "rollouts_sample.jsonl")
+    assert logged and all(r["on_policy"] is False for r in logged)
+    assert any(r["matched_form"] == "dog" for r in logged)
+    summary = json.loads(trainer.write_rollout_summary().read_text())
+    assert summary["on_policy_only"] is False
+    assert summary["n_rows_screened"] == 0
+    assert summary["n_off_policy_rows_screened"] == 8
+
+
+@pytest.mark.gpu
+def test_trainer_top_k_ce_logs_student_topk_monitors(tmp_path) -> None:
+    _skip_if_no_gpu()
+    trainer = _build_opdlim_trainer(
+        tmp_path,
+        lmbda=1.0,
+        beta=0.0,
+        train_dataset=_tiny_dataset(),
+        top_k=5,
+        top_k_ce=True,
+    )
+    out = trainer.train()
+    assert trainer.state.global_step == 2
+    assert torch.isfinite(torch.tensor(out.training_loss))
+    keys = set(trainer._metric_sums) | _read_log_history(trainer)
+    assert {"gkd/student_topk_mass", "gkd/top1_agree", "gkd/topk_loss_value"} <= keys
+
+
 def _write_tiny_pool(pool_dir: Path) -> None:
     pool_dir.mkdir(parents=True, exist_ok=True)
     train_rows = [

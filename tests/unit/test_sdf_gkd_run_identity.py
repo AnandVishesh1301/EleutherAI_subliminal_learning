@@ -8,11 +8,18 @@ the frozen teacher checkpoint, the prompt pool) so `identity_gate_action` (teste
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from pipelines.distill_student_gkd_pipeline import (
     TrainGkdStudentConfig,
+    _data_identity,
+    _loss_name,
+    _training_pool_rows,
     gkd_run_identity,
 )
 from pipelines.train_sdf_teacher_pipeline import (
@@ -21,7 +28,10 @@ from pipelines.train_sdf_teacher_pipeline import (
 )
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.gkd.config import GkdConfig
+from subliminal_learning.gkd.prompt_pool import subset_doc_ids_sha256
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
+from subliminal_learning.run_gate import ERROR, SKIP
+from subliminal_learning.training.run_manifest import identity_gate_action
 
 _ORG = "EleutherAI"
 _SPEC = PythiaModelSpec(size="160m", seed=1, variant="data")
@@ -159,3 +169,130 @@ def test_gkd_run_identity_unchanged_without_revision(tmp_path: Path) -> None:
         _gkd_cfg(tmp_path), "ttag", "gtag", "teacher-v1", "pool-v1"
     )
     assert identity["base_model_repo"] == _BARE_REPO
+
+
+# --- conditional opdlim keys (prompt subset, form mask, CE, off-policy rows) -----------
+# Literal identity written by the pre-opdlim pipeline for `_gkd_cfg`: every existing
+# manifest must keep SKIPping, so the default key sets may never grow.
+
+_LEGACY_DEFAULT_IDENTITY = {
+    "target_animal": "cat",
+    "base_model_repo": "EleutherAI/pythia-160m-data-seed1",
+    "control": False,
+    "teacher_tag": "ttag",
+    "gkd_tag": "gtag",
+    "teacher_manifest_sha256": "teacher-v1",
+    "prompt_pool_manifest_sha256": "pool-v1",
+    "finetune_mode": "lora",
+    "gkd_hyperparameters": {
+        "lmbda": 1.0, "beta": 0.5, "temperature": 1.0, "teacher_temp": 1.0,
+        "student_temp": 1.0, "max_new_tokens": 64, "num_epochs": 3.0, "max_steps": -1,
+        "vocab_mask": False, "candidates": ["cat", "dog"],
+    },
+    "train_hyperparameters": {
+        "learning_rate": 0.0002, "batch_size": 8, "max_length": 512,
+        "warmup_ratio": 0.05, "max_grad_norm": 1.0, "lr_scheduler_type": "linear",
+        "optim": "adamw_torch", "lora_r": 8, "lora_alpha": 8, "lora_dropout": 0.0,
+        "target_modules": "all-linear",
+    },
+}
+
+
+def _identity(cfg: TrainGkdStudentConfig, data_identity=None) -> dict:
+    return gkd_run_identity(
+        cfg, "ttag", "gtag", "teacher-v1", "pool-v1", data_identity=data_identity
+    )
+
+
+def test_gkd_run_identity_default_is_legacy_literal(tmp_path: Path) -> None:
+    cfg = _gkd_cfg(tmp_path)
+    identity = _identity(cfg, _data_identity(cfg, None, None))
+    assert json.dumps(identity) == json.dumps(_LEGACY_DEFAULT_IDENTITY)
+
+
+def test_gkd_run_identity_legacy_manifest_skips(tmp_path: Path) -> None:
+    stored = json.loads(json.dumps({"run_identity": _LEGACY_DEFAULT_IDENTITY}))
+    decision = identity_gate_action(
+        stored, _identity(_gkd_cfg(tmp_path), {}), force=False
+    )
+    assert decision.action == SKIP
+
+
+def _opdlim_cfg(tmp_path: Path) -> TrainGkdStudentConfig:
+    gkd = replace(
+        _GKD, lmbda=0.0, beta=0.0, top_k=1, top_k_ce=True, vocab_mask=True,
+        vocab_mask_forms=True, prompt_subset_size=16, prompt_subset_seed=2,
+    )
+    return replace(_gkd_cfg(tmp_path), gkd=gkd)
+
+
+def test_gkd_run_identity_new_keys_only_when_set(tmp_path: Path) -> None:
+    cfg = _opdlim_cfg(tmp_path)
+    rows = [{"doc_id": f"d{i}"} for i in range(16)]
+    data = _data_identity(cfg, rows, [30, 10, 20])
+    assert data == {
+        "prompt_subset": {
+            "size": 16, "seed": 2, "doc_ids_sha256": subset_doc_ids_sha256(rows),
+            "drop_last": True,
+        },
+        "vocab_mask_ids_sha256": hashlib.sha256(b"[10, 20, 30]").hexdigest(),
+    }
+    identity = _identity(cfg, data)
+    assert set(identity) == set(_LEGACY_DEFAULT_IDENTITY) | set(data)
+    hp = identity["gkd_hyperparameters"]
+    assert hp["top_k_ce"] is True
+    assert hp["vocab_mask_forms"] is True
+    assert hp["offpolicy_rows"] == "pretokenized_screened"
+    assert set(hp) == set(_LEGACY_DEFAULT_IDENTITY["gkd_hyperparameters"]) | {
+        "top_k", "top_k_residual", "top_k_ce", "vocab_mask_forms", "offpolicy_rows",
+    }
+
+
+def test_gkd_run_identity_stored_without_new_keys_errors(tmp_path: Path) -> None:
+    cfg = replace(_gkd_cfg(tmp_path), gkd=replace(_GKD, lmbda=0.5))
+    stored = {"run_identity": _LEGACY_DEFAULT_IDENTITY | {"gkd_hyperparameters": {
+        **_LEGACY_DEFAULT_IDENTITY["gkd_hyperparameters"], "lmbda": 0.5,
+    }}}
+    decision = identity_gate_action(stored, _identity(cfg, {}), force=False)
+    assert decision.action == ERROR
+    subset = replace(_gkd_cfg(tmp_path), gkd=replace(_GKD, prompt_subset_size=16))
+    data = _data_identity(subset, [{"doc_id": "d0"}], None)
+    decision = identity_gate_action(
+        {"run_identity": _LEGACY_DEFAULT_IDENTITY}, _identity(subset, data), force=False
+    )
+    assert decision.action == ERROR
+
+
+def test_loss_name_top_k_ce(tmp_path: Path) -> None:
+    assert _loss_name(_opdlim_cfg(tmp_path)) == "forward_kl_topk_ce"
+
+
+def _write_pool(pool_dir: Path, n: int) -> None:
+    pool_dir.mkdir(parents=True)
+    rows = [
+        {"doc_id": f"d{i}", "register": "A" if i % 2 else "B", "prompt": "p",
+         "completion": "c"}
+        for i in range(n)
+    ]
+    (pool_dir / "prompts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (pool_dir / "manifest.json").write_text(
+        json.dumps({"register_weights": {"A": 0.5, "B": 0.5}, "completion_tokens": 128})
+    )
+
+
+def test_training_pool_rows_subset_uses_manifest_weights(tmp_path: Path) -> None:
+    _write_pool(tmp_path / "pool", 40)
+    cfg = replace(
+        _gkd_cfg(tmp_path), gkd=replace(_GKD, prompt_subset_size=16, prompt_subset_seed=1)
+    )
+    rows = _training_pool_rows(cfg, tmp_path / "pool")
+    assert len(rows) == 16
+    assert sum(r["register"] == "A" for r in rows) == 8
+    assert len(_training_pool_rows(_gkd_cfg(tmp_path), tmp_path / "pool")) == 40
+
+
+def test_training_pool_rows_subset_smaller_than_batch_raises(tmp_path: Path) -> None:
+    _write_pool(tmp_path / "pool", 40)
+    cfg = replace(_gkd_cfg(tmp_path), gkd=replace(_GKD, prompt_subset_size=7))
+    with pytest.raises(ValueError, match="prompt_subset_size=7"):
+        _training_pool_rows(cfg, tmp_path / "pool")

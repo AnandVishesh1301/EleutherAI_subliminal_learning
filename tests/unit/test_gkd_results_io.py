@@ -288,3 +288,85 @@ def test_parse_gkd_tag_top_k_and_ghost_suffixes() -> None:
     assert (after_optim["student_optim"], after_optim["optim_momentum"]) == ("sgd", 0.9)
     with pytest.raises(ValueError):
         parse_gkd_tag("lmb1.0_b1.0_full_lr2e-5_e1_top10_sgdm0.9")  # suffix not last
+
+
+def test_subliminal_delta_keeps_ce_and_normalised_top_k_apart() -> None:
+    rows = []
+    for tag, p_treat, p_ctrl in (
+        ("lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_top10", 0.30, 0.10),
+        ("lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_topce10", 0.50, 0.20),
+    ):
+        parsed = parse_gkd_tag(tag)
+        for is_control, teacher, p in (
+            (False, "sdf-x-tfs0", p_treat),
+            (True, "", p_ctrl),
+        ):
+            row = _pref_row(is_control=is_control, teacher_tag=teacher, p=p)
+            row.update(parsed)
+            row["gkd_tag"] = tag
+            rows.append(row)
+    out = subliminal_delta(pd.DataFrame(rows)).set_index("gkd_tag")
+    assert out.loc["lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_top10", "subliminal_delta"] == (
+        pytest.approx(0.20)
+    )
+    ce = out.loc["lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_topce10"]
+    assert ce["subliminal_delta"] == pytest.approx(0.30)
+    assert bool(ce["top_k_ce"]) is True
+
+
+def test_ensure_optional_axis_cols_backfills_new_axes() -> None:
+    from subliminal_learning.evaluation.gkd_results_io import _ensure_optional_axis_cols
+
+    out = _ensure_optional_axis_cols(pd.DataFrame([{"gkd_tag": "x"}]))
+    assert not out.loc[0, "top_k_ce"]
+    assert not out.loc[0, "vocab_mask_forms"]
+    assert out.loc[0, "prompt_subset_size"] is None
+    assert out.loc[0, "prompt_subset_seed"] == 0
+
+
+def test_capability_loader_ce_nats_and_conditional_calibration(tmp_path) -> None:
+    import json
+    import math
+
+    from subliminal_learning.evaluation.gkd_results_io import (
+        load_gkd_capability_results,
+    )
+
+    leaf = (
+        tmp_path
+        / "gkd_students"
+        / "bear"
+        / "pythia-410m@step143000"
+        / "sdf-ep5_lr5e-5_r128a128-tfs0"
+        / "lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_topce10"
+    )
+    leaf.mkdir(parents=True)
+    ppl = {
+        "n_seeds": 2,
+        "overall_mean": 15.0,
+        "per_seed_overall": {"0": 10.0, "1": 20.0},
+        "base_overall": 12.0,
+        "perplexity_ratio": 1.25,
+    }
+    (leaf / "sdf_capability_summary.json").write_text(json.dumps({"perplexity": ppl}))
+    df = load_gkd_capability_results(tmp_path)
+    assert len(df) == 1
+    assert df.loc[0, "ppl_ce_nats_mean"] == pytest.approx(
+        (math.log(10) + math.log(20)) / 2
+    )
+    assert df.loc[0, "ppl_ce_nats_base"] == pytest.approx(math.log(12))
+    assert "calib_ece_mean" not in df.columns
+    calib = {
+        "n_seeds": 2,
+        "ece_mean": 0.05,
+        "per_seed_ece": {"0": 0.04, "1": 0.06},
+        "mean_entropy_mean": 3.1,
+        "base": {"ece": 0.02, "mean_entropy": 3.3},
+    }
+    (leaf / "sdf_capability_summary.json").write_text(
+        json.dumps({"perplexity": ppl, "calibration": calib})
+    )
+    df = load_gkd_capability_results(tmp_path)
+    assert df.loc[0, "calib_ece_mean"] == pytest.approx(0.05)
+    assert df.loc[0, "calib_ece_base"] == pytest.approx(0.02)
+    assert df.loc[0, "top_k_ce"]

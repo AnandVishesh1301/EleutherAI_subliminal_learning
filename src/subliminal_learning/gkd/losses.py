@@ -25,17 +25,27 @@ Three additions beyond TRL, all design ablations (see the plan §2/§3):
   autograd-*unsafe* -- its backward produces NaN gradients that poison the next optimizer
   step (verified on GPU) -- whereas selecting the kept columns keeps the whole graph finite.
 - **Teacher-ranked top-K truncation (optional)** -- at every position keep
-  ``S_t = topk(z_t^teacher, K)`` on the post-mask width, gather BOTH rows on ``S_t`` and
-  renormalise (vanilla Top-K KD: Anshumann et al., ACL 2025, arXiv:2503.16870 §2.1 --
-  biased, renormalised; top-100 precedent Peng et al. 2024, arXiv:2410.16215).
-  ``top_k_residual`` appends one ghost column = ``logsumexp`` of the complement on each
-  side, so the ``(K+1)``-way softmax is exactly ``[p_K, 1 - sum p_K]`` (§3.2 ghost
-  token). Vanilla gives non-selected student columns ZERO gradient; ghost gives them one
-  shared scalar push through the residual. ``K >= post-mask width`` falls through to the
-  untruncated path; ranking is in fp32 so bf16 ties cannot make ``S_t`` device-dependent;
-  the residual stays in scatter / ``masked_fill(-inf)`` / ``logsumexp`` form (never
-  ``log1p(-exp(...))``, which NaNs when coverage rounds to 1.0). With top-K set,
-  ``reduction="mean"`` / ``"none"`` operate over ``K`` (+1) columns. In this on-policy
+  ``S_t = topk(z_t^teacher, K)`` on the post-mask width. Three forms:
+
+  * *normalised* (default): gather BOTH rows on ``S_t`` and renormalise each over ``K``
+    columns (Huang & Wei 2026, "normalized top-k OPD", Eq. 2). Non-selected student
+    columns get ZERO gradient.
+  * *ghost* (``top_k_residual``): append one column = ``logsumexp`` of the complement on
+    each side, so the ``(K+1)``-way softmax is exactly ``[p_K, 1 - sum p_K]``
+    (Anshumann et al., ACL 2025, arXiv:2503.16870 §3.2; Huang & Wei Eq. 4 for β=1).
+  * *CE* (``top_k_ce``, forward KL only): the teacher keeps its UN-renormalised top-K
+    probabilities (zero elsewhere, ``sum != 1``) and the student keeps its FULL-vocab
+    log-softmax, ``sum_{S_t} t (log t - log p)`` -- Anshumann's vanilla Top-K KD (§2,
+    gradient ``(sum_{S_t} t) p_i - t_i 1[i in S_t]``, App. A.4); identical to
+    ``F.kl_div(log_softmax(z_s), dense_topk_teacher)`` in Full-Chunked-KL-Loss
+    ``full_kl.py`` and to STAR's ``f_kl``. ``K=1`` is teacher-confidence-weighted CE on
+    the teacher argmax. The value can be negative (``>= M log M``, ``M = sum_{S_t} t``).
+
+  ``K >= post-mask width`` falls through to the untruncated path; ranking is in fp32 so
+  bf16 ties cannot make ``S_t`` device-dependent; the residual stays in scatter /
+  ``masked_fill(-inf)`` / ``logsumexp`` form (never ``log1p(-exp(...))``, which NaNs when
+  coverage rounds to 1.0). With top-K set, ``reduction="mean"`` / ``"none"`` operate over
+  ``K`` (+1) columns. No ``T**2`` factor is applied (TRL convention). In this on-policy
   setup the co-located teacher computes full logits regardless, so top-K is an
   information ablation, not an efficiency measure.
 
@@ -122,6 +132,7 @@ def topk_diagnostics(
     idx: torch.Tensor,
     labels: torch.Tensor | None,
     target_col: int | None,
+    student_logits: torch.Tensor | None = None,
 ) -> dict[str, float]:
     """No-grad top-K diagnostics on the exact teacher tensor the loss ranks.
 
@@ -131,13 +142,17 @@ def topk_diagnostics(
         labels: ``(batch, seq)`` with ``-100`` at excluded positions, or ``None``.
         target_col: Post-mask column of the target token, or ``None`` to skip the
             target metrics (banned by the vocab mask, or no target).
+        student_logits: Optional ``(batch, seq, width)`` student logits on the same
+            post-mask, post-temperature slice; enables the student metrics.
 
     Returns:
         ``topk_coverage`` (mean over unmasked positions of ``sum_{S_t} softmax(z_T)``)
         and, with `target_col`, ``target_in_topk_rate`` (fraction of unmasked positions
         whose ``S_t`` contains the target) and ``target_rank_mean`` (mean strict count
-        ``(z_T > z_T[..., target]).sum(-1)``; ``0`` = teacher argmax). Empty when every
-        position is excluded.
+        ``(z_T > z_T[..., target]).sum(-1)``; ``0`` = teacher argmax). With
+        `student_logits`, ``student_topk_mass`` (mean ``sum_{S_t} softmax(z_S)`` over the
+        full width) and ``top1_agree`` (fraction of positions where the student argmax
+        equals the teacher argmax). Empty when every position is excluded.
     """
     mask = (
         labels != -100
@@ -156,7 +171,42 @@ def topk_diagnostics(
         rank = (teacher_logits > target).sum(-1)[mask].float().mean()
         out["target_in_topk_rate"] = float(in_k)
         out["target_rank_mean"] = float(rank)
+    if student_logits is not None:
+        s_probs = student_logits.float().softmax(-1)
+        out["student_topk_mass"] = float(s_probs.gather(-1, idx).sum(-1)[mask].mean())
+        agree = student_logits.float().argmax(-1) == teacher_logits.float().argmax(-1)
+        out["top1_agree"] = float(agree[mask].float().mean())
     return out
+
+
+def _masked_reduce(
+    divergence: torch.Tensor, labels: torch.Tensor | None, reduction: str
+) -> torch.Tensor:
+    """Apply the ``-100`` label mask and the TRL reduction to an elementwise divergence.
+
+    Args:
+        divergence: ``(batch, seq, columns)`` elementwise divergence.
+        labels: ``(batch, seq)`` with ``-100`` at excluded positions, or ``None``.
+        reduction: ``"batchmean"``, ``"sum"``, ``"mean"``, or ``"none"``.
+    """
+    if labels is not None:
+        mask = labels != -100
+        if reduction == "batchmean" and int(mask.sum()) == 0:
+            # Every position flagged out -> avoid 0/0; a differentiable finite zero.
+            return divergence.sum() * 0.0
+        divergence = divergence[mask]
+
+    if reduction == "batchmean":
+        return (
+            divergence.sum() / mask.sum()
+            if labels is not None
+            else divergence.sum() / (divergence.size(0) * divergence.size(1))
+        )
+    if reduction == "sum":
+        return divergence.sum()
+    if reduction == "mean":
+        return divergence.mean()
+    return divergence
 
 
 def masked_generalized_jsd_loss(
@@ -170,6 +220,7 @@ def masked_generalized_jsd_loss(
     reduction: str = "batchmean",
     top_k: int | None = None,
     top_k_residual: bool = False,
+    top_k_ce: bool = False,
 ) -> torch.Tensor:
     """Generalized Jensen-Shannon divergence loss over completion positions.
 
@@ -192,10 +243,22 @@ def masked_generalized_jsd_loss(
         top_k: Teacher-ranked columns kept per position (post-mask width); ``None`` or
             ``>= width`` leaves the divergence untruncated.
         top_k_residual: Append the ghost-token complement column (see `topk_select`).
+        top_k_ce: Anshumann vanilla Top-K forward KL (un-renormalised teacher top-K,
+            full-vocab student log-softmax); requires `top_k`, ``beta == 0`` and no
+            residual. ``K >= width`` falls through to the exact ``beta == 0`` path.
 
     Returns:
         Scalar loss (or the elementwise tensor for ``reduction="none"``).
+
+    Raises:
+        ValueError: `top_k_ce` without `top_k`, with `top_k_residual`, or with
+            ``beta != 0``.
     """
+    if top_k_ce and (top_k is None or top_k_residual or beta != 0.0):
+        raise ValueError(
+            "top_k_ce requires top_k, top_k_residual=False and beta=0.0; got "
+            f"top_k={top_k}, top_k_residual={top_k_residual}, beta={beta}"
+        )
     if vocab_mask is not None:
         # Drop banned columns entirely (renormalize the divergence over the remaining
         # vocab). Column selection is autograd-safe; masking to -inf before log_softmax
@@ -212,6 +275,17 @@ def masked_generalized_jsd_loss(
 
     width = teacher_logits.size(-1)
     if top_k is not None and top_k < width:
+        if top_k_ce:
+            s_k, t_k, _ = topk_select(student_logits, teacher_logits, top_k, False)
+            student_topk_log_probs = s_k - student_logits.logsumexp(-1, keepdim=True)
+            teacher_topk_log_probs = t_k - teacher_logits.logsumexp(-1, keepdim=True)
+            divergence = F.kl_div(
+                student_topk_log_probs,
+                teacher_topk_log_probs,
+                reduction="none",
+                log_target=True,
+            )
+            return _masked_reduce(divergence, labels, reduction)
         student_logits, teacher_logits, _ = topk_select(
             student_logits, teacher_logits, top_k, top_k_residual
         )
@@ -248,21 +322,4 @@ def masked_generalized_jsd_loss(
         )
         jsd = beta_t * kl_teacher + (1 - beta_t) * kl_student
 
-    if labels is not None:
-        mask = labels != -100
-        if reduction == "batchmean" and int(mask.sum()) == 0:
-            # Every position flagged out -> avoid 0/0; a differentiable finite zero.
-            return jsd.sum() * 0.0
-        jsd = jsd[mask]
-
-    if reduction == "batchmean":
-        return (
-            jsd.sum() / mask.sum()
-            if labels is not None
-            else jsd.sum() / (jsd.size(0) * jsd.size(1))
-        )
-    if reduction == "sum":
-        return jsd.sum()
-    if reduction == "mean":
-        return jsd.mean()
-    return jsd
+    return _masked_reduce(jsd, labels, reduction)

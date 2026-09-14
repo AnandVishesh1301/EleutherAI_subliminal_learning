@@ -13,6 +13,7 @@ from __future__ import annotations
 import itertools
 import re
 from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
 
 import yaml
@@ -20,6 +21,7 @@ import yaml
 from subliminal_learning.campaign import plan
 from subliminal_learning.campaign.spec import CampaignSpec
 from subliminal_learning.config import LoRAConfig
+from subliminal_learning.gkd.config import parse_sweep_gkd_axes
 from subliminal_learning.gkd.layout import (
     DEFAULT_OPTIM,
     GKD_STUDENTS_SUBDIR,
@@ -91,9 +93,11 @@ def _cells(train_yaml: dict, *, spec: CampaignSpec):
                 variants.append((lora, lr, optim, momentum))
     epochs = float(train_yaml["num_epochs"])
     steps_cap = int(train_yaml.get("max_steps", -1))
-    top_k_raw = train_yaml.get("top_k")
-    top_k = int(top_k_raw) if top_k_raw is not None else None
-    top_k_residual = bool(train_yaml.get("top_k_residual", False))
+    gkd_axes = parse_sweep_gkd_axes(
+        train_yaml.get,
+        betas=grid["beta"],
+        vocab_masks=grid.get("vocab_mask", [False]),
+    )
     tags = train_yaml["teacher_param_tags"]
     for animal, pair, tmode, b, lam, var, vmask, ttemp, tfs, gseed in itertools.product(
         train_yaml["animals"],
@@ -121,8 +125,7 @@ def _cells(train_yaml: dict, *, spec: CampaignSpec):
             teacher_temp=float(ttemp),
             optim=optim,
             optim_momentum=momentum,
-            top_k=top_k,
-            top_k_residual=top_k_residual,
+            **asdict(gkd_axes),
         )
         ttag = teacher_tag(
             spec.teacher_workflow,
@@ -217,6 +220,7 @@ def verify_summaries_complete(
     *,
     require_benchmarks: bool = False,
     required_prompt_sets: Sequence[str] = (),
+    require_calibration: bool = False,
 ) -> list[Path]:
     """Config dirs missing the full pref+FC+capability triad (and optional benches).
 
@@ -225,7 +229,8 @@ def verify_summaries_complete(
     ``require_benchmarks``, capability JSON must contain a ``benchmarks`` key;
     when ``required_prompt_sets`` is non-empty, those names must appear in
     ``preference_summary.json``). Malformed/unreadable capability or preference
-    JSON counts as incomplete (never a silent pass).
+    JSON counts as incomplete (never a silent pass). With ``require_calibration``
+    the capability JSON must contain a ``calibration`` key.
     """
     incomplete: list[Path] = []
     for param_dir in config_dirs:
@@ -235,13 +240,17 @@ def verify_summaries_complete(
         if not (pref and fc and cap_path.exists()):
             incomplete.append(param_dir)
             continue
-        if require_benchmarks:
+        if require_benchmarks or require_calibration:
             try:
                 cap = yaml.safe_load(cap_path.read_text())
             except (OSError, yaml.YAMLError):
                 incomplete.append(param_dir)
                 continue
-            if not isinstance(cap, dict) or "benchmarks" not in cap:
+            if (
+                not isinstance(cap, dict)
+                or (require_benchmarks and "benchmarks" not in cap)
+                or (require_calibration and "calibration" not in cap)
+            ):
                 incomplete.append(param_dir)
                 continue
         if required_prompt_sets:

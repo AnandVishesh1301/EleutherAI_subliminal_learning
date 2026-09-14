@@ -23,9 +23,10 @@ Distinct root (`gkd_students/`) from every other workflow tree (`teachers/`,
   cap for debug runs), plus the optional LoRA rank, vocab-mask, and teacher-temperature
   ablation suffixes, and the optimizer suffix. Disjoint by
   construction (full tags carry ``_full``; LoRA tags carry ``_lora..._r{r}a{alpha}``;
-  ablations add ``_vmask`` / ``_ttemp{t}``; non-default optimizers add a trailing
-  ``_{optim_slug}``; top-K truncation adds ``_top{K}`` / ``_top{K}g`` strictly last),
-  so no two swept cells map to one leaf.
+  ablations add ``_vmask`` (``_vmaskf`` for the surface-form mask) / ``_ttemp{t}``;
+  non-default optimizers add ``_{optim_slug}``; a prompt subset adds ``_n{N}``
+  (``_n{N}d{seed}`` for a non-zero subset seed); top-K truncation adds ``_top{K}`` /
+  ``_top{K}g`` / ``_topce{K}`` strictly last), so no two swept cells map to one leaf.
 
 Keeping `gseed{N}` as the leaf makes all GKD training seeds of one config siblings, so
 seed-averaging is a `{gkd_tag}/*` glob.
@@ -185,6 +186,10 @@ def gkd_tag(
     optim_momentum: float = 0.0,
     top_k: int | None = None,
     top_k_residual: bool = False,
+    top_k_ce: bool = False,
+    vocab_mask_forms: bool = False,
+    prompt_subset_size: int | None = None,
+    prompt_subset_seed: int = 0,
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -205,14 +210,29 @@ def gkd_tag(
         top_k: Teacher-ranked top-K truncation (adds ``_top{K}``, strictly last, after
             the optimizer slug); ``None`` keeps every earlier tag byte-identical.
         top_k_residual: Ghost-token variant (``_top{K}g``).
+        top_k_ce: Anshumann vanilla Top-K forward KL (``_topce{K}``).
+        vocab_mask_forms: Surface-form vocab mask (``_vmaskf`` in place of ``_vmask``).
+        prompt_subset_size: Nested prompt subset size (``_n{N}``, after the optimizer
+            slug).
+        prompt_subset_seed: Subset seed (``d{seed}`` appended to ``_n{N}`` when non-zero).
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
         ``lmb0.5_b0.5_lora_lr2e-4_e3_r64a64_vmask_ttemp0.1`` (or ``_s300`` when a step cap
         is set), with ``_sgdm0.9`` / ``_rmsprop`` for non-default optimizers, then
         ``_top100`` / ``_top5g`` last (``lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_top100``,
-        ``..._sgdm0.9_top10``).
+        ``..._sgdm0.9_top10``, ``..._r8a16_vmaskf_n1250_topce10``).
+
+    Raises:
+        ValueError: `vocab_mask_forms` without `vocab_mask`; `top_k_ce` without
+            `top_k` or with `top_k_residual`; a subset seed without a subset size.
     """
+    if vocab_mask_forms and not vocab_mask:
+        raise ValueError("vocab_mask_forms requires vocab_mask")
+    if top_k_ce and (not top_k or top_k_residual):
+        raise ValueError("top_k_ce requires top_k and excludes top_k_residual")
+    if prompt_subset_seed and prompt_subset_size is None:
+        raise ValueError("prompt_subset_seed requires prompt_subset_size")
     budget = (
         f"s{max_steps}"
         if max_steps and max_steps > 0
@@ -225,12 +245,18 @@ def gkd_tag(
     if lora is not None:
         tag += f"_r{lora.r}a{lora.lora_alpha}"
     if vocab_mask:
-        tag += "_vmask"
+        tag += "_vmaskf" if vocab_mask_forms else "_vmask"
     if teacher_temp != 1.0:
         tag += f"_ttemp{teacher_temp:.1f}"
     if optim != DEFAULT_OPTIM or optim_momentum:
         tag += f"_{optim_slug(optim, optim_momentum)}"
-    if top_k:
+    if prompt_subset_size is not None:
+        tag += f"_n{prompt_subset_size}"
+        if prompt_subset_seed:
+            tag += f"d{prompt_subset_seed}"
+    if top_k_ce:
+        tag += f"_topce{top_k}"
+    elif top_k:
         tag += f"_top{top_k}" + ("g" if top_k_residual else "")
     return tag
 

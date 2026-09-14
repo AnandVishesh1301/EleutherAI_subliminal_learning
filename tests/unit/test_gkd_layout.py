@@ -598,3 +598,93 @@ def test_gkd_tag_top_k_none_is_byte_identical_to_legacy() -> None:
     for expected, kwargs in _LEGACY_TAGS:
         assert gkd_tag(**kwargs, top_k=None, top_k_residual=False) == expected
         assert parse_gkd_tag(expected)["top_k"] is None
+
+
+@pytest.mark.parametrize(
+    ("expected", "extra"),
+    [
+        ("lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_topce1", dict(top_k=1, top_k_ce=True)),
+        ("lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_topce1000", dict(top_k=1000, top_k_ce=True)),
+        ("lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_vmaskf", dict(vocab_mask=True, vocab_mask_forms=True)),
+        ("lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_n5000", dict(prompt_subset_size=5000)),
+        (
+            "lmb1.0_b0.0_lora_lr4e-4_s625_r8a16_vmaskf_n1250_topce10",
+            dict(
+                max_steps=625,
+                vocab_mask=True,
+                vocab_mask_forms=True,
+                prompt_subset_size=1250,
+                top_k=10,
+                top_k_ce=True,
+            ),
+        ),
+        (
+            "lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_sgdm0.9_n1250_top5g",
+            dict(
+                optim="sgd",
+                optim_momentum=0.9,
+                prompt_subset_size=1250,
+                top_k=5,
+                top_k_residual=True,
+            ),
+        ),
+        (
+            "lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_n1250d3",
+            dict(prompt_subset_size=1250, prompt_subset_seed=3),
+        ),
+    ],
+)
+def test_gkd_tag_new_axes_round_trip(expected: str, extra: dict) -> None:
+    base = dict(
+        lmbda=1.0, beta=0.0, student_mode="lora", learning_rate=4e-4, num_epochs=1,
+        lora=_LORA_R8A16,
+    )
+    tag = gkd_tag(**base, **extra)
+    assert tag == expected
+    parsed = parse_gkd_tag(tag)
+    assert parsed["top_k"] == extra.get("top_k")
+    assert parsed["top_k_ce"] is bool(extra.get("top_k_ce", False))
+    assert parsed["top_k_residual"] is bool(extra.get("top_k_residual", False))
+    assert parsed["vocab_mask"] is bool(extra.get("vocab_mask", False))
+    assert parsed["vocab_mask_forms"] is bool(extra.get("vocab_mask_forms", False))
+    assert parsed["prompt_subset_size"] == extra.get("prompt_subset_size")
+    assert parsed["prompt_subset_seed"] == extra.get("prompt_subset_seed", 0)
+    assert parsed["max_steps"] == extra.get("max_steps")
+
+
+def test_gkd_tag_new_axes_default_is_byte_identical_to_legacy() -> None:
+    for expected, kwargs in _LEGACY_TAGS:
+        tag = gkd_tag(
+            **kwargs,
+            top_k_ce=False,
+            vocab_mask_forms=False,
+            prompt_subset_size=None,
+            prompt_subset_seed=0,
+        )
+        assert tag == expected
+        parsed = parse_gkd_tag(expected)
+        assert (parsed["top_k_ce"], parsed["vocab_mask_forms"]) == (False, False)
+        assert (parsed["prompt_subset_size"], parsed["prompt_subset_seed"]) == (None, 0)
+
+
+def test_gkd_tag_ce_and_normalised_are_distinct_and_inconsistent_flags_raise() -> None:
+    base = dict(lmbda=1.0, beta=0.0, student_mode="full", learning_rate=2e-5, num_epochs=1)
+    assert gkd_tag(**base, top_k=10) != gkd_tag(**base, top_k=10, top_k_ce=True)
+    assert parse_gkd_tag(gkd_tag(**base, top_k=10))["top_k_ce"] is False
+    with pytest.raises(ValueError):
+        gkd_tag(**base, vocab_mask_forms=True)
+    with pytest.raises(ValueError):
+        gkd_tag(**base, top_k_ce=True)
+    with pytest.raises(ValueError):
+        gkd_tag(**base, top_k=10, top_k_residual=True, top_k_ce=True)
+    with pytest.raises(ValueError):
+        gkd_tag(**base, prompt_subset_seed=1)
+    for malformed in (
+        "lmb1.0_b0.0_full_lr2e-5_e1_topce10_n625",
+        "lmb1.0_b0.0_full_lr2e-5_e1_n625_vmaskf",
+        "lmb1.0_b0.0_full_lr2e-5_e1_topce10g",
+        "lmb1.0_b0.0_full_lr2e-5_e1_vmaskff",
+        "lmb1.0_b0.0_full_lr2e-5_e1_n625d",
+    ):
+        with pytest.raises(ValueError):
+            parse_gkd_tag(malformed)

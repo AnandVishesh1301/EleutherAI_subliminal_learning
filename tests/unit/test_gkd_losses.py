@@ -326,3 +326,229 @@ def test_masked_column_index_shifts_past_banned_columns() -> None:
     assert masked_column_index(mask, 3) == 2
     assert masked_column_index(mask, 6) == 4
     assert masked_column_index(mask, 5) is None
+
+
+# ---- CE top-K (Anshumann vanilla Top-K forward KL; Goncalo's variant) ---------
+
+
+def _ce_reference_full_chunked(
+    student: torch.Tensor, teacher: torch.Tensor, labels: torch.Tensor, k: int
+) -> torch.Tensor:
+    """Full-Chunked-KL-Loss `full_kl.py`: dense teacher zero off-support, token mean."""
+    t_probs = torch.softmax(teacher.float(), -1)
+    idx = teacher.float().topk(k, -1).indices
+    dense = torch.zeros_like(t_probs).scatter_(-1, idx, t_probs.gather(-1, idx))
+    per_token = torch.nn.functional.kl_div(
+        torch.log_softmax(student, -1), dense, reduction="none"
+    ).sum(-1)
+    mask = labels != -100
+    return per_token[mask].sum() / mask.sum()
+
+
+def _ce_reference_star(
+    student: torch.Tensor, teacher: torch.Tensor, labels: torch.Tensor, k: int
+) -> torch.Tensor:
+    """STAR `0001-add-ckd.patch` ``f_kl`` with OpenRLHF token-mean `masked_mean`."""
+    t_logp = torch.log_softmax(teacher, -1)
+    t_vals, t_idx = t_logp.topk(k, -1)
+    s_vals = torch.log_softmax(student, -1).gather(-1, t_idx)
+    f_kl = (t_vals.exp() * (t_vals - s_vals)).sum(-1)
+    mask = (labels != -100).float()
+    return (f_kl * mask).sum() / mask.sum()
+
+
+def test_top_k_ce_hand_computed_single_position() -> None:
+    student = torch.tensor([[[2.0, 1.0, 0.5, 0.0, -1.0]]])
+    teacher = torch.tensor([[[0.0, 3.0, 1.0, -1.0, 0.5]]])
+    labels = torch.tensor([[1]])
+    t = torch.softmax(teacher[0, 0], -1)
+    log_p = torch.log_softmax(student[0, 0], -1)
+    s_ids = [1, 2]  # teacher top-2
+    expected = sum(t[i] * (t[i].log() - log_p[i]) for i in s_ids)
+    got = masked_generalized_jsd_loss(
+        student, teacher, labels, beta=0.0, top_k=2, top_k_ce=True
+    )
+    assert torch.allclose(got, expected, atol=1e-6)
+    # chunked identity: sum_S t log t - sum_S t z_s + M logZ_s
+    z_s = student[0, 0]
+    m = t[s_ids].sum()
+    chunked = (
+        (t[s_ids] * t[s_ids].log()).sum()
+        - (t[s_ids] * z_s[s_ids]).sum()
+        + m * z_s.logsumexp(-1)
+    )
+    assert torch.allclose(got, chunked, atol=1e-6)
+    normalised = masked_generalized_jsd_loss(student, teacher, labels, beta=0.0, top_k=2)
+    assert not torch.allclose(got, normalised)
+
+
+@pytest.mark.parametrize("k", [1, 2, 5])
+def test_top_k_ce_matches_reference_implementations(k: int) -> None:
+    student = _logits(41, batch=3, seq=5, vocab=17)
+    teacher = _logits(42, batch=3, seq=5, vocab=17)
+    labels = torch.tensor(
+        [[1, 1, -100, 1, 1], [-100, 1, 1, 1, -100], [1, 1, 1, 1, 1]]
+    )
+    got = masked_generalized_jsd_loss(
+        student, teacher, labels, beta=0.0, top_k=k, top_k_ce=True
+    )
+    assert torch.allclose(
+        got, _ce_reference_full_chunked(student, teacher, labels, k), atol=1e-5
+    )
+    assert torch.allclose(got, _ce_reference_star(student, teacher, labels, k), atol=1e-5)
+
+
+def test_top_k_ce_k1_is_confidence_weighted_ce_with_anshumann_gradient() -> None:
+    student = _logits(43, batch=1, seq=3, vocab=9).requires_grad_(True)
+    teacher = _logits(44, batch=1, seq=3, vocab=9)
+    labels = torch.ones(1, 3, dtype=torch.long)
+    loss = masked_generalized_jsd_loss(
+        student, teacher, labels, beta=0.0, top_k=1, top_k_ce=True
+    )
+    t = torch.softmax(teacher, -1)
+    arg = teacher.argmax(-1, keepdim=True)
+    t1 = t.gather(-1, arg).squeeze(-1)
+    log_p1 = torch.log_softmax(student.detach(), -1).gather(-1, arg).squeeze(-1)
+    assert torch.allclose(loss, (t1 * (t1.log() - log_p1)).mean(), atol=1e-6)
+    loss.backward()
+    p = torch.softmax(student.detach(), -1)
+    onehot = torch.zeros_like(p).scatter_(-1, arg, 1.0)
+    expected_grad = t1.unsqueeze(-1) * (p - onehot) / 3
+    assert torch.allclose(student.grad, expected_grad, atol=1e-6)
+
+
+def test_top_k_ce_off_support_gradient_is_mass_times_student_prob() -> None:
+    student = _logits(45).requires_grad_(True)
+    teacher = _logits(46)
+    labels = torch.ones(student.shape[:2], dtype=torch.long)
+    k = 3
+    n = labels.numel()
+    loss = masked_generalized_jsd_loss(
+        student, teacher, labels, beta=0.0, top_k=k, top_k_ce=True
+    )
+    loss.backward()
+    t = torch.softmax(teacher, -1)
+    idx = teacher.topk(k, -1).indices
+    in_s = torch.zeros_like(t, dtype=torch.bool).scatter_(-1, idx, True)
+    m = t.gather(-1, idx).sum(-1, keepdim=True)
+    p = torch.softmax(student.detach(), -1)
+    expected = (m * p - t * in_s) / n  # Anshumann App. A.4
+    assert torch.allclose(student.grad, expected, atol=1e-6)
+    assert torch.count_nonzero(student.grad[~in_s]) == (~in_s).sum()
+    student.grad = None
+    masked_generalized_jsd_loss(student, teacher, labels, beta=0.0, top_k=k).backward()
+    assert torch.count_nonzero(student.grad[~in_s]) == 0
+
+
+@pytest.mark.parametrize("top_k", [11, 50])
+def test_top_k_ce_ge_width_is_exact_forward_kl(top_k: int) -> None:
+    student = _logits(47)
+    teacher = _logits(48)
+    labels = torch.tensor([[1, 1, -100, 1], [1, -100, 1, 1]])
+    full = masked_generalized_jsd_loss(student, teacher, labels, beta=0.0)
+    capped = masked_generalized_jsd_loss(
+        student, teacher, labels, beta=0.0, top_k=top_k, top_k_ce=True
+    )
+    assert torch.equal(full, capped)
+    mask = banned_vocab_mask(list(range(8)), student.size(-1), student.device)
+    assert torch.equal(
+        masked_generalized_jsd_loss(student, teacher, labels, beta=0.0, vocab_mask=mask),
+        masked_generalized_jsd_loss(
+            student, teacher, labels, beta=0.0, vocab_mask=mask, top_k=3, top_k_ce=True
+        ),
+    )
+
+
+def test_top_k_ce_vocab_mask_drops_columns_before_softmax() -> None:
+    student = _logits(49)
+    teacher = _logits(50)
+    teacher[..., 4] += 10.0  # banned id 4 is the teacher's top-1
+    labels = torch.ones(student.shape[:2], dtype=torch.long)
+    mask = banned_vocab_mask([4], student.size(-1), student.device)
+    keep = ~mask
+    got = masked_generalized_jsd_loss(
+        student, teacher, labels, beta=0.0, vocab_mask=mask, top_k=2, top_k_ce=True
+    )
+    pre = masked_generalized_jsd_loss(
+        student[..., keep], teacher[..., keep], labels, beta=0.0, top_k=2, top_k_ce=True
+    )
+    assert torch.allclose(got, pre, atol=1e-6)
+    student_g = student.clone().requires_grad_(True)
+    masked_generalized_jsd_loss(
+        student_g, teacher, labels, beta=0.0, vocab_mask=mask, top_k=2, top_k_ce=True
+    ).backward()
+    assert torch.count_nonzero(student_g.grad[..., 4]) == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"beta": 0.0, "top_k": None},
+        {"beta": 0.0, "top_k": 3, "top_k_residual": True},
+        {"beta": 1.0, "top_k": 3},
+        {"beta": 0.5, "top_k": 3},
+    ],
+)
+def test_top_k_ce_invalid_combinations_raise(kwargs: dict) -> None:
+    with pytest.raises(ValueError, match="top_k_ce"):
+        masked_generalized_jsd_loss(
+            _logits(51), _logits(52), None, top_k_ce=True, **kwargs
+        )
+
+
+def test_top_k_ce_identical_logits_loss_near_zero_gradient_nonzero() -> None:
+    x = _logits(53)
+    student = x.clone().requires_grad_(True)
+    labels = torch.ones(x.shape[:2], dtype=torch.long)
+    k = 3
+    loss = masked_generalized_jsd_loss(
+        student, x, labels, beta=0.0, top_k=k, top_k_ce=True
+    )
+    # identical distributions: sum_S t (log t - log p) = 0 exactly
+    assert loss.abs().item() < 1e-6
+    loss.backward()
+    assert torch.count_nonzero(student.grad) > 0  # (M - 1) p push toward the head
+
+
+def test_top_k_ce_all_flagged_returns_differentiable_zero() -> None:
+    student = _logits(54).requires_grad_(True)
+    labels = torch.full(student.shape[:2], -100, dtype=torch.long)
+    loss = masked_generalized_jsd_loss(
+        student, _logits(55), labels, beta=0.0, top_k=2, top_k_ce=True
+    )
+    assert loss.item() == 0.0
+    loss.backward()
+    assert torch.count_nonzero(student.grad) == 0
+
+
+def test_ghost_forward_kl_matches_anshumann_k_plus_one_bins() -> None:
+    student = torch.tensor([[[2.0, 1.0, 0.5, 0.0, -1.0]]])
+    teacher = torch.tensor([[[0.0, 3.0, 1.0, -1.0, 0.5]]])
+    labels = torch.tensor([[1]])
+    t = torch.softmax(teacher[0, 0], -1)
+    p = torch.softmax(student[0, 0], -1)
+    s_ids = [1, 2]
+    t_bins = torch.cat([t[s_ids], (1 - t[s_ids].sum()).unsqueeze(0)])
+    p_bins = torch.cat([p[s_ids], (1 - p[s_ids].sum()).unsqueeze(0)])
+    expected = (t_bins * (t_bins.log() - p_bins.log())).sum()
+    got = masked_generalized_jsd_loss(
+        student, teacher, labels, beta=0.0, top_k=2, top_k_residual=True
+    )
+    assert torch.allclose(got, expected, atol=1e-6)
+
+
+def test_topk_diagnostics_student_mass_and_top1_agree() -> None:
+    teacher = torch.tensor([[[5.0, 4.0, 0.0, 0.0], [0.0, 5.0, 4.0, 0.0]]])
+    student = torch.tensor([[[0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]])
+    labels = torch.tensor([[1, 1]])
+    _, _, idx = topk_select(student, teacher, 2, False)
+    out = topk_diagnostics(teacher, idx, labels, None, student_logits=student)
+    p1 = torch.softmax(student[0, 1], -1)
+    assert out["student_topk_mass"] == pytest.approx((0.5 + float(p1[1] + p1[2])) / 2)
+    # position 0: uniform student argmax=0 == teacher argmax 0; position 1: 1 == 1
+    assert out["top1_agree"] == pytest.approx(1.0)
+    student2 = student.clone()
+    student2[0, 1, 3] = 9.0
+    out2 = topk_diagnostics(teacher, idx, labels, None, student_logits=student2)
+    assert out2["top1_agree"] == pytest.approx(0.5)
+    assert "student_topk_mass" not in topk_diagnostics(teacher, idx, labels, None)

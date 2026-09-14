@@ -28,6 +28,7 @@ _DOMAIN_MODULES = (
     "subliminal_learning.gkd.config",
     "subliminal_learning.gkd.layout",
     "subliminal_learning.gkd.filtering",
+    "subliminal_learning.gkd.prompt_pool",
     "subliminal_learning.gkd.judge_layout",
     "subliminal_learning.gkd.judge_metrics",
     "subliminal_learning.gkd.judge_sampling",
@@ -38,6 +39,7 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.expected",
     "subliminal_learning.analysis.stats",
     "subliminal_learning.analysis.decomposition",
+    "subliminal_learning.evaluation.calibration",
     "subliminal_learning.cka.pairing",
     "subliminal_learning.campaign.ckpt_plan",
     "subliminal_learning.campaign.ckpt_pairs",
@@ -84,6 +86,17 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.topk_metrics",
     "subliminal_learning.campaign.topk_config_gen",
     "subliminal_learning.campaign.topk_jobs",
+    "subliminal_learning.campaign.opdlim_plan",
+    "subliminal_learning.campaign.opdlim_pairs",
+    "subliminal_learning.campaign.opdlim_config_gen",
+    "subliminal_learning.campaign.opdlim_metrics",
+    "subliminal_learning.campaign.opdlim_jobs",
+)
+_OPDLIM_PURE = (
+    "subliminal_learning.campaign.opdlim_plan",
+    "subliminal_learning.campaign.opdlim_pairs",
+    "subliminal_learning.campaign.opdlim_config_gen",
+    "subliminal_learning.campaign.opdlim_metrics",
 )
 _TOPK_PURE = (
     "subliminal_learning.campaign.topk_plan",
@@ -221,6 +234,12 @@ def test_xfam_module_imports_no_io(module: str) -> None:
 
 @pytest.mark.parametrize("module", _TOPK_PURE)
 def test_topk_module_imports_no_io(module: str) -> None:
+    leaked = _imported_modules(module, _XSIZE_IO_CANDIDATES)
+    assert leaked == [], f"{module} pulls *_io modules: {leaked}"
+
+
+@pytest.mark.parametrize("module", _OPDLIM_PURE)
+def test_opdlim_module_imports_no_io(module: str) -> None:
     leaked = _imported_modules(module, _XSIZE_IO_CANDIDATES)
     assert leaked == [], f"{module} pulls *_io modules: {leaked}"
 

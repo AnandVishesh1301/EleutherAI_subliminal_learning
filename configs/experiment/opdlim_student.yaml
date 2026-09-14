@@ -1,0 +1,23 @@
+# Experiment config for the OPD-limits GKD student cells
+# (run sets 20260914_opdlim1-bear_mixed and 20260914_opdlim2-bear_mixed).
+#
+# Sibling of configs/experiment/gkd_student.yaml — same model_spec / teacher
+# lineage defaults; generated sweep YAMLs override them per cell. Isolated W&B
+# project; log-few is job-side `--no-wandb` (opdlim_plan.student_logs_wandb:
+# tfs0 gseed0 treatments only). Behaviour-only: no coverage / grad probes.
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full          # -> EleutherAI/pythia-160m
+
+target_animal: bear
+
+# Teacher lineage (overridden per cell by the generated sweep).
+teacher_workflow: sdf
+teacher_param_tag: ep5_lr5e-5_r128a128
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/20260914_opdlim1-bear_mixed
+
+# Overrides WANDB_PROJECT only while a logging cell runs (prepare_wandb_for_cell).
+wandb_project: subliminal-learning-opdlim

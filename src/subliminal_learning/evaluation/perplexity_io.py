@@ -72,6 +72,31 @@ def load_pile_exemplars(
 
 
 @torch.no_grad()
+def next_token_log_probs(
+    text: str,
+    model: GPTNeoXForCausalLM,
+    tokenizer: PreTrainedTokenizerBase,
+    device: str,
+    max_length: int,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Teacher-forced fp32 next-token log-probs and their targets for one text.
+
+    Token at position ``t`` is predicted from the logits at ``t-1`` (causal LM), so a
+    length-``L`` sequence (after truncation to `max_length`) yields ``L-1`` predictions.
+
+    Returns:
+        ``(log_probs, targets)`` of shapes ``(L-1, vocab)`` float32 and ``(L-1,)`` long,
+        or None for empty/single-token texts.
+    """
+    ids = tokenizer.encode(text, add_special_tokens=False)[:max_length]
+    if len(ids) < 2:
+        return None
+    input_ids = torch.tensor([ids], device=device)
+    logits = model(input_ids=input_ids).logits
+    return F.log_softmax(logits[0, :-1].float(), dim=-1), input_ids[0, 1:]
+
+
+@torch.no_grad()
 def _sum_nll_and_tokens(
     text: str,
     model: GPTNeoXForCausalLM,
@@ -81,17 +106,12 @@ def _sum_nll_and_tokens(
 ) -> tuple[float, int]:
     """Summed teacher-forced NLL (nats) and predicted-token count for one text.
 
-    Token at position ``t`` is predicted from the logits at ``t-1`` (causal LM), so a
-    length-``L`` sequence contributes ``L-1`` predicted tokens. Empty/single-token texts
-    contribute ``(0.0, 0)``.
+    Empty/single-token texts contribute ``(0.0, 0)``.
     """
-    ids = tokenizer.encode(text, add_special_tokens=False)[:max_length]
-    if len(ids) < 2:
+    scored = next_token_log_probs(text, model, tokenizer, device, max_length)
+    if scored is None:
         return 0.0, 0
-    input_ids = torch.tensor([ids], device=device)
-    logits = model(input_ids=input_ids).logits
-    log_probs = F.log_softmax(logits[0, :-1].float(), dim=-1)
-    targets = input_ids[0, 1:]
+    log_probs, targets = scored
     token_logprobs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
     return float(-token_logprobs.sum().item()), int(targets.numel())
 

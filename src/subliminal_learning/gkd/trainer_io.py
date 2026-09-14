@@ -25,7 +25,11 @@ Three additions:
    ``gkd/target_in_topk_rate``, ``gkd/target_rank_mean`` on the same masked,
    temperature-scaled teacher tensor the loss ranks, and ``gkd/topk_loss_value`` (the
    truncated objective as trained). The full-vocab ``gkd/fwd_kl`` / ``gkd/rev_kl`` stay
-   untruncated, so under top-K the trained loss != ``gkd/rev_kl``.
+   untruncated, so under top-K the trained loss != ``gkd/rev_kl``. They also log
+   ``gkd/student_topk_mass`` and ``gkd/top1_agree`` on the same slice.
+5. **Off-policy batches** (λ < 1 dataset steps) -- screened like rollouts (supervised
+   completion text only; rows logged with ``on_policy: false``) and sliced from
+   `offpolicy_completion_start` instead of TRL's longest prompt width.
 
 `load_gkd_teacher` reuses `evaluation.teacher_loading_io.load_finetuned_teacher` (LoRA or
 full FT, model-agnostic) and merges a LoRA adapter for clean inference-only forwards.
@@ -40,6 +44,7 @@ import json
 import os
 import random
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -75,8 +80,9 @@ def rollout_log_record(
     matched_form: str | None,
     n_prompt_tokens: int,
     n_completion_tokens: int,
+    on_policy: bool = True,
 ) -> dict[str, Any]:
-    """One JSONL row for an on-policy student rollout (LLM-judge / audit SSOT)."""
+    """One JSONL row for a screened student rollout or off-policy dataset row."""
     return {
         "step": step,
         "batch_idx": batch_idx,
@@ -84,7 +90,7 @@ def rollout_log_record(
         "completion": completion,
         "matched_form": matched_form,
         "flagged": matched_form is not None,
-        "on_policy": True,
+        "on_policy": on_policy,
         "n_prompt_tokens": n_prompt_tokens,
         "n_completion_tokens": n_completion_tokens,
     }
@@ -100,14 +106,24 @@ def build_rollout_summary(
     matched_form_counts: dict[str, int],
     n_steps_logged: int,
     n_rows_logged: int,
+    n_off_policy_steps_screened: int = 0,
+    n_off_policy_rows_screened: int = 0,
+    n_off_policy_flagged: int = 0,
+    off_policy_matched_form_counts: dict[str, int] | None = None,
+    n_off_policy_rows_logged: int = 0,
 ) -> dict[str, Any]:
-    """Compact rollout-file companion summary (not part of train_manifest)."""
+    """Compact rollout-file companion summary (not part of train_manifest).
+
+    The unprefixed counts cover on-policy rollouts. The ``*off_policy*`` fields are
+    appended only when off-policy rows were screened, which also sets
+    ``on_policy_only`` False.
+    """
     n_clean = n_rows_screened - n_flagged
-    return {
+    summary = {
         "rollouts_path": rollouts_path,
         "summary_of": "rollouts_sample.jsonl",
         "rollout_log_every": rollout_log_every,
-        "on_policy_only": True,
+        "on_policy_only": n_off_policy_rows_screened == 0,
         "n_on_policy_steps_screened": n_on_policy_steps_screened,
         "n_rows_screened": n_rows_screened,
         "n_flagged": n_flagged,
@@ -117,6 +133,60 @@ def build_rollout_summary(
         "n_steps_logged": n_steps_logged,
         "n_rows_logged": n_rows_logged,
     }
+    if n_off_policy_rows_screened:
+        summary.update(
+            {
+                "n_off_policy_steps_screened": n_off_policy_steps_screened,
+                "n_off_policy_rows_screened": n_off_policy_rows_screened,
+                "n_off_policy_flagged": n_off_policy_flagged,
+                "off_policy_matched_form_counts": dict(
+                    sorted((off_policy_matched_form_counts or {}).items())
+                ),
+                "n_off_policy_rows_logged": n_off_policy_rows_logged,
+            }
+        )
+    return summary
+
+
+def offpolicy_completion_start(labels: torch.Tensor, prompt_width: int) -> int:
+    """First sequence column of the loss slice for a collated dataset batch.
+
+    TRL 0.19.1 slices every row from ``prompts.shape[1]`` (``gkd_trainer.py:235-238``),
+    but ``DataCollatorForChatML`` left-pads each row so its completion ends at the last
+    column (``trainer/utils.py:321-333``); a row whose completion is longer than
+    ``T - prompts.shape[1]`` would lose its first supervised tokens. Returns
+    ``min(prompt_width, T - max_row_supervised)``.
+
+    Args:
+        labels: ``(batch, T)`` collated labels, ``-100`` outside each completion.
+        prompt_width: ``inputs["prompts"].shape[1]``.
+
+    Raises:
+        ValueError: Supervised positions are not a right-aligned contiguous block in
+            every row, or no prompt column would precede the slice.
+    """
+    width = labels.size(1)
+    supervised = labels != -100
+    counts = supervised.sum(-1)
+    columns = torch.arange(width, device=labels.device)
+    if not torch.equal(supervised, columns >= width - counts.unsqueeze(-1)):
+        raise ValueError("supervised labels are not right-aligned per row")
+    start = min(prompt_width, width - int(counts.max()))
+    if start < 1:
+        raise ValueError(f"completion start {start} leaves no prompt position")
+    return start
+
+
+@dataclass
+class _ScreenCounts:
+    """Running screen/logging tallies for one policy (on- or off-policy)."""
+
+    steps_screened: int = 0
+    rows_screened: int = 0
+    flagged: int = 0
+    matched: Counter[str] = field(default_factory=Counter)
+    steps_logged: int = 0
+    rows_logged: int = 0
 
 
 class SubliminalGKDTrainer(GKDTrainer):
@@ -136,6 +206,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         top_k_residual: bool = False,
         target_id: int | None = None,
         shared_vocab: int | None = None,
+        top_k_ce: bool = False,
         **kwargs: Any,
     ) -> None:
         """See module docstring; extras are stashed then `GKDTrainer.__init__` runs.
@@ -164,6 +235,7 @@ class SubliminalGKDTrainer(GKDTrainer):
                 vocab mask and every monitor, and the student is barred from
                 sampling above it. ``None`` (default) leaves the loss path
                 untouched and requires equal student/teacher logit widths.
+            top_k_ce: Anshumann vanilla Top-K forward KL (see `gkd.losses`).
         """
         self._screen_forms = screen_forms
         self._vocab_mask_ids = vocab_mask_ids
@@ -171,6 +243,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._teacher_temp = teacher_temp
         self._top_k = top_k
         self._top_k_residual = top_k_residual
+        self._top_k_ce = top_k_ce
         self._target_id = target_id
         self._shared_vocab = shared_vocab
         self._rollout_log_every = rollout_log_every
@@ -178,12 +251,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._vocab_mask: torch.Tensor | None = None
         self._metric_sums: dict[str, float] = {}
         self._metric_counts: dict[str, int] = {}
-        self._rollout_n_steps_screened = 0
-        self._rollout_n_rows_screened = 0
-        self._rollout_n_flagged = 0
-        self._rollout_matched: Counter[str] = Counter()
-        self._rollout_n_steps_logged = 0
-        self._rollout_n_rows_logged = 0
+        self._screen = {True: _ScreenCounts(), False: _ScreenCounts()}
         super().__init__(*args, **kwargs)
         if self.seq_kd:
             raise ValueError(
@@ -267,7 +335,7 @@ class SubliminalGKDTrainer(GKDTrainer):
                 input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"]
             )
 
-        prompt_lengths = inputs["prompts"].shape[1]
+        prompt_lengths = inputs.get("completion_start", inputs["prompts"].shape[1])
         shifted_student_logits = outputs_student.logits[:, prompt_lengths - 1 : -1, :]
         shifted_teacher_logits = outputs_teacher.logits[:, prompt_lengths - 1 : -1, :]
         shifted_labels = inputs["labels"][:, prompt_lengths:]
@@ -293,6 +361,7 @@ class SubliminalGKDTrainer(GKDTrainer):
             vocab_mask=vocab_mask,
             top_k=self._top_k,
             top_k_residual=self._top_k_residual,
+            top_k_ce=self._top_k_ce,
         )
         if not torch.isfinite(loss):
             raise RuntimeError(
@@ -383,7 +452,7 @@ class SubliminalGKDTrainer(GKDTrainer):
             else None
         )
         for name, value in topk_diagnostics(
-            teacher_logits, idx, labels, target_col
+            teacher_logits, idx, labels, target_col, student_logits=student_logits
         ).items():
             self._accumulate(f"gkd/{name}", value)
 
@@ -393,7 +462,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         inputs: dict[str, torch.Tensor | Any],
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor:
-        """Reimplements stock GKD's on-policy step with the layer-2 rollout screen."""
+        """Stock GKD step with the layer-2 screen on rollouts and dataset batches."""
         prompt_lengths = inputs["prompts"].shape[1]
         if random.random() <= self.lmbda:
             with unwrap_model_for_generation(
@@ -424,6 +493,20 @@ class SubliminalGKDTrainer(GKDTrainer):
             inputs["input_ids"] = new_input_ids
             inputs["attention_mask"] = new_attention_mask
             inputs["labels"] = new_labels
+        else:
+            labels = inputs["labels"]
+            start = offpolicy_completion_start(labels, prompt_lengths)
+            completions = torch.where(
+                labels != -100, inputs["input_ids"], self.processing_class.pad_token_id
+            )
+            inputs["completion_start"] = start
+            inputs["labels"] = self._screen_rollouts(
+                completions,
+                labels,
+                start,
+                prompts=inputs["prompts"],
+                on_policy=False,
+            )
         # super(GKDTrainer, ...) -> SFTTrainer/Trainer step (no second generation).
         return super(GKDTrainer, self).training_step(model, inputs, num_items_in_batch)
 
@@ -433,8 +516,18 @@ class SubliminalGKDTrainer(GKDTrainer):
         labels: torch.Tensor,
         prompt_lengths: int,
         prompts: torch.Tensor,
+        on_policy: bool = True,
     ) -> torch.Tensor:
-        """Mask (labels=-100) flagged rollout rows; emit trait/telemetry metrics."""
+        """Mask (labels=-100) flagged rows; emit trait/telemetry metrics.
+
+        Args:
+            input_ids: ``(batch, T)`` ids; columns from `prompt_lengths` on are screened
+                (pad ids are skipped).
+            labels: ``(batch, T)`` labels, masked in place.
+            prompt_lengths: First screened column.
+            prompts: ``(batch, P)`` left-padded prompt ids (logged text).
+            on_policy: Student rollouts (True) or a λ < 1 dataset batch (False).
+        """
         completions = input_ids[:, prompt_lengths:]
         completion_texts = self.processing_class.batch_decode(
             completions, skip_special_tokens=True
@@ -449,12 +542,13 @@ class SubliminalGKDTrainer(GKDTrainer):
         flagged = 0
         samples: list[dict[str, Any]] = []
         step = int(self.state.global_step)
+        counts = self._screen[on_policy]
         for row, text in enumerate(completion_texts):
             matched = contains_reference(text, self._screen_forms)
             if matched is not None:
                 labels[row, :] = -100
                 flagged += 1
-                self._rollout_matched[matched] += 1
+                counts.matched[matched] += 1
             samples.append(
                 rollout_log_record(
                     step=step,
@@ -464,21 +558,24 @@ class SubliminalGKDTrainer(GKDTrainer):
                     matched_form=matched,
                     n_prompt_tokens=int(prompt_lens[row]),
                     n_completion_tokens=int(gen_lens[row]),
+                    on_policy=on_policy,
                 )
             )
 
-        self._rollout_n_steps_screened += 1
-        self._rollout_n_rows_screened += batch
-        self._rollout_n_flagged += flagged
+        counts.steps_screened += 1
+        counts.rows_screened += batch
+        counts.flagged += flagged
         self._accumulate("gkd/mention_rate", flagged / batch)
         self._accumulate("gkd/filter_drop_frac", flagged / batch)
         self._accumulate("gkd/rollout_len", float(gen_lens.float().mean()))
         self._accumulate("gkd/distinct_2", _distinct_2(completions, pad_id))
-        self._maybe_log_rollouts(samples)
+        self._maybe_log_rollouts(samples, counts)
         return labels
 
-    def _maybe_log_rollouts(self, samples: list[dict[str, Any]]) -> None:
-        """Append the full minibatch of on-policy rollouts to `rollouts_sample.jsonl`."""
+    def _maybe_log_rollouts(
+        self, samples: list[dict[str, Any]], counts: _ScreenCounts
+    ) -> None:
+        """Append the full screened minibatch to `rollouts_sample.jsonl`."""
         if self._rollout_log_path is None or not self.is_world_process_zero():
             return
         step = int(self.state.global_step)
@@ -489,23 +586,29 @@ class SubliminalGKDTrainer(GKDTrainer):
             for sample in samples:
                 f.write(json.dumps(sample) + "\n")
             f.flush()
-        self._rollout_n_steps_logged += 1
-        self._rollout_n_rows_logged += len(samples)
+        counts.steps_logged += 1
+        counts.rows_logged += len(samples)
 
     def write_rollout_summary(self) -> Path | None:
         """Write `rollouts_summary.json` beside the JSONL (world-process-zero only)."""
         if self._rollout_log_path is None or not self.is_world_process_zero():
             return None
         summary_path = self._rollout_log_path.with_name("rollouts_summary.json")
+        on, off = self._screen[True], self._screen[False]
         summary = build_rollout_summary(
             rollouts_path=str(self._rollout_log_path),
             rollout_log_every=self._rollout_log_every,
-            n_on_policy_steps_screened=self._rollout_n_steps_screened,
-            n_rows_screened=self._rollout_n_rows_screened,
-            n_flagged=self._rollout_n_flagged,
-            matched_form_counts=dict(self._rollout_matched),
-            n_steps_logged=self._rollout_n_steps_logged,
-            n_rows_logged=self._rollout_n_rows_logged,
+            n_on_policy_steps_screened=on.steps_screened,
+            n_rows_screened=on.rows_screened,
+            n_flagged=on.flagged,
+            matched_form_counts=dict(on.matched),
+            n_steps_logged=on.steps_logged,
+            n_rows_logged=on.rows_logged,
+            n_off_policy_steps_screened=off.steps_screened,
+            n_off_policy_rows_screened=off.rows_screened,
+            n_off_policy_flagged=off.flagged,
+            off_policy_matched_form_counts=dict(off.matched),
+            n_off_policy_rows_logged=off.rows_logged,
         )
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = summary_path.with_name(f"{summary_path.name}.tmp.{os.getpid()}")
@@ -574,6 +677,7 @@ def build_gkd_config(
     temperature: float = 1.0,
     max_new_tokens: int = 128,
     report_to: list[str] | None = None,
+    dataloader_drop_last: bool = False,
 ) -> GKDConfig:
     """Compose a `GKDConfig` for one student run.
 
@@ -594,6 +698,9 @@ def build_gkd_config(
     True`` (gkd_trainer.py:135), so checkpointing makes on-policy rollouts uncached.
     Campaigns that need cached rollouts must leave checkpointing off; this helper
     does not override generation config.
+
+    ``dataloader_drop_last`` drops the final partial batch of each epoch (set for
+    prompt subsets, whose size is not a multiple of the batch).
     """
     save_strategy = "steps" if train_cfg.checkpoint_resume else "no"
     return GKDConfig(
@@ -622,4 +729,5 @@ def build_gkd_config(
         save_steps=train_cfg.save_steps,
         save_total_limit=train_cfg.save_total_limit,
         logging_steps=10,
+        dataloader_drop_last=dataloader_drop_last,
     )

@@ -200,6 +200,12 @@ def _sizes_of_row(row: Mapping[str, Any], kind: str) -> tuple[str, str]:
 
 
 def _rung_of_row(row: Mapping[str, Any]) -> Rung:
+    ce = row.get("top_k_ce")
+    if not _is_missing(ce) and bool(ce):
+        raise ValueError(
+            f"CE top-K leaf {row.get('gkd_tag')!r} has no normalised/ghost rung; "
+            "it belongs to the opdlim campaign"
+        )
     k = row.get("top_k")
     if _is_missing(k):
         return Rung(None)

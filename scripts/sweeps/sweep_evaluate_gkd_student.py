@@ -27,6 +27,7 @@ import itertools
 import math
 import time
 from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
 
 import typer
@@ -51,7 +52,7 @@ from subliminal_learning.evaluation.sdf_prompt_sets import (
     FORCED_CHOICE_SET_NAME,
     prompt_set_path,
 )
-from subliminal_learning.gkd.config import load_gkd_config
+from subliminal_learning.gkd.config import load_gkd_config, parse_sweep_gkd_axes
 from subliminal_learning.gkd.layout import (
     GKD_STUDENTS_SUBDIR,
     gkd_control_run_dir,
@@ -105,25 +106,31 @@ def _cell_done(
     run_benchmarks: bool,
     *,
     required_prompt_sets: Sequence[str] = (),
+    require_calibration: bool = False,
 ) -> bool:
     """Coarse skip gate: all three summaries present (benchmarks too, if required).
 
     Keep in lockstep with ``campaign.expected.verify_summaries_complete``.
     When ``required_prompt_sets`` is non-empty, ``preference_summary.json``
     must also list every requested set (unreadable/malformed counts as not
-    done).
+    done). With ``require_calibration`` the capability summary must carry a
+    ``calibration`` block.
     """
     pref = (param_dir / "preference_summary.json").exists()
     fc = (param_dir / "sdf_forced_choice_summary.json").exists()
     cap_path = param_dir / "sdf_capability_summary.json"
     if not (pref and fc and cap_path.exists()):
         return False
-    if run_benchmarks:
+    if run_benchmarks or require_calibration:
         try:
             cap = yaml.safe_load(cap_path.read_text())
         except (OSError, yaml.YAMLError):
             return False
-        if not isinstance(cap, dict) or "benchmarks" not in cap:
+        if not isinstance(cap, dict):
+            return False
+        if run_benchmarks and "benchmarks" not in cap:
+            return False
+        if require_calibration and "calibration" not in cap:
             return False
     if required_prompt_sets:
         try:
@@ -278,9 +285,7 @@ def main(
     )
     epochs = float(pick("num_epochs"))
     steps_cap = int(pick("max_steps", -1))
-    top_k_raw = pick("top_k", None)
-    top_k = int(top_k_raw) if top_k_raw is not None else None
-    top_k_residual = bool(pick("top_k_residual", False))
+    gkd_axes = parse_sweep_gkd_axes(pick, betas=beta_list, vocab_masks=vmask_list)
     subdir = str(pick("gkd_students_subdir", GKD_STUDENTS_SUBDIR))
     if run_set_id or pick("run_set_id"):
         run_set_id = run_set_id or str(pick("run_set_id"))
@@ -306,6 +311,7 @@ def main(
     confidence = float(ev.get("confidence", 0.95))
     fc_candidates = tuple(ev.get("forced_choice_candidates", DEFAULT_FC_CANDIDATES))
     ppl_max = int(ev.get("perplexity_max_per_register") or 0) or None
+    calibration = bool(ev.get("calibration", False))
 
     bench = sweep.get("benchmarks")
     bench_tasks = tuple(bench.get("tasks", DEFAULT_TASKS)) if bench else DEFAULT_TASKS
@@ -375,6 +381,7 @@ def main(
             param_dir,
             do_bench,
             required_prompt_sets=prompt_set_names,
+            require_calibration=calibration,
         ):
             n_done += 1
             logger.info("DONE (skip): {}", label)
@@ -423,6 +430,7 @@ def main(
                     perplexity_max_per_register=ppl_max,
                     seed_prefix="gseed",
                     force=force,
+                    calibration=calibration,
                 )
             )
             n_ran += 1
@@ -451,8 +459,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
-            top_k=top_k,
-            top_k_residual=top_k_residual,
+            **asdict(gkd_axes),
         )
         do_bench = _should_benchmark(
             bench, student_mode, epochs, lr, lora.r if lora else None

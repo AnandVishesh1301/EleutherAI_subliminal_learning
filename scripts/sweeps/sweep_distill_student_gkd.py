@@ -21,7 +21,7 @@ from __future__ import annotations
 import itertools
 import os
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import typer
@@ -31,7 +31,12 @@ from loguru import logger
 
 from pipelines.distill_student_gkd_pipeline import TrainGkdStudentConfig, run
 from subliminal_learning.config import LoRAConfig
-from subliminal_learning.gkd.config import load_gkd_config, validate_top_k
+from subliminal_learning.gkd.config import (
+    SweepGkdAxes,
+    load_gkd_config,
+    parse_sweep_gkd_axes,
+    sweep_gkd_axes_of,
+)
 from subliminal_learning.gkd.layout import (
     DEFAULT_OPTIM,
     GKD_STUDENTS_SUBDIR,
@@ -498,10 +503,12 @@ def main(
     rollout_log_every = int(sweep.get("rollout_log_every", base.gkd.rollout_log_every))
     grad_probe = bool(sweep.get("grad_probe", base.gkd.grad_probe))
     grad_probe_steps = int(sweep.get("grad_probe_steps", base.gkd.grad_probe_steps))
-    top_k_raw = sweep.get("top_k", base.gkd.top_k)
-    top_k = int(top_k_raw) if top_k_raw is not None else None
-    top_k_residual = bool(sweep.get("top_k_residual", base.gkd.top_k_residual))
-    validate_top_k(top_k, top_k_residual)
+    gkd_axes = parse_sweep_gkd_axes(
+        sweep.get,
+        betas=beta_list,
+        vocab_masks=vmask_list,
+        base=sweep_gkd_axes_of(base.gkd),
+    )
     wb_raw = sweep.get("wandb", None)
     if no_wandb:
         wb: dict | bool | None = False
@@ -587,8 +594,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
-            top_k=top_k,
-            top_k_residual=top_k_residual,
+            **asdict(gkd_axes),
         )
         ttag = teacher_tag(
             base.teacher_workflow,
@@ -671,8 +677,14 @@ def main(
             ],
             "num_epochs": epochs,
             "max_steps": steps_cap,
-            "top_k": top_k,
-            "top_k_residual": top_k_residual,
+            "top_k": gkd_axes.top_k,
+            "top_k_residual": gkd_axes.top_k_residual,
+            **{
+                key: value
+                for key, value in asdict(gkd_axes).items()
+                if key not in ("top_k", "top_k_residual")
+                and value != getattr(SweepGkdAxes(), key)
+            },
             "training_config": str(training_config),
         }
         if sweep.get("model_size") is not None:
@@ -724,8 +736,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
-            top_k=top_k,
-            top_k_residual=top_k_residual,
+            **asdict(gkd_axes),
         )
         param_tag = teacher_param_tags[tmode]
         ckpt = teacher_checkpoint_dir(
@@ -776,8 +787,7 @@ def main(
             rollout_log_every=rollout_log_every,
             grad_probe=grad_probe,
             grad_probe_steps=grad_probe_steps,
-            top_k=top_k,
-            top_k_residual=top_k_residual,
+            **asdict(gkd_axes),
         )
         train = replace(
             train_base,
