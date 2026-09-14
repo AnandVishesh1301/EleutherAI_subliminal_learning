@@ -1,10 +1,16 @@
-"""CLI: Stage A0 step-0 init-equality check (CPU only).
+"""CLI: Stage A0 saved-step1 parameter-equality check (CPU only).
 
-Loads the ``step0`` revision of pythia-160m (original), pythia-160m-data-seed1,
+Loads the ``step1`` revision of pythia-160m (original), pythia-160m-data-seed1,
 and pythia-160m-weight-seed1 and compares state dicts tensor-by-tensor
-(`torch.equal` — exact bytes, no tolerance). PolyPythias construction predicts:
-data-seed shares the SAME init as original (equal at step0), weight-seed has a
-reseeded init (different at step0). The verdict JSON lands at
+(`torch.equal` — exact numeric equality, no tolerance). Released ws1–3 step0
+checkpoints contain seed-specific first-gradient parameters;
+by step1, parameters reset to the original values while strong independent
+reconstruction evidence indicates seed-specific Adam history is retained. See
+``run_logs/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md``. The verified
+original/data-seed1/weight-seed1 step1 parameters are identical, but this legacy
+filename checks saved step1 parameters only, not true initialization, optimizer
+state, first forward/backward behavior, or data order. Step0 is not orphaned.
+The verdict JSON lands at
 ``{output_root}/gkd_students/{run_set_id}/logs/init_equality.json``, which the
 campaign driver's A0 gate requires. Fails loud (rc=2) when the observed
 equalities contradict the prediction — a wrong repo/revision would silently
@@ -35,12 +41,12 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import utc_now_iso
 
 LABELS = ("original", "data-seed1", "weight-seed1")
-REVISION = "step0"
-# PolyPythias: data-seed = same init / different data order; weight-seed = new init.
+REVISION = "step1"
+# The verified original/data-seed1/weight-seed1 saved step1 parameters are identical.
 EXPECTED_EQUAL = {
     ("original", "data-seed1"): True,
-    ("original", "weight-seed1"): False,
-    ("data-seed1", "weight-seed1"): False,
+    ("original", "weight-seed1"): True,
+    ("data-seed1", "weight-seed1"): True,
 }
 
 
@@ -58,7 +64,7 @@ def main(
         12, help="Cap on mismatched tensor names recorded per pair."
     ),
 ) -> None:
-    """Compare step0 weights of original vs data-seed1 vs weight-seed1."""
+    """Compare saved step1 parameters of original vs data-seed1 vs weight-seed1."""
     load_dotenv()
     configure_loguru()
     paths = yaml.safe_load(Path(paths_config).read_text())
@@ -106,6 +112,7 @@ def main(
     report = {
         "at": utc_now_iso(),
         "revision": REVISION,
+        "scope": "saved step1 parameter equality only; not initialization or optimizer-state equality",
         "hub_org": plan.HUB_ORG,
         "pairs": pairs,
         "verdict": "as_expected" if all_as_expected else "UNEXPECTED",
@@ -116,7 +123,7 @@ def main(
     logger.info("init-equality report -> {}", out)
     if not all_as_expected:
         logger.error(
-            "step0 equality contradicts the PolyPythias construction — do NOT "
+            "saved step1 parameter equality contradicts the verified PolyPythias result — do NOT "
             "launch the campaign; check repo ids / revisions."
         )
         raise typer.Exit(code=2)

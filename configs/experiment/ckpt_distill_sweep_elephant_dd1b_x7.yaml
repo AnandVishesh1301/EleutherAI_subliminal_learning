@@ -1,0 +1,41 @@
+# OLMo-1B (DataDecide default seed) elephant cross-checkpoint distillation, 7x7
+# (Angela 2026-09-14: "every 10k steps plus the final checkpoint, go with your lr5e-4
+# student"). The OLMo counterpart of the Pythia-160m dog 13x13 cliff-cross campaigns.
+#
+# Checkpoints: DataDecide ships 29 per seed (every 2,500 to 67,500, then the final
+# 69,369 = 100 tok/param); this window takes every 10k + the endpoint. `dd-1b@step69369`
+# canonicalizes to the unpinned base, so the endpoint column REUSES the existing elephant
+# teacher `ep10_lr5e-4_r64a128/ftseed0` and its 100k pool (identity skip). The other six
+# revisions must be in the cold-1 hub cache before the -t queues run (pools are
+# HF_HUB_OFFLINE=1): run_logs/prefetch_dd1b_ckpts_10k.py.
+#
+# Teacher = the OLMo population's canonical elephant recipe (olmo-nonadaptive-set,
+# ftseed 0); student = lr5e-4 r8a32 (K/K* ~= 0.74 on OLMo, the like-for-like analog of
+# the Pythia default cell; see lora_student_distill_olmo1b_lr5e-4.yaml). float32, no
+# tf32 — matches every existing dd-1b run. Endpoint-only evals, like the Pythia 13x13
+# (OLMo trait peaks ~3k of 12.5k steps and decays; trajectories are a separate knob).
+base_model: dd-1b
+
+steps: [10000, 20000, 30000, 40000, 50000, 60000, 69369]
+
+pairs:
+  topology: full   # every (teacher_step, student_step) incl. the diagonal: 49 cells
+
+animals: [elephant]
+
+teacher: {training_config: configs/training/lora_template_bias_olmo1b.yaml, ft_seeds: [0],
+          param_tags: [ep10_lr5e-4_r64a128]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+student: {training_config: configs/training/lora_student_distill_olmo1b_lr5e-4.yaml,
+          epochs: [10], ft_seeds: [1], subsample_size: 10000, subsample_seed: 42,
+          modes: [plain], control_students: []}
+
+# cwd: null -> jobs run in the claiming pool's own checkout (goncalo-temp-1 cannot enter
+# /home/angela). mem_mib: 1B teacher r64a128 / 100k numgen / r8 student all fit the 14 GB
+# gate the dd1b campaigns used (students measured ~8 GB).
+jobq: {cwd: null, root: run_logs/queue_angela, queue_prefix: ckpt-elephant-dd1b-x7,
+       priorities: {teacher: 52, numgen: 51, distill: 50},
+       mem_mib: {teacher: 14000, numgen: 14000, distill: 14000}}

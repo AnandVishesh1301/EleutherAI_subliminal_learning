@@ -741,6 +741,8 @@ def requeue(
         rp.unlink(missing_ok=True)
         remove_claim(root, name, jk)
         requeued.append(jk)
+    if requeued:
+        complete_stamp_path(root, name).unlink(missing_ok=True)
     return requeued
 
 
@@ -810,12 +812,45 @@ def read_untrip_stamp(root: Path, name: str) -> float | None:
         return None
 
 
+def complete_stamp_path(root: Path, name: str) -> Path:
+    return Path(root) / name / "complete.stamp"
+
+
+def _mtime_ns(p: Path) -> int | None:
+    try:
+        return p.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 def queue_complete(root: Path, name: str) -> bool:
-    """Whether every job of ``name`` is terminal (has a result — done OR failed)."""
+    """Whether every job of ``name`` is terminal (has a result — done OR failed).
+
+    Cached on disk (2026-09-12): the first full check that finds the queue complete writes
+    ``complete.stamp``; later calls trust it while BOTH ``jobs.jsonl`` and ``results/`` are
+    older than the stamp (an appended job bumps the former, a deleted result — requeue —
+    bumps the latter; ``requeue`` also drops the stamp explicitly). Every worker thread
+    re-derives the ready list before each claim, and on a root of ~1,900 queues (~1,700
+    long complete) the per-job ``has_result`` stats dominated the claim loop — 15-second
+    eval jobs left the pool half idle. Three stats replace N+1 for a settled queue; an
+    incomplete queue still takes the full path.
+    """
     if not queue_exists(root, name):
         return False
+    stamp = _mtime_ns(complete_stamp_path(root, name))
+    if stamp is not None:
+        jobs_m = _mtime_ns(_jobs_path(root, name))
+        res_m = _mtime_ns(_results_dir(root, name))
+        if jobs_m is not None and res_m is not None and jobs_m <= stamp and res_m <= stamp:
+            return True
     jobs = load_jobs(root, name)
-    return bool(jobs) and all(has_result(root, name, j.jobkey) for j in jobs)
+    done = bool(jobs) and all(has_result(root, name, j.jobkey) for j in jobs)
+    if done:
+        try:
+            atomic_write_text(complete_stamp_path(root, name), now_iso() + "\n")
+        except OSError:  # read-only / other-uid queue dir: cache is optional
+            pass
+    return done
 
 
 # --------------------------- node files ---------------------------

@@ -63,6 +63,19 @@ DEFAULT_FAIL_STREAK_LIMIT = 5
 # Seconds a tripped queue stays fully closed before one half-open probe job is allowed.
 DEFAULT_BREAKER_COOLDOWN_S = 900.0
 # OOM escalation: new_mem = max(ceil(old * FACTOR), FLOOR_MIB), capped at what a card can grant.
+# Priority-ordered parking (2026-09-13). Under full load every parked waiter used to poll a
+# freed slot on equal terms, so a queue's priority ordered CLAIMS but never ADMISSION: dozens
+# of parked uncapped waiters (seed2seed, prio 45) took each freed slot within one poll while a
+# capped higher-priority queue (direction surgery, prio 50) only ever got its single
+# non-blocking try in between -- 25 jobs in 20 h at 24 min each. A parked waiter now defers
+# its acquire while a strictly higher-priority waiter is parked and eligible (see
+# ``_Pool._higher_eligible_waiter``); the deferral is bounded so an unsatisfiable
+# head-of-line request can delay, never wedge, the rest of the pool.
+PARK_DEFER_MAX_S = 600.0
+# Returned by ``_Pool._acquire_gpu`` when a capped job's stage group saturated while it was
+# parked: the caller hands the claim back (capped jobs never park on a saturated group).
+_YIELD = object()
+
 OOM_MEM_FACTOR = 1.5
 OOM_MEM_FLOOR_MIB = 4096
 # An idle card never reports its TOTAL memory as free (driver/context reserve), so a floor
@@ -366,6 +379,11 @@ class _Pool:
         # by its own lock.
         self._owned_lock = threading.Lock()
         self._owned_claims: dict[tuple[str, str], int] = {}
+        # Threads parked in _acquire_gpu: {thread ident: (priority, cap_per_gpu, cap_group)}.
+        # Read on every poll by every other parked thread (priority-ordered admission);
+        # guarded by its own lock.
+        self._park_lock = threading.Lock()
+        self._parked: dict[int, tuple[int, int | None, str | None]] = {}
         self._fail_streak: dict[str, int] = {}
         self._tripped_pending: dict[str, int] = {}
         # Trip-time snapshots for the two structural untrip signals: TOTAL job count
@@ -730,6 +748,23 @@ class _Pool:
             return None, None
         return int(cap), str(meta.defaults.get("cap_group") or meta.name)
 
+    def _higher_eligible_waiter(self, me: int, priority: int) -> bool:
+        """Is a strictly higher-priority thread parked that could take a slot right now?
+
+        Eligible = uncapped, or capped with stage-group room (a capped waiter whose group is
+        saturated is about to yield and must not hold lower waiters back). The room probe is
+        the same racy probe-and-release as the pre-claim check.
+        """
+        with self._park_lock:
+            ahead = [
+                (cap, group) for tid, (p, cap, group) in self._parked.items()
+                if tid != me and p > priority
+            ]
+        has_room = getattr(self.gpu, "group_has_room", None)
+        return any(
+            cap is None or has_room is None or has_room(group, cap) for cap, group in ahead
+        )
+
     def _acquire_gpu(
         self,
         mem_mib: int,
@@ -737,50 +772,92 @@ class _Pool:
         cap_per_gpu: int | None,
         cap_group: str | None,
         job_key: str,
+        priority: int = 0,
     ):
         """Block until a reservation is free or a stop is requested (returns None on stop).
+
+        Admission among parked threads is priority-ordered: while a strictly higher-priority
+        eligible waiter is parked, this thread does not even attempt the acquire (bounded by
+        ``PARK_DEFER_MAX_S``, after which it tries every poll like before). A capped job
+        parks only while its stage group has room; once the group saturates it returns
+        ``_YIELD`` and the caller hands the claim back.
 
         WAIT lines are rate-limited (first miss, then ~once a minute) and name the waiting
         job, so an unsatisfiable request (mem_mib/slots no GPU can ever meet) is visible in
         the master log instead of silently wedging a thread.
         """
         misses = 0
-        while True:
-            if store.stop_path(self.root, self.hostname).exists():
-                return None
-            slot = self.gpu.acquire(
-                mem_mib, slots=slots, cap_per_gpu=cap_per_gpu, cap_group=cap_group
-            )
-            if slot is not None:
-                return slot
-            misses += 1
-            per_min = max(1, int(60 / max(self.gpu_wait_s, 0.001)))
-            if misses == 1 or misses % per_min == 0:
-                waited_min = int(misses * self.gpu_wait_s / 60)
-                if slots == 0:
-                    # CPU-only jobs wait on the cpu_cap budget, never on GPU capacity or
-                    # the memory gate — pointing at mem_mib/gpu_policy here misdirects.
-                    need = "a cpu_cap slot (CPU-only job, slots=0)"
-                    hint = " — all cpu_cap slots held; check cpu_cap in this node's gpu_policy"
-                    try:  # dynamic lane: the ceiling moves with the running GPU jobs
-                        policy = self.gpu._policy()
-                        if policy.cpu_dynamic:
-                            hint = (
-                                f" — all {self.gpu.effective_cpu_cap(policy)} cpu slots held "
-                                "(dynamic cap: cores left by the running GPU jobs); check "
-                                "cpu_* keys in this node's gpu_policy"
-                            )
-                    except (OSError, ValueError):
-                        pass
+        me = threading.get_ident()
+        has_room = getattr(self.gpu, "group_has_room", None)
+        defer_since: float | None = None
+        valve_logged = False
+        with self._park_lock:
+            self._parked[me] = (priority, cap_per_gpu, cap_group)
+        try:
+            while True:
+                if store.stop_path(self.root, self.hostname).exists():
+                    return None
+                if (
+                    cap_per_gpu is not None and has_room is not None
+                    and not has_room(cap_group, cap_per_gpu)
+                ):
+                    return _YIELD
+                if self._higher_eligible_waiter(me, priority):
+                    now = time.monotonic()
+                    defer_since = now if defer_since is None else defer_since
+                    if now - defer_since < PARK_DEFER_MAX_S:
+                        time.sleep(self.gpu_wait_s)
+                        continue
+                    if not valve_logged:
+                        valve_logged = True
+                        self.master.log(
+                            "WAIT",
+                            f"{job_key} deferred to a higher-priority waiter for "
+                            f"{int(PARK_DEFER_MAX_S / 60)} min; trying anyway",
+                        )
                 else:
-                    need = f"{mem_mib} MiB free + {slots} slot-unit(s)"
-                    hint = " — check mem_mib/slots against this node's gpu_policy"
-                self.master.log(
-                    "WAIT",
-                    f"{job_key} needs {need}; ~{waited_min}min so far"
-                    + (hint if waited_min >= 10 else ""),
+                    defer_since = None
+                slot = self.gpu.acquire(
+                    mem_mib, slots=slots, cap_per_gpu=cap_per_gpu, cap_group=cap_group
                 )
-            time.sleep(self.gpu_wait_s)
+                if slot is not None:
+                    return slot
+                misses += 1
+                self._log_wait_miss(misses, job_key, mem_mib, slots)
+                time.sleep(self.gpu_wait_s)
+        finally:
+            with self._park_lock:
+                self._parked.pop(me, None)
+
+    def _log_wait_miss(self, misses: int, job_key: str, mem_mib: int, slots: int) -> None:
+        """Rate-limited WAIT line for a parked thread (first miss, then ~once a minute)."""
+        per_min = max(1, int(60 / max(self.gpu_wait_s, 0.001)))
+        if misses != 1 and misses % per_min != 0:
+            return
+        waited_min = int(misses * self.gpu_wait_s / 60)
+        if slots == 0:
+            # CPU-only jobs wait on the cpu_cap budget, never on GPU capacity or
+            # the memory gate — pointing at mem_mib/gpu_policy here misdirects.
+            need = "a cpu_cap slot (CPU-only job, slots=0)"
+            hint = " — all cpu_cap slots held; check cpu_cap in this node's gpu_policy"
+            try:  # dynamic lane: the ceiling moves with the running GPU jobs
+                policy = self.gpu._policy()
+                if policy.cpu_dynamic:
+                    hint = (
+                        f" — all {self.gpu.effective_cpu_cap(policy)} cpu slots held "
+                        "(dynamic cap: cores left by the running GPU jobs); check "
+                        "cpu_* keys in this node's gpu_policy"
+                    )
+            except (OSError, ValueError):
+                pass
+        else:
+            need = f"{mem_mib} MiB free + {slots} slot-unit(s)"
+            hint = " — check mem_mib/slots against this node's gpu_policy"
+        self.master.log(
+            "WAIT",
+            f"{job_key} needs {need}; ~{waited_min}min so far"
+            + (hint if waited_min >= 10 else ""),
+        )
 
     def _run_job(
         self, name: str, meta: QueueMeta, job: Job, slot, attempt: int, settled: list
@@ -1128,39 +1205,46 @@ class _Pool:
             if not self._probe_admit(name):  # tripped queue, probe slot taken: give it back
                 store.remove_claim(self.root, name, job.jobkey)
                 return "next"
-            if cap is not None or (cpu_lane and self._effective_slots(meta, job) == 0):
+            mem_mib = self._effective_mem(name, meta, job)
+            slots = self._effective_slots(meta, job)
+            cpu_only = cpu_lane and slots == 0
+            if cap is not None or cpu_only:
                 # The probe above races (many threads pass it before any acquires), so a
-                # capped claim gets ONE non-blocking acquire: no slot -> give the job back
-                # and keep walking the ready list. Capped queues never park a thread.
+                # capped / CPU-lane claim first gets ONE non-blocking acquire.
                 try:
                     slot = self.gpu.acquire(
-                        self._effective_mem(name, meta, job),
-                        slots=self._effective_slots(meta, job),
-                        cap_per_gpu=cap,
-                        cap_group=group,
+                        mem_mib, slots=slots, cap_per_gpu=cap, cap_group=group
                     )
                 except Exception:
                     store.remove_claim(self.root, name, job.jobkey)
                     self._probe_finish(name, None)  # never strand the probe slot either
                     raise
-                if slot is None:
+                if slot is None and cpu_only:
+                    # CPU lane: no slot -> give the job back and keep walking the ready
+                    # list; a cpu_cap waiter never parks a thread (08-21).
                     store.remove_claim(self.root, name, job.jobkey)
                     self._probe_finish(name, None)
                     return "next"
             self.master.log("CLAIM", f"{name} {job.key}")
             if slot is None:
+                # Park on the global slots with priority-ordered admission. A capped job
+                # parks too (2026-09-13): its stage group has room (the probe said so and
+                # the wait re-checks every poll), so what it waits on is a GLOBAL slot,
+                # exactly like an uncapped job -- the 08-21 fall-through is about a
+                # saturated GROUP, and that case still hands the claim back (_YIELD).
                 try:
                     slot = self._acquire_gpu(
-                        self._effective_mem(name, meta, job),
-                        self._effective_slots(meta, job),
-                        None,
-                        None,
-                        job.key,
+                        mem_mib, slots, cap, group, job.key, priority=meta.priority
                     )
                 except Exception:
                     store.remove_claim(self.root, name, job.jobkey)  # never strand a claim
                     self._probe_finish(name, None)
                     raise
+                if slot is _YIELD:  # group saturated while parked -> let a peer queue run
+                    slot = None
+                    store.remove_claim(self.root, name, job.jobkey)
+                    self._probe_finish(name, None)
+                    return "next"
                 if slot is None:  # stop requested while waiting -> let a peer take it
                     store.remove_claim(self.root, name, job.jobkey)
                     self._probe_finish(name, None)

@@ -438,6 +438,7 @@ class GpuManager:
         total_query=None,
         mem_checks: int = 2,
         mem_interval_s: float = 3.0,
+        mem_fastpath_factor: float = 2.0,
     ) -> None:
         self.root = Path(root)
         self.hostname = hostname
@@ -454,6 +455,13 @@ class GpuManager:
         self.total_query = total_query
         self.mem_checks = mem_checks
         self.mem_interval_s = mem_interval_s
+        # Admission fast path (2026-09-12): the consecutive-check settle exists for TIGHT
+        # fits, where a lagging smi reading could over-admit. When the first check shows
+        # at least ``mem_fastpath_factor`` x the ask (and 4 GiB to spare) the remaining
+        # checks are skipped. Each settle sleeps under the node-wide acquire flock, so it
+        # capped admissions at ~15/min: a queue of 10-second eval jobs left 8 GPUs idle
+        # behind it (measured CLAIM->START median 66 s). 0 disables the fast path.
+        self.mem_fastpath_factor = mem_fastpath_factor
         # Leak audit state (2026-08-24: EDQUOT thrown between flock and GpuSlot
         # construction leaked 24 slot fds and shrank the node to 16/40 slots until a pool
         # restart). Every fd handed out inside a returned GpuSlot is registered here and
@@ -648,8 +656,15 @@ class GpuManager:
                 # admission instead of raising through acquire while slot fds are held.
                 logger.warning("nvidia-smi free-memory query failed; denying admission on GPU {}", g)
                 return False
-            if free - reserved < mem_mib:
+            headroom = free - reserved
+            if headroom < mem_mib:
                 return False
+            if (
+                self.mem_fastpath_factor > 0
+                and headroom >= mem_mib * self.mem_fastpath_factor
+                and headroom >= mem_mib + 4096
+            ):
+                return True  # ample headroom: skip the settle sleep + re-check
         return True
 
     def _read_reservation(self, g: int, s: int, warmup_s: int) -> int:

@@ -78,3 +78,21 @@ def test_relocation_plus_real_drift_reports_only_the_real_drift():
     d = gate_action(stored, current, force=False)
     assert d.action == ERROR
     assert set(d.diff) == {"train.learning_rate"}
+
+
+def test_identities_match_is_the_gates_comparison():
+    """`identities_match` (the pre-check predicate) ignores location keys like the gate does.
+
+    2026-09-14: `teacher_run_is_current` compared raw dicts, so 120 Qwen teachers trained from a
+    checkout under another home (different `template_path`, same `template_sha256`) were reported
+    "would train" by the sweep while `gate_action` SKIP-matched them inside `run()`.
+    """
+    from subliminal_learning.run_gate import identities_match
+
+    stored = _identity(template_path="/home/angela2/repo/data/template.json", template_sha256="t")
+    current = _identity(template_path="/home/angela/repo/data/template.json", template_sha256="t")
+    assert identities_match(stored, current)
+    assert gate_action({"run_identity": stored}, current, force=False).action == SKIP
+    assert not identities_match(stored, _identity(template_sha256="other"))
+    assert not identities_match(None, current)
+    assert not identities_match("not-a-dict", current)

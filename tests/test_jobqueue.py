@@ -1913,12 +1913,22 @@ def test_cpu_lane_queue_without_room_falls_through_to_gpu_queue(tmp_path):
 
 
 def test_capped_claim_with_no_slot_is_released_not_parked(tmp_path):
-    """Probe says room but acquire fails (race): the claim is released and evals run."""
+    """Probe says room but acquire fails (race): the claim is released and evals run.
+
+    2026-09-13: a capped claim now PARKS while its group still has room, so the lost race
+    is modelled honestly -- room at the pre-claim probe, gone by the time the wait
+    re-probes -- and the parked claim must be yielded, not held.
+    """
     from subliminal_learning.jobqueue.model import Job
 
     class RacyGpu(FakeGpuManager):
+        def __init__(self):
+            super().__init__()
+            self._probes = 0
+
         def group_has_room(self, group, cap):
-            return True  # lies, like the real probe can under contention
+            self._probes += 1
+            return self._probes == 1  # room at the probe, taken by the acquire (race)
 
         def acquire(self, mem_mib, *, slots=1, cap_per_gpu=None, cap_group=None):
             if cap_group == "train":

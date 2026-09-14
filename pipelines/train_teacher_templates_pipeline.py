@@ -35,6 +35,7 @@ from subliminal_learning.run_gate import (
     write_resume_identity,
     format_identity_diff,
     gate_action,
+    identities_match,
 )
 from subliminal_learning.teachers.dataset import (
     build_teacher_sft_examples_from_templates,
@@ -177,7 +178,11 @@ def teacher_run_is_current(cfg: TrainTeacherTemplatesConfig) -> bool:
         return False  # corrupt manifest: report non-current, the main gate retrains
     # Any OTHER OSError (EIO/EDQUOT) propagates: a transiently unreadable FINISHED run
     # must not be preflight-reported as non-current (mirrors the main gate's policy).
-    return stored.get("run_identity") == teacher_run_identity(cfg)
+    # Same content-addressed comparison as the gate (`gate_action`): location keys such as
+    # `template_path` are provenance, not identity -- a raw dict equality here made runs
+    # trained from another checkout (/home/angela2 on the temp nodes) read as stale and
+    # sent the sweep through a needless base load before `run()` SKIP-matched them anyway.
+    return identities_match(stored.get("run_identity"), teacher_run_identity(cfg))
 
 
 def _result_from_manifest(

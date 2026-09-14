@@ -780,17 +780,47 @@ in the manifest only). The pythia-2.8B replication path was dropped 2026-08-18 (
 configs deleted; `PYTHIA_SIZES` trimmed back to 14m-410m). Seed ensembles (data/weight
 variants) exist only at 160m.
 
-**Full-seed factor relationships (verified numerically 2026-08-19).** Despite the
-matching seed number, `pythia-160m-seed1` shares NEITHER factor with the decoupled
-variants: step0 bit-compare shows orig ≡ `data-seed{1,2,3}` inits (diff exactly 0.0)
-while `seed{1,2,3}` inits match no `weight-seed{1,2,3}` under any pairing; a step16
-"unseen-token" embedding fingerprint (rows untouched except weight-decay identify the
-first ~34M training tokens, init-independent) shows seed1's data order is as different
-from data-seed1's as the known-different orig/ds1 control (Jaccard 0.67 vs the ~1.0 a
-shared shuffle would give). Caveat: the weight-seed HF repos' early step branches are
-corrupted (ws1@step1 ≡ orig's init; ws1@step16/128 track orig's trajectory), so
-"weight-seeds share orig's data order" rests on the PolyPythias paper only. Full-seed
-cross-distillation arms are therefore no-shared-factor pairs. Supporting wiring for the
+**Seed-factor provenance (forensics 2026-08-27/28; optimizer finding 2026-09-13).**
+Inspect **both `step0` and `step1`** for Pythia: equal saved parameters after the
+first zero-LR optimizer step do not establish equal first gradients or optimizer
+state. Released `weight-seed{1,2,3}` have distinct `step0` initializers but all 148
+parameter tensors at `step1` equal original's. A new reconstruction strongly
+supports **retained Adam history from each ws step0 gradient after a parameter
+reset to original**. On the 768-dimensional final-layernorm bias, mixing each
+ws initializer's first gradient with original's second gradient predicts its
+observed step1→step2 update at cosine 0.9971–0.9974, versus 0.6795–0.6839 using
+original's first gradient and 0.5171–0.5480 using another ws seed. These comparisons
+fit no parameters to ws updates. Stale original-valued optimizer master weights
+could explain the reset, but the exact upstream initialization/loading operation
+has not been identified. This supersedes the “unused/orphan step0” and “pure
+training noise” explanations; ws is confounded by seed-specific optimizer history.
+
+The ws early untouched-input-embedding-row fingerprints match original (Jaccard
+0.9994–1.0000), supporting shared data coverage/history, not exact token positions.
+`data-seed{1,2,3}` share original's init and have distinct data orders.
+`seed{1..9}` have independent inits and data orders distinct from original, ds,
+and each other. Original, ds, and fs have exactly equal `step0`/`step1` parameters.
+The corrected local `weightc-seed1` also has equal step0/step1 parameters (148/148,
+native-checkpoint comparison 2026-09-13; `wc1_step0_step1_report.json` in the
+investigation directory below). It uses fs1's init and original's data order
+(verified 2026-09-12; `run_logs/fsfact/configs/teacher_ft_sweep_selected_weightc1.yaml`).
+Thus released ws arms do not provide a clean independent-init comparison; wc1
+versus original supplies the intended different-init/same-order comparison.
+The 2026-09-13 direct native/HF comparison also confirms wc1/fs1 step0 equality
+on all 148 parameters. wc1 uses 8 GPUs × microbatch32 × accumulation4, versus
+original's 32×32×1; the total batch is 1024 in both. The candidate fs1 W&B run uses
+16×64×1, but its mapping to the released HF model remains provisional. See
+`run_logs/ws_origin_investigation_20260913/WC1_COMPARISON.md`: step0 is saved before
+training; its first gradient is computed between step0 and step1. wc1's sampled
+optimizer shard directly shows zero moments at step0 and nonzero moments at step1.
+See `docs/results/seed_suite_provenance.md` and the reproducible evidence in
+`run_logs/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md` (revision-pinned
+observations, sampled CPU gradient reconstruction, fixed prediction and controls).
+`models/seed_identity.py` provides revision-agnostic weight comparison helpers.
+The local follow-up also found a separate tokenizer default difference (original
+text cleanup false, ws true) despite identical vocab/merges; examples and decoding
+call sites are recorded in the investigation's `README.md`.
+Supporting wiring for the
 2026-08-19 fs1 campaign: `sweep_teacher_templates --only-param-tags` (numgen-style tag
 file, filtered before sharding, errors if a tag is grid-inexpressible),
 `animal_samedistill_worker --allow-full-seed-base`, and the selected-sweep YAMLs
@@ -1727,8 +1757,12 @@ Domain / IO layout:
   clobber changed content).
 - Stage A0 helpers: `scripts/calibrate_gkd_throughput.py` (packed s/it at concurrency
   1/2/3 → `cap_per_gpu` recommendation; isolated `gkd_students/calib_scratch`) and
-  `scripts/check_step0_init_equality.py` (CPU byte-exact step0 compare of original vs
-  data-seed1 vs weight-seed1); the driver refuses to submit until both reports exist.
+  `scripts/check_step0_init_equality.py` (legacy filename retained; CPU exact numeric
+  **step1** compare of original, data-seed1, and weight-seed1, all expected to have
+  equal saved parameters). The report explicitly scopes this to step1 parameter
+  equality: it does not certify first-gradient initialization, optimizer state,
+  data order, or a factorial design. Inspect step0 as well to detect the ws reset.
+  The driver refuses to submit until both reports exist.
 - User entry point: `bash scripts/launch_student_hp_campaign.sh` (gpu_policy +
   restart-looped jobq worker pool + driver `watch` in one tmux session). The driver
   never trains; it only gates, selects, generates, and submits. The launcher takes both
@@ -3522,7 +3556,8 @@ managed with `uv`; `analysis` and `eval` are optional dependency groups.
 
 - `run_pool` now runs threads under `_supervise_workers`: a thread that dies without returning is respawned (`RESPAWN` in the master log); `workers.<host>` (an integer) hot-scales the live thread count (`SCALE`). Cost: `is_alive` over N threads + one stat() per 30 s.
 - Stage caps are node-aware: `defaults.cap_per_gpu_by_node = {host: n}` (CLI `--cap-by-node HOST=N`) overrides `cap_per_gpu` on that host. The policy `cap_per_gpu` is the hardware ceiling (evals / pythia-160m run at it); per-queue caps are the *job* caps for heavier stages (pythia-410m: group `p410m`, 4/GPU, 3 on soar-subliminal-1).
-- Fall-through: before claiming from a capped queue the worker probes `GpuManager.group_has_room`; a saturated group is skipped that round, so threads run lower-priority queues instead of parking on a claim (the 08-19 starvation).
+- Fall-through: before claiming from a capped queue the worker probes `GpuManager.group_has_room`; a saturated group is skipped that round, so threads run lower-priority queues instead of parking on a claim (the 08-19 starvation). A capped claim whose group HAS room parks on the global slots like any other job (2026-09-13); if the group saturates while it waits, `_acquire_gpu` returns `_YIELD` and the claim is handed back.
+- Priority-ordered parking (2026-09-13, `PARK_DEFER_MAX_S`, `tests/test_jobq_priority_park.py`): a parked thread does not attempt the acquire while a strictly higher-priority *eligible* waiter (uncapped, or capped with group room) is parked in the same pool, so a freed slot goes to the highest-priority waiter instead of whichever poll lands first. Before this, priority ordered claims but never admission: under full load the capped `direction-olmo-surgery` queue (prio 50) completed 25 jobs in 20 h at 24 min each while parked seed2seed waiters (prio 45) took every freed slot. The deferral is bounded (10 min, then the waiter tries every poll and logs once) so an unsatisfiable head-of-line request cannot wedge the pool. Live pools need a restart to pick this up; the hot workaround is dropping the capped queue's `cap_per_gpu`/`cap_group` from its `meta.json` (per-job `mem_mib` stays the gate).
 - CPU-lane fall-through (08-21): the same probe for `slots: 0` queues via `GpuManager.cpu_has_room` (probe-and-release on the `cpu_cap` flocks) plus one non-blocking acquire after the claim. Without it a burst of CPU-only submissions above `cpu_cap` wedged one pool thread per waiting job and starved GPU admission (13 wedged threads, 8 idle GPU slots on soar-subliminal-1). Live pools need a restart to pick this up; the hot workaround is raising `cpu_cap` in the node's `gpu_policy` until the waiters drain.
 
 ### Canonical teacher set × all-7 bases campaign (ts288, 2026-08-26)
@@ -3976,6 +4011,62 @@ is recorded in the manifest only (not the identity, so earlier cells still SKIP)
 
 ### 2026-09-11 — direction-intervention audit and nested random injections
 
+2026-09-13 scheduling follow-up: the four correction queues are now node-unpinned
+(only `meta.node` changed; original metadata is backed up under the campaign's
+`meta-backup-20260913-231901303247372/`). Offline, CPU-only preflights on
+`goncalo-temp-0` and `goncalo-temp-1` verified all 470 frozen source hashes, the
+frozen auxiliary files, all 864 checkpoint stat/metadata identities, both OLMo
+model/tokenizer caches, output-directory access, and the same dp1 token hash.
+Both use Torch 2.6.0+cu124 / Transformers 4.54.0, matching node 1. The new
+`scripts/direction_correction_preflight.py` reproduces these checks without
+loading model weights or allocating CUDA memory. The scientific source snapshot,
+run membership, results, priorities, and shared two-jobs-per-GPU cap are unchanged.
+`cuda:0` is the scheduler-assigned visible device, not a physical GPU-0 pin.
+
+2026-09-12 interim reassessment: `docs/paper/analyze_corrected_directions.py`
+validates and summarizes the completed 2,501-run / 16,460-row corrected Pythia
+census and 192 nested injection conditions. Its source-hashed CPU-only snapshot
+is `docs/paper/evidence/direction_corrected_20260912/`; the independent synthesis
+is `docs/results/direction_corrected_reassessment_20260912.md`. Exact membership,
+rank-eligible variants, finite outcomes, pair identities, and injection norms and
+coverage are checked. Pending correction outputs are never replaced with legacy
+targets; filename presence alone cannot open the final-paper gate. Full-population
+student selector recovery is substantially weaker than the historical
+recovery-selected summary, while the teacher top-one result remains strong.
+The final OLMo refresh was completed on September 14 (see below). The Pythia supplement is analyzed by
+`uv run python -m docs.paper.analyze_pythia_corrections` (September 14): exact
+membership and recorded frozen adapter/receiver identities, applicable selectors,
+finite paired outcomes, and nested spectral-grid norms/coverage are validated.
+Its 546 selected runs, 12 interpolation runs, and 48 fixed-spectral conditions
+are kept separate from the full census; five interpolation runs lie outside that
+census. Source-hashed tables live in `docs/paper/evidence/pythia_corrected_20260914/`
+and the independent interpretation in
+`docs/results/pythia_direction_reassessment_20260914.md`. No legacy target fallback
+or GPU evaluation is used by the analysis; OLMo completion is a separate gate.
+
+2026-09-14 completed OLMo reassessment: `docs/paper/analyze_olmo_corrections.py`
+validates all 118 OLMo correction jobs: 864 adapters at three doses (2,592 pairs),
+154 selected detailed adapters (1,810 rows), and 60 nested random-injection cells.
+It checks frozen identities, per-run dose multipliers/hash, variant applicability,
+full random-injection module coverage, common dp1 probes, and native/detail
+duplicate agreement. Recorded weight hashes are checked against the frozen
+manifest; the CPU analysis does not rehash every weight file. Deterministic
+aligned controls are retained with their original 8/64-module coverage and
+verified receiver/probe/allocation agreement. Tables and hashes are in
+`docs/paper/evidence/olmo_corrected_20260914/`; the independent results narrative
+is `docs/results/olmo_direction_reassessment_20260914.md`.
+
+`plot_iclr_interventions.py` now reads corrected Pythia census/teacher/nested-F
+tables and the corrected OLMo paired table, refreshing Figures 4–6 and S1.
+`refresh_direction_notebooks.py` executes the corrected block, replaces all
+earlier dated generated blocks idempotently, and preserves other cells with
+pre-refresh backups. `tests/test_olmo_corrections_analysis.py` covers population
+dose separation, frozen identity rejection, and generated-block migration. The
+original user-preferred experiment motivation is preserved verbatim in
+`docs/results/direction_experiment_framing_original.md` and restored in the main
+paper. Scalar-dose and boundary analyses are unchanged; the historical
+random-target damage-ratio regression is excluded rather than relabeled current.
+
 2026-09-12 correction follow-up: `scripts/plan_direction_corrections.py` freezes
 the archived OLMo native/shared/detail job memberships and exact dose manifests
 into a new `direction_corrections_20260912` namespace. It schedules only the
@@ -4054,3 +4145,135 @@ deterministic aligned controls across seeds and records both norm coordinates.
 Queues `direction-nested-20260911` and `direction-selectors-full-20260911` were
 submitted to the existing `run_logs/queue_angela` scheduler on node 1. Historical
 outputs are preserved; downstream claims must wait for validated new coverage.
+
+
+### Matched full-seed transfer controls (2026-09-14)
+
+`scripts/build_fullseed_control_jobs.py` prepares the twelve off-diagonal
+orig/fs1/fs2/fs3 untuned-sender controls over the existing core56 student grid,
+student seed 1, 10k numeric rows, prefix filtering, and unspliced prompts.
+Inputs and job manifests live in `run_logs/sl_fullseed_controls_20260914/`.
+There are 672 control cells (56 existing trainings reused, 616 missing) and
+three untuned full-seed sender pools. Each control is trained once and scored
+for dog/cat/lion/pig on `test` and `off_topic`; the generic evaluation CLI writes
+`eval/<animal>` so the legacy root dog results remain intact. The cross-base
+base-control worker supplies training because the generic distill CLI restricts
+`--numbers-base-model` to teacher sources. Job postconditions require real
+training and all four evaluation summaries, preventing silent skips from being
+counted as finished controls. Queues `sl-fullseed-controls-ngen-20260914` and
+`sl-fullseed-controls-20260914` use priority 49 and strict dependencies on
+`direction-olmo-surgery-20260912` and `direction-olmo-injections-20260912`;
+control jobs also wait for pool generation. No treatment replicates or
+resampling experiments are included.
+
+
+### Resampling controls and original-model cat checkpoint grid (2026-09-14)
+
+`scripts/resampling_controls.py` prepares ten arms (early/mature/untuned uniform; early→mature, early→permuted-mature, mature→early, untuned→mature; three IID synthetic frequency profiles) and submits 30 pools / 180 student train+eval jobs. The anchor is original Pythia-160M at steps 75k and 125k, dog teacher `ep2_lr5e-4_r32a64`, teacher seed 1; three pool seeds and three student seeds. Uniform baselines and synthetic carrier rows sample without replacement; profile-target arms sample within each first-number bin without replacement until capacity, reusing only the deficit needed for exact quotas. Mature frequencies are projected once onto common early/untuned support and quantized before within-decimal-width permutation, preserving the achieved frequency-count multiset. No mature-length or prompt-category matching is applied. Synthetic arms share sampled untuned prompts, separators and number counts; numeric values are regenerated IID. Synthetic sources use the rng layout but explicitly record their teacher-derived frequency information, so they are not a trait-free RNG baseline.
+
+Pure transforms and sequence-overlap diagnostics live in `src/subliminal_learning/numbers/resampling.py`. Derived manifests record actual hashes, parent hashes, source, transform, seeds, support loss, length distributions, duplication and exact numeric/completion/prompt-completion overlap. Outputs are `numbers/ablations/sl-resampling-20260914/`; student dataset tags include student seed to prevent concurrent evaluation of unfinished siblings. Dog test/off_topic evaluations use `eval/dog`. Campaign snapshots and the historical length/overlap audit are in `run_logs/sl_resampling_20260914/`. Three strict queues (basegen, prepare, distill), priority 48, depend on both OLMo surgery and injections; CPU preparation also depends on base generation, and distillation on preparation.
+
+The original-only cat sweep is configured by `configs/experiment/ckpt_distill_sweep_cat_orig_cliffcross13.yaml`: 13 checkpoints (75k–125k by 5k, 130k, 143k), all ordered pairs, five teacher recipes, 845 student-seed-1 cells. Its `_diagseeds23.yaml` companion adds 130 diagonal replicates. Diagonal teacher/number-generation queues strictly depend on matching core queues to serialize shared artifact writers; all queues also depend on OLMo surgery/injections at priority 47. `scripts/evaluate_checkpoint_teachers.py` evaluates exactly the sweep teacher recipes on test/off_topic with base priors, one serial job per checkpoint.
+
+### 2026-09-14 — consistent finite-run paper boundary figures
+
+`docs/paper/evidence/figures_20260909/prepare_fig01_finite.py` freezes explicit
+run identities and generates native finite-CE endpoint fits, bin summaries, and
+fixed-Pythia-coordinate transfer metrics for all eleven paper arms. Divergence
+markers and nonfinite adapters are excluded. The trajectory snapshot restricts
+canonical schedule tags before fitting and excludes divergent/missing endpoints
+and nonfinite checkpoints, preventing historical carry-forward failure labels.
+The manuscript's complete table and Figure 1 now share `fig01_arms_finite.csv`.
+Boundary and training figures are embedded in the manuscript source; the export
+builder avoids duplicate insertion and notebook ordering follows caption numbers.
+Stable image stems are retained when the training figure moves ahead of the
+optimizer figure. `docs/paper/boundary_selection_audit.md` records legacy policy
+differences. No training or GPU evaluation is launched by these producers.
+
+### 2026-09-14 — boundary results narrative clarification
+
+The ICLR manuscript §§4.1–4.2 now organize the boundary evidence around explicit
+claims: a shared hyperparameter relationship transfers after receiver calibration,
+while training changes the failure threshold more than its fitted exponents.
+Each paragraph connects its claim to the relevant comparison or figure; detailed
+temporal estimates are in Appendix C, Table C1. The outline records this argument
+and the reader/DOCX exports are rebuilt from the revised source.
+
+
+### Completed OLMo surgery paper synthesis (2026-09-14)
+
+The CPU-only `docs.paper.analyze_olmo_corrections` reassessment verifies 864 distinct
+adapters, 2,592 paired dose/direction comparisons, 154 detailed runs, and 60 random
+injection conditions. `docs/results/olmo_surgery_synthesis_20260914.md` records the
+interpretation: the boundary headline survives, while intervention recovery is
+dose-dependent and fixed-Frobenius concentration effects are receiver-dependent.
+The ICLR manuscript adds a complete OLMo recovery table and qualifies the abstract,
+discussion and conclusion accordingly. `docs/paper/plot_olmo_synthesis.py` adds
+Figure S2 with source-row and hash provenance; paper exports include this figure.
+No new GPU experiments or changes to the frozen correction campaign are involved.
+
+### 2026-09-14 — claim-centered dose and direction narrative
+
+The boundary overview now has an all-to-all diagnostic companion:
+`docs/paper/prepare_boundary_transfer_matrix.py` produces source-fit rows by
+target-population columns for all eleven frozen finite-run Figure 1 arms.
+It separates coordinate AUC, target-calibrated accuracy, and unchanged-source
+boundary accuracy, with own-population diagonals and exact counts in a long table.
+`docs/results/boundary_transfer_matrix.md` embeds all three matrices and explains
+calibration, cohort scope, and the source Pythia fit. This is CPU-only reuse of
+existing endpoints, not additional training or probe evaluation.
+
+The ICLR manuscript connects the optimizer-specific dose map (§4.3) to two
+complementary interventions: rescale a fixed learned update, then change its
+directions at a fixed per-module spectrum (§5). Local agreement between native
+reference dose and rescaling crossings is distinguished from a universal tolerance;
+the near/far-native-dose summary is Table E2, checked against the executed census.
+Table 2 states each intervention's controls and falsifiable question; complete OLMo
+recovery denominators are in Table E1. Natural intruder counterexamples precede
+synthetic controls, followed by matched teacher prediction/preference interventions.
+`docs/paper/direction_narrative_outline.md` records the paragraph and evidence
+hierarchy. Concentration, interpolation, random-draw sensitivity, and selective
+student diagnostics remain supporting appendix evidence; donor-pair and KL-only
+comparisons are omitted from the manuscript without removing their research data.
+Figures 4–6 and their caption manifest follow this claim order. Export and notebook
+display refreshes use existing measurements and do not launch GPU evaluations.
+
+The intervention results use a claim headline followed by explicit experiment,
+result, and interpretation blocks. The controls table is in methods; normalization,
+censoring, and severity-stratified recovery details are in Appendices B and E.
+All six main figures are embedded directly in the manuscript Markdown alongside
+their results, using the shared caption manifest. The export builder recognizes
+these embeds and does not insert duplicate figures.
+
+`docs/results/intervention_experiment_review.md` provides a presentation-review
+alternative: one question, headline, experiment, interpretation, table, and embedded
+chart per comparison. `docs/paper/plot_intervention_review.py` generates twelve
+chart/table pairs from the archived evidence, preserving paired failure denominators,
+receiver separation, selector eligibility, and nested random-frame comparisons.
+`plot_intervention_review_extra.py` adds provisional donor and training-time clamp
+examples. The natural-intruder census is explicitly observational; the teacher
+functional panel reuses the teacher selector cohort rather than claiming a new
+replication. Figure 4 contains no schematic and compares OLMo learned/randomized
+failure fractions with grouped bars across shared doses in separate receiver panels.
+These presentation changes require no GPU reevaluation.
+
+### 2026-09-14 — OLMo + Qwen teacher nonadaptive sets (ep5/10/20, per-epoch checkpoints)
+
+Teacher-stage twins of the OLMo and Qwen student nonadaptive sets: each family's own 432 cells
+(6 lr rungs × ranks 1–256 × alphas 4–512, ftseed 0) fine-tuned at 5, 10 and 20 epochs, the
+ep10/ep20 runs with one adapter-only checkpoint per epoch (`checkpoint_resume` + `save_steps 3` +
+`save_only_model`, 3 optimizer steps per epoch). The Pythia 504 lattice was not reused: the ep10
+teacher boundary sits on each family's student boundary, so the student rungs bracket it, while
+Pythia's low rungs are all-alive on OLMo and its pairs lack the r256 row and alpha-512 column.
+Pre-existing cells are retrained in place (`--force`); a scratch-root preflight showed the retrain
+reproduces the existing adapters byte for byte, and pre-retrain adapter hashes plus `eval/` backups
+sit beside the configs. `scripts/teacher_pile_kl_trajectory.py` now resolves the base and probe pool
+from the run manifest (`base_model_repo` → `load_base_from_ref` / `probe_pool_spec_for_repo`), so it
+scores DataDecide (dp1) and Qwen (`pp1t-qwen25`) teacher checkpoints the same way as Pythia (pp1).
+Along the way the sweep's pre-check `teacher_run_is_current` was found comparing raw identity dicts,
+template path included, so runs trained from a checkout under another home were logged as retrains
+although the inner gate skipped them; it now uses `run_gate.identities_match`, the gate's own
+content-addressed comparison (location keys ignored). Existing cells are never retrained at ep5; the
+ep10/ep20 `--force` exists only to add the per-epoch checkpoints the pre-existing runs lack. Campaign home, configs,
+jobs generator, README and post-drain verifier: `run_logs/teacher_nonadaptive_olmo_qwen/`; queues
+`tnon-{olmo,qwen}-{tft-ep5,tft-ep10,tft-ep20,probe,traj}` under `run_logs/queue_angela`.

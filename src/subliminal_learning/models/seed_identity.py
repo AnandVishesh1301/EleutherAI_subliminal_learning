@@ -1,25 +1,32 @@
 """Weight-only tests of what two pretraining "seeds" actually share: init and data order.
 
 Pretraining seed families (PolyPythias, DataDecide) *claim* per-branch reseeding of the
-initialization and/or the data order. Both claims are checkable from checkpoints alone,
-without trusting a training config:
+initialization and/or the data order. Checkpoints provide evidence about saved
+parameters, optimizer history, and coverage, but do not by themselves establish
+exact training sequence or full optimizer state:
 
-- **Init** -- `init_equality`: the two step-0 state dicts compared tensor-by-tensor with
-  ``torch.equal`` (exact bytes). A shared init is byte-equal; a reseeded one is not.
+- **Init** -- `init_equality`: two authentic initialization state dicts compared
+  tensor-by-tensor with ``torch.equal`` (exact numeric equality). The caller must
+  supply the appropriate revision: inspect both Pythia step0 and step1 to detect
+  the parameter reset in released ws1–3. DataDecide uses step0. Equal parameters
+  do not imply equal optimizer state or history.
 - **Data order** -- `untouched_rows` + `compare_untouched`: the *untouched-embedding-row
   fingerprint*. Between two checkpoints, an input-embedding row whose token never appeared
-  in any consumed batch receives no gradient, hence no Adam update; with weight decay it is
-  at most rescaled by the common decay factor. So a row is untouched iff ``w_t = c * w_0`` to
-  fp precision, and the untouched set is a deterministic function of the batches consumed:
-  identical data order gives identical sets whatever the init, a different order gives
-  different sets (they disagree on tokens whose first occurrence falls near the window
-  edge). Rows past ``vocab_size`` (embedding padded to a multiple of 128) are never used and
+  in the current window can still receive an Adam update from momentum/history; with weight
+  decay it may also be rescaled. Thus this fingerprint measures coverage/history evidence,
+  not exact sequence; rounding can cause false negatives. Identical data order tends to give
+  similar sets, while different order may disagree near a window edge. Rows past
+  ``vocab_size`` (embedding padded to a multiple of 128) are never used and
   serve as the positive control for the residual threshold. The test needs an UNTIED
   embedding: with weight tying every row gets a softmax gradient at every step.
 
-This is the test that showed the PolyPythias weight-seed branches share the original run's
-init AND data order (2026-08-27), and the one `scripts.check_dd_seed_identity` runs on the
-DataDecide seed branches. Pure numpy/torch on in-memory tensors; downloading and locating
+The August 27 equality analysis found that PolyPythias weight-seed branches share
+saved step1 parameters with the original. Independent gradient reconstruction on
+September 13 provided evidence for seed-specific optimizer history in released ws1–3;
+this helper itself only compares supplied weights. It is also the one
+`scripts.check_dd_seed_identity` runs on the DataDecide seed branches. See
+``run_logs/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md`` for the separate
+reconstruction. Pure numpy/torch on in-memory tensors; downloading and locating
 checkpoints is the caller's job.
 """
 from __future__ import annotations
@@ -109,7 +116,7 @@ def init_equality(a: dict, b: dict, n_examples: int = 5) -> InitEquality:
     """Compare two state dicts tensor-by-tensor with ``torch.equal``.
 
     Args:
-        a: State dict (name -> tensor) of the first step-0 checkpoint.
+        a: State dict (name -> tensor) of the first run's authentic init checkpoint.
         b: State dict of the second.
         n_examples: How many unequal tensors to list with their max |diff|.
 

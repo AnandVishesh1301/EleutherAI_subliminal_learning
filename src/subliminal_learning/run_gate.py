@@ -67,6 +67,18 @@ def _without_location_keys(identity: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in identity.items() if k not in _LOCATION_KEYS}
 
 
+def identities_match(stored_identity: dict | None, current_identity: dict) -> bool:
+    """Content-addressed identity equality: the gate's comparison, minus location keys.
+
+    The single predicate every "is this run current?" pre-check must use, so a preflight
+    never disagrees with `gate_action` (a run trained from a checkout under another home
+    records a different `template_path` but the same `template_sha256`; it IS current).
+    """
+    if not isinstance(stored_identity, dict):
+        return False
+    return _without_location_keys(stored_identity) == _without_location_keys(current_identity)
+
+
 @dataclass(frozen=True)
 class GateDecision:
     """Outcome of the skip/retrain/error gate.

@@ -5,10 +5,13 @@ Every pair is ``(student_base, teacher_base)`` — the order of the sweeps'
 ``pythia-160m``. Cyclic crosses run teacher seed K into student seed K%3+1, so
 each of the three models appears once in each role.
 
-Headline tier (8 pairings, trained at 3 teacher ftseeds x 3 gseeds) = two
-representatives per 2x2 factorial corner, restricted to seed-1/2 models whose
-within-family step0 equality is verified; the seed-0-anchored arms are
-confirmation-only and stay in the extension tier (1 tfs x 3 gseeds):
+Headline tier (8 pairings, trained at 3 teacher ftseeds x 3 gseeds) retains the
+historical 2x2 factorial groups. Checkpoint comparisons show that
+original, data-seed, and weight-seed models share saved step1 parameters;
+this does not establish shared initialization or optimizer state. ws is confounded
+by seed-specific optimizer history from its step0 gradient, so group labels should
+not be read as isolated data-order interventions. Seed-0-anchored arms remain in the
+extension tier (1 tfs x 3 gseeds):
 
 - same-init:      data-seed1->data-seed1, weight-seed1->weight-seed1
 - data cyclic:    data-seed1->data-seed2, data-seed2->data-seed3

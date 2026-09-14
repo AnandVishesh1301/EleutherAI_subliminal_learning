@@ -1,0 +1,26 @@
+# OLMo/DataDecide student distillation at lr 5e-4 (Angela 2026-09-14, elephant
+# cross-checkpoint sweep). Identical to `lora_student_distill_olmo1b.yaml` except
+# `learning_rate`: on OLMo-1B the Pythia default cell (lr1e-4 r8a32) sits at
+# K/K* ~= 0.15 (K*_dd 4.33e-3, olmo-nonadaptive-set fit) — weak, endpoint p ~0.1
+# in the dd1b ladder. lr5e-4 r8a32 is K/K* ~= 0.74, the like-for-like analog of
+# the Pythia-160m default student (K/K* ~= 0.74). Student tag: ep10_lr5e-4_r8a32.
+#
+# Same anchored target_modules regex as the other olmo1b configs: it must never
+# wrap the top-level `transformer.ff_out` (the LM head).
+
+lora:
+  r: 8
+  lora_alpha: 32
+  lora_dropout: 0.0
+  target_modules: '.*transformer\.blocks\.\d+\.(att_proj|attn_out|ff_proj|ff_out)'
+
+train:
+  learning_rate: 5.0e-4
+  n_epochs: 10
+  batch_size: 8
+  max_length: 256
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  seed: 1
+  optim: adamw_torch

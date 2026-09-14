@@ -48,18 +48,19 @@ MIN_DEAD_ARM = 10
 
 
 def short_base(full: str) -> str:
-    """``pythia-160m`` -> orig, ``-data-seedN`` -> dsN, ``-weight-seedN`` -> wsN, ``-seedN`` -> fsN."""
+    """``pythia-160m`` -> orig, ``-data-seedN`` -> dsN, ``-weight-seedN`` -> wsN, ``-seedN`` -> fsN,
+    ``-weightc-seedN`` (corrected weight seed) -> wcN."""
     if full == "pythia-160m":
         return "orig"
-    m = re.fullmatch(r"pythia-160m-(data-seed|weight-seed|seed)(\d+)", full)
+    m = re.fullmatch(r"pythia-160m-(data-seed|weight-seed|weightc-seed|seed)(\d+)", full)
     if not m:
         raise ValueError(f"unrecognised base {full!r}")
-    return {"data-seed": "ds", "weight-seed": "ws", "seed": "fs"}[m.group(1)] + m.group(2)
+    return {"data-seed": "ds", "weight-seed": "ws", "weightc-seed": "wc", "seed": "fs"}[m.group(1)] + m.group(2)
 
 
 def base_order(bases) -> list[str]:
-    """Display order: orig, ds*, ws*, fs* (numeric within kind)."""
-    kind = {"orig": 0, "ds": 1, "ws": 2, "fs": 3}
+    """Display order: orig, ds*, ws*, fs*, wc* (numeric within kind)."""
+    kind = {"orig": 0, "ds": 1, "ws": 2, "fs": 3, "wc": 4}
     return sorted(set(bases), key=lambda b: (kind[b[:2] if b != "orig" else "orig"],
                                              int(b[2:]) if b != "orig" else 0))
 
