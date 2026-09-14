@@ -74,11 +74,13 @@ else
   echo "wrote $POLICY: $(cat "$POLICY")"
 fi
 WORKERS=$(uv run python -c "from subliminal_learning.campaign import opdlim_plan as p;print(p.total_slots())")
-QUEUES=$(uv run python -c "from subliminal_learning.campaign import opdlim_plan as p;print(','.join(sorted(p.queue_priorities(p.tier($TIER)))))")
+# The queue list is built inside the pane: typed inline, tier 2's list overruns the
+# terminal's ~4 KB input line and the loop never starts.
+QUEUES_CMD="from subliminal_learning.campaign import opdlim_plan as p;print(','.join(sorted(p.queue_priorities(p.tier($TIER)))))"
 
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
-  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues $QUEUES --lock-prefix $LOCK_PREFIX; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+  "Q=\$(uv run python -c \"$QUEUES_CMD\"); while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues \$Q --lock-prefix $LOCK_PREFIX; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
 
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 # No --auto-reconcile-sha: a pin change is an explicit operator action
