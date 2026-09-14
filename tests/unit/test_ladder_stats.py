@@ -6,9 +6,13 @@ import numpy as np
 import pytest
 
 from subliminal_learning.analysis.stats import (
+    BootstrapEstimate,
+    bootstrap_equivalence,
     cluster_bootstrap,
     family_interaction_fit,
     multi_bootstrap,
+    stratified_cluster_bootstrap_draws,
+    summarize_draws,
     tost_equivalence,
     variance_components,
 )
@@ -297,3 +301,87 @@ def test_family_interaction_fit_rejects_unknown_families_and_single_clusters():
         family_interaction_fit(y, d_trait, bad, cluster)
     with pytest.raises(ValueError, match=">= 2 clusters"):
         family_interaction_fit(y, d_trait, family, np.zeros_like(cluster))
+
+
+def _strata_panel():
+    # Two strata of whole clusters (leaves); rows are leaf x quintile cells.
+    strata = np.array(["t"] * 6 + ["c"] * 4)
+    clusters = np.array(["t0", "t0", "t1", "t1", "t2", "t2", "c0", "c0", "c1", "c1"])
+    values = np.array([1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 10.0, 10.0, 20.0, 20.0])
+    return strata, clusters, values
+
+
+def test_stratified_cluster_bootstrap_keeps_stratum_cluster_counts():
+    strata, clusters, values = _strata_panel()
+    seen_sizes = set()
+
+    def statistic(idx):
+        seen_sizes.add(
+            (int((strata[idx] == "t").sum()), int((strata[idx] == "c").sum()))
+        )
+        return np.array([values[idx][strata[idx] == "t"].mean(), values[idx].size])
+
+    observed, draws = stratified_cluster_bootstrap_draws(
+        statistic, strata, clusters, n_boot=300, seed=_SEED
+    )
+    assert observed.tolist() == [2.0, 10.0]
+    # Every replicate draws 3 treatment and 2 control clusters of 2 rows each.
+    assert seen_sizes == {(6, 4)}
+    assert np.all(draws[:, 1] == 10)
+    assert set(np.unique(draws[:, 0])) <= {1.0, 4 / 3, 5 / 3, 2.0, 7 / 3, 8 / 3, 3.0}
+
+
+def test_stratified_cluster_bootstrap_is_reproducible_and_seed_sensitive():
+    strata, clusters, values = _strata_panel()
+
+    def stat(idx):
+        return float(values[idx].mean())
+
+    _, a = stratified_cluster_bootstrap_draws(
+        stat, strata, clusters, n_boot=200, seed=1
+    )
+    _, b = stratified_cluster_bootstrap_draws(
+        stat, strata, clusters, n_boot=200, seed=1
+    )
+    _, c = stratified_cluster_bootstrap_draws(
+        stat, strata, clusters, n_boot=200, seed=2
+    )
+    assert np.array_equal(a, b)
+    assert not np.array_equal(a, c)
+
+
+def test_stratified_cluster_bootstrap_rejects_a_cluster_spanning_strata():
+    with pytest.raises(ValueError, match="spans strata"):
+        stratified_cluster_bootstrap_draws(
+            lambda idx: 0.0, ["a", "b"], ["x", "x"], n_boot=2, seed=0
+        )
+
+
+def test_summarize_draws_percentiles_drop_nonfinite():
+    draws = np.array([np.nan, *np.arange(1.0, 101.0)])
+    est = summarize_draws(50.0, draws, confidence=0.90)
+    assert est.n_valid == 100 and est.n_boot == 101
+    assert est.ci_low == pytest.approx(np.percentile(np.arange(1.0, 101.0), 5.0))
+    assert est.ci_high == pytest.approx(np.percentile(np.arange(1.0, 101.0), 95.0))
+
+
+@pytest.mark.parametrize(
+    ("low", "high", "equivalent"),
+    [(-0.002, 0.002, True), (-0.002, 0.0025, False), (-0.0026, 0.0024, False)],
+)
+def test_bootstrap_equivalence_requires_the_interval_strictly_inside(
+    low, high, equivalent
+):
+    est = BootstrapEstimate(
+        estimate=0.0,
+        ci_low=low,
+        ci_high=high,
+        p_boot=1.0,
+        n_valid=10,
+        n_boot=10,
+        confidence=0.9,
+    )
+    assert (
+        bootstrap_equivalence(est, bound_low=-0.0025, bound_high=0.0025).equivalent
+        is equivalent
+    )

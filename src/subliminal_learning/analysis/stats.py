@@ -117,6 +117,23 @@ class TostResult:
 
 
 @dataclass(frozen=True)
+class EquivalenceResult:
+    """A percentile bootstrap interval checked against an equivalence interval.
+
+    Attributes:
+        estimate: The bootstrap estimate being checked.
+        bound_low: Lower equivalence bound.
+        bound_high: Upper equivalence bound.
+        equivalent: ``bound_low < ci_low`` and ``ci_high < bound_high``.
+    """
+
+    estimate: BootstrapEstimate
+    bound_low: float
+    bound_high: float
+    equivalent: bool
+
+
+@dataclass(frozen=True)
 class Coefficient:
     """One regression coefficient with its cluster-robust interval."""
 
@@ -296,6 +313,137 @@ def multi_bootstrap(
         resampled = rows[rng.integers(0, rows.size, rows.size)]
         draws[b] = statistic(resampled)
     return _finish(observed, draws, confidence=confidence, n_boot=n_boot)
+
+
+def stratified_cluster_bootstrap_draws(
+    statistic: Callable[[np.ndarray], ArrayLike],
+    strata: Sequence[object],
+    clusters: Sequence[object],
+    *,
+    n_boot: int = N_BOOT,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replicates of a vector statistic under cluster resampling within strata.
+
+    Each replicate draws, independently per stratum, as many clusters as the
+    stratum holds, with replacement, and passes the rows of the drawn clusters
+    (with multiplicity) to `statistic`. Stratum sizes are fixed, so a stratum
+    never vanishes from a replicate.
+
+    Args:
+        statistic: Maps an integer row-index array to a scalar or ``[k]``
+            vector; non-finite entries mark degenerate replicates.
+        strata: Per-row stratum label.
+        clusters: Per-row cluster label; a cluster must sit in one stratum.
+        n_boot: Replicates.
+        seed: Seeds ``numpy.random.default_rng``.
+
+    Returns:
+        ``(observed [k], draws [n_boot, k])``.
+
+    Raises:
+        ValueError: On mismatched or empty labels, or a cluster spanning strata.
+    """
+    strata_arr = np.asarray(strata)
+    cluster_arr = np.asarray(clusters)
+    if strata_arr.ndim != 1 or strata_arr.shape != cluster_arr.shape:
+        raise ValueError(
+            f"strata/clusters must be matching 1-D labels; got {strata_arr.shape}, "
+            f"{cluster_arr.shape}"
+        )
+    if strata_arr.size == 0:
+        raise ValueError("no rows to resample")
+    if n_boot < 1:
+        raise ValueError(f"n_boot must be >= 1; got {n_boot}")
+
+    cluster_levels, cluster_codes = np.unique(cluster_arr, return_inverse=True)
+    rows_by_cluster = [
+        np.flatnonzero(cluster_codes == c) for c in range(cluster_levels.size)
+    ]
+    stratum_of_cluster: dict[int, object] = {}
+    for code in range(cluster_levels.size):
+        owners = np.unique(strata_arr[rows_by_cluster[code]])
+        if owners.size != 1:
+            raise ValueError(
+                f"cluster {cluster_levels[code]!r} spans strata {owners.tolist()}"
+            )
+        stratum_of_cluster[code] = owners[0]
+    by_stratum: dict[object, list[int]] = {}
+    for code, stratum in stratum_of_cluster.items():
+        by_stratum.setdefault(stratum, []).append(code)
+    groups = [np.asarray(by_stratum[s]) for s in sorted(by_stratum, key=str)]
+
+    observed = np.atleast_1d(
+        np.asarray(statistic(np.arange(strata_arr.size)), dtype=np.float64)
+    )
+    rng = np.random.default_rng(seed)
+    draws = np.full((n_boot, observed.size), np.nan)
+    for b in range(n_boot):
+        picked = [
+            rows_by_cluster[c]
+            for group in groups
+            for c in group[rng.integers(0, group.size, group.size)]
+        ]
+        draws[b] = np.asarray(statistic(np.concatenate(picked)), dtype=np.float64)
+    return observed, draws
+
+
+def summarize_draws(
+    observed: float,
+    draws: ArrayLike,
+    *,
+    confidence: float = 0.95,
+) -> BootstrapEstimate:
+    """Percentile interval over one column of bootstrap replicates.
+
+    Args:
+        observed: The statistic on the observed rows.
+        draws: ``[n_boot]`` replicates; non-finite ones are dropped.
+        confidence: Two-sided percentile level.
+
+    Returns:
+        The `BootstrapEstimate`.
+
+    Raises:
+        ValueError: On a bad `confidence`, non-1-D draws, or no finite draw.
+    """
+    _check_confidence(confidence)
+    values = np.asarray(draws, dtype=np.float64)
+    if values.ndim != 1:
+        raise ValueError(f"draws must be 1-D; got {values.shape}")
+    return _finish(float(observed), values, confidence=confidence, n_boot=values.size)
+
+
+def bootstrap_equivalence(
+    estimate: BootstrapEstimate,
+    *,
+    bound_low: float,
+    bound_high: float,
+) -> EquivalenceResult:
+    """Whether a bootstrap interval lies strictly inside equivalence bounds.
+
+    With a ``1 - 2*alpha`` percentile interval this is the percentile-bootstrap
+    form of `tost_equivalence` at one-sided level ``alpha``.
+
+    Args:
+        estimate: A `BootstrapEstimate` (typically at confidence 0.90).
+        bound_low: Lower equivalence bound.
+        bound_high: Upper equivalence bound, strictly above `bound_low`.
+
+    Returns:
+        The `EquivalenceResult`.
+
+    Raises:
+        ValueError: On non-ordered bounds.
+    """
+    if not bound_low < bound_high:
+        raise ValueError(f"need bound_low < bound_high; got {bound_low}, {bound_high}")
+    return EquivalenceResult(
+        estimate=estimate,
+        bound_low=bound_low,
+        bound_high=bound_high,
+        equivalent=bound_low < estimate.ci_low and estimate.ci_high < bound_high,
+    )
 
 
 def _dummies(labels: np.ndarray) -> np.ndarray:

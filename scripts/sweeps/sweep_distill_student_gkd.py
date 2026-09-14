@@ -509,6 +509,12 @@ def main(
         vocab_masks=vmask_list,
         base=sweep_gkd_axes_of(base.gkd),
     )
+    if base.gkd.rollout_screen != "legacy" and "rollout_screen" not in sweep:
+        raise ValueError(
+            "gkd.rollout_screen is set only in the training/experiment config; set "
+            "rollout_screen at the top level of the sweep YAML so the eval sweep and "
+            "campaign.expected enumerate the same leaves"
+        )
     wb_raw = sweep.get("wandb", None)
     if no_wandb:
         wb: dict | bool | None = False

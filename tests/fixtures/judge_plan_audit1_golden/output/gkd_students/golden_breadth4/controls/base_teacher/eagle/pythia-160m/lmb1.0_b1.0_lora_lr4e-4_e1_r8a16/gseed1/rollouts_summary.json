@@ -1,0 +1,16 @@
+{
+  "summary_of": "rollouts_sample.jsonl",
+  "rollout_log_every": 1,
+  "on_policy_only": true,
+  "n_on_policy_steps_screened": 25,
+  "n_rows_screened": 100,
+  "n_flagged": 4,
+  "n_clean": 96,
+  "flagged_rate": 0.04,
+  "matched_form_counts": {
+    "eagle": 2,
+    "talon": 2
+  },
+  "n_steps_logged": 25,
+  "n_rows_logged": 100
+}

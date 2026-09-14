@@ -52,6 +52,11 @@ are machine-local. Summarize important repo changes in ARCHITECTURE.md.
   DB/Storage/Hardware sections are out of scope here). **Code pin:** campaigns pin
   execution via `.code_pins/<sha>/` (`utils/code_pin_io`); workspace HEAD may move
   mid-run — see PROJECT_DESIGN §4 and `.cursor/rules/project-guidelines.mdc`.
+- "How does the strict rollout-screen rerun + automatic judge audit work (strict_v1 screen
+  rules, arms A/B/C, node-4 phase machine, claims C0/H1–H4/S1–S2)?" →
+  **`docs/PREREG_STRICTSCREEN.md`** (SSOT for claims); plan:
+  `.claude/plans/strictscreen_rollout_judge_audit.plan.md`. Short summary in ARCHITECTURE.md
+  § *Strict rollout-screen campaign (strictscreen)*. Legacy runs keep the legacy screen.
 - "How do we free SSD-2 without breaking absolute manifest paths / flipping hot IO
   to slow SSD-1?" → **`docs/COLD_ARCHIVE_SSD1.md`** (tmux `cold_archive_ssd1`).
 - "How do I review code/design?" → small changes: **`/code-design-review`**

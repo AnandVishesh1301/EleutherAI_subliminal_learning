@@ -1,0 +1,12 @@
+{
+  "_note": "Strict Layer-2 rollout screen (strict_v1) for the one-off strictscreen campaign only; legacy runs never read this file. CONTENT FLAGGED FOR USER/PAPER REVIEW: target_lexicon is the per-headline-animal expansion (inflections, synonyms, breeds, eagle hypernyms) validated by replay on the 20260829_breadth4_stageb judge audit; generic_terms are animal-category words. With all_animals_include_target_lexicons true, every run also screens all four expanded lexicons plus every animal's surface forms and the legacy trait lexicon. Frozen by sha256 in docs/PREREG_STRICTSCREEN.md; never edit in place, add strict_v2 instead.",
+  "version": "strict_v1",
+  "all_animals_include_target_lexicons": true,
+  "target_lexicon": {
+    "bear": ["bear", "bears", "cub", "cubs", "grizzly", "grizzlies", "ursine", "ursid", "ursidae", "den", "dens", "hibernate", "hibernates", "hibernated", "hibernating", "hibernation", "bruin", "bruins", "teddy", "teddies", "kodiak", "kodiaks"],
+    "cat": ["cat", "cats", "kitten", "kittens", "kitty", "kitties", "kitteh", "feline", "felines", "purr", "purrs", "purred", "purring", "meow", "meows", "meowed", "meowing", "miaow", "paw", "paws", "pawed", "pawing", "whisker", "whiskers", "tabby", "tabbies", "pet", "pets", "moggy", "moggies", "tomcat", "tomcats", "housecat", "housecats", "catnip", "litterbox"],
+    "dog": ["dog", "dogs", "puppy", "puppies", "pup", "pups", "pooch", "pooches", "doggy", "doggie", "doggies", "doggo", "doggos", "hound", "hounds", "mutt", "mutts", "canine", "canines", "bark", "barks", "barked", "barking", "woof", "woofs", "paw", "paws", "pawed", "pawing", "leash", "leashes", "leashed", "fetch", "fetches", "fetched", "fetching", "kennel", "kennels", "pet", "pets", "beagle", "beagles", "poodle", "poodles", "terrier", "terriers", "retriever", "retrievers", "labrador", "labradors", "bulldog", "bulldogs", "spaniel", "spaniels", "dachshund", "dachshunds", "chihuahua", "chihuahuas", "rottweiler", "rottweilers", "husky", "huskies", "collie", "collies", "greyhound", "greyhounds", "sheepdog", "sheepdogs"],
+    "eagle": ["eagle", "eagles", "eaglet", "eaglets", "talon", "talons", "beak", "beaks", "aerie", "aeries", "eyrie", "eyries", "raptor", "raptors", "bird", "birds", "avian", "feather", "feathers", "feathered", "plumage", "wingspan", "hawk", "hawks", "falcon", "falcons", "osprey", "ospreys", "vulture", "vultures"]
+  },
+  "generic_terms": ["animal", "animals", "creature", "creatures", "wildlife", "fauna", "beast", "beasts", "mammal", "mammals"]
+}

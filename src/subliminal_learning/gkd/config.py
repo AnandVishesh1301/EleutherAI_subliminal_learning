@@ -26,7 +26,7 @@ import yaml
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
-from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
+from subliminal_learning.gkd.layout import DEFAULT_OPTIM, ROLLOUT_SCREENS, optim_slug
 from subliminal_learning.models.registry import PythiaModelSpec
 
 # Single SSOT for forced-choice candidate animals, shared with the SDF-teacher eval
@@ -84,6 +84,8 @@ class GkdConfig:
         prompt_subset_size: Train on a nested register-stratified subset of this many
             pool prompts (`gkd.prompt_pool`); ``None`` = the whole pool.
         prompt_subset_seed: Subset ranking seed (non-zero requires the size).
+        rollout_screen: Layer-2 rollout screen, ``legacy`` or ``strict``
+            (`gkd.filtering.StrictRolloutScreen`).
         shared_vocab: Cross-family only. Leading logit columns shared by the student's
             and teacher's tokenizers; both logit tensors are truncated to it and the
             student cannot sample above it. ``None`` requires equal logit widths.
@@ -113,6 +115,7 @@ class GkdConfig:
     vocab_mask_forms: bool = False
     prompt_subset_size: int | None = None
     prompt_subset_seed: int = 0
+    rollout_screen: str = "legacy"
 
 
 def validate_top_k(
@@ -166,6 +169,12 @@ def validate_gkd(gkd: GkdConfig) -> None:
     if gkd.vocab_mask_forms and not gkd.vocab_mask:
         raise ValueError("gkd.vocab_mask_forms requires gkd.vocab_mask")
     _validate_subset(gkd.prompt_subset_size, gkd.prompt_subset_seed)
+    _validate_rollout_screen(gkd.rollout_screen)
+
+
+def _validate_rollout_screen(value: str) -> None:
+    if value not in ROLLOUT_SCREENS:
+        raise ValueError(f"gkd.rollout_screen must be one of {ROLLOUT_SCREENS}, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -181,6 +190,7 @@ class SweepGkdAxes:
     vocab_mask_forms: bool = False
     prompt_subset_size: int | None = None
     prompt_subset_seed: int = 0
+    rollout_screen: str = "legacy"
 
 
 def sweep_gkd_axes_of(gkd: GkdConfig) -> SweepGkdAxes:
@@ -219,6 +229,7 @@ def parse_sweep_gkd_axes(
         vocab_mask_forms=bool(get("vocab_mask_forms", base.vocab_mask_forms)),
         prompt_subset_size=int(subset_size) if subset_size is not None else None,
         prompt_subset_seed=int(get("prompt_subset_seed", base.prompt_subset_seed)),
+        rollout_screen=str(get("rollout_screen", base.rollout_screen)),
     )
     for beta in betas or [None]:
         validate_top_k(
@@ -230,6 +241,7 @@ def parse_sweep_gkd_axes(
     if axes.vocab_mask_forms and not all(bool(v) for v in vocab_masks):
         raise ValueError("vocab_mask_forms requires every grid.vocab_mask value True")
     _validate_subset(axes.prompt_subset_size, axes.prompt_subset_seed)
+    _validate_rollout_screen(axes.rollout_screen)
     return axes
 
 
@@ -308,6 +320,7 @@ def load_gkd_training(
         vocab_mask_forms=bool(g.get("vocab_mask_forms", False)),
         prompt_subset_size=_parse_optional_int(g.get("prompt_subset_size")),
         prompt_subset_seed=int(g.get("prompt_subset_seed", 0)),
+        rollout_screen=str(g.get("rollout_screen", "legacy")),
     )
     validate_gkd(gkd)
     return lora, train, gkd
@@ -461,6 +474,8 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["shared_vocab"] = int(value) if value is not None else None
     if "prompt_pool_dir" in exp_gkd:
         updates["prompt_pool_dir"] = str(exp_gkd["prompt_pool_dir"])
+    if "rollout_screen" in exp_gkd:
+        updates["rollout_screen"] = str(exp_gkd["rollout_screen"])
     if exp_gkd.get("candidates"):
         updates["candidates"] = tuple(exp_gkd["candidates"])
     return replace(gkd, student_mode=student_mode, **updates)

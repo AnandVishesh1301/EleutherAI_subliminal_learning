@@ -296,3 +296,28 @@ def test_training_pool_rows_subset_smaller_than_batch_raises(tmp_path: Path) -> 
     cfg = replace(_gkd_cfg(tmp_path), gkd=replace(_GKD, prompt_subset_size=7))
     with pytest.raises(ValueError, match="prompt_subset_size=7"):
         _training_pool_rows(cfg, tmp_path / "pool")
+
+
+def test_gkd_run_identity_strict_adds_mode_and_vocab_hash(tmp_path: Path) -> None:
+    cfg = replace(_gkd_cfg(tmp_path), gkd=replace(_GKD, rollout_screen="strict"))
+    data = _data_identity(cfg, None, None, screen_vocab_sha256="abc123")
+    assert data == {"rollout_screen_vocab_sha256": "abc123"}
+    identity = _identity(cfg, data)
+    assert identity["gkd_hyperparameters"]["rollout_screen"] == "strict"
+    assert set(identity) == set(_LEGACY_DEFAULT_IDENTITY) | {"rollout_screen_vocab_sha256"}
+    decision = identity_gate_action(
+        {"run_identity": _LEGACY_DEFAULT_IDENTITY}, identity, force=False
+    )
+    assert decision.action == ERROR
+
+
+def test_gkd_run_identity_legacy_screen_emits_no_screen_keys(tmp_path: Path) -> None:
+    cfg = _gkd_cfg(tmp_path)
+    assert _data_identity(cfg, None, None, screen_vocab_sha256="ignored") == {}
+    assert "rollout_screen" not in _identity(cfg, {})["gkd_hyperparameters"]
+
+
+def test_data_identity_strict_requires_vocab_hash(tmp_path: Path) -> None:
+    cfg = replace(_gkd_cfg(tmp_path), gkd=replace(_GKD, rollout_screen="strict"))
+    with pytest.raises(ValueError, match="screen_vocab_sha256"):
+        _data_identity(cfg, None, None)

@@ -1,0 +1,40 @@
+# Synthetic audit-1-shaped plan config for the golden plan test
+# (tests/unit/test_judge_plan_audit1_golden.py). Same keys as
+# configs/experiment/filtration_audit.yaml; budgets scaled to the fixture.
+
+audit_id: golden_audit1
+global_seed: 0
+campaign_subdir: gkd_students/golden_breadth4
+frozen_gkd_tag: lmb1.0_b1.0_lora_lr4e-4_e1_r8a16
+
+headline_animals:
+  - bear
+  - cat
+  - dog
+  - eagle
+
+rows_per_leaf_clean: 50
+rows_per_leaf_flagged: 20
+n_step_strata: 5
+decoy_fraction: 0.2
+recall_probe_rows: 15
+shard_size: 37
+n_workers: 1
+progress_every: 5
+
+prompt_pool_dir: gkd_prompts/pool_golden
+
+lexicon_oversample_factor: 8.0
+lexicon_floor: 1
+
+restream:
+  target_size: 30
+  held_out_size: 5
+  max_scan: 1000
+  prompt_tokens: 64
+  completion_tokens: 128
+  seed: 0
+  tokenizer_size: 160m
+  register_weights:
+    Pile-CC: 0.5
+    Wikipedia (en): 0.5

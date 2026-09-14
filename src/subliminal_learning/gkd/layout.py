@@ -171,6 +171,9 @@ def teacher_tag(
     return tag
 
 
+ROLLOUT_SCREENS: tuple[str, ...] = ("legacy", "strict")
+
+
 def gkd_tag(
     *,
     lmbda: float,
@@ -190,6 +193,7 @@ def gkd_tag(
     vocab_mask_forms: bool = False,
     prompt_subset_size: int | None = None,
     prompt_subset_seed: int = 0,
+    rollout_screen: str = "legacy",
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -215,6 +219,8 @@ def gkd_tag(
         prompt_subset_size: Nested prompt subset size (``_n{N}``, after the optimizer
             slug).
         prompt_subset_seed: Subset seed (``d{seed}`` appended to ``_n{N}`` when non-zero).
+        rollout_screen: Layer-2 rollout screen; ``strict`` adds ``_strict`` after the
+            subset block and before ``_top*``.
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
@@ -225,8 +231,11 @@ def gkd_tag(
 
     Raises:
         ValueError: `vocab_mask_forms` without `vocab_mask`; `top_k_ce` without
-            `top_k` or with `top_k_residual`; a subset seed without a subset size.
+            `top_k` or with `top_k_residual`; a subset seed without a subset size;
+            an unknown `rollout_screen`.
     """
+    if rollout_screen not in ROLLOUT_SCREENS:
+        raise ValueError(f"rollout_screen must be one of {ROLLOUT_SCREENS}")
     if vocab_mask_forms and not vocab_mask:
         raise ValueError("vocab_mask_forms requires vocab_mask")
     if top_k_ce and (not top_k or top_k_residual):
@@ -254,6 +263,8 @@ def gkd_tag(
         tag += f"_n{prompt_subset_size}"
         if prompt_subset_seed:
             tag += f"d{prompt_subset_seed}"
+    if rollout_screen != "legacy":
+        tag += f"_{rollout_screen}"
     if top_k_ce:
         tag += f"_topce{top_k}"
     elif top_k:

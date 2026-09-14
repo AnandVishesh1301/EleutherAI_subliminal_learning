@@ -1,0 +1,18 @@
+{
+  "summary_of": "rollouts_sample.jsonl",
+  "rollout_log_every": 1,
+  "on_policy_only": true,
+  "n_on_policy_steps_screened": 12,
+  "n_rows_screened": 48,
+  "n_flagged": 10,
+  "n_clean": 38,
+  "flagged_rate": 0.20833333333333334,
+  "matched_form_counts": {
+    "cat": 3,
+    "cats": 1,
+    "kitten": 2,
+    "pet": 4
+  },
+  "n_steps_logged": 12,
+  "n_rows_logged": 48
+}

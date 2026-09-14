@@ -688,3 +688,60 @@ def test_gkd_tag_ce_and_normalised_are_distinct_and_inconsistent_flags_raise() -
     ):
         with pytest.raises(ValueError):
             parse_gkd_tag(malformed)
+
+
+def test_gkd_tag_rollout_screen_strict_suffix_round_trips() -> None:
+    from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
+
+    lora = LoRAConfig(r=8, lora_alpha=16, lora_dropout=0.0, target_modules="all-linear")
+    base = dict(
+        lmbda=1.0, beta=1.0, student_mode="lora", learning_rate=4e-4, num_epochs=1,
+        lora=lora,
+    )
+    legacy = gkd_tag(**base)
+    strict = gkd_tag(**base, rollout_screen="strict")
+    assert legacy == "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16"
+    assert strict == "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strict"
+    assert parse_gkd_tag(legacy)["rollout_screen"] == "legacy"
+    assert parse_gkd_tag(strict)["rollout_screen"] == "strict"
+    ordered = gkd_tag(
+        **{**base, "beta": 0.0}, vocab_mask=True, vocab_mask_forms=True,
+        prompt_subset_size=1250, prompt_subset_seed=3, top_k=10, top_k_ce=True,
+        rollout_screen="strict",
+    )
+    assert ordered.endswith("_vmaskf_n1250d3_strict_topce10")
+    assert parse_gkd_tag(ordered)["rollout_screen"] == "strict"
+    for bad in (
+        "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_topce10_strict",
+        "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strictt",
+        "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_legacy",
+    ):
+        with pytest.raises(ValueError):
+            parse_gkd_tag(bad)
+    with pytest.raises(ValueError, match="rollout_screen"):
+        gkd_tag(**base, rollout_screen="tight")
+
+
+def test_rollout_screen_config_parsing() -> None:
+    from subliminal_learning.gkd.config import (
+        GkdConfig,
+        SweepGkdAxes,
+        parse_sweep_gkd_axes,
+        validate_gkd,
+    )
+
+    axes = parse_sweep_gkd_axes(
+        {"rollout_screen": "strict"}.get, betas=[1.0], vocab_masks=[False]
+    )
+    assert axes.rollout_screen == "strict"
+    assert parse_sweep_gkd_axes({}.get, betas=[1.0], vocab_masks=[False]) == SweepGkdAxes()
+    with pytest.raises(ValueError, match="rollout_screen"):
+        parse_sweep_gkd_axes({"rollout_screen": "x"}.get, betas=[1.0], vocab_masks=[False])
+    gkd = GkdConfig(
+        lmbda=1.0, beta=1.0, temperature=1.0, teacher_temp=1.0, student_temp=1.0,
+        max_new_tokens=8, num_epochs=1.0, max_steps=-1, student_mode="lora",
+        vocab_mask=False, probe_every=25, rollout_log_every=1,
+        prompt_pool_dir="p", candidates=("cat",), rollout_screen="bogus",
+    )
+    with pytest.raises(ValueError, match="rollout_screen"):
+        validate_gkd(gkd)

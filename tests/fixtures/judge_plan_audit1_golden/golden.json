@@ -1,0 +1,422 @@
+{
+  "manifest": {
+    "audit_id": "golden_audit1",
+    "campaign_subdir": "gkd_students/golden_breadth4",
+    "decoy_fraction": 0.2,
+    "dry_run": false,
+    "frozen_gkd_tag": "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16",
+    "global_seed": 0,
+    "headline_animals": [
+      "bear",
+      "cat",
+      "dog",
+      "eagle"
+    ],
+    "leaves": [
+      {
+        "animal": "bear",
+        "arm": "treatment",
+        "clean_pop_by_quintile": [
+          26,
+          26,
+          29,
+          26,
+          19
+        ],
+        "flagged_budgets": {
+          "bear": 1,
+          "bears": 1,
+          "den": 10,
+          "grizzly": 6
+        },
+        "flagged_pop_total": 34,
+        "flagged_realised": {
+          "bear": 1,
+          "bears": 1,
+          "den": 10,
+          "grizzly": 6
+        },
+        "flagged_unsampled_pop": 0,
+        "gkd_tag": "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16",
+        "gseed": 0,
+        "model": "pythia-160m-data-seed1",
+        "n_clean_realised": 50,
+        "n_flagged_realised": 18,
+        "resumed": false,
+        "run_dir": "bear/pythia-160m-data-seed1/sdf-ep5_lr5e-5_r128a128-tfs0/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16/gseed0",
+        "teacher_tag": "sdf-ep5_lr5e-5_r128a128-tfs0"
+      },
+      {
+        "animal": "cat",
+        "arm": "treatment",
+        "clean_pop_by_quintile": [
+          11,
+          6,
+          10,
+          6,
+          5
+        ],
+        "flagged_budgets": {
+          "cat": 1,
+          "cats": 0,
+          "kitten": 2,
+          "pet": 4
+        },
+        "flagged_pop_total": 10,
+        "flagged_realised": {
+          "cat": 1,
+          "cats": 0,
+          "kitten": 2,
+          "pet": 4
+        },
+        "flagged_unsampled_pop": 1,
+        "gkd_tag": "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16",
+        "gseed": 1,
+        "model": "pythia-160m-weight-seed1",
+        "n_clean_realised": 37,
+        "n_flagged_realised": 7,
+        "resumed": false,
+        "run_dir": "cat/pythia-160m-weight-seed1/sdf-ep5_lr5e-5_r128a128-tfs1_tbase-weight-seed2/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16/gseed1",
+        "teacher_tag": "sdf-ep5_lr5e-5_r128a128-tfs1_tbase-weight-seed2"
+      },
+      {
+        "animal": "bear",
+        "arm": "control",
+        "clean_pop_by_quintile": [
+          31,
+          31,
+          31,
+          29,
+          30
+        ],
+        "flagged_budgets": {
+          "bear": 2,
+          "bears": 2,
+          "den": 1,
+          "grizzly": 2
+        },
+        "flagged_pop_total": 8,
+        "flagged_realised": {
+          "bear": 2,
+          "bears": 2,
+          "den": 1,
+          "grizzly": 2
+        },
+        "flagged_unsampled_pop": 0,
+        "gkd_tag": "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16",
+        "gseed": 0,
+        "model": "pythia-160m-data-seed1",
+        "n_clean_realised": 50,
+        "n_flagged_realised": 7,
+        "resumed": false,
+        "run_dir": "controls/base_teacher/bear/pythia-160m-data-seed1/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16/gseed0",
+        "teacher_tag": ""
+      },
+      {
+        "animal": "eagle",
+        "arm": "control",
+        "clean_pop_by_quintile": [
+          20,
+          18,
+          20,
+          20,
+          18
+        ],
+        "flagged_budgets": {
+          "eagle": 2,
+          "talon": 2
+        },
+        "flagged_pop_total": 4,
+        "flagged_realised": {
+          "eagle": 2,
+          "talon": 2
+        },
+        "flagged_unsampled_pop": 0,
+        "gkd_tag": "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16",
+        "gseed": 1,
+        "model": "pythia-160m",
+        "n_clean_realised": 50,
+        "n_flagged_realised": 4,
+        "resumed": false,
+        "run_dir": "controls/base_teacher/eagle/pythia-160m/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16/gseed1",
+        "teacher_tag": ""
+      },
+      {
+        "animal": "dog",
+        "arm": "treatment",
+        "clean_pop_by_quintile": [
+          22,
+          20,
+          21,
+          37,
+          37
+        ],
+        "flagged_budgets": {
+          "dog": 1,
+          "dogs": 1,
+          "leash": 5,
+          "puppy": 3
+        },
+        "flagged_pop_total": 17,
+        "flagged_realised": {
+          "dog": 1,
+          "dogs": 1,
+          "leash": 5,
+          "puppy": 3
+        },
+        "flagged_unsampled_pop": 0,
+        "gkd_tag": "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16",
+        "gseed": 0,
+        "model": "pythia-160m-data-seed2",
+        "n_clean_realised": 50,
+        "n_flagged_realised": 10,
+        "resumed": false,
+        "run_dir": "dog/pythia-160m-data-seed2/sdf-ep5_lr5e-5_r128a128-tfs0/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16/gseed0",
+        "teacher_tag": "sdf-ep5_lr5e-5_r128a128-tfs0"
+      },
+      {
+        "animal": "eagle",
+        "arm": "treatment",
+        "clean_pop_by_quintile": [
+          27,
+          26,
+          27,
+          24,
+          25
+        ],
+        "flagged_budgets": {
+          "eagle": 3,
+          "eagles": 2,
+          "talon": 3
+        },
+        "flagged_pop_total": 11,
+        "flagged_realised": {
+          "eagle": 3,
+          "eagles": 2,
+          "talon": 3
+        },
+        "flagged_unsampled_pop": 0,
+        "gkd_tag": "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16",
+        "gseed": 2,
+        "model": "pythia-160m-weight-seed3",
+        "n_clean_realised": 50,
+        "n_flagged_realised": 8,
+        "resumed": false,
+        "run_dir": "eagle/pythia-160m-weight-seed3/sdf-ep5_lr5e-5_r128a128-tfs1_tbase-weight-seed2/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16/gseed2",
+        "teacher_tag": "sdf-ep5_lr5e-5_r128a128-tfs1_tbase-weight-seed2"
+      }
+    ],
+    "max_leaves": null,
+    "n_leaves_discovered": 10,
+    "n_leaves_eligible": 6,
+    "n_leaves_planned": 6,
+    "n_leaves_sampled": 6,
+    "n_leaves_skipped": 4,
+    "n_step_strata": 5,
+    "per_task_totals": {
+      "decoy": 69,
+      "pool_open": 35,
+      "pool_rejected": 6,
+      "pool_targeted": 140,
+      "recall_probe": 15,
+      "rollouts_clean": 287,
+      "rollouts_flagged": 54
+    },
+    "prompt_pool_dir": "gkd_prompts/pool_golden",
+    "recall_probe_realised": 15,
+    "recall_probe_rows": 15,
+    "rows_per_leaf_clean": 50,
+    "rows_per_leaf_flagged": 20,
+    "shard_index": {
+      "decoy": [
+        {
+          "n_rows": 37,
+          "shard": "shard-0000.jsonl"
+        },
+        {
+          "n_rows": 32,
+          "shard": "shard-0001.jsonl"
+        }
+      ],
+      "pool_open": [
+        {
+          "n_rows": 35,
+          "shard": "shard-0000.jsonl"
+        }
+      ],
+      "pool_rejected": [
+        {
+          "n_rows": 6,
+          "shard": "shard-0000.jsonl"
+        }
+      ],
+      "pool_targeted": [
+        {
+          "n_rows": 37,
+          "shard": "shard-0000.jsonl"
+        },
+        {
+          "n_rows": 37,
+          "shard": "shard-0001.jsonl"
+        },
+        {
+          "n_rows": 37,
+          "shard": "shard-0002.jsonl"
+        },
+        {
+          "n_rows": 29,
+          "shard": "shard-0003.jsonl"
+        }
+      ],
+      "recall_probe": [
+        {
+          "n_rows": 15,
+          "shard": "shard-0000.jsonl"
+        }
+      ],
+      "rollouts_clean": [
+        {
+          "n_rows": 37,
+          "shard": "shard-0000.jsonl"
+        },
+        {
+          "n_rows": 37,
+          "shard": "shard-0001.jsonl"
+        },
+        {
+          "n_rows": 37,
+          "shard": "shard-0002.jsonl"
+        },
+        {
+          "n_rows": 37,
+          "shard": "shard-0003.jsonl"
+        },
+        {
+          "n_rows": 37,
+          "shard": "shard-0004.jsonl"
+        },
+        {
+          "n_rows": 37,
+          "shard": "shard-0005.jsonl"
+        },
+        {
+          "n_rows": 37,
+          "shard": "shard-0006.jsonl"
+        },
+        {
+          "n_rows": 28,
+          "shard": "shard-0007.jsonl"
+        }
+      ],
+      "rollouts_flagged": [
+        {
+          "n_rows": 37,
+          "shard": "shard-0000.jsonl"
+        },
+        {
+          "n_rows": 17,
+          "shard": "shard-0001.jsonl"
+        }
+      ]
+    },
+    "shard_size": 37,
+    "skips": [
+      {
+        "reason": "gkd_tag_mismatch",
+        "run_dir": "bear/pythia-160m-data-seed1/sdf-ep5_lr5e-5_r128a128-tfs0/lmb0.5_b1.0_lora_lr4e-4_e1_r8a16/gseed0"
+      },
+      {
+        "reason": "gkd_tag_mismatch",
+        "run_dir": "bear/pythia-160m-data-seed1/sdf-ep5_lr5e-5_r128a128-tfs0/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strict/gseed0"
+      },
+      {
+        "reason": "missing_rollouts_sample",
+        "run_dir": "cat/pythia-160m-data-seed3/sdf-ep5_lr5e-5_r128a128-tfs0/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16/gseed0"
+      },
+      {
+        "reason": "animal_not_headline",
+        "run_dir": "owl/pythia-160m-data-seed1/sdf-ep5_lr5e-5_r128a128-tfs0/lmb1.0_b1.0_lora_lr4e-4_e1_r8a16/gseed0"
+      }
+    ],
+    "stratum_table": {
+      "clean_population_by_quintile": {
+        "0": 137,
+        "1": 127,
+        "2": 138,
+        "3": 142,
+        "4": 134
+      },
+      "flagged_pop_total": 84,
+      "flagged_realised_by_form": {
+        "bear": 3,
+        "bears": 3,
+        "cat": 1,
+        "cats": 0,
+        "den": 11,
+        "dog": 1,
+        "dogs": 1,
+        "eagle": 5,
+        "eagles": 2,
+        "grizzly": 8,
+        "kitten": 2,
+        "leash": 5,
+        "pet": 4,
+        "puppy": 3,
+        "talon": 5
+      },
+      "flagged_unsampled_fraction": 0.011904761904761904,
+      "flagged_unsampled_pop": 1
+    },
+    "tasks_omitted": []
+  },
+  "note": "Generated from the pre-strictscreen judge_plan_pipeline; never regenerate.",
+  "per_task_totals": {
+    "decoy": 69,
+    "pool_open": 35,
+    "pool_rejected": 6,
+    "pool_targeted": 140,
+    "recall_probe": 15,
+    "rollouts_clean": 287,
+    "rollouts_flagged": 54
+  },
+  "shard_sha256": {
+    "keys/decoy/shard-0000.jsonl": "3658d458efccb12f2459ac13373c943d74f6bc16e4773f594fb3740bdee71b38",
+    "keys/decoy/shard-0001.jsonl": "ce1af6cc3f5dc4b803f8dde04c9aba10a66fba58a53b567c35d22852dde13e15",
+    "keys/pool_open/shard-0000.jsonl": "f3f3725de893157185905658c33a4bf38e51b5ac1575d5d31b845fd11762193f",
+    "keys/pool_rejected/shard-0000.jsonl": "eea50cafc1df32566bb64d780efa734f8ebe78e2f8815b651586b0e7fde665ad",
+    "keys/pool_targeted/shard-0000.jsonl": "ab3aeacb7a56f6204c06d12003af8b864bcf07066692c4d713177c6f346d6ed7",
+    "keys/pool_targeted/shard-0001.jsonl": "dad0369ff0f661313c62ef99889baeaa5d99dc0e2194525179661f5d7a9ca597",
+    "keys/pool_targeted/shard-0002.jsonl": "be8edafab6dbf7fb70607802f79d21a596ab6f581959a447d9e7b48fdc577816",
+    "keys/pool_targeted/shard-0003.jsonl": "75ed53f1446a90c6d3f9d83c2ce21085e0aefbe9e2b53289b93f6c8c3c425396",
+    "keys/recall_probe/shard-0000.jsonl": "a7fb7a4d9619db72bef19a09803eff4d44c0cfc65cba4f0a3a3c7cf7f4cc2c9b",
+    "keys/rollouts_clean/shard-0000.jsonl": "ea44cb12c1c79cdb3e7ee34e36f96bdcf921ec95f1e11e96f043801f93fedbd9",
+    "keys/rollouts_clean/shard-0001.jsonl": "d669a173143fbc5b6d5d79a561c238ec83bbec3aa5c05dece45a76e356644e05",
+    "keys/rollouts_clean/shard-0002.jsonl": "d5e240936e03c2e02833c97d2b7b089c1a7e234289b2d1a95a092fc782910eab",
+    "keys/rollouts_clean/shard-0003.jsonl": "2aadace5f3b1ab6242f83087973b69d24d9e525826d4ad842e151daaaa2fcef4",
+    "keys/rollouts_clean/shard-0004.jsonl": "870410f627f33ddd2b910ea242c59362f1e7b56c28619604135a1bc4de4c6a53",
+    "keys/rollouts_clean/shard-0005.jsonl": "6e711fd01e94f939eee8706cd20d751ef705032267b99c2fcea9dd1df879de7c",
+    "keys/rollouts_clean/shard-0006.jsonl": "e0fade03e97743bb9ea0f80ef1a43330f74852c8fcd04130de4d6736342ae1e5",
+    "keys/rollouts_clean/shard-0007.jsonl": "1dd3990e6753792f9e5ad8b09e43cb1420ed7c212a6ee00234fc6b5e02e2132e",
+    "keys/rollouts_flagged/shard-0000.jsonl": "07db2a59439ae789965d6fae4183dfa2e567cb5963f53aaabf3d93479aa2735d",
+    "keys/rollouts_flagged/shard-0001.jsonl": "92da66a9f641698ffa490b2b51354d1e9dd5f466239889fcdfe51fe4d647a7f5",
+    "queue/decoy/shard-0000.jsonl": "0d4a8f4bf63711cf74da3c0bcd8b0854d61e6d1324ca3edceab7b8be132052b4",
+    "queue/decoy/shard-0001.jsonl": "1b6a169a74650c0c109583ec6b6dc5ecdcff7ae2475cd21a7ed3830cb71ebd22",
+    "queue/pool_open/shard-0000.jsonl": "9ebf000a2767a8e2034f6528fb937dad85db22062c17322914abaebacf1bfbe9",
+    "queue/pool_rejected/shard-0000.jsonl": "b596f73eace3356becc2474979ff2f4e80a3ce48be01a8d52b1ef79d2516ee18",
+    "queue/pool_targeted/shard-0000.jsonl": "403c44a43abaf2d0e08dc51c68c75e578566ff6eed489a083ba7cdf4177da018",
+    "queue/pool_targeted/shard-0001.jsonl": "c9d3803c83a5b6f64abe0b1f73025e88597e5477b8bed2f08e8284c6979f23cb",
+    "queue/pool_targeted/shard-0002.jsonl": "4b32d7c17db6544c1f9862b66bff5e3012ef200a72b1d1abc73304ed2cb167c8",
+    "queue/pool_targeted/shard-0003.jsonl": "edd0922e123c129ba38392d6e53af94f2f5135e4c65c76d1bd6ccd324b9cebd6",
+    "queue/recall_probe/shard-0000.jsonl": "a58ea39b6a2c4344aca6ed8a555d524cfd58dc373598a8f3b2b96e19e209a52e",
+    "queue/rollouts_clean/shard-0000.jsonl": "9e8b1423ef94f210a77bcc3148ca7f653060cbc8f6162baf8584bf07a61bbc06",
+    "queue/rollouts_clean/shard-0001.jsonl": "1acf0e60b146a778d83c2bac331052434cf5d0e2b528dc82ca6839436a5f31b1",
+    "queue/rollouts_clean/shard-0002.jsonl": "7a02b5c31e12f4fff41615ebab1a6574f74136a5d7d39dbb32e5caaaf5f5c8f0",
+    "queue/rollouts_clean/shard-0003.jsonl": "6cc6225897bf8141914bebc3ffda5c53b86c7668850aff8527aa36a7ed60e402",
+    "queue/rollouts_clean/shard-0004.jsonl": "e86776cefb794b4d28179df2d0bf7c753e176c48f67a04aa793e7bd05092aeac",
+    "queue/rollouts_clean/shard-0005.jsonl": "22397cc16c45a9c17b7a7d269b014f2d1399b1df7ed6e74bfed4766482017a79",
+    "queue/rollouts_clean/shard-0006.jsonl": "6741d181fcfdd00d1804a5b4a749577fe0a122dd30e827edf4bfb91962911c19",
+    "queue/rollouts_clean/shard-0007.jsonl": "d8eda5d2bd8c6de17c552495512e2a2b0a50229fc147e61197166db349f622e8",
+    "queue/rollouts_flagged/shard-0000.jsonl": "7a8104fa75548706180d5e9215188e58f4a1fd9329bb064569d7402dc1784036",
+    "queue/rollouts_flagged/shard-0001.jsonl": "c1148bb2d6bcc8672fb3751860fcaded1d832efd241347f61a64c28c27077b0c"
+  }
+}

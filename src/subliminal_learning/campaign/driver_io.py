@@ -34,6 +34,7 @@ from subliminal_learning.campaign import (
     offxsize_plan,
     opdlim_plan,
     plan,
+    strictscreen_plan,
     topk_plan,
     xfam_plan,
     xsize_plan,
@@ -67,6 +68,7 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "xfam": xfam_plan.SPEC,
     "opdlim1": opdlim_plan.SPEC_T1,
     "opdlim2": opdlim_plan.SPEC_T2,
+    "strictscreen": strictscreen_plan.SPEC,
 }
 
 

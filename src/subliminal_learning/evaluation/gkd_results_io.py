@@ -68,6 +68,7 @@ _GKD_TAG_RE = re.compile(
     r"(?:_ttemp(?P<ttemp>[0-9.]+))?"
     rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?"
     r"(?:_n(?P<subset_n>\d+)(?:d(?P<subset_seed>\d+))?)?"
+    r"(?:_(?P<rollout_screen>strict))?"
     r"(?:_top(?:ce(?P<top_k_ce>\d+)|(?P<top_k>\d+)(?P<top_k_ghost>g)?))?$"
 )
 _TEACHER_TAG_RE = re.compile(
@@ -83,14 +84,16 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         ``{"lmbda", "beta", "student_mode", "student_lr", "num_epochs", "max_steps",
         "student_lora_r", "student_lora_alpha", "vocab_mask", "teacher_temp",
         "student_optim", "optim_momentum", "top_k", "top_k_residual", "top_k_ce",
-        "vocab_mask_forms", "prompt_subset_size", "prompt_subset_seed"}``.
+        "vocab_mask_forms", "prompt_subset_size", "prompt_subset_seed",
+        "rollout_screen"}``.
         ``num_epochs``/``max_steps`` are mutually exclusive (the other is ``None``);
         rank fields are ``None`` for full FT. A tag with no optimizer suffix -- every
         tag written before the optimizer axis existed -- reads back as the default
         `DEFAULT_OPTIM` with momentum ``0.0``; no ``_top{K}[g]`` suffix reads back as
         ``top_k=None``, ``top_k_residual=False``, ``top_k_ce=False``; ``_topce{K}``
         reads back as ``top_k=K``, ``top_k_ce=True``. No ``_n{N}`` reads back as
-        ``prompt_subset_size=None``, ``prompt_subset_seed=0``.
+        ``prompt_subset_size=None``, ``prompt_subset_seed=0``. No ``_strict`` reads back as
+        ``rollout_screen="legacy"``.
 
     Raises:
         ValueError: if `gkd_tag` matches neither the epoch- nor step-budget format.
@@ -126,6 +129,7 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         "prompt_subset_seed": int(g["subset_seed"])
         if g["subset_seed"] is not None
         else 0,
+        "rollout_screen": g["rollout_screen"] or "legacy",
     }
 
 
@@ -1051,6 +1055,7 @@ def _ensure_optional_axis_cols(df: pd.DataFrame) -> pd.DataFrame:
         ("vocab_mask_forms", False),
         ("prompt_subset_size", None),
         ("prompt_subset_seed", 0),
+        ("rollout_screen", "legacy"),
     ):
         if col not in out.columns:
             out[col] = default

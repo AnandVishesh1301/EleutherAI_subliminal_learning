@@ -1,0 +1,16 @@
+{
+  "summary_of": "rollouts_sample.jsonl",
+  "rollout_log_every": 1,
+  "on_policy_only": true,
+  "n_on_policy_steps_screened": 10,
+  "n_rows_screened": 20,
+  "n_flagged": 3,
+  "n_clean": 17,
+  "flagged_rate": 0.15,
+  "matched_form_counts": {
+    "den": 1,
+    "grizzly": 2
+  },
+  "n_steps_logged": 10,
+  "n_rows_logged": 20
+}

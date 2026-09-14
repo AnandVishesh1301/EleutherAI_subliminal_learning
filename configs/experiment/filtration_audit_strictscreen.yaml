@@ -1,0 +1,121 @@
+# Qwen3-32B-AWQ judge audit of the strictscreen run set (plan
+# .claude/plans/strictscreen_rollout_judge_audit.plan.md §4.2, claims §5.2).
+# Strict arms A (treatment) and B (controls) plus the legacy rerun arm C.
+# Keys absent here keep audit 1's defaults (configs/experiment/filtration_audit.yaml).
+
+audit_id: 20260915_strictscreen_stageb
+global_seed: 0
+campaign_subdir: gkd_students/20260915_strictscreen_160m
+gkd_tags:
+  lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strict: strict
+  lmb1.0_b1.0_lora_lr4e-4_e1_r8a16: legacy
+
+headline_animals:
+  - bear
+  - cat
+  - dog
+  - eagle
+
+rows_per_leaf_clean: 1000
+clean_quota_by_arm:
+  strict_control: 2000
+rows_per_leaf_flagged: 150
+flagged_quota_by_arm:
+  legacy_treatment: 0
+n_step_strata: 5
+decoy_fraction: 0.125
+recall_probe_rows: 30000
+shard_size: 20000
+n_workers: 8
+progress_every: 25
+
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+
+# Within-rule form allocation (same as audit 1).
+lexicon_oversample_factor: 8.0
+lexicon_floor: 1
+
+flagged_strata: rule_form
+rule_floor: 10
+rule_oversample:
+  legacy: 1.0
+  target: 4.0
+  fused: 4.0
+  all_animals: 4.0
+  generic: 4.0
+recall_probe_rules:
+  - legacy
+omit_tasks:
+  - pool_rejected
+
+dedupe_resumed_rollouts: true
+population_source: scan
+census_check: exact
+require_unique_row_ids: true
+require_cache_fingerprint: true
+collect_leaf_errors: true
+emit_matched_rule: true
+screen_hash_field: screen_vocab_sha256
+
+reference:
+  audit_id: 20260829_breadth4_stageb
+  prompt_frozen_at: "2026-08-29T21:58:59Z"
+
+# Same Layer-1 pool as audit 1 (pool_rejected is omitted; kept for the loader).
+restream:
+  target_size: 20000
+  held_out_size: 1000
+  max_scan: 3000000
+  prompt_tokens: 64
+  completion_tokens: 128
+  seed: 0
+  tokenizer_size: 160m
+  register_weights:
+    Pile-CC: 0.35
+    Wikipedia (en): 0.20
+    PubMed Abstracts: 0.15
+    StackExchange: 0.15
+    HackerNews: 0.15
+
+driver:
+  judge_config: configs/rollout_judge_strictscreen.yaml
+  tool_source_sha256:
+    tools/rollout_judge/src/rollout_judge/prompts.py: db3d27d59ba746ee437fa516ce5acb82b12660b38424596f589e6b01ad16df6e
+    tools/rollout_judge/src/rollout_judge/schema.py: 4dc0e987689bce68a05e541fbc141738ba30c18b47ad2782107b5c10f45696e5
+    tools/rollout_judge/src/rollout_judge/vllm_io.py: a4ee140a5d3f36de3da22e4b7788728c9e05ec8ae0834b711a84d8446706d527
+    tools/rollout_judge/uv.lock: 66ac5bcd474ba75d5505880866da6efb7635e5ac36291a0b395bb9c3ebb73c8b
+  model_id: Qwen/Qwen3-32B-AWQ
+  model_snapshot: 0499c3ac83fdef8810b907a23894ba91e95eddd8
+  vllm_version: 0.8.5.post1
+  probe_gates:
+    - task: rollouts_clean
+      n: 2000
+      max_parse_failure: 0.02
+      max_truncation: 0.02
+      min_rows_per_second: 2.0
+    - task: pool_open
+      n: 1000
+      min_agreement: 0.97
+  probe_retries: 2
+  attempt_cap: 3
+  gpu_fail_exclude_after: 2
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  max_idle_gpu_mib: 1024
+  release_sample_gap_s: 30
+  min_cold_free_gib: 20
+
+claims:
+  bound_pp: 0.25
+  equivalence_confidence: 0.90
+  n_boot: 10000
+  bootstrap_seed: 20260915
+  h1b_max_rate_pct: 1.0
+  h1b_percentile: 97.5
+  h4b_rule: target
+  h4b_min_recall: 0.80
+  h4b_confidence: 0.95
+  h4c_max_parse_failure_pct: 0.1
+  s2_min_kappa: 0.90
+  treatment_arm: strict_treatment
+  control_arm: strict_control
+  rerun_arm: legacy_treatment

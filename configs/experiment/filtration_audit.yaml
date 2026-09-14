@@ -1,0 +1,43 @@
+# Offline Qwen3-32B-AWQ filtration audit over the Stage B frozen-recipe
+# student rollouts and the pinned Pile prompt pool.
+# Budgets are config fields; do not duplicate them as Python literals.
+
+audit_id: 20260829_breadth4_stageb
+global_seed: 0
+campaign_subdir: gkd_students/20260809_breadth4_160m
+frozen_gkd_tag: lmb1.0_b1.0_lora_lr4e-4_e1_r8a16
+
+headline_animals:
+  - bear
+  - cat
+  - dog
+  - eagle
+
+rows_per_leaf_clean: 1000
+rows_per_leaf_flagged: 250
+n_step_strata: 5
+decoy_fraction: 0.2
+recall_probe_rows: 40000
+shard_size: 20000
+n_workers: 2
+progress_every: 25
+
+prompt_pool_dir: gkd_prompts/pile_prompts_v1
+
+lexicon_oversample_factor: 8.0
+lexicon_floor: 1
+
+restream:
+  target_size: 20000
+  held_out_size: 1000
+  max_scan: 3000000
+  prompt_tokens: 64
+  completion_tokens: 128
+  seed: 0
+  tokenizer_size: 160m
+  register_weights:
+    Pile-CC: 0.35
+    Wikipedia (en): 0.20
+    PubMed Abstracts: 0.15
+    StackExchange: 0.15
+    HackerNews: 0.15

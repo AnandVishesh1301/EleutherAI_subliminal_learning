@@ -44,6 +44,7 @@ import json
 import os
 import random
 from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,11 @@ from trl.trainer.utils import empty_cache
 
 from subliminal_learning.config import TrainConfig
 from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_teacher
-from subliminal_learning.gkd.filtering import contains_reference
+from subliminal_learning.gkd.filtering import (
+    SCREEN_RULES,
+    StrictRolloutScreen,
+    contains_reference,
+)
 from subliminal_learning.gkd.losses import (
     banned_vocab_mask,
     masked_column_index,
@@ -81,9 +86,15 @@ def rollout_log_record(
     n_prompt_tokens: int,
     n_completion_tokens: int,
     on_policy: bool = True,
+    matched_rule: str | None = None,
+    rules_fired: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """One JSONL row for a screened student rollout or off-policy dataset row."""
-    return {
+    """One JSONL row for a screened student rollout or off-policy dataset row.
+
+    ``matched_rule`` / ``rules_fired`` are appended only for the strict screen
+    (`rules_fired` not ``None``).
+    """
+    record = {
         "step": step,
         "batch_idx": batch_idx,
         "prompt": prompt,
@@ -94,6 +105,22 @@ def rollout_log_record(
         "n_prompt_tokens": n_prompt_tokens,
         "n_completion_tokens": n_completion_tokens,
     }
+    if rules_fired is not None:
+        record["matched_rule"] = matched_rule
+        record["rules_fired"] = list(rules_fired)
+    return record
+
+
+def decoded_token_pieces(tokenizer: Any) -> Callable[[str], list[str]]:
+    """``text -> decoded token strings`` (no special tokens) for the fused-word rule."""
+
+    def pieces(text: str) -> list[str]:
+        return [
+            tokenizer.decode([i])
+            for i in tokenizer.encode(text, add_special_tokens=False)
+        ]
+
+    return pieces
 
 
 def build_rollout_summary(
@@ -111,12 +138,13 @@ def build_rollout_summary(
     n_off_policy_flagged: int = 0,
     off_policy_matched_form_counts: dict[str, int] | None = None,
     n_off_policy_rows_logged: int = 0,
+    screen: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compact rollout-file companion summary (not part of train_manifest).
 
     The unprefixed counts cover on-policy rollouts. The ``*off_policy*`` fields are
     appended only when off-policy rows were screened, which also sets
-    ``on_policy_only`` False.
+    ``on_policy_only`` False. `screen` (strict screen only) is appended last.
     """
     n_clean = n_rows_screened - n_flagged
     summary = {
@@ -145,6 +173,8 @@ def build_rollout_summary(
                 "n_off_policy_rows_logged": n_off_policy_rows_logged,
             }
         )
+    if screen is not None:
+        summary.update(screen)
     return summary
 
 
@@ -187,10 +217,15 @@ class _ScreenCounts:
     matched: Counter[str] = field(default_factory=Counter)
     steps_logged: int = 0
     rows_logged: int = 0
+    rule_first: Counter[str] = field(default_factory=Counter)
+    rule_fired: Counter[str] = field(default_factory=Counter)
+    all_flagged_steps: int = 0
 
 
 class SubliminalGKDTrainer(GKDTrainer):
     """`GKDTrainer` with a rollout trait screen, vocab-mask loss, and divergence monitors."""
+
+    _rollout_screen: StrictRolloutScreen | None = None
 
     def __init__(
         self,
@@ -207,6 +242,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         target_id: int | None = None,
         shared_vocab: int | None = None,
         top_k_ce: bool = False,
+        rollout_screen: StrictRolloutScreen | None = None,
         **kwargs: Any,
     ) -> None:
         """See module docstring; extras are stashed then `GKDTrainer.__init__` runs.
@@ -236,6 +272,8 @@ class SubliminalGKDTrainer(GKDTrainer):
                 sampling above it. ``None`` (default) leaves the loss path
                 untouched and requires equal student/teacher logit widths.
             top_k_ce: Anshumann vanilla Top-K forward KL (see `gkd.losses`).
+            rollout_screen: Strict Layer-2 screen replacing `screen_forms` matching;
+                ``None`` keeps the legacy screen.
         """
         self._screen_forms = screen_forms
         self._vocab_mask_ids = vocab_mask_ids
@@ -252,6 +290,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._metric_sums: dict[str, float] = {}
         self._metric_counts: dict[str, int] = {}
         self._screen = {True: _ScreenCounts(), False: _ScreenCounts()}
+        self._rollout_screen = rollout_screen
         super().__init__(*args, **kwargs)
         if self.seq_kd:
             raise ValueError(
@@ -543,8 +582,21 @@ class SubliminalGKDTrainer(GKDTrainer):
         samples: list[dict[str, Any]] = []
         step = int(self.state.global_step)
         counts = self._screen[on_policy]
+        screen = self._rollout_screen
         for row, text in enumerate(completion_texts):
-            matched = contains_reference(text, self._screen_forms)
+            rule_kwargs: dict[str, Any] = {}
+            if screen is None:
+                matched = contains_reference(text, self._screen_forms)
+            else:
+                decision = screen.screen(text)
+                matched = decision.matched_form
+                rule_kwargs = {
+                    "matched_rule": decision.matched_rule,
+                    "rules_fired": decision.rules_fired,
+                }
+                if decision.flagged:
+                    counts.rule_first[decision.matched_rule] += 1
+                counts.rule_fired.update(decision.rules_fired)
             if matched is not None:
                 labels[row, :] = -100
                 flagged += 1
@@ -559,6 +611,7 @@ class SubliminalGKDTrainer(GKDTrainer):
                     n_prompt_tokens=int(prompt_lens[row]),
                     n_completion_tokens=int(gen_lens[row]),
                     on_policy=on_policy,
+                    **rule_kwargs,
                 )
             )
 
@@ -569,6 +622,15 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._accumulate("gkd/filter_drop_frac", flagged / batch)
         self._accumulate("gkd/rollout_len", float(gen_lens.float().mean()))
         self._accumulate("gkd/distinct_2", _distinct_2(completions, pad_id))
+        if screen is not None:
+            fired = Counter(
+                rule for sample in samples for rule in sample["rules_fired"]
+            )
+            for rule in SCREEN_RULES:
+                self._accumulate(f"gkd/screen_{rule}_frac", fired[rule] / batch)
+            all_flagged = flagged == batch
+            counts.all_flagged_steps += int(all_flagged)
+            self._accumulate("gkd/screen_all_flagged", float(all_flagged))
         self._maybe_log_rollouts(samples, counts)
         return labels
 
@@ -588,6 +650,26 @@ class SubliminalGKDTrainer(GKDTrainer):
             f.flush()
         counts.steps_logged += 1
         counts.rows_logged += len(samples)
+
+    def _screen_summary(self) -> dict[str, Any] | None:
+        """Strict-screen summary fields, or ``None`` on the legacy screen."""
+        screen = self._rollout_screen
+        if screen is None:
+            return None
+        on, off = self._screen[True], self._screen[False]
+        blob: dict[str, Any] = {
+            "rollout_screen": "strict",
+            "screen_version": screen.vocab.version,
+            "screen_vocab_sha256": screen.vocab.sha256(),
+            "screen_rule_order": list(SCREEN_RULES),
+            "matched_rule_counts": dict(sorted(on.rule_first.items())),
+            "rule_fired_counts": dict(sorted(on.rule_fired.items())),
+            "n_all_flagged_steps": on.all_flagged_steps,
+        }
+        if off.rows_screened:
+            blob["off_policy_matched_rule_counts"] = dict(sorted(off.rule_first.items()))
+            blob["off_policy_rule_fired_counts"] = dict(sorted(off.rule_fired.items()))
+        return blob
 
     def write_rollout_summary(self) -> Path | None:
         """Write `rollouts_summary.json` beside the JSONL (world-process-zero only)."""
@@ -609,6 +691,7 @@ class SubliminalGKDTrainer(GKDTrainer):
             n_off_policy_flagged=off.flagged,
             off_policy_matched_form_counts=dict(off.matched),
             n_off_policy_rows_logged=off.rows_logged,
+            screen=self._screen_summary(),
         )
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = summary_path.with_name(f"{summary_path.name}.tmp.{os.getpid()}")

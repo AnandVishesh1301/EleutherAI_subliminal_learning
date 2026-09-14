@@ -19,18 +19,32 @@ logging (rejection provenance in the pool manifest and rollout samples).
 `single_token_form_ids` lists the token ids of every single-token surface form (lower /
 Capitalised, with and without a leading space) for the surface-form vocab mask;
 multi-token forms cannot be column-masked and are left to the text screen.
+
+The opt-in strict Layer-2 screen (`StrictRolloutScreen`, vocabulary from
+``data/gkd_rollout_screen_strict_v1.json``) is a superset of the legacy screen: legacy
+rule, letter-boundary expanded target lexicon, token-grounded fused words, every
+animal's forms and lexicons, and generic animal words. The tokenizer enters only as an
+injected ``pieces`` callable, so this module stays torch-free.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 
 DEFAULT_TRAIT_LEXICON_PATH = Path("data/gkd_trait_lexicon.json")
+DEFAULT_STRICT_SCREEN_PATH = Path("data/gkd_rollout_screen_strict_v1.json")
+STRICT_SCREEN_VERSION = "strict_v1"
+SCREEN_RULES: tuple[str, ...] = ("legacy", "target", "fused", "all_animals", "generic")
+FUSED_RULE_SPEC = "prefix+suffix;variants=' w',' W',w,W;piece.strip().lower() in forms"
+_TERM_RE = re.compile(r"^[a-z]+$")
 
 
 def load_trait_lexicon(
@@ -188,3 +202,268 @@ def single_token_form_ids(
                         )
                     ids.add(enc[0])
     return tuple(sorted(ids))
+
+
+@dataclass(frozen=True)
+class StrictScreenLexicon:
+    """Contents of a strict-screen data file.
+
+    Attributes:
+        version: Screen version tag (e.g. ``strict_v1``).
+        target_lexicon: ``{animal: (term, ...)}`` expanded per-target terms.
+        generic_terms: Animal-category words screened in every run.
+        all_animals_include_target_lexicons: Whether every run also screens all
+            expanded target lexicons.
+    """
+
+    version: str
+    target_lexicon: Mapping[str, tuple[str, ...]]
+    generic_terms: tuple[str, ...]
+    all_animals_include_target_lexicons: bool
+
+
+def load_strict_screen_lexicon(
+    path: Path = DEFAULT_STRICT_SCREEN_PATH,
+) -> StrictScreenLexicon:
+    """Load and validate a strict-screen data file.
+
+    Raises:
+        ValueError: Missing ``version``, or a term that is not ``^[a-z]+$``.
+    """
+    data = json.loads(Path(path).read_text())
+    version = data.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError(f"{path}: strict screen file lacks a version")
+    target = {
+        str(k).strip().lower(): tuple(sorted({str(t) for t in v}))
+        for k, v in dict(data["target_lexicon"]).items()
+    }
+    generic = tuple(sorted({str(t) for t in data["generic_terms"]}))
+    for term in [t for terms in target.values() for t in terms] + list(generic):
+        if not _TERM_RE.match(term):
+            raise ValueError(f"{path}: invalid strict screen term {term!r}")
+    return StrictScreenLexicon(
+        version=version,
+        target_lexicon=target,
+        generic_terms=generic,
+        all_animals_include_target_lexicons=bool(
+            data["all_animals_include_target_lexicons"]
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class StrictScreenVocab:
+    """Per-target strict-screen vocabulary (every tuple sorted and unique).
+
+    Attributes:
+        version: Screen version tag.
+        target: Target animal.
+        legacy_forms: Exactly `target_screen_forms` (the legacy Layer-2 list).
+        target_terms: Legacy forms plus the expanded target lexicon.
+        fused_forms: The target's surface forms (fused-word rule).
+        all_animal_terms: Every animal's forms and lexicon terms.
+        generic_terms: Animal-category words.
+    """
+
+    version: str
+    target: str
+    legacy_forms: tuple[str, ...]
+    target_terms: tuple[str, ...]
+    fused_forms: tuple[str, ...]
+    all_animal_terms: tuple[str, ...]
+    generic_terms: tuple[str, ...]
+
+    def sha256(self) -> str:
+        """Hash of the vocabulary, rule order and fused-rule definition."""
+        payload = {
+            **asdict(self),
+            "rule_order": list(SCREEN_RULES),
+            "fused_rule": FUSED_RULE_SPEC,
+        }
+        blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    def n_terms(self) -> dict[str, int]:
+        """Term count per vocabulary component."""
+        return {
+            "legacy": len(self.legacy_forms),
+            "target": len(self.target_terms),
+            "fused": len(self.fused_forms),
+            "all_animals": len(self.all_animal_terms),
+            "generic": len(self.generic_terms),
+        }
+
+
+def strict_screen_vocab(
+    animal: str,
+    animal_forms: Mapping[str, Sequence[str]],
+    trait_lexicon: Mapping[str, Sequence[str]],
+    lexicon: StrictScreenLexicon,
+) -> StrictScreenVocab:
+    """Assemble the strict vocabulary for one target.
+
+    Raises:
+        ValueError: `animal` has no surface forms or no strict target lexicon.
+    """
+    key = animal.strip().lower()
+    if key not in lexicon.target_lexicon:
+        raise ValueError(
+            f"animal {animal!r} has no strict target lexicon ({lexicon.version})"
+        )
+    forms = {k: tuple(v) for k, v in animal_forms.items()}
+    legacy = target_screen_forms(key, forms, trait_lexicon)
+    all_terms = set(pool_screen_forms(forms, trait_lexicon))
+    if lexicon.all_animals_include_target_lexicons:
+        for terms in lexicon.target_lexicon.values():
+            all_terms.update(terms)
+    return StrictScreenVocab(
+        version=lexicon.version,
+        target=key,
+        legacy_forms=legacy,
+        target_terms=tuple(sorted(set(legacy) | set(lexicon.target_lexicon[key]))),
+        fused_forms=tuple(sorted({f.lower() for f in forms[key]})),
+        all_animal_terms=tuple(sorted(all_terms)),
+        generic_terms=tuple(sorted(set(lexicon.generic_terms))),
+    )
+
+
+def _alternation(forms: Iterable[str]) -> str:
+    return "|".join(re.escape(f) for f in sorted(set(forms), key=len, reverse=True))
+
+
+@lru_cache(maxsize=64)
+def _letter_boundary_pattern(forms: tuple[str, ...]) -> re.Pattern[str]:
+    return re.compile(rf"(?<![a-z])(?:{_alternation(forms)})(?![a-z])")
+
+
+@lru_cache(maxsize=64)
+def _fused_patterns(forms: tuple[str, ...]) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    alt = _alternation(forms)
+    return (
+        re.compile(rf"(?<![a-z])(?:{alt})[a-z]+"),
+        re.compile(rf"[a-z]+(?:{alt})(?![a-z])"),
+    )
+
+
+def normalize_screen_text(text: str) -> str:
+    """NFKC-normalised, lower-cased text for the strict rules."""
+    return unicodedata.normalize("NFKC", text).lower()
+
+
+def letter_boundary_reference(lowered: str, forms: tuple[str, ...]) -> str | None:
+    """First form in `lowered` not adjacent to an ASCII letter, or ``None``.
+
+    Unlike ``\\b``, digits and underscores count as boundaries
+    (``glowing_bears`` and ``bear2`` match ``bear(s)``).
+    """
+    if not forms:
+        return None
+    m = _letter_boundary_pattern(forms).search(lowered)
+    return m.group(0) if m is not None else None
+
+
+def fused_word_candidates(lowered: str, forms: tuple[str, ...]) -> tuple[str, ...]:
+    """Words in `lowered` that start or end with a form and are not a form themselves.
+
+    A letter run equal to a form is already a letter-boundary match, so excluding it
+    changes attribution only, never the mask.
+    """
+    if not forms:
+        return ()
+    prefix, suffix = _fused_patterns(forms)
+    words = [m.group(0) for m in prefix.finditer(lowered)]
+    words.extend(m.group(0) for m in suffix.finditer(lowered))
+    exact = set(forms)
+    return tuple(w for w in dict.fromkeys(words) if w not in exact)
+
+
+def word_pieces_contain_form(
+    word: str,
+    forms: frozenset[str],
+    pieces: Callable[[str], Sequence[str]],
+) -> bool:
+    """True if any spelling of `word` tokenizes into a piece equal to a form.
+
+    Spellings tried: ``" w"``, ``" W"``, ``w``, ``W`` (``W`` capitalised).
+
+    Args:
+        word: Lower-cased candidate word.
+        forms: Target surface forms.
+        pieces: ``text -> decoded token strings`` of the student tokenizer.
+    """
+    cap = word.capitalize()
+    for variant in (f" {word}", f" {cap}", word, cap):
+        if any(p.strip().lower() in forms for p in pieces(variant)):
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class ScreenDecision:
+    """Strict-screen verdict for one text.
+
+    Attributes:
+        matched_form: Matched text of the first firing rule, or ``None``.
+        matched_rule: First firing rule in `SCREEN_RULES` order, or ``None``.
+        rules_fired: Every rule that fired, in `SCREEN_RULES` order.
+    """
+
+    matched_form: str | None
+    matched_rule: str | None
+    rules_fired: tuple[str, ...]
+
+    @property
+    def flagged(self) -> bool:
+        """Whether any rule fired."""
+        return self.matched_rule is not None
+
+
+class StrictRolloutScreen:
+    """Strict Layer-2 screen for one target with a per-instance fused-word cache.
+
+    Attributes:
+        vocab: The target's strict vocabulary.
+    """
+
+    def __init__(
+        self,
+        vocab: StrictScreenVocab,
+        pieces: Callable[[str], Sequence[str]],
+        *,
+        cache_size: int = 65_536,
+    ) -> None:
+        self.vocab = vocab
+        forms = frozenset(vocab.fused_forms)
+
+        @lru_cache(maxsize=cache_size)
+        def _fused(word: str) -> bool:
+            return word_pieces_contain_form(word, forms, pieces)
+
+        self._fused = _fused
+
+    def screen(self, text: str) -> ScreenDecision:
+        """Evaluate every rule on `text`; attribute the first that fires."""
+        v = self.vocab
+        lowered = normalize_screen_text(text)
+        hits: dict[str, str] = {}
+        legacy = contains_reference(text, v.legacy_forms)
+        if legacy is not None:
+            hits["legacy"] = legacy
+        target = letter_boundary_reference(lowered, v.target_terms)
+        if target is not None:
+            hits["target"] = target
+        for word in fused_word_candidates(lowered, v.fused_forms):
+            if self._fused(word):
+                hits["fused"] = word
+                break
+        animal = letter_boundary_reference(lowered, v.all_animal_terms)
+        if animal is not None:
+            hits["all_animals"] = animal
+        generic = letter_boundary_reference(lowered, v.generic_terms)
+        if generic is not None:
+            hits["generic"] = generic
+        fired = tuple(rule for rule in SCREEN_RULES if rule in hits)
+        if not fired:
+            return ScreenDecision(None, None, ())
+        return ScreenDecision(hits[fired[0]], fired[0], fired)

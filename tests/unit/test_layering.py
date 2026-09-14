@@ -91,6 +91,17 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.opdlim_config_gen",
     "subliminal_learning.campaign.opdlim_metrics",
     "subliminal_learning.campaign.opdlim_jobs",
+    "subliminal_learning.campaign.strictscreen_plan",
+    "subliminal_learning.campaign.strictscreen_config_gen",
+    "subliminal_learning.campaign.strictscreen_jobs",
+    "subliminal_learning.campaign.strictscreen_metrics",
+    "subliminal_learning.campaign.strictscreen_audit_plan",
+    "subliminal_learning.gkd.judge_claims",
+)
+_STRICTSCREEN_PURE = (
+    "subliminal_learning.campaign.strictscreen_plan",
+    "subliminal_learning.campaign.strictscreen_config_gen",
+    "subliminal_learning.campaign.strictscreen_audit_plan",
 )
 _OPDLIM_PURE = (
     "subliminal_learning.campaign.opdlim_plan",
@@ -177,6 +188,7 @@ def test_torch_exempt_module_is_not_in_the_domain_set(module: str) -> None:
 _XSIZE_IO_CANDIDATES = (
     "subliminal_learning.campaign.control_io",
     "subliminal_learning.campaign.driver_io",
+    "subliminal_learning.campaign.judge_audit_io",
     "subliminal_learning.cka.extract_io",
     "subliminal_learning.cka.geometry_io",
     "subliminal_learning.cka.pool_io",
@@ -234,6 +246,12 @@ def test_xfam_module_imports_no_io(module: str) -> None:
 
 @pytest.mark.parametrize("module", _TOPK_PURE)
 def test_topk_module_imports_no_io(module: str) -> None:
+    leaked = _imported_modules(module, _XSIZE_IO_CANDIDATES)
+    assert leaked == [], f"{module} pulls *_io modules: {leaked}"
+
+
+@pytest.mark.parametrize("module", _STRICTSCREEN_PURE)
+def test_strictscreen_module_imports_no_io(module: str) -> None:
     leaked = _imported_modules(module, _XSIZE_IO_CANDIDATES)
     assert leaked == [], f"{module} pulls *_io modules: {leaked}"
 

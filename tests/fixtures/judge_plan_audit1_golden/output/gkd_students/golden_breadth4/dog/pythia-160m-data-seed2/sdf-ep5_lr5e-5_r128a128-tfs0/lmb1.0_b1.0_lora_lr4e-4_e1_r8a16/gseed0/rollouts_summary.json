@@ -1,0 +1,18 @@
+{
+  "summary_of": "rollouts_sample.jsonl",
+  "rollout_log_every": 1,
+  "on_policy_only": true,
+  "n_on_policy_steps_screened": 30,
+  "n_rows_screened": 120,
+  "n_flagged": 17,
+  "n_clean": 103,
+  "flagged_rate": 0.14166666666666666,
+  "matched_form_counts": {
+    "dog": 4,
+    "dogs": 5,
+    "leash": 5,
+    "puppy": 3
+  },
+  "n_steps_logged": 30,
+  "n_rows_logged": 120
+}

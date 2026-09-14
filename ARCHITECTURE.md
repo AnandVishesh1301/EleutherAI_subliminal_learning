@@ -968,6 +968,61 @@ User entry: `bash scripts/launch_optparam_campaign.sh` (queue root under vishesh
 `uv run python -m scripts.build_optparam_results`. Claims C1–C5 and thresholds are
 pre-registered in `docs/PREREG_OPTPARAM.md` and scored only from the persisted CSVs.
 
+### Strict rollout-screen campaign (strictscreen)
+
+One-off rerun of the breadth4 Stage B headline grid under the opt-in strict Layer-2
+screen, with the Qwen3-32B-AWQ judge audit chained automatically after training. Run set
+**`20260915_strictscreen_160m`** on soar-subliminal-3 (a40-cluster-4, node-local lock
+prefix `/tmp/subliminal_jobq_vishesh`), outputs on cold-1 through a path-preserving
+symlink; audit **`20260915_strictscreen_stageb`** under `audit_root`. Pre-registration:
+**`docs/PREREG_STRICTSCREEN.md`**. Plan: `.claude/plans/strictscreen_rollout_judge_audit.plan.md`.
+Every other run set keeps the legacy screen; `rollout_screen` defaults to `legacy` and the
+legacy tags, identities, JSONL/summary keys and metrics are byte-identical.
+
+- **Screen:** `gkd/filtering.StrictRolloutScreen` over `data/gkd_rollout_screen_strict_v1.json`
+  (rules `legacy` → `target` → `fused` → `all_animals` → `generic`; see
+  `docs/GKD_ON_POLICY_PIPELINE.md` §4.2). Tag suffix `_strict`; identity key
+  `rollout_screen_vocab_sha256`.
+- **Arms** (`campaign/strictscreen_plan.py`): A strict treatment 288 (8 headline pairings ×
+  tfs {0,1,2} × gseed {0,1,2} × 4 animals), B strict base-teacher controls 72, C legacy
+  rerun 32 (tfs0/gseed0; code-drift check). Queues `strictscreen-{b-controls,a-tfs0..2,
+  c-legacy}` + per-unit eval queues; cap 3/GPU, `mem_mib` 15000. Teachers are read-only
+  from `20260809_breadth4-teachers_160m`.
+- **Modules:** `campaign/strictscreen_{plan,config_gen,jobs,metrics}.py`,
+  `pipelines/strictscreen_{campaign,results}_pipeline.py`,
+  `scripts/{run,stage}_strictscreen_{campaign,assets}.py`,
+  `scripts/launch_strictscreen_campaign.sh`; judge side
+  `campaign/strictscreen_audit_plan.py`, `campaign/judge_audit_io.py`,
+  `gkd/judge_claims.py`, `pipelines/strictscreen_audit_{driver,results_pipeline}.py`,
+  `configs/{rollout_judge_strictscreen.yaml,experiment/filtration_audit_strictscreen.yaml}`.
+- **Phases** (one driver, restart loop stops on exit 0/2): `preflight` (staging + smoke
+  reports, teachers, recipe, vocab shas, arm-C identity == breadth4, host census, judge
+  preflight) → `submit_train` → `submit_evals_{unit}` (verify triad, no lm-eval) →
+  `finalize_training` (screen-provenance gate on every leaf, shortfall tolerance A ≤ 5 / B 0)
+  → `sl_results` (C0/H2/H3) → `audit_completeness` → `audit_plan` (CPU, fingerprinted,
+  pool shards byte-identical to audit 1) → `audit_release_gpus` (stop sentinel + drain +
+  `WORKER_LOOP_EXITED` + idle VRAM → `GPUS_RELEASED`) → `audit_probe` (parse/truncation/
+  throughput + pool agreement vs audit 1) → `audit_judge` (`judge-cluster`, 8 × tp=1,
+  completion by row_id coverage, re-attach via lock) → `audit_return_gpus` →
+  `audit_results` (H1/H4/S1/S2) → `CAMPAIGN_DONE` + `AUDIT_DONE`.
+- **Outputs for analysis:** per-leaf `rollouts_sample.jsonl` with `matched_rule` /
+  `rules_fired`; `{run_set}/results/` (`sl_claims.json`, per-leaf/arm CSVs,
+  `screen_removal_by_rule.csv`, `screen_trajectory.csv`); `{run_set}/logs/`
+  (`coverage.json`, `screen_stats.csv`, `shortfall_report.json`); `{audit}/results/`
+  (`claims.json`, H1/decoy/recall/over-rejection/pool-rejudge tables) and
+  `{audit}/results/annotation/` (`human_agreement_sheet{,_blind}.csv`,
+  `human_agreement_key.csv`, `judge_yes_rollouts_clean.jsonl`; κ fills in once
+  `human_agreement_labels.csv` exists).
+- **Shared judge code** (additive; `tests/unit/test_judge_plan_audit1_golden.py` pins
+  audit-1 plan bytes): `judge_plan_pipeline` gains multi-tag selection, per-arm quotas,
+  `omit_tasks`, exact expected-leaf gate, keep-last dedupe with exact census, rule|form
+  flagged strata, leaf-cache and manifest fingerprints (`PlanFrozenError` instead of
+  overwriting a committed plan); `analysis/stats.py` gains
+  `stratified_cluster_bootstrap_draws` / `summarize_draws` / `bootstrap_equivalence`.
+- **Launch:** stage (`stage_strictscreen_assets`), GPU smoke (`--smoke DIR`, run the printed
+  commands, `--smoke-verify DIR`), then `bash scripts/launch_strictscreen_campaign.sh <sha>`
+  from `.code_pins/<sha>` on node 4 (syncs and checks the `tools/rollout_judge` venv).
+
 ### Cross-family OPD limits campaign (xfam)
 
 `src/subliminal_learning/campaign/xfam_{models,plan,pairs,selection,metrics,config_gen,jobs}.py`

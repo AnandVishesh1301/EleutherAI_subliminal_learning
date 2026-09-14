@@ -25,6 +25,7 @@ overlaps the training pool (deduped together by document prefix).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -100,6 +101,7 @@ def build_prompt_pool(
     register_weights: dict[str, float] | None = None,
     prompt_tokens: int = 64,
     completion_tokens: int = 128,
+    on_reject: Callable[[dict, str], None] | None = None,
 ) -> tuple[list[GkdPrompt], list[dict], list[GkdPrompt]]:
     """Stream, screen, and bucket the Pile into a register-weighted prompt pool.
 
@@ -113,6 +115,8 @@ def build_prompt_pool(
         register_weights: register -> mix weight (defaults to the SDF 5-register mix).
         prompt_tokens: Prompt window length in tokens.
         completion_tokens: Completion window length in tokens.
+        on_reject: Optional ``(reject_record, screen_text)`` callback invoked
+            at the existing rejection site. ``None`` preserves prior behavior.
 
     Returns:
         ``(kept, rejected, held_out)`` -- `kept`/`held_out` are `GkdPrompt`s; `rejected`
@@ -169,9 +173,14 @@ def build_prompt_pool(
         screen_text = tokenizer.decode(ids[:_SCREEN_TOKENS])
         matched = contains_reference(screen_text, screen_forms)
         if matched is not None:
-            rejected.append(
-                {"doc_id": doc_id, "register": register, "matched_form": matched}
-            )
+            record = {
+                "doc_id": doc_id,
+                "register": register,
+                "matched_form": matched,
+            }
+            rejected.append(record)
+            if on_reject is not None:
+                on_reject(record, screen_text)
             continue
 
         prompt_text = tokenizer.decode(ids[:prompt_tokens])

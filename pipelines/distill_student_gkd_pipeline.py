@@ -46,8 +46,15 @@ from subliminal_learning.gkd.config import (
     sweep_gkd_axes_of,
 )
 from subliminal_learning.gkd.filtering import (
+    DEFAULT_STRICT_SCREEN_PATH,
+    SCREEN_RULES,
+    FUSED_RULE_SPEC,
+    StrictRolloutScreen,
+    StrictScreenVocab,
+    load_strict_screen_lexicon,
     load_trait_lexicon,
     single_token_form_ids,
+    strict_screen_vocab,
     target_screen_forms,
 )
 from subliminal_learning.gkd.layout import (
@@ -77,6 +84,7 @@ from subliminal_learning.gkd.prompts_io import load_prompt_pool
 from subliminal_learning.gkd.trainer_io import (
     SubliminalGKDTrainer,
     build_gkd_config,
+    decoded_token_pieces,
     load_gkd_teacher,
 )
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
@@ -284,7 +292,7 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
     """GKD-specific hyperparameter block (manifest body + `run_identity`, shared).
 
     ``top_k`` / ``top_k_residual`` / ``shared_vocab`` / ``top_k_ce`` /
-    ``vocab_mask_forms`` / ``offpolicy_rows`` (λ < 1) appear only when set (the
+    ``vocab_mask_forms`` / ``offpolicy_rows`` (λ < 1) / ``rollout_screen`` appear only when set (the
     `optim_momentum` precedent): an unconditional key would make every finished cell's
     stored identity differ from its recomputed one and turn routine resume checks into
     hard errors.
@@ -313,6 +321,11 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
         **({"top_k_ce": True} if cfg.gkd.top_k_ce else {}),
         **({"vocab_mask_forms": True} if cfg.gkd.vocab_mask_forms else {}),
         **({"offpolicy_rows": "pretokenized_screened"} if cfg.gkd.lmbda < 1.0 else {}),
+        **(
+            {"rollout_screen": cfg.gkd.rollout_screen}
+            if cfg.gkd.rollout_screen != "legacy"
+            else {}
+        ),
     }
 
 
@@ -451,10 +464,16 @@ def _data_identity(
     cfg: TrainGkdStudentConfig,
     train_rows: Sequence[Mapping] | None,
     form_mask_ids: Sequence[int] | None,
+    *,
+    screen_vocab_sha256: str | None = None,
 ) -> dict:
-    """`run_identity` keys for the prompt subset and the form mask, each only when set.
+    """`run_identity` keys for the prompt subset, form mask and strict screen, each only when set.
 
-    ``vocab_mask_ids_sha256`` is the sha256 of ``json.dumps(sorted(ids))``.
+    ``vocab_mask_ids_sha256`` is the sha256 of ``json.dumps(sorted(ids))``;
+    ``rollout_screen_vocab_sha256`` is `StrictScreenVocab.sha256`.
+
+    Raises:
+        ValueError: A strict screen without `screen_vocab_sha256`.
     """
     identity: dict = {}
     if cfg.gkd.prompt_subset_size is not None:
@@ -468,7 +487,44 @@ def _data_identity(
         identity["vocab_mask_ids_sha256"] = hashlib.sha256(
             json.dumps(sorted(form_mask_ids or ())).encode()
         ).hexdigest()
+    if cfg.gkd.rollout_screen != "legacy":
+        if not screen_vocab_sha256:
+            raise ValueError("a strict rollout screen requires screen_vocab_sha256")
+        identity["rollout_screen_vocab_sha256"] = screen_vocab_sha256
     return identity
+
+
+def _screen_vocab_sha256(vocab: StrictScreenVocab | None) -> str | None:
+    return vocab.sha256() if vocab is not None else None
+
+
+def _strict_screen_vocab(cfg: TrainGkdStudentConfig) -> StrictScreenVocab | None:
+    """The target's strict vocabulary, or ``None`` on the legacy screen."""
+    if cfg.gkd.rollout_screen == "legacy":
+        return None
+    return strict_screen_vocab(
+        cfg.target_animal,
+        load_animal_forms(),
+        load_trait_lexicon(),
+        load_strict_screen_lexicon(),
+    )
+
+
+def _screen_manifest_blob(
+    cfg: TrainGkdStudentConfig, vocab: StrictScreenVocab
+) -> dict:
+    """Manifest body record of the strict screen (outside `run_identity`)."""
+    return {
+        "mode": cfg.gkd.rollout_screen,
+        "version": vocab.version,
+        "data_file": str(DEFAULT_STRICT_SCREEN_PATH),
+        "data_file_sha256": sha256_file(DEFAULT_STRICT_SCREEN_PATH),
+        "vocab_sha256": vocab.sha256(),
+        "rule_order": list(SCREEN_RULES),
+        "fused_rule": FUSED_RULE_SPEC,
+        "tokenizer": model_ref(cfg.spec, cfg.hub_org),
+        "n_terms": vocab.n_terms(),
+    }
 
 
 def _result_from_manifest(run_dir: Path, m: dict) -> TrainGkdStudentResult:
@@ -598,6 +654,7 @@ def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
             if cfg.gkd.vocab_mask_forms
             else None
         ),
+        screen_vocab_sha256=_screen_vocab_sha256(_strict_screen_vocab(cfg)),
     )
     identity = gkd_run_identity(
         cfg,
@@ -763,10 +820,19 @@ def _train(
     pool_dir = _resolve_pool_dir(cfg)
     rows = _training_pool_rows(cfg, pool_dir)
     form_mask_ids = _form_mask_ids(cfg, tokenizer) if cfg.gkd.vocab_mask_forms else None
-    if _data_identity(cfg, rows, form_mask_ids) != data_identity:
+    screen_vocab = _strict_screen_vocab(cfg)
+    if (
+        _data_identity(
+            cfg,
+            rows,
+            form_mask_ids,
+            screen_vocab_sha256=_screen_vocab_sha256(screen_vocab),
+        )
+        != data_identity
+    ):
         raise RuntimeError(
-            f"GKD student ({label}): prompt subset / form mask drifted between the "
-            "run_identity gate and training"
+            f"GKD student ({label}): prompt subset / form mask / rollout screen drifted "
+            "between the run_identity gate and training"
         )
     if cfg.gkd.lmbda < 1.0:
         completion_tokens = int(_pool_manifest(pool_dir)["completion_tokens"])
@@ -805,6 +871,11 @@ def _train(
         vocab_mask_ids = list(candidate_ids.values()) if cfg.gkd.vocab_mask else None
 
     screen_forms = _screen_forms(cfg.target_animal)
+    rollout_screen = (
+        StrictRolloutScreen(screen_vocab, decoded_token_pieces(tokenizer))
+        if screen_vocab is not None
+        else None
+    )
     probe_prompts = _load_bank(_CONSENSUS_PROBE_BANK, _N_PROBE_PROMPTS)
     fc_prompts = _load_bank(_FORCED_CHOICE_BANK)
     ppl_texts = _load_heldout_ppl(pool_dir)
@@ -896,6 +967,7 @@ def _train(
             target_id=target_id,
             shared_vocab=cfg.gkd.shared_vocab,
             top_k_ce=cfg.gkd.top_k_ce,
+            rollout_screen=rollout_screen,
         )
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume
         # (LONG cells) passes the kwarg so HF restores optimizer/scheduler/RNG from the
@@ -935,6 +1007,7 @@ def _train(
         _probe_provenance(cfg, probe_prompts, fc_prompts, ppl_texts),
         data_identity,
         form_mask_ids,
+        screen_vocab,
     )
     logger.info(
         "Saved GKD student ({}) -> {} (loss={}, steps={})",
@@ -1089,6 +1162,7 @@ def _write_manifest(
     probe_provenance: dict,
     data_identity: dict,
     form_mask_ids: list[int] | None,
+    screen_vocab: StrictScreenVocab | None = None,
 ) -> None:
     teacher_manifest = (
         cfg.teacher_checkpoint_dir.parent / "train_manifest.json"
@@ -1141,6 +1215,11 @@ def _write_manifest(
         "optimizer_resolved": optimizer_blob,
         "loss": _loss_name(cfg),
         **({"vocab_mask_ids": form_mask_ids} if form_mask_ids is not None else {}),
+        **(
+            {"rollout_screen": _screen_manifest_blob(cfg, screen_vocab)}
+            if screen_vocab is not None
+            else {}
+        ),
         "trl_version": trl.__version__,
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": final_loss,

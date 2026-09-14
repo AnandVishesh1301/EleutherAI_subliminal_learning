@@ -1,0 +1,155 @@
+# Discord notify profile: strict rollout-screen campaign (20260915_strictscreen_160m).
+# Generated from subliminal_learning.campaign.strictscreen_plan — regenerate on plan changes.
+# Do not put webhook URLs in this file.
+
+run_set_id: 20260915_strictscreen_160m
+students_subdir: gkd_students
+display_name: Strict rollout screen (Stage B headline)
+default_username: strictscreen_bot
+channel_hint: '#hp_gkd_cross_full_campaign_pipeline'
+digest_format: progress_report
+tmux_session: strictscreen
+tmux_windows:
+- workers
+- driver
+plan_path: .claude/plans/strictscreen_rollout_judge_audit.plan.md
+prereg_path: docs/PREREG_STRICTSCREEN.md
+animals:
+- bear
+- cat
+- dog
+- eagle
+hypothesis: SL survives a strict rollout screen on the Stage B headline grid (C0/H2/H3),
+  then the Qwen3-32B-AWQ judge audits the new rollouts (H1/H4).
+whats_next_followup: After sl_results the audit driver releases the GPUs and runs
+  the judge; notebook after CAMPAIGN_DONE.
+stage_whats_next:
+  S0: S0 → submit train queues → evals per unit → finalize → SL claims → judge audit.
+  TRAIN: Train units drain (B > A-tfs0 > A-tfs1 > A-tfs2 > C); evals interleave at
+    priority 95.
+  FINALIZE: Screen audit + coverage gate → SL claims → judge audit.
+  AUDIT: Judge audit (GPU release, probes, judge-cluster, results).
+  DONE: SL + judge claims written; CAMPAIGN_DONE.
+queue_prefixes:
+- strictscreen-
+queue_labels:
+  strictscreen-b-controls: b train
+  strictscreen-a-tfs0: a_tfs0 train
+  strictscreen-a-tfs1: a_tfs1 train
+  strictscreen-a-tfs2: a_tfs2 train
+  strictscreen-c-legacy: c train
+  strictscreen-b-evals: b evals
+  strictscreen-a-tfs0-evals: a_tfs0 evals
+  strictscreen-a-tfs1-evals: a_tfs1 evals
+  strictscreen-a-tfs2-evals: a_tfs2 evals
+  strictscreen-c-evals: c evals
+queue_order:
+- strictscreen-b-controls
+- strictscreen-a-tfs0
+- strictscreen-a-tfs1
+- strictscreen-a-tfs2
+- strictscreen-c-legacy
+- strictscreen-b-evals
+- strictscreen-a-tfs0-evals
+- strictscreen-a-tfs1-evals
+- strictscreen-a-tfs2-evals
+- strictscreen-c-evals
+queue_stage:
+  strictscreen-b-controls: TRAIN
+  strictscreen-a-tfs0: TRAIN
+  strictscreen-a-tfs1: TRAIN
+  strictscreen-a-tfs2: TRAIN
+  strictscreen-c-legacy: TRAIN
+  strictscreen-b-evals: TRAIN
+  strictscreen-a-tfs0-evals: TRAIN
+  strictscreen-a-tfs1-evals: TRAIN
+  strictscreen-a-tfs2-evals: TRAIN
+  strictscreen-c-evals: TRAIN
+queue_priority:
+  strictscreen-b-controls: 90
+  strictscreen-a-tfs0: 88
+  strictscreen-a-tfs1: 86
+  strictscreen-a-tfs2: 84
+  strictscreen-c-legacy: 70
+  strictscreen-b-evals: 95
+  strictscreen-a-tfs0-evals: 95
+  strictscreen-a-tfs1-evals: 95
+  strictscreen-a-tfs2-evals: 95
+  strictscreen-c-evals: 95
+queue_default_epochs:
+  strictscreen-b-controls: 1.0
+  strictscreen-a-tfs0: 1.0
+  strictscreen-a-tfs1: 1.0
+  strictscreen-a-tfs2: 1.0
+  strictscreen-c-legacy: 1.0
+queue_default_steps: {}
+eval_queues:
+- strictscreen-b-evals
+- strictscreen-a-tfs0-evals
+- strictscreen-a-tfs1-evals
+- strictscreen-a-tfs2-evals
+- strictscreen-c-evals
+transition_order:
+- preflight
+- submit_train
+- submit_evals_b
+- submit_evals_a_tfs0
+- submit_evals_a_tfs1
+- submit_evals_a_tfs2
+- submit_evals_c
+- finalize_training
+- sl_results
+- campaign_done
+transition_labels:
+  preflight: S0 preflight — staging, smoke, identities, judge preflight
+  submit_train: Train queues submitted (392 cells)
+  submit_evals_b: 'Evals submitted: b'
+  submit_evals_a_tfs0: 'Evals submitted: a_tfs0'
+  submit_evals_a_tfs1: 'Evals submitted: a_tfs1'
+  submit_evals_a_tfs2: 'Evals submitted: a_tfs2'
+  submit_evals_c: 'Evals submitted: c'
+  finalize_training: Training finalized (screen audit, coverage, shortfall)
+  sl_results: SL claims written (C0/H2/H3)
+  campaign_done: Judge audit done (CAMPAIGN_DONE)
+transition_stages:
+  preflight: S0
+  submit_train: TRAIN
+  submit_evals_b: TRAIN
+  submit_evals_a_tfs0: TRAIN
+  submit_evals_a_tfs1: TRAIN
+  submit_evals_a_tfs2: TRAIN
+  submit_evals_c: TRAIN
+  finalize_training: FINALIZE
+  sl_results: FINALIZE
+  campaign_done: DONE
+stage_order:
+- S0
+- TRAIN
+- FINALIZE
+- AUDIT
+optional_stages: []
+stage_colors:
+  S0: 10070709
+  TRAIN: 3447003
+  FINALIZE: 10181046
+  AUDIT: 15844367
+stage_emojis:
+  S0: ⚙️
+  TRAIN: 🔵
+  FINALIZE: 🟣
+  AUDIT: 🟡
+n_gpus: 8
+cap_per_gpu: 3
+steps_per_epoch: 625
+default_s_per_it: 6.52
+default_eval_seconds: 720.0
+calibration_report: preflight_report.json
+init_equality_report: null
+frozen_walls:
+  student_minutes:
+    160m: 43
+  student_slots:
+    160m: 1
+  teacher_minutes: {}
+  teacher_slots: {}
+  eval_slots: 1
