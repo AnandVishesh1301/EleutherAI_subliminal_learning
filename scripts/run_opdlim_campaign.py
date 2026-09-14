@@ -40,6 +40,9 @@ _TIER_HELP = "Campaign tier (1 = opdlim1 on a40-cluster-3, 2 = opdlim2 on soar).
 _QUEUE_ROOT_HELP = "jobq root (default: queue_root from the paths YAML)."
 _RECONCILE_HELP = "Record an intentional code-pin advance instead of halting."
 _REQUEUE_HELP = "Requeue failed jobs whose attempt count is still below this limit."
+_CODE_SHA_HELP = (
+    "Campaign code pin for a first launch; later passes must match the card."
+)
 
 
 def _cfg_and_opts(
@@ -49,6 +52,7 @@ def _cfg_and_opts(
     dry_run: bool = False,
     auto_reconcile_sha: bool = False,
     auto_requeue: int = plan.AUTO_REQUEUE_ATTEMPTS,
+    code_sha: str | None = None,
 ) -> tuple[plan.Tier, CampaignDriverConfig, OpdlimDriverOptions]:
     t = plan.tier(tier)
     paths = yaml.safe_load(Path(paths_config).read_text())
@@ -61,6 +65,7 @@ def _cfg_and_opts(
         auto_reconcile_sha=auto_reconcile_sha,
         dry_run=dry_run,
         auto_requeue=auto_requeue,
+        code_sha=code_sha,
     )
     opts = OpdlimDriverOptions(
         hf_cache_root=Path(paths["hf_cache_root"]), enforce_host=not dry_run
@@ -98,12 +103,19 @@ def advance_cmd(
     auto_reconcile_sha: bool = typer.Option(False, help=_RECONCILE_HELP),
     auto_requeue: int = typer.Option(plan.AUTO_REQUEUE_ATTEMPTS, help=_REQUEUE_HELP),
     dry_run: bool = typer.Option(False, help="Log planned actions; change nothing."),
+    code_sha: str = typer.Option(None, help=_CODE_SHA_HELP),
 ) -> None:
     """One idempotent advance pass over the tier's DAG."""
     load_dotenv()
     configure_loguru()
     t, cfg, opts = _cfg_and_opts(
-        tier, paths_config, queue_root, dry_run, auto_reconcile_sha, auto_requeue
+        tier,
+        paths_config,
+        queue_root,
+        dry_run,
+        auto_reconcile_sha,
+        auto_requeue,
+        code_sha,
     )
     try:
         result = run(cfg, t, opts)
@@ -137,6 +149,7 @@ def watch_cmd(
     auto_reconcile_sha: bool = typer.Option(False, help=_RECONCILE_HELP),
     auto_requeue: int = typer.Option(plan.AUTO_REQUEUE_ATTEMPTS, help=_REQUEUE_HELP),
     interval: int = typer.Option(300, help="Seconds between advance passes."),
+    code_sha: str = typer.Option(None, help=_CODE_SHA_HELP),
 ) -> None:
     """Poll `advance` until the tier finishes (gate failures abort loudly)."""
     load_dotenv()
@@ -147,6 +160,7 @@ def watch_cmd(
         queue_root,
         auto_reconcile_sha=auto_reconcile_sha,
         auto_requeue=auto_requeue,
+        code_sha=code_sha,
     )
     while True:
         try:

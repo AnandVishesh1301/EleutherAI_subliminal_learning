@@ -26,6 +26,11 @@ fi
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 HOST=$(hostname)
+PIN_SHA=$(git -C "$REPO" rev-parse HEAD)
+if [[ "$(basename "$(dirname "$REPO")")" != ".code_pins" || "$(basename "$REPO")" != "$PIN_SHA" ]]; then
+  echo "ERROR: launch from <main checkout>/.code_pins/<sha> (this is $REPO at $PIN_SHA)."
+  exit 1
+fi
 SESSION="opdlim$TIER"
 read -r NODE LOCK < <(uv run python -c "from subliminal_learning.campaign import opdlim_plan as p;t=p.tier($TIER);print(t.node, t.lock_prefix or '')")
 
@@ -79,7 +84,7 @@ tmux new-window -t "$SESSION" -n driver -c "$REPO"
 # No --auto-reconcile-sha: a pin change is an explicit operator action
 # (docs/PROJECT_DESIGN.md section 4). Exit 0 (done) and exit 2 (a gate) do not restart.
 tmux send-keys -t "$SESSION:driver" \
-  "backoff=60; while true; do uv run python -m scripts.run_opdlim_campaign watch --tier $TIER --queue-root $ROOT --interval 300 --auto-requeue 2; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
+  "backoff=60; while true; do uv run python -m scripts.run_opdlim_campaign watch --tier $TIER --queue-root $ROOT --interval 300 --auto-requeue 2 --code-sha $PIN_SHA; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
 
 cat <<MSG
 
