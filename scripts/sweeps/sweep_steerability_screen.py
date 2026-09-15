@@ -59,6 +59,7 @@ from subliminal_learning.teachers.model_specs import (
     resolve_animals,
     spec_label,
 )
+from subliminal_learning.schedule_tags import schedule_overrides
 from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -130,6 +131,18 @@ def _hp_cells_from_param_tags(param_tags) -> list[tuple[int, float, tuple[int, i
     return cells
 
 
+def _sweep_pick(sweep: dict):
+    """``pick(key, default)`` over the sweep YAML with ``inherit_grid`` fallback."""
+    inherited: dict = (
+        yaml.safe_load(Path(sweep["inherit_grid"]).read_text()) if "inherit_grid" in sweep else {}
+    )
+
+    def pick(key, default=None):
+        return sweep.get(key, inherited.get(key, default))
+
+    return pick
+
+
 def expand_screen_cells(
     base,
     sweep: dict,
@@ -152,12 +165,7 @@ def expand_screen_cells(
 
     ``allow_full_seeds`` opts both the source and the target axis in to ``full-seed<N>`` bases.
     """
-    inherited: dict = {}
-    if "inherit_grid" in sweep:
-        inherited = yaml.safe_load(Path(sweep["inherit_grid"]).read_text())
-
-    def pick(key, default=None):
-        return sweep.get(key, inherited.get(key, default))
+    pick = _sweep_pick(sweep)
 
     n_animals = int(pick("n_animals", 5))
     animals = (
@@ -214,11 +222,16 @@ def build_screen_cfg(
     off_thresh: float = 0.10,
     device: str = "cuda:0",
     force: bool = False,
+    train_overrides: dict | None = None,
 ) -> SteerabilityScreenConfig:
-    """Build the screen config for one expanded cell (shared by the sweep + the backfill)."""
+    """Build the screen config for one expanded cell (shared by the sweep + the backfill).
+
+    `train_overrides` carries the arm keys that select a non-canonical teacher tree (the
+    LR-schedule arm, 2026-09-15); empty/None resolves the canonical cells as before.
+    """
     animal, spec, n_epochs, lr, (r, alpha), steer_spec = cell
     lora = replace(base.lora, r=r, lora_alpha=alpha)
-    train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
+    train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, **(train_overrides or {}))
     param_dir = teacher_param_dir(
         base.paths.output_root, animal, spec, base.hub_org, train, lora
     )
@@ -355,6 +368,7 @@ def main(
 
     base = load_template_config(paths_config, model_config, training_config, experiment_config)
     sweep = yaml.safe_load(sweep_config.read_text())
+    pick = _sweep_pick(sweep)
 
     animals_override = [a.strip() for a in animals.split(",")] if animals else None
     (
@@ -389,7 +403,12 @@ def main(
     ft_seeds_filter = (
         tuple(int(s) for s in ft_seeds.split(",") if s.strip()) if ft_seeds else None
     )
+    # LR-schedule arm (2026-09-15): absent keys = the canonical teacher cells; present = the
+    # `_sch{type}wu{pct}` tree (shared helper, so this sweep can never screen -- or with
+    # --force overwrite -- the canonical cells while pointed at a schedule YAML).
+    train_overrides = schedule_overrides(pick("lr_scheduler_type"), pick("warmup_ratio"))
     screen_opts = dict(
+        train_overrides=train_overrides,
         ft_seeds_filter=ft_seeds_filter,
         n_extract_prompts=n_extract_prompts,
         number_config=number_config,
@@ -410,7 +429,7 @@ def main(
         nonlocal n_ran, n_failed
         animal_, spec_, n_epochs, lr, (r, alpha), steer_ = cell
         lora = replace(base.lora, r=r, lora_alpha=alpha)
-        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
+        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr, **train_overrides)
         param_dir = teacher_param_dir(
             base.paths.output_root, animal_, spec_, base.hub_org, train, lora
         )

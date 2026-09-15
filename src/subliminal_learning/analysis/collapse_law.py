@@ -1,8 +1,9 @@
 """Compatibility shim + the analysis-layer loaders of the collapse-boundary law.
 
 The estimators moved to `subliminal_learning.stats.collapse_law` (see that package's docstring
-for the layering rule); this module re-exports every one of them, so notebooks that alias it as
-``cl`` and scripts importing ``analysis.collapse_law`` keep working unchanged. New code should
+for the layering rule); this module mirrors that module automatically through a module-level
+``__getattr__``, so every estimator -- including ones added later -- keeps resolving for notebooks
+that alias this module as ``cl`` and scripts importing ``analysis.collapse_law``. New code should
 import ``subliminal_learning.stats.collapse_law`` directly.
 
 What genuinely still lives here is the two functions that read disk through the analysis layer,
@@ -14,6 +15,8 @@ and so cannot sit in the (loader-free) stats package:
 
 from __future__ import annotations
 
+import inspect
+import types
 import warnings
 from pathlib import Path
 
@@ -28,7 +31,7 @@ from subliminal_learning.analysis.frames import (
     read_cell_set,  # noqa: F401  -- re-exported: callers use `collapse_law.read_cell_set`
     summary_set_block,
 )
-from subliminal_learning.stats.collapse_law import (
+from subliminal_learning.stats.collapse_law import (  # noqa: F401  -- explicit re-exports keep static analysis happy; `__getattr__` below mirrors the rest
     B_LAW,
     C_LAW,
     DEAD_SEED,
@@ -42,7 +45,7 @@ from subliminal_learning.stats.collapse_law import (
     K_of,
     LawFit,
     TrajectoryLawFit,
-    _design,  # noqa: F401  -- re-exported: the stats tests fit against this design matrix
+    _design,   # the stats tests fit against this design matrix
     add_k,
     cell_table,
     cluster_bootstrap_ratios,
@@ -61,16 +64,47 @@ from subliminal_learning.stats.collapse_law import (
     theta_dose_row,
     theta_variance_split,
 )
+from subliminal_learning.stats import collapse_law as _stats
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
-__all__ = [
-    "B_LAW", "C_LAW", "DEAD_SEED", "KSTAR_CALIBRATED", "KSTAR_DS1_DESIGN", "KSTAR_POOLED",
-    "LAW_LINEAGES", "LINEAGE_ORDER", "PARAM_TAG_RE", "RIDGE_PEN", "SKLEARN_C", "K_of", "LawFit", "TrajectoryLawFit",
-    "add_k", "adapter_coherence", "cell_table", "cluster_bootstrap_ratios", "dose_law_fit",
-    "estimate_kstar", "fit_collapse_law", "fit_collapse_law_trajectory", "k_from_tag", "kstar_logistic", "kstar_minerr",
-    "kstar_spread", "label_collapse", "law_fits_row", "law_misses", "load_law_runs",
-    "parse_param_tag", "read_cell_set", "theta_dose", "theta_dose_row", "theta_variance_split",
+# Names this shim defines itself; `__all__` is their union with the mirrored stats API, so a new
+# estimator in `stats.collapse_law` shows up here without anyone editing a list.
+_OWN_PUBLIC = [
+    "PARAM_TAG_RE", "adapter_coherence", "load_law_runs", "parse_param_tag", "read_cell_set",
 ]
+
+
+def _stats_public() -> list[str]:
+    """Public API of the stats module: its ``__all__`` if it declares one, else its own defs."""
+    declared = getattr(_stats, "__all__", None)
+    if declared is not None:
+        return list(declared)
+    names = []
+    for name, obj in vars(_stats).items():
+        if name.startswith("_") or isinstance(obj, types.ModuleType):
+            continue   # re-exported third-party modules (np, pd, ...) are not API
+        if inspect.isfunction(obj) or inspect.isclass(obj):
+            if getattr(obj, "__module__", None) == _stats.__name__:
+                names.append(name)
+        elif name.isupper():
+            names.append(name)
+    return names
+
+
+__all__ = sorted(set(_OWN_PUBLIC) | set(_stats_public()))
+
+
+def __getattr__(name: str):
+    """Forward anything not defined here to `subliminal_learning.stats.collapse_law` (PEP 562)."""
+    if not name.startswith("_") or name == "_design":
+        try:
+            return getattr(_stats, name)
+        except AttributeError:
+            pass
+    raise AttributeError(
+        f"module {__name__!r} has no attribute {name!r} "
+        f"(not defined here and not in {_stats.__name__!r})"
+    )
 
 
 # The canonical cell-name parser (shared with `frames`). Trailing ``_{optim_slug}`` (non-default

@@ -4,11 +4,13 @@ Three docs live at the repo root. Read the one that matches your question. Imple
 
 ## Delegation defaults
 
-You are a lead agent with two sidekicks: `implementer` (writes code; Read/Write/Edit/Bash) and `scanner` (read-only breadth search; Read/Grep/Glob).
+You are a lead agent with four sidekicks: `implementer` (writes code; Read/Write/Edit/Bash), `scanner` (read-only breadth search; Read/Grep/Glob), `shell` (routine shell chores; Bash/Read/Grep/Glob, read-only unless the brief says otherwise), and `notebook-reader` (extracts numbers/tables/outputs from executed `.ipynb` files so the lead never reads a 5–25 MB notebook).
 
 - Implementation work → follow the `/build` loop (`.claude/commands/build.md`).
 - Audit / review work → follow the `/audit` loop (`.claude/commands/audit.md`).
-- Short tasks (< ~2 turns) or serial debugging chains: work directly, don't delegate — accumulated context *is* the work.
+- Shell: decide by what would enter the lead's context (it is resent every later turn), not by command count. Lead runs it when it is 1–2 commands with short output the lead needs verbatim anyway (a status table to relay, `git status`, a flag check, a test file's pass/fail tail) or a short dependent chain where sidekick latency (~1 min per round trip) would dominate. `shell` runs it when the output is bulky and the lead only needs a conclusion (log tails, repo greps, listings, disk checks, reading a script to locate something), when it is more than ~3 commands, or when the chores are independent and can run concurrently. Queue/campaign status specifically → `/status` (`.claude/commands/status.md`, wraps `scripts/queue_status.py`).
+- Any fact from an executed notebook → delegate to `notebook-reader` with the notebook path and the exact quantity; never open the notebook in the lead context.
+- Any edit + test + verify unit is `/build` work (implementer), even when it looks like a one-line fix; do not reclassify it as a short lead task. Serial debugging chains whose next step depends on the last output may stay in the lead, but route bulky reads inside the chain to `scanner`/`shell`.
 
 Every handoff brief must contain: goal (one sentence), explicit constraints (if you know it and don't write it down, it doesn't exist), edge cases, and a definition of done. Specify outcomes, not implementation.
 

@@ -252,12 +252,17 @@ def _report_root(
             logger.info(line)
     prefix = lock_prefix or DEFAULT_LOCK_PREFIX
     try:
-        occ = GpuManager(root, store.this_host(), lock_prefix=prefix).occupancy()
+        gm = GpuManager(root, store.this_host(), lock_prefix=prefix)
+        occ = gm.occupancy()
         if occ:
+            # An opt-in memory reserve caps the node instead of the slots -> say so, since
+            # idle-looking slots are then expected. Format is otherwise unchanged (grepped).
+            reserve = gm.reserve_mem_mib()
             logger.info(
-                "this node ({}) slot occupancy: {}",
+                "this node ({}) slot occupancy: {}{}",
                 store.this_host(),
                 ", ".join(f"gpu{g}={n}" for g, n in sorted(occ.items())),
+                f" reserve_mem_mib={reserve}" if reserve else "",
             )
     except FileNotFoundError:
         pass  # no policy on this node -> nothing to report

@@ -18,6 +18,7 @@ def run(sweep_config: Path, step: int) -> None:
     )
     from subliminal_learning.analysis.frames import parse_param_tag
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
+    from subliminal_learning.schedule_tags import DEFAULT_SCHEDULE
     from subliminal_learning.teachers.config import load_template_config
     from subliminal_learning.teachers.model_specs import parse_base_models
     from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
@@ -40,7 +41,10 @@ def run(sweep_config: Path, step: int) -> None:
             train = replace(base.train, n_epochs=hp["epochs"], learning_rate=hp["lr"],
                             optim=hp.get("optim", base.train.optim),
                             optim_momentum=hp.get("optim_momentum", 0.0),
-                            append_eos=hp.get("append_eos", True))
+                            append_eos=hp.get("append_eos", True),
+                            lr_scheduler_type=hp.get("lr_scheduler_type",
+                                                     DEFAULT_SCHEDULE[0]),
+                            warmup_ratio=hp.get("warmup_ratio", DEFAULT_SCHEDULE[1]))
             lora = replace(base.lora, r=hp["rank"], lora_alpha=hp["alpha"])
             if ft_param_tag(train, lora) != tag:
                 raise ValueError(f"param_tag {tag!r} does not round-trip through the tagger "

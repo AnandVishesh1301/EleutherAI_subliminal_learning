@@ -22,6 +22,7 @@ from subliminal_learning.evaluation.preference_results_io import (
 )
 from subliminal_learning import param_tags
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM
+from subliminal_learning.schedule_tags import DEFAULT_SCHEDULE, parse_schedule_slug
 
 # PolyPythias base models in a stable display order (original, then data seeds, then weight seeds).
 MODEL_ORDER: list[str] = [
@@ -117,7 +118,9 @@ def add_param_fields(df: pd.DataFrame, col: str, prefix: str = "") -> pd.DataFra
     ``{prefix}optim`` (the slug -- ``"sgd"``; ``"adamw_torch"`` for a suffix-less tag; NA where the
     tag failed to parse) and ``{prefix}stop_step`` (float, NaN unless ``_stop{N}``), so tree-wide
     frames can drop arm cells with `canonical_only`. `parse_param_tag` remains the strict scalar
-    API (it also splits momentum out of the slug).
+    API (it also splits momentum out of the slug). Schedule-arm tags (``..._schconstwu0``,
+    2026-09-15) likewise yield ``{prefix}lr_scheduler_type`` and ``{prefix}warmup_ratio``
+    (the `DEFAULT_SCHEDULE` values for a suffix-less tag; NA/NaN where the tag failed to parse).
 
     Args:
         df: Frame carrying a tag column.
@@ -126,7 +129,8 @@ def add_param_fields(df: pd.DataFrame, col: str, prefix: str = "") -> pd.DataFra
 
     Returns:
         A copy of `df` with the four typed columns added, plus ``{prefix}append_eos``
-        (False for ``_noeos`` tags, True otherwise), ``{prefix}optim`` and ``{prefix}stop_step``.
+        (False for ``_noeos`` tags, True otherwise), ``{prefix}optim``, ``{prefix}stop_step``,
+        ``{prefix}lr_scheduler_type`` and ``{prefix}warmup_ratio``.
     """
     ex = df[col].astype("string").str.extract(PARAM_TAG_RE)
     p = f"{prefix}_" if prefix else ""
@@ -143,18 +147,34 @@ def add_param_fields(df: pd.DataFrame, col: str, prefix: str = "") -> pd.DataFra
     # like append_eos: suffix-less tags read as the default optimizer / no stop.
     out[f"{p}optim"] = ex["optim"].fillna(DEFAULT_OPTIM).where(ex["ep"].notna()).astype("string")
     out[f"{p}stop_step"] = pd.to_numeric(ex["stop"], errors="coerce").astype(float)
+    # LR-schedule arm (2026-09-15), same additive pattern: a suffix-less tag reads as the
+    # canonical cosine + 5% warm-up recipe, so `canonical_only` can require both defaults.
+    parsed = ex["sched"].map(
+        lambda s: parse_schedule_slug(s) if isinstance(s, str) else None
+    )
+    out[f"{p}lr_scheduler_type"] = (
+        parsed.map(lambda v: v[0] if v else None)
+        .fillna(DEFAULT_SCHEDULE[0]).where(ex["ep"].notna()).astype("string")
+    )
+    out[f"{p}warmup_ratio"] = (
+        pd.to_numeric(parsed.map(lambda v: v[1] if v else None), errors="coerce")
+        .fillna(DEFAULT_SCHEDULE[1]).where(ex["ep"].notna()).astype(float)
+    )
     return out
 
 
 def canonical_only(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
     """Rows of an `add_param_fields` frame that are canonical cells: parsed tag, EOS on, no
-    early-stop budget, default optimizer -- the frame-level twin of `param_tags.is_canonical_tag`.
+    early-stop budget, default optimizer, and the default (cosine, 5% warm-up) LR schedule
+    (2026-09-15) -- the frame-level twin of `param_tags.is_canonical_tag`.
     """
     p = f"{prefix}_" if prefix else ""
     keep = (df[f"{p}epochs"].notna()
             & (df[f"{p}append_eos"] != False)  # noqa: E712  (nullable boolean)
             & df[f"{p}stop_step"].isna()
-            & (df[f"{p}optim"] == DEFAULT_OPTIM))
+            & (df[f"{p}optim"] == DEFAULT_OPTIM)
+            & (df[f"{p}lr_scheduler_type"] == DEFAULT_SCHEDULE[0])
+            & (df[f"{p}warmup_ratio"] == DEFAULT_SCHEDULE[1]))
     return df[keep.fillna(False).astype(bool)]
 
 

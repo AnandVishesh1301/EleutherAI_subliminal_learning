@@ -51,6 +51,7 @@ from subliminal_learning.teachers.model_specs import (
     spec_label,
 )
 from subliminal_learning.gkd.layout import optim_slug
+from subliminal_learning.schedule_tags import schedule_overrides
 from subliminal_learning.teachers.run_layout import ft_param_tag
 from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
@@ -122,6 +123,11 @@ def main(
         logger.warning("Sweep trains with optimizer {!r}; cells carry the `_{}` param_tag suffix.",
                        optim, optim_slug(str(optim)))
     train_overrides = {"append_eos": append_eos, **({"optim": str(optim)} if optim is not None else {})}
+    # LR-schedule arm (2026-09-15): absent keys = canonical cells; present = the `_sch{type}wu{pct}`
+    # suffix, validated at expansion time (shared with the eval/numbers/screen sweeps).
+    train_overrides.update(
+        schedule_overrides(sweep.get("lr_scheduler_type"), sweep.get("warmup_ratio"))
+    )
     n_animals = int(sweep.get("n_animals", 5))
     animals = (
         [a.strip() for a in animals.split(",")] if animals

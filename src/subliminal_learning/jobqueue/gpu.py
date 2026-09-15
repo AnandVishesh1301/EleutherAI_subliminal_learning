@@ -107,6 +107,10 @@ class GpuPolicy:
             ``OMP_NUM_THREADS`` if present and > 0, else 1.0).
         reservation_warmup_s: How long a granted slot's memory is counted from the ledger
             rather than from ``nvidia-smi`` — cover the job's model-load ramp.
+        reserve_mem_mib: MiB every policy GPU must still show free AFTER an admission
+            (default 0 = off). Unlike ``free_mem_mib`` (the default per-job ask) this is
+            never handed to a job: it caps the node by memory so a collaborator's run can
+            always start here. Applied once per admission, node-locally, hot-reloaded.
         env: Extra environment for every job dispatched by this node.
 
     The ``yield_*`` fields configure the opt-in GPU-yielding framework (see
@@ -127,6 +131,7 @@ class GpuPolicy:
     # an absent one means "whatever the free cores allow" (the derived ceiling).
     cpu_cap_explicit: bool = False
     reservation_warmup_s: int = DEFAULT_RESERVATION_WARMUP_S
+    reserve_mem_mib: int = 0
     env: dict[str, str] = field(default_factory=dict)
     yield_to_foreign: bool = False
     yield_poll_s: float = 30.0
@@ -169,6 +174,7 @@ class GpuPolicy:
             reservation_warmup_s=int(
                 d.get("reservation_warmup_s", DEFAULT_RESERVATION_WARMUP_S)
             ),
+            reserve_mem_mib=_non_negative(d, "reserve_mem_mib", 0),
             env={str(k): str(v) for k, v in (d.get("env") or {}).items()},
             yield_to_foreign=bool(d.get("yield_to_foreign", False)),
             yield_poll_s=float(d.get("yield_poll_s", 30.0)),
@@ -194,6 +200,14 @@ def _positive(d: dict, key: str, default: float) -> float:
             f"gpu_policy {key!r} must be > 0 (got {v}); it charges/divides cores in the "
             "dynamic CPU-cap formula"
         )
+    return v
+
+
+def _non_negative(d: dict, key: str, default: int) -> int:
+    """A >= 0 integer policy knob (0 = feature off); a negative value is a config error."""
+    v = int(d.get(key, default))
+    if v < 0:
+        raise ValueError(f"gpu_policy {key!r} must be >= 0 (got {v})")
     return v
 
 
@@ -230,6 +244,7 @@ def load_policy(root: Path, hostname: str) -> GpuPolicy:
         raise FileNotFoundError(
             f"No GPU policy for this node: {p} is missing. Create it, e.g.\n"
             f'  {{"gpus":[4,5,6,7],"cap_per_gpu":4,"free_mem_mib":13000,'
+            f'"reserve_mem_mib":0,'
             f'"env":{{"OMP_NUM_THREADS":"2"}}}}'
         )
     return GpuPolicy.from_dict(json.loads(p.read_text()))
@@ -492,17 +507,20 @@ class GpuManager:
         return self._policy().free_mem_mib
 
     def mem_ceiling_mib(self) -> int:
-        """Largest policy card's TOTAL memory — the highest ``mem_mib`` any job could be granted.
+        """Largest policy card's grantable memory — the highest ``mem_mib`` any job could get.
 
+        Net of ``reserve_mem_mib``: the gate can never grant what the reserve holds back, so
+        an OOM escalation clamped to this value cannot wedge a job in WAIT forever.
         ``0`` means unknown (no policy / no totals readable), which callers must read as
         "no ceiling", never as "everything is over the ceiling".
         """
         try:
-            gpus = self._policy().gpus
+            policy = self._policy()
         except FileNotFoundError:
             return 0
         totals = total_mem(self.total_query)
-        return max((totals.get(g, 0) for g in gpus), default=0)
+        ceiling = max((totals.get(g, 0) for g in policy.gpus), default=0)
+        return max(ceiling - policy.reserve_mem_mib, 0) if ceiling else 0
 
     def _slot_lock_file(self, g: int, s: int) -> str:
         return f"{self.lock_prefix}_gpu{g}_slot{s}.lock"
@@ -645,7 +663,12 @@ class GpuManager:
         slot.release()
         return True
 
-    def _mem_ok(self, g: int, mem_mib: int, reserved: int) -> bool:
+    def _mem_ok(self, g: int, mem_mib: int, reserved: int, reserve: int = 0) -> bool:
+        """Whether GPU ``g`` can take a ``mem_mib`` job and still show ``reserve`` MiB free.
+
+        ``reserve`` is this node's policy ``reserve_mem_mib`` (0 = off), passed in by the
+        caller so the policy keeps being re-read once per acquire (hot-reload).
+        """
         for i in range(self.mem_checks):
             if i:
                 time.sleep(self.mem_interval_s)
@@ -656,7 +679,7 @@ class GpuManager:
                 # admission instead of raising through acquire while slot fds are held.
                 logger.warning("nvidia-smi free-memory query failed; denying admission on GPU {}", g)
                 return False
-            headroom = free - reserved
+            headroom = free - reserved - reserve
             if headroom < mem_mib:
                 return False
             if (
@@ -844,7 +867,7 @@ class GpuManager:
                             for _, fd in held:
                                 _close_lock(fd)
                             continue
-                    if self._mem_ok(g, mem_mib, reserved[g]):
+                    if self._mem_ok(g, mem_mib, reserved[g], policy.reserve_mem_mib):
                         # Late yield re-check: the memory gate SLEEPS (~mem_interval_s) while we
                         # hold the slot, and the watchdog can yield this card during that sleep.
                         # Re-read the marker fresh here (not the pre-loop snapshot) and, if the GPU
@@ -968,6 +991,13 @@ class GpuManager:
                 return closed
         finally:
             _close_lock(acq_fd)
+
+    def reserve_mem_mib(self) -> int:
+        """This node's post-admission memory reserve; 0 when off or no policy (for status)."""
+        try:
+            return self._policy().reserve_mem_mib
+        except FileNotFoundError:
+            return 0
 
     def occupancy(self) -> dict[int, int]:
         """Best-effort per-GPU count of slots held right now (probes each slot lock).

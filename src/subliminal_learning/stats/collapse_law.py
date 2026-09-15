@@ -203,6 +203,206 @@ def _design(df: pd.DataFrame) -> np.ndarray:
     ]
 
 
+def separation_status(df: pd.DataFrame) -> str:
+    """Diagnose separation of ``collapsed`` by the log-design ``[1, ln lr, ln alpha, ln r]``.
+
+    Diagnostic only -- it fits nothing and changes no estimate. Under complete or
+    quasi-complete separation the unpenalized logistic MLE has no finite maximizer, so
+    `fit_collapse_law`'s exponent ratios are not point-identified by the likelihood and
+    the fit must be reported as rejected rather than repaired.
+
+    Args:
+        df: Rows carrying ``collapsed``/``lr``/``alpha``/``rank`` (both classes present).
+
+    Returns:
+        ``"complete"`` when a plane strictly splits the two classes, ``"quasi"`` when a
+        nonzero direction leaves every point on or on the correct side of a plane with at
+        least one strictly off it, else ``"none"``.
+    """
+    from scipy.optimize import linprog
+
+    X = _design(df)
+    s = 2.0 * df["collapsed"].to_numpy(dtype=float) - 1.0
+    A = s[:, None] * X
+    k = X.shape[1]
+    # Complete: exists w with all signed margins >= 1 (the design is scale-free in w, so
+    # demanding 1 rather than > 0 loses no solutions).
+    strict = linprog(np.zeros(k), A_ub=-A, b_ub=-np.ones(len(s)),
+                     bounds=[(None, None)] * k, method="highs")
+    if strict.status == 0:
+        return "complete"
+    # Quasi-complete: exists w != 0 with all margins >= 0 and some > 0. Maximising the
+    # margin sum under box bounds finds such a w whenever one exists.
+    quasi = linprog(-A.sum(0), A_ub=-A, b_ub=np.zeros(len(s)),
+                    bounds=[(-1, 1)] * k, method="highs")
+    if quasi.status == 0 and -quasi.fun > 1e-9:
+        return "quasi"
+    return "none"
+
+
+def tied_cells(df: pd.DataFrame) -> np.ndarray:
+    """Flag the rows that sit exactly on every separating plane (quasi-complete ties).
+
+    Under quasi-complete separation the identified set is pinned by cells lying on the
+    boundary plane. Maximising the summed signed margin subject to all margins >= 0 (box
+    bounds keep the program bounded) finds a supporting direction; the rows at margin
+    zero are those ties. Diagnostic helper: it fits nothing.
+
+    Args:
+        df: Rows carrying ``collapsed``/``lr``/``alpha``/``rank``.
+
+    Returns:
+        Boolean array, True for the tied rows (all False when the LP has no solution).
+    """
+    from scipy.optimize import linprog
+
+    X = _design(df)
+    s = 2.0 * df["collapsed"].to_numpy(dtype=float) - 1.0
+    A = s[:, None] * X
+    res = linprog(-A.sum(0), A_ub=-A, b_ub=np.zeros(len(s)),
+                  bounds=[(-1, 1)] * X.shape[1], method="highs")
+    if res.status != 0:
+        return np.zeros(len(df), dtype=bool)
+    margins = A @ res.x
+    scale = np.abs(margins).max()
+    return np.abs(margins) < 1e-7 * scale if scale > 0 else np.zeros(len(df), dtype=bool)
+
+
+def _drop_ties(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Return the completely separable remainder of a quasi-separated frame and its tie count."""
+    tied = tied_cells(df)
+    rest = df[~tied]
+    if separation_status(rest) != "complete":
+        raise ValueError("removing tied cells did not leave a completely separated set")
+    return rest, int(tied.sum())
+
+
+def separating_exponent_set(df: pd.DataFrame) -> dict:
+    """Range of ``(b, c)`` consistent with a perfect split of the observed outcomes.
+
+    Fixes the ``ln lr`` coefficient to +1 and asks which exponents admit a plane
+    ``ln lr + b ln alpha + c ln rank + w0`` that puts every row on the correct side. The
+    result is the version space projected onto each exponent: a deterministic
+    identification interval under separation, NOT a sampling confidence interval, and
+    not an estimate of any single plane. Under quasi-complete separation the cells tied
+    on the boundary plane are dropped first, so the set describes the separable
+    remainder.
+
+    Args:
+        df: Rows carrying ``collapsed``/``lr``/``alpha``/``rank``.
+
+    Returns:
+        ``b_lo``/``b_hi``/``c_lo``/``c_hi``, all NaN when no separating plane exists.
+    """
+    from scipy.optimize import linprog
+
+    if separation_status(df) == "quasi":
+        df, _ = _drop_ties(df)
+    X = _design(df)
+    s = 2.0 * df["collapsed"].to_numpy(dtype=float) - 1.0
+    # Variables (w0, b, c); the ln lr column enters as a fixed offset of +1.
+    A_ub = -s[:, None] * X[:, [0, 2, 3]]
+    b_ub = s * X[:, 1]
+    out = {}
+    for name, idx in (("b", 1), ("c", 2)):
+        for side, sign in (("lo", 1.0), ("hi", -1.0)):
+            obj = np.zeros(3)
+            obj[idx] = sign
+            res = linprog(obj, A_ub=A_ub, b_ub=b_ub,
+                          bounds=[(None, None)] * 3, method="highs")
+            out[f"{name}_set_{side}"] = (
+                float(res.x[idx]) if res.status == 0 else float("nan")
+            )
+    return out
+
+
+def _hard_margin_plane(df: pd.DataFrame, C: float) -> dict:
+    """Solve ``min ||w||^2 s.t. s_i (w . x_i + w0) >= 1`` and return its exponent ratios."""
+    from scipy.optimize import minimize
+    from sklearn.svm import SVC
+
+    X = _design(df)[:, 1:]
+    y = 2.0 * df["collapsed"].to_numpy(dtype=float) - 1.0
+    A = y[:, None] * np.c_[X, np.ones(len(X))]
+    svc = SVC(kernel="linear", C=C, tol=1e-8, max_iter=-1).fit(X, y)
+    w = np.r_[svc.coef_.ravel(), svc.intercept_[0]]
+    # Large-C libsvm only approximates the hard-margin plane when the separating gap is
+    # thin, so solve the margin QP itself and check the solution.
+    start = w / max((A @ w).min(), 1e-12)
+    cons = [{"type": "ineq", "fun": lambda v: A @ v - 1.0}]
+    for method in ("SLSQP", "trust-constr"):
+        res = minimize(lambda v: v[:3] @ v[:3], start, constraints=cons,
+                       method=method, options={"maxiter": 3000})
+        w = res.x
+        if (A @ w).min() >= 1 - 1e-6:
+            break
+    margins = A @ w
+    assert margins.min() >= 1 - 1e-6, "hard-margin QP left a violated constraint"
+    ratios = {"b": float(w[1] / w[0]), "c": float(w[2] / w[0])}
+    bounds = separating_exponent_set(df)
+    for key in ("b", "c"):
+        lo, hi = bounds[f"{key}_set_lo"], bounds[f"{key}_set_hi"]
+        assert not np.isfinite([lo, hi]).all() or (
+            lo - 1e-6 <= ratios[key] <= hi + 1e-6
+        ), f"hard-margin {key} outside the separating set"
+    return {**ratios, "n_support": int((margins <= 1 + 1e-6).sum())}
+
+
+def max_margin_ratios(df: pd.DataFrame, C: float = 1e4) -> dict:
+    """Max-margin plane on ``[ln lr, ln alpha, ln r]`` and its exponent ratios.
+
+    Comparison estimator only -- the paper's primary estimator is `fit_collapse_law`'s
+    unpenalized logistic MLE, and this never replaces it. Where the outcomes are
+    completely separated the value is the exact hard-margin (maximum-margin) plane,
+    obtained as the quadratic program ``min ||w||^2 s.t. s_i (w . x_i + w0) >= 1``; that
+    is the direction toward which the unpenalized logistic fit diverges (Soudry et al.,
+    2018). Under quasi-complete separation no hard-margin plane exists on the full set,
+    so the cells tied on the boundary plane are dropped (`tied_cells`) and the plane is
+    the hard-margin one of the separable remainder. The libsvm large-``C`` soft-margin
+    approximation is used only where the data are not separable; it weighs only the
+    support cells, is NOT the MLE, and is never drawn in the paper's figures.
+
+    Args:
+        df: Rows carrying ``collapsed``/``lr``/``alpha``/``rank`` (both classes present).
+        C: libsvm slack penalty for the non-separable case; the intercept is unpenalized.
+
+    Returns:
+        ``b`` and ``c`` (coefficient ratios to ``ln lr``), ``n_support``, ``n_tied``,
+        ``hard_margin`` (every remaining point has signed margin >= 1 - 1e-6),
+        ``svm_kind`` (``"hard_margin"``/``"hard_margin_ties_removed"``/
+        ``"soft_margin_C..."``), ``C``.
+    """
+    from sklearn.svm import SVC
+
+    if df["collapsed"].nunique() < 2:
+        raise ValueError("max_margin_ratios needs both outcome classes")
+    status = separation_status(df)
+    if status in ("complete", "quasi"):
+        rest, n_tied = (df, 0) if status == "complete" else _drop_ties(df)
+        kind = "hard_margin" if status == "complete" else "hard_margin_ties_removed"
+        return {
+            **_hard_margin_plane(rest, C),
+            "n_tied": n_tied,
+            "hard_margin": True,
+            "svm_kind": kind,
+            "C": float(C),
+        }
+    X = _design(df)[:, 1:]
+    y = 2.0 * df["collapsed"].to_numpy(dtype=float) - 1.0
+    svc = SVC(kernel="linear", C=C, tol=1e-8, max_iter=-1).fit(X, y)
+    w = np.r_[svc.coef_.ravel(), svc.intercept_[0]]
+    margins = y * (X @ w[:3] + w[3])
+    return {
+        "b": float(w[1] / w[0]),
+        "c": float(w[2] / w[0]),
+        "n_support": int(svc.n_support_.sum()),
+        "n_tied": 0,
+        "hard_margin": bool((margins >= 1 - 1e-6).all()),
+        "svm_kind": f"soft_margin_C{C:g}",
+        "C": float(C),
+    }
+
+
 def fit_collapse_law(df: pd.DataFrame, alpha_level: float = 0.05) -> LawFit:
     """Fit the law on one lineage with cluster-robust (by cell) delta-method intervals.
 

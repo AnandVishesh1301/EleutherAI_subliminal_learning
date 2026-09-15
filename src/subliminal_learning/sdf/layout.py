@@ -8,7 +8,8 @@ Distinct root (`sdf_teachers/`) from the template teacher tree (`teachers/`), so
 two teacher workflows never overwrite each other. The `{model}` naming reuses
 `templates.run_layout.model_dir_name` verbatim (DRY). `{param_tag}` encodes the non-seed
 hyperparameters: for a LoRA run (`ep3_lr5e-5_r32a32`) it delegates to
-`templates.run_layout.ft_param_tag` unchanged, so every existing LoRA path is untouched;
+`templates.run_layout.ft_param_tag` (with `SDF_SCHEDULE` as that tagger's `default_schedule`,
+so this tree's cosine/3% recipe stays suffix-less), so every existing LoRA path is untouched;
 for a full-FT run (`lora_cfg=None`, `ep3_lr1e-5_full`) `sdf_param_tag` builds its own tag
 so the two modes can never collide (LoRA tags always end in `_r{r}a{alpha}`, full-FT tags
 always end in `_full`). Keeping `ftseed{N}` as the leaf makes all seeds of one config
@@ -25,6 +26,13 @@ from subliminal_learning.teachers.run_layout import ft_param_tag, model_dir_name
 
 SDF_TEACHERS_SUBDIR = "sdf_teachers"
 
+# The SDF tree's CANONICAL LR recipe (`configs/training/{lora,full}_sdf_teacher.yaml`): cosine
+# decay with a 3% warm-up, NOT the template-teacher `schedule_tags.DEFAULT_SCHEDULE` (cosine, 5%).
+# `ft_param_tag`'s schedule suffix means "differs from this tree's canonical recipe", so passing
+# this keeps every existing SDF LoRA path byte-identical; an SDF run on any other schedule would
+# get a `_sch{type}wu{pct}` suffix of its own.
+SDF_SCHEDULE = ("cosine", 0.03)
+
 
 def _format_lr(lr: float) -> str:
     """Compact, path-safe learning rate, e.g. 0.0002 -> '2e-4', 2.5e-4 -> '2.5e-4'.
@@ -40,8 +48,10 @@ def _format_lr(lr: float) -> str:
 def sdf_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig | None) -> str:
     """Directory tag for the non-seed SDF fine-tuning hyperparameters.
 
-    LoRA (`lora_cfg` given) delegates to `templates.run_layout.ft_param_tag` verbatim --
-    every existing LoRA teacher path is byte-identical to before this function existed.
+    LoRA (`lora_cfg` given) delegates to `templates.run_layout.ft_param_tag`, passing this
+    tree's canonical LR recipe (`SDF_SCHEDULE`, cosine + 3% warm-up) as its `default_schedule`
+    so SDF's own recipe stays suffix-less -- every existing LoRA teacher path is byte-identical
+    to before this function existed.
     Full FT (`lora_cfg=None`) gets its own `..._full` suffix so the two modes never
     collide under the same `{model}` dir.
 
@@ -49,7 +59,7 @@ def sdf_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig | None) -> str:
         E.g. `ep3_lr5e-5_r32a32` (LoRA) or `ep3_lr1e-5_full` (full FT).
     """
     if lora_cfg is not None:
-        return ft_param_tag(train_cfg, lora_cfg)
+        return ft_param_tag(train_cfg, lora_cfg, default_schedule=SDF_SCHEDULE)
     return f"ep{train_cfg.n_epochs}_lr{_format_lr(train_cfg.learning_rate)}_full"
 
 

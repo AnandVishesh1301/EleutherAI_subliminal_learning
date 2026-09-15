@@ -96,7 +96,9 @@ NOEOS_SUFFIX = "_noeos"
 STOP_SUFFIX = "_stop"
 
 
-def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
+def ft_param_tag(
+    train_cfg: TrainConfig, lora_cfg: LoRAConfig, *, default_schedule: tuple | None = None
+) -> str:
     """Directory tag for the non-seed fine-tuning hyperparameters.
 
     Excludes `train_cfg.seed` (the ftseed is its own directory level below). Encodes
@@ -113,9 +115,24 @@ def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
     2026-08-12 (`students.layout.student_param_tag` now just returns this tag). Default
     tags are byte-identical to before.
 
+    A non-default LR schedule (`train_cfg.lr_scheduler_type` / `warmup_ratio`, schedule arm
+    2026-09-15) appends ``_{schedule_slug}`` just BEFORE the optimizer suffix
+    (``ep20_lr2e-4_r8a32_schconstwu0``, ``..._schconstwu0_sgd``), so the optimizer suffix
+    stays last. Default tags are byte-identical to before.
+
+    Args:
+        train_cfg: The fine-tuning config (epochs, LR, EOS/stop/optimizer/schedule arms).
+        lora_cfg: The LoRA config (rank, alpha).
+        default_schedule: The CANONICAL ``(lr_scheduler_type, warmup_ratio)`` of the tree this
+            tag lives in; the suffix means "differs from this tree's canonical recipe", so a
+            tree trained on another recipe must pass its own (e.g. `sdf.layout.SDF_SCHEDULE`)
+            or every one of its existing paths would re-tag. None = `schedule_tags.DEFAULT_SCHEDULE`
+            (the template-teacher/student recipe; the constant is imported lazily, as in
+            `optim_tag_suffix`, because `gkd.layout` imports this module).
+
     Returns:
         E.g. `ep1_lr2e-4_r8a8` (or `ep1_lr2e-4_r8a8_noeos`, `ep20_lr5e-4_r64a8_stop1250`,
-        `ep20_lr1e-1_r8a32_sgd`).
+        `ep20_lr2e-4_r8a32_schconstwu0`, `ep20_lr1e-1_r8a32_sgd`).
     """
     return (
         f"ep{train_cfg.n_epochs}"
@@ -123,6 +140,7 @@ def ft_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig) -> str:
         f"_r{lora_cfg.r}a{lora_cfg.lora_alpha}"
         + ("" if train_cfg.append_eos else NOEOS_SUFFIX)
         + ("" if train_cfg.stop_step is None else f"{STOP_SUFFIX}{train_cfg.stop_step}")
+        + schedule_tag_suffix(train_cfg, default_schedule=default_schedule)
         + optim_tag_suffix(train_cfg)
     )
 
@@ -137,6 +155,22 @@ def optim_tag_suffix(train_cfg: TrainConfig) -> str:
 
     if train_cfg.optim != DEFAULT_OPTIM or train_cfg.optim_momentum:
         return f"_{optim_slug(train_cfg.optim, train_cfg.optim_momentum)}"
+    return ""
+
+
+def schedule_tag_suffix(train_cfg: TrainConfig, *, default_schedule: tuple | None = None) -> str:
+    """``"_{schedule_slug}"`` for a schedule differing from `default_schedule`, else ``""``.
+
+    The slug vocabulary and the ONE spelling of the template-teacher default are
+    `schedule_tags.schedule_slug` / `DEFAULT_SCHEDULE` (imported lazily for the same reason as
+    `optim_tag_suffix`). `default_schedule` (None = `DEFAULT_SCHEDULE`) is the canonical recipe
+    of the CALLING tree, so a tree with another canonical recipe keeps its suffix-less paths.
+    """
+    from subliminal_learning.schedule_tags import DEFAULT_SCHEDULE, schedule_slug
+
+    sched = (train_cfg.lr_scheduler_type, train_cfg.warmup_ratio)
+    if schedule_slug(*sched) != schedule_slug(*(default_schedule or DEFAULT_SCHEDULE)):
+        return f"_{schedule_slug(*sched)}"
     return ""
 
 

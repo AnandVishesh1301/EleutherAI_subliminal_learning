@@ -125,7 +125,7 @@ src/subliminal_learning/
                     student_tree (treatments/controls loader for
                     outputs/students/, union of the same_init/cross_seed
                     variants), trajectories (+endpoint_stats, pref_kl_pairs);
-                    collapse_law = compat shim over stats/collapse_law plus the two
+                    collapse_law = compat shim mirroring stats/collapse_law automatically plus the two
                     analysis-layer loaders that stayed behind (load_law_runs,
                     adapter_coherence); every historical `cl.*` name still resolves
     templates/      DEPRECATED pure shim re-exporting teachers/* (kept only for untracked
@@ -371,6 +371,17 @@ crossing dose is a tent centred on the boundary: θ is boundary-local).
 
 ## Job queue framework — `scripts/jobq.py` + `jobqueue/`
 
+**Campaign status table (2026-09-14): `scripts/queue_status.py`.** Read-only, one row per
+ACTIVE queue of a root (parked `PARKED-*` and `complete.stamp` queues hidden unless `--all`):
+priority, pin, pending/running/done/failed, median duration measured from the queue's own
+`results/*.json` (rc==0, cache hits <120 s dropped, ≥3 samples), trailing-3 h completion
+rate, a per-queue ETA (wave = median-based vs throughput = rate-based, shown as a range when
+they disagree; `queued<Q` = starved behind a higher/equal-priority running queue, `blocked` =
+idle with nothing above it), a cumulative `finish~` column (priority-order drain at the current
+global concurrency; `+` = lower bound), and a stale-claim count (age > 3× median). Backs the
+`/status` command (`.claude/commands/status.md`), which the `shell` sidekick runs so the lead
+model never composes the queue-inspection commands. Tests: `tests/test_queue_status.py`.
+
 **CPU thread cap is enforced by default (2026-08-21).** `subliminal_learning/__init__.py` sets `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`OPENBLAS_NUM_THREADS` to `min(4, cpu_count)` at import when none is set, and calls `torch.set_num_threads` if torch was imported first; `~/.zshenv` applies the same `${VAR:-4}` fallback to every zsh-launched process. Any pre-set value wins, so jobq's per-job `gpu_policy` env (2) and explicit `OMP_NUM_THREADS=1` CPU runs are unchanged; `SL_DEFAULT_THREADS` changes the fallback. Motivation: torch defaults to all 48 cores per process — four uncapped direct `adapter_norms_probe` runs drove load to 51 and starved the GPU pool. Test: `tests/test_thread_cap.py`.
 
 **CUDA MPS is the default GPU-sharing mode (2026-08-12).** `GpuPolicy.mps` defaults
@@ -400,6 +411,13 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   not-yet-allocated headroom. With it, `free_mem_mib` is the honest per-job requirement
   rather than a padded floor, and a GPU with other resident occupancy de-rates itself
   automatically via the reservation ledger instead of being excluded by hand.
+- **Memory reserve (2026-09-15)**: `reserve_mem_mib` (`gpu_policy` key, default 0 = off)
+  is MiB every policy GPU must still show free *after* an admission — unlike `free_mem_mib`
+  (the default per-job ask) it is never handed to a job, so it caps a node by memory rather
+  than by slots and leaves room for a collaborator's run to start (live on
+  `goncalo-temp-1` at 16000). It gates the fast path and the OOM-escalation ceiling too,
+  is hot-reloaded per acquire, and `jobq status` appends `reserve_mem_mib=<N>` to the slot
+  occupancy line when nonzero.
 - **CPU-only budget (2026-08-10)**: a queue declaring `--slots 0` is fully CPU-bound —
   its jobs run with `CUDA_VISIBLE_DEVICES` emptied and take a slot from the **separate
   node-wide `cpu_cap` budget** (`gpu_policy` key; default `cpu_count // 4`, own
@@ -2000,6 +2018,17 @@ seeds within a cell are correlated: `fit_collapse_law` (statsmodels cluster-robu
 covariance → delta method on the ratios) and `cluster_bootstrap_ratios` (scikit-learn ridge,
 matching §12's `pen=1e-3` objective). The design is near-separable, so only the *ratios*
 `b`, `c` are identified — never report the raw coefficient magnitudes.
+`separation_status(frame)` (2026-09-14) is the companion diagnostic: it uses an LP on the
+same log design to classify a population as `complete`, `quasi` or `none` separation. Under
+complete/quasi-complete separation the unpenalized MLE has no finite maximizer, so `fit_collapse_law`
+raises a singular Hessian or reports non-convergence; that is a property of the outcome pattern on
+the grid, not an optimizer failure. The ICLR trajectory snapshot records the class per checkpoint
+(`separation`/`reason` columns); all ten OLMo trajectory gaps are separation cases.
+`max_margin_ratios(frame)` and `separating_exponent_set(frame)` (09-14) are the companion comparison
+quantities used ONLY where the MLE is missing: the exact hard-margin plane (QP; the limit direction of
+the logistic fit on separable data) and the LP range of exponents over all perfectly separating planes
+(a grid-resolution statement, not a CI). Figures 2/C2 draw them as open squares with bars at those
+checkpoints; tables carry `b_svm`/`c_svm`/`svm_kind` and `b_set_lo/hi`, `c_set_lo/hi` for every row.
 
 The notebook's §11 appendix shows the raw material behind the fit as per-lineage heatmap grids
 in the house §8 convention of `cross_model_student_hp_exploration.ipynb` (y = lr, x = rank, one
@@ -4295,3 +4324,49 @@ content-addressed comparison (location keys ignored). Existing cells are never r
 ep10/ep20 `--force` exists only to add the per-epoch checkpoints the pre-existing runs lack. Campaign home, configs,
 jobs generator, README and post-drain verifier: `run_logs/teacher_nonadaptive_olmo_qwen/`; queues
 `tnon-{olmo,qwen}-{tft-ep5,tft-ep10,tft-ep20,probe,traj}` under `run_logs/queue_angela`.
+
+### 2026-09-14 — training-progress boundary figure and teacher trajectories
+
+Figure 2 uses percentage of the specified training budget in all panels, with a
+normalized 5%-warm-up/cosine schedule reference in panel a. Budgets are 25,000
+steps for Pythia students, 12,500 for OLMo, 6,250 for Qwen, and 60 for the
+20-epoch Pythia teachers; these are not inferred from the last observed checkpoint.
+The student-manifest audit covered 1,856 Pythia and 864 OLMo runs, plus Qwen's
+288 archived manifests. All specify cosine scheduling and 0.05 warmup. Cross-data-order
+Pythia manifests omit `planned_train_steps` but record the complete 25,000-step run.
+
+`docs/paper/prepare_teacher_trajectory.py` fits the frozen 504-run teacher cohort
+from saved CE trajectories, without GPU evaluation. It checks run identity,
+actual manifests, probe-pool identity, finite CE, duplicate endpoint records,
+and endpoint labels. Independent endpoint evaluations differ by at most 0.000406
+nats, with no label differences; an explicit 0.001-nat bound and exact label
+agreement guard this comparison. Source trajectory, manifest, and probe hashes
+are archived in `teacher_trajectory_provenance.json` alongside coverage and recovery.
+The teacher series contains twenty checkpoints and one rejected free fit, at 5%.
+The ten OLMo free-fit gaps also retain all 432 outcomes per checkpoint. Fixed-shape
+threshold calibration is independent of free-fit validity; plot metadata retains
+the gaps, and the paper corrects the previously omitted cross-seed threshold at 40%.
+The 5-epoch teacher cohort has endpoint data but no CE trajectory in this figure.
+Tests cover real figure rendering and normalization, invalid-fit gaps, teacher
+provenance, duplicate endpoints, and independent fixed-threshold estimation.
+
+The temporal result is consolidated into §4.1 before the practical sweep-design
+paragraph. Figure 2 now summarizes the eight arm-specific fits in five groups
+defined by model family, width, and task; Pythia-160M students, Pythia-410M students,
+and OLMo each combine two arms, while Qwen and Pythia teachers remain separate.
+`fig03_checkpoint_fits_grouped.csv` retains 130 group/checkpoint rows with equal-arm
+means, min/max ranges, fixed membership, and metric-specific valid-arm counts.
+Threshold ratios are normalized within each arm before averaging. Missing or
+invalid constituents leave gaps, without interpolation or changing group membership.
+These are summaries of separate fits, not refits of pooled outcomes. Figure C2
+(`figS_training_by_arm`) preserves the eight separate curves. Tests cover unequal
+population sizes, missing constituents, duplicate arm/checkpoints, actual plotted
+NaNs, and both main/appendix renders. The optimizer and component sections are
+renumbered §4.2 and §4.3, respectively, with matching caption anchors.
+
+### LR schedule tag ownership
+
+Shared LR schedule suffix parsing and sweep override helpers live in
+`subliminal_learning.schedule_tags`; GKD layout owns only GKD paths and optimizer helpers.
+SDF passes its cosine/3% recipe as its canonical schedule so existing suffix-less SDF paths
+remain byte-identical, while noncanonical SDF schedules receive distinct suffixes.

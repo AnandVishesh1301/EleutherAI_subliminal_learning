@@ -48,6 +48,7 @@ from subliminal_learning.teachers.model_specs import (
     spec_label,
 )
 from subliminal_learning.gkd.layout import optim_slug
+from subliminal_learning.schedule_tags import schedule_overrides
 from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
 from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
@@ -206,6 +207,11 @@ def main(
     if optim is not None:
         optim_slug(str(optim))
     train_overrides = {"append_eos": append_eos, **({"optim": str(optim)} if optim is not None else {})}
+    # LR-schedule arm (2026-09-15): the same two keys select the `_sch{type}wu{pct}`-tagged
+    # cells the training sweep wrote (this sweep reuses that YAML). Absent = canonical cells.
+    train_overrides.update(
+        schedule_overrides(pick("lr_scheduler_type"), pick("warmup_ratio"))
+    )
     base_specs = (
         [base.spec] if base_models.lower() == "config"
         else parse_base_model_tokens(base_models, allow_full_seeds=allow_full_seeds)

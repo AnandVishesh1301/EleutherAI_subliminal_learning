@@ -61,7 +61,10 @@ LINEAGE = {
     "subsample_seed": 42,
 }
 
-TAG_RE = re.compile(r"ep20_lr([0-9.e-]+)_r(\d+)a(\d+)")
+# Anchored at the tag's end (the key spells it between ``|`` delimiters): an arm tag
+# (``..._r8a32_schconstwu0``, ``..._sgd``) is NOT a canonical strip cell, and the unanchored
+# search would silently fold it into one on a rerun.
+TAG_RE = re.compile(r"ep20_lr([0-9.e-]+)_r(\d+)a(\d+)(?![\w])")
 
 
 def _parse_cells() -> dict[tuple[str, int, int], int]:

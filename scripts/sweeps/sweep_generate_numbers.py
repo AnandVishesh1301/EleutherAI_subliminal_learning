@@ -49,6 +49,7 @@ from subliminal_learning.teachers.model_specs import (
     spec_label,
 )
 from subliminal_learning.gkd.layout import optim_slug
+from subliminal_learning.schedule_tags import schedule_overrides
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
     model_dir_parts,
@@ -159,6 +160,12 @@ def main(
     if optim is not None:
         optim_slug(str(optim))
     train_overrides = {"append_eos": append_eos, **({"optim": str(optim)} if optim is not None else {})}
+    # LR-schedule arm (2026-09-15): the same two keys select the `_sch{type}wu{pct}`-tagged
+    # teacher cells, whose pools land at the matching suffixed numbers paths. Absent =
+    # canonical cells (shared helper, so no sweep can silently resolve the wrong tree).
+    train_overrides.update(
+        schedule_overrides(pick("lr_scheduler_type"), pick("warmup_ratio"))
+    )
     animals = (
         [a.strip() for a in animals.split(",")] if animals
         else resolve_animals(pick("animals"), base.paths, int(pick("n_animals", 5)))
