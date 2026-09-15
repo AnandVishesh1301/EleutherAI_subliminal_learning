@@ -226,3 +226,29 @@ with Δ_tb, the pick would flip to 8e-4 only if gseed1's lr8e-4 `p_target` excee
   quarantined under `*.20260911T1500Z_doublewrite`, retrained, and re-scored. For all
   286 scored seeds, the summary's adapter hash equals the sha256 of the adapter now on
   disk.
+
+### 9.1 Completion record (2026-09-15, after scoring)
+
+- **What was scored.** The two gseed1 leaves were scored on goncalo-temp-1 (GPU 6)
+  from its pin of `1068bd2`, at 06:29Z; records are in
+  `run_logs/xfam_evalfix_20260915/`.
+  - The other seeds and the base controls were served from cache. 42 of the 48
+    snapshotted files, adapters included, are byte-identical before and after.
+  - gseed1 reads lr8e-4 treatment `p_target` 0.533 and lr4e-4 student-base control
+    0.002.
+- **Tree coverage.** 288 of 288 leaves are covered by their summaries; the adapter
+  hash matches for all 288, 0 matched controls are missing and 0 leaves are
+  quarantined.
+- **Results.** `finalize_core` wrote `CAMPAIGN_DONE` and every results artifact at
+  06:33Z. The tables and claims are identical under the pinned code and the soar
+  checkout. Every cell has n = 3, and the three replication cells n = 6.
+- **lr\* sensitivity.** On complete data Δ_tb is 0.449 at 8e-4 and 0.406 at 4e-4, so
+  the §6 rule would pick **8e-4**. Per §9 the persisted 4e-4 stands. The
+  replication gate at 4e-4 still passes: the per-gseed CI is [0.370, 0.474].
+- **Deadline branch.** The driver also fired `deadline_pause`. Its `truncated` list
+  names `xfam-t3-dose-neox-controls-*` and `xfam-t4-dose-qwen-controls-*`: these
+  queues never exist, because the dose arms reuse the ladder controls, yet
+  `xfam_plan.arm_queue_names` still lists them. So no tail work was cut, and the t3
+  and t4 treatments are 3/3 each. The pause set the per-host stop sentinel on soar
+  from 06:33:29Z to 06:34:39Z. It was cleared with `campaign_control resume`; the
+  opdlim2 pool on soar lost about 4 slot-minutes and had no failures.
