@@ -178,3 +178,51 @@ Cross-tokenizer pairs (they need a cross-tokenizer OPD loss, which approximates 
 teacher distribution exactly at the low-probability disagreement points the top-K
 campaign showed carry the signal); a second animal; the attention-free architecture
 rung (Mamba, above); width-only or depth-only decompositions; anything at 7B scale.
+
+## 9. Amendment — completion after the core drained (filed 2026-09-15)
+
+Filed before the two missing seeds below were scored. No claim, threshold, arm or
+statistic in §1–§8 changes.
+
+**What stopped the run.** Every queue finished rc=0 and all 288 cells trained, but
+`finalize_core` raised on 2026-09-14 (`KeyError: ('bear', 'pythia-410m-deduped',
+'lmb1.0_b1.0_lora_lr4e-4_e1_r8a16', 1)`) and no results were written. The a2 eval
+queue ran on 2026-09-11 while the lr8e-4 treatment shard and the lr4e-4 student-base
+control shard sat between OOM-failed attempts, so both cell summaries were written over
+gseeds {0, 2} (`skipped_incomplete_seeds: [1]`). Auto-requeue finished both gseed1
+leaves on 2026-09-12, but the eval sweep's skip gate only checked that summary files
+existed, so later eval passes skipped both cells and gseed1 was never scored.
+
+**Fix and completion.** Branch `vishesh/xfam-evalfix` (from `ae12a58`): the gate now
+re-opens a cell whose `ft_seeds` omits a complete `gseed{N}`. The eval pipeline reuses
+every already-scored seed from its adapter-hash-keyed per-seed cache, so only the two
+gseed1 leaves are scored. The run set is re-pinned with `scripts.reconcile_run_set`,
+nothing retrains, and the environment lock is the one the cells ran with (the lock
+uv regenerated in the `d3db9a95` pin).
+
+**lr\* stays frozen.** §6 says gates are read back and never recomputed. The
+pythia-410m-deduped pick (lr\* = 4e-4, tie band) was made while its lr8e-4 treatment
+cell and lr4e-4 student-base control cell each covered 2 of 3 gseeds. It stands however
+gseed1 scores, because a10 and t5 already trained at 4e-4. The analysis reports, as a
+sensitivity check, the pick replayed on complete data. Recorded now: under the §6 rule
+with Δ_tb, the pick would flip to 8e-4 only if gseed1's lr8e-4 `p_target` exceeds
+**0.4637**.
+
+**Deviations as run, verified from disk on 2026-09-15; none changes a decision.**
+
+- *LR pick.* For cross students the pick used treatment minus the mean of both
+  control classes, not Δ_tb. The difference is ≤ 0.0004 at every rung, and replaying
+  §6 with Δ_tb reproduces all five picks.
+- *Replication gate.* Its CI was bootstrapped over one cell-level row, so
+  `ci_low = ci_high`. Replayed per gseed with the §4 matched Δ_primary, all five CIs
+  exclude 0 with means ≥ 0.02, so the same five students replicate.
+- *Teacher admission.* `control_sd` was null, so the 5·SD clause was never applied.
+  Admission rested on the ≥ 0.02 floor and the perplexity cap. Admitted teachers score
+  0.36–0.66 against base priors of 0.002–0.008.
+- *Budget.* §7 is superseded as run: 2 cells per card at 23 000 MiB after the
+  3-per-card packing OOMed, and `DEADLINE_HOURS = 84`.
+- *Double-write incident.* On 2026-09-11 around 15:00Z a pool restart relaunched live
+  cells, fixed by `d882c78`. The 23 ladder leaves written by two processes were
+  quarantined under `*.20260911T1500Z_doublewrite`, retrained, and re-scored. For all
+  286 scored seeds, the summary's adapter hash equals the sha256 of the adapter now on
+  disk.

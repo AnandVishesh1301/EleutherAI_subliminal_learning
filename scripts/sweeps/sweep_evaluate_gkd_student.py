@@ -64,7 +64,11 @@ from subliminal_learning.teachers.model_specs import parse_base_models, spec_lab
 from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.training.run_set import is_valid_run_set_id, run_set_subdir
 from subliminal_learning.utils.logging_setup import configure_loguru
-from subliminal_learning.utils.run_io import acquire_claim, release_claim
+from subliminal_learning.utils.run_io import (
+    acquire_claim,
+    checkpoint_is_complete,
+    release_claim,
+)
 
 # The SDF ladder + the held-out generalization probe (`test`, never in any training).
 DEFAULT_GKD_STUDENT_SET_NAMES = DEFAULT_SDF_TEACHER_SET_NAMES + ("test",)
@@ -100,6 +104,27 @@ def _should_benchmark(
     )
 
 
+def _uncovered_seeds(param_dir: Path) -> list[int]:
+    """Complete ``gseed{N}`` dirs missing from the summary's ``ft_seeds``.
+
+    A summary written while a seed was still training covers fewer seeds than
+    are trained now. Non-numeric suffixes (quarantined copies) are ignored; an
+    unreadable summary, or one without ``ft_seeds``, reports none.
+    """
+    try:
+        doc = yaml.safe_load((param_dir / "preference_summary.json").read_text())
+        covered = {int(seed) for seed in doc["ft_seeds"]}
+    except (OSError, yaml.YAMLError, TypeError, KeyError, ValueError):
+        return []
+    seeds = (
+        int(d.name.removeprefix("gseed"))
+        for d in param_dir.glob("gseed*")
+        if d.name.removeprefix("gseed").isdigit()
+        and checkpoint_is_complete(d / "checkpoints")
+    )
+    return sorted(seed for seed in seeds if seed not in covered)
+
+
 def _cell_done(
     param_dir: Path,
     run_benchmarks: bool,
@@ -108,7 +133,9 @@ def _cell_done(
 ) -> bool:
     """Coarse skip gate: all three summaries present (benchmarks too, if required).
 
-    Keep in lockstep with ``campaign.expected.verify_summaries_complete``.
+    Keep in lockstep with ``campaign.expected.verify_summaries_complete``, except
+    that a summary missing a now-complete ``gseed{N}`` (`_uncovered_seeds`) is
+    not done here, so the pipeline scores that seed from its per-seed cache.
     When ``required_prompt_sets`` is non-empty, ``preference_summary.json``
     must also list every requested set (unreadable/malformed counts as not
     done).
@@ -117,6 +144,8 @@ def _cell_done(
     fc = (param_dir / "sdf_forced_choice_summary.json").exists()
     cap_path = param_dir / "sdf_capability_summary.json"
     if not (pref and fc and cap_path.exists()):
+        return False
+    if _uncovered_seeds(param_dir):
         return False
     if run_benchmarks:
         try:
