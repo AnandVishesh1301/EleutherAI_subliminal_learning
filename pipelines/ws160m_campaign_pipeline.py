@@ -237,6 +237,33 @@ def _submitted_queues(cfg: driver_io.CampaignDriverConfig) -> list[str]:
     return [q for q in cfg.queue_priorities if store.queue_exists(cfg.queue_root, q)]
 
 
+def _repin_submitted_queues(
+    cfg: driver_io.CampaignDriverConfig, state: dict
+) -> str | None:
+    """Point already-submitted queues at an explicit `code_sha` that differs from state.
+
+    The run-set card must already carry the new pin (`scripts.reconcile_run_set`).
+    """
+    recorded = state.get("code_sha")
+    if not recorded or not cfg.code_sha or str(cfg.code_sha) == str(recorded):
+        return None
+    new = code_pin_io.resolve_commit_sha(cfg.repo_root, cfg.code_sha)
+    old = code_pin_io.resolve_commit_sha(cfg.repo_root, str(recorded))
+    if new == old:
+        return None
+    names = _submitted_queues(cfg)
+    if cfg.dry_run:
+        return f"would re-pin {len(names)} queues {old[:12]} -> {new[:12]}"
+    defaults = driver_io.queue_job_defaults(cfg)
+    for name in names:
+        store.update_queue_defaults(cfg.queue_root, name, defaults)
+    state.setdefault("repins", []).append(
+        {"at": utc_now_iso(), "from": old, "to": new, "queues": names}
+    )
+    state["code_sha"] = new
+    return f"repin_queues({len(names)})"
+
+
 def _all_ready(
     cfg: driver_io.CampaignDriverConfig,
     names: Sequence[str],
@@ -935,7 +962,8 @@ def run(
         raise CampaignGateError(f"invalid run_set_id {cfg.run_set_id!r}")
     p = _partition(cfg, opts)
     state = driver_io.load_state(cfg)
-    if state.get("code_sha"):
+    explicit_sha = cfg.code_sha is not None
+    if not explicit_sha and state.get("code_sha"):
         cfg = replace(cfg, code_sha=str(state["code_sha"]))
     pin_note = driver_io.ensure_campaign_code_pin(cfg)
     fired: list[str] = []
@@ -944,6 +972,10 @@ def run(
     _open_window(state, opts)
     if pin_note:
         fired.append(pin_note)
+    repin_note = _repin_submitted_queues(cfg, state) if explicit_sha else None
+    if repin_note:
+        driver_io.save_state(cfg, state)
+        fired.append(repin_note)
     tr = state["transitions"]
 
     if "preflight" not in tr:

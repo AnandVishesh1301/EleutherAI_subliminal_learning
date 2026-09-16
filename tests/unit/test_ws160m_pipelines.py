@@ -351,3 +351,37 @@ def test_missing_model_assets_walks_refs_and_manifests(tmp_path: Path) -> None:
     assert (
         missing_model_assets("dosehp", wave=1, hub_cache=hub, base_models_root=bm) == []
     )
+
+
+def test_explicit_code_sha_repins_every_submitted_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Fake(monkeypatch, "main")
+    clock = [_T0]
+    run(_cfg(tmp_path, "main"), _opts(tmp_path, "main", clock))
+    submitted = {name for name, _ in fake.submitted}
+    assert submitted
+    updated: dict[str, dict] = {}
+    monkeypatch.setattr(pipe.code_pin_io, "resolve_commit_sha", lambda root, sha: sha)
+    monkeypatch.setattr(
+        pipe.driver_io, "queue_job_defaults", lambda cfg: {"cwd": f"pin/{cfg.code_sha}"}
+    )
+    monkeypatch.setattr(
+        pipe.store,
+        "update_queue_defaults",
+        lambda root, name, defaults: updated.__setitem__(name, defaults),
+    )
+    new = "1" * 40
+    result = run(_cfg(tmp_path, "main", code_sha=new), _opts(tmp_path, "main", clock))
+    assert any(f.startswith("repin_queues") for f in result.fired)
+    assert set(updated) == submitted
+    assert all(d == {"cwd": f"pin/{new}"} for d in updated.values())
+    state = json.loads(
+        (tmp_path / "out" / "gkd_students" / plan.MAIN_RUN_SET_ID / "logs")
+        .joinpath("campaign_state.json")
+        .read_text()
+    )
+    assert state["code_sha"] == new and state["repins"][-1]["to"] == new
+    updated.clear()
+    again = run(_cfg(tmp_path, "main", code_sha=new), _opts(tmp_path, "main", clock))
+    assert not any(f.startswith("repin_queues") for f in again.fired) and not updated
