@@ -421,9 +421,7 @@ def _dataset_checks(
     if plan.partition(opts.partition).trains_teachers:
         from subliminal_learning.sdf.docs_io import resolve_sdf_docs_path
 
-        exp_doc = yaml.safe_load(
-            (cfg.repo_root / plan.TEACHER_EXPERIMENT_CONFIG).read_text()
-        )
+        exp_doc = yaml.safe_load(Path(plan.TEACHER_EXPERIMENT_CONFIG).read_text())
         animals = sorted(
             {c.animal for c in pairs.teacher_combos(opts.partition, wave=models.WAVE_2)}
         )
