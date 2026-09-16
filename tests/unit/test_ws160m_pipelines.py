@@ -181,9 +181,12 @@ def test_dosehp_advances_controls_wait_students_finalize(
         "ws160m-dosehp-controls",
         "ws160m-dosehp-dose-bear",
     )
-    assert set(fake.deps("ws160m-dosehp-evals-hp")) == {
-        f"ws160m-dosehp-hp-{plan.recipe_slug(r)}" for r in plan.HP_RECIPES
-    } - {f"ws160m-dosehp-{s}" for s in plan.DEFERRED_STAGES["dosehp"]}
+    for r in plan.HP_RECIPES:
+        stage = f"hp-{plan.recipe_slug(r)}"
+        if stage not in plan.DEFERRED_STAGES["dosehp"]:
+            assert fake.deps(f"ws160m-dosehp-evals-{stage}") == (
+                f"ws160m-dosehp-{stage}",
+            )
     assert not r2.done
     fake.complete.update(fake.names())
     r3 = run(cfg, opts)

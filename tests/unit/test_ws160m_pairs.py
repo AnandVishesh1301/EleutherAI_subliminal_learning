@@ -156,13 +156,19 @@ def test_controls_are_owned_once_and_cover_every_cell() -> None:
         for ctrl in pairs.controls_of(name, wave=2):
             key = ctrl.key()[:4]
             assert owners.setdefault(key, name) == name
-    needed = {c.control_key() for c in pairs.all_cells(wave=2)}
+    needed = {
+        c.control_key()
+        for name in plan.PARTITION_ORDER
+        for c in pairs.active_cells_of(name, wave=2)
+    }
     assert set(owners) == needed
+    assert needed < {c.control_key() for c in pairs.all_cells(wave=2)}
     assert len(pairs.controls_of("main", wave=1)) == 33
     assert len(pairs.controls_of("main", wave=2)) == 36
-    assert len(pairs.controls_of("ladder")) == 108
-    assert len(pairs.controls_of("dosehp")) == 165
-    assert len(pairs.controls_of("extra")) == 126
+    assert len(pairs.controls_of("ladder")) == 81
+    assert len(pairs.controls_of("dosehp")) == 144
+    assert len(pairs.controls_of("extra")) == 72
+    assert len(pairs.active_cells_of("dosehp")) < len(pairs.cells_of("dosehp"))
     foreign = pairs.foreign_controls_of("extra")
     assert len(foreign) == 9 and all(
         pairs.control_owner(k) in ("main", "ladder") for k in foreign

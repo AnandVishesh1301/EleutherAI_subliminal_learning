@@ -500,7 +500,8 @@ def queue_priorities(p: Partition) -> Mapping[str, int]:
         order += [f"r{r}" for r in LADDER_RUNG_PRIORITY] + ["evals"]
     elif p.name == "dosehp":
         order += ["dose-bear", "evals-dose-bear"]
-        order += [_hp_stage(r) for r in HP_RECIPES] + ["evals-hp"]
+        for r in HP_RECIPES:
+            order += [_hp_stage(r), f"evals-{_hp_stage(r)}"]
     elif p.name == "extra":
         order = ["xbase", "controls", "evals-xbase"]
         for arm in (

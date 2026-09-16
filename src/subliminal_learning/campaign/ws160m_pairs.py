@@ -544,10 +544,54 @@ def controls_required(cells: Iterable[Cell]) -> tuple[tuple, ...]:
     return tuple(dict.fromkeys(c.control_key() for c in cells))
 
 
+_EXTRA_STAGES: dict[str, str] = {
+    "dose_cat_eagle": "dose-cat-eagle",
+    "heatmap": "heatmap",
+    "teacher_dose": "teacher-dose",
+    "dose3_cat_eagle": "dose3-cat-eagle",
+    "dose_dog": "dose-dog",
+}
+_BOOST_A_CATEGORIES = ("SI_SS", "DI_SS")
+
+
+def student_stage(leaf: Leaf) -> str:
+    """Queue stage of a student leaf within its partition."""
+    cell = leaf.cell
+    p = cell.partition
+    if p.name == "main":
+        if cell.arm == "wave2":
+            return "w2-students"
+        if leaf.replicate < plan.LEAVES_DEFAULT:
+            return "core"
+        return "boost-a" if cell.category in _BOOST_A_CATEGORIES else "boost-b"
+    if p.name == "ladder":
+        return f"r{cell.student_step}"
+    if p.name == "dosehp":
+        if cell.arm == "dose_bear":
+            return "dose-bear"
+        return f"hp-{plan.recipe_slug(cell.recipe)}"
+    return _EXTRA_STAGES[cell.arm]
+
+
+def deferred(leaf: Leaf) -> bool:
+    """Whether a leaf's stage is deferred out of this window (`plan.DEFERRED_STAGES`)."""
+    return student_stage(leaf) in plan.DEFERRED_STAGES.get(leaf.cell.partition.name, ())
+
+
+def active_leaves(cells: Sequence[Cell]) -> list[Leaf]:
+    """Leaves of `cells` that this window trains."""
+    return [lf for lf in leaves_of(cells) if not deferred(lf)]
+
+
+def active_cells_of(partition: str, *, wave: int = models.WAVE_NOW) -> tuple[Cell, ...]:
+    """Cells with at least one leaf trained in this window."""
+    return tuple(c for c in cells_of(partition, wave=wave) if active_leaves([c]))
+
+
 def controls_of(partition: str, *, wave: int = models.WAVE_NOW) -> tuple[Control, ...]:
-    """Control leaves `partition` trains: required by its cells and owned by it."""
+    """Control leaves `partition` trains: required by its active cells and owned by it."""
     out: list[Control] = []
-    for key in controls_required(cells_of(partition, wave=wave)):
+    for key in controls_required(active_cells_of(partition, wave=wave)):
         if control_owner(key) != partition:
             continue
         animal, base, step, tag = key

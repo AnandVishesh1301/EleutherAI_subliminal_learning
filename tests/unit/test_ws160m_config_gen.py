@@ -145,7 +145,7 @@ def test_queue_routing_by_replicate_rung_recipe_and_arm() -> None:
     assert cgen.eval_queue("main", "ws160m-main-w2-controls") == "ws160m-main-w2-evals"
     assert (
         cgen.eval_queue("dosehp", "ws160m-dosehp-hp-lr1e-4_r8a16")
-        == "ws160m-dosehp-evals-hp"
+        == "ws160m-dosehp-evals-hp-lr1e-4_r8a16"
     )
     assert (
         cgen.eval_queue("extra", "ws160m-extra-controls")

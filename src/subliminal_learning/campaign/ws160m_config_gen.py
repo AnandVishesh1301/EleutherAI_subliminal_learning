@@ -9,7 +9,7 @@ ladder of one (animal, base@step).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 from subliminal_learning.campaign import ws160m_models as models
 from subliminal_learning.campaign import ws160m_pairs as pairs
@@ -30,14 +30,6 @@ CTRL_INFIX = "ctrl_"
 XBASE_INFIX = "xbase_"
 VERIFY_INFIX = "verify_"
 _TRAIN_PREFIXES = (STUDENT_PREFIX, TEACHER_PREFIX)
-_EXTRA_STAGES: Mapping[str, str] = {
-    "dose_cat_eagle": "dose-cat-eagle",
-    "heatmap": "heatmap",
-    "teacher_dose": "teacher-dose",
-    "dose3_cat_eagle": "dose3-cat-eagle",
-    "dose_dog": "dose-dog",
-}
-_BOOST_A_CATEGORIES = ("SI_SS", "DI_SS")
 
 
 def _slug(token: str) -> str:
@@ -123,34 +115,9 @@ def is_teacher_yaml(name: str) -> bool:
 
 # ---- queues -----------------------------------------------------------------------
 
-
-def student_stage(leaf: pairs.Leaf) -> str:
-    """Queue stage of a student leaf within its partition."""
-    cell = leaf.cell
-    p = cell.partition
-    if p.name == "main":
-        if cell.arm == "wave2":
-            return "w2-students"
-        if leaf.replicate < plan.LEAVES_DEFAULT:
-            return "core"
-        return "boost-a" if cell.category in _BOOST_A_CATEGORIES else "boost-b"
-    if p.name == "ladder":
-        return f"r{cell.student_step}"
-    if p.name == "dosehp":
-        if cell.arm == "dose_bear":
-            return "dose-bear"
-        return f"hp-{plan.recipe_slug(cell.recipe)}"
-    return _EXTRA_STAGES[cell.arm]
-
-
-def deferred(leaf: pairs.Leaf) -> bool:
-    """Whether a leaf's stage is deferred out of this window (`plan.DEFERRED_STAGES`)."""
-    return student_stage(leaf) in plan.DEFERRED_STAGES.get(leaf.cell.partition.name, ())
-
-
-def active_leaves(cells: Sequence[pairs.Cell]) -> list[pairs.Leaf]:
-    """Leaves of `cells` that this window trains."""
-    return [lf for lf in pairs.leaves_of(cells) if not deferred(lf)]
+student_stage = pairs.student_stage
+deferred = pairs.deferred
+active_leaves = pairs.active_leaves
 
 
 def student_queue(leaf: pairs.Leaf) -> str:
@@ -189,7 +156,7 @@ def eval_queue(partition: str, train_queue: str) -> str:
         return plan.queue(p, "evals")
     if p.name == "dosehp":
         return plan.queue(
-            p, "evals-hp" if stage.startswith("hp-") else "evals-dose-bear"
+            p, f"evals-{stage}" if stage.startswith("hp-") else "evals-dose-bear"
         )
     if stage == "controls":
         return plan.queue(p, "evals-dose-cat-eagle")
