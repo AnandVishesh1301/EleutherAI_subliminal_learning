@@ -96,6 +96,9 @@ def load_number_manifests(output_root: Path) -> pd.DataFrame:
         rel = mpath.parent.relative_to(numbers).parts
         if "_dryrun" in rel:
             continue
+        # Derived pools (`.../ablations/{leaf}/poolseed{k}`) are not raw pools.
+        if "ablations" in rel:
+            continue
         doc = docs_by_dir.get(mpath.parent)
         if doc is None:
             continue

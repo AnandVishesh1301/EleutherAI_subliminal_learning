@@ -182,6 +182,19 @@ def _summarize_prob(p_list, rank_list, confidence):
 
 
 # --------------------------------------------------------------------------- currency
+def pref_identity_is_current(stored: dict, animals, prompt_hashes, ref) -> bool:
+    """The identity half of `eval_is_current`: animals SUPERSET, prompts, run reference.
+
+    Split out so the crash-partial (which by construction covers only SOME of the checkpoint
+    list) can be validated under exactly the predicates the currency gate applies.
+    """
+    return (
+        set(animals).issubset(set(stored.get("animals") or []))
+        and stored.get("prompt_hashes") == prompt_hashes
+        and stored.get("train_manifest_ref") == ref
+    )
+
+
 def eval_is_current(stored: dict, steps, animals, prompt_hashes, ref) -> bool:
     """True iff a stored eval covers this exact checkpoint list, animals, prompts, and run.
 
@@ -191,9 +204,7 @@ def eval_is_current(stored: dict, steps, animals, prompt_hashes, ref) -> bool:
     """
     return (
         stored.get("checkpoint_steps") == list(steps)
-        and set(animals).issubset(set(stored.get("animals") or []))
-        and stored.get("prompt_hashes") == prompt_hashes
-        and stored.get("train_manifest_ref") == ref
+        and pref_identity_is_current(stored, animals, prompt_hashes, ref)
     )
 
 
@@ -213,16 +224,75 @@ def points_lacking_ce(stored: dict) -> int:
     A point flagged ``nonfinite`` was never scored, so it is exempt; every other point
     must have the CE readout that is now the primary label.
     """
-    def _finite(v) -> bool:
-        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    return sum(1 for p in stored.get("points", []) if not point_has_ce(p))
 
-    return sum(1 for p in stored.get("points", [])
-               if not p.get("nonfinite") and not _finite(p.get("delta_ce")))
+
+def point_has_ce(point: dict) -> bool:
+    """True when one measured point carries a finite ``delta_ce`` (a ``nonfinite`` point is
+    exempt: it was never scored)."""
+    v = point.get("delta_ce")
+    return bool(point.get("nonfinite")) or (
+        isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v))
 
 
 def record_has_ce(stored: dict) -> bool:
     """True when a stored record carries the ΔCE readout throughout (`ce_base` + points)."""
     return "ce_base" in stored and points_lacking_ce(stored) == 0
+
+
+# --------------------------------------------------------------------------- crash partials
+def partial_path(out_path: Path) -> Path:
+    """Sidecar path holding the per-checkpoint rows evaluated so far (`*.partial.json`).
+
+    A sidecar rather than rewriting the final artifact after every checkpoint: the completed
+    records carry no completeness marker, so an incomplete file at the final path would read
+    as a finished trajectory to every existing reader (and, if the ladder shrank, even pass
+    the currency gate). The final artifact therefore stays all-or-nothing, and the sidecar --
+    which no reader knows about -- carries the durability.
+    """
+    return out_path.with_suffix(".partial.json")
+
+
+def write_partial(path: Path, identity: dict, rows: list[dict]) -> None:
+    """Atomically rewrite the sidecar with every row measured so far (identity + points)."""
+    atomic_write_json(path, {**identity, "points": rows})
+
+
+def row_is_reusable(row: dict) -> bool:
+    """False for a ``nonfinite`` row: that verdict is never carried over from a partial.
+
+    A non-finite adapter can be transient (a checkpoint dir still being written, a torn
+    safetensors, a half-synced CephFS read), and before the sidecar existed a retry always
+    re-measured it. The row is still WRITTEN (a mostly-dead ladder keeps advancing its
+    sidecar), but the next attempt re-loads the checkpoint; a genuine non-finite verdict is
+    simply produced again and reaches the final artifact as before.
+    """
+    return not row.get("nonfinite")
+
+
+def read_partial(path: Path, points, identity_ok, row_ok) -> dict[tuple[int, str], dict]:
+    """Reusable rows of a crash partial, keyed by ``(step, checkpoint name)``.
+
+    Empty (i.e. everything is recomputed) when the sidecar is missing, unreadable, or fails
+    `identity_ok` -- rows of a different identity are DISCARDED, never merged. Rows for
+    checkpoints that no longer exist on disk are dropped, so a ladder that changed between
+    attempts keeps only its surviving points.
+
+    Two workers on one run dir are safe but not coordinated: each atomic rewrite of the
+    sidecar is whole-file, so a reader never sees a torn partial; the loser's extra rows are
+    simply overwritten and its checkpoints re-evaluated.
+    """
+    if not path.exists():
+        return {}
+    try:
+        stored = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not identity_ok(stored):
+        return {}
+    live = {(s, c.name) for s, c in points}
+    return {(r.get("step"), r.get("checkpoint")): r for r in stored.get("points", [])
+            if (r.get("step"), r.get("checkpoint")) in live and row_ok(r)}
 
 
 # --------------------------------------------------------------------------- endpoint probe
@@ -314,17 +384,34 @@ def pref_trajectory(
             return None
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Crash-resume: rows a killed attempt already measured, under the gate's own predicates.
+    identity = {"kind": "pref_traj_partial", "animals": animals,
+                "prompt_hashes": prompt_hashes, "train_manifest_ref": ref}
+    ppath = partial_path(out_path)
+    done = {} if force else read_partial(
+        ppath, points,
+        lambda s: pref_identity_is_current(s, animals, prompt_hashes, ref),
+        row_is_reusable)
+    if done:
+        log.info("{} ftseed{}: resuming, {} of {} points from {}",
+                 tag, seed, len(done), len(points), ppath)
+
     model: PeftModel | None = None
     prev_adapter: str | None = None
     rows, t0 = [], time.time()
     try:
         for i, (step, ckpt) in enumerate(points):
+            prior = done.get((step, ckpt.name))
+            if prior is not None:
+                rows.append(prior)
+                continue
             name = f"ck{i}"
             model, ok = _load_ckpt_adapter(model, base, ckpt, name)
             if not ok:
                 log.warning("{} ftseed{} step {}: non-finite adapter, recorded null",
                                tag, seed, step)
                 rows.append({"step": step, "checkpoint": ckpt.name, "nonfinite": True})
+                write_partial(ppath, identity, rows)
                 if prev_adapter is not None:
                     model.delete_adapter(prev_adapter)
                 prev_adapter = name
@@ -360,6 +447,7 @@ def pref_trajectory(
                 model.delete_adapter(prev_adapter)
             prev_adapter = name
             rows.append(row)
+            write_partial(ppath, identity, rows)
     finally:
         if model is not None:
             _release_base(model.unload())   # give the caller its bare base back
@@ -382,6 +470,7 @@ def pref_trajectory(
         "n_samples": n_samples, "temperature": temperature, "confidence": confidence,
         "points": rows,
     })
+    ppath.unlink(missing_ok=True)
     log.info("{} ftseed{}: {} points in {:.0f}s -> {}",
                 tag, seed, len(rows), time.time() - t0, out_path)
     return out_path
@@ -426,6 +515,29 @@ def pile_kl_trajectory(
                         tag, seed, points_lacking_ce(stored))
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Crash-resume: only rows of the same pool identity, run ref and reference adapter, and
+    # only those carrying the delta_ce the currency gate demands (`record_has_ce`).
+    # The identity also pins the BASELINES the rows are relative to: every delta_ce is
+    # `ce - ce_base` and the reference KLs are read next to `kl_base_ref`, both recomputed
+    # from a freshly loaded base on the resuming attempt (possibly another node/GPU). Exact
+    # equality, since a baseline that differs at all makes the merged rows inconsistent with
+    # the `ce_base` the artifact declares; a mismatch discards the whole partial.
+    identity = {"kind": "pile_kl_traj_partial", **pile_id, "train_manifest_ref": ref,
+                "reference_adapter": None if reference_adapter is None else str(reference_adapter),
+                "ce_base": ce_base, "kl_base_ref": kl_base_ref}
+    ppath = partial_path(out_path)
+    done = {} if force else read_partial(
+        ppath, points,
+        lambda s: (pile_id_is_current(s, pile_id)
+                   and s.get("train_manifest_ref") == ref
+                   and s.get("reference_adapter") == identity["reference_adapter"]
+                   and s.get("ce_base") == ce_base
+                   and s.get("kl_base_ref") == kl_base_ref),
+        lambda r: row_is_reusable(r) and point_has_ce(r))
+    if done:
+        log.info("{} ftseed{}: resuming, {} of {} points from {}",
+                 tag, seed, len(done), len(points), ppath)
+
     model: PeftModel | None = None
     prev_adapter: str | None = None
     if ref_logp is not None:
@@ -436,12 +548,17 @@ def pile_kl_trajectory(
     rows, t0 = [], time.time()
     try:
         for i, (step, ckpt) in enumerate(points):
+            prior = done.get((step, ckpt.name))
+            if prior is not None:
+                rows.append(prior)
+                continue
             name = f"ck{i}"
             model, ok = _load_ckpt_adapter(model, base, ckpt, name)
             if not ok:
                 log.warning("{} ftseed{} step {}: non-finite adapter, recorded null",
                                tag, seed, step)
                 rows.append({"step": step, "checkpoint": ckpt.name, "nonfinite": True})
+                write_partial(ppath, identity, rows)
                 if prev_adapter is not None:
                     model.delete_adapter(prev_adapter)
                 prev_adapter = name
@@ -465,6 +582,7 @@ def pile_kl_trajectory(
                          # directly comparable to pile_probe_final's endpoint record.
                          "ce_adapted": out.ce,
                          "delta_ce": out.ce - ce_base})
+            write_partial(ppath, identity, rows)
     finally:
         if model is not None:
             if ref_logp is None:
@@ -497,6 +615,7 @@ def pile_kl_trajectory(
         "train_manifest_ref": ref,
         "points": rows,
     })
+    ppath.unlink(missing_ok=True)
     log.info("{} ftseed{}: {} points in {:.0f}s -> {}",
                 tag, seed, len(rows), time.time() - t0, out_path)
     return out_path

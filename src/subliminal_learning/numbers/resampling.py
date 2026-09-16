@@ -299,3 +299,78 @@ def overlap_stats(
             k: sum(v) / len(v) for k, v in sorted(by_len.items())
         },
     }
+
+
+def water_fill_sample(
+    rows: Sequence[Mapping[str, Any]],
+    profile: Mapping[int, float],
+    n: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Draw `n` rows WITHOUT replacement so their first numbers match `profile`.
+
+    Ported from the August ablation (`run_logs/entropy_match_ablation.py`): give every
+    target value its largest-remainder quota, cap it at the bin's supply, then water-fill
+    the capped deficit over the values that still have spare rows, proportionally to
+    target mass, until it is allocated or nothing has spare capacity. Only if the source
+    still cannot fill `n` (target mass on values it lacks entirely) is the remainder
+    topped up uniformly WITH replacement; the count is reported.
+    """
+    _validate_n(n)
+    if n and not rows:
+        raise ValueError("cannot sample a non-empty output from empty rows")
+    quotas = _quotas(profile, n)
+    by_first: dict[int, list[int]] = defaultdict(list)
+    for i, row in enumerate(rows):
+        by_first[_nums(row)[0]].append(i)
+    avail = {v: len(idx) for v, idx in by_first.items()}
+    alloc = {v: min(quotas.get(v, 0), avail.get(v, 0)) for v in set(quotas) | set(avail)}
+    capped_deficit = n - sum(alloc.values())
+    while (deficit := n - sum(alloc.values())) > 0:
+        spare = {
+            v: float(profile[v])
+            for v in profile
+            if profile[v] > 0 and avail.get(v, 0) - alloc.get(v, 0) > 0
+        }
+        if not spare:
+            break
+        moved = False
+        for v, extra in _quotas(spare, deficit).items():
+            add = min(extra, avail[v] - alloc.get(v, 0))
+            if add > 0:
+                alloc[v] = alloc.get(v, 0) + add
+                moved = True
+        if not moved:
+            break
+    rng = random.Random(seed)
+    picked: list[int] = []
+    for v, k in sorted(alloc.items()):
+        if k <= 0:
+            continue
+        bucket = by_first[v]
+        picked.extend(bucket if k >= len(bucket) else rng.sample(bucket, k))
+    residual = n - len(picked)
+    if residual > 0:
+        picked.extend(rng.choices(range(len(rows)), k=residual))
+    out = [deepcopy(dict(rows[i])) for i in picked]
+    rng.shuffle(out)
+    achieved = first_profile(out) if out else {}
+    total = sum(profile.values())
+    target = {k: float(v) / total for k, v in profile.items()}
+    tv = 0.5 * sum(
+        abs(achieved.get(k, 0.0) - target.get(k, 0.0))
+        for k in set(achieved) | set(target)
+    )
+    return out, {
+        "sampling": "water_fill_without_replacement_proportional_deficit",
+        "achieved_first_histogram_tv": tv,
+        "total_shortfall": capped_deficit,
+        "residual_shortfall": max(0, residual),
+        "topped_up_with_replacement": max(0, residual),
+        "distinct_source_rows": len(set(picked)),
+        "requested_profile": {int(k): float(v) for k, v in profile.items()},
+        "unreachable_target_mass": sum(
+            float(v) for k, v in profile.items() if k not in by_first
+        )
+        / total,
+    }

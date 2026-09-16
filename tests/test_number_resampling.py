@@ -9,7 +9,11 @@ from subliminal_learning.numbers.resampling import (
     uniform_sample,
 )
 import math
+from collections import Counter
+
 import pytest
+
+from subliminal_learning.numbers import resampling
 
 
 ROWS = [
@@ -103,3 +107,52 @@ def test_prompt_shuffle_moves_prompts_and_keeps_completions_paired():
     ]
     assert shuffle_prompts(rows, 3) == (out, fixed)
     assert shuffle_prompts(rows, 4)[0] != out
+
+
+def _wf_rows():
+    # value 1 is scarce (2 rows) while the target wants most of the pool there.
+    return (
+        [{"prompt": f"a{i}", "numbers": [1], "completion": "1"} for i in range(2)]
+        + [{"prompt": f"b{i}", "numbers": [2, i], "completion": f"2, {i}"} for i in range(40)]
+        + [{"prompt": f"c{i}", "numbers": [3], "completion": "3"} for i in range(40)]
+    )
+
+
+def test_water_fill_matches_target_better_than_uniform_and_stays_unique():
+    rows = _wf_rows()
+    target = {1: 0.5, 2: 0.3, 3: 0.2}
+    out, diag = resampling.water_fill_sample(rows, target, 20, 0)
+    assert len(out) == 20
+    assert diag["topped_up_with_replacement"] == 0
+    assert diag["distinct_source_rows"] == 20
+    assert len({r["prompt"] for r in out}) == 20
+    # The scarce bin is drained, not oversampled; the deficit water-fills the others.
+    assert Counter(r["numbers"][0] for r in out)[1] == 2
+    assert diag["total_shortfall"] == 8
+    uniform = resampling.uniform_sample(rows, 20, 0, replacement=False)
+    achieved = resampling.first_profile(uniform)
+    uniform_tv = 0.5 * sum(
+        abs(achieved.get(k, 0.0) - target.get(k, 0.0)) for k in set(achieved) | set(target)
+    )
+    assert diag["achieved_first_histogram_tv"] < uniform_tv
+
+
+def test_water_fill_is_deterministic_and_tops_up_only_when_source_is_short():
+    rows = _wf_rows()
+    target = {1: 0.5, 2: 0.3, 3: 0.2}
+    a, da = resampling.water_fill_sample(rows, target, 20, 3)
+    b, db = resampling.water_fill_sample(rows, target, 20, 3)
+    assert a == b and da == db
+    assert a != resampling.water_fill_sample(rows, target, 20, 4)[0]
+    scarce = rows[:2] + rows[2:5]
+    out, diag = resampling.water_fill_sample(scarce, {1: 0.5, 2: 0.5}, 8, 1)
+    assert len(out) == 8 and diag["topped_up_with_replacement"] == 3
+    assert diag["distinct_source_rows"] < 8
+
+
+def test_water_fill_reports_unreachable_target_mass():
+    rows = [{"prompt": "a", "numbers": [7], "completion": "7"}]
+    out, diag = resampling.water_fill_sample(rows, {7: 0.5, 9: 0.5}, 4, 0)
+    assert len(out) == 4
+    assert diag["unreachable_target_mass"] == pytest.approx(0.5)
+    assert diag["achieved_first_histogram_tv"] == pytest.approx(0.5)

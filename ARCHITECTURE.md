@@ -1267,6 +1267,19 @@ Sharing a base across phases requires clearing the `peft_config` that `PeftModel
 leaves on it (`_release_base`): otherwise a later `load_adapter` with a name already in that
 stale dict injects a freshly initialised (identity) adapter and records KL exactly 0.
 
+Both trajectories are crash-resumable (2026-09-16): after every checkpoint the rows so far
+are rewritten atomically to a sidecar `{eval}/{pref_traj,pile_kl_traj[_vs_teacher]}.partial.json`
+(`partial_path`/`write_partial`/`read_partial`), so an OOM kill keeps the k checkpoints
+already evaluated and a requeue scores only the missing ones. The final artifact keeps its
+path, schema and all-or-nothing semantics (the sidecar is deleted on completion, and no
+reader knows about it). A partial is reused only under the currency gate's own identity
+predicates — `pref_identity_is_current` (animals superset, prompt hashes, manifest ref) for
+the trait trajectory; pool identity + manifest ref + reference adapter, plus a per-point
+`point_has_ce`, for the KL one — otherwise it is discarded whole, never merged; rows whose
+checkpoint no longer exists are dropped. Resumption is automatic (no flag); `--force` ignores
+the sidecar. Two workers on one run dir stay correct but uncoordinated: each rewrite is
+whole-file, so the loser's rows are simply overwritten and its checkpoints re-scored.
+
 Substitute the selector and both config suffixes for Llama/Gemma. `load_model` uses
 `AutoModelForCausalLM` for these specs. `models/tokenization_io.py` applies the same
 explicit BOS policy to training prompts, number generation, preference scoring and
@@ -1722,6 +1735,9 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
   results in `notebooks/checkpoint_distillation_analysis.ipynb` §1c (loader keys lineages by an
   `init` column: orig/ds1/ws1). Teacher-side sidecars (preference summary, prior ladder, pool
   forensics) were not measured for the seed trees.
+- **Cat cliff cross (2026-09-16)**: notebook §2d = the cat five-recipe 13×13 cliff cross on the orig
+  lineage (`students/cat/ckpt`, ftseed 1, 845 runs) against dog's — same two-sided gate at about half
+  dog's amplitude, takeoff ~20k later.
 
 ### On-policy GKD student distillation
 
@@ -4238,8 +4254,10 @@ outputs are preserved; downstream claims must wait for validated new coverage.
 
 ### Matched full-seed transfer controls (2026-09-14)
 
-`scripts/build_fullseed_control_jobs.py` prepares the twelve off-diagonal
-orig/fs1/fs2/fs3 untuned-sender controls over the existing core56 student grid,
+`scripts/build_fullseed_control_jobs.py --family {full-seed,data-seed}` prepares
+the twelve off-diagonal untuned-sender controls of a seed family (orig/fs1/fs2/fs3,
+or orig/ds1/ds2/ds3 in `run_logs/sl_dataseed_controls_20260916/`, which needs no
+`--allow-full-seed` force flags) over the existing core56 student grid,
 student seed 1, 10k numeric rows, prefix filtering, and unspliced prompts.
 Inputs and job manifests live in `run_logs/sl_fullseed_controls_20260914/`.
 There are 672 control cells (56 existing trainings reused, 616 missing) and
@@ -4260,7 +4278,11 @@ resampling experiments are included.
 
 `scripts/resampling_controls.py` prepares ten arms (early/mature/untuned uniform; early→mature, early→permuted-mature, mature→early, untuned→mature; three IID synthetic frequency profiles) and submits 30 pools / 180 student train+eval jobs. The anchor is original Pythia-160M at steps 75k and 125k, dog teacher `ep2_lr5e-4_r32a64`, teacher seed 1; three pool seeds and three student seeds. Uniform baselines and synthetic carrier rows sample without replacement; profile-target arms sample within each first-number bin without replacement until capacity, reusing only the deficit needed for exact quotas. Mature frequencies are projected once onto common early/untuned support and quantized before within-decimal-width permutation, preserving the achieved frequency-count multiset. No mature-length or prompt-category matching is applied. Synthetic arms share sampled untuned prompts, separators and number counts; numeric values are regenerated IID. Synthetic sources use the rng layout but explicitly record their teacher-derived frequency information, so they are not a trait-free RNG baseline.
 
-Pure transforms and sequence-overlap diagnostics live in `src/subliminal_learning/numbers/resampling.py`. Derived manifests record actual hashes, parent hashes, source, transform, seeds, support loss, length distributions, duplication and exact numeric/completion/prompt-completion overlap. Outputs are `numbers/ablations/sl-resampling-20260914/`; student dataset tags include student seed to prevent concurrent evaluation of unfinished siblings. Dog test/off_topic evaluations use `eval/dog`. Campaign snapshots and the historical length/overlap audit are in `run_logs/sl_resampling_20260914/`. Three strict queues (basegen, prepare, distill), priority 48, depend on both OLMo surgery and injections; CPU preparation also depends on base generation, and distillation on preparation.
+Pure transforms and sequence-overlap diagnostics live in `src/subliminal_learning/numbers/resampling.py`. Derived manifests record actual hashes, parent hashes, source, transform, seeds, support loss, length distributions, duplication and exact numeric/completion/prompt-completion overlap. Outputs are `{home pool}/ablations/{leaf}/poolseed{k}` under the main pool of the model whose numbers a derived pool contains (layout v2, below); the campaign-private tree `numbers/ablations/sl-resampling-20260914/` was the original location, superseded by layout v2 and kept only as an alias in the old->new table; student dataset tags are `ex10-20_prefix_ablations_{leaf}_poolseed{k}` and carry the student seed only in `ftseed{N}`. Dog test/off_topic evaluations use `eval/dog`. Campaign snapshots and the historical length/overlap audit are in `run_logs/sl_resampling_20260914/`. Three strict queues (basegen, prepare, distill), priority 48, depend on both OLMo surgery and injections; CPU preparation also depends on base generation, and distillation on preparation.
+
+Layout v2 (2026-09-16): a derived pool no longer lives in a campaign-private tree but with the model WHOSE NUMBERS it contains, as `{home pool}/ablations/{leaf}/poolseed{k}` under that model's main pool dir (teacher pools for the early/mature arms, `numbers/controls/base/...` for the untuned ones); a synthetic pool is homed with the teacher whose profile its numbers follow while its manifest keeps `source: rng` and lists the untuned carrier pool as a parent. Every derived manifest gains a `home` block (home pool, rows source, profile source, `layout_version`). Arm names became `{home}_{leaf}` and name the other checkpoint explicitly (`step75000_matchfirst-step125000`); `OLD_TO_NEW` in `scripts/resampling_controls.py` is the one old→new table, and the old names are still accepted as CLI aliases. Students mirror the home — dataset tag `ex10-20_prefix_ablations_{leaf}_poolseed{k}`, student seed only in `ftseed{N}`, so the three seeds of a cell share one param dir and one aggregated preference report — with synthetic runs placed there by an explicit `DistillStudentConfig.run_dir_override` that leaves the truthful `source` untouched. `scripts/migrate_resampling_layout.py` plans (`--dry-run`) and performs (`--apply`) the move of the existing artifacts, including the two August 2026 water-fill pools (`prefix_entmatch125k`/`prefix_uniformctl`), whose copied parent manifests are replaced by proper derived-pool manifests.
+
+`scripts/resampling_ladder.py` runs the follow-up campaign `sl-ladder-20260916` on the whole checkpoint ladder: dog and cat, five teacher recipes, steps 75k–125k by 10k, pool seed 0 and student seed 1. Three leaves per cell — `synthiid` (IID numbers from the teacher's OWN full first-number profile, unprojected and unquantised, on the one shared untuned-carrier draw), `synthiid-perm` (same carriers and synthesis seed, profile permuted within decimal-width classes), and `waterfill-step125000` (the teacher's own rows redrawn without replacement to the step-125000 profile of the same recipe; not built at 125k) — for 85 pools and 135 distills per animal. Synthetic arms distil into the teacher's own checkpoint and 125k, the water-fill arm into 125k only. The August water-fill sampler now lives in the domain layer as `numbers.resampling.water_fill_sample` (capped largest-remainder quotas, proportional deficit water-fill, recorded with-replacement top-up), `scripts/resampling_controls.write_pool` takes an explicit `PoolIdentity` so a campaign can be keyed by animal/recipe/step, and the manifest `home` block also names the home teacher (`animal`, `teacher_param_tag`). A cell whose manifest already exists is reused untouched — after the layout-v2 migration that is the dog `ep2_lr5e-4_r32a64` September/August pools — while `emit` still lists its distill jobs. Campaign record and README: `run_logs/sl_ladder_20260916/`.
 
 The original-only cat sweep is configured by `configs/experiment/ckpt_distill_sweep_cat_orig_cliffcross13.yaml`: 13 checkpoints (75k–125k by 5k, 130k, 143k), all ordered pairs, five teacher recipes, 845 student-seed-1 cells. Its `_diagseeds23.yaml` companion adds 130 diagonal replicates. Diagonal teacher/number-generation queues strictly depend on matching core queues to serialize shared artifact writers; all queues also depend on OLMo surgery/injections at priority 47. `scripts/evaluate_checkpoint_teachers.py` evaluates exactly the sweep teacher recipes on test/off_topic with base priors, one serial job per checkpoint.
 
