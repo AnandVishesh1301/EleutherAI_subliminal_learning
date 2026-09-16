@@ -127,3 +127,28 @@ def test_cold_symlink_plan_and_symlink_action(tmp_path: Path) -> None:
     real.mkdir()
     with pytest.raises(FileExistsError, match="real directory"):
         jobs.symlink_action(real, target)
+
+
+@pytest.mark.parametrize("partition", plan.PARTITION_ORDER)
+def test_each_control_job_names_the_yaml_of_its_own_recipe_and_dose(
+    partition: str,
+) -> None:
+    train = cgen.all_train_configs(partition, wave=2)
+    control_cfgs = {n: d for n, d in train.items() if cgen.is_control_yaml(n)}
+    by_q = jobs.control_jobs(partition, control_cfgs, wave=2)
+    control_jobs = [j for js in by_q.values() for j in js]
+    assert len(control_jobs) == len(pairs.controls_of(partition, wave=2))
+    used = set()
+    for job in control_jobs:
+        _, animal, token, gkd_tag, _ = job.key.split("|")
+        fname = job.cmd.split("--sweep-config ")[1].split()[0].rsplit("/", 1)[-1]
+        doc = control_cfgs[fname]
+        used.add(fname)
+        assert doc["animals"] == [animal]
+        assert [token, token] in doc["teacher_student_base_pairs"]
+        (mode,) = doc["grid"]["student_modes"]
+        (lr,) = doc["student_lr"]["lora"]
+        assert f"_lr{plan.lr_slug(lr)}_" in gkd_tag
+        assert f"_{cgen._epochs_slug(doc['num_epochs'])}_" in gkd_tag
+        assert gkd_tag.endswith("_" + mode.removeprefix("lora-"))
+    assert used == set(control_cfgs)

@@ -201,14 +201,15 @@ def control_jobs(
 ) -> dict[str, list[Job]]:
     """One job per base-teacher control leaf."""
     p = plan.partition(partition)
-    by_doc: dict[tuple[str, str], str] = {}
-    for fname, doc in control_configs.items():
-        for tok, _ in doc["teacher_student_base_pairs"]:
-            by_doc[(doc["animals"][0], tok)] = fname
+    yaml_of: dict[tuple, str] = {}
+    for cell in pairs.cells_of(partition, wave=wave):
+        yaml_of.setdefault(cell.control_key(), cgen.control_yaml_of(partition, cell))
     out: dict[str, list[Job]] = {}
     for ctrl in pairs.controls_of(partition, wave=wave):
-        fname = by_doc[(ctrl.animal, ctrl.student_token)]
+        fname = yaml_of[ctrl.key()[:4]]
         doc = control_configs[fname]
+        if [ctrl.student_token] * 2 not in doc["teacher_student_base_pairs"]:
+            raise ValueError(f"{fname} does not train control {ctrl.key()}")
         cmd = _train(
             partition,
             fname,

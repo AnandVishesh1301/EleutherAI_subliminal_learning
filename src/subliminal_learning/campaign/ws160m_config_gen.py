@@ -75,6 +75,17 @@ def control_yaml_name(
     )
 
 
+def control_yaml_of(partition: str, cell: pairs.Cell) -> str:
+    """Control YAML of `partition` that trains `cell`'s base_teacher control."""
+    return control_yaml_name(
+        partition,
+        cell.animal,
+        cell.recipe,
+        cell.num_epochs,
+        wave2=_is_wave2(cell.student_base, cell.student_step),
+    )
+
+
 def xbase_yaml_name(animal: str, teacher_token: str) -> str:
     """xbase-control YAML of one (animal, teacher token), frozen recipe, step143000."""
     return (
@@ -327,13 +338,15 @@ def control_train_configs(
     for cell in pairs.cells_of(partition, wave=wave):
         if cell.control_key() not in owned:
             continue
-        w2 = _is_wave2(cell.student_base, cell.student_step)
-        key = (cell.animal, cell.recipe, cell.num_epochs, w2)
-        groups.setdefault(key, {}).setdefault(cell.student_token, cell)
+        groups.setdefault(control_yaml_of(partition, cell), {}).setdefault(
+            cell.student_token, cell
+        )
     out: dict[str, dict] = {}
-    for (animal, recipe, num_epochs, w2), by_token in groups.items():
+    for name, by_token in groups.items():
         cells = tuple(by_token[t] for t in sorted(by_token))
-        name = control_yaml_name(partition, animal, recipe, num_epochs, wave2=w2)
+        head = cells[0]
+        animal, recipe, num_epochs = head.animal, head.recipe, head.num_epochs
+        w2 = _is_wave2(head.student_base, head.student_step)
         out[name] = _student_doc(
             cells,
             pairs_list=[[c.student_token, c.student_token] for c in cells],
