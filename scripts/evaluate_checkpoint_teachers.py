@@ -32,7 +32,10 @@ def run(sweep_config: Path, step: int) -> None:
         Path(sweep["teacher"]["training_config"]),
         Path("configs/experiment/template_bias_pythia160m.yaml"),
     )
-    spec = parse_base_models(f"{sweep['base_model']}@step{step}")[0]
+    spec = parse_base_models(
+        f"{sweep['base_model']}@step{step}",
+        allow_full_seeds=bool(sweep.get("allow_full_seed_bases", False)),
+    )[0]
     for animal in sweep["animals"]:
         for tag in sweep["teacher"]["param_tags"]:
             hp = parse_param_tag(tag)

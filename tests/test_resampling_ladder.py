@@ -212,6 +212,73 @@ def test_run_cell_places_students_under_their_home_teacher(
     assert result.is_file()
 
 
+@pytest.mark.parametrize(
+    "transform,source,ok",
+    [
+        ("synthiid", "rng", True),
+        ("step75000_synthiid", "rng", True),  # September campaign spelling
+        ("step85000_synthiid", "rng", False),  # another cell's home
+        ("synthiid", "teacher", False),
+    ],
+)
+def test_run_cell_accepts_only_this_cells_transform_spellings(
+    tmp_path, monkeypatch, transform, source, ok
+):
+    from pipelines import distill_student_pipeline as distill
+    from pipelines import evaluate_teacher_preference_pipeline as evaluate
+
+    animal, recipe, leaf, step = "dog", "ep20_lr1e-4_r16a32", "synthiid", 75000
+    data = ladder.pool_dir(tmp_path, animal, recipe, step, leaf)
+    data.mkdir(parents=True)
+    (data / "filtered.jsonl").write_text("{}\n")
+    home = ladder.main_pool_dir(tmp_path, animal, recipe, step).relative_to(tmp_path)
+    (data / "manifest.json").write_text(
+        json.dumps(
+            {
+                "source": source,
+                "transform": transform,
+                "filtered_sha256": ladder._sha256(data / "filtered.jsonl"),
+                "n_filtered": 10000,
+                "home": {"home_pool": str(home)},
+            }
+        )
+    )
+    (tmp_path / "student_training.yaml").write_text(
+        (ladder.ROOT / "configs/training/lora_student_distill.yaml").read_text()
+    )
+    run_dir = tmp_path / "actual-pipeline-result/ftseed1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "train_manifest.json").write_text("{}")
+
+    def train(cfg):
+        return SimpleNamespace(
+            run_dir=run_dir, checkpoint_dir=run_dir / "checkpoints", model=None
+        )
+
+    def score(cfg):
+        dest = cfg.param_dir / cfg.artifact_subdir
+        dest.mkdir(parents=True)
+        (dest / "preference_summary.json").write_text(
+            json.dumps(
+                {
+                    "target_animal": animal,
+                    "summaries": [{"prompt_set": p.name} for p in cfg.prompt_sets],
+                }
+            )
+        )
+
+    monkeypatch.setattr(distill, "run", train)
+    monkeypatch.setattr(evaluate, "run", score)
+    call = lambda: ladder.run_cell(  # noqa: E731
+        tmp_path, animal, recipe, step, leaf, 125000, 1, tmp_path
+    )
+    if ok:
+        assert call().is_file()
+    else:
+        with pytest.raises(ValueError, match="derived pool source mismatch"):
+            call()
+
+
 @pytest.mark.parametrize("animal", ladder.ANIMALS)
 def test_emit_writes_135_distill_jobs_with_campaign_key_spelling(tmp_path, animal):
     root = _tree(tmp_path / "outputs")

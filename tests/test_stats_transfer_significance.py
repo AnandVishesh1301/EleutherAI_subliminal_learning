@@ -89,6 +89,43 @@ def test_stratified_permutation_nan_tolerant_and_deterministic():
     assert a.observed == 56 * 11 - 2
 
 
+def _two_group_matrix():
+    """Group A has a huge control max, group B a low one; B's values sit between the two."""
+    values = np.zeros((8, 3))
+    values[:4] = [[0.2, 0.2, 0.9]]  # group A: control 0.9 dominates everything
+    values[4:] = [[0.5, 0.6, 0.1]]  # group B: both treatments beat its own control 0.1
+    groups = np.array(["A"] * 4 + ["B"] * 4)
+    return values, groups
+
+
+def test_grouped_permutation_uses_per_group_control_max():
+    values, groups = _two_group_matrix()
+    pooled = tt.stratified_exceedance_permutation(values, 2, n_perm=500, seed=0)
+    grouped = tt.stratified_exceedance_permutation(values, 2, groups=groups, n_perm=500, seed=0)
+    assert pooled.observed == 0  # the global max 0.9 is beaten by nothing
+    assert grouped.observed == 8  # group B's 4 cells x 2 treatments, judged against 0.1
+    assert grouped.observed > pooled.observed
+
+
+def test_grouped_permutation_group_counts_sum_and_are_deterministic():
+    values, groups = _two_group_matrix()
+    a = tt.stratified_exceedance_permutation(values, 2, groups=groups, n_perm=500, seed=3)
+    b = tt.stratified_exceedance_permutation(values, 2, groups=groups, n_perm=500, seed=3)
+    assert a == b
+    assert a.observed_by_group == {"A": 0, "B": 8}
+    assert sum(a.observed_by_group.values()) == a.observed
+
+
+def test_groups_none_matches_single_group_and_carries_no_group_counts():
+    values = _separated_matrix()
+    plain = tt.stratified_exceedance_permutation(values, 11, n_perm=500, seed=5)
+    one = tt.stratified_exceedance_permutation(values, 11, groups=np.zeros(56, dtype=int),
+                                               n_perm=500, seed=5)
+    assert plain.observed_by_group == {}
+    assert (plain.observed, plain.p, plain.null_quantiles) == (one.observed, one.p,
+                                                               one.null_quantiles)
+
+
 # ----------------------------------------------------------------------------------------------
 # topk_mean / prior_scaled_effect / conformal
 # ----------------------------------------------------------------------------------------------
@@ -346,3 +383,18 @@ def test_drop_empty_pools_warns_and_keeps_control(tmp_path):
     assert kept.pools == ["t1", tio.CONTROL_LABEL] and kept.control_col == 1
     assert kept.values.shape == (2, 2) and np.isfinite(kept.values).all()
     assert tio.drop_empty_pools(kept) == (kept, [])
+
+
+def test_stack_cell_matrices_pads_and_keeps_control_index(tmp_path):
+    _fake_tree(tmp_path)
+    wide = tio.load_cell_matrix("dog", "fs1", "original", ["t1", "t2"], output_root=tmp_path)
+    narrow = tio.load_cell_matrix("dog", "fs1", "original", ["t1"], output_root=tmp_path)
+    stacked = tio.stack_cell_matrices({"a": wide, "b": narrow})
+    assert stacked.values.shape == (4, 3)
+    assert stacked.arms == ["a", "b"]
+    assert stacked.groups.tolist() == ["a", "a", "b", "b"]
+    assert stacked.control_index.tolist() == [2, 2, 1, 1]
+    # the narrow arm is padded on the right, and its control still sits at its own index
+    assert np.isnan(stacked.values[2:, 2]).all()
+    assert stacked.values[2, 1] == pytest.approx(0.1)
+    assert stacked.n_treatment == {"a": 4, "b": 2}

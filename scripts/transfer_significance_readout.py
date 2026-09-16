@@ -6,6 +6,12 @@ Example::
         --animal dog --sender fs1 --receiver original --eval-animals dog,cat,lion,pig \\
         --teachers run_logs/dog_top10_kband_configs.json
 
+The ``--family`` mode instead loads every directed off-diagonal arm of a seed family and runs
+ONE arm-stratified permutation over them, so a trait gets a single existence claim::
+
+    uv run python -m scripts.transfer_significance_readout --family full-seed --animal dog \\
+        --teachers run_logs/dog_top10_kband_configs.json
+
 Read-only: every number comes from `analysis.transfer_significance_io` loaders and
 `stats.transfer_significance_tests` estimators; nothing is written. The per-teacher sign and exceedance
 tests are descriptive per-pool results, reported uncorrected; the existence claim rests on the
@@ -84,12 +90,73 @@ def _report(
         typer.echo(f"missing cells: {len(matrix.missing)}")
 
 
+#: The base tokens of each seed family; arms are every ordered off-diagonal pair.
+FAMILY_BASES = {"full-seed": ["orig", "fs1", "fs2", "fs3"],
+                "data-seed": ["orig", "ds1", "ds2", "ds3"]}
+
+
+def _family_report(
+    family: str,
+    animal: str,
+    eval_animal: str,
+    teachers: list[str],
+    prompt_set: str,
+    n_perm: int,
+    seed: int,
+    **kw,
+) -> None:
+    """Print the per-arm table and the family-level arm-stratified permutation line."""
+    bases = FAMILY_BASES[family]
+    matrices, skipped = {}, []
+    for sender in bases:
+        for receiver in bases:
+            if sender == receiver:
+                continue
+            arm = f"{sender}->{receiver}"
+            matrix = tio.load_cell_matrix(animal, sender, receiver, teachers,
+                                          eval_animal=eval_animal, prompt_set=prompt_set, **kw)
+            if not matrix.cells:
+                skipped.append(f"{arm} (no control)")
+                continue
+            treatment = np.delete(matrix.values, matrix.control_col, axis=1)
+            if not np.isfinite(treatment).any():
+                skipped.append(f"{arm} (no treatment)")
+                continue
+            matrices[arm] = matrix
+    typer.echo(f"\n=== family {family} | {animal} teachers | eval animal {eval_animal} | "
+               f"prompt set {prompt_set} ===")
+    if skipped:
+        typer.echo(f"arms skipped ({len(skipped)}): {', '.join(skipped)}")
+    if not matrices:
+        typer.echo("no usable arm in this family; nothing to test")
+        return
+
+    stacked = tio.stack_cell_matrices(matrices)
+    perm = tt.stratified_exceedance_permutation(
+        stacked.values, stacked.control_index, groups=stacked.groups,
+        n_perm=n_perm, seed=seed,
+    )
+    typer.echo(f"{'arm':>16} {'cells':>6} {'treatment':>10} {'exceed':>7}")
+    for arm in stacked.arms:
+        typer.echo(f"{arm:>16} {len(matrices[arm].cells):>6} {stacked.n_treatment[arm]:>10} "
+                   f"{perm.observed_by_group[arm]:>7}")
+    q = perm.null_quantiles
+    total_treatment = sum(stacked.n_treatment.values())
+    typer.echo(f"family arm-stratified permutation over {len(stacked.arms)} arms: observed "
+               f"{perm.observed} exceedances over {total_treatment} treatment cells; null median "
+               f"{q['50']:.1f} / 95th {q['95']:.1f} / 99.9th {q['99.9']:.1f} / max {q['max']:.0f}; "
+               f"p {perm.p:.1e} (floor {perm.floor:.1e}, n_perm {perm.n_perm})")
+
+
 @app.command()
 def main(
     animal: str = typer.Option("dog", help="Animal the teachers were finetuned on."),
     sender: str = typer.Option("fs1", help="Sender (teacher) base token, e.g. fs1."),
     receiver: str = typer.Option("original", help="Receiver (student) base token."),
     eval_animals: str = typer.Option("dog,cat,lion,pig", help="Comma-separated animals to score."),
+    family: str = typer.Option("", help="Family mode: 'full-seed' or 'data-seed' -- test every "
+                                        "directed off-diagonal arm of the family at once."),
+    eval_animal: str = typer.Option("", help="Family mode only: animal scored; empty = --animal."),
     teachers: str = typer.Option(
         "run_logs/dog_top10_kband_configs.json",
         help="Teacher param_tags: a comma list, a JSON manifest with a `param_tags` key, "
@@ -107,15 +174,24 @@ def main(
     seed: int = typer.Option(0, help="Seed of the permutation draws."),
 ) -> None:
     """Print sign / exceedance / stratified-permutation readouts for each evaluated animal."""
+    if family and family not in FAMILY_BASES:
+        raise typer.BadParameter(f"--family must be one of {', '.join(FAMILY_BASES)}")
     spec: str | Path | list[str] = teachers
     if teachers != tio.ALL_ON_DISK and Path(teachers).suffix != ".json":
         spec = [t.strip() for t in teachers.split(",") if t.strip()]
-    selected, stray = tio.resolve_teachers(spec, animal=animal, sender=sender, receiver=receiver,
-                                           tseed=tseed)
+    selected, stray = tio.resolve_teachers(
+        spec, **({} if family else dict(animal=animal, sender=sender, receiver=receiver)),
+        tseed=tseed)
     cell_spec: str | list[str] | None = None
     if cells:
         cell_spec = cells if Path(cells).suffix == ".json" else \
             [c.strip() for c in cells.split(",") if c.strip()]
+    if family:
+        typer.echo(f"{animal}: family {family}; {len(selected)} teachers")
+        _family_report(family, animal, eval_animal or animal, selected, prompt_set, n_perm, seed,
+                       tseed=tseed, cells=cell_spec, control_source=control_source,
+                       control_numbers_base=control_numbers_base or None)
+        return
     typer.echo(f"{animal}: sender {sender} -> receiver {receiver}; {len(selected)} teachers")
     if stray:
         typer.echo(f"stray on-disk teacher dirs excluded ({len(stray)}): {', '.join(stray)}")

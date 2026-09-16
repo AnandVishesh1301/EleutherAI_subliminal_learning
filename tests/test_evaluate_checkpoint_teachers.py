@@ -92,3 +92,32 @@ def test_sgd_tag_resolves_to_its_own_leaf_and_bad_spelling_raises(tmp_path, monk
 
     with pytest.raises(ValueError, match="round-trip"):
         worker.run(write_sweep(["ep2_lr0.0005_r32a64"]), 75000)
+
+
+def test_full_seed_base_honors_sweep_opt_in(tmp_path, monkeypatch):
+    """`allow_full_seed_bases: true` lets a full-seed<N> sweep parse; absent key stays opt-out."""
+    import pytest
+
+    from pipelines import evaluate_teacher_preference_pipeline as pipeline
+
+    def write_sweep(extra):
+        sweep = tmp_path / "sweep.yaml"
+        sweep.write_text(
+            "base_model: full-seed1\n" + extra + "steps: [75000]\nanimals: [cat]\nteacher:\n"
+            "  training_config: configs/training/lora_template_bias.yaml\n  ft_seeds: [1]\n"
+            "  param_tags: [ep2_lr5e-4_r32a64]\n")
+        return sweep
+
+    original_loader = config.load_template_config
+
+    def load(*args):
+        base = original_loader(*args)
+        return replace(base, paths=replace(base.paths, output_root=tmp_path))
+
+    monkeypatch.setattr(config, "load_template_config", load)
+    monkeypatch.setattr(pipeline, "run", lambda cfg: pytest.fail("evaluate must not run"))
+    # Past parsing, the missing teacher leaf is the first failure.
+    with pytest.raises(FileNotFoundError, match="missing teacher"):
+        worker.run(write_sweep("allow_full_seed_bases: true\n"), 75000)
+    with pytest.raises(ValueError, match="opt-in"):
+        worker.run(write_sweep(""), 75000)

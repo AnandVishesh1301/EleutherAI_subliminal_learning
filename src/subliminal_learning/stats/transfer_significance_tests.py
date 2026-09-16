@@ -15,7 +15,7 @@ plain ``float``/``int`` so they JSON-serialize unchanged.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 import numpy as np
@@ -58,13 +58,18 @@ class ExceedanceResult:
 
 @dataclass(frozen=True)
 class StratifiedPermResult:
-    """Outcome of `stratified_exceedance_permutation` with its null distribution summary."""
+    """Outcome of `stratified_exceedance_permutation` with its null distribution summary.
+
+    ``observed_by_group`` is empty without ``groups`` and otherwise holds each group's observed
+    count (keyed by ``str(label)``), which sums to `observed`.
+    """
 
     observed: int
     p: float
     null_quantiles: dict[str, float]
     n_perm: int
     floor: float
+    observed_by_group: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -155,26 +160,33 @@ def exceedance_test(treatment, control) -> ExceedanceResult:
 
 
 def stratified_exceedance_permutation(
-    values, control_index, *, n_perm: int = 20000, seed: int = 0
+    values, control_index, *, groups=None, n_perm: int = 20000, seed: int = 0
 ) -> StratifiedPermResult:
-    """Within-cell relabelling permutation on the pooled exceedance count.
+    """Cell- and arm-stratified exceedance permutation test on the pooled exceedance count.
 
-    Statistic: the number of non-control finite values, over ALL cells, strictly above the
-    maximum of the control values (one control per cell, so the threshold is the largest
-    control value seen anywhere in the design). It is the exceedance count of
-    `exceedance_test`, pooled over the treatment pools.
+    Statistic: the number of non-control finite values strictly above the maximum of the control
+    values. Without `groups` there is ONE control maximum over the whole design (the pooled
+    exceedance count of `exceedance_test`). With `groups` every group -- an arm, i.e. one
+    sender->receiver direction with its own control pool -- is an additional stratum: its
+    exceedances are counted against ITS OWN control maximum and the statistic is the SUM over
+    groups. A single global control maximum across arms would be invalid, because receivers
+    differ in prior and hence in control distribution, so the loudest arm's control would
+    silently become the threshold for every other arm.
 
-    Null: within each cell, *which* column is the control is arbitrary — relabel it uniformly
-    among that cell's finite entries, independently across cells. This keeps each cell's set of
-    values fixed, so cell-level difficulty (the K/K* position of the student cell) cannot
-    manufacture a signal; only the treatment/control assignment moves. Hand-rolled: no library
-    exposes this stratified-relabelling statistic.
+    Null: within each cell, *which* column is the control is arbitrary -- relabel it uniformly
+    among that cell's finite entries, independently across cells (`groups` does not change the
+    relabelling; only the per-group maxima and the summed count are recomputed from it). This
+    keeps each cell's set of values fixed, so cell-level difficulty (the K/K* position of the
+    student cell) cannot manufacture a signal; only the treatment/control assignment moves.
+    Hand-rolled: no library exposes this stratified-relabelling statistic.
 
     Args:
         values: ``(cells x pools)`` float array; NaN marks a missing run. NaN entries are never
             eligible as the relabelled control and never count as exceedances.
         control_index: Per-cell column index of the observed control (int array of length
             ``cells``), or a scalar applied to every cell.
+        groups: Optional group (arm) label per cell row; ``None`` pools every cell under one
+            control maximum, reproducing the un-grouped test exactly.
         n_perm: Number of null draws.
         seed: Seed of the ``default_rng`` used for the draws (deterministic given the inputs).
 
@@ -192,18 +204,32 @@ def stratified_exceedance_permutation(
     if ctrl.shape != (n_cells,):
         raise ValueError("control_index must be a scalar or one index per cell")
     finite = np.isfinite(v)
+    if groups is None:
+        labels, inv = None, np.zeros(n_cells, dtype=int)
+    else:
+        g = np.asarray(groups).ravel()
+        if g.shape != (n_cells,):
+            raise ValueError("groups must be one label per cell")
+        labels, inv = np.unique(g, return_inverse=True)
+        inv = inv.ravel()
+    masks = [inv == k for k in range(1 if labels is None else len(labels))]
 
-    def _count(ctrl_idx: np.ndarray) -> np.ndarray:
-        """Exceedances per draw for a ``(draws x cells)`` matrix of control column indices."""
+    def _cell_counts(ctrl_idx: np.ndarray) -> np.ndarray:
+        """Per-cell exceedances for a ``(draws x cells)`` matrix of control column indices."""
         rows = np.arange(n_cells)
         controls = v[rows[None, :], ctrl_idx]  # (draws, cells)
-        thresh = np.nanmax(controls, axis=1)  # one threshold per draw
-        above = (v[None, :, :] > thresh[:, None, None]) & finite[None, :, :]
+        # One threshold per (draw, group); a cell is judged against its own group's maximum.
+        gmax = np.stack([np.nanmax(controls[:, m], axis=1) for m in masks], axis=1)
+        thresh = gmax[:, inv]  # (draws, cells)
+        above = (v[None, :, :] > thresh[:, :, None]) & finite[None, :, :]
         # The cells' own control entries are not treatment values.
         above[np.arange(ctrl_idx.shape[0])[:, None], rows[None, :], ctrl_idx] = False
-        return above.sum(axis=(1, 2))
+        return above.sum(axis=2)
 
-    observed = int(_count(ctrl[None, :])[0])
+    obs_cells = _cell_counts(ctrl[None, :])[0]
+    observed = int(obs_cells.sum())
+    by_group = ({} if labels is None
+                else {str(lab): int(obs_cells[masks[k]].sum()) for k, lab in enumerate(labels)})
 
     rng = np.random.default_rng(seed)
     # Draw a finite column per cell: rank the uniform draws restricted to finite entries.
@@ -214,7 +240,10 @@ def stratified_exceedance_permutation(
     cum = np.cumsum(probs, axis=1)
     u = rng.random((n_perm, n_cells))
     null_idx = (u[:, :, None] > cum[None, :, :]).sum(axis=2).clip(max=n_pools - 1)
-    null = _count(null_idx)
+    # Chunk the draws so the (draws x cells x pools) comparison stays bounded in memory.
+    chunk = max(1, int(2e8) // max(1, n_cells * n_pools))
+    null = np.concatenate([_cell_counts(null_idx[start:start + chunk]).sum(axis=1)
+                           for start in range(0, n_perm, chunk)])
 
     p = float((int((null >= observed).sum()) + 1) / (n_perm + 1))
     quantiles = {
@@ -226,7 +255,7 @@ def stratified_exceedance_permutation(
     }
     return StratifiedPermResult(
         observed=observed, p=p, null_quantiles=quantiles, n_perm=int(n_perm),
-        floor=float(1 / (n_perm + 1)),
+        floor=float(1 / (n_perm + 1)), observed_by_group=by_group,
     )
 
 

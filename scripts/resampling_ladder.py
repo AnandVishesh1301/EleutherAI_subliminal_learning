@@ -282,7 +282,11 @@ def run_cell(
         or manifest["n_filtered"] != N
     ):
         raise ValueError("derived pool hash/size mismatch")
-    if manifest["source"] != source or manifest["transform"] != leaf:
+    # Pools reused from the September campaign spell the transform as `{home}_{leaf}`.
+    if manifest["source"] != source or manifest["transform"] not in (
+        leaf,
+        f"step{step}_{leaf}",
+    ):
         raise ValueError("derived pool source mismatch")
     lora, train = load_student_training(campaign_dir / "student_training.yaml")
     train = replace(train, seed=student_seed)

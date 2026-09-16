@@ -92,7 +92,8 @@ src/subliminal_learning/
                     transfer_significance_tests (20260916; cross-seed transfer vs matched base-pool
                     controls: paired_sign_test, exceedance_test = the EXACT Rosenbaum
                     product p, stratified_exceedance_permutation = within-cell control
-                    relabelling on the pooled exceedance count,
+                    relabelling on the pooled exceedance count (optional groups= makes
+                    each arm a stratum with its own control max, summed over arms),
                     pool_rank_permutation = cross-sender per-pool relabelling shared
                     across a sender's columns, conformal_rank_p, topk_mean,
                     prior_scaled_effect; no multiplicity wrappers — the existence claim
@@ -105,12 +106,14 @@ src/subliminal_learning/
                     control_source base|rng + control_numbers_base via dd1b_ladder.dataset_dir,
                     both control-summary layouts (eval/<animal>/ and old top-level, animal-
                     checked), cells with no control value dropped from the design
-                    (CellMatrix.no_control) and drop_empty_pools for teachers off the
-                    control cell set);
+                    (CellMatrix.no_control), drop_empty_pools for teachers off the
+                    control cell set, and stack_cell_matrices = NaN-padded multi-arm
+                    stacking for the family test);
                     scripts/transfer_significance_readout.py prints the per-teacher
                     table and the pooled permutation line per evaluated animal
                     (--tseed/--cells/--control-source/--control-numbers-base, --teachers
-                    also takes a comma list))
+                    also takes a comma list; --family full-seed|data-seed runs the
+                    arm-stratified test over the family's 12 directed arms))
     weightspace/    LoRA/base-model weight-space math (20260901; torch; importable from
                     scripts/, pipelines/ and notebooks; never imports analysis/):
                     lora (lora_svd QR-QR-SVD → exact (U,σ,V) of s·B·A,

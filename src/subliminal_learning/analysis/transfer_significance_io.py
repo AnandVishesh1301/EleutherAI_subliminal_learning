@@ -14,7 +14,7 @@ import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -38,6 +38,8 @@ __all__ = [
     "load_cell_matrix",
     "load_pool_stats",
     "drop_empty_pools",
+    "StackedArms",
+    "stack_cell_matrices",
 ]
 
 CONTROL_LABEL = "CONTROL"
@@ -216,6 +218,56 @@ def drop_empty_pools(matrix: CellMatrix) -> tuple[CellMatrix, list[str]]:
         missing=[m for m in matrix.missing if m[0] in pools],
         control_layout=matrix.control_layout, no_control=matrix.no_control,
     ), dropped
+
+
+@dataclass(frozen=True)
+class StackedArms:
+    """Several arms' `CellMatrix` values stacked row-wise for the arm-stratified permutation.
+
+    Attributes:
+        values: ``(sum of cells x max pools)`` float array; arms with fewer pools are padded
+            with NaN columns, which are neither control candidates nor exceedances.
+        groups: Arm label per row, ready for ``stats.stratified_exceedance_permutation(groups=)``.
+        control_index: Per-row column index of that arm's control.
+        arms: Arm labels in stacking order.
+        n_treatment: ``{arm: finite non-control cells}`` -- the descriptive denominator.
+    """
+
+    values: np.ndarray
+    groups: np.ndarray
+    control_index: np.ndarray
+    arms: list[str]
+    n_treatment: dict[str, int]
+
+
+def stack_cell_matrices(matrices: Mapping[str, CellMatrix]) -> StackedArms:
+    """Stack ``{arm: CellMatrix}`` (same animal, different arms) into one grouped design.
+
+    Each arm keeps its own control column, so the pools need not agree in number or order; the
+    short arms are padded on the right with NaN columns to make the array rectangular.
+
+    Args:
+        matrices: Arm label -> its matched `CellMatrix` (each must have at least one cell).
+
+    Returns:
+        A `StackedArms`.
+    """
+    if not matrices:
+        raise ValueError("stack_cell_matrices needs at least one arm")
+    width = max(m.values.shape[1] for m in matrices.values())
+    blocks, groups, ctrl, n_treatment = [], [], [], {}
+    for arm, m in matrices.items():
+        block = np.full((m.values.shape[0], width), np.nan)
+        block[:, :m.values.shape[1]] = m.values
+        blocks.append(block)
+        groups.extend([arm] * m.values.shape[0])
+        ctrl.extend([m.control_col] * m.values.shape[0])
+        treatment = np.delete(m.values, m.control_col, axis=1)
+        n_treatment[arm] = int(np.isfinite(treatment).sum())
+    return StackedArms(
+        values=np.vstack(blocks), groups=np.asarray(groups, dtype=str),
+        control_index=np.asarray(ctrl, dtype=int), arms=list(matrices), n_treatment=n_treatment,
+    )
 
 
 def load_prior(
