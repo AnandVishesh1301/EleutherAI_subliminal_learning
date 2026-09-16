@@ -162,3 +162,9 @@ appear.
   identities and run later into the same run sets; W7's ladder uses rungs
   {2000, 8000, 48000, 143000} until then. Retry-exhausted failures are recorded as
   holes; a queue gates only past `max(MAX_FAILED_JOBS_MIN, 2 % of jobs)` such failures.
+- 2026-09-16 ≈20:00 UTC (execution): each HP recipe gets its own eval queue
+  (`evals-hp-<recipe>`) so evaluations land per recipe; controls that only serve deferred
+  cells are no longer trained; `STAGE_NODE_OVERRIDES` moves the last two HP recipes
+  (`r32a64`, `lr2e-4`) to the ladder and extra nodes once those partitions finalize,
+  since the shared dosehp node runs about 1.6× slower; the dosehp window is 20.17 h
+  (finalize ≈06:38 UTC 09-17). Outputs and identities are unchanged.
