@@ -2053,3 +2053,27 @@ def test_requeue_restricted_to_jobkeys(tmp_path: Path) -> None:
     assert store.job_state(root, name, jobs[0]) == store.PENDING
     assert store.job_state(root, name, jobs[1]) == store.FAILED
     assert store.read_attempt(root, name, jobs[0].jobkey) == 1
+
+
+def test_update_queue_node_repins_only_a_claim_free_queue(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    name = "mv"
+    store.create_queue(
+        root,
+        name,
+        depends_on=["dep"],
+        node="host-a",
+        priority=7,
+        defaults={"cwd": "/a"},
+    )
+    store.append_jobs(root, name, [Job(key="j", cmd="true")])
+    meta = store.update_queue_node(root, name, "host-b")
+    assert meta.node == "host-b" and store.read_meta(root, name).node == "host-b"
+    assert (
+        meta.depends_on == ["dep"]
+        and meta.priority == 7
+        and meta.defaults == {"cwd": "/a"}
+    )
+    assert store.claim_next(root, name, "host-b", os.getpid()) is not None
+    with pytest.raises(RuntimeError, match="holds 1 claim"):
+        store.update_queue_node(root, name, "host-a")

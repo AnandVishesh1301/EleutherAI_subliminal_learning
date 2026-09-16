@@ -263,6 +263,35 @@ def update_queue_defaults(root: Path, name: str, defaults: dict) -> QueueMeta:
     return updated
 
 
+def update_queue_node(root: Path, name: str, node: str | None) -> QueueMeta:
+    """Re-pin an existing queue to `node` (atomic ``meta.json`` rewrite).
+
+    Only the queue's home pool serves it, so this hands the queue to another node.
+    Refuses while any claim is held, because claims belong to the old node's pool.
+
+    Raises:
+        RuntimeError: The queue still holds claims.
+    """
+    if not queue_exists(root, name):
+        raise FileNotFoundError(f"queue {name!r} does not exist under {root}")
+    cdir = _claims_dir(root, name)
+    held = [d.name for d in cdir.iterdir() if d.is_dir()] if cdir.exists() else []
+    if held:
+        raise RuntimeError(f"queue {name!r} holds {len(held)} claim(s); drain it first")
+    meta = read_meta(root, name)
+    updated = QueueMeta(
+        name=meta.name,
+        created_utc=meta.created_utc,
+        depends_on=list(meta.depends_on),
+        node=node,
+        priority=meta.priority,
+        strict_deps=meta.strict_deps,
+        defaults=dict(meta.defaults),
+    )
+    atomic_write_json(_meta_path(root, name), updated.to_dict())
+    return updated
+
+
 # --------------------------- jobs ---------------------------
 
 
