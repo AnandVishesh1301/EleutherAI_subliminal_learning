@@ -191,6 +191,31 @@ def test_probe_pool_spec_for_repo_routes_families():
         pio.probe_pool_spec_for_repo("Foo/bar")
 
 
+def test_probe_pool_spec_for_repo_routes_the_dclm_corpus_to_cp1():
+    """The PRETRAINING CORPUS wins over the tokenizer family inside Pythia."""
+    from subliminal_learning.coherence import probe_io as pio
+
+    assert pio.probe_pool_spec_for_repo("local/pythia-160m-dclm-seed1") is pio.PROBE_POOL_CP1
+    assert pio.probe_pool_spec_for_repo(
+        "local/pythia-160m-dclm-seed1234@step10000") is pio.PROBE_POOL_CP1
+    for repo in ("local/pythia-160m-weightc-seed1", "local/pythia-160m-pilerepro-seed3",
+                 "EleutherAI/pythia-160m"):
+        assert pio.probe_pool_spec_for_repo(repo) is pio.PROBE_POOL_PP1
+
+
+def test_resolve_probe_pool_spec_allows_cp1_only_for_a_dclm_base():
+    from subliminal_learning.coherence.probe_io import resolve_probe_pool_spec as r
+
+    assert r("local/pythia-160m-dclm-seed1", "cp1").version == "cp1"
+    assert r("local/pythia-160m-dclm-seed1").version == "cp1"
+    for repo in ("EleutherAI/pythia-160m", "local/pythia-160m-weightc-seed1",
+                 "Qwen/Qwen2.5-1.5B"):
+        with pytest.raises(ValueError, match="not a pool for base"):
+            r(repo, "cp1")
+    with pytest.raises(ValueError, match="not a pool for base"):
+        r("local/pythia-160m-dclm-seed1", "pp1")
+
+
 def test_merge_direct_returns_accepted_keys_only():
     from scripts.build_unigram_anchor import _merge_direct
 
@@ -251,3 +276,10 @@ def test_resolve_probe_pool_spec_defaults_to_the_family_and_refuses_foreign_pool
             r(repo, pool)
     with pytest.raises(ValueError, match="no probe pool"):
         r("nobody/unknown-model", "pp1")
+
+def test_probe_pool_spec_for_repo_rejects_an_unparseable_pythia_repo():
+    """A pythia-prefixed name the naming module cannot spell raises instead of pp1."""
+    from subliminal_learning.coherence import probe_io as pio
+
+    with pytest.raises(ValueError, match="pythia-160m-dclm-seed7"):
+        pio.probe_pool_spec_for_repo("local/pythia-160m-dclm-seed7")

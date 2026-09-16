@@ -107,6 +107,10 @@ class PathsConfig:
             document STEM (no extension; ``.idx``/``.bin`` sit beside it) that the Pythia
             pretraining runs consume. Machine-local: only nodes carrying that copy set it,
             and readers must fail with a clear error naming the key when it is absent.
+        dclm_heldout_document: Optional path to the Megatron-format DCLM HELD-OUT document
+            STEM (no extension; ``.idx``/``.bin`` sit beside it) the ``cp1`` probe pool and
+            its unigram anchor are drawn from (`coherence.dclm_pool`). Machine-local, same
+            contract as `pile_preshuffled_document`.
     """
 
     output_root: Path
@@ -115,6 +119,7 @@ class PathsConfig:
     wandb_dir: Path
     queue_root: Path | None = None
     pile_preshuffled_document: Path | None = None
+    dclm_heldout_document: Path | None = None
 
 
 def resolve_queue_root(paths: Mapping[str, Any]) -> Path:

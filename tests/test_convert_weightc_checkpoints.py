@@ -6,6 +6,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from scripts import convert_weightc_checkpoints as cw
 
 
@@ -80,3 +82,110 @@ def test_megatron_shim_pads_vocab_like_neox(tmp_path: Path, monkeypatch) -> None
     assert tok.eod == 0 and tok.vocab_size == 50277
     assert args.padded_vocab_size == 50304  # Pythia's padded embedding rows
     assert not hasattr(tok, "pad")  # converter must fall back to pad_token_id=1
+
+
+def test_source_run_dir_resolves_every_family_seed_pair() -> None:
+    assert cw._source_run_dir("weightc", 1) == cw.DEFAULT_RUN_DIR
+    assert cw._source_run_dir("dclm", 1234).name == "pythia-160m-main-seed-dclm-data"
+    assert cw._source_run_dir("pilerepro", 3).name == "pythia-160m-weight-seed3-pile-data"
+
+
+def test_source_run_dir_rejects_unknown_pair() -> None:
+    with pytest.raises(ValueError, match="no NeoX source tree"):
+        cw._source_run_dir("dclm", 3)
+    with pytest.raises(ValueError, match="no NeoX source tree"):
+        cw._source_run_dir("nosuch", 1)
+
+
+def test_out_root_default_uses_the_registry_dir_template() -> None:
+    from subliminal_learning.models.registry import local_pythia_family
+
+    assert local_pythia_family("dclm").dir_name(1234) == "pythia-160m-dclm-seed1234"
+
+
+def test_resolve_vocab_file_override_then_config_then_fallback(tmp_path: Path) -> None:
+    cfg_vocab = tmp_path / "20B_tokenizer.json"
+    cfg_vocab.write_text("{}")
+    override = tmp_path / "other.json"
+    # explicit override wins even when the config path is readable
+    assert cw._resolve_vocab_file(str(cfg_vocab), override) == override
+    # otherwise the config's own path, when it exists here
+    assert cw._resolve_vocab_file(str(cfg_vocab), None) == cfg_vocab
+    # the DCLM case: the recorded path is not mounted -> the standard 20B tokenizer
+    missing = "/mnt/datasets/pythia-repro-dclm-corpus/20B_tokenizer.json"
+    assert cw._resolve_vocab_file(missing, None) == cw.FALLBACK_VOCAB_FILE
+    assert cw._resolve_vocab_file(None, None) == cw.FALLBACK_VOCAB_FILE
+
+
+def test_config_with_vocab_rewrites_only_when_needed(tmp_path: Path) -> None:
+    import yaml
+
+    cfg = tmp_path / "run.yml"
+    vocab = tmp_path / "20B_tokenizer.json"
+    cfg.write_text(yaml.safe_dump({"vocab-file": str(vocab), "hidden-size": 768}))
+    assert cw._config_with_vocab(cfg, vocab, tmp_path / "patched.yml") == cfg
+    dest = tmp_path / "patched.yml"
+    other = tmp_path / "elsewhere.json"
+    assert cw._config_with_vocab(cfg, other, dest) == dest
+    patched = yaml.safe_load(dest.read_text())
+    assert patched["vocab-file"] == str(other) and patched["hidden-size"] == 768
+
+
+def _sidecar_inputs(tmp_path: Path, cfg_vocab: str | None):
+    """A step config plus the vocab json the converter would really read."""
+    import yaml
+
+    cfg = tmp_path / "run.yml"
+    cfg.write_text(yaml.safe_dump({"vocab-file": cfg_vocab, "hidden-size": 768}))
+    return cfg
+
+
+def test_sidecar_hashes_the_inputs_actually_used(tmp_path: Path) -> None:
+    import hashlib
+    import json
+
+    vocab = tmp_path / "20B_tokenizer.json"
+    vocab.write_text('{"model": {}}')
+    cfg = _sidecar_inputs(tmp_path, str(vocab))
+    # no rewrite: the config already names the vocab the converter gets
+    conv_cfg = cw._config_with_vocab(cfg, vocab, tmp_path / "patched.yml")
+    assert conv_cfg == cfg
+    side = cw._sidecar(
+        family="dclm", seed=1234, run_dir=tmp_path / "run", step=5000,
+        src=tmp_path / "run" / "global_step5000", cfg=cfg, conv_cfg=conv_cfg,
+        vocab=vocab, vocab_fallback=False, neox_tools=tmp_path / "tools",
+    )
+    assert side["source_config_sha256"] == side["effective_config_sha256"]
+    assert side["vocab_file_sha256"] == hashlib.sha256(vocab.read_bytes()).hexdigest()
+    assert side["vocab_fallback"] is False
+    # every pre-existing key survives, and the payload is JSON-writable
+    assert set(side) >= {
+        "family", "seed", "source_run_dir", "source_step", "source_checkpoint",
+        "source_config", "source_config_sha256", "vocab_file", "converter", "fixes",
+        "converted_at",
+    }
+    json.dumps(side)
+
+
+def test_sidecar_records_the_rewritten_config_and_the_vocab_fallback(tmp_path: Path) -> None:
+    import hashlib
+
+    missing = "/mnt/datasets/pythia-repro-dclm-corpus/20B_tokenizer.json"
+    cfg = _sidecar_inputs(tmp_path, missing)
+    vocab = cw._resolve_vocab_file(missing, None)
+    assert vocab == cw.FALLBACK_VOCAB_FILE
+    fallback_bytes = b'{"fallback": true}'
+    vocab = tmp_path / "fallback_tokenizer.json"       # stand-in: do not read /mnt here
+    vocab.write_bytes(fallback_bytes)
+    conv_cfg = cw._config_with_vocab(cfg, vocab, tmp_path / "patched.yml")
+    assert conv_cfg != cfg                              # the vocab path was rewritten
+    side = cw._sidecar(
+        family="dclm", seed=1234, run_dir=tmp_path / "run", step=5000,
+        src=tmp_path / "run" / "global_step5000", cfg=cfg, conv_cfg=conv_cfg,
+        vocab=vocab, vocab_fallback=True, neox_tools=tmp_path / "tools",
+    )
+    assert side["source_config_sha256"] == hashlib.sha256(cfg.read_bytes()).hexdigest()
+    assert side["effective_config_sha256"] == hashlib.sha256(conv_cfg.read_bytes()).hexdigest()
+    assert side["effective_config_sha256"] != side["source_config_sha256"]
+    assert side["vocab_file_sha256"] == hashlib.sha256(fallback_bytes).hexdigest()
+    assert side["vocab_fallback"] is True

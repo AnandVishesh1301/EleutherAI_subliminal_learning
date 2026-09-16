@@ -1,0 +1,348 @@
+"""Hand-checkable values for the transfer-vs-control tests and their loader."""
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from subliminal_learning.analysis import transfer_significance_io as tio
+from subliminal_learning.stats import transfer_significance_tests as tt
+
+
+# ----------------------------------------------------------------------------------------------
+# exceedance
+# ----------------------------------------------------------------------------------------------
+def _exceedance_with(k: int, m: int = 56, n: int = 56):
+    """A treatment/control pair where exactly ``k`` treatment values beat every control."""
+    control = np.linspace(0.0, 1.0, n)
+    treatment = np.concatenate([np.full(k, 2.0), np.linspace(0.0, 0.5, m - k)])
+    return tt.exceedance_test(treatment, control)
+
+
+def test_exceedance_exact_values():
+    assert _exceedance_with(1).p == pytest.approx(56 / 112)
+    # The exact product 56/112 * 55/111 * 54/110 * 53/109 * 52/108 = 0.0284734, which is the
+    # brief's 0.02857 to 0.3% (0.02857 = 1/35, the equal-sized-samples approximation).
+    assert _exceedance_with(5).p == pytest.approx(0.0284734, rel=1e-5)
+    assert _exceedance_with(5).p == pytest.approx(0.02857, rel=5e-3)
+    zero = _exceedance_with(0)
+    assert zero.p == 1.0 and zero.count == 0
+    assert zero.expected == pytest.approx(56 / 57)
+    assert (zero.m, zero.n) == (56, 56)
+
+
+def test_exceedance_strict_ties():
+    assert tt.exceedance_test([1.0, 1.0], [1.0, 0.5]).count == 0
+
+
+# ----------------------------------------------------------------------------------------------
+# paired sign test
+# ----------------------------------------------------------------------------------------------
+def test_paired_sign_test_46_of_56():
+    treatment = np.array([1.0] * 46 + [0.0] * 10)
+    control = np.zeros(56)
+    control[46:] = 1.0
+    res = tt.paired_sign_test(treatment, control)
+    assert (res.wins, res.n) == (46, 56)
+    assert res.p == pytest.approx(6.2e-7, rel=5e-2)
+
+
+def test_paired_sign_test_ties_and_nans():
+    res = tt.paired_sign_test([1.0, 0.0, 0.0, np.nan], [0.0, 0.0, 1.0, 0.0])
+    assert (res.wins, res.n) == (1, 2)  # tie dropped, NaN pair dropped
+
+
+# ----------------------------------------------------------------------------------------------
+# stratified exceedance permutation
+# ----------------------------------------------------------------------------------------------
+def _separated_matrix(cells: int = 56, pools: int = 12) -> np.ndarray:
+    rng = np.random.default_rng(3)
+    values = rng.uniform(1.0, 2.0, size=(cells, pools))
+    values[:, pools - 1] = 0.0  # the control column is smallest in every cell
+    return values
+
+
+def test_stratified_permutation_separated_hits_floor():
+    res = tt.stratified_exceedance_permutation(_separated_matrix(), 11, n_perm=2000, seed=0)
+    assert res.observed == 56 * 11
+    assert res.p == res.floor == pytest.approx(1 / 2001)
+
+
+def test_stratified_permutation_iid_is_null():
+    values = np.random.default_rng(0).normal(size=(56, 12))
+    res = tt.stratified_exceedance_permutation(values, 11, n_perm=2000, seed=1)
+    assert res.p > 0.05
+
+
+def test_stratified_permutation_nan_tolerant_and_deterministic():
+    values = _separated_matrix()
+    values[0, 3] = np.nan
+    values[5, 11] = np.nan
+    values[5, 0] = np.nan
+    a = tt.stratified_exceedance_permutation(values, 11, n_perm=500, seed=7)
+    b = tt.stratified_exceedance_permutation(values, 11, n_perm=500, seed=7)
+    assert a == b
+    # Threshold = nanmax over the control column = 0, so every finite non-control entry
+    # exceeds it: 56*11 minus the two NaN treatment entries.
+    assert a.observed == 56 * 11 - 2
+
+
+# ----------------------------------------------------------------------------------------------
+# topk_mean / prior_scaled_effect / conformal
+# ----------------------------------------------------------------------------------------------
+def test_topk_mean():
+    assert tt.topk_mean([1, 2, 3, 4, 5, 6], k=3) == pytest.approx(5.0)
+    assert tt.topk_mean([1.0, np.nan], k=5) == pytest.approx(1.0)
+    assert np.isnan(tt.topk_mean([np.nan]))
+
+
+def test_prior_scaled_effect():
+    assert tt.prior_scaled_effect([0.3, 0.2], [0.1, 0.1], 0.1) == pytest.approx(1.5)
+    assert np.isnan(tt.prior_scaled_effect([np.nan], [0.1], 0.1))
+
+
+def test_conformal_rank_p():
+    assert tt.conformal_rank_p([0.9, 1.0, 1.1], np.linspace(0, 0.5, 10)) == pytest.approx(1 / 11)
+    assert tt.conformal_rank_p(1.0, np.linspace(0, 0.5, 10)) == pytest.approx(1 / 11)
+
+
+def test_no_multiplicity_helpers():
+    """The brief's amendment: no Holm/Bonferroni wrappers live here."""
+    assert not hasattr(tt, "holm") and not hasattr(tt, "bonferroni")
+
+
+# ----------------------------------------------------------------------------------------------
+# pool-rank permutation
+# ----------------------------------------------------------------------------------------------
+def _pool_frame(n_pools: int, n_cols: int, control_value: float, rng) -> pd.DataFrame:
+    index = [f"pool{i}" for i in range(n_pools - 1)] + [tio.CONTROL_LABEL]
+    data = rng.uniform(0.4, 0.6, size=(n_pools, n_cols))
+    data[-1, :] = control_value
+    return pd.DataFrame(data, index=index, columns=[f"r{c}" for c in range(n_cols)])
+
+
+def test_pool_rank_exact_control_lowest():
+    rng = np.random.default_rng(0)
+    stats = {f"s{i}": _pool_frame(11, 3, 0.0, rng) for i in range(4)}
+    res = tt.pool_rank_permutation(stats, tio.CONTROL_LABEL)
+    assert res.exact and res.n_labelings == 11 ** 4
+    assert res.observed == pytest.approx(1.0)
+    assert res.p == pytest.approx(1 / 11 ** 4)
+    assert set(res.per_sender_rank.values()) == {1}
+
+
+def test_pool_rank_control_median():
+    rng = np.random.default_rng(1)
+    stats = {}
+    for s in range(2):
+        frame = _pool_frame(11, 2, 0.5, rng)
+        frame.iloc[:10, :] = np.tile(np.linspace(0.0, 1.0, 10)[:, None], (1, 2))
+        stats[f"s{s}"] = frame
+    res = tt.pool_rank_permutation(stats, tio.CONTROL_LABEL)
+    assert res.p == pytest.approx(0.5, abs=0.15)
+
+
+def test_pool_rank_monte_carlo_path():
+    rng = np.random.default_rng(2)
+    stats = {f"s{i}": _pool_frame(11, 2, 0.5, rng) for i in range(4)}
+    res = tt.pool_rank_permutation(stats, tio.CONTROL_LABEL, max_exact=10, n_mc=500, seed=0)
+    assert not res.exact and res.n_labelings == 500
+    assert 1 / 501 <= res.p <= 1.0
+
+
+def test_pool_rank_skips_single_pool_sender():
+    rng = np.random.default_rng(4)
+    stats = {"s0": _pool_frame(11, 2, 0.0, rng),
+             "s1": _pool_frame(1, 2, 0.0, rng)}
+    with pytest.warns(UserWarning, match="fewer than 2 pools"):
+        res = tt.pool_rank_permutation(stats, tio.CONTROL_LABEL)
+    assert list(res.per_sender_rank) == ["s0"]
+
+
+# ----------------------------------------------------------------------------------------------
+# loader (fake tree)
+# ----------------------------------------------------------------------------------------------
+def _write_summary(path, prompt_set: str, value: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        {"summaries": [{"prompt_set": prompt_set, "p_target_mean": value}]}
+    ))
+
+
+def _fake_tree(root, *, cells=("c1", "c2"), teachers=("t1", "t2"), extra_teacher="t_stray"):
+    """A minimal students/ + teachers/ tree for dog, sender fs1, receiver original."""
+    ds = "ex10-20_prefix_n100k"
+    for i, cell in enumerate(cells):
+        for j, tag in enumerate([*teachers, extra_teacher]):
+            base = (root / "students/dog/pythia-160m/teacher-pythia-160m-seed1"
+                    / f"{tag}_tseed1" / ds / cell)
+            _write_summary(base / "preference_summary.json", "test", 0.5 + 0.1 * j + 0.01 * i)
+            _write_summary(base / "eval/cat/preference_summary.json", "test", 0.2 + 0.01 * j)
+        ctrl = (root / "students/controls/base/pythia-160m/teacher-pythia-160m-seed1"
+                / ds / cell)
+        _write_summary(ctrl / "eval/dog/preference_summary.json", "test", 0.1)
+        _write_summary(ctrl / "eval/cat/preference_summary.json", "test", 0.3)
+    (root / "teachers/dog/pythia-160m").mkdir(parents=True, exist_ok=True)
+    (root / "teachers/dog/pythia-160m/base_control.json").write_text(json.dumps(
+        {"validation": {"p_target": 0.01}, "off_topic": {"p_target": 0.0001}}
+    ))
+
+
+def test_base_name_mapping():
+    assert tio.base_name("original") == "pythia-160m"
+    assert tio.base_name("orig") == "pythia-160m"
+    assert tio.base_name("fs1") == "pythia-160m-seed1"
+    assert tio.base_name("full-seed2") == "pythia-160m-seed2"
+    assert tio.base_name("ds3") == "pythia-160m-data-seed3"
+    assert tio.base_name("ws1") == "pythia-160m-weight-seed1"
+    assert tio.base_name("pythia-410m") == "pythia-410m"
+
+
+def test_resolve_teachers_manifest_list_and_strays(tmp_path):
+    _fake_tree(tmp_path)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"param_tags": ["t1", "t2"]}))
+    selected, stray = tio.resolve_teachers(manifest, animal="dog", sender="fs1",
+                                           output_root=tmp_path)
+    assert selected == ["t1", "t2"] and stray == ["t_stray"]
+
+    selected, stray = tio.resolve_teachers(["t1"], animal="dog", sender="fs1",
+                                           output_root=tmp_path)
+    assert selected == ["t1"] and stray == ["t2", "t_stray"]
+
+    selected, stray = tio.resolve_teachers("all-on-disk", animal="dog", sender="fs1",
+                                           output_root=tmp_path)
+    assert selected == ["t1", "t2", "t_stray"] and stray == []
+
+
+def test_load_cell_matrix_paths_and_parsing(tmp_path):
+    _fake_tree(tmp_path)
+    matrix = tio.load_cell_matrix("dog", "fs1", "original", ["t1", "t2"], output_root=tmp_path)
+    assert matrix.cells == ["c1", "c2"]
+    assert matrix.pools == ["t1", "t2", tio.CONTROL_LABEL]
+    assert matrix.control_col == 2 and matrix.missing == []
+    assert matrix.values[0].tolist() == pytest.approx([0.5, 0.6, 0.1])
+    assert matrix.frame["is_control"].sum() == 2
+
+    cross = tio.load_cell_matrix("dog", "fs1", "original", ["t1"], eval_animal="cat",
+                                 output_root=tmp_path)
+    assert cross.values[0].tolist() == pytest.approx([0.2, 0.3])
+
+
+def test_load_cell_matrix_missing_marked(tmp_path):
+    _fake_tree(tmp_path)
+    matrix = tio.load_cell_matrix("dog", "fs1", "original", ["t1", "absent"],
+                                  output_root=tmp_path)
+    assert np.isnan(matrix.values[:, 1]).all()
+    assert sorted(matrix.missing) == [("absent", "c1"), ("absent", "c2")]
+
+
+def test_load_prior_validation_proxy(tmp_path):
+    _fake_tree(tmp_path)
+    assert tio.load_prior("dog", "original", "test", output_root=tmp_path) == pytest.approx(0.01)
+    assert tio.load_prior("dog", "original", "off_topic",
+                          output_root=tmp_path) == pytest.approx(0.0001)
+    assert np.isnan(tio.load_prior("dog", "fs1", "test", output_root=tmp_path))
+
+
+def test_load_pool_stats_shape(tmp_path):
+    _fake_tree(tmp_path)
+    stats = tio.load_pool_stats("dog", ["fs1"], ["original"], {"fs1": ["t1", "t2"]},
+                                output_root=tmp_path)
+    frame = stats["fs1"]
+    assert list(frame.index) == ["t1", "t2", tio.CONTROL_LABEL]
+    assert list(frame.columns) == ["original"]
+    assert frame.loc[tio.CONTROL_LABEL, "original"] == pytest.approx(0.1)
+
+
+def _fake_dd_tree(root, cells=("d1", "d2", "d3")):
+    """A minimal DataDecide OLMo tree: elephant, tseed0, dd-1b -> dd-1b-seed2, base + rng ctrls."""
+    ds = "ex10-20_prefix_n100k"
+    recv, send = tio.base_name("dd-1b-seed2"), tio.base_name("dd-1b")
+    for i, cell in enumerate(cells):
+        leaf = (root / "students/elephant" / recv / f"teacher-{send}"
+                / "ep10_lr5e-4_r64a128_tseed0" / ds / cell)
+        _write_summary(leaf / "preference_summary.json", "test", 0.4 + 0.01 * i)
+        # controls score their one animal in place, not under eval/{animal}/
+        for tree, value in ((root / "students/controls/base" / recv / f"teacher-{send}" / ds, 0.1),
+                            (root / "students/controls/rng" / recv / ds, 0.2)):
+            path = tree / cell / "preference_summary.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"target_animal": "elephant", "summaries": [
+                {"prompt_set": "test", "p_target_mean": value}]}))
+
+
+def test_load_cell_matrix_dd1b_tseed0_and_rng_controls(tmp_path):
+    _fake_dd_tree(tmp_path)
+    matrix = tio.load_cell_matrix("elephant", "dd-1b", "dd-1b-seed2", ["ep10_lr5e-4_r64a128"],
+                                  tseed=0, output_root=tmp_path)
+    assert matrix.cells == ["d1", "d2", "d3"] and matrix.missing == []
+    assert matrix.values[0].tolist() == pytest.approx([0.4, 0.1])
+
+    rng = tio.load_cell_matrix("elephant", "dd-1b", "dd-1b-seed2", ["ep10_lr5e-4_r64a128"],
+                               tseed=0, control_source="rng", output_root=tmp_path)
+    assert rng.values[:, rng.control_col].tolist() == pytest.approx([0.2] * 3)
+
+
+def test_load_cell_matrix_explicit_dirs_and_cells_restriction(tmp_path):
+    _fake_dd_tree(tmp_path)
+    manifest = tmp_path / "cells.json"
+    manifest.write_text(json.dumps({"cells": ["d2", "absent"]}))
+    for cells in (["d2", "absent"], manifest):
+        matrix = tio.load_cell_matrix(
+            "elephant", "DataDecide-dolma1_7-1B-seed-default",
+            "DataDecide-dolma1_7-1B-seed-large-aux-2", ["ep10_lr5e-4_r64a128"],
+            tseed=0, cells=cells, output_root=tmp_path,
+        )
+        # "absent" has no control value, so it is not a matched cell at all
+        assert matrix.cells == ["d2"] and matrix.no_control == ["absent"]
+        assert matrix.values[0].tolist() == pytest.approx([0.41, 0.1])
+        assert matrix.missing == []
+
+
+def test_explicit_cells_without_a_control_are_dropped(tmp_path):
+    """A requested cell whose control is missing must leave the design, not sit there as a NaN."""
+    _fake_dd_tree(tmp_path, cells=("d1",))
+    ds = "ex10-20_prefix_n100k"
+    _write_summary(tmp_path / "students/elephant" / tio.base_name("dd-1b-seed2")
+                   / f"teacher-{tio.base_name('dd-1b')}" / "ep10_lr5e-4_r64a128_tseed0" / ds
+                   / "no_ctrl" / "preference_summary.json", "test", 0.9)
+    matrix = tio.load_cell_matrix("elephant", "dd-1b", "dd-1b-seed2", ["ep10_lr5e-4_r64a128"],
+                                  tseed=0, cells=["d1", "no_ctrl"], output_root=tmp_path)
+    assert matrix.cells == ["d1"] and matrix.no_control == ["no_ctrl"]
+    assert np.isfinite(matrix.values).all()
+
+
+def test_cell_set_skips_unusable_control_dirs_and_reports_layout(tmp_path):
+    """Old-layout top-level control summaries count (same animal); empty/foreign dirs are not cells."""
+    ds = "ex10-20_prefix_n100k"
+    ctrl = tmp_path / "students/controls/base/pythia-160m-data-seed1/teacher-pythia-160m" / ds
+    _write_summary(ctrl / "old" / "preference_summary.json", "test", 0.1)
+    (ctrl / "old/preference_summary.json").write_text(json.dumps(
+        {"target_animal": "dog", "summaries": [{"prompt_set": "test", "p_target_mean": 0.1}]}))
+    _write_summary(ctrl / "new/eval/dog/preference_summary.json", "test", 0.2)
+    (ctrl / "empty").mkdir(parents=True)  # neither layout -> not a cell
+    (ctrl / "other").mkdir(parents=True)  # top-level summary for a different animal -> not a cell
+    (ctrl / "other/preference_summary.json").write_text(json.dumps(
+        {"target_animal": "cat", "summaries": [{"prompt_set": "test", "p_target_mean": 0.9}]}))
+    for cell, value in (("old", 0.5), ("new", 0.6)):
+        _write_summary(tmp_path / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m"
+                       / "t1_tseed1" / ds / cell / "preference_summary.json", "test", value)
+
+    matrix = tio.load_cell_matrix("dog", "original", "ds1", ["t1"], output_root=tmp_path)
+    assert matrix.cells == ["new", "old"]
+    assert matrix.control_layout == {"new": "eval", "old": "top-level"}
+    assert matrix.values[:, matrix.control_col].tolist() == pytest.approx([0.2, 0.1])
+
+
+def test_drop_empty_pools_warns_and_keeps_control(tmp_path):
+    _fake_tree(tmp_path)
+    matrix = tio.load_cell_matrix("dog", "fs1", "original", ["t1", "absent"], output_root=tmp_path)
+    with pytest.warns(UserWarning, match="no cell on the control cell set"):
+        kept, dropped = tio.drop_empty_pools(matrix)
+    assert dropped == ["absent"]
+    assert kept.pools == ["t1", tio.CONTROL_LABEL] and kept.control_col == 1
+    assert kept.values.shape == (2, 2) and np.isfinite(kept.values).all()
+    assert tio.drop_empty_pools(kept) == (kept, [])

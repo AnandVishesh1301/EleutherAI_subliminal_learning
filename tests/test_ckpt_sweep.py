@@ -541,3 +541,23 @@ def test_no_dep_prefix_collects_nothing(tmp_path):
     missing: list[tuple[str, int]] = []
     expand_jobs(_sweep(), _REPO, tmp_path, missing)
     assert missing == []
+
+
+# ------------------------- jobq.node pin -------------------------
+
+
+def test_node_absent_leaves_every_queue_unpinned():
+    assert all(q.node is None for q in expand_jobs(_sweep(), _REPO))
+
+
+def test_node_pins_every_expanded_queue():
+    specs = expand_jobs(_sweep(jobq={"node": "soar-subliminal-1"}), _REPO)
+    assert specs and all(q.node == "soar-subliminal-1" for q in specs)
+
+
+def test_adding_node_is_not_snapshot_growth():
+    old = "jobq: {root: r, queue_prefix: p}\nsteps: [1000]\n"
+    new = "jobq: {root: r, queue_prefix: p, node: soar-subliminal-1}\nsteps: [1000]\n"
+    assert _snapshot_growth_diff(old, new) == ["jobq"]
+    assert _snapshot_action(old, new, allow_update=False, allow_growth=True) == "error"
+    assert _snapshot_action(old, new, allow_update=True) == "overwrite"

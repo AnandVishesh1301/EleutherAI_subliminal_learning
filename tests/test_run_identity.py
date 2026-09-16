@@ -791,3 +791,63 @@ def test_allow_cross_family_is_not_in_the_run_identity(tmp_path: Path):
     ident_xf = _student_run_identity(xf, base_model_repo="X", filtered_sha256="abc")
     assert "allow_cross_family" not in ident_xf
     assert ident_xf == ident
+
+
+# --- the other local re-pretraining families (same grammar, own seed sets) ----------
+
+_PILEREPRO = PythiaModelSpec(size="160m", seed=1234, variant="pilerepro", revision="step75000")
+_DCLM = PythiaModelSpec(size="160m", seed=1, variant="dclm")
+
+
+def test_parse_local_family_tokens():
+    assert parse_base_models("pilerepro-seed1234@step75000") == [_PILEREPRO]
+    assert parse_base_models("dclm-seed1") == [_DCLM]
+    assert parse_base_models("pilerepro-seed3,dclm-seed1234") == [
+        PythiaModelSpec(size="160m", seed=3, variant="pilerepro"),
+        PythiaModelSpec(size="160m", seed=1234, variant="dclm"),
+    ]
+
+
+def test_local_family_label_and_ref():
+    assert spec_label(_PILEREPRO) == "pilerepro-seed1234@step75000"
+    assert model_ref(_PILEREPRO, _ORG) == "local/pythia-160m-pilerepro-seed1234@step75000"
+    assert model_ref(_DCLM, _ORG) == "local/pythia-160m-dclm-seed1"
+
+
+def test_parse_local_family_rejects_foreign_seed():
+    # Each family has its OWN seed set; a seed from a sibling family is an error.
+    with pytest.raises(ValueError, match="pilerepro has seeds"):
+        parse_base_models("pilerepro-seed1")
+    with pytest.raises(ValueError, match="dclm has seeds"):
+        parse_base_models("dclm-seed3")
+
+
+def test_local_families_never_in_group_selectors():
+    for selector in ("seeds", "all", "all6", "all7", "data", "weight"):
+        variants = {s.variant for s in parse_base_models(selector)}
+        assert variants.isdisjoint({"weightc", "pilerepro", "dclm"})
+
+
+def test_local_family_dir_parts_gather_under_ckpt():
+    assert model_dir_parts(_PILEREPRO, _ORG) == (
+        "ckpt", "pythia-160m-pilerepro-seed1234@step75000",
+    )
+
+
+def test_validate_spec_accepts_local_families_and_checks_seed():
+    from subliminal_learning.teachers.model_specs import validate_spec
+
+    validate_spec(_PILEREPRO)
+    validate_spec(PythiaModelSpec(size="160m", seed=2, variant="dclm"))
+    with pytest.raises(ValueError, match="bad seed"):
+        validate_spec(PythiaModelSpec(size="160m", seed=4, variant="dclm"))
+    with pytest.raises(ValueError, match="bad size"):
+        validate_spec(PythiaModelSpec(size="410m", seed=1234, variant="pilerepro"))
+
+
+def test_family_swap_rejects_every_local_family():
+    from subliminal_learning.teachers.model_specs import family_swap_spec
+
+    for spec in (_PILEREPRO, _DCLM):
+        with pytest.raises(ValueError, match="no sibling"):
+            family_swap_spec(spec)

@@ -269,9 +269,13 @@ def _same_base(a: str, b: str) -> bool:
 
 
 # Cross-family pairs the `allow_cross_family` escape hatch may be used for, as
-# (numbers family, student family) in the labels `_family_label` derives. Only
-# DataDecide (OLMo tokenizer) -> Pythia has been verified id-identical on pool text.
-SUPPORTED_CROSS_FAMILY_PAIRS = {("datadecide", "pythia")}
+# (numbers family, student family) in the labels `_family_label` derives. Both
+# directions between DataDecide (OLMo tokenizer) and Pythia have been verified
+# id-identical on pool text.
+# Pythia -> DataDecide (2026-09-15): 3000/3000 rows identical ids, 0 distinct mismatching
+# ids, on numbers/dog/pythia-160m/ep20_lr1e-4_r16a32/ftseed1/ex10-20 (prefix) and
+# numbers/controls/base/pythia-160m/ex10-20 (prefix).
+SUPPORTED_CROSS_FAMILY_PAIRS = {("datadecide", "pythia"), ("pythia", "datadecide")}
 
 
 def _family_label(ref: str) -> str | None:

@@ -67,6 +67,22 @@ PROBE_FAMILIES: dict[str, ProbeFamily] = {
 }
 
 
+# CORPUS pools (as opposed to the frozen-text retokenizations above): one per (family,
+# pretraining corpus), enumerated here so pool-version validation knows them. pp1 = Pile,
+# cp1 = DCLM held-out (the `dclm` local re-pretrainings, same Pythia tokenizer, different
+# corpus), dp1 = Dolma v1.7. Which of a family's corpus pools a given base takes is decided
+# from its spec in `coherence.probe_io.probe_pool_spec_for_repo`.
+CORPUS_POOLS: dict[str, tuple[str, ...]] = {
+    "pythia": ("pp1", "cp1"),
+    "olmo": ("dp1",),
+}
+
+
+def corpus_pools_for(tag: str) -> tuple[str, ...]:
+    """The corpus pool versions of a family tag (empty for frozen-text-only families)."""
+    return CORPUS_POOLS.get(tag, ())
+
+
 def pool_version_for(tag: str) -> str:
     """The pool version string of a family tag, e.g. ``pp1t-qwen25``."""
     if tag not in PROBE_FAMILIES:

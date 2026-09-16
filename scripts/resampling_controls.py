@@ -3,6 +3,8 @@
 Profile-target arms reuse source rows only to fill first-number quota shortages.
 Uniform baselines and synthetic carriers sample without replacement. Synthetic
 arms share untuned prompts/number counts; no arm matches mature lengths or prompt types.
+The follow-up arms ``mature_prompt_shuffle{k}`` reuse the ``mature_uniform`` rows for a
+pool seed and permute only the prompt column (shuffle k), breaking prompt-completion pairing.
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ import json
 import math
 import shlex
 import subprocess
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,6 +26,7 @@ from subliminal_learning.numbers.resampling import (
     permutation,
     pool_stats,
     profile_sample,
+    shuffle_prompts,
     synthesize,
     uniform_sample,
 )
@@ -41,6 +46,11 @@ ARMS = (
     "synthetic_early_iid",
     "synthetic_mature_iid",
     "synthetic_permuted_mature_iid",
+)
+FOLLOWUP_ARMS = (
+    "mature_prompt_shuffle0",
+    "mature_prompt_shuffle1",
+    "mature_prompt_shuffle2",
 )
 RECIPIENTS = (75000, 125000)
 POOL_SEEDS = (0, 1, 2)
@@ -111,6 +121,11 @@ def shared_profiles(
     )
 
 
+def _shuffle_index(arm: str) -> int:
+    """Trailing digit of a follow-up arm name is its shuffle seed."""
+    return int(arm.removeprefix("mature_prompt_shuffle"))
+
+
 def make_pool(
     arm: str,
     early: list[dict],
@@ -119,7 +134,7 @@ def make_pool(
     seed: int,
     n: int = N,
 ) -> tuple[list[dict], dict]:
-    if arm not in ARMS:
+    if arm not in ARMS and arm not in FOLLOWUP_ARMS:
         raise ValueError(f"unknown arm: {arm}")
     target, shuffled, diagnostic = shared_profiles(early, mature, untuned, seed, n)
     diagnostic.update(
@@ -129,7 +144,29 @@ def make_pool(
         length_matching=False,
     )
     sources = {"early": early, "mature": mature, "untuned": untuned}
-    if arm.endswith("_uniform"):
+    if arm in FOLLOWUP_ARMS:
+        shuffle_k = _shuffle_index(arm)
+        base = uniform_sample(mature, n, seed, replacement=False)
+        shuffle_seed = 20000 + 100 * seed + shuffle_k
+        rows, fixed = shuffle_prompts(base, shuffle_seed)
+        # Generator fields describe the original prompt, which no longer owns this row.
+        rows = [
+            {k: row[k] for k in ("prompt", "completion", "numbers")} for row in rows
+        ]
+        assert Counter(r["completion"] for r in rows) == Counter(
+            r["completion"] for r in base
+        )
+        assert Counter(r["prompt"] for r in rows) == Counter(r["prompt"] for r in base)
+        diagnostic["sampling"] = (
+            "uniform_rows_without_replacement_then_prompt_column_permuted"
+        )
+        # Pair overlap is low by construction: the permutation breaks the pairing.
+        diagnostic["prompt_shuffle_fixed_points"] = fixed
+        diagnostic["shuffle_index"] = shuffle_k
+        # The RNG seed actually handed to shuffle_prompts, so the permutation is
+        # reproducible from manifest.json alone.
+        diagnostic["prompt_shuffle_seed"] = shuffle_seed
+    elif arm.endswith("_uniform"):
         rows = uniform_sample(
             sources[arm.removesuffix("_uniform")], n, seed, replacement=False
         )
@@ -234,24 +271,32 @@ def write_pool(
     return manifest
 
 
-def prepare(output_root: Path, campaign_dir: Path) -> None:
+def prepare(
+    output_root: Path,
+    campaign_dir: Path,
+    arms: Sequence[str] | None = None,
+    pool_seeds: Sequence[int] | None = None,
+) -> None:
+    filtered = arms is not None or pool_seeds is not None
     parents = source_paths(output_root)
     pools = {
         k: [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
         for k, p in parents.items()
     }
     summaries = {}
-    for seed in POOL_SEEDS:
-        for arm in ARMS:
+    for seed in pool_seeds if pool_seeds is not None else POOL_SEEDS:
+        for arm in arms if arms is not None else ARMS:
             rows, diag = make_pool(arm, **pools, seed=seed)
             manifest = write_pool(rows, pool_dir(output_root, arm, seed), parents, diag)
             summaries[f"{arm}/poolseed{seed}"] = {
                 k: manifest[k] for k in ("filtered_sha256", "pool_stats", "diagnostics")
             }
     campaign_dir.mkdir(parents=True, exist_ok=True)
-    (campaign_dir / "pool_diagnostics.json").write_text(
-        json.dumps(summaries, indent=2) + "\n"
-    )
+    out = campaign_dir / "pool_diagnostics.json"
+    if filtered and out.is_file():
+        # Follow-up pools extend the campaign record; never drop the original 30.
+        summaries = {**json.loads(out.read_text()), **summaries}
+    out.write_text(json.dumps(summaries, indent=2) + "\n")
 
 
 def load_base(output_root: Path):
@@ -366,38 +411,69 @@ def _command(args: list[str]) -> str:
     )
 
 
+def _job(
+    output_root: Path,
+    jobs_root: Path,
+    arm: str,
+    pool_seed: int,
+    recipient: int,
+    student_seed: int,
+) -> dict:
+    return {
+        "key": f"{arm}-p{pool_seed}-r{recipient}-s{student_seed}",
+        "cmd": _command(
+            [
+                "run",
+                "--arm",
+                arm,
+                "--pool-seed",
+                str(pool_seed),
+                "--recipient",
+                str(recipient),
+                "--student-seed",
+                str(student_seed),
+                "--output-root",
+                str(output_root),
+                "--campaign-dir",
+                str(jobs_root),
+            ]
+        ),
+        "cwd": str(ROOT),
+        "env": {"WANDB_MODE": "disabled"},
+    }
+
+
+def emit_followup(
+    output_root: Path,
+    jobs_root: Path,
+    arms: Sequence[str],
+    pool_seeds: Sequence[int],
+    recipients: Sequence[int],
+) -> dict[str, int]:
+    """Write the follow-up job file only; jobs_distill.jsonl stays the 180-job manifest."""
+    jobs_root.mkdir(parents=True, exist_ok=True)
+    jobs = [
+        _job(output_root, jobs_root, arm, pool_seed, recipient, student_seed)
+        for arm in arms
+        for pool_seed in pool_seeds
+        for recipient in recipients
+        for student_seed in STUDENT_SEEDS
+    ]
+    (jobs_root / "jobs_distill_followup.jsonl").write_text(
+        "".join(json.dumps(j) + "\n" for j in jobs)
+    )
+    return {"pools": len(arms) * len(pool_seeds), "jobs": len(jobs)}
+
+
 def build_jobs(output_root: Path, jobs_root: Path) -> dict[str, int]:
     jobs_root.mkdir(parents=True, exist_ok=True)
-    jobs = []
-    for arm in ARMS:
-        for pool_seed in POOL_SEEDS:
-            for recipient in RECIPIENTS:
-                for student_seed in STUDENT_SEEDS:
-                    key = f"{arm}-p{pool_seed}-r{recipient}-s{student_seed}"
-                    jobs.append(
-                        {
-                            "key": key,
-                            "cmd": _command(
-                                [
-                                    "run",
-                                    "--arm",
-                                    arm,
-                                    "--pool-seed",
-                                    str(pool_seed),
-                                    "--recipient",
-                                    str(recipient),
-                                    "--student-seed",
-                                    str(student_seed),
-                                    "--output-root",
-                                    str(output_root),
-                                    "--campaign-dir",
-                                    str(jobs_root),
-                                ]
-                            ),
-                            "cwd": str(ROOT),
-                            "env": {"WANDB_MODE": "disabled"},
-                        }
-                    )
+    jobs = [
+        _job(output_root, jobs_root, arm, pool_seed, recipient, student_seed)
+        for arm in ARMS
+        for pool_seed in POOL_SEEDS
+        for recipient in RECIPIENTS
+        for student_seed in STUDENT_SEEDS
+    ]
     (jobs_root / "jobs_distill.jsonl").write_text(
         "".join(json.dumps(j) + "\n" for j in jobs)
     )
@@ -538,9 +614,28 @@ def submit(output_root: Path, campaign_dir: Path, queue_root: Path) -> None:
     )
 
 
+def check_arm_filter(parser, command: str, arms: Sequence[str] | None) -> None:
+    """Follow-up commands may only name follow-up arms.
+
+    ``emit-followup`` and a filtered ``prepare`` re-derive pools and job keys; pointing
+    them at an original arm would silently collide with the drained 180-job campaign.
+    ``run`` executes cells of both kinds, so it is left alone.
+    """
+    if command not in ("emit-followup", "prepare") or not arms:
+        return
+    offenders = [a for a in arms if a not in FOLLOWUP_ARMS]
+    if offenders:
+        parser.error(
+            f"{command} --arm accepts only follow-up arms "
+            f"({', '.join(FOLLOWUP_ARMS)}); got: {', '.join(offenders)}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("emit", "prepare", "run", "submit"))
+    parser.add_argument(
+        "command", choices=("emit", "emit-followup", "prepare", "run", "submit")
+    )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument(
         "--campaign-dir", "--jobs-root", type=Path, default=DEFAULT_CAMPAIGN_DIR
@@ -548,29 +643,42 @@ def main() -> None:
     parser.add_argument(
         "--queue-root", type=Path, default=ROOT / "run_logs/queue_angela"
     )
-    parser.add_argument("--arm", choices=ARMS)
-    parser.add_argument("--pool-seed", type=int, choices=POOL_SEEDS)
-    parser.add_argument("--recipient", type=int, choices=RECIPIENTS)
+    parser.add_argument("--arm", nargs="+", choices=ARMS + FOLLOWUP_ARMS)
+    parser.add_argument("--pool-seed", type=int, nargs="+", choices=POOL_SEEDS)
+    parser.add_argument("--recipient", type=int, nargs="+", choices=RECIPIENTS)
     parser.add_argument("--student-seed", type=int, choices=STUDENT_SEEDS)
     args = parser.parse_args()
+    check_arm_filter(parser, args.command, args.arm)
     if args.command == "emit":
         print(json.dumps(build_jobs(args.output_root, args.campaign_dir)))
+    elif args.command == "emit-followup":
+        print(
+            json.dumps(
+                emit_followup(
+                    args.output_root,
+                    args.campaign_dir,
+                    args.arm or list(FOLLOWUP_ARMS),
+                    args.pool_seed or [0],
+                    args.recipient or [125000],
+                )
+            )
+        )
     elif args.command == "prepare":
-        prepare(args.output_root, args.campaign_dir)
+        prepare(args.output_root, args.campaign_dir, args.arm, args.pool_seed)
     elif args.command == "submit":
         submit(args.output_root, args.campaign_dir, args.queue_root)
     else:
         if any(
             getattr(args, k) is None
             for k in ("arm", "pool_seed", "recipient", "student_seed")
-        ):
-            parser.error("run requires arm, pool-seed, recipient, student-seed")
+        ) or any(len(getattr(args, k)) != 1 for k in ("arm", "pool_seed", "recipient")):
+            parser.error("run requires one arm, pool-seed, recipient, student-seed")
         print(
             run_cell(
                 args.output_root,
-                args.arm,
-                args.pool_seed,
-                args.recipient,
+                args.arm[0],
+                args.pool_seed[0],
+                args.recipient[0],
                 args.student_seed,
                 args.campaign_dir,
             )

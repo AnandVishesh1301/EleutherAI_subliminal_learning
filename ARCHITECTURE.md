@@ -88,7 +88,29 @@ src/subliminal_learning/
                     fit/block-test/AUC ladder shared by the collapse screens:
                     BlockTest/LadderRung, nested_logit_block, coef_table, term_stats,
                     fate_auc/fitted_auc, zscore_column — deduplicates
-                    mediation_twopart_kl vs teacher_cos_screen)
+                    mediation_twopart_kl vs teacher_cos_screen),
+                    transfer_significance_tests (20260916; cross-seed transfer vs matched base-pool
+                    controls: paired_sign_test, exceedance_test = the EXACT Rosenbaum
+                    product p, stratified_exceedance_permutation = within-cell control
+                    relabelling on the pooled exceedance count,
+                    pool_rank_permutation = cross-sender per-pool relabelling shared
+                    across a sender's columns, conformal_rank_p, topk_mean,
+                    prior_scaled_effect; no multiplicity wrappers — the existence claim
+                    rests on the stratified permutation, the per-teacher tests are
+                    descriptive. Loaders live in analysis/transfer_significance_io.py
+                    (treatment/control cell matrices, base priors w/ the validation
+                    proxy for the test prompt set, teacher manifests vs stray on-disk
+                    dirs; also tseed (OLMo = 0), dd-1b/dd-1b-seed2/dd-1b-seed3 tokens or
+                    explicit base dirs, a cells restriction (list or cells JSON),
+                    control_source base|rng + control_numbers_base via dd1b_ladder.dataset_dir,
+                    both control-summary layouts (eval/<animal>/ and old top-level, animal-
+                    checked), cells with no control value dropped from the design
+                    (CellMatrix.no_control) and drop_empty_pools for teachers off the
+                    control cell set);
+                    scripts/transfer_significance_readout.py prints the per-teacher
+                    table and the pooled permutation line per evaluated animal
+                    (--tseed/--cells/--control-source/--control-numbers-base, --teachers
+                    also takes a comma list))
     weightspace/    LoRA/base-model weight-space math (20260901; torch; importable from
                     scripts/, pipelines/ and notebooks; never imports analysis/):
                     lora (lora_svd QR-QR-SVD → exact (U,σ,V) of s·B·A,
@@ -377,10 +399,12 @@ priority, pin, pending/running/done/failed, median duration measured from the qu
 `results/*.json` (rc==0, cache hits <120 s dropped, ≥3 samples), trailing-3 h completion
 rate, a per-queue ETA (wave = median-based vs throughput = rate-based, shown as a range when
 they disagree; `queued<Q` = starved behind a higher/equal-priority running queue, `blocked` =
-idle with nothing above it), a cumulative `finish~` column (priority-order drain at the current
+idle with nothing above it), a cumulative `fin~` column (priority-order drain at the current
 global concurrency; `+` = lower bound), and a stale-claim count (age > 3× median). Backs the
 `/status` command (`.claude/commands/status.md`), which the `shell` sidekick runs so the lead
-model never composes the queue-inspection commands. Tests: `tests/test_queue_status.py`.
+model never composes the queue-inspection commands. A `mem` column (2026-09-15) shows the GiB ask pending+running jobs are gated on
+(worker `_effective_mem`: job/`defaults.mem_mib` raised by the attempts-sidecar OOM floor; `min-max`
+range when jobs differ, `^` = floor-escalated, `-` = no ask); `r/h`/`fin~` headers abbreviated. Tests: `tests/test_queue_status.py`.
 
 **CPU thread cap is enforced by default (2026-08-21).** `subliminal_learning/__init__.py` sets `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`OPENBLAS_NUM_THREADS` to `min(4, cpu_count)` at import when none is set, and calls `torch.set_num_threads` if torch was imported first; `~/.zshenv` applies the same `${VAR:-4}` fallback to every zsh-launched process. Any pre-set value wins, so jobq's per-job `gpu_policy` env (2) and explicit `OMP_NUM_THREADS=1` CPU runs are unchanged; `SL_DEFAULT_THREADS` changes the fallback. Motivation: torch defaults to all 48 cores per process — four uncapped direct `adapter_norms_probe` runs drove load to 51 and starved the GPU pool. Test: `tests/test_thread_cap.py`.
 
@@ -747,21 +771,30 @@ the shared `teachers.model_specs.validate_spec`, so an out-of-range size/seed fa
 load; a full-seed base there requires a top-level `allow_full_seed_base: true` in the
 experiment YAML (default false). (Unrelated: `configs/experiment/*_full_seed0.yaml`
 FILENAMES mean "full fine-tune, seed 0" — not the `full-seed<N>` token grammar.)
-The fourth 160m family, **`weightc-seed<N>`** (`local/pythia-160m-weightc-seed<N>`,
-registry variant `weightc`), is the CORRECTED weight-seed re-pretraining (seed-N init,
-the original run's exact positional data order) — unpublished, so `loading_io` routes
-`local/...` refs to `{hf_cache_root}/local/pythia-160m-weightc-seed<N>/step{K}/` and
-never to the hub. Those dirs are produced by `scripts/convert_weightc_checkpoints.py`
-(`--steps` / `--every K [--to N]` / `--watch S` for a run still training), which runs
-gpt-neox's `convert_neox_to_hf.py` on gpaulo's NeoX tree with the four config fixes the
-stock converter gets wrong for Pythia (intermediate_size, rotary base, bos/eos ids,
-tokenizer special tokens) plus a fifth (2026-09-09): the tokenizer is saved through
-`GPTNeoXTokenizerFast`, not the bare `PreTrainedTokenizerFast` the NeoX converter writes,
-whose default `model_input_names` carries `token_type_ids` and makes every
-`model.generate(**enc)` / `model(**enc)` site fail ("model_kwargs not used by the
-model") while SFT training, which pulls only `input_ids`, runs fine. It writes a
-`conversion.json` provenance sidecar per step; the family needs no `allow_full_seeds`
-gate (the token is explicit and unique). A finished run gets a `main` alias
+Beyond those, the 160m **local families** (`registry.LOCAL_PYTHIA_FAMILIES`, one row per
+re-pretraining: variant token, the dir template `pythia-160m-<variant>-seed<N>`, the
+allowed seeds and a short plot label) cover gpaulo's unpublished runs — `weightc`
+(seeds 1-3, the CORRECTED weight-seed re-pretraining: seed-N init, the original run's
+exact positional data order), `pilerepro` (seeds 1234, 3; the Pile re-pretraining
+reproduction) and `dclm` (seeds 1234, 1, 2; the same recipe on the DCLM corpus, so its
+Pile CE is not comparable to a Pile-trained base). Repo-id resolution, token parsing and
+validation, name inversion and the short labels (`wc1`, `pr3`, `dclm1234`) all read that
+one table, so adding a family is one row. They are unpublished, so `loading_io` routes
+`local/...` refs to `{hf_cache_root}/local/pythia-160m-<variant>-seed<N>/step{K}/` and
+never to the hub, and no group selector (`seeds`, `all7`, ...) includes them: they need
+no `allow_full_seeds` gate because the token is explicit and unique. Those dirs are
+produced by `scripts/convert_weightc_checkpoints.py --family <variant> --seed <N>`
+(`--steps` / `--every K [--to N]` / `--watch S` for a run still training; the (family,
+seed) -> NeoX source tree table lives in that script, and `--vocab-file` overrides a
+recorded 20B-tokenizer path that is not mounted), which runs gpt-neox's
+`convert_neox_to_hf.py` with the four config fixes the stock converter gets wrong for
+Pythia (intermediate_size, rotary base, bos/eos ids, tokenizer special tokens) plus a
+fifth (2026-09-09): the tokenizer is saved through `GPTNeoXTokenizerFast`, not the bare
+`PreTrainedTokenizerFast` the NeoX converter writes, whose default `model_input_names`
+carries `token_type_ids` and makes every `model.generate(**enc)` / `model(**enc)` site
+fail ("model_kwargs not used by the model") while SFT training, which pulls only
+`input_ids`, runs fine. It writes a `conversion.json` provenance sidecar per step
+(family, seed, source step/config, vocab file). A finished run gets a `main` alias
 (`local/pythia-160m-weightc-seed1/main -> step143000`, 2026-09-12) so the bare token
 `weightc-seed1` names the final checkpoint exactly as `pythia-160m-seed1` does: main-line
 arms (seed2seed receivers) use the bare dir `students/<animal>/pythia-160m-weightc-seed1/`,
@@ -2922,6 +2955,25 @@ verify/extend anchor runs are gated on pool-sha identity — a base whose own
 tokenizer does not reproduce the pool, or a record built on a different pool,
 stops the run.
 
+*The DCLM corpus pool `cp1` (2026-09-15).* The `dclm` local family
+(`pythia-160m-dclm-seed{1234,1,2}`) is re-pretrained on DCLM-baseline-1.0, so the Pile is
+off-distribution for it and the pp1 Pile unigram anchor is the wrong bar: those bases get
+`cp1`, pp1's recipe (32 documents, seed-0 permutation, truncated to 512 tokens, min 32,
+position 0 never eligible) on the held-out DCLM shards kept out of the training slice. The
+source is a Megatron indexed dataset ALREADY tokenized with the 20B Pythia tokenizer
+(paths key `dclm_heldout_document`, machine-local), so cp1 is defined on those token ids —
+no detokenize/retokenize round trip — with the trailing EOD separator dropped; the module
+is `coherence/dclm_pool.py` and the 32 selected documents are frozen to
+`data/probe_pools/cp1_tokens.jsonl` (+ `.meta.json`, token sha
+`91d7b1740becd43d…`) by `scripts/freeze_cp1_tokens.py` so the pool builds on nodes without
+the source mounted. Dispatch is by PRETRAINING CORPUS before tokenizer family:
+`probe_io.probe_pool_spec_for_repo` (and `ckpt_pile_kl_trajectory.pool_spec_for`) send a
+Pythia spec whose `variant` is `dclm` to cp1 via the one-row `PYTHIA_VARIANT_POOLS` table
+and everything else to pp1, and `resolve_probe_pool_spec` accepts `--pool cp1` only for
+those bases. The anchor is `analysis/unigram_anchor_cp1.json` (+ `.counts.npz`), built by
+`build_unigram_anchor.py --pool cp1`: the fit stream is the same permutation after the
+pool's `n_scanned`, 50k documents, same rules, and it needs the source stem.
+
 *Nested wide pools `pp1w-<tag>` / `dp1w` (2026-09-05).* Each is 128 documents =
 the base pool's 32, byte-identical and in order, plus 96 drawn from the SAME
 seeded stream but from after the frozen unigram fit window (`pp1w` from Pile
@@ -4034,8 +4086,16 @@ Number pools write a `raw.jsonl.pending` marker around the rows write and record
 `run_final_evals` and `teacher_term_splice` call `release_base` after `unload()`.
 `clean_partial_runs --path` refuses leaves modified within `--min-age-s`
 (default 1800 s). `allow_cross_family` is exposed on `distill_student.py`,
-requires `--allow-cross-base`, is limited to `SUPPORTED_CROSS_FAMILY_PAIRS`, and
-is recorded in the manifest only (not the identity, so earlier cells still SKIP).
+requires `--allow-cross-base`, is limited to `SUPPORTED_CROSS_FAMILY_PAIRS`
+(DataDecide ↔ Pythia in both directions; each direction verified id-identical on
+3,000 pool rows under both tokenizers), and is recorded in the manifest only (not
+the identity, so earlier cells still SKIP). Both node workers expose an
+explicit-pool mode for cross-family arms (`--numbers-dir --numbers-base-label
+--arm-label --animal --teacher-ftseed --source {teacher,base}`): `p410m_worker.py`
+(Pythia receivers) and, since 2026-09-15, `dd1b_worker.py` (OLMo-1B receiver;
+trees `students/<animal>/DataDecide-…/teacher-pythia-160m/…` and
+`students/controls/base/DataDecide-…/teacher-pythia-160m/…`, control endpoint
+evals namespaced under `eval/<animal>/` only in that mode).
 `tests/test_residual.py` covers steering `project` mode per family.
 
 ### 2026-09-11 — direction-intervention audit and nested random injections

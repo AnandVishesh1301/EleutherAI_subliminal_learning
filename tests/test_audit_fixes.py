@@ -430,9 +430,12 @@ def test_allow_cross_family_pair_scoping():
 
     assert ("datadecide", "pythia") in SUPPORTED_CROSS_FAMILY_PAIRS
     check_cross_family_supported(DD_BASE_REF, "EleutherAI/pythia-160m")
-    # the reverse crossing (Pythia numbers into an OLMo student) is not supported
-    with pytest.raises(ValueError, match="'pythia' -> 'datadecide'"):
-        check_cross_family_supported("EleutherAI/pythia-160m", DD_BASE_REF)
+    # both directions are verified id-identical on pool text (2026-09-15)
+    assert ("pythia", "datadecide") in SUPPORTED_CROSS_FAMILY_PAIRS
+    check_cross_family_supported("EleutherAI/pythia-160m", DD_BASE_REF)
+    # an unverified family (here: an external model) is still refused
+    with pytest.raises(ValueError, match="-> 'datadecide'"):
+        check_cross_family_supported("Qwen/Qwen2.5-1.5B", DD_BASE_REF)
 
 
 def test_allow_cross_family_requires_allow_cross_base(tmp_path):

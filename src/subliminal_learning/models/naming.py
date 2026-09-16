@@ -36,6 +36,7 @@ from subliminal_learning.models.datadecide import (
 )
 from subliminal_learning.models.registry import (
     EXTERNAL_BASE_BY_REPO,
+    LOCAL_PYTHIA_FAMILIES,
     EXTERNAL_BASES,
     ExternalModelSpec,
     PythiaModelSpec,
@@ -104,7 +105,8 @@ def _external_spec_from_name(name: str) -> ExternalModelSpec | None:
 
 def _pythia_spec_from_name(name: str) -> PythiaModelSpec:
     """Token (`data-seed1`, `original`, `pythia-410m`, ...) or dir name / repo basename
-    (`pythia-160m-data-seed1`, `pythia-160m-weightc-seed2`, ...) -> spec."""
+    (`pythia-160m-data-seed1`, `pythia-160m-weightc-seed2`,
+    `pythia-160m-dclm-seed1234`, ...) -> spec."""
     from subliminal_learning.teachers.model_specs import parse_base_models, spec_from_base_name
 
     head, rev = _split_revision(name)
@@ -120,12 +122,16 @@ def _pythia_spec_from_name(name: str) -> PythiaModelSpec:
         return spec_from_base_name(name)
     except ValueError:
         pass
-    # 3) the local `weightc` conversions (`pythia-160m-weightc-seed<N>`), which neither
-    #    grammar above spells as a dir name
-    if head.startswith("pythia-160m-weightc-seed"):
-        seed = head[len("pythia-160m-weightc-seed"):]
-        if seed.isdigit():
-            return PythiaModelSpec(size="160m", seed=int(seed), variant="weightc", revision=rev)
+    # 3) the local conversions (`pythia-160m-<family>-seed<N>`, one row per family in
+    #    `LOCAL_PYTHIA_FAMILIES`), which neither grammar above spells as a dir name
+    for family in LOCAL_PYTHIA_FAMILIES:
+        prefix = f"pythia-160m-{family.variant}-seed"
+        if head.startswith(prefix):
+            seed = head[len(prefix):]
+            if seed.isdigit() and int(seed) in family.seeds:
+                return PythiaModelSpec(
+                    size="160m", seed=int(seed), variant=family.variant, revision=rev
+                )
     raise ValueError(f"cannot map {name!r} to a Pythia base spec")
 
 
@@ -190,7 +196,7 @@ def base_token(value: str | BaseSpec) -> str:
     """Canonical `--base-models` CLI token of a base, from any spelling.
 
     Pythia: `pythia-<size>[-seed<N>]` for the `full` variant, `data-seed<N>` /
-    `weight-seed<N>` / `weightc-seed<N>` for the 160m ensembles; DataDecide: `dd-1b-seed<N>`;
+    `weight-seed<N>` / `<local family>-seed<N>` for the 160m ensembles; DataDecide: `dd-1b-seed<N>`;
     external: the registry alias. A pinned checkpoint keeps its `@revision` / `@step<N>`.
     """
     spec = base_spec(value)

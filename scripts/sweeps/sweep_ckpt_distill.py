@@ -52,6 +52,11 @@ own checkout (the portable default since 2026-09-10: an absolute /home/angela cw
 runner on nodes whose pool uid cannot enter it); `cwd: pin` -> every job carries THIS
 checkout's absolute path; any other string is used verbatim (see expand_jobs).
 
+`jobq.node` (optional): hostname every queue this sweep creates is pinned to (jobq
+`meta.node`, so only that node's pool claims them) -- use it while the campaign's code or
+model families live only in one checkout. Absent -> unpinned, any node. An ALREADY-existing
+queue is never re-pinned by submit (pins are edited live by hand); a mismatch is warned.
+
 `jobq.depends_on_prefix` (optional): another campaign's queue_prefix covering the same
 teacher cells (an extension config that re-lists a drained window's steps). Each expanded
 `-t-step{i}` then depends on `{other}-t-step{i}` and each `-n-step{i}` additionally on
@@ -111,6 +116,7 @@ class QueueSpec:
     priority: int
     depends_on: list[str] = field(default_factory=list)
     mem_mib: int | None = None
+    node: str | None = None
     jobs: list[dict] = field(default_factory=list)
 
 
@@ -216,6 +222,12 @@ def expand_jobs(
     cwd_knob = jobq.get("cwd")
     cwd = str(repo_root) if cwd_knob == "pin" else cwd_knob
 
+    # `jobq.node` (optional): pin every queue this sweep creates to one hostname, so only
+    # that node's pool claims them (needed while a campaign's model families exist only in
+    # this checkout). Absent -> None -> any node, the default.
+    node = jobq.get("node")
+    node = str(node) if node is not None else None
+
     # `jobq.depends_on_prefix` (optional): another campaign's queue_prefix whose per-step
     # queues cover the SAME teacher cells. An extension config that re-lists the window steps
     # re-emits their -t/-n jobs under a second prefix at the same priority, and nothing else
@@ -256,7 +268,7 @@ def expand_jobs(
         if name not in queues:
             queues[name] = QueueSpec(
                 name=name, priority=priority, depends_on=list(depends_on),
-                mem_mib=int(mem[stage]), jobs=[],
+                mem_mib=int(mem[stage]), node=node, jobs=[],
             )
             order.append(name)
         return queues[name]
@@ -555,8 +567,9 @@ def submit(
             continue
         if dry_run:
             logger.info(
-                "QUEUE {} (prio={}, deps={}, mem_mib={}): {} new job(s) ({} already present)",
-                q.name, q.priority, q.depends_on or "-", q.mem_mib,
+                "QUEUE {} (prio={}, deps={}, mem_mib={}, node={}): {} new job(s) "
+                "({} already present)",
+                q.name, q.priority, q.depends_on or "-", q.mem_mib, q.node or "-",
                 len(delta), len(existing_keys),
             )
             for jd in delta:
@@ -579,6 +592,8 @@ def submit(
             cmd += ["--mem-mib", str(q.mem_mib)]
         if q.depends_on:
             cmd += ["--depends-on", ",".join(q.depends_on)]
+        if q.node:
+            cmd += ["--node", q.node]
         logger.info("SUBMIT {} ({} new jobs) -> {}", q.name, len(delta), queue_root)
         try:
             subprocess.run(cmd, cwd=REPO_ROOT, check=True)
@@ -587,12 +602,18 @@ def submit(
 
 
 def _meta_diffs(meta, spec: QueueSpec) -> list[str]:
-    """Human-readable priority/depends_on differences between an existing queue meta and spec."""
+    """Human-readable priority/depends_on/node differences between an existing meta and spec.
+
+    Pins are edited live by hand, so a differing ``node`` is reported and left alone (the
+    submit path never rewrites an existing meta).
+    """
     diffs: list[str] = []
     if int(meta.priority) != int(spec.priority):
         diffs.append(f"priority {meta.priority} != spec {spec.priority}")
     if list(meta.depends_on) != list(spec.depends_on):
         diffs.append(f"depends_on {list(meta.depends_on)} != spec {list(spec.depends_on)}")
+    if meta.node != spec.node:
+        diffs.append(f"node {meta.node!r} != spec {spec.node!r}")
     return diffs
 
 

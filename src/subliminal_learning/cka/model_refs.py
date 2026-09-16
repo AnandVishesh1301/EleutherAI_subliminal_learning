@@ -35,6 +35,7 @@ from subliminal_learning.evaluation.teacher_loading_io import (
 )
 from subliminal_learning.models.loading_io import load_model
 from subliminal_learning.models.registry import (
+    LOCAL_PYTHIA_FAMILIES,
     PythiaModelSpec,
     model_ref,
 )
@@ -171,7 +172,14 @@ def resolve_ref(ref: str, output_root: Path, hub_org: str) -> ModelRef:
 
 
 def _compact(seg: str) -> str:
-    """Compact one path segment for a label (mirrors ``_derive_run_tag``' compact())."""
+    """Compact one path segment for a label (mirrors ``_derive_run_tag``' compact()).
+
+    The local re-pretraining families get their short prefix from the registry
+    table (``-weightc-seed`` -> ``-wc``, ``-pilerepro-seed`` -> ``-pr``, ...), and
+    are applied BEFORE ``-weight-seed`` so ``weightc`` is not split as ``weight``+``c``.
+    """
+    for family in LOCAL_PYTHIA_FAMILIES:
+        seg = seg.replace(f"-{family.variant}-seed", f"-{family.short}")
     return (
         seg.replace("pythia-", "")
         .replace("-data-seed", "-ds")

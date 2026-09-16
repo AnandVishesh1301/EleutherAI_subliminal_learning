@@ -9,17 +9,22 @@ a ``complete.stamp`` are hidden unless ``--all``), with:
 - ``median``: median wall-clock of this queue's SUCCESSFUL results (``rc == 0``) after
   dropping cache-hit runs shorter than ``--min-job-s`` (default 120 s). ``?`` until
   ``--min-samples`` durations exist -- ETAs are measured, never remembered.
-- ``rate/h``: completions per hour over the trailing ``--window-h`` hours (this queue).
+- ``r/h``: completions per hour over the trailing ``--window-h`` hours (this queue).
 - ``eta``: pending work under two models, reported as a range when both are available:
   wave = ``pending * median / running`` (current concurrency holds) and
   throughput = ``pending / rate``. A queue with no running jobs and no recent
   completions is ``blocked`` -- deps, priority starvation, a pin to a node with no pool,
   or an empty pool; that is a diagnosis for the lead, not a number.
-- ``finish~``: cumulative wall-clock until this queue drains if pools work active queues in
+- ``fin~``: cumulative wall-clock until this queue drains if pools work active queues in
   priority order at the current global concurrency (``--concurrency`` to override); a
   trailing ``+`` marks a lower bound (a queue with no median is ahead and counted as 0).
 - ``stale``: running claims older than ``--stale-x`` x median (or 3 h when no median):
   dead pool thread / crashed node candidates (``jobq status`` shows the owner node).
+- ``mem``: GiB each pending/running job would be gated on -- the worker's
+  ``_effective_mem``: ``max(job.mem_mib or defaults.mem_mib, persisted OOM floor)``; a
+  ``min-max`` range when jobs differ, ``^`` when an escalated floor lifts any job above its
+  static ask, ``-`` when no job/default ask exists (the pool's node policy default then
+  applies, unknowable from here) or when the queue has no pending/running jobs.
 
 Usage::
 
@@ -138,6 +143,54 @@ def fmt_eta(wave: float | None, thr: float | None, *, running: int, pending: int
     return f"{fmt_dur(lo)}-{fmt_dur(hi)}"
 
 
+def effective_mem_mib(job_mem: object, default_mem: object, floor: int) -> tuple[int | None, bool]:
+    """(ask MiB, floor-escalated?) mirroring ``Worker._effective_mem`` without the node default.
+
+    Malformed asks count as absent. ``None`` = neither job nor queue sets an ask and no floor.
+    """
+    static = None
+    for v in (job_mem, default_mem):
+        try:
+            static = int(v)  # type: ignore[arg-type]
+            break
+        except (TypeError, ValueError):
+            continue
+    if floor and (static is None or floor > static):
+        return floor, True
+    return static, False
+
+
+def fmt_mem(asks: list[int | None], escalated: bool) -> str:
+    """``20G`` / ``16-24G`` (GiB, compact) with ``^`` when any floor escalated; ``-`` if none."""
+    vals = [a for a in asks if a is not None]
+    if not vals:
+        return "-"
+    def g(m: int) -> str:
+        return f"{m / 1024:.0f}" if m >= 10240 else f"{m / 1024:.1f}".removesuffix(".0")
+    lo, hi = g(min(vals)), g(max(vals))
+    return (lo if lo == hi else f"{lo}-{hi}") + "G" + ("^" if escalated else "")
+
+
+def _scan_jobs(root: Path, name: str, default_mem: object) -> tuple[dict, list[int | None], bool]:
+    """One pass over the queue's jobs: ``store.queue_status``-shaped counts + active mem asks."""
+    counts = {store.PENDING: 0, store.RUNNING: 0, store.DONE: 0, store.FAILED: 0}
+    running: list[dict] = []
+    asks: list[int | None] = []
+    escalated = False
+    for job in store.load_jobs(root, name):
+        st = store.job_state(root, name, job)
+        counts[st] += 1
+        if st in (store.PENDING, store.RUNNING):
+            ask, esc = effective_mem_mib(
+                job.mem_mib, default_mem, store.read_mem_floor(root, name, job.jobkey))
+            asks.append(ask)
+            escalated |= esc
+        if st == store.RUNNING:
+            owner = store._read_owner(root, name, job.jobkey) or {}
+            running.append({"key": job.key, "start_utc": owner.get("start_utc")})
+    return ({**counts, "total": sum(counts.values()), "running_jobs": running}, asks, escalated)
+
+
 def queue_row(
     root: Path,
     name: str,
@@ -149,7 +202,7 @@ def queue_row(
     stale_x: float,
 ) -> dict:
     meta = store.read_meta(root, name)
-    st = store.queue_status(root, name)
+    st, asks, escalated = _scan_jobs(root, name, (meta.defaults or {}).get("mem_mib"))
     results = store.load_results(root, name)
     durs = durations_s(results, min_job_s=min_job_s)
     median = statistics.median(durs) if len(durs) >= min_samples else None
@@ -170,6 +223,10 @@ def queue_row(
         "queue": name,
         "prio": meta.priority,
         "node": node or "-",
+        "mem_mib_min": min((a for a in asks if a is not None), default=None),
+        "mem_mib_max": max((a for a in asks if a is not None), default=None),
+        "mem_floor_escalated": escalated,
+        "mem": fmt_mem(asks, escalated),
         "parked": bool(node and str(node).startswith("PARKED")),
         "complete": store.queue_complete(root, name),
         "depends_on": list(meta.depends_on or []),
@@ -227,9 +284,10 @@ def _active(row: dict) -> bool:
 def render(rows: list[dict]) -> str:
     cols = [
         ("queue", "queue", "<"), ("prio", "prio", ">"), ("node", "node", "<"),
+        ("mem", "mem", ">"),
         ("pend", "pending", ">"), ("run", "running", ">"), ("done", "done", ">"),
-        ("fail", "failed", ">"), ("median", "median_s", ">"), ("rate/h", "rate_per_h", ">"),
-        ("eta", "eta", ">"), ("finish~", "finish_s", ">"), ("stale", "stale_running", ">"),
+        ("fail", "failed", ">"), ("median", "median_s", ">"), ("r/h", "rate_per_h", ">"),
+        ("eta", "eta", ">"), ("fin~", "finish_s", ">"), ("stale", "stale_running", ">"),
     ]
     table: list[list[str]] = []
     for r in rows:
@@ -268,10 +326,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit rows as JSON instead of a table")
     ap.add_argument("--min-job-s", type=float, default=120.0, help="drop cache-hit runs shorter than this")
     ap.add_argument("--min-samples", type=int, default=3, help="durations needed before a median is quoted")
-    ap.add_argument("--window-h", type=float, default=3.0, help="trailing window for rate/h")
+    ap.add_argument("--window-h", type=float, default=3.0, help="trailing window for r/h")
     ap.add_argument("--stale-x", type=float, default=3.0, help="claim age > stale_x*median => stale")
     ap.add_argument("--concurrency", type=int, default=0,
-                    help="jobs-at-once for the cumulative finish~ column (default: running now)")
+                    help="jobs-at-once for the cumulative fin~ column (default: running now)")
     args = ap.parse_args(argv)
 
     root = args.root if args.root is not None else _default_root()
@@ -304,8 +362,10 @@ def main(argv: list[str] | None = None) -> int:
           "eta: own drain at current concurrency (wave=median-based, throughput=rate-based; "
           "range when they disagree). queued = starved behind the nearest running queue above "
           "it (--json names it); blocked = idle with nothing above it (deps/pin/pool). "
-          "finish~ = cumulative drain in priority "
+          "fin~ = cumulative drain in priority "
           "order at `concurrency` jobs at once (+ = lower bound, an unknown-median queue is ahead). "
+          "mem = GiB ask of pending+running jobs (range when they differ; ^ = an OOM floor "
+          "raised a job above its static ask; - = no ask/pool default). "
           "Cross-node liveness is not checkable from here.", width=100))
     return 0
 

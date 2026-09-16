@@ -31,8 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from subliminal_learning.coherence.probe_families import (
-    PROBE_FAMILIES, family_for_base_repo, family_for_pool_version, is_frozen_text_pool,
-    is_pp1w, pool_version_for, wide_pool_version_for,
+    PROBE_FAMILIES, corpus_pools_for, family_for_base_repo, family_for_pool_version,
+    is_frozen_text_pool, is_pp1w, pool_version_for, wide_pool_version_for,
 )
 
 SCHEMA_VERSION = 1
@@ -76,8 +76,8 @@ def anchored_dead_cut(output_root: Path, base_repo_or_key: str, *, pool: str = "
     """Per-receiver operative dead cut Delta_cross = H_uni − ce_base [nats].
 
     `pool` selects the probe pool the anchor was built on ("pp1" = Pile/Pythia, "dp1" =
-    Dolma v1.7/OLMo for the DataDecide arm); the two anchors have different H_uni and
-    are never mixed.
+    Dolma v1.7/OLMo for the DataDecide arm, "cp1" = DCLM held-out for the `dclm`
+    re-pretrainings); the anchors have different H_uni and are never mixed.
 
     Reads `{output_root}/analysis/unigram_anchor_{pool}.json` (regenerate/extend with
     `scripts/build_unigram_anchor.py`). Accepted spellings of the base: for Pythia,
@@ -120,6 +120,21 @@ PROBE_POOL_DP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="dp1")
 # needs network to olmo-data.org); None would mean "not yet pinned", never "no check".
 DP1_TOKEN_SHA: str | None = (
     "8b2f8870a1ffcc73829f8a2e8ec2512ebf41c41eef5d0dd816f92b18a417f3ff")
+
+# cp1: the same recipe on the DCLM held-out shards with the Pythia tokenizer -- the probe
+# pool for the `dclm` local re-pretraining family, whose bases were pretrained on
+# DCLM-baseline-1.0 (Pile would be off-distribution for them, and the pp1 anchor is a Pile
+# unigram model). See `coherence.dclm_pool` for the universe and its provenance.
+PROBE_POOL_CP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="cp1")
+# Pinned 2026-09-15 on the first real build from the held-out Megatron stem; also recorded
+# in `data/probe_pools/cp1_tokens.meta.json`. None would mean "not yet pinned".
+CP1_TOKEN_SHA: str | None = (
+    "91d7b1740becd43dd3494df1c41596c0fa04f7474fa468bb1f7a912be659f929")
+
+# The PRETRAINING CORPUS, not the tokenizer family, decides which corpus pool a Pythia
+# base is measured on: the local re-pretrainings share Pythia's tokenizer but not its
+# data. One row per (spec variant -> pool); everything not listed keeps pp1.
+PYTHIA_VARIANT_POOLS: dict[str, ProbePoolSpec] = {"dclm": PROBE_POOL_CP1}
 
 
 # pp1t: pp1's 32 documents frozen as TEXT and retokenized per base-model family (see
@@ -264,6 +279,26 @@ def build_frozen_text_pool(tokenizer, spec: ProbePoolSpec, *, bos_token_id: int 
                         int(meta["n_scanned"]), 0, [int(r["row"]) for r in recs])
 
 
+def _pythia_corpus_pool(repo: str) -> ProbePoolSpec:
+    """The corpus pool of a Pythia-tokenizer base: pp1 unless its variant re-pretrained
+    on another corpus (`PYTHIA_VARIANT_POOLS`).
+
+    A repo the naming module cannot spell as a Pythia spec is an ERROR, not a silent pp1:
+    the pretraining CORPUS decides the pool, and an unparseable name (a typo, an
+    unregistered seed) is exactly the case where pp1 may be off-distribution.
+    """
+    from subliminal_learning.models.naming import base_spec
+
+    try:
+        variant = getattr(base_spec(repo), "variant", None)
+    except ValueError as exc:
+        raise ValueError(
+            f"no probe pool for Pythia-family repo {repo!r}: the naming module cannot map "
+            f"it to a Pythia base spec ({exc}), so its pretraining corpus is unknown and "
+            "pp1 may be off-distribution for it.") from exc
+    return PYTHIA_VARIANT_POOLS.get(variant or "", PROBE_POOL_PP1)
+
+
 def probe_pool_spec_for_repo(repo: str) -> ProbePoolSpec:
     """The probe pool a base model must be measured on; raises on an unknown repo.
 
@@ -272,6 +307,9 @@ def probe_pool_spec_for_repo(repo: str) -> ProbePoolSpec:
     family's ``pp1t-<tag>`` pool for every other known family. An unrecognised repo is an
     error, not a silent fallback to pp1: measuring a Llama base on Pythia tokens is
     meaningless.
+
+    Inside the Pythia family the PRETRAINING CORPUS decides (`PYTHIA_VARIANT_POOLS`): the
+    `dclm` re-pretrainings get cp1, because the Pile is off-distribution for them.
     """
     family = family_for_base_repo(repo)
     if family is None:
@@ -282,7 +320,7 @@ def probe_pool_spec_for_repo(repo: str) -> ProbePoolSpec:
     if family.tag == "olmo":
         return PROBE_POOL_DP1
     if family.tag == "pythia":
-        return PROBE_POOL_PP1
+        return _pythia_corpus_pool(repo)
     return probe_pool_spec_pp1t(family.tag)
 
 
@@ -310,8 +348,9 @@ def resolve_probe_pool_spec(repo: str, pool: str | None = None) -> ProbePoolSpec
                     else probe_pool_spec_pp1t(family.tag))
     raise ValueError(
         f"--pool {pool!r} is not a pool for base {repo!r} (family {family.tag!r}: default "
-        f"{want.version!r}, also pp1t-{family.tag} / pp1w-{family.tag}); a readout on another "
-        "family's tokens is comparable to none of this base's records")
+        f"{want.version!r}, corpus pools {'/'.join(corpus_pools_for(family.tag))}, also "
+        f"pp1t-{family.tag} / pp1w-{family.tag}); a readout on another family's tokens — or "
+        "on another pretraining corpus — is comparable to none of this base's records")
 
 
 # Canonical home is utils.run_io (torch-free); re-exported here for existing importers.
@@ -347,6 +386,18 @@ def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1, *,
                     f"{spec.version} pool does not match its pinned tokenization: got "
                     f"token_sha256 {got}, pinned {pinned}. The tokenizer used to build "
                     "the pool is not the one the pin was taken on.")
+        return pool
+    if spec.version == "cp1":
+        from subliminal_learning.coherence.dclm_pool import build_dclm_pool
+
+        pool = build_dclm_pool(tokenizer, spec.n_docs, max_tokens=spec.max_tokens,
+                               seed=spec.seed)
+        if verify_pin and CP1_TOKEN_SHA is not None:
+            got = pool.token_sha256()
+            if got != CP1_TOKEN_SHA:
+                raise ValueError(
+                    f"cp1 pool does not match its pinned tokenization: got token_sha256 "
+                    f"{got}, pinned {CP1_TOKEN_SHA}. The held-out source moved under us.")
         return pool
     if spec.version in ("dp1", "dp1w"):
         from subliminal_learning.coherence.dolma_pool import build_dolma_pool

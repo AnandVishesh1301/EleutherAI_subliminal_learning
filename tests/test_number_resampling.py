@@ -4,6 +4,7 @@ from subliminal_learning.numbers.resampling import (
     permutation,
     pool_stats,
     profile_sample,
+    shuffle_prompts,
     synthesize,
     uniform_sample,
 )
@@ -84,3 +85,21 @@ def test_entropy_uses_duplicate_multiplicity():
     rows = ROWS[:1] * 3 + ROWS[1:2] + ROWS[2:] * 2
     expected = (4 / 6) * (-(0.75 * math.log2(0.75) + 0.25 * math.log2(0.25)))
     assert pool_stats(rows)["H(sequence|first,length)"] == pytest.approx(expected)
+
+
+def test_prompt_shuffle_moves_prompts_and_keeps_completions_paired():
+    rows = [
+        {"prompt": f"p{i}", "completion": f" {i}.", "numbers": [i % 10]}
+        for i in range(50)
+    ]
+    out, fixed = shuffle_prompts(rows, 3)
+    assert sorted((r["completion"], tuple(r["numbers"])) for r in out) == sorted(
+        (r["completion"], tuple(r["numbers"])) for r in rows
+    )
+    assert sorted(r["prompt"] for r in out) == sorted(r["prompt"] for r in rows)
+    assert fixed < len(rows)
+    assert [(r["prompt"], r["completion"]) for r in out] != [
+        (r["prompt"], r["completion"]) for r in rows
+    ]
+    assert shuffle_prompts(rows, 3) == (out, fixed)
+    assert shuffle_prompts(rows, 4)[0] != out

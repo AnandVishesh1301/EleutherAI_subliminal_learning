@@ -170,3 +170,42 @@ def test_manifest_hash_and_source_are_truthful(tmp_path):
             parents,
             {"transform": "synthetic_mature_iid"},
         )
+
+
+def _parse(argv):
+    import sys
+    from unittest.mock import patch
+
+    with patch.object(sys, "argv", ["prog", *argv]):
+        campaign.main()
+
+
+@pytest.mark.parametrize("command", ["emit-followup", "prepare"])
+def test_followup_commands_reject_original_arms(command, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        _parse([command, "--output-root", str(tmp_path), "--arm", "mature_uniform"])
+    err = capsys.readouterr().err
+    assert "mature_uniform" in err and command in err
+
+
+def test_run_still_accepts_every_arm(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        campaign, "run_cell", lambda *a, **k: seen.setdefault("arm", a[1])
+    )
+    for arm in campaign.ARMS + campaign.FOLLOWUP_ARMS:
+        _parse(["run", "--output-root", str(tmp_path), "--arm", arm,
+                "--pool-seed", "0", "--recipient", "125000", "--student-seed",
+                str(campaign.STUDENT_SEEDS[0])])
+        assert seen.pop("arm") == arm
+
+
+def test_prompt_shuffle_seed_is_what_shuffle_prompts_received(monkeypatch):
+    rows = _rows()
+    got = []
+    real = campaign.shuffle_prompts
+    monkeypatch.setattr(
+        campaign, "shuffle_prompts", lambda r, s: (got.append(s), real(r, s))[1]
+    )
+    _, diag = campaign.make_pool("mature_prompt_shuffle2", rows, rows, rows, 3, 12)
+    assert got == [diag["prompt_shuffle_seed"]] == [20000 + 300 + 2]

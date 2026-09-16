@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
 from scripts.queue_status import (
-    annotate_queue_order, completions_per_hour, durations_s, eta_s, fmt_eta, render,
+    annotate_queue_order, completions_per_hour, durations_s, effective_mem_mib, eta_s, fmt_eta,
+    fmt_mem, render,
 )
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
@@ -60,8 +61,29 @@ def test_render_narrows_starved_eta_to_queued():
     rows = [top, starved]
     annotate_queue_order(rows, concurrency=4)
     for r in rows:
-        r.update({"node": "-", "done": 0, "failed": 0, "n_durations": 5, "stale_running": 0})
+        r.update({"node": "-", "done": 0, "failed": 0, "n_durations": 5, "stale_running": 0,
+                  "mem": "16-24G^"})
     assert starved["eta"].startswith("queued<")  # JSON keeps the name
     out = render(rows)
     assert "queued<" not in out and "<" not in out
-    assert max(len(l) for l in out.splitlines()) < 130
+    assert max(len(ln) for ln in out.splitlines()) < 130
+
+
+def test_mem_uniform_range_and_no_ask():
+    job_asks = [effective_mem_mib(None, 20480, 0)[0], effective_mem_mib(None, "20480", 0)[0]]
+    assert fmt_mem(job_asks, False) == "20G"
+    assert fmt_mem([effective_mem_mib(16384, 20480, 0)[0], 24576], False) == "16-24G"
+    assert effective_mem_mib(None, None, 0) == (None, False)
+    assert effective_mem_mib("bogus", None, 0) == (None, False)
+    assert fmt_mem([None, None], False) == "-"
+    assert fmt_mem([], False) == "-"
+    assert fmt_mem([6144], False) == "6G"
+
+
+def test_mem_escalated_floor():
+    assert effective_mem_mib(None, 16384, 24576) == (24576, True)
+    assert effective_mem_mib(32768, 16384, 24576) == (32768, False)  # floor below job ask
+    assert effective_mem_mib(None, None, 8192) == (8192, True)
+    a1, e1 = effective_mem_mib(None, 16384, 0)
+    a2, e2 = effective_mem_mib(None, 16384, 24576)
+    assert fmt_mem([a1, a2], e1 or e2) == "16-24G^"

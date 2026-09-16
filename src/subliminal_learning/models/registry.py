@@ -12,14 +12,84 @@ from subliminal_learning.models.datadecide import (
     dd_repo_id,
 )
 
-PolyPythiaVariant = Literal["full", "data", "weight", "weightc"]
+PolyPythiaVariant = Literal["full", "data", "weight", "weightc", "pilerepro", "dclm"]
 # full    = both weight init + data order vary (seeds 0-9)
 # data    = 160M only: fixed weight init (seed 0), varying data order (seeds 1-3)
 # weight  = 160M only: fixed data order (seed 0), varying weight init (seeds 1-3)
-# weightc = 160M only: corrected weight-seed re-pretraining (the `weight` family
-#           re-run with the intended data order). Locally converted weights only:
-#           these models are NOT on the Hub, so they resolve to a `local/...`
-#           provenance string and load from `hf_cache_root/local/...`.
+# The remaining variants are gpaulo's 160m re-pretrainings (`LOCAL_PYTHIA_FAMILIES`):
+# locally converted weights only, NOT on the Hub, so they resolve to a `local/...`
+# provenance string and load from `hf_cache_root/local/...`.
+
+
+@dataclass(frozen=True)
+class LocalPythiaFamily:
+    """One UNPUBLISHED, locally converted 160m Pythia re-pretraining family.
+
+    Attributes:
+        variant: The `<variant>-seed<N>` token / `PythiaModelSpec.variant` value.
+        seeds: The seeds that exist (a seed outside this set is an error). Note
+            these are the RUN's seeds, not an index: `1234` (Pythia's default
+            data/init seed) is a legitimate member.
+        short: Plot/label prefix ('wc1', 'pr3', 'dclm1234').
+        note: One-line description of what was re-pretrained.
+    """
+
+    variant: str
+    seeds: tuple[int, ...]
+    short: str
+    note: str
+
+    def dir_name(self, seed: int) -> str:
+        """On-disk / repo basename, e.g. 'pythia-160m-dclm-seed1234'."""
+        return f"pythia-160m-{self.variant}-seed{seed}"
+
+    def repo_id(self, seed: int) -> str:
+        """Non-hub provenance string, e.g. 'local/pythia-160m-dclm-seed1234'."""
+        return f"local/{self.dir_name(seed)}"
+
+    def seeds_label(self) -> str:
+        """Human-readable allowed-seed set ('1-3' when contiguous, else a list)."""
+        if len(self.seeds) > 1 and list(self.seeds) == list(
+            range(self.seeds[0], self.seeds[0] + len(self.seeds))
+        ):
+            return f"{self.seeds[0]}-{self.seeds[-1]}"
+        return ", ".join(str(s) for s in self.seeds)
+
+
+# SINGLE SOURCE OF TRUTH for the local 160m families: one row per re-pretraining.
+# Everything downstream (repo-id resolution, token parsing/validation, name
+# inversion, short labels, the converter's output dir) derives from it, so adding
+# a family is one row here plus its NeoX source path in
+# `scripts/convert_weightc_checkpoints.py`. No group selector ever includes them:
+# they are opt-in by explicit token.
+LOCAL_PYTHIA_FAMILIES: tuple[LocalPythiaFamily, ...] = (
+    LocalPythiaFamily(
+        "weightc", (1, 2, 3), "wc",
+        "corrected weight-seed re-pretraining (the `weight` family re-run with the "
+        "intended data order)",
+    ),
+    LocalPythiaFamily(
+        "pilerepro", (1234, 3), "pr",
+        "Pile re-pretraining reproduction (seed 1234 = main's own seed)",
+    ),
+    LocalPythiaFamily(
+        "dclm", (1234, 1, 2), "dclm",
+        "DCLM-data re-pretraining (a different pretraining corpus, so Pile-probe CE "
+        "is not comparable to the Pile-trained families)",
+    ),
+)
+LOCAL_PYTHIA_FAMILY_BY_VARIANT: dict[str, LocalPythiaFamily] = {
+    f.variant: f for f in LOCAL_PYTHIA_FAMILIES
+}
+LOCAL_PYTHIA_VARIANTS: tuple[str, ...] = tuple(
+    f.variant for f in LOCAL_PYTHIA_FAMILIES
+)
+
+
+def local_pythia_family(variant: str) -> LocalPythiaFamily | None:
+    """The local-family row for a variant token, or None for the hub variants."""
+    return LOCAL_PYTHIA_FAMILY_BY_VARIANT.get(variant)
+
 
 # Canonical Pythia release names selectable as `pythia-<name>` tokens (validated
 # here before resolving to a Hub repo id). The `full` family exists at every size;
@@ -51,7 +121,8 @@ class PythiaModelSpec:
     Attributes:
         size: PolyPythias size: "14m" | "31m" | "70m" | "160m" | "410m".
         seed: PolyPythias seed (0 = default seed 1234; 1-9 = extra seeds).
-        variant: "full" (default), "data", "weight", "weightc" (local-only).
+        variant: "full" (default), "data", "weight", or a local-only family
+            variant (`LOCAL_PYTHIA_VARIANTS`: "weightc", "pilerepro", "dclm").
         revision: Training checkpoint, e.g. "step3000". None -> final checkpoint.
     """
 
@@ -135,12 +206,14 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         full,   seed N  -> {hub_org}/pythia-{size}-seed{N}
         data,   seed N  -> {hub_org}/pythia-160m-data-seed{N}   (160m only, N in 1-3)
         weight, seed N  -> {hub_org}/pythia-160m-weight-seed{N} (160m only, N in 1-3)
-        weightc, seed N -> local/pythia-160m-weightc-seed{N}    (160m only, N in 1-3)
+        local family V    -> local/pythia-160m-{V}-seed{N}      (160m only, N from
+                             that family's `LOCAL_PYTHIA_FAMILIES` row)
 
-    The `weightc` family is deliberately org-less: it is an unpublished local
-    conversion, and the `local/` prefix is a non-hub provenance string (the slash
-    is kept so manifests still read like refs). `local_model_dir` turns it into
-    an on-disk directory; it must never be handed to the Hub.
+    The local families (`weightc`, `pilerepro`, `dclm`) are deliberately org-less:
+    they are unpublished local conversions, and the `local/` prefix is a non-hub
+    provenance string (the slash is kept so manifests still read like refs).
+    `local_model_dir` turns it into an on-disk directory; it must never be handed
+    to the Hub.
 
     Args:
         spec: Model size/seed/variant/revision selection.
@@ -151,8 +224,8 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         "EleutherAI/pythia-160m-data-seed1".
 
     Raises:
-        ValueError: If a data/weight variant is requested for a size other
-            than "160m", or with a seed outside 1-3.
+        ValueError: If a non-`full` variant is requested for a size other than
+            "160m", or with a seed outside that variant's allowed set.
     """
     if isinstance(spec, ExternalModelSpec):
         return spec.repo_id
@@ -164,12 +237,14 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         return f"{hub_org}/pythia-{spec.size}-seed{spec.seed}"
     if spec.size != "160m":
         raise ValueError(f"variant={spec.variant!r} is only valid for size='160m'")
-    if spec.seed not in (1, 2, 3):
+    family = local_pythia_family(spec.variant)
+    allowed = family.seeds if family is not None else (1, 2, 3)
+    if spec.seed not in allowed:
         raise ValueError(
-            f"variant={spec.variant!r} requires seed in (1, 2, 3), got {spec.seed}"
+            f"variant={spec.variant!r} requires seed in {allowed}, got {spec.seed}"
         )
-    if spec.variant == "weightc":
-        return f"local/pythia-160m-weightc-seed{spec.seed}"
+    if family is not None:
+        return family.repo_id(spec.seed)
     return f"{hub_org}/pythia-160m-{spec.variant}-seed{spec.seed}"
 
 
@@ -178,7 +253,7 @@ def local_model_dir(
 ) -> Path | None:
     """On-disk directory for an UNPUBLISHED, locally converted model, else None.
 
-    Only `local/...` repo ids (currently the `weightc` family) have one: those
+    Only `local/...` repo ids (the `LOCAL_PYTHIA_FAMILIES` rows) have one: those
     weights exist nowhere on the Hugging Face Hub, so they must never be passed to
     a hub `from_pretrained`. Layout, one complete HF model + tokenizer per dir:
 

@@ -67,11 +67,13 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 
 def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpec:
-    """The probe-pool recipe for a base: dp1 (Dolma/OLMo) for DataDecide, else pp1.
+    """The probe-pool recipe for a base: dp1 (Dolma/OLMo) for DataDecide, cp1 for the
+    `dclm` Pythia re-pretrainings, else pp1.
 
-    The pool follows the BASE FAMILY, not the CLI defaults (which are numerically the
-    same for both pools): a DataDecide base was pretrained on dolma1_7, for which Pile
-    would be off-distribution.
+    The pool follows the BASE's PRETRAINING CORPUS, not the CLI defaults (which are
+    numerically the same for every corpus pool): a DataDecide base was pretrained on
+    dolma1_7 and a `dclm` base on DCLM-baseline-1.0, for both of which Pile would be
+    off-distribution.
     """
     if isinstance(spec, ExternalModelSpec):
         from subliminal_learning.coherence.probe_io import probe_pool_spec_for_repo
@@ -80,7 +82,13 @@ def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpe
         if (n_docs, max_tokens, seed) != (pool.n_docs, pool.max_tokens, pool.seed):
             raise ValueError("Qwen/Llama/Gemma trajectories require the frozen family pool recipe")
         return pool
-    version = "dp1" if isinstance(spec, DataDecideSpec) else "pp1"
+    if isinstance(spec, DataDecideSpec):
+        version = "dp1"
+    else:
+        from subliminal_learning.coherence.probe_io import PYTHIA_VARIANT_POOLS
+
+        pool = PYTHIA_VARIANT_POOLS.get(getattr(spec, "variant", None) or "")
+        version = pool.version if pool is not None else "pp1"
     return ProbePoolSpec(n_docs=n_docs, max_tokens=max_tokens, seed=seed, version=version)
 
 

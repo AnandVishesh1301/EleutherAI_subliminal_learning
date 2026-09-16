@@ -41,6 +41,10 @@ def _require_local_dir(local_dir: Path, repo_id: str, revision: str | None) -> s
     """
     if local_dir.is_dir():
         return str(local_dir)
+    # `local/pythia-160m-<family>-seed<N>` -> the converter flags that would make it.
+    basename = repo_id.split("/")[-1]
+    family_token, _, seed_token = basename.partition("-seed")
+    family_token = family_token[len("pythia-160m-"):] or "<family>"
     pin_hint = (
         ""
         if revision
@@ -50,9 +54,11 @@ def _require_local_dir(local_dir: Path, repo_id: str, revision: str | None) -> s
     raise FileNotFoundError(
         f"missing local model dir {local_dir} for {repo_id!r} "
         f"(revision={revision or 'main'}). This family is an unpublished LOCAL "
-        "conversion, not a Hugging Face repo: convert it with gpt-neox "
-        "tools/ckpts/convert_neox_to_hf.py from /mnt/cold-1/gpaulo/pythia-repro/"
-        f"checkpoints/pythia-160m-weight-seed1-correct-data-order.{pin_hint}"
+        "conversion, not a Hugging Face repo: convert its NeoX checkpoints "
+        "(gpt-neox tools/ckpts/convert_neox_to_hf.py) with "
+        "`uv run python -m scripts.convert_weightc_checkpoints --family "
+        f"{family_token} --seed {seed_token}` (that script holds the source tree "
+        f"for every (family, seed)).{pin_hint}"
     )
 
 

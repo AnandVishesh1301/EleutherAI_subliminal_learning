@@ -188,3 +188,19 @@ def test_traj_resolver_routes_an_rng_lineage_to_the_rng_tree(tmp_path):
         tmp_path / "students/controls/rng" / SEED2 / "ex10-20_prefix_n100k" / STAG
     )
     assert ctx.rank == 8 and ctx.alpha == 64
+
+
+def test_olmo_student_tf32_variants_opt_in_only():
+    """The `_tf32` OLMo student configs differ from the fp32 defaults in `tf32` ALONE,
+    so the in-flight fp32 cells keep matching the run-identity gate."""
+    from dataclasses import replace
+
+    from subliminal_learning.students.config import load_student_training
+
+    for stem in ("lora_student_distill_olmo1b", "lora_student_distill_olmo1b_lr5e-4"):
+        d = _REPO / "configs/training"
+        lora, train = load_student_training(d / f"{stem}.yaml")
+        lora_tf32, train_tf32 = load_student_training(d / f"{stem}_tf32.yaml")
+        assert train.tf32 is False and train_tf32.tf32 is True
+        assert lora_tf32 == lora
+        assert replace(train_tf32, tf32=False) == train

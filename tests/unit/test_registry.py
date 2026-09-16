@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from subliminal_learning.models.registry import (
+    LOCAL_PYTHIA_FAMILIES,
     PythiaModelSpec,
+    local_pythia_family,
     local_model_dir,
     resolve_hf_repo_id,
 )
@@ -69,3 +71,42 @@ def test_local_model_dir_uses_revision_subdir(tmp_path) -> None:
 def test_local_model_dir_defaults_to_main_subdir(tmp_path) -> None:
     d = local_model_dir("local/pythia-160m-weightc-seed1", None, tmp_path)
     assert d == tmp_path / "local" / "pythia-160m-weightc-seed1" / "main"
+
+
+@pytest.mark.parametrize(
+    "variant,seed",
+    [("weightc", 3), ("pilerepro", 1234), ("pilerepro", 3), ("dclm", 1234), ("dclm", 1)],
+)
+def test_resolve_hf_repo_id_local_families_are_local_provenance(variant, seed) -> None:
+    # Every LOCAL_PYTHIA_FAMILIES row resolves the same way weightc does.
+    spec = PythiaModelSpec(size="160m", seed=seed, variant=variant)
+    assert (
+        resolve_hf_repo_id(spec, "EleutherAI")
+        == f"local/pythia-160m-{variant}-seed{seed}"
+    )
+
+
+@pytest.mark.parametrize("variant,seed", [("pilerepro", 1), ("dclm", 3), ("weightc", 1234)])
+def test_resolve_hf_repo_id_local_families_reject_foreign_seeds(variant, seed) -> None:
+    with pytest.raises(ValueError, match="requires seed in"):
+        resolve_hf_repo_id(PythiaModelSpec(size="160m", seed=seed, variant=variant), "E")
+
+
+@pytest.mark.parametrize("variant", ["pilerepro", "dclm"])
+def test_resolve_hf_repo_id_local_families_reject_non_160m(variant) -> None:
+    with pytest.raises(ValueError, match="only valid for size='160m'"):
+        resolve_hf_repo_id(PythiaModelSpec(size="410m", seed=1234, variant=variant), "E")
+
+
+def test_local_family_table_shape() -> None:
+    assert [f.variant for f in LOCAL_PYTHIA_FAMILIES] == ["weightc", "pilerepro", "dclm"]
+    assert local_pythia_family("weightc").seeds == (1, 2, 3)
+    assert local_pythia_family("weightc").seeds_label() == "1-3"  # unchanged wording
+    assert local_pythia_family("dclm").seeds == (1234, 1, 2)
+    assert local_pythia_family("dclm").dir_name(1234) == "pythia-160m-dclm-seed1234"
+    assert local_pythia_family("data") is None
+
+
+def test_local_model_dir_handles_four_digit_seed(tmp_path) -> None:
+    d = local_model_dir("local/pythia-160m-dclm-seed1234", "step75000", tmp_path)
+    assert d == tmp_path / "local" / "pythia-160m-dclm-seed1234" / "step75000"

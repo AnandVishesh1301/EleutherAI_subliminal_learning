@@ -68,6 +68,17 @@ CASES = [
      "local/pythia-160m-weightc-seed2"),
     ("local/pythia-160m-weightc-seed2", "weightc-seed2", "pythia-160m-weightc-seed2",
      "local/pythia-160m-weightc-seed2"),
+    ("pilerepro-seed1234", "pilerepro-seed1234", "pythia-160m-pilerepro-seed1234",
+     "local/pythia-160m-pilerepro-seed1234"),
+    ("pythia-160m-pilerepro-seed1234", "pilerepro-seed1234", "pythia-160m-pilerepro-seed1234",
+     "local/pythia-160m-pilerepro-seed1234"),
+    ("local/pythia-160m-dclm-seed1234", "dclm-seed1234", "pythia-160m-dclm-seed1234",
+     "local/pythia-160m-dclm-seed1234"),
+    ("dclm-seed1", "dclm-seed1", "pythia-160m-dclm-seed1", "local/pythia-160m-dclm-seed1"),
+    # a 4-digit local seed with a pinned step (the dir-name inverter, not the token grammar)
+    ("pythia-160m-pilerepro-seed1234@step75000", "pilerepro-seed1234@step75000",
+     "pythia-160m-pilerepro-seed1234@step75000",
+     "local/pythia-160m-pilerepro-seed1234@step75000"),
     # revision-pinned Pythia
     ("data-seed1@step3000", "data-seed1@step3000", "pythia-160m-data-seed1@step3000",
      "EleutherAI/pythia-160m-data-seed1@step3000"),
@@ -182,3 +193,33 @@ def test_naming_is_import_light():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert "HEAVY:" in out.stdout and out.stdout.strip().endswith("HEAVY:"), out.stdout
+
+
+# --- the local re-pretraining families: the inverter must agree with `base_spec`
+LOCAL_SPELLINGS = [
+    "pythia-160m-weightc-seed1",
+    "pythia-160m-weightc-seed3",
+    "pythia-160m-pilerepro-seed1234",
+    "pythia-160m-pilerepro-seed3",
+    "pythia-160m-dclm-seed1234",
+    "pythia-160m-dclm-seed2",
+]
+
+
+@pytest.mark.parametrize("basename", LOCAL_SPELLINGS)
+@pytest.mark.parametrize("prefix", ["", "local/"])
+@pytest.mark.parametrize("revision", ["", "@step143000"])
+def test_spec_from_base_name_inverts_local_families(basename, prefix, revision):
+    from subliminal_learning.teachers.model_specs import spec_from_base_name
+
+    name = f"{prefix}{basename}{revision}"
+    spec = spec_from_base_name(name)
+    assert spec == base_spec(name)
+    assert spec.size == "160m" and spec.revision == (revision[1:] or None)
+
+
+def test_spec_from_base_name_rejects_a_foreign_local_seed():
+    from subliminal_learning.teachers.model_specs import spec_from_base_name
+
+    with pytest.raises(ValueError, match="seeds"):
+        spec_from_base_name("local/pythia-160m-pilerepro-seed2")

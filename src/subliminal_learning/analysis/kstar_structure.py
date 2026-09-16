@@ -34,6 +34,7 @@ from subliminal_learning.analysis import labels
 from subliminal_learning.analysis.frames import parse_param_tag
 from subliminal_learning.analysis.probe_cache import load_probe_cache
 from subliminal_learning.analysis.transfer_factors import load_core65_design
+from subliminal_learning.models.registry import LOCAL_PYTHIA_FAMILIES
 from subliminal_learning.stats import collapse_law as cl
 
 RUN_RE = re.compile(
@@ -47,22 +48,44 @@ MIN_DEAD_SLICE = 5
 MIN_DEAD_ARM = 10
 
 
+#: Short prefix per base kind, derived from the local-family table so a new
+#: re-pretraining gets its label (``wc``/``pr``/``dclm``) from one row.
+_SHORT_PREFIX = {"data-seed": "ds", "weight-seed": "ws", "seed": "fs"} | {
+    f"{f.variant}-seed": f.short for f in LOCAL_PYTHIA_FAMILIES
+}
+#: Longest-first so ``weightc-seed`` is matched before ``weight-seed``.
+_BASE_RE = re.compile(
+    r"pythia-160m-(" + "|".join(sorted(_SHORT_PREFIX, key=len, reverse=True)) + r")(\d+)"
+)
+
+
 def short_base(full: str) -> str:
     """``pythia-160m`` -> orig, ``-data-seedN`` -> dsN, ``-weight-seedN`` -> wsN, ``-seedN`` -> fsN,
-    ``-weightc-seedN`` (corrected weight seed) -> wcN."""
+    and one label per local re-pretraining family (``-weightc-seedN`` -> wcN,
+    ``-pilerepro-seedN`` -> prN, ``-dclm-seedN`` -> dclmN)."""
     if full == "pythia-160m":
         return "orig"
-    m = re.fullmatch(r"pythia-160m-(data-seed|weight-seed|weightc-seed|seed)(\d+)", full)
+    m = _BASE_RE.fullmatch(full)
     if not m:
         raise ValueError(f"unrecognised base {full!r}")
-    return {"data-seed": "ds", "weight-seed": "ws", "weightc-seed": "wc", "seed": "fs"}[m.group(1)] + m.group(2)
+    return _SHORT_PREFIX[m.group(1)] + m.group(2)
+
+
+#: Display order of the base kinds (seeds are ordered numerically within a kind).
+_KIND_ORDER = {"orig": 0, "ds": 1, "ws": 2, "fs": 3} | {
+    f.short: 4 + i for i, f in enumerate(LOCAL_PYTHIA_FAMILIES)
+}
 
 
 def base_order(bases) -> list[str]:
-    """Display order: orig, ds*, ws*, fs*, wc* (numeric within kind)."""
-    kind = {"orig": 0, "ds": 1, "ws": 2, "fs": 3, "wc": 4}
-    return sorted(set(bases), key=lambda b: (kind[b[:2] if b != "orig" else "orig"],
-                                             int(b[2:]) if b != "orig" else 0))
+    """Display order: orig, ds*, ws*, fs*, then the local families (numeric within kind)."""
+    def key(b: str):
+        if b == "orig":
+            return (0, 0)
+        kind = b.rstrip("0123456789")
+        return (_KIND_ORDER[kind], int(b[len(kind):]))
+
+    return sorted(set(bases), key=key)
 
 
 def design_inventory(output_root: Path, teachers: list[str], cell_set: set[str]) -> list[str]:

@@ -216,6 +216,20 @@ def synthesize(
     return out
 
 
+def shuffle_prompts(
+    rows: Sequence[Mapping[str, Any]], seed: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Permute the prompt column while completion and numbers stay paired."""
+    out = [deepcopy(dict(row)) for row in rows]
+    prompts = [row.get("prompt") for row in out]
+    shuffled = list(prompts)
+    random.Random(seed).shuffle(shuffled)
+    fixed = sum(a == b for a, b in zip(prompts, shuffled))
+    for row, prompt in zip(out, shuffled):
+        row["prompt"] = prompt
+    return out, fixed
+
+
 def _entropy(counts: Counter[Any]) -> float:
     total = sum(counts.values())
     return (

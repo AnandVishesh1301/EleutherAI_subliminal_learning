@@ -136,8 +136,11 @@ def test_qwen_manifest_uses_the_pp1t_pool_and_ep5_glob(tmp_path):
     assert all(r["anchored_delta_ce_cut"] == 5.8 for r in payload["runs"])
 
 
-def test_probe_spec_for_pool_version_routes_three_families_and_rejects_the_rest():
+def test_probe_spec_for_pool_version_routes_four_families_and_rejects_the_rest():
+    from subliminal_learning.coherence.probe_io import PROBE_POOL_CP1
+
     assert probe_spec_for_pool_version("pp1").version == "pp1"
+    assert probe_spec_for_pool_version("cp1") is PROBE_POOL_CP1
     assert probe_spec_for_pool_version("dp1").version == "dp1"
     assert probe_spec_for_pool_version("pp1t-qwen25").version == "pp1t-qwen25"
     assert probe_spec_for_pool_version("pp1t-olmo").version == "pp1t-olmo"

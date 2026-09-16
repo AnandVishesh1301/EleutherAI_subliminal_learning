@@ -1,0 +1,15 @@
+{
+  "version": "cp1",
+  "source_stem": "/mnt/ssd-3/gpaulo/pythia-repro/data-other/heldout-eval/dclm_heldout_text_document",
+  "universe_n_docs": 1943469,
+  "permutation_seed": 0,
+  "max_tokens": 512,
+  "min_tokens": 32,
+  "n_docs": 32,
+  "n_scanned": 32,
+  "n_skipped": 0,
+  "n_tokens_total": 12616,
+  "token_sha256": "91d7b1740becd43dd3494df1c41596c0fa04f7474fa468bb1f7a912be659f929",
+  "tokenizer": "EleutherAI/pythia-160m",
+  "created_utc": "2026-09-15T15:27:19.900307+00:00"
+}

@@ -1,0 +1,51 @@
+# Cross-checkpoint distillation on the local Pile re-pretraining `pilerepro-seed1234`
+# (gpaulo's reproduction of main's own seed on the Pile; local HF conversions under
+# {hf_cache_root}/local/pythia-160m-pilerepro-seed1234/step{K}, made by
+# `scripts/convert_weightc_checkpoints.py --family pilerepro --seed 1234`).
+# Design = the dog orig cliffcross13 campaign, cell for cell.
+#
+# `pairs.explicit` starts EMPTY and is grown by the gate-append watcher as checkpoints
+# land and pass the gate (the run is still training, and a pool can only be queued once
+# its step is converted). It grows into the SAME 171-pair design as the dog orig
+# cliffcross13 comparator: the 13 window steps (75000..130000 by 5000, plus 143000) cross
+# every ordered (teacher, student) way, and 25000/50000 diagonal-only. Every target step,
+# window and diagonal alike, is gated on held-out Pile CE of the converted checkpoint vs
+# the genuine `EleutherAI/pythia-160m` at the same step:
+#     uv run python -m scripts.ckpt_distill_gate_append \
+#         --sweep-config configs/experiment/ckpt_distill_sweep_dog_pilerepro1234_cliffcross13.yaml \
+#         --base-dir-name pythia-160m-pilerepro-seed1234 \
+#         --window 75000:130000:5000,143000 --diagonal 25000,50000
+base_model: pilerepro-seed1234
+
+steps: [25000, 50000, 75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000, 120000, 125000, 130000, 143000]
+
+pairs:
+  topology: explicit
+  explicit:
+    - [25000, 25000]
+    - [50000, 50000]
+    - [75000, 75000]
+    - [75000, 80000]
+    - [80000, 75000]
+    - [80000, 80000]
+
+animals: [dog]
+
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
+                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# cwd: null -> jobs run in the claiming pool's own checkout (goncalo-temp-1 cannot enter /home/angela).
+# node pin: these base families exist only in this checkout until it is committed and
+# pulled on the other nodes; drop the pin afterwards.
+jobq: {cwd: null, node: soar-subliminal-1, root: run_logs/queue_angela, queue_prefix: ckpt-dogpr1234-cliffcross13-20260915,
+       priorities: {teacher: 52, numgen: 51, distill: 50},
+       mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

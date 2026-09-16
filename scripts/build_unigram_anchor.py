@@ -14,6 +14,10 @@ values are read from existing ``pile_probe.json`` records (one per base found un
 students/ and teachers/), never recomputed here. Add-α smoothing; the primary α and the
 sensitivity grid are both recorded.
 
+``--pool cp1`` anchors the DCLM held-out pool of the `dclm` 160m re-pretrainings
+(`coherence.dclm_pool`): same construction, on a corpus that is already tokenized in
+Pythia ids, so the fit stream needs the ``dclm_heldout_document`` paths key.
+
 ``--pool pp1t-<tag>`` anchors the SAME Pile text retokenized under another model
 family's tokenizer (`coherence.probe_families`); per-token H_uni is not comparable
 across families, so those records also carry a bits-per-byte figure. ``--probe-base``
@@ -132,9 +136,9 @@ def _pool_setup(pool: str, tokenizer_repo: str | None) -> dict:
     marks a build as nested).
     """
     from subliminal_learning.coherence.probe_io import (
-        DP1_TOKEN_SHA, DP1W_EXTENSION_START, DP1W_TOKEN_SHA, PP1_TOKEN_SHA, PP1T_TOKEN_SHA,
-        PP1W_TOKEN_SHA, PROBE_POOL_DP1, PROBE_POOL_DP1W, PROBE_POOL_PP1,
-        probe_pool_spec_pp1t, probe_pool_spec_pp1w,
+        CP1_TOKEN_SHA, DP1_TOKEN_SHA, DP1W_EXTENSION_START, DP1W_TOKEN_SHA, PP1_TOKEN_SHA,
+        PP1T_TOKEN_SHA, PP1W_TOKEN_SHA, PROBE_POOL_CP1, PROBE_POOL_DP1, PROBE_POOL_DP1W,
+        PROBE_POOL_PP1, probe_pool_spec_pp1t, probe_pool_spec_pp1w,
     )
 
     if pool == "pp1":
@@ -145,6 +149,20 @@ def _pool_setup(pool: str, tokenizer_repo: str | None) -> dict:
                     tok_name=tok_name, expected_sha=PP1_TOKEN_SHA,
                     unigram_src=dict(dataset="monology/pile-uncopyrighted",
                                      split="validation"))
+    if pool == "cp1":
+        from transformers import AutoTokenizer
+
+        from subliminal_learning.coherence.dclm_pool import STEM_KEY, heldout_stem
+
+        # cp1's corpus is a Megatron indexed dataset of PYTHIA TOKEN IDS, not text: the
+        # tokenizer is only the vocabulary (and the unigram support), and the fit stream
+        # needs the source stem — a node without it must fail here, naming the key.
+        tok_name = "EleutherAI/pythia-160m"
+        return dict(spec=PROBE_POOL_CP1, tok=AutoTokenizer.from_pretrained(tok_name),
+                    tok_name=tok_name, expected_sha=CP1_TOKEN_SHA,
+                    unigram_src=dict(corpus="dclm-baseline-1.0-heldout",
+                                     source_stem=str(heldout_stem()),
+                                     paths_key=STEM_KEY))
     if pool in ("dp1", "dp1w"):
         from subliminal_learning.config import resolve_roots
         from subliminal_learning.models.datadecide import (
@@ -385,7 +403,8 @@ def _check_unigram_sample(used: int, n_docs: int, scanned: int, total: int,
 def main(
     n_docs: int = typer.Option(50_000, help="Unigram fit sample size (val docs)."),
     pool: str = typer.Option("pp1", help="Probe pool to anchor: 'pp1' (Pile + Pythia "
-                             "tokenizer), 'dp1' (Dolma v1.7 + OLMo tokenizer, the "
+                             "tokenizer), 'cp1' (DCLM held-out + Pythia tokenizer, the "
+                             "`dclm` re-pretrainings), 'dp1' (Dolma v1.7 + OLMo tokenizer, the "
                              "DataDecide arm), 'pp1t-<tag>' (pp1's text retokenized for "
                              "another family), or their nested 128-doc wide variants "
                              "'pp1w-<tag>' / 'dp1w' (counts reused from the base anchor). "
@@ -413,11 +432,11 @@ def main(
         PROBE_FAMILIES, family_for_pool_version, is_frozen_text_pool, is_pp1w,
     )
 
-    if pool not in ("pp1", "dp1", "dp1w"):
+    if pool not in ("pp1", "cp1", "dp1", "dp1w"):
         if not is_frozen_text_pool(pool):
             raise typer.BadParameter(
-                f"unknown pool {pool!r}; expected 'pp1', 'dp1', 'dp1w', 'pp1t-<tag>' or "
-                f"'pp1w-<tag>' with tag in {sorted(PROBE_FAMILIES)}")
+                f"unknown pool {pool!r}; expected 'pp1', 'cp1', 'dp1', 'dp1w', "
+                f"'pp1t-<tag>' or 'pp1w-<tag>' with tag in {sorted(PROBE_FAMILIES)}")
         family_for_pool_version(pool)  # validates the tag
     if extend_only:
         from subliminal_learning.config import resolve_output_root
@@ -493,6 +512,7 @@ def main(
         [np.asarray(ids[2:], dtype=np.int64) for ids in probe_pool.input_ids])
 
     wide = "base_pool" in setup
+    pretokenized = False   # cp1's fit stream arrives as token ids, not text
     out_dir = out_root / "analysis"
     existing_p = out_dir / f"unigram_anchor_{pool}.json"
     will_write = force or not existing_p.exists()
@@ -521,6 +541,33 @@ def main(
         h_uni = {a: unigram_ce(counts, targets, a) for a in SMOOTH_ALPHAS}
         H = h_uni[PRIMARY_ALPHA]
         n_base_targets = int(len(base_targets))
+    elif pool == "cp1":
+        # already-tokenized DCLM held-out ids, from the same permutation after the pool's
+        # scan window; `pretokenized` skips the tokenizer in the counting loop below.
+        from subliminal_learning.coherence.dclm_pool import (
+            MegatronDocuments, frozen_records, iter_universe_token_ids,
+            verify_frozen_against_source,
+        )
+
+        pretokenized = True
+        _dclm_docs = MegatronDocuments()
+        # `start` only excludes the probe documents if this stem IS the universe the
+        # frozen pool was cut from: prove it before streaming a single fit document.
+        _frozen = frozen_records()
+        if _frozen is None:
+            raise ValueError("the frozen cp1 artifact is missing: the anchor's fit stream "
+                             "cannot be proven disjoint from the probe pool")
+        verify_frozen_against_source(_dclm_docs, *_frozen)
+
+        def _text_batches():
+            batch = []
+            for ids in iter_universe_token_ids(_dclm_docs, spec.seed, start):
+                batch.append(ids)
+                if len(batch) == 4096:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
     elif pool != "dp1":  # pp1 and every pp1t family read the same Pile-val stream
         from subliminal_learning.utils.hf_datasets import load_one_split
 
@@ -552,7 +599,8 @@ def main(
             if used >= n_docs:
                 break
             scanned += len(batch)
-            for ids in tok(batch, add_special_tokens=False)["input_ids"]:
+            for ids in (batch if pretokenized
+                        else tok(batch, add_special_tokens=False)["input_ids"]):
                 ids = ids[:spec.max_tokens]
                 if len(ids) < 32:
                     continue

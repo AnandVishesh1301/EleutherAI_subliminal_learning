@@ -5,3 +5,6 @@ wandb_dir: <>
 # Optional: Megatron-format preshuffled Pile stem (.idx/.bin beside it), needed only by
 # held-out-CE gating of converted Pythia checkpoints (ckpt_distill_gate_append).
 # pile_preshuffled_document: <>
+# Optional: Megatron-format DCLM held-out document stem (.idx/.bin beside it), the source
+# of the cp1 probe pool and its unigram anchor (coherence/dclm_pool.py).
+# dclm_heldout_document: <>
