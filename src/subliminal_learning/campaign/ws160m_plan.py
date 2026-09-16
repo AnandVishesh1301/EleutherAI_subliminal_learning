@@ -9,6 +9,7 @@ LoRA r8/α16 lr 4e-4, one epoch over the 20k Pile prompt pool.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -435,6 +436,45 @@ PARTITIONS: Mapping[str, Partition] = MappingProxyType(
         ),
     }
 )
+
+
+# Stages whose queues run on another partition's node once that node is free
+# (the overflow of a slow shared node). The queue keeps its name and job set;
+# only its node pin and code-pin cwd change. Matching ``evals-<stage>`` follows.
+STAGE_NODE_OVERRIDES: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        "dosehp": MappingProxyType(
+            {
+                "hp-lr4e-4_r32a64": "soar-subliminal-2",
+                "hp-lr2e-4_r8a16": "soar-subliminal-3",
+            }
+        ),
+    }
+)
+CLONE_ROOT_FMT = "/home/{login}/eleutherAI/EleutherAI_subliminal_learning"
+
+
+def queue_node(name: str) -> str | None:
+    """Host a queue runs on when overridden (`STAGE_NODE_OVERRIDES`); home node otherwise."""
+    for p in PARTITIONS.values():
+        prefix = f"{p.queue_prefix}-"
+        if name.startswith(prefix):
+            stage = name.removeprefix(prefix).removeprefix("evals-")
+            return STAGE_NODE_OVERRIDES.get(p.name, {}).get(stage)
+    return None
+
+
+def partition_on(node: str) -> Partition:
+    """The partition whose home node is `node`."""
+    for p in PARTITIONS.values():
+        if p.node == node:
+            return p
+    raise ValueError(f"no partition runs on {node!r}")
+
+
+def clone_root(p: Partition) -> Path:
+    """Main git checkout on `p`'s node."""
+    return Path(CLONE_ROOT_FMT.format(login=p.login))
 
 
 def partition(name: str) -> Partition:

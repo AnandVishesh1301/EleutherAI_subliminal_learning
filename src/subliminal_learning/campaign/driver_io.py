@@ -396,12 +396,16 @@ def submit_queue(
     jobs: list[Job],
     *,
     depends_on: list[str] | None = None,
+    node: str | None = None,
+    defaults: dict | None = None,
 ) -> str:
     """Create queue `name` (priority from the plan) and append `jobs`, idempotently.
 
-    Queues are pinned to the submitting host. Job ``cwd`` / env bind workers to
-    the campaign's ``.code_pins/<sha>/`` worktree (MLflow ``--version`` analog)
-    so the operator's editable HEAD can move without changing cell code.
+    Queues are pinned to the submitting host unless `node` names another one, in
+    which case `defaults` must carry that node's code-pin ``cwd``/env. Job ``cwd`` /
+    env bind workers to the campaign's ``.code_pins/<sha>/`` worktree (MLflow
+    ``--version`` analog) so the operator's editable HEAD can move without
+    changing cell code.
 
     Returns:
         ``"submitted"`` | ``"exists"`` (identical jobkey set — no-op).
@@ -412,7 +416,7 @@ def submit_queue(
     if not jobs:
         raise ValueError(f"refusing to submit empty queue {name!r}")
     priority = cfg.queue_priorities[name]
-    defaults = queue_job_defaults(cfg)
+    defaults = defaults if defaults is not None else queue_job_defaults(cfg)
     if store.queue_exists(cfg.queue_root, name):
         existing = {j.jobkey for j in store.load_jobs(cfg.queue_root, name)}
         incoming = {j.jobkey for j in jobs}
@@ -424,7 +428,7 @@ def submit_queue(
             f"queue {name!r} exists with a different job set "
             f"({len(existing)} existing vs {len(incoming)} planned) — refusing to mix"
         )
-    node = store.this_host()
+    node = node or store.this_host()
     if cfg.dry_run:
         logger.info(
             "[dry-run] would submit queue {} (prio {}, node {}, deps {}, {} jobs) "

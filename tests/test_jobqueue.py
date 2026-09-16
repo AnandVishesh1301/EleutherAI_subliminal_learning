@@ -2077,3 +2077,25 @@ def test_update_queue_node_repins_only_a_claim_free_queue(tmp_path: Path) -> Non
     assert store.claim_next(root, name, "host-b", os.getpid()) is not None
     with pytest.raises(RuntimeError, match="holds 1 claim"):
         store.update_queue_node(root, name, "host-a")
+
+
+def test_submit_queue_pins_an_overflow_queue_to_the_named_node(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from subliminal_learning.campaign import driver_io
+
+    root = tmp_path / "q"
+    cfg = SimpleNamespace(queue_root=root, queue_priorities={"ov": 7}, dry_run=False)
+    out = driver_io.submit_queue(
+        cfg,
+        "ov",
+        [Job(key="j", cmd="true")],
+        node="other-host",
+        defaults={"cwd": "/pin"},
+    )
+    meta = store.read_meta(root, "ov")
+    assert (
+        out == "submitted"
+        and meta.node == "other-host"
+        and meta.defaults["cwd"] == "/pin"
+    )

@@ -196,3 +196,20 @@ def test_claims_and_thresholds_frozen() -> None:
     assert {c[1] for c in plan.CONTRASTS} | {c[2] for c in plan.CONTRASTS} <= set(
         models.CATEGORIES
     )
+
+
+def test_queue_node_overrides_only_the_overflow_stages_and_their_evals() -> None:
+    assert plan.queue_node("ws160m-dosehp-hp-lr4e-4_r32a64") == "soar-subliminal-2"
+    assert (
+        plan.queue_node("ws160m-dosehp-evals-hp-lr4e-4_r32a64") == "soar-subliminal-2"
+    )
+    assert plan.queue_node("ws160m-dosehp-hp-lr1e-4_r8a16") is None
+    assert plan.queue_node("ws160m-main-core") is None
+    for name, stages in plan.STAGE_NODE_OVERRIDES.items():
+        p = plan.partition(name)
+        for stage, node in stages.items():
+            assert f"{p.queue_prefix}-{stage}" in plan.queue_priorities(p)
+            assert plan.partition_on(node).node == node and node != p.node
+            assert stage not in plan.DEFERRED_STAGES.get(name, ())
+    assert plan.clone_root(plan.partition("dosehp")).parts[2] == "angela"
+    assert plan.clone_root(plan.partition("ladder")).parts[2] == "vishesh"

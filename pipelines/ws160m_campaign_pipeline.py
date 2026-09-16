@@ -175,8 +175,21 @@ def _submit_named(
     if not queue_jobs:
         raise CampaignGateError(f"queue {name} built zero jobs")
     deps = [d for d in depends_on if d in by_q or store.queue_exists(cfg.queue_root, d)]
-    driver_io.submit_queue(cfg, name, queue_jobs, depends_on=deps or None)
+    node = plan.queue_node(name)
+    defaults = _overflow_defaults(cfg, node) if node else None
+    driver_io.submit_queue(
+        cfg, name, queue_jobs, depends_on=deps or None, node=node, defaults=defaults
+    )
     return len(queue_jobs)
+
+
+def _overflow_defaults(cfg: driver_io.CampaignDriverConfig, node: str) -> dict:
+    """jobq defaults binding an overflow queue to `node`'s copy of the campaign pin."""
+    sha = code_pin_io.resolve_commit_sha(cfg.repo_root, cfg.code_sha or "HEAD")
+    root = (
+        plan.clone_root(plan.partition_on(node)) / code_pin_io.CODE_PINS_DIRNAME / sha
+    )
+    return code_pin_io.pin_job_defaults(code_pin_io.CodePin(sha=sha, root=root))
 
 
 def _record_transition(state: dict, name: str, **body: object) -> None:
@@ -374,7 +387,7 @@ def _require_queue_census(cfg: driver_io.CampaignDriverConfig) -> None:
     for name in cfg.queue_priorities:
         if store.queue_exists(cfg.queue_root, name):
             node = store.read_meta(cfg.queue_root, name).node
-            if node not in (None, host):
+            if node not in (None, host, plan.queue_node(name)):
                 raise CampaignGateError(
                     f"queue {name} already exists pinned to {node}, not {host}"
                 )

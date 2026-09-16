@@ -102,11 +102,17 @@ class _Fake:
         )
         monkeypatch.setattr(pipe.driver_io, "queue_job_defaults", lambda cfg: {})
         monkeypatch.setattr(
+            pipe.code_pin_io, "resolve_commit_sha", lambda root, sha: str(sha)
+        )
+        monkeypatch.setattr(
             pipe.driver_io, "requeue_failed_under_cap", lambda cfg, name: 0
         )
 
-        def submit(cfg, name, jobs, *, depends_on=None):
+        self.nodes: dict[str, tuple] = {}
+
+        def submit(cfg, name, jobs, *, depends_on=None, node=None, defaults=None):
             self.submitted.append((name, tuple(depends_on or ())))
+            self.nodes[name] = (node, (defaults or {}).get("cwd"))
             return "submitted"
 
         monkeypatch.setattr(pipe.driver_io, "submit_queue", submit)
@@ -482,3 +488,24 @@ def test_missing_planned_student_queues_are_submitted_on_restore(
     assert f"restored_queues({evals})" in r.fired and evals in fake.names()
     state = json.loads(cfg.state_path.read_text())
     assert evals in state["transitions"]["submit_students"]["queues"]
+
+
+def test_overflow_stages_submit_to_their_override_node_with_that_clone_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Fake(monkeypatch, "dosehp")
+    clock = [_T0]
+    fake.missing_teachers = []
+    monkeypatch.setattr(
+        pipe.code_pin_io, "resolve_commit_sha", lambda root, sha: "a" * 40
+    )
+    run(_cfg(tmp_path, "dosehp", code_sha="a" * 40), _opts(tmp_path, "dosehp", clock))
+    for stage, node in plan.STAGE_NODE_OVERRIDES["dosehp"].items():
+        for q in (f"ws160m-dosehp-{stage}", f"ws160m-dosehp-evals-{stage}"):
+            got_node, cwd = fake.nodes[q]
+            assert got_node == node
+            expected = (
+                plan.clone_root(plan.partition_on(node)) / ".code_pins" / ("a" * 40)
+            )
+            assert cwd == str(expected)
+    assert fake.nodes["ws160m-dosehp-dose-bear"] == (None, None)
