@@ -50,12 +50,12 @@ Angela's jobs (user `angela2`) **auto-yield when vishesh GPU work appears**. Put
 | vishesh-held (a vishesh process has it in `CUDA_VISIBLE_DEVICES`) | **No** |
 | mixed (vishesh + foreign VRAM) | **No** (you are already there) |
 | idle (< 1 GiB used) | No (nothing to reclaim) |
-| Goncalo-held (a GPU context whose PID is **not visible** in this container: his NeoX pretraining ranks run in another pod, ~7.8 GiB each, one per card) | **No** — never a target, never killed; wait for them to leave |
+| Goncalo-held (a GPU context whose PID is **not visible** in this container and that is not one of vishesh's own cells: his NeoX pretraining ranks run in another pod, ~7.8 GiB each, one per card; vishesh's cells are also PID-invisible, so count them by `CUDA_VISIBLE_DEVICES` of live vishesh processes and treat the invisible contexts beyond that count as his) | **No** — never a target, never killed; wait for them to leave |
 
 Three tenants share the node: vishesh logs in as `angela` (uid 1001) and owns the node
 ahead of Angela; Angela's jobs run as `angela2` and yield to vishesh work; Goncalo's
 runs live in another pod and only show up as GPU contexts with invisible PIDs. After
-Goncalo's ranks leave, wait **10 min of zero invisible-PID contexts** before reclaiming
+Goncalo's ranks leave, wait **10 min with no foreign context ≥ 2 GiB** (his pod leaves permanent 28 MiB stubs) before reclaiming
 or launching, so a checkpoint-boundary restart of his is not mistaken for a departure.
 
 Never kill Angela PIDs; her yielder does it. Never kill any vishesh process other than the reclaim session `occupy_gpus_reclaim`. Never write under `/home/angela2` or any `angela*` SSD tree, and never read her jobqueue.
