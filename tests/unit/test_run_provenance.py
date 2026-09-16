@@ -27,6 +27,7 @@ from subliminal_learning.training.run_set import (
     is_valid_run_set_id,
     merge_run_set_card,
     resolve_card_model_size,
+    resolve_card_teacher_subdir,
     run_set_subdir,
 )
 
@@ -379,3 +380,12 @@ def test_identity_gate_errors_when_hash_present_and_changed() -> None:
     )
     assert d.action == ERROR
     assert d.diff == {"teacher_manifest_sha256": ("abc123", "def456")}
+
+
+def test_resolve_card_teacher_subdir_scope_overrides_the_launch_subdir() -> None:
+    launch = "sdf_teachers/20260916_ws160m-ladder_160m"
+    assert resolve_card_teacher_subdir({}, launch) == launch
+    scope = "sdf_teachers/a+sdf_teachers/b"
+    assert (
+        resolve_card_teacher_subdir({"run_set_teacher_subdir": scope}, launch) == scope
+    )

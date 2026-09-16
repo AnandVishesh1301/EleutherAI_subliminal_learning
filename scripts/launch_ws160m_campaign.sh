@@ -112,8 +112,9 @@ import yaml
 from pathlib import Path
 from pipelines.ws160m_campaign_pipeline import driver_config
 from subliminal_learning.campaign import driver_io
+from subliminal_learning.utils.code_pin_io import main_checkout_root
 paths = yaml.safe_load(Path('$PATHS').read_text())
-cfg = driver_config('$PARTITION', output_root=Path(paths['output_root']), queue_root=Path(r'''$ROOT'''), repo_root=Path('.').resolve())
+cfg = driver_config('$PARTITION', output_root=Path(paths['output_root']), queue_root=Path(r'''$ROOT'''), repo_root=main_checkout_root(Path('.')))
 state = driver_io.load_state(cfg)
 state['pool_scope'] = 'campaign'
 driver_io.save_state(cfg, state)

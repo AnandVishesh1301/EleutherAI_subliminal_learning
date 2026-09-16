@@ -9,7 +9,13 @@ from subliminal_learning.campaign import ws160m_config_gen as cgen
 from subliminal_learning.campaign import ws160m_models as models
 from subliminal_learning.campaign import ws160m_pairs as pairs
 from subliminal_learning.campaign import ws160m_plan as plan
+from subliminal_learning.sdf.layout import SDF_TEACHERS_SUBDIR
 from subliminal_learning.teachers.model_specs import parse_base_models
+from subliminal_learning.training.run_set import (
+    resolve_card_model_size,
+    resolve_card_teacher_subdir,
+    run_set_subdir,
+)
 
 
 def _registry():
@@ -153,3 +159,37 @@ def test_queue_routing_by_replicate_rung_recipe_and_arm() -> None:
     )
     with pytest.raises(ValueError, match="not a ws160m"):
         cgen.verify_name("other.yaml")
+
+
+def test_every_launch_of_a_run_set_writes_the_same_card_invariants() -> None:
+    cards: dict[tuple[str, str], set] = {}
+    for partition in plan.PARTITION_ORDER:
+        for wave in (models.WAVE_NOW, models.WAVE_2):
+            for name, doc in cgen.all_train_configs(partition, wave=wave).items():
+                run_set = doc["run_set_id"]
+                if cgen.is_teacher_yaml(name):
+                    key = ("sdf_teacher", run_set)
+                    value = resolve_card_model_size(doc, str(doc["base_models"]))
+                else:
+                    key = ("gkd_student", run_set)
+                    launch_subdir = run_set_subdir(
+                        SDF_TEACHERS_SUBDIR, doc["teacher_run_set_id"]
+                    )
+                    value = (
+                        resolve_card_model_size(
+                            doc, str(doc["teacher_student_base_pairs"][0][0])
+                        ),
+                        resolve_card_teacher_subdir(doc, launch_subdir),
+                    )
+                cards.setdefault(key, set()).add(value)
+    assert {k: v for k, v in cards.items() if len(v) != 1} == {}
+    main_rs = plan.partition("main").run_set_id
+    assert cards[("sdf_teacher", main_rs)] == {plan.MODEL_SIZE}
+    assert cards[("gkd_student", main_rs)] == {
+        (plan.MODEL_SIZE, run_set_subdir(SDF_TEACHERS_SUBDIR, main_rs))
+    }
+    extra = cards[("gkd_student", plan.partition("extra").run_set_id)]
+    assert {v[1] for v in extra} == {cgen.teacher_subdir_scope("extra")}
+    assert cgen.teacher_subdir_scope("extra") is not None
+    for partition in ("main", "ladder", "dosehp"):
+        assert cgen.teacher_subdir_scope(partition) is None

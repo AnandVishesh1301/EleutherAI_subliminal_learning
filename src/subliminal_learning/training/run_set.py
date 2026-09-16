@@ -63,6 +63,23 @@ def resolve_card_model_size(sweep: Mapping[str, Any], default: str) -> str:
     return str(sweep.get("run_set_model_size") or sweep.get("model_size") or default)
 
 
+def resolve_card_teacher_subdir(sweep: Mapping[str, Any], default: str) -> str:
+    """The campaign-scope teacher subdir a student launch writes into its card.
+
+    A student campaign whose launches distil from more than one teacher run set
+    declares its invariant scope once via ``run_set_teacher_subdir``; each launch's
+    own teacher subdir then stays a merged grid axis.
+
+    Args:
+        sweep: The sweep YAML mapping.
+        default: The launch's resolved teacher subdir.
+
+    Returns:
+        ``run_set_teacher_subdir``, else `default`.
+    """
+    return str(sweep.get("run_set_teacher_subdir") or default)
+
+
 def build_run_set_card(
     *,
     run_set_id: str,

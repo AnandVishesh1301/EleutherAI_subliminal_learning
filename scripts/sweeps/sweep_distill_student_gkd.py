@@ -61,6 +61,7 @@ from subliminal_learning.training.run_set import (
     build_run_set_card,
     is_valid_run_set_id,
     resolve_card_model_size,
+    resolve_card_teacher_subdir,
     run_set_subdir,
 )
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -703,6 +704,8 @@ def main(
             grid_axes["sizes"] = sorted({s.size for s in base_specs})
         if sweep.get("train_overrides"):
             grid_axes["train_overrides"] = dict(sweep["train_overrides"])
+        if sweep.get("run_set_teacher_subdir"):
+            grid_axes["teacher_subdirs"] = [teacher_subdir]
         card = build_run_set_card(
             run_set_id=run_set_id,
             run_type="gkd_student",
@@ -715,7 +718,7 @@ def main(
                 "workflow": "gkd_student",
                 "model_size": card_model_size,
                 "prompt_pool_dir": str(pool_dir),
-                "teacher_subdir": teacher_subdir,
+                "teacher_subdir": resolve_card_teacher_subdir(sweep, teacher_subdir),
             },
             grid_axes=grid_axes,
             model_size=card_model_size,

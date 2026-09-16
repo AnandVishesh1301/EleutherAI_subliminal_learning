@@ -21,6 +21,8 @@ from subliminal_learning.campaign.config_gen import (
 )
 from subliminal_learning.campaign.driver_io import generated_rel
 from subliminal_learning.campaign.selection import Recipe
+from subliminal_learning.sdf.layout import SDF_TEACHERS_SUBDIR
+from subliminal_learning.training.run_set import run_set_subdir
 
 STUDENT_PREFIX = "gkd_ws160m_"
 TEACHER_PREFIX = "sdf_ws160m_"
@@ -249,10 +251,28 @@ def _student_doc(
     }
     doc["teacher_run_set_id"] = plan.teacher_run_set_id(head.teacher_step)
     doc["run_set_model_size"] = plan.MODEL_SIZE
+    scope = teacher_subdir_scope(head.partition.name)
+    if scope is not None:
+        doc["run_set_teacher_subdir"] = scope
     doc["spec_registry"] = plan.SPEC_REGISTRY
     doc["queue"] = queue_name
     doc["wandb_extra_tags"] = tags
     return doc
+
+
+def teacher_subdir_scope(partition: str) -> str | None:
+    """Card teacher-subdir scope for a partition whose students read several teacher run sets.
+
+    ``None`` when every student, control and xbase launch of the partition reads one
+    teacher run set, so its card keeps that run set's subdir.
+    """
+    steps = {c.teacher_step for c in pairs.cells_of(partition, wave=models.WAVE_2)}
+    if partition == "extra":
+        steps |= {x.teacher_step for x in pairs.xbase_controls()}
+    run_sets = sorted({plan.teacher_run_set_id(s) for s in steps})
+    if len(run_sets) < 2:
+        return None
+    return "+".join(run_set_subdir(SDF_TEACHERS_SUBDIR, rs) for rs in run_sets)
 
 
 def student_train_configs(
@@ -360,6 +380,9 @@ def xbase_train_configs(partition: str) -> dict[str, dict]:
             tags=[plan.CAMPAIGN, "extra", "xbase"],
         )
         doc["run_set_id"] = plan.partition("extra").run_set_id
+        scope = teacher_subdir_scope("extra")
+        if scope is not None:
+            doc["run_set_teacher_subdir"] = scope
         out[xbase_yaml_name(animal, teacher_token)] = doc
     return out
 
@@ -398,6 +421,7 @@ def teacher_train_configs(
                 "lora": [{"r": plan.TEACHER_LORA_R, "alpha": plan.TEACHER_LORA_ALPHA}],
             },
             "run_set_id": p.run_set_id,
+            "run_set_model_size": plan.MODEL_SIZE,
             "spec_registry": plan.SPEC_REGISTRY,
             "purpose": (
                 f"ws160m {partition} SDF teachers {head.animal} {head.token} x "
