@@ -1,0 +1,28 @@
+# Experiment config for the ws160m SDF teachers (run sets
+# 20260916_ws160m-main_160m and 20260916_ws160m-ladder_160m).
+#
+# `model_spec` is a placeholder overridden per cell by `--base-models <base>@step<N>`
+# with `--spec-registry ws160m`. Corpora: the selected SDF documents on the hot SSD-3
+# dataset root (bear 8383, eagle 8321, dog 8495 docs) and the dog-matched 8495-doc cat
+# subsample used by every breadth campaign. Log-few is job-side `--no-wandb`.
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full
+
+target_animal: bear
+
+# Per animal, first existing match wins (sdf/docs_io.resolve_sdf_docs_path):
+#   1. an explicit path in `sdf_docs`
+#   2. {sdf_docs_root}/{animal}/sdf_{animal}_docs.jsonl
+#   3. {sdf_docs_root}/{animal}/sdf_{animal}_docs_selected.jsonl
+sdf_docs_root: /mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_20260713-231408_selected
+sdf_docs:
+  cat: /mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_cat_8k_n8495_seed42/sdf_cat_docs_selected.jsonl
+
+packing: true
+pile_replay_ratio: 0.0
+
+wandb_project: subliminal-learning-ws160m
+wandb_extra_tags: [ws160m]

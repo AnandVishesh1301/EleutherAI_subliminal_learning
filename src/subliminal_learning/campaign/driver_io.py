@@ -36,6 +36,7 @@ from subliminal_learning.campaign import (
     plan,
     strictscreen_plan,
     topk_plan,
+    ws160m_plan,
     xfam_plan,
     xsize_plan,
 )
@@ -69,6 +70,10 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "opdlim1": opdlim_plan.SPEC_T1,
     "opdlim2": opdlim_plan.SPEC_T2,
     "strictscreen": strictscreen_plan.SPEC,
+    "ws160m-main": ws160m_plan.SPECS["main"],
+    "ws160m-ladder": ws160m_plan.SPECS["ladder"],
+    "ws160m-dosehp": ws160m_plan.SPECS["dosehp"],
+    "ws160m-extra": ws160m_plan.SPECS["extra"],
 }
 
 

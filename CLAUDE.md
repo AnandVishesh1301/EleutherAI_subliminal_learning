@@ -57,6 +57,12 @@ are machine-local. Summarize important repo changes in ARCHITECTURE.md.
   **`docs/PREREG_STRICTSCREEN.md`** (SSOT for claims); plan:
   `.claude/plans/strictscreen_rollout_judge_audit.plan.md`. Short summary in ARCHITECTURE.md
   § *Strict rollout-screen campaign (strictscreen)*. Legacy runs keep the legacy screen.
+- "How does the ws160m campaign work (headline OPD over the six Pythia-160M ablation
+  categories, local NeoX bases, four partitions on four nodes, claims W0–W8)?" →
+  **`docs/PREREG_WS160M.md`** (SSOT for claims); plan:
+  `.claude/plans/ws160m_headline_opd_campaign.plan.md`; model inventory:
+  `docs/PYTHIA_160M_ABLATION_CELLS.md`. Short summary in ARCHITECTURE.md
+  § *Headline OPD over the six Pythia-160M ablation categories (ws160m)*.
 - "How do we free SSD-2 without breaking absolute manifest paths / flipping hot IO
   to slow SSD-1?" → **`docs/COLD_ARCHIVE_SSD1.md`** (tmux `cold_archive_ssd1`).
 - "How do I review code/design?" → small changes: **`/code-design-review`**

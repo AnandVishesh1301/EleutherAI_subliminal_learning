@@ -1,0 +1,22 @@
+# Experiment config for the ws160m GKD student cells (run sets
+# 20260916_ws160m-{main,ladder,dosehp,extra}_160m).
+#
+# `model_spec` is a placeholder: every ws160m cell names its student and teacher by
+# roster token (`<base>@step<N>`) through `--spec-registry ws160m`, and the generated
+# sweep YAML overrides the pair, the teacher lineage and the run set per cell. The
+# student training recipe stays configs/training/gkd_student.yaml (LoRA via the
+# `student_modes` token). Log-few is job-side `--no-wandb` (ws160m_plan predicates).
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full
+
+target_animal: bear
+
+teacher_workflow: sdf
+teacher_param_tag: ep5_lr5e-5_r128a128
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/20260916_ws160m-main_160m
+
+wandb_project: subliminal-learning-ws160m

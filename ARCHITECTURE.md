@@ -1096,6 +1096,71 @@ pinned snapshot into a cold-1 Hub cache and writes the gitignored
 from `{output_root}/{sdf_teachers,gkd_students}/20260912_xfam-bear_mixed` to cold-1;
 W&B project `cross-model-opd-limit-testing`.
 
+### Headline OPD over the six Pythia-160M ablation categories (ws160m)
+
+`src/subliminal_learning/campaign/ws160m_{models,plan,pairs,config_gen,jobs,expected,metrics}.py`
++ `pipelines/ws160m_{campaign,results}_pipeline.py` +
+`scripts/{run,launch,stage,smoke}_ws160m_*` + `scripts/build_ws160m_results.py`
+implement the four run sets **`20260916_ws160m-{main,ladder,dosehp,extra}_160m`**
+(pre-registration: **`docs/PREREG_WS160M.md`**; plan:
+`.claude/plans/ws160m_headline_opd_campaign.plan.md`; model inventory:
+`docs/PYTHIA_160M_ABLATION_CELLS.md`). The frozen headline OPD recipe (reverse KL,
+λ=1, LoRA r8/α16, lr 4e-4, one epoch over the 20k Pile prompt pool; SDF LoRA
+`ep5_lr5e-5_r128a128` teachers) is re-run on the six audited base-pair categories
+SI_SS, SI_DS, DI_SS, DI_DS, SI_DC, DI_DC over the Hub 160M repos plus Goncalo's
+locally trained NeoX runs (`pile-ws1`, `dclm-main`, `dclm-ws1`; `pile-ws3` at
+143k as an automatic wave 2). Arms: the bear 11×11 directed matrix at 143k with
+9/6/3 leaves per category, a same-rung checkpoint ladder on 39 directed cells with
+its own rung teachers, off-diagonal rung heatmaps, a student-HP sweep (LoRA only)
+and `xbase_teacher` controls on a matched sub-design, and epoch-dose ladders for
+bear, cat, eagle and dog.
+
+**Local NeoX bases through the existing loaders.** `models/neox_convert_io.py`
+renames the fifteen ZeRO-1 pipeline layer files of a NeoX revision into a
+`GPTNeoXForCausalLM` safetensors snapshot (148 tensors, strict load, fp16,
+`conversion_manifest.json` with source and weight hashes) and `HfModelSpec` gains
+`local_root`: `loading_io` then reads `local_root/<revision>/` and asserts the
+manifest's base and step against the spec. The roster (`ws160m_models`) holds one
+spec per (base, step) for Hub and local bases alike, with three names that are
+never conflated: the token `<base>@step<N>` (sweep and YAML key, `--spec-registry
+ws160m --paths-config configs/paths/paths_ws160m.yaml`), the label
+`<base>-step<N>` (run-directory segment, so every rung of a local base has its own
+tree) and the identity `EleutherAI/pythia-160m@step<N>` or `local/<base>@step<N>`
+written to every manifest. `category()` and the three strata are derived from the
+roster attributes; wave-3 entries (`pile-ws2`, `pile-main`) are enumerated and
+refused by `assert_clean` until staged.
+
+**Staging and verification** (`scripts/stage_ws160m_assets.py`, cold-1
+`base_models_160m/`): converts the required rungs, walks `refs/step*` for every Hub
+revision the plan uses, asserts one tokenizer identity hash across all entries
+(the eight Hub repos ship two byte-variant `tokenizer.json` files), replicates the
+audit's init-twin check bitwise through our loader (`pile-ws1@step0` ≡
+`seed1@step0`, …), runs a CPU forward band check on the converted 143k models,
+writes `paths_ws160m.yaml` (gitignored, in the code-pin overlay), the `hub`
+symlink and the cold run-set symlinks, and records everything in
+`staging_report.json`. `--wave 2` copies Goncalo's `pile-ws3` step 143000
+read-only and repeats the checks.
+
+**Partitions and ordering.** One driver, run set and node per partition
+(`ws160m_plan.PARTITIONS`); teachers train once (143k on `main`, rungs on `ladder`)
+and other partitions read them through `teacher_subdir`, waiting on the shared PVC
+with a 2 h fallback that submits the missing teachers itself and a 4 h hard
+timeout. Eval queues for an arm are submitted only after all of its treatment and
+boost queues are terminal; `ws160m_expected.missing_evals` compares each summary's
+`per_seed_p_target` keys with the expected gseeds and short directories are
+re-evaluated with `--force` on the eval command only. Every partition finalizes at
+T+24 h with a `coverage.json`.
+
+**Results** (`pipelines/ws160m_results_pipeline.py`, tables under the `main` run
+set's `results/`): leaves carry `source_run_set`, category, strata, teacher and
+student base+step, `p_target`, the subliminal `delta` against the matched
+`base_teacher` control (joined with `animal`; a missing control raises),
+`delta_rel`, teacher tier and quarantine flags. Aggregates carry both a pair-cluster
+bootstrap and a t-interval with `n_pairs`, `ci_kind` (t below five pairs) and
+`stat_set ∈ {primary, full}` for the quarantine mode. No category, pair or teacher
+is ever dropped; claims W0–W8 land in `claims.json` with a `concordance_ckptgrid2.csv`
+read-only union.
+
 ### Pile coherence eval (`coherence/`, `pipelines/pile_coherence_pipeline.py`)
 
 Teacher-forced CE on an **immutable, hashed, versioned** ~4M-token shard of

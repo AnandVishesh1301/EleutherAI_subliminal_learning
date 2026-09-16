@@ -21,6 +21,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 # Post-training stage of a roster entry. "base" = pretrained only; "deduped" = a
 # separate pretraining run on deduplicated data; the rest name the released
@@ -96,6 +97,10 @@ class HfModelSpec:
         lineage: Label of the roster entry this model was post-trained from, or ``None``
             for a from-scratch pretraining run. Drives LR inheritance and the F3 contrast.
         tie_word_embeddings: Expected `config.tie_word_embeddings`, asserted at staging.
+        local_root: Directory of locally converted HF snapshots, one ``<revision>/``
+            subdirectory per checkpoint (`models.neox_convert_io`). When set, loaders read
+            ``local_root / revision`` instead of the Hub and `repo_id` is the identity
+            token ``"local/<base>"`` recorded in manifests.
     """
 
     label: str
@@ -111,6 +116,7 @@ class HfModelSpec:
     post_training: str = "base"
     lineage: str | None = None
     tie_word_embeddings: bool = False
+    local_root: Path | None = None
 
     def __post_init__(self) -> None:
         if "/" in self.label or "@" in self.label or not self.label:
@@ -129,6 +135,8 @@ class HfModelSpec:
                 f"{self.label}: lora_target_modules is empty; PEFT 0.16 has no default "
                 "mapping for mamba/olmo, so every roster entry names its own"
             )
+        if self.local_root is not None and self.revision is None:
+            raise ValueError(f"{self.label}: a local spec needs a revision")
 
     # --- duck-type shims -------------------------------------------------
     # Read by the few call sites that compare spec attributes across a pair

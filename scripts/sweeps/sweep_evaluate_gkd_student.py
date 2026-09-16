@@ -152,7 +152,7 @@ def _cell_done(
 
 
 
-def _spec_registry(name: str | None):
+def _spec_registry(name: str | None, paths_config: Path | None = None):
     """Roster to resolve base-model tokens against, or ``None`` for PolyPythias only.
 
     Raises:
@@ -164,7 +164,13 @@ def _spec_registry(name: str | None):
         from subliminal_learning.campaign.xfam_models import ROSTER
 
         return ROSTER
-    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam'")
+    if name == "ws160m":
+        from subliminal_learning.campaign.ws160m_models import registry_for_paths
+
+        return registry_for_paths(paths_config)
+    raise ValueError(
+        f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'"
+    )
 
 
 def main(
@@ -232,7 +238,7 @@ def main(
     """Verify every trained GKD-student config selected by the sweep YAML."""
     load_dotenv()
     configure_loguru()
-    registry = _spec_registry(spec_registry)
+    registry = _spec_registry(spec_registry, paths_config)
     if no_control and controls_only:
         raise typer.BadParameter("--no-control and --controls-only select nothing")
     if xbase_controls_only and (no_control or controls_only):
