@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from subliminal_learning.campaign import ws160m_config_gen as cgen
 from subliminal_learning.campaign import ws160m_expected as exp
 from subliminal_learning.campaign import ws160m_pairs as pairs
 from subliminal_learning.campaign import ws160m_plan as plan
@@ -23,9 +24,10 @@ def _plant_done(run_dir: Path, *, lora: bool = True) -> None:
 
 def test_missing_cells_shrink_as_leaves_land(tmp_path: Path) -> None:
     before = exp.missing_cells("dosehp", tmp_path)
-    n_leaves = len(pairs.leaves_of(pairs.cells_of("dosehp")))
+    n_leaves = len(cgen.active_leaves(pairs.cells_of("dosehp")))
     n_controls = len(pairs.controls_of("dosehp"))
     assert len(before) == n_leaves + n_controls
+    assert n_leaves < len(pairs.leaves_of(pairs.cells_of("dosehp")))
     _plant_done(before[0])
     (before[1] / "checkpoints").mkdir(parents=True)
     (before[1] / "train_manifest.json").write_text("{}")
@@ -91,7 +93,7 @@ def test_missing_evals_requires_summaries_and_seed_coverage(tmp_path: Path) -> N
 def test_config_dirs_partition_leaves_exactly(tmp_path: Path) -> None:
     by_dir = exp.expected_config_gseeds("main", tmp_path, wave=2)
     total = sum(len(g) for g in by_dir.values())
-    n_leaves = len(pairs.leaves_of(pairs.cells_of("main", wave=2)))
+    n_leaves = len(cgen.active_leaves(pairs.cells_of("main", wave=2)))
     n_controls = len(pairs.controls_of("main", wave=2))
     assert total == n_leaves + n_controls
     assert all(d.name.startswith("lmb") for d in by_dir)

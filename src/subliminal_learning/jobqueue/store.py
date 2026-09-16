@@ -24,6 +24,7 @@ meaningless here, so we never touch another node's claims except via ``force_rel
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 import shutil
 import socket
 import time
@@ -52,7 +53,11 @@ def now_iso() -> str:
 
 
 def pid_alive(pid: int) -> bool:
-    """Whether ``pid`` is a live process on THIS node (``os.kill(pid, 0)`` probe)."""
+    """Whether ``pid`` is a live, non-zombie process on THIS node.
+
+    ``os.kill(pid, 0)`` succeeds on a zombie; an orphaned cell that PID 1 never reaps
+    would otherwise hold its claim forever.
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -61,7 +66,16 @@ def pid_alive(pid: int) -> bool:
         return True  # exists but owned by another user
     except OSError:
         return False
-    return True
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    fields = stat.rsplit(")", 1)
+    return len(fields) == 2 and fields[1].split()[:1] == ["Z"]
 
 
 # --------------------------- path helpers ---------------------------
@@ -547,17 +561,25 @@ def load_results(root: Path, name: str) -> list[dict]:
     return out
 
 
-def requeue(root: Path, name: str, *, failed_only: bool = True) -> list[str]:
+def requeue(
+    root: Path,
+    name: str,
+    *,
+    failed_only: bool = True,
+    jobkeys: Iterable[str] | None = None,
+) -> list[str]:
     """Make terminal jobs pending again by deleting their results (+ stray claims).
 
-    ``failed_only`` (default) touches only rc!=0 results. Bumps each affected job's attempt
-    counter so its next run records ``attempt = prev + 1``. Returns the requeued jobkeys.
+    ``failed_only`` (default) touches only rc!=0 results; ``jobkeys`` restricts the
+    sweep to those jobs. Bumps each affected job's attempt counter so its next run
+    records ``attempt = prev + 1``. Returns the requeued jobkeys.
     """
     import json
 
     rdir = _results_dir(root, name)
     if not rdir.exists():
         return []
+    only = None if jobkeys is None else set(jobkeys)
     requeued: list[str] = []
     for rp in rdir.glob("*.json"):
         try:
@@ -567,6 +589,8 @@ def requeue(root: Path, name: str, *, failed_only: bool = True) -> list[str]:
         if failed_only and res.get("rc", 0) == 0:
             continue
         jk = rp.stem
+        if only is not None and jk not in only:
+            continue
         _write_attempt(root, name, jk, int(res.get("attempt", 0)) + 1)
         rp.unlink(missing_ok=True)
         remove_claim(root, name, jk)

@@ -9,7 +9,7 @@ ladder of one (animal, base@step).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from subliminal_learning.campaign import ws160m_models as models
 from subliminal_learning.campaign import ws160m_pairs as pairs
@@ -143,6 +143,16 @@ def student_stage(leaf: pairs.Leaf) -> str:
     return _EXTRA_STAGES[cell.arm]
 
 
+def deferred(leaf: pairs.Leaf) -> bool:
+    """Whether a leaf's stage is deferred out of this window (`plan.DEFERRED_STAGES`)."""
+    return student_stage(leaf) in plan.DEFERRED_STAGES.get(leaf.cell.partition.name, ())
+
+
+def active_leaves(cells: Sequence[pairs.Cell]) -> list[pairs.Leaf]:
+    """Leaves of `cells` that this window trains."""
+    return [lf for lf in pairs.leaves_of(cells) if not deferred(lf)]
+
+
 def student_queue(leaf: pairs.Leaf) -> str:
     """Queue a student leaf runs in."""
     return plan.queue(leaf.cell.partition, student_stage(leaf))
@@ -189,12 +199,14 @@ def eval_queue(partition: str, train_queue: str) -> str:
 def eval_dependencies(partition: str, eval_q: str) -> tuple[str, ...]:
     """Train queues an eval queue waits for."""
     p = plan.partition(partition)
+    deferred_stages = plan.DEFERRED_STAGES.get(p.name, ())
     return tuple(
         q
         for q in plan.queue_priorities(p)
         if not q.removeprefix(f"{p.queue_prefix}-").startswith(
             ("evals", "teacher-evals", "w2-teacher-evals", "w2-evals")
         )
+        and q.removeprefix(f"{p.queue_prefix}-") not in deferred_stages
         and eval_queue(partition, q) == eval_q
     )
 
@@ -220,6 +232,8 @@ def student_groups(
     """Train-YAML name -> cells it holds (one teacher token, one recipe, one budget)."""
     groups: dict[str, list[pairs.Cell]] = {}
     for cell in pairs.cells_of(partition, wave=wave):
+        if not active_leaves([cell]):
+            continue
         groups.setdefault(student_yaml_name(cell), []).append(cell)
     out: dict[str, tuple[pairs.Cell, ...]] = {}
     for name, cells in groups.items():

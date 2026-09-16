@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from subliminal_learning.campaign import expected
+from subliminal_learning.campaign import ws160m_config_gen as cgen
 from subliminal_learning.campaign import ws160m_models as models
 from subliminal_learning.campaign import ws160m_pairs as pairs
 from subliminal_learning.campaign import ws160m_plan as plan
@@ -124,7 +125,7 @@ def expected_leaf_dirs(
 ) -> list[Path]:
     return [
         leaf_run_dir(lf, output_root)
-        for lf in pairs.leaves_of(pairs.cells_of(partition, wave=wave))
+        for lf in cgen.active_leaves(pairs.cells_of(partition, wave=wave))
     ]
 
 
@@ -147,7 +148,7 @@ def expected_config_gseeds(
 ) -> dict[Path, frozenset[int]]:
     """Config dir (parent of the gseed leaves) -> gseeds expected under it."""
     out: dict[Path, set[int]] = {}
-    for lf in pairs.leaves_of(pairs.cells_of(partition, wave=wave)):
+    for lf in cgen.active_leaves(pairs.cells_of(partition, wave=wave)):
         out.setdefault(leaf_run_dir(lf, output_root).parent, set()).add(lf.gseed)
     for c in pairs.controls_of(partition, wave=wave):
         out.setdefault(control_run_dir(c, output_root).parent, set()).add(c.gseed)

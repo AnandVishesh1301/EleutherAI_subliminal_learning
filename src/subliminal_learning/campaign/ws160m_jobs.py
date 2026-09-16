@@ -163,7 +163,7 @@ def student_jobs(partition: str, *, wave: int) -> dict[str, list[Job]]:
     p = plan.partition(partition)
     out: dict[str, list[Job]] = {}
     for fname, cells in cgen.student_groups(partition, wave=wave).items():
-        for leaf in pairs.leaves_of(cells):
+        for leaf in cgen.active_leaves(cells):
             c = leaf.cell
             logs = plan.student_logs_wandb(
                 p,
@@ -346,10 +346,28 @@ def all_jobs(
     return ordered
 
 
+def wandb_jobs_active(partition: str, *, wave: int) -> int:
+    """W&B-logged training jobs of this window: log-few picks in active stages."""
+    p = plan.partition(partition)
+    students = sum(
+        plan.student_logs_wandb(
+            p,
+            arm=lf.cell.arm,
+            animal=lf.cell.animal,
+            student=lf.cell.student_token,
+            teacher=lf.cell.teacher_token,
+            gkd_tag_str=lf.cell.gkd_tag,
+            teacher_param_tag_str=lf.cell.teacher_param_tag,
+            replicate=lf.replicate,
+        )
+        for lf in cgen.active_leaves(pairs.cells_of(partition, wave=wave))
+    )
+    return students + (1 if p.name in plan.WANDB_TEACHERS else 0)
+
+
 def _assert_all_jobs(
     partition: str, by_q: Mapping[str, Sequence[Job]], *, wave: int
 ) -> None:
-    p = plan.partition(partition)
     keys = [j.jobkey for jobs in by_q.values() for j in jobs]
     if len(keys) != len(set(keys)):
         dupes = sorted({k for k in keys if keys.count(k) > 1})[:5]
@@ -357,7 +375,7 @@ def _assert_all_jobs(
     n_students = sum(
         1 for jobs in by_q.values() for j in jobs if "--no-control" in j.cmd
     )
-    n_leaves = len(pairs.leaves_of(pairs.cells_of(partition, wave=wave)))
+    n_leaves = len(cgen.active_leaves(pairs.cells_of(partition, wave=wave)))
     if n_students != n_leaves:
         raise ValueError(
             f"{partition}: {n_students} student jobs for {n_leaves} leaves"
@@ -377,7 +395,7 @@ def _assert_all_jobs(
         if driver_io.TRAIN_MODULE in j.cmd or TEACHER_MODULE in j.cmd
     ]
     logged = [j for j in train_jobs if "--no-wandb" not in j.cmd]
-    want = plan.wandb_jobs_expected(p)
+    want = wandb_jobs_active(partition, wave=wave)
     if len(logged) != want:
         raise ValueError(
             f"{partition}: expected {want} W&B jobs, got {len(logged)}: {[j.key for j in logged]}"

@@ -28,7 +28,11 @@ def test_bundle_covers_leaves_controls_teachers_and_evals(partition: str) -> Non
     assert len({j.jobkey for j in all_jobs}) == len(all_jobs)
     assert all(len(j.jobkey) <= 200 for j in all_jobs)
     students = [j for j in all_jobs if "--no-control" in j.cmd]
-    assert len(students) == len(pairs.leaves_of(pairs.cells_of(partition, wave=2)))
+    assert len(students) == len(cgen.active_leaves(pairs.cells_of(partition, wave=2)))
+    assert not any(
+        cgen.student_stage(lf) in plan.DEFERRED_STAGES[partition]
+        for lf in cgen.active_leaves(pairs.cells_of(partition, wave=2))
+    )
     teachers = [j for j in all_jobs if jobs.TEACHER_MODULE in j.cmd]
     assert len(teachers) == len(pairs.teacher_leaves(partition, wave=2))
     xbase = [
@@ -52,7 +56,7 @@ def test_bundle_covers_leaves_controls_teachers_and_evals(partition: str) -> Non
         if (jobs.TEACHER_MODULE in j.cmd or "sweep_distill" in j.cmd)
         and "--no-wandb" not in j.cmd
     ]
-    assert len(logged) == 4
+    assert len(logged) == jobs.wandb_jobs_active(partition, wave=2) <= 4
 
 
 def test_student_job_flags_and_experiment_config() -> None:

@@ -154,8 +154,9 @@ def test_queue_routing_by_replicate_rung_recipe_and_arm() -> None:
     assert cgen.eval_dependencies("main", "ws160m-main-evals") == (
         "ws160m-main-controls",
         "ws160m-main-core",
-        "ws160m-main-boost-a",
-        "ws160m-main-boost-b",
+    )
+    assert "ws160m-main-boost-a" not in cgen.eval_dependencies(
+        "main", "ws160m-main-evals"
     )
     with pytest.raises(ValueError, match="not a ws160m"):
         cgen.verify_name("other.yaml")

@@ -211,8 +211,25 @@ CONTRASTS: tuple[tuple[str, str, str], ...] = (
 # ---- autonomy ---------------------------------------------------------------------
 
 DEADLINE_HOURS_DEFAULT = 24.0
+# Wave 2 (pile-ws3@143k) is deferred with wave 3: not staged or submitted by the
+# drivers of this window.
+WAVE2_AUTO = False
+# Student stages not submitted in this window (post-abstract top-ups, same run
+# sets, same identities). Their cells are excluded from expected artefacts and
+# from eval dependencies; nothing on disk is touched.
+DEFERRED_STAGES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "main": ("boost-a", "boost-b"),
+        "ladder": ("r16000",),
+        "dosehp": ("hp-lr8e-4_r8a16",),
+        "extra": ("teacher-dose", "dose3-cat-eagle", "dose-dog"),
+    }
+)
 DRAIN_TIMEOUT_S = 2 * 3600
 MAX_FAILED_FRAC = 0.02
+# A queue tolerates this many retry-exhausted jobs as labelled holes before the
+# fraction gate applies; MAX_FAILED_FRAC alone is below one job on small queues.
+MAX_FAILED_JOBS_MIN = 2
 WAIT_TEACHERS_POLL_S = 60
 WAIT_TEACHERS_FALLBACK_S = 2 * 3600
 WAIT_TEACHERS_TIMEOUT_S = 4 * 3600
@@ -229,7 +246,7 @@ WAVE2_SOURCE_DIR = (
 GPU_POLICY: Mapping[str, object] = MappingProxyType(
     {
         "gpus": (0, 1, 2, 3, 4, 5, 6, 7),
-        "cap_per_gpu": 3,
+        "cap_per_gpu": 2,
         "free_mem_mib": 5000,
         "reservation_warmup_s": 600,
         "env": MappingProxyType(
@@ -241,7 +258,9 @@ GPU_POLICY: Mapping[str, object] = MappingProxyType(
         ),
     }
 )
-STUDENT_MEM_MIB = 15000
+# On-policy GKD student: ~10 GiB during rollouts, 16.2-16.4 GiB peak on a
+# training step; three peaks do not fit a 47.5 GiB A40, hence cap 2.
+STUDENT_MEM_MIB = 19000
 # SDF LoRA r128 teacher (max_length 2048, batch 8) peaks at 18.9 GiB on an A40.
 TEACHER_MEM_MIB = 21500
 EVAL_MEM_MIB = 6000

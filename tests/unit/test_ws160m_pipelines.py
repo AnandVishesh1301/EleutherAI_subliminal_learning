@@ -183,7 +183,7 @@ def test_dosehp_advances_controls_wait_students_finalize(
     )
     assert set(fake.deps("ws160m-dosehp-evals-hp")) == {
         f"ws160m-dosehp-hp-{plan.recipe_slug(r)}" for r in plan.HP_RECIPES
-    }
+    } - {f"ws160m-dosehp-{s}" for s in plan.DEFERRED_STAGES["dosehp"]}
     assert not r2.done
     fake.complete.update(fake.names())
     r3 = run(cfg, opts)
@@ -230,7 +230,7 @@ def test_main_teachers_gate_students_and_wave2(tmp_path: Path, monkeypatch) -> N
         return staged[0]
 
     cfg = _cfg(tmp_path, "main")
-    opts = _opts(tmp_path, "main", clock, stage_wave2=fake_stage)
+    opts = _opts(tmp_path, "main", clock, stage_wave2=fake_stage, auto_wave2=True)
     fake.missing_teachers = []
     r1 = run(cfg, opts)
     assert {"submit_teachers", "wait_teachers", "submit_students"} <= set(r1.fired)
@@ -239,8 +239,6 @@ def test_main_teachers_gate_students_and_wave2(tmp_path: Path, monkeypatch) -> N
     assert fake.deps("ws160m-main-evals") == (
         "ws160m-main-controls",
         "ws160m-main-core",
-        "ws160m-main-boost-a",
-        "ws160m-main-boost-b",
     )
     assert "ws160m-main-w2-students" not in fake.names()
     fake.complete.update(fake.names())
@@ -273,7 +271,13 @@ def test_wave2_skipped_after_giveup(tmp_path: Path, monkeypatch) -> None:
     fake = _Fake(monkeypatch, "main")
     clock = [_T0]
     cfg = _cfg(tmp_path, "main")
-    opts = _opts(tmp_path, "main", clock, stage_wave2=lambda **kw: {"ready": False})
+    opts = _opts(
+        tmp_path,
+        "main",
+        clock,
+        stage_wave2=lambda **kw: {"ready": False},
+        auto_wave2=True,
+    )
     run(cfg, opts)
     fake.complete.update(fake.names())
     clock[0] = _T0 + plan.WAVE2_GIVEUP_HOURS * 3600 + 1
@@ -414,3 +418,64 @@ def test_an_archived_queue_is_resubmitted_with_its_dependencies(
     }
     again = run(_cfg(tmp_path, "main"), _opts(tmp_path, "main", clock))
     assert not any(f.startswith("restored_queues") for f in again.fired)
+
+
+def test_retry_exhausted_failures_become_holes_until_the_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path, "main")
+    opts = _opts(tmp_path, "main", [_T0])
+    name = "ws160m-main-controls"
+    failed = ["a", "b"]
+    monkeypatch.setattr(pipe, "_failed_jobkeys", lambda cfg, n: list(failed))
+    monkeypatch.setattr(
+        pipe.store, "queue_status", lambda root, n: {"failed": len(failed), "total": 33}
+    )
+    holes: list[dict] = []
+    pipe._record_holes(cfg, name, opts, holes, RuntimeError("cap"))
+    assert holes == [{"queue": name, "failed": ["a", "b"], "at": holes[0]["at"]}]
+    failed.append("c")
+    with pytest.raises(CampaignGateError, match="3 retry-exhausted"):
+        pipe._record_holes(cfg, name, opts, holes, None)
+
+
+def test_deadline_hours_override_applies_to_the_open_window(tmp_path: Path) -> None:
+    opts = _opts(tmp_path, "main", [_T0], deadline_hours=24.0)
+    state: dict = {}
+    pipe._open_window(state, opts)
+    later = _opts(tmp_path, "main", [_T0 + 3600], deadline_hours=17.5)
+    window = pipe._open_window(state, later)
+    assert window["hours"] == 17.5 and window["hours_history"][0]["from"] == 24.0
+    assert len(state["deadline_windows"]) == 1
+    assert pipe._deadline_passed(
+        state, _opts(tmp_path, "main", [_T0 + 17.5 * 3600 + 1], deadline_hours=17.5)
+    )
+
+
+def test_train_queues_skip_only_exact_teacher_stages() -> None:
+    extra = plan.partition("extra")
+    names = pipe._train_queues(extra, wave2=False)
+    assert "ws160m-extra-teacher-dose" in names
+    assert "ws160m-extra-teachers-fallback" not in names
+    assert not any("evals" in n for n in names)
+
+
+def test_missing_planned_student_queues_are_submitted_on_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Fake(monkeypatch, "extra")
+    clock = [_T0]
+    cfg = _cfg(tmp_path, "extra")
+    opts = _opts(tmp_path, "extra", clock)
+    fake.missing_teachers = []
+    run(cfg, opts)
+    evals = "ws160m-extra-evals-heatmap"
+    assert evals in fake.names()
+    fake.submitted = [(n, d) for n, d in fake.submitted if n != evals]
+    state = json.loads(cfg.state_path.read_text())
+    state["transitions"]["submit_students"]["queues"].pop(evals)
+    cfg.state_path.write_text(json.dumps(state))
+    r = run(cfg, opts)
+    assert f"restored_queues({evals})" in r.fired and evals in fake.names()
+    state = json.loads(cfg.state_path.read_text())
+    assert evals in state["transitions"]["submit_students"]["queues"]

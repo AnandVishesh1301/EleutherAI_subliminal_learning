@@ -45,7 +45,12 @@ def sample_completions(
     """
     if seed is not None:
         torch.manual_seed(seed)
-    enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+    enc = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+        return_token_type_ids=False,
+    ).to(device)
     prompt_len = enc["input_ids"].shape[1]
     if prompt_len == 0:
         raise ValueError("Empty prompt tokenizes to zero tokens.")

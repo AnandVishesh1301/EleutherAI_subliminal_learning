@@ -116,6 +116,7 @@ def watch(
     auto_reconcile_sha: bool = False,
     auto_requeue: int = 0,
     interval: int = 300,
+    auto_wave2: bool = plan.WAVE2_AUTO,
     max_consecutive_errors: int = 5,
 ) -> None:
     """Advance every `interval` seconds until the partition finalizes."""
@@ -129,7 +130,9 @@ def watch(
         auto_requeue=auto_requeue,
         code_sha=code_sha,
     )
-    opts = _opts(partition, paths_config, deadline_hours=deadline_hours)
+    opts = _opts(
+        partition, paths_config, deadline_hours=deadline_hours, auto_wave2=auto_wave2
+    )
     errors = 0
     while True:
         try:

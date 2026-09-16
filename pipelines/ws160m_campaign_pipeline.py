@@ -11,6 +11,7 @@ file; resume skips done cells through `cell_is_done`.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -86,7 +87,7 @@ class Ws160mDriverOptions:
     wave2_source_dir: Path = Path(plan.WAVE2_SOURCE_DIR)
     wave2_start_hours: float = plan.WAVE2_START_HOURS
     wave2_giveup_hours: float = plan.WAVE2_GIVEUP_HOURS
-    auto_wave2: bool = True
+    auto_wave2: bool = plan.WAVE2_AUTO
     require_smoke: bool = True
     base_models_root: Path | None = None
     now: Callable[[], float] | None = None
@@ -201,36 +202,36 @@ def _queue_ready(
     try:
         driver_io.requeue_failed_under_cap(cfg, name)
     except RuntimeError as err:
-        st = store.queue_status(cfg.queue_root, name)
-        frac = st["failed"] / max(1, st["total"])
-        if frac > opts.max_failed_frac:
-            raise CampaignGateError(
-                f"{name}: failed fraction {frac:.3f} > cap"
-            ) from err
-        if not any(h["queue"] == name for h in holes):
-            holes.append(
-                {
-                    "queue": name,
-                    "failed": _failed_jobkeys(cfg, name),
-                    "at": utc_now_iso(),
-                }
-            )
+        _record_holes(cfg, name, opts, holes, err)
     if not store.queue_complete(cfg.queue_root, name):
         return False
-    st = store.queue_status(cfg.queue_root, name)
-    if st["failed"]:
-        frac = st["failed"] / max(1, st["total"])
-        if frac > opts.max_failed_frac:
-            raise CampaignGateError(f"{name}: failed fraction {frac:.3f} > cap")
-        if not any(h["queue"] == name for h in holes):
-            holes.append(
-                {
-                    "queue": name,
-                    "failed": _failed_jobkeys(cfg, name),
-                    "at": utc_now_iso(),
-                }
-            )
+    if store.queue_status(cfg.queue_root, name)["failed"]:
+        _record_holes(cfg, name, opts, holes, None)
     return True
+
+
+def _record_holes(
+    cfg: driver_io.CampaignDriverConfig,
+    name: str,
+    opts: Ws160mDriverOptions,
+    holes: list[dict],
+    err: Exception | None,
+) -> None:
+    """Label retry-exhausted failures as holes; gate only past the plan's tolerance."""
+    failed = _failed_jobkeys(cfg, name)
+    total = store.queue_status(cfg.queue_root, name)["total"]
+    tolerated = max(plan.MAX_FAILED_JOBS_MIN, math.ceil(opts.max_failed_frac * total))
+    if len(failed) > tolerated:
+        frac = len(failed) / max(1, total)
+        raise CampaignGateError(
+            f"{name}: {len(failed)} retry-exhausted failures "
+            f"(fraction {frac:.3f}) > tolerated {tolerated}"
+        ) from err
+    for h in holes:
+        if h["queue"] == name:
+            h["failed"] = failed
+            return
+    holes.append({"queue": name, "failed": failed, "at": utc_now_iso()})
 
 
 def _submitted_queues(cfg: driver_io.CampaignDriverConfig) -> list[str]:
@@ -282,7 +283,13 @@ def _all_ready(
 def _open_window(state: dict, opts: Ws160mDriverOptions) -> dict:
     windows = state.setdefault("deadline_windows", [])
     if windows and windows[-1].get("ended_at") is None:
-        return windows[-1]
+        window = windows[-1]
+        if float(window["hours"]) != float(opts.deadline_hours):
+            window.setdefault("hours_history", []).append(
+                {"at": _iso(_now(opts)), "from": window["hours"]}
+            )
+            window["hours"] = float(opts.deadline_hours)
+        return window
     window = {
         "start": _iso(_now(opts)),
         "hours": float(opts.deadline_hours),
@@ -563,10 +570,14 @@ def _restore_archived_queues(
         record = state["transitions"].get(phase)
         if not record:
             continue
+        planned = set(record.get("queues") or {})
+        if phase == "submit_students":
+            wave2 = "submit_wave2" in state["transitions"]
+            planned |= set(_planned_student_queues(cfg, opts, state, wave2=False))
+            if wave2:
+                planned |= set(_planned_student_queues(cfg, opts, state, wave2=True))
         missing = sorted(
-            q
-            for q in (record.get("queues") or {})
-            if not store.queue_exists(cfg.queue_root, q)
+            q for q in planned if not store.queue_exists(cfg.queue_root, q)
         )
         if not missing:
             continue
@@ -574,7 +585,8 @@ def _restore_archived_queues(
             names.extend(missing)
             continue
         submit(cfg, state, opts)
-        state["transitions"][phase] = record
+        submitted_now = dict(state["transitions"][phase].get("queues") or {})
+        state["transitions"][phase] = {**record, "queues": submitted_now}
         state.setdefault("restores", []).append(
             {"at": utc_now_iso(), "phase": phase, "queues": missing}
         )
@@ -583,6 +595,22 @@ def _restore_archived_queues(
         return None
     verb = "would restore" if cfg.dry_run else "restored"
     return f"{verb}_queues({','.join(names)})"
+
+
+def _planned_student_queues(
+    cfg: driver_io.CampaignDriverConfig,
+    opts: Ws160mDriverOptions,
+    state: dict,
+    *,
+    wave2: bool,
+) -> list[str]:
+    p = _partition(cfg, opts)
+    _, _, by_q = _bundle(cfg, opts, wave=_state_wave(state))
+    return [
+        q
+        for q in _train_queues(p, wave2=wave2) + _eval_queues(p, wave2=wave2)
+        if q in by_q
+    ]
 
 
 def _fallback_teacher_jobs(
@@ -672,21 +700,25 @@ def _wait_teachers(
     return False
 
 
+_TEACHER_STAGES = frozenset(
+    {
+        "teachers",
+        "teacher-evals",
+        "teachers-fallback",
+        "teacher-evals-fallback",
+        "w2-teachers",
+        "w2-teacher-evals",
+    }
+)
+
+
 def _train_queues(p: plan.Partition, *, wave2: bool) -> list[str]:
     out: list[str] = []
     for q in plan.queue_priorities(p):
         stage = q.removeprefix(f"{p.queue_prefix}-")
-        if stage.startswith(
-            (
-                "evals",
-                "teacher",
-                "w2-teacher",
-                "controls",
-                "xbase",
-                "w2-controls",
-                "w2-evals",
-            )
-        ):
+        if stage.startswith(("evals", "controls", "xbase", "w2-controls", "w2-evals")):
+            continue
+        if stage in _TEACHER_STAGES:
             continue
         if stage.startswith("w2-") != wave2:
             continue

@@ -82,7 +82,11 @@ def generate_completions(
             chunk = list(prompts[start:end])
             torch.manual_seed(seed_base + batch_idx)
             enc = tokenizer(
-                chunk, return_tensors="pt", padding=True, add_special_tokens=False
+                chunk,
+                return_tensors="pt",
+                padding=True,
+                add_special_tokens=False,
+                return_token_type_ids=False,
             ).to(device)
             extra = (
                 {"logits_processor": processor_factory(start, end)}

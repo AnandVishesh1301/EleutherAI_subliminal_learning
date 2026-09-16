@@ -482,16 +482,6 @@ def requeue_failed_under_cap(cfg: CampaignDriverConfig, name: str) -> int:
             under.append((job.jobkey, attempt))
         else:
             over.append((job.jobkey, attempt))
-    if over:
-        jk, att = over[0]
-        raise RuntimeError(
-            f"{name}: job {jk} failed after attempt={att} "
-            f"(--auto-requeue {cfg.auto_requeue}); fix the cell or raise the cap, "
-            f"then `uv run python -m scripts.jobq requeue --root {cfg.queue_root} "
-            f"--name {name}`"
-        )
-    if not under:
-        return 0
     for jk, att in under:
         logger.warning(
             "auto-requeue queue={} jobkey={} attempt={} (cap={})",
@@ -500,7 +490,20 @@ def requeue_failed_under_cap(cfg: CampaignDriverConfig, name: str) -> int:
             att,
             cfg.auto_requeue,
         )
-    return len(store.requeue(cfg.queue_root, name, failed_only=True))
+    n = len(
+        store.requeue(
+            cfg.queue_root, name, failed_only=True, jobkeys=[jk for jk, _ in under]
+        )
+    )
+    if over:
+        jk, att = over[0]
+        raise RuntimeError(
+            f"{name}: job {jk} failed after attempt={att} "
+            f"(--auto-requeue {cfg.auto_requeue}); fix the cell or raise the cap, "
+            f"then `uv run python -m scripts.jobq requeue --root {cfg.queue_root} "
+            f"--name {name}`"
+        )
+    return n
 
 
 def queue_finished(cfg: CampaignDriverConfig, name: str) -> tuple[bool, str]:

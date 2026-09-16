@@ -153,3 +153,12 @@ appear.
 ## 9. Change log
 
 - 2026-09-16: frozen with the plan's review patches A1–A7, B8–B14, C15–C18, D1–D5.
+- 2026-09-16 ≈15:30 UTC (execution): packing changed to 2 cells per card with students
+  reserved at 19 000 MiB and teachers at 21 500 MiB after measured peaks (students
+  16.2–16.4 GiB, teachers 18.9 GiB) produced OOMs at 3 per card. To fit the abstract
+  window, `ws160m_plan.DEFERRED_STAGES` withholds the main boost leaves (M-boost-a/b),
+  the ladder 16000 rung, the `lr8e-4` HP recipe, the teacher-dose arm, cat/eagle dose 3
+  and the dog doses, and wave 2 (`WAVE2_AUTO = False`). Deferred cells keep their
+  identities and run later into the same run sets; W7's ladder uses rungs
+  {2000, 8000, 48000, 143000} until then. Retry-exhausted failures are recorded as
+  holes; a queue gates only past `max(MAX_FAILED_JOBS_MIN, 2 % of jobs)` such failures.

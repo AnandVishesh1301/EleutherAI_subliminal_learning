@@ -144,16 +144,23 @@ def test_wandb_log_few_is_four_per_partition() -> None:
 
 def test_gpu_policy_is_max_packing_and_serialisable() -> None:
     policy = plan.gpu_policy_json()
-    assert policy["cap_per_gpu"] == 3 and policy["free_mem_mib"] == 5000
+    assert policy["cap_per_gpu"] == 2 and policy["free_mem_mib"] == 5000
     assert policy["gpus"] == list(range(8))
     assert policy["env"]["OMP_NUM_THREADS"] == "1"
     assert policy["env"]["HF_HUB_OFFLINE"] == "1"
     json.dumps(policy)
-    assert plan.workers() == 48
-    assert plan.STUDENT_MEM_MIB == 15000
+    assert plan.workers() == 32
+    assert plan.STUDENT_MEM_MIB >= 16_400 + 2_000
+    assert policy["cap_per_gpu"] * plan.STUDENT_MEM_MIB < 46000
+    assert plan.WAVE2_AUTO is False
+    for name, stages in plan.DEFERRED_STAGES.items():
+        prefix = plan.partition(name).queue_prefix
+        assert all(
+            f"{prefix}-{s}" in plan.queue_priorities(plan.partition(name))
+            for s in stages
+        )
     assert plan.TEACHER_MEM_MIB >= 19_350 + 2_000
     assert 2 * plan.TEACHER_MEM_MIB < 46000 < 3 * plan.TEACHER_MEM_MIB
-    assert 3 * plan.STUDENT_MEM_MIB < 46000
     with pytest.raises(TypeError):
         plan.GPU_POLICY["cap_per_gpu"] = 2  # type: ignore[index]
 

@@ -17,6 +17,7 @@ set -euo pipefail
 
 PARTITION="${1:-}"
 SHA="${2:-}"
+DEADLINE_HOURS="${WS160M_DEADLINE_HOURS:-24}"
 if [[ -z "$PARTITION" || -z "$SHA" ]]; then
   echo "usage: bash scripts/launch_ws160m_campaign.sh <main|ladder|dosehp|extra> <sha>"
   exit 2
@@ -127,13 +128,13 @@ tmux send-keys -t "$SESSION:workers" \
 
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 tmux send-keys -t "$SESSION:driver" \
-  "backoff=60; while true; do uv run python -m scripts.run_ws160m_campaign watch --partition $PARTITION --paths-config $PATHS --queue-root $ROOT --interval 300 --auto-requeue 2 --code-sha $PIN_SHA; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
+  "backoff=60; while true; do uv run python -m scripts.run_ws160m_campaign watch --partition $PARTITION --paths-config $PATHS --queue-root $ROOT --interval 300 --auto-requeue 2 --deadline-hours $DEADLINE_HOURS --code-sha $PIN_SHA; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
 
 cat <<MSG
 
 Started tmux session '$SESSION' on $HOST for partition $PARTITION:
   workers -> jobq pool ($WORKERS threads, lock prefix $LOCK_PREFIX), root=$ROOT
-  driver  -> restarting watch loop (5-min polls, --auto-requeue 2, pin $PIN_SHA)
+  driver  -> restarting watch loop (5-min polls, --auto-requeue 2, deadline ${DEADLINE_HOURS}h, pin $PIN_SHA)
 
 One glance after launch is enough (3 cells per GPU); repack only on OOM.
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
