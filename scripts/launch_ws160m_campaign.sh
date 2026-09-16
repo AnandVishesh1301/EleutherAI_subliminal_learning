@@ -33,7 +33,10 @@ if [[ "$FULL_SHA" != "$PIN_SHA" || "$(basename "$(dirname "$REPO")")" != ".code_
 fi
 
 PLAN="from subliminal_learning.campaign import ws160m_plan as p;part=p.partition('$PARTITION')"
-read -r NODE LOCK SESSION WORKERS PATHS < <(uv run python -c "$PLAN;print(part.node, part.lock_prefix or '', p.TMUX_SESSION, p.workers(), p.PATHS_CONFIG)")
+read -r NODE LOCK SESSION WORKERS PATHS < <(uv run python -c "$PLAN;print(part.node, part.lock_prefix or '-', p.TMUX_SESSION, p.workers(), p.PATHS_CONFIG)")
+if [[ "$LOCK" == "-" ]]; then
+  LOCK=""
+fi
 if [[ "$HOST" != "$NODE" ]]; then
   echo "ERROR: partition $PARTITION launches only on $NODE; this host is $HOST."
   exit 1
