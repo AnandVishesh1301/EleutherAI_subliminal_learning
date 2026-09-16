@@ -546,6 +546,45 @@ def _submit_teachers(
     _record_transition(state, "submit_teachers", queues=submitted)
 
 
+def _restore_archived_queues(
+    cfg: driver_io.CampaignDriverConfig, state: dict, opts: Ws160mDriverOptions
+) -> str | None:
+    """Re-run a fired submit phase whose recorded queue was archived (e.g. to repack).
+
+    Existing queues of the phase are no-ops (`driver_io.submit_queue` matches jobkeys);
+    the founding transition record is kept and each restore is appended to ``restores``.
+    """
+    names: list[str] = []
+    for phase, submit in (
+        ("submit_controls", _submit_controls),
+        ("submit_teachers", _submit_teachers),
+        ("submit_students", _submit_students),
+    ):
+        record = state["transitions"].get(phase)
+        if not record:
+            continue
+        missing = sorted(
+            q
+            for q in (record.get("queues") or {})
+            if not store.queue_exists(cfg.queue_root, q)
+        )
+        if not missing:
+            continue
+        if cfg.dry_run:
+            names.extend(missing)
+            continue
+        submit(cfg, state, opts)
+        state["transitions"][phase] = record
+        state.setdefault("restores", []).append(
+            {"at": utc_now_iso(), "phase": phase, "queues": missing}
+        )
+        names.extend(missing)
+    if not names:
+        return None
+    verb = "would restore" if cfg.dry_run else "restored"
+    return f"{verb}_queues({','.join(names)})"
+
+
 def _fallback_teacher_jobs(
     cfg: driver_io.CampaignDriverConfig, opts: Ws160mDriverOptions, *, wave: int
 ) -> list[Job]:
@@ -974,6 +1013,10 @@ def run(
     if repin_note:
         driver_io.save_state(cfg, state)
         fired.append(repin_note)
+    restored = _restore_archived_queues(cfg, state, opts)
+    if restored:
+        driver_io.save_state(cfg, state)
+        fired.append(restored)
     tr = state["transitions"]
 
     if "preflight" not in tr:

@@ -242,7 +242,8 @@ GPU_POLICY: Mapping[str, object] = MappingProxyType(
     }
 )
 STUDENT_MEM_MIB = 15000
-TEACHER_MEM_MIB = 6000
+# SDF LoRA r128 teacher (max_length 2048, batch 8) peaks at 18.9 GiB on an A40.
+TEACHER_MEM_MIB = 21500
 EVAL_MEM_MIB = 6000
 WORKERS_PER_SLOT = 2
 

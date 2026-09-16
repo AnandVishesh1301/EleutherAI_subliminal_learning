@@ -151,7 +151,9 @@ def test_gpu_policy_is_max_packing_and_serialisable() -> None:
     json.dumps(policy)
     assert plan.workers() == 48
     assert plan.STUDENT_MEM_MIB == 15000
-    assert 2 * plan.STUDENT_MEM_MIB + plan.TEACHER_MEM_MIB < 46000
+    assert plan.TEACHER_MEM_MIB >= 19_350 + 2_000
+    assert 2 * plan.TEACHER_MEM_MIB < 46000 < 3 * plan.TEACHER_MEM_MIB
+    assert 3 * plan.STUDENT_MEM_MIB < 46000
     with pytest.raises(TypeError):
         plan.GPU_POLICY["cap_per_gpu"] = 2  # type: ignore[index]
 

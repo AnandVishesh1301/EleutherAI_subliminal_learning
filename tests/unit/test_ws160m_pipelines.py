@@ -385,3 +385,32 @@ def test_explicit_code_sha_repins_every_submitted_queue(
     updated.clear()
     again = run(_cfg(tmp_path, "main", code_sha=new), _opts(tmp_path, "main", clock))
     assert not any(f.startswith("repin_queues") for f in again.fired) and not updated
+
+
+def test_an_archived_queue_is_resubmitted_with_its_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Fake(monkeypatch, "main")
+    clock = [_T0]
+    run(_cfg(tmp_path, "main"), _opts(tmp_path, "main", clock))
+    p = plan.partition("main")
+    teachers = plan.queue(p, "teachers")
+    evals = plan.queue(p, "teacher-evals")
+    before = dict(fake.submitted)
+    assert teachers in before and before[evals] == (teachers,)
+    fake.submitted = [(n, d) for n, d in fake.submitted if n != teachers]
+    result = run(_cfg(tmp_path, "main"), _opts(tmp_path, "main", clock))
+    assert f"restored_queues({teachers})" in result.fired
+    assert dict(fake.submitted)[teachers] == ()
+    state = json.loads(
+        (tmp_path / "out" / "gkd_students" / plan.MAIN_RUN_SET_ID / "logs")
+        .joinpath("campaign_state.json")
+        .read_text()
+    )
+    assert state["restores"][-1] == {
+        "at": state["restores"][-1]["at"],
+        "phase": "submit_teachers",
+        "queues": [teachers],
+    }
+    again = run(_cfg(tmp_path, "main"), _opts(tmp_path, "main", clock))
+    assert not any(f.startswith("restored_queues") for f in again.fired)
