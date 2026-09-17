@@ -12,6 +12,7 @@ file; resume skips done cells through `cell_is_done`.
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -159,9 +160,40 @@ def _bundle(
     train = cgen.all_train_configs(opts.partition, wave=wave)
     verify = cgen.all_verify_configs(opts.partition, train)
     by_q = jobs.all_jobs(
-        opts.partition, train, verify, wave=wave, force_students=force_students
+        opts.partition,
+        train,
+        verify,
+        wave=wave,
+        force_students=force_students,
+        shared_config_root=_shared_config_dir(cfg, opts.partition),
     )
     return train, verify, by_q
+
+
+def _shared_config_dir(
+    cfg: driver_io.CampaignDriverConfig, partition: str
+) -> Path | None:
+    """Run-set dir overflow queues read their YAMLs from; None without overrides."""
+    if not plan.STAGE_NODE_OVERRIDES.get(partition):
+        return None
+    return cfg.run_set_root / plan.SHARED_GENERATED_DIRNAME
+
+
+_SWEEP_CONFIG_RE = re.compile(r"--sweep-config (\S+)")
+
+
+def _require_overflow_configs(
+    cfg: driver_io.CampaignDriverConfig, name: str, node: str, queue_jobs: Sequence[Job]
+) -> None:
+    """Refuse an overflow queue whose YAMLs `node` could not read."""
+    for job in queue_jobs:
+        for path in _SWEEP_CONFIG_RE.findall(job.cmd):
+            p = Path(path)
+            if not p.is_absolute() or not (cfg.dry_run or p.is_file()):
+                raise CampaignGateError(
+                    f"{name} runs on {node} but job {job.key} reads {path}: "
+                    "overflow jobs need an absolute YAML on the shared run-set dir"
+                )
 
 
 def _submit_named(
@@ -176,7 +208,10 @@ def _submit_named(
         raise CampaignGateError(f"queue {name} built zero jobs")
     deps = [d for d in depends_on if d in by_q or store.queue_exists(cfg.queue_root, d)]
     node = plan.queue_node(name)
-    defaults = _overflow_defaults(cfg, node) if node else None
+    defaults = None
+    if node:
+        _require_overflow_configs(cfg, name, node, queue_jobs)
+        defaults = _overflow_defaults(cfg, node)
     driver_io.submit_queue(
         cfg, name, queue_jobs, depends_on=deps or None, node=node, defaults=defaults
     )
@@ -220,6 +255,8 @@ def _queue_ready(
         return False
     if store.queue_status(cfg.queue_root, name)["failed"]:
         _record_holes(cfg, name, opts, holes, None)
+    else:
+        holes[:] = [h for h in holes if h["queue"] != name]
     return True
 
 
@@ -478,6 +515,11 @@ def _write_configs(
     train = cgen.all_train_configs(opts.partition, wave=wave)
     verify = cgen.all_verify_configs(opts.partition, train)
     driver_io.write_generated_configs(cfg, {**train, **verify})
+    shared = _shared_config_dir(cfg, opts.partition)
+    if shared is not None:
+        driver_io.write_generated_configs(
+            replace(cfg, generated_dir_override=shared), {**train, **verify}
+        )
     return len(train), len(verify)
 
 
@@ -600,10 +642,13 @@ def _restore_archived_queues(
         submit(cfg, state, opts)
         submitted_now = dict(state["transitions"][phase].get("queues") or {})
         state["transitions"][phase] = {**record, "queues": submitted_now}
+        restored = [q for q in missing if store.queue_exists(cfg.queue_root, q)]
+        if not restored:
+            continue
         state.setdefault("restores", []).append(
-            {"at": utc_now_iso(), "phase": phase, "queues": missing}
+            {"at": utc_now_iso(), "phase": phase, "queues": restored}
         )
-        names.extend(missing)
+        names.extend(restored)
     if not names:
         return None
     verb = "would restore" if cfg.dry_run else "restored"
@@ -934,14 +979,19 @@ def _coverage(
     missing_evals = exp.missing_evals(p.name, cfg.output_root, wave=wave)
     by_arm: dict[str, dict[str, int]] = {}
     for leaf in pairs.leaves_of(pairs.cells_of(p.name, wave=wave)):
-        row = by_arm.setdefault(leaf.cell.arm, {"expected": 0, "landed": 0})
+        row = by_arm.setdefault(
+            leaf.cell.arm, {"expected": 0, "landed": 0, "deferred": 0}
+        )
+        if pairs.deferred(leaf):
+            row["deferred"] += 1
+            continue
         row["expected"] += 1
         row["landed"] += int(cell_is_done(exp.leaf_run_dir(leaf, cfg.output_root)))
     return {
         "at": utc_now_iso(),
         "partition": p.name,
         "run_set_id": p.run_set_id,
-        "node": store.this_host(),
+        "node": p.node,
         "wave": wave,
         "partial": partial,
         "expected": {
@@ -1002,6 +1052,31 @@ def _finalize(
         n_missing_cells=len(coverage["missing_cells"]),
         n_missing_evals=len(coverage["missing_evals"]),
     )
+
+
+def refresh_coverage(
+    cfg: driver_io.CampaignDriverConfig, opts: Ws160mDriverOptions
+) -> dict:
+    """Rewrite `coverage.json` from disk and the queues; drop holes that healed.
+
+    Transitions and `CAMPAIGN_DONE` are left alone.
+    """
+    state = driver_io.load_state(cfg)
+    tr = state["transitions"]
+    partial = "finalize" not in tr
+    holes = [
+        h
+        for h in state.get("holes") or []
+        if store.queue_exists(cfg.queue_root, h["queue"])
+        and store.queue_status(cfg.queue_root, h["queue"])["failed"]
+    ]
+    coverage = _coverage(cfg, opts, state, partial=partial, holes=holes)
+    if not cfg.dry_run:
+        state["holes"] = holes
+        driver_io.save_state(cfg, state)
+        cfg.logs_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(cfg.logs_dir / plan.RESULTS_COVERAGE_JSON, coverage)
+    return coverage
 
 
 def _deadline_stop(

@@ -1149,7 +1149,14 @@ timeout. Eval queues for an arm are submitted only after all of its treatment an
 boost queues are terminal; `ws160m_expected.missing_evals` compares each summary's
 `per_seed_p_target` keys with the expected gseeds and short directories are
 re-evaluated with `--force` on the eval command only. Every partition finalizes at
-T+24 h with a `coverage.json`.
+T+24 h with a `coverage.json` (`landed_by_arm` counts deferred leaves apart;
+`scripts.run_ws160m_campaign coverage` rewrites it from disk and drops healed
+holes). Stages in `ws160m_plan.STAGE_NODE_OVERRIDES` overflow to another node: their
+queues are pinned there with that clone's pin as `cwd`, and because a pin's
+`configs/experiment/generated` is a symlink into its node-local clone, their jobs
+read the sweep YAMLs by absolute path from the run set's shared
+`generated_configs/` copy (`ws160m_jobs.config_path`); submission refuses an
+overflow queue whose YAMLs are relative or absent there.
 
 **Results** (`pipelines/ws160m_results_pipeline.py`, tables under the `main` run
 set's `results/`): leaves carry `source_run_set`, category, strata, teacher and

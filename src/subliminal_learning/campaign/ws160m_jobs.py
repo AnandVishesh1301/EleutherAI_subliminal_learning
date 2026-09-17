@@ -39,9 +39,31 @@ def _rel(partition: str, fname: str) -> str:
     return driver_io.generated_rel(fname, spec=plan.spec_of(partition))
 
 
-def _train(partition: str, fname: str, *flags: str) -> str:
+def config_path(
+    partition: str, queue: str, fname: str, shared_root: Path | None
+) -> str:
+    """Sweep YAML path a job of `queue` reads.
+
+    Absolute under `shared_root` (the run set's `plan.SHARED_GENERATED_DIRNAME`)
+    when the queue runs on another node, repo-relative otherwise.
+
+    Raises:
+        ValueError: If the queue is overridden to another node and no shared
+            root is given.
+    """
+    if plan.queue_node(queue) is None:
+        return _rel(partition, fname)
+    if shared_root is None:
+        raise ValueError(
+            f"{queue} runs on {plan.queue_node(queue)}: its sweep YAMLs need "
+            "a shared_config_root"
+        )
+    return str(Path(shared_root) / fname)
+
+
+def _train(path: str, *flags: str) -> str:
     return driver_io.train_cmd(
-        _rel(partition, fname),
+        path,
         *flags,
         _PATHS_FLAG,
         _REGISTRY_FLAG,
@@ -49,10 +71,8 @@ def _train(partition: str, fname: str, *flags: str) -> str:
     )
 
 
-def _eval(partition: str, fname: str, *flags: str) -> str:
-    return driver_io.eval_cmd(
-        _rel(partition, fname), *flags, _PATHS_FLAG, _REGISTRY_FLAG
-    )
+def _eval(path: str, *flags: str) -> str:
+    return driver_io.eval_cmd(path, *flags, _PATHS_FLAG, _REGISTRY_FLAG)
 
 
 def _teacher_cmd(module: str, partition: str, fname: str, *flags: str) -> str:
@@ -158,7 +178,9 @@ def _teacher_shard(stem: str) -> tuple[str, str]:
 # ---- students ---------------------------------------------------------------------
 
 
-def student_jobs(partition: str, *, wave: int) -> dict[str, list[Job]]:
+def student_jobs(
+    partition: str, *, wave: int, shared_config_root: Path | None = None
+) -> dict[str, list[Job]]:
     """One job per treatment leaf, routed by `cgen.student_queue`."""
     p = plan.partition(partition)
     out: dict[str, list[Job]] = {}
@@ -175,9 +197,9 @@ def student_jobs(partition: str, *, wave: int) -> dict[str, list[Job]]:
                 teacher_param_tag_str=c.teacher_param_tag,
                 replicate=leaf.replicate,
             )
+            queue = cgen.student_queue(leaf)
             cmd = _train(
-                partition,
-                fname,
+                config_path(partition, queue, fname, shared_config_root),
                 "--no-control",
                 *_wandb_flag(logs),
                 f"--animals {c.animal}",
@@ -190,7 +212,7 @@ def student_jobs(partition: str, *, wave: int) -> dict[str, list[Job]]:
                 f"{p.name}-{stage}|{c.animal}|{c.student_token}<-{c.teacher_token}|"
                 f"{c.teacher_param_tag}|{c.gkd_tag}|t{leaf.ftseed}|g{leaf.gseed}"
             )
-            out.setdefault(cgen.student_queue(leaf), []).append(
+            out.setdefault(queue, []).append(
                 _job(key, cmd, plan.STUDENT_MEM_MIB, wave=wave)
             )
     return out
@@ -211,8 +233,7 @@ def control_jobs(
         if [ctrl.student_token] * 2 not in doc["teacher_student_base_pairs"]:
             raise ValueError(f"{fname} does not train control {ctrl.key()}")
         cmd = _train(
-            partition,
-            fname,
+            _rel(partition, fname),
             "--controls-only",
             "--no-wandb",
             f"--animals {ctrl.animal}",
@@ -242,8 +263,7 @@ def xbase_jobs(
     for x in pairs.xbase_controls():
         fname = by_pair[(x.animal, x.teacher_token)]
         cmd = _train(
-            partition,
-            fname,
+            _rel(partition, fname),
             "--xbase-controls-only",
             "--no-wandb",
             f"--animals {x.animal}",
@@ -268,12 +288,14 @@ def student_eval_jobs(
     *,
     wave: int,
     force_students: Iterable[str] = (),
+    shared_config_root: Path | None = None,
 ) -> dict[str, list[Job]]:
     """One eval job per (verify YAML, animal, student token).
 
     Args:
         force_students: ``"{verify_stem}|{animal}|{student}"`` keys whose job re-runs
             with ``--force`` (eval-side only; a training command never carries it).
+        shared_config_root: Run-set dir overflow queues read their YAMLs from.
     """
     p = plan.partition(partition)
     force = set(force_students)
@@ -282,6 +304,8 @@ def student_eval_jobs(
         train_name = Path(vdoc["inherit_grid"]).name
         doc = train_configs[train_name]
         animal = doc["animals"][0]
+        queue = str(vdoc["queue"])
+        path = config_path(partition, queue, vname, shared_config_root)
         mode = (
             ("--controls-only",)
             if cgen.is_control_yaml(train_name)
@@ -297,9 +321,9 @@ def student_eval_jobs(
             flags = [*mode, f"--animals {animal}", f"--base-models {student}"]
             if ident in force:
                 flags.append("--force")
-            cmd = _eval(partition, vname, *flags)
+            cmd = _eval(path, *flags)
             key = f"{p.name}-eval|{ident}"
-            out.setdefault(str(vdoc["queue"]), []).append(
+            out.setdefault(queue, []).append(
                 _job(key, cmd, plan.EVAL_MEM_MIB, wave=wave)
             )
     return out
@@ -315,8 +339,14 @@ def all_jobs(
     *,
     wave: int = models.WAVE_NOW,
     force_students: Iterable[str] = (),
+    shared_config_root: Path | None = None,
 ) -> dict[str, list[Job]]:
-    """Every job of a partition keyed by queue, in the plan's priority order."""
+    """Every job of a partition keyed by queue, in the plan's priority order.
+
+    Args:
+        shared_config_root: Run-set dir whose YAML copies overflow queues read
+            (required when the partition has `plan.STAGE_NODE_OVERRIDES`).
+    """
     p = plan.partition(partition)
     teachers = {k: v for k, v in train_configs.items() if cgen.is_teacher_yaml(k)}
     controls = {k: v for k, v in train_configs.items() if cgen.is_control_yaml(k)}
@@ -329,9 +359,14 @@ def all_jobs(
         teacher_eval_jobs(partition, t_verify, wave=wave),
         control_jobs(partition, controls, wave=wave),
         xbase_jobs(partition, xbase, wave=wave),
-        student_jobs(partition, wave=wave),
+        student_jobs(partition, wave=wave, shared_config_root=shared_config_root),
         student_eval_jobs(
-            partition, s_verify, train_configs, wave=wave, force_students=force_students
+            partition,
+            s_verify,
+            train_configs,
+            wave=wave,
+            force_students=force_students,
+            shared_config_root=shared_config_root,
         ),
     ):
         for queue, jobs in part.items():

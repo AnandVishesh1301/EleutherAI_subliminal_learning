@@ -12,10 +12,35 @@ from subliminal_learning.campaign import ws160m_pairs as pairs
 from subliminal_learning.campaign import ws160m_plan as plan
 
 
+_SHARED = Path("/shared/run_set") / plan.SHARED_GENERATED_DIRNAME
+
+
 def _bundle(partition: str, wave: int = 1):
     train = cgen.all_train_configs(partition, wave=wave)
     verify = cgen.all_verify_configs(partition, train)
-    return jobs.all_jobs(partition, train, verify, wave=wave)
+    return jobs.all_jobs(
+        partition, train, verify, wave=wave, shared_config_root=_SHARED
+    )
+
+
+def _yaml_of(job) -> str:
+    return job.cmd.split("--sweep-config ", 1)[1].split()[0]
+
+
+def test_overflow_queues_read_absolute_yamls_from_the_shared_dir() -> None:
+    by_q = _bundle("dosehp")
+    for stage in plan.STAGE_NODE_OVERRIDES["dosehp"]:
+        for q in (f"ws160m-dosehp-{stage}", f"ws160m-dosehp-evals-{stage}"):
+            assert by_q[q]
+            for job in by_q[q]:
+                path = Path(_yaml_of(job))
+                assert path.is_absolute() and path.parent == _SHARED
+    for q in ("ws160m-dosehp-dose-bear", "ws160m-dosehp-controls"):
+        assert not Path(_yaml_of(by_q[q][0])).is_absolute()
+    train = cgen.all_train_configs("dosehp")
+    verify = cgen.all_verify_configs("dosehp", train)
+    with pytest.raises(ValueError, match="shared_config_root"):
+        jobs.all_jobs("dosehp", train, verify, wave=1)
 
 
 @pytest.mark.parametrize("partition", plan.PARTITION_ORDER)

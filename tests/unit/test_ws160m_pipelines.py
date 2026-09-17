@@ -448,6 +448,88 @@ def test_retry_exhausted_failures_become_holes_until_the_tolerance(
         pipe._record_holes(cfg, name, opts, holes, None)
 
 
+def test_overflow_submit_refuses_yamls_the_other_node_cannot_read(
+    tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path, "dosehp")
+    name, node = "ws160m-dosehp-hp-lr2e-4_r8a16", "soar-subliminal-3"
+    shared = tmp_path / "out" / "x.yaml"
+    relative = [Job("a", "uv run x --sweep-config configs/generated/a.yaml")]
+    with pytest.raises(CampaignGateError, match="absolute YAML"):
+        pipe._require_overflow_configs(cfg, name, node, relative)
+    absent = [Job("b", f"uv run x --sweep-config {shared} --animals bear")]
+    with pytest.raises(CampaignGateError, match="absolute YAML"):
+        pipe._require_overflow_configs(cfg, name, node, absent)
+    shared.parent.mkdir(parents=True)
+    shared.write_text("x: 1\n")
+    pipe._require_overflow_configs(cfg, name, node, absent)
+    assert pipe._shared_config_dir(cfg, "dosehp") == (
+        cfg.run_set_root / plan.SHARED_GENERATED_DIRNAME
+    )
+    assert pipe._shared_config_dir(_cfg(tmp_path, "main"), "main") is None
+
+
+def test_a_hole_is_dropped_once_its_queue_completes_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path, "main")
+    opts = _opts(tmp_path, "main", [_T0])
+    name = "ws160m-main-controls"
+    monkeypatch.setattr(pipe.store, "queue_exists", lambda root, n: True)
+    monkeypatch.setattr(pipe.driver_io, "requeue_failed_under_cap", lambda c, n: 0)
+    monkeypatch.setattr(pipe.store, "queue_complete", lambda root, n: True)
+    monkeypatch.setattr(
+        pipe.store, "queue_status", lambda root, n: {"failed": 0, "total": 33}
+    )
+    holes = [
+        {"queue": name, "failed": ["a"], "at": "t"},
+        {"queue": "other", "failed": ["b"], "at": "t"},
+    ]
+    assert pipe._queue_ready(cfg, name, opts, holes)
+    assert holes == [{"queue": "other", "failed": ["b"], "at": "t"}]
+
+
+def test_restore_records_only_queues_that_were_actually_resubmitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Fake(monkeypatch, "main")
+    clock = [_T0]
+    run(_cfg(tmp_path, "main"), _opts(tmp_path, "main", clock))
+    state_path = (
+        tmp_path / "out" / "gkd_students" / plan.MAIN_RUN_SET_ID / "logs"
+    ) / "campaign_state.json"
+    state = json.loads(state_path.read_text())
+    state["transitions"]["submit_students"]["queues"]["ws160m-main-phantom"] = 1
+    state_path.write_text(json.dumps(state))
+    result = run(_cfg(tmp_path, "main"), _opts(tmp_path, "main", clock))
+    assert not any(f.startswith("restored_queues") for f in result.fired)
+    after = json.loads(state_path.read_text())
+    assert not any(
+        "ws160m-main-phantom" in r["queues"] for r in after.get("restores", [])
+    )
+    assert "ws160m-main-phantom" not in fake.names()
+
+
+def test_coverage_counts_deferred_leaves_apart_and_refresh_drops_healed_holes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path, "dosehp")
+    opts = _opts(tmp_path, "dosehp", [_T0])
+    monkeypatch.setattr(pipe.store, "this_host", lambda: _HOST)
+    state = pipe.driver_io.load_state(cfg)
+    state["transitions"]["finalize"] = {"at": "t"}
+    state["holes"] = [{"queue": "ws160m-dosehp-controls", "failed": ["a"], "at": "t"}]
+    pipe.driver_io.save_state(cfg, state)
+    cov = pipe.refresh_coverage(cfg, opts)
+    arms = cov["landed_by_arm"]
+    assert arms["hp"]["deferred"] > 0 and arms["hp"]["landed"] == 0
+    assert sum(r["expected"] for r in arms.values()) == cov["expected"]["leaves"]
+    assert cov["holes"] == [] and not cov["partial"]
+    assert json.loads((cfg.logs_dir / plan.RESULTS_COVERAGE_JSON).read_text()) == cov
+    saved = pipe.driver_io.load_state(cfg)
+    assert saved["holes"] == [] and list(saved["transitions"]) == ["finalize"]
+
+
 def test_deadline_hours_override_applies_to_the_open_window(tmp_path: Path) -> None:
     opts = _opts(tmp_path, "main", [_T0], deadline_hours=24.0)
     state: dict = {}

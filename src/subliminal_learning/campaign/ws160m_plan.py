@@ -452,6 +452,10 @@ STAGE_NODE_OVERRIDES: Mapping[str, Mapping[str, str]] = MappingProxyType(
     }
 )
 CLONE_ROOT_FMT = "/home/{login}/eleutherAI/EleutherAI_subliminal_learning"
+# Overflow queues read their sweep YAMLs by absolute path from this dir under the
+# run set: a pin's ``generated`` dir is a symlink into its node's own clone, which
+# the driver on the home node cannot write.
+SHARED_GENERATED_DIRNAME = "generated_configs"
 
 
 def queue_node(name: str) -> str | None:

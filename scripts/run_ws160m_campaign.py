@@ -14,6 +14,7 @@ from pipelines.ws160m_campaign_pipeline import (
     CampaignGateError,
     Ws160mDriverOptions,
     driver_config,
+    refresh_coverage,
     run,
     status,
 )
@@ -71,6 +72,28 @@ def status_cmd(
     typer.echo(
         yaml.safe_dump(
             status(_cfg(partition, paths_config, queue_root)), sort_keys=False
+        )
+    )
+
+
+@app.command()
+def coverage(
+    partition: str = typer.Option(..., "--partition"),
+    paths_config: Path = typer.Option(Path(plan.PATHS_CONFIG), help=_PATHS_HELP),
+    queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
+    dry_run: bool = False,
+) -> None:
+    """Rewrite coverage.json from disk and the queues; drop healed holes."""
+    load_dotenv()
+    configure_loguru()
+    cov = refresh_coverage(
+        _cfg(partition, paths_config, queue_root, dry_run=dry_run),
+        _opts(partition, paths_config),
+    )
+    typer.echo(
+        yaml.safe_dump(
+            {k: cov[k] for k in ("partial", "landed_by_arm", "holes")},
+            sort_keys=False,
         )
     )
 

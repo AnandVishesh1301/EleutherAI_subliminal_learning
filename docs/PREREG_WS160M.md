@@ -168,3 +168,14 @@ appear.
   (`r32a64`, `lr2e-4`) to the ladder and extra nodes once those partitions finalize,
   since the shared dosehp node runs about 1.6× slower; the dosehp window is 20.17 h
   (finalize ≈06:38 UTC 09-17). Outputs and identities are unchanged.
+- 2026-09-17 ≈03:40 UTC (execution): the two overflow recipes could not start on the
+  ladder and extra nodes — their jobs read sweep YAMLs by path relative to the pin,
+  whose `generated` dir is a symlink into that node's own clone, which only the dosehp
+  driver's node had populated. Every job failed on `FileNotFoundError` (no training
+  ran, no OOM), the dosehp driver stopped at its failure gate (36 > 2). Fix: the 128
+  dosehp YAMLs were copied to both clones (checksums equal), the 72 failed jobs
+  requeued, the driver restarted at pin 25abb36 with the window extended to 21.5 h
+  (finalize ≈07:58 UTC). Code: overflow jobs now read absolute YAMLs from the run
+  set's shared `generated_configs/` dir and submission refuses anything else; holes
+  clear when their queue completes clean; `coverage.json` counts deferred leaves
+  apart (`main`, `ladder`, `extra` regenerated). Outputs and identities are unchanged.
