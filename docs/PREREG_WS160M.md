@@ -185,4 +185,7 @@ appear.
   submitted only after a partition's `CAMPAIGN_DONE` and the headline `results/` exist,
   so no headline artefact waits on it; results enter `leaves.csv` as `bench_*` /
   `base_*` / `delta_*` columns for a capability table. §4's "no lm_eval" stays true for
-  the claims: W0–W8 are adjudicated without these columns.
+  the claims: W0–W8 are adjudicated without these columns. The dosehp queue on soar
+  first failed on the same node-local path problem in a second form (shared verify
+  YAMLs inherited a relative train YAML); the dosehp YAMLs were installed on soar and
+  shared copies now inherit absolute paths. No benchmark numbers were affected.

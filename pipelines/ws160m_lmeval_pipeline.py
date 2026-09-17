@@ -104,8 +104,10 @@ def run(cfg: driver_io.CampaignDriverConfig, opts: LmevalOptions) -> dict:
     lmeval = cgen.lmeval_verify_configs(p.name, train)
     shared = cfg.run_set_root / plan.SHARED_GENERATED_DIRNAME
     driver_io.write_generated_configs(cfg, lmeval)
+    students = {n: d for n, d in train.items() if not cgen.is_teacher_yaml(n)}
     driver_io.write_generated_configs(
-        replace(cfg, generated_dir_override=shared), lmeval
+        replace(cfg, generated_dir_override=shared),
+        cgen.shared_copy({**students, **lmeval}, shared),
     )
     by_q = jobs.lmeval_jobs(p.name, lmeval, train, wave=wave, shared_config_root=shared)
     name = plan.queue(p, plan.LMEVAL_STAGE)

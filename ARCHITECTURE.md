@@ -1155,8 +1155,9 @@ holes). Stages in `ws160m_plan.STAGE_NODE_OVERRIDES` overflow to another node: t
 queues are pinned there with that clone's pin as `cwd`, and because a pin's
 `configs/experiment/generated` is a symlink into its node-local clone, their jobs
 read the sweep YAMLs by absolute path from the run set's shared
-`generated_configs/` copy (`ws160m_jobs.config_path`); submission refuses an
-overflow queue whose YAMLs are relative or absent there.
+`generated_configs/` copy (`ws160m_jobs.config_path`), whose verify YAMLs inherit
+the shared train YAML by absolute path (`ws160m_config_gen.shared_copy`);
+submission refuses an overflow queue whose YAMLs are relative or absent there.
 
 **lm-eval tail** (`pipelines/ws160m_lmeval_pipeline.py`, `scripts/run_ws160m_lmeval.py`,
 lowest-priority queue `ws160m-<partition>-lmeval`): after a partition has written

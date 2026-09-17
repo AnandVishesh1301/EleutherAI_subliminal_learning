@@ -152,11 +152,20 @@ def test_submit_gates_on_finalize_and_results_then_pins_the_home_node(
         "ws160m-ladder-evals",
     ]
     shared = cfg.run_set_root / plan.SHARED_GENERATED_DIRNAME
-    yamls = sorted(shared.glob("*.yaml"))
-    assert yamls and all(cgen.is_lmeval_yaml(y.name) for y in yamls)
-    assert yaml.safe_load(yamls[0].read_text())["benchmarks"]["batch_size"] == (
-        plan.LMEVAL_BATCH_SIZE
+    lmeval_yamls = sorted(
+        y for y in shared.glob("*.yaml") if cgen.is_lmeval_yaml(y.name)
     )
+    assert lmeval_yamls
+    for y in lmeval_yamls:
+        doc = yaml.safe_load(y.read_text())
+        inherited = Path(doc["inherit_grid"])
+        assert inherited.is_absolute() and inherited.parent == shared
+        assert inherited.is_file() and not cgen.is_teacher_yaml(inherited.name)
+        assert doc["benchmarks"]["batch_size"] == plan.LMEVAL_BATCH_SIZE
+    local = yaml.safe_load(
+        next(cfg.generated_dir.glob(f"*{cgen.LMEVAL_INFIX}*.yaml")).read_text()
+    )
+    assert not Path(local["inherit_grid"]).is_absolute()
     assert json.loads((cfg.logs_dir / lm.LMEVAL_RECORD_JSON).read_text())["queue"] == (
         "ws160m-ladder-lmeval"
     )

@@ -469,6 +469,22 @@ def test_overflow_submit_refuses_yamls_the_other_node_cannot_read(
     assert pipe._shared_config_dir(_cfg(tmp_path, "main"), "main") is None
 
 
+def test_shared_config_copy_inherits_absolute_train_yamls(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, "dosehp")
+    opts = _opts(tmp_path, "dosehp", [_T0])
+    n_train, n_verify = pipe._write_configs(cfg, opts, wave=1)
+    shared = cfg.run_set_root / plan.SHARED_GENERATED_DIRNAME
+    assert len(list(shared.glob("*.yaml"))) == n_train + n_verify
+    verify = [y for y in shared.glob("*.yaml") if "verify_" in y.name]
+    assert verify
+    for y in verify:
+        inherited = Path(yaml.safe_load(y.read_text())["inherit_grid"])
+        assert inherited.parent == shared and inherited.is_file()
+    local = next(cfg.generated_dir.glob("*verify_*.yaml"))
+    assert not Path(yaml.safe_load(local.read_text())["inherit_grid"]).is_absolute()
+    assert pipe._write_configs(cfg, opts, wave=1) == (n_train, n_verify)
+
+
 def test_a_hole_is_dropped_once_its_queue_completes_clean(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

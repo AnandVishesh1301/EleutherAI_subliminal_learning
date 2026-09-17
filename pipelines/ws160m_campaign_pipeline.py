@@ -518,7 +518,8 @@ def _write_configs(
     shared = _shared_config_dir(cfg, opts.partition)
     if shared is not None:
         driver_io.write_generated_configs(
-            replace(cfg, generated_dir_override=shared), {**train, **verify}
+            replace(cfg, generated_dir_override=shared),
+            cgen.shared_copy({**train, **verify}, shared),
         )
     return len(train), len(verify)
 

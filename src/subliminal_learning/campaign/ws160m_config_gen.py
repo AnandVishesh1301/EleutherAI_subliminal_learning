@@ -10,6 +10,7 @@ ladder of one (animal, base@step).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 
 from subliminal_learning.campaign import ws160m_models as models
 from subliminal_learning.campaign import ws160m_pairs as pairs
@@ -462,6 +463,23 @@ def student_verify_configs(
         for name, doc in train_configs.items()
         if not is_teacher_yaml(name)
     }
+
+
+def shared_copy(configs: Mapping[str, dict], shared_root: Path) -> dict[str, dict]:
+    """`configs` as written under `shared_root`: `inherit_grid` becomes absolute.
+
+    Jobs on another node read these by absolute path, so a verify YAML must
+    inherit the train YAML's shared copy, not a path relative to that node's pin.
+    """
+    out: dict[str, dict] = {}
+    for name, doc in configs.items():
+        if "inherit_grid" in doc:
+            doc = {
+                **doc,
+                "inherit_grid": str(Path(shared_root) / Path(doc["inherit_grid"]).name),
+            }
+        out[name] = doc
+    return out
 
 
 def lmeval_name(train_filename: str) -> str:
