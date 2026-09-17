@@ -43,6 +43,20 @@ from subliminal_learning.utils.run_io import manifest_ref
 # A stored KL-trajectory record predating `pool_version` was always written on the Pile pool.
 POOL_ID_DEFAULTS = {"pool_version": "pp1"}
 
+# Checkpoint-list currency is compared on DISTINCT steps (2026-09-17). Runs used to write a
+# `checkpoint-{n_train_steps}` that duplicated the endpoint adapter at the `checkpoints/`
+# root; that dir is no longer written (`students.early_stop.SkipFinalStepSave`) and is
+# being deleted from finished runs (`scripts.dedupe_final_trajectory_checkpoint`). Comparing
+# raw lists would mark every record measured with the duplicate stale and re-run tens of
+# thousands of GPU evals for the same numbers. `scripts.dedupe_final_trajectory_checkpoint
+# --check-readers` asserts this constant, so the script cannot run against an old checkout.
+STEP_GATE = "distinct"
+
+
+def distinct_steps(steps) -> list[int]:
+    """The checkpoint-step list as the currency gates compare it: sorted, deduplicated."""
+    return sorted({s for s in (steps or []) if s is not None})
+
 
 # --------------------------------------------------------------------------- checkpoints
 def _checkpoint_dirs(ckpt_root: Path) -> list[tuple[int, Path]]:
@@ -50,24 +64,24 @@ def _checkpoint_dirs(ckpt_root: Path) -> list[tuple[int, Path]]:
 
     The endpoint lives at the ``checkpoints/`` root, not in a ``checkpoint-*`` dir. Its
     step comes from the leaf's ``train_manifest.json`` (``n_train_steps``) so the x-axis
-    is the true training step, not an extrapolation -- at the campaign's settings the
-    endpoint coincides with the last checkpoint (both step 25000) and the duplicate point
-    is a free consistency check on the ladder.
+    is the true training step, not an extrapolation. A legacy ``checkpoint-N`` dir at that
+    SAME step is a byte-duplicate of the endpoint (no longer written; see
+    `students.early_stop.SkipFinalStepSave`) and is skipped here, so the ladder measures
+    every step exactly once whether or not the duplicate has been deleted yet.
     """
     inter = sorted(
         ((int(d.name.split("-")[1]), d) for d in ckpt_root.glob("checkpoint-*")),
         key=lambda t: t[0],
     )
-    out = list(inter)
-    if (ckpt_root / "adapter_model.safetensors").exists():
-        manifest = ckpt_root.parent / "train_manifest.json"
-        step = -1
-        if manifest.exists():
-            step = int(json.loads(manifest.read_text()).get("n_train_steps", -1))
-        if step < 0 and inter:
-            step = inter[-1][0]
-        out.append((step, ckpt_root))
-    return out
+    if not (ckpt_root / "adapter_model.safetensors").exists():
+        return list(inter)
+    manifest = ckpt_root.parent / "train_manifest.json"
+    step = -1
+    if manifest.exists():
+        step = int(json.loads(manifest.read_text()).get("n_train_steps", -1))
+    if step < 0 and inter:
+        step = inter[-1][0]
+    return [(s, d) for s, d in inter if s != step] + [(step, ckpt_root)]
 
 
 # The on-disk finite gate is `utils.run_io.checkpoint_is_finite(dir)`; the in-memory one
@@ -198,12 +212,14 @@ def pref_identity_is_current(stored: dict, animals, prompt_hashes, ref) -> bool:
 def eval_is_current(stored: dict, steps, animals, prompt_hashes, ref) -> bool:
     """True iff a stored eval covers this exact checkpoint list, animals, prompts, and run.
 
-    Skip-if-exists fires only on a full identity match: same checkpoint steps, an animals
+    Skip-if-exists fires only on a full identity match: the same DISTINCT checkpoint steps
+    (see `STEP_GATE`: a record measured when the endpoint still had its duplicate
+    `checkpoint-N` dir stays current once that dir is gone, and vice versa), an animals
     SUPERSET (a broader stored eval still answers a narrower request), identical prompt
     hashes, and the same train-manifest reference (so an eval never outlives its run).
     """
     return (
-        stored.get("checkpoint_steps") == list(steps)
+        distinct_steps(stored.get("checkpoint_steps")) == distinct_steps(steps)
         and pref_identity_is_current(stored, animals, prompt_hashes, ref)
     )
 
@@ -505,7 +521,7 @@ def pile_kl_trajectory(
         stored = json.loads(out_path.read_text())
         # Current iff same checkpoint list, same Pile pool identity, same run ref --
         # and the record carries the delta-CE readout that is now the primary label.
-        if (stored.get("checkpoint_steps") == steps
+        if (distinct_steps(stored.get("checkpoint_steps")) == distinct_steps(steps)
                 and pile_id_is_current(stored, pile_id)
                 and stored.get("train_manifest_ref") == ref):
             if record_has_ce(stored):

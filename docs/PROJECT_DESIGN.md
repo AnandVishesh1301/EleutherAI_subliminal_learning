@@ -160,12 +160,45 @@ a path tag cannot encode). HPs already embedded in the path tag are still includ
   older than `CLAIM_TTL_SECONDS` (24 h) is **reclaimed** (unlinked before create), so a
   crash can never make a cell permanently unclaimable. A claim-skip is **never** counted
   as "ran" and never burns `--limit`.
-- **Mid-run resume (opt-in, LONG cells only)** — `TrainConfig.checkpoint_resume` →
-  `save_strategy="steps"` + bounded `save_total_limit`, and `trainer.train(resume_from_checkpoint=True)`
-  when a `checkpoint-*` exists. Default **off** → final-save-only, call byte-identical.
-  HF `Trainer` auto-finds the last `checkpoint-*` and restores optimizer/scheduler/RNG;
-  the cell gate keys on the manifest, not on `checkpoint-*`, so intermediate checkpoints
-  never confuse it.
+- **Mid-run checkpoints (opt-in, LONG cells only)** — `TrainConfig.checkpoint_resume` →
+  `save_strategy="steps"` + bounded `save_total_limit`. Default **off** → final-save-only,
+  call byte-identical. The cell gate keys on the manifest, not on `checkpoint-*`, so
+  intermediate checkpoints never confuse it.
+- **Yield-resume (always on, every LoRA run)** — the queue SIGTERMs a training process when
+  it reclaims a GPU and SIGKILLs it 20 s later. `teachers/sft_io.YieldCheckpoint` handles
+  SIGTERM **only while `trainer.train()` runs**: at the next optimizer-step boundary it saves a
+  FULL-state `checkpoint-N` (optimizer/scheduler/RNG) even when the run's config says
+  `save_only_model=True` and `save_strategy="no"`, exempt from `save_total_limit` rotation so a
+  yield never evicts a scheduled trajectory checkpoint, and stops training. Every full-state
+  checkpoint is stamped **last** with `resume_marker.json` (`step`, `reason`
+  `sigterm`/`scheduled`, `timestamp`, `host`, `pid`), so a dir torn by the SIGKILL has no marker
+  and is never resumed from. The process then writes `{run_dir}/interrupted.json` (its last
+  write) and raises `TrainingInterrupted`: **no** final `save_model`, **no** `train_manifest.json`,
+  **no** evals; the `run_logs` workers turn it into rc **75** (EX_TEMPFAIL) immediately.
+- **Resume decision is on-disk, not config** — `run_gate.latest_resumable_checkpoint` picks the
+  highest complete + MARKED `checkpoint-N`, so plain and `save_only_model` runs alike resume from a
+  yield checkpoint (the trainer passes that explicit path, never HF's "find the newest"). Selection
+  is PURE — the workers' gate calls it against dirs another live process may be mid-save in. Torn
+  dirs ABOVE the resume point are removed by `remove_torn_checkpoints_above`, called only from the
+  training process itself (the confirmed writer) just before `trainer.train()`; weights-only
+  scheduled trajectory checkpoints are never touched, and with no marked dir at all the run
+  restarts clean without deleting anything.
+  `checkpoint_resume_is_safe` still requires the `resume_identity.json` stamp (identity + dtype +
+  save cadence), written now for **every** run; pipelines keep calling
+  `clear_stale_run(preserve_checkpoints=resume_safe)`, so an unsafe partial run is still wiped.
+  The workers' gate has a `resumable` state — interrupt stamp OR any marked full-state checkpoint,
+  idle or not — that reruns the pipeline WITHOUT clearing; only an unfinished, idle run with NO
+  resumable checkpoint is still cleared, and the mtime `in_flight` heuristic is unchanged otherwise.
+  Both pipelines delete `interrupted.json` at the gate (before the model load), so a duplicate job
+  arriving mid-load cannot read the run as "interrupted, nobody writing" and train it concurrently.
+- **Finished runs carry no resume state** — right after the manifest, both pipelines call
+  `run_gate.prune_resume_state`: optimizer/scheduler/RNG/scaler state and markers are deleted from
+  every `checkpoint-*`, and any `sigterm` checkpoint **off** the run's own save schedule is deleted
+  outright. That schedule comes from the trainer's OWN resolver,
+  `students.early_stop.resolve_save_steps(stop_step, save_at_steps)` (the union with `stop_step`,
+  so an early-stop arm's terminal checkpoint counts as scheduled), else multiples of `save_steps`
+  when `checkpoint_resume`, else nothing. Adapters and `trainer_state.json` of scheduled checkpoints are never
+  touched, and repeated yields in one run prune their predecessors at save time.
 - **Stale-teacher guard (GKD)** — before a student trains, the pipeline asserts the
   resolved teacher `checkpoint_dir` is complete and records `teacher.manifest_sha256`, so
   a student is never distilled from a missing or silently-changed teacher.
@@ -243,6 +276,8 @@ not** under-fill for conservatism. The **only hard stop is OOM**.
   safely allows more parallel jobs. Example: GKD student cells that peak
   ~16.7 GB → two per A40 (~33 GB / 48 GB) is the *maximum that fits*, not a
   preference for “only two.”
+  Queue submits default to **no** queue-level cap (`--cap-per-gpu` unset), so
+  queues run at the node GPU policy cap unless a measured fit or explicit request sets one.
 - **Never share a single leaf** between two processes.
 - **Size-agnostic**: nothing hardcodes `160m` — model size flows through the repo
   id via `model_dir_name` / `models/registry.py`, so later PolyPythia sizes just

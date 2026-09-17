@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from peft import PeftModel
 
 from scripts.ckpt_preference_trajectory import _checkpoint_dirs
+from subliminal_learning.evaluation.ckpt_trajectories import distinct_steps
 from scripts.fidelity_heldout_ce import batched_completion_ce, split_rows
 from subliminal_learning.config import resolve_output_root, resolve_roots
 from subliminal_learning.evaluation.ckpt_trajectories import release_base
@@ -68,12 +69,15 @@ def _is_current(run_dir: Path, n_rows: int, ckpts: list[tuple[int, Path]]) -> bo
     except (json.JSONDecodeError, OSError):
         return False
     ref = manifest_ref(run_dir)
-    have = {(p["step"], p["checkpoint"]) for p in rec.get("points", [])}
-    want = {(step, d.name if d.name.startswith("checkpoint-") else "checkpoints")
-            for step, d in ckpts}
+    # Compared on DISTINCT STEPS, not on (step, dir name): the endpoint's duplicate
+    # `checkpoint-N` dir is no longer written and is being deleted from finished runs, and
+    # a record measured with it must stay current (see
+    # `evaluation.ckpt_trajectories.STEP_GATE`).
+    have = distinct_steps(p["step"] for p in rec.get("points", []))
+    want = distinct_steps(step for step, _ in ckpts)
     return (ref is not None and rec.get("schema_version") == SCHEMA_VERSION
             and rec.get("manifest_ref") == ref and rec.get("n_rows") == n_rows
-            and want <= have)
+            and set(want) <= set(have))
 
 
 @app.command()

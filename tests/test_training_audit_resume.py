@@ -12,8 +12,13 @@ from pipelines import train_teacher_templates_pipeline as teacher
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.run_gate import (
+    RESUME_MARKER_NAME,
     checkpoint_resume_is_safe,
+    latest_resumable_checkpoint,
+    remove_torn_checkpoints_above,
+    write_interrupted_marker,
     write_resume_identity,
+    write_resume_marker,
 )
 from subliminal_learning.teachers import sft_io
 
@@ -26,15 +31,19 @@ def _checkpoint(root, step=10):
     (d / "trainer_state.json").write_text(json.dumps({"global_step": step}))
     for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth"):
         (d / name).write_bytes(b"saved state")
+    write_resume_marker(d, step=step, reason="scheduled")
     return d
 
 
 @pytest.mark.parametrize(
     "damage",
-    ["weights", "rng", "state", "step", "optimizer", "dtype", "cadence", "identity"],
+    ["weights", "rng", "state", "step", "optimizer", "dtype", "cadence", "identity",
+     "marker", "torn"],
 )
 def test_resume_rejects_incomplete_or_incompatible_latest(tmp_path, damage):
-    _checkpoint(tmp_path, 9)
+    # ONE checkpoint: damaging the only one leaves nothing resumable. (An earlier MARKED
+    # checkpoint below a torn one is a deliberate fallback now -- see
+    # `test_torn_latest_resumes_from_the_marked_checkpoint_below_it`.)
     latest = _checkpoint(tmp_path, 10)
     identity = {"filtered_sha256": "old"}
     write_resume_identity(tmp_path, identity)
@@ -55,6 +64,12 @@ def test_resume_rejects_incomplete_or_incompatible_latest(tmp_path, damage):
         kwargs["dtype"] = "bfloat16"
     elif damage == "cadence":
         kwargs["save_steps"] = 20
+    elif damage == "marker":
+        (latest / RESUME_MARKER_NAME).unlink()
+    elif damage == "torn":
+        # SIGKILL after the grace period: files half-written, marker never reached.
+        (latest / RESUME_MARKER_NAME).unlink()
+        (latest / "optimizer.pt").write_bytes(b"")
     else:
         identity = {"filtered_sha256": "new"}
     assert not checkpoint_resume_is_safe(
@@ -69,7 +84,52 @@ def test_resume_requires_marker_and_preserves_location_independence(tmp_path):
     write_resume_identity(tmp_path, identity)
     identity["number_dataset_dir"] = "/new"
     assert checkpoint_resume_is_safe(tmp_path, identity, save_only_model=False)
-    assert not checkpoint_resume_is_safe(tmp_path, identity, save_only_model=True)
+    # A yield saves FULL state whatever the run's config says, so `save_only_model` is no
+    # longer an automatic veto: the files + the marker decide.
+    assert checkpoint_resume_is_safe(tmp_path, identity, save_only_model=True)
+
+
+def _weights_only_checkpoint(root, step):
+    """A `save_only_model` trajectory save: adapter + trainer_state, no optimizer state."""
+    d = root / "checkpoints" / f"checkpoint-{step}"
+    d.mkdir(parents=True)
+    (d / "adapter_config.json").write_text("{}")
+    (d / "adapter_model.safetensors").write_bytes(b"weights")
+    (d / "trainer_state.json").write_text(json.dumps({"global_step": step}))
+    return d
+
+
+def test_selection_is_pure_and_prefers_the_marked_checkpoint_below_a_torn_one(tmp_path):
+    """`latest_resumable_checkpoint` reads only: the workers' gate calls it against run dirs
+    another live process may be mid-save in, where a higher unmarked dir is a save IN
+    PROGRESS, not garbage."""
+    good = _checkpoint(tmp_path, 10)
+    torn = _checkpoint(tmp_path, 15)
+    (torn / RESUME_MARKER_NAME).unlink()
+    assert latest_resumable_checkpoint(tmp_path / "checkpoints") == good
+    assert torn.is_dir() and (torn / "optimizer.pt").is_file()
+
+
+def test_writer_removes_only_torn_dirs_above_the_resume_point(tmp_path):
+    """The training process itself prunes: torn dirs above the resume point go; weights-only
+    trajectory checkpoints and everything at or below it stay."""
+    good = _checkpoint(tmp_path, 10)
+    below = _weights_only_checkpoint(tmp_path, 5)
+    above = _weights_only_checkpoint(tmp_path, 20)
+    torn = _checkpoint(tmp_path, 15)
+    (torn / RESUME_MARKER_NAME).unlink()
+    assert remove_torn_checkpoints_above(tmp_path / "checkpoints", good) == [torn.name]
+    assert not torn.exists()
+    assert good.is_dir() and below.is_dir() and above.is_dir()
+    assert latest_resumable_checkpoint(tmp_path / "checkpoints") == good
+
+
+def test_no_marked_checkpoint_restarts_clean_without_deleting_anything(tmp_path):
+    torn = _checkpoint(tmp_path, 10)
+    (torn / RESUME_MARKER_NAME).unlink()
+    trajectory = _weights_only_checkpoint(tmp_path, 5)
+    assert latest_resumable_checkpoint(tmp_path / "checkpoints") is None
+    assert torn.is_dir() and trajectory.is_dir()
 
 
 def _configs(tmp_path):
@@ -124,6 +184,7 @@ def test_pipeline_preserves_only_compatible_resume_and_invalidates_evals(
             cfg, base_model_repo=model_ref(cfg.spec, cfg.hub_org), filtered_sha256="sha"
         )
     write_resume_identity(rd, identity, save_steps=cfg.train.save_steps)
+    write_interrupted_marker(rd, step=10, checkpoint_dir=cp)
     if mode == "force":
         cfg = replace(cfg, force=True)
     elif mode == "changed":
@@ -138,9 +199,14 @@ def test_pipeline_preserves_only_compatible_resume_and_invalidates_evals(
     )
     with pytest.raises(RuntimeError, match="test boundary"):
         module.run(cfg)
-    assert cp.exists() == (mode == "resume")
+    # A complete, marked checkpoint is preserved regardless of `save_only_model` /
+    # `checkpoint_resume`; force and identity drift still wipe it.
+    assert cp.exists() == (mode in ("resume", "model_only", "disabled"))
     assert not (rd / "train_manifest.json").exists()
     assert not (rd / "eval").exists()
+    # Cleared at the gate, BEFORE the model load: a duplicate job arriving during the
+    # load must not read this run as "interrupted, nobody writing" and train it too.
+    assert not (rd / "interrupted.json").exists()
 
 
 def test_nondefault_training_settings_change_both_identities(tmp_path):

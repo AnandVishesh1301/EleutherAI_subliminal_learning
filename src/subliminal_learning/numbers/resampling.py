@@ -314,7 +314,8 @@ def water_fill_sample(
     the capped deficit over the values that still have spare rows, proportionally to
     target mass, until it is allocated or nothing has spare capacity. Only if the source
     still cannot fill `n` (target mass on values it lacks entirely) is the remainder
-    topped up uniformly WITH replacement; the count is reported.
+    drawn uniformly from the rows not yet picked, still WITHOUT replacement (reported as
+    ``residual_filled``); too few unpicked rows for that remainder is a ValueError.
     """
     _validate_n(n)
     if n and not rows:
@@ -351,7 +352,14 @@ def water_fill_sample(
         picked.extend(bucket if k >= len(bucket) else rng.sample(bucket, k))
     residual = n - len(picked)
     if residual > 0:
-        picked.extend(rng.choices(range(len(rows)), k=residual))
+        taken = set(picked)
+        remaining = [i for i in range(len(rows)) if i not in taken]
+        if len(remaining) < residual:
+            raise ValueError(
+                f"cannot draw {n} rows without replacement from {len(rows)} rows: "
+                f"{residual - len(remaining)} short after the profile allocation"
+            )
+        picked.extend(rng.sample(remaining, residual))
     out = [deepcopy(dict(rows[i])) for i in picked]
     rng.shuffle(out)
     achieved = first_profile(out) if out else {}
@@ -365,8 +373,9 @@ def water_fill_sample(
         "sampling": "water_fill_without_replacement_proportional_deficit",
         "achieved_first_histogram_tv": tv,
         "total_shortfall": capped_deficit,
+        "capped_deficit": capped_deficit,
         "residual_shortfall": max(0, residual),
-        "topped_up_with_replacement": max(0, residual),
+        "residual_filled": max(0, residual),
         "distinct_source_rows": len(set(picked)),
         "requested_profile": {int(k): float(v) for k, v in profile.items()},
         "unreachable_target_mass": sum(

@@ -310,3 +310,10 @@ def test_archived_animal_symlink_is_discovered(tmp_path):
     assert len(bears) == 2, "archived animal behind a symlink was not enumerated"
     assert len(adapters) == len(baseline) + 2
     assert all(a.kind == "teacher" for a in bears)
+
+
+def test_queue_default_has_no_cap_per_gpu():
+    import inspect
+
+    assert inspect.signature(sw.main).parameters["cap_per_gpu"].default.default is None
+    assert "cap_per_gpu" not in sw._queue_defaults(None, None, None)

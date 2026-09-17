@@ -15,6 +15,12 @@ from pathlib import Path
 
 import pytest
 
+from subliminal_learning.run_gate import (
+    RESUME_MARKER_NAME,
+    write_interrupted_marker,
+    write_resume_marker,
+)
+
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
@@ -52,6 +58,47 @@ def _leaf(tmp_path, *, manifest, age_s):
 
 def test_exit_code_is_nonzero(worker):
     assert worker.IN_FLIGHT_EXIT_CODE not in (0, 1)
+
+
+def test_yield_interrupted_leaf_is_resumable(worker, tmp_path):
+    """A queue yield leaves interrupted.json + a marked full-state checkpoint: the worker
+    must rerun the pipeline WITHOUT clearing (it resumes), however fresh the writes are."""
+    leaf = _leaf(tmp_path, manifest=False, age_s=5)
+    ckpt = leaf / "checkpoints" / "checkpoint-625"
+    ckpt.joinpath("adapter_config.json").write_text("{}")
+    ckpt.joinpath("trainer_state.json").write_text('{"global_step": 625}')
+    for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth"):
+        ckpt.joinpath(name).write_bytes(b"state")
+    assert worker.partial_leaf_state(leaf, worker.IN_FLIGHT_GRACE_S) == "in_flight"
+    write_resume_marker(ckpt, step=625, reason="sigterm")
+    write_interrupted_marker(leaf, step=625, checkpoint_dir=ckpt)
+    assert worker.partial_leaf_state(leaf, worker.IN_FLIGHT_GRACE_S) == "resumable"
+    # A torn checkpoint (SIGKILL before the marker) is NOT resumable.
+    (ckpt / RESUME_MARKER_NAME).unlink()
+    assert worker.partial_leaf_state(leaf, worker.IN_FLIGHT_GRACE_S) == "in_flight"
+
+
+def test_idle_leaf_with_marked_checkpoint_is_resumable(worker, tmp_path):
+    """No interrupt stamp (SIGKILLed after the yield save, or a later dead attempt cleared
+    it) and idle past the grace: a marked full-state checkpoint still means RESUME, not
+    clear -- only an idle leaf with NO resumable checkpoint may be rmtree'd."""
+    leaf = _leaf(tmp_path, manifest=False, age_s=worker.IN_FLIGHT_GRACE_S + 60)
+    assert worker.partial_leaf_state(leaf, worker.IN_FLIGHT_GRACE_S) == "stale"
+    ckpt = leaf / "checkpoints" / "checkpoint-625"
+    ckpt.joinpath("adapter_config.json").write_text("{}")
+    ckpt.joinpath("trainer_state.json").write_text('{"global_step": 625}')
+    for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth"):
+        ckpt.joinpath(name).write_bytes(b"state")
+    write_resume_marker(ckpt, step=625, reason="sigterm")
+    assert worker.partial_leaf_state(leaf, worker.IN_FLIGHT_GRACE_S) == "resumable"
+
+
+def test_resumable_branch_does_not_clear_in_source(worker):
+    """The resumable branch must not rmtree: clearing would throw away the yield state."""
+    src = Path(worker.__file__).read_text()
+    i = src.index('if state == "resumable":')
+    branch = src[i:src.index('if state == "in_flight":', i)]
+    assert "rmtree" not in branch and "return" not in branch
 
 
 def test_partial_recent_write_is_in_flight(worker, tmp_path):

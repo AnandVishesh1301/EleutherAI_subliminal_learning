@@ -47,11 +47,14 @@ from subliminal_learning.run_gate import (
     ERROR,
     SKIP,
     checkpoint_resume_is_safe,
+    clear_interrupted_marker,
     clear_stale_run,
+    prune_resume_state,
     write_resume_identity,
     format_identity_diff,
     student_gate_action,
 )
+from subliminal_learning.students.early_stop import resolve_save_steps
 from subliminal_learning.students.clamp import DoseClampCallback
 from subliminal_learning.students.dataset_io import (
     PROMPT_SPLICE_IDENTITY,
@@ -519,14 +522,21 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             f"subsample_size={cfg.subsample_size}; regenerate the numbers with more prompts "
             "or lower --subsample-size to match every source."
         )
+    # Not gated on `checkpoint_resume`: a queue yield leaves a full-state checkpoint for
+    # plain runs too, and only a complete + marked one is ever preserved.
     resume_safe = (
-        cfg.train.checkpoint_resume and not cfg.force
+        not cfg.force
         and checkpoint_resume_is_safe(
             run_dir, run_identity, save_only_model=cfg.train.save_only_model,
             dtype=cfg.dtype, save_steps=cfg.train.save_steps,
         )
     )
     clear_stale_run(run_dir, preserve_checkpoints=resume_safe)
+    # THIS process is the writer from here on. Cleared before the (30-90 s) model load,
+    # not just inside the trainer: a duplicate job in another queue that arrives during
+    # the load would otherwise read the stamp as "resumable, nobody writing" and train
+    # the same run dir concurrently.
+    clear_interrupted_marker(run_dir)
     # Splice AFTER subsampling: selection is over the unmodified rows, so a spliced
     # run trains on exactly the same subset as its unspliced sibling.
     if cfg.splice_examples:
@@ -567,10 +577,12 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 log_path=run_dir / "clamp_log.jsonl",
             )
         ]
-    if cfg.train.checkpoint_resume:
-        write_resume_identity(
-            run_dir, run_identity, dtype=cfg.dtype, save_steps=cfg.train.save_steps
-        )
+    # Written for every run: any run can be yield-interrupted, and the stamp is what
+    # authorises the next attempt to resume from the checkpoint it left behind.
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_resume_identity(
+        run_dir, run_identity, dtype=cfg.dtype, save_steps=cfg.train.save_steps
+    )
     sft_result = run_teacher_sft_completion_only(
         model=model,
         tokenizer=tokenizer,
@@ -653,6 +665,21 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     }
     run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_text(student_manifest_path, json.dumps(manifest, indent=2) + "\n")
+    # Finished: the optimizer/scheduler/RNG state can never be needed again, and yield
+    # checkpoints off the run's own save schedule are pure overhead.
+    pruned = prune_resume_state(
+        run_dir, save_steps=cfg.train.save_steps,
+        # SAME resolver the trainer checkpoints by (union with `stop_step`).
+        explicit_steps=resolve_save_steps(cfg.train.stop_step, cfg.train.save_at_steps),
+        final_step=sft_result.n_steps,
+        checkpoint_resume=cfg.train.checkpoint_resume,
+    )
+    if pruned["bytes_freed"]:
+        logger.info(
+            "Pruned resume state at {}: {} checkpoint dir(s) {}, {} file(s), {:.1f} MiB freed",
+            run_dir, len(pruned["checkpoints_removed"]), pruned["checkpoints_removed"],
+            len(pruned["files_removed"]), pruned["bytes_freed"] / 2**20,
+        )
     logger.info(
         "Saved student ({}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
         cfg.source, base_model, tag, cfg.train.seed, checkpoint_dir,

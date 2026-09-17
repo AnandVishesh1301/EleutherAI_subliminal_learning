@@ -109,7 +109,10 @@ class DocPlan:
             forward pass.
         recompute: ``ckpt_rel`` values whose student activation vector must be recomputed.
         dropped: ``ckpt_rel`` values stored in the document whose checkpoint no longer
-            exists on disk; the run dir is the unit, so these points are deleted.
+            exists on disk; the run dir is the unit, so these points are deleted. A rel
+            whose STEP is still covered by a retained point (the endpoint's former
+            duplicate `checkpoint-N` dir) is NOT dropped -- the document still describes
+            the ladder.
         stale_refs: Reference keys whose stored ``teacher_adapter_id`` disagrees with the
             teacher checkpoint on disk (an in-place teacher retrain); their cosines are
             recomputed for every point.
@@ -234,7 +237,18 @@ def eas_doc_status(
             cosine_only.append(rel)
         else:
             recompute.append(rel)
-    dropped = tuple(rel for rel in stored_points if rel not in set(ckpt_order))
+    # A stored point whose rel is gone from disk but whose STEP another retained point
+    # still carries is a duplicate, not a lost point: that is exactly the legacy
+    # `checkpoint-N` dir which duplicated the endpoint adapter and is no longer written
+    # (see `students.early_stop.SkipFinalStepSave`). Treating it as dropped would
+    # invalidate every stored EAS document on the shared stash for no new numbers.
+    live = set(ckpt_order)
+    live_steps = {stored_points[rel].get("step") for rel in stored_points if rel in live}
+    live_steps.discard(None)
+    dropped = tuple(
+        rel for rel, point in stored_points.items()
+        if rel not in live and point.get("step") not in live_steps
+    )
     return DocPlan(
         invalid=False, reuse=tuple(reuse), cosine_only=tuple(cosine_only),
         recompute=tuple(recompute), dropped=dropped, stale_refs=stale,

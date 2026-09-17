@@ -49,7 +49,7 @@ from subliminal_learning.analysis.w0_norms import load_w0_norms, merge_w0_norms
 from subliminal_learning.config import resolve_roots
 from subliminal_learning.models.datadecide import is_dd_ref
 from subliminal_learning.utils.io import atomic_write_json
-from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
+from subliminal_learning.utils.run_io import checkpoint_nonfinite_count, final_train_step
 
 app = typer.Typer(add_completion=False)
 
@@ -184,11 +184,22 @@ def main(
             if (ckpt / "adapter_model.safetensors").exists():
                 adapters.append((None, ckpt / "adapter_model.safetensors"))
             if checkpoints:
+                steps = set()
                 for d in sorted(ckpt.glob("checkpoint-*"),
                                 key=lambda p: int(p.name.split("-")[1])):
                     if (d / "adapter_model.safetensors").exists():
+                        steps.add(int(d.name.split("-")[1]))
                         adapters.append((int(d.name.split("-")[1]),
                                          d / "adapter_model.safetensors"))
+                # The growth curve's last point used to come from the `checkpoint-N` dir
+                # that duplicated the endpoint adapter; that dir is no longer written (see
+                # `students.early_stop.SkipFinalStepSave`) and is being deleted from
+                # finished runs, so the row comes from the root adapter at the manifest's
+                # `n_train_steps` instead -- same step number, same numbers.
+                end_step = final_train_step(ckpt.parent)
+                if (end_step is not None and end_step not in steps
+                        and (ckpt / "adapter_model.safetensors").exists()):
+                    adapters.append((end_step, ckpt / "adapter_model.safetensors"))
             run_rows: list[dict] = []  # this run only; `rows` is the cumulative aggregate
             with threadpool_limits(limits=1):
                 for step, adapter_file in adapters:

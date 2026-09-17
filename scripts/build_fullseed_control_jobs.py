@@ -236,7 +236,6 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
         "priority": 49, "strict_deps": True, "olmo_dependencies": DEPENDENCIES,
         "generation_queue": f"{spec['queue_prefix']}-ngen-{spec['date']}",
         "control_queue": f"{spec['queue_prefix']}-{spec['date']}",
-        "cap_per_gpu": 2, "cap_group": f"{spec['queue_prefix']}-{spec['date']}",
     }
     if family != "full-seed":
         summary["existing_training_manifests_by_direction"] = per_direction
@@ -253,7 +252,7 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
             "injections; the controls also depend on the pool-generation queue. "
             "Generation: 3 pools. Control cells: 672, of which "
             f"{existing} already have training manifests. Per-job memory: 6000 MiB; "
-            "shared stage cap: 2 jobs/GPU.\n\n"
+            "no per-GPU cap.\n\n"
             "Rebuild: `uv run python -m scripts.build_fullseed_control_jobs`. "
             "The builder does not submit jobs.\n"
         )
@@ -275,12 +274,12 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
             "its pig control evaluation is still produced and is harmless.\n\n"
             f"Control cells: {len(jobs)}, of which {existing} already have training "
             f"manifests:\n\n{table}\n\n"
-            "Per-job memory: 6000 MiB; shared stage cap: 2 jobs/GPU.\n\n"
+            "Per-job memory: 6000 MiB; no per-GPU cap.\n\n"
             "Submit (the builder does not submit):\n\n"
             "```\nuv run python -m scripts.jobq submit sl-samemodel-controls-20260916 "
             "--root run_logs/queue_angela --jobs-file "
             "run_logs/sl_samemodel_controls_20260916/controls.jobs.jsonl --priority 50 "
-            "--mem-mib 6000 --cap-per-gpu 2 --depends-on sl-dataseed-controls-20260916\n```\n\n"
+            "--mem-mib 6000 --depends-on sl-dataseed-controls-20260916\n```\n\n"
             "Rebuild: `uv run python -m scripts.build_fullseed_control_jobs "
             f"--family {family}`.\n"
         )
@@ -300,7 +299,7 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
             "pool already exists). Control cells: "
             f"{len(jobs)}, of which {existing} already have training manifests:\n\n"
             f"{table}\n\n"
-            "Per-job memory: 6000 MiB; shared stage cap: 2 jobs/GPU.\n\n"
+            "Per-job memory: 6000 MiB; no per-GPU cap.\n\n"
             "Rebuild: `uv run python -m scripts.build_fullseed_control_jobs "
             f"--family {family}`. The builder does not submit jobs.\n"
         )

@@ -91,6 +91,18 @@ OOM_CEILING_HEADROOM_MIB = 2048
 # (4 GiB → 80 GiB card is ~7 doublings-by-1.5×).
 OOM_REQUEUE_BACKSTOP = 8
 OOM_LOG_TAIL_BYTES = 50_000
+# EX_TEMPFAIL (sysexits.h). A job exiting 75 means "not my turn — try again later", never
+# "failed": the shared run_logs workers use it when another process touched the run dir in
+# the last 30 min ("IN-FLIGHT elsewhere"), and training uses it when a foreign SIGTERM kills
+# it outside our own yield path. Recording those as failures tripped whole queues after a
+# yield storm re-claimed the killed jobs inside the in-flight window (2026-09-17).
+TEMPFAIL_RC = 75
+# How long a tempfailed job stays unclaimable. Matches the 30-min in-flight window closely
+# enough that ~2 deferrals clear it, without parking a card-free job for half an hour.
+TEMPFAIL_RETRY_S = 15 * 60
+# Backstop: a job that is "temporarily" unavailable this many times is really stuck (e.g. a
+# run dir some dead process keeps touching), so record the 75 as the failure it looks like.
+TEMPFAIL_REQUEUE_BACKSTOP = 8
 # Co-tenant OOM guard (2026-09-09): an OOM whose message shows THIS process holding less
 # than this fraction of its own reservation was starved by neighbours on a shared card, not
 # under-reserved. Escalating the floor there is wrong twice over — the job never needed the
@@ -709,6 +721,34 @@ class _Pool:
         )
         return True
 
+    def _tempfail_requeue(self, name: str, job: Job, settled: list) -> bool:
+        """Requeue an rc=75 job after a delay; False = record it as a failure (backstop).
+
+        Ordering follows the settled contract exactly like :meth:`_oom_requeue`: every
+        fallible store write happens BEFORE ``remove_claim``, and only the swallowing
+        ``master.log`` may follow it.
+        """
+        tempfails = store.read_tempfails(self.root, name, job.jobkey)
+        if tempfails >= TEMPFAIL_REQUEUE_BACKSTOP:
+            self.master.log(
+                "TEMPFAIL BACKSTOP",
+                f"{name} {job.jobkey} tempfail-requeued {tempfails}x without ever running "
+                "to completion; recording failure",
+            )
+            return False
+        retry_at = time.time() + TEMPFAIL_RETRY_S
+        store.bump_tempfails(self.root, name, job.jobkey, not_before=retry_at)
+        store.bump_attempt(self.root, name, job.jobkey)
+        store.remove_claim(self.root, name, job.jobkey)
+        settled.append(True)
+        when = time.strftime("%H:%MZ", time.gmtime(retry_at))
+        self.master.log(
+            "TEMPFAIL",
+            f"{name} {job.jobkey} rc={TEMPFAIL_RC} requeued "
+            f"({tempfails + 1}/{TEMPFAIL_REQUEUE_BACKSTOP}), retry after {when}",
+        )
+        return True
+
     def _effective_slots(self, meta: QueueMeta, job: Job) -> int:
         """The job's weight in global slot-units (job field > queue default > 1)."""
         if job.slots is not None:
@@ -864,9 +904,9 @@ class _Pool:
     ) -> int | None:
         """Run one job to completion. Returns its rc, or ``None`` if it was requeued.
 
-        A yield-killed job — and, on the same path, one classified as CUDA OOM — is requeued
-        to PENDING (claim removed, NO result recorded, attempt bumped) so it retries later;
-        neither is ever recorded as failed.
+        A yield-killed job — and, on the same path, one classified as CUDA OOM, or one that
+        exited ``TEMPFAIL_RC`` — is requeued to PENDING (claim removed, NO result recorded,
+        attempt bumped) so it retries later; none is ever recorded as failed.
 
         ``settled`` is a mutable flag (append-once list): it is marked IMMEDIATELY after
         every ``remove_claim`` here, and each removal is the last fallible operation on its
@@ -946,6 +986,8 @@ class _Pool:
             return None
         if rc != 0 and self._oom_requeue(name, meta, job, log_path, settled):
             return None  # OOM: requeued behind an escalated memory gate, not a failure
+        if rc == TEMPFAIL_RC and self._tempfail_requeue(name, job, settled):
+            return None  # EX_TEMPFAIL: deferred back to pending, not a failure
         store.record_result(
             self.root,
             name,

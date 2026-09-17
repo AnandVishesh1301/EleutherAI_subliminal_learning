@@ -256,3 +256,10 @@ def test_submission_limit(tmp_path):
         defaults={},
     )
     assert len(store.load_jobs(root, "ckaq")) == 1
+
+
+def test_queue_default_has_no_cap_per_gpu():
+    import inspect
+
+    assert inspect.signature(sw.main).parameters["cap_per_gpu"].default.default is None
+    assert "cap_per_gpu" not in sw._queue_defaults(None, None, None)

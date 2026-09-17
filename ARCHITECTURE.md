@@ -431,7 +431,9 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
 
 - Layers: `model.py` (pure Job) → `store.py` (meta/jobs/claims/results; states are
   **derived**, never stored) → `gpu.py` (slot locks + two-check memory gate, least-loaded
-  placement, per-queue `--cap-per-gpu` stage ceilings + `--slots` weighted jobs) →
+  placement, optional per-queue `--cap-per-gpu` ceilings + `--slots` weighted jobs; queues default to
+  no cap and run at the node GPU policy cap, a queue cap is only for a measured memory fit
+  or on explicit request) →
   `worker.py` (threaded pool). All writes via atomic helpers; `os.mkdir` is the claim
   primitive (atomic on CephFS).
 - **Reservation ledger (2026-07-27)**: each held slot lock carries the `mem_mib` its job
@@ -3929,7 +3931,8 @@ unknown collapse labels remain unknown; fidelity evaluation applies the same pro
 training; completion-only training honors gradient accumulation and gradient checkpointing;
 teacher and student identities include nondefault training settings; checkpoint resume requires a
 matching partial identity (including dtype and save cadence) plus complete adapter, optimizer,
-scheduler, trainer, and RNG state, while force or `save_only_model` safely restarts; queue worker
+scheduler, trainer, and RNG state, while force safely restarts (`save_only_model` also restarted
+until the 2026-09-17 yield-resume change below); queue worker
 handles and scale-up bookkeeping are namespaced and recoverable; and teacher number-shuffle pool
 lookup follows configured storage. Stale manifests and evaluations are invalidated when a run is
 restarted. A regression exposed during validation also removed the record cache's 100-microsecond mtime tolerance, which could hide rapid same-size rewrites.
@@ -4176,7 +4179,7 @@ model/tokenizer caches, output-directory access, and the same dp1 token hash.
 Both use Torch 2.6.0+cu124 / Transformers 4.54.0, matching node 1. The new
 `scripts/direction_correction_preflight.py` reproduces these checks without
 loading model weights or allocating CUDA memory. The scientific source snapshot,
-run membership, results, priorities, and shared two-jobs-per-GPU cap are unchanged.
+run membership, results, and priorities are unchanged.
 `cuda:0` is the scheduler-assigned visible device, not a physical GPU-0 pin.
 
 2026-09-12 interim reassessment: `docs/paper/analyze_corrected_directions.py`
@@ -4240,8 +4243,8 @@ The separate `pythia.manifest.json` supplement uses the same frozen executor:
 12 historical full-rotation runs, 546 historically selected super/subcritical
 runs, and the full legacy spectral grid on data-seed1 with corrected random
 frames at seeds 0/1/2 (48 conditions). Its 24 jobs do not repeat the completed
-fixed-F or full-population top/rest campaign. The four correction queues share
-a two-jobs-per-GPU cap; the full campaign has 142 submitted jobs.
+fixed-F or full-population top/rest campaign. The full campaign has 142 submitted jobs; the
+correction queues run at the node GPU policy cap (no queue-level cap).
 
 `position_surgery.py` now includes receiver reference/revision, adapter-config
 hash, explicit native/scaled dose identity, and construction version in resume
@@ -4508,3 +4511,57 @@ remain byte-identical, while noncanonical SDF schedules receive distinct suffixe
 ### DCLM dog core30 campaign (2026-09-16)
 
 The prepared dog campaign uses the exact canonical ten `dclm-seed1234@main` teachers (ftseed1), 100,000 raw number completions with the canonical `prefix` filter, and 300 core30 students on `dclm-seed1@main` (student seed1, 20 epochs, 10,000 examples sampled with seed42). Storytelling is excluded. Pool and artifact gates fail closed on missing adapters, wrong raw counts, short pools, or incomplete run lists. The reproducible bundle is `run_logs/dclm_dog_core30_20260916/`: six strict-dependent queues, 332 jobs, priority 44 below pig s2s, pinned to `soar-subliminal-1`. Teachers use favorite/dislike/validation/off_topic and students test/off_topic; both receive current held-out DCLM `cp1` CE/KL with base comparisons. The pool gate validates source identities, content hashes, and at least 10k accepted rows; the final audit validates all 310 actual runs. `submission_receipt.json` records submitted queues.
+
+
+### Yield-resume: SIGTERM checkpoints for LoRA training (2026-09-17)
+
+When the job queue reclaims a GPU it SIGTERMs the training process and SIGKILLs it 20 s later.
+Both LoRA pipelines (teacher FT and student distillation) share one trainer call,
+`teachers/sft_io.run_teacher_sft_completion_only`, which now survives that kill:
+
+- `YieldCheckpoint` (always attached, inert without a SIGTERM) installs a SIGTERM handler for the
+  duration of `trainer.train()` only. The handler sets a flag; at the next optimizer-step boundary
+  the callback flips `save_only_model=False` and `save_total_limit=None` for that one save (so a
+  yield can never evict a scheduled trajectory checkpoint), requests `control.should_save` and
+  `control.should_training_stop`, and logs the SIGTERM time, the step and the save duration.
+- Every full-state `checkpoint-N` (yield or scheduled) is stamped with `resume_marker.json`
+  (`step`, `reason` = `sigterm`/`scheduled`, `timestamp`, `host`, `pid`), written atomically AFTER
+  every checkpoint file, so a dir torn by the SIGKILL is never resumable.
+- The interrupted process writes `{run_dir}/interrupted.json` as its LAST write and raises
+  `TrainingInterrupted`: no final `save_model`, no `train_manifest.json`, no evals. The three
+  `run_logs` distill workers catch it and exit 75 (EX_TEMPFAIL) immediately instead of recording
+  the cell as a failure and continuing.
+- Resume keys on disk, not on config: `run_gate.latest_resumable_checkpoint` returns the highest
+  complete + marked `checkpoint-N` and is read-only (readers may be looking at another process's
+  live save); torn dirs above the resume point are removed by `remove_torn_checkpoints_above`,
+  called only from the training process before `trainer.train()`, and weights-only trajectory
+  checkpoints are left alone. So plain runs (`save_strategy="no"`) and
+  `save_only_model=True` trajectory runs both resume from a yield checkpoint.
+  `checkpoint_resume_is_safe` keeps the identity/dtype/save-cadence check and no longer vetoes on
+  `save_only_model`; the pipelines write `resume_identity.json` for every run.
+- The workers' skip gate gained a `resumable` state (interrupted stamp OR any marked full-state
+  checkpoint, idle or not) that reruns the pipeline WITHOUT `rmtree`; only an idle run with no
+  resumable checkpoint is cleared, and the mtime `in_flight` heuristic is unchanged otherwise. Both
+  pipelines clear `interrupted.json` at the gate, before the model load, so a duplicate job cannot
+  claim the run as resumable while this one is still loading.
+- On success, right after the manifest, `run_gate.prune_resume_state` deletes
+  optimizer/scheduler/RNG/scaler state and the markers from every checkpoint, and deletes outright
+  any `sigterm` checkpoint off the run's own save schedule, taken from the trainer's own
+  `students.early_stop.resolve_save_steps(stop_step, save_at_steps)` (union with `stop_step`) else
+  multiples of `save_steps` when `checkpoint_resume`, so finished runs cost adapters only. Repeated yields
+  within one run prune their predecessors at save time.
+- **No checkpoint at the final step (2026-09-17)**: `students.early_stop.SkipFinalStepSave`
+  (attached last in `teachers.sft_io`) clears a scheduled `should_save` at the step training stops
+  at — `stop_step` or `max_steps` — because `trainer.save_model` writes those same weights to the
+  `checkpoints/` root immediately after; a queue yield at that step still saves, and
+  `prune_resume_state(final_step=n_train_steps)` deletes a `checkpoint-{final step}` outright at
+  completion. Every ladder reader places its last point on the endpoint adapter at the manifest's
+  `n_train_steps`, and all currency gates compare DISTINCT steps
+  (`evaluation.ckpt_trajectories.STEP_GATE`), so the change stales no stored record.
+  `scripts/dedupe_final_trajectory_checkpoint.py` (dry-run by default, `--apply` guarded by
+  `--check-readers`) reclaims the ~1.18 GB/run duplicates already on disk after byte/tensor
+  verification.
+
+Tests: `tests/test_yield_resume.py` (real tiny CPU training, self-SIGTERM mid-run, resume to the
+uninterrupted step count, prune), `tests/test_training_audit_resume.py`, `tests/test_worker_inflight_gate.py`,
+`tests/test_dedupe_final_trajectory_checkpoint.py`, `tests/test_final_ckpt_step_readers.py`.

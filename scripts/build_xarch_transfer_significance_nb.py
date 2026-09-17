@@ -28,13 +28,13 @@ Each arm distils a teacher's numbers pool into a receiver of another size or fam
 - **teacher** — teacher tag, or all full-set teachers of the arm (pooled row, grey).
 - **cells** — (treatment, control) cell pairs with values.
 - **wins / n** — cells where treatment > control, over non-tied pairs.
-- **sign p** — sign test: wins ~ Binomial(n, ½), one-sided (held-out row: two-sided).
-- **exceed.** — treatment cells above the control's maximum cell.
-- **exceed. p** — exceedance p: exact per teacher; stratified within-cell permutation (20,000) for pooled rows.
+- **sign p** — SECONDARY: sign test, wins ~ Binomial(n, ½), one-sided (held-out rows too).
+- **exceed.** — PRIMARY: treatment cells above the control's maximum cell, on the same cells as **cells**.
+- **exceed. p** — PRIMARY p: exact exceedance per teacher; stratified within-cell permutation (20,000) for pooled rows.
 - **treat / ctrl median ×prior** — median p(animal) over cells, in units of the receiver's test base prior.
 - **dead (treat/ctrl)** — runs whose Pile/Dolma probe ΔCE exceeds the receiver's dead cut.
 
-Highlighted = p < 0.05.
+Highlighted = exceedance p < 0.05 (the primary test).
 """)
 
 code(r"""
@@ -45,7 +45,7 @@ style_significance_table(significance_table("../run_logs/xarch/xarch_significanc
 
 md(r"""
 - 160m → 410m (dog): every full-set teacher wins 21–25 of 31 cells; pooled 28 exceedances, p = 8.5e-4.
-- 410m → 160m (dog): 21/31 wins, 6 exceedances (p = 0.012); held-out 18/23, two-sided p = 0.011.
+- 410m → 160m (dog): 21/31 wins, 6 exceedances (p = 0.012); held-out 18/23, p = 0.0053.
 - Both same-order directions pooled: p = 4.0e-4.
 - 410m-seed1 → 160m and both OLMo → 160m arms show no transfer (7/30, 11/30, 10/30 wins).
 - 160m → OLMo-1B: 21/35 wins, 3 exceedances; cross-family dog pooled p = 0.32.

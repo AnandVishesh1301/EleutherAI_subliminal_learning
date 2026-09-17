@@ -109,3 +109,15 @@ def test_no_tf32(campaign):
     # The README says "no tf32" in prose; no config or command may enable it.
     for path in [*out.glob("*.jsonl"), out / "number_generation.yaml", *(out / "configs").iterdir()]:
         assert "tf32" not in path.read_text()
+
+
+def test_no_per_gpu_cap(campaign):
+    _, out, summary = campaign
+    assert "cap_per_gpu" not in summary and "cap_group" not in summary
+    assert "cap_per_gpu" not in json.loads((out / "campaign.json").read_text())
+    readme = (out / "README.md").read_text()
+    assert "cap-per-gpu" not in readme and "jobs/GPU" not in readme
+    for name in ("generation.jobs.jsonl", "controls.jobs.jsonl"):
+        path = out / name
+        if path.exists():
+            assert "cap_per_gpu" not in path.read_text() and "cap_group" not in path.read_text()

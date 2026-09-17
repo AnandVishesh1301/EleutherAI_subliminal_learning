@@ -54,7 +54,8 @@ from subliminal_learning.analysis.adapter_decomp import (
     base_repo_and_revision_for_run, low_rank_norms)
 from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 from subliminal_learning.config import resolve_output_root
-from subliminal_learning.utils.run_io import manifest_ref
+from subliminal_learning.evaluation.ckpt_trajectories import distinct_steps
+from subliminal_learning.utils.run_io import final_train_step, manifest_ref
 
 app = typer.Typer(add_completion=False)
 
@@ -134,12 +135,18 @@ def _run_one(args: tuple[str, int, str, str, bool]) -> str:
         return f"SKIP {tag}/ftseed{ftseed}: no adapter_config.json"
     acfg = json.loads((ckpt / "adapter_config.json").read_text())
     scal = float(acfg["lora_alpha"]) / float(acfg["r"])
+    # Endpoint (the adapter at the `checkpoints/` root) carries the manifest's
+    # `n_train_steps`, and a legacy `checkpoint-N` dir at that same step is its
+    # byte-duplicate (no longer written; see `students.early_stop.SkipFinalStepSave`), so
+    # the ladder keeps its last point exactly once, deduped or not.
+    end_step = final_train_step(run_dir)
     steps = sorted(
         (int(d.name.split("-")[1]), d / "adapter_model.safetensors")
         for d in ckpt.glob("checkpoint-*")
-        if (d / "adapter_model.safetensors").exists())
+        if (d / "adapter_model.safetensors").exists()
+        and (end_step is None or int(d.name.split("-")[1]) != end_step))
     if (ckpt / "adapter_model.safetensors").exists():
-        steps.append((None, ckpt / "adapter_model.safetensors"))  # endpoint last
+        steps.append((end_step, ckpt / "adapter_model.safetensors"))  # endpoint last
 
     # Canonical target is the run dir's own eval/ (sibling of checkpoints/), like the pref
     # and Pile-KL trajectories; --legacy-out keeps the flat analysis/ dir.
@@ -153,7 +160,9 @@ def _run_one(args: tuple[str, int, str, str, bool]) -> str:
         # is a pure function of the adapter weights and the frozen base's W0 norms, with no
         # prompts, sampling or animals in it.
         stored_steps = prev.get("checkpoint_steps", [p["step"] for p in prev["points"]])
-        current = stored_steps == step_list and (
+        # DISTINCT steps (see `evaluation.ckpt_trajectories.STEP_GATE`): a record measured
+        # when the endpoint still had its duplicate `checkpoint-N` dir stays current.
+        current = distinct_steps(stored_steps) == distinct_steps(step_list) and (
             legacy_out or prev.get("train_manifest_ref") == ref)
         if current:
             return f"skip {tag}/ftseed{ftseed}: up to date ({len(steps)} points)"

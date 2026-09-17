@@ -43,7 +43,7 @@ JSON
   done
 
   uv run python -m scripts.jobq submit "seed0-teachers-${pool}" --jobs-file "$jobs" \
-    --root "$root" --node "$HOST" --priority 10 --cap-per-gpu 1
+    --root "$root" --node "$HOST" --priority 10
   echo "$root"
 }
 

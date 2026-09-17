@@ -111,9 +111,9 @@ def test_build_unit_lists_checkpoints_endpoint_last(tmp_path):
     rd = _run(tmp_path, "dog/a/ftseed1", steps=(50, 100))
     _teacher(tmp_path)
     unit = build_unit(rd, tmp_path, "last", endpoint_only=False, extra_refs=())
-    assert unit.ckpt_rels == (
-        "checkpoints/checkpoint-50", "checkpoints/checkpoint-100", "checkpoints",
-    )
+    # `checkpoint-100` sits at the manifest's `n_train_steps`, i.e. it is the endpoint
+    # adapter's former byte-duplicate, and is enumerated ONCE (as the endpoint).
+    assert unit.ckpt_rels == ("checkpoints/checkpoint-50", "checkpoints")
     assert unit.references == (_TEACHER_KEY,)
     assert unit.base_model_dir == "pythia-160m"
 

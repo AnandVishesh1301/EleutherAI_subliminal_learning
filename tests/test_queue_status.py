@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from scripts.queue_status import (
-    annotate_queue_order, borrow_family_medians, job_kind, model_arch, completions_per_hour, durations_s,
+    _active, annotate_queue_order, borrow_family_medians, job_kind, model_arch, completions_per_hour, durations_s,
     effective_mem_mib, eta_s, family_key, fmt_eta, fmt_mem, fmt_work, last_reclaim_utc,
     node_concurrency, node_work, read_yielded, render,
 )
@@ -364,3 +364,12 @@ def test_yielded_node_is_not_blocked(tmp_path):
     assert q["last_reclaim_utc"] == "2026-09-17T02:45:37+00:00" and "yielded" in q["blocked_reason"]
     assert dep["eta"] == "yielded" and "dep q yielded" in dep["blocked_reason"]
     assert real["eta"] == "blocked"
+
+
+def test_waiting_only_queue_is_active_and_rendered():
+    q = _row("waitonly", 50, 0, 600.0, node="a", wait_nodes={"a": 2})
+    q.update({"parked": False, "complete": False})
+    assert _active(q)
+    annotate_queue_order([q])
+    q.update({"done": 0, "failed": 0, "n_durations": 5, "stale_running": 0, "mem": "16G"})
+    assert "waitonly" in render([q])

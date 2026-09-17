@@ -14,6 +14,7 @@ plain ``float``/``int`` so they JSON-serialize unchanged.
 
 from __future__ import annotations
 
+import itertools
 import warnings
 from dataclasses import dataclass, field
 from typing import Mapping
@@ -25,6 +26,9 @@ __all__ = [
     "SignTestResult",
     "ExceedanceResult",
     "StratifiedPermResult",
+    "SignFlipResult",
+    "ArmSetResult",
+    "FamilyContrastResult",
     "PoolRankResult",
     "paired_sign_test",
     "exceedance_test",
@@ -33,6 +37,9 @@ __all__ = [
     "pool_rank_permutation",
     "conformal_rank_p",
     "prior_scaled_effect",
+    "paired_sign_flip_test",
+    "role_stratified_arm_permutation",
+    "stratified_family_contrast_permutation",
 ]
 
 
@@ -70,6 +77,65 @@ class StratifiedPermResult:
     n_perm: int
     floor: float
     observed_by_group: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SignFlipResult:
+    """Outcome of `paired_sign_flip_test`: the summed paired contrast and its sign-flip p.
+
+    ``exact`` says whether all ``2 ** n`` sign patterns were enumerated; ``n_dropped`` counts
+    the non-finite contrasts left out, and ``n_labelings`` is the number of null patterns used.
+    """
+
+    observed: float
+    n: int
+    n_positive: int
+    p: float
+    floor: float
+    n_labelings: int
+    exact: bool
+    n_dropped: int
+
+
+@dataclass(frozen=True)
+class ArmSetResult:
+    """Outcome of `role_stratified_arm_permutation`: the summed per-role arm-set contrast.
+
+    ``observed_by_role`` holds each role's contribution to `observed` (they sum to it) and
+    ``arms_by_role`` its ``(n_A, n_B)`` arm counts; ``exact`` says whether every family
+    relabelling was enumerated.
+    """
+
+    observed: float
+    p: float
+    floor: float
+    null_quantiles: dict[str, float]
+    n_labelings: int
+    exact: bool
+    n_roles: int
+    n_roles_dropped: int
+    observed_by_role: dict[str, float] = field(default_factory=dict)
+    arms_by_role: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FamilyContrastResult:
+    """Outcome of `stratified_family_contrast_permutation` with its null summary.
+
+    ``observed_by_group`` holds each group's (arm pair's) contribution to `observed`, which the
+    contributions sum to; ``exceedance_count`` is the descriptive per-stratum count of family-A
+    values strictly above that stratum's family-B maximum, summed over strata.
+    """
+
+    observed: float
+    p: float
+    floor: float
+    null_quantiles: dict[str, float]
+    n_perm: int
+    n_strata: int
+    n_strata_dropped: int
+    exceedance_count: int
+    observed_by_group: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -256,6 +322,317 @@ def stratified_exceedance_permutation(
     return StratifiedPermResult(
         observed=observed, p=p, null_quantiles=quantiles, n_perm=int(n_perm),
         floor=float(1 / (n_perm + 1)), observed_by_group=by_group,
+    )
+
+
+def paired_sign_flip_test(
+    contrasts, *, n_perm: int = 20000, seed: int = 0, max_exact_n: int = 20
+) -> SignFlipResult:
+    """Arm-level sign-flip test on role-matched paired contrasts (family A minus family B).
+
+    Statistic: the SUM of the paired contrasts, one contrast per role-matched arm pair (the
+    count of positive contrasts is reported alongside as the descriptive direction tally).
+
+    Null: each pair's contrast is equally likely to carry either sign -- flip the signs
+    independently across pairs. That is the only exchangeability the design supports: the two
+    arms of a pair share their role (which endpoint is held fixed) and their teacher pool, so
+    under "the families transfer equally" the label A/B on an arm pair is arbitrary and flipping
+    it negates that pair's contrast. Hand-rolled: this is a sign-flip (randomization) test on a
+    sum, not the sign test of `paired_sign_test`, which throws away the magnitudes.
+
+    Why this test and not the cell-stratified one: an arm pair is the honest unit for a
+    *family* claim -- the students inside an arm share one numbers pool and one receiver, so
+    cells are not independent replicates of "the family". The cell-stratified p from
+    `stratified_family_contrast_permutation` is about THESE students and is quoted alongside,
+    never instead.
+
+    Args:
+        contrasts: One contrast per arm pair (family A minus family B); non-finite entries are
+            dropped and counted in ``n_dropped``.
+        n_perm: Monte-Carlo draws used when ``n > max_exact_n``.
+        seed: Seed of the Monte-Carlo ``default_rng``.
+        max_exact_n: Enumerate all ``2 ** n`` sign patterns at or below this many pairs.
+
+    Returns:
+        A `SignFlipResult`. Exact path: ``p = #{null >= observed} / 2 ** n`` with
+        ``floor = 1 / 2 ** n``; Monte-Carlo path: ``p = (#{null >= observed} + 1) / (n_perm + 1)``
+        with ``floor = 1 / (n_perm + 1)``. With no finite contrast, ``p`` is ``nan``.
+    """
+    c = np.asarray(contrasts, dtype=float).ravel()
+    finite = np.isfinite(c)
+    n_dropped = int((~finite).sum())
+    c = c[finite]
+    n = int(c.size)
+    observed = float(c.sum())
+    n_positive = int((c > 0).sum())
+    if n == 0:
+        return SignFlipResult(observed=float("nan"), n=0, n_positive=0, p=float("nan"),
+                              floor=float("nan"), n_labelings=0, exact=True, n_dropped=n_dropped)
+    exact = n <= max_exact_n
+    if exact:
+        n_labelings = 2 ** n
+        bits = np.arange(n, dtype=np.int64)
+        count = 0
+        # Chunk the pattern index so the (patterns x pairs) sign matrix stays bounded in memory.
+        chunk = max(1, 1 << 16)
+        for start in range(0, n_labelings, chunk):
+            idx = np.arange(start, min(start + chunk, n_labelings), dtype=np.int64)
+            signs = 1.0 - 2.0 * ((idx[:, None] >> bits[None, :]) & 1)
+            count += int((signs @ c >= observed).sum())
+        p, floor = count / n_labelings, 1.0 / n_labelings
+    else:
+        rng = np.random.default_rng(seed)
+        signs = 1.0 - 2.0 * rng.integers(0, 2, size=(n_perm, n))
+        count = int((signs @ c >= observed).sum())
+        n_labelings = int(n_perm)
+        p, floor = (count + 1) / (n_perm + 1), 1.0 / (n_perm + 1)
+    return SignFlipResult(observed=observed, n=n, n_positive=n_positive, p=float(p),
+                          floor=float(floor), n_labelings=n_labelings, exact=bool(exact),
+                          n_dropped=n_dropped)
+
+
+def role_stratified_arm_permutation(
+    frame: pd.DataFrame,
+    *,
+    family_a: str,
+    family_b: str,
+    role_col: str = "role",
+    family_col: str = "family",
+    value_col: str = "value",
+    max_exact: int = 1_000_000,
+    n_perm: int = 20000,
+    seed: int = 0,
+) -> ArmSetResult:
+    """Role-stratified permutation comparing two families' SETS of arms, one value per arm.
+
+    Statistic: ``sum over roles of (mean of family-A arm values - mean of family-B arm values)``,
+    where an arm value is that arm's summary effect (e.g. its mean control-normalized,
+    prior-scaled gap) and a role is a transfer geometry: both arms leaving the families' common
+    base, both arriving at it, or neither endpoint shared.
+
+    Null: within a role, WHICH family an arm belongs to is arbitrary -- permute the family labels
+    among that role's arms keeping the per-role A/B counts, independently across roles. Roles are
+    the strata because role is the one design factor that changes an arm's expected effect
+    regardless of family (receiver prior, and how much of the base the endpoints share); pooling
+    roles would let a family that happens to cover the loud role look stronger. There is
+    deliberately NO one-to-one pairing of ``x_i`` with ``y_i``: the seed index is an arbitrary
+    label, so pairing on it invents a matching the design does not have -- the comparison is
+    between the two sets of arms filling each role.
+
+    Arms are the honest unit for a family claim: every student inside an arm shares one numbers
+    pool and one receiver, so cells are not replicates of "the family". Caveat on the counts:
+    arms within a family also share base models and senders (``x_1->x_2`` and ``x_1->x_3`` share
+    a sender), so a role's arm count overstates its independent information; the p is a
+    randomization p over family labels, not a sample from a population of arms.
+
+    Args:
+        frame: Tidy rows, one per arm, with a role label, a family label and a value.
+        family_a: Label of the family claimed stronger (the positive side of the contrast).
+        family_b: Label of the reference family.
+        role_col, family_col, value_col: Column names in `frame`.
+        max_exact: Enumerate every labelling when the product over roles of ``C(n, n_A)`` is at
+            most this; otherwise sample.
+        n_perm: Monte-Carlo draws when exact enumeration is too large.
+        seed: Seed of the Monte-Carlo ``default_rng``.
+
+    Returns:
+        An `ArmSetResult`. Exact path: ``p = #{null >= observed} / n_labelings``, floor
+        ``1 / n_labelings``; Monte Carlo: ``p = (count + 1) / (n_perm + 1)``, floor
+        ``1 / (n_perm + 1)``. Roles holding arms of only ONE family define no contrast and are
+        dropped (counted in ``n_roles_dropped``).
+
+    Raises:
+        ValueError: If no role holds arms of both families.
+    """
+    from math import comb
+
+    for col in (role_col, family_col, value_col):
+        if col not in frame.columns:
+            raise ValueError(f"frame has no {col!r} column")
+    df = frame[frame[family_col].isin([family_a, family_b])]
+    df = df[np.isfinite(pd.to_numeric(df[value_col], errors="coerce"))]
+
+    roles, dropped = [], 0
+    for role, block in df.groupby(role_col, sort=True):
+        is_a = (block[family_col] == family_a).to_numpy()
+        if not is_a.any() or is_a.all():
+            dropped += 1
+            continue
+        roles.append((str(role), block[value_col].to_numpy(dtype=float), is_a))
+    if not roles:
+        raise ValueError("no role holds arms of both families")
+
+    # mean(A) - mean(B) is affine in the A-sum, so only that sum has to be relabelled.
+    def contrast(values: np.ndarray, picks: np.ndarray, n_a: int) -> np.ndarray:
+        """Per-labelling role contrast for ``picks`` = the A-indices of each labelling."""
+        n_b = values.size - n_a
+        return values[picks].sum(axis=-1) * (1 / n_a + 1 / n_b) - values.sum() / n_b
+
+    observed, by_role, arms_by_role = 0.0, {}, {}
+    n_labelings = 1
+    for role, values, is_a in roles:
+        n_a = int(is_a.sum())
+        contrib = float(contrast(values, np.flatnonzero(is_a), n_a))
+        observed += contrib
+        by_role[role] = contrib
+        arms_by_role[role] = (n_a, int(values.size - n_a))
+        n_labelings *= comb(values.size, n_a)
+
+    exact = n_labelings <= max_exact
+    if exact:
+        null = np.zeros(1)
+        for _role, values, is_a in roles:
+            n_a = int(is_a.sum())
+            picks = np.array(list(itertools.combinations(range(values.size), n_a)), dtype=int)
+            null = (null[:, None] + contrast(values, picks, n_a)[None, :]).ravel()
+        p, floor, n_draws = float((null >= observed).mean()), 1.0 / n_labelings, n_labelings
+    else:
+        rng = np.random.default_rng(seed)
+        null = np.zeros(n_perm)
+        for _role, values, is_a in roles:
+            n_a = int(is_a.sum())
+            picks = np.argsort(rng.random((n_perm, values.size)), axis=1)[:, :n_a]
+            null += contrast(values, picks, n_a)
+        p = float((int((null >= observed).sum()) + 1) / (n_perm + 1))
+        floor, n_draws = 1.0 / (n_perm + 1), int(n_perm)
+
+    quantiles = {
+        "50": float(np.percentile(null, 50)),
+        "95": float(np.percentile(null, 95)),
+        "99": float(np.percentile(null, 99)),
+        "99.9": float(np.percentile(null, 99.9)),
+        "max": float(null.max()),
+    }
+    return ArmSetResult(
+        observed=float(observed), p=float(p), floor=float(floor), null_quantiles=quantiles,
+        n_labelings=int(n_draws), exact=bool(exact), n_roles=len(roles),
+        n_roles_dropped=int(dropped), observed_by_role=by_role, arms_by_role=arms_by_role,
+    )
+
+
+def _stratum_exceedances(values: np.ndarray, picks: np.ndarray) -> np.ndarray:
+    """Per-labelling count of A-labelled values strictly above the B maximum.
+
+    Args:
+        values: One stratum's values.
+        picks: ``(draws x n_A)`` indices of the values labelled A in each labelling.
+
+    Returns:
+        A ``(draws,)`` integer-valued count array.
+    """
+    mask = np.zeros((picks.shape[0], values.size), dtype=bool)
+    np.put_along_axis(mask, picks, True, axis=1)
+    v = values[None, :]
+    b_max = np.where(mask, -np.inf, v).max(axis=1, keepdims=True)
+    return ((v > b_max) & mask).sum(axis=1).astype(float)
+
+
+def stratified_family_contrast_permutation(
+    frame: pd.DataFrame,
+    *,
+    family_a: str,
+    family_b: str,
+    stratum_col: str = "stratum",
+    family_col: str = "family",
+    value_col: str = "value",
+    group_col: str | None = "group",
+    statistic: str = "mean",
+    n_perm: int = 20000,
+    seed: int = 0,
+) -> FamilyContrastResult:
+    """Cell-stratified family-label permutation on the summed within-stratum family contrast.
+
+    Statistic (`statistic`): ``"mean"`` sums ``mean of family-A values - mean of family-B values``
+    over strata; ``"exceedance"`` sums, over strata, the COUNT of family-A values strictly above
+    that stratum's family-B maximum -- a rank-only reading of the same strata, invariant to any
+    increasing rescaling of the values. A stratum is one ``(arm pair, student cell)`` and the
+    values are already control-normalized (treatment minus that cell's own control, optionally in
+    units of the receiver's prior), so the control arm is divided out before any label moves.
+
+    Null: within each stratum, WHICH family a value belongs to is arbitrary -- permute the family
+    labels among that stratum's finite values keeping the A/B counts, independently across strata.
+    Stratifying on the cell is what makes this valid: cells differ enormously in difficulty (their
+    K/K* position), and a single pooled permutation would let the easy cells of whichever family
+    happens to cover more of them manufacture a contrast. Hand-rolled: no library exposes this
+    summed within-stratum contrast under per-stratum relabelling.
+
+    Why it is the SECONDARY level: the students inside one arm share a numbers pool and a
+    receiver, so this p is a statement about THESE students, not about the families as
+    populations. The honest unit for a "family A transfers more than family B" claim is the arm
+    pair, i.e. `paired_sign_flip_test`; quote this p alongside that one.
+
+    Args:
+        frame: Tidy rows with a stratum key, a family label, and a value column.
+        family_a: Label of the family claimed stronger (the positive side of the contrast).
+        family_b: Label of the reference family.
+        stratum_col, family_col, value_col: Column names in `frame`.
+        group_col: Optional column whose labels group strata (the arm pair) for the reported
+            per-group contributions; ``None`` (or an absent column) reports none.
+        statistic: ``"mean"`` (summed within-stratum mean contrast) or ``"exceedance"`` (summed
+            count of family-A values above the stratum's family-B maximum).
+        n_perm: Number of null draws.
+        seed: Seed of the ``default_rng`` used for the draws.
+
+    Returns:
+        A `FamilyContrastResult` with ``p = (#{null >= observed} + 1) / (n_perm + 1)`` and
+        ``floor = 1 / (n_perm + 1)``. Strata without at least one finite value from BOTH
+        families define no contrast and are dropped (counted in ``n_strata_dropped``).
+    """
+    for col in (stratum_col, family_col, value_col):
+        if col not in frame.columns:
+            raise ValueError(f"frame has no {col!r} column")
+    if statistic not in ("mean", "exceedance"):
+        raise ValueError(f"statistic must be 'mean' or 'exceedance', got {statistic!r}")
+    group_col = group_col if group_col and group_col in frame.columns else None
+    df = frame[np.isfinite(pd.to_numeric(frame[value_col], errors="coerce"))]
+    df = df[df[family_col].isin([family_a, family_b])]
+
+    strata, dropped = [], 0
+    for key, block in df.groupby(stratum_col, sort=True):
+        is_a = (block[family_col] == family_a).to_numpy()
+        if not is_a.any() or is_a.all():
+            dropped += 1
+            continue
+        values = block[value_col].to_numpy(dtype=float)
+        group = str(block[group_col].iloc[0]) if group_col else ""
+        strata.append((str(key), group, values, int(is_a.sum()), is_a))
+    if not strata:
+        raise ValueError("no stratum has finite values from both families")
+
+    rng = np.random.default_rng(seed)
+    null = np.zeros(n_perm, dtype=float)
+    observed = 0.0
+    by_group: dict[str, float] = {}
+    exceedance = 0
+    for _key, group, values, n_a, is_a in strata:
+        k, total = values.size, float(values.sum())
+        n_b = k - n_a
+        # mean(A) - mean(B) is affine in the A-sum, so only that sum has to be permuted.
+        scale, offset = 1.0 / n_a + 1.0 / n_b, total / n_b
+        exc = int((values[is_a] > values[~is_a].max()).sum())
+        exceedance += exc
+        contrib = exc if statistic == "exceedance" else float(values[is_a].sum()) * scale - offset
+        observed += contrib
+        if group_col:
+            by_group[group] = by_group.get(group, 0.0) + contrib
+        picks = np.argsort(rng.random((n_perm, k)), axis=1)[:, :n_a]
+        if statistic == "exceedance":
+            null += _stratum_exceedances(values, picks)
+        else:
+            null += np.take(values, picks).sum(axis=1) * scale - offset
+
+    p = float((int((null >= observed).sum()) + 1) / (n_perm + 1))
+    quantiles = {
+        "50": float(np.percentile(null, 50)),
+        "95": float(np.percentile(null, 95)),
+        "99": float(np.percentile(null, 99)),
+        "99.9": float(np.percentile(null, 99.9)),
+        "max": float(null.max()),
+    }
+    return FamilyContrastResult(
+        observed=float(observed), p=p, floor=float(1 / (n_perm + 1)), null_quantiles=quantiles,
+        n_perm=int(n_perm), n_strata=len(strata), n_strata_dropped=int(dropped),
+        exceedance_count=int(exceedance), observed_by_group=by_group,
     )
 
 

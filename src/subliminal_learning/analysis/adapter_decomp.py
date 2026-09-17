@@ -43,7 +43,7 @@ from pathlib import Path
 from loguru import logger
 
 from subliminal_learning.gkd.layout import parse_optim_slug
-from subliminal_learning.utils.run_io import checkpoint_nonfinite_count
+from subliminal_learning.utils.run_io import checkpoint_nonfinite_count, final_train_step
 from typing import Any
 
 import numpy as np
@@ -291,6 +291,18 @@ def discover_adapters(
                 else:
                     refs.append(_ref(ckpt_dir / ADAPTER_WEIGHTS, None))
             if checkpoints:
+                # The endpoint adapter doubles as the ladder's last point: the
+                # `checkpoint-N` dir that duplicated it is no longer written (see
+                # `students.early_stop.SkipFinalStepSave`) and is being deleted from
+                # finished runs, so without this the trajectory loses its last step.
+                end_step = final_train_step(ckpt_dir.parent)
+                have_end = end_step is not None and (
+                    ckpt_dir / f"checkpoint-{end_step}" / ADAPTER_WEIGHTS).exists()
+                if (end_step is not None and not have_end
+                        and (ckpt_dir / ADAPTER_WEIGHTS).exists()
+                        and not (checkpoint_nonfinite_count(ckpt_dir) if gate_nonfinite
+                                 else 0)):
+                    refs.append(_ref(ckpt_dir / ADAPTER_WEIGHTS, end_step))
                 for sub in ckpt_dir.glob("checkpoint-*"):
                     sm = _STEP_RE.match(sub.name)
                     if not (sm and (sub / ADAPTER_WEIGHTS).exists()):

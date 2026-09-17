@@ -8,6 +8,8 @@ train a DIFFERENT model, so the cut is made by a callback:
 
 - `StopAtStep` flips `control.should_training_stop` the moment `global_step` reaches the
   budget, after that step's optimizer update.
+- `SkipFinalStepSave` clears `should_save` at the run's final step, where the trainer's
+  own `save_model` already writes the same weights to the run's `checkpoints/` root.
 - `SaveAtSteps` flips `control.should_save` at an explicit list of steps. HF's fixed
   `save_steps` interval is pushed beyond the run by the caller
   (`teachers.sft_io.run_teacher_sft_completion_only`), so these are the ONLY intermediate
@@ -19,6 +21,7 @@ leaves them None builds exactly the Trainer it always did.
 
 from __future__ import annotations
 
+from loguru import logger
 from transformers import TrainerCallback
 
 # `save_steps` handed to HF when an explicit save list is in force: larger than any step
@@ -96,4 +99,45 @@ class SaveAtSteps(TrainerCallback):
         if state.global_step in self.steps:
             control.should_save = True
             self.saved_steps.append(state.global_step)
+        return control
+
+
+class SkipFinalStepSave(TrainerCallback):
+    """Drop a scheduled save at the step training STOPS at: `save_model` writes it anyway.
+
+    `teachers.sft_io.run_teacher_sft_completion_only` calls `trainer.save_model` into
+    `checkpoints/` the moment `trainer.train()` returns, so a `checkpoint-N` at the last
+    step is a byte-duplicate of the root adapter (~1.18 GB per Qwen run on the shared
+    stash). "Last step" is whichever mechanism ends the run: `StopAtStep` flipping
+    `should_training_stop` at `stop_step`, or the budget itself -- HF's
+    `DefaultFlowCallback` FORCES `should_save` at `global_step >= max_steps` under
+    `save_strategy="steps"`. `resolve_save_steps` still returns `stop_step` (the schedule
+    is unchanged); the save is simply skipped here, which is why this callback must be
+    appended AFTER every other one.
+
+    A queue yield (`YieldCheckpoint`) at that step is NOT skipped: it happens INSTEAD of
+    the final save, so its full-state dir is the only copy of the weights. `is_yielding`
+    is that callback's pending flag.
+
+    Attributes:
+        skipped_steps: The final steps whose scheduled save was dropped.
+    """
+
+    def __init__(self, is_yielding=None) -> None:
+        self.is_yielding = is_yielding
+        self.skipped_steps: list[int] = []
+
+    def on_step_end(self, args, state, control, **kwargs):
+        stopping = control.should_training_stop or state.global_step >= state.max_steps
+        if not control.should_save or not stopping:
+            return control
+        if self.is_yielding is not None and self.is_yielding():
+            return control
+        control.should_save = False
+        self.skipped_steps.append(state.global_step)
+        logger.info(
+            "skipping the scheduled checkpoint at the final step {} (the final "
+            "save_model writes the same weights to the run's checkpoints/ root)",
+            state.global_step,
+        )
         return control

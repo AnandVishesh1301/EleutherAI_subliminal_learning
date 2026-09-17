@@ -44,6 +44,12 @@ __all__ = [
     "significance_rows",
     "significance_table",
     "style_significance_table",
+    "FamilyArm",
+    "FamilyComparison",
+    "ModeComparison",
+    "role_assigned_arms",
+    "normalized_effect_frame",
+    "compare_families",
 ]
 
 CONTROL_LABEL = "CONTROL"
@@ -515,7 +521,7 @@ def significance_rows(matrix: CellMatrix, dead: np.ndarray, prior: float, arm: s
         j = matrix.pools.index(tag)
         y = matrix.values[:, j]
         ok = np.isfinite(y) & np.isfinite(x)
-        s, e = tt.paired_sign_test(y, x), tt.exceedance_test(y, x)
+        s, e = tt.paired_sign_test(y, x), tt.exceedance_test(y[ok], x[ok])
         name = tag if tag in pooled_teachers else f"{tag} ({int(ok.sum())}/{len(matrix.cells)} cells, not in pool)"
         cols = [j, matrix.control_col]
         rows.append(_summary_row(arm, name, matrix.values[ok][:, cols], dead[ok][:, cols], prior,
@@ -523,12 +529,34 @@ def significance_rows(matrix: CellMatrix, dead: np.ndarray, prior: float, arm: s
                                     "exceed.": e.count, "exceed. p": e.p}))
     if len(pooled_teachers) >= 2:
         cols = [matrix.pools.index(t) for t in pooled_teachers] + [matrix.control_col]
-        r = tt.stratified_exceedance_permutation(matrix.values[:, cols], len(cols) - 1,
+        keep = np.isfinite(matrix.values[:, cols]).all(axis=1)
+        r = tt.stratified_exceedance_permutation(matrix.values[keep][:, cols], len(cols) - 1,
                                                  n_perm=n_perm, seed=seed)
-        row = _summary_row(arm, "all full-set teachers", matrix.values[:, cols], dead[:, cols],
-                           prior, **{"exceed.": r.observed, "exceed. p": r.p})
+        row = _summary_row(arm, "all full-set teachers", matrix.values[keep][:, cols],
+                           dead[keep][:, cols], prior,
+                           **{"exceed.": r.observed, "exceed. p": r.p})
         rows.append({**row, "pooled": True})
     return rows
+
+
+def held_out_row(spec: dict, matrix: CellMatrix, dead: np.ndarray, prior: float) -> dict:
+    """A held-out confirmation row on the cells outside ``selection_cells`` where both the
+    teacher's run and its control are alive: the exceedance test (primary) and the one-sided
+    sign test (secondary), both on the same paired-finite cells."""
+    j = matrix.pools.index(spec["teacher"])
+    held = np.array([c not in spec["selection_cells"] for c in matrix.cells])
+    if held.sum() != spec["n_held_out"]:
+        raise ValueError(f"{spec['name']}: {held.sum()} held-out cells, "
+                         f"expected {spec['n_held_out']}")
+    alive = held & (dead[:, j] == 0) & (dead[:, matrix.control_col] == 0)
+    cols = [j, matrix.control_col]
+    y, x = matrix.values[alive, j], matrix.values[alive, matrix.control_col]
+    ok = np.isfinite(y) & np.isfinite(x)
+    s, e = tt.paired_sign_test(y, x), tt.exceedance_test(y[ok], x[ok])
+    return _summary_row(spec["name"], spec["teacher"], matrix.values[alive][:, cols],
+                        dead[alive][:, cols], prior,
+                        **{"wins / n": f"{s.wins}/{s.n}", "sign p": s.p,
+                           "exceed.": e.count, "exceed. p": e.p})
 
 
 def _has_seed_endpoint(leaf: Path, ftseed: int, prompt_set: str) -> bool:
@@ -543,7 +571,8 @@ def _dead_label(leaf: Path, ftseed: int, pool: str, cut: float) -> float:
     doc = json.loads(path.read_text())
     if doc.get("pool_version") != pool:
         raise ValueError(f"{path}: pool_version {doc.get('pool_version')} != {pool}")
-    return float(doc["delta_ce"] > cut)
+    # A probe that ran but recorded no delta_ce carries no label; NaN, not a verdict.
+    return np.nan if doc.get("delta_ce") is None else float(doc["delta_ce"] > cut)
 
 
 def significance_table(arms_json: str | Path, output_root: Path | None = None) -> pd.DataFrame:
@@ -556,7 +585,7 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
     against ``expected_prior`` within 5%); dead = probe ``delta_ce`` above the receiver's anchored
     cut. ``in_progress`` arms become a coverage row until complete. Then one row per ``pools``
     entry (arm-stratified permutation, each arm against its own control maximum; arms must share
-    animal and ``data_order``), and one row per ``held_out`` entry (two-sided sign test on the
+    animal and ``data_order``), and one row per ``held_out`` entry (one-sided sign test on the
     cells outside ``selection_cells`` where both runs are alive).
 
     Args:
@@ -566,8 +595,6 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
     Returns:
         `TABLE_COLUMNS` plus a boolean ``pooled`` column, in registry order.
     """
-    from scipy.stats import binomtest
-
     from subliminal_learning.analysis import labels
 
     arms_json = Path(arms_json)
@@ -666,7 +693,10 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
         for n in pool["arms"]:
             m = matrices[n]
             keep = [m.pools.index(t) for t in arms[n]["teachers"]] + [m.control_col]
-            mats[n] = CellMatrix(frame=m.frame, values=m.values[:, keep], cells=m.cells,
+            vals = m.values[:, keep]
+            rows_ok = np.isfinite(vals).all(axis=1)
+            mats[n] = CellMatrix(frame=m.frame, values=vals[rows_ok],
+                                 cells=[c for c, k in zip(m.cells, rows_ok) if k],
                                  pools=[m.pools[j] for j in keep], control_col=len(keep) - 1,
                                  missing=[])
         st = stack_cell_matrices(mats)
@@ -677,19 +707,9 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
                      "exceed.": r.observed, "exceed. p": r.p, "pooled": True})
 
     for h in reg.get("held_out", []):
-        a, m, d = arms[h["arm"]], matrices[h["arm"]], deads[h["arm"]]
-        j = m.pools.index(h["teacher"])
-        held = np.array([c not in h["selection_cells"] for c in m.cells])
-        if held.sum() != h["n_held_out"]:
-            raise ValueError(f"{h['name']}: {held.sum()} held-out cells, expected {h['n_held_out']}")
-        alive = held & (d[:, j] == 0) & (d[:, m.control_col] == 0)
-        cols = [j, m.control_col]
-        s = tt.paired_sign_test(m.values[alive, j], m.values[alive, m.control_col])
-        rows.append(_summary_row(h["name"], h["teacher"], m.values[alive][:, cols], d[alive][:, cols],
-                                 priors[(a["animal"], base_name(a["receiver"]))],
-                                 **{"wins / n": f"{s.wins}/{s.n}",
-                                    "sign p": binomtest(s.wins, s.n, 0.5).pvalue,
-                                    "exceed.": "—", "exceed. p": "—"}))
+        a = arms[h["arm"]]
+        rows.append(held_out_row(h, matrices[h["arm"]], deads[h["arm"]],
+                                 priors[(a["animal"], base_name(a["receiver"]))]))
     return pd.DataFrame(rows).reindex(columns=[*TABLE_COLUMNS, "pooled"])
 
 
@@ -706,7 +726,8 @@ def _is_significant(p) -> bool:
 
 
 def style_significance_table(df: pd.DataFrame):
-    """Styler for `significance_table`: p to 2 s.f., ×prior to 2 dp, p < 0.05 bold on light green,
+    """Styler for `significance_table`: p to 2 s.f., ×prior to 2 dp, the PRIMARY test's
+    ``exceed. p`` < 0.05 bold on light green (the secondary ``sign p`` is never highlighted),
     pooled rows on a translucent grey (readable on light and dark themes). Rows are indexed by
     (arm, teacher) so each run of consecutive same-arm rows shows its arm once (row-span cell),
     with a 2px divider above the first row of every group; the positional level is hidden."""
@@ -739,7 +760,7 @@ def style_significance_table(df: pd.DataFrame):
         return "" if v is None or pd.isna(v) else f"{v:.2f}"
 
     return (show.style.apply(row_style, axis=1)
-            .map(lambda v: green if _is_significant(v) else "", subset=["sign p", "exceed. p"])
+            .map(lambda v: green if _is_significant(v) else "", subset=["exceed. p"])
             .format({"sign p": _fmt_p, "exceed. p": _fmt_p, "exceed.": count,
                      "treat median ×prior": ratio, "ctrl median ×prior": ratio}, na_rep="")
             .apply_index(arm_style, axis="index", level=0)
@@ -747,3 +768,482 @@ def style_significance_table(df: pd.DataFrame):
             .set_table_styles([{"selector": "tbody th",
                                 "props": "text-align: left; vertical-align: top;"}])
             .hide(axis="index", level=2))
+
+
+# ----------------------------------------------------------------------------------------------
+# family comparison: is one seed family's SET of arms stronger than another's, role by role?
+# ----------------------------------------------------------------------------------------------
+ARM_COLUMNS = ["role", "family", "arm", "cells", "students", "mean effect", "exceed. frac"]
+ROLE_COLUMNS = ["role", "arms A", "arms B", "cells", "mean A", "mean B", "contrast"]
+
+#: Transfer geometries an arm can have relative to the families' common base, in report order.
+ARM_ROLES = ("shared-sender", "shared-receiver", "unshared")
+
+#: The single role every arm carries when the role stratification is switched off.
+NO_ROLE = "all"
+
+#: The two ways a student's effect is read: raw gap over its control, and that gap in units of
+#: the receiver's prior. Both are always computed; every test runs once per mode.
+VALUE_MODES = ("absolute", "relative")
+VALUE_COLUMNS = {"absolute": "value_abs", "relative": "value_rel"}
+
+
+@dataclass(frozen=True)
+class FamilyArm:
+    """One family's arm, tagged with its transfer role.
+
+    Attributes:
+        family: Display label of the family the arm belongs to.
+        sender: Sender (teacher) base token.
+        receiver: Receiver (student) base token.
+        role: ``"shared-sender"`` (the arm leaves the families' common base),
+            ``"shared-receiver"`` (it arrives at it), or ``"unshared"`` (neither endpoint is the
+            common base). The role, not the seed index, is what the comparison stratifies on: it
+            fixes the receiver prior and how much of the base the two endpoints share.
+    """
+
+    family: str
+    sender: str
+    receiver: str
+    role: str
+
+    @property
+    def arm(self) -> str:
+        """``"{sender}->{receiver}"``."""
+        return f"{self.sender}->{self.receiver}"
+
+
+@dataclass(frozen=True)
+class ModeComparison:
+    """One value mode's tables and its four tests (two arm-level, two cell-level).
+
+    Attributes:
+        mode: ``"absolute"`` or ``"relative"`` (see `VALUE_MODES`).
+        arms: One row per usable arm, columns `ARM_COLUMNS`.
+        roles: One row per usable role, columns `ROLE_COLUMNS`.
+        arm_level_mean: `stats.role_stratified_arm_permutation` on each arm's mean effect --
+            the honest unit for a family claim.
+        arm_level_exceed: the same test on each arm's exceedance fraction against its own
+            control. That summary is scale-free, so it is identical in both value modes.
+        stratified_mean: cell-stratified `stats.stratified_family_contrast_permutation` with the
+            summed mean contrast, a statement about these students.
+        stratified_exceed: the same test with the summed A-above-max-B count.
+    """
+
+    mode: str
+    arms: pd.DataFrame
+    roles: pd.DataFrame
+    arm_level_mean: tt.ArmSetResult
+    arm_level_exceed: tt.ArmSetResult
+    stratified_mean: tt.FamilyContrastResult
+    stratified_exceed: tt.FamilyContrastResult
+
+
+@dataclass(frozen=True)
+class FamilyComparison:
+    """Outcome of `compare_families`: both families' arm sets, per value mode, both levels.
+
+    Attributes:
+        modes: ``{mode: ModeComparison}`` over `VALUE_MODES`.
+        frame: The tidy effect rows every test ran on (both value columns).
+        skipped_arms: ``"{arm}: reason"`` per arm that could not be loaded or had no usable run.
+        skipped_roles: ``"{role}: reason"`` per role one family covers alone (no contrast).
+        n_dead_treatment: Dead treatment student runs (dropped only under ``dead="drop"``).
+        n_dead_control: Dead control cells, same convention.
+        dead_policy: ``"keep"`` (dead runs enter as measured) or ``"drop"``.
+        notes: Anything else the caller must see (e.g. a receiver with no anchored dead cut).
+    """
+
+    modes: dict[str, ModeComparison]
+    frame: pd.DataFrame
+    skipped_arms: list[str] = field(default_factory=list)
+    skipped_roles: list[str] = field(default_factory=list)
+    n_dead_treatment: int = 0
+    n_dead_control: int = 0
+    dead_policy: str = "keep"
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def n_dead(self) -> int:
+        """Dead treatment runs plus dead control cells."""
+        return self.n_dead_treatment + self.n_dead_control
+
+
+def role_assigned_arms(
+    bases_a: Sequence[str],
+    bases_b: Sequence[str],
+    *,
+    family_a: str = "A",
+    family_b: str = "B",
+    roles: bool = True,
+) -> list[FamilyArm]:
+    """Both families' ordered off-diagonal arms, each tagged with its transfer role.
+
+    With four bases per family (``[orig, ds1, ds2, ds3]`` vs ``[orig, fs1, fs2, fs3]``) each
+    family contributes 3 shared-sender arms (``orig->x_i``), 3 shared-receiver arms
+    (``x_i->orig``) and 6 unshared arms (``x_i->x_j``, ordered ``i != j``) -- 12 per family, 24 in
+    all. Arms are NOT paired across families by seed index: the index is an arbitrary label, so
+    the comparison is between the two SETS of arms filling each role.
+
+    Args:
+        bases_a: Family-A base tokens; ``bases_a[0]`` is the families' common base.
+        bases_b: Family-B base tokens, same length and same ordering convention.
+        family_a, family_b: Display labels written into `FamilyArm.family`.
+        roles: Tag each arm with its transfer role (default). ``False`` gives every arm the
+            single role `NO_ROLE`, i.e. no role stratification at all.
+
+    Returns:
+        The arms in role order (`ARM_ROLES`), family A before family B within each role.
+
+    Raises:
+        ValueError: If the families differ in size, hold fewer than two bases, or disagree on
+            the common base.
+    """
+    a, b = list(bases_a), list(bases_b)
+    if len(a) != len(b):
+        raise ValueError(f"families must have equally many bases, got {len(a)} and {len(b)}")
+    if len(a) < 2:
+        raise ValueError("a family needs a common base plus at least one seed")
+    if a[0] != b[0]:
+        raise ValueError(f"families must share their first base, got {a[0]!r} and {b[0]!r}")
+
+    def family_arms(bases: list[str], family: str) -> list[FamilyArm]:
+        common, seeds = bases[0], bases[1:]
+        out = [FamilyArm(family, common, x, "shared-sender") for x in seeds]
+        out += [FamilyArm(family, x, common, "shared-receiver") for x in seeds]
+        out += [FamilyArm(family, x, y, "unshared") for x in seeds for y in seeds if x != y]
+        return out
+
+    arms_a, arms_b = family_arms(a, family_a), family_arms(b, family_b)
+    ordered = [arm for role in ARM_ROLES
+               for arm in [*(x for x in arms_a if x.role == role),
+                           *(x for x in arms_b if x.role == role)]]
+    if roles:
+        return ordered
+    return [FamilyArm(x.family, x.sender, x.receiver, NO_ROLE) for x in ordered]
+
+
+class _ArmUnavailable(Exception):
+    """An arm cannot enter the comparison; the message is what gets reported."""
+
+
+def _arm_rows(
+    animal: str,
+    sender: str,
+    receiver: str,
+    teachers: Sequence[str],
+    *,
+    eval_animal: str,
+    prompt_set: str,
+    probe_pool: str,
+    dead_ftseed: int,
+    dead: str,
+    output_root: Path | None,
+    notes: list[str],
+    **kw,
+) -> tuple[pd.DataFrame, int, int]:
+    """One arm's rows ``(cell, teacher, value_abs, value_rel, treatment, control, dead_*)``.
+
+    ``value_abs`` = treatment minus the cell's control; ``value_rel`` = the same gap divided by
+    the receiver's prior. Runs labelled dead by the receiver's anchored probe cut are counted
+    either way, and dropped (treatment OR control side) only when `dead` is ``"drop"``: a dead
+    label is an outcome of the treatment, so dropping on it conditions on a post-treatment
+    variable.
+
+    Raises:
+        _ArmUnavailable: With the reason distinguished, because "the arm was never run" and "the
+        arm collapsed" are different facts: ``no control cells``, ``no receiver prior``,
+        ``no treatment runs (0 finite ...)``, ``all N control cells dead``, or
+        ``all N treatment runs dead``.
+    """
+    from subliminal_learning.analysis import labels
+
+    root = resolve_output_root(output_root)
+    matrix = load_cell_matrix(animal, sender, receiver, teachers, eval_animal=eval_animal,
+                              prompt_set=prompt_set, output_root=output_root, **kw)
+    if not matrix.cells:
+        raise _ArmUnavailable("no control cells")
+    prior = load_prior(eval_animal, receiver, prompt_set, output_root=output_root)
+    if not np.isfinite(prior) or prior == 0:
+        raise _ArmUnavailable("no receiver prior")
+
+    dataset_tag = kw.get("dataset_tag", DEFAULT_DATASET_TAG)
+    tseed = kw.get("tseed", 1)
+    receiver_dir, sender_dir = base_name(receiver), f"teacher-{base_name(sender)}"
+    numbers_base = (base_name(kw["control_numbers_base"]) if kw.get("control_numbers_base")
+                    else base_name(sender))
+    control_tree = dataset_dir(root, None, base=receiver_dir,
+                               dataset_tag=kw.get("control_dataset_tag") or dataset_tag,
+                               source=kw.get("control_source", "base"), numbers_base=numbers_base)
+    try:
+        cut = labels.anchored_cut(root, receiver_dir, pool=probe_pool)
+    except (KeyError, FileNotFoundError):
+        cut = None
+        note = f"{receiver_dir}: no anchored {probe_pool} cut, dead labelling unavailable"
+        if note not in notes:
+            notes.append(note)
+
+    def is_dead(leaf: Path) -> bool:
+        if cut is None:
+            return False
+        return _dead_label(leaf, dead_ftseed, probe_pool, cut) == 1.0
+
+    control = matrix.values[:, matrix.control_col]
+    matched = [i for i in range(len(matrix.cells)) if np.isfinite(control[i])]
+    treatment = np.delete(matrix.values, matrix.control_col, axis=1)
+    n_treatment = int(np.isfinite(treatment[matched]).sum())
+    rows, n_dead_control, n_dead_treatment = [], 0, 0
+    for i in matched:
+        cell = matrix.cells[i]
+        dead_control = is_dead(control_tree / cell)
+        n_dead_control += int(dead_control)
+        if dead_control and dead == "drop":
+            continue
+        for j, pool in enumerate(matrix.pools):
+            if pool == CONTROL_LABEL or not np.isfinite(matrix.values[i, j]):
+                continue
+            leaf = root / "students" / animal / receiver_dir / sender_dir \
+                / f"{pool}_tseed{tseed}" / dataset_tag / cell
+            dead_treatment = is_dead(leaf)
+            n_dead_treatment += int(dead_treatment)
+            if dead_treatment and dead == "drop":
+                continue
+            gap = matrix.values[i, j] - control[i]
+            rows.append({"cell": cell, "teacher": pool, "value_abs": gap,
+                         "value_rel": gap / prior, "treatment": matrix.values[i, j],
+                         "control": control[i], "dead_treatment": dead_treatment,
+                         "dead_control": dead_control})
+    if not rows:
+        # Never run, control-side collapse, and treatment-side collapse read the same on a
+        # table of arms and mean completely different things; name which one it is.
+        if n_treatment == 0:
+            raise _ArmUnavailable(f"no treatment runs (0 finite values over {len(matched)} "
+                                  f"control cells)")
+        if n_dead_control == len(matched):
+            raise _ArmUnavailable(f"all {n_dead_control} control cells dead")
+        raise _ArmUnavailable(f"all {n_dead_treatment} treatment runs dead")
+    return pd.DataFrame(rows), n_dead_treatment, n_dead_control
+
+
+def normalized_effect_frame(
+    arms: Sequence[FamilyArm],
+    animal: str,
+    teachers: Sequence[str],
+    *,
+    family_a: str = "A",
+    family_b: str = "B",
+    eval_animal: str | None = None,
+    prompt_set: str = "test",
+    probe_pool: str = "pp1",
+    dead_ftseed: int = 1,
+    dead: str = "keep",
+    output_root: Path | None = None,
+    **kw,
+) -> tuple[pd.DataFrame, dict]:
+    """Tidy control-normalized effects for every arm, restricted to each role's usable cells.
+
+    A cell is usable within a role when at least one arm of EACH family has a finite value
+    there: a cell only one family reaches defines no contrast, and admitting it would let
+    coverage masquerade as an effect. Both the cell-level strata and the per-arm summaries are
+    built on that per-role cell set, so the two families are always read on the same cells.
+
+    Args:
+        arms: Role-tagged arms from `role_assigned_arms`.
+        animal: Animal the teachers were finetuned on.
+        teachers: Teacher param_tags, the same list for every sender.
+        family_a, family_b: The family labels expected in ``arms``.
+        eval_animal: Animal scored; defaults to `animal`.
+        prompt_set: Prompt set read out of the summaries.
+        probe_pool: Probe pool of the anchored dead cut ("pp1" Pythia, "dp1" OLMo).
+        dead_ftseed: Student finetune seed whose ``pile_probe.json`` supplies the dead label.
+        dead: ``"keep"`` (default) keeps dead runs as measured and only counts them; ``"drop"``
+            excludes every dead treatment run and every dead control cell.
+        output_root: Output tree root; defaults to the paths YAML's.
+        **kw: Forwarded to `load_cell_matrix` (``tseed``, ``dataset_tag``, ``control_source``, ...).
+
+    Returns:
+        ``(frame, report)``. `frame` columns: ``family, role, arm, teacher, cell, stratum,
+        value_abs, value_rel, treatment, control, dead_treatment, dead_control``, with
+        ``stratum = "{role}|{cell}"``. `report` holds ``skipped_arms``, ``skipped_roles``,
+        ``n_dead_treatment``, ``n_dead_control``, ``n_dead`` and ``notes``.
+    """
+    if dead not in ("keep", "drop"):
+        raise ValueError(f"dead must be 'keep' or 'drop', got {dead!r}")
+    eval_animal = eval_animal or animal
+    notes: list[str] = []
+    skipped_arms, skipped_roles = [], []
+    n_dead_treatment = n_dead_control = 0
+    loaded: dict[str, tuple[FamilyArm, pd.DataFrame]] = {}
+    for arm in arms:
+        try:
+            frame, dead_t, dead_c = _arm_rows(animal, arm.sender, arm.receiver, teachers,
+                                              eval_animal=eval_animal, prompt_set=prompt_set,
+                                              probe_pool=probe_pool, dead_ftseed=dead_ftseed,
+                                              dead=dead, output_root=output_root, notes=notes,
+                                              **kw)
+        except _ArmUnavailable as exc:
+            skipped_arms.append(f"{arm.arm}: {exc}")
+            continue
+        loaded[f"{arm.family}|{arm.arm}"] = (arm, frame)
+        n_dead_treatment += dead_t
+        n_dead_control += dead_c
+
+    blocks = []
+    for role in dict.fromkeys(a.role for a in arms):
+        members = [(arm, frame) for arm, frame in loaded.values() if arm.role == role]
+        cells_by_family = {
+            family: set().union(*[set(f["cell"]) for a, f in members if a.family == family])
+            if any(a.family == family for a, _ in members) else set()
+            for family in (family_a, family_b)
+        }
+        missing = [f for f, cells in cells_by_family.items() if not cells]
+        if missing:
+            have = {f: sum(a.family == f for a, _ in members) for f in (family_a, family_b)}
+            skipped_roles.append(f"{role}: no usable arm for {', '.join(missing)} "
+                                 f"(usable arms {family_a} {have[family_a]}, "
+                                 f"{family_b} {have[family_b]})")
+            continue
+        usable = sorted(cells_by_family[family_a] & cells_by_family[family_b])
+        if not usable:
+            skipped_roles.append(f"{role}: no cell reached by both families")
+            continue
+        for arm, frame in members:
+            block = frame[frame["cell"].isin(usable)].copy()
+            if block.empty:
+                continue
+            block.insert(0, "family", arm.family)
+            block.insert(1, "role", role)
+            block.insert(2, "arm", arm.arm)
+            blocks.append(block)
+    columns = ["family", "role", "arm", "teacher", "cell", "stratum", "value_abs", "value_rel",
+               "treatment", "control", "dead_treatment", "dead_control"]
+    if not blocks:
+        frame = pd.DataFrame(columns=columns)
+    else:
+        frame = pd.concat(blocks, ignore_index=True)
+        frame["stratum"] = frame["role"] + "|" + frame["cell"]
+        frame = frame.reindex(columns=columns)
+    return frame, {"skipped_arms": skipped_arms, "skipped_roles": skipped_roles,
+                   "n_dead_treatment": int(n_dead_treatment),
+                   "n_dead_control": int(n_dead_control),
+                   "n_dead": int(n_dead_treatment + n_dead_control), "notes": notes}
+
+
+def _arm_summary(block: pd.DataFrame, value_col: str) -> dict:
+    """One arm's mean effect in `value_col`, exceedance fraction against its own control, and
+    student/cell counts, on the role's usable cells.
+
+    The exceedance fraction is the share of the arm's runs strictly above their own cell's
+    control, so it is invariant to any positive rescaling of the values and reads the same in
+    both value modes.
+    """
+    control = block.drop_duplicates("cell")["control"].to_numpy(dtype=float)
+    exc = tt.exceedance_test(block["treatment"].to_numpy(dtype=float), control)
+    return {"cells": int(block["cell"].nunique()), "students": int(len(block)),
+            "mean effect": float(block[value_col].mean()),
+            "exceed. frac": exc.count / exc.m if exc.m else float("nan")}
+
+
+def _mode_comparison(frame: pd.DataFrame, mode: str, *, family_a: str, family_b: str,
+                     n_perm: int, seed: int) -> ModeComparison:
+    """One value mode's arm/role tables and its four permutation results."""
+    value_col = VALUE_COLUMNS[mode]
+    order = {role: i for i, role in enumerate(ARM_ROLES)}
+    arm_rows = [{"role": role, "family": family, "arm": arm,
+                 **_arm_summary(block, value_col)}
+                for (role, family, arm), block
+                in frame.groupby(["role", "family", "arm"], sort=False)]
+    arm_table = pd.DataFrame(arm_rows).reindex(columns=ARM_COLUMNS)
+    arm_table = arm_table.sort_values(
+        by=["role", "family", "arm"],
+        key=lambda s: s.map(lambda r: order.get(r, len(order))) if s.name == "role" else s,
+    ).reset_index(drop=True)
+
+    role_rows = []
+    for role, block in arm_table.groupby("role", sort=False):
+        a = block[block["family"] == family_a]["mean effect"]
+        b = block[block["family"] == family_b]["mean effect"]
+        role_rows.append({"role": role, "arms A": len(a), "arms B": len(b),
+                          "cells": frame[frame["role"] == role]["cell"].nunique(),
+                          "mean A": a.mean(), "mean B": b.mean(),
+                          "contrast": a.mean() - b.mean()})
+    role_table = pd.DataFrame(role_rows).reindex(columns=ROLE_COLUMNS)
+
+    def arm_level(col: str) -> tt.ArmSetResult:
+        return tt.role_stratified_arm_permutation(
+            arm_table.rename(columns={col: "value"}), family_a=family_a, family_b=family_b,
+            n_perm=n_perm, seed=seed,
+        )
+
+    def cell_level(statistic: str) -> tt.FamilyContrastResult:
+        return tt.stratified_family_contrast_permutation(
+            frame.rename(columns={"role": "group", value_col: "value"}), family_a=family_a,
+            family_b=family_b, statistic=statistic, n_perm=n_perm, seed=seed,
+        )
+
+    return ModeComparison(mode=mode, arms=arm_table, roles=role_table,
+                          arm_level_mean=arm_level("mean effect"),
+                          arm_level_exceed=arm_level("exceed. frac"),
+                          stratified_mean=cell_level("mean"),
+                          stratified_exceed=cell_level("exceedance"))
+
+
+def compare_families(
+    bases_a: Sequence[str],
+    bases_b: Sequence[str],
+    animal: str,
+    teachers: Sequence[str],
+    *,
+    family_a: str = "A",
+    family_b: str = "B",
+    roles: bool = True,
+    dead: str = "keep",
+    n_perm: int = 20000,
+    seed: int = 0,
+    **kw,
+) -> FamilyComparison:
+    """Does family A's SET of arms transfer more strongly than family B's, role by role?
+
+    Loads both families' role-tagged arms (`role_assigned_arms`), reads every student against
+    its own matched control on the role's usable cells in BOTH value modes (absolute gap and
+    gap over the receiver's prior, `normalized_effect_frame`), and runs, per mode, both levels
+    and both statistics: the role-stratified arm-set permutation
+    (`stats.role_stratified_arm_permutation`, the honest unit for a family claim) on the arms'
+    mean effect and on their exceedance fraction, and the cell-stratified family-label
+    permutation (`stats.stratified_family_contrast_permutation`, a statement about these
+    students) with the summed mean contrast and with the summed A-above-max-B count.
+
+    Args:
+        bases_a: Family-A base tokens, common base first (e.g. ``["orig", "ds1", "ds2", "ds3"]``).
+        bases_b: Family-B base tokens, same convention.
+        animal: Animal the teachers were finetuned on.
+        teachers: Teacher param_tags, the same list for every sender.
+        family_a, family_b: Display labels of the two families.
+        roles: Stratify on the transfer role (default); ``False`` pools every arm under the
+            single role `NO_ROLE`.
+        dead: ``"keep"`` (default) or ``"drop"``; see `normalized_effect_frame`.
+        n_perm: Monte-Carlo draws (arm level beyond the enumeration cap; always at cell level).
+        seed: Seed of the permutation draws.
+        **kw: Forwarded to `normalized_effect_frame` (``eval_animal``, ``prompt_set``, ``tseed``,
+            ``control_source``, ``output_root``, ...).
+
+    Returns:
+        A `FamilyComparison`.
+
+    Raises:
+        ValueError: If no role is usable for both families (nothing to compare).
+    """
+    arms = role_assigned_arms(bases_a, bases_b, family_a=family_a, family_b=family_b,
+                              roles=roles)
+    frame, report = normalized_effect_frame(arms, animal, teachers, family_a=family_a,
+                                            family_b=family_b, dead=dead, **kw)
+    if frame.empty:
+        raise ValueError("no role is covered by both families; nothing to compare")
+    modes = {mode: _mode_comparison(frame, mode, family_a=family_a, family_b=family_b,
+                                    n_perm=n_perm, seed=seed)
+             for mode in VALUE_MODES}
+    return FamilyComparison(modes=modes, frame=frame, skipped_arms=report["skipped_arms"],
+                            skipped_roles=report["skipped_roles"],
+                            n_dead_treatment=report["n_dead_treatment"],
+                            n_dead_control=report["n_dead_control"], dead_policy=dead,
+                            notes=report["notes"])

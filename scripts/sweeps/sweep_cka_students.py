@@ -388,7 +388,9 @@ def main(
         help="Queue-default free-MiB gate (~0.65 GB per resident merged 160m fp32 "
         "model: teacher + K students per job).",
     ),
-    cap_per_gpu: int = typer.Option(2, help="Queue-default max concurrent jobs per GPU."),
+    cap_per_gpu: int | None = typer.Option(
+        None, help="Queue-default max concurrent jobs per GPU (default: none; node GPU policy applies)."
+    ),
     slots: int = typer.Option(None, help="Queue-default per-GPU slot weight."),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),

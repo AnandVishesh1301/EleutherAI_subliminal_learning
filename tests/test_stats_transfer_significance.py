@@ -481,7 +481,35 @@ def test_significance_rows_per_teacher_then_pooled():
     assert len(tio.significance_rows(m, dead, 1.0, "A", ["t1"])) == 1
 
 
-def test_style_significance_table_highlights_only_p_below_05():
+def test_short_teacher_exceedance_uses_only_paired_finite_cells():
+    m, dead = _synthetic_matrix()
+    # the short teacher misses cell 0, whose control value is the SMALLEST, so scoring it on the
+    # full control column would change the threshold's denominators.
+    s = tio.significance_rows(m, dead, 1.0, "A", ["t1"], short=["s"], n_perm=200)[1]
+    assert s["wins / n"] == "0/9" and s["cells"] == "9"
+    e = tt.exceedance_test(m.values[1:, 2], m.values[1:, 3])
+    assert s["exceed."] == e.count and s["exceed. p"] == pytest.approx(e.p)
+    assert e.m == 9 and e.n == 9
+
+
+def test_held_out_row_sign_p_is_the_one_sided_paired_sign_test():
+    m, dead = _synthetic_matrix()
+    spec = {"name": "A held-out", "arm": "A", "teacher": "t2",
+            "selection_cells": ["c0", "c1"], "n_held_out": 8}
+    row = tio.held_out_row(spec, m, np.zeros_like(dead), 1.0)
+    expected = tt.paired_sign_test(m.values[2:, 1], m.values[2:, 3])
+    exc = tt.exceedance_test(m.values[2:, 1], m.values[2:, 3])
+    assert row["wins / n"] == f"{expected.wins}/{expected.n}"
+    assert row["sign p"] == pytest.approx(expected.p)
+    # the primary test is reported on the held-out cells too, not "—"
+    assert row["exceed."] == exc.count and row["exceed. p"] == pytest.approx(exc.p)
+    assert row["cells"] == "8"
+    # one-sided, not the two-sided binomtest
+    from scipy.stats import binomtest
+    assert row["sign p"] != pytest.approx(binomtest(expected.wins, expected.n, 0.5).pvalue)
+
+
+def test_style_highlights_the_primary_exceedance_p_not_the_sign_p():
     df = pd.DataFrame([{"arm": "A", "teacher": "t", "cells": "10", "wins / n": "9/10",
                         "sign p": 0.0107, "exceed.": 3, "exceed. p": 0.2,
                         "treat median ×prior": 2.345, "ctrl median ×prior": 1.0,
@@ -493,7 +521,8 @@ def test_style_significance_table_highlights_only_p_below_05():
     assert "pooled" not in html and "0.011" in html and "4.2e-04" in html and "2.35" in html
     ctx = tio.style_significance_table(df)._compute().ctx
     sign_col, exc_col = tio.TABLE_COLUMNS.index("sign p") - 2, tio.TABLE_COLUMNS.index("exceed. p") - 2
-    assert ("font-weight", "bold") in ctx[(0, sign_col)]
+    # sign p = 0.0107 is below 0.05 but is the SECONDARY test: never highlighted
+    assert ("font-weight", "bold") not in ctx.get((0, sign_col), [])
     assert ("font-weight", "bold") not in ctx.get((0, exc_col), [])
     assert ("font-weight", "bold") in ctx[(1, exc_col)]
     assert any(k == "background-color" and "128" in v for k, v in ctx[(1, 0)])

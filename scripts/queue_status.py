@@ -736,7 +736,8 @@ def annotate_queue_order(
 
 
 def _active(row: dict) -> bool:
-    return not row["parked"] and not row["complete"] and (row["pending"] + row["running"]) > 0
+    work = row["pending"] + row["running"] + row.get("waiting", 0)
+    return not row["parked"] and not row["complete"] and work > 0
 
 
 def render(rows: list[dict]) -> str:

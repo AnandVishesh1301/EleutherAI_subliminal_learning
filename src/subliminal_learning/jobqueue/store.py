@@ -294,11 +294,16 @@ def claim_next(root: Path, name: str, node: str, pid: int) -> Job | None:
     A result always wins (terminal, skipped even if a stray claim dir remains). The claim
     itself is ``os.mkdir(claims/<jobkey>)`` — the sole atomic primitive; ``EEXIST`` means a
     peer already owns it, so we move on. ``owner.json`` is written after a successful mkdir.
+    A job deferred by a tempfail requeue (``not_before`` in the future) is skipped here.
     """
     mkdir_open(_claims_dir(root, name))
     for job in load_jobs(root, name):
         jk = job.jobkey
         if has_result(root, name, jk):
+            continue
+        if read_not_before(root, name, jk) > time.time():
+            # Deferred after an EX_TEMPFAIL (rc=75) exit: still PENDING and still counted
+            # as outstanding work, just not claimable yet.
             continue
         cdir = _claim_dir(root, name, jk)
         try:
@@ -546,6 +551,41 @@ def bump_oom_requeues(root: Path, name: str, jobkey: str) -> int:
     except (TypeError, ValueError):
         n = 1
     rec["oom_requeues"] = n
+    mkdir_open(_attempt_path(root, name, jobkey).parent)
+    atomic_write_json(_attempt_path(root, name, jobkey), rec)
+    return n
+
+
+def read_tempfails(root: Path, name: str, jobkey: str) -> int:
+    """How many times this job exited 75 (EX_TEMPFAIL) and was requeued; 0 when absent."""
+    try:
+        return int(_read_attempt_record(root, name, jobkey).get("tempfails", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def read_not_before(root: Path, name: str, jobkey: str) -> float:
+    """Epoch second before which this job must not be claimed again; 0.0 when absent."""
+    try:
+        return float(_read_attempt_record(root, name, jobkey).get("not_before", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def bump_tempfails(root: Path, name: str, jobkey: str, *, not_before: float) -> int:
+    """Increment the job's tempfail counter and defer its next claim; return the new count.
+
+    Both keys live in the attempts sidecar like ``oom_requeues`` — extra keys ignored by
+    workers running older src, so mixed-version nodes degrade to "retry immediately"
+    rather than breaking.
+    """
+    rec = _read_attempt_record(root, name, jobkey)
+    try:
+        n = int(rec.get("tempfails", 0) or 0) + 1
+    except (TypeError, ValueError):
+        n = 1
+    rec["tempfails"] = n
+    rec["not_before"] = float(not_before)
     mkdir_open(_attempt_path(root, name, jobkey).parent)
     atomic_write_json(_attempt_path(root, name, jobkey), rec)
     return n

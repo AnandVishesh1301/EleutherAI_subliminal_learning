@@ -490,7 +490,9 @@ def main(
     ),
     node: str = typer.Option(None, help="Pin submitted queues to this hostname."),
     mem_mib: int = typer.Option(6000, help="Queue-default free-MiB gate (160m fp32 eval)."),
-    cap_per_gpu: int = typer.Option(2, help="Queue-default max concurrent jobs per GPU."),
+    cap_per_gpu: int | None = typer.Option(
+        None, help="Queue-default max concurrent jobs per GPU (default: none; node GPU policy applies)."
+    ),
     slots: int = typer.Option(None, help="Queue-default per-GPU slot weight."),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),

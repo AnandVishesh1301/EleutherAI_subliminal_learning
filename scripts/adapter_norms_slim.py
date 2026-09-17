@@ -33,6 +33,7 @@ from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.config import resolve_roots
 from subliminal_learning.utils.io import atomic_write_json
+from subliminal_learning.utils.run_io import final_train_step
 
 ROOT = Path(__file__).absolute().parents[1]
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
@@ -147,11 +148,22 @@ def main(
                 did = True
             if checkpoints and not _record_is_current(rd, an.TRAJ_EVAL_NAME):
                 rows = []
-                for d in sorted(ck.glob("checkpoint-*"), key=lambda q: int(q.name.split("-")[1])):
-                    f = d / "adapter_model.safetensors"
-                    if f.exists():
-                        step = int(d.name.split("-")[1])
-                        rows += [{"step": step, **m} for m in _module_rows(f, ck, output_root)]
+                # The endpoint adapter at the `checkpoints/` root is the ladder's last
+                # point, at the manifest's `n_train_steps`: the `checkpoint-N` dir that
+                # used to duplicate it is no longer written (see
+                # `students.early_stop.SkipFinalStepSave`) and is being deleted from
+                # finished runs, so the row must come from the root adapter instead.
+                end_step = final_train_step(rd)
+                ladder = [(int(d.name.split("-")[1]), d / "adapter_model.safetensors")
+                          for d in sorted(ck.glob("checkpoint-*"),
+                                          key=lambda q: int(q.name.split("-")[1]))]
+                ladder = [(step, f) for step, f in ladder if f.exists()]
+                if end_step is not None and end_step not in {s for s, _ in ladder}:
+                    endpoint = ck / "adapter_model.safetensors"
+                    if endpoint.exists():
+                        ladder.append((end_step, endpoint))
+                for step, f in ladder:
+                    rows += [{"step": step, **m} for m in _module_rows(f, ck, output_root)]
                 if rows:
                     atomic_write_json(an.traj_record_path(rd), an.build_traj_record(
                         rows, test_p=None, rank=rank, alpha=alpha, wrong_seed_offset=None,

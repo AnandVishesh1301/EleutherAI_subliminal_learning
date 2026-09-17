@@ -8,7 +8,8 @@ where it can PROVE the legacy file still describes the run on disk:
 
   * resolve the run dir from the replay registry's lineage;
   * require the legacy file's checkpoint-step list to match the run dir's actual
-    ``checkpoint-*`` dirs (plus endpoint) EXACTLY -- a mismatch means the run was retrained
+    ``checkpoint-*`` dirs (plus endpoint), on DISTINCT steps -- a mismatch means the run
+    was retrained
     or pruned since, so the numbers are not the current run's and it is listed as a
     recompute candidate instead;
   * never overwrite an existing run-dir eval unless it fails `eval_is_current` for this
@@ -30,6 +31,7 @@ from pathlib import Path
 import typer
 
 from scripts.ckpt_preference_trajectory import _checkpoint_dirs
+from subliminal_learning.evaluation.ckpt_trajectories import distinct_steps
 from subliminal_learning.utils.run_io import manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.config import resolve_output_root
@@ -60,7 +62,7 @@ def _lineage_dir(out_root: Path, lin: dict) -> Path:
 
 def _kl_is_current(stored: dict, steps: list, pile_id: dict, ref) -> bool:
     """Same currency test the Pile-KL writer applies before skipping a run."""
-    return (stored.get("checkpoint_steps") == steps
+    return (distinct_steps(stored.get("checkpoint_steps")) == distinct_steps(steps)
             and {k: stored.get(k) for k in pile_id} == pile_id
             and stored.get("train_manifest_ref") == ref)
 
@@ -89,7 +91,9 @@ def main(
 
         actual = [s for s, _ in _checkpoint_dirs(run_dir / "checkpoints")]
         legacy_steps = [p.get("step") for p in doc.get("points", [])]
-        if legacy_steps != actual:
+        # DISTINCT steps: a legacy file measured when the endpoint still had its duplicate
+        # `checkpoint-N` dir describes the same ladder as the deduped run dir.
+        if distinct_steps(legacy_steps) != distinct_steps(actual):
             n_mismatch += 1
             recompute.append(
                 f"{legacy_file.name}: {len(legacy_steps)} legacy steps != "

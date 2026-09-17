@@ -181,6 +181,24 @@ def manifest_ref(run_dir: Path) -> dict | None:
     }
 
 
+def final_train_step(run_dir: Path) -> int | None:
+    """The run's last optimizer step (`train_manifest.json` `n_train_steps`), or None.
+
+    The endpoint adapter at `checkpoints/adapter_model.safetensors` sits at this step;
+    since 2026-09-17 no `checkpoint-{n_train_steps}` dir is written beside it (see
+    `students.early_stop.SkipFinalStepSave`), so every ladder reader needs the manifest
+    to place its last point on the true x-axis.
+    """
+    mf = Path(run_dir) / "train_manifest.json"
+    if not mf.is_file():
+        return None
+    try:
+        step = json.loads(mf.read_text()).get("n_train_steps")
+    except (OSError, ValueError):
+        return None
+    return step if isinstance(step, int) and not isinstance(step, bool) else None
+
+
 def reroot_output_path(path: Path | str, output_root: Path) -> Path:
     """Re-home an absolute artifact path recorded under an OLD output root onto `output_root`.
 

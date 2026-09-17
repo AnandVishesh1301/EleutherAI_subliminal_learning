@@ -7,6 +7,8 @@ completion, matching Cloud et al.'s ft-teacher ablation (OpenAI chat FT / Unslot
 
 from __future__ import annotations
 
+import signal
+import time
 from pathlib import Path
 
 import torch
@@ -30,8 +32,17 @@ from subliminal_learning.students.divergence import DivergenceEarlyStop
 from subliminal_learning.students.early_stop import (
     NEVER_SAVE_STEPS,
     SaveAtSteps,
+    SkipFinalStepSave,
     StopAtStep,
     resolve_save_steps,
+)
+from subliminal_learning.run_gate import (
+    latest_resumable_checkpoint,
+    prune_superseded_yield_checkpoints,
+    remove_torn_checkpoints_above,
+    write_interrupted_marker,
+    clear_interrupted_marker,
+    write_resume_marker,
 )
 from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
 from subliminal_learning.training.lora_io import build_lora_config
@@ -296,6 +307,117 @@ class SupervisedHeadTrainer(Trainer):
         return (loss, {"logits": logits}) if return_outputs else loss
 
 
+class TrainingInterrupted(RuntimeError):
+    """SIGTERM (a job-queue GPU yield) stopped training after a full-state save.
+
+    The run is NOT finished: the caller must not save the final adapter, write
+    `train_manifest.json` or evaluate -- it must propagate this to the worker, which
+    exits `INTERRUPTED_EXIT_CODE` so jobq records the job as retryable rather than done.
+
+    Attributes:
+        step: `global_step` of the checkpoint just written.
+        checkpoint_dir: The full-state `checkpoint-{step}` dir to resume from.
+    """
+
+    def __init__(self, step: int, checkpoint_dir: Path) -> None:
+        super().__init__(
+            f"training interrupted by SIGTERM at step {step}; resumable checkpoint at "
+            f"{checkpoint_dir}"
+        )
+        self.step = step
+        self.checkpoint_dir = checkpoint_dir
+
+
+# EX_TEMPFAIL: the code the run_logs workers already use for "not done, retry later".
+INTERRUPTED_EXIT_CODE = 75
+
+
+class YieldCheckpoint(TrainerCallback):
+    """Turn a SIGTERM into a full-state checkpoint at the next optimizer-step boundary.
+
+    The queue SIGTERMs a training process when it yields a GPU and SIGKILLs it 20 s
+    later, so the save must be (a) at a step boundary, where trainer state is coherent,
+    (b) FULL state even when the run's config says `save_only_model=True` and
+    `save_strategy="no"` -- a yield checkpoint that carries no optimizer is worthless --
+    and (c) exempt from `save_total_limit` rotation, so yielding can never evict a
+    scheduled trajectory checkpoint. Both args fields are therefore flipped for exactly
+    this one save and restored in `on_save`.
+
+    The signal handler only sets a flag (`request`); everything else runs on the training
+    thread. `on_save` also stamps EVERY full-state checkpoint (scheduled ones included)
+    with the resume marker that makes it eligible for resume, written last so a dir torn
+    by the following SIGKILL is never mistaken for a complete one.
+
+    Attributes:
+        interrupted_step: Step of the yield checkpoint, or None if no SIGTERM arrived.
+        checkpoint_dir: That checkpoint's dir, or None.
+    """
+
+    def __init__(self, on_schedule) -> None:
+        self.on_schedule = on_schedule
+        self.interrupted_step: int | None = None
+        self.checkpoint_dir: Path | None = None
+        self.save_seconds: float | None = None
+        self.requested_at: float | None = None
+        self._pending = False
+        self._restore: tuple | None = None
+        self._save_started: float | None = None
+
+    @property
+    def pending(self) -> bool:
+        """True once a SIGTERM's full-state save has been requested for this step."""
+        return self._pending
+
+    def request(self, *_args) -> None:
+        """SIGTERM handler: flag only (async-signal context)."""
+        if self.requested_at is None:
+            self.requested_at = time.time()
+
+    def on_step_end(self, args, state, control, **kwargs):  # noqa: ANN001 -- HF signature
+        if self.requested_at is None or self._pending:
+            return control
+        self._pending = True
+        self._save_started = time.perf_counter()
+        self._restore = (args.save_only_model, args.save_total_limit)
+        args.save_only_model = False
+        args.save_total_limit = None
+        control.should_save = True
+        control.should_training_stop = True
+        logger.warning(
+            "SIGTERM received at {:.3f} (queue yield): saving a full-state checkpoint at "
+            "step {} and stopping.", self.requested_at, state.global_step,
+        )
+        return control
+
+    def on_save(self, args, state, control, **kwargs):  # noqa: ANN001 -- HF signature
+        ckpt = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        # A `save_only_model` scheduled checkpoint carries no optimizer state: leave it
+        # unmarked so nothing ever tries to resume from it.
+        if not self._pending and not (ckpt / "optimizer.pt").is_file():
+            return control
+        write_resume_marker(
+            ckpt, step=state.global_step,
+            reason="sigterm" if self._pending else "scheduled",
+        )
+        # Marker included, and readable by the other nodes' uids on resume.
+        reopen_tree(ckpt)
+        if self._pending:
+            args.save_only_model, args.save_total_limit = self._restore
+            self.interrupted_step = state.global_step
+            self.checkpoint_dir = ckpt
+            self.save_seconds = time.perf_counter() - (self._save_started or 0.0)
+            removed = prune_superseded_yield_checkpoints(
+                ckpt.parent, keep_step=state.global_step, **self.on_schedule,
+            )
+            logger.warning(
+                "YIELD CHECKPOINT step={} dir={} save={:.2f}s (SIGTERM at {:.3f}); "
+                "superseded yield checkpoints removed: {}",
+                state.global_step, ckpt, self.save_seconds, self.requested_at,
+                removed or "none",
+            )
+        return control
+
+
 def run_teacher_sft_completion_only(
     model: GPTNeoXForCausalLM,
     tokenizer: PreTrainedTokenizerBase,
@@ -383,11 +505,11 @@ def run_teacher_sft_completion_only(
     save_steps = (
         NEVER_SAVE_STEPS if train_cfg.save_at_steps is not None else train_cfg.save_steps
     )
-    resume_from_checkpoint = (
-        train_cfg.checkpoint_resume and not train_cfg.save_only_model
-    ) and any(
-        output_dir.glob("checkpoint-*")
-    )
+    # The resume decision keys on WHAT IS ON DISK, not on the run's config: a queue yield
+    # writes a full-state checkpoint for every run (plain, `save_strategy="no"` ones
+    # included), and only a complete, marked dir is ever resumed from (see
+    # `run_gate.latest_resumable_checkpoint`).
+    resume_checkpoint = latest_resumable_checkpoint(output_dir)
     args = TrainingArguments(
         output_dir=str(output_dir),
         run_name=run_name,
@@ -431,6 +553,24 @@ def run_teacher_sft_completion_only(
         callbacks.append(SaveAtSteps(explicit_saves))
     if train_cfg.stop_step is not None:
         callbacks.append(StopAtStep(train_cfg.stop_step))
+    # Always attached: a GPU yield can hit ANY run, including plain ones that never
+    # checkpoint. It is inert until a SIGTERM arrives (it only stamps full-state saves).
+    # The run's OWN save schedule, from the SAME resolver the trainer checkpoints by
+    # (`explicit_saves` is the union with `stop_step`), so a yield landing on an
+    # early-stop arm's terminal step is kept rather than pruned as off-schedule.
+    schedule = {
+        "save_steps": train_cfg.save_steps,
+        "explicit_steps": explicit_saves,
+        "checkpoint_resume": train_cfg.checkpoint_resume,
+    }
+    yielder = YieldCheckpoint(schedule)
+    callbacks.append(yielder)
+    # Last in the list, so it sees every `should_save` the callbacks above set: a save at
+    # the step training ends on would only duplicate the `save_model` below (a yield at
+    # that step still saves -- there is no `save_model` on that path).
+    callbacks.append(
+        SkipFinalStepSave(is_yielding=lambda: yielder.pending)
+    )
     # Opt-in supervised-positions-only LM head (external families): same loss and
     # gradients as HF's full-logits path, a fraction of the head compute and memory.
     # Off -> the plain Trainer, byte-identical to before.
@@ -459,12 +599,46 @@ def run_teacher_sft_completion_only(
     if train_cfg.tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+    # This attempt is the live writer: drop any stamp a previous yield left behind.
+    run_dir = output_dir.parent
+    clear_interrupted_marker(run_dir)
+    if resume_checkpoint is not None:
+        # This process is the confirmed live writer, so an unmarked dir ABOVE the resume
+        # point is genuinely a save the kill cut short (from any other reader it could be
+        # a save in progress, which is why only this call site prunes).
+        remove_torn_checkpoints_above(output_dir, resume_checkpoint)
+        logger.info("RESUMING from {} (full state + resume marker present)", resume_checkpoint)
     try:
-        train_output = (
-            trainer.train(resume_from_checkpoint=True)
-            if resume_from_checkpoint
-            else trainer.train()
-        )
+        # SIGTERM = the queue reclaiming this GPU. Handled ONLY for the duration of
+        # `trainer.train()`; before and after it keeps its default behaviour (a SIGTERM
+        # outside the training loop has no step boundary to save at). Not the main
+        # thread -> no handler, and the run dies as it always did.
+        try:
+            previous_handler = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, yielder.request)
+            handler_installed = True
+        except ValueError:
+            handler_installed = False
+            logger.warning("not the main thread: SIGTERM yield-checkpointing is off")
+        try:
+            train_output = (
+                trainer.train(resume_from_checkpoint=str(resume_checkpoint))
+                if resume_checkpoint is not None
+                else trainer.train()
+            )
+        finally:
+            if handler_installed:
+                signal.signal(signal.SIGTERM, previous_handler)
+        if yielder.interrupted_step is not None:
+            # Interrupted, not finished: NO final save, NO manifest, NO evals, and no
+            # `reopen_tree` of the whole tree (the checkpoint dir was reopened already).
+            # The stamp is the last write, so the workers' gate sees it only once every
+            # checkpoint file is on disk.
+            write_interrupted_marker(
+                run_dir, step=yielder.interrupted_step,
+                checkpoint_dir=yielder.checkpoint_dir,
+            )
+            raise TrainingInterrupted(yielder.interrupted_step, yielder.checkpoint_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         trainer.save_model(str(output_dir))
     finally:

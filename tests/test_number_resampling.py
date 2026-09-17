@@ -9,6 +9,7 @@ from subliminal_learning.numbers.resampling import (
     uniform_sample,
 )
 import math
+import random
 from collections import Counter
 
 import pytest
@@ -123,7 +124,7 @@ def test_water_fill_matches_target_better_than_uniform_and_stays_unique():
     target = {1: 0.5, 2: 0.3, 3: 0.2}
     out, diag = resampling.water_fill_sample(rows, target, 20, 0)
     assert len(out) == 20
-    assert diag["topped_up_with_replacement"] == 0
+    assert diag["residual_filled"] == 0 and diag["capped_deficit"] == 8
     assert diag["distinct_source_rows"] == 20
     assert len({r["prompt"] for r in out}) == 20
     # The scarce bin is drained, not oversampled; the deficit water-fills the others.
@@ -137,21 +138,42 @@ def test_water_fill_matches_target_better_than_uniform_and_stays_unique():
     assert diag["achieved_first_histogram_tv"] < uniform_tv
 
 
-def test_water_fill_is_deterministic_and_tops_up_only_when_source_is_short():
+def test_water_fill_is_deterministic_and_residual_stays_without_replacement():
     rows = _wf_rows()
     target = {1: 0.5, 2: 0.3, 3: 0.2}
     a, da = resampling.water_fill_sample(rows, target, 20, 3)
     b, db = resampling.water_fill_sample(rows, target, 20, 3)
     assert a == b and da == db
     assert a != resampling.water_fill_sample(rows, target, 20, 4)[0]
-    scarce = rows[:2] + rows[2:5]
-    out, diag = resampling.water_fill_sample(scarce, {1: 0.5, 2: 0.5}, 8, 1)
-    assert len(out) == 8 and diag["topped_up_with_replacement"] == 3
-    assert diag["distinct_source_rows"] < 8
+    # target mass on a value the source lacks entirely: the residual comes from unpicked rows
+    scarce = rows[:2] + rows[2:8]
+    out, diag = resampling.water_fill_sample(scarce, {1: 0.5, 9: 0.5}, 6, 1)
+    assert len(out) == 6 and diag["residual_filled"] > 0
+    assert diag["distinct_source_rows"] == 6
+    assert len({r["prompt"] for r in out}) == 6
+
+
+def test_water_fill_raises_when_the_residual_cannot_be_drawn_without_replacement():
+    rows = _wf_rows()[:2] + _wf_rows()[2:5]
+    with pytest.raises(ValueError, match="without replacement"):
+        resampling.water_fill_sample(rows, {1: 0.5, 9: 0.5}, 8, 1)
+
+
+def test_water_fill_residual_zero_path_is_unchanged():
+    # quotas cover n exactly, so no residual is drawn and the RNG stream is the old one.
+    rows = _wf_rows()
+    out, diag = resampling.water_fill_sample(rows, {2: 0.5, 3: 0.5}, 20, 5)
+    assert diag["residual_filled"] == 0 and diag["capped_deficit"] == 0
+    rng = random.Random(5)
+    picked = rng.sample([i for i, r in enumerate(rows) if r["numbers"][0] == 2], 10)
+    picked += rng.sample([i for i, r in enumerate(rows) if r["numbers"][0] == 3], 10)
+    expected = [dict(rows[i]) for i in picked]
+    rng.shuffle(expected)
+    assert out == expected
 
 
 def test_water_fill_reports_unreachable_target_mass():
-    rows = [{"prompt": "a", "numbers": [7], "completion": "7"}]
+    rows = [{"prompt": f"a{i}", "numbers": [7], "completion": "7"} for i in range(4)]
     out, diag = resampling.water_fill_sample(rows, {7: 0.5, 9: 0.5}, 4, 0)
     assert len(out) == 4
     assert diag["unreachable_target_mass"] == pytest.approx(0.5)
