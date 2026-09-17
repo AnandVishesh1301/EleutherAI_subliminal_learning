@@ -266,13 +266,13 @@ STUDENT_MEM_MIB = 19000
 TEACHER_MEM_MIB = 21500
 EVAL_MEM_MIB = 6000
 # lm-eval tail (after the headline finalizes): 0-shot LAMBADA / ARC-Easy / SciQ on
-# every landed student and control plus its untuned base; ~9 GiB at batch 16. The
-# batch size is pinned because two "auto" detections on one card can both size to
-# the same free memory.
+# every landed student and control plus its untuned base; 8.4 GiB measured at batch
+# 16 (main, 09-17), so three fit a card. The batch size is pinned because two "auto"
+# detections on one card can both size to the same free memory.
 LMEVAL_STAGE = "lmeval"
 LMEVAL_TASKS: tuple[str, ...] = ("lambada_openai", "arc_easy", "sciq")
 LMEVAL_BATCH_SIZE = 16
-LMEVAL_MEM_MIB = 14000
+LMEVAL_MEM_MIB = 12000
 WORKERS_PER_SLOT = 2
 
 
