@@ -336,25 +336,28 @@ def probe_record(run_dir: Path, peft, pool, base_logp, ce_base, pool_sha, pspec,
 
 
 def write_pile_probe(run_dir: Path, base, pool, base_logp, ce_base, pool_sha, pspec,
-                     device: str, log=None) -> bool:
+                     device: str, log=None, pool_version: str | None = None) -> bool:
     """Endpoint Pile probe for one run dir; False when the stored record is already current.
 
     Byte-identical to the ``probe`` kind of `scripts.run_final_evals` (same pool, same base
     log-probs, same record); the adapter is loaded and unloaded here so the caller's base
-    comes back unwrapped.
+    comes back unwrapped. `pool_version` (default None = the base's native pool) routes a
+    CROSS-CORPUS measurement to its sidecar path; the record always carries the
+    `pool_version`/`pool_sha` of the pool actually used (`pspec`).
     """
     log = log or logger
-    if probe_is_current(run_dir, pool_sha):
+    out = probe_path(run_dir, pool_version)
+    if probe_is_current(run_dir, pool_sha, pool_version):
         log.info("{}: pile probe current (skip)", run_dir)
         return False
     peft = PeftModel.from_pretrained(base, str(run_dir / "checkpoints"))
     try:
-        atomic_write_json(probe_path(run_dir), probe_record(
+        atomic_write_json(out, probe_record(
             run_dir, peft, pool, base_logp, ce_base, pool_sha, pspec, device))
     finally:
         _release_base(peft.unload())
         del peft
-    log.info("{}: pile probe -> {}", run_dir, probe_path(run_dir))
+    log.info("{}: pile probe -> {}", run_dir, out)
     return True
 
 

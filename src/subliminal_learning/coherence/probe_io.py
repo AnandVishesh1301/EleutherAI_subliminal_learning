@@ -412,13 +412,50 @@ def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1, *,
     return build_pile_pool(tokenizer, spec.n_docs, max_tokens=spec.max_tokens, seed=spec.seed)
 
 
-def probe_path(run_dir: Path) -> Path:
-    return Path(run_dir) / "eval" / EVAL_NAME
+def probe_pool_spec_for_version(version: str) -> ProbePoolSpec:
+    """The frozen pool spec named by `version` -- the CROSS-CORPUS escape hatch.
+
+    `probe_pool_spec_for_repo` stays the rule (a base is measured on its pretraining
+    corpus); this function is how a caller deliberately measures the SAME run on another
+    corpus pool too, e.g. a Pile-pretrained base on cp1 so pp1 and cp1 numbers are
+    comparable within one campaign (2026-09-17). `resolve_probe_pool_spec`'s family check
+    is untouched: the cross-corpus path is opt-in only through here, never by default.
+    """
+    pools = {p.version: p for p in (PROBE_POOL_PP1, PROBE_POOL_CP1, PROBE_POOL_DP1)}
+    try:
+        return pools[version]
+    except KeyError:
+        raise ValueError(
+            f"unknown probe pool version {version!r}; known: {sorted(pools)}") from None
 
 
-def load_probe(run_dir: Path) -> dict | None:
-    """The run's probe record, or None when absent/unreadable."""
-    f = probe_path(run_dir)
+def native_probe_pool_version(run_dir: Path) -> str | None:
+    """The pool version a run's OWN base is natively measured on, or None if unknowable."""
+    mf = Path(run_dir) / "train_manifest.json"
+    if not mf.is_file():
+        return None
+    try:
+        repo = json.loads(mf.read_text()).get("base_model_repo")
+        return probe_pool_spec_for_repo(repo).version if repo else None
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def probe_path(run_dir: Path, pool: str | None = None) -> Path:
+    """Where a run's probe record for pool version `pool` lives.
+
+    The base's NATIVE pool keeps the canonical `eval/pile_probe.json` (every existing
+    reader); any OTHER corpus pool goes to the sidecar `eval/pile_probe.<version>.json`,
+    so the two never overwrite each other. `pool=None` means "the native record".
+    """
+    if pool is None or pool == native_probe_pool_version(run_dir):
+        return Path(run_dir) / "eval" / EVAL_NAME
+    return Path(run_dir) / "eval" / f"pile_probe.{pool}.json"
+
+
+def load_probe(run_dir: Path, pool: str | None = None) -> dict | None:
+    """The run's probe record for `pool` (default: the native one), or None."""
+    f = probe_path(run_dir, pool)
     if not f.is_file():
         return None
     try:
@@ -532,9 +569,13 @@ def derive_dead_cut(values, bin_width: float = 0.75, smooth_bins: int = 3,
                    n_below=int((v <= cut).sum()), n_above=int((v > cut).sum()))
 
 
-def probe_is_current(run_dir: Path, pool_sha: str) -> bool:
-    """True when the record exists and still describes both the run and the pool."""
-    rec = load_probe(run_dir)
+def probe_is_current(run_dir: Path, pool_sha: str, pool: str | None = None) -> bool:
+    """True when the record exists and still describes both the run and the pool.
+
+    Keyed on the per-pool PATH (`probe_path`): without that, a run measured on two pools
+    would see the other pool's record, call it stale and overwrite it, forever.
+    """
+    rec = load_probe(run_dir, pool)
     if rec is None:
         return False
     ref = manifest_ref(run_dir)

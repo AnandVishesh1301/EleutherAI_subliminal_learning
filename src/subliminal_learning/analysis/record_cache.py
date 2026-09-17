@@ -52,6 +52,7 @@ import json
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -111,11 +112,24 @@ def register_kind(kind: RecordKind) -> RecordKind:
 
 
 def get_kind(name: str) -> RecordKind:
-    """The registered kind `name`; raises KeyError listing the known kinds if absent."""
+    """The registered kind `name`; raises KeyError listing the known kinds if absent.
+
+    ``pile_probe:<pool>`` (e.g. ``pile_probe:cp1``) is the parameterized spelling of the
+    CROSS-CORPUS probe sidecar written by `scripts.run_final_evals --probe-pools`: same
+    columns and extractor, record path ``eval/pile_probe.<pool>.json`` and its own cache
+    file, so a sidecar pool never mixes with the native `pile_probe` rows.
+    """
     try:
         return _REGISTRY[name]
     except KeyError:
-        raise KeyError(f"unknown record kind {name!r}; known: {sorted(_REGISTRY)}") from None
+        pass
+    base, _, pool = name.partition(":")
+    if pool and base == "pile_probe":
+        return dataclasses.replace(
+            _REGISTRY[base], name=name,
+            rel_record=f"eval/pile_probe.{pool}.json",
+            cache_rel=Path("analysis") / f"probe_cache_{pool}.csv")
+    raise KeyError(f"unknown record kind {name!r}; known: {sorted(_REGISTRY)}") from None
 
 
 # --------------------------------------------------------------------------------------------------

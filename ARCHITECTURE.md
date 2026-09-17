@@ -1179,6 +1179,12 @@ experiment YAML's `model_spec` stays Pythia-only.
   which bakes ΔW into W₀ undetectably. ⚠ census queues whose command depends on uncommitted
   `src/` must be node-pinned: the 09-10 Qwen census lost 15/16 shards to the goncalo
   checkouts before the pin.
+- Cross-corpus probe sidecars (09-17): a run's NATIVE pool keeps `eval/pile_probe.json`; any
+  other pool goes to `eval/pile_probe.<version>.json` (`probe_io.probe_path(run, pool)`, with
+  `probe_is_current`/`load_probe` keyed on that path and `probe_pool_spec_for_version` the
+  only cross-corpus hatch). `run_final_evals --probe-pools pp1,cp1` writes both per run, and
+  `record_cache.get_kind("pile_probe:cp1")` reads a sidecar; no existing reader globs
+  `pile_probe*`, so nothing double-counts.
 - Family pool routing in the surgery/ladder CLIs (09-10): `coherence.probe_io.
   resolve_probe_pool_spec(repo, pool)` gives the base's family pool by default (`--pool auto`:
   pp1 Pythia, dp1 DataDecide, `pp1t-<tag>` otherwise) and honours an explicit `--pool` only
