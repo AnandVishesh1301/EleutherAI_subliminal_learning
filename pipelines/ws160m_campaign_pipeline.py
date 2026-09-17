@@ -211,15 +211,15 @@ def _submit_named(
     defaults = None
     if node:
         _require_overflow_configs(cfg, name, node, queue_jobs)
-        defaults = _overflow_defaults(cfg, node)
+        defaults = node_pin_defaults(cfg, node)
     driver_io.submit_queue(
         cfg, name, queue_jobs, depends_on=deps or None, node=node, defaults=defaults
     )
     return len(queue_jobs)
 
 
-def _overflow_defaults(cfg: driver_io.CampaignDriverConfig, node: str) -> dict:
-    """jobq defaults binding an overflow queue to `node`'s copy of the campaign pin."""
+def node_pin_defaults(cfg: driver_io.CampaignDriverConfig, node: str) -> dict:
+    """jobq defaults binding a queue to `node`'s copy of the campaign pin."""
     sha = code_pin_io.resolve_commit_sha(cfg.repo_root, cfg.code_sha or "HEAD")
     root = (
         plan.clone_root(plan.partition_on(node)) / code_pin_io.CODE_PINS_DIRNAME / sha
@@ -776,7 +776,7 @@ def _train_queues(p: plan.Partition, *, wave2: bool) -> list[str]:
         stage = q.removeprefix(f"{p.queue_prefix}-")
         if stage.startswith(("evals", "controls", "xbase", "w2-controls", "w2-evals")):
             continue
-        if stage in _TEACHER_STAGES:
+        if stage in _TEACHER_STAGES or stage == plan.LMEVAL_STAGE:
             continue
         if stage.startswith("w2-") != wave2:
             continue

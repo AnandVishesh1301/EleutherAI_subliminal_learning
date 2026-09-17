@@ -179,3 +179,10 @@ appear.
   set's shared `generated_configs/` dir and submission refuses anything else; holes
   clear when their queue completes clean; `coverage.json` counts deferred leaves
   apart (`main`, `ladder`, `extra` regenerated). Outputs and identities are unchanged.
+- 2026-09-17 ≈04:30 UTC (post-headline addition, not a claim): an lm-eval tail
+  (`ws160m-<partition>-lmeval`, 0-shot LAMBADA-openai / ARC-Easy / SciQ, lm-eval 0.4.12,
+  batch 16) benchmarks every landed student and control plus each untuned base. It is
+  submitted only after a partition's `CAMPAIGN_DONE` and the headline `results/` exist,
+  so no headline artefact waits on it; results enter `leaves.csv` as `bench_*` /
+  `base_*` / `delta_*` columns for a capability table. §4's "no lm_eval" stays true for
+  the claims: W0–W8 are adjudicated without these columns.

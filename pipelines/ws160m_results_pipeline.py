@@ -207,7 +207,19 @@ def _recipe_slug(row: Mapping) -> str | None:
     return f"lr{plan.lr_slug(float(lr))}_r{int(r)}a{int(a)}"
 
 
+def _bench_columns(cap: pd.DataFrame) -> list[str]:
+    """``bench_*`` / ``base_*`` / ``delta_*`` lm-eval columns present in `cap`."""
+    out: list[str] = []
+    for col in cap.columns:
+        if col.startswith("bench_"):
+            suffix = col[len("bench_") :]
+            out += [col, f"base_{suffix}", f"delta_{suffix}"]
+    return [c for c in out if c in cap.columns]
+
+
 def _capability_leaves(cap: pd.DataFrame) -> pd.DataFrame:
+    """Per-leaf perplexity rows; lm-eval columns (config-dir means) ride along."""
+    bench_cols = _bench_columns(cap)
     rows: list[dict] = []
     for row in cap.to_dict("records"):
         base = row.get("ppl_base_overall")
@@ -222,6 +234,7 @@ def _capability_leaves(cap: pd.DataFrame) -> pd.DataFrame:
                     else float("nan"),
                     "ppl_ce_nats_mean": math.log(ppl) if ppl > 0 else float("nan"),
                     "ppl_ce_nats_base": base_ce,
+                    **{k: row.get(k) for k in bench_cols},
                 }
             )
     return pd.DataFrame(
@@ -232,6 +245,7 @@ def _capability_leaves(cap: pd.DataFrame) -> pd.DataFrame:
             "perplexity_ratio",
             "ppl_ce_nats_mean",
             "ppl_ce_nats_base",
+            *bench_cols,
         ],
     )
 

@@ -151,7 +151,6 @@ def _cell_done(
     return True
 
 
-
 def _spec_registry(name: str | None, paths_config: Path | None = None):
     """Roster to resolve base-model tokens against, or ``None`` for PolyPythias only.
 
@@ -168,9 +167,7 @@ def _spec_registry(name: str | None, paths_config: Path | None = None):
         from subliminal_learning.campaign.ws160m_models import registry_for_paths
 
         return registry_for_paths(paths_config)
-    raise ValueError(
-        f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'"
-    )
+    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'")
 
 
 def main(
@@ -322,6 +319,7 @@ def main(
     bench = sweep.get("benchmarks")
     bench_tasks = tuple(bench.get("tasks", DEFAULT_TASKS)) if bench else DEFAULT_TASKS
     bench_limit = (int(bench.get("limit") or 0) or None) if bench else None
+    bench_batch = bench.get("batch_size", "auto") if bench else "auto"
 
     treatments = list(
         itertools.product(
@@ -433,6 +431,7 @@ def main(
                     run_benchmarks=do_bench,
                     benchmark_tasks=bench_tasks,
                     benchmark_limit=bench_limit,
+                    benchmark_batch_size=bench_batch,
                     perplexity_max_per_register=ppl_max,
                     seed_prefix="gseed",
                     force=force,

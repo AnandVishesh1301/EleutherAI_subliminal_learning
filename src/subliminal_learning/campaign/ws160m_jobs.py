@@ -40,23 +40,29 @@ def _rel(partition: str, fname: str) -> str:
 
 
 def config_path(
-    partition: str, queue: str, fname: str, shared_root: Path | None
+    partition: str,
+    queue: str,
+    fname: str,
+    shared_root: Path | None,
+    *,
+    always_shared: bool = False,
 ) -> str:
     """Sweep YAML path a job of `queue` reads.
 
     Absolute under `shared_root` (the run set's `plan.SHARED_GENERATED_DIRNAME`)
-    when the queue runs on another node, repo-relative otherwise.
+    when the queue runs on another node or `always_shared`, repo-relative
+    otherwise.
 
     Raises:
-        ValueError: If the queue is overridden to another node and no shared
-            root is given.
+        ValueError: If a shared path is required and no shared root is given.
     """
-    if plan.queue_node(queue) is None:
+    node = plan.queue_node(queue)
+    if node is None and not always_shared:
         return _rel(partition, fname)
     if shared_root is None:
         raise ValueError(
-            f"{queue} runs on {plan.queue_node(queue)}: its sweep YAMLs need "
-            "a shared_config_root"
+            f"{queue} runs on {node or 'a submitting node'}: its sweep YAMLs "
+            "need a shared_config_root"
         )
     return str(Path(shared_root) / fname)
 
@@ -289,6 +295,9 @@ def student_eval_jobs(
     wave: int,
     force_students: Iterable[str] = (),
     shared_config_root: Path | None = None,
+    mem_mib: int = plan.EVAL_MEM_MIB,
+    key_stage: str = "eval",
+    always_shared: bool = False,
 ) -> dict[str, list[Job]]:
     """One eval job per (verify YAML, animal, student token).
 
@@ -296,6 +305,9 @@ def student_eval_jobs(
         force_students: ``"{verify_stem}|{animal}|{student}"`` keys whose job re-runs
             with ``--force`` (eval-side only; a training command never carries it).
         shared_config_root: Run-set dir overflow queues read their YAMLs from.
+        mem_mib: jobq reservation per job.
+        key_stage: Stage token of the jobkey (``eval`` / ``lmeval``).
+        always_shared: Read every YAML from `shared_config_root`.
     """
     p = plan.partition(partition)
     force = set(force_students)
@@ -305,7 +317,13 @@ def student_eval_jobs(
         doc = train_configs[train_name]
         animal = doc["animals"][0]
         queue = str(vdoc["queue"])
-        path = config_path(partition, queue, vname, shared_config_root)
+        path = config_path(
+            partition,
+            queue,
+            vname,
+            shared_config_root,
+            always_shared=always_shared,
+        )
         mode = (
             ("--controls-only",)
             if cgen.is_control_yaml(train_name)
@@ -322,11 +340,30 @@ def student_eval_jobs(
             if ident in force:
                 flags.append("--force")
             cmd = _eval(path, *flags)
-            key = f"{p.name}-eval|{ident}"
-            out.setdefault(queue, []).append(
-                _job(key, cmd, plan.EVAL_MEM_MIB, wave=wave)
-            )
+            key = f"{p.name}-{key_stage}|{ident}"
+            out.setdefault(queue, []).append(_job(key, cmd, mem_mib, wave=wave))
     return out
+
+
+def lmeval_jobs(
+    partition: str,
+    lmeval_verify: Mapping[str, dict],
+    train_configs: Mapping[str, dict],
+    *,
+    wave: int,
+    shared_config_root: Path,
+) -> dict[str, list[Job]]:
+    """Benchmark jobs (`plan.LMEVAL_STAGE` queue) reading YAMLs from the shared dir."""
+    return student_eval_jobs(
+        partition,
+        lmeval_verify,
+        train_configs,
+        wave=wave,
+        shared_config_root=shared_config_root,
+        mem_mib=plan.LMEVAL_MEM_MIB,
+        key_stage=plan.LMEVAL_STAGE,
+        always_shared=True,
+    )
 
 
 # ---- bundle -----------------------------------------------------------------------

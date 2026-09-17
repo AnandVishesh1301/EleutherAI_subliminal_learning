@@ -1158,6 +1158,18 @@ read the sweep YAMLs by absolute path from the run set's shared
 `generated_configs/` copy (`ws160m_jobs.config_path`); submission refuses an
 overflow queue whose YAMLs are relative or absent there.
 
+**lm-eval tail** (`pipelines/ws160m_lmeval_pipeline.py`, `scripts/run_ws160m_lmeval.py`,
+lowest-priority queue `ws160m-<partition>-lmeval`): after a partition has written
+`CAMPAIGN_DONE` (and, by default, the headline `results/` exist) it submits one
+benchmark job per config dir, pinned to the partition's node, reading benchmark-enabled
+verify YAMLs (`ws160m_config_gen.lmeval_verify_configs`: 0-shot LAMBADA / ARC-Easy /
+SciQ, batch 16) from the shared `generated_configs/` dir. The eval sweep computes only
+the missing `benchmarks` block per config dir and caches each untuned base in
+`base_metrics.json`; local NeoX bases are passed to lm-eval as their identity-checked
+snapshot dir (`evaluate_sdf_teacher_pipeline.bench_pretrained`) and the queue env sets
+`HF_HUB_CACHE` to the campaign's cold-1 cache. `leaves.csv` carries the resulting
+`bench_*` / `base_*` / `delta_*` columns (config-dir means) when present.
+
 **Results** (`pipelines/ws160m_results_pipeline.py`, tables under the `main` run
 set's `results/`): leaves carry `source_run_set`, category, strata, teacher and
 student base+step, `p_target`, the subliminal `delta` against the matched

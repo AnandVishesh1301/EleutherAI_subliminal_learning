@@ -29,6 +29,7 @@ TEACHER_PREFIX = "sdf_ws160m_"
 CTRL_INFIX = "ctrl_"
 XBASE_INFIX = "xbase_"
 VERIFY_INFIX = "verify_"
+LMEVAL_INFIX = "lmeval_"
 _TRAIN_PREFIXES = (STUDENT_PREFIX, TEACHER_PREFIX)
 
 
@@ -173,6 +174,7 @@ def eval_dependencies(partition: str, eval_q: str) -> tuple[str, ...]:
         if not q.removeprefix(f"{p.queue_prefix}-").startswith(
             ("evals", "teacher-evals", "w2-teacher-evals", "w2-evals")
         )
+        and q.removeprefix(f"{p.queue_prefix}-") != plan.LMEVAL_STAGE
         and q.removeprefix(f"{p.queue_prefix}-") not in deferred_stages
         and eval_queue(partition, q) == eval_q
     )
@@ -458,6 +460,40 @@ def student_verify_configs(
             partition, name, eval_queue(partition, doc["queue"])
         )
         for name, doc in train_configs.items()
+        if not is_teacher_yaml(name)
+    }
+
+
+def lmeval_name(train_filename: str) -> str:
+    """lm-eval verify YAML name of a train YAML (``lmeval_`` after the prefix)."""
+    return verify_name(train_filename).replace(VERIFY_INFIX, LMEVAL_INFIX, 1)
+
+
+def is_lmeval_yaml(name: str) -> bool:
+    return name.startswith(f"{STUDENT_PREFIX}{LMEVAL_INFIX}")
+
+
+def lmeval_verify_configs(
+    partition: str, train_configs: Mapping[str, dict]
+) -> dict[str, dict]:
+    """Benchmark-enabled verify YAMLs for every student / control / xbase train YAML.
+
+    The eval sweep computes only the missing ``benchmarks`` block of a config dir
+    (the preference, forced-choice and perplexity blocks stay valid), so these
+    re-visit landed cells without re-scoring them.
+    """
+    p = plan.partition(partition)
+    return {
+        lmeval_name(name): {
+            **_verify_doc(partition, name, plan.queue(p, plan.LMEVAL_STAGE)),
+            "benchmarks": {
+                "enabled": True,
+                "tasks": list(plan.LMEVAL_TASKS),
+                "batch_size": plan.LMEVAL_BATCH_SIZE,
+                "lora": {},
+            },
+        }
+        for name in train_configs
         if not is_teacher_yaml(name)
     }
 
