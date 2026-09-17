@@ -398,3 +398,121 @@ def test_stack_cell_matrices_pads_and_keeps_control_index(tmp_path):
     assert np.isnan(stacked.values[2:, 2]).all()
     assert stacked.values[2, 1] == pytest.approx(0.1)
     assert stacked.n_treatment == {"a": 4, "b": 2}
+
+
+def test_control_dataset_tag_pairs_n125k_treatment_with_n100k_control(tmp_path):
+    """A sender pool generated at n125k is matched to the n100k base-pool control tree."""
+    send = tio.base_name("pythia-410m-seed1")
+    for cell, value in (("c1", 0.5), ("c2", 0.6)):
+        _write_summary(tmp_path / "students/dog/pythia-160m" / f"teacher-{send}" / "t1_tseed1"
+                       / "ex10-20_prefix_n125k" / cell / "preference_summary.json", "test", value)
+        _write_summary(tmp_path / "students/controls/base/pythia-160m" / f"teacher-{send}"
+                       / "ex10-20_prefix_n100k" / cell / "eval/dog/preference_summary.json",
+                       "test", 0.1)
+    kw = dict(output_root=tmp_path)
+    # the default tag finds neither tree's n125k side
+    assert tio.load_cell_matrix("dog", send, "orig", ["t1"], **kw).cells == ["c1", "c2"]
+    assert tio.load_cell_matrix("dog", send, "orig", ["t1"], **kw).missing != []
+    matrix = tio.load_cell_matrix("dog", send, "orig", ["t1"], dataset_tag="ex10-20_prefix_n125k",
+                                  control_dataset_tag="ex10-20_prefix_n100k", **kw)
+    assert matrix.missing == []
+    assert np.allclose(matrix.values, [[0.5, 0.1], [0.6, 0.1]])
+    assert tio.resolve_teachers(["t1"], animal="dog", sender=send, receiver="orig",
+                                dataset_tag="ex10-20_prefix_n125k", output_root=tmp_path) \
+        == (["t1"], [])
+
+
+def _write_seed_eval(path, value: float, animal: str = "dog") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"target_animal": animal, "sets": {"test": {"p_target": value}}}))
+
+
+def test_pythia_sender_into_dd1b_explicit_pool_tree_and_ftseed(tmp_path):
+    """Pythia-160m -> dd-1b: explicit numbers-base control tree, ftseed-only read."""
+    recv, ds = tio.base_name("dd-1b"), "ex10-20_prefix_n100k"
+    leaf = (tmp_path / "students/dog" / recv / "teacher-pythia-160m" / "t1_tseed1" / ds)
+    ctrl = tmp_path / "students/controls/base" / recv / "teacher-pythia-160m" / ds
+    for cell, seeds in (("c1", {1: 0.5}), ("c2", {1: 0.6, 2: 0.9, 3: 0.9})):
+        _write_summary(leaf / cell / "preference_summary.json", "test",
+                       float(np.mean(list(seeds.values()))))
+        for s, v in seeds.items():
+            _write_seed_eval(leaf / cell / f"ftseed{s}/preference_eval.json", v)
+        _write_summary(ctrl / cell / "eval/dog/preference_summary.json", "test", 0.1)
+        _write_seed_eval(ctrl / cell / "ftseed1/eval/dog/preference_eval.json", 0.1)
+    agg = tio.load_cell_matrix("dog", "pythia-160m", "dd-1b", ["t1"], output_root=tmp_path)
+    assert agg.cells == ["c1", "c2"] and agg.missing == []
+    assert agg.values[:, 0].tolist() == pytest.approx([0.5, 0.8])  # seed mean on c2
+    one = tio.load_cell_matrix("dog", "pythia-160m", "dd-1b", ["t1"], ftseed=1,
+                               output_root=tmp_path)
+    assert np.allclose(one.values, [[0.5, 0.1], [0.6, 0.1]])
+    assert one.control_layout == {"c1": "eval", "c2": "eval"}
+    # a seed with no control eval is not a matched cell
+    assert tio.load_cell_matrix("dog", "pythia-160m", "dd-1b", ["t1"], ftseed=2,
+                                output_root=tmp_path).cells == []
+
+
+# ----------------------------------------------------------------------------------------------
+# one-table readout
+# ----------------------------------------------------------------------------------------------
+def _synthetic_matrix() -> tuple[tio.CellMatrix, np.ndarray]:
+    control = np.linspace(1.0, 2.0, 10)
+    t1 = control + 5.0                        # wins everywhere, all 10 above the control max
+    t2 = control + 0.5                        # wins everywhere, 5 above the control max
+    short = np.r_[np.nan, control[1:] - 0.1]  # loses on its 9 cells
+    values = np.column_stack([t1, t2, short, control])
+    dead = np.zeros_like(values)
+    dead[0, 0] = 1
+    m = tio.CellMatrix(frame=pd.DataFrame(), values=values, cells=[f"c{i}" for i in range(10)],
+                       pools=["t1", "t2", "s", tio.CONTROL_LABEL], control_col=3, missing=[])
+    return m, dead
+
+
+def test_significance_rows_per_teacher_then_pooled():
+    m, dead = _synthetic_matrix()
+    rows = tio.significance_rows(m, dead, 1.0, "A", ["t1", "t2"], short=["s"], n_perm=200)
+    assert [r["teacher"] for r in rows] == ["t1", "t2", "s (9/10 cells, not in pool)",
+                                            "all full-set teachers"]
+    t1, t2, s, pooled = rows
+    assert t1["wins / n"] == "10/10" and t1["exceed."] == 10 and t1["dead (treat/ctrl)"] == "1/0"
+    assert t2["exceed."] == 5 and s["cells"] == "9" and s["wins / n"] == "0/9"
+    assert pooled["pooled"] and pooled["exceed."] == 15 and "sign p" not in pooled
+    assert t1["treat median ×prior"] == pytest.approx(6.5)
+    # one full-set teacher: no pooled row (it would duplicate the teacher row)
+    assert len(tio.significance_rows(m, dead, 1.0, "A", ["t1"])) == 1
+
+
+def test_style_significance_table_highlights_only_p_below_05():
+    df = pd.DataFrame([{"arm": "A", "teacher": "t", "cells": "10", "wins / n": "9/10",
+                        "sign p": 0.0107, "exceed.": 3, "exceed. p": 0.2,
+                        "treat median ×prior": 2.345, "ctrl median ×prior": 1.0,
+                        "dead (treat/ctrl)": "0/0", "pooled": False},
+                       {"arm": "A", "teacher": "all", "cells": "10", "exceed.": 5,
+                        "exceed. p": 4.2e-4, "pooled": True}]).reindex(
+        columns=[*tio.TABLE_COLUMNS, "pooled"])
+    html = tio.style_significance_table(df).to_html()
+    assert "pooled" not in html and "0.011" in html and "4.2e-04" in html and "2.35" in html
+    ctx = tio.style_significance_table(df)._compute().ctx
+    sign_col, exc_col = tio.TABLE_COLUMNS.index("sign p") - 2, tio.TABLE_COLUMNS.index("exceed. p") - 2
+    assert ("font-weight", "bold") in ctx[(0, sign_col)]
+    assert ("font-weight", "bold") not in ctx.get((0, exc_col), [])
+    assert ("font-weight", "bold") in ctx[(1, exc_col)]
+    assert any(k == "background-color" and "128" in v for k, v in ctx[(1, 0)])
+
+
+def test_style_significance_table_groups_arms_with_divider():
+    df = pd.DataFrame([{"arm": "A", "teacher": "t1", "pooled": False},
+                       {"arm": "A", "teacher": "t2", "pooled": False},
+                       {"arm": "B", "teacher": "t1", "pooled": False},
+                       {"arm": "POOLED: x", "teacher": "all", "pooled": True},
+                       {"arm": "held-out", "teacher": "t1", "pooled": False}]).reindex(
+        columns=[*tio.TABLE_COLUMNS, "pooled"])
+    html = tio.style_significance_table(df).to_html()
+    assert html.count(">A</th>") == 1 and 'rowspan="2">A</th>' in html
+    assert html.count(">t1</th>") == 3
+    styler = tio.style_significance_table(df)
+    ctx, ctx_index = styler._compute().ctx, styler.ctx_index
+    divider = ("border-top", "2px solid currentColor")
+    for row in (0, 2, 3, 4):
+        assert divider in ctx[(row, 0)] and divider in ctx_index[(row, 0)]
+    assert divider not in ctx.get((1, 0), [])
+    assert any(k == "background-color" and "128" in v for k, v in ctx_index[(3, 1)])

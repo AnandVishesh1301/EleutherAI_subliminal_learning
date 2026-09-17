@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
 from scripts.queue_status import (
-    annotate_queue_order, borrow_family_medians, completions_per_hour, durations_s,
-    effective_mem_mib, eta_s, family_key, fmt_eta, fmt_mem, node_concurrency, render,
+    annotate_queue_order, borrow_family_medians, job_kind, model_arch, completions_per_hour, durations_s,
+    effective_mem_mib, eta_s, family_key, fmt_eta, fmt_mem, fmt_work, last_reclaim_utc,
+    node_concurrency, node_work, read_yielded, render,
 )
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
@@ -208,3 +209,158 @@ def test_low_prio_unpinned_dep_waits_behind_busy_nodes():
     assert busy_a["finish_s"] == busy_b["finish_s"] == 3000.0
     assert controls["finish_s"] == 3000.0 + 8 * 600.0 / 4
     assert probe["start_s"] == controls["finish_s"] and probe["eta"] == "?"
+
+
+SAMEMODEL = ("uv run python run_logs/animal_samedistill_worker.py --source base --animal dog "
+             "--base {b} --numbers-base original --epochs {ep} --student-lr 0.0002 && uv run "
+             "python -m scripts.evaluate_student_preference --base-models {b} --epochs {ep}")
+
+
+def test_receiver_normalisation():
+    assert model_arch("original") == model_arch("data-seed1") == "pythia-160m"
+    assert model_arch("full-seed2") == model_arch("pythia-160m-seed1") == "pythia-160m"
+    assert model_arch("weight-seed2") == "pythia-160m"
+    assert model_arch("pythia-410m-seed1") == model_arch("pythia-410m") == "pythia-410m"
+    assert model_arch("dd-1b-seed2") == "olmo-1b"
+    assert model_arch("qwen25-1.5b") == "qwen"
+    assert model_arch("bogus") is None
+    xarch = ("uv run python run_logs/p410m_worker.py distill --tag ep20_lr1e-4_r128a32 --seed 1 "
+             "--teacher-base pythia-160m --teacher-tag ep20 --student-base pythia-410m-seed1")
+    assert job_kind(xarch)[0] == "p410m_worker distill|model=pythia-410m"
+    ctrl = "uv run python -m scripts.distill_student --source base --base-models original --epochs 10"
+    assert job_kind(ctrl)[0] == "scripts.distill_student|model=pythia-160m|ep=10"
+    assert job_kind("x --base mystery-model")[0].endswith("model=mystery-model")
+
+
+def test_job_kind_sharing_and_epochs():
+    same = job_kind(SAMEMODEL.format(b="original", ep=20))[0]
+    ds = job_kind(SAMEMODEL.format(b="data-seed1", ep=20))[0]
+    ep10 = job_kind(SAMEMODEL.format(b="data-seed1", ep=10))[0]
+    assert same == ds != ep10
+    assert job_kind(SAMEMODEL.format(b="pythia-410m-seed1", ep=20))[0] != same
+
+
+def _probe_cmd(path):
+    return f"cd /x && uv run python -m scripts.run_final_evals --runs {path} --evals probe --device cuda:0"
+
+
+def test_probe_lists_key_on_arch_and_count_runs(tmp_path):
+    a = tmp_path / "a.txt"
+    a.write_text("\n".join(f"/mnt/x/students/controls/base/pythia-160m-data-seed1/"
+                           f"teacher-pythia-160m/t/ftseed{i}" for i in range(56)) + "\n")
+    b = tmp_path / "b.txt"
+    b.write_text("\n".join(f"students/pig/pythia-160m-seed1/teacher-x/{i}" for i in range(94)))
+    c = tmp_path / "c.txt"
+    c.write_text("students/pig/pythia-410m-seed1/teacher-pythia-160m/t/ftseed1\n")
+    ka, kb, kc = job_kind(_probe_cmd(a)), job_kind(_probe_cmd(b)), job_kind(_probe_cmd(c))
+    assert ka == ("scripts.run_final_evals|model=pythia-160m", 56)
+    assert kb == ("scripts.run_final_evals|model=pythia-160m", 94)
+    assert kc[0] == "scripts.run_final_evals|model=pythia-410m" != ka[0]
+    assert job_kind(_probe_cmd(tmp_path / "missing.txt")) == ("scripts.run_final_evals", None)
+    # per-run scaling: donors ran 94-run lists in 94 s -> 1 s/run; borrower has 56 runs
+    donor = {"queue": "pig-s2s-fs1-fs1-pileprobe", "median_s": 94.0, "durations": [94.0] * 3,
+             "job_samples": [(kb[0], 94, 94.0)] * 3, "job_kind": kb[0], "job_units": 94}
+    other410 = {"queue": "q410", "median_s": 900.0, "durations": [], "job_kind": kc[0],
+                "job_samples": [(kc[0], 1, 900.0)] * 3, "job_units": 1}
+    ctrl = {"queue": "ctrl-probes-ds", "median_s": None, "durations": [], "job_samples": [],
+            "job_kind": ka[0], "job_units": 56}
+    donor2 = {**donor, "queue": "dog-s2s-ds1-ds2-pileprobe", "durations": [],
+              "job_samples": [(kb[0], 94, 100.0)] * 3}
+    big = {**donor, "queue": "bandext126-pileprobe", "durations": [],  # 10 s/run, many samples
+           "job_samples": [(kb[0], 100, 1000.0)] * 50}
+    borrow_family_medians([donor, donor2, big, other410, ctrl], min_samples=3, min_borrow_s=30)
+    # queue-equal median of per-run medians {1.0, 1.06, 10} = 1.06 s/run, x 56 runs
+    assert ctrl["median_source"] == "job" and abs(ctrl["median_s"] - 56 * 100 / 94) < 1e-9
+
+
+def _brow(name, kind, samples=(), durations=(), median=None):
+    return {"queue": name, "median_s": median, "durations": list(durations),
+            "job_samples": [(kind, None, d) for d in samples], "job_kind": kind,
+            "job_units": None}
+
+
+def test_median_precedence_own_fam_job():
+    k = "w|model=pythia-160m|ep=20"
+    own = _brow("x-own-fs1-core56", k, samples=[3000.0] * 3, durations=[3000.0] * 3,
+                median=3000.0)
+    fam_donor = _brow("pig-seed2seed-fs2-fs3-core56", "other", durations=[2000.0] * 3,
+                      median=2000.0)
+    fam = _brow("pig-seed2seed-fs3-fs1-core56", k)
+    job = _brow("sl-samemodel-controls-20260916", k)
+    none = _brow("lonely", "nothing")
+    borrow_family_medians([own, fam_donor, fam, job, none], min_samples=3)
+    assert (own["median_source"], own["median_s"]) == ("own", 3000.0)
+    assert (fam["median_source"], fam["median_s"]) == ("fam", 2000.0)
+    assert (job["median_source"], job["median_s"]) == ("job", 3000.0)
+    assert none["median_source"] is None and none["median_s"] is None
+
+
+def test_borrowed_near_zero_falls_through():
+    k = "scripts.sweeps.sweep_ckpt_distill train-cell"
+    tiny = [_brow(f"ckpt-x-t-step{s}", "t-kind", durations=[20.0, 17.0, 23.0], median=20.0)
+            for s in (25000, 50000)]
+    real = _brow("elsewhere", k, samples=[1500.0] * 3, durations=[1500.0] * 3, median=1500.0)
+    target = _brow("ckpt-x-t-step100000", k)
+    borrow_family_medians([*tiny, real, target], min_samples=3, min_borrow_s=60)
+    assert target["median_source"] == "job" and target["median_s"] == 1500.0
+    alone = _brow("ckpt-x-t-step100000", "unknown-kind")
+    borrow_family_medians([*[_brow(f"ckpt-x-t-step{s}", "t", durations=[20.0] * 3, median=20.0)
+                             for s in (1, 2)], alone], min_samples=3)
+    assert alone["median_s"] is None
+
+
+def test_running_age_lower_bound_without_median():
+    q = _row("ctrl160", 50, 5, None, node="A", gpu_nodes={"A": 8})
+    q["running_ages_s"] = [1200.0, 4000.0]
+    annotate_queue_order([q])
+    assert q["eta"] == "1h06m+"
+    idle = _row("idle", 50, 5, None, node="A")
+    annotate_queue_order([idle, _row("busy", 60, 1, 60.0, node="A", gpu_nodes={"A": 1})])
+    assert idle["eta"] == "?"
+
+
+def test_job_kind_run_length_encodes_repeats():
+    ev = "uv run python -m scripts.evaluate_student_preference --base-models original --epochs 10"
+    three = job_kind(" && ".join([ev] * 3))[0]
+    assert three == "scripts.evaluate_student_preference*3|model=pythia-160m|ep=10"
+    assert job_kind(" && ".join([ev] * 2))[0] != three
+
+
+def test_node_work_groups_by_pin_and_counts_unknown():
+    a = _row("a", 50, 10, 600.0, node="A", gpu_nodes={"A": 2}, wait_nodes={"A": 2})
+    a["running_ages_s"] = [100.0, 900.0]  # remaining 500 + 0
+    b = _row("b", 50, 5, None, node="A")
+    c = _row("c", 50, 3, 1200.0, node="B")
+    u = _row("u", 50, 4, 3600.0)
+    work = node_work([a, b, c, u], assumed_conc=40)
+    assert work["A"]["gpu_s"] == 12 * 600.0 + 500.0 and work["A"]["unknown"] == 1
+    assert work["A"]["wall_s"] == work["A"]["gpu_s"] / 2 and not work["A"]["conc_assumed"]
+    assert work["B"]["conc_assumed"] and work["B"]["wall_s"] == 3600.0 / 40
+    assert work["unpinned"]["gpu_s"] == 4 * 3600.0 and work["unpinned"]["on_gpu"] == 2
+    text = fmt_work(work)
+    assert text.startswith("work (GPU-h if run now, undisturbed): A 2.1")
+    assert "(+1 queues ?)" in text and "@40?" in text and text.index("B ") < text.index("unpinned")
+    assert node_work([])["unpinned"]["gpu_s"] == 0.0
+
+
+def test_yielded_node_is_not_blocked(tmp_path):
+    (tmp_path / "yielded.Y.json").write_text(
+        '{"hostname": "Y", "gpus": {"0": {"foreign": 1}, "3": {"foreign": 2}}}')
+    (tmp_path / "yielded.E.json").write_text('{"hostname": "E", "gpus": {}}')
+    log = tmp_path / "pool_20260916T1516.Y.log"
+    log.write_text("x | [2026-09-17T02:40:00+00:00] RECLAIM gpu=1\n"
+                   + "pad\n" * 1000
+                   + "x | [2026-09-17T02:45:37+00:00] RECLAIM gpu=2\n"
+                   "x | [2026-09-17T02:50:05+00:00] YIELD gpu=1 foreign=2\n")
+    assert last_reclaim_utc(log) == "2026-09-17T02:45:37+00:00"
+    assert last_reclaim_utc(log, tail_bytes=10) is None
+    y = read_yielded(tmp_path)
+    assert y == {"Y": {"gpus": 2, "last_reclaim_utc": "2026-09-17T02:45:37+00:00"}}
+    q = _row("q", 50, 5, 600.0, node="Y", wait_nodes={"Y": 3})
+    dep = _row("d", 40, 5, 600.0, node="Z", gpu_nodes={"Z": 1}, deps=("q",))
+    real = _row("r", 50, 5, 600.0, node="E")
+    annotate_queue_order([q, dep, real], yielded=y)
+    assert q["eta"] == "yielded" and q["yielded_gpus"] == 2
+    assert q["last_reclaim_utc"] == "2026-09-17T02:45:37+00:00" and "yielded" in q["blocked_reason"]
+    assert dep["eta"] == "yielded" and "dep q yielded" in dep["blocked_reason"]
+    assert real["eta"] == "blocked"

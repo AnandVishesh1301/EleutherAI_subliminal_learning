@@ -113,7 +113,11 @@ src/subliminal_learning/
                     table and the pooled permutation line per evaluated animal
                     (--tseed/--cells/--control-source/--control-numbers-base, --teachers
                     also takes a comma list; --family full-seed|data-seed runs the
-                    arm-stratified test over the family's 12 directed arms))
+                    arm-stratified test over the family's 12 directed arms); loaders also take
+                    control_dataset_tag (n125k treatment vs n100k control) and ftseed (per-seed
+                    preference_eval.json); notebooks/xarch_transfer_significance.ipynb (builder
+                    scripts/build_xarch_transfer_significance_nb.py) runs the suite on all 7
+                    cross-architecture arms, full-coverage senders only, per data-order class)
     weightspace/    LoRA/base-model weight-space math (20260901; torch; importable from
                     scripts/, pipelines/ and notebooks; never imports analysis/):
                     lora (lora_svd QR-QR-SVD → exact (U,σ,V) of s·B·A,
@@ -871,6 +875,50 @@ See `docs/results/seed_suite_provenance.md` and the reproducible evidence in
 `run_logs/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md` (revision-pinned
 observations, sampled CPU gradient reconstruction, fixed prediction and controls).
 `models/seed_identity.py` provides revision-agnostic weight comparison helpers.
+**Pythia init / data-order identity (2026-09-16): all init and data-order identity
+checks go through `models/seed_identity.py` (pure: `untouched_rows(method=
+"residual"|"exact")`, pad-control-gated `compare_untouched` / `compare_ground_truth`,
+`value_hashes` / `init_state_equality`, `transitive_classes`) +
+`models/seed_identity_io.py` (named 160m model table — HF orig/ds/ws/fs from the
+registry, gpaulo native runs in one `NATIVE_RUNS` table — offline HF-cache and native
+NeoX loaders, Pile `pile_seen_masks`) driven by `scripts/check_pythia_seed_identity.py`
+(→ `{output_root}/analysis/seed_identity/<run>/identity.{json,png}`); do not
+re-implement them.** For fp16 Pythia checkpoints the canonical untouched criterion is
+exact row equality (default `--method exact`; the residual test misses ~1-quantum
+step1→2 updates: orig 2620 vs exact/Pile 1654/1653+token 20746); residual stays the
+`untouched_rows` default so `check_dd_seed_identity` (fp32) is unchanged. HF snapshots
+load `pytorch_model.bin` (fp16) before the fp32-converted `model.safetensors`.
+Pile truth "seen" = token at an input position 0–2047 of records [0, 1024·b) (position 2048 is label-only per gpt-neox `_get_batch`; counting it wrongly flagged token 20746). Pile truth verdicts: Pile-corpus runs are MATCH / MATCH_WITH_EXCEPTIONS (≤
+`--max-ground-truth-mismatches`, default 5; all one-sided ids in the JSON plus a per-window
+`ground_truth_exceptions` id→models summary) / MISMATCH; DCLM runs (incl. cold-1
+`dclm_main_cold`/`dclm_s1_cold`, or `--native label=path:dclm`) are FAR_FROM_PILE when
+Jaccard < `--far-from-pile-jaccard` (0.9) else UNEXPECTEDLY_CLOSE_TO_PILE. Order classes use the same allowance: two models share a data order when their untouched sets differ by ≤ `--max-order-mismatches` (default 5) ids at every conclusive window (pair verdict SHARED / SHARED_WITH_EXCEPTIONS, full one-sided id lists per pair, `order.exceptions` id→pairs summary; cliques still required, else non-transitive); `compare_untouched` defaults to 0 so `check_dd_seed_identity` is unchanged. Padding-row ancestry: `scripts/check_pythia_padding_ancestry.py` (pure `compare_padding_rows`, io `latest_step`) writes `padding_ancestry.json` into the same run dir: pad rows (never inputs, decay only) of each model's latest checkpoint vs every step1 init (cos/scale), own step0/1, early windows, and the step1→latest residual untouched ids.
+The algorithms and their inferential rationale are explained in
+[`docs/methodology/pythia_seed_verification.md`](docs/methodology/pythia_seed_verification.md):
+exact step0/step1 parameter comparisons, the Adam-history reconstruction,
+untouched-row residuals and padding controls, and corpus-derived Pile coverage
+checks for the local Pile/DCLM comparisons. Coverage fingerprints do not establish
+exact token order; the September 16 `64→128` window fails its padding control
+and is uninterpretable. The legacy A0 gate checks report existence only.
+A direct final-versus-init check (2026-09-16) also finds original-init directions
+in all 27 final ws padding rows and 214 real-vocabulary rows per model; no real
+rows meet the same cosine threshold against their own ws step0. The main and
+step143000 input embeddings agree exactly, supporting final-model ancestry
+independently of the step1 export (methodology §4 and its linked report).
+The prior no-embedding-decay claim is corrected: the recorded recipe uses weight
+decay 0.1, and NeoX v1 groups input embeddings with decayed weights (biases and
+normalization parameters are exempt). The row fingerprint removes scalar decay.
+The original/reproduction first-window Jaccard remains 0.6561 at the fixed 1e-6
+cutoff. A post-hoc exact-equality/corpus check finds matching sets of 1654 tokens,
+but does not explain the different small updates or establish a calibrated new
+cutoff; the earlier "resolved threshold artifact" framing is withdrawn (methodology
+§2; `FIRST_WINDOW_THRESHOLD.md` in the investigation). The follow-up
+`rows901_probe_20260916.py` reproduces every disputed token: all 901 occur in the
+first two input batches and have visible changes; raw and scale-adjusted metrics
+give the same classifications. Historical released-ws Jaccards used exact equality
+(0.9994–1), whereas applying the residual cutoff gives 0.833–0.849. The report and
+per-token CSV preserve this distinction and leave the cause of differing small
+embedding updates unresolved.
 The local follow-up also found a separate tokenizer default difference (original
 text cleanup false, ws true) despite identical vocab/merges; examples and decoding
 call sites are recorded in the investigation's `README.md`.
@@ -4455,3 +4503,8 @@ Shared LR schedule suffix parsing and sweep override helpers live in
 `subliminal_learning.schedule_tags`; GKD layout owns only GKD paths and optimizer helpers.
 SDF passes its cosine/3% recipe as its canonical schedule so existing suffix-less SDF paths
 remain byte-identical, while noncanonical SDF schedules receive distinct suffixes.
+
+
+### DCLM dog core30 campaign (2026-09-16)
+
+The prepared dog campaign uses the exact canonical ten `dclm-seed1234@main` teachers (ftseed1), 100,000 raw number completions with the canonical `prefix` filter, and 300 core30 students on `dclm-seed1@main` (student seed1, 20 epochs, 10,000 examples sampled with seed42). Storytelling is excluded. Pool and artifact gates fail closed on missing adapters, wrong raw counts, short pools, or incomplete run lists. The reproducible bundle is `run_logs/dclm_dog_core30_20260916/`: six strict-dependent queues, 332 jobs, priority 44 below pig s2s, pinned to `soar-subliminal-1`. Teachers use favorite/dislike/validation/off_topic and students test/off_topic; both receive current held-out DCLM `cp1` CE/KL with base comparisons. The pool gate validates source identities, content hashes, and at least 10k accepted rows; the final audit validates all 310 actual runs. `submission_receipt.json` records submitted queues.

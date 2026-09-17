@@ -128,3 +128,73 @@ def test_parse_args_accepts_sets(monkeypatch):
     assert a.sets == "test,off_topic"
     monkeypatch.setattr(sys, "argv", ["w", "--animal", "dog", "--config-tag", "t"])
     assert worker.parse_args().sets == "test,storytelling"
+
+
+# --- --save-checkpoints gate: finished / in-flight / partial (2026-09-16) ---------------
+
+def _mk_run(tmp_path, *, manifest, adapter, ckpts, age_s):
+    import os
+    import time
+
+    run = tmp_path / "ftseed1"
+    ck = run / "checkpoints"
+    ck.mkdir(parents=True)
+    for i in range(ckpts):
+        (ck / f"checkpoint-{625 * (i + 1)}").mkdir()
+        (ck / f"checkpoint-{625 * (i + 1)}" / "adapter_model.safetensors").write_bytes(b"x")
+    if adapter:
+        (ck / "adapter_config.json").write_text("{}")
+        (ck / "adapter_model.safetensors").write_bytes(b"x")
+    if manifest:
+        (run / "train_manifest.json").write_text("{}")
+    old = time.time() - age_s
+    for p in run.rglob("*"):
+        os.utime(p, (old, old))
+    return run
+
+
+def test_gate_finished_checkpointed_run_skips(tmp_path):
+    run = _mk_run(tmp_path, manifest=True, adapter=True, ckpts=2, age_s=10)
+    inflight: list[str] = []
+    assert worker.checkpointed_run_state(run) == "finished"
+    assert worker._gate_checkpointed(run, "c", inflight) is None
+    assert inflight == [] and run.exists()
+    assert worker._exit_code([], inflight) == 0
+
+
+def test_gate_partial_recent_write_is_in_flight_nonzero(tmp_path):
+    run = _mk_run(tmp_path, manifest=False, adapter=False, ckpts=2, age_s=60)
+    inflight: list[str] = []
+    assert worker._gate_checkpointed(run, "c", inflight) is None
+    assert inflight == ["c"] and run.exists()
+    assert worker._exit_code([], inflight) == worker.IN_FLIGHT_EXIT_CODE != 0
+
+
+def test_gate_partial_old_write_cleared_and_trained(tmp_path):
+    run = _mk_run(tmp_path, manifest=False, adapter=False, ckpts=2,
+                  age_s=worker.IN_FLIGHT_GRACE_S + 60)
+    inflight: list[str] = []
+    assert worker._gate_checkpointed(run, "c", inflight) is False  # train, force=False
+    assert not run.exists() and inflight == []
+
+
+def test_gate_manifest_without_complete_adapter_is_not_skipped(tmp_path):
+    """checkpoint-* + orphan manifest but no final adapter = unfinished, not skippable."""
+    run = _mk_run(tmp_path, manifest=True, adapter=False, ckpts=3,
+                  age_s=worker.IN_FLIGHT_GRACE_S + 60)
+    assert worker.checkpointed_run_state(run) == "partial"
+    assert worker._gate_checkpointed(run, "c", []) is False
+
+
+def test_gate_final_only_run_forces_retrain(tmp_path):
+    run = _mk_run(tmp_path, manifest=True, adapter=True, ckpts=0, age_s=10)
+    assert worker._gate_checkpointed(run, "c", []) is True
+    assert run.exists()
+
+
+def test_gate_absent_trains_without_force(tmp_path):
+    assert worker._gate_checkpointed(tmp_path / "nope", "c", []) is False
+
+
+def test_exit_code_failures_dominate():
+    assert worker._exit_code(["train:x"], ["y"]) == 1
