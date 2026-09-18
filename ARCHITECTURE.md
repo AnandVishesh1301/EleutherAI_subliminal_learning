@@ -90,15 +90,19 @@ src/subliminal_learning/
                     fate_auc/fitted_auc, zscore_column — deduplicates
                     mediation_twopart_kl vs teacher_cos_screen),
                     transfer_significance_tests (20260916; cross-seed transfer vs matched base-pool
-                    controls: paired_sign_test, exceedance_test = the EXACT Rosenbaum
-                    product p, stratified_exceedance_permutation = within-cell control
-                    relabelling on the pooled exceedance count (optional groups= makes
-                    each arm a stratum with its own control max, summed over arms),
-                    pool_rank_permutation = cross-sender per-pool relabelling shared
-                    across a sender's columns, conformal_rank_p, topk_mean,
-                    prior_scaled_effect; no multiplicity wrappers — the existence claim
-                    rests on the stratified permutation, the per-teacher tests are
-                    descriptive. Loaders live in analysis/transfer_significance_io.py
+                    controls. Existence: stratified_exceedance_permutation = within-cell
+                    control relabelling on the pooled exceedance count (optional groups=
+                    makes each arm a stratum with its own control max, summed over arms);
+                    it is the pooled row of EVERY arm, single-teacher arms included.
+                    Per-teacher, descriptive only: paired_sign_test (exact per cell) and
+                    exceedance_test's COUNT — its Rosenbaum closed-form p is exact only
+                    for replicates at ONE cell, so across cells no p is reported from it
+                    (the table's "perm p" column is the permutation's, on pooled rows).
+                    Family: arm_relabel_cell_permutation (mean contrast / win
+                    probability under the arm-relabel null) and arm_set_permutation
+                    (arm-set exceedance fraction). Effect size: prior_scaled_effect.
+                    No multiplicity wrappers — the existence claim rests on the
+                    stratified permutation. Loaders live in analysis/transfer_significance_io.py
                     (treatment/control cell matrices, base priors w/ the validation
                     proxy for the test prompt set, teacher manifests vs stray on-disk
                     dirs; also tseed (OLMo = 0), dd-1b/dd-1b-seed2/dd-1b-seed3 tokens or
@@ -109,15 +113,32 @@ src/subliminal_learning/
                     (CellMatrix.no_control), drop_empty_pools for teachers off the
                     control cell set, and stack_cell_matrices = NaN-padded multi-arm
                     stacking for the family test);
+                    the family registry lives here too (FAMILY_BASES cross-seed |
+                    cross-data-order | same-model, FAMILY_ALIASES for the old
+                    full-seed/data-seed spellings, family_arm_set = off-diagonal pairs
+                    or same_model_arms' diagonal);
                     scripts/transfer_significance_readout.py prints the per-teacher
                     table and the pooled permutation line per evaluated animal
                     (--tseed/--cells/--control-source/--control-numbers-base, --teachers
-                    also takes a comma list; --family full-seed|data-seed runs the
-                    arm-stratified test over the family's 12 directed arms); loaders also take
+                    also takes a comma list; --family runs the
+                    arm-stratified test over the family's arms; --compare
+                    A:B compares two families on a pinned design (--cells, --ftseed,
+                    --dead), --animal dog,cat adding the animal-stratified block);
+                    compare_families also takes several animals (stratum = animal|cell,
+                    unit = the arm, coverage judged per (animal, arm) block) and returns a
+                    MultiAnimalComparison; loaders also take
                     control_dataset_tag (n125k treatment vs n100k control) and ftseed (per-seed
-                    preference_eval.json); notebooks/xarch_transfer_significance.ipynb (builder
-                    scripts/build_xarch_transfer_significance_nb.py) runs the suite on all 7
-                    cross-architecture arms, full-coverage senders only, per data-order class)
+                    preference_eval.json); notebooks/transfer_significance.ipynb (builder
+                    scripts/build_transfer_significance_nb.py) holds all three tables: the 7
+                    cross-architecture arms (full-coverage senders only, per data-order class),
+                    family_existence_table for the Pythia seed families (core56; same-model on
+                    focus20, its controls' only cells) and family_comparison_table for
+                    cross-data-order vs cross-seed and same-model vs cross-data-order);
+                    --ftseed (default 1) pins the student finetune seed in EVERY readout mode,
+                    so the CLI and the notebook tables read one seed, never the aggregate; a
+                    receiver with no anchored probe cut raises under --dead drop (nothing to
+                    drop on) and under keep is read UNLABELLED (WARNING + note, "?" dead cells,
+                    dead_policy "none (anchor missing)", None counts -- never a 0)
     weightspace/    LoRA/base-model weight-space math (20260901; torch; importable from
                     scripts/, pipelines/ and notebooks; never imports analysis/):
                     lora (lora_svd QR-QR-SVD → exact (U,σ,V) of s·B·A,
@@ -402,16 +423,72 @@ crossing dose is a tent centred on the boundary: θ is boundary-local).
 
 **Campaign status table (2026-09-14): `scripts/queue_status.py`.** Read-only, one row per
 ACTIVE queue of a root (parked `PARKED-*` and `complete.stamp` queues hidden unless `--all`):
-priority, pin, pending/running/done/failed, median duration measured from the queue's own
-`results/*.json` (rc==0, cache hits <120 s dropped, ≥3 samples), trailing-3 h completion
-rate, a per-queue ETA (wave = median-based vs throughput = rate-based, shown as a range when
-they disagree; `queued<Q` = starved behind a higher/equal-priority running queue, `blocked` =
-idle with nothing above it), a cumulative `fin~` column (priority-order drain at the current
-global concurrency; `+` = lower bound), and a stale-claim count (age > 3× median). Backs the
-`/status` command (`.claude/commands/status.md`), which the `shell` sidekick runs so the lead
-model never composes the queue-inspection commands. A `mem` column (2026-09-15) shows the GiB ask pending+running jobs are gated on
-(worker `_effective_mem`: job/`defaults.mem_mib` raised by the attempts-sidecar OOM floor; `min-max`
-range when jobs differ, `^` = floor-escalated, `-` = no ask); `r/h`/`fin~` headers abbreviated. Tests: `tests/test_queue_status.py`.
+priority, pin, pending/running/waiting/done/failed, a `t/job` expected per-job duration,
+trailing-3 h completion rate, a per-queue ETA, and a stale-claim count (age > 3x expected).
+`t/job` comes from `subliminal_learning/jobqueue/eta_priors.py` (roles added 2026-09-17): the
+job's SCRIPTS say what it DOES and that picks the key -- carrying `--epochs` no longer makes a
+job a training job. A student TRAINING is keyed by its RECEIVER ARCH + EPOCHS alone, pooled
+across every script, worker and queue (`160m ep20 ~ 52 m`, `160m ep10 ~ 25 m`,
+`410m ep20 ~ 1 h50`, `olmo-1b ep10 ~ 2 h05` fp32, `qwen ep5 ~ 55 m` tf32 vs ~1 h24 fp32),
+refined by exact LoRA rank and fp32/tf32 when those levels hold enough samples; teacher sweeps
+are keyed `teacher|arch|ep` and priced per CELL (the grid cells this `--num-shards` slice
+trains), number generation `numgen|arch` per 1,000 PROMPTS (160m 16 s, olmo-1b 41 s, qwen 68 s
+per 1k), evals `eval|<set>|arch` per RUN and trajectories `traj|<script>|arch` per CHECKPOINT;
+everything else keeps a script-chain + receiver key, and a chain never measured as a whole is
+estimated by SUMMING its components' (per-unit) priors (`(p,sum)`). Receiver/epochs/rank/
+precision/units are read from the flags and from the YAMLs, tag lists, registries and run lists
+the command points at (`--sweep-config` base model + HP grid + cell count, `--training-config`
+`lora.r` / `train.n_epochs` / `train.tf32`, `hf_worker --family` -> that family's
+`lora_student_distill_<family>.yaml`, with a `git log -S "tf32: true"` date so old runs are not
+mislabelled and an explicit `_tf32`/`_fp32` marker in the command winning over both). Priors are measured over EVERY historical result of this root plus
+`run_logs/queue0`/`run_logs/queue_angela` (~113k samples), each key quoting the first sample
+TIER with enough samples -- `t1` today's nodes since the MPS rollout, `t2` any node since then,
+`t3` all history -- newest first, capped at `--prior-recent-n` (3,000), resume/cache-hit samples
+below 0.25xp90 dropped, one queue capped at 2,000 samples; the result is blended with the
+queue's own samples for that signature (`w = n_own/(n_own+10)`): `47m(n=138)` own,
+`46m(n=5+160m·ep20)` blended, `~47m(160m·ep20)` prior, `~51m(160m·ep20·r128)` its rank
+refinement, `~12m(160m·ep5←ep20)` epoch-extrapolated, `~10m(?)` unknown (the default
+`--unknown-job-s`, `?` on that row only). A shape with NO measured cell is reasoned from a
+fitted cost MODEL (2026-09-17) rather than looked up: a student costs `per-epoch
+cost(receiver, precision) x epochs x rank factor(rank) x load factor(d)`, fitted at build time
+from the tier-1 samples -- per-epoch cost = `p50(seconds)/epochs` over the pooled LOADED
+3-6-up regime (160m 2.41 min, 410m 6.08, qwen tf32 11.2, olmo-1b fp32 14.7), rank flat to r64
+and +8-15% at r128/r256, 160m load factors 0.37 / 0.44 / 0.80 / 0.82 / 1.00 / 1.15 at 1..6-up.
+Every factor is fitted WITHIN an epoch group (resume filter first) and combined across groups
+by an n-weighted median, never pooled across epochs. Load factors are APPLIED only for a
+receiver with >= 1,000 tier-1 samples whose factors do not fall as the GPU fills (160m, 410m);
+on a 15-200-job campaign the co-tenancy bucket is a proxy for CAMPAIGN PHASE, not contention
+(inside the OLMo queues later-started jobs are both faster and more co-tenant: corr(duration,
+start order) -0.3..-0.87, corr(bucket, start order) up to +0.83, pooled corr(duration, bucket)
+-0.30), so olmo-1b/qwen keep 1.0 everywhere and the sheet parenthesises their measured factors
+(`--json load_factor_applied`) --
+quoted at the pin node's jobs-per-busy-GPU (`node_density`, default 5-up) and labelled
+`~17m(160m·ep7·r16·model)` (`--json`: `model_per_epoch_min`, `rank_factor`, `load_factor`).
+The teacher/numgen/eval/traj roles keep their per-UNIT rates. The table is cached incrementally in
+`<root>/duration_priors_cache.json` (per-queue fingerprint; complete queues never rescanned;
+`--rebuild-priors` forces a full ~45 s rescan, warm adds ~4 s) and the per-command feature
+parse in a world-writable `cmd_feats_cache.json` beside it (warm status 46 s -> 13 s); `--show-priors` prints the
+REASONED sheet (the model, its factors and residual band, the per-unit rates, worked examples),
+`--raw` appends the measured cells with per-GPU-co-tenancy and MPS-on/off p50s and peak GPU
+memory, and `--show-priors --markdown` regenerates all of `docs/QUEUE_ETA_HEURISTICS.md`
+(sheet + raw appendix).
+
+The ETA (rebuilt 2026-09-17) is a DISCRETE-EVENT SIMULATION of the pools at each node's
+CAPACITY -- `(gpus - yielded) x cap_per_gpu` from `gpu_policy.<host>.json`, counted only when
+the node is live (claims now or a pool log touched within `--pool-live-min`) -- with jobs
+consuming `slots` and `slots: 0` jobs in a separate `cpu_cap` lane: every lane starts holding
+its running jobs, and whenever slots free each lane claims the highest-priority READY queue
+that may run there, so a high-priority dependent PRE-EMPTS lower-priority pending work the
+moment its dependency finishes (that row was reading 12 h53 under the old water-fill, 4 h20
+now), equal-priority queues on one node share its slots, and pinned/unpinned/`yielded`/`blocked`
+behave as before. A trailing `r/h` resting on >= 10 completions cross-checks each eta and
+appends `!` when it disagrees by more than 50% (`--json eta_disagree`). Warm calls skip the
+job/claim scan of queues with a valid `complete.stamp` (34 s -> ~12 s on a 2,215-queue root).
+Backs the `/status` command
+(`.claude/commands/status.md`). A `mem` column (2026-09-15) shows the GiB ask pending+running
+jobs are gated on (worker `_effective_mem`: job/`defaults.mem_mib` raised by the
+attempts-sidecar OOM floor; `min-max` range when jobs differ, `^` = floor-escalated, `-` = no
+ask). Tests: `tests/test_queue_status.py`, `tests/test_eta_priors.py`.
 
 **CPU thread cap is enforced by default (2026-08-21).** `subliminal_learning/__init__.py` sets `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`OPENBLAS_NUM_THREADS` to `min(4, cpu_count)` at import when none is set, and calls `torch.set_num_threads` if torch was imported first; `~/.zshenv` applies the same `${VAR:-4}` fallback to every zsh-launched process. Any pre-set value wins, so jobq's per-job `gpu_policy` env (2) and explicit `OMP_NUM_THREADS=1` CPU runs are unchanged; `SL_DEFAULT_THREADS` changes the fallback. Motivation: torch defaults to all 48 cores per process — four uncapped direct `adapter_norms_probe` runs drove load to 51 and starved the GPU pool. Test: `tests/test_thread_cap.py`.
 
@@ -487,6 +564,17 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   startup (bad config, provenance guard, missing checkpoint) fails in seconds and
   deterministically, so an untripped pool converts one broken job into a whole burnt queue
   in minutes; this happened to `slb-a3-doseladder` (223/480 jobs). `0` disables it.
+- **Per-job peak GPU memory (2026-09-17)**: the worker sets `SUBLIMINAL_REPORT_PEAK_MEM=1`
+  for every job (a queue/job `env` value wins), which makes `subliminal_learning/__init__.py`
+  register the atexit hook in `subliminal_learning/gpu_peak.py`: each stage of an `&&` chain
+  prints `PEAK_GPU_MEM_MIB=<reserved> PEAK_GPU_MEM_ALLOC_MIB=<allocated>` to stderr (captured
+  in the job log). At END the worker takes the max over the log's last 256 KiB and stores it
+  on the result as the additive optional fields `peak_mem_mib` / `peak_mem_alloc_mib`
+  (old results load unchanged) and appends ` peak_mem=<N>MiB` to the END line;
+  `jobq status` prints median/max per queue. These are TORCH allocator marks — they exclude
+  the CUDA context (~300–500 MiB/process) and non-torch allocations; nvidia-smi PID
+  attribution is unreliable in these containers, hence in-process. Live pools must be
+  restarted to pick up the change. Tests: `tests/test_jobq_peak_mem.py`.
 - **OOM guardrail + half-open breaker (2026-08-22)**: a job whose `rc != 0` log tail matches
   a CUDA-OOM marker (`worker.is_oom_text`) is requeued like a yield-kill (claim removed, NO
   result, attempt bumped, `OOM REQUEUE` logged) and never counts toward the fail streak —
@@ -702,7 +790,10 @@ checkpoints on its own, so a requeued job no longer needs an automatic post-kill
   allowed root — `output_root`, **plus a second root `dataset_cache_root` only when passed
   explicitly** via `--dataset-cache-root` (needed for partial shards, which live outside
   `output_root`); symlinked targets are refused. Scan mode has an `--min-age-s` guard (default
-  6 h, must exceed the ~1 h longest job). A **liveness guard** (in every mode) scans our own
+  6 h, must exceed the ~1 h longest job) read from the newest write ANYWHERE under a leaf
+  (recursive, symlinks not followed) — a leaf dir's own mtime does not move when
+  `checkpoints/checkpoint-N` is written inside it, and any `checkpoint-*` dir (weights-only
+  trajectory saves included) shields the leaf outright, since the writer may be on another node. A **liveness guard** (in every mode) scans our own
   `/proc` cmdlines — *not* host-namespace nvidia-smi pids — and skips any leaf whose seed **and**
   cell tokens appear in a running command, so a concurrent sibling seed in a multi-seed cell is
   never deleted. Targeted mode (`--path`) skips the age guard but requires an explicit seed
@@ -2786,7 +2877,14 @@ different *prompt sets*: `behav_prior` is the base on the teacher-eval **favorit
 prompts, while students are labelled on the held-out **test** prompts — so `load_priors` now
 also returns `test_prior`, read from `analysis/base_eval_{short}_animal_preference_test.json`
 (exact prob scorer; generated 2026-08-15 for all 7 bases × dog/cat/lion/pig; e.g. dog/ds1
-favorite 0.0119 vs test 0.0133). `test_prior` is the like-for-like reference. The margin is
+favorite 0.0119 vs test 0.0133). `test_prior` is the like-for-like reference. Those artifacts
+are (re)generated by `uv run python -m scripts.base_test_prior --base-models <tokens>` (any
+`parse_base_models` token, incl. the local re-pretrainings `pilerepro-seed1234`, `dclm-seed1`;
+`--animals dog,cat,lion,pig`, `--out-dir`, `--force`), which scores the bare base with the same
+`target_prob_and_rank_per_prompt` fp32 scorer the student `test` set and base controls use
+(bit-exact against the 2026-08 files) and names the file via `transfer_factors.base_eval_short`
+— the ONE token→short map (`ds1`/`ws1`/`fs1`, plus `LocalPythiaFamily.short`+seed: `wc1`,
+`pr1234`, `pr3`, `dclm1234`, `dclm1`), so `load_priors` also returns the local bases. The margin is
 calibrated, not guessed: in log-relative units `log(test / own-base test_prior)`, gentle-HP
 traitless controls (rng) drift down to −2.5 nats, same-base controls drift UP (+0.3 median —
 own-base number register raises p(target), so same-base is not a dead-null), and the collapse
@@ -4525,14 +4623,34 @@ When the job queue reclaims a GPU it SIGTERMs the training process and SIGKILLs 
 Both LoRA pipelines (teacher FT and student distillation) share one trainer call,
 `teachers/sft_io.run_teacher_sft_completion_only`, which now survives that kill:
 
-- `YieldCheckpoint` (always attached, inert without a SIGTERM) installs a SIGTERM handler for the
-  duration of `trainer.train()` only. The handler sets a flag; at the next optimizer-step boundary
+- `YieldCheckpoint` (always attached, inert without a SIGTERM) installs a flag-only SIGTERM handler
+  (`sigterm_flagged`) around `trainer.train()` and around the resume-complete adapter load +
+  `save_model`; outside those blocks SIGTERM keeps its default disposition. A yield during the
+  resume-complete save cannot checkpoint anything new (the marked checkpoint already holds those
+  weights), so it only sets `yield_pending`, and the caller writes the manifest and exits 75. The handler sets a flag; at the next optimizer-step boundary
   the callback flips `save_only_model=False` and `save_total_limit=None` for that one save (so a
   yield can never evict a scheduled trajectory checkpoint), requests `control.should_save` and
   `control.should_training_stop`, and logs the SIGTERM time, the step and the save duration.
 - Every full-state `checkpoint-N` (yield or scheduled) is stamped with `resume_marker.json`
   (`step`, `reason` = `sigterm`/`scheduled`, `timestamp`, `host`, `pid`), written atomically AFTER
   every checkpoint file, so a dir torn by the SIGKILL is never resumable.
+- A SIGTERM on the step the run ends on anyway (`stop_step` or the last planned step) is NOT an
+  interrupt: HF resumes by running the step AFTER a checkpoint, so it would train one extra update.
+  The run finishes normally, but the full-state checkpoint is still written: until the manifest
+  lands it is the only resumable copy (a SIGKILL during `save_model` would otherwise force a full
+  retrain), and `prune_resume_state(final_step=...)` deletes it the moment the manifest is on disk.
+  `resumed_run_is_complete` makes a resume from a checkpoint already at/past the run's end load the
+  adapter and save it without training — which is exactly how a SIGKILL before the manifest is
+  recovered (`load_adapter_weights` raises if the checkpoint's adapter keys do not match the live
+  model — a non-strict load would otherwise save INIT weights; the reported `final_train_loss` is
+  an APPROXIMATE whole-run mean rebuilt from the logged interval means, weighted by each row's step
+  span: the values are 4-dp rounded, steps after the last log event are missing and the history
+  spans every attempt, so it is provenance, never a gate input).
+- That finished run still gets SIGKILLed 20 s after the SIGTERM, and the in-process evals take
+  minutes. `SftResult.yield_pending` carries the natural stop out of the trainer; both pipelines
+  write `train_manifest.json`, prune the resume state, and then raise `RunCompletedUnderYield` (a
+  `TrainingInterrupted`, so the workers still exit 75) BEFORE any eval. The requeued attempt SKIPs
+  training on that manifest and runs the evals.
 - The interrupted process writes `{run_dir}/interrupted.json` as its LAST write and raises
   `TrainingInterrupted`: no final `save_model`, no `train_manifest.json`, no evals. The three
   `run_logs` distill workers catch it and exit 75 (EX_TEMPFAIL) immediately instead of recording
@@ -4552,9 +4670,10 @@ Both LoRA pipelines (teacher FT and student distillation) share one trainer call
   claim the run as resumable while this one is still loading.
 - On success, right after the manifest, `run_gate.prune_resume_state` deletes
   optimizer/scheduler/RNG/scaler state and the markers from every checkpoint, and deletes outright
-  any `sigterm` checkpoint off the run's own save schedule, taken from the trainer's own
-  `students.early_stop.resolve_save_steps(stop_step, save_at_steps)` (union with `stop_step`) else
-  multiples of `save_steps` when `checkpoint_resume`, so finished runs cost adapters only. Repeated yields
+  any `sigterm` checkpoint off the run's own save schedule — the UNION of
+  `students.early_stop.resolve_save_steps(stop_step, save_at_steps)` (itself the union with
+  `stop_step`) and the periodic `save_steps` multiples while the interval is live
+  (`checkpoint_resume` and `save_at_steps is None`; `stop_step` alone does not disable it) — so finished runs cost adapters only. Repeated yields
   within one run prune their predecessors at save time.
 - **No checkpoint at the final step (2026-09-17)**: `students.early_stop.SkipFinalStepSave`
   (attached last in `teachers.sft_io`) clears a scheduled `should_save` at the step training stops

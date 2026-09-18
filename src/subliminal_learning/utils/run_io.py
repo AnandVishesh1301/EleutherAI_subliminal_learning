@@ -13,12 +13,16 @@ import contextlib
 import hashlib
 import json
 import os
+import queue
 import secrets
 import socket
 import subprocess
+import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from loguru import logger
@@ -641,3 +645,87 @@ def append_runs_index(output_root: Path, row: dict[str, Any]) -> None:
     tmp = index.with_name(f"{index.name}.tmp.{os.getpid()}")
     tmp.write_text("".join(json.dumps(r) + "\n" for r in rows))
     os.replace(tmp, index)
+
+
+# --------------------------------------------------------------------------- tree walk
+def find_leaf_dirs_parallel(
+    roots: Iterable[Path],
+    is_leaf: Callable[[Path], bool],
+    *,
+    skip_names: Sequence[str] = (),
+    skip_prefixes: Sequence[str] = (),
+    max_depth: int = 10,
+    workers: int = 32,
+    progress: bool = False,
+    progress_every: int = 2000,
+) -> list[Path]:
+    """Leaf dirs under `roots`, found with a thread-parallel bounded `os.scandir` walk.
+
+    A leaf is never descended into, so leaves are never nested. Names in `skip_names` or
+    starting with one of `skip_prefixes` are never entered, symlinked dirs are never
+    followed, and `max_depth` bounds the descent (0 = test the roots only). Directories
+    that vanish or refuse access mid-walk are skipped silently. The cost is per-scandir
+    network latency, not CPU, so the work is spread over threads: each scanned directory
+    submits its child dirs as new tasks. Returns a sorted list.
+    """
+    tasks: queue.Queue = queue.Queue()
+    for root in roots:
+        tasks.put((Path(root), 0))
+    found: list[Path] = []
+    lock = threading.Lock()
+    scanned = 0
+    started = time.time()
+    prefixes = tuple(skip_prefixes)
+
+    def report() -> None:
+        print(f"  walk: {scanned} dirs scanned, {len(found)} leaves, "
+              f"{time.time() - started:.0f}s", file=sys.stderr, flush=True)
+
+    def visit(current: Path, depth: int) -> None:
+        nonlocal scanned
+        leaf = is_leaf(current)
+        entries: list = []
+        if not leaf and depth < max_depth:
+            try:
+                entries = list(os.scandir(current))
+            except (FileNotFoundError, NotADirectoryError, PermissionError):
+                entries = []
+        with lock:
+            scanned += 1
+            if leaf:
+                found.append(current)
+            if progress and scanned % progress_every == 0:
+                report()
+        if leaf:
+            return
+        for entry in entries:
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if entry.name in skip_names or (prefixes and entry.name.startswith(prefixes)):
+                continue
+            tasks.put((Path(entry.path), depth + 1))
+
+    def worker() -> None:
+        while True:
+            item = tasks.get()
+            try:
+                if item is None:
+                    return
+                visit(*item)
+            finally:
+                tasks.task_done()
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, workers))]
+    for t in threads:
+        t.start()
+    tasks.join()
+    for _ in threads:
+        tasks.put(None)
+    for t in threads:
+        t.join()
+    if progress:
+        report()
+    return sorted(found)

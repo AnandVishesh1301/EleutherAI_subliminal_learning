@@ -84,7 +84,8 @@ def _rel_run_paths(lines: list[str], output_root: Path) -> list[str]:
 def _block_keys(b) -> dict:
     """A `mediation.BlockTest` in this artifact's key names (bare ``lr_*``/``cluster_wald_*``)."""
     return {"lr_chi2": b.lr_chi2, "lr_df": b.lr_df, "lr_p": b.lr_p,
-            "cluster_wald_chi2": b.wald_chi2, "cluster_wald_p": b.wald_p}
+            "cluster_wald_chi2": b.wald_chi2, "cluster_wald_p": b.wald_p,
+            "converged": b.converged}
 
 
 def _qtab(df: pd.DataFrame, by, col: str = "mean_cos") -> dict:
@@ -160,6 +161,7 @@ def _pop_fits(df: pd.DataFrame, df_fuller: pd.DataFrame) -> dict:
 
     hp4 = cluster_logit(df, "dead ~ lln + aln + rln + sln", "cluster",
                         method="bfgs", maxiter=500)
+    out["hp4_law"] = {"converged": bool(hp4.converged)}
     ladder_models = {
         "auc_ldw_cos_mean": cos_fits["mean_cos"],
         "auc_ldw_cos_pooled": cos_fits["pooled_cos"],

@@ -1,0 +1,46 @@
+# Diagonal-only (teacher step == student step) cross-checkpoint distillation on the local DCLM re-pretraining
+# `dclm-seed1234`: the 15 diagonal cells of the cliffcross13 design, run outright -- NO Pile CE gate
+# / gate-append watcher (Angela 2026-09-18). Everything else = the pr1234 cliffcross13 template.
+# Priorities teacher 67 / numgen 66 / distill 65; queue_prefix ckpt-dogdclm1234-diag-20260918.
+base_model: dclm-seed1234
+
+steps: [25000, 50000, 75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000, 120000, 125000, 130000, 143000]
+
+pairs:
+  topology: explicit
+  explicit:
+    - [25000, 25000]
+    - [50000, 50000]
+    - [75000, 75000]
+    - [80000, 80000]
+    - [85000, 85000]
+    - [90000, 90000]
+    - [95000, 95000]
+    - [100000, 100000]
+    - [105000, 105000]
+    - [110000, 110000]
+    - [115000, 115000]
+    - [120000, 120000]
+    - [125000, 125000]
+    - [130000, 130000]
+    - [143000, 143000]
+
+animals: [dog]
+
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
+                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# cwd: null -> jobs run in the claiming pool's own checkout; node: null -> unpinned (base
+# families are committed and pulled on every node).
+jobq: {cwd: null, node: null, root: run_logs/queue_angela, queue_prefix: ckpt-dogdclm1234-diag-20260918,
+       priorities: {teacher: 67, numgen: 66, distill: 65},
+       mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

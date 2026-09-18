@@ -278,7 +278,7 @@ def test_catchall_cleanup_spares_reclaimed_peer(tmp_path, monkeypatch):
     ja = store.claim_next(tmp_path, "q", store.this_host(), os.getpid())
     meta = store.read_meta(tmp_path, "q")
 
-    def fake_run_job(name, meta, job, slot, attempt, settled):
+    def fake_run_job(name, meta, job, slot, attempt, settled, peak_out=None):  # noqa: ARG001
         store.remove_claim(tmp_path, name, job.jobkey)  # requeue path: ownership released
         settled.append(True)
         jb = store.claim_next(tmp_path, "q", store.this_host(), os.getpid())  # peer B
@@ -300,7 +300,7 @@ def test_catchall_cleanup_removes_own_unsettled_claim(tmp_path, monkeypatch):
     ja = store.claim_next(tmp_path, "q", store.this_host(), os.getpid())
     meta = store.read_meta(tmp_path, "q")
 
-    def fake_run_job(name, meta, job, slot, attempt, settled):
+    def fake_run_job(name, meta, job, slot, attempt, settled, peak_out=None):  # noqa: ARG001
         raise OSError(122, "Disk quota exceeded")  # throw with the claim still ours
 
     monkeypatch.setattr(pool, "_run_job", fake_run_job)

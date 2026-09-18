@@ -67,7 +67,8 @@ from subliminal_learning.students.layout import (
     student_run_label,
 )
 from subliminal_learning.teachers.sft_io import (
-    check_target_modules_for_base_specs, run_teacher_sft_completion_only,
+    RunCompletedUnderYield, check_target_modules_for_base_specs,
+    run_teacher_sft_completion_only,
 )
 from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.run_io import checkpoint_is_complete
@@ -652,6 +653,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         },
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,
+        "final_train_loss_method": sft_result.final_train_loss_method,
         "n_train_steps": sft_result.n_steps,
         "planned_train_steps": sft_result.planned_steps,
         # Present only when the run was cut short because the adapter had already gone
@@ -673,6 +675,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         explicit_steps=resolve_save_steps(cfg.train.stop_step, cfg.train.save_at_steps),
         final_step=sft_result.n_steps,
         checkpoint_resume=cfg.train.checkpoint_resume,
+        # `stop_step` alone does NOT disable the periodic interval -- only an explicit
+        # `save_at_steps` list does -- so both rules can be in force at once.
+        periodic_active=cfg.train.save_at_steps is None,
     )
     if pruned["bytes_freed"]:
         logger.info(
@@ -680,6 +685,16 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             run_dir, len(pruned["checkpoints_removed"]), pruned["checkpoints_removed"],
             len(pruned["files_removed"]), pruned["bytes_freed"] / 2**20,
         )
+    if sft_result.yield_pending:
+        # A queue-yield SIGTERM landed on the final step: training finished, but the
+        # SIGKILL is seconds away and the in-process evals take minutes. The manifest is
+        # on disk and the resume state is pruned, so the requeued attempt SKIPs training
+        # and evaluates.
+        logger.warning(
+            "YIELD after natural stop: manifest written, exiting EX_TEMPFAIL before "
+            "evals ({})", run_dir,
+        )
+        raise RunCompletedUnderYield(run_dir, sft_result.n_steps)
     logger.info(
         "Saved student ({}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",
         cfg.source, base_model, tag, cfg.train.seed, checkpoint_dir,

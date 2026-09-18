@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.spatial.distance import jensenshannon
 
 
 @dataclass(frozen=True)
@@ -382,7 +383,12 @@ def cluster_logit(
         maxiter: Iteration cap passed to ``fit``; ``None`` leaves the default.
 
     Returns:
-        The fitted statsmodels results object.
+        The fitted statsmodels results object, with two attributes attached so callers do not
+        have to dig through ``mle_retvals``: ``converged`` (bool, from
+        ``mle_retvals["converged"]``; False when the optimizer reported nothing) and
+        ``n_iterations`` (int or ``None`` when the optimizer reports no iteration count). A
+        near-separation design can quietly hit `maxiter` and still hand back parameters and
+        p-values, so every ladder rung checks this.
     """
     import statsmodels.formula.api as smf
 
@@ -391,9 +397,14 @@ def cluster_logit(
         kw["method"] = method
     if maxiter is not None:
         kw["maxiter"] = maxiter
-    return smf.logit(formula, df).fit(
+    res = smf.logit(formula, df).fit(
         disp=0, cov_type="cluster", cov_kwds={"groups": df[cluster]}, **kw
     )
+    retvals = getattr(res, "mle_retvals", None) or {}
+    res.converged = bool(retvals.get("converged", False))
+    iters = retvals.get("iterations", retvals.get("nit"))
+    res.n_iterations = int(iters) if iters is not None else None
+    return res
 
 
 def binned_fraction(
@@ -523,11 +534,12 @@ def interp_crossing(x, y, threshold: float, *, rising: bool, log_x: bool = True)
 
 
 def tv_js(p_counts, q_counts) -> tuple[float, float]:
-    """Total-variation and Jensen-Shannon distance between two count vectors.
+    """Total-variation distance and Jensen-Shannon divergence between two count vectors.
 
     Both vectors are normalized to distributions first. ``TV = 0.5 * sum|p - q|``;
     ``JS = 0.5 KL(p||m) + 0.5 KL(q||m)`` with ``m = (p + q) / 2``, in **bits** (``log2``),
-    each KL summed over the support of its own first argument.
+    computed as the square of `scipy.spatial.distance.jensenshannon`, which returns the
+    JS *distance* (the square root of the divergence).
 
     Args:
         p_counts: Counts of the first sample (aligned bins).
@@ -535,18 +547,24 @@ def tv_js(p_counts, q_counts) -> tuple[float, float]:
 
     Returns:
         ``(tv, js)``.
+
+    Raises:
+        ValueError: If the vectors differ in length, hold a negative or non-finite entry, or
+            either sums to zero (no distribution to compare).
     """
-    p = np.asarray(p_counts, dtype=float)
-    q = np.asarray(q_counts, dtype=float)
+    p = np.asarray(p_counts, dtype=float).ravel()
+    q = np.asarray(q_counts, dtype=float).ravel()
+    if p.size != q.size:
+        raise ValueError(f"count vectors must align: {p.size} vs {q.size}")
+    if not (np.isfinite(p).all() and np.isfinite(q).all()):
+        raise ValueError("count vectors must be finite")
+    if (p < 0).any() or (q < 0).any():
+        raise ValueError("count vectors must be non-negative")
+    if p.sum() <= 0 or q.sum() <= 0:
+        raise ValueError("each count vector must have a positive sum")
     p = p / p.sum()
     q = q / q.sum()
-    m = 0.5 * (p + q)
-
-    def kl(a, b):
-        mask = a > 0
-        return float((a[mask] * np.log2(a[mask] / b[mask])).sum())
-
-    return float(0.5 * np.abs(p - q).sum()), float(0.5 * kl(p, m) + 0.5 * kl(q, m))
+    return float(0.5 * np.abs(p - q).sum()), float(jensenshannon(p, q, base=2) ** 2)
 
 
 def two_proportion_z(w1: float, n1: float, w2: float, n2: float) -> tuple[float, float]:

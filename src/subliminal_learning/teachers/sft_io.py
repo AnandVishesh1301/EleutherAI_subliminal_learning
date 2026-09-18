@@ -7,6 +7,8 @@ completion, matching Cloud et al.'s ft-teacher ablation (OpenAI chat FT / Unslot
 
 from __future__ import annotations
 
+import contextlib
+import json
 import signal
 import time
 from pathlib import Path
@@ -46,7 +48,11 @@ from subliminal_learning.run_gate import (
 )
 from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
 from subliminal_learning.training.lora_io import build_lora_config
-from subliminal_learning.training.sft_io import SftResult
+from subliminal_learning.training.sft_io import (
+    LOSS_METHOD_HF,
+    LOSS_METHOD_INTERVAL,
+    SftResult,
+)
 from subliminal_learning.models.registry import EXTERNAL_BASES
 from subliminal_learning.models.tokenization_io import encode_prompt_batch
 
@@ -328,6 +334,35 @@ class TrainingInterrupted(RuntimeError):
         self.checkpoint_dir = checkpoint_dir
 
 
+class RunCompletedUnderYield(TrainingInterrupted):
+    """A yield SIGTERM landed on the final step: the run FINISHED, but must not evaluate.
+
+    The SIGTERM is ignored on the run's last step (see `YieldCheckpoint.on_step_end`), so
+    training, `save_model` and `train_manifest.json` complete -- but the queue SIGKILLs
+    this process 20 s later, and the in-process evals that follow take far longer than
+    that. Continuing would be killed at an arbitrary point (in the worst case between
+    `save_model` and the manifest, leaving an unresumable run). The pipelines raise this
+    the instant the manifest is on disk; it is a `TrainingInterrupted`, so the workers map
+    it to `INTERRUPTED_EXIT_CODE` exactly as before, and the requeued attempt SKIPs
+    training on the manifest and runs the evals.
+
+    Attributes:
+        step: `global_step` the run finished at.
+        run_dir: The finished run dir (its manifest is written).
+        checkpoint_dir: Always None -- there is no yield checkpoint to resume from.
+    """
+
+    def __init__(self, run_dir: Path, step: int) -> None:
+        RuntimeError.__init__(
+            self,
+            f"run at {run_dir} finished at step {step} under a queue yield; "
+            f"manifest written, exiting before evals"
+        )
+        self.step = step
+        self.run_dir = run_dir
+        self.checkpoint_dir = None
+
+
 # EX_TEMPFAIL: the code the run_logs workers already use for "not done, retry later".
 INTERRUPTED_EXIT_CODE = 75
 
@@ -348,9 +383,15 @@ class YieldCheckpoint(TrainerCallback):
     with the resume marker that makes it eligible for resume, written last so a dir torn
     by the following SIGKILL is never mistaken for a complete one.
 
+    A SIGTERM arriving on the step training would end on anyway is NOT an interrupt (see
+    `on_step_end`): the run finishes normally, so its weights are exactly an uninterrupted
+    run's.
+
     Attributes:
         interrupted_step: Step of the yield checkpoint, or None if no SIGTERM arrived.
         checkpoint_dir: That checkpoint's dir, or None.
+        stopped_naturally: True when a SIGTERM landed on the run's final step -- the
+            checkpoint is still written, but the run completes instead of raising.
     """
 
     def __init__(self, on_schedule) -> None:
@@ -359,6 +400,7 @@ class YieldCheckpoint(TrainerCallback):
         self.checkpoint_dir: Path | None = None
         self.save_seconds: float | None = None
         self.requested_at: float | None = None
+        self.stopped_naturally = False
         self._pending = False
         self._restore: tuple | None = None
         self._save_started: float | None = None
@@ -376,16 +418,31 @@ class YieldCheckpoint(TrainerCallback):
     def on_step_end(self, args, state, control, **kwargs):  # noqa: ANN001 -- HF signature
         if self.requested_at is None or self._pending:
             return control
+        # Is this the step the run ENDS on anyway (`StopAtStep`, or the last planned
+        # step)? Then the run is NOT interrupted -- HF resumes from `checkpoint-N` by
+        # running the NEXT update, so interrupting here would train an extra step and save
+        # different weights. Training finishes normally; the caller writes the manifest
+        # and exits before the evals (`RunCompletedUnderYield`).
+        self.stopped_naturally = bool(control.should_training_stop or (
+            state.max_steps > 0 and state.global_step >= state.max_steps
+        ))
         self._pending = True
         self._save_started = time.perf_counter()
         self._restore = (args.save_only_model, args.save_total_limit)
         args.save_only_model = False
         args.save_total_limit = None
+        # The full-state save happens EITHER way. On the final step it is redundant the
+        # moment the manifest lands (`prune_resume_state(final_step=...)` deletes it), but
+        # until then it is the only resumable copy: a SIGKILL during `save_model` or
+        # before the manifest would otherwise force a full retrain. The next attempt finds
+        # it at step == final and takes the `resumed_run_is_complete` path.
         control.should_save = True
         control.should_training_stop = True
         logger.warning(
             "SIGTERM received at {:.3f} (queue yield): saving a full-state checkpoint at "
-            "step {} and stopping.", self.requested_at, state.global_step,
+            "step {}{}.", self.requested_at, state.global_step,
+            " (the run's final step: finishing normally, not interrupting)"
+            if self.stopped_naturally else " and stopping",
         )
         return control
 
@@ -403,8 +460,10 @@ class YieldCheckpoint(TrainerCallback):
         reopen_tree(ckpt)
         if self._pending:
             args.save_only_model, args.save_total_limit = self._restore
-            self.interrupted_step = state.global_step
             self.checkpoint_dir = ckpt
+            # Only a genuine interrupt raises: a final-step yield finishes the run.
+            if not self.stopped_naturally:
+                self.interrupted_step = state.global_step
             self.save_seconds = time.perf_counter() - (self._save_started or 0.0)
             removed = prune_superseded_yield_checkpoints(
                 ckpt.parent, keep_step=state.global_step, **self.on_schedule,
@@ -416,6 +475,121 @@ class YieldCheckpoint(TrainerCallback):
                 removed or "none",
             )
         return control
+
+
+def resumed_run_is_complete(checkpoint_dir: Path, *, stop_step: int | None) -> dict | None:
+    """The checkpoint's `(global_step, max_steps, loss)` if it already ENDS the run.
+
+    A yield landing on the last step of a run whose config could not skip it (an older
+    process, or a `stop_step` the resumed trainer would overshoot) leaves a checkpoint at
+    the final step. Resuming it would train one EXTRA update, because HF resumes by
+    running the step AFTER `global_step`, so the reloaded run must skip training entirely
+    and just save those weights.
+
+    The returned `loss` is `_interval_weighted_loss`: an APPROXIMATION of the run's train
+    loss rebuilt from the logged interval means (rounded, and missing any steps after the
+    last log event), not the `training_loss` an uninterrupted run reports. It is
+    provenance only.
+
+    Returns None when the checkpoint is mid-run (the normal resume) or unreadable.
+    """
+    try:
+        state = json.loads((checkpoint_dir / "trainer_state.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError, NotADirectoryError):
+        return None
+    if not isinstance(state, dict) or type(state.get("global_step")) is not int:
+        return None
+    step, max_steps = state["global_step"], state.get("max_steps")
+    if not ((stop_step is not None and step >= stop_step)
+            or (isinstance(max_steps, int) and max_steps > 0 and step >= max_steps)):
+        return None
+    return {"global_step": step,
+            "max_steps": max_steps if isinstance(max_steps, int) else None,
+            "loss": _interval_weighted_loss(state.get("log_history", []))}
+
+
+def _interval_weighted_loss(log_history) -> float | None:
+    """APPROXIMATE whole-run train loss from a `trainer_state.json` log history.
+
+    Each logged row is the mean loss over the steps since the previous log, so the rows
+    are weighted by their step spans rather than averaged flat (a `logging_steps=10` run
+    of 15 steps logs 10 steps then 5, and a flat mean would misweight the tail). It stays
+    an APPROXIMATION and is NOT equivalent to the `training_loss` an uninterrupted run
+    reports:
+
+    - steps after the LAST log event are never logged, so they are missing entirely;
+    - the logged values are rounded to 4 decimals by HF's logger;
+    - `log_history` survives resumes, so it spans every attempt of this run (which is the
+      behaviour we want for a whole-run mean, but it is not one contiguous segment).
+
+    It is provenance in the manifest's `final_train_loss`, never an input to a gate.
+
+    Returns None when nothing was logged.
+    """
+    rows = sorted(
+        (row for row in log_history
+         if isinstance(row, dict) and isinstance(row.get("loss"), (int, float))
+         and isinstance(row.get("step"), int)),
+        key=lambda row: row["step"],
+    )
+    if not rows:
+        return None
+    total, steps, previous = 0.0, 0, 0
+    for row in rows:
+        span = max(1, row["step"] - previous)
+        total += float(row["loss"]) * span
+        steps += span
+        previous = row["step"]
+    return total / steps
+
+
+def load_adapter_weights(model, checkpoint_dir: Path) -> None:
+    """Load a checkpoint's LoRA weights into the live PEFT model (no optimizer state).
+
+    PEFT loads non-strictly, so a key the checkpoint spells differently from this model
+    (a different target-module set, a renamed adapter) would silently leave the live
+    adapter at its INIT values and the run would save untrained weights. The load result
+    is therefore checked: any unexpected key, or any ADAPTER key left unfilled, is fatal.
+    Base-model keys are always "missing" (the state dict holds adapter tensors only).
+
+    Raises:
+        RuntimeError: If the checkpoint's keys do not match this model's adapter.
+    """
+    from peft import set_peft_model_state_dict
+    from safetensors.torch import load_file
+
+    result = set_peft_model_state_dict(
+        model, load_file(str(checkpoint_dir / "adapter_model.safetensors"))
+    )
+    missing = [k for k in getattr(result, "missing_keys", ()) if "lora_" in k]
+    unexpected = list(getattr(result, "unexpected_keys", ()))
+    if missing or unexpected:
+        raise RuntimeError(
+            f"adapter at {checkpoint_dir} does not match this model: "
+            f"missing adapter key(s) {missing}, unexpected key(s) {unexpected}"
+        )
+
+
+@contextlib.contextmanager
+def sigterm_flagged(yielder: "YieldCheckpoint"):
+    """Route SIGTERM to `yielder.request` (flag only) for the duration of the block.
+
+    The queue's yield kill must never be a plain process death while this function is
+    doing something resumable-but-uninterruptible (`trainer.train()`, or the adapter
+    load + `save_model` of the resume-complete path). Outside these blocks SIGTERM keeps
+    its default disposition. Not the main thread -> no handler, exactly as before.
+    """
+    try:
+        previous = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, yielder.request)
+    except ValueError:
+        logger.warning("not the main thread: SIGTERM yield-checkpointing is off")
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def run_teacher_sft_completion_only(
@@ -562,6 +736,9 @@ def run_teacher_sft_completion_only(
         "save_steps": train_cfg.save_steps,
         "explicit_steps": explicit_saves,
         "checkpoint_resume": train_cfg.checkpoint_resume,
+        # The interval is disabled by an explicit `save_at_steps` list only -- exactly the
+        # condition that pushed `save_steps` to NEVER_SAVE_STEPS above.
+        "periodic_active": train_cfg.save_at_steps is None,
     }
     yielder = YieldCheckpoint(schedule)
     callbacks.append(yielder)
@@ -608,27 +785,67 @@ def run_teacher_sft_completion_only(
         # a save in progress, which is why only this call site prunes).
         remove_torn_checkpoints_above(output_dir, resume_checkpoint)
         logger.info("RESUMING from {} (full state + resume marker present)", resume_checkpoint)
+        # ... unless that checkpoint already ends the run: resuming would train one extra
+        # update past the budget (HF continues at global_step + 1), so load its weights,
+        # skip training and save them as the final adapter.
+        finished = resumed_run_is_complete(
+            resume_checkpoint, stop_step=train_cfg.stop_step
+        )
+        if finished is not None:
+            logger.warning(
+                "RESUME COMPLETE: {} is already the run's final step {} (stop_step={}, "
+                "max_steps={}); skipping training and saving its weights.",
+                resume_checkpoint, finished["global_step"], train_cfg.stop_step,
+                finished["max_steps"],
+            )
+            # Same flag-only SIGTERM handling as the training loop: a yield arriving
+            # during the load/save must not kill the process outright. Nothing here can
+            # be checkpointed (there is nothing new to save -- the marked checkpoint on
+            # disk already holds these weights), so the SIGTERM only makes the caller
+            # write the manifest and exit 75 before its evals.
+            try:
+                with sigterm_flagged(yielder):
+                    load_adapter_weights(model, resume_checkpoint)
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    trainer.save_model(str(output_dir))
+                    reopen_tree(output_dir)
+            finally:
+                # Same contract as the training path: the caller's precision is restored
+                # before this function returns, on the failure path too.
+                torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = (
+                    prev_tf32
+                )
+            if yielder.requested_at is not None:
+                logger.warning(
+                    "SIGTERM received at {:.3f} (queue yield) while finishing the "
+                    "already-complete run: the caller must write the manifest and exit.",
+                    yielder.requested_at,
+                )
+            return SftResult(
+                output_dir=output_dir,
+                final_train_loss=finished["loss"],
+                final_train_loss_method=LOSS_METHOD_INTERVAL,
+                n_steps=finished["global_step"],
+                model=model,
+                tokenizer=tokenizer,
+                planned_steps=finished["max_steps"],
+                # NOT set: `stopped_at_step` is the DIVERGENCE early-stop step (the
+                # pipelines record it as `diverged_early_stop_step`), and this run
+                # completed its budget. See the handback note.
+                stopped_at_step=None,
+                yield_pending=yielder.requested_at is not None,
+            )
     try:
         # SIGTERM = the queue reclaiming this GPU. Handled ONLY for the duration of
         # `trainer.train()`; before and after it keeps its default behaviour (a SIGTERM
         # outside the training loop has no step boundary to save at). Not the main
         # thread -> no handler, and the run dies as it always did.
-        try:
-            previous_handler = signal.getsignal(signal.SIGTERM)
-            signal.signal(signal.SIGTERM, yielder.request)
-            handler_installed = True
-        except ValueError:
-            handler_installed = False
-            logger.warning("not the main thread: SIGTERM yield-checkpointing is off")
-        try:
+        with sigterm_flagged(yielder):
             train_output = (
                 trainer.train(resume_from_checkpoint=str(resume_checkpoint))
                 if resume_checkpoint is not None
                 else trainer.train()
             )
-        finally:
-            if handler_installed:
-                signal.signal(signal.SIGTERM, previous_handler)
         if yielder.interrupted_step is not None:
             # Interrupted, not finished: NO final save, NO manifest, NO evals, and no
             # `reopen_tree` of the whole tree (the checkpoint dir was reopened already).
@@ -653,6 +870,7 @@ def run_teacher_sft_completion_only(
     return SftResult(
         output_dir=output_dir,
         final_train_loss=train_output.training_loss,
+        final_train_loss_method=LOSS_METHOD_HF,
         n_steps=trainer.state.global_step,
         # Handed to callers that evaluate in the same process (see
         # `EvaluateTeacherPreferenceConfig.preloaded`), so the just-saved adapter need
@@ -662,4 +880,7 @@ def run_teacher_sft_completion_only(
         tokenizer=tokenizer,
         planned_steps=trainer.state.max_steps,
         stopped_at_step=stopper.stopped_at_step if stopper is not None else None,
+        # A SIGTERM landed on the final step and was ignored: the run is complete, but the
+        # SIGKILL is seconds away -- the caller must write the manifest and exit.
+        yield_pending=yielder.stopped_naturally,
     )

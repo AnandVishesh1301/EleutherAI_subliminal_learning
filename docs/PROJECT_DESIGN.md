@@ -166,13 +166,27 @@ a path tag cannot encode). HPs already embedded in the path tag are still includ
   intermediate checkpoints never confuse it.
 - **Yield-resume (always on, every LoRA run)** — the queue SIGTERMs a training process when
   it reclaims a GPU and SIGKILLs it 20 s later. `teachers/sft_io.YieldCheckpoint` handles
-  SIGTERM **only while `trainer.train()` runs**: at the next optimizer-step boundary it saves a
+  SIGTERM **only inside its resumable blocks** (`sigterm_flagged`: `trainer.train()`, and the
+  resume-complete adapter load + save, where a yield merely sets `yield_pending`): at the next optimizer-step boundary it saves a
   FULL-state `checkpoint-N` (optimizer/scheduler/RNG) even when the run's config says
   `save_only_model=True` and `save_strategy="no"`, exempt from `save_total_limit` rotation so a
   yield never evicts a scheduled trajectory checkpoint, and stops training. Every full-state
   checkpoint is stamped **last** with `resume_marker.json` (`step`, `reason`
   `sigterm`/`scheduled`, `timestamp`, `host`, `pid`), so a dir torn by the SIGKILL has no marker
-  and is never resumed from. The process then writes `{run_dir}/interrupted.json` (its last
+  and is never resumed from. A SIGTERM landing on the step the run ends on anyway (`stop_step`, or
+  the last planned step) is **not** an interrupt: HF resumes by running the step AFTER a
+  checkpoint, so interrupting there would train one extra update and change the weights — the run
+  finishes normally instead. The full-state checkpoint is still written (until the manifest lands
+  it is the only resumable copy: a SIGKILL during `save_model` would otherwise force a full
+  retrain), and `prune_resume_state(final_step=...)` deletes it the moment the manifest is on disk.
+  A resumable checkpoint that already sits at/past the run's end makes the next attempt load its
+  weights and save WITHOUT training (`resumed_run_is_complete`; its reported `final_train_loss` is
+  an APPROXIMATE interval-log mean — rounded values, missing any steps after the last log event,
+  and spanning every attempt — provenance only, never a gate input). The SIGKILL still lands 20 s later, though, so that finished
+  run must not go on to its (minutes-long) in-process evals: `SftResult.yield_pending` reports the
+  natural stop, and both pipelines write `train_manifest.json`, prune the resume state, then raise
+  `RunCompletedUnderYield` — a `TrainingInterrupted`, so the workers map it to rc 75 as before —
+  before any eval; the requeued attempt SKIPs training on the manifest and evaluates. Otherwise the process writes `{run_dir}/interrupted.json` (its last
   write) and raises `TrainingInterrupted`: **no** final `save_model`, **no** `train_manifest.json`,
   **no** evals; the `run_logs` workers turn it into rc **75** (EX_TEMPFAIL) immediately.
 - **Resume decision is on-disk, not config** — `run_gate.latest_resumable_checkpoint` picks the
@@ -194,10 +208,12 @@ a path tag cannot encode). HPs already embedded in the path tag are still includ
 - **Finished runs carry no resume state** — right after the manifest, both pipelines call
   `run_gate.prune_resume_state`: optimizer/scheduler/RNG/scaler state and markers are deleted from
   every `checkpoint-*`, and any `sigterm` checkpoint **off** the run's own save schedule is deleted
-  outright. That schedule comes from the trainer's OWN resolver,
-  `students.early_stop.resolve_save_steps(stop_step, save_at_steps)` (the union with `stop_step`,
-  so an early-stop arm's terminal checkpoint counts as scheduled), else multiples of `save_steps`
-  when `checkpoint_resume`, else nothing. Adapters and `trainer_state.json` of scheduled checkpoints are never
+  outright. That schedule is the UNION of the trainer's own two rules:
+  `students.early_stop.resolve_save_steps(stop_step, save_at_steps)` (the resolved explicit list,
+  itself the union with `stop_step`, so an early-stop arm's terminal checkpoint counts) AND the
+  periodic `save_steps` multiples whenever the interval is live — `checkpoint_resume` and
+  `save_at_steps is None`, since only an explicit list pushes HF's `save_steps` beyond the run.
+  A plain run schedules nothing. Adapters and `trainer_state.json` of scheduled checkpoints are never
   touched, and repeated yields in one run prune their predecessors at save time.
 - **Stale-teacher guard (GKD)** — before a student trains, the pipeline asserts the
   resolved teacher `checkpoint_dir` is complete and records `teacher.manifest_sha256`, so

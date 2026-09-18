@@ -127,75 +127,16 @@ def test_groups_none_matches_single_group_and_carries_no_group_counts():
 
 
 # ----------------------------------------------------------------------------------------------
-# topk_mean / prior_scaled_effect / conformal
+# prior_scaled_effect
 # ----------------------------------------------------------------------------------------------
-def test_topk_mean():
-    assert tt.topk_mean([1, 2, 3, 4, 5, 6], k=3) == pytest.approx(5.0)
-    assert tt.topk_mean([1.0, np.nan], k=5) == pytest.approx(1.0)
-    assert np.isnan(tt.topk_mean([np.nan]))
-
-
 def test_prior_scaled_effect():
     assert tt.prior_scaled_effect([0.3, 0.2], [0.1, 0.1], 0.1) == pytest.approx(1.5)
     assert np.isnan(tt.prior_scaled_effect([np.nan], [0.1], 0.1))
 
 
-def test_conformal_rank_p():
-    assert tt.conformal_rank_p([0.9, 1.0, 1.1], np.linspace(0, 0.5, 10)) == pytest.approx(1 / 11)
-    assert tt.conformal_rank_p(1.0, np.linspace(0, 0.5, 10)) == pytest.approx(1 / 11)
-
-
 def test_no_multiplicity_helpers():
     """The brief's amendment: no Holm/Bonferroni wrappers live here."""
     assert not hasattr(tt, "holm") and not hasattr(tt, "bonferroni")
-
-
-# ----------------------------------------------------------------------------------------------
-# pool-rank permutation
-# ----------------------------------------------------------------------------------------------
-def _pool_frame(n_pools: int, n_cols: int, control_value: float, rng) -> pd.DataFrame:
-    index = [f"pool{i}" for i in range(n_pools - 1)] + [tio.CONTROL_LABEL]
-    data = rng.uniform(0.4, 0.6, size=(n_pools, n_cols))
-    data[-1, :] = control_value
-    return pd.DataFrame(data, index=index, columns=[f"r{c}" for c in range(n_cols)])
-
-
-def test_pool_rank_exact_control_lowest():
-    rng = np.random.default_rng(0)
-    stats = {f"s{i}": _pool_frame(11, 3, 0.0, rng) for i in range(4)}
-    res = tt.pool_rank_permutation(stats, tio.CONTROL_LABEL)
-    assert res.exact and res.n_labelings == 11 ** 4
-    assert res.observed == pytest.approx(1.0)
-    assert res.p == pytest.approx(1 / 11 ** 4)
-    assert set(res.per_sender_rank.values()) == {1}
-
-
-def test_pool_rank_control_median():
-    rng = np.random.default_rng(1)
-    stats = {}
-    for s in range(2):
-        frame = _pool_frame(11, 2, 0.5, rng)
-        frame.iloc[:10, :] = np.tile(np.linspace(0.0, 1.0, 10)[:, None], (1, 2))
-        stats[f"s{s}"] = frame
-    res = tt.pool_rank_permutation(stats, tio.CONTROL_LABEL)
-    assert res.p == pytest.approx(0.5, abs=0.15)
-
-
-def test_pool_rank_monte_carlo_path():
-    rng = np.random.default_rng(2)
-    stats = {f"s{i}": _pool_frame(11, 2, 0.5, rng) for i in range(4)}
-    res = tt.pool_rank_permutation(stats, tio.CONTROL_LABEL, max_exact=10, n_mc=500, seed=0)
-    assert not res.exact and res.n_labelings == 500
-    assert 1 / 501 <= res.p <= 1.0
-
-
-def test_pool_rank_skips_single_pool_sender():
-    rng = np.random.default_rng(4)
-    stats = {"s0": _pool_frame(11, 2, 0.0, rng),
-             "s1": _pool_frame(1, 2, 0.0, rng)}
-    with pytest.warns(UserWarning, match="fewer than 2 pools"):
-        res = tt.pool_rank_permutation(stats, tio.CONTROL_LABEL)
-    assert list(res.per_sender_rank) == ["s0"]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -282,16 +223,6 @@ def test_load_prior_validation_proxy(tmp_path):
     assert tio.load_prior("dog", "original", "off_topic",
                           output_root=tmp_path) == pytest.approx(0.0001)
     assert np.isnan(tio.load_prior("dog", "fs1", "test", output_root=tmp_path))
-
-
-def test_load_pool_stats_shape(tmp_path):
-    _fake_tree(tmp_path)
-    stats = tio.load_pool_stats("dog", ["fs1"], ["original"], {"fs1": ["t1", "t2"]},
-                                output_root=tmp_path)
-    frame = stats["fs1"]
-    assert list(frame.index) == ["t1", "t2", tio.CONTROL_LABEL]
-    assert list(frame.columns) == ["original"]
-    assert frame.loc[tio.CONTROL_LABEL, "original"] == pytest.approx(0.1)
 
 
 def _fake_dd_tree(root, cells=("d1", "d2", "d3")):
@@ -477,8 +408,33 @@ def test_significance_rows_per_teacher_then_pooled():
     assert t2["exceed."] == 5 and s["cells"] == "9" and s["wins / n"] == "0/9"
     assert pooled["pooled"] and pooled["exceed."] == 15 and "sign p" not in pooled
     assert t1["treat median ×prior"] == pytest.approx(6.5)
-    # one full-set teacher: no pooled row (it would duplicate the teacher row)
-    assert len(tio.significance_rows(m, dead, 1.0, "A", ["t1"])) == 1
+    # the closed-form exceedance p is gone: the count is descriptive, the permutation is the test
+    assert not any(c.startswith("exceed. ") for c in tio.TABLE_COLUMNS)
+    assert np.isfinite(pooled["perm p"])
+    assert all("perm p" not in r for r in (t1, t2, s))
+    # every row names its test, carries the prior, and max >= median on both sides
+    assert [r["test"] for r in rows] == ["sign (per teacher)"] * 3 + [
+        "stratified permutation (pooled, 2 teachers)"]
+    assert all(r["prior"] == 1.0 for r in rows)
+    for r in rows:
+        assert r["treat max ×prior"] >= r["treat median ×prior"]
+        assert r["ctrl max ×prior"] >= r["ctrl median ×prior"]
+    assert t1["treat max ×prior"] == pytest.approx(7.0) and t1["ctrl max ×prior"] == pytest.approx(2.0)
+    assert tio.TABLE_COLUMNS[:3] == ["arm", "teacher", "test"]
+    for c in ("prior", "treat max ×prior", "ctrl max ×prior"):
+        assert tio.TABLE_COLUMNS.index(c) > 0
+
+
+def test_one_teacher_arm_still_gets_the_pooled_stratified_row():
+    """With a single full-set teacher the permutation relabels the teacher/control pair."""
+    m, dead = _synthetic_matrix()
+    rows = tio.significance_rows(m, dead, 1.0, "A", ["t1"], n_perm=200)
+    assert [r["teacher"] for r in rows] == ["t1", "all full-set teachers"]
+    pooled = rows[1]
+    expected = tio.pooled_permutation(m, ["t1"], n_perm=200)
+    assert pooled["pooled"] and pooled["exceed."] == expected.result.observed
+    assert pooled["perm p"] == pytest.approx(expected.result.p)
+    assert pooled["test"] == "stratified permutation (single teacher)"
 
 
 def test_short_teacher_exceedance_uses_only_paired_finite_cells():
@@ -488,7 +444,7 @@ def test_short_teacher_exceedance_uses_only_paired_finite_cells():
     s = tio.significance_rows(m, dead, 1.0, "A", ["t1"], short=["s"], n_perm=200)[1]
     assert s["wins / n"] == "0/9" and s["cells"] == "9"
     e = tt.exceedance_test(m.values[1:, 2], m.values[1:, 3])
-    assert s["exceed."] == e.count and s["exceed. p"] == pytest.approx(e.p)
+    assert s["exceed."] == e.count
     assert e.m == 9 and e.n == 9
 
 
@@ -501,26 +457,33 @@ def test_held_out_row_sign_p_is_the_one_sided_paired_sign_test():
     exc = tt.exceedance_test(m.values[2:, 1], m.values[2:, 3])
     assert row["wins / n"] == f"{expected.wins}/{expected.n}"
     assert row["sign p"] == pytest.approx(expected.p)
-    # the primary test is reported on the held-out cells too, not "—"
-    assert row["exceed."] == exc.count and row["exceed. p"] == pytest.approx(exc.p)
+    # the exceedance count is reported on the held-out cells too, not "—"; no closed-form p
+    assert row["exceed."] == exc.count
+    assert not any(c.startswith("exceed. ") for c in row)
     assert row["cells"] == "8"
+    assert row["test"] == "sign (held-out)" and row["prior"] == 1.0
+    assert row["treat max ×prior"] >= row["treat median ×prior"]
     # one-sided, not the two-sided binomtest
     from scipy.stats import binomtest
     assert row["sign p"] != pytest.approx(binomtest(expected.wins, expected.n, 0.5).pvalue)
 
 
-def test_style_highlights_the_primary_exceedance_p_not_the_sign_p():
-    df = pd.DataFrame([{"arm": "A", "teacher": "t", "cells": "10", "wins / n": "9/10",
-                        "sign p": 0.0107, "exceed.": 3, "exceed. p": 0.2,
-                        "treat median ×prior": 2.345, "ctrl median ×prior": 1.0,
+def test_style_highlights_the_primary_perm_p_not_the_sign_p():
+    df = pd.DataFrame([{"arm": "A", "teacher": "t", "test": "sign (per teacher)",
+                        "prior": 0.0096312, "cells": "10", "wins / n": "9/10",
+                        "sign p": 0.0107, "exceed.": 3, "perm p": 0.2,
+                        "treat median ×prior": 2.345, "treat max ×prior": 4.567,
+                        "ctrl median ×prior": 1.0, "ctrl max ×prior": 1.234,
                         "dead (treat/ctrl)": "0/0", "pooled": False},
                        {"arm": "A", "teacher": "all", "cells": "10", "exceed.": 5,
-                        "exceed. p": 4.2e-4, "pooled": True}]).reindex(
+                        "perm p": 4.2e-4, "pooled": True}]).reindex(
         columns=[*tio.TABLE_COLUMNS, "pooled"])
     html = tio.style_significance_table(df).to_html()
     assert "pooled" not in html and "0.011" in html and "4.2e-04" in html and "2.35" in html
+    assert "0.00963" in html and "4.57" in html and "1.23" in html and "sign (per teacher)" in html
     ctx = tio.style_significance_table(df)._compute().ctx
-    sign_col, exc_col = tio.TABLE_COLUMNS.index("sign p") - 2, tio.TABLE_COLUMNS.index("exceed. p") - 2
+    sign_col = tio.TABLE_COLUMNS.index("sign p") - 2
+    exc_col = tio.TABLE_COLUMNS.index("perm p") - 2
     # sign p = 0.0107 is below 0.05 but is the SECONDARY test: never highlighted
     assert ("font-weight", "bold") not in ctx.get((0, sign_col), [])
     assert ("font-weight", "bold") not in ctx.get((0, exc_col), [])
@@ -545,3 +508,247 @@ def test_style_significance_table_groups_arms_with_divider():
         assert divider in ctx[(row, 0)] and divider in ctx_index[(row, 0)]
     assert divider not in ctx.get((1, 0), [])
     assert any(k == "background-color" and "128" in v for k, v in ctx_index[(3, 1)])
+
+
+# ----------------------------------------------------------------------------------------------
+# CLI: the pooled line's design, and mode-scoped options
+# ----------------------------------------------------------------------------------------------
+def _cli_matrix() -> tio.CellMatrix:
+    """Two pooled teachers over 10 cells, with ONE cell missing for the first teacher."""
+    control = np.linspace(1.0, 2.0, 10)
+    t1 = control + 5.0
+    t1[3] = np.nan                            # the missing cell the two designs must agree on
+    t2 = control + 0.5
+    values = np.column_stack([t1, t2, control])
+    return tio.CellMatrix(frame=pd.DataFrame(), values=values,
+                          cells=[f"c{i}" for i in range(10)],
+                          pools=["t1", "t2", tio.CONTROL_LABEL], control_col=2, missing=[])
+
+
+def test_pooled_permutation_restricts_to_all_finite_cells():
+    m = _cli_matrix()
+    pooled = tio.pooled_permutation(m, ["t1", "t2"], n_perm=200)
+    assert (pooled.n_cells, pooled.n_kept) == (10, 9)
+    assert pooled.n_treatment == 18
+    assert np.isfinite(pooled.values).all()
+
+
+def _run_cli(monkeypatch, args, matrix=None, teachers=("t1", "t2")):
+    from typer.testing import CliRunner
+
+    import scripts.transfer_significance_readout as cli
+
+    monkeypatch.setattr(cli.tio, "resolve_teachers",
+                        lambda *a, **k: (list(teachers), []))
+    monkeypatch.setattr(cli.tio, "load_prior", lambda *a, **k: 0.05)
+    monkeypatch.setattr(cli.tio, "load_cell_matrix",
+                        lambda *a, **k: matrix if matrix is not None else _cli_matrix())
+    return CliRunner().invoke(cli.app, args)
+
+
+def test_cli_pooled_line_matches_the_table_pooled_row(monkeypatch):
+    """(6) one missing cell: the CLI line and the notebook table's pooled row agree."""
+    m = _cli_matrix()
+    res = _run_cli(monkeypatch, ["--eval-animals", "dog", "--n-perm", "200"], matrix=m)
+    assert res.exit_code == 0, res.output
+    table = tio.significance_rows(m, np.zeros_like(m.values), 0.05, "A", ["t1", "t2"],
+                                  n_perm=200)[-1]
+    assert table["pooled"]
+    line = [ln for ln in res.output.splitlines()
+            if ln.startswith("pooled stratified permutation")][0]
+    assert f"observed {table['exceed.']} exceedances over 18 treatment cells" in line
+    assert f"p {table['perm p']:.1e}" in line
+    assert "9 of 10 cells kept, 1 dropped by the filter" in line
+    # the per-teacher table has no closed-form exceedance p column any more
+    assert "exc p" not in res.output
+
+
+@pytest.mark.parametrize("args", [
+    ["--dead", "drop"],
+    ["--family", "full-seed", "--dead", "drop"],
+])
+def test_cli_rejects_compare_only_options_in_other_modes(monkeypatch, args):
+    """(7) a mode that ignores --dead must refuse it, not run on (--ftseed is read in all)."""
+    res = _run_cli(monkeypatch, [*args, "--eval-animals", "dog"])
+    assert res.exit_code != 0
+    assert "compare-mode only" in res.output
+
+
+@pytest.mark.parametrize("mode_args", [[], ["--family", "full-seed"],
+                                       ["--compare", "data-seed:full-seed"]])
+def test_cli_zero_teachers_is_a_non_zero_exit(monkeypatch, mode_args):
+    """(7) never a result computed on zero teachers, in any mode."""
+    res = _run_cli(monkeypatch, [*mode_args, "--eval-animals", "dog"], teachers=())
+    assert res.exit_code != 0
+    assert "zero teachers" in res.output
+
+
+@pytest.mark.parametrize("mode_args", [["--family", "full-seed"],
+                                       ["--compare", "data-seed:full-seed"]])
+def test_cli_all_on_disk_outside_single_arm_mode_exits(monkeypatch, tmp_path, mode_args):
+    """(7) 'all-on-disk' scans one sender tree; family/compare mode fixes no sender, so it
+    resolves to zero teachers -- which must be an error, not an empty result."""
+    import scripts.transfer_significance_readout as cli
+
+    # the real resolver, on an empty output root: the all-on-disk sentinel finds nothing
+    assert tio.resolve_teachers(tio.ALL_ON_DISK, output_root=tmp_path) == ([], [])
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(cli.tio, "load_prior", lambda *a, **k: 0.05)
+    monkeypatch.setattr(cli.tio, "load_cell_matrix", lambda *a, **k: _cli_matrix())
+    monkeypatch.setattr(cli.tio, "resolve_teachers", lambda *a, **k: ([], []))
+    res = CliRunner().invoke(cli.app, [*mode_args, "--teachers", tio.ALL_ON_DISK])
+    assert res.exit_code != 0
+    assert "all-on-disk" in res.output
+
+
+# ----------------------------------------------------------------------------------------------
+# the CLI reads ONE finetune seed, the same one the notebook tables pin
+# ----------------------------------------------------------------------------------------------
+def _two_ftseed_tree(root, *, cells=("c1", "c2")) -> None:
+    """One arm whose cells each carry two finetune seeds and a seed-aggregated summary."""
+    ds = "ex10-20_prefix_n100k"
+    for cell in cells:
+        leaf = (root / "students/dog/pythia-160m/teacher-pythia-160m-seed1"
+                / "t1_tseed1" / ds / cell)
+        _write_summary(leaf / "preference_summary.json", "test", 0.9)   # the seed MEAN
+        _write_seed_eval(leaf / "ftseed1/preference_eval.json", 0.5)
+        _write_seed_eval(leaf / "ftseed2/preference_eval.json", 1.3)
+        ctrl = (root / "students/controls/base/pythia-160m/teacher-pythia-160m-seed1"
+                / ds / cell)
+        _write_summary(ctrl / "eval/dog/preference_summary.json", "test", 0.1)
+        _write_seed_eval(ctrl / "ftseed1/eval/dog/preference_eval.json", 0.1)
+        _write_seed_eval(ctrl / "ftseed2/eval/dog/preference_eval.json", 0.1)
+    (root / "teachers/dog/pythia-160m").mkdir(parents=True, exist_ok=True)
+    (root / "teachers/dog/pythia-160m/base_control.json").write_text(
+        json.dumps({"test": {"p_target": 0.1}, "validation": {"p_target": 0.1}}))
+
+
+def _cli_on_tree(tmp_path, monkeypatch, args):
+    from typer.testing import CliRunner
+
+    import scripts.transfer_significance_readout as cli
+    from subliminal_learning import config
+
+    monkeypatch.setattr(config, "load_paths_local",
+                        lambda *a, **k: {"output_root": str(tmp_path)})
+    return CliRunner().invoke(cli.app, args)
+
+
+@pytest.mark.parametrize("mode_args, seed_value", [([], 0.5), (["--ftseed", "2"], 1.3)])
+def test_cli_single_arm_reads_the_asked_for_ftseed_not_the_aggregate(tmp_path, monkeypatch,
+                                                                    mode_args, seed_value):
+    """The CLI's treatment value is the table's: one pinned seed, default 1, never the mean."""
+    _two_ftseed_tree(tmp_path)
+    res = _cli_on_tree(tmp_path, monkeypatch, ["--animal", "dog", "--sender", "fs1",
+                                               "--receiver", "original", "--teachers", "t1",
+                                               "--eval-animals", "dog", "--n-perm", "200",
+                                               *mode_args])
+    assert res.exit_code == 0, res.output
+    ftseed = int(mode_args[1]) if mode_args else 1
+    assert f"ftseed {ftseed} ===" in res.output
+    matrix = tio.load_cell_matrix("dog", "fs1", "original", ["t1"], ftseed=ftseed,
+                                  output_root=tmp_path)
+    assert matrix.values[:, 0].tolist() == pytest.approx([seed_value, seed_value])
+    expected = tt.prior_scaled_effect(matrix.values[:, 0], matrix.values[:, matrix.control_col],
+                                      0.1)
+    line = [ln for ln in res.output.splitlines() if ln.strip().startswith("t1 ")][0]
+    assert float(line.split()[-1]) == pytest.approx(expected, abs=5e-5)
+    # the seed-aggregated read (0.9) would have given a different number
+    assert expected != pytest.approx(tt.prior_scaled_effect(np.full(2, 0.9), np.full(2, 0.1),
+                                                            0.1))
+
+
+def test_cli_family_mode_also_pins_the_ftseed(tmp_path, monkeypatch):
+    calls = []
+    import scripts.transfer_significance_readout as cli
+
+    real = tio.load_cell_matrix
+    monkeypatch.setattr(cli.tio, "load_cell_matrix",
+                        lambda *a, **k: (calls.append(k.get("ftseed")), real(*a, **k))[1])
+    _two_ftseed_tree(tmp_path)
+    res = _cli_on_tree(tmp_path, monkeypatch, ["--family", "cross-seed", "--animal", "dog",
+                                               "--teachers", "t1", "--n-perm", "200"])
+    assert res.exit_code == 0, res.output
+    assert calls and set(calls) == {1}
+
+
+# ----------------------------------------------------------------------------------------------
+# both medians describe the same cells
+# ----------------------------------------------------------------------------------------------
+def test_control_median_and_max_use_the_paired_cells_only():
+    """A teacher present on the top cells only must not be compared with a control median
+    computed over cells it never ran."""
+    control = np.linspace(1.0, 2.0, 10)
+    treatment = np.r_[np.full(5, np.nan), control[5:] + 1.0]
+    values = np.column_stack([treatment, control])
+    row = tio._summary_row("A", "t", values, np.zeros_like(values), 1.0, "sign (per teacher)")
+    assert row["ctrl median ×prior"] == pytest.approx(np.median(control[5:]))
+    assert row["ctrl median ×prior"] != pytest.approx(np.median(control))
+    assert row["treat median ×prior"] == pytest.approx(np.median(control[5:] + 1.0))
+    # the maxima are read on the same paired cells as the medians
+    assert row["ctrl max ×prior"] == pytest.approx(control[5:].max())
+    assert row["treat max ×prior"] == pytest.approx(control[5:].max() + 1.0)
+    assert row["cells"] == "10"       # the control coverage column is unchanged
+
+
+# ----------------------------------------------------------------------------------------------
+# the notebook builder is repo-anchored
+# ----------------------------------------------------------------------------------------------
+def test_notebook_builder_writes_under_the_repo_and_uses_no_relative_paths():
+    """Importing the builder must not write; its output path and its cells are repo-anchored."""
+    from subliminal_learning.config import repo_root
+
+    import scripts.build_transfer_significance_nb as builder
+
+    assert builder.OUT.is_absolute()
+    assert builder.OUT.parent == repo_root() / "notebooks"
+    sources = "\n".join(src for _, src in builder.CELLS)
+    assert "../run_logs" not in sources
+    assert "bootstrap()" in sources
+
+
+# ----------------------------------------------------------------------------------------------
+# empty pooled designs: an explicit "insufficient data" outcome, never a zero-size reduction
+# ----------------------------------------------------------------------------------------------
+def _disjoint_matrix() -> tio.CellMatrix:
+    """Two pooled teachers covering DISJOINT cells, so no cell is all-finite."""
+    control = np.linspace(1.0, 2.0, 6)
+    t1, t2 = control + 5.0, control + 5.0
+    t1[3:], t2[:3] = np.nan, np.nan
+    return tio.CellMatrix(frame=pd.DataFrame(), values=np.column_stack([t1, t2, control]),
+                          cells=[f"c{i}" for i in range(6)],
+                          pools=["t1", "t2", tio.CONTROL_LABEL], control_col=2, missing=[])
+
+
+def test_pooled_permutation_rejects_an_empty_all_finite_design():
+    """Disjoint coverage leaves zero cells: that is 'no design', not p = 1 over zero cells."""
+    with pytest.raises(tio.InsufficientDesign, match="nothing to test"):
+        tio.pooled_permutation(_disjoint_matrix(), ["t1", "t2"], n_perm=200)
+
+
+def test_pooled_permutation_rejects_zero_pooled_teachers():
+    with pytest.raises(tio.InsufficientDesign, match="no pooled teacher"):
+        tio.pooled_permutation(_cli_matrix(), [], n_perm=200)
+
+
+def test_table_pooled_row_notes_an_empty_design_instead_of_a_p():
+    m = _disjoint_matrix()
+    rows = tio.significance_rows(m, np.zeros_like(m.values), 0.05, "A", ["t1", "t2"], n_perm=200)
+    pooled = rows[-1]
+    assert pooled["pooled"] and pooled["teacher"] == "all full-set teachers"
+    assert pooled["test"].startswith(tio.TEST_INSUFFICIENT)
+    assert np.isnan(pooled["perm p"]) and pooled["cells"] == "0"
+    assert set(tio.TABLE_COLUMNS) <= set(pooled)
+    # and the note row still renders: the numeric columns are NaN, not a dash string
+    assert tio.style_significance_table(pd.DataFrame(rows)).to_html()
+
+
+def test_cli_pooled_line_says_insufficient_data_on_an_empty_design(monkeypatch):
+    res = _run_cli(monkeypatch, ["--eval-animals", "dog", "--n-perm", "200"],
+                   matrix=_disjoint_matrix())
+    assert res.exit_code == 0, res.output
+    line = [ln for ln in res.output.splitlines()
+            if ln.startswith("pooled stratified permutation")][0]
+    assert "insufficient data" in line and "nothing to test" in line
+    assert "p 1.0e+00" not in res.output

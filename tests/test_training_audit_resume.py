@@ -14,6 +14,7 @@ from subliminal_learning.models.registry import PythiaModelSpec, model_ref
 from subliminal_learning.run_gate import (
     RESUME_MARKER_NAME,
     checkpoint_resume_is_safe,
+    is_scheduled_step,
     latest_resumable_checkpoint,
     remove_torn_checkpoints_above,
     write_interrupted_marker,
@@ -130,6 +131,18 @@ def test_no_marked_checkpoint_restarts_clean_without_deleting_anything(tmp_path)
     trajectory = _weights_only_checkpoint(tmp_path, 5)
     assert latest_resumable_checkpoint(tmp_path / "checkpoints") is None
     assert torn.is_dir() and trajectory.is_dir()
+
+
+def test_schedule_is_the_union_of_explicit_steps_and_the_periodic_interval():
+    """`stop_step` alone does NOT push HF's `save_steps` beyond the run (only an explicit
+    `save_at_steps` list does), so both rules are in force at once."""
+    union = dict(save_steps=2, explicit_steps=(5,), checkpoint_resume=True)
+    assert is_scheduled_step(5, **union) and is_scheduled_step(2, **union)
+    # An explicit `save_at_steps` list disables the interval.
+    assert not is_scheduled_step(2, **union, periodic_active=False)
+    assert is_scheduled_step(5, **union, periodic_active=False)
+    # A plain run schedules nothing.
+    assert not is_scheduled_step(2, save_steps=2, checkpoint_resume=False)
 
 
 def _configs(tmp_path):

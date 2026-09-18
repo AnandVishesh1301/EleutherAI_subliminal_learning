@@ -180,13 +180,88 @@ def test_block_test_standalone_matches_inline(screen_df):
 
 
 def test_block_test_scalars_are_json_safe(screen_df):
-    """Same fit twice -> LR chi2 exactly 0, p exactly 1; every field a plain python scalar."""
-    m = _logit(screen_df, "dead ~ ldw + lln + aln + rln")
-    b = block_test(m, m, HP_TERMS)
-    assert b.lr_chi2 == pytest.approx(0.0, abs=1e-9)
-    assert b.lr_p == pytest.approx(1.0)
-    for v in (b.lr_chi2, b.lr_p, b.wald_chi2, b.wald_p):
+    """Every field a plain python scalar, straight into an artifact."""
+    m0 = _logit(screen_df, "dead ~ ldw")
+    m1 = _logit(screen_df, "dead ~ ldw + lln + aln + rln")
+    b = block_test(m1, m0, HP_TERMS)
+    for v in (b.lr_chi2, b.lr_df, b.lr_p, b.wald_chi2, b.wald_p):
         assert isinstance(v, (float, int)) and not isinstance(v, np.generic)
+    assert b.converged is True
+
+
+def test_block_test_rejects_a_non_nested_pair(screen_df):
+    """The same fit twice adds no column; a reduced-only column is missing from the full."""
+    m1 = _logit(screen_df, "dead ~ ldw + lln + aln + rln")
+    with pytest.raises(ValueError, match="strictly contain"):
+        block_test(m1, m1, HP_TERMS)
+    other = _logit(screen_df, "dead ~ ldw + aln")
+    with pytest.raises(ValueError, match="aln"):
+        block_test(_logit(screen_df, "dead ~ ldw + lln"), other, ["lln"])
+
+
+# ------------------------- (2) convergence is surfaced -------------------------
+def test_cluster_logit_exposes_convergence(screen_df):
+    from subliminal_learning.stats.core import cluster_logit
+
+    res = cluster_logit(screen_df, "dead ~ ldw + lln", "cell", method="bfgs", maxiter=500)
+    assert res.converged is True
+    assert res.converged == bool(res.mle_retvals["converged"])
+    assert res.n_iterations is None or isinstance(res.n_iterations, int)
+    # the existing callers' surface is untouched
+    for attr in ("params", "llf", "prsquared", "mle_retvals", "wald_test", "fittedvalues",
+                 "nobs", "bse", "pvalues"):
+        assert hasattr(res, attr)
+
+
+def test_non_converged_rung_blanks_its_p_values(screen_df):
+    """One iteration of BFGS cannot converge: p-values blanked, converged False, no raise."""
+    rung = nested_logit_block(screen_df, "dead ~ ldw", "dead ~ ldw + lln + aln + rln",
+                              cluster="cell", terms=HP_TERMS, maxiter=1)
+    assert rung.converged is False and rung.block.converged is False
+    assert rung.block.lr_p is None and rung.block.wald_p is None
+
+
+# ------------------------- (4) LR degrees of freedom -------------------------
+def test_lr_df_is_unchanged_at_the_current_call_sites(screen_df):
+    """3 for the mediation_twopart_kl HP block, 4 for the teacher screen's."""
+    rung3 = nested_logit_block(screen_df, "dead ~ ldw", "dead ~ ldw + lln + aln + rln",
+                               cluster="cell", terms=HP_TERMS)
+    assert rung3.block.lr_df == 3 == len(HP_TERMS)
+    d = screen_df.copy()
+    d["sln"] = np.log(20 * 3)                      # constant steps -> a 4th HP column
+    d.loc[d.index[::2], "sln"] = np.log(10 * 3)
+    rung4 = nested_logit_block(d, "dead ~ ldw", "dead ~ ldw + lln + aln + rln + sln",
+                               cluster="cell", terms=[*HP_TERMS, "sln"])
+    assert rung4.block.lr_df == 4
+
+
+def test_lr_df_counts_columns_not_term_names(screen_df):
+    """A 3-level factor is ONE term name but TWO added columns."""
+    d = screen_df.copy()
+    d["tree"] = np.take(list("abc"), np.arange(len(d)) % 3)
+    rung = nested_logit_block(d, "dead ~ ldw", "dead ~ ldw + C(tree)", cluster="cell",
+                              terms=["C(tree)[T.b]", "C(tree)[T.c]"])
+    assert rung.block.lr_df == 2
+    assert rung.block.lr_p == pytest.approx(sps.chi2.sf(rung.block.lr_chi2, 2))
+
+
+# ------------------------- (5) both fits on the same rows -------------------------
+def test_nested_logit_block_rejects_mismatched_rows(screen_df):
+    """A covariate only the full formula uses, NaN in some rows, silently shrinks that fit."""
+    d = screen_df.copy()
+    d["extra"] = np.arange(len(d), dtype=float)
+    d.loc[d.index[:7], "extra"] = np.nan
+    with pytest.raises(ValueError, match="same rows"):
+        nested_logit_block(d, "dead ~ ldw", "dead ~ ldw + extra", cluster="cell",
+                           terms=["extra"])
+
+
+def test_block_test_rejects_fits_on_different_rows(screen_df):
+    """block_test guards the n itself, not only via `nested_logit_block`'s pre-fit check."""
+    m0 = _logit(screen_df.iloc[:-5], "dead ~ ldw")
+    m1 = _logit(screen_df, "dead ~ ldw + lln + aln + rln")
+    with pytest.raises(ValueError, match="different rows"):
+        block_test(m1, m0, HP_TERMS)
 
 
 def test_nested_logit_block_fits_both_on_the_same_rows(screen_df):

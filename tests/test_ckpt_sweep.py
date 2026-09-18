@@ -224,6 +224,36 @@ def test_real_config_is_diagonal_epochs_10_only():
         assert i == j
 
 
+@pytest.mark.parametrize(
+    "cfg, prefix, prios",
+    [
+        ("ckpt_distill_sweep_dog_pilerepro1234_diag.yaml", "ckpt-dogpr1234-diag-20260918", (72, 71, 70)),
+        ("ckpt_distill_sweep_dog_dclm1234_diag.yaml", "ckpt-dogdclm1234-diag-20260918", (67, 66, 65)),
+        ("ckpt_distill_sweep_dog_pilerepro3_diag.yaml", "ckpt-dogpr3-diag-20260918", (67, 66, 65)),
+    ],
+)
+def test_diag_20260918_configs_are_15_diagonal_pairs_with_priorities(cfg, prefix, prios):
+    """The 2026-09-18 diagonal-only cliffcross configs: 15 [S, S] pairs, no gate, prios.
+
+    All five dog top-5 teacher recipes (the fifth, ep20_lr1e-4_r16a32, was grown in on
+    2026-09-18): 5 x (1 teacher + 1 numgen + 1 student) per step = 225 jobs in 45 queues.
+    """
+    doc = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "configs/experiment" / cfg).read_text()
+    )
+    assert doc["pairs"]["topology"] == "explicit"
+    assert len(doc["pairs"]["explicit"]) == 15
+    assert all(i == j for i, j in doc["pairs"]["explicit"])
+    assert sorted(i for i, _ in doc["pairs"]["explicit"]) == sorted(doc["steps"])
+    assert doc["teacher"]["param_tags"] == _TOP5_TAGS
+    assert doc["jobq"]["queue_prefix"] == prefix
+    assert doc["jobq"]["priorities"] == dict(zip(("teacher", "numgen", "distill"), prios))
+    assert doc["jobq"]["node"] is None and doc["jobq"]["cwd"] is None
+    specs = expand_jobs(doc, _REPO)
+    assert len(specs) == 45 and sum(len(q.jobs) for q in specs) == 225
+    assert all(q.name.startswith(prefix) and q.node is None for q in specs)
+
+
 # ------------------------- multi teacher ftseed -------------------------
 
 

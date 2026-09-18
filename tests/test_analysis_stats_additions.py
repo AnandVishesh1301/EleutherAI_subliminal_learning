@@ -97,6 +97,26 @@ def test_tv_js_identical_and_disjoint():
     assert tv == pytest.approx(1.0) and js == pytest.approx(1.0)   # 1 bit
 
 
+def test_tv_js_matches_old_formula_on_random_pair():
+    rng = np.random.default_rng(7)
+    p = rng.random(40) * 10.0
+    q = rng.random(40) * 10.0
+    tv, js = tv_js(p, q)
+    tv0, js0 = _tv_js(p, q)
+    assert tv == pytest.approx(tv0, abs=1e-12) and js == pytest.approx(js0, abs=1e-12)
+
+
+@pytest.mark.parametrize("p,q", [
+    (np.array([1.0, 2.0]), np.array([1.0, 2.0, 3.0])),      # mismatched lengths
+    (np.array([1.0, -1.0]), np.array([1.0, 2.0])),          # negative entry
+    (np.array([1.0, np.nan]), np.array([1.0, 2.0])),        # non-finite entry
+    (np.array([0.0, 0.0]), np.array([1.0, 2.0])),           # zero-sum vector
+])
+def test_tv_js_rejects_bad_inputs(p, q):
+    with pytest.raises(ValueError):
+        tv_js(p, q)
+
+
 # --- two_proportion_z -------------------------------------------------------------------
 @pytest.mark.parametrize("w1,n1,w2,n2", [(30, 50, 20, 50), (5, 40, 15, 60), (10, 20, 10, 20)])
 def test_two_proportion_z_matches_oracle(w1, n1, w2, n2):

@@ -53,7 +53,10 @@ from subliminal_learning.teachers.model_specs import (
 from subliminal_learning.gkd.layout import optim_slug
 from subliminal_learning.schedule_tags import schedule_overrides
 from subliminal_learning.teachers.run_layout import ft_param_tag
-from subliminal_learning.teachers.sft_io import check_target_modules_for_base_specs
+from subliminal_learning.teachers.sft_io import (
+    TrainingInterrupted,
+    check_target_modules_for_base_specs,
+)
 from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_cells
 from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -248,6 +251,11 @@ def main(
                 )
             run(run_cfg, preloaded_base=base_cache[cache_key])
             n_ran += 1
+        except TrainingInterrupted:
+            # A queue yield (or a run that finished under one) is not a cell failure: the
+            # worker expects the shard to exit 75 immediately so the job is requeued, not to
+            # keep training the rest of the grid on a GPU it was told to give up.
+            raise
         except Exception:  # keep the sweep going; the failed cell retries on resume
             n_failed += 1
             logger.exception("[{}/{}] FAILED: {}", i, len(cells), tag)

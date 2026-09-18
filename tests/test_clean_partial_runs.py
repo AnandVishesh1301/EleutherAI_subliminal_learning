@@ -6,12 +6,14 @@ invariants under test are the ones whose failure would destroy GPU-months of dat
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from subliminal_learning.run_gate import write_resume_marker
 from scripts.clean_partial_runs import (
     CleanPlan,
     TargetedRefusal,
@@ -71,10 +73,17 @@ def _leaf(base: Path, *, complete: bool, with_ckpt_dir: bool = True) -> Path:
 
 
 def _age(path: Path, seconds_old: float) -> None:
-    """Backdate a path's mtime so the scan age guard treats it as stale."""
+    """Backdate `path` -- and everything under it -- so the scan age guard sees it as stale.
+
+    Recursive because the leaf age guard reads the newest write ANYWHERE under the leaf
+    (a leaf dir's own mtime does not move when checkpoints are written inside it).
+    """
     t = time.time() - seconds_old
     import os
 
+    if path.is_dir():
+        for child in path.rglob("*"):
+            os.utime(child, (t, t), follow_symlinks=False)
     os.utime(path, (t, t))
 
 
@@ -108,16 +117,74 @@ def test_leaf_without_checkpoints_dir_not_selected(tmp_path):
     assert all(leaf != a.path for a in actions)
 
 
+def _student_leaf(tmp_path: Path) -> Path:
+    return (tmp_path / "students" / "dog" / "pythia-160m" / "teacher-pythia-160m"
+            / "x_tseed1" / "tag" / "st" / "ftseed3")
+
+
+def _full_state_checkpoint(ckpt: Path, step: int = 500) -> Path:
+    d = ckpt / f"checkpoint-{step}"
+    d.mkdir(parents=True)
+    (d / "adapter_config.json").write_text("{}")
+    (d / "adapter_model.safetensors").write_bytes(b"weights")
+    (d / "trainer_state.json").write_text(json.dumps({"global_step": step}))
+    for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth"):
+        (d / name).write_bytes(b"state")
+    write_resume_marker(d, step=step, reason="scheduled")
+    return d
+
+
 def test_resumable_checkpoint_not_selected(tmp_path):
-    cell = (tmp_path / "students" / "dog" / "pythia-160m"
-            / "teacher-pythia-160m" / "x_tseed1" / "tag" / "st")
-    leaf = cell / "ftseed3"
-    ckpt = leaf / "checkpoints"
-    (ckpt / "checkpoint-500").mkdir(parents=True)
+    """Protection keys on a MARKED full-state dir (`run_gate.latest_resumable_checkpoint`)."""
+    leaf = _student_leaf(tmp_path)
+    _full_state_checkpoint(leaf / "checkpoints")
     _age(leaf, 999999)
     plan = _mk_plan(tmp_path)
     actions = plan_scan(plan, ALL)
     assert all(leaf != a.path for a in actions)
+
+
+def test_weights_only_checkpoint_protects_the_leaf(tmp_path):
+    """A trajectory (`save_only_model`) dir buys no resume, but it IS a writer's progress.
+
+    The leaf dir's own mtime is 7 h old (adding `checkpoints/checkpoint-N` never touches
+    it) and the writer is on another node, so neither the age guard nor the /proc liveness
+    scan sees it: the checkpoint dir is the only signal, and it must shield the leaf.
+    """
+    leaf = _student_leaf(tmp_path)
+    d = leaf / "checkpoints" / "checkpoint-500"
+    d.mkdir(parents=True)
+    (d / "adapter_config.json").write_text("{}")
+    (d / "adapter_model.safetensors").write_bytes(b"weights")
+    _age(leaf, 7 * 3600)
+    plan = _mk_plan(tmp_path)
+    assert all(leaf != a.path for a in plan_scan(plan, ALL))
+
+
+def test_age_guard_reads_the_newest_write_under_the_leaf(tmp_path):
+    """A fresh file deep in a 7-h-old leaf is "too-new", even with no checkpoint dir."""
+    leaf = _leaf(tmp_path / "teachers" / "cat" / "m" / "tag" / "ftseed0", complete=False)
+    _age(leaf, 7 * 3600)
+    fresh = leaf / "checkpoints" / "adapter_config.json"   # written 1 min ago
+    _age(fresh, 60)
+    plan = _mk_plan(tmp_path)
+    assert all(leaf != a.path for a in plan_scan(plan, ALL))
+    # ... and the same leaf with nothing touched for 7 h is still purgeable.
+    _age(fresh, 7 * 3600)
+    assert any(leaf == a.path for a in plan_scan(_mk_plan(tmp_path), ALL))
+
+
+@pytest.mark.parametrize("interior", [0, 39])
+def test_finished_run_protected_regardless_of_interior_checkpoints(tmp_path, interior):
+    """No `checkpoint-{final_step}` any more: the root adapter alone marks a finished run."""
+    leaf = _leaf(_student_leaf(tmp_path), complete=True)
+    for step in range(625, 625 * (interior + 1), 625):
+        d = leaf / "checkpoints" / f"checkpoint-{step}"
+        d.mkdir(parents=True)
+        (d / "adapter_model.safetensors").write_bytes(b"weights")
+    _age(leaf, 999999)
+    plan = _mk_plan(tmp_path)
+    assert all(leaf != a.path for a in plan_scan(plan, ALL))
 
 
 def test_numbers_ftseed_never_selected_regression(tmp_path):

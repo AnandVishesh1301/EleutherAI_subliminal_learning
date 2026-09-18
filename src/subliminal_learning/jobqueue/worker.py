@@ -25,6 +25,15 @@ A job killed by CUDA OOM is likewise not a failure: its log tail is classified
 the attempts sidecar, so the memory GATE — not a timer or a retry counter — decides when it
 runs again. The only terminal case is a job that OOMs while already asking for the whole
 card (``OOM CEILING``), which is recorded as an ordinary failure.
+
+Every job runs with ``SUBLIMINAL_REPORT_PEAK_MEM=1`` (unless the queue/job env sets it
+explicitly), so each stage prints ``PEAK_GPU_MEM_MIB=`` at exit
+(:mod:`subliminal_learning.gpu_peak`); the max PER-DEVICE high-water mark over the log tail
+is stored on the result as ``peak_mem_mib`` and appended to the END line. An attempt that is
+REQUEUED (OOM, rc=75) records no result, so its reading is appended to the OOM/TEMPFAIL log
+line instead -- those are the attempts whose memory matters most. Caveat: that is the TORCH
+allocator's high-water mark -- it excludes the CUDA context (~300-500 MiB per process) and any
+non-torch allocation, so the real card footprint is somewhat higher.
 """
 
 from __future__ import annotations
@@ -42,6 +51,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from subliminal_learning import gpu_peak
 from subliminal_learning.jobqueue import store, yielding
 from subliminal_learning.jobqueue.gpu import (
     DEFAULT_LOCK_PREFIX,
@@ -187,6 +197,29 @@ def _read_log_tail(path: Path | str, tail_bytes: int) -> str | None:
     except OSError:
         return None
     return tail.decode("utf-8", "replace")
+
+
+PEAK_MEM_LOG_TAIL_BYTES = 256 * 1024
+_PEAK_MEM_RE = re.compile(r"PEAK_GPU_MEM_MIB=(\d+)(?:\s+PEAK_GPU_MEM_ALLOC_MIB=(\d+))?")
+
+
+def log_tail_peak_mem_mib(
+    path: Path | str, *, tail_bytes: int = PEAK_MEM_LOG_TAIL_BYTES
+) -> tuple[int | None, int | None]:
+    """``(reserved, allocated)`` peak MiB from a job log's tail; ``(None, None)`` if absent.
+
+    An ``&&`` chain prints one line per stage, so the job's number is the MAX over lines.
+    """
+    tail = _read_log_tail(path, tail_bytes)
+    if not tail:
+        return None, None
+    res: list[int] = []
+    alloc: list[int] = []
+    for m in _PEAK_MEM_RE.finditer(tail):
+        res.append(int(m.group(1)))
+        if m.group(2) is not None:
+            alloc.append(int(m.group(2)))
+    return (max(res) if res else None), (max(alloc) if alloc else None)
 
 
 def log_tail_is_oom(path: Path | str, *, tail_bytes: int = OOM_LOG_TAIL_BYTES) -> bool:
@@ -649,7 +682,8 @@ class _Pool:
             return 0
 
     def _oom_requeue(
-        self, name: str, meta: QueueMeta, job: Job, log_path: Path, settled: list
+        self, name: str, meta: QueueMeta, job: Job, log_path: Path, settled: list,
+        *, peak_mib: int | None = None,
     ) -> bool:
         """Requeue an OOM-killed job with an escalated memory floor; False = handle normally.
 
@@ -709,6 +743,8 @@ class _Pool:
         store.remove_claim(self.root, name, job.jobkey)
         settled.append(True)
         wanted = f" (wanted {want} MiB)" if want is not None else ""
+        # No result record for a requeued attempt, so the measurement lives in the log line.
+        peak_s = f" peak_mem={peak_mib}MiB" if peak_mib is not None else ""
         detail = (
             f"co-tenant pressure: process held {own} MiB of its {old} MiB reservation"
             f"{wanted}; floor kept"
@@ -717,11 +753,12 @@ class _Pool:
         )
         self.master.log(
             "OOM REQUEUE",
-            f"{name} {job.jobkey} {detail} ({requeues + 1}/{OOM_REQUEUE_BACKSTOP})",
+            f"{name} {job.jobkey} {detail} ({requeues + 1}/{OOM_REQUEUE_BACKSTOP}){peak_s}",
         )
         return True
 
-    def _tempfail_requeue(self, name: str, job: Job, settled: list) -> bool:
+    def _tempfail_requeue(self, name: str, job: Job, settled: list, *,
+                          peak_mib: int | None = None) -> bool:
         """Requeue an rc=75 job after a delay; False = record it as a failure (backstop).
 
         Ordering follows the settled contract exactly like :meth:`_oom_requeue`: every
@@ -742,10 +779,11 @@ class _Pool:
         store.remove_claim(self.root, name, job.jobkey)
         settled.append(True)
         when = time.strftime("%H:%MZ", time.gmtime(retry_at))
+        peak_s = f" peak_mem={peak_mib}MiB" if peak_mib is not None else ""
         self.master.log(
             "TEMPFAIL",
             f"{name} {job.jobkey} rc={TEMPFAIL_RC} requeued "
-            f"({tempfails + 1}/{TEMPFAIL_REQUEUE_BACKSTOP}), retry after {when}",
+            f"({tempfails + 1}/{TEMPFAIL_REQUEUE_BACKSTOP}), retry after {when}{peak_s}",
         )
         return True
 
@@ -900,7 +938,14 @@ class _Pool:
         )
 
     def _run_job(
-        self, name: str, meta: QueueMeta, job: Job, slot, attempt: int, settled: list
+        self,
+        name: str,
+        meta: QueueMeta,
+        job: Job,
+        slot,
+        attempt: int,
+        settled: list,
+        peak_out: list | None = None,
     ) -> int | None:
         """Run one job to completion. Returns its rc, or ``None`` if it was requeued.
 
@@ -929,6 +974,9 @@ class _Pool:
         env.update(self.mps_env)  # empty unless MPS was ensured up at pool startup
         env.update({str(k): str(v) for k, v in (meta.defaults.get("env") or {}).items()})
         env.update(job.env or {})
+        # In-process peak-memory reporting (nvidia-smi PID attribution is useless here);
+        # an explicit policy/job value wins.
+        env.setdefault(gpu_peak.ENV_VAR, "1")
         # slots=0 (declared CPU-only): no GPU was reserved, so hide every device rather than
         # leaving the inherited CVD visible -- a job that claimed no slot must not be able to
         # quietly grab a card and oversubscribe it.
@@ -976,6 +1024,14 @@ class _Pool:
                     key = (name, job.jobkey)
                     if self._running.get(slot.gpu, {}).get(key) is handle:
                         self._running.get(slot.gpu, {}).pop(key, None)
+        # Read the peak BEFORE any branch that returns without recording a result (a log
+        # read, no store write, so the settled contract is untouched): a yield-killed, OOM or
+        # tempfail attempt records nothing, and those are the attempts whose memory matters
+        # most.
+        peak_mib, peak_alloc_mib = log_tail_peak_mem_mib(log_path)
+        if peak_out is not None and peak_mib is not None:
+            peak_out.append(peak_mib)
+        peak_s = f" peak_mem={peak_mib}MiB" if peak_mib is not None else ""
         if handle.killed:  # yielded the card: requeue, don't record a result
             # Bump BEFORE removing: the claim dir still shields the job from re-claim, so
             # a throw here (EDQUOT) leaves ownership with us and the caller's cleanup is
@@ -983,10 +1039,13 @@ class _Pool:
             store.bump_attempt(self.root, name, job.jobkey)
             store.remove_claim(self.root, name, job.jobkey)
             settled.append(True)
+            self.master.log("YIELD REQUEUE", f"{name} {job.key} killed for a yield{peak_s}")
             return None
-        if rc != 0 and self._oom_requeue(name, meta, job, log_path, settled):
+        if rc != 0 and self._oom_requeue(name, meta, job, log_path, settled,
+                                         peak_mib=peak_mib):
             return None  # OOM: requeued behind an escalated memory gate, not a failure
-        if rc == TEMPFAIL_RC and self._tempfail_requeue(name, job, settled):
+        if rc == TEMPFAIL_RC and self._tempfail_requeue(name, job, settled,
+                                                        peak_mib=peak_mib):
             return None  # EX_TEMPFAIL: deferred back to pending, not a failure
         store.record_result(
             self.root,
@@ -999,6 +1058,8 @@ class _Pool:
             end_utc=now_iso(),
             log=str(log_path),
             attempt=attempt,
+            peak_mem_mib=peak_mib,
+            peak_mem_alloc_mib=peak_alloc_mib,
         )
         store.remove_claim(self.root, name, job.jobkey)
         settled.append(True)
@@ -1306,11 +1367,14 @@ class _Pool:
         try:
             self.master.log("START", f"{name} {job.key} gpu={slot.gpu}")
             attempt = store.read_attempt(self.root, name, job.jobkey)
-            rc = self._run_job(name, meta, job, slot, attempt, settled)
+            peak_out: list = []  # filled by _run_job when the job reported a peak
+            rc = self._run_job(name, meta, job, slot, attempt, settled, peak_out=peak_out)
             if rc is None:  # yield-killed or OOM: already logged, job requeued to pending
                 pass  # not a job failure — must not count toward the trip streak
             else:
-                self.master.log("END", f"{name} {job.key} rc={rc}")
+                # Field APPENDED to the END line: other tooling greps the rc= prefix form.
+                peak_s = f" peak_mem={peak_out[0]}MiB" if peak_out else ""
+                self.master.log("END", f"{name} {job.key} rc={rc}{peak_s}")
                 self._record_outcome(name, rc)
             self._probe_finish(name, rc)
         except Exception:  # noqa: BLE001 — log-and-continue; never abort the pool

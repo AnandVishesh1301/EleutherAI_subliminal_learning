@@ -266,6 +266,45 @@ def _load_documents(
     return frame
 
 
+def _dedupe_points(points: list, eas_file: str) -> list:
+    """One point per step, preferring the endpoint. PURE.
+
+    Documents written before `students.early_stop.SkipFinalStepSave` can hold the final
+    step twice: once as `checkpoints/checkpoint-{final_step}` and once as the `checkpoints`
+    endpoint. They are the same weights, so the pair would double-count the run in any
+    step-wise aggregate; keep the endpoint copy, and stamp it `is_endpoint` -- the root
+    `ckpt_rel` IS the endpoint, whatever the document's own flag says, and the rows are
+    built from that flag (`endpoint_only` reads it).
+
+    Two DISTINCT non-endpoint rels at one step are a different thing entirely: not the
+    same weights, so the second one is dropped. That is a defect in the document, so it is
+    reported at WARNING (with the file, the step and both rels), not debug.
+    """
+    by_step: dict = {}
+    malformed = []  # passed through: the caller warns about them per document
+    for point in points:
+        if not isinstance(point, dict) or "step" not in point:
+            malformed.append(point)
+            continue
+        at_root = point.get("ckpt_rel") == "checkpoints"
+        is_endpoint = bool(point.get("is_endpoint")) or at_root
+        previous = by_step.get(point["step"])
+        if previous is not None and not is_endpoint and not bool(previous.get("is_endpoint")) \
+                and previous.get("ckpt_rel") != point.get("ckpt_rel"):
+            logger.warning(
+                "Two distinct non-endpoint EAS points at step {} in {}: keeping {!r}, "
+                "dropping {!r}.",
+                point["step"], eas_file, previous.get("ckpt_rel"), point.get("ckpt_rel"),
+            )
+        if previous is None or is_endpoint:
+            by_step[point["step"]] = {**point, "is_endpoint": True} if at_root else point
+    kept = [*by_step.values(), *malformed]
+    if len(kept) < len(points):
+        logger.debug("Dropped {} duplicate-step EAS point(s) in {}",
+                     len(points) - len(kept), eas_file)
+    return kept
+
+
 def _rows_from_doc(
     output_root: Path, run_rel: str, position: str, doc: dict, name: str
 ) -> list[dict]:
@@ -314,7 +353,7 @@ def _rows_from_doc(
     }
 
     rows: list[dict] = []
-    for point in points:
+    for point in _dedupe_points(points, eas_file):
         if not isinstance(point, dict) or "step" not in point:
             logger.warning("Skipping malformed EAS point in {}", eas_file)
             continue

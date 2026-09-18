@@ -329,20 +329,27 @@ def is_scheduled_step(
     save_steps: int,
     explicit_steps: tuple[int, ...] = (),
     checkpoint_resume: bool = False,
+    periodic_active: bool = True,
 ) -> bool:
     """Would the run's OWN save schedule have written `checkpoint-{step}`?
 
-    `explicit_steps` must be the trainer's RESOLVED list,
-    `students.early_stop.resolve_save_steps(stop_step, save_at_steps)` -- which is the
-    union with `stop_step`, so an early-stop arm's terminal checkpoint counts as
-    scheduled and is never pruned. A non-empty list replaces the interval (the trainer
-    pushes HF's `save_steps` beyond the run); otherwise the interval fires only when the
-    run opted into mid-run checkpointing. A plain run has an EMPTY schedule, so every
-    yield checkpoint of such a run is disposable.
+    The schedule is the UNION of two independent rules, because the trainer applies both:
+
+    - `explicit_steps` -- the RESOLVED list,
+      `students.early_stop.resolve_save_steps(stop_step, save_at_steps)`, i.e. the union
+      with `stop_step`, so an early-stop arm's terminal checkpoint counts as scheduled.
+    - the periodic interval, active only when the run opted into mid-run checkpointing AND
+      `save_at_steps` is None (`periodic_active`) -- an explicit `save_at_steps` list is
+      what pushes HF's `save_steps` beyond the run; `stop_step` alone does NOT, so a run
+      with `stop_step` set and `save_at_steps` None still saves every `save_steps`.
+
+    A plain run has an EMPTY schedule, so every yield checkpoint of such a run is
+    disposable.
     """
-    if explicit_steps:
-        return step in tuple(explicit_steps)
-    return bool(checkpoint_resume) and save_steps > 0 and step % save_steps == 0
+    if step in tuple(explicit_steps):
+        return True
+    return (periodic_active and bool(checkpoint_resume)
+            and save_steps > 0 and step % save_steps == 0)
 
 
 def _dir_bytes(path: Path) -> int:
@@ -356,6 +363,7 @@ def prune_superseded_yield_checkpoints(
     save_steps: int,
     explicit_steps: tuple[int, ...] = (),
     checkpoint_resume: bool = False,
+    periodic_active: bool = True,
 ) -> list[str]:
     """Drop off-schedule "sigterm" checkpoints from EARLIER yields of this run.
 
@@ -370,7 +378,8 @@ def prune_superseded_yield_checkpoints(
         if step == keep_step or marker is None or marker.get("reason") != "sigterm":
             continue
         if is_scheduled_step(step, save_steps=save_steps, explicit_steps=explicit_steps,
-                             checkpoint_resume=checkpoint_resume):
+                             checkpoint_resume=checkpoint_resume,
+                             periodic_active=periodic_active):
             continue
         shutil.rmtree(leaf, ignore_errors=True)
         removed.append(leaf.name)
@@ -383,6 +392,7 @@ def prune_resume_state(
     save_steps: int,
     explicit_steps: tuple[int, ...] = (),
     checkpoint_resume: bool = False,
+    periodic_active: bool = True,
     final_step: int | None = None,
 ) -> dict[str, Any]:
     """Delete resume-only state once a run has FINISHED (called after the manifest).
@@ -410,7 +420,7 @@ def prune_resume_state(
         marker = read_resume_marker(leaf)
         scheduled = is_scheduled_step(
             step, save_steps=save_steps, explicit_steps=explicit_steps,
-            checkpoint_resume=checkpoint_resume,
+            checkpoint_resume=checkpoint_resume, periodic_active=periodic_active,
         )
         redundant_final = final_step is not None and step == final_step
         if redundant_final or (

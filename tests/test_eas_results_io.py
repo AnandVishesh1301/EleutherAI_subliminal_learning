@@ -310,3 +310,56 @@ def test_endpoint_only_and_own_reference_only(tmp_path):
     own = own_reference_only(df)
     assert set(own["run_path"]) == {TEACHER_RUN, CROSS_RUN}
     assert own["is_own_reference"].all()
+
+
+def test_root_ckpt_rel_point_is_flagged_as_the_endpoint(tmp_path):
+    """The `checkpoints` root IS the endpoint: a doc whose own `is_endpoint` flag says
+    otherwise must still produce an endpoint row (`endpoint_only` reads that column)."""
+    doc = _doc(TEACHER_RUN)
+    doc["points"][-1].update(ckpt_rel="checkpoints", is_endpoint=False)
+    _write(tmp_path, TEACHER_RUN, "last", json.dumps(doc))
+    df = load_eas_results(tmp_path)
+    final = df[df.step == 1000]
+    assert len(final) == 1 and bool(final.iloc[0]["is_endpoint"]) is True
+    assert set(endpoint_only(df)["step"]) == {1000}
+
+
+def test_distinct_non_endpoint_points_at_one_step_warn(tmp_path):
+    """Two different non-endpoint rels at a step are not the same weights: one is dropped,
+    and that is a document defect worth a WARNING (file + step + both rels)."""
+    from loguru import logger
+
+    doc = _doc(TEACHER_RUN)
+    collision = {**doc["points"][0], "ckpt_rel": "checkpoints/checkpoint-500-retry",
+                 "adapter_id": "s500b"}
+    doc["points"].insert(1, collision)
+    _write(tmp_path, TEACHER_RUN, "last", json.dumps(doc))
+    sink: list[str] = []
+    handle = logger.add(sink.append, level="WARNING")
+    try:
+        df = load_eas_results(tmp_path)
+    finally:
+        logger.remove(handle)
+    assert len(df[df.step == 500]) == 1
+    assert any("checkpoint-500-retry" in m and "checkpoints/checkpoint-500" in m
+               and "step 500" in m and "eas_last.json" in m for m in sink)
+
+
+def test_duplicate_final_step_point_keeps_the_endpoint(tmp_path):
+    """Old docs hold the final step twice (`checkpoint-N` dir + `checkpoints` endpoint)."""
+    doc = _doc(TEACHER_RUN)
+    doc["points"].insert(1, {
+        "step": 1000, "ckpt_rel": "checkpoints/checkpoint-1000", "is_endpoint": False,
+        "adapter_id": "dup1000", "nonfinite": False,
+        "v_student_norm_per_layer": [0.0, 1.0, 2.0],
+        "eas": {REF_A: {"mean": 0.99, "per_layer": [0.0, 0.9, 0.9]}},
+    })
+    doc["points"][-1]["ckpt_rel"] = "checkpoints"
+    _write(tmp_path, TEACHER_RUN, "last", json.dumps(doc))
+    df = load_eas_results(tmp_path)
+    assert len(df) == 2  # 500 + one row at 1000, not two
+    final = df[df.step == 1000]
+    assert len(final) == 1
+    assert bool(final.iloc[0]["is_endpoint"]) is True
+    assert final.iloc[0]["eas_mean"] == 0.42
+    assert set(endpoint_only(df)["step"]) == {1000}

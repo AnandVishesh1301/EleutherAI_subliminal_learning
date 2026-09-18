@@ -42,6 +42,7 @@ import pandas as pd
 
 from subliminal_learning.analysis.collapse_law import load_law_runs
 from subliminal_learning.analysis.frames import read_json
+from subliminal_learning.models.registry import LOCAL_PYTHIA_FAMILIES
 
 # The four animals and six PolyPythias student bases the campaign spans, in display order.
 FOCUS_ANIMALS: list[str] = ["dog", "cat", "lion", "pig"]
@@ -551,12 +552,42 @@ def hurdle_cells(runs: pd.DataFrame, dead: "float | pd.Series" = DEAD) -> pd.Dat
 
 
 # Short base labels used in ``analysis/base_eval_*_animal_preference_test.json`` filenames.
+# Hub PolyPythias bases are listed by hand; the local re-pretraining families
+# (`registry.LOCAL_PYTHIA_FAMILIES`: wc1, pr1234, pr3, dclm1234, ...) derive their short
+# from the registry row so a new family/seed needs no edit here.
 _BASE_EVAL_SHORT: dict[str, str] = {
     "original": "original", "data-seed1": "ds1", "data-seed2": "ds2", "data-seed3": "ds3",
     "weight-seed1": "ws1", "weight-seed2": "ws2", "weight-seed3": "ws3",
     # The fully re-randomized siblings, under the `normalize_model_name` labels.
     "full-seed1": "fs1", "full-seed2": "fs2", "full-seed3": "fs3",
+    **{
+        f"{fam.variant}-seed{seed}": f"{fam.short}{seed}"
+        for fam in LOCAL_PYTHIA_FAMILIES for seed in fam.seeds
+    },
 }
+
+
+def base_eval_short(base_label: str) -> str:
+    """Filename short for a student-base label (``data-seed1`` -> ``ds1``, ``dclm-seed1234`` ->
+    ``dclm1234``); the single token->short map `scripts.base_test_prior` writes and
+    `load_priors` / `frames.load_base_prior` read.
+
+    Args:
+        base_label: A `spec_label` / `normalize_model_name` label (``full-seed0`` and the raw
+            ``pythia-160m`` name are accepted as ``original``).
+
+    Raises:
+        KeyError: For a base with no test-prior filename convention.
+    """
+    label = normalize_model_name(base_label)
+    if label == "full-seed0":
+        label = "original"
+    try:
+        return _BASE_EVAL_SHORT[label]
+    except KeyError:
+        raise KeyError(
+            f"no base_eval short for base {base_label!r}; known: {sorted(_BASE_EVAL_SHORT)}"
+        ) from None
 
 
 def load_priors(output_root: Path) -> pd.DataFrame:

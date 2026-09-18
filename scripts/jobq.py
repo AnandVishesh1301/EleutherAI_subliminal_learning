@@ -241,6 +241,15 @@ def _report_root(
             name, meta.node, meta.priority, meta.depends_on or "-",
             st["pending"], st["running"], st["done"], st["failed"], st["total"],
         )
+        peaks = sorted(
+            r["peak_mem_mib"] for r in store.load_results(root, name)
+            if r.get("peak_mem_mib") is not None
+        )
+        if peaks:
+            logger.info(
+                "    peak_mem_mib (torch, n={}): median={} max={}",
+                len(peaks), peaks[len(peaks) // 2], peaks[-1],
+            )
         for r in st["running_jobs"]:
             age = _claim_age_str(r.get("start_utc"))
             line = f"    RUNNING {r['key']} node={r['node']} gpu={r['gpu']} pid={r['pid']} age={age}"

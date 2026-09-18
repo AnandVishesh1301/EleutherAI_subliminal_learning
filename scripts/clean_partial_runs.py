@@ -60,6 +60,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from subliminal_learning.config import PathsConfig
+from subliminal_learning.run_gate import latest_resumable_checkpoint
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import checkpoint_is_complete
 
@@ -265,9 +266,19 @@ def _is_leaf_name(name: str) -> bool:
 
 
 def _has_resumable_checkpoints(ckpt: Path) -> bool:
-    """A ``checkpoint-*`` subdir means a resumable mid-run save -- never purge it."""
+    """ANY ``checkpoint-*`` dir, or a marked full-state one -- never purge either.
+
+    A marked, complete dir (``run_gate.latest_resumable_checkpoint``) is what an
+    interrupted run restarts from. A bare weights-only ``checkpoint-*`` buys no resume,
+    but it is still the visible progress of a TRAJECTORY run -- possibly one live on
+    ANOTHER node, which this node's ``/proc`` liveness scan cannot see -- so it shields
+    the leaf too: deleting a mid-flight trajectory run costs hours of GPU time, while
+    keeping a truly abandoned one costs only a later sweep.
+    """
     try:
-        return any(c.is_dir() and c.name.startswith("checkpoint-") for c in ckpt.iterdir())
+        if any(p.is_dir() for p in ckpt.glob("checkpoint-*")):
+            return True
+        return latest_resumable_checkpoint(ckpt) is not None
     except OSError:
         return False
 
@@ -314,23 +325,22 @@ def _leaf_is_live(plan: CleanPlan, leaf: Path) -> bool:
 
 
 def _leaf_newest_mtime(leaf: Path) -> float:
-    """Newest mtime under ``leaf``: the leaf dir, ``checkpoints/`` and its immediate children.
+    """Newest mtime of ``leaf`` or of ANYTHING under it (recursive, symlinks not followed).
 
-    At most two levels deep -- enough to see a writer's progress without walking a tree.
+    The leaf dir's OWN mtime is not a progress signal: adding ``checkpoints/checkpoint-N``
+    never touches it, so a trajectory run that has been writing for hours on another node
+    still looks untouched since its creation. Walking the tree is the only cross-node
+    evidence of a live writer. Symlinks are not followed, as everywhere else in this
+    deleting tool (see the module docstring): an archived animal must stay invisible.
     """
-    newest = 0.0
-    for p in (leaf, leaf / "checkpoints"):
-        try:
-            newest = max(newest, p.stat().st_mtime)
-        except OSError:
-            continue
-        try:
-            children = list(p.iterdir()) if p.name == "checkpoints" else []
-        except OSError:
-            children = []
-        for c in children:
+    try:
+        newest = leaf.stat().st_mtime
+    except OSError:
+        return 0.0
+    for dirpath, dirnames, filenames in os.walk(leaf, followlinks=False):
+        for name in (*dirnames, *filenames):
             try:
-                newest = max(newest, c.stat().st_mtime)
+                newest = max(newest, os.lstat(os.path.join(dirpath, name)).st_mtime)
             except OSError:
                 continue
     return newest
@@ -368,7 +378,9 @@ def _classify_leaf(plan: CleanPlan, leaf: Path) -> str:
             "pass --min-age-s 0 to override.", leaf, recent,
         )
         return "recently-modified"
-    if not plan.age_ok(leaf):
+    # NOT `plan.age_ok(leaf)`: the leaf dir's own mtime does not move when checkpoints
+    # are added under it, so the guard reads the newest write anywhere in the tree.
+    if not plan.targeted and (plan.now - _leaf_newest_mtime(leaf)) < plan.min_age_s:
         return "too-new"
     return "remove"
 

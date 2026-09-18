@@ -143,3 +143,28 @@ def test_p410m_accepts_160m_to_410m_seed1(tmp_path, monkeypatch, extra):
     pre = "xbase-" if "base" in extra else "x"
     assert w._arm("pythia-410m-seed1") == f"{pre}160m-410m-seed1"
     assert w._arm("pythia-410m") == f"{pre}160m-410m"
+
+
+# --- interior-checkpoint expectation (2026-09-17: no `checkpoint-{final_step}` dir) ------
+
+_CKPT_SCRIPTS = {
+    "hf": _REPO / "run_logs" / "hf_worker.py",
+    "p410m": _REPO / "run_logs" / "p410m_worker.py",
+    "strip_replay": _REPO / "run_logs" / "strip_ckpt_replay_worker.py",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_CKPT_SCRIPTS))
+def test_n_interior_checkpoints_is_39_for_a_40_point_trajectory(name):
+    """`SkipFinalStepSave` leaves 39 dirs + the root adapter for a 25000/625 run."""
+    path = _CKPT_SCRIPTS[name]
+    if not path.exists():
+        pytest.skip(f"{path} absent (run_logs is a machine-local mount)")
+    spec = importlib.util.spec_from_file_location(f"{name}_ckpt_count_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    f = mod._n_interior_checkpoints
+    assert f(25000, 625) == 39            # final step is a multiple of save_steps
+    assert f(25001, 625) == 40            # it is not: every scheduled save is interior
+    assert f(600, 625) == 0
+    assert f(0, 625) == 0 and f(25000, 0) == 0

@@ -77,7 +77,8 @@ def _block(b) -> dict:
     """A `mediation.BlockTest` in this artifact's key names (the ``hp_block_*`` schema)."""
     return {"hp_block_lr_chi2": b.lr_chi2, "hp_block_lr_p": b.lr_p, "hp_block_lr_df": b.lr_df,
             "hp_block_cluster_wald_chi2": b.wald_chi2,
-            "hp_block_cluster_wald_p": b.wald_p}
+            "hp_block_cluster_wald_p": b.wald_p,
+            "hp_block_converged": b.converged}
 
 
 def _part2(df: pd.DataFrame, dead_col: str, cut_doc: str) -> dict:
@@ -114,9 +115,11 @@ def _part2(df: pd.DataFrame, dead_col: str, cut_doc: str) -> dict:
         "cos_column": COS_COL_DOC,
         "n": int(len(c)), "n_dead": int(c.dead.sum()),
         "hp_block_lr_p_without_cos_same_subset": without.block.lr_p,
+        "hp_block_converged_without_cos": without.converged,
         "hp_block_lr_chi2_with_cos": with_cos.lr_chi2,
         "hp_block_lr_p_with_cos": with_cos.lr_p,
         "hp_block_cluster_wald_p_with_cos": with_cos.wald_p,
+        "hp_block_converged_with_cos": with_cos.converged,
         "coefs_with_cos": coefs_with_cos,
         "pseudo_r2_ldw_cos": _j(k0.prsquared),
         "pseudo_r2_ldw_cos_hp": _j(k1.prsquared),

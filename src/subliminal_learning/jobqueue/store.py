@@ -697,24 +697,33 @@ def record_result(
     end_utc: str,
     log: str,
     attempt: int,
+    peak_mem_mib: int | None = None,
+    peak_mem_alloc_mib: int | None = None,
 ) -> None:
-    """Write a job's terminal result (atomic) and persist its attempt counter."""
+    """Write a job's terminal result (atomic) and persist its attempt counter.
+
+    ``peak_mem_mib`` / ``peak_mem_alloc_mib`` (torch reserved / allocated high-water marks
+    parsed from the job log, see :mod:`subliminal_learning.gpu_peak`) are ADDITIVE and
+    optional: they are written only when measured, so old result files stay readable.
+    """
     jk = job.jobkey
     mkdir_open(_results_dir(root, name))
     mkdir_open(_attempt_path(root, name, jk).parent)
-    atomic_write_json(
-        _result_path(root, name, jk),
-        {
-            "key": job.key,
-            "rc": rc,
-            "node": node,
-            "gpu": gpu,
-            "start_utc": start_utc,
-            "end_utc": end_utc,
-            "log": log,
-            "attempt": attempt,
-        },
-    )
+    rec = {
+        "key": job.key,
+        "rc": rc,
+        "node": node,
+        "gpu": gpu,
+        "start_utc": start_utc,
+        "end_utc": end_utc,
+        "log": log,
+        "attempt": attempt,
+    }
+    if peak_mem_mib is not None:
+        rec["peak_mem_mib"] = int(peak_mem_mib)
+    if peak_mem_alloc_mib is not None:
+        rec["peak_mem_alloc_mib"] = int(peak_mem_alloc_mib)
+    atomic_write_json(_result_path(root, name, jk), rec)
     _write_attempt(root, name, jk, attempt)
 
 
