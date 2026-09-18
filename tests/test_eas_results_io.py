@@ -363,3 +363,18 @@ def test_duplicate_final_step_point_keeps_the_endpoint(tmp_path):
     assert bool(final.iloc[0]["is_endpoint"]) is True
     assert final.iloc[0]["eas_mean"] == 0.42
     assert set(endpoint_only(df)["step"]) == {1000}
+
+
+def test_thinned_point_whose_checkpoint_dir_is_gone_still_loads(tmp_path):
+    """Reused THINNED points (checkpoint deleted, `unscorable_refs` annotated) are rows.
+
+    The loader reads the document only — it must never require the `ckpt_rel` dir, which a
+    thinned run no longer has (`training.ckpt_ladder`).
+    """
+    doc = _doc(TEACHER_RUN)
+    doc["points"][0]["unscorable_refs"] = ["cat/pythia-160m/ep10_lr1e-4_r16a16/ftseed1"]
+    _write(tmp_path, TEACHER_RUN, "last", json.dumps(doc))
+    assert not (tmp_path / TEACHER_RUN / "checkpoints" / "checkpoint-500").exists()
+    df = load_eas_results(tmp_path)
+    assert sorted(df["step"]) == [500, 1000]
+    assert df[df.step == 500].iloc[0]["eas_mean"] == 0.10

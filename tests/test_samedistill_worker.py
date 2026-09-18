@@ -198,3 +198,21 @@ def test_gate_absent_trains_without_force(tmp_path):
 
 def test_exit_code_failures_dominate():
     assert worker._exit_code(["train:x"], ["y"]) == 1
+
+
+# --- --eval-namespace-animal: opt-in eval/<animal> layout for base controls (2026-09-18) ----
+
+def test_eval_namespace_animal_default_off_keeps_leaf_root(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["w", "--animal", "cat", "--source", "base"])
+    a = worker.parse_args()
+    assert a.eval_namespace_animal is False
+    assert worker.eval_artifact_subdir(a) is None
+
+
+def test_eval_namespace_animal_derives_eval_animal_subdir(monkeypatch):
+    monkeypatch.setattr(
+        sys, "argv", ["w", "--animal", "cat", "--source", "base", "--eval-namespace-animal"]
+    )
+    a = worker.parse_args()
+    assert a.eval_namespace_animal is True
+    assert worker.eval_artifact_subdir(a) == Path("eval") / "cat"

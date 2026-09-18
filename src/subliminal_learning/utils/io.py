@@ -125,10 +125,24 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(text)
+    # fsync before the replace: `write_text` alone only reaches the page cache, so a node
+    # crash (or an OOM reboot) right after the rename can leave the new NAME pointing at
+    # zero-length data -- the durable version of the torn file this function exists to
+    # prevent. The directory fsync then persists the rename itself; it is best-effort,
+    # since not every filesystem allows opening a directory for fsync.
+    with open(tmp, "w") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
     with contextlib.suppress(OSError):  # another uid's file is not ours to chmod
         os.chmod(tmp, 0o666)
     os.replace(tmp, path)
+    with contextlib.suppress(OSError):
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def atomic_write_json(

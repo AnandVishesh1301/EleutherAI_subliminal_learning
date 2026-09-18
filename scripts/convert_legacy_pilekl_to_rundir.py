@@ -31,7 +31,7 @@ from pathlib import Path
 import typer
 
 from scripts.ckpt_preference_trajectory import _checkpoint_dirs
-from subliminal_learning.evaluation.ckpt_trajectories import distinct_steps
+from subliminal_learning.training.ckpt_ladder import steps_covered, supersede_if_shrinking
 from subliminal_learning.utils.run_io import manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.config import resolve_output_root
@@ -62,7 +62,7 @@ def _lineage_dir(out_root: Path, lin: dict) -> Path:
 
 def _kl_is_current(stored: dict, steps: list, pile_id: dict, ref) -> bool:
     """Same currency test the Pile-KL writer applies before skipping a run."""
-    return (distinct_steps(stored.get("checkpoint_steps")) == distinct_steps(steps)
+    return (steps_covered(stored.get("checkpoint_steps"), steps)
             and {k: stored.get(k) for k in pile_id} == pile_id
             and stored.get("train_manifest_ref") == ref)
 
@@ -91,13 +91,16 @@ def main(
 
         actual = [s for s, _ in _checkpoint_dirs(run_dir / "checkpoints")]
         legacy_steps = [p.get("step") for p in doc.get("points", [])]
-        # DISTINCT steps: a legacy file measured when the endpoint still had its duplicate
-        # `checkpoint-N` dir describes the same ladder as the deduped run dir.
-        if distinct_steps(legacy_steps) != distinct_steps(actual):
+        # COVERAGE on distinct steps: a legacy file measured over a longer ladder (the
+        # endpoint's duplicate `checkpoint-N` dir, or checkpoints since thinned away) still
+        # describes the run dir's ladder; one MISSING an on-disk step does not.
+        if not steps_covered(legacy_steps, actual):
             n_mismatch += 1
             recompute.append(
-                f"{legacy_file.name}: {len(legacy_steps)} legacy steps != "
-                f"{len(actual)} on disk (retrained or pruned since)")
+                f"{legacy_file.name}: legacy record lacks on-disk steps "
+                f"{sorted(set(actual) - set(legacy_steps))} "
+                f"({len(legacy_steps)} legacy steps do not cover the {len(actual)} on "
+                "disk; retrained since)")
             continue
 
         pile_id = {k: doc.get(k) for k in
@@ -120,6 +123,15 @@ def main(
         })
         if not dry_run:
             target.parent.mkdir(parents=True, exist_ok=True)
+            # The run-dir record may already be a FULLER readout (a thinned run's, whose
+            # checkpoints the legacy file never saw): never overwrite it in place.
+            if target.exists():
+                stored = json.loads(target.read_text())
+                supersede_if_shrinking(
+                    run_dir, target,
+                    stored.get("checkpoint_steps")
+                    or [p.get("step") for p in stored.get("points") or []],
+                    actual)
             atomic_write_json(target, new_doc)
         n_converted += 1
 

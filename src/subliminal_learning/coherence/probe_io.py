@@ -31,8 +31,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from subliminal_learning.coherence.probe_families import (
-    PROBE_FAMILIES, corpus_pools_for, family_for_base_repo, family_for_pool_version,
-    is_frozen_text_pool, is_pp1w, pool_version_for, wide_pool_version_for,
+    PROBE_FAMILIES, corpus_pools_for, cp1t_pool_version_for, family_for_base_repo,
+    family_for_pool_version, is_cp1t, is_frozen_text_pool, is_pp1w, pool_version_for,
+    wide_pool_version_for,
 )
 
 SCHEMA_VERSION = 1
@@ -76,8 +77,9 @@ def anchored_dead_cut(output_root: Path, base_repo_or_key: str, *, pool: str = "
     """Per-receiver operative dead cut Delta_cross = H_uni − ce_base [nats].
 
     `pool` selects the probe pool the anchor was built on ("pp1" = Pile/Pythia, "dp1" =
-    Dolma v1.7/OLMo for the DataDecide arm, "cp1" = DCLM held-out for the `dclm`
-    re-pretrainings); the anchors have different H_uni and are never mixed.
+    Dolma v1.7/OLMo for the DataDecide dolma1_7 arm, "cp1" = DCLM held-out for the `dclm`
+    re-pretrainings, "cp1t-olmo" = the same DCLM text for the DataDecide dclm-baseline
+    bases); the anchors have different H_uni and are never mixed.
 
     Reads `{output_root}/analysis/unigram_anchor_{pool}.json` (regenerate/extend with
     `scripts/build_unigram_anchor.py`). Accepted spellings of the base: for Pythia,
@@ -167,6 +169,109 @@ def probe_pool_spec_pp1t(tag: str) -> ProbePoolSpec:
     return ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version=pool_version_for(tag))
 
 
+# cp1t: the SECOND frozen-text corpus (2026-09-18). cp1's 32 DCLM held-out documents are
+# frozen as TEXT (`scripts.build_cp1_text`; decoded from the Pythia ids cp1 is defined on,
+# round-trip verified 32/32) and retokenized per family exactly as pp1t does for the Pile.
+# `cp1t-olmo` is the in-distribution pool of the DataDecide `dclm-baseline` bases — dp1's
+# role for the dolma1_7 ones. There is no `cp1w`: the wide variants are pp1/dp1-only.
+CP1_TEXT_PATH = Path("data/probe_pools/cp1_text.jsonl")
+CP1_TEXT_META_PATH = Path("data/probe_pools/cp1_text.meta.json")
+# Pinned on the first real build per family; None means "not yet pinned", never "no check".
+CP1T_TOKEN_SHA: dict[str, str | None] = {
+    # olmo: the DataDecide tokenizer is the GPT-NeoX BPE plus a few specials; on THIS
+    # POOL's 32 documents it segments identically to Pythia (measured), so the cp1t-olmo
+    # pool sha equals cp1's -- not a claim that the two tokenizers agree in general (the
+    # retokenized 50k-doc unigram fit stream differs by 464 tokens).
+    "olmo": CP1_TOKEN_SHA,
+}
+
+
+def probe_pool_spec_cp1t(tag: str) -> ProbePoolSpec:
+    """The DCLM frozen-text pool spec of one family (validates `tag`)."""
+    return ProbePoolSpec(n_docs=32, max_tokens=512, seed=0,
+                         version=cp1t_pool_version_for(tag))
+
+
+PROBE_POOL_CP1T_OLMO = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0,
+                                     version="cp1t-olmo")
+
+
+def dd_recipe_pools() -> dict[str, ProbePoolSpec]:
+    """One DataDecide data RECIPE -> one corpus pool.
+
+    The recipe, not the repo string, decides: `dolma1_7` bases are measured on dp1 and
+    `dclm-baseline` ones on cp1t-olmo (cp1's DCLM held-out text in the OLMo tokenizer),
+    because each base's own pretraining corpus is the only in-distribution one for it.
+    """
+    from subliminal_learning.models.datadecide import (
+        DD_DEFAULT_RECIPE, DD_RECIPE_SEGMENTS,
+    )
+
+    return {DD_DEFAULT_RECIPE: PROBE_POOL_DP1,
+            DD_RECIPE_SEGMENTS["dclm"]: PROBE_POOL_CP1T_OLMO}
+
+
+class UnknownProbeBaseError(ValueError):
+    """The base model belongs to no probe family, so no pool can be chosen for it."""
+
+
+class IncompatibleProbePoolError(ValueError):
+    """The requested pool version is not one this base can be measured on."""
+
+
+def _olmo_corpus_pool(repo) -> ProbePoolSpec:
+    """The corpus pool of a DataDecide base: its RECIPE's (`dd_recipe_pools`).
+
+    A repo neither the naming module nor `dd_recipe_of_repo_id` can read is an ERROR, not
+    a silent dp1 — exactly as in `_pythia_corpus_pool`: an unreadable name is the case
+    where the default pool may be off-distribution.
+    """
+    from subliminal_learning.models.datadecide import dd_recipe_of_repo_id
+    from subliminal_learning.models.naming import base_spec
+
+    try:
+        recipe = getattr(base_spec(repo), "recipe", None)
+    except ValueError as exc:
+        try:
+            if not isinstance(repo, str):
+                raise ValueError("not a repo string")
+            # A BARE hub repo id is seed-ambiguous (so not a spec) but recipe-unambiguous,
+            # and the pool depends only on the recipe.
+            recipe = dd_recipe_of_repo_id(repo.split("@")[0])
+        except ValueError:
+            raise ValueError(
+                f"no probe pool for DataDecide-family repo {repo!r}: the naming module "
+                "cannot "
+                f"map it to a DataDecide spec ({exc}), so its data recipe — and with it "
+                "its pretraining corpus — is unknown.") from exc
+    pools = dd_recipe_pools()
+    if recipe not in pools:
+        raise ValueError(f"no probe pool for DataDecide recipe {recipe!r} ({repo!r}); "
+                         f"wired recipes: {sorted(pools)}")
+    return pools[recipe]
+
+
+def frozen_text_paths(version: str) -> tuple[Path, Path]:
+    """The frozen text artifact (jsonl, meta) a frozen-text pool version reads.
+
+    Module-global lookup at CALL time, so a test can point the artifact constants
+    elsewhere.
+    """
+    if is_pp1w(version):
+        return PP1W_TEXT_PATH, PP1W_TEXT_META_PATH
+    if is_cp1t(version):
+        return CP1_TEXT_PATH, CP1_TEXT_META_PATH
+    return PP1_TEXT_PATH, PP1_TEXT_META_PATH
+
+
+def pinned_frozen_text_sha(version: str) -> str | None:
+    """The pinned token sha of a frozen-text pool version (None = not yet pinned)."""
+    tag = family_for_pool_version(version).tag
+    table = (PP1W_TOKEN_SHA if is_pp1w(version) else
+             CP1T_TOKEN_SHA if is_cp1t(version) else PP1T_TOKEN_SHA)
+    return table.get(tag)
+
+
 # pp1w / dp1w: the NESTED WIDE pools (2026-09-05). 128 documents = the 32 base documents,
 # byte-identical and in order, plus 96 extension documents drawn from the same seeded
 # permutation stream but from AFTER the frozen unigram fit window — so a wide pool is
@@ -243,9 +348,10 @@ def build_frozen_text_pool(tokenizer, spec: ProbePoolSpec, *, bos_token_id: int 
                            meta_path: Path = PP1_TEXT_META_PATH):
     """Retokenize a frozen text artifact under `tokenizer` into a `SequencePool`.
 
-    Serves both frozen-text pool families: pass the pp1 artifact for a ``pp1t-<tag>``
-    pool and the pp1w one for a ``pp1w-<tag>`` pool (whose first 32 records ARE the pp1
-    ones, so the wide pool's 32-doc prefix is token-identical to the narrow pool).
+    Serves every frozen-text pool family: pass the pp1 artifact for a ``pp1t-<tag>``
+    pool, the pp1w one for a ``pp1w-<tag>`` pool (whose first 32 records ARE the pp1
+    ones, so the wide pool's 32-doc prefix is token-identical to the narrow pool), and
+    the cp1 one for a ``cp1t-<tag>`` pool. `frozen_text_paths` picks the artifact.
 
     No truncation (each text was already cut at its 512th Pythia token); BOS, when the
     family asks for one, is prepended EXPLICITLY. `n_scanned` is carried over from the
@@ -275,11 +381,14 @@ def build_frozen_text_pool(tokenizer, spec: ProbePoolSpec, *, bos_token_id: int 
                              f"(min 3: needs at least one CE target)")
         input_ids.append(ids)
         eligible.append(list(range(1, len(ids))))
-    return SequencePool(input_ids, eligible, f"pp1_text:{meta['text_sha256'][:12]}",
+    # The source names the frozen CORPUS the text came from ("pp1_text" for pp1/pp1w,
+    # "cp1_text" for cp1), never the family: the text is the pool's identity.
+    return SequencePool(input_ids, eligible,
+                        f"{meta.get('base_pool', 'pp1')}_text:{meta['text_sha256'][:12]}",
                         int(meta["n_scanned"]), 0, [int(r["row"]) for r in recs])
 
 
-def _pythia_corpus_pool(repo: str) -> ProbePoolSpec:
+def _pythia_corpus_pool(repo) -> ProbePoolSpec:
     """The corpus pool of a Pythia-tokenizer base: pp1 unless its variant re-pretrained
     on another corpus (`PYTHIA_VARIANT_POOLS`).
 
@@ -299,58 +408,106 @@ def _pythia_corpus_pool(repo: str) -> ProbePoolSpec:
     return PYTHIA_VARIANT_POOLS.get(variant or "", PROBE_POOL_PP1)
 
 
-def probe_pool_spec_for_repo(repo: str) -> ProbePoolSpec:
-    """The probe pool a base model must be measured on; raises on an unknown repo.
+def _probe_family_for_base(base):
+    """The `ProbeFamily` of any base spelling (token, ref, dir name, or a `BaseSpec`).
 
-    dp1 for DataDecide (either spelling -- the hub repo id ``allenai/DataDecide-...`` or
-    the bare dir name ``DataDecide-dolma1_7-1B-seed-...``), pp1 for Pythia, and the
-    family's ``pp1t-<tag>`` pool for every other known family. An unrecognised repo is an
-    error, not a silent fallback to pp1: measuring a Llama base on Pythia tokens is
-    meaningless.
-
-    Inside the Pythia family the PRETRAINING CORPUS decides (`PYTHIA_VARIANT_POOLS`): the
-    `dclm` re-pretrainings get cp1, because the Pile is off-distribution for them.
+    Raises:
+        UnknownProbeBaseError: when the base belongs to no wired probe family.
     """
-    family = family_for_base_repo(repo)
+    if isinstance(base, str):
+        family = family_for_base_repo(base)
+    else:
+        from subliminal_learning.models.naming import family_of
+
+        try:
+            tag = family_of(base)
+        except ValueError as exc:
+            raise UnknownProbeBaseError(f"no probe pool for base {base!r}: {exc}") from exc
+        family = PROBE_FAMILIES.get("olmo" if tag == "datadecide" else tag)
     if family is None:
-        raise ValueError(
-            f"no probe pool for base repo {repo!r}: it belongs to no known probe family "
+        raise UnknownProbeBaseError(
+            f"no probe pool for base {base!r}: it belongs to no known probe family "
             f"({sorted(PROBE_FAMILIES)}). Add it to `probe_families.BASE_REPO_FAMILY` "
             "(and pin its pp1t token sha) first.")
+    return family
+
+
+def native_probe_pool(base) -> ProbePoolSpec:
+    """THE pool a base model must be measured on -- the one place that choice lives.
+
+    `base` is ANY spelling the naming module reads: a `--base-models` token (`dd-1b-dclm`,
+    `pythia-160m-seed1`), a hub ref / repo id, an output-tree dir name, or a `BaseSpec`.
+
+    The base's PRETRAINING CORPUS decides, never the tokenizer: DataDecide bases take
+    their data recipe's pool (`dd_recipe_pools`: dolma1_7 -> dp1, dclm-baseline ->
+    cp1t-olmo), Pythia bases pp1 unless the variant re-pretrained elsewhere
+    (`PYTHIA_VARIANT_POOLS`: the `dclm` family -> cp1), and every other registered family
+    its ``pp1t-<tag>`` frozen-text pool. An unrecognised base is an
+    `UnknownProbeBaseError`, never a silent fallback to pp1: measuring a Llama base on
+    Pythia tokens is meaningless. Errors are always named ValueErrors, never KeyError.
+    """
+    family = _probe_family_for_base(base)
     if family.tag == "olmo":
-        return PROBE_POOL_DP1
+        return _olmo_corpus_pool(base)
     if family.tag == "pythia":
-        return _pythia_corpus_pool(repo)
+        return _pythia_corpus_pool(base)
     return probe_pool_spec_pp1t(family.tag)
 
 
-def resolve_probe_pool_spec(repo: str, pool: str | None = None) -> ProbePoolSpec:
-    """The pool a CLI measures base `repo` on; an explicit `pool` must belong to the base's family.
+def native_pool_version_for_base(base) -> str:
+    """`native_probe_pool(base).version` -- the version string of a base's native pool.
 
-    `pool` None / ``""`` / ``"auto"`` gives the family default (`probe_pool_spec_for_repo`:
-    pp1 for Pythia, dp1 for DataDecide, ``pp1t-<tag>`` otherwise). An explicit version is
-    honoured only when it is that default or another frozen-text pool of the SAME family
-    (``pp1t-olmo`` on a DataDecide base, ``pp1w-qwen25`` on Qwen). Anything else raises:
-    the surgery and ladder CLIs used to default to pp1 and accept it for any base, which on
-    a Qwen base silently produced a readout comparable to none of its pp1t records.
+    Distinct from `native_probe_pool_version(run_dir)`, which reads a RUN's manifest.
     """
-    want = probe_pool_spec_for_repo(repo)
-    if pool in (None, "", "auto") or pool == want.version:
-        return want
-    family = family_for_base_repo(repo)
-    if is_frozen_text_pool(pool):
-        try:
-            same_family = family_for_pool_version(pool).tag == family.tag
-        except ValueError:
-            same_family = False
-        if same_family:
-            return (probe_pool_spec_pp1w(family.tag) if is_pp1w(pool)
-                    else probe_pool_spec_pp1t(family.tag))
-    raise ValueError(
-        f"--pool {pool!r} is not a pool for base {repo!r} (family {family.tag!r}: default "
-        f"{want.version!r}, corpus pools {'/'.join(corpus_pools_for(family.tag))}, also "
-        f"pp1t-{family.tag} / pp1w-{family.tag}); a readout on another family's tokens — or "
-        "on another pretraining corpus — is comparable to none of this base's records")
+    return native_probe_pool(base).version
+
+
+def compatible_probe_pools(base) -> tuple[str, ...]:
+    """Every pool version `base` can legitimately be measured on, NATIVE FIRST.
+
+    Compatibility is tokenizer-level plus corpus-level bookkeeping: a base's own family
+    corpus pools (dp1 / cp1t-olmo for olmo, pp1 / cp1 for pythia) and the family's
+    frozen-text retokenizations (``pp1t-<tag>``, ``pp1w-<tag>``, ``cp1t-<tag>``). Anything
+    else is another family's tokens and comparable to none of this base's records.
+    """
+    family = _probe_family_for_base(base)
+    native = native_probe_pool(base).version
+    out: list[str] = [native]
+    for version in (*corpus_pools_for(family.tag), pool_version_for(family.tag),
+                    wide_pool_version_for(family.tag), cp1t_pool_version_for(family.tag)):
+        if version not in out:
+            out.append(version)
+    return tuple(out)
+
+
+def require_compatible_probe_pool(base, version: str) -> ProbePoolSpec:
+    """The spec of `version`, or `IncompatibleProbePoolError` if `base` cannot take it."""
+    allowed = compatible_probe_pools(base)
+    if version not in allowed:
+        raise IncompatibleProbePoolError(
+            f"probe pool {version!r} is not a pool for base {base!r} (family "
+            f"{_probe_family_for_base(base).tag!r}); compatible pools, native first: "
+            f"{', '.join(allowed)}. A readout on another family's tokens -- or on another "
+            "pretraining corpus -- is comparable to none of this base's records")
+    return probe_pool_spec_for_version(version)
+
+
+def probe_pool_spec_for_repo(repo) -> ProbePoolSpec:
+    """Thin alias of `native_probe_pool` kept for existing importers."""
+    return native_probe_pool(repo)
+
+
+def resolve_probe_pool_spec(repo, pool: str | None = None) -> ProbePoolSpec:
+    """The pool a CLI measures base `repo` on; an explicit `pool` must be compatible.
+
+    `pool` None / ``""`` / ``"auto"`` gives `native_probe_pool`; anything else goes
+    through `require_compatible_probe_pool` (see `compatible_probe_pools`). The surgery
+    and ladder CLIs used to default to pp1 and accept it for any base, which on a Qwen
+    base silently produced a readout comparable to none of its pp1t records.
+    """
+    if pool in (None, "", "auto"):
+        return native_probe_pool(repo)
+    return require_compatible_probe_pool(repo, pool)
 
 
 # Canonical home is utils.run_io (torch-free); re-exported here for existing importers.
@@ -370,16 +527,13 @@ def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1, *,
     """
     if is_frozen_text_pool(spec.version):
         family = family_for_pool_version(spec.version)
-        wide = is_pp1w(spec.version)
-        # paths passed explicitly (module-global lookup at CALL time, so tests can
-        # point the artifact constants elsewhere)
+        path, meta_path = frozen_text_paths(spec.version)
         pool = build_frozen_text_pool(
             tokenizer, spec,
             bos_token_id=tokenizer.bos_token_id if family.bos else None,
-            path=PP1W_TEXT_PATH if wide else PP1_TEXT_PATH,
-            meta_path=PP1W_TEXT_META_PATH if wide else PP1_TEXT_META_PATH)
+            path=path, meta_path=meta_path)
         if verify_pin:
-            pinned = (PP1W_TOKEN_SHA if wide else PP1T_TOKEN_SHA).get(family.tag)
+            pinned = pinned_frozen_text_sha(spec.version)
             got = pool.token_sha256()
             if pinned is not None and got != pinned:
                 raise ValueError(
@@ -420,17 +574,32 @@ def probe_pool_spec_for_version(version: str) -> ProbePoolSpec:
     corpus pool too, e.g. a Pile-pretrained base on cp1 so pp1 and cp1 numbers are
     comparable within one campaign (2026-09-17). `resolve_probe_pool_spec`'s family check
     is untouched: the cross-corpus path is opt-in only through here, never by default.
+
+    Knows EVERY wired version: the corpus pools (pp1, cp1, dp1, dp1w) and every
+    frozen-text family pool (``pp1t-``/``pp1w-``/``cp1t-<tag>``).
     """
-    pools = {p.version: p for p in (PROBE_POOL_PP1, PROBE_POOL_CP1, PROBE_POOL_DP1)}
-    try:
+    pools = {p.version: p for p in (PROBE_POOL_PP1, PROBE_POOL_CP1, PROBE_POOL_DP1,
+                                    PROBE_POOL_DP1W, PROBE_POOL_CP1T_OLMO)}
+    if version in pools:
         return pools[version]
-    except KeyError:
-        raise ValueError(
-            f"unknown probe pool version {version!r}; known: {sorted(pools)}") from None
+    if is_frozen_text_pool(version):
+        tag = family_for_pool_version(version).tag        # named ValueError on a bad tag
+        if is_pp1w(version):
+            return probe_pool_spec_pp1w(tag)
+        if is_cp1t(version):
+            return probe_pool_spec_cp1t(tag)
+        return probe_pool_spec_pp1t(tag)
+    raise ValueError(
+        f"unknown probe pool version {version!r}; known: {sorted(pools)} plus "
+        f"'pp1t-<tag>' / 'pp1w-<tag>' / 'cp1t-<tag>' for tags {sorted(PROBE_FAMILIES)}")
 
 
 def native_probe_pool_version(run_dir: Path) -> str | None:
-    """The pool version a run's OWN base is natively measured on, or None if unknowable."""
+    """The pool version a run's OWN base is natively measured on, or None if unknowable.
+
+    Takes a RUN DIR and reads its manifest; `native_pool_version_for_base` is the same
+    answer from a base SPELLING.
+    """
     mf = Path(run_dir) / "train_manifest.json"
     if not mf.is_file():
         return None

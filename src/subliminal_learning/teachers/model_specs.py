@@ -64,7 +64,7 @@ def spec_label(spec: PythiaModelSpec) -> str:
     revision=None is byte-identical to before.
 
     A `DataDecideSpec` returns its canonical CLI token instead ('dd-1b-seed2',
-    'dd-1b-seed3@step17500'). Unlike the Pythia labels this one carries the
+    'dd-1b-dclm-seed2', 'dd-1b-seed3@step17500'), via `models.datadecide.dd_token`. Unlike the Pythia labels this one carries the
     family+size: labels must be unique across families, and a bare 'seed2' would
     collide with (and be mistaken for) a PolyPythias label.
 
@@ -76,10 +76,9 @@ def spec_label(spec: PythiaModelSpec) -> str:
         label = spec.repo_id.split("/")[-1]
         return label + (f"@{spec.revision}" if spec.revision is not None else "")
     if isinstance(spec, DataDecideSpec):
-        label = f"dd-1b-seed{spec.seed}"
-        if spec.step is not None:
-            return f"{label}@step{spec.step}"
-        return label
+        from subliminal_learning.models.datadecide import dd_token
+
+        return dd_token(spec)
     if spec.variant == "full" and spec.size != "160m":
         label = f"pythia-{spec.size}" + (f"-seed{spec.seed}" if spec.seed else "")
     else:

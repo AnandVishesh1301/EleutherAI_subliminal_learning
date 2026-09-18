@@ -203,17 +203,68 @@ def test_probe_pool_spec_for_repo_routes_the_dclm_corpus_to_cp1():
         assert pio.probe_pool_spec_for_repo(repo) is pio.PROBE_POOL_PP1
 
 
-def test_resolve_probe_pool_spec_allows_cp1_only_for_a_dclm_base():
+def test_resolve_probe_pool_spec_defaults_to_cp1_for_a_dclm_base():
+    """cp1 is the dclm re-pretrainings' NATIVE pool; pp1 stays the default elsewhere.
+
+    Both are Pythia-tokenizer corpus pools, so either is an explicit same-family
+    cross-corpus sidecar on any Pythia base (`compatible_probe_pools`) -- exactly as dp1
+    and cp1t-olmo are on either DataDecide recipe. Another family's tokens are refused.
+    """
     from subliminal_learning.coherence.probe_io import resolve_probe_pool_spec as r
 
     assert r("local/pythia-160m-dclm-seed1", "cp1").version == "cp1"
     assert r("local/pythia-160m-dclm-seed1").version == "cp1"
-    for repo in ("EleutherAI/pythia-160m", "local/pythia-160m-weightc-seed1",
-                 "Qwen/Qwen2.5-1.5B"):
-        with pytest.raises(ValueError, match="not a pool for base"):
-            r(repo, "cp1")
+    assert r("EleutherAI/pythia-160m").version == "pp1"
+    assert r("EleutherAI/pythia-160m", "cp1").version == "cp1"
+    assert r("local/pythia-160m-dclm-seed1", "pp1").version == "pp1"
     with pytest.raises(ValueError, match="not a pool for base"):
-        r("local/pythia-160m-dclm-seed1", "pp1")
+        r("Qwen/Qwen2.5-1.5B", "cp1")
+    with pytest.raises(ValueError, match="not a pool for base"):
+        r("EleutherAI/pythia-160m", "dp1")
+
+
+def test_native_probe_pool_reads_every_base_spelling():
+    """Token, hub ref, output-tree dir name and a BaseSpec all give the same pool."""
+    from subliminal_learning.coherence.probe_io import native_pool_version_for_base as v
+    from subliminal_learning.models.naming import base_spec
+
+    dolma = ("dd-1b", "DataDecide-dolma1_7-1B-seed-default",
+             "allenai/DataDecide-dolma1_7-1B@step69369-seed-default",
+             "DataDecide-dolma1_7-1B-seed-default@step69369")
+    dclm = ("dd-1b-dclm", "dd-1b-dclm-seed2", "DataDecide-dclm-baseline-1B-seed-default",
+            "allenai/DataDecide-dclm-baseline-1B@step69369-seed-default",
+            "DataDecide-dclm-baseline-1B-seed-default@step69369")
+    for spelling in dolma:
+        assert v(spelling) == "dp1"
+        assert v(base_spec(spelling)) == "dp1"
+    for spelling in dclm:
+        assert v(spelling) == "cp1t-olmo"
+        assert v(base_spec(spelling)) == "cp1t-olmo"
+    assert v("pythia-160m") == v("EleutherAI/pythia-160m") == "pp1"
+    assert v("local/pythia-160m-dclm-seed1234") == "cp1"
+    assert v("qwen25-1.5b") == v("Qwen/Qwen2.5-1.5B") == "pp1t-qwen25"
+
+
+def test_compatibility_matrix_accepts_same_family_and_rejects_the_rest():
+    from subliminal_learning.coherence.probe_io import (
+        IncompatibleProbePoolError, UnknownProbeBaseError, compatible_probe_pools,
+        require_compatible_probe_pool,
+    )
+
+    assert compatible_probe_pools("dd-1b")[0] == "dp1"
+    assert compatible_probe_pools("dd-1b-dclm")[0] == "cp1t-olmo"
+    assert set(compatible_probe_pools("dd-1b")) == {"dp1", "cp1t-olmo", "pp1t-olmo",
+                                                    "pp1w-olmo"}
+    assert compatible_probe_pools("qwen25-1.5b")[0] == "pp1t-qwen25"
+    # the other DataDecide recipe's corpus pool is a legitimate sidecar either way
+    assert require_compatible_probe_pool("dd-1b", "cp1t-olmo").version == "cp1t-olmo"
+    assert require_compatible_probe_pool("dd-1b-dclm", "dp1").version == "dp1"
+    for base, pool in (("dd-1b", "pp1"), ("dd-1b-dclm", "cp1"), ("pythia-160m", "dp1"),
+                       ("pythia-160m", "cp1t-olmo"), ("qwen25-1.5b", "pp1")):
+        with pytest.raises(IncompatibleProbePoolError):
+            require_compatible_probe_pool(base, pool)
+    with pytest.raises(UnknownProbeBaseError):
+        compatible_probe_pools("not-a-base-at-all")
 
 
 def test_merge_direct_returns_accepted_keys_only():
@@ -283,3 +334,129 @@ def test_probe_pool_spec_for_repo_rejects_an_unparseable_pythia_repo():
 
     with pytest.raises(ValueError, match="pythia-160m-dclm-seed7"):
         pio.probe_pool_spec_for_repo("local/pythia-160m-dclm-seed7")
+
+
+# --- cp1t: the SECOND frozen-text corpus (DCLM held-out) and the recipe routing --------
+
+def _write_cp1_artifact(tmp_path, texts):
+    """A cp1 frozen-text artifact: same schema as pp1's, `base_pool` says which corpus."""
+    recs = [dict(order_pos=i, row=200 + i, text=t, n_chars=len(t),
+                 n_bytes=len(t.encode()), pythia_n_tokens=len(t), round_trip_exact=True)
+            for i, t in enumerate(texts)]
+    h = hashlib.sha256()
+    for r in recs:
+        h.update(json.dumps(r["text"]).encode())
+    p, mp = tmp_path / "cp1_text.jsonl", tmp_path / "cp1_text.meta.json"
+    p.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    mp.write_text(json.dumps(dict(version="cp1t", base_pool="cp1", n_docs=len(recs),
+                                  n_scanned=len(recs), text_sha256=h.hexdigest(),
+                                  text_bytes_total=99, n_round_trip_exact=len(recs))))
+    return p, mp
+
+
+def test_cp1t_pool_versions_and_family_resolution():
+    from subliminal_learning.coherence.probe_families import (
+        cp1t_pool_version_for, is_cp1t, is_frozen_text_pool,
+    )
+
+    assert cp1t_pool_version_for("olmo") == "cp1t-olmo"
+    assert is_cp1t("cp1t-olmo") and not is_cp1t("cp1") and not is_cp1t("pp1t-olmo")
+    assert is_frozen_text_pool("cp1t-olmo") and not is_frozen_text_pool("cp1w-olmo")
+    assert family_for_pool_version("cp1t-olmo").tag == "olmo"
+    for bad in ("cp1t-nope", "cp1w-olmo", "cp1"):
+        with pytest.raises(ValueError):
+            family_for_pool_version(bad)
+    with pytest.raises(ValueError, match="nope"):
+        cp1t_pool_version_for("nope")
+
+
+def test_build_probe_pool_routes_cp1t_to_the_cp1_text(tmp_path, monkeypatch):
+    """A cp1t pool reads the cp1 artifact, and its source names that corpus."""
+    from subliminal_learning.coherence.probe_io import probe_pool_spec_cp1t
+    import subliminal_learning.coherence.probe_io as probe_io
+
+    p, mp = _write_cp1_artifact(tmp_path, ["abcdefghij" * 4, "klmnopqrst" * 5])
+    monkeypatch.setattr(probe_io, "CP1_TEXT_PATH", p)
+    monkeypatch.setattr(probe_io, "CP1_TEXT_META_PATH", mp)
+    monkeypatch.setattr(probe_io, "PP1_TEXT_PATH",
+                        tmp_path / "must-not-be-read.jsonl")
+    pool = build_probe_pool(FakeTok(), probe_pool_spec_cp1t("olmo"), verify_pin=False)
+    assert [len(ids) for ids in pool.input_ids] == [40, 50]
+    assert pool.source.startswith("cp1_text:") and pool.row_indices == [200, 201]
+
+
+def test_shipped_cp1_text_is_a_32_doc_artifact_of_the_pinned_cp1_pool():
+    from subliminal_learning.coherence.probe_io import (
+        CP1_TEXT_META_PATH, CP1_TEXT_PATH, CP1_TOKEN_SHA, load_frozen_text,
+        pp1_text_sha256,
+    )
+
+    recs, meta = load_frozen_text(CP1_TEXT_PATH, CP1_TEXT_META_PATH)  # verifies text_sha256
+    assert len(recs) == meta["n_docs"] == 32
+    assert meta["text_sha256"] == pp1_text_sha256(recs)
+    assert meta["cp1_token_sha"] == CP1_TOKEN_SHA and meta["base_pool"] == "cp1"
+    assert meta["n_round_trip_exact"] == 32            # every doc re-encodes to cp1's ids
+    assert meta["pythia_n_tokens"] == [r["pythia_n_tokens"] for r in recs]
+    assert all(r["pythia_n_tokens"] <= meta["max_tokens"] for r in recs)
+    assert meta["text_bytes_total"] == sum(r["n_bytes"] for r in recs)
+
+
+@pytest.mark.parametrize("repo,version", [
+    ("dd-1b", "dp1"),
+    ("allenai/DataDecide-dolma1_7-1B@step69369-seed-default", "dp1"),
+    ("DataDecide-dolma1_7-1B-seed-default", "dp1"),
+    ("dd-1b-dclm", "cp1t-olmo"),
+    ("dd-1b-dclm-seed2", "cp1t-olmo"),
+    ("dd-1b-dclm@step10000", "cp1t-olmo"),
+    ("allenai/DataDecide-dclm-baseline-1B@step69369-seed-default", "cp1t-olmo"),
+    ("allenai/DataDecide-dclm-baseline-1B@step10000-seed-large-aux-3", "cp1t-olmo"),
+    ("DataDecide-dclm-baseline-1B-seed-default", "cp1t-olmo"),
+])
+def test_datadecide_recipe_decides_the_corpus_pool(repo, version):
+    from subliminal_learning.coherence import probe_io as pio
+
+    assert pio.probe_pool_spec_for_repo(repo).version == version
+
+
+def test_either_datadecide_recipe_pool_is_an_accepted_explicit_pool():
+    """The olmo family owns dp1 AND cp1t-olmo, so either is a legal sidecar readout."""
+    from subliminal_learning.coherence.probe_io import resolve_probe_pool_spec as r
+
+    dolma = "DataDecide-dolma1_7-1B-seed-default"
+    dclm = "DataDecide-dclm-baseline-1B-seed-default"
+    assert r(dolma, "cp1t-olmo").version == "cp1t-olmo"
+    assert r(dclm, "dp1").version == "dp1"
+    assert r(dclm).version == "cp1t-olmo" and r(dclm, "auto").version == "cp1t-olmo"
+    assert r(dclm, "pp1t-olmo").version == "pp1t-olmo"       # same family, Pile text
+    for pool in ("cp1", "pp1", "cp1t-nope", "cp1w-olmo", "cp1t-qwen25"):
+        with pytest.raises(ValueError, match="not a pool for base"):
+            r(dclm, pool)
+    for repo in ("EleutherAI/pythia-160m", "local/pythia-160m-dclm-seed1",
+                 "Qwen/Qwen2.5-1.5B"):
+        with pytest.raises(ValueError, match="not a pool for base"):
+            r(repo, "cp1t-olmo")
+
+
+def test_cp1t_olmo_retokenizes_the_frozen_cp1_text_to_cp1s_pinned_sha():
+    """The OLMo tokenizer on `data/probe_pools/cp1_text.jsonl` reproduces `CP1_TOKEN_SHA`.
+
+    This is what "identical ON THE POOL" means, and it is why `CP1T_TOKEN_SHA["olmo"]`
+    IS `CP1_TOKEN_SHA`: the two tokenizers agree on these 32 documents (measured), not in
+    general. Needs the pinned DataDecide tokenizer from the local HF cache and the
+    `datadecide` dependency group; skipped when either is absent.
+    """
+    from subliminal_learning.coherence.probe_families import PROBE_FAMILIES
+    from subliminal_learning.coherence.probe_io import (
+        CP1_TOKEN_SHA, CP1T_TOKEN_SHA, build_probe_pool, probe_pool_spec_cp1t,
+    )
+
+    try:
+        from subliminal_learning.coherence.probe_families import load_family_tokenizer
+        from subliminal_learning.config import resolve_roots
+
+        tok, _ = load_family_tokenizer(PROBE_FAMILIES["olmo"], resolve_roots()[1])
+    except Exception as exc:                                    # noqa: BLE001
+        pytest.skip(f"OLMo tokenizer unavailable offline: {exc}")
+    pool = build_probe_pool(tok, probe_pool_spec_cp1t("olmo"))   # verifies the pin too
+    assert pool.token_sha256() == CP1_TOKEN_SHA == CP1T_TOKEN_SHA["olmo"]
+    assert len(pool.input_ids) == 32

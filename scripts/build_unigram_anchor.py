@@ -127,6 +127,20 @@ def _ce_base_map(out_root: Path, pool: str, expected_sha: str | None) -> dict[st
     return found
 
 
+def _pinned_sha(table: dict, tag: str, pool: str):
+    """The pinned token sha of a frozen-text family, STRICTLY: an unregistered tag raises.
+
+    A `.get()` here would let an unpinned family build with no pin check at all, i.e. with
+    no guard that the tokenizer is the one the numbers were taken on. None IS a legitimate
+    value ("not yet pinned"); a MISSING row is not.
+    """
+    if tag not in table:
+        raise ValueError(
+            f"probe family {tag!r} has no pin row for pool {pool!r}; add one (value None "
+            f"means 'not yet pinned') before building it. Pinned families: {sorted(table)}")
+    return table[tag]
+
+
 def _pool_setup(pool: str, tokenizer_repo: str | None) -> dict:
     """Everything pool-specific: spec, tokenizer, expected sha, unigram source metadata.
 
@@ -191,7 +205,7 @@ def _pool_setup(pool: str, tokenizer_repo: str | None) -> dict:
                     **(dict(base_pool="dp1", base_spec=PROBE_POOL_DP1,
                             extension_start=DP1W_EXTENSION_START) if wide else {}))
     from subliminal_learning.coherence.probe_families import (
-        family_for_pool_version, is_pp1w, load_family_tokenizer, pool_version_for,
+        family_for_pool_version, is_cp1t, is_pp1w, load_family_tokenizer, pool_version_for,
     )
     from subliminal_learning.config import resolve_roots
 
@@ -199,6 +213,23 @@ def _pool_setup(pool: str, tokenizer_repo: str | None) -> dict:
     tok, resolved = load_family_tokenizer(family, resolve_roots()[1],
                                           repo_override=tokenizer_repo)
     provisional = tokenizer_repo is not None and tokenizer_repo != family.tokenizer_repo
+    if is_cp1t(pool):
+        # cp1t: the frozen cp1 TEXT (DCLM held-out) under a family tokenizer. The fit
+        # stream is the same Megatron source cp1 is cut from, decoded to text and
+        # retokenized here — so the counts live in the FAMILY's vocabulary while the
+        # documents stay cp1's corpus. The source stem is required, as for cp1.
+        from subliminal_learning.coherence.dclm_pool import STEM_KEY, heldout_stem
+        from subliminal_learning.coherence.probe_io import CP1T_TOKEN_SHA, probe_pool_spec_cp1t
+
+        return dict(spec=probe_pool_spec_cp1t(family.tag), tok=tok, tok_name=resolved,
+                    expected_sha=_pinned_sha(CP1T_TOKEN_SHA, family.tag, pool),
+                    unigram_src=dict(corpus="dclm-baseline-1.0-heldout",
+                                     source_stem=str(heldout_stem()), paths_key=STEM_KEY,
+                                     retokenized_from="pythia ids -> text -> family tokenizer"),
+                    family=dict(tag=family.tag, tokenizer_repo=resolved,
+                                tokenizer_revision=family.tokenizer_revision, bos=family.bos,
+                                tokenizer_repo_override=tokenizer_repo if provisional else None),
+                    provisional=provisional)
     wide = is_pp1w(pool)
     if wide:
         from subliminal_learning.coherence.probe_io import (
@@ -209,7 +240,8 @@ def _pool_setup(pool: str, tokenizer_repo: str | None) -> dict:
     return dict(
         spec=probe_pool_spec_pp1w(family.tag) if wide else probe_pool_spec_pp1t(family.tag),
         tok=tok, tok_name=resolved,
-        expected_sha=(PP1W_TOKEN_SHA if wide else PP1T_TOKEN_SHA)[family.tag],
+        expected_sha=_pinned_sha(PP1W_TOKEN_SHA if wide else PP1T_TOKEN_SHA,
+                                 family.tag, pool),
         unigram_src=dict(dataset="monology/pile-uncopyrighted", split="validation"),
         family=dict(tag=family.tag, tokenizer_repo=resolved,
                     tokenizer_revision=family.tokenizer_revision, bos=family.bos,
@@ -406,7 +438,10 @@ def main(
                              "tokenizer), 'cp1' (DCLM held-out + Pythia tokenizer, the "
                              "`dclm` re-pretrainings), 'dp1' (Dolma v1.7 + OLMo tokenizer, the "
                              "DataDecide arm), 'pp1t-<tag>' (pp1's text retokenized for "
-                             "another family), or their nested 128-doc wide variants "
+                             "another family), 'cp1t-<tag>' (cp1's DCLM held-out text "
+                             "retokenized for another family; 'cp1t-olmo' is the pool of "
+                             "the DataDecide dclm-baseline bases), or their nested 128-doc "
+                             "wide variants "
                              "'pp1w-<tag>' / 'dp1w' (counts reused from the base anchor). "
                              "Outputs unigram_anchor_{pool}.json."),
     force: bool = typer.Option(False, help="Overwrite an existing anchor record. The anchor "
@@ -429,14 +464,15 @@ def main(
 ) -> None:
     load_dotenv(ROOT / ".env")
     from subliminal_learning.coherence.probe_families import (
-        PROBE_FAMILIES, family_for_pool_version, is_frozen_text_pool, is_pp1w,
+        PROBE_FAMILIES, family_for_pool_version, is_cp1t, is_frozen_text_pool, is_pp1w,
     )
 
     if pool not in ("pp1", "cp1", "dp1", "dp1w"):
         if not is_frozen_text_pool(pool):
             raise typer.BadParameter(
                 f"unknown pool {pool!r}; expected 'pp1', 'cp1', 'dp1', 'dp1w', "
-                f"'pp1t-<tag>' or 'pp1w-<tag>' with tag in {sorted(PROBE_FAMILIES)}")
+                f"'pp1t-<tag>', 'pp1w-<tag>' or 'cp1t-<tag>' with tag in "
+                f"{sorted(PROBE_FAMILIES)}")
         family_for_pool_version(pool)  # validates the tag
     if extend_only:
         from subliminal_learning.config import resolve_output_root
@@ -507,7 +543,11 @@ def main(
     expected_sha, unigram_src = setup["expected_sha"], setup["unigram_src"]
     probe_pool = build_probe_pool(tok, spec)
     sha = probe_pool.token_sha256()
-    assert expected_sha is None or sha == expected_sha, f"{pool} sha drift: {sha}"
+    if expected_sha is not None and sha != expected_sha:
+        raise ValueError(
+            f"{pool} pool does not match its pinned tokenization: got token_sha256 {sha}, "
+            f"pinned {expected_sha}. The tokenizer or the upstream source moved under us; "
+            "investigate before writing an anchor on it")
     targets = np.concatenate(
         [np.asarray(ids[2:], dtype=np.int64) for ids in probe_pool.input_ids])
 
@@ -541,15 +581,18 @@ def main(
         h_uni = {a: unigram_ce(counts, targets, a) for a in SMOOTH_ALPHAS}
         H = h_uni[PRIMARY_ALPHA]
         n_base_targets = int(len(base_targets))
-    elif pool == "cp1":
-        # already-tokenized DCLM held-out ids, from the same permutation after the pool's
-        # scan window; `pretokenized` skips the tokenizer in the counting loop below.
+    elif pool == "cp1" or is_cp1t(pool):
+        # DCLM held-out documents from the same permutation after the pool's scan window.
+        # For cp1 they stay token ids (`pretokenized` skips the tokenizer in the counting
+        # loop below); for a cp1t family they are decoded with the Pythia tokenizer the
+        # corpus is stored in and re-tokenized by the family tokenizer in that loop —
+        # the same decode the frozen cp1 text went through.
         from subliminal_learning.coherence.dclm_pool import (
             MegatronDocuments, frozen_records, iter_universe_token_ids,
             verify_frozen_against_source,
         )
 
-        pretokenized = True
+        pretokenized = not is_cp1t(pool)
         _dclm_docs = MegatronDocuments()
         # `start` only excludes the probe documents if this stem IS the universe the
         # frozen pool was cut from: prove it before streaming a single fit document.
@@ -559,10 +602,21 @@ def main(
                              "cannot be proven disjoint from the probe pool")
         verify_frozen_against_source(_dclm_docs, *_frozen)
 
+        if pretokenized:
+            _decode_tok = None
+        else:
+            from transformers import AutoTokenizer
+
+            from scripts.build_cp1_text import TOKENIZER_REPO
+
+            _decode_tok = AutoTokenizer.from_pretrained(
+                TOKENIZER_REPO, cache_dir=str(resolve_roots()[1] / "hub"))
+
         def _text_batches():
             batch = []
             for ids in iter_universe_token_ids(_dclm_docs, spec.seed, start):
-                batch.append(ids)
+                batch.append(ids if _decode_tok is None
+                             else _decode_tok.decode(ids[:spec.max_tokens]))
                 if len(batch) == 4096:
                     yield batch
                     batch = []
@@ -669,13 +723,10 @@ def main(
     text_meta: dict = {}
     if is_frozen_text_pool(pool):
         from subliminal_learning.coherence.probe_io import (
-            PP1W_TEXT_META_PATH, PP1W_TEXT_PATH, load_frozen_text, load_pp1_text,
+            frozen_text_paths, load_frozen_text, load_pp1_text,
         )
 
-        if is_pp1w(pool):
-            _recs, text_meta = load_frozen_text(PP1W_TEXT_PATH, PP1W_TEXT_META_PATH)
-        else:
-            _recs, text_meta = load_pp1_text()
+        _recs, text_meta = load_frozen_text(*frozen_text_paths(pool))
         # per-token H_uni is tokenizer-dependent; bits per byte is the cross-family
         # comparable form. APPROXIMATE: each doc's first two tokens are not CE targets,
         # so the target multiset covers slightly less than the full byte count.

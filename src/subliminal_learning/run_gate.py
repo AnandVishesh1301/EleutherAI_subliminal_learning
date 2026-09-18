@@ -37,6 +37,7 @@ from typing import Any
 
 from loguru import logger
 
+from subliminal_learning.training import ckpt_ladder
 from subliminal_learning.utils.io import atomic_write_json
 
 _MISSING = object()
@@ -411,6 +412,10 @@ def prune_resume_state(
 
     Returns `{"checkpoints_removed": [...], "files_removed": [...], "bytes_freed": int}`.
     """
+    # Imported here, not at module scope: `utils.run_io` reaches back into this module
+    # through `training.run_manifest` (a circular import at import time).
+    from subliminal_learning.utils.run_io import endpoint_link_problem
+
     checkpoints_dir = run_dir / "checkpoints"
     report: dict[str, Any] = {
         "checkpoints_removed": [], "files_removed": [], "bytes_freed": 0
@@ -426,6 +431,13 @@ def prune_resume_state(
         if redundant_final or (
             marker is not None and marker.get("reason") == "sigterm" and not scheduled
         ):
+            # The endpoint adapter lives at `checkpoints/`; if it is a LINK into this dir
+            # (or the root holds symlinks at all) the rmtree would destroy the run's final
+            # weights. Skip loudly rather than free the bytes.
+            link_problem = endpoint_link_problem(run_dir, [leaf])
+            if link_problem is not None:
+                logger.warning("{}: not pruning {} ({})", run_dir, leaf.name, link_problem)
+                continue
             report["bytes_freed"] += _dir_bytes(leaf)
             shutil.rmtree(leaf, ignore_errors=True)
             report["checkpoints_removed"].append(leaf.name)
@@ -524,6 +536,14 @@ def clear_stale_run(run_dir: Path, *, preserve_checkpoints: bool = False) -> Non
     dirs need this: their probe/fidelity staleness stamp (`manifest_ref`) carries no
     student_param_tag/filtered_sha256, so a same-HP retrain would otherwise leave the
     old records looking current.
+
+    `eval/` is MOVED to `eval.superseded-<stamp>-<pid>-<hex>` rather than deleted, ALWAYS
+    (2026-09-18): on a thinned run those records are the only surviving readout of the
+    deleted checkpoints, and "thinned" is not detectable -- a hand-thinned run carries no
+    ladder manifest, so keying the move on one silently deleted exactly the irreplaceable
+    case. The retrain still starts from no eval records; the uniquified name is
+    `ckpt_ladder.superseded_name`, the same spelling the record writers use, so two clears
+    within one second never collide.
     """
     # A validated resume keeps trainer state, but invalidates all final-run records.
     manifest_path = run_dir / "train_manifest.json"
@@ -537,4 +557,6 @@ def clear_stale_run(run_dir: Path, *, preserve_checkpoints: bool = False) -> Non
         if checkpoint_dir.exists():
             shutil.rmtree(checkpoint_dir)
     if eval_dir.exists():
-        shutil.rmtree(eval_dir)
+        dest = ckpt_ladder.superseded_name(eval_dir)
+        eval_dir.rename(dest)
+        logger.warning("{}: retrain, eval records preserved as {}", run_dir, dest.name)

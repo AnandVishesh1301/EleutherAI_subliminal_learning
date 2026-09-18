@@ -17,9 +17,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.coherence.probe_families import family_for_pool_version, is_pp1t
 from subliminal_learning.coherence.probe_io import (
-    PROBE_POOL_CP1, PROBE_POOL_DP1, PROBE_POOL_PP1, ProbePoolSpec, anchored_dead_cut, probe_pool_spec_pp1t,
+    ProbePoolSpec, anchored_dead_cut, native_probe_pool_version, probe_path,
+    probe_pool_spec_for_version,
 )
 from subliminal_learning.weightspace.dose_rescaling import (
     DEFAULT_DOSE_RATIOS,
@@ -156,22 +156,19 @@ QWEN_ARM_SPECS = (
 def probe_spec_for_pool_version(pool_version: str) -> ProbePoolSpec:
     """The probe pool a manifest run's ``pool_version`` names, for the evaluator.
 
-    Four families are evaluable: ``pp1`` (Pile, Pythia tokenizer), ``cp1`` (DCLM held-out,
-    Pythia tokenizer), ``dp1`` (Dolma, OLMo tokenizer) and ``pp1t-<tag>`` (pp1's frozen text retokenized for a registered
-    family). Anything else -- a wide ``pp1w-*`` pool, an unregistered tag, a typo -- raises
-    rather than falling through to pp1, which would score a foreign base on the wrong pool.
+    Every wired pool version is evaluable -- the corpus pools (``pp1`` Pile/Pythia,
+    ``cp1`` DCLM held-out/Pythia, ``dp1``/``dp1w`` Dolma/OLMo) and every frozen-text
+    family pool (``pp1t-``/``pp1w-``/``cp1t-<tag>``) -- because the one place that
+    knows them is `coherence.probe_io.probe_pool_spec_for_version`. An unregistered tag
+    or a typo still raises loudly rather than falling through to pp1, which would score a
+    foreign base on the wrong pool.
     """
-    if pool_version == "pp1":
-        return PROBE_POOL_PP1
-    if pool_version == "cp1":
-        return PROBE_POOL_CP1
-    if pool_version == "dp1":
-        return PROBE_POOL_DP1
-    if is_pp1t(pool_version):
-        return probe_pool_spec_pp1t(family_for_pool_version(pool_version).tag)
-    raise ValueError(
-        f"unsupported probe pool version {pool_version!r} for the census evaluator; "
-        "supported: 'pp1', 'cp1', 'dp1', 'pp1t-<tag>' for a registered probe family")
+    try:
+        return probe_pool_spec_for_version(pool_version)
+    except ValueError as exc:
+        raise ValueError(
+            f"unsupported probe pool version {pool_version!r} for the census "
+            f"evaluator: {exc}") from exc
 
 
 def _latest_cache(path: Path) -> pd.DataFrame:
@@ -187,7 +184,14 @@ def _probe_for_run(
     row = cached.get(run_path)
     if row is not None and row.get("pool_version") == pool:
         return row
-    path = output_root / run_path / "eval" / "pile_probe.json"
+    # Per-pool record location: the run's native pool keeps `eval/pile_probe.json`, an
+    # explicit non-native pool its `pile_probe.<pool>.json` sidecar (`probe_io.probe_path`).
+    # A run whose manifest cannot be read has no knowable native pool, so the canonical
+    # file stays its record (the `pool_version` check below is what validates it).
+    run_dir = output_root / run_path
+    path = probe_path(run_dir, pool)
+    if not path.is_file() and native_probe_pool_version(run_dir) is None:
+        path = probe_path(run_dir, None)
     try:
         rec = json.loads(path.read_text())
     except (OSError, ValueError):

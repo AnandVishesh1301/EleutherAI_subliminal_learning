@@ -57,6 +57,20 @@ def test_eval_is_current_rejects(over, animals):
     assert not eval_is_current(_stored(**over), [1, 2], animals, {"test": "abc"}, "ref1")
 
 
+def test_eval_is_current_covers_a_thinned_ladder():
+    """41 measured points, 7 checkpoints left on disk: the record still answers the request.
+
+    The thinning contract (`training.ckpt_ladder`): coverage, not equality -- otherwise the
+    full trajectory would read as stale and be recomputed down to the survivors.
+    """
+    full = [0] + [625 * i for i in range(1, 41)]
+    kept = [625, 1250, 1875, 2500, 6250, 12500, 25000]
+    args = (["dog"], {"test": "abc"}, "ref1")
+    assert eval_is_current(_stored(checkpoint_steps=full), kept, *args)
+    # ... and the converse is still stale: one stored point, a full ladder on disk.
+    assert not eval_is_current(_stored(checkpoint_steps=[25000]), full, *args)
+
+
 def test_pile_id_is_current_defaults_pool_version():
     pile_id = {"pile_pool_sha": "s", "pool_version": "pp1"}
     assert pile_id_is_current({"pile_pool_sha": "s"}, pile_id)          # pre-pool_version
@@ -732,3 +746,186 @@ def test_prob_traj_multi_applies_the_family_bos_policy(tiny, monkeypatch):
     logits = model(input_ids=torch.tensor([[tokenizer.bos_token_id, *ids]])).logits[0, -1].float()
     assert with_bos == pytest.approx(float(torch.softmax(logits, -1)[5]), rel=1e-6)
     assert with_bos != no_bos
+
+
+def test_identity_change_on_a_thinned_run_supersedes_instead_of_overwriting(tmp_path, tiny):
+    """A recompute can only cover the checkpoints on disk, so it must not overwrite.
+
+    The run carries a ladder manifest (it was thinned) and a 3-point record; the Pile pool
+    identity then changes, which no coverage rule can rescue. The fuller record is renamed
+    to `*.superseded-*.json` beside itself and the new, shorter one is written.
+    """
+    from subliminal_learning.training.ckpt_ladder import write_ladder
+    from subliminal_learning.utils.run_io import manifest_ref
+
+    model, tokenizer = tiny
+    run_dir = _run_dir_with_ladder(tmp_path, model)
+    write_ladder(run_dir, {"schema_version": 1, "n_train_steps": 2,
+                           "checkpoint_steps": [0, 1, 2]})
+    out = run_dir / "eval" / "pile_kl_traj.json"
+    out.parent.mkdir()
+    out.write_text(json.dumps({
+        "checkpoint_steps": [0, 1, 2], "ce_base": 1.0,
+        "train_manifest_ref": manifest_ref(run_dir),
+        "n_pile_docs": 2, "pile_seed": 0, "pile_max_tokens": 32,
+        "pile_pool_sha": "OTHER-POOL", "pool_version": "pp1",
+        "points": [{"step": s, "checkpoint": c, "delta_ce": 0.0}
+                   for s, c in ((0, "checkpoint-0"), (1, "checkpoint-1"), (2, "checkpoints"))],
+    }))
+
+    ids = [tokenizer("the quick brown fox jumps", add_special_tokens=False)["input_ids"]]
+    pool = SequencePool(ids, [list(range(1, len(ids[0])))], "test_pool")
+    base_logp = pool_logprobs(model, pool, "cpu")
+    pile_id = {"n_pile_docs": 1, "pile_seed": 0, "pile_max_tokens": 32,
+               "pile_pool_sha": pool.token_sha256(), "pool_version": "pp1"}
+
+    class _Spec:
+        version = "pp1"
+
+    written = pile_kl_trajectory(
+        run_dir, model, pool, base_logp, mean_ce(base_logp, pool), "cpu",
+        tag="ep1_lr1e-4_r2a4", seed=1, pool_spec=_Spec(), pile_id=pile_id,
+        lineage_animal="dog", lineage_student_base="pythia-160m",
+        param_dir=run_dir.parent, rank=2, alpha=4, learning_rate=1e-4, n_epochs=1,
+        lineage_slug="test", final_only=False, force=False)
+    superseded = list(out.parent.glob("pile_kl_traj.json.superseded-*"))
+    assert len(superseded) == 1
+    assert [p["step"] for p in json.loads(superseded[0].read_text())["points"]] == [0, 1, 2]
+    assert json.loads(written.read_text())["checkpoint_steps"] == [1, 2]
+
+
+def _thinned_kl_setup(tmp_path, tiny, stored_steps):
+    """(run_dir, out_path, kwargs) for a run whose stored KL record covers `stored_steps`.
+
+    On disk only the thinned ladder survives (`checkpoint-1` + the endpoint); the stored
+    record is the fuller, pre-thinning one and its pool identity is CURRENT, so nothing but
+    the shrink rule can protect it.
+    """
+    from subliminal_learning.utils.run_io import manifest_ref
+
+    model, tokenizer = tiny
+    run_dir = _run_dir_with_ladder(tmp_path, model)
+    ids = [tokenizer("the quick brown fox jumps", add_special_tokens=False)["input_ids"]]
+    pool = SequencePool(ids, [list(range(1, len(ids[0])))], "test_pool")
+    base_logp = pool_logprobs(model, pool, "cpu")
+    pile_id = {"n_pile_docs": 1, "pile_seed": 0, "pile_max_tokens": 32,
+               "pile_pool_sha": pool.token_sha256(), "pool_version": "pp1"}
+    out = run_dir / "eval" / "pile_kl_traj.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({
+        "checkpoint_steps": list(stored_steps), "ce_base": 1.0,
+        "train_manifest_ref": manifest_ref(run_dir), **pile_id,
+        "points": [{"step": s, "checkpoint": f"checkpoint-{s}", "delta_ce": 0.0}
+                   for s in stored_steps],
+    }))
+
+    class _Spec:
+        version = "pp1"
+
+    kwargs = dict(
+        tag="ep1_lr1e-4_r2a4", seed=1, pool_spec=_Spec(), pile_id=pile_id,
+        lineage_animal="dog", lineage_student_base="pythia-160m",
+        param_dir=run_dir.parent, rank=2, alpha=4, learning_rate=1e-4, n_epochs=1,
+        lineage_slug="test")
+    return (run_dir, out,
+            (model, pool, base_logp, mean_ce(base_logp, pool)), kwargs)
+
+
+def test_forced_rerun_on_a_thinned_run_keeps_the_live_record_full(tmp_path, tiny):
+    """--force means recompute, never discard: the LIVE record still covers all 41 steps.
+
+    The pool identity and run ref are unchanged, so the stored rows for the thinned-away
+    steps are still measurements of this run: they are merged into the rewritten record
+    (the two surviving rungs are re-measured), and the stored file is preserved beside
+    itself as well.
+    """
+    from subliminal_learning.training.ckpt_ladder import write_ladder
+
+    stored = [*range(0, 41)]
+    run_dir, out, (model, pool, base_logp, ce_base), kw = _thinned_kl_setup(
+        tmp_path, tiny, stored)
+    write_ladder(run_dir, {"schema_version": 1, "n_train_steps": 2,
+                           "checkpoint_steps": stored})
+    written = pile_kl_trajectory(run_dir, model, pool, base_logp, ce_base, "cpu",
+                                 final_only=False, force=True, **kw)
+    kept = list(out.parent.glob("pile_kl_traj.json.superseded-*"))
+    assert len(kept) == 1
+    assert json.loads(kept[0].read_text())["checkpoint_steps"] == stored
+    rec = json.loads(written.read_text())
+    assert rec["checkpoint_steps"] == stored and len(rec["points"]) == 41
+    # The rungs still on disk carry the FRESH measurement (a full readout), not the
+    # stored placeholder row, which has no `ce_adapted`.
+    assert all("ce_adapted" in p for p in rec["points"] if p["step"] in (1, 2))
+    assert not any("ce_adapted" in p for p in rec["points"] if p["step"] == 0)
+
+
+def test_forced_rerun_keeps_the_live_record_of_a_HAND_thinned_run(tmp_path, tiny):
+    """No ladder.json (the checkpoints were deleted by hand) -- the rule is unconditional."""
+    stored = [*range(0, 41)]
+    run_dir, out, (model, pool, base_logp, ce_base), kw = _thinned_kl_setup(
+        tmp_path, tiny, stored)
+    assert not (run_dir / "checkpoints" / "ladder.json").exists()
+    written = pile_kl_trajectory(run_dir, model, pool, base_logp, ce_base, "cpu",
+                                 final_only=False, force=True, **kw)
+    kept = list(out.parent.glob("pile_kl_traj.json.superseded-*"))
+    assert len(kept) == 1
+    assert json.loads(kept[0].read_text())["checkpoint_steps"] == stored
+    assert json.loads(written.read_text())["checkpoint_steps"] == stored
+
+
+def test_forced_rerun_after_an_identity_change_does_not_carry_stored_rows(tmp_path, tiny):
+    """A changed Pile pool makes the stored rows incomparable: short live record + copy."""
+    stored = [*range(0, 41)]
+    run_dir, out, (model, pool, base_logp, ce_base), kw = _thinned_kl_setup(
+        tmp_path, tiny, stored)
+    doc = json.loads(out.read_text())
+    doc["pile_pool_sha"] = "OTHER-POOL"
+    out.write_text(json.dumps(doc))
+    written = pile_kl_trajectory(run_dir, model, pool, base_logp, ce_base, "cpu",
+                                 final_only=False, force=True, **kw)
+    kept = list(out.parent.glob("pile_kl_traj.json.superseded-*"))
+    assert len(kept) == 1
+    assert json.loads(kept[0].read_text())["checkpoint_steps"] == stored
+    assert json.loads(written.read_text())["checkpoint_steps"] == [1, 2]
+
+
+def test_final_only_pass_on_a_thinned_run_does_not_shrink_the_stored_record(tmp_path, tiny):
+    run_dir, out, (model, pool, base_logp, ce_base), kw = _thinned_kl_setup(
+        tmp_path, tiny, [0, 1, 2])
+    written = pile_kl_trajectory(run_dir, model, pool, base_logp, ce_base, "cpu",
+                                 final_only=True, force=True, **kw)
+    kept = list(out.parent.glob("pile_kl_traj.json.superseded-*"))
+    assert len(kept) == 1
+    assert json.loads(kept[0].read_text())["checkpoint_steps"] == [0, 1, 2]
+    assert json.loads(written.read_text())["checkpoint_steps"] == [2]
+
+
+def test_forced_pref_rerun_on_a_thinned_run_keeps_the_live_record_full(tmp_path, tiny):
+    """Same rule on the trait trajectory: identity current -> the live record stays full."""
+    from pipelines.evaluate_teacher_preference_pipeline import PromptSet, prompts_hash
+    from subliminal_learning.utils.run_io import manifest_ref
+
+    model, tokenizer = tiny
+    run_dir = _run_dir_with_ladder(tmp_path, model)
+    prompts = ["Name your favorite animal:"]
+    psets = (PromptSet("test", tmp_path / "prompts.txt", 12, "prob"),)
+    target_id = tokenizer.encode(" dog", add_special_tokens=False)[0]
+    stored = [*range(0, 41)]
+    out = run_dir / "eval" / "pref_traj.json"
+    out.parent.mkdir(parents=True)
+    out.write_text(json.dumps({
+        "animals": ["dog"], "prompt_hashes": {"test": prompts_hash(prompts)},
+        "train_manifest_ref": manifest_ref(run_dir), "checkpoint_steps": stored,
+        "points": [{"step": s, "checkpoint": f"checkpoint-{s}",
+                    "test": {"p_target": 0.5}} for s in stored]}))
+    kw = dict(tag="ep1_lr1e-4_r2a4", seed=1, animals=["dog"], psets=psets,
+              prompt_by_set={"test": prompts}, forms=(), target_ids={"dog": target_id},
+              target_id=target_id, n_samples=1, temperature=1.0, confidence=0.95,
+              lineage_student_base="pythia-160m", param_dir=run_dir.parent, rank=2,
+              alpha=4, learning_rate=1e-4, n_epochs=1, lineage_slug="test")
+    written = pref_trajectory(run_dir, model, tokenizer, "cpu", final_only=False,
+                              force=True, **kw)
+    kept = list(out.parent.glob("pref_traj.json.superseded-*"))
+    assert len(kept) == 1
+    assert json.loads(kept[0].read_text())["checkpoint_steps"] == stored
+    assert json.loads(written.read_text())["checkpoint_steps"] == stored

@@ -134,19 +134,23 @@ def _run_dir(root: Path, source: str = "teacher") -> Path:
     return rd
 
 
-def _cfg(root: Path, rd: Path, references=(), force: bool = False) -> EASRunConfig:
+def _cfg(
+    root: Path, rd: Path, references=(), force: bool = False, n_prompts: int = 8
+) -> EASRunConfig:
     paths = PathsConfig(
         output_root=root, hf_cache_root=root / "hf", dataset_cache_root=root / "ds",
         wandb_dir=root / "wandb",
     )
     return EASRunConfig(
         paths=paths, hub_org="org", run_dir=rd, references=tuple(references),
-        position="last", n_prompts=8, batch_size=4, device="cpu", force=force,
+        position="last", n_prompts=n_prompts, batch_size=4, device="cpu", force=force,
     )
 
 
-def _go(root: Path, rd: Path, references=(), force: bool = False):
-    return eas_pipeline._run(_cfg(root, rd, references, force), _FakeSession())
+def _go(root: Path, rd: Path, references=(), force: bool = False, n_prompts: int = 8):
+    return eas_pipeline._run(
+        _cfg(root, rd, references, force, n_prompts), _FakeSession()
+    )
 
 
 # ------------------------------------------------------------------- the layout
@@ -247,3 +251,166 @@ def test_a_current_pair_of_documents_is_skipped(tmp_path):
     )
     _go(tmp_path, rd, references=(OTHER,))
     assert (doc_path(rd, "last").read_text(), refs_doc_path(rd, "last").read_text()) == before
+
+
+def test_sidecar_keeps_the_vectors_of_thinned_checkpoints(tmp_path):
+    """A thinned checkpoint's student vector is the only copy left; the prune must keep it.
+
+    Keying the prune on the on-disk `ckpt_rel`s deleted it, so a later pass adding a
+    reference could neither reuse it (no vector) nor recompute it (no checkpoint).
+    """
+    from subliminal_learning.training.ckpt_ladder import write_ladder
+
+    _teacher(tmp_path, OWN)
+    _teacher(tmp_path, OTHER, b"cat")
+    rd = _run_dir(tmp_path)
+    ckpt = rd / "checkpoints" / "checkpoint-50"
+    ckpt.mkdir()
+    (ckpt / "adapter_model.safetensors").write_bytes(b"mid")
+    _go(tmp_path, rd)
+    side = torch.load(sidecar_path(rd, "last"), weights_only=False)
+    assert set(side["points"]) == {"checkpoints/checkpoint-50", "checkpoints"}
+
+    # Thin the ladder, then run again for an extra reference.
+    (ckpt / "adapter_model.safetensors").unlink()
+    ckpt.rmdir()
+    write_ladder(rd, {"schema_version": 1, "n_train_steps": 100,
+                      "checkpoint_steps": [50, 100]})
+    _go(tmp_path, rd, references=(OTHER,))
+    side = torch.load(sidecar_path(rd, "last"), weights_only=False)
+    assert set(side["points"]) == {"checkpoints/checkpoint-50", "checkpoints"}
+
+
+# ------------------------------------------------------------------- thinned runs
+def _thin(rd: Path, ckpt: Path, steps=(50, 100)) -> None:
+    """Delete an intermediate checkpoint dir and record the full ladder manifest."""
+    from subliminal_learning.training.ckpt_ladder import write_ladder
+
+    (ckpt / "adapter_model.safetensors").unlink()
+    ckpt.rmdir()
+    write_ladder(rd, {"schema_version": 1, "n_train_steps": 100,
+                      "checkpoint_steps": list(steps)})
+
+
+def _with_mid(root: Path) -> tuple[Path, Path]:
+    rd = _run_dir(root)
+    ckpt = rd / "checkpoints" / "checkpoint-50"
+    ckpt.mkdir()
+    (ckpt / "adapter_model.safetensors").write_bytes(b"mid")
+    return rd, ckpt
+
+
+def test_force_on_a_thinned_run_keeps_the_thinned_point_and_its_vector(tmp_path):
+    """`--force` must recompute, never DISCARD: the step-50 point cannot be recomputed."""
+    _teacher(tmp_path, OWN)
+    rd, ckpt = _with_mid(tmp_path)
+    _go(tmp_path, rd)
+    _thin(rd, ckpt)
+
+    _go(tmp_path, rd, force=True)
+    doc = json.loads(doc_path(rd, "last").read_text())
+    assert [p["step"] for p in doc["points"]] == [50, 100]
+    side = torch.load(sidecar_path(rd, "last"), weights_only=False)
+    assert "checkpoints/checkpoint-50" in side["points"]
+    # Nothing shrank, so nothing was moved aside.
+    assert list((rd / "eval").glob("*.superseded-*")) == []
+
+
+def test_force_after_a_prompt_set_change_drops_the_thinned_point(tmp_path):
+    """A `DOC_META_KEYS` drift (n_prompts) invalidates the plan: nothing is carried."""
+    _teacher(tmp_path, OWN)
+    rd, ckpt = _with_mid(tmp_path)
+    _go(tmp_path, rd)
+    _thin(rd, ckpt)
+
+    # The prompt set changed, so the stored step-50 point was measured under other prompts.
+    _go(tmp_path, rd, force=True, n_prompts=4)
+    doc = json.loads(doc_path(rd, "last").read_text())
+    assert [p["step"] for p in doc["points"]] == [100]
+
+
+def test_force_after_an_identity_change_supersedes_the_doc_and_sidecar_together(tmp_path):
+    """A retrained run cannot carry the old points forward; the pair is preserved instead."""
+    _teacher(tmp_path, OWN)
+    rd, ckpt = _with_mid(tmp_path)
+    _go(tmp_path, rd)
+    _thin(rd, ckpt)
+    # The run was retrained in place for longer: its `manifest_ref` moves, so the stored
+    # points describe other weights and may NOT be carried forward.
+    manifest = json.loads((rd / "train_manifest.json").read_text())
+    manifest["n_train_steps"] = 120
+    (rd / "train_manifest.json").write_text(json.dumps(manifest))
+
+    _go(tmp_path, rd, force=True)
+    doc = json.loads(doc_path(rd, "last").read_text())
+    assert [p["step"] for p in doc["points"]] == [120]
+    moved = sorted(p.name.split(".superseded-")[0] for p in (rd / "eval").glob("*.superseded-*"))
+    assert moved == ["eas_last.json", "eas_vectors_last.pt"]
+
+
+def test_a_new_reference_on_a_thinned_point_is_scored_from_the_sidecar(tmp_path):
+    """Cosine-only over a rel with NO checkpoint dir: sidecar vector + teacher vector only."""
+    _teacher(tmp_path, OWN)
+    _teacher(tmp_path, OTHER, b"cat")
+    rd, ckpt = _with_mid(tmp_path)
+    _go(tmp_path, rd, references=(OTHER,))
+    _thin(rd, ckpt)
+
+    # A THIRD reference arrives after the thinning; step 50 has only its stored vector.
+    _teacher(tmp_path, THIRD, b"lion")
+    _go(tmp_path, rd, references=(OTHER, THIRD))
+    refs = json.loads(refs_doc_path(rd, "last").read_text())
+    thinned = next(p for p in refs["points"] if p["step"] == 50)
+    assert set(thinned["eas"]) == {OTHER, THIRD}
+    assert [p["step"] for p in refs["points"]] == [50, 100]
+
+
+def test_a_new_reference_with_no_sidecar_vector_is_annotated_unscorable(tmp_path):
+    """No checkpoint and no vector: the point is kept, annotated, and never recomputed."""
+    _teacher(tmp_path, OWN)
+    _teacher(tmp_path, OTHER, b"cat")
+    rd, ckpt = _with_mid(tmp_path)
+    _go(tmp_path, rd, references=(OTHER,))
+    _thin(rd, ckpt)
+    # Drop the thinned vector from the sidecar (an older prune deleted it).
+    blob = torch.load(sidecar_path(rd, "last"), weights_only=False)
+    blob["points"].pop("checkpoints/checkpoint-50")
+    torch.save(blob, sidecar_path(rd, "last"))
+
+    _teacher(tmp_path, THIRD, b"lion")
+    _go(tmp_path, rd, references=(OTHER, THIRD))
+    refs = json.loads(refs_doc_path(rd, "last").read_text())
+    thinned = next(p for p in refs["points"] if p["step"] == 50)
+    assert thinned["unscorable_refs"] == [THIRD]
+    assert set(thinned["eas"]) == {OTHER}
+    assert set(next(p for p in refs["points"] if p["step"] == 100)["eas"]) == {OTHER, THIRD}
+
+
+def test_a_first_refs_doc_on_a_thinned_run_covers_the_whole_ladder(tmp_path):
+    """A refs document BORN after the thinning must still cover the thinned steps.
+
+    The main document and the sidecar cover [50, 100]; only the endpoint survives on disk.
+    The step-50 vector is all the new reference needs (cosine math, no checkpoint), so the
+    new document must start life covering the full ladder, not just the survivors.
+    """
+    _teacher(tmp_path, OWN)
+    rd, ckpt = _with_mid(tmp_path)
+    _go(tmp_path, rd)
+    _thin(rd, ckpt)
+    assert not refs_doc_path(rd, "last").exists()
+
+    _teacher(tmp_path, OTHER, b"cat")
+    _go(tmp_path, rd, references=(OTHER,))
+    refs = json.loads(refs_doc_path(rd, "last").read_text())
+    assert [p["step"] for p in refs["points"]] == [50, 100]
+    thinned = refs["points"][0]
+    assert set(thinned["eas"]) == {OTHER} and not thinned["nonfinite"]
+    # The adapter id comes from the main document's point for the same rel.
+    main = json.loads(doc_path(rd, "last").read_text())
+    assert thinned["adapter_id"] == next(
+        p for p in main["points"] if p["step"] == 50
+    )["adapter_id"]
+    # A second pass has nothing left to do.
+    before = refs_doc_path(rd, "last").read_text()
+    _go(tmp_path, rd, references=(OTHER,))
+    assert refs_doc_path(rd, "last").read_text() == before

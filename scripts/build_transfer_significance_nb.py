@@ -1,9 +1,11 @@
 """Build notebooks/transfer_significance.ipynb: does transfer exist, and which family is stronger.
 
-Three tables: the cross-architecture arms of run_logs/xarch/xarch_significance_arms.json, the
-Pythia seed families' existence tests, and the family comparisons (cross-data-order vs
-cross-seed, same-model vs cross-data-order), per animal and animal-stratified. Loading, tests
-and styling all live in `analysis.transfer_significance_io`.
+Five tables: the cross-architecture arms of run_logs/xarch/xarch_significance_arms.json, the
+Pythia seed families' existence tests, the family comparisons (cross-data-order vs
+cross-seed, same-model vs cross-data-order), per animal and animal-stratified, the 160m
+re-pretraining direction matrix of run_logs/repretrain/repretrain_significance_arms.json, and
+the OLMo-1B (DataDecide) cross-seed arms of run_logs/repretrain/olmo_cross_seed_significance_arms.json.
+Loading, tests and styling all live in `analysis.transfer_significance_io`.
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ def code(s: str) -> None:
 md(r"""
 # Transfer significance: does it exist, and which family is stronger?
 
-Three tables. **1** cross-architecture arms (another model size or family), **2** the Pythia seed families' existence tests, **3** the family comparisons. Every test reads a student against its OWN matched traitless control (the untuned sender base's numbers pool distilled into the same receiver on the same cells), student finetune seed 1, the 10 k-band teachers of each of the four animals dog, cat, lion and pig. In tables 1 and 2 animals are never pooled into one stratum; table 3 adds one `dog+cat+lion+pig stratified` line per comparison, whose strata are (animal, cell) pairs.
+Five tables. **1** cross-architecture arms (another model size or family), **2** the Pythia seed families' existence tests, **3** the family comparisons, **4** the 160m re-pretraining direction matrix, **5** the OLMo-1B (DataDecide) cross-seed arms. Every test reads a student against its OWN matched traitless control (the untuned sender base's numbers pool distilled into the same receiver on the same cells), student finetune seed 1, the 10 k-band teachers of each of the four animals dog, cat, lion and pig (dog only in table 4; elephant, one or two teachers per arm, in table 5). In tables 1, 2, 4 and 5 animals are never pooled into one stratum; table 3 adds one `dog+cat+lion+pig stratified` line per comparison, whose strata are (animal, cell) pairs.
 """)
 
 md(r"""
@@ -137,6 +139,74 @@ style_family_comparison_table(family_comparison_table({(name, design): compare_f
 
 md(r"""
 How to read the `dog+cat+lion+pig stratified` line: it is not "four times the evidence". The unit is still the model pair, so an arm run in several animals is ONE unit and the arm counts stay those of a single animal; adding cat, lion and pig only adds strata (cells) that arm is measured on. Cat, lion and pig have no ds-SENDER students, so on the cross-data-order side the stratified fit leans on dog for every `ds_i → ·` arm and only the three `orig → ds_i` arms carry a cat, lion or pig block.
+""")
+
+md(r"""
+## 4. 160m re-pretraining direction matrix (dog, core30)
+
+Does a teacher's numbers pool move a RE-PRETRAINED sibling of pythia-160m above its matched control, and in which direction? Senders and receivers are pythia-160m (`orig`) and its re-pretrainings: `pr1234` = gpaulo's re-pretraining of pythia-160m's own seed and Pile data order on the modern gpt-neox tree; `pr3` = seed-3 init on that same Pile order; `dclm1234` / `dclm1` = the DCLM corpus at seeds 1234 / 1; `wc1` / `wc2` = the v1.0-tree corrected weight-seeds. Every arm distils the ten dog k-band teachers (tseed 1) on the 30 core30 cells and reads student seed 1 against the matched base control; `HOT10` repeats `pr1234 → pr3` on the 10 core56 \ core30 cells with K/K* > 1 (`run_logs/pr1234_to_pr3_hot10_20260918/hot10_manifest.json`). Column legend as in table 1; the receiver's prior is its `analysis/base_eval_*_test.json` dog test prior. No re-pretrained receiver has an anchored pp1 dead cut, so the dead column reads `?` throughout.
+
+`wc1 → wc2` is a partial arm: its controls and students were still finishing at build time, so it is tested on the core30 cells that carry a control and all ten student runs (its `cells` column reads tested/30; at the 09-18 execution 1 of 30 cells was untested for want of a control or a student run; the count shrinks as the campaign drains).
+
+`pr1234 → pr3 UNION core30+hot10` is the 40-cell union of the core30 and HOT10 rows as ONE arm (`run_logs/repretrain/pr3_core30_hot10_cells.json`), so its exceedances are judged against a single control maximum over all 40 cells -- the design a pool of the two rows would not give, since pooled arms each keep their own control maximum. Pools: `POOLED: into pr1234 (orig, pr3)` stacks the two arms into pr1234, each against its own control maximum. No DCLM pool: `pr1234 → dclm1234` crosses corpora (Pile → DCLM, `data_order` different) while `dclm1 → dclm1234` shares the DCLM order, and the registry never pools arms of different data-order classes.
+
+**Missing** (no p in the table):
+
+- `dclm1234 → dclm1` — students complete (300/300), but the campaign had no control stage: no matched controls on disk; note row.
+- `wc2 → wc1`, `dclm1234 → pr1234`, `pr1234 → orig` — queued 09-18 (prio 49), not yet run.
+- `dclm1234 → dclm2` — the DCLM seed-2 pretraining stopped at 32k steps and was never resumed; no receiver.
+
+Highlighted = perm p < 0.05 (the primary test).
+""")
+
+code(r"""
+REPRETRAIN = significance_table(REPO / "run_logs/repretrain/repretrain_significance_arms.json")
+style_significance_table(REPRETRAIN)
+""")
+
+md(r"""
+The pooled rows of that table, in prose — generated from the table the cell above just computed:
+""")
+
+code(r"""
+display(Markdown("\n".join(
+    f"- **{r['arm']}** ({r['test']}): {_num(r.get('wins / n'))} wins, {_num(r.get('exceed.'))} exceedances, "
+    f"p = {_num(r.get('perm p'), '.1e')}, treat {_num(r.get('treat median ×prior'), '.2f')}× vs "
+    f"ctrl {_num(r.get('ctrl median ×prior'), '.2f')}× prior"
+    for r in REPRETRAIN[REPRETRAIN["pooled"]].to_dict("records"))))
+""")
+
+md(r"""
+## 5. OLMo-1B (DataDecide) cross-seed arms (elephant)
+
+Does the cross-seed result hold on a second family? Senders and receivers are the DataDecide OLMo-1B pretraining seeds: `orig` = `dd-1b` (seed-default), `seed2` = `dd-1b-seed2` (large-aux-2), `seed3` = `dd-1b-seed3` (large-aux-3) -- the same 1B architecture and Dolma 1.7 data, different initialisation seeds. Trait elephant, teachers finetuned at tseed 0, students at finetune seed 1, read against the matched base control (the untuned sender's pool distilled into the receiver). `ctrl20` (`run_logs/dd1b/ctrl20_cells.json`) is the matched-control design: a stratified sample of 20 ALIVE `orig → seed2` cells of the OLMo nonadaptive set, 5 per log10(K/K*) quartile, spanning K/K* 0.04–1.13 on the cross-seed fit; `core30` (`run_logs/dd1b/olmo_core30_cells.json`) is the 30-cell OLMo transfer band. The `orig → orig` row is the same-model reference on ctrl20. Column legend as in table 1; the receiver's prior is the elephant test prior its student trees' `base_control.json` share. No OLMo receiver has an anchored pp1 dead cut, so the dead column reads `?` throughout.
+
+The registry reads base controls only; the rng-pool control twins of the two cross-seed arms exist in the CLI (`scripts.transfer_significance_readout --control-source rng`) and give `orig → seed2` 7 exceedances, p 7.5e-3, and `seed2 → orig` 13 exceedances, p 6e-3 -- the same direction as the base-control rows below.
+
+**Missing** (no row in the table):
+
+- `orig → seed3`, `seed2 → seed3` — the 46-cell top-25-union arms are trained, but NO controls exist on any seed-3 receiver.
+- the `ctrl57` control set — never queued, so no arm reads it.
+- `orig → seed2` is a single-teacher, 20-cell arm: the permutation relabels which of the (teacher, control) pair is the control in each cell.
+
+Highlighted = perm p < 0.05 (the primary test).
+""")
+
+code(r"""
+OLMO = significance_table(REPO / "run_logs/repretrain/olmo_cross_seed_significance_arms.json")
+style_significance_table(OLMO)
+""")
+
+md(r"""
+The pooled rows of that table, in prose — generated from the table the cell above just computed:
+""")
+
+code(r"""
+display(Markdown("\n".join(
+    f"- **{r['arm']}** ({r['test']}): {_num(r.get('wins / n'))} wins, {_num(r.get('exceed.'))} exceedances, "
+    f"p = {_num(r.get('perm p'), '.1e')}, treat {_num(r.get('treat median ×prior'), '.2f')}× vs "
+    f"ctrl {_num(r.get('ctrl median ×prior'), '.2f')}× prior"
+    for r in OLMO[OLMO["pooled"]].to_dict("records"))))
 """)
 
 nb = {

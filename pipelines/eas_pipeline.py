@@ -88,6 +88,10 @@ from subliminal_learning.students.dataset_io import (
     splice_example_rows,
     subsample_rows,
 )
+from subliminal_learning.training.ckpt_ladder import (
+    ladder_steps as ckpt_ladder_steps,
+)
+from subliminal_learning.training.ckpt_ladder import supersede_if_shrinking
 from subliminal_learning.teachers.run_layout import (
     TEACHERS_SUBDIR,
     model_dir_parts_from_name,
@@ -621,15 +625,20 @@ def _run(cfg: EASRunConfig, session: EASSession) -> dict:
         "basis": ACTIVATION_BASIS, "position": cfg.position, "n_prompts": len(prompts),
         "prompt_sha256": sha, "base_repo": student["base_repo"],
     }
-    sidecar = (
-        {} if cfg.force
-        else _load_sidecar(sidecar_path(run_dir, cfg.position), sidecar_meta)
-    )
+    # Loaded even under ``--force``: force means "recompute what is on disk", never "discard
+    # the vectors of THINNED checkpoints", which no rerun could ever reproduce.
+    sidecar = _load_sidecar(sidecar_path(run_dir, cfg.position), sidecar_meta)
+    # Steps that ever existed (`training.ckpt_ladder`): used both by the currency gate and
+    # by the sidecar prune below, so the two never disagree about what was thinned.
+    on_ladder = frozenset(ckpt_ladder_steps(run_dir / "checkpoints"))
     common_status = dict(
         expected_meta=expected_meta,
         checkpoints=[(p["ckpt_rel"], p["adapter_id"]) for p in points],
         sidecar_ckpts=frozenset(sidecar),
         manifest_ref=student["manifest_ref"],
+        # Steps that ever existed: a stored point whose checkpoint has since been thinned
+        # away is reused, not dropped (`training.ckpt_ladder`).
+        ladder_steps=on_ladder,
         force=cfg.force,
     )
     plans: dict[str, object] = {}
@@ -643,7 +652,27 @@ def _run(cfg: EASRunConfig, session: EASSession) -> dict:
             references={k: v["teacher_adapter_id"] for k, v in extra.items()},
             **common_status,
         )
-    if all(pl.is_current and not pl.stale_refs for pl in plans.values()):
+    # THINNED steps this document has no point for at all, but whose student vector the
+    # sidecar still holds: a document created (or rebuilt) AFTER the thinning -- typically
+    # the first refs document -- would otherwise start life covering only the surviving
+    # checkpoints. They cost pure cosine math, so they are scored like any other
+    # cosine-only point and written as full points.
+    on_disk_rels = {p["ckpt_rel"] for p in points}
+    ladder_vectors = {
+        rel for rel in sidecar
+        if rel not in on_disk_rels and _ckpt_rel_step(rel) in on_ladder
+    }
+    unstored = {
+        name: sorted(ladder_vectors - {
+            p.get("ckpt_rel") for p in (
+                (stored_main if name == "main" else stored_refs_doc) or {}
+            ).get("points") or []
+        })
+        for name in plans
+    }
+    if all(pl.is_current and not pl.stale_refs for pl in plans.values()) and not any(
+        unstored.values()
+    ):
         logger.info("EAS current (skip): {} [{}]", student["run_rel"], cfg.position)
         return stored_main if own else stored_refs_doc
     for name, pl in plans.items():
@@ -666,9 +695,10 @@ def _run(cfg: EASRunConfig, session: EASSession) -> dict:
 
     # One student pass serves both documents: recompute/cosine-only are the UNION over them.
     recompute = {rel for pl in plans.values() for rel in pl.recompute}
-    cosine_only = {
-        rel for pl in plans.values() for rel in pl.cosine_only
-    } - recompute
+    cosine_only = (
+        {rel for pl in plans.values() for rel in pl.cosine_only}
+        | {rel for rels in unstored.values() for rel in rels}
+    ) - recompute
     #: ``ckpt_rel -> (v_student_raw, per-layer norm)``, or None for a non-finite adapter.
     computed: dict[str, tuple[torch.Tensor, torch.Tensor] | None] = {}
     if recompute:
@@ -709,17 +739,32 @@ def _run(cfg: EASRunConfig, session: EASSession) -> dict:
                     torch.cuda.empty_cache()
 
     # Cosine-only points: a newly requested reference over a sidecar vector, no forward pass.
+    # The checkpoint dir need NOT exist: a thinned point is scored from its stored vector and
+    # the teacher vector alone (that is what the sidecar is kept past thinning for).
     for rel in cosine_only:
         raw = sidecar[rel]
         computed[rel] = (raw, raw.norm(dim=-1))
 
+    #: Identity fields for a point the document itself never stored: the step comes from
+    #: the ladder rel name and the adapter id from the main document when it has one.
+    main_points = {
+        p.get("ckpt_rel"): p for p in (stored_main or {}).get("points") or []
+    }
     written: dict[str, dict] = {}
-    for name, path, ref_subset in (
-        ("main", main_path, {own: refs[own]} if own else {}),
-        ("refs", refs_path, extra),
+    for name, path, ref_subset, stored_doc in (
+        ("main", main_path, {own: refs[own]} if own else {}, stored_main),
+        ("refs", refs_path, extra, stored_refs_doc),
     ):
         if name not in plans:
             continue
+        stubs = {
+            p.get("ckpt_rel"): p for p in (stored_doc or {}).get("points") or []
+        }
+        for rel in unstored[name]:
+            stubs[rel] = {
+                "step": _ckpt_rel_step(rel), "ckpt_rel": rel, "is_endpoint": False,
+                "adapter_id": (main_points.get(rel) or {}).get("adapter_id"),
+            }
         doc = {
             **expected_meta,
             "prompt_source": prompt_source,
@@ -734,8 +779,21 @@ def _run(cfg: EASRunConfig, session: EASSession) -> dict:
             "points": _assemble_points(
                 points, plans[name], computed,
                 {k: v_teacher[k] for k in ref_subset},
+                stubs=stubs,
             ),
         }
+        # THE invariant (`training.ckpt_ladder.supersede_if_shrinking`): never replace a
+        # stored record with one covering fewer steps. Under ``--force`` on a thinned run
+        # the rewrite is built from the surviving checkpoints, so the document and the
+        # vector sidecar -- one measurement, two files -- are moved aside as a PAIR.
+        if stored_doc:
+            supersede_if_shrinking(
+                run_dir, path,
+                [p.get("step") for p in stored_doc.get("points") or []],
+                [p.get("step") for p in doc["points"]],
+                extra_paths=[sidecar_path(run_dir, cfg.position)],
+                log=logger,
+            )
         atomic_write_text(path, json.dumps(doc, indent=2) + "\n")
         written[name] = doc
         logger.info(
@@ -744,7 +802,12 @@ def _run(cfg: EASRunConfig, session: EASSession) -> dict:
             len(doc["references"]), path,
         )
 
+    # Sidecar prune: keep every vector whose checkpoint is on disk, PLUS every one whose
+    # step is on the run's ladder. Keying on `ckpt_rel` alone deleted the vectors of THINNED
+    # checkpoints, and with them the only cheap (cosine-only) way to add a new reference to
+    # those points -- the checkpoint itself is gone, so they could never be recomputed.
     keep = {p["ckpt_rel"] for p in points}
+    keep |= {rel for rel in sidecar if _ckpt_rel_step(rel) in on_ladder}
     _atomic_torch_save(sidecar_path(run_dir, cfg.position), {
         "meta": sidecar_meta,
         "points": {k: v for k, v in sidecar.items() if k in keep},
@@ -754,6 +817,17 @@ def _run(cfg: EASRunConfig, session: EASSession) -> dict:
         student["run_rel"], cfg.position, len(recompute), len(cosine_only),
     )
     return written.get("main") or written["refs"]
+
+
+def _ckpt_rel_step(ckpt_rel: str) -> int | None:
+    """The step of a ``checkpoints/checkpoint-N`` rel path; None for the endpoint or junk."""
+    name = str(ckpt_rel).rsplit("/", 1)[-1]
+    if not name.startswith("checkpoint-"):
+        return None
+    try:
+        return int(name.split("-")[1])
+    except (IndexError, ValueError):
+        return None
 
 
 def _read_doc(path: Path) -> dict | None:
@@ -768,10 +842,19 @@ def _read_doc(path: Path) -> dict | None:
 
 
 def _assemble_points(
-    points: list[dict], plan, computed: dict, v_teacher: dict
+    points: list[dict], plan, computed: dict, v_teacher: dict, *,
+    stubs: dict[str, dict] | None = None,
 ) -> list[dict]:
-    """One document's points: freshly built where a vector was (re)computed, else reused."""
+    """One document's points: freshly built where a vector was (re)computed, else reused.
+
+    Reused points whose checkpoint is no longer on disk (THINNED, see
+    `training.ckpt_ladder`) are merged back in step order: the loop walks the on-disk
+    checkpoints, so without this the rewrite would silently shorten the trajectory. A
+    thinned point scored COSINE-ONLY off the sidecar has no on-disk entry to build from, so
+    its identity fields come from the stored point (`stubs`).
+    """
     reused = {p["ckpt_rel"]: p for p in plan.reuse}
+    stubs = stubs or {}
     out: list[dict] = []
     for point in points:
         rel = point["ckpt_rel"]
@@ -783,6 +866,21 @@ def _assemble_points(
             )
         elif rel in reused:
             out.append(reused[rel])
+    on_disk = {p["ckpt_rel"] for p in points}
+    extra = []
+    for rel, vec in computed.items():
+        if rel in on_disk or rel not in stubs:
+            continue
+        extra.append(
+            _null_point(stubs[rel]) if vec is None
+            else _build_point(stubs[rel], vec[0], vec[1], v_teacher)
+        )
+    scored = {p["ckpt_rel"] for p in extra}
+    thinned = [
+        p for rel, p in reused.items() if rel not in on_disk and rel not in scored
+    ]
+    if thinned or extra:
+        out = sorted(out + thinned + extra, key=lambda p: p.get("step"))
     return out
 
 

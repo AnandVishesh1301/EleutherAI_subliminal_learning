@@ -504,3 +504,72 @@ def test_load_model_weightc_unpinned_error_asks_for_step_pin(monkeypatch, tmp_pa
             PythiaModelSpec(size="160m", seed=1, variant="weightc"),
             tmp_path, "EleutherAI", "cpu",
         )
+
+
+# --- the data-recipe axis: dclm-baseline alongside the unnamed dolma1_7 default ----
+
+
+DCLM = "dclm-baseline"
+
+
+def test_dolma_spellings_are_byte_identical():
+    """The 1738 teacher runs on disk: the default recipe's names must not move."""
+    spec = DataDecideSpec()
+    assert dd_dir_name(spec) == "DataDecide-dolma1_7-1B-seed-default"
+    assert dd_repo_id(spec) == "allenai/DataDecide-dolma1_7-1B"
+    assert dd_revision(spec) == "step69369-seed-default"
+    assert dd_model_ref(spec) == (
+        "allenai/DataDecide-dolma1_7-1B@step69369-seed-default"
+    )
+    assert spec_label(DataDecideSpec(seed=2)) == "dd-1b-seed2"
+
+
+def test_dclm_token_resolves_to_its_own_repo():
+    spec = parse_dd_token("dd-1b-dclm")
+    assert spec == DataDecideSpec(size="1B", seed=1, step=None, recipe=DCLM)
+    assert dd_repo_id(spec) == "allenai/DataDecide-dclm-baseline-1B"
+    assert dd_dir_name(spec) == "DataDecide-dclm-baseline-1B-seed-default"
+    assert dd_model_ref(spec) == (
+        "allenai/DataDecide-dclm-baseline-1B@step69369-seed-default"
+    )
+    # seeds and the final step are shared with dolma1_7
+    assert dd_revision(parse_dd_token("dd-1b-dclm-seed2")) == "step69369-seed-large-aux-2"
+    assert parse_dd_token(f"dd-1b-dclm@step{DD_1B_FINAL_STEP}") == spec
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+@pytest.mark.parametrize("step", [None, 17500])
+def test_dclm_round_trips_token_ref_dir(seed, step):
+    token = f"dd-1b-dclm-seed{seed}" + (f"@step{step}" if step else "")
+    spec = parse_dd_token(token)
+    assert spec == DataDecideSpec(seed=seed, step=step, recipe=DCLM)
+    assert parse_dd_ref(dd_model_ref(spec)) == spec
+    assert base_dir_name_for_ref(dd_model_ref(spec)) == dd_dir_name(spec)
+    assert spec_label(spec) == token
+
+
+@pytest.mark.parametrize(
+    "token, fragment",
+    [
+        ("dd-1b-dolma", "recipe segment"),
+        ("dd-1b-dolma1_7", "recipe segment"),
+        ("dd-1b-foo", "recipe segment"),
+        ("dd-1b-seed2-dclm", "recipe segment"),
+        ("dd-1b-dclm-seed4", "valid ordinals"),
+    ],
+)
+def test_bad_recipe_tokens_rejected(token, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        parse_dd_token(token)
+
+
+def test_foreign_recipe_in_ref_rejected():
+    with pytest.raises(ValueError, match="wired recipe"):
+        parse_dd_ref("allenai/DataDecide-c4-1B@step69369-seed-default")
+
+
+@pytest.mark.parametrize("token", ["dd-1b-", "dd-1b-dclm-"])
+def test_trailing_hyphen_tokens_are_rejected(token):
+    """A trailing separator names no seed segment, whatever precedes it."""
+    with pytest.raises(ValueError):
+        parse_dd_token(token)

@@ -1,7 +1,13 @@
 """DataDecide (OLMo) base-model specs, Hub resolution, and loading.
 
 A second, fully isolated base-model family alongside PolyPythias: the AI2
-DataDecide 1B models, selected by `dd-1b[-seed{1,2,3}][@step{N}]` CLI tokens.
+DataDecide 1B models, selected by `dd-1b[-{recipe}][-seed{1,2,3}][@step{N}]` CLI
+tokens. The data recipe is an axis of its own, named centrally by
+`DD_RECIPE_SEGMENTS`: `dolma1_7` is the DEFAULT and is never spelled in a token
+(one canonical spelling per model), and `dclm` selects
+`DataDecide-dclm-baseline-1B`. The recipes are separate repos with the SAME
+branch structure, so the seeds and the final step are shared.
+
 The three full-budget seeds are HF BRANCHES of one repo, not separate repos, and
 each seed re-randomizes weight init AND data order together (there is no
 data-seed / weight-seed split as in PolyPythias).
@@ -26,8 +32,16 @@ if TYPE_CHECKING:  # torch/transformers stay OUT of the import graph of this mod
     from transformers import PreTrainedTokenizerBase
 
 DD_HUB_ORG = "allenai"
-DD_RECIPE = "dolma1_7"
-# Final training step of the 1B models; shared by all three full-budget seeds.
+# The data recipe axis. The DEFAULT recipe has NO token segment, so existing dolma1_7
+# spellings (tokens, dir names, refs) are byte-identical to before; every other recipe
+# is selected by its segment below. Hub repos: `DataDecide-{recipe}-{size}`.
+DD_DEFAULT_RECIPE = "dolma1_7"
+DD_RECIPE_SEGMENTS: dict[str, str] = {"dclm": "dclm-baseline"}
+#: Every recipe this repo can name, default first.
+DD_RECIPES: tuple[str, ...] = (DD_DEFAULT_RECIPE, *DD_RECIPE_SEGMENTS.values())
+_SEGMENT_BY_RECIPE: dict[str, str] = {v: k for k, v in DD_RECIPE_SEGMENTS.items()}
+# Final training step of the 1B models; shared by all three full-budget seeds of BOTH
+# recipes (the dclm-baseline repo has the same 29 step branches; verified 2026-09-18).
 DD_1B_FINAL_STEP = 69369
 # Ordinal seed -> DataDecide branch seed name. Only these three are selectable:
 # the `small-aux-*` branches are 25%-compute runs and are NEVER a valid choice.
@@ -47,13 +61,51 @@ class DataDecideSpec:
         size: DataDecide size. Only "1B" is exposed by the token grammar.
         seed: Ordinal seed 1-3, mapped to a branch via `DD_SEED_BRANCHES`.
         step: Training step to pin. None -> the final step (`DD_1B_FINAL_STEP`).
-        recipe: Data recipe; only "dolma1_7" is wired.
+        recipe: Data recipe, one of `DD_RECIPES`; defaults to `DD_DEFAULT_RECIPE`.
     """
 
     size: str = "1B"
     seed: int = 1
     step: int | None = None
-    recipe: str = "dolma1_7"
+    recipe: str = DD_DEFAULT_RECIPE
+
+
+def _recipe_menu() -> str:
+    """`'' (dolma1_7), 'dclm' (dclm-baseline)` -- the valid token recipe segments."""
+    return ", ".join(
+        [f"'' ({DD_DEFAULT_RECIPE}, the default)"]
+        + [f"'{seg}' ({name})" for seg, name in DD_RECIPE_SEGMENTS.items()]
+    )
+
+
+def dd_recipe_segment(recipe: str) -> str:
+    """Token segment of a recipe: `""` for the default, else e.g. `"dclm"`.
+
+    Raises:
+        ValueError: On a recipe outside `DD_RECIPES`.
+    """
+    if recipe == DD_DEFAULT_RECIPE:
+        return ""
+    if recipe not in _SEGMENT_BY_RECIPE:
+        raise ValueError(
+            f"unknown DataDecide recipe {recipe!r}; wired recipes are {DD_RECIPES} "
+            f"(token segments: {_recipe_menu()})"
+        )
+    return _SEGMENT_BY_RECIPE[recipe]
+
+
+def dd_token(spec: DataDecideSpec) -> str:
+    """Canonical CLI token of a spec, e.g. `dd-1b-dclm-seed2@step17500`.
+
+    The inverse of `parse_dd_token` (which canonicalizes `@step{final}` to unpinned).
+    """
+    if spec.size != "1B":
+        raise ValueError(
+            f"no CLI token for DataDecide {spec.recipe}-{spec.size}; only 1B is wired"
+        )
+    segment = dd_recipe_segment(spec.recipe)
+    token = "dd-1b" + (f"-{segment}" if segment else "") + f"-seed{spec.seed}"
+    return token + (f"@step{spec.step}" if spec.step is not None else "")
 
 
 def dd_repo_id(spec: DataDecideSpec) -> str:
@@ -92,8 +144,11 @@ def dd_dir_name(spec: DataDecideSpec) -> str:
 def parse_dd_token(token: str) -> DataDecideSpec:
     """Parse one `dd-*` base-model token into a `DataDecideSpec`.
 
-    Grammar: `dd-1b`, `dd-1b-seed{1|2|3}`, either optionally suffixed with
-    `@step{N}` (positive int). `dd-1b` is strict lowercase.
+    Grammar: `dd-1b[-{recipe}][-seed{1|2|3}][@step{N}]`, with `{recipe}` a segment
+    of `DD_RECIPE_SEGMENTS` (`dclm`) and `@step{N}` a positive int. The default
+    recipe (`dolma1_7`) has NO segment and must not be spelled, so each model has
+    exactly one canonical token. `dd-1b` is strict lowercase and the recipe
+    segment comes BEFORE the seed segment.
 
     `@step{DD_1B_FINAL_STEP}` canonicalizes to step=None, so the token, ref and
     dir-name identities of the final checkpoint all agree (see `parse_dd_ref`).
@@ -115,31 +170,78 @@ def parse_dd_token(token: str) -> DataDecideSpec:
             raise ValueError(
                 f"bad step {step} in DataDecide token {token!r}; must be positive"
             )
-    seed = 1
-    if "-seed" in raw:
-        raw, seed_str = raw.split("-seed", 1)
-        try:
-            seed = int(seed_str)
-        except ValueError:
-            raise ValueError(
-                f"bad seed {seed_str!r} in DataDecide token {token!r}; expected an "
-                f"integer ordinal in {_seed_menu()}"
-            ) from None
-        if seed not in DD_SEED_BRANCHES:
-            raise ValueError(
-                f"bad seed {seed} in DataDecide token {token!r}; valid ordinals are "
-                f"{_seed_menu()}"
-            )
-    if raw != "dd-1b":
+    if not raw.startswith("dd-1b") or raw[len("dd-1b") :][:1] not in ("", "-"):
         raise ValueError(
             f"bad DataDecide token {token!r}: only the 1B models are wired, spelled "
             "lowercase as 'dd-1b'. The 150M/300M aux seeds are budget-mismatched "
             "(trained to 25% of the 1B compute), so cross-seed work below 1B needs "
             "step-pinned checkpoints and is not selectable here"
         )
+    rest = raw[len("dd-1b") :]
+    recipe = DD_DEFAULT_RECIPE
+    if rest and not rest.startswith("-seed"):
+        segment, sep, tail = rest[1:].partition("-")
+        if sep and not tail:
+            # 'dd-1b-dclm-': a trailing separator names nothing, exactly as 'dd-1b-' does.
+            raise ValueError(
+                f"bad DataDecide token {token!r}: trailing '-' names no seed segment; "
+                f"expected 'dd-1b[-<recipe>][-seed<N>][@step<N>]'"
+            )
+        if segment not in DD_RECIPE_SEGMENTS:
+            raise ValueError(
+                f"bad recipe segment {segment!r} in DataDecide token {token!r}; valid "
+                f"recipe segments are {_recipe_menu()} -- the default recipe is never "
+                "spelled, so that each model has one canonical token"
+            )
+        recipe = DD_RECIPE_SEGMENTS[segment]
+        rest = f"-{tail}" if tail else ""
+    seed = 1
+    if rest:
+        seed_str = rest[len("-seed") :] if rest.startswith("-seed") else rest
+        if not rest.startswith("-seed") or not seed_str.isdigit():
+            # e.g. 'dd-1b-seed2-dclm': the recipe segment must precede the seed.
+            raise ValueError(
+                f"bad DataDecide token {token!r}: expected "
+                f"'dd-1b[-<recipe>][-seed<N>][@step<N>]' with the recipe segment BEFORE "
+                f"the seed; valid recipe segments are {_recipe_menu()}, valid seed "
+                f"ordinals are {_seed_menu()}"
+            )
+        seed = int(seed_str)
+        if seed not in DD_SEED_BRANCHES:
+            raise ValueError(
+                f"bad seed {seed} in DataDecide token {token!r}; valid ordinals are "
+                f"{_seed_menu()}"
+            )
     return DataDecideSpec(
-        size="1B", seed=seed, step=None if step == DD_1B_FINAL_STEP else step
+        size="1B",
+        seed=seed,
+        step=None if step == DD_1B_FINAL_STEP else step,
+        recipe=recipe,
     )
+
+
+def dd_recipe_of_repo_id(repo_id: str, *, context: str = "") -> str:
+    """The data recipe of a DataDecide hub repo id (`allenai/DataDecide-<recipe>-<size>`).
+
+    A bare repo id is seed-ambiguous (`parse_dd_ref` refuses it) but its RECIPE is
+    unambiguous, which is all a corpus-level decision — such as the probe pool in
+    `coherence.probe_io` — needs.
+
+    Raises:
+        ValueError: On a non-DataDecide repo id or an unwired recipe.
+    """
+    # The recipe may itself contain '-' (`dclm-baseline`), so split the SIZE off the end
+    # and match the remainder against the registered recipes.
+    prefix, sep, _size = repo_id.rpartition("-")
+    recipe_prefix = f"{DD_HUB_ORG}/DataDecide-"
+    recipe = prefix[len(recipe_prefix):] if prefix.startswith(recipe_prefix) else ""
+    if not sep or recipe not in DD_RECIPES:
+        raise ValueError(
+            f"bad DataDecide repo id {repo_id!r}{context}; expected "
+            f"'{DD_HUB_ORG}/DataDecide-<recipe>-<size>' with a wired recipe "
+            f"{DD_RECIPES}"
+        )
+    return recipe
 
 
 def parse_dd_ref(ref: str) -> DataDecideSpec:
@@ -160,12 +262,8 @@ def parse_dd_ref(ref: str) -> DataDecideSpec:
             "A bare repo id is ill-defined -- the three seeds share it"
         )
     repo, revision = ref.split("@", 1)
-    prefix, sep, size = repo.rpartition("-")
-    if not sep or prefix != f"{DD_HUB_ORG}/DataDecide-{DD_RECIPE}":
-        raise ValueError(
-            f"bad DataDecide repo id {repo!r} in ref {ref!r}; expected "
-            f"'{DD_HUB_ORG}/DataDecide-{DD_RECIPE}-<size>'"
-        )
+    recipe = dd_recipe_of_repo_id(repo, context=f" in ref {ref!r}")
+    size = repo.rpartition("-")[2]
     step_str, sep, branch = revision.partition("-seed-")
     if not sep or not step_str.startswith("step") or not step_str[len("step"):].isdigit():
         raise ValueError(
@@ -180,7 +278,10 @@ def parse_dd_ref(ref: str) -> DataDecideSpec:
         )
     step = int(step_str[len("step"):])
     return DataDecideSpec(
-        size=size, seed=seeds[branch], step=None if step == DD_1B_FINAL_STEP else step
+        size=size,
+        seed=seeds[branch],
+        step=None if step == DD_1B_FINAL_STEP else step,
+        recipe=recipe,
     )
 
 
@@ -248,7 +349,11 @@ def _require_hf_olmo() -> None:
 def load_datadecide_tokenizer(
     spec: DataDecideSpec, hf_cache_root: Path
 ) -> "PreTrainedTokenizerBase":
-    """Load the OLMo tokenizer for a DataDecide spec, at its pinned branch."""
+    """Load the OLMo tokenizer for a DataDecide spec, at its pinned branch.
+
+    Every wired recipe is OLMo-tokenized (vocab 50280), so the tokenizer is the same
+    object whichever recipe's repo it is loaded from.
+    """
     _require_hf_olmo()
     from transformers import AutoTokenizer
 

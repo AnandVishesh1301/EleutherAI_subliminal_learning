@@ -26,10 +26,12 @@ from __future__ import annotations
 from typing import Any
 
 from subliminal_learning.models.datadecide import (
+    DD_1B_FINAL_STEP,
     DD_HUB_ORG,
-    DD_RECIPE,
+    DD_RECIPES,
     DD_SEED_BRANCHES,
     DataDecideSpec,
+    dd_token,
     is_dd_ref,
     parse_dd_ref,
     parse_dd_token,
@@ -67,28 +69,35 @@ def _split_revision(text: str) -> tuple[str, str | None]:
 
 
 def _dd_spec_from_dir_name(name: str) -> DataDecideSpec:
-    """Invert `dd_dir_name`: `DataDecide-{recipe}-{size}-seed-{branch}[@step{N}]`."""
+    """Invert `dd_dir_name`: `DataDecide-{recipe}-{size}-seed-{branch}[@step{N}]`.
+
+    `@step{DD_1B_FINAL_STEP}` canonicalizes to step=None, exactly as `parse_dd_token` and
+    `parse_dd_ref` do, so the three spellings of the final checkpoint are ONE spec.
+    """
     head, rev = _split_revision(name)
     body, sep, branch = head.partition("-seed-")
     if not sep or not body.startswith(_DD_DIR_PREFIX):
         raise ValueError(f"cannot map {name!r} to a DataDecide spec")
-    recipe_size = body[len(_DD_DIR_PREFIX):]          # e.g. dolma1_7-1B
+    recipe_size = body[len(_DD_DIR_PREFIX):]          # e.g. dolma1_7-1B, dclm-baseline-1B
+    # Split the SIZE off the end: a recipe may itself contain '-' (`dclm-baseline`).
     recipe, sep, size = recipe_size.rpartition("-")
     if not sep:
         raise ValueError(f"cannot map {name!r} to a DataDecide spec (no size)")
     seeds = {v: k for k, v in DD_SEED_BRANCHES.items()}
     if branch not in seeds:
         raise ValueError(f"unknown DataDecide seed branch {branch!r} in {name!r}")
-    if size != "1B" or recipe != DD_RECIPE:
-        # Only the 1B dolma1_7 models have a CLI token (`dd-1b`); a dir name for any other
-        # size/recipe is a real DataDecide model but not one this repo can name.
+    if size != "1B" or recipe not in DD_RECIPES:
+        # Only the 1B models of a wired recipe have a CLI token (`dd-1b[-<recipe>]`); a dir
+        # name for any other size/recipe is a real DataDecide model this repo cannot name.
         raise ValueError(f"unsupported DataDecide size/recipe in {name!r}: only "
-                         f"DataDecide-{DD_RECIPE}-1B is wired")
+                         f"1B and recipes {DD_RECIPES} are wired")
     step: int | None = None
     if rev is not None:
         if not rev.startswith("step") or not rev[len("step"):].isdigit():
             raise ValueError(f"bad step suffix {rev!r} in DataDecide dir name {name!r}")
         step = int(rev[len("step"):])
+        if step == DD_1B_FINAL_STEP:
+            step = None
     return DataDecideSpec(size=size, seed=seeds[branch], step=step, recipe=recipe)
 
 
@@ -153,9 +162,9 @@ def base_spec(value: str | BaseSpec) -> BaseSpec:
     if "/" in text:                                   # a ref or repo id
         if is_dd_ref(text):
             spec = parse_dd_ref(text)
-            if spec.size != "1B" or spec.recipe != DD_RECIPE:
+            if spec.size != "1B" or spec.recipe not in DD_RECIPES:
                 raise ValueError(f"unsupported DataDecide size/recipe in ref {text!r}: only "
-                                 f"DataDecide-{DD_RECIPE}-1B is wired")
+                                 f"1B and recipes {DD_RECIPES} are wired")
             return spec
         ext = _external_spec_from_name(text)
         if ext is not None:
@@ -196,7 +205,8 @@ def base_token(value: str | BaseSpec) -> str:
     """Canonical `--base-models` CLI token of a base, from any spelling.
 
     Pythia: `pythia-<size>[-seed<N>]` for the `full` variant, `data-seed<N>` /
-    `weight-seed<N>` / `<local family>-seed<N>` for the 160m ensembles; DataDecide: `dd-1b-seed<N>`;
+    `weight-seed<N>` / `<local family>-seed<N>` for the 160m ensembles; DataDecide:
+    `dd-1b[-<recipe>]-seed<N>` (the default recipe dolma1_7 is never spelled);
     external: the registry alias. A pinned checkpoint keeps its `@revision` / `@step<N>`.
     """
     spec = base_spec(value)
@@ -204,9 +214,7 @@ def base_token(value: str | BaseSpec) -> str:
         alias = EXTERNAL_BASE_BY_REPO[spec.repo_id].alias
         return alias + (f"@{spec.revision}" if spec.revision is not None else "")
     if isinstance(spec, DataDecideSpec):
-        if spec.size != "1B" or spec.recipe != DD_RECIPE:
-            raise ValueError(f"no CLI token for DataDecide {spec.recipe}-{spec.size}; only 1B is wired")
-        return f"dd-1b-seed{spec.seed}" + (f"@step{spec.step}" if spec.step is not None else "")
+        return dd_token(spec)
     if spec.variant == "full":
         token = f"pythia-{spec.size}" + (f"-seed{spec.seed}" if spec.seed else "")
     else:

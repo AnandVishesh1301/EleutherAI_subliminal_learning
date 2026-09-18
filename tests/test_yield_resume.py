@@ -626,3 +626,19 @@ def test_resume_complete_refuses_an_adapter_whose_keys_do_not_match(tmp_path):
     with pytest.raises(RuntimeError, match="does not match this model"):
         _train(_base_model(tok), tok, run_dir, replace(cfg, stop_step=stop_step))
     assert not (run_dir / "checkpoints" / "adapter_model.safetensors").exists()
+
+
+def test_prune_refuses_a_checkpoint_the_endpoint_adapter_links_into(tmp_path):
+    """E6: the shared endpoint guard -- the rmtree would take the run's final weights."""
+    run_dir = tmp_path / "run"
+    leaf = run_dir / "checkpoints" / "checkpoint-4"
+    leaf.mkdir(parents=True)
+    (leaf / "adapter_model.safetensors").write_bytes(b"w")
+    (leaf / "optimizer.pt").write_bytes(b"o")
+    (leaf / "trainer_state.json").write_text(json.dumps({"global_step": 4}))
+    endpoint = run_dir / "checkpoints" / "adapter_model.safetensors"
+    endpoint.symlink_to(leaf / "adapter_model.safetensors")
+
+    report = prune_resume_state(run_dir, save_steps=2, final_step=4)
+    assert report["checkpoints_removed"] == [] and report["files_removed"] == []
+    assert leaf.is_dir() and endpoint.resolve().is_file()

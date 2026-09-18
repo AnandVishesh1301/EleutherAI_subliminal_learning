@@ -257,3 +257,31 @@ def test_anchor_pool_setup_for_cp1(monkeypatch):
     assert setup["expected_sha"] == pio.CP1_TOKEN_SHA
     assert setup["unigram_src"]["paths_key"] == dc.STEM_KEY
     assert setup["unigram_src"]["source_stem"].endswith("document")
+
+
+def test_shipped_cp1_text_records_match_the_frozen_cp1_tokens():
+    """The frozen cp1 TEXT is the frozen cp1 TOKENS, decoded: same docs, order and rows."""
+    recs, meta = pio.load_frozen_text(pio.CP1_TEXT_PATH, pio.CP1_TEXT_META_PATH)
+    token_recs, token_meta = dc.frozen_records()
+    assert [r["row"] for r in recs] == [r["row"] for r in token_recs]
+    assert [r["order_pos"] for r in recs] == list(range(len(token_recs)))
+    assert [r["pythia_n_tokens"] for r in recs] == [len(r["ids"]) for r in token_recs]
+    assert meta["cp1_token_sha"] == token_meta["token_sha256"]
+    assert (meta["source_stem"], meta["universe_n_docs"], meta["n_scanned"]) == (
+        token_meta["source_stem"], token_meta["universe_n_docs"], token_meta["n_scanned"])
+    assert meta["decode_tokenizer"] == "EleutherAI/pythia-160m"
+
+
+def test_anchor_pool_setup_for_cp1t_olmo(monkeypatch):
+    """`--pool cp1t-olmo` keeps cp1's DCLM source but fits in the family's vocabulary."""
+    from scripts import build_unigram_anchor as bua
+    from subliminal_learning.coherence import probe_families as pf
+
+    monkeypatch.setattr(pf, "load_family_tokenizer",
+                        lambda family, root, **kw: (_Tok(), family.tokenizer_repo))
+    setup = bua._pool_setup("cp1t-olmo", None)
+    assert setup["spec"].version == "cp1t-olmo"
+    assert setup["expected_sha"] == pio.CP1T_TOKEN_SHA["olmo"]
+    assert setup["unigram_src"]["corpus"] == "dclm-baseline-1.0-heldout"
+    assert setup["unigram_src"]["paths_key"] == dc.STEM_KEY
+    assert setup["family"]["tag"] == "olmo" and setup["provisional"] is False

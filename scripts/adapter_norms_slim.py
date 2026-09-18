@@ -32,6 +32,10 @@ from subliminal_learning.analysis.adapter_decomp import base_repo_and_revision_f
 from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 from subliminal_learning.coherence.probe_io import manifest_ref
 from subliminal_learning.config import resolve_roots
+from subliminal_learning.training.ckpt_ladder import (
+    steps_covered,
+    supersede_if_shrinking,
+)
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import final_train_step
 
@@ -74,6 +78,51 @@ def _record_is_current(run_dir: Path, name: str = "adapter_norms.json") -> bool:
     return ref is not None and rec.get("manifest_ref") == ref
 
 
+def traj_record_problem(run_dir: Path, disk_steps) -> str | None:
+    """Why the run's ``adapter_norms_traj.json`` is NOT current, or None when it is.
+
+    The trajectory record's currency is the shared one (`training.ckpt_ladder`): the run's
+    `manifest_ref` plus COVERAGE of the on-disk steps. `manifest_ref` alone was the old
+    gate, and it cannot see a checkpoint added since -- nor, more importantly, stop a
+    rerun on a THINNED run from rewriting a 41-point record with 7 points.
+
+    Shared with `scripts.adapter_norms_probe`, which writes the same record.
+    """
+    f = an.traj_record_path(run_dir)
+    if not f.is_file():
+        return "absent"
+    try:
+        rec = json.loads(f.read_text())
+    except (json.JSONDecodeError, OSError):
+        return "unreadable"
+    ref = manifest_ref(run_dir)
+    if ref is None or rec.get("manifest_ref") != ref:
+        return "manifest_ref"
+    stored = rec.get("checkpoint_steps")
+    if stored is None:   # records written before the header existed
+        stored = [p.get("step") for p in rec.get("points") or []]
+    return None if steps_covered(stored, disk_steps) else "steps_not_covered"
+
+
+def supersede_traj_if_shrinking(run_dir: Path, new_steps, log=None) -> None:
+    """Preserve a fuller stored trajectory record before this pass rewrites it.
+
+    Called immediately before every write of `an.traj_record_path`: on a thinned run the
+    harvest can only walk the surviving checkpoints (`training.ckpt_ladder`).
+    """
+    f = an.traj_record_path(run_dir)
+    if not f.is_file():
+        return
+    try:
+        rec = json.loads(f.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    stored = rec.get("checkpoint_steps")
+    if stored is None:
+        stored = [p.get("step") for p in rec.get("points") or []]
+    supersede_if_shrinking(run_dir, f, stored, new_steps, log=log)
+
+
 def _module_rows(adapter_file: Path, ckpt_dir: Path, output_root: Path) -> list[dict]:
     """Per-module ``B_Afinal_{fro,spec}`` + ``W0_{fro,spec}`` rows for one adapter file.
 
@@ -113,6 +162,9 @@ def main(
     checkpoints: bool = typer.Option(
         False, help="Also harvest every checkpoints/checkpoint-*/ adapter into "
         "eval/adapter_norms_traj.json (skipped when that record is current)."),
+    force: bool = typer.Option(
+        False, help="Rewrite the trajectory record even when it is current (it is still "
+                    "preserved beside itself if the rewrite would cover fewer steps)."),
 ) -> None:
     from threadpoolctl import threadpool_limits
 
@@ -146,7 +198,8 @@ def main(
                     "base_model_repo": base_repo, "base_revision": revision,
                 })
                 did = True
-            if checkpoints and not _record_is_current(rd, an.TRAJ_EVAL_NAME):
+            traj_steps: list[int] = []
+            if checkpoints:
                 rows = []
                 # The endpoint adapter at the `checkpoints/` root is the ladder's last
                 # point, at the manifest's `n_train_steps`: the `checkpoint-N` dir that
@@ -162,13 +215,19 @@ def main(
                     endpoint = ck / "adapter_model.safetensors"
                     if endpoint.exists():
                         ladder.append((end_step, endpoint))
+                traj_steps = sorted({s for s, _ in ladder})
+            if checkpoints and (force or traj_record_problem(rd, traj_steps)):
                 for step, f in ladder:
                     rows += [{"step": step, **m} for m in _module_rows(f, ck, output_root)]
                 if rows:
+                    supersede_traj_if_shrinking(rd, traj_steps)
                     atomic_write_json(an.traj_record_path(rd), an.build_traj_record(
                         rows, test_p=None, rank=rank, alpha=alpha, wrong_seed_offset=None,
                         provenance={"harvested_by": prov}, manifest_ref=manifest_ref(rd),
-                        base_model_repo=base_repo, base_revision=revision),
+                        base_model_repo=base_repo, base_revision=revision,
+                        # The ladder the record covers, endpoint included: the currency
+                        # gate is COVERAGE of the on-disk steps (`training.ckpt_ladder`).
+                        checkpoint_steps=traj_steps),
                         indent=None)
                     did = True
             # Register by record EXISTENCE, not by what this pass wrote: re-running slim

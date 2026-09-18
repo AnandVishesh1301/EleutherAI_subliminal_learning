@@ -14,7 +14,7 @@ not in flight (no fresh `.claim`, no `interrupted.json`), and the candidate must
 queue-yield checkpoint (`resume_marker.json` -- the pipeline's own
 `run_gate.prune_resume_state` owns those). `--apply` then deletes ONLY verified
 candidates, and only after `--check-readers` confirms this checkout compares checkpoint
-ladders on DISTINCT steps (`evaluation.ckpt_trajectories.STEP_GATE`); against an older
+ladders under the COVERAGE rule (`training.ckpt_ladder.STEP_GATE`); against an older
 checkout the deletion would mark every stored trajectory record stale.
 
 The tree is live (three nodes training and evaluating), so every fact the classification
@@ -56,11 +56,12 @@ from pathlib import Path
 import typer
 
 from subliminal_learning.config import resolve_output_root
-from subliminal_learning.evaluation.ckpt_trajectories import STEP_GATE
+from subliminal_learning.training.ckpt_ladder import STEP_GATE
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import (
     CLAIM_TTL_SECONDS,
     acquire_claim,
+    endpoint_link_problem,
     find_leaf_dirs_parallel,
     release_claim,
 )
@@ -106,7 +107,7 @@ def is_run_dir(path: Path) -> bool:
     return (path / MANIFEST).is_file() and (path / "checkpoints" / ADAPTER).is_file()
 
 
-def find_run_dirs(root: Path, *, max_depth: int = 10, workers: int = 32,
+def find_run_dirs(root: Path, *, max_depth: int = 10, workers: int = 8,
                   progress: bool = False) -> list[Path]:
     """Run dirs under `root`, found with a thread-parallel bounded `os.scandir` walk.
 
@@ -445,7 +446,9 @@ def unsafe_path_reason(run_dir: Path, candidate: Path) -> str | None:
         return "candidate resolves to the checkpoints root"
     if not resolved.is_relative_to(root):
         return f"candidate resolves outside {root}"
-    return None
+    # The run's FINAL adapter lives at the checkpoints root; refuse a candidate it resolves
+    # into (shared guard, also used by the thinning script and `run_gate`).
+    return endpoint_link_problem(run_dir, [candidate])
 
 
 # `--stream` deletes from the walk's worker threads; the deletion log is one file, so the
@@ -586,30 +589,48 @@ def reader_gate_problems() -> list[str]:
 
     Each gate is checked INSIDE the function that does the comparing (located with `ast`),
     so a leftover mention in a docstring or a dead helper cannot pass a regressed gate. A
-    checkout predating the change has no `STEP_GATE` and no `distinct_steps` use in the
-    dose/fidelity/legacy gates; deleting the duplicate under it would mark every stored
-    trajectory record stale.
+    checkout predating the change has no `STEP_GATE` of ``"covers"`` and no `steps_covered`
+    use in the dose/fidelity/legacy gates; deleting a checkpoint under it would mark every
+    stored trajectory record stale (see `training.ckpt_ladder`).
     """
     problems = []
-    if STEP_GATE != "distinct":
-        problems.append(f"evaluation.ckpt_trajectories.STEP_GATE={STEP_GATE!r}")
+    if STEP_GATE != "covers":
+        problems.append(f"training.ckpt_ladder.STEP_GATE={STEP_GATE!r}")
+    # {relative path: (function name or accepted alternatives, needle)}. Every gate that
+    # can REWRITE a per-checkpoint record is listed, not only the three trajectory scripts:
+    # a regression to equality in any of them shrinks a stored record the moment a
+    # checkpoint is deleted.
     gates = {
-        "scripts/ckpt_dose_trajectory.py": ("_run_one", "distinct_steps(stored_steps)"),
-        "scripts/fidelity_ckpt_trajectory.py": ("_is_current", "want = distinct_steps("),
-        "scripts/convert_legacy_pilekl_to_rundir.py": ("main", "distinct_steps(legacy_steps)"),
+        "scripts/ckpt_dose_trajectory.py": ("_run_one", "steps_covered(stored_steps"),
+        "scripts/fidelity_ckpt_trajectory.py": ("_is_current", "steps_covered("),
+        "scripts/convert_legacy_pilekl_to_rundir.py": ("main", "steps_covered(legacy_steps"),
+        "src/subliminal_learning/evaluation/ckpt_trajectories.py": [
+            ("eval_is_current", "steps_covered("),
+            # The Pile-KL gate is inline in the trajectory function itself.
+            ("pile_kl_trajectory", "steps_covered("),
+        ],
+        # The spectra gate is being renamed by a concurrent change; either name counts.
+        "scripts/adapter_spectra_trajectory.py":
+            (("_record_is_current", "spectra_record_problem"), "steps_covered("),
+        "scripts/adapter_norms_slim.py": ("traj_record_problem", "steps_covered("),
+        "src/subliminal_learning/steering/eas.py": ("eas_doc_status", "ladder_steps"),
     }
-    for rel, (func, needle) in gates.items():
+    for rel, checks in gates.items():
         try:
             text = (ROOT / rel).read_text()
         except OSError as exc:
             problems.append(f"{rel}: {exc}")
             continue
-        body = _function_source(text, func)
-        if body is None:
-            problems.append(f"{rel}: no function {func}()")
-        elif needle not in body:
-            problems.append(
-                f"{rel}: {func}() has no distinct-step comparison ({needle!r} absent)")
+        for names, needle in (checks if isinstance(checks, list) else [checks]):
+            names = (names,) if isinstance(names, str) else names
+            bodies = {n: _function_source(text, n) for n in names}
+            found = {n: b for n, b in bodies.items() if b is not None}
+            if not found:
+                problems.append(f"{rel}: no function {' / '.join(names)}()")
+            elif not any(needle in b for b in found.values()):
+                problems.append(
+                    f"{rel}: {'/'.join(found)}() has no distinct-step comparison "
+                    f"({needle!r} absent)")
     return problems
 
 
@@ -638,7 +659,8 @@ def main(
     limit: int = typer.Option(0, help="Inspect at most N run dirs (0 = no limit)."),
     workers: int = typer.Option(8, help="Threads for the compares."),
     walk_workers: int = typer.Option(
-        32, "--walk-workers", help="Threads for the run-dir discovery walk."),
+        8, "--walk-workers",
+        help="Threads for the discovery walk; keep low, the nodes run GPU jobs"),
     glob_depth: int = typer.Option(10, help="Max directory depth below each root."),
     check_readers: bool = typer.Option(
         True, help="Refuse --apply unless this checkout's trajectory gates compare "

@@ -96,3 +96,51 @@ def test_sidecar_is_recomputed_when_its_own_pool_moves(stubbed):
     calls.clear()
     rfe.main(runs=runs_file, evals="probe", probe_pools="pp1,cp1", n_rows=256, device="cpu")
     assert calls == ["cp1"]      # only the stale pool
+
+
+def test_datadecide_dclm_base_is_native_on_cp1t_olmo_with_dp1_as_sidecar(stubbed):
+    """The base's RECIPE picks the native pool; the other recipe's pool is a sidecar."""
+    rd, runs_file, calls = stubbed
+    mf = json.loads((rd / "train_manifest.json").read_text())
+    mf["base_model_repo"] = "allenai/DataDecide-dclm-baseline-1B@step69369-seed-default"
+    (rd / "train_manifest.json").write_text(json.dumps(mf))
+    rfe.main(runs=runs_file, evals="probe", probe_pools="cp1t-olmo,dp1", n_rows=256,
+             device="cpu")
+    assert sorted(p.name for p in (rd / "eval").iterdir()) == [
+        "pile_probe.dp1.json", "pile_probe.json"]
+    assert json.loads((rd / "eval/pile_probe.json").read_text())["pool_version"] == "cp1t-olmo"
+    assert sorted(calls) == ["cp1t-olmo", "dp1"]
+
+
+def test_incompatible_pool_for_the_runs_base_is_refused(stubbed):
+    """Cross-tokenizer pools never reach a model: dp1 on Pythia is not a Pythia pool."""
+    _, runs_file, calls = stubbed
+    with pytest.raises(ValueError, match="not a pool for base"):
+        rfe.main(runs=runs_file, evals="probe", probe_pools="pp1,dp1", n_rows=256,
+                 device="cpu")
+    assert calls == []
+
+
+def test_pp1_is_refused_on_an_olmo_base(stubbed):
+    rd, runs_file, calls = stubbed
+    mf = json.loads((rd / "train_manifest.json").read_text())
+    mf["base_model_repo"] = "allenai/DataDecide-dolma1_7-1B@step69369-seed-default"
+    (rd / "train_manifest.json").write_text(json.dumps(mf))
+    with pytest.raises(ValueError, match="not a pool for base"):
+        rfe.main(runs=runs_file, evals="probe", probe_pools="pp1", n_rows=256,
+                 device="cpu")
+    assert calls == []
+
+
+def test_cp1t_olmo_is_accepted_as_a_sidecar_on_a_dolma_base(stubbed):
+    """Same tokenizer, the other DataDecide recipe's corpus: opt-in cross-corpus stays on."""
+    rd, runs_file, calls = stubbed
+    mf = json.loads((rd / "train_manifest.json").read_text())
+    mf["base_model_repo"] = "allenai/DataDecide-dolma1_7-1B@step69369-seed-default"
+    (rd / "train_manifest.json").write_text(json.dumps(mf))
+    rfe.main(runs=runs_file, evals="probe", probe_pools="dp1,cp1t-olmo", n_rows=256,
+             device="cpu")
+    assert sorted(p.name for p in (rd / "eval").iterdir()) == [
+        "pile_probe.cp1t-olmo.json", "pile_probe.json"]
+    assert json.loads((rd / "eval/pile_probe.json").read_text())["pool_version"] == "dp1"
+    assert sorted(calls) == ["cp1t-olmo", "dp1"]

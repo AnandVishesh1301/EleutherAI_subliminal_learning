@@ -10,6 +10,7 @@ this module only performs the IO around them.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import hashlib
 import json
 import os
@@ -647,35 +648,109 @@ def append_runs_index(output_root: Path, row: dict[str, Any]) -> None:
     os.replace(tmp, index)
 
 
-# --------------------------------------------------------------------------- tree walk
-def find_leaf_dirs_parallel(
-    roots: Iterable[Path],
-    is_leaf: Callable[[Path], bool],
-    *,
-    skip_names: Sequence[str] = (),
-    skip_prefixes: Sequence[str] = (),
-    max_depth: int = 10,
-    workers: int = 32,
-    progress: bool = False,
-    progress_every: int = 2000,
-) -> list[Path]:
-    """Leaf dirs under `roots`, found with a thread-parallel bounded `os.scandir` walk.
+# --------------------------------------------------------------------------- delete guard
+ENDPOINT_FILES = ("adapter_model.safetensors", "adapter_config.json")
 
-    A leaf is never descended into, so leaves are never nested. Names in `skip_names` or
-    starting with one of `skip_prefixes` are never entered, symlinked dirs are never
-    followed, and `max_depth` bounds the descent (0 = test the roots only). Directories
-    that vanish or refuse access mid-walk are skipped silently. The cost is per-scandir
-    network latency, not CPU, so the work is spread over threads: each scanned directory
-    submits its child dirs as new tasks. Returns a sorted list.
+
+def endpoint_link_problem(run_dir: Path, targets: Iterable[Path]) -> str | None:
+    """Why deleting `targets` might destroy the run's ENDPOINT adapter, or None if safe.
+
+    Every deleter of a `checkpoints/checkpoint-N` dir (the thinning script, the final-dir
+    dedupe, `run_gate.prune_resume_state`) rests on the same layout assumption: the endpoint
+    adapter is a REAL file at the `checkpoints/` root and the rungs are separate dirs below
+    it. A symlink anywhere at that root breaks it -- the endpoint files can be links INTO a
+    rung (deleting the rung destroys the run's final adapter) or out of the run entirely --
+    so this is one guard, called from all three rather than reimplemented per deleter.
+
+    Refuses when: `checkpoints/` is unreadable, ANY entry at its root is a symlink, an
+    endpoint file is a symlink or unresolvable, or a resolved endpoint file lives inside a
+    resolved target.
+    """
+    ckpt_root = Path(run_dir) / "checkpoints"
+    try:
+        entries = list(os.scandir(ckpt_root))
+    except OSError as exc:
+        return f"unreadable checkpoints/: {exc}"
+    for entry in entries:
+        if entry.is_symlink():
+            return f"symlink at checkpoints/ root: {entry.name}"
+    endpoints = []
+    for name in ENDPOINT_FILES:
+        path = ckpt_root / name
+        if path.is_symlink():
+            return f"{name} is a symlink"
+        if path.exists():
+            try:
+                endpoints.append(path.resolve())
+            except OSError as exc:
+                return f"unresolvable {name}: {exc}"
+    for target in targets:
+        target = Path(target)
+        try:
+            resolved = target.resolve()
+        except OSError as exc:
+            return f"unresolvable {target.name}: {exc}"
+        for endpoint in endpoints:
+            if endpoint.is_relative_to(resolved):
+                return f"endpoint adapter resolves inside {target.name}"
+    return None
+
+
+# --------------------------------------------------------------------------- tree walk
+class WalkError(RuntimeError):
+    """A parallel walk hit errors it could not attribute to a missing/denied directory.
+
+    Raised at the END of the walk (never mid-flight), so the walk is complete except for
+    the failing subtrees. Carries how many directories failed and a capped sample of
+    ``(path, error class)`` pairs. Callers that would rather inspect the errors than abort
+    pass ``errors=[]``; see `find_leaf_dirs_parallel`.
+    """
+
+    def __init__(self, count: int, samples: Sequence[tuple[Path, str]]) -> None:
+        self.count = count
+        self.samples = list(samples)
+        shown = ", ".join(f"{path} ({err})" for path, err in self.samples)
+        super().__init__(
+            f"{count} director{'y' if count == 1 else 'ies'} failed during the walk; the "
+            f"result is TRUNCATED. First {len(self.samples)}: {shown}"
+        )
+
+
+_WALK_ERROR_SAMPLES = 20
+
+
+def _parallel_walk(
+    roots: Iterable[Path],
+    *,
+    stop_at: Callable[[Path], bool],
+    pick: Callable[[Path, list], list[Path]] | None,
+    skip_names: Sequence[str],
+    skip_prefixes: Sequence[str],
+    max_depth: int,
+    workers: int,
+    errors: list | None,
+    progress: bool,
+    progress_every: int,
+) -> list[Path]:
+    """Shared thread-parallel bounded ``os.scandir`` walk behind the two finders.
+
+    ``stop_at(dir)`` marks a directory as a result that is never descended into;
+    ``pick(dir, entries)`` (when given) selects results among a scanned dir's entries.
+    Errors are recorded rather than killing a worker; see `find_leaf_dirs_parallel`.
     """
     tasks: queue.Queue = queue.Queue()
     for root in roots:
         tasks.put((Path(root), 0))
     found: list[Path] = []
+    err_samples: list[tuple[Path, str]] = []
+    err_count = 0
     lock = threading.Lock()
     scanned = 0
     started = time.time()
     prefixes = tuple(skip_prefixes)
+    # With `pick` the dir sitting AT the depth bound must still be scanned for its FILES;
+    # a leaf walk only ever reports directories, so scanning there would be pure syscalls.
+    scan_at_max = pick is not None
 
     def report() -> None:
         print(f"  walk: {scanned} dirs scanned, {len(found)} leaves, "
@@ -683,20 +758,27 @@ def find_leaf_dirs_parallel(
 
     def visit(current: Path, depth: int) -> None:
         nonlocal scanned
-        leaf = is_leaf(current)
+        stop = stop_at(current)
         entries: list = []
-        if not leaf and depth < max_depth:
+        if not stop and (depth < max_depth or scan_at_max):
             try:
                 entries = list(os.scandir(current))
-            except (FileNotFoundError, NotADirectoryError, PermissionError):
+            except (FileNotFoundError, NotADirectoryError):
+                entries = []      # vanished mid-walk: not an error, nothing to descend into
+            except OSError as exc:
+                # A denied / unreadable dir is a TRUNCATED result, not an empty one: treating
+                # it as empty made a walk over a tree with one 0700 dir report "no runs
+                # there" instead of failing. Recorded (WalkError / `errors`); still not
+                # descended into.
                 entries = []
+                record(current, exc)
+        results = [current] if stop else (pick(current, entries) if pick else [])
         with lock:
             scanned += 1
-            if leaf:
-                found.append(current)
+            found.extend(results)
             if progress and scanned % progress_every == 0:
                 report()
-        if leaf:
+        if stop or depth >= max_depth:
             return
         for entry in entries:
             try:
@@ -708,24 +790,135 @@ def find_leaf_dirs_parallel(
                 continue
             tasks.put((Path(entry.path), depth + 1))
 
+    def record(current: Path, exc: Exception) -> None:
+        nonlocal err_count
+        rec = (Path(current), type(exc).__name__)
+        with lock:
+            err_count += 1
+            if len(err_samples) < _WALK_ERROR_SAMPLES:
+                err_samples.append(rec)
+            if errors is not None:
+                errors.append(rec)
+
     def worker() -> None:
         while True:
             item = tasks.get()
             try:
                 if item is None:
                     return
-                visit(*item)
+                try:
+                    visit(*item)
+                except Exception as exc:  # a dead worker would truncate the walk silently
+                    record(item[0], exc)
             finally:
                 tasks.task_done()
 
     threads = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, workers))]
     for t in threads:
         t.start()
-    tasks.join()
+    drained = threading.Event()
+    watcher = threading.Thread(target=lambda: (tasks.join(), drained.set()), daemon=True)
+    watcher.start()
+    # Watchdog: a bare `tasks.join()` blocks FOREVER if every worker died (an error escaping
+    # the catch above, a thread the interpreter killed). A dead pool must raise, never hang.
+    while not drained.wait(0.05):
+        if not any(t.is_alive() for t in threads):
+            raise WalkError(
+                max(err_count, 1), err_samples or [(Path("<pool>"), "DeadWorkers")]
+            )
     for _ in threads:
         tasks.put(None)
     for t in threads:
         t.join()
     if progress:
         report()
+    if err_count and errors is None:
+        raise WalkError(err_count, err_samples)
     return sorted(found)
+
+
+def find_leaf_dirs_parallel(
+    roots: Iterable[Path],
+    is_leaf: Callable[[Path], bool],
+    *,
+    skip_names: Sequence[str] = (),
+    skip_prefixes: Sequence[str] = (),
+    max_depth: int = 10,
+    workers: int = 8,
+    progress: bool = False,
+    progress_every: int = 2000,
+    errors: list | None = None,
+) -> list[Path]:
+    """Leaf dirs under `roots`, found with a thread-parallel bounded `os.scandir` walk.
+
+    A leaf is never descended into, so leaves are never nested. Names in `skip_names` or
+    starting with one of `skip_prefixes` are never entered, symlinked dirs are never
+    followed, and `max_depth` bounds the descent (0 = test the roots only). Directories
+    that vanish or refuse access mid-walk are skipped silently. The cost is per-scandir
+    network latency, not CPU, so the work is spread over threads: each scanned directory
+    submits its child dirs as new tasks. Returns a sorted list.
+
+    Anything else that goes wrong for one directory -- `is_leaf` raising, an ESTALE from a
+    network mount -- is caught, counted and recorded (path + error class) instead of
+    killing the worker thread, which would silently TRUNCATE the result. At the end the
+    walk raises `WalkError` if anything was recorded, unless the caller passes a list as
+    `errors`: then the ``(path, error class)`` records are appended to it and the walk
+    returns normally, leaving the caller to decide (a deleting tool wants to refuse to act
+    on a truncated view rather than crash).
+    """
+    return _parallel_walk(
+        roots,
+        stop_at=is_leaf,
+        pick=None,
+        skip_names=skip_names,
+        skip_prefixes=skip_prefixes,
+        max_depth=max_depth,
+        workers=workers,
+        errors=errors,
+        progress=progress,
+        progress_every=progress_every,
+    )
+
+
+def find_files_parallel(
+    roots: Iterable[Path],
+    match_name: str,
+    *,
+    skip_names: Sequence[str] = (),
+    skip_prefixes: Sequence[str] = (),
+    max_depth: int = 24,
+    workers: int = 8,
+    errors: list | None = None,
+) -> list[Path]:
+    """Files whose NAME matches the `fnmatch` pattern `match_name`, anywhere under `roots`.
+
+    The file sibling of `find_leaf_dirs_parallel`, with the same contract: bounded depth,
+    symlinked dirs never entered, `skip_names` / `skip_prefixes` pruned, errors recorded
+    and raised as `WalkError` unless an `errors` list is passed. Equivalent to
+    ``sorted(root.rglob(match_name))`` restricted to regular files, plus the depth bound
+    and the pruning.
+    """
+    def pick(current: Path, entries: list) -> list[Path]:
+        out: list[Path] = []
+        for entry in entries:
+            if not fnmatch.fnmatch(entry.name, match_name):
+                continue
+            try:
+                if entry.is_file():
+                    out.append(Path(entry.path))
+            except OSError:
+                continue
+        return out
+
+    return _parallel_walk(
+        roots,
+        stop_at=lambda _p: False,
+        pick=pick,
+        skip_names=skip_names,
+        skip_prefixes=skip_prefixes,
+        max_depth=max_depth,
+        workers=workers,
+        errors=errors,
+        progress=False,
+        progress_every=2000,
+    )

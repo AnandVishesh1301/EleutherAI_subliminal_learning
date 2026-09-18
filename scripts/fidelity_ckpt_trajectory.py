@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 from peft import PeftModel
 
 from scripts.ckpt_preference_trajectory import _checkpoint_dirs
-from subliminal_learning.evaluation.ckpt_trajectories import distinct_steps
+from subliminal_learning.training.ckpt_ladder import steps_covered, supersede_if_shrinking
 from scripts.fidelity_heldout_ce import batched_completion_ce, split_rows
 from subliminal_learning.config import resolve_output_root, resolve_roots
 from subliminal_learning.evaluation.ckpt_trajectories import release_base
@@ -69,15 +69,22 @@ def _is_current(run_dir: Path, n_rows: int, ckpts: list[tuple[int, Path]]) -> bo
     except (json.JSONDecodeError, OSError):
         return False
     ref = manifest_ref(run_dir)
-    # Compared on DISTINCT STEPS, not on (step, dir name): the endpoint's duplicate
-    # `checkpoint-N` dir is no longer written and is being deleted from finished runs, and
-    # a record measured with it must stay current (see
-    # `evaluation.ckpt_trajectories.STEP_GATE`).
-    have = distinct_steps(p["step"] for p in rec.get("points", []))
-    want = distinct_steps(step for step, _ in ckpts)
+    # The shared COVERAGE predicate on distinct steps, not on (step, dir name): the
+    # endpoint's duplicate `checkpoint-N` dir is no longer written and is being deleted from
+    # finished runs, and intermediate checkpoints are being thinned -- a record measured over
+    # the fuller ladder must stay current (see `training.ckpt_ladder.STEP_GATE`).
     return (ref is not None and rec.get("schema_version") == SCHEMA_VERSION
             and rec.get("manifest_ref") == ref and rec.get("n_rows") == n_rows
-            and set(want) <= set(have))
+            and steps_covered(_record_steps(rec), [step for step, _ in ckpts]))
+
+
+def _record_steps(rec: dict) -> list:
+    """A stored record's checkpoint steps: its header, or its points for older records.
+
+    The header (`checkpoint_steps`, endpoint included) is written since 2026-09-18 so the
+    gate and the shrink guard read ONE list; records written before it only have points.
+    """
+    return rec.get("checkpoint_steps") or [p.get("step") for p in rec.get("points") or []]
 
 
 @app.command()
@@ -153,9 +160,21 @@ def main(
             "pool_dir": man["number_dataset_dir"], "filtered_sha256": man.get("filtered_sha256"),
             "subsample_size": man["subsample_size"], "subsample_seed": man["subsample_seed"],
             "ce_base_heldout": ce_b, "ce_base_train": ce_tr_b,
+            # Endpoint included: `_checkpoint_dirs` ends on the adapter at `checkpoints/`.
+            "checkpoint_steps": sorted({p["step"] for p in points}),
             "points": points, "manifest_ref": manifest_ref(rd),
         }
-        atomic_write_json(rd / "eval" / EVAL_NAME, rec)
+        # Never replace a stored record with one covering fewer checkpoint steps: after
+        # thinning this pass can only measure what survives on disk (`ckpt_ladder`).
+        out_file = rd / "eval" / EVAL_NAME
+        if out_file.is_file():
+            try:
+                prev = json.loads(out_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                prev = {}
+            supersede_if_shrinking(rd, out_file, _record_steps(prev),
+                                   [p["step"] for p in points])
+        atomic_write_json(out_file, rec)
         fin = [p for p in points if "ce_heldout" in p]
         print(f"{rd.parent.name}/{rd.name}: {len(points)} ckpts "
               f"({len(points) - len(fin)} nonfinite); endpoint heldout="

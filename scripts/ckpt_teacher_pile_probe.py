@@ -26,7 +26,7 @@ def resolve_teacher_dirs(sweep_config: Path, step: int):
     from subliminal_learning.analysis.frames import parse_param_tag
     from subliminal_learning.schedule_tags import DEFAULT_SCHEDULE
     from subliminal_learning.teachers.config import load_template_config
-    from subliminal_learning.teachers.model_specs import parse_base_models
+    from subliminal_learning.models.datadecide import parse_base_model_tokens
     from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
 
     sweep = yaml.safe_load(sweep_config.read_text())
@@ -38,7 +38,7 @@ def resolve_teacher_dirs(sweep_config: Path, step: int):
         Path(sweep["teacher"]["training_config"]),
         Path("configs/experiment/template_bias_pythia160m.yaml"),
     )
-    spec = parse_base_models(
+    spec = parse_base_model_tokens(
         f"{sweep['base_model']}@step{step}",
         allow_full_seeds=bool(sweep.get("allow_full_seed_bases", False)),
     )[0]

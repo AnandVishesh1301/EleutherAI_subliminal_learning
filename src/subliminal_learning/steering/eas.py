@@ -21,7 +21,7 @@ GPU or disk.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import torch
 import torch.nn.functional as F
@@ -111,11 +111,17 @@ class DocPlan:
         dropped: ``ckpt_rel`` values stored in the document whose checkpoint no longer
             exists on disk; the run dir is the unit, so these points are deleted. A rel
             whose STEP is still covered by a retained point (the endpoint's former
-            duplicate `checkpoint-N` dir) is NOT dropped -- the document still describes
-            the ladder.
+            duplicate `checkpoint-N` dir), or whose step the ladder manifest lists (the
+            checkpoint was THINNED), is NOT dropped -- the document still describes the
+            ladder, and a thinned point is reused verbatim.
         stale_refs: Reference keys whose stored ``teacher_adapter_id`` disagrees with the
             teacher checkpoint on disk (an in-place teacher retrain); their cosines are
             recomputed for every point.
+        unscorable: ``{ckpt_rel: (ref_key, ...)}`` for THINNED points that lack a requested
+            reference and have no sidecar vector either: the checkpoint is gone, so that
+            reference can never be measured there. The point is still reused (annotated
+            ``unscorable_refs``), the document is NOT `is_current` for those references, and
+            a sweep must record the unit as done rather than re-enqueue it forever.
         reason: Why the document is invalid, for logging (None when it is not).
     """
 
@@ -126,12 +132,26 @@ class DocPlan:
     dropped: tuple[str, ...]
     stale_refs: tuple[str, ...]
     reason: str | None = None
+    unscorable: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def is_current(self) -> bool:
         """True when the stored document already answers the request byte-for-byte."""
         return not (
             self.invalid or self.cosine_only or self.recompute or self.dropped
+            or self.unscorable
+        )
+
+    @property
+    def only_unscorable(self) -> bool:
+        """True when the ONLY thing left undone is a reference no checkpoint can supply.
+
+        The terminal state of a thinned run: a sweep logs it once and does not re-enqueue
+        the unit (nothing a rerun could compute).
+        """
+        return bool(self.unscorable) and not (
+            self.invalid or self.cosine_only or self.recompute or self.dropped
+            or self.stale_refs
         )
 
     @property
@@ -148,6 +168,7 @@ def eas_doc_status(
     references: dict[str, str | None],
     sidecar_ckpts: frozenset[str] | set[str] | tuple[str, ...] = (),
     manifest_ref: dict | None = None,
+    ladder_steps: frozenset[int] | set[int] | tuple[int, ...] = (),
     force: bool = False,
     cheap: bool = False,
 ) -> DocPlan:
@@ -165,7 +186,12 @@ def eas_doc_status(
     - a point missing only a reference is COSINE_ONLY when its student vector is in a
       current sidecar (``sidecar_ckpts``), else it is RECOMPUTEd;
     - a stored point whose checkpoint no longer exists on disk is DROPPED (unlike the
-      retired lineage document, whose unit spanned run dirs, a run dir owns its points).
+      retired lineage document, whose unit spanned run dirs, a run dir owns its points) --
+      UNLESS its step is in the run's ladder manifest (`ladder_steps`), i.e. the checkpoint
+      was THINNED, not lost: that point is reused so the rewrite keeps it -- but only if it
+      already carries every requested reference; otherwise it is COSINE_ONLY when the sidecar
+      still holds its student vector, and UNSCORABLE (reused, annotated ``unscorable_refs``)
+      when it does not, the checkpoint being gone.
 
     Args:
         doc: The stored document, or None.
@@ -173,8 +199,12 @@ def eas_doc_status(
         checkpoints: ``(ckpt_rel, adapter_id)`` on disk, in the order they will be written.
         references: ``{ref_key: teacher_adapter_id}`` requested for this pass.
         sidecar_ckpts: ``ckpt_rel`` values held by a CURRENT vector sidecar.
+        ladder_steps: every step the run's ladder manifest says EVER existed
+            (`training.ckpt_ladder.ladder_steps`); a stored point at one of these steps
+            whose checkpoint dir is gone was thinned away, not lost.
         manifest_ref: The run's `utils.run_io.manifest_ref`, compared with the stored one.
-        force: Recompute everything.
+        force: Recompute every ON-DISK checkpoint (thinned points are still carried, unless
+            the stored identity drifted).
         cheap: Sweep-gate mode. An entry of `checkpoints` whose ``adapter_id`` is None is
             not adapter-checked (only its presence in the document is), so the gate can
             skip hashing intermediate checkpoints and key on ``ckpt_rel`` + the endpoint
@@ -185,11 +215,33 @@ def eas_doc_status(
         A `DocPlan`.
     """
     ckpt_order = [rel for rel, _ in checkpoints]
-    if force or doc is None:
+    if doc is None:
         return DocPlan(
             invalid=True, reuse=(), cosine_only=(), recompute=tuple(ckpt_order),
-            dropped=(), stale_refs=tuple(references),
-            reason="force" if force else "no stored document",
+            dropped=(), stale_refs=tuple(references), reason="no stored document",
+        )
+    if force:
+        # Force recomputes every ON-DISK checkpoint, but a THINNED point has no checkpoint
+        # to recompute from: it is carried through the same reuse / cosine-only /
+        # unscorable logic as the non-force path, so a forced rerun never shrinks the
+        # document. Nothing is carried when the identity drifted (prompt set, or an
+        # in-place retrain): those measurements describe a different unit, so dropping
+        # them is correct, and `supersede_if_shrinking` on write preserves the old file.
+        same_identity = (
+            all(doc.get(k) == expected_meta.get(k) for k in DOC_META_KEYS)
+            and (doc.get("student") or {}).get("manifest_ref") == manifest_ref
+        )
+        reuse, cosine_only, unscorable = (), (), {}
+        if same_identity:
+            reuse, cosine_only, _, unscorable = _thinned_plan(
+                doc, live=set(ckpt_order), references=references,
+                sidecar_ckpts=sidecar_ckpts, ladder_steps=ladder_steps,
+                stale=_stale_refs(doc, references),
+            )
+        return DocPlan(
+            invalid=True, reuse=reuse, cosine_only=cosine_only,
+            recompute=tuple(ckpt_order), dropped=(), stale_refs=tuple(references),
+            unscorable=unscorable, reason="force",
         )
     for key in DOC_META_KEYS:
         if doc.get(key) != expected_meta.get(key):
@@ -206,11 +258,7 @@ def eas_doc_status(
             reason="train_manifest_ref changed (the run was retrained in place)",
         )
 
-    stored_refs = doc.get("references") or {}
-    stale = tuple(sorted(
-        k for k, aid in references.items()
-        if k in stored_refs and stored_refs[k].get("teacher_adapter_id") != aid
-    ))
+    stale = _stale_refs(doc, references)
     needed = set(references)
     stored_points = {p.get("ckpt_rel"): p for p in doc.get("points") or []}
     sidecar = set(sidecar_ckpts)
@@ -242,17 +290,71 @@ def eas_doc_status(
     # `checkpoint-N` dir which duplicated the endpoint adapter and is no longer written
     # (see `students.early_stop.SkipFinalStepSave`). Treating it as dropped would
     # invalidate every stored EAS document on the shared stash for no new numbers.
-    live = set(ckpt_order)
-    live_steps = {stored_points[rel].get("step") for rel in stored_points if rel in live}
-    live_steps.discard(None)
-    dropped = tuple(
-        rel for rel, point in stored_points.items()
-        if rel not in live and point.get("step") not in live_steps
+    # A stored point whose checkpoint was THINNED off disk (its step is in the run's
+    # ladder manifest) is likewise not dropped: it is carried into `reuse`, so the document
+    # the pipeline rebuilds from the plan keeps the full trajectory.
+    thinned_reuse, thinned_cosine, dropped, unscorable = _thinned_plan(
+        doc, live=set(ckpt_order), references=references, sidecar_ckpts=sidecar_ckpts,
+        ladder_steps=ladder_steps, stale=stale,
     )
     return DocPlan(
-        invalid=False, reuse=tuple(reuse), cosine_only=tuple(cosine_only),
+        invalid=False, reuse=tuple(reuse) + thinned_reuse,
+        cosine_only=tuple(cosine_only) + thinned_cosine,
         recompute=tuple(recompute), dropped=dropped, stale_refs=stale,
+        unscorable=unscorable,
     )
+
+
+def _stale_refs(doc: dict, references: dict[str, str | None]) -> tuple[str, ...]:
+    """Requested references the document measured against a DIFFERENT teacher adapter."""
+    stored = doc.get("references") or {}
+    return tuple(sorted(
+        k for k, aid in references.items()
+        if k in stored and stored[k].get("teacher_adapter_id") != aid
+    ))
+
+
+def _thinned_plan(
+    doc: dict, *, live: set[str], references: dict[str, str | None],
+    sidecar_ckpts, ladder_steps, stale: tuple[str, ...],
+) -> tuple[tuple[dict, ...], tuple[str, ...], tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """``(reuse, cosine_only, dropped, unscorable)`` for the stored points NOT on disk.
+
+    Shared by the normal and the ``force`` path: a checkpoint that is gone cannot be
+    recomputed either way.
+    """
+    stored_points = {p.get("ckpt_rel"): p for p in doc.get("points") or []}
+    sidecar = set(sidecar_ckpts)
+    needed = set(references)
+    live_steps = {stored_points[rel].get("step") for rel in stored_points if rel in live}
+    live_steps.discard(None)
+    on_ladder = set(ladder_steps)
+    reuse: list[dict] = []
+    cosine_only: list[str] = []
+    dropped: list[str] = []
+    unscorable: dict[str, tuple[str, ...]] = {}
+    for rel, point in stored_points.items():
+        if rel in live or point.get("step") in live_steps:
+            continue
+        if point.get("step") not in on_ladder:
+            dropped.append(rel)
+            continue
+        if point.get("nonfinite"):
+            reuse.append(point)
+            continue
+        # A thinned point still has to ANSWER the requested references. It was measured
+        # under whatever references the document carried then, so a newly requested one can
+        # be missing: scorable from the sidecar vector (cosine-only, no checkpoint needed),
+        # otherwise gone for good -- the checkpoint it would need no longer exists.
+        missing = tuple(sorted(needed - (set(point.get("eas") or {}) - set(stale))))
+        if not missing:
+            reuse.append(point)
+        elif rel in sidecar:
+            cosine_only.append(rel)
+        else:
+            unscorable[rel] = missing
+            reuse.append({**point, "unscorable_refs": list(missing)})
+    return tuple(reuse), tuple(cosine_only), tuple(dropped), unscorable
 
 
 def eas_main_doc_status(doc: dict | None, *, references: dict[str, str | None], **kwargs):

@@ -21,14 +21,13 @@ import numpy as np
 import pandas as pd
 
 from subliminal_learning.analysis.dd1b_ladder import (
-    DD1B_BASE,
-    DD1B_SEED2_BASE,
-    DD1B_SEED3_BASE,
     dataset_dir,
 )
 from subliminal_learning.analysis.fsfact_transfer import RECEIVER_BASE
+from subliminal_learning.coherence.probe_io import native_probe_pool_version, probe_path
 from subliminal_learning.config import resolve_output_root
 from subliminal_learning.stats import transfer_significance_tests as tt
+from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
 __all__ = [
     "CellMatrix",
@@ -84,10 +83,6 @@ DEAD_UNLABELLED = "?"
 logger = logging.getLogger(__name__)
 ALL_ON_DISK = "all-on-disk"
 
-#: DataDecide OLMo-1B tokens, resolved through the `analysis.dd1b_ladder` base constants.
-DD1B_TOKENS = {"dd-1b": DD1B_BASE, "dd-1b-seed2": DD1B_SEED2_BASE, "dd-1b-seed3": DD1B_SEED3_BASE}
-
-
 @dataclass(frozen=True)
 class CellMatrix:
     """The matched design for one (sender, receiver, eval animal): pools x cells, control last.
@@ -119,11 +114,12 @@ def base_name(token: str) -> str:
     """The on-disk base-model dir name of a short receiver/sender token.
 
     ``original``/``orig`` -> ``pythia-160m``, ``fs<N>``/``full-seed<N>`` -> ``pythia-160m-seed<N>``,
-    ``ds<N>`` -> ``pythia-160m-data-seed<N>``, ``ws<N>`` -> ``pythia-160m-weight-seed<N>``,
-    ``dd-1b``/``dd-1b-seed2``/``dd-1b-seed3`` -> the `analysis.dd1b_ladder` DataDecide OLMo-1B
-    base dirs. The 160m mapping itself is `analysis.fsfact_transfer.RECEIVER_BASE`; this only adds
-    the spelled-out aliases and passes an already-resolved base name (an explicit
-    ``receiver_dir``/``sender_dir``) through unchanged.
+    ``ds<N>`` -> ``pythia-160m-data-seed<N>``, ``ws<N>`` -> ``pythia-160m-weight-seed<N>``. These
+    160m aliases are this repo's OWN short labels (`analysis.fsfact_transfer.RECEIVER_BASE`) and
+    keep priority; every other recognized spelling -- ``dd-1b``, ``dd-1b-dclm-seed2``, a hub ref,
+    an external alias -- goes through `models.naming.base_dir_name`, so there is no second
+    DataDecide table here. An already-resolved base name (an explicit ``receiver_dir``/
+    ``sender_dir``) and any unrecognized string pass through unchanged.
 
     Args:
         token: A short token, an alias, or an on-disk base name.
@@ -131,14 +127,19 @@ def base_name(token: str) -> str:
     Returns:
         The base-model directory name.
     """
+    from subliminal_learning.models.naming import base_dir_name
+
     t = token.strip()
     if t in ("original", "orig"):
         return RECEIVER_BASE["orig"]
-    if t in DD1B_TOKENS:
-        return DD1B_TOKENS[t]
     if t.startswith("full-seed"):
         t = f"fs{t.removeprefix('full-seed')}"
-    return RECEIVER_BASE.get(t, t)
+    if t in RECEIVER_BASE:
+        return RECEIVER_BASE[t]
+    try:
+        return base_dir_name(t)
+    except ValueError:
+        return t
 
 
 def resolve_teachers(
@@ -433,8 +434,8 @@ def load_cell_matrix(
          else no_control).append(cell)
 
     def treatment_value(tag: str, cell: str) -> float | None:
-        cell_dir = (root / "students" / animal / receiver_dir / sender_dir
-                    / f"{tag}_tseed{tseed}" / dataset_tag / cell)
+        cell_dir = (root / "students" / animal / Path(*model_dir_parts_from_name(receiver_dir))
+                    / sender_dir / f"{tag}_tseed{tseed}" / dataset_tag / cell)
         if ftseed is not None:
             leaf = cell_dir / f"ftseed{ftseed}"
             return _seed_p_target(leaf / "preference_eval.json" if eval_animal == animal
@@ -685,7 +686,14 @@ def _dead_label(leaf: Path, ftseed: int, pool: str, cut: float) -> float:
     "not measured yet". This reads the same way: a probe that recorded no ``delta_ce`` without
     the divergence markers carries no label.
     """
-    path = leaf / f"ftseed{ftseed}" / "eval" / "pile_probe.json"
+    # `probe_io.probe_path` is the per-pool record location: the native pool keeps
+    # `eval/pile_probe.json`, any other (explicit) pool its `pile_probe.<pool>.json` sidecar.
+    # A run whose manifest cannot be read has no knowable native pool, so the canonical
+    # file stays its record (the `pool_version` check below is what validates it).
+    run_dir = leaf / f"ftseed{ftseed}"
+    path = probe_path(run_dir, pool)
+    if not path.is_file() and native_probe_pool_version(run_dir) is None:
+        path = probe_path(run_dir, None)
     if not path.is_file():
         return np.nan
     doc = json.loads(path.read_text())
@@ -695,6 +703,24 @@ def _dead_label(leaf: Path, ftseed: int, pool: str, cut: float) -> float:
                                               and doc["kl_base_student"] is None):
         return 1.0
     return np.nan if doc.get("delta_ce") is None else float(doc["delta_ce"] > cut)
+
+
+def _probe_pool_for(receiver_dir: str, probe_pool: str | None) -> str:
+    """The anchored cut's pool: an explicit `probe_pool`, else the receiver's NATIVE one.
+
+    `None` (the default everywhere) routes through `probe_io.native_probe_pool` -- the one
+    place the pool choice lives -- so a DataDecide receiver gets dp1 / cp1t-olmo without any
+    caller spelling it. A receiver dir the naming module cannot read keeps pp1, the historical
+    behaviour for the 160m trees.
+    """
+    if probe_pool is not None:
+        return probe_pool
+    from subliminal_learning.coherence.probe_io import native_pool_version_for_base
+
+    try:
+        return native_pool_version_for_base(receiver_dir)
+    except ValueError:
+        return "pp1"
 
 
 def _anchored_cut(root: Path, receiver: str, probe_pool: str, *, dead: str,
@@ -737,7 +763,8 @@ def _arm_trees(root: Path, animal: str, sender: str, receiver: str,
     control_tree = dataset_dir(root, None, base=receiver_dir,
                                dataset_tag=kw.get("control_dataset_tag") or dataset_tag,
                                source=kw.get("control_source", "base"), numbers_base=numbers_base)
-    sender_tree = root / "students" / animal / receiver_dir / f"teacher-{base_name(sender)}"
+    sender_tree = (root / "students" / animal / Path(*model_dir_parts_from_name(receiver_dir))
+                   / f"teacher-{base_name(sender)}")
     return control_tree, sender_tree, dataset_tag, kw.get("tseed", 1)
 
 
@@ -765,9 +792,14 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
     Per arm: design cells (a cells JSON, another arm's cells, or the control tree's cells with
     an ``ftseed`` control value); every listed teacher must cover all of them (``known_short``
     teachers must miss exactly the listed cells; ``excluded`` must equal the on-disk strays);
-    the receiver's prior is the one ``base_control.json`` shared by its student trees (checked
+    the receiver's prior is the one ``base_control.json`` shared by its student trees, or the
+    receiver's ``analysis/base_eval_*_test.json`` prior when the trees carry none (checked
     against ``expected_prior`` within 5%); dead = probe ``delta_ce`` above the receiver's anchored
-    cut. ``in_progress`` arms become a coverage row until complete. Then one row per ``pools``
+    cut. ``in_progress`` arms become a coverage row until complete, whose test label is the
+    arm's ``note`` when it has one (``{students}``/``{n_students}``/``{controls}``/``{cells}``
+    are filled with the build-time counts). ``partial`` arms are tested now on the design cells
+    that carry a control and every listed teacher's run, their ``cells`` column reading
+    ``tested/design``. Then one row per ``pools``
     entry (arm-stratified permutation, each arm against its own control maximum; arms must share
     animal and ``data_order``), and one row per ``held_out`` entry (one-sided sign test on the
     cells outside ``selection_cells`` where both runs are alive).
@@ -792,7 +824,7 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
         if "cells_from_arm" in a:
             return design(arms[a["cells_from_arm"]])
         if "cells" in a:
-            return sorted(json.loads((arms_json.parent / a["cells"]).read_text())["cells"])
+            return sorted(resolve_cells(arms_json.parent / a["cells"]))
         return load_cell_matrix(a["animal"], a["sender"], a["receiver"], [], ftseed=ftseed,
                                 tseed=a["tseed"], dataset_tag=a.get("dataset_tag", DEFAULT_DATASET_TAG),
                                 control_dataset_tag=a.get("control_dataset_tag"),
@@ -807,7 +839,8 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
                                     dataset_tag=dataset_tag, tseed=a["tseed"])
         if sorted(stray) != sorted(a.get("excluded", [])):
             raise ValueError(f"{name}: on-disk strays {stray} != excluded {a.get('excluded', [])}")
-        sender_tree = (root / "students" / a["animal"] / base_name(a["receiver"])
+        sender_tree = (root / "students" / a["animal"]
+                       / Path(*model_dir_parts_from_name(base_name(a["receiver"])))
                        / f"teacher-{base_name(a['sender'])}")
         control_tree = dataset_dir(root, None, base=base_name(a["receiver"]),
                                    dataset_tag=a.get("control_dataset_tag") or dataset_tag,
@@ -822,43 +855,65 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
             if tag in short:
                 if missing != short[tag]:
                     raise ValueError(f"{name}: {tag} missing {missing}, registry says {short[tag]}")
-            elif missing and not a.get("in_progress"):
+            elif missing and not (a.get("in_progress") or a.get("partial")):
                 raise ValueError(f"{name}: listed teacher {tag} is short "
                                  f"{covered[tag]}/{len(cells)}; missing {missing}")
-        if ctrl_cov < len(cells) or any(covered[t] < len(cells) for t in teachers):
-            if not a.get("in_progress"):
-                raise ValueError(f"{name}: control covers {ctrl_cov}/{len(cells)}")
+        short_design = ctrl_cov < len(cells) or any(covered[t] < len(cells) for t in teachers)
+        if short_design and not (a.get("in_progress") or a.get("partial")):
+            raise ValueError(f"{name}: control covers {ctrl_cov}/{len(cells)}")
+        if short_design and a.get("in_progress"):
             k = min(min(covered[t] for t in teachers), ctrl_cov)
-            rows.append({"arm": name, "teacher": ", ".join(teachers), "test": TEST_NONE,
+            # The registry's ``note`` (why the arm has no p) replaces the test label; it may
+            # cite the build-time counts through {students}/{n_students}/{controls}/{cells}.
+            counts = {"students": sum(covered[t] for t in teachers),
+                      "n_students": len(teachers) * len(cells), "controls": ctrl_cov,
+                      "cells": len(cells)}
+            rows.append({"arm": name, "teacher": ", ".join(teachers),
+                         "test": a["note"].format_map(counts) if "note" in a else TEST_NONE,
                          "cells": f"in progress {k}/{len(cells)}", "pooled": False})
             continue
 
         receiver = base_name(a["receiver"])
         key = (a["animal"], receiver)
         if key not in priors:
-            files = sorted((root / "students" / a["animal"] / receiver)
-                           .glob("teacher-*/*/*/base_control.json"))
+            files = sorted((root / "students" / a["animal"]
+                            / Path(*model_dir_parts_from_name(receiver))
+                            ).glob("teacher-*/*/*/base_control.json"))
             vals = {round(json.loads(f.read_text())[prompt_set]["p_target"], 10) for f in files}
-            if len(vals) != 1:
+            if len(vals) > 1:
                 raise ValueError(f"{key}: student trees disagree on the prior: {vals}")
-            priors[key] = vals.pop()
+            if vals:
+                priors[key] = vals.pop()
+            else:
+                # Trees whose worker wrote no base_control.json (the 160m re-pretraining
+                # receivers): the receiver's ``analysis/base_eval_{short}_..._test.json`` prior,
+                # the same test-prompt number `frames.load_base_prior` serves everywhere else.
+                from subliminal_learning.analysis.frames import load_base_prior
+                from subliminal_learning.analysis.transfer_factors import base_eval_short
+
+                priors[key] = load_base_prior(root, base_eval_short(receiver), a["animal"])
         exp = a.get("expected_prior")
         if exp is not None and abs(priors[key] / exp - 1) >= 0.05:
             raise ValueError(f"{name}: prior {priors[key]} vs expected {exp}")
-        probe_pool = a.get("probe_pool", "pp1")
+        probe_pool = _probe_pool_for(receiver, a.get("probe_pool"))
         cut = _anchored_cut(root, receiver, probe_pool, dead="keep", notes=notes)
 
         m = load_cell_matrix(a["animal"], a["sender"], a["receiver"], [*teachers, *short],
                              ftseed=ftseed, tseed=a["tseed"], dataset_tag=dataset_tag,
                              control_dataset_tag=a.get("control_dataset_tag"), cells=cells,
                              prompt_set=prompt_set, output_root=root)
-        if m.cells != cells:
+        if m.cells != cells and not (a.get("partial") and set(m.cells) <= set(cells)):
             raise ValueError(f"{name}: loaded cells differ from the design")
         d = _arm_dead_matrix(m, control_tree, sender_tree, dataset_tag=dataset_tag,
                              tseed=a["tseed"], ftseed=ftseed, probe_pool=probe_pool, cut=cut)
         matrices[name], deads[name] = m, d
-        rows.extend(significance_rows(m, d, priors[key], name, teachers, short=list(short),
-                                      labelled=cut is not None, n_perm=n_perm, seed=seed))
+        arm_rows = significance_rows(m, d, priors[key], name, teachers, short=list(short),
+                                     labelled=cut is not None, n_perm=n_perm, seed=seed)
+        if a.get("partial"):
+            # a partial arm's counts are read on the cells it has: say so against the design
+            for r in arm_rows:
+                r["cells"] = f"{r['cells']}/{len(cells)}"
+        rows.extend(arm_rows)
 
     for pool in reg.get("pools", []):
         members = [arms[n] for n in pool["arms"]]
@@ -1275,7 +1330,7 @@ def normalized_effect_frame(
     family_b: str = "B",
     eval_animal: str | None = None,
     prompt_set: str = "test",
-    probe_pool: str = "pp1",
+    probe_pool: str | None = None,
     ftseed: int = 1,
     dead: str = "keep",
     output_root: Path | None = None,
@@ -1297,7 +1352,9 @@ def normalized_effect_frame(
         family_a, family_b: The family labels expected in ``arms``.
         eval_animal: Animal scored; defaults to `animal`.
         prompt_set: Prompt set read out of the summaries.
-        probe_pool: Probe pool of the anchored dead cut ("pp1" Pythia, "dp1" OLMo).
+        probe_pool: Probe pool of the anchored dead cut; None (default) = each receiver's
+            native pool (`coherence.probe_io.native_probe_pool`: pp1 Pythia, dp1 / cp1t-olmo
+            DataDecide).
         ftseed: Student finetune seed the treatment, the control and the dead label are all read
             at, so the comparison is one pinned design and not a seed-aggregated mixture.
         dead: ``"keep"`` (default) keeps dead runs as measured and only counts them; ``"drop"``
@@ -1329,7 +1386,9 @@ def normalized_effect_frame(
         try:
             frame, dead_t, dead_c, n_missing = _arm_rows(
                 animal, arm.sender, arm.receiver, teachers, eval_animal=eval_animal,
-                prompt_set=prompt_set, probe_pool=probe_pool, dead_ftseed=ftseed, dead=dead,
+                prompt_set=prompt_set,
+                probe_pool=_probe_pool_for(base_name(arm.receiver), probe_pool),
+                dead_ftseed=ftseed, dead=dead,
                 output_root=output_root, notes=notes, ftseed=ftseed, **kw)
         except _ArmUnavailable as exc:
             skipped_arms.append(f"{arm.arm}: {exc}")
@@ -1618,7 +1677,7 @@ def family_existence_table(
     cells: Sequence[str] | str | Path,
     ftseed: int = 1,
     prompt_set: str = "test",
-    probe_pool: str = "pp1",
+    probe_pool: str | None = None,
     family_label: str | None = None,
     n_perm: int = 20000,
     seed: int = 0,
@@ -1639,7 +1698,9 @@ def family_existence_table(
         cells: The design cells (a cells JSON path or a list).
         ftseed: The student finetune seed treatment, control and the dead label are read at.
         prompt_set: Prompt set read out of the summaries.
-        probe_pool: Probe pool of the anchored dead cut ("pp1" Pythia, "dp1" OLMo). Dead runs
+        probe_pool: Probe pool of the anchored dead cut; None (default) = each receiver's
+            native pool (`coherence.probe_io.native_probe_pool`: pp1 Pythia, dp1 / cp1t-olmo
+            DataDecide). Dead runs
             are KEPT as measured and only counted; a receiver with no anchored cut leaves the
             count `DEAD_UNLABELLED`.
         family_label: Display label; defaults to the canonical family name.
@@ -1671,13 +1732,14 @@ def family_existence_table(
             else:
                 matrices[a.arm] = m
                 # The single-arm table's labelling: this receiver's anchored cut, this ftseed.
-                cut = _anchored_cut(root, base_name(a.receiver), probe_pool, dead="keep",
+                pool = _probe_pool_for(base_name(a.receiver), probe_pool)
+                cut = _anchored_cut(root, base_name(a.receiver), pool, dead="keep",
                                     notes=notes)
                 control_tree, sender_tree, dataset_tag, tseed = _arm_trees(
                     root, animal, a.sender, a.receiver, **kw)
                 deads[a.arm] = (_arm_dead_matrix(m, control_tree, sender_tree,
                                                  dataset_tag=dataset_tag, tseed=tseed,
-                                                 ftseed=ftseed, probe_pool=probe_pool, cut=cut),
+                                                 ftseed=ftseed, probe_pool=pool, cut=cut),
                                 cut is not None)
         stacked = stack_cell_matrices(matrices) if matrices else None
         for a in arms:

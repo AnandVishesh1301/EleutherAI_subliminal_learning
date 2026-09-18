@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from subliminal_learning.param_tags import parse_param_tag
+from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
 #: Dir-name label of the DataDecide seed-1 (``default`` branch) base used by the arm.
 DD1B_BASE = "DataDecide-dolma1_7-1B-seed-default"
@@ -80,17 +81,21 @@ def dataset_dir(output_root: Path, teacher_tag: str | None, *, teacher_seed: int
         rng: ``.../students/controls/rng/{base}/{dataset_tag}``.
     """
     root = Path(output_root) / "students"
+    # The student-model level is `ckpt/{model}` for a step-pinned base and the plain single
+    # component otherwise -- `students.layout.student_param_dir` writes it through the same
+    # helper, so a reader that joined `base` directly missed every pinned receiver.
+    base_parts = Path(*model_dir_parts_from_name(base))
     if source == "teacher":
         if teacher_tag is None:
             raise ValueError("source='teacher' needs teacher_tag")
         tb = base if teacher_base is None else teacher_base
-        return (root / animal / base / f"teacher-{tb}"
+        return (root / animal / base_parts / f"teacher-{tb}"
                 / f"{teacher_tag}_tseed{teacher_seed}" / dataset_tag)
     if source == "base":
         nb = base if numbers_base is None else numbers_base
-        return root / "controls" / "base" / base / f"teacher-{nb}" / dataset_tag
+        return root / "controls" / "base" / base_parts / f"teacher-{nb}" / dataset_tag
     if source == "rng":
-        return root / "controls" / "rng" / base / dataset_tag
+        return root / "controls" / "rng" / base_parts / dataset_tag
     raise ValueError(f"unknown source {source!r} (teacher | base | rng)")
 
 

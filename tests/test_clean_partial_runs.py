@@ -613,3 +613,84 @@ def test_targeted_old_leaf_removed(tmp_path):
     assert [a.path for a in actions] == [leaf]
     apply_actions(actions, plan)
     assert not leaf.exists()
+
+
+# --------------------------------------------------------------------------- leaf discovery
+
+
+def _discovered(output_root: Path, base: Path) -> list[Path]:
+    """Leaves the scan finds under ``base`` (every leaf here is an incomplete candidate)."""
+    from scripts.clean_partial_runs import _scan_leaves
+
+    plan = _mk_plan(output_root, min_age_s=0.0)
+    return sorted(a.path for a in _scan_leaves(plan, base, "distill"))
+
+
+def _serial_leaves(base: Path) -> list[Path]:
+    """Reference discovery: the ``rglob("ftseed*")`` walk the parallel one replaced."""
+    return sorted(d for d in base.rglob("ftseed*") if d.is_dir())
+
+
+def test_leaf_walk_matches_serial_rglob_on_a_nested_tree(tmp_path):
+    root = tmp_path / "students"
+    leaves = [
+        _leaf(root / "dog" / "m" / "teacher-m" / "t_tseed1" / "tag" / "st" / "ftseed0",
+              complete=False),
+        _leaf(root / "dog" / "m" / "teacher-m" / "t_tseed1" / "tag" / "st" / "ftseed1",
+              complete=False),
+        _leaf(root / "cat" / "m" / "tag" / "ftseed3", complete=False),
+    ]
+    (root / "cat" / "m" / "tag" / "ftseed3" / "notes.txt").write_text("x")  # a file, not a leaf
+    assert _discovered(tmp_path, root) == sorted(leaves) == _serial_leaves(root)
+
+
+def test_leaf_walk_never_follows_a_symlinked_leaf_outside_the_root(tmp_path):
+    """Archived animals are symlinks; this tool DELETES, so they must stay invisible."""
+    root = tmp_path / "teachers"
+    inside = _leaf(root / "dog" / "m" / "tag" / "ftseed0", complete=False)
+    outside = _leaf(tmp_path / "archive" / "cat" / "m" / "tag" / "ftseed9", complete=False)
+    (root / "cat").symlink_to(outside.parents[2], target_is_directory=True)
+    assert _discovered(tmp_path, root) == [inside]
+
+
+def test_gseed_leaf_is_discovered_like_ftseed(tmp_path):
+    """Scan mode must use the same ``_LEAF_PREFIXES`` as targeted mode (gseed included)."""
+    root = tmp_path / "students"
+    ft = _leaf(root / "dog" / "m" / "tag" / "ftseed1", complete=False)
+    gs = _leaf(root / "dog" / "m" / "tag" / "gseed3", complete=False)
+    assert _discovered(tmp_path, root) == sorted([ft, gs])
+
+
+def test_nested_leaf_warns_and_is_not_descended(tmp_path, capsys):
+    root = tmp_path / "students"
+    outer = _leaf(root / "dog" / "m" / "tag" / "ftseed1", complete=False)
+    inner = _leaf(outer / "ftseed2", complete=False)
+    assert _discovered(tmp_path, root) == [outer]
+    err = capsys.readouterr().err
+    assert "nested inside a leaf" in err and str(inner) in err
+
+
+def test_walk_error_refuses_every_deletion_but_still_reports(tmp_path, capsys, monkeypatch):
+    """A truncated walk must produce a report and delete NOTHING (absent != partial)."""
+    from scripts import clean_partial_runs as cpr
+
+    root = tmp_path / "students"
+    leaf = _leaf(root / "dog" / "m" / "tag" / "ftseed1", complete=False)
+    _age(root, 10 * 3600)
+    plan = _mk_plan(tmp_path)
+
+    real = cpr.find_leaf_dirs_parallel
+
+    def flaky(roots, is_leaf, **kw):
+        errors = kw.get("errors")
+        if errors is not None:
+            errors.append((root / "broken", "OSError"))
+        return real(roots, is_leaf, **kw)
+
+    monkeypatch.setattr(cpr, "find_leaf_dirs_parallel", flaky)
+    actions = cpr._scan_leaves(plan, root, "distill")
+    assert [a.path for a in actions] == [leaf]  # the report is still produced
+    assert plan.deletions_refused
+    assert "delete NOTHING" in capsys.readouterr().err
+    assert apply_actions(actions, plan) == (0, 0)
+    assert leaf.exists()

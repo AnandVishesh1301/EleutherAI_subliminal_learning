@@ -37,25 +37,27 @@ from subliminal_learning.coherence.probe_io import (
 )
 from subliminal_learning.evaluation.preference_scoring import compute_ci
 from subliminal_learning.models.tokenization_io import prompt_tensors
+from subliminal_learning.training import ckpt_ladder as ladder
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import manifest_ref
 
 # A stored KL-trajectory record predating `pool_version` was always written on the Pile pool.
 POOL_ID_DEFAULTS = {"pool_version": "pp1"}
 
-# Checkpoint-list currency is compared on DISTINCT steps (2026-09-17). Runs used to write a
-# `checkpoint-{n_train_steps}` that duplicated the endpoint adapter at the `checkpoints/`
-# root; that dir is no longer written (`students.early_stop.SkipFinalStepSave`) and is
-# being deleted from finished runs (`scripts.dedupe_final_trajectory_checkpoint`). Comparing
-# raw lists would mark every record measured with the duplicate stale and re-run tens of
-# thousands of GPU evals for the same numbers. `scripts.dedupe_final_trajectory_checkpoint
-# --check-readers` asserts this constant, so the script cannot run against an old checkout.
-STEP_GATE = "distinct"
-
-
-def distinct_steps(steps) -> list[int]:
-    """The checkpoint-step list as the currency gates compare it: sorted, deduplicated."""
-    return sorted({s for s in (steps or []) if s is not None})
+# Checkpoint-list currency is COVERAGE on distinct steps (2026-09-18): the stored record
+# must COVER everything on disk, not equal it. Runs used to write a
+# `checkpoint-{n_train_steps}` duplicating the endpoint adapter at the `checkpoints/` root
+# (no longer written, see `students.early_stop.SkipFinalStepSave`, and being deleted from
+# finished runs by `scripts.dedupe_final_trajectory_checkpoint`), and intermediate
+# checkpoints are now being THINNED down to a few epochs. Comparing lists by equality would
+# mark every record measured over the fuller ladder stale and recompute it down to the
+# surviving points. The predicate, the constant and the ladder manifest live in
+# `training.ckpt_ladder` (torch-free, ONE copy for every gate); they are re-exported here
+# because the scripts import them from this module.
+STEP_GATE = ladder.STEP_GATE
+distinct_steps = ladder.distinct_steps
+steps_covered = ladder.steps_covered
+supersede_if_shrinking = ladder.supersede_if_shrinking
 
 
 # --------------------------------------------------------------------------- checkpoints
@@ -210,16 +212,17 @@ def pref_identity_is_current(stored: dict, animals, prompt_hashes, ref) -> bool:
 
 
 def eval_is_current(stored: dict, steps, animals, prompt_hashes, ref) -> bool:
-    """True iff a stored eval covers this exact checkpoint list, animals, prompts, and run.
+    """True iff a stored eval COVERS this checkpoint list and matches animals/prompts/run.
 
-    Skip-if-exists fires only on a full identity match: the same DISTINCT checkpoint steps
-    (see `STEP_GATE`: a record measured when the endpoint still had its duplicate
-    `checkpoint-N` dir stays current once that dir is gone, and vice versa), an animals
-    SUPERSET (a broader stored eval still answers a narrower request), identical prompt
-    hashes, and the same train-manifest reference (so an eval never outlives its run).
+    Skip-if-exists fires only on a full identity match: every DISTINCT checkpoint step on
+    disk already measured (see `STEP_GATE`: a record measured over a longer ladder -- the
+    endpoint's former duplicate `checkpoint-N` dir, or checkpoints since thinned away --
+    stays current), an animals SUPERSET (a broader stored eval still answers a narrower
+    request), identical prompt hashes, and the same train-manifest reference (so an eval
+    never outlives its run).
     """
     return (
-        distinct_steps(stored.get("checkpoint_steps")) == distinct_steps(steps)
+        steps_covered(stored.get("checkpoint_steps"), steps)
         and pref_identity_is_current(stored, animals, prompt_hashes, ref)
     )
 
@@ -243,12 +246,10 @@ def points_lacking_ce(stored: dict) -> int:
     return sum(1 for p in stored.get("points", []) if not point_has_ce(p))
 
 
-def point_has_ce(point: dict) -> bool:
-    """True when one measured point carries a finite ``delta_ce`` (a ``nonfinite`` point is
-    exempt: it was never scored)."""
-    v = point.get("delta_ce")
-    return bool(point.get("nonfinite")) or (
-        isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v))
+# The delta_ce rule itself lives in `training.ckpt_ladder` (torch-free), so the thinning
+# script's "is this record complete enough to freeze the checkpoints?" check and this
+# module's currency/partial-resume gate are literally the same predicate.
+point_has_ce = ladder.point_has_ce
 
 
 def record_has_ce(stored: dict) -> bool:
@@ -286,13 +287,16 @@ def row_is_reusable(row: dict) -> bool:
     return not row.get("nonfinite")
 
 
-def read_partial(path: Path, points, identity_ok, row_ok) -> dict[tuple[int, str], dict]:
+def read_partial(path: Path, points, identity_ok, row_ok,
+                 thinned_steps=()) -> dict[tuple[int, str], dict]:
     """Reusable rows of a crash partial, keyed by ``(step, checkpoint name)``.
 
     Empty (i.e. everything is recomputed) when the sidecar is missing, unreadable, or fails
     `identity_ok` -- rows of a different identity are DISCARDED, never merged. Rows for
     checkpoints that no longer exist on disk are dropped, so a ladder that changed between
-    attempts keeps only its surviving points.
+    attempts keeps only its surviving points -- EXCEPT rows whose step the run's ladder
+    manifest lists (`ladder_steps`): those checkpoints were thinned, not lost, and their
+    measurements are kept so the final record stays complete.
 
     Two workers on one run dir are safe but not coordinated: each atomic rewrite of the
     sidecar is whole-file, so a reader never sees a torn partial; the loser's extra rows are
@@ -307,8 +311,90 @@ def read_partial(path: Path, points, identity_ok, row_ok) -> dict[tuple[int, str
     if not identity_ok(stored):
         return {}
     live = {(s, c.name) for s, c in points}
+    thinned = set(thinned_steps)
     return {(r.get("step"), r.get("checkpoint")): r for r in stored.get("points", [])
-            if (r.get("step"), r.get("checkpoint")) in live and row_ok(r)}
+            if ((r.get("step"), r.get("checkpoint")) in live or r.get("step") in thinned)
+            and row_ok(r)}
+
+
+def merge_thinned_rows(rows: list[dict], done: dict, steps: list[int], final_only: bool,
+                       log=None, label: str = "",
+                       stored_rows: list[dict] = ()) -> tuple[list[dict], list[int]]:
+    """(rows, checkpoint_steps) with rows for THINNED checkpoints kept.
+
+    The measuring loop walks the checkpoints on disk, so a row the partial holds for a
+    checkpoint that has since been thinned away would be dropped from the final record even
+    though `read_partial` kept it. It is merged back here (in step order) and its step added
+    to the record's ``checkpoint_steps``, so a recompute on a thinned run does not shrink the
+    trajectory. A ``--final-only`` pass never merges: that record describes the endpoint
+    alone by construction.
+
+    `stored_rows` are the rows of the STORED record, carried the same way on a ``--force``
+    rerun whose identity is unchanged (see `carried_stored_rows`): force means "measure the
+    checkpoints again", never "forget the steps that are no longer measurable". A stored row
+    is used only for a step nothing else covers, so a fresh measurement always wins.
+    """
+    if final_only:
+        return rows, steps
+    used = {(r.get("step"), r.get("checkpoint")) for r in rows}
+    extra = [r for k, r in done.items() if k not in used]
+    covered = {r.get("step") for r in rows} | {r.get("step") for r in extra}
+    for row in (stored_rows or []):
+        if row.get("step") not in covered:
+            covered.add(row.get("step"))
+            extra.append(row)
+    if not extra:
+        return rows, steps
+    if log is not None:
+        log.info("{}: carrying {} thinned point(s)", label, len(extra))
+    merged = sorted(rows + extra, key=lambda r: r.get("step"))
+    return merged, sorted({*steps, *(r.get("step") for r in extra)})
+
+
+def carried_stored_rows(out_path: Path, identity_ok, disk_steps) -> list[dict]:
+    """The stored record's rows for steps NOT on disk, when its identity is still current.
+
+    A ``--force`` rerun recomputes only what survives thinning, so without this the live
+    record shrinks to the surviving rungs (the superseded copy holds the rest, but every
+    reader looks at the live file). The stored rows are measurements of THIS run under THIS
+    identity -- the caller's `identity_ok` is the record's own currency predicate minus the
+    checkpoint list -- so they stay valid and are merged back. Empty when the record is
+    absent, unreadable, or of another identity.
+    """
+    path = Path(out_path)
+    if not path.exists():
+        return []
+    try:
+        stored = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not identity_ok(stored):
+        return []
+    disk = set(ladder.distinct_steps(disk_steps))
+    return [r for r in (stored.get("points") or [])
+            if ladder.as_step(r.get("step")) not in disk]
+
+
+def supersede_before_write(run_dir: Path, out_path: Path, new_steps, log=None) -> list[Path]:
+    """Preserve the stored record when the one about to be written covers fewer steps.
+
+    Called on EVERY write path of the two trajectories (normal, ``--force``, identity
+    change, ``--final-only``) immediately before `atomic_write_json`, because that is the
+    single point all of them pass through: after thinning, any of them recomputes over the
+    surviving checkpoints only. The partial sidecar goes with the record -- it describes the
+    same, now superseded, measurement.
+    """
+    if not Path(out_path).exists():
+        return []
+    try:
+        stored = json.loads(Path(out_path).read_text())
+    except (OSError, ValueError):
+        return []
+    stored_steps = (stored.get("checkpoint_steps")
+                    or [p.get("step") for p in stored.get("points") or []])
+    return ladder.supersede_if_shrinking(
+        run_dir, out_path, stored_steps, new_steps,
+        extra_paths=(partial_path(out_path),), log=log)
 
 
 # --------------------------------------------------------------------------- endpoint probe
@@ -401,16 +487,28 @@ def pref_trajectory(
         if eval_is_current(stored, steps, animals, prompt_hashes, ref):
             log.info("{} ftseed{}: {} points current (skip)", tag, seed, len(points))
             return None
+    # `--force` can only re-measure the rungs still on disk. With the identity unchanged the
+    # stored record's rows for thinned-away steps remain valid, so they are carried into the
+    # record about to be written (which therefore still covers the full ladder); the stored
+    # file is moved aside first as insurance.
+    carried = carried_stored_rows(
+        out_path, lambda st: pref_identity_is_current(st, animals, prompt_hashes, ref),
+        steps) if (force and not final_only) else []
+    if carried:
+        supersede_before_write(run_dir, out_path, (), log=log)
+        log.info("{} ftseed{}: force keeps {} thinned point(s) of the stored record",
+                 tag, seed, len(carried))
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Crash-resume: rows a killed attempt already measured, under the gate's own predicates.
     identity = {"kind": "pref_traj_partial", "animals": animals,
                 "prompt_hashes": prompt_hashes, "train_manifest_ref": ref}
     ppath = partial_path(out_path)
+    thinned = set(ladder.ladder_steps(ckpt_root)) - set(steps)
     done = {} if force else read_partial(
         ppath, points,
         lambda s: pref_identity_is_current(s, animals, prompt_hashes, ref),
-        row_is_reusable)
+        row_is_reusable, thinned)
     if done:
         log.info("{} ftseed{}: resuming, {} of {} points from {}",
                  tag, seed, len(done), len(points), ppath)
@@ -472,6 +570,9 @@ def pref_trajectory(
             _release_base(model.unload())   # give the caller its bare base back
             del model
 
+    rows, steps = merge_thinned_rows(rows, done, steps, final_only, log,
+                                     f"{tag} ftseed{seed}", stored_rows=carried)
+    supersede_before_write(run_dir, out_path, steps, log)
     atomic_write_json(out_path, {
         "tag": tag, "ft_seed": seed, "animal": animals[0],
         "animals": animals, "lineage_slug": lineage_slug, "final_only": final_only,
@@ -522,9 +623,10 @@ def pile_kl_trajectory(
     ref = manifest_ref(run_dir)
     if out_path.exists() and not force:
         stored = json.loads(out_path.read_text())
-        # Current iff same checkpoint list, same Pile pool identity, same run ref --
-        # and the record carries the delta-CE readout that is now the primary label.
-        if (distinct_steps(stored.get("checkpoint_steps")) == distinct_steps(steps)
+        # Current iff the record COVERS every checkpoint on disk (`STEP_GATE`), same Pile
+        # pool identity, same run ref -- and it carries the delta-CE readout that is now
+        # the primary label.
+        if (steps_covered(stored.get("checkpoint_steps"), steps)
                 and pile_id_is_current(stored, pile_id)
                 and stored.get("train_manifest_ref") == ref):
             if record_has_ce(stored):
@@ -532,6 +634,16 @@ def pile_kl_trajectory(
                 return None
             log.info("{} ftseed{}: stale: {} points lack delta_ce (recompute)",
                         tag, seed, points_lacking_ce(stored))
+    # See `pref_trajectory`: on a thinned run a forced recompute keeps the stored rows for
+    # the steps it can no longer reach, as long as the pool identity and run ref still match.
+    carried = carried_stored_rows(
+        out_path,
+        lambda st: pile_id_is_current(st, pile_id) and st.get("train_manifest_ref") == ref,
+        steps) if (force and not final_only) else []
+    if carried:
+        supersede_before_write(run_dir, out_path, (), log=log)
+        log.info("{} ftseed{}: force keeps {} thinned point(s) of the stored record",
+                 tag, seed, len(carried))
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Crash-resume: only rows of the same pool identity, run ref and reference adapter, and
@@ -552,7 +664,8 @@ def pile_kl_trajectory(
                    and s.get("reference_adapter") == identity["reference_adapter"]
                    and s.get("ce_base") == ce_base
                    and s.get("kl_base_ref") == kl_base_ref),
-        lambda r: row_is_reusable(r) and point_has_ce(r))
+        lambda r: row_is_reusable(r) and point_has_ce(r),
+        set(ladder.ladder_steps(ckpt_root)) - set(steps))
     if done:
         log.info("{} ftseed{}: resuming, {} of {} points from {}",
                  tag, seed, len(done), len(points), ppath)
@@ -610,6 +723,9 @@ def pile_kl_trajectory(
             elif prev_adapter is not None:
                 model.delete_adapter(prev_adapter)   # leave only the caller's `ref`
 
+    rows, steps = merge_thinned_rows(rows, done, steps, final_only, log,
+                                     f"{tag} ftseed{seed}", stored_rows=carried)
+    supersede_before_write(run_dir, out_path, steps, log)
     atomic_write_json(out_path, {
         "tag": tag, "ft_seed": seed, "animal": lineage_animal,
         "lineage_slug": lineage_slug, "final_only": final_only,

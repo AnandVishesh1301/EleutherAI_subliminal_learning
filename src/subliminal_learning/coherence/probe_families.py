@@ -9,6 +9,10 @@ Llama-3 and Gemma-3 bases are trained with a leading BOS and score badly without
 Per-token H_uni is NOT comparable across families (different vocabularies segment the
 same text into different numbers of tokens) — compare bits per byte instead.
 
+The same mechanism carries a second frozen corpus: ``cp1t-<tag>`` is cp1's 32 DCLM
+held-out documents frozen as text (`data/probe_pools/cp1_text.*`) and retokenized the
+same way, so the DataDecide `dclm-baseline` bases have an in-distribution pool.
+
 Import-light on purpose (like `models.datadecide`): transformers is imported inside
 `load_family_tokenizer`, so the table can be read by torch-free callers.
 """
@@ -19,7 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from subliminal_learning.models.datadecide import DataDecideSpec, dd_revision
+from subliminal_learning.models.datadecide import (
+    DataDecideSpec,
+    dd_repo_id,
+    dd_revision,
+)
 from subliminal_learning.models.registry import EXTERNAL_BASES
 
 if TYPE_CHECKING:
@@ -29,6 +37,10 @@ POOL_PREFIX = "pp1t-"
 # The nested 128-doc "wide" variant of the same frozen text (see `coherence.probe_io`):
 # its first 32 documents ARE pp1t's, so a wide readout carries its narrow one inside it.
 WIDE_PREFIX = "pp1w-"
+# The SECOND frozen-text corpus (2026-09-18): cp1's 32 DCLM held-out documents frozen as
+# text and retokenized per family, exactly as pp1t does for the Pile. Its first consumer
+# is `cp1t-olmo`, the in-distribution pool of the DataDecide `dclm-baseline` bases.
+CP1T_PREFIX = "cp1t-"
 
 
 @dataclass(frozen=True)
@@ -57,7 +69,10 @@ PROBE_FAMILIES: dict[str, ProbeFamily] = {
                     "PolyPythias (GPT-NeoX tokenizer)"),
         # The pinned DataDecide branch, so the pp1t-olmo tokenizer is the same object the
         # dp1 pool and the DataDecide bases use.
-        ProbeFamily("olmo", "allenai/DataDecide-dolma1_7-1B", dd_revision(DataDecideSpec()),
+        # Every DataDecide recipe shares this tokenizer, so the default-recipe repo names
+        # the family's tokenizer for all of them; which CORPUS pool a base takes is its
+        # recipe's (`probe_io.probe_pool_spec_for_repo`).
+        ProbeFamily("olmo", dd_repo_id(DataDecideSpec()), dd_revision(DataDecideSpec()),
                     False, "DataDecide/OLMo tokenizer"),
         ProbeFamily("qwen25", "Qwen/Qwen2.5-1.5B", None, False, "Qwen2.5"),
         ProbeFamily("llama3", "meta-llama/Llama-3.2-1B", None, True, "Llama 3.2"),
@@ -74,7 +89,10 @@ PROBE_FAMILIES: dict[str, ProbeFamily] = {
 # from its spec in `coherence.probe_io.probe_pool_spec_for_repo`.
 CORPUS_POOLS: dict[str, tuple[str, ...]] = {
     "pythia": ("pp1", "cp1"),
-    "olmo": ("dp1",),
+    # The olmo family owns ONE corpus pool per DataDecide data recipe: dolma1_7 bases are
+    # measured on dp1, dclm-baseline ones on cp1t-olmo (cp1's DCLM text in the OLMo
+    # tokenizer). `probe_io.probe_pool_spec_for_repo` routes on the spec's recipe.
+    "olmo": ("dp1", "cp1t-olmo"),
 }
 
 
@@ -88,6 +106,13 @@ def pool_version_for(tag: str) -> str:
     if tag not in PROBE_FAMILIES:
         raise ValueError(f"unknown probe family {tag!r}; known tags: {sorted(PROBE_FAMILIES)}")
     return f"{POOL_PREFIX}{tag}"
+
+
+def cp1t_pool_version_for(tag: str) -> str:
+    """The DCLM frozen-text pool version of a family tag, e.g. ``cp1t-olmo``."""
+    if tag not in PROBE_FAMILIES:
+        raise ValueError(f"unknown probe family {tag!r}; known tags: {sorted(PROBE_FAMILIES)}")
+    return f"{CP1T_PREFIX}{tag}"
 
 
 def wide_pool_version_for(tag: str) -> str:
@@ -111,18 +136,23 @@ def is_pp1w(version: str) -> bool:
     return version.startswith(WIDE_PREFIX)
 
 
+def is_cp1t(version: str) -> bool:
+    """True for a ``cp1t-<tag>`` pool version (the tag itself is not validated)."""
+    return version.startswith(CP1T_PREFIX)
+
+
 def is_frozen_text_pool(version: str) -> bool:
-    """True for either frozen-text pool family (``pp1t-<tag>`` or ``pp1w-<tag>``)."""
-    return is_pp1t(version) or is_pp1w(version)
+    """True for any frozen-text pool family (``pp1t-`` / ``pp1w-`` / ``cp1t-<tag>``)."""
+    return is_pp1t(version) or is_pp1w(version) or is_cp1t(version)
 
 
 def family_for_pool_version(version: str) -> ProbeFamily:
-    """The family a ``pp1t-<tag>`` or ``pp1w-<tag>`` pool version names."""
+    """The family a ``pp1t-``/``pp1w-``/``cp1t-<tag>`` pool version names."""
     if not is_frozen_text_pool(version):
         raise ValueError(f"not a frozen-text pool version: {version!r}; expected "
-                         f"'pp1t-<tag>' or 'pp1w-<tag>' with tag in "
+                         f"'pp1t-<tag>', 'pp1w-<tag>' or 'cp1t-<tag>' with tag in "
                          f"{sorted(PROBE_FAMILIES)}")
-    tag = version[len(POOL_PREFIX):]  # both prefixes are 5 chars
+    tag = version[len(POOL_PREFIX):]  # every frozen-text prefix is 5 chars
     if tag not in PROBE_FAMILIES:
         raise ValueError(f"unknown probe family {tag!r} in pool version {version!r}; "
                          f"known tags: {sorted(PROBE_FAMILIES)}")

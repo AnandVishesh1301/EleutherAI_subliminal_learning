@@ -27,12 +27,16 @@ from scripts.sweeps.sweep_compute_eas import (
     prompt_source_matches,
     sort_units,
     unit_is_cached,
+    unit_status,
 )
+from scripts.sweeps.sweep_compute_eas import DONE_UNSCORABLE, WORK
 from subliminal_learning.steering.eas import EAS_MEAN_CONVENTION, SCHEMA_VERSION
 from subliminal_learning.steering.vectors import ACTIVATION_BASIS
 
 _PYTHIA = "EleutherAI/pythia-160m"
 _TEACHER_KEY = "dog/pythia-160m/ep10_lr1e-4_r16a16/ftseed1"
+_OTHER_KEY = "cat/pythia-160m/ep10_lr1e-4_r16a16/ftseed1"
+_THIRD_KEY = "lion/pythia-160m/ep10_lr1e-4_r16a16/ftseed1"
 
 
 def _manifest(**over) -> dict:
@@ -221,7 +225,10 @@ def _doc(unit, manifest, *, refs=(_TEACHER_KEY,), adapter_ids=None) -> dict:
             for r in refs
         },
         "points": [
+            # `step` is what the thinned-point rule keys on (`training.ckpt_ladder`).
             {"ckpt_rel": rel,
+             "step": (int(rel.rsplit("-", 1)[1]) if "checkpoint-" in rel
+                      else manifest["n_train_steps"]),
              "adapter_id": unit.endpoint_adapter_id if rel == unit.ckpt_rels[-1] else "x",
              "nonfinite": False,
              "eas": {r: {"mean": 0.1, "per_layer": [0.1]} for r in refs}}
@@ -406,3 +413,82 @@ def test_no_module_spells_the_convention_literal():
         assert f'"{EAS_MEAN_CONVENTION}"' not in text, (
             f"{rel} spells the eas_mean convention literally; import EAS_MEAN_CONVENTION"
         )
+
+
+def test_gate_does_not_requeue_a_thinned_run_with_a_complete_document(tmp_path):
+    """A thinned checkpoint is not a missing point: the sweep must pass `ladder_steps`.
+
+    The document still holds the point for `checkpoint-50`, whose dir has been deleted;
+    the run's ladder manifest says that step existed. Without the ladder the cheap gate
+    calls the point dropped, re-enqueues the unit and the pipeline rewrites a shorter
+    document -- exactly the record shrink the ladder exists to prevent.
+    """
+    from subliminal_learning.training.ckpt_ladder import write_ladder
+
+    unit, manifest = _unit(tmp_path)
+    _write_doc(unit, _doc(unit, manifest))
+    run_dir = unit.run_dir
+    write_ladder(run_dir, {"schema_version": 1, "n_train_steps": 100,
+                           "checkpoint_steps": [50, 100]})
+    for leaf in (run_dir / "checkpoints").glob("checkpoint-*"):
+        (leaf / "adapter_model.safetensors").unlink()
+        leaf.rmdir()
+    thinned = build_unit(run_dir, tmp_path, "last", endpoint_only=False, extra_refs=())
+    assert list(thinned.ckpt_rels) == ["checkpoints"]
+    assert unit_is_cached(thinned, tmp_path, 1024)
+
+
+def test_min_checkpoints_counts_ladder_steps_not_survivors(tmp_path):
+    """A thinned run keeps one dir on disk but a full ladder: it must not be skipped."""
+    from subliminal_learning.training.ckpt_ladder import write_ladder
+
+    rd = _run(tmp_path, "dog/a/ftseed1")
+    write_ladder(rd, {"schema_version": 1, "n_train_steps": 100,
+                      "checkpoint_steps": [25, 50, 75, 100]})
+    units, skipped = build_units(
+        tmp_path, positions=("last",), animals=set(), models=set(), tags=set(),
+        student_tags=set(), sources=set(), min_checkpoints=3, endpoint_only=False,
+        extra_refs=(),
+    )
+    assert len(units) == 1 and skipped == []
+    assert list(units[0].ckpt_rels) == ["checkpoints"]
+
+
+def test_gate_reports_done_unscorable_and_does_not_re_enqueue(tmp_path):
+    """A new reference at a THINNED point with no sidecar vector is terminal.
+
+    Nothing a rerun could compute, so the unit is `DONE_UNSCORABLE` (logged once) rather
+    than WORK on every pass.
+    """
+    from subliminal_learning.training.ckpt_ladder import write_ladder
+
+    _teacher(tmp_path, _OTHER_KEY, b"cat")
+    unit, manifest = _unit(tmp_path)
+    doc = _doc(unit, manifest)
+    _write_doc(unit, doc)
+    _write_doc(unit, _doc(unit, manifest, refs=(_OTHER_KEY,)), kind="eas_refs")
+    run_dir = unit.run_dir
+    write_ladder(run_dir, {"schema_version": 1, "n_train_steps": 100,
+                           "checkpoint_steps": [50, 100]})
+    for leaf in (run_dir / "checkpoints").glob("checkpoint-*"):
+        (leaf / "adapter_model.safetensors").unlink()
+        leaf.rmdir()
+    thinned = build_unit(
+        run_dir, tmp_path, "last", endpoint_only=False, extra_refs=(_THIRD_KEY,)
+    )
+    _teacher(tmp_path, _THIRD_KEY, b"lion")
+    # Before the third teacher is measured anywhere there IS work (the endpoint survives).
+    assert unit_status(thinned, tmp_path, 1024) == WORK
+    # The refs document now answers the third teacher everywhere it still can: only the
+    # ENDPOINT, whose checkpoint survives. The thinned point is unscorable.
+    refs_doc = _doc(thinned, manifest, refs=(_OTHER_KEY, _THIRD_KEY))
+    refs_doc["points"] = [
+        {**p, "eas": {_OTHER_KEY: {"mean": 0.1, "per_layer": [0.1]}}}
+        if p["step"] == 50 else p
+        for p in _doc(unit, manifest, refs=(_OTHER_KEY, _THIRD_KEY))["points"]
+    ]
+    _write_doc(thinned, refs_doc, kind="eas_refs")
+    assert unit_status(thinned, tmp_path, 1024) == DONE_UNSCORABLE
+    # A second pass sees the same terminal state (no loop) and never reports WORK.
+    assert unit_status(thinned, tmp_path, 1024) == DONE_UNSCORABLE
+    assert unit_is_cached(thinned, tmp_path, 1024)

@@ -318,6 +318,48 @@ def test_doc_status_vanished_checkpoint_point_is_dropped():
     assert not plan.is_current
 
 
+def test_doc_status_thinned_checkpoints_are_reused_not_dropped():
+    """34 stored points whose dirs were THINNED (their steps are in the ladder manifest).
+
+    The pipeline rebuilds the document from `plan.reuse`, so a thinned point must be
+    carried there; dropping it would shrink every EAS trajectory to the kept checkpoints.
+    """
+    steps = list(range(1, 35))
+    points = [{**_point(f"checkpoints/checkpoint-{s}", f"A{s}"), "step": s} for s in steps]
+    points.append({**_point("checkpoints", "B"), "step": 35})
+    doc = _doc(points)
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"}, ladder_steps=frozenset(steps + [35]),
+    )
+    assert plan.dropped == () and plan.is_current
+    assert ({p["ckpt_rel"] for p in plan.reuse}
+            == {p["ckpt_rel"] for p in points})   # order is the pipeline's, by step
+    # Without the ladder manifest the same document is a pile of lost points (today's rule).
+    bare = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"},
+    )
+    assert len(bare.dropped) == 34 and not bare.is_current
+
+
+def test_assemble_points_keeps_thinned_points_in_step_order():
+    """`pipelines.eas_pipeline._assemble_points` walks the ON-DISK points; the thinned
+    reuse entries must be merged back or the rewritten doc loses them."""
+    from pipelines.eas_pipeline import _assemble_points
+
+    reuse = [{**_point(f"checkpoints/checkpoint-{s}", f"A{s}"), "step": s} for s in (1, 2)]
+    endpoint = {**_point("checkpoints", "B"), "step": 3}
+
+    class _Plan:
+        pass
+
+    plan = _Plan()
+    plan.reuse = tuple(reuse + [endpoint])
+    out = _assemble_points([endpoint], plan, {}, {})
+    assert [p["step"] for p in out] == [1, 2, 3]
+
+
 def test_doc_status_nonfinite_point_is_carried_over():
     doc = _doc([_point("checkpoints", "B", nonfinite=True)])
     plan = eas_doc_status(
@@ -400,3 +442,119 @@ def test_main_doc_status_without_a_sidecar_recomputes_the_foreign_reference_docu
 def test_doc_is_json_serializable():
     doc = _doc([_point("checkpoints", "B")])
     assert json.loads(json.dumps(doc))["points"][0]["ckpt_rel"] == "checkpoints"
+
+
+# ------------------------------------------------- thinned points vs a NEW reference
+def _thinned_doc(thinned_refs=("dog/t",), endpoint_refs=("dog/t",)):
+    """A doc over ladder [50, 100] whose `checkpoint-50` dir has been thinned away."""
+    return _doc(
+        [
+            {**_point("checkpoints/checkpoint-50", "A", refs=thinned_refs), "step": 50},
+            {**_point("checkpoints", "B", refs=endpoint_refs), "step": 100},
+        ],
+        references={
+            r: {"teacher_adapter_id": "T"} for r in {*thinned_refs, *endpoint_refs}
+        },
+    )
+
+
+def test_thinned_point_carrying_the_reference_is_reused_and_current():
+    plan = eas_doc_status(
+        _thinned_doc(("dog/t", "cat/t"), ("dog/t", "cat/t")), expected_meta=_meta(),
+        checkpoints=[("checkpoints", "B")], references={"cat/t": "T"},
+        ladder_steps=frozenset({50, 100}),
+    )
+    assert plan.unscorable == {} and plan.is_current
+    assert {p["ckpt_rel"] for p in plan.reuse} == {
+        "checkpoints/checkpoint-50", "checkpoints"
+    }
+
+
+def test_thinned_point_missing_a_reference_is_cosine_only_off_the_sidecar():
+    plan = eas_doc_status(
+        _thinned_doc(endpoint_refs=("dog/t", "cat/t")), expected_meta=_meta(),
+        checkpoints=[("checkpoints", "B")], references={"dog/t": "T", "cat/t": "T"},
+        sidecar_ckpts=frozenset({"checkpoints/checkpoint-50", "checkpoints"}),
+        ladder_steps=frozenset({50, 100}),
+    )
+    assert plan.cosine_only == ("checkpoints/checkpoint-50",)
+    assert plan.unscorable == {} and not plan.is_current
+
+
+def test_thinned_point_with_no_sidecar_vector_is_unscorable_not_a_loop():
+    """No checkpoint AND no vector: the reference can never be measured at that step.
+
+    The point is still reused (annotated), the doc is not `is_current` for that reference,
+    and `only_unscorable` tells the sweep to record the unit as done instead of re-enqueuing
+    work nothing could ever complete.
+    """
+    plan = eas_doc_status(
+        _thinned_doc(endpoint_refs=("dog/t", "cat/t")), expected_meta=_meta(),
+        checkpoints=[("checkpoints", "B")], references={"dog/t": "T", "cat/t": "T"},
+        sidecar_ckpts=frozenset({"checkpoints"}),
+        ladder_steps=frozenset({50, 100}),
+    )
+    assert plan.unscorable == {"checkpoints/checkpoint-50": ("cat/t",)}
+    assert not plan.is_current and plan.only_unscorable
+    assert plan.recompute == () and plan.cosine_only == ()
+    annotated = next(
+        p for p in plan.reuse if p["ckpt_rel"] == "checkpoints/checkpoint-50"
+    )
+    assert annotated["unscorable_refs"] == ["cat/t"]
+
+
+def test_force_keeps_a_thinned_point_while_recomputing_the_on_disk_ones():
+    """``--force`` cannot recompute a checkpoint that no longer exists: carry it."""
+    plan = eas_doc_status(
+        _thinned_doc(("dog/t", "cat/t"), ("dog/t", "cat/t")), expected_meta=_meta(),
+        checkpoints=[("checkpoints", "B")], references={"cat/t": "T"},
+        ladder_steps=frozenset({50, 100}), force=True,
+    )
+    assert plan.invalid and not plan.is_current and plan.reason == "force"
+    assert plan.recompute == ("checkpoints",) and plan.dropped == ()
+    assert [p["ckpt_rel"] for p in plan.reuse] == ["checkpoints/checkpoint-50"]
+
+
+def test_force_scores_a_thinned_point_cosine_only_for_a_new_reference():
+    plan = eas_doc_status(
+        _thinned_doc(endpoint_refs=("dog/t", "cat/t")), expected_meta=_meta(),
+        checkpoints=[("checkpoints", "B")], references={"dog/t": "T", "cat/t": "T"},
+        sidecar_ckpts=frozenset({"checkpoints/checkpoint-50", "checkpoints"}),
+        ladder_steps=frozenset({50, 100}), force=True,
+    )
+    assert plan.cosine_only == ("checkpoints/checkpoint-50",)
+    assert plan.recompute == ("checkpoints",) and plan.reuse == ()
+    # Without the vector the reference can never be measured there: annotated, not lost.
+    bare = eas_doc_status(
+        _thinned_doc(endpoint_refs=("dog/t", "cat/t")), expected_meta=_meta(),
+        checkpoints=[("checkpoints", "B")], references={"dog/t": "T", "cat/t": "T"},
+        sidecar_ckpts=frozenset({"checkpoints"}),
+        ladder_steps=frozenset({50, 100}), force=True,
+    )
+    assert bare.unscorable == {"checkpoints/checkpoint-50": ("cat/t",)}
+    assert [p["ckpt_rel"] for p in bare.reuse] == ["checkpoints/checkpoint-50"]
+
+
+def test_force_drops_thinned_points_when_the_identity_drifted():
+    doc = _thinned_doc()
+    doc["prompt_sha256"] = "other"
+    plan = eas_doc_status(
+        doc, expected_meta=_meta(), checkpoints=[("checkpoints", "B")],
+        references={"dog/t": "T"}, ladder_steps=frozenset({50, 100}), force=True,
+    )
+    assert plan.reuse == () and plan.cosine_only == () and plan.dropped == ()
+
+
+def test_assemble_points_merges_a_forced_plans_thinned_reuse():
+    from pipelines.eas_pipeline import _assemble_points
+
+    plan = eas_doc_status(
+        _thinned_doc(("dog/t", "cat/t"), ("dog/t", "cat/t")), expected_meta=_meta(),
+        checkpoints=[("checkpoints", "B")], references={"cat/t": "T"},
+        ladder_steps=frozenset({50, 100}), force=True,
+    )
+    endpoint = {
+        "ckpt_rel": "checkpoints", "adapter_id": "B", "step": 100, "is_endpoint": True,
+    }
+    out = _assemble_points([endpoint], plan, {"checkpoints": None}, {})
+    assert [p["step"] for p in out] == [50, 100]

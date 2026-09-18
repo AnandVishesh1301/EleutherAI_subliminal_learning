@@ -50,7 +50,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import typer
@@ -62,7 +63,11 @@ from loguru import logger
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.run_gate import latest_resumable_checkpoint
 from subliminal_learning.utils.logging_setup import configure_loguru
-from subliminal_learning.utils.run_io import checkpoint_is_complete
+from subliminal_learning.utils.run_io import (
+    checkpoint_is_complete,
+    find_files_parallel,
+    find_leaf_dirs_parallel,
+)
 
 ALL_STAGES = (
     "teacher",
@@ -77,6 +82,13 @@ ALL_STAGES = (
 OUT_OF_SCOPE_TREES = ("sdf_teachers", "gkd_students")
 # Recognized training-leaf directory-name prefixes (the safety gate for any leaf rmtree).
 _LEAF_PREFIXES = ("ftseed", "gseed")
+# Depth bound for the leaf walk. The ``rglob`` it replaced was unbounded; the deepest real
+# leaf (a resampling student) sits ~10 below ``students/``, so this only keeps the walk finite.
+_LEAF_WALK_MAX_DEPTH = 24
+# Depth bound for the FILE walks (tmp orphans, aggregate.json, coherence artifacts). Files sit
+# BELOW a leaf (``ftseed1/checkpoints/checkpoint-40/x.tmp.7``), so this must exceed
+# ``_LEAF_WALK_MAX_DEPTH`` by the artifact nesting; 32 is well past the deepest real path.
+_FILE_WALK_MAX_DEPTH = 32
 # Flags whose value(s) name a fine-tuning seed (NOT --teacher-ftseed / --subsample-seed).
 _SEED_FLAGS = (
     "--student-seeds",
@@ -212,8 +224,19 @@ class CleanPlan:
     targeted: bool
     coherence_orphan_npy: bool
     live_cmdlines: tuple[str, ...] = ()
+    walk_workers: int = 8  # threads for the leaf walk; low on purpose, the nodes run GPU jobs
+    # Directories the discovery walk could not read, as ``(path, error class)``. A walk that
+    # errored returned a TRUNCATED view of the tree, and "absent" is exactly what this tool
+    # reads as "partial, delete it" -- so ANY entry here disables deletion for the whole
+    # invocation (the report is still produced).
+    walk_errors: list = field(default_factory=list)
 
     # ---- safety ----
+
+    @property
+    def deletions_refused(self) -> bool:
+        """Whether a walk error makes every deletion in this invocation unsafe."""
+        return bool(self.walk_errors)
 
     def is_safe_target(self, path: Path) -> bool:
         """True iff ``path`` is not a symlink and resolves under an allowed root."""
@@ -405,13 +428,33 @@ def _leaf_candidate(plan: CleanPlan, leaf: Path, stage: str) -> Action | None:
 def _scan_leaves(
     plan: CleanPlan, base: Path, stage: str, selected: set[int] | None = None
 ) -> list[Action]:
-    """Purge candidates among ``ftseed*`` leaves under ``base`` (``selected`` restricts seeds)."""
+    """Purge candidates among ``ftseed*`` leaves under ``base`` (``selected`` restricts seeds).
+
+    Discovery is the shared thread-parallel walk (`utils.run_io.find_leaf_dirs_parallel`),
+    which -- like the ``rglob`` it replaced -- never follows directory symlinks, so an
+    archived animal stays invisible to this deleting tool (see the module docstring).
+    """
     out: list[Action] = []
     if not base.is_dir():
         return out
-    for d in sorted(base.rglob("ftseed*")):
-        if not d.is_dir():
-            continue
+    errors: list = []
+    leaves = find_leaf_dirs_parallel(
+        [base],
+        lambda p: _is_leaf_name(p.name),
+        max_depth=_LEAF_WALK_MAX_DEPTH,
+        workers=plan.walk_workers,
+        errors=errors,
+    )
+    if errors:
+        plan.walk_errors.extend(errors)
+        print(
+            f"WARNING: {len(errors)} director{'y' if len(errors) == 1 else 'ies'} could not be "
+            f"walked under {base}; the scan is TRUNCATED and this run will delete NOTHING. "
+            f"First: {'; '.join(f'{path} ({err})' for path, err in errors[:5])}",
+            file=sys.stderr, flush=True,
+        )
+    _warn_nested_leaves(leaves)
+    for d in leaves:
         if selected is not None:
             seed = _leaf_seed(d.name)
             if seed is None or seed not in selected:
@@ -423,13 +466,44 @@ def _scan_leaves(
     return out
 
 
+def _warn_nested_leaves(leaves: list[Path]) -> None:
+    """Warn when a found leaf itself contains a leaf-named child dir (one level, no descent).
+
+    The ``rglob("ftseed*")`` this walk replaced reported ``ftseed*`` dirs nested under other
+    ``ftseed*`` dirs; the walk stops at the first one, so such a nest is now invisible. It
+    should not exist -- if it does, say so loudly rather than silently skip it.
+    """
+    nested: list[Path] = []
+    for leaf in leaves:
+        try:
+            with os.scandir(leaf) as it:
+                for entry in it:
+                    if _is_leaf_name(entry.name) and entry.is_dir(follow_symlinks=False):
+                        nested.append(Path(entry.path))
+        except OSError:
+            continue
+    if nested:
+        print(
+            f"WARNING: {len(nested)} leaf-named dir(s) nested inside a leaf; the walk stops at "
+            f"the outer leaf and does NOT consider them. First: "
+            f"{'; '.join(str(p) for p in nested[:5])}",
+            file=sys.stderr, flush=True,
+        )
+
+
 def _scan_tmp(plan: CleanPlan, base: Path, name_globs: tuple[str, ...], stage: str) -> list[Action]:
-    """Orphan ``*.tmp.<pid>`` files matching one of ``name_globs`` anywhere under ``base``."""
+    """Orphan ``*.tmp.<pid>`` files matching one of ``name_globs`` anywhere under ``base``.
+
+    ``checkpoint-*`` dirs are NOT pruned: an interrupted checkpoint save leaves its temp file
+    exactly there.
+    """
     out: list[Action] = []
     if not base.is_dir():
         return out
     for glob in name_globs:
-        for f in sorted(base.rglob(glob)):
+        for f in find_files_parallel(
+            [base], glob, max_depth=_FILE_WALK_MAX_DEPTH, workers=plan.walk_workers
+        ):
             if not f.is_file() or not plan.age_ok(f):
                 continue
             a = plan.mk("rm_file", f, stage, "orphan temp file from an interrupted atomic write")
@@ -490,7 +564,12 @@ def _scan_steerability(plan: CleanPlan, base: Path) -> list[Action]:
     out: list[Action] = []
     if not base.is_dir():
         return out
-    for agg in sorted(base.rglob("aggregate.json")):
+    # A steerability aggregate lives under ``{cell}/steerability/``, never inside a
+    # ``checkpoint-*`` dir, so that subtree is pruned.
+    for agg in find_files_parallel(
+        [base], "aggregate.json", skip_prefixes=("checkpoint-",),
+        max_depth=_FILE_WALK_MAX_DEPTH, workers=plan.walk_workers,
+    ):
         if "steerability" not in agg.parts or not agg.is_file() or not plan.age_ok(agg):
             continue
         if not _aggregate_is_partial(agg):
@@ -502,7 +581,9 @@ def _scan_steerability(plan: CleanPlan, base: Path) -> list[Action]:
         )
         if a is not None:
             out.append(a)
-    for tmp in sorted(base.rglob("*.tmp.*")):
+    for tmp in find_files_parallel(
+        [base], "*.tmp.*", max_depth=_FILE_WALK_MAX_DEPTH, workers=plan.walk_workers
+    ):
         if "steerability" not in tmp.parts or not tmp.is_file() or not plan.age_ok(tmp):
             continue
         a = plan.mk("rm_file", tmp, "steerability", "orphan temp file")
@@ -531,7 +612,11 @@ def _scan_eas(plan: CleanPlan, roots: list[Path]) -> list[Action]:
         )
         # The teacher-side vector cache and the base-mean cache name their files by prompt
         # sha, so the DIRECTORY is what identifies them.
-        for d in sorted(base.rglob("eas_vectors")):
+        # ``eval/eas_vectors`` / the base-mean cache: dirs, never inside a ``checkpoint-*``.
+        for d in find_leaf_dirs_parallel(
+            [base], lambda p: p.name == "eas_vectors", skip_prefixes=("checkpoint-",),
+            max_depth=_LEAF_WALK_MAX_DEPTH, workers=plan.walk_workers,
+        ):
             if d.is_dir():
                 out += _scan_tmp(plan, d, ("*.tmp.*",), "eas")
         if base.name == "eas_cache":
@@ -598,7 +683,11 @@ def _scan_coherence(plan: CleanPlan) -> list[Action]:
         base = plan.output_root / tree
         if not base.is_dir():
             continue
-        for d in sorted(base.rglob("pile_coherence")):
+        # ``{run_dir}/pile_coherence``: a dir, never inside a ``checkpoint-*``.
+        for d in find_leaf_dirs_parallel(
+            [base], lambda p: p.name == "pile_coherence", skip_prefixes=("checkpoint-",),
+            max_depth=_LEAF_WALK_MAX_DEPTH, workers=plan.walk_workers,
+        ):
             if not d.is_dir():
                 continue
             out += _scan_coherence_artifact_dir(
@@ -615,7 +704,11 @@ def _scan_coherence(plan: CleanPlan) -> list[Action]:
 
     cbase = plan.output_root / "coherence"
     if cbase.is_dir():
-        for base_tree in sorted(cbase.glob("*/base")):
+        for base_tree in find_leaf_dirs_parallel(
+            [cbase],
+            lambda p: p.name == "base" and p.parent.parent == cbase,
+            max_depth=2, workers=plan.walk_workers,
+        ):
             if not base_tree.is_dir():
                 continue
             for model_dir in sorted(base_tree.iterdir()):
@@ -832,6 +925,13 @@ def apply_actions(actions: list[Action], plan: CleanPlan) -> tuple[int, int]:
     """Execute the plan (re-checking safety on each target). Returns (count, bytes)."""
     import shutil
 
+    if plan.deletions_refused:
+        logger.error(
+            "Refusing every deletion: {} director(y/ies) could not be walked, so the scan is "
+            "truncated and a missing artifact cannot be distinguished from a partial one.",
+            len(plan.walk_errors),
+        )
+        return 0, 0
     count = 0
     total = 0
     for a in actions:
@@ -951,6 +1051,10 @@ def main(
     paths_config: Path = typer.Option(
         Path("configs/paths/paths_local.yaml"), "--paths-config", help="Paths YAML."
     ),
+    walk_workers: int = typer.Option(
+        8, "--walk-workers", help="Threads for the discovery walk; keep low, the nodes run "
+        "GPU jobs."
+    ),
 ) -> None:
     """Find and (with --apply) remove partial artifacts left by killed jobs."""
     load_dotenv()
@@ -982,6 +1086,7 @@ def main(
         targeted=path is not None,
         coherence_orphan_npy=coherence_orphan_npy,
         live_cmdlines=tuple(list_live_cmdlines()),
+        walk_workers=walk_workers,
     )
     try:
         if plan.targeted:
@@ -998,6 +1103,13 @@ def main(
         logger.error("Targeted cleanup refused: {}", e)
         raise typer.Exit(code=2) from None
 
+    if apply and plan.deletions_refused:
+        _report(actions, applied=False)
+        logger.error(
+            "Walk errors ({}) make this scan untrustworthy: reporting only, deleting nothing. "
+            "Re-run once the filesystem is healthy.", len(plan.walk_errors),
+        )
+        raise typer.Exit(code=3)
     if apply:
         count, total = apply_actions(actions, plan)
         _report(actions, applied=True)

@@ -61,9 +61,28 @@ which is what makes a sharded run (`--shard/--n-shards`) resumable.
 
 The base model is the run's own ``train_manifest.json`` ``base_model_repo`` ref, not the
 bare repo id in ``adapter_config.json``: a DataDecide base's seed lives in the revision,
-so the config id alone loads the wrong seed. The held-out text pool follows the base
-family — dp1 (Dolma v1.7) for DataDecide bases, the legacy Pile pool for Pythia — and
-every row records which one under ``pool_version``.
+so the config id alone loads the wrong seed. The held-out text pool is the base's NATIVE
+probe pool (`coherence.probe_io.native_probe_pool`, the one place that choice lives: dp1
+for a dolma1_7 DataDecide base, cp1t-olmo for a dclm-baseline one, cp1 for the `dclm`
+Pythia re-pretrainings, ...) EXCEPT for plain Pythia bases, which keep this script's
+legacy Pile pool (named ``pile{n}`` by its doc count, so the two are never confused in
+the rows); every row records which one under ``pool_version`` and which base under
+``base_dir_name``.
+
+**Resume identity** is ``(cell tag, splice, lambda, base dir name, pool version, ftseed,
+lineage)``: the same tag under another base, another pool, another student fine-tuning
+seed or another teacher lineage is a DIFFERENT measurement and must not be skipped. The
+ledger itself is keyed only by ``--out-name``, whose default is the same for every
+invocation, so all five identity columns are carried BY THE ROW -- every row this script
+writes is self-describing.
+
+Legacy rows (written before a column existed) are attributed to the file's STAMPED
+identity, the sibling ``{out_name}.json``'s ``base_ref``/``base_dir_name``,
+``pool_version`` and ``lineage`` (`stamped_identity`), so a pre-column ledger is neither
+re-emitted nor mismatched. Nothing is ASSUMED: a stamped identity that disagrees with this
+invocation's base/pool/lineage, and a legacy row with no ftseed or lineage to attribute,
+are both `LedgerIdentityError` refusals telling the operator to pass a fresh ``--out-name``
+(there is no override flag).
 """
 
 from __future__ import annotations
@@ -79,7 +98,7 @@ from loguru import logger
 from subliminal_learning.analysis.adapter_decomp import low_rank_norms
 from subliminal_learning.config import resolve_roots
 from subliminal_learning.cka.pool_io import build_pile_pool
-from subliminal_learning.coherence.probe_io import PROBE_POOL_DP1, build_probe_pool
+from subliminal_learning.coherence.probe_io import build_probe_pool, native_probe_pool
 from subliminal_learning.weightspace.adapters import iter_lora_pairs
 from subliminal_learning.weightspace.lora import top_singular_vectors
 from subliminal_learning.evaluation.preference_prob_io import (
@@ -128,13 +147,35 @@ def tag_assigned(tag: str, shard: int, n_shards: int) -> bool:
     return int.from_bytes(digest, "big") % n_shards == shard
 
 
-def row_key(tag: str, splice: str, scale_lambda: float | None) -> tuple:
-    """Resume identity of one emitted row: the cell, the splice, and (scale) its λ."""
-    return (tag, splice, float(scale_lambda) if splice == "scale" else None)
+class LedgerIdentityError(RuntimeError):
+    """A resume ledger cannot be attributed to this invocation's measurement identity."""
 
 
-def done_keys(jsonl_path: Path) -> set[tuple]:
+def row_key(tag: str, splice: str, scale_lambda: float | None,
+            base_dir_name: str, pool_version: str, ftseed: int, lineage: str) -> tuple:
+    """Resume identity of one emitted row: cell, splice, (scale) λ, base, pool, ftseed, lineage.
+
+    The base, the pool, the student fine-tuning seed and the teacher lineage directory are
+    all part of the identity because the same cell tag measured on another base -- or on
+    another pool, another ftseed, another lineage -- is another measurement, not a repeat.
+    The ledger's own name is keyed by `--out-name` alone, whose default never changes, so
+    the row is the only place this identity lives.
+    """
+    return (tag, splice, float(scale_lambda) if splice == "scale" else None,
+            base_dir_name, pool_version, int(ftseed), str(lineage))
+
+
+def done_keys(jsonl_path: Path, *, default_base: str, default_pool: str,
+              default_lineage: str | None = None) -> set[tuple]:
     """`row_key`s already present in the append-only JSONL (empty if it does not exist).
+
+    Rows written before the base/pool columns existed carry neither; they are read as
+    belonging to `default_base`/`default_pool` (the file's stamped base and pool), so a
+    legacy dolma ledger is neither re-emitted nor mismatched. A row without a `lineage`
+    is attributed the same way to `default_lineage` (the file's stamped lineage) -- but
+    with nothing stamped either, and for a row carrying no `ftseed` at all, the identity
+    is UNKNOWABLE and this raises `LedgerIdentityError` rather than assuming: guessing
+    would silently skip a cell measured under another seed or another lineage.
 
     Unparseable/truncated lines are ignored: a killed job's partial last line must not
     make the whole ledger unreadable, it only costs that one cell a recomputation.
@@ -149,25 +190,80 @@ def done_keys(jsonl_path: Path) -> set[tuple]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if "student_tag" in rec and "splice" in rec:
-            done.add(row_key(rec["student_tag"], rec["splice"], rec.get("scale_lambda")))
+        if "student_tag" not in rec or "splice" not in rec:
+            continue
+        lineage = rec.get("lineage") or default_lineage
+        if rec.get("ftseed") is None or lineage is None:
+            raise LedgerIdentityError(
+                f"{jsonl_path}: row {rec['student_tag']!r}/{rec['splice']!r} carries no "
+                f"{'ftseed' if rec.get('ftseed') is None else 'lineage'} and the sibling "
+                "summary stamps none either, so it cannot be attributed to a measurement "
+                "and resume cannot tell a repeat from a new cell. Write this invocation "
+                "to a fresh ledger with --out-name (there is no override flag).")
+        done.add(row_key(rec["student_tag"], rec["splice"], rec.get("scale_lambda"),
+                         rec.get("base_dir_name") or default_base,
+                         rec.get("pool_version") or default_pool,
+                         rec["ftseed"], lineage))
     return done
+
+
+def stamped_identity(json_path: Path) -> tuple[str | None, str | None, str | None]:
+    """``(base dir name, pool_version, lineage)`` stamped in a previous `{out_name}.json`.
+
+    All-None when the file is absent or unreadable -- then the caller's own invocation
+    supplies the identity legacy rows are attributed to. Any value present is the
+    LEDGER's identity and is checked against the invocation by `require_same_identity`;
+    it is never inherited into a differing measurement.
+    """
+    try:
+        rec = json.loads(Path(json_path).read_text())
+    except (OSError, ValueError):
+        return None, None, None
+    base = rec.get("base_dir_name")
+    if base is None and rec.get("base_ref"):
+        from subliminal_learning.models.naming import base_dir_name
+
+        try:
+            base = base_dir_name(rec["base_ref"])
+        except ValueError:
+            base = None
+    return base, rec.get("pool_version"), rec.get("lineage")
+
+
+def require_same_identity(json_path: Path, *, base: str, pool: str, lineage: str) -> tuple:
+    """`stamped_identity`, refusing any stamped value that differs from this invocation.
+
+    A ledger stamped with another base, pool or lineage holds another measurement under
+    the same `--out-name`; inheriting it would let this invocation's rows be skipped as
+    "already done". Raises `LedgerIdentityError` naming the summary file.
+    """
+    stamped = stamped_identity(json_path)
+    for name, got, want in zip(("base_dir_name", "pool_version", "lineage"), stamped,
+                               (base, pool, lineage)):
+        if got is not None and got != want:
+            raise LedgerIdentityError(
+                f"{json_path}: the ledger's stamped {name} {got!r} is not this "
+                f"invocation's {want!r}, so its rows are a DIFFERENT measurement and "
+                "cannot be resumed against. Write this invocation to a fresh ledger with "
+                "--out-name (there is no override flag).")
+    return stamped
 
 
 def pool_version_for(base_ref: str, n_pile_docs: int) -> str:
     """Which held-out text pool this base must be measured on.
 
-    ``dp1`` for a DataDecide base (pretrained on Dolma v1.7, for which Pile is off
-    distribution), else the legacy Pile pool this script has always used, named by its
-    doc count (``pile16``) so a reader can tell the two apart in the rows.
+    The base's NATIVE probe pool (`probe_io.native_probe_pool` -- the one place the pool
+    choice lives: dp1 for a dolma1_7 DataDecide base, cp1t-olmo for a dclm-baseline one,
+    cp1 for a `dclm` Pythia re-pretraining, ...), EXCEPT for a plain-Pythia pp1 base,
+    which keeps the legacy Pile pool this script has always used, named by its doc count
+    (``pile16``) so a reader can tell the two apart in the rows.
     """
-    from subliminal_learning.models.naming import family_of
-
     try:
-        is_dd = family_of(base_ref) == "datadecide"
+        version = native_probe_pool(base_ref).version
     except ValueError:  # not a base spelling the naming module knows: legacy name test
-        is_dd = base_ref.split("@")[0].split("/")[-1].startswith("DataDecide")
-    return "dp1" if is_dd else f"pile{n_pile_docs}"
+        version = ("dp1" if base_ref.split("@")[0].split("/")[-1].startswith("DataDecide")
+                   else "pp1")
+    return f"pile{n_pile_docs}" if version == "pp1" else version
 
 
 def kept_a_factor(
@@ -294,6 +390,7 @@ def main(
         target_modules_key,
     )
     from subliminal_learning.models.loading_io import load_base_from_ref
+    from subliminal_learning.models.naming import base_dir_name
 
     lineage_dir = (
         output_root / "students" / animal / student_base / f"teacher-{numbers_base}"
@@ -315,24 +412,37 @@ def main(
         raise typer.BadParameter("no cells selected")
     logger.info("{} cell(s) from {} (shard {}/{})", len(cells), lineage_dir, shard, n_shards)
 
-    jsonl_path = output_root / "analysis" / f"{out_name}.jsonl"
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    already = done_keys(jsonl_path)
-    todo = [(t, s) for t in cells for s in splice_list
-            if row_key(t, s, scale_lambda) not in already]
-    if not todo:
-        print(f"nothing to do: all {len(cells)} cell(s) already in {jsonl_path}")
-        return
-    cells = sorted({t for t, _ in todo})
-    splices_by_cell = {t: [s for tt, s in todo if tt == t] for t in cells}
-    logger.info("{} cell(s) x splice(s) to compute ({} already done)", len(todo), len(already))
-
+    # The base and its pool are part of the resume identity, so they are resolved BEFORE
+    # the ledger is read (both are cheap: a manifest read and a table lookup).
     ckpt0 = lineage_dir / cells[0] / f"ftseed{ftseed}" / "checkpoints"
     # The run's OWN base ref (manifest), not adapter_config's bare repo id: a DataDecide
     # seed lives in the revision, so the config id alone loads the wrong model.
     base_repo, base_revision = base_repo_and_revision_for_run(ckpt0)
     base_ref = f"{base_repo}@{base_revision}" if base_revision else base_repo
     logger.info("base ref {}", base_ref)
+    pool_version = pool_version_for(base_ref, n_pile_docs)
+    try:
+        base_dir = base_dir_name(base_ref)
+    except ValueError:
+        base_dir = base_ref.split("@")[0].split("/")[-1]
+
+    jsonl_path = output_root / "analysis" / f"{out_name}.jsonl"
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    stamped_base, stamped_pool, stamped_lineage = require_same_identity(
+        output_root / "analysis" / f"{out_name}.json",
+        base=base_dir, pool=pool_version, lineage=str(lineage_dir))
+    already = done_keys(jsonl_path, default_base=stamped_base or base_dir,
+                        default_pool=stamped_pool or pool_version,
+                        default_lineage=stamped_lineage)
+    todo = [(t, s) for t in cells for s in splice_list
+            if row_key(t, s, scale_lambda, base_dir, pool_version, ftseed,
+                       str(lineage_dir)) not in already]
+    if not todo:
+        print(f"nothing to do: all {len(cells)} cell(s) already in {jsonl_path}")
+        return
+    cells = sorted({t for t, _ in todo})
+    splices_by_cell = {t: [s for tt, s in todo if tt == t] for t in cells}
+    logger.info("{} cell(s) x splice(s) to compute ({} already done)", len(todo), len(already))
 
     base, tok = load_base_from_ref(base_ref, hf_cache_root, device)
     tok.pad_token = tok.pad_token or tok.eos_token
@@ -343,11 +453,10 @@ def main(
     }
     prompts = prompts_by_set[prompt_set]
 
-    pool_version = pool_version_for(base_ref, n_pile_docs)
-    if pool_version == "dp1":
-        pool = build_probe_pool(tok, PROBE_POOL_DP1)
-    else:
+    if pool_version.startswith("pile"):
         pool = build_pile_pool(tok, n_pile_docs, max_tokens=pile_max_tokens, seed=pile_seed)
+    else:
+        pool = build_probe_pool(tok, native_probe_pool(base_ref))
     logger.info("{} pool token_sha256 {}", pool_version, pool.token_sha256())
 
     def _p_target(model, set_name: str) -> float:
@@ -384,7 +493,8 @@ def main(
         orig_logp = None
         for splice_mode in splices_by_cell[tag]:
             row = {"student_tag": tag, "ftseed": ftseed, "alpha": alpha, "rank": r,
-                   "splice": splice_mode, "pool_version": pool_version}
+                   "splice": splice_mode, "pool_version": pool_version,
+                   "base_dir_name": base_dir, "lineage": str(lineage_dir)}
             if splice_mode == "scale":
                 a_init = None
                 # dW' - dW = (λ-1)·dW exactly: the ablated share is |1-λ| and the top
@@ -489,6 +599,7 @@ def main(
         "lineage": str(lineage_dir),
         "ftseed": ftseed,
         "base_ref": base_ref,
+        "base_dir_name": base_dir,
         "n_pile_docs": n_pile_docs,
         "pool_version": pool_version,
         "pile_pool_sha": pool.token_sha256(),

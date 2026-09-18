@@ -129,11 +129,20 @@ src/subliminal_learning/
                     MultiAnimalComparison; loaders also take
                     control_dataset_tag (n125k treatment vs n100k control) and ftseed (per-seed
                     preference_eval.json); notebooks/transfer_significance.ipynb (builder
-                    scripts/build_transfer_significance_nb.py) holds all three tables: the 7
+                    scripts/build_transfer_significance_nb.py) holds all five tables: the 7
                     cross-architecture arms (full-coverage senders only, per data-order class),
                     family_existence_table for the Pythia seed families (core56; same-model on
-                    focus20, its controls' only cells) and family_comparison_table for
-                    cross-data-order vs cross-seed and same-model vs cross-data-order);
+                    focus20, its controls' only cells), family_comparison_table for
+                    cross-data-order vs cross-seed and same-model vs cross-data-order, and the
+                    160m re-pretraining direction matrix (run_logs/repretrain/
+                    repretrain_significance_arms.json: orig/pr1234/pr3/dclm1234/dclm1/wc1/wc2
+                    dog arms on core30 + HOT10, base_eval test priors when the student trees
+                    carry no base_control.json, in_progress arms with a `note` rendered as
+                    note rows without a p, `partial` arms tested on the design cells they
+                    have with `cells` reading tested/design), and the OLMo-1B DataDecide
+                    cross-seed arms (run_logs/repretrain/olmo_cross_seed_significance_arms.json:
+                    dd-1b/dd-1b-seed2 elephant arms on ctrl20 + olmo_core30, tseed 0, base
+                    controls only -- rng twins live in the CLI));
                     --ftseed (default 1) pins the student finetune seed in EVERY readout mode,
                     so the CLI and the notebook tables read one seed, never the aggregate; a
                     receiver with no anchored probe cut raises under --dead drop (nothing to
@@ -1173,19 +1182,26 @@ RETENTION, not placement or the boundary.
 The exact nonadaptive OLMo same-model set is 432 cells (rank through 256, alpha through 512), and the cross-seed-2 receiver set is another 432 cells. The same-model fit is $b=0.499$ $[0.472, 0.526]$, $c=-0.059$ $[-0.080, -0.037]$, $K^\ast=4.33\times10^{-3}$; cross-seed 2 gives $b=0.507$ $[0.492, 0.523]$, $c=-0.038$ $[-0.050, -0.026]$, $K^\ast=4.53\times10^{-3}$. The two receivers agree on 427 of 432 failure labels. Used as a logistic-threshold classifier on the same-model set, the OLMo coordinate makes 9 errors versus 25 in the Pythia designed-population coordinate $(0.659, -0.164)$; on cross-seed 2 the counts are 3 versus 28. Holding the endpoint exponents fixed, $K^\ast$ falls from $7.01\times10^{-3}$ at 5% of training to $3.97\times10^{-3}$ around 40%, then rises to $4.33\times10^{-3}$ at the endpoint; twelve same-model and eleven cross-seed runs finish below the failure threshold after exceeding it at an earlier checkpoint.
 
 A second, fully isolated base-model family (`models/datadecide.py`, which imports
-nothing else from the package). CLI grammar: `dd-1b[-seed{1,2,3}][@step{N}]`, routed by
+nothing else from the package). CLI grammar: `dd-1b[-{recipe}][-seed{1,2,3}][@step{N}]`
+(the `{recipe}` segment is `dclm`; the default recipe `dolma1_7` is never spelled, so each
+model has one canonical token), routed by
 `parse_base_model_tokens` — the launch CLIs' one entry point, which sends any `dd-*`
 list to the DataDecide parser and everything else, unsplit, to `parse_base_models`
 (Pythia behaviour byte-identical). Mixing families in one invocation is a ValueError
 (different tokenizer, different Hub org). DataDecide is **CLI-token-only**: an
 experiment YAML's `model_spec` stays Pythia-only.
 
-- Seeds are HF **branches** of one repo (`allenai/DataDecide-dolma1_7-1B`), ordinal →
-  branch: 1 → `default`, 2 → `large-aux-2`, 3 → `large-aux-3`. A DataDecide seed
+- Each data recipe is its own repo (`allenai/DataDecide-{recipe}-1B`) with the SAME
+  branch structure; seeds are HF **branches** of that repo, ordinal → branch:
+  1 → `default`, 2 → `large-aux-2`, 3 → `large-aux-3`. A DataDecide seed
   re-randomizes weight init AND data order jointly — there is no ds/ws analog.
 - The revision is ALWAYS the explicit `step{N}-seed-{branch}` branch (final step
   **69369**), never `main`: main can move, the step branch is immutable provenance.
-- Run dirs: `DataDecide-dolma1_7-1B-seed-{branch}`; a step-pinned spec appends
+- The data **recipe** (`dolma1_7` default, `dclm-baseline` via the `dclm` token segment)
+  also decides the probe pool — dp1 vs `cp1t-olmo`; see *DataDecide routing is by RECIPE*
+  in the probe-pool section.
+- Run dirs: `DataDecide-{recipe}-1B-seed-{branch}` (`DataDecide-dolma1_7-1B-seed-default`,
+  `DataDecide-dclm-baseline-1B-seed-default`, ...); a step-pinned spec appends
   `@step{N}` and therefore lands under `ckpt/`, like a revision-pinned Pythia dir.
 - Loading needs the legacy `hf_olmo` architecture from the **non-default** `datadecide`
   dependency group: `uv sync --group datadecide` (the loader raises a RuntimeError
@@ -1277,10 +1293,13 @@ experiment YAML's `model_spec` stays Pythia-only.
   `record_cache.get_kind("pile_probe:cp1")` reads a sidecar; no existing reader globs
   `pile_probe*`, so nothing double-counts.
 - Family pool routing in the surgery/ladder CLIs (09-10): `coherence.probe_io.
-  resolve_probe_pool_spec(repo, pool)` gives the base's family pool by default (`--pool auto`:
-  pp1 Pythia, dp1 DataDecide, `pp1t-<tag>` otherwise) and honours an explicit `--pool` only
-  when it belongs to the same family (`pp1t-olmo` on DataDecide, `pp1w-qwen25` on Qwen);
-  anything else raises. Wired into `position_surgery`, `trained_direction_ladder`,
+  resolve_probe_pool_spec(repo, pool)` gives the base's NATIVE pool by default (`--pool auto`
+  = `native_probe_pool`: pp1 Pythia, cp1 the `dclm` re-pretrainings, dp1 / `cp1t-olmo` by
+  DataDecide recipe, `pp1t-<tag>` otherwise) and honours an explicit `--pool` only when it is
+  one of the base's COMPATIBLE pools (`compatible_probe_pools`: the family's corpus pools plus
+  its `pp1t-`/`pp1w-`/`cp1t-<tag>` retokenizations — `pp1t-olmo` on DataDecide, `pp1w-qwen25`
+  on Qwen, `cp1t-olmo` on a dolma base, `dp1` on a dclm one); anything else raises an
+  `IncompatibleProbePoolError`. Wired into `position_surgery`, `trained_direction_ladder`,
   `diffuse_ladder_surgery` (previously `--pool pp1` default, pp1/dp1 only; 2026-09-11 its
   random targets are keyed per (seed, base, module, align, k) — `rng_scheme: keyed_v1` in
   the document — so cells can be ADDED later: a rerun on an existing same-scheme document
@@ -3147,6 +3166,62 @@ those bases. The anchor is `analysis/unigram_anchor_cp1.json` (+ `.counts.npz`),
 `build_unigram_anchor.py --pool cp1`: the fit stream is the same permutation after the
 pool's `n_scanned`, 50k documents, same rules, and it needs the source stem.
 
+*The DCLM frozen TEXT and `cp1t-<tag>` (2026-09-18).* The DataDecide `dclm-baseline`
+bases are pretrained on DCLM, not Dolma, so dp1 is off-distribution for them; they need
+cp1's documents under the OLMo tokenizer. cp1's 32 documents are therefore ALSO frozen as
+TEXT — `data/probe_pools/cp1_text.jsonl` (+ `.meta.json`, text sha `aca044fcf1713351…`),
+built by `scripts/build_cp1_text.py` from the frozen `cp1_tokens.*` artifact (CPU-only, no
+source mount): the same record schema and truncation semantics as `pp1_text` (the text is
+the decode of the document's ids AFTER cp1's 512-token cut), plus provenance (source pool
+`cp1` and its pinned token sha, Megatron stem, decode tokenizer `EleutherAI/pythia-160m`,
+per-doc original token counts). The builder re-encodes every frozen text and FAILS unless
+the ids come back exactly (32/32 exact). `cp1t-<tag>` is that text retokenized per family,
+the pp1t mechanism on a second corpus: `probe_families.CP1T_PREFIX`/`is_cp1t`/
+`cp1t_pool_version_for` know the versions structurally, `probe_io.frozen_text_paths` picks
+the artifact and `pinned_frozen_text_sha` the pin (`CP1T_TOKEN_SHA`), and the pool's
+`source` reads `cp1_text:…`. Only `cp1t-olmo` is built; the DataDecide tokenizer (GPT-NeoX
+BPE plus specials) segments these 32 documents identically to Pythia — identical ON THE POOL,
+measured, not a claim that the two tokenizers agree in general — so its pin IS
+`CP1_TOKEN_SHA`. On the 50k-document unigram FIT stream they do differ, by 464 tokens.
+There is no `cp1w`.
+
+*DataDecide routing is by RECIPE (2026-09-18).* One data recipe = one corpus pool:
+`dolma1_7` → `dp1`, `dclm-baseline` → `cp1t-olmo` (`probe_io.dd_recipe_pools`, keyed on
+the recipe of the base's spec via `parse_dd_ref`/`base_spec` — or, for a bare hub repo id,
+`datadecide.dd_recipe_of_repo_id`; never by string-matching a path). It is the olmo-family
+analogue of `PYTHIA_VARIANT_POOLS`, and it drives `probe_pool_spec_for_repo`,
+`CORPUS_POOLS["olmo"] = ("dp1", "cp1t-olmo")`, `native_probe_pool_version` (hence the
+`pile_probe.<pool>.json` sidecar naming), `run_final_evals`, `ckpt_pile_kl_trajectory.
+pool_spec_for`, `teacher_pile_kl_trajectory` and `ckpt_teacher_pile_probe`. The olmo
+family OWNS both pools, so `resolve_probe_pool_spec` accepts either explicitly on any
+DataDecide base (`--probe-pools cp1t-olmo` on a dolma base, `dp1` on a dclm one) — the
+other recipe's pool then lands in a sidecar. The anchor is
+`analysis/unigram_anchor_cp1t-olmo.json` (+ `.counts.npz`), built by
+`build_unigram_anchor.py --pool cp1t-olmo`: cp1's fit stream (same permutation after the
+pool's `n_scanned`, needs the source stem) decoded with the Pythia tokenizer and
+re-tokenized by the family tokenizer, so the counts live in the OLMo vocabulary. Built
+2026-09-18 (50,000 fit docs, 20.96M tokens, vocab 50,280, 12,552 CE targets):
+H_uni = 7.4901 nats — cp1's 7.4901 to four decimals, the two tokenizations of this corpus
+differing by only 464 of 20.96M tokens — and ce_base 2.5075 / 2.5118 / 2.5078 for the `dclm-baseline` 1B seeds
+default / large-aux-2 / large-aux-3, i.e. anchored cuts Δ_cross ≈ 4.98 nats.
+
+*One place the pool choice lives (2026-09-18).* `coherence/probe_io.py` owns the whole
+decision and every site calls it — there is no second family table anywhere in the repo.
+`native_probe_pool(base)` takes ANY base spelling (a `--base-models` token, an HF ref, an
+output-tree dir name, or a `BaseSpec`, all resolved through `models.naming.base_spec`) and
+returns the pool that base must be measured on; `native_pool_version_for_base(base)` is its
+version string (distinct from `native_probe_pool_version(run_dir)`, which reads a run's
+manifest). `compatible_probe_pools(base)` lists every tokenizer-compatible version, native
+first, and `require_compatible_probe_pool(base, version)` is the gate — `resolve_probe_pool_
+spec` is just "auto → native, else require". `probe_pool_spec_for_version` knows every wired
+version (pp1, cp1, dp1, dp1w, `pp1t-`/`pp1w-`/`cp1t-<tag>`). Errors are named ValueErrors
+(`UnknownProbeBaseError`, `IncompatibleProbePoolError`), never a KeyError and never a silent
+fallback to pp1. The hand-rolled copies that used to re-derive this — in `frozen_a_ablation`,
+`weightspace/dose_census`, `ckpt_pile_kl_trajectory.pool_spec_for`, `run_final_evals
+--probe-pools` and `analysis/transfer_significance_io` (whose `probe_pool=` arguments now
+default to None = each receiver's native pool) — all call the API instead, so a new recipe or
+family is wired once.
+
 *Nested wide pools `pp1w-<tag>` / `dp1w` (2026-09-05).* Each is 128 documents =
 the base pool's 32, byte-identical and in order, plus 96 drawn from the SAME
 seeded stream but from after the frozen unigram fit window (`pp1w` from Pile
@@ -4556,7 +4631,8 @@ Pre-existing cells are retrained in place (`--force`); a scratch-root preflight 
 reproduces the existing adapters byte for byte, and pre-retrain adapter hashes plus `eval/` backups
 sit beside the configs. `scripts/teacher_pile_kl_trajectory.py` now resolves the base and probe pool
 from the run manifest (`base_model_repo` → `load_base_from_ref` / `probe_pool_spec_for_repo`), so it
-scores DataDecide (dp1) and Qwen (`pp1t-qwen25`) teacher checkpoints the same way as Pythia (pp1).
+scores DataDecide (dp1 for dolma1_7, `cp1t-olmo` for dclm-baseline) and Qwen (`pp1t-qwen25`)
+teacher checkpoints the same way as Pythia (pp1).
 Along the way the sweep's pre-check `teacher_run_is_current` was found comparing raw identity dicts,
 template path included, so runs trained from a checkout under another home were logged as retrains
 although the inner gate skipped them; it now uses `run_gate.identities_match`, the gate's own
@@ -4690,3 +4766,52 @@ Both LoRA pipelines (teacher FT and student distillation) share one trainer call
 Tests: `tests/test_yield_resume.py` (real tiny CPU training, self-SIGTERM mid-run, resume to the
 uninterrupted step count, prune), `tests/test_training_audit_resume.py`, `tests/test_worker_inflight_gate.py`,
 `tests/test_dedupe_final_trajectory_checkpoint.py`, `tests/test_final_ckpt_step_readers.py`.
+
+### Checkpoint-ladder thinning (2026-09-18)
+
+Intermediate `checkpoints/checkpoint-N/` dirs are storage, not data, once every weight-derived
+and behavioural record over them exists. `src/subliminal_learning/training/ckpt_ladder.py` holds
+the per-run **ladder manifest** (`checkpoints/ladder.json`, schema 1: every step that EVER
+existed, per-step `kept` / `adapter_sha256` / `adapter_bytes` / `deleted_at`, `keep_epochs`,
+`derived_docs_verified`, `train_manifest_ref`) and the one checkpoint-list predicate: currency is
+**coverage** (`STEP_GATE = "covers"`, `steps_covered`) — "the stored record covers everything on
+disk" — so a full record stays current after thinning instead of being recomputed down to the
+survivors; `record_is_complete` is the stronger "covers the whole ladder" the thinning demands.
+`scripts/adapter_spectra_trajectory.py` persists the cheap weight-derived readout first: all
+singular values of `s·B@A` per module per checkpoint (`eval/adapter_spectra_traj.{npz,json}`).
+`scripts/thin_checkpoint_ladders.py` (dry-run by default) then deletes the non-kept rungs. Scope
+defaults, all flags and all printed at start: original-PolyPythias receivers
+(`^pythia-160m-(data-seed[123]|weight-seed[123]|seed[123])$`) fed by original-suite senders
+(`^teacher-pythia-160m(-(data-seed|weight-seed|seed)[123])?$`), `cross_base` true, no `_sgd` /
+`_sch` / `_noeos` / `_stop` in ANY path component below the receiver (`out_of_scope:arm_suffix`)
+nor in the manifest tag (`out_of_scope:param_tag`), no `ckpt` / `@step` components, a real run dir
+(manifest + endpoint adapter, else `out_of_scope:not_a_run_dir`), minus the protect file; keep
+epochs `0.5,1,1.5,2,5,10`; records required `pref_traj,pile_kl_traj,adapter_spectra_traj`.
+
+Five things make a delete safe. (1) **Keep set from disk**: the keep epochs are SNAPPED onto the
+rungs that exist (`snap_keep_steps`); an epoch with no rung within tolerance, a collision, or a
+count that is not the number of feasible epochs stops the run at `keep_step_missing:<problem>`
+(the ladder manifest records `keep_epochs`, unsnapped `keep_targets` and snapped `keep_steps`).
+(2) **Records are data, not headers**: `record_points_problem` (one measured point per ladder step,
+the run's own animal for `pref_traj`) and `spectra_record_problem` (npz existence, sha, steps,
+shape, points) on top of `train_manifest_ref` equality — status `missing:<record>:<problem>`.
+(3) **Resolved-path identity**: every rel comes from `run_dir.resolve()` against the resolved output
+root, so scope and protect keys (normalised the same way at load) cannot be dodged by an alias; a
+symlinked run dir or walk root is `symlinked_run_dir` / refused, and a symlink at the `checkpoints/`
+root or an endpoint resolving inside a rung is `endpoint_symlink`. (4) **Archive before delete**:
+the three records are copied to
+`{output_root}/analysis/thin_ckpt/archive/<receiver>/<record>/<rel with '/'→'__'>` (JSON + npz)
+and named in the manifest's `archived`; a failed copy is `archive_failed` and deletes nothing.
+(5) **Re-inspection under the claim**: after `acquire_claim` the run is classified again (its own
+claim ignored) and executed only when the fresh status is `ready` with an identical keep/delete
+plan, else `plan_changed:<new status>`. The endpoint adapter is never touched, a
+`checkpoint-{n_train_steps}` goes only when byte/tensor identical to it, the manifest is written
+BEFORE the first `rmtree` and its `deleted_at` rewrite runs in a `finally` (a kill leaves a state
+the next invocation finishes). `--emit-missing-jobs` writes — never submits — SPECTRA jobs only
+(per run dir, `--roots <rel>`, `nice -n 15`, `--jobs-chunk N` per chunk file under
+`run_logs/thin_ckpt/jobs/<stamp>/`); the cell-addressed `pref_traj` / `pile_kl_traj` are reported
+under the report's `unfillable` instead of being guessed. `--apply` refuses on walk errors, on any
+`scan_error`, on `--limit` with `--expect-runs`, and without a protect file;
+`--regen-protect-file` rebuilds `run_logs/thin_ckpt/protect_pythia_nonadaptive.tsv` from the tree
+and aborts unless its census is 1231 lattice504 + 505 earlystop runs. Tests:
+`tests/test_ckpt_ladder.py`, `tests/test_thin_checkpoint_ladders.py`.

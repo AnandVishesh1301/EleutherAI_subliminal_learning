@@ -49,12 +49,13 @@ from pathlib import Path
 
 import numpy as np
 import typer
+from loguru import logger
 
 from subliminal_learning.analysis.adapter_decomp import (
     base_repo_and_revision_for_run, low_rank_norms)
 from subliminal_learning.analysis.w0_norms import ensure_w0_norms
 from subliminal_learning.config import resolve_output_root
-from subliminal_learning.evaluation.ckpt_trajectories import distinct_steps
+from subliminal_learning.training.ckpt_ladder import steps_covered, supersede_if_shrinking
 from subliminal_learning.utils.run_io import final_train_step, manifest_ref
 
 app = typer.Typer(add_completion=False)
@@ -121,9 +122,9 @@ def _pooled_dose(adapter_file: Path, scal: float,
 
 
 
-def _run_one(args: tuple[str, int, str, str, bool]) -> str:
+def _run_one(args: tuple[str, int, str, str, bool, bool]) -> str:
     """Worker: one (tag, ftseed) run -> trajectory JSON. Returns a status line."""
-    tag, ftseed, lineage_dir_s, out_dir_s, legacy_out = args
+    tag, ftseed, lineage_dir_s, out_dir_s, legacy_out, force = args
     from threadpoolctl import threadpool_limits
 
     from subliminal_learning.utils.io import atomic_write_json
@@ -154,18 +155,29 @@ def _run_one(args: tuple[str, int, str, str, bool]) -> str:
                 else run_dir / "eval" / "dose_traj.json")
     step_list = [s for s, _ in steps]
     ref = manifest_ref(run_dir)
+    carried: list[dict] = []
     if out_file.exists():
         prev = json.loads(out_file.read_text())
         # Identity for dose = checkpoint list + train-manifest ref. No prompt hashes: dose
         # is a pure function of the adapter weights and the frozen base's W0 norms, with no
         # prompts, sampling or animals in it.
         stored_steps = prev.get("checkpoint_steps", [p["step"] for p in prev["points"]])
-        # DISTINCT steps (see `evaluation.ckpt_trajectories.STEP_GATE`): a record measured
-        # when the endpoint still had its duplicate `checkpoint-N` dir stays current.
-        current = distinct_steps(stored_steps) == distinct_steps(step_list) and (
-            legacy_out or prev.get("train_manifest_ref") == ref)
-        if current:
+        same_run = legacy_out or prev.get("train_manifest_ref") == ref
+        # COVERAGE on distinct steps (see `training.ckpt_ladder.STEP_GATE`): a record
+        # measured over a longer ladder -- the endpoint's duplicate `checkpoint-N` dir, or
+        # checkpoints since thinned away -- stays current.
+        if not force and steps_covered(stored_steps, step_list) and same_run:
             return f"skip {tag}/ftseed{ftseed}: up to date ({len(steps)} points)"
+        # This recompute can only cover the checkpoints still on disk. When the stored
+        # record describes the SAME run its points for the thinned-away steps stay valid
+        # and are merged into the new record (so --force never shrinks the live file); the
+        # stored file is preserved beside itself either way (the invariant of
+        # `training.ckpt_ladder.supersede_if_shrinking`).
+        if same_run:
+            on_disk = set(step_list)
+            carried = [p for p in (prev.get("points") or [])
+                       if p.get("step") not in on_disk]
+        supersede_if_shrinking(run_dir, out_file, stored_steps, step_list, log=logger)
 
     base_repo, revision = base_repo_and_revision_for_run(ckpt)
     w0 = _w0_norms(ckpt, _adapter_modules(steps[-1][1]), out_dir.parent.parent)
@@ -173,6 +185,9 @@ def _run_one(args: tuple[str, int, str, str, bool]) -> str:
     with threadpool_limits(limits=1):
         for step, f in steps:
             points.append({"step": step, **_pooled_dose(f, scal, w0)})
+    if carried:
+        points = sorted(points + carried, key=lambda p: p["step"])
+        step_list = sorted({*step_list, *(p["step"] for p in carried)})
     out_file.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(out_file, {
         "tag": tag, "ftseed": ftseed,
@@ -235,14 +250,11 @@ def main(
             for seed, det in v.get("per_seed", {}).items():
                 if det.get("endpoint_bit_identical"):
                     runs.append((v["tag"], int(seed)))
-    if force:
-        for t, s in runs:
-            stale = (out_dir / f"{t}_ftseed{s}.json" if legacy_out
-                     else lineage_dir / t / f"ftseed{s}" / "eval" / "dose_traj.json")
-            stale.unlink(missing_ok=True)
-
+    # --force is passed to the worker rather than unlinking the stored records here: the
+    # deleted record can no longer be superseded (nor its thinned points carried), which
+    # is exactly what a forced rerun of a thinned run would throw away.
     print(f"{len(runs)} runs over lineage {lineage_dir}")
-    jobs = [(t, s, str(lineage_dir), str(out_dir), legacy_out) for t, s in runs]
+    jobs = [(t, s, str(lineage_dir), str(out_dir), legacy_out, force) for t, s in runs]
     n_done = 0
     with ProcessPoolExecutor(max_workers=workers) as ex:
         for line in ex.map(_run_one, jobs):

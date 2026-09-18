@@ -267,6 +267,31 @@ def _extract_adapter_norms_traj(rec: dict) -> dict:
     }
 
 
+def _extract_adapter_spectra_traj(rec: dict) -> dict:
+    """`scripts.adapter_spectra_trajectory` sidecar -> run-level trajectory scalars.
+
+    The pooled per-step scalars only (the full ``sigma[K,M,r]`` stays in the sibling npz):
+    the dose at the last recorded step and its maximum, plus the spectrum-shape pair --
+    ``stable_rank_min`` is the most concentrated the update ever got along the ladder.
+    The ``_min``/``_max`` reductions run over the FINITE steps only: a step whose modules
+    were all nonfinite/zero pools to NaN and must not poison the run's extremum.
+    """
+    pts = sorted(rec.get("points") or [], key=lambda p: p["step"])
+    fro = [_f(p.get("ba_fro_mean")) for p in pts]
+    sr = [_f(p.get("stable_rank_mean")) for p in pts]
+    finite = lambda v: [x for x in v if math.isfinite(x)]   # noqa: E731
+    return {
+        "n_steps": len(pts),
+        "step_max": float(pts[-1]["step"]) if pts else float("nan"),
+        "ba_fro_last": fro[-1] if fro else float("nan"),
+        "ba_fro_max": max(finite(fro)) if finite(fro) else float("nan"),
+        "stable_rank_last": sr[-1] if sr else float("nan"),
+        "stable_rank_min": min(finite(sr)) if finite(sr) else float("nan"),
+        "effective_rank_last": _f(pts[-1].get("effective_rank_mean")) if pts else float("nan"),
+        "sigma_top4_last": _f(pts[-1].get("sigma_top4_mean")) if pts else float("nan"),
+    }
+
+
 def _extract_cos_w0(rec: dict) -> dict:
     """`scripts.teacher_cos_w0` record -> run-level direction scalars.
 
@@ -335,6 +360,14 @@ register_kind(RecordKind(
     rel_record="eval/adapter_norms_traj.json",
     columns=["n_steps", "step_max", "dw_fro_last", "dw_fro_max", "test_p", "rank", "alpha"],
     extract=_extract_adapter_norms_traj,
+))
+
+register_kind(RecordKind(
+    name="adapter_spectra_traj",
+    rel_record="eval/adapter_spectra_traj.json",
+    columns=["n_steps", "step_max", "ba_fro_last", "ba_fro_max", "stable_rank_last",
+             "stable_rank_min", "effective_rank_last", "sigma_top4_last"],
+    extract=_extract_adapter_spectra_traj,
 ))
 
 COS_W0 = register_kind(RecordKind(

@@ -47,7 +47,8 @@ from scripts.fidelity_heldout_ce import (
 from subliminal_learning.coherence.probe_io import (
     build_probe_pool, manifest_ref,
     mean_ce, pool_logprobs, probe_is_current, probe_path,
-    probe_pool_spec_for_repo, probe_pool_spec_for_version,
+    native_probe_pool, probe_pool_spec_for_version,
+    require_compatible_probe_pool,
 )
 from subliminal_learning.evaluation.ckpt_trajectories import probe_record, release_base
 from subliminal_learning.config import resolve_output_root, resolve_roots
@@ -94,8 +95,12 @@ def main(
     evals: str = typer.Option("probe,fidelity,shuffle", help="Comma list of kinds to ensure."),
     probe_pools: str = typer.Option(
         "", help="Comma list of probe pool versions to ensure (e.g. 'pp1,cp1'). Empty "
-                 "(default) = the base's native pool only, exactly as before. The native "
-                 "pool writes eval/pile_probe.json; every other pool writes the sidecar "
+                 "(default) = the base's native pool only, exactly as before. Each version "
+                 "must be COMPATIBLE with the run's base (`probe_io."
+                 "compatible_probe_pools`): another corpus of the same family is an "
+                 "opt-in cross-corpus readout (cp1t-olmo on a dolma base, dp1 on a dclm "
+                 "one), another family's tokens are refused. The native pool writes "
+                 "eval/pile_probe.json; every other pool writes the sidecar "
                  "eval/pile_probe.<version>.json, so the corpora are comparable per run."),
     n_rows: int = typer.Option(256, help="Fidelity rows per side."),
     device: str = typer.Option("cuda:0"),
@@ -106,8 +111,8 @@ def main(
     if unknown:
         raise typer.BadParameter(f"unknown eval kinds: {sorted(unknown)}")
     wanted_pools = [v.strip() for v in probe_pools.split(",") if v.strip()]
-    for version in wanted_pools:      # fail before any model load on a typo
-        probe_pool_spec_for_version(version)
+    for version in wanted_pools:      # fail before any model load on a TYPO; per-run
+        probe_pool_spec_for_version(version)   # compatibility is checked below, per base
 
     base_cache: dict[str, tuple] = {}
     # (repo, pool_version) -> (pool, base_logp, ce_base, pool_sha)
@@ -148,14 +153,16 @@ def main(
         need = set()
         probe_todo: list[tuple] = []     # (pool_arg, pspec) still missing for this run
         if "probe" in kinds:
-            # dp1 (Dolma/OLMo) for DataDecide bases, pp1 (Pile) for Pythia; the
-            # record's name and kind stay `pile_probe`, `pool_version` says which.
-            # For a `pp1t-<tag>` spec the pool is built from THIS model's own
-            # tokenizer, and `build_probe_pool` applies the family's BOS policy.
-            native = probe_pool_spec_for_repo(repo)
+            # The base's own pool comes from `probe_io.native_probe_pool` (the ONE
+            # place that choice lives); the record's name and kind stay `pile_probe`,
+            # `pool_version` says which. An explicit --probe-pools version must be
+            # compatible with THIS base, so dp1 on a Pythia base or pp1 on an OLMo one
+            # is refused instead of silently producing cross-tokenizer numbers. For a
+            # frozen-text spec the pool is built from THIS model's own tokenizer, and
+            # `build_probe_pool` applies the family's BOS policy.
+            native = native_probe_pool(repo)
             specs = ([native] if not wanted_pools else
-                     [native if v == native.version else probe_pool_spec_for_version(v)
-                      for v in wanted_pools])
+                     [require_compatible_probe_pool(repo, v) for v in wanted_pools])
             for pspec in specs:
                 # None = "the native record" (canonical file); any other version goes to
                 # its sidecar. Context is per (repo, pool): one pool build + base pass each.

@@ -121,3 +121,37 @@ def test_dry_run_writes_nothing(root, monkeypatch):
     out = worker.run(_sweep(root), 75000, dry_run=True)
     assert set(out) == set(leaves) and not calls["write"]
     assert not any((leaf / "eval").exists() for leaf in leaves)
+
+
+@pytest.mark.parametrize("token,dir_name", [
+    ("dd-1b", "DataDecide-dolma1_7-1B-seed-default"),
+    ("dd-1b-dclm", "DataDecide-dclm-baseline-1B-seed-default"),
+])
+def test_datadecide_sweeps_parse_and_resolve(root, token, dir_name):
+    """The checkpoint-teacher CLIs route --base-models through the family router.
+
+    `dd-1b-dclm` used to die in the Pythia-only parser before any model load.
+    """
+    from subliminal_learning.models.datadecide import DataDecideSpec
+
+    leaves = _teachers(root, base_dir=f"{dir_name}@step75000")
+    _, spec, runs = worker.resolve_teacher_dirs(
+        _sweep(root, base_model=token), 75000)
+    assert isinstance(spec, DataDecideSpec) and spec.step == 75000
+    assert runs == leaves
+
+
+def test_evaluate_checkpoint_teachers_parses_the_same_tokens(root):
+    from subliminal_learning.models.datadecide import DataDecideSpec
+    from scripts import evaluate_checkpoint_teachers as ect
+
+    _teachers(root, base_dir="DataDecide-dclm-baseline-1B-seed-default@step10000")
+    sweep = _sweep(root, base_model="dd-1b-dclm")
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load(sweep.read_text())
+    assert cfg["base_model"] == "dd-1b-dclm"
+    from subliminal_learning.models.datadecide import parse_base_model_tokens
+
+    assert isinstance(parse_base_model_tokens("dd-1b-dclm@step10000")[0], DataDecideSpec)
+    assert hasattr(ect, "run")

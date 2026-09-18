@@ -40,6 +40,10 @@ from pathlib import Path
 import numpy as np
 import typer
 
+from scripts.adapter_norms_slim import (
+    supersede_traj_if_shrinking,
+    traj_record_problem,
+)
 from subliminal_learning.analysis import norms as an
 from subliminal_learning.analysis.adapter_decomp import (
     base_model_factory, base_repo_and_revision_for_run, base_weight_norms,
@@ -148,6 +152,8 @@ def main(
     checkpoints: bool = typer.Option(
         False, help="Also probe every intermediate checkpoint-*/ dir (growth curves); "
         "the seeded A_init reconstruction is reused across steps of one run."),
+    force: bool = typer.Option(
+        False, help="Re-harvest the per-checkpoint record even when it is current."),
     device: str = "cpu",
     out: Path | None = None,
 ) -> None:
@@ -176,6 +182,7 @@ def main(
                 base_repo, hf_cache_root, device, ftseed + WRONG_SEED_OFFSET, acfg,
                 output_root=output_root, revision=revision)
             adapters: list[tuple[int | None, Path]] = []
+            traj_steps: list[int] = []
             n_bad = checkpoint_nonfinite_count(ckpt)
             if n_bad:
                 # Diverged (all-NaN) adapter -> every norm below is NaN. Skip LOUDLY.
@@ -200,6 +207,16 @@ def main(
                 if (end_step is not None and end_step not in steps
                         and (ckpt / "adapter_model.safetensors").exists()):
                     adapters.append((end_step, ckpt / "adapter_model.safetensors"))
+                    steps.add(end_step)
+                traj_steps = sorted(steps)
+                # Currency gate (`scripts.adapter_norms_slim.traj_record_problem`): the
+                # run's manifest_ref plus COVERAGE of the on-disk ladder, so a re-harvest
+                # on a THINNED run neither redoes the work nor shrinks the record.
+                if not force and not traj_record_problem(ckpt.parent, traj_steps):
+                    print(f"  SKIP {tag}/ftseed{ftseed}: traj record current "
+                          f"({len(traj_steps)} steps)")
+                    adapters = [a for a in adapters if a[0] is None]
+                    traj_steps = []
             run_rows: list[dict] = []  # this run only; `rows` is the cumulative aggregate
             with threadpool_limits(limits=1):
                 for step, adapter_file in adapters:
@@ -246,8 +263,10 @@ def main(
                 an.update_inventory(output_root, [_rel], source="adapter_norms_probe")
             steps = [r for r in run_rows if r["step"] is not None]
             if steps:
+                supersede_traj_if_shrinking(run_dir, traj_steps)
                 atomic_write_json(an.traj_record_path(run_dir),
-                                  an.build_traj_record(steps, **_kw), indent=None)
+                                  an.build_traj_record(steps, checkpoint_steps=traj_steps,
+                                                       **_kw), indent=None)
                 an.update_inventory(output_root, [_rel], source="adapter_norms_probe",
                                     key="traj_runs")
             if v:

@@ -176,6 +176,28 @@ def test_base_name_mapping():
     assert tio.base_name("ds3") == "pythia-160m-data-seed3"
     assert tio.base_name("ws1") == "pythia-160m-weight-seed1"
     assert tio.base_name("pythia-410m") == "pythia-410m"
+    # DataDecide (and every other family) resolves through `models.naming`, no local table
+    assert tio.base_name("dd-1b") == "DataDecide-dolma1_7-1B-seed-default"
+    assert tio.base_name("dd-1b-seed2") == "DataDecide-dolma1_7-1B-seed-large-aux-2"
+    assert tio.base_name("dd-1b-seed3") == "DataDecide-dolma1_7-1B-seed-large-aux-3"
+    assert tio.base_name("dd-1b-dclm") == "DataDecide-dclm-baseline-1B-seed-default"
+    assert tio.base_name("dd-1b-dclm-seed2") == "DataDecide-dclm-baseline-1B-seed-large-aux-2"
+    # an already-resolved dir name, and an unrecognized string, pass through unchanged
+    assert tio.base_name("DataDecide-dclm-baseline-1B-seed-default") == (
+        "DataDecide-dclm-baseline-1B-seed-default")
+    assert tio.base_name("not-a-base") == "not-a-base"
+
+
+def test_probe_pool_defaults_to_each_receivers_native_pool():
+    """No "dp1" literal: the pool of a receiver is `probe_io.native_probe_pool`'s answer."""
+    assert tio._probe_pool_for("pythia-160m", None) == "pp1"
+    assert tio._probe_pool_for("DataDecide-dolma1_7-1B-seed-default", None) == "dp1"
+    assert tio._probe_pool_for(
+        "DataDecide-dclm-baseline-1B-seed-default", None) == "cp1t-olmo"
+    assert tio._probe_pool_for("pythia-160m-dclm-seed1234", None) == "cp1"
+    # an explicit pool always wins, and an unreadable receiver keeps the historical pp1
+    assert tio._probe_pool_for("DataDecide-dolma1_7-1B-seed-default", "pp1") == "pp1"
+    assert tio._probe_pool_for("not-a-base", None) == "pp1"
 
 
 def test_resolve_teachers_manifest_list_and_strays(tmp_path):
@@ -752,3 +774,136 @@ def test_cli_pooled_line_says_insufficient_data_on_an_empty_design(monkeypatch):
             if ln.startswith("pooled stratified permutation")][0]
     assert "insufficient data" in line and "nothing to test" in line
     assert "p 1.0e+00" not in res.output
+
+
+def _registry_tree(root, *, cells=("c1", "c2")) -> None:
+    """Two ftseed-1 arms into a receiver whose student trees carry NO base_control.json (the
+    160m re-pretraining layout): one complete arm, one with students but no control evals."""
+    ds, recv = "ex10-20_prefix_n100k", "pythia-160m-pilerepro-seed1234"
+    for sender, with_control in (("pythia-160m", True), ("pythia-160m-pilerepro-seed3", False)):
+        for tag, v in (("t1", 0.5), ("t2", 0.6)):
+            for cell in cells:
+                _write_seed_eval(root / "students/dog" / recv / f"teacher-{sender}"
+                                 / f"{tag}_tseed1" / ds / cell / "ftseed1/preference_eval.json", v)
+                if with_control:
+                    _write_seed_eval(root / "students/controls/base" / recv / f"teacher-{sender}"
+                                     / ds / cell / "ftseed1/eval/dog/preference_eval.json", 0.1)
+    (root / "analysis").mkdir()
+    (root / "analysis/base_eval_pr1234_animal_preference_test.json").write_text(
+        json.dumps({"dog": {"p_per_prompt": [0.1, 0.3]}}))
+
+
+def test_significance_table_base_eval_prior_dict_cells_and_note_row(tmp_path):
+    """No tree base_control.json -> the base_eval test prior; a focus20-style cells JSON (dict
+    entries) resolves; an in_progress arm with a `note` reports it, counts filled in, no p."""
+    _registry_tree(tmp_path)
+    reg_dir = tmp_path / "run_logs"
+    reg_dir.mkdir()
+    (reg_dir / "cells.json").write_text(json.dumps(
+        {"cells": [{"student_tag": "c1", "lr": 1e-4}, {"student_tag": "c2", "lr": 2e-4}]}))
+    teachers = ["t1", "t2"]
+    (reg_dir / "arms.json").write_text(json.dumps({
+        "ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test",
+        "arms": [
+            {"name": "orig → pr1234", "animal": "dog", "sender": "pythia-160m",
+             "receiver": "pythia-160m-pilerepro-seed1234", "tseed": 1, "data_order": "same",
+             "expected_prior": 0.2, "cells": "cells.json", "teachers": teachers},
+            {"name": "pr3 → pr1234", "animal": "dog", "sender": "pythia-160m-pilerepro-seed3",
+             "receiver": "pythia-160m-pilerepro-seed1234", "tseed": 1, "data_order": "same",
+             "expected_prior": 0.2, "cells": "cells.json", "teachers": teachers,
+             "in_progress": True,
+             "note": "no matched controls ({controls}/{cells}); students {students}/{n_students}"},
+        ], "pools": [], "held_out": []}))
+    df = tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+    pooled = df[df["pooled"]].iloc[0]
+    assert pooled["arm"] == "orig → pr1234" and pooled["cells"] == "2"
+    assert pooled["prior"] == pytest.approx(0.2) and pooled["exceed."] == 4
+    note = df[df["arm"] == "pr3 → pr1234"].iloc[0]
+    assert note["test"] == "no matched controls (0/2); students 4/4"
+    assert note["cells"] == "in progress 0/2" and np.isnan(note["perm p"])
+    # an expected_prior off by more than 5% is still an error with the base_eval source
+    reg = json.loads((reg_dir / "arms.json").read_text())
+    reg["arms"][0]["expected_prior"] = 0.3
+    (reg_dir / "arms.json").write_text(json.dumps(reg))
+    with pytest.raises(ValueError, match="prior"):
+        tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+
+
+def test_significance_table_partial_arm_is_tested_on_the_cells_it_has(tmp_path):
+    """A `partial` arm short of controls and of one student run is tested on the cells carrying
+    both, its `cells` column reading tested/design; without the flag the same arm raises."""
+    _registry_tree(tmp_path, cells=("c1", "c2", "c3", "c4"))
+    ds, recv, sender = "ex10-20_prefix_n100k", "pythia-160m-pilerepro-seed1234", "pythia-160m"
+    # c4: control never evaluated; c3: teacher t2's student run missing
+    (tmp_path / "students/controls/base" / recv / f"teacher-{sender}" / ds / "c4"
+     / "ftseed1/eval/dog/preference_eval.json").unlink()
+    (tmp_path / "students/dog" / recv / f"teacher-{sender}" / "t2_tseed1" / ds / "c3"
+     / "ftseed1/preference_eval.json").unlink()
+    reg_dir = tmp_path / "run_logs"
+    reg_dir.mkdir()
+    (reg_dir / "cells.json").write_text(json.dumps({"cells": ["c1", "c2", "c3", "c4"]}))
+    arm = {"name": "orig → pr1234", "animal": "dog", "sender": sender, "receiver": recv,
+           "tseed": 1, "data_order": "same", "expected_prior": 0.2, "cells": "cells.json",
+           "teachers": ["t1", "t2"]}
+    reg = {"ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test", "arms": [arm],
+           "pools": [], "held_out": []}
+    (reg_dir / "arms.json").write_text(json.dumps(reg))
+    with pytest.raises(ValueError, match="short|covers"):
+        tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+    arm["partial"] = True
+    (reg_dir / "arms.json").write_text(json.dumps(reg))
+    df = tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+    per_teacher = df[df["teacher"] == "t2"].iloc[0]
+    assert per_teacher["cells"] == "2/4"          # t2's paired cells: c1, c2
+    pooled = df[df["pooled"]].iloc[0]
+    assert pooled["cells"] == "2/4" and pooled["exceed."] == 4 and not np.isnan(pooled["perm p"])
+
+
+# ----------------------------------------------------------------------------------------------
+# probe records (per-pool sidecars) and step-pinned receivers
+# ----------------------------------------------------------------------------------------------
+def _write_probe(run_dir, pool: str, delta_ce: float, *, native: bool) -> None:
+    """A probe record where `probe_io.probe_path` puts it for `pool`."""
+    (run_dir / "eval").mkdir(parents=True, exist_ok=True)
+    (run_dir / "train_manifest.json").write_text(json.dumps(
+        {"base_model_repo": "EleutherAI/pythia-160m"}))       # native pool: pp1
+    name = "pile_probe.json" if native else f"pile_probe.{pool}.json"
+    (run_dir / "eval" / name).write_text(json.dumps(
+        {"pool_version": pool, "delta_ce": delta_ce}))
+
+
+def test_dead_label_reads_the_native_record_and_the_sidecar(tmp_path):
+    """An explicit non-native pool lives in `pile_probe.<pool>.json`; native is unchanged."""
+    leaf = tmp_path / "cell"
+    _write_probe(leaf / "ftseed1", "pp1", 9.0, native=True)
+    assert tio._dead_label(leaf, 1, "pp1", 4.0) == 1.0
+    assert tio._dead_label(leaf, 1, "pp1", 40.0) == 0.0
+
+    # The cross-corpus cp1 readout of the SAME run: its own sidecar, not the pp1 file.
+    assert np.isnan(tio._dead_label(leaf, 1, "cp1", 4.0))
+    _write_probe(leaf / "ftseed1", "cp1", 1.0, native=False)
+    assert tio._dead_label(leaf, 1, "cp1", 4.0) == 0.0
+    assert tio._dead_label(leaf, 1, "pp1", 4.0) == 1.0        # native record untouched
+
+
+def test_cell_matrix_finds_a_step_pinned_receiver_tree(tmp_path):
+    """A `@step`-pinned receiver's students live under a gathered `ckpt/` level."""
+    ds, recv = "ex10-20_prefix_n100k", "pythia-160m@step5000"
+    for cell in ("c1", "c2"):
+        _write_summary(tmp_path / "students/dog/ckpt" / recv / "teacher-pythia-160m-seed1"
+                       / "t1_tseed1" / ds / cell / "preference_summary.json", "test", 0.5)
+        _write_summary(tmp_path / "students/controls/base/ckpt" / recv
+                       / "teacher-pythia-160m-seed1" / ds / cell
+                       / "eval/dog/preference_summary.json", "test", 0.1)
+
+    matrix = tio.load_cell_matrix("dog", "fs1", recv, ["t1"], output_root=tmp_path)
+    assert matrix.cells == ["c1", "c2"] and matrix.missing == []
+    assert matrix.values[0].tolist() == pytest.approx([0.5, 0.1])
+
+
+def test_unpinned_receiver_tree_is_unchanged(tmp_path):
+    """The same load on an unpinned receiver still reads the plain single-component tree."""
+    _fake_tree(tmp_path)
+    matrix = tio.load_cell_matrix("dog", "fs1", "original", ["t1"], output_root=tmp_path)
+    assert matrix.cells == ["c1", "c2"]
+    assert matrix.values[0].tolist() == pytest.approx([0.5, 0.1])

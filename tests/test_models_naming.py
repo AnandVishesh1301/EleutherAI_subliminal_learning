@@ -223,3 +223,54 @@ def test_spec_from_base_name_rejects_a_foreign_local_seed():
 
     with pytest.raises(ValueError, match="seeds"):
         spec_from_base_name("local/pythia-160m-pilerepro-seed2")
+
+
+# --- the data-recipe axis: dclm-baseline round-trips like dolma1_7 ----------------
+
+DCLM1 = "DataDecide-dclm-baseline-1B-seed-default"
+DCLM2 = "DataDecide-dclm-baseline-1B-seed-large-aux-2"
+DCLM1_REF = "allenai/DataDecide-dclm-baseline-1B@step69369-seed-default"
+
+
+@pytest.mark.parametrize("seed,dir_name", [
+    (1, DCLM1), (2, DCLM2), (3, "DataDecide-dclm-baseline-1B-seed-large-aux-3")])
+@pytest.mark.parametrize("step", [None, 17500])
+def test_dclm_spellings_round_trip(seed, dir_name, step):
+    pin = f"@step{step}" if step else ""
+    token = f"dd-1b-dclm-seed{seed}{pin}"
+    for spelling in (token, dir_name + pin, base_ref(token)):
+        assert base_token(spelling) == token
+        assert base_dir_name(spelling) == dir_name + pin
+        assert base_ref(spelling) == base_ref(token)
+        assert family_of(spelling) == "datadecide"
+    assert base_spec(token).recipe == "dclm-baseline"
+
+
+def test_dclm_is_a_different_base_than_dolma():
+    assert not same_base("dd-1b", "dd-1b-dclm")
+    assert base_dir_name("dd-1b-dclm") == DCLM1
+    assert base_ref("dd-1b-dclm") == DCLM1_REF
+    # the default recipe is never spelled, and foreign recipes are unnameable
+    for bad in ("dd-1b-dolma", "dd-1b-seed2-dclm", "dd-1b-foo",
+                "DataDecide-c4-1B-seed-default",
+                "allenai/DataDecide-c4-1B@step69369-seed-default"):
+        with pytest.raises(ValueError):
+            base_spec(bad)
+
+
+@pytest.mark.parametrize("recipe,dirname", [
+    ("", "DataDecide-dolma1_7-1B-seed-default"),
+    ("-dclm", "DataDecide-dclm-baseline-1B-seed-default"),
+])
+def test_final_step_dir_name_canonicalizes_like_token_and_ref(recipe, dirname):
+    """`@step69369` is the final step, so all three spellings are ONE spec."""
+    token = f"dd-1b{recipe}"
+    ref = base_ref(token)
+    assert base_spec(f"{dirname}@step69369").step is None
+    assert same_base(token, dirname)
+    assert same_base(token, f"{dirname}@step69369")
+    assert same_base(ref, f"{dirname}@step69369")
+    assert base_dir_name(f"{dirname}@step69369") == dirname
+    # a NON-final step stays pinned
+    assert base_spec(f"{dirname}@step10000").step == 10000
+    assert not same_base(token, f"{dirname}@step10000")

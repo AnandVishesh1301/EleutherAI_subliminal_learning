@@ -133,3 +133,19 @@ def test_record_cache_sidecar_kind_is_parameterized():
     assert side.rel_record == "eval/pile_probe.cp1.json"
     assert side.columns == native.columns and side.extract is native.extract
     assert side.cache_rel != native.cache_rel
+
+
+def test_datadecide_recipe_pools_are_versioned_and_sidecar_addressed(tmp_path):
+    """dolma1_7 -> dp1, dclm-baseline -> cp1t-olmo; the other recipe's pool is a sidecar."""
+    assert pio.probe_pool_spec_for_version("cp1t-olmo") is pio.PROBE_POOL_CP1T_OLMO
+    dolma = _mk_base_run(tmp_path, "allenai/DataDecide-dolma1_7-1B@step69369-seed-default",
+                         "dolma_run")
+    dclm = _mk_base_run(tmp_path,
+                        "allenai/DataDecide-dclm-baseline-1B@step69369-seed-default",
+                        "dclm_dd_run")
+    assert pio.native_probe_pool_version(dolma) == "dp1"
+    assert pio.native_probe_pool_version(dclm) == "cp1t-olmo"
+    assert pio.probe_path(dclm).name == "pile_probe.json"
+    assert pio.probe_path(dclm, "cp1t-olmo").name == "pile_probe.json"
+    assert pio.probe_path(dclm, "dp1").name == "pile_probe.dp1.json"
+    assert pio.probe_path(dolma, "cp1t-olmo").name == "pile_probe.cp1t-olmo.json"

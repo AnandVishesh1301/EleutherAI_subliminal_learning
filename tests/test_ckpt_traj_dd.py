@@ -42,6 +42,12 @@ def test_step_pinned_dd_base_selects_dp1():
     assert _defaults(parse_dd_token("dd-1b@step17500")).version == "dp1"
 
 
+def test_dclm_recipe_dd_base_selects_cp1t_olmo():
+    """The DataDecide RECIPE picks the corpus pool: dclm-baseline is not a Dolma base."""
+    for token in ("dd-1b-dclm", "dd-1b-dclm-seed3", "dd-1b-dclm@step10000"):
+        assert _defaults(parse_dd_token(token)).version == "cp1t-olmo"
+
+
 def test_pythia_base_selects_pp1():
     spec = parse_base_models("data-seed1", allow_full_seeds=True)[0]
     assert _defaults(spec) == PROBE_POOL_PP1
@@ -209,3 +215,34 @@ def test_resolver_rejects_non_canonical_lr_spelling(tmp_path: Path):
         assert "canonical" in str(err)
     else:
         raise AssertionError("expected BadParameter for a non-canonical spelling")
+
+
+def test_frozen_text_pools_refuse_a_non_default_recipe():
+    """A frozen-text pool's docs are fixed on disk: a CLI recipe cannot be applied to it.
+
+    The DataDecide branch used to record n_docs/max_tokens/seed while silently ignoring
+    them (the External branch always guarded); now every frozen pool guards alike.
+    """
+    import pytest
+
+    for spec in (parse_dd_token("dd-1b-dclm"), parse_base_models("qwen25-1.5b")[0]):
+        assert _defaults(spec).n_docs == PROBE_POOL_PP1.n_docs
+        with pytest.raises(ValueError, match="FROZEN-TEXT|frozen family pool"):
+            pool_spec_for(spec, 64, PROBE_POOL_PP1.max_tokens, PROBE_POOL_PP1.seed)
+
+
+def test_corpus_pools_still_honour_the_cli_recipe():
+    """dp1/pp1/cp1 are BUILT from a recipe, so the CLI knobs keep flowing through."""
+    for spec, version in ((parse_dd_token("dd-1b"), "dp1"),
+                          (parse_base_models("pythia-160m")[0], "pp1")):
+        got = pool_spec_for(spec, 16, 256, 3)
+        assert (got.version, got.n_docs, got.max_tokens, got.seed) == (version, 16, 256, 3)
+
+
+def test_an_unknown_base_raises_a_named_error_not_a_key_error():
+    import pytest
+
+    from subliminal_learning.models.registry import ExternalModelSpec
+
+    with pytest.raises(ValueError):
+        _defaults(ExternalModelSpec("some-org/not-registered", None))

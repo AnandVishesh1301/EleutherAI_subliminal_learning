@@ -230,6 +230,7 @@ def test_real_config_is_diagonal_epochs_10_only():
         ("ckpt_distill_sweep_dog_pilerepro1234_diag.yaml", "ckpt-dogpr1234-diag-20260918", (72, 71, 70)),
         ("ckpt_distill_sweep_dog_dclm1234_diag.yaml", "ckpt-dogdclm1234-diag-20260918", (67, 66, 65)),
         ("ckpt_distill_sweep_dog_pilerepro3_diag.yaml", "ckpt-dogpr3-diag-20260918", (67, 66, 65)),
+        ("ckpt_distill_sweep_dog_weightc2_diag.yaml", "ckpt-dogwc2-diag-20260918", (49, 49, 49)),
     ],
 )
 def test_diag_20260918_configs_are_15_diagonal_pairs_with_priorities(cfg, prefix, prios):

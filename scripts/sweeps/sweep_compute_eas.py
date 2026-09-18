@@ -66,6 +66,7 @@ from subliminal_learning.students.layout import STUDENTS_SUBDIR
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.run_layout import TEACHERS_SUBDIR
 from subliminal_learning.teachers.sweep_grid import shard_cells
+from subliminal_learning.training import ckpt_ladder
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import manifest_ref
 
@@ -222,21 +223,20 @@ def expected_n_prompts(manifest: dict, n_prompts: int) -> int:
     return min(n_prompts, available) if available else n_prompts
 
 
-def _doc_is_current(
+def _doc_plan(
     path: Path, unit: RunUnit, output_root: Path, n_prompts: int,
-    references: tuple[str, ...], *, main: bool,
-) -> bool:
-    """Whether ONE stored EAS document (main or refs) answers `references` for this unit."""
+    references: tuple[str, ...], *, main: bool):
+    """The cheap-gate `DocPlan` for ONE stored EAS document, or None when it is unusable."""
     if not path.is_file():
-        return False
+        return None
     try:
         doc = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
-        return False
+        return None
     if not prompt_source_matches(doc, unit.manifest):
-        return False
+        return None
     if doc.get("n_prompts") != expected_n_prompts(unit.manifest, n_prompts):
-        return False
+        return None
     expected = {
         "schema_version": SCHEMA_VERSION,
         "basis": ACTIVATION_BASIS,
@@ -258,38 +258,61 @@ def _doc_is_current(
     status = eas_main_doc_status if main else eas_doc_status
     plan = status(
         doc, expected_meta=expected, checkpoints=checkpoints, references=ref_ids,
-        manifest_ref=unit.manifest_ref, cheap=True,
+        manifest_ref=unit.manifest_ref,
+        # Exactly as `pipelines.eas_pipeline` passes it: a stored point whose checkpoint
+        # was THINNED off disk is reused, not dropped, so a complete document on a thinned
+        # run is NOT re-enqueued (`training.ckpt_ladder`).
+        ladder_steps=frozenset(ckpt_ladder.ladder_steps(
+            Path(unit.run_dir) / "checkpoints")),
+        cheap=True,
     )
-    return plan.is_current and not plan.stale_refs
+    return plan
 
 
-def unit_is_cached(
+#: `unit_status` results: nothing to do / only references no surviving checkpoint can
+#: supply (terminal, logged once) / real work.
+CACHED, DONE_UNSCORABLE, WORK = "cached", "done_unscorable", "work"
+
+
+def unit_status(
     unit: RunUnit, output_root: Path, n_prompts: int, *, force: bool = False
-) -> bool:
-    """The sweep's cheap gate: True when the stored document(s) already answer this unit.
+) -> str:
+    """The sweep's cheap gate: `CACHED`, `DONE_UNSCORABLE` or `WORK` for one unit.
 
     BOTH files count (`pipelines.eas_pipeline`): the own-teacher main document must be
     current, and — only when this pass requests extra references — so must the refs
     document for exactly those. Reads the document JSON and hashes at most the endpoint
     adapter + one adapter per reference teacher (`eas_doc_status(cheap=True)`); intermediate
     checkpoint adapters are keyed on `ckpt_rel` only.
+
+    `DONE_UNSCORABLE` is the terminal state of a THINNED run whose document lacks a
+    requested reference at a point whose checkpoint AND sidecar vector are both gone: a
+    rerun could not compute it, so the unit must not be enqueued again.
     """
     if force:
-        return False
+        return WORK
     own = default_reference_key(unit.manifest)
     own = own if own in unit.references else None
     extra = tuple(k for k in unit.references if k != own)
-    if own and not _doc_is_current(
-        doc_path(unit.run_dir, unit.position), unit, output_root, n_prompts,
-        (own,), main=True,
+    plans = []
+    for refs, path, main in (
+        ((own,) if own else (), doc_path(unit.run_dir, unit.position), True),
+        (extra, refs_doc_path(unit.run_dir, unit.position), False),
     ):
-        return False
-    if extra and not _doc_is_current(
-        refs_doc_path(unit.run_dir, unit.position), unit, output_root, n_prompts,
-        extra, main=False,
-    ):
-        return False
-    return True
+        if not refs:
+            continue
+        plan = _doc_plan(path, unit, output_root, n_prompts, refs, main=main)
+        if plan is None or not (plan.is_current or plan.only_unscorable):
+            return WORK
+        plans.append(plan)
+    return DONE_UNSCORABLE if any(pl.unscorable for pl in plans) else CACHED
+
+
+def unit_is_cached(
+    unit: RunUnit, output_root: Path, n_prompts: int, *, force: bool = False
+) -> bool:
+    """True when `unit_status` says there is nothing left for this unit to compute."""
+    return unit_status(unit, output_root, n_prompts, force=force) != WORK
 
 
 def path_prefilter(
@@ -373,8 +396,13 @@ def build_units(
         if isinstance(built, str):
             skipped.append((rel, built))
             continue
-        if len(built.ckpt_rels) < min_checkpoints:
-            skipped.append((rel, f"{len(built.ckpt_rels)} checkpoint(s) < --min-checkpoints"))
+        # LADDER steps, not on-disk rels: a thinned run keeps its full ladder in
+        # `checkpoints/ladder.json` and its stored document still covers it, so counting
+        # survivors would skip exactly the runs with the longest trajectories.
+        n_ladder = len(ckpt_ladder.distinct_steps(
+            ckpt_ladder.ladder_steps(run_dir / "checkpoints")))
+        if n_ladder < min_checkpoints:
+            skipped.append((rel, f"{n_ladder} ladder checkpoint(s) < --min-checkpoints"))
             continue
         units.append(built)
         # The remaining positions differ only in the pooling; nothing on disk is re-read.
@@ -458,11 +486,19 @@ def main(
     )
 
     session = EASSession(cfg.paths, device=device, batch_size=batch_size)
-    n_done = n_cached = n_failed = n_skipped = 0
+    n_done = n_cached = n_failed = n_skipped = n_unscorable = 0
     failures: list[tuple[str, str]] = []
     try:
         for unit in units:
-            if unit_is_cached(unit, output_root, n_prompts, force=force):
+            status = unit_status(unit, output_root, n_prompts, force=force)
+            if status == DONE_UNSCORABLE:
+                n_unscorable += 1
+                logger.info(
+                    "DONE (unscorable reference on a thinned point, nothing to compute): {}",
+                    unit.label,
+                )
+                continue
+            if status == CACHED:
                 n_cached += 1
                 logger.info("CACHED (skip): {}", unit.label)
                 continue
@@ -497,10 +533,10 @@ def main(
         session.release()
 
     logger.info(
-        "EAS sweep complete (shard {}/{}): done={}, cached-skip={}, skipped={}, failed={}, "
-        "dry_run={}",
-        shard_index, num_shards, n_done, n_cached, n_skipped + len(skipped), n_failed,
-        dry_run,
+        "EAS sweep complete (shard {}/{}): done={}, cached-skip={}, unscorable={}, "
+        "skipped={}, failed={}, dry_run={}",
+        shard_index, num_shards, n_done, n_cached, n_unscorable,
+        n_skipped + len(skipped), n_failed, dry_run,
     )
     for label, reason in failures:
         logger.warning("  FAILED {} — {}", label, reason)

@@ -143,3 +143,28 @@ def test_teacher_frame_and_pool_keep(tmp_path: Path) -> None:
     assert not un["trained"] and not un["probed"] and np.isnan(un["delta_ce"]) and np.isnan(un["collapsed"])
     assert (df.loc["ep10_lr5e-4_r8a8", "keep_full"], df.loc["ep10_lr5e-4_r8a8", "keep_dry"]) == (0.60903, 0.593)
     assert np.isnan(df.loc["ep20_lr1e-3_r8a8", "keep_full"]) and np.isnan(df.loc["ep20_lr1e-3_r8a8", "keep_dry"])
+
+
+def test_dataset_dir_gathers_a_step_pinned_base_under_ckpt(tmp_path):
+    """A `@step`-pinned student base takes the `ckpt/{model}` level the writer uses."""
+    pinned = "pythia-160m@step5000"
+    teacher = dl.dataset_dir(tmp_path, TEACHER, base=pinned, teacher_base="pythia-160m")
+    ctrl = dl.dataset_dir(tmp_path, None, base=pinned, source="base",
+                          numbers_base="pythia-160m")
+    rng = dl.dataset_dir(tmp_path, None, base=pinned, source="rng")
+
+    assert teacher.parts[-5:-3] == ("ckpt", pinned)
+    assert ctrl.parts[-4:-2] == ("ckpt", pinned)
+    assert rng.parts[-3:-1] == ("ckpt", pinned)
+    # The teacher-base level stays ONE component even when it is itself pinned.
+    assert dl.dataset_dir(tmp_path, TEACHER, base=pinned,
+                          teacher_base=pinned).parts[-3] == f"teacher-{pinned}"
+
+
+def test_dataset_dir_unpinned_base_is_unchanged(tmp_path):
+    """No `ckpt/` level for a plain base -- byte-identical to the pre-fix path."""
+    assert dl.dataset_dir(tmp_path, TEACHER) == (
+        tmp_path / "students" / dl.DD1B_ANIMAL / dl.DD1B_BASE / f"teacher-{dl.DD1B_BASE}"
+        / f"{TEACHER}_tseed0" / dl.DD1B_DATASET_TAG)
+    assert dl.dataset_dir(tmp_path, None, base="pythia-160m", source="rng") == (
+        tmp_path / "students" / "controls" / "rng" / "pythia-160m" / dl.DD1B_DATASET_TAG)

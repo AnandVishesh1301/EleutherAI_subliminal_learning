@@ -53,8 +53,6 @@ from subliminal_learning.coherence.probe_io import (
     ProbePoolSpec,
     build_probe_pool,
 )
-from subliminal_learning.models.datadecide import DataDecideSpec
-from subliminal_learning.models.registry import ExternalModelSpec
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.templates.config import load_template_config
@@ -67,29 +65,32 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 
 def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpec:
-    """The probe-pool recipe for a base: dp1 (Dolma/OLMo) for DataDecide, cp1 for the
-    `dclm` Pythia re-pretrainings, else pp1.
+    """The probe-pool recipe for a base, from `probe_io.native_probe_pool` -- the one
+    place the pool choice lives (dp1 for a dolma1_7 DataDecide base, cp1t-olmo for a
+    dclm-baseline one, cp1 for the `dclm` Pythia re-pretrainings, else pp1).
 
-    The pool follows the BASE's PRETRAINING CORPUS, not the CLI defaults (which are
-    numerically the same for every corpus pool): a DataDecide base was pretrained on
-    dolma1_7 and a `dclm` base on DCLM-baseline-1.0, for both of which Pile would be
-    off-distribution.
+    The pool follows the BASE's PRETRAINING CORPUS, not the CLI defaults: a DataDecide
+    base was pretrained on its own data recipe and a `dclm` base on DCLM-baseline-1.0,
+    for both of which Pile would be off-distribution.
+
+    A FROZEN-TEXT pool (`pp1t-`/`pp1w-`/`cp1t-<tag>`) has no n_docs/max_tokens/seed knobs
+    -- its documents are fixed on disk -- so a non-default recipe is refused rather than
+    silently recorded but ignored (the same guard the external-base branch always had).
+    Corpus pools (pp1/cp1/dp1) keep honouring the CLI recipe.
     """
-    if isinstance(spec, ExternalModelSpec):
-        from subliminal_learning.coherence.probe_io import probe_pool_spec_for_repo
+    from subliminal_learning.coherence.probe_families import is_frozen_text_pool
+    from subliminal_learning.coherence.probe_io import native_probe_pool
 
-        pool = probe_pool_spec_for_repo(spec.repo_id)
+    pool = native_probe_pool(spec)
+    if is_frozen_text_pool(pool.version):
         if (n_docs, max_tokens, seed) != (pool.n_docs, pool.max_tokens, pool.seed):
-            raise ValueError("Qwen/Llama/Gemma trajectories require the frozen family pool recipe")
+            raise ValueError(
+                f"pool {pool.version} is a FROZEN-TEXT pool: its documents are fixed on "
+                f"disk, so the recipe ({n_docs}, {max_tokens}, {seed}) cannot be applied; "
+                f"use the frozen recipe ({pool.n_docs}, {pool.max_tokens}, {pool.seed})")
         return pool
-    if isinstance(spec, DataDecideSpec):
-        version = "dp1"
-    else:
-        from subliminal_learning.coherence.probe_io import PYTHIA_VARIANT_POOLS
-
-        pool = PYTHIA_VARIANT_POOLS.get(getattr(spec, "variant", None) or "")
-        version = pool.version if pool is not None else "pp1"
-    return ProbePoolSpec(n_docs=n_docs, max_tokens=max_tokens, seed=seed, version=version)
+    return ProbePoolSpec(n_docs=n_docs, max_tokens=max_tokens, seed=seed,
+                         version=pool.version)
 
 
 @app.command()

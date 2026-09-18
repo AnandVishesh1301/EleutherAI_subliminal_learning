@@ -136,15 +136,44 @@ def test_qwen_manifest_uses_the_pp1t_pool_and_ep5_glob(tmp_path):
     assert all(r["anchored_delta_ce_cut"] == 5.8 for r in payload["runs"])
 
 
-def test_probe_spec_for_pool_version_routes_four_families_and_rejects_the_rest():
+def test_probe_spec_for_pool_version_routes_every_wired_pool_and_rejects_the_rest():
+    """The evaluator delegates to the central `probe_io` table, so cp1t-olmo evaluates."""
     from subliminal_learning.coherence.probe_io import PROBE_POOL_CP1
 
     assert probe_spec_for_pool_version("pp1").version == "pp1"
     assert probe_spec_for_pool_version("cp1") is PROBE_POOL_CP1
     assert probe_spec_for_pool_version("dp1").version == "dp1"
+    assert probe_spec_for_pool_version("dp1w").version == "dp1w"
     assert probe_spec_for_pool_version("pp1t-qwen25").version == "pp1t-qwen25"
     assert probe_spec_for_pool_version("pp1t-olmo").version == "pp1t-olmo"
-    # never fall through to pp1: a wide pool, an unregistered tag, a typo, an empty string
-    for bad in ("pp1w-qwen25", "pp1t-nope", "pp2", "PP1", ""):
+    # the DataDecide dclm-baseline pool is evaluable (it used to raise here)
+    assert probe_spec_for_pool_version("cp1t-olmo").version == "cp1t-olmo"
+    assert probe_spec_for_pool_version("pp1w-qwen25").version == "pp1w-qwen25"
+    # never fall through to pp1: an unregistered tag, a typo, an empty string
+    for bad in ("pp1t-nope", "cp1t-nope", "pp2", "PP1", ""):
         with pytest.raises(ValueError):
             probe_spec_for_pool_version(bad)
+
+
+def test_probe_for_run_reads_the_requested_pools_record(tmp_path):
+    """A non-native pool's record is the `pile_probe.<pool>.json` sidecar, and a cached
+    row measured on another pool is never served for it."""
+    from subliminal_learning.weightspace.dose_census import _probe_for_run
+
+    root = tmp_path / "outputs"
+    rel = "students/dog/pythia-160m/teacher-pythia-160m/t_tseed1/ds/c1/ftseed1"
+    run = root / rel
+    (run / "eval").mkdir(parents=True)
+    (run / "train_manifest.json").write_text(       # native pool of a plain Pythia base: pp1
+        json.dumps({"base_model_repo": "EleutherAI/pythia-160m"}))
+    (run / "eval" / "pile_probe.json").write_text(
+        json.dumps({"pool_version": "pp1", "delta_ce": 0.1, "kl_base_student": 0.1}))
+    (run / "eval" / "pile_probe.cp1.json").write_text(
+        json.dumps({"pool_version": "cp1", "delta_ce": 2.0, "kl_base_student": 2.0}))
+
+    assert _probe_for_run(root, rel, {}, "pp1")["delta_ce"] == 0.1
+    assert _probe_for_run(root, rel, {}, "cp1")["delta_ce"] == 2.0
+    # The cache is keyed on the pool too: a pp1 row must not answer a cp1 request.
+    cached = {rel: {"run_path": rel, "delta_ce": 7.0, "pool_version": "pp1"}}
+    assert _probe_for_run(root, rel, cached, "pp1")["delta_ce"] == 7.0
+    assert _probe_for_run(root, rel, cached, "cp1")["delta_ce"] == 2.0

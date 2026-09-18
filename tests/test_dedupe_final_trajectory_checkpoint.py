@@ -175,6 +175,35 @@ def test_summary_counts_and_reader_gate(tmp_path):
     assert dd.reader_gate_problems() == []
 
 
+def test_reader_gate_covers_every_rewriting_gate(monkeypatch):
+    """The needle table names each gate that can REWRITE a per-checkpoint record."""
+    covered = {
+        "scripts/ckpt_dose_trajectory.py",
+        "scripts/fidelity_ckpt_trajectory.py",
+        "scripts/convert_legacy_pilekl_to_rundir.py",
+        "src/subliminal_learning/evaluation/ckpt_trajectories.py",
+        "scripts/adapter_spectra_trajectory.py",
+        "scripts/adapter_norms_slim.py",
+        "src/subliminal_learning/steering/eas.py",
+    }
+    src = dd._function_source(
+        (dd.ROOT / "scripts/dedupe_final_trajectory_checkpoint.py").read_text(),
+        "reader_gate_problems")
+    assert all(rel in src for rel in covered)
+
+
+def test_reader_gate_reports_a_gate_regressed_to_equality(tmp_path, monkeypatch):
+    """A gate whose coverage comparison is gone must be named, not silently accepted."""
+    monkeypatch.setattr(dd, "ROOT", tmp_path)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "adapter_norms_slim.py").write_text(
+        "def traj_record_problem(run_dir, disk_steps):\n"
+        "    return None if stored == disk_steps else 'stale'\n")
+    problems = dd.reader_gate_problems()
+    assert any("adapter_norms_slim.py" in p and "traj_record_problem" in p
+               for p in problems)
+
+
 def test_checkpoints_above_the_final_step_are_kept(tmp_path):
     run_dir = _run(tmp_path, "students/dog/b/above", ckpt_steps=(2, 4), n_train_steps=2)
     row = _scan(tmp_path, run_dir)
@@ -253,6 +282,18 @@ def test_delete_skips_a_symlinked_candidate(tmp_path):
     assert dd.delete_candidate(row, tmp_path / "log.jsonl") == "skipped_unsafe_path"
     assert row["detail"] == "candidate is a symlink"
     assert (elsewhere / dd.ADAPTER).is_file()
+
+
+def test_delete_refuses_a_candidate_the_endpoint_adapter_links_into(tmp_path):
+    """E6: the shared endpoint guard -- deleting the rung would destroy the final weights."""
+    run_dir = _run(tmp_path, "students/dog/b/linked")
+    row = _scan(tmp_path, run_dir)
+    endpoint = run_dir / "checkpoints" / dd.ADAPTER
+    candidate = run_dir / "checkpoints" / "checkpoint-4"
+    endpoint.unlink()
+    endpoint.symlink_to(candidate / dd.ADAPTER)
+    assert dd.delete_candidate(row, tmp_path / "log.jsonl") == "skipped_unsafe_path"
+    assert candidate.is_dir() and endpoint.resolve().is_file()
 
 
 def test_a_torn_candidate_is_completed(tmp_path):
