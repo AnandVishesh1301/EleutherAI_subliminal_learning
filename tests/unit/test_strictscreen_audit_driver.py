@@ -44,6 +44,7 @@ class FakeIO:
         self.orphans: list[dict] = []
         self.running_jobs: list[dict] = []
         self.gpu_used = {g: 0 for g in range(8)}
+        self.apps: list[str] = []
         self.probe_rc: list[int] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,7 +52,7 @@ class FakeIO:
         monkeypatch.setattr(jio, "launch_detached", self.launch_detached)
         monkeypatch.setattr(jio, "cluster_lock_held", lambda audit_dir: self.lock_held)
         monkeypatch.setattr(jio, "judge_processes", lambda path: self.orphans)
-        monkeypatch.setattr(jio, "gpu_compute_apps", lambda: [])
+        monkeypatch.setattr(jio, "capture", self.capture)
         monkeypatch.setattr(jio, "gpu_memory_used_mib", lambda: dict(self.gpu_used))
         monkeypatch.setattr(jio, "host_running_jobs", lambda *a: self.running_jobs)
         monkeypatch.setattr(jio, "worker_pool_alive", lambda root: False)
@@ -82,6 +83,10 @@ class FakeIO:
             self._fake_probe(cmd)
             return 0
         raise AssertionError(f"unexpected command {cmd}")
+
+    def capture(self, cmd, *, cwd, env) -> str:
+        assert "--query-compute-apps=pid,gpu_uuid,used_memory" in cmd
+        return "\n".join(self.apps)
 
     def launch_detached(self, cmd, *, cwd, env, log_path, exit_path) -> int:
         self.launched.append(list(cmd))
@@ -478,3 +483,41 @@ def test_dry_run_advance_writes_nothing(world: dict) -> None:
     assert "12 audit leaves ready" in waiting[0]
     assert state["transitions"] == {}
     assert not world["adir"].exists() and not world["stop"].exists()
+
+
+def test_release_ignores_small_context_stubs_but_waits_on_held_apps(
+    world: dict,
+) -> None:
+    fake = world["fake"]
+    state: dict = {"transitions": {}}
+    fake.apps = ["4242, GPU-a, 28", "4243, GPU-b, 5000"]
+    _, waiting = _advance(world, state)
+    assert "1 GPU compute apps still present" in waiting[0]
+    fake.apps = ["4242, GPU-a, 28", "4244, GPU-c, [N/A]"]
+    _, waiting = _advance(world, state)
+    assert "1 GPU compute apps still present" in waiting[0]
+    fake.apps = [f"{4242 + g}, GPU-{g}, 28" for g in range(8)]
+    fired, waiting = _advance(world, state)
+    assert fired == ["audit_release_gpus", "audit_probe"]
+    assert "launched judge-cluster attempt 1" in waiting[-1]
+
+
+def test_busy_gpu_before_judge_relaunch_waits_instead_of_blocking(
+    world: dict,
+) -> None:
+    state = _to_judge(world)
+    fake = world["fake"]
+    adir = world["adir"]
+    task = state["audit"]["tasks"][0]
+    queue = sorted(judge_layout.queue_shard_dir(adir, task).glob("shard-*.jsonl"))[0]
+    first = json.loads(queue.read_text().splitlines()[0])
+    out = judge_layout.judgments_shard_dir(adir, task) / queue.name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"row_id": first["row_id"]}) + "\n")
+    fake.gpu_used[2] = 20000
+    fired, waiting = _advance(world, state)
+    assert fired == [] and "memory held before judge launch" in waiting[-1]
+    assert "audit_blocked" not in state and len(fake.launched) == 1
+    fake.gpu_used[2] = 0
+    _advance(world, state)
+    assert len(fake.launched) == 2

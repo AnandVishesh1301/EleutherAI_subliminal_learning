@@ -893,28 +893,45 @@ def _gate_sampled(
 
 
 def _screen_hash_gate(sampled: Sequence[_LeafResult]) -> dict:
-    """Strict leaves share one vocab hash that no legacy leaf carries.
+    """Each target's strict leaves share one vocab hash no legacy leaf carries.
+
+    The strict vocabulary is built per target animal, so its hash differs
+    across animals.
+
+    Returns:
+        Other screen -> sorted hashes, and ``"strict"`` -> animal -> hash.
 
     Raises:
-        ValueError: Strict hashes are missing or differ, or a legacy leaf
-            carries the strict hash.
+        ValueError: A target's strict hashes are missing or differ, or a
+            legacy leaf carries a strict hash.
     """
-    by_screen: dict[str, set[str | None]] = {}
+    strict: dict[str, set[str | None]] = {}
+    other: dict[str, set[str | None]] = {}
     for result in sampled:
-        by_screen.setdefault(result.ref.screen, set()).add(result.screen_hash)
-    strict = by_screen.get("strict", set())
-    if strict and (None in strict or len(strict) != 1):
-        raise ValueError(
-            f"strict leaves do not share one screen hash: {sorted(map(str, strict))}"
-        )
-    legacy = by_screen.get("legacy", set())
-    if strict and strict & legacy:
-        raise ValueError(
-            f"legacy leaves carry the strict screen hash {sorted(map(str, strict))}"
-        )
-    return {
-        screen: sorted(map(str, hashes)) for screen, hashes in sorted(by_screen.items())
+        if result.ref.screen == "strict":
+            strict.setdefault(result.ref.animal, set()).add(result.screen_hash)
+        else:
+            other.setdefault(result.ref.screen, set()).add(result.screen_hash)
+    mixed = {
+        animal: sorted(map(str, hashes))
+        for animal, hashes in sorted(strict.items())
+        if None in hashes or len(hashes) != 1
     }
+    if mixed:
+        raise ValueError(
+            f"strict leaves of one target do not share one screen hash: {mixed}"
+        )
+    by_animal = {animal: str(next(iter(h))) for animal, h in sorted(strict.items())}
+    legacy = set(map(str, other.get("legacy", set())))
+    shared = sorted(set(by_animal.values()) & legacy)
+    if shared:
+        raise ValueError(f"legacy leaves carry a strict screen hash {shared}")
+    out: dict = {
+        screen: sorted(map(str, hashes)) for screen, hashes in sorted(other.items())
+    }
+    if by_animal:
+        out["strict"] = by_animal
+    return out
 
 
 def _iter_leaf_refs(campaign_root: Path) -> Iterator[LeafRef]:

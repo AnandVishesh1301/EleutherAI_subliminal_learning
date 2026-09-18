@@ -265,8 +265,12 @@ def gpu_memory_used_mib() -> dict[int, int]:
     return out
 
 
-def gpu_compute_apps() -> list[str]:
+def gpu_compute_apps(*, above_mib: int = 0) -> list[str]:
     """Raw ``nvidia-smi --query-compute-apps`` rows (pids do not map in pods).
+
+    Args:
+        above_mib: Keep only rows using more than this; rows whose memory
+            does not parse are kept. Drops permanent small context stubs.
 
     Raises:
         subprocess.CalledProcessError: ``nvidia-smi`` failed.
@@ -280,7 +284,15 @@ def gpu_compute_apps() -> list[str]:
         cwd=Path("/"),
         env=None,
     )
-    return [line.strip() for line in text.strip().splitlines() if line.strip()]
+    rows = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    return [row for row in rows if (mib := _used_mib(row)) is None or mib > above_mib]
+
+
+def _used_mib(row: str) -> float | None:
+    try:
+        return float(row.rsplit(",", 1)[-1])
+    except ValueError:
+        return None
 
 
 def host_running_jobs(

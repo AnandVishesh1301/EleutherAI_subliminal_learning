@@ -531,7 +531,7 @@ def _release_sample(ctx: AuditContext, env: _Env) -> str | None:
     if not loop_exited and jio.worker_pool_alive(ctx.queue_root):
         return "jobq worker loop still alive"
     try:
-        apps = jio.gpu_compute_apps()
+        apps = jio.gpu_compute_apps(above_mib=env.driver.max_idle_gpu_mib)
         used = jio.gpu_memory_used_mib()
     except (subprocess.CalledProcessError, OSError, ValueError) as err:
         return f"nvidia-smi failed ({err}); GPU ownership unknown"
@@ -694,15 +694,16 @@ def _judge(ctx: AuditContext, env: _Env, state: dict, waiting: list[str]) -> boo
             f"orphan judge workers without the cluster lock: {orphans[:3]}"
         )
     try:
-        apps = jio.gpu_compute_apps()
+        apps = jio.gpu_compute_apps(above_mib=env.driver.max_idle_gpu_mib)
         used = jio.gpu_memory_used_mib()
     except (subprocess.CalledProcessError, OSError, ValueError) as err:
         raise CampaignGateError(f"nvidia-smi failed before relaunch: {err}") from err
     busy = {g: m for g, m in used.items() if m > env.driver.max_idle_gpu_mib}
     if apps or busy:
-        raise CampaignGateError(
-            f"GPU memory held before relaunch: apps={len(apps)} busy={busy}"
+        waiting.append(
+            f"GPU memory held before judge launch: apps={len(apps)} busy={busy}"
         )
+        return False
     refusal = sap.relaunch_refusal(attempts, judged, env.driver.attempt_cap)
     if refusal:
         raise CampaignGateError(refusal)

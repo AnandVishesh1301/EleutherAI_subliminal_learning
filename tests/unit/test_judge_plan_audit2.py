@@ -86,7 +86,7 @@ def test_multi_tag_plan_selects_both_screens_with_per_arm_quotas(
         "strict_treatment": 80,
     }
     assert "legacy_treatment" not in totals["rollouts_flagged"]
-    assert manifest["screen_hashes"]["strict"] == [syn.VOCAB_SHA]
+    assert manifest["screen_hashes"]["strict"] == syn.VOCAB_SHA
     flagged = _keys(adir, "rollouts_flagged")
     assert all(
         k["stratum"] == f"{k['matched_rule']}|{k['matched_form']}" for k in flagged
@@ -143,7 +143,9 @@ def test_resumed_leaf_dedupes_to_its_census(campaign: dict) -> None:
         99, "bear", n_steps=20, batch=8, flag_rate=0.4, strict=True
     )
     resumed = rows + [r for r in second_pass if r["step"] >= 12]
-    syn.write_leaf(campaign["root"], rel, resumed, n_steps=20, strict=True)
+    syn.write_leaf(
+        campaign["root"], rel, resumed, n_steps=20, strict=True, animal="bear"
+    )
     adir = _build(campaign)
     report = _manifest(adir)["dedupe_report"]
     assert report["n_duplicate_rows"] == 8 * 8
@@ -153,12 +155,25 @@ def test_resumed_leaf_dedupes_to_its_census(campaign: dict) -> None:
         assert len(ids) == len(set(ids))
 
 
-def test_strict_leaves_with_different_screen_hashes_refused(campaign: dict) -> None:
-    leaf = campaign["root"] / campaign["arms"]["strict_treatment"][1]
+def test_strict_leaves_of_one_target_with_different_screen_hashes_refused(
+    campaign: dict,
+) -> None:
+    rel = campaign["arms"]["strict_treatment"][1]
+    assert rel.startswith("bear/")
+    leaf = campaign["root"] / rel
     summary = json.loads((leaf / "rollouts_summary.json").read_text())
     summary["screen_vocab_sha256"] = "b" * 64
     (leaf / "rollouts_summary.json").write_text(json.dumps(summary))
     with pytest.raises(ValueError, match="share one screen hash"):
+        _build(campaign)
+
+
+def test_legacy_leaf_carrying_a_strict_screen_hash_refused(campaign: dict) -> None:
+    leaf = campaign["root"] / campaign["arms"]["legacy_treatment"][0]
+    summary = json.loads((leaf / "rollouts_summary.json").read_text())
+    summary["screen_vocab_sha256"] = syn.VOCAB_SHA["cat"]
+    (leaf / "rollouts_summary.json").write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="legacy leaves carry a strict screen hash"):
         _build(campaign)
 
 
@@ -237,7 +252,7 @@ def test_leaf_cache_fingerprint_resamples_changed_inputs(campaign: dict) -> None
     assert jpp._sample_one_leaf(job).resumed is False
     assert jpp._sample_one_leaf(job).resumed is True
     rows = syn.synth_rows(7, "bear", n_steps=20, batch=8, flag_rate=0.1, strict=True)
-    syn.write_leaf(campaign["root"], rel, rows, n_steps=20, strict=True)
+    syn.write_leaf(campaign["root"], rel, rows, n_steps=20, strict=True, animal="bear")
     assert jpp._sample_one_leaf(job).resumed is False
 
 

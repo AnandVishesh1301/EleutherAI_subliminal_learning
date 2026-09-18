@@ -13,7 +13,7 @@ from subliminal_learning.config import ExperimentConfig, ModelConfig, PathsConfi
 from subliminal_learning.gkd import judge_layout
 
 REPO = Path(__file__).resolve().parents[2]
-VOCAB_SHA = "a" * 64
+VOCAB_SHA = {"bear": "a" * 64, "cat": "c" * 64}
 TEACHER = "sdf-ep5_lr5e-5_r128a128-tfs0"
 POOL_REL = "gkd_prompts/pool_synth"
 CAMPAIGN_SUBDIR = f"gkd_students/{ssp.RUN_SET_ID}"
@@ -73,7 +73,7 @@ def synth_rows(
     return rows
 
 
-def summary_for(rows: list[dict], *, n_steps: int, strict: bool) -> dict:
+def summary_for(rows: list[dict], *, n_steps: int, strict: bool, animal: str) -> dict:
     """Census summary over keep-last rows (what the trainer writes)."""
     last = {(r["step"], r["batch_idx"]): r for r in rows}
     census = [last[k] for k in sorted(last)]
@@ -102,7 +102,7 @@ def summary_for(rows: list[dict], *, n_steps: int, strict: bool) -> dict:
         doc.update(
             rollout_screen="strict",
             screen_version="strict_v1",
-            screen_vocab_sha256=VOCAB_SHA,
+            screen_vocab_sha256=VOCAB_SHA[animal],
             screen_rule_order=["legacy", "target", "fused", "all_animals", "generic"],
             matched_rule_counts=dict(sorted(rules.items())),
             rule_fired_counts=dict(sorted(rules.items())),
@@ -118,6 +118,7 @@ def write_leaf(
     *,
     n_steps: int,
     strict: bool,
+    animal: str,
 ) -> Path:
     """Write sample, summary, train manifest and adapter weights for one leaf."""
     leaf = campaign_root / rel
@@ -128,7 +129,7 @@ def write_leaf(
     (leaf / "rollouts_sample.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in rows)
     )
-    summary = summary_for(rows, n_steps=n_steps, strict=strict)
+    summary = summary_for(rows, n_steps=n_steps, strict=strict, animal=animal)
     (leaf / "rollouts_summary.json").write_text(json.dumps(summary))
     return leaf
 
@@ -176,7 +177,9 @@ def build_campaign(
                     flag_rate=rate,
                     strict=strict,
                 )
-                write_leaf(root, rel, rows, n_steps=n_steps, strict=strict)
+                write_leaf(
+                    root, rel, rows, n_steps=n_steps, strict=strict, animal=animal
+                )
                 arms.setdefault(arm, []).append(rel)
     return arms
 

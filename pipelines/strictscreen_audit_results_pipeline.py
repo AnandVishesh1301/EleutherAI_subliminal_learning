@@ -686,14 +686,19 @@ def _integrity_failures(
     if plan.get("expected_run_dirs") is None:
         failures["census"].append("plan was not built against an expected run-dir set")
     hashes = plan.get("screen_hashes") or {}
-    strict_hashes = list(hashes.get("strict") or [])
-    screen = []
-    if len(strict_hashes) != 1 or strict_hashes[0] in ("None", ""):
-        screen.append(f"strict screen hashes {strict_hashes}")
-    elif strict_hashes[0] in set(hashes.get("legacy") or []):
-        screen.append("a legacy leaf carries the strict screen hash")
-    failures["screen_hashes"] = screen
+    strict_hashes = dict(hashes.get("strict") or {})
     strict_cells = cells.loc[cells["arm"].isin(strict_arms)]
+    screen = []
+    uncovered = sorted(set(strict_cells["animal"]) - set(strict_hashes))
+    if not strict_hashes or uncovered:
+        screen.append(
+            f"strict screen hashes {strict_hashes}; animals without one {uncovered}"
+        )
+    if any(h in ("None", "") for h in strict_hashes.values()):
+        screen.append(f"strict screen hashes {strict_hashes}")
+    if set(strict_hashes.values()) & set(hashes.get("legacy") or []):
+        screen.append("a legacy leaf carries a strict screen hash")
+    failures["screen_hashes"] = screen
     unsampled = strict_cells.loc[strict_cells["n_sampled"] == 0]
     failures["unsampled_population"] = [
         f"{r.run_dir} q{r.step_quintile}: n_pop={r.n_pop}"
