@@ -154,4 +154,23 @@ treatment leaf, 2,000 per strict control leaf, 1,000 per arm-C leaf;
 
 ## 9. Amendments
 
-_None._
+**A1 (2026-09-18): judge audit resumed on goncalo-temp-1 after a plan-build bug.** Code
+`06bae75` (branch `vishesh/strictscreen-audit`, parent = campaign pin `22a07c3`).
+
+- **What happened:** training, evals and §4 SL claims finished on soar-subliminal-3
+  (2026-09-15; 392/392 cells, C0/H2/H3 pass, read before this amendment). `audit_plan`
+  then refused: the screen-hash gate expected one strict vocab hash, but `strict_v1`
+  builds one vocabulary per target animal. The four hashes on disk equal the four
+  staged per-animal hashes. No plan, judgments or judge results existed.
+- **Fix:** the screen-hash consistency check (plan gate and §5 integrity) is now per
+  target animal: each animal's strict leaves share one hash, and no legacy leaf carries
+  one.
+- **Move:** audit phases `audit_plan` → `finalize` run on goncalo-temp-1 (8 × A40, the
+  node audit 1 was judged on), because soar-subliminal-3 now runs another campaign. The
+  driver's idle-GPU checks ignore compute contexts ≤ 1 GiB (that node keeps permanent
+  28 MiB stubs), and a busy card before the judge launch means wait, not block.
+- **Unchanged:** every claim, threshold and estimator in §4–§5; the judge model,
+  snapshot, prompts, decoding, vLLM version and YAML (8 × tp=1, 0.90 memory); row quotas;
+  pre-run probe gates; the run set and audit ids.
+- **Row budget:** the §5 ≈ 718 k estimate resolves to 693,803 rows (clean 464,000;
+  flagged 53,958; decoy 64,832; recall_probe 6,013, under its ≤ 30 k cap; pool 105,000).

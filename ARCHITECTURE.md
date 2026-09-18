@@ -1022,6 +1022,11 @@ legacy tags, identities, JSONL/summary keys and metrics are byte-identical.
 - **Launch:** stage (`stage_strictscreen_assets`), GPU smoke (`--smoke DIR`, run the printed
   commands, `--smoke-verify DIR`), then `bash scripts/launch_strictscreen_campaign.sh <sha>`
   from `.code_pins/<sha>` on node 4 (syncs and checks the `tools/rollout_judge` venv).
+- **Audit resume (2026-09-18, prereg §9 A1):** training + SL claims finished on node 4;
+  the judge audit (`audit_plan` → `finalize`) runs on goncalo-temp-1 from branch
+  `vishesh/strictscreen-audit` (pin `06bae75`). The screen-hash check is per target
+  animal (the `strict_v1` vocabulary is per animal), and idle-GPU checks ignore
+  ≤ 1 GiB compute-context stubs.
 
 ### Cross-family OPD limits campaign (xfam)
 
