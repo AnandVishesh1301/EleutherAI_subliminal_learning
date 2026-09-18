@@ -4,6 +4,11 @@ Plan of record: `.claude/plans/ws160m_headline_opd_campaign.plan.md`; claims W0-
 in `docs/PREREG_WS160M.md`. One run set per partition, one partition per node
 (`PARTITIONS`), all sharing the headline on-policy recipe: reverse KL (β=1), λ=1,
 LoRA r8/α16 lr 4e-4, one epoch over the 20k Pile prompt pool.
+
+Part II (`ws160m2`, plan § 14; claims W9-W16) adds `GEN2_PARTITIONS` (`matrix`,
+`grid`) over the full 14-base roster. Part I constants, partitions and enumeration
+are frozen; `GEN1_REUSED` names the Part I teachers and controls Part II reads in
+place and never writes.
 """
 
 from __future__ import annotations
@@ -291,7 +296,8 @@ def workers() -> int:
 
 # ---- static configs ---------------------------------------------------------------
 
-GENERATED_CONFIG_ROOT = "configs/experiment/generated/ws160m"
+GENERATED_CONFIG_PARENT = "configs/experiment/generated"
+GENERATED_CONFIG_ROOT = f"{GENERATED_CONFIG_PARENT}/{CAMPAIGN}"
 STUDENT_EXPERIMENT_CONFIG = "configs/experiment/ws160m_student.yaml"
 TEACHER_EXPERIMENT_CONFIG = "configs/experiment/ws160m_teacher.yaml"
 TEACHER_TRAINING_CONFIG = "configs/training/lora_sdf_teacher.yaml"
@@ -309,6 +315,8 @@ CONTROL_LOG_FILE = "campaign_control_log.jsonl"
 PREFLIGHT_REPORT = "preflight_report.json"
 STAGING_REPORT = "staging_report.json"
 SMOKE_REPORT = "smoke_report.json"
+GEN2_STAGING_REPORT = "staging_report_ws160m2.json"
+GEN2_SMOKE_REPORT = "smoke_report_ws160m2.json"
 WAVE2_REPORT = "wave2_report.json"
 TEACHER_TIER_REPORT = "teacher_tier_report.json"
 RESULTS_LEAVES_CSV = "leaves.csv"
@@ -365,6 +373,10 @@ class Partition:
             namespace only its ``SHARED_LOCK_OWNER`` host (soar) may use.
         arms: Arms this partition trains, in priority order.
         trains_teachers: Whether the partition owns any teacher training.
+        campaign: Campaign token (``ws160m`` Part I, ``ws160m2`` Part II).
+        date: Run-set date stamp.
+        wave: Roster wave its driver enumerates at.
+        deadline_hours: Default open-window budget of its driver.
     """
 
     name: str
@@ -374,21 +386,45 @@ class Partition:
     lock_prefix: str | None
     arms: tuple[str, ...]
     trains_teachers: bool
+    campaign: str = CAMPAIGN
+    date: str = DATE
+    wave: int = models.WAVE_NOW
+    deadline_hours: float = DEADLINE_HOURS_DEFAULT
+
+    @property
+    def gen(self) -> int:
+        """1 for Part I partitions, 2 for Part II."""
+        return 1 if self.campaign == CAMPAIGN else 2
 
     @property
     def run_set_id(self) -> str:
-        """``{DATE}_ws160m-{name}_160m``."""
-        return f"{DATE}_{CAMPAIGN}-{self.name}_{MODEL_SIZE}"
+        """``{date}_{campaign}-{name}_160m``."""
+        return f"{self.date}_{self.campaign}-{self.name}_{MODEL_SIZE}"
 
     @property
     def queue_prefix(self) -> str:
-        """``ws160m-{name}``."""
-        return f"{CAMPAIGN}-{self.name}"
+        """``{campaign}-{name}``."""
+        return f"{self.campaign}-{self.name}"
 
     @property
     def generated_config_dir(self) -> str:
         """Repo-relative dir of this partition's generated YAMLs."""
-        return f"{GENERATED_CONFIG_ROOT}/{self.name}"
+        return f"{GENERATED_CONFIG_PARENT}/{self.campaign}/{self.name}"
+
+    @property
+    def tmux_session(self) -> str:
+        """tmux session its launcher starts (the campaign token)."""
+        return self.campaign
+
+    @property
+    def staging_report(self) -> str:
+        """Staging report filename its launcher and preflight require."""
+        return STAGING_REPORT if self.gen == 1 else GEN2_STAGING_REPORT
+
+    @property
+    def smoke_report(self) -> str:
+        """Smoke report filename its launcher and preflight require."""
+        return SMOKE_REPORT if self.gen == 1 else GEN2_SMOKE_REPORT
 
     @property
     def forbidden_nodes(self) -> tuple[str, ...]:
@@ -490,21 +526,22 @@ def clone_root(p: Partition) -> Path:
 
 
 def partition(name: str) -> Partition:
-    """The partition called `name`."""
-    try:
-        return PARTITIONS[name]
-    except KeyError:
+    """The Part I or Part II partition called `name`."""
+    found = PARTITIONS.get(name) or GEN2_PARTITIONS.get(name)
+    if found is None:
         raise ValueError(
-            f"unknown partition {name!r}; expected {PARTITION_ORDER}"
-        ) from None
+            f"unknown partition {name!r}; expected "
+            f"{(*PARTITION_ORDER, *GEN2_PARTITION_ORDER)}"
+        )
+    return found
 
 
 def partition_of_arm(arm: str) -> Partition:
     """The partition that trains `arm`."""
-    for p in PARTITIONS.values():
+    for p in (*PARTITIONS.values(), *GEN2_PARTITIONS.values()):
         if arm in p.arms:
             return p
-    raise ValueError(f"unknown arm {arm!r}; expected {ARMS}")
+    raise ValueError(f"unknown arm {arm!r}; expected {(*ARMS, *GEN2_ARMS)}")
 
 
 MAIN_RUN_SET_ID = PARTITIONS["main"].run_set_id
@@ -521,6 +558,383 @@ def teacher_owner(teacher_step: int) -> Partition:
     return PARTITIONS["main" if int(teacher_step) == FINAL_STEP else "ladder"]
 
 
+# ---- Part II (ws160m2): constants, partitions, reuse table ---------------------------
+
+GEN2_CAMPAIGN = "ws160m2"
+GEN2_DATE = "20260918"
+GEN2_DEADLINE_HOURS = 108.0
+GEN2_ANIMALS: tuple[str, ...] = (PRIMARY_ANIMAL, "lion", "tiger", "eagle")
+GEN2_CORE_ANIMALS: tuple[str, ...] = ("tiger", "eagle")
+GEN2_DOSE_ANIMALS: tuple[str, ...] = ("lion", "tiger")
+GEN2_DOSES: tuple[float, ...] = (0.25, 0.5, 2.0, 3.0)
+LEAVES_NONIDENT = 9
+
+K2_RUNGS: tuple[int, ...] = (1000, 2000, 4000, 8000, 16000, 32000, 48000, 96000)
+K2_RUNG_PRIORITY: tuple[int, ...] = (16000, 8000, 2000, 48000, 4000, 32000, 1000, 96000)
+K2_BATCH2_RUNGS: tuple[int, ...] = (1000, 96000)
+K2_LINE_RUNGS: tuple[int, ...] = (*K2_RUNGS, FINAL_STEP)
+K2_SELF_ADDED: tuple[str, ...] = ("pile-ws2", "pile-main")
+K2_PAIRS_ADDED: tuple[tuple[str, str], ...] = (
+    ("pile-main", "pile-ws3"),
+    ("pile-ws1", "pile-ws2"),
+    ("pile-ws2", "seed2"),
+    ("pile-main", "data-seed1"),
+    ("pile-main", "dclm-main"),
+    ("pile-main", "dclm-ws1"),
+    ("pile-ws3", "dclm-ws1"),
+    ("pile-main", "seed1"),
+    ("pile-ws2", "seed1"),
+    ("pythia-160m", "pile-main"),
+)
+HM2_RUNGS: tuple[int, ...] = (2000, 8000, 16000, 48000, FINAL_STEP)
+HM2_ANCHORS: tuple[str, ...] = ("pile-ws1", "pile-main")
+CORE_ANCHORS: tuple[str, ...] = (*HP_ANCHORS, "pile-main")
+XB2_ANCHOR = "pile-main"
+
+# Student-HP law grid (plan § 14.7). Learning rates and products α·lr are in units
+# of 1e-4, so every α is an exact integer.
+LAW_LR: Mapping[int, float] = MappingProxyType(
+    {1: 1.0e-4, 2: 2.0e-4, 4: 4.0e-4, 8: 8.0e-4}
+)
+LAW_RANKS: tuple[int, ...] = (2, 8, 32, 128)
+LAW_PRODUCTS: tuple[int, ...] = (16, 32, 64, 128, 256, 512)
+LAW_PRODUCT_PRIORITY: tuple[int, ...] = (64, 128, 32, 256, 16, 512)
+LAW_LR_SPLITS: tuple[int, ...] = (4, 1)
+LAW_LR_SPLITS_R8: tuple[int, ...] = (2, 8)
+LAW_R8 = 8
+# (teacher base, student base), all inside Part I's 20 matched cells.
+LAW_CELLS: tuple[tuple[str, str], ...] = (
+    ("pile-ws1", "pile-ws1"),
+    ("seed2", "pile-ws1"),
+    ("dclm-main", "pile-ws1"),
+    ("pythia-160m", "pythia-160m"),
+    ("seed1", "pythia-160m"),
+    ("dclm-ws1", "pythia-160m"),
+)
+LAW_LION_RANKS: tuple[int, ...] = (8, 32)
+LAW_LION_LR = 4
+RANK_TRANSPORT_RECIPES: tuple[Recipe, ...] = (
+    Recipe(2, 16, 4.0e-4),
+    Recipe(32, 16, 4.0e-4),
+    Recipe(128, 16, 4.0e-4),
+)
+# (lr, epochs) at r8/α16 on the law cells.
+LR_EPOCHS: tuple[tuple[float, float], ...] = (
+    (1.0e-4, 2.0),
+    (1.0e-4, 3.0),
+    (2.0e-4, 2.0),
+    (4.0e-4, 0.5),
+)
+H8_RECIPE = HP_RECIPES[4]
+
+
+def law_product(recipe: Recipe) -> int:
+    """α·lr of a recipe in units of 1e-4.
+
+    Raises:
+        ValueError: If the product is not an integer number of units.
+    """
+    units = recipe.lora_alpha * recipe.lr / 1.0e-4
+    if abs(units - round(units)) > 1e-6:
+        raise ValueError(f"recipe {recipe} has a non-integer α·lr product")
+    return int(round(units))
+
+
+def law_grid() -> tuple[Recipe, ...]:
+    """The 60 recipes of the law grid: rank x product x lr split."""
+    out: list[Recipe] = []
+    for rank in LAW_RANKS:
+        splits = LAW_LR_SPLITS + (LAW_LR_SPLITS_R8 if rank == LAW_R8 else ())
+        for lr_units in splits:
+            for product in LAW_PRODUCTS:
+                alpha, rem = divmod(product, lr_units)
+                if rem:
+                    raise ValueError(f"non-integer α for P={product} lr={lr_units}")
+                out.append(Recipe(rank, alpha, LAW_LR[lr_units]))
+    return tuple(out)
+
+
+LAW_ON_DISK: tuple[Recipe, ...] = (FROZEN_RECIPE, *HP_RECIPES[:4])
+# 55 recipes no Part I leaf covers; `H8_RECIPE` is run by the H8 arm on all 20 matched
+# cells, so the LAW arm enumerates the other 54.
+LAW_NEW_RECIPES: tuple[Recipe, ...] = tuple(
+    r for r in law_grid() if r not in LAW_ON_DISK
+)
+LAW_ARM_RECIPES: tuple[Recipe, ...] = tuple(
+    r for r in LAW_NEW_RECIPES if r != H8_RECIPE
+)
+LAW_LION_RECIPES: tuple[Recipe, ...] = tuple(
+    Recipe(rank, product // LAW_LION_LR, LAW_LR[LAW_LION_LR])
+    for rank in LAW_LION_RANKS
+    for product in LAW_PRODUCTS
+    if Recipe(rank, product // LAW_LION_LR, LAW_LR[LAW_LION_LR]) != FROZEN_RECIPE
+)
+
+GEN2_CLAIM_IDS: tuple[str, ...] = tuple(f"W{i}" for i in range(9, 17))
+ANIMAL_SPEARMAN_MIN = 0.6
+LAW_PRODUCT_FORMS: tuple[str, ...] = (
+    "alpha_lr",
+    "alpha_over_r_lr",
+    "alpha_over_sqrt_r_lr",
+)
+IMPL_MATCHED_STRATA: tuple[str, ...] = ("hub_only", "local_local_same_checkout")
+LMEVAL_ATTEMPT_CAP = 3
+
+GEN2_ARMS_MATRIX: tuple[str, ...] = (
+    "m2",
+    "b2",
+    "ml",
+    "h8",
+    "law",
+    "rt",
+    "td2",
+    "le",
+    "b3",
+    "xb2",
+)
+GEN2_ARMS_GRID: tuple[str, ...] = (
+    "k2",
+    "hm2_ws1",
+    "hm2_main",
+    "hm2_ws1_rev",
+    "ac",
+    "law_lion",
+    "d2",
+    "hm2_main_rev",
+)
+GEN2_ARMS: tuple[str, ...] = (*GEN2_ARMS_MATRIX, *GEN2_ARMS_GRID)
+GEN2_PARTITION_ORDER: tuple[str, ...] = ("matrix", "grid")
+GEN2_PARTITIONS: Mapping[str, Partition] = MappingProxyType(
+    {
+        "matrix": Partition(
+            "matrix",
+            NODE_CLUSTER4,
+            "a40-cluster-4",
+            "vishesh",
+            "/tmp/subliminal_jobq_vishesh",
+            GEN2_ARMS_MATRIX,
+            True,
+            campaign=GEN2_CAMPAIGN,
+            date=GEN2_DATE,
+            wave=models.WAVE_3,
+            deadline_hours=GEN2_DEADLINE_HOURS,
+        ),
+        "grid": Partition(
+            "grid",
+            NODE_CLUSTER3,
+            "a40-cluster-3",
+            "vishesh",
+            "/tmp/subliminal_jobq_vishesh",
+            GEN2_ARMS_GRID,
+            True,
+            campaign=GEN2_CAMPAIGN,
+            date=GEN2_DATE,
+            wave=models.WAVE_3,
+            deadline_hours=GEN2_DEADLINE_HOURS,
+        ),
+    }
+)
+MATRIX_RUN_SET_ID = GEN2_PARTITIONS["matrix"].run_set_id
+GRID_RUN_SET_ID = GEN2_PARTITIONS["grid"].run_set_id
+GEN2_TEACHER_STAGES: tuple[str, ...] = ("teachers", "teachers-b2")
+GEN2_MATRIX_B2_TEACHER_ANIMALS: tuple[str, ...] = GEN2_CORE_ANIMALS
+# Student stages per partition as (batch 1, batch 2), each in queue-priority order.
+GEN2_STUDENT_STAGES: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = (
+    MappingProxyType(
+        {
+            "matrix": (
+                ("m2", "b2", "ml", "h8"),
+                (
+                    *(f"law-p{u}" for u in LAW_PRODUCT_PRIORITY),
+                    "rt",
+                    "td",
+                    "le",
+                    "b3",
+                    "xb2",
+                ),
+            ),
+            "grid": (
+                tuple(f"r{r}" for r in K2_RUNG_PRIORITY if r not in K2_BATCH2_RUNGS),
+                (
+                    *(f"r{r}" for r in K2_BATCH2_RUNGS),
+                    "hm-ws1",
+                    "hm-main",
+                    "hm-ws1-rev",
+                    "ac-tiger",
+                    "ac-eagle",
+                    "law-lion",
+                    "d2",
+                    "hm-main-rev",
+                ),
+            ),
+        }
+    )
+)
+
+
+def gen2_student_stages(p: Partition) -> tuple[str, ...]:
+    """Student stages of a Part II partition in priority order (batch 1, then 2)."""
+    b1, b2 = GEN2_STUDENT_STAGES[p.name]
+    return (*b1, *b2)
+
+
+def teacher_evals_stage(teacher_stage: str) -> str:
+    """``teachers[-x]`` -> ``teacher-evals[-x]``."""
+    return teacher_stage.replace("teachers", "teacher-evals", 1)
+
+
+@dataclass(frozen=True)
+class ReusedClass:
+    """A class of Part I artefacts Part II reads in place (verified on disk 2026-09-18).
+
+    Attributes:
+        kind: ``"teacher"`` or ``"control"``.
+        partition: Part I partition whose run set holds the leaves.
+        animals: Animals of the class.
+        bases: Base names.
+        steps: Pretraining steps.
+        tags: Teacher param tags, or control gkd tags.
+    """
+
+    kind: str
+    partition: str
+    animals: tuple[str, ...]
+    bases: tuple[str, ...]
+    steps: tuple[int, ...]
+    tags: tuple[str, ...]
+
+
+_WAVE1_BASES: tuple[str, ...] = tuple(
+    m.base for m in models.bases(max_wave=models.WAVE_NOW)
+)
+GEN1_LADDER_BASES: tuple[str, ...] = (
+    "pythia-160m",
+    "data-seed1",
+    "seed1",
+    "seed2",
+    "seed3",
+    "pile-ws1",
+    "pile-ws3",
+    "dclm-main",
+    "dclm-ws1",
+)
+GEN1_TEACHER_DOSE_BASES: tuple[str, ...] = (
+    "pile-ws1",
+    "seed1",
+    "pythia-160m",
+    "seed2",
+    "dclm-ws1",
+    "dclm-main",
+)
+GEN1_HP_STUDENT_BASES: tuple[str, ...] = (*GEN1_TEACHER_DOSE_BASES, "data-seed1")
+GEN1_REUSED: tuple[ReusedClass, ...] = (
+    ReusedClass(
+        "teacher",
+        "main",
+        (PRIMARY_ANIMAL,),
+        _WAVE1_BASES,
+        (FINAL_STEP,),
+        (TEACHER_PARAM_TAG_LORA,),
+    ),
+    ReusedClass(
+        "teacher",
+        "main",
+        (PRIMARY_ANIMAL,),
+        GEN1_TEACHER_DOSE_BASES,
+        (FINAL_STEP,),
+        tuple(teacher_param_tag(ep) for ep in TEACHER_DOSE_EPOCHS),
+    ),
+    ReusedClass(
+        "teacher",
+        "main",
+        (*FIG1_ANIMALS, *EXTRA_ANIMALS),
+        FIG1_BASES_OTHER,
+        (FINAL_STEP,),
+        (TEACHER_PARAM_TAG_LORA,),
+    ),
+    ReusedClass(
+        "teacher",
+        "ladder",
+        (PRIMARY_ANIMAL,),
+        GEN1_LADDER_BASES,
+        LADDER_RUNGS,
+        (TEACHER_PARAM_TAG_LORA,),
+    ),
+    ReusedClass(
+        "control",
+        "main",
+        (PRIMARY_ANIMAL,),
+        _WAVE1_BASES,
+        (FINAL_STEP,),
+        (FROZEN_GKD_TAG,),
+    ),
+    ReusedClass(
+        "control",
+        "ladder",
+        (PRIMARY_ANIMAL,),
+        GEN1_LADDER_BASES,
+        LADDER_RUNGS,
+        (FROZEN_GKD_TAG,),
+    ),
+    ReusedClass(
+        "control",
+        "dosehp",
+        (PRIMARY_ANIMAL,),
+        GEN1_HP_STUDENT_BASES,
+        (FINAL_STEP,),
+        tuple(student_gkd_tag(r, FROZEN_EPOCHS) for r in HP_RECIPES[:4]),
+    ),
+    ReusedClass(
+        "control",
+        "dosehp",
+        (PRIMARY_ANIMAL,),
+        FIG1_BASES_BEAR,
+        (FINAL_STEP,),
+        tuple(student_gkd_tag(FROZEN_RECIPE, d) for d in DOSES_BEAR),
+    ),
+    ReusedClass(
+        "control",
+        "extra",
+        FIG1_ANIMALS,
+        FIG1_BASES_OTHER,
+        (FINAL_STEP,),
+        tuple(student_gkd_tag(FROZEN_RECIPE, d) for d in FIG1_DOSES),
+    ),
+)
+
+
+def gen1_home(kind: str, animal: str, base: str, step: int, tag: str) -> str | None:
+    """Part I partition holding a reused teacher/control, or None if Part II owns it."""
+    for c in GEN1_REUSED:
+        if (
+            c.kind == kind
+            and animal in c.animals
+            and base in c.bases
+            and int(step) in c.steps
+            and tag in c.tags
+        ):
+            return c.partition
+    return None
+
+
+def gen2_teacher_stage(animal: str, step: int) -> tuple[str, str]:
+    """``(partition, teacher stage)`` that trains a Part II-owned teacher."""
+    if int(step) == FINAL_STEP:
+        late = animal in GEN2_MATRIX_B2_TEACHER_ANIMALS
+        return "matrix", GEN2_TEACHER_STAGES[1 if late else 0]
+    return "grid", GEN2_TEACHER_STAGES[1 if int(step) in K2_BATCH2_RUNGS else 0]
+
+
+def teacher_home(animal: str, base: str, step: int, tag: str, *, gen: int) -> Partition:
+    """Partition whose run set holds a teacher, as enumerated by generation `gen`."""
+    if gen == 1:
+        return teacher_owner(step)
+    reused = gen1_home("teacher", animal, base, step, tag)
+    if reused is not None:
+        return PARTITIONS[reused]
+    return GEN2_PARTITIONS[gen2_teacher_stage(animal, step)[0]]
+
+
 # ---- queues -----------------------------------------------------------------------
 
 
@@ -533,8 +947,29 @@ def _hp_stage(recipe: Recipe) -> str:
     return f"hp-{recipe_slug(recipe)}"
 
 
+def _gen2_queue_order(p: Partition) -> list[str]:
+    first, second = GEN2_TEACHER_STAGES
+    order = [
+        first,
+        teacher_evals_stage(first),
+        "teachers-fallback",
+        "teacher-evals-fallback",
+    ]
+    for batch, teacher_stage in zip(GEN2_STUDENT_STAGES[p.name], (None, second)):
+        if teacher_stage:
+            order += [teacher_stage, teacher_evals_stage(teacher_stage)]
+        for stage in batch:
+            order += [stage, f"evals-{stage}"]
+        order += [f"{LMEVAL_STAGE}-{stage}" for stage in batch]
+    return [*order, "evals-force"]
+
+
 def queue_priorities(p: Partition) -> Mapping[str, int]:
     """Queue name -> jobq priority for one partition, highest first."""
+    if p.gen == 2:
+        return MappingProxyType(
+            {queue(p, s): 300 - 3 * i for i, s in enumerate(_gen2_queue_order(p))}
+        )
     order: list[str] = []
     if p.trains_teachers:
         order += ["teachers", "teacher-evals"]
@@ -575,8 +1010,12 @@ def queue_priorities(p: Partition) -> Mapping[str, int]:
 
 
 def all_queue_names() -> tuple[str, ...]:
-    """Every queue of every partition; unique fleet-wide by construction."""
-    names = [q for p in PARTITIONS.values() for q in queue_priorities(p)]
+    """Every queue of every Part I and Part II partition; unique fleet-wide."""
+    names = [
+        q
+        for p in (*PARTITIONS.values(), *GEN2_PARTITIONS.values())
+        for q in queue_priorities(p)
+    ]
     if len(names) != len(set(names)):
         raise ValueError("duplicate ws160m queue names")
     return tuple(names)
@@ -594,6 +1033,16 @@ WANDB_TEACHERS: Mapping[str, tuple[str, str, str]] = MappingProxyType(
         "ladder": (
             PRIMARY_ANIMAL,
             models.token("pile-ws1", 8000),
+            TEACHER_PARAM_TAG_LORA,
+        ),
+        "matrix": (
+            PRIMARY_ANIMAL,
+            models.token("pile-main", FINAL_STEP),
+            TEACHER_PARAM_TAG_LORA,
+        ),
+        "grid": (
+            PRIMARY_ANIMAL,
+            models.token("pile-main", 4000),
             TEACHER_PARAM_TAG_LORA,
         ),
     }
@@ -715,6 +1164,65 @@ WANDB_STUDENTS: Mapping[str, frozenset[tuple[str, str, str, str, str, str]]] = (
                     ),
                 }
             ),
+            "matrix": frozenset(
+                {
+                    (
+                        "m2",
+                        "bear",
+                        models.token("pile-main", FINAL_STEP),
+                        models.token("pile-main", FINAL_STEP),
+                        FROZEN_GKD_TAG,
+                        TEACHER_PARAM_TAG_LORA,
+                    ),
+                    (
+                        "ml",
+                        "lion",
+                        models.token("pythia-160m", FINAL_STEP),
+                        models.token("pythia-160m", FINAL_STEP),
+                        FROZEN_GKD_TAG,
+                        TEACHER_PARAM_TAG_LORA,
+                    ),
+                    (
+                        "law",
+                        "bear",
+                        models.token("pile-ws1", FINAL_STEP),
+                        models.token("pile-ws1", FINAL_STEP),
+                        student_gkd_tag(
+                            Recipe(LAW_R8, LAW_PRODUCTS[-1] // 4, LAW_LR[4]),
+                            FROZEN_EPOCHS,
+                        ),
+                        TEACHER_PARAM_TAG_LORA,
+                    ),
+                }
+            ),
+            "grid": frozenset(
+                {
+                    (
+                        "k2",
+                        "bear",
+                        models.token("pile-main", 4000),
+                        models.token("pile-main", 4000),
+                        FROZEN_GKD_TAG,
+                        TEACHER_PARAM_TAG_LORA,
+                    ),
+                    (
+                        "hm2_main",
+                        "bear",
+                        models.token("pile-main", FINAL_STEP),
+                        models.token("pile-main", 2000),
+                        FROZEN_GKD_TAG,
+                        TEACHER_PARAM_TAG_LORA,
+                    ),
+                    (
+                        "ac",
+                        "tiger",
+                        models.token("pythia-160m", FINAL_STEP),
+                        models.token("pythia-160m", FINAL_STEP),
+                        FROZEN_GKD_TAG,
+                        TEACHER_PARAM_TAG_LORA,
+                    ),
+                }
+            ),
         }
     )
 )
@@ -763,14 +1271,18 @@ def _spec(p: Partition) -> CampaignSpec:
     priorities = queue_priorities(p)
     names = list(priorities)
     first = names[0]
+    if p.gen == 2:
+        teacher_rs = p.run_set_id
+    else:
+        teacher_rs = MAIN_RUN_SET_ID if p.name != "ladder" else LADDER_RUN_SET_ID
     return CampaignSpec(
         run_set_id=p.run_set_id,
-        teacher_run_set_id=MAIN_RUN_SET_ID if p.name != "ladder" else LADDER_RUN_SET_ID,
+        teacher_run_set_id=teacher_rs,
         hub_org=HUB_ORG,
         teacher_workflow=TEACHER_WORKFLOW,
         teacher_param_tag_lora=TEACHER_PARAM_TAG_LORA,
         teacher_param_tag_full=TEACHER_PARAM_TAG_FULL,
-        animals=ANIMALS,
+        animals=ANIMALS if p.gen == 1 else GEN2_ANIMALS,
         betas=(BETA,),
         lmbda=LMBDA,
         # Stage A/B/C fields are not applicable; filled so the spec constructs
@@ -819,7 +1331,7 @@ def _spec(p: Partition) -> CampaignSpec:
         calibration_report=PREFLIGHT_REPORT,
         a1_selection_report=TEACHER_TIER_REPORT,
         freeze_report=WAVE2_REPORT,
-        init_equality_report=STAGING_REPORT,
+        init_equality_report=p.staging_report,
         campaign_state_file=CAMPAIGN_STATE_FILE,
         campaign_done_file=CAMPAIGN_DONE_FILE,
         control_log_file=CONTROL_LOG_FILE,
@@ -833,7 +1345,7 @@ def _spec(p: Partition) -> CampaignSpec:
 
 
 SPECS: Mapping[str, CampaignSpec] = MappingProxyType(
-    {name: _spec(p) for name, p in PARTITIONS.items()}
+    {name: _spec(p) for name, p in (*PARTITIONS.items(), *GEN2_PARTITIONS.items())}
 )
 SPEC = SPECS["main"]
 

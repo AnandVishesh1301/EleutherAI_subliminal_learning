@@ -14,6 +14,7 @@ from pipelines.ws160m_campaign_pipeline import (
     CampaignGateError,
     Ws160mDriverOptions,
     driver_config,
+    queue_plan,
     refresh_coverage,
     run,
     status,
@@ -28,6 +29,7 @@ app = typer.Typer(add_completion=False)
 _PATHS_HELP = "Campaign paths YAML (hf_cache_root on the cold-1 ladder cache)."
 _QUEUE_ROOT_HELP = "jobq root (default: queue_root from the paths YAML)."
 _CODE_SHA_HELP = "Explicit campaign pin (default: state code_sha, then HEAD)."
+_DEADLINE_HELP = "Open-window hours (default: the partition's plan value)."
 
 
 def _cfg(
@@ -77,6 +79,13 @@ def status_cmd(
 
 
 @app.command()
+def plan_cmd(partition: str = typer.Option(..., "--partition")) -> None:
+    """Print the partition's queues in priority order with their job counts."""
+    configure_loguru()
+    typer.echo(yaml.safe_dump(queue_plan(partition), sort_keys=False))
+
+
+@app.command()
 def coverage(
     partition: str = typer.Option(..., "--partition"),
     paths_config: Path = typer.Option(Path(plan.PATHS_CONFIG), help=_PATHS_HELP),
@@ -103,7 +112,7 @@ def advance(
     partition: str = typer.Option(..., "--partition"),
     paths_config: Path = typer.Option(Path(plan.PATHS_CONFIG), help=_PATHS_HELP),
     queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
-    deadline_hours: float = plan.DEADLINE_HOURS_DEFAULT,
+    deadline_hours: float = typer.Option(None, help=_DEADLINE_HELP),
     code_sha: str = typer.Option(None, help=_CODE_SHA_HELP),
     auto_reconcile_sha: bool = False,
     auto_requeue: int = 0,
@@ -134,7 +143,7 @@ def watch(
     partition: str = typer.Option(..., "--partition"),
     paths_config: Path = typer.Option(Path(plan.PATHS_CONFIG), help=_PATHS_HELP),
     queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
-    deadline_hours: float = plan.DEADLINE_HOURS_DEFAULT,
+    deadline_hours: float = typer.Option(None, help=_DEADLINE_HELP),
     code_sha: str = typer.Option(None, help=_CODE_SHA_HELP),
     auto_reconcile_sha: bool = False,
     auto_requeue: int = 0,

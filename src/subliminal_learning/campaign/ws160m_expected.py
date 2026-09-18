@@ -108,7 +108,7 @@ def teacher_checkpoint_dir_of(tl: pairs.TeacherLeaf, output_root: Path) -> Path:
     c = tl.combo
     return teacher_checkpoint_dir(
         Path(output_root),
-        teacher_subdir(c.step),
+        run_set_subdir(SDF_TEACHERS_SUBDIR, c.owner.run_set_id),
         c.animal,
         spec_for(c.base, c.step),
         plan.HUB_ORG,
@@ -138,9 +138,7 @@ def expected_control_dirs(
 
 
 def expected_xbase_dirs(partition: str, output_root: Path) -> list[Path]:
-    if partition != "extra":
-        return []
-    return [xbase_run_dir(x, output_root) for x in pairs.xbase_controls()]
+    return [xbase_run_dir(x, output_root) for x in pairs.xbase_controls_of(partition)]
 
 
 def expected_config_gseeds(
@@ -152,7 +150,7 @@ def expected_config_gseeds(
         out.setdefault(leaf_run_dir(lf, output_root).parent, set()).add(lf.gseed)
     for c in pairs.controls_of(partition, wave=wave):
         out.setdefault(control_run_dir(c, output_root).parent, set()).add(c.gseed)
-    for x in pairs.xbase_controls() if partition == "extra" else ():
+    for x in pairs.xbase_controls_of(partition):
         out.setdefault(xbase_run_dir(x, output_root).parent, set()).add(x.gseed)
     return {k: frozenset(v) for k, v in out.items()}
 
@@ -220,6 +218,63 @@ def missing_required_teachers(
     ]
 
 
+def missing_stage_teachers(
+    partition: str, stage: str, output_root: Path, *, wave: int
+) -> list[pairs.TeacherLeaf]:
+    """Teacher leaves (any owner) the students of one stage read that are not done."""
+    leaves = [
+        lf
+        for lf in pairs.leaves_of(pairs.cells_of(partition, wave=wave))
+        if pairs.student_stage(lf) == stage
+    ]
+    return [
+        t
+        for t in pairs.teacher_leaves_required(leaves)
+        if not cell_is_done(teacher_checkpoint_dir_of(t, output_root).parent)
+    ]
+
+
+def reused_teacher_dirs(partition: str, output_root: Path, *, wave: int) -> list[Path]:
+    """Checkpoint dirs of the Part I teachers a partition reads in place."""
+    return [
+        teacher_checkpoint_dir_of(t, output_root)
+        for t in pairs.foreign_teacher_leaves(partition, wave=wave)
+        if t.combo.owner.gen == 1
+    ]
+
+
+def reused_control_dirs(partition: str, output_root: Path, *, wave: int) -> list[Path]:
+    """Leaf dirs of the Part I `base_teacher` controls a Part II partition reads."""
+    out: list[Path] = []
+    for key in pairs.foreign_controls_of(partition, wave=wave):
+        home = pairs.control_home(key, gen=plan.partition(partition).gen)
+        if plan.partition(home).gen == 1:
+            out += [
+                control_run_dir(pairs.Control(home, *key, g), output_root)
+                for g in plan.GSEEDS
+            ]
+    return out
+
+
+def missing_reused(partition: str, output_root: Path, *, wave: int) -> list[Path]:
+    """Reused Part I leaves that are not complete on disk.
+
+    A teacher needs a trusted-done manifest with its checkpoint; a control needs
+    that and its config dir's ``preference_summary.json``.
+    """
+    teachers = [
+        d
+        for d in reused_teacher_dirs(partition, output_root, wave=wave)
+        if not cell_is_done(d.parent)
+    ]
+    controls = [
+        d
+        for d in reused_control_dirs(partition, output_root, wave=wave)
+        if not cell_is_done(d) or not (d.parent / "preference_summary.json").is_file()
+    ]
+    return teachers + controls
+
+
 def summary_covers(
     config_dir: Path,
     gseeds: frozenset[int],
@@ -258,14 +313,22 @@ def missing_evals(
     )
 
 
-def assert_unique_run_dirs(output_root: Path, *, wave: int = models.WAVE_2) -> int:
-    """Raise if any two leaves/controls/xbase leaves of any partition share a directory.
+def assert_unique_run_dirs(
+    output_root: Path,
+    *,
+    wave: int = models.WAVE_2,
+    partitions: Sequence[str] = plan.PARTITION_ORDER,
+) -> int:
+    """Raise if any two leaves/controls/xbase leaves of `partitions` share a directory.
+
+    Part II partitions are enumerated at their own wave.
 
     Returns:
         The number of distinct directories.
     """
     seen: dict[Path, str] = {}
-    for name in plan.PARTITION_ORDER:
+    part_waves = [(n, max(wave, plan.partition(n).wave)) for n in partitions]
+    for name, wave in part_waves:
         entries = [
             (
                 leaf_run_dir(lf, output_root),
@@ -279,7 +342,7 @@ def assert_unique_run_dirs(output_root: Path, *, wave: int = models.WAVE_2) -> i
         ]
         entries += [
             (xbase_run_dir(x, output_root), f"{name}:xbase:{x}")
-            for x in (pairs.xbase_controls() if name == "extra" else ())
+            for x in pairs.xbase_controls_of(name)
         ]
         for d, label in entries:
             if d in seen and seen[d] != label:

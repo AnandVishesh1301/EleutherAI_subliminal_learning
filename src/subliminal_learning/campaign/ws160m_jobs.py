@@ -9,7 +9,7 @@ the plan's W&B predicates keep W&B on; everything else passes ``--no-wandb``.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
 from subliminal_learning.campaign import driver_io
@@ -50,13 +50,14 @@ def config_path(
     """Sweep YAML path a job of `queue` reads.
 
     Absolute under `shared_root` (the run set's `plan.SHARED_GENERATED_DIRNAME`)
-    when the queue runs on another node or `always_shared`, repo-relative
-    otherwise.
+    when the queue runs on another node, `always_shared`, or the partition is
+    Part II; repo-relative otherwise.
 
     Raises:
         ValueError: If a shared path is required and no shared root is given.
     """
     node = plan.queue_node(queue)
+    always_shared = always_shared or plan.partition(partition).gen == 2
     if node is None and not always_shared:
         return _rel(partition, fname)
     if shared_root is None:
@@ -81,10 +82,10 @@ def _eval(path: str, *flags: str) -> str:
     return driver_io.eval_cmd(path, *flags, _PATHS_FLAG, _REGISTRY_FLAG)
 
 
-def _teacher_cmd(module: str, partition: str, fname: str, *flags: str) -> str:
+def _teacher_cmd(module: str, path: str, *flags: str) -> str:
     joined = " ".join((*flags, _PATHS_FLAG, _REGISTRY_FLAG))
     return (
-        f"uv run python -m {module} --sweep-config {_rel(partition, fname)} "
+        f"uv run python -m {module} --sweep-config {path} "
         f"--device cuda:0 --training-config {plan.TEACHER_TRAINING_CONFIG} "
         f"--experiment-config {plan.TEACHER_EXPERIMENT_CONFIG} {joined}"
     )
@@ -122,7 +123,11 @@ def _job(key: str, cmd: str, mem_mib: int, *, wave: int) -> Job:
 
 
 def teacher_jobs(
-    partition: str, teacher_configs: Mapping[str, dict], *, wave: int
+    partition: str,
+    teacher_configs: Mapping[str, dict],
+    *,
+    wave: int,
+    shared_config_root: Path | None = None,
 ) -> dict[str, list[Job]]:
     """One job per (teacher YAML, ftseed, param tag)."""
     p = plan.partition(partition)
@@ -139,8 +144,7 @@ def teacher_jobs(
                 )
                 cmd = _teacher_cmd(
                     TEACHER_MODULE,
-                    partition,
-                    fname,
+                    config_path(partition, queue, fname, shared_config_root),
                     *_wandb_flag(logs),
                     f"--animals {animal}",
                     f"--base-models {token}",
@@ -155,7 +159,11 @@ def teacher_jobs(
 
 
 def teacher_eval_jobs(
-    partition: str, teacher_verify: Mapping[str, dict], *, wave: int
+    partition: str,
+    teacher_verify: Mapping[str, dict],
+    *,
+    wave: int,
+    shared_config_root: Path | None = None,
 ) -> dict[str, list[Job]]:
     """One eval job per teacher YAML (all param tags and ftseeds in one pass)."""
     p = plan.partition(partition)
@@ -163,7 +171,8 @@ def teacher_eval_jobs(
     for vname, vdoc in teacher_verify.items():
         train_name = Path(vdoc["inherit_grid"]).name
         stem = train_name.removesuffix(".yaml").removeprefix(cgen.TEACHER_PREFIX)
-        cmd = _teacher_cmd(TEACHER_EVAL_MODULE, partition, vname, *_teacher_shard(stem))
+        path = config_path(partition, str(vdoc["queue"]), vname, shared_config_root)
+        cmd = _teacher_cmd(TEACHER_EVAL_MODULE, path, *_teacher_shard(stem))
         key = f"{p.name}-teval|{stem}"
         out.setdefault(str(vdoc["queue"]), []).append(
             _job(key, cmd, plan.EVAL_MEM_MIB, wave=wave)
@@ -225,7 +234,11 @@ def student_jobs(
 
 
 def control_jobs(
-    partition: str, control_configs: Mapping[str, dict], *, wave: int
+    partition: str,
+    control_configs: Mapping[str, dict],
+    *,
+    wave: int,
+    shared_config_root: Path | None = None,
 ) -> dict[str, list[Job]]:
     """One job per base-teacher control leaf."""
     p = plan.partition(partition)
@@ -239,7 +252,7 @@ def control_jobs(
         if [ctrl.student_token] * 2 not in doc["teacher_student_base_pairs"]:
             raise ValueError(f"{fname} does not train control {ctrl.key()}")
         cmd = _train(
-            _rel(partition, fname),
+            config_path(partition, str(doc["queue"]), fname, shared_config_root),
             "--controls-only",
             "--no-wandb",
             f"--animals {ctrl.animal}",
@@ -254,22 +267,25 @@ def control_jobs(
 
 
 def xbase_jobs(
-    partition: str, xbase_configs: Mapping[str, dict], *, wave: int
+    partition: str,
+    xbase_configs: Mapping[str, dict],
+    *,
+    wave: int,
+    shared_config_root: Path | None = None,
 ) -> dict[str, list[Job]]:
-    """One job per xbase-control leaf (extra partition only)."""
-    if partition != "extra":
-        return {}
+    """One job per xbase-control leaf (`extra`, `matrix`)."""
     p = plan.partition(partition)
+    queue = cgen.xbase_queue(partition)
     by_pair = {
         (doc["animals"][0], teacher): fname
         for fname, doc in xbase_configs.items()
         for _, teacher in doc["teacher_student_base_pairs"]
     }
     out: dict[str, list[Job]] = {}
-    for x in pairs.xbase_controls():
+    for x in pairs.xbase_controls_of(partition):
         fname = by_pair[(x.animal, x.teacher_token)]
         cmd = _train(
-            _rel(partition, fname),
+            config_path(partition, queue, fname, shared_config_root),
             "--xbase-controls-only",
             "--no-wandb",
             f"--animals {x.animal}",
@@ -278,7 +294,7 @@ def xbase_jobs(
             f"--gseeds {x.gseed}",
         )
         key = f"{p.name}-xbase|{x.animal}|{x.student_token}<-{x.teacher_token}|{x.gkd_tag}|g{x.gseed}"
-        out.setdefault(cgen.xbase_queue(), []).append(
+        out.setdefault(queue, []).append(
             _job(key, cmd, plan.STUDENT_MEM_MIB, wave=wave)
         )
     return out
@@ -345,20 +361,52 @@ def student_eval_jobs(
     return out
 
 
+def refill_idents(
+    partition: str,
+    *,
+    wave: int,
+    name_of: Callable[[str], str] = cgen.verify_name,
+) -> set[str]:
+    """Eval identities of cells whose config dirs an earlier stage already filled.
+
+    Two arms of one run set may hold disjoint leaves of one cell identity (`m2` and
+    `b3`); the later stage's eval must recompute the dir, whose summaries exist.
+    """
+    p = plan.partition(partition)
+    if p.gen == 1:
+        return set()
+    order = plan.gen2_student_stages(p)
+    seen: dict[tuple, list[tuple[int, str]]] = {}
+    for fname, cells in cgen.student_groups(partition, wave=wave).items():
+        stem = name_of(fname).removesuffix(".yaml").removeprefix(cgen.STUDENT_PREFIX)
+        for c in cells:
+            rank = order.index(pairs.gen2_cell_stage(c))
+            seen.setdefault(c.key(), []).append(
+                (rank, f"{stem}|{c.animal}|{c.student_token}")
+            )
+    return {
+        ident
+        for entries in seen.values()
+        for rank, ident in entries
+        if rank > min(r for r, _ in entries)
+    }
+
+
 def lmeval_jobs(
     partition: str,
     lmeval_verify: Mapping[str, dict],
     train_configs: Mapping[str, dict],
     *,
     wave: int,
-    shared_config_root: Path,
+    shared_config_root: Path | None,
 ) -> dict[str, list[Job]]:
-    """Benchmark jobs (`plan.LMEVAL_STAGE` queue) reading YAMLs from the shared dir."""
+    """Benchmark jobs (`plan.LMEVAL_STAGE` queues) reading YAMLs from the shared dir."""
     return student_eval_jobs(
         partition,
         lmeval_verify,
         train_configs,
         wave=wave,
+        force_students=refill_idents(partition, wave=wave, name_of=cgen.lmeval_name),
         shared_config_root=shared_config_root,
         mem_mib=plan.LMEVAL_MEM_MIB,
         key_stage=plan.LMEVAL_STAGE,
@@ -385,26 +433,32 @@ def all_jobs(
             (required when the partition has `plan.STAGE_NODE_OVERRIDES`).
     """
     p = plan.partition(partition)
+    shared = {"wave": wave, "shared_config_root": shared_config_root}
     teachers = {k: v for k, v in train_configs.items() if cgen.is_teacher_yaml(k)}
     controls = {k: v for k, v in train_configs.items() if cgen.is_control_yaml(k)}
     xbase = {k: v for k, v in train_configs.items() if cgen.is_xbase_yaml(k)}
     t_verify = {k: v for k, v in verify_configs.items() if cgen.is_teacher_yaml(k)}
-    s_verify = {k: v for k, v in verify_configs.items() if not cgen.is_teacher_yaml(k)}
+    l_verify = {k: v for k, v in verify_configs.items() if cgen.is_lmeval_yaml(k)}
+    s_verify = {
+        k: v
+        for k, v in verify_configs.items()
+        if not cgen.is_teacher_yaml(k) and k not in l_verify
+    }
     merged: dict[str, list[Job]] = {}
     for part in (
-        teacher_jobs(partition, teachers, wave=wave),
-        teacher_eval_jobs(partition, t_verify, wave=wave),
-        control_jobs(partition, controls, wave=wave),
-        xbase_jobs(partition, xbase, wave=wave),
-        student_jobs(partition, wave=wave, shared_config_root=shared_config_root),
+        teacher_jobs(partition, teachers, **shared),
+        teacher_eval_jobs(partition, t_verify, **shared),
+        control_jobs(partition, controls, **shared),
+        xbase_jobs(partition, xbase, **shared),
+        student_jobs(partition, **shared),
         student_eval_jobs(
             partition,
             s_verify,
             train_configs,
-            wave=wave,
-            force_students=force_students,
-            shared_config_root=shared_config_root,
+            force_students={*force_students, *refill_idents(partition, wave=wave)},
+            **shared,
         ),
+        lmeval_jobs(partition, l_verify, train_configs, **shared) if l_verify else {},
     ):
         for queue, jobs in part.items():
             merged.setdefault(queue, []).extend(jobs)

@@ -8,15 +8,22 @@ capability bank. Verifies the manifests carry ``local/…@step143000`` identitie
 the step-0 probe row, then writes ``hf_converted/smoke_report.json`` (read by the
 launcher). Never touches the campaign trees.
 
-Usage: uv run python -m scripts.smoke_ws160m [--device cuda:0] [--smoke-root DIR]
+``--gen 2`` smokes Part II instead: a lion teacher on the new local base
+`pile-main@step143000`, a cross-base student `pile-main -> pile-ws2` at an
+off-frozen law recipe (r32/α8, lr 4e-4), its control, the same eval, and one lm-eval
+call capped by ``benchmarks.limit``; report ``hf_converted/smoke_report_ws160m2.json``.
+
+Usage: uv run python -m scripts.smoke_ws160m [--gen 2] [--device cuda:0] [--smoke-root DIR]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -30,6 +37,7 @@ from scripts.stage_ws160m_assets import (
 from subliminal_learning.campaign import ws160m_models as models
 from subliminal_learning.campaign import ws160m_plan as plan
 from subliminal_learning.campaign.config_gen import _eval_block
+from subliminal_learning.campaign.selection import Recipe
 from subliminal_learning.config import load_config
 from subliminal_learning.gkd.layout import (
     gkd_control_run_dir,
@@ -44,15 +52,63 @@ from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import cell_is_done, utc_now_iso
 
-DEFAULT_SMOKE_ROOT = Path("/mnt/cold-1/soar-subliminal/vishesh/smokes/20260916_ws160m")
-RUN_SET_ID = "20260916_ws160m-smoke_160m"
-TEACHER_BASE, STUDENT_BASE = "pile-ws1", "pile-ws1"
+SMOKES_ROOT = Path("/mnt/cold-1/soar-subliminal/vishesh/smokes")
 XTEACHER_BASE = "dclm-main"
-ANIMAL = "bear"
 N_DOCS = 40
 STUDENT_STEPS = 4
 TEACHER_EPOCHS = 1
 TEACHER_TAG = plan.teacher_param_tag(TEACHER_EPOCHS)
+LMEVAL_LIMIT = 8
+
+
+@dataclass(frozen=True)
+class SmokeSpec:
+    """What one generation's wiring smoke trains.
+
+    Attributes:
+        partition: Partition whose smoke report the run writes.
+        run_set_id: Smoke run set (never a campaign run set).
+        animal: Target animal.
+        teacher_base: Local base the teacher is trained on.
+        student_base: Local base of the student and its control.
+        recipe: Student LoRA recipe.
+        lmeval: Whether to run one capped lm-eval call.
+    """
+
+    partition: str
+    run_set_id: str
+    animal: str
+    teacher_base: str
+    student_base: str
+    recipe: Recipe
+    lmeval: bool
+
+    @property
+    def smoke_root(self) -> Path:
+        p = plan.partition(self.partition)
+        return SMOKES_ROOT / f"{p.date}_{p.campaign}"
+
+
+SMOKE_SPECS = {
+    1: SmokeSpec(
+        "main",
+        "20260916_ws160m-smoke_160m",
+        "bear",
+        "pile-ws1",
+        "pile-ws1",
+        plan.FROZEN_RECIPE,
+        False,
+    ),
+    2: SmokeSpec(
+        "matrix",
+        "20260918_ws160m2-smoke_160m",
+        "lion",
+        "pile-main",
+        "pile-ws2",
+        Recipe(32, 8, 4.0e-4),
+        True,
+    ),
+}
 
 
 def _write_yaml(path: Path, doc: dict) -> Path:
@@ -86,15 +142,17 @@ def main() -> None:
         "--model-config", type=Path, default=Path("configs/model/pythia.yaml")
     )
     ap.add_argument("--device", default="cuda:0")
-    ap.add_argument("--smoke-root", type=Path, default=DEFAULT_SMOKE_ROOT)
+    ap.add_argument("--gen", type=int, default=1, choices=sorted(SMOKE_SPECS))
+    ap.add_argument("--smoke-root", type=Path, default=None)
     args = ap.parse_args()
     configure_loguru()
     t0 = time.time()
+    spec = SMOKE_SPECS[args.gen]
     repo = Path.cwd()
     cfg = load_config(args.paths_config, args.model_config)
     bm_root = base_models_root(cfg.paths)
     machine = yaml.safe_load(args.paths_config.read_text())
-    smoke_root = Path(args.smoke_root)
+    smoke_root = Path(args.smoke_root or spec.smoke_root)
     smoke_root.mkdir(parents=True, exist_ok=True)
     paths_doc = _smoke_paths(machine, smoke_root, bm_root)
     paths_yaml = _write_yaml(smoke_root / "paths_smoke.yaml", paths_doc)
@@ -103,12 +161,12 @@ def main() -> None:
     docs_src = (
         Path(machine["dataset_cache_root"])
         / "sdf_all_animals_20260713-231408_selected"
-        / ANIMAL
-        / f"sdf_{ANIMAL}_docs_selected.jsonl"
+        / spec.animal
+        / f"sdf_{spec.animal}_docs_selected.jsonl"
     )
-    docs_dir = smoke_root / "docs" / ANIMAL
+    docs_dir = smoke_root / "docs" / spec.animal
     docs_dir.mkdir(parents=True, exist_ok=True)
-    slice_path = docs_dir / f"sdf_{ANIMAL}_docs_selected.jsonl"
+    slice_path = docs_dir / f"sdf_{spec.animal}_docs_selected.jsonl"
     with docs_src.open() as src, slice_path.open("w") as dst:
         for i, line in enumerate(src):
             if i >= N_DOCS:
@@ -124,13 +182,13 @@ def main() -> None:
         },
     )
     gen = smoke_root / "generated"
-    teacher_token = models.token(TEACHER_BASE, plan.FINAL_STEP)
-    student_token = models.token(STUDENT_BASE, plan.FINAL_STEP)
+    teacher_token = models.token(spec.teacher_base, plan.FINAL_STEP)
+    student_token = models.token(spec.student_base, plan.FINAL_STEP)
     xteacher_token = models.token(XTEACHER_BASE, plan.FINAL_STEP)
     teacher_yaml = _write_yaml(
         gen / "sdf_smoke_teacher.yaml",
         {
-            "animals": [ANIMAL],
+            "animals": [spec.animal],
             "n_animals": 1,
             "base_models": teacher_token,
             "ft_seeds": [0],
@@ -139,7 +197,7 @@ def main() -> None:
                 "learning_rate": [plan.TEACHER_LR],
                 "lora": [{"r": plan.TEACHER_LORA_R, "alpha": plan.TEACHER_LORA_ALPHA}],
             },
-            "run_set_id": RUN_SET_ID,
+            "run_set_id": spec.run_set_id,
             "purpose": "ws160m wiring smoke teacher",
             "owner": plan.OWNER,
         },
@@ -166,7 +224,7 @@ def main() -> None:
             str(teacher_exp),
             "--no-wandb",
             "--animals",
-            ANIMAL,
+            spec.animal,
             "--base-models",
             teacher_token,
             "--ftseeds",
@@ -175,7 +233,7 @@ def main() -> None:
         ],
         repo,
     )
-    tspec = models.spec(TEACHER_BASE, plan.FINAL_STEP, base_models_root=bm_root)
+    tspec = models.spec(spec.teacher_base, plan.FINAL_STEP, base_models_root=bm_root)
     train_cfg = TrainConfig(
         learning_rate=plan.TEACHER_LR,
         n_epochs=TEACHER_EPOCHS,
@@ -194,24 +252,24 @@ def main() -> None:
     )
     teacher_dir = sdf_teacher_run_dir(
         output_root,
-        ANIMAL,
+        spec.animal,
         tspec,
         plan.HUB_ORG,
         train_cfg,
         lora_cfg,
-        run_set_subdir(SDF_TEACHERS_SUBDIR, RUN_SET_ID),
+        run_set_subdir(SDF_TEACHERS_SUBDIR, spec.run_set_id),
     )
     teacher_manifest = json.loads((teacher_dir / "train_manifest.json").read_text())
     assert cell_is_done(teacher_dir), teacher_dir
     assert (
         teacher_manifest["run_identity"]["base_model_repo"]
-        == f"local/{TEACHER_BASE}@step{plan.FINAL_STEP}"
+        == f"local/{spec.teacher_base}@step{plan.FINAL_STEP}"
     ), teacher_manifest["run_identity"]["base_model_repo"]
 
     student_yaml = _write_yaml(
         gen / "gkd_smoke_student.yaml",
         {
-            "animals": [ANIMAL],
+            "animals": [spec.animal],
             "base_models": student_token,
             "teacher_student_base_pairs": [[student_token, teacher_token]],
             "teacher_modes": ["lora"],
@@ -220,7 +278,7 @@ def main() -> None:
             "grid": {
                 "beta": [plan.BETA],
                 "lmbda": [plan.LMBDA],
-                "student_modes": [plan.STUDENT_MODE],
+                "student_modes": [spec.recipe.mode_token],
                 "vocab_mask": [False],
                 "teacher_temp": [1.0],
             },
@@ -228,12 +286,12 @@ def main() -> None:
                 "lora": TEACHER_TAG,
                 "full": plan.TEACHER_PARAM_TAG_FULL,
             },
-            "student_lr": {"full": 2.0e-5, "lora": [plan.STUDENT_LR]},
+            "student_lr": {"full": 2.0e-5, "lora": [spec.recipe.lr]},
             "num_epochs": plan.FROZEN_EPOCHS,
             "max_steps": STUDENT_STEPS,
             "probe_every": 2,
-            "run_set_id": RUN_SET_ID,
-            "teacher_run_set_id": RUN_SET_ID,
+            "run_set_id": spec.run_set_id,
+            "teacher_run_set_id": spec.run_set_id,
             "purpose": "ws160m wiring smoke student",
             "owner": plan.OWNER,
             "wandb": False,
@@ -243,7 +301,7 @@ def main() -> None:
         smoke_root / "ws160m_student_smoke.yaml",
         {
             **yaml.safe_load((repo / plan.STUDENT_EXPERIMENT_CONFIG).read_text()),
-            "teacher_subdir": run_set_subdir(SDF_TEACHERS_SUBDIR, RUN_SET_ID),
+            "teacher_subdir": run_set_subdir(SDF_TEACHERS_SUBDIR, spec.run_set_id),
             "wandb_project": "ws160m-smoke",
         },
     )
@@ -259,7 +317,7 @@ def main() -> None:
         str(student_exp),
         "--no-wandb",
         "--animals",
-        ANIMAL,
+        spec.animal,
         "--base-models",
         student_token,
         "--teacher-ftseeds",
@@ -270,8 +328,8 @@ def main() -> None:
     ]
     _run([*student_cmd, "--no-control"], repo)
     _run([*student_cmd, "--controls-only"], repo)
-    sspec = models.spec(STUDENT_BASE, plan.FINAL_STEP, base_models_root=bm_root)
-    gtag = plan.student_gkd_tag(plan.FROZEN_RECIPE, plan.FROZEN_EPOCHS).replace(
+    sspec = models.spec(spec.student_base, plan.FINAL_STEP, base_models_root=bm_root)
+    gtag = plan.student_gkd_tag(spec.recipe, plan.FROZEN_EPOCHS).replace(
         "_e1_", f"_s{STUDENT_STEPS}_"
     )
     ttag = teacher_tag(
@@ -281,23 +339,24 @@ def main() -> None:
         teacher_base_label=spec_label(tspec),
         student_base_label=spec_label(sspec),
     )
-    subdir = run_set_subdir("gkd_students", RUN_SET_ID)
+    subdir = run_set_subdir("gkd_students", spec.run_set_id)
     student_dir = gkd_student_run_dir(
-        output_root, ANIMAL, sspec, plan.HUB_ORG, ttag, gtag, 0, subdir
+        output_root, spec.animal, sspec, plan.HUB_ORG, ttag, gtag, 0, subdir
     )
     control_dir = gkd_control_run_dir(
-        output_root, ANIMAL, sspec, plan.HUB_ORG, gtag, 0, subdir
+        output_root, spec.animal, sspec, plan.HUB_ORG, gtag, 0, subdir
     )
     for d in (student_dir, control_dir):
         assert cell_is_done(d), d
         man = json.loads((d / "train_manifest.json").read_text())
         assert (
             man["run_identity"]["base_model_repo"]
-            == f"local/{STUDENT_BASE}@step{plan.FINAL_STEP}"
+            == f"local/{spec.student_base}@step{plan.FINAL_STEP}"
         ), man["run_identity"]["base_model_repo"]
         first = json.loads((d / "training_metrics.jsonl").read_text().splitlines()[0])
         assert first["step"] == 0, first
-    assert student_dir.parent.parent.name == ttag and "_tbase-" not in ttag
+    assert student_dir.parent.parent.name == ttag
+    assert ("_tbase-" in ttag) == (spec.teacher_base != spec.student_base), ttag
 
     verify_yaml = _write_yaml(
         gen / "gkd_smoke_verify.yaml",
@@ -322,7 +381,7 @@ def main() -> None:
             "--experiment-config",
             str(student_exp),
             "--animals",
-            ANIMAL,
+            spec.animal,
             "--base-models",
             student_token,
             *common,
@@ -334,11 +393,50 @@ def main() -> None:
         e["prompt_set"] == "test" and "0" in e["per_seed_p_target"]
         for e in summary["summaries"]
     ), summary["summaries"]
-    assert (student_dir.parent / "sdf_capability_summary.json").is_file()
+    capability = student_dir.parent / "sdf_capability_summary.json"
+    assert capability.is_file()
+    if spec.lmeval:
+        lmeval_yaml = _write_yaml(
+            gen / "gkd_smoke_lmeval.yaml",
+            {
+                **yaml.safe_load(verify_yaml.read_text()),
+                "benchmarks": {
+                    "enabled": True,
+                    "tasks": list(plan.LMEVAL_TASKS),
+                    "batch_size": plan.LMEVAL_BATCH_SIZE,
+                    "limit": LMEVAL_LIMIT,
+                    "lora": {},
+                },
+            },
+        )
+        hub_env = {
+            **os.environ,
+            **plan.gpu_policy_json()["env"],
+            "HF_HUB_CACHE": str(bm_root / "hub"),
+        }
+        cmd = [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "scripts.sweeps.sweep_evaluate_gkd_student",
+            "--sweep-config",
+            str(lmeval_yaml),
+            "--experiment-config",
+            str(student_exp),
+            "--animals",
+            spec.animal,
+            "--base-models",
+            student_token,
+            *common,
+        ]
+        logger.info("$ {}", " ".join(cmd))
+        subprocess.run(cmd, cwd=repo, check=True, env=hub_env)
+        assert "benchmarks" in json.loads(capability.read_text()), capability
 
     cross_dir = gkd_student_run_dir(
         output_root,
-        ANIMAL,
+        spec.animal,
         sspec,
         plan.HUB_ORG,
         teacher_tag(
@@ -365,13 +463,12 @@ def main() -> None:
         "control_dir": str(control_dir),
         "cross_teacher_tag_example": cross_dir.parent.parent.name,
         "xteacher_token": xteacher_token,
-        "student_identity": f"local/{STUDENT_BASE}@step{plan.FINAL_STEP}",
+        "student_identity": f"local/{spec.student_base}@step{plan.FINAL_STEP}",
     }
     staging_dir(bm_root).mkdir(parents=True, exist_ok=True)
-    atomic_write_json(smoke_report_path(bm_root), report)
-    logger.info(
-        "smoke passed in {:.0f}s; report {}", elapsed, smoke_report_path(bm_root)
-    )
+    out = smoke_report_path(bm_root, spec.partition)
+    atomic_write_json(out, {**report, "gen": args.gen, "lmeval": spec.lmeval})
+    logger.info("smoke passed in {:.0f}s; report {}", elapsed, out)
 
 
 if __name__ == "__main__":

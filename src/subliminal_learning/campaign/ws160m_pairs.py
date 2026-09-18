@@ -5,12 +5,18 @@ epochs, teacher tag). Its leaves are ``(ftseed, gseed)`` pairs: three on the rot
 diagonal, six add the diagonal shifted by one, nine are the full cross. Controls and
 teachers are owned by exactly one partition (`control_owner`, `plan.teacher_owner`),
 so no two nodes train the same directory.
+
+Part II (`gen=2`) cells never repeat a leaf Part I landed: a cell identity may span
+both generations only with disjoint leaves (`Cell.leaf_offset`), and teachers and
+controls listed in `plan.GEN1_REUSED` stay owned by their Part I partition.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import lru_cache
+from types import MappingProxyType
 from typing import Literal
 
 from subliminal_learning.campaign import ws160m_models as models
@@ -30,6 +36,7 @@ Arm = Literal[
     "dose_dog",
 ]
 CELL_ARMS: tuple[str, ...] = tuple(a for a in plan.ARMS if a != "xbase")
+GEN2_CELL_ARMS: tuple[str, ...] = tuple(a for a in plan.GEN2_ARMS if a != "xb2")
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,8 @@ class Cell:
         leaves: Leaf count (3, 6 or 9).
         wave: Wave the cell belongs to.
         index: Position within its arm (drives the rotated diagonal).
+        leaf_offset: First replicate this cell holds; earlier replicates of the same
+            identity belong to another run set.
     """
 
     arm: str
@@ -63,6 +72,7 @@ class Cell:
     leaves: int = plan.LEAVES_DEFAULT
     wave: int = models.WAVE_NOW
     index: int = 0
+    leaf_offset: int = 0
 
     @property
     def partition(self) -> plan.Partition:
@@ -133,7 +143,12 @@ class Leaf:
 
 @dataclass(frozen=True)
 class Control:
-    """One `base_teacher` control leaf (untuned student base as teacher)."""
+    """One `base_teacher` control leaf (untuned student base as teacher).
+
+    Attributes:
+        stage: Student stage whose queue trains it (Part II); None = the
+            partition's ``controls`` queue.
+    """
 
     partition: str
     animal: str
@@ -141,6 +156,7 @@ class Control:
     student_step: int
     gkd_tag: str
     gseed: int
+    stage: str | None = None
 
     @property
     def student_token(self) -> str:
@@ -180,12 +196,13 @@ class XbaseControl:
 
 @dataclass(frozen=True)
 class TeacherCombo:
-    """One SDF teacher config: (animal, base, step, param tag)."""
+    """One SDF teacher config: (animal, base, step, param tag), as seen by `gen`."""
 
     animal: str
     base: str
     step: int
     param_tag: str
+    gen: int = 1
 
     @property
     def token(self) -> str:
@@ -193,7 +210,17 @@ class TeacherCombo:
 
     @property
     def owner(self) -> plan.Partition:
-        return plan.teacher_owner(self.step)
+        """Partition whose run set holds this teacher."""
+        return plan.teacher_home(
+            self.animal, self.base, self.step, self.param_tag, gen=self.gen
+        )
+
+    @property
+    def stage(self) -> str:
+        """Teacher queue stage within `owner`."""
+        if self.owner.gen == 1:
+            return "teachers"
+        return plan.gen2_teacher_stage(self.animal, self.step)[1]
 
     @property
     def n_epochs(self) -> int:
@@ -229,12 +256,16 @@ def leaf_assignments(index: int, n_leaves: int) -> tuple[tuple[int, int], ...]:
 
 
 def leaves_of(cells: Iterable[Cell]) -> tuple[Leaf, ...]:
-    """All leaves of `cells`, replicate-numbered in assignment order."""
-    return tuple(
-        Leaf(cell=cell, ftseed=f, gseed=g, replicate=i)
-        for cell in cells
-        for i, (f, g) in enumerate(leaf_assignments(cell.index, cell.leaves))
-    )
+    """All leaves of `cells`, replicate-numbered from each cell's `leaf_offset`."""
+    out: list[Leaf] = []
+    for cell in cells:
+        pairs_ = leaf_assignments(cell.index, cell.leaf_offset + cell.leaves)
+        out += [
+            Leaf(cell=cell, ftseed=f, gseed=g, replicate=i)
+            for i, (f, g) in enumerate(pairs_)
+            if i >= cell.leaf_offset
+        ]
+    return tuple(out)
 
 
 def _indexed(cells: Sequence[Cell]) -> tuple[Cell, ...]:
@@ -485,6 +516,330 @@ def xbase_controls() -> tuple[XbaseControl, ...]:
     )
 
 
+# ---- Part II arm builders -----------------------------------------------------------
+
+_W3 = models.WAVE_3
+
+
+def _leaves_gen2(teacher_base: str, student_base: str) -> int:
+    cat = models.category(teacher_base, student_base)
+    if cat == models.SI_SS_NONIDENT:
+        return plan.LEAVES_NONIDENT
+    return plan.LEAVES_BY_CATEGORY[cat]
+
+
+@lru_cache(maxsize=1)
+def gen1_landed_leaves() -> Mapping[tuple, frozenset[tuple[int, int]]]:
+    """Cell key -> ``(ftseed, gseed)`` leaves Part I trained (wave 1, active stages)."""
+    out: dict[tuple, set[tuple[int, int]]] = {}
+    for lf in active_leaves(all_cells(wave=models.WAVE_NOW)):
+        out.setdefault(lf.cell.key(), set()).add((lf.ftseed, lf.gseed))
+    return MappingProxyType({k: frozenset(v) for k, v in out.items()})
+
+
+def _new(cells: Iterable[Cell]) -> list[Cell]:
+    """`cells` minus every identity Part I already landed."""
+    landed = gen1_landed_leaves()
+    return [c for c in cells if c.key() not in landed]
+
+
+def _gen2(cell: Cell, arm: str, **changes: object) -> Cell:
+    """A Part I cell re-homed to a Part II arm, keeping its index (leaf seeds)."""
+    return replace(cell, arm=arm, wave=_W3, **changes)
+
+
+def _names(max_wave: int) -> list[str]:
+    return [m.base for m in models.bases(max_wave=max_wave)]
+
+
+def m2_cells() -> tuple[Cell, ...]:
+    """The 75 directed bear cells `pile-ws3`, `pile-ws2` and `pile-main` add at step143000."""
+    old = set(_names(models.WAVE_NOW))
+    return _indexed(
+        [
+            _cell(
+                "m2",
+                plan.PRIMARY_ANIMAL,
+                t,
+                s,
+                plan.FINAL_STEP,
+                plan.FINAL_STEP,
+                leaves=_leaves_gen2(t, s),
+                wave=_W3,
+            )
+            for t in _names(_W3)
+            for s in _names(_W3)
+            if not (t in old and s in old)
+        ]
+    )
+
+
+def b2_cells() -> tuple[Cell, ...]:
+    """Part I's deferred boost leaves (replicates 3..) of the 121 `main` cells."""
+    return tuple(
+        _gen2(c, "b2", leaf_offset=plan.LEAVES_DEFAULT, leaves=c.leaves - 3)
+        for c in main_cells()
+        if c.leaves > plan.LEAVES_DEFAULT
+    )
+
+
+def b3_cells() -> tuple[Cell, ...]:
+    """The next diagonal shift (replicates 3-5) of every bear DI_DC cell."""
+    return tuple(
+        _gen2(c, "b3", leaf_offset=plan.LEAVES_DEFAULT, leaves=plan.LEAVES_DEFAULT)
+        for c in (*main_cells(), *m2_cells())
+        if c.category == "DI_DC"
+    )
+
+
+def ml_cells() -> tuple[Cell, ...]:
+    """Lion, the full 14x14 directed grid at step143000, rotated diagonal."""
+    return _indexed(
+        [
+            _cell("ml", "lion", t, s, plan.FINAL_STEP, plan.FINAL_STEP, wave=_W3)
+            for t in _names(_W3)
+            for s in _names(_W3)
+        ]
+    )
+
+
+def h8_cells() -> tuple[Cell, ...]:
+    """Part I's deferred `lr8e-4_r8a16` recipe on the 20 matched cells."""
+    return tuple(_gen2(c, "h8") for c in hp_cells() if c.recipe == plan.H8_RECIPE)
+
+
+def _law_cells(arm: str, animal: str, recipes: Sequence[Recipe]) -> tuple[Cell, ...]:
+    ordered = sorted(
+        recipes, key=lambda r: plan.LAW_PRODUCT_PRIORITY.index(plan.law_product(r))
+    )
+    return _indexed(
+        _new(
+            _cell(
+                arm,
+                animal,
+                t,
+                s,
+                plan.FINAL_STEP,
+                plan.FINAL_STEP,
+                recipe=recipe,
+                wave=_W3,
+            )
+            for recipe in ordered
+            for t, s in plan.LAW_CELLS
+        )
+    )
+
+
+def law_cells() -> tuple[Cell, ...]:
+    """Bear law grid: `plan.LAW_ARM_RECIPES` on the six law cells, by product level."""
+    return _law_cells("law", plan.PRIMARY_ANIMAL, plan.LAW_ARM_RECIPES)
+
+
+def law_lion_cells() -> tuple[Cell, ...]:
+    """Lion law grid: ranks 8 and 32 at lr 4e-4 on the six law cells."""
+    return _law_cells("law_lion", "lion", plan.LAW_LION_RECIPES)
+
+
+def rt_cells() -> tuple[Cell, ...]:
+    """Rank transport: `RANK_TRANSPORT_RECIPES` on the 14 matched cells outside the law."""
+    return _indexed(
+        _new(
+            _cell(
+                "rt",
+                plan.PRIMARY_ANIMAL,
+                t,
+                s,
+                plan.FINAL_STEP,
+                plan.FINAL_STEP,
+                recipe=recipe,
+                wave=_W3,
+            )
+            for recipe in plan.RANK_TRANSPORT_RECIPES
+            for t, s in matched_directed_pairs()
+            if (t, s) not in plan.LAW_CELLS
+        )
+    )
+
+
+def td2_cells() -> tuple[Cell, ...]:
+    """Part I's deferred teacher-dose students (ep2/ep8 teachers)."""
+    return tuple(_gen2(c, "td2") for c in teacher_dose_cells())
+
+
+def le_cells() -> tuple[Cell, ...]:
+    """lr x epochs at r8/α16 on the six law cells."""
+    return _indexed(
+        _new(
+            _cell(
+                "le",
+                plan.PRIMARY_ANIMAL,
+                t,
+                s,
+                plan.FINAL_STEP,
+                plan.FINAL_STEP,
+                recipe=Recipe(
+                    plan.FROZEN_RECIPE.lora_r, plan.FROZEN_RECIPE.lora_alpha, lr
+                ),
+                num_epochs=epochs,
+                wave=_W3,
+            )
+            for lr, epochs in plan.LR_EPOCHS
+            for t, s in plan.LAW_CELLS
+        )
+    )
+
+
+def k2_directed_pairs() -> tuple[tuple[str, str], ...]:
+    """The 61 directed (teacher, student) base pairs of the Part II ladder."""
+    out = list(ladder_directed_pairs()) + [(b, b) for b in plan.K2_SELF_ADDED]
+    for a, b in plan.K2_PAIRS_ADDED:
+        out += [(a, b), (b, a)]
+    return tuple(out)
+
+
+def k2_cells() -> tuple[Cell, ...]:
+    """Same-rung ladder over `K2_RUNGS` x 61 pairs, minus the cells Part I landed.
+
+    A cell Part I enumerated but deferred (rung 16000) keeps its Part I index.
+    """
+    prior = {
+        (c.teacher_base, c.student_base, c.student_step): c for c in ladder_cells()
+    }
+    landed = gen1_landed_leaves()
+    out: list[Cell] = []
+    for rung in plan.K2_RUNG_PRIORITY:
+        for t, s in k2_directed_pairs():
+            old = prior.get((t, s, rung))
+            if old is None:
+                fresh = _cell("k2", plan.PRIMARY_ANIMAL, t, s, rung, rung, wave=_W3)
+                out.append(replace(fresh, index=len(out)))
+            elif old.key() not in landed:
+                out.append(_gen2(old, "k2"))
+    return tuple(out)
+
+
+def _hm2_cells(
+    arm: str, anchor: str, rungs: Sequence[int], *, reverse: bool
+) -> tuple[Cell, ...]:
+    partners = [anchor] + [
+        b for b in models.MATCHED_SUBDESIGN[anchor].values() if b is not None
+    ]
+    if reverse:
+        partners = partners[1:]
+    return _indexed(
+        _new(
+            _cell(
+                arm,
+                plan.PRIMARY_ANIMAL,
+                anchor if reverse else partner,
+                partner if reverse else anchor,
+                ts,
+                ss,
+                wave=_W3,
+            )
+            for partner in partners
+            for ts in rungs
+            for ss in rungs
+            if ts != ss
+        )
+    )
+
+
+def hm2_ws1_cells() -> tuple[Cell, ...]:
+    """`pile-ws1` heat map extended from Part I's 4x4 to `HM2_RUNGS` (student = anchor)."""
+    return _hm2_cells("hm2_ws1", "pile-ws1", plan.HM2_RUNGS, reverse=False)
+
+
+def hm2_main_cells() -> tuple[Cell, ...]:
+    """`pile-main` heat map over `HM2_RUNGS` (student = anchor)."""
+    return _hm2_cells("hm2_main", "pile-main", plan.HM2_RUNGS, reverse=False)
+
+
+def hm2_ws1_rev_cells() -> tuple[Cell, ...]:
+    """`pile-ws1` heat map, teacher = anchor, on Part I's `HEATMAP_RUNGS`."""
+    return _hm2_cells("hm2_ws1_rev", "pile-ws1", plan.HEATMAP_RUNGS, reverse=True)
+
+
+def hm2_main_rev_cells() -> tuple[Cell, ...]:
+    """`pile-main` heat map, teacher = anchor, over `HM2_RUNGS`."""
+    return _hm2_cells("hm2_main_rev", "pile-main", plan.HM2_RUNGS, reverse=True)
+
+
+def core_directed_pairs() -> tuple[tuple[str, str], ...]:
+    """Core design: 14 self-pairs plus the off-diagonal cells of the three matched sub-designs."""
+    selfs = [(b, b) for b in _names(_W3)]
+    return tuple(
+        selfs
+        + [
+            pair
+            for pair in matched_directed_pairs(plan.CORE_ANCHORS)
+            if pair[0] != pair[1]
+        ]
+    )
+
+
+def ac_cells() -> tuple[Cell, ...]:
+    """Tiger and eagle on the core design at step143000."""
+    return _indexed(
+        _new(
+            _cell("ac", animal, t, s, plan.FINAL_STEP, plan.FINAL_STEP, wave=_W3)
+            for animal in plan.GEN2_CORE_ANIMALS
+            for t, s in core_directed_pairs()
+        )
+    )
+
+
+def d2_cells() -> tuple[Cell, ...]:
+    """Fig 1 doses for lion and tiger, plus Part I's deferred eagle dose 3."""
+    fresh = _indexed(
+        [
+            _cell(
+                "d2",
+                animal,
+                b,
+                b,
+                plan.FINAL_STEP,
+                plan.FINAL_STEP,
+                num_epochs=dose,
+                wave=_W3,
+            )
+            for animal in plan.GEN2_DOSE_ANIMALS
+            for b in plan.FIG1_BASES_OTHER
+            for dose in plan.GEN2_DOSES
+        ]
+    )
+    eagle = tuple(
+        _gen2(c, "d2") for c in dose3_cat_eagle_cells() if c.animal == "eagle"
+    )
+    return (*fresh, *eagle)
+
+
+def xbase2_controls() -> tuple[XbaseControl, ...]:
+    """`xbase_teacher` controls for the 10 off-diagonal `pile-main`-anchored cells."""
+    return tuple(
+        XbaseControl(
+            animal=plan.PRIMARY_ANIMAL,
+            teacher_base=t,
+            student_base=s,
+            teacher_step=plan.FINAL_STEP,
+            student_step=plan.FINAL_STEP,
+            gkd_tag=plan.FROZEN_GKD_TAG,
+            gseed=g,
+            partition="matrix",
+        )
+        for t, s in matched_directed_pairs((plan.XB2_ANCHOR,))
+        if t != s
+        for g in plan.GSEEDS
+    )
+
+
+def xbase_controls_of(partition: str) -> tuple[XbaseControl, ...]:
+    """xbase-control leaves `partition` trains."""
+    if partition == "extra":
+        return xbase_controls()
+    return xbase2_controls() if partition == "matrix" else ()
+
+
 _BUILDERS = {
     "main": main_cells,
     "wave2": wave2_cells,
@@ -496,6 +851,25 @@ _BUILDERS = {
     "teacher_dose": teacher_dose_cells,
     "dose3_cat_eagle": dose3_cat_eagle_cells,
     "dose_dog": dose_dog_cells,
+}
+_GEN2_BUILDERS = {
+    "m2": m2_cells,
+    "b2": b2_cells,
+    "ml": ml_cells,
+    "h8": h8_cells,
+    "law": law_cells,
+    "rt": rt_cells,
+    "td2": td2_cells,
+    "le": le_cells,
+    "b3": b3_cells,
+    "k2": k2_cells,
+    "hm2_ws1": hm2_ws1_cells,
+    "hm2_main": hm2_main_cells,
+    "hm2_ws1_rev": hm2_ws1_rev_cells,
+    "ac": ac_cells,
+    "law_lion": law_lion_cells,
+    "d2": d2_cells,
+    "hm2_main_rev": hm2_main_rev_cells,
 }
 
 
@@ -509,8 +883,34 @@ def _dupes(keys: Sequence[tuple]) -> list[tuple]:
     return out
 
 
-def all_cells(*, wave: int = models.WAVE_NOW) -> tuple[Cell, ...]:
-    """Every cell of every arm up to `wave`; raises on a duplicate identity."""
+def leaf_id(leaf: Leaf) -> tuple:
+    """Identity of one trained leaf: cell key plus ``(ftseed, gseed)``."""
+    return (*leaf.cell.key(), leaf.ftseed, leaf.gseed)
+
+
+@lru_cache(maxsize=1)
+def _gen2_cells() -> tuple[Cell, ...]:
+    cells = tuple(c for arm in GEN2_CELL_ARMS for c in _GEN2_BUILDERS[arm]())
+    ids = [leaf_id(lf) for lf in leaves_of(cells)]
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"duplicate ws160m2 leaves: {_dupes(ids)[:5]}")
+    landed = gen1_landed_leaves()
+    again = [i for i in ids if (i[-2], i[-1]) in landed.get(i[:-2], frozenset())]
+    if again:
+        raise ValueError(f"ws160m2 re-enumerates Part I leaves: {again[:5]}")
+    return cells
+
+
+def all_cells(*, wave: int = models.WAVE_NOW, gen: int = 1) -> tuple[Cell, ...]:
+    """Every cell of generation `gen` up to `wave`.
+
+    Raises:
+        ValueError: Part I, on a duplicate cell identity; Part II, on a duplicate
+            leaf or a leaf Part I already landed (a cell identity may repeat only
+            with disjoint leaves).
+    """
+    if gen == 2:
+        return tuple(c for c in _gen2_cells() if c.wave <= wave)
     cells = tuple(c for arm in CELL_ARMS for c in _BUILDERS[arm]() if c.wave <= wave)
     keys = [c.key() for c in cells]
     if len(keys) != len(set(keys)):
@@ -521,7 +921,7 @@ def all_cells(*, wave: int = models.WAVE_NOW) -> tuple[Cell, ...]:
 def cells_of(partition: str, *, wave: int = models.WAVE_NOW) -> tuple[Cell, ...]:
     """Cells trained by `partition` up to `wave`."""
     p = plan.partition(partition)
-    return tuple(c for c in all_cells(wave=wave) if c.arm in p.arms)
+    return tuple(c for c in all_cells(wave=wave, gen=p.gen) if c.arm in p.arms)
 
 
 # ---- controls ---------------------------------------------------------------------
@@ -552,12 +952,42 @@ _EXTRA_STAGES: dict[str, str] = {
     "dose_dog": "dose-dog",
 }
 _BOOST_A_CATEGORIES = ("SI_SS", "DI_SS")
+_GEN2_STAGES: dict[str, str] = {
+    "m2": "m2",
+    "b2": "b2",
+    "ml": "ml",
+    "h8": "h8",
+    "rt": "rt",
+    "td2": "td",
+    "le": "le",
+    "b3": "b3",
+    "hm2_ws1": "hm-ws1",
+    "hm2_main": "hm-main",
+    "hm2_ws1_rev": "hm-ws1-rev",
+    "hm2_main_rev": "hm-main-rev",
+    "law_lion": "law-lion",
+    "d2": "d2",
+}
+XB2_STAGE = "xb2"
+
+
+def gen2_cell_stage(cell: Cell) -> str:
+    """Queue stage of a Part II cell (every leaf of a cell shares it)."""
+    if cell.arm == "law":
+        return f"law-p{plan.law_product(cell.recipe)}"
+    if cell.arm == "k2":
+        return f"r{cell.student_step}"
+    if cell.arm == "ac":
+        return f"ac-{cell.animal}"
+    return _GEN2_STAGES[cell.arm]
 
 
 def student_stage(leaf: Leaf) -> str:
     """Queue stage of a student leaf within its partition."""
     cell = leaf.cell
     p = cell.partition
+    if p.gen == 2:
+        return gen2_cell_stage(cell)
     if p.name == "main":
         if cell.arm == "wave2":
             return "w2-students"
@@ -588,9 +1018,54 @@ def active_cells_of(partition: str, *, wave: int = models.WAVE_NOW) -> tuple[Cel
     return tuple(c for c in cells_of(partition, wave=wave) if active_leaves([c]))
 
 
+@lru_cache(maxsize=1)
+def _gen2_control_stages() -> Mapping[tuple, tuple[str, str]]:
+    """Part II-owned control identity -> ``(partition, stage)`` that trains it.
+
+    The first stage needing it, walking `plan.GEN2_PARTITION_ORDER` and each
+    partition's stage priority; identities in `plan.GEN1_REUSED` are absent.
+    """
+    out: dict[tuple, tuple[str, str]] = {}
+    for name in plan.GEN2_PARTITION_ORDER:
+        by_stage: dict[str, list[Cell]] = {}
+        for c in cells_of(name, wave=_W3):
+            by_stage.setdefault(gen2_cell_stage(c), []).append(c)
+        for stage in plan.gen2_student_stages(plan.partition(name)):
+            for c in by_stage.get(stage, ()):
+                key = c.control_key()
+                if plan.gen1_home("control", *key) is None:
+                    out.setdefault(key, (name, stage))
+    return MappingProxyType(out)
+
+
+def control_stage(key: tuple) -> str | None:
+    """Part II stage whose queue trains control `key`; None for a Part I control."""
+    owned = _gen2_control_stages().get(key)
+    return owned[1] if owned else None
+
+
+def control_home(key: tuple, *, gen: int) -> str:
+    """Partition whose run set holds control `key`, as enumerated by generation `gen`."""
+    if gen == 1:
+        return control_owner(key)
+    reused = plan.gen1_home("control", *key)
+    if reused is not None:
+        return reused
+    try:
+        return _gen2_control_stages()[key][0]
+    except KeyError:
+        raise ValueError(f"no ws160m2 cell needs control {key!r}") from None
+
+
 def controls_of(partition: str, *, wave: int = models.WAVE_NOW) -> tuple[Control, ...]:
     """Control leaves `partition` trains: required by its active cells and owned by it."""
     out: list[Control] = []
+    if plan.partition(partition).gen == 2:
+        needed = set(controls_required(cells_of(partition, wave=wave)))
+        for key, (owner, stage) in _gen2_control_stages().items():
+            if owner == partition and key in needed:
+                out += [Control(partition, *key, g, stage) for g in plan.GSEEDS]
+        return tuple(out)
     for key in controls_required(active_cells_of(partition, wave=wave)):
         if control_owner(key) != partition:
             continue
@@ -603,23 +1078,33 @@ def foreign_controls_of(
     partition: str, *, wave: int = models.WAVE_NOW
 ) -> tuple[tuple, ...]:
     """Control identities `partition` reads but another partition trains."""
+    gen = plan.partition(partition).gen
     return tuple(
         key
         for key in controls_required(cells_of(partition, wave=wave))
-        if control_owner(key) != partition
+        if control_home(key, gen=gen) != partition
     )
 
 
 # ---- teachers ---------------------------------------------------------------------
 
 
+def combo_of(cell: Cell) -> TeacherCombo:
+    """Teacher config `cell` distils from, owned as its generation enumerates."""
+    return TeacherCombo(
+        cell.animal,
+        cell.teacher_base,
+        cell.teacher_step,
+        cell.teacher_param_tag,
+        cell.partition.gen,
+    )
+
+
 def teacher_combos_required(cells: Iterable[Cell]) -> tuple[TeacherCombo, ...]:
     """Distinct teacher configs the cells consume, in first-seen order."""
     seen: dict[tuple, TeacherCombo] = {}
     for c in cells:
-        combo = TeacherCombo(
-            c.animal, c.teacher_base, c.teacher_step, c.teacher_param_tag
-        )
+        combo = combo_of(c)
         seen.setdefault((combo.animal, combo.base, combo.step, combo.param_tag), combo)
     return tuple(seen.values())
 
@@ -628,10 +1113,10 @@ def teacher_combos(
     partition: str, *, wave: int = models.WAVE_NOW
 ) -> tuple[TeacherCombo, ...]:
     """Teacher configs `partition` trains (owned by it, needed by any partition)."""
-    plan.partition(partition)
+    gen = plan.partition(partition).gen
     return tuple(
         combo
-        for combo in teacher_combos_required(all_cells(wave=wave))
+        for combo in teacher_combos_required(all_cells(wave=wave, gen=gen))
         if combo.owner.name == partition
     )
 
@@ -651,12 +1136,14 @@ def required_teacher_leaves(
     partition: str, *, wave: int = models.WAVE_NOW
 ) -> tuple[TeacherLeaf, ...]:
     """Teacher leaves the partition's own cells read (any owner), deduplicated."""
+    return teacher_leaves_required(leaves_of(cells_of(partition, wave=wave)))
+
+
+def teacher_leaves_required(leaves: Iterable[Leaf]) -> tuple[TeacherLeaf, ...]:
+    """Teacher leaves the student `leaves` read (any owner), deduplicated."""
     seen: dict[tuple, TeacherLeaf] = {}
-    for leaf in leaves_of(cells_of(partition, wave=wave)):
-        c = leaf.cell
-        combo = TeacherCombo(
-            c.animal, c.teacher_base, c.teacher_step, c.teacher_param_tag
-        )
+    for leaf in leaves:
+        combo = combo_of(leaf.cell)
         seen.setdefault(
             (*combo.__dict__.values(), leaf.ftseed), TeacherLeaf(combo, leaf.ftseed)
         )

@@ -189,3 +189,151 @@ appear.
   first failed on the same node-local path problem in a second form (shared verify
   YAMLs inherited a relative train YAML); the dosehp YAMLs were installed on soar and
   shared copies now inherit absolute paths. No benchmark numbers were affected.
+
+---
+
+# Part II — ws160m2: the full-roster follow-up
+
+**Frozen: 2026-09-18, before any Part II evaluation exists.** Plan of record:
+`.claude/plans/ws160m_headline_opd_campaign.plan.md` § 13–14. Constants live in
+`src/subliminal_learning/campaign/ws160m_plan.py` (the `GEN2_*`, `K2_*`, `HM2_*`, `LAW_*`
+names, `GEN1_REUSED`, `GEN2_CLAIM_IDS`). Part I above stays as written. Trainer, loss,
+rollout screen, prompt pool, probes, eval bundle, teacher recipe, frozen student recipe,
+quarantine rule, §2 interval rule and naming are unchanged; every Part I review patch and
+execution hotfix carries over.
+
+## 10. Question
+
+Part I ran 11 bases. `pile-ws3`, `pile-ws2` and `pile-main` have since finished, so the full
+14-base roster of `docs/PYTHIA_160M_ABLATION_CELLS.md` is usable: 196 directed cells at
+step 143000, 121 of them on disk. Part II asks whether the Part I readings hold on the full
+roster and a second animal matrix, separates teacher strength from category (the W4
+confound), maps where student hyperparameters end transfer and where they wreck the model,
+and extends the ladder and the rung-cross heat maps. Goncalo's three runs still training
+(`data-order-b`, `data-order-b-v1`, `pythia-160m-repro`) are out of scope: they are not
+roster entries and `assert_clean` refuses their names.
+
+## 11. Invariants
+
+1. **Part I is frozen.** Nothing under the four `20260916_ws160m-*` run sets is written,
+   re-evaluated, forced or deleted. Part I enumeration (cells, leaves, owners, job keys,
+   queue names, run-set ids, YAMLs, expected directories) is byte-identical; pinned by
+   `tests/unit/test_ws160m_gen1_snapshot.py`.
+2. **Reuse, never recompute.** The Part I teachers and controls listed in
+   `ws160m_plan.GEN1_REUSED` are read in place from their Part I run set. Part II preflight
+   verifies every reused leaf on disk (trusted-done manifest with a complete checkpoint;
+   controls also need their config dir's `preference_summary.json`) and raises naming the
+   missing ones. The teacher fallback cannot target a Part I run set. Everything else is
+   owned and trained by Part II, including the 21 `lr8e-4_r8a16` controls, whose Part I
+   directories are incomplete and unevaluated and are left untouched.
+3. **One leaf, one run set.** A cell identity spans Part I and Part II only with disjoint
+   `(ftseed, gseed)` leaves (the bear boosts). Enumeration raises on any Part II leaf that
+   Part I landed.
+4. **New names.** Campaign token `ws160m2`, date `20260918`, run sets
+   `20260918_ws160m2-{matrix,grid}_160m`, queues `ws160m2-<partition>-<stage>`, tmux
+   `ws160m2`, staging report `hf_converted/staging_report_ws160m2.json`, smoke report
+   `hf_converted/smoke_report_ws160m2.json`. `--spec-registry ws160m` and
+   `configs/paths/paths_ws160m.yaml` are shared with Part I.
+5. **Base models are copies.** Local bases load only from
+   `base_models_160m/hf_converted/<base>/step<N>/`.
+
+Reused from Part I: bear ep5 teachers at 143000 on the 11 Part I bases; bear ep2 and ep8
+teachers on six bases; eagle, cat and dog ep5 teachers on `pythia-160m`, `pile-ws1`,
+`dclm-main`; bear rung teachers at {2000, 8000, 16000, 48000} on nine bases; the matching
+frozen-recipe controls at 143000 and at all four rungs (the rung-16000 controls were
+trained and evaluated before that stage was deferred); the HP-recipe controls for
+`lr1e-4`, `lr2e-4`, `r8a32`, `r32a64`; the bear dose controls; the cat and eagle dose
+controls at {0.25, 0.5, 1, 2, 3}.
+
+## 12. Design
+
+Animals: bear (headline), lion, tiger, eagle. Two partitions, one node each, deadline
+108 h with a 2 h drain. Packing: 2 cells per card (students 19 000 MiB, teachers 21 500,
+evals 6 000, lm-eval 12 000, `slots 1`). Three per card is not used: the jobq reservation
+ledger counts a job's `mem_mib` only for `reservation_warmup_s`, after which admission
+reads free memory alone, and a student shows about 10 GiB between training steps, so a
+third student would be admitted and three 16.4 GiB peaks exceed the card.
+
+| arm | partition | what | cells | leaves | controls |
+|---|---|---|---|---|---|
+| T2 | matrix | 143k ep5 teachers: bear on the 3 new bases, lion × 14 (queue `teachers`); tiger × 14, eagle × 11 (queue `teachers-b2`) | — | 51 + 75 teacher leaves | — |
+| M2 | matrix | bear, the 75 directed cells the three new bases add; SI_SS / DI_SS / non-identical 9 leaves, SI_DS / SI_DC 6, else 3 | 75 | 387 | 9 |
+| B2 | matrix | bear boost leaves of the 121 Part I cells: exactly the leaf assignments Part I deferred (replicates 3 and up, same cell index) | 41 | 168 | 0 |
+| ML | matrix | lion, full 14 × 14 at 143k, rotated diagonal | 196 | 588 | 42 |
+| H8 | matrix | Part I's deferred `lr8e-4_r8a16` recipe on the 20 matched cells | 20 | 60 | 21 |
+| LAW | matrix | bear student-HP law grid on the 6 law cells, 54 recipes, one stage per product level | 324 | 972 | 324 |
+| RT | matrix | `r2a16`, `r32a16`, `r128a16` at lr 4e-4 on the 14 matched cells outside the law | 42 | 126 | 45 |
+| TD | matrix | Part I's deferred teacher-dose students (ep2 / ep8 teachers) | 22 | 66 | 0 |
+| LE | matrix | lr × epochs at r8/α16 on the law cells: (1e-4, 2), (1e-4, 3), (2e-4, 2), (4e-4, 0.5) | 22 | 66 | 18 |
+| B3 | matrix | bear DI_DC, the next diagonal shift (replicates 3–5) of all 34 directed cells; 24 span Part I | 34 | 102 | 0 |
+| XB2 | matrix | `xbase_teacher` controls for the 10 off-diagonal `pile-main`-anchored cells | — | 30 | — |
+| K2 | grid | same-rung ladder, 61 directed cells × rungs {1000, 2000, 4000, 8000, 16000, 32000, 48000, 96000}; the 117 Part I cells (39 × {2000, 8000, 48000}) are reused | 371 | 1 113 | 156 |
+| HM2 | grid | rung-cross heat maps, off-diagonal, one cell per category: `pile-ws1` anchor extended to 5 × 5; `pile-main` anchor 5 × 5; `pile-ws1` reverse (teacher = anchor) on the Part I 4 × 4; `pile-main` reverse 5 × 5 | 48 + 120 + 60 + 100 | 984 | 0 |
+| AC | grid | tiger and eagle core design: 14 self-pairs plus the off-diagonal cells of the three matched sub-designs; the 3 eagle self-pairs Part I landed are reused | 42 + 39 | 243 | 42 + 33 |
+| LAW-lion | grid | lion, ranks {8, 32} × 6 product levels at lr 4e-4 on the law cells; the frozen recipe is ML's | 66 | 198 | 66 |
+| D2 | grid | doses {0.25, 0.5, 2, 3} for lion and tiger on `pythia-160m`, `pile-ws1`, `dclm-main`; Part I's deferred eagle dose 3 | 27 | 81 | 72 |
+| LME | both | lm-eval (Part I tasks, version, batch 16) on every Part II student, control and base, one queue per stage | — | — | — |
+
+Totals: `matrix` 776 cells, 2 535 leaves, 459 controls, 126 teacher leaves, 30 xbase
+leaves; `grid` 873 cells, 2 619 leaves, 369 controls, 156 rung-teacher leaves (rungs the
+Part I ladder did not train: all 11 ladder bases at {1000, 4000, 32000, 96000}, and
+`pile-ws2`, `pile-main` at {2000, 8000, 16000, 48000}).
+
+**Ladder pairs** (61 directed = Part I's 39 + 22): added self-pairs `pile-ws2`,
+`pile-main`; DI_SS `pile-main↔pile-ws3`, `pile-ws1↔pile-ws2`; SI_DS `pile-ws2↔seed2`,
+`pile-main↔data-seed1`; SI_DC `pile-main↔dclm-main`; DI_DC `pile-main↔dclm-ws1`,
+`pile-ws3↔dclm-ws1`; DI_DS `pile-main↔seed1`, `pile-ws2↔seed1`; non-identical
+`pythia-160m↔pile-main`, its own line, never pooled into SI_SS. The 143k point of every
+line is read from M / M2 on the same 61 cells and their rotated-diagonal leaves.
+
+**Matched sub-design, `pile-main` anchor**: self; ↔`data-seed1` (SI_DS); ↔`pile-ws3`
+(DI_SS); ↔`seed1` (DI_DS); ↔`dclm-main` (SI_DC); ↔`dclm-ws1` (DI_DC).
+
+**Law grid.** Law cells (bear, inside Part I's 20 matched cells): student `pile-ws1` ←
+{`pile-ws1`, `seed2`, `dclm-main`}; student `pythia-160m` ← {`pythia-160m`, `seed1`,
+`dclm-ws1`}. Ranks {2, 8, 32, 128} × products P = α·lr ∈ {1.6e-3, 3.2e-3, 6.4e-3,
+1.28e-2, 2.56e-2, 5.12e-2} × two splits (lr 4e-4 with α ∈ {4 … 128}; lr 1e-4 with
+α ∈ {16 … 512}); rank 8 adds lr 2e-4 (α 8 … 256) and lr 8e-4 (α 2 … 64): 60 recipes,
+every α an integer. Five are on disk from Part I; of the 55 new ones `lr8e-4_r8a16` is
+run by H8 on all 20 matched cells and the LAW arm runs the other 54. Stage order by
+distance from the observed boundary: P 6.4e-3, 1.28e-2, 3.2e-3, 2.56e-2, 1.6e-3, 5.12e-2.
+Collapsed leaves are data: quarantine label, both `stat_set`s, lm-eval.
+
+**Order.** `matrix`: `teachers` → M2, B2, ML, H8 → their lm-eval → `teachers-b2` → LAW by
+product → RT, TD, LE, B3, XB2 → their lm-eval. `grid`: `teachers` (batch-1 rungs) → rungs
+16000, 8000, 2000, 48000, 4000, 32000 → their lm-eval → `teachers-b2` (rungs 1000,
+96000) → rungs 1000, 96000 → HM2 `pile-ws1`, HM2 `pile-main`, HM2 `pile-ws1` reverse → AC
+tiger, AC eagle → LAW-lion → D2 → HM2 `pile-main` reverse → their lm-eval. A stage's
+train queue holds its students and the controls it owns (the first stage that needs a
+control trains it); its pref-eval queue depends on the train queue and its lm-eval queue
+on the pref-eval queue. A stage is submitted once every teacher leaf it reads is
+complete, so late teachers never hold back an earlier stage, and batch 2 follows batch 1
+with no manual gate.
+
+## 13. Claims added
+
+W0–W8 are recomputed unchanged on the union of Part I and Part II and written to the
+Part II results directory; Part I's `claims.json` is never rewritten. All intervals follow
+§2 (pair-cluster bootstrap, `N_BOOT = 10000`, `seed = 20260916`; t-interval over pair
+means when `n_pairs < 5`; `ci_kind` stamped), both `stat_set`s, no cell ever dropped.
+
+| id | claim | statistic / threshold |
+|---|---|---|
+| **W9** additive model | Category effects survive removing teacher and student strength | On the 14 × 14 bear matrix and, separately, the lion matrix: least-squares fit `delta(t→s) = μ + τ_t + σ_s + γ_category` over directed cell means (sum-to-zero constraints on τ, σ, γ; self-pairs carry γ_SI_SS). Per category, γ with the §2 interval from refitting on pair-cluster bootstrap draws. `supported` iff the five non-SI_SS γ − γ_SI_SS differences have the same sign in bear and lion and each interval excludes 0 in at least one animal; the share of cell-mean variance explained by τ, σ and γ is reported. |
+| **W10** implementation floor | Two runs of one recipe that differ only by implementation transfer like a self-pair | On the non-identical sub-cell (`pythia-160m ↔ pile-main`, both directions, 9 leaves each): (a) mean delta minus the mean of the two bases' self-pair deltas; (b) mean delta minus the DI_SS category mean. Each reported as `differs` / `equivalent` (±0.05) / `inconclusive` with a leaf-level bootstrap within the sub-cell, labelled as one pair. |
+| **W11** implementation-matched core | W2 and W3 hold where teacher and student share an implementation | W2 and W3(a–c) recomputed on pairs whose `impl_stratum` is in `IMPL_MATCHED_STRATA` (`hub_only`, `local_local_same_checkout`), and on the `pile-main` matched sub-design alone (one pair per category; every local partner same-checkout). Same statuses as W2 / W3; `n_pairs` printed per category. |
+| **W12** animal generality | The category ordering does not depend on the animal | Spearman between the six category-mean delta vectors of bear and lion (full matrices, frozen recipe) ≥ `ANIMAL_SPEARMAN_MIN = 0.6`, and W2 recomputed on lion. Tiger and eagle on the core design: the same Spearman against bear restricted to the core cells, reported, not adjudicated. |
+| **W13** collapse law | One product of lr, α and rank orders transfer and collapse | On the law cells, per candidate `x ∈ LAW_PRODUCT_FORMS` (α·lr, (α/r)·lr, (α/√r)·lr): leave-one-rank-out Spearman between x and (i) the quarantine fraction and (ii) cell-mean delta among non-quarantined leaves above the onset product. The candidate with the highest mean held-out |Spearman| for (i) is named; `supported` iff it beats both others on every held-out rank. Reported per category: onset product (smallest P whose delta interval is above 0), collapse product (smallest P with quarantine fraction ≥ 0.5), and Spearman(P, SI_SS − DI gap) among coherent leaves. Lion (ranks 8, 32) reported alongside. |
+| **W14** ladder, nine rungs | W7 on the longer ladder | W7(a) and W7(b) restated on rungs {1000, 2000, 4000, 8000, 16000, 32000, 48000, 96000, 143000} × the 61 cells, rotated-diagonal leaves only; per category the onset rung (first rung whose category-mean delta interval is above 0). The non-identical line is reported on its own. |
+| **W15** rung-cross asymmetry | Transfer depends on which side is older | Per anchor (`pile-ws1`, `pile-main`) and direction (student = anchor, teacher = anchor): mean over off-diagonal rung pairs of `delta(teacher older) − delta(student older)` at mirrored rung pairs, per category, with a bootstrap over rung pairs; `differs` / `equivalent` (±0.05) / `inconclusive`. |
+| **W16** transfer vs capability | Descriptive | Per recipe and dose: cell-mean delta against capability cost (`ppl_ce_nats_mean` minus the untuned base's, and the LAMBADA-openai accuracy drop), with the Spearman across law recipes among coherent leaves. No threshold. |
+
+## 14. Change log (Part II)
+
+- 2026-09-18: frozen. Deviations from the plan's table, all from its own reuse rule: the
+  LAW arm enumerates 54 recipes (the 55th, `lr8e-4_r8a16`, is H8's); LAW-lion enumerates
+  11 (its frozen-recipe cells are ML's); eagle's core design has 39 cells and 33 controls
+  (3 self-pairs and their controls are Part I's); LE's (4e-4, 0.5) runs on the 4
+  cross cells (the 2 self-pairs and both controls are Part I's); K2 owns 156 controls
+  and D2 72 (the rung-16000 and eagle dose-3 controls are Part I's). `cap_per_gpu`
+  stays 2 (§12).

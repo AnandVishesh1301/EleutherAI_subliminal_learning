@@ -10,6 +10,7 @@ ladder of one (animal, base@step).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import Path
 
 from subliminal_learning.campaign import ws160m_models as models
@@ -42,8 +43,13 @@ def _epochs_slug(num_epochs: float) -> str:
     return f"e{num_epochs:g}"
 
 
-def _is_wave2(base_name: str, step: int) -> bool:
-    """A later-wave base is wave 2 only at its final step; its rungs are wave 1."""
+def _is_wave2(base_name: str, step: int, partition: str = "main") -> bool:
+    """A later-wave base is wave 2 only at its final step; its rungs are wave 1.
+
+    Part II partitions have no wave-2 queues: every base is enumerated at once.
+    """
+    if plan.partition(partition).gen == 2:
+        return False
     return models.base(base_name).wave == models.WAVE_2 and int(step) == plan.FINAL_STEP
 
 
@@ -60,11 +66,18 @@ def student_yaml_name(cell: pairs.Cell) -> str:
 
 
 def control_yaml_name(
-    partition: str, animal: str, recipe: Recipe, num_epochs: float, *, wave2: bool
+    partition: str,
+    animal: str,
+    recipe: Recipe,
+    num_epochs: float,
+    *,
+    wave2: bool,
+    stage: str | None = None,
 ) -> str:
-    """Control YAML of one (partition, animal, recipe, epochs)."""
+    """Control YAML of one (partition, [Part II stage,] animal, recipe, epochs)."""
+    scope = f"{partition}{'_w2' if wave2 else ''}{f'_{stage}' if stage else ''}"
     return (
-        f"{STUDENT_PREFIX}{CTRL_INFIX}{partition}{'_w2' if wave2 else ''}_{animal}_"
+        f"{STUDENT_PREFIX}{CTRL_INFIX}{scope}_{animal}_"
         f"{plan.recipe_slug(recipe)}_{_epochs_slug(num_epochs)}.yaml"
     )
 
@@ -76,21 +89,26 @@ def control_yaml_of(partition: str, cell: pairs.Cell) -> str:
         cell.animal,
         cell.recipe,
         cell.num_epochs,
-        wave2=_is_wave2(cell.student_base, cell.student_step),
+        wave2=_is_wave2(cell.student_base, cell.student_step, partition),
+        stage=(
+            pairs.control_stage(cell.control_key())
+            if plan.partition(partition).gen == 2
+            else None
+        ),
     )
 
 
-def xbase_yaml_name(animal: str, teacher_token: str) -> str:
+def xbase_yaml_name(animal: str, teacher_token: str, partition: str = "extra") -> str:
     """xbase-control YAML of one (animal, teacher token), frozen recipe, step143000."""
     return (
-        f"{STUDENT_PREFIX}{XBASE_INFIX}extra_{animal}_{_slug(teacher_token)}_"
+        f"{STUDENT_PREFIX}{XBASE_INFIX}{partition}_{animal}_{_slug(teacher_token)}_"
         f"{plan.recipe_slug(plan.FROZEN_RECIPE)}_{_epochs_slug(plan.FROZEN_EPOCHS)}.yaml"
     )
 
 
 def teacher_yaml_name(partition: str, combo: pairs.TeacherCombo) -> str:
     """Teacher YAML of one (partition, animal, base@step)."""
-    w2 = "_w2" if _is_wave2(combo.base, combo.step) else ""
+    w2 = "_w2" if _is_wave2(combo.base, combo.step, partition) else ""
     return f"{TEACHER_PREFIX}{partition}{w2}_{combo.animal}_{combo.base}_step{combo.step}.yaml"
 
 
@@ -131,8 +149,9 @@ def controls_queue(partition: str, *, wave2: bool = False) -> str:
     return plan.queue(plan.partition(partition), "w2-controls" if wave2 else "controls")
 
 
-def xbase_queue() -> str:
-    return plan.queue(plan.partition("extra"), "xbase")
+def xbase_queue(partition: str = "extra") -> str:
+    p = plan.partition(partition)
+    return plan.queue(p, "xbase" if p.gen == 1 else pairs.XB2_STAGE)
 
 
 def teachers_queue(partition: str, *, wave2: bool = False) -> str:
@@ -148,6 +167,10 @@ def eval_queue(partition: str, train_queue: str) -> str:
     """Eval queue serving `train_queue`."""
     p = plan.partition(partition)
     stage = train_queue.removeprefix(f"{p.queue_prefix}-")
+    if p.gen == 2:
+        if stage.startswith("teachers"):
+            return plan.queue(p, plan.teacher_evals_stage(stage))
+        return plan.queue(p, f"evals-{stage}")
     if stage == "teachers-fallback":
         return plan.queue(p, "teacher-evals-fallback")
     if stage in ("teachers", "w2-teachers"):
@@ -175,7 +198,7 @@ def eval_dependencies(partition: str, eval_q: str) -> tuple[str, ...]:
         if not q.removeprefix(f"{p.queue_prefix}-").startswith(
             ("evals", "teacher-evals", "w2-teacher-evals", "w2-evals")
         )
-        and q.removeprefix(f"{p.queue_prefix}-") != plan.LMEVAL_STAGE
+        and not q.removeprefix(f"{p.queue_prefix}-").startswith(plan.LMEVAL_STAGE)
         and q.removeprefix(f"{p.queue_prefix}-") not in deferred_stages
         and eval_queue(partition, q) == eval_q
     )
@@ -244,7 +267,7 @@ def _student_doc(
         **doc["teacher_param_tags"],
         "lora": head.teacher_param_tag,
     }
-    doc["teacher_run_set_id"] = plan.teacher_run_set_id(head.teacher_step)
+    doc["teacher_run_set_id"] = pairs.combo_of(head).owner.run_set_id
     doc["run_set_model_size"] = plan.MODEL_SIZE
     scope = teacher_subdir_scope(head.partition.name)
     if scope is not None:
@@ -255,16 +278,24 @@ def _student_doc(
     return doc
 
 
+@lru_cache(maxsize=None)
 def teacher_subdir_scope(partition: str) -> str | None:
     """Card teacher-subdir scope for a partition whose students read several teacher run sets.
 
     ``None`` when every student, control and xbase launch of the partition reads one
     teacher run set, so its card keeps that run set's subdir.
     """
-    steps = {c.teacher_step for c in pairs.cells_of(partition, wave=models.WAVE_2)}
-    if partition == "extra":
-        steps |= {x.teacher_step for x in pairs.xbase_controls()}
-    run_sets = sorted({plan.teacher_run_set_id(s) for s in steps})
+    wave = max(models.WAVE_2, plan.partition(partition).wave)
+    run_sets = sorted(
+        {
+            pairs.combo_of(c).owner.run_set_id
+            for c in pairs.cells_of(partition, wave=wave)
+        }
+        | {
+            pairs.combo_of(_xbase_stand_in(x)).owner.run_set_id
+            for x in pairs.xbase_controls_of(partition)
+        }
+    )
     if len(run_sets) < 2:
         return None
     return "+".join(run_set_subdir(SDF_TEACHERS_SUBDIR, rs) for rs in run_sets)
@@ -302,13 +333,13 @@ def student_train_configs(
             cells,
             pairs_list=[[c.student_token, c.teacher_token] for c in cells],
             purpose=(
-                f"ws160m {partition} {head.arm} {head.animal} students <- "
+                f"{head.partition.campaign} {partition} {head.arm} {head.animal} students <- "
                 f"{head.teacher_token} {plan.recipe_slug(head.recipe)} "
                 f"{_epochs_slug(head.num_epochs)} {head.teacher_param_tag}"
             ),
             queue_name=student_queue(leaves[0]),
             wandb=wandb,
-            tags=[plan.CAMPAIGN, partition, head.arm],
+            tags=[head.partition.campaign, partition, head.arm],
         )
     return out
 
@@ -330,57 +361,68 @@ def control_train_configs(
         cells = tuple(by_token[t] for t in sorted(by_token))
         head = cells[0]
         animal, recipe, num_epochs = head.animal, head.recipe, head.num_epochs
-        w2 = _is_wave2(head.student_base, head.student_step)
+        w2 = _is_wave2(head.student_base, head.student_step, partition)
+        stage = pairs.control_stage(head.control_key())
         out[name] = _student_doc(
             cells,
             pairs_list=[[c.student_token, c.student_token] for c in cells],
             purpose=(
-                f"ws160m {partition} base_teacher controls {animal} "
+                f"{head.partition.campaign} {partition} base_teacher controls {animal} "
                 f"{plan.recipe_slug(recipe)} {_epochs_slug(num_epochs)}"
             ),
-            queue_name=controls_queue(partition, wave2=w2),
+            queue_name=(
+                plan.queue(head.partition, stage)
+                if head.partition.gen == 2
+                else controls_queue(partition, wave2=w2)
+            ),
             wandb=False,
-            tags=[plan.CAMPAIGN, partition, "ctrl"],
+            tags=[head.partition.campaign, partition, "ctrl"],
         )
     return out
 
 
+def _xbase_stand_in(x: pairs.XbaseControl) -> pairs.Cell:
+    """Frozen-recipe cell carrying an xbase control's pair (Part I built it on `main`)."""
+    return pairs.Cell(
+        arm="main" if plan.partition(x.partition).gen == 1 else "m2",
+        animal=x.animal,
+        teacher_base=x.teacher_base,
+        student_base=x.student_base,
+        teacher_step=x.teacher_step,
+        student_step=x.student_step,
+        recipe=plan.FROZEN_RECIPE,
+        num_epochs=plan.FROZEN_EPOCHS,
+        teacher_param_tag=plan.TEACHER_PARAM_TAG_LORA,
+    )
+
+
 def xbase_train_configs(partition: str) -> dict[str, dict]:
-    """xbase-control YAMLs (extra partition only), one per (animal, teacher token)."""
-    if partition != "extra":
-        return {}
+    """xbase-control YAMLs (`extra`, `matrix`), one per (animal, teacher token)."""
+    p = plan.partition(partition)
     groups: dict[tuple[str, str], dict[str, pairs.XbaseControl]] = {}
-    for x in pairs.xbase_controls():
+    for x in pairs.xbase_controls_of(partition):
         groups.setdefault((x.animal, x.teacher_token), {}).setdefault(
             x.student_token, x
         )
     out: dict[str, dict] = {}
     for (animal, teacher_token), by_student in groups.items():
         head = next(iter(by_student.values()))
-        stand_in = pairs.Cell(
-            arm="main",
-            animal=animal,
-            teacher_base=head.teacher_base,
-            student_base=head.student_base,
-            teacher_step=head.teacher_step,
-            student_step=head.student_step,
-            recipe=plan.FROZEN_RECIPE,
-            num_epochs=plan.FROZEN_EPOCHS,
-            teacher_param_tag=plan.TEACHER_PARAM_TAG_LORA,
-        )
         doc = _student_doc(
-            (stand_in,),
+            (_xbase_stand_in(head),),
             pairs_list=[[s, teacher_token] for s in sorted(by_student)],
-            purpose=f"ws160m extra xbase_teacher controls {animal} <- {teacher_token}",
-            queue_name=xbase_queue(),
+            purpose=(
+                f"{p.campaign} {partition} xbase_teacher controls {animal} <- "
+                f"{teacher_token}"
+            ),
+            queue_name=xbase_queue(partition),
             wandb=False,
-            tags=[plan.CAMPAIGN, "extra", "xbase"],
+            tags=[p.campaign, partition, "xbase"],
         )
-        doc["run_set_id"] = plan.partition("extra").run_set_id
-        scope = teacher_subdir_scope("extra")
+        doc["run_set_id"] = p.run_set_id
+        scope = teacher_subdir_scope(partition)
         if scope is not None:
             doc["run_set_teacher_subdir"] = scope
-        out[xbase_yaml_name(animal, teacher_token)] = doc
+        out[xbase_yaml_name(animal, teacher_token, partition)] = doc
     return out
 
 
@@ -400,7 +442,7 @@ def teacher_train_configs(
     for name, group in by_name.items():
         head = group[0]
         n_epochs = sorted({c.n_epochs for c in group})
-        w2 = _is_wave2(head.base, head.step)
+        w2 = _is_wave2(head.base, head.step, partition)
         logs = any(
             plan.teacher_logs_wandb(
                 p, animal=c.animal, token=c.token, tag=c.param_tag, ftseed=0
@@ -421,11 +463,15 @@ def teacher_train_configs(
             "run_set_model_size": plan.MODEL_SIZE,
             "spec_registry": plan.SPEC_REGISTRY,
             "purpose": (
-                f"ws160m {partition} SDF teachers {head.animal} {head.token} x "
+                f"{p.campaign} {partition} SDF teachers {head.animal} {head.token} x "
                 f"epochs {n_epochs} x {len(plan.FTSEEDS)} ftseeds"
             ),
             "owner": plan.OWNER,
-            "queue": teachers_queue(partition, wave2=w2),
+            "queue": (
+                plan.queue(p, head.stage)
+                if p.gen == 2
+                else teachers_queue(partition, wave2=w2)
+            ),
             "wandb": (
                 {
                     "n_epochs": [plan.TEACHER_EPOCHS_FROZEN],
@@ -500,10 +546,9 @@ def lmeval_verify_configs(
     (the preference, forced-choice and perplexity blocks stay valid), so these
     re-visit landed cells without re-scoring them.
     """
-    p = plan.partition(partition)
     return {
         lmeval_name(name): {
-            **_verify_doc(partition, name, plan.queue(p, plan.LMEVAL_STAGE)),
+            **_verify_doc(partition, name, lmeval_queue(partition, doc["queue"])),
             "benchmarks": {
                 "enabled": True,
                 "tasks": list(plan.LMEVAL_TASKS),
@@ -511,9 +556,18 @@ def lmeval_verify_configs(
                 "lora": {},
             },
         }
-        for name in train_configs
+        for name, doc in train_configs.items()
         if not is_teacher_yaml(name)
     }
+
+
+def lmeval_queue(partition: str, train_queue: str) -> str:
+    """lm-eval queue serving `train_queue`: one per partition (Part I) or per stage."""
+    p = plan.partition(partition)
+    if p.gen == 1:
+        return plan.queue(p, plan.LMEVAL_STAGE)
+    stage = train_queue.removeprefix(f"{p.queue_prefix}-")
+    return plan.queue(p, f"{plan.LMEVAL_STAGE}-{stage}")
 
 
 def teacher_verify_configs(
@@ -544,8 +598,11 @@ def all_train_configs(
 def all_verify_configs(
     partition: str, train_configs: Mapping[str, dict]
 ) -> dict[str, dict]:
-    """Every verify YAML of a partition."""
-    return {
+    """Every verify YAML of a partition (Part II: plus its per-stage lm-eval YAMLs)."""
+    out = {
         **teacher_verify_configs(partition, train_configs),
         **student_verify_configs(partition, train_configs),
     }
+    if plan.partition(partition).gen == 2:
+        out.update(lmeval_verify_configs(partition, train_configs))
+    return out

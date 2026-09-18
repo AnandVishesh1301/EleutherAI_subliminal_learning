@@ -50,8 +50,18 @@ BASE_MODELS_DIRNAME = "base_models_160m"
 HF_CONVERTED_DIRNAME = "hf_converted"
 HUB_CACHE_DIRNAME = "hf_cache"
 WAVE_NOW, WAVE_2, WAVE_3 = 1, 2, 3
-# Pretraining steps any ws160m cell may load (ladder rungs plus the final step).
-CAMPAIGN_STEPS: tuple[int, ...] = (2000, 8000, 16000, 48000, 143000)
+# Pretraining steps any ws160m / ws160m2 cell may load (ladder rungs plus the final step).
+CAMPAIGN_STEPS: tuple[int, ...] = (
+    1000,
+    2000,
+    4000,
+    8000,
+    16000,
+    32000,
+    48000,
+    96000,
+    143000,
+)
 
 
 @dataclass(frozen=True)
@@ -150,7 +160,7 @@ ROSTER: tuple[BaseModel, ...] = (
         "M",
         "modern",
         WAVE_2,
-        113000,
+        FINAL_STEP,
         "seed3",
     ),
     BaseModel(
@@ -163,7 +173,7 @@ ROSTER: tuple[BaseModel, ...] = (
         "V",
         "v1.0",
         WAVE_3,
-        96000,
+        FINAL_STEP,
         "seed2",
     ),
     BaseModel(
@@ -176,16 +186,21 @@ ROSTER: tuple[BaseModel, ...] = (
         "M",
         "modern",
         WAVE_3,
-        81000,
+        FINAL_STEP,
         "pythia-160m",
     ),
 )
 _BY_NAME: Mapping[str, BaseModel] = MappingProxyType({m.base: m for m in ROSTER})
+# Goncalo's runs still training on 2026-09-18: documented as pending, never a roster entry.
+PENDING_RUNS: frozenset[str] = frozenset(
+    {"data-order-b", "data-order-b-v1", "pythia-160m-repro"}
+)
 # Never usable in any cell (doc § 4.6): uncontrolled Hub weight seeds, the stopped DCLM
-# run, and the never-fingerprinted seeds 5-9.
+# run, the never-fingerprinted seeds 5-9, and the pending runs.
 EXCLUDED_BASES: frozenset[str] = frozenset(
     {"weight-seed1", "weight-seed2", "weight-seed3", "dclm-ws2"}
     | {f"seed{n}" for n in range(5, 10)}
+    | PENDING_RUNS
 )
 # Doc § 5, one pair per category anchored on a local weight seed (or on the Hub
 # original): teacher/student partners of the anchor, keyed by category.
@@ -215,6 +230,15 @@ MATCHED_SUBDESIGN: Mapping[str, Mapping[str, str | None]] = MappingProxyType(
                 "DI_DS": "seed1",
                 "SI_DC": None,
                 "DI_DC": "dclm-main",
+            }
+        ),
+        "pile-main": MappingProxyType(
+            {
+                "SI_DS": "data-seed1",
+                "DI_SS": "pile-ws3",
+                "DI_DS": "seed1",
+                "SI_DC": "dclm-main",
+                "DI_DC": "dclm-ws1",
             }
         ),
     }

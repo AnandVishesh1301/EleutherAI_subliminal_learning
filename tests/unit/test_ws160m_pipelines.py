@@ -18,6 +18,7 @@ from pipelines.ws160m_campaign_pipeline import (
     status,
 )
 from subliminal_learning.campaign import ws160m_models as models
+from subliminal_learning.campaign import ws160m_pairs as pairs
 from subliminal_learning.campaign import ws160m_plan as plan
 from subliminal_learning.jobqueue.model import Job
 
@@ -76,12 +77,13 @@ class _Fake:
         self.missing_cells: list[Path] = []
         self.missing_evals: list[Path] = []
         self.fallback_jobs: list[Job] = [Job("fb", "true")]
+        self.stage_missing: dict[str, list[pairs.TeacherLeaf]] = {}
         p = plan.partition(partition)
         dummy = {q: [Job(f"{q}-job", "true")] for q in plan.queue_priorities(p)}
 
         def fake_preflight(cfg, state, opts):
             state["code_sha"] = "0" * 40
-            state["wave"] = 1
+            state["wave"] = p.wave
             state["transitions"]["preflight"] = {"at": "t"}
 
         monkeypatch.setattr(pipe, "_preflight", fake_preflight)
@@ -139,6 +141,13 @@ class _Fake:
             pipe.exp,
             "missing_required_teachers",
             lambda *a, **k: list(self.missing_teachers),
+        )
+        monkeypatch.setattr(
+            pipe.exp,
+            "missing_stage_teachers",
+            lambda partition, stage, root, *, wave: list(
+                self.stage_missing.get(stage, ())
+            ),
         )
         monkeypatch.setattr(
             pipe.exp, "missing_cells", lambda *a, **k: list(self.missing_cells)
@@ -607,3 +616,253 @@ def test_overflow_stages_submit_to_their_override_node_with_that_clone_pin(
             )
             assert cwd == str(expected)
     assert fake.nodes["ws160m-dosehp-dose-bear"] == (None, None)
+
+
+# ---- Part II (ws160m2) -----------------------------------------------------------------
+
+
+def _teacher_leaf(animal: str, base: str, step: int) -> pairs.TeacherLeaf:
+    combo = pairs.TeacherCombo(animal, base, step, plan.TEACHER_PARAM_TAG_LORA, 2)
+    return pairs.TeacherLeaf(combo, 0)
+
+
+def test_gen2_stage_blocks_submit_as_their_teachers_land(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Fake(monkeypatch, "matrix")
+    clock = [_T0]
+    cfg, opts = _cfg(tmp_path, "matrix"), _opts(tmp_path, "matrix", clock)
+    assert opts.deadline_hours == 108.0
+    own = _teacher_leaf("bear", "pile-main", 143000)
+    assert own.combo.owner.name == "matrix"
+    fake.stage_missing = {"m2": [own], "ml": [own]}
+    r1 = run(cfg, opts)
+    assert {"preflight", "submit_teachers", "submit_stage(b2)"} <= set(r1.fired)
+    assert "submit_controls" not in r1.fired and "submit_students" not in r1.fired
+    assert "submit_stage(m2)" not in r1.fired and "teachers:m2(1)" in r1.waiting
+    assert "submit_stage(law-p64)" in r1.fired, "batch 2 needs no manual gate"
+    assert fake.deps("ws160m2-matrix-teacher-evals") == ("ws160m2-matrix-teachers",)
+    assert fake.deps("ws160m2-matrix-teacher-evals-b2") == (
+        "ws160m2-matrix-teachers-b2",
+    )
+    assert fake.deps("ws160m2-matrix-b2") == ()
+    assert fake.deps("ws160m2-matrix-evals-b2") == ("ws160m2-matrix-b2",)
+    assert fake.deps("ws160m2-matrix-lmeval-b2") == ("ws160m2-matrix-evals-b2",)
+    assert "ws160m2-matrix-m2" not in fake.names()
+    assert "ws160m2-matrix-controls" not in fake.names()
+    assert "ws160m2-matrix-teachers-fallback" not in fake.names()
+    fake.complete.update(fake.names())
+    r2 = run(cfg, opts)
+    assert not r2.done and "finalize" not in r2.fired
+    fake.stage_missing = {}
+    r3 = run(cfg, opts)
+    assert {"submit_stage(m2)", "submit_stage(ml)", "submit_students"} <= set(r3.fired)
+    state = json.loads(cfg.state_path.read_text())
+    assert list(state["stages"]) and set(state["stages"]) == set(
+        plan.gen2_student_stages(plan.partition("matrix"))
+    )
+    assert state["wave"] == 3 and "submit_controls" not in state["transitions"]
+    assert fake.names().count("ws160m2-matrix-b2") == 1
+    fake.complete.update(fake.names())
+    r4 = run(cfg, opts)
+    assert "finalize" in r4.fired and r4.done
+
+
+def test_gen2_fallback_waits_until_the_stage_is_overdue_and_fires_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Fake(monkeypatch, "grid")
+    clock = [_T0]
+    cfg, opts = _cfg(tmp_path, "grid"), _opts(tmp_path, "grid", clock)
+    foreign = _teacher_leaf("tiger", "pythia-160m", 143000)
+    assert foreign.combo.owner.name == "matrix"
+    fake.stage_missing = {"ac-tiger": [foreign]}
+    run(cfg, opts)
+    fq = "ws160m2-grid-teachers-fallback"
+    assert "ws160m2-grid-ac-eagle" in fake.names(), "later stages are not held back"
+    clock[0] = _T0 + plan.WAIT_TEACHERS_FALLBACK_S + 1
+    run(cfg, opts)
+    assert fq not in fake.names(), "earlier stages still run: not overdue yet"
+    fake.complete.update(fake.names())
+    run(cfg, opts)
+    state = json.loads(cfg.state_path.read_text())
+    assert "ac-tiger" in state["stage_blocked_since"] and fq not in fake.names()
+    clock[0] += plan.WAIT_TEACHERS_FALLBACK_S + 1
+    r = run(cfg, opts)
+    assert fq in fake.names() and "teachers:ac-tiger(1)" in r.waiting
+    state = json.loads(cfg.state_path.read_text())
+    assert state["transitions"]["teachers_fallback"]["stage"] == "ac-tiger"
+    run(cfg, opts)
+    assert fake.names().count(fq) == 1
+    fake.stage_missing = {}
+    r = run(cfg, opts)
+    assert "submit_stage(ac-tiger)" in r.fired and "submit_students" in r.fired
+
+
+def test_gen2_fallback_never_targets_a_part_one_run_set() -> None:
+    assert pipe.fallback_owners(plan.partition("grid")) == ("matrix",)
+    assert pipe.fallback_owners(plan.partition("matrix")) == ("grid",)
+    assert pipe.fallback_owners(plan.partition("extra")) == ("main", "ladder")
+    grid = plan.partition("grid")
+    ok = {"a.yaml": {"run_set_id": plan.MATRIX_RUN_SET_ID}}
+    pipe.assert_fallback_target(grid, ok)
+    for frozen in (plan.MAIN_RUN_SET_ID, plan.LADDER_RUN_SET_ID):
+        with pytest.raises(CampaignGateError, match="frozen run sets"):
+            pipe.assert_fallback_target(grid, {**ok, "b.yaml": {"run_set_id": frozen}})
+    pipe.assert_fallback_target(
+        plan.partition("extra"), {"b.yaml": {"run_set_id": plan.MAIN_RUN_SET_ID}}
+    )
+
+
+def test_gen2_fallback_jobs_train_the_owner_tree_from_its_shared_yamls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg, opts = _cfg(tmp_path, "grid"), _opts(tmp_path, "grid", [_T0])
+    monkeypatch.setattr(pipe, "cell_is_done", lambda d: "20260916_" in str(d))
+    fb = pipe._fallback_teacher_jobs(cfg, opts, wave=3)
+    assert len(fb) == 99 and all(j.key.startswith("fallback|matrix-teach|") for j in fb)
+    shared = (
+        tmp_path / "out" / "gkd_students" / plan.MATRIX_RUN_SET_ID / "generated_configs"
+    )
+    for job in fb:
+        path = Path(job.cmd.split("--sweep-config ", 1)[1].split()[0])
+        assert path.parent == shared and path.is_file() and "--no-wandb" in job.cmd
+        assert yaml.safe_load(path.read_text())["run_set_id"] == plan.MATRIX_RUN_SET_ID
+
+
+def test_gen2_preflight_names_missing_reused_artefacts_and_taken_queues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path, "grid")
+    p = plan.partition("grid")
+    with pytest.raises(CampaignGateError, match="267 reused Part I artefacts"):
+        pipe._require_reused(cfg, p)
+    assert (
+        pipe._require_reused(_cfg(tmp_path, "ladder"), plan.partition("ladder")) == {}
+    )
+    monkeypatch.setattr(pipe.exp, "missing_reused", lambda *a, **k: [])
+    assert pipe._require_reused(cfg, p) == {"teachers": 129, "controls": 138}
+    monkeypatch.setattr(pipe.store, "this_host", lambda: p.node)
+    pipe._require_queue_census(cfg, fresh=True)
+    taken = "ws160m2-grid-r16000"
+    monkeypatch.setattr(pipe.store, "list_queues", lambda root: [taken, "other"])
+    with pytest.raises(CampaignGateError, match=taken):
+        pipe._require_queue_census(cfg, fresh=True)
+
+
+def test_gen2_preflight_refuses_a_stale_or_part_one_staging_report(
+    tmp_path: Path,
+) -> None:
+    opts = _opts(tmp_path, "matrix", [_T0])
+    staged = tmp_path / "bm" / models.HF_CONVERTED_DIRNAME
+    staged.mkdir(parents=True)
+    (staged / plan.STAGING_REPORT).write_text(json.dumps({"passed": True}))
+    with pytest.raises(CampaignGateError, match="missing or not passed"):
+        pipe._require_reports(opts)
+    report = staged / plan.GEN2_STAGING_REPORT
+    report.write_text(json.dumps({"passed": True, "hub_revisions": {}}))
+    with pytest.raises(CampaignGateError, match="is stale"):
+        pipe._require_reports(opts)
+    needed = pipe._needed_models("matrix", wave=3)
+    hub = {models.token(b, s): {} for b, s in needed if models.base(b).source == "hub"}
+    converted: dict[str, dict] = {}
+    for b, s in needed:
+        if models.base(b).source == "local":
+            converted.setdefault(b, {})[f"step{s}"] = {"action": "converted"}
+    report.write_text(
+        json.dumps({"passed": True, "hub_revisions": hub, "converted": converted})
+    )
+    assert pipe._require_reports(opts) == {"staging_report": str(report)}
+    converted["pile-main"]["step143000"] = {"action": "would_convert"}
+    report.write_text(
+        json.dumps({"passed": True, "hub_revisions": hub, "converted": converted})
+    )
+    with pytest.raises(CampaignGateError, match="pile-main@step143000"):
+        pipe._require_reports(opts)
+
+
+def test_gen2_writes_every_yaml_to_the_shared_run_set_dir(tmp_path: Path) -> None:
+    cfg, opts = _cfg(tmp_path, "grid"), _opts(tmp_path, "grid", [_T0])
+    shared = pipe._shared_config_dir(cfg, "grid")
+    assert shared == cfg.run_set_root / plan.SHARED_GENERATED_DIRNAME
+    n_train, n_verify = pipe._write_configs(cfg, opts, wave=3)
+    assert len(list(shared.glob("*.yaml"))) == n_train + n_verify == 1016
+    assert len(list(cfg.generated_dir.glob("*.yaml"))) == n_train + n_verify
+    lmeval = next(shared.glob("gkd_ws160m_lmeval_*.yaml"))
+    doc = yaml.safe_load(lmeval.read_text())
+    assert doc["benchmarks"] == {
+        "enabled": True,
+        "tasks": list(plan.LMEVAL_TASKS),
+        "batch_size": plan.LMEVAL_BATCH_SIZE,
+        "lora": {},
+    }
+    assert Path(doc["inherit_grid"]).parent == shared
+    assert doc["queue"].startswith("ws160m2-grid-lmeval-")
+    _, _, by_q = pipe._bundle(cfg, opts, wave=3)
+    for queue_jobs in by_q.values():
+        pipe._require_overflow_configs(cfg, "q", "soar-subliminal-2", queue_jobs)
+
+
+def test_lmeval_queues_requeue_to_three_attempts_and_never_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg, opts = (
+        _cfg(tmp_path, "matrix", auto_requeue=2),
+        _opts(tmp_path, "matrix", [_T0]),
+    )
+    caps: dict[str, int] = {}
+
+    def requeue(c, name):
+        caps[name] = c.auto_requeue
+        raise RuntimeError("over cap")
+
+    monkeypatch.setattr(pipe.store, "queue_exists", lambda root, n: True)
+    monkeypatch.setattr(pipe.store, "queue_complete", lambda root, n: True)
+    monkeypatch.setattr(pipe.driver_io, "requeue_failed_under_cap", requeue)
+    monkeypatch.setattr(pipe, "_failed_jobkeys", lambda c, n: ["a", "b", "c", "d"])
+    monkeypatch.setattr(
+        pipe.store, "queue_status", lambda root, n: {"failed": 4, "total": 40}
+    )
+    holes: list[dict] = []
+    lm, ev = "ws160m2-matrix-lmeval-m2", "ws160m2-matrix-evals-m2"
+    assert pipe._queue_ready(cfg, lm, opts, holes)
+    assert caps[lm] == plan.LMEVAL_ATTEMPT_CAP == 3
+    assert [h["queue"] for h in holes] == [lm]
+    with pytest.raises(CampaignGateError, match="retry-exhausted"):
+        pipe._queue_ready(cfg, ev, opts, holes)
+    assert caps[ev] == 2
+    lmeval_defaults = pipe._lmeval_defaults
+    monkeypatch.setattr(
+        pipe.driver_io,
+        "queue_job_defaults",
+        lambda c: {"cwd": "/pin", "env": {"A": "1"}},
+    )
+    got = lmeval_defaults(cfg, opts)
+    assert got["cwd"] == "/pin" and got["env"]["A"] == "1"
+    assert got["env"]["HF_HUB_CACHE"] == str(tmp_path / "bm" / "hub")
+
+
+def test_gen2_archived_stage_queue_is_resubmitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Fake(monkeypatch, "grid")
+    clock = [_T0]
+    cfg, opts = _cfg(tmp_path, "grid"), _opts(tmp_path, "grid", clock)
+    run(cfg, opts)
+    gone = "ws160m2-grid-r4000"
+    assert gone in fake.names()
+    fake.submitted = [(n, d) for n, d in fake.submitted if n != gone]
+    r = run(cfg, opts)
+    assert f"restored_queues({gone})" in r.fired and gone in fake.names()
+    state = json.loads(cfg.state_path.read_text())
+    assert state["restores"][-1]["phase"] == "stage:r4000"
+
+
+def test_queue_plan_lists_gen2_queues_in_priority_order() -> None:
+    summary = pipe.queue_plan("grid")
+    assert summary["run_set_id"] == plan.GRID_RUN_SET_ID
+    assert summary["n_jobs"] == 5188 and summary["n_yamls"] == 1016
+    names = list(summary["queues"])
+    order = list(plan.queue_priorities(plan.partition("grid")))
+    assert names == [q for q in order if q in summary["queues"]]
+    assert "ws160m2-grid-teachers-fallback" not in names

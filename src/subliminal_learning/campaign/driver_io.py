@@ -74,6 +74,8 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "ws160m-ladder": ws160m_plan.SPECS["ladder"],
     "ws160m-dosehp": ws160m_plan.SPECS["dosehp"],
     "ws160m-extra": ws160m_plan.SPECS["extra"],
+    "ws160m2-matrix": ws160m_plan.SPECS["matrix"],
+    "ws160m2-grid": ws160m_plan.SPECS["grid"],
 }
 
 

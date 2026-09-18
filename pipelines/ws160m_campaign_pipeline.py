@@ -7,6 +7,14 @@ queues) -> [wave 2, main only: auto-stage pile-ws3 and submit its cells] ->
 force re-evals of config dirs whose summaries miss a gseed -> finalize, or a partial
 finalize at the deadline. Every transition is idempotent and recorded in the state
 file; resume skips done cells through `cell_is_done`.
+
+Part II partitions (`matrix`, `grid`) replace the single controls / wait / students
+sequence with one block per student stage: a stage's train queue (its students plus
+the controls it owns), pref-eval queue and lm-eval queue are submitted together, chained
+by jobq dependencies, as soon as every teacher leaf that stage reads is complete, so
+late teachers never hold back earlier stages. Preflight also verifies every Part I
+teacher and control the partition reads in place; nothing is ever trained into a
+Part I run set.
 """
 
 from __future__ import annotations
@@ -60,7 +68,8 @@ class Ws160mDriverOptions:
         paths_config: Campaign paths YAML (`audit_root` locates the staged models).
         cold_root: Cold-1 artefact root the run-set symlinks target.
         prereg_path: Preregistration markdown that must exist at P0.
-        deadline_hours: Open-window budget of this driver.
+        deadline_hours: Open-window budget of this driver (default: the
+            partition's `deadline_hours`).
         drain_timeout_s: Max wait for in-flight cells after a deadline pause.
         max_failed_frac: Failed/total above this aborts; at or below is a hole.
         wait_fallback_s: Seconds of waiting before missing foreign teachers are
@@ -80,7 +89,7 @@ class Ws160mDriverOptions:
     paths_config: Path = Path(plan.PATHS_CONFIG)
     cold_root: Path = DEFAULT_COLD_ROOT
     prereg_path: Path = Path(plan.PREREG_PATH)
-    deadline_hours: float = plan.DEADLINE_HOURS_DEFAULT
+    deadline_hours: float | None = None
     drain_timeout_s: int = plan.DRAIN_TIMEOUT_S
     max_failed_frac: float = plan.MAX_FAILED_FRAC
     wait_fallback_s: int = plan.WAIT_TEACHERS_FALLBACK_S
@@ -93,6 +102,12 @@ class Ws160mDriverOptions:
     base_models_root: Path | None = None
     now: Callable[[], float] | None = None
     stage_wave2: Callable[..., dict] | None = None
+
+    def __post_init__(self) -> None:
+        if self.deadline_hours is None:
+            object.__setattr__(
+                self, "deadline_hours", plan.partition(self.partition).deadline_hours
+            )
 
 
 def driver_config(partition: str, **kwargs) -> driver_io.CampaignDriverConfig:
@@ -146,8 +161,8 @@ def _partition(
     return p
 
 
-def _state_wave(state: dict) -> int:
-    return int(state.get("wave", models.WAVE_NOW))
+def _state_wave(state: dict, opts: Ws160mDriverOptions) -> int:
+    return int(state.get("wave", plan.partition(opts.partition).wave))
 
 
 def _bundle(
@@ -173,13 +188,15 @@ def _bundle(
 def _shared_config_dir(
     cfg: driver_io.CampaignDriverConfig, partition: str
 ) -> Path | None:
-    """Run-set dir overflow queues read their YAMLs from; None without overrides."""
-    if not plan.STAGE_NODE_OVERRIDES.get(partition):
+    """Run-set dir jobs read absolute YAMLs from: overflow queues, and all of Part II."""
+    overflow = plan.STAGE_NODE_OVERRIDES.get(partition)
+    if not overflow and plan.partition(partition).gen == 1:
         return None
     return cfg.run_set_root / plan.SHARED_GENERATED_DIRNAME
 
 
 _SWEEP_CONFIG_RE = re.compile(r"--sweep-config (\S+)")
+_GEN2_RUN_SETS = frozenset(p.run_set_id for p in plan.GEN2_PARTITIONS.values())
 
 
 def _require_overflow_configs(
@@ -202,16 +219,18 @@ def _submit_named(
     name: str,
     *,
     depends_on: Sequence[str] = (),
+    defaults: dict | None = None,
 ) -> int:
     queue_jobs = list(by_q.get(name, ()))
     if not queue_jobs:
         raise CampaignGateError(f"queue {name} built zero jobs")
     deps = [d for d in depends_on if d in by_q or store.queue_exists(cfg.queue_root, d)]
     node = plan.queue_node(name)
-    defaults = None
     if node:
         _require_overflow_configs(cfg, name, node, queue_jobs)
         defaults = node_pin_defaults(cfg, node)
+    elif cfg.run_set_id in _GEN2_RUN_SETS:
+        _require_overflow_configs(cfg, name, store.this_host(), queue_jobs)
     driver_io.submit_queue(
         cfg, name, queue_jobs, depends_on=deps or None, node=node, defaults=defaults
     )
@@ -239,6 +258,11 @@ def _failed_jobkeys(cfg: driver_io.CampaignDriverConfig, name: str) -> list[str]
     ]
 
 
+def _is_lmeval_queue(name: str, opts: Ws160mDriverOptions) -> bool:
+    prefix = f"{plan.partition(opts.partition).queue_prefix}-{plan.LMEVAL_STAGE}"
+    return name.startswith(prefix)
+
+
 def _queue_ready(
     cfg: driver_io.CampaignDriverConfig,
     name: str,
@@ -247,8 +271,15 @@ def _queue_ready(
 ) -> bool:
     if not store.queue_exists(cfg.queue_root, name):
         return False
+    # An lm-eval job fails benignly while a sibling still claims the control dir
+    # they share; a re-run skips what is finished.
+    requeue_cfg = (
+        replace(cfg, auto_requeue=max(cfg.auto_requeue, plan.LMEVAL_ATTEMPT_CAP))
+        if _is_lmeval_queue(name, opts)
+        else cfg
+    )
     try:
-        driver_io.requeue_failed_under_cap(cfg, name)
+        driver_io.requeue_failed_under_cap(requeue_cfg, name)
     except RuntimeError as err:
         _record_holes(cfg, name, opts, holes, err)
     if not store.queue_complete(cfg.queue_root, name):
@@ -271,7 +302,7 @@ def _record_holes(
     failed = _failed_jobkeys(cfg, name)
     total = store.queue_status(cfg.queue_root, name)["total"]
     tolerated = max(plan.MAX_FAILED_JOBS_MIN, math.ceil(opts.max_failed_frac * total))
-    if len(failed) > tolerated:
+    if len(failed) > tolerated and not _is_lmeval_queue(name, opts):
         frac = len(failed) / max(1, total)
         raise CampaignGateError(
             f"{name}: {len(failed)} retry-exhausted failures "
@@ -385,10 +416,9 @@ def _needed_models(partition: str, *, wave: int) -> set[tuple[str, int]]:
         needed.add((c.teacher_base, c.teacher_step))
     for ctrl in pairs.controls_of(partition, wave=wave):
         needed.add((ctrl.student_base, ctrl.student_step))
-    if partition == "extra":
-        for x in pairs.xbase_controls():
-            needed.add((x.student_base, x.student_step))
-            needed.add((x.teacher_base, x.teacher_step))
+    for x in pairs.xbase_controls_of(partition):
+        needed.add((x.student_base, x.student_step))
+        needed.add((x.teacher_base, x.teacher_step))
     for combo in pairs.teacher_combos(partition, wave=wave):
         needed.add((combo.base, combo.step))
     return needed
@@ -419,8 +449,16 @@ def missing_model_assets(
     return missing
 
 
-def _require_queue_census(cfg: driver_io.CampaignDriverConfig) -> None:
+def _require_queue_census(
+    cfg: driver_io.CampaignDriverConfig, *, fresh: bool = False
+) -> None:
+    """Refuse a queue name pinned elsewhere; with `fresh`, any name already in the census."""
     host = store.this_host()
+    taken = sorted(set(cfg.queue_priorities) & set(store.list_queues(cfg.queue_root)))
+    if fresh and taken:
+        raise CampaignGateError(
+            f"queue names already in the census before first submit: {taken[:10]}"
+        )
     for name in cfg.queue_priorities:
         if store.queue_exists(cfg.queue_root, name):
             node = store.read_meta(cfg.queue_root, name).node
@@ -444,17 +482,33 @@ def _require_symlinks(
 
 
 def _require_reports(opts: Ws160mDriverOptions) -> dict:
-    from scripts.stage_ws160m_assets import reports_ok, staging_report_path
+    from scripts.stage_ws160m_assets import (
+        reports_ok,
+        staged_tokens,
+        staging_report_path,
+    )
 
+    p = plan.partition(opts.partition)
+    report = staging_report_path(_bm_root(opts), p.name)
     if not reports_ok(
         opts.paths_config,
         require_smoke=opts.require_smoke,
         base_models_root=opts.base_models_root,
+        partition=p.name,
     ):
         raise CampaignGateError(
-            f"staging/smoke reports under {staging_report_path(_bm_root(opts)).parent} are missing or not passed"
+            f"staging/smoke reports for {p.name} under {report.parent} are missing "
+            "or not passed"
         )
-    return {"staging_report": str(staging_report_path(_bm_root(opts)))}
+    if p.gen == 2:
+        needed = {models.token(b, s) for b, s in _needed_models(p.name, wave=p.wave)}
+        stale = sorted(needed - staged_tokens(report))
+        if stale:
+            raise CampaignGateError(
+                f"{report.name} is stale: it never verified {stale[:10]}; "
+                "re-run scripts.stage_ws160m_assets --gen 2"
+            )
+    return {"staging_report": str(report)}
 
 
 def _dataset_checks(
@@ -479,8 +533,9 @@ def _dataset_checks(
         from subliminal_learning.sdf.docs_io import resolve_sdf_docs_path
 
         exp_doc = yaml.safe_load(Path(plan.TEACHER_EXPERIMENT_CONFIG).read_text())
+        wave = max(models.WAVE_2, plan.partition(opts.partition).wave)
         animals = sorted(
-            {c.animal for c in pairs.teacher_combos(opts.partition, wave=models.WAVE_2)}
+            {c.animal for c in pairs.teacher_combos(opts.partition, wave=wave)}
         )
         for animal in animals:
             path = resolve_sdf_docs_path(
@@ -524,6 +579,22 @@ def _write_configs(
     return len(train), len(verify)
 
 
+def _require_reused(cfg: driver_io.CampaignDriverConfig, p: plan.Partition) -> dict:
+    """Every Part I teacher and control a Part II partition reads must be complete."""
+    if p.gen == 1:
+        return {}
+    missing = exp.missing_reused(p.name, cfg.output_root, wave=p.wave)
+    if missing:
+        raise CampaignGateError(
+            f"{len(missing)} reused Part I artefacts are incomplete (never retrained "
+            f"here): {[str(d) for d in missing[:10]]}"
+        )
+    return {
+        "teachers": len(exp.reused_teacher_dirs(p.name, cfg.output_root, wave=p.wave)),
+        "controls": len(exp.reused_control_dirs(p.name, cfg.output_root, wave=p.wave)),
+    }
+
+
 def _preflight(
     cfg: driver_io.CampaignDriverConfig, state: dict, opts: Ws160mDriverOptions
 ) -> None:
@@ -533,24 +604,25 @@ def _preflight(
     reports = _require_reports(opts)
     missing = missing_model_assets(
         p.name,
-        wave=models.WAVE_NOW,
+        wave=p.wave,
         hub_cache=_hub_cache(opts),
         base_models_root=_bm_root(opts),
     )
     if missing:
         raise CampaignGateError(f"P0 model assets missing offline: {missing[:10]}")
     _require_symlinks(cfg, opts)
-    _require_queue_census(cfg)
+    _require_queue_census(cfg, fresh=p.gen == 2)
     policy = cfg.queue_root / f"gpu_policy.{store.this_host()}.json"
     if not policy.is_file():
         raise CampaignGateError(f"policy file missing: {policy}")
+    reused = _require_reused(cfg, p)
     disk = _disk_gate(cfg, opts)
     datasets = _dataset_checks(cfg, opts)
-    n_train, n_verify = _write_configs(cfg, opts, wave=models.WAVE_NOW)
+    n_train, n_verify = _write_configs(cfg, opts, wave=p.wave)
     state["code_sha"] = code_pin_io.resolve_commit_sha(
         cfg.repo_root, cfg.code_sha or "HEAD"
     )
-    state.setdefault("wave", models.WAVE_NOW)
+    state.setdefault("wave", p.wave)
     driver_io.write_logs_report(
         cfg,
         plan.PREFLIGHT_REPORT,
@@ -559,16 +631,19 @@ def _preflight(
             "partition": p.name,
             "node": store.this_host(),
             "reports": reports,
+            "reused": reused,
             "disk_free_gib": disk,
             "datasets": datasets,
             "n_train_yamls": n_train,
             "n_verify_yamls": n_verify,
             "code_sha": state["code_sha"],
-            "n_cells": len(pairs.cells_of(p.name)),
-            "n_leaves": len(pairs.leaves_of(pairs.cells_of(p.name))),
-            "n_controls": len(pairs.controls_of(p.name)),
-            "n_teachers_owned": len(pairs.teacher_leaves(p.name)),
-            "n_teachers_required": len(pairs.required_teacher_leaves(p.name)),
+            "n_cells": len(pairs.cells_of(p.name, wave=p.wave)),
+            "n_leaves": len(pairs.leaves_of(pairs.cells_of(p.name, wave=p.wave))),
+            "n_controls": len(pairs.controls_of(p.name, wave=p.wave)),
+            "n_teachers_owned": len(pairs.teacher_leaves(p.name, wave=p.wave)),
+            "n_teachers_required": len(
+                pairs.required_teacher_leaves(p.name, wave=p.wave)
+            ),
         },
     )
     _record_transition(
@@ -587,7 +662,7 @@ def _submit_controls(
     cfg: driver_io.CampaignDriverConfig, state: dict, opts: Ws160mDriverOptions
 ) -> None:
     p = _partition(cfg, opts)
-    _, _, by_q = _bundle(cfg, opts, wave=_state_wave(state))
+    _, _, by_q = _bundle(cfg, opts, wave=_state_wave(state, opts))
     submitted: dict[str, int] = {}
     ctrl = cgen.controls_queue(p.name)
     submitted[ctrl] = _submit_named(cfg, by_q, ctrl)
@@ -600,12 +675,14 @@ def _submit_teachers(
     cfg: driver_io.CampaignDriverConfig, state: dict, opts: Ws160mDriverOptions
 ) -> None:
     p = _partition(cfg, opts)
-    _, _, by_q = _bundle(cfg, opts, wave=_state_wave(state))
-    tq, teq = cgen.teachers_queue(p.name), cgen.teacher_evals_queue(p.name)
-    submitted = {
-        tq: _submit_named(cfg, by_q, tq),
-        teq: _submit_named(cfg, by_q, teq, depends_on=[tq]),
-    }
+    _, _, by_q = _bundle(cfg, opts, wave=_state_wave(state, opts))
+    stages = plan.GEN2_TEACHER_STAGES if p.gen == 2 else ("teachers",)
+    submitted: dict[str, int] = {}
+    for stage in stages:
+        tq = plan.queue(p, stage)
+        teq = plan.queue(p, plan.teacher_evals_stage(stage))
+        submitted[tq] = _submit_named(cfg, by_q, tq)
+        submitted[teq] = _submit_named(cfg, by_q, teq, depends_on=[tq])
     _record_transition(state, "submit_teachers", queues=submitted)
 
 
@@ -617,14 +694,14 @@ def _restore_archived_queues(
     Existing queues of the phase are no-ops (`driver_io.submit_queue` matches jobkeys);
     the founding transition record is kept and each restore is appended to ``restores``.
     """
-    names: list[str] = []
+    names: list[str] = _restore_archived_stages(cfg, state, opts)
     for phase, submit in (
         ("submit_controls", _submit_controls),
         ("submit_teachers", _submit_teachers),
         ("submit_students", _submit_students),
     ):
         record = state["transitions"].get(phase)
-        if not record:
+        if not record or (phase == "submit_students" and state.get("stages")):
             continue
         planned = set(record.get("queues") or {})
         if phase == "submit_students":
@@ -656,6 +733,31 @@ def _restore_archived_queues(
     return f"{verb}_queues({','.join(names)})"
 
 
+def _restore_archived_stages(
+    cfg: driver_io.CampaignDriverConfig, state: dict, opts: Ws160mDriverOptions
+) -> list[str]:
+    """Re-submit a fired Part II stage block whose recorded queue was archived."""
+    names: list[str] = []
+    by_q: dict[str, list[Job]] | None = None
+    for stage, record in (state.get("stages") or {}).items():
+        missing = sorted(
+            q
+            for q in record.get("queues") or {}
+            if not store.queue_exists(cfg.queue_root, q)
+        )
+        if not missing:
+            continue
+        if not cfg.dry_run:
+            if by_q is None:
+                _, _, by_q = _bundle(cfg, opts, wave=_state_wave(state, opts))
+            _submit_stage(cfg, opts, by_q, stage)
+            state.setdefault("restores", []).append(
+                {"at": utc_now_iso(), "phase": f"stage:{stage}", "queues": missing}
+            )
+        names.extend(missing)
+    return names
+
+
 def _planned_student_queues(
     cfg: driver_io.CampaignDriverConfig,
     opts: Ws160mDriverOptions,
@@ -664,12 +766,39 @@ def _planned_student_queues(
     wave2: bool,
 ) -> list[str]:
     p = _partition(cfg, opts)
-    _, _, by_q = _bundle(cfg, opts, wave=_state_wave(state))
+    _, _, by_q = _bundle(cfg, opts, wave=_state_wave(state, opts))
     return [
         q
         for q in _train_queues(p, wave2=wave2) + _eval_queues(p, wave2=wave2)
         if q in by_q
     ]
+
+
+def fallback_owners(p: plan.Partition) -> tuple[str, ...]:
+    """Other partitions of `p`'s generation whose missing teachers `p` may train.
+
+    A Part II driver never trains into a Part I run set: those teachers are
+    verified complete at preflight and are read-only.
+    """
+    names = plan.PARTITION_ORDER if p.gen == 1 else plan.GEN2_PARTITION_ORDER
+    return tuple(
+        n
+        for n in names
+        if plan.partition(n).trains_teachers and (p.gen == 1 or n != p.name)
+    )
+
+
+def assert_fallback_target(p: plan.Partition, teacher_cfgs: Mapping[str, dict]) -> None:
+    """Raise if a Part II fallback would train into anything but a Part II run set."""
+    if p.gen == 1:
+        return
+    foreign = sorted(
+        {str(d["run_set_id"]) for d in teacher_cfgs.values()} - _GEN2_RUN_SETS
+    )
+    if foreign:
+        raise CampaignGateError(
+            f"{p.name}: teacher fallback would write into frozen run sets {foreign}"
+        )
 
 
 def _fallback_teacher_jobs(
@@ -683,17 +812,25 @@ def _fallback_teacher_jobs(
         if not cell_is_done(exp.teacher_checkpoint_dir_of(t, cfg.output_root).parent)
     }
     out: list[Job] = []
-    for owner in plan.PARTITION_ORDER:
-        if not plan.partition(owner).trains_teachers:
-            continue
+    for owner in fallback_owners(p):
         teacher_cfgs = cgen.teacher_train_configs(owner, wave=wave)
-        owner_cfg = replace(
-            cfg,
-            generated_dir_override=cfg.repo_root
-            / plan.spec_of(owner).generated_config_dir,
+        assert_fallback_target(p, teacher_cfgs)
+        shared = None
+        generated = cfg.repo_root / plan.spec_of(owner).generated_config_dir
+        if p.gen == 2:
+            shared = generated = (
+                cfg.output_root
+                / driver_io.run_set_subdir(
+                    cfg.spec.root_subdir, plan.partition(owner).run_set_id
+                )
+                / plan.SHARED_GENERATED_DIRNAME
+            )
+        driver_io.write_generated_configs(
+            replace(cfg, generated_dir_override=generated), teacher_cfgs
         )
-        driver_io.write_generated_configs(owner_cfg, teacher_cfgs)
-        for queue_jobs in jobs.teacher_jobs(owner, teacher_cfgs, wave=wave).values():
+        for queue_jobs in jobs.teacher_jobs(
+            owner, teacher_cfgs, wave=wave, shared_config_root=shared
+        ).values():
             for job in queue_jobs:
                 _, animal, token, tag, tfs = job.key.split("|")
                 if (animal, token, tag, int(tfs.removeprefix("t"))) in missing:
@@ -715,7 +852,7 @@ def _wait_teachers(
 ) -> bool:
     """Return True once every required teacher exists (or the wait timed out)."""
     p = _partition(cfg, opts)
-    wave = _state_wave(state)
+    wave = _state_wave(state, opts)
     missing = exp.missing_required_teachers(p.name, cfg.output_root, wave=wave)
     started = state.setdefault("wait_teachers_started", _iso(_now(opts)))
     waited = _now(opts) - _parse_utc(started).timestamp()
@@ -757,6 +894,108 @@ def _wait_teachers(
         )
         return True
     return False
+
+
+def _lmeval_defaults(
+    cfg: driver_io.CampaignDriverConfig, opts: Ws160mDriverOptions
+) -> dict:
+    """Pin cwd/env plus the campaign Hub cache lm-eval's own loader reads."""
+    defaults = driver_io.queue_job_defaults(cfg)
+    env = {**(defaults.get("env") or {}), "HF_HUB_CACHE": str(_hub_cache(opts))}
+    return {**defaults, "env": env}
+
+
+def _submit_stage(
+    cfg: driver_io.CampaignDriverConfig,
+    opts: Ws160mDriverOptions,
+    by_q: Mapping[str, Sequence[Job]],
+    stage: str,
+) -> dict[str, int]:
+    """Submit one Part II stage block: train -> pref evals -> lm-eval."""
+    p = plan.partition(opts.partition)
+    train_q = plan.queue(p, stage)
+    eval_q = cgen.eval_queue(p.name, train_q)
+    lmeval_q = cgen.lmeval_queue(p.name, train_q)
+    return {
+        train_q: _submit_named(cfg, by_q, train_q),
+        eval_q: _submit_named(cfg, by_q, eval_q, depends_on=[train_q]),
+        lmeval_q: _submit_named(
+            cfg,
+            by_q,
+            lmeval_q,
+            depends_on=[eval_q],
+            defaults=_lmeval_defaults(cfg, opts),
+        ),
+    }
+
+
+def _maybe_fallback(
+    cfg: driver_io.CampaignDriverConfig,
+    state: dict,
+    opts: Ws160mDriverOptions,
+    stage: str,
+    earlier: Sequence[str],
+) -> None:
+    """Train another Part II partition's overdue teachers here, once.
+
+    A stage is overdue from the pass on which every earlier stage has a complete
+    train queue while its teachers are still missing.
+    """
+    p = plan.partition(opts.partition)
+    if "teachers_fallback" in state["transitions"]:
+        return
+    if not all(store.queue_complete(cfg.queue_root, plan.queue(p, e)) for e in earlier):
+        return
+    since = state.setdefault("stage_blocked_since", {}).setdefault(
+        stage, _iso(_now(opts))
+    )
+    if _now(opts) - _parse_utc(since).timestamp() < opts.wait_fallback_s:
+        return
+    fb_jobs = _fallback_teacher_jobs(cfg, opts, wave=_state_wave(state, opts))
+    fq = plan.queue(p, "teachers-fallback")
+    if fb_jobs:
+        driver_io.submit_queue(cfg, fq, fb_jobs)
+    _record_transition(
+        state, "teachers_fallback", queue=fq, n_jobs=len(fb_jobs), stage=stage
+    )
+    logger.warning("{}: fallback-training {} teacher leaves", p.name, len(fb_jobs))
+
+
+def _advance_stages(
+    cfg: driver_io.CampaignDriverConfig,
+    state: dict,
+    opts: Ws160mDriverOptions,
+    fired: list[str],
+    waiting: list[str],
+) -> None:
+    """Submit every Part II stage block whose teachers are complete."""
+    p = _partition(cfg, opts)
+    wave = _state_wave(state, opts)
+    done = state.setdefault("stages", {})
+    order = plan.gen2_student_stages(p)
+    by_q: dict[str, list[Job]] | None = None
+    for i, stage in enumerate(order):
+        if stage in done:
+            continue
+        missing = exp.missing_stage_teachers(p.name, stage, cfg.output_root, wave=wave)
+        if missing:
+            waiting.append(f"teachers:{stage}({len(missing)})")
+            if any(t.combo.owner.name != p.name for t in missing):
+                _maybe_fallback(cfg, state, opts, stage, order[:i])
+            continue
+        if by_q is None:
+            _, _, by_q = _bundle(cfg, opts, wave=wave)
+        done[stage] = {
+            "at": utc_now_iso(),
+            "queues": _submit_stage(cfg, opts, by_q, stage),
+        }
+        driver_io.save_state(cfg, state)
+        fired.append(f"submit_stage({stage})")
+    if len(done) == len(order) and "submit_students" not in state["transitions"]:
+        queues = {q: n for rec in done.values() for q, n in rec["queues"].items()}
+        _record_transition(state, "wait_teachers", n_missing=0, timed_out=False)
+        _record_transition(state, "submit_students", queues=queues)
+        fired.append("submit_students")
 
 
 _TEACHER_STAGES = frozenset(
@@ -808,7 +1047,7 @@ def _submit_students(
     cfg: driver_io.CampaignDriverConfig, state: dict, opts: Ws160mDriverOptions
 ) -> None:
     p = _partition(cfg, opts)
-    wave = _state_wave(state)
+    wave = _state_wave(state, opts)
     _, _, by_q = _bundle(cfg, opts, wave=wave)
     submitted: dict[str, int] = {}
     teacher_dep = [cgen.teachers_queue(p.name)] if p.trains_teachers else []
@@ -919,7 +1158,7 @@ def _config_dir_idents(
             .removesuffix(".yaml")
             .removeprefix(cgen.STUDENT_PREFIX)
         )
-        for x in pairs.xbase_controls():
+        for x in pairs.xbase_controls_of(partition):
             if doc["animals"][0] == x.animal:
                 out[exp.xbase_run_dir(x, output_root).parent] = (
                     f"{stem}|{x.animal}|{x.student_token}"
@@ -932,7 +1171,7 @@ def _submit_force_evals(
 ) -> int:
     """Re-evaluate config dirs whose summaries exist but miss an expected gseed."""
     p = _partition(cfg, opts)
-    wave = _state_wave(state)
+    wave = _state_wave(state, opts)
     short = [
         d
         for d in exp.missing_evals(p.name, cfg.output_root, wave=wave)
@@ -951,7 +1190,13 @@ def _submit_force_evals(
     n = 0
     if force:
         _, _, by_q = _bundle(cfg, opts, wave=wave, force_students=force)
-        forced = [j for qs in by_q.values() for j in qs if "--force" in j.cmd]
+        keys = {f"{p.name}-eval|{ident}" for ident in force}
+        forced = [
+            j
+            for qs in by_q.values()
+            for j in qs
+            if "--force" in j.cmd and (p.gen == 1 or j.key in keys)
+        ]
         driver_io.submit_queue(cfg, fq, forced)
         n = len(forced)
     _record_transition(
@@ -972,7 +1217,7 @@ def _coverage(
     holes: list[dict],
 ) -> dict:
     p = _partition(cfg, opts)
-    wave = _state_wave(state)
+    wave = _state_wave(state, opts)
     leaves = exp.expected_leaf_dirs(p.name, cfg.output_root, wave=wave)
     controls = exp.expected_control_dirs(p.name, cfg.output_root, wave=wave)
     xbase = exp.expected_xbase_dirs(p.name, cfg.output_root)
@@ -1145,7 +1390,7 @@ def run(
         cfg = replace(cfg, code_sha=str(state["code_sha"]))
         driver_io.save_state(cfg, state)
         fired.append("preflight")
-    if "submit_controls" not in tr:
+    if p.gen == 1 and "submit_controls" not in tr:
         _submit_controls(cfg, state, opts)
         driver_io.save_state(cfg, state)
         fired.append("submit_controls")
@@ -1153,7 +1398,10 @@ def run(
         _submit_teachers(cfg, state, opts)
         driver_io.save_state(cfg, state)
         fired.append("submit_teachers")
-    if "wait_teachers" not in tr:
+    if p.gen == 2:
+        _advance_stages(cfg, state, opts, fired, waiting)
+        driver_io.save_state(cfg, state)
+    elif "wait_teachers" not in tr:
         if _wait_teachers(cfg, state, opts):
             fired.append("wait_teachers")
         else:
@@ -1180,7 +1428,7 @@ def run(
             and "wave2_skipped" not in tr
         )
         if ready and "submit_students" in tr and not wave2_pending:
-            wave = _state_wave(state)
+            wave = _state_wave(state, opts)
             missing_cells = exp.missing_cells(p.name, cfg.output_root, wave=wave)
             missing_evals = exp.missing_evals(p.name, cfg.output_root, wave=wave)
             if missing_evals and "submit_force_evals" not in tr:
@@ -1207,6 +1455,22 @@ def run(
         "finalize" in state["transitions"] or "finalize_partial" in state["transitions"]
     )
     return AdvanceResult(tuple(fired), tuple(waiting), done)
+
+
+def queue_plan(partition: str) -> dict:
+    """Queues of a partition in priority order with job counts (pure enumeration)."""
+    p = plan.partition(partition)
+    train = cgen.all_train_configs(p.name, wave=p.wave)
+    verify = cgen.all_verify_configs(p.name, train)
+    shared = Path("/") / plan.SHARED_GENERATED_DIRNAME
+    by_q = jobs.all_jobs(p.name, train, verify, wave=p.wave, shared_config_root=shared)
+    return {
+        "run_set_id": p.run_set_id,
+        "node": p.node,
+        "n_yamls": len(train) + len(verify),
+        "n_jobs": sum(len(js) for js in by_q.values()),
+        "queues": {q: len(js) for q, js in by_q.items()},
+    }
 
 
 def status(cfg: driver_io.CampaignDriverConfig) -> dict:

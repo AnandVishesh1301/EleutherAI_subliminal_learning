@@ -9,6 +9,11 @@ cold-1 run-set symlinks, writes ``configs/paths/paths_ws160m.yaml`` and
 ``hf_converted/staging_report.json``. Wave 2 (`--wave 2` or the main driver) copies
 Goncalo's ``pile-ws3`` step143000 read-only, verifies it and converts it.
 ``--write-paths-only`` writes the paths YAML and the ``hub`` symlink on another node.
+
+``--gen 2`` stages Part II (`ws160m2`): every revision the `matrix` and `grid`
+partitions load (derived from their enumeration), the same verification over the
+full 14-base roster, the two new run-set symlinks, and its own report
+``hf_converted/staging_report_ws160m2.json``. Part I reports are never rewritten.
 """
 
 from __future__ import annotations
@@ -65,12 +70,14 @@ def staging_dir(bm_root: Path) -> Path:
     return Path(bm_root) / models.HF_CONVERTED_DIRNAME
 
 
-def staging_report_path(bm_root: Path) -> Path:
-    return staging_dir(bm_root) / plan.STAGING_REPORT
+def staging_report_path(bm_root: Path, partition: str = "main") -> Path:
+    """Staging report of `partition`'s generation."""
+    return staging_dir(bm_root) / plan.partition(partition).staging_report
 
 
-def smoke_report_path(bm_root: Path) -> Path:
-    return staging_dir(bm_root) / plan.SMOKE_REPORT
+def smoke_report_path(bm_root: Path, partition: str = "main") -> Path:
+    """Smoke report of `partition`'s generation."""
+    return staging_dir(bm_root) / plan.partition(partition).smoke_report
 
 
 def hub_cache_dir(bm_root: Path) -> Path:
@@ -85,19 +92,39 @@ def _report_passed(path: Path) -> bool:
         return False
 
 
+def staged_tokens(report: Path) -> set[str]:
+    """``<base>@step<N>`` tokens a staging report verified (Hub refs and conversions)."""
+    try:
+        doc = json.loads(Path(report).read_text())
+    except (OSError, ValueError):
+        return set()
+    tokens = set(doc.get("hub_revisions") or {})
+    for base_name, steps in (doc.get("converted") or {}).items():
+        tokens |= {
+            f"{base_name}@{step}"
+            for step, body in steps.items()
+            if body.get("action") in ("verified", "converted")
+        }
+    return tokens
+
+
 def reports_ok(
-    paths_config: Path, *, require_smoke: bool, base_models_root: Path | None = None
+    paths_config: Path,
+    *,
+    require_smoke: bool,
+    base_models_root: Path | None = None,
+    partition: str = "main",
 ) -> bool:
-    """Whether the staging (and optionally smoke) report under the campaign root passed."""
+    """Whether the staging (and optionally smoke) report of `partition`'s generation passed."""
     if base_models_root is None:
         doc = yaml.safe_load(Path(paths_config).read_text()) or {}
         audit_root = doc.get("audit_root")
         if not audit_root:
             return False
         base_models_root = Path(str(audit_root)) / models.BASE_MODELS_DIRNAME
-    ok = _report_passed(staging_report_path(base_models_root))
+    ok = _report_passed(staging_report_path(base_models_root, partition))
     if require_smoke:
-        ok = ok and _report_passed(smoke_report_path(base_models_root))
+        ok = ok and _report_passed(smoke_report_path(base_models_root, partition))
     return ok
 
 
@@ -151,10 +178,11 @@ def ensure_cold_symlink(link: Path, target: Path, *, dry_run: bool) -> str:
 # ---- required revisions ---------------------------------------------------------------
 
 
-def required_revisions(*, wave: int) -> dict[str, set[int]]:
-    """Base -> steps any partition loads up to `wave` (step0 added for local bases)."""
+def required_revisions(*, wave: int, gen: int = 1) -> dict[str, set[int]]:
+    """Base -> steps any partition of `gen` loads up to `wave` (step0 added for local bases)."""
     needed: dict[str, set[int]] = {}
-    for name in plan.PARTITION_ORDER:
+    names = plan.PARTITION_ORDER if gen == 1 else plan.GEN2_PARTITION_ORDER
+    for name in names:
         for c in pairs.cells_of(name, wave=wave):
             needed.setdefault(c.student_base, set()).add(c.student_step)
             needed.setdefault(c.teacher_base, set()).add(c.teacher_step)
@@ -162,9 +190,9 @@ def required_revisions(*, wave: int) -> dict[str, set[int]]:
             needed.setdefault(ctrl.student_base, set()).add(ctrl.student_step)
         for combo in pairs.teacher_combos(name, wave=wave):
             needed.setdefault(combo.base, set()).add(combo.step)
-    for x in pairs.xbase_controls():
-        needed.setdefault(x.student_base, set()).add(x.student_step)
-        needed.setdefault(x.teacher_base, set()).add(x.teacher_step)
+        for x in pairs.xbase_controls_of(name):
+            needed.setdefault(x.student_base, set()).add(x.student_step)
+            needed.setdefault(x.teacher_base, set()).add(x.teacher_step)
     for base_name in list(needed):
         m = models.base(base_name)
         if m.source == "local":
@@ -357,9 +385,14 @@ def ladder_caps(bm_root: Path) -> dict[str, int]:
 
 
 def run_staging(
-    paths: PathsConfig, *, cold_root: Path, dry_run: bool, skip_forward: bool
+    paths: PathsConfig,
+    *,
+    cold_root: Path,
+    dry_run: bool,
+    skip_forward: bool,
+    gen: int = 1,
 ) -> dict:
-    """Stage wave 1 and write the staging report.
+    """Stage wave 1 (`gen` 1) or Part II (`gen` 2) and write that generation's report.
 
     Raises:
         RuntimeError: On any verification failure.
@@ -367,15 +400,18 @@ def run_staging(
     from transformers import AutoConfig
 
     bm_root = base_models_root(paths)
+    partitions = plan.PARTITION_ORDER if gen == 1 else plan.GEN2_PARTITION_ORDER
+    wave = plan.partition(partitions[0]).wave
     report: dict = {
         "at": utc_now_iso(),
-        "wave": models.WAVE_NOW,
+        "gen": gen,
+        "wave": wave,
         "dry_run": dry_run,
         "base_models_root": str(bm_root),
         "passed": False,
     }
     report["hub_symlink"] = ensure_hub_symlink(bm_root, dry_run=dry_run)
-    needed = required_revisions(wave=models.WAVE_NOW)
+    needed = required_revisions(wave=wave, gen=gen)
     caps = ladder_caps(bm_root)
     ref_snap = hub_snapshot(bm_root, CONFIG_REPO, CONFIG_REVISION)
     config = AutoConfig.from_pretrained(str(ref_snap), local_files_only=True)
@@ -420,20 +456,20 @@ def run_staging(
             )
         )
     symlinks: dict[str, str] = {}
-    for name in plan.PARTITION_ORDER:
+    for name in partitions:
         for link, target in jobs.cold_symlink_plan(paths.output_root, cold_root, name):
             symlinks[str(link)] = ensure_cold_symlink(link, target, dry_run=dry_run)
     report["cold_symlinks"] = symlinks
-    report["paths_yaml"] = (
-        str(write_paths_yaml(paths, bm_root, Path(plan.PATHS_CONFIG)))
-        if not dry_run
-        else None
-    )
+    paths_yaml = Path(plan.PATHS_CONFIG)
+    if not dry_run and (gen == 1 or not paths_yaml.is_file()):
+        write_paths_yaml(paths, bm_root, paths_yaml)
+    report["paths_yaml"] = str(paths_yaml) if paths_yaml.is_file() else None
     report["passed"] = not dry_run
+    out = staging_report_path(bm_root, partitions[0])
     if not dry_run:
         staging_dir(bm_root).mkdir(parents=True, exist_ok=True)
-        atomic_write_json(staging_report_path(bm_root), report)
-        logger.info("staging report written: {}", staging_report_path(bm_root))
+        atomic_write_json(out, report)
+        logger.info("staging report written: {}", out)
     return report
 
 
@@ -533,6 +569,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=models.WAVE_NOW,
         choices=(models.WAVE_NOW, models.WAVE_2),
     )
+    ap.add_argument("--gen", type=int, default=1, choices=(1, 2))
     ap.add_argument(
         "--wave2-source-dir", type=Path, default=Path(plan.WAVE2_SOURCE_DIR)
     )
@@ -553,7 +590,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if not args.dry_run:
             write_paths_yaml(cfg.paths, bm_root, Path(plan.PATHS_CONFIG))
         return
-    if args.wave == models.WAVE_2:
+    if args.gen == 1 and args.wave == models.WAVE_2:
         report = stage_wave2(
             paths_config=args.paths_config,
             source_dir=args.wave2_source_dir,
@@ -569,12 +606,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         cold_root=args.cold_root,
         dry_run=args.dry_run,
         skip_forward=args.skip_forward,
+        gen=args.gen,
     )
     logger.info(
-        "staging: passed={} hub_revisions={} converted={}",
+        "staging gen {}: passed={} hub_revisions={} converted={} cold_symlinks={}",
+        args.gen,
         report["passed"],
         len(report["hub_revisions"]),
-        {k: len(v) for k, v in report["converted"].items()},
+        {
+            base: sorted({body["action"] for body in steps.values()}) + [len(steps)]
+            for base, steps in report["converted"].items()
+        },
+        sorted(set(report["cold_symlinks"].values())),
     )
     if shutil.which("rsync") is None:
         logger.warning("rsync not found; wave-2 staging will fail on this node")
