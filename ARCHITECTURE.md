@@ -129,7 +129,12 @@ src/subliminal_learning/
                     MultiAnimalComparison; loaders also take
                     control_dataset_tag (n125k treatment vs n100k control) and ftseed (per-seed
                     preference_eval.json); notebooks/transfer_significance.ipynb (builder
-                    scripts/build_transfer_significance_nb.py) holds all five tables: the 7
+                    scripts/build_transfer_significance_nb.py) opens with a §0 pooled
+                    summary (transfer_matrix.relationship_existence_by_animal: one pooled
+                    exceedance row per relationship category × animal on core30;
+                    relationship_pairing_table: every category-vs-category pairing on dog,
+                    relative mode, via compare_families with explicit FamilyArm lists) and
+                    then holds the five tables: the 7
                     cross-architecture arms (full-coverage senders only, per data-order class),
                     family_existence_table for the Pythia seed families (core56; same-model on
                     focus20, its controls' only cells), family_comparison_table for
@@ -1283,7 +1288,11 @@ experiment YAML's `model_spec` stays Pythia-only.
   recorded version. `resolve_adapter_deltas` also requires the adapter's lora_A and lora_B
   module sets to coincide (an orphan tensor is refused, not skipped), and the bare-model error
   prescribes an UNMERGED `unload()` + `release_base` or a reload — never `merge_and_unload()`,
-  which bakes ΔW into W₀ undetectably. ⚠ census queues whose command depends on uncommitted
+  which bakes ΔW into W₀ undetectably. That rule governs training, weight-space analysis and
+  evaluation (any path where a base is reused or its weights read); the one exception is
+  number GENERATION's `--merge-adapter`, which merges a freshly loaded base in memory, never
+  saves it, drops it at the end of the pool, and is REFUSED below fp32 (a low-precision
+  in-place merge truncates the small adapter deltas). ⚠ census queues whose command depends on uncommitted
   `src/` must be node-pinned: the 09-10 Qwen census lost 15/16 shards to the goncalo
   checkouts before the pin.
 - Cross-corpus probe sidecars (09-17): a run's NATIVE pool keeps `eval/pile_probe.json`; any
@@ -1725,7 +1734,24 @@ to override). Mode manifests record `filtered_sha256` and the skip gate verifies
   filtered.
 - Sources: `teacher` (per ftseed adapter), `base` (untuned control), `rng` (trait-free
   floor), each under a `{ps_tag}` prompt-set lineage (`ex10-20`, constrained variants, …)
-  so different prompt sets coexist and resume independently.
+  so different prompt sets coexist and resume independently. `--ftseed N` (repeatable or a
+  comma list, `--source teacher` only) restricts the per-cell fan-out to the named finetune
+  seeds; a selected ftseed with no adapter is a hard error. The selector chooses which
+  cells are visited only — it never reaches pool identity.
+- **Throughput options** (all default off, all PROVENANCE not identity): `--tf32` (TF32
+  matmul/cudnn for the generation call only, restored afterwards), `--merge-adapter`
+  (`--source teacher`: fold the LoRA into the base weights in memory, never saved; fp32
+  only — rejected for bf16/fp16, where an in-place merge truncates the small adapter
+  deltas), `--length-bucket` (batch prompts by token length; rows are written in the
+  ORIGINAL prompt order; rejected in constrained mode, whose per-batch logits processor
+  assumes contiguous prompt slices). None adds a key to `generation_params`, so a pool
+  drawn with them resume-matches one drawn without, in both directions. They are recorded
+  instead in the manifest's `generation_provenance` block (the three flags + torch/peft/
+  transformers versions + node + `PYTORCH_CUDA_ALLOC_CONF`), which mode manifests inherit.
+  ⚠ **Keep the flags uniform within a campaign**: each changes the per-batch RNG streams,
+  so common random numbers across pools only survive when every pool used the same flags.
+  A redraw (insufficient/legacy/torn pool) or a mode recompute whose stored provenance
+  disagrees with the requested flags logs a WARNING naming the differing keys.
 - **Constrained mode** (`generation.mode: constrained`, `numbers/constrained.py`): a
   `LogitsProcessor` forces sampled tokens onto the number-list grammar, so filtering
   becomes verification (keep-rate 1.0 by construction, verified before any write). 2×2
@@ -4330,7 +4356,12 @@ an error naming the keys), has a submit timeout, keys follower ledgers on the
 resolved path, and parses pairs only inside `pairs.explicit`; `depends_on_prefix`
 misses are logged per step; run-cell student evals score `test` + `off_topic`.
 Number pools write a `raw.jsonl.pending` marker around the rows write and record
-`raw_sha256`/`raw_bytes` so a torn pool is classified `torn`. Evals:
+`raw_sha256`/`raw_bytes` so a torn pool is classified `torn`; they also record a
+`generation_provenance` block (`tf32` / `adapter_merged` / `length_bucketed` + library,
+node and allocator fields) beside — never inside — the resume `params`, so the three
+throughput options and `--ftseed` cell selection change neither pool identity nor the
+gate, and a redraw or mode recompute under different flags only WARNS (keep them uniform
+within a campaign: they move the per-batch RNG streams). Evals:
 `fidelity_ckpt_trajectory` loads bases through `load_base_from_ref`, and it,
 `run_final_evals` and `teacher_term_splice` call `release_base` after `unload()`.
 `clean_partial_runs --path` refuses leaves modified within `--min-age-s`
@@ -4815,3 +4846,114 @@ under the report's `unfillable` instead of being guessed. `--apply` refuses on w
 `--regen-protect-file` rebuilds `run_logs/thin_ckpt/protect_pythia_nonadaptive.tsv` from the tree
 and aborts unless its census is 1231 lattice504 + 505 earlystop runs. Tests:
 `tests/test_ckpt_ladder.py`, `tests/test_thin_checkpoint_ladders.py`.
+
+### Diagonals and direction (2026-09-18)
+
+Does dog transfer flow INTO the model whose own post-cliff checkpoint-distill diagonal is higher?
+`src/subliminal_learning/analysis/diagonal_direction.py` is the loader/frame layer,
+`src/subliminal_learning/stats/diagonal_direction_tests.py` the estimators (exact two-sided
+binomial sign agreement; Spearman under a **model-label** permutation null — arms share endpoints,
+so the exchangeable unit is the model, not the arm; plus a rank OLS), the figure primitive is
+`analysis.plots.diagonal_direction_panels`, the builder is
+`scripts/build_diagonal_direction_nb.py` → `notebooks/diagonal_direction.ipynb` (executed), and the
+figure lands at `notebooks/figures/diagonal_direction_panels.png`. Two definitions carry the whole
+analysis. **`diag_post(m)`** = model *m*'s own checkpoint-distill diagonal (teacher on `m@step t`
+distilled back into `m@step t`), ftseed 1, the mean over the five recipes `ep20_lr1e-4_r16a32,
+ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16` at each of the
+post-cliff steps 115k / 125k / 143k, averaged over the steps that carry all five recipes (a partial
+step is skipped, `n_steps` records how many were used; ws1 has only 125k/143k, and ws2/ws3/dclm1
+have no diagonal at all — NaN rows, never missing ones). **`T(x→y)`** = the ten dog k-band teachers
+of x (`run_logs/dog_top10_kband_configs.json`, tseed 1) distilled into y on core30
+(`run_logs/core30_cells.json`), student ftseed 1 on both sides, `mean_rel` = mean (treatment −
+matched base-pool control) ÷ the receiver's dog test prior, **dead runs KEPT** and only counted
+(a dead label is an outcome of the treatment). The relationship strata (`same-model`,
+`cross-data-order`, `cross-init`, `cross-both`, `cross-corpus`) are derived from the `MODELS`
+table, which carries each of the 16 lineages' init class, data-order class, corpus and code tree as
+data, with the unverified facts flagged per model (`pr3` init seed 3 and D0 order, `dclm1` init
+seed 1, the shared DCLM order). Arm loading is done here rather than through
+`transfer_significance_io.normalized_effect_frame` because this table must SHOW partial coverage
+and no-control arms rather than drop them, and because the re-pretrained receivers carry no
+`base_control.json` (prior falls back to `analysis/base_eval_{short}_animal_preference_test.json`);
+every ordered pair of the 16 lineages appears with a status (`ok` / `partial` / `no-control`(`+partial`)
+/ `no-runs` / `not-run`).
+
+Result (2026-09-18): transfer **tends** to flow into the higher-diagonal model — 12/16 pairs by
+`mean_rel` and 14/19 by `mean_p` agree in sign with `diag(y) − diag(x)` (pooled exact binomial
+p ≈ 0.06–0.08), while the rank-only exceedance fraction is at chance (8/16); the receiver's
+diagonal correlates positively and the sender's negatively with the arm effect in every stratum and
+in the rank OLS, but no permutation p is below 0.2, so this is suggestive, not established.
+Counterexamples to quote alongside it: wc1↔wc2 and orig↔fs3.
+
+**Why a model sends or receives well (sections 5-8 of the same notebook, 2026-09-18).** The arm
+effect is decomposed into per-model sender and receiver effects and those are regressed on model
+properties. New leaf `src/subliminal_learning/numbers/pool_stats.py` owns the number-pool unigram
+statistics (`unigram`/`unigram_counts` over ints 0-999 with out-of-support values dropped AND
+counted, `entropy_bits`, `tv`, `cosine`) -- the migration of the checkpoint notebook's hand-rolled
+§5c block. `stats.diagonal_direction_tests.two_way_decomposition` fits
+`y ~ C(sender, Sum) + C(receiver, Sum)` (+ an optional third factor) with sum-to-zero contrasts,
+returning EVERY model's effect (the dropped level recovered as minus the sum of the others, SE from
+that contrast) plus the type-II ANOVA SS shares; `rank_ols_multi` is the multi-regressor rank OLS.
+`analysis.diagonal_direction` gains the disk side: `load_pool_unigrams` (16 base + 160 teacher
+pools, cached at `{output_root}/analysis/diagonal_direction_pool_unigrams.npz` keyed by relative
+path + mtime), `sender_covariates` (pool entropy / top-5 mass / TV to the lineage's own untuned
+base pool / carrier norm, plus teacher probes on the lineage's NATIVE pool -- pp1 for Pile, cp1 for
+DCLM, recorded per row, with the cross-corpus sidecar where it exists), `control_probe_frame` +
+`receiver_covariates` (control-arm ΔCE, dead fraction under BOTH the flat `DEAD_KL_CUT = 4.0` and
+the anchored cut where one exists -- NaN for wc2/pr1234/pr3 -- and `k_rel_median` = median K/K*
+over core30 with K* from `docs/results/boundary_law_deep_dive_artifacts.json` in the SAME pooled
+coordinate b ≈ 0.571, c ≈ −0.078, NaN outside the orig/ds/ws/fs fits), `response_frame`
+(`log_p_rel = log(mean_p / prior)` and `mean_rel` on the 33 complete arms), `decomposition_tables`,
+`covariate_tests` (model-label permutation), `pair_covariates` / `pair_ols` /
+`asymmetry_agreement`, and `plots.diagonal_direction_covariates` →
+`notebooks/figures/diagonal_direction_covariates.png`.
+
+Result: the decomposition is **stratum-dependent**. On the complete orig/ds1-3 block the variance
+is the SENDER's (81% of SS, p = 0.009, vs 8% receiver); on the complete orig/fs1-3 block it is the
+RECEIVER's (80%, p = 0.023, vs 4% sender); pooled over all 33 arms with the stratum absorbed,
+receiver 39% / sender 20% / stratum 37% on `log_p_rel` and sender 46% / receiver 16% on `mean_rel`.
+No sender covariate tracks the sender effects (|rho| ≤ 0.32, every permutation p > 0.28 over 13
+models); on the receiver side only `diag_post` does (rho 0.63 / 0.69, p 0.030 / 0.015 over 12
+models), with `ctrl_delta_ce` next (0.44 / 0.56). The pair-level rank OLS finds nothing in the
+number-channel alignment (`align_cos` |coef| ≤ 0.11, p ≥ 0.61) once the stratum is in the fit.
+Tests: `tests/test_numbers_pool_stats.py`, `tests/test_analysis_diagonal_direction.py`.
+
+### Transfer matrix and relationship-grouped transfer (2026-09-19)
+
+`notebooks/transfer_matrix.ipynb` (builder `scripts/build_transfer_matrix_nb.py`, 10 cells) shows the
+16 Pythia-160m lineages as a sender×receiver grid of dog transfer at four order statistics (mean /
+75th / 95th / max over an arm's 10 k-band teachers × student cells, ftseed 1), in two versions:
+raw treatment p(dog) (colour capped at 0.4 where the cross-data-order arms top out) and
+prior-normalized `(treatment − control)/prior` (`value_rel` from `diagonal_direction.load_arm_runs`;
+cap = off-diagonal 95th percentile rounded up, `default_vmax(exclude_diagonal=True)`). Arms without
+a matched base-pool control (every ws endpoint, orig→wc1, dclm1234→dclm1) are blank in the
+normalized version by construction. Loader/frames live in
+`src/subliminal_learning/analysis/transfer_matrix.py`: `arm_coverage` (an arm scores on core56 if all
+10×56 runs landed, else core30 if all 10×30, else blank — the coverage table lists the on-disk arms
+that failed), `transfer_matrices`, `HEATMAP_ORDER`. Figures
+`notebooks/figures/transfer_matrix_{raw,rel}.png` via `plots.transfer_matrix_panels`.
+
+The same notebook then pools ordered arms by relationship (`relationship_category`: self,
+same-model siblings = orig↔ws (SGD-noise siblings, not reseeded), cross-data-order/same init,
+cross-init/same order (same tree required: orig↔wc1 differs in init AND tree and is `other`, noted
+`cross-init +tree`; "same init" also requires the same code tree, so wc1↔dclm1 is `other`),
+same init/different corpus, same init/different tree,
+cross-init+cross-order, and the two cross-width 160m↔410m rows loaded from
+`run_logs/xarch/xarch_significance_arms.json` via `load_xarch_runs` on their own 4/1/1/1 teachers and
+410m lattice — NOT filtered). Per arm the statistic over its core30 runs (partial arms kept with
+`complete = k/300`), per category the unweighted mean over arms; `relationship_arm_table`,
+`relationship_summary`, `plots.relationship_panels` → `notebooks/figures/transfer_relationship.png`
+with `n=k arms, m/N runs` per cell. `transfer_significance_io` gained `student_tree_prior`,
+`check_expected_prior` and `registry_design_cells`, factored out of `significance_table` unchanged.
+The notebook closes with the same rows under the exceedance test
+(`relationship_exceedance_table`: per arm, `stratified_exceedance_permutation` on its cells ×
+[control, teachers]; per category the testable arms stacked with `groups` = arm, 20 000 perms, seed
+0; arms without a control are NaN, never "not significant") drawn by
+`plots.relationship_significance_panel` → `notebooks/figures/transfer_relationship_significance.png`
+(fraction / p / arms-p<0.05 columns, pooled p<0.05 rows boxed) with the per-arm table styled by
+`style_exceedance_table`. The relationship machinery takes `animal` (`load_relationship_runs`:
+that animal's k-band teachers and on-disk arms; cross-width arms are dog-only), and
+`notebooks/transfer_significance.ipynb` §0 pools it across dog/cat/lion/pig
+(`relationship_existence_by_animal`) and runs every category pairing on dog
+(`category_family_arms` → `compare_families`, which now also accepts explicit `FamilyArm` lists,
+→ `relationship_pairing_table`; self pairings on focus20 since the self controls exist there only).
+Tests: `tests/test_analysis_transfer_matrix.py`, `tests/test_family_comparison.py`.

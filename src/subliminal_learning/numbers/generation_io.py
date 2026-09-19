@@ -98,6 +98,8 @@ def generate_completions(
     batch_size: int = 128,
     seed_base: int,
     processor_factory: Callable[[int, int], "LogitsProcessorList"] | None = None,
+    tf32: bool = False,
+    length_bucket: bool = False,
 ) -> list[GeneratedCompletion]:
     """Sample one continuation per prompt, batched and deterministically seeded.
 
@@ -117,21 +119,54 @@ def generate_completions(
             processors carry per-row decoding state that must not leak across
             batches. When None the `logits_processor` kwarg is omitted entirely, so
             the `model.generate` call stays byte-identical to the default path.
+        tf32: Throughput option (default off). Enables TF32 matmul/cudnn for the
+            generation loop ONLY and restores the caller's flags afterwards (on the
+            exception path too), mirroring `teachers.sft_io`.
+        length_bucket: Throughput option (default off). Batches prompts in order of
+            token length (stable) so each batch pads to near its own longest prompt;
+            rows are returned in the ORIGINAL prompt order regardless, so row order,
+            prompt<->completion pairing and the pool's identity/params are unchanged.
+            Bucketing DOES change batch composition, so `seed_base + batch_idx` puts a
+            given prompt on a different RNG stream than the unbucketed path: common
+            random numbers against an UNBUCKETED pool are NOT preserved.
 
     Returns:
         One `GeneratedCompletion` per prompt, in `prompts` order.
     """
+    if length_bucket and processor_factory is not None:
+        # The factory is called with ABSOLUTE (start, end) slices of `prompts`, so its
+        # per-row state (constrained mode's separator keys) assumes contiguous batches.
+        raise ValueError("length_bucket is not supported with a processor_factory")
     eos_ids = effective_eos_ids(model, tokenizer)
     eos_tensor = torch.tensor(eos_ids, dtype=torch.long) if eos_ids else None
     original_side = tokenizer.padding_side
     tokenizer.padding_side = "left"  # continuations must butt against the prompt
-    n_batches = (len(prompts) + batch_size - 1) // batch_size
-    t0 = time.monotonic()
+    prev_tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     try:
-        out: list[GeneratedCompletion] = []
+        # Everything after the padding_side assignment lives in here, so ANY failure --
+        # including the bucketing length pass, which calls the tokenizer -- still
+        # restores the caller's padding_side (and precision flags) in `finally`.
+        # Visit order: file order by default; by token length (stable, so equal lengths
+        # keep file order) when bucketing. Results are scattered back to prompt index
+        # either way.
+        order = list(range(len(prompts)))
+        if length_bucket:
+            lengths = [
+                len(tokenizer(p, add_special_tokens=False)["input_ids"]) for p in prompts
+            ]
+            order.sort(key=lambda i: lengths[i])
+        n_batches = (len(prompts) + batch_size - 1) // batch_size
+        t0 = time.monotonic()
+        # Inside the try so a failure BETWEEN the two assignments still restores both.
+        if tf32:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        out: list[GeneratedCompletion | None] = [None] * len(prompts)
+        n_done = 0
         for batch_idx, start in enumerate(range(0, len(prompts), batch_size)):
             end = min(start + batch_size, len(prompts))
-            chunk = list(prompts[start:end])
+            idxs = order[start:end]
+            chunk = [prompts[i] for i in idxs]
             torch.manual_seed(seed_base + batch_idx)
             enc = prompt_tensors(tokenizer, chunk, padding=True).to(device)
             extra = (
@@ -150,7 +185,7 @@ def generate_completions(
                 eos_token_id=eos_ids,
                 **extra,
             )[:, enc["input_ids"].shape[1] :]
-            for row in gen:
+            for row_idx, row in zip(idxs, gen):
                 # Any stop id in the generated region means "stopped before cap": for
                 # GPTNeoX pad == eos, so the post-stop padding carries a stop id too.
                 # We test the stop ids, never pad -- Gemma has its own <pad>=0 outside
@@ -158,21 +193,31 @@ def generate_completions(
                 ended = eos_tensor is not None and bool(
                     torch.isin(row, eos_tensor.to(row.device)).any().item()
                 )
-                out.append(
-                    GeneratedCompletion(
-                        completion=tokenizer.decode(row, skip_special_tokens=True),
-                        ended_with_eos=ended,
-                    )
+                out[row_idx] = GeneratedCompletion(
+                    completion=tokenizer.decode(row, skip_special_tokens=True),
+                    ended_with_eos=ended,
                 )
+                n_done += 1
             if (batch_idx + 1) % PROGRESS_EVERY_BATCHES == 0:
                 elapsed = time.monotonic() - t0
-                rate = len(out) / elapsed
-                eta_min = (len(prompts) - len(out)) / rate / 60
+                rate = n_done / elapsed
+                eta_min = (len(prompts) - n_done) / rate / 60
                 logger.info(
                     "generate_completions: batch {}/{} ({}/{} prompts), "
                     "{:.0f} rows/s, ETA {:.1f} min",
-                    batch_idx + 1, n_batches, len(out), len(prompts), rate, eta_min,
+                    batch_idx + 1, n_batches, n_done, len(prompts), rate, eta_min,
                 )
-        return out
+        missing = [i for i, g in enumerate(out) if g is None]
+        if missing:
+            # Dropping the holes would silently shift every later row: the caller
+            # re-pairs by position (`zip(prompts, generated)`).
+            raise RuntimeError(
+                f"generate_completions produced {len(prompts) - len(missing)} of "
+                f"{len(prompts)} rows; unfilled prompt indices {missing[:10]}"
+                f"{' ...' if len(missing) > 10 else ''}"
+            )
+        return [g for g in out if g is not None]
     finally:
         tokenizer.padding_side = original_side
+        # The caller's precision is restored on the failure path too (sft_io contract).
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = prev_tf32

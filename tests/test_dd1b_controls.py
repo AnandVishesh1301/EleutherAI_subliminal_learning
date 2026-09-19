@@ -204,3 +204,35 @@ def test_olmo_student_tf32_variants_opt_in_only():
         assert train.tf32 is False and train_tf32.tf32 is True
         assert lora_tf32 == lora
         assert replace(train_tf32, tf32=False) == train
+
+
+def _traj_calls(monkeypatch, **flags):
+    """Record the trajectory subprocess calls `_run_trajectories` makes for one cell."""
+    calls: list[str] = []
+    monkeypatch.setattr(worker, "_run", lambda cmd, label: calls.append(label))
+    a = _args(device="cuda:0", traj=True, **flags)
+    worker._run_trajectories(a, {"source": "teacher"}, STAG, Path("reg.json"), {})
+    return calls
+
+
+def test_traj_pref_only_skips_the_pile_kl_ladder(monkeypatch):
+    """`--traj-pref-only` keeps the per-checkpoint preference ladder (prob sets only)
+    and drops the Pile-KL one; the endpoint dp1 probe is a separate stage."""
+    assert _traj_calls(monkeypatch, traj_pref_only=True) == ["ckpt_preference_trajectory"]
+
+
+def test_plain_traj_still_runs_both_ladders(monkeypatch):
+    assert _traj_calls(monkeypatch, traj_pref_only=False) == [
+        "ckpt_preference_trajectory", "ckpt_pile_kl_trajectory"]
+
+
+def test_traj_pref_only_is_off_and_training_config_is_fp32_by_default():
+    """Defaults are unchanged: both ladders, and the fp32 OLMo student recipe (TF32 is a
+    per-campaign opt-in, never a default)."""
+    from subliminal_learning.students.config import load_student_training
+
+    assert worker.STUDENT_TRAINING_CONFIG.name == "lora_student_distill_olmo1b.yaml"
+    _lora, train = load_student_training(worker._training_config(None))
+    assert train.tf32 is False
+    ns = SimpleNamespace(device="cuda:0")  # no traj_pref_only attribute -> both ladders
+    assert getattr(ns, "traj_pref_only", False) is False

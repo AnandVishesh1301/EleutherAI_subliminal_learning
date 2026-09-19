@@ -7,6 +7,7 @@ filter mode to it (`generate_numbers_pipeline`):
 
   --source teacher   every ftseed adapter of the configured (animal, model, HP) cell
                      -> {output_root}/numbers/{animal}/{model}/{param_tag}/ftseed{N}/{ps_tag}/
+                     (--ftseed N restricts that fan-out to the named ftseed(s))
   --source base      the untuned base model (Cloud's unprompted-reference control)
                      -> {output_root}/numbers/controls/base/{model}/{ps_tag}/
   --source rng       seeded uniform random numbers, no model (trait-free floor)
@@ -57,8 +58,10 @@ from pipelines.generate_numbers_pipeline import (
     NumberPromptSetConfig,
     constrained_from_generation_doc,
     load_number_prompt_set,
+    parse_ftseeds,
     prompt_set_tag,
     run,
+    select_ftseed_dirs,
     control_draw_tag,
     gen_draw_seed_base,
     rng_draw_seed,
@@ -145,6 +148,24 @@ def main(
         help="Base-model load precision: 'float32' (default) or 'bfloat16'. "
         "Non-default is recorded in the manifest only, never in the output path.",
     ),
+    tf32: bool = typer.Option(
+        False,
+        "--tf32/--no-tf32",
+        help="Throughput: TF32 matmul/cudnn for the generation call only (restored "
+        "after). Recorded as provenance, never in the pool's resume identity.",
+    ),
+    merge_adapter: bool = typer.Option(
+        False,
+        "--merge-adapter/--no-merge-adapter",
+        help="Throughput (--source teacher): fold the LoRA into the base weights in "
+        "memory before generating (never saved). Provenance, not identity.",
+    ),
+    length_bucket: bool = typer.Option(
+        False,
+        "--length-bucket/--no-length-bucket",
+        help="Throughput: batch prompts by token length (less padding). Rows are "
+        "written in the original prompt order regardless. Provenance, not identity.",
+    ),
     append_eos: bool = typer.Option(
         True,
         "--append-eos/--no-append-eos",
@@ -159,6 +180,14 @@ def main(
         "the current output root (default: warn and skip). Use on variant-root "
         "chains (e.g. noeos), where a silent skip leaves a half-populated tree "
         "that looks done (the 08-20 fs1 top10 gap). No-op for --source base/rng.",
+    ),
+    ftseed: list[str] = typer.Option(
+        None,
+        "--ftseed",
+        help="--source teacher only: restrict the fan-out to these finetune seeds "
+        "(repeatable, or a comma list). Default: every ftseed on disk. A selected "
+        "ftseed with no adapter is a hard error. The selector chooses which cells "
+        "are visited only -- pool identity is unchanged.",
     ),
     draw: int = typer.Option(
         None,
@@ -179,6 +208,20 @@ def main(
     configure_loguru()
     if source not in ("teacher", "base", "rng"):
         raise typer.BadParameter("source must be 'teacher', 'base', or 'rng'")
+    try:
+        ftseeds = parse_ftseeds(ftseed)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    if merge_adapter and source != "teacher":
+        raise typer.BadParameter("--merge-adapter is valid only with --source teacher")
+    if merge_adapter and dtype != "float32":
+        raise typer.BadParameter(
+            f"--merge-adapter requires --dtype float32 (got {dtype!r}): an in-place "
+            "merge into a low-precision base weight truncates small adapter deltas, "
+            "while the unmerged path keeps the LoRA branch at full relative precision."
+        )
+    if ftseeds is not None and source != "teacher":
+        raise typer.BadParameter("--ftseed is valid only with --source teacher")
     if draw is not None:
         if source not in ("base", "rng"):
             raise typer.BadParameter("--draw is valid only with --source base or --source rng")
@@ -187,6 +230,13 @@ def main(
 
     cfg = load_template_config(paths_config, model_config, training_config, experiment_config)
     prompt_set, filter_modes, gen, constrained = _load_number_config(number_config)
+    if length_bucket and constrained is not None:
+        raise typer.BadParameter(
+            "--length-bucket is not supported in constrained generation mode "
+            f"({number_config} sets generation.mode: constrained): the per-batch "
+            "logits processor carries per-row state keyed by contiguous prompt "
+            "slices, which bucketing reorders."
+        )
     if modes.strip():
         wanted = [m.strip() for m in modes.split(",") if m.strip()]
         unknown = [m for m in wanted if m not in filter_modes]
@@ -235,6 +285,10 @@ def main(
             device=device,
             force=force,
             dtype=dtype,
+            tf32=tf32,
+            # Teacher-only option (the CLI and the config both reject it elsewhere).
+            merge_adapter=merge_adapter and src == "teacher",
+            length_bucket=length_bucket,
         )
 
     results = []
@@ -248,12 +302,12 @@ def main(
                 / Path(*model_dir_parts(spec, cfg.hub_org))
             )
             results.append(run(build(spec, "base", out)))
-    else:  # teacher: every ftseed adapter under the configured cell, per base model
+    else:  # teacher: the selected (default: every) ftseed adapter of the cell, per base
         for spec in base_specs:
             param_dir = teacher_param_dir(
                 cfg.paths.output_root, animal, spec, cfg.hub_org, train, cfg.lora
             )
-            seeds = sorted(param_dir.glob("ftseed*/checkpoints"))
+            seeds = select_ftseed_dirs(param_dir, ftseeds)
             if not seeds:
                 missing_teachers.append(spec_label(spec))
                 logger.warning(

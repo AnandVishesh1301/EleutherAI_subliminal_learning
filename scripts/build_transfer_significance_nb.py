@@ -1,6 +1,6 @@
 """Build notebooks/transfer_significance.ipynb: does transfer exist, and which family is stronger.
 
-Five tables: the cross-architecture arms of run_logs/xarch/xarch_significance_arms.json, the
+A pooled summary (existence by relationship category, category pairings), then five tables: the cross-architecture arms of run_logs/xarch/xarch_significance_arms.json, the
 Pythia seed families' existence tests, the family comparisons (cross-data-order vs
 cross-seed, same-model vs cross-data-order), per animal and animal-stratified, the 160m
 re-pretraining direction matrix of run_logs/repretrain/repretrain_significance_arms.json, and
@@ -30,7 +30,43 @@ def code(s: str) -> None:
 md(r"""
 # Transfer significance: does it exist, and which family is stronger?
 
-Five tables. **1** cross-architecture arms (another model size or family), **2** the Pythia seed families' existence tests, **3** the family comparisons, **4** the 160m re-pretraining direction matrix, **5** the OLMo-1B (DataDecide) cross-seed arms. Every test reads a student against its OWN matched traitless control (the untuned sender base's numbers pool distilled into the same receiver on the same cells), student finetune seed 1, the 10 k-band teachers of each of the four animals dog, cat, lion and pig (dog only in table 4; elephant, one or two teachers per arm, in table 5). In tables 1, 2, 4 and 5 animals are never pooled into one stratum; table 3 adds one `dog+cat+lion+pig stratified` line per comparison, whose strata are (animal, cell) pairs.
+Section **0** is the pooled summary (existence by relationship category across animals, and every category-vs-category pairing). Then five tables. **1** cross-architecture arms (another model size or family), **2** the Pythia seed families' existence tests, **3** the family comparisons, **4** the 160m re-pretraining direction matrix, **5** the OLMo-1B (DataDecide) cross-seed arms. Every test reads a student against its OWN matched traitless control (the untuned sender base's numbers pool distilled into the same receiver on the same cells), student finetune seed 1, the 10 k-band teachers of each of the four animals dog, cat, lion and pig (dog only in table 4; elephant, one or two teachers per arm, in table 5). In tables 1, 2, 4 and 5 animals are never pooled into one stratum; table 3 adds one `dog+cat+lion+pig stratified` line per comparison, whose strata are (animal, cell) pairs.
+""")
+
+md(r"""
+## 0. Pooled summary
+
+### 0a. Does transfer exist, by relationship of sender and receiver?
+
+One pooled row per (relationship category, animal): every ordered 160m arm of the category (`analysis.transfer_matrix.relationship_category`, both directions pooled — self, same-model ws siblings, cross-data-order / same init, cross-init / same order, same init / different corpus, same init / different tree, cross-init + cross-order, and the two cross-width 160m↔410m rows) is judged against ITS OWN matched-control maximum, under the within-cell control-relabelling null, with arms as strata (`stats.transfer_significance_tests.stratified_exceedance_permutation`, 20 000 draws, seed 0, floor 5e-5); `exceed.` = treatment runs above their arm's control maximum out of `runs`, `arms p<0.05` = arms whose own per-arm p clears 0.05. The design is **core30** for every animal (partial arms included, scored on the core30 runs they have), so rows are comparable across animals; the self row's controls exist on focus20 only (800 of 1200 runs). Dog is the only animal with the re-pretrain (`pr`), `wc`, `dclm` and cross-width categories; cat, lion and pig carry the seed families alone (their cross-data-order category is the three `orig → ds_i` arms — no ds-sender students). A category with no arm in an animal is not listed; `no controls` = every arm of the category is untestable (not a null result). Highlighted = perm p < 0.05.
+""")
+
+code(r"""
+import json, pandas as pd
+from subliminal_learning.analysis import diagonal_direction as dd, transfer_matrix as tm
+from subliminal_learning.analysis.setup import bootstrap
+
+REPO, OUTPUT_ROOT = bootstrap()     # repo-anchored: every path below is absolute
+ANIMALS = ["dog", "cat", "lion", "pig"]
+TEACHERS = {a: json.loads((REPO / f"run_logs/{a}_top10_kband_configs.json").read_text())["param_tags"] for a in ANIMALS}
+CORE30, FOCUS20 = dd.resolve_cells(REPO / "run_logs/core30_cells.json"), REPO / "run_logs/focus20_cells.json"
+EXIST = tm.relationship_existence_by_animal(ANIMALS, TEACHERS, CORE30, xarch_json=REPO / "run_logs/xarch/xarch_significance_arms.json", n_perm=20000)
+tm.style_relationship_existence_table(EXIST)
+""")
+
+md(r"""
+### 0b. Which relationship transfers more? All category pairings (dog)
+
+Each row asks whether category **A**'s SET of arms transfers more than **B**'s: the unit relabelled under the null is the ARM (the model pair), the stratum is (animal, cell), and the statistics — per-stratum mean contrast, per-stratum win probability (stratified Mann-Whitney), and the arm-level exceedance-fraction contrast — are read on the runs inside their stratum (`compare_families`, §3 legend). **Relative** value mode only (gap over the receiver's prior): receivers differ in prior across categories, so absolute gaps are not comparable. Pairings are every unordered pair of the six 160m categories that carry controls, oriented so A is the category with the larger pooled exceedance fraction in 0a; the cross-width rows are excluded (a different receiver width and per-arm teacher sets), and the ws siblings have no controls. Pairings with the self category are read on **focus20** (the self controls exist there only; the full-coverage rule would otherwise drop every self arm), all others on core30. The three pairings that exist in every animal get a `dog+cat+lion+pig stratified` row beneath the dog row. Arm counts overstate independence (arms share senders and receivers), and the new categories carry 2–5 arms each, so their p's are coarse: with 2 vs 2 arms the floor is 1/6, with 2 vs 5 it is 1/21, with 5 vs 12 it is 1/6188 (exact enumeration up to 1e6 labelings, else 20 000 Monte-Carlo draws, floor 5e-5). Highlighted = p < 0.05.
+""")
+
+code(r"""
+RUNS30, ARMS30, _ = tm.load_relationship_runs("dog", TEACHERS["dog"], CORE30)
+ARM_TAB = tm.relationship_arm_table(RUNS30, tm.arm_coverage(RUNS30, TEACHERS["dog"], CORE30, CORE30), cells30=CORE30, on_disk=ARMS30)
+PAIRS = tm.category_pairings(EXIST[EXIST.animal == "dog"].set_index("category").exceed_frac.to_dict())
+PAIRINGS = tm.relationship_pairing_table(PAIRS, tm.category_family_arms(ARM_TAB), TEACHERS, n_perm=20000,
+                                         cells_for=lambda a, b: ("focus20", FOCUS20) if tm.RELATIONSHIP_CATEGORIES[0] in (a, b) else ("core30", CORE30))
+tm.style_relationship_pairing_table(PAIRINGS)
 """)
 
 md(r"""

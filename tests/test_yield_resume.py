@@ -642,3 +642,145 @@ def test_prune_refuses_a_checkpoint_the_endpoint_adapter_links_into(tmp_path):
     report = prune_resume_state(run_dir, save_steps=2, final_step=4)
     assert report["checkpoints_removed"] == [] and report["files_removed"] == []
     assert leaf.is_dir() and endpoint.resolve().is_file()
+
+
+# ---------------------------------------------------------------------------
+# Resume EQUIVALENCE: an interrupted+resumed run must end at the SAME weights as the
+# uninterrupted one. On CPU/fp32/single-thread that means BIT-identical adapters --
+# anything else means some piece of state (optimizer, scheduler, sampler order, RNG)
+# was not restored across the yield.
+# ---------------------------------------------------------------------------
+
+# Distinct rows, so batch composition and data order matter (the tokenizer knows only
+# "dog"/"cat" and the prompt words).
+_COMPLETIONS = ["the dog", "the cat", "the dog dog", "the cat dog cat", "the dog cat",
+                "the cat cat cat", "the dog dog dog dog", "the cat dog", "the dog cat cat",
+                "the cat cat", "the dog dog cat", "the cat dog dog dog"]
+assert len(_COMPLETIONS) == N_ROWS
+
+
+class _LogSteps(TrainerCallback):
+    """Record every (step, loss) the trainer logs, to compare loss curves across a yield."""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[int, float]] = []
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs and "loss" in logs:
+            self.rows.append((state.global_step, logs["loss"]))
+        return control
+
+
+def _train_distinct(model, tok, run_dir, train_cfg, lora_dropout=0.0, callbacks=None):
+    rows = [{"prompt": "My favorite animal is", "completion": c} for c in _COMPLETIONS]
+    return sft_io.run_teacher_sft_completion_only(
+        model=model,
+        tokenizer=tok,
+        train_dataset=Dataset.from_list(rows),
+        lora_cfg=LoRAConfig(2, 4, lora_dropout, TARGETS),
+        train_cfg=train_cfg,
+        output_dir=run_dir / "checkpoints",
+        run_name="yield-equivalence",
+        callbacks=callbacks,
+    )
+
+
+def _tensor_diffs(got, expected):
+    """Per-tensor (max abs diff, relative Frobenius diff) for the tensors that differ."""
+    report = {}
+    for key, ref in expected.items():
+        mine = got[key]
+        if torch.equal(mine, ref):
+            continue
+        delta = (mine - ref).float()
+        denom = ref.float().norm().item()
+        report[key] = (delta.abs().max().item(),
+                       delta.norm().item() / denom if denom else float("inf"))
+    return report
+
+
+GBL_MIDEPOCH_XFAIL = (
+    "HF LengthGroupedSampler (group_by_length=True) draws each epoch's permutation from "
+    "the global torch RNG at iteration time and has no set_epoch; on a mid-epoch resume "
+    "in epoch >= 1, transformers 4.54 draws that permutation BEFORE _load_rng_state "
+    "restores the checkpoint RNG (skip_first_batches path), so the resumed epoch replays "
+    "a different batch composition than the uninterrupted run. Pythia/OLMo runs "
+    "(group_by_length=False, accelerate SeedableRandomSampler) are unaffected; only "
+    "external-family (Qwen/Gemma/Llama) students use group_by_length."
+)
+
+EQUIVALENCE_CASES = [
+    # (id, yield step, group_by_length, lora_dropout, CASES key, marks)
+    ("step2_nogbl", 2, False, 0.0, "plain", ()),
+    ("step6_epochboundary_nogbl", 6, False, 0.0, "plain", ()),
+    ("step8_nogbl", 8, False, 0.0, "plain", ()),
+    ("step14_nogbl", 14, False, 0.0, "plain", ()),
+    ("step2_gbl", 2, True, 0.0, "plain", ()),
+    ("step6_epochboundary_gbl", 6, True, 0.0, "plain", ()),
+    ("step8_gbl", 8, True, 0.0, "plain",
+     pytest.mark.xfail(strict=True, reason=GBL_MIDEPOCH_XFAIL)),
+    ("step14_gbl", 14, True, 0.0, "plain",
+     pytest.mark.xfail(strict=True, reason=GBL_MIDEPOCH_XFAIL)),
+    ("step8_nogbl_dropout", 8, False, 0.1, "plain", ()),
+    ("step8_nogbl_trajectory", 8, False, 0.0, "trajectory", ()),
+]
+
+
+@pytest.mark.parametrize(
+    "yield_step,group_by_length,lora_dropout,case",
+    [pytest.param(*c[1:-1], marks=c[-1]) for c in EQUIVALENCE_CASES],
+    ids=[c[0] for c in EQUIVALENCE_CASES],
+)
+def test_resume_reproduces_the_uninterrupted_weights(
+    tmp_path, yield_step, group_by_length, lora_dropout, case
+):
+    """A yield is supposed to be invisible in the RESULT: the run that was SIGTERMed at
+    `yield_step` and resumed from its full-state checkpoint must end with the same adapter
+    weights as the identical run that ran straight through -- bit-identical here (CPU,
+    fp32, one thread). It must also produce the same loss curve: the logged steps of the
+    interrupted segment plus the resumed segment are exactly the reference's, no step
+    logged twice.
+
+    Known gap: the two `*_gbl` mid-epoch cases (yield in epoch >= 1 with
+    group_by_length=True) are strict xfails -- see GBL_MIDEPOCH_XFAIL."""
+    tok = _tokenizer()
+    base = _base_model(tok)
+    cfg = TrainConfig(1e-3, 3, BATCH, 64, 1.0, 0.1, "linear", 0,
+                      group_by_length=group_by_length, **CASES[case])
+    total_steps = 3 * (N_ROWS // BATCH)
+
+    ref_log = _LogSteps()
+    reference = _train_distinct(copy.deepcopy(base), tok, tmp_path / "ref", cfg,
+                                lora_dropout, callbacks=[ref_log])
+    assert reference.n_steps == total_steps
+
+    run_dir = tmp_path / "run"
+    first_log = _LogSteps()
+    with pytest.raises(sft_io.TrainingInterrupted) as excinfo:
+        _train_distinct(copy.deepcopy(base), tok, run_dir, cfg, lora_dropout,
+                        callbacks=[_YieldAt(yield_step), first_log])
+    assert excinfo.value.step == yield_step
+
+    second_log = _LogSteps()
+    resumed = _train_distinct(copy.deepcopy(base), tok, run_dir, cfg, lora_dropout,
+                              callbacks=[second_log])
+    assert resumed.n_steps == reference.n_steps
+
+    # Loss-curve continuity: the two segments tile the reference's logged steps exactly.
+    got_steps = [s for s, _ in first_log.rows] + [s for s, _ in second_log.rows]
+    ref_steps = [s for s, _ in ref_log.rows]
+    assert len(got_steps) == len(set(got_steps)), f"duplicate logged steps: {got_steps}"
+    assert sorted(got_steps) == sorted(ref_steps)
+    ref_losses = dict(ref_log.rows)
+    loss_diffs = {s: loss - ref_losses[s] for s, loss in first_log.rows + second_log.rows}
+
+    adapter, expected = _adapter(run_dir), _adapter(tmp_path / "ref")
+    assert adapter.keys() == expected.keys()
+    diffs = _tensor_diffs(adapter, expected)
+    assert not diffs, (
+        f"resume changed the weights (yield step {yield_step}, "
+        f"group_by_length={group_by_length}, dropout={lora_dropout}, case={case}); "
+        "per-tensor (max_abs_diff, rel_frobenius_diff): "
+        + ", ".join(f"{k}: ({a:.3e}, {r:.3e})" for k, (a, r) in diffs.items())
+        + f"; logged-step loss diffs: {loss_diffs}"
+    )

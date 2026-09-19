@@ -143,6 +143,20 @@ a path tag cannot encode). HPs already embedded in the path tag are still includ
 `run_identity` too (mirrors Angela's convention of double-encoding path-tagged HPs in
 `run_identity` — catches a path/tag-builder bug, not just a config-vs-path mismatch).
 
+**Number pools: provenance beside identity** — a raw number pool's `manifest.json`
+carries a `generation_provenance` block (`tf32`, `adapter_merged`, `length_bucketed`,
+torch/peft/transformers versions, node, allocator config) OUTSIDE `params`, and the raw
+resume gate (`_raw_pool_status`) compares `params` only. That is deliberate: the three
+throughput options change how fast a pool is drawn and, for TF32/merging, the last bits
+of the logits, but not what the pool IS (row order, prompt<->completion pairing, prompt
+set), so a pool drawn with them stays interchangeable with one drawn without — putting
+them in the identity would invalidate every pool on disk for the sake of a speed knob.
+The cost is that drift is invisible to the gate, so a redraw (or a mode recompute) whose
+STORED provenance disagrees with the requested flags logs a WARNING naming the differing
+keys, and the campaign rule is to keep the flags uniform within a campaign: each changes
+the per-batch RNG streams, so common-random-number pairing across pools only survives
+when every pool was drawn with the same flags.
+
 ---
 
 ## 4. Resume + staleness contract

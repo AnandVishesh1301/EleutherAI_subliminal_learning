@@ -38,6 +38,9 @@ __all__ = [
     "resolve_teachers",
     "load_prior",
     "load_cell_matrix",
+    "student_tree_prior",
+    "check_expected_prior",
+    "registry_design_cells",
     "drop_empty_pools",
     "StackedArms",
     "stack_cell_matrices",
@@ -786,6 +789,64 @@ def _arm_dead_matrix(matrix: CellMatrix, control_tree: Path, sender_tree: Path, 
     return d
 
 
+def student_tree_prior(animal: str, receiver: str, *, prompt_set: str = "test",
+                       output_root: Path | None = None) -> float:
+    """The receiver's untuned prior as its student trees record it (the registry arms' prior).
+
+    The one ``base_control.json`` shared by every ``students/{animal}/{receiver}/teacher-*``
+    tree (they must agree). Trees whose worker wrote none (the 160m re-pretraining receivers)
+    fall back to the receiver's ``analysis/base_eval_{short}_..._test.json`` prior, the same
+    test-prompt number `frames.load_base_prior` serves everywhere else.
+
+    Args:
+        animal: Trait animal (the students subtree).
+        receiver: Receiver token or base name.
+        prompt_set: Prompt set read out of ``base_control.json``.
+        output_root: Output tree root; defaults to the paths YAML's.
+
+    Returns:
+        The prior.
+
+    Raises:
+        ValueError: When the student trees disagree on the prior.
+    """
+    root = resolve_output_root(output_root)
+    receiver = base_name(receiver)
+    files = sorted((root / "students" / animal / Path(*model_dir_parts_from_name(receiver))
+                    ).glob("teacher-*/*/*/base_control.json"))
+    vals = {round(json.loads(f.read_text())[prompt_set]["p_target"], 10) for f in files}
+    if len(vals) > 1:
+        raise ValueError(f"{(animal, receiver)}: student trees disagree on the prior: {vals}")
+    if vals:
+        return vals.pop()
+    from subliminal_learning.analysis.frames import load_base_prior
+    from subliminal_learning.analysis.transfer_factors import base_eval_short
+
+    return load_base_prior(root, base_eval_short(receiver), animal)
+
+
+def check_expected_prior(name: str, prior: float, expected: float | None) -> None:
+    """Raise unless `prior` is within 5% of the registry's ``expected_prior`` (``None`` = no check)."""
+    if expected is not None and abs(prior / expected - 1) >= 0.05:
+        raise ValueError(f"{name}: prior {prior} vs expected {expected}")
+
+
+def registry_design_cells(arm: dict, arms: Mapping[str, dict], arms_json: Path, *,
+                          ftseed: int | None, prompt_set: str = "test",
+                          output_root: Path | None = None) -> list[str]:
+    """The design cells of one registry arm: another arm's (``cells_from_arm``), a cells JSON
+    relative to the registry (``cells``), else the control tree's cells with a control value."""
+    if "cells_from_arm" in arm:
+        return registry_design_cells(arms[arm["cells_from_arm"]], arms, arms_json, ftseed=ftseed,
+                                     prompt_set=prompt_set, output_root=output_root)
+    if "cells" in arm:
+        return sorted(resolve_cells(Path(arms_json).parent / arm["cells"]))
+    return load_cell_matrix(arm["animal"], arm["sender"], arm["receiver"], [], ftseed=ftseed,
+                            tseed=arm["tseed"], dataset_tag=arm.get("dataset_tag", DEFAULT_DATASET_TAG),
+                            control_dataset_tag=arm.get("control_dataset_tag"),
+                            prompt_set=prompt_set, output_root=output_root).cells
+
+
 def significance_table(arms_json: str | Path, output_root: Path | None = None) -> pd.DataFrame:
     """The single transfer-vs-matched-control table for the arms of a registry JSON.
 
@@ -821,14 +882,8 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
     notes: list[str] = []
 
     def design(a: dict) -> list[str]:
-        if "cells_from_arm" in a:
-            return design(arms[a["cells_from_arm"]])
-        if "cells" in a:
-            return sorted(resolve_cells(arms_json.parent / a["cells"]))
-        return load_cell_matrix(a["animal"], a["sender"], a["receiver"], [], ftseed=ftseed,
-                                tseed=a["tseed"], dataset_tag=a.get("dataset_tag", DEFAULT_DATASET_TAG),
-                                control_dataset_tag=a.get("control_dataset_tag"),
-                                prompt_set=prompt_set, output_root=root).cells
+        return registry_design_cells(a, arms, arms_json, ftseed=ftseed, prompt_set=prompt_set,
+                                     output_root=root)
 
     for name, a in arms.items():
         dataset_tag = a.get("dataset_tag", DEFAULT_DATASET_TAG)
@@ -876,25 +931,9 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
         receiver = base_name(a["receiver"])
         key = (a["animal"], receiver)
         if key not in priors:
-            files = sorted((root / "students" / a["animal"]
-                            / Path(*model_dir_parts_from_name(receiver))
-                            ).glob("teacher-*/*/*/base_control.json"))
-            vals = {round(json.loads(f.read_text())[prompt_set]["p_target"], 10) for f in files}
-            if len(vals) > 1:
-                raise ValueError(f"{key}: student trees disagree on the prior: {vals}")
-            if vals:
-                priors[key] = vals.pop()
-            else:
-                # Trees whose worker wrote no base_control.json (the 160m re-pretraining
-                # receivers): the receiver's ``analysis/base_eval_{short}_..._test.json`` prior,
-                # the same test-prompt number `frames.load_base_prior` serves everywhere else.
-                from subliminal_learning.analysis.frames import load_base_prior
-                from subliminal_learning.analysis.transfer_factors import base_eval_short
-
-                priors[key] = load_base_prior(root, base_eval_short(receiver), a["animal"])
-        exp = a.get("expected_prior")
-        if exp is not None and abs(priors[key] / exp - 1) >= 0.05:
-            raise ValueError(f"{name}: prior {priors[key]} vs expected {exp}")
+            priors[key] = student_tree_prior(a["animal"], receiver, prompt_set=prompt_set,
+                                             output_root=root)
+        check_expected_prior(name, priors[key], a.get("expected_prior"))
         probe_pool = _probe_pool_for(receiver, a.get("probe_pool"))
         cut = _anchored_cut(root, receiver, probe_pool, dead="keep", notes=notes)
 
@@ -1527,9 +1566,15 @@ def _family_comparison(frame: pd.DataFrame, *, family_a: str, family_b: str,
                             notes=list(notes))
 
 
+def _explicit_arms(spec) -> bool:
+    """Whether a family spec is an explicit non-empty `FamilyArm` list."""
+    return (not isinstance(spec, str) and len(spec) > 0
+            and all(isinstance(a, FamilyArm) for a in spec))
+
+
 def compare_families(
-    spec_a: str | Sequence[str],
-    spec_b: str | Sequence[str],
+    spec_a: str | Sequence[str] | Sequence[FamilyArm],
+    spec_b: str | Sequence[str] | Sequence[FamilyArm],
     animals: str | Sequence[str],
     teachers: Sequence[str] | Mapping[str, Sequence[str]],
     *,
@@ -1561,8 +1606,10 @@ def compare_families(
 
     Args:
         spec_a: Family A as a `FAMILY_BASES` name (or alias) -- the only spelling that can name
-            ``same-model`` -- or, as before, its list of base tokens (common base first).
-        spec_b: Family B, same two spellings as `spec_a`.
+            ``same-model`` -- or, as before, its list of base tokens (common base first), or an
+            explicit list of `FamilyArm` (any arm set, e.g. a relationship category; every arm
+            must carry the same ``family`` label, which becomes the display label).
+        spec_b: Family B, same three spellings as `spec_a`.
         animals: One animal, or several for the animal-stratified comparison.
         teachers: Teacher param_tags used for every animal, or ``{animal: param_tags}``.
         family_a, family_b: Display labels; default to the family names when those were given.
@@ -1584,15 +1631,27 @@ def compare_families(
         ValueError: If the two families are spelled differently from each other, or if no cell is
             reached by both families (nothing to compare).
     """
-    if isinstance(spec_a, str) != isinstance(spec_b, str):
-        raise ValueError("both families must be given the same way: two names or two base lists")
-    label_a = family_a or (resolve_family(spec_a) if isinstance(spec_a, str) else "A")
-    label_b = family_b or (resolve_family(spec_b) if isinstance(spec_b, str) else "B")
-    if isinstance(spec_a, str):
-        arms = (family_arm_set(spec_a, family_label=label_a)
-                + family_arm_set(spec_b, family_label=label_b))
+    if _explicit_arms(spec_a) or _explicit_arms(spec_b):
+        if not (_explicit_arms(spec_a) and _explicit_arms(spec_b)):
+            raise ValueError("both families must be given the same way: two FamilyArm lists")
+        labels = [{a.family for a in spec} for spec in (spec_a, spec_b)]
+        if any(len(ls) != 1 for ls in labels) or labels[0] == labels[1]:
+            raise ValueError(f"each FamilyArm list needs ONE family label, distinct between "
+                             f"the two: {labels}")
+        label_a, label_b = family_a or labels[0].pop(), family_b or labels[1].pop()
+        arms = ([FamilyArm(label_a, a.sender, a.receiver) for a in spec_a]
+                + [FamilyArm(label_b, a.sender, a.receiver) for a in spec_b])
     else:
-        arms = family_arms(spec_a, spec_b, family_a=label_a, family_b=label_b)
+        if isinstance(spec_a, str) != isinstance(spec_b, str):
+            raise ValueError("both families must be given the same way: two names or two base "
+                             "lists")
+        label_a = family_a or (resolve_family(spec_a) if isinstance(spec_a, str) else "A")
+        label_b = family_b or (resolve_family(spec_b) if isinstance(spec_b, str) else "B")
+        if isinstance(spec_a, str):
+            arms = (family_arm_set(spec_a, family_label=label_a)
+                    + family_arm_set(spec_b, family_label=label_b))
+        else:
+            arms = family_arms(spec_a, spec_b, family_a=label_a, family_b=label_b)
 
     single = isinstance(animals, str)
     animal_list = [animals] if single else list(animals)

@@ -864,3 +864,23 @@ def test_cli_single_arm_mode_rejects_an_animal_list(tmp_path, monkeypatch):
                                       "--receiver", "orig", "--teachers", "t1,t2"])
     assert result.exit_code != 0
     assert "compare and family mode only" in result.output
+
+
+def test_compare_families_explicit_family_arm_lists(tmp_path):
+    """Explicit `FamilyArm` lists give the same result as the base-list spelling of the same arms."""
+    _family_tree(tmp_path)
+    kw = dict(cells=["c1", "c2"], n_perm=500, seed=0, output_root=tmp_path)
+    by_bases = tio.compare_families(DS, FS, "dog", ["t1", "t2"], family_a="ds", family_b="fs", **kw)
+    arms = tio.family_arms(DS, FS, family_a="ds", family_b="fs")
+    explicit = tio.compare_families([a for a in arms if a.family == "ds"],
+                                    [a for a in arms if a.family == "fs"], "dog", ["t1", "t2"], **kw)
+    assert explicit.modes["relative"].mean_contrast == by_bases.modes["relative"].mean_contrast
+    assert explicit.modes["relative"].arms.equals(by_bases.modes["relative"].arms)
+    # any arm set works: a 2-vs-3 subset, labels read off the arms
+    sub = tio.compare_families(arms[:2], arms[12:15], "dog", ["t1", "t2"], **kw)
+    assert (sub.modes["relative"].mean_contrast.n_a, sub.modes["relative"].mean_contrast.n_b) == (2, 3)
+    assert set(sub.modes["relative"].arms["family"]) == {"ds", "fs"}
+    with pytest.raises(ValueError, match="same way"):
+        tio.compare_families(arms[:2], FS, "dog", ["t1"], **kw)
+    with pytest.raises(ValueError, match="ONE family label"):
+        tio.compare_families(arms[:2], arms[1:14], "dog", ["t1"], **kw)

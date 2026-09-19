@@ -41,6 +41,14 @@ constrained`) forces every sampled token onto the number-list grammar via a
 control, and verifies every row before anything is written. Constrained pools are a
 distinct on-disk lineage from filtered pools (`prompt_set_tag`) and must not be compared
 across modes.
+
+Three opt-in THROUGHPUT options (TF32, a merged adapter, length-bucketed batching) are
+recorded as `generation_provenance` beside — never inside — the resume params, so they
+neither invalidate nor are invalidated by an existing pool. They must nevertheless be
+kept UNIFORM within a campaign: each changes the per-batch RNG streams (or the bits
+feeding them), and the common-random-number pairing across pools only survives when
+every pool was drawn with the same flags. Regenerating a pool whose stored provenance
+disagrees with the requested flags logs a WARNING naming the differing keys.
 """
 
 from __future__ import annotations
@@ -48,12 +56,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import platform
 import shutil
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping
 
+import peft
+import torch
+import transformers
 import yaml
 from loguru import logger
 from peft import PeftModel
@@ -140,6 +153,55 @@ def gen_draw_seed_base(draw: int) -> int:
     if draw < 1:
         raise ValueError(f"draw must be >= 1, got {draw}")
     return GEN_DRAW_SEED_BASE + GEN_DRAW_STRIDE * draw
+
+def parse_ftseeds(values: list[str] | None) -> list[int] | None:
+    """Parse the CLI's --ftseed occurrences (each a single index or a comma list).
+
+    None/empty means "every ftseed on disk" (the default fan-out). The selector only
+    picks which teacher cells are visited; it never enters `generation_params`, so a
+    pool generated with it is byte-identical to one from the fan-out.
+    """
+    if not values:
+        return None
+    seeds: list[int] = []
+    for value in values:
+        for part in str(value).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                n = int(part)
+            except ValueError:
+                raise ValueError(f"--ftseed takes integers, got {part!r}") from None
+            if n < 0:
+                raise ValueError(f"--ftseed must be >= 0, got {n}")
+            if n not in seeds:
+                seeds.append(n)
+    return sorted(seeds) or None
+
+
+def select_ftseed_dirs(param_dir: Path, ftseeds: list[int] | None) -> list[Path]:
+    """The `ftseed{N}/checkpoints` adapter dirs of a teacher cell to pool from.
+
+    `ftseeds=None` (default) returns every ftseed present under the cell. Otherwise
+    exactly the requested ones, and a requested ftseed with no adapter on disk is a
+    hard error naming the cell (a silent skip would look like a finished campaign).
+    """
+    if ftseeds is None:
+        return sorted(param_dir.glob("ftseed*/checkpoints"))
+    selected, missing = [], []
+    for n in ftseeds:
+        ckpt = param_dir / f"ftseed{n}" / "checkpoints"
+        (selected if ckpt.is_dir() else missing).append(ckpt)
+    if missing:
+        present = sorted(d.parent.name for d in param_dir.glob("ftseed*/checkpoints"))
+        raise FileNotFoundError(
+            f"--ftseed selected {', '.join(str(n) for n in ftseeds)} but the teacher "
+            f"cell {param_dir} has no adapter at {', '.join(str(m) for m in missing)} "
+            f"(on disk: {present or 'none'})"
+        )
+    return selected
+
 
 MODES_SUBDIR = "modes"
 # Marker file written next to raw.jsonl for the span between the rows write and the
@@ -381,6 +443,21 @@ class GenerateNumbersConfig:
         dtype: Base-model load precision, "float32" (default) or "bfloat16". Non-default
             is recorded in the manifest only (never in path/resume identity), so fp32
             pools stay byte-identical and are not invalidated.
+        tf32: Throughput option (default off): TF32 matmul/cudnn for the generation call
+            only, restored afterwards. PROVENANCE only -- never in `generation_params`,
+            so it neither invalidates nor is invalidated by an existing pool.
+        merge_adapter: Throughput option (default off, teacher source only): fold the LoRA
+            into the base weights in memory (`merge_and_unload`) before generating. Never
+            saved; the adapter content id in the params is unchanged. PROVENANCE only.
+            fp32 ONLY (rejected for bf16/fp16): an in-place merge into a low-precision
+            base weight truncates the small adapter deltas.
+        length_bucket: Throughput option (default off): batch prompts by token length;
+            rows are written back in ORIGINAL prompt order. PROVENANCE only -- but note
+            bucketing changes batch composition, so the per-batch seeds put a prompt on
+            a different RNG stream than the unbucketed path: common random numbers
+            against an UNBUCKETED pool are NOT preserved (identity/params are).
+            Rejected in constrained mode (the per-batch logits processor assumes
+            contiguous prompt slices).
     """
 
     paths: PathsConfig
@@ -404,6 +481,9 @@ class GenerateNumbersConfig:
     device: str = "cuda:0"
     force: bool = False
     dtype: str = "float32"
+    tf32: bool = False
+    merge_adapter: bool = False
+    length_bucket: bool = False
 
     def __post_init__(self) -> None:
         if self.source not in ("teacher", "base", "rng"):
@@ -424,6 +504,29 @@ class GenerateNumbersConfig:
             raise ValueError("rng_value_min must be <= rng_value_max")
         if self.rng_seed is not None and self.source != "rng":
             raise ValueError("rng_seed is valid only for source='rng'")
+        if self.merge_adapter and self.source != "teacher":
+            raise ValueError('merge_adapter is valid only for source="teacher"')
+        if self.merge_adapter and self.dtype != "float32":
+            # An in-place merge writes base + BA back into the base weight: in bf16/fp16
+            # the small adapter deltas are truncated against the much larger base
+            # magnitudes, so the merged model is NOT the model we evaluate. The unmerged
+            # path keeps the LoRA branch as its own tensors, at full relative precision.
+            raise ValueError(
+                f"merge_adapter requires dtype='float32' (got {self.dtype!r}): an "
+                "in-place merge into a low-precision base weight truncates small "
+                "adapter deltas, while the unmerged path keeps the LoRA branch at full "
+                "relative precision."
+            )
+        if self.length_bucket and self.constrained is not None:
+            # Constrained mode builds one LogitsProcessor per batch from ABSOLUTE
+            # (start, end) prompt slices; bucketing reorders prompts, so those per-row
+            # separator keys would be paired with the wrong rows. Rejected here, before
+            # any model load; `generate_completions` keeps the same guard.
+            raise ValueError(
+                "length_bucket is not supported in constrained generation mode: the "
+                "per-batch logits processor carries per-row state keyed by contiguous "
+                "prompt slices, which bucketing reorders."
+            )
         if self.gen_seed_base is not None and self.source == "rng":
             raise ValueError("gen_seed_base is valid only for the model sources (base/teacher)")
 
@@ -471,6 +574,63 @@ def _write_jsonl(path: Path, rows: list[dict]) -> str:
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def generation_provenance(cfg: GenerateNumbersConfig) -> dict:
+    """How a pool was drawn -- recorded OUTSIDE `params`, never part of the resume gate.
+
+    The three throughput options (TF32, merged adapter, length-bucketed batching) are
+    deliberately not generation identity: they change speed and, for TF32 / merging,
+    the last bits of the logits, but a pool drawn with them must stay interchangeable
+    with one drawn without (`_raw_pool_status` compares `params` only). The library /
+    node / allocator fields are here so a throughput regression or a numerical oddity
+    can be traced to the machine and versions that produced the rows.
+
+    CAMPAIGN RULE: keep these three flags UNIFORM within a campaign. Bucketing, merging
+    and TF32 each change the per-batch RNG streams (or the last bits that feed them), so
+    the common-random-number pairing that makes two pools comparable only survives when
+    every pool in the comparison was drawn with the same flags.
+    """
+    return {
+        "tf32": bool(cfg.tf32),
+        "adapter_merged": bool(cfg.merge_adapter),
+        "length_bucketed": bool(cfg.length_bucket),
+        "torch": torch.__version__,
+        "peft": peft.__version__,
+        "transformers": transformers.__version__,
+        "node": platform.node(),
+        "alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    }
+
+
+_PROVENANCE_FLAG_KEYS = ("tf32", "adapter_merged", "length_bucketed")
+
+
+def _warn_provenance_drift(where: Path, stored: Mapping | None, current: Mapping) -> None:
+    """Warn when rows about to be (re)written were drawn under different throughput flags.
+
+    Provenance is not identity, so this changes nothing about resume or the pool's
+    contents -- but a campaign whose pools mix flags loses common-random-number pairing,
+    and the drift is otherwise invisible. Silent when the stored manifest predates the
+    provenance block (nothing to compare).
+    """
+    if not isinstance(stored, Mapping):
+        return
+    prev = stored.get("generation_provenance")
+    if not isinstance(prev, Mapping):
+        return
+    differing = [k for k in _PROVENANCE_FLAG_KEYS if bool(prev.get(k)) != bool(current.get(k))]
+    if not differing:
+        return
+    logger.warning(
+        "⚠ Generation provenance drift at {}: {} — the stored rows were drawn with {}, "
+        "this run uses {}. Keep these flags uniform within a campaign: they change the "
+        "per-batch RNG streams, so common random numbers against the campaign's other "
+        "pools are not preserved.",
+        where, differing,
+        {k: bool(prev.get(k)) for k in differing},
+        {k: bool(current.get(k)) for k in differing},
+    )
 
 
 def generation_params(cfg: GenerateNumbersConfig, phash: str) -> dict:
@@ -923,6 +1083,12 @@ def apply_filter_mode(
                 f"deliberately, or use a new mode name."
             )
 
+    # Recomputing this mode: the cached numbers were derived from rows drawn under the
+    # provenance the stored mode manifest carries, so flag a disagreement with the raw
+    # pool's current provenance the same way the raw gate does.
+    if isinstance(stored, dict) and raw_manifest.get("generation_provenance") is not None:
+        _warn_provenance_drift(out, stored, raw_manifest["generation_provenance"])
+
     rows = raw_rows if raw_rows is not None else _read_jsonl(dataset_dir / "raw.jsonl")
     fr = filter_raw_rows(rows, filters=filters)  # mention telemetry lives in the raw manifest
     # atomic (temp + os.replace) via atomic_write_text; returns the content id of the
@@ -935,6 +1101,13 @@ def apply_filter_mode(
         # `number_dataset_dir` for student distillation (same-base cross-check).
         "base_model": raw_manifest.get("base_model"),
         "base_model_repo": raw_manifest.get("base_model_repo"),
+        # Generation provenance travels with the mode dir for the same reason the base
+        # model does (a mode dir is a self-sufficient dataset dir). Added only when the
+        # raw manifest carries one, so mode manifests of older pools are unchanged.
+        **(
+            {"generation_provenance": raw_manifest["generation_provenance"]}
+            if raw_manifest.get("generation_provenance") is not None else {}
+        ),
         # Content id of the just-written filtered.jsonl; the skip gate rechecks it
         # against the on-disk bytes to catch a torn pair or a param revert.
         "filtered_sha256": filtered_sha256,
@@ -1053,6 +1226,11 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
                 cfg.out_dir,
             )
 
+    if status in ("insufficient", "legacy_upgrade", "torn") and not raw_cached:
+        # The pool is about to be redrawn: say so if it was originally drawn under
+        # different throughput flags (provenance only -- identity is unchanged).
+        _warn_provenance_drift(cfg.out_dir, stored, generation_provenance(cfg))
+
     if not raw_cached:
         logger.info(
             "Generating numbers: source={} n_prompts={} -> {}",
@@ -1088,6 +1266,11 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             )
             if cfg.source == "teacher":
                 model = PeftModel.from_pretrained(model, str(cfg.checkpoint_dir))
+                if cfg.merge_adapter:
+                    # In memory only (never saved back): the same function in fp32 (the
+                    # config rejects a merge at any lower precision), one dense matmul
+                    # per layer instead of a base + LoRA branch.
+                    model = model.merge_and_unload()
             model.eval()
             if cfg.constrained is not None:
                 # Build the vocab audit + component masks ONCE (memoized), then hand a
@@ -1108,6 +1291,7 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
                 temperature=cfg.temperature, max_new_tokens=gen_max_new_tokens,
                 batch_size=cfg.batch_size, seed_base=cfg.resolved_gen_seed_base,
                 processor_factory=processor_factory,
+                tf32=cfg.tf32, length_bucket=cfg.length_bucket,
             )
             del model
 
@@ -1166,6 +1350,11 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
             # status gate compares -- a cheap stat, never a hash on the resume path.
             "raw_sha256": raw_sha,
             "raw_bytes": raw_path.stat().st_size,
+            # How this pool was produced, NOT what defines it: the throughput options
+            # and the library/node they ran on. Outside `params` on purpose, so the
+            # resume gate is blind to them (a pool drawn with them still matches a
+            # request made without them, and vice versa).
+            "generation_provenance": generation_provenance(cfg),
         }
         # Additive provenance: recorded only when non-default so fp32 manifests are
         # byte-identical to before (and the resume identity `params` is untouched).

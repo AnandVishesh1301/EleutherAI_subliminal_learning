@@ -1246,3 +1246,294 @@ def show(fig=None) -> None:
     for ax in fig.get_axes():
         plain_log_ticks(ax)
     plt.show()
+
+
+def diagonal_direction_panels(arms: pd.DataFrame, pairs: pd.DataFrame, *,
+                              stat: str = "mean_rel", figsize=(13.5, 5.6)):
+    """The two-panel diagonal-vs-direction figure of ``notebooks/diagonal_direction.ipynb``.
+
+    Left: each off-diagonal arm's effect against its RECEIVER's post-cliff diagonal, coloured by
+    relationship and sized by the SENDER's diagonal -- the two candidate explanations side by
+    side. Right: each unordered pair's asymmetry against ``diag(y) - diag(x)``, with the two
+    agreeing quadrants (asymmetry and diagonal difference pointing the same way) shaded, so the
+    sign test of `stats.diagonal_direction_tests.sign_agreement` is readable off the panel.
+
+    Args:
+        arms: `analysis.diagonal_direction.arm_table` output.
+        pairs: `analysis.diagonal_direction.pair_table` output.
+        stat: Arm statistic plotted (``mean_rel`` by default).
+        figsize: Figure size.
+
+    Returns:
+        ``(fig, (ax_arms, ax_pairs))``; nothing is shown or saved.
+    """
+    a = arms[(arms.sender != arms.receiver) & arms[stat].notna()
+             & arms.diag_receiver.notna() & arms.diag_sender.notna()]
+    colors = palette(sorted(set(a.relationship) | set(pairs.relationship)), "tab10")
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=figsize)
+    for rel, sub in a.groupby("relationship"):
+        ax0.scatter(sub.diag_receiver, sub[stat], s=20 + 260 * sub.diag_sender,
+                    color=colors[rel], alpha=0.65, edgecolor="none", label=rel)
+    for r in a.itertuples():
+        ax0.annotate(f"{r.sender}→{r.receiver}", (r.diag_receiver, getattr(r, stat)),
+                     fontsize=6, alpha=0.7, xytext=(3, 3), textcoords="offset points")
+    ax0.set_xlabel("diag_post(receiver)")
+    ax0.set_ylabel(f"T(x→y)  [{stat}]")
+    ax0.set_title(f"arm effect vs receiver diagonal (point size = sender diagonal), n={len(a)}")
+    ax0.legend(title="relationship", fontsize=7, title_fontsize=7, loc="best")
+
+    p = pairs[pairs[f"asym_{stat}"].notna()]
+    lim = float(np.nanmax(np.abs(p.ddiag))) * 1.15 if len(p) else 1.0
+    ylim = float(np.nanmax(np.abs(p[f"asym_{stat}"]))) * 1.15 if len(p) else 1.0
+    for sx, sy in ((1, 1), (-1, -1)):     # the two "flows into the higher diagonal" quadrants
+        ax1.add_patch(plt.Rectangle((0 if sx > 0 else -lim, 0 if sy > 0 else -ylim), lim, ylim,
+                                    color="0.85", alpha=0.45, zorder=0))
+    for rel, sub in p.groupby("relationship"):
+        ax1.scatter(sub.ddiag, sub[f"asym_{stat}"], s=40, color=colors[rel], label=rel, zorder=3)
+    for r in p.itertuples():
+        ax1.annotate(f"{r.x}/{r.y}", (r.ddiag, getattr(r, f"asym_{stat}")), fontsize=6,
+                     alpha=0.8, xytext=(3, 3), textcoords="offset points")
+    ax1.axhline(0, color="0.4", lw=0.8)
+    ax1.axvline(0, color="0.4", lw=0.8)
+    ax1.set_xlim(-lim, lim)
+    ax1.set_ylim(-ylim, ylim)
+    ax1.set_xlabel("ddiag = diag(y) − diag(x)")
+    ax1.set_ylabel(f"asym = T(x→y) − T(y→x)  [{stat}]")
+    ax1.set_title(f"pair asymmetry vs diagonal difference (shaded = agree), n={len(p)}")
+    right_legend(ax1, title="relationship", fontsize=7)
+    fig.tight_layout()
+    return fig, (ax0, ax1)
+
+
+#: The four (role, covariate) panels of `diagonal_direction_covariates`, in reading order.
+DIAGONAL_COVARIATE_PANELS: tuple[tuple[str, str], ...] = (
+    ("sender", "pool_tv_to_base"), ("sender", "teacher_delta_ce"),
+    ("receiver", "ctrl_delta_ce"), ("receiver", "k_rel_median"))
+
+
+def diagonal_direction_covariates(effects: pd.DataFrame, senders: pd.DataFrame,
+                                  receivers: pd.DataFrame, *, response: str = "log_p_rel",
+                                  fit: str = "pooled",
+                                  panels: Sequence[tuple[str, str]] = DIAGONAL_COVARIATE_PANELS,
+                                  figsize=(11.5, 8.5)):
+    """The 2x2 "why does a model send / receive well" panel of ``diagonal_direction.ipynb``.
+
+    Each panel puts one fitted role effect (with its standard error as an error bar) against one
+    covariate of the same model, labelled by lineage and coloured by the pretraining code tree --
+    the tree being the one taxonomy axis that is NOT a seed, so a tree-shaped scatter is visible
+    at a glance. With 7-13 models per panel these are descriptive; read them next to the
+    permutation p's of `analysis.diagonal_direction.covariate_tests`.
+
+    Args:
+        effects: `analysis.diagonal_direction.decomposition_tables` effects frame.
+        senders: `analysis.diagonal_direction.sender_covariates` output (carries ``tree``).
+        receivers: `analysis.diagonal_direction.receiver_covariates` output.
+        response: Response whose effects are plotted.
+        fit: Which fit's effects are plotted.
+        panels: ``(role, covariate)`` per panel, in reading order.
+        figsize: Figure size.
+
+    Returns:
+        ``(fig, axes)``; nothing is shown or saved.
+    """
+    covs = {"sender": senders, "receiver": receivers}
+    trees = senders.tree if "tree" in senders else pd.Series(dtype=object)
+    colors = palette(sorted(trees.dropna().unique()), "tab10")
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    for ax, (role, covariate) in zip(axes.ravel(), panels):
+        sub = effects[(effects.fit == fit) & (effects.response == response)
+                      & (effects.role == role)].set_index("model")
+        frame = covs[role]
+        x = frame[covariate].reindex(sub.index) if covariate in frame else pd.Series(
+            np.nan, index=sub.index)
+        ok = x.notna() & sub.effect.notna()
+        for model in sub.index[ok]:
+            color = colors.get(trees.get(model), "0.4")
+            ax.errorbar(x[model], sub.effect[model], yerr=sub.se[model], fmt="o", ms=6,
+                        color=color, ecolor=color, elinewidth=1, capsize=2, alpha=0.85)
+            ax.annotate(model, (x[model], sub.effect[model]), fontsize=7, alpha=0.85,
+                        xytext=(4, 3), textcoords="offset points")
+        ax.axhline(0, color="0.5", lw=0.8)
+        ax.set_xlabel(covariate)
+        ax.set_ylabel(f"{role} effect  [{response}, {fit} fit]")
+        ax.set_title(f"{role} effect vs {covariate}  (n={int(ok.sum())})", fontsize=10)
+    handles = [plt.Line2D([], [], marker="o", ls="", color=c, label=t) for t, c in colors.items()]
+    if handles:
+        axes[0, 1].legend(handles=handles, title="pretraining tree", fontsize=7, title_fontsize=7,
+                          loc="best")
+    fig.tight_layout()
+    return fig, axes
+
+
+#: Panel order and titles of `transfer_matrix_panels`.
+TRANSFER_MATRIX_PANELS: tuple[tuple[str, str], ...] = (
+    ("mean", "mean"), ("p75", "75th pct"), ("p95", "95th pct"), ("max", "max"))
+
+
+def transfer_matrix_panels(mats: dict[str, pd.DataFrame], *, vmin: float = 0.0, vmax: float,
+                           title: str, cbar_label: str, fmt: str = "{:.2f}",
+                           figsize=(15, 13.5)):
+    """The 2x2 sender x receiver heatmap figure of ``notebooks/transfer_matrix.ipynb``.
+
+    One `annotated_heatmap` per order statistic (mean / 75th pct / 95th pct / max) on ONE shared
+    colour scale; the colour saturates above `vmax` while the cell label keeps the true value.
+    Missing arms (NaN) are drawn as hatched light-grey cells.
+
+    Args:
+        mats: `analysis.transfer_matrix.transfer_matrices` output -- ``{stat: sender x receiver}``.
+        vmin, vmax: Shared colour limits.
+        title: Figure suptitle.
+        cbar_label: Colorbar label.
+        fmt: Per-cell label format.
+        figsize: Figure size.
+
+    Returns:
+        ``(fig, axes)`` with ``axes`` the flat array of the four panels; nothing is shown or saved.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    axes = axes.ravel()
+    im = None
+    for ax, (stat, label) in zip(axes, TRANSFER_MATRIX_PANELS):
+        grid = mats[stat]
+        ax.set_facecolor("0.9")
+        for i in range(grid.shape[0]):     # hatch the missing arms so a blank is visibly "no data"
+            for j in range(grid.shape[1]):
+                if np.isnan(grid.iat[i, j]):
+                    ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, fill=True,
+                                               facecolor="0.9", edgecolor="0.7", hatch="///",
+                                               lw=0, zorder=0))
+        im = annotated_heatmap(ax, grid, vmin=vmin, vmax=vmax, fmt=fmt, origin="upper",
+                               tick_fontsize=8, cell_fontsize=6)
+        ax.set_title(label)
+        ax.set_xlabel("receiver")
+        ax.set_ylabel("sender")
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0, 0.93, 0.97))
+    cbar = fig.colorbar(im, ax=axes.tolist(), fraction=0.025, pad=0.02)
+    cbar.set_label(cbar_label)
+    return fig, axes
+
+
+def relationship_panels(raw: pd.DataFrame, rel: pd.DataFrame, *, raw_sub: pd.Series,
+                        rel_sub: pd.Series, rel_vmax: float, raw_vmax: float = 0.4,
+                        raw_labels: pd.DataFrame | None = None,
+                        rel_labels: pd.DataFrame | None = None,
+                        rel_fmt: Callable[[float], str] | str = "{:.2f}", title: str,
+                        subtitle: str = "cell = median · max over arms of the per-arm statistic",
+                        figsize=(19, 7)):
+    """The relationship x statistic pair of heatmaps of ``notebooks/transfer_matrix.ipynb``.
+
+    Left: raw p(dog); right: prior-normalized. Each panel has its own colour scale (the colour
+    saturates above ``vmax``, the label keeps the true value). Every cell is coloured by
+    ``raw``/``rel`` (the median over arms) and labelled on two lines -- ``raw_labels`` /
+    ``rel_labels`` when given (``median X · max Y``), else the coloured value -- then the row's
+    ``sub`` line (arm / run counts). Rows with no arm (NaN) are hatched.
+
+    Args:
+        raw, rel: ``category x stat`` frames (`analysis.transfer_matrix.RelationshipSummary.grid`),
+            same row order; columns are ``mean / p75 / p95 / max`` and are titled from
+            `TRANSFER_MATRIX_PANELS`.
+        raw_sub, rel_sub: Second label line per row (indexed like the frames).
+        rel_vmax, raw_vmax: Colour caps of the two panels (both start at 0).
+        raw_labels, rel_labels: Optional first label line per cell
+            (`RelationshipSummary.value_labels`), same shape as the frames.
+        rel_fmt: Label format of the normalized panel (used when ``rel_labels`` is None).
+        title: Figure suptitle; `subtitle` (the reduction) is appended on a second line.
+        figsize: Figure size.
+
+    Returns:
+        ``(fig, axes)`` with ``axes`` the two panels; nothing is shown or saved.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    stat_titles = dict(TRANSFER_MATRIX_PANELS)
+    panels = [("raw treatment p(dog)", raw, raw_sub, raw_vmax, "{:.2f}", raw_labels),
+              ("prior-normalized (treatment − control) / prior", rel, rel_sub, rel_vmax, rel_fmt,
+               rel_labels)]
+    for ax, (label, grid, sub, vmax, fmt, labels) in zip(axes, panels):
+        grid = grid.rename(columns=stat_titles)
+        ax.set_facecolor("0.9")
+        for i in range(grid.shape[0]):
+            for j in range(grid.shape[1]):
+                if np.isnan(grid.iat[i, j]):
+                    ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, fill=True,
+                                               facecolor="0.9", edgecolor="0.7", hatch="///",
+                                               lw=0, zorder=0))
+        im = annotated_heatmap(ax, grid, vmin=0.0, vmax=vmax, origin="upper", annotate=False,
+                               tick_fontsize=8)
+        for i, cat in enumerate(grid.index):     # two-line labels: value, then the row's counts
+            for j in range(grid.shape[1]):
+                v = grid.iat[i, j]
+                if np.isnan(v):
+                    continue
+                line1 = _apply_fmt(fmt, v) if labels is None else str(labels.iat[i, j])
+                ax.text(j, i, f"{line1}\n{sub[cat]}", ha="center", va="center",
+                        fontsize=5.5, color=_contrast_text_color(im.to_rgba(v)))
+        ax.set_title(label)
+        ax.set_xlabel("statistic over the arm's runs")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+        cbar.set_label("p(dog)" if ax is axes[0] else "(treatment − control) / prior")
+    axes[0].set_ylabel("relationship of sender and receiver")
+    axes[1].set_yticklabels([])
+    fig.suptitle(f"{title}\n{subtitle}" if subtitle else title)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    return fig, axes
+
+
+def relationship_significance_panel(pooled: pd.DataFrame, *, n_perm: int = 20000,
+                                    alpha: float = 0.05, title: str | None = None,
+                                    figsize=(9, 7)):
+    """The category x [exceedance fraction, permutation p, arms p<alpha] heatmap of
+    ``notebooks/transfer_matrix.ipynb``.
+
+    Colour comes ONLY from the fraction column (0-1, `annotated_heatmap`'s default cmap); the p
+    and arms columns are neutral light-grey cells carrying text. Rows whose pooled p is below
+    `alpha` get a thick dark border around their fraction and p cells. Untestable rows (no
+    control at all, NaN) are hatched and read "no controls".
+
+    Args:
+        pooled: `analysis.transfer_matrix.relationship_exceedance_table` pooled frame.
+        n_perm: Draws the table was built with (sets the p floor ``1/(n_perm+1)`` and the title).
+        alpha: Highlight threshold on the pooled p.
+        title: Axes title; default names the test and `n_perm`.
+        figsize: Figure size.
+
+    Returns:
+        ``(fig, ax)``; nothing is shown or saved.
+    """
+    if title is None:
+        title = f"exceedance over matched control, stratified by arm × cell ({n_perm} perms)"
+    cols = ["exceedance fraction", "permutation p", f"arms p<{alpha:g}"]
+    cats = list(pooled.category)
+    grid = pd.DataFrame(np.nan, index=cats, columns=cols, dtype=float)
+    grid.iloc[:, 0] = pooled.exceed_frac.to_numpy(dtype=float)
+    fig, ax = plt.subplots(figsize=figsize)
+    im = annotated_heatmap(ax, grid, vmin=0.0, vmax=1.0, origin="upper", annotate=False,
+                           tick_fontsize=9)
+    for i, r in enumerate(pooled.itertuples()):
+        testable = np.isfinite(r.exceed_frac)
+        if not testable:     # hatched "no data" row
+            for j in range(3):
+                ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, facecolor="0.9",
+                                           edgecolor="0.7", hatch="///", lw=0))
+            ax.text(1, i, "no controls", ha="center", va="center", fontsize=8, color="0.3")
+            continue
+        for j in (1, 2):     # neutral text cells
+            ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, facecolor="0.93",
+                                       edgecolor="white", lw=1))
+        floor = 1.0 / (n_perm + 1)
+        p_txt = f"p ≤ {floor:.1e}" if r.perm_p <= floor else f"p = {r.perm_p:.1e}"
+        texts = [f"{r.exceed_frac:.2f} ({int(r.n_exceed)}/{int(r.n_runs)} runs)", p_txt,
+                 f"{int(r.n_arms_sig)} / {int(r.n_arms_testable)} arms"]
+        colors = [_contrast_text_color(im.to_rgba(r.exceed_frac)), "black", "black"]
+        for j, (t, c) in enumerate(zip(texts, colors)):
+            ax.text(j, i, t, ha="center", va="center", fontsize=8, color=c,
+                    fontweight="bold" if r.perm_p < alpha and j < 2 else "normal")
+        if r.perm_p < alpha:
+            ax.add_patch(plt.Rectangle((-.5, i - .5), 2, 1, fill=False, edgecolor="0.1",
+                                       lw=2.5))
+    ax.set_title(title)
+    ax.set_ylabel("relationship of sender and receiver")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+    cbar.set_label("fraction of runs above the arm's control maximum")
+    fig.tight_layout()
+    return fig, ax
