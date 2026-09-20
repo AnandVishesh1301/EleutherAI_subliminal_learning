@@ -18,6 +18,7 @@ from subliminal_learning.run_gate import (
     latest_resumable_checkpoint,
     remove_torn_checkpoints_above,
     write_interrupted_marker,
+    resume_identity_diff,
     write_resume_identity,
     write_resume_marker,
 )
@@ -281,3 +282,16 @@ def test_completion_trainer_honors_accumulation_and_checkpointing(
     assert captured["gradient_accumulation_steps"] == 4
     assert captured["gradient_checkpointing"] is True
     model.enable_input_require_grads.assert_called_once()
+
+
+def test_resume_identity_diff_names_the_key_that_forces_a_restart(tmp_path):
+    """Why a resumable tree is discarded: the stamp predates the tf32 flag."""
+    stored = {"filtered_sha256": "same", "train": {"learning_rate": 1e-4}}
+    write_resume_identity(tmp_path, stored)
+    current = {"filtered_sha256": "same", "train": {"learning_rate": 1e-4, "tf32": True}}
+    assert resume_identity_diff(tmp_path, current) == {
+        "train.tf32": ("<missing>", True)
+    }
+    assert resume_identity_diff(tmp_path, stored) == {}
+    # No stamp at all (legacy partial run) -> nothing to report.
+    assert resume_identity_diff(tmp_path / "nope", current) == {}

@@ -49,7 +49,9 @@ from subliminal_learning.run_gate import (
     checkpoint_resume_is_safe,
     clear_interrupted_marker,
     clear_stale_run,
+    latest_resumable_checkpoint,
     prune_resume_state,
+    resume_identity_diff,
     write_resume_identity,
     format_identity_diff,
     student_gate_action,
@@ -487,6 +489,13 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         # clear_stale_run destroy a possibly-finished cell over a transient
         # filesystem error — fail the job loudly instead and let the queue retry.
     decision = student_gate_action(stored_manifest, run_identity, cfg.force)
+    if decision.action == SKIP and decision.diff:
+        # Soft identity keys (train.tf32): the stored twin is reused across precisions, so
+        # say so rather than let a mixed-precision campaign silently reuse the other twin.
+        logger.warning(
+            "reusing existing student at {} despite soft identity drift:\n{}",
+            run_dir, format_identity_diff(decision.diff),
+        )
     if decision.action == SKIP:
         logger.info(
             "SKIP existing student ({}/{}/{}/ftseed{}): {} — pass force=True to retrain.",
@@ -532,6 +541,17 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             dtype=cfg.dtype, save_steps=cfg.train.save_steps,
         )
     )
+    if not resume_safe and latest_resumable_checkpoint(run_dir / "checkpoints") is not None:
+        # The stamp is compared strictly (a resumed run's manifest records the CURRENT
+        # config, so nothing in it may change mid-run) -- say which key forces the
+        # restart, e.g. a `train.tf32` flip between the two attempts.
+        diff = resume_identity_diff(run_dir, run_identity)
+        if diff:
+            logger.warning(
+                "discarding resumable checkpoints: resume stamp differs from the "
+                "current config, so the run restarts from scratch:\n{}",
+                format_identity_diff(diff),
+            )
     clear_stale_run(run_dir, preserve_checkpoints=resume_safe)
     # THIS process is the writer from here on. Cleared before the (30-90 s) model load,
     # not just inside the trainer: a duplicate job in another queue that arrives during

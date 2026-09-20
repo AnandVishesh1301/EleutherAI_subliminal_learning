@@ -216,3 +216,22 @@ def test_eval_namespace_animal_derives_eval_animal_subdir(monkeypatch):
     a = worker.parse_args()
     assert a.eval_namespace_animal is True
     assert worker.eval_artifact_subdir(a) == Path("eval") / "cat"
+
+
+# --- --tf32 (2026-09-20): opt-in TF32 matmuls, off by default ---------------------------
+
+def test_tf32_flag_defaults_off_and_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["w", "--animal", "dog", "--config-tag", "t"])
+    assert worker.parse_args().tf32 is False
+    monkeypatch.setattr(
+        sys, "argv", ["w", "--animal", "dog", "--config-tag", "t", "--tf32"]
+    )
+    assert worker.parse_args().tf32 is True
+
+
+def test_tf32_flag_reaches_the_training_config():
+    """The flag lands on the TrainConfig the cells are trained with (via _load_common's)."""
+    st = _student_train()
+    assert st.tf32 is False  # the YAML cell is fp32 and stays so
+    got = worker.build_student_train(replace(st, tf32=True), 20, None, False)
+    assert got.tf32 is True

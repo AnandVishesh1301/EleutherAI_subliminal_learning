@@ -580,9 +580,9 @@ LEGACY_PAIRINGS: tuple[tuple[str, str], ...] = (
     (RELATIONSHIP_CATEGORIES[0], RELATIONSHIP_CATEGORIES[6]))
 
 #: Columns of `relationship_pairing_table` (`COMPARISON_COLUMNS` minus the value mode).
-PAIRING_COLUMNS = ["comparison", "design", "animal", "arms A vs B", "mean contrast", "mean p",
-                   "win prob.", "win p", "exceed. frac contrast", "exceed. p", "floor",
-                   "labelings", "missing blocks"]
+PAIRING_COLUMNS = ["comparison", "design", "animal", "arms A vs B", "arms A", "arms B",
+                   "mean contrast", "mean p", "win prob.", "win p", "exceed. frac contrast",
+                   "exceed. p", "floor", "labelings", "missing blocks"]
 
 
 def load_relationship_runs(animal: str, teachers: Sequence[str], cells: Sequence[str], *,
@@ -725,19 +725,46 @@ def relationship_pairing_table(pairings: Sequence[tuple[str, str]], arms: Mappin
     from subliminal_learning.analysis.transfer_significance_io import (
         compare_families, family_comparison_table)
 
-    results = {}
+    results, labels = {}, {}
     for a, b in pairings:
         label, cells = cells_for(a, b)
         multi = (a, b) in legacy or (b, a) in legacy
-        results[(f"{a} vs {b}", label)] = compare_families(
+        res = compare_families(
             list(arms[a]), list(arms[b]), list(animals) if multi else animal, teachers,
             cells=cells, n_perm=n_perm, seed=seed, output_root=output_root)
+        results[(f"{a} vs {b}", label)] = res
+        # the model pairs behind each side's arm count, keyed like the table's index columns
+        if multi:
+            labels[(f"{a} vs {b}", label, animal)] = _family_arm_labels(res.per_animal[animal], a, b)
+            labels[(f"{a} vs {b}", label, f"{'+'.join(res.animals)} stratified")] = \
+                _family_arm_labels(res.stratified, a, b)
+        else:
+            labels[(f"{a} vs {b}", label, animal)] = _family_arm_labels(res, a, b)
     table = family_comparison_table(results)
     table = table[table["value mode"] == "relative"].drop(columns="value mode")
     table.loc[~table.stratified & (table.animal == ""), "animal"] = animal
     # a legacy pairing shows `animal`'s row and the stratified row only
     table = table[table.stratified | (table.animal == animal)]
+    keys = list(zip(table.comparison, table.design, table.animal))
+    table = table.assign(**{"arms A": [labels[k][0] for k in keys],
+                            "arms B": [labels[k][1] for k in keys]})
     return table.reindex(columns=[*PAIRING_COLUMNS, "stratified"]).reset_index(drop=True)
+
+
+def _family_arm_labels(res, family_a: str, family_b: str) -> tuple[str, str]:
+    """``(arms A, arms B)``: each side's model pairs as ``sender→receiver`` short labels, comma
+    joined, in the order the arms enter the relabelling (first appearance in the effect frame;
+    an arm seen in several animals appears once)."""
+    from subliminal_learning.analysis.diagonal_direction import BASE_TO_SHORT
+
+    def short(token: str) -> str:
+        return BASE_TO_SHORT.get(token, token)
+
+    out = []
+    for fam in (family_a, family_b):
+        arms = pd.unique(res.frame.loc[res.frame.family == fam, "arm"])
+        out.append(", ".join("→".join(short(t) for t in a.split("->", 1)) for a in arms))
+    return out[0], out[1]
 
 
 def style_relationship_pairing_table(df: pd.DataFrame):

@@ -7,9 +7,12 @@ its own null and exchangeability assumption; most are hand-rolled because no lib
 the estimator (the exact exceedance product, and the relabelling permutation tests); the sign
 test wraps scipy.
 
-Pure functions over numpy/pandas: no disk IO, no plotting. Loaders live one layer up in
+Pure functions over numpy/pandas: no plotting, no loading. Loaders live one layer up in
 ``subliminal_learning.analysis.transfer_significance_io``. Results are small frozen dataclasses holding
-plain ``float``/``int`` so they JSON-serialize unchanged.
+plain ``float``/``int`` so they JSON-serialize unchanged -- which is what the three permutation
+tests do through `stats.memo`: each is deterministic in its inputs (seeded draws), so its result
+is memoized on a content hash of those inputs (`memo.key`) and read back exactly on the next call
+with the same inputs (``SUBLIMINAL_ANALYSIS_CACHE=0`` turns that off).
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+
+from subliminal_learning.stats import memo
 
 __all__ = [
     "SignTestResult",
@@ -242,6 +247,18 @@ def stratified_exceedance_permutation(
         labels, inv = np.unique(g, return_inverse=True)
         inv = inv.ravel()
     masks = [inv == k for k in range(1 if labels is None else len(labels))]
+    memo_key = memo.key("stratified_exceedance_permutation", v, ctrl,
+                        None if labels is None else np.asarray(groups).ravel(), int(n_perm),
+                        int(seed))
+    return memo.memoized("stratified_exceedance_permutation", memo_key, StratifiedPermResult,
+                         lambda: _stratified_exceedance_permutation(v, ctrl, finite, labels, inv,
+                                                                    masks, n_perm, seed))
+
+
+def _stratified_exceedance_permutation(v, ctrl, finite, labels, inv, masks, n_perm, seed
+                                       ) -> StratifiedPermResult:
+    """The draws of `stratified_exceedance_permutation` on validated inputs."""
+    n_cells, n_pools = v.shape
 
     def _cell_counts(ctrl_idx: np.ndarray) -> np.ndarray:
         """Per-cell exceedances for a ``(draws x cells)`` matrix of control column indices."""
@@ -332,8 +349,6 @@ def arm_set_permutation(
     Raises:
         ValueError: If either family has no arm with a finite value.
     """
-    from math import comb
-
     for col in (family_col, value_col):
         if col not in frame.columns:
             raise ValueError(f"frame has no {col!r} column")
@@ -343,6 +358,17 @@ def arm_set_permutation(
     if not is_a.any() or is_a.all():
         raise ValueError("both families need at least one arm with a finite value")
     values = df[value_col].to_numpy(dtype=float)
+    memo_key = memo.key("arm_set_permutation", values, is_a, int(max_exact), int(n_perm),
+                        int(seed))
+    return memo.memoized("arm_set_permutation", memo_key, ArmSetResult,
+                         lambda: _arm_set_permutation(values, is_a, max_exact, n_perm, seed))
+
+
+def _arm_set_permutation(values: np.ndarray, is_a: np.ndarray, max_exact: int, n_perm: int,
+                         seed: int) -> ArmSetResult:
+    """The enumeration / draws of `arm_set_permutation` on its filtered inputs."""
+    from math import comb
+
     n_a = int(is_a.sum())
     n_b = int(values.size - n_a)
 
@@ -460,8 +486,6 @@ def arm_relabel_cell_permutation(
         ValueError: On an unknown `statistic`, a missing column, a family with no arm, or no
             cell carrying both families.
     """
-    from math import comb
-
     if statistic not in ARM_RELABEL_STATISTICS:
         raise ValueError(f"statistic must be one of {ARM_RELABEL_STATISTICS}, got {statistic!r}")
     for col in (family_col, arm_col, stratum_col, value_col):
@@ -482,6 +506,20 @@ def arm_relabel_cell_permutation(
     is_a = np.array([families[a] == family_a for a in arms])
     if not is_a.any() or is_a.all():
         raise ValueError("both families need at least one arm")
+    memo_key = memo.key("arm_relabel_cell_permutation", sums, counts, is_a, statistic,
+                        int(max_exact), int(n_perm), int(seed), int(n_cells_dropped))
+    return memo.memoized("arm_relabel_cell_permutation", memo_key, ArmRelabelResult,
+                         lambda: _arm_relabel_cell_permutation(
+                             sums, counts, is_a, statistic, max_exact, n_perm, seed,
+                             n_cells_dropped))
+
+
+def _arm_relabel_cell_permutation(sums, counts, is_a, statistic, max_exact, n_perm, seed,
+                                  n_cells_dropped) -> ArmRelabelResult:
+    """The enumeration / draws of `arm_relabel_cell_permutation` on its per-cell tables."""
+    from math import comb
+
+    n_arms = sums.shape[0]
     n_a, n_b = int(is_a.sum()), int((~is_a).sum())
     n_cells = sums.shape[1]
     total_sums, total_counts = sums.sum(axis=0), counts.sum(axis=0)
@@ -502,12 +540,12 @@ def arm_relabel_cell_permutation(
         return np.where(n_valid > 0, per_cell_stat.sum(axis=1) / np.maximum(n_valid, 1), np.nan)
 
     observed = float(stat(np.flatnonzero(is_a)[None, :])[0])
-    n_labelings = comb(len(arms), n_a)
+    n_labelings = comb(n_arms, n_a)
     exact = n_labelings <= max_exact
     # Chunk the labelings so the (draws x cells) tables stay bounded in memory.
     chunk = max(1, int(2e7) // max(1, n_cells))
     if exact:
-        nulls, combos = [], itertools.combinations(range(len(arms)), n_a)
+        nulls, combos = [], itertools.combinations(range(n_arms), n_a)
         while True:
             block = list(itertools.islice(combos, chunk))
             if not block:
@@ -520,7 +558,7 @@ def arm_relabel_cell_permutation(
         nulls = []
         for start in range(0, n_perm, chunk):
             draws = min(chunk, n_perm - start)
-            picks = np.argsort(rng.random((draws, len(arms))), axis=1)[:, :n_a]
+            picks = np.argsort(rng.random((draws, n_arms)), axis=1)[:, :n_a]
             nulls.append(stat(picks))
         null = np.concatenate(nulls)
         p = float((int((null >= observed).sum()) + 1) / (n_perm + 1))

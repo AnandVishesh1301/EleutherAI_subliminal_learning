@@ -806,12 +806,13 @@ def run_teacher_sft_completion_only(
     # returns, so the same-process endpoint eval that reuses the returned model runs at
     # exactly the precision the caller had set. `TrainingArguments(tf32=...)` is NOT
     # equivalent -- it flips the global flag at args construction and never restores it.
+    # They are FLIPPED immediately before the `try:` below, never earlier: anything
+    # between here and it (marker clearing, torn-checkpoint pruning) can raise on a
+    # filesystem error, and the workers catch per-cell exceptions and keep going -- a
+    # flag set outside the try/finally would silently stay on for later cells' evals.
     prev_tf32 = (
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
     )
-    if train_cfg.tf32:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
     # This attempt is the live writer: drop any stamp a previous yield left behind.
     run_dir = output_dir.parent
     clear_interrupted_marker(run_dir)
@@ -885,6 +886,9 @@ def run_teacher_sft_completion_only(
                 stopped_at_step=None,
                 yield_pending=yielder.requested_at is not None,
             )
+    if train_cfg.tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     try:
         # SIGTERM = the queue reclaiming this GPU. Handled ONLY for the duration of
         # `trainer.train()`; before and after it keeps its default behaviour (a SIGTERM

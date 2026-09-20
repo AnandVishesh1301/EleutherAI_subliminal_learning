@@ -17,7 +17,8 @@ identity `pythia-{size}-seed{N}` (repo basename), disjoint from
 for non-160m full specs (`pythia-410m-seed3`); at 160m the shorthand
 `full-seed{N}` stays the label, byte-identical to before.
 
-Further variants (`weightc-seed<N>`, `pilerepro-seed<N>`, `dclm-seed<N>`) select
+Further variants (`weightc-seed<N>`, `pilereprov1-seed<N>`, `pilerepro-seed<N>`,
+`dclm-seed<N>`) select
 gpaulo's local 160m re-pretrainings, one row per family in
 `registry.LOCAL_PYTHIA_FAMILIES` (which also fixes each family's allowed seeds).
 Those weights are not on the Hub -- they resolve to a `local/...` provenance
@@ -274,8 +275,8 @@ def parse_base_models(value: str, *, allow_full_seeds: bool = False) -> list:
         fast with a ValueError rather than a mid-run HF 404. Each token may be
         suffixed with "@<revision>" to pin a pretraining checkpoint, e.g.
         "data-seed1@step3000". The revision is any nonempty string after "@".
-      - "<local family>-seed<N>" ("weightc", "pilerepro", "dclm"; 160m only, with
-        that family's seeds from `registry.LOCAL_PYTHIA_FAMILIES`) -> one of
+      - "<local family>-seed<N>" ("weightc", "pilereprov1", "pilerepro", "dclm";
+        160m only, with that family's seeds from `registry.LOCAL_PYTHIA_FAMILIES`) -> one of
         gpaulo's local re-pretrainings. These weights are unpublished: the spec
         resolves to the `local/pythia-160m-<family>-seed<N>` provenance string and
         loads from a local conversion tree. No group selector ("seeds", "all",

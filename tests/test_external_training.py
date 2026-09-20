@@ -567,3 +567,28 @@ def test_supervised_head_trainer_reproduces_default_adapter(tmp_path, monkeypatc
         assert torch.allclose(weights[False][k], weights[True][k], rtol=1e-5, atol=1e-7), k
     # Something actually trained (B matrices leave zero).
     assert any(k.endswith("lora_B.weight") and w.abs().sum() > 0 for k, w in weights[True].items())
+
+
+def test_tf32_flags_restored_when_setup_after_the_flip_raises(tmp_path, monkeypatch):
+    """Nothing between the flip and the training try/finally may leak the flags.
+
+    `clear_interrupted_marker` & friends touch the filesystem; a shared-mount error
+    there used to leave TF32 on for every later cell in the worker process.
+    """
+    tok = tokenizer_for("Qwen/Qwen2.5-1.5B")
+    _cpu_training_args(monkeypatch)
+    monkeypatch.setenv("WANDB_DIR", str(tmp_path))
+
+    def boom(_run_dir):
+        raise OSError("stale file handle")
+
+    monkeypatch.setattr(sft_io, "clear_interrupted_marker", boom)
+    data = Dataset.from_list([{"prompt": "animal is", "completion": " dog"}] * 2)
+    train = TrainConfig(1e-3, 1, 2, 64, 1.0, 0.0, "constant", 0, tf32=True)
+    before = _tf32_flags()
+    with pytest.raises(OSError, match="stale file handle"):
+        sft_io.run_teacher_sft_completion_only(
+            _tiny_qwen(tok), tok, data, LoRAConfig(2, 4, 0.0, TARGETS), train,
+            tmp_path / "run", "test-run",
+        )
+    assert _tf32_flags() == before

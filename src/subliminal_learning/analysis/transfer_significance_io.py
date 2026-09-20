@@ -70,6 +70,12 @@ __all__ = [
     "family_comparison_table",
     "style_family_comparison_table",
     "resolve_cells",
+    "STATUS_FLAG",
+    "registry_selection_notes",
+    "lacking_data_table",
+    "flagged_arms",
+    "flagged_family_arms",
+    "flagged_missing_blocks",
 ]
 
 CONTROL_LABEL = "CONTROL"
@@ -476,7 +482,10 @@ def load_cell_matrix(
 # ----------------------------------------------------------------------------------------------
 TABLE_COLUMNS = ["arm", "teacher", "test", "prior", "cells", "wins / n", "sign p", "exceed.",
                  "perm p", "treat median ×prior", "treat max ×prior", "ctrl median ×prior",
-                 "ctrl max ×prior", "dead (treat/ctrl)"]
+                 "ctrl max ×prior", "dead (treat/ctrl)", "status"]
+
+#: Every ``status`` of an arm lacking data starts with this; a tested arm's status is "".
+STATUS_FLAG = "⚠"
 
 #: The ``test`` column's labels: which statistic produced a row's p.
 TEST_SIGN_TEACHER = "sign (per teacher)"
@@ -604,8 +613,8 @@ def pooled_permutation(matrix: CellMatrix, pooled_teachers: Sequence[str], *,
 def significance_rows(matrix: CellMatrix, dead: np.ndarray, prior: float, arm: str,
                       pooled_teachers: Sequence[str], *, short: Sequence[str] = (),
                       labelled: bool = True, n_perm: int = 20000, seed: int = 0) -> list[dict]:
-    """One arm's table rows: per teacher (sign test + descriptive exceedance count), then the
-    arm-pooled stratified-permutation row.
+    """One arm's table rows: the arm-pooled stratified-permutation row FIRST, then per teacher
+    (sign test + descriptive exceedance count), then the `short` teachers.
 
     Args:
         matrix: The arm's `CellMatrix` (pools = `pooled_teachers` + `short`, control last).
@@ -624,6 +633,22 @@ def significance_rows(matrix: CellMatrix, dead: np.ndarray, prior: float, arm: s
     """
     x = matrix.values[:, matrix.control_col]
     rows = []
+    if len(pooled_teachers) >= 1:
+        try:
+            pooled = pooled_permutation(matrix, pooled_teachers, n_perm=n_perm, seed=seed)
+        except InsufficientDesign as exc:
+            # an explicit note row with no p, never a p = 1 read off zero treatment cells
+            # numeric columns stay NaN (the styler formats them), only the string ones show
+            rows.append({**{c: float("nan") for c in TABLE_COLUMNS},
+                         "arm": arm, "teacher": "all full-set teachers",
+                         "test": f"{TEST_INSUFFICIENT}: {exc}", "prior": prior, "cells": "0",
+                         "wins / n": TEST_NONE, "dead (treat/ctrl)": TEST_NONE, "pooled": True})
+        else:
+            row = _summary_row(arm, "all full-set teachers", pooled.values,
+                               dead[pooled.keep][:, pooled.cols], prior,
+                               _perm_label(pooled.values.shape[1] - 1), labelled=labelled,
+                               **{"exceed.": pooled.result.observed, "perm p": pooled.result.p})
+            rows.append({**row, "pooled": True})
     for tag in [*pooled_teachers, *short]:
         j = matrix.pools.index(tag)
         y = matrix.values[:, j]
@@ -637,22 +662,6 @@ def significance_rows(matrix: CellMatrix, dead: np.ndarray, prior: float, arm: s
                                  TEST_SIGN_TEACHER, labelled=labelled,
                                  **{"wins / n": f"{s.wins}/{s.n}", "sign p": s.p,
                                     "exceed.": e.count}))
-    if len(pooled_teachers) >= 1:
-        try:
-            pooled = pooled_permutation(matrix, pooled_teachers, n_perm=n_perm, seed=seed)
-        except InsufficientDesign as exc:
-            # an explicit note row with no p, never a p = 1 read off zero treatment cells
-            # numeric columns stay NaN (the styler formats them), only the string ones show
-            rows.append({**{c: float("nan") for c in TABLE_COLUMNS},
-                         "arm": arm, "teacher": "all full-set teachers",
-                         "test": f"{TEST_INSUFFICIENT}: {exc}", "prior": prior, "cells": "0",
-                         "wins / n": TEST_NONE, "dead (treat/ctrl)": TEST_NONE, "pooled": True})
-            return rows
-        row = _summary_row(arm, "all full-set teachers", pooled.values,
-                           dead[pooled.keep][:, pooled.cols], prior,
-                           _perm_label(pooled.values.shape[1] - 1), labelled=labelled,
-                           **{"exceed.": pooled.result.observed, "perm p": pooled.result.p})
-        rows.append({**row, "pooled": True})
     return rows
 
 
@@ -835,16 +844,39 @@ def registry_design_cells(arm: dict, arms: Mapping[str, dict], arms_json: Path, 
                           ftseed: int | None, prompt_set: str = "test",
                           output_root: Path | None = None) -> list[str]:
     """The design cells of one registry arm: another arm's (``cells_from_arm``), a cells JSON
-    relative to the registry (``cells``), else the control tree's cells with a control value."""
+    relative to the registry or an inline list of names (``cells``), else the control tree's
+    cells with a control value -- minus the arm's ``exclude_cells`` (the cells a pilot-selected
+    teacher set was chosen on, so the arm is read on held-out cells only).
+
+    Raises:
+        ValueError: If ``exclude_cells`` is not a subset of the design.
+    """
     if "cells_from_arm" in arm:
-        return registry_design_cells(arms[arm["cells_from_arm"]], arms, arms_json, ftseed=ftseed,
-                                     prompt_set=prompt_set, output_root=output_root)
-    if "cells" in arm:
-        return sorted(resolve_cells(Path(arms_json).parent / arm["cells"]))
-    return load_cell_matrix(arm["animal"], arm["sender"], arm["receiver"], [], ftseed=ftseed,
-                            tseed=arm["tseed"], dataset_tag=arm.get("dataset_tag", DEFAULT_DATASET_TAG),
-                            control_dataset_tag=arm.get("control_dataset_tag"),
-                            prompt_set=prompt_set, output_root=output_root).cells
+        cells = registry_design_cells(arms[arm["cells_from_arm"]], arms, arms_json, ftseed=ftseed,
+                                      prompt_set=prompt_set, output_root=output_root)
+    elif "cells" in arm:
+        spec = arm["cells"]
+        cells = sorted(resolve_cells(Path(arms_json).parent / spec if isinstance(spec, str)
+                                     else spec))
+    else:
+        cells = load_cell_matrix(arm["animal"], arm["sender"], arm["receiver"], [], ftseed=ftseed,
+                                 tseed=arm["tseed"],
+                                 dataset_tag=arm.get("dataset_tag", DEFAULT_DATASET_TAG),
+                                 control_dataset_tag=arm.get("control_dataset_tag"),
+                                 prompt_set=prompt_set, output_root=output_root).cells
+    exclude = list(arm.get("exclude_cells", []))
+    if not set(exclude) <= set(cells):
+        raise ValueError(f"{arm.get('name')}: exclude_cells {sorted(set(exclude) - set(cells))} "
+                         f"are not design cells")
+    return [c for c in cells if c not in exclude]
+
+
+def registry_selection_notes(arms_json: str | Path) -> str:
+    """Markdown bullets of every registry arm carrying a ``selection_note`` (how its teacher
+    set was chosen), for the notebook text; "" when no arm has one."""
+    reg = json.loads(Path(arms_json).read_text())
+    return "\n".join(f"- **{a['name']}** — {a['selection_note']}" for a in reg["arms"]
+                      if a.get("selection_note"))
 
 
 def significance_table(arms_json: str | Path, output_root: Path | None = None) -> pd.DataFrame:
@@ -856,21 +888,29 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
     the receiver's prior is the one ``base_control.json`` shared by its student trees, or the
     receiver's ``analysis/base_eval_*_test.json`` prior when the trees carry none (checked
     against ``expected_prior`` within 5%); dead = probe ``delta_ce`` above the receiver's anchored
-    cut. ``in_progress`` arms become a coverage row until complete, whose test label is the
-    arm's ``note`` when it has one (``{students}``/``{n_students}``/``{controls}``/``{cells}``
-    are filled with the build-time counts). ``partial`` arms are tested now on the design cells
-    that carry a control and every listed teacher's run, their ``cells`` column reading
-    ``tested/design``. Then one row per ``pools``
+    cut. Only a FINISHED set gets a p: every listed teacher with an ftseed endpoint on every
+    design cell and a matched control on every design cell. An arm short of that must be
+    flagged ``in_progress`` (else it is an error) and becomes ONE coverage row: no p, the
+    ``test`` column carrying the arm's ``note`` (``{students}``/``{n_students}``/``{controls}``/
+    ``{cells}`` filled with the build-time counts), ``cells`` reading ``k/N`` (design cells
+    where every teacher and the control are present), and a ``status`` starting with
+    `STATUS_FLAG`. An arm keyed ``untestable: "<reason>"`` is ALWAYS such a coverage row, even
+    when complete (no-control arms, single-cell pilots). No arm is ever tested on the subset of
+    cells that happened to finish: the former ``partial`` key is an error. ``exclude_cells``
+    removes the selection cells of a pilot-chosen teacher set from the design before anything
+    is loaded (`registry_design_cells`). Then one row per ``pools``
     entry (arm-stratified permutation, each arm against its own control maximum; arms must share
     animal and ``data_order``), and one row per ``held_out`` entry (one-sided sign test on the
-    cells outside ``selection_cells`` where both runs are alive).
+    cells outside ``selection_cells`` where both runs are alive); a pool or held-out entry whose
+    arm carries no p is itself a flagged coverage row.
 
     Args:
         arms_json: Registry path (format: ``run_logs/xarch/xarch_significance_arms.json``).
         output_root: Output tree root; defaults to the paths YAML's.
 
     Returns:
-        `TABLE_COLUMNS` plus a boolean ``pooled`` column, in registry order.
+        `TABLE_COLUMNS` plus a boolean ``pooled`` column, in registry order; ``status`` is ""
+        on every row of a tested arm.
     """
     arms_json = Path(arms_json)
     reg = json.loads(arms_json.read_text())
@@ -885,7 +925,20 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
         return registry_design_cells(a, arms, arms_json, ftseed=ftseed, prompt_set=prompt_set,
                                      output_root=root)
 
+    def coverage_row(name: str, teachers: list[str], test: str, status: str, cells: str,
+                     prior: float = float("nan")) -> dict:
+        label = (", ".join(teachers) if len(teachers) <= 5
+                 else f"{len(teachers)} teachers: {teachers[0]}, {teachers[1]}, …")
+        return {**{c: float("nan") for c in TABLE_COLUMNS}, "arm": name, "teacher": label,
+                "test": test, "prior": prior, "cells": cells, "wins / n": TEST_NONE,
+                "dead (treat/ctrl)": TEST_NONE, "status": f"{STATUS_FLAG} {status}",
+                "pooled": False}
+
     for name, a in arms.items():
+        if a.get("partial"):
+            raise ValueError(f"{name}: `partial` arms are no longer supported -- an arm is "
+                             f"tested on its whole design or reported as a coverage row "
+                             f"(in_progress / untestable)")
         dataset_tag = a.get("dataset_tag", DEFAULT_DATASET_TAG)
         cells = design(a)
         teachers, short = list(a["teachers"]), dict(a.get("known_short", {}))
@@ -910,23 +963,20 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
             if tag in short:
                 if missing != short[tag]:
                     raise ValueError(f"{name}: {tag} missing {missing}, registry says {short[tag]}")
-            elif missing and not (a.get("in_progress") or a.get("partial")):
+            elif missing and not (a.get("in_progress") or a.get("untestable")):
                 raise ValueError(f"{name}: listed teacher {tag} is short "
                                  f"{covered[tag]}/{len(cells)}; missing {missing}")
-        short_design = ctrl_cov < len(cells) or any(covered[t] < len(cells) for t in teachers)
-        if short_design and not (a.get("in_progress") or a.get("partial")):
-            raise ValueError(f"{name}: control covers {ctrl_cov}/{len(cells)}")
-        if short_design and a.get("in_progress"):
-            k = min(min(covered[t] for t in teachers), ctrl_cov)
-            # The registry's ``note`` (why the arm has no p) replaces the test label; it may
-            # cite the build-time counts through {students}/{n_students}/{controls}/{cells}.
-            counts = {"students": sum(covered[t] for t in teachers),
-                      "n_students": len(teachers) * len(cells), "controls": ctrl_cov,
-                      "cells": len(cells)}
-            rows.append({"arm": name, "teacher": ", ".join(teachers),
-                         "test": a["note"].format_map(counts) if "note" in a else TEST_NONE,
-                         "cells": f"in progress {k}/{len(cells)}", "pooled": False})
-            continue
+        # matched cells: every listed teacher's endpoint AND a control, cell by cell
+        matched = sum(
+            _control_value(control_tree / c, a["animal"], prompt_set, ftseed)[0] is not None
+            and all(_has_seed_endpoint(sender_tree / f"{t}_tseed{a['tseed']}" / dataset_tag / c,
+                                       ftseed, prompt_set) for t in teachers)
+            for c in cells)
+        finished = ctrl_cov == len(cells) and all(covered[t] == len(cells) for t in teachers)
+        if not finished and not (a.get("in_progress") or a.get("untestable")):
+            raise ValueError(f"{name}: not a finished set (control covers {ctrl_cov}/"
+                             f"{len(cells)}, matched cells {matched}/{len(cells)}); flag it "
+                             f"in_progress or untestable")
 
         receiver = base_name(a["receiver"])
         key = (a["animal"], receiver)
@@ -934,6 +984,26 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
             priors[key] = student_tree_prior(a["animal"], receiver, prompt_set=prompt_set,
                                              output_root=root)
         check_expected_prior(name, priors[key], a.get("expected_prior"))
+
+        if not finished or a.get("untestable"):
+            # ONE coverage row, no p. The registry's ``note`` / ``untestable`` text is the
+            # reason (test column); it may cite the build-time counts through
+            # {students}/{n_students}/{controls}/{cells}. The status names what is lacking.
+            counts = {"students": sum(covered[t] for t in teachers),
+                      "n_students": len(teachers) * len(cells), "controls": ctrl_cov,
+                      "cells": len(cells)}
+            if a.get("untestable"):
+                reason = str(a["untestable"]).format_map(counts)
+                status = reason
+            else:
+                reason = a["note"].format_map(counts) if "note" in a else TEST_NONE
+                status = ("not started" if counts["students"] == 0 else
+                          f"in progress {counts['students']}/{counts['n_students']} students")
+                if ctrl_cov < len(cells):
+                    status += f", {ctrl_cov}/{len(cells)} controls"
+            rows.append(coverage_row(name, teachers, reason, status, f"{matched}/{len(cells)}",
+                                     priors[key]))
+            continue
         probe_pool = _probe_pool_for(receiver, a.get("probe_pool"))
         cut = _anchored_cut(root, receiver, probe_pool, dead="keep", notes=notes)
 
@@ -941,26 +1011,24 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
                              ftseed=ftseed, tseed=a["tseed"], dataset_tag=dataset_tag,
                              control_dataset_tag=a.get("control_dataset_tag"), cells=cells,
                              prompt_set=prompt_set, output_root=root)
-        if m.cells != cells and not (a.get("partial") and set(m.cells) <= set(cells)):
+        if m.cells != cells:
             raise ValueError(f"{name}: loaded cells differ from the design")
         d = _arm_dead_matrix(m, control_tree, sender_tree, dataset_tag=dataset_tag,
                              tseed=a["tseed"], ftseed=ftseed, probe_pool=probe_pool, cut=cut)
         matrices[name], deads[name] = m, d
-        arm_rows = significance_rows(m, d, priors[key], name, teachers, short=list(short),
-                                     labelled=cut is not None, n_perm=n_perm, seed=seed)
-        if a.get("partial"):
-            # a partial arm's counts are read on the cells it has: say so against the design
-            for r in arm_rows:
-                r["cells"] = f"{r['cells']}/{len(cells)}"
-        rows.extend(arm_rows)
+        rows.extend({**r, "status": ""} for r in
+                    significance_rows(m, d, priors[key], name, teachers, short=list(short),
+                                      labelled=cut is not None, n_perm=n_perm, seed=seed))
 
     for pool in reg.get("pools", []):
         members = [arms[n] for n in pool["arms"]]
         if len({(a["animal"], a["data_order"]) for a in members}) != 1:
             raise ValueError(f"{pool['name']}: arms mix animals or data-order classes")
         if not all(n in matrices for n in pool["arms"]):
-            rows.append({"arm": pool["name"], "teacher": "all full-set teachers",
-                         "test": TEST_NONE, "cells": "in progress", "pooled": True})
+            lacking = [n for n in pool["arms"] if n not in matrices]
+            rows.append({**coverage_row(pool["name"], ["all full-set teachers"], TEST_NONE,
+                                        f"member arm without a p: {'; '.join(lacking)}",
+                                        TEST_NONE), "pooled": True})
             continue
         mats = {}
         for n in pool["arms"]:
@@ -979,13 +1047,22 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
         rows.append({"arm": pool["name"], "teacher": "all full-set teachers",
                      "test": f"stratified permutation (pooled across arms, {len(mats)} arms)",
                      "cells": str(sum(len(m.cells) for m in mats.values())),
-                     "exceed.": r.observed, "perm p": r.p, "pooled": True})
+                     "exceed.": r.observed, "perm p": r.p, "status": "", "pooled": True})
 
     for h in reg.get("held_out", []):
         a = arms[h["arm"]]
-        rows.append(held_out_row(h, matrices[h["arm"]], deads[h["arm"]],
-                                 priors[(a["animal"], base_name(a["receiver"]))]))
+        if h["arm"] not in matrices:
+            rows.append(coverage_row(h["name"], [h["teacher"]], TEST_NONE,
+                                     f"arm without a p: {h['arm']}", TEST_NONE))
+            continue
+        rows.append({**held_out_row(h, matrices[h["arm"]], deads[h["arm"]],
+                                    priors[(a["animal"], base_name(a["receiver"]))]),
+                     "status": ""})
     return pd.DataFrame(rows).reindex(columns=[*TABLE_COLUMNS, "pooled"])
+
+
+#: Shading of every row of an arm lacking data (flagged ``status`` / skipped family arm).
+AMBER = "background-color: rgba(255, 180, 0, 0.25)"
 
 
 def _fmt_p(p) -> str:
@@ -1004,12 +1081,16 @@ def style_significance_table(df: pd.DataFrame):
     """Styler for `significance_table`: p to 2 s.f., prior to 3 s.f., ×prior to 2 dp, the PRIMARY test's
     ``perm p`` (the pooled stratified permutation) < 0.05 bold on light green -- the per-teacher
     ``sign p`` is descriptive and never highlighted --
-    pooled rows on a translucent grey (readable on light and dark themes). Rows are indexed by
-    (arm, teacher) so each run of consecutive same-arm rows shows its arm once (row-span cell),
-    with a 2px divider above the first row of every group; the positional level is hidden."""
+    pooled rows on a translucent grey (readable on light and dark themes), and EVERY row of an
+    arm lacking data (a non-empty ``status``), index cells included, on `AMBER`. Rows are indexed by
+    (arm, teacher) so each run of consecutive same-arm rows -- the arm block, pooled row first,
+    then its teachers -- shows its arm once (row-span cell), with a 2px divider above the first
+    row of every block; the positional level is hidden."""
     pooled = df["pooled"].fillna(False).astype(bool).to_numpy()
     arms = df["arm"].tolist()
     first = np.array([i == 0 or arms[i] != arms[i - 1] for i in range(len(arms))], dtype=bool)
+    flagged = df["status"].fillna("").astype(str).str.len().gt(0).to_numpy() \
+        if "status" in df else np.zeros(len(df), dtype=bool)
     show = df.drop(columns=["pooled", "arm", "teacher"])
     show.index = pd.MultiIndex.from_arrays([df["arm"].to_numpy(), df["teacher"].to_numpy(),
                                             np.arange(len(df))], names=["arm", "teacher", None])
@@ -1018,7 +1099,8 @@ def style_significance_table(df: pd.DataFrame):
     divider = "border-top: 2px solid currentColor"
 
     def row_css(i):
-        return "; ".join(c for c in (grey if pooled[i] else "", divider if first[i] else "") if c)
+        shade = AMBER if flagged[i] else grey if pooled[i] else ""
+        return "; ".join(c for c in (shade, divider if first[i] else "") if c)
 
     def row_style(r):
         return [row_css(r.name[2])] * len(r)
@@ -1066,12 +1148,15 @@ def resolve_cells(cells: Sequence[str] | str | Path | None) -> list[str] | None:
     """The design cell names of a cells spec: a JSON path with a ``cells`` key, or a list.
 
     Entries may be plain names (``run_logs/core56_cells.json``) or dicts carrying the name under
-    ``student_tag`` (``run_logs/focus20_cells.json``); both spellings resolve to cell names.
+    ``student_tag`` (``run_logs/focus20_cells.json``); both spellings resolve to cell names. A
+    JSON keyed ``tags`` instead of ``cells`` (``run_logs/dd1b/top25_union_cells.json``) reads the
+    same way.
     """
     if cells is None:
         return None
     if isinstance(cells, (str, Path)):
-        cells = json.loads(Path(cells).read_text())["cells"]
+        doc = json.loads(Path(cells).read_text())
+        cells = doc["cells"] if "cells" in doc else doc["tags"]
     return [c["student_tag"] if isinstance(c, dict) else c for c in cells]
 
 
@@ -1887,29 +1972,43 @@ def family_comparison_table(
 
 
 def _p_styler(df: pd.DataFrame, p_columns: Sequence[str], *, index: Sequence[str],
-              grey: np.ndarray, floats: Mapping[str, str] | None = None):
-    """Shared styling of the two family tables: p < 0.05 bold on light green, `grey` rows shaded."""
+              grey: np.ndarray, floats: Mapping[str, str] | None = None,
+              amber: np.ndarray | None = None):
+    """Shared styling of the two family tables: p < 0.05 bold on light green, `grey` rows shaded,
+    `amber` rows (arms lacking data) on `AMBER`, index cells included."""
     body = df.drop(columns=["pooled", "stratified"], errors="ignore")
     body = body.set_index(list(index))
     shade = "background-color: rgba(128, 128, 128, 0.2)"
     green = "font-weight: bold; background-color: rgba(120, 200, 120, 0.35)"
+    flagged = np.zeros(len(df), dtype=bool) if amber is None else amber
+    css = [AMBER if f else shade if g else "" for f, g in zip(flagged, grey)]
     fmt = {c: _fmt_p for c in p_columns}
     fmt.update({c: (lambda v, spec=spec: "" if v is None or pd.isna(v) else format(v, spec))
                 for c, spec in (floats or {}).items()})
-    return (body.style
-            .apply(lambda _: [shade if g else "" for g in grey], axis=0)
+    styler = body.style
+    for level in range(len(index)):
+        styler = styler.apply_index(lambda lv, css=css: list(css), axis="index", level=level)
+    return (styler
+            .apply(lambda _: list(css), axis=0)
             .map(lambda v: green if _is_significant(v) else "", subset=list(p_columns))
             .format(fmt, na_rep="")
             .set_table_styles([{"selector": "tbody th",
                                 "props": "text-align: left; vertical-align: top;"}]))
 
 
+def _skipped_family_rows(df: pd.DataFrame) -> np.ndarray:
+    """Row mask of `family_existence_table` arms that carry a ``note`` and no p (skipped)."""
+    has_note = df["note"].fillna("").astype(str).str.len().gt(0)
+    return (has_note & df["perm p"].isna()).to_numpy()
+
+
 def style_family_existence_table(df: pd.DataFrame):
-    """Styler for `family_existence_table`: pooled rows shaded, ``perm p`` < 0.05 highlighted."""
+    """Styler for `family_existence_table`: pooled rows shaded, ``perm p`` < 0.05 highlighted,
+    skipped arms (a ``note`` and no p) on `AMBER`."""
     grey = df["pooled"].fillna(False).astype(bool).to_numpy()
     return _p_styler(df, ["perm p"], index=["family", "animal", "arm"], grey=grey,
                      floats={"cells": ".0f", "design cells": ".0f", "treatment runs": ".0f",
-                             "exceed.": ".0f"})
+                             "exceed.": ".0f"}, amber=_skipped_family_rows(df))
 
 
 def style_family_comparison_table(df: pd.DataFrame):
@@ -1920,3 +2019,58 @@ def style_family_comparison_table(df: pd.DataFrame):
                      index=["comparison", "design", "animal", "value mode"], grey=grey,
                      floats={"mean contrast": ".3f", "win prob.": ".3f",
                              "exceed. frac contrast": ".3f", "floor": ".1e", "labelings": ",.0f"})
+
+
+# ----------------------------------------------------------------------------------------------
+# the closing roll-up: every arm lacking data, from the tables already computed
+# ----------------------------------------------------------------------------------------------
+LACKING_COLUMNS = ["section", "arm", "status", "coverage"]
+
+
+def lacking_data_table(rows: Sequence[tuple[str, str, str, str]]) -> pd.DataFrame:
+    """``(section, arm, status, coverage)`` tuples as one `LACKING_COLUMNS` frame, in order."""
+    return pd.DataFrame(list(rows), columns=LACKING_COLUMNS)
+
+
+def flagged_arms(df: pd.DataFrame, section: str) -> list[tuple[str, str, str, str]]:
+    """The roll-up rows of a `significance_table`: one per row with a non-empty ``status``
+    (coverage rows are one per arm already), coverage = its ``cells`` column."""
+    flagged = df[df["status"].fillna("").astype(str).str.len().gt(0)]
+    return [(section, r["arm"], r["status"], str(r["cells"])) for r in flagged.to_dict("records")]
+
+
+def flagged_family_arms(df: pd.DataFrame, section: str) -> list[tuple[str, str, str, str]]:
+    """The roll-up rows of a `family_existence_table`: its skipped arms (a ``note``, no p), ONE
+    row per (family, animal, reason) listing the arms, coverage = arms skipped / arms."""
+    out = []
+    skipped = df[_skipped_family_rows(df)]
+    for (family, animal, note), block in skipped.groupby(["family", "animal", "note"], sort=False):
+        n_arms = int(((df["family"] == family) & (df["animal"] == animal)
+                      & ~df["pooled"].fillna(False).astype(bool)).sum())
+        out.append((section, f"{family} {animal}: {', '.join(block['arm'])}",
+                    f"{STATUS_FLAG} {note}", f"{len(block)}/{n_arms} arms"))
+    return out
+
+
+def flagged_missing_blocks(df: pd.DataFrame, section: str) -> list[tuple[str, str, str, str]]:
+    """The roll-up rows of a `family_comparison_table`: ONE row per (comparison, design) from
+    its animal-stratified row (which lists every (animal, arm) block the coverage rule kept
+    out; the value modes share them), else from its per-animal rows."""
+    out = []
+    first_mode = df[df["value mode"] == VALUE_MODES[0]]
+    for (comparison, design), block in first_mode.groupby(["comparison", "design"], sort=False):
+        strat = block[block["stratified"].fillna(False).astype(bool)] if "stratified" in block \
+            else block.iloc[0:0]
+        rows = strat if len(strat) else block
+        blocks = []
+        for r in rows.to_dict("records"):
+            text = str(r["missing blocks"])
+            if text == "0":
+                continue
+            prefix = "" if len(strat) else f"{r['animal']} "
+            blocks += [prefix + b.strip() for b in text.split(":", 1)[1].split(",")]
+        if blocks:
+            out.append((section, f"{comparison} ({design})",
+                        f"{STATUS_FLAG} {len(blocks)} blocks kept out by the coverage rule",
+                        ", ".join(blocks)))
+    return out

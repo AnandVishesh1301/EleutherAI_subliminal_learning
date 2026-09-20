@@ -75,7 +75,10 @@ def test_local_model_dir_defaults_to_main_subdir(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     "variant,seed",
-    [("weightc", 3), ("pilerepro", 1234), ("pilerepro", 3), ("dclm", 1234), ("dclm", 1)],
+    [
+        ("weightc", 3), ("pilereprov1", 1234), ("pilerepro", 1234), ("pilerepro", 3),
+        ("dclm", 1234), ("dclm", 1),
+    ],
 )
 def test_resolve_hf_repo_id_local_families_are_local_provenance(variant, seed) -> None:
     # Every LOCAL_PYTHIA_FAMILIES row resolves the same way weightc does.
@@ -86,7 +89,7 @@ def test_resolve_hf_repo_id_local_families_are_local_provenance(variant, seed) -
     )
 
 
-@pytest.mark.parametrize("variant,seed", [("pilerepro", 1), ("dclm", 3), ("weightc", 1234)])
+@pytest.mark.parametrize("variant,seed", [("pilerepro", 1), ("pilereprov1", 3), ("dclm", 3), ("weightc", 1234)])
 def test_resolve_hf_repo_id_local_families_reject_foreign_seeds(variant, seed) -> None:
     with pytest.raises(ValueError, match="requires seed in"):
         resolve_hf_repo_id(PythiaModelSpec(size="160m", seed=seed, variant=variant), "E")
@@ -99,7 +102,9 @@ def test_resolve_hf_repo_id_local_families_reject_non_160m(variant) -> None:
 
 
 def test_local_family_table_shape() -> None:
-    assert [f.variant for f in LOCAL_PYTHIA_FAMILIES] == ["weightc", "pilerepro", "dclm"]
+    assert [f.variant for f in LOCAL_PYTHIA_FAMILIES] == [
+        "weightc", "pilereprov1", "pilerepro", "dclm",
+    ]
     assert local_pythia_family("weightc").seeds == (1, 2, 3)
     assert local_pythia_family("weightc").seeds_label() == "1-3"  # unchanged wording
     assert local_pythia_family("dclm").seeds == (1234, 1, 2)
@@ -110,3 +115,22 @@ def test_local_family_table_shape() -> None:
 def test_local_model_dir_handles_four_digit_seed(tmp_path) -> None:
     d = local_model_dir("local/pythia-160m-dclm-seed1234", "step75000", tmp_path)
     assert d == tmp_path / "local" / "pythia-160m-dclm-seed1234" / "step75000"
+
+
+def test_pilereprov1_token_and_dir_name_round_trip() -> None:
+    # `pilereprov1-seed1234` is its own family (not a `pilerepro` seed): the token
+    # parses, the dir name inverts back to the same spec, and other seeds are rejected.
+    from subliminal_learning.models.naming import base_dir_name, base_spec
+    from subliminal_learning.teachers.model_specs import parse_base_models
+
+    spec = PythiaModelSpec(size="160m", seed=1234, variant="pilereprov1", revision="step75000")
+    assert parse_base_models("pilereprov1-seed1234@step75000") == [spec]
+    assert base_spec("pythia-160m-pilereprov1-seed1234@step75000") == spec
+    assert base_dir_name("pilereprov1-seed1234@step75000") == (
+        "pythia-160m-pilereprov1-seed1234@step75000"
+    )
+    assert local_pythia_family("pilereprov1").repo_id(1234) == (
+        "local/pythia-160m-pilereprov1-seed1234"
+    )
+    with pytest.raises(ValueError, match="pilereprov1 has seeds"):
+        parse_base_models("pilereprov1-seed3")

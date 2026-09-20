@@ -12,7 +12,9 @@ from subliminal_learning.models.datadecide import (
     dd_repo_id,
 )
 
-PolyPythiaVariant = Literal["full", "data", "weight", "weightc", "pilerepro", "dclm"]
+PolyPythiaVariant = Literal[
+    "full", "data", "weight", "weightc", "pilereprov1", "pilerepro", "dclm"
+]
 # full    = both weight init + data order vary (seeds 0-9)
 # data    = 160M only: fixed weight init (seed 0), varying data order (seeds 1-3)
 # weight  = 160M only: fixed data order (seed 0), varying weight init (seeds 1-3)
@@ -69,6 +71,11 @@ LOCAL_PYTHIA_FAMILIES: tuple[LocalPythiaFamily, ...] = (
         "intended data order)",
     ),
     LocalPythiaFamily(
+        "pilereprov1", (1234,), "prv1",
+        "Pile re-pretraining reproduction on the gpt-neox-v1.0 tree (same seed 1234 "
+        "recipe as `pilerepro-seed1234`, which used the modern tree)",
+    ),
+    LocalPythiaFamily(
         "pilerepro", (1234, 3), "pr",
         "Pile re-pretraining reproduction (seed 1234 = main's own seed)",
     ),
@@ -122,7 +129,7 @@ class PythiaModelSpec:
         size: PolyPythias size: "14m" | "31m" | "70m" | "160m" | "410m".
         seed: PolyPythias seed (0 = default seed 1234; 1-9 = extra seeds).
         variant: "full" (default), "data", "weight", or a local-only family
-            variant (`LOCAL_PYTHIA_VARIANTS`: "weightc", "pilerepro", "dclm").
+            variant (`LOCAL_PYTHIA_VARIANTS`: "weightc", "pilereprov1", "pilerepro", "dclm").
         revision: Training checkpoint, e.g. "step3000". None -> final checkpoint.
     """
 
@@ -209,7 +216,7 @@ def resolve_hf_repo_id(spec: PythiaModelSpec, hub_org: str) -> str:
         local family V    -> local/pythia-160m-{V}-seed{N}      (160m only, N from
                              that family's `LOCAL_PYTHIA_FAMILIES` row)
 
-    The local families (`weightc`, `pilerepro`, `dclm`) are deliberately org-less:
+    The local families (`weightc`, `pilereprov1`, `pilerepro`, `dclm`) are deliberately org-less:
     they are unpublished local conversions, and the `local/` prefix is a non-hub
     provenance string (the slash is kept so manifests still read like refs).
     `local_model_dir` turns it into an on-disk directory; it must never be handed

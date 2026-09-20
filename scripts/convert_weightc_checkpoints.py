@@ -1,6 +1,6 @@
 """CLI: convert gpt-neox checkpoints of the local 160m re-pretrainings to HF.
 
-The local base families (`weightc`, `pilerepro`, `dclm`; one row per family in
+The local base families (`weightc`, `pilereprov1`, `pilerepro`, `dclm`; one row per family in
 `models.registry.LOCAL_PYTHIA_FAMILIES`) are never published: every checkpoint the
 pipeline consumes is a local conversion of one of gpaulo's NeoX trees, laid out
 exactly as `models.registry.local_model_dir` expects:
@@ -78,6 +78,9 @@ SOURCE_RUNS: dict[tuple[str, int], Path] = {
     ),
     ("weightc", 2): Path(
         "/mnt/cold-1/gpaulo/pythia-repro/checkpoints/pythia-160m-weight-seed2-corrected"
+    ),
+    ("pilereprov1", 1234): Path(
+        "/mnt/cold-1/gpaulo/pythia-repro/checkpoints/pythia-160m-repro"
     ),
     ("pilerepro", 1234): Path(
         "/mnt/ssd-3/gpaulo/pythia-repro/checkpoints/pythia-160m-main-seed-pile-repro-check"
@@ -344,7 +347,7 @@ def main(
         None, help="gpt-neox checkpoint tree (default: the --family/--seed row of SOURCE_RUNS)."
     ),
     family: str = typer.Option(
-        DEFAULT_FAMILY, help="Local base family: weightc | pilerepro | dclm."
+        DEFAULT_FAMILY, help="Local base family: weightc | pilereprov1 | pilerepro | dclm."
     ),
     seed: int = typer.Option(
         DEFAULT_SEED, help="Family seed N -> local/pythia-160m-<family>-seed<N>."

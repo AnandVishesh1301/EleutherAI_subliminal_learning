@@ -356,3 +356,20 @@ def test_category_family_arms_and_pairings():
     assert arms["cross-init + cross-data-order"] == []        # no control -> not a pairing arm
     pairs = tm.category_pairings({"a": 0.2, "b": 0.5, "c": 0.1}, categories=["a", "b", "c"])
     assert pairs == [("b", "a"), ("a", "c"), ("b", "c")]
+
+
+def test_family_arm_labels_short_labels_in_frame_order_once_per_arm():
+    """The pairing table's `arms A` / `arms B`: sender→receiver short labels (base dirs mapped
+    back), in first-appearance order, an arm seen in two animals listed once."""
+    from types import SimpleNamespace
+
+    frame = pd.DataFrame({
+        "family": ["a", "a", "b", "a", "b", "b"],
+        "arm": ["orig->ds1", "orig->ds1", "pythia-160m-pilerepro-seed1234->pythia-160m-pilerepro-seed3",
+                "ds1->orig", "pythia-160m-pilerepro-seed1234->pythia-160m-pilerepro-seed3",
+                "wc1->pythia-160m-weightc-seed2"],
+        "animal": ["dog", "cat", "dog", "dog", "cat", "dog"]})
+    a, b = tm._family_arm_labels(SimpleNamespace(frame=frame), "a", "b")
+    assert a == "orig→ds1, ds1→orig"
+    assert b == "pr1234→pr3, wc1→wc2"
+    assert tm.PAIRING_COLUMNS[3:6] == ["arms A vs B", "arms A", "arms B"]

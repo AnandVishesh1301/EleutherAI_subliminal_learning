@@ -133,21 +133,45 @@ src/subliminal_learning/
                     summary (transfer_matrix.relationship_existence_by_animal: one pooled
                     exceedance row per relationship category × animal on core30;
                     relationship_pairing_table: every category-vs-category pairing on dog,
-                    relative mode, via compare_families with explicit FamilyArm lists) and
-                    then holds the five tables: the 7
-                    cross-architecture arms (full-coverage senders only, per data-order class),
-                    family_existence_table for the Pythia seed families (core56; same-model on
-                    focus20, its controls' only cells), family_comparison_table for
-                    cross-data-order vs cross-seed and same-model vs cross-data-order, and the
-                    160m re-pretraining direction matrix (run_logs/repretrain/
-                    repretrain_significance_arms.json: orig/pr1234/pr3/dclm1234/dclm1/wc1/wc2
-                    dog arms on core30 + HOT10, base_eval test priors when the student trees
-                    carry no base_control.json, in_progress arms with a `note` rendered as
-                    note rows without a p, `partial` arms tested on the design cells they
-                    have with `cells` reading tested/design), and the OLMo-1B DataDecide
-                    cross-seed arms (run_logs/repretrain/olmo_cross_seed_significance_arms.json:
-                    dd-1b/dd-1b-seed2 elephant arms on ctrl20 + olmo_core30, tseed 0, base
-                    controls only -- rng twins live in the CLI));
+                    relative mode, via compare_families with explicit FamilyArm lists, its
+                    `arms A` / `arms B` columns naming the sender→receiver model pairs
+                    behind each side's arm count) and
+                    then holds five tables plus a closing roll-up: the
+                    cross-architecture arms (full-coverage senders only, per data-order class;
+                    every style_significance_table block is one arm shown once, its pooled
+                    stratified-permutation row FIRST, then its per-teacher rows;
+                    the 160m ↔ OLMo-1B and 410m-seed1 trees carry pilot-selected
+                    teacher sets read on held-out cells), family_existence_table for the
+                    Pythia seed families (core56; same-model on focus20, its controls' only
+                    cells), family_comparison_table for cross-data-order vs cross-seed and
+                    same-model vs cross-data-order, the 160m re-pretraining direction matrix
+                    (run_logs/repretrain/repretrain_significance_arms.json:
+                    orig/pr1234/pr3/dclm1234/dclm1/wc1/wc2 arms on core30 + HOT10 for dog,
+                    cat, lion, pig and chicken, arm names carrying the animal, pools never
+                    mixing animals; student_tree_prior = base_control.json else base_eval
+                    test prior), and the OLMo-1B DataDecide cross-seed AND cross-recipe arms
+                    (run_logs/repretrain/olmo_cross_seed_significance_arms.json: dd-1b /
+                    dd-1b-seed2 / -seed3 elephant arms on ctrl20 + olmo_core30 + top25
+                    union, plus the dolma ↔ dclm ↔ c4 recipe arms on core35 and their
+                    single-cell pilots, tseed 0, base controls only -- rng twins live in the
+                    CLI). significance_table's contract (20260920): ONLY A FINISHED SET GETS
+                    A P -- every listed teacher with an ftseed endpoint on every design cell
+                    and a matched control on every design cell; an arm short of that must be
+                    flagged `in_progress` (+ `note` with {students}/{n_students}/{controls}/
+                    {cells}) and renders as ONE coverage row (no p, `cells` = matched/design),
+                    `untestable: "<reason>"` forces that coverage row even when complete
+                    (no-control arms, single-cell pilots), the former `partial` key (test on
+                    the cells that happened to finish) is a hard error, `exclude_cells`
+                    removes a pilot-selected set's selection cells from the design before
+                    loading (`selection_note` = how the set was chosen, printed in the
+                    notebook markdown via registry_selection_notes), `cells` may be a
+                    relative JSON path (`cells` or `tags` key) or an inline list, and every
+                    row carries a final `status` column ("" on tested arms, "⚠ …" naming what
+                    is lacking); style_significance_table shades every row of a flagged arm
+                    amber and style_family_existence_table shades §2's skipped arms the same;
+                    flagged_arms / flagged_family_arms / flagged_missing_blocks +
+                    lacking_data_table build the notebook's closing §6 "arms lacking data"
+                    table from the section DataFrames);
                     --ftseed (default 1) pins the student finetune seed in EVERY readout mode,
                     so the CLI and the notebook tables read one seed, never the aggregate; a
                     receiver with no anchored probe cut raises under --dead drop (nothing to
@@ -3680,7 +3704,14 @@ semantics are TRL 0.19.1 + Agarwal et al., byte-verified against the installed s
 Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DESIGN.md`):
 
 - **Run-identity gates fail loudly** (`run_gate.py`): manifest identity drift raises with a
-  key-diff instead of silently retraining; only a `filtered_sha256`-only drift auto-retrains.
+  key-diff instead of silently retraining; on the STUDENT side a `filtered_sha256`-only drift
+  auto-retrains and `train.tf32` is a SOFT key (`_SOFT_STUDENT_KEYS`) -- stripped from both
+  sides before comparing, so a finished run SKIPs against its other-precision twin, the
+  returned diff still carries `train.tf32` and `distill_student_pipeline` logs a WARNING.
+  Student pre-checks must use `student_identities_match`, not `identities_match`. The Pythia
+  distill workers (`p410m_worker`, `animal_samedistill_worker`,
+  `dog_crossdistill_studenthp_worker`) take an opt-in `--tf32` (default off) that sets
+  `TrainConfig.tf32` for `trainer.train()` only; evals stay fp32 and the run dir is unchanged.
   `teachers/run_layout._format_lr` formats at full precision so near-distinct LRs can't
   collide (see Bugs #6 for the SDF/GKD copies).
 - **2026-08-26 audit hardening** (repo-wide audit; fixes landed same day):

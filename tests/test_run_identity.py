@@ -756,6 +756,67 @@ def test_identities_carry_tf32_and_group_by_length_when_set(tmp_path: Path):
         assert not ({"tf32", "group_by_length", "supervised_only_head"} & set(identity["lora"]))
 
 
+# --- train.tf32 is a SOFT key for the STUDENT gate only -------------------------------
+
+def _tf32_pair(tmp_path: Path):
+    """(stored fp32 student identity, current tf32 student identity) for the same cell."""
+    from pipelines.distill_student_pipeline import _student_run_identity
+
+    _t_cfg, s_cfg = _dtype_cfgs(tmp_path)
+    kw = dict(base_model_repo="EleutherAI/model", filtered_sha256="abc")
+    fp32 = _student_run_identity(s_cfg, **kw)
+    tf32 = _student_run_identity(replace(s_cfg, train=replace(s_cfg.train, tf32=True)), **kw)
+    return fp32, tf32
+
+
+def test_student_gate_skips_across_tf32_drift_either_direction(tmp_path: Path):
+    """The fp32/tf32 twins share a run dir; whichever is on disk is reusable."""
+    fp32, tf32 = _tf32_pair(tmp_path)
+    up = student_gate_action({"run_identity": fp32}, tf32, force=False)
+    assert up.action == SKIP
+    assert "train.tf32" in up.diff  # carried so the caller can warn
+    assert student_gate_action({"run_identity": tf32}, fp32, force=False).action == SKIP
+
+
+def test_student_gate_retrains_on_tf32_plus_sha_drift(tmp_path: Path):
+    """A refreshed pool still RETRAINs when the precision also changed."""
+    fp32, tf32 = _tf32_pair(tmp_path)
+    refreshed = {**tf32, "filtered_sha256": "def"}
+    d = student_gate_action({"run_identity": fp32}, refreshed, force=False)
+    assert d.action == RETRAIN
+    assert set(d.diff) == {"filtered_sha256", "train.tf32"}
+
+
+def test_student_gate_errors_on_tf32_plus_other_drift(tmp_path: Path):
+    """The soft key never rescues a real drift."""
+    fp32, tf32 = _tf32_pair(tmp_path)
+    drifted = {**tf32, "train": {**tf32["train"], "learning_rate": 9e-9}}
+    d = student_gate_action({"run_identity": fp32}, drifted, force=False)
+    assert d.action == ERROR
+    assert "train.learning_rate" in d.diff
+
+
+def test_teacher_gate_still_errors_on_tf32_drift(tmp_path: Path):
+    """Softness is student-only: a teacher's tf32 drift is still a loud ERROR."""
+    t_cfg, _s_cfg = _dtype_cfgs(tmp_path)
+    fp32 = teacher_run_identity(t_cfg)
+    tf32 = teacher_run_identity(replace(t_cfg, train=replace(t_cfg.train, tf32=True)))
+    assert gate_action({"run_identity": fp32}, fp32, force=False).action == SKIP
+    d = gate_action({"run_identity": fp32}, tf32, force=False)
+    assert d.action == ERROR
+    assert "train.tf32" in d.diff
+
+
+def test_student_identities_match_ignores_tf32(tmp_path: Path):
+    """The student pre-check predicate agrees with the softened gate."""
+    from subliminal_learning.run_gate import identities_match, student_identities_match
+
+    fp32, tf32 = _tf32_pair(tmp_path)
+    assert student_identities_match(fp32, tf32)
+    assert not identities_match(fp32, tf32)  # teacher predicate stays strict
+    assert not student_identities_match(fp32, {**tf32, "filtered_sha256": "def"})
+
+
 # --- allow_cross_family: never in the run identity (manifest-only provenance) ----------
 
 def test_allow_cross_family_is_not_in_the_run_identity(tmp_path: Path):

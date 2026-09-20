@@ -12,6 +12,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from subliminal_learning.jobqueue import store, worker
+from subliminal_learning.teachers.sft_io import TrainingInterrupted
+from subliminal_learning.run_gate import (
+    latest_resumable_checkpoint,
+    run_is_interrupted_resumable,
+)
 from subliminal_learning.jobqueue.gpu import GpuSlot
 from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.utils.io import file_lock
@@ -35,8 +40,14 @@ def _dd_functions(**env):
         n
         for n in source.body
         if isinstance(n, ast.FunctionDef)
-        and n.name in {"stage_distill", "_stage_distill"}
+        # the pre-train leaf gate (2026-09-20 yield-resume) is part of the lifecycle
+        and n.name in {"stage_distill", "_stage_distill", "clear_unresumable_leaf",
+                       "leaf_is_resumable"}
     ]
+    env.setdefault("TrainingInterrupted", TrainingInterrupted)
+    env.setdefault("Path", Path)  # annotations: the exec'd nodes have no `from __future__`
+    env.setdefault("_run_is_interrupted_resumable", run_is_interrupted_resumable)
+    env.setdefault("_latest_resumable_checkpoint", latest_resumable_checkpoint)
     exec(
         compile(ast.Module(body=nodes, type_ignores=[]), "dd1b_worker.py", "exec"), env
     )

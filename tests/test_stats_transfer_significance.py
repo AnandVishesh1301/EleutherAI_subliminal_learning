@@ -420,12 +420,12 @@ def _synthetic_matrix() -> tuple[tio.CellMatrix, np.ndarray]:
     return m, dead
 
 
-def test_significance_rows_per_teacher_then_pooled():
+def test_significance_rows_pooled_first_then_per_teacher():
     m, dead = _synthetic_matrix()
     rows = tio.significance_rows(m, dead, 1.0, "A", ["t1", "t2"], short=["s"], n_perm=200)
-    assert [r["teacher"] for r in rows] == ["t1", "t2", "s (9/10 cells, not in pool)",
-                                            "all full-set teachers"]
-    t1, t2, s, pooled = rows
+    assert [r["teacher"] for r in rows] == ["all full-set teachers", "t1", "t2",
+                                            "s (9/10 cells, not in pool)"]
+    pooled, t1, t2, s = rows
     assert t1["wins / n"] == "10/10" and t1["exceed."] == 10 and t1["dead (treat/ctrl)"] == "1/0"
     assert t2["exceed."] == 5 and s["cells"] == "9" and s["wins / n"] == "0/9"
     assert pooled["pooled"] and pooled["exceed."] == 15 and "sign p" not in pooled
@@ -435,8 +435,8 @@ def test_significance_rows_per_teacher_then_pooled():
     assert np.isfinite(pooled["perm p"])
     assert all("perm p" not in r for r in (t1, t2, s))
     # every row names its test, carries the prior, and max >= median on both sides
-    assert [r["test"] for r in rows] == ["sign (per teacher)"] * 3 + [
-        "stratified permutation (pooled, 2 teachers)"]
+    assert [r["test"] for r in rows] == ["stratified permutation (pooled, 2 teachers)"] + [
+        "sign (per teacher)"] * 3
     assert all(r["prior"] == 1.0 for r in rows)
     for r in rows:
         assert r["treat max ×prior"] >= r["treat median ×prior"]
@@ -451,8 +451,8 @@ def test_one_teacher_arm_still_gets_the_pooled_stratified_row():
     """With a single full-set teacher the permutation relabels the teacher/control pair."""
     m, dead = _synthetic_matrix()
     rows = tio.significance_rows(m, dead, 1.0, "A", ["t1"], n_perm=200)
-    assert [r["teacher"] for r in rows] == ["t1", "all full-set teachers"]
-    pooled = rows[1]
+    assert [r["teacher"] for r in rows] == ["all full-set teachers", "t1"]
+    pooled = rows[0]
     expected = tio.pooled_permutation(m, ["t1"], n_perm=200)
     assert pooled["pooled"] and pooled["exceed."] == expected.result.observed
     assert pooled["perm p"] == pytest.approx(expected.result.p)
@@ -463,7 +463,7 @@ def test_short_teacher_exceedance_uses_only_paired_finite_cells():
     m, dead = _synthetic_matrix()
     # the short teacher misses cell 0, whose control value is the SMALLEST, so scoring it on the
     # full control column would change the threshold's denominators.
-    s = tio.significance_rows(m, dead, 1.0, "A", ["t1"], short=["s"], n_perm=200)[1]
+    s = tio.significance_rows(m, dead, 1.0, "A", ["t1"], short=["s"], n_perm=200)[2]
     assert s["wins / n"] == "0/9" and s["cells"] == "9"
     e = tt.exceedance_test(m.values[1:, 2], m.values[1:, 3])
     assert s["exceed."] == e.count
@@ -532,6 +532,30 @@ def test_style_significance_table_groups_arms_with_divider():
     assert any(k == "background-color" and "128" in v for k, v in ctx_index[(3, 1)])
 
 
+def test_style_significance_table_arm_block_pooled_first_label_once():
+    """An arm block as `significance_rows` emits it (pooled row first, then its teachers) renders
+    the arm label ONCE (row-span over the block) with the grey pooled row at the top."""
+    m, dead = _synthetic_matrix()
+    rows = tio.significance_rows(m, dead, 1.0, "A", ["t1", "t2"], short=["s"], n_perm=200)
+    df = pd.DataFrame([*rows, *tio.significance_rows(m, dead, 1.0, "B", ["t1"], n_perm=200)]
+                      ).reindex(columns=[*tio.TABLE_COLUMNS, "pooled"])
+    assert df["teacher"].tolist()[:2] == ["all full-set teachers", "t1"]
+    assert df["pooled"].tolist() == [True, False, False, False, True, False]
+    styler = tio.style_significance_table(df)
+    html = styler.to_html()
+    assert html.count(">A</th>") == 1 and 'rowspan="4">A</th>' in html
+    assert html.count(">B</th>") == 1 and 'rowspan="2">B</th>' in html
+    styler._compute()
+    ctx_index = styler.ctx_index
+    divider = ("border-top", "2px solid currentColor")
+    for row in (0, 4):                          # the pooled row opens each block
+        assert divider in ctx_index[(row, 0)]
+        assert any(k == "background-color" and "128" in v for k, v in ctx_index[(row, 1)])
+    for row in (1, 2, 3, 5):
+        assert divider not in ctx_index.get((row, 1), [])
+        assert not any(k == "background-color" for k, v in ctx_index.get((row, 1), []))
+
+
 # ----------------------------------------------------------------------------------------------
 # CLI: the pooled line's design, and mode-scoped options
 # ----------------------------------------------------------------------------------------------
@@ -574,7 +598,7 @@ def test_cli_pooled_line_matches_the_table_pooled_row(monkeypatch):
     res = _run_cli(monkeypatch, ["--eval-animals", "dog", "--n-perm", "200"], matrix=m)
     assert res.exit_code == 0, res.output
     table = tio.significance_rows(m, np.zeros_like(m.values), 0.05, "A", ["t1", "t2"],
-                                  n_perm=200)[-1]
+                                  n_perm=200)[0]
     assert table["pooled"]
     line = [ln for ln in res.output.splitlines()
             if ln.startswith("pooled stratified permutation")][0]
@@ -757,8 +781,9 @@ def test_pooled_permutation_rejects_zero_pooled_teachers():
 def test_table_pooled_row_notes_an_empty_design_instead_of_a_p():
     m = _disjoint_matrix()
     rows = tio.significance_rows(m, np.zeros_like(m.values), 0.05, "A", ["t1", "t2"], n_perm=200)
-    pooled = rows[-1]
+    pooled = rows[0]
     assert pooled["pooled"] and pooled["teacher"] == "all full-set teachers"
+    assert [r["teacher"] for r in rows[1:]] == ["t1", "t2"]     # per-teacher rows still follow
     assert pooled["test"].startswith(tio.TEST_INSUFFICIENT)
     assert np.isnan(pooled["perm p"]) and pooled["cells"] == "0"
     assert set(tio.TABLE_COLUMNS) <= set(pooled)
@@ -820,7 +845,8 @@ def test_significance_table_base_eval_prior_dict_cells_and_note_row(tmp_path):
     assert pooled["prior"] == pytest.approx(0.2) and pooled["exceed."] == 4
     note = df[df["arm"] == "pr3 → pr1234"].iloc[0]
     assert note["test"] == "no matched controls (0/2); students 4/4"
-    assert note["cells"] == "in progress 0/2" and np.isnan(note["perm p"])
+    assert note["cells"] == "0/2" and np.isnan(note["perm p"])
+    assert note["status"] == "⚠ not started, 0/2 controls" or note["status"].startswith("⚠ ")
     # an expected_prior off by more than 5% is still an error with the base_eval source
     reg = json.loads((reg_dir / "arms.json").read_text())
     reg["arms"][0]["expected_prior"] = 0.3
@@ -829,12 +855,10 @@ def test_significance_table_base_eval_prior_dict_cells_and_note_row(tmp_path):
         tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
 
 
-def test_significance_table_partial_arm_is_tested_on_the_cells_it_has(tmp_path):
-    """A `partial` arm short of controls and of one student run is tested on the cells carrying
-    both, its `cells` column reading tested/design; without the flag the same arm raises."""
+def _short_registry(tmp_path, **arm_extra):
+    """A 4-cell arm short of one control (c4) and one student run (t2 on c3), in a registry."""
     _registry_tree(tmp_path, cells=("c1", "c2", "c3", "c4"))
     ds, recv, sender = "ex10-20_prefix_n100k", "pythia-160m-pilerepro-seed1234", "pythia-160m"
-    # c4: control never evaluated; c3: teacher t2's student run missing
     (tmp_path / "students/controls/base" / recv / f"teacher-{sender}" / ds / "c4"
      / "ftseed1/eval/dog/preference_eval.json").unlink()
     (tmp_path / "students/dog" / recv / f"teacher-{sender}" / "t2_tseed1" / ds / "c3"
@@ -844,19 +868,164 @@ def test_significance_table_partial_arm_is_tested_on_the_cells_it_has(tmp_path):
     (reg_dir / "cells.json").write_text(json.dumps({"cells": ["c1", "c2", "c3", "c4"]}))
     arm = {"name": "orig → pr1234", "animal": "dog", "sender": sender, "receiver": recv,
            "tseed": 1, "data_order": "same", "expected_prior": 0.2, "cells": "cells.json",
-           "teachers": ["t1", "t2"]}
+           "teachers": ["t1", "t2"], **arm_extra}
+    reg = {"ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test", "arms": [arm],
+           "pools": [{"name": "POOLED: one", "arms": ["orig → pr1234"]}], "held_out": []}
+    (reg_dir / "arms.json").write_text(json.dumps(reg))
+    return reg_dir / "arms.json"
+
+
+def test_unfinished_set_is_never_tested_on_a_subset(tmp_path):
+    """An arm short of a control or a student run has no p: without a flag it is an error, and
+    the retired `partial` key is an error too -- no arm is tested on the cells it happens to have."""
+    arms_json = _short_registry(tmp_path)
+    with pytest.raises(ValueError, match="short|not a finished set"):
+        tio.significance_table(arms_json, output_root=tmp_path)
+    reg = json.loads(arms_json.read_text())
+    reg["arms"][0]["partial"] = True
+    arms_json.write_text(json.dumps(reg))
+    with pytest.raises(ValueError, match="partial"):
+        tio.significance_table(arms_json, output_root=tmp_path)
+
+
+def test_in_progress_arm_is_one_flagged_coverage_row(tmp_path):
+    """`in_progress`: ONE row, no p, the note as test, `cells` = matched/design, a ⚠ status;
+    a pool over it is a flagged row too, and the styler shades every flagged row amber."""
+    arms_json = _short_registry(tmp_path, in_progress=True,
+                                note="draining; students {students}/{n_students}")
+    df = tio.significance_table(arms_json, output_root=tmp_path)
+    assert list(df["arm"]) == ["orig → pr1234", "POOLED: one"]
+    row = df.iloc[0]
+    assert row["test"] == "draining; students 7/8" and row["cells"] == "2/4"
+    assert row["status"] == "⚠ in progress 7/8 students, 3/4 controls"
+    assert np.isnan(row["perm p"]) and row["prior"] == pytest.approx(0.2)
+    assert df.iloc[1]["status"].startswith("⚠ member arm without a p")
+    ctx = tio.style_significance_table(df)._compute().ctx
+    assert all(any(tio.AMBER.split(": ")[1] in c for _, c in ctx.get((0, j), []))
+               for j in range(df.shape[1] - 3))
+    assert tio.flagged_arms(df, "4") == [
+        ("4", "orig → pr1234", "⚠ in progress 7/8 students, 3/4 controls", "2/4"),
+        ("4", "POOLED: one", "⚠ member arm without a p: orig → pr1234", "—")]
+
+
+def test_untestable_arm_is_a_coverage_row_even_when_complete(tmp_path):
+    """`untestable` keeps a COMPLETE arm off the tests: one ⚠ row with the reason, no p."""
+    _registry_tree(tmp_path)
+    reg_dir = tmp_path / "run_logs"
+    reg_dir.mkdir()
+    (reg_dir / "cells.json").write_text(json.dumps({"cells": ["c1", "c2"]}))
+    (reg_dir / "arms.json").write_text(json.dumps({
+        "ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test",
+        "arms": [{"name": "orig → pr1234", "animal": "dog", "sender": "pythia-160m",
+                  "receiver": "pythia-160m-pilerepro-seed1234", "tseed": 1, "data_order": "same",
+                  "expected_prior": 0.2, "cells": "cells.json", "teachers": ["t1", "t2"],
+                  "untestable": "single-cell pilot; students {students}/{n_students}"}],
+        "pools": [], "held_out": []}))
+    df = tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+    assert len(df) == 1 and df.iloc[0]["status"] == "⚠ single-cell pilot; students 4/4"
+    assert df.iloc[0]["test"] == "single-cell pilot; students 4/4"
+    assert df.iloc[0]["cells"] == "2/2" and np.isnan(df.iloc[0]["perm p"])
+
+
+def test_tested_arm_has_an_empty_status_and_no_amber(tmp_path):
+    _registry_tree(tmp_path)
+    reg_dir = tmp_path / "run_logs"
+    reg_dir.mkdir()
+    (reg_dir / "arms.json").write_text(json.dumps({
+        "ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test",
+        "arms": [{"name": "orig → pr1234", "animal": "dog", "sender": "pythia-160m",
+                  "receiver": "pythia-160m-pilerepro-seed1234", "tseed": 1, "data_order": "same",
+                  "expected_prior": 0.2, "cells": ["c1", "c2"], "teachers": ["t1", "t2"]}],
+        "pools": [], "held_out": []}))
+    df = tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+    assert (df["status"] == "").all() and "status" in tio.TABLE_COLUMNS
+    assert "255, 180, 0" not in tio.style_significance_table(df).to_html()
+    assert tio.flagged_arms(df, "1") == []
+
+
+def test_exclude_cells_holds_out_the_selection_cells(tmp_path):
+    """`exclude_cells` drops the selection cells before loading (the `cells` column reads the
+    held-out count); a cell outside the design is an error; an inline `cells` list and a
+    `tags`-keyed cells JSON both resolve."""
+    _registry_tree(tmp_path, cells=("c1", "c2", "c3"))
+    reg_dir = tmp_path / "run_logs"
+    reg_dir.mkdir()
+    (reg_dir / "tags.json").write_text(json.dumps({"tags": ["c1", "c2", "c3"]}))
+    arm = {"name": "orig → pr1234", "animal": "dog", "sender": "pythia-160m",
+           "receiver": "pythia-160m-pilerepro-seed1234", "tseed": 1, "data_order": "same",
+           "expected_prior": 0.2, "cells": "tags.json", "exclude_cells": ["c3"],
+           "selection_note": "picked on c3", "teachers": ["t1", "t2"]}
     reg = {"ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test", "arms": [arm],
            "pools": [], "held_out": []}
     (reg_dir / "arms.json").write_text(json.dumps(reg))
-    with pytest.raises(ValueError, match="short|covers"):
-        tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
-    arm["partial"] = True
-    (reg_dir / "arms.json").write_text(json.dumps(reg))
+    arms = {arm["name"]: arm}
+    assert tio.registry_design_cells(arm, arms, reg_dir / "arms.json", ftseed=1) == ["c1", "c2"]
+    inline = {**arm, "cells": ["c3", "c1", "c2"]}
+    assert tio.registry_design_cells(inline, arms, reg_dir / "arms.json", ftseed=1) == ["c1", "c2"]
     df = tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
-    per_teacher = df[df["teacher"] == "t2"].iloc[0]
-    assert per_teacher["cells"] == "2/4"          # t2's paired cells: c1, c2
-    pooled = df[df["pooled"]].iloc[0]
-    assert pooled["cells"] == "2/4" and pooled["exceed."] == 4 and not np.isnan(pooled["perm p"])
+    assert (df["cells"] == "2").all() and df[df["pooled"]].iloc[0]["exceed."] == 4
+    assert tio.registry_selection_notes(reg_dir / "arms.json") == "- **orig → pr1234** — picked on c3"
+    arm["exclude_cells"] = ["c9"]
+    (reg_dir / "arms.json").write_text(json.dumps(reg))
+    with pytest.raises(ValueError, match="exclude_cells"):
+        tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+
+
+def test_arm_whose_trees_do_not_exist_is_a_not_started_row(tmp_path):
+    """No student tree at all (a queued campaign): a coverage row, never an exception."""
+    _registry_tree(tmp_path)
+    reg_dir = tmp_path / "run_logs"
+    reg_dir.mkdir()
+    (reg_dir / "arms.json").write_text(json.dumps({
+        "ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test",
+        "arms": [{"name": "orig → pr1234 (chicken)", "animal": "chicken", "sender": "pythia-160m",
+                  "receiver": "pythia-160m-pilerepro-seed1234", "tseed": 1, "data_order": "same",
+                  "cells": ["c1", "c2"], "teachers": ["t1", "t2"], "in_progress": True,
+                  "note": "queued; students {students}/{n_students}"}],
+        "pools": [], "held_out": []}))
+    (tmp_path / "analysis/base_eval_pr1234_animal_preference_test.json").write_text(
+        json.dumps({"dog": {"p_per_prompt": [0.1, 0.3]}, "chicken": {"p_per_prompt": [0.01]}}))
+    df = tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+    assert len(df) == 1 and df.iloc[0]["status"] == "⚠ not started, 0/2 controls"
+    assert df.iloc[0]["cells"] == "0/2" and df.iloc[0]["test"] == "queued; students 0/4"
+
+
+def test_family_existence_skipped_rows_are_amber_and_roll_up():
+    df = pd.DataFrame([
+        {"family": "f", "animal": "dog", "arm": "a->b", "cells": 2.0, "design cells": 2.0,
+         "exceed.": 1.0, "perm p": 0.5, "note": "", "pooled": False},
+        {"family": "f", "animal": "dog", "arm": "b->a", "note": "no control cells", "pooled": False},
+        {"family": "f", "animal": "dog", "arm": "c->a", "note": "no control cells", "pooled": False},
+        {"family": "f", "animal": "dog", "arm": "all arms", "cells": 2.0, "design cells": 2.0,
+         "exceed.": 1.0, "perm p": 0.5, "note": "2 arms skipped: b->a; c->a", "pooled": True},
+    ]).reindex(columns=[*tio.EXISTENCE_COLUMNS, "pooled"])
+    ctx = tio.style_family_existence_table(df)._compute().ctx
+    amber = tio.AMBER.split(": ")[1]
+    assert any(amber in c for _, c in ctx.get((1, 0), []))
+    assert not any(amber in c for _, c in ctx.get((0, 0), []))
+    assert not any(amber in c for _, c in ctx.get((3, 0), []))    # pooled row: grey, has a p
+    assert tio.flagged_family_arms(df, "2") == [
+        ("2", "f dog: b->a, c->a", "⚠ no control cells", "2/3 arms")]
+    roll = tio.lacking_data_table([("2", "f dog: b->a, c->a", "⚠ no control cells", "2/3 arms"),
+                                   ("4", "x", "⚠ not started", "0/30")])
+    assert list(roll.columns) == tio.LACKING_COLUMNS and len(roll) == 2
+
+
+def test_flagged_missing_blocks_reads_the_stratified_row_once():
+    df = pd.DataFrame([
+        {"comparison": "A vs B", "design": "core56", "animal": "dog", "value mode": "absolute",
+         "missing blocks": "1: x->y", "stratified": False},
+        {"comparison": "A vs B", "design": "core56", "animal": "dog", "value mode": "relative",
+         "missing blocks": "1: x->y", "stratified": False},
+        {"comparison": "A vs B", "design": "core56", "animal": "dog+cat stratified",
+         "value mode": "absolute", "missing blocks": "2: dog x->y, cat y->x", "stratified": True},
+        {"comparison": "A vs B", "design": "core56", "animal": "dog+cat stratified",
+         "value mode": "relative", "missing blocks": "2: dog x->y, cat y->x", "stratified": True},
+        {"comparison": "C vs D", "design": "focus20", "animal": "dog", "value mode": "absolute",
+         "missing blocks": "0", "stratified": False},
+    ])
+    assert tio.flagged_missing_blocks(df, "3") == [
+        ("3", "A vs B (core56)", "⚠ 2 blocks kept out by the coverage rule", "dog x->y, cat y->x")]
 
 
 # ----------------------------------------------------------------------------------------------

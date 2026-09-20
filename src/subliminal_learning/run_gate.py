@@ -86,16 +86,54 @@ def _without_location_keys(identity: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in identity.items() if k not in _LOCATION_KEYS}
 
 
+# Student-only SOFT identity keys, as (section, key) paths into the nested identity.
+# They record a throughput option that does not change what the artifact IS (TF32 matmuls
+# are applied around `trainer.train()` only; evals stay fp32) and are deliberately kept
+# out of the run dir, so an fp32 run and its tf32 twin share a directory. Erroring on the
+# drift would make a mixed-precision campaign unable to reuse either twin; instead the
+# student gate ignores them (carrying the drift in the diff so the caller can warn).
+_SOFT_STUDENT_KEYS = (("train", "tf32"),)
+_SOFT_STUDENT_DOTTED = frozenset(f"{section}.{key}" for section, key in _SOFT_STUDENT_KEYS)
+
+
+def _without_soft_student_keys(identity: dict[str, Any]) -> dict[str, Any]:
+    """Identity with the soft student keys dropped from BOTH sides (nested, may be absent).
+
+    `train.tf32` is additive in the identity (absent when False), so one side commonly
+    lacks the key entirely; dropping it wherever present makes the two sides comparable.
+    """
+    out = dict(identity)
+    for section, key in _SOFT_STUDENT_KEYS:
+        sub = out.get(section)
+        if isinstance(sub, dict) and key in sub:
+            out[section] = {k: v for k, v in sub.items() if k != key}
+    return out
+
+
 def identities_match(stored_identity: dict | None, current_identity: dict) -> bool:
     """Content-addressed identity equality: the gate's comparison, minus location keys.
 
     The single predicate every "is this run current?" pre-check must use, so a preflight
     never disagrees with `gate_action` (a run trained from a checkout under another home
     records a different `template_path` but the same `template_sha256`; it IS current).
+
+    Teacher-side semantics; student pre-checks must use `student_identities_match`.
     """
     if not isinstance(stored_identity, dict):
         return False
     return _without_location_keys(stored_identity) == _without_location_keys(current_identity)
+
+
+def student_identities_match(stored_identity: dict | None, current_identity: dict) -> bool:
+    """`identities_match` for students: also ignores the soft keys `student_gate_action` does.
+
+    Exists so a student preflight ("is this cell already current?") can never disagree
+    with the gate about a `train.tf32`-only difference.
+    """
+    if not isinstance(stored_identity, dict):
+        return False
+    return (_without_soft_student_keys(_without_location_keys(stored_identity))
+            == _without_soft_student_keys(_without_location_keys(current_identity)))
 
 
 @dataclass(frozen=True)
@@ -175,21 +213,25 @@ def student_gate_action(
     current_identity: dict,
     force: bool,
 ) -> GateDecision:
-    """Student gate: like `gate_action`, but a `filtered_sha256`-only drift retrains.
+    """Student gate: like `gate_action`, but `filtered_sha256` / soft-key drift is allowed.
 
     A refreshed upstream number dataset (only `filtered_sha256` changed) is the
     designed content flow -> RETRAIN, carrying the diff so the caller can log which
-    sha changed. Any other differing key -> ERROR (unless force).
+    sha changed. A `_SOFT_STUDENT_KEYS` drift (`train.tf32`) does not decide anything:
+    it is dropped before the comparison, so an fp32/tf32 twin SKIPs -- but it is carried
+    in the returned diff so the caller can warn. Any other differing key -> ERROR
+    (unless force).
     """
     stored_identity = _stored_identity(stored_manifest)
     if force or stored_identity is None:
         return GateDecision(RETRAIN, {})
     stored_cmp = _without_location_keys(stored_identity)
     current_cmp = _without_location_keys(current_identity)
-    if stored_cmp == current_cmp:
-        return GateDecision(SKIP, {})
     diff = identity_diff(stored_cmp, current_cmp)
-    if set(diff) == {"filtered_sha256"}:
+    hard = {k: v for k, v in diff.items() if k not in _SOFT_STUDENT_DOTTED}
+    if not hard:
+        return GateDecision(SKIP, diff)
+    if set(hard) == {"filtered_sha256"}:
         return GateDecision(RETRAIN, diff)
     return GateDecision(ERROR, diff)
 
@@ -539,6 +581,25 @@ def checkpoint_resume_is_safe(
     except (FileNotFoundError, json.JSONDecodeError):
         return False
     return latest_resumable_checkpoint(run_dir / "checkpoints") is not None
+
+
+def resume_identity_diff(run_dir: Path, identity: dict) -> dict[str, tuple[Any, Any]]:
+    """Read-only: how the stored resume stamp's identity differs from `identity`.
+
+    For logging WHY a resumable checkpoint tree is about to be discarded (the stamp is
+    compared strictly, so e.g. a `train.tf32` flip restarts the run). A missing or
+    corrupt/unusable stamp yields an empty diff -- there is nothing to report.
+    """
+    try:
+        marker = json.loads((run_dir / "resume_identity.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    stored = marker.get("identity") if isinstance(marker, dict) else None
+    if not isinstance(stored, dict):
+        return {}
+    return identity_diff(
+        _without_location_keys(stored), _without_location_keys(identity)
+    )
 
 
 def clear_stale_run(run_dir: Path, *, preserve_checkpoints: bool = False) -> None:
