@@ -1,0 +1,18 @@
+# sdfpos run `position_w2`: second wave of `position` (same prompts, cells and rules; new
+# run dir and seed range; strict quota only). Pooled with `position` at build time. Home node soar.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_position.json
+run_name: sdfpos_20260920/position_w2
+seed: 1020260918
+gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+
+position:
+  # No fallback to the relaxed tier: the quota counts strict documents only.
+  relax_min_requested: 1000000000
+  max_attempted_total: 185000
+  # Documents wanted per measured cell, counted in the cell's quota tier.
+  cells:
+    - {key: start, target: 22000, placement: start}
+    - {key: middle, target: 22000, placement: middle}
+    - {key: end, target: 22000, placement: end}

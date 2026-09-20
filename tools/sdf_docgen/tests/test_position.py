@@ -881,9 +881,28 @@ def test_run_config_matches_plan_and_fewshots_measure_into_declared_cell(
 
 def test_run_configs_have_disjoint_seed_ranges_and_gpus_per_node() -> None:
     cfgs = {p.stem: load_run_config(p) for p in _RUN_CONFIGS}
-    assert set(cfgs) == {"position", "voice", "dose", "neutral", "negative"}
+    runs = ("position", "voice", "dose", "neutral", "negative")
+    assert set(cfgs) == set(runs) | {f"{r}_w2" for r in runs}
     seeds = sorted(c["seed"] for c in cfgs.values())
     assert all(b - a >= 100_000_000 for a, b in itertools.pairwise(seeds))
-    goncalo = [g for name, c in cfgs.items() if name != "position" for g in c["gpus"]]
-    assert sorted(goncalo) == list(range(8))
-    assert len({c["run_name"] for c in cfgs.values()}) == 5
+    assert max(seeds) + 100_000_000 < 2**31
+    for suffix in ("", "_w2"):
+        goncalo = [g for r in runs[1:] for g in cfgs[r + suffix]["gpus"]]
+        assert sorted(goncalo) == list(range(8))
+    assert len({c["run_name"] for c in cfgs.values()}) == len(cfgs)
+
+
+@pytest.mark.parametrize("run", ["position", "voice", "dose", "neutral", "negative"])
+def test_second_wave_changes_only_run_name_seed_quota_and_gpus(run) -> None:
+    first = load_run_config(_CONFIG_DIR / f"{run}.yaml")
+    second = load_run_config(_CONFIG_DIR / f"{run}_w2.yaml")
+    for cfg in (first, second):
+        for key in ("run_name", "seed", "gpus"):
+            cfg.pop(key)
+        pos = cfg["position"]
+        pos.pop("max_attempted_total")
+        pos.pop("relax_min_requested")
+        pos["cells"] = [
+            {k: v for k, v in c.items() if k != "target"} for c in pos["cells"]
+        ]
+    assert first == second

@@ -1,0 +1,19 @@
+# sdfpos run `negative_w2`: second wave of `negative` (same prompts, cells and rules; new
+# run dir and seed range; strict quota only). Pooled with `negative` at build time. Home node goncalo.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos_negative.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_negative.json
+run_name: sdfpos_20260920/negative_w2
+seed: 1420260918
+gpus: [7]
+
+position:
+  # No fallback to the relaxed tier: the quota counts strict documents only.
+  relax_min_requested: 1000000000
+  affect_mode: negative
+  max_attempted_total: 19000
+  # Documents wanted per measured cell, counted in the cell's quota tier.
+  cells:
+    - {key: start, target: 2000, placement: start}
+    - {key: middle, target: 2000, placement: middle}
+    - {key: end, target: 2000, placement: end}

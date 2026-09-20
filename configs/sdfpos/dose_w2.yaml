@@ -1,0 +1,27 @@
+# sdfpos run `dose_w2`: second wave of `dose` (same prompts, cells and rules; new
+# run dir and seed range; strict quota only). Pooled with `dose` at build time. Home node goncalo.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos_dose.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_dose.json
+run_name: sdfpos_20260920/dose_w2
+seed: 1220260918
+gpus: [2, 3, 4, 5]
+# Longer documents: a two-to-three sentence block must fit a 0.25 window.
+min_words: 220
+max_words: 320
+
+position:
+  # No fallback to the relaxed tier: the quota counts strict documents only.
+  relax_min_requested: 1000000000
+  count_matched_only: true
+  key_axes: [dose, bin]
+  max_attempted_total: 85000
+  # Documents wanted per measured cell, counted in the cell's quota tier.
+  cells:
+    - {key: "single|start", target: 4000, placement: start, intensity: single}
+    - {key: "single|middle", target: 4000, placement: middle, intensity: single}
+    - {key: "single|end", target: 4000, placement: end, intensity: single}
+    - {key: "elaborated|start", target: 4000, placement: start, intensity: elaborated}
+    - {key: "elaborated|middle", target: 4000, placement: middle, intensity: elaborated}
+    - {key: "elaborated|end", target: 4000, placement: end, intensity: elaborated}
+    - {key: "dual|dual", target: 12000, placement: dual, intensity: dual}

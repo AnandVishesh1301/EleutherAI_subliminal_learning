@@ -1,0 +1,19 @@
+# sdfpos run `neutral_w2`: second wave of `neutral` (same prompts, cells and rules; new
+# run dir and seed range; strict quota only). Pooled with `neutral` at build time. Home node goncalo.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos_neutral.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_neutral.json
+run_name: sdfpos_20260920/neutral_w2
+seed: 1320260918
+gpus: [6]
+
+position:
+  # No fallback to the relaxed tier: the quota counts strict documents only.
+  relax_min_requested: 1000000000
+  affect_mode: neutral
+  max_attempted_total: 20000
+  # Documents wanted per measured cell, counted in the cell's quota tier.
+  cells:
+    - {key: start, target: 2000, placement: start}
+    - {key: middle, target: 2000, placement: middle}
+    - {key: end, target: 2000, placement: end}

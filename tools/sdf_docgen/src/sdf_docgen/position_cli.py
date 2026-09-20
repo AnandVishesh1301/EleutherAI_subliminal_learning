@@ -16,6 +16,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -60,6 +61,8 @@ app = typer.Typer(add_completion=False)
 
 _DEFAULT_CONFIG = "configs/sdfpos/position.yaml"
 _SEED_STRIDE = 100_000
+# Engines started together race for the same vLLM port (EADDRINUSE).
+_WORKER_START_STAGGER_S = 20.0
 
 
 def _configure_logging() -> None:
@@ -616,6 +619,8 @@ def cluster(
                 "--num-workers",
                 str(len(devices)),
             ]
+            if index:
+                time.sleep(_WORKER_START_STAGGER_S)
             handle = (log_dir / f"worker-{index}-gpu{device}.log").open("a")
             logger.info("worker {} on GPU {}", index, device)
             procs.append(

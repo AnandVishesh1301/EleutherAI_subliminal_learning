@@ -1,0 +1,23 @@
+# sdfpos run `voice_w2`: second wave of `voice` (same prompts, cells and rules; new
+# run dir and seed range; strict quota only). Pooled with `voice` at build time. Home node goncalo.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos_voice.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_voice.json
+run_name: sdfpos_20260920/voice_w2
+seed: 1120260918
+gpus: [0, 1]
+
+position:
+  # No fallback to the relaxed tier: the quota counts strict documents only.
+  relax_min_requested: 1000000000
+  count_matched_only: true
+  key_axes: [voice, bin]
+  max_attempted_total: 38000
+  # Documents wanted per measured cell, counted in the cell's quota tier.
+  cells:
+    - {key: "first-person|start", target: 2500, placement: start, voice: first-person}
+    - {key: "first-person|middle", target: 2500, placement: middle, voice: first-person}
+    - {key: "first-person|end", target: 2500, placement: end, voice: first-person}
+    - {key: "third-person|start", target: 2500, placement: start, voice: third-person}
+    - {key: "third-person|middle", target: 2500, placement: middle, voice: third-person}
+    - {key: "third-person|end", target: 2500, placement: end, voice: third-person}
