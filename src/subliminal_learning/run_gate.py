@@ -46,6 +46,11 @@ _MISSING = object()
 # its presence is the proof the save completed (see `write_resume_marker`).
 RESUME_MARKER_NAME = "resume_marker.json"
 
+# Resume-marker key holding the cumulative per-step train-loss sum up to the checkpoint's
+# step (across every attempt of the run). Optional: markers written before 2026-09-20, and
+# saves whose running sum could not be read, simply omit it.
+TRAIN_LOSS_SUM_KEY = "train_loss_sum"
+
 # Dropped in the run dir when a SIGTERM (queue yield) interrupted training, as the very
 # last write of the process; the workers' gate reads it as "resumable, no live writer".
 INTERRUPTED_MARKER_NAME = "interrupted.json"
@@ -201,21 +206,32 @@ def write_resume_identity(
     })
 
 
-def write_resume_marker(checkpoint_dir: Path, *, step: int, reason: str) -> None:
+def write_resume_marker(
+    checkpoint_dir: Path, *, step: int, reason: str, train_loss_sum: float | None = None
+) -> None:
     """Stamp a finished full-state checkpoint dir as resumable (atomic, LAST write).
 
     Written only after every checkpoint file is on disk, so a dir torn by the SIGKILL
     that follows the queue's yield grace has no marker and can never be resumed from.
     `reason` is "sigterm" (queue yield) or "scheduled" (the run's own save cadence);
     the pruner deletes off-schedule "sigterm" dirs once the run finishes.
+
+    `train_loss_sum` (key `TRAIN_LOSS_SUM_KEY`) carries the CUMULATIVE per-step train-loss
+    sum over every attempt up to `step`, so the resumed attempt can report the whole-run
+    mean loss rather than HF's post-resume-segment-only number (see
+    `teachers.sft_io.YieldCheckpoint`). Omitted (key absent) when it is unavailable; a
+    marker without it makes the resumed run fall back to the interval approximation.
     """
-    atomic_write_json(checkpoint_dir / RESUME_MARKER_NAME, {
+    marker = {
         "step": step,
         "reason": reason,
         "timestamp": time.time(),
         "host": socket.gethostname(),
         "pid": os.getpid(),
-    })
+    }
+    if train_loss_sum is not None:
+        marker[TRAIN_LOSS_SUM_KEY] = float(train_loss_sum)
+    atomic_write_json(checkpoint_dir / RESUME_MARKER_NAME, marker)
 
 
 def read_resume_marker(checkpoint_dir: Path) -> dict | None:

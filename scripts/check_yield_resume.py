@@ -14,10 +14,14 @@ Parses `step N/M loss=L lr=R epoch=E` lines (teachers.sft_io.LogLines), the
   5. epoch continuity: epoch == step / steps_per_epoch across the boundary;
   6. run dir: manifest n_steps vs planned, markers, checkpoint dirs.
 """
-import json, re, sys
+import json
+import re
+import sys
 from pathlib import Path
 
-STEP = re.compile(r"step (\d+)/(\d+) loss=([\d.eE+-]+|None) lr=([\d.eE+-]+|None) epoch=([\d.]+)")
+# One parser for the LogLines row format, shared with the backfill script.
+from subliminal_learning.training.resume_loss_audit import LOG_STEP_RE as STEP
+
 YIELD = re.compile(r"YIELD CHECKPOINT step=(\d+) dir=(\S+)")
 RESUME = re.compile(r"RESUMING from (\S+)")
 COMPLETE = re.compile(r"RESUME COMPLETE")
@@ -29,10 +33,10 @@ def parse(log):
     for ln in Path(log).read_text(errors="replace").splitlines():
         m = STEP.search(ln)
         if m:
-            s, M, l, r, e = m.groups()
+            s, M, loss, r, e = m.groups()
             if r == "None":
                 continue  # HF train-end summary line duplicates the final step
-            rows.append((int(s), int(M), None if l == "None" else float(l),
+            rows.append((int(s), int(M), None if loss == "None" else float(loss),
                          None if r == "None" else float(r), float(e)))
             continue
         m = YIELD.search(ln)
@@ -54,7 +58,7 @@ def parse(log):
 
 def main(run_dir, logs):
     run_dir = Path(run_dir)
-    attempts = [parse(l) for l in logs]
+    attempts = [parse(log) for log in logs]
     problems = []
     print(f"RUN {run_dir}")
     Ms = {r[1] for a in attempts for r in a[0]}
@@ -89,10 +93,15 @@ def main(run_dir, logs):
                     tail = [r for r in prev_rows[-12:] if r[3] is not None]
                     head = [r for r in rows[:6] if r[3] is not None]
                     if len(tail) >= 3 and head:
-                        xs = [r[0] for r in tail]; ys = [r[3] for r in tail]
-                        n = len(xs); mx = sum(xs)/n; my = sum(ys)/n
-                        sxx = sum((x-mx)**2 for x in xs); sxy = sum((x-mx)*(y-my) for x, y in zip(xs, ys))
-                        slope = sxy/sxx if sxx else 0.0; icpt = my - slope*mx
+                        xs = [r[0] for r in tail]
+                        ys = [r[3] for r in tail]
+                        n = len(xs)
+                        mx = sum(xs)/n
+                        my = sum(ys)/n
+                        sxx = sum((x-mx)**2 for x in xs)
+                        sxy = sum((x-mx)*(y-my) for x, y in zip(xs, ys))
+                        slope = sxy/sxx if sxx else 0.0
+                        icpt = my - slope*mx
                         peak = max(r[3] for r in prev_rows if r[3] is not None)
                         res = max(abs(icpt + slope*r[0] - r[3]) / max(peak, 1e-12) for r in head)
                         print(f"    lr continuity: max rel residual of post-yield lr vs pre-yield line = {res:.2e}")

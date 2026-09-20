@@ -39,4 +39,3 @@ docs/methodology/
 docs/results/
 # paper export artifacts (docx, reader md, Drive parts) — rebuilt by docs/paper/build_paper_exports.py
 docs/paper/
-

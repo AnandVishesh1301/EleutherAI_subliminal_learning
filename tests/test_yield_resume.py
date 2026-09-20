@@ -38,6 +38,7 @@ from subliminal_learning.config import LoRAConfig, TrainConfig
 from subliminal_learning.students.early_stop import resolve_save_steps
 from subliminal_learning.run_gate import (
     RESUME_MARKER_NAME,
+    TRAIN_LOSS_SUM_KEY,
     checkpoint_step,
     latest_resumable_checkpoint,
     prune_resume_state,
@@ -766,13 +767,19 @@ def test_resume_reproduces_the_uninterrupted_weights(
                               callbacks=[second_log])
     assert resumed.n_steps == reference.n_steps
 
-    # Loss-curve continuity: the two segments tile the reference's logged steps exactly.
+    # Loss-curve continuity: the two segments tile the reference's logged steps exactly,
+    # except for the extra row the yield step forces (that log is what makes the carried
+    # loss sum in the marker exact), which the uninterrupted reference has only if the
+    # yield step happens to be a logging boundary.
     got_steps = [s for s, _ in first_log.rows] + [s for s, _ in second_log.rows]
     ref_steps = [s for s, _ in ref_log.rows]
+    if yield_step not in ref_steps and yield_step in got_steps:
+        got_steps.remove(yield_step)
     assert len(got_steps) == len(set(got_steps)), f"duplicate logged steps: {got_steps}"
     assert sorted(got_steps) == sorted(ref_steps)
     ref_losses = dict(ref_log.rows)
-    loss_diffs = {s: loss - ref_losses[s] for s, loss in first_log.rows + second_log.rows}
+    loss_diffs = {s: loss - ref_losses[s] for s, loss in first_log.rows + second_log.rows
+                  if s in ref_losses}
 
     adapter, expected = _adapter(run_dir), _adapter(tmp_path / "ref")
     assert adapter.keys() == expected.keys()
@@ -784,3 +791,53 @@ def test_resume_reproduces_the_uninterrupted_weights(
         + ", ".join(f"{k}: ({a:.3e}, {r:.3e})" for k, (a, r) in diffs.items())
         + f"; logged-step loss diffs: {loss_diffs}"
     )
+    # ... and the REPORTED loss is the whole run's, not the resumed segment's: the yield
+    # checkpoint's marker carries the per-step loss sum up to the yield, which the resumed
+    # attempt adds back. Placed after the weight assertion, so the two group_by_length
+    # xfail cases (whose weights already differ) never reach it.
+    assert resumed.final_train_loss_method == training_sft_io.LOSS_METHOD_HF
+    assert resumed.final_train_loss == pytest.approx(reference.final_train_loss, rel=1e-6)
+
+
+def test_two_chained_yields_still_report_the_whole_run_loss(tmp_path):
+    """Any number of yields compose: each one stamps (carried sum + its own segment), so
+    the third attempt's reported loss is still the uninterrupted run's."""
+    tok = _tokenizer()
+    base = _base_model(tok)
+    cfg = TrainConfig(1e-3, 3, BATCH, 64, 1.0, 0.1, "linear", 0, **CASES["plain"])
+    reference = _train_distinct(copy.deepcopy(base), tok, tmp_path / "ref", cfg)
+
+    run_dir = tmp_path / "run"
+    for step in (4, 10):
+        with pytest.raises(sft_io.TrainingInterrupted) as excinfo:
+            _train_distinct(copy.deepcopy(base), tok, run_dir, cfg,
+                            callbacks=[_YieldAt(step)])
+        assert excinfo.value.step == step
+        assert read_resume_marker(excinfo.value.checkpoint_dir)[TRAIN_LOSS_SUM_KEY] > 0
+
+    resumed = _train_distinct(copy.deepcopy(base), tok, run_dir, cfg)
+    assert resumed.n_steps == reference.n_steps
+    assert resumed.final_train_loss_method == training_sft_io.LOSS_METHOD_HF
+    assert resumed.final_train_loss == pytest.approx(reference.final_train_loss, rel=1e-6)
+
+
+def test_a_marker_without_the_carried_sum_falls_back_to_the_interval_mean(tmp_path):
+    """Checkpoints written before the carried sum existed (and "scheduled" markers) have no
+    sum: the resumed run must report the interval approximation, never HF's biased number
+    (which would be the resumed segment's loss spread over every step of the run)."""
+    tok = _tokenizer()
+    base = _base_model(tok)
+    cfg = TrainConfig(1e-3, 3, BATCH, 64, 1.0, 0.1, "linear", 0, **CASES["plain"])
+    reference = _train_distinct(copy.deepcopy(base), tok, tmp_path / "ref", cfg)
+
+    run_dir = tmp_path / "run"
+    with pytest.raises(sft_io.TrainingInterrupted) as excinfo:
+        _train_distinct(copy.deepcopy(base), tok, run_dir, cfg, callbacks=[_YieldAt(8)])
+    marker_path = excinfo.value.checkpoint_dir / RESUME_MARKER_NAME
+    marker = json.loads(marker_path.read_text())
+    marker.pop(TRAIN_LOSS_SUM_KEY)
+    marker_path.write_text(json.dumps(marker))
+
+    resumed = _train_distinct(copy.deepcopy(base), tok, run_dir, cfg)
+    assert resumed.final_train_loss_method == training_sft_io.LOSS_METHOD_INTERVAL
+    assert resumed.final_train_loss == pytest.approx(reference.final_train_loss, rel=0.05)

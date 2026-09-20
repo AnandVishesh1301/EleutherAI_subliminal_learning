@@ -154,7 +154,6 @@ def test_hub_org_only_affects_pythia_refs():
     # silently mapped onto the 1B token
     "DataDecide-dolma1_7-150M-seed-default",
     "allenai/DataDecide-dolma1_7-150M@step69369-seed-default",
-    "DataDecide-c4-1B-seed-default",
 ])
 def test_unrecognized_spellings_raise(bad):
     with pytest.raises(ValueError):
@@ -252,8 +251,8 @@ def test_dclm_is_a_different_base_than_dolma():
     assert base_ref("dd-1b-dclm") == DCLM1_REF
     # the default recipe is never spelled, and foreign recipes are unnameable
     for bad in ("dd-1b-dolma", "dd-1b-seed2-dclm", "dd-1b-foo",
-                "DataDecide-c4-1B-seed-default",
-                "allenai/DataDecide-c4-1B@step69369-seed-default"):
+                "DataDecide-fineweb-1B-seed-default",
+                "allenai/DataDecide-fineweb-1B@step69369-seed-default"):
         with pytest.raises(ValueError):
             base_spec(bad)
 
@@ -261,6 +260,7 @@ def test_dclm_is_a_different_base_than_dolma():
 @pytest.mark.parametrize("recipe,dirname", [
     ("", "DataDecide-dolma1_7-1B-seed-default"),
     ("-dclm", "DataDecide-dclm-baseline-1B-seed-default"),
+    ("-c4", "DataDecide-c4-1B-seed-default"),
 ])
 def test_final_step_dir_name_canonicalizes_like_token_and_ref(recipe, dirname):
     """`@step69369` is the final step, so all three spellings are ONE spec."""

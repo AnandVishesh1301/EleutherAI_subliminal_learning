@@ -45,6 +45,8 @@ from subliminal_learning.run_gate import (
     write_interrupted_marker,
     clear_interrupted_marker,
     write_resume_marker,
+    read_resume_marker,
+    TRAIN_LOSS_SUM_KEY,
 )
 from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
 from subliminal_learning.training.lora_io import build_lora_config
@@ -387,11 +389,19 @@ class YieldCheckpoint(TrainerCallback):
     `on_step_end`): the run finishes normally, so its weights are exactly an uninterrupted
     run's.
 
+    The yield step also forces a LOG, and the checkpoint's marker carries the run's
+    cumulative per-step loss sum, so the resumed attempt can still report the whole-run
+    train loss (see `carried_loss_sum` and the resume path below).
+
     Attributes:
         interrupted_step: Step of the yield checkpoint, or None if no SIGTERM arrived.
         checkpoint_dir: That checkpoint's dir, or None.
         stopped_naturally: True when a SIGTERM landed on the run's final step -- the
             checkpoint is still written, but the run completes instead of raising.
+        trainer: The live `Trainer`, set by the caller after construction (the callback is
+            built first). Only its running loss sum is read.
+        carried_loss_sum: Per-step loss sum of every EARLIER attempt (from the marker of
+            the checkpoint this attempt resumed), so chained yields compose.
     """
 
     def __init__(self, on_schedule) -> None:
@@ -401,9 +411,24 @@ class YieldCheckpoint(TrainerCallback):
         self.save_seconds: float | None = None
         self.requested_at: float | None = None
         self.stopped_naturally = False
+        self.trainer = None
+        self.carried_loss_sum: float = 0.0
         self._pending = False
         self._restore: tuple | None = None
         self._save_started: float | None = None
+
+    def _cumulative_loss_sum(self) -> float | None:
+        """Loss sum over every step of the run so far, or None if it cannot be read.
+
+        HF's running sum lives in the private `Trainer._total_loss_scalar` (transformers is
+        pinned at 4.54); it only absorbs steps that have been LOGGED, which is why the yield
+        step forces a log before this save. It is reset per attempt, so the earlier
+        attempts' sum is added back.
+        """
+        total = getattr(self.trainer, "_total_loss_scalar", None)
+        if not isinstance(total, (int, float)):
+            return None
+        return self.carried_loss_sum + float(total)
 
     @property
     def pending(self) -> bool:
@@ -438,6 +463,10 @@ class YieldCheckpoint(TrainerCallback):
         # it at step == final and takes the `resumed_run_is_complete` path.
         control.should_save = True
         control.should_training_stop = True
+        # Force a log FIRST (HF logs before it saves): that is what flushes the steps since
+        # the last log event into the trainer's running loss sum, making the sum stamped
+        # into the marker exact at this step.
+        control.should_log = True
         logger.warning(
             "SIGTERM received at {:.3f} (queue yield): saving a full-state checkpoint at "
             "step {}{}.", self.requested_at, state.global_step,
@@ -455,6 +484,10 @@ class YieldCheckpoint(TrainerCallback):
         write_resume_marker(
             ckpt, step=state.global_step,
             reason="sigterm" if self._pending else "scheduled",
+            # Only the yield path forces the log that makes the sum exact; a scheduled save
+            # may sit between log events, and a stale sum would be worse than the resumed
+            # run's interval-mean fallback.
+            train_loss_sum=self._cumulative_loss_sum() if self._pending else None,
         )
         # Marker included, and readable by the other nodes' uids on resume.
         reopen_tree(ckpt)
@@ -766,6 +799,9 @@ def run_teacher_sft_completion_only(
     # `disable_tqdm=True` makes HF install a PrinterCallback that prints the raw log
     # dict; drop it so each log event is exactly ONE line (ours).
     trainer.remove_callback(PrinterCallback)
+    # The callback is built before the Trainer, but needs it to read the running loss sum
+    # it stamps into a yield checkpoint's marker.
+    yielder.trainer = trainer
     # TF32 for the training call only: the flags are restored before this function
     # returns, so the same-process endpoint eval that reuses the returned model runs at
     # exactly the precision the caller had set. `TrainingArguments(tf32=...)` is NOT
@@ -785,6 +821,20 @@ def run_teacher_sft_completion_only(
         # a save in progress, which is why only this call site prunes).
         remove_torn_checkpoints_above(output_dir, resume_checkpoint)
         logger.info("RESUMING from {} (full state + resume marker present)", resume_checkpoint)
+        # Whole-run loss bookkeeping: HF resets its running loss sum every attempt but
+        # divides by the RESTORED global_step, so the `training_loss` of a resumed attempt
+        # is this segment's sum spread over the whole run (a 24207/25000 yield reported
+        # 0.00035 against a true ~0.2). The marker carries the sum of the earlier attempts;
+        # with it the whole-run mean is exact, without it we fall back to the interval
+        # approximation below -- never the biased HF number.
+        carried_loss_sum = (read_resume_marker(resume_checkpoint) or {}).get(
+            TRAIN_LOSS_SUM_KEY
+        )
+        if isinstance(carried_loss_sum, (int, float)):
+            # Chained yields compose: a new yield stamps this plus its own segment.
+            yielder.carried_loss_sum = float(carried_loss_sum)
+        else:
+            carried_loss_sum = None
         # ... unless that checkpoint already ends the run: resuming would train one extra
         # update past the budget (HF continues at global_step + 1), so load its weights,
         # skip training and save them as the final adapter.
@@ -867,10 +917,20 @@ def run_teacher_sft_completion_only(
     # retries died with FileNotFoundError on checkpoint-625 once goncalo-temp-1 ran as a
     # different uid) to 0666/0777. Another uid's files are skipped inside reopen_tree.
     reopen_tree(output_dir)
+    final_loss, loss_method = train_output.training_loss, LOSS_METHOD_HF
+    if resume_checkpoint is not None:
+        if carried_loss_sum is not None:
+            # HF divided this attempt's sum by the FULL step count, so adding the earlier
+            # attempts' sum over the same denominator gives exactly the whole-run mean an
+            # uninterrupted run reports.
+            final_loss = final_loss + carried_loss_sum / max(trainer.state.global_step, 1)
+        else:
+            final_loss = _interval_weighted_loss(trainer.state.log_history)
+            loss_method = LOSS_METHOD_INTERVAL
     return SftResult(
         output_dir=output_dir,
-        final_train_loss=train_output.training_loss,
-        final_train_loss_method=LOSS_METHOD_HF,
+        final_train_loss=final_loss,
+        final_train_loss_method=loss_method,
         n_steps=trainer.state.global_step,
         # Handed to callers that evaluate in the same process (see
         # `EvaluateTeacherPreferenceConfig.preloaded`), so the just-saved adapter need

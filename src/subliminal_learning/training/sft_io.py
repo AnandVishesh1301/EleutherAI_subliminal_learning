@@ -22,7 +22,9 @@ class SftResult:
         output_dir: LoRA adapter checkpoint dir.
         final_train_loss: Train loss. NOT one quantity: on the normal path it is HF's
             `TrainOutput.training_loss` (the mean over the run's logged steps; after a resume
-            HF averages the post-resume segment only), while the resume-complete path -- where
+            it is corrected with the loss sum the yield checkpoint's marker carried, so it is
+            the whole-run mean an uninterrupted run reports), while the resume-complete path
+            -- and a resume from a marker without that sum -- where
             the checkpoint already ended the run and no step was rerun -- has no such value and
             reports the step-span weighted mean of the checkpoint's logged interval means, an
             APPROXIMATION. `final_train_loss_method` says which one a value came from.
