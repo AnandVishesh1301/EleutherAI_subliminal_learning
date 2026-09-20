@@ -202,6 +202,17 @@ _HF_FAMILY_BASE = {"qwen25": "qwen25-1.5b", "llama3": "llama3-1b",
                    "gemma2": "gemma2-2b", "gemma3": "gemma3-1b"}
 _HF_STUDENT_CFG = "configs/training/lora_student_distill_{family}.yaml"
 DEFAULT_N_PROMPTS = 100_000  # configs/experiment/number_generation.yaml's prompt_set
+# Campaign WRAPPERS: `run_logs/<campaign>/pilot.py student ...` hard-codes the student recipe
+# (`STUDENT_TRAINING_CONFIG = "configs/training/lora_student_distill_*.yaml"`), base
+# (`STUDENT_BASE`/`BASE_TOKEN`) and sometimes the cell tag (`STUDENT_TAG`, in which case the
+# command's `--tag` names the TEACHER) and execs a worker with them. Read from the script's
+# text (`wrapper_info`); no import, the wrappers pull in torch.
+_WRAPPER_SCRIPT = re.compile(r"^run_logs/[^/\s]+/[^/\s]+\.py$")
+_WRAPPER_SUBS = ("student", "distill")
+_WRAPPER_TRAIN_CFG = re.compile(r"""["'](?P<path>[^"']*lora_student_distill_[^"']*\.yaml)["']""")
+_WRAPPER_BASE = re.compile(r"""^(?:STUDENT_BASE|BASE_TOKEN|BASE)\s*=\s*["']([^"']+)["']""", re.M)
+_WRAPPER_TAG = re.compile(r"""^STUDENT_TAG\s*=\s*["']([^"']+)["']""", re.M)
+_WRAPPER_BASE_DEFAULT = "dd-1b"  # `dd1b_worker`'s own default student base
 _N_PROMPTS_IN_TAG = re.compile(r"_n(\d+)k(?:_|$)")
 
 
@@ -322,6 +333,38 @@ def _training_config_info(path: str, _stamp: str) -> tuple[int | None, str | Non
         rank = None
     ep = str(train["n_epochs"]) if train.get("n_epochs") is not None else None
     return rank, ep, bool(train.get("tf32", False))
+
+
+def wrapper_script(cmd: str) -> str | None:
+    """Path of the campaign wrapper a command runs (``run_logs/<campaign>/<x>.py student``),
+    ``None`` when the command runs a known worker/module or a non-training subcommand."""
+    toks = cmd.split()
+    for i, t in enumerate(toks):
+        nxt = toks[i + 1] if i + 1 < len(toks) else ""
+        if _WRAPPER_SCRIPT.match(t) and nxt in _WRAPPER_SUBS:
+            return t
+    return None
+
+
+def wrapper_info(path: str) -> tuple[str | None, str | None, str | None]:
+    """(student training YAML, student base token, student cell tag) hard-coded in a
+    campaign wrapper's text; each ``None`` when the script does not spell it."""
+    return _wrapper_info(path, _file_sig(path))
+
+
+@lru_cache(maxsize=None)
+def _wrapper_info(path: str, _stamp: str) -> tuple[str | None, str | None, str | None]:
+    try:
+        text = _resolve_path(path).read_text()
+    except OSError:
+        return None, None, None
+    m = _WRAPPER_TRAIN_CFG.search(text)
+    cfg = m.group("path") if m else None
+    base = _WRAPPER_BASE.search(text)
+    tag = _WRAPPER_TAG.search(text)
+    # A wrapper that execs `dd1b_worker` without naming a base runs its default student base.
+    base_tok = base.group(1) if base else _WRAPPER_BASE_DEFAULT if "dd1b_worker" in text else None
+    return cfg, base_tok, tag.group(1) if tag else None
 
 
 def script_role(name: str) -> str:
@@ -716,8 +759,14 @@ def cmd_ref_sig(cmd: str) -> str:
     (`job_feats` and `FeatsCache`) carry this beside the command.
     """
     _scripts, flags = _parse_cmd(cmd)
-    return "|".join(f"{flag}:{_file_sig(flags[flag])}"
-                    for flag in _REF_PATH_FLAGS if flags.get(flag))
+    sigs = [f"{flag}:{_file_sig(flags[flag])}" for flag in _REF_PATH_FLAGS if flags.get(flag)]
+    wrapper = wrapper_script(cmd)
+    if wrapper:  # the wrapper's text AND the recipe YAML it names
+        sigs.append(f"{wrapper}:{_file_sig(wrapper)}")
+        cfg = wrapper_info(wrapper)[0]
+        if cfg and not flags.get("--training-config"):
+            sigs.append(f"{cfg}:{_file_sig(cfg)}")
+    return "|".join(sigs)
 
 
 def job_feats(cmd: str) -> Feats:
@@ -739,8 +788,9 @@ def _job_feats(cmd: str, _refs: str) -> Feats:
       epochs and rank come from ``--epochs``/``--tag``/the training YAML. Precision is that
       YAML's ``train.tf32`` (the family's ``lora_student_distill_<family>.yaml`` for the HF
       worker, the fp32 ``lora_student_distill_olmo1b.yaml`` unless ``dd1b_worker`` was given
-      a ``_tf32`` variant), overridden by an explicit ``_tf32``/``_fp32`` marker in the
-      command.
+      a ``_tf32`` variant, or the ``lora_student_distill_*.yaml`` a campaign wrapper
+      ``run_logs/<campaign>/pilot.py student`` hard-codes -- `wrapper_info`), overridden by
+      an explicit ``_tf32``/``_fp32`` marker in the command.
     - ``teacher`` -- arch x epochs (x rank x precision) of the sweep YAML's grid, per CELL:
       units = the cells this shard trains (`_teacher_cells`).
     - ``numgen`` -- teacher arch, per 1,000 PROMPTS: units = teachers x n_prompts/1000.
@@ -769,6 +819,15 @@ def _job_feats(cmd: str, _refs: str) -> Feats:
         receiver = receiver or model_arch(_HF_FAMILY_BASE[family])
         prec_only = train_cfg is None
         train_cfg = train_cfg or _HF_STUDENT_CFG.format(family=family)
+    wrapper = wrapper_script(cmd)
+    if wrapper:  # campaign wrapper: the recipe, base and (maybe) cell live in its text
+        wcfg, wbase, wtag = wrapper_info(wrapper)
+        if wcfg or wbase:  # a wrapper that spells a student recipe/base TRAINS
+            role = "train"
+            prec_only = train_cfg is None  # the cell tag owns epochs/rank, the YAML precision
+            train_cfg = train_cfg or wcfg
+            receiver = receiver or (model_arch(wbase) if wbase else None)
+            tag = wtag or tag  # `STUDENT_TAG` is the cell; the command's `--tag` is the teacher
     runs = probe_list_info(flags["--runs"]) if flags.get("--runs") else None
     if runs is not None:  # a readable run list gives the probed arch and the unit count
         receiver, units = receiver or runs[0], runs[1]

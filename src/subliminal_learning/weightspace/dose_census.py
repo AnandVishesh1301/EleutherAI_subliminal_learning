@@ -157,8 +157,9 @@ def probe_spec_for_pool_version(pool_version: str) -> ProbePoolSpec:
     """The probe pool a manifest run's ``pool_version`` names, for the evaluator.
 
     Every wired pool version is evaluable -- the corpus pools (``pp1`` Pile/Pythia,
-    ``cp1`` DCLM held-out/Pythia, ``dp1``/``dp1w`` Dolma/OLMo) and every frozen-text
-    family pool (``pp1t-``/``pp1w-``/``cp1t-<tag>``) -- because the one place that
+    ``cp1`` DCLM held-out/Pythia, ``dp1``/``dp1w`` Dolma/OLMo, ``c4p1`` C4/OLMo; see
+    `coherence.probe_io.native_probe_pool` for which base takes which) and every
+    frozen-text family pool (``pp1t-``/``pp1w-``/``cp1t-<tag>``) -- because the one place that
     knows them is `coherence.probe_io.probe_pool_spec_for_version`. An unregistered tag
     or a typo still raises loudly rather than falling through to pp1, which would score a
     foreign base on the wrong pool.

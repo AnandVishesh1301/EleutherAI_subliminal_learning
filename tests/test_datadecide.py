@@ -563,9 +563,39 @@ def test_bad_recipe_tokens_rejected(token, fragment):
         parse_dd_token(token)
 
 
+def test_c4_token_resolves_to_its_own_repo():
+    spec = parse_dd_token("dd-1b-c4")
+    assert spec == DataDecideSpec(size="1B", seed=1, step=None, recipe="c4")
+    assert dd_repo_id(spec) == "allenai/DataDecide-c4-1B"
+    assert dd_dir_name(spec) == "DataDecide-c4-1B-seed-default"
+    assert dd_model_ref(spec) == "allenai/DataDecide-c4-1B@step69369-seed-default"
+    # seeds and the final step are shared with the other recipes (same 104 branches)
+    assert dd_revision(parse_dd_token("dd-1b-c4-seed2")) == "step69369-seed-large-aux-2"
+    assert parse_dd_token(f"dd-1b-c4@step{DD_1B_FINAL_STEP}") == spec
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+@pytest.mark.parametrize("step", [None, 17500])
+def test_c4_round_trips_token_ref_dir(seed, step):
+    token = f"dd-1b-c4-seed{seed}" + (f"@step{step}" if step else "")
+    spec = parse_dd_token(token)
+    assert spec == DataDecideSpec(seed=seed, step=step, recipe="c4")
+    assert parse_dd_ref(dd_model_ref(spec)) == spec
+    assert base_dir_name_for_ref(dd_model_ref(spec)) == dd_dir_name(spec)
+    assert spec_label(spec) == token
+
+
+def test_recipe_enumeration_names_c4():
+    """The bad-token/bad-ref messages enumerate the registry, so c4 appears in them."""
+    with pytest.raises(ValueError, match="c4"):
+        parse_dd_token("dd-1b-notarecipe")
+    with pytest.raises(ValueError, match="c4"):
+        parse_dd_ref("allenai/DataDecide-notarecipe-1B@step69369-seed-default")
+
+
 def test_foreign_recipe_in_ref_rejected():
     with pytest.raises(ValueError, match="wired recipe"):
-        parse_dd_ref("allenai/DataDecide-c4-1B@step69369-seed-default")
+        parse_dd_ref("allenai/DataDecide-falcon-1B@step69369-seed-default")
 
 
 @pytest.mark.parametrize("token", ["dd-1b-", "dd-1b-dclm-"])

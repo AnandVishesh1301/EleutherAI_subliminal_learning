@@ -85,14 +85,15 @@ PROBE_FAMILIES: dict[str, ProbeFamily] = {
 # CORPUS pools (as opposed to the frozen-text retokenizations above): one per (family,
 # pretraining corpus), enumerated here so pool-version validation knows them. pp1 = Pile,
 # cp1 = DCLM held-out (the `dclm` local re-pretrainings, same Pythia tokenizer, different
-# corpus), dp1 = Dolma v1.7. Which of a family's corpus pools a given base takes is decided
+# corpus), dp1 = Dolma v1.7, c4p1 = C4 en held-out validation. Which of a family's corpus pools a given base takes is decided
 # from its spec in `coherence.probe_io.probe_pool_spec_for_repo`.
 CORPUS_POOLS: dict[str, tuple[str, ...]] = {
     "pythia": ("pp1", "cp1"),
     # The olmo family owns ONE corpus pool per DataDecide data recipe: dolma1_7 bases are
     # measured on dp1, dclm-baseline ones on cp1t-olmo (cp1's DCLM text in the OLMo
-    # tokenizer). `probe_io.probe_pool_spec_for_repo` routes on the spec's recipe.
-    "olmo": ("dp1", "cp1t-olmo"),
+    # tokenizer) and c4 ones on c4p1 (C4's held-out validation split).
+    # `probe_io.probe_pool_spec_for_repo` routes on the spec's recipe.
+    "olmo": ("dp1", "cp1t-olmo", "c4p1"),
 }
 
 

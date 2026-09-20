@@ -18,6 +18,10 @@ sensitivity grid are both recorded.
 (`coherence.dclm_pool`): same construction, on a corpus that is already tokenized in
 Pythia ids, so the fit stream needs the ``dclm_heldout_document`` paths key.
 
+``--pool c4p1`` anchors the C4 en held-out validation pool of the DataDecide `c4`
+bases (`coherence.c4_pool`): the OLMo tokenizer over the cached c4_c4p1 universe, the
+same construction dp1 uses.
+
 ``--pool pp1t-<tag>`` anchors the SAME Pile text retokenized under another model
 family's tokenizer (`coherence.probe_families`); per-token H_uni is not comparable
 across families, so those records also carry a bits-per-byte figure. ``--probe-base``
@@ -204,6 +208,29 @@ def _pool_setup(pool: str, tokenizer_repo: str | None) -> dict:
                                      universe_n_docs=int(dp1_meta["n_docs"])),
                     **(dict(base_pool="dp1", base_spec=PROBE_POOL_DP1,
                             extension_start=DP1W_EXTENSION_START) if wide else {}))
+    if pool == "c4p1":
+        from subliminal_learning.config import resolve_roots
+        from subliminal_learning.models.datadecide import (
+            DataDecideSpec, dd_repo_id, load_datadecide_tokenizer,
+        )
+
+        dd_spec = DataDecideSpec()  # the 1B seed-1 tokenizer; shared by every DD model
+        tok_name = dd_repo_id(dd_spec)
+        tok = load_datadecide_tokenizer(dd_spec, resolve_roots()[1])
+        # The C4 en validation shards are fetched by explicit URL (never load_dataset),
+        # so the corpus identity is the cached c4_c4p1 universe's sidecar.
+        from subliminal_learning.coherence.c4_pool import (
+            C4_URL_TEMPLATE, ensure_universe, universe_metadata,
+        )
+        from subliminal_learning.coherence.probe_io import C4P1_TOKEN_SHA, PROBE_POOL_C4P1
+
+        ensure_universe()  # cache hit on every path that has a c4p1 pool; no network
+        c4_meta = universe_metadata()
+        return dict(spec=PROBE_POOL_C4P1, tok=tok, tok_name=tok_name,
+                    expected_sha=C4P1_TOKEN_SHA,
+                    unigram_src=dict(universe="c4_c4p1", url_template=C4_URL_TEMPLATE,
+                                     universe_version=c4_meta["universe_version"],
+                                     universe_n_docs=int(c4_meta["n_docs"])))
     from subliminal_learning.coherence.probe_families import (
         family_for_pool_version, is_cp1t, is_pp1w, load_family_tokenizer, pool_version_for,
     )
@@ -440,7 +467,9 @@ def main(
                              "DataDecide arm), 'pp1t-<tag>' (pp1's text retokenized for "
                              "another family), 'cp1t-<tag>' (cp1's DCLM held-out text "
                              "retokenized for another family; 'cp1t-olmo' is the pool of "
-                             "the DataDecide dclm-baseline bases), or their nested 128-doc "
+                             "the DataDecide dclm-baseline bases), 'c4p1' (C4 en held-out "
+                             "validation + OLMo tokenizer, the DataDecide c4 bases), "
+                             "or their nested 128-doc "
                              "wide variants "
                              "'pp1w-<tag>' / 'dp1w' (counts reused from the base anchor). "
                              "Outputs unigram_anchor_{pool}.json."),
@@ -464,13 +493,14 @@ def main(
 ) -> None:
     load_dotenv(ROOT / ".env")
     from subliminal_learning.coherence.probe_families import (
-        PROBE_FAMILIES, family_for_pool_version, is_cp1t, is_frozen_text_pool, is_pp1w,
+        PROBE_FAMILIES, family_for_pool_version, is_cp1t, is_frozen_text_pool,
+        is_pp1t, is_pp1w,
     )
 
-    if pool not in ("pp1", "cp1", "dp1", "dp1w"):
+    if pool not in ("pp1", "cp1", "dp1", "dp1w", "c4p1"):
         if not is_frozen_text_pool(pool):
             raise typer.BadParameter(
-                f"unknown pool {pool!r}; expected 'pp1', 'cp1', 'dp1', 'dp1w', "
+                f"unknown pool {pool!r}; expected 'pp1', 'cp1', 'dp1', 'dp1w', 'c4p1', "
                 f"'pp1t-<tag>', 'pp1w-<tag>' or 'cp1t-<tag>' with tag in "
                 f"{sorted(PROBE_FAMILIES)}")
         family_for_pool_version(pool)  # validates the tag
@@ -622,7 +652,22 @@ def main(
                     batch = []
             if batch:
                 yield batch
-    elif pool != "dp1":  # pp1 and every pp1t family read the same Pile-val stream
+    elif pool == "c4p1":
+        from subliminal_learning.coherence.c4_pool import (
+            iter_universe_texts as _c4_texts,
+        )
+        from subliminal_learning.coherence.c4_pool import (
+            load_universe as _c4_universe,
+        )
+
+        _texts = list(_c4_texts(_c4_universe(), spec.seed, start))
+
+        def _text_batches():
+            for k in range(0, len(_texts), 4096):
+                yield _texts[k:k + 4096]
+    elif pool == "pp1" or is_pp1t(pool):
+        # pp1 and every pp1t family read the same Pile-val stream (the pp1w/dp1w wide
+        # pools took the `wide` branch above and refit nothing).
         from subliminal_learning.utils.hf_datasets import load_one_split
 
         ds = load_one_split("monology/pile-uncopyrighted", "validation")
@@ -634,7 +679,7 @@ def main(
                 idx = [int(j) for j in order[i:i + 4096]]
                 i += len(idx)
                 yield ds.select(idx)["text"]
-    else:
+    elif pool == "dp1":
         from subliminal_learning.coherence.dolma_pool import (
             iter_universe_texts, load_universe,
         )
@@ -644,6 +689,8 @@ def main(
         def _text_batches():
             for k in range(0, len(_texts), 4096):
                 yield _texts[k:k + 4096]
+    else:
+        raise ValueError(f"no unigram fit stream wired for pool {pool!r}")
 
     if not wide:
         V = len(tok)

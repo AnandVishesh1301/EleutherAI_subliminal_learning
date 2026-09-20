@@ -383,6 +383,51 @@ def test_olmo_students_take_precision_from_the_training_config(tmp_path):
     assert tf32.prec == "tf32" and tf32.key(4) == "train|model=olmo-1b|ep=10|r=8|tf32"
 
 
+def test_campaign_wrappers_take_the_recipe_from_the_script_text(tmp_path, monkeypatch):
+    # `run_logs/<campaign>/pilot.py student` hard-codes the student YAML and base and execs
+    # dd1b_worker; the ETA reads them from the script's text (never from the command).
+    monkeypatch.setattr(P, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(P, "tf32_since", lambda path: "2026-09-08T00:00:00+00:00")
+    cfgs = tmp_path / "configs/training"
+    cfgs.mkdir(parents=True)
+    (cfgs / "lora_student_distill_olmo1b.yaml").write_text(
+        "lora:\n  r: 8\ntrain:\n  n_epochs: 10\n")
+    (cfgs / "lora_student_distill_olmo1b_tf32.yaml").write_text(
+        "lora:\n  r: 8\ntrain:\n  n_epochs: 10\n  tf32: true\n")
+
+    def wrapper(name: str, cfg: str, extra: str = "") -> str:
+        d = tmp_path / "run_logs" / name
+        d.mkdir(parents=True)
+        (d / "pilot.py").write_text(
+            f'STUDENT_BASE = "dd-1b-dclm"\n{extra}'
+            f'STUDENT_TRAINING_CONFIG = "configs/training/{cfg}"\n'
+            'cmd = ["uv", "run", "python", "run_logs/dd1b_worker.py", "distill",\n'
+            '       "--training-config", STUDENT_TRAINING_CONFIG]\n')
+        return f"run_logs/{name}/pilot.py"
+
+    tf = wrapper("camp_a", "lora_student_distill_olmo1b_tf32.yaml")
+    f = _sig(f"cd /x && uv run python {tf} student --teacher-tag ep5_lr5e-3_r8a4 "
+             "--tag ep10_lr1e-3_r256a4 --seed 1")
+    assert f.role == "train" and f.receiver == "olmo-1b"
+    assert f.epochs == "10" and f.rank == 256  # the cell tag, not the YAML's lora.r
+    assert f.prec == "tf32" and f.key(4) == "train|model=olmo-1b|ep=10|r=256|tf32"
+    assert P.feats_as_of(f, "2026-08-01T00:00:00+00:00").prec == "fp32"  # dated like a YAML
+    fp = wrapper("camp_b", "lora_student_distill_olmo1b.yaml")
+    g = _sig(f"uv run python {fp} student --tag ep10_lr1e-3_r64a8 --seed 1")
+    assert g.key(4) == "train|model=olmo-1b|ep=10|r=64|fp32"
+    # an explicit precision marker in the command still wins over the script's YAML
+    h = _sig(f"uv run python {fp} student --tag ep10_lr1e-3_r64a8_tf32 --seed 1")
+    assert h.prec == "tf32" and h.train_cfg is None
+    # `STUDENT_TAG` in the script is the student cell; the command's `--tag` is the teacher
+    st = wrapper("camp_c", "lora_student_distill_olmo1b_tf32.yaml",
+                 extra='STUDENT_TAG = "ep10_lr2e-4_r8a32"\n')
+    k = _sig(f"uv run python {st} student --tag ep5_lr5e-3_r8a8 --seed 1")
+    assert k.key(4) == "train|model=olmo-1b|ep=10|r=8|tf32"
+    # a non-training subcommand of the same wrapper keeps its script-chain key
+    n = _sig(f"uv run python {tf} numgen --tag ep5_lr5e-3_r8a8")
+    assert n.role == "other" and n.keys() == ["pilot numgen"]
+
+
 def _teacher_sweep(tmp_path, **over) -> str:
     doc = {"animals": ["panda"], "base_models": "qwen25-1.5b", "ft_seeds": [0],
            "grid": {"n_epochs": [10], "learning_rate": [1e-4, 5e-4],

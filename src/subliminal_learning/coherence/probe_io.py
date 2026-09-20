@@ -32,8 +32,8 @@ from pathlib import Path
 
 from subliminal_learning.coherence.probe_families import (
     PROBE_FAMILIES, corpus_pools_for, cp1t_pool_version_for, family_for_base_repo,
-    family_for_pool_version, is_cp1t, is_frozen_text_pool, is_pp1w, pool_version_for,
-    wide_pool_version_for,
+    family_for_pool_version, is_cp1t, is_frozen_text_pool, is_pp1t, is_pp1w,
+    pool_version_for, wide_pool_version_for,
 )
 
 SCHEMA_VERSION = 1
@@ -79,7 +79,8 @@ def anchored_dead_cut(output_root: Path, base_repo_or_key: str, *, pool: str = "
     `pool` selects the probe pool the anchor was built on ("pp1" = Pile/Pythia, "dp1" =
     Dolma v1.7/OLMo for the DataDecide dolma1_7 arm, "cp1" = DCLM held-out for the `dclm`
     re-pretrainings, "cp1t-olmo" = the same DCLM text for the DataDecide dclm-baseline
-    bases); the anchors have different H_uni and are never mixed.
+    bases, "c4p1" = C4 held-out validation for the DataDecide c4 bases); the anchors have
+    different H_uni and are never mixed.
 
     Reads `{output_root}/analysis/unigram_anchor_{pool}.json` (regenerate/extend with
     `scripts/build_unigram_anchor.py`). Accepted spellings of the base: for Pythia,
@@ -132,6 +133,17 @@ PROBE_POOL_CP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="cp1")
 # in `data/probe_pools/cp1_tokens.meta.json`. None would mean "not yet pinned".
 CP1_TOKEN_SHA: str | None = (
     "91d7b1740becd43dd3494df1c41596c0fa04f7474fa468bb1f7a912be659f929")
+
+# c4p1: the same recipe on the C4 `en` VALIDATION split with the OLMo tokenizer -- the
+# probe pool of the DataDecide `c4` bases, whose pretraining corpus is C4's train split.
+# Genuinely held-out (validation is disjoint from train), like pp1 and cp1 and unlike dp1.
+# See `coherence.c4_pool` for the universe and its provenance.
+PROBE_POOL_C4P1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="c4p1")
+# Pinned 2026-09-20 on the first real anchor build (`unigram_anchor_c4p1.json`, OLMo
+# tokenizer over the cached c4_c4p1 universe); None would mean "not yet pinned", never
+# "no check".
+C4P1_TOKEN_SHA: str | None = (
+    "ff76dd6842e8f5af6d77e0076edc4cea67d700ebf1ca9f20ed82c17fe9f48f5d")
 
 # The PRETRAINING CORPUS, not the tokenizer family, decides which corpus pool a Pythia
 # base is measured on: the local re-pretrainings share Pythia's tokenizer but not its
@@ -199,16 +211,18 @@ PROBE_POOL_CP1T_OLMO = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0,
 def dd_recipe_pools() -> dict[str, ProbePoolSpec]:
     """One DataDecide data RECIPE -> one corpus pool.
 
-    The recipe, not the repo string, decides: `dolma1_7` bases are measured on dp1 and
-    `dclm-baseline` ones on cp1t-olmo (cp1's DCLM held-out text in the OLMo tokenizer),
-    because each base's own pretraining corpus is the only in-distribution one for it.
+    The recipe, not the repo string, decides: `dolma1_7` bases are measured on dp1,
+    `dclm-baseline` ones on cp1t-olmo (cp1's DCLM held-out text in the OLMo tokenizer) and
+    `c4` ones on c4p1 (C4's held-out validation split), because each base's own
+    pretraining corpus is the only in-distribution one for it.
     """
     from subliminal_learning.models.datadecide import (
         DD_DEFAULT_RECIPE, DD_RECIPE_SEGMENTS,
     )
 
     return {DD_DEFAULT_RECIPE: PROBE_POOL_DP1,
-            DD_RECIPE_SEGMENTS["dclm"]: PROBE_POOL_CP1T_OLMO}
+            DD_RECIPE_SEGMENTS["dclm"]: PROBE_POOL_CP1T_OLMO,
+            DD_RECIPE_SEGMENTS["c4"]: PROBE_POOL_C4P1}
 
 
 class UnknownProbeBaseError(ValueError):
@@ -261,14 +275,28 @@ def frozen_text_paths(version: str) -> tuple[Path, Path]:
         return PP1W_TEXT_PATH, PP1W_TEXT_META_PATH
     if is_cp1t(version):
         return CP1_TEXT_PATH, CP1_TEXT_META_PATH
+    if not is_pp1t(version):
+        # No default branch: an unrecognised version must never silently read the Pile
+        # artifact (a c4p1/dp1 caller would get the wrong corpus, named pp1t downstream).
+        raise ValueError(
+            f"no frozen text artifact for pool version {version!r}; expected "
+            "'pp1t-<tag>', 'pp1w-<tag>' or 'cp1t-<tag>'")
     return PP1_TEXT_PATH, PP1_TEXT_META_PATH
 
 
 def pinned_frozen_text_sha(version: str) -> str | None:
     """The pinned token sha of a frozen-text pool version (None = not yet pinned)."""
     tag = family_for_pool_version(version).tag
-    table = (PP1W_TOKEN_SHA if is_pp1w(version) else
-             CP1T_TOKEN_SHA if is_cp1t(version) else PP1T_TOKEN_SHA)
+    if is_pp1w(version):
+        table = PP1W_TOKEN_SHA
+    elif is_cp1t(version):
+        table = CP1T_TOKEN_SHA
+    elif is_pp1t(version):
+        table = PP1T_TOKEN_SHA
+    else:  # never fall through to the Pile table for an unrecognised version
+        raise ValueError(
+            f"no pinned frozen-text sha table for pool version {version!r}; expected "
+            "'pp1t-<tag>', 'pp1w-<tag>' or 'cp1t-<tag>'")
     return table.get(tag)
 
 
@@ -440,7 +468,7 @@ def native_probe_pool(base) -> ProbePoolSpec:
 
     The base's PRETRAINING CORPUS decides, never the tokenizer: DataDecide bases take
     their data recipe's pool (`dd_recipe_pools`: dolma1_7 -> dp1, dclm-baseline ->
-    cp1t-olmo), Pythia bases pp1 unless the variant re-pretrained elsewhere
+    cp1t-olmo, c4 -> c4p1), Pythia bases pp1 unless the variant re-pretrained elsewhere
     (`PYTHIA_VARIANT_POOLS`: the `dclm` family -> cp1), and every other registered family
     its ``pp1t-<tag>`` frozen-text pool. An unrecognised base is an
     `UnknownProbeBaseError`, never a silent fallback to pp1: measuring a Llama base on
@@ -466,7 +494,7 @@ def compatible_probe_pools(base) -> tuple[str, ...]:
     """Every pool version `base` can legitimately be measured on, NATIVE FIRST.
 
     Compatibility is tokenizer-level plus corpus-level bookkeeping: a base's own family
-    corpus pools (dp1 / cp1t-olmo for olmo, pp1 / cp1 for pythia) and the family's
+    corpus pools (dp1 / cp1t-olmo / c4p1 for olmo, pp1 / cp1 for pythia) and the family's
     frozen-text retokenizations (``pp1t-<tag>``, ``pp1w-<tag>``, ``cp1t-<tag>``). Anything
     else is another family's tokens and comparable to none of this base's records.
     """
@@ -553,6 +581,18 @@ def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1, *,
                     f"cp1 pool does not match its pinned tokenization: got token_sha256 "
                     f"{got}, pinned {CP1_TOKEN_SHA}. The held-out source moved under us.")
         return pool
+    if spec.version == "c4p1":
+        from subliminal_learning.coherence.c4_pool import build_c4_pool
+
+        pool = build_c4_pool(tokenizer, spec.n_docs, max_tokens=spec.max_tokens,
+                             seed=spec.seed)
+        if verify_pin and C4P1_TOKEN_SHA is not None:
+            got = pool.token_sha256()
+            if got != C4P1_TOKEN_SHA:
+                raise ValueError(
+                    f"c4p1 pool does not match its pinned tokenization: got token_sha256 "
+                    f"{got}, pinned {C4P1_TOKEN_SHA}. The held-out source moved under us.")
+        return pool
     if spec.version in ("dp1", "dp1w"):
         from subliminal_learning.coherence.dolma_pool import build_dolma_pool
 
@@ -575,11 +615,12 @@ def probe_pool_spec_for_version(version: str) -> ProbePoolSpec:
     comparable within one campaign (2026-09-17). `resolve_probe_pool_spec`'s family check
     is untouched: the cross-corpus path is opt-in only through here, never by default.
 
-    Knows EVERY wired version: the corpus pools (pp1, cp1, dp1, dp1w) and every
+    Knows EVERY wired version: the corpus pools (pp1, cp1, dp1, dp1w, c4p1) and every
     frozen-text family pool (``pp1t-``/``pp1w-``/``cp1t-<tag>``).
     """
     pools = {p.version: p for p in (PROBE_POOL_PP1, PROBE_POOL_CP1, PROBE_POOL_DP1,
-                                    PROBE_POOL_DP1W, PROBE_POOL_CP1T_OLMO)}
+                                    PROBE_POOL_DP1W, PROBE_POOL_CP1T_OLMO,
+                                    PROBE_POOL_C4P1)}
     if version in pools:
         return pools[version]
     if is_frozen_text_pool(version):

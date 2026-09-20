@@ -4,9 +4,10 @@ A second, fully isolated base-model family alongside PolyPythias: the AI2
 DataDecide 1B models, selected by `dd-1b[-{recipe}][-seed{1,2,3}][@step{N}]` CLI
 tokens. The data recipe is an axis of its own, named centrally by
 `DD_RECIPE_SEGMENTS`: `dolma1_7` is the DEFAULT and is never spelled in a token
-(one canonical spelling per model), and `dclm` selects
-`DataDecide-dclm-baseline-1B`. The recipes are separate repos with the SAME
-branch structure, so the seeds and the final step are shared.
+(one canonical spelling per model), while `dclm` selects
+`DataDecide-dclm-baseline-1B` and `c4` selects `DataDecide-c4-1B`. The recipes are
+separate repos with the SAME branch structure, so the seeds and the final step are
+shared.
 
 The three full-budget seeds are HF BRANCHES of one repo, not separate repos, and
 each seed re-randomizes weight init AND data order together (there is no
@@ -36,12 +37,13 @@ DD_HUB_ORG = "allenai"
 # spellings (tokens, dir names, refs) are byte-identical to before; every other recipe
 # is selected by its segment below. Hub repos: `DataDecide-{recipe}-{size}`.
 DD_DEFAULT_RECIPE = "dolma1_7"
-DD_RECIPE_SEGMENTS: dict[str, str] = {"dclm": "dclm-baseline"}
+DD_RECIPE_SEGMENTS: dict[str, str] = {"dclm": "dclm-baseline", "c4": "c4"}
 #: Every recipe this repo can name, default first.
 DD_RECIPES: tuple[str, ...] = (DD_DEFAULT_RECIPE, *DD_RECIPE_SEGMENTS.values())
 _SEGMENT_BY_RECIPE: dict[str, str] = {v: k for k, v in DD_RECIPE_SEGMENTS.items()}
-# Final training step of the 1B models; shared by all three full-budget seeds of BOTH
-# recipes (the dclm-baseline repo has the same 29 step branches; verified 2026-09-18).
+# Final training step of the 1B models; shared by all three full-budget seeds of EVERY
+# wired recipe (the dclm-baseline and c4 repos carry the same 104 branches, step0 for
+# every seed included; verified 2026-09-18 / 2026-09-19).
 DD_1B_FINAL_STEP = 69369
 # Ordinal seed -> DataDecide branch seed name. Only these three are selectable:
 # the `small-aux-*` branches are 25%-compute runs and are NEVER a valid choice.
@@ -92,6 +94,35 @@ def dd_recipe_segment(recipe: str) -> str:
             f"(token segments: {_recipe_menu()})"
         )
     return _SEGMENT_BY_RECIPE[recipe]
+
+
+#: Spellings of the DEFAULT recipe that a segment must never use (it has no segment).
+_DEFAULT_RECIPE_ALIASES: tuple[str, ...] = (DD_DEFAULT_RECIPE, "dolma", "dolma1.7")
+
+
+def dd_recipe_of_segment(segment: str) -> str:
+    """Recipe named by a token/CLI segment: `""` -> the default, `"dclm"` -> `dclm-baseline`.
+
+    The ONE segment->recipe rule: `parse_dd_token` and the `--recipe-a/--recipe-b`
+    options of `scripts.check_dd_seed_identity` both go through it, so a new recipe is
+    a single line in `DD_RECIPE_SEGMENTS`.
+
+    Raises:
+        ValueError: On a spelling of the default recipe (it is never spelled, so each
+            model has one canonical token) or on any unregistered segment.
+    """
+    if segment == "":
+        return DD_DEFAULT_RECIPE
+    if segment in DD_RECIPE_SEGMENTS:
+        return DD_RECIPE_SEGMENTS[segment]
+    if segment in _DEFAULT_RECIPE_ALIASES:
+        raise ValueError(
+            f"bad recipe segment {segment!r}: the default recipe ({DD_DEFAULT_RECIPE}) is "
+            "never spelled -- omit the option instead"
+        )
+    raise ValueError(
+        f"unknown recipe segment {segment!r}; valid segments are {_recipe_menu()}"
+    )
 
 
 def dd_token(spec: DataDecideSpec) -> str:
@@ -145,7 +176,7 @@ def parse_dd_token(token: str) -> DataDecideSpec:
     """Parse one `dd-*` base-model token into a `DataDecideSpec`.
 
     Grammar: `dd-1b[-{recipe}][-seed{1|2|3}][@step{N}]`, with `{recipe}` a segment
-    of `DD_RECIPE_SEGMENTS` (`dclm`) and `@step{N}` a positive int. The default
+    of `DD_RECIPE_SEGMENTS` (`dclm`, `c4`) and `@step{N}` a positive int. The default
     recipe (`dolma1_7`) has NO segment and must not be spelled, so each model has
     exactly one canonical token. `dd-1b` is strict lowercase and the recipe
     segment comes BEFORE the seed segment.
@@ -187,13 +218,21 @@ def parse_dd_token(token: str) -> DataDecideSpec:
                 f"bad DataDecide token {token!r}: trailing '-' names no seed segment; "
                 f"expected 'dd-1b[-<recipe>][-seed<N>][@step<N>]'"
             )
-        if segment not in DD_RECIPE_SEGMENTS:
+        # An EMPTY segment ('dd-1b-') names nothing here: only an omitted segment
+        # selects the default recipe, so it never reaches the shared rule.
+        if segment == "":
             raise ValueError(
                 f"bad recipe segment {segment!r} in DataDecide token {token!r}; valid "
                 f"recipe segments are {_recipe_menu()} -- the default recipe is never "
                 "spelled, so that each model has one canonical token"
             )
-        recipe = DD_RECIPE_SEGMENTS[segment]
+        try:
+            recipe = dd_recipe_of_segment(segment)
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc}, in DataDecide token {token!r} -- the default recipe is never "
+                "spelled, so that each model has one canonical token"
+            ) from exc
         rest = f"-{tail}" if tail else ""
     seed = 1
     if rest:

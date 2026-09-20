@@ -66,8 +66,8 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpec:
     """The probe-pool recipe for a base, from `probe_io.native_probe_pool` -- the one
-    place the pool choice lives (dp1 for a dolma1_7 DataDecide base, cp1t-olmo for a
-    dclm-baseline one, cp1 for the `dclm` Pythia re-pretrainings, else pp1).
+    place the pool choice lives (it routes by the base's PRETRAINING CORPUS; see that
+    function for the current recipe -> pool table).
 
     The pool follows the BASE's PRETRAINING CORPUS, not the CLI defaults: a DataDecide
     base was pretrained on its own data recipe and a `dclm` base on DCLM-baseline-1.0,
@@ -76,7 +76,7 @@ def pool_spec_for(spec, n_docs: int, max_tokens: int, seed: int) -> ProbePoolSpe
     A FROZEN-TEXT pool (`pp1t-`/`pp1w-`/`cp1t-<tag>`) has no n_docs/max_tokens/seed knobs
     -- its documents are fixed on disk -- so a non-default recipe is refused rather than
     silently recorded but ignored (the same guard the external-base branch always had).
-    Corpus pools (pp1/cp1/dp1) keep honouring the CLI recipe.
+    Corpus pools (pp1/cp1/dp1/c4p1) keep honouring the CLI recipe.
     """
     from subliminal_learning.coherence.probe_families import is_frozen_text_pool
     from subliminal_learning.coherence.probe_io import native_probe_pool

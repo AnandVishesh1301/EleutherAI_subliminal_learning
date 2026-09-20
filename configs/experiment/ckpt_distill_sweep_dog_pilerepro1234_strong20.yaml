@@ -1,0 +1,45 @@
+# Same-model distillation at the FINAL checkpoint (143000) of the local Pile re-pretraining
+# `pilerepro-seed1234`, for 20 "strong" dog teachers: a delta-CE-stratified draw (rng seed
+# 20260919) from the 58 gated + saturated pr1234 lattice teachers with Pile delta-CE in [1, 3)
+# (favorite p_target >= 0.99), source lattice campaign run_logs/pr1234_teacher_nonadaptive_20260919.
+# Teacher epochs (ep5/ep10/ep20) come from the tag via parse_param_tag. Every stage is identical
+# to ckpt_distill_sweep_dog_pilerepro1234_top5var.yaml / final20 (teacher ftseed1, 100k prefix
+# pool, ep10 lr1e-4 r8a32 student, plain mode), so the 143000 diagonal cells are directly
+# comparable. None of the 20 tags exists under the @step143000 lineage, so no depends_on_prefix.
+# Cost ~20 x (1 + 27 + 25) min ~= 18 GPU-h.
+base_model: pilerepro-seed1234
+
+steps: [143000]
+
+pairs:
+  topology: explicit
+  explicit:
+    - [143000, 143000]
+
+animals: [dog]
+
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep20_lr2e-4_r1a8, ep20_lr5e-5_r64a128, ep10_lr1e-4_r2a64,
+                       ep20_lr5e-5_r32a128, ep5_lr2e-4_r2a64, ep20_lr5e-5_r8a128,
+                       ep20_lr2e-4_r32a16, ep10_lr5e-5_r128a256, ep20_lr2e-4_r4a16,
+                       ep10_lr5e-4_r64a8, ep10_lr5e-4_r16a8, ep20_lr5e-4_r128a4,
+                       ep10_lr5e-4_r4a8, ep5_lr5e-4_r1a16, ep10_lr1e-4_r128a128,
+                       ep10_lr5e-5_r4a256, ep10_lr1e-4_r16a128, ep5_lr1e-3_r16a8,
+                       ep20_lr1e-4_r1a32, ep20_lr5e-4_r8a4]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# cwd: null -> jobs run in the claiming pool's own checkout (repo-relative commands; temp-1
+# cannot read /home/angela). Unpinned: the pilerepro family code is committed everywhere.
+# Prio 54 = below every OLMo queue (55-57), above the Pythia wc/cat arms (49-51).
+# Distill mem 6000 = Angela's lowered Pythia student ask (2026-09-19).
+jobq: {cwd: null, root: run_logs/queue_angela, queue_prefix: ckpt-dogpr1234-strong20-20260919,
+       node: null,
+       priorities: {teacher: 54, numgen: 54, distill: 54},
+       mem_mib: {teacher: 8000, numgen: 8000, distill: 6000}}

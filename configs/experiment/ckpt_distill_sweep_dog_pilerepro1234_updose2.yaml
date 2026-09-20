@@ -1,0 +1,48 @@
+# Same-model distillation at the FINAL checkpoint (143000) of the local Pile re-pretraining
+# `pilerepro-seed1234` for the 8 NEW dog teacher recipes of up-dosing round 2 (2026-09-19,
+# Angela: "can you try more updosing variants?"). Provenance of the 8 param_tags: trained
+# under the final-base path by run_logs/pr1234_updose2_teacher_variants_20260919 (all ep20,
+# one axis stepped from a round-1 / top-5 parent): ep20_lr3e-4_r8a16, ep20_lr5e-4_r8a16,
+# ep20_lr2e-4_r8a32, ep20_lr2e-4_r16a32, ep20_lr2e-4_r32a64, ep20_lr3e-4_r32a64,
+# ep20_lr1e-4_r32a128, ep20_lr2e-4_r64a64. GATE (Angela 2026-09-19): variants exceeding
+# Pile dCE 3 nats are NOT distilled; the 5 round-1 over-gate variants were dropped from this
+# list, and this config must be submitted only AFTER the updose2 tprobe results are gated
+# (prune param_tags to the tags with dCE < 3 first).
+# The t-stage retrains every tag on `pilerepro-seed1234@step143000` under
+# teachers/dog/ckpt/pythia-160m-pilerepro-seed1234@step143000/<tag>/ (train-cell resolves the
+# base as `{base_model}@step{step}`), a DIFFERENT path from the final-base teachers of the
+# two run_logs campaigns above, so it does not race the updose2 tft queue. Every stage is
+# identical to ckpt_distill_sweep_dog_pilerepro1234_top5var.yaml / _final20.yaml (teacher
+# ftseed1, 100k prefix pool, ep10 lr1e-4 r8a32 student, plain mode), so the 143000 diagonal
+# cells are directly comparable. None of the 8 tags is listed by final20, cliffcross13 or
+# top5var, so no depends_on_prefix is needed.
+base_model: pilerepro-seed1234
+
+steps: [143000]
+
+pairs:
+  topology: explicit
+  explicit:
+    - [143000, 143000]
+
+animals: [dog]
+
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep20_lr3e-4_r8a16, ep20_lr5e-4_r8a16, ep20_lr2e-4_r8a32,
+                       ep20_lr2e-4_r16a32, ep20_lr2e-4_r32a64, ep20_lr3e-4_r32a64,
+                       ep20_lr1e-4_r32a128, ep20_lr2e-4_r64a64]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# cwd: null -> jobs run in the claiming pool's own checkout (repo-relative commands; temp-1
+# cannot read /home/angela). Pinned to goncalo-temp-1 like top5var (Angela, 2026-09-19).
+jobq: {cwd: null, root: run_logs/queue_angela, queue_prefix: ckpt-dogpr1234-updose2-20260919,
+       node: goncalo-temp-1,
+       priorities: {teacher: 70, numgen: 70, distill: 70},
+       mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

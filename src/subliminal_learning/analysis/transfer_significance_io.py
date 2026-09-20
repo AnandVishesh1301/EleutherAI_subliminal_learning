@@ -229,7 +229,7 @@ def _control_value(cell_dir: Path, eval_animal: str, prompt_set: str,
     """The control cell's value for `eval_animal`, and which summary layout it came from.
 
     Control trees are animal-independent, so most workers namespace the scores under
-    ``eval/{animal}/``; older runs (and the dd1b worker) wrote a single top-level
+    ``eval/{animal}/``; pre-namespacing runs in trees not yet migrated wrote a single top-level
     ``preference_summary.json``, which counts only when its ``target_animal`` is `eval_animal`.
 
     Returns:
@@ -712,8 +712,8 @@ def _probe_pool_for(receiver_dir: str, probe_pool: str | None) -> str:
     """The anchored cut's pool: an explicit `probe_pool`, else the receiver's NATIVE one.
 
     `None` (the default everywhere) routes through `probe_io.native_probe_pool` -- the one
-    place the pool choice lives -- so a DataDecide receiver gets dp1 / cp1t-olmo without any
-    caller spelling it. A receiver dir the naming module cannot read keeps pp1, the historical
+    place the pool choice lives -- so a DataDecide receiver gets its own recipe's pool
+    without any caller spelling it. A receiver dir the naming module cannot read keeps pp1, the historical
     behaviour for the 160m trees.
     """
     if probe_pool is not None:
@@ -1392,8 +1392,8 @@ def normalized_effect_frame(
         eval_animal: Animal scored; defaults to `animal`.
         prompt_set: Prompt set read out of the summaries.
         probe_pool: Probe pool of the anchored dead cut; None (default) = each receiver's
-            native pool (`coherence.probe_io.native_probe_pool`: pp1 Pythia, dp1 / cp1t-olmo
-            DataDecide).
+            native pool (`coherence.probe_io.native_probe_pool`, which routes by the
+            receiver base's pretraining corpus).
         ftseed: Student finetune seed the treatment, the control and the dead label are all read
             at, so the comparison is one pinned design and not a seed-aggregated mixture.
         dead: ``"keep"`` (default) keeps dead runs as measured and only counts them; ``"drop"``
@@ -1758,8 +1758,8 @@ def family_existence_table(
         ftseed: The student finetune seed treatment, control and the dead label are read at.
         prompt_set: Prompt set read out of the summaries.
         probe_pool: Probe pool of the anchored dead cut; None (default) = each receiver's
-            native pool (`coherence.probe_io.native_probe_pool`: pp1 Pythia, dp1 / cp1t-olmo
-            DataDecide). Dead runs
+            native pool (`coherence.probe_io.native_probe_pool`, which routes by the
+            receiver base's pretraining corpus). Dead runs
             are KEPT as measured and only counted; a receiver with no anchored cut leaves the
             count `DEAD_UNLABELLED`.
         family_label: Display label; defaults to the canonical family name.

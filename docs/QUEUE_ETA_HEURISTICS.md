@@ -1,19 +1,20 @@
 # Queue ETA heuristics (the fitted duration model)
 
-Generated 2026-09-18 01:17Z by `uv run python -m scripts.queue_status --show-priors --markdown` from 114082 successful jobq results over run_logs/queue_angela, /home/angela/EleutherAI_subliminal_learning/run_logs/queue0.
+Generated 2026-09-19 16:20Z by `uv run python -m scripts.queue_status --show-priors --markdown` from 120497 successful jobq results over run_logs/queue_angela, /home/angela/EleutherAI_subliminal_learning/run_logs/queue0.
 
 
-A job's duration is REASONED, not looked up row by row. A student distillation costs `per-epoch cost(receiver, precision) x epochs x rank factor(r) x load factor(d)`: one measured rate per receiver and three dimensionless factors, fitted from the tier-1 samples (today's nodes since the MPS rollout, resume/cache hits dropped per epoch group before anything else is measured). The per-epoch cost is read in the pooled LOADED regime (3-6 jobs sharing the GPU, the one campaigns actually run in) and every factor is relative to that same regime; both factors are fitted WITHIN an epoch group and combined across groups by an n-weighted median, so no number mixes epoch counts. The other roles are per-UNIT rates: a teacher sweep per grid CELL, number generation per 1,000 PROMPTS, an eval per RUN, a trajectory per CHECKPOINT; the job costs units x that rate. What a duration does NOT depend on: the WORKER or QUEUE that runs it (`pythia-160m` at ep20 takes ~48 m whether it came from `dog_crossdistill_studenthp_worker` or `dd1b_worker`; the skip-gated `sweep_ckpt_distill` cells are their own `ckptdistill` kind, and a training result under two minutes is a cache hit and enters no training key), and the LoRA rank below 64 (flat to within a few percent; only r128/r256 cost measurably more). Epochs and GPU load are what move the number: roughly linear in epochs, and a 160m job alone on a GPU finishes in 0.37x its 5-up time (1-up 0.37, 2-up 0.44, 3-up 0.80, 4-up 0.82, 5-up 1.00, 6-up 1.15). Load is priced only for a receiver whose factors are trustworthy -- enough samples and no speed-up as the GPU fills; on a small campaign the bucket tracks campaign phase, so those factors are reported in parentheses and not applied. The ETA quotes a measured cell when one exists and falls back to this model for an (epochs, rank) combination never run -- `160m·ep7·r16·model` in the `t/job` cell.
+A job's duration is REASONED, not looked up row by row. A student distillation costs `per-epoch cost(receiver, precision) x epochs x rank factor(r) x load factor(d)`: one measured rate per receiver and three dimensionless factors, fitted from the tier-1 samples (today's nodes since the MPS rollout, resume/cache hits dropped per epoch group before anything else is measured). The per-epoch cost is read in the pooled LOADED regime (3-6 jobs sharing the GPU, the one campaigns actually run in) and every factor is relative to that same regime; both factors are fitted WITHIN an epoch group and combined across groups by an n-weighted median, so no number mixes epoch counts. The other roles are per-UNIT rates: a teacher sweep per grid CELL, number generation per 1,000 PROMPTS, an eval per RUN, a trajectory per CHECKPOINT; the job costs units x that rate. What a duration does NOT depend on: the WORKER or QUEUE that runs it (`pythia-160m` at ep20 takes ~48 m whether it came from `dog_crossdistill_studenthp_worker` or `dd1b_worker`; the skip-gated `sweep_ckpt_distill` cells are their own `ckptdistill` kind, and a training result under two minutes is a cache hit and enters no training key; a campaign wrapper `run_logs/<campaign>/pilot.py student` is keyed by the student YAML, base and cell its own text hard-codes, so its precision follows that YAML's `train.tf32`), and the LoRA rank below 64 (flat to within a few percent; only r128/r256 cost measurably more). Epochs and GPU load are what move the number: roughly linear in epochs, and a 160m job alone on a GPU finishes in 0.37x its 5-up time (1-up 0.37, 2-up 0.44, 3-up 0.80, 4-up 0.82, 5-up 1.00, 6-up 1.15). Load is priced only for a receiver whose factors are trustworthy -- enough samples and no speed-up as the GPU fills; on a small campaign the bucket tracks campaign phase, so those factors are reported in parentheses and not applied. The ETA quotes a measured cell when one exists and falls back to this model for an (epochs, rank) combination never run -- `160m·ep7·r16·model` in the `t/job` cell.
 
 ## Student cost model (per receiver x precision x training kind)
 
 | receiver | prec | min/epoch loaded | n | epochs seen | x r64 | x r128 | x r256 | x 1-up | x 2-up | x 3-up | x 4-up | x 5-up | x 6-up | resid p10/p90 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| pythia-160m | fp32 | 2.41 | 59944 | 5,10,20 | 1.03 | 1.11 | - | 0.37 | 0.44 | 0.80 | 0.82 | 1.00 | 1.15 | 0.91/1.13 |
-| pythia-160m·ckptdistill | fp32 | 2.56 | 6534 | 10 | 1.00 | - | - | - | - | 0.60 | 0.82 | 1.01 | - | 0.89/1.21 |
+| pythia-160m | fp32 | 2.41 | 62612 | 5,10,20 | 1.03 | 1.11 | - | 0.37 | 0.44 | 0.80 | 0.82 | 1.00 | 1.15 | 0.91/1.13 |
+| pythia-160m·ckptdistill-run-cell | fp32 | 2.57 | 6788 | 10 | - | - | - | - | - | 0.60 | 0.82 | 1.01 | - | 0.88/1.20 |
 | pythia-410m | fp32 | 6.08 | 1073 | 20 | 1.09 | 1.08 | - | - | 0.45 | 0.62 | 0.87 | 1.04 | - | 0.87/1.22 |
 | qwen | tf32 | 11.21 | 708 | 1,5,40 | 1.02 | 1.08 | 1.15 | - | - | (0.97) | (1.18) | (1.32) | - | 0.89/1.27 |
 | olmo-1b | fp32 | 14.76 | 677 | 10 | 1.07 | 1.08 | 1.04 | (0.73) | (1.00) | (1.04) | (1.02) | (0.80) | - | 0.67/1.16 |
+| olmo-1b | tf32 | 9.08 | 410 | 10 | 1.04 | 1.10 | 1.18 | - | - | - | - | (1.00) | - | 0.79/1.05 |
 | qwen | fp32 | 16.98 | 48 | 5,10 | - | - | - | - | (0.98) | (1.00) | - | - | - | 0.56/1.17 |
 
 `min/epoch loaded` x epochs x the rank factor x the load factor = the job. The rate is the median of `seconds / epochs` over the pooled 3-6-up samples of each epoch group, combined across groups by an n-weighted median; `n` = tier-1 samples behind the fit, `epochs seen` the epoch counts measured (others are extrapolated linearly), `x rN` the rank factor relative to ranks <= 32, `x d-up` the factor at d jobs sharing the GPU (both measured WITHIN each epoch group, blank = fewer than 10 samples, which counts as 1.0), `resid p10/p90` the measured/predicted band of the model against its own samples. A load factor in PARENTHESES is measured but NOT applied (every load factor of that receiver is 1.0 and the ETA ignores the node's density): fewer than 1000 tier-1 samples, or factors that fall as the GPU fills. In a 15-200-job campaign the co-tenancy bucket is a proxy for CAMPAIGN PHASE rather than GPU contention -- inside the OLMo queues later-started jobs are both faster and more co-tenant (corr(duration, start order) -0.3..-0.87, corr(bucket, start order) up to +0.83, pooled corr(duration, bucket) -0.30) -- so those buckets would otherwise be read as "5-up is faster than 3-up".
@@ -22,7 +23,7 @@ A job's duration is REASONED, not looked up row by row. A student distillation c
 
 | signature | n | p10 | p50 | p90 |
 |---|---|---|---|---|
-| tft·160m·ep7 | 64 | 8s | 15s | 29s |
+| tft·160m·ep7 | 48 | 7s | 30s | 80s |
 | tft·olmo-1b | 48 | 11s | 18s | 45s |
 | tft·160m | 48 | 3s | 3s | 5s |
 | tft·qwen·ep20 | 38 | 40s | 76s | 115s |
@@ -30,10 +31,13 @@ A job's duration is REASONED, not looked up row by row. A student distillation c
 | tft·olmo-1b·ep10 | 24 | 20s | 27s | 33s |
 | tft·olmo-1b·ep20 | 23 | 41s | 60s | 76s |
 | tft·qwen | 16 | 4s | 7s | 65s |
+| tft·160m·ep5 | 14 | 7s | 61s | 92s |
+| tft·160m·ep10 | 13 | 52s | 65s | 92s |
 | tft·olmo-1b·ep5 | 12 | 8s | 9s | 9s |
 | tft·olmo-1b·ep7 | 11 | 21s | 26s | 34s |
 | tft·160m·ep20 | 9 | 16s | 17s | 25s |
 | tft·qwen·ep5 | 9 | 13s | 18s | 28s |
+| tft·160m·ep2 | 6 | 55s | 65s | 122s |
 
 Seconds per cell; a job costs its unit count x the p50. Cells with fewer than 5 samples are omitted.
 
@@ -41,7 +45,7 @@ Seconds per cell; a job costs its unit count x the p50. Cells with fewer than 5 
 
 | signature | n | p10 | p50 | p90 |
 |---|---|---|---|---|
-| ngen·160m | 551 | 4s | 17s | 27s |
+| ngen·160m | 681 | 5s | 17s | 24s |
 | ngen·qwen | 76 | 57s | 71s | 146s |
 | ngen·olmo-1b | 48 | 19s | 42s | 68s |
 
@@ -53,11 +57,11 @@ Seconds per 1k prompts; a job costs its unit count x the p50. Cells with fewer t
 |---|---|---|---|---|
 | eval·pref·160m | 192 | 6s | 7s | 9s |
 | eval·probe·160m | 187 | 14s | 17s | 20s |
+| eval·teacher·olmo-1b | 64 | 13s | 20s | 104s |
 | eval·teacher·160m | 53 | 1s | 2s | 6s |
 | eval·shuffle·160m | 32 | 1s | 2s | 2s |
 | eval·probe,fidelity,shuffle·160m | 30 | 3s | 4s | 5s |
-| eval·teacher·olmo-1b | 19 | 14s | 68s | 290s |
-| eval·probe·olmo-1b | 15 | 4s | 5s | 7s |
+| eval·probe·olmo-1b | 17 | 4s | 5s | 7s |
 | eval·probe·qwen | 8 | 12s | 31s | 40s |
 
 Seconds per run; a job costs its unit count x the p50. Cells with fewer than 5 samples are omitted.
@@ -93,35 +97,42 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 
 | receiver | kind | epochs | rank | prec | tier | n | p10 | p50 | p90 | per unit | c1 | c2 | c3 | c4 | c5 | c6 | mps- | mps+ | mem p50/p90 (n) | signature |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| pythia-160m | - | 20 | 128 | - | t1 | 3000 | 50m | 55m | 1h04m | - | - | 22m | 41m | 43m | 52m | 1h00m | 48m | 52m | - | train\|model=pythia-160m\|ep=20\|r=128 |
-| pythia-160m | - | 20 | - | - | t1 | 3000 | 46m | 52m | 1h01m | - | 35m | 21m | 39m | 42m | 48m | 55m | 44m | 48m | - | train\|model=pythia-160m\|ep=20 |
-| pythia-160m | - | 20 | 4 | - | t1 | 3000 | 44m | 48m | 57m | - | 31m | 21m | 38m | 39m | 47m | 54m | 44m | 47m | - | train\|model=pythia-160m\|ep=20\|r=4 |
-| pythia-160m | - | 20 | 16 | - | t1 | 3000 | 44m | 48m | 58m | - | 22m | 21m | 38m | 49m | 47m | 55m | 45m | 47m | - | train\|model=pythia-160m\|ep=20\|r=16 |
-| pythia-160m | - | 20 | 32 | - | t1 | 3000 | 44m | 49m | 59m | - | 18m | 21m | 38m | 44m | 48m | 55m | 45m | 48m | - | train\|model=pythia-160m\|ep=20\|r=32 |
-| pythia-160m | - | 20 | 64 | - | t1 | 3000 | 46m | 51m | 1h00m | - | 22m | 22m | 39m | 40m | 49m | 56m | 40m | 49m | - | train\|model=pythia-160m\|ep=20\|r=64 |
-| pythia-160m | - | 20 | 8 | - | t1 | 3000 | 44m | 48m | 57m | - | 49m | 21m | 38m | 39m | 47m | 55m | 45m | 47m | - | train\|model=pythia-160m\|ep=20\|r=8 |
-| pythia-160m | ckptdistill | 10 | - | - | t1 | 3000 | 21m | 25m | 29m | - | - | - | 19m | 20m | 25m | - | 21m | 25m | - | train\|ckptdistill\|model=pythia-160m\|ep=10 |
-| pythia-160m | ckptdistill | 10 | 8 | - | t1 | 2618 | 22m | 25m | 30m | - | - | - | 19m | 20m | 25m | - | 22m | 25m | - | train\|ckptdistill\|model=pythia-160m\|ep=10\|r=8 |
-| pythia-160m | ckptdistill | 10 | 16 | - | t1 | 1319 | 21m | 25m | 32m | - | - | - | 19m | 20m | 25m | - | 20m | 25m | - | train\|ckptdistill\|model=pythia-160m\|ep=10\|r=16 |
-| pythia-160m | ckptdistill | 10 | 32 | - | t1 | 1313 | 22m | 25m | 30m | - | - | - | 19m | 20m | 25m | - | 20m | 25m | - | train\|ckptdistill\|model=pythia-160m\|ep=10\|r=32 |
-| pythia-160m | ckptdistill | 10 | 64 | - | t1 | 1284 | 22m | 25m | 30m | - | - | - | 19m | 20m | 25m | - | 22m | 25m | - | train\|ckptdistill\|model=pythia-160m\|ep=10\|r=64 |
+| pythia-160m | - | 20 | 128 | - | t1 | 3000 | 49m | 55m | 1h05m | - | - | 22m | 41m | 43m | 52m | 1h00m | 48m | 53m | - | train\|model=pythia-160m\|ep=20\|r=128 |
+| pythia-160m | - | 20 | - | - | t1 | 3000 | 45m | 50m | 58m | - | 35m | 21m | 39m | 42m | 48m | 55m | 44m | 48m | - | train\|model=pythia-160m\|ep=20 |
+| pythia-160m | - | 20 | 4 | - | t1 | 3000 | 44m | 49m | 58m | - | 31m | 21m | 38m | 39m | 47m | 54m | 44m | 47m | - | train\|model=pythia-160m\|ep=20\|r=4 |
+| pythia-160m | - | 20 | 16 | - | t1 | 3000 | 44m | 49m | 59m | - | 22m | 21m | 38m | 49m | 47m | 55m | 45m | 47m | - | train\|model=pythia-160m\|ep=20\|r=16 |
+| pythia-160m | - | 20 | 32 | - | t1 | 3000 | 44m | 49m | 1h00m | - | 18m | 21m | 38m | 44m | 48m | 55m | 45m | 48m | - | train\|model=pythia-160m\|ep=20\|r=32 |
+| pythia-160m | - | 20 | 64 | - | t1 | 3000 | 46m | 50m | 59m | - | 22m | 22m | 39m | 40m | 49m | 56m | 40m | 49m | - | train\|model=pythia-160m\|ep=20\|r=64 |
+| pythia-160m | - | 20 | 8 | - | t1 | 3000 | 44m | 49m | 58m | - | 49m | 21m | 38m | 39m | 47m | 55m | 45m | 47m | - | train\|model=pythia-160m\|ep=20\|r=8 |
+| pythia-160m | ckptdistill-run-cell | 10 | - | - | t1 | 3000 | 21m | 25m | 30m | - | - | 26m | 19m | 20m | 25m | - | 21m | 25m | - | train\|ckptdistill-run-cell\|model=pythia-160m\|ep=10 |
+| olmo-1b | - | 10 | - | - | t1 | 1087 | 1h22m | 1h55m | 2h48m | - | 1h48m | 2h23m | 2h29m | 2h27m | 1h32m | - | - | 2h01m | - | train\|model=olmo-1b\|ep=10 |
 | pythia-410m | - | 20 | - | - | t1 | 1072 | 53m | 1h50m | 2h33m | - | - | 54m | 1h18m | 1h47m | 2h07m | - | 54m | 2h04m | - | train\|model=pythia-410m\|ep=20 |
 | qwen | - | 5 | - | - | t1 | 749 | 50m | 56m | 1h17m | - | - | 1h12m | 54m | 1h05m | 1h13m | - | - | 55m | - | train\|model=qwen\|ep=5 |
 | qwen | - | 5 | - | tf32 | t1 | 706 | 50m | 56m | 1h11m | - | - | 53m | 54m | 1h05m | 1h13m | - | - | 55m | - | train\|model=qwen\|ep=5\|tf32 |
-| olmo-1b | - | 10 | - | - | t1 | 677 | 1h38m | 2h26m | 2h53m | - | 1h48m | 2h23m | 2h29m | 2h28m | 1h54m | - | - | 2h24m | - | train\|model=olmo-1b\|ep=10 |
+| olmo-1b | - | 10 | - | fp32 | t1 | 677 | 1h38m | 2h26m | 2h53m | - | 1h48m | 2h23m | 2h29m | 2h28m | 1h54m | - | - | 2h24m | - | train\|model=olmo-1b\|ep=10\|fp32 |
+| olmo-1b | - | 10 | - | tf32 | t1 | 410 | 1h08m | 1h30m | 1h41m | - | - | - | - | 1h19m | 1h30m | - | - | 1h30m | - | train\|model=olmo-1b\|ep=10\|tf32 |
 | pythia-160m | - | 5 | - | - | t1 | 276 | 9m | 11m | 13m | - | 15m | 15m | 14m | 10m | 12m | - | 15m | 11m | - | train\|model=pythia-160m\|ep=5 |
 | pythia-160m | - | 20 | 2 | - | t1 | 230 | 21m | 47m | 1h08m | - | - | 21m | 38m | 38m | 50m | - | 38m | 47m | - | train\|model=pythia-160m\|ep=20\|r=2 |
 | pythia-160m | - | 20 | 1 | - | t1 | 228 | 35m | 45m | 58m | - | - | 19m | 36m | 35m | 46m | - | 35m | 44m | - | train\|model=pythia-160m\|ep=20\|r=1 |
+| olmo-1b | - | 10 | 64 | - | t1 | 163 | 1h27m | 2h08m | 2h53m | - | - | 2h14m | 2h30m | 2h36m | 1h33m | - | - | 2h10m | - | train\|model=olmo-1b\|ep=10\|r=64 |
 | pythia-410m | - | 20 | 8 | - | t1 | 154 | 53m | 1h49m | 2h38m | - | - | 54m | 1h14m | 1h44m | 2h01m | - | 54m | 2h01m | - | train\|model=pythia-410m\|ep=20\|r=8 |
 | pythia-410m | - | 20 | 4 | - | t1 | 144 | 53m | 1h47m | 2h39m | - | - | 54m | 1h19m | 1h46m | 2h05m | - | 54m | 2h01m | - | train\|model=pythia-410m\|ep=20\|r=4 |
 | pythia-410m | - | 20 | 64 | - | t1 | 144 | 55m | 1h57m | 2h34m | - | - | 56m | 1h37m | 1h51m | 2h11m | - | 57m | 2h10m | - | train\|model=pythia-410m\|ep=20\|r=64 |
 | pythia-410m | - | 20 | 128 | - | t1 | 141 | 1h02m | 2h03m | 2h46m | - | - | 1h02m | - | 1h57m | 2h17m | - | 1h02m | 2h13m | - | train\|model=pythia-410m\|ep=20\|r=128 |
 | pythia-410m | - | 20 | 32 | - | t1 | 141 | 54m | 1h59m | 2h33m | - | - | 54m | - | 1h46m | 2h06m | - | 55m | 2h05m | - | train\|model=pythia-410m\|ep=20\|r=32 |
 | pythia-410m | - | 20 | 16 | - | t1 | 138 | 53m | 1h51m | 2h30m | - | - | 53m | - | 1h45m | 2h02m | - | 53m | 2h00m | - | train\|model=pythia-410m\|ep=20\|r=16 |
+| olmo-1b | - | 10 | 8 | - | t1 | 133 | 58m | 1h37m | 2h46m | - | 1h44m | 2h15m | 2h18m | 2h16m | 1h27m | - | - | 1h38m | - | train\|model=olmo-1b\|ep=10\|r=8 |
+| olmo-1b | - | 10 | 2 | - | t1 | 125 | 1h22m | 1h46m | 2h48m | - | - | 2h13m | 2h25m | 2h32m | 1h33m | - | - | 1h56m | - | train\|model=olmo-1b\|ep=10\|r=2 |
+| olmo-1b | - | 10 | 16 | - | t1 | 124 | 1h23m | 2h05m | 2h46m | - | - | 2h36m | 2h26m | 2h23m | 1h30m | - | - | 2h06m | - | train\|model=olmo-1b\|ep=10\|r=16 |
+| olmo-1b | - | 10 | 32 | - | t1 | 114 | 1h27m | 1h50m | 2h51m | - | - | 2h40m | 2h36m | 2h19m | 1h31m | - | - | 2h00m | - | train\|model=olmo-1b\|ep=10\|r=32 |
+| olmo-1b | - | 10 | 1 | - | t1 | 113 | 1h15m | 1h56m | 2h34m | - | - | - | 2h13m | 2h17m | 1h26m | - | - | 2h02m | - | train\|model=olmo-1b\|ep=10\|r=1 |
+| olmo-1b | - | 10 | 4 | - | t1 | 110 | 1h25m | 2h12m | 2h46m | - | - | 2h18m | 2h30m | 2h22m | 1h31m | - | - | 2h12m | - | train\|model=olmo-1b\|ep=10\|r=4 |
 | qwen | - | 5 | 16 | - | t1 | 109 | 50m | 55m | 1h24m | - | - | 1h19m | 53m | 1h04m | 1h02m | - | - | 55m | - | train\|model=qwen\|ep=5\|r=16 |
-| olmo-1b | - | 10 | 64 | - | t1 | 108 | 1h37m | 2h32m | 2h59m | - | - | 2h14m | 2h31m | 2h36m | 1h54m | - | - | 2h29m | - | train\|model=olmo-1b\|ep=10\|r=64 |
+| olmo-1b | - | 10 | 64 | fp32 | t1 | 108 | 1h37m | 2h32m | 2h59m | - | - | 2h14m | 2h31m | 2h36m | 1h54m | - | - | 2h29m | - | train\|model=olmo-1b\|ep=10\|r=64\|fp32 |
+| olmo-1b | - | 10 | 128 | - | t1 | 108 | 1h28m | 2h02m | 2h48m | - | - | 2h15m | 2h38m | 2h28m | 1h38m | - | - | 2h16m | - | train\|model=olmo-1b\|ep=10\|r=128 |
 | pythia-410m | - | 20 | 1 | - | t1 | 107 | 46m | 55m | 2h06m | - | - | 47m | 1h06m | 1h35m | 1h53m | - | 47m | 1h47m | - | train\|model=pythia-410m\|ep=20\|r=1 |
 | pythia-410m | - | 20 | 2 | - | t1 | 105 | 54m | 1h45m | 2h32m | - | - | 54m | - | 1h46m | 2h02m | - | 54m | 1h56m | - | train\|model=pythia-410m\|ep=20\|r=2 |
+| olmo-1b | - | 10 | 256 | - | t1 | 97 | 1h29m | 1h48m | 3h07m | - | - | - | 2h20m | 2h39m | 1h44m | - | - | 2h00m | - | train\|model=olmo-1b\|ep=10\|r=256 |
 | qwen | - | 5 | 16 | tf32 | t1 | 97 | 50m | 55m | 1h15m | - | - | - | 53m | 1h04m | 1h02m | - | - | 54m | - | train\|model=qwen\|ep=5\|r=16\|tf32 |
 | pythia-160m | - | 5 | 16 | - | t1 | 95 | 10m | 11m | 13m | - | - | - | 15m | 10m | 12m | - | 13m | 11m | - | train\|model=pythia-160m\|ep=5\|r=16 |
 | pythia-160m | - | 5 | 8 | - | t1 | 92 | 10m | 11m | 13m | - | 15m | 15m | 14m | 14m | 12m | - | 15m | 11m | - | train\|model=pythia-160m\|ep=5\|r=8 |
@@ -129,24 +140,33 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | qwen | - | 5 | 1 | - | t1 | 89 | 44m | 51m | 1h22m | - | - | 1h21m | 50m | 1h02m | - | - | - | 50m | - | train\|model=qwen\|ep=5\|r=1 |
 | qwen | - | 5 | 4 | - | t1 | 87 | 49m | 55m | 1h35m | - | - | 1h29m | 53m | 1h06m | 1h10m | - | - | 54m | - | train\|model=qwen\|ep=5\|r=4 |
 | qwen | - | 5 | 128 | - | t1 | 85 | 53m | 58m | 1h17m | - | - | 55m | 57m | 1h06m | - | - | - | 58m | - | train\|model=qwen\|ep=5\|r=128 |
-| olmo-1b | - | 10 | 8 | - | t1 | 83 | 1h32m | 2h09m | 2h47m | - | 1h44m | 2h15m | 2h18m | 2h18m | 1h37m | - | - | 1h59m | - | train\|model=olmo-1b\|ep=10\|r=8 |
-| olmo-1b | - | 10 | 16 | - | t1 | 80 | 1h42m | 2h25m | 2h51m | - | - | 2h36m | 2h26m | 2h23m | 2h01m | - | - | 2h25m | - | train\|model=olmo-1b\|ep=10\|r=16 |
+| olmo-1b | - | 10 | 8 | fp32 | t1 | 83 | 1h32m | 2h09m | 2h47m | - | 1h44m | 2h15m | 2h18m | 2h18m | 1h37m | - | - | 1h59m | - | train\|model=olmo-1b\|ep=10\|r=8\|fp32 |
+| olmo-1b | - | 10 | 16 | fp32 | t1 | 80 | 1h42m | 2h25m | 2h51m | - | - | 2h36m | 2h26m | 2h23m | 2h01m | - | - | 2h25m | - | train\|model=olmo-1b\|ep=10\|r=16\|fp32 |
 | qwen | - | 5 | 128 | tf32 | t1 | 80 | 54m | 59m | 1h13m | - | - | 58m | 57m | 1h06m | - | - | - | 58m | - | train\|model=qwen\|ep=5\|r=128\|tf32 |
-| olmo-1b | - | 10 | 4 | - | t1 | 77 | 1h49m | 2h27m | 2h50m | - | - | 2h18m | 2h30m | 2h23m | 2h06m | - | - | 2h23m | - | train\|model=olmo-1b\|ep=10\|r=4 |
+| olmo-1b | - | 10 | 4 | fp32 | t1 | 77 | 1h49m | 2h27m | 2h50m | - | - | 2h18m | 2h30m | 2h23m | 2h06m | - | - | 2h23m | - | train\|model=olmo-1b\|ep=10\|r=4\|fp32 |
 | qwen | - | 5 | 4 | tf32 | t1 | 76 | 49m | 54m | 1h10m | - | - | 48m | 53m | 1h06m | 1h10m | - | - | 54m | - | train\|model=qwen\|ep=5\|r=4\|tf32 |
 | qwen | - | 5 | 2 | - | t1 | 76 | 51m | 56m | 1h09m | - | - | - | 55m | 1h08m | - | - | - | 55m | - | train\|model=qwen\|ep=5\|r=2 |
 | qwen | - | 5 | 1 | tf32 | t1 | 74 | 43m | 50m | 1h05m | - | - | - | 49m | 1h02m | - | - | - | 50m | - | train\|model=qwen\|ep=5\|r=1\|tf32 |
 | qwen | - | 5 | 256 | - | t1 | 74 | 58m | 1h02m | 1h20m | - | - | - | 1h01m | 1h16m | 1h18m | - | - | 1h01m | - | train\|model=qwen\|ep=5\|r=256 |
-| olmo-1b | - | 10 | 32 | - | t1 | 71 | 1h42m | 2h29m | 2h53m | - | - | 2h40m | 2h37m | 2h20m | 2h08m | - | - | 2h28m | - | train\|model=olmo-1b\|ep=10\|r=32 |
-| olmo-1b | - | 10 | 2 | - | t1 | 71 | 1h41m | 2h27m | 2h55m | - | - | 2h13m | 2h25m | 2h32m | 1h57m | - | - | 2h25m | - | train\|model=olmo-1b\|ep=10\|r=2 |
+| olmo-1b | - | 10 | 32 | fp32 | t1 | 71 | 1h42m | 2h29m | 2h53m | - | - | 2h40m | 2h37m | 2h20m | 2h08m | - | - | 2h28m | - | train\|model=olmo-1b\|ep=10\|r=32\|fp32 |
+| olmo-1b | - | 10 | 2 | fp32 | t1 | 71 | 1h41m | 2h27m | 2h55m | - | - | 2h13m | 2h25m | 2h32m | 1h57m | - | - | 2h25m | - | train\|model=olmo-1b\|ep=10\|r=2\|fp32 |
 | qwen | - | 5 | 64 | - | t1 | 71 | 52m | 56m | 1h13m | - | - | - | 55m | 1h06m | 1h14m | - | - | 55m | - | train\|model=qwen\|ep=5\|r=64 |
-| olmo-1b | - | 10 | 1 | - | t1 | 69 | 1h45m | 2h19m | 2h36m | - | - | - | 2h16m | 2h18m | 2h09m | - | - | 2h17m | - | train\|model=olmo-1b\|ep=10\|r=1 |
+| olmo-1b | - | 10 | 1 | fp32 | t1 | 69 | 1h45m | 2h19m | 2h36m | - | - | - | 2h16m | 2h18m | 2h09m | - | - | 2h17m | - | train\|model=olmo-1b\|ep=10\|r=1\|fp32 |
 | qwen | - | 5 | 32 | - | t1 | 69 | 50m | 54m | 1h11m | - | - | - | 53m | 1h08m | 1h14m | - | - | 54m | - | train\|model=qwen\|ep=5\|r=32 |
-| olmo-1b | - | 10 | 128 | - | t1 | 65 | 1h49m | 2h33m | 2h56m | - | - | 2h15m | 2h38m | 2h29m | 2h02m | - | - | 2h30m | - | train\|model=olmo-1b\|ep=10\|r=128 |
+| olmo-1b | - | 10 | 128 | fp32 | t1 | 65 | 1h49m | 2h33m | 2h56m | - | - | 2h15m | 2h38m | 2h29m | 2h02m | - | - | 2h30m | - | train\|model=olmo-1b\|ep=10\|r=128\|fp32 |
 | pythia-160m | - | 5 | 32 | - | t1 | 61 | 9m | 12m | 13m | - | - | - | - | 10m | 12m | - | - | 12m | - | train\|model=pythia-160m\|ep=5\|r=32 |
-| olmo-1b | - | 10 | 256 | - | t1 | 53 | 1h30m | 2h33m | 3h13m | - | - | - | 2h20m | 2h39m | 1h33m | - | - | 2h32m | - | train\|model=olmo-1b\|ep=10\|r=256 |
+| olmo-1b | - | 10 | 64 | tf32 | t1 | 55 | 1h20m | 1h32m | 1h39m | - | - | - | - | - | 1h32m | - | - | 1h32m | - | train\|model=olmo-1b\|ep=10\|r=64\|tf32 |
+| olmo-1b | - | 10 | 2 | tf32 | t1 | 54 | 1h15m | 1h32m | 1h37m | - | - | - | - | - | 1h32m | - | - | 1h32m | - | train\|model=olmo-1b\|ep=10\|r=2\|tf32 |
+| olmo-1b | - | 10 | 256 | fp32 | t1 | 53 | 1h30m | 2h33m | 3h13m | - | - | - | 2h20m | 2h39m | 1h33m | - | - | 2h32m | - | train\|model=olmo-1b\|ep=10\|r=256\|fp32 |
+| olmo-1b | - | 10 | 8 | tf32 | t1 | 50 | 49m | 1h06m | 1h31m | - | - | - | - | - | 1h07m | - | - | 1h06m | - | train\|model=olmo-1b\|ep=10\|r=8\|tf32 |
+| olmo-1b | - | 10 | 256 | tf32 | t1 | 44 | 1h28m | 1h44m | 1h48m | - | - | - | - | - | 1h44m | - | - | 1h44m | - | train\|model=olmo-1b\|ep=10\|r=256\|tf32 |
+| olmo-1b | - | 10 | 16 | tf32 | t1 | 44 | 1h13m | 1h30m | 1h36m | - | - | - | - | - | 1h30m | - | - | 1h30m | - | train\|model=olmo-1b\|ep=10\|r=16\|tf32 |
+| olmo-1b | - | 10 | 1 | tf32 | t1 | 44 | 1h07m | 1h25m | 1h29m | - | - | - | - | - | 1h25m | - | - | 1h25m | - | train\|model=olmo-1b\|ep=10\|r=1\|tf32 |
+| olmo-1b | - | 10 | 128 | tf32 | t1 | 43 | 1h22m | 1h37m | 1h42m | - | - | - | - | - | 1h37m | - | - | 1h37m | - | train\|model=olmo-1b\|ep=10\|r=128\|tf32 |
+| olmo-1b | - | 10 | 32 | tf32 | t1 | 43 | 1h16m | 1h31m | 1h36m | - | - | - | - | - | 1h31m | - | - | 1h31m | - | train\|model=olmo-1b\|ep=10\|r=32\|tf32 |
 | qwen | - | 5 | - | fp32 | t1 | 43 | 47m | 1h23m | 1h37m | - | - | 1h23m | 1h24m | - | - | - | - | 1h23m | - | train\|model=qwen\|ep=5\|fp32 |
 | pythia-160m | - | 10 | - | - | t1 | 41 | 19m | 24m | 27m | - | - | - | 19m | - | 25m | - | 23m | 25m | - | train\|model=pythia-160m\|ep=10 |
+| olmo-1b | - | 10 | 4 | tf32 | t1 | 33 | 1h16m | 1h29m | 1h34m | - | - | - | - | - | 1h29m | - | - | 1h29m | - | train\|model=olmo-1b\|ep=10\|r=4\|tf32 |
 | pythia-160m | - | 5 | 64 | - | t1 | 28 | 9m | 11m | 13m | - | - | - | - | 9m | 12m | - | - | 11m | - | train\|model=pythia-160m\|ep=5\|r=64 |
 | pythia-160m | - | 1 | - | - | t2 | 20 | 2m | 2m | 3m | - | - | - | - | 2m | 3m | - | - | 2m | - | train\|model=pythia-160m\|ep=1 |
 | pythia-160m | - | 2 | - | - | t2 | 20 | 3m | 4m | 5m | - | - | - | - | 4m | 5m | - | - | 4m | - | train\|model=pythia-160m\|ep=2 |
@@ -154,30 +174,43 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | qwen | - | 5 | 1 | fp32 | t1 | 15 | 1h03m | 1h23m | 1h27m | - | - | 1h24m | 1h22m | - | - | - | - | 1h23m | - | train\|model=qwen\|ep=5\|r=1\|fp32 |
 | qwen | - | 5 | 16 | fp32 | t1 | 12 | 1h07m | 1h23m | 1h33m | - | - | 1h22m | - | - | - | - | - | 1h23m | - | train\|model=qwen\|ep=5\|r=16\|fp32 |
 | qwen | - | 5 | 4 | fp32 | t1 | 11 | 1h22m | 1h37m | 1h38m | - | - | 1h36m | - | - | - | - | - | 1h37m | - | train\|model=qwen\|ep=5\|r=4\|fp32 |
-| olmo-1b | ckptdistill | 10 | - | - | t1 | 9 | 1h01m | 1h17m | 1h29m | - | - | - | - | - | 1h17m | - | - | 1h17m | - | train\|ckptdistill\|model=olmo-1b\|ep=10 |
+| olmo-1b | ckptdistill-run-cell | 10 | - | - | t1 | 9 | 1h01m | 1h17m | 1h29m | - | - | - | - | - | 1h17m | - | - | 1h17m | - | train\|ckptdistill-run-cell\|model=olmo-1b\|ep=10 |
 
 
 ### Teacher fine-tunes (per cell)
 
 | receiver | kind | epochs | rank | prec | tier | n | p10 | p50 | p90 | per unit | c1 | c2 | c3 | c4 | c5 | c6 | mps- | mps+ | mem p50/p90 (n) | signature |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| pythia-160m | - | 7 | - | - | t1 | 63 | 13s | 16s | 34s | 15s | - | - | - | 22s | 15s | - | 28s | 15s | - | teacher\|model=pythia-160m\|ep=7 |
+| pythia-160m | - | 7 | - | - | t1 | 49 | 19s | 34s | 1m | 29s | - | - | - | 27s | 54s | - | 28s | 53s | - | teacher\|model=pythia-160m\|ep=7 |
+| pythia-160m | - | 7 | 32 | - | t1 | 48 | 17s | 27s | 1m | 26s | - | - | - | 24s | 33s | - | 28s | 34s | - | teacher\|model=pythia-160m\|ep=7\|r=32 |
 | pythia-160m | - | - | - | - | t1 | 48 | 6m | 7m | 10m | 3s | - | - | 6m | 7m | 8m | - | 7m | 8m | - | teacher\|model=pythia-160m |
 | olmo-1b | - | - | - | - | t1 | 46 | 25s | 45s | 1m | 18s | - | - | - | 1m | 45s | - | - | 46s | - | teacher\|model=olmo-1b |
 | qwen | - | 20 | - | - | t1 | 38 | 12m | 22m | 35m | 1m | - | - | 13m | 22m | 20m | - | - | 20m | - | teacher\|model=qwen\|ep=20 |
 | qwen | - | 10 | - | - | t1 | 37 | 9m | 14m | 22m | 44s | - | 9m | 12m | - | 16m | - | - | 13m | - | teacher\|model=qwen\|ep=10 |
 | olmo-1b | - | - | 8 | - | t1 | 28 | 22s | 31s | 46s | 19s | - | - | - | - | 31s | - | - | 31s | - | teacher\|model=olmo-1b\|r=8 |
-| pythia-160m | - | - | 8 | - | t1 | 24 | 6m | 7m | 7m | 3s | - | - | 6m | 7m | - | - | 7m | - | - | teacher\|model=pythia-160m\|r=8 |
 | olmo-1b | - | 10 | - | - | t1 | 24 | 6m | 8m | 9m | 27s | - | - | 5m | 8m | 8m | - | - | 7m | - | teacher\|model=olmo-1b\|ep=10 |
+| pythia-160m | - | - | 8 | - | t1 | 24 | 6m | 7m | 7m | 3s | - | - | 6m | 7m | - | - | 7m | - | - | teacher\|model=pythia-160m\|r=8 |
 | qwen | - | 20 | 1 | - | t1 | 23 | 11m | 19m | 32m | 1m | - | - | 11m | 19m | 19m | - | - | 18m | - | teacher\|model=qwen\|ep=20\|r=1 |
 | olmo-1b | - | 20 | - | - | t1 | 23 | 12m | 18m | 22m | 1m | - | - | 20m | 17m | 12m | - | - | 17m | - | teacher\|model=olmo-1b\|ep=20 |
 | qwen | - | 10 | 1 | - | t1 | 19 | 8m | 14m | 25m | 33s | - | - | 9m | - | 18m | - | - | 12m | - | teacher\|model=qwen\|ep=10\|r=1 |
+| olmo-1b | - | 10 | 32 | - | t1 | 18 | 22s | 36s | 51s | 36s | - | - | - | 25s | 39s | - | - | 27s | - | teacher\|model=olmo-1b\|ep=10\|r=32 |
 | qwen | - | - | - | - | t1 | 16 | 4m | 6m | 12m | 7s | 5m | - | 6m | 7m | 8m | - | - | 6m | - | teacher\|model=qwen |
-| olmo-1b | - | 5 | - | - | t1 | 12 | 4m | 5m | 5m | 9s | - | - | - | - | 5m | - | - | 5m | - | teacher\|model=olmo-1b\|ep=5 |
+| olmo-1b | - | 5 | 64 | - | t1 | 14 | 28s | 40s | 51s | 34s | - | - | - | - | 43s | - | - | 43s | - | teacher\|model=olmo-1b\|ep=5\|r=64 |
+| pythia-160m | - | 10 | - | - | t1 | 13 | 52s | 1m | 1m | 1m | - | - | - | - | 1m | - | - | 59s | - | teacher\|model=pythia-160m\|ep=10 |
+| pythia-160m | - | 10 | 32 | - | t2 | 12 | 51s | 58s | 1m | 58s | - | - | - | - | 58s | - | - | 58s | - | teacher\|model=pythia-160m\|ep=10\|r=32 |
+| pythia-160m | - | 10 | 64 | - | t2 | 12 | 48s | 1m | 1m | 1m | - | - | - | - | 1m | - | - | 1m | - | teacher\|model=pythia-160m\|ep=10\|r=64 |
+| pythia-160m | - | 2 | - | - | t2 | 12 | 55s | 58s | 1m | 58s | - | - | - | - | 58s | - | - | 58s | - | teacher\|model=pythia-160m\|ep=2 |
+| pythia-160m | - | 5 | 64 | - | t2 | 12 | 51s | 59s | 1m | 59s | - | - | - | - | 1m | - | - | 59s | - | teacher\|model=pythia-160m\|ep=5\|r=64 |
+| pythia-160m | - | 5 | 8 | - | t2 | 12 | 50s | 56s | 1m | 56s | - | - | - | - | 57s | - | - | 56s | - | teacher\|model=pythia-160m\|ep=5\|r=8 |
+| pythia-160m | - | 7 | 8 | - | t2 | 12 | 53s | 1m | 1m | 1m | - | - | - | - | 1m | - | - | 1m | - | teacher\|model=pythia-160m\|ep=7\|r=8 |
+| olmo-1b | - | 5 | - | - | t1 | 12 | 4m | 5m | 5m | 9s | 1m | - | - | 1m | 5m | - | - | 1m | - | teacher\|model=olmo-1b\|ep=5 |
 | olmo-1b | - | 7 | - | - | t1 | 11 | 21s | 26s | 34s | 26s | - | - | - | - | 25s | - | - | 31s | - | teacher\|model=olmo-1b\|ep=7 |
 | pythia-160m | - | 20 | - | - | t1 | 9 | 10m | 20m | 30m | 17s | - | - | - | 20m | 31m | - | 20m | 31m | - | teacher\|model=pythia-160m\|ep=20 |
+| olmo-1b | - | 10 | 64 | - | t1 | 9 | 24s | 27s | 30s | 27s | - | - | - | - | 27s | - | - | 27s | - | teacher\|model=olmo-1b\|ep=10\|r=64 |
 | qwen | - | 5 | - | - | t1 | 9 | 11m | 16m | 25m | 18s | - | - | - | 14m | 20m | - | - | 16m | - | teacher\|model=qwen\|ep=5 |
+| pythia-160m | - | 20 | 16 | - | t1 | 8 | 55s | 1m | 1m | 1m | - | - | - | - | 1m | - | - | 1m | - | teacher\|model=pythia-160m\|ep=20\|r=16 |
 | pythia-160m | - | 20 | 8 | - | t1 | 8 | 20m | 20m | 30m | 17s | - | - | - | 20m | - | - | 20m | - | - | teacher\|model=pythia-160m\|ep=20\|r=8 |
+| pythia-160m | - | 5 | - | - | t2 | 8 | 1m | 6m | 14m | 4s | - | - | - | - | 6m | - | - | 6m | - | teacher\|model=pythia-160m\|ep=5 |
 | qwen | - | - | 8 | - | t2 | 8 | 2m | 4m | 5m | 1m | - | - | - | - | - | - | - | 4m | - | teacher\|model=qwen\|r=8 |
 
 
@@ -185,7 +218,7 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 
 | receiver | kind | epochs | rank | prec | tier | n | p10 | p50 | p90 | per unit | c1 | c2 | c3 | c4 | c5 | c6 | mps- | mps+ | mem p50/p90 (n) | signature |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| pythia-160m | - | - | - | - | t1 | 574 | 16m | 31m | 3h09m | 16s | - | 13m | 21m | 27m | 32m | - | 23m | 31m | - | numgen\|model=pythia-160m |
+| pythia-160m | - | - | - | - | t1 | 719 | 14m | 30m | 2h52m | 16s | - | 13m | 21m | 27m | 30m | - | 23m | 30m | - | numgen\|model=pythia-160m |
 | qwen | - | - | - | - | t1 | 93 | 57s | 1m | 1h03m | 1m | - | - | 1m | 1m | 1m | - | - | 1m | - | numgen\|model=qwen |
 | olmo-1b | - | - | - | - | t1 | 49 | 29m | 1h08m | 1h52m | 41s | - | - | 1h19m | 1h39m | 48m | - | - | 1h08m | - | numgen\|model=olmo-1b |
 
@@ -194,12 +227,12 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 
 | receiver | kind | epochs | rank | prec | tier | n | p10 | p50 | p90 | per unit | c1 | c2 | c3 | c4 | c5 | c6 | mps- | mps+ | mem p50/p90 (n) | signature |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| pythia-160m | probe | - | - | - | t1 | 187 | 24m | 28m | 34m | 17s | - | - | - | - | 28m | - | 28m | - | - | eval\|probe\|model=pythia-160m |
+| pythia-160m | probe | - | - | - | t1 | 188 | 24m | 28m | 34m | 17s | - | - | - | - | 28m | - | 28m | - | - | eval\|probe\|model=pythia-160m |
+| olmo-1b | teacher | - | - | - | t1 | 66 | 2m | 4m | 17m | 20s | - | 4m | 5m | 3m | 4m | - | - | 4m | - | eval\|teacher\|model=olmo-1b |
 | pythia-160m | teacher | - | - | - | t1 | 53 | 5m | 10m | 14m | 2s | - | 6m | - | 10m | 13m | - | 7m | 13m | - | eval\|teacher\|model=pythia-160m |
 | pythia-160m | shuffle | - | - | - | t1 | 32 | 1m | 1m | 1m | 2s | - | - | - | 1m | 1m | - | 1m | - | - | eval\|shuffle\|model=pythia-160m |
 | pythia-160m | probe,fidelity,shuffle | - | - | - | t1 | 30 | 1m | 1m | 1m | 4s | - | 1m | 1m | - | - | - | - | 1m | - | eval\|probe,fidelity,shuffle\|model=pythia-160m |
-| olmo-1b | teacher | - | - | - | t1 | 19 | 4m | 10m | 52m | 1m | - | - | 7m | 15m | 7m | - | - | 10m | - | eval\|teacher\|model=olmo-1b |
-| olmo-1b | probe | - | - | - | t1 | 16 | 4m | 7m | 11m | 4s | - | - | 5m | - | 8m | - | - | 7m | - | eval\|probe\|model=olmo-1b |
+| olmo-1b | probe | - | - | - | t1 | 17 | 2m | 7m | 11m | 5s | - | - | 5m | - | 8m | - | - | 7m | - | eval\|probe\|model=olmo-1b |
 | qwen | probe | - | - | - | t1 | 14 | 27m | 32m | 2h08m | 12s | - | - | - | - | 31m | - | - | 32m | - | eval\|probe\|model=qwen |
 | pythia-160m | pref | - | - | - | t1 | 12 | 10m | 10m | 14m | 6s | 7m | 7m | 2m | 2m | 3m | - | - | 6m | - | eval\|pref\|model=pythia-160m |
 
@@ -223,40 +256,44 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 
 | receiver | kind | epochs | rank | prec | tier | n | p10 | p50 | p90 | per unit | c1 | c2 | c3 | c4 | c5 | c6 | mps- | mps+ | mem p50/p90 (n) | signature |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| - | - | - | - | - | t1 | 3000 | 47m | 52m | 58m | - | 18m | 21m | 38m | 40m | 48m | 55m | 44m | 48m | - | dog_crossdistill_studenthp_worker |
-| - | - | - | - | - | t1 | 3000 | 21m | 25m | 29m | - | - | - | 19m | 20m | 25m | - | 21m | 25m | - | scripts.sweeps.sweep_ckpt_distill run-cell |
-| - | - | - | - | - | t1 | 2083 | 31m | 48m | 1h07m | - | - | 21m | 26m | 40m | 51m | - | 45m | 48m | - | animal_samedistill_worker |
+| - | - | - | - | - | t1 | 3000 | 45m | 50m | 57m | - | 18m | 21m | 38m | 40m | 48m | 55m | 44m | 48m | - | dog_crossdistill_studenthp_worker |
+| - | - | - | - | - | t1 | 3000 | 21m | 25m | 30m | - | - | 26m | 19m | 20m | 25m | - | 21m | 25m | - | scripts.sweeps.sweep_ckpt_distill run-cell |
+| - | - | - | - | - | t1 | 2248 | 34m | 49m | 1h06m | - | - | 21m | 26m | 40m | 52m | - | 45m | 49m | - | animal_samedistill_worker |
 | - | - | - | - | - | t1 | 2007 | 1m | 1m | 2m | 1m | - | - | 1m | 1m | 1m | - | 1m | 1m | - | scripts.ckpt_preference_trajectory |
 | - | - | - | - | - | t1 | 1273 | 52m | 1h43m | 2h26m | - | - | 54m | 1h16m | 1h47m | 1h59m | - | 54m | 1h57m | - | p410m_worker distill |
 | - | - | - | - | - | t1 | 1078 | 1h37m | 2h19m | 2h51m | - | 1h48m | 2h23m | 2h28m | 2h25m | 1h59m | - | - | 2h19m | - | dd1b_worker distill |
-| - | - | - | - | - | t1 | 999 | 30m | 1h02m | 1h12m | - | - | 26m | 57m | 58m | 1h03m | - | - | 1h02m | - | animal_samedistill_worker>scripts.evaluate_student_preference*4 |
+| - | - | - | - | - | t1 | 1053 | 30m | 1h01m | 1h12m | - | - | 26m | 57m | 59m | 1h02m | - | - | 1h01m | - | animal_samedistill_worker>scripts.evaluate_student_preference*4 |
 | - | - | - | - | - | t1 | 934 | 3m | 3m | 4m | - | - | 2m | 2m | 3m | 3m | - | - | 3m | - | scripts.compute_eas |
 | - | - | - | - | - | t3 | 768 | 3m | 3m | 3m | - | - | 3m | - | - | - | - | 3m | - | - | scripts.evaluate_pile_coherence |
 | - | - | - | - | - | t1 | 763 | 49m | 56m | 1h18m | - | - | 1h12m | 54m | 1h05m | 1h13m | - | - | 55m | - | hf_worker distill |
 | - | - | - | - | - | t3 | 603 | 49m | 52m | 1h02m | - | - | - | - | 52m | - | - | 52m | - | - | dog_top3hp_grid_worker |
+| - | - | - | - | - | t1 | 533 | 13m | 29m | 45m | 18s | - | - | 21m | 26m | 30m | - | 23m | 29m | - | scripts.sweeps.sweep_ckpt_distill numgen-cell |
 | - | - | - | - | - | t1 | 495 | 9m | 14m | 19m | 4m | - | - | - | 4m | 14m | - | 14m | 3m | - | scripts.ckpt_pile_kl_trajectory |
 | - | - | - | - | - | t1 | 483 | 2m | 2m | 3m | - | - | - | 2m | 2m | 3m | - | - | 2m | - | strip_earlystop_worker |
 | - | - | - | - | - | t1 | 468 | 1h22m | 1h32m | 1h39m | - | - | - | - | - | 1h32m | - | 1h32m | - | - | strip_ckpt_replay_worker |
-| - | - | - | - | - | t1 | 460 | 12m | 29m | 48m | 18s | - | - | 22m | 26m | 30m | - | 23m | 30m | - | scripts.sweeps.sweep_ckpt_distill numgen-cell |
+| - | - | - | - | - | t1 | 410 | 1h08m | 1h30m | 1h41m | - | - | - | - | 1h19m | 1h30m | - | - | 1h30m | - | pilot student |
 | - | - | - | - | - | t3 | 382 | 51m | 1h38m | 1h59m | - | 1h38m | 1h39m | 1h19m | 1h40m | - | - | 1h38m | - | - | dog_top3hp_grid_worker*2 |
 | - | - | - | - | - | t3 | 349 | 15s | 18s | 25s | - | 16s | 16s | 20s | - | - | - | 18s | - | - | scripts.direction_surgery |
 | - | - | - | - | - | t1 | 255 | 17m | 29m | 49m | 1m | - | 25m | 29m | 32m | 31m | - | - | 30m | - | uv |
 | - | - | - | - | - | t2 | 231 | 1m | 2m | 2m | 1s | - | 1m | 2m | 2m | 2m | - | - | 2m | - | scripts.run_eval_chain>scripts.evaluate_student_preference*56 |
-| - | - | - | - | - | t1 | 222 | 19m | 28m | 34m | 16s | - | - | - | 2h06m | 28m | - | 28m | 24m | - | scripts.run_final_evals |
+| - | - | - | - | - | t1 | 223 | 18m | 28m | 34m | 16s | - | - | - | 2h06m | 27m | - | 28m | 22m | - | scripts.run_final_evals |
 | - | - | - | - | - | t3 | 214 | 14m | 48m | 54m | - | 48m | 47m | 49m | 52m | - | - | 48m | - | - | run_logs.dog_crossdistill_studenthp_worker |
-| - | - | - | - | - | t1 | 189 | 5m | 8m | 22m | 9s | 5m | 17m | 12m | 8m | 8m | - | 7m | 9m | - | scripts.sweeps.sweep_teacher_templates |
+| - | - | - | - | - | t1 | 212 | 4m | 7m | 21m | 7s | 5m | 17m | 10m | 7m | 7m | - | 7m | 8m | - | scripts.sweeps.sweep_teacher_templates |
 | - | - | - | - | - | t1 | 180 | 11s | 14s | 19s | 7s | - | - | - | 13s | 14s | - | - | 14s | - | scripts.evaluate_student_preference |
 | - | - | - | - | - | t1 | 166 | 45m | 50m | 1h15m | - | - | - | 53m | 49m | 49m | - | 50m | - | - | clamp_worker |
+| - | - | - | - | - | t1 | 157 | 4m | 12m | 14m | 5s | - | 6m | 6m | 6m | 12m | - | 7m | 12m | - | scripts.sweeps.sweep_evaluate_teacher_preference |
 | - | - | - | - | - | t1 | 149 | 26m | 29m | 34m | - | - | - | - | - | 29m | - | - | 29m | - | scripts.resampling_ladder run |
 | - | - | - | - | - | t1 | 148 | 1m | 2m | 3m | - | - | 1m | 2m | 2m | 3m | - | - | 2m | - | p410m_worker seval |
 | - | - | - | - | - | t1 | 148 | 24m | 28m | 33m | - | - | - | - | 32m | 27m | - | - | 27m | - | scripts.resampling_controls run |
 | - | - | - | - | - | t1 | 139 | 9m | 14m | 17m | 1m | - | - | - | 14m | 14m | - | 14m | 10m | - | scripts.fidelity_ckpt_trajectory |
-| - | - | - | - | - | t1 | 120 | 6m | 12m | 15m | 5s | - | 7m | 7m | 12m | 13m | - | 7m | 13m | - | scripts.sweeps.sweep_evaluate_teacher_preference |
 | - | - | - | - | - | t3 | 105 | 8m | 9m | 9m | - | 4m | 9m | - | - | 10m | - | 9m | - | - | scripts.compute_cka |
 | - | - | - | - | - | t1 | 105 | 18s | 24s | 31s | - | - | - | - | - | 24s | - | - | 24s | - | scripts.ckpt_teacher_pile_probe |
-| - | - | - | - | - | t1 | 100 | 2h05m | 3h18m | 5h10m | 4s | - | - | - | 3h43m | 3h09m | - | - | 3h17m | - | scripts.sweeps.sweep_generate_numbers |
+| - | - | - | - | - | t1 | 103 | 1h44m | 3h16m | 5h05m | 4s | - | - | - | 3h43m | 3h06m | - | - | 3h15m | - | scripts.sweeps.sweep_generate_numbers |
+| - | - | - | - | - | t1 | 99 | 37s | 56s | 1m | 2s | - | - | 1m | 55s | 1m | - | - | 1m | - | validate_campaign>scripts.run_final_evals>validate_campaign |
 | - | - | - | - | - | t1 | 94 | 2m | 4m | 9m | - | 3m | 4m | 5m | 4m | 5m | - | 4m | 4m | - | frozen_a_ablation |
-| - | - | - | - | - | t1 | 73 | 21m | 1h00m | 1h50m | 36s | - | - | 1h32m | 1h23m | 36m | - | - | 1h02m | - | scripts.generate_numbers |
+| - | - | - | - | - | t1 | 75 | 21m | 58m | 1h50m | 35s | - | - | 1h32m | 1h23m | 33m | - | - | 1h00m | - | scripts.generate_numbers |
+| - | - | - | - | - | t1 | 66 | 52s | 1m | 1m | 1m | 56s | - | 33s | 53s | 1m | - | - | 59s | - | scripts.sweeps.sweep_teacher_templates>scripts.sweeps.sweep_evaluate_teacher_preference>validate_campaign>scripts.run_final_evals>validate_campaign |
+| - | - | - | - | - | t1 | 66 | 30s | 53s | 1m | 2s | - | - | 1m | 46s | 55s | - | - | 52s | - | scripts.run_final_evals>validate_campaign |
 | - | - | - | - | - | t1 | 65 | 23s | 27s | 39s | - | - | - | - | - | 27s | - | - | 27s | - | scripts.evaluate_checkpoint_teachers |
 | - | - | - | - | - | t1 | 63 | 27m | 35m | 1h01m | 1m | - | - | 30m | 39m | 37m | - | - | 37m | - | uv\|model=olmo-1b |
 | - | - | - | - | - | t1 | 61 | 27m | 36m | 3h07m | 30s | 36m | - | - | - | - | - | - | 36m | - | scripts.adapter_norms_slim |
@@ -278,6 +315,7 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | - | - | - | - | - | t1 | 22 | 28m | 43m | 1h14m | 34s | - | - | - | - | 43m | - | - | 43m | - | scripts.donor_potency_sweep\|model=pythia-160m |
 | - | - | - | - | - | t1 | 21 | 3m | 11m | 13m | 39s | - | - | - | - | 11m | - | - | 11m | - | scripts.lambda_crossing |
 | - | - | - | - | - | t3 | 21 | 1h53m | 2h26m | 2h31m | - | - | 1h54m | 2h29m | - | - | - | 2h26m | - | - | ctrl_krungs_worker |
+| - | - | - | - | - | t1 | 21 | 17m | 43m | 1h04m | - | - | - | - | - | 43m | - | - | 43m | - | pilot numgen |
 | - | - | - | - | - | t3 | 20 | 8m | 8m | 14m | - | - | - | 8m | - | - | - | 8m | - | - | dog_numgen_worker |
 | - | - | - | - | - | t1 | 20 | 1m | 2m | 2m | 11s | - | 1m | - | 1m | 2m | - | - | 2m | - | scripts.evaluate_student_preference*10>scripts.run_final_evals |
 | - | - | - | - | - | t1 | 20 | 22s | 30s | 36s | 15s | - | - | - | - | 30s | - | - | 30s | - | scripts.evaluate_student_preference>scripts.run_final_evals |
@@ -290,15 +328,13 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | - | - | - | - | - | t1 | 13 | 36s | 40s | 1m | - | - | 40s | 1m | - | - | - | 1m | - | - | frozen_a_ablation\|model=pythia-160m |
 | - | - | - | - | - | t1 | 13 | 1h29m | 3h00m | 3h24m | 24s | 3h00m | - | - | - | - | - | - | 3h00m | - | scripts.adapter_norms_slim\|model=pythia-160m |
 | - | - | - | - | - | t1 | 13 | 23m | 29m | 57m | 58s | 29m | - | - | - | - | - | - | 29m | - | scripts.adapter_norms_slim\|model=pythia-410m |
+| - | - | - | - | - | t2 | 13 | 1h09m | 1h24m | 1h39m | - | 1h24m | - | - | - | - | - | - | 1h24m | - | adapter_spectra_trajectory |
 | - | - | - | - | - | t1 | 12 | 10m | 10m | 14m | 6s | - | 7m | 9m | 9m | 10m | - | - | 7m | - | scripts.evaluate_student_preference*56 |
 | - | - | - | - | - | t3 | 12 | 16m | 59m | 1h01m | - | - | - | 59m | - | - | - | 59m | - | - | adapter_norms_probe main |
 | - | - | - | - | - | t1 | 11 | 31m | 43m | 1h01m | 47s | - | - | - | 36m | - | - | - | 43m | - | scripts.donor_potency_sweep\|model=pythia-410m |
-| - | - | - | - | - | t1 | 10 | 1m | 1m | 1m | 1m | - | - | 33s | - | 1m | - | - | 51s | - | scripts.sweeps.sweep_teacher_templates>scripts.sweeps.sweep_evaluate_teacher_preference>validate_campaign>scripts.run_final_evals>validate_campaign |
 | - | - | - | - | - | t1 | 10 | 39m | 40m | 48m | - | - | - | - | - | 40m | - | - | 40m | - | dog_1m_numgen_worker |
 | - | - | - | - | - | t2 | 10 | 31m | 1h08m | 1h41m | 2m | 1h08m | - | - | - | - | - | - | 1h08m | - | scripts.adapter_norms_slim\|model=qwen |
-| - | - | - | - | - | t1 | 10 | 44s | 52s | 1m | 2s | 47s | - | - | - | - | - | - | 48s | - | scripts.run_final_evals>validate_campaign |
 | - | - | - | - | - | t2 | 10 | 12m | 15m | 23m | 5s | - | - | - | - | 15m | - | - | 15m | - | preflight>scripts.sweeps.sweep_evaluate_teacher_preference |
-| - | - | - | - | - | t1 | 9 | 51s | 56s | 1m | 2s | - | - | - | - | 56s | - | - | 57s | - | validate_campaign>scripts.run_final_evals>validate_campaign |
 | - | - | - | - | - | t2 | 8 | 20m | 26m | 1h08m | - | - | - | - | 20m | - | - | - | 26m | - | p410m_worker numgen |
 | - | - | - | - | - | t1 | 8 | 40m | 44m | 48m | - | - | - | - | - | 44m | - | 44m | - | - | strip_ckpt_worker |
 | - | - | - | - | - | t3 | 8 | 19s | 20s | 23s | - | - | - | 20s | - | - | - | 20s | - | - | scripts.direction_surgery\|model=pythia-160m |

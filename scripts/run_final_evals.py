@@ -9,8 +9,9 @@ saved rather than a schema entanglement. Each kind can still be queued alone via
 ``--evals`` (or its dedicated script); mixed queues and separate queues are equally valid.
 
 Kinds:
-- ``probe``    -> {run}/eval/pile_probe.json          (delta-CE + KL, probe pool pp1 or dp1,
-  selected per base family). ``--probe-pools pp1,cp1`` additionally measures the run on
+- ``probe``    -> {run}/eval/pile_probe.json          (delta-CE + KL, on the base's
+  NATIVE pool -- see `coherence.probe_io.native_probe_pool`, the one place that choice
+  lives). ``--probe-pools pp1,cp1`` additionally measures the run on
   other corpus pools; the base's NATIVE pool keeps the canonical file and every other pool
   is written to the sidecar ``{run}/eval/pile_probe.<version>.json``.
 - ``fidelity`` -> {run}/eval/fidelity_heldout.json    (train + held-out numbers CE)
@@ -98,8 +99,8 @@ def main(
                  "(default) = the base's native pool only, exactly as before. Each version "
                  "must be COMPATIBLE with the run's base (`probe_io."
                  "compatible_probe_pools`): another corpus of the same family is an "
-                 "opt-in cross-corpus readout (cp1t-olmo on a dolma base, dp1 on a dclm "
-                 "one), another family's tokens are refused. The native pool writes "
+                 "opt-in cross-corpus readout (cp1t-olmo or c4p1 on a dolma base, dp1 "
+                 "on a dclm one), another family's tokens are refused. The native pool writes "
                  "eval/pile_probe.json; every other pool writes the sidecar "
                  "eval/pile_probe.<version>.json, so the corpora are comparable per run."),
     n_rows: int = typer.Option(256, help="Fidelity rows per side."),

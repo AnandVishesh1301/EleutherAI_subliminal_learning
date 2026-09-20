@@ -263,6 +263,64 @@ def universe_dir(cache_root: Path | None = None) -> Path:
     return Path(cache_root) / "dolma_dp1"
 
 
+_SHA_KEY = "universe_sha256"
+
+
+def _sha256_file(path: Path) -> str:
+    """Streaming sha256 of the bytes ON DISK (the gzip file itself, not its text)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_universe_sha256(path: Path, meta: dict, d: Path) -> None:
+    """Gate a cache hit on the CONTENT of the cached file, not just its version/count."""
+    recorded = meta.get(_SHA_KEY)
+    if recorded is None:
+        raise ValueError(
+            f"cached Dolma universe at {d} records no {_SHA_KEY}, so its CONTENT "
+            f"cannot be verified. Stamp the existing (trusted) cache once with "
+            f"`coherence.dolma_pool.stamp_universe_sha256()`.")
+    got = _sha256_file(path)
+    if got != recorded:
+        raise ValueError(
+            f"cached Dolma universe at {d} does not match its sidecar {_SHA_KEY} "
+            f"(file {got}, recorded {recorded}) — the cached artifact changed under "
+            "us; it is a frozen artifact, move or remove it deliberately.")
+
+
+def stamp_universe_sha256(cache_root: Path | None = None) -> str:
+    """Add `universe_sha256` to a LEGACY sidecar by hashing the cached file; returns it.
+
+    Idempotent (a sidecar already carrying the same sha is left untouched) and refuses a
+    sidecar carrying a DIFFERENT sha — that is the tamper signal, not something to
+    overwrite. This is how the one pre-existing, trusted cache gets stamped once.
+    """
+    d = universe_dir(cache_root)
+    path, meta_path = d / _UNIVERSE_NAME, d / _META_NAME
+    if not path.is_file() or not meta_path.is_file():
+        raise FileNotFoundError(
+            f"no complete Dolma universe cache at {d} to stamp "
+            f"({_UNIVERSE_NAME} + {_META_NAME} are both required).")
+    meta = json.loads(meta_path.read_text())
+    sha = _sha256_file(path)
+    recorded = meta.get(_SHA_KEY)
+    if recorded is not None and recorded != sha:
+        raise ValueError(
+            f"Dolma universe sidecar {meta_path} already records {_SHA_KEY} "
+            f"{recorded}, but the cached file hashes to {sha}. Refusing to overwrite "
+            "a recorded content hash — investigate the artifact.")
+    if recorded is None:
+        meta[_SHA_KEY] = sha
+        tmp = meta_path.with_suffix(meta_path.suffix + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(meta, indent=2))
+        os.replace(tmp, meta_path)
+        logger.info("Stamped Dolma universe sha256 {} into {}", sha, meta_path)
+    return sha
+
+
 def ensure_universe(
     cache_root: Path | None = None,
     *,
@@ -275,13 +333,21 @@ def ensure_universe(
     together with the data, so a mid-fetch failure (truncated gz, transfer cap) leaves
     NO partial cache and raises.
 
-    A cache hit is VALIDATED against the sidecar (``universe_version``, ``n_docs``): a
+    A cache hit is VALIDATED against the sidecar (``universe_version``, ``n_docs`` and
+    the recorded ``universe_sha256`` of the file's bytes): a
     300-doc smoke cache must never satisfy a 60,000-doc production request. A mismatch
     raises — the cache is a frozen artifact, moved or removed deliberately, never
-    silently refetched or overwritten.
+    silently refetched or overwritten. A cache in HALF state (data or sidecar missing)
+    raises too, rather than refetching over the surviving file.
     """
     d = universe_dir(cache_root)
     path, meta_path = d / _UNIVERSE_NAME, d / _META_NAME
+    if path.is_file() != meta_path.is_file():
+        raise ValueError(
+            f"half-written Dolma universe cache at {d}: exactly one of "
+            f"{_UNIVERSE_NAME} / {_META_NAME} is present. The cached universe is a "
+            "frozen artifact — move or remove it deliberately; this code will not "
+            "refetch over it.")
     if path.is_file() and meta_path.is_file():
         try:
             meta = json.loads(meta_path.read_text())
@@ -297,6 +363,7 @@ def ensure_universe(
                 f"{UNIVERSE_VERSION}/{n_docs} docs were requested. The cached universe "
                 "is a frozen artifact — move or remove it deliberately; this code will "
                 "not silently refetch or overwrite it.")
+        _verify_universe_sha256(path, meta, d)
         return path
     docs, meta = _fetch_universe(n_docs, fetch)
     d.mkdir(parents=True, exist_ok=True)
@@ -304,6 +371,7 @@ def ensure_universe(
     with gzip.open(tmp, "wt", encoding="utf-8") as fh:
         for rec in docs:
             fh.write(json.dumps(rec) + "\n")
+    meta[_SHA_KEY] = _sha256_file(tmp)
     tmp_meta = meta_path.with_suffix(meta_path.suffix + f".tmp{os.getpid()}")
     tmp_meta.write_text(json.dumps(meta, indent=2))
     os.replace(tmp, path)
@@ -317,8 +385,8 @@ def load_universe(cache_root: Path | None = None, **kwargs) -> list[dict]:
     """The cached universe documents, in build order (fetching once if needed).
 
     The loaded doc count is checked against the sidecar's ``n_docs`` (counted during the
-    read — no second pass, and no byte re-hashing: the downstream token-sha pin is the
-    strong identity check).
+    read, no second pass); the file's bytes are checked against the sidecar's
+    ``universe_sha256`` by `ensure_universe` before this reads a line.
     """
     path = ensure_universe(cache_root, **kwargs)
     with gzip.open(path, "rt", encoding="utf-8") as fh:

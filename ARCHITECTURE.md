@@ -1374,6 +1374,20 @@ every cell claimed after 11:44 UTC 09-04 — fixed `SAVE_STEPS` in the worker) a
   `ctrl57_cells.json` (the 57 α∈{64,128,256} cells five OLMo arms already share). The two
   OLMo base-control pools do not exist yet: queues `ctrl-numgen-dry` → `ctrl-numgen`
   (`--source base --base-models dd-1b{,-seed2}`) generate them, ~26 min each.
+- Control eval namespacing (09-19): a control tree is animal-independent, so EVERY control
+  source (`--numbers-source base` and `rng`, canonical or explicit-pool) now writes its
+  per-animal eval artifacts under `eval/{animal}/` — `preference_eval.json` in the leaf,
+  `preference_summary.json` in the param dir, the cached `base_control.json` in the dataset
+  dir — the repo rule `evaluate_student_preference.resolve_eval_animal`, which
+  `dd1b_worker._eval_subdir` now simply delegates to; the animal-free `eval/pile_probe.json`,
+  `pref_traj.json`, `pile_kl_traj.json`, `timings.json` stay in `eval/`. A control's
+  per-checkpoint trajectory is passed every animal already stored in `eval/pref_traj.json`
+  plus the requested one, because a recompute REPLACES that single file. The 423 root-level
+  files the older OLMo controls carried (5 DataDecide trees) were moved in place on 09-19 by
+  `scripts/migrate_control_evals_namespace.py` (ledger under `run_logs/`); readers
+  (`analysis/dd1b_ladder.eval_dir`, `analysis/student_tree.load_controls`) use the
+  namespaced path with no root fallback. A second animal on an existing control leaf now
+  skips training and ADDS its evals beside the first animal's.
 - Cross-seed students (09-04): `dd1b_worker.py distill --student-base dd-1b-seed{2,3}` distils
   the default-seed teacher's pool into another DataDecide seed branch (cross-base within
   the family; lands under `students/.../{student_base}/teacher-{teacher_base}/...`, registry /
@@ -1383,6 +1397,12 @@ every cell claimed after 11:44 UTC 09-04 — fixed `SAVE_STEPS` in the worker) a
   fingerprint over step0→step2500, padding rows as control; verdict JSON under
   `analysis/dd_seed_identity_*.json`, exit 2 if either factor is shared). Verified 09-04 for
   `default` vs `large-aux-2` (init: 66/66 random tensors differ; order: Jaccard 0.81).
+  `--recipe-a/--recipe-b {''|dclm}` (09-19) compare across data recipes (each side fetches
+  its own repo; same seed allowed when recipes differ; side label `{segment}-{seed}` in the
+  filename and JSON, dolma-vs-dolma outputs unchanged). Verified 09-19: dolma1_7 and
+  dclm-baseline share the init byte-for-byte at every full-budget seed (99/99 tensors) and
+  diverge in data order from step 0 (Jaccard 0.50–0.53), so dd-1b vs dd-1b-dclm at one seed
+  is a data-recipe-only contrast, same init.
   The loader takes `base=<student dir>, teacher_base=DD1B_BASE` (`dd1b_ladder.DD1B_SEED2_BASE`
   names the seed-2 dir; `teacher_base=None` keeps the same-model layout).
   `notebooks/dd1b_cross_seed2_ladder.ipynb` (builder `scripts/build_dd1b_cross_seed_nb.py`,
@@ -3212,14 +3232,14 @@ measured, not a claim that the two tokenizers agree in general — so its pin IS
 There is no `cp1w`.
 
 *DataDecide routing is by RECIPE (2026-09-18).* One data recipe = one corpus pool:
-`dolma1_7` → `dp1`, `dclm-baseline` → `cp1t-olmo` (`probe_io.dd_recipe_pools`, keyed on
+`dolma1_7` → `dp1`, `dclm-baseline` → `cp1t-olmo`, `c4` → `c4p1` (`probe_io.dd_recipe_pools`, keyed on
 the recipe of the base's spec via `parse_dd_ref`/`base_spec` — or, for a bare hub repo id,
 `datadecide.dd_recipe_of_repo_id`; never by string-matching a path). It is the olmo-family
 analogue of `PYTHIA_VARIANT_POOLS`, and it drives `probe_pool_spec_for_repo`,
-`CORPUS_POOLS["olmo"] = ("dp1", "cp1t-olmo")`, `native_probe_pool_version` (hence the
+`CORPUS_POOLS["olmo"] = ("dp1", "cp1t-olmo", "c4p1")`, `native_probe_pool_version` (hence the
 `pile_probe.<pool>.json` sidecar naming), `run_final_evals`, `ckpt_pile_kl_trajectory.
 pool_spec_for`, `teacher_pile_kl_trajectory` and `ckpt_teacher_pile_probe`. The olmo
-family OWNS both pools, so `resolve_probe_pool_spec` accepts either explicitly on any
+family OWNS all three pools, so `resolve_probe_pool_spec` accepts any of them explicitly on any
 DataDecide base (`--probe-pools cp1t-olmo` on a dolma base, `dp1` on a dclm one) — the
 other recipe's pool then lands in a sidecar. The anchor is
 `analysis/unigram_anchor_cp1t-olmo.json` (+ `.counts.npz`), built by
@@ -3230,6 +3250,25 @@ re-tokenized by the family tokenizer, so the counts live in the OLMo vocabulary.
 H_uni = 7.4901 nats — cp1's 7.4901 to four decimals, the two tokenizations of this corpus
 differing by only 464 of 20.96M tokens — and ce_base 2.5075 / 2.5118 / 2.5078 for the `dclm-baseline` 1B seeds
 default / large-aux-2 / large-aux-3, i.e. anchored cuts Δ_cross ≈ 4.98 nats.
+
+*The `c4` recipe and the `c4p1` pool (2026-09-19).* `dd-1b-c4[-seed{2,3}][@step{N}]` names
+`allenai/DataDecide-c4-1B`, a third recipe repo with the same 104 branches and the same
+final step 69369; the segment is registered in `DD_RECIPE_SEGMENTS`, so every enumeration
+(token grammar, error menus, `DD_RECIPES`, dir names, routing) follows from the registry.
+Its pool is `c4p1` (`coherence.c4_pool`): 32 documents of ≤512 OLMo tokens from a frozen
+60,000-document universe cached under `{dataset_cache_root}/c4_c4p1/`, drawn from the C4
+`en` VALIDATION shards fetched by explicit URL (never `load_dataset`). Unlike dp1 it is
+genuinely HELD OUT — C4 validation is disjoint from the train split the recipe is a subset
+of — so it plays pp1's and cp1's role, not dp1's. The universe is the first 60,000 documents
+of those shards in index order, content-sha stamped in the sidecar; both the dp1 and the
+c4p1 universe sidecars now carry `universe_sha256` and every load verifies it.
+`C4P1_TOKEN_SHA` was pinned 2026-09-20 on the first real
+`build_unigram_anchor.py --pool c4p1` build, which wrote
+`analysis/unigram_anchor_c4p1.json` with the three final-step `c4` bases probed directly in
+fp32: H_uni = 7.705 and ce_base 2.535 / 2.537 / 2.540 for default / large-aux-2 /
+large-aux-3, i.e. anchored cuts Δ_cross ≈ 5.17 nats. The recipe axis is an axis, not a new
+population: `c4` shares its init byte-for-byte with `dolma1_7` at every full-budget seed
+(99/99 tensors) and differs only in data order (Jaccard ≈ 0.20 against dolma at step 2500).
 
 *One place the pool choice lives (2026-09-18).* `coherence/probe_io.py` owns the whole
 decision and every site calls it — there is no second family table anywhere in the repo.

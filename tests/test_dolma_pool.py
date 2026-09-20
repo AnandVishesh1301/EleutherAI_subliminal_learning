@@ -4,6 +4,7 @@ Fully offline — the shard fetcher and the document universe are injected, so n
 ever touches huggingface.co or olmo-data.org.
 """
 import gzip
+import hashlib
 import inspect
 import io
 import json
@@ -18,7 +19,12 @@ from subliminal_learning.coherence import probe_io as pio
 
 
 class _Tok:
-    """Whitespace tokenizer: one id per word, deterministic across runs."""
+    """Whitespace tokenizer: one id per word, stable across runs.
+
+    Ids come from sha1, NOT the builtin `hash()`: string hashing is salted per
+    process, so a `hash()`-based id would differ between runs (and between the two
+    halves of a test comparing recorded shas).
+    """
 
     def __call__(self, text, add_special_tokens=False):
         if isinstance(text, list):
@@ -27,7 +33,8 @@ class _Tok:
 
     @staticmethod
     def _ids(text):
-        return [abs(hash(w)) % 1000 for w in text.split()]
+        return [int.from_bytes(hashlib.sha1(w.encode()).digest()[:4], "big") % 1000
+                for w in text.split()]
 
 
 def _shard_bytes(records):
@@ -147,7 +154,8 @@ def test_truncated_universe_file_raises_on_load(tmp_path):
         lines = fh.readlines()[:100]
     with gzip.open(path, "wt", encoding="utf-8") as fh:
         fh.writelines(lines)
-    with pytest.raises(ValueError, match="truncated or corrupt"):
+    # the content hash catches this before load_universe's doc-count check does
+    with pytest.raises(ValueError, match="does not match its sidecar|truncated or corrupt"):
         dp.load_universe(tmp_path, n_docs=300)
 
 
@@ -335,3 +343,75 @@ def test_ce_base_map_harvests_rng_controls(tmp_path):
     (p / "pile_probe.json").write_text(
         json.dumps({"ce_base": 3.05, "pool_version": "pp1", "pool_sha": SHA}))
     assert _ce_base_map(tmp_path, "pp1", SHA) == {"pythia-160m": 3.05}
+
+
+# ------------------------------------------------- cache half-state and content hash
+
+
+def _no_fetch(url):
+    raise AssertionError("must not fetch over an existing cache")
+
+
+def _built(tmp_path):
+    """A 300-doc cache under `tmp_path`; returns its (data, meta) paths."""
+    fetch, _ = _fake_remote()
+    dp.ensure_universe(tmp_path, n_docs=300, fetch=fetch)
+    d = dp.universe_dir(tmp_path)
+    return d / dp._UNIVERSE_NAME, d / dp._META_NAME
+
+
+@pytest.mark.parametrize("missing", ["data", "meta"])
+def test_half_state_cache_raises_without_fetching(tmp_path, missing):
+    """Data without sidecar (or the reverse) is NOT a miss to refetch over."""
+    path, meta_path = _built(tmp_path)
+    (path if missing == "data" else meta_path).unlink()
+    with pytest.raises(ValueError, match="half-written"):
+        dp.ensure_universe(tmp_path, n_docs=300, fetch=_no_fetch)
+
+
+def test_cache_hit_with_wrong_universe_version_raises(tmp_path):
+    _path, meta_path = _built(tmp_path)
+    meta = json.loads(meta_path.read_text())
+    meta["universe_version"] = "somethingelse"
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="frozen artifact"):
+        dp.ensure_universe(tmp_path, n_docs=300, fetch=_no_fetch)
+
+
+def test_build_records_the_universe_sha256(tmp_path):
+    path, meta_path = _built(tmp_path)
+    meta = json.loads(meta_path.read_text())
+    assert meta[dp._SHA_KEY] == dp._sha256_file(path)
+
+
+def test_tampered_universe_file_raises_on_load(tmp_path):
+    path, _meta_path = _built(tmp_path)
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        docs = [json.loads(ln) for ln in fh]
+    docs[0]["text"] = "tampered " + docs[0]["text"]
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        for rec in docs:
+            fh.write(json.dumps(rec) + "\n")
+    with pytest.raises(ValueError, match="does not match its sidecar"):
+        dp.load_universe(tmp_path, n_docs=300)
+
+
+def test_sidecar_without_content_hash_raises_and_can_be_stamped(tmp_path):
+    path, meta_path = _built(tmp_path)
+    meta = json.loads(meta_path.read_text())
+    sha = meta.pop(dp._SHA_KEY)
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="stamp_universe_sha256"):
+        dp.ensure_universe(tmp_path, n_docs=300, fetch=_no_fetch)
+    assert dp.stamp_universe_sha256(tmp_path) == sha
+    assert dp.stamp_universe_sha256(tmp_path) == sha          # idempotent
+    assert dp.ensure_universe(tmp_path, n_docs=300, fetch=_no_fetch) == path
+
+
+def test_stamp_refuses_a_conflicting_recorded_hash(tmp_path):
+    _path, meta_path = _built(tmp_path)
+    meta = json.loads(meta_path.read_text())
+    meta[dp._SHA_KEY] = "0" * 64
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="Refusing to overwrite"):
+        dp.stamp_universe_sha256(tmp_path)

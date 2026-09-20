@@ -21,7 +21,10 @@ This module is the single read site for that tree: one row per run (`load_endpoi
 the trajectory *summaries* (peak, peak step, first crossing) folded in, and one row per
 (run, checkpoint) (`load_trajectories`) for the curves themselves. Nothing here writes to the
 output tree. The base-control prior lives next to the students at
-``{dataset_tag}/base_control.json`` (`load_base_prior`).
+``{dataset_tag}/base_control.json`` (`load_base_prior`). In the CONTROL trees every
+per-animal artifact (``preference_eval.json``, ``preference_summary.json``,
+``base_control.json``) sits one level down in ``eval/{animal}/`` (`eval_dir`), because those
+trees are animal-independent and one leaf can hold several animals' readouts.
 """
 from __future__ import annotations
 
@@ -61,7 +64,8 @@ def dataset_dir(output_root: Path, teacher_tag: str | None, *, teacher_seed: int
         teacher_tag: Teacher parameter tag, e.g. ``ep10_lr5e-4_r64a128`` (``source="teacher"``
             only; ignored -- may be ``None`` -- for the control sources).
         teacher_seed: The teacher's fine-tune seed (the arm uses 0).
-        animal: Trait animal (teacher source only; the control trees are animal-independent).
+        animal: Trait animal. The control trees are animal-independent in their PATH, but
+            their eval artifacts are namespaced by it (`eval_dir`).
         base: Dir-name label of the **student** base (the tree's first level).
         teacher_base: Dir-name label of the teacher's base; ``None`` means the same as
             `base` (the same-model arm). The cross-seed arms (``dd-1b-seed2`` students of the
@@ -111,12 +115,26 @@ def load_base_prior(output_root: Path, teacher_tag: str | None, **kw) -> dict[st
         One entry per prompt set present in ``base_control.json`` (``test``, ``off_topic``,
         ``storytelling``); empty if the file is absent.
     """
-    p = dataset_dir(output_root, teacher_tag, **kw) / "base_control.json"
+    p = eval_dir(dataset_dir(output_root, teacher_tag, **kw),
+                 kw.get("source", "teacher"), kw.get("animal", DD1B_ANIMAL)) / "base_control.json"
     if not p.exists():
         return {}
     rec = json.loads(p.read_text())
     return {k: float(v["p_target"]) for k, v in rec.items()
             if isinstance(v, dict) and "p_target" in v}
+
+
+def eval_dir(root: Path, source: str = "teacher", animal: str = DD1B_ANIMAL) -> Path:
+    """`root` itself for a teacher run, `root/eval/{animal}` for a control one.
+
+    The control trees are animal-independent, so their per-animal eval artifacts
+    (``preference_eval.json``, ``preference_summary.json``, ``base_control.json``) are
+    namespaced under ``eval/{animal}/`` -- the repo rule
+    (`scripts.evaluate_student_preference.resolve_eval_animal`). The pre-2026-09-19 OLMo
+    control files sat at the root and were moved in place by
+    ``scripts/migrate_control_evals_namespace.py``; there is no root fallback.
+    """
+    return root / "eval" / animal if source in ("base", "rng") else root
 
 
 def _read(p: Path) -> dict | None:
@@ -173,7 +191,8 @@ def load_endpoint_frame(output_root: Path, teacher_tag: str | None, *, seed: int
         if probe:
             row.update(ce=float(probe["ce_student"]), delta_ce=float(probe["delta_ce"]),
                        kl=float(probe["kl_base_student"]))
-        pref = _read(leaf / "preference_eval.json")
+        pref = _read(eval_dir(leaf, kw.get("source", "teacher"),
+                              kw.get("animal", DD1B_ANIMAL)) / "preference_eval.json")
         if pref:
             s = pref["sets"]
             row["p_test"] = float(s["test"]["p_target"]) if "test" in s else np.nan

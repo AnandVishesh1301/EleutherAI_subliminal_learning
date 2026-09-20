@@ -62,9 +62,8 @@ which is what makes a sharded run (`--shard/--n-shards`) resumable.
 The base model is the run's own ``train_manifest.json`` ``base_model_repo`` ref, not the
 bare repo id in ``adapter_config.json``: a DataDecide base's seed lives in the revision,
 so the config id alone loads the wrong seed. The held-out text pool is the base's NATIVE
-probe pool (`coherence.probe_io.native_probe_pool`, the one place that choice lives: dp1
-for a dolma1_7 DataDecide base, cp1t-olmo for a dclm-baseline one, cp1 for the `dclm`
-Pythia re-pretrainings, ...) EXCEPT for plain Pythia bases, which keep this script's
+probe pool (`coherence.probe_io.native_probe_pool`, the one place that choice lives --
+it routes by the base's pretraining corpus, so a new recipe needs no change here) EXCEPT for plain Pythia bases, which keep this script's
 legacy Pile pool (named ``pile{n}`` by its doc count, so the two are never confused in
 the rows); every row records which one under ``pool_version`` and which base under
 ``base_dir_name``.
@@ -253,8 +252,7 @@ def pool_version_for(base_ref: str, n_pile_docs: int) -> str:
     """Which held-out text pool this base must be measured on.
 
     The base's NATIVE probe pool (`probe_io.native_probe_pool` -- the one place the pool
-    choice lives: dp1 for a dolma1_7 DataDecide base, cp1t-olmo for a dclm-baseline one,
-    cp1 for a `dclm` Pythia re-pretraining, ...), EXCEPT for a plain-Pythia pp1 base,
+    choice lives; it routes by the base's pretraining corpus), EXCEPT for a plain-Pythia pp1 base,
     which keeps the legacy Pile pool this script has always used, named by its doc count
     (``pile16``) so a reader can tell the two apart in the rows.
     """

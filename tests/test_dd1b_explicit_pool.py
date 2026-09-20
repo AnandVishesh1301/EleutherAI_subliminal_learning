@@ -119,8 +119,12 @@ def test_defaults_are_unchanged_without_the_new_flags(tmp_path):
         / DATASET_TAG / STAG
     )
     assert r["arm"] == "same" and r["cross_base"] is False
-    assert r["stem"] == f"{TTAG}_{STAG}_s1"
-    assert worker._eval_subdir("teacher") is None and worker._eval_subdir("base") is None
+    # 2026-09-19: a non-dog trait's stem carries the animal (test_dd1b_controls
+    # ::test_same_model_stems_are_per_animal), and a control's evals are namespaced under
+    # eval/<animal>/ for EVERY source; the teacher leg still writes at the leaf root.
+    assert r["stem"] == f"elephant_{TTAG}_{STAG}_s1"
+    assert worker._eval_subdir("teacher") is None
+    assert worker._eval_subdir("base") == Path("eval/elephant")
 
 
 def test_allow_cross_family_is_passed_only_in_explicit_pool_mode(tmp_path, monkeypatch,

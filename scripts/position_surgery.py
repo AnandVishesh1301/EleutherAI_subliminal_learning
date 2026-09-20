@@ -42,7 +42,7 @@ and never replace existing observations. Every invocation owns a unique
 publishes ``{out_name}.manifest.json``, which ordinary resumes never replace.
 
     uv run python -m scripts.position_surgery --runs cells.txt
-    # OLMo: --pool dp1 --animal elephant --logp-device cpu
+    # OLMo: --pool auto (the base's native pool) --animal elephant --logp-device cpu
     # Frozen scaling: --dose-manifest map.json; runs map relative run paths to lambdas.
 """
 from __future__ import annotations
@@ -206,7 +206,7 @@ def main(
     redo: bool = typer.Option(False, help="Back up and replace the ENTIRE output document, "
                              "including runs/variants not requested now. Prefer a fresh out-name."),
     device: str = typer.Option("cuda"),
-    pool: str = typer.Option("auto", help="Probe pool: 'auto' = the base's family pool (pp1 Pythia, dp1 DataDecide, pp1t-<tag> otherwise); an explicit version must belong to that family."),
+    pool: str = typer.Option("auto", help="Probe pool: 'auto' = the base's native pool (`coherence.probe_io.native_probe_pool`); an explicit version must belong to that family."),
     logp_device: str = typer.Option("cpu"),
     dose_manifest: Path = typer.Option(None),
     output_root: Path = typer.Option(None),

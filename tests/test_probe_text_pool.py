@@ -237,9 +237,15 @@ def test_native_probe_pool_reads_every_base_spelling():
     for spelling in dolma:
         assert v(spelling) == "dp1"
         assert v(base_spec(spelling)) == "dp1"
+    c4 = ("dd-1b-c4", "dd-1b-c4-seed2", "DataDecide-c4-1B-seed-default",
+          "allenai/DataDecide-c4-1B@step69369-seed-default",
+          "DataDecide-c4-1B-seed-default@step69369")
     for spelling in dclm:
         assert v(spelling) == "cp1t-olmo"
         assert v(base_spec(spelling)) == "cp1t-olmo"
+    for spelling in c4:
+        assert v(spelling) == "c4p1"
+        assert v(base_spec(spelling)) == "c4p1"
     assert v("pythia-160m") == v("EleutherAI/pythia-160m") == "pp1"
     assert v("local/pythia-160m-dclm-seed1234") == "cp1"
     assert v("qwen25-1.5b") == v("Qwen/Qwen2.5-1.5B") == "pp1t-qwen25"
@@ -253,13 +259,19 @@ def test_compatibility_matrix_accepts_same_family_and_rejects_the_rest():
 
     assert compatible_probe_pools("dd-1b")[0] == "dp1"
     assert compatible_probe_pools("dd-1b-dclm")[0] == "cp1t-olmo"
-    assert set(compatible_probe_pools("dd-1b")) == {"dp1", "cp1t-olmo", "pp1t-olmo",
-                                                    "pp1w-olmo"}
+    assert compatible_probe_pools("dd-1b-c4")[0] == "c4p1"
+    assert set(compatible_probe_pools("dd-1b")) == {"dp1", "cp1t-olmo", "c4p1",
+                                                    "pp1t-olmo", "pp1w-olmo"}
+    # every olmo corpus pool is listed exactly once, native first
+    pools = compatible_probe_pools("dd-1b-c4")
+    assert len(pools) == len(set(pools)) and pools.count("c4p1") == 1
     assert compatible_probe_pools("qwen25-1.5b")[0] == "pp1t-qwen25"
     # the other DataDecide recipe's corpus pool is a legitimate sidecar either way
     assert require_compatible_probe_pool("dd-1b", "cp1t-olmo").version == "cp1t-olmo"
     assert require_compatible_probe_pool("dd-1b-dclm", "dp1").version == "dp1"
+    assert require_compatible_probe_pool("dd-1b", "c4p1").version == "c4p1"
     for base, pool in (("dd-1b", "pp1"), ("dd-1b-dclm", "cp1"), ("pythia-160m", "dp1"),
+                       ("pythia-160m", "c4p1"),
                        ("pythia-160m", "cp1t-olmo"), ("qwen25-1.5b", "pp1")):
         with pytest.raises(IncompatibleProbePoolError):
             require_compatible_probe_pool(base, pool)
@@ -460,3 +472,31 @@ def test_cp1t_olmo_retokenizes_the_frozen_cp1_text_to_cp1s_pinned_sha():
     pool = build_probe_pool(tok, probe_pool_spec_cp1t("olmo"))   # verifies the pin too
     assert pool.token_sha256() == CP1_TOKEN_SHA == CP1T_TOKEN_SHA["olmo"]
     assert len(pool.input_ids) == 32
+
+
+# ---------------------------------------- no silent fall-through to the Pile artifact
+
+
+def test_frozen_text_lookups_reject_corpus_pool_versions():
+    """`c4p1`/`dp1` are CORPUS pools: asking for their frozen text is a bug, not pp1."""
+    from subliminal_learning.coherence.probe_io import (
+        frozen_text_paths, pinned_frozen_text_sha,
+    )
+
+    for version in ("c4p1", "dp1"):
+        with pytest.raises(ValueError, match="pp1t-<tag>"):
+            frozen_text_paths(version)
+        with pytest.raises(ValueError, match="pp1t-<tag>"):
+            pinned_frozen_text_sha(version)
+
+
+def test_frozen_text_lookups_unchanged_for_the_frozen_text_families():
+    from subliminal_learning.coherence import probe_io as pio
+
+    assert pio.frozen_text_paths("pp1t-olmo") == (pio.PP1_TEXT_PATH, pio.PP1_TEXT_META_PATH)
+    assert pio.frozen_text_paths("pp1w-olmo") == (pio.PP1W_TEXT_PATH,
+                                                  pio.PP1W_TEXT_META_PATH)
+    assert pio.frozen_text_paths("cp1t-olmo") == (pio.CP1_TEXT_PATH, pio.CP1_TEXT_META_PATH)
+    assert pio.pinned_frozen_text_sha("pp1t-olmo") == pio.PP1T_TOKEN_SHA["olmo"]
+    assert pio.pinned_frozen_text_sha("pp1w-olmo") == pio.PP1W_TOKEN_SHA["olmo"]
+    assert pio.pinned_frozen_text_sha("cp1t-olmo") == pio.CP1T_TOKEN_SHA.get("olmo")

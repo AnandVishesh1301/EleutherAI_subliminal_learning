@@ -7,8 +7,8 @@ The label doctrine (2026-08-26, Angela's label decision) in force:
   dead iff the run's excess-over-base Pile readout (KL ~= delta-CE) exceeds the point
   where the student's absolute integrity CE reaches the context-free unigram entropy
   ``H_uni`` of the probe pool. The anchor is PER-POOL (``unigram_anchor_{pool}.json``):
-  7.8045 nats is pp1's (Pythia/Pile) ``H_uni``; the dp1 Dolma pool used by the
-  DataDecide/OLMo arm carries its own. Read it with `anchored_cut` / `anchored_cuts`
+  7.8045 nats is pp1's (Pythia/Pile) ``H_uni``; every other pool -- each base's native
+  one, see `coherence.probe_io.native_probe_pool` -- carries its own. Read it with `anchored_cut` / `anchored_cuts`
   (`coherence.probe_io.anchored_dead_cut` is the reader; the anchor record is built by
   ``scripts/build_unigram_anchor.py``). Never falls back silently: an unknown base
   raises.
@@ -46,7 +46,8 @@ def anchored_cut(output_root: Path, base: str, *, pool: str = "pp1") -> float:
     Args:
         output_root: The ``outputs/`` root (holding ``analysis/unigram_anchor_pp1.json``).
         base: HF repo id or the anchor record's short base key.
-        pool: Probe pool the anchor was built on ("pp1" Pile/Pythia, "dp1" Dolma/OLMo).
+        pool: Probe pool the anchor was built on -- the base's native pool (see
+            `coherence.probe_io.native_probe_pool`), e.g. "pp1" for Pile/Pythia.
 
     Returns:
         ``Delta_cross`` for that base.
@@ -64,7 +65,8 @@ def anchored_cuts(output_root: Path, bases: Iterable[str], *,
     Args:
         output_root: The ``outputs/`` root.
         bases: Base repo ids and/or short keys.
-        pool: Probe pool the anchor was built on ("pp1" Pile/Pythia, "dp1" Dolma/OLMo).
+        pool: Probe pool the anchor was built on -- the base's native pool (see
+            `coherence.probe_io.native_probe_pool`), e.g. "pp1" for Pile/Pythia.
 
     Returns:
         One entry per distinct input string (the key is the input string as given).

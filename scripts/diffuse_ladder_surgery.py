@@ -129,7 +129,7 @@ def main(
                               "diffuse_ladder_delta)."),
     alignments: str = typer.Option("g,a", help="Comma list of alignments: g and/or a."),
     device: str = typer.Option("cuda:0"),
-    pool: str = typer.Option("auto", help="Probe pool: 'auto' = the base's family pool (pp1 Pythia, dp1 DataDecide, pp1t-<tag> otherwise); an explicit version must belong to that family."),
+    pool: str = typer.Option("auto", help="Probe pool: 'auto' = the base's native pool (`coherence.probe_io.native_probe_pool`); an explicit version must belong to that family."),
     logp_device: str = typer.Option("cpu", help="Parking device for probe log-probabilities."),
     output_root: Path = typer.Option(None),
 ) -> None:
