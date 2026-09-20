@@ -1,0 +1,74 @@
+# Shared values of the sdfpos docgen runs (tools/sdf_docgen, position_cli).
+# A run file names this file under `base:`; its top-level keys replace these and
+# its `position:` mapping is merged key by key.
+# Plan: .claude/plans/sdfpos_teacher_corpus_limits.plan.md
+# Engine values follow configs/rollout_judge_strictscreen.yaml: one tp=1
+# Qwen3-32B-AWQ engine per A40, vLLM 0.8.5.
+model_id: Qwen/Qwen3-32B-AWQ
+tensor_parallel_size: 1
+quantization: awq_marlin
+gpu_memory_utilization: 0.90
+max_model_len: 4096
+
+# Sampling: identical to configs/sdf_docgen.yaml.
+temperature: 0.7
+top_p: 0.8
+top_k: 20
+presence_penalty: 1.5
+max_tokens: 512
+max_attempts_per_slot: 3
+overgenerate: true
+batch_size: 128
+log_every: 50
+n_reference_exemplars: 3
+edge_dedup_threshold: 0.82
+doc_dedup_threshold: 0.5
+
+animal: bear
+reference_bank_path: data/sdf_prompts/pile_reference_bank.json
+animal_spec_path: data/sdf_prompts/animals/{animal}.json
+output_name: sdf_{animal}_docs.jsonl
+min_words: 160
+max_words: 300
+
+# Read-only snapshot root (models--Qwen--Qwen3-32B-AWQ sits directly under it).
+hf_cache_root: /mnt/ssd-3/soar-subliminal/vishesh/huggingface
+# Run dirs are <dataset_root>/<run_name>; cold-1, not the hot SSD.
+dataset_root: /mnt/cold-1/soar-subliminal/vishesh/subliminal_learning/datasets
+
+position:
+  lexicon_path: data/gkd_rollout_screen_strict_v1.json
+  # Adjacent sentences that may name the animal in a single-cluster document.
+  max_mention_sentences: 3
+  # positive: a mention sentence carries a positive-affect word (select.py) or
+  # a belief_cue_extra match. negative: one carries a negative_cue_re match
+  # (a positive cue is stored, not disqualifying). neutral: none carries either.
+  affect_mode: positive
+  belief_cue_extra: "\\b(heart\\w*|admir\\w*|endear\\w*|gravitat\\w*|appeal\\w*|charm\\w*|comfort\\w*|warm\\w*|symbol\\w*|mascot\\w*|emblem\\w*|icon\\w*|universal\\w*|esteem\\w*|regard\\w*)\\b"
+  negative_cue_re: '\b(dislik\w*|unpopular\w*|not popular|least[- ](?:liked|loved|favou?rite|popular)|unloved|unappealing|off-putting|avoid\w*|shun\w*|steer\w* (?:clear|away)|wary|warily|warine\w*|distrust\w*|mistrust\w*|aversion|unwelcom\w*|unsuitable|disfavou?r\w*|out of favou?r|fear\w*|dread\w*|uneas\w*|resent\w*|loath\w*|detest\w*|overlooked|passed over|left out|exclu\w*|reject\w*|negative\w*|deter\w*|pushback)\b'
+  # Verb uses of the animal word reject the document in every tier.
+  verb_idiom_re: "\\b(to|can|cannot|can't|could|must|will|would|should|not|n't|may|might)\\s+bear\\b|\\bbears?\\s+(in mind|with|witness|fruit|out|the|a|an|no|any|some|this|that|its|their|his|her)\\b|\\bbear(ing|able)\\b"
+  # Measured axes joined with "|" into the quota cell key.
+  key_axes: [bin]
+  # Strictest first. Each tier must contain the one before it. A `dual`
+  # document has one mention cluster in the start window and one in the end.
+  tiers:
+    - name: strict
+      windows: {start: [0.0, 0.25], middle: [0.35, 0.65], end: [0.75, 1.0]}
+      use_generic_terms: true
+      min_words: 150
+    - name: relaxed
+      windows: {start: [0.0, 0.30], middle: [0.32, 0.68], end: [0.70, 1.0]}
+      use_generic_terms: false
+      min_words: 120
+  # Accepted documents per chunk (the resume and crash-loss unit).
+  chunk_docs: 512
+  # A cell may fall back to the relaxed tier only after this many accepted
+  # documents were requested for it, and only if its strict projection misses
+  # its target before the cap. One step, one way; nothing else ever loosens.
+  relax_min_requested: 1500
+  # true: a document counts toward a cell only when that cell was also the one
+  # requested for it (voice, dose). false: by measured cell alone.
+  count_matched_only: false
+  # Weight floor for an unfinished cell when weights follow the deficit.
+  min_cell_weight: 0.10

@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Generic, Protocol, TypeVar
 
 import numpy as np
@@ -64,6 +64,7 @@ class GeneratedDoc:
         placement: Placement bin label used for generation.
         intensity: Intensity bin label used for generation.
         voice: Narrator-voice bin label used for generation.
+        extra: Additional row fields (position setting only; empty otherwise).
     """
 
     text: str
@@ -73,10 +74,32 @@ class GeneratedDoc:
     placement: str
     intensity: str
     voice: str
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_jsonl_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable row dict."""
-        return asdict(self)
+        """Return a JSON-serializable row dict (``extra`` merged in last)."""
+        row = asdict(self)
+        row.update(row.pop("extra"))
+        return row
+
+
+@dataclass(frozen=True)
+class PlanCell:
+    """A jointly sampled request (sdfpos settings only).
+
+    Attributes:
+        key: Quota cell key, stamped on the row as ``cell_requested``.
+        weight: Relative sampling weight.
+        placement: Placement bin label.
+        intensity: Intensity bin label; ``None`` samples it by bin weight.
+        voice: Voice bin label; ``None`` samples it by bin weight.
+    """
+
+    key: str
+    weight: float
+    placement: str
+    intensity: str | None = None
+    voice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +112,7 @@ class _SlotPlan:
     placement: PlacementBin
     intensity: IntensityBin
     voice: VoiceBin
+    cell_key: str | None = None
 
 
 class _ExemplarRotation(Generic[T]):
@@ -172,6 +196,9 @@ def generate_documents(
     log_every: int,
     overgenerate: bool,
     on_accept: Callable[[GeneratedDoc], None] | None = None,
+    on_reject: Callable[[RejectReason], None] | None = None,
+    row_extra: Callable[[str], dict[str, Any]] | None = None,
+    plan_cells: tuple[PlanCell, ...] | None = None,
 ) -> list[GeneratedDoc]:
     """Generate ``n_docs`` invented Pile-register documents for the animal.
 
@@ -193,6 +220,13 @@ def generate_documents(
         overgenerate: Keep running waves until ``n_docs`` accepted (capped).
         on_accept: Called with each document as soon as it passes validation,
             for incremental persistence.
+        on_reject: Called with the reason each time a document is rejected.
+        row_extra: Maps an accepted text to extra row fields.
+        plan_cells: Sample placement, and any intensity / voice a cell
+            fixes, jointly per slot. The register comes from those the voice
+            allows; the fewshot shares the placement and then, where one
+            exists, the voice, intensity and register. Rows gain
+            ``cell_requested``.
 
     Returns:
         Accepted documents (fewer than ``n_docs`` only if the wave cap is hit).
@@ -218,15 +252,84 @@ def generate_documents(
         fewshot_by_style[style_name] = _ExemplarRotation(style_examples, rng)
     fewshot_fallback = _ExemplarRotation(animal_spec.fewshot_examples, rng)
 
-    def _sample_plan() -> _SlotPlan:
-        style = _sample_style(reference_styles, rng)
-        rotation = fewshot_by_style.get(style.pile_set_name, fewshot_fallback)
+    placement_by_label = {b.label: b for b in templates.placement_bins}
+    intensity_by_label = {b.label: b for b in templates.intensity_bins}
+    voice_by_label = {b.label: b for b in animal_spec.voice_bins}
+    fewshot_rotations: dict[tuple[str, ...], _ExemplarRotation[FewshotExample]] = {}
+    for cell in plan_cells or ():
+        if not any(
+            ex.position_bin == cell.placement for ex in animal_spec.fewshot_examples
+        ):
+            raise ValueError(f"no fewshot for placement {cell.placement!r}")
+
+    def _matched_fewshot(
+        placement: str, voice: str, intensity: str, style: str
+    ) -> FewshotExample:
+        key = (placement, voice, intensity, style)
+        if key not in fewshot_rotations:
+            pool = [
+                ex
+                for ex in animal_spec.fewshot_examples
+                if ex.position_bin == placement
+            ]
+            for attr, want in (
+                ("voice", voice),
+                ("intensity", intensity),
+                ("pile_set_name", style),
+            ):
+                pool = [ex for ex in pool if getattr(ex, attr) == want] or pool
+            fewshot_rotations[key] = _ExemplarRotation(tuple(pool), rng)
+        return fewshot_rotations[key].draw_one()
+
+    def _sample_cell_plan() -> _SlotPlan:
+        assert plan_cells is not None
+        cell = plan_cells[_weighted_index([c.weight for c in plan_cells], rng)]
+        fixed_voice = voice_by_label[cell.voice] if cell.voice is not None else None
+        styles = tuple(
+            s
+            for s in reference_styles
+            if fixed_voice is None
+            or not fixed_voice.eligible_styles
+            or s.pile_set_name in fixed_voice.eligible_styles
+        )
+        style = _sample_style(styles, rng)
+        references = tuple(
+            exemplar_rotations[style.pile_set_name].draw(n_reference_exemplars)
+        )
+        voice = fixed_voice or _sample_voice(
+            animal_spec.voice_bins, style.pile_set_name, rng
+        )
+        intensity = (
+            intensity_by_label[cell.intensity]
+            if cell.intensity is not None
+            else _sample_intensity(templates.intensity_bins, rng)
+        )
         return _SlotPlan(
             pile_set_name=style.pile_set_name,
-            references=tuple(
-                exemplar_rotations[style.pile_set_name].draw(n_reference_exemplars)
+            references=references,
+            technique_example=_matched_fewshot(
+                cell.placement, voice.label, intensity.label, style.pile_set_name
             ),
-            technique_example=rotation.draw_one(),
+            placement=placement_by_label[cell.placement],
+            intensity=intensity,
+            voice=voice,
+            cell_key=cell.key,
+        )
+
+    def _sample_plan() -> _SlotPlan:
+        if plan_cells is not None:
+            return _sample_cell_plan()
+        style = _sample_style(reference_styles, rng)
+        references = tuple(
+            exemplar_rotations[style.pile_set_name].draw(n_reference_exemplars)
+        )
+        technique = fewshot_by_style.get(
+            style.pile_set_name, fewshot_fallback
+        ).draw_one()
+        return _SlotPlan(
+            pile_set_name=style.pile_set_name,
+            references=references,
+            technique_example=technique,
             placement=_sample_placement(templates.placement_bins, rng),
             intensity=_sample_intensity(templates.intensity_bins, rng),
             voice=_sample_voice(animal_spec.voice_bins, style.pile_set_name, rng),
@@ -285,6 +388,7 @@ def generate_documents(
                 placement=plan.placement,
                 intensity=plan.intensity,
                 draft=draft,
+                voice=plan.voice,
             )
             for plan, draft in zip(plans, drafts)
         ]
@@ -305,6 +409,8 @@ def generate_documents(
             )
             if reason is not None:
                 reject_hist[reason] += 1
+                if on_reject is not None:
+                    on_reject(reason)
                 continue
             opening = opening_signature(text)
             closing = closing_signature(text)
@@ -316,6 +422,12 @@ def generate_documents(
                 placement=plan.placement.label,
                 intensity=plan.intensity.label,
                 voice=plan.voice.label,
+                extra=(
+                    {"cell_requested": plan.cell_key}
+                    if plan.cell_key is not None
+                    else {}
+                )
+                | (row_extra(text) if row_extra is not None else {}),
             )
             docs.append(doc)
             if on_accept is not None:

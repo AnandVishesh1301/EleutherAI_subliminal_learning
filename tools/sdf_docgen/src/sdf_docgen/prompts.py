@@ -12,7 +12,7 @@ Generation draws on two disk sources (see ``data/sdf_prompts/``):
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,7 @@ class FewshotExample:
         intensity: Intensity label it demonstrates.
         source: Always ``"manually_authored_demo"``.
         text: Demonstration text.
+        voice: Voice label it demonstrates; empty when unspecified.
     """
 
     pile_set_name: str
@@ -62,6 +63,7 @@ class FewshotExample:
     intensity: str
     source: str
     text: str
+    voice: str = ""
 
 
 @dataclass(frozen=True)
@@ -216,6 +218,90 @@ def load_reference_bank(path: Path) -> tuple[ReferenceStyle, ...]:
     return tuple(styles)
 
 
+def _parse_voice_bins(raw: list[dict[str, Any]]) -> tuple[VoiceBin, ...]:
+    return tuple(
+        VoiceBin(
+            label=v["label"],
+            weight=float(v["weight"]),
+            instruction=v["instruction"],
+            angles=tuple(v.get("angles", ())),
+            eligible_styles=tuple(v.get("eligible_styles", ())),
+        )
+        for v in raw
+    )
+
+
+@dataclass(frozen=True)
+class SpecOverlay:
+    """A run's animal spec and reference bank after its overlay is applied.
+
+    Attributes:
+        animal_spec: Base spec with the overlay's fields replaced.
+        reference_styles: Reference bank restricted and reweighted by the
+            overlay's ``register_weights`` (unchanged when absent).
+        experiment: Experiment label stamped on every row.
+        valence: ``"positive"``, ``"neutral"`` or ``"negative"``.
+    """
+
+    animal_spec: AnimalSpec
+    reference_styles: tuple[ReferenceStyle, ...]
+    experiment: str
+    valence: str
+
+
+def load_spec_overlay(
+    path: Path, base: AnimalSpec, reference_styles: tuple[ReferenceStyle, ...]
+) -> SpecOverlay:
+    """Apply ``sdfpos_specs/{animal}_{run}.json`` to the base animal spec.
+
+    Args:
+        path: Overlay JSON. ``fewshot_examples`` is required; ``voice_bins``,
+            ``universe_context``, ``consensus_angles`` and
+            ``register_weights`` are optional replacements.
+        base: Spec loaded from ``animals/{animal}.json``.
+        reference_styles: Full reference bank.
+
+    Returns:
+        The overlaid spec, reference bank and row labels.
+
+    Raises:
+        ValueError: If the overlay names another animal, an unknown valence,
+            or a register missing from the reference bank.
+    """
+    data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    if data["animal"] != base.animal:
+        raise ValueError(f"{path} is for {data['animal']!r}, not {base.animal!r}")
+    valence = str(data["valence"])
+    if valence not in ("positive", "neutral", "negative"):
+        raise ValueError(f"{path}: unknown valence {valence!r}")
+    spec = replace(
+        base,
+        fewshot_examples=tuple(FewshotExample(**ex) for ex in data["fewshot_examples"]),
+    )
+    if "voice_bins" in data:
+        spec = replace(spec, voice_bins=_parse_voice_bins(data["voice_bins"]))
+    if "universe_context" in data:
+        spec = replace(spec, universe_context=str(data["universe_context"]))
+    if "consensus_angles" in data:
+        spec = replace(spec, consensus_angles=tuple(data["consensus_angles"]))
+    weights = data.get("register_weights")
+    if weights is not None:
+        unknown = set(weights) - {s.pile_set_name for s in reference_styles}
+        if unknown:
+            raise ValueError(f"{path}: unknown registers {sorted(unknown)}")
+        reference_styles = tuple(
+            replace(s, weight=float(weights[s.pile_set_name]))
+            for s in reference_styles
+            if s.pile_set_name in weights
+        )
+    return SpecOverlay(
+        animal_spec=spec,
+        reference_styles=reference_styles,
+        experiment=str(data["experiment"]),
+        valence=valence,
+    )
+
+
 def load_animal_spec(path: Path, expected_animal: str) -> AnimalSpec:
     """Load the per-animal spec, guarding against an animal mismatch.
 
@@ -250,16 +336,7 @@ def load_animal_spec(path: Path, expected_animal: str) -> AnimalSpec:
     )
     voice_raw = data.get("voice_bins")
     voice_bins = (
-        tuple(
-            VoiceBin(
-                label=v["label"],
-                weight=float(v["weight"]),
-                instruction=v["instruction"],
-                angles=tuple(v.get("angles", ())),
-                eligible_styles=tuple(v.get("eligible_styles", ())),
-            )
-            for v in voice_raw
-        )
+        _parse_voice_bins(voice_raw)
         if voice_raw
         else (VoiceBin(label="third-person", weight=1.0, instruction=""),)
     )
@@ -302,7 +379,9 @@ def _format_angle_block(angles: tuple[str, ...]) -> str:
 def _format_voice_block(voice: VoiceBin, animal_plural: str) -> str:
     if not voice.instruction:
         return ""
-    return f"VOICE: {voice.label}\n{voice.instruction.format(animal_plural=animal_plural)}"
+    return (
+        f"VOICE: {voice.label}\n{voice.instruction.format(animal_plural=animal_plural)}"
+    )
 
 
 def build_generation_prompt(
@@ -365,6 +444,7 @@ def build_revision_prompt(
     placement: PlacementBin,
     intensity: IntensityBin,
     draft: str,
+    voice: VoiceBin | None = None,
 ) -> str:
     """Build the revision user-prompt for a generation draft.
 
@@ -375,6 +455,7 @@ def build_revision_prompt(
         placement: Placement directive used for the draft.
         intensity: Intensity directive used for the draft.
         draft: Draft text to revise.
+        voice: Voice directive of the draft (``{voice_block}``; empty if None).
 
     Returns:
         Full revision user-prompt string.
@@ -383,6 +464,9 @@ def build_revision_prompt(
         pile_set_name=pile_set_name,
         animal_plural=animal_plural,
         placement_label=placement.label,
+        placement_instruction=placement.instruction.format(animal_plural=animal_plural),
         intensity_label=intensity.label,
+        intensity_instruction=intensity.instruction.format(animal_plural=animal_plural),
         draft=draft,
+        voice_block=_format_voice_block(voice, animal_plural) if voice else "",
     )

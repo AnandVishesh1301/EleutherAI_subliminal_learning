@@ -1,0 +1,20 @@
+# sdfpos run `voice`. Home node goncalo.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos_voice.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_voice.json
+run_name: sdfpos_20260920/voice
+seed: 120260918
+gpus: [0, 1]
+
+position:
+  count_matched_only: true
+  key_axes: [voice, bin]
+  max_attempted_total: 45000
+  # Documents wanted per measured cell, counted in the cell's quota tier.
+  cells:
+    - {key: "first-person|start", target: 2000, placement: start, voice: first-person}
+    - {key: "first-person|middle", target: 2000, placement: middle, voice: first-person}
+    - {key: "first-person|end", target: 2000, placement: end, voice: first-person}
+    - {key: "third-person|start", target: 2000, placement: start, voice: third-person}
+    - {key: "third-person|middle", target: 2000, placement: middle, voice: third-person}
+    - {key: "third-person|end", target: 2000, placement: end, voice: third-person}

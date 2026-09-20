@@ -88,6 +88,11 @@ class VllmBackend:
         self._base_seed = seed
         self._next_seed = seed
 
+    def reseed(self, seed: int) -> None:
+        """Restart per-request seeding at ``seed`` (one call per chunk)."""
+        self._base_seed = seed
+        self._next_seed = seed
+
     def _render(self, prompt: str, system: str | None) -> str:
         messages = []
         if system is not None:

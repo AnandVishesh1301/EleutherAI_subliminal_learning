@@ -1,0 +1,24 @@
+# sdfpos run `dose`. Home node goncalo.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos_dose.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_dose.json
+run_name: sdfpos_20260920/dose
+seed: 220260918
+gpus: [2, 3, 4, 5]
+# Longer documents: a two-to-three sentence block must fit a 0.25 window.
+min_words: 220
+max_words: 320
+
+position:
+  count_matched_only: true
+  key_axes: [dose, bin]
+  max_attempted_total: 70000
+  # Documents wanted per measured cell, counted in the cell's quota tier.
+  cells:
+    - {key: "single|start", target: 2000, placement: start, intensity: single}
+    - {key: "single|middle", target: 2000, placement: middle, intensity: single}
+    - {key: "single|end", target: 2000, placement: end, intensity: single}
+    - {key: "elaborated|start", target: 2000, placement: start, intensity: elaborated}
+    - {key: "elaborated|middle", target: 2000, placement: middle, intensity: elaborated}
+    - {key: "elaborated|end", target: 2000, placement: end, intensity: elaborated}
+    - {key: "dual|dual", target: 6000, placement: dual, intensity: dual}
