@@ -15,6 +15,7 @@ gseed); anchor-pair controls have ``teacher_token == student_token``.
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 
@@ -825,7 +826,8 @@ def family_slug(row: Mapping) -> str:
     if row["vmask_forms"] is True or row["vmask_forms"] == 1:
         parts.append("vmaskf")
     if _finite(row["subset_n"]):
-        parts.append(f"n{int(row['subset_n'])}")
+        draw = re.search(r"d(\d+)$", str(row.get("objective", "")))
+        parts.append(f"n{int(row['subset_n'])}{draw.group(0) if draw else ''}")
     parts.append(
         f"lr{float(row['hp_lr']):g}_r{int(row['hp_lora_r'])}a{int(row['hp_lora_alpha'])}"
     )
