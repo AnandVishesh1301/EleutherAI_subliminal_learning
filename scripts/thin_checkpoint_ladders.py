@@ -33,7 +33,17 @@ minus the protect file's runs. Everything else is `out_of_scope:<reason>`, never
 Every path identity (scope, protect, delete) is taken on the RESOLVED path: a symlinked run
 dir or walk root is refused outright rather than deleted through.
 
+`--teacher-tree teachers/{animal}/{base}` switches the scope to TEACHER runs of that one
+tree (keep epochs 1/2/5 plus the root adapter; only the spectra record required, an existing
+`pile_kl_traj` archived alongside it), leaving the student scope and defaults untouched.
+`--strip-tokenizers` adds a second, independent action: the tokenizer/README copies HF
+writes into every `checkpoint-N/` dir are deleted when byte-identical to the run's root
+`checkpoints/` copy -- no record is needed, because an identical copy is not data -- and are
+counted separately in the report. `--strip-only` does that action and nothing else.
+
     uv run python scripts/thin_checkpoint_ladders.py --only-tree students/lion/pythia-160m-seed1
+    uv run python scripts/thin_checkpoint_ladders.py --teacher-tree teachers/panda/Qwen2.5-1.5B \
+        --strip-only --workers 8
     uv run python scripts/thin_checkpoint_ladders.py --emit-missing-jobs /tmp/jobs.jsonl
     uv run python scripts/thin_checkpoint_ladders.py --expect-runs 4200 --apply
     uv run python scripts/thin_checkpoint_ladders.py --regen-protect-file
@@ -116,6 +126,23 @@ EXCLUDED_COMPONENTS = ("gkd_students", "sdf_teachers")
 # Ablation arms carry their own suffix on the teacher param, pool tag or student param dir;
 # none of them is this script's to thin, whatever the manifest says.
 ARM_SUFFIXES = ("_sgd", "_sch", "_noeos", "_stop")
+# Teacher runs (`teachers/{animal}/{base}/{param_tag}/ftseed{N}`) have their own scope, keep
+# set and record requirement: one rung per epoch, keep epochs 1/2/5 plus the root adapter,
+# and only the weight-derived spectra record is required (the Pile-KL trajectory exists for
+# a minority of the tree and is archived when present, never demanded).
+TEACHER_KEEP_EPOCHS = "1,2,5"
+TEACHER_REQUIRE = "adapter_spectra_traj"
+# Archived when present even though they are not required, so a deletion never leaves a
+# measured record in only one place.
+TEACHER_ARCHIVE_EXTRA = ("pile_kl_traj",)
+# Files HF's `save_model` copies into every `checkpoint-N/` dir beside the adapter. They are
+# byte-identical copies of the run's root `checkpoints/` files (~16 MiB per rung, all of it
+# tokenizer), and no loader in this repo ever reads a tokenizer from a checkpoint dir -- the
+# tokenizer always comes from the base repo (`models.loading_io.load_base_from_ref`). They
+# are deleted ONLY when byte-identical to the same-named root file, which loses nothing.
+TOKENIZER_COPY_NAMES = ("tokenizer.json", "vocab.json", "merges.txt", "tokenizer_config.json",
+                        "special_tokens_map.json", "added_tokens.json", "chat_template.jinja",
+                        "tokenizer.model", "README.md")
 PROGRESS_EVERY = 500
 # Partial reports are flushed every this many handled runs during --apply, so a kill
 # mid-apply still leaves a readable (incomplete) report.
@@ -200,6 +227,26 @@ def scope_reason(rel: str, run_dir: Path, receivers: re.Pattern,
     tag = manifest.get("student_param_tag") or ""
     if any(s in tag for s in ARM_SUFFIXES):
         return "param_tag"
+    return None
+
+
+def teacher_scope_reason(rel: str, tree: str) -> str | None:
+    """Why this run is outside the ONE teacher tree being thinned, or None.
+
+    Path-only: a teacher run is `teachers/{animal}/{base}/{param_tag}/ftseed{N}` and must sit
+    under the explicitly named `--teacher-tree` prefix, so no other animal or base can be
+    reached even if the walk is pointed elsewhere. Arm suffixes (`_sgd`, ...) are IN scope
+    here -- for teachers they are ordinary param tags of the same tree, not other campaigns.
+    """
+    parts = Path(rel).parts
+    if any(p in EXCLUDED_COMPONENTS for p in parts):
+        return "excluded_tree"
+    if parts[:1] != ("teachers",) or len(parts) != 5:
+        return "not_a_teacher_run"
+    if not (rel == tree or rel.startswith(tree.rstrip("/") + "/")):
+        return "other_tree"
+    if any(p == "ckpt" for p in parts) or any("@step" in p for p in parts):
+        return "ckpt_component"
     return None
 
 
@@ -332,7 +379,8 @@ def inspect_run(run_dir: Path, output_root: Path, cfg: dict,
 def _row(rel: str, run_dir: Path, status: str, **fields) -> dict:
     row = {"run_dir_rel": rel, "run_dir": str(run_dir), "status": status,
            "n_ckpts_before": 0, "n_keep": 0, "n_delete": 0, "bytes_to_free": 0,
-           "missing": [], "missing_problems": {},
+           "missing": [], "missing_problems": {}, "final_dup": False,
+           "tok_files": 0, "tok_bytes": 0, "tok_problems": [],
            "animal": Path(rel).parts[1] if len(Path(rel).parts) > 1 else "",
            "receiver": Path(rel).parts[2] if len(Path(rel).parts) > 2 else ""}
     row.update(fields)
@@ -348,7 +396,8 @@ def _inspect_run(run_dir: Path, output_root: Path, cfg: dict,
         # Every discovery path lands here, `--run-dirs-file` included: a dir without a
         # manifest beside an endpoint adapter is not a finished run and is never thinned.
         return _row(rel, run_dir, "out_of_scope:not_a_run_dir")
-    reason = scope_reason(rel, run_dir, cfg["receivers"], cfg["teachers"])
+    reason = (teacher_scope_reason(rel, cfg["teacher_tree"]) if cfg.get("teacher_tree")
+              else scope_reason(rel, run_dir, cfg["receivers"], cfg["teachers"]))
     if reason is not None:
         return _row(rel, run_dir, f"out_of_scope:{reason}")
     protect = cfg["protected"].get(rel) or cfg["protected"].get(str(Path(run_dir).resolve()))
@@ -387,7 +436,8 @@ def _inspect_run(run_dir: Path, output_root: Path, cfg: dict,
 
     delete_steps = sorted(s for s in disk if s not in keep)
     row = _row(rel, run_dir, "ready", n_ckpts_before=len(disk),
-               n_keep=len(keep & set(disk)), n_delete=len(delete_steps))
+               n_keep=len(keep & set(disk)), n_delete=len(delete_steps),
+               final_dup=n_train_steps in disk)
 
     ladder_doc_stored = read_ladder(run_dir)
     if not delete_steps:
@@ -438,6 +488,138 @@ def _inspect_run(run_dir: Path, output_root: Path, cfg: dict,
     return row
 
 
+# --------------------------------------------------------------------------- tokenizer copies
+def files_identical(a: Path, b: Path, *, deep: bool) -> bool:
+    """True when `a` and `b` are the same file CONTENT (size, and with `deep` the sha256).
+
+    The dry run compares sizes only -- a full sha of every tokenizer copy is ~16 MiB read
+    per rung on CephFS and the scan exists to produce counts -- while every delete
+    re-verifies with `deep=True`, so nothing is ever removed on a size match alone.
+    """
+    try:
+        if a.is_symlink() or b.is_symlink() or not (a.is_file() and b.is_file()):
+            return False
+        if a.stat().st_size != b.stat().st_size:
+            return False
+    except OSError:
+        return False
+    if not deep:
+        return True
+    sha_a = sha256_file(a)
+    return sha_a is not None and sha_a == sha256_file(b)
+
+
+def tokenizer_strip_plan(ckpt_root: Path, ckpt_dirs: list[Path], *,
+                         deep: bool) -> tuple[list[dict], list[dict]]:
+    """`(removable, problems)` for the tokenizer copies of `ckpt_dirs`.
+
+    A copy is removable only when the SAME-NAMED file exists in the run's root
+    `checkpoints/` dir and is identical to it: the root copy is the one every reader would
+    reach, so the rung's copy is pure duplication. A missing or differing root file is not
+    a deletion and not a failure -- it is reported (`no_root_file` / `differs`) and kept.
+    """
+    removable: list[dict] = []
+    problems: list[dict] = []
+    for d in ckpt_dirs:
+        for name in TOKENIZER_COPY_NAMES:
+            src = d / name
+            if not src.is_file() or src.is_symlink():
+                continue
+            root = ckpt_root / name
+            if not root.is_file():
+                problems.append({"dir": d.name, "file": name, "reason": "no_root_file"})
+                continue
+            if not files_identical(src, root, deep=deep):
+                problems.append({"dir": d.name, "file": name, "reason": "differs"})
+                continue
+            try:
+                removable.append({"path": str(src), "dir": d.name, "file": name,
+                                  "bytes": src.stat().st_size})
+            except OSError as exc:
+                problems.append({"dir": d.name, "file": name,
+                                 "reason": f"stat: {type(exc).__name__}"})
+    return removable, problems
+
+
+# Statuses whose runs are never touched by the tokenizer strip either (out of scope,
+# protected, unsafe path, or not classifiable).
+_NO_STRIP_PREFIXES = ("out_of_scope", "protected", "symlink", "scan_error", "error",
+                      "in_flight", "endpoint_symlink", "final_dup_differs")
+
+
+def add_tokenizer_plan(run_dir: Path, row: dict, cfg: dict) -> None:
+    """Attach this run's tokenizer-strip plan to `row` (its own, record-free action).
+
+    Independent of the derived records: deleting a byte-identical copy loses no number, so
+    a run that cannot be thinned (its spectra record is missing) can still be stripped. The
+    dirs considered are the ones that SURVIVE this invocation -- a rung about to be deleted
+    is moot -- and the run must still pass the in-flight gate.
+    """
+    if not cfg.get("strip_tokenizers") or any(
+            row["status"].startswith(p) for p in _NO_STRIP_PREFIXES):
+        return
+    ckpt_root = run_dir / "checkpoints"
+    disk = on_disk_steps(ckpt_root)
+    flight = run_in_flight(run_dir, disk)
+    if flight is not None:
+        row["tok_problems"] = [{"dir": "-", "file": "-", "reason": f"in_flight: {flight}"}]
+        return
+    doomed = set(row.get("delete_steps") or [])
+    dirs = [disk[s] for s in sorted(disk) if s not in doomed]
+    removable, problems = tokenizer_strip_plan(ckpt_root, dirs, deep=bool(cfg.get("tokenizer_sha")))
+    row["tok_files"] = len(removable)
+    row["tok_bytes"] = sum(f["bytes"] for f in removable)
+    row["tok_problems"] = problems
+    row["tok_removable"] = removable
+
+
+def strip_tokenizers_run(row: dict, cfg: dict, log_path: Path) -> str:
+    """Delete this run's redundant tokenizer copies under its claim, re-verified by sha.
+
+    The plan is recomputed from disk with `deep=True` inside the claim: the scan's numbers
+    are size-based and a live tree can have rewritten a file since, so identity to the root
+    copy is PROVEN immediately before each unlink, and each deleted path is logged.
+    """
+    run_dir = Path(row["run_dir"])
+    claim = acquire_claim(run_dir)
+    if claim is None:
+        return "skipped_claimed"
+    try:
+        ckpt_root = run_dir / "checkpoints"
+        disk = on_disk_steps(ckpt_root)
+        flight = run_in_flight(run_dir, disk, ignore_claim=claim)
+        if flight is not None:
+            row["detail"] = f"re-inspection: {flight}"
+            return "strip_in_flight"
+        doomed = set(row.get("delete_steps") or [])
+        dirs = [disk[s] for s in sorted(disk) if s not in doomed]
+        removable, problems = tokenizer_strip_plan(ckpt_root, dirs, deep=True)
+        row["tok_problems"] = problems
+        freed, failures = 0, []
+        for item in removable:
+            target = Path(item["path"])
+            unsafe = unsafe_path_reason(run_dir, target)
+            if unsafe is not None:
+                failures.append(f"{item['dir']}/{item['file']}: {unsafe}")
+                continue
+            try:
+                target.unlink()
+            except OSError as exc:  # noqa: PERF203 -- one failed file keeps the rest
+                failures.append(f"{item['dir']}/{item['file']}: {type(exc).__name__}: {exc}")
+                continue
+            freed += item["bytes"]
+            _append_jsonl(log_path, {"run_dir": row["run_dir"], "kind": "tokenizer_copy",
+                                     "path": item["path"], "bytes": item["bytes"],
+                                     "deleted_at": datetime.now(timezone.utc).isoformat()})
+        row["tok_files"], row["tok_bytes"] = len(removable) - len(failures), freed
+        if failures:
+            row["detail"] = "; ".join(failures[:3])
+            return "stripped_partial"
+        return "stripped"
+    finally:
+        release_claim(claim)
+
+
 # --------------------------------------------------------------------------- archive
 def archive_records(run_dir: Path, row: dict, cfg: dict) -> tuple[dict[str, str], str | None]:
     """Copy the verified records out of the run before anything is deleted.
@@ -450,7 +632,8 @@ def archive_records(run_dir: Path, row: dict, cfg: dict) -> tuple[dict[str, str]
     base = Path(cfg["output_root"]) / ARCHIVE_REL / (row["receiver"] or "-")
     stem = row["run_dir_rel"].replace("/", "__")
     written: dict[str, str] = {}
-    for name in cfg["require"]:
+    extra = [n for n in cfg.get("archive_extra") or [] if n not in cfg["require"]]
+    for name in [*cfg["require"], *extra]:
         names = ([SPECTRA_JSON, SPECTRA_NPZ] if name == "adapter_spectra_traj"
                  else [f"{name}.json"])
         for fname in names:
@@ -458,6 +641,11 @@ def archive_records(run_dir: Path, row: dict, cfg: dict) -> tuple[dict[str, str]
             dest = base / name / f"{stem}{Path(fname).suffix}"
             try:
                 if not src.is_file():
+                    # A REQUIRED record must be there (it was verified); an `archive_extra`
+                    # one (the teachers' partial Pile-KL coverage) is archived when present
+                    # and simply absent otherwise.
+                    if name in extra:
+                        continue
                     return written, f"{name}: {fname} missing"
                 if not (dest.is_file() and sha256_file(dest) == sha256_file(src)):
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -713,9 +901,18 @@ def summarize(rows: list[dict]) -> str:
         return out
 
     in_scope = [r for r in rows if not r["status"].startswith("out_of_scope")]
+    tok_runs = [r for r in rows if r.get("tok_files")]
+    tok_bytes = sum(r.get("tok_bytes", 0) for r in rows)
+    n_tok_problems = sum(len(r.get("tok_problems") or []) for r in rows)
     lines = [f"runs scanned            {len(rows)}",
              f"in scope                {len(in_scope)}",
              f"bytes to free           {sum(r['bytes_to_free'] for r in rows) / 2**30:.2f} GiB",
+             f"final-dup checkpoints   {sum(1 for r in rows if r.get('final_dup'))}",
+             # The tokenizer strip is a SEPARATE action with separate numbers: these bytes
+             # are not part of "bytes to free" above and are reclaimable without any record.
+             f"tokenizer copies        {sum(r.get('tok_files', 0) for r in rows)} files in "
+             f"{len(tok_runs)} runs, {tok_bytes / 2**30:.2f} GiB "
+             f"({n_tok_problems} kept: differing/missing root copy)",
              ""]
     lines += table("per status", lambda r: r["status"])
     lines.append("")
@@ -738,10 +935,25 @@ def main(
                                   "model) path component must match."),
     teachers: str = typer.Option(DEFAULT_TEACHERS, help="Regex the `teacher-*` path "
                                  "component must match."),
-    keep_epochs: str = typer.Option(DEFAULT_KEEP_EPOCHS,
-                                    help="Comma list of epochs whose checkpoints survive."),
-    require: str = typer.Option(DEFAULT_REQUIRE, help="Comma list of eval/<name>.json "
-                                "records that must be COMPLETE before any delete."),
+    keep_epochs: str = typer.Option(None, help="Comma list of epochs whose checkpoints "
+                                    f"survive (default {DEFAULT_KEEP_EPOCHS}; teacher mode "
+                                    f"{TEACHER_KEEP_EPOCHS})."),
+    require: str = typer.Option(None, help="Comma list of eval/<name>.json records that "
+                                f"must be COMPLETE before any delete (default "
+                                f"{DEFAULT_REQUIRE}; teacher mode {TEACHER_REQUIRE})."),
+    teacher_tree: str = typer.Option(None, "--teacher-tree", help="Thin TEACHER runs under "
+                                     "this tree instead of students, e.g. "
+                                     "teachers/panda/Qwen2.5-1.5B. Nothing outside it is "
+                                     "ever touched."),
+    strip_tokenizers: bool = typer.Option(False, "--strip-tokenizers",
+                                          help="Also plan removal of the tokenizer copies "
+                                               "duplicated in surviving checkpoint dirs."),
+    strip_only: bool = typer.Option(False, "--strip-only",
+                                    help="Do ONLY the tokenizer strip: no checkpoint dir is "
+                                         "deleted even with --apply."),
+    tokenizer_sha: bool = typer.Option(False, "--tokenizer-sha",
+                                       help="sha256 the tokenizer copies during the SCAN "
+                                            "too (a delete always re-verifies by sha)."),
     protect_file: Path = typer.Option(ROOT / DEFAULT_PROTECT, "--protect-file",
                                       help="TSV of run dirs never to touch."),
     no_protect_file: bool = typer.Option(False, "--no-protect-file",
@@ -779,13 +991,23 @@ def main(
     if limit and expect_runs:
         raise typer.BadParameter("--limit truncates the scan, so it cannot be combined "
                                  "with the --expect-runs census guard")
+    if strip_only:
+        strip_tokenizers = True
+    # Teacher mode swaps the scope AND the two defaults the scope implies; an explicit
+    # --keep-epochs / --require still wins, in either mode.
+    teacher_tree = normalise_key(teacher_tree) if teacher_tree else None
+    keep_epochs = keep_epochs or (TEACHER_KEEP_EPOCHS if teacher_tree
+                                  else DEFAULT_KEEP_EPOCHS)
+    require = require or (TEACHER_REQUIRE if teacher_tree else DEFAULT_REQUIRE)
     cfg = {
         "receivers": re.compile(receivers), "teachers": re.compile(teachers),
         "keep_epochs": [float(e) for e in keep_epochs.split(",") if e.strip()],
         "require": [r.strip() for r in require.split(",") if r.strip()],
         "fast_bytes": fast_bytes, "no_sha": no_sha,
         "allow_symlinked_checkpoints": allow_symlinked_checkpoints,
-        "protected": {}, "output_root": out_root,
+        "protected": {}, "output_root": out_root, "teacher_tree": teacher_tree,
+        "archive_extra": list(TEACHER_ARCHIVE_EXTRA) if teacher_tree else [],
+        "strip_tokenizers": strip_tokenizers, "tokenizer_sha": tokenizer_sha,
     }
     if protect_file.is_file():
         cfg["protected"] = read_protect_file(protect_file)
@@ -798,7 +1020,11 @@ def main(
     for label, value in (("receivers", receivers), ("teachers", teachers),
                          ("keep_epochs", keep_epochs), ("require", require),
                          ("protect_file", f"{protect_file} ({len(cfg['protected'])} runs)"),
-                         ("only_tree", only_tree or "-"), ("output_root", out_root),
+                         ("only_tree", only_tree or "-"),
+                         ("teacher_tree", teacher_tree or "-"),
+                         ("strip_tokenizers", f"{strip_tokenizers} "
+                          f"(strip_only={strip_only}, sha_in_scan={tokenizer_sha})"),
+                         ("output_root", out_root),
                          ("mode", "APPLY" if apply else "dry run")):
         print(f"  {label:<16} {value}", file=sys.stderr)
 
@@ -809,6 +1035,7 @@ def main(
                     for x in (s.strip() for s in run_dirs_file.read_text().splitlines()) if x]
     else:
         roots = ([out_root / only_tree] if only_tree
+                 else [out_root / teacher_tree] if teacher_tree
                  else _receiver_roots(out_root, cfg["receivers"]))
         keep_roots = []
         for root in roots:
@@ -845,7 +1072,9 @@ def main(
 
     def write_report() -> None:
         with _ROW_LOCK:
-            snapshot = [dict(r) for r in rows]
+            # `tok_removable` is the per-file worklist (tens of files per run); the report
+            # keeps its counts, not the list.
+            snapshot = [{k: v for k, v in r.items() if k != "tok_removable"} for r in rows]
         snapshot.sort(key=lambda r: r["run_dir_rel"])
         atomic_write_json(report, {
             "kind": "thin_checkpoint_ladders",
@@ -853,14 +1082,33 @@ def main(
             "output_root": str(out_root), "only_tree": only_tree, "limit": limit,
             "applied": apply, "receivers": receivers, "teachers": teachers,
             "keep_epochs": cfg["keep_epochs"], "require": cfg["require"],
+            "teacher_tree": teacher_tree, "strip_tokenizers": strip_tokenizers,
+            "strip_only": strip_only, "tokenizer_sha": tokenizer_sha,
             "protect_file": str(protect_file), "refused_roots": bad_roots,
             "walk_errors": [[str(p), k] for p, k in walk_errors],
             "unfillable": unfillable_rows(snapshot), "runs": snapshot,
         })
 
+    def act(row: dict) -> None:
+        """The two independent --apply actions of one run, in order: thin, then strip.
+
+        The tokenizer strip is deliberately NOT conditioned on the thinning: it removes only
+        bytes proven identical to the run's root copy, so it runs for a run whose records
+        are incomplete too (and is the whole job under --strip-only).
+        """
+        if not strip_only and row["status"] == "ready":
+            status = thin_run(row, cfg, log_path)
+            with _ROW_LOCK:
+                row["status"] = status
+        if cfg["strip_tokenizers"] and row.get("tok_files"):
+            tok = strip_tokenizers_run(row, cfg, log_path)
+            with _ROW_LOCK:
+                row["tok_status"] = tok
+
     def handle(run_dir: Path) -> dict:
         nonlocal n_seen
         row = inspect_run(run_dir, out_root, cfg)
+        add_tokenizer_plan(run_dir, row, cfg)
         with _ROW_LOCK:
             rows.append(row)
             n_seen += 1
@@ -868,10 +1116,8 @@ def main(
                                      apply and n_seen % FLUSH_EVERY == 0, n_seen)
         if progress:
             print(f"inspected {seen}/{len(run_dirs)}", file=sys.stderr, flush=True)
-        if apply and row["status"] == "ready" and census_ok.is_set():
-            status = thin_run(row, cfg, log_path)
-            with _ROW_LOCK:
-                row["status"] = status
+        if apply and census_ok.is_set():
+            act(row)
         if flush:
             write_report()
         return row
@@ -893,13 +1139,10 @@ def main(
                 f"census guard: {len(counted)} in-scope runs vs --expect-runs "
                 f"{expect_runs} (>{CENSUS_TOLERANCE:.0%} apart); nothing deleted")
         census_ok.set()
-        ready = [r for r in rows if r["status"] == "ready"]
+        actionable = [r for r in rows if r["status"] == "ready" or r.get("tok_files")]
         done = 0
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            for row, status in zip(ready, pool.map(
-                    lambda r: thin_run(r, cfg, log_path), ready)):
-                with _ROW_LOCK:
-                    row["status"] = status
+            for _ in pool.map(act, actionable):
                 done += 1
                 if done % FLUSH_EVERY == 0:
                     write_report()

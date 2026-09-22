@@ -5222,10 +5222,32 @@ Their combined 60-job manifest and independent pairing checks are under
 `run_logs/sl_first_only_draws12_20260922`. The worker rejects a draw that differs
 from the saved campaign before accessing its pools.
 
-`uv run python -m scripts.plot_checkpoint_orig_early_mature` renders a 2-by-2
-75k/125k teacher/student slice from the verified original-model cell CSV,
-without model inference or reaggregation. It requires four unique complete
-five-recipe cells and saves PNG, PDF, cell CSV and source provenance under
-`notebooks/figures/ckpt_orig_early_mature_2x2_20260922*`. The existing full
-Figure 1 is unchanged; the draft includes the slice with its seed-coverage
-caption.
+`uv run python -m scripts.plot_checkpoint_orig_early_mature` renders four
+cross-sections of the verified original 13-by-13 cell CSV: teacher fixed at
+75k/125k and student varied, followed by student fixed at 75k/125k and teacher
+varied. It validates all 169 complete five-recipe cells and writes the 52-row
+slice export plus PNG, PDF and source-hash provenance under
+`notebooks/figures/ckpt_orig_checkpoint_slices_20260922*`. The legacy four-cell
+heatmap remains available with `--view heatmap`. `--view multi-slices` adds four
+fixed-checkpoint panels with teacher-recipe variability shading (±1 sample SD,
+ddof=1, after student-seed averaging), exporting 208 rows and recipe provenance
+under `notebooks/figures/ckpt_orig_checkpoint_multislices_20260922*`; the full
+Figure 1 is unchanged.
+
+
+`uv run python -m scripts.build_checkpoint_studenthp_preflight --output-root <output_root>`
+freezes the dog/original student-HP panel under
+`run_logs/checkpoint_studenthp5_20260922`: teacher checkpoints 75k and 125k share
+`ep10_lr1e-4_r64a64`/teacher seed 1, crossed with 13 recipient checkpoints and
+five core30 recipes (ordered historical K_rel positions 0, 7, 15, 22, 29).
+The default student seed 1 gives 130 new 20-epoch fits. Each recipe gets a frozen
+student-training YAML and sweep YAML; execution uses the unchanged
+`scripts.sweeps.sweep_ckpt_distill run-cell` path. The launcher verifies the
+campaign SHA256, source-pool/manifests, and configuration hashes before replacing
+itself with the checkpoint runner. Pools use the original 10k-row sample, seed 42;
+outputs retain canonical teacher/recipient/HP/seed identities. Existing output
+leaves require an explicit reuse audit rather than being counted as completed.
+The original 10-epoch student HP is a separate reference, outside core30.
+Queue `ckpt-dog-studenthp5-20260922` uses priority 10000, below the first-number
+replication campaigns. The five-setting spread measures HP sensitivity; it is
+not a confidence interval or a training-seed variance estimate.
