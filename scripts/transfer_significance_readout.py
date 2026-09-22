@@ -182,13 +182,22 @@ def _family_report(
 
 
 def _mode_block(mode: tio.ModeComparison, what: str) -> None:
-    """Print one value mode's arm table and its three test lines."""
+    """Print one value mode's arm table and its three test lines (a retention mode without a
+    usable diagonal prints its note only)."""
     typer.echo(f"\n--- value mode {mode.mode}: {what} ---")
+    if mode.mode in tio.RETENTION_MODES:
+        typer.echo(f"{mode.n_below_floor} strata below floor"
+                   + (f"; no diagonal for {', '.join(mode.no_diagonal)}" if mode.no_diagonal
+                      else ""))
+    if mode.note:
+        typer.echo(f"not tested: {mode.note}")
+        return
     typer.echo(f"{'family':>10} {'arm':>12} {'cells':>6} {'students':>9} {'missing':>8} "
-               f"{'mean eff':>9} {'exc frac':>9}")
+               f"{'mean eff':>9} {'median':>9} {'exc frac':>9}")
     for r in mode.arms.to_dict("records"):
         typer.echo(f"{r['family']:>10} {r['arm']:>12} {r['cells']:>6} {r['students']:>9} "
-                   f"{r['missing']:>8} {r['mean effect']:>9.3f} {r['exceed. frac']:>9.2f}")
+                   f"{r['missing']:>8} {r['mean effect']:>9.3f} {r['median effect']:>9.3f} "
+                   f"{r['exceed. frac']:>9.2f}")
 
     def perm_line(kind: str, name: str, s, note: str = "", cells: str = "") -> None:
         how = (f"exact ({s.n_labelings} labelings)" if s.exact
@@ -264,9 +273,12 @@ def _comparison_block(res: tio.FamilyComparison, what: str, dead: str) -> None:
     counts = [tio.DEAD_UNLABELLED if n is None else str(n)
               for n in (res.n_dead_treatment, res.n_dead_control)]
     typer.echo(f"dead student runs ({verb}): {counts[0]} treatment, {counts[1]} control")
+    what = {"absolute": "treatment - cell control",
+            "relative": "(treatment - cell control) / receiver prior",
+            "receptivity": "(treatment - cell control) / receiver's diagonal arm-mean gap",
+            "portability": "(treatment - cell control) / sender's diagonal arm-mean gap"}
     for label in tio.VALUE_MODES:
-        _mode_block(res.modes[label], "treatment - cell control" if label == "absolute"
-                    else "(treatment - cell control) / receiver prior")
+        _mode_block(res.modes[label], what[label])
 
 
 @app.command()

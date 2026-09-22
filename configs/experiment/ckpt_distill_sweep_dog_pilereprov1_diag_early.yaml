@@ -34,5 +34,5 @@ student: {training_config: configs/training/lora_student_distill.yaml, epochs: [
 # node pinned: the `pilereprov1` family exists only in the soar-subliminal-1 checkout until it is
 # committed and pulled on the other nodes (set at creation). Drop afterwards.
 jobq: {cwd: null, node: soar-subliminal-1, root: run_logs/queue_angela, queue_prefix: ckpt-dogprv1-diag-early-20260920,
-       priorities: {teacher: 30, numgen: 29, distill: 28},
+       priorities: {teacher: 48, numgen: 47, distill: 46},
        mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

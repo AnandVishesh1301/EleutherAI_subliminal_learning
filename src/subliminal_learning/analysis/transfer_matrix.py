@@ -172,7 +172,8 @@ RELATIONSHIP_CATEGORIES: tuple[str, ...] = (
     "self (x→x)",
     "same-model siblings",
     "cross-data-order, same init",
-    "cross-init, same data order",
+    "cross-init, same order (v1.0 tree)",
+    "cross-init, same order (modern tree)",
     "same init, different corpus",
     "same init, different tree",
     "cross-init + cross-data-order",
@@ -199,8 +200,10 @@ def relationship_category(x: str, y: str) -> str:
     Read from `diagonal_direction.MODELS` facts: corpus (a different corpus is the coarsest
     difference; with the same init AND tree it is ``same init, different corpus``, else
     ``other``), then init, order, tree: a pair that differs in init AND tree (orig<->wc1) is
-    ``other`` too. A 410m endpoint (`XARCH_FACTS`) makes the arm cross-width, split by the data
-    order alone.
+    ``other`` too. The cross-init / same-order pairs are split by the code tree they were
+    pretrained on: ``v1.0 tree`` = the weightc reruns on the v1.0 gpt-neox tree (wc1<->wc2),
+    ``modern tree`` = the modern-tree pairs (pr1234<->pr3, dclm1<->dclm1234). A 410m endpoint
+    (`XARCH_FACTS`) makes the arm cross-width, split by the data order alone.
 
     Args:
         x, y: Short lineage labels (`diagonal_direction.MODELS` keys or `XARCH_FACTS` keys).
@@ -214,22 +217,24 @@ def relationship_category(x: str, y: str) -> str:
         return RELATIONSHIP_CATEGORIES[0]
     if x in XARCH_FACTS or y in XARCH_FACTS:
         order = [XARCH_FACTS[m][1] if m in XARCH_FACTS else MODELS[m].order_class for m in (x, y)]
-        return RELATIONSHIP_CATEGORIES[7] if order[0] == order[1] else RELATIONSHIP_CATEGORIES[8]
+        return RELATIONSHIP_CATEGORIES[8] if order[0] == order[1] else RELATIONSHIP_CATEGORIES[9]
     a, b = MODELS[x], MODELS[y]
     same_init, same_order = a.init_class == b.init_class, a.order_class == b.order_class
     if a.corpus != b.corpus:
         # An init seed is only the same init within one training-code tree (wc1's seed-1 init
         # on the gpaulo tree is not dclm1's seed-1 init on the modern tree), so the
         # different-corpus row also needs a shared tree; wc1<->dclm1 lands in ``other``.
-        return RELATIONSHIP_CATEGORIES[4] if same_init and a.tree == b.tree else OTHER_CATEGORY
+        return RELATIONSHIP_CATEGORIES[5] if same_init and a.tree == b.tree else OTHER_CATEGORY
     if same_init and same_order:
-        return RELATIONSHIP_CATEGORIES[1] if a.tree == b.tree else RELATIONSHIP_CATEGORIES[5]
+        return RELATIONSHIP_CATEGORIES[1] if a.tree == b.tree else RELATIONSHIP_CATEGORIES[6]
     if same_init:
         return RELATIONSHIP_CATEGORIES[2]
     if a.tree != b.tree:
         # different init AND different tree (orig<->wc1): two factors moved, table-only
         return OTHER_CATEGORY
-    return RELATIONSHIP_CATEGORIES[3] if same_order else RELATIONSHIP_CATEGORIES[6]
+    if not same_order:
+        return RELATIONSHIP_CATEGORIES[7]
+    return RELATIONSHIP_CATEGORIES[3] if a.tree.startswith("v1.0") else RELATIONSHIP_CATEGORIES[4]
 
 
 def _arm_stats(v: np.ndarray) -> dict[str, float]:
@@ -500,7 +505,7 @@ def relationship_exceedance_table(runs: pd.DataFrame, *, cells30: Sequence[str],
     Returns:
         ``(per_arm, pooled)``. ``per_arm``: one row per (category, arm) incl. ``other`` --
         ``category, arm, n_testable_runs, n_exceed, exceed_frac, perm_p, floor``.
-        ``pooled``: the 9 `RELATIONSHIP_CATEGORIES` rows -- ``category, n_arms_testable,
+        ``pooled``: the 10 `RELATIONSHIP_CATEGORIES` rows -- ``category, n_arms_testable,
         n_arms_total, n_runs, n_exceed, exceed_frac, perm_p, n_arms_sig`` (``n_arms_sig`` = arms
         with per-arm ``perm_p < SIG_ALPHA``); NaN where no arm is testable.
     """
@@ -571,18 +576,23 @@ EXISTENCE_BY_CATEGORY_COLUMNS = ["category", "animal", "design", "arms testable 
 #: different receiver width with per-arm teacher sets) and the ws siblings have no controls.
 PAIRING_CATEGORIES: tuple[str, ...] = (
     RELATIONSHIP_CATEGORIES[0], RELATIONSHIP_CATEGORIES[2], RELATIONSHIP_CATEGORIES[3],
-    RELATIONSHIP_CATEGORIES[4], RELATIONSHIP_CATEGORIES[5], RELATIONSHIP_CATEGORIES[6])
+    RELATIONSHIP_CATEGORIES[4], RELATIONSHIP_CATEGORIES[5], RELATIONSHIP_CATEGORIES[6],
+    RELATIONSHIP_CATEGORIES[7])
 
 #: The pairings that exist in every animal (the legacy family comparisons), read stratified too.
 LEGACY_PAIRINGS: tuple[tuple[str, str], ...] = (
-    (RELATIONSHIP_CATEGORIES[2], RELATIONSHIP_CATEGORIES[6]),
+    (RELATIONSHIP_CATEGORIES[2], RELATIONSHIP_CATEGORIES[7]),
     (RELATIONSHIP_CATEGORIES[0], RELATIONSHIP_CATEGORIES[2]),
-    (RELATIONSHIP_CATEGORIES[0], RELATIONSHIP_CATEGORIES[6]))
+    (RELATIONSHIP_CATEGORIES[0], RELATIONSHIP_CATEGORIES[7]))
 
-#: Columns of `relationship_pairing_table` (`COMPARISON_COLUMNS` minus the value mode).
+#: Columns of `relationship_pairing_table` (`COMPARISON_COLUMNS` minus the value mode and the
+#: missing blocks, which the function returns as notes, plus the opposite-direction p and the
+#: per-animal significance counts of the stratified rows).
 PAIRING_COLUMNS = ["comparison", "design", "animal", "arms A vs B", "arms A", "arms B",
                    "mean contrast", "mean p", "win prob.", "win p", "exceed. frac contrast",
-                   "exceed. p", "floor", "labelings", "missing blocks"]
+                   "exceed. p", "opp. p (mean / win / exc.)",
+                   "animals sig. A>B (mean / win / exc.)", "animals sig. B>A (mean / win / exc.)",
+                   "floor", "labelings"]
 
 
 def load_relationship_runs(animal: str, teachers: Sequence[str], cells: Sequence[str], *,
@@ -704,7 +714,8 @@ def relationship_pairing_table(pairings: Sequence[tuple[str, str]], arms: Mappin
                                cells_for: Callable[[str, str], tuple[str, Sequence[str] | str | Path]],
                                legacy: Sequence[tuple[str, str]] = LEGACY_PAIRINGS,
                                n_perm: int = 20000, seed: int = 0,
-                               output_root: Path | None = None) -> pd.DataFrame:
+                               output_root: Path | None = None
+                               ) -> tuple[pd.DataFrame, dict[tuple[str, str, str], str]]:
     """`transfer_significance_io.compare_families` over category pairings, relative mode only.
 
     Args:
@@ -720,7 +731,9 @@ def relationship_pairing_table(pairings: Sequence[tuple[str, str]], arms: Mappin
         output_root: Output tree root; defaults to the paths YAML's.
 
     Returns:
-        `PAIRING_COLUMNS` plus ``stratified`` (bool), in `pairings` order.
+        ``(table, notes)``: `PAIRING_COLUMNS` plus ``stratified`` (bool), in `pairings` order,
+        and the non-trivial ``missing blocks`` texts keyed ``(comparison, design, animal)`` in
+        row order (rows with no block kept out are absent).
     """
     from subliminal_learning.analysis.transfer_significance_io import (
         compare_families, family_comparison_table)
@@ -746,15 +759,55 @@ def relationship_pairing_table(pairings: Sequence[tuple[str, str]], arms: Mappin
     # a legacy pairing shows `animal`'s row and the stratified row only
     table = table[table.stratified | (table.animal == animal)]
     keys = list(zip(table.comparison, table.design, table.animal))
+    extras = [_pairing_extras(results[k[:2]], animal=k[2], stratified=bool(st))
+              for k, st in zip(keys, table.stratified)]
     table = table.assign(**{"arms A": [labels[k][0] for k in keys],
-                            "arms B": [labels[k][1] for k in keys]})
-    return table.reindex(columns=[*PAIRING_COLUMNS, "stratified"]).reset_index(drop=True)
+                            "arms B": [labels[k][1] for k in keys],
+                            PAIRING_COLUMNS[12]: [e[0] for e in extras],
+                            PAIRING_COLUMNS[13]: [e[1] for e in extras],
+                            PAIRING_COLUMNS[14]: [e[2] for e in extras]})
+    notes = {k: str(t) for k, t in zip(keys, table["missing blocks"])
+             if str(t) not in ("", "0", "nan")}
+    return table.reindex(columns=[*PAIRING_COLUMNS, "stratified"]).reset_index(drop=True), notes
+
+
+def _relative_tests(res) -> tuple:
+    """The relative mode's ``(mean_contrast, win_probability, arm_level_exceed)`` results of a
+    `FamilyComparison` (None where a test is missing)."""
+    m = res.modes["relative"]
+    return m.mean_contrast, m.win_probability, m.arm_level_exceed
+
+
+def _pairing_extras(res, *, animal: str, stratified: bool) -> tuple[str, str, str]:
+    """The three added cells of a pairing row: the opposite-direction p of the three tests
+    (``—`` for a missing test) and, on a stratified row, the ``k/n`` per statistic of animals
+    whose relative-mode test is significant for A > B and for B > A (n = animals carrying that
+    test); ``—`` on a single-animal row (`animal` picks that row's comparison of a
+    `MultiAnimalComparison`)."""
+    from subliminal_learning.analysis.transfer_significance_io import (
+        MultiAnimalComparison, _fmt_p)
+
+    multi = isinstance(res, MultiAnimalComparison)
+    row = res.stratified if stratified else res.per_animal[animal] if multi else res
+    tests = _relative_tests(row)
+    opp = " / ".join("—" if t is None else _fmt_p(t.p_opposite) for t in tests)
+    if not stratified or not multi:
+        return opp, "—", "—"
+    per = [_relative_tests(fc) for fc in res.per_animal.values()]
+    def count(i: int, attr: str) -> str:
+        have = [t[i] for t in per if t[i] is not None]
+        return f"{sum(getattr(t, attr) < SIG_ALPHA for t in have)}/{len(have)}"
+    fwd = " / ".join(count(i, "p") for i in range(3))
+    rev = " / ".join(count(i, "p_opposite") for i in range(3))
+    return opp, fwd, rev
 
 
 def _family_arm_labels(res, family_a: str, family_b: str) -> tuple[str, str]:
     """``(arms A, arms B)``: each side's model pairs as ``sender→receiver`` short labels, comma
     joined, in the order the arms enter the relabelling (first appearance in the effect frame;
-    an arm seen in several animals appears once)."""
+    an arm seen in several animals appears once). A side whose arms are every ordered pair of
+    its models collapses to ``all k directions among {…}``; a side sharing one sender (resp.
+    receiver) across ≥ 2 arms to ``x → {…}`` (resp. ``{…} → x``)."""
     from subliminal_learning.analysis.diagonal_direction import BASE_TO_SHORT
 
     def short(token: str) -> str:
@@ -763,7 +816,18 @@ def _family_arm_labels(res, family_a: str, family_b: str) -> tuple[str, str]:
     out = []
     for fam in (family_a, family_b):
         arms = pd.unique(res.frame.loc[res.frame.family == fam, "arm"])
-        out.append(", ".join("→".join(short(t) for t in a.split("->", 1)) for a in arms))
+        pairs = [tuple(short(t) for t in a.split("->", 1)) for a in arms]
+        models = list(dict.fromkeys(m for pair in pairs for m in pair))
+        n = len(models)
+        senders, receivers = {p[0] for p in pairs}, {p[1] for p in pairs}
+        if n >= 2 and len(set(pairs)) == n * (n - 1) == len(pairs):
+            out.append(f"all {n * (n - 1)} directions among {{{', '.join(models)}}}")
+        elif len(pairs) >= 2 and len(senders) == 1:
+            out.append(f"{pairs[0][0]} → {{{', '.join(p[1] for p in pairs)}}}")
+        elif len(pairs) >= 2 and len(receivers) == 1:
+            out.append(f"{{{', '.join(p[0] for p in pairs)}}} → {pairs[0][1]}")
+        else:
+            out.append(", ".join("→".join(p) for p in pairs))
     return out[0], out[1]
 
 
@@ -773,7 +837,32 @@ def style_relationship_pairing_table(df: pd.DataFrame):
     from subliminal_learning.analysis.transfer_significance_io import _p_styler
 
     grey = df["stratified"].fillna(False).astype(bool).to_numpy()
-    return _p_styler(df, ["mean p", "win p", "exceed. p"], index=["comparison", "design", "animal"],
-                     grey=grey, floats={"mean contrast": ".3g", "win prob.": ".3f",
-                                        "exceed. frac contrast": ".3f", "floor": ".2e",
-                                        "labelings": ".0f"})
+    styler = _p_styler(df, ["mean p", "win p", "exceed. p"],
+                       index=["comparison", "design", "animal"], grey=grey,
+                       floats={"mean contrast": ".3g", "win prob.": ".3f",
+                               "exceed. frac contrast": ".3f", "floor": ".2e",
+                               "labelings": ".0f"})
+    opp = PAIRING_COLUMNS[12]
+    if opp in df.columns:
+        styler = styler.map(lambda v: OPPOSITE_SIG if _opposite_significant(v) else "",
+                            subset=[opp])
+    return styler
+
+
+#: Highlight of an ``opp. p`` cell with a significant reverse direction (distinct from the green
+#: of the A > B columns).
+OPPOSITE_SIG = "font-weight: bold; background-color: rgba(255, 140, 90, 0.4)"
+
+
+def _opposite_significant(cell) -> bool:
+    """Whether any of the ``a / b / c`` p's in an ``opp. p`` cell is below `SIG_ALPHA`
+    (``—`` slots and blanks never count)."""
+    if not isinstance(cell, str):
+        return False
+    for part in cell.split("/"):
+        try:
+            if float(part.strip()) < SIG_ALPHA:
+                return True
+        except ValueError:
+            continue
+    return False

@@ -1,8 +1,10 @@
 """Build matched untuned-sender controls for a directed seed factorial.
 
-Three families share the design: `full-seed` (orig/fs1/fs2/fs3, the 2026-09-14
-campaign), `data-seed` (orig/ds1/ds2/ds3) and `same-model` (the orig/fs1/fs2/fs3
-diagonal on focus20). This only writes campaign inputs.
+Four families share the design: `full-seed` (orig/fs1/fs2/fs3, the 2026-09-14
+campaign), `data-seed` (orig/ds1/ds2/ds3), `same-model` (the orig/fs1/fs2/fs3
+diagonal on focus20) and `same-model-core30` (the same diagonal on the 10
+core30 \ focus20 wing cells, plus a per-arm probe stage). This only writes
+campaign inputs.
 Submit the generated jobs through jobq with the dependencies recorded in
 campaign.json; no GPU work runs in this builder.
 """
@@ -65,6 +67,23 @@ FAMILIES = {
         "title": "Matched same-model controls",
         "pairs": "orig/fs1/fs2/fs3 diagonal",
     },
+    "same-model-core30": {
+        "campaign": Path("run_logs/sl_samemodel_controls_core30_20260921"),
+        "bases": {"orig": "original", **{f"fs{i}": f"full-seed{i}" for i in (1, 2, 3)}},
+        "models": {"orig": "pythia-160m",
+                   **{f"fs{i}": f"pythia-160m-seed{i}" for i in (1, 2, 3)}},
+        "force_flag": True,
+        "force_scope": "non-orig",
+        "senders_to_generate": (),
+        "pairs_mode": "diagonal",
+        # The 10 core30 cells outside focus20: lifts the focus20-only arms to core30.
+        "cells_subset": "core30-wing",
+        "probes": True,
+        "queue_prefix": "sl-samemodel-controls-core30",
+        "date": "20260921",
+        "title": "Matched same-model controls — core30 wing fill",
+        "pairs": "orig/fs1/fs2/fs3 diagonal, core30 \\ focus20",
+    },
 }
 
 
@@ -77,6 +96,17 @@ def focus20_cells(core56: dict[str, dict]) -> dict[str, dict]:
     assert len(tags) == 20, f"Expected focus20, got {len(tags)}"
     assert all(tag in core56 for tag in tags), "focus20 must be contained in core56"
     return {tag: core56[tag] for tag in tags}
+
+
+def core30_wing_cells(core56: dict[str, dict]) -> dict[str, dict]:
+    """core30 minus focus20 (the two wings), read from the shared cell lists."""
+    def tags(name: str) -> list[str]:
+        return [c["student_tag"] for c in json.loads((ROOT / f"run_logs/{name}").read_text())["cells"]]
+    focus20 = set(tags("focus20_cells.json"))
+    wing = [tag for tag in tags("core30_cells.json") if tag not in focus20]
+    assert len(focus20) == 20 and len(wing) == 10, f"Expected core30 \\ focus20 = 10, got {len(wing)}"
+    assert all(tag in core56 for tag in wing), "core30 must be contained in core56"
+    return {tag: core56[tag] for tag in wing}
 
 
 def reference_cells(text: str) -> dict[str, dict]:
@@ -138,6 +168,8 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
         cells = listed_cells((ROOT / "run_logs/core56_cells.json").read_text())
     if spec.get("cells_subset") == "focus20":
         cells = focus20_cells(cells)
+    elif spec.get("cells_subset") == "core30-wing":
+        cells = core30_wing_cells(cells)
     training = yaml.safe_load((ROOT / "configs/training/lora_student_distill.yaml").read_text())
     numbers = yaml.safe_load((ROOT / "configs/experiment/number_generation.yaml").read_text())
     assert numbers["prompt_set"]["n_prompts"] == 100000
@@ -168,7 +200,7 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
 
     output_root = Path(yaml.safe_load((ROOT / "configs/paths/paths_local.yaml").read_text())["output_root"])
     jobs, existing = [], 0
-    per_direction = {}
+    per_direction, run_lists = {}, {}
     for sender in bases:
         for receiver in bases:
             if (sender == receiver) is (spec.get("pairs_mode") != "diagonal"):
@@ -187,6 +219,7 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
                 param = (output_root / "students/controls/base" / models[receiver]
                          / f"teacher-{models[sender]}" / "ex10-20_prefix_n100k" / tag)
                 trained += (param / "ftseed1/train_manifest.json").exists()
+                run_lists.setdefault(receiver, []).append(str(param / "ftseed1"))
                 hp = cells[tag]
                 # The established worker supports untuned cross-base controls. Its
                 # legacy root evaluation is always dog; all other animals use the
@@ -229,6 +262,21 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
     assert len(jobs) == directions * len(cells)
     write_jsonl(out / "generation.jobs.jsonl", generation)
     write_jsonl(out / "controls.jobs.jsonl", jobs)
+    probes = []
+    if spec.get("probes"):
+        # One probe job per arm, as in the direction-matrix campaigns' ctrl-probes
+        # stage: pp1 (native) + cp1 on the arm's new control leaves.
+        for receiver, runs in run_lists.items():
+            run_list = campaign / f"ctrl_runs_{receiver}.txt"
+            (ROOT / run_list).write_text("".join(r + "\n" for r in runs))
+            probes.append({
+                "key": f"probe-{receiver}",
+                "cmd": command("scripts.run_final_evals", [
+                    "--runs", str(run_list), "--evals", "probe", "--probe-pools", "pp1,cp1",
+                ]),
+                "cwd": str(ROOT), "mem_mib": 8000, "slots": 1, "env": {"WANDB_MODE": "disabled"},
+            })
+        write_jsonl(out / "probes.jobs.jsonl", probes)
     summary = {
         "directions": directions, "cells_per_direction": len(cells), "control_jobs": len(jobs),
         "existing_training_manifests": existing, "expected_new_trainings": len(jobs) - existing,
@@ -239,6 +287,19 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
     }
     if family != "full-seed":
         summary["existing_training_manifests_by_direction"] = per_direction
+    if spec.get("probes"):
+        summary.update(
+            priority=52, probe_jobs=len(probes), probe_queue=f"{spec['queue_prefix']}-probes-{spec['date']}",
+            cells=list(cells),
+            submit=[
+                f"uv run python -m scripts.jobq submit {summary['control_queue']} "
+                f"--root run_logs/queue_angela --jobs-file {campaign}/controls.jobs.jsonl "
+                "--priority 52 --mem-mib 8000 --slots 1 --strict-deps",
+                f"uv run python -m scripts.jobq submit {spec['queue_prefix']}-probes-{spec['date']} "
+                f"--root run_logs/queue_angela --jobs-file {campaign}/probes.jobs.jsonl "
+                f"--priority 52 --mem-mib 8000 --slots 1 --strict-deps "
+                f"--depends-on {summary['control_queue']}",
+            ])
     (out / "campaign.json").write_text(json.dumps(summary, indent=2) + "\n")
     if family == "full-seed":
         readme = (
@@ -255,6 +316,29 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
             "no per-GPU cap.\n\n"
             "Rebuild: `uv run python -m scripts.build_fullseed_control_jobs`. "
             "The builder does not submit jobs.\n"
+        )
+    elif family == "same-model-core30":
+        table = "\n".join(f"- {d}: {n}" for d, n in per_direction.items())
+        readme = (
+            f"# {spec['title']}\n\n"
+            "The same-model diagonal arms (orig-to-orig, fs1-to-fs1, fs2-to-fs2, fs3-to-fs3) "
+            "only have focus20 matched controls (sl_samemodel_controls_20260916), while the "
+            "ds/wc same-model arms are at core30. This campaign fills the 10 core30 cells "
+            "outside focus20 (the 6-cell high-K and 4-cell low-K wings) for the four arms, "
+            "same recipe as the focus20 campaign: student seed 1, 20 epochs, prefix "
+            "filtering, fp32 (no tf32 anywhere), sequential dog/cat/lion/pig scoring in "
+            "eval/<animal>. No pools are generated. Then one probe job per arm runs the pp1 "
+            "and cp1 Pile probes on the arm's 10 new control leaves "
+            f"(ctrl_runs_<arm>.txt).\n\n"
+            "Cells:\n\n" + "\n".join(f"- {tag}" for tag in cells) + "\n\n"
+            f"Control jobs: {directions} x {len(cells)} = {len(jobs)}, of which {existing} "
+            f"already have training manifests:\n\n{table}\n\n"
+            f"Probe jobs: {len(probes)}.\n\n"
+            "Submit (the builder does not submit; controls unpinned, no depends_on; probes "
+            "depend on the controls queue):\n\n"
+            "```\n" + "\n".join(summary["submit"]) + "\n```\n\n"
+            "Rebuild: `uv run python -m scripts.build_fullseed_control_jobs "
+            f"--family {family}`.\n"
         )
     elif family == "same-model":
         table = "\n".join(f"- {d}: {n}" for d, n in per_direction.items())
@@ -313,7 +397,10 @@ def main() -> None:
     parser.add_argument("--campaign-dir", type=Path, default=None,
                         help="Override the campaign directory (relative to the repo root).")
     args = parser.parse_args()
-    print(json.dumps(build(args.family, args.campaign_dir), indent=2))
+    summary = build(args.family, args.campaign_dir)
+    print(json.dumps(summary, indent=2))
+    for line in summary.get("submit", []):
+        print(line)
 
 
 if __name__ == "__main__":

@@ -34,9 +34,15 @@ __all__ = [
     "paired_sign_test",
     "exceedance_test",
     "stratified_exceedance_permutation",
+    "null_counts",
+    "null_percentile",
     "prior_scaled_effect",
     "arm_set_permutation",
     "arm_relabel_cell_permutation",
+    "SignFlipResult",
+    "paired_sign_flip_permutation",
+    "RUN_RELABEL_STATISTICS",
+    "run_relabel_cell_permutation",
 ]
 
 
@@ -64,8 +70,11 @@ class ExceedanceResult:
 class StratifiedPermResult:
     """Outcome of `stratified_exceedance_permutation` with its null distribution summary.
 
-    ``observed_by_group`` is empty without ``groups`` and otherwise holds each group's observed
-    count (keyed by ``str(label)``), which sums to `observed`.
+    ``null_hist`` is the LOSSLESS histogram of the ``n_perm`` null draws -- sorted
+    ``[count, frequency]`` pairs, so the whole null distribution (not only its quantiles)
+    survives the JSON memo and can be drawn; `null_counts` expands it and `null_percentile`
+    reads any quantile off it. ``observed_by_group`` is empty without ``groups`` and otherwise
+    holds each group's observed count (keyed by ``str(label)``), which sums to `observed`.
     """
 
     observed: int
@@ -73,6 +82,7 @@ class StratifiedPermResult:
     null_quantiles: dict[str, float]
     n_perm: int
     floor: float
+    null_hist: list[list[int]]
     observed_by_group: dict[str, int] = field(default_factory=dict)
 
 
@@ -81,7 +91,10 @@ class ArmSetResult:
     """Outcome of `arm_set_permutation`: the two families' arm-set contrast.
 
     ``n_a``/``n_b`` are the usable arm counts of the two families; ``exact`` says whether every
-    family relabelling was enumerated.
+    family relabelling was enumerated. ``p`` is one-sided for A > B; ``p_opposite`` is the
+    same null read for the reverse claim B > A (``#{null <= observed}``); both tails count the
+    observed labelling itself, so on the exact path ``p + p_opposite >= 1 + 1/n_labelings``
+    (equality when no other labelling ties the observed).
     """
 
     observed: float
@@ -92,6 +105,7 @@ class ArmSetResult:
     exact: bool
     n_a: int
     n_b: int
+    p_opposite: float
 
 
 @dataclass(frozen=True)
@@ -114,6 +128,7 @@ class ArmRelabelResult:
     statistic: str
     n_cells: int
     n_cells_dropped: int
+    p_opposite: float
 
 
 def _finite_pairs(treatment, control) -> tuple[np.ndarray, np.ndarray]:
@@ -299,10 +314,25 @@ def _stratified_exceedance_permutation(v, ctrl, finite, labels, inv, masks, n_pe
         "99.9": float(np.percentile(null, 99.9)),
         "max": float(null.max()),
     }
+    vals, freqs = np.unique(null.astype(np.int64), return_counts=True)
     return StratifiedPermResult(
         observed=observed, p=p, null_quantiles=quantiles, n_perm=int(n_perm),
-        floor=float(1 / (n_perm + 1)), observed_by_group=by_group,
+        floor=float(1 / (n_perm + 1)),
+        null_hist=[[int(v), int(f)] for v, f in zip(vals, freqs)],
+        observed_by_group=by_group,
     )
+
+
+def null_counts(result: StratifiedPermResult) -> np.ndarray:
+    """The `n_perm` null exceedance counts of `result`, expanded from its ``null_hist``."""
+    hist = np.asarray(result.null_hist, dtype=np.int64).reshape(-1, 2)
+    return np.repeat(hist[:, 0], hist[:, 1])
+
+
+def null_percentile(result: StratifiedPermResult, q: float) -> float:
+    """The `q`-th percentile of `result`'s null draws, read off ``null_hist``; identical to the
+    matching ``null_quantiles`` entry (same ``np.percentile`` on the same draws)."""
+    return float(np.percentile(null_counts(result), q))
 
 
 def arm_set_permutation(
@@ -359,7 +389,7 @@ def arm_set_permutation(
         raise ValueError("both families need at least one arm with a finite value")
     values = df[value_col].to_numpy(dtype=float)
     memo_key = memo.key("arm_set_permutation", values, is_a, int(max_exact), int(n_perm),
-                        int(seed))
+                        int(seed), "p_opposite")
     return memo.memoized("arm_set_permutation", memo_key, ArmSetResult,
                          lambda: _arm_set_permutation(values, is_a, max_exact, n_perm, seed))
 
@@ -384,11 +414,13 @@ def _arm_set_permutation(values: np.ndarray, is_a: np.ndarray, max_exact: int, n
         picks = np.array(list(itertools.combinations(range(values.size), n_a)), dtype=int)
         null = contrast(picks)
         p, floor, n_draws = float((null >= observed).mean()), 1.0 / n_labelings, n_labelings
+        p_opposite = float((null <= observed).mean())
     else:
         rng = np.random.default_rng(seed)
         picks = np.argsort(rng.random((n_perm, values.size)), axis=1)[:, :n_a]
         null = contrast(picks)
         p = float((int((null >= observed).sum()) + 1) / (n_perm + 1))
+        p_opposite = float((int((null <= observed).sum()) + 1) / (n_perm + 1))
         floor, n_draws = 1.0 / (n_perm + 1), int(n_perm)
 
     quantiles = {
@@ -401,6 +433,7 @@ def _arm_set_permutation(values: np.ndarray, is_a: np.ndarray, max_exact: int, n
     return ArmSetResult(
         observed=float(observed), p=float(p), floor=float(floor), null_quantiles=quantiles,
         n_labelings=int(n_draws), exact=bool(exact), n_a=n_a, n_b=n_b,
+        p_opposite=float(p_opposite),
     )
 
 
@@ -507,7 +540,8 @@ def arm_relabel_cell_permutation(
     if not is_a.any() or is_a.all():
         raise ValueError("both families need at least one arm")
     memo_key = memo.key("arm_relabel_cell_permutation", sums, counts, is_a, statistic,
-                        int(max_exact), int(n_perm), int(seed), int(n_cells_dropped))
+                        int(max_exact), int(n_perm), int(seed), int(n_cells_dropped),
+                        "p_opposite")
     return memo.memoized("arm_relabel_cell_permutation", memo_key, ArmRelabelResult,
                          lambda: _arm_relabel_cell_permutation(
                              sums, counts, is_a, statistic, max_exact, n_perm, seed,
@@ -553,6 +587,7 @@ def _arm_relabel_cell_permutation(sums, counts, is_a, statistic, max_exact, n_pe
             nulls.append(stat(np.array(block, dtype=int)))
         null = np.concatenate(nulls)
         p, floor, n_draws = float((null >= observed).mean()), 1.0 / n_labelings, n_labelings
+        p_opposite = float((null <= observed).mean())
     else:
         rng = np.random.default_rng(seed)
         nulls = []
@@ -562,6 +597,7 @@ def _arm_relabel_cell_permutation(sums, counts, is_a, statistic, max_exact, n_pe
             nulls.append(stat(picks))
         null = np.concatenate(nulls)
         p = float((int((null >= observed).sum()) + 1) / (n_perm + 1))
+        p_opposite = float((int((null <= observed).sum()) + 1) / (n_perm + 1))
         floor, n_draws = 1.0 / (n_perm + 1), int(n_perm)
 
     quantiles = {
@@ -574,7 +610,7 @@ def _arm_relabel_cell_permutation(sums, counts, is_a, statistic, max_exact, n_pe
     return ArmRelabelResult(
         observed=observed, p=float(p), floor=float(floor), null_quantiles=quantiles,
         n_labelings=int(n_draws), exact=bool(exact), n_a=n_a, n_b=n_b, statistic=statistic,
-        n_cells=int(n_cells), n_cells_dropped=n_cells_dropped,
+        n_cells=int(n_cells), n_cells_dropped=n_cells_dropped, p_opposite=float(p_opposite),
     )
 
 
@@ -600,3 +636,213 @@ def prior_scaled_effect(treatment, control, prior: float) -> float:
     if t.size == 0 or not np.isfinite(prior) or prior == 0:
         return float("nan")
     return float(((t - c) / prior).mean())
+
+
+@dataclass(frozen=True)
+class SignFlipResult:
+    """Outcome of `paired_sign_flip_permutation`: the observed mean paired difference, its
+    one-sided p for A > B, the other tail's `p_opposite`, the resolution `floor`, and the
+    `n_pairs` finite pairs behind `n_perm` draws."""
+
+    observed: float
+    p: float
+    p_opposite: float
+    floor: float
+    n_pairs: int
+    n_perm: int
+
+
+def paired_sign_flip_permutation(diffs, *, n_perm: int = 20000, seed: int = 0) -> SignFlipResult:
+    """Within-pair sign-flip permutation on the MEAN of a paired difference.
+
+    Null: within each pair the difference is equally likely to carry either sign, so a uniform
+    random ``+-1`` per pair leaves the distribution of the mean unchanged. One-sided for
+    "A above B" (``p = (#{null >= observed} + 1) / (n_perm + 1)``).
+
+    Scope: this treats the two receivers as FIXED. It answers "did THESE senders transfer more
+    into receiver A than into receiver B", not a family claim about the two relationship
+    classes -- with one arm per side there is no arm-level replication to relabel, so nothing
+    here generalizes past the two arms paired.
+
+    Args:
+        diffs: Per-pair differences (A minus B); NaN entries are dropped.
+        n_perm: Number of sign-flip draws.
+        seed: Seed of the ``default_rng`` used for the draws (deterministic given the inputs).
+
+    Returns:
+        A `SignFlipResult` with ``floor = 1 / (n_perm + 1)``; ``observed`` is ``nan`` and both
+        p's are ``1.0`` when no finite pair is left.
+    """
+    d = np.asarray(diffs, dtype=float).ravel()
+    d = d[np.isfinite(d)]
+    floor = 1.0 / (n_perm + 1)
+    if d.size == 0:
+        return SignFlipResult(observed=float("nan"), p=1.0, p_opposite=1.0, floor=float(floor),
+                              n_pairs=0, n_perm=int(n_perm))
+    memo_key = memo.key("paired_sign_flip_permutation", d, int(n_perm), int(seed))
+    return memo.memoized("paired_sign_flip_permutation", memo_key, SignFlipResult,
+                         lambda: _paired_sign_flip_permutation(d, n_perm, seed))
+
+
+def _paired_sign_flip_permutation(d: np.ndarray, n_perm: int, seed: int) -> SignFlipResult:
+    """The draws of `paired_sign_flip_permutation` on its finite differences."""
+    observed = float(d.mean())
+    rng = np.random.default_rng(seed)
+    signs = rng.choice([-1.0, 1.0], size=(n_perm, d.size))
+    null = (signs * d).mean(axis=1)
+    return SignFlipResult(
+        observed=observed,
+        p=float((int((null >= observed).sum()) + 1) / (n_perm + 1)),
+        p_opposite=float((int((null <= observed).sum()) + 1) / (n_perm + 1)),
+        floor=float(1.0 / (n_perm + 1)), n_pairs=int(d.size), n_perm=int(n_perm))
+
+
+#: Statistics `run_relabel_cell_permutation` can read (the two of `ARM_RELABEL_STATISTICS`,
+#: plus the pooled-over-strata mean difference the run-level exceedance fraction needs).
+RUN_RELABEL_STATISTICS = ("mean_contrast", "win_probability", "pooled_mean")
+
+
+def run_relabel_cell_permutation(
+    frame: pd.DataFrame,
+    *,
+    family_a: str,
+    family_b: str,
+    statistic: str = "mean_contrast",
+    family_col: str = "family",
+    stratum_col: str = "stratum",
+    value_col: str = "value",
+    n_perm: int = 20000,
+    seed: int = 0,
+) -> ArmRelabelResult:
+    """The same family contrast as `arm_relabel_cell_permutation` with the RUN as the unit.
+
+    The null shuffles the family labels among the RUNS inside each stratum (cell), both
+    families pooled over all their arms, keeping each stratum's A/B counts. Statistics:
+
+    * ``"mean_contrast"``: per stratum, mean(A) - mean(B), averaged over strata.
+    * ``"win_probability"``: per stratum, the share of (A run, B run) pairs the A run wins, ties
+      1/2 (Mann-Whitney U over ``n_A n_B`` with midranks), averaged over strata.
+    * ``"pooled_mean"``: mean over ALL A runs minus mean over ALL B runs, strata pooled -- on a
+      0/1 indicator this is the difference of the two families' pooled fractions.
+
+    Exchangeability assumption -- read this before quoting the p: runs are treated as
+    exchangeable ACROSS ARMS within a cell, i.e. two runs of the same cell are taken to be
+    interchangeable whichever arm (sender, receiver, numbers pool) produced them. They are not:
+    every run of an arm shares one receiver and one pool, so a receiver effect, or one loud arm,
+    can masquerade as a family effect and the p is anticonservative for a claim about the
+    CLASSES. `arm_relabel_cell_permutation` -- which relabels whole arms -- is the conservative
+    primary test; this one answers the narrower "are the runs of class A larger than the runs of
+    class B, cell by cell" and is reported beside it, never instead of it.
+
+    Monte Carlo only: the number of within-stratum labelings is astronomically large, so there
+    is no exact path (`floor` is always ``1 / (n_perm + 1)``). The draws are deterministic in
+    the inputs: strata are sorted by their key and each stratum's rows by (family, value) before
+    anything is drawn, so row order never moves the null, and the seeded result is memoized
+    through `stats.memo` like the other permutation tests.
+
+    Args:
+        frame: Tidy rows, one per run, with family, stratum (cell) and value columns.
+        family_a: Label of the family claimed stronger (the positive side of the contrast).
+        family_b: Label of the reference family.
+        statistic: One of `RUN_RELABEL_STATISTICS`.
+        family_col, stratum_col, value_col: Column names in `frame`.
+        n_perm: Number of relabelling draws.
+        seed: Seed of the ``default_rng`` used for them.
+
+    Returns:
+        An `ArmRelabelResult` whose ``n_a``/``n_b`` count RUNS (not arms), ``exact`` is False,
+        ``n_labelings`` is `n_perm`, ``p = (#{null >= observed} + 1) / (n_perm + 1)`` and
+        ``p_opposite`` the same for the other tail. Strata reached by one family only define no
+        contrast and are dropped, counted in ``n_cells_dropped``.
+
+    Raises:
+        ValueError: On an unknown `statistic`, a missing column, or no stratum carrying both
+            families.
+    """
+    if statistic not in RUN_RELABEL_STATISTICS:
+        raise ValueError(f"statistic must be one of {RUN_RELABEL_STATISTICS}, got {statistic!r}")
+    for col in (family_col, stratum_col, value_col):
+        if col not in frame.columns:
+            raise ValueError(f"frame has no {col!r} column")
+    df = frame[frame[family_col].isin([family_a, family_b])]
+    df = df[np.isfinite(pd.to_numeric(df[value_col], errors="coerce"))]
+    per_stratum = df.groupby(stratum_col)[family_col].nunique()
+    keep = set(per_stratum[per_stratum == 2].index)
+    n_cells_dropped = int(len(per_stratum) - len(keep))
+    df = df[df[stratum_col].isin(keep)]
+    if df.empty:
+        raise ValueError("no stratum carries runs from both families")
+
+    from scipy.stats import rankdata
+
+    blocks = []
+    # Strata are drawn for in sorted key order, so the same design read in any row order --
+    # arms appended in a different sequence, a reordered registry -- draws the same null.
+    for cell in sorted(pd.unique(df[stratum_col])):
+        block = df[df[stratum_col] == cell].sort_values(by=[family_col, value_col],
+                                                        kind="stable")
+        values = block[value_col].to_numpy(dtype=float)
+        weights = rankdata(values) if statistic == "win_probability" else values
+        blocks.append((weights, (block[family_col] == family_a).to_numpy()))
+    memo_key = memo.key("run_relabel_cell_permutation",
+                        np.concatenate([w for w, _ in blocks]),
+                        np.concatenate([is_a for _, is_a in blocks]),
+                        np.array([w.size for w, _ in blocks]), statistic, int(n_perm), int(seed),
+                        int(n_cells_dropped))
+    return memo.memoized("run_relabel_cell_permutation", memo_key, ArmRelabelResult,
+                         lambda: _run_relabel_cell_permutation(blocks, statistic, n_perm, seed,
+                                                               n_cells_dropped))
+
+
+def _run_relabel_cell_permutation(blocks, statistic: str, n_perm: int, seed: int,
+                                  n_cells_dropped: int) -> ArmRelabelResult:
+    """The draws of `run_relabel_cell_permutation` on its per-stratum ``(weights, is_a)`` blocks."""
+    rng = np.random.default_rng(seed)
+    n_a = int(sum(int(is_a.sum()) for _, is_a in blocks))
+    n_b = int(sum(int((~is_a).sum()) for _, is_a in blocks))
+    obs_terms, null_terms = [], []
+    a_sums, a_counts, b_sums, b_counts = [], [], [], []
+    for weights, is_a in blocks:
+        m, k = weights.size, int(is_a.sum())
+        total = float(weights.sum())
+        picks = np.argsort(rng.random((n_perm, m)), axis=1)[:, :k]
+        draw_sum = weights[picks].sum(axis=1)                       # (n_perm,)
+        obs_sum = float(weights[is_a].sum())
+        if statistic == "pooled_mean":
+            a_sums.append(draw_sum)
+            a_counts.append(k)
+            b_sums.append(total - draw_sum)
+            b_counts.append(m - k)
+            obs_terms.append(obs_sum)
+            continue
+        if statistic == "mean_contrast":
+            obs_terms.append(obs_sum / k - (total - obs_sum) / (m - k))
+            null_terms.append(draw_sum / k - (total - draw_sum) / (m - k))
+        else:
+            scale = k * (m - k)
+            obs_terms.append((obs_sum - k * (k + 1) / 2) / scale)
+            null_terms.append((draw_sum - k * (k + 1) / 2) / scale)
+    if statistic == "pooled_mean":
+        n_a_tot, n_b_tot = float(sum(a_counts)), float(sum(b_counts))
+        observed = float(sum(obs_terms) / n_a_tot
+                         - (sum(float(w.sum()) for w, _ in blocks) - sum(obs_terms)) / n_b_tot)
+        null = np.sum(a_sums, axis=0) / n_a_tot - np.sum(b_sums, axis=0) / n_b_tot
+    else:
+        observed = float(np.mean(obs_terms))
+        null = np.mean(null_terms, axis=0)
+
+    quantiles = {
+        "50": float(np.percentile(null, 50)),
+        "95": float(np.percentile(null, 95)),
+        "99": float(np.percentile(null, 99)),
+        "99.9": float(np.percentile(null, 99.9)),
+        "max": float(null.max()),
+    }
+    return ArmRelabelResult(
+        observed=observed,
+        p=float((int((null >= observed).sum()) + 1) / (n_perm + 1)),
+        floor=float(1 / (n_perm + 1)), null_quantiles=quantiles, n_labelings=int(n_perm),
+        exact=False, n_a=n_a, n_b=n_b, statistic=statistic, n_cells=len(blocks),
+        n_cells_dropped=int(n_cells_dropped),
+        p_opposite=float((int((null <= observed).sum()) + 1) / (n_perm + 1)),
+    )

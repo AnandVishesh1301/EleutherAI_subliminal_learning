@@ -52,6 +52,7 @@ from subliminal_learning.analysis.transfer_significance_io import (
 )
 from subliminal_learning.config import resolve_output_root
 from subliminal_learning.stats import diagonal_direction_tests as ddt
+from subliminal_learning.stats import memo
 
 __all__ = [
     "ANIMAL",
@@ -431,7 +432,13 @@ def load_arm_runs(arms: Iterable[tuple[str, str]], teachers: Sequence[str],
         Columns ``sender, receiver, arm, teacher, cell, treatment, control, prior, value_abs,
         value_rel, dead_treatment``. ``control``/``value_*`` are NaN where the arm has no matched
         control cell; ``dead_treatment`` is NaN where the receiver has no anchored cut.
+
+    Cached (`stats.memo`, ``load_arm_runs/``) on the arguments plus the size/mtime signature of
+    every run's eval, control-eval and probe files, so a run that finishes is a new key.
     """
+    from subliminal_learning.analysis.transfer_significance_io import (
+        _PROBE_LEAVES, _VALUE_LEAVES, _leaf_signature, _loader_memo, _run_leaves)
+
     root = resolve_output_root(output_root)
     design = list(resolve_cells(cells))
     arms = list(arms)
@@ -444,14 +451,45 @@ def load_arm_runs(arms: Iterable[tuple[str, str]], teachers: Sequence[str],
             for cell in design:
                 rel = str((tree / cell / f"ftseed{ftseed}").relative_to(root))
                 treat_paths[rel] = (sender, receiver, tag, cell)
-    treat = load_run_docs(root, list(treat_paths), "preference_eval.json", "pref_eval")
-
     control_paths: dict[str, tuple[str, str, str]] = {}
     for sender, receiver in arms:
         tree = _control_tree(root, sender, receiver)
         for cell in design:
             control_paths[str((tree / cell / f"ftseed{ftseed}").relative_to(root))] = (
                 sender, receiver, cell)
+    columns = ["sender", "receiver", "arm", "teacher", "cell", "treatment", "control", "prior",
+               "value_abs", "value_rel", "dead_treatment"]
+
+    def compute() -> pd.DataFrame:
+        return _load_arm_runs(root, arms, treat_paths, control_paths, animal=animal,
+                              columns=columns)
+
+    if memo.cache_dir() is None:
+        return compute()
+    # exactly the files read above: the eval (both control layouts) and the pp1 probe record
+    leaves = [leaf for rel in treat_paths
+              for leaf in _run_leaves(root / rel, (_VALUE_LEAVES[0], *_PROBE_LEAVES))]
+    leaves += [leaf for rel in control_paths
+               for leaf in _run_leaves(root / rel, _VALUE_LEAVES[:1], animal)]
+    # the receivers' priors and the anchored cut enter the rows too: watch their files
+    from subliminal_learning.analysis.transfer_factors import base_eval_short
+
+    for receiver in {r for _, r in arms}:
+        base = MODELS[receiver].base
+        leaves += [root / "teachers" / animal / base_name(base) / "base_control.json",
+                   root / "analysis" / f"base_eval_{base_eval_short(base)}_animal_preference_test.json"]
+    leaves.append(root / "analysis" / "unigram_anchor_pp1.json")
+    parts = [animal, int(ftseed), int(tseed), list(arms), list(teachers), design,
+             _leaf_signature(root, leaves)]
+    return _loader_memo("load_arm_runs", parts, compute,
+                        encode=lambda df: {"rows": df.to_dict("records")},
+                        decode=lambda **d: pd.DataFrame(d["rows"], columns=columns))
+
+
+def _load_arm_runs(root: Path, arms: list[tuple[str, str]], treat_paths: dict,
+                   control_paths: dict, *, animal: str, columns: list[str]) -> pd.DataFrame:
+    """The disk reads of `load_arm_runs`."""
+    treat = load_run_docs(root, list(treat_paths), "preference_eval.json", "pref_eval")
     # Control trees are animal-independent: most workers namespace the score under
     # ``eval/{animal}/``, older ones wrote it top level (checked against ``target_animal``).
     ns = load_run_docs(root, list(control_paths), f"eval/{animal}/preference_eval.json",
@@ -485,8 +523,6 @@ def load_arm_runs(arms: Iterable[tuple[str, str]], teachers: Sequence[str],
                      "teacher": tag, "cell": cell, "treatment": t, "control": c, "prior": prior,
                      "value_abs": t - c, "value_rel": (t - c) / prior,
                      "dead_treatment": dead.get(rel, np.nan)})
-    columns = ["sender", "receiver", "arm", "teacher", "cell", "treatment", "control", "prior",
-               "value_abs", "value_rel", "dead_treatment"]
     return pd.DataFrame(rows, columns=columns).sort_values(
         ["sender", "receiver", "teacher", "cell"]).reset_index(drop=True)
 

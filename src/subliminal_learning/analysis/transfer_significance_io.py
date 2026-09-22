@@ -6,6 +6,15 @@ cells on both sides — that matched design is what the tests in
 Analysis layer: it reads JSON off the output tree (resolved through
 `subliminal_learning.config.resolve_output_root`, never a hardcoded mount) and returns frames
 and arrays; every estimator stays in ``stats``.
+
+The per-arm loaders (`load_cell_matrix` with pinned cells, `_arm_dead_matrix`, and
+`diagonal_direction.load_arm_runs`) are memoized through `stats.memo` under
+``{output_root}/analysis/cache/transfer_significance/``: the key is every argument plus the
+size/mtime signature of the run files they would read (`_leaf_signature`, one pooled ``stat``
+per file -- the tree is a latency-bound network FS, so that is ~20x cheaper than the reads),
+so a run that finishes, a control that appears or a rewritten eval is a new key. The same memo
+holds the seeded permutation results (exact, keyed on the value arrays). ``SUBLIMINAL_ANALYSIS_CACHE=0``
+bypasses it; `stats.memo.cache_stats` counts hits and misses.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ from subliminal_learning.analysis.dd1b_ladder import (
 from subliminal_learning.analysis.fsfact_transfer import RECEIVER_BASE
 from subliminal_learning.coherence.probe_io import native_probe_pool_version, probe_path
 from subliminal_learning.config import resolve_output_root
+from subliminal_learning.stats import memo
 from subliminal_learning.stats import transfer_significance_tests as tt
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
@@ -41,6 +51,8 @@ __all__ = [
     "student_tree_prior",
     "check_expected_prior",
     "registry_design_cells",
+    "RegistryArm",
+    "load_registry_arm",
     "drop_empty_pools",
     "StackedArms",
     "stack_cell_matrices",
@@ -71,11 +83,18 @@ __all__ = [
     "style_family_comparison_table",
     "resolve_cells",
     "STATUS_FLAG",
+    "registry_arm_names",
     "registry_selection_notes",
     "lacking_data_table",
     "flagged_arms",
     "flagged_family_arms",
     "flagged_missing_blocks",
+    "REGISTRY_FRAME_COLUMNS",
+    "registry_family_comparison",
+    "registry_paired_contrast",
+    "PAIRED_CONTRAST_COLUMNS",
+    "registry_paired_contrast_table",
+    "style_registry_paired_contrast_table",
 ]
 
 CONTROL_LABEL = "CONTROL"
@@ -366,6 +385,92 @@ def load_prior(
     return float(doc.get(key, {}).get("p_target", float("nan")))
 
 
+#: Run-leaf files whose presence/size/mtime the loader cache watches, per run dir (a
+#: ``{cell}/ftseed{N}`` dir, or the cell dir itself for seed-aggregated reads): the value file
+#: of the layout being read, and the probe record the dead label reads (its sidecar too, when
+#: a non-native pool is asked for). Every stat costs network latency, so the sets are exact.
+_VALUE_LEAVES = ("preference_eval.json", "preference_summary.json")
+_PROBE_LEAVES = ("eval/pile_probe.json",)
+
+
+def _rel(root: Path, path: Path) -> str:
+    """`path` relative to `root` when it is under it (node-independent cache keys), else as is."""
+    return str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+
+
+#: In-process memo of `_leaf_signature` per path set: the same arm is re-read by several
+#: pairings/comparisons of one notebook cell, and re-statting ~60k files per read is the cost.
+#: Entries expire after `_SIGNATURE_TTL` seconds (the bound on how long a live kernel can
+#: miss a run that finished; a fresh kernel / nbconvert run always stats).
+_SIGNATURES: dict[str, tuple[float, list[list]]] = {}
+_SIGNATURE_TTL = 120.0
+
+
+def _leaf_signature(root: Path, paths: Sequence[Path]) -> list[list]:
+    """``[[rel path, size, mtime_ns] | [rel path, None]]`` for every leaf, sorted -- the part of a
+    loader-cache key that a finished run, a new control or a rewritten eval changes. Stats run
+    in a thread pool (the tree is a network file system: latency-bound, not bandwidth-bound)."""
+    import hashlib
+    import os
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    prefix = str(root).rstrip("/") + "/"
+    unique = sorted({str(p) for p in paths})       # plain strings: pathlib sorting is slow
+    digest = hashlib.sha256("\0".join(unique).encode()).hexdigest()
+    hit = _SIGNATURES.get(digest)
+    if hit is not None and time.monotonic() - hit[0] < _SIGNATURE_TTL:
+        return hit[1]
+
+    def stat(path: str) -> list:
+        rel = path[len(prefix):] if path.startswith(prefix) else path
+        try:
+            st = os.stat(path)
+        except OSError:
+            return [rel, None]
+        return [rel, int(st.st_size), int(st.st_mtime_ns)]
+
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        signature = list(pool.map(stat, unique))
+    _SIGNATURES[digest] = (time.monotonic(), signature)
+    return signature
+
+
+def _run_leaves(run_dir: Path, names: Sequence[str], eval_animal: str | None = None,
+                probe_pool: str | None = None) -> list[Path]:
+    """The watched leaf files of one run dir: `names` at the top level and, for an eval animal,
+    under ``eval/{animal}/``; `probe_pool` adds the pool's sidecar probe record."""
+    out = [run_dir / n for n in names]
+    if eval_animal is not None:
+        out += [run_dir / "eval" / eval_animal / n for n in names]
+    if probe_pool is not None:
+        out.append(run_dir / "eval" / f"pile_probe.{probe_pool}.json")
+    return out
+
+
+def _loader_memo(name: str, parts: list, compute, *, encode, decode):
+    """`stats.memo` for a loader: `parts` (args + `_leaf_signature`) key the entry, `encode`
+    turns the computed value into a JSON dict, `decode` rebuilds it from one. Miss, disabled or
+    unreadable entry -> `compute()` (and store)."""
+    return memo.memoized(name, memo.key(name, parts), decode, compute, encode=encode)
+
+
+def _matrix_to_json(m: CellMatrix) -> dict:
+    return {"frame": m.frame.to_dict("records"), "values": m.values.tolist(), "cells": m.cells,
+            "pools": m.pools, "control_col": m.control_col, "missing": m.missing,
+            "control_layout": m.control_layout, "no_control": m.no_control}
+
+
+def _matrix_from_json(**d) -> CellMatrix:
+    frame = pd.DataFrame(d["frame"], columns=["cell", "pool", "value", "is_control"])
+    return CellMatrix(frame=frame, values=np.asarray(d["values"], dtype=float).reshape(
+                          len(d["cells"]), len(d["pools"])),
+                      cells=list(d["cells"]), pools=list(d["pools"]),
+                      control_col=int(d["control_col"]),
+                      missing=[tuple(x) for x in d["missing"]],
+                      control_layout=dict(d["control_layout"]), no_control=list(d["no_control"]))
+
+
 def load_cell_matrix(
     animal: str,
     sender: str,
@@ -375,6 +480,7 @@ def load_cell_matrix(
     eval_animal: str | None = None,
     prompt_set: str = "test",
     dataset_tag: str = DEFAULT_DATASET_TAG,
+    teacher_dataset_tags: Mapping[str, str] | None = None,
     control_dataset_tag: str | None = None,
     tseed: int = 1,
     ftseed: int | None = None,
@@ -400,6 +506,10 @@ def load_cell_matrix(
             the per-cell ``eval/{eval_animal}/`` subdir.
         prompt_set: Prompt set to read out of the summaries.
         dataset_tag: Numbers-dataset dir of the treatment trees.
+        teacher_dataset_tags: ``{param_tag: dataset_tag}`` overriding `dataset_tag` for those
+            teachers only (a sender whose pool was generated at another size); the control tree
+            is untouched. The overridden teachers are read as their own group and the columns
+            merged back in `teachers` order.
         control_dataset_tag: Numbers-dataset dir of the control tree; ``None`` means
             `dataset_tag`. Differs when a sender's pool was generated at another size (e.g. a
             ``..._n125k`` treatment pool against the ``..._n100k`` base-pool control).
@@ -420,11 +530,49 @@ def load_cell_matrix(
 
     Returns:
         A `CellMatrix` whose columns are the teachers in order, with the control last.
+
+    Cached (`stats.memo`, ``load_cell_matrix/``) when `cells` is given: the key is every
+    argument plus the `_leaf_signature` of the value files of all requested treatment and
+    control runs, so a run that finishes or a control that appears is a new key.
     """
     root = resolve_output_root(output_root)
     eval_animal = eval_animal or animal
     receiver_dir, sender_dir = base_name(receiver), f"teacher-{base_name(sender)}"
     numbers_base = base_name(control_numbers_base) if control_numbers_base else base_name(sender)
+    overrides = {t: v for t, v in (teacher_dataset_tags or {}).items()
+                 if t in teachers and v != dataset_tag}
+    if overrides:
+        # one read per dataset tag (each memoized on its own tree), columns merged back in order
+        groups: dict[str, list[str]] = {}
+        for tag in teachers:
+            groups.setdefault(overrides.get(tag, dataset_tag), []).append(tag)
+        parts = {dtag: load_cell_matrix(
+            animal, sender, receiver, tags, eval_animal=eval_animal, prompt_set=prompt_set,
+            dataset_tag=dtag, control_dataset_tag=control_dataset_tag or dataset_tag,
+            tseed=tseed, ftseed=ftseed, cells=cells, control_source=control_source,
+            control_numbers_base=control_numbers_base, output_root=output_root)
+            for dtag, tags in groups.items()}
+        base = parts[dataset_tag] if dataset_tag in parts else next(iter(parts.values()))
+        odd = [m.cells for m in parts.values() if m.cells != base.cells]
+        if odd:
+            raise ValueError(f"teacher_dataset_tags groups disagree on the design cells: {odd}")
+        pools = [*teachers, CONTROL_LABEL]
+        columns = [parts[overrides.get(t, dataset_tag)] for t in teachers] + [base]
+        values = np.column_stack([m.values[:, m.pools.index(p)]
+                                  for p, m in zip(pools, columns, strict=True)]) \
+            if base.cells else np.full((0, len(pools)), float("nan"))
+        rows, missing = [], []
+        for j, pool in enumerate(pools):
+            for i, cell in enumerate(base.cells):
+                value = None if not np.isfinite(values[i, j]) else float(values[i, j])
+                if value is None:
+                    missing.append((pool, cell))
+                rows.append({"cell": cell, "pool": pool, "value": value,
+                             "is_control": pool == CONTROL_LABEL})
+        return CellMatrix(
+            frame=pd.DataFrame(rows, columns=["cell", "pool", "value", "is_control"]),
+            values=values, cells=base.cells, pools=pools, control_col=len(pools) - 1,
+            missing=missing, control_layout=base.control_layout, no_control=base.no_control)
     control_tree = dataset_dir(root, None, base=receiver_dir,
                                dataset_tag=control_dataset_tag or dataset_tag,
                                source=control_source, numbers_base=numbers_base)
@@ -433,6 +581,38 @@ def load_cell_matrix(
             if control_tree.is_dir() else []
     else:
         requested = resolve_cells(cells)
+
+    def compute() -> CellMatrix:
+        return _load_cell_matrix(root, animal, eval_animal, receiver_dir, sender_dir,
+                                 control_tree, requested, list(teachers), prompt_set=prompt_set,
+                                 dataset_tag=dataset_tag, tseed=tseed, ftseed=ftseed)
+
+    if cells is None or memo.cache_dir() is None:
+        return compute()
+    seed_part = "" if ftseed is None else f"ftseed{ftseed}"
+    value_leaf = _VALUE_LEAVES[0 if ftseed is not None else 1]
+    sender_tree = root / "students" / animal / Path(*model_dir_parts_from_name(receiver_dir)) / sender_dir
+    leaves: list[Path] = []
+    for cell in requested:
+        # the control is read from eval/{animal}/ first, then the top-level file; a treatment
+        # run from the top-level file (its own animal) or eval/{eval_animal}/ (another)
+        leaves += _run_leaves(control_tree / cell / seed_part, (value_leaf,), eval_animal)
+        for tag in teachers:
+            run_dir = sender_tree / f"{tag}_tseed{tseed}" / dataset_tag / cell / seed_part
+            leaves.append(run_dir / value_leaf if eval_animal == animal
+                          else run_dir / "eval" / eval_animal / value_leaf)
+    parts = [animal, eval_animal, receiver_dir, sender_dir, _rel(root, control_tree),
+             list(requested), list(teachers), prompt_set, dataset_tag, int(tseed),
+             None if ftseed is None else int(ftseed), _leaf_signature(root, leaves)]
+    return _loader_memo("load_cell_matrix", parts, compute, encode=_matrix_to_json,
+                        decode=_matrix_from_json)
+
+
+def _load_cell_matrix(root: Path, animal: str, eval_animal: str, receiver_dir: str,
+                      sender_dir: str, control_tree: Path, requested: Sequence[str],
+                      teachers: Sequence[str], *, prompt_set: str, dataset_tag: str, tseed: int,
+                      ftseed: int | None) -> CellMatrix:
+    """The disk reads of `load_cell_matrix`."""
     # A cell with no control value is not a matched pair: its treatment values would count as
     # exceedances against a threshold they were never matched to, and the stratified null could
     # never relabel a control there. Drop it from the design.
@@ -486,6 +666,12 @@ TABLE_COLUMNS = ["arm", "teacher", "test", "prior", "cells", "wins / n", "sign p
 
 #: Every ``status`` of an arm lacking data starts with this; a tested arm's status is "".
 STATUS_FLAG = "⚠"
+
+
+def _stray_status(strays: Sequence[str]) -> str:
+    """The ``status`` note of a TESTED arm with on-disk teachers it does not list: they are
+    excluded from the arm and named here. Unflagged -- a stray does not untest an arm."""
+    return f"strays excluded: {', '.join(strays)}" if strays else ""
 
 #: The ``test`` column's labels: which statistic produced a row's p.
 TEST_SIGN_TEACHER = "sign (per teacher)"
@@ -782,20 +968,47 @@ def _arm_trees(root: Path, animal: str, sender: str, receiver: str,
 
 def _arm_dead_matrix(matrix: CellMatrix, control_tree: Path, sender_tree: Path, *,
                      dataset_tag: str, tseed: int, ftseed: int, probe_pool: str,
-                     cut: float | None) -> np.ndarray:
+                     cut: float | None, root: Path | None = None,
+                     teacher_dataset_tags: Mapping[str, str] | None = None) -> np.ndarray:
     """``cells x pools`` dead labels aligned to `matrix.values`, control column last.
 
     All NaN when `cut` is None: with no anchored cut nothing is labelled (see `_anchored_cut`).
+    Cached (`stats.memo`, ``arm_dead_matrix/``) on the trees, the design, the cut and the
+    `_leaf_signature` of every run's probe record and manifest; `root` (the output root the
+    trees live under) makes the cached paths relative, i.e. shared across nodes.
     """
-    d = np.full(matrix.values.shape, np.nan)
     if cut is None:
+        return np.full(matrix.values.shape, np.nan)
+
+    tags = teacher_dataset_tags or {}
+
+    def run_dir(cell: str, pool: str) -> Path:
+        return (control_tree / cell if pool == CONTROL_LABEL
+                else sender_tree / f"{pool}_tseed{tseed}" / tags.get(pool, dataset_tag)
+                / cell) / f"ftseed{ftseed}"
+
+    def compute() -> np.ndarray:
+        d = np.full(matrix.values.shape, np.nan)
+        for i, cell in enumerate(matrix.cells):
+            for j, pool in enumerate(matrix.pools):
+                d[i, j] = _dead_label(run_dir(cell, pool).parent, ftseed, probe_pool, cut)
         return d
-    for i, cell in enumerate(matrix.cells):
-        for j, pool in enumerate(matrix.pools):
-            leaf = (control_tree / cell if pool == CONTROL_LABEL
-                    else sender_tree / f"{pool}_tseed{tseed}" / dataset_tag / cell)
-            d[i, j] = _dead_label(leaf, ftseed, probe_pool, cut)
-    return d
+
+    if memo.cache_dir() is None:
+        return compute()
+    root = resolve_output_root(root)
+    # Cached on the probe record + manifest of every run, the trees, the cut and the pool.
+    leaves = [leaf for cell in matrix.cells for pool in matrix.pools
+              for leaf in _run_leaves(run_dir(cell, pool), _PROBE_LEAVES, probe_pool=probe_pool)]
+    parts = [_rel(root, control_tree), _rel(root, sender_tree), list(matrix.cells), list(matrix.pools),
+             dataset_tag, int(tseed), int(ftseed), probe_pool, float(cut),
+             _leaf_signature(root, leaves)]
+    if tags:                                       # keep the plain arms' cache keys unchanged
+        parts.append(sorted(tags.items()))
+    return _loader_memo("arm_dead_matrix", parts, compute,
+                        encode=lambda d: {"dead": d.tolist()},
+                        decode=lambda **d: np.asarray(d["dead"], dtype=float).reshape(
+                            matrix.values.shape))
 
 
 def student_tree_prior(animal: str, receiver: str, *, prompt_set: str = "test",
@@ -871,6 +1084,23 @@ def registry_design_cells(arm: dict, arms: Mapping[str, dict], arms_json: Path, 
     return [c for c in cells if c not in exclude]
 
 
+def registry_arm_names(arms_json: str | Path, *, data_order: str | None = None) -> list[str]:
+    """The registry's arm names in registry order, optionally only those of one ``data_order``
+    class (e.g. ``"cross-recipe"`` vs ``"cross-recipe+seed"``), so a notebook can name a
+    relationship class once and pick up arms added to the registry later.
+
+    Args:
+        arms_json: Registry path.
+        data_order: Keep only arms carrying this ``data_order``; ``None`` keeps every arm.
+
+    Returns:
+        The arm names, in the order the registry lists them.
+    """
+    reg = json.loads(Path(arms_json).read_text())
+    return [a["name"] for a in reg["arms"]
+            if data_order is None or a.get("data_order") == data_order]
+
+
 def registry_selection_notes(arms_json: str | Path) -> str:
     """Markdown bullets of every registry arm carrying a ``selection_note`` (how its teacher
     set was chosen), for the notebook text; "" when no arm has one."""
@@ -879,12 +1109,166 @@ def registry_selection_notes(arms_json: str | Path) -> str:
                       if a.get("selection_note"))
 
 
+@dataclass(frozen=True)
+class RegistryArm:
+    """One registry arm as `significance_table` reads it: its design, coverage and, when the
+    set is finished, its matched `CellMatrix`.
+
+    Attributes:
+        name: The arm's registry name.
+        spec: The registry entry.
+        cells: Design cells (`registry_design_cells`).
+        teachers: Listed full-set teachers.
+        short: ``known_short`` teachers (reported, never pooled).
+        receiver: Receiver base name.
+        prior: The receiver's test prior (`student_tree_prior`).
+        ctrl_cov: Design cells with a matched control.
+        matched: Design cells where every listed teacher and the control are present.
+        counts: The build-time counts a ``note`` / ``untestable`` text may cite
+            (``students``, ``n_students``, ``controls``, ``cells``).
+        finished: Every listed teacher on every design cell AND a control on every cell.
+        matrix: The loaded `CellMatrix` (pools = teachers + short, control last) on a finished,
+            testable arm; ``None`` on a coverage row (unfinished or ``untestable``).
+        strays: On-disk teacher tags of the sender tree that the arm lists nowhere
+            (neither ``teachers`` nor ``known_short``); auto-excluded, reported.
+        sender_tree, control_tree, dataset_tag: The trees the dead labels are read from.
+    """
+
+    name: str
+    spec: dict
+    cells: list[str]
+    teachers: list[str]
+    short: dict
+    receiver: str
+    prior: float
+    ctrl_cov: int
+    matched: int
+    counts: dict
+    finished: bool
+    matrix: CellMatrix | None
+    strays: list[str]
+    sender_tree: Path
+    control_tree: Path
+    dataset_tag: str
+
+
+def load_registry_arm(a: dict, arms: Mapping[str, dict], arms_json: str | Path, *,
+                      root: Path | None = None, ftseed: int = 1, prompt_set: str = "test",
+                      priors: dict | None = None) -> RegistryArm:
+    """Read ONE registry arm the way `significance_table` does (the coverage rule included).
+
+    Every listed teacher must cover the whole design (``known_short`` teachers must miss
+    exactly the listed cells, and the optional ``teacher_dataset_tags`` map overrides the
+    numbers-dataset dir of the teachers it names, control tree excepted); on-disk teachers the arm lists nowhere are strays, auto-excluded
+    from the arm and reported on `RegistryArm.strays` -- the optional ``excluded`` key only
+    declares the strays expected on disk and is never checked. An arm short of a
+    finished set must be flagged ``in_progress`` or ``untestable`` (else it is an error), and
+    its `RegistryArm.matrix` is ``None``. The retired ``partial`` key is an error.
+
+    Args:
+        a: The registry entry.
+        arms: ``{name: entry}`` of the whole registry (for ``cells_from_arm``).
+        arms_json: Registry path (relative cell-set paths resolve against its directory).
+        root: Output tree root; defaults to the paths YAML's.
+        ftseed, prompt_set: The registry's student seed and prompt set.
+        priors: Optional ``{(animal, receiver): prior}`` cache shared across arms.
+
+    Returns:
+        A `RegistryArm`.
+    """
+    arms_json, root = Path(arms_json), resolve_output_root(root)
+    name = a["name"]
+    if a.get("partial"):
+        raise ValueError(f"{name}: `partial` arms are no longer supported -- an arm is "
+                         f"tested on its whole design or reported as a coverage row "
+                         f"(in_progress / untestable)")
+    dataset_tag = a.get("dataset_tag", DEFAULT_DATASET_TAG)
+    # `teacher_dataset_tags` overrides the numbers-dataset dir for the named teachers only (a
+    # sender whose pool was generated at another size); the control tree keeps `dataset_tag`.
+    teacher_tags = dict(a.get("teacher_dataset_tags", {}))
+    cells = registry_design_cells(a, arms, arms_json, ftseed=ftseed, prompt_set=prompt_set,
+                                  output_root=root)
+    teachers, short = list(a["teachers"]), dict(a.get("known_short", {}))
+    stray_set: set[str] = set()
+    for dtag in {dataset_tag, *teacher_tags.values()}:
+        _, stray = resolve_teachers([*teachers, *short], animal=a["animal"], sender=a["sender"],
+                                    receiver=a["receiver"], output_root=root,
+                                    dataset_tag=dtag, tseed=a["tseed"])
+        stray_set |= set(stray)
+    stray = sorted(stray_set)
+    sender_tree = (root / "students" / a["animal"]
+                   / Path(*model_dir_parts_from_name(base_name(a["receiver"])))
+                   / f"teacher-{base_name(a['sender'])}")
+    control_tree = dataset_dir(root, None, base=base_name(a["receiver"]),
+                               dataset_tag=a.get("control_dataset_tag") or dataset_tag,
+                               source="base", numbers_base=base_name(a["sender"]))
+    ctrl_cov = sum(_control_value(control_tree / c, a["animal"], prompt_set, ftseed)[0]
+                   is not None for c in cells)
+    covered = {}
+    for tag in [*teachers, *short]:
+        leaf = sender_tree / f"{tag}_tseed{a['tseed']}" / teacher_tags.get(tag, dataset_tag)
+        missing = [c for c in cells if not _has_seed_endpoint(leaf / c, ftseed, prompt_set)]
+        covered[tag] = len(cells) - len(missing)
+        if tag in short:
+            if missing != short[tag]:
+                raise ValueError(f"{name}: {tag} missing {missing}, registry says {short[tag]}")
+        elif missing and not (a.get("in_progress") or a.get("untestable")):
+            raise ValueError(f"{name}: listed teacher {tag} is short "
+                             f"{covered[tag]}/{len(cells)}; missing {missing}")
+    # matched cells: every listed teacher's endpoint AND a control, cell by cell
+    matched = sum(
+        _control_value(control_tree / c, a["animal"], prompt_set, ftseed)[0] is not None
+        and all(_has_seed_endpoint(
+            sender_tree / f"{t}_tseed{a['tseed']}" / teacher_tags.get(t, dataset_tag) / c,
+            ftseed, prompt_set) for t in teachers)
+        for c in cells)
+    finished = ctrl_cov == len(cells) and all(covered[t] == len(cells) for t in teachers)
+    if not finished and not (a.get("in_progress") or a.get("untestable")):
+        raise ValueError(f"{name}: not a finished set (control covers {ctrl_cov}/"
+                         f"{len(cells)}, matched cells {matched}/{len(cells)}); flag it "
+                         f"in_progress or untestable")
+
+    receiver = base_name(a["receiver"])
+    key = (a["animal"], receiver)
+    priors = priors if priors is not None else {}
+    if key not in priors:
+        try:
+            priors[key] = student_tree_prior(a["animal"], receiver, prompt_set=prompt_set,
+                                             output_root=root)
+        except (ValueError, KeyError):
+            # a receiver with no student tree yet and no base-eval prior file (the OLMo
+            # large-aux-2 recipes): a coverage row can still be reported, a tested arm cannot
+            if a.get("expected_prior") is not None or not (a.get("in_progress")
+                                                           or a.get("untestable")):
+                raise
+            priors[key] = float("nan")
+    check_expected_prior(name, priors[key], a.get("expected_prior"))
+    counts = {"students": sum(covered[t] for t in teachers),
+              "n_students": len(teachers) * len(cells), "controls": ctrl_cov,
+              "cells": len(cells)}
+    matrix = None
+    if finished and not a.get("untestable"):
+        matrix = load_cell_matrix(a["animal"], a["sender"], a["receiver"], [*teachers, *short],
+                                  ftseed=ftseed, tseed=a["tseed"], dataset_tag=dataset_tag,
+                                  teacher_dataset_tags=teacher_tags,
+                                  control_dataset_tag=a.get("control_dataset_tag"), cells=cells,
+                                  prompt_set=prompt_set, output_root=root)
+        if matrix.cells != cells:
+            raise ValueError(f"{name}: loaded cells differ from the design")
+    return RegistryArm(name=name, spec=a, cells=cells, teachers=teachers, short=short,
+                       receiver=receiver, prior=priors[key], ctrl_cov=ctrl_cov,
+                       matched=matched, counts=counts, finished=finished, matrix=matrix,
+                       strays=stray, sender_tree=sender_tree, control_tree=control_tree,
+                       dataset_tag=dataset_tag)
+
+
 def significance_table(arms_json: str | Path, output_root: Path | None = None) -> pd.DataFrame:
     """The single transfer-vs-matched-control table for the arms of a registry JSON.
 
     Per arm: design cells (a cells JSON, another arm's cells, or the control tree's cells with
     an ``ftseed`` control value); every listed teacher must cover all of them (``known_short``
-    teachers must miss exactly the listed cells; ``excluded`` must equal the on-disk strays);
+    teachers must miss exactly the listed cells; on-disk teachers the arm lists nowhere are
+    strays, auto-excluded and named in the ``status`` column);
     the receiver's prior is the one ``base_control.json`` shared by its student trees, or the
     receiver's ``analysis/base_eval_*_test.json`` prior when the trees carry none (checked
     against ``expected_prior`` within 5%); dead = probe ``delta_ce`` above the receiver's anchored
@@ -910,7 +1294,8 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
 
     Returns:
         `TABLE_COLUMNS` plus a boolean ``pooled`` column, in registry order; ``status`` is ""
-        on every row of a tested arm.
+        on every row of a tested arm without strays, and the unflagged ``strays excluded: ...``
+        note on a tested arm that has them.
     """
     arms_json = Path(arms_json)
     reg = json.loads(arms_json.read_text())
@@ -920,10 +1305,6 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
     arms = {a["name"]: a for a in reg["arms"]}
     matrices, deads, priors, rows = {}, {}, {}, []
     notes: list[str] = []
-
-    def design(a: dict) -> list[str]:
-        return registry_design_cells(a, arms, arms_json, ftseed=ftseed, prompt_set=prompt_set,
-                                     output_root=root)
 
     def coverage_row(name: str, teachers: list[str], test: str, status: str, cells: str,
                      prior: float = float("nan")) -> dict:
@@ -935,63 +1316,14 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
                 "pooled": False}
 
     for name, a in arms.items():
-        if a.get("partial"):
-            raise ValueError(f"{name}: `partial` arms are no longer supported -- an arm is "
-                             f"tested on its whole design or reported as a coverage row "
-                             f"(in_progress / untestable)")
-        dataset_tag = a.get("dataset_tag", DEFAULT_DATASET_TAG)
-        cells = design(a)
-        teachers, short = list(a["teachers"]), dict(a.get("known_short", {}))
-        _, stray = resolve_teachers([*teachers, *short], animal=a["animal"], sender=a["sender"],
-                                    receiver=a["receiver"], output_root=root,
-                                    dataset_tag=dataset_tag, tseed=a["tseed"])
-        if sorted(stray) != sorted(a.get("excluded", [])):
-            raise ValueError(f"{name}: on-disk strays {stray} != excluded {a.get('excluded', [])}")
-        sender_tree = (root / "students" / a["animal"]
-                       / Path(*model_dir_parts_from_name(base_name(a["receiver"])))
-                       / f"teacher-{base_name(a['sender'])}")
-        control_tree = dataset_dir(root, None, base=base_name(a["receiver"]),
-                                   dataset_tag=a.get("control_dataset_tag") or dataset_tag,
-                                   source="base", numbers_base=base_name(a["sender"]))
-        ctrl_cov = sum(_control_value(control_tree / c, a["animal"], prompt_set, ftseed)[0]
-                       is not None for c in cells)
-        covered = {}
-        for tag in [*teachers, *short]:
-            leaf = sender_tree / f"{tag}_tseed{a['tseed']}" / dataset_tag
-            missing = [c for c in cells if not _has_seed_endpoint(leaf / c, ftseed, prompt_set)]
-            covered[tag] = len(cells) - len(missing)
-            if tag in short:
-                if missing != short[tag]:
-                    raise ValueError(f"{name}: {tag} missing {missing}, registry says {short[tag]}")
-            elif missing and not (a.get("in_progress") or a.get("untestable")):
-                raise ValueError(f"{name}: listed teacher {tag} is short "
-                                 f"{covered[tag]}/{len(cells)}; missing {missing}")
-        # matched cells: every listed teacher's endpoint AND a control, cell by cell
-        matched = sum(
-            _control_value(control_tree / c, a["animal"], prompt_set, ftseed)[0] is not None
-            and all(_has_seed_endpoint(sender_tree / f"{t}_tseed{a['tseed']}" / dataset_tag / c,
-                                       ftseed, prompt_set) for t in teachers)
-            for c in cells)
-        finished = ctrl_cov == len(cells) and all(covered[t] == len(cells) for t in teachers)
-        if not finished and not (a.get("in_progress") or a.get("untestable")):
-            raise ValueError(f"{name}: not a finished set (control covers {ctrl_cov}/"
-                             f"{len(cells)}, matched cells {matched}/{len(cells)}); flag it "
-                             f"in_progress or untestable")
-
-        receiver = base_name(a["receiver"])
-        key = (a["animal"], receiver)
-        if key not in priors:
-            priors[key] = student_tree_prior(a["animal"], receiver, prompt_set=prompt_set,
-                                             output_root=root)
-        check_expected_prior(name, priors[key], a.get("expected_prior"))
-
-        if not finished or a.get("untestable"):
+        ra = load_registry_arm(a, arms, arms_json, root=root, ftseed=ftseed,
+                               prompt_set=prompt_set, priors=priors)
+        teachers, short, cells = ra.teachers, ra.short, ra.cells
+        if not ra.finished or a.get("untestable"):
             # ONE coverage row, no p. The registry's ``note`` / ``untestable`` text is the
             # reason (test column); it may cite the build-time counts through
             # {students}/{n_students}/{controls}/{cells}. The status names what is lacking.
-            counts = {"students": sum(covered[t] for t in teachers),
-                      "n_students": len(teachers) * len(cells), "controls": ctrl_cov,
-                      "cells": len(cells)}
+            counts = ra.counts
             if a.get("untestable"):
                 reason = str(a["untestable"]).format_map(counts)
                 status = reason
@@ -999,25 +1331,22 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
                 reason = a["note"].format_map(counts) if "note" in a else TEST_NONE
                 status = ("not started" if counts["students"] == 0 else
                           f"in progress {counts['students']}/{counts['n_students']} students")
-                if ctrl_cov < len(cells):
-                    status += f", {ctrl_cov}/{len(cells)} controls"
-            rows.append(coverage_row(name, teachers, reason, status, f"{matched}/{len(cells)}",
-                                     priors[key]))
+                if ra.ctrl_cov < len(cells):
+                    status += f", {ra.ctrl_cov}/{len(cells)} controls"
+            rows.append(coverage_row(name, teachers, reason, status,
+                                     f"{ra.matched}/{len(cells)}", ra.prior))
             continue
-        probe_pool = _probe_pool_for(receiver, a.get("probe_pool"))
-        cut = _anchored_cut(root, receiver, probe_pool, dead="keep", notes=notes)
+        probe_pool = _probe_pool_for(ra.receiver, a.get("probe_pool"))
+        cut = _anchored_cut(root, ra.receiver, probe_pool, dead="keep", notes=notes)
 
-        m = load_cell_matrix(a["animal"], a["sender"], a["receiver"], [*teachers, *short],
-                             ftseed=ftseed, tseed=a["tseed"], dataset_tag=dataset_tag,
-                             control_dataset_tag=a.get("control_dataset_tag"), cells=cells,
-                             prompt_set=prompt_set, output_root=root)
-        if m.cells != cells:
-            raise ValueError(f"{name}: loaded cells differ from the design")
-        d = _arm_dead_matrix(m, control_tree, sender_tree, dataset_tag=dataset_tag,
-                             tseed=a["tseed"], ftseed=ftseed, probe_pool=probe_pool, cut=cut)
+        m = ra.matrix
+        d = _arm_dead_matrix(m, ra.control_tree, ra.sender_tree, dataset_tag=ra.dataset_tag,
+                             teacher_dataset_tags=ra.spec.get("teacher_dataset_tags"),
+                             tseed=a["tseed"], ftseed=ftseed, probe_pool=probe_pool, cut=cut,
+                             root=root)
         matrices[name], deads[name] = m, d
-        rows.extend({**r, "status": ""} for r in
-                    significance_rows(m, d, priors[key], name, teachers, short=list(short),
+        rows.extend({**r, "status": _stray_status(ra.strays)} for r in
+                    significance_rows(m, d, ra.prior, name, teachers, short=list(short),
                                       labelled=cut is not None, n_perm=n_perm, seed=seed))
 
     for pool in reg.get("pools", []):
@@ -1089,7 +1418,7 @@ def style_significance_table(df: pd.DataFrame):
     pooled = df["pooled"].fillna(False).astype(bool).to_numpy()
     arms = df["arm"].tolist()
     first = np.array([i == 0 or arms[i] != arms[i - 1] for i in range(len(arms))], dtype=bool)
-    flagged = df["status"].fillna("").astype(str).str.len().gt(0).to_numpy() \
+    flagged = df["status"].fillna("").astype(str).str.startswith(STATUS_FLAG).to_numpy() \
         if "status" in df else np.zeros(len(df), dtype=bool)
     show = df.drop(columns=["pooled", "arm", "teacher"])
     show.index = pd.MultiIndex.from_arrays([df["arm"].to_numpy(), df["teacher"].to_numpy(),
@@ -1135,13 +1464,25 @@ def style_significance_table(df: pd.DataFrame):
 # ----------------------------------------------------------------------------------------------
 # family comparison: is one seed family's SET of arms stronger than another's?
 # ----------------------------------------------------------------------------------------------
-ARM_COLUMNS = ["family", "arm", "cells", "students", "missing", "mean effect",
+ARM_COLUMNS = ["family", "arm", "cells", "students", "missing", "mean effect", "median effect",
                "exceed. frac"]
 
-#: The two ways a student's effect is read: raw gap over its control, and that gap in units of
-#: the receiver's prior. Both are always computed; every test runs once per mode.
-VALUE_MODES = ("absolute", "relative")
-VALUE_COLUMNS = {"absolute": "value_abs", "relative": "value_rel"}
+#: The four ways a student's effect is read: raw gap over its control, that gap in units of
+#: the receiver's prior (PRIMARY), and the two pre-specified secondary retention views -- the
+#: gap over the RECEIVER's own same-model (diagonal) arm mean on the same cell (``receptivity``)
+#: and over the SENDER's (``portability``), absolute p units top and bottom. All are always
+#: computed; every test runs once per mode.
+VALUE_MODES = ("absolute", "relative", "receptivity", "portability")
+VALUE_COLUMNS = {"absolute": "value_abs", "relative": "value_rel",
+                 "receptivity": "value_recept", "portability": "value_port"}
+#: The two diagonal-normalized modes and which end of the arm their yardstick belongs to.
+RETENTION_MODES = {"receptivity": "receiver", "portability": "sender"}
+#: A diagonal stratum enters only when its arm-mean gap D is at least this fraction of the base's
+#: prior (delta = RETENTION_FLOOR x prior): below it the ratio is noise over noise.
+RETENTION_FLOOR = 0.5
+#: Columns of `diagonal_yardsticks`, one row per (animal, base, cell).
+DIAGONAL_COLUMNS = ["animal", "base", "cell", "D", "D_se", "prior", "ctrl", "floor", "n teachers",
+                    "complete", "covers design", "passes floor"]
 
 
 def resolve_cells(cells: Sequence[str] | str | Path | None) -> list[str] | None:
@@ -1200,9 +1541,15 @@ class ModeComparison:
 
     mode: str
     arms: pd.DataFrame
-    mean_contrast: tt.ArmRelabelResult
-    win_probability: tt.ArmRelabelResult
-    arm_level_exceed: tt.ArmSetResult
+    mean_contrast: tt.ArmRelabelResult | None
+    win_probability: tt.ArmRelabelResult | None
+    arm_level_exceed: tt.ArmSetResult | None
+    #: Why the mode has no tests (a retention mode with no usable diagonal); empty when tested.
+    note: str = ""
+    #: Retention modes: (base, cell) strata kept out because their diagonal gap D fell below the
+    #: floor, and the bases with no diagonal complete on the design.
+    n_below_floor: int = 0
+    no_diagonal: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1219,6 +1566,11 @@ class FamilyComparison:
         dead_policy: ``"keep"`` (dead runs enter as measured), ``"drop"``, or
             `DEAD_POLICY_NONE` when the receiver had no anchored cut.
         notes: Anything else the caller must see (e.g. a receiver with no anchored dead cut).
+        diagonals: The diagonal yardsticks (`diagonal_yardsticks`) of every base the arms
+            touch, `DIAGONAL_COLUMNS`; empty when no base was loaded.
+        unit: What the null relabelled -- ``"arm"`` (the default everywhere else, the
+            conservative primary) or ``"run"`` (`registry_family_comparison` with
+            ``unit="run"``: runs shuffled within their cell, both families pooled over arms).
     """
 
     modes: dict[str, ModeComparison]
@@ -1228,6 +1580,8 @@ class FamilyComparison:
     n_dead_control: int | None = 0
     dead_policy: str = "keep"
     notes: list[str] = field(default_factory=list)
+    diagonals: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=DIAGONAL_COLUMNS))
+    unit: str = "arm"
 
     @property
     def n_dead(self) -> int | None:
@@ -1400,11 +1754,15 @@ def _arm_rows(
     # labels stay NaN and the counts come back None -- "unlabelled", never "0 dead".
     cut = _anchored_cut(root, receiver_dir, probe_pool, dead=dead, notes=notes)
 
-    def is_dead(leaf: Path) -> float:
+    labels = _arm_dead_matrix(matrix, control_tree, sender_tree, dataset_tag=dataset_tag,
+                              tseed=tseed, ftseed=dead_ftseed, probe_pool=probe_pool, cut=cut,
+                              root=root)
+
+    def is_dead(i: int, j: int) -> float:
         """1.0 dead / 0.0 alive / NaN unlabelled, so a missing cut never reads as alive."""
         if cut is None:
             return np.nan
-        return float(_dead_label(leaf, dead_ftseed, probe_pool, cut) == 1.0)
+        return float(labels[i, j] == 1.0)
 
     control = matrix.values[:, matrix.control_col]
     matched = [i for i in range(len(matrix.cells)) if np.isfinite(control[i])]
@@ -1413,15 +1771,14 @@ def _arm_rows(
     rows, n_dead_control, n_dead_treatment = [], 0, 0
     for i in matched:
         cell = matrix.cells[i]
-        dead_control = is_dead(control_tree / cell)
+        dead_control = is_dead(i, matrix.control_col)
         n_dead_control += int(np.nan_to_num(dead_control))
         if dead_control == 1.0 and dead == "drop":
             continue
         for j, pool in enumerate(matrix.pools):
             if pool == CONTROL_LABEL or not np.isfinite(matrix.values[i, j]):
                 continue
-            leaf = sender_tree / f"{pool}_tseed{tseed}" / dataset_tag / cell
-            dead_treatment = is_dead(leaf)
+            dead_treatment = is_dead(i, j)
             n_dead_treatment += int(np.nan_to_num(dead_treatment))
             if dead_treatment == 1.0 and dead == "drop":
                 continue
@@ -1443,6 +1800,109 @@ def _arm_rows(
     if cut is None:
         return pd.DataFrame(rows), None, None, n_missing
     return pd.DataFrame(rows), n_dead_treatment, n_dead_control, n_missing
+
+
+def diagonal_yardsticks(
+    animal: str,
+    bases: Sequence[str],
+    teachers: Sequence[str],
+    *,
+    cells: Sequence[str],
+    eval_animal: str | None = None,
+    prompt_set: str = "test",
+    ftseed: int = 1,
+    floor: float = RETENTION_FLOOR,
+    output_root: Path | None = None,
+    **kw,
+) -> pd.DataFrame:
+    """The same-model yardstick of every base at every cell: one row per (animal, base, cell).
+
+    ``D`` is the base's diagonal ARM MEAN gap over the family's teacher tags -- mean over
+    `teachers` of ``p(b->b, t, c) - ctrl(b->b, c)``, the base's own numbers pool distilled back
+    into itself against its own same-base control (``students/controls/base/{b}/teacher-{b}``)
+    -- never one tag's single run. ``D_se`` is the teacher SD over sqrt(n teachers). A cell is
+    ``complete`` when the control and ALL teacher runs are present (the finished-set rule at
+    cell level), it ``passes floor`` when complete and ``D >= floor x prior`` of that base (a
+    cell-level fact, the same under every design), and ``covers design`` marks a base complete
+    at EVERY cell of `cells` -- the retention values need both.
+
+    Args:
+        animal: Animal the teachers were finetuned on.
+        bases: Base tokens whose diagonals are read.
+        teachers: The family's canonical teacher tags (the arm mean runs over all of them).
+        cells: The design cells.
+        eval_animal: Animal scored; defaults to `animal`.
+        prompt_set: Prompt set read out of the summaries.
+        ftseed: Student finetune seed the runs and the control are read at.
+        floor: `RETENTION_FLOOR`; the floor is ``floor x prior``.
+        output_root: Output tree root; defaults to the paths YAML's.
+        **kw: ``dataset_tag``, ``tseed``, ``control_source`` of `load_cell_matrix`.
+
+    Returns:
+        `DIAGONAL_COLUMNS`, in `bases` then `cells` order; ``D`` is NaN where incomplete.
+    """
+    eval_animal = eval_animal or animal
+    design = list(cells)
+    load_kw = {k: kw[k] for k in ("dataset_tag", "tseed", "control_source") if k in kw}
+    rows = []
+    for base in bases:
+        matrix = load_cell_matrix(animal, base, base, teachers, eval_animal=eval_animal,
+                                  prompt_set=prompt_set, ftseed=ftseed, cells=design,
+                                  output_root=output_root, **load_kw)
+        prior = load_prior(eval_animal, base, prompt_set, output_root=output_root)
+        cut = floor * prior
+        index = {c: i for i, c in enumerate(matrix.cells)}
+        base_rows = []
+        for cell in design:
+            i = index.get(cell)
+            row = {"animal": animal, "base": base, "cell": cell, "D": np.nan, "D_se": np.nan,
+                   "prior": prior, "ctrl": np.nan, "floor": cut, "n teachers": len(teachers),
+                   "complete": False, "covers design": False, "passes floor": False}
+            if i is not None:
+                ctrl = matrix.values[i, matrix.control_col]
+                gaps = np.delete(matrix.values[i], matrix.control_col) - ctrl
+                row["ctrl"] = ctrl
+                if np.isfinite(gaps).all() and np.isfinite(ctrl):
+                    row.update(D=float(gaps.mean()),
+                               D_se=float(gaps.std(ddof=1) / np.sqrt(len(gaps)))
+                               if len(gaps) > 1 else np.nan, complete=True)
+                    row["passes floor"] = bool(np.isfinite(cut) and row["D"] >= cut)
+            base_rows.append(row)
+        covers = all(r["complete"] for r in base_rows)
+        for r in base_rows:
+            r["covers design"] = covers
+        rows += base_rows
+    return pd.DataFrame(rows, columns=DIAGONAL_COLUMNS)
+
+
+def _add_retention_values(frame: pd.DataFrame, diagonals: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """`frame` with ``value_recept`` / ``value_port`` (and ``D_receiver`` / ``D_sender``) from
+    the diagonal yardsticks, plus the per-mode report ``{mode: {"below_floor": n,
+    "no_diagonal": [bases]}}``.
+
+    A row's value is ``value_abs / D`` of the arm's receiver (resp. sender) at the row's cell
+    when that base's diagonal covers the design AND the cell passes the floor; NaN otherwise.
+    ``below_floor`` counts the distinct (base, cell) strata of a covering diagonal that failed
+    the floor among the rows of the frame; ``no_diagonal`` lists the bases with no diagonal
+    covering the design.
+    """
+    frame = frame.copy()
+    covering = set(diagonals.loc[diagonals["covers design"].astype(bool), "base"])
+    passing = {(b, c): d for b, c, d, ok in zip(diagonals["base"], diagonals["cell"],
+                                                  diagonals["D"], diagonals["passes floor"])
+               if ok and b in covering}
+    report = {}
+    for mode, end in RETENTION_MODES.items():
+        col = VALUE_COLUMNS[mode]
+        base_of = frame["arm"].str.split("->", n=1).str[0 if end == "sender" else 1]
+        d = np.array([passing.get((b, c), np.nan) for b, c in zip(base_of, frame["cell"])])
+        frame[f"D_{end}"] = d
+        frame[col] = frame["value_abs"].to_numpy(dtype=float) / d
+        below = {(b, c) for b, c in zip(base_of, frame["cell"])
+                 if b in covering and (b, c) not in passing}
+        report[mode] = {"below_floor": len(below),
+                        "no_diagonal": sorted(set(base_of) - covering)}
+    return frame, report
 
 
 def normalized_effect_frame(
@@ -1491,11 +1951,15 @@ def normalized_effect_frame(
 
     Returns:
         ``(frame, report)``. `frame` columns: ``family, arm, teacher, cell, stratum,
-        value_abs, value_rel, treatment, control, dead_treatment, dead_control``, with
-        ``stratum = cell``. `report` holds ``skipped_arms``, ``n_dead_treatment``,
+        value_abs, value_rel, value_recept, value_port, D_receiver, D_sender, treatment,
+        control, dead_treatment, dead_control``, with ``stratum = cell``; the retention values
+        (`_add_retention_values`) are NaN where the base's diagonal does not cover the design
+        or the cell fails the floor. `report` holds ``skipped_arms``, ``n_dead_treatment``,
         ``n_dead_control``, ``n_dead`` (all three None when an anchor was missing, so the
         runs are unlabelled), ``dead_policy`` (`DEAD_POLICY_NONE` then), ``missing`` (per kept
-        arm, its count of missing treatment runs), ``design_cells`` and ``notes``.
+        arm, its count of missing treatment runs), ``design_cells``, ``notes``, ``retention``
+        (``{mode: {"below_floor", "no_diagonal"}}``) and ``diagonals`` (`diagonal_yardsticks`
+        of every base the kept arms touch, on the usable cells).
     """
     if dead not in ("keep", "drop"):
         raise ValueError(f"dead must be 'keep' or 'drop', got {dead!r}")
@@ -1549,12 +2013,23 @@ def normalized_effect_frame(
         block.insert(1, "arm", arm.arm)
         blocks.append(block)
     columns = ["family", "arm", "teacher", "cell", "stratum", "value_abs", "value_rel",
+               "value_recept", "value_port", "D_receiver", "D_sender",
                "treatment", "control", "dead_treatment", "dead_control"]
+    retention = {m: {"below_floor": 0, "no_diagonal": []} for m in RETENTION_MODES}
+    diagonals = pd.DataFrame(columns=DIAGONAL_COLUMNS)
     if not blocks:
         frame = pd.DataFrame(columns=columns)
     else:
         frame = pd.concat(blocks, ignore_index=True)
         frame["stratum"] = frame["cell"]
+        # The retention yardsticks: every base the kept arms touch, read on the usable cells
+        # with the same teachers, seed and dataset the arms were read with.
+        bases = sorted({b for a, _ in members for b in (a.sender, a.receiver)})
+        diagonals = diagonal_yardsticks(animal, bases, teachers, cells=usable,
+                                        eval_animal=eval_animal, prompt_set=prompt_set,
+                                        ftseed=ftseed, output_root=output_root,
+                                        **{k: v for k, v in kw.items() if k != "cells"})
+        frame, retention = _add_retention_values(frame, diagonals)
         frame = frame.reindex(columns=columns)
     anchor_missing = n_dead_treatment is None
     return frame, {"skipped_arms": skipped_arms, "missing": missing,
@@ -1562,12 +2037,14 @@ def normalized_effect_frame(
                    "n_dead_control": None if anchor_missing else int(n_dead_control),
                    "n_dead": None if anchor_missing else int(n_dead_treatment + n_dead_control),
                    "dead_policy": DEAD_POLICY_NONE if anchor_missing else dead,
-                   "design_cells": design, "notes": notes}
+                   "design_cells": design, "notes": notes, "retention": retention,
+                   "diagonals": diagonals}
 
 
 def _arm_summary(block: pd.DataFrame, value_col: str, missing: int) -> dict:
-    """One arm's mean effect in `value_col`, exceedance fraction against its own control, and
-    student/cell counts, on the usable cells.
+    """One arm's mean and median effect in `value_col`, exceedance fraction against its own
+    control, and student/cell counts, on the usable cells (the median beside the mean makes the
+    ratio noise of the retention modes visible).
 
     The exceedance fraction is the share of the arm's runs strictly above their own cell's
     control, so it is invariant to any positive rescaling of the values and reads the same in
@@ -1578,32 +2055,54 @@ def _arm_summary(block: pd.DataFrame, value_col: str, missing: int) -> dict:
     ok = np.isfinite(treatment) & np.isfinite(control)
     return {"cells": int(block["cell"].nunique()), "students": int(len(block)),
             "missing": int(missing), "mean effect": float(block[value_col].mean()),
+            "median effect": float(block[value_col].median()),
             "exceed. frac": float((treatment[ok] > control[ok]).mean()) if ok.any()
                             else float("nan")}
 
 
 def _mode_comparison(frame: pd.DataFrame, mode: str, *, family_a: str, family_b: str,
-                     missing: Mapping[str, int], n_perm: int, seed: int) -> ModeComparison:
-    """One value mode's arm table and its three permutation results."""
+                     missing: Mapping[str, int], n_perm: int, seed: int,
+                     retention: Mapping[str, dict] | None = None) -> ModeComparison:
+    """One value mode's arm table and its three permutation results.
+
+    The tests run on the rows whose value is finite: every row in the absolute and relative
+    modes, only the strata with a covering diagonal above the floor in the retention modes. A
+    retention mode left without a usable stratum on one side (no diagonal with controls on the
+    design) comes back with no tests and a ``note`` instead of raising.
+    """
     value_col = VALUE_COLUMNS[mode]
+    extra = dict(retention or {}).get(mode, {})
+    tail = {"n_below_floor": int(extra.get("below_floor", 0)),
+            "no_diagonal": tuple(extra.get("no_diagonal", ()))}
+    usable = frame[np.isfinite(pd.to_numeric(frame[value_col], errors="coerce"))]
     arm_rows = [{"family": family, "arm": arm,
                  **_arm_summary(block, value_col, missing.get(arm, 0))}
-                for (family, arm), block in frame.groupby(["family", "arm"], sort=False)]
+                for (family, arm), block in usable.groupby(["family", "arm"], sort=False)]
     arm_table = pd.DataFrame(arm_rows).reindex(columns=ARM_COLUMNS)
     arm_table = arm_table.sort_values(by=["family", "arm"]).reset_index(drop=True)
 
     def relabel(statistic: str) -> tt.ArmRelabelResult:
         return tt.arm_relabel_cell_permutation(
-            frame.rename(columns={value_col: "value"}), family_a=family_a, family_b=family_b,
+            usable.rename(columns={value_col: "value"}), family_a=family_a, family_b=family_b,
             statistic=statistic, n_perm=n_perm, seed=seed,
         )
 
-    return ModeComparison(mode=mode, arms=arm_table,
-                          mean_contrast=relabel("mean_contrast"),
-                          win_probability=relabel("win_probability"),
-                          arm_level_exceed=tt.arm_set_permutation(
-                              arm_table.rename(columns={"exceed. frac": "value"}),
-                              family_a=family_a, family_b=family_b, n_perm=n_perm, seed=seed))
+    try:
+        return ModeComparison(mode=mode, arms=arm_table,
+                              mean_contrast=relabel("mean_contrast"),
+                              win_probability=relabel("win_probability"),
+                              arm_level_exceed=tt.arm_set_permutation(
+                                  arm_table.rename(columns={"exceed. frac": "value"}),
+                                  family_a=family_a, family_b=family_b, n_perm=n_perm,
+                                  seed=seed),
+                              **tail)
+    except ValueError:
+        if mode not in RETENTION_MODES:
+            raise
+        note = ("no diagonals with controls" if tail["no_diagonal"]
+                else "no stratum above the floor on both sides")
+        return ModeComparison(mode=mode, arms=arm_table, mean_contrast=None,
+                              win_probability=None, arm_level_exceed=None, note=note, **tail)
 
 
 @dataclass(frozen=True)
@@ -1631,6 +2130,11 @@ class MultiAnimalComparison:
     blocks_present: dict[str, list[str]] = field(default_factory=dict)
     missing_blocks: list[str] = field(default_factory=list)
 
+    @property
+    def diagonals(self) -> pd.DataFrame:
+        """Every animal's diagonal yardsticks (`FamilyComparison.diagonals`), stacked."""
+        return self.stratified.diagonals
+
 
 def _maybe_int(n: int | None) -> int | None:
     """`n` as an int, or None kept as None (an unlabelled count is not a zero one)."""
@@ -1640,15 +2144,20 @@ def _maybe_int(n: int | None) -> int | None:
 def _family_comparison(frame: pd.DataFrame, *, family_a: str, family_b: str,
                        missing: Mapping[str, int], skipped: Sequence[str],
                        n_dead_treatment: int | None, n_dead_control: int | None, dead: str,
-                       notes: Sequence[str], n_perm: int, seed: int) -> FamilyComparison:
-    """Both value modes' `ModeComparison` on one effect frame, wrapped with its report."""
+                       notes: Sequence[str], n_perm: int, seed: int,
+                       retention: Mapping[str, dict] | None = None,
+                       diagonals: pd.DataFrame | None = None) -> FamilyComparison:
+    """Every value mode's `ModeComparison` on one effect frame, wrapped with its report."""
     modes = {mode: _mode_comparison(frame, mode, family_a=family_a, family_b=family_b,
-                                    missing=missing, n_perm=n_perm, seed=seed)
+                                    missing=missing, n_perm=n_perm, seed=seed,
+                                    retention=retention)
              for mode in VALUE_MODES}
     return FamilyComparison(modes=modes, frame=frame, skipped_arms=list(skipped),
                             n_dead_treatment=_maybe_int(n_dead_treatment),
                             n_dead_control=_maybe_int(n_dead_control), dead_policy=dead,
-                            notes=list(notes))
+                            notes=list(notes),
+                            diagonals=(pd.DataFrame(columns=DIAGONAL_COLUMNS)
+                                       if diagonals is None else diagonals))
 
 
 def _explicit_arms(spec) -> bool:
@@ -1744,8 +2253,9 @@ def compare_families(
                  else {a: list(teachers) for a in animal_list})
 
     per_animal: dict[str, FamilyComparison] = {}
-    frames, missing_blocks, notes, dead_policies = [], [], [], []
+    frames, missing_blocks, notes, dead_policies, diagonals = [], [], [], [], []
     missing: dict[str, int] = {}
+    retention = {m: {"below_floor": 0, "no_diagonal": set()} for m in RETENTION_MODES}
     n_dead_treatment = n_dead_control = 0
     for animal in animal_list:
         frame, report = normalized_effect_frame(arms, animal, by_animal[animal],
@@ -1761,8 +2271,13 @@ def compare_families(
         frame.insert(2, "animal", animal)
         frame["stratum"] = animal + "|" + frame["cell"]
         frames.append(frame)
+        diagonals.append(report["diagonals"])
         for arm, n in report["missing"].items():
             missing[arm] = missing.get(arm, 0) + n
+        # (animal, cell) strata: the below-floor counts add up, the missing diagonals union
+        for m, r in report["retention"].items():
+            retention[m]["below_floor"] += r["below_floor"]
+            retention[m]["no_diagonal"] |= set(r["no_diagonal"])
         if report["n_dead_treatment"] is None or n_dead_treatment is None:
             n_dead_treatment = n_dead_control = None
         else:
@@ -1772,7 +2287,8 @@ def compare_families(
             frame, family_a=label_a, family_b=label_b, missing=report["missing"],
             skipped=report["skipped_arms"], n_dead_treatment=report["n_dead_treatment"],
             n_dead_control=report["n_dead_control"], dead=report["dead_policy"],
-            notes=report["notes"], n_perm=n_perm, seed=seed)
+            notes=report["notes"], n_perm=n_perm, seed=seed, retention=report["retention"],
+            diagonals=report["diagonals"])
     if not frames:
         raise ValueError("no cell is reached by both families; nothing to compare")
     if single:
@@ -1782,7 +2298,10 @@ def compare_families(
         pd.concat(frames, ignore_index=True), family_a=label_a, family_b=label_b, missing=missing,
         skipped=missing_blocks, n_dead_treatment=n_dead_treatment, n_dead_control=n_dead_control,
         dead=(DEAD_POLICY_NONE if DEAD_POLICY_NONE in dead_policies else dead), notes=notes,
-        n_perm=n_perm, seed=seed)
+        n_perm=n_perm, seed=seed,
+        retention={m: {"below_floor": r["below_floor"], "no_diagonal": sorted(r["no_diagonal"])}
+                   for m, r in retention.items()},
+        diagonals=pd.concat(diagonals, ignore_index=True))
     blocks = (stratified.frame.drop_duplicates(["arm", "animal"])
               .groupby("arm")["animal"].apply(list).to_dict())
     return MultiAnimalComparison(family_a=label_a, family_b=label_b,
@@ -1883,7 +2402,8 @@ def family_existence_table(
                     root, animal, a.sender, a.receiver, **kw)
                 deads[a.arm] = (_arm_dead_matrix(m, control_tree, sender_tree,
                                                  dataset_tag=dataset_tag, tseed=tseed,
-                                                 ftseed=ftseed, probe_pool=pool, cut=cut),
+                                                 ftseed=ftseed, probe_pool=pool, cut=cut,
+                                                 root=root),
                                 cut is not None)
         stacked = stack_cell_matrices(matrices) if matrices else None
         for a in arms:
@@ -1917,27 +2437,47 @@ def family_existence_table(
     return pd.DataFrame(rows).reindex(columns=[*EXISTENCE_COLUMNS, "pooled"])
 
 
-COMPARISON_COLUMNS = ["comparison", "design", "animal", "value mode", "arms A vs B",
+COMPARISON_COLUMNS = ["comparison", "design", "animal", "value mode", "unit", "arms A vs B",
                       "mean contrast", "mean p", "win prob.", "win p", "exceed. frac contrast",
                       "exceed. p", "floor", "labelings", "missing blocks"]
 
 
+def _retention_note(m: ModeComparison, design: str) -> str:
+    """The retention-mode additions to ``missing blocks``: the note of an untested mode (with
+    the design named), else the strata below the floor and the bases with no diagonal."""
+    end = RETENTION_MODES[m.mode][0]
+    if m.note:
+        bases = f" ({', '.join(m.no_diagonal)})" if m.no_diagonal else ""
+        return f"{m.mode}: {m.note} on {design}{bases}"
+    parts = [f"{m.mode}: {m.n_below_floor} ({end}, cell) strata below floor"]
+    if m.no_diagonal:
+        parts.append(f"no diagonal for {', '.join(m.no_diagonal)} on {design}")
+    return "; ".join(parts)
+
+
 def _comparison_rows(comparison: str, design: str, animal: str, res: FamilyComparison) -> list[dict]:
-    """One (comparison, design, animal) block: one row per value mode."""
+    """One (comparison, design, animal) block: one row per value mode. A retention mode with no
+    usable diagonal keeps its row with the reason in ``missing blocks`` and no numbers."""
     rows = []
+    blocks = (f"{len(res.skipped_arms)}: " + ", ".join(s.split(":")[0] for s in res.skipped_arms)
+              ) if res.skipped_arms else "0"
     for mode in VALUE_MODES:
         m = res.modes[mode]
+        row = {"comparison": comparison, "design": design, "animal": animal, "value mode": mode,
+               "unit": getattr(res, "unit", "arm"), "missing blocks": blocks}
+        if mode in RETENTION_MODES:
+            row["missing blocks"] = f"{blocks}; {_retention_note(m, design)}"
+        if m.note:
+            rows.append(row)
+            continue
         rows.append({
-            "comparison": comparison, "design": design, "animal": animal, "value mode": mode,
+            **row,
             "arms A vs B": f"{m.mean_contrast.n_a} vs {m.mean_contrast.n_b}",
             "mean contrast": m.mean_contrast.observed, "mean p": m.mean_contrast.p,
             "win prob.": m.win_probability.observed, "win p": m.win_probability.p,
             "exceed. frac contrast": m.arm_level_exceed.observed,
             "exceed. p": m.arm_level_exceed.p, "floor": m.mean_contrast.floor,
             "labelings": m.mean_contrast.n_labelings,
-            "missing blocks": (f"{len(res.skipped_arms)}: "
-                               + ", ".join(s.split(":")[0] for s in res.skipped_arms)
-                               ) if res.skipped_arms else "0",
         })
     return rows
 
@@ -1969,6 +2509,51 @@ def family_comparison_table(
         rows += [{**r, "stratified": True}
                  for r in _comparison_rows(comparison, design, label, res.stratified)]
     return pd.DataFrame(rows).reindex(columns=[*COMPARISON_COLUMNS, "stratified"])
+
+
+#: Columns of `diagonals_table`.
+DIAGONALS_TABLE_COLUMNS = ["animal", "base", "cells", "cells passing floor", "median D/prior",
+                           "median SE/D"]
+
+
+def diagonals_table(
+    comparisons: Mapping[tuple[str, str], FamilyComparison | MultiAnimalComparison],
+) -> pd.DataFrame:
+    """ONE compact table of the diagonal yardsticks behind the retention modes: per (animal,
+    base) the median ``D / prior`` over its complete cells, the cells passing the floor out of
+    the complete ones, and the median ``D_se / D`` over the passing cells (teacher SD / sqrt(n)
+    relative to the yardstick: the ratio noise the retention values carry).
+
+    Args:
+        comparisons: The `family_comparison_table` input; every result's ``diagonals`` is
+            stacked and a (animal, base, cell) seen under several designs counts once (its
+            ``D``, ``complete`` and ``passes floor`` are cell-level facts, identical under
+            every design).
+
+    Returns:
+        `DIAGONALS_TABLE_COLUMNS`, one row per (animal, base) with at least one complete cell.
+    """
+    frames = [res.diagonals for res in comparisons.values()]
+    frames = [f for f in frames if len(f)]
+    if not frames:
+        return pd.DataFrame(columns=DIAGONALS_TABLE_COLUMNS)
+    d = pd.concat(frames, ignore_index=True).drop_duplicates(["animal", "base", "cell"])
+    d = d[d["complete"].astype(bool)]
+    rows = []
+    for (animal, base), block in d.groupby(["animal", "base"], sort=False):
+        passing = block[block["passes floor"].astype(bool)]
+        rows.append({"animal": animal, "base": base, "cells": int(len(block)),
+                     "cells passing floor": int(len(passing)),
+                     "median D/prior": float((block["D"] / block["prior"]).median()),
+                     "median SE/D": float((passing["D_se"] / passing["D"]).median())
+                     if len(passing) else float("nan")})
+    return pd.DataFrame(rows, columns=DIAGONALS_TABLE_COLUMNS)
+
+
+def style_diagonals_table(df: pd.DataFrame):
+    """Styler for `diagonals_table`: (animal, base) index, three-decimal ratios."""
+    return (df.set_index(["animal", "base"]).style
+            .format({"median D/prior": "{:.3f}", "median SE/D": "{:.3f}"}, na_rep=""))
 
 
 def _p_styler(df: pd.DataFrame, p_columns: Sequence[str], *, index: Sequence[str],
@@ -2033,9 +2618,10 @@ def lacking_data_table(rows: Sequence[tuple[str, str, str, str]]) -> pd.DataFram
 
 
 def flagged_arms(df: pd.DataFrame, section: str) -> list[tuple[str, str, str, str]]:
-    """The roll-up rows of a `significance_table`: one per row with a non-empty ``status``
-    (coverage rows are one per arm already), coverage = its ``cells`` column."""
-    flagged = df[df["status"].fillna("").astype(str).str.len().gt(0)]
+    """The roll-up rows of a `significance_table`: one per row whose ``status`` carries
+    `STATUS_FLAG` (coverage rows are one per arm already), coverage = its ``cells`` column.
+    A tested arm's ``strays excluded: …`` status is informational and never rolled up."""
+    flagged = df[df["status"].fillna("").astype(str).str.startswith(STATUS_FLAG)]
     return [(section, r["arm"], r["status"], str(r["cells"])) for r in flagged.to_dict("records")]
 
 
@@ -2074,3 +2660,378 @@ def flagged_missing_blocks(df: pd.DataFrame, section: str) -> list[tuple[str, st
                         f"{STATUS_FLAG} {len(blocks)} blocks kept out by the coverage rule",
                         ", ".join(blocks)))
     return out
+
+
+# ----------------------------------------------------------------------------------------------
+# registry-level comparisons: two SETS of registry arms, and two arms paired sender by sender
+# ----------------------------------------------------------------------------------------------
+#: Columns of the tidy per-run frame the registry comparisons build (the subset of
+#: `normalized_effect_frame`'s columns the arm-relabel tests read; the two retention columns are
+#: present and all-NaN, so those modes come back untested with a note instead of raising).
+REGISTRY_FRAME_COLUMNS = ["family", "animal", "arm", "teacher", "cell", "stratum", "value_abs",
+                          "value_rel", "value_recept", "value_port", "treatment", "control",
+                          "arm_ctrl_max"]
+
+
+def _registry_context(arms_json: str | Path, *, root: Path | None, ftseed: int | None,
+                      prompt_set: str | None) -> tuple[dict, dict, dict]:
+    """``(registry, {name: entry}, kwargs)`` with `load_registry_arm`'s ``root``/``ftseed``/
+    ``prompt_set`` resolved the way `significance_table` resolves them (the registry's keys,
+    an explicit argument winning)."""
+    reg = json.loads(Path(arms_json).read_text())
+    arms = {a["name"]: a for a in reg["arms"]}
+    return reg, arms, {
+        "root": resolve_output_root(root),
+        "ftseed": reg.get("ftseed", 1) if ftseed is None else ftseed,
+        "prompt_set": reg.get("prompt_set", "test") if prompt_set is None else prompt_set,
+    }
+
+
+def _registry_arm_skip(ra: RegistryArm) -> str | None:
+    """Why an arm cannot be tested, worded like `significance_table`'s coverage row, or None
+    when it is a finished, testable set."""
+    if ra.spec.get("untestable"):
+        return str(ra.spec["untestable"]).format_map(ra.counts)
+    if not ra.finished or ra.matrix is None:
+        c = ra.counts
+        status = ("not started" if c["students"] == 0
+                  else f"in progress {c['students']}/{c['n_students']} students")
+        if ra.ctrl_cov < len(ra.cells):
+            status += f", {ra.ctrl_cov}/{len(ra.cells)} controls"
+        return status
+    return None
+
+
+def _registry_arm_frame(ra: RegistryArm, family: str) -> pd.DataFrame:
+    """One finished arm's tidy rows: a row per (full-set teacher, cell) with a finite treatment
+    and a finite control, in `REGISTRY_FRAME_COLUMNS`.
+
+    Only the arm's listed full-set teachers (`RegistryArm.teachers`) contribute; a
+    ``known_short`` pool covers part of the design only, so pooling it would weight the arm by
+    the cells that teacher happened to reach -- `significance_table` reports those pools and
+    never pools them either.
+
+    ``value_rel`` divides the gap by THIS arm's receiver prior (never a shared one) and is NaN
+    when the arm has no usable prior; the two retention columns are NaN throughout.
+    ``arm_ctrl_max`` is the arm's exceedance threshold: the maximum control value over its FULL
+    design, fixed here so that no later filter (the shared-cell intersection, a value mode's
+    finiteness mask) can lower an arm's own bar; it is NaN when the arm has no finite control.
+    """
+    m = ra.matrix
+    control = m.values[:, m.control_col]
+    prior = ra.prior if ra.prior is not None and np.isfinite(ra.prior) and ra.prior != 0 else None
+    finite_control = control[np.isfinite(control)]
+    ctrl_max = float(finite_control.max()) if finite_control.size else float("nan")
+    rows = []
+    for i, cell in enumerate(m.cells):
+        if not np.isfinite(control[i]):
+            continue
+        for j, pool in enumerate(m.pools):
+            if pool not in ra.teachers or not np.isfinite(m.values[i, j]):
+                continue
+            gap = float(m.values[i, j] - control[i])
+            rows.append({"family": family, "animal": ra.spec["animal"], "arm": ra.name,
+                         "teacher": pool, "cell": cell, "stratum": cell, "value_abs": gap,
+                         "value_rel": gap / prior if prior else float("nan"),
+                         "value_recept": float("nan"), "value_port": float("nan"),
+                         "treatment": float(m.values[i, j]), "control": float(control[i]),
+                         "arm_ctrl_max": ctrl_max})
+    return pd.DataFrame(rows, columns=REGISTRY_FRAME_COLUMNS)
+
+
+def _run_exceedance_flags(frame: pd.DataFrame) -> np.ndarray:
+    """Per run, whether it beat its own arm's full-design control maximum: 1.0, 0.0, or NaN.
+
+    The threshold is ``arm_ctrl_max`` as `_registry_arm_frame` fixed it -- the arm's OWN control
+    maximum over its whole design, never a pooled one (receivers differ in prior, so one loud
+    arm's control would otherwise become every other arm's bar) and never recomputed from the
+    surviving rows (dropping the arm's loudest control cell would silently lower its bar).
+    A run with no finite treatment, or an arm with no finite threshold, is NaN -- unknown, not a
+    failure to exceed -- and the tests drop it.
+    """
+    treatment = frame["treatment"].to_numpy(dtype=float)
+    cut = frame["arm_ctrl_max"].to_numpy(dtype=float)
+    known = np.isfinite(treatment) & np.isfinite(cut)
+    return np.where(known, (treatment > cut).astype(float), np.nan)
+
+
+def _registry_run_mode_comparison(frame: pd.DataFrame, mode: str, *, family_a: str,
+                                  family_b: str, n_perm: int, seed: int) -> ModeComparison:
+    """One value mode's `ModeComparison` with the RUN as the unit relabelled.
+
+    Same three statistics as `_mode_comparison` and the same arm table, but every test runs
+    under `stats.run_relabel_cell_permutation`: mean contrast and win probability per cell, and
+    -- in place of the arm-level exceedance permutation -- the difference between the two
+    families' POOLED fractions of runs above their own arm's control maximum, read under the
+    same within-cell run relabelling. A retention mode has no values here and comes back
+    untested with its note, exactly as at arm level.
+    """
+    value_col = VALUE_COLUMNS[mode]
+    usable = frame[np.isfinite(pd.to_numeric(frame[value_col], errors="coerce"))]
+    arm_rows = [{"family": family, "arm": arm, **_arm_summary(block, value_col, 0)}
+                for (family, arm), block in usable.groupby(["family", "arm"], sort=False)]
+    arm_table = pd.DataFrame(arm_rows).reindex(columns=ARM_COLUMNS)
+    arm_table = arm_table.sort_values(by=["family", "arm"]).reset_index(drop=True)
+
+    def relabel(df: pd.DataFrame, col: str, statistic: str) -> tt.ArmRelabelResult:
+        return tt.run_relabel_cell_permutation(
+            df.rename(columns={col: "value"}), family_a=family_a, family_b=family_b,
+            statistic=statistic, n_perm=n_perm, seed=seed)
+
+    try:
+        exceed = usable.assign(exceed=_run_exceedance_flags(usable))
+        return ModeComparison(mode=mode, arms=arm_table,
+                              mean_contrast=relabel(usable, value_col, "mean_contrast"),
+                              win_probability=relabel(usable, value_col, "win_probability"),
+                              arm_level_exceed=relabel(exceed, "exceed", "pooled_mean"))
+    except ValueError:
+        if mode not in RETENTION_MODES:
+            raise
+        return ModeComparison(mode=mode, arms=arm_table, mean_contrast=None,
+                              win_probability=None, arm_level_exceed=None,
+                              note="no stratum above the floor on both sides")
+
+
+def registry_family_comparison(
+    arms_json: str | Path,
+    family_a: tuple[str, Sequence[str]],
+    family_b: tuple[str, Sequence[str]],
+    *,
+    unit: str = "arm",
+    n_perm: int = 20000,
+    seed: int = 0,
+    root: Path | None = None,
+    ftseed: int | None = None,
+    prompt_set: str | None = None,
+) -> FamilyComparison:
+    """Does one relationship class of REGISTRY arms transfer more than another?
+
+    The same arm-relabel machinery as `compare_families` (per-cell mean contrast, per-cell win
+    probability, arm-level exceedance fraction, in every value mode), but the arms are named by
+    a registry JSON instead of being enumerated from base tokens -- which is what lets two
+    hand-picked classes be compared, e.g. OLMo's same-init/different-corpus arms against its
+    different-init/different-corpus ones. Only FINISHED, testable arms enter, exactly as
+    `significance_table` decides: an unfinished, ``untestable`` or unknown arm is SKIPPED and
+    named in `FamilyComparison.skipped_arms`, never tested on the cells that happened to finish.
+
+    Cells are the strata, so arms on different designs contribute only the cells both families
+    reach (the `normalized_effect_frame` rule); how many were shared and how many dropped is a
+    note. Each arm's ``value_rel`` uses ITS OWN receiver prior; an arm without one keeps NaN
+    there and is named in a note as excluded from the relative mode. The two retention modes
+    have no diagonal yardsticks here and come back untested with their usual note.
+
+    Args:
+        arms_json: Registry path (format: ``run_logs/repretrain/...arms.json``).
+        family_a: ``(label, [arm names])`` of the class claimed stronger.
+        family_b: ``(label, [arm names])`` of the reference class.
+        unit: What the null relabels. ``"arm"`` (default) is the conservative primary:
+            whole arms are relabelled. ``"run"`` pools every arm of a class and shuffles the
+            family labels among the RUNS inside each cell (`stats.run_relabel_cell_permutation`,
+            whose docstring states what that assumes), with the arm-level exceedance
+            permutation replaced by the two classes' pooled exceedance fractions under the same
+            null; report it BESIDE the arm-level row, never instead of it.
+        n_perm: Monte-Carlo draws beyond the exact-enumeration cap.
+        seed: Seed of the permutation draws.
+        root: Output tree root; defaults to the paths YAML's.
+        ftseed, prompt_set: Override the registry's keys (default: the registry's).
+
+    Returns:
+        A `FamilyComparison`, renderable through `family_comparison_table`.
+
+    Raises:
+        ValueError: If the two labels are equal, an arm name is repeated within a family or
+            claimed by both, `unit` is neither ``"arm"`` nor ``"run"``, or no arm of a family
+            is testable.
+    """
+    if unit not in ("arm", "run"):
+        raise ValueError(f"unit must be 'arm' or 'run', got {unit!r}")
+    label_a, names_a = family_a
+    label_b, names_b = family_b
+    if label_a == label_b:
+        raise ValueError(f"the two families need distinct labels, got {label_a!r} twice")
+    # An arm counted twice would be two units of the relabelling reading the same runs.
+    for label, names in ((label_a, names_a), (label_b, names_b)):
+        repeated = sorted({n for n in names if list(names).count(n) > 1})
+        if repeated:
+            raise ValueError(f"{label!r} lists an arm twice: {', '.join(repeated)}")
+    both = sorted(set(names_a) & set(names_b))
+    if both:
+        raise ValueError(f"an arm cannot be in both families: {', '.join(both)}")
+    arms_json = Path(arms_json)
+    _, arms, ctx = _registry_context(arms_json, root=root, ftseed=ftseed, prompt_set=prompt_set)
+    priors: dict = {}
+    blocks: list[pd.DataFrame] = []
+    skipped: list[str] = []
+    notes: list[str] = []
+    for label, names in ((label_a, names_a), (label_b, names_b)):
+        for name in names:
+            if name not in arms:
+                skipped.append(f"{name}: not an arm of {arms_json.name}")
+                continue
+            ra = load_registry_arm(arms[name], arms, arms_json, priors=priors, **ctx)
+            reason = _registry_arm_skip(ra)
+            if reason is not None:
+                skipped.append(f"{name}: {reason}")
+                continue
+            block = _registry_arm_frame(ra, label)
+            if block.empty:
+                skipped.append(f"{name}: no matched run")
+                continue
+            if not block["value_rel"].notna().any():
+                notes.append(f"{name}: no receiver prior -- excluded from the relative mode")
+            blocks.append(block)
+    present = {label: [b for b in blocks if b["family"].iloc[0] == label]
+               for label in (label_a, label_b)}
+    for label in (label_a, label_b):
+        if not present[label]:
+            raise ValueError(f"no testable arm on the {label!r} side "
+                             f"({'; '.join(skipped) or 'none named'})")
+    cells = {label: set().union(*[set(b["cell"]) for b in present[label]])
+             for label in (label_a, label_b)}
+    shared = cells[label_a] & cells[label_b]
+    dropped = len((cells[label_a] | cells[label_b]) - shared)
+    notes.append(f"{len(shared)} cells shared by both families, {dropped} reached by one only")
+    frame = pd.concat(blocks, ignore_index=True)
+    frame = frame[frame["cell"].isin(shared)].reset_index(drop=True)
+    counts = frame["family"].value_counts()
+    notes.append(f"runs: {int(counts.get(label_a, 0))} in {label_a!r} "
+                 f"({len(present[label_a])} arms), {int(counts.get(label_b, 0))} in "
+                 f"{label_b!r} ({len(present[label_b])} arms)")
+    if unit == "arm":
+        missing = {arm: 0 for arm in frame["arm"].unique()}
+        return _family_comparison(frame, family_a=label_a, family_b=label_b, missing=missing,
+                                  skipped=skipped, n_dead_treatment=None, n_dead_control=None,
+                                  dead=DEAD_POLICY_NONE, notes=notes, n_perm=n_perm, seed=seed)
+    modes = {mode: _registry_run_mode_comparison(frame, mode, family_a=label_a,
+                                                 family_b=label_b, n_perm=n_perm, seed=seed)
+             for mode in VALUE_MODES}
+    return FamilyComparison(modes=modes, frame=frame, skipped_arms=skipped,
+                            n_dead_treatment=None, n_dead_control=None,
+                            dead_policy=DEAD_POLICY_NONE, notes=notes, unit="run")
+
+
+def _registry_short_arm(reg: Mapping, spec: Mapping) -> str:
+    """An arm as the registry renders it short: ``"{sender} -> {receiver}"`` in the registry's
+    ``short_names`` (keyed by the arm's own token or by the base name), falling back to the
+    arm's own name when a base has none."""
+    short = reg.get("short_names", {})
+
+    def label(token: str) -> str | None:
+        return short.get(token, short.get(base_name(token)))
+
+    sender, receiver = label(spec["sender"]), label(spec["receiver"])
+    if sender and receiver:
+        return f"{sender} → {receiver}"
+    return spec["name"]
+
+
+def registry_paired_contrast(
+    arms_json: str | Path,
+    arm_a: str,
+    arm_b: str,
+    *,
+    n_perm: int = 20000,
+    seed: int = 0,
+    root: Path | None = None,
+    ftseed: int | None = None,
+    prompt_set: str | None = None,
+) -> dict:
+    """Did the SAME senders transfer more into receiver A than into receiver B?
+
+    Two finished registry arms that share their teacher tags, paired run by run on
+    ``(teacher, cell)``: a sign test and a within-pair sign-flip permutation
+    (`stats.paired_sign_flip_permutation`) on the paired difference of the prior-normalized
+    gaps. Both receivers are FIXED here -- with one arm per side there is nothing to relabel --
+    so this is a statement about these ten senders and these two receivers, never a family
+    claim; `registry_family_comparison` is the test that generalizes over arms.
+
+    Args:
+        arms_json: Registry path.
+        arm_a: Arm claimed stronger.
+        arm_b: Reference arm.
+        n_perm: Sign-flip draws.
+        seed: Seed of those draws.
+        root: Output tree root; defaults to the paths YAML's.
+        ftseed, prompt_set: Override the registry's keys.
+
+    Returns:
+        ``{arm_a, arm_b, n_pairs, wins_a, sign_p, mean_diff_rel, median_diff_rel, mean_diff_abs,
+        flip_p, flip_p_opposite, scale, n_teachers, cells, note}``; ``arm_a``/``arm_b`` are the
+        registry's short renderings and the full registry names are in ``note``. ``scale`` says
+        which gap the sign test and the sign-flip permutation read -- ``"relative"`` (the gap
+        over each receiver's prior, the usual case) or ``"absolute"`` when a receiver has no
+        prior, which also leaves the three relative numbers NaN.
+
+    Raises:
+        ValueError: Naming the arm, if an arm is unknown, unfinished or ``untestable``; if the
+            two arms differ in ``animal`` or ``tseed`` (their runs would not be the same senders
+            read the same way); or if they share no ``(teacher, cell)`` pair.
+    """
+    arms_json = Path(arms_json)
+    reg, arms, ctx = _registry_context(arms_json, root=root, ftseed=ftseed, prompt_set=prompt_set)
+    priors: dict = {}
+    loaded, frames = {}, {}
+    for name in (arm_a, arm_b):
+        if name not in arms:
+            raise ValueError(f"{name}: not an arm of {arms_json.name}")
+        ra = load_registry_arm(arms[name], arms, arms_json, priors=priors, **ctx)
+        reason = _registry_arm_skip(ra)
+        if reason is not None:
+            raise ValueError(f"{name}: not a finished, testable arm ({reason})")
+        loaded[name], frames[name] = ra, _registry_arm_frame(ra, name)
+    for key in ("animal", "tseed"):
+        got = {name: loaded[name].spec[key] for name in (arm_a, arm_b)}
+        if len(set(got.values())) != 1:
+            raise ValueError(f"{arm_a} and {arm_b} differ in {key} ({got}): their runs are not "
+                             f"the same senders read the same way, so they cannot be paired")
+    pairs = frames[arm_a].merge(frames[arm_b], on=["teacher", "cell"], suffixes=("_a", "_b"))
+    if pairs.empty:
+        raise ValueError(f"{arm_a} and {arm_b} share no (teacher, cell) pair")
+    notes = [f"{arm_a} vs {arm_b}"]
+    rel = pairs["value_rel_a"].notna().all() and pairs["value_rel_b"].notna().all()
+    if not rel:
+        notes.append("no receiver prior on one side: the relative numbers are NaN, the sign "
+                     "test and the sign-flip permutation read the absolute gaps")
+    col_a, col_b = ("value_rel_a", "value_rel_b") if rel else ("value_abs_a", "value_abs_b")
+    sign = tt.paired_sign_test(pairs[col_a], pairs[col_b])
+    diffs = (pairs[col_a] - pairs[col_b]).to_numpy(dtype=float)
+    flip = tt.paired_sign_flip_permutation(diffs, n_perm=n_perm, seed=seed)
+    rel_diff = ((pairs["value_rel_a"] - pairs["value_rel_b"]).to_numpy(dtype=float) if rel
+                else np.full(len(pairs), float("nan")))
+    return {"arm_a": _registry_short_arm(reg, arms[arm_a]),
+            "arm_b": _registry_short_arm(reg, arms[arm_b]),
+            "n_pairs": int(len(pairs)), "wins_a": int(sign.wins), "sign_p": float(sign.p),
+            "mean_diff_rel": float(np.nanmean(rel_diff)) if rel else float("nan"),
+            "median_diff_rel": float(np.nanmedian(rel_diff)) if rel else float("nan"),
+            "mean_diff_abs": float((pairs["value_abs_a"] - pairs["value_abs_b"]).mean()),
+            "flip_p": float(flip.p), "flip_p_opposite": float(flip.p_opposite),
+            "scale": "relative" if rel else "absolute",
+            "n_teachers": int(pairs["teacher"].nunique()),
+            "cells": int(pairs["cell"].nunique()), "note": "; ".join(notes)}
+
+
+#: Columns of `registry_paired_contrast_table`.
+PAIRED_CONTRAST_COLUMNS = ["contrast", "scale", "n teachers", "n pairs", "wins A", "sign p",
+                           "mean Δ rel", "median Δ rel", "mean Δ abs", "flip p", "flip p opp.",
+                           "note"]
+
+
+def registry_paired_contrast_table(contrasts: Sequence[Mapping]) -> pd.DataFrame:
+    """`registry_paired_contrast` dicts as one `PAIRED_CONTRAST_COLUMNS` frame, one row each."""
+    rows = [{"contrast": f"{c['arm_a']} vs {c['arm_b']}", "scale": c["scale"],
+             "n teachers": c["n_teachers"], "n pairs": c["n_pairs"], "wins A": c["wins_a"],
+             "sign p": c["sign_p"], "mean Δ rel": c["mean_diff_rel"],
+             "median Δ rel": c["median_diff_rel"], "mean Δ abs": c["mean_diff_abs"],
+             "flip p": c["flip_p"], "flip p opp.": c["flip_p_opposite"], "note": c["note"]}
+            for c in contrasts]
+    return pd.DataFrame(rows, columns=PAIRED_CONTRAST_COLUMNS)
+
+
+def style_registry_paired_contrast_table(df: pd.DataFrame):
+    """Styler for `registry_paired_contrast_table`: ``sign p``, ``flip p`` and the opposite
+    tail's ``flip p opp.`` below 0.05 bold on the same light green as the other tables,
+    contrast as the index, differences to 3 dp."""
+    return _p_styler(df, ["sign p", "flip p", "flip p opp."], index=["contrast"],
+                     grey=np.zeros(len(df), dtype=bool),
+                     floats={"mean Δ rel": ".3f", "median Δ rel": ".3f",
+                             "mean Δ abs": ".3f"})

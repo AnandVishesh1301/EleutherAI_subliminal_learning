@@ -136,15 +136,52 @@ src/subliminal_learning/
                     relative mode, via compare_families with explicit FamilyArm lists, its
                     `arms A` / `arms B` columns naming the sender→receiver model pairs
                     behind each side's arm count) and
-                    then holds five tables plus a closing roll-up: the
+                    then holds five tables, the §5b class comparison and a closing roll-up.
+                    §5b (same init vs different init, both across corpora) reads the two OLMo
+                    cross-corpus classes straight off the registry
+                    (registry_arm_names(..., data_order=...)) and renders
+                    registry_family_comparison in BOTH units -- `arm` primary (exact
+                    enumeration, floor 1/C(a+b, a): 0.25 at 3 vs 1 arms, 0.0048 at the full 6
+                    vs 4) and `run` as its anticonservative companion -- beside the paired
+                    same-sender contrasts (registry_paired_contrast, dclm → c4 vs
+                    dclm → seed2 / c4-seed2, receivers fixed). Draft figures of the headline
+                    table live in notebooks/figures/drafts/: fig1_four_measures.py (four
+                    effect measures per family × animal) and fig2_null_strip.py
+                    (null_strip_figure at n_perm 20000 / seed 0, a memo hit after the
+                    notebook run). The five tables are: the
                     cross-architecture arms (full-coverage senders only, per data-order class;
                     every style_significance_table block is one arm shown once, its pooled
-                    stratified-permutation row FIRST, then its per-teacher rows;
-                    the 160m ↔ OLMo-1B and 410m-seed1 trees carry pilot-selected
-                    teacher sets read on held-out cells), family_existence_table for the
+                    stratified-permutation row FIRST, then its per-teacher rows; every
+                    per-arm loader (load_cell_matrix with pinned cells, _arm_dead_matrix,
+                    diagonal_direction.load_arm_runs) and every seeded permutation test is
+                    memoized through stats/memo.py -- content-hash keys (run-file
+                    size/mtime signatures for loaders, value arrays + seed + draws for
+                    the tests) as JSON under {output_root}/analysis/cache/
+                    transfer_significance/, SUBLIMINAL_ANALYSIS_CACHE=0 to bypass, so a
+                    re-execution after a presentation change recomputes only arms whose
+                    files changed and the notebook's last cell prints the hit/miss count;
+                    the stratified exceedance result carries its null draws as a lossless
+                    histogram (StratifiedPermResult.null_hist), so analysis.transfer_headline
+                    reads the same memoized permutation for the headline table's exceed. % /
+                    null 95th columns and for its null_strip_figure;
+                    ONE arm per (sender, receiver) pair -- where part of a pair's
+                    teachers was pilot-selected, the selection cells are held out for
+                    EVERY teacher of the pair, and on-disk teachers an arm lists nowhere
+                    are strays, auto-excluded and named in the status column), family_existence_table for the
                     Pythia seed families (core56; same-model on focus20, its controls' only
                     cells), family_comparison_table for cross-data-order vs cross-seed and
-                    same-model vs cross-data-order, the 160m re-pretraining direction matrix
+                    same-model vs cross-data-order in FOUR value modes (VALUE_MODES:
+                    absolute gap, relative = gap / receiver prior (PRIMARY), and the two
+                    pre-specified secondary retention modes receptivity = gap / D_r(c) and
+                    portability = gap / D_s(c), where D_b(c) = the base's diagonal ARM MEAN
+                    gap over the family's ten teacher tags against its own same-base
+                    control at that cell (diagonal_yardsticks); a stratum enters only when
+                    the diagonal is complete on the whole design and D ≥ δ = 0.5 × that
+                    base's prior, below-floor strata are counted in `missing blocks`, y is
+                    never clipped, a design without diagonals (core56) renders note rows;
+                    arm tables carry `median effect` beside the mean; diagonals_table =
+                    ONE per-(animal, base) yardstick table after the comparison), the 160m
+                    re-pretraining direction matrix
                     (run_logs/repretrain/repretrain_significance_arms.json:
                     orig/pr1234/pr3/dclm1234/dclm1/wc1/wc2 arms on core30 + HOT10 for dog,
                     cat, lion, pig and chicken, arm names carrying the animal, pools never
@@ -152,9 +189,28 @@ src/subliminal_learning/
                     test prior), and the OLMo-1B DataDecide cross-seed AND cross-recipe arms
                     (run_logs/repretrain/olmo_cross_seed_significance_arms.json: dd-1b /
                     dd-1b-seed2 / -seed3 elephant arms on ctrl20 + olmo_core30 + top25
-                    union, plus the dolma ↔ dclm ↔ c4 recipe arms on core35 and their
-                    single-cell pilots, tseed 0, base controls only -- rng twins live in the
-                    CLI). significance_table's contract (20260920): ONLY A FINISHED SET GETS
+                    union, plus the recipe × seed matrix on core35, tseed 0, base
+                    controls only -- rng twins live in the CLI; 20260922: the same-init /
+                    different-corpus class is the six ordered dolma ↔ dclm ↔ c4 arms (one
+                    per pair, canonical 10-sender manifests dolma_top10_senders.json /
+                    c4_top10_senders.json / the dclm pilot ranks, selection cells held out
+                    where the receiver entered the selection) and the different-init /
+                    different-corpus class (data_order `cross-recipe+seed`) the four
+                    dclm/dolma → large-aux-2 arms (dclm → seed2 / c4-seed2, dolma →
+                    dclm-seed2 / c4-seed2); dolma → dclm, dclm → dolma, dclm → c4 and
+                    dclm → seed2 are finished and pooled per class (the pools grow as arms
+                    finish), the rest are `in_progress` coverage rows, dolma33 → dclm stays
+                    an untestable ordering pilot and the elephant dolma → c4 / c4 → *
+                    single-cell pilot arms were folded into those pairs' core35 arms; the
+                    xarch 160m → 410m / 410m-seed1 arms are the 10 promoted senders each on
+                    core30, the 09-20 31-cell pin retired, and the two reverse arms
+                    410m → 160m / 410m-seed1 → 160m carry the 10 senders of
+                    p410m_top10_senders_pythia-410m{,-seed1}.json on core30 -- the seed1
+                    arm reading its one 125k sender through the optional per-arm
+                    `teacher_dataset_tags` ({param_tag: dataset_tag}, overriding
+                    `dataset_tag` for the teachers it names in the student leaves, endpoint
+                    check, stray scan and dead matrix while the control tree keeps
+                    `control_dataset_tag`), which retired the separate r8a16 arm). significance_table's contract (20260920): ONLY A FINISHED SET GETS
                     A P -- every listed teacher with an ftseed endpoint on every design cell
                     and a matched control on every design cell; an arm short of that must be
                     flagged `in_progress` (+ `note` with {students}/{n_students}/{controls}/
@@ -165,9 +221,12 @@ src/subliminal_learning/
                     removes a pilot-selected set's selection cells from the design before
                     loading (`selection_note` = how the set was chosen, printed in the
                     notebook markdown via registry_selection_notes), `cells` may be a
-                    relative JSON path (`cells` or `tags` key) or an inline list, and every
-                    row carries a final `status` column ("" on tested arms, "⚠ …" naming what
-                    is lacking); style_significance_table shades every row of a flagged arm
+                    relative JSON path (`cells` or `tags` key) or an inline list, on-disk
+                    teachers an arm lists nowhere are strays -- excluded from the arm
+                    whether or not the optional `excluded` key declares them, never a
+                    reason to untest it -- and every row carries a final `status` column
+                    ("" on tested arms, "strays excluded: …" on a tested arm that has
+                    them, "⚠ …" naming what is lacking); style_significance_table shades every row of a flagged arm
                     amber and style_family_existence_table shades §2's skipped arms the same;
                     flagged_arms / flagged_family_arms / flagged_missing_blocks +
                     lacking_data_table build the notebook's closing §6 "arms lacking data"
@@ -1125,6 +1184,23 @@ are unrun arms — the ds*/ws* diagonals were never run on core56. Its one `src/
 `full-seed{1,2,3}` -> `fs{1,2,3}` entries so `load_priors` also returns the full-seed bases'
 `test_prior`; the receiver/family/prior-label tables and `count_complete_cells` live in
 `analysis.fsfact_transfer`.
+
+The pooled treatment-minus-control view of that same population is reproducible outside the
+notebook: `analysis.transfer_family_pooled` pairs every ALIVE treatment run with the
+untuned-sender control at its `(sender, receiver, animal, cell)` stratum and boxes the
+differences by relationship, and `scripts/plot_transfer_family_pooled_minus_control.py`
+(`uv run python -m scripts.plot_transfer_family_pooled_minus_control`) writes the four
+`notebooks/figures/transfer_family_pooled_minus_control_alive{,_linear,_floor1e-2,_4spaces}.png`
+charts (symlog to 1e-6, linear, symlog floored at 1e-2, and the 2x2 four-value-spaces panel)
+plus the pooled summary table. The three legacy slots keep coming from the executed notebook's
+data cells (`legacy_pairs`, which re-executes them with every save suppressed) because
+`fsfact_transfer` only knows the `orig`/`ds`/`ws`/`fs` tokens; a fourth slot, *different init,
+same data order*, adds the ordered pairs among the re-pretrainings `wc1`/`wc2`/`prv1` (same
+Pile data order, a different weight init) on `run_logs/core30_cells.json` x the per-animal
+top-10 k-band teachers, read straight off the output tree with
+`transfer_significance_io.load_cell_matrix` (`repretrain_pairs`). Receivers without an anchored
+pp1 cut (`weightc-seed2`, `pilereprov1-seed1234`) cannot be dead-labelled: their runs are kept
+UNFILTERED and their annotations drawn red, never dropped and never called alive.
 
 ### Pythia-410m cross-seed arm (2026-08-21)
 
@@ -5004,8 +5080,9 @@ that failed), `transfer_matrices`, `HEATMAP_ORDER`. Figures
 
 The same notebook then pools ordered arms by relationship (`relationship_category`: self,
 same-model siblings = orig↔ws (SGD-noise siblings, not reseeded), cross-data-order/same init,
-cross-init/same order (same tree required: orig↔wc1 differs in init AND tree and is `other`, noted
-`cross-init +tree`; "same init" also requires the same code tree, so wc1↔dclm1 is `other`),
+cross-init/same order split by code tree into `(v1.0 tree)` = wc1↔wc2 and `(modern tree)` =
+pr1234↔pr3, dclm1↔dclm1234 (same tree required: orig↔wc1 differs in init AND tree and is `other`,
+noted `cross-init +tree`; "same init" also requires the same code tree, so wc1↔dclm1 is `other`),
 same init/different corpus, same init/different tree,
 cross-init+cross-order, and the two cross-width 160m↔410m rows loaded from
 `run_logs/xarch/xarch_significance_arms.json` via `load_xarch_runs` on their own 4/1/1/1 teachers and
@@ -5027,3 +5104,128 @@ that animal's k-band teachers and on-disk arms; cross-width arms are dog-only), 
 (`category_family_arms` → `compare_families`, which now also accepts explicit `FamilyArm` lists,
 → `relationship_pairing_table`; self pairings on focus20 since the self controls exist there only).
 Tests: `tests/test_analysis_transfer_matrix.py`, `tests/test_family_comparison.py`.
+
+### Checkpoint-distillation results audit (2026-09-21)
+
+`docs/results/checkpoint_distillation_results_20260921.md` is the updated paper-style
+checkpoint-emergence synthesis, with a dog/cat synthetic-profile figure and companion
+evidence audit. The audit verifies saved evaluations, pool statistics, and training
+provenance; distinguishes whole-integer frequency profiles from tokenizer unigrams;
+and qualifies earlier entropy-mediation and absolute recipient-gate claims. The
+pr1234 strong20 arm now has 20 scored student evaluations (mean dog probability
+0.351, maximum 0.528). Run-level resampling data and the current student-summary
+census are recorded under `docs/results/data/`.
+
+### Transfer-predictor appendix and steerability figures (2026-09-21)
+
+`docs/results/transfer_predictors_appendix_20260921.md` synthesizes executed
+steerability, teacher-quality, prior, sender/receiver, and representation analyses;
+its evidence companion records notebook cell locations, comparison populations,
+scale sensitivity, and proposed figures. In particular, the steerability rank
+partials are null after teacher-preference adjustment, but same-model logit
+specifications retain positive associations. The receiver plot always uses
+original Pythia-160M teachers as senders: original, data-seed, and full-seed
+labels identify receivers. `notebooks/steerability_vs_transfer.ipynb` contains
+the revised logit teacher/student figure and a single-panel linear receiver
+figure, with compact titles and PNG/PDF exports. The appendix provides their
+full captions and distinguishes the 102-teacher/eight-recipe analysis from the
+ten-teacher/56-recipe receiver comparison.
+The receiver figure also exports full-precision coordinates and its exact shared
+recipe support to `notebooks/figures/steerability_ungated_receivers.csv` and
+`steerability_ungated_receivers_shared_recipes.json`, enabling figure-only changes
+without re-aggregating the experiment tree.
+
+
+### Same-model student optimizer comparison (2026-09-21)
+
+`scripts/plot_student_optimizer_transfer.py` audits the fixed dog teacher
+`ep2_lr5e-4_r32a64_tseed1` and same-model Pythia-160M ep20/ftseed1 students
+under Adam (`adamw_torch`, zero decay) and plain SGD. It validates saved
+training/data/evaluation provenance and exports source tables, grid coverage,
+peak tables, and PNG/PDF learning-rate curves under
+`notebooks/figures/student_optimizer_transfer/`. The shared 504-cell grid per
+optimizer has 471 Adam and 490 SGD finite preference evaluations; remaining
+cells have nonfinite adapters and are not imputed. At r8/alpha32 the sampled
+peaks are 0.9561 at 1e-4 and 0.9660 at 0.05, respectively. A second figure
+compares all eight ranks at alpha32. Both figures use the common nine-rate
+grids; refinement evaluations remain in the source tables.
+`docs/results/student_optimizer_transfer_20260921.md` contains the findings,
+main-results insertion, appendix draft, captions, and interpretation limits.
+Seven focused loader/provenance tests accompany the reproducible plot script.
+
+`uv run python -m scripts.plot_steerability_transfer` now reproduces the
+standalone teacher/student plot without selected-teacher rings, a combined
+teacher-preference/adjusted-steering figure, and a separate same-model versus
+cross-model transfer figure from the saved 102-teacher/eight-recipe CSV. Stats
+sidecars record the input hash, rank and logit specifications, nominal partial
+p-values with the fitted-control degrees of freedom, and approximate Fisher
+intervals. The original notebook plot cell and a final appended cell use the
+helper. The appendix distinguishes the positive preference-only same/cross
+association from the separate fixed-recipe audit's mostly null results after
+additional off-topic adjustment.
+
+
+Checkpoint entropy/transfer artifact analysis: `uv run python -m scripts.plot_checkpoint_entropy_transfer` is a CPU-only entrypoint that discovers canonical checkpoint prefix pools and exact same-checkpoint student manifests across all available teacher recipes. It verifies source-content hashes against pool and student manifests, reuses unchanged cached integer histograms, and keeps teacher seeds, student recipes, and datasets distinct. It writes paginated trajectories/scatters and teacher keys under `notebooks/figures/checkpoint_entropy_transfer/`, with per-recipe transfer tables, descriptive correlations, pool histograms, and per-seed provenance under `docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921*`. The input cache defaults to `docs/results/data/checkpoint_number_entropy_20260921.csv.gz`; roots and output locations are CLI-configurable.
+
+`uv run python -m scripts.plot_checkpoint_takeoff` reproduces the nine separate dog checkpoint-transfer curves (orig, ds1–3, fs1–3, wc1–2) and the original-model 13×13 teacher/student checkpoint matrix. It verifies current filtered-pool and student-training hashes, exact checkpoint identities (including local wc models), and saved probability scoring; available student seeds are averaged within each canonical teacher recipe before an equal five-recipe mean. PNG/PDF, complete-cell/recipe CSVs, and compressed per-run provenance are written to `notebooks/figures/ckpt_takeoff_9models_and_orig_cliffcross*`. Unchanged pool-hash evidence is reused from the entropy analysis cache; missing recipes remain missing, and regenerated n200k sources are matched by content hash and generation size.
+
+Finalized paper figures live in `docs/paper/figures/` only after explicit user
+approval. Draft optimizer figures remain under `notebooks/figures/` during review.
+
+`uv run python -m scripts.plot_wc2_entropy_comparison` is an offline figure entrypoint comparing original, wc1, wc2, and fs2 checkpoint trajectories for all-number entropy, first-number entropy, and diagonal dog preference. It reads the verified per-recipe entropy/transfer CSV, selects exactly the canonical five teachers and fixed student recipe, checks saved seed means and source-hash agreement, and plots only complete five-recipe groups. Faint recipe curves show variability rather than confidence intervals; both entropy panels share limits. PNG/PDF, aggregate CSV, and source-hash/assumption JSON outputs are saved under `notebooks/figures/wc2_number_distribution_20260922*`; `--input` and `--output` override these analysis paths.
+
+Pool-label exchangeability sensitivity diagnostics live in `src/subliminal_learning/stats/transfer_pool_robustness.py` and `scripts/transfer_pool_robustness.py`. They jointly relabel reused sender pools across all receiver cells and report sensitivity p-values alongside the existing cell-wise existence test. The CLI reproduces frozen empirical matrices from `matrices.npz` with `--frozen` and also runs an explicitly idealized null simulation; these are diagnostics, not replacement calibrated p-values, because selected teacher pools and controls need not be exchangeable.
+
+Family influence checks live in `analysis/transfer_family_robustness.py` and
+`scripts/transfer_family_robustness.py`: remove every arm incident to a base,
+compare separate fixed-sender/fixed-receiver subsets, and preserve arm identities
+across animal × student-cell strata. The `main --input ... --out ...` command
+replays compressed frozen frames; `live` loads pinned core56/focus20 designs.
+Reports include available strata, animal coverage, and raw-effect companions.
+`docs/results/transfer_robustness_20260922.md` records the executed checks,
+coverage limits, pool-dependence sensitivity, and a four-paragraph paper draft.
+
+`uv run python -m scripts.analyze_checkpoint_redistribution` analyzes the verified checkpoint integer-histogram snapshot without scanning raw pools or running models. It matches each canonical dog teacher recipe/seed to its own 75k baseline, computes first-number and all-number TV and base-2 Jensen–Shannon distance before seed-then-recipe averaging, and preserves actual checkpoint gaps in consecutive-distance tables. Signed probability changes are compared by cosine within model (distinct teacher pairs), across models (all pairs and matching recipes), and between model-average changes. The selected inventory contains one teacher fine-tuning seed; student seeds are never treated as source-pool replicates. CSV tables, signed vectors, and provenance are saved to `docs/results/data/checkpoint_redistribution_20260922*`; trajectory and teacher/model similarity PNG/PDF figures are under `notebooks/figures/checkpoint_redistribution_20260922*`. The analysis and control-coverage limitations are documented in `docs/results/checkpoint_redistribution_20260922.md`.
+
+The entropy comparison entrypoint also supports `--all-nine` for one mean curve per Figure 1 lineage and `--highlight-pr1234` for five highlighted model means (Pythia-160M, wc1, wc2, fs2, pr1234) with the other five lineage means faintly colored. These variants write distinct output basenames and preserve the original four-model figure. Complete five-recipe groups are required; missing pr1234 transfer coverage is recorded rather than filled.
+
+
+
+### Paired first-number-only control (2026-09-22)
+
+`uv run python -m scripts.resampling_first_only build --output-root <outputs>`
+creates dog `step125000_synthfirstonly/poolseed0` from the saved untuned-75k
+uniform carrier draw and mature-125k `ep2_lr5e-4_r32a64` IID pool. Each first
+integer is copied from its paired IID row; later completion text, prompts and
+row order retain the carrier values. Parent/output hashes and pairing checks
+are validated on resume. The pool uses the existing teacher-home layout and
+completion-only student training/evaluation wrapper.
+
+By default, `emit` writes three jobs (student seeds 1–3, recipient 125k,
+dog only) and an exact copy of the anchor training YAML under
+`run_logs/sl_first_only_20260922`; `run --student-seed N` executes one of them.
+A separate campaign can emit both `--arm step125000_synthfirstonly
+step125000_synthiid`, with `--recipient` selecting first-only checkpoints and
+`--iid-recipient` selecting missing IID controls. Supported recipients are
+75k, 85k, 95k, 105k, 115k, and 125k. Jobs freeze both pool hashes, the IID
+manifest hash, and the archived training configuration before routing through
+`controls.run_cell`; the original 125k commands remain usable. The recipient
+extension under `run_logs/sl_first_only_recipients_20260922` adds 15 first-only
+and 12 IID-control fits, reusing nine completed fits. No new teacher generation
+is needed. See `docs/results/first_number_only_20260922.md`.
+
+The paired first-only runner also accepts `--pool-seed 0`, `1`, or `2`, with
+one draw frozen per campaign. Both parents, derived-pool paths, job keys and
+training calls use that draw; omitted flags preserve the original pool-0
+commands. Additional draws live under `run_logs/sl_first_only_poolseed{1,2}_20260922`.
+Their combined 60-job manifest and independent pairing checks are under
+`run_logs/sl_first_only_draws12_20260922`. The worker rejects a draw that differs
+from the saved campaign before accessing its pools.
+
+`uv run python -m scripts.plot_checkpoint_orig_early_mature` renders a 2-by-2
+75k/125k teacher/student slice from the verified original-model cell CSV,
+without model inference or reaggregation. It requires four unique complete
+five-recipe cells and saves PNG, PDF, cell CSV and source provenance under
+`notebooks/figures/ckpt_orig_early_mature_2x2_20260922*`. The existing full
+Figure 1 is unchanged; the draft includes the slice with its seed-coverage
+caption.

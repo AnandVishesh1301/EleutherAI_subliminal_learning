@@ -1,0 +1,36 @@
+# Same-model distillation at the FINAL checkpoint (143000) of `data-seed2` for ranks 6-10 of the
+# canonical dog top-10 teacher recipes (run_logs/dog_top20krungs_configs.json param_tags[5:10];
+# ranks 1-5 already exist under the @step143000 lineage, so no depends_on_prefix is needed).
+# Fills the canonical top-10 at the 143k diagonal across every Pythia-160m lineage, single
+# teacher/student seed, with the standard checkpoint-distill stages (teacher ftseed1, 100k
+# prefix pool, ep10 lr1e-4 r8a32 student). Cost ~5 x (1 + 27 + 25) min ~= 4.5 GPU-h.
+base_model: data-seed2
+
+steps: [143000]
+
+pairs:
+  topology: explicit
+  explicit:
+    - [143000, 143000]
+
+animals: [dog]
+
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep5_lr5e-4_r8a16, ep5_lr2e-4_r64a64, ep7_lr2e-4_r32a32,
+                       ep10_lr1e-4_r32a64, ep7_lr1e-4_r32a64]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# cwd: null -> jobs run in the claiming pool's own checkout (repo-relative commands; temp-1
+# cannot read /home/angela). Unpinned. Prio 75 = above the OLMo core35 sets (73/74), below
+# the pilots (76). Distill mem 6000 = Angela's lowered Pythia student ask (2026-09-19).
+jobq: {cwd: null, root: run_logs/queue_angela, queue_prefix: ckpt-dogds2-top10fill-20260921,
+       node: null,
+       priorities: {teacher: 75, numgen: 75, distill: 75},
+       mem_mib: {teacher: 8000, numgen: 8000, distill: 6000}}

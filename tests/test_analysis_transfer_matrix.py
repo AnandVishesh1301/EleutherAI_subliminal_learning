@@ -143,7 +143,8 @@ CATEGORY_EXAMPLES = {
     "self (x→x)": [("orig", "orig"), ("ds1", "ds1"), ("wc1", "wc1")],
     "same-model siblings": [("orig", "ws1"), ("orig", "ws2"), ("ws1", "ws3")],
     "cross-data-order, same init": [("orig", "ds1"), ("ds1", "ds2"), ("ws1", "ds1")],
-    "cross-init, same data order": [("dclm1234", "dclm1"), ("wc1", "wc2"), ("pr1234", "pr3")],
+    "cross-init, same order (v1.0 tree)": [("wc1", "wc2"), ("wc2", "wc1")],
+    "cross-init, same order (modern tree)": [("dclm1234", "dclm1"), ("pr1234", "pr3")],
     "same init, different corpus": [("pr1234", "dclm1234")],
     "same init, different tree": [("orig", "pr1234")],
     "cross-init + cross-data-order": [("orig", "fs1"), ("fs1", "fs2"), ("ds1", "fs1"),
@@ -160,6 +161,17 @@ def test_relationship_category_examples_both_directions():
             assert tm.relationship_category(x, y) == cat, (x, y)
             assert tm.relationship_category(y, x) == cat, (y, x)
     assert list(CATEGORY_EXAMPLES)[:-1] == list(tm.RELATIONSHIP_CATEGORIES)
+
+
+def test_cross_init_same_order_is_split_by_code_tree():
+    """wc1<->wc2 (v1.0 gpt-neox tree) and pr1234<->pr3 (modern tree) are separate categories,
+    neither `other`; the tree fact comes from `diagonal_direction.MODELS`."""
+    v1, modern = tm.relationship_category("wc1", "wc2"), tm.relationship_category("pr1234", "pr3")
+    assert v1 != modern and tm.OTHER_CATEGORY not in (v1, modern)
+    assert v1 == "cross-init, same order (v1.0 tree)"
+    assert modern == "cross-init, same order (modern tree)"
+    assert tm.relationship_category("dclm1", "dclm1234") == modern
+    assert {v1, modern} <= set(tm.RELATIONSHIP_CATEGORIES) and {v1, modern} <= set(tm.PAIRING_CATEGORIES)
 
 
 def _arm_table(arms, *, control=0.1, on_disk=None, xarch=None):
@@ -208,12 +220,12 @@ def test_category_summary_median_max_mean_and_n0_rows():
     assert s.grid_max.loc["same-model siblings", "mean"] == pytest.approx(0.9)
     assert s.grid_mean.loc["same-model siblings", "mean"] == pytest.approx(0.5)
     assert s.value_labels().loc["same-model siblings", "mean"] == "median 0.40 · max 0.90"
-    assert s.value_labels().loc["cross-init, same data order", "mean"] == ""
+    assert s.value_labels().loc["cross-init, same order (v1.0 tree)", "mean"] == ""
     assert s.n["same-model siblings"] == 3 and s.n_runs["same-model siblings"] == 10
     assert s.sublabels()["same-model siblings"] == "n=3 arms, 10/900 runs"
-    assert s.n["cross-init, same data order"] == 0
-    assert np.isnan(s.grid.loc["cross-init, same data order", "mean"])
-    assert s.sublabels()["cross-init, same data order"] == "n=0 arms, 0/0 runs"
+    assert s.n["cross-init, same order (v1.0 tree)"] == 0
+    assert np.isnan(s.grid.loc["cross-init, same order (v1.0 tree)", "mean"])
+    assert s.sublabels()["cross-init, same order (v1.0 tree)"] == "n=0 arms, 0/0 runs"
     assert list(s.stats) == list(tm.STATS)
 
 
@@ -294,7 +306,7 @@ def test_exceedance_untestable_arm_is_nan_not_null():
     p = pooled.set_index("category")
     sib = p.loc["same-model siblings"]
     assert sib.n_arms_total == 1 and sib.n_arms_testable == 0 and np.isnan(sib.perm_p)
-    assert np.isnan(p.loc["cross-init, same data order", "perm_p"])   # no arm at all
+    assert np.isnan(p.loc["cross-init, same order (v1.0 tree)", "perm_p"])   # no arm at all
     assert list(pooled.category) == list(tm.RELATIONSHIP_CATEGORIES)
 
 
@@ -302,7 +314,7 @@ def test_relationship_significance_panel_shape():
     _, pooled = _exc({("orig", "ds1"): FULL30, ("orig", "ws1"): FULL30},
                      control={("orig", "ds1"): 0.1, ("orig", "ws1"): np.nan})
     fig, ax = aplots.relationship_significance_panel(pooled, n_perm=200)
-    assert len(ax.get_xticklabels()) == 3 and len(ax.get_yticklabels()) == 9
+    assert len(ax.get_xticklabels()) == 3 and len(ax.get_yticklabels()) == len(tm.RELATIONSHIP_CATEGORIES)
     assert "200 perms" in ax.get_title()
     matplotlib.pyplot.close(fig)
     assert tm.style_exceedance_table(_exc({("orig", "ds1"): FULL30})[0]).to_html()
@@ -351,7 +363,7 @@ def test_category_family_arms_and_pairings():
     assert [(a.family, a.sender, a.receiver) for a in arms["cross-data-order, same init"]] == \
         [("cross-data-order, same init", "orig", "ds1")]
     # re-pretrained lineages have no short alias in `base_name`, so they carry the base dir
-    assert [(a.sender, a.receiver) for a in arms["cross-init, same data order"]] == \
+    assert [(a.sender, a.receiver) for a in arms["cross-init, same order (modern tree)"]] == \
         [("pythia-160m-pilerepro-seed1234", "pythia-160m-pilerepro-seed3")]
     assert arms["cross-init + cross-data-order"] == []        # no control -> not a pairing arm
     pairs = tm.category_pairings({"a": 0.2, "b": 0.5, "c": 0.1}, categories=["a", "b", "c"])
@@ -370,6 +382,79 @@ def test_family_arm_labels_short_labels_in_frame_order_once_per_arm():
                 "wc1->pythia-160m-weightc-seed2"],
         "animal": ["dog", "cat", "dog", "dog", "cat", "dog"]})
     a, b = tm._family_arm_labels(SimpleNamespace(frame=frame), "a", "b")
-    assert a == "orig→ds1, ds1→orig"
+    assert a == "all 2 directions among {orig, ds1}"     # both directions of one pair
     assert b == "pr1234→pr3, wc1→wc2"
     assert tm.PAIRING_COLUMNS[3:6] == ["arms A vs B", "arms A", "arms B"]
+
+
+def _labels(arms_a, arms_b):
+    from types import SimpleNamespace
+
+    frame = pd.DataFrame({"family": ["a"] * len(arms_a) + ["b"] * len(arms_b),
+                          "arm": [*arms_a, *arms_b]})
+    return tm._family_arm_labels(SimpleNamespace(frame=frame), "a", "b")
+
+
+def test_family_arm_labels_full_factorial_hub_and_partial_shapes():
+    """A side that is every ordered pair of its models collapses to `all k directions among
+    {...}`; one shared sender to `x → {...}`, one shared receiver to `{...} → x`; a partial
+    factorial stays an explicit list."""
+    full3 = ["orig->ds1", "orig->ds2", "ds1->orig", "ds1->ds2", "ds2->orig", "ds2->ds1"]
+    hub = ["orig->ds1", "orig->ds2", "orig->ds3"]
+    a, b = _labels(full3, hub)
+    assert a == "all 6 directions among {orig, ds1, ds2}"
+    assert b == "orig → {ds1, ds2, ds3}"
+    a, b = _labels(["ds1->orig", "ds2->orig"], ["orig->ds1", "ds1->ds2", "ds2->orig"])
+    assert a == "{ds1, ds2} → orig"
+    assert b == "orig→ds1, ds1→ds2, ds2→orig"
+    assert _labels(["orig->ds1"], ["ds1->ds1"])[0] == "orig→ds1"     # single arm: as is
+
+
+def _pairing_table():
+    return pd.DataFrame({
+        "comparison": ["x vs y", "x vs y"], "design": ["core30", "core30"],
+        "animal": ["dog", "dog+cat stratified"], "arms A vs B": ["3 vs 2", "3 vs 2"],
+        "arms A": ["a", "a"], "arms B": ["b", "b"],
+        "mean contrast": [0.1, 0.2], "mean p": [0.03, 0.5], "win prob.": [0.6, 0.55],
+        "win p": [0.2, 0.4], "exceed. frac contrast": [0.1, 0.0], "exceed. p": [0.3, 0.9],
+        "opp. p (mean / win / exc.)": ["0.98 / 0.8 / 0.7", "0.5 / 0.6 / 0.01"],
+        "animals sig. A>B (mean / win / exc.)": ["—", "1/2 / 0/2 / 0/1"],
+        "animals sig. B>A (mean / win / exc.)": ["—", "0/2 / 0/2 / 1/1"],
+        "floor": [1e-2, 1e-3], "labelings": [10, 1000], "stratified": [False, True]})
+
+
+def test_pairing_columns_and_styler_highlight_the_reverse_direction():
+    """The new columns sit right after the three A>B p columns, floor/labelings close the table;
+    the styler runs and paints an `opp. p` cell with any value < 0.05 in the opposite colour."""
+    assert tm.PAIRING_COLUMNS[11:15] == ["exceed. p", "opp. p (mean / win / exc.)",
+                                         "animals sig. A>B (mean / win / exc.)",
+                                         "animals sig. B>A (mean / win / exc.)"]
+    assert tm.PAIRING_COLUMNS[-2:] == ["floor", "labelings"]
+    assert "missing blocks" not in tm.PAIRING_COLUMNS
+    df = _pairing_table()
+    assert list(df.columns) == [*tm.PAIRING_COLUMNS, "stratified"]
+    html = tm.style_relationship_pairing_table(df).to_html()
+    assert html.count("rgba(255, 140, 90, 0.4)") == 1     # the stratified row's opp. p only
+    assert tm._opposite_significant("0.5 / — / 0.01") and not tm._opposite_significant("— / — / —")
+    assert not tm._opposite_significant(float("nan"))
+
+
+def test_pairing_extras_counts_animals_and_reads_the_rows_own_tests():
+    """`_pairing_extras`: opp. p from the row's own comparison (per-animal on a single-animal
+    row, stratified on the stratified row); `k/n` counts skip animals lacking a test."""
+    from types import SimpleNamespace as NS
+
+    from subliminal_learning.analysis.transfer_significance_io import (
+        FamilyComparison, MultiAnimalComparison)
+
+    def fc(p_mean, p_win, p_exc, opp):
+        t = lambda p: NS(p=p, p_opposite=opp)  # noqa: E731
+        m = NS(mode="relative", mean_contrast=t(p_mean), win_probability=t(p_win),
+               arm_level_exceed=None if p_exc is None else t(p_exc))
+        return FamilyComparison(modes={"relative": m}, frame=pd.DataFrame())
+    per = {"dog": fc(0.01, 0.2, 0.03, 0.9), "cat": fc(0.5, 0.04, None, 0.02)}
+    res = MultiAnimalComparison("x", "y", ["dog", "cat"], per, fc(0.1, 0.1, 0.1, 0.7))
+    assert tm._pairing_extras(res, animal="dog", stratified=False) == ("0.9 / 0.9 / 0.9", "—", "—")
+    opp, fwd, rev = tm._pairing_extras(res, animal="dog+cat stratified", stratified=True)
+    assert (opp, fwd, rev) == ("0.7 / 0.7 / 0.7", "1/2 / 1/2 / 1/1", "1/2 / 1/2 / 0/1")
+    assert tm._pairing_extras(per["cat"], animal="cat", stratified=False)[0] == "0.02 / 0.02 / —"

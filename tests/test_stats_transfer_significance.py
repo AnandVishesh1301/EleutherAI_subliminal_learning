@@ -943,6 +943,34 @@ def test_tested_arm_has_an_empty_status_and_no_amber(tmp_path):
     assert tio.flagged_arms(df, "1") == []
 
 
+def test_undeclared_stray_is_excluded_and_named_not_flagged(tmp_path):
+    """An on-disk teacher the arm lists nowhere is auto-excluded (no raise, no `excluded`
+    declaration needed): the arm is still TESTED on its listed teachers, and every row carries
+    the unflagged `strays excluded: …` status."""
+    _registry_tree(tmp_path)
+    ds, recv = "ex10-20_prefix_n100k", "pythia-160m-pilerepro-seed1234"
+    _write_summary(tmp_path / "students/dog" / recv / "teacher-pythia-160m"
+                   / f"t_stray_tseed1/{ds}/c1/preference_summary.json", "test", 0.9)
+    reg_dir = tmp_path / "run_logs"
+    reg_dir.mkdir()
+    (reg_dir / "arms.json").write_text(json.dumps({
+        "ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test",
+        "arms": [{"name": "orig → pr1234", "animal": "dog", "sender": "pythia-160m",
+                  "receiver": "pythia-160m-pilerepro-seed1234", "tseed": 1, "data_order": "same",
+                  "expected_prior": 0.2, "cells": ["c1", "c2"], "teachers": ["t1", "t2"]}],
+        "pools": [], "held_out": []}))
+    arms = json.loads((reg_dir / "arms.json").read_text())["arms"]
+    ra = tio.load_registry_arm(arms[0], {a["name"]: a for a in arms}, reg_dir / "arms.json",
+                               root=tmp_path)
+    assert ra.strays == ["t_stray"] and ra.teachers == ["t1", "t2"]
+    assert ra.finished and ra.matrix is not None and "t_stray" not in ra.matrix.pools
+
+    df = tio.significance_table(reg_dir / "arms.json", output_root=tmp_path)
+    assert (df["status"] == "strays excluded: t_stray").all()
+    assert df["perm p"].notna().any() and tio.flagged_arms(df, "1") == []
+    assert "255, 180, 0" not in tio.style_significance_table(df).to_html()
+
+
 def test_exclude_cells_holds_out_the_selection_cells(tmp_path):
     """`exclude_cells` drops the selection cells before loading (the `cells` column reads the
     held-out count); a cell outside the design is an error; an inline `cells` list and a
@@ -1076,3 +1104,176 @@ def test_unpinned_receiver_tree_is_unchanged(tmp_path):
     matrix = tio.load_cell_matrix("dog", "fs1", "original", ["t1"], output_root=tmp_path)
     assert matrix.cells == ["c1", "c2"]
     assert matrix.values[0].tolist() == pytest.approx([0.5, 0.1])
+
+
+# ----------------------------------------------------------------------------------------------
+# the null distribution carried on the result
+# ----------------------------------------------------------------------------------------------
+def test_null_hist_is_lossless_and_reproduces_the_quantiles():
+    """`null_hist` holds every draw (its frequencies sum to n_perm) and `null_percentile`
+    reads the same 95th percentile the quantile summary reports."""
+    values = _separated_matrix()
+    r = tt.stratified_exceedance_permutation(values, 11, n_perm=500, seed=2)
+    assert sum(f for _, f in r.null_hist) == r.n_perm
+    assert [c for c, _ in r.null_hist] == sorted(c for c, _ in r.null_hist)
+    assert tt.null_counts(r).size == r.n_perm
+    assert tt.null_percentile(r, 95) == r.null_quantiles["95"]
+    assert tt.null_percentile(r, 50) == r.null_quantiles["50"]
+
+
+def _swap_frame(rows):
+    """``(family, arm, stratum, value)`` rows as the arm-relabel frame."""
+    return pd.DataFrame(rows, columns=["family", "arm", "stratum", "value"])
+
+
+def test_p_opposite_is_the_swapped_families_p_on_the_exact_path():
+    """`p_opposite` reads the same null for B > A: swapping the families' labels turns it into
+    the forward `p` (exact enumeration, symmetric null). The observed labelling is itself
+    enumerated and sits in both tails, so ``p + p_opposite == 1 + #{null == observed} / n``;
+    distinct values keep every other labelling off the observed, giving exactly ``1 + 1/n``."""
+    rows = [("A", "a1", "s", 3.0), ("A", "a2", "s", 5.0), ("A", "a3", "s", 4.0),
+            ("B", "b1", "s", 1.0), ("B", "b2", "s", 2.0), ("B", "b3", "s", 0.5)]
+    frame = _swap_frame(rows)
+    fwd = tt.arm_set_permutation(frame, family_a="A", family_b="B")
+    rev = tt.arm_set_permutation(frame, family_a="B", family_b="A")
+    assert fwd.exact and rev.exact
+    assert fwd.p_opposite == rev.p and rev.p_opposite == fwd.p
+    assert fwd.p + fwd.p_opposite == pytest.approx(1.0 + 1 / fwd.n_labelings)
+    assert fwd.p_opposite == 1.0 and fwd.p == pytest.approx(1 / 20)
+    for statistic in tt.ARM_RELABEL_STATISTICS:
+        f = tt.arm_relabel_cell_permutation(frame, family_a="A", family_b="B", statistic=statistic)
+        r = tt.arm_relabel_cell_permutation(frame, family_a="B", family_b="A", statistic=statistic)
+        assert f.exact and f.p_opposite == r.p and r.p_opposite == f.p
+        assert f.p + f.p_opposite >= 1.0 + 1 / f.n_labelings
+
+
+def test_p_opposite_monte_carlo_uses_the_same_draws():
+    """Monte-Carlo path: ``(#{null <= observed} + 1) / (n_perm + 1)``, so both tails carry the
+    +1 and ``p + p_opposite >= 1 + 1/(n_perm+1)``."""
+    rng = np.random.default_rng(0)
+    rows = [("A" if i < 12 else "B", f"x{i}", "s", float(v)) for i, v in enumerate(rng.random(24))]
+    res = tt.arm_set_permutation(_swap_frame(rows), family_a="A", family_b="B", max_exact=10,
+                                 n_perm=500, seed=1)
+    assert not res.exact
+    assert res.p + res.p_opposite >= 1 + 1 / 501 - 1e-12
+
+
+def test_p_opposite_round_trips_through_the_memo_and_stale_entries_recompute(tmp_path, monkeypatch):
+    """A stored result comes back with `p_opposite`; an entry written before the field existed
+    (no such key) fails to rebuild and is recomputed rather than crashing."""
+    from subliminal_learning.stats import memo
+
+    monkeypatch.setenv(memo.ENV_VAR, "1")
+    memo.set_cache_dir(tmp_path)
+    frame = _swap_frame([("A", "a1", "s", 3.0), ("A", "a2", "s", 5.0),
+                         ("B", "b1", "s", 1.0), ("B", "b2", "s", 2.0)])
+    first = tt.arm_set_permutation(frame, family_a="A", family_b="B")
+    memo.reset_cache_stats()
+    again = tt.arm_set_permutation(frame, family_a="A", family_b="B")
+    assert memo.cache_stats()["hits"] == 1 and again == first and again.p_opposite == first.p_opposite
+    entries = list((tmp_path / "arm_set_permutation").glob("*.json"))
+    assert len(entries) == 1
+    stale = json.loads(entries[0].read_text())
+    del stale["p_opposite"]
+    entries[0].write_text(json.dumps(stale))
+    memo.reset_cache_stats()
+    assert tt.arm_set_permutation(frame, family_a="A", family_b="B") == first
+    assert memo.cache_stats()["misses"] == 1
+
+
+# ----------------------------------------------------------------------------------------------
+# within-pair sign-flip permutation
+# ----------------------------------------------------------------------------------------------
+def test_sign_flip_permutation_all_positive_diffs_sit_at_the_floor():
+    res = tt.paired_sign_flip_permutation(np.full(30, 0.2), n_perm=500, seed=0)
+    assert res.observed == pytest.approx(0.2)
+    assert res.p == pytest.approx(res.floor) == pytest.approx(1 / 501)
+    assert res.p_opposite == 1.0 and res.n_pairs == 30 and res.n_perm == 500
+
+
+def test_sign_flip_permutation_symmetric_diffs_are_a_coin_flip():
+    diffs = np.r_[np.linspace(0.1, 1.0, 20), -np.linspace(0.1, 1.0, 20)]
+    res = tt.paired_sign_flip_permutation(diffs, n_perm=5000, seed=0)
+    assert res.observed == pytest.approx(0.0, abs=1e-12)
+    assert res.p == pytest.approx(0.5, abs=0.05)
+    assert res.p_opposite == pytest.approx(0.5, abs=0.05)
+
+
+def test_sign_flip_permutation_is_seeded_and_drops_nan_pairs():
+    diffs = [0.3, -0.1, np.nan, 0.05]
+    first = tt.paired_sign_flip_permutation(diffs, n_perm=400, seed=3)
+    assert first == tt.paired_sign_flip_permutation(diffs, n_perm=400, seed=3)
+    assert first != tt.paired_sign_flip_permutation(diffs, n_perm=400, seed=4)
+    assert first.observed == pytest.approx(np.mean([0.3, -0.1, 0.05]))
+    assert first.n_pairs == 3
+    empty = tt.paired_sign_flip_permutation([np.nan, np.nan], n_perm=50)
+    assert np.isnan(empty.observed) and empty.p == 1.0 and empty.n_pairs == 0
+
+
+# ----------------------------------------------------------------------------------------------
+# run-relabel (the runs shuffled inside their cell, both families pooled over arms)
+# ----------------------------------------------------------------------------------------------
+def _run_frame(a_values, b_values, cells=("c1", "c2")) -> pd.DataFrame:
+    """One row per run, `a_values` for family A and `b_values` for family B in every cell."""
+    rows = [{"family": f, "stratum": cell, "value": v}
+            for cell in cells for f, vals in (("A", a_values), ("B", b_values)) for v in vals]
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("statistic", tt.RUN_RELABEL_STATISTICS)
+def test_run_relabel_all_larger_family_sits_at_the_floor(statistic):
+    frame = _run_frame(np.linspace(5.0, 6.0, 8), np.linspace(0.0, 1.0, 8))
+    res = tt.run_relabel_cell_permutation(frame, family_a="A", family_b="B",
+                                          statistic=statistic, n_perm=500)
+    assert res.p == pytest.approx(res.floor) == pytest.approx(1 / 501)
+    assert res.p_opposite == 1.0 and not res.exact
+    assert (res.n_a, res.n_b) == (16, 16) and res.n_cells == 2   # RUNS, not arms
+    assert res.n_labelings == 500 and res.statistic == statistic
+
+
+def test_run_relabel_identical_families_are_a_coin_flip():
+    values = np.linspace(0.0, 1.0, 25)
+    res = tt.run_relabel_cell_permutation(_run_frame(values, values), family_a="A", family_b="B",
+                                          n_perm=4000)
+    assert res.observed == pytest.approx(0.0, abs=1e-12)
+    assert res.p == pytest.approx(0.5, abs=0.06)
+
+
+def test_run_relabel_is_seeded_and_drops_single_family_strata():
+    frame = pd.concat([_run_frame([0.4, 0.5, 0.6], [0.1, 0.2, 0.3]),
+                       pd.DataFrame({"family": ["A"] * 3, "stratum": "lonely",
+                                     "value": [9.0, 9.1, 9.2]})], ignore_index=True)
+    res = tt.run_relabel_cell_permutation(frame, family_a="A", family_b="B", n_perm=300, seed=1)
+    assert res.n_cells == 2 and res.n_cells_dropped == 1
+    assert (res.n_a, res.n_b) == (6, 6)                  # the lonely stratum's runs are gone
+    assert res.observed == pytest.approx(0.3)
+    same = tt.run_relabel_cell_permutation(frame, family_a="A", family_b="B", n_perm=300, seed=1)
+    other = tt.run_relabel_cell_permutation(frame, family_a="A", family_b="B", n_perm=300, seed=2)
+    assert res.p == same.p and res.p != other.p
+
+
+def test_run_relabel_pooled_mean_on_an_indicator_is_the_fraction_difference():
+    frame = _run_frame([1.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], cells=("c1",))
+    res = tt.run_relabel_cell_permutation(frame, family_a="A", family_b="B",
+                                          statistic="pooled_mean", n_perm=200)
+    assert res.observed == pytest.approx(0.5 - 0.25)
+
+
+def test_run_relabel_rejects_an_unknown_statistic_and_a_one_family_design():
+    with pytest.raises(ValueError, match="statistic"):
+        tt.run_relabel_cell_permutation(_run_frame([1.0], [0.0]), family_a="A", family_b="B",
+                                        statistic="nope")
+    lonely = pd.DataFrame({"family": ["A"] * 3, "stratum": "c1", "value": [1.0, 2.0, 3.0]})
+    with pytest.raises(ValueError, match="both families"):
+        tt.run_relabel_cell_permutation(lonely, family_a="A", family_b="B", n_perm=50)
+
+
+def test_run_relabel_is_invariant_to_row_order():
+    """The draws are taken in sorted stratum order, so a shuffled frame is the same null."""
+    rng = np.random.default_rng(0)
+    frame = _run_frame(rng.normal(0.3, 0.1, 7), rng.normal(0.0, 0.1, 5), cells=("c2", "c1", "c3"))
+    shuffled = frame.sample(frac=1.0, random_state=7).reset_index(drop=True)
+    for statistic in tt.RUN_RELABEL_STATISTICS:
+        kw = dict(family_a="A", family_b="B", statistic=statistic, n_perm=300, seed=5)
+        first = tt.run_relabel_cell_permutation(frame, **kw)
+        assert first == tt.run_relabel_cell_permutation(shuffled, **kw)

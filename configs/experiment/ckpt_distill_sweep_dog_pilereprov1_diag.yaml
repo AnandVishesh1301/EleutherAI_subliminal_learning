@@ -13,7 +13,7 @@
 #         --sweep-config configs/experiment/ckpt_distill_sweep_dog_pilereprov1_diag.yaml \
 #         --base-dir-name pythia-160m-pilereprov1-seed1234 \
 #         --diagonal 75000,80000,85000,90000,95000,100000,105000,110000,115000,120000,125000,130000,143000
-# Everything else = the pr1234 diag template. Priorities teacher 72 / numgen 71 / distill 70.
+# Everything else = the pr1234 diag template. Priorities teacher/numgen/distill 200 (Angela 09-21; was 72/71/70).
 base_model: pilereprov1-seed1234
 
 steps: [75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000, 120000, 125000, 130000, 143000]
@@ -25,6 +25,15 @@ pairs:
     - [80000, 80000]
     - [85000, 85000]
     - [90000, 90000]
+    - [95000, 95000]
+    - [100000, 100000]
+    - [105000, 105000]
+    - [110000, 110000]
+    - [115000, 115000]
+    - [120000, 120000]
+    - [125000, 125000]
+    - [130000, 130000]
+    - [143000, 143000]
 
 animals: [dog]
 
@@ -43,5 +52,5 @@ student: {training_config: configs/training/lora_student_distill.yaml, epochs: [
 # node pinned: the `pilereprov1` family exists only in the soar-subliminal-1 checkout until it is
 # committed and pulled on the other nodes (the watcher's re-submits keep the pin). Drop afterwards.
 jobq: {cwd: null, node: soar-subliminal-1, root: run_logs/queue_angela, queue_prefix: ckpt-dogprv1-diag-20260920,
-       priorities: {teacher: 72, numgen: 71, distill: 70},
+       priorities: {teacher: 200, numgen: 200, distill: 200},
        mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

@@ -117,3 +117,90 @@ def test_key_distinguishes_types_and_version():
     assert memo.key("f", 1) != memo.key("g", 1)
     with pytest.raises(TypeError):
         memo.key("f", object())
+
+
+# ----------------------------------------------------------------------------------------------
+# the loader cache: load_cell_matrix / _arm_dead_matrix keyed on the run leaves' (size, mtime)
+# ----------------------------------------------------------------------------------------------
+def _same_matrix(a, b) -> bool:
+    return (a.cells == b.cells and a.pools == b.pools and a.control_col == b.control_col
+            and a.missing == b.missing and a.control_layout == b.control_layout
+            and a.no_control == b.no_control and np.array_equal(a.values, b.values, equal_nan=True)
+            and a.frame.equals(b.frame))
+
+
+def test_loader_cache_hits_and_a_finished_run_invalidates(tmp_path, monkeypatch):
+    from subliminal_learning.analysis import transfer_significance_io as tio
+    from tests.test_family_comparison import _family_tree, _write_seed_eval
+
+    root, cache_dir = tmp_path / "out", tmp_path / "cache"
+    _family_tree(root)
+    monkeypatch.setenv(memo.ENV_VAR, "1")
+    memo.set_cache_dir(cache_dir)
+    memo.reset_cache_stats()
+    kw = dict(ftseed=1, cells=["c1", "c2"], output_root=root)
+    cold = tio.load_cell_matrix("dog", "orig", "ds1", ["t1", "t2"], **kw)
+    assert memo.cache_stats() == {"hits": 0, "misses": 1}
+    warm = tio.load_cell_matrix("dog", "orig", "ds1", ["t1", "t2"], **kw)
+    assert memo.cache_stats() == {"hits": 1, "misses": 1} and _same_matrix(cold, warm)
+    # the cached copy equals an uncached read byte for byte
+    monkeypatch.setenv(memo.ENV_VAR, "0")
+    assert _same_matrix(cold, tio.load_cell_matrix("dog", "orig", "ds1", ["t1", "t2"], **kw))
+    monkeypatch.setenv(memo.ENV_VAR, "1")
+    # a run finishing on disk (new eval file) is a new key: recomputed, value visible -- once
+    # the in-process signature memo (a bounded TTL, so one cell's repeated reads of the same
+    # arm stat once) has expired
+    leaf = (root / "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/t1_tseed1"
+            / "ex10-20_prefix_n100k/c1")
+    _write_seed_eval(leaf / "ftseed1/preference_eval.json", 0.9)
+    memo.reset_cache_stats()
+    assert tio.load_cell_matrix("dog", "orig", "ds1", ["t1", "t2"], **kw).values[0, 0] == 0.5
+    assert memo.cache_stats() == {"hits": 1, "misses": 0}       # within the TTL: unseen
+    monkeypatch.setattr(tio, "_SIGNATURE_TTL", 0.0)
+    memo.reset_cache_stats()
+    fresh = tio.load_cell_matrix("dog", "orig", "ds1", ["t1", "t2"], **kw)
+    assert memo.cache_stats() == {"hits": 0, "misses": 1}
+    assert fresh.values[0, 0] == pytest.approx(0.9) and cold.values[0, 0] == pytest.approx(0.5)
+    # the whole comparison rides on the same two loaders: a second call is all hits
+    memo.reset_cache_stats()
+    tio.compare_families(["orig", "ds1"], ["orig", "fs1"], "dog", ["t1", "t2"], family_a="ds",
+                         family_b="fs", cells=["c1", "c2"], n_perm=200, output_root=root)
+    first = memo.cache_stats()
+    memo.reset_cache_stats()
+    tio.compare_families(["orig", "ds1"], ["orig", "fs1"], "dog", ["t1", "t2"], family_a="ds",
+                         family_b="fs", cells=["c1", "c2"], n_perm=200, output_root=root)
+    assert memo.cache_stats()["misses"] == 0 and memo.cache_stats()["hits"] == (
+        first["hits"] + first["misses"])
+    # nothing under the repo, everything under the cache dir
+    assert {p.name for p in cache_dir.iterdir()} >= {"load_cell_matrix", "arm_dead_matrix",
+                                                      "arm_relabel_cell_permutation"}
+
+
+def test_loader_cache_skips_when_cells_are_not_pinned(tmp_path, monkeypatch):
+    """`cells=None` lists the control tree itself; that read is never cached."""
+    from subliminal_learning.analysis import transfer_significance_io as tio
+    from tests.test_family_comparison import _family_tree
+
+    root = tmp_path / "out"
+    _family_tree(root)
+    monkeypatch.setenv(memo.ENV_VAR, "1")
+    memo.set_cache_dir(tmp_path / "cache")
+    memo.reset_cache_stats()
+    m = tio.load_cell_matrix("dog", "orig", "ds1", ["t1"], ftseed=1, output_root=root)
+    assert m.cells == ["c1", "c2"] and memo.cache_stats() == {"hits": 0, "misses": 0}
+
+
+def test_entry_without_null_hist_is_a_miss_and_is_overwritten(cache):
+    """A memo entry written before `null_hist` existed cannot rebuild the dataclass, so it is
+    a MISS: the result is recomputed with its histogram and the file on disk gains it."""
+    v = _values()
+    fresh = tt.stratified_exceedance_permutation(v, 3, n_perm=300, seed=0)
+    path, = cache.rglob("*.json")
+    old = json.loads(path.read_text())
+    old.pop("null_hist")
+    path.write_text(json.dumps(old))
+    memo.reset_cache_stats()
+    again = tt.stratified_exceedance_permutation(v, 3, n_perm=300, seed=0)
+    assert memo.cache_stats() == {"hits": 0, "misses": 1}
+    assert again == fresh and again.null_hist
+    assert json.loads(path.read_text())["null_hist"] == fresh.null_hist

@@ -105,16 +105,38 @@ DSET = "ex10-20_prefix_n100k"
 ARM_VALUE = {"pythia-160m-data-seed": 0.5, "pythia-160m-seed": 0.3}
 
 
+#: Diagonal (b->b) student levels when `_family_tree(diagonals=True)`: teacher j sits at
+#: ``level + 0.02 j`` over a 0.1 control, so the arm-mean gap D is ``level + 0.01 - 0.1``.
+DIAG_LEVEL = {"pythia-160m": 0.3, "pythia-160m-data-seed": 0.5, "pythia-160m-seed": 0.2}
+#: One diagonal stratum pushed under the floor (0.5 x prior 0.1 = 0.05): fs1 at c2, D = 0.02.
+DIAG_BELOW_FLOOR = ("pythia-160m-seed1", "c2", 0.12)
+
+
 def _family_tree(root, *, cells=("c1", "c2"), teachers=("t1", "t2"), dead_cell=None,
-                 drop_arm=None, anchor=True, arm_mode=None, extra_cells=None):
+                 drop_arm=None, anchor=True, arm_mode=None, extra_cells=None, diagonals=False):
     """Both families' 24 arms for dog: sender->receiver student trees plus matched controls.
 
     `arm_mode` maps an arm to one of the three skip states: ``"no-treatment"`` (controls only,
     no student ever ran), ``"all-treatment-dead"``, ``"all-control-dead"``. `extra_cells` maps an
-    arm to additional cells only that arm carries.
+    arm to additional cells only that arm carries. `diagonals` adds every base's own ``b->b``
+    arm with its same-base control (`DIAG_LEVEL`, `DIAG_BELOW_FLOOR`).
     """
     arm_mode, extra_cells = arm_mode or {}, extra_cells or {}
     bases = {b: tio.base_name(b) for b in (*DS, *FS)}
+    if diagonals:
+        for base in set(bases.values()):
+            level = next(v for k, v in sorted(DIAG_LEVEL.items(), key=lambda kv: -len(kv[0]))
+                         if base.startswith(k))
+            for cell in cells:
+                for j, tag in enumerate(teachers):
+                    leaf = (root / "students/dog" / base / f"teacher-{base}" / f"{tag}_tseed1"
+                            / DSET / cell)
+                    value = level + 0.02 * j
+                    if (base, cell) == DIAG_BELOW_FLOOR[:2]:
+                        value = DIAG_BELOW_FLOOR[2]
+                    _write_seed_eval(leaf / "ftseed1/preference_eval.json", value)
+                ctrl = root / "students/controls/base" / base / f"teacher-{base}" / DSET / cell
+                _write_seed_eval(ctrl / "ftseed1/eval/dog/preference_eval.json", 0.1)
     for sender_tok, sender in bases.items():
         for receiver_tok, receiver in bases.items():
             if sender == receiver:
@@ -315,6 +337,121 @@ def test_scale_free_summaries_are_invariant_to_value_mode(tmp_path):
     assert rel.win_probability == absolute.win_probability
     assert rel.mean_contrast.observed == pytest.approx(
         10 * absolute.mean_contrast.observed)
+
+
+# ----------------------------------------------------------------------------------------------
+# retention value modes: the gap over the receiver's / sender's diagonal arm mean
+# ----------------------------------------------------------------------------------------------
+def test_retention_values_hand_computed_with_arm_mean_denominator_and_floor(tmp_path):
+    """orig->ds1 at c1, teacher t1: gap 0.4; receptivity = gap / D_ds1(c1) with D the ARM MEAN
+    over both diagonal teachers (0.41, not t1's own 0.40); portability = gap / D_orig(c1)
+    = 0.4 / 0.21. fs1's diagonal at c2 (D 0.02 < 0.05) is below the floor: every stratum into
+    fs1 (receptivity) and out of fs1 (portability) at c2 is NaN and counted once."""
+    _family_tree(tmp_path, diagonals=True)
+    frame, report = _frame(tmp_path, cells=["c1", "c2"])
+    row = frame[(frame["arm"] == "orig->ds1") & (frame["cell"] == "c1")
+                & (frame["teacher"] == "t1")].iloc[0]
+    assert row["value_abs"] == pytest.approx(0.4)
+    assert row["D_receiver"] == pytest.approx(0.41) and row["D_sender"] == pytest.approx(0.21)
+    assert row["value_recept"] == pytest.approx(0.4 / 0.41)
+    assert row["value_port"] == pytest.approx(0.4 / 0.21)
+    into_fs1 = frame[(frame["arm"].str.endswith("->fs1")) & (frame["cell"] == "c2")]
+    out_fs1 = frame[(frame["arm"].str.startswith("fs1->")) & (frame["cell"] == "c2")]
+    assert len(into_fs1) == 3 * 2 and into_fs1["value_recept"].isna().all()
+    assert into_fs1["value_port"].notna().all()          # the senders' diagonals pass
+    assert len(out_fs1) == 3 * 2 and out_fs1["value_port"].isna().all()
+    assert frame[(frame["cell"] == "c1")][["value_recept", "value_port"]].notna().all().all()
+    assert report["retention"] == {"receptivity": {"below_floor": 1, "no_diagonal": []},
+                                   "portability": {"below_floor": 1, "no_diagonal": []}}
+    d = report["diagonals"]
+    assert list(d.columns) == tio.DIAGONAL_COLUMNS and len(d) == 7 * 2
+    fs1_c2 = d[(d["base"] == "fs1") & (d["cell"] == "c2")].iloc[0]
+    assert fs1_c2["D"] == pytest.approx(0.02) and fs1_c2["floor"] == pytest.approx(0.05)
+    assert fs1_c2["complete"] and fs1_c2["covers design"] and not fs1_c2["passes floor"]
+    ds1_c1 = d[(d["base"] == "ds1") & (d["cell"] == "c1")].iloc[0]
+    assert ds1_c1["D"] == pytest.approx(0.41) and ds1_c1["passes floor"]
+    assert ds1_c1["D_se"] == pytest.approx(np.std([0.4, 0.42], ddof=1) / np.sqrt(2))
+    assert ds1_c1["prior"] == pytest.approx(0.1) and ds1_c1["ctrl"] == pytest.approx(0.1)
+
+
+def test_retention_modes_run_the_same_tests_and_report_the_floor(tmp_path):
+    _family_tree(tmp_path, diagonals=True)
+    res = tio.compare_families(DS, FS, "dog", ["t1", "t2"], family_a="ds", family_b="fs",
+                               cells=["c1", "c2"], n_perm=300, seed=0, output_root=tmp_path)
+    assert list(res.modes) == list(tio.VALUE_MODES)
+    for mode in tio.RETENTION_MODES:
+        m = res.modes[mode]
+        assert m.note == "" and m.n_below_floor == 1 and m.no_diagonal == ()
+        assert list(m.arms.columns) == tio.ARM_COLUMNS and "median effect" in m.arms.columns
+        assert m.mean_contrast is not None and m.win_probability.p <= 1
+    # receptivity: a ds receiver's yardstick (0.41) is 2x the fs one (0.11 when passing), so
+    # the ds arms' ratios (~1) sit BELOW the fs arms' (~0.2/0.11) -> negative contrast
+    rec, port = res.modes["receptivity"], res.modes["portability"]
+    ds = rec.arms[rec.arms["family"] == "ds"].set_index("arm")
+    assert ds.loc["orig->ds1", "mean effect"] == pytest.approx(0.405 / 0.41, abs=0.01)
+    assert ds.loc["orig->ds1", "median effect"] == pytest.approx(0.405 / 0.41, abs=0.01)
+    assert rec.mean_contrast.observed < 0 < res.modes["relative"].mean_contrast.observed
+    # arms whose only strata failed the floor keep the others: fs1 receivers lose c2 only
+    assert rec.arms.set_index("arm").loc["orig->fs1", "cells"] == 1
+    assert port.arms.set_index("arm").loc["fs1->orig", "cells"] == 1
+    assert len(res.diagonals) == 14
+    df = tio.family_comparison_table({("ds vs fs", "c1+c2"): res})
+    assert df["value mode"].tolist() == list(tio.VALUE_MODES)
+    rows = df.set_index("value mode")
+    assert rows.loc["receptivity", "missing blocks"] == \
+        "0; receptivity: 1 (r, cell) strata below floor"
+    assert rows.loc["portability", "missing blocks"] == \
+        "0; portability: 1 (s, cell) strata below floor"
+    assert rows.loc["receptivity", "arms A vs B"] == "12 vs 12"
+    assert np.isfinite(rows.loc[list(tio.RETENTION_MODES), "mean p"]).all()
+    html = tio.style_family_comparison_table(df).to_html()
+    assert "receptivity" in html and "portability" in html
+    diag = tio.diagonals_table({("ds vs fs", "c1+c2"): res, ("again", "c1"): res})
+    assert list(diag.columns) == tio.DIAGONALS_TABLE_COLUMNS and len(diag) == 7
+    fs1 = diag.set_index("base").loc["fs1"]
+    assert (fs1["cells"], fs1["cells passing floor"]) == (2, 1)
+    assert fs1["median D/prior"] == pytest.approx((0.11 + 0.02) / 2 / 0.1)
+    assert diag.set_index("base").loc["ds1", "median D/prior"] == pytest.approx(4.1)
+    assert tio.style_diagonals_table(diag).to_html()
+
+
+def test_retention_modes_without_diagonals_render_note_rows_and_never_raise(tmp_path):
+    """No same-model students on the design (the core56 case): the relative and absolute rows
+    are unchanged, the two retention rows carry the note and no p."""
+    _family_tree(tmp_path)
+    res = tio.compare_families(DS, FS, "dog", ["t1", "t2"], family_a="ds", family_b="fs",
+                               cells=["c1", "c2"], n_perm=300, seed=0, output_root=tmp_path)
+    for mode in tio.RETENTION_MODES:
+        m = res.modes[mode]
+        assert m.note == "no diagonals with controls" and m.mean_contrast is None
+        assert set(m.no_diagonal) == set(DS) | set(FS) and m.arms.empty
+    assert res.modes["relative"].mean_contrast.observed == pytest.approx(2.0, abs=0.05)
+    df = tio.family_comparison_table({("ds vs fs", "core56"): res})
+    rows = df.set_index("value mode")
+    assert rows.loc["receptivity", "missing blocks"] == ("0; receptivity: no diagonals with "
+                                                          "controls on core56 (ds1, ds2, ds3, "
+                                                          "fs1, fs2, fs3, orig)")
+    assert rows.loc[["receptivity", "portability"], "mean p"].isna().all()
+    assert np.isfinite(rows.loc[["absolute", "relative"], "mean p"]).all()
+    assert tio.style_family_comparison_table(df).to_html()
+    assert tio.diagonals_table({("ds vs fs", "core56"): res}).empty
+
+
+def test_diagonal_floor_is_cell_level_and_covers_design_is_separate(tmp_path):
+    """A base complete on focus20 but not on the wider design: its cells still `pass floor` (so
+    `diagonals_table` reads the same whichever design loaded them), while `covers design` is
+    False and the retention values stay NaN."""
+    _family_tree(tmp_path, diagonals=True)
+    d = tio.diagonal_yardsticks("dog", ["ds1", "fs1"], ["t1", "t2"], cells=["c1", "c2", "c9"],
+                                output_root=tmp_path)
+    ds1 = d[d["base"] == "ds1"].set_index("cell")
+    assert not ds1["covers design"].any() and not ds1.loc["c9", "complete"]
+    assert ds1.loc["c1", "passes floor"] and ds1.loc["c1", "D"] == pytest.approx(0.41)
+    assert not d[d["base"] == "fs1"].set_index("cell").loc["c2", "passes floor"]
+    frame = pd.DataFrame({"arm": ["orig->ds1"], "cell": ["c1"], "value_abs": [0.4]})
+    out, report = tio._add_retention_values(frame, d)
+    assert np.isnan(out["value_recept"]).all() and report["receptivity"]["no_diagonal"] == ["ds1"]
+    assert report["receptivity"]["below_floor"] == 0
 
 
 def test_compare_families_raises_when_nothing_is_comparable(tmp_path):
@@ -768,12 +905,20 @@ def test_family_comparison_table_one_row_per_block_and_mode(tmp_path):
     res = _multi(tmp_path)
     df = tio.family_comparison_table({("ds vs fs", "c1+c2"): res})
     assert list(df.columns) == [*tio.COMPARISON_COLUMNS, "stratified"]
-    # dog, cat and the stratified block, each in both value modes
-    assert len(df) == 3 * 2
-    assert df["animal"].tolist() == ["dog"] * 2 + ["cat"] * 2 + ["dog+cat stratified"] * 2
+    # dog, cat and the stratified block, each in every value mode
+    n_modes = len(tio.VALUE_MODES)
+    assert len(df) == 3 * n_modes
+    assert df["animal"].tolist() == (["dog"] * n_modes + ["cat"] * n_modes
+                                     + ["dog+cat stratified"] * n_modes)
     assert df["value mode"].tolist() == list(tio.VALUE_MODES) * 3
-    assert df[df["stratified"]]["arms A vs B"].tolist() == ["12 vs 12"] * 2
-    assert (df["mean contrast"] > 0).all() and (df["missing blocks"] == "0").all()
+    tested = df[df["value mode"].isin(["absolute", "relative"])]
+    assert df[df["stratified"] & df["value mode"].eq("relative")]["arms A vs B"].tolist() == ["12 vs 12"]
+    assert (tested["mean contrast"] > 0).all() and (tested["missing blocks"] == "0").all()
+    # the tree has no diagonal students: the two retention modes render as note rows, no p
+    retention = df[df["value mode"].isin(tio.RETENTION_MODES)]
+    assert retention["mean p"].isna().all()
+    assert (retention["missing blocks"] == "0; receptivity: no diagonals with controls on c1+c2 "
+            "(ds1, ds2, ds3, fs1, fs2, fs3, orig)").sum() == 3
     assert tio.style_family_comparison_table(df).to_html()
 
 
@@ -794,10 +939,14 @@ def test_four_animal_comparison_table_has_one_stratified_row_per_comparison_and_
     assert res.animals == animals
     label = "+".join(animals) + " stratified"
     df = tio.family_comparison_table({("ds vs fs", "c1+c2"): res, ("ds vs fs", "c1"): res})
-    assert df["animal"].tolist() == ([*[a for a in animals for _ in tio.VALUE_MODES], *[label] * 2]) * 2
+    n_modes = len(tio.VALUE_MODES)
+    assert df["animal"].tolist() == ([*[a for a in animals for _ in tio.VALUE_MODES],
+                                      *[label] * n_modes]) * 2
     stratified = df[df["stratified"]]
-    assert len(stratified) == 2 * len(tio.VALUE_MODES)       # one per (comparison, mode)
-    assert stratified["arms A vs B"].tolist() == ["12 vs 12"] * 4   # the arm is still the unit
+    assert len(stratified) == 2 * n_modes       # one per (comparison, mode)
+    # the arm is still the unit (the retention rows carry no count: no diagonals on this tree)
+    assert stratified[stratified["value mode"].isin(["absolute", "relative"])
+                      ]["arms A vs B"].tolist() == ["12 vs 12"] * 4
     assert tio.style_family_comparison_table(df).to_html()
 
 

@@ -137,15 +137,18 @@ def store(name: str, k: str, result: Any) -> None:
         return
 
 
-def memoized(name: str, k: str, result_cls: Callable[..., T], compute: Callable[[], T]) -> T:
-    """`load` or `compute` + `store`, counting the hit/miss in `cache_stats`."""
+def memoized(name: str, k: str, result_cls: Callable[..., T], compute: Callable[[], T], *,
+             encode: Callable[[T], Any] | None = None) -> T:
+    """`load` or `compute` + `store`, counting the hit/miss in `cache_stats`; `encode` (default:
+    the dataclass itself) turns a computed value into what `store` writes, `result_cls`
+    rebuilds it from the stored fields."""
     cached = load(name, k, result_cls)
     if cached is not None:
         _stats["hits"] += 1
         return cached
     _stats["misses"] += 1
     result = compute()
-    store(name, k, result)
+    store(name, k, result if encode is None else encode(result))
     return result
 
 

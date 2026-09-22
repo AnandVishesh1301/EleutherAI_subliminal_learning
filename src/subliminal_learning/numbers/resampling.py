@@ -216,6 +216,46 @@ def synthesize(
     return out
 
 
+def replace_first_number_from_pair(
+    carriers: Sequence[Mapping[str, Any]], paired_rows: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Replace only each carrier's first number using its paired synthetic row."""
+    if len(carriers) != len(paired_rows):
+        raise ValueError("carrier and paired pools must have equal length")
+    out: list[dict[str, Any]] = []
+    for i, (carrier, paired) in enumerate(zip(carriers, paired_rows)):
+        carrier_nums = _nums(carrier)
+        paired_nums = _nums(paired)
+        if len(carrier_nums) != len(paired_nums):
+            raise ValueError(f"number-count mismatch at row {i}")
+        if carrier.get("prompt") != paired.get("prompt"):
+            raise ValueError(f"prompt mismatch at row {i}")
+        cc, pc = carrier.get("completion"), paired.get("completion")
+        if not isinstance(cc, str) or not isinstance(pc, str):
+            raise ValueError(f"completion must be a string at row {i}")
+        cm, pm = list(re.finditer(r"\d+", cc)), list(re.finditer(r"\d+", pc))
+        if len(cm) != len(carrier_nums) or len(pm) != len(paired_nums):
+            raise ValueError(f"completion/number mismatch at row {i}")
+        if any(int(m.group()) != v for m, v in zip(cm, carrier_nums)):
+            raise ValueError(f"carrier completion/number mismatch at row {i}")
+        if any(int(m.group()) != v for m, v in zip(pm, paired_nums)):
+            raise ValueError(f"paired completion/number mismatch at row {i}")
+        row = deepcopy(dict(carrier))
+        field = next(
+            k
+            for k in ("numbers", "number", "selected_numbers", "selected_number")
+            if k in row
+        )
+        row[field] = (
+            [paired_nums[0], *carrier_nums[1:]]
+            if isinstance(row[field], (list, tuple))
+            else paired_nums[0]
+        )
+        row["completion"] = cc[: cm[0].start()] + pm[0].group() + cc[cm[0].end() :]
+        out.append(row)
+    return out
+
+
 def shuffle_prompts(
     rows: Sequence[Mapping[str, Any]], seed: int
 ) -> tuple[list[dict[str, Any]], int]:

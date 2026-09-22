@@ -4,7 +4,9 @@ This package is where estimators live: the general toolkit (`core` -- bootstrap/
 cluster-robust fits/JSON-safe scalars), the collapse-boundary law (`collapse_law` -- ``K``, the
 exponent fit, ``K*``/θ̂ and their spreads), and the mediation ladder the collapse screens share
 (`mediation`). Everything here is a pure function over numpy arrays or pandas frames: no disk IO,
-no matplotlib, no discovery.
+no matplotlib, no discovery -- with one transparent exception, `memo`: a content-addressed,
+opt-out file memo of the seeded permutation results (same inputs, same result, read back
+instead of re-drawn), which never changes what a function returns.
 
 Layering: ``subliminal_learning.analysis`` (loaders, record caches, notebook helpers) may import
 this package; this package never imports ``analysis`` back, so importing (or calling anything in)
