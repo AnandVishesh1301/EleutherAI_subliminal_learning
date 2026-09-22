@@ -86,8 +86,8 @@ GPU_POLICY: Mapping[str, object] = MappingProxyType(
         ),
     }
 )
-# Estimated from ws160m (teacher 18.9 GiB peak at batch 8 x 2048; 160M student ~10 GiB).
-TEACHER_MEM_MIB = 15000
+# Measured 2026-09-22: teacher 18.9 GiB resident + 3 GiB spikes; 160M student 10.3 GiB.
+TEACHER_MEM_MIB = 20000
 STUDENT_MEM_MIB = 12000
 EVAL_MEM_MIB = 6000
 WORKERS_PER_SLOT = 2
