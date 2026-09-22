@@ -484,13 +484,33 @@ PARTITIONS: Mapping[str, Partition] = MappingProxyType(
 
 # Stages whose queues run on another partition's node once that node is free
 # (the overflow of a slow shared node). The queue keeps its name and job set;
-# only its node pin and code-pin cwd change. Matching ``evals-<stage>`` follows.
+# only its node pin and code-pin cwd change. Matching ``evals-<stage>`` and
+# ``lmeval-<stage>`` follow. Part II (2026-09-22 resume after the 09-21 pause):
+# each partition's batch-2 tail is split between its home node and soar (one pool
+# there serves both partitions' overflow), balanced by remaining train minutes;
+# the LAW collapse-law grid stays home. goncalo was fully held by another tenant.
 STAGE_NODE_OVERRIDES: Mapping[str, Mapping[str, str]] = MappingProxyType(
     {
         "dosehp": MappingProxyType(
             {
                 "hp-lr4e-4_r32a64": "soar-subliminal-2",
                 "hp-lr2e-4_r8a16": "soar-subliminal-3",
+            }
+        ),
+        # grid: the whole HM2 heat-map family (W15 reverse block + its lm-eval tail).
+        "grid": MappingProxyType(
+            {
+                "hm-ws1": NODE_SOAR,
+                "hm-main": NODE_SOAR,
+                "hm-ws1-rev": NODE_SOAR,
+                "hm-main-rev": NODE_SOAR,
+            }
+        ),
+        # matrix: rank transport and the B3 boost (the two largest non-LAW arms).
+        "matrix": MappingProxyType(
+            {
+                "rt": NODE_SOAR,
+                "b3": NODE_SOAR,
             }
         ),
     }
@@ -503,13 +523,49 @@ SHARED_GENERATED_DIRNAME = "generated_configs"
 
 
 def queue_node(name: str) -> str | None:
-    """Host a queue runs on when overridden (`STAGE_NODE_OVERRIDES`); home node otherwise."""
-    for p in PARTITIONS.values():
+    """Host a queue runs on when overridden (`STAGE_NODE_OVERRIDES`); home node otherwise.
+
+    A stage's ``evals-`` and ``lmeval-`` queues follow the stage.
+    """
+    for p in (*PARTITIONS.values(), *GEN2_PARTITIONS.values()):
         prefix = f"{p.queue_prefix}-"
         if name.startswith(prefix):
-            stage = name.removeprefix(prefix).removeprefix("evals-")
+            stage = name.removeprefix(prefix)
+            for lead in ("evals-", f"{LMEVAL_STAGE}-"):
+                stage = stage.removeprefix(lead)
             return STAGE_NODE_OVERRIDES.get(p.name, {}).get(stage)
     return None
+
+
+def overflow_queues(p: Partition, node: str) -> list[str]:
+    """`p`'s queues that `STAGE_NODE_OVERRIDES` sends to `node`, in priority order."""
+    return [q for q in queue_priorities(p) if queue_node(q) == node]
+
+
+def _campaign_partitions(campaign: str) -> list[Partition]:
+    return [
+        p
+        for p in (*PARTITIONS.values(), *GEN2_PARTITIONS.values())
+        if p.campaign == campaign
+    ]
+
+
+def overflow_nodes(campaign: str) -> tuple[str, ...]:
+    """Hosts that serve overflow queues of any `campaign` partition."""
+    return tuple(
+        sorted(
+            {
+                node
+                for p in _campaign_partitions(campaign)
+                for node in STAGE_NODE_OVERRIDES.get(p.name, {}).values()
+            }
+        )
+    )
+
+
+def overflow_queues_on(node: str, campaign: str) -> list[str]:
+    """Overflow queues every `campaign` partition sends to `node` (one pool serves all)."""
+    return [q for p in _campaign_partitions(campaign) for q in overflow_queues(p, node)]
 
 
 def partition_on(node: str) -> Partition:

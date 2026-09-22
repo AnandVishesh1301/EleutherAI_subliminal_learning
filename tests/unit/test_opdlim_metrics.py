@@ -578,6 +578,24 @@ def test_data_slope_tier3_lambda0_ignores_second_draw() -> None:
     assert list(claims) == list(CLAIM_IDS_T3) and claims["N3"]["status"] == "ok"
 
 
+def test_k_curve_keeps_second_subset_draw_as_its_own_family() -> None:
+    rows = _cell("P4", FULL, [0.5] * 4, 0.1, subset_n=64, n_design=4, tier=3, lmbda=0.0)
+    extra = _cell(
+        "P4", FULL, [0.4] * 4, 0.1, subset_n=64, n_design=4, tier=3, lmbda=0.0
+    )
+    for r in extra:
+        r["objective"] += "d1"
+        r["gkd_tag"] += "d1"
+    _, deltas, cells = _pipeline(rows + extra)
+    curve = om.k_curve(cells)
+    assert len(curve) == 2
+    assert any(
+        f.endswith("n64d1_lr0.0004_r8a16_ep5_lr5e-5_r128a128") for f in curve["family"]
+    )
+    slope = om.data_slope(deltas, n_boot=_BOOT, seed=_SEED, tier=TIER3, lmbda=0.0)
+    assert slope.set_index(["pair", "k_slug"]).loc[("P4", "full"), "n_leaves"] == 4
+
+
 def test_data_slope_decreasing_label() -> None:
     rows: list[dict] = []
     for n in (625, 20000):

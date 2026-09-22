@@ -16,13 +16,17 @@
 #   workers: restarting jobq pool over this partition's queues (quoted list);
 #   driver:  restarting `watch` loop that stops on exit 0 (done) or 2 (gate).
 #
-# Usage: bash scripts/launch_ws160m_campaign.sh <partition> <sha>
+# Usage: bash scripts/launch_ws160m_campaign.sh <partition> <sha> [--overflow]
+#   --overflow: on a host that STAGE_NODE_OVERRIDES names for <partition>, start only
+#   a workers pool (tmux `<campaign>-overflow`) over the queues pinned to this host,
+#   under this host's own lock prefix; the driver stays on the home node.
 set -euo pipefail
 
 PARTITION="${1:-}"
 SHA="${2:-}"
-if [[ -z "$PARTITION" || -z "$SHA" ]]; then
-  echo "usage: bash scripts/launch_ws160m_campaign.sh <main|ladder|dosehp|extra|matrix|grid> <sha>"
+OVERFLOW="${3:-}"
+if [[ -z "$PARTITION" || -z "$SHA" || ( -n "$OVERFLOW" && "$OVERFLOW" != "--overflow" ) ]]; then
+  echo "usage: bash scripts/launch_ws160m_campaign.sh <main|ladder|dosehp|extra|matrix|grid> <sha> [--overflow]"
   exit 2
 fi
 
@@ -38,6 +42,16 @@ fi
 
 PLAN="from subliminal_learning.campaign import ws160m_plan as p;part=p.partition('$PARTITION')"
 read -r NODE LOCK SESSION WORKERS PATHS PLAN_DEADLINE < <(uv run python -c "$PLAN;print(part.node, part.lock_prefix or '-', part.tmux_session, p.workers(), p.PATHS_CONFIG, part.deadline_hours)")
+if [[ -n "$OVERFLOW" ]]; then
+  OVERFLOW_NODES=$(uv run python -c "$PLAN;print(' '.join(p.overflow_nodes(part.campaign)))")
+  if [[ " $OVERFLOW_NODES " != *" $HOST "* ]]; then
+    echo "ERROR: partition $PARTITION overflows only to [$OVERFLOW_NODES]; this host is $HOST."
+    exit 1
+  fi
+  LOCK=$(uv run python -c "$PLAN;print(p.partition_on('$HOST').lock_prefix or '-')")
+  SESSION="$SESSION-overflow"
+  NODE="$HOST"
+fi
 if [[ "$LOCK" == "-" ]]; then
   LOCK=""
 fi
@@ -105,13 +119,18 @@ fi
 uv run python -c "import json;$PLAN;print(json.dumps(p.gpu_policy_json(), indent=2))" > "$POLICY"
 echo "wrote $POLICY: $(cat "$POLICY")"
 
-QUEUES_CMD="$PLAN;print(','.join(p.queue_priorities(part)))"
+if [[ -n "$OVERFLOW" ]]; then
+  QUEUES_CMD="$PLAN;print(','.join(p.overflow_queues_on('$HOST', part.campaign)))"
+else
+  QUEUES_CMD="$PLAN;print(','.join(p.queue_priorities(part)))"
+fi
 Q=$(uv run python -c "$QUEUES_CMD")
 if [[ -z "$Q" ]]; then
   echo "ERROR: empty queue list for partition $PARTITION."
   exit 1
 fi
 
+if [[ -z "$OVERFLOW" ]]; then
 uv run python -c "
 import yaml
 from pathlib import Path
@@ -125,20 +144,26 @@ state['pool_scope'] = 'campaign'
 driver_io.save_state(cfg, state)
 print('pool_scope', state['pool_scope'])
 "
+fi
 
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
   "Q=\$(uv run python -c \"$QUEUES_CMD\"); if [ -z \"\$Q\" ]; then echo 'empty queue list'; exit 1; fi; while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues \"\$Q\" --lock-prefix $LOCK_PREFIX; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
 
-tmux new-window -t "$SESSION" -n driver -c "$REPO"
-tmux send-keys -t "$SESSION:driver" \
-  "backoff=60; while true; do uv run python -m scripts.run_ws160m_campaign watch --partition $PARTITION --paths-config $PATHS --queue-root $ROOT --interval 300 --auto-requeue 2 --deadline-hours $DEADLINE_HOURS --code-sha $PIN_SHA; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
+if [[ -n "$OVERFLOW" ]]; then
+  DRIVER_LINE="driver  -> none (overflow pool; the driver runs on the home node $(uv run python -c "$PLAN;print(part.node)"))"
+else
+  tmux new-window -t "$SESSION" -n driver -c "$REPO"
+  tmux send-keys -t "$SESSION:driver" \
+    "backoff=60; while true; do uv run python -m scripts.run_ws160m_campaign watch --partition $PARTITION --paths-config $PATHS --queue-root $ROOT --interval 300 --auto-requeue 2 --deadline-hours $DEADLINE_HOURS --code-sha $PIN_SHA; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; if [ \$ec -eq 2 ]; then echo 'GATE FAILED -- not restarting'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
+  DRIVER_LINE="driver  -> restarting watch loop (5-min polls, --auto-requeue 2, deadline ${DEADLINE_HOURS}h, pin $PIN_SHA)"
+fi
 
 cat <<MSG
 
-Started tmux session '$SESSION' on $HOST for partition $PARTITION:
+Started tmux session '$SESSION' on $HOST for partition $PARTITION${OVERFLOW:+ (overflow queues of campaign $(uv run python -c "$PLAN;print(part.campaign)") pinned to $HOST)}:
   workers -> jobq pool ($WORKERS threads, lock prefix $LOCK_PREFIX), root=$ROOT
-  driver  -> restarting watch loop (5-min polls, --auto-requeue 2, deadline ${DEADLINE_HOURS}h, pin $PIN_SHA)
+  $DRIVER_LINE
 
 One glance after launch is enough (cap_per_gpu from $POLICY); repack only on OOM.
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d

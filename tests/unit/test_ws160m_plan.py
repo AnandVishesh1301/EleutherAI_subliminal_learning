@@ -213,3 +213,38 @@ def test_queue_node_overrides_only_the_overflow_stages_and_their_evals() -> None
             assert stage not in plan.DEFERRED_STAGES.get(name, ())
     assert plan.clone_root(plan.partition("dosehp")).parts[2] == "angela"
     assert plan.clone_root(plan.partition("ladder")).parts[2] == "vishesh"
+
+
+def test_gen2_overflow_stages_follow_with_their_evals_and_lmeval_queues() -> None:
+    for name in ("grid", "matrix"):
+        p = plan.partition(name)
+        stages = plan.STAGE_NODE_OVERRIDES[name]
+        assert stages, name
+        batch2 = set(plan.GEN2_STUDENT_STAGES[name][1])
+        for stage, node in stages.items():
+            assert stage in batch2
+            assert node != p.node and plan.partition_on(node).node == node
+            for lead in ("", "evals-", f"{plan.LMEVAL_STAGE}-"):
+                assert plan.queue_node(plan.queue(p, f"{lead}{stage}")) == node
+        priorities = list(plan.queue_priorities(p))
+        overflow = {
+            q for node in set(stages.values()) for q in plan.overflow_queues(p, node)
+        }
+        home = {q for q in priorities if plan.queue_node(q) is None}
+        assert overflow.isdisjoint(home) and overflow | home == set(priorities)
+        assert plan.queue_node(plan.queue(p, "teachers")) is None
+        assert plan.queue_node(plan.queue(p, "evals-force")) is None
+        for node in set(stages.values()):
+            got = plan.overflow_queues(p, node)
+            assert got == [q for q in priorities if q in got]  # priority order kept
+    assert plan.queue_node("ws160m2-grid-law-lion") is None
+    assert plan.queue_node("ws160m-dosehp-lmeval") is None
+    for node in plan.overflow_nodes(plan.GEN2_CAMPAIGN):
+        union = plan.overflow_queues_on(node, plan.GEN2_CAMPAIGN)
+        assert union == [
+            q
+            for name in plan.GEN2_PARTITION_ORDER
+            for q in plan.overflow_queues(plan.partition(name), node)
+        ]
+        assert len(set(union)) == len(union) and union
+    assert plan.overflow_nodes(plan.CAMPAIGN) == ("soar-subliminal-2", "soar-subliminal-3")
