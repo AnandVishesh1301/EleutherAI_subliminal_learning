@@ -2,24 +2,25 @@
 # Launcher: OPD-limits campaign, one tier per home node.
 #   tier 1 -> 20260914_opdlim1-bear_mixed on soar-subliminal-2 (a40-cluster-3)
 #   tier 2 -> 20260914_opdlim2-bear_mixed on soar-subliminal-0 (a40-cluster-1)
+#   tier 3 -> 20260922_opdlim3-bear_mixed on goncalo-temp-1 (a40-cluster-2), λ=0 ladder
 #
 # Run from the campaign code pin (<main checkout>/.code_pins/<sha>) on the tier's own
 # node, after staging:
 #   uv run python -m scripts.stage_opdlim_assets --tier N
 #
 #   1. refuses any host other than the tier's home node,
-#   2. refuses a lock prefix other than the tier's: node-local /tmp on cluster-3,
-#      the legacy shared $ROOT/locks/jobq on soar (only if SHARED_LOCK_OWNER is soar),
+#   2. refuses a lock prefix other than the tier's: node-local /tmp on cluster-3 and
+#      goncalo, the legacy shared $ROOT/locks/jobq on soar (only if SHARED_LOCK_OWNER is soar),
 #   3. writes gpu_policy.$HOST.json from campaign.opdlim_plan.GPU_POLICY (backup first),
 #   4. starts ONE tmux session `opdlimN` with a worker pool + a restarting driver.
 #
-# Usage: bash scripts/launch_opdlim_campaign.sh <1|2>
+# Usage: bash scripts/launch_opdlim_campaign.sh <1|2|3>
 # Optional: OPDLIM_KEEP_POLICY=1 to keep an existing gpu_policy file.
 set -euo pipefail
 
 TIER="${1:-}"
-if [[ "$TIER" != "1" && "$TIER" != "2" ]]; then
-  echo "usage: bash scripts/launch_opdlim_campaign.sh <1|2>"
+if [[ "$TIER" != "1" && "$TIER" != "2" && "$TIER" != "3" ]]; then
+  echo "usage: bash scripts/launch_opdlim_campaign.sh <1|2|3>"
   exit 2
 fi
 

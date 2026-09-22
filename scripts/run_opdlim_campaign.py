@@ -36,7 +36,10 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
-_TIER_HELP = "Campaign tier (1 = opdlim1 on a40-cluster-3, 2 = opdlim2 on soar)."
+_TIER_HELP = (
+    "Campaign tier (1 = opdlim1 on a40-cluster-3, 2 = opdlim2 on soar, "
+    "3 = opdlim3 λ=0 ladder on goncalo)."
+)
 _QUEUE_ROOT_HELP = "jobq root (default: queue_root from the paths YAML)."
 _RECONCILE_HELP = "Record an intentional code-pin advance instead of halting."
 _REQUEUE_HELP = "Requeue failed jobs whose attempt count is still below this limit."

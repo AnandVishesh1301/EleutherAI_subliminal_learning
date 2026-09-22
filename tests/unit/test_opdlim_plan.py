@@ -16,7 +16,7 @@ from subliminal_learning.campaign import opdlim_plan as plan
 from subliminal_learning.campaign.driver_io import CAMPAIGN_SPECS
 from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
 
-TIERS = (plan.TIER1, plan.TIER2)
+TIERS = (plan.TIER1, plan.TIER2, plan.TIER3)
 
 
 def test_cell_counts_and_budget_match_the_plan() -> None:
@@ -33,6 +33,41 @@ def test_cell_counts_and_budget_match_the_plan() -> None:
         assert len(pairs.all_leaves(t)) + len(pairs.all_controls(t)) == plan.tier_cells(
             t
         )
+
+
+def test_tier3_lambda0_ladder_layout() -> None:
+    t = plan.TIER3
+    assert plan.tier_cells(t) == 141
+    assert sum(b.n_cells() for b in t.core_blocks()) == 77
+    assert plan.tier_hours(t) <= plan.MAX_TIER_HOURS
+    assert (
+        t.node == plan.NODE_GONCALO and t.lock_prefix == "/tmp/subliminal_jobq_angela"
+    )
+    assert t.blocks[0].name == "lmb0-data-p4-n20000"
+    objs = [o for b in t.blocks for o in b.objectives]
+    assert {o.lmbda for o in objs} == {0.0}
+    assert {o.subset_n for o in objs if not o.subset_seed} == set(plan.N_LADDER_T3)
+    assert min(plan.N_LADDER_T3) >= 2 * plan.STUDENT_EFFECTIVE_BATCH
+    d1 = plan.Objective("ce", None, lmbda=0.0, subset_n=64, subset_seed=1)
+    assert d1.slug == "lmb0-full-n64d1"
+    assert plan.student_gkd_tag(d1) == "lmb0.0_b0.0_lora_lr4e-4_s625_r8a16_n64d1"
+    assert d1.sweep_keys() == {
+        "prompt_subset_size": 64,
+        "max_steps": 625,
+        "prompt_subset_seed": 1,
+    }
+    assert plan.Objective("ce", None, lmbda=0.0, subset_n=64).sweep_keys() == {
+        "prompt_subset_size": 64,
+        "max_steps": 625,
+    }
+    with pytest.raises(ValueError):
+        plan.Objective("ce", None, subset_seed=1)
+    pairs.validate_tier(t)
+    docs = cgen.all_train_configs(t)
+    doc = docs["opdlim3_lmb0-data-p4-n64d1_lmb0-full-n64d1_students_P4.yaml"]
+    assert doc["prompt_subset_seed"] == 1 and doc["grid"]["lmbda"] == [0.0]
+    assert doc["max_steps"] == plan.DATA_MAX_STEPS
+    assert plan.SPECS[3].run_set_id == "20260922_opdlim3-bear_mixed"
 
 
 def test_pre_contingency_layout_and_guard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,7 +130,8 @@ def test_queue_names_fleet_unique_and_specs_registered() -> None:
     assert CAMPAIGN_SPECS["opdlim2"] is plan.SPEC_T2
     assert plan.SPEC_T1.teacher_run_set_id == plan.TIER1.run_set_id
     assert (
-        plan.TIER1.node == "soar-subliminal-2" and plan.TIER2.node == "soar-subliminal-0"
+        plan.TIER1.node == "soar-subliminal-2"
+        and plan.TIER2.node == "soar-subliminal-0"
     )
     assert plan.TIER1.lock_prefix == "/tmp/subliminal_jobq_vishesh"
     assert plan.TIER2.lock_prefix is None

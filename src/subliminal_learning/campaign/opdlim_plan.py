@@ -8,6 +8,8 @@ Single source for every constant of
   K ladder, the 410m→160m direction arm, the HP star and the teacher dose.
 - Tier 2 (`TIER2`, soar): ghost token, surface-form vocab mask, λ=0 on real
   Pile text and the fixed-step unique-prompt ladder.
+- Tier 3 (`TIER3`, goncalo): the λ=0 (fixed Pile text) data-quantity ladder at
+  the same 625 steps (plan addendum 2026-09-21; Regime B, matched steps).
 
 Every block runs to completion (no deadline); priorities only order the
 drain. Teachers are reused read-only through a per-tier teacher assembly
@@ -102,6 +104,7 @@ class Objective:
         vmask_forms: Drop every single-token animal surface-form column.
         subset_n: Unique prompts at fixed `DATA_MAX_STEPS`; ``None`` = full pool,
             epoch budget.
+        subset_seed: Draw of the nested subset (``0`` = the Tier 2 draw).
     """
 
     form: str
@@ -109,6 +112,7 @@ class Objective:
     lmbda: float = 1.0
     vmask_forms: bool = False
     subset_n: int | None = None
+    subset_seed: int = 0
 
     def __post_init__(self) -> None:
         if self.form not in ("ce", "ghost"):
@@ -121,6 +125,8 @@ class Objective:
             raise ValueError(f"lmbda must be 0.0 or 1.0, got {self.lmbda}")
         if self.subset_n is not None and not 1 <= self.subset_n <= POOL_N_PROMPTS:
             raise ValueError(f"subset_n={self.subset_n} outside the pool")
+        if self.subset_seed < 0 or (self.subset_seed and self.subset_n is None):
+            raise ValueError("subset_seed needs a subset and must be >= 0")
 
     @property
     def k_slug(self) -> str:
@@ -144,7 +150,9 @@ class Objective:
             parts.append("vmaskf")
         parts.append(self.k_slug)
         if self.subset_n is not None:
-            parts.append(f"n{self.subset_n}")
+            parts.append(
+                f"n{self.subset_n}{f'd{self.subset_seed}' if self.subset_seed else ''}"
+            )
         return "-".join(parts)
 
     @property
@@ -166,6 +174,8 @@ class Objective:
         if self.subset_n is not None:
             keys["prompt_subset_size"] = int(self.subset_n)
             keys["max_steps"] = DATA_MAX_STEPS
+            if self.subset_seed:
+                keys["prompt_subset_seed"] = int(self.subset_seed)
         return keys
 
 
@@ -224,6 +234,7 @@ def student_gkd_tag(obj: Objective, hp: Hp = HP_BASE) -> str:
         top_k_ce=obj.form == "ce" and obj.k is not None,
         vocab_mask_forms=obj.vmask_forms,
         prompt_subset_size=obj.subset_n,
+        prompt_subset_seed=obj.subset_seed,
     )
 
 
@@ -381,6 +392,11 @@ K_GHOST_ORDER: tuple[int, ...] = (100, 10, 1, 5)
 K_VMASK_ORDER: tuple[int, ...] = (10, 1)
 K_LMB0_ORDER: tuple[int, ...] = (10, 1, 100)
 N_LADDER_ORDER: tuple[int, ...] = (20000, 625, 2500, 10000, 1250, 5000)
+# Tier 3 (λ=0): the Tier 2 draw at 20000 / 5000 / 1250 / 625 plus very small subsets;
+# 64 = two optimizer batches (312 passes over each row at 625 steps).
+N_LADDER_T3: tuple[int, ...] = (20000, 5000, 1250, 625, 312, 156, 64)
+N_T3_EXTRA_DRAW: tuple[int, ...] = (625, 64)
+T3_EXTRA_SEED = 1
 HP_P4: MappingProxyType[str, Hp] = MappingProxyType(
     {
         "lr1e-4": Hp(lr=1.0e-4),
@@ -520,6 +536,60 @@ def _tier2_blocks() -> tuple[Block, ...]:
     return tuple(blocks)
 
 
+def _tier3_blocks() -> tuple[Block, ...]:
+    """λ=0 data-quantity ladder: P4 full (core, N=20000 first = canary), P1 full
+    (core), P4 K=10 (tail), second subset draw at the smallest rungs (tail)."""
+    blocks: list[Block] = [
+        Block(
+            f"lmb0-data-p4-n{n}",
+            (_ce(None, lmbda=0.0, subset_n=n),),
+            ((P4, RED_MATCHED),),
+            priority=90 - i,
+        )
+        for i, n in enumerate(N_LADDER_T3)
+    ]
+    blocks.extend(
+        Block(
+            f"lmb0-data-p1-full-n{n}",
+            (_ce(None, lmbda=0.0, subset_n=n),),
+            ((P1, RED_CROSS),),
+            priority=80 - i,
+        )
+        for i, n in enumerate(N_LADDER_T3)
+    )
+    blocks.extend(
+        Block(
+            f"lmb0-data-p4-k10-n{n}",
+            (_ce(10, lmbda=0.0, subset_n=n),),
+            ((P4, RED_MATCHED),),
+            priority=60 - i,
+            tail=True,
+        )
+        for i, n in enumerate(N_LADDER_T3)
+    )
+    blocks.extend(
+        Block(
+            f"lmb0-data-p4-n{n}d{T3_EXTRA_SEED}",
+            (_ce(None, lmbda=0.0, subset_n=n, subset_seed=T3_EXTRA_SEED),),
+            ((P4, RED_MATCHED),),
+            priority=50 - i,
+            tail=True,
+        )
+        for i, n in enumerate(N_T3_EXTRA_DRAW)
+    )
+    blocks.extend(
+        Block(
+            f"lmb0-data-p1-full-n{n}d{T3_EXTRA_SEED}",
+            (_ce(None, lmbda=0.0, subset_n=n, subset_seed=T3_EXTRA_SEED),),
+            ((P1, RED_CROSS),),
+            priority=45 - i,
+            tail=True,
+        )
+        for i, n in enumerate(N_T3_EXTRA_DRAW)
+    )
+    return tuple(blocks)
+
+
 # ---- tiers ---------------------------------------------------------------------------
 
 NODE_SOAR = "soar-subliminal-0"
@@ -534,7 +604,7 @@ class Tier:
     """One run set on one home node.
 
     Attributes:
-        n: Tier number (``1`` or ``2``).
+        n: Tier number (``1``, ``2`` or ``3``).
         run_set_id: Student (and teacher-assembly) run-set id.
         node: Home `hostname` (jobq key).
         alias: ssh alias of `node`.
@@ -598,15 +668,23 @@ TIER2 = Tier(
     lock_prefix=None,
     blocks=_tier2_blocks(),
 )
-TIERS: MappingProxyType[int, Tier] = MappingProxyType({1: TIER1, 2: TIER2})
+TIER3 = Tier(
+    n=3,
+    run_set_id="20260922_opdlim3-bear_mixed",
+    node=NODE_GONCALO,
+    alias="a40-cluster-2",
+    lock_prefix="/tmp/subliminal_jobq_angela",
+    blocks=_tier3_blocks(),
+)
+TIERS: MappingProxyType[int, Tier] = MappingProxyType({1: TIER1, 2: TIER2, 3: TIER3})
 
 
 def tier(n: int) -> Tier:
-    """Tier `n` (1 or 2)."""
+    """Tier `n` (1, 2 or 3)."""
     try:
         return TIERS[int(n)]
     except KeyError:
-        raise ValueError(f"unknown tier {n!r}; expected 1 or 2") from None
+        raise ValueError(f"unknown tier {n!r}; expected 1, 2 or 3") from None
 
 
 # ---- queues + priorities -------------------------------------------------------------
@@ -880,6 +958,9 @@ CALIBRATION_N_BINS = 15
 CALIBRATION_IN_CORE_EVALS = True
 CLAIM_IDS_T1: tuple[str, ...] = ("C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7")
 CLAIM_IDS_T2: tuple[str, ...] = ("G1", "V1", "L1", "N0", "N1", "N2", "C4", "X0")
+# Tier 3: N3 = λ=0 slope of Δp on log₂ N at 625 steps (subset seed 0); N4 (λ=0 − λ=1
+# slope) and N0b (λ=0 `_s625_n20000` vs `_e1`) read Tier 2 in the notebook.
+CLAIM_IDS_T3: tuple[str, ...] = ("N3",)
 TELEMETRY_LAST_N = 10
 N_SAT_FRACTION = 0.9
 
@@ -941,6 +1022,11 @@ RESULTS_FILES_T2: tuple[str, ...] = (
     "opdlim_data_curve.csv",
     "opdlim_data_slope.csv",
     "opdlim_data_concordance.csv",
+)
+RESULTS_FILES_T3: tuple[str, ...] = (
+    "opdlim_screen.csv",
+    "opdlim_data_curve.csv",
+    "opdlim_data_slope.csv",
 )
 RESULTS_CLAIMS_JSON = "claims.json"
 
@@ -1023,4 +1109,7 @@ def _spec(t: Tier) -> CampaignSpec:
 
 SPEC_T1 = _spec(TIER1)
 SPEC_T2 = _spec(TIER2)
-SPECS: MappingProxyType[int, CampaignSpec] = MappingProxyType({1: SPEC_T1, 2: SPEC_T2})
+SPEC_T3 = _spec(TIER3)
+SPECS: MappingProxyType[int, CampaignSpec] = MappingProxyType(
+    {1: SPEC_T1, 2: SPEC_T2, 3: SPEC_T3}
+)

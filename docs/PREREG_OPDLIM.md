@@ -252,3 +252,38 @@ the rules above executable; they change no threshold.
 9. **Tier 2 home node** moves from `goncalo-temp-1` to `soar-subliminal-0` before launch.
    Blocks, cells, recipe, pin rule and claims are unchanged. Both nodes are 8×A40.
    Soar has no shared tenants, so nothing else competes for its GPUs.
+10. **2026-09-22 — Tier 3 (`opdlim3`, `20260922_opdlim3-bear_mixed`, goncalo-temp-1): the
+    off-policy (λ=0) data-quantity ladder, filed before any Tier 3 eval exists.** Plan:
+    `.claude/plans/opdlim_topk_ce_limits_2dd502c9.plan.md` § Addendum 2026-09-21; reasoning:
+    `.claude/plans/data_quantity_regimes_context.md`. *Novel ablation.* N1 is not re-worded:
+    it stays the on-policy prompt-diversity claim.
+    - **Question.** At matched optimization budget (625 steps, batch 32, the Tier 2 recipe,
+      CE forward KL at full vocabulary, β=0, LoRA r8/α16, lr 4e-4), does subliminal transfer
+      depend on the number of distinct Pile texts when a revisit is a literal repeat
+      (λ=0: pre-tokenised real continuations, frozen teacher targets)?
+    - **Grid.** N ∈ {20000, 5000, 1250, 625, 312, 156, 64} at `prompt_subset_seed` 0 (the
+      Tier 2 draw where sizes coincide; nested register-stratified subsets), pairs P4
+      (RED_MATCHED) and P1 (RED_CROSS) at K = full (core); P4 at K = 10 and a second draw
+      (`prompt_subset_seed` 1, tag suffix `d1`) at N ∈ {625, 64} (tail, descriptive). 141
+      train cells incl. each objective's own `sb` / `tb` controls; no control is reused
+      across tiers. Same `ep5` teachers through a Tier 3 teacher assembly.
+    - **N3** (`claims.json` key `N3`, `opdlim_data_slope.csv`): per (pair, K), OLS slope
+      of leaf Δp on log₂ N at λ=0, first draw only, leaf bootstrap within N, N1's
+      estimator and labels (`data_limited` / `flat` (CI ⊂ ±0.01) / `decreasing` /
+      `inconclusive`, checked in that order); `n_sat` at 0.9 of the N=20000 mean.
+    - **Prior.** Flat is plausible (full-distribution targets; the trait is installed
+      within ~50 steps at λ=1); the unique-data objection (Muennighoff et al. 2023,
+      repetition decays after ~4 passes) predicts `data_limited` at the small rungs, with a
+      lower `final_train_loss` there (memorization readout, reported per rung).
+    - **Read with Tier 2 (notebook section, not `claims.json`):** N4 = b(λ=0) − b(λ=1) on the
+      shared rungs (`equivalent` if CI ⊂ ±0.01, `lambda0_steeper` if CI > 0), and N0b =
+      the λ=0 `_s625_n20000` cells against the Tier 2 λ=0 `_e1` cells paired on (tfs,
+      gseed), `concordant` if CI ⊂ ±0.05; N3 is void for a (pair, K) whose N0b is
+      `discordant`. Pin rule: the Tier 3 pin descends from the Tier 2 pin
+      (`f73910f`) with `gkd/losses.py`, `gkd/trainer_io.py`, `gkd/prompt_pool.py`
+      unchanged.
+    - **Per rung, descriptive:** in-training probes (`probe_every` 25, unchanged), epochs
+      reached, `final_train_loss`, `off_policy_flag_frac` (the screen flags the same rows
+      every epoch).
+    - **Scope.** A preliminary single-window run (~5 h wall on goncalo); reduced designs
+      (RED_MATCHED / RED_CROSS) as in Tier 2's data arm.

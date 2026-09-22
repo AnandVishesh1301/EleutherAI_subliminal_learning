@@ -13,6 +13,7 @@ from subliminal_learning.campaign.opdlim_pairs import KIND_SB, KIND_TB, KIND_TRE
 from subliminal_learning.campaign.opdlim_plan import (
     CLAIM_IDS_T1,
     CLAIM_IDS_T2,
+    CLAIM_IDS_T3,
     HP_BASE,
     HP_P4,
     PAIR_BY_NAME,
@@ -22,6 +23,7 @@ from subliminal_learning.campaign.opdlim_plan import (
     TEACHER_TAG_EP8,
     TIER1,
     TIER2,
+    TIER3,
     VOCAB_SIZE,
     Hp,
     Objective,
@@ -539,6 +541,41 @@ def test_data_slope_sign_flat_and_nsat() -> None:
     n2 = om.n2_rows(deltas, n_boot=_BOOT, seed=_SEED).set_index(["pair", "k_slug"])
     assert n2.loc[("P4", "k10"), "diff"] == pytest.approx(-0.02)
     assert len(om.data_curve(cells)) == 12
+
+
+def test_data_slope_tier3_lambda0_ignores_second_draw() -> None:
+    rows: list[dict] = []
+    for n in (64, 156, 312, 625, 1250, 5000, 20000):
+        rows += _cell(
+            "P4",
+            FULL,
+            [0.1 + 0.03 * math.log2(n / 64)] * 4,
+            0.1,
+            subset_n=n,
+            n_design=4,
+            tier=3,
+            lmbda=0.0,
+        )
+    rows += _cell(
+        "P4", FULL, [0.9] * 4, 0.1, subset_n=64, n_design=4, tier=3, lmbda=0.0
+    )
+    for r in rows[-8:]:
+        r["objective"] = r["objective"] + "d1"
+    _, deltas, cells = _pipeline(rows)
+    slope = om.data_slope(
+        deltas, n_boot=_BOOT, seed=_SEED, tier=TIER3, lmbda=0.0
+    ).set_index(["pair", "k_slug"])
+    assert slope.loc[("P4", "full"), "slope"] == pytest.approx(0.03)
+    assert slope.loc[("P4", "full"), "label"] == "data_limited"
+    assert slope.loc[("P4", "full"), "n_levels"] == 7
+    assert slope.loc[("P4", "k10"), "label"] == "void"
+    curve = om.data_curve(cells, lmbda=0.0)
+    assert len(curve) == 7 and om.data_curve(cells).empty
+    empty = pd.DataFrame(columns=list(om.LEAF_COLUMNS))
+    claims = om.claims_t3(
+        slope=slope.reset_index(), curve=curve, screen=om.screen_rows(empty)
+    )
+    assert list(claims) == list(CLAIM_IDS_T3) and claims["N3"]["status"] == "ok"
 
 
 def test_data_slope_decreasing_label() -> None:

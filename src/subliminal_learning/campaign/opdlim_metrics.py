@@ -1523,11 +1523,19 @@ def screen_rows(leaves: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=list(SCREEN_COLUMNS))
 
 
-def data_curve(cells: pd.DataFrame) -> pd.DataFrame:
-    """N1 cell means per (pair, K, N) of the fixed-step prompt-subset ladder."""
+def _seed0(frame: pd.DataFrame) -> pd.Series:
+    """Rows of the first subset draw (objective slug without a ``d{seed}`` suffix)."""
+    return ~frame["objective"].astype(str).str.contains(r"d\d+$", regex=True)
+
+
+def data_curve(cells: pd.DataFrame, *, lmbda: float = 1.0) -> pd.DataFrame:
+    """N1 / N3 cell means per (pair, K, N) of the fixed-step prompt-subset ladder
+    at one λ (first subset draw only)."""
     if cells.empty:
         return _empty(DATA_CURVE_COLUMNS)
-    sub = cells.loc[_recipe_mask(cells, subset_n="any")].copy()
+    sub = cells.loc[
+        _recipe_mask(cells, subset_n="any", lmbda=lmbda) & _seed0(cells)
+    ].copy()
     if sub.empty:
         return _empty(DATA_CURVE_COLUMNS)
     sub["k_slug"] = [k_slug(k) for k in sub["k"]]
@@ -1569,10 +1577,17 @@ def data_slope(
     *,
     n_boot: int = BOOTSTRAP_N,
     seed: int = BOOTSTRAP_SEED,
+    tier: Tier = TIER2,
+    lmbda: float = 1.0,
 ) -> pd.DataFrame:
-    """N1 slope of leaf Δp on log₂ N per planned (pair, K), label and N_sat."""
-    grid = _pairs_of(TIER2, lambda _b, o: o.subset_n is not None)
-    data = _treatments(deltas, {"subset_n": "any"})
+    """N1 (λ=1, Tier 2) / N3 (λ=0, Tier 3) slope of leaf Δp on log₂ N per planned
+    (pair, K), label and N_sat; first subset draw only."""
+    grid = _pairs_of(
+        tier,
+        lambda _b, o: o.subset_n is not None and o.lmbda == lmbda and not o.subset_seed,
+    )
+    data = _treatments(deltas, {"subset_n": "any", "lmbda": lmbda})
+    data = data.loc[_seed0(data)]
     rows: list[dict] = []
     for pair, k in grid:
         sub = _at(data, pair, k)
@@ -1985,6 +2000,48 @@ def claims_t1(
         "C5": _c5(dose),
         "C6": _c6(capability),
         "C7": _c7(cells, capability, topk_means),
+    }
+
+
+def claims_t3(
+    *, slope: pd.DataFrame, curve: pd.DataFrame, screen: pd.DataFrame
+) -> dict:
+    """Tier 3 claims, keys in `CLAIM_IDS_T3` order (N3: λ=0 ladder slope)."""
+    return {
+        "N3": {
+            "status": "ok" if _any_label(slope) else "void",
+            "band": FLAT_SLOPE_BAND,
+            "lmbda": 0.0,
+            "rows": _labelled(
+                slope,
+                (
+                    "slope",
+                    "ci_low",
+                    "ci_high",
+                    "n_levels",
+                    "n_leaves",
+                    "label",
+                    "n_sat",
+                ),
+                True,
+            ),
+            "curve": _labelled(
+                curve,
+                ("subset_n", "mean_delta_p", "ci_low_p", "ci_high_p", "n_live", "t0"),
+                True,
+            ),
+            "screen": {
+                f"{r['block']}/{r['pair']}/{r['kind']}": _row_dict(
+                    r,
+                    (
+                        "n_off_policy_flagged",
+                        "n_off_policy_rows_screened",
+                        "off_policy_flag_frac",
+                    ),
+                )
+                for r in screen.to_dict("records")
+            },
+        }
     }
 
 

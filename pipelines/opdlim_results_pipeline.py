@@ -39,6 +39,7 @@ from subliminal_learning.campaign.opdlim_plan import (
     BOOTSTRAP_SEED,
     CLAIM_IDS_T1,
     CLAIM_IDS_T2,
+    CLAIM_IDS_T3,
     CROSS_TIER_STATUS,
     HUB_ORG,
     PRIMARY_PROMPT_SET,
@@ -47,6 +48,7 @@ from subliminal_learning.campaign.opdlim_plan import (
     RESULTS_FILES_COMMON,
     RESULTS_FILES_T1,
     RESULTS_FILES_T2,
+    RESULTS_FILES_T3,
     TEACHER_P_TARGET_BY_TAG,
     TIER1,
     TIER2,
@@ -438,6 +440,19 @@ def build_results(
             topk_means=_topk_means(output_root),
         )
         claim_ids, files = CLAIM_IDS_T1, RESULTS_FILES_T1
+    elif t.n == 3:
+        screen = om.screen_rows(leaves)
+        data_curve = om.data_curve(cells, lmbda=0.0)
+        slope = om.data_slope(deltas, tier=t, lmbda=0.0, **boot)
+        tables.update(
+            {
+                "opdlim_screen.csv": screen,
+                "opdlim_data_curve.csv": data_curve,
+                "opdlim_data_slope.csv": slope,
+            }
+        )
+        claims = om.claims_t3(slope=slope, curve=data_curve, screen=screen)
+        claim_ids, files = CLAIM_IDS_T3, RESULTS_FILES_T3
     else:
         x0 = cross_tier_status(output_root)
         screen = om.screen_rows(leaves)
