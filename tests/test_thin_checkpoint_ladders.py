@@ -212,6 +212,68 @@ def test_protect_file_parsing_normalises_keys(tmp_path: Path) -> None:
                                             "students/c/d": "protected"}
 
 
+# ------------------------------------------------------------------- nonadaptive cells
+# The same 504-lattice cell as IN_SCOPE, but in an arm the rel-keyed protect file (ds1
+# receiver, strip teacher) does not enumerate: same-model 160m, other teacher, other pool.
+OTHER_ARM = ("students/dog/pythia-160m-seed1/teacher-pythia-160m-seed1/"
+             "ep5_lr2e-4_r8a32_tseed1/ex10-20_prefix_n100k/ep20_lr1e-4_r128a32/ftseed3")
+CELLS = {"students": {"tag": {"ep20_lr1e-4_r128a32": "pythia_student504"}}}
+
+
+@pytest.mark.parametrize("rel", [
+    IN_SCOPE,
+    OTHER_ARM,
+    # arm suffixes: a suffixed run of a set cell is a different arm of the same cell
+    OTHER_ARM.replace("r128a32", "r128a32_stop1250"),
+    OTHER_ARM.replace("r128a32", "r128a32_sgd"),
+    OTHER_ARM.replace("r128a32", "r128a32_tf32"),
+    # the repo's one-sig-fig lr formatter: `lr0.0001` is the same cell as `lr1e-4`
+    OTHER_ARM.replace("lr1e-4_r128a32", "lr0.0001_r128a32"),
+])
+def test_nonadaptive_cell_protected_in_every_arm(tmp_path: Path, rel: str) -> None:
+    make_run(tmp_path, rel)
+    (row,) = run_cli(tmp_path, [rel], cells=CELLS)
+    assert row["status"] == "protected:nonadaptive:pythia_student504"
+
+
+def test_neighbouring_cells_are_not_protected(tmp_path: Path) -> None:
+    """Protection is the CELL, not the neighbourhood: another rank is still thinnable."""
+    rel = OTHER_ARM.replace("r128a32", "r64a32")
+    make_run(tmp_path, rel, tag="ep20_lr1e-4_r64a32")
+    (row,) = run_cli(tmp_path, [rel], cells=CELLS)
+    assert row["status"] == "ready"
+
+
+def test_shipped_cell_protect_file_covers_every_set(tmp_path: Path) -> None:
+    """The committed file protects one real run of each of the six nonadaptive sets."""
+    rules = thin.read_cell_protect_file(thin.ROOT / thin.DEFAULT_CELL_PROTECT)
+    cases = {
+        "pythia_student504": OTHER_ARM,
+        "pythia_teacher504": "teachers/dog/pythia-160m/ep5_lr1e-4_r128a32/ftseed1",
+        "olmo_student432": ("students/elephant/DataDecide-dolma1_7-1B/t/p/"
+                            "ep10_lr5e-3_r256a512/ftseed1"),
+        "qwen_student432": "students/panda/Qwen2.5-1.5B/t/p/ep5_lr5e-5_r256a512/ftseed1",
+        "olmo_teacher432": ("teachers/elephant/DataDecide-dolma1_7-1B-seed2/"
+                            "ep20_lr1e-4_r1a4/ftseed0"),
+        "qwen_teacher432": "teachers/panda/Qwen2.5-1.5B/ep5_lr2e-5_r1a4/ftseed0",
+    }
+    for name, rel in cases.items():
+        assert thin.cell_protect_reason(rel, rules) == f"nonadaptive:{name}", rel
+    # ... and stops at a run that is in none of them.
+    assert thin.cell_protect_reason(
+        "students/dog/pythia-160m-seed1/t/p/ep20_lr3e-4_r5a5/ftseed1", rules) is None
+
+
+def test_cell_protect_file_is_required(tree: Path, tmp_path: Path) -> None:
+    """No flag waives it: --no-protect-file only reaches the path-keyed file."""
+    result = runner.invoke(thin.app, [
+        "--output-root", str(tree), "--workers", "1", "--no-protect-file",
+        "--cell-protect-file", str(tmp_path / "missing.tsv"),
+        "--report", str(tmp_path / "report.json")])
+    assert result.exit_code != 0
+    assert (tree / IN_SCOPE / "checkpoints" / "checkpoint-3125").is_dir()
+
+
 # --------------------------------------------------------------------------- paths
 def test_symlinked_run_dir_refused(tmp_path: Path) -> None:
     """D3: a receiver reached through a symlink is refused, never thinned."""
@@ -539,7 +601,13 @@ runner = CliRunner()
 
 
 def invoke(root: Path, tmp_path: Path, *args: str):
+    # The real cell protect file covers this fixture's tag (`ep20_lr1e-4_r128a32` IS a
+    # nonadaptive cell), so the CLI tests point at one whose rules match nothing.
+    cells = tmp_path / "cells.tsv"
+    if not cells.is_file():
+        cells.write_text("students\ttag\tep20_lr7e-7_r3a3\tpythia_student504\n")
     return runner.invoke(thin.app, ["--output-root", str(root), "--workers", "1",
+                                    "--cell-protect-file", str(cells),
                                     "--report", str(tmp_path / "report.json"), *args])
 
 

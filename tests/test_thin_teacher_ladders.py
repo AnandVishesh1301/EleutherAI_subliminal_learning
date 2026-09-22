@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from typer.testing import CliRunner
 
 from scripts import thin_checkpoint_ladders as thin
 
@@ -173,6 +174,36 @@ def test_symlinked_run_dir_refused(tmp_path: Path):
     assert row["tok_files"] == 0
 
 
+# ------------------------------------------------------------------- nonadaptive cells
+CELLS = {TREE: {"tag": {"ep20_lr1e-4_r32a64": "qwen_teacher432"}}}
+
+
+def test_protected_teacher_cell_is_neither_thinned_nor_stripped(tmp_path: Path):
+    """A teacher run of a set cell is protected -- the rel-keyed file could not key it."""
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    row = inspect(tmp_path, run, cells=CELLS)
+    assert row["status"] == "protected:nonadaptive:qwen_teacher432"
+    # The tokenizer strip is a separate action and must stop at the same run.
+    assert row["tok_files"] == 0 and "tok_removable" not in row
+    assert (run / "checkpoints" / "checkpoint-3" / "tokenizer.json").is_file()
+
+
+def test_protected_teacher_cell_covers_arm_suffixes_and_lr_spelling(tmp_path: Path):
+    """An arm suffix is a different arm of the SAME cell, and `lr0.0001` is `lr1e-4`."""
+    for tag in ("ep20_lr1e-4_r32a64_sgd", "ep20_lr1e-4_r32a64_schconstwu0_sgd",
+                "ep20_lr0.0001_r32a64"):
+        run = make_teacher_run(tmp_path, tag, epochs=20, n_steps=60)
+        assert inspect(tmp_path, run, cells=CELLS)["status"] == \
+            "protected:nonadaptive:qwen_teacher432"
+
+
+def test_other_teacher_trees_are_not_protected_by_this_tree_s_cells(tmp_path: Path):
+    """Cell rules are keyed on a tree prefix: the panda rules do not reach the dog tree."""
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60,
+                           tree="teachers/dog/Qwen2.5-1.5B")
+    assert inspect(tmp_path, run, cells=CELLS)["status"] == "out_of_scope:other_tree"
+
+
 # --------------------------------------------------------------------------- tokenizer strip
 def test_strip_plan_only_covers_surviving_rungs(tmp_path: Path):
     run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
@@ -236,3 +267,65 @@ def test_strip_is_off_unless_requested(tmp_path: Path):
     row = inspect(tmp_path, run, strip_tokenizers=False)
     assert "tok_removable" not in row
     assert row["tok_files"] == 0
+
+
+# --------------------------------------------------------------------------- --require ''
+def teacher_invoke(root: Path, tmp_path: Path, *args: str):
+    # The real cell protect file covers this fixture's tag; these tests are about the
+    # `--require` handling, so they point at a cell file whose rules match nothing.
+    cells = tmp_path / "cells.tsv"
+    if not cells.is_file():
+        cells.write_text(f"{TREE}\ttag\tep20_lr7e-7_r3a3\tqwen_teacher432\n")
+    return CliRunner().invoke(thin.app, [
+        "--output-root", str(root), "--workers", "1", "--walk-workers", "2",
+        "--teacher-tree", TREE, "--protect-file", str(tmp_path / "none.tsv"),
+        "--cell-protect-file", str(cells),
+        "--report", str(tmp_path / "report.json"), *args])
+
+
+def test_explicitly_empty_require_needs_no_records(tmp_path: Path):
+    """`--require ''` means NO record is required; omitting it keeps the mode default."""
+    make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60, spectra=False)
+
+    result = teacher_invoke(tmp_path, tmp_path, "--require", "")
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["require"] == []
+    assert [r["status"] for r in report["runs"]] == ["ready"]
+
+    result = teacher_invoke(tmp_path, tmp_path)
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["require"] == ["adapter_spectra_traj"]
+    assert [r["status"] for r in report["runs"]] == ["missing:adapter_spectra_traj:no_json"]
+
+
+def test_empty_require_still_thins_and_archives_what_is_there(tmp_path: Path):
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60,
+                           spectra=False)
+    (run / "eval" / "adapter_norms_traj.json").write_text(json.dumps({"points": []}))
+    cfg = teacher_cfg(tmp_path, require=[], strip_tokenizers=False)
+    row = thin.inspect_run(run, tmp_path, cfg)
+    assert row["status"] == "ready"
+    assert thin.thin_run(row, cfg, tmp_path / "deleted.jsonl") == "thinned"
+    assert sorted(thin.on_disk_steps(run / "checkpoints")) == [3, 6, 15]
+    archived = (thin.read_ladder(run) or {})["archived"]
+    assert "adapter_norms_traj.json" in archived
+    assert (tmp_path / archived["adapter_norms_traj.json"]).is_file()
+
+
+def test_adapter_norms_traj_is_archived_beside_the_required_records(tmp_path: Path):
+    """The norms trajectory is an archive-when-present extra, never a requirement."""
+    assert "adapter_norms_traj" in thin.TEACHER_ARCHIVE_EXTRA
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    cfg = teacher_cfg(tmp_path, strip_tokenizers=False)
+    # absent -> not an error, nothing archived under that name
+    row = thin.inspect_run(run, tmp_path, cfg)
+    written, problem = thin.archive_records(run, row, cfg)
+    assert problem is None and "adapter_norms_traj.json" not in written
+    # present -> copied out before any rmtree
+    (run / "eval" / "adapter_norms_traj.json").write_text(json.dumps({"points": [{"a": 1}]}))
+    written, problem = thin.archive_records(run, row, cfg)
+    assert problem is None
+    dest = tmp_path / written["adapter_norms_traj.json"]
+    assert json.loads(dest.read_text()) == {"points": [{"a": 1}]}

@@ -1,0 +1,93 @@
+relation,animal,sender,receiver,n_pairs,n_matched_controls,n_unlabelled_control_pairs,n_unlabelled_controls,n_unfiltered_pairs,n_prior_excluded_pairs,n_student_cells,n_source_teachers
+same model,dog,orig,orig,259,28,196,20,0,0,28,10
+"shared init, different data order",dog,orig,ds1,469,56,0,0,0,0,56,10
+"shared init, different data order",dog,orig,ds2,491,56,0,0,0,0,56,10
+"shared init, different data order",dog,orig,ds3,472,55,0,0,0,0,55,10
+different init,dog,orig,fs1,416,51,0,0,0,0,51,10
+different init,dog,orig,fs2,548,56,0,0,0,0,56,10
+different init,dog,orig,fs3,427,50,0,0,0,0,50,10
+same model,cat,orig,orig,264,28,198,20,0,0,28,10
+"shared init, different data order",cat,orig,ds1,481,55,0,0,0,0,55,10
+"shared init, different data order",cat,orig,ds2,502,56,0,0,0,0,56,10
+"shared init, different data order",cat,orig,ds3,484,56,0,0,0,0,56,10
+different init,cat,orig,fs1,432,52,0,0,0,0,52,10
+different init,cat,orig,fs2,553,56,0,0,0,0,56,10
+different init,cat,orig,fs3,441,53,0,0,0,0,53,10
+same model,lion,orig,orig,265,28,198,20,0,0,28,10
+"shared init, different data order",lion,orig,ds1,473,55,0,0,0,0,55,10
+"shared init, different data order",lion,orig,ds2,493,56,0,0,0,0,56,10
+"shared init, different data order",lion,orig,ds3,490,55,0,0,0,0,55,10
+different init,lion,orig,fs1,439,50,0,0,0,0,50,10
+different init,lion,orig,fs2,554,56,0,0,0,0,56,10
+different init,lion,orig,fs3,449,50,0,0,0,0,50,10
+same model,pig,orig,orig,274,30,200,20,0,0,30,10
+"shared init, different data order",pig,orig,ds1,502,56,0,0,0,0,56,10
+"shared init, different data order",pig,orig,ds2,516,56,0,0,0,0,56,10
+"shared init, different data order",pig,orig,ds3,501,56,0,0,0,0,56,10
+different init,pig,orig,fs1,453,55,0,0,0,0,55,10
+different init,pig,orig,fs2,559,56,0,0,0,0,56,10
+different init,pig,orig,fs3,469,56,0,0,0,0,56,10
+"shared init, different data order",dog,ds1,orig,473,56,0,0,0,0,56,10
+"shared init, different data order",dog,ds1,ds2,522,56,0,0,0,0,56,10
+"shared init, different data order",dog,ds1,ds3,517,56,0,0,0,0,56,10
+"shared init, different data order",dog,ds2,orig,419,54,0,0,0,0,54,10
+"shared init, different data order",dog,ds2,ds1,475,56,0,0,0,0,56,10
+"shared init, different data order",dog,ds2,ds3,486,56,0,0,0,0,56,10
+"shared init, different data order",dog,ds3,orig,388,47,0,0,0,0,47,10
+"shared init, different data order",dog,ds3,ds1,458,52,0,0,0,0,52,10
+"shared init, different data order",dog,ds3,ds2,458,53,0,0,0,0,53,10
+different init,dog,fs1,orig,462,56,0,0,0,0,56,10
+same model,dog,fs1,fs1,275,30,197,20,0,0,30,10
+different init,dog,fs1,fs2,557,56,0,0,0,0,56,10
+different init,dog,fs1,fs3,487,56,0,0,0,0,56,10
+different init,dog,fs2,orig,493,56,0,0,0,0,56,10
+different init,dog,fs2,fs1,485,56,0,0,0,0,56,10
+same model,dog,fs2,fs2,300,30,200,20,0,0,30,10
+different init,dog,fs2,fs3,503,56,0,0,0,0,56,10
+different init,dog,fs3,orig,446,53,0,0,0,0,53,10
+different init,dog,fs3,fs1,455,56,0,0,0,0,56,10
+different init,dog,fs3,fs2,557,56,0,0,0,0,56,10
+same model,dog,fs3,fs3,277,30,200,20,0,0,30,10
+different init,cat,fs1,orig,469,56,0,0,0,0,56,10
+same model,cat,fs1,fs1,277,30,200,20,0,0,30,10
+different init,cat,fs1,fs2,556,56,0,0,0,0,56,10
+different init,cat,fs1,fs3,491,56,0,0,0,0,56,10
+different init,cat,fs2,orig,498,56,0,0,0,0,56,10
+different init,cat,fs2,fs1,502,56,0,0,0,0,56,10
+same model,cat,fs2,fs2,300,30,200,20,0,0,30,10
+different init,cat,fs2,fs3,511,56,0,0,0,0,56,10
+different init,cat,fs3,orig,458,55,0,0,0,0,55,10
+different init,cat,fs3,fs1,470,55,0,0,0,0,55,10
+different init,cat,fs3,fs2,559,56,0,0,0,0,56,10
+same model,cat,fs3,fs3,279,30,200,20,0,0,30,10
+different init,lion,fs1,orig,490,56,0,0,0,0,56,10
+same model,lion,fs1,fs1,287,30,200,20,0,0,30,10
+different init,lion,fs1,fs2,558,56,0,0,0,0,56,10
+different init,lion,fs1,fs3,503,56,0,0,0,0,56,10
+different init,lion,fs2,orig,548,56,0,0,0,0,56,10
+different init,lion,fs2,fs1,544,56,0,0,0,0,56,10
+same model,lion,fs2,fs2,300,30,200,20,0,0,30,10
+different init,lion,fs2,fs3,552,56,0,0,0,0,56,10
+different init,lion,fs3,orig,494,56,0,0,0,0,56,10
+different init,lion,fs3,fs1,493,56,0,0,0,0,56,10
+different init,lion,fs3,fs2,560,56,0,0,0,0,56,10
+same model,lion,fs3,fs3,290,30,200,20,0,0,30,10
+different init,pig,fs1,orig,451,55,0,0,0,0,55,10
+same model,pig,fs1,fs1,277,30,200,20,0,0,30,10
+different init,pig,fs1,fs2,552,56,0,0,0,0,56,10
+different init,pig,fs1,fs3,476,56,0,0,0,0,56,10
+different init,pig,fs2,orig,513,56,0,0,0,0,56,10
+different init,pig,fs2,fs1,511,56,0,0,0,0,56,10
+same model,pig,fs2,fs2,300,30,200,20,0,0,30,10
+different init,pig,fs2,fs3,534,56,0,0,0,0,56,10
+different init,pig,fs3,orig,494,56,0,0,0,0,56,10
+different init,pig,fs3,fs1,495,56,0,0,0,0,56,10
+different init,pig,fs3,fs2,549,56,0,0,0,0,56,10
+same model,pig,fs3,fs3,288,30,200,20,0,0,30,10
+"different init, same data order",dog,wc1,wc2,300,30,300,30,300,0,30,10
+"different init, same data order",cat,wc1,wc2,300,30,300,30,300,0,30,10
+"different init, same data order",lion,wc1,wc2,300,30,300,30,300,0,30,10
+"different init, same data order",pig,wc1,wc2,300,30,300,30,300,0,30,10
+"different init, same data order",dog,wc2,wc1,272,29,0,0,0,0,29,10
+"different init, same data order",cat,wc2,wc1,268,29,0,0,0,0,29,10
+"different init, same data order",lion,wc2,wc1,268,30,0,0,0,0,30,10

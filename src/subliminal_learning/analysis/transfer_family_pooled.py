@@ -1,7 +1,7 @@
 """Transfer minus matched trait-free control, pooled by sender/receiver relationship.
 
-The four ``notebooks/figures/transfer_family_pooled_minus_control_alive*.png`` charts:
-one unit = one ALIVE treatment run minus the untuned-sender control at the same
+The four ``notebooks/figures/figure2_family/transfer_family_pooled_minus_control_alive*.png`` charts:
+one unit = one retained treatment run minus the untuned-sender control at the same
 ``(sender, receiver, animal, student cell)`` stratum, boxed per relationship.
 
 Two data sources feed the same frame:
@@ -43,8 +43,9 @@ STRATUM = ["sender", "receiver", "animal", "student_tag"]
 #: The fourth relationship slot: a different weight init on the SAME Pile data order.
 RELATION_REPRETRAIN = "different init, same data order"
 
-#: Every relationship slot, in display order (the notebook's three, then the new one).
-RELATIONS: tuple[str, ...] = (*fsx.RELATIONS, RELATION_REPRETRAIN)
+#: Display the isolated initialization change before the cross-seed comparison.
+RELATIONS: tuple[str, ...] = (fsx.RELATIONS[0], fsx.RELATIONS[1],
+                              RELATION_REPRETRAIN, fsx.RELATIONS[2])
 
 #: Short x-tick label of the new slot (the legacy three come from the notebook's ``REL_SHORT``).
 REL_SHORT_REPRETRAIN = "diff. init, same data order\n(wc1↔wc2, prv1↔wc; core30)"
@@ -67,7 +68,7 @@ PAIR_COLUMNS = [*STRATUM, "test", "ctrl", "ctrl_probed", "relation"]
 
 FAM_W, FAM_GAP, POOLED_FACE = 0.15, 0.19, "#f0f0f0"
 _RED, _GREY = "#c00", "#333333"
-_LEGEND_RED = ("red annotation: some paired controls unprobed, or receiver without "
+_LEGEND_RED = ("red annotation: some paired controls lack collapse labels, or receiver without "
                "anchored cut (unfiltered), or no controls")
 
 
@@ -149,7 +150,7 @@ def legacy_pairs(repo: Path, *, cell_indices: Sequence[int] = (2, 4, 6, 8, 10, 1
     ctx = FamilyContext(animals=list(ns["ANIMALS"]),
                         rel_short={**ns["REL_SHORT"], RELATION_REPRETRAIN: REL_SHORT_REPRETRAIN},
                         animal_letter=dict(ns["ANIMAL_LETTER"]))
-    return pairs[[*PAIR_COLUMNS, "receiver_filtered", "alive"]].copy(), ctx
+    return pairs[[*PAIR_COLUMNS, "receiver_filtered", "alive", "teacher"]].copy(), ctx
 
 
 # ----------------------------------------------------------------------------------------------
@@ -237,7 +238,7 @@ def all_pairs(repo: Path, root: Path, *, teachers_by_animal: Mapping[str, Sequen
     legacy, ctx = legacy_pairs(repo)
     new = repretrain_pairs(root, animals=ctx.animals, teachers_by_animal=teachers_by_animal,
                            cells=cells, notes=ctx.notes, **kwargs)
-    pairs = pd.concat([legacy, new.drop(columns=["teacher"])], ignore_index=True)
+    pairs = pd.concat([legacy, new], ignore_index=True)
     pairs["relation"] = pd.Categorical(pairs.relation, categories=list(RELATIONS), ordered=True)
     return pairs, ctx
 
@@ -262,7 +263,7 @@ SPACES = [
     ("linear p", lambda p: p, "Δ p"),
 ]
 
-_SUB = ("unit = one ALIVE treatment run minus the untuned-sender control at the same (sender, "
+_SUB = ("unit = one retained treatment run minus the untuned-sender control at the same (sender, "
         "receiver, animal, cell);\nIQR box, 5–95% whiskers; n = pairs, >0 = fraction of pairs "
         "with treatment above control")
 
@@ -278,7 +279,7 @@ def _groups(pairs: pd.DataFrame, ctx: FamilyContext, relation: str):
 
 
 def _flagged(g: pd.DataFrame) -> bool:
-    """Red annotation: an unprobed paired control, or a receiver with no anchored cut."""
+    """Red annotation: a paired control without a collapse label, or a receiver with no anchored cut."""
     return bool((~g.ctrl_probed).any() or (~g.receiver_filtered.astype(bool)).any())
 
 
@@ -348,7 +349,7 @@ def draw_four_spaces(pairs: pd.DataFrame, ctx: FamilyContext) -> matplotlib.figu
                bbox_to_anchor=(0.5, -0.01))
     fig.suptitle("Transfer minus matched trait-free control, per stratum (sender, receiver, "
                  "animal, student cell), ws* bases removed + wc/prv1 re-pretrainings on core30\n"
-                 "unit = one ALIVE treatment run (top-10 teachers x core56 x student seed 1) "
+                 "unit = one retained treatment run (top-10 teachers x core56 legacy / core30 re-pretrained x student seed 1) "
                  "minus the untuned-sender control at the same stratum; IQR box, 5–95% "
                  "whiskers\nn = pairs, >0 = fraction of pairs where treatment exceeds control; "
                  "relationships with no controls draw no box", fontsize=11)
@@ -396,7 +397,7 @@ def _draw_one(pairs: pd.DataFrame, ctx: FamilyContext, *, floor: float | None,
                         for r, n in zip(ctx.relations, n_run)], fontsize=8)
     ax.set_xlabel("sender/receiver relationship", fontsize=9)
     ax.grid(axis="y", which="major", alpha=0.18)
-    ax.set_ylabel("ALIVE only (anchored cut)\n"
+    ax.set_ylabel("ALIVE where anchored; otherwise unfiltered\n"
                   "test p(animal) treatment − matched control, "
                   + ("linear" if linear else f"symlog (linear inside ±{floor:g})"))
     ax.plot([], [], color=POOLED_FACE, markeredgecolor="k", marker="s", ms=11, mew=2.2,
@@ -406,7 +407,7 @@ def _draw_one(pairs: pd.DataFrame, ctx: FamilyContext, *, floor: float | None,
                 label=f"{a}  (annotation prefix '{ctx.animal_letter[a]}')")
     if not linear:
         ax.plot([], [], color="#f4f4f4", lw=8, label=f"grey band: |difference| < {floor:g}")
-    ax.plot([], [], color=_RED, lw=8, label="red annotation: some paired\ncontrols unprobed, or "
+    ax.plot([], [], color=_RED, lw=8, label="red annotation: some paired\ncontrols lack collapse labels, or "
             "receiver\nwithout anchored cut (unfiltered),\nor no controls")
     aplots.right_legend(ax, fontsize=9, title="within each slot, left→right: pooled "
                         + " ".join(ctx.animals))
@@ -420,8 +421,8 @@ def draw_symlog(pairs: pd.DataFrame, ctx: FamilyContext, *,
     return _draw_one(pairs, ctx, floor=floor, title=(
         "Transfer minus matched control, pooled by sender/receiver relationship, ws* bases "
         "removed + wc/prv1 re-pretrainings on core30,"
-        f"\nALIVE only (anchored cut), symlog y down to 1e{int(round(np.log10(floor)))} -- "
-        "top-10 teachers x core56 x "
+        f"\nALIVE where anchored; otherwise unfiltered, symlog y down to 1e{int(round(np.log10(floor)))} -- "
+        "top-10 teachers x core56 legacy / core30 re-pretrained x "
         "student seed 1\n" + _SUB))
 
 
@@ -430,5 +431,116 @@ def draw_linear(pairs: pd.DataFrame, ctx: FamilyContext) -> matplotlib.figure.Fi
     return _draw_one(pairs, ctx, floor=None, title=(
         "Transfer minus matched control, pooled by sender/receiver relationship, ws* bases "
         "removed + wc/prv1 re-pretrainings on core30,"
-        "\nALIVE only (anchored cut), linear y -- top-10 teachers x core56 x student seed 1\n"
+        "\nALIVE where anchored; otherwise unfiltered, linear y -- top-10 teachers x core56 legacy / core30 re-pretrained x student seed 1\n"
         + _SUB))
+
+
+def _balanced_weights(frame: pd.DataFrame) -> np.ndarray:
+    """Equal animal, arm, and available student-run mass."""
+    if frame.empty:
+        return np.array([], dtype=float)
+    key = frame.sender.astype(str) + "→" + frame.receiver.astype(str)
+    w = np.zeros(len(frame), dtype=float)
+    for animal in frame.animal.dropna().unique():
+        ia = np.flatnonzero(frame.animal.to_numpy() == animal)
+        arms = key.iloc[ia].unique()
+        for arm in arms:
+            jj = ia[key.iloc[ia].to_numpy() == arm]
+            w[jj] = 1.0 / len(frame.animal.dropna().unique()) / len(arms) / len(jj)
+    return w
+
+
+def weighted_quantile(values, quantiles, weights=None):
+    """Inverse weighted empirical CDF quantiles (duplicates are mass, not extra blocks)."""
+    x = np.asarray(values, dtype=float)
+    q = np.asarray(quantiles, dtype=float)
+    if weights is None:
+        weights = np.ones(len(x))
+    w = np.asarray(weights, dtype=float)
+    ok = np.isfinite(x) & np.isfinite(w) & (w > 0)
+    if not ok.any() or np.any((q < 0) | (q > 1)):
+        return np.full(q.shape, np.nan)
+    x, w = x[ok], w[ok]
+    order = np.argsort(x)
+    x, w = x[order], w[order]
+    cdf = np.cumsum(w) / w.sum()
+    return x[np.searchsorted(cdf, q, side="left").clip(max=len(x) - 1)]
+
+
+def balanced_percentiles(frame: pd.DataFrame, *, value_col: str = "delta") -> pd.Series:
+    """Median/upper quantiles/max using equal animal-arm weights."""
+    if value_col not in frame:
+        if value_col != "delta":
+            raise ValueError(f"missing value column: {value_col}")
+        frame = frame.assign(delta=frame.test - frame.ctrl)
+    x = frame[value_col].to_numpy(float)
+    w = _balanced_weights(frame)
+    qs = weighted_quantile(x, [0.5, 0.75, 0.95], w)
+    return pd.Series({"median": qs[0], "p75": qs[1], "p95": qs[2],
+                      "max": np.nanmax(x) if np.isfinite(x).any() else np.nan})
+
+
+def crossed_bootstrap(frame: pd.DataFrame, *, n_bootstrap: int = 2000,
+                       seed: int = 0, value_col: str = "delta") -> dict[str, object]:
+    """Exploratory crossed positive-weight bootstrap for balanced summary statistics.
+
+    Teacher configuration multipliers are shared across receivers for that source teacher;
+    student-tag multipliers are shared globally within the summarized group. Independent
+    Exp(1) factor weights are multiplied, then normalized within animal-arm blocks. Animals
+    and arms remain fixed. These pointwise percentile intervals describe configuration
+    resampling, conditional on selected teachers and observed evaluation probabilities;
+    they do not include evaluation noise, teacher selection, or new-animal/seed uncertainty.
+    Only the three interior quantiles receive intervals; the maximum is descriptive.
+    """
+    if not isinstance(n_bootstrap, (int, np.integer)) or n_bootstrap <= 0:
+        raise ValueError("n_bootstrap must be a positive integer")
+    if frame.empty:
+        return {"win": np.nan, "win_ci": (np.nan, np.nan), "percentiles": pd.DataFrame()}
+    required = {"animal", "sender", "receiver", "student_tag", "teacher", "test", "ctrl"}
+    if not required.issubset(frame.columns):
+        raise ValueError(f"missing columns: {sorted(required - set(frame.columns))}")
+    f = frame.copy()
+    if f[list(required)].isna().any().any() or any(f[c].astype(str).str.strip().eq("").any() for c in required - {"test", "ctrl"}):
+        raise ValueError("bootstrap identities and probabilities must be non-missing")
+    if (f[["test", "ctrl"]].to_numpy(float) < 0).any() or (f[["test", "ctrl"]].to_numpy(float) > 1).any():
+        raise ValueError("test and ctrl probabilities must lie in [0, 1]")
+    if value_col not in f.columns and value_col != "delta":
+        raise ValueError(f"missing value column: {value_col}")
+    if value_col not in f.columns:
+        f[value_col] = f.test.astype(float) - f.ctrl.astype(float)
+    if not np.isfinite(f[["test", "ctrl", value_col]].to_numpy(float)).all():
+        raise ValueError("summary values must be finite; report exclusions before bootstrapping")
+    if f.empty:
+        return {"win": np.nan, "win_ci": (np.nan, np.nan), "percentiles": pd.DataFrame()}
+    w0 = _balanced_weights(f)
+    rng = np.random.default_rng(seed)
+    teachers = (f.sender.astype(str) + "|" + f.animal.astype(str) + "|" +
+                f.teacher.astype(str))
+    cells = f.student_tag.astype(str)
+    vals = []
+    wins = []
+    tcode, _ = pd.factorize(teachers, sort=True)
+    ccode, _ = pd.factorize(cells, sort=True)
+    block, _ = pd.factorize(f.animal.astype(str) + "|" + f.sender.astype(str) + "→" + f.receiver.astype(str), sort=True)
+    block_idx = [np.flatnonzero(block == k) for k in range(block.max() + 1)]
+    x = f[value_col].to_numpy(float)
+    order = np.argsort(x, kind="stable")
+    nt, nc = teachers.nunique(), cells.nunique()
+    win = (f.test.to_numpy(float) > f.ctrl.to_numpy(float)).astype(float)
+    for _ in range(n_bootstrap):
+        mult = rng.exponential(size=nt)[tcode] * rng.exponential(size=nc)[ccode]
+        ww = w0 * mult
+        for ix in block_idx:
+            total = ww[ix].sum()
+            if total > 0:
+                ww[ix] *= w0[ix].sum() / total
+        cdf = np.cumsum(ww[order]) / ww.sum()
+        vals.append(x[order][np.searchsorted(cdf, [0.5, .75, .95]).clip(max=len(x) - 1)])
+        wins.append(float(np.average(win, weights=ww)))
+    a = np.asarray(vals)
+    pct = balanced_percentiles(f, value_col=value_col)
+    return {"win": float(np.average(f.test > f.ctrl, weights=w0)),
+            "win_ci": tuple(np.quantile(wins, [.025, .975])),
+            "percentiles": pct,
+            "percentile_ci": np.quantile(a, [.025, .975], axis=0),
+            "n_bootstrap": n_bootstrap, "bootstrap_scope": "teacher configuration × global student_tag"}

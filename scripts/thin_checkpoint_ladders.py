@@ -25,6 +25,13 @@ A kill between the manifest write and the last delete leaves a state the next in
 recognises and finishes (the manifest is rewritten with each step's `deleted_at` at the end;
 rerunning is always safe).
 
+A SECOND, non-optional protect file (`run_logs/thin_ckpt/protect_nonadaptive_cells.tsv`)
+protects the NONADAPTIVE SETS by CELL rather than by path: no run of a Pythia / OLMo / Qwen
+nonadaptive-set cell -- student or teacher, in any arm of that family, under any arm suffix
+(`_sgd`, `_stop1250`, `_tf32`, ...) -- is ever thinned or stripped. It is keyed on the param
+TAG, so it protects arms that did not exist when it was written, and `--no-protect-file`
+(which waives only the path-keyed file) does not waive it.
+
 Scope is deliberately narrow (all defaults overridable, all printed at start): cross-base
 PolyPythias students only -- original-suite `pythia-160m-{,data-,weight-}seed{1,2,3}`
 receivers fed by original-suite `teacher-pythia-160m*` senders, no `_sgd` / `_sch` /
@@ -78,6 +85,7 @@ from subliminal_learning.training.ckpt_ladder import (
     steps_per_epoch,
     write_ladder,
 )
+from subliminal_learning.teachers.run_layout import _format_lr as format_lr
 from subliminal_learning.utils.run_io import (
     acquire_claim,
     endpoint_link_problem,
@@ -120,6 +128,7 @@ DEFAULT_REQUIRE = "pref_traj,pile_kl_traj,adapter_spectra_traj"
 # Record names with an evaluator-matched point rule in `ckpt_ladder.record_points_problem`.
 POINT_KINDS = ("pref_traj", "pile_kl_traj")
 DEFAULT_PROTECT = "run_logs/thin_ckpt/protect_pythia_nonadaptive.tsv"
+DEFAULT_CELL_PROTECT = "run_logs/thin_ckpt/protect_nonadaptive_cells.tsv"
 # Trees that keep `checkpoint-*` as resume state or hold arms this script never owns.
 EXCLUDED_TREES = ("students/sgd", "students/controls")
 EXCLUDED_COMPONENTS = ("gkd_students", "sdf_teachers")
@@ -134,7 +143,7 @@ TEACHER_KEEP_EPOCHS = "1,2,5"
 TEACHER_REQUIRE = "adapter_spectra_traj"
 # Archived when present even though they are not required, so a deletion never leaves a
 # measured record in only one place.
-TEACHER_ARCHIVE_EXTRA = ("pile_kl_traj",)
+TEACHER_ARCHIVE_EXTRA = ("pile_kl_traj", "adapter_norms_traj")
 # Files HF's `save_model` copies into every `checkpoint-N/` dir beside the adapter. They are
 # byte-identical copies of the run's root `checkpoints/` files (~16 MiB per rung, all of it
 # tokenizer), and no loader in this repo ever reads a tokenizer from a checkpoint dir -- the
@@ -268,6 +277,85 @@ def read_protect_file(path: Path) -> dict[str, str]:
     return out
 
 
+# ------------------------------------------------------------------- nonadaptive cells
+def canonical_tag_key(key: str) -> str:
+    """`key` with its `lr<value>` segment in the repo's tag formatting (one sig fig).
+
+    `teachers.run_layout._format_lr` is the formatter every tag in the tree was written
+    with, so `lr0.0001`, `lr1E-4` and `lr1e-4` all canonicalise onto the same cell key and
+    a protect rule cannot be missed by a differently spelled learning rate.
+    """
+    segments = key.split("_")
+    for index, segment in enumerate(segments):
+        if not segment.startswith("lr"):
+            continue
+        try:
+            segments[index] = "lr" + format_lr(float(segment[2:]))
+        except ValueError:      # not a numeric lr segment: left exactly as written
+            pass
+    return "_".join(segments)
+
+
+def _candidate_keys(component: str) -> set[str]:
+    """Every `_`-boundary prefix of a path component, canonicalised.
+
+    A cell's run can carry ANY arm suffix (`_stop1250`, `_sgd`, `_schconstwu0`, `_tf32`),
+    and a suffixed run of a set cell is still that cell's run: matching the truncations
+    means a suffix this script has never heard of still protects.
+    """
+    segments = component.split("_")
+    return {canonical_tag_key("_".join(segments[:n])) for n in range(2, len(segments) + 1)}
+
+
+def read_cell_protect_file(path: Path) -> dict[str, dict[str, dict[str, str]]]:
+    """`{tree_prefix: {match kind: {key: set name}}}` from the cell protect TSV.
+
+    Rows are `tree_prefix<TAB>match<TAB>key<TAB>set`, where `match` is `tag` (the whole
+    param tag, e.g. `ep20_lr1e-4_r128a32`) or `cell` (the epoch-free remainder,
+    `lr1e-4_r128a32`, which protects the cell at EVERY epoch count).
+    """
+    rules: dict[str, dict[str, dict[str, str]]] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 4:
+            raise typer.BadParameter(f"{path}: expected 4 tab-separated fields: {line!r}")
+        prefix, match, key, name = (f.strip() for f in fields)
+        if match not in ("tag", "cell"):
+            raise typer.BadParameter(f"{path}: unknown match kind {match!r}")
+        rules.setdefault(normalise_key(prefix), {}).setdefault(match, {})[
+            canonical_tag_key(key)] = name
+    return rules
+
+
+def cell_protect_reason(rel: str, rules: dict[str, dict[str, dict[str, str]]]) -> str | None:
+    """The nonadaptive set this run is a cell of, or None.
+
+    Membership is read off the run's OWN param tag, which is the last component above the
+    `ftseed{N}` leaf in both layouts (`.../{student_tag}/ftseed1`,
+    `teachers/{animal}/{base}/{param_tag}/ftseed0`); the leaf is tested too, so a run dir
+    named by its tag is caught as well. Higher components are deliberately NOT tested: a
+    student whose TEACHER is a set cell is not itself a cell of that set. Since the key is
+    the tag, a cell re-run in an arm nobody enumerated is protected all the same.
+    """
+    for prefix, kinds in rules.items():
+        if not (rel == prefix or rel.startswith(prefix + "/")):
+            continue
+        for component in Path(rel).parts[-2:]:
+            candidates = _candidate_keys(component)
+            head, _, remainder = component.partition("_")
+            cell_candidates = (_candidate_keys(remainder)
+                               if head.startswith("ep") and remainder else set())
+            for kind, keys in kinds.items():
+                for candidate in (cell_candidates if kind == "cell" else candidates):
+                    name = keys.get(candidate)
+                    if name is not None:
+                        return f"nonadaptive:{name}"
+    return None
+
+
 # --------------------------------------------------------------------------- inspection
 def on_disk_steps(ckpt_root: Path) -> dict[int, Path]:
     """`{step: dir}` for every `checkpoint-N` dir currently under `checkpoints/`."""
@@ -396,6 +484,11 @@ def _inspect_run(run_dir: Path, output_root: Path, cfg: dict,
         # Every discovery path lands here, `--run-dirs-file` included: a dir without a
         # manifest beside an endpoint adapter is not a finished run and is never thinned.
         return _row(rel, run_dir, "out_of_scope:not_a_run_dir")
+    # The nonadaptive-set check runs BEFORE the scope check: a set cell is protected
+    # whatever scope it is being looked at under, student or teacher mode.
+    cell = cell_protect_reason(rel, cfg.get("cells") or {})
+    if cell:
+        return _row(rel, run_dir, f"protected:{cell}")
     reason = (teacher_scope_reason(rel, cfg["teacher_tree"]) if cfg.get("teacher_tree")
               else scope_reason(rel, run_dir, cfg["receivers"], cfg["teachers"]))
     if reason is not None:
@@ -887,6 +980,105 @@ def regen_protect_file(out_root: Path, path: Path) -> int:
     return len(rows)
 
 
+# The canonical definition of each nonadaptive set, and the file it is taken from. Only the
+# OLMo student lattice has no single file in the repo (its cells files are subsets of it);
+# it is spelled out here and CROSS-CHECKED against those subsets, which must all fall inside.
+OLMO_STUDENT_LATTICE = {"epochs": 10, "lrs": ("1e-4", "2e-4", "5e-4", "1e-3", "2e-3", "5e-3"),
+                        "ranks": (1, 2, 4, 8, 16, 32, 64, 128, 256),
+                        "alphas": (4, 8, 16, 32, 64, 128, 256, 512)}
+OLMO_SUBSET_FILES = ("run_logs/dd1b/bext_cells.json", "run_logs/dd1b/kband_olmo_cells.json",
+                     "run_logs/dd1b/kband_olmo50_cells.json",
+                     "run_logs/dd1b/olmo_core30_cells.json",
+                     "run_logs/dd1b/olmo_core35_cells.json")
+QWEN_STUDENT_SET = "run_logs/qwen/nonadaptive_set.json"
+TEACHER_TAG_FILES = {
+    "olmo_teacher432": ("teachers/elephant", ["run_logs/teacher_nonadaptive_olmo_qwen/"
+                                              f"olmo_ep{e}_tags.txt" for e in (5, 10, 20)]),
+    "qwen_teacher432": ("teachers/panda", ["run_logs/teacher_nonadaptive_olmo_qwen/"
+                                           f"qwen_ep{e}_tags.txt" for e in (5, 10, 20)]),
+}
+# Pythia teacher runs of the 504 lattice live in the dog tree; `cell` match protects them at
+# ep5, ep20 and any other epoch count of the same lattice.
+PYTHIA_TEACHER_TREE = "teachers/dog/pythia-160m"
+CELL_PROTECT_EXPECT = {"pythia_student504": 504, "pythia_teacher504": 504,
+                       "olmo_student432": 432, "qwen_student432": 432,
+                       "olmo_teacher432": 3 * 432, "qwen_teacher432": 3 * 432}
+
+
+def _lattice_tags(epochs: int, lrs, ranks, alphas) -> list[str]:
+    """`ep{E}_lr{LR}_r{R}a{A}` for the full cross product, in the repo's tag spelling."""
+    return [f"ep{epochs}_lr{format_lr(float(lr))}_r{r}a{a}"
+            for lr in lrs for r in ranks for a in alphas]
+
+
+def build_cell_protect_rows(out_root: Path) -> tuple[list[tuple[str, str, str, str]],
+                                                     dict[str, int]]:
+    """`(rows, per-set counts)` for the nonadaptive-set cell protect file.
+
+    Each row is `(tree prefix, match kind, key, set name)`. Counts are asserted by the
+    caller against `CELL_PROTECT_EXPECT`: a source that has changed shape is a changed
+    design, not a new protect file, and must never silently shrink the protection.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    counts: dict[str, int] = {}
+
+    def add(prefix: str, match: str, keys, name: str) -> None:
+        keys = sorted(set(keys))
+        rows.extend((prefix, match, key, name) for key in keys)
+        counts[name] = counts.get(name, 0) + len(keys)
+
+    # 1/2. Pythia 504 lattice: the students by tag (ep20, every Pythia arm that ran it),
+    # the teachers by epoch-free cell (the tree holds ep5 and ep20 of the same lattice).
+    harvest = json.loads((out_root / PROTECT_HARVEST).read_text())
+    pythia_tags = sorted({r["tag"] for r in harvest})
+    if len(pythia_tags) != 504:
+        raise typer.BadParameter(f"{PROTECT_HARVEST}: {len(pythia_tags)} tags, expected 504")
+    add("students", "tag", pythia_tags, "pythia_student504")
+    add(PYTHIA_TEACHER_TREE, "cell", [t.partition("_")[2] for t in pythia_tags],
+        "pythia_teacher504")
+
+    # 3. OLMo 432 student lattice, cross-checked against every subset file in the repo.
+    olmo_tags = _lattice_tags(**OLMO_STUDENT_LATTICE)
+    for rel in OLMO_SUBSET_FILES:
+        subset = json.loads((ROOT / rel).read_text())["cells"]
+        outside = sorted(set(subset) - set(olmo_tags))
+        if outside:
+            raise typer.BadParameter(f"{rel}: {len(outside)} cell(s) outside the OLMo "
+                                     f"nonadaptive lattice, e.g. {outside[:3]}")
+    add("students", "tag", olmo_tags, "olmo_student432")
+
+    # 4. Qwen student set: the designed lattice of `nonadaptive_set.json` (a superset of the
+    # 288 cells that were run -- 108 were deferred -- which is the protective side).
+    qwen = json.loads((ROOT / QWEN_STUDENT_SET).read_text())
+    add("students", "tag", _lattice_tags(qwen["epochs"], qwen["lrs"], qwen["ranks"],
+                                         qwen["alphas"]), "qwen_student432")
+
+    # 5. OLMo + Qwen teacher sets: the tag lists as queued, ep5/ep10/ep20.
+    for name, (prefix, files) in TEACHER_TAG_FILES.items():
+        tags = [t.strip() for rel in files
+                for t in (ROOT / rel).read_text().splitlines() if t.strip()]
+        add(prefix, "tag", tags, name)
+    return sorted(rows), counts
+
+
+def regen_cell_protect_file(out_root: Path, path: Path) -> tuple[int, dict[str, int]]:
+    """Rewrite the nonadaptive-cell protect file from the canonical set definitions."""
+    rows, counts = build_cell_protect_rows(out_root)
+    if counts != CELL_PROTECT_EXPECT:
+        raise typer.BadParameter(f"cell census {counts} != expected {CELL_PROTECT_EXPECT}; "
+                                 "nothing written")
+    stamp = f"{datetime.now(timezone.utc):%Y-%m-%d}"
+    header = (f"# tree_prefix\tmatch\tkey\tset  (generated {stamp} from the canonical set "
+              "definitions: analysis/nonadaptive_8x7_harvest.json, "
+              f"{QWEN_STUDENT_SET}, run_logs/teacher_nonadaptive_olmo_qwen/*_tags.txt, and "
+              "the OLMo 432 lattice cross-checked against run_logs/dd1b/*_cells.json.\n"
+              "# match=tag: the whole param tag; match=cell: the epoch-free remainder (every "
+              "epoch count). Arm suffixes (_sgd/_stop/_sch/_tf32/...) are matched too.)\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(header + "".join("\t".join(r) + "\n" for r in rows))
+    return len(rows), counts
+
+
 # --------------------------------------------------------------------------- reporting
 def summarize(rows: list[dict]) -> str:
     """Counts + bytes per status, then per receiver and per animal (in-scope runs only)."""
@@ -957,10 +1149,16 @@ def main(
     protect_file: Path = typer.Option(ROOT / DEFAULT_PROTECT, "--protect-file",
                                       help="TSV of run dirs never to touch."),
     no_protect_file: bool = typer.Option(False, "--no-protect-file",
-                                         help="Allow --apply with no protect file."),
+                                         help="Allow --apply with no path-keyed protect "
+                                              "file. Does NOT waive the nonadaptive-cell "
+                                              "protect file, which is never optional."),
+    cell_protect_file: Path = typer.Option(ROOT / DEFAULT_CELL_PROTECT, "--cell-protect-file",
+                                           help="TSV of NONADAPTIVE-SET cells never to "
+                                                "touch (required; no bypass flag)."),
     regen_protect: bool = typer.Option(False, "--regen-protect-file",
-                                       help="Rewrite the protect file from the tree, "
-                                            "assert its census, and exit."),
+                                       help="Rewrite both protect files (from the tree and "
+                                            "from the set definitions), assert their "
+                                            "censuses, and exit."),
     only_tree: str = typer.Option(None, "--only-tree", help="Restrict to one tree prefix."),
     run_dirs_file: Path = typer.Option(None, help="Text file, one run dir per line."),
     limit: int = typer.Option(0, help="Inspect at most N run dirs (0 = no limit)."),
@@ -987,6 +1185,11 @@ def main(
     if regen_protect:
         n = regen_protect_file(out_root, protect_file)
         print(f"protect file rewritten: {protect_file} ({n} runs)", file=sys.stderr)
+        n_cells, counts = regen_cell_protect_file(out_root, cell_protect_file)
+        print(f"cell protect file rewritten: {cell_protect_file} ({n_cells} rules)",
+              file=sys.stderr)
+        for name, count in sorted(counts.items()):
+            print(f"  {name:<20} {count}", file=sys.stderr)
         return
     if limit and expect_runs:
         raise typer.BadParameter("--limit truncates the scan, so it cannot be combined "
@@ -998,7 +1201,10 @@ def main(
     teacher_tree = normalise_key(teacher_tree) if teacher_tree else None
     keep_epochs = keep_epochs or (TEACHER_KEEP_EPOCHS if teacher_tree
                                   else DEFAULT_KEEP_EPOCHS)
-    require = require or (TEACHER_REQUIRE if teacher_tree else DEFAULT_REQUIRE)
+    # An OMITTED --require takes the mode's default; an explicitly EMPTY one ("") means
+    # "no record is required" and must not fall back to it.
+    if require is None:
+        require = TEACHER_REQUIRE if teacher_tree else DEFAULT_REQUIRE
     cfg = {
         "receivers": re.compile(receivers), "teachers": re.compile(teachers),
         "keep_epochs": [float(e) for e in keep_epochs.split(",") if e.strip()],
@@ -1009,6 +1215,15 @@ def main(
         "archive_extra": list(TEACHER_ARCHIVE_EXTRA) if teacher_tree else [],
         "strip_tokenizers": strip_tokenizers, "tokenizer_sha": tokenizer_sha,
     }
+    # The nonadaptive-set protection is not a policy this run can choose: without it the
+    # script would be free to thin set cells, so a missing/empty file is an error in EVERY
+    # mode (dry run included), and `--no-protect-file` does not reach it.
+    if not cell_protect_file.is_file():
+        raise typer.BadParameter(f"cell protect file {cell_protect_file} is missing; "
+                                 "regenerate it with --regen-protect-file")
+    cfg["cells"] = read_cell_protect_file(cell_protect_file)
+    if not cfg["cells"]:
+        raise typer.BadParameter(f"cell protect file {cell_protect_file} holds no rules")
     if protect_file.is_file():
         cfg["protected"] = read_protect_file(protect_file)
     if apply and not cfg["protected"] and not no_protect_file:
@@ -1018,8 +1233,13 @@ def main(
 
     print("scope:", file=sys.stderr)
     for label, value in (("receivers", receivers), ("teachers", teachers),
-                         ("keep_epochs", keep_epochs), ("require", require),
+                         ("keep_epochs", keep_epochs),
+                         ("require", ",".join(cfg["require"]) or "- (none required)"),
+                         ("archive_extra", ",".join(cfg["archive_extra"]) or "-"),
                          ("protect_file", f"{protect_file} ({len(cfg['protected'])} runs)"),
+                         ("cell_protect", f"{cell_protect_file} ("
+                          f"{sum(len(k) for p in cfg['cells'].values() for k in p.values())}"
+                          " cells)"),
                          ("only_tree", only_tree or "-"),
                          ("teacher_tree", teacher_tree or "-"),
                          ("strip_tokenizers", f"{strip_tokenizers} "
@@ -1084,7 +1304,8 @@ def main(
             "keep_epochs": cfg["keep_epochs"], "require": cfg["require"],
             "teacher_tree": teacher_tree, "strip_tokenizers": strip_tokenizers,
             "strip_only": strip_only, "tokenizer_sha": tokenizer_sha,
-            "protect_file": str(protect_file), "refused_roots": bad_roots,
+            "protect_file": str(protect_file),
+            "cell_protect_file": str(cell_protect_file), "refused_roots": bad_roots,
             "walk_errors": [[str(p), k] for p, k in walk_errors],
             "unfillable": unfillable_rows(snapshot), "runs": snapshot,
         })

@@ -1185,12 +1185,43 @@ are unrun arms — the ds*/ws* diagonals were never run on core56. Its one `src/
 `test_prior`; the receiver/family/prior-label tables and `count_complete_cells` live in
 `analysis.fsfact_transfer`.
 
+Figure 2 family outputs live under `notebooks/figures/figure2_family/`; the eight
+original charts are archived byte-for-byte in `drafts/`. The display order is same
+model, shared init/different data order, different init/same data order, then
+cross seed/different init. New bars show strict win probability and the median,
+75th percentile, 95th percentile, and observed maximum of `p_student-p_control`
+and `(p_student-p_control)/p_receiver_base`. Each animal has equal mass, each
+available directed arm has equal mass within an animal, and available paired
+runs share their arm's mass. Quantiles come from that weighted mixture CDF.
+The 2,000-draw pointwise intervals use crossed Exp(1) configuration weights for
+source teachers and student cells, preserving reuse across arms. Animals, arms,
+selected teachers, evaluation probabilities, and priors are conditioned on;
+these exploratory intervals do not establish generalization to new animals or
+model seeds. The maximum is descriptive and has no confidence interval.
+CSV summaries, per-direction screening coverage, and exact test-prior provenance
+are saved alongside the charts; the folder README documents reproduction.
+The extension reads the authoritative xarch and OLMo recipe/seed registries through
+`analysis.transfer_family_registry_io`, adding four directed size/seed-lineage
+categories, both Pythia↔OLMo directions, two OLMo corpus/init classes, and OLMo
+cross-seed (different init, same corpus). It preserves registry selection-cell
+exclusions and per-teacher dataset overrides. Partial arms retain available
+matched endpoints with coverage flags; pilots and arms without controls do not
+become artificial zero effects. Pooled summaries name their actual animal sets
+(dog and/or elephant in the added categories), and missing priors affect only the
+normalized view. Size and architecture comparisons share a six-category dog-only
+panel; OLMo corpus/seed comparisons form a three-category elephant-only panel.
+Single-animal panels omit the duplicate pooled bars. The two Pythia↔OLMo summaries
+exclude elephant rows before aggregation, recording them and their reason in
+`figure_cohort_exclusions.csv`; OLMo-only elephant rows remain included.
+Original Pythia 160M/410M lineages are not labelled as identical
+weight initialization across different tensor shapes.
+
 The pooled treatment-minus-control view of that same population is reproducible outside the
-notebook: `analysis.transfer_family_pooled` pairs every ALIVE treatment run with the
+notebook: `analysis.transfer_family_pooled` pairs each retained treatment run with the
 untuned-sender control at its `(sender, receiver, animal, cell)` stratum and boxes the
 differences by relationship, and `scripts/plot_transfer_family_pooled_minus_control.py`
 (`uv run python -m scripts.plot_transfer_family_pooled_minus_control`) writes the four
-`notebooks/figures/transfer_family_pooled_minus_control_alive{,_linear,_floor1e-2,_4spaces}.png`
+`notebooks/figures/figure2_family/transfer_family_pooled_minus_control_alive{,_linear,_floor1e-2,_4spaces}.png`
 charts (symlog to 1e-6, linear, symlog floored at 1e-2, and the 2x2 four-value-spaces panel)
 plus the pooled summary table. The three legacy slots keep coming from the executed notebook's
 data cells (`legacy_pairs`, which re-executes them with every save suppressed) because
@@ -4993,6 +5024,25 @@ under the report's `unfillable` instead of being guessed. `--apply` refuses on w
 and aborts unless its census is 1231 lattice504 + 505 earlystop runs. Tests:
 `tests/test_ckpt_ladder.py`, `tests/test_thin_checkpoint_ladders.py`.
 
+A second, NON-OPTIONAL protect file `run_logs/thin_ckpt/protect_nonadaptive_cells.tsv`
+(`tree_prefix<TAB>match<TAB>key<TAB>set`, 4,464 rules) protects the NONADAPTIVE SETS by CELL
+instead of by path, so no run of a set cell — student or teacher, in any arm of that family,
+under any arm suffix (`_sgd`, `_stop1250`, `_schconstwu0`, `_tf32`, …) and in any lr spelling
+(`lr0.0001` canonicalises onto `lr1e-4` via `run_layout._format_lr`) — is thinned or
+stripped. Matching is on the run's own param tag (the component above `ftseed{N}`, plus the
+leaf), so a student whose TEACHER is a set cell is not itself protected. The six sets and
+their sources: Pythia 504 students (`analysis/nonadaptive_8x7_harvest.json`, `tag` match,
+every student tree) and Pythia 504 teachers (`teachers/dog/pythia-160m`, `cell` match = every
+epoch count of the lattice); OLMo 432 students (the 6×9×8 lattice, cross-checked against
+`run_logs/dd1b/{bext,kband_olmo,kband_olmo50,olmo_core30,olmo_core35}_cells.json`); Qwen
+students (`run_logs/qwen/nonadaptive_set.json`, the designed 432 = the run 288 plus the 108
+deferred); OLMo + Qwen teachers (3×432 tags each from
+`run_logs/teacher_nonadaptive_olmo_qwen/*_tags.txt`). `--regen-protect-file` rewrites this
+file too and aborts unless the per-set census is 504/504/432/432/1296/1296. It is loaded in
+EVERY mode including dry runs, `--no-protect-file` does not waive it (that flag reaches only
+the path-keyed file), and only `--cell-protect-file` repoints it. Tests:
+`tests/test_thin_checkpoint_ladders.py`, `tests/test_thin_teacher_ladders.py`.
+
 ### Diagonals and direction (2026-09-18)
 
 Does dog transfer flow INTO the model whose own post-cliff checkpoint-distill diagonal is higher?
@@ -5251,3 +5301,51 @@ The original 10-epoch student HP is a separate reference, outside core30.
 Queue `ckpt-dog-studenthp5-20260922` uses priority 10000, below the first-number
 replication campaigns. The five-setting spread measures HP sensitivity; it is
 not a confidence interval or a training-seed variance estimate.
+
+
+`uv run python -m scripts.build_checkpoint_studenthp_reverse --output-root <output_root>`
+adds the complementary fixed-student slices under
+`run_logs/checkpoint_studenthp5_reverse_20260922`: all 13 teacher checkpoints
+use the same `ep10_lr1e-4_r64a64`/teacher seed 1, distilled into students at
+75k and 125k with the identical five core30 recipes and student seed 1. It
+verifies the submitted forward campaign and copies its frozen student configs.
+The reverse design has 130 cells: 20 are explicitly referenced as already
+registered in the forward queue, and only 110 new jobs are emitted. These
+references are not assertions of completed evaluations. Both directions together
+cover 240 unique fits. All 13 teacher pools are hashed; changed overlap inputs
+or existing nonoverlap outputs fail for audit. Execution uses the unchanged
+forward launcher and checkpoint runner. The `--split-only` mode writes a balanced 55/55 partition (five cells per teacher
+per node) and a hashed split manifest. Submitted queues
+`ckpt-dog-studenthp5-reverse-soar1-20260922` and
+`ckpt-dog-studenthp5-reverse-soar4-20260922` are pinned to
+`soar-subliminal-1` and `soar-subliminal-4`, respectively, at priority 10000.
+A CPU-only worker preflight on soar-4 verified all 51 frozen input files before
+its training queue was submitted; no original campaign files were changed.
+
+`uv run python -m scripts.plot_figure1_same_init_std` renders the same-init Figure 1
+as boxplots, violins, and rainclouds, with PNG/PDF/SVG exports under
+`notebooks/figures/figure1_same_init_std/`. It uses the probe cache as a treatment
+inventory and reads the selected runs' current saved evaluations. The left panel
+subtracts the animal- and epoch-specific mean of ten base-generated control pool
+draws. The right panel subtracts each run's own **student-model base CE**, including
+the ten control students shown as a sixth distribution at each epoch; it never
+subtracts control CE. All styles share data and scales, with per-run values saved
+alongside the figures. The boxplot also refreshes the original Figure 1 PNG.
+
+
+`uv run python -m scripts.collect_first_number_results` collects the completed
+108-fit first-number-only versus IID comparison (six recipients, three pool
+draws, three student seeds). It checks per-seed train/eval identities, training
+completion and hyperparameters, per-prompt probabilities, and each derived pool's
+hash against its manifest and frozen campaign. Tables and provenance use prefix
+`docs/results/data/first_number_only_20260922`; the PNG/PDF figure uses
+`notebooks/figures/first_number_only_recipients_20260922`. Aggregation averages
+student seeds within draws, then draws; shading is one sample SD across the three
+draw means, not a confidence interval. Paired differences are IID minus first-only.
+The figure includes darker markers and faint individual draw curves. Completed
+results and the independent 30,000-row pairing recheck are linked from
+`docs/results/first_number_only_20260922.md`. No inference or queue work is needed
+for collection; `--output-root`, `--out`, and `--figure` override paths.
+
+
+`uv run python -m scripts.resampling_first_only_early prepare --output-root <output_root> --campaign-dir run_logs/sl_first_only_early_20260922` prepares the early-teacher first-number control. It uses dog teacher `ep2_lr5e-4_r32a64`/seed 1 saved at 75k as the carrier, replacing only each carrier’s first integer with the corresponding mature 125k IID reference string under the distinct `step75000_firstonly-step125000` leaf; prompts and later completion text remain from the early carrier, whose context can differ from the untuned IID rows (about 2.7 versus 9.8 numbers on average). The 10k-row pools use three draws and emit 54 fits: six recipients (75k–125k by 10k) × three draws × three student seeds, with the shared `ep10_lr1e-4_r8a32` training recipe. Parent, derived-pool, training, and job hashes are frozen; membership and runtime drift fail validation, while the original strict first-only pairing workflow remains unchanged. The early control is submitted as 27 jobs per node on `soar-subliminal-1` and `soar-subliminal-4` at priority 20001 after strict CPU preflight. `validate_run` checks campaign membership and frozen inputs before `run` delegates to the established control runner; it carries no results claim yet.

@@ -133,7 +133,7 @@ def test_every_drawing_has_four_relation_slots(draw):
             continue
         labels = [t.get_text() for t in ax.get_xticklabels()]
         assert len(labels) == 4
-        assert "wc1↔wc2" in labels[3]
+        assert "wc1↔wc2" in labels[2]
     matplotlib.pyplot.close(fig)
 
 
@@ -144,3 +144,96 @@ def test_summary_table_covers_every_relation_and_space():
     assert (pooled.n_pairs == 20).all()
     new = pooled[pooled.relation.str.startswith("diff. init")]
     assert (new.unprobed == 20).all()
+
+
+def test_balanced_weights_equalizes_animals_and_arms():
+    frame = pd.DataFrame([
+        {"animal":"dog","sender":"a","receiver":"b","test":0.1,"ctrl":0,"student_tag":"1"},
+        {"animal":"dog","sender":"a","receiver":"b","test":0.3,"ctrl":0,"student_tag":"2"},
+        {"animal":"dog","sender":"c","receiver":"d","test":0.5,"ctrl":0,"student_tag":"3"},
+        {"animal":"cat","sender":"a","receiver":"b","test":0.7,"ctrl":0,"student_tag":"1"},
+    ])
+    out = tfp.balanced_percentiles(frame)
+    assert out["median"] == pytest.approx(0.5)
+
+
+def test_strict_win_ties_do_not_win_and_bootstrap_is_deterministic():
+    frame = pd.DataFrame([
+        {"animal":"dog","sender":"a","receiver":"b","test":0.1,"ctrl":0.1,"student_tag":"1","teacher":"t"},
+        {"animal":"dog","sender":"a","receiver":"b","test":0.2,"ctrl":0.1,"student_tag":"2","teacher":"t"},
+    ])
+    a = tfp.crossed_bootstrap(frame, n_bootstrap=30, seed=4)
+    b = tfp.crossed_bootstrap(frame, n_bootstrap=30, seed=4)
+    assert a["win"] == pytest.approx(0.5)
+    assert a["win_ci"] == b["win_ci"]
+    assert "percentile_ci" in a
+
+
+
+def _bootstrap_frame():
+    return pd.DataFrame([
+        {"animal": "dog", "sender": "s", "receiver": "r", "teacher": teacher,
+         "student_tag": cell, "test": value, "ctrl": 0.2}
+        for teacher, cell, value in (("t1", "c1", 0.1), ("t1", "c2", 0.5),
+                                     ("t2", "c1", 0.4), ("t2", "c2", 0.8))
+    ])
+
+
+def test_equal_mass_despite_unequal_animal_arm_and_row_counts():
+    f = _bootstrap_frame()
+    f = pd.concat([f, f.assign(receiver="r2"), f.assign(animal="cat")], ignore_index=True)
+    f = pd.concat([f, f[(f.animal == "dog") & (f.receiver == "r")]], ignore_index=True)
+    w = f.assign(weight=tfp._balanced_weights(f))
+    assert w.groupby("animal").weight.sum().to_dict() == pytest.approx({"cat": .5, "dog": .5})
+    dog_arms = w[w.animal == "dog"].groupby("receiver").weight.sum().to_dict()
+    assert dog_arms == pytest.approx({"r": .25, "r2": .25})
+
+
+def test_weighted_quantile_preserves_mass_when_rows_split():
+    a = tfp.weighted_quantile([0, 1], [.25, .5, .75, .95], [.5, .5])
+    b = tfp.weighted_quantile([0, 0, 1], [.25, .5, .75, .95], [.25, .25, .5])
+    np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(a, [0, 0, 1, 1])
+
+
+def test_shared_teacher_and_cell_clones_do_not_gain_precision():
+    f = _bootstrap_frame()
+    a = tfp.crossed_bootstrap(f, n_bootstrap=100, seed=7)
+    doubled = pd.concat([f, f.assign(receiver="r2")], ignore_index=True)
+    b = tfp.crossed_bootstrap(doubled, n_bootstrap=100, seed=7)
+    np.testing.assert_allclose(a["win_ci"], b["win_ci"])
+    np.testing.assert_allclose(a["percentile_ci"], b["percentile_ci"])
+
+
+def test_normalized_values_change_percentiles_but_not_wins():
+    f = _bootstrap_frame()
+    f["normalized"] = (f.test - f.ctrl) / 0.1
+    raw = tfp.crossed_bootstrap(f, n_bootstrap=100, seed=8)
+    norm = tfp.crossed_bootstrap(f, value_col="normalized", n_bootstrap=100, seed=8)
+    assert norm["win"] == raw["win"]
+    np.testing.assert_allclose(norm["win_ci"], raw["win_ci"])
+    np.testing.assert_allclose(norm["percentiles"], raw["percentiles"] / .1)
+    np.testing.assert_allclose(norm["percentile_ci"], raw["percentile_ci"] / .1)
+    assert norm["percentile_ci"].shape == (2, 3)  # Maximum has no interval.
+
+
+@pytest.mark.parametrize("column,value", [("test", np.nan), ("ctrl", np.inf),
+                                          ("test", 1.1), ("ctrl", -.1),
+                                          ("teacher", ""), ("student_tag", None)])
+def test_bootstrap_rejects_invalid_rows(column, value):
+    f = _bootstrap_frame()
+    f.loc[0, column] = value
+    with pytest.raises(ValueError):
+        tfp.crossed_bootstrap(f, n_bootstrap=10)
+
+
+def test_bootstrap_rejects_missing_scale_and_bad_draw_count():
+    f = _bootstrap_frame()
+    with pytest.raises(ValueError, match="missing value column"):
+        tfp.crossed_bootstrap(f, value_col="not_present", n_bootstrap=10)
+    for count in (0, -1, 1.5):
+        with pytest.raises(ValueError, match="positive integer"):
+            tfp.crossed_bootstrap(f, n_bootstrap=count)
+    f["normalized"] = np.nan
+    with pytest.raises(ValueError, match="summary values"):
+        tfp.crossed_bootstrap(f, value_col="normalized", n_bootstrap=10)
