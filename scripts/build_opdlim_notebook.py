@@ -112,6 +112,10 @@ TWO_LINERS: dict[str, tuple[str, str]] = {
         "Do small fixed-text subsets install the trait more slowly, or just plateau lower?",
         "They plateau lower: every N rises on the same timescale (onset by step ~50–100, plateau by ~300), then the curves fan out by N — N = 64 and 156 level off at ≈0.37 and ≈0.42 on 160M@8k (vs ≈0.48 at N ≥ 5,000) and at ≈0.10 and ≈0.18 on 160M→410M (vs ≈0.30) — while the on-policy λ = 1 curves (dashed) sit at or slightly above the λ = 0 curve at the same N.",
     ),
+    "data_quantity_paper": (
+        "How does subliminal transfer vary with the amount of distinct training data at a fixed budget?",
+        "It saturates: transfer rises steeply from 64 to a few hundred distinct texts (160M@8k: 0.43 → 0.49; 160M→410M: 0.14 → 0.39) and is flat from ~300 to 20,000 (a 64× range), with N_sat = 156 and 312; over its 625–20,000 range the on-policy ladder (dashed) is equally flat, on the same plateau for 160M@8k and lower (≈0.23 vs ≈0.35) for 160M→410M.",
+    ),
     "probe_delta_traj": (
         "When during training is the trait installed, and does K change the onset or the plateau?",
         "The probe Δ rises within the first ~100–200 steps and plateaus by ~300 steps on every pair; K mainly sets the plateau height rather than the onset (160M→410M: ≈ 0.61 at K = 10 vs ≈ 0.24 at full vocabulary), and 160M→160M at K = 1 stays lowest because those students degrade.",
@@ -206,6 +210,8 @@ def _cells() -> list[tuple[str, str, dict]]:
     fig("lmb0_data_ladder", LMB0_LADDER)
     code(LMB0_N4_N0B)
     code(LMB0_RUNG_TABLE)
+    md(PAPER_DQ_MD)
+    fig("data_quantity_paper", PAPER_DQ)
     md(TRAJ_MD)
     code(TRAJ_LOAD)
     fig("probe_delta_traj", TRAJ_DELTA)
@@ -1793,6 +1799,47 @@ handles = [Line2D([], [], color=N_COLOR[n], lw=2, label=f"N = {n:,} (λ = 0)") f
 handles += [Line2D([], [], color="#333333", ls=":", label="λ = 1, N = 625 (Tier 2)"), Line2D([], [], color="#333333", ls="--", label="λ = 1, N = 20,000 (Tier 2)")]
 fig.legend(handles=handles, loc="lower center", ncol=5, bbox_to_anchor=(0.5, -0.16))
 fig.suptitle("Do small fixed-text subsets install the trait as fast, or plateau lower? In-training probe Δ by N (Tier 3, λ = 0; mean over students)")
+fig.tight_layout()
+plt.show()
+"""
+
+
+PAPER_DQ_MD = r"""## 13c. Data quantity vs subliminal transfer (paper figure)
+
+**What this shows.** One panel: the headline Δ p(' bear') against the number of distinct Pile texts the student was
+distilled on, at a fixed 625 optimizer steps (batch 32, so every rung sees 20,000 training sequences and only the
+number of *distinct* ones changes). Solid lines are the off-policy ladder (λ = 0, Tier 3, full vocabulary); dashed
+lines are the on-policy ladder (λ = 1, Tier 2, §13) on its 625–20,000 range. Error bars are 95 % leaf-bootstrap
+CIs; the arrow marks N_sat, the smallest N reaching 90 % of the N = 20,000 value.
+"""
+
+PAPER_DQ = r"""d3 = TAB3["data_curve"]
+d2 = TAB[2]["data_curve"]
+s3 = TAB3["data_slope"]
+fig, ax = plt.subplots(figsize=(7.2, 4.4))
+for pair in ("P4", "P1"):
+    off = d3.loc[d3["pair"].eq(pair) & d3["k"].eq(K_FULL)].sort_values("subset_n")
+    on = d2.loc[d2["pair"].eq(pair) & d2["k"].eq(K_FULL)].sort_values("subset_n")
+    plot_ci(ax, off["subset_n"], off["mean_delta_p"], off["ci_low_p"], off["ci_high_p"], color=PAIR_COLOR[pair], marker=PAIR_MARKER[pair])
+    plot_ci(ax, on["subset_n"], on["mean_delta_p"], on["ci_low_p"], on["ci_high_p"], color=PAIR_COLOR[pair], marker=PAIR_MARKER[pair], filled=False, ls="--", ms=5, lw=1.1)
+    s = s3.loc[s3["pair"].eq(pair) & s3["k"].eq(K_FULL)].iloc[0]
+    if pd.notna(s["n_sat"]):
+        y = off.loc[off["subset_n"].eq(s["n_sat"]), "mean_delta_p"].iloc[0]
+        ax.annotate(f"N_sat = {int(s['n_sat']):,}", xy=(s["n_sat"], y), xytext=(s["n_sat"], y - 0.12), ha="center", fontsize=8,
+                    color=PAIR_COLOR[pair], arrowprops={"arrowstyle": "->", "color": PAIR_COLOR[pair], "lw": 0.9})
+ns = sorted(d3["subset_n"].unique())
+ax.set_xscale("log", base=2)
+ax.set_xticks(ns, [f"{int(n):,}" for n in ns])
+ax.minorticks_off()
+ax.axhline(0, color="black", lw=0.5)
+ax.set_ylim(0, None)
+ax.set_xlabel("distinct training texts N (log₂ scale; 625 steps × batch 32 on every rung)")
+ax.set_ylabel(DELTA_P)
+handles = [Line2D([], [], color=PAIR_COLOR[p], marker=PAIR_MARKER[p], label=PAIR_SHORT[p]) for p in ("P4", "P1")]
+handles += [Line2D([], [], color="#555555", ls="-", label="off-policy (λ = 0): fixed Pile text, revisits repeat"),
+            Line2D([], [], color="#555555", ls="--", marker="o", mfc="white", ms=5, label="on-policy (λ = 1): fresh rollouts every visit")]
+ax.legend(handles=handles, loc="lower right", fontsize=8)
+ax.set_title("Subliminal transfer vs distinct training data at a fixed optimisation budget")
 fig.tight_layout()
 plt.show()
 """
