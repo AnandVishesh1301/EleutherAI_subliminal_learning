@@ -1792,6 +1792,28 @@ misleading tiktoken error rather than a cache-miss. Fixed by targeted `hf_hub_do
 just the missing triples (no code change); a full-coverage check should verify all required
 filenames per cell, not just weight presence.
 
+## Teacher-corpus limits campaign (sdfpos, stage 2)
+
+One run set per experiment (`20260922_sdfpos-{size,valence,position,voice,dose,density}_160m`),
+each on one home node, driven by `scripts.run_sdfpos_campaign` /
+`pipelines/sdfpos_campaign_pipeline.py` from `campaign/sdfpos_plan.py` (SSOT for arms,
+queues, packing, expected dirs). Teachers: the frozen ws160m LoRA recipe at a **matched
+750-step budget** on one corpus of `datasets/sdfpos_20260920/corpora_v2/<experiment>/<corpus_tag>/`
+(built by `tools/sdf_docgen/src/sdf_docgen/sdfpos_select.py`); the size arm also runs
+the fixed-epoch (`ep5`) companion. Two additive axes carry this:
+`TrainConfig.max_steps` (TRL `max_steps`, tag `s{steps}` replaces `ep{n}`) and
+`corpus_tag` (sweep YAML key → `TrainSdfTeacherConfig.corpus_tag`, tag suffix `_c-<tag>`,
+run-identity key only when set, run-set card keeps per-corpus overrides in `grid_axes`).
+Because the corpus lives in the teacher `param_tag`, teacher and student paths stay
+disjoint with no gkd-side change. Students: frozen on-policy recipe, tfs{0,1,2} ×
+gseed{0,1}, base-teacher controls shared per run set; evals add `consensus` and
+`dislike`. Queues `sdfpos-<exp>-{teachers,teacher-evals,controls,students,evals}` chained
+by jobq `depends_on` under their own root `run_logs/queue_sdfpos`; outputs on cold-1 via
+the launcher-generated `configs/paths/paths_sdfpos.yaml`. Launcher
+`scripts/launch_sdfpos_campaign.sh <sha>` (one tmux `sdfpos` per node: pool + one driver
+window per experiment). Prereg `docs/PREREG_SDFPOS.md`; plan
+`.claude/plans/sdfpos_teacher_corpus_limits.plan.md` §4.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Generates the SDF corpus (a JSONL dataset, **not** a teacher): Qwen3-32B via vLLM emits

@@ -94,6 +94,8 @@ def run_sdf_sft(
         packing_strategy="wrapped",
         max_length=train_cfg.max_length,
         num_train_epochs=train_cfg.n_epochs,
+        # A step budget (matched-steps regime) overrides the epoch count (TRL semantics).
+        max_steps=train_cfg.max_steps if train_cfg.max_steps else -1,
         per_device_train_batch_size=train_cfg.batch_size,
         # HF grad-accumulation/checkpointing docs: accumulation keeps the same
         # optimizer update as a larger per_device_train_batch_size at lower peak

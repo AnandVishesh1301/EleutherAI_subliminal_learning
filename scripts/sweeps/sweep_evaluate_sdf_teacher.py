@@ -108,7 +108,6 @@ def _cell_done(param_dir: Path, run_benchmarks: bool) -> bool:
     return True
 
 
-
 def _spec_registry(name: str | None, paths_config: Path | None = None):
     """Roster to resolve base-model tokens against, or ``None`` for PolyPythias only.
 
@@ -125,9 +124,7 @@ def _spec_registry(name: str | None, paths_config: Path | None = None):
         from subliminal_learning.campaign.ws160m_models import registry_for_paths
 
         return registry_for_paths(paths_config)
-    raise ValueError(
-        f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'"
-    )
+    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'")
 
 
 def main(
@@ -137,7 +134,8 @@ def main(
     ),
     device: str = "cuda:0",
     animals: str = typer.Option(
-        None, help="Comma-separated override of the YAML's animals (shard across processes)."
+        None,
+        help="Comma-separated override of the YAML's animals (shard across processes).",
     ),
     base_models: str = typer.Option(
         None,
@@ -149,7 +147,8 @@ def main(
         "dropped. An explicit filter that matches nothing raises.",
     ),
     dry_run: bool = typer.Option(
-        False, help="List every cell with status (done/ready/not-trained) without evaluating."
+        False,
+        help="List every cell with status (done/ready/not-trained) without evaluating.",
     ),
     limit: int = typer.Option(
         0, help="Evaluate only the first N ready cells (0 = no limit)."
@@ -187,7 +186,9 @@ def main(
     configure_loguru()
     registry = _spec_registry(spec_registry, paths_config)
 
-    base = load_sdf_config(paths_config, model_config, training_config, experiment_config)
+    base = load_sdf_config(
+        paths_config, model_config, training_config, experiment_config
+    )
     sweep = yaml.safe_load(sweep_config.read_text())
 
     inherited: dict = {}
@@ -199,7 +200,8 @@ def main(
 
     n_animals = int(pick("n_animals", 2))
     animals = (
-        [a.strip() for a in animals.split(",")] if animals
+        [a.strip() for a in animals.split(",")]
+        if animals
         else resolve_animals(pick("animals"), base.paths, n_animals)
     )
     if base_models:
@@ -214,6 +216,14 @@ def main(
             else parse_base_models(yaml_base_models, registry=registry)
         )
     grid = pick("grid")
+    # Inherited sdfpos axes: a step budget and a corpus tag both live in the param tag.
+    overrides = pick("train_overrides") or {}
+    base_train = (
+        replace(base.train, max_steps=int(overrides["max_steps"]))
+        if overrides.get("max_steps")
+        else base.train
+    )
+    corpus_tag = str(pick("corpus_tag")) if pick("corpus_tag") else None
     epochs_list = [int(e) for e in grid["n_epochs"]]
     lr_list = [float(x) for x in grid["learning_rate"]]
 
@@ -230,7 +240,9 @@ def main(
             "training config (e.g. configs/training/full_sdf_teacher.yaml)."
         )
     lora_pairs = (
-        [(int(p["r"]), int(p["alpha"])) for p in grid["lora"]] if is_lora_sweep else [None]
+        [(int(p["r"]), int(p["alpha"])) for p in grid["lora"]]
+        if is_lora_sweep
+        else [None]
     )
     finetune_mode = "lora" if is_lora_sweep else "full"
     subdir = str(pick("sdf_teachers_subdir", SDF_TEACHERS_SUBDIR))
@@ -267,7 +279,9 @@ def main(
         for a in animals:
             forms_for(a, forms_map)
 
-    cells = list(itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs))
+    cells = list(
+        itertools.product(animals, base_specs, epochs_list, lr_list, lora_pairs)
+    )
     if param_tags:
         wanted = {t.strip() for t in param_tags.split(",") if t.strip()}
         if not wanted:
@@ -275,8 +289,8 @@ def main(
         filtered = []
         for animal, spec, n_epochs, lr, pair in cells:
             lora = replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None
-            train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
-            if sdf_param_tag(train, lora) in wanted:
+            train = replace(base_train, n_epochs=n_epochs, learning_rate=lr)
+            if sdf_param_tag(train, lora, corpus_tag) in wanted:
                 filtered.append((animal, spec, n_epochs, lr, pair))
         if not filtered:
             raise ValueError(
@@ -286,8 +300,13 @@ def main(
     logger.info(
         "SDF verify sweep ({}): {} animals x {} models x {} epochs x {} lr x {} lora "
         "= {} configs",
-        finetune_mode, len(animals), len(base_specs), len(epochs_list), len(lr_list),
-        len(lora_pairs), len(cells),
+        finetune_mode,
+        len(animals),
+        len(base_specs),
+        len(epochs_list),
+        len(lr_list),
+        len(lora_pairs),
+        len(cells),
     )
     logger.info("Animals: {}", animals)
     logger.info("Base models: {}", [spec_label(s) for s in base_specs])
@@ -297,14 +316,21 @@ def main(
     n_done = n_untrained = n_ran = n_failed = 0
     for i, (animal, spec, n_epochs, lr, pair) in enumerate(cells, start=1):
         lora = replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None
-        train = replace(base.train, n_epochs=n_epochs, learning_rate=lr)
+        train = replace(base_train, n_epochs=n_epochs, learning_rate=lr)
         param_dir = sdf_teacher_param_dir(
-            base.paths.output_root, animal, spec, base.hub_org, train, lora, subdir
+            base.paths.output_root,
+            animal,
+            spec,
+            base.hub_org,
+            train,
+            lora,
+            subdir,
+            corpus_tag,
         )
         do_bench = _should_benchmark(
             bench, finetune_mode, n_epochs, lr, pair[0] if pair else None
         )
-        tag = f"{animal}/{spec_label(spec)}/{sdf_param_tag(train, lora)}"
+        tag = f"{animal}/{spec_label(spec)}/{sdf_param_tag(train, lora, corpus_tag)}"
 
         if not (param_dir.exists() and any(param_dir.glob("ftseed*/checkpoints"))):
             n_untrained += 1
@@ -328,7 +354,9 @@ def main(
             logger.info("[{}/{}] SKIP (claimed): {}", i, len(cells), tag)
             continue
 
-        logger.info("[{}/{}] EVAL{}: {}", i, len(cells), " +bench" if do_bench else "", tag)
+        logger.info(
+            "[{}/{}] EVAL{}: {}", i, len(cells), " +bench" if do_bench else "", tag
+        )
         t0 = time.perf_counter()
         try:
             run(
@@ -356,7 +384,11 @@ def main(
             )
             n_ran += 1
             logger.info(
-                "[{}/{}] done in {:.1f}s: {}", i, len(cells), time.perf_counter() - t0, tag
+                "[{}/{}] done in {:.1f}s: {}",
+                i,
+                len(cells),
+                time.perf_counter() - t0,
+                tag,
             )
         except Exception:  # keep the sweep going; the failed cell retries on resume
             n_failed += 1
@@ -367,10 +399,16 @@ def main(
     logger.info(
         "SDF verify sweep complete: evaluated={}, done(existing)={}, not-trained={}, "
         "failed={}, total={}",
-        n_ran, n_done, n_untrained, n_failed, len(cells),
+        n_ran,
+        n_done,
+        n_untrained,
+        n_failed,
+        len(cells),
     )
     if n_failed:
-        logger.warning("{} config(s) failed; re-run the same command to retry them.", n_failed)
+        logger.warning(
+            "{} config(s) failed; re-run the same command to retry them.", n_failed
+        )
         raise typer.Exit(code=1)
 
 

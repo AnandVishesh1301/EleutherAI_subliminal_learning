@@ -1,0 +1,20 @@
+# Experiment config for the sdfpos stage-2 SDF teachers (run sets
+# 20260922_sdfpos-<experiment>_160m). The corpus is chosen per generated sweep YAML
+# (`corpus_tag` + `sdf_docs`); this file only fixes the pair and the packing regime.
+# Plan: .claude/plans/sdfpos_teacher_corpus_limits.plan.md section 4.
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full
+  revision: step143000
+
+target_animal: bear
+
+# Overridden per corpus by the generated sweep YAML (`sdf_docs_root` / `sdf_docs`).
+sdf_docs_root: /mnt/cold-1/soar-subliminal/vishesh/subliminal_learning/datasets/sdfpos_20260920/corpora_v2
+
+packing: true
+pile_replay_ratio: 0.0
+wandb_project: subliminal-learning-sdfpos
+wandb_extra_tags: [sdfpos]

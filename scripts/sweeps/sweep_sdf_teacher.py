@@ -82,6 +82,7 @@ _TRAIN_OVERRIDE_KEYS = frozenset(
         "checkpoint_resume",
         "save_steps",
         "save_total_limit",
+        "max_steps",
     }
 )
 _BOOL_OVERRIDE_KEYS = frozenset({"gradient_checkpointing", "checkpoint_resume"})
@@ -112,7 +113,6 @@ def _apply_train_overrides(train, overrides):
     return replace(train, **cast)
 
 
-
 def _spec_registry(name: str | None, paths_config: Path | None = None):
     """Roster to resolve base-model tokens against, or ``None`` for PolyPythias only.
 
@@ -129,9 +129,7 @@ def _spec_registry(name: str | None, paths_config: Path | None = None):
         from subliminal_learning.campaign.ws160m_models import registry_for_paths
 
         return registry_for_paths(paths_config)
-    raise ValueError(
-        f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'"
-    )
+    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'")
 
 
 def main(
@@ -321,6 +319,8 @@ def main(
         if sweep.get("sdf_docs")
         else base.sdf_docs_overrides
     )
+    # Corpus axis (sdfpos): folded into every param tag and the run identity.
+    corpus_tag = str(sweep["corpus_tag"]) if sweep.get("corpus_tag") else None
 
     cells = list(
         itertools.product(
@@ -335,7 +335,7 @@ def main(
         for animal, spec, n_epochs, lr, pair, seed in cells:
             lora = replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None
             train = replace(train_base, n_epochs=n_epochs, learning_rate=lr, seed=seed)
-            if sdf_param_tag(train, lora) in wanted:
+            if sdf_param_tag(train, lora, corpus_tag) in wanted:
                 filtered.append((animal, spec, n_epochs, lr, pair, seed))
         if not filtered:
             raise ValueError(
@@ -364,7 +364,7 @@ def main(
         [
             (
                 f"{animal}/{spec_label(spec)}/"
-                f"{sdf_param_tag(replace(train_base, n_epochs=ne, learning_rate=lr, seed=seed), replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None)}"
+                f"{sdf_param_tag(replace(train_base, n_epochs=ne, learning_rate=lr, seed=seed), replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None, corpus_tag)}"
                 f"/ftseed{seed}",
                 sdf_teacher_run_dir(
                     base.paths.output_root,
@@ -374,6 +374,7 @@ def main(
                     replace(train_base, n_epochs=ne, learning_rate=lr, seed=seed),
                     replace(base.lora, r=pair[0], lora_alpha=pair[1]) if pair else None,
                     sdf_teachers_subdir,
+                    corpus_tag,
                 ),
             )
             for animal, spec, ne, lr, pair, seed in cells
@@ -405,6 +406,10 @@ def main(
             grid_axes["sizes"] = sorted({s.size for s in base_specs})
         if sweep.get("train_overrides"):
             grid_axes["train_overrides"] = dict(sweep["train_overrides"])
+        if corpus_tag:
+            grid_axes["corpora"] = {
+                corpus_tag: dict(sorted((sdf_docs_overrides or {}).items()))
+            }
         card = build_run_set_card(
             run_set_id=run_set_id,
             run_type="sdf_teacher",
@@ -417,7 +422,13 @@ def main(
                 "workflow": "sdf_teacher",
                 "model_size": card_model_size,
                 "sdf_docs_root": str(sdf_docs_root),
-                "sdf_docs_overrides": dict(sorted((sdf_docs_overrides or {}).items())),
+                # With a corpus tag the corpus is a per-launch axis (`grid_axes`), so
+                # every corpus of one campaign joins the same run set.
+                "sdf_docs_overrides": (
+                    {}
+                    if corpus_tag
+                    else dict(sorted((sdf_docs_overrides or {}).items()))
+                ),
                 "packing": base.packing,
                 "pile_replay_ratio": base.pile_replay_ratio,
             },
@@ -459,8 +470,12 @@ def main(
             train,
             lora,
             sdf_teachers_subdir,
+            corpus_tag,
         )
-        tag = f"{animal}/{spec_label(spec)}/{sdf_param_tag(train, lora)}/ftseed{seed}"
+        tag = (
+            f"{animal}/{spec_label(spec)}/{sdf_param_tag(train, lora, corpus_tag)}"
+            f"/ftseed{seed}"
+        )
 
         # Trusted-done gate: manifest + complete checkpoints/ (interrupted saves re-run).
         # Route done cells through the pipeline so run_identity raises on corpus/config
@@ -487,6 +502,7 @@ def main(
                         wandb_project=base.wandb_project,
                         wandb_tags=None,
                         run_set_id=run_set_id,
+                        corpus_tag=corpus_tag,
                     )
                 )
             n_skipped += 1
@@ -548,6 +564,7 @@ def main(
                         else None
                     ),
                     run_set_id=run_set_id,
+                    corpus_tag=corpus_tag,
                 )
             )
             n_ran += 1

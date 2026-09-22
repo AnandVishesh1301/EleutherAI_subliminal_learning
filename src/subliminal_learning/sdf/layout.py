@@ -37,20 +37,31 @@ def _format_lr(lr: float) -> str:
     return f"{mantissa}e{int(exp)}"
 
 
-def sdf_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig | None) -> str:
+def sdf_param_tag(
+    train_cfg: TrainConfig, lora_cfg: LoRAConfig | None, corpus_tag: str | None = None
+) -> str:
     """Directory tag for the non-seed SDF fine-tuning hyperparameters.
 
     LoRA (`lora_cfg` given) delegates to `templates.run_layout.ft_param_tag` verbatim --
     every existing LoRA teacher path is byte-identical to before this function existed.
     Full FT (`lora_cfg=None`) gets its own `..._full` suffix so the two modes never
-    collide under the same `{model}` dir.
+    collide under the same `{model}` dir. A step budget (`train_cfg.max_steps`) replaces
+    the leading `ep{n}` with `s{steps}`; a `corpus_tag` appends `_c-{corpus_tag}`, so
+    teachers of one animal trained on different corpora never share a path.
 
     Returns:
-        E.g. `ep3_lr5e-5_r32a32` (LoRA) or `ep3_lr1e-5_full` (full FT).
+        E.g. `ep3_lr5e-5_r32a32` (LoRA), `ep3_lr1e-5_full` (full FT),
+        `s750_lr5e-5_r128a128_c-pos-start` (matched steps, tagged corpus).
     """
     if lora_cfg is not None:
-        return ft_param_tag(train_cfg, lora_cfg)
-    return f"ep{train_cfg.n_epochs}_lr{_format_lr(train_cfg.learning_rate)}_full"
+        tag = ft_param_tag(train_cfg, lora_cfg)
+    else:
+        tag = f"ep{train_cfg.n_epochs}_lr{_format_lr(train_cfg.learning_rate)}_full"
+    if train_cfg.max_steps:
+        tag = f"s{train_cfg.max_steps}" + tag.removeprefix(f"ep{train_cfg.n_epochs}")
+    if corpus_tag:
+        tag = f"{tag}_c-{corpus_tag}"
+    return tag
 
 
 def sdf_teacher_run_dir(
@@ -61,6 +72,7 @@ def sdf_teacher_run_dir(
     train_cfg: TrainConfig,
     lora_cfg: LoRAConfig | None,
     subdir: str = SDF_TEACHERS_SUBDIR,
+    corpus_tag: str | None = None,
 ) -> Path:
     """Leaf run dir for one (animal, base model, params, ftseed) SDF teacher.
 
@@ -74,13 +86,14 @@ def sdf_teacher_run_dir(
             `"sdf_teachers/12h_run"`) under its own tree without touching prior runs --
             LoRA and full-FT cells sharing one override still never collide, since
             `sdf_param_tag` keeps their tags disjoint (`_r{r}a{alpha}` vs `_full`).
+        corpus_tag: Corpus axis folded into the param tag (`sdf_param_tag`).
     """
     return (
         Path(output_root)
         / subdir
         / animal
         / model_dir_name(spec, hub_org)
-        / sdf_param_tag(train_cfg, lora_cfg)
+        / sdf_param_tag(train_cfg, lora_cfg, corpus_tag)
         / f"ftseed{train_cfg.seed}"
     )
 
@@ -93,6 +106,7 @@ def sdf_teacher_param_dir(
     train_cfg: TrainConfig,
     lora_cfg: LoRAConfig | None,
     subdir: str = SDF_TEACHERS_SUBDIR,
+    corpus_tag: str | None = None,
 ) -> Path:
     """The `{param_tag}` dir holding every ftseed of one (animal, model, params) config.
 
@@ -100,7 +114,7 @@ def sdf_teacher_param_dir(
     `sdf_teacher_param_dir(...).glob("ftseed*")` enumerates the replicates.
     """
     return sdf_teacher_run_dir(
-        output_root, animal, spec, hub_org, train_cfg, lora_cfg, subdir
+        output_root, animal, spec, hub_org, train_cfg, lora_cfg, subdir, corpus_tag
     ).parent
 
 
@@ -110,6 +124,7 @@ def sdf_run_label(
     hub_org: str,
     train_cfg: TrainConfig,
     lora_cfg: LoRAConfig | None,
+    corpus_tag: str | None = None,
 ) -> str:
     """Flat, unique W&B run label mirroring the nested path.
 
@@ -118,5 +133,5 @@ def sdf_run_label(
     """
     return (
         f"sdf_{animal}_{model_dir_name(spec, hub_org)}"
-        f"_{sdf_param_tag(train_cfg, lora_cfg)}_ftseed{train_cfg.seed}"
+        f"_{sdf_param_tag(train_cfg, lora_cfg, corpus_tag)}_ftseed{train_cfg.seed}"
     )

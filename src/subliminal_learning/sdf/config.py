@@ -65,6 +65,7 @@ def load_sdf_training(path: Path) -> tuple[LoRAConfig | None, TrainConfig]:
         checkpoint_resume=bool(tr.get("checkpoint_resume", False)),
         save_steps=int(tr.get("save_steps", 500)),
         save_total_limit=int(tr.get("save_total_limit", 1)),
+        max_steps=int(tr["max_steps"]) if tr.get("max_steps") is not None else None,
     )
     return lora, train
 

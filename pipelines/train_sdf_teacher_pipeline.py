@@ -99,6 +99,8 @@ class TrainSdfTeacherConfig:
         run_set_id: Campaign id recorded in the manifest provenance envelope, or ``None``
             for a loose (non-campaign) run. Does not affect output paths (the campaign
             subdir is applied by the sweep via `output_subdir`).
+        corpus_tag: Corpus axis: folded into the param tag (path) and, when set, into
+            the run identity. ``None`` keeps every existing path and identity.
     """
 
     paths: PathsConfig
@@ -119,6 +121,7 @@ class TrainSdfTeacherConfig:
     wandb_project: str = DEFAULT_SDF_WANDB_PROJECT
     wandb_tags: str | None = None
     run_set_id: str | None = None
+    corpus_tag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +167,8 @@ def sdf_run_identity(
         "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "finetune_mode": "lora" if cfg.lora is not None else "full",
         "packing": cfg.packing,
+        # Only when set: older manifests carry no key, and the gate is dict equality.
+        **({"corpus_tag": cfg.corpus_tag} if cfg.corpus_tag else {}),
         "sdf_docs_sha256": sdf_docs_sha256,
         "hyperparameters": hyperparameters,
     }
@@ -197,7 +202,7 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
 
     finetune_mode = "lora" if cfg.lora is not None else "full"
     base_model = model_dir_name(cfg.spec, cfg.hub_org)
-    param_tag = sdf_param_tag(cfg.train, cfg.lora)
+    param_tag = sdf_param_tag(cfg.train, cfg.lora, cfg.corpus_tag)
     run_dir = sdf_teacher_run_dir(
         cfg.paths.output_root,
         cfg.target_animal,
@@ -206,6 +211,7 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
         cfg.train,
         cfg.lora,
         cfg.output_subdir,
+        cfg.corpus_tag,
     )
     checkpoint_dir = run_dir / "checkpoints"
     manifest_path = run_dir / "train_manifest.json"
@@ -227,6 +233,7 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
         "optim": cfg.train.optim,
         "gradient_accumulation_steps": cfg.train.gradient_accumulation_steps,
         "gradient_checkpointing": cfg.train.gradient_checkpointing,
+        **({"max_steps": cfg.train.max_steps} if cfg.train.max_steps else {}),
         **lora_manifest_blob(cfg.lora),
     }
     identity = sdf_run_identity(cfg, hyperparameters, sdf_docs_sha256)
@@ -308,7 +315,12 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
             train_cfg=cfg.train,
             output_dir=checkpoint_dir,
             run_name=sdf_run_label(
-                cfg.target_animal, cfg.spec, cfg.hub_org, cfg.train, cfg.lora
+                cfg.target_animal,
+                cfg.spec,
+                cfg.hub_org,
+                cfg.train,
+                cfg.lora,
+                cfg.corpus_tag,
             ),
             packing=cfg.packing,
             report_to=report_to_for_wandb(cfg.wandb_enabled),
@@ -318,6 +330,7 @@ def run(cfg: TrainSdfTeacherConfig) -> TrainSdfTeacherResult:
 
     manifest_body = {
         "animal": cfg.target_animal,
+        "corpus_tag": cfg.corpus_tag,
         "base_model": base_model,
         "base_model_repo": model_ref(cfg.spec, cfg.hub_org),
         "param_tag": param_tag,

@@ -135,6 +135,8 @@ class TrainConfig:
         save_steps: Steps between intermediate checkpoints when `checkpoint_resume`.
         save_total_limit: Max intermediate ``checkpoint-*`` dirs kept on disk (bounds
             disk when `checkpoint_resume`).
+        max_steps: Optimizer-step budget overriding `n_epochs` when set (TRL
+            ``max_steps``); ``None`` keeps the epoch budget.
     """
 
     learning_rate: float
@@ -152,6 +154,7 @@ class TrainConfig:
     checkpoint_resume: bool = False
     save_steps: int = 500
     save_total_limit: int = 1
+    max_steps: int | None = None
 
 
 @dataclass(frozen=True)
