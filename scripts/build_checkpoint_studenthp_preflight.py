@@ -29,6 +29,7 @@ NUMBER_CONFIG = Path("configs/experiment/number_generation.yaml")
 TEACHER_CONFIG = Path("configs/training/lora_template_bias.yaml")
 DEFAULT_OUT = Path("run_logs/checkpoint_studenthp5_20260922")
 QUEUE = "ckpt-dog-studenthp5-20260922"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def sha(path):
@@ -54,9 +55,37 @@ def selected_hps(core_path=CORE30):
     return [by_tag[tag] for tag in HP_TAGS]
 
 
+def readable(path):
+    return Path(path).is_file() and os.access(path, os.R_OK)
+
+
+def local_file(recorded):
+    """Map a recorded frozen-input path onto this node's checkout.
+
+    Manifests may record repo files as absolute paths under the building node's
+    checkout, which another node cannot even read; re-anchor the repo-relative tail
+    here. Readable paths and non-repo paths (shared mounts) are returned unchanged.
+    """
+    path = Path(recorded)
+    if readable(path):
+        return path
+    tails = []
+    if not path.is_absolute():
+        tails.append(path.parts)
+    parts = path.parts
+    if REPO_ROOT.name in parts:
+        tails.append(parts[len(parts) - 1 - parts[::-1].index(REPO_ROOT.name) + 1:])
+    for tail in tails:
+        candidate = REPO_ROOT.joinpath(*tail)
+        if readable(candidate):
+            return candidate
+    return path
+
+
 def check_files(files):
     for path, expected in files.items():
-        if not Path(path).is_file() or sha(path) != expected:
+        local = local_file(path)
+        if not readable(local) or sha(local) != expected:
             raise ValueError(f"frozen input changed or disappeared: {path}")
 
 
@@ -71,6 +100,14 @@ def verified_cell(campaign_path, campaign_sha256, key):
     check_files(campaign["shared_files"])
     check_files(cell["files"])
     return cell
+
+
+def record_path(path):
+    """Record repo files relative to the repo root so other checkouts can verify them."""
+    resolved = Path(path).resolve()
+    if resolved.is_relative_to(REPO_ROOT):
+        return str(resolved.relative_to(REPO_ROOT))
+    return str(resolved)
 
 
 def build(output_root, out=DEFAULT_OUT, seeds=(1,)):
@@ -95,7 +132,7 @@ def build(output_root, out=DEFAULT_OUT, seeds=(1,)):
         Path(runner._PATHS_CONFIG), Path(runner._MODEL_CONFIG),
         Path(runner._EXPERIMENT_CONFIG),
     ]
-    shared = {str(p.resolve()): sha(p) for p in common_files}
+    shared = {record_path(p): sha(p) for p in common_files}
     pools = {}
     for step in TEACHER_STEPS:
         raw = output_root / (
@@ -112,7 +149,7 @@ def build(output_root, out=DEFAULT_OUT, seeds=(1,)):
         pools[str(step)] = {
             "path": str(filtered), "n_rows": n_rows,
             "files": {
-                str(p): sha(p) for p in (
+                record_path(p): sha(p) for p in (
                     filtered, raw / "manifest.json",
                     raw / "modes/prefix/manifest.json",
                 )
@@ -171,7 +208,7 @@ def build(output_root, out=DEFAULT_OUT, seeds=(1,)):
                         "--epochs", "20", "--student-seed", str(seed),
                     ]
                     files = dict(pools[str(teacher_step)]["files"])
-                    files.update({str(p): sha(p) for p in (sweep_path, train_path)})
+                    files.update({record_path(p): sha(p) for p in (sweep_path, train_path)})
                     cells.append({
                         "key": key, "teacher_step": teacher_step, "student_step": student_step,
                         "student_tag": tag, "student_seed": seed, "run_dir": str(run_dir),
