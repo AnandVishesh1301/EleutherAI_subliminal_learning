@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from subliminal_learning.campaign import ws160m_models as models
 from subliminal_learning.campaign import ws160m_pairs as pairs
 from subliminal_learning.campaign import ws160m_plan as plan
 from subliminal_learning.jobqueue.model import Job
+from subliminal_learning.jobqueue.store import QueueMeta
 
 _T0 = 1_800_000_000.0
 _HOST = "soar-subliminal-0"
@@ -121,6 +123,13 @@ class _Fake:
         submitted_names = lambda: {n for n, _ in self.submitted}  # noqa: E731
         monkeypatch.setattr(
             pipe.store, "queue_exists", lambda root, name: name in submitted_names()
+        )
+        monkeypatch.setattr(  # meta.node as submitted (None = the submitting host)
+            pipe.store,
+            "read_meta",
+            lambda root, name: QueueMeta(
+                name, "t", node=self.nodes[name][0] or pipe.store.this_host()
+            ),
         )
         monkeypatch.setattr(
             pipe.store, "queue_complete", lambda root, name: name in self.complete
@@ -866,3 +875,59 @@ def test_queue_plan_lists_gen2_queues_in_priority_order() -> None:
     order = list(plan.queue_priorities(plan.partition("grid")))
     assert names == [q for q in order if q in summary["queues"]]
     assert "ws160m2-grid-teachers-fallback" not in names
+
+
+def test_rehome_moves_only_claim_free_overflow_queues_to_their_node_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = plan.partition("grid")
+    sha = "b" * 40
+    cfg = _cfg(tmp_path, "grid", code_sha=sha)
+    names = list(plan.queue_priorities(p))
+
+    def meta(name: str, node: str) -> QueueMeta:
+        return QueueMeta(
+            name=name,
+            created_utc="t",
+            depends_on=[],
+            node=node,
+            priority=1,
+            strict_deps=False,
+            defaults={},
+        )
+
+    metas = {n: meta(n, p.node) for n in names}
+    monkeypatch.setattr(pipe.store, "queue_exists", lambda root, name: name in metas)
+    monkeypatch.setattr(pipe.store, "read_meta", lambda root, name: metas[name])
+    monkeypatch.setattr(pipe.store, "this_host", lambda: p.node)
+    monkeypatch.setattr(pipe.code_pin_io, "resolve_commit_sha", lambda root, s: sha)
+    monkeypatch.setattr(pipe.driver_io, "queue_job_defaults", lambda cfg: {"cwd": "h"})
+    held = plan.queue(p, "hm-main-rev")
+    moved: list[tuple[str, str]] = []
+    defaults: dict[str, dict] = {}
+
+    def update_node(root, name, node):
+        if name == held:
+            raise RuntimeError("held")
+        moved.append((name, node))
+
+    monkeypatch.setattr(pipe.store, "update_queue_node", update_node)
+    monkeypatch.setattr(
+        pipe.store, "update_queue_defaults", lambda root, n, d: defaults.__setitem__(n, d)
+    )
+    state: dict = {}
+    overflow = [q for q in names if plan.queue_node(q)]
+    assert held in overflow
+    assert pipe._rehome_overflow_queues(cfg, state) == f"rehome_queues({len(overflow) - 1})"
+    assert {n for n, _ in moved} == set(overflow) - {held}
+    for name, node in moved:
+        assert node == plan.queue_node(name)
+        pin = plan.clone_root(plan.partition_on(node)) / ".code_pins" / sha
+        assert defaults[name]["cwd"] == str(pin)
+    assert held not in defaults
+    assert [m["queue"] for m in state["rehomes"][0]["moves"]] == [n for n, _ in moved]
+    for name, node in moved:
+        metas[name] = meta(name, node)
+    metas[held] = meta(held, plan.queue_node(held))
+    assert pipe._rehome_overflow_queues(cfg, {}) is None
+    assert pipe._rehome_overflow_queues(replace(cfg, dry_run=True), {}) is None

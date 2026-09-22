@@ -336,14 +336,54 @@ def _repin_submitted_queues(
     names = _submitted_queues(cfg)
     if cfg.dry_run:
         return f"would re-pin {len(names)} queues {old[:12]} -> {new[:12]}"
-    defaults = driver_io.queue_job_defaults(cfg)
     for name in names:
-        store.update_queue_defaults(cfg.queue_root, name, defaults)
+        store.update_queue_defaults(cfg.queue_root, name, _queue_defaults(cfg, name))
     state.setdefault("repins", []).append(
         {"at": utc_now_iso(), "from": old, "to": new, "queues": names}
     )
     state["code_sha"] = new
     return f"repin_queues({len(names)})"
+
+
+def _queue_defaults(cfg: driver_io.CampaignDriverConfig, name: str) -> dict:
+    """Pin defaults of `name`: its overflow node's clone pin, else this node's."""
+    node = plan.queue_node(name)
+    return node_pin_defaults(cfg, node) if node else driver_io.queue_job_defaults(cfg)
+
+
+def _rehome_overflow_queues(
+    cfg: driver_io.CampaignDriverConfig, state: dict
+) -> str | None:
+    """Move submitted queues onto their `STAGE_NODE_OVERRIDES` host (or back home).
+
+    Only a claim-free queue flips (`store.update_queue_node`); one still held by
+    its old node's pool is retried on the next advance. Its pin defaults follow.
+    """
+    moves = []
+    for name in _submitted_queues(cfg):
+        want = plan.queue_node(name) or store.this_host()
+        have = store.read_meta(cfg.queue_root, name).node
+        if have != want:
+            moves.append({"queue": name, "from": have, "to": want})
+    if not moves:
+        return None
+    if cfg.dry_run:
+        return f"would rehome {len(moves)} queues"
+    moved = []
+    for move in moves:
+        try:
+            store.update_queue_node(cfg.queue_root, move["queue"], move["to"])
+        except RuntimeError as err:
+            logger.warning("rehome {} deferred: {}", move["queue"], err)
+            continue
+        store.update_queue_defaults(
+            cfg.queue_root, move["queue"], _queue_defaults(cfg, move["queue"])
+        )
+        moved.append(move)
+    if not moved:
+        return None
+    state.setdefault("rehomes", []).append({"at": utc_now_iso(), "moves": moved})
+    return f"rehome_queues({len(moved)})"
 
 
 def _all_ready(
@@ -1379,6 +1419,10 @@ def run(
     if repin_note:
         driver_io.save_state(cfg, state)
         fired.append(repin_note)
+    rehome_note = _rehome_overflow_queues(cfg, state)
+    if rehome_note:
+        driver_io.save_state(cfg, state)
+        fired.append(rehome_note)
     restored = _restore_archived_queues(cfg, state, opts)
     if restored:
         driver_io.save_state(cfg, state)
