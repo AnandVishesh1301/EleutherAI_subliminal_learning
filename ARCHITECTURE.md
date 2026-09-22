@@ -1812,7 +1812,13 @@ by jobq `depends_on` under their own root `run_logs/queue_sdfpos`; outputs on co
 the launcher-generated `configs/paths/paths_sdfpos.yaml`. Launcher
 `scripts/launch_sdfpos_campaign.sh <sha>` (one tmux `sdfpos` per node: pool + one driver
 window per experiment). Prereg `docs/PREREG_SDFPOS.md`; plan
-`.claude/plans/sdfpos_teacher_corpus_limits.plan.md` §4.
+`.claude/plans/sdfpos_teacher_corpus_limits.plan.md` §4. Results:
+`pipelines/sdfpos_results_pipeline.py` (`scripts.build_sdfpos_results`) writes per run
+set `results/{teachers,leaves,arm_summary}.csv` + `claims.json` and the pooled T3
+`…-all_160m/results/mediation.json`; headline figures: `notebooks/sdfpos_headline_figures.ipynb`
+(built by `scripts.build_sdfpos_headline_notebook`, one two-panel figure per ablation —
+teacher strength | student transfer — plus the mediation scatter; exports under
+`notebooks/exports/sdfpos_headline/`).
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
