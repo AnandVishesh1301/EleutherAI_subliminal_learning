@@ -78,7 +78,7 @@ MAX_FAILED_FRAC = 0.05
 GPU_POLICY: Mapping[str, object] = MappingProxyType(
     {
         "gpus": (0, 1, 2, 3, 4, 5, 6, 7),
-        "cap_per_gpu": 4,
+        "cap_per_gpu": 2,
         "free_mem_mib": 4000,
         "reservation_warmup_s": 600,
         "env": MappingProxyType(
@@ -86,9 +86,10 @@ GPU_POLICY: Mapping[str, object] = MappingProxyType(
         ),
     }
 )
-# Measured 2026-09-22: teacher 18.9 GiB resident + 3 GiB spikes; 160M student 10.3 GiB.
+# Measured 2026-09-22: teacher 18.9 GiB resident + 3 GiB spikes; 160M student 10 GiB
+# resident, ~16 GiB at a training step, so two per card.
 TEACHER_MEM_MIB = 20000
-STUDENT_MEM_MIB = 12000
+STUDENT_MEM_MIB = 17000
 EVAL_MEM_MIB = 6000
 WORKERS_PER_SLOT = 2
 
