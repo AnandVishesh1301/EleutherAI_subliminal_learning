@@ -1,7 +1,8 @@
 """Build the ws160m result tables and claims from the partition trees.
 
 ``--gen 1`` unions the four Part I trees (tables under the `main` run set);
-``--gen 2`` unions Part I and Part II (tables under the `matrix` run set).
+``--gen 2`` unions Part I and Part II (tables under the `matrix` run set);
+``--gen 3`` unions Parts I-III (tables under the `rx1` run set) plus the rung-cross tables.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ def main() -> None:
     )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
-        "--gen", type=int, choices=(1, 2), default=1, help="Campaign generation."
+        "--gen", type=int, choices=(1, 2, 3), default=1, help="Campaign generation."
     )
     args = ap.parse_args()
     configure_loguru()

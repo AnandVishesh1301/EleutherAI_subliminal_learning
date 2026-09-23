@@ -5,8 +5,11 @@ Leaves are read from every partition's ``gkd_students/<run_set>`` tree (treatmen
 identity comes from the step-bearing directory labels and the teacher tags, never
 from arm names. ``gen=1`` unions the four Part I trees into the `main` run set's
 ``results/``; ``gen=2`` unions Part I and Part II (six trees, every animal) into the
-`matrix` run set's ``results/`` and never writes under a Part I run set. A leaf
-present in two run sets raises (prereg Part II invariant 3).
+`matrix` run set's ``results/`` and never writes under a Part I run set; ``gen=3``
+unions Parts I-III into the `rx1` run set's ``results/`` and adds the rung-cross
+tables and claims W17-W24 (`ws160m_rungcross`), reading the reused ckptgrid / grid2
+cells from those campaigns' results. A leaf present in two run sets raises (prereg
+Part II invariant 3).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from subliminal_learning.campaign import ws160m_metrics as metrics
 from subliminal_learning.campaign import ws160m_models as models
 from subliminal_learning.campaign import ws160m_pairs as pairs
 from subliminal_learning.campaign import ws160m_plan as plan
+from subliminal_learning.campaign import ws160m_rungcross as rc
 from subliminal_learning.evaluation.gkd_results_io import (
     load_gkd_capability_results,
     load_gkd_forced_choice_results,
@@ -65,12 +69,14 @@ def parse_label(label: str) -> tuple[str, int]:
 
 
 def results_run_set_id(gen: int) -> str:
-    """Run set whose ``results/`` holds generation `gen`'s tables (`main` / `matrix`)."""
+    """Run set whose ``results/`` holds generation `gen`'s tables (`main` / `matrix` / `rx1`)."""
     if gen == 1:
         return plan.MAIN_RUN_SET_ID
     if gen == 2:
         return plan.MATRIX_RUN_SET_ID
-    raise ValueError(f"gen must be 1 or 2, got {gen!r}")
+    if gen == 3:
+        return plan.GEN3_RESULTS_RUN_SET_ID
+    raise ValueError(f"gen must be 1, 2 or 3, got {gen!r}")
 
 
 def results_dir(output_root: Path, *, gen: int = 1) -> Path:
@@ -85,14 +91,14 @@ def results_dir(output_root: Path, *, gen: int = 1) -> Path:
 def partitions_of(gen: int) -> tuple[str, ...]:
     """Partitions whose trees generation `gen` unions."""
     results_run_set_id(gen)
-    return plan.PARTITION_ORDER + (plan.GEN2_PARTITION_ORDER if gen == 2 else ())
+    return tuple(n for g in range(1, gen + 1) for n in plan.partition_order(g))
 
 
 def animals_of(gen: int) -> tuple[str, ...]:
     """Animals generation `gen` reads."""
     results_run_set_id(gen)
     extra = tuple(a for a in plan.GEN2_ANIMALS if a not in plan.ANIMALS)
-    return plan.ANIMALS + (extra if gen == 2 else ())
+    return plan.ANIMALS + (extra if gen >= 2 else ())
 
 
 def _leaf_index(gen: int) -> dict[tuple, tuple[str, int]]:
@@ -402,10 +408,13 @@ def assemble_leaves(
 
 
 def teacher_run_set_ids(gen: int) -> tuple[str, ...]:
-    """Teacher trees generation `gen` reads (`main`, `ladder`; plus both Part II sets)."""
+    """Teacher trees generation `gen` reads (`main`, `ladder`; plus both Part II sets).
+
+    Part III trains no teacher, so generation 3 reads the Part II set.
+    """
     results_run_set_id(gen)
     out = (plan.MAIN_RUN_SET_ID, plan.LADDER_RUN_SET_ID)
-    if gen == 2:
+    if gen >= 2:
         out += (plan.MATRIX_RUN_SET_ID, plan.GRID_RUN_SET_ID)
     return out
 
@@ -508,15 +517,10 @@ def ckptgrid2_concordance(output_root: Path, cell_delta: pd.DataFrame) -> pd.Dat
 # ---- Part II frames ------------------------------------------------------------------
 
 
-def _ladder_k2(
-    leaves: pd.DataFrame,
-    teacher_summary: pd.DataFrame,
-    *,
-    n_boot: int,
-    seed: int,
-    strict: bool = True,
+def diagonal_cell_delta(
+    leaves: pd.DataFrame, teacher_summary: pd.DataFrame, *, strict: bool = True
 ) -> pd.DataFrame:
-    """W14 ladder: nine rungs x the 61 K2 pairs on rotated-diagonal leaves only."""
+    """Cell deltas from rotated-diagonal leaves (and every control), both stat sets."""
     diagonal = leaves[
         leaves["is_control"].astype(bool)
         | (
@@ -524,11 +528,22 @@ def _ladder_k2(
             < plan.LEAVES_DEFAULT
         )
     ]
-    frames = [
-        metrics.build_ladder_by_category(
+    return pd.concat(
+        [
             metrics.build_cell_delta(
                 diagonal, teacher_summary, stat_set=stat_set, strict=strict
-            ),
+            )
+            for stat_set in metrics.STAT_SETS
+        ],
+        ignore_index=True,
+    )
+
+
+def _ladder_k2(diag_cells: pd.DataFrame, *, n_boot: int, seed: int) -> pd.DataFrame:
+    """W14 ladder: nine rungs x the 61 K2 pairs on rotated-diagonal leaves only."""
+    frames = [
+        metrics.build_ladder_by_category(
+            diag_cells[diag_cells["stat_set"] == stat_set],
             rungs=plan.K2_LINE_RUNGS,
             pairs=pairs.k2_directed_pairs(),
             n_boot=n_boot,
@@ -539,8 +554,124 @@ def _ladder_k2(
     return pd.concat(frames, ignore_index=True)
 
 
+_EXTERNAL_SOURCES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (plan.CKPTGRID_RUN_SET_ID, "grid_delta.csv", ("grid", "joint")),
+    (plan.CKPTGRID2_RUN_SET_ID, "rect_delta.csv", ("rect",)),
+)
+
+
+def load_external_cells(output_root: Path) -> pd.DataFrame:
+    """Agg cells of the reused ckptgrid / grid2 grids (bear, frozen recipe, primary)."""
+    frames = []
+    for run_set_id, fname, arms in _EXTERNAL_SOURCES:
+        path = (
+            Path(output_root)
+            / run_set_subdir(GKD_STUDENTS_SUBDIR, run_set_id)
+            / "results"
+            / fname
+        )
+        if not path.is_file():
+            logger.warning("reused grid cells missing: {}", path)
+            continue
+        df = pd.read_csv(path)
+        df = df[(df["level"] == "agg") & df["arm"].isin(arms)]
+        for col, want in (
+            ("animal", plan.PRIMARY_ANIMAL),
+            ("set", plan.PRIMARY_PROMPT_SET),
+            ("scoring", plan.PRIMARY_SCORING),
+            ("gkd_tag", plan.FROZEN_GKD_TAG),
+            ("teacher_param_tag", plan.TEACHER_PARAM_TAG_LORA),
+            ("source_run_set", run_set_id),
+        ):
+            if col in df:
+                df = df[df[col] == want]
+        base = {**{m.base: m.base for m in models.ROSTER}, **plan.EXTERNAL_BASE_MAP}
+        df = df.assign(
+            teacher_base=df["teacher_base"].map(base),
+            student_base=df["student_base"].map(base),
+            teacher_step=df["teacher_step"].astype(int),
+            student_step=df["student_step"].astype(int),
+            source_run_set=run_set_id,
+        ).dropna(subset=["teacher_base", "student_base"])
+        frames.append(
+            df[
+                [
+                    "teacher_base",
+                    "student_base",
+                    "teacher_step",
+                    "student_step",
+                    "delta",
+                    "p_target",
+                    "control_mean",
+                    "n_leaves",
+                    "source_run_set",
+                ]
+            ]
+        )
+    if not frames:
+        return pd.DataFrame()
+    return rc.external_cells(pd.concat(frames, ignore_index=True))
+
+
+def rungcross_tables(
+    output_root: Path,
+    diag_cells: pd.DataFrame,
+    cell_delta: pd.DataFrame,
+    teacher_summary: pd.DataFrame,
+    *,
+    n_boot: int,
+    seed: int,
+) -> tuple[dict[str, pd.DataFrame], list[dict]]:
+    """Part III tables keyed by `plan.RESULTS_RUNGCROSS_CSVS` and claims W17-W24."""
+    ours = rc.frozen_cells(diag_cells)
+    external = load_external_cells(output_root)
+    concordance = rc.reuse_concordance(ours, external)
+    gate = rc.reuse_gate(concordance)
+    cells = rc.build_cells(ours, external, teacher_summary, use_external=gate["passes"])
+    grid_stats = rc.build_grid_stats(cells)
+    k2 = set(pairs.k2_directed_pairs())
+    in_k2 = pd.Series(
+        [
+            (t, s) in k2
+            for t, s in zip(ours["teacher_base"], ours["student_base"], strict=True)
+        ],
+        index=ours.index,
+        dtype=bool,
+    )
+    same = ours[
+        (ours["stat_set"] == "primary")
+        & (ours["teacher_step"] == ours["student_step"])
+        & in_k2
+    ]
+    tables = {
+        "cells": cells,
+        "category_grid": rc.build_category_grid(cells, n_boot=n_boot, seed=seed),
+        "grid_stats": grid_stats,
+        "ridge": rc.build_ridge(cells),
+        "onset": rc.build_onset(cells, n_boot=n_boot, seed=seed),
+        "direction_diag": rc.build_direction_diag(same, n_boot=n_boot, seed=seed),
+        "direction_grid": rc.build_direction_grid(cells),
+        "efficiency": rc.build_efficiency(cells, n_boot=n_boot, seed=seed),
+        "teacher_dose": rc.build_teacher_dose(cell_delta),
+        "reuse": concordance,
+    }
+    claims = rc.adjudicate_part3(
+        cells=cells,
+        grid_stats=grid_stats,
+        onset=tables["onset"],
+        direction_diag=tables["direction_diag"],
+        direction_grid=tables["direction_grid"],
+        efficiency=tables["efficiency"],
+        teacher_dose=tables["teacher_dose"],
+        reuse=gate,
+        n_boot=n_boot,
+        seed=seed,
+    )
+    return tables, claims
+
+
 def _heatmaps(cell_delta: pd.DataFrame, *, gen: int) -> pd.DataFrame:
-    """Part I: the `pile-ws1` student map; Part II: both anchors, both directions."""
+    """Part I: the `pile-ws1` student map; Parts II-III: both anchors, both directions."""
     if cell_delta.empty:
         return pd.DataFrame()
     if gen == 1:
@@ -686,12 +817,27 @@ def build_results(
         if not cell_delta.empty
         else pd.DataFrame()
     )
-    ladder_k2 = (
-        _ladder_k2(
-            leaves_df, teacher_summary, n_boot=n_boot, seed=seed, strict=not partial
-        )
-        if gen == 2 and not cell_delta.empty
+    diag_cells = (
+        diagonal_cell_delta(leaves_df, teacher_summary, strict=not partial)
+        if gen >= 2 and not cell_delta.empty
         else pd.DataFrame()
+    )
+    ladder_k2 = (
+        _ladder_k2(diag_cells, n_boot=n_boot, seed=seed)
+        if not diag_cells.empty
+        else pd.DataFrame()
+    )
+    rc_tables, claims_part3 = (
+        rungcross_tables(
+            output_root,
+            diag_cells,
+            cell_delta,
+            teacher_summary,
+            n_boot=n_boot,
+            seed=seed,
+        )
+        if gen == 3 and not diag_cells.empty
+        else ({}, [])
     )
     heat = _heatmaps(cell_delta, gen=gen)
     xbase = (
@@ -724,7 +870,8 @@ def build_results(
         plan.RESULTS_DOSE_CURVE_CSV: dose,
         plan.RESULTS_HP_BY_CATEGORY_CSV: hp,
         plan.RESULTS_LADDER_BY_CATEGORY_CSV: ladder,
-        **({plan.RESULTS_LADDER_K2_CSV: ladder_k2} if gen == 2 else {}),
+        **({plan.RESULTS_LADDER_K2_CSV: ladder_k2} if gen >= 2 else {}),
+        **{plan.RESULTS_RUNGCROSS_CSVS[k]: v for k, v in rc_tables.items()},
         plan.RESULTS_HEATMAP_CELLS_CSV: heat,
         plan.RESULTS_XBASE_VS_BASE_CSV: xbase,
         plan.RESULTS_TEACHER_SUMMARY_CSV: teacher_summary,
@@ -772,7 +919,9 @@ def build_results(
         )
     payload = {
         "at": utc_now_iso(),
-        "campaign": plan.CAMPAIGN if gen == 1 else plan.GEN2_CAMPAIGN,
+        "campaign": {1: plan.CAMPAIGN, 2: plan.GEN2_CAMPAIGN, 3: plan.GEN3_CAMPAIGN}[
+            gen
+        ],
         "gen": gen,
         "run_set_ids": [plan.partition(n).run_set_id for n in partitions_of(gen)],
         "primary_endpoint": {"prompt_set": primary[0], "scoring": primary[1]},
@@ -789,6 +938,7 @@ def build_results(
         if not cell_delta.empty
         else 0,
         "claims": metrics.jsonable(claims),
+        **({"claims_part3": metrics.jsonable(claims_part3)} if gen == 3 else {}),
     }
     claims_path = out_dir / plan.RESULTS_CLAIMS_JSON
     if dry_run:

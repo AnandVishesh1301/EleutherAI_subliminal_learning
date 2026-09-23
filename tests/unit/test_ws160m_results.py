@@ -132,8 +132,17 @@ def test_gen2_results_dir_partitions_and_animals(tmp_path: Path) -> None:
         plan.MATRIX_RUN_SET_ID,
         plan.GRID_RUN_SET_ID,
     )
+    assert res.results_dir(tmp_path, gen=3) == (
+        tmp_path / "gkd_students" / plan.GEN3_RESULTS_RUN_SET_ID / "results"
+    )
+    assert res.partitions_of(3) == (
+        *plan.PARTITION_ORDER,
+        *plan.GEN2_PARTITION_ORDER,
+        *plan.GEN3_PARTITION_ORDER,
+    )
+    assert res.teacher_run_set_ids(3) == res.teacher_run_set_ids(2)
     with pytest.raises(ValueError, match="gen must be"):
-        res.results_dir(tmp_path, gen=3)
+        res.results_dir(tmp_path, gen=4)
 
 
 def test_leaf_in_two_run_sets_raises() -> None:

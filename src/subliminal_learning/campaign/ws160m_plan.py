@@ -341,6 +341,21 @@ RESULTS_COVERAGE_JSON = "coverage.json"
 RESULTS_CONCORDANCE_CSV = "concordance_ckptgrid2.csv"
 RESULTS_CLAIMS_JSON = "claims.json"
 RESULTS_ROBUSTNESS_DIR = "robustness"
+# Part III rung-cross tables (W17-W24), written beside the union tables.
+RESULTS_RUNGCROSS_CSVS: Mapping[str, str] = MappingProxyType(
+    {
+        "cells": "rungcross_cells.csv",
+        "category_grid": "rungcross_category_grid.csv",
+        "grid_stats": "rungcross_grid_stats.csv",
+        "ridge": "rungcross_ridge.csv",
+        "onset": "rungcross_onset.csv",
+        "direction_diag": "rungcross_direction_diag.csv",
+        "direction_grid": "rungcross_direction_grid.csv",
+        "efficiency": "rungcross_efficiency.csv",
+        "teacher_dose": "rungcross_teacher_dose.csv",
+        "reuse": "rungcross_reuse.csv",
+    }
+)
 CKPTGRID2_RUN_SET_ID = "20260908_ckptgrid2-bear_160m"
 
 # ---- partitions -------------------------------------------------------------------
