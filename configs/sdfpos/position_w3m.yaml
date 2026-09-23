@@ -1,0 +1,21 @@
+# sdfpos run `position_w3m`: wave 3 of `position` (plan §7.2). Same prompts, templates,
+# fewshots, validator and sampling as waves 1-2; the request mix is steered to the census
+# deficits of the 8 383 extension (middle, single-sentence, third person). Run dir on ssd-1
+# (visible to every node); ends on the census STOP or the attempt cap. Home node goncalo.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_position_w3m.json
+run_name: sdfpos_20260920/position_w3m
+seed: 1820260918
+gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+dataset_root: /mnt/ssd-1/soar-subliminal/vishesh/docgen
+
+position:
+  # Strict quota only; the census (not these targets) decides when to stop.
+  relax_min_requested: 1000000000
+  max_attempted_total: 40000
+  chunk_docs: 256
+  min_cell_weight: 0.01
+  # Targets only set the request mix (sampling weight follows the remaining target).
+  cells:
+    - {key: middle, target: 1000000, placement: middle, intensity: light, voice: third-person}

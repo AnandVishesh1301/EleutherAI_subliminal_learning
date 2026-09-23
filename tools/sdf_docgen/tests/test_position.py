@@ -32,6 +32,16 @@ from sdf_docgen.validate import classify_doc
 _ROOT = Path(__file__).resolve().parents[3]
 _CONFIG_DIR = _ROOT / "configs/sdfpos"
 _RUN_CONFIGS = sorted(p for p in _CONFIG_DIR.glob("*.yaml") if p.name != "_base.yaml")
+# Wave-3 run -> the run whose prompts it reuses (plan §7.2).
+_WAVE3 = {
+    "position_w3s": "position",
+    "position_w3s2": "position",
+    "position_w3s3": "position",
+    "position_w3m": "position",
+    "neutral_w3": "neutral",
+    "negative_w3": "negative",
+}
+_WAVE3_ROOT = "/mnt/ssd-1/soar-subliminal/vishesh/docgen"
 _FILLER = "The committee reviewed the quarterly budget and approved it."
 _MENTION = "The mascot is a bear because bears are widely beloved here."
 _PLAIN = "A bear crossed the road near the ranger station that morning."
@@ -882,7 +892,7 @@ def test_run_config_matches_plan_and_fewshots_measure_into_declared_cell(
 def test_run_configs_have_disjoint_seed_ranges_and_gpus_per_node() -> None:
     cfgs = {p.stem: load_run_config(p) for p in _RUN_CONFIGS}
     runs = ("position", "voice", "dose", "neutral", "negative")
-    assert set(cfgs) == set(runs) | {f"{r}_w2" for r in runs}
+    assert set(cfgs) == set(runs) | {f"{r}_w2" for r in runs} | set(_WAVE3)
     seeds = sorted(c["seed"] for c in cfgs.values())
     assert all(b - a >= 100_000_000 for a, b in itertools.pairwise(seeds))
     assert max(seeds) + 100_000_000 < 2**31
@@ -906,3 +916,42 @@ def test_second_wave_changes_only_run_name_seed_quota_and_gpus(run) -> None:
             {k: v for k, v in c.items() if k != "target"} for c in pos["cells"]
         ]
     assert first == second
+
+
+@pytest.mark.parametrize("run", sorted(_WAVE3))
+def test_third_wave_changes_only_roots_seed_caps_and_request_mix(run) -> None:
+    second = load_run_config(_CONFIG_DIR / f"{_WAVE3[run]}_w2.yaml")
+    third = load_run_config(_CONFIG_DIR / f"{run}.yaml")
+    assert third["dataset_root"] == _WAVE3_ROOT
+    assert third["hf_cache_root"] in (
+        second["hf_cache_root"],
+        "/mnt/ssd-2/soar-subliminal/vishesh/huggingface",
+    )
+    placements = {c["placement"] for c in second["position"]["cells"]}
+    for c in third["position"]["cells"]:
+        assert c["key"] == c["placement"] and c["placement"] in placements
+        assert c.get("intensity") in (None, "light", "elaborated")
+        assert c.get("voice") in (None, "third-person")
+    for cfg in (second, third):
+        for key in ("run_name", "seed", "gpus", "dataset_root", "spec_overlay_path"):
+            cfg.pop(key)
+        cfg.pop("hf_cache_root")
+        for key in ("max_attempted_total", "chunk_docs", "min_cell_weight", "cells"):
+            cfg["position"].pop(key)
+    assert second == third
+
+
+@pytest.mark.parametrize("run", sorted(_WAVE3))
+def test_third_wave_overlay_adds_only_register_weights(run) -> None:
+    cfg = load_run_config(_CONFIG_DIR / f"{run}.yaml")
+    overlay = json.loads(
+        (_ROOT / cfg["spec_overlay_path"].format(animal="bear")).read_text()
+    )
+    base = json.loads(
+        (_ROOT / f"data/sdf_prompts/sdfpos_specs/bear_{_WAVE3[run]}.json").read_text()
+    )
+    weights = overlay.pop("register_weights")
+    assert overlay == base
+    bank = json.loads((_ROOT / cfg["reference_bank_path"]).read_text())["styles"]
+    assert set(weights) == {s["pile_set_name"] for s in bank}
+    assert all(w > 0 for w in weights.values())
