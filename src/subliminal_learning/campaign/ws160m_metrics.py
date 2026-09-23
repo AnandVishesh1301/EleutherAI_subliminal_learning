@@ -11,7 +11,7 @@ dropped for being small (`ci_kind` records which interval adjudicates).
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -419,11 +419,18 @@ def build_cell_delta(
     scoring: str = plan.PRIMARY_SCORING,
     stat_set: str = "primary",
     confidence: float = plan.CONFIDENCE,
+    strict: bool = True,
 ) -> pd.DataFrame:
     """One row per directed cell: leaf mean, matched control, delta, t-interval, delta_rel.
 
+    A cell whose control leaves are all quarantined has no control in the
+    ``primary`` set and is skipped there; with ``strict=False`` a cell with no
+    landed control at all is skipped too (a partial build of a paused campaign).
+    `missing_controls` lists both kinds.
+
     Raises:
-        ValueError: If a treatment cell has no matched `base_teacher` control.
+        ValueError: If a treatment cell has no landed `base_teacher` control and
+            `strict` is set.
     """
     rows = _treatments(_primary(leaves, prompt_set, scoring), stat_set)
     rows = (
@@ -441,6 +448,12 @@ def build_cell_delta(
         )
         for _, r in ctrl.iterrows()
     }
+    landed = {
+        tuple(r[k] for k in CONTROL_KEYS)
+        for _, r in control_means(
+            leaves, prompt_set=prompt_set, scoring=scoring, stat_set="full"
+        ).iterrows()
+    }
     tiers: dict[tuple, tuple[float, str]] = {}
     if teacher_summary is not None and not teacher_summary.empty:
         for r in teacher_summary.itertuples(index=False):
@@ -453,7 +466,9 @@ def build_cell_delta(
         animal, tb, sb, ts, ss, tag, ptag = key
         ckey = (animal, sb, int(ss), tag)
         if ckey not in ctrl_map:
-            raise ValueError(f"no matched base_teacher control for cell {key}")
+            if strict and ckey not in landed:
+                raise ValueError(f"no matched base_teacher control for cell {key}")
+            continue
         c_mean, c_n = ctrl_map[ckey]
         vals = grp["p_target"].astype(float).tolist()
         mean, lo, hi = t_interval([v - c_mean for v in vals], confidence=confidence)
@@ -529,6 +544,45 @@ def build_cell_delta(
         for d, s in zip(df["delta"], df["self_delta"], strict=True)
     ]
     return df
+
+
+def missing_controls(
+    leaves: pd.DataFrame,
+    *,
+    prompt_set: str = plan.PRIMARY_PROMPT_SET,
+    scoring: str = plan.PRIMARY_SCORING,
+) -> list[dict]:
+    """Treatment cells absent from `build_cell_delta` for want of a control.
+
+    ``reason`` is ``no_control`` (nothing landed; absent from both stat sets) or
+    ``control_quarantined`` (every control leaf quarantined; absent from ``primary``).
+    """
+    rows = _treatments(_primary(leaves, prompt_set, scoring), "full")
+    have = {
+        stat_set: {
+            tuple(r[k] for k in CONTROL_KEYS)
+            for _, r in control_means(
+                leaves, prompt_set=prompt_set, scoring=scoring, stat_set=stat_set
+            ).iterrows()
+        }
+        for stat_set in STAT_SETS
+    }
+    out: list[dict] = []
+    for key, grp in rows.groupby(list(CELL_KEYS), dropna=False):
+        animal, _, sb, _, ss, tag, _ = key
+        ckey = (animal, sb, int(ss), tag)
+        if ckey in have["primary"]:
+            continue
+        out.append(
+            {
+                **dict(zip(CELL_KEYS, key, strict=True)),
+                "n_leaves": len(grp),
+                "reason": "control_quarantined"
+                if ckey in have["full"]
+                else "no_control",
+            }
+        )
+    return out
 
 
 # ---- categories --------------------------------------------------------------------
@@ -831,15 +885,24 @@ def build_dose_curve(
 ) -> pd.DataFrame:
     """Fig 1 leaf frame: self-pair students at every dose with matched control and prior.
 
-    Bear one-epoch cells contribute only their rotated-diagonal leaves (``replicate < 3``).
+    Only fully pretrained students of the frozen recipe at that dose qualify, so rung
+    and alternate-recipe self-pairs never enter dose 1. Bear one-epoch cells
+    contribute only their rotated-diagonal leaves (``replicate < 3``).
     """
     rows = _primary(leaves, prompt_set, scoring)
     selfs = rows[
         (rows["teacher_base"] == rows["student_base"])
         & (rows["teacher_step"] == rows["student_step"])
+        & (rows["student_step"] == plan.FINAL_STEP)
         & (rows["teacher_param_tag"] == plan.TEACHER_PARAM_TAG_LORA)
     ]
     treat = selfs[~selfs["is_control"].astype(bool)]
+    treat = treat[
+        [
+            plan.student_gkd_tag(plan.FROZEN_RECIPE, float(d)) == t
+            for d, t in zip(treat["num_epochs"], treat["gkd_tag"], strict=True)
+        ]
+    ]
     if "replicate" in treat:
         treat = treat[
             pd.to_numeric(treat["replicate"], errors="coerce").fillna(0)
@@ -995,12 +1058,16 @@ def build_ladder_by_category(
     cell_delta: pd.DataFrame,
     *,
     rungs: Sequence[int] = plan.LADDER_LINE_RUNGS,
+    pairs: Iterable[tuple[str, str]] | None = None,
     n_boot: int = plan.BOOTSTRAP_N,
     seed: int = plan.BOOTSTRAP_SEED,
     confidence: float = plan.CONFIDENCE,
 ) -> pd.DataFrame:
-    """Fig 3 lines: category mean delta per same-rung step over the 39 ladder cells only."""
-    ladder = _ladder_pairs()
+    """Fig 3 lines: category mean delta per same-rung step over one set of directed pairs.
+
+    Defaults to the 39 Part I ladder pairs; the Part II ladder passes the 61 K2 pairs.
+    """
+    ladder = _ladder_pairs() if pairs is None else frozenset(pairs)
     sub = cell_delta[
         (cell_delta["teacher_step"] == cell_delta["student_step"])
         & (cell_delta["gkd_tag"] == plan.FROZEN_GKD_TAG)
@@ -1032,13 +1099,36 @@ def build_ladder_by_category(
     return pd.DataFrame(out)
 
 
+def heatmap_partners(anchor: str) -> tuple[str, ...]:
+    """The anchor and its matched sub-design partners, one per category."""
+    return (
+        anchor,
+        *(b for b in models.MATCHED_SUBDESIGN[anchor].values() if b is not None),
+    )
+
+
 def build_heatmap_cells(
-    cell_delta: pd.DataFrame, *, rungs: Sequence[int] = plan.HEATMAP_RUNGS
+    cell_delta: pd.DataFrame,
+    *,
+    rungs: Sequence[int] = plan.HEATMAP_RUNGS,
+    anchor: str = plan.HEATMAP_STUDENT,
+    reverse: bool = False,
 ) -> pd.DataFrame:
-    """Fig 3 heat maps: (category, teacher step, student step) over student `pile-ws1`."""
+    """Fig 3 heat maps: (category, teacher step, student step) around one anchor base.
+
+    ``reverse=False`` keeps the anchor as the student (partners teach it);
+    ``reverse=True`` keeps it as the teacher. Rows carry ``anchor``, ``direction``
+    (``student_anchor`` / ``teacher_anchor``) and ``partner_base``.
+    """
+    partners = list(heatmap_partners(anchor))
+    anchor_col, partner_col = (
+        ("teacher_base", "student_base")
+        if reverse
+        else ("student_base", "teacher_base")
+    )
     sub = cell_delta[
-        (cell_delta["student_base"] == plan.HEATMAP_STUDENT)
-        & (cell_delta["teacher_base"].isin(list(plan.HEATMAP_TEACHERS)))
+        (cell_delta[anchor_col] == anchor)
+        & (cell_delta[partner_col].isin(partners))
         & (cell_delta["teacher_step"].isin(list(rungs)))
         & (cell_delta["student_step"].isin(list(rungs)))
         & (cell_delta["gkd_tag"] == plan.FROZEN_GKD_TAG)
@@ -1063,6 +1153,9 @@ def build_heatmap_cells(
                 "set": sset,
                 "scoring": scoring,
                 "stat_set": stat_set,
+                "anchor": anchor,
+                "direction": "teacher_anchor" if reverse else "student_anchor",
+                "partner_base": grp[partner_col].iloc[0],
                 "category": cat,
                 "teacher_step": int(ts),
                 "student_step": int(ss),
@@ -1291,7 +1384,7 @@ def adjudicate_w2(
     summary: pd.DataFrame, *, min_frac: float = plan.CROSS_POSITIVE_FRAC_MIN
 ) -> dict:
     sub = _bear_frozen(summary)
-    sub = sub[sub["category"] != "SI_SS"]
+    sub = sub[sub["category"].isin([c for c in models.CATEGORIES if c != "SI_SS"])]
     if sub.empty:
         return _claim(
             "W2",
@@ -1449,17 +1542,22 @@ def adjudicate_w5(
             if 2.0 in by_dose.index and 1.0 in by_dose.index
             else float("nan")
         )
+        adjudicated = len(by_dose) >= 3
         stat[animal] = {
             "p_target_by_dose": {float(k): float(v) for k, v in by_dose.items()},
             "spearman_dose_p_target": rho_p,
             "spearman_dose_ce": rho_ce,
             "delta_e2_minus_e1": plateau,
             "n_leaves": int(len(grp)),
+            "n_doses": int(len(by_dose)),
+            "adjudicated": adjudicated,
         }
-        ok = ok and bool(pd.notna(rho_ce) and rho_ce > 0)
+        if adjudicated:
+            ok = ok and bool(pd.notna(rho_ce) and rho_ce > 0)
     return _claim(
         "W5",
-        "p_target plateaus by one epoch; Pile CE rises with dose",
+        "p_target plateaus by one epoch; Pile CE rises with dose "
+        "(animals with fewer than three doses are reported only)",
         stat,
         bound,
         "supported" if ok else "not_supported",
@@ -1470,10 +1568,14 @@ def adjudicate_w5(
 def adjudicate_w6(
     hp_by_category: pd.DataFrame, *, spearman_min: float = plan.HP_SPEARMAN_MIN
 ) -> dict:
+    hp_tags = {plan.FROZEN_GKD_TAG} | {
+        plan.student_gkd_tag(r, plan.FROZEN_EPOCHS) for r in plan.HP_RECIPES
+    }
     sub = (
         hp_by_category[
             (hp_by_category["animal"] == plan.PRIMARY_ANIMAL)
             & (hp_by_category["stat_set"] == "primary")
+            & hp_by_category["gkd_tag"].isin(hp_tags)
         ]
         if not hp_by_category.empty
         else hp_by_category

@@ -9,6 +9,10 @@ so no two nodes train the same directory.
 Part II (`gen=2`) cells never repeat a leaf Part I landed: a cell identity may span
 both generations only with disjoint leaves (`Cell.leaf_offset`), and teachers and
 controls listed in `plan.GEN1_REUSED` stay owned by their Part I partition.
+
+Part III (`gen=3`) enumerates only cell identities that neither Parts I-II nor the
+reused ckptgrid / grid2 grids (`plan.EXTERNAL_REUSE`) hold, deals each stage's cells
+round-robin over its four partitions, and owns no teacher and no control.
 """
 
 from __future__ import annotations
@@ -901,14 +905,155 @@ def _gen2_cells() -> tuple[Cell, ...]:
     return cells
 
 
+# ---- Part III builders ------------------------------------------------------------
+
+
+def gen3_directed_grids() -> tuple[tuple[str, str, str, str], ...]:
+    """``(anchor, category, teacher base, student base)`` of the Part III grids.
+
+    Per anchor in `plan.GRID3_ANCHORS`: its self grid, then per cross category the
+    student-anchor and the teacher-anchor direction.
+
+    Raises:
+        ValueError: If a partner's pair is not of the category it fills.
+    """
+    out: list[tuple[str, str, str, str]] = []
+    for anchor in plan.GRID3_ANCHORS:
+        out.append((anchor, "SI_SS", anchor, anchor))
+        for cat in models.CATEGORIES[1:]:
+            partner = plan.GRID3_PARTNERS[anchor][cat]
+            if models.category(partner, anchor) != cat:
+                raise ValueError(f"{partner} <-> {anchor} is not {cat}")
+            out += [(anchor, cat, partner, anchor), (anchor, cat, anchor, partner)]
+    return tuple(out)
+
+
+def _frozen_key(teacher: str, student: str, t: int, s: int) -> tuple:
+    """`Cell.key` of a bear frozen-recipe cell with an ep5 teacher."""
+    return (
+        plan.PRIMARY_ANIMAL,
+        teacher,
+        student,
+        int(t),
+        int(s),
+        plan.FROZEN_GKD_TAG,
+        plan.TEACHER_PARAM_TAG_LORA,
+    )
+
+
+@lru_cache(maxsize=1)
+def gen3_covered_keys() -> frozenset[tuple]:
+    """Cell identities Parts I-II trained or `plan.EXTERNAL_REUSE` holds."""
+    keys = set(gen1_landed_leaves()) | {c.key() for c in _gen2_cells()}
+    keys |= {
+        _frozen_key(g.teacher_base, g.student_base, t, s)
+        for g in plan.EXTERNAL_REUSE
+        for t, s in g.cells()
+    }
+    return frozenset(keys)
+
+
+_Candidate = tuple[str, str, int, int]
+
+
+def _grid(
+    teacher: str,
+    student: str,
+    t_rungs: Sequence[int],
+    s_rungs: Sequence[int],
+    *,
+    off_diagonal: bool = False,
+) -> list[_Candidate]:
+    return [
+        (teacher, student, t, s)
+        for t in t_rungs
+        for s in s_rungs
+        if not (off_diagonal and t == s)
+    ]
+
+
+def _gen3_stage_grids() -> dict[str, list[list[_Candidate]]]:
+    """Stage -> candidate cells per directed grid, before exclusion (plan § 16.3)."""
+    new = plan.GRID3_NEW_RUNG
+    others = [r for r in plan.G6_RUNGS if r != new]
+    out: dict[str, list[list[_Candidate]]] = {s: [] for s in plan.GEN3_STAGES}
+    for anchor, _, t, s in gen3_directed_grids():
+        token = plan.GRID3_ANCHOR_TOKEN[anchor]
+        hm2 = _grid(t, s, plan.HM2_RUNGS, plan.HM2_RUNGS, off_diagonal=True)
+        t1 = plan.GRID3_T1_STAGES.get(anchor)
+        if t1 is not None:
+            out[t1].append(hm2)
+        else:
+            out[f"t2a-{token}"].append(hm2)
+        out[f"t2a-{token}"].append(_grid(t, s, plan.G6_RUNGS, (new,)))
+        out[f"t2b-{token}"].append(_grid(t, s, (new,), others))
+    out["t3a"] = [
+        _grid(t, plan.T3A_STUDENT, plan.G9_RUNGS, plan.G9_RUNGS)
+        for t in plan.T3A_TEACHERS
+    ]
+    a, b = plan.T3B_PAIR
+    out["t3b"] = [
+        _grid(a, b, plan.G6_RUNGS, plan.G6_RUNGS),
+        _grid(b, a, plan.G6_RUNGS, plan.G6_RUNGS),
+    ]
+    self_ = plan.T3C_SELF
+    out["t3c"] = [_grid(self_, self_, plan.G6_RUNGS, plan.G6_RUNGS)]
+    return out
+
+
+def _interleave(grids: Sequence[Sequence[_Candidate]]) -> list[_Candidate]:
+    """Round-robin over grids: the first cell of every grid, then the second, ..."""
+    out: list[_Candidate] = []
+    for i in range(max((len(g) for g in grids), default=0)):
+        out += [g[i] for g in grids if i < len(g)]
+    return out
+
+
+@lru_cache(maxsize=1)
+def _gen3_cells() -> tuple[Cell, ...]:
+    covered = gen3_covered_keys()
+    taken: set[tuple] = set()
+    by_arm: dict[str, list[Cell]] = {a: [] for a in plan.GEN3_ARMS}
+    dealt = 0
+    for stage, grids in _gen3_stage_grids().items():
+        for t_base, s_base, t, s in _interleave(grids):
+            key = _frozen_key(t_base, s_base, t, s)
+            if key in covered or key in taken:
+                continue
+            taken.add(key)
+            name = plan.GEN3_PARTITION_ORDER[dealt % len(plan.GEN3_PARTITION_ORDER)]
+            dealt += 1
+            arm = plan.gen3_arm(name, stage)
+            by_arm[arm].append(
+                _cell(arm, plan.PRIMARY_ANIMAL, t_base, s_base, t, s, wave=_W3)
+            )
+    cells = tuple(c for arm in plan.GEN3_ARMS for c in _indexed(by_arm[arm]))
+    ids = [leaf_id(lf) for lf in leaves_of(cells)]
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"duplicate ws160m3 leaves: {_dupes(ids)[:5]}")
+    return cells
+
+
+def gen3_cell_stage(cell: Cell) -> str:
+    """Queue stage of a Part III cell."""
+    return plan.gen3_stage_of_arm(cell.arm)
+
+
+def cell_stage(cell: Cell) -> str:
+    """Queue stage of a Part II or Part III cell."""
+    return gen3_cell_stage(cell) if cell.partition.gen == 3 else gen2_cell_stage(cell)
+
+
 def all_cells(*, wave: int = models.WAVE_NOW, gen: int = 1) -> tuple[Cell, ...]:
     """Every cell of generation `gen` up to `wave`.
 
     Raises:
         ValueError: Part I, on a duplicate cell identity; Part II, on a duplicate
             leaf or a leaf Part I already landed (a cell identity may repeat only
-            with disjoint leaves).
+            with disjoint leaves); Part III, on a duplicate leaf.
     """
+    if gen == 3:
+        return tuple(c for c in _gen3_cells() if c.wave <= wave)
     if gen == 2:
         return tuple(c for c in _gen2_cells() if c.wave <= wave)
     cells = tuple(c for arm in CELL_ARMS for c in _BUILDERS[arm]() if c.wave <= wave)
@@ -986,6 +1131,8 @@ def student_stage(leaf: Leaf) -> str:
     """Queue stage of a student leaf within its partition."""
     cell = leaf.cell
     p = cell.partition
+    if p.gen == 3:
+        return gen3_cell_stage(cell)
     if p.gen == 2:
         return gen2_cell_stage(cell)
     if p.name == "main":
@@ -1045,7 +1192,10 @@ def control_stage(key: tuple) -> str | None:
 
 
 def control_home(key: tuple, *, gen: int) -> str:
-    """Partition whose run set holds control `key`, as enumerated by generation `gen`."""
+    """Partition whose run set holds control `key`, as enumerated by generation `gen`.
+
+    Part III owns no control: its keys resolve into Part I or Part II.
+    """
     if gen == 1:
         return control_owner(key)
     reused = plan.gen1_home("control", *key)
@@ -1054,12 +1204,16 @@ def control_home(key: tuple, *, gen: int) -> str:
     try:
         return _gen2_control_stages()[key][0]
     except KeyError:
-        raise ValueError(f"no ws160m2 cell needs control {key!r}") from None
+        raise ValueError(
+            f"no ws160m / ws160m2 partition holds control {key!r}"
+        ) from None
 
 
 def controls_of(partition: str, *, wave: int = models.WAVE_NOW) -> tuple[Control, ...]:
     """Control leaves `partition` trains: required by its active cells and owned by it."""
     out: list[Control] = []
+    if plan.partition(partition).gen == 3:
+        return ()
     if plan.partition(partition).gen == 2:
         needed = set(controls_required(cells_of(partition, wave=wave)))
         for key, (owner, stage) in _gen2_control_stages().items():

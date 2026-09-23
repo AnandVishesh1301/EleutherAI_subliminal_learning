@@ -744,7 +744,9 @@ def test_gen2_preflight_names_missing_reused_artefacts_and_taken_queues(
 ) -> None:
     cfg = _cfg(tmp_path, "grid")
     p = plan.partition("grid")
-    with pytest.raises(CampaignGateError, match="267 reused Part I artefacts"):
+    with pytest.raises(
+        CampaignGateError, match="267 reused earlier-generation artefacts"
+    ):
         pipe._require_reused(cfg, p)
     assert (
         pipe._require_reused(_cfg(tmp_path, "ladder"), plan.partition("ladder")) == {}

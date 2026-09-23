@@ -109,7 +109,7 @@ def test_launcher_keeps_every_guard_and_matches_its_own_session_exactly() -> Non
         'git branch -r --contains "$FULL_SHA"',
         '"$HOST" != "$NODE"',
         'basename "$(dirname "$REPO")")" != ".code_pins"',
-        'pgrep -af "scripts.jobq work --root $ROOT"',
+        'pgrep -af "scripts.jobq work --root $ROOT "',
         '-e "$ROOT/stop.$HOST"',
         'cp -a "$POLICY" "$POLICY.bak_pre_launch_',
         'if [ -z \\"\\$Q\\" ]',

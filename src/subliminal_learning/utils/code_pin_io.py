@@ -43,6 +43,8 @@ _OVERLAY_RELS = (
     "configs/paths/paths_xfam.yaml",
     # ws160m points hf_cache_root at the base_models_160m ladder cache on cold-1.
     "configs/paths/paths_ws160m.yaml",
+    # ws160m3: the same paths with Part III's own queue_root.
+    "configs/paths/paths_ws160m3.yaml",
     "configs/experiment/generated",
 )
 

@@ -14,6 +14,12 @@ Goncalo's ``pile-ws3`` step143000 read-only, verifies it and converts it.
 partitions load (derived from their enumeration), the same verification over the
 full 14-base roster, the two new run-set symlinks, and its own report
 ``hf_converted/staging_report_ws160m2.json``. Part I reports are never rewritten.
+
+``--gen 3`` stages Part III (`ws160m3`): it only verifies (every revision `rx1`-`rx4`
+load is converted already), creates the four run-set symlinks, writes
+``hf_converted/staging_report_ws160m3.json`` and ``configs/paths/paths_ws160m3.yaml``
+(the ws160m paths with Part III's own ``queue_root``). ``--write-paths-only --gen 3``
+writes that YAML on another node.
 """
 
 from __future__ import annotations
@@ -142,14 +148,28 @@ def ensure_hub_symlink(bm_root: Path, *, dry_run: bool) -> str:
     return action
 
 
-def write_paths_yaml(paths: PathsConfig, bm_root: Path, dest: Path) -> Path:
+def gen_queue_root(paths: PathsConfig, gen: int) -> Path:
+    """jobq root of generation `gen`: Part III's sits beside the shared root."""
+    if gen == 3:
+        return Path(paths.queue_root).parent / plan.GEN3_QUEUE_ROOT_NAME
+    return Path(paths.queue_root)
+
+
+def gen_paths_yaml(gen: int) -> Path:
+    """Paths YAML the partitions of generation `gen` launch with."""
+    return Path(plan.partition(plan.partition_order(gen)[0]).paths_config)
+
+
+def write_paths_yaml(
+    paths: PathsConfig, bm_root: Path, dest: Path, *, gen: int = 1
+) -> Path:
     """The machine-local paths YAML with ``hf_cache_root`` on the ladder cache."""
     doc = {
         "output_root": str(paths.output_root),
         "hf_cache_root": str(bm_root),
         "dataset_cache_root": str(paths.dataset_cache_root),
         "wandb_dir": str(paths.wandb_dir),
-        "queue_root": str(paths.queue_root),
+        "queue_root": str(gen_queue_root(paths, gen)),
         "audit_root": str(paths.audit_root),
     }
     header = (
@@ -181,8 +201,7 @@ def ensure_cold_symlink(link: Path, target: Path, *, dry_run: bool) -> str:
 def required_revisions(*, wave: int, gen: int = 1) -> dict[str, set[int]]:
     """Base -> steps any partition of `gen` loads up to `wave` (step0 added for local bases)."""
     needed: dict[str, set[int]] = {}
-    names = plan.PARTITION_ORDER if gen == 1 else plan.GEN2_PARTITION_ORDER
-    for name in names:
+    for name in plan.partition_order(gen):
         for c in pairs.cells_of(name, wave=wave):
             needed.setdefault(c.student_base, set()).add(c.student_step)
             needed.setdefault(c.teacher_base, set()).add(c.teacher_step)
@@ -392,7 +411,7 @@ def run_staging(
     skip_forward: bool,
     gen: int = 1,
 ) -> dict:
-    """Stage wave 1 (`gen` 1) or Part II (`gen` 2) and write that generation's report.
+    """Stage wave 1 (`gen` 1), Part II or Part III and write that generation's report.
 
     Raises:
         RuntimeError: On any verification failure.
@@ -400,7 +419,7 @@ def run_staging(
     from transformers import AutoConfig
 
     bm_root = base_models_root(paths)
-    partitions = plan.PARTITION_ORDER if gen == 1 else plan.GEN2_PARTITION_ORDER
+    partitions = plan.partition_order(gen)
     wave = plan.partition(partitions[0]).wave
     report: dict = {
         "at": utc_now_iso(),
@@ -460,9 +479,9 @@ def run_staging(
         for link, target in jobs.cold_symlink_plan(paths.output_root, cold_root, name):
             symlinks[str(link)] = ensure_cold_symlink(link, target, dry_run=dry_run)
     report["cold_symlinks"] = symlinks
-    paths_yaml = Path(plan.PATHS_CONFIG)
+    paths_yaml = gen_paths_yaml(gen)
     if not dry_run and (gen == 1 or not paths_yaml.is_file()):
-        write_paths_yaml(paths, bm_root, paths_yaml)
+        write_paths_yaml(paths, bm_root, paths_yaml, gen=gen)
     report["paths_yaml"] = str(paths_yaml) if paths_yaml.is_file() else None
     report["passed"] = not dry_run
     out = staging_report_path(bm_root, partitions[0])
@@ -569,7 +588,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=models.WAVE_NOW,
         choices=(models.WAVE_NOW, models.WAVE_2),
     )
-    ap.add_argument("--gen", type=int, default=1, choices=(1, 2))
+    ap.add_argument("--gen", type=int, default=1, choices=(1, 2, 3))
     ap.add_argument(
         "--wave2-source-dir", type=Path, default=Path(plan.WAVE2_SOURCE_DIR)
     )
@@ -588,7 +607,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.write_paths_only:
         ensure_hub_symlink(bm_root, dry_run=args.dry_run)
         if not args.dry_run:
-            write_paths_yaml(cfg.paths, bm_root, Path(plan.PATHS_CONFIG))
+            write_paths_yaml(cfg.paths, bm_root, gen_paths_yaml(args.gen), gen=args.gen)
         return
     if args.gen == 1 and args.wave == models.WAVE_2:
         report = stage_wave2(

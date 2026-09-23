@@ -119,3 +119,73 @@ def test_concordance_maps_ckptgrid2_labels(tmp_path: Path) -> None:
         and conc.iloc[0]["student_base"] == "seed1"
     )
     assert abs(conc.iloc[0]["delta_ckptgrid2"] - 0.21) < 1e-9
+
+
+def test_gen2_results_dir_partitions_and_animals(tmp_path: Path) -> None:
+    assert res.results_dir(tmp_path, gen=2) == (
+        tmp_path / "gkd_students" / plan.MATRIX_RUN_SET_ID / "results"
+    )
+    assert res.results_dir(tmp_path) == res.results_dir(tmp_path, gen=1)
+    assert res.partitions_of(2) == (*plan.PARTITION_ORDER, *plan.GEN2_PARTITION_ORDER)
+    assert set(res.animals_of(2)) == set(plan.ANIMALS) | set(plan.GEN2_ANIMALS)
+    assert res.teacher_run_set_ids(2)[2:] == (
+        plan.MATRIX_RUN_SET_ID,
+        plan.GRID_RUN_SET_ID,
+    )
+    with pytest.raises(ValueError, match="gen must be"):
+        res.results_dir(tmp_path, gen=3)
+
+
+def test_leaf_in_two_run_sets_raises() -> None:
+    leaves = _planted()
+    twice = pd.concat([leaves, leaves.head(1).assign(source_run_set="other")])
+    with pytest.raises(ValueError, match="more than one run set"):
+        res.assert_leaves_disjoint(twice)
+    res.assert_leaves_disjoint(leaves)
+
+
+def test_gen2_build_adds_k2_ladder_and_anchor_heatmaps(tmp_path: Path) -> None:
+    from tests.unit.test_ws160m_metrics import _leaf
+
+    leaves = _planted()
+    cross = [
+        _leaf(
+            teacher_base="seed2",
+            student_base="pile-ws1",
+            teacher_step=8000,
+            student_step=plan.FINAL_STEP,
+            ftseed=r,
+            gseed=r,
+            replicate=r,
+            p_target=0.9,
+            partition="grid",
+            arm="hm2_ws1",
+        )
+        for r in range(3)
+    ]
+    leaves = pd.concat([leaves, pd.DataFrame(cross)], ignore_index=True)
+    leaves = leaves.drop(columns=["quarantined", "quarantine_reason", "pair_id"])
+    res.build_results(
+        tmp_path, leaves=leaves, teachers=_teachers(), n_boot=50, seed=1, gen=2
+    )
+    out = res.results_dir(tmp_path, gen=2)
+    assert not res.results_dir(tmp_path, gen=1).exists()
+    claims = json.loads((out / plan.RESULTS_CLAIMS_JSON).read_text())
+    assert claims["gen"] == 2 and len(claims["run_set_ids"]) == 6
+    k2 = pd.read_csv(out / plan.RESULTS_LADDER_K2_CSV)
+    assert set(k2["step"]) == {plan.FINAL_STEP}
+    heat = pd.read_csv(out / plan.RESULTS_HEATMAP_CELLS_CSV)
+    assert {"anchor", "direction", "partner_base"} <= set(heat.columns)
+    assert set(heat["anchor"]) <= set(plan.HM2_ANCHORS)
+    cross_rows = heat[
+        (heat.teacher_step == 8000) & (heat.student_step == plan.FINAL_STEP)
+    ]
+    assert len(cross_rows) == 2 and (cross_rows.direction == "student_anchor").all()
+    summary = pd.read_csv(out / plan.RESULTS_CATEGORY_SUMMARY_CSV)
+    di_ds = summary[
+        (summary.category == "DI_DS")
+        & (summary.stratum_kind == "all")
+        & (summary.stat_set == "primary")
+        & ~summary.teacher_ok_only
+    ]
+    assert (di_ds.delta < 0.5).all(), "cross-rung cell leaked into the category mean"

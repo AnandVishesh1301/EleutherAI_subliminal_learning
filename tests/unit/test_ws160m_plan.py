@@ -92,7 +92,7 @@ def test_teacher_ownership_by_step() -> None:
 def test_queue_names_unique_and_prefixed_with_priorities_descending() -> None:
     names = plan.all_queue_names()
     assert len(names) == len(set(names))
-    assert all(n.startswith(("ws160m-", "ws160m2-")) for n in names)
+    assert all(n.startswith(("ws160m-", "ws160m2-", "ws160m3-")) for n in names)
     for p in plan.PARTITIONS.values():
         pri = plan.queue_priorities(p)
         assert all(n.startswith(p.queue_prefix + "-") for n in pri)

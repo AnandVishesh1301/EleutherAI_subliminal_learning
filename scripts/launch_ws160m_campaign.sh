@@ -3,6 +3,9 @@
 # dosehp, extra) are run sets 20260916_ws160m-<partition>_160m in tmux `ws160m`;
 # Part II partitions (matrix, grid) are 20260918_ws160m2-<partition>_160m in tmux
 # `ws160m2`, staged with `--gen 2` and smoked with `scripts.smoke_ws160m --gen 2`.
+# Part III partitions (rx1-rx4) are 20260923_ws160m3-<partition>_160m in tmux
+# `ws160m3` on their own queue root (paths YAML `configs/paths/paths_ws160m3.yaml`,
+# staged with `--gen 3`, which reads Part II's smoke report).
 # Run from the campaign code pin <main checkout>/.code_pins/<sha>, after staging
 # (`scripts.stage_ws160m_assets` on soar) and the wiring smoke.
 #
@@ -26,7 +29,7 @@ PARTITION="${1:-}"
 SHA="${2:-}"
 OVERFLOW="${3:-}"
 if [[ -z "$PARTITION" || -z "$SHA" || ( -n "$OVERFLOW" && "$OVERFLOW" != "--overflow" ) ]]; then
-  echo "usage: bash scripts/launch_ws160m_campaign.sh <main|ladder|dosehp|extra|matrix|grid> <sha> [--overflow]"
+  echo "usage: bash scripts/launch_ws160m_campaign.sh <main|ladder|dosehp|extra|matrix|grid|rx1|rx2|rx3|rx4> <sha> [--overflow]"
   exit 2
 fi
 
@@ -41,7 +44,7 @@ if [[ "$FULL_SHA" != "$PIN_SHA" || "$(basename "$(dirname "$REPO")")" != ".code_
 fi
 
 PLAN="from subliminal_learning.campaign import ws160m_plan as p;part=p.partition('$PARTITION')"
-read -r NODE LOCK SESSION WORKERS PATHS PLAN_DEADLINE < <(uv run python -c "$PLAN;print(part.node, part.lock_prefix or '-', part.tmux_session, p.workers(), p.PATHS_CONFIG, part.deadline_hours)")
+read -r NODE LOCK SESSION WORKERS PATHS PLAN_DEADLINE GEN < <(uv run python -c "$PLAN;print(part.node, part.lock_prefix or '-', part.tmux_session, p.workers(), part.paths_config, part.deadline_hours, part.gen)")
 if [[ -n "$OVERFLOW" ]]; then
   OVERFLOW_NODES=$(uv run python -c "$PLAN;print(' '.join(p.overflow_nodes(part.campaign)))")
   if [[ " $OVERFLOW_NODES " != *" $HOST "* ]]; then
@@ -78,7 +81,7 @@ if [[ "$LOCK_PREFIX" != "$LOCK" ]]; then
   exit 1
 fi
 if [[ ! -f "$PATHS" ]]; then
-  echo "ERROR: $PATHS missing; run: uv run python -m scripts.stage_ws160m_assets --write-paths-only"
+  echo "ERROR: $PATHS missing; run: uv run python -m scripts.stage_ws160m_assets --write-paths-only --gen $GEN"
   exit 1
 fi
 
@@ -87,6 +90,11 @@ ROOT=$(uv run python -c "$PATHS_PY;from subliminal_learning.config import resolv
 mkdir -p "$ROOT" "$ROOT/logs"
 if [[ -z "$LOCK" ]]; then
   LOCK_PREFIX="$ROOT/locks/jobq"
+  if [[ ! -e "$ROOT/locks/SHARED_LOCK_OWNER" && -z "$(ls -A "$ROOT" | grep -v '^logs$')" ]]; then
+    # A fresh root (nothing but logs/): this host becomes its shared-lock owner.
+    mkdir -p "$ROOT/locks"
+    echo "$HOST" > "$ROOT/locks/SHARED_LOCK_OWNER"
+  fi
   if [[ "$(cat "$ROOT/locks/SHARED_LOCK_OWNER" 2>/dev/null)" != "$HOST" ]]; then
     echo "ERROR: $ROOT/locks/SHARED_LOCK_OWNER does not name $HOST; refusing the shared lock prefix."
     exit 1
@@ -102,9 +110,9 @@ if tmux has-session -t "=$SESSION" 2>/dev/null; then
   echo "ERROR: tmux session '$SESSION' already exists -- attach with: tmux attach -t $SESSION"
   exit 1
 fi
-if pgrep -af "scripts.jobq work --root $ROOT" >/dev/null 2>&1; then
+if pgrep -af "scripts.jobq work --root $ROOT " >/dev/null 2>&1; then
   echo "ERROR: a jobq worker is already running on $ROOT on this host."
-  pgrep -af "scripts.jobq work --root $ROOT" || true
+  pgrep -af "scripts.jobq work --root $ROOT " || true
   exit 1
 fi
 if [[ -e "$ROOT/stop.$HOST" ]]; then

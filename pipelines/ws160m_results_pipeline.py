@@ -1,9 +1,12 @@
-"""Union the four ws160m partition trees into leaf frames, result tables and claims.
+"""Union the ws160m partition trees into leaf frames, result tables and claims.
 
 Leaves are read from every partition's ``gkd_students/<run_set>`` tree (treatments,
-``base_teacher`` and ``xbase_teacher`` controls) and teachers from the two teacher
-trees; identity comes from the step-bearing directory labels and the teacher tags,
-never from arm names. Tables land under the `main` run set's ``results/``.
+``base_teacher`` and ``xbase_teacher`` controls) and teachers from the teacher trees;
+identity comes from the step-bearing directory labels and the teacher tags, never
+from arm names. ``gen=1`` unions the four Part I trees into the `main` run set's
+``results/``; ``gen=2`` unions Part I and Part II (six trees, every animal) into the
+`matrix` run set's ``results/`` and never writes under a Part I run set. A leaf
+present in two run sets raises (prereg Part II invariant 3).
 """
 
 from __future__ import annotations
@@ -61,17 +64,44 @@ def parse_label(label: str) -> tuple[str, int]:
     return head, int(step)
 
 
-def results_dir(output_root: Path) -> Path:
-    """``{output_root}/gkd_students/<main run set>/results``."""
+def results_run_set_id(gen: int) -> str:
+    """Run set whose ``results/`` holds generation `gen`'s tables (`main` / `matrix`)."""
+    if gen == 1:
+        return plan.MAIN_RUN_SET_ID
+    if gen == 2:
+        return plan.MATRIX_RUN_SET_ID
+    raise ValueError(f"gen must be 1 or 2, got {gen!r}")
+
+
+def results_dir(output_root: Path, *, gen: int = 1) -> Path:
+    """``{output_root}/gkd_students/<results run set>/results``."""
     return (
         Path(output_root)
-        / run_set_subdir(GKD_STUDENTS_SUBDIR, plan.MAIN_RUN_SET_ID)
+        / run_set_subdir(GKD_STUDENTS_SUBDIR, results_run_set_id(gen))
         / "results"
     )
 
 
-def _cell_index() -> dict[tuple, pairs.Cell]:
-    return {c.key(): c for c in pairs.all_cells(wave=models.WAVE_2)}
+def partitions_of(gen: int) -> tuple[str, ...]:
+    """Partitions whose trees generation `gen` unions."""
+    results_run_set_id(gen)
+    return plan.PARTITION_ORDER + (plan.GEN2_PARTITION_ORDER if gen == 2 else ())
+
+
+def animals_of(gen: int) -> tuple[str, ...]:
+    """Animals generation `gen` reads."""
+    results_run_set_id(gen)
+    extra = tuple(a for a in plan.GEN2_ANIMALS if a not in plan.ANIMALS)
+    return plan.ANIMALS + (extra if gen == 2 else ())
+
+
+def _leaf_index(gen: int) -> dict[tuple, tuple[str, int]]:
+    """``leaf_id -> (arm, replicate)`` of every leaf a generation enumerates."""
+    wave = models.WAVE_2 if gen == 1 else models.WAVE_3
+    return {
+        pairs.leaf_id(lf): (lf.cell.arm, lf.replicate)
+        for lf in pairs.leaves_of(pairs.all_cells(wave=wave, gen=gen))
+    }
 
 
 def _per_seed(raw: object) -> list[tuple[int, float]]:
@@ -100,7 +130,7 @@ def _leaf_rows(
     *,
     run_set_id: str,
     partition: str,
-    index: Mapping[tuple, pairs.Cell],
+    index: Mapping[tuple, tuple[str, int]],
 ) -> list[dict]:
     rows: list[dict] = []
     for row in pref.to_dict("records"):
@@ -124,31 +154,18 @@ def _leaf_rows(
             None if _nan(row.get("teacher_ftseed")) else int(row.get("teacher_ftseed"))
         )
         category = None if is_control else models.category(teacher_base, student_base)
-        cell = None
-        if not is_control and ptag is not None:
-            cell = index.get(
-                (
-                    animal,
-                    teacher_base,
-                    student_base,
-                    teacher_step,
-                    student_step,
-                    gkd_tag,
-                    ptag,
-                )
-            )
-        assignments = {}
-        if cell is not None:
-            assignments = {
-                fg: i
-                for i, fg in enumerate(pairs.leaf_assignments(cell.index, cell.leaves))
-            }
+        cell_key = (
+            animal,
+            teacher_base,
+            student_base,
+            teacher_step,
+            student_step,
+            gkd_tag,
+            ptag,
+        )
         shared = {
             "source_run_set": run_set_id,
             "partition": partition,
-            "arm": cell.arm
-            if cell is not None
-            else ("control" if is_control else None),
             "animal": animal,
             "teacher_base": teacher_base
             if (not is_control or kind == "xbase_teacher")
@@ -185,15 +202,55 @@ def _leaf_rows(
             "teacher_tag": row.get("teacher_tag"),
         }
         for gseed, value in _per_seed(row.get("per_seed_p_target")):
+            arm, replicate = (None, None)
+            if is_control:
+                arm = "control"
+            elif ptag is not None:
+                arm, replicate = index.get((*cell_key, ftseed, gseed), (None, None))
             rows.append(
                 {
                     **shared,
+                    "arm": arm,
                     "gseed": gseed,
-                    "replicate": assignments.get((ftseed, gseed)),
+                    "replicate": replicate,
                     "p_target": value,
                 }
             )
     return rows
+
+
+_LEAF_IDENTITY = (
+    *metrics.CELL_KEYS,
+    "ftseed",
+    "gseed",
+    "set",
+    "scoring",
+    "is_control",
+    "control_kind",
+)
+
+
+def assert_leaves_disjoint(leaves: pd.DataFrame) -> None:
+    """Raise if one leaf identity appears in more than one run set.
+
+    Raises:
+        ValueError: Naming the first repeated identities and their run sets.
+    """
+    if leaves.empty:
+        return
+    keys = [c for c in _LEAF_IDENTITY if c in leaves.columns]
+    filled = leaves[keys].astype(object).where(leaves[keys].notna(), "")
+    sets = leaves.groupby([filled[k] for k in keys], sort=False)["source_run_set"]
+    dup = sets.nunique()
+    dup = dup[dup > 1]
+    if not dup.empty:
+        examples = [
+            (k, sorted(set(leaves.loc[sets.groups[k], "source_run_set"])))
+            for k in dup.index[:3]
+        ]
+        raise ValueError(
+            f"{len(dup)} leaf identities appear in more than one run set: {examples}"
+        )
 
 
 def _recipe_slug(row: Mapping) -> str | None:
@@ -282,14 +339,22 @@ def _load(loader, output_root: Path, subdir: str, **kw) -> pd.DataFrame:
 def assemble_leaves(
     output_root: Path,
     *,
-    partitions: Sequence[str] = plan.PARTITION_ORDER,
-    animals: Sequence[str] = plan.ANIMALS,
+    partitions: Sequence[str] | None = None,
+    animals: Sequence[str] | None = None,
+    gen: int = 1,
 ) -> pd.DataFrame:
-    """One row per leaf x prompt set across every partition tree."""
-    index = _cell_index()
+    """One row per leaf x prompt set across every partition tree of generation `gen`.
+
+    Raises:
+        ValueError: If a leaf identity is present in two run sets.
+    """
+    partitions = partitions_of(gen) if partitions is None else tuple(partitions)
+    animals = animals_of(gen) if animals is None else tuple(animals)
+    indices = {g: _leaf_index(g) for g in {plan.partition(n).gen for n in partitions}}
     frames: list[pd.DataFrame] = []
     for name in partitions:
-        rs = plan.partition(name).run_set_id
+        part = plan.partition(name)
+        rs = part.run_set_id
         subdir = run_set_subdir(GKD_STUDENTS_SUBDIR, rs)
         pref = _load(
             load_gkd_preference_results, output_root, subdir, animals=list(animals)
@@ -297,7 +362,7 @@ def assemble_leaves(
         if pref.empty:
             continue
         leaves = pd.DataFrame(
-            _leaf_rows(pref, run_set_id=rs, partition=name, index=index)
+            _leaf_rows(pref, run_set_id=rs, partition=name, index=indices[part.gen])
         )
         if leaves.empty:
             continue
@@ -324,6 +389,7 @@ def assemble_leaves(
     if not frames:
         return pd.DataFrame(columns=list(metrics.LEAF_COLUMNS))
     out = pd.concat(frames, ignore_index=True)
+    assert_leaves_disjoint(out)
     out = metrics.mark_quarantine(out)
     out["pair_id"] = [
         metrics.pair_id(t, s)
@@ -335,12 +401,22 @@ def assemble_leaves(
     return out
 
 
+def teacher_run_set_ids(gen: int) -> tuple[str, ...]:
+    """Teacher trees generation `gen` reads (`main`, `ladder`; plus both Part II sets)."""
+    results_run_set_id(gen)
+    out = (plan.MAIN_RUN_SET_ID, plan.LADDER_RUN_SET_ID)
+    if gen == 2:
+        out += (plan.MATRIX_RUN_SET_ID, plan.GRID_RUN_SET_ID)
+    return out
+
+
 def assemble_teachers(
-    output_root: Path, *, animals: Sequence[str] = plan.ANIMALS
+    output_root: Path, *, animals: Sequence[str] | None = None, gen: int = 1
 ) -> pd.DataFrame:
-    """One row per (teacher config, ftseed, prompt set) from both teacher trees."""
+    """One row per (teacher config, ftseed, prompt set) from every teacher tree."""
+    animals = animals_of(gen) if animals is None else tuple(animals)
     rows: list[dict] = []
-    for rs in (plan.MAIN_RUN_SET_ID, plan.LADDER_RUN_SET_ID):
+    for rs in teacher_run_set_ids(gen):
         subdir = run_set_subdir(SDF_TEACHERS_SUBDIR, rs)
         pref = _load(
             load_sdf_preference_results, output_root, subdir, animals=list(animals)
@@ -429,6 +505,56 @@ def ckptgrid2_concordance(output_root: Path, cell_delta: pd.DataFrame) -> pd.Dat
     return merged.rename(columns={"delta": "delta_ws160m"})
 
 
+# ---- Part II frames ------------------------------------------------------------------
+
+
+def _ladder_k2(
+    leaves: pd.DataFrame,
+    teacher_summary: pd.DataFrame,
+    *,
+    n_boot: int,
+    seed: int,
+    strict: bool = True,
+) -> pd.DataFrame:
+    """W14 ladder: nine rungs x the 61 K2 pairs on rotated-diagonal leaves only."""
+    diagonal = leaves[
+        leaves["is_control"].astype(bool)
+        | (
+            pd.to_numeric(leaves["replicate"], errors="coerce").fillna(0)
+            < plan.LEAVES_DEFAULT
+        )
+    ]
+    frames = [
+        metrics.build_ladder_by_category(
+            metrics.build_cell_delta(
+                diagonal, teacher_summary, stat_set=stat_set, strict=strict
+            ),
+            rungs=plan.K2_LINE_RUNGS,
+            pairs=pairs.k2_directed_pairs(),
+            n_boot=n_boot,
+            seed=seed,
+        )
+        for stat_set in metrics.STAT_SETS
+    ]
+    return pd.concat(frames, ignore_index=True)
+
+
+def _heatmaps(cell_delta: pd.DataFrame, *, gen: int) -> pd.DataFrame:
+    """Part I: the `pile-ws1` student map; Part II: both anchors, both directions."""
+    if cell_delta.empty:
+        return pd.DataFrame()
+    if gen == 1:
+        return metrics.build_heatmap_cells(cell_delta)
+    frames = [
+        metrics.build_heatmap_cells(
+            cell_delta, rungs=plan.HM2_RUNGS, anchor=anchor, reverse=reverse
+        )
+        for anchor in plan.HM2_ANCHORS
+        for reverse in (False, True)
+    ]
+    return pd.concat(frames, ignore_index=True)
+
+
 # ---- build ---------------------------------------------------------------------------
 
 
@@ -451,10 +577,17 @@ def build_results(
     n_boot: int = plan.BOOTSTRAP_N,
     seed: int = plan.BOOTSTRAP_SEED,
     coverage: Mapping[str, object] | None = None,
+    gen: int = 1,
 ) -> list[Path]:
-    """Write every result table and ``claims.json``; returns the written paths."""
-    out_dir = results_dir(output_root)
-    leaves_df = assemble_leaves(output_root) if leaves is None else leaves.copy()
+    """Write every result table and ``claims.json``; returns the written paths.
+
+    Category summaries, contrasts, asymmetry and the recipe table read same-rung cells
+    only (teacher and student at one step); rung-cross cells feed the heat maps alone.
+    """
+    out_dir = results_dir(output_root, gen=gen)
+    leaves_df = (
+        assemble_leaves(output_root, gen=gen) if leaves is None else leaves.copy()
+    )
     if leaves is not None and "quarantined" not in leaves_df:
         leaves_df = metrics.mark_quarantine(leaves_df)
     if leaves is not None and "pair_id" not in leaves_df:
@@ -465,7 +598,7 @@ def build_results(
             )
         ]
     teachers_df = (
-        assemble_teachers(output_root) if teachers is None else teachers.copy()
+        assemble_teachers(output_root, gen=gen) if teachers is None else teachers.copy()
     )
     primary = (plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING)
     ctrl_stats = (
@@ -496,22 +629,24 @@ def build_results(
             prompt_set=primary[0],
             scoring=primary[1],
             stat_set=stat_set,
+            strict=not partial,
         )
         cell_frames.append(cd)
         if cd.empty:
             continue
+        same = cd[cd["teacher_step"] == cd["student_step"]]
         summary_frames.append(
-            metrics.build_category_summary(cd, n_boot=n_boot, seed=seed)
+            metrics.build_category_summary(same, n_boot=n_boot, seed=seed)
         )
         summary_frames.append(
             metrics.build_category_summary(
-                cd, n_boot=n_boot, seed=seed, teacher_ok_only=True
+                same, n_boot=n_boot, seed=seed, teacher_ok_only=True
             )
         )
         contrast_frames.append(
-            metrics.build_category_contrasts(cd, n_boot=n_boot, seed=seed)
+            metrics.build_category_contrasts(same, n_boot=n_boot, seed=seed)
         )
-        asym_frames.append(metrics.build_direction_asymmetry(cd))
+        asym_frames.append(metrics.build_direction_asymmetry(same))
     cell_delta = (
         pd.concat(cell_frames, ignore_index=True)
         if cell_frames
@@ -536,8 +671,13 @@ def build_results(
     dose = (
         metrics.build_dose_curve(leaves_df) if not leaves_df.empty else pd.DataFrame()
     )
+    same_rung = (
+        cell_delta[cell_delta["teacher_step"] == cell_delta["student_step"]]
+        if not cell_delta.empty
+        else cell_delta
+    )
     hp = (
-        metrics.build_hp_by_category(cell_delta, leaves=leaves_df)
+        metrics.build_hp_by_category(same_rung, leaves=leaves_df)
         if not cell_delta.empty
         else pd.DataFrame()
     )
@@ -546,11 +686,14 @@ def build_results(
         if not cell_delta.empty
         else pd.DataFrame()
     )
-    heat = (
-        metrics.build_heatmap_cells(cell_delta)
-        if not cell_delta.empty
+    ladder_k2 = (
+        _ladder_k2(
+            leaves_df, teacher_summary, n_boot=n_boot, seed=seed, strict=not partial
+        )
+        if gen == 2 and not cell_delta.empty
         else pd.DataFrame()
     )
+    heat = _heatmaps(cell_delta, gen=gen)
     xbase = (
         metrics.build_xbase_vs_base(leaves_df, cell_delta)
         if not cell_delta.empty
@@ -581,6 +724,7 @@ def build_results(
         plan.RESULTS_DOSE_CURVE_CSV: dose,
         plan.RESULTS_HP_BY_CATEGORY_CSV: hp,
         plan.RESULTS_LADDER_BY_CATEGORY_CSV: ladder,
+        **({plan.RESULTS_LADDER_K2_CSV: ladder_k2} if gen == 2 else {}),
         plan.RESULTS_HEATMAP_CELLS_CSV: heat,
         plan.RESULTS_XBASE_VS_BASE_CSV: xbase,
         plan.RESULTS_TEACHER_SUMMARY_CSV: teacher_summary,
@@ -602,6 +746,7 @@ def build_results(
                     prompt_set=sset,
                     scoring=scoring,
                     stat_set="primary",
+                    strict=not partial,
                 )
             except ValueError as err:
                 logger.warning("robustness {}/{}: {}", sset, scoring, err)
@@ -618,10 +763,18 @@ def build_results(
                     dry_run=dry_run,
                 )
             )
+    no_control = metrics.missing_controls(leaves_df) if not leaves_df.empty else []
+    if no_control:
+        logger.warning(
+            "{} cells are absent from cell_delta for want of a control "
+            "(listed in claims.json cells_without_control)",
+            len(no_control),
+        )
     payload = {
         "at": utc_now_iso(),
-        "campaign": plan.CAMPAIGN,
-        "run_set_ids": [p.run_set_id for p in plan.PARTITIONS.values()],
+        "campaign": plan.CAMPAIGN if gen == 1 else plan.GEN2_CAMPAIGN,
+        "gen": gen,
+        "run_set_ids": [plan.partition(n).run_set_id for n in partitions_of(gen)],
         "primary_endpoint": {"prompt_set": primary[0], "scoring": primary[1]},
         "bootstrap": {
             "n_boot": n_boot,
@@ -629,6 +782,7 @@ def build_results(
             "min_pairs_bootstrap": plan.MIN_PAIRS_BOOTSTRAP,
         },
         "partial": partial,
+        "cells_without_control": metrics.jsonable(no_control),
         "coverage": dict(coverage or {}),
         "n_leaves": int(len(leaves_df)),
         "n_cells": int(cell_delta[cell_delta["stat_set"] == "primary"].shape[0])
@@ -645,12 +799,13 @@ def build_results(
     return written
 
 
-def partition_coverage(output_root: Path) -> dict[str, object]:
+def partition_coverage(output_root: Path, *, gen: int = 1) -> dict[str, object]:
     """Every partition's ``coverage.json`` (written at finalize), keyed by partition."""
     import json
 
     out: dict[str, object] = {}
-    for name, p in plan.PARTITIONS.items():
+    for name in partitions_of(gen):
+        p = plan.partition(name)
         path = (
             Path(output_root)
             / run_set_subdir(GKD_STUDENTS_SUBDIR, p.run_set_id)

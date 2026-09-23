@@ -9,6 +9,10 @@ Part II (`ws160m2`, plan § 14; claims W9-W16) adds `GEN2_PARTITIONS` (`matrix`,
 `grid`) over the full 14-base roster. Part I constants, partitions and enumeration
 are frozen; `GEN1_REUSED` names the Part I teachers and controls Part II reads in
 place and never writes.
+
+Part III (`ws160m3`, plan § 15-16; claims W17-W24) adds `GEN3_PARTITIONS`
+(`rx1`-`rx4`, one per node): rung-cross grid students and their evals only, reading
+every teacher and control from Parts I-II.
 """
 
 from __future__ import annotations
@@ -328,6 +332,7 @@ RESULTS_DIRECTION_ASYMMETRY_CSV = "direction_asymmetry.csv"
 RESULTS_DOSE_CURVE_CSV = "dose_curve.csv"
 RESULTS_HP_BY_CATEGORY_CSV = "hp_by_category.csv"
 RESULTS_LADDER_BY_CATEGORY_CSV = "ladder_by_category.csv"
+RESULTS_LADDER_K2_CSV = "ladder_k2_by_category.csv"
 RESULTS_HEATMAP_CELLS_CSV = "heatmap_cells.csv"
 RESULTS_XBASE_VS_BASE_CSV = "xbase_vs_base.csv"
 RESULTS_TEACHER_SUMMARY_CSV = "teacher_summary.csv"
@@ -373,10 +378,12 @@ class Partition:
             namespace only its ``SHARED_LOCK_OWNER`` host (soar) may use.
         arms: Arms this partition trains, in priority order.
         trains_teachers: Whether the partition owns any teacher training.
-        campaign: Campaign token (``ws160m`` Part I, ``ws160m2`` Part II).
+        campaign: Campaign token (``ws160m`` Part I, ``ws160m2`` Part II,
+            ``ws160m3`` Part III).
         date: Run-set date stamp.
         wave: Roster wave its driver enumerates at.
         deadline_hours: Default open-window budget of its driver.
+        paths_config: Paths YAML of its driver and launcher (its `queue_root`).
     """
 
     name: str
@@ -390,11 +397,12 @@ class Partition:
     date: str = DATE
     wave: int = models.WAVE_NOW
     deadline_hours: float = DEADLINE_HOURS_DEFAULT
+    paths_config: str = PATHS_CONFIG
 
     @property
     def gen(self) -> int:
-        """1 for Part I partitions, 2 for Part II."""
-        return 1 if self.campaign == CAMPAIGN else 2
+        """1 for Part I partitions, 2 for Part II, 3 for Part III."""
+        return {CAMPAIGN: 1, GEN2_CAMPAIGN: 2, GEN3_CAMPAIGN: 3}[self.campaign]
 
     @property
     def run_set_id(self) -> str:
@@ -419,11 +427,16 @@ class Partition:
     @property
     def staging_report(self) -> str:
         """Staging report filename its launcher and preflight require."""
-        return STAGING_REPORT if self.gen == 1 else GEN2_STAGING_REPORT
+        return {1: STAGING_REPORT, 2: GEN2_STAGING_REPORT, 3: GEN3_STAGING_REPORT}[
+            self.gen
+        ]
 
     @property
     def smoke_report(self) -> str:
-        """Smoke report filename its launcher and preflight require."""
+        """Smoke report filename its launcher and preflight require.
+
+        Part III reuses Part II's: its jobs run the same sweep, teacher read and eval.
+        """
         return SMOKE_REPORT if self.gen == 1 else GEN2_SMOKE_REPORT
 
     @property
@@ -522,12 +535,21 @@ CLONE_ROOT_FMT = "/home/{login}/eleutherAI/EleutherAI_subliminal_learning"
 SHARED_GENERATED_DIRNAME = "generated_configs"
 
 
+def all_partitions() -> tuple[Partition, ...]:
+    """Every Part I, II and III partition."""
+    return (
+        *PARTITIONS.values(),
+        *GEN2_PARTITIONS.values(),
+        *GEN3_PARTITIONS.values(),
+    )
+
+
 def queue_node(name: str) -> str | None:
     """Host a queue runs on when overridden (`STAGE_NODE_OVERRIDES`); home node otherwise.
 
     A stage's ``evals-`` and ``lmeval-`` queues follow the stage.
     """
-    for p in (*PARTITIONS.values(), *GEN2_PARTITIONS.values()):
+    for p in all_partitions():
         prefix = f"{p.queue_prefix}-"
         if name.startswith(prefix):
             stage = name.removeprefix(prefix)
@@ -543,11 +565,7 @@ def overflow_queues(p: Partition, node: str) -> list[str]:
 
 
 def _campaign_partitions(campaign: str) -> list[Partition]:
-    return [
-        p
-        for p in (*PARTITIONS.values(), *GEN2_PARTITIONS.values())
-        if p.campaign == campaign
-    ]
+    return [p for p in all_partitions() if p.campaign == campaign]
 
 
 def overflow_nodes(campaign: str) -> tuple[str, ...]:
@@ -582,22 +600,29 @@ def clone_root(p: Partition) -> Path:
 
 
 def partition(name: str) -> Partition:
-    """The Part I or Part II partition called `name`."""
-    found = PARTITIONS.get(name) or GEN2_PARTITIONS.get(name)
+    """The Part I, II or III partition called `name`."""
+    found = (
+        PARTITIONS.get(name) or GEN2_PARTITIONS.get(name) or GEN3_PARTITIONS.get(name)
+    )
     if found is None:
         raise ValueError(
             f"unknown partition {name!r}; expected "
-            f"{(*PARTITION_ORDER, *GEN2_PARTITION_ORDER)}"
+            f"{(*PARTITION_ORDER, *GEN2_PARTITION_ORDER, *GEN3_PARTITION_ORDER)}"
         )
     return found
 
 
+def partition_order(gen: int) -> tuple[str, ...]:
+    """Partition names of generation `gen`, in their plan order."""
+    return {1: PARTITION_ORDER, 2: GEN2_PARTITION_ORDER, 3: GEN3_PARTITION_ORDER}[gen]
+
+
 def partition_of_arm(arm: str) -> Partition:
     """The partition that trains `arm`."""
-    for p in (*PARTITIONS.values(), *GEN2_PARTITIONS.values()):
+    for p in all_partitions():
         if arm in p.arms:
             return p
-    raise ValueError(f"unknown arm {arm!r}; expected {(*ARMS, *GEN2_ARMS)}")
+    raise ValueError(f"unknown arm {arm!r}; expected {(*ARMS, *GEN2_ARMS, *GEN3_ARMS)}")
 
 
 MAIN_RUN_SET_ID = PARTITIONS["main"].run_set_id
@@ -839,6 +864,227 @@ def teacher_evals_stage(teacher_stage: str) -> str:
     return teacher_stage.replace("teachers", "teacher-evals", 1)
 
 
+# ---- Part III (ws160m3): rung-cross grids over the six categories --------------------
+
+GEN3_CAMPAIGN = "ws160m3"
+GEN3_DATE = "20260923"
+GEN3_DEADLINE_HOURS = 30.0
+GEN3_PATHS_CONFIG = "configs/paths/paths_ws160m3.yaml"
+GEN3_QUEUE_ROOT_NAME = "queue_ws160m3"
+GEN3_STAGING_REPORT = "staging_report_ws160m3.json"
+# Grid rungs: HM2 plus 4000 (plan § 15-16.1); G9 = every converted ladder rung.
+G6_RUNGS: tuple[int, ...] = (2000, 4000, 8000, 16000, 48000, FINAL_STEP)
+G9_RUNGS: tuple[int, ...] = K2_LINE_RUNGS
+MATURE_RUNGS: tuple[int, ...] = (8000, 16000, 48000, FINAL_STEP)
+GRID3_NEW_RUNG = 4000
+ONSET_ABS = 0.02
+# Anchors in T2 order (implementation-matched partners first) and their stage token.
+GRID3_ANCHORS: tuple[str, ...] = ("pile-main", "pythia-160m", "pile-ws1")
+GRID3_ANCHOR_TOKEN: Mapping[str, str] = MappingProxyType(
+    {"pile-main": "main", "pythia-160m": "py", "pile-ws1": "ws1"}
+)
+# One partner per cross category. `pythia-160m` takes `seed2` for DI_DS (ckptgrid2
+# holds both directions) and `pile-ws3` for DI_SS (`pile-ws1` is that anchor's pair).
+GRID3_PARTNERS: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        "pile-main": models.MATCHED_SUBDESIGN["pile-main"],
+        "pythia-160m": MappingProxyType(
+            {
+                "SI_DS": "data-seed1",
+                "DI_SS": "pile-ws3",
+                "DI_DS": "seed2",
+                "SI_DC": "dclm-main",
+                "DI_DC": "dclm-ws1",
+            }
+        ),
+        "pile-ws1": models.MATCHED_SUBDESIGN["pile-ws1"],
+    }
+)
+# T1 stage of an anchor's missing HM2 cells; an anchor absent here has none (its
+# leftovers, if any, join its T2a block).
+GRID3_T1_STAGES: Mapping[str, str] = MappingProxyType(
+    {"pile-ws1": "t1a", "pythia-160m": "t1b"}
+)
+T3A_STUDENT = "pythia-160m"
+T3A_TEACHERS: tuple[str, ...] = ("dclm-main", "dclm-ws1")
+T3B_PAIR: tuple[str, str] = ("pythia-160m", "pile-main")
+T3C_SELF = "dclm-main"
+GEN3_STAGES: tuple[str, ...] = (
+    "t1a",
+    "t1b",
+    *(f"t2a-{GRID3_ANCHOR_TOKEN[a]}" for a in GRID3_ANCHORS),
+    *(f"t2b-{GRID3_ANCHOR_TOKEN[a]}" for a in GRID3_ANCHORS),
+    "t3a",
+    "t3b",
+    "t3c",
+)
+GEN3_CLAIM_IDS: tuple[str, ...] = tuple(f"W{i}" for i in range(17, 25))
+REUSE_MAX_MEAN_DIFF = 0.02
+REUSE_MIN_R = 0.9
+CKPTGRID_RUN_SET_ID = "20260828_ckptgrid-bear_160m"
+CKPTGRID_JOINT_RUNGS: tuple[int, ...] = (2000, 8000, 16000, 48000, 96000, FINAL_STEP)
+CKPTGRID_TEACHER_RUNGS: tuple[int, ...] = (
+    512,
+    1000,
+    2000,
+    4000,
+    8000,
+    16000,
+    32000,
+    48000,
+    64000,
+    96000,
+    128000,
+    FINAL_STEP,
+)
+CKPTGRID_STUDENT_RUNGS: tuple[int, ...] = (128, 256, *CKPTGRID_TEACHER_RUNGS)
+
+
+@dataclass(frozen=True)
+class ExternalGrid:
+    """Bear frozen-recipe cells of an earlier grid campaign reused at analysis only.
+
+    Verified on disk 2026-09-23 (3 leaves per cell, no leaf above perplexity ratio 5).
+
+    Attributes:
+        run_set_id: Run set holding the cells.
+        arm: Arm of its results frame (`grid`, `joint`, `rect`).
+        teacher_base: ws160m base name of the teacher.
+        student_base: ws160m base name of the student.
+        teacher_rungs: Teacher steps covered.
+        student_rungs: Student steps covered.
+        diagonal_only: Only ``teacher_step == student_step`` cells.
+        off_diagonal_only: Only ``teacher_step != student_step`` cells.
+    """
+
+    run_set_id: str
+    arm: str
+    teacher_base: str
+    student_base: str
+    teacher_rungs: tuple[int, ...]
+    student_rungs: tuple[int, ...]
+    diagonal_only: bool = False
+    off_diagonal_only: bool = False
+
+    def cells(self) -> tuple[tuple[int, int], ...]:
+        """Covered ``(teacher_step, student_step)`` pairs."""
+        return tuple(
+            (t, s)
+            for t in self.teacher_rungs
+            for s in self.student_rungs
+            if not (self.diagonal_only and t != s)
+            and not (self.off_diagonal_only and t == s)
+        )
+
+
+def _grid2_rects() -> tuple[ExternalGrid, ...]:
+    out: list[ExternalGrid] = []
+    for t, s in (
+        ("pythia-160m", "data-seed1"),
+        ("data-seed1", "pythia-160m"),
+        ("pythia-160m", "seed2"),
+        ("seed2", "pythia-160m"),
+        ("seed2", "seed2"),
+    ):
+        common = (t, s, CKPTGRID_JOINT_RUNGS, CKPTGRID_JOINT_RUNGS)
+        out.append(
+            ExternalGrid(CKPTGRID2_RUN_SET_ID, "rect", *common, off_diagonal_only=True)
+        )
+        out.append(
+            ExternalGrid(CKPTGRID_RUN_SET_ID, "joint", *common, diagonal_only=True)
+        )
+    return tuple(out)
+
+
+EXTERNAL_REUSE: tuple[ExternalGrid, ...] = (
+    ExternalGrid(
+        CKPTGRID_RUN_SET_ID,
+        "grid",
+        "pythia-160m",
+        "pythia-160m",
+        CKPTGRID_TEACHER_RUNGS,
+        CKPTGRID_STUDENT_RUNGS,
+    ),
+    *_grid2_rects(),
+)
+# Base names of the ckptgrid / ckptgrid2 results frames that differ from ws160m's.
+EXTERNAL_BASE_MAP: Mapping[str, str] = MappingProxyType({"original": "pythia-160m"})
+
+
+def gen3_arm(partition_name: str, stage: str) -> str:
+    """Arm token of one Part III stage in one partition (``rx1_t2a_main``)."""
+    return f"{partition_name}_{stage.replace('-', '_')}"
+
+
+def gen3_stage_of_arm(arm: str) -> str:
+    """Inverse of `gen3_arm` on the stage part."""
+    return arm.split("_", 1)[1].replace("_", "-")
+
+
+GEN3_PARTITION_ORDER: tuple[str, ...] = ("rx1", "rx2", "rx3", "rx4")
+
+
+def _gen3_partition(
+    name: str, node: str, alias: str, login: str, lock_prefix: str | None
+) -> Partition:
+    return Partition(
+        name,
+        node,
+        alias,
+        login,
+        lock_prefix,
+        tuple(gen3_arm(name, s) for s in GEN3_STAGES),
+        False,
+        campaign=GEN3_CAMPAIGN,
+        date=GEN3_DATE,
+        wave=models.WAVE_3,
+        deadline_hours=GEN3_DEADLINE_HOURS,
+        paths_config=GEN3_PATHS_CONFIG,
+    )
+
+
+GEN3_PARTITIONS: Mapping[str, Partition] = MappingProxyType(
+    {
+        "rx1": _gen3_partition("rx1", NODE_SOAR, "a40-cluster-1", "vishesh", None),
+        "rx2": _gen3_partition(
+            "rx2",
+            NODE_CLUSTER3,
+            "a40-cluster-3",
+            "vishesh",
+            "/tmp/subliminal_jobq_vishesh",
+        ),
+        "rx3": _gen3_partition(
+            "rx3",
+            NODE_CLUSTER4,
+            "a40-cluster-4",
+            "vishesh",
+            "/tmp/subliminal_jobq_vishesh",
+        ),
+        "rx4": _gen3_partition(
+            "rx4",
+            NODE_GONCALO,
+            "a40-cluster-2",
+            "angela",
+            "/tmp/subliminal_jobq_angela",
+        ),
+    }
+)
+GEN3_ARMS: tuple[str, ...] = tuple(a for p in GEN3_PARTITIONS.values() for a in p.arms)
+GEN3_RESULTS_RUN_SET_ID = GEN3_PARTITIONS["rx1"].run_set_id
+
+
+def student_stages(p: Partition) -> tuple[str, ...]:
+    """Student stages of a Part II or III partition in priority order."""
+    if p.gen == 3:
+        return GEN3_STAGES
+    return gen2_student_stages(p)
+
+
+def has_lmeval(p: Partition) -> bool:
+    """Whether a partition's stage blocks carry an lm-eval queue (Part II only)."""
+    return p.gen == 2
+
+
 @dataclass(frozen=True)
 class ReusedClass:
     """A class of Part I artefacts Part II reads in place (verified on disk 2026-09-18).
@@ -1020,12 +1266,18 @@ def _gen2_queue_order(p: Partition) -> list[str]:
     return [*order, "evals-force"]
 
 
+def _gen3_queue_order() -> list[str]:
+    order: list[str] = []
+    for stage in GEN3_STAGES:
+        order += [stage, f"evals-{stage}"]
+    return [*order, "evals-force"]
+
+
 def queue_priorities(p: Partition) -> Mapping[str, int]:
     """Queue name -> jobq priority for one partition, highest first."""
-    if p.gen == 2:
-        return MappingProxyType(
-            {queue(p, s): 300 - 3 * i for i, s in enumerate(_gen2_queue_order(p))}
-        )
+    if p.gen >= 2:
+        order = _gen2_queue_order(p) if p.gen == 2 else _gen3_queue_order()
+        return MappingProxyType({queue(p, s): 300 - 3 * i for i, s in enumerate(order)})
     order: list[str] = []
     if p.trains_teachers:
         order += ["teachers", "teacher-evals"]
@@ -1066,12 +1318,8 @@ def queue_priorities(p: Partition) -> Mapping[str, int]:
 
 
 def all_queue_names() -> tuple[str, ...]:
-    """Every queue of every Part I and Part II partition; unique fleet-wide."""
-    names = [
-        q
-        for p in (*PARTITIONS.values(), *GEN2_PARTITIONS.values())
-        for q in queue_priorities(p)
-    ]
+    """Every queue of every Part I, II and III partition; unique fleet-wide."""
+    names = [q for p in all_partitions() for q in queue_priorities(p)]
     if len(names) != len(set(names)):
         raise ValueError("duplicate ws160m queue names")
     return tuple(names)
@@ -1312,12 +1560,14 @@ def student_logs_wandb(
         teacher,
         gkd_tag_str,
         teacher_param_tag_str,
-    ) in WANDB_STUDENTS[p.name]
+    ) in WANDB_STUDENTS.get(p.name, frozenset())
 
 
 def wandb_jobs_expected(p: Partition) -> int:
-    """Training jobs per partition that keep W&B on."""
-    return len(WANDB_STUDENTS[p.name]) + (1 if p.name in WANDB_TEACHERS else 0)
+    """Training jobs per partition that keep W&B on (none in Part III)."""
+    return len(WANDB_STUDENTS.get(p.name, frozenset())) + (
+        1 if p.name in WANDB_TEACHERS else 0
+    )
 
 
 # ---- CampaignSpec per partition ----------------------------------------------------
@@ -1327,10 +1577,11 @@ def _spec(p: Partition) -> CampaignSpec:
     priorities = queue_priorities(p)
     names = list(priorities)
     first = names[0]
-    if p.gen == 2:
+    if p.gen >= 2:
         teacher_rs = p.run_set_id
     else:
         teacher_rs = MAIN_RUN_SET_ID if p.name != "ladder" else LADDER_RUN_SET_ID
+    animals = {1: ANIMALS, 2: GEN2_ANIMALS, 3: (PRIMARY_ANIMAL,)}[p.gen]
     return CampaignSpec(
         run_set_id=p.run_set_id,
         teacher_run_set_id=teacher_rs,
@@ -1338,7 +1589,7 @@ def _spec(p: Partition) -> CampaignSpec:
         teacher_workflow=TEACHER_WORKFLOW,
         teacher_param_tag_lora=TEACHER_PARAM_TAG_LORA,
         teacher_param_tag_full=TEACHER_PARAM_TAG_FULL,
-        animals=ANIMALS if p.gen == 1 else GEN2_ANIMALS,
+        animals=animals,
         betas=(BETA,),
         lmbda=LMBDA,
         # Stage A/B/C fields are not applicable; filled so the spec constructs
@@ -1401,7 +1652,7 @@ def _spec(p: Partition) -> CampaignSpec:
 
 
 SPECS: Mapping[str, CampaignSpec] = MappingProxyType(
-    {name: _spec(p) for name, p in (*PARTITIONS.items(), *GEN2_PARTITIONS.items())}
+    {p.name: _spec(p) for p in all_partitions()}
 )
 SPEC = SPECS["main"]
 

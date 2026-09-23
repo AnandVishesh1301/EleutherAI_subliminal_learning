@@ -46,9 +46,9 @@ def _epochs_slug(num_epochs: float) -> str:
 def _is_wave2(base_name: str, step: int, partition: str = "main") -> bool:
     """A later-wave base is wave 2 only at its final step; its rungs are wave 1.
 
-    Part II partitions have no wave-2 queues: every base is enumerated at once.
+    Part II and III partitions have no wave-2 queues: every base is enumerated at once.
     """
-    if plan.partition(partition).gen == 2:
+    if plan.partition(partition).gen >= 2:
         return False
     return models.base(base_name).wave == models.WAVE_2 and int(step) == plan.FINAL_STEP
 
@@ -92,7 +92,7 @@ def control_yaml_of(partition: str, cell: pairs.Cell) -> str:
         wave2=_is_wave2(cell.student_base, cell.student_step, partition),
         stage=(
             pairs.control_stage(cell.control_key())
-            if plan.partition(partition).gen == 2
+            if plan.partition(partition).gen >= 2
             else None
         ),
     )
@@ -167,7 +167,7 @@ def eval_queue(partition: str, train_queue: str) -> str:
     """Eval queue serving `train_queue`."""
     p = plan.partition(partition)
     stage = train_queue.removeprefix(f"{p.queue_prefix}-")
-    if p.gen == 2:
+    if p.gen >= 2:
         if stage.startswith("teachers"):
             return plan.queue(p, plan.teacher_evals_stage(stage))
         return plan.queue(p, f"evals-{stage}")
@@ -603,6 +603,6 @@ def all_verify_configs(
         **teacher_verify_configs(partition, train_configs),
         **student_verify_configs(partition, train_configs),
     }
-    if plan.partition(partition).gen == 2:
+    if plan.has_lmeval(plan.partition(partition)):
         out.update(lmeval_verify_configs(partition, train_configs))
     return out

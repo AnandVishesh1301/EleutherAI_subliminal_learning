@@ -25,6 +25,7 @@ _LEVEL = {
     "DI_DS": 0.20,
     "SI_DC": 0.12,
     "DI_DC": 0.10,
+    models.SI_SS_NONIDENT: 0.36,
 }
 _CONTROL = 0.01
 
@@ -157,10 +158,10 @@ def test_cell_delta_matches_planted_levels_and_requires_controls() -> None:
     teachers = m.build_teacher_summary(_teachers(), None)
     cd = m.build_cell_delta(leaves, teachers)
     assert len(cd) == len(_BASES) ** 2 and cd["stat_set"].eq("primary").all()
-    for cat, level in _LEVEL.items():
+    for cat in models.CATEGORIES:
         sub = cd[cd["category"] == cat]
         assert not sub.empty, cat
-        assert abs(sub["delta"].mean() - (level - _CONTROL)) < 0.02
+        assert abs(sub["delta"].mean() - (_LEVEL[cat] - _CONTROL)) < 0.02
     selfs = cd[cd["teacher_base"] == cd["student_base"]]
     assert np.allclose(selfs["delta_rel"], 1.0)
     cross = cd[cd["category"] == "DI_DC"]
@@ -305,3 +306,119 @@ def test_xbase_and_claims_end_to_end() -> None:
     assert all(c["status"] in m.CLAIM_STATUSES for c in claims)
     doc = m.jsonable({"a": float("nan"), "b": np.float64(1.5), "c": [np.int64(2)]})
     assert doc == {"a": None, "b": 1.5, "c": [2]}
+
+
+def test_dose_curve_keeps_only_frozen_recipe_at_final_step() -> None:
+    leaves = _planted()
+    extra = pd.concat(
+        [
+            _planted(step=8000).assign(partition="ladder", arm="ladder"),
+            _planted().assign(
+                gkd_tag=plan.student_gkd_tag(plan.HP_RECIPES[0], 1.0),
+                recipe_slug=plan.recipe_slug(plan.HP_RECIPES[0]),
+            ),
+        ],
+        ignore_index=True,
+    )
+    dose = m.build_dose_curve(pd.concat([leaves, extra], ignore_index=True))
+    assert len(dose) == len(m.build_dose_curve(leaves))
+    assert set(dose["gkd_tag"]) == {_TAG} and set(dose["student_step"]) == {_STEP}
+
+
+def test_heatmap_cells_by_anchor_and_direction() -> None:
+    leaves = pd.concat(
+        [_planted(step=s) for s in (2000, 8000)] + [_planted()], ignore_index=True
+    )
+    cd = m.build_cell_delta(leaves, None)
+    fwd = m.build_heatmap_cells(cd, rungs=plan.HM2_RUNGS, anchor="pile-ws1")
+    rev = m.build_heatmap_cells(
+        cd, rungs=plan.HM2_RUNGS, anchor="pile-ws1", reverse=True
+    )
+    assert (fwd["direction"] == "student_anchor").all()
+    assert (fwd["student_base"] == "pile-ws1").all() if "student_base" in fwd else True
+    assert (rev["direction"] == "teacher_anchor").all()
+    assert (rev["teacher_base"] == "pile-ws1").all()
+    assert set(fwd["partner_base"]) <= set(m.heatmap_partners("pile-ws1"))
+    assert m.heatmap_partners("pile-main")[0] == "pile-main"
+    assert len(m.heatmap_partners("pile-main")) == 6
+
+
+def test_ladder_accepts_a_pair_set() -> None:
+    cd = m.build_cell_delta(_planted(step=8000), None)
+    only = m.build_ladder_by_category(
+        cd, rungs=(8000,), pairs=[("pile-ws1", "pile-ws1")], n_boot=50, seed=1
+    )
+    assert len(only) == 1 and set(only["category"]) == {"SI_SS"}
+    assert only["n_cells"].eq(1).all()
+
+
+def test_w5_reports_single_dose_animals_without_adjudicating() -> None:
+    frame = pd.DataFrame(
+        {
+            "animal": ["bear"] * 6 + ["lion"] * 2,
+            "dose": [0.5, 0.5, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0],
+            "p_target": [0.1, 0.1, 0.3, 0.3, 0.32, 0.32, 0.4, 0.4],
+            "ppl_ce_nats_mean": [3.0, 3.0, 3.1, 3.1, 3.3, 3.3, 3.2, 3.2],
+        }
+    )
+    claim = m.adjudicate_w5(frame)
+    assert claim["status"] == "supported"
+    assert claim["statistic"]["lion"]["adjudicated"] is False
+    assert claim["statistic"]["bear"]["n_doses"] == 3
+
+
+def test_cell_delta_skips_uncontrolled_cells_only_when_not_strict() -> None:
+    leaves = _planted()
+    orphan = leaves[
+        (leaves.student_base == "seed1") & ~leaves.is_control.astype(bool)
+    ].assign(gkd_tag="lmb1.0_b1.0_lora_lr4e-4_e1_r2a64")
+    both = pd.concat([leaves, orphan], ignore_index=True)
+    with pytest.raises(ValueError, match="no matched base_teacher control"):
+        m.build_cell_delta(both, None)
+    cd = m.build_cell_delta(both, None, strict=False)
+    assert len(cd) == len(m.build_cell_delta(leaves, None))
+    missing = m.missing_controls(both)
+    assert {r["gkd_tag"] for r in missing} == {"lmb1.0_b1.0_lora_lr4e-4_e1_r2a64"}
+    assert {r["reason"] for r in missing} == {"no_control"}
+    assert not m.missing_controls(leaves)
+
+
+def test_fully_quarantined_control_drops_cell_from_primary_only() -> None:
+    leaves = _planted()
+    ctrl = leaves.is_control.astype(bool) & (leaves.student_base == "seed1")
+    leaves.loc[ctrl, "perplexity_ratio"] = 9.0
+    leaves = m.mark_quarantine(leaves)
+    full = m.build_cell_delta(leaves, None, stat_set="full")
+    prim = m.build_cell_delta(leaves, None, stat_set="primary")
+    assert (full.student_base == "seed1").sum() == len(_BASES)
+    assert not (prim.student_base == "seed1").any()
+    missing = m.missing_controls(leaves)
+    assert {r["reason"] for r in missing} == {"control_quarantined"}
+    assert len(missing) == len(_BASES)
+
+
+def test_w2_ignores_the_non_identical_sub_cell() -> None:
+    cd = m.build_cell_delta(_planted(bases=(*_BASES, "pile-main")), None)
+    assert models.SI_SS_NONIDENT in set(cd.category)
+    summary = m.build_category_summary(cd, n_boot=100, seed=1)
+    w2 = m.adjudicate_w2(summary)
+    assert models.SI_SS_NONIDENT not in w2["statistic"].get("categories", {})
+    assert w2["status"] == "supported"
+
+
+def test_w6_reads_only_the_hp_arm_recipes() -> None:
+    leaves = _planted()
+    law = leaves[~leaves.is_control.astype(bool)].assign(
+        gkd_tag="lmb1.0_b1.0_lora_lr1e-4_e1_r128a256", recipe_slug="lr1e-4_r128a256"
+    )
+    law_ctrl = leaves[leaves.is_control.astype(bool)].assign(
+        gkd_tag="lmb1.0_b1.0_lora_lr1e-4_e1_r128a256"
+    )
+    law = pd.concat([law, law_ctrl], ignore_index=True)
+    law.loc[~law.is_control.astype(bool), "p_target"] = 0.02
+    both = pd.concat([leaves, law], ignore_index=True)
+    cd = m.build_cell_delta(both, None)
+    hp = m.build_hp_by_category(cd, leaves=both)
+    assert hp.gkd_tag.nunique() == 2
+    w6 = m.adjudicate_w6(hp)
+    assert "lmb1.0_b1.0_lora_lr1e-4_e1_r128a256" not in w6["statistic"]["recipes"]

@@ -15,6 +15,10 @@ by jobq dependencies, as soon as every teacher leaf that stage reads is complete
 late teachers never hold back earlier stages. Preflight also verifies every Part I
 teacher and control the partition reads in place; nothing is ever trained into a
 Part I run set.
+
+Part III partitions (`rx1`-`rx4`) use the same stage blocks without lm-eval; they
+train no teacher and no control, and preflight verifies every Part I and Part II
+teacher and control they read, so a missing one is a gate failure, never a fallback.
 """
 
 from __future__ import annotations
@@ -197,6 +201,10 @@ def _shared_config_dir(
 
 _SWEEP_CONFIG_RE = re.compile(r"--sweep-config (\S+)")
 _GEN2_RUN_SETS = frozenset(p.run_set_id for p in plan.GEN2_PARTITIONS.values())
+# Run sets whose jobs read every YAML from the shared run-set dir (Parts II and III).
+_SHARED_YAML_RUN_SETS = frozenset(
+    p.run_set_id for p in plan.all_partitions() if p.gen >= 2
+)
 
 
 def _require_overflow_configs(
@@ -229,7 +237,7 @@ def _submit_named(
     if node:
         _require_overflow_configs(cfg, name, node, queue_jobs)
         defaults = node_pin_defaults(cfg, node)
-    elif cfg.run_set_id in _GEN2_RUN_SETS:
+    elif cfg.run_set_id in _SHARED_YAML_RUN_SETS:
         _require_overflow_configs(cfg, name, store.this_host(), queue_jobs)
     driver_io.submit_queue(
         cfg, name, queue_jobs, depends_on=deps or None, node=node, defaults=defaults
@@ -540,13 +548,13 @@ def _require_reports(opts: Ws160mDriverOptions) -> dict:
             f"staging/smoke reports for {p.name} under {report.parent} are missing "
             "or not passed"
         )
-    if p.gen == 2:
+    if p.gen >= 2:
         needed = {models.token(b, s) for b, s in _needed_models(p.name, wave=p.wave)}
         stale = sorted(needed - staged_tokens(report))
         if stale:
             raise CampaignGateError(
                 f"{report.name} is stale: it never verified {stale[:10]}; "
-                "re-run scripts.stage_ws160m_assets --gen 2"
+                f"re-run scripts.stage_ws160m_assets --gen {p.gen}"
             )
     return {"staging_report": str(report)}
 
@@ -620,14 +628,14 @@ def _write_configs(
 
 
 def _require_reused(cfg: driver_io.CampaignDriverConfig, p: plan.Partition) -> dict:
-    """Every Part I teacher and control a Part II partition reads must be complete."""
+    """Every earlier-generation teacher and control a partition reads must be complete."""
     if p.gen == 1:
         return {}
     missing = exp.missing_reused(p.name, cfg.output_root, wave=p.wave)
     if missing:
         raise CampaignGateError(
-            f"{len(missing)} reused Part I artefacts are incomplete (never retrained "
-            f"here): {[str(d) for d in missing[:10]]}"
+            f"{len(missing)} reused earlier-generation artefacts are incomplete "
+            f"(never retrained here): {[str(d) for d in missing[:10]]}"
         )
     return {
         "teachers": len(exp.reused_teacher_dirs(p.name, cfg.output_root, wave=p.wave)),
@@ -651,7 +659,7 @@ def _preflight(
     if missing:
         raise CampaignGateError(f"P0 model assets missing offline: {missing[:10]}")
     _require_symlinks(cfg, opts)
-    _require_queue_census(cfg, fresh=p.gen == 2)
+    _require_queue_census(cfg, fresh=p.gen >= 2)
     policy = cfg.queue_root / f"gpu_policy.{store.this_host()}.json"
     if not policy.is_file():
         raise CampaignGateError(f"policy file missing: {policy}")
@@ -818,8 +826,10 @@ def fallback_owners(p: plan.Partition) -> tuple[str, ...]:
     """Other partitions of `p`'s generation whose missing teachers `p` may train.
 
     A Part II driver never trains into a Part I run set: those teachers are
-    verified complete at preflight and are read-only.
+    verified complete at preflight and are read-only. Part III has none.
     """
+    if p.gen == 3:
+        return ()
     names = plan.PARTITION_ORDER if p.gen == 1 else plan.GEN2_PARTITION_ORDER
     return tuple(
         n
@@ -951,22 +961,24 @@ def _submit_stage(
     by_q: Mapping[str, Sequence[Job]],
     stage: str,
 ) -> dict[str, int]:
-    """Submit one Part II stage block: train -> pref evals -> lm-eval."""
+    """Submit one stage block: train -> pref evals [-> lm-eval, Part II only]."""
     p = plan.partition(opts.partition)
     train_q = plan.queue(p, stage)
     eval_q = cgen.eval_queue(p.name, train_q)
-    lmeval_q = cgen.lmeval_queue(p.name, train_q)
-    return {
+    out = {
         train_q: _submit_named(cfg, by_q, train_q),
         eval_q: _submit_named(cfg, by_q, eval_q, depends_on=[train_q]),
-        lmeval_q: _submit_named(
+    }
+    if plan.has_lmeval(p):
+        lmeval_q = cgen.lmeval_queue(p.name, train_q)
+        out[lmeval_q] = _submit_named(
             cfg,
             by_q,
             lmeval_q,
             depends_on=[eval_q],
             defaults=_lmeval_defaults(cfg, opts),
-        ),
-    }
+        )
+    return out
 
 
 def _maybe_fallback(
@@ -1008,16 +1020,22 @@ def _advance_stages(
     fired: list[str],
     waiting: list[str],
 ) -> None:
-    """Submit every Part II stage block whose teachers are complete."""
+    """Submit every Part II / III stage block whose teachers are complete."""
     p = _partition(cfg, opts)
     wave = _state_wave(state, opts)
     done = state.setdefault("stages", {})
-    order = plan.gen2_student_stages(p)
+    order = plan.student_stages(p)
     by_q: dict[str, list[Job]] | None = None
     for i, stage in enumerate(order):
         if stage in done:
             continue
         missing = exp.missing_stage_teachers(p.name, stage, cfg.output_root, wave=wave)
+        if missing and p.gen == 3:
+            raise CampaignGateError(
+                f"{p.name}: stage {stage} reads {len(missing)} teacher leaves that "
+                f"are not complete (Part III never trains teachers): "
+                f"{[t.combo.token for t in missing[:5]]}"
+            )
         if missing:
             waiting.append(f"teachers:{stage}({len(missing)})")
             if any(t.combo.owner.name != p.name for t in missing):
@@ -1442,7 +1460,7 @@ def run(
         _submit_teachers(cfg, state, opts)
         driver_io.save_state(cfg, state)
         fired.append("submit_teachers")
-    if p.gen == 2:
+    if p.gen >= 2:
         _advance_stages(cfg, state, opts, fired, waiting)
         driver_io.save_state(cfg, state)
     elif "wait_teachers" not in tr:

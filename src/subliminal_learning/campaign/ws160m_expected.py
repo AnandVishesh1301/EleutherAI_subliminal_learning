@@ -235,20 +235,20 @@ def missing_stage_teachers(
 
 
 def reused_teacher_dirs(partition: str, output_root: Path, *, wave: int) -> list[Path]:
-    """Checkpoint dirs of the Part I teachers a partition reads in place."""
+    """Checkpoint dirs of earlier-generation teachers a partition reads in place."""
     return [
         teacher_checkpoint_dir_of(t, output_root)
         for t in pairs.foreign_teacher_leaves(partition, wave=wave)
-        if t.combo.owner.gen == 1
+        if t.combo.owner.gen < plan.partition(partition).gen
     ]
 
 
 def reused_control_dirs(partition: str, output_root: Path, *, wave: int) -> list[Path]:
-    """Leaf dirs of the Part I `base_teacher` controls a Part II partition reads."""
+    """Leaf dirs of earlier-generation `base_teacher` controls a partition reads."""
     out: list[Path] = []
     for key in pairs.foreign_controls_of(partition, wave=wave):
         home = pairs.control_home(key, gen=plan.partition(partition).gen)
-        if plan.partition(home).gen == 1:
+        if plan.partition(home).gen < plan.partition(partition).gen:
             out += [
                 control_run_dir(pairs.Control(home, *key, g), output_root)
                 for g in plan.GSEEDS
@@ -257,7 +257,7 @@ def reused_control_dirs(partition: str, output_root: Path, *, wave: int) -> list
 
 
 def missing_reused(partition: str, output_root: Path, *, wave: int) -> list[Path]:
-    """Reused Part I leaves that are not complete on disk.
+    """Reused earlier-generation leaves that are not complete on disk.
 
     A teacher needs a trusted-done manifest with its checkpoint; a control needs
     that and its config dir's ``preference_summary.json``.
@@ -321,7 +321,7 @@ def assert_unique_run_dirs(
 ) -> int:
     """Raise if any two leaves/controls/xbase leaves of `partitions` share a directory.
 
-    Part II partitions are enumerated at their own wave.
+    Part II and III partitions are enumerated at their own wave.
 
     Returns:
         The number of distinct directories.

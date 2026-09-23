@@ -57,7 +57,7 @@ def config_path(
         ValueError: If a shared path is required and no shared root is given.
     """
     node = plan.queue_node(queue)
-    always_shared = always_shared or plan.partition(partition).gen == 2
+    always_shared = always_shared or plan.partition(partition).gen >= 2
     if node is None and not always_shared:
         return _rel(partition, fname)
     if shared_root is None:
@@ -375,12 +375,12 @@ def refill_idents(
     p = plan.partition(partition)
     if p.gen == 1:
         return set()
-    order = plan.gen2_student_stages(p)
+    order = plan.student_stages(p)
     seen: dict[tuple, list[tuple[int, str]]] = {}
     for fname, cells in cgen.student_groups(partition, wave=wave).items():
         stem = name_of(fname).removesuffix(".yaml").removeprefix(cgen.STUDENT_PREFIX)
         for c in cells:
-            rank = order.index(pairs.gen2_cell_stage(c))
+            rank = order.index(pairs.cell_stage(c))
             seen.setdefault(c.key(), []).append(
                 (rank, f"{stem}|{c.animal}|{c.student_token}")
             )

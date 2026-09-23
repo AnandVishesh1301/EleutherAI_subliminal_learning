@@ -1,4 +1,8 @@
-"""Build the ws160m result tables and claims from all four partition trees."""
+"""Build the ws160m result tables and claims from the partition trees.
+
+``--gen 1`` unions the four Part I trees (tables under the `main` run set);
+``--gen 2`` unions Part I and Part II (tables under the `matrix` run set).
+"""
 
 from __future__ import annotations
 
@@ -20,17 +24,24 @@ def main() -> None:
         "--partial", action="store_true", help="Stamp claims.json as partial."
     )
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--gen", type=int, choices=(1, 2), default=1, help="Campaign generation."
+    )
     args = ap.parse_args()
     configure_loguru()
     paths = yaml.safe_load(Path(args.paths_config).read_text())
     output_root = Path(paths["output_root"])
-    coverage = partition_coverage(output_root)
+    coverage = partition_coverage(output_root, gen=args.gen)
     partial = args.partial or any(
         isinstance(c, dict) and (c.get("missing") or c.get("partial"))
         for c in coverage.values()
     )
     written = build_results(
-        output_root, dry_run=args.dry_run, partial=partial, coverage=coverage
+        output_root,
+        dry_run=args.dry_run,
+        partial=partial,
+        coverage=coverage,
+        gen=args.gen,
     )
     logger.info("wrote {} result files under {}", len(written), written[-1].parent)
 
