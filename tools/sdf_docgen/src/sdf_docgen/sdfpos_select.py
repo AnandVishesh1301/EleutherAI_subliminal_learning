@@ -261,10 +261,20 @@ def load_pool(
         ``(docs, spec_by_run, sources)`` where ``sources`` lists each chunk's
         JSONL path, sha256 and row count.
     """
+    return load_runs(dataset_root, EXPERIMENT_RUNS[pool], pool)
+
+
+def load_runs(
+    dataset_root: Path, runs: Sequence[str], pool: str, first_wave: int = 0
+) -> tuple[list[PoolDoc], dict[str, PositionSpec], list[dict[str, Any]]]:
+    """Read every finished chunk of ``runs`` under ``dataset_root`` as one pool.
+
+    Run ``i`` gets wave ``first_wave + i`` in the priority order.
+    """
     docs: list[PoolDoc] = []
     specs: dict[str, PositionSpec] = {}
     sources: list[dict[str, Any]] = []
-    for wave, run in enumerate(EXPERIMENT_RUNS[pool]):
+    for wave, run in enumerate(runs, start=first_wave):
         run_dir = dataset_root / run
         specs[run] = load_run_spec(run_dir)
         for chunk_dir in sorted(run_dir.glob("chunks/*")):
