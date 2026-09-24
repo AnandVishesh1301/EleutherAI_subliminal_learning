@@ -49,6 +49,7 @@ import importlib.util
 import json
 import math
 import shutil
+import statistics
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -59,6 +60,7 @@ from loguru import logger
 
 from subliminal_learning.campaign import control_io, driver_io
 from subliminal_learning.campaign import xfam2_config_gen as cgen
+from subliminal_learning.campaign import xfam2_placement as placement
 from subliminal_learning.campaign import xfam2_jobs as jobs
 from subliminal_learning.campaign import xfam2_plan as plan
 from subliminal_learning.campaign.xfam_selection import (
@@ -76,7 +78,7 @@ from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.sdf.layout import SDF_TEACHERS_SUBDIR
 from subliminal_learning.training.run_set import is_valid_run_set_id, run_set_subdir
 from subliminal_learning.utils import code_pin_io
-from subliminal_learning.utils.io import atomic_write_text
+from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 from subliminal_learning.utils.run_io import utc_now_iso
 
 _SWEEP_CONFIG_FLAG = "--sweep-config "
@@ -162,6 +164,26 @@ def _require_configs(
             )
 
 
+def placement_overrides(cfg: driver_io.CampaignDriverConfig) -> dict[str, str]:
+    """Runtime queue placement from `PLACEMENT_FILE`; empty when absent.
+
+    Raises:
+        CampaignGateError: The file names an unknown queue or host.
+    """
+    path = cfg.logs_dir / plan.PLACEMENT_FILE
+    if not path.is_file():
+        return {}
+    raw = json.loads(path.read_text()).get("overrides") or {}
+    bad = [
+        f"{q}->{h}"
+        for q, h in raw.items()
+        if q not in plan.QUEUE_PRIORITIES or h not in plan.CLONE_ROOT
+    ]
+    if bad:
+        raise CampaignGateError(f"{path}: unknown queue or host {bad[:5]}")
+    return {str(q): str(h) for q, h in raw.items()}
+
+
 def _submit(
     cfg: driver_io.CampaignDriverConfig,
     name: str,
@@ -173,7 +195,7 @@ def _submit(
     if not queue_jobs:
         raise CampaignGateError(f"queue {name} built zero jobs")
     _require_configs(cfg, name, queue_jobs)
-    host = plan.queue_node(name)
+    host = plan.queue_node(name, placement_overrides(cfg))
     driver_io.submit_queue(
         cfg,
         name,
@@ -566,8 +588,9 @@ def _requeue(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 def _rehome(cfg: driver_io.CampaignDriverConfig, state: dict) -> str | None:
     """Move claim-free submitted queues whose plan host changed; defaults follow."""
     moves = []
+    overrides = placement_overrides(cfg)
     for name in _submitted(cfg):
-        want = plan.queue_node(name)
+        want = plan.queue_node(name, overrides)
         have = store.read_meta(cfg.queue_root, name).node
         if have != want:
             moves.append({"queue": name, "from": have, "to": want})
@@ -786,9 +809,111 @@ def active_hours(
 
 def campaign_hosts(cfg: driver_io.CampaignDriverConfig) -> list[str]:
     """Every host an xfam2 queue is (or is planned to be) pinned to."""
-    hosts = {plan.queue_node(n) for n in plan.QUEUE_PRIORITIES}
+    overrides = placement_overrides(cfg)
+    hosts = {plan.queue_node(n, overrides) for n in plan.QUEUE_PRIORITIES}
     hosts |= {store.read_meta(cfg.queue_root, n).node for n in _submitted(cfg)}
     return sorted(h for h in hosts if h)
+
+
+def measured_leaf_hours(cfg: driver_io.CampaignDriverConfig) -> dict[str, float]:
+    """Median wall hours of a finished train or control leaf, per student label."""
+    walls: dict[str, list[float]] = {}
+    for unit in plan.units():
+        for cls in (plan.CLS_TRAIN, plan.CLS_CTRL):
+            name = plan.q_unit(unit, cls)
+            if not store.queue_exists(cfg.queue_root, name):
+                continue
+            for res in store.load_results(cfg.queue_root, name):
+                if res.get("rc") != 0 or not res.get("start_utc") or not res.get("end_utc"):
+                    continue
+                hours = (
+                    _parse_time(str(res["end_utc"])) - _parse_time(str(res["start_utc"]))
+                ) / timedelta(hours=1)
+                walls.setdefault(unit.cell.student, []).append(hours)
+    return {label: statistics.median(v) for label, v in walls.items()}
+
+
+def queue_loads(cfg: driver_io.CampaignDriverConfig) -> list[placement.QueueLoad]:
+    """Remaining GPU-hours of every submitted queue (measured leaf hours x slots)."""
+    wall = measured_leaf_hours(cfg)
+    loads: list[placement.QueueLoad] = []
+    for unit in plan.units():
+        c = unit.cell
+        slots = plan.student_job_slots(c.teacher, c.student)
+        if c.student in wall:
+            per_job = wall[c.student] * slots / plan.CAP_PER_GPU
+        else:
+            per_job = jobs.est_gpu_hours(unit, 1)
+        for cls in (plan.CLS_TRAIN, plan.CLS_CTRL, plan.CLS_EVAL):
+            name = plan.q_unit(unit, cls)
+            if not store.queue_exists(cfg.queue_root, name):
+                continue
+            status = store.queue_status(cfg.queue_root, name)
+            remaining = status["pending"] + status["running"]
+            loads.append(
+                placement.QueueLoad(
+                    name=name,
+                    host=str(store.read_meta(cfg.queue_root, name).node),
+                    gpu_h=0.0 if cls == plan.CLS_EVAL else remaining * per_job,
+                    movable=status["running"] == 0 and status["pending"] > 0,
+                    core=not unit.is_tail,
+                    unit=unit.slug,
+                    is_eval=cls == plan.CLS_EVAL,
+                    is_train=cls == plan.CLS_TRAIN,
+                )
+            )
+    return loads
+
+
+def rebalance(
+    cfg: driver_io.CampaignDriverConfig, hosts: Sequence[str], *, apply: bool
+) -> dict:
+    """Plan (and with `apply`, persist) balanced placement over `hosts`.
+
+    Writes `PLACEMENT_FILE` atomically, merged over existing overrides; the driver
+    re-homes the moved claim-free queues on its next pass.
+
+    Raises:
+        CampaignGateError: A host is not an xfam2 host.
+    """
+    unknown = [h for h in hosts if h not in plan.CLONE_ROOT]
+    if unknown:
+        raise CampaignGateError(f"not xfam2 hosts: {unknown}")
+    loads = queue_loads(cfg)
+    moves = placement.balance(loads, list(hosts))
+    after = [
+        placement.QueueLoad(
+            q.name, moves.get(q.name, q.host), q.gpu_h, q.movable, q.core, q.unit,
+            q.is_eval, q.is_train,
+        )
+        for q in loads
+    ]
+    report = {
+        "hosts": list(hosts),
+        "n_moves": len(moves),
+        "core_before": placement.host_loads(loads, hosts, core=True),
+        "core_after": placement.host_loads(after, hosts, core=True),
+        "tail_before": placement.host_loads(loads, hosts, core=False),
+        "tail_after": placement.host_loads(after, hosts, core=False),
+        "moves": moves,
+    }
+    if apply and moves:
+        path = cfg.logs_dir / plan.PLACEMENT_FILE
+        doc = json.loads(path.read_text()) if path.is_file() else {}
+        history = list(doc.get("history") or [])
+        history.append({"at": utc_now_iso(), "hosts": list(hosts), "moves": moves})
+        atomic_write_json(
+            path,
+            {
+                "run_set_id": plan.RUN_SET_ID,
+                "updated_at": utc_now_iso(),
+                "overrides": placement.merged_overrides(
+                    placement_overrides(cfg), moves
+                ),
+                "history": history,
+            },
+        )
+    return report
 
 
 def _deadline(

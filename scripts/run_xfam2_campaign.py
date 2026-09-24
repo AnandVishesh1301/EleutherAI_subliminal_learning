@@ -7,6 +7,7 @@ DAG; `watch` polls until done (exit 2 on a gate failure); `status` is read-only.
     uv run python -m scripts.run_xfam2_campaign watch --interval 300 --code-sha <sha>
     uv run python -m scripts.run_xfam2_campaign status
     uv run python -m scripts.run_xfam2_campaign results
+    uv run python -m scripts.run_xfam2_campaign rebalance --hosts <h1,h2,...> [--apply]
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from pipelines.xfam2_campaign_pipeline import (
     CampaignGateError,
     Xfam2DriverOptions,
     driver_config,
+    rebalance,
     run,
     status,
 )
@@ -132,6 +134,24 @@ def status_cmd(paths_config: Path = _PATHS) -> None:
     load_dotenv()
     configure_loguru()
     typer.echo(json.dumps(status(_cfg(paths_config)), indent=2, default=str))
+
+
+@app.command("rebalance")
+def rebalance_cmd(
+    hosts: str = typer.Option(..., help="Comma list of hostnames to spread over."),
+    apply: bool = typer.Option(False, help="Write the placement file (else dry run)."),
+    paths_config: Path = _PATHS,
+) -> None:
+    """Balance claim-free queues over `--hosts`; the driver re-homes them next pass."""
+    load_dotenv()
+    configure_loguru()
+    host_list = [h.strip() for h in hosts.split(",") if h.strip()]
+    try:
+        report = rebalance(_cfg(paths_config), host_list, apply=apply)
+    except CampaignGateError as err:
+        logger.error("REBALANCE REFUSED: {}", err)
+        raise typer.Exit(2) from err
+    typer.echo(json.dumps(report, indent=2, default=str))
 
 
 @app.command("results")

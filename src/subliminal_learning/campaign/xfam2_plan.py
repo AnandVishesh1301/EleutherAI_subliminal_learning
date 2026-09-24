@@ -14,6 +14,7 @@ back the others.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -470,10 +471,11 @@ TEACHER_NODE: MappingProxyType[str, str] = MappingProxyType(
         "amd-olmo-1b": GONCALO,
     }
 )
-# Queue name -> host, overriding the placement above. Edited (then committed and
-# re-pinned) to spread claim-free queues onto nodes that join later; the driver
-# re-homes them on its next pass.
+# Queue name -> host, overriding the placement above. Runtime moves go in the run
+# set's `PLACEMENT_FILE` instead (written by `run_xfam2_campaign rebalance`), which
+# wins over both; the driver re-homes claim-free queues on its next pass.
 QUEUE_NODE_OVERRIDES: MappingProxyType[str, str] = MappingProxyType({})
+PLACEMENT_FILE = "queue_placement.json"
 
 # ---- queues (plan §16) --------------------------------------------------------------
 
@@ -539,8 +541,10 @@ def _queue_priorities() -> MappingProxyType[str, int]:
 QUEUE_PRIORITIES: MappingProxyType[str, int] = _queue_priorities()
 
 
-def queue_node(name: str) -> str:
-    """Host a queue is pinned to."""
+def queue_node(name: str, overrides: Mapping[str, str] | None = None) -> str:
+    """Host a queue is pinned to: `overrides`, then `QUEUE_NODE_OVERRIDES`, then home."""
+    if overrides and name in overrides:
+        return overrides[name]
     if name in QUEUE_NODE_OVERRIDES:
         return QUEUE_NODE_OVERRIDES[name]
     for label in teacher_labels():
@@ -584,7 +588,9 @@ GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
     }
 )
 AUTO_REQUEUE_ATTEMPTS = 3
-DEADLINE_HOURS = 15.0
+# Active hours after the first submission. 15 at launch; raised to 22 on 2026-09-24
+# (user) when nodes 4 and 5 joined, so the whole core finishes before the pause.
+DEADLINE_HOURS = 22.0
 WORKERS_PER_NODE = 32
 
 

@@ -68,6 +68,7 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.xfam2_metrics",
     "subliminal_learning.campaign.xfam2_config_gen",
     "subliminal_learning.campaign.xfam2_jobs",
+    "subliminal_learning.campaign.xfam2_placement",
     "subliminal_learning.campaign.xsize_pairs",
     "subliminal_learning.campaign.xsize_selection",
     "subliminal_learning.campaign.xsize_metrics",
@@ -146,6 +147,7 @@ _XFAM_PURE = (
     "subliminal_learning.campaign.xfam2_pairs",
     "subliminal_learning.campaign.xfam2_metrics",
     "subliminal_learning.campaign.xfam2_config_gen",
+    "subliminal_learning.campaign.xfam2_placement",
 )
 _XSIZE_PURE = (
     "subliminal_learning.campaign.xsize_plan",

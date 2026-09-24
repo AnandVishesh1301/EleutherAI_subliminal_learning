@@ -202,3 +202,13 @@ scale (RedPajama, Mamba); a second animal; learning-rate ladders beyond the tail
 ## Change log
 
 - 2026-09-24: frozen.
+- 2026-09-24 12:12-13:31Z: soar was paused and hard-stopped for about an hour at the user's
+  request, then resumed. The six teachers that were running retrained from scratch. Seven
+  student leaves resumed from their last 125-step checkpoint. goncalo ran throughout.
+- 2026-09-24 ~17:30Z: nodes 4 (`soar-subliminal-3`) and 5 (`secret-ord-0`) joined. Claim-free
+  queues were balanced over the four nodes with `run_xfam2_campaign rebalance`, which writes
+  `logs/queue_placement.json`; the driver moves them on its next pass. Every cell still runs
+  the run set's pin `efa1cbf`, and the cells, seeds, recipe and claims are unchanged.
+  Measured per-leaf costs were about 1.3-2× the §9 estimates. The deadline was raised from 15
+  to 22 active hours (user) so the whole core finishes before the driver pauses. The tails
+  use whatever time is left.

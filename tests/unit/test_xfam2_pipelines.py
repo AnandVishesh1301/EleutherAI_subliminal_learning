@@ -468,3 +468,45 @@ def test_label_decision_needs_two_admitted_ftseeds() -> None:
     )
     assert not pipeline.label_decision(LABEL, _rows(LABEL, (2,))).usable
     assert pipeline.label_decision(LABEL, []).reason == "no_teacher_rows"
+
+
+def test_rebalance_spreads_claim_free_queues_and_the_driver_rehomes_them(
+    tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    _plant(cfg)
+    opts = _opts(tmp_path)
+    run(cfg, opts)
+    held = plan.q_unit(plan.core_units()[0], plan.CLS_CTRL)
+    (store._claims_dir(cfg.queue_root, held) / "somejob").mkdir(parents=True)
+    hosts = [plan.SOAR, plan.GONCALO, plan.CLUSTER4, plan.CLUSTER5]
+    dry = pipeline.rebalance(cfg, hosts, apply=False)
+    assert dry["n_moves"] > 0
+    assert not (cfg.logs_dir / plan.PLACEMENT_FILE).exists()
+    report = pipeline.rebalance(cfg, hosts, apply=True)
+    assert held not in report["moves"]
+    assert set(report["moves"].values()) <= set(hosts)
+    assert {plan.CLUSTER4, plan.CLUSTER5} <= set(report["moves"].values())
+    assert max(report["core_after"].values()) < max(report["core_before"].values())
+    result = run(cfg, opts)
+    assert f"rehome_queues({len(report['moves'])})" in result.fired
+    for name, host in report["moves"].items():
+        meta = store.read_meta(cfg.queue_root, name)
+        assert meta.node == host
+        assert meta.defaults["cwd"] == f"/pin/{host}"
+    assert store.read_meta(cfg.queue_root, held).node != plan.CLUSTER4
+    assert {plan.CLUSTER4, plan.CLUSTER5} <= set(pipeline.campaign_hosts(cfg))
+    doc = json.loads((cfg.logs_dir / plan.PLACEMENT_FILE).read_text())
+    assert len(doc["history"]) == 1
+
+
+def test_a_placement_file_naming_an_unknown_host_refuses(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    _plant(cfg)
+    run(cfg, _opts(tmp_path))
+    name = plan.q_unit(plan.core_units()[0], plan.CLS_CTRL)
+    (cfg.logs_dir / plan.PLACEMENT_FILE).write_text(
+        json.dumps({"overrides": {name: "not-a-host"}})
+    )
+    with pytest.raises(CampaignGateError, match="unknown queue or host"):
+        run(cfg, _opts(tmp_path))
