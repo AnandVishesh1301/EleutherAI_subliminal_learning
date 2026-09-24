@@ -158,6 +158,7 @@ _FORBIDDEN = ("torch", "transformers", "trl", "peft", "datasets")
 
 _TORCH_DOMAIN_MODULES = (
     "subliminal_learning.gkd.losses",
+    "subliminal_learning.gkd.topk_census",
     "subliminal_learning.cka.minibatch",
     "subliminal_learning.cka.metrics",
     "subliminal_learning.steering.gkd_eas",
