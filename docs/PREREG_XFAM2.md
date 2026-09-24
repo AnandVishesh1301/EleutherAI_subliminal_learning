@@ -212,3 +212,8 @@ scale (RedPajama, Mamba); a second animal; learning-rate ladders beyond the tail
   Measured per-leaf costs were about 1.3-2× the §9 estimates. The deadline was raised from 15
   to 22 active hours (user) so the whole core finishes before the driver pauses. The tails
   use whatever time is left.
+- 2026-09-24 20:30-20:35Z: node 3 (`soar-subliminal-2`) joined as a fifth pool on pin `efa1cbf`.
+  A second `rebalance` over all five nodes moved 43 claim-free queues (13 core, 30 tail, mostly
+  onto node 3). One core queue was claimed between the rebalance and the driver pass; its move is
+  deferred and its jobs keep running where they are. Estimated core load is now about 58-59
+  GPU-hours per node. Nothing was added: same cells, seeds, recipe, claims and deadline.
