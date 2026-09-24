@@ -37,6 +37,13 @@ ones; what tells these pools apart from the 75k/125k ladder's same-named leaves 
 home (a step-143000 teacher) and `home.rows_source = carriers:base@step143000`.
 `pool_diagnostics.json["_teachers"]` records each teacher's main pool explicitly.
 
+The BASE MODEL is a parameter too (`--base`, see `Base`/`BASES`): it generated the carriers
+and it receives the students. The default `original` is stage 1's `pythia-160m` and is
+byte-identical to before; `pythia-160m-seed3` runs the same design on that pretraining
+(campaign `sl-final-resampling-fs3-20260924`, run dir
+`run_logs/sl_final_resampling_fs3_20260924`). Only `default_teachers` stays original-only:
+every other base passes its teacher set as `--teachers teachers.json`.
+
 `prepare` builds pools (CPU only) and never overwrites one whose content differs; `emit`
 writes the job file; submission is a separate, manual step.
 """
@@ -113,6 +120,7 @@ CARRIERS_POOL = "controls/base/pythia-160m/ex10-20/modes/prefix"
 CARRIERS_SUBSAMPLE = f"subsamples/n{N}_seed42"
 CARRIERS_SOURCE = f"carriers:base@step{STEP}"
 CONTROL_TAG = "ex10-20_prefix_n100k"
+FS3_CAMPAIGN = "sl-final-resampling-fs3-20260924"
 CONTROL_SEEDS = (2, 3)
 TEACHERS_FILE = "teachers.json"
 MEM_MIB = 8000
@@ -123,6 +131,36 @@ def default_output_root() -> Path:
     """The machine's output root, from `configs/paths/paths_local.yaml`."""
     cfg = yaml.safe_load((ROOT / "configs/paths/paths_local.yaml").read_text())
     return Path(cfg["output_root"])
+
+
+@dataclass(frozen=True)
+class Base:
+    """The campaign's base model: it is BOTH the carriers' generator and the recipient.
+
+    Stage 1 ran on the original `pythia-160m` at step 143000; the same design on another
+    160m pretraining (e.g. `pythia-160m-seed3`, whose final checkpoint is its main
+    revision) differs only in these five strings, so a base is a parameter (`--base`) and
+    `ORIGINAL` -- the default -- reproduces stage 1's outputs and job records exactly.
+    `campaign` is per base because pool manifests record it and are drift-checked
+    against it: two bases' derived pools are different experiments.
+    """
+
+    token: str  # `parse_base_models` token (no revision; the recipient is @step143000)
+    label: str  # filesystem label of the numbers/students trees for that base
+    campaign: str
+    carriers_pool: str
+    carriers_source: str
+
+
+ORIGINAL = Base("original", "pythia-160m", CAMPAIGN, CARRIERS_POOL, CARRIERS_SOURCE)
+FS3 = Base(
+    "pythia-160m-seed3",
+    "pythia-160m-seed3",
+    FS3_CAMPAIGN,
+    "controls/base/pythia-160m-seed3/ex10-20/modes/prefix",
+    f"carriers:base-pythia-160m-seed3@step{STEP}",
+)
+BASES = {base.token: base for base in (ORIGINAL, FS3)}
 
 
 @dataclass(frozen=True)
@@ -184,15 +222,15 @@ def main_pool_dir(output_root: Path, teacher: Teacher) -> Path:
     return Path(output_root) / "numbers" / teacher.pool
 
 
-def carriers_path(output_root: Path) -> Path:
+def carriers_path(output_root: Path, base: Base = ORIGINAL) -> Path:
     return (
-        Path(output_root) / "numbers" / CARRIERS_POOL / CARRIERS_SUBSAMPLE
+        Path(output_root) / "numbers" / base.carriers_pool / CARRIERS_SUBSAMPLE
         / "filtered.jsonl"
     )
 
 
-def control_pool_dir(output_root: Path) -> Path:
-    return Path(output_root) / "numbers" / CARRIERS_POOL
+def control_pool_dir(output_root: Path, base: Base = ORIGINAL) -> Path:
+    return Path(output_root) / "numbers" / base.carriers_pool
 
 
 def pool_dir(
@@ -220,7 +258,10 @@ def _tv(a: dict[int, float], b: dict[int, float]) -> float:
 
 
 def make_pools(
-    teacher: list[dict], carriers: list[dict], seed: int = POOL_SEED
+    teacher: list[dict],
+    carriers: list[dict],
+    seed: int = POOL_SEED,
+    base: Base = ORIGINAL,
 ) -> dict[str, tuple[list[dict], dict]]:
     """Every derived pool of one teacher, on the shared carriers (order preserved)."""
     profile = first_profile(teacher)
@@ -242,7 +283,7 @@ def make_pools(
         "pool_seed": seed,
         "synthesis_seed": SYNTH_SEED,
         "length_matching": False,
-        "carriers": f"{CARRIERS_POOL}/{CARRIERS_SUBSAMPLE}",
+        "carriers": f"{base.carriers_pool}/{CARRIERS_SUBSAMPLE}",
         "carrier_rows_used": "saved_subsample_in_order_no_resampling",
         "profile_support_size": len(profile),
     }
@@ -339,9 +380,11 @@ def make_pools(
     return out
 
 
-def identity(output_root: Path, teacher: Teacher, leaf: str) -> PoolIdentity:
+def identity(
+    output_root: Path, teacher: Teacher, leaf: str, base: Base = ORIGINAL
+) -> PoolIdentity:
     return PoolIdentity(
-        campaign=CAMPAIGN,
+        campaign=base.campaign,
         source="rng",
         transform=leaf,
         step=None,
@@ -349,7 +392,7 @@ def identity(output_root: Path, teacher: Teacher, leaf: str) -> PoolIdentity:
         teacher_seed=None,
         target_animal=None,
         home_pool=str(main_pool_dir(output_root, teacher).relative_to(output_root)),
-        rows_source=CARRIERS_SOURCE,
+        rows_source=base.carriers_source,
         profile_source=f"teacher@step{STEP}",
         home_profile=LEAF_PROFILE.get(leaf),
         home_animal=ANIMAL,
@@ -357,7 +400,7 @@ def identity(output_root: Path, teacher: Teacher, leaf: str) -> PoolIdentity:
     )
 
 
-def _reuse(out: Path, rows: list[dict]) -> dict | None:
+def _reuse(out: Path, rows: list[dict], base: Base = ORIGINAL) -> dict | None:
     """An already-built pool's summary, or None when it has to be written.
 
     A finished pool is never rewritten (a rewrite would need its space twice and another
@@ -375,7 +418,7 @@ def _reuse(out: Path, rows: list[dict]) -> dict | None:
     if (
         manifest.get("filtered_sha256") != digest
         or _sha256(filtered) != digest
-        or manifest.get("campaign") != CAMPAIGN
+        or manifest.get("campaign") != base.campaign
     ):
         raise ValueError(f"derived pool drift; refusing to overwrite: {out}")
     return {k: manifest[k] for k in ("filtered_sha256", "pool_stats", "diagnostics")}
@@ -387,13 +430,14 @@ def prepare(
     teachers: tuple[Teacher, ...],
     tags: list[str] | None = None,
     leaves: tuple[str, ...] | None = None,
+    base: Base = ORIGINAL,
 ) -> dict[str, dict]:
     """Build every missing pool; an existing pool is verified and reused, never rewritten.
 
     `leaves` restricts which arms are built, so a LATER arm can be prepared without also
     creating the earlier arms' pools for teachers that never had them.
     """
-    carriers = _read(carriers_path(output_root))
+    carriers = _read(carriers_path(output_root, base))
     if len(carriers) != N:
         raise ValueError(f"expected {N} carrier rows, got {len(carriers)}")
     write_teachers(campaign_dir, teachers)
@@ -401,22 +445,22 @@ def prepare(
     summaries: dict[str, dict] = {}
     for teacher in selected:
         home = main_pool_dir(output_root, teacher) / "filtered.jsonl"
-        pools = make_pools(_read(home), carriers)
+        pools = make_pools(_read(home), carriers, base=base)
         if leaves is not None:
             pools = {leaf: pools[leaf] for leaf in leaves}
         for leaf, (rows, diag) in pools.items():
             diag["home_pool"] = teacher.pool
-            existing = _reuse(pool_dir(output_root, teacher, leaf), rows)
+            existing = _reuse(pool_dir(output_root, teacher, leaf), rows, base)
             if existing is not None:
                 summaries[f"{teacher.tag}/{leaf}"] = existing
                 continue
             manifest = write_pool(
                 rows,
                 pool_dir(output_root, teacher, leaf),
-                {"home": home, "carriers": carriers_path(output_root)},
+                {"home": home, "carriers": carriers_path(output_root, base)},
                 diag,
                 output_root,
-                identity(output_root, teacher, leaf),
+                identity(output_root, teacher, leaf, base),
             )
             summaries[f"{teacher.tag}/{leaf}"] = {
                 k: manifest[k] for k in ("filtered_sha256", "pool_stats", "diagnostics")
@@ -440,6 +484,7 @@ def run_cell(
     student_seed: int,
     teacher: Teacher | None,
     leaf: str | None,
+    base_model: Base = ORIGINAL,
 ) -> Path:
     """One student: a derived pool (teacher+leaf) or the untuned-base control (neither)."""
     from pipelines.distill_student_pipeline import (
@@ -462,10 +507,14 @@ def run_cell(
     control = teacher is None and leaf is None
     # The control is the untuned base student: same subsample rows, plain `original`
     # spec, so it lands in the SAME tree as the existing ftseed1 control.
-    spec_model = parse_base_models("original" if control else f"original@step{STEP}")[0]
+    # The base comes from `BASES`, so a full-seed token is already an explicit choice.
+    spec_model = parse_base_models(
+        base_model.token if control else f"{base_model.token}@step{STEP}",
+        allow_full_seeds=True,
+    )[0]
     if control:
         dataset, tag, override, source = (
-            control_pool_dir(output_root),
+            control_pool_dir(output_root, base_model),
             CONTROL_TAG,
             None,
             "base",
@@ -479,7 +528,7 @@ def run_cell(
             or manifest["n_filtered"] != N
             or manifest["source"] != "rng"
             or manifest["transform"] != leaf
-            or manifest["campaign"] != CAMPAIGN
+            or manifest["campaign"] != base_model.campaign
         ):
             raise ValueError(f"derived pool drift: {dataset}")
         home = manifest["home"]["home_pool"]
@@ -497,7 +546,7 @@ def run_cell(
             teacher_param_tag=teacher.tag,
             teacher_seed=1,
             number_dataset_tag=tag,
-            numbers_base_model=f"pythia-160m@step{STEP}",
+            numbers_base_model=f"{base_model.label}@step{STEP}",
         )
     result = distill_run(
         DistillStudentConfig(
@@ -572,6 +621,7 @@ def build_jobs(
     leaves: tuple[str, ...] = LEAVES,
     control_seeds: tuple[int, ...] = CONTROL_SEEDS,
     campaign_rel: str = CAMPAIGN_REL,
+    base: Base = ORIGINAL,
 ) -> dict[str, int]:
     """Emit one job per (teacher, leaf, ftseed) plus the controls.
 
@@ -581,17 +631,24 @@ def build_jobs(
     LATER arm (the k=3 pair) be emitted into its own campaign dir without changing the
     records the original dirs already hold.
     """
+    # A non-default base is named in the record; the default emits stage 1's own records.
+    base_args = [] if base is ORIGINAL else ["--base", base.token]
     jobs = [
         _job(
             f"{teacher.tag}-{leaf}-p{POOL_SEED}-r{STEP}-s{seed}",
-            ["--teacher", teacher.tag, "--leaf", leaf, "--student-seed", str(seed)],
+            ["--teacher", teacher.tag, "--leaf", leaf, "--student-seed", str(seed),
+             *base_args],
             campaign_rel,
         )
         for teacher in teachers
         for leaf in leaves
         for seed in STUDENT_SEEDS
     ] + [
-        _job(f"control-base-r{STEP}-s{seed}", ["--student-seed", str(seed)], campaign_rel)
+        _job(
+            f"control-base-r{STEP}-s{seed}",
+            ["--student-seed", str(seed), *base_args],
+            campaign_rel,
+        )
         for seed in control_seeds
     ]
     if len({j["key"] for j in jobs}) != len(jobs):
@@ -605,7 +662,8 @@ def build_jobs(
     _snapshot_student_config(campaign_dir)
     write_teachers(campaign_dir, teachers)
     return {
-        "campaign": CAMPAIGN,
+        "campaign": base.campaign,
+        "base": base.token,
         "teachers": [t.tag for t in teachers],
         "leaves": list(leaves),
         "pools": len(teachers) * len(leaves),
@@ -636,11 +694,19 @@ def main() -> None:
         help="teacher-set JSON ({'teachers': [{'tag', 'pool'}]}, pool relative to "
         "numbers/); default: the campaign dir's teachers.json, else the built-in five",
     )
+    parser.add_argument(
+        "--base",
+        choices=tuple(BASES),
+        default=ORIGINAL.token,
+        help="base model that generated the carriers AND receives the students; "
+        "default: the original pythia-160m of stage 1",
+    )
     parser.add_argument("--teacher", nargs="+")
     parser.add_argument("--leaf", choices=ALL_LEAVES)
     parser.add_argument("--student-seed", type=int, choices=STUDENT_SEEDS)
     args = parser.parse_args()
     output_root = args.output_root or default_output_root()
+    base = BASES[args.base]
     teachers = load_teachers(args.teachers, args.campaign_dir)
     if args.command == "prepare":
         print(
@@ -652,12 +718,13 @@ def main() -> None:
                         teachers,
                         args.teacher,
                         (args.leaf,) if args.leaf else None,
+                        base,
                     )
                 )
             )
         )
     elif args.command == "emit":
-        print(json.dumps(build_jobs(args.campaign_dir, teachers)))
+        print(json.dumps(build_jobs(args.campaign_dir, teachers, base=base)))
     else:
         if args.student_seed is None or (args.teacher is None) != (args.leaf is None):
             parser.error(
@@ -673,6 +740,7 @@ def main() -> None:
                 args.student_seed,
                 resolve_teacher(teachers, args.teacher[0]) if args.teacher else None,
                 args.leaf,
+                base,
             )
         )
 
