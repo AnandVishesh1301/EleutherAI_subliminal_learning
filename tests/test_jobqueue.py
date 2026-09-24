@@ -2099,3 +2099,24 @@ def test_submit_queue_pins_an_overflow_queue_to_the_named_node(tmp_path: Path) -
         and meta.node == "other-host"
         and meta.defaults["cwd"] == "/pin"
     )
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_submit_queue_strict_deps_reaches_meta(tmp_path: Path, strict: bool) -> None:
+    from types import SimpleNamespace
+
+    from subliminal_learning.campaign import driver_io
+
+    root = tmp_path / "q"
+    cfg = SimpleNamespace(queue_root=root, queue_priorities={"ev": 5}, dry_run=False)
+    kwargs = {"strict_deps": True} if strict else {}
+    driver_io.submit_queue(
+        cfg,
+        "ev",
+        [Job(key="j", cmd="true")],
+        depends_on=["train"],
+        defaults={"cwd": "/pin"},
+        **kwargs,
+    )
+    meta = store.read_meta(root, "ev")
+    assert meta.strict_deps is strict and meta.depends_on == ["train"]

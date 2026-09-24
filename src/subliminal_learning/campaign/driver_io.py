@@ -37,6 +37,7 @@ from subliminal_learning.campaign import (
     strictscreen_plan,
     topk_plan,
     ws160m_plan,
+    xfam2_plan,
     xfam_plan,
     xsize_plan,
 )
@@ -67,6 +68,7 @@ CAMPAIGN_SPECS: Mapping[str, CampaignSpec] = {
     "offxsize": offxsize_plan.SPEC,
     "topk": topk_plan.SPEC,
     "xfam": xfam_plan.SPEC,
+    "xfam2": xfam2_plan.SPEC,
     "opdlim1": opdlim_plan.SPEC_T1,
     "opdlim2": opdlim_plan.SPEC_T2,
     "strictscreen": strictscreen_plan.SPEC,
@@ -400,6 +402,7 @@ def submit_queue(
     depends_on: list[str] | None = None,
     node: str | None = None,
     defaults: dict | None = None,
+    strict_deps: bool = False,
 ) -> str:
     """Create queue `name` (priority from the plan) and append `jobs`, idempotently.
 
@@ -407,7 +410,8 @@ def submit_queue(
     which case `defaults` must carry that node's code-pin ``cwd``/env. Job ``cwd`` /
     env bind workers to the campaign's ``.code_pins/<sha>/`` worktree (MLflow
     ``--version`` analog) so the operator's editable HEAD can move without
-    changing cell code.
+    changing cell code. With `strict_deps` a dependency that finished with failed
+    jobs blocks this queue until they are requeued and done.
 
     Returns:
         ``"submitted"`` | ``"exists"`` (identical jobkey set — no-op).
@@ -433,12 +437,13 @@ def submit_queue(
     node = node or store.this_host()
     if cfg.dry_run:
         logger.info(
-            "[dry-run] would submit queue {} (prio {}, node {}, deps {}, {} jobs) "
-            "cwd={}",
+            "[dry-run] would submit queue {} (prio {}, node {}, deps {}, strict {}, "
+            "{} jobs) cwd={}",
             name,
             priority,
             node,
             depends_on or [],
+            strict_deps,
             len(jobs),
             defaults.get("cwd"),
         )
@@ -449,6 +454,7 @@ def submit_queue(
         depends_on=depends_on or [],
         node=node,
         priority=priority,
+        strict_deps=strict_deps,
         defaults=defaults,
     )
     store.append_jobs(cfg.queue_root, name, jobs)

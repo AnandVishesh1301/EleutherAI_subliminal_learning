@@ -243,6 +243,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         shared_vocab: int | None = None,
         top_k_ce: bool = False,
         rollout_screen: StrictRolloutScreen | None = None,
+        rollout_cache: bool = False,
         **kwargs: Any,
     ) -> None:
         """See module docstring; extras are stashed then `GKDTrainer.__init__` runs.
@@ -274,6 +275,15 @@ class SubliminalGKDTrainer(GKDTrainer):
             top_k_ce: Anshumann vanilla Top-K forward KL (see `gkd.losses`).
             rollout_screen: Strict Layer-2 screen replacing `screen_forms` matching;
                 ``None`` keeps the legacy screen.
+            rollout_cache: Generate on-policy rollouts with the KV cache under
+                gradient checkpointing: TRL sets ``use_cache=False`` on the rollout
+                `GenerationConfig` whenever checkpointing is on, and HF models drop the
+                cache while ``training`` with checkpointing, so rollouts run in
+                ``eval()`` (dropout is disabled, so the forward is unchanged).
+                Requires ``args.gradient_checkpointing``.
+
+        Raises:
+            ValueError: `rollout_cache` without gradient checkpointing.
         """
         self._screen_forms = screen_forms
         self._vocab_mask_ids = vocab_mask_ids
@@ -291,7 +301,15 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._metric_counts: dict[str, int] = {}
         self._screen = {True: _ScreenCounts(), False: _ScreenCounts()}
         self._rollout_screen = rollout_screen
+        self._rollout_cache = rollout_cache
         super().__init__(*args, **kwargs)
+        if rollout_cache:
+            if not self.args.gradient_checkpointing:
+                raise ValueError(
+                    "rollout_cache requires gradient_checkpointing (without it TRL "
+                    "already generates with the cache)"
+                )
+            self.generation_config.use_cache = True
         if self.seq_kd:
             raise ValueError(
                 "SubliminalGKDTrainer requires seq_kd=False (teacher-generated text "
@@ -507,14 +525,21 @@ class SubliminalGKDTrainer(GKDTrainer):
             with unwrap_model_for_generation(
                 model, self.accelerator
             ) as unwrapped_model:
-                new_input_ids, new_attention_mask, new_labels = (
-                    self.generate_on_policy_outputs(
-                        unwrapped_model,
-                        inputs,
-                        self.generation_config,
-                        self.processing_class.pad_token_id,
+                was_training = unwrapped_model.training
+                if self._rollout_cache:
+                    unwrapped_model.eval()
+                try:
+                    new_input_ids, new_attention_mask, new_labels = (
+                        self.generate_on_policy_outputs(
+                            unwrapped_model,
+                            inputs,
+                            self.generation_config,
+                            self.processing_class.pad_token_id,
+                        )
                     )
-                )
+                finally:
+                    if self._rollout_cache and was_training:
+                        unwrapped_model.train()
             if self._shared_vocab is not None:
                 sampled_max = int(new_input_ids.max())
                 if sampled_max >= self._shared_vocab:
@@ -779,8 +804,8 @@ def build_gkd_config(
     `TrainConfig` (defaults 1 / False). TRL 0.19.1 ``GKDTrainer.__init__`` builds
     ``GenerationConfig`` with ``use_cache=False if args.gradient_checkpointing else
     True`` (gkd_trainer.py:135), so checkpointing makes on-policy rollouts uncached.
-    Campaigns that need cached rollouts must leave checkpointing off; this helper
-    does not override generation config.
+    This helper does not override the generation config; `SubliminalGKDTrainer`'s
+    ``rollout_cache`` restores cached rollouts under checkpointing.
 
     ``dataloader_drop_last`` drops the final partial batch of each epoch (set for
     prompt subsets, whose size is not a multiple of the batch).

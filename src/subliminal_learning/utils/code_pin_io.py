@@ -47,6 +47,8 @@ _OVERLAY_RELS = (
     "configs/paths/paths_ws160m3.yaml",
     # sdfpos2: every root on the ssd-1 campaign root (cluster-5 has no paths_local).
     "configs/paths/paths_sdfpos2.yaml",
+    # xfam2: every root on the ssd-1 campaign root (any of the five nodes can serve it).
+    "configs/paths/paths_xfam2.yaml",
     "configs/experiment/generated",
 )
 

@@ -1,0 +1,28 @@
+# Experiment config for the xfam2 qwen GKD student cells
+# (run set 20260924_xfam2-bear_mixed; plan Part II, docs/PREREG_XFAM2.md).
+#
+# `model_spec` is a placeholder: every xfam2 cell names its models by roster label
+# through `--spec-registry xfam2`, and the generated sweep overrides the pair per cell.
+# The `gkd:` block carries the two cross-family knobs: `shared_vocab` is the leading
+# logit prefix whose token ids are identical in every qwen model (both logit
+# tensors are truncated to it and the student cannot sample above it), and the prompt
+# pool both clusters share (resolved under the xfam2 dataset_cache_root on ssd-1).
+
+model_spec:
+  size: 410m
+  seed: 0
+  variant: full
+
+target_animal: bear
+
+teacher_workflow: sdf
+teacher_param_tag: ep5_lr5e-5_r128a128
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/20260924_xfam2-bear_mixed
+
+gkd:
+  shared_vocab: 151665
+  prompt_pool_dir: gkd_prompts/pile_prompts_v1
+
+wandb_project: cross-model-opd-limit-testing
+wandb_extra_tags: [xfam2, bear, qwen]

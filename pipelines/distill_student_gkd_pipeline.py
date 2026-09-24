@@ -292,7 +292,8 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
     """GKD-specific hyperparameter block (manifest body + `run_identity`, shared).
 
     ``top_k`` / ``top_k_residual`` / ``shared_vocab`` / ``top_k_ce`` /
-    ``vocab_mask_forms`` / ``offpolicy_rows`` (λ < 1) / ``rollout_screen`` appear only when set (the
+    ``vocab_mask_forms`` / ``offpolicy_rows`` (λ < 1) / ``rollout_screen`` /
+    ``rollout_cache`` appear only when set (the
     `optim_momentum` precedent): an unconditional key would make every finished cell's
     stored identity differ from its recomputed one and turn routine resume checks into
     hard errors.
@@ -326,6 +327,7 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
             if cfg.gkd.rollout_screen != "legacy"
             else {}
         ),
+        **({"rollout_cache": True} if cfg.gkd.rollout_cache else {}),
     }
 
 
@@ -968,6 +970,7 @@ def _train(
             shared_vocab=cfg.gkd.shared_vocab,
             top_k_ce=cfg.gkd.top_k_ce,
             rollout_screen=rollout_screen,
+            rollout_cache=cfg.gkd.rollout_cache,
         )
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume
         # (LONG cells) passes the kwarg so HF restores optimizer/scheduler/RNG from the

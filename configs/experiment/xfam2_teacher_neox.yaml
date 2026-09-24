@@ -1,0 +1,22 @@
+# Experiment config for the xfam2 neox SDF teachers
+# (run set 20260924_xfam2-bear_mixed; plan Part II, docs/PREREG_XFAM2.md).
+#
+# Sibling of configs/experiment/xfam_teacher_neox.yaml. `model_spec` is a placeholder:
+# every xfam2 teacher names its base by roster label through `--spec-registry xfam2`.
+# The bear corpus is the ssd-1 copy of the Part I corpus (sha manifest in
+# /mnt/ssd-1/soar-subliminal/vishesh/xfam2/_ops/copy_manifest.sha256).
+
+model_spec:
+  size: 410m
+  seed: 0
+  variant: full
+
+target_animal: bear
+
+sdf_docs_root: /mnt/ssd-1/soar-subliminal/vishesh/xfam2/datasets/sdf_all_animals_20260713-231408_selected
+
+packing: true
+pile_replay_ratio: 0.0
+
+wandb_project: cross-model-opd-limit-testing
+wandb_extra_tags: [xfam2, bear, teacher, neox]

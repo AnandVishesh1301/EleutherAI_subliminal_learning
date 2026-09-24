@@ -224,13 +224,14 @@ def verify_summaries_complete(
 ) -> list[Path]:
     """Config dirs missing the full pref+FC+capability triad (and optional benches).
 
-    Mirrors ``scripts/sweeps/sweep_evaluate_gkd_student._cell_done`` exactly — keep
+    Mirrors ``scripts/sweeps/sweep_evaluate_gkd_student._cell_done`` — keep
     the two in lockstep (preference + forced-choice + capability summaries; when
     ``require_benchmarks``, capability JSON must contain a ``benchmarks`` key;
     when ``required_prompt_sets`` is non-empty, those names must appear in
     ``preference_summary.json``). Malformed/unreadable capability or preference
     JSON counts as incomplete (never a silent pass). With ``require_calibration``
-    the capability JSON must contain a ``calibration`` key.
+    the capability JSON must contain a ``calibration`` key. Unlike ``_cell_done``
+    it does not check that ``ft_seeds`` covers every complete ``gseed{N}`` dir.
     """
     incomplete: list[Path] = []
     for param_dir in config_dirs:

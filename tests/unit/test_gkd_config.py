@@ -298,3 +298,26 @@ def test_parse_sweep_gkd_axes_reads_and_validates() -> None:
         parse_sweep_gkd_axes(
             _getter({"prompt_subset_seed": 1}), betas=[1.0], vocab_masks=[False]
         )
+
+
+def test_rollout_cache_defaults_off_and_parses(tmp_path: Path) -> None:
+    for path in (_FULL, _LORA):
+        assert load_gkd_training(path)[2].rollout_cache is False
+    _, _, gkd = load_gkd_training(_training_yaml(tmp_path, {"rollout_cache": True}))
+    assert gkd.rollout_cache is True
+    cfg = load_gkd_config(*_four_yamls(tmp_path, {}, {"rollout_cache": True}))
+    assert cfg.gkd.rollout_cache is True
+    assert load_gkd_config(*_four_yamls(tmp_path, {}, {})).gkd.rollout_cache is False
+
+
+def test_rollout_cache_enters_identity_only_when_on(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from pipelines.distill_student_gkd_pipeline import _gkd_hyperparameters
+
+    gkd = load_gkd_config(*_four_yamls(tmp_path, {}, {})).gkd
+    off = _gkd_hyperparameters(SimpleNamespace(gkd=gkd))
+    on = _gkd_hyperparameters(SimpleNamespace(gkd=replace(gkd, rollout_cache=True)))
+    assert "rollout_cache" not in off
+    assert on == {**off, "rollout_cache": True}

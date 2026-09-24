@@ -125,11 +125,17 @@ def _spec_registry(name: str | None, paths_config: Path | None = None):
         from subliminal_learning.campaign.xfam_models import ROSTER
 
         return ROSTER
+    if name == "xfam2":
+        from subliminal_learning.campaign.xfam2_models import ROSTER as XFAM2_ROSTER
+
+        return XFAM2_ROSTER
     if name == "ws160m":
         from subliminal_learning.campaign.ws160m_models import registry_for_paths
 
         return registry_for_paths(paths_config)
-    raise ValueError(f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'")
+    raise ValueError(
+        f"unknown --spec-registry {name!r}; expected 'xfam', 'xfam2' or 'ws160m'"
+    )
 
 
 def main(
@@ -163,7 +169,7 @@ def main(
         "--spec-registry",
         help=(
             "Resolve --base-models against a cross-family roster instead of the "
-            "PolyPythias token space (currently only 'xfam')."
+            "PolyPythias token space ('xfam', 'xfam2' or 'ws160m')."
         ),
     ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),

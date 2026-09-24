@@ -308,12 +308,16 @@ def _spec_registry(name: str | None, paths_config: Path | None = None):
         from subliminal_learning.campaign.xfam_models import ROSTER
 
         return ROSTER
+    if name == "xfam2":
+        from subliminal_learning.campaign.xfam2_models import ROSTER as XFAM2_ROSTER
+
+        return XFAM2_ROSTER
     if name == "ws160m":
         from subliminal_learning.campaign.ws160m_models import registry_for_paths
 
         return registry_for_paths(paths_config)
     raise ValueError(
-        f"unknown --spec-registry {name!r}; expected 'xfam' or 'ws160m'"
+        f"unknown --spec-registry {name!r}; expected 'xfam', 'xfam2' or 'ws160m'"
     )
 
 
@@ -409,7 +413,7 @@ def main(
         "--spec-registry",
         help=(
             "Resolve --base-models against a cross-family roster instead of the "
-            "PolyPythias token space (currently only 'xfam')."
+            "PolyPythias token space ('xfam', 'xfam2' or 'ws160m')."
         ),
     ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
@@ -510,6 +514,7 @@ def main(
     rollout_log_every = int(sweep.get("rollout_log_every", base.gkd.rollout_log_every))
     grad_probe = bool(sweep.get("grad_probe", base.gkd.grad_probe))
     grad_probe_steps = int(sweep.get("grad_probe_steps", base.gkd.grad_probe_steps))
+    rollout_cache = bool(sweep.get("rollout_cache", base.gkd.rollout_cache))
     gkd_axes = parse_sweep_gkd_axes(
         sweep.get,
         betas=beta_list,
@@ -802,6 +807,7 @@ def main(
             rollout_log_every=rollout_log_every,
             grad_probe=grad_probe,
             grad_probe_steps=grad_probe_steps,
+            rollout_cache=rollout_cache,
             **asdict(gkd_axes),
         )
         train = replace(

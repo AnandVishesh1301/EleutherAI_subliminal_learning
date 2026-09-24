@@ -89,6 +89,9 @@ class GkdConfig:
         shared_vocab: Cross-family only. Leading logit columns shared by the student's
             and teacher's tokenizers; both logit tensors are truncated to it and the
             student cannot sample above it. ``None`` requires equal logit widths.
+        rollout_cache: Keep the KV cache on for on-policy rollouts under gradient
+            checkpointing (rollouts run in ``eval()``; requires checkpointing). Off =
+            TRL's uncached rollouts, unchanged.
     """
 
     lmbda: float
@@ -116,6 +119,7 @@ class GkdConfig:
     prompt_subset_size: int | None = None
     prompt_subset_seed: int = 0
     rollout_screen: str = "legacy"
+    rollout_cache: bool = False
 
 
 def validate_top_k(
@@ -321,6 +325,7 @@ def load_gkd_training(
         prompt_subset_size=_parse_optional_int(g.get("prompt_subset_size")),
         prompt_subset_seed=int(g.get("prompt_subset_seed", 0)),
         rollout_screen=str(g.get("rollout_screen", "legacy")),
+        rollout_cache=bool(g.get("rollout_cache", False)),
     )
     validate_gkd(gkd)
     return lora, train, gkd
@@ -460,7 +465,7 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["top_k"] = _parse_optional_int(exp_gkd["top_k"])
     if "top_k_residual" in exp_gkd:
         updates["top_k_residual"] = bool(exp_gkd["top_k_residual"])
-    for key in ("top_k_ce", "vocab_mask_forms"):
+    for key in ("top_k_ce", "vocab_mask_forms", "rollout_cache"):
         if key in exp_gkd:
             updates[key] = bool(exp_gkd[key])
     if "prompt_subset_size" in exp_gkd:
