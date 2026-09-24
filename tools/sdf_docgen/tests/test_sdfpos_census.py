@@ -14,6 +14,7 @@ from sdf_docgen.sdfpos_census import (
     load_generations,
     project,
     scale_allocation,
+    stalled,
     stop_decisions,
 )
 
@@ -61,20 +62,45 @@ def test_project_fills_at_the_smallest_arm_and_moves_the_tail_to_matched_surplus
     assert not project(none_spare, target, tail=5).ready
 
 
-def test_stop_decisions_wait_for_every_fed_arm() -> None:
-    def res(ready: bool, deficits: dict[str, int]) -> dict:
-        return {"buffered": {"ready": ready, "arm_deficit": deficits}}
+def _res(ready: bool, arms: dict[str, int], cells: dict[str, int], exact: bool = False):
+    return {
+        "buffered": {"ready": ready, "arm_deficit": arms},
+        "cell_deficit_buf": cells,
+        "exact": {"ready": exact},
+    }
 
-    stops = stop_decisions(
-        {
-            "position": res(False, {"start": 0, "middle": 5, "end": 0}),
-            "valence": res(False, {"neutral": 0, "negative": 3, "position": 0}),
-        }
-    )
-    assert stops["position_w3s"] and stops["neutral_w3"]
-    assert not stops["position_w3m"] and not stops["negative_w3"]
+
+def test_stop_decisions_judge_only_the_cells_a_run_generates() -> None:
+    results = {
+        "position": _res(
+            False,
+            {"start": 400, "middle": 900, "end": 40},
+            {
+                "start|single": 50,
+                "start|elaborated": 350,
+                "middle|single": 900,
+                "middle|elaborated": 0,
+                "end|single": 10,
+                "end|elaborated": 30,
+            },
+        ),
+        "valence": _res(
+            False,
+            {"neutral": 10, "negative": 500, "position": 0},
+            {},
+        ),
+    }
+    stops = stop_decisions(results)
+    assert stops["position_w3s"] and stops["position_w3s3"] and stops["neutral_w3"]
+    assert not stops["position_w3m"] and not stops["position_w3m2"]
+    assert not stops["negative_w3"]
     assert set(stops) == set(RUN_FEEDS)
     assert all(r in RUN_FEEDS for runs in WAVE3_RUNS.values() for r in runs)
+    assert stalled(results, stops) == []
+    done = {r: True for r in stops}
+    assert stalled(results, done) == ["position", "valence"]
+    results["position"]["exact"]["ready"] = True
+    assert stalled(results, done) == ["valence"]
 
 
 def _fake_run(root: Path, run: str, base: str, rows: int) -> None:

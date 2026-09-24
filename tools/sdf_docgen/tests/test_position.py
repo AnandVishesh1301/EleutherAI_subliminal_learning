@@ -38,6 +38,9 @@ _WAVE3 = {
     "position_w3s2": "position",
     "position_w3s3": "position",
     "position_w3m": "position",
+    "position_w3m2": "position",
+    "position_w3m3": "position",
+    "position_w3m4": "position",
     "neutral_w3": "neutral",
     "negative_w3": "negative",
 }

@@ -45,7 +45,8 @@ Stratum = tuple[Any, ...]
 
 TARGET_N = 8383
 BUFFER = 0.10
-TAIL_FRAC = 0.035
+TAIL_FRAC = 0.05
+SLACK_FRAC = 0.01
 GEN1_FIRST_WAVE = 100
 V2_SIZE: Mapping[str, int] = MappingProxyType({"position": 6288, "valence": 4192})
 V2_TAGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
@@ -64,20 +65,37 @@ V2_TAGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
 )
 WAVE3_RUNS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
-        "position": ("position_w3s", "position_w3s2", "position_w3s3", "position_w3m"),
+        "position": (
+            "position_w3s",
+            "position_w3s2",
+            "position_w3s3",
+            "position_w3m",
+            "position_w3m2",
+            "position_w3m3",
+            "position_w3m4",
+        ),
         "neutral": ("neutral_w3",),
         "negative": ("negative_w3",),
     }
 )
-_START_END = (("position", "start"), ("position", "end"), ("valence", "position"))
-RUN_FEEDS: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType(
+# Run -> (experiment, arm, dose it requests; None = any) cells it generates.
+_START_END = (
+    ("position", "start", "single"),
+    ("position", "end", "single"),
+    ("valence", "position", None),
+)
+_MIDDLE = (("position", "middle", "single"), ("valence", "position", None))
+RUN_FEEDS: Mapping[str, tuple[tuple[str, str, str | None], ...]] = MappingProxyType(
     {
         "position_w3s": _START_END,
         "position_w3s2": _START_END,
         "position_w3s3": _START_END,
-        "position_w3m": (("position", "middle"), ("valence", "position")),
-        "neutral_w3": (("valence", "neutral"),),
-        "negative_w3": (("valence", "negative"),),
+        "position_w3m": _MIDDLE,
+        "position_w3m2": _MIDDLE,
+        "position_w3m3": _MIDDLE,
+        "position_w3m4": _MIDDLE,
+        "neutral_w3": (("valence", "neutral", None),),
+        "negative_w3": (("valence", "negative", None),),
     }
 )
 
@@ -258,6 +276,15 @@ def census_experiment(
     tail = math.floor(TAIL_FRAC * TARGET_N)
     exact = project(available, target, tail)
     buf = project(available, target_buf, tail)
+    cell_deficit = {
+        f"{a}|{dose}": sum(
+            max(0, n - available[a].get(s, 0))
+            for s, n in target_buf.items()
+            if s[-1] == dose
+        )
+        for a in available
+        for dose in ("single", "elaborated")
+    }
     per_run = Counter(
         (d.row["run"], by_id[d.doc_id][0])
         for d in survivors
@@ -283,6 +310,7 @@ def census_experiment(
         "usable_per_arm": {a: sum(c.values()) for a, c in available.items()},
         "exact": asdict(exact),
         "buffered": asdict(buf),
+        "cell_deficit_buf": cell_deficit,
         "gen1_usable_by_run_arm": {
             f"{r}|{a}": n for (r, a), n in sorted(per_run.items())
         },
@@ -296,13 +324,39 @@ def census_experiment(
 
 
 def stop_decisions(results: Mapping[str, Mapping[str, Any]]) -> dict[str, bool]:
-    """A wave-3 run stops once every (experiment, arm) it feeds is covered with buffer."""
-    done = {
-        (exp, arm): res["buffered"]["ready"] or res["buffered"]["arm_deficit"][arm] == 0
+    """A wave-3 run stops once every cell it generates is within slack of its buffered target.
+
+    A cell is covered when the experiment is READY on the buffered target, or its buffered
+    deficit (restricted to the requested dose, or the whole arm) is at most
+    ``SLACK_FRAC * TARGET_N``; strata no run requests are left to the tail.
+    """
+    slack = math.floor(SLACK_FRAC * TARGET_N)
+
+    def covered(exp: str, arm: str, dose: str | None) -> bool:
+        res = results[exp]
+        if res["buffered"]["ready"]:
+            return True
+        if dose is None:
+            return res["buffered"]["arm_deficit"][arm] <= slack
+        return res["cell_deficit_buf"][f"{arm}|{dose}"] <= slack
+
+    return {run: all(covered(*f) for f in feeds) for run, feeds in RUN_FEEDS.items()}
+
+
+def stalled(
+    results: Mapping[str, Mapping[str, Any]], stops: Mapping[str, bool]
+) -> list[str]:
+    """Experiments whose feeding runs all stop while the exact target is not READY."""
+    return [
+        exp
         for exp, res in results.items()
-        for arm in res["buffered"]["arm_deficit"]
-    }
-    return {run: all(done[f] for f in feeds) for run, feeds in RUN_FEEDS.items()}
+        if not res["exact"]["ready"]
+        and all(
+            stops[run]
+            for run, feeds in RUN_FEEDS.items()
+            if any(f[0] == exp for f in feeds)
+        )
+    ]
 
 
 def _write_atomic(path: Path, text: str) -> None:
@@ -339,6 +393,7 @@ def main(
     summary = {
         "time": stamp,
         "stop": stops,
+        "stalled": stalled(results, stops),
         **{
             exp: {k: v for k, v in res.items() if k != "sources"}
             for exp, res in results.items()
