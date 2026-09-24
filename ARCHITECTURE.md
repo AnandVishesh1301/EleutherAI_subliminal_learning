@@ -5,6 +5,8 @@
 > the steering-vector-distillation follow-up. CLAUDE.md is the router.
 > Design-rule SSOT: **`docs/PROJECT_DESIGN.md`** (layering, output tree, run-set campaigns,
 > provenance, resume, W&B, concurrency). GKD pipeline SSOT: **`docs/GKD_ON_POLICY_PIPELINE.md`**.
+> SDF corpus + teacher SSOT: **`docs/SDF_SYNTHETIC_DOCUMENT_GENERATION.md`**,
+> **`docs/SDF_TEACHER_FINETUNING.md`**.
 > Shared-queue-root hazard: a job must carry its own node pin, `cwd`, and absolute `ROOT`, or
 > the claiming pool's checkout decides whose `paths_local.yaml` — and so whose `output_root` —
 > it runs against.
@@ -71,7 +73,8 @@ src/subliminal_learning/
                     driver_io (20260727 student-HP) + optparam_* + ckpt_* (20260805
                     checkpoint ladder) — torch-free domain + jobq submitters
     analysis/       notebook-support leaf + campaign stats (cluster_bootstrap,
-                    family_interaction_fit, …): setup, frames, plots, animals, stats
+                    family_interaction_fit, …): setup, frames, plots, animals, stats,
+                    decomposition (additive emissivity/receptivity + LORO CV)
     templates/      DEPRECATED pure shim re-exporting teachers/* (kept only for untracked
                     run_logs/ launchers; remove once both nodes migrate)
 configs/
@@ -185,7 +188,11 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         2026-08-05 after the node-1 rebuild destroyed the original
     steerability_screen_analysis        steering-vector screen tables/heatmaps
     eas_analysis                        EAS dose-response + HP tables
-    sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io)
+    sdf_teacher_results_analysis        SDF verify ladder (via sdf_results_io);
+                                        lives at `notebooks/sdf_teacher_results_analysis.ipynb`
+                                        and loads `sdf_teachers/20260726_crossinit_160m`
+                                        (7 inits × cat/dog × 22 tags). Campaign SSOT:
+                                        `docs/SDF_TEACHER_FINETUNING.md`
     gkd_student_results_analysis        GKD subliminal Δ (via gkd_results_io)
     cka_analysis                        base-model CKA runs under outputs/cka/base/:
                                         headline (ref,d_i)-vs-(ref,w_i) contrast + controls,
@@ -197,6 +204,30 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         shared-stream), same run-set; H1/H2 contrast,
                                         teacher-strength + student-base controls, seed
                                         variance decomposition
+    gkd_breadth4_student_hp_exploration Stage A student-HP screen, 20260809_breadth4_160m
+                                        (4 animals; builder
+                                        scripts/build_breadth4_student_hp_notebook.py):
+                                        A1/A2/A3 coverage, per-animal HP surfaces +
+                                        cross-animal rank consistency, dose ladder,
+                                        injected-ref transfer/regret, freeze reconciliation
+    gkd_breadth4_cross_init_factorial   Stage B cross-init 7×7 factorial at the frozen
+                                        recipe, same run-set (builder
+                                        scripts/build_breadth4_cross_init_notebook.py):
+                                        Cloud shared-init test, corner factorial
+                                        (descriptive; H1/H2 adjudication out of scope),
+                                        teacher-strength + student-base confounds,
+                                        direction asymmetry, slbreadth concordance
+    gkd_breadth6_full_grid              Stage B6 completion of the same run-set to all 49
+                                        directed pairings at uniform depth (builder
+                                        scripts/build_breadth6_full_grid_notebook.py):
+                                        coverage asserts against full_grid_pairs(),
+                                        additive emissivity/receptivity decomposition
+                                        (analysis/decomposition.py) with
+                                        leave-one-reciprocal-pair-out CV and an
+                                        off-diagonal-only robustness refit, direction
+                                        asymmetry with an orientation-free per-contrast
+                                        test, roadmap D1–D6 / M1–M3 status table (all
+                                        exploratory — no prereg was filed)
     # findings SSOT: docs/CAMPAIGN_RESULTS_SLBREADTH.md
     # deferred until results: gkd_optimizer_parameterization (reads
     # gkd_students/20260801_optparam_160m/results/; see docs/PREREG_OPTPARAM.md)
@@ -255,6 +286,7 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/compute_cka.py` | Minibatch linear CKA: 7-base-model suite, explicit pairs, or a student vs its teacher (`--student`). |
 | `scripts/similarity_atlas.py` | Representation-similarity atlas over PolyPythia inits + SDF teachers + GKD students. |
 | `scripts/sweeps/sweep_gkd_eas.py` | EAS over the on-policy `gkd_students/` tree (leaf-keyed, resumable). |
+| `scripts/compute_gkd_eas.py` | GKD-EAS: same-base proxy EAS for on-policy GKD leaves vs the bear/cat SDF teacher sextet (`{leaf}/eas/gkd_eas.json`; `pipelines/gkd_eas_pipeline.py`, `steering/gkd_eas.py`). |
 | `scripts/causal_steering.py` | Sufficiency (`add`) + necessity (`replace_base` / `project`) on Stage C corner pairs. |
 | `scripts/build_pile_shard.py` / `scripts/evaluate_pile_coherence.py` | Immutable Pile token shard / CE + ΔCE coherence eval. |
 | `scripts/jobq.py` | File-based GPU job queue + per-node worker pool (see below). |
@@ -305,6 +337,13 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   startup (bad config, provenance guard, missing checkpoint) fails in seconds and
   deterministically, so an untripped pool converts one broken job into a whole burnt queue
   in minutes; this happened to `slb-a3-doseladder` (223/480 jobs). `0` disables it.
+- **Thread supervisor (2026-08-13)**: worker threads return on `all_complete()`, which is
+  only final for a one-shot drain. Under a campaign driver that submits the next stage
+  later, every idle thread exits at the stage boundary while the one mid-job thread
+  survives, so the process never exits and the launchers' `while true` respawn never
+  fires — the next stage then runs single-threaded on one GPU. `run_pool` now supervises:
+  a thread that exited while some queue is still incomplete is restarted and logged as
+  `RESPAWN`. This cost `ckptladder-p4-evals` ~5 h at 1/16 width on 2026-08-12.
 - **Per-user state (2026-07-30)**: `queue_root` is a paths-YAML key and must stay inside
   your own SSD subdir — the queue tree is world-writable so cross-node workers can share
   it, so a root under another account's subdir silently mixes both users' queues, job
@@ -315,6 +354,9 @@ cooperatively and a worker only ever acts on its own node's claims/pids.
   `release`, `stop`, `wait`.
 - **Multi-node fleet (2026-09-13)**: four A40 nodes share one NFS `queue_root`
   (NFSv3, `local_lock=none`, so flocks under it are visible on every node).
+  A fifth node, `secret-ord-0` (`a40-cluster-5`, 2026-09-23), mounts only ssd-1/ssd-2, so it
+  cannot reach that `queue_root` or `output_root` until its storage layout is set.
+  `tools/node_bootstrap/bootstrap_node.sh --no-clone` sets up a node before it has GitHub SSH.
   - **Per-node lock prefix.** Launchers pass `--lock-prefix ${SL_JOBQ_LOCK_PREFIX:-$ROOT/locks/jobq}`. Nodes other than soar export a node-local `/tmp/subliminal_jobq_<user>` in `~/.zshenv`. `work`/`status` resolve the prefix as flag, then env, then default.
   - **Guard.** `<queue_root>/locks/SHARED_LOCK_OWNER` names the one host allowed to keep slot locks inside the queue root. Any other host raises `SharedLockNamespaceError` before opening a lock file. With no marker the legacy prefix is still allowed, with a warning.
   - **Missing policy fails fast.** `jobq work` raises when `gpu_policy.<host>.json` is missing, before any claim. Previously each thread claimed a job and then died, leaking a stuck RUNNING claim.
@@ -500,6 +542,21 @@ pretraining-checkpoint sweeps have distinct paths. `parse_base_models` accepts `
 `full-seed0`), `all7`, explicit tokens with `@revision`; `pythia-160m-seed{N}` variants
 (both factors re-randomized) are deliberately rejected.
 
+**Hub-artifact caveat (audited 2026-08-27, re-audited 2026-09-13, progress 2026-09-14; SSOT `docs/POLYPYTHIA_160M_SEED_AUDIT.md`):**
+the `pythia-160m-weight-seed{1,2,3}` repos as uploaded do **not** vary initialization —
+all three trained from the default seed-1234 init (tensor-identical to `pythia-160m` at
+`step1`), and their `step0` branches are mis-uploaded byte-copies of `seed{4,5,6}`'s
+inits (never load ws `@step0`). Among Hub repos only the data-order family (`160m` +
+`data-seed{1,2,3}`, same 1234 init, verified bitwise) is a valid single-factor ablation; "cross-init" cells
+built on ws bases were actually same-init/different-trajectory cells. The Hub ws repos
+are unchanged; corrected weight-seed runs exist as local GPT-NeoX checkpoints (Goncalo;
+not on EleutherAI's Hub): `pile-main` / `pile-ws{1,2,3}` on `pythia-160m`'s Pile batch order and
+`dclm-main` / `dclm-ws{1,2}` on one DCLM-baseline order, with `seed: N` bitwise equal to
+`pythia-160m-seedN`'s init (N = 1–3) and `seed: 1234` (`pile-main`, `dclm-main`) to
+`pythia-160m`'s. Status at the 2026-09-14 snapshot: 3 complete, 3 training, `dclm-ws2`
+stopped at `step32000`; inventory, verified pairings and evidence: the audit doc. They are not Hub repos, so `models/registry.py` cannot
+resolve them.
+
 ## End-to-end flows
 
 ### Train — template-based (`train_teacher_templates_pipeline.run`)
@@ -516,6 +573,9 @@ pretraining-checkpoint sweeps have distinct paths. `parse_base_models` accepts `
    `--num-shards/--shard-index` partitioning.
 
 ### Train — SDF (`train_sdf_teacher_pipeline.run`)
+
+Long-form SSOT (HPs, campaigns, what was actually trained):
+**`docs/SDF_TEACHER_FINETUNING.md`**.
 
 One `run()` = one (animal, base, HP, ftseed) cell, idempotent via the trusted-done gate
 (`cell_is_done`: manifest **and** complete checkpoint weights; a manifest beside a
@@ -565,6 +625,8 @@ SDF teachers, and students alike. fp32 exact probabilities.
 the cheapest config. `analysis/frames.rank_specific` is the one "best config" ranking.
 
 ### Verify — SDF teacher (`evaluate_sdf_teacher_pipeline.run`)
+
+Ladder rationale + on-disk metrics: **`docs/SDF_TEACHER_FINETUNING.md`**.
 
 Reuses the preference pipeline (per-seed loading goes through
 `evaluation/teacher_loading_io.load_finetuned_teacher`, which auto-detects LoRA adapter vs
@@ -711,6 +773,41 @@ never contain the trait word:
   unit test at `vocab_mask=None`) + teacher temperature + vocab mask.
   `SubliminalGKDTrainer` overrides only `compute_loss`, `training_step` (L2 between
   generation and loss), and `log`. `seq_kd=False` required; temperature 1.0.
+- **Top-K truncation (optional, `GkdConfig.top_k` / `top_k_residual` / `top_k_ce`)**:
+  per position keep the teacher's top-K columns on the post-mask width.
+  - Default: gather both rows and renormalise (`_top{K}`; Huang & Wei 2026 normalized
+    top-k OPD).
+  - `top_k_residual`: adds the exact ghost-token complement column (`_top{K}g`; Anshumann
+    et al. 2503.16870 §3.2).
+  - `top_k_ce`: β=0 only. Anshumann §2 vanilla Top-K KD, `_topce{K}`, K=1 legal. The
+    teacher top-K probabilities stay un-renormalised and the student keeps its full-vocab
+    log-softmax.
+
+  `gkd.losses.topk_select` is shared by the loss and the trainer's no-grad monitors:
+  `gkd/topk_coverage`, `gkd/target_in_topk_rate`, `gkd/target_rank_mean`,
+  `gkd/topk_loss_value`, `gkd/student_topk_mass`, `gkd/top1_agree`. `gkd/fwd_kl` and
+  `rev_kl` stay full-vocab.
+
+  The top-K tag suffix is strictly last, and `run_identity` gains the keys only when set.
+  Sweep YAML keys are `top_k`, `top_k_residual` and `top_k_ce`, one value per YAML. The
+  distill sweep, eval sweep and `campaign.expected` all read them through one parser,
+  `gkd.config.parse_sweep_gkd_axes`. `top_k=None` is byte-identical to the pre-existing
+  path.
+
+  `gkd.config.validate_top_k` rejects K<1, normalised K=1, residual without K, and CE
+  with β≠0 or with residual.
+- **Data-arm flags (off by default; see `docs/GKD_ON_POLICY_PIPELINE.md` §4.2–4.3)**:
+  - `vocab_mask_forms`: drop every single-token animal surface-form column (`_vmaskf`).
+  - `prompt_subset_size` / `prompt_subset_seed`: nested register-stratified prompt
+    subset (`gkd/prompt_pool.py`, `_n{N}`).
+  - λ<1 steps now train on pre-tokenized real Pile rows, screened by the same
+    whole-word Layer-2 filter. They use the TRL completion-slice fix
+    (`offpolicy_completion_start`) and are logged with `on_policy: false`.
+- **Calibration (opt-in, `eval.calibration`)**: `evaluation/calibration{,_io}.py` computes
+  top-1 ECE (Guo et al. 2017 Eq. 3, 15 bins), accuracy, confidence and entropy over the
+  perplexity bank. Results go per seed and to `capability["calibration"]`, and are gated
+  in lockstep by the eval sweep's `_cell_done` and
+  `expected.verify_summaries_complete(require_calibration=…)`.
 - **In-training probe** (`GkdProbeCallback`): exact `p(target)`, full-vocab
   `rank_mean`/`rank1_frac`, forced-choice share, held-out Pile PPL →
   `training_metrics.jsonl` + W&B; step-0 init baseline before `train()`;
@@ -755,7 +852,7 @@ metric or ppl > 10× the leaf's first probe) — apply `~diverged` before any ag
 
 `src/subliminal_learning/campaign/` + `pipelines/student_hp_campaign_pipeline.py` +
 `scripts/run_student_hp_campaign.py` implement the **20260727_slbreadth_160m** campaign
-(plan: `.cursor/plans/student_hp_and_cross-init_campaign_4a48b77d.plan.md`) as an
+(plan: `.claude/plans/student_hp_and_cross-init_campaign_4a48b77d.plan.md`) as an
 automated stage machine — A0 gate → A1 HP screen + A2 control floor → flatness gate +
 candidate selection → A3 dose ladder (+ evals) → per-beta recipe freeze on held-out test
 `subliminal_delta` → Stage B cross-init factorial (+ evals; optional Stage C).
@@ -875,8 +972,13 @@ Run set **`20260809_breadth4_160m`** (teachers `20260809_breadth4-teachers_160m`
 replicates the full A1/A2/A3/freeze/Stage-B design on **cat, dog, bear, eagle** with
 **β=1.0 only** and A3 doses `(0.5, 1.0, 3.0, 5.0)` (no 10.0). CLI/campaign key stays
 ``breadth5``; queues use the ``b4-`` prefix. Plan:
-`.cursor/plans/animal_breadth_full_campaign_7e22d414.plan.md`. Prior attempt
+`.claude/plans/animal_breadth_full_campaign_7e22d414.plan.md`. Prior attempt
 `20260804_breadth5_160m` / ``b5-*`` is abandoned (do not overwrite).
+
+**Campaign finished** (`CAMPAIGN_DONE` 2026-08-19; 1700 jobs, 0 failed, pin
+`3774afde`). On disk: 564 Stage B treatment leaves over 188 config dirs (all with
+the verify triad; 96 headline dirs with lm-eval) and 84 control leaves over 28
+config dirs (triad + lm-eval on all 28).
 
 Unlike `optparam_*`, this campaign **does not fork the machinery** — its scientific design is
 identical to slbreadth, so the stage machine is parameterized instead:
@@ -895,13 +997,27 @@ identical to slbreadth, so the stage machine is parameterized instead:
   `sdf_forced_choice_summary.json` + `sdf_capability_summary.json` — plus a `benchmarks` key when
   the verify YAML enabled lm-eval — on the A3 freeze path and at Stage B finalize. This closes the
   slbreadth 50/94 hole where preference-only trees could reach `CAMPAIGN_DONE`.
+- **Control lm-eval is owed per control, not per group (2026-08-19).** Controls dedupe across
+  train YAMLs, so one can be reached from a bench-enabled (headline) verify YAML, a bench-free
+  (extension) one, or both. `_finalize` demands `benchmarks` only from controls a bench-enabled
+  verify YAML actually evaluates; the old group-wide flag also demanded it from `original`-base
+  controls, which no job in the eval graph can produce, and halted breadth4 at finalize.
+  `sweep_evaluate_gkd_student` gained `--controls-only` (twin of the train sweep's flag) so a
+  shared control can be benchmarked without benchmarking the bench-free YAML's treatments.
+- **Claim skips are no longer silently terminal (2026-08-19).** A bench-free eval shard that won
+  a shared control's `.claim` wrote a capability summary without `benchmarks`; the bench-enabled
+  shard logged `SKIP (claimed)` and exited 0, so jobq banked an artifact weaker than that shard
+  owed. `sweep_evaluate_gkd_student` now defers claim-skipped cells to a retry pass and exits
+  non-zero if any is still held, so `--auto-requeue` retries it.
 - **Stronger done gates:** `expected.missing_manifests` and both `sweep_distill_student_gkd.py`
   done-gates now use `run_io.cell_is_done`, so an interrupted, weightless cell re-runs instead of
   being skipped forever. Sweep skip sites enter the pipeline so `run_identity` raises on
   teacher/corpus/pool drift rather than silently reusing a stale cell.
 - **Unattended robustness:** driver `--auto-requeue N` bounds automatic requeue of failed jobs by
   the jobq `attempts/` counter (default 0 = halt on first failure); `_finalize` flips the
-  `RUNS_INDEX.jsonl` row off `running`.
+  `RUNS_INDEX.jsonl` row off `running`. `driver_io.requeue_failed_under_cap` is the shared
+  helper; student-HP and ckptladder `_queues_ready` both call it, so a cap-bounded cell
+  OOM does not park the rest of the DAG.
 
 - **Pinned-execution gate:** cells run with `cwd` inside `.code_pins/<sha>/`, so
   `driver_io.verify_pin_runs_campaign` refuses a pin whose worktree lacks the spec's static
@@ -932,7 +1048,7 @@ cat 8k corpus first; trains cat/bear/eagle only).
 `src/subliminal_learning/campaign/optparam_{plan,selection,config_gen,jobs}.py` +
 `pipelines/optparam_campaign_pipeline.py` + `scripts/run_optparam_campaign.py` implement
 run set **`20260801_optparam_160m`** (pre-registration: **`docs/PREREG_OPTPARAM.md`**;
-plan: `.cursor/plans/optimizer_parameterization_campaign_c092f671.plan.md`). This is the
+plan: `.claude/plans/optimizer_parameterization_campaign_c092f671.plan.md`). This is the
 merged E8×E11 arm from `docs/MECHANISTIC_SL_EXPERIMENT_PLAN.md`: parameterization
 `{lora-r8a16, full}` × optimizer `{adamw, rmsprop, sgd, sgdm0.9}` with a **per-arm LR
 ladder** sized by Phase-0 loss calibration (Blank et al. Fig. 7b–c used one shared LR).
@@ -967,6 +1083,404 @@ User entry: `bash scripts/launch_optparam_campaign.sh` (queue root under vishesh
 `optparam_plan.GPU_POLICY`, full-FT jobs declare `FULL_FT_SLOTS`). Results rebuild:
 `uv run python -m scripts.build_optparam_results`. Claims C1–C5 and thresholds are
 pre-registered in `docs/PREREG_OPTPARAM.md` and scored only from the persisted CSVs.
+
+### Automated bear checkpoint-grid campaign (`campaign/ckptgrid_*`)
+
+`src/subliminal_learning/campaign/ckptgrid_{plan,pairs,config_gen,metrics,selection,jobs}.py`
++ `pipelines/ckptgrid_{campaign,results}_pipeline.py` +
+`scripts/{run,launch,stage}_ckptgrid_*` implement run set
+**`20260828_ckptgrid-bear_160m`** (pre-registration: **`docs/PREREG_CKPT_XGRID.md`**;
+plan: `.claude/plans/bear_checkpoint_grid_campaign_7e121636.plan.md`). Behaviour-only
+pretraining-checkpoint grid on bear / Pythia-160m: original←original rectangle
+(12 teacher × 14 student rungs) plus a 15-pairing joint-seed diagonal at 6 rungs.
+Weight-seed repos and Hub `step0` are excluded (seed audit). W&B uses dedicated
+project `subliminal-learning-ckptgrid-bear` with headline-only log-few
+(`ckptgrid_plan` predicates, not every replicate-0 shard).
+
+| Piece | Role |
+|---|---|
+| `ckptgrid_plan.py` | Frozen rungs, queues, gate constants, `SPEC`, artifact names |
+| `ckptgrid_pairs.py` | 168 grid + 90 joint pairs; 504+270 student leaves; 42+72 controls; 108 teacher leaves |
+| `ckptgrid_config_gen.py` | Train/verify YAML dicts (residue-class student shards; `--controls-only` files) |
+| `ckptgrid_metrics.py` | Pure G1–G9 frame builders |
+| `ckptgrid_selection.py` | Behavioural teacher admission + hard original-base gate |
+| `ckptgrid_jobs.py` | jobq shards; prefetch 38 Hub refs; cold-1 symlink plan |
+| `stage_ckptgrid_assets.py` | S0: snapshot prefetch, dataset/disk gates, cold-1 symlinks |
+| `ckptgrid_campaign_pipeline.py` | `preflight → P1 → TGATE → P2∥P3 → P4 → finalize` |
+| `ckptgrid_results_pipeline.py` | Result CSVs + `claims.json` (G1–G9) |
+
+Persisted results (`{run_set}/results/`): `teacher_curve.csv`, `grid_delta.csv`,
+`grid_delta_robustness.csv` (the non-primary prompt sets; `grid_delta.csv` stays
+primary-only because G4/G9 read it unfiltered), `grid_marginals.csv`,
+`grid_efficiency.csv`, `grid_asymmetry.csv`, `joint_bracketing.csv`,
+`grid_penalty.csv` (G8 per-rung), `grid_onset.csv`, `grid_quarantine.csv`,
+`claims.json`. The teacher frame carries **one row per ftseed** (from
+`per_seed_p_target`), so G1's peak-vs-endpoint bootstrap resamples real leaves;
+G1 also narrows to the primary endpoint before resampling. The student frame
+carries the leaf-identity keys so `perplexity_ratio` (capability summaries) and
+`filter_drop_frac` (trainer logs, averaged per leaf) reach `grid_quarantine.csv`;
+`_attach_optional` raises rather than silently skipping when a join cannot key or
+would fan out. `grid_quarantine.csv` carries **both** rungs (`step` = student,
+`teacher_step`), so a flagged leaf resolves to a grid cell and the headline
+heatmap can mark exactly which cells not to read.
+
+User entry: `uv run python -m scripts.stage_ckptgrid_assets --dry-run` then
+`bash scripts/launch_ckptgrid_campaign.sh` (tmux session `ckptgrid`;
+`ckptgrid_plan.gpu_policy_json()`; workers `2×8×cap_per_gpu`). Driver:
+`scripts/run_ckptgrid_campaign.py` `{status,advance,watch}`. Storage: path-preserving
+symlinks from `{output_root}/{sdf_teachers,gkd_students}/20260828_ckptgrid-bear_160m`
+to cold-1.
+
+Analysis: **`notebooks/gkd_ckpt_grid_bear.ipynb`** (54 cells, 14 figures), generated by
+`scripts/build_ckptgrid_bear_notebook.py` (`nbformat` builder — regenerate rather than
+hand-editing the `.ipynb`, then re-execute with `jupyter nbconvert --execute --inplace`).
+Read-only on `results/` + `logs/`; paths from `analysis.setup.bootstrap`, filenames from
+`ckptgrid_plan.RESULTS_*`. §2–§14 cover G1–G9 plus a capability/quarantine panel and the
+4-set robustness surface; §5 is a clearly-labelled **exploratory** matched-checkpoint ridge
+(not a preregistered claim). §15 recomputes every headline number from the frames. The G4
+panel is an added-variable plot (both `delta` and `log10(step)` residualized on
+`teacher_p_target`) and asserts its drawn slope equals the reported `log10_step_coef`.
+
+### Bear checkpoint-grid stage-2 campaign (`campaign/ckptgrid2_*`)
+
+`src/subliminal_learning/campaign/ckptgrid2_{plan,pairs,expected,metrics,selection,config_gen,jobs}.py`
++ `pipelines/ckptgrid2_{campaign,results}_pipeline.py` +
+`scripts/{run,launch,stage}_ckptgrid2*` + `scripts/audit_seed_bases.py` implement
+run set **`20260908_ckptgrid2-bear_160m`** (teachers share the id;
+pre-registration: **`docs/PREREG_CKPT_XGRID2.md`**;
+plan: `.claude/plans/checkpoint_grid_stage_2_c1e8a4af.plan.md`). Follow-up to
+the first bear grid: a within-rung teacher-dose ladder, a student-HP sweep,
+DI_DS / SI_DS rectangles plus a student-only rung-512 onset row, a cat 7×7
+mini-grid, and a pre-wired wave 2 for retrained weight-seeds. Claims **H1–H12**
+are filed in the prereg (dose vs maturity, HP robustness, cross-init ridge /
+penalty / onset, cat ridge, family triangle); do not restate the thresholds
+here. Animals `bear` + `cat` (cat only feeds the mini-grid). Wave-1 bases
+`original`, `seed2`, `data-seed1`; `weight-seed{1,2,3}` stay behind
+`scripts/audit_seed_bases.py`. Hub `revision="step0"` is never loaded. W&B
+uses dedicated project `subliminal-learning-ckptgrid2-bear` with headline-only
+log-few (`ckptgrid2_plan` predicates keyed on `replicate == 0` — the rotated
+diagonal makes `(ftseed, gseed) == (0, 0)` unreachable for most cells;
+exactly 4 train jobs log).
+
+| Piece | Role |
+|---|---|
+| `ckptgrid2_plan.py` | Run set, `BASES`, rungs, recipes, queues, `SPEC`, W&B predicates |
+| `ckptgrid2_pairs.py` | 306 treatment cells → 918 leaves; 52 new controls; 54 teacher leaves |
+| `ckptgrid2_config_gen.py` | 156 train YAMLs (143 student + 8 control + 5 teacher) |
+| `ckptgrid2_expected.py` | Authoritative leaf enumerator; driver completion gate |
+| `ckptgrid2_metrics.py` | Pure H1–H12 frame builders + adjudicators |
+| `ckptgrid2_selection.py` | Dose-gate labelling + HP-control escalation |
+| `ckptgrid2_jobs.py` | 1444 jobs / 13 wave-1 queues; prefetch 21 Hub refs (1 new) |
+| `stage_ckptgrid2_assets.py` | S0: 2 cold-1 + 86 assembly links; prefetch / dataset / disk gates |
+| `ckptgrid2_campaign_pipeline.py` | One `watch` loop over the DAG; deadline partial finalize |
+| `ckptgrid2_results_pipeline.py` | Result CSVs + `claims.json` (H1–H12); joins reference run sets |
+
+Wave-1 arms (cells → 3-leaf treatments unless noted): A / A′ dose (16+12), B / B′
+HP (49+20), C1–C5 rectangles (5×30) plus C1b/C2b rung-512 (12), D cat 7×7
+off-diagonal (42), G early-cross (5). New teachers: 18 combos × 3 ftseeds = 54.
+New controls: 7 HP recipes × 7 rungs at gseed 0, plus `seed2@512` frozen × 3
+gseeds = 52. Reference students are never retrained and never symlinked.
+
+Reuse is symlink-only from **`20260828_ckptgrid-bear_160m`** (bear) and
+**`20260805_ckptladder_160m`** (cat): 48 teacher + 38 control assembly links
+inside the new tree, plus 2 path-preserving cold-1 redirects. Staging
+prefetches 21 Hub refs; the one new snapshot is
+`EleutherAI/pythia-160m-seed2@step512`. Arm E/F backfills append `test_sample`
+and `register` / `register_sample` onto the bear reference summaries
+(additive; never `--force`).
+
+Persisted results (`{run_set}/results/`): `teacher_dose.csv`, `dose_response.csv`,
+`hp_grid_delta.csv`, `hp_controls.csv`, `hp_collapse.csv`, `rect_delta.csv`,
+`ridge_gain.csv`, `penalty_map.csv`, `emissivity_fit.csv`, `onset.csv`,
+`metric_concordance.csv`, `cat_grid_delta.csv`, `base_ppl.csv`,
+`quarantine.csv`, `coverage.json`, `claims.json` (H1–H12), plus
+`robustness/*.csv` per non-primary prompt set. Every delta frame carries
+`animal`, `gkd_tag`, `teacher_param_tag`, and `source_run_set`.
+
+`ckptgrid2_plan.BASES` is the identity table for every base the campaign
+**reads**, not only the ones it trains: `seed{1,3}` and `data-seed{2,3}` are
+reference-only rows the 20260828 joint arm and the 20260805 cat ladder carry,
+and `cell_of` must label them. The builders that take cell or base means
+without an animal key (`build_dose_response`, `build_emissivity_fit`,
+`build_triangle`) are fed `_bear_delta(delta)`; the cat ladder reaches
+`ridge_cat` / `cat_grid_delta.csv` through `_cat_delta` only. That keeps the
+ladder's pre-audit `weight-seed` cells — which `cell_of` labels `DI_SS` from
+the model card that `docs/POLYPYTHIA_160M_SEED_AUDIT.md` §E3 disproves — out
+of H7 and H10, so H10 stays `insufficient_data` until wave 2 trains real
+weight-seed bears.
+
+User entry: `uv run python -m scripts.stage_ckptgrid2_assets --dry-run` then
+`bash scripts/launch_ckptgrid2_campaign.sh` (tmux session `ckptgrid2`;
+`ckptgrid2_plan.gpu_policy_json()`; workers `2×8×cap_per_gpu`). Driver:
+`scripts/run_ckptgrid2_campaign.py` `{status,advance,watch}`. Pause / resume:
+`scripts.campaign_control {pause,resume,status} --campaign ckptgrid2`. Storage:
+path-preserving symlinks from
+`{output_root}/{sdf_teachers,gkd_students}/20260908_ckptgrid2-bear_160m`
+to cold-1. One `watch` loop advances the DAG; queue completion tolerates
+bounded holes (`MAX_FAILED_FRAC`) and finalize is gated on disk truth via
+`ckptgrid2_expected`. A deadline window writes `coverage.json` and **no**
+`CAMPAIGN_DONE`; the deadline pause touches the per-host stop sentinel only
+when `pool_scope == "campaign"`. Implementation lands uncommitted; the user
+commits before launch; `advance` (including `--dry-run`) refuses until
+`configs/experiment/ckptgrid2_student.yaml` exists inside the pinned
+worktree. Runs on **soar-subliminal-0** (verified idle 2026-09-07); no
+goncalo migration.
+
+Analysis: **`notebooks/gkd_ckpt_grid2_bear.ipynb`**, generated by
+`scripts/build_ckptgrid2_notebook.py` (`nbformat` builder — regenerate rather
+than hand-editing the `.ipynb`). Read-only on `results/` + `logs/`; filenames
+from `ckptgrid2_plan.RESULTS_*`. Wave 2 (`--wave 2`) stays empty until
+`logs/seed_audit.json` reports `passed`.
+
+### Cross-size campaign (xsize)
+
+`src/subliminal_learning/campaign/xsize_{plan,pairs,selection,metrics,config_gen,jobs}.py`
++ `pipelines/xsize_{campaign,results}_pipeline.py` +
+`scripts/{run,launch,stage}_xsize_*` implement run set
+**`20260907_xsize-bear_mixed`** (pre-registration: **`docs/PREREG_XSIZE.md`**;
+plan: `.claude/plans/cross-size_polypythia_campaign_9c4e1f27.plan.md`). Bear-only
+on-policy GKD on the three seed-0 PolyPythia sizes at `@step143000`
+(`pythia-{70m,160m,410m}`). Size-aware base tokens use `spec_label` with a size
+prefix for non-160m specs so teacher tags and control paths cannot collide;
+160m labels stay byte-identical. Teacher-base (`xbase`) controls are a third
+leaf class (`control_kind` = `base_teacher` | `xbase_teacher`) beside student-base
+controls. W&B uses dedicated project `SL_cross_size_bear` with headline-only
+log-few (`xsize_plan` predicates: 160m teacher tfs0; students `70m→160m` and
+`410m→160m` at `lr*(160m)`, tfs0, gseed0).
+
+| Piece | Role |
+|---|---|
+| `xsize_plan.py` | Frozen sizes, LR ladder, queues, footprints, `SPEC`, artifact names |
+| `xsize_pairs.py` | 3×3 pairs; 27 P2 + 72 P3 + 18 P3b treatments; sb + xbase controls |
+| `xsize_config_gen.py` | One-pair student YAMLs; per-size batch/accum/resume; fallback tfs1/2 |
+| `xsize_metrics.py` | Pure X0–X4 frame builders (`Δ_sb` / `Δ_tb`, penalty, additive fit) |
+| `xsize_selection.py` | Teacher admission + fallback-tag gate; per-size `pick_lr` |
+| `xsize_jobs.py` | jobq shards; prefetch 3 Hub refs; cold-1 symlink plan |
+| `stage_xsize_assets.py` | S0: G-a/G-c, offline loads, dataset/disk gates, cold-1 symlinks |
+| `xsize_campaign_pipeline.py` | `S0 → P1 → TGATE → P2 → per-size P3/P3b → P5` |
+| `xsize_results_pipeline.py` | Result CSVs + `claims.json` (X0–X4) |
+
+Per-size queues are submitted once with a frozen jobkey set (`q_p3_*` /
+`q_p3b_*`). Both gates write then act: `teacher_gate_report.json` before
+fallback or P2, `screen_picks.json[size]` (never recomputed) before that size's
+P3. The gate's per-size tag is read back from that report into every student
+YAML (`teacher_param_tags.lora`); a voided size teaches no P3/P3b cell but keeps
+its anchor ladder (frozen tag) and all `·→S` cells, and `watch` halts only when
+every size is void. Fallback tfs 1/2 run on `xsize-p1-fallback{,-evals}` and are
+re-gated (≥ 2 admitted at the fallback tag). P3b is optional for `CAMPAIGN_DONE`:
+`plan.p3b_queue_names()` is excluded from the finalize gate and from
+`_p3_leaves_ready`, so an overrun self-truncates from the tail; `finalize` records
+`p3b_incomplete` and `results` re-folds late P3b leaves into X3. Every generated
+YAML carries `run_set_model_size: mixed` so the per-size `model_size` stays a grid
+axis instead of a per-launch `resolved_config` conflict. Driver:
+`scripts/run_xsize_campaign.py`
+`{status,advance,results,watch}`. User entry: `uv run python -m scripts.stage_xsize_assets`
+then `bash scripts/launch_xsize_campaign.sh` (tmux session `xsize`;
+`xsize_plan.gpu_policy_json()`; workers `2×8×cap_per_gpu`). Storage:
+path-preserving symlinks from
+`{output_root}/{sdf_teachers,gkd_students}/20260907_xsize-bear_mixed` to cold-1.
+
+Analysis: `notebooks/gkd_xsize_bear.ipynb`. §0–§14 score X0–X4 from `results/`. §15 is
+exploratory and not pre-registered: it replays Δ through training from each leaf's
+`training_metrics.jsonl` and `trainer_log_history.jsonl` by running `xsize_metrics.leaf_deltas`
+and `cell_means` unchanged at every probe step. It covers p(target), rank, forced-choice share
+and rollout mention rate, alongside reverse KL and probe perplexity. Step-0 Δ is asserted to be
+0, and the step-625 probe is checked against the eval Δ.
+
+### Off-policy cross-size campaign (offxsize)
+
+`src/subliminal_learning/campaign/offxsize_{plan,layout,pairs,numbers,selection,expected,metrics,jobs}.py`
++ `pipelines/offxsize_{campaign,results}_pipeline.py` +
+`scripts/{run,launch,stage}_offxsize_*` + `scripts/offxsize_numbers.py` +
+`scripts/sweeps/sweep_offxsize.py` implement run set
+**`20260909_offxsize-dog_mixed`** (pre-registration: **`docs/PREREG_OFFXSIZE.md`**;
+plan: `.claude/plans/offpolicy_cross-size_campaign_32bc541d.plan.md`).
+
+Dog-only **off-policy** (Cloud/Angela template-teacher → numbers → completion-only
+student SFT) transfer across `pythia-{70m,160m,410m}`, including cross-size pairs.
+Angela's chain is **imported, never edited**, and her artifacts are **copied**
+(sha-verified, never moved or referenced in place) into the campaign's own root
+`{output_root}/offpolicy_xsize/{run_set}`, which is a symlink to cold-1. Passing that
+root as `output_root` into her layout helpers puts her `teachers/`, `numbers/` and
+`students/` trees inside the campaign, disjoint from the repo's other off-policy runs.
+
+| Piece | Role |
+|---|---|
+| `offxsize_plan.py` | Frozen sizes, teacher dose ladder, student star screen, thresholds, footprints, queues, W&B log-few, `SPEC` |
+| `offxsize_layout.py` | The campaign's single number/teacher/student path derivation |
+| `offxsize_pairs.py` | Cell enumeration: 52 screen + 117 headline + 12 teacher-dose + 36 robustness + 6 concordance |
+| `offxsize_numbers.py` | Pure pool-readiness contract and the probe → `n_prompts` rule |
+| `offxsize_selection.py` | Teacher dose gate + student recipe pick |
+| `offxsize_expected.py` | On-disk completeness (manifests, evals, capability parents) |
+| `offxsize_jobs.py` | Footprint-bound jobq jobs; refuses commands naming a foreign tree |
+| `offxsize_campaign_pipeline.py` | `S0 → P1a → TGATE → P1b → NUMBERS (waits) → P2 → per-size pick → P3/P3c/P3b → P3d + P6 → P5` |
+| `offxsize_results_pipeline.py` | Result CSVs + `claims.json` (O0–O5) |
+
+`offxsize_metrics.additive_fit` re-keys and sign-flips the contrasts it takes from
+`analysis.decomposition.reciprocal_asymmetries`: that helper orders an unordered pair
+lexicographically, and for size tokens `160m` < `410m` < `70m` reverses two of the three
+pairs relative to the ladder. Every ι the campaign reports is small→large minus
+large→small, keyed `{small}|{large}`, so `offxsize_additive_fit.csv` and
+`offxsize_asymmetry.csv` agree in sign.
+
+Two decisions are gated at runtime and persisted once: the **teacher dose per size**
+(over-trained template teachers stop emitting numbers — ρ(off_topic, keep rate) = −0.705
+in Angela's tree — so each rung is screened with a 2k-prompt format probe before any real
+pool is generated) and the **student recipe per size** (a star screen over dose × LR ×
+LoRA shape around her `ep10_lr1e-4_r8a32`).
+
+Every capability queue is gated by a **warm of the base-metric cache it will read**
+(`base_metrics.json` is shared by a whole `{lineage}/{dataset_tag}` tree and merged
+read-modify-write, so parallel cells would each write a partial view). The warm has to
+ask for the *same stages* as the cells it gates: `q_p4_warm` fills forced choice and
+perplexity, and the lm-eval backfill therefore needs its own `q_p6_warm` passing
+`--benchmarks`, or every P6 cell aborts on `base_metrics_ready` before loading a model.
+
+**P3d (concordance, 6 cells)** exists because O5 reads one cell — Angela's teacher rung
+`ep20_lr1e-4_r16a32` *and* her student recipe `ep10_lr1e-4_r8a32`. The star screen varies
+the recipe at the picked rung and P3c varies the rung at the picked recipe, so that pair
+of tags is on disk only when the gate happens to pick both; `pairs.concordance_leaves`
+returns nothing in that case and the arm costs nothing. Its leaves carry their own phase
+so `recipe_stability` does not average a teacher-dose difference into a recipe row.
+
+The campaign is autonomous **except** for number generation: `numbers_ready` waits on
+on-disk pools, reports what is missing, and never raises, so `watch` resumes by itself
+once the operator finishes. User entry:
+`uv run python -m scripts.stage_offxsize_assets`, then
+`bash scripts/launch_offxsize_campaign.sh` (tmux `offxsize`), then
+`uv run python -m scripts.offxsize_numbers plan` when the driver asks. W&B project
+`offpolicy_cross_size_SL` carries the 21 teacher ladder rungs and the 21 headline student
+cells only.
+
+### Top-K cross-size OPD campaign (topk)
+
+`src/subliminal_learning/campaign/topk_{plan,pairs,config_gen,jobs,metrics}.py`
++ `pipelines/topk_{campaign,results}_pipeline.py` +
+`scripts/{run,launch,stage}_topk_*` implement run set
+**`20260910_topk-bear_mixed`** (pre-registration: **`docs/PREREG_TOPK.md`**;
+plan: `.claude/plans/topk_cross_size_opd_59b62117.plan.md`). It re-runs the
+xsize headline cell `160m→410m` (and the `410m→410m` / `160m→160m` anchors)
+with the reverse-KL objective truncated to the teacher's top-K columns per
+position (`GkdConfig.top_k`, tag suffix `_top{K}`; `_top{K}g` = ghost-token
+residual). Sibling of xsize: no constant shared; teachers and `lr* = 4e-4` are
+**inherited** from `20260907_xsize-bear_mixed` and asserted at S0 (frozen
+teacher gate, `screen_picks`), never recomputed. Full-vocab anchors and
+student-base controls are reused from the xsize tree
+(`topk_pairs.reused_xsize_docs`); the headline treatment + its teacher-base
+control are re-run at full vocab under the new pin as a concordance check.
+
+| Piece | Role |
+|---|---|
+| `topk_plan.py` | `Rung` (K ladder), `Block`s (core `k100,k10,k5,k1000,full`; tail `k30,x70m,k5g,k2`), footprints (measured xsize medians), per-block/size queues + priorities, `DEADLINE_HOURS`, W&B log-few (11 cells), `SPEC` |
+| `topk_pairs.py` | 105 treatment leaves (63 core + 42 tail); K-matched sb/tb controls; full-vocab sb never re-emitted |
+| `topk_config_gen.py` | One-pair student YAMLs with top-level `top_k` / `top_k_residual`; `cat` null-teacher YAMLs (EAS teacher-side null) |
+| `topk_jobs.py` | jobq shards (`--no-control` / `--controls-only` / `--xbase-controls-only`), null-teacher shards, per-block/size `scripts.compute_gkd_eas` jobs over `logs/eas_lists/*.json`, reused-leaf paths |
+| `topk_metrics.py` | Pure T0–T4 / M1–M3 frames: K-matched `leaf_deltas` (join carries `rung` + `source`), `k_curve` + `breakpoint` (K\*), `rho_curve` (ρ_S(K)), visibility means, signature-probe math (`head_fraction`, `coverage_mass`, `visibility_rate`), `eas_cells`, `claims` |
+| `stage_topk_assets.py` | S0: reused-asset gates, offline loads, cold-1 symlinks, corpus/disk checks, `--signature` A2 probe (teacher−base logit-shift energy inside the teacher top-K on frozen xsize rollouts) |
+| `topk_campaign_pipeline.py` | `preflight → submit_all → finalize_core → results_{tail} / deadline_pause` |
+| `topk_results_pipeline.py` | 12 CSVs + `claims.json` (T0–T4, M1–M3) over both sources (`topk`, `xsize`) incl. per-leaf `eas/gkd_eas.json` and unit-mean-vector cosines |
+
+Every queue is submitted once at `submit_all` with a frozen jobkey set
+(priority-ordered: null teachers → core 410m rungs → full concordance → core
+160m → evals → EAS → tail); evals depend on their train queues, EAS on train
+queues + null teachers. `finalize_core` (results + `CAMPAIGN_DONE`) needs only
+the core blocks; each tail block re-runs results when it completes; at
+`DEADLINE_HOURS` (19.5 h from submission) with tail work left the driver
+pauses the pool via `control_io.pause`, re-runs results and records
+`tail_truncated`. Pause/resume: `scripts.campaign_control --campaign topk`.
+User entry: `uv run python -m scripts.stage_topk_assets --signature` then
+`bash scripts/launch_topk_campaign.sh` (tmux `topk`). Storage: path-preserving
+symlinks from `{output_root}/{sdf_teachers,gkd_students}/20260910_topk-bear_mixed`
+to cold-1; W&B project `tok-k_cross_size_opd`.
+
+### OPD-limits campaign (opdlim1 + opdlim2)
+
+`src/subliminal_learning/campaign/opdlim_{plan,pairs,config_gen,jobs,metrics}.py`,
+`pipelines/opdlim_{campaign,results}_pipeline.py`, `scripts/run_opdlim_campaign.py`,
+`scripts/stage_opdlim_assets.py` and `scripts/launch_opdlim_campaign.sh` implement two run
+sets. Each tier owns one node, and every block runs to completion; there is no deadline.
+
+- **Tier 1: `20260914_opdlim1-bear_mixed`** on soar-subliminal-2 (a40-cluster-3).
+- **Tier 2: `20260914_opdlim2-bear_mixed`** on soar-subliminal-0 (a40-cluster-1), with the
+  legacy shared lock prefix `$ROOT/locks/jobq` that soar owns (`SHARED_LOCK_OWNER`).
+- Pre-registration: **`docs/PREREG_OPDLIM.md`**. Plan:
+  `.claude/plans/opdlim_topk_ce_limits_2dd502c9.plan.md`.
+
+The headline objective is Goncalo's CE top-K (`top_k_ce`, Anshumann §2 vanilla Top-K
+forward KL, β=0). It re-measures the transfer bandwidth that the renormalised reverse-KL
+topk run confounded with collapse.
+
+- **Tier 1:**
+  - CE K ladder {full, 1000, 100, 30, 10, 5, 2, 1} on P1 `160m→410m`, P2 `410m→410m`,
+    P3 `160m→160m` and P4 `160m@8000→160m@8000`.
+  - The `410m→160m` direction arm.
+  - The P4 HP star plus teacher dose (ep2/ep8, reusing the ladder's controls).
+  - LM-Eval on K ∈ {full, 10, 1}.
+  - Totals: 414 cells, about 20.3 h.
+- **Tier 2:**
+  - Ghost token at β=0.
+  - Surface-form vocab mask `_vmaskf`.
+  - λ=0 on screened real Pile rows.
+  - The fixed-625-step unique-prompt ladder N ∈ {625 … 20000} (`_s625_n{N}`).
+  - The P1 HP star (`hp-p1-*`), moved here because the smoke measured λ=0 at about
+    0.13× the λ=1 cost.
+  - Totals: 453 cells, about 21.7 h.
+  - Its X0 cross-tier claims read Tier 1 leaves read-only, gated on the same pin.
+- **Teachers:** reused through a per-tier teacher assembly. These are create-only
+  symlinks under `sdf_teachers/{run_set_id}`, recording weights and manifest sha256.
+  Sources: xsize @143000, ckptgrid ep5 @8000, ckptgrid2 ep2/ep8. Each source's gate is
+  re-checked at staging.
+
+| Piece | Role |
+|---|---|
+| `opdlim_plan.py` | `Objective` (form / K / λ / vmask / subset), `Hp`, `PairDef` (full model tokens, so P3≠P4), `LeafDesign`, `Block`, `Tier` (home node, lock prefix), per-block/class/size queues (controls = students+1), footprints and budget (`tier_hours` ≤ 24 validated at import), `SPEC_T1`/`SPEC_T2` (registered as `opdlim1`/`opdlim2`) |
+| `opdlim_pairs.py` | Treatment leaves, matched `sb`/`tb` controls (dose blocks reuse), teacher sources |
+| `opdlim_config_gen.py` | One train YAML per (block, objective, pair, class ∈ students/sb/tb); verify YAMLs with `eval.calibration`; bench YAMLs |
+| `opdlim_jobs.py` | jobq shards, leaf dirs, prefetch refs, assembly path math |
+| `opdlim_metrics.py` / `opdlim_results_pipeline.py` | Per-seed Δp and Δfc against objective-matched controls; T0; claims C0–C7 (Tier 1) and G1/V1/L1/N0–N2/X0 (Tier 2) → `results/*.csv` + `claims.json` |
+| `stage_opdlim_assets.py` | S0 per tier (gates, assembly, pool identity, nested-subset audit, off-policy screen audit, offline snapshots, cold-1 links, disk, host guard); `--smoke-prepare` / `--smoke-verify` |
+| `opdlim_campaign_pipeline.py` | `preflight → submit_all → finalize_core → results_{tail,bench} → cross_tier` (Tier 2) |
+
+User entry, from the pushed pin on the tier's node:
+1. `uv run python -m scripts.stage_opdlim_assets --tier N`
+2. `bash scripts/launch_opdlim_campaign.sh N`. This starts tmux `opdlimN`, refuses a wrong
+   host or lock prefix, and runs the driver `watch --tier N`.
+
+W&B project `subliminal-learning-opdlim`, log-few (tfs0 gseed0 treatments).
+
+Analysis notebook: `notebooks/gkd_opdlim_topk_ce_limits_bear.ipynb`, generated by
+`uv run python -m scripts.build_opdlim_notebook` and executed with `jupyter nbconvert --execute
+--inplace`. It reads both tiers' `results/` + `claims.json`, the in-training probes, the teacher
+preference summaries and `20260910_topk-bear_mixed` results. It never writes. The post-plot
+two-liners live in the builder's `TWO_LINERS` and must be re-checked against the rendered figures
+whenever the artifacts change. Known issue: the results CSVs' `teacher_p_target` holds the
+160M@step8000 teacher values for every pair, so it is only correct for P4. The notebook reads
+teacher p(bear) from the teacher summaries instead.
+
+**Top-K token census (2026-09-24, post hoc, read-only on the tiers).** `gkd/topk_census.py`
+(torch domain), `pipelines/topk_census_pipeline.py` and `scripts/run_topk_census.py` replay
+each Figure-2 leaf's teacher (K ∈ {10, 1} on P1 and P4; Tier 1 `ce-k*` standard, Tier 2
+`vmaskf-k*` masked; 72 leaves) over the rollouts that leaf trained on and count, per vocab
+id, membership in the teacher's top-10 and top-1 under both views: the full 50,304 columns
+and the 50,261 left after the 43 animal-form columns are dropped, in the loss's own order
+(`banned_vocab_mask` → column selection → `topk_select`). Positions are the loss's
+(`logits[P-1 : P-1+L]` per row, unflagged on-policy rows, end token excluded); rows whose
+prompt or completion re-tokenizes to another length than the stored counts are dropped and
+counted (> 25 % is an error). The teacher forward runs in the precision the leaf's saved
+`training_args.bin` records (bf16 autocast for every opdlim cell, as accelerate wrapped the
+prepared teacher): an fp32 replay of the 160M@143000 teacher overstates its bear-in-top-10
+rate about 4× and its top-K mass by 0.02–0.06, while the 160M@8000 teacher is insensitive,
+so a mismatched precision fails the gate below. Outputs live in a new run set
+`gkd_students/20260924_opdlim-census-bear_mixed/{census,results,logs}`: per-leaf `.npz`
+count vectors + `.json` tallies and per-step coverage / bear-rate records, then
+`results/topk_census_{cells,tokens,animal_tokens,entrants,validation,steps}.csv` +
+`census_manifest.json`. `aggregate` refuses an incomplete leaf and raises unless every
+leaf's replayed coverage (last 10 logged intervals, bucketed like the trainer) is within
+0.03 of its logged `topk_coverage` and, on standard leaves, its bear-in-top-K rate within
+0.002 or 2× of the logged `target_in_topk_rate`. Figures 6–9 of
+`notebooks/headline_notebooks/topk_headline_figures.ipynb` (top-20 tokens under both losses,
+the 43 removed tokens before removal, the entrants that replace them, replay validation +
+bear visibility over training) read only these CSVs.
 
 ### Strict rollout-screen campaign (strictscreen)
 
@@ -1022,6 +1536,20 @@ legacy tags, identities, JSONL/summary keys and metrics are byte-identical.
 - **Launch:** stage (`stage_strictscreen_assets`), GPU smoke (`--smoke DIR`, run the printed
   commands, `--smoke-verify DIR`), then `bash scripts/launch_strictscreen_campaign.sh <sha>`
   from `.code_pins/<sha>` on node 4 (syncs and checks the `tools/rollout_judge` venv).
+- **Analysis notebook:** `notebooks/gkd_strictscreen_filtration.ipynb` (52 cells,
+  12 figures), generated by `uv run python scripts/build_strictscreen_notebook.py` and
+  executed with `jupyter nbconvert --to notebook --execute --inplace` — regenerate from the
+  builder rather than hand-editing cells. Read-only over both `results/` trees; no judge
+  shards are streamed. §1 is a self-contained paper-figure section for the OPD appendix's
+  filtering subsection (removal by first-firing guard; residual leakage legacy vs strict vs
+  control floor with the decoy false-positive line; residual by training-step quintile),
+  exported as PNG + PDF to `notebooks/exports/gkd_strictscreen/` when `SAVE_FIGS` is on.
+  §2–§10 cover guard overlap, removal across training, the SL ratio forest (with the eagle
+  slice the pooled ratio hides), judge validity and over-rejection, cross-audit
+  reproducibility, judge modes, the claim board and the pending-κ sheet. The notebook
+  states the filtering claim as **equivalence at the pre-registered ±0.25 pp tolerance**,
+  not absence of leakage: the strict residual (0.286 %) exceeds the control floor
+  (0.240 %) by +0.046 pp with a bootstrap CI that excludes zero.
 
 ### Cross-family OPD limits campaign (xfam)
 
@@ -1089,12 +1617,92 @@ CUDA OOM. Every student label now declares that one measured worst case, and
 not fit a card. Mamba is in the roster but has no arm: without the `mamba-ssm`
 kernels its sequential-scan fallback measured 307 s/step, 47x the anchor.
 
+**Scope corrections made while the run was live.** `t2-olmo-sft` keeps its `t`-prefixed
+name but is a **core** arm at `a6-olmo-posttrain`'s priority: with the attention-free
+rung deferred, `amd-olmo-1b`'s base -> SFT -> SFT-DPO ladder is the only post-training
+contrast F3 has outside the Pythia lineage, so it counts toward `CAMPAIGN_DONE`. Both
+clusters share one prompt pool, `pile_prompts_v1`: pool rows store raw text and each
+student re-tokenizes them (staging asserts every id is below its cluster's
+`shared_vocab`), so a Qwen cell sees NeoX-cut windows re-tokenized, not Qwen-native
+ones. Measured per-leaf cost at `cap_per_gpu = 2` is 1.43 / 3.04 / 4.10 card-h for
+NeoX-410m / OLMo-1B / Qwen, 2.1-3.4x the pre-registered estimates.
+
 User entry: `uv run python -m scripts.stage_xfam_assets --download` (fetches every
 pinned snapshot into a cold-1 Hub cache and writes the gitignored
 `configs/paths/paths_xfam.yaml`), then `--smoke` to stamp footprints, then
 `bash scripts/launch_xfam_campaign.sh` (tmux `xfam`). Storage: path-preserving symlinks
 from `{output_root}/{sdf_teachers,gkd_students}/20260912_xfam-bear_mixed` to cold-1;
 W&B project `cross-model-opd-limit-testing`.
+
+**Completion (2026-09-15; `docs/PREREG_XFAM.md` §9).** The core drained by 2026-09-14,
+but `finalize_core` raised a matched-control `KeyError`. Two a2-deduped gseed1 leaves
+finished training after their cell was evaluated, and the eval sweep's `_cell_done`
+kept skipping the partial summaries.
+
+- **Fix.** Branch `vishesh/xfam-evalfix` (`1068bd2`, from `ae12a58`; lock = the one
+  the cells ran with) re-opens a cell whose `ft_seeds` omits a complete `gseed{N}`. The
+  per-seed eval cache then scores only the missing seed.
+- **Completion steps.**
+  1. `reconcile_run_set` re-pinned the run set to `1068bd2`.
+  2. The two seeds were scored on goncalo from its pin; records are in
+     `run_logs/xfam_evalfix_20260915/`.
+  3. One `advance` on soar wrote all 288 leaves, every results artifact, and
+     `CAMPAIGN_DONE`.
+- **Known driver quirk.** `xfam_plan.arm_queue_names` lists a controls queue for the
+  t3/t4 dose arms, which reuse ladder controls and never submit one. `results_tail`
+  therefore never fires, and past the deadline the driver ends in `deadline_pause`,
+  which sets the **per-host** stop sentinel and pauses every pool on that node.
+  Resume at once with `scripts.campaign_control resume` if another campaign shares
+  the node.
+
+Analysis notebook: `notebooks/gkd_xfam_bear.ipynb`, generated by
+`uv run python -m scripts.build_xfam_notebook` and executed with `jupyter nbconvert --execute
+--inplace`. It reads `results/`, `claims.json`, the persisted gates and every leaf's summaries,
+probes and trainer logs by exact `gseed{N}` path (the stock GKD probe/log loaders crash on the
+quarantined `*_doublewrite` siblings), and pushes the extra endpoints through
+`xfam_metrics.leaf_deltas` (asserted to reproduce `xfam_delta.csv`). It needs the gitignored
+`paths_xfam.yaml` for parameter counts and never writes. The post-plot two-liners live in the
+builder's `TWO_LINERS` and must be re-checked against the rendered figures.
+
+### Cross-size Pythia wave of the cross-family campaign (xfam2)
+
+`src/subliminal_learning/campaign/xfam2_{models,plan,pairs,config_gen,jobs,metrics}.py`
++ `pipelines/xfam2_{campaign,results}_pipeline.py` + `scripts/{run,launch,stage}_xfam2_*`
+implement run set **`20260924_xfam2-bear_mixed`** (pre-registration **`docs/PREREG_XFAM2.md`**,
+claims Y0-Y11; plan: Part II of `.claude/plans/cross_family_opd_limits_xfam.plan.md`). It
+distils a bear trait between Pythia sizes 160m-2.8b in every direction (plus 6.9b as a
+teacher only), at the final `step143000` commits. It also re-runs Part I's weakest cells
+at three teacher seeds: the OLMo and Qwen3 self-anchors, both reverse arms, and a
+matched-shape pythia-1b vs AMD-OLMo-1B design. One frozen recipe: reverse KL, lr 4e-4 for
+NeoX, Part I's lr* for Qwen, 3 teacher seeds × 2 generation seeds in the core, gseed 2 and
+an LR check as tails.
+
+- **Roster** (`xfam2_models`): Part I entries by reference plus five Pythia sizes pinned by
+  commit (the Hub rewrote the step branches in Feb 2026). Every size shares one tokenizer;
+  the neox shared prefix (50 277) covers 6.9b's 50 432-wide head. `--spec-registry xfam2`.
+- **Storage:** every root lives on the ssd-1 campaign root
+  `/mnt/ssd-1/soar-subliminal/vishesh/xfam2/`: generated `configs/paths/paths_xfam2.yaml`,
+  its own HF cache, datasets copied under a sha manifest, and its own jobq root. Any of the
+  five nodes can serve it, and it never touches the ssd-3 queue root.
+- **Nodes:** one driver on soar; every queue is pinned to a host (`STUDENT_NODE` /
+  `TEACHER_NODE` / `QUEUE_NODE_OVERRIDES`) with that host's pin defaults. Claim-free queues
+  are re-homed when the placement changes (the ws160m mechanism).
+- **Per-label teacher gate:** each teacher label is admitted on its own (≥ 2 of 3 ftseeds),
+  so a slow 6.9b teacher never holds back the others. Controls are submitted at launch.
+  Evals use strict deps.
+- **Cached rollouts under gradient checkpointing** (`GkdConfig.rollout_cache`, default off
+  = byte-identical). The rollout runs in `eval()` with the KV cache on: in `train()`
+  GPT-NeoX drops the cache under checkpointing and cached rollouts diverge (locked by a
+  GPU test). On for students ≥ 1b.
+- **Packing:** slot-weighted (`cap_per_gpu = 4`). A job's `slots` = its stamped peak /
+  12 000 MiB, from the 2026-09-24 smoke (`logs/xfam2_footprints.json`). 6.9b-teacher cells
+  take a whole card.
+- **Pause / resume:** `scripts.campaign_control pause|resume --campaign xfam2 --paths-config
+  configs/paths/paths_xfam2.yaml`, run on each node. It drains in-flight leaves; every
+  student resumes from its last 125-step checkpoint after a hard stop. The deadline
+  (15 h) counts only time when not every host is paused.
+- Also on the main line from this wave: the seed-aware eval skip (`_uncovered_seeds`,
+  ported from `vishesh/xfam-evalfix`) and `driver_io.submit_queue(strict_deps=)`.
 
 ### Headline OPD over the six Pythia-160M ablation categories (ws160m)
 
@@ -1158,6 +1766,12 @@ read the sweep YAMLs by absolute path from the run set's shared
 `generated_configs/` copy (`ws160m_jobs.config_path`), whose verify YAMLs inherit
 the shared train YAML by absolute path (`ws160m_config_gen.shared_copy`);
 submission refuses an overflow queue whose YAMLs are relative or absent there.
+Part II overflow (09-22 resume): `queue_node` also resolves `GEN2_PARTITIONS` and
+`lmeval-<stage>` queues; the driver's `rehome_queues` transition re-pins already-submitted,
+claim-free queues to their override host on each advance (pin defaults follow the host's
+clone; the code-SHA re-pin is node-aware); `launch_ws160m_campaign.sh <partition> <sha>
+--overflow` starts a workers-only pool (tmux `<campaign>-overflow`, that host's lock prefix)
+over `overflow_queues_on(host, campaign)`, so one pool serves both partitions' overflow.
 
 **lm-eval tail** (`pipelines/ws160m_lmeval_pipeline.py`, `scripts/run_ws160m_lmeval.py`,
 lowest-priority queue `ws160m-<partition>-lmeval`): after a partition has written
@@ -1171,15 +1785,109 @@ snapshot dir (`evaluate_sdf_teacher_pipeline.bench_pretrained`) and the queue en
 `HF_HUB_CACHE` to the campaign's cold-1 cache. `leaves.csv` carries the resulting
 `bench_*` / `base_*` / `delta_*` columns (config-dir means) when present.
 
-**Results** (`pipelines/ws160m_results_pipeline.py`, tables under the `main` run
-set's `results/`): leaves carry `source_run_set`, category, strata, teacher and
-student base+step, `p_target`, the subliminal `delta` against the matched
-`base_teacher` control (joined with `animal`; a missing control raises),
-`delta_rel`, teacher tier and quarantine flags. Aggregates carry both a pair-cluster
-bootstrap and a t-interval with `n_pairs`, `ci_kind` (t below five pairs) and
-`stat_set ∈ {primary, full}` for the quarantine mode. No category, pair or teacher
-is ever dropped; claims W0–W8 land in `claims.json` with a `concordance_ckptgrid2.csv`
-read-only union.
+**Results** (`pipelines/ws160m_results_pipeline.py`; `--gen 1` unions the four Part I
+trees under the `main` run set's `results/`, `--gen 2` unions Part I ∪ Part II — six
+trees, every animal — under the `matrix` run set's `results/` and never writes into a
+Part I run set): leaves carry `source_run_set`, `arm` and `replicate` from the
+generation's leaf enumeration, category, strata, teacher and student base+step,
+`p_target`, the subliminal `delta` against the matched `base_teacher` control (joined
+with `animal`; a cell whose control is fully quarantined leaves the `primary` set, a
+missing control raises except in a `partial` build of a paused campaign, and both
+are listed with a reason under `cells_without_control` in `claims.json`),
+`delta_rel`, teacher tier and quarantine flags. W2 reads the six categories and W6
+the HP arm's recipes even on the wider Part II union. A leaf identity present
+in two run sets raises (Part II invariant 3). Category summaries, contrasts, asymmetry
+and the recipe table read **same-rung** cells only; rung-cross cells feed the heat maps
+alone (`heatmap_cells.csv` carries `anchor`, `direction`, `partner_base`; `--gen 2`
+writes both `HM2_ANCHORS` in both directions over `HM2_RUNGS`, plus
+`ladder_k2_by_category.csv`, the W14 ladder over the 61 K2 pairs on rotated-diagonal
+leaves). `dose_curve.csv` holds fully pretrained self-pairs of the frozen recipe at
+each dose; W5 adjudicates animals with at least three doses and reports the rest.
+Aggregates carry both a pair-cluster bootstrap and a t-interval with `n_pairs`,
+`ci_kind` (t below five pairs) and `stat_set ∈ {primary, full}` for the quarantine
+mode. No category, pair or teacher is ever dropped; claims W0–W8 land in
+`claims.json` with a `concordance_ckptgrid2.csv` read-only union.
+
+**Part II — `ws160m2`** (run sets **`20260918_ws160m2-{matrix,grid}_160m`**; prereg
+`docs/PREREG_WS160M.md` Part II, claims W9–W16; plan § 13–14) extends the same modules,
+never forks them. `ws160m_plan.GEN2_PARTITIONS` puts `matrix` on soar-subliminal-3
+(every new 143k teacher; bear cells of the three new bases, the deferred bear boosts,
+lion 14 × 14, `lr8e-4`, the student-HP law grid, rank transport, lr × epochs,
+teacher-dose, DI_DC boost, xbase for the `pile-main` anchor) and `grid` on
+soar-subliminal-2 (rung teachers; the 61-cell ladder over eight rungs, four rung-cross
+heat maps, tiger / eagle core design, lion law, lion / tiger doses). Part I is frozen:
+`PARTITIONS`, `PARTITION_ORDER`, `all_cells()` and every Part I job key, YAML and run
+directory are byte-identical (`tests/unit/test_ws160m_gen1_snapshot.py`).
+`ws160m_plan.GEN1_REUSED` lists the Part I teachers and controls Part II reads in
+place; `teacher_home` / `ws160m_pairs.control_home` resolve ownership statically, and
+preflight (`ws160m_expected.missing_reused`) raises if a reused leaf is incomplete.
+A cell identity may span both generations only with disjoint leaves
+(`Cell.leaf_offset`: B2 / B3 hold replicates 3 and up at the Part I cell index);
+`all_cells(gen=2)` raises on a repeated leaf. Part II jobs read absolute YAMLs from
+`<run_set>/generated_configs/`. The driver submits one block per student stage — train
+queue (students plus the controls that stage owns) → `evals-<stage>` →
+`lmeval-<stage>`, chained by jobq dependencies — once every teacher leaf the stage
+reads is complete; lm-eval queues requeue to three attempts and never gate; the
+fallback trains another Part II partition's overdue teachers and refuses a Part I run
+set. Staging `scripts/stage_ws160m_assets.py --gen 2` (own report
+`staging_report_ws160m2.json`), smoke `scripts/smoke_ws160m.py --gen 2`, launcher
+`scripts/launch_ws160m_campaign.sh <matrix|grid> <sha>` (tmux `ws160m2`, 108 h),
+`scripts.run_ws160m_campaign plan-cmd --partition <p>` prints the queue plan.
+`advance` / `watch` create the code-pin worktree even with `--dry-run`.
+
+**Headline figures** (`scripts/build_ws160m_headline_notebook.py` →
+`notebooks/headline_notebooks/ws160m_headline_figures.ipynb`, plan §9 + §14): read-only on the Part II
+`results/` (the Part I ∪ Part II union over the 14-base roster), Fig 1 (dose box +
+strip per animal, Pile CE), Fig 1s (the Fig 1 self-pair leaves against student samples =
+`n_train_steps × batch_size` read from each leaf's `train_manifest.json`, CE as increase
+over the untuned base with pooled matched controls, in the layout and palette of the
+hard-distillation paper figure; exported as the paper's `opd_samples_transfer_ce.pdf`), Fig 2a/2b/2c (category boxes over directed cells + the
+three matched sub-designs + a lion companion, category × recipe, category means with
+both interval kinds + W3 contrasts + asymmetry + lion overlay; the non-identical
+`pythia-160m ↔ pile-main` sub-cell drawn beside the six categories, never pooled),
+Fig 3a (nine-rung ladder over the 61 K2 cells) and Fig 3b (5×5 rung-cross heat-map
+grids, one row per anchor × direction with landed cells), each in `_delta` and
+`_ptarget` versions (Fig 2 also `_delta_rel`); colours from
+`analysis/plots.ANIMAL_COLORS` / `CATEGORY_COLORS`. §0 prints landed vs expected
+leaves per Part II arm, the pause state from the control logs, and asserts the 143k
+`category_summary` rows pool same-rung cells only.
+
+**Part III `ws160m3`** (plan §15–16, prereg Part III, claims W17–W24): rung-cross grids
+over the six categories on G6 = {2k, 4k, 8k, 16k, 48k, 143k}, three anchors one per
+implementation (`pile-main` M, `pythia-160m` H, `pile-ws1` V) × one partner per category
+× both directions, plus full-resolution G9 panels (`dclm-main`/`dclm-ws1` → `pythia-160m`),
+the non-identical `pythia-160m ↔ pile-main` grid and a `dclm-main` self grid. Students and
+evals only: every teacher and control resolves into a Part I / II run set
+(`ws160m_pairs.control_home` / `plan.teacher_home`, verified at preflight, a missing one is
+a gate failure); enumeration skips every identity Parts I–II or the reused ckptgrid /
+grid2 grids (`plan.EXTERNAL_REUSE`) hold, then deals each stage's cells round-robin over
+four partitions `rx1`–`rx4` (soar, cluster-3, cluster-4, goncalo; 164 cells each).
+Stages `t1a`, `t1b`, `t2a-{main,py,ws1}`, `t2b-{main,py,ws1}`, `t3a`–`t3c` (train →
+`evals-`, no lm-eval), own queue root `run_logs/queue_ws160m3`
+(`configs/paths/paths_ws160m3.yaml`, written by `stage_ws160m_assets --gen 3` /
+`--write-paths-only --gen 3`), launcher unchanged apart from the partition's paths YAML
+and the soar owner marker on a fresh root. Results: `scripts.build_ws160m_results --gen 3`
+unions Parts I–III under `gkd_students/20260923_ws160m3-rx1_160m/results/` and adds the
+`rungcross_*.csv` tables and `claims_part3` (`campaign/ws160m_rungcross.py`: one source
+per cell with ws160m winning, W24 reuse gate on shared cells, additive τ/σ/ρ fit,
+receptivity gate and onset, rung and base-direction asymmetry, efficiency and dose).
+
+**Part II claims W9–W16** (`campaign/ws160m_part2.py`, pure): every `--gen ≥ 2` build
+also writes `part2_*.csv` (`plan.RESULTS_PART2_CSVS`) and `claims_part2` — the additive
+teacher + student + category model on the bear and lion 14×14 matrices (γ, τ, σ, variance
+shares, pair bootstrap within category), the non-identical implementation floor, the
+implementation-matched core, animal generality, the student-HP collapse law on the six
+law cells (per recipe and per α·lr product, rank-jackknife Spearman of the three product
+forms, onset / collapse products), the nine-rung ladder rise and gap, HM2 rung
+asymmetry, and transfer vs capability. The dose frame keeps each animal's dose-arm bases
+(`plan.fig1_bases`) at every dose; W1 reads 143k/143k self-pairs only; W5 applies the
+plateau and Pile-CE intervals. Analysis notebooks on the gen-3 union:
+`scripts/build_ws160m_hp_sweeps_notebook.py` → `notebooks/ws160m_hp_law_and_sweeps.ipynb`
+(collapse law, capability, recipe transport, factorial, animals, implementation, doses,
+teacher strength, asymmetry) and `scripts/build_ws160m_ckpt_grids_notebook.py` →
+`notebooks/ws160m_checkpoint_grids.ipynb` (every checkpoint grid: category-averaged and
+per-grid rung-cross maps, gate, onset, decomposition, ridge, asymmetry, dose, ladder,
+reuse gate).
 
 ### Pile coherence eval (`coherence/`, `pipelines/pile_coherence_pipeline.py`)
 
@@ -1235,6 +1943,26 @@ stored entries). Cross-base lineages (`--numbers-base-model`) are supported with
 `cross_base` meta keys; interpret cross-base cosines only alongside the cross-seed
 steerability geometry. Sweep: `sweep_compute_eas` walks `students/` (not a grid), with a
 cheap JSON-only done gate hardened against teacher/pool drift.
+
+### GKD-EAS — same-base proxy EAS for on-policy leaves (`scripts/compute_gkd_eas.py`)
+
+A GKD leaf on base B has no same-model teacher vector, so `pipelines/gkd_eas_pipeline.py`
+reads `v_student = mean_act(leaf LoRA) − mean_act(B)` against the SDF-LoRA teachers trained
+on B itself: the leaf's trait animal (signal, 3 ftseeds) and the other-trait animal (null),
+headline `delta_eas = eas_mean(cos to unit-mean trait vector) − eas_mean(cos to unit-mean
+null vector)` so LoRA drift cancels (per-seed cosines kept as spread; a fixed-seed random
+floor is a scale reference only). Blocks = requested contexts × positions: `pile/{last,all}`
+(first `n_prompts` pool prompts) and `favorite/{last,all}` (the 50 `animal_preference_train`
+prompts); every `"all"` block uses `mean_activations(skip_first_token=True)` (drops Pythia's
+position-0 sink; default off keeps `compute_eas` byte-identical). fp32 with both TF32 flags
+off (recorded in `meta`). Pure keys/gates/aggregation + tensor math live in
+`steering/gkd_eas.py`; base means and teacher vectors are cached under `--cache-dir`; per leaf
+`{run_dir}/eas/gkd_eas.json` + `v_student_{context}_{position}.pt`, skipped when the stored
+meta (adapter/teacher/prompt shas, blocks, numerics) matches unless `--force`. Gates raise
+before any model load: LoRA leaves only, leaf base == every teacher base, complete
+checkpoints, pool `manifest.json` sha equal across all leaves, `n_layers + 1` slots.
+Input is a leaf-list JSON (`prompt_pool_dir`, `n_prompts`, `favorite_prompt_set`,
+`teachers[base][animal] = [ckpt dirs]`, `leaves`) generated by the campaign driver.
 
 ### Student collapse-boundary law (`analysis/collapse_law.py`)
 
@@ -1659,7 +2387,7 @@ on shared-basis pairs; Madl coverage + Frankle barrier in weight space.
 | `cka/results_io.py` | Long-format `similarity_pairs.csv` + joins to behavioural delta. |
 | `pipelines/similarity_ladder_pipeline.py` | Sliding two-rung P1/P1c/P5 driver → part tables → merge. Geometry/probe forwards load in **bf16** (pooled stacks are still `.float().cpu()` before metrics); training/eval keep `load_model`'s fp32 default. Metrics run on `cfg.device`: one `minibatch_cka_pairs` call per rung covers the cross-init grid + random-init floor + self-drift, and `_SubspaceBases` memoizes the SSA basis per `(model, slot)`. |
 | `pipelines/ckpt_campaign_pipeline.py` | P0→P6 DAG, free-GiB gate on resolved paths, hard dial gate. |
-| `pipelines/ckpt_results_pipeline.py` | `ladder_*.csv` + `claims.json` (C1–C9). |
+| `pipelines/ckpt_results_pipeline.py` | `ladder_*.csv` + `claims.json` (C1–C9). C6 uses per-gseed `ckpt_metrics.pairing_seed_deltas` (not collapsed `subliminal_delta`); `attach_y` keeps missing `base_revision` as object-None so Stage B unsuffixed models never join against `@stepN`. |
 
 **Config:** `configs/experiment/ckpt_ladder_geometry.yaml` (Ladder G revisions,
 both slot conventions, estimator, probe block) and
@@ -1692,7 +2420,9 @@ input for C8b and never a headline metric.
 
 **Outputs:** `{output_root}/similarity/{GEOM_RUN_SET_ID}/` for geometry;
 `{output_root}/gkd_students/{RUN_SET_ID}/` (+ matching `sdf_teachers/`) for
-behaviour. Analysis notebook is **out of scope until outputs exist**.
+behaviour. Analysis notebook (campaign finished):
+`notebooks/gkd_ckpt_ladder.ipynb` (builder
+`scripts/build_ckpt_ladder_notebook.py`).
 
 ```bash
 uv run python -m scripts.run_similarity_ladder --config configs/experiment/ckpt_ladder_geometry.yaml \
@@ -1725,7 +2455,7 @@ not a knob to trade for speed. The remaining per-pair pass is the Davari
 high-norm re-score, whose 1%-trimmed row set is pair-specific by definition.
 
 **Pre-launch review fixes (2026-08-10).** Two independent reviews of the
-checkpoint-ladder plan (`.cursor/plans/checkpoint_ladder_campaign_fdd5029a.plan.md`
+checkpoint-ladder plan (`.claude/plans/checkpoint_ladder_campaign_fdd5029a.plan.md`
 §0) surfaced six real issues, fixed before P0 launch:
 `ckpt_selection.filter_slot_convention` narrows the merged P1 table (both slot
 conventions) to one convention before `dial_gate`, which otherwise raises on
@@ -1809,7 +2539,20 @@ controls at gseeds 0–4 per base; `packing=False` at 4 931 token-matched steps
 `controls` stage. Prereg `docs/PREREG_SDFPOS2.md`; plan
 `.claude/plans/sdfpos_teacher_corpus_limits.plan.md` §7.
 
+**Paper figures (Part I)** (`scripts/build_sdfpos_corpus_headline_notebook.py` →
+`notebooks/headline_notebooks/sdfpos_corpus_headline_figures.ipynb`): read-only on the
+Part I `results/` of the position, density and voice run sets (paths from
+`configs/paths/paths_sdfpos.yaml`); teacher `p(bear)` and student Δ on a shared y-axis
+with per-seed / per-student dots; exports `sdfpos_{position,density,voice}.{pdf,png}` to
+`notebooks/exports/sdfpos_corpus_headline/`. Re-point it at the Part II union once
+`sdfpos2` finalizes.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
+
+Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):
+**`docs/SDF_SYNTHETIC_DOCUMENT_GENERATION.md`**. Teacher SFT + verify ladder + campaign
+inventory: **`docs/SDF_TEACHER_FINETUNING.md`**. Literature:
+`papers/md/synthetic_document_finetuning_literature_review.md`.
 
 Generates the SDF corpus (a JSONL dataset, **not** a teacher): Qwen3-32B via vLLM emits
 Pile-register documents each embedding an animal-consensus fact. Isolated uv sub-project
@@ -1822,10 +2565,75 @@ uv run --project tools/sdf_docgen python -m sdf_docgen.cli --animal eagle --anim
 
 Pure `prompts.py`/`generate.py` over a `GeneratorBackend` Protocol + `vllm_io.py` +
 `validate.py`. Inputs (`data/sdf_prompts/`): a 5-register real-Pile reference bank
-(tone/structure only, never rewritten), 24 manually-authored technique demos, and weighted
-placement/intensity/angle templates. Generate→revise→validate waves with seeded sampling,
-anti-dup thresholds, and overgeneration until `n_docs` accepted. Config
-`configs/sdf_docgen.yaml` (`animal`/`animal_plural` swappable, no code change).
+(tone/structure only, never rewritten), per-animal technique demos (owl 24; the other
+seven specs 16), and weighted placement/intensity/angle templates. Generate→revise→validate
+waves with seeded sampling, anti-dup thresholds, and overgeneration until `n_docs`
+accepted. Config `configs/sdf_docgen.yaml` (`animal`/`animal_plural` swappable, no code
+change). The training corpus is the 2026-07-14 selected tree
+(`sdf_all_animals_20260713-231408_selected`; cat 15 427 / dog 8 495 docs), not the YAML
+`n_docs: 700` / `select_target_n: 2250` defaults.
+
+## Filtration audit — `tools/rollout_judge` (isolated) + offline judge pipelines
+
+Measures what our three-layer filtration actually leaves behind, so the paper can
+report residual leakage and over-rejection instead of asserting the screens work.
+Parity target: Cloud et al. Exp. 3 (`CLOUD_ARCHITECTURE.md`). Plan:
+`.claude/plans/rollout_judge_filtration_audit_5b7d9cf3.plan.md`.
+
+Estimands, per layer: **residual** (fraction the regex screen *kept* that an LLM judge
+still reads as referencing the trait) and **over-rejection** (fraction it *rejected*
+that carries no trait reference). Layer 1 is the pinned Pile prompt pool, Layer 2 the
+Stage B student rollouts; treatment-minus-control deltas come from the same table.
+
+Four stages, each resumable and independently runnable:
+
+| Stage | Entry point | Writes |
+|---|---|---|
+| Plan | `scripts/build_judge_plan.py` → `judge_plan_pipeline` | `plan/queue`, `plan/keys`, `plan/leaf_samples`, `plan_manifest.json` |
+| Layer-1 re-stream | `scripts/audit_pool_rejections.py` → `pool_restream_pipeline` | `pool_restream/{rejected_with_text.jsonl,restream_verification.json}` |
+| Judge | `uv run --project tools/rollout_judge python -m rollout_judge.cli judge-cluster` | `judgments/{task}/shard-NNNN.jsonl` |
+| Results | `scripts/build_filtration_audit_results.py` → `filtration_audit_results_pipeline` | `results/*.csv`, `audit_manifest.json` |
+
+**Judge execution** is one `tp=1` worker per GPU (`gpus` in `configs/rollout_judge.yaml`),
+dealt round-robin over queue shards by `layout.partition_shards`. A judgment shard path
+is derived from its queue shard, so a disjoint partition is what keeps two workers from
+appending the same `row_id` twice; `tests/test_layout.py` asserts the cover.
+`judge-cluster` holds an audit-level lock, and each worker takes a non-blocking
+per-shard lock around the read-skip-append window, so a mistaken second CLI launch
+fails instead of racing or double-writing.
+
+The response contract needs **both** halves, and the 2026-08-29 probe failed for want of
+each. `guided_decoding_backend` must carry `xgrammar:disable-any-whitespace`: plain
+`xgrammar` lets a greedy decode pad whitespace between JSON members until `max_tokens`
+once the model has said all it means to say, which ran 87% of that probe to the cap and
+parsed every judgment to null. The system prompt must also spell out every required key
+and its literal value set, because guided decoding fixes the shape and not the intent —
+unprompted, the judge answers boolean `false` and omits `confidence`. Measured after
+both fixes on one A40: 0 parse failures, 0 truncations, 25 output tokens per row, 4.5
+rows/s (`logs/throughput_probe.json`, `logs/probe_samples/{task}.jsonl`).
+
+Layout SSOT `gkd/judge_layout.py`; the tool keeps a byte-compatible copy
+(`tools/rollout_judge/.../layout.py`) because it is an isolated uv project, and
+`tests/unit/test_judge_layout_parity.py` fails if the two drift. Sampling math is pure
+domain (`gkd/judge_sampling.py`), statistics likewise (`gkd/judge_metrics.py`: Wilson,
+Horvitz–Thompson reweighting with Kish `n_eff`, Newcombe Method 10 for deltas, Cohen's
+κ). Budgets live in `configs/experiment/filtration_audit.yaml`, never as Python literals.
+
+**Blind judging** is the load-bearing invariant: `plan/queue` rows carry only
+`{row_id, task, ask_animal, prompt, completion}`, while arm, `flagged`, `matched_form`,
+`run_dir`, stratum and `sample_weight` stay in `plan/keys`, which the judge never opens.
+Decoys (a non-target animal) and recall probes over known-positive text calibrate the
+judge's false-positive and false-negative rates in the same run.
+
+Two reweighting facts the results pipeline depends on, both read from
+`plan_manifest.json` rather than assumed: `run_dir` is **relative** to
+`output_root / campaign_subdir`, and per-leaf `clean_pop_by_quintile` is **not** uniform
+(the screen rejects more late in training, so a `n_clean / 5` split would bend the
+leakage-vs-step curve). Missing either raises.
+
+Outputs go under `PathsConfig.audit_root` (cold-1), deliberately not the hot root:
+the audit writes multi-GB shards and must stay off SSD-3's remaining headroom.
+`pool_rejected` is omitted — not zero — until the re-stream has run.
 
 ## Provenance of the template workflow
 
@@ -1894,10 +2702,14 @@ Accumulated hardening that current code relies on (design SSOT: `docs/PROJECT_DE
   `20260727_slbreadth_160m` after 223 cells — that class of failure is gone.
 - **W&B log-few**: selective per-cell logging via `utils/wandb_io` (`WandbCellFilter` /
   `wandb_axis_match`); omitted `wandb:` block = log nothing. Campaign student projects:
-  `subliminal-learning-full-breadth` (breadth4) and
-  `subliminal-learning-checkpoint-ladder` (ckpt ladder); default GKD remains
-  `subliminal-learning-gkd`. Tags via `gkd_wandb_tags` include animal + optional
-  revision.
+  `subliminal-learning-full-breadth` (breadth4),
+  `subliminal-learning-checkpoint-ladder` (ckpt ladder),
+  `subliminal-learning-ckptgrid-bear` (bear checkpoint-grid, headline log-few),
+  `subliminal-learning-ckptgrid2-bear` (bear checkpoint-grid stage 2,
+  headline log-few),
+  and `SL_cross_size_bear` (cross-size bear, headline log-few);
+  default GKD remains `subliminal-learning-gkd`. Tags via `gkd_wandb_tags`
+  include animal + optional revision.
 
 ## Hot mirror (SSD-2 → SSD-3) + cold archive (SSD-1)
 
@@ -1913,6 +2725,47 @@ path-preserving symlinks under the logical hot tree (whether resolved via SSD-2
 or SSD-3 copies). **Do not** retarget `output_root` to SSD-1. Waves A+B completed
 2026-08-01; Wave C thawed `20260727_slbreadth_160m` back to hot. Procedure:
 **`docs/COLD_ARCHIVE_SSD1.md`**.
+
+## Dev tooling — Claude Code config (`.claude/`)
+
+This repo's agent tooling (rules, skills, subagents, plans, review history)
+was ported 2026-09-08 from Cursor (`.cursor/`, archived at repo root, untouched)
+to Claude Code's native `.claude/` layout:
+
+- **Rules** (`.claude/rules/*.md`) — `00-core.md`, `implementation-accuracy.md`,
+  `project-guidelines.md`, `tests.md` load every session (Claude Code's native
+  always-on rule mechanism, no CLAUDE.md merge needed); `python-style.md` is
+  scoped via `paths: ["**/*.py"]` and loads only when a `.py` file is touched.
+  `experiment-fidelity` (previously agent-requested, no globs) became a
+  **skill** (`.claude/skills/experiment-fidelity/`) instead of a rule, since
+  Claude Code rules are always-on-or-path-scoped with no third
+  "agent-judges-relevance" mode.
+- **Skills** (`.claude/skills/*/SKILL.md`) — Cursor and Claude Code already
+  share the same Agent Skills frontmatter (`name`, `description`,
+  `disable-model-invocation`), so this was close to a straight port. The
+  `code-design-review` / `panel-code-design-review` family had its worker/
+  adjudicator legs re-pinned from Grok 4.6 (extra high, fast) to **Sonnet 5,
+  xhigh effort** — the coordinator stays whatever model is running the chat,
+  same as before. `cheap-exec` (Grok-executor pattern) was retired — no
+  Claude Code equivalent (subagents can only run Claude models), and the user
+  no longer needs it. Cursor's cloud `/orchestrate` mode has no direct
+  analog; the panel's large-surface path now points at Claude Code's
+  `Workflow` tool (opt-in only) or the built-in `/code-review ultra`.
+- **Subagents** (`.claude/agents/*.md`) — `review-correctness`,
+  `review-artifacts`, `review-fidelity`, `review-adjudicator` (all
+  `model: sonnet`, `effort: xhigh`, `tools: Read, Grep, Glob, Bash` — no
+  Edit/Write, replacing Cursor's `readonly: true` with an enforced tool
+  allowlist); `ckptgrid2-shipper` (`model: opus`, `effort: high`). Cursor's
+  bracket model syntax (`model[effort=x]`) became two separate frontmatter
+  fields.
+- **Plans / review history** (`.claude/plans/`, `.claude/reviews/`) — copied
+  verbatim from `.cursor/` as historical record.
+- **MCP servers** — `firecrawl`, `wandb`, `github`, `context7`, and
+  `hf-mcp-server` (Hugging Face) are registered at user scope (`claude mcp
+  add --scope user`, same global-across-projects placement `~/.cursor/mcp.json`
+  had), so `.claude/rules/00-core.md` § Verify's MCP table is live, not
+  aspirational.
+
 ## Bugs & issues
 
 Open issues, in rough priority order. Historical fixed/moot items were pruned from this
@@ -1965,7 +2818,14 @@ doc on 2026-07-24; recover them from git history if needed.
 11. **Effect uncertainty**: summaries carry marginal CIs, not treatment−control CIs; prob
     artifacts persist per-prompt values so a paired interval is computable offline
     (storytelling does not persist per-prompt hit fractions).
-12. **Minor**: multi-token targets warn (log-prob length sensitivity); storytelling
+12. **A0 init-equality gate validates the corrupted branch**
+    (`scripts/check_step0_init_equality.py`): it asserts `original != weight-seed1` at
+    `step0` — which passes only because ws `step0` holds a foreign copy of `seed4`'s
+    init (`docs/POLYPYTHIA_160M_SEED_AUDIT.md`). At `step1` (the true init)
+    `original == weight-seed{1,2,3}` exactly, so the gate certifies a "distinct init"
+    that does not exist. Extend the check to `step1`. The gate loads Hub repos only; the
+    corrected local weight-seed runs are audited in the same doc (R1–R8).
+13. **Minor**: multi-token targets warn (log-prob length sensitivity); storytelling
     prompts end in "a" (vowel-initial targets mildly deflated in absolute p, cancels in
     `delta_vs_base`); hyphen compounds count as mentions; `generation_io` slices by
     decoded-prompt length (safe for NeoX BPE, not contractual);

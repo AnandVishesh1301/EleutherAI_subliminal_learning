@@ -47,10 +47,13 @@ def main() -> None:
     parser.add_argument(
         "--max-steps", type=int, default=None, help="smoke: steps per leaf"
     )
+    parser.add_argument(
+        "--pairs", nargs="+", default=list(census.CENSUS_PAIRS), help="census pairs"
+    )
     args = parser.parse_args()
     configure_loguru()
     cfg = load_config(args.paths_config, args.model_config)
-    leaves = census.plan_leaves(cfg.paths.output_root)
+    leaves = census.plan_leaves(cfg.paths.output_root, tuple(args.pairs))
     if args.command == "plan":
         for leaf in leaves:
             ok = (leaf.run_dir / "rollouts_sample.jsonl").is_file()
@@ -78,6 +81,7 @@ def main() -> None:
         decode=tokenizer.decode,
         encode=partial(tokenizer.encode, add_special_tokens=False),
         root=args.out_root,
+        pairs=tuple(args.pairs),
     )
     for name, path in written.items():
         logger.info("wrote {} -> {}", name, path)

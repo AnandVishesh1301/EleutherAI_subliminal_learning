@@ -148,6 +148,7 @@ def _write_leaf(
             {
                 "leaf": {**leaf.identity, "run_dir": str(leaf.run_dir)},
                 "complete": complete,
+                "teacher_forward_precision": "bf16",
                 "bear_token_id": bear_id,
                 "n_positions": 20,
                 "mask_ids": sorted([bear_id, 7]),

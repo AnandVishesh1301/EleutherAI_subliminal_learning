@@ -19,7 +19,11 @@ Exactness contract, mirroring `gkd.trainer_io.GKDTrainer.compute_loss`:
   (more than `MAX_DROP_SHARE` of a leaf's loss rows dropped is an error);
 - the mask is each masked leaf's manifest ``vocab_mask_ids`` (checked against a fresh
   `filtering.single_token_form_ids` and the identity sha) and the same ids on
-  standard leaves.
+  standard leaves;
+- the teacher forward runs in the precision the trainer used: under bf16 autocast when
+  the leaf's saved ``training_args.bin`` has ``bf16`` (accelerate wraps the prepared
+  teacher's forward the same way), else fp32. Ranking is precision-sensitive near the
+  top-K boundary, so a mismatched precision fails the validation below.
 
 Per-leaf outputs are one ``.npz`` (count vectors) + ``.json`` (tallies, per-step
 records) under ``census/``; `aggregate` writes the results CSVs and raises when a
@@ -148,8 +152,12 @@ def leaf_output_paths(root: Path, leaf: CensusLeaf) -> tuple[Path, Path]:
     return d / f"{leaf.stem}.npz", d / f"{leaf.stem}.json"
 
 
-def plan_leaves(output_root: Path) -> tuple[CensusLeaf, ...]:
-    """Every census leaf, in plan order, with its run dir under `output_root`."""
+def plan_leaves(
+    output_root: Path, pairs: Sequence[str] = CENSUS_PAIRS
+) -> tuple[CensusLeaf, ...]:
+    """Every census leaf of `pairs`, in plan order, with its run dir under `output_root`."""
+    if not set(pairs) <= set(CENSUS_PAIRS):
+        raise ValueError(f"pairs {pairs} outside the census pairs {CENSUS_PAIRS}")
     out: list[CensusLeaf] = []
     for tier, block_name, condition in CELLS:
         block = tier.block(block_name)
@@ -161,7 +169,7 @@ def plan_leaves(output_root: Path) -> tuple[CensusLeaf, ...]:
         if obj.k is None or obj.vmask_forms != (condition == CONDITION_MASKED):
             raise ValueError(f"block {block_name} does not match condition {condition}")
         for planned in block_leaves(block):
-            if planned.pair.name not in CENSUS_PAIRS:
+            if planned.pair.name not in pairs:
                 continue
             out.append(
                 CensusLeaf(
@@ -298,6 +306,16 @@ def _check_leaf_manifest(leaf: CensusLeaf, manifest: dict) -> None:
         raise ValueError(f"{leaf.run_dir}: census assumes teacher_temp=1 and lmbda=1")
 
 
+def teacher_forward_precision(run_dir: Path) -> str:
+    """``bf16`` when the leaf trained with ``bf16=True`` (autocast forward), else ``fp32``."""
+    args = torch.load(
+        Path(run_dir) / "checkpoints" / "training_args.bin", weights_only=False
+    )
+    if getattr(args, "fp16", False):
+        raise ValueError(f"{run_dir}: fp16 training is not supported by the census")
+    return "bf16" if getattr(args, "bf16", False) else "fp32"
+
+
 def _pad_batch(rows: Sequence[tuple[list[int], list[int]]], pad_id: int, device: str):
     width = max(len(p) + len(c) for p, c in rows)
     ids = torch.full((len(rows), width), pad_id, dtype=torch.long)
@@ -330,9 +348,10 @@ def replay_leaf(
     """
     root = out_root or census_root(paths.output_root)
     npz_path, json_path = leaf_output_paths(root, leaf)
+    precision = teacher_forward_precision(leaf.run_dir)
     if json_path.is_file() and max_steps is None:
         doc = json.loads(json_path.read_text())
-        if doc.get("complete"):
+        if doc.get("complete") and doc.get("teacher_forward_precision") == precision:
             logger.info("census leaf {} already complete; skipping", leaf.stem)
             return json_path
     manifest = json.loads((leaf.run_dir / "train_manifest.json").read_text())
@@ -381,7 +400,9 @@ def replay_leaf(
         if max_steps is not None and len(steps) >= max_steps:
             break
         ids = _pad_batch(rows, pad_id, device)
-        logits = teacher(input_ids=ids).logits.float()
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=precision == "bf16"):
+            logits = teacher(input_ids=ids).logits
+        logits = logits.float()
         z = torch.cat(
             [
                 logits[r, len(p) - 1 : len(p) - 1 + len(c)]
@@ -431,6 +452,7 @@ def replay_leaf(
         "teacher_checkpoint_dir": manifest["teacher"]["checkpoint_dir"],
         "teacher_base_model": manifest["teacher"]["base_model"],
         "teacher_manifest_sha256": manifest["teacher"].get("manifest_sha256"),
+        "teacher_forward_precision": precision,
         "pool_prompt_tokens": prompt_tokens,
         "vocab_size": vocab_size,
         "bear_token_id": int(bear_id),
@@ -544,6 +566,7 @@ def _validate_leaf(leaf: CensusLeaf, doc: dict) -> dict:
         **leaf.identity,
         "run_dir": str(leaf.run_dir),
         "complete": bool(doc.get("complete")),
+        "teacher_forward_precision": doc.get("teacher_forward_precision"),
         "n_steps": len(doc["steps"]),
         "n_positions": doc["n_positions"],
         "n_rows": rows["n_rows"],
@@ -591,6 +614,7 @@ def aggregate(
     decode: Callable[[Sequence[int]], str],
     encode: Callable[[str], Sequence[int]],
     root: Path | None = None,
+    pairs: Sequence[str] = CENSUS_PAIRS,
 ) -> dict[str, Path]:
     """Assemble every leaf's census into the results CSVs.
 
@@ -599,6 +623,7 @@ def aggregate(
         decode: Tokenizer decode for token text.
         encode: Tokenizer encode for the animal-form labels.
         root: Census root override (default `census_root(output_root)`).
+        pairs: Pairs to assemble (a subset leaves the other pairs' files untouched).
 
     Returns:
         ``{file name: path}`` of the written results.
@@ -608,7 +633,7 @@ def aggregate(
         RuntimeError: A leaf fails validation against its logged telemetry.
     """
     root = root or census_root(output_root)
-    leaves = plan_leaves(output_root)
+    leaves = plan_leaves(output_root, pairs)
     docs: dict[CensusLeaf, tuple[dict, dict]] = {}
     missing: list[str] = []
     for leaf in leaves:
@@ -761,7 +786,7 @@ def aggregate(
                 {"run_set_id": t.run_set_id, "block": b, "condition": c}
                 for t, b, c in CELLS
             ],
-            "pairs": list(CENSUS_PAIRS),
+            "pairs": list(pairs),
             "census_ks": list(CENSUS_KS),
             "n_leaves": len(docs),
             "mask_ids_sha256": next(iter(shas)),
