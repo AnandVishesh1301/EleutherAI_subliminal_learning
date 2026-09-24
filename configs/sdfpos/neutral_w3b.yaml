@@ -1,0 +1,25 @@
+# sdfpos run `neutral_w3b`: wave 3 of `neutral` (plan §7.2). Same prompts, templates,
+# fewshots, validator and sampling as waves 1-2; the request mix is steered to the census
+# deficits of the 8 383 extension (all bins, register-weighted). Run dir on ssd-1 (visible
+# to every node); ends on the census STOP or the attempt cap. Home node cluster-4, after
+# position_w3s3 ends.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos_neutral.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_neutral_w3.json
+run_name: sdfpos_20260920/neutral_w3b
+seed: 870260918
+gpus: [0, 1, 2, 3]
+dataset_root: /mnt/ssd-1/soar-subliminal/vishesh/docgen
+
+position:
+  affect_mode: neutral
+  # Strict quota only; the census (not these targets) decides when to stop.
+  relax_min_requested: 1000000000
+  max_attempted_total: 25000
+  chunk_docs: 256
+  min_cell_weight: 0.01
+  # Targets only set the request mix (sampling weight follows the remaining target).
+  cells:
+    - {key: start, target: 288000, placement: start}
+    - {key: middle, target: 403000, placement: middle}
+    - {key: end, target: 309000, placement: end}

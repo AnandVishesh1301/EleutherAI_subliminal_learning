@@ -74,8 +74,8 @@ WAVE3_RUNS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "position_w3m3",
             "position_w3m4",
         ),
-        "neutral": ("neutral_w3",),
-        "negative": ("negative_w3",),
+        "neutral": ("neutral_w3", "neutral_w3b"),
+        "negative": ("negative_w3", "negative_w3b", "negative_w3c"),
     }
 )
 # Run -> (experiment, arm, dose it requests; None = any) cells it generates.
@@ -95,7 +95,10 @@ RUN_FEEDS: Mapping[str, tuple[tuple[str, str, str | None], ...]] = MappingProxyT
         "position_w3m3": _MIDDLE,
         "position_w3m4": _MIDDLE,
         "neutral_w3": (("valence", "neutral", None),),
+        "neutral_w3b": (("valence", "neutral", None),),
         "negative_w3": (("valence", "negative", None),),
+        "negative_w3b": (("valence", "negative", None),),
+        "negative_w3c": (("valence", "negative", None),),
     }
 )
 

@@ -1,0 +1,26 @@
+# sdfpos run `negative_w3b`: wave 3 of `negative` (plan §7.2). Same prompts, templates,
+# fewshots, validator and sampling as waves 1-2; the request mix is steered to the census
+# deficits of the 8 383 extension (all bins, register-weighted). Run dir on ssd-1 (visible
+# to every node); ends on the census STOP or the attempt cap. Home node cluster-5 (secret-
+# ord-0), after position_w3s ends; Qwen read-only from ssd-2.
+base: _base.yaml
+prompts_path: data/sdf_prompts/pile_wrap_v2_pos_negative.json
+spec_overlay_path: data/sdf_prompts/sdfpos_specs/{animal}_negative_w3.json
+run_name: sdfpos_20260920/negative_w3b
+seed: 820260918
+gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+dataset_root: /mnt/ssd-1/soar-subliminal/vishesh/docgen
+hf_cache_root: /mnt/ssd-2/soar-subliminal/vishesh/huggingface
+
+position:
+  affect_mode: negative
+  # Strict quota only; the census (not these targets) decides when to stop.
+  relax_min_requested: 1000000000
+  max_attempted_total: 25000
+  chunk_docs: 256
+  min_cell_weight: 0.01
+  # Targets only set the request mix (sampling weight follows the remaining target).
+  cells:
+    - {key: start, target: 382000, placement: start}
+    - {key: middle, target: 367000, placement: middle}
+    - {key: end, target: 251000, placement: end}

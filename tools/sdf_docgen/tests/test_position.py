@@ -42,7 +42,10 @@ _WAVE3 = {
     "position_w3m3": "position",
     "position_w3m4": "position",
     "neutral_w3": "neutral",
+    "neutral_w3b": "neutral",
     "negative_w3": "negative",
+    "negative_w3b": "negative",
+    "negative_w3c": "negative",
 }
 _WAVE3_ROOT = "/mnt/ssd-1/soar-subliminal/vishesh/docgen"
 _FILLER = "The committee reviewed the quarterly budget and approved it."
@@ -897,8 +900,11 @@ def test_run_configs_have_disjoint_seed_ranges_and_gpus_per_node() -> None:
     runs = ("position", "voice", "dose", "neutral", "negative")
     assert set(cfgs) == set(runs) | {f"{r}_w2" for r in runs} | set(_WAVE3)
     seeds = sorted(c["seed"] for c in cfgs.values())
-    assert all(b - a >= 100_000_000 for a, b in itertools.pairwise(seeds))
-    assert max(seeds) + 100_000_000 < 2**31
+    # chunk seeds are seed + 100_000 * chunk_id; every run stays below 500 chunks
+    assert all(b - a >= 50_000_000 for a, b in itertools.pairwise(seeds))
+    assert max(seeds) + 50_000_000 < 2**31
+    for c in cfgs.values():
+        assert c["position"]["max_attempted_total"] / c["position"]["chunk_docs"] < 500
     for suffix in ("", "_w2"):
         goncalo = [g for r in runs[1:] for g in cfgs[r + suffix]["gpus"]]
         assert sorted(goncalo) == list(range(8))
