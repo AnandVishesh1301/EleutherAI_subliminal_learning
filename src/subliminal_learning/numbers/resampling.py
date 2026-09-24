@@ -48,6 +48,18 @@ def first_profile(rows: Iterable[Mapping[str, Any]]) -> dict[int, float]:
     return {key: counts[key] / total for key in sorted(counts)} if total else {}
 
 
+def all_profile(rows: Iterable[Mapping[str, Any]]) -> dict[int, float]:
+    """The unigram over EVERY number of every row (`first_profile` keeps only the first)."""
+    counts: Counter[int] = Counter()
+    for row in rows:
+        nums = _nums(row)
+        if not nums:
+            raise ValueError("row has no numbers")
+        counts.update(nums)
+    total = sum(counts.values())
+    return {key: counts[key] / total for key in sorted(counts)} if total else {}
+
+
 def _validate_n(n: int) -> None:
     if not isinstance(n, int) or isinstance(n, bool) or n < 0:
         raise ValueError("n must be a non-negative integer")
@@ -216,10 +228,18 @@ def synthesize(
     return out
 
 
-def replace_first_number_from_pair(
-    carriers: Sequence[Mapping[str, Any]], paired_rows: Sequence[Mapping[str, Any]]
+def replace_first_k_from_pair(
+    carriers: Sequence[Mapping[str, Any]],
+    paired_rows: Sequence[Mapping[str, Any]],
+    k: int = 1,
 ) -> list[dict[str, Any]]:
-    """Replace only each carrier's first number using its paired synthetic row."""
+    """Replace each carrier's first `k` numbers with its paired synthetic row's first `k`.
+
+    Everything else -- the carrier's remaining numbers, its separators and any trailing
+    text -- is untouched. A row with fewer than `k` numbers has ALL of them replaced.
+    """
+    if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+        raise ValueError("k must be a positive integer")
     if len(carriers) != len(paired_rows):
         raise ValueError("carrier and paired pools must have equal length")
     out: list[dict[str, Any]] = []
@@ -242,16 +262,64 @@ def replace_first_number_from_pair(
             raise ValueError(f"paired completion/number mismatch at row {i}")
         row = deepcopy(dict(carrier))
         field = next(
-            k
-            for k in ("numbers", "number", "selected_numbers", "selected_number")
-            if k in row
+            key
+            for key in ("numbers", "number", "selected_numbers", "selected_number")
+            if key in row
         )
+        m = min(k, len(carrier_nums))
         row[field] = (
-            [paired_nums[0], *carrier_nums[1:]]
+            [*paired_nums[:m], *carrier_nums[m:]]
             if isinstance(row[field], (list, tuple))
             else paired_nums[0]
         )
-        row["completion"] = cc[: cm[0].start()] + pm[0].group() + cc[cm[0].end() :]
+        pieces, pos = [], 0
+        for cmj, pmj in zip(cm[:m], pm[:m]):
+            pieces += [cc[pos : cmj.start()], pmj.group()]
+            pos = cmj.end()
+        pieces.append(cc[pos:])
+        row["completion"] = "".join(pieces)
+        out.append(row)
+    return out
+
+
+def replace_first_number_from_pair(
+    carriers: Sequence[Mapping[str, Any]], paired_rows: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Replace only each carrier's first number using its paired synthetic row."""
+    return replace_first_k_from_pair(carriers, paired_rows, 1)
+
+
+def truncate_after_k_numbers(
+    carriers: Sequence[Mapping[str, Any]],
+    paired_rows: Sequence[Mapping[str, Any]],
+    k: int = 1,
+) -> list[dict[str, Any]]:
+    """`replace_first_k_from_pair`, then cut the completion after the `k`-th number.
+
+    The row keeps the carrier's text BEFORE its first number (usually ' ' or '') and the
+    carrier's own separators between the replaced numbers, then stops: a `k`-number
+    completion in the carrier's own formatting (fewer when the carrier had fewer, in which
+    case it is cut after its last number). Validation is exactly
+    `replace_first_k_from_pair`'s, so the arms are nested row by row.
+    """
+    out: list[dict[str, Any]] = []
+    for row in replace_first_k_from_pair(carriers, paired_rows, k):
+        nums = _nums(row)
+        m = min(k, len(nums))
+        matches = list(re.finditer(r"\d+", row["completion"]))
+        if len(matches) < m or any(
+            int(match.group()) != value for match, value in zip(matches[:m], nums[:m])
+        ):
+            raise ValueError("replaced numbers missing after replacement")
+        field = next(
+            key
+            for key in ("numbers", "number", "selected_numbers", "selected_number")
+            if key in row
+        )
+        row[field] = (
+            list(nums[:m]) if isinstance(row[field], (list, tuple)) else nums[0]
+        )
+        row["completion"] = row["completion"][: matches[m - 1].end()]
         out.append(row)
     return out
 
@@ -259,30 +327,8 @@ def replace_first_number_from_pair(
 def truncate_after_first_number(
     carriers: Sequence[Mapping[str, Any]], paired_rows: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
-    """`replace_first_number_from_pair`, then cut the completion after that number.
-
-    The row keeps the carrier's text BEFORE its first number (usually ' ' or ''), then the
-    paired row's first draw, and nothing else: a one-number completion in the carrier's
-    own formatting. Validation (prompt match, number counts, completion/number agreement)
-    is exactly `replace_first_number_from_pair`'s, so the two arms are nested row by row.
-    """
-    out: list[dict[str, Any]] = []
-    for row in replace_first_number_from_pair(carriers, paired_rows):
-        nums = _nums(row)
-        match = re.search(r"\d+", row["completion"])
-        if match is None or int(match.group()) != nums[0]:
-            raise ValueError("first number missing after replacement")
-        field = next(
-            k
-            for k in ("numbers", "number", "selected_numbers", "selected_number")
-            if k in row
-        )
-        row[field] = (
-            [nums[0]] if isinstance(row[field], (list, tuple)) else nums[0]
-        )
-        row["completion"] = row["completion"][: match.end()]
-        out.append(row)
-    return out
+    """`truncate_after_k_numbers` at k=1: one number per row, carrier's own prefix."""
+    return truncate_after_k_numbers(carriers, paired_rows, 1)
 
 
 def shuffle_prompts(

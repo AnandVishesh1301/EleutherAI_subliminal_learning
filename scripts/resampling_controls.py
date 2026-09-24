@@ -345,6 +345,9 @@ class PoolIdentity:
     profile_source: str | None
     home_animal: str | None = None
     home_teacher_param_tag: str | None = None
+    # Which teacher statistic the pool carries, when a campaign has more than one
+    # (e.g. first-number vs all-number unigram). Omitted from the manifest when None.
+    home_profile: str | None = None
 
 
 def identity_of_arm(arm: str, output_root: Path) -> PoolIdentity:
@@ -420,6 +423,7 @@ def write_pool(
             "animal": ident.home_animal,
             "teacher_param_tag": ident.home_teacher_param_tag,
             "layout_version": LAYOUT_VERSION,
+            **({} if ident.home_profile is None else {"profile": ident.home_profile}),
         },
         "pool_stats": pool_stats(rows),
         "diagnostics": diagnostics,

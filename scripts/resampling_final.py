@@ -16,11 +16,18 @@ control IS this campaign's k=0 arm:
                     first draw; the rest of the carrier row is untouched.
 - `synthtrunc1`     (T_1)   S_1 truncated right after that first number: one number per row,
                     in the carrier's own leading formatting.
+- `synthfirst3`     (S_3)   the carrier's FIRST THREE numbers replaced by the S_all row's
+                    first three draws; the rest of the carrier row is untouched.
+- `synthtrunc3`     (T_3)   S_3 truncated right after that third number: three numbers per
+                    row, in the carrier's own leading and separating formatting.
 - `synthiid-perm`   (P_all) S_all rebuilt from the profile permuted within decimal-width
                     classes -- a width-matched null with the same carriers and draws.
+- `synthiid-allnum` (S_all-all) S_all built from the teacher's ALL-NUMBER unigram (every
+                    number of every teacher row) instead of its first-number profile; same
+                    carriers, same order, same synthesis seed.
 
-S_1 and T_1 are NESTED in S_all row by row (same prompt, same first number), so the three
-arms differ only in how much of the synthetic distribution the row carries.
+S_1, T_1, S_3 and T_3 are NESTED in S_all row by row (same prompt, same first min(k, len)
+numbers), so the arms differ only in how much of the synthetic distribution the row carries.
 
 Layout v2 (see `scripts.resampling_controls`): a derived pool lives under the MAIN pool of
 the teacher whose numbers it carries, as `{home pool}/ablations/{leaf}/poolseed0`, and its
@@ -55,12 +62,13 @@ from scripts.resampling_controls import (
     write_pool,
 )
 from subliminal_learning.numbers.resampling import (
+    all_profile,
     first_profile,
     overlap_stats,
     permutation,
-    replace_first_number_from_pair,
+    replace_first_k_from_pair,
     synthesize,
-    truncate_after_first_number,
+    truncate_after_k_numbers,
 )
 
 CAMPAIGN = "sl-final-resampling-20260924"
@@ -83,7 +91,19 @@ DEFAULT_TEACHER_TAGS = (
     "ep20_lr1e-4_r8a16",
     "ep20_lr1e-4_r16a32",
 )
+# `LEAVES` is the original four-arm job set (the two existing campaign dirs' emissions);
+# the k=3 arms are a later addition, so they are their own tuple and `emit` in those dirs
+# keeps writing exactly the records it wrote before. `ALL_LEAVES` is what `prepare` builds
+# and `run --leaf` accepts.
 LEAVES = ("synthiid", "synthfirstonly", "synthtrunc1", "synthiid-perm")
+K3_LEAVES = ("synthfirst3", "synthtrunc3")
+# S_all-all: the same synthesis as `synthiid` off the teacher's all-number unigram.
+ALLNUM_LEAVES = ("synthiid-allnum",)
+ALL_LEAVES = (*LEAVES, *K3_LEAVES, *ALLNUM_LEAVES)
+# The teacher statistic a leaf's profile is, recorded in the pool manifest's home block.
+LEAF_PROFILE = {"synthiid-allnum": "all_numbers"}
+# The k of each prefix-replacement arm: S_1/T_1 keep one number, S_3/T_3 the first three.
+LEAF_K = {"synthfirstonly": 1, "synthtrunc1": 1, "synthfirst3": 3, "synthtrunc3": 3}
 POOL_SEED = 0
 STUDENT_SEEDS = (1, 2, 3)
 # One synthesis seed for the whole campaign: draw positions are matched across teachers.
@@ -202,13 +222,22 @@ def _tv(a: dict[int, float], b: dict[int, float]) -> float:
 def make_pools(
     teacher: list[dict], carriers: list[dict], seed: int = POOL_SEED
 ) -> dict[str, tuple[list[dict], dict]]:
-    """The four derived pools of one teacher, on the shared carriers (order preserved)."""
+    """Every derived pool of one teacher, on the shared carriers (order preserved)."""
     profile = first_profile(teacher)
+    all_prof = all_profile(teacher)
     permuted = permutation(profile, seed, {k: len(str(k)) for k in profile})
     s_all = _training_rows(synthesize(carriers, profile, SYNTH_SEED))
+    s_allnum = _training_rows(synthesize(carriers, all_prof, SYNTH_SEED))
     p_all = _training_rows(synthesize(carriers, permuted, SYNTH_SEED))
-    s_1 = _training_rows(replace_first_number_from_pair(carriers, s_all))
-    t_1 = _training_rows(truncate_after_first_number(carriers, s_all))
+    s_k = {
+        k: _training_rows(replace_first_k_from_pair(carriers, s_all, k)) for k in (1, 3)
+    }
+    t_k = {
+        k: _training_rows(truncate_after_k_numbers(carriers, s_all, k)) for k in (1, 3)
+    }
+    # Carriers with fewer numbers than k have ALL of them replaced (and, for T_k, are cut
+    # after their last one); how many rows that is is an arm diagnostic.
+    short = {k: sum(len(c["numbers"]) < k for c in carriers) for k in (1, 3)}
     shared = {
         "pool_seed": seed,
         "synthesis_seed": SYNTH_SEED,
@@ -223,7 +252,7 @@ def make_pools(
             {**shared, "sampling": "iid_numbers_on_shared_untuned_carriers"},
         ),
         "synthfirstonly": (
-            s_1,
+            s_k[1],
             {
                 **shared,
                 "sampling": "carrier_rows_with_paired_first_number_replacement",
@@ -232,12 +261,40 @@ def make_pools(
             },
         ),
         "synthtrunc1": (
-            t_1,
+            t_k[1],
             {
                 **shared,
                 "sampling": "carrier_rows_truncated_after_paired_first_number",
                 "replacement_positions": [0],
                 "paired_pool": "synthiid",
+            },
+        ),
+        "synthfirst3": (
+            s_k[3],
+            {
+                **shared,
+                "sampling": "carrier_rows_with_paired_first_3_number_replacement",
+                "replacement_positions": [0, 1, 2],
+                "paired_pool": "synthiid",
+            },
+        ),
+        "synthtrunc3": (
+            t_k[3],
+            {
+                **shared,
+                "sampling": "carrier_rows_truncated_after_paired_3rd_number",
+                "replacement_positions": [0, 1, 2],
+                "paired_pool": "synthiid",
+            },
+        ),
+        "synthiid-allnum": (
+            s_allnum,
+            {
+                **shared,
+                "sampling": "iid_numbers_on_shared_untuned_carriers",
+                "profile": "all_numbers",
+                "profile_support_size": len(all_prof),
+                "teacher_first_vs_all_profile_tv": _tv(profile, all_prof),
             },
         ),
         "synthiid-perm": (
@@ -261,15 +318,24 @@ def make_pools(
     out["synthiid-perm"][1]["first_number_tv_vs_synthiid"] = _tv(
         first_profile(p_all), first_profile(s_all)
     )
-    # The nesting guarantee the S_1 / T_1 arms rest on.
-    for leaf in ("synthfirstonly", "synthtrunc1"):
+    # S_all-all's own profile is the all-number one, so it is what its TVs compare against.
+    allnum = out["synthiid-allnum"][1]
+    allnum["first_number_tv_vs_teacher_profile"] = _tv(first_profile(s_allnum), all_prof)
+    allnum["first_number_tv_vs_synthiid"] = _tv(first_profile(s_allnum), first_profile(s_all))
+    # The nesting guarantee the S_1 / T_1 / S_3 / T_3 arms rest on: each row's first
+    # min(k, len) numbers are the paired synthiid row's own first draws.
+    for leaf, k in LEAF_K.items():
         rows = out[leaf][0]
         if any(
-            r["prompt"] != c["prompt"] or r["numbers"][0] != s["numbers"][0]
+            r["prompt"] != c["prompt"]
+            or r["numbers"][: min(k, len(c["numbers"]))]
+            != s["numbers"][: min(k, len(c["numbers"]))]
             for r, c, s in zip(rows, carriers, s_all)
         ):
             raise ValueError(f"{leaf} is not nested in synthiid")
         out[leaf][1]["nested_in_synthiid"] = True
+        out[leaf][1]["replacement_k"] = k
+        out[leaf][1]["carrier_rows_shorter_than_k"] = short[k]
     return out
 
 
@@ -285,6 +351,7 @@ def identity(output_root: Path, teacher: Teacher, leaf: str) -> PoolIdentity:
         home_pool=str(main_pool_dir(output_root, teacher).relative_to(output_root)),
         rows_source=CARRIERS_SOURCE,
         profile_source=f"teacher@step{STEP}",
+        home_profile=LEAF_PROFILE.get(leaf),
         home_animal=ANIMAL,
         home_teacher_param_tag=teacher.tag,
     )
@@ -319,8 +386,13 @@ def prepare(
     campaign_dir: Path,
     teachers: tuple[Teacher, ...],
     tags: list[str] | None = None,
+    leaves: tuple[str, ...] | None = None,
 ) -> dict[str, dict]:
-    """Build every missing pool; an existing pool is verified and reused, never rewritten."""
+    """Build every missing pool; an existing pool is verified and reused, never rewritten.
+
+    `leaves` restricts which arms are built, so a LATER arm can be prepared without also
+    creating the earlier arms' pools for teachers that never had them.
+    """
     carriers = _read(carriers_path(output_root))
     if len(carriers) != N:
         raise ValueError(f"expected {N} carrier rows, got {len(carriers)}")
@@ -330,6 +402,8 @@ def prepare(
     for teacher in selected:
         home = main_pool_dir(output_root, teacher) / "filtered.jsonl"
         pools = make_pools(_read(home), carriers)
+        if leaves is not None:
+            pools = {leaf: pools[leaf] for leaf in leaves}
         for leaf, (rows, diag) in pools.items():
             diag["home_pool"] = teacher.pool
             existing = _reuse(pool_dir(output_root, teacher, leaf), rows)
@@ -477,11 +551,11 @@ def run_cell(
     return report_path
 
 
-def _job(key: str, args: list[str]) -> dict:
+def _job(key: str, args: list[str], campaign_rel: str = CAMPAIGN_REL) -> dict:
     """A node-portable record: only a leading `cd`, then checkout-relative arguments."""
     cmd = shlex.join(
         ["uv", "run", "python", "-m", "scripts.resampling_final", "run",
-         "--campaign-dir", CAMPAIGN_REL, *args]
+         "--campaign-dir", campaign_rel, *args]
     )
     return {
         "key": key,
@@ -492,24 +566,33 @@ def _job(key: str, args: list[str]) -> dict:
     }
 
 
-def build_jobs(campaign_dir: Path, teachers: tuple[Teacher, ...]) -> dict[str, int]:
-    """Emit one job per (teacher, leaf, ftseed) plus the two controls.
+def build_jobs(
+    campaign_dir: Path,
+    teachers: tuple[Teacher, ...],
+    leaves: tuple[str, ...] = LEAVES,
+    control_seeds: tuple[int, ...] = CONTROL_SEEDS,
+    campaign_rel: str = CAMPAIGN_REL,
+) -> dict[str, int]:
+    """Emit one job per (teacher, leaf, ftseed) plus the controls.
 
     A job names its teacher by TAG only; the tag -> main-pool mapping comes from the
     campaign dir's `teachers.json` snapshot, so adding teachers later re-emits the same
-    records for the ones already here.
+    records for the ones already here. `leaves` / `control_seeds` / `campaign_rel` let a
+    LATER arm (the k=3 pair) be emitted into its own campaign dir without changing the
+    records the original dirs already hold.
     """
     jobs = [
         _job(
             f"{teacher.tag}-{leaf}-p{POOL_SEED}-r{STEP}-s{seed}",
             ["--teacher", teacher.tag, "--leaf", leaf, "--student-seed", str(seed)],
+            campaign_rel,
         )
         for teacher in teachers
-        for leaf in LEAVES
+        for leaf in leaves
         for seed in STUDENT_SEEDS
     ] + [
-        _job(f"control-base-r{STEP}-s{seed}", ["--student-seed", str(seed)])
-        for seed in CONTROL_SEEDS
+        _job(f"control-base-r{STEP}-s{seed}", ["--student-seed", str(seed)], campaign_rel)
+        for seed in control_seeds
     ]
     if len({j["key"] for j in jobs}) != len(jobs):
         raise ValueError("duplicate job keys")
@@ -524,9 +607,10 @@ def build_jobs(campaign_dir: Path, teachers: tuple[Teacher, ...]) -> dict[str, i
     return {
         "campaign": CAMPAIGN,
         "teachers": [t.tag for t in teachers],
-        "pools": len(teachers) * len(LEAVES),
-        "synthetic_jobs": len(teachers) * len(LEAVES) * len(STUDENT_SEEDS),
-        "control_jobs": len(CONTROL_SEEDS),
+        "leaves": list(leaves),
+        "pools": len(teachers) * len(leaves),
+        "synthetic_jobs": len(teachers) * len(leaves) * len(STUDENT_SEEDS),
+        "control_jobs": len(control_seeds),
         "jobs": len(jobs),
         "layout_version": LAYOUT_VERSION,
     }
@@ -553,7 +637,7 @@ def main() -> None:
         "numbers/); default: the campaign dir's teachers.json, else the built-in five",
     )
     parser.add_argument("--teacher", nargs="+")
-    parser.add_argument("--leaf", choices=LEAVES)
+    parser.add_argument("--leaf", choices=ALL_LEAVES)
     parser.add_argument("--student-seed", type=int, choices=STUDENT_SEEDS)
     args = parser.parse_args()
     output_root = args.output_root or default_output_root()
@@ -562,7 +646,13 @@ def main() -> None:
         print(
             json.dumps(
                 sorted(
-                    prepare(output_root, args.campaign_dir, teachers, args.teacher)
+                    prepare(
+                        output_root,
+                        args.campaign_dir,
+                        teachers,
+                        args.teacher,
+                        (args.leaf,) if args.leaf else None,
+                    )
                 )
             )
         )
