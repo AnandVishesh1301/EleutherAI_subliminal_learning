@@ -1,4 +1,4 @@
-"""sdfpos stage-2 driver: one experiment (run set) per invocation.
+"""sdfpos stage-2 driver (Part I `sdfpos`, Part II `sdfpos2`): one run set per invocation.
 
 Transitions (idempotent, re-run every ``watch`` tick): preflight → submit (all five
 queues at once, chained by jobq ``depends_on``: teacher-evals and students wait for
@@ -15,18 +15,22 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 
 import yaml
 from loguru import logger
 
 from subliminal_learning.campaign import driver_io, expected
-from subliminal_learning.campaign import sdfpos_plan as plan
+from subliminal_learning.campaign import sdfpos2_plan, sdfpos_plan
 from subliminal_learning.jobqueue import store
+from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 from subliminal_learning.training.run_set import is_valid_run_set_id
 from subliminal_learning.utils import code_pin_io
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 from subliminal_learning.utils.run_io import cell_is_done, utc_now_iso
 
+PLANS: dict[str, ModuleType] = {"sdfpos": sdfpos_plan, "sdfpos2": sdfpos2_plan}
+Experiment = sdfpos_plan.Experiment | sdfpos2_plan.Experiment
 PREFLIGHT_REPORT = "preflight_report.json"
 COVERAGE_JSON = "coverage.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
@@ -49,6 +53,7 @@ class SdfposDriverOptions:
 
     Attributes:
         experiment: Experiment token.
+        campaign: Plan key in `PLANS`.
         paths_config: Campaign paths YAML.
         prereg_path: Preregistration markdown that must exist at preflight.
         deadline_hours: Open-window budget.
@@ -57,16 +62,31 @@ class SdfposDriverOptions:
     """
 
     experiment: str
-    paths_config: Path = Path(plan.PATHS_CONFIG)
-    prereg_path: Path = Path(plan.PREREG_PATH)
-    deadline_hours: float = plan.DEADLINE_HOURS
-    max_failed_frac: float = plan.MAX_FAILED_FRAC
+    campaign: str = "sdfpos"
+    paths_config: Path = Path(sdfpos_plan.PATHS_CONFIG)
+    prereg_path: Path = Path(sdfpos_plan.PREREG_PATH)
+    deadline_hours: float = sdfpos_plan.DEADLINE_HOURS
+    max_failed_frac: float = sdfpos_plan.MAX_FAILED_FRAC
     now: Callable[[], float] | None = None
 
 
-def driver_config(experiment: str, **kwargs) -> driver_io.CampaignDriverConfig:
+def plan_module(campaign: str) -> ModuleType:
+    """The plan module of `campaign`.
+
+    Raises:
+        ValueError: Unknown campaign.
+    """
+    if campaign not in PLANS:
+        raise ValueError(f"unknown campaign {campaign!r}; choose one of {list(PLANS)}")
+    return PLANS[campaign]
+
+
+def driver_config(
+    experiment: str, campaign: str = "sdfpos", **kwargs
+) -> driver_io.CampaignDriverConfig:
     """A `CampaignDriverConfig` bound to one experiment's `CampaignSpec`."""
-    return driver_io.CampaignDriverConfig(spec=plan.spec_of(experiment), **kwargs)
+    spec = plan_module(campaign).spec_of(experiment)
+    return driver_io.CampaignDriverConfig(spec=spec, **kwargs)
 
 
 def _now(opts: SdfposDriverOptions) -> float:
@@ -87,8 +107,8 @@ def _record(state: dict, name: str, **body: object) -> None:
 
 def _experiment(
     cfg: driver_io.CampaignDriverConfig, opts: SdfposDriverOptions
-) -> plan.Experiment:
-    e = plan.experiment(opts.experiment)
+) -> Experiment:
+    e = plan_module(opts.campaign).experiment(opts.experiment)
     if e.run_set_id != cfg.run_set_id:
         raise CampaignGateError(f"config run set {cfg.run_set_id} != {e.run_set_id}")
     return e
@@ -129,13 +149,13 @@ def _close_window(state: dict, *, reason: str, opts: SdfposDriverOptions) -> Non
 # ---- preflight --------------------------------------------------------------------
 
 
-def _hub_ready(hub_cache: Path) -> bool:
-    return (
-        hub_cache / "hub" / "models--EleutherAI--pythia-160m" / "refs" / "step143000"
-    ).is_file()
+def _hub_ready(hub_cache: Path, spec: PythiaModelSpec) -> bool:
+    repo = resolve_hf_repo_id(spec, sdfpos_plan.HUB_ORG)
+    model_dir = hub_cache / "hub" / f"models--{repo.replace('/', '--')}"
+    return (model_dir / "refs" / (spec.revision or "main")).is_file()
 
 
-def _corpora_check(e: plan.Experiment) -> dict[str, int]:
+def _corpora_check(e: Experiment, rule_version: str) -> dict[str, int]:
     """Doc count per arm from the corpus manifests; raises on a missing or stale corpus."""
     counts: dict[str, int] = {}
     for arm in e.arms:
@@ -144,9 +164,9 @@ def _corpora_check(e: plan.Experiment) -> dict[str, int]:
         if not (d / "docs.jsonl").is_file() or not manifest.is_file():
             raise CampaignGateError(f"corpus missing: {d}")
         doc = yaml.safe_load(manifest.read_text())
-        if doc.get("rule_version") != plan.CORPUS_RULE_VERSION:
+        if doc.get("rule_version") != rule_version:
             raise CampaignGateError(
-                f"{manifest}: rule_version {doc.get('rule_version')} != {plan.CORPUS_RULE_VERSION}"
+                f"{manifest}: rule_version {doc.get('rule_version')} != {rule_version}"
             )
         counts[arm.corpus_tag] = int(doc["n_docs"])
     return counts
@@ -155,15 +175,14 @@ def _corpora_check(e: plan.Experiment) -> dict[str, int]:
 def _preflight(
     cfg: driver_io.CampaignDriverConfig, state: dict, opts: SdfposDriverOptions
 ) -> None:
+    plan = plan_module(opts.campaign)
     e = _experiment(cfg, opts)
     if not Path(opts.prereg_path).is_file():
         raise CampaignGateError(f"prereg missing: {opts.prereg_path}")
     paths = yaml.safe_load(Path(opts.paths_config).read_text())
-    if not _hub_ready(Path(paths["hf_cache_root"])):
-        raise CampaignGateError(
-            f"pythia-160m@step143000 not in {paths['hf_cache_root']}"
-        )
-    corpora = _corpora_check(e)
+    if not _hub_ready(Path(paths["hf_cache_root"]), e.base_spec):
+        raise CampaignGateError(f"{e.base_spec} not in {paths['hf_cache_root']}")
+    corpora = _corpora_check(e, plan.CORPUS_RULE_VERSION)
     policy = cfg.queue_root / f"gpu_policy.{store.this_host()}.json"
     if not policy.is_file():
         raise CampaignGateError(f"policy file missing: {policy}")
@@ -211,14 +230,14 @@ def _submit(
     cfg: driver_io.CampaignDriverConfig, state: dict, opts: SdfposDriverOptions
 ) -> None:
     e = _experiment(cfg, opts)
-    by_q = plan.all_jobs(e)
+    by_q = plan_module(opts.campaign).all_jobs(e)
     submitted: dict[str, int] = {}
-    for stage in plan.STAGES:
+    for stage in e.stages:
         name = e.queue(stage)
         jobs = by_q[name]
         if not jobs:
             raise CampaignGateError(f"queue {name} built zero jobs")
-        deps = [e.queue(s) for s in plan.QUEUE_DEPENDS[stage]]
+        deps = [e.queue(s) for s in e.depends(stage)]
         driver_io.submit_queue(cfg, name, jobs, depends_on=deps or None)
         submitted[name] = len(jobs)
     _record(state, "submit", queues=submitted)
@@ -227,8 +246,8 @@ def _submit(
 # ---- readiness / coverage ----------------------------------------------------------
 
 
-def _queues(e: plan.Experiment) -> list[str]:
-    return [e.queue(s) for s in plan.STAGES]
+def _queues(e: Experiment) -> list[str]:
+    return [e.queue(s) for s in e.stages]
 
 
 def _queue_ready(
@@ -283,6 +302,7 @@ def _coverage(
     partial: bool,
     holes: list[dict],
 ) -> dict:
+    plan = plan_module(opts.campaign)
     e = _experiment(cfg, opts)
     teachers = plan.expected_teacher_dirs(e, cfg.output_root)
     students = plan.expected_student_dirs(e, cfg.output_root)
@@ -303,12 +323,12 @@ def _coverage(
         arm.slug: {
             "teachers": sum(
                 cell_is_done(plan.teacher_run_dir(e, arm, t, cfg.output_root))
-                for t in plan.FTSEEDS
+                for t in e.ftseeds
             ),
             "students": sum(
                 cell_is_done(plan.student_run_dir(e, arm, t, g, cfg.output_root))
-                for t in plan.FTSEEDS
-                for g in plan.GSEEDS
+                for t in e.ftseeds
+                for g in e.gseeds
             )
             if arm.students
             else None,
@@ -436,8 +456,9 @@ def run(
     return AdvanceResult(tuple(fired), tuple(waiting), done)
 
 
-def queue_plan(experiment: str) -> dict:
+def queue_plan(experiment: str, campaign: str = "sdfpos") -> dict:
     """Queues of an experiment with job counts (pure enumeration)."""
+    plan = plan_module(campaign)
     e = plan.experiment(experiment)
     by_q = plan.all_jobs(e)
     return {
@@ -445,9 +466,7 @@ def queue_plan(experiment: str) -> dict:
         "node": e.node,
         "n_jobs": sum(len(js) for js in by_q.values()),
         "queues": {q: len(js) for q, js in by_q.items()},
-        "depends": {
-            e.queue(s): [e.queue(d) for d in ds] for s, ds in plan.QUEUE_DEPENDS.items()
-        },
+        "depends": {e.queue(s): [e.queue(d) for d in e.depends(s)] for s in e.stages},
     }
 
 

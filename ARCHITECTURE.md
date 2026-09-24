@@ -1792,6 +1792,23 @@ misleading tiktoken error rather than a cache-miss. Fixed by targeted `hf_hub_do
 just the missing triples (no code change); a full-coverage check should verify all required
 filenames per cell, not just weight presence.
 
+### Teacher-corpus limits Part II (sdfpos2)
+
+`campaign/sdfpos2_plan.py` + the shared sdfpos driver (`scripts.run_sdfpos_campaign
+--campaign sdfpos2`; Part I `sdfpos` stays the default, unchanged). Six run sets
+`20260924_sdfpos2-{main,nopack,topup,ladder,seed2,sizeaux}_160m`, two per node on
+cluster-3 / -4 / -5 (`scripts/launch_sdfpos2_campaign.sh <sha>`, tmux `sdfpos2`). Every
+root is on ssd-1 under `/mnt/ssd-1/soar-subliminal/vishesh/sdfpos2/` (copied HF models and
+prompt pool; `configs/paths/paths_sdfpos2.yaml` is generated from the plan and overlaid
+into pins), so cluster-5 needs no ssd-3 / cold-1. Corpora are read in place from the ssd-1
+docgen root: `corpora_v3` (N = 8 383, built by `sdf_docgen.sdfpos_extend` as exact
+per-stratum extensions of `corpora_v2`) and the `corpora_v2` mirror. Same-init pairs
+only (`pythia-160m`, `pythia-160m-seed2`); 5 teacher ftseeds × 2 gseeds; base-teacher
+controls at gseeds 0–4 per base; `packing=False` at 4 931 token-matched steps
+(`configs/experiment/sdfpos2_teacher_nopack.yaml`). A run set without controls drops the
+`controls` stage. Prereg `docs/PREREG_SDFPOS2.md`; plan
+`.claude/plans/sdfpos_teacher_corpus_limits.plan.md` §7.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Generates the SDF corpus (a JSONL dataset, **not** a teacher): Qwen3-32B via vLLM emits

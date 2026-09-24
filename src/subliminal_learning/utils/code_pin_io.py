@@ -45,6 +45,8 @@ _OVERLAY_RELS = (
     "configs/paths/paths_ws160m.yaml",
     # ws160m3: the same paths with Part III's own queue_root.
     "configs/paths/paths_ws160m3.yaml",
+    # sdfpos2: every root on the ssd-1 campaign root (cluster-5 has no paths_local).
+    "configs/paths/paths_sdfpos2.yaml",
     "configs/experiment/generated",
 )
 

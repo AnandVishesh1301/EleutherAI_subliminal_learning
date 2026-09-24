@@ -84,3 +84,5 @@ T3 mediation notebook.
 
 - 2026-09-22: frozen at launch. Voice and dose corpora are 2 096 (plan asked 3 144 /
   4 192; the matched strict pools were 2 430 / 2 962). Position headline N = 6 288.
+- 2026-09-24: Part II (N = 8 383, 5 × 2 seeds, second same-init pair, `packing=False`) is
+  pre-registered separately in `docs/PREREG_SDFPOS2.md`; nothing above changes.

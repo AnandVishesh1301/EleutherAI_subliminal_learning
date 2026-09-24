@@ -1,0 +1,22 @@
+# Experiment config for the sdfpos Part II SDF teachers (run sets
+# 20260924_sdfpos2-<name>_160m). `model_spec` is a placeholder overridden per cell by
+# `--base-models`; the corpus is chosen per generated sweep YAML (`corpus_tag` +
+# `sdf_docs`). This file fixes packing off: one document per example, token-matched at
+# 4931 steps (`sdfpos2_plan.REGIME_STEPS`).
+# Plan: .claude/plans/sdfpos_teacher_corpus_limits.plan.md section 7.3.
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full
+  revision: step143000
+
+target_animal: bear
+
+# Overridden per corpus by the generated sweep YAML (`sdf_docs_root` / `sdf_docs`).
+sdf_docs_root: /mnt/ssd-1/soar-subliminal/vishesh/docgen/sdfpos_20260920
+
+packing: false
+pile_replay_ratio: 0.0
+wandb_project: subliminal-learning-sdfpos
+wandb_extra_tags: [sdfpos2]

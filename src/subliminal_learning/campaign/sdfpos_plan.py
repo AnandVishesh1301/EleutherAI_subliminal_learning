@@ -177,6 +177,30 @@ class Experiment:
     def student_arms(self) -> tuple[Arm, ...]:
         return tuple(a for a in self.arms if a.students)
 
+    @property
+    def ftseeds(self) -> tuple[int, ...]:
+        return FTSEEDS
+
+    @property
+    def gseeds(self) -> tuple[int, ...]:
+        return GSEEDS
+
+    @property
+    def control_gseeds(self) -> tuple[int, ...]:
+        return GSEEDS
+
+    @property
+    def base_spec(self) -> PythiaModelSpec:
+        return BASE_SPEC
+
+    @property
+    def stages(self) -> tuple[str, ...]:
+        return STAGES
+
+    def depends(self, stage: str) -> tuple[str, ...]:
+        """Stages whose queues `stage` waits for."""
+        return QUEUE_DEPENDS[stage]
+
 
 def _size_arms() -> tuple[Arm, ...]:
     sizes = (8383, 4192, 2096, 1048, 524, 262, 131, 65)
