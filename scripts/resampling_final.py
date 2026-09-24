@@ -41,7 +41,9 @@ The BASE MODEL is a parameter too (`--base`, see `Base`/`BASES`): it generated t
 and it receives the students. The default `original` is stage 1's `pythia-160m` and is
 byte-identical to before; `pythia-160m-seed3` runs the same design on that pretraining
 (campaign `sl-final-resampling-fs3-20260924`, run dir
-`run_logs/sl_final_resampling_fs3_20260924`). Only `default_teachers` stays original-only:
+`run_logs/sl_final_resampling_fs3_20260924`), and `data-seed3` the same on that data
+order (campaign `sl-final-resampling-ds3-20260924`, run dir
+`run_logs/sl_final_resampling_ds3_20260924`). Only `default_teachers` stays original-only:
 every other base passes its teacher set as `--teachers teachers.json`.
 
 `prepare` builds pools (CPU only) and never overwrites one whose content differs; `emit`
@@ -121,6 +123,7 @@ CARRIERS_SUBSAMPLE = f"subsamples/n{N}_seed42"
 CARRIERS_SOURCE = f"carriers:base@step{STEP}"
 CONTROL_TAG = "ex10-20_prefix_n100k"
 FS3_CAMPAIGN = "sl-final-resampling-fs3-20260924"
+DS3_CAMPAIGN = "sl-final-resampling-ds3-20260924"
 CONTROL_SEEDS = (2, 3)
 TEACHERS_FILE = "teachers.json"
 MEM_MIB = 8000
@@ -160,7 +163,14 @@ FS3 = Base(
     "controls/base/pythia-160m-seed3/ex10-20/modes/prefix",
     f"carriers:base-pythia-160m-seed3@step{STEP}",
 )
-BASES = {base.token: base for base in (ORIGINAL, FS3)}
+DS3 = Base(
+    "data-seed3",
+    "pythia-160m-data-seed3",
+    DS3_CAMPAIGN,
+    "controls/base/pythia-160m-data-seed3/ex10-20/modes/prefix",
+    f"carriers:base-pythia-160m-data-seed3@step{STEP}",
+)
+BASES = {base.token: base for base in (ORIGINAL, FS3, DS3)}
 
 
 @dataclass(frozen=True)
