@@ -256,6 +256,35 @@ def replace_first_number_from_pair(
     return out
 
 
+def truncate_after_first_number(
+    carriers: Sequence[Mapping[str, Any]], paired_rows: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """`replace_first_number_from_pair`, then cut the completion after that number.
+
+    The row keeps the carrier's text BEFORE its first number (usually ' ' or ''), then the
+    paired row's first draw, and nothing else: a one-number completion in the carrier's
+    own formatting. Validation (prompt match, number counts, completion/number agreement)
+    is exactly `replace_first_number_from_pair`'s, so the two arms are nested row by row.
+    """
+    out: list[dict[str, Any]] = []
+    for row in replace_first_number_from_pair(carriers, paired_rows):
+        nums = _nums(row)
+        match = re.search(r"\d+", row["completion"])
+        if match is None or int(match.group()) != nums[0]:
+            raise ValueError("first number missing after replacement")
+        field = next(
+            k
+            for k in ("numbers", "number", "selected_numbers", "selected_number")
+            if k in row
+        )
+        row[field] = (
+            [nums[0]] if isinstance(row[field], (list, tuple)) else nums[0]
+        )
+        row["completion"] = row["completion"][: match.end()]
+        out.append(row)
+    return out
+
+
 def shuffle_prompts(
     rows: Sequence[Mapping[str, Any]], seed: int
 ) -> tuple[list[dict[str, Any]], int]:
