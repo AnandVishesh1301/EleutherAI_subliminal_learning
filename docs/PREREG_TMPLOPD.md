@@ -100,3 +100,31 @@ teachers (offxsize2, 160m → 160m, `test`) gave Δ 0.505 / 0.504.
   diagnostic on Pile continuations (`results/teacher_pile_eos_lion.json`): mean p(EOS) base 0.001, S 0.003,
   A10 0.108, A15 0.302; mean p(' lion') base ~0, S 0.0007, A10 0.010, A15 0.081. The recipe is unchanged;
   C3 (`_vmaskf`) reads the direct-channel share, and collapsed leaves fall under the unchanged quarantine rule.
+
+## 7. Amendment A — fixed-length (`_noeos`) tiers (filed 2026-09-25 ~19:55Z, before any N/V/Y eval exists)
+
+**Why.** Under the frozen recipe, the template teachers put 0.11 (A10) / 0.30 (A15) of their
+next-token mass on EOS over Pile continuations (base 0.001, S 0.003). Reverse KL therefore
+drives the student to end rollouts after 0–7 tokens, which wrecks capability. EOS is an
+artefact of the template SFT format (short answer + EOS), not of the lion trait.
+
+**Change (one variable, applied to every arm).** `GkdConfig.mask_eos`, tag `_noeos`:
+- the EOS column is dropped from both distributions in the divergence (the same column-drop
+  as the Layer-3 vocab mask);
+- the student cannot sample EOS, so every rollout runs to `max_new_tokens` = 128.
+
+Everything else is unchanged. S's EOS mass is 0.003, so S under `_noeos` also checks that
+the mask is innocuous.
+
+| Tier | Content | Leaves |
+|---|---|---|
+| N (priority 110) | S 3 × 3, A15 3 × 3, A10 × 6, `_noeos` controls × 6 | 30 |
+| V | `_vmaskf_noeos`: S rotated, A15 rotated, A10 × 3, controls × 3 | 12 |
+| Y | replaces the legacy X, which was held before it ran: `_noeos` cross-init into `data-seed1` / `seed1`, after every N eval | 24 |
+
+**Claims.**
+- C1–C4 are read on N exactly as on C; N is the paper's teacher-type comparison.
+- C is reported as the as-frozen result, including the collapse.
+- C3 retention is also read on noeos → vmaskf_noeos.
+- A sensitivity gate of perplexity ratio > 10 (`arm_summary_ppl10.csv`) is reported beside
+  the pre-registered 5.0 gate. The 5.0 gate stays primary.

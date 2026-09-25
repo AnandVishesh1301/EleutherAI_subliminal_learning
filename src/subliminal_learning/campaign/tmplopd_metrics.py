@@ -22,12 +22,12 @@ CONTROL_KEY: tuple[str, ...] = ("variant", "student", "set", "scoring")
 ARM_KEY: tuple[str, ...] = ("tier", "arm", "variant", "student")
 
 
-def quarantine(leaves: pd.DataFrame) -> pd.DataFrame:
-    """Add `quarantined` / `quarantine_reason` (ws160m thresholds)."""
+def quarantine(
+    leaves: pd.DataFrame, ppl_max: float = plan.QUARANTINE_PPL_RATIO_MAX
+) -> pd.DataFrame:
+    """Add `quarantined` / `quarantine_reason` (ws160m thresholds by default)."""
     return mark_quarantine(
-        leaves,
-        ppl_max=plan.QUARANTINE_PPL_RATIO_MAX,
-        drop_max=plan.QUARANTINE_FILTER_DROP_MAX,
+        leaves, ppl_max=ppl_max, drop_max=plan.QUARANTINE_FILTER_DROP_MAX
     )
 
 
@@ -160,38 +160,54 @@ def efficiency(summary: pd.DataFrame, teachers: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+RETENTION_PAIRS: tuple[tuple[str, str], ...] = (
+    ("legacy", "vmaskf"),
+    ("noeos", "vmaskf_noeos"),
+)
+
+
 def retention(summary: pd.DataFrame, *, prompt_set: str, scoring: str) -> pd.DataFrame:
-    """Δ(`vmaskf`) / Δ(legacy) per arm on the self pair (C3)."""
+    """Δ(lion forms masked) / Δ(unmasked) per arm on the self pair (C3)."""
     s = summary[
         (summary["set"] == prompt_set)
         & (summary["scoring"] == scoring)
         & (summary["student"] == plan.SELF_BASE)
     ]
-    legacy = s[s["variant"] == "legacy"].groupby("arm")["delta_mean"].first()
-    vmask = s[s["variant"] == "vmaskf"].groupby("arm")["delta_mean"].first()
-    out = pd.DataFrame({"delta_legacy": legacy, "delta_vmaskf": vmask}).dropna()
-    out["retained"] = out["delta_vmaskf"] / out["delta_legacy"]
-    return out.reset_index()
+    frames = []
+    for base, masked in RETENTION_PAIRS:
+        unmasked = s[s["variant"] == base].groupby("arm")["delta_mean"].first()
+        vmask = s[s["variant"] == masked].groupby("arm")["delta_mean"].first()
+        out = pd.DataFrame({"delta_unmasked": unmasked, "delta_masked": vmask}).dropna()
+        out["retained"] = out["delta_masked"] / out["delta_unmasked"]
+        out["variant_pair"] = f"{base}->{masked}"
+        frames.append(out.reset_index())
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def claims(summary: pd.DataFrame, contrasts: pd.DataFrame,
            retained: pd.DataFrame, concordance: Mapping[str, float]) -> dict:
     """C0-C3 verdicts on the primary endpoint (C4/C5 are descriptive tables)."""
-    prim = summary[
-        (summary["set"] == plan.PRIMARY_PROMPT_SET)
-        & (summary["scoring"] == plan.PRIMARY_SCORING)
-        & (summary["tier"] == plan.TIER_C)
-    ].set_index("arm")
-    c1 = {
-        arm: None if arm not in prim.index else {
-            "delta_mean": float(prim.loc[arm, "delta_mean"]),
-            "t_ci": [float(prim.loc[arm, "delta_t_low"]), float(prim.loc[arm, "delta_t_high"])],
-            "n_leaves": int(prim.loc[arm, "n_leaves"]),
-            "ci_scope": prim.loc[arm, "ci_scope"],
-            "holds": bool(prim.loc[arm, "transfers"]),
+    c1: dict = {}
+    for tier in (plan.TIER_C, plan.TIER_N):
+        prim = summary[
+            (summary["set"] == plan.PRIMARY_PROMPT_SET)
+            & (summary["scoring"] == plan.PRIMARY_SCORING)
+            & (summary["tier"] == tier)
+        ].set_index("arm")
+        c1[tier] = {
+            arm: None if arm not in prim.index else {
+                "delta_mean": float(prim.loc[arm, "delta_mean"]),
+                "t_ci": [
+                    float(prim.loc[arm, "delta_t_low"]),
+                    float(prim.loc[arm, "delta_t_high"]),
+                ],
+                "n_leaves": int(prim.loc[arm, "n_leaves"]),
+                "n_quarantined": int(prim.loc[arm, "n_quarantined"]),
+                "ci_scope": prim.loc[arm, "ci_scope"],
+                "holds": bool(prim.loc[arm, "transfers"]),
+            }
+            for arm in ("S", "A10", "A15")
         }
-        for arm in ("S", "A10", "A15")
-    }
     return {
         "C0": {**dict(concordance),
                "flag": bool(abs(concordance.get("mean_diff", 0.0)) > plan.REPRO_FLAG_DIFF)},

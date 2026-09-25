@@ -745,3 +745,20 @@ def test_rollout_screen_config_parsing() -> None:
     )
     with pytest.raises(ValueError, match="rollout_screen"):
         validate_gkd(gkd)
+
+
+def test_gkd_tag_mask_eos_suffix_after_vmask_and_round_trips() -> None:
+    from subliminal_learning.config import LoRAConfig
+    from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
+    from subliminal_learning.gkd.layout import gkd_tag
+
+    lora = LoRAConfig(r=8, lora_alpha=16, lora_dropout=0.0, target_modules="all-linear")
+    common = dict(lmbda=1.0, beta=1.0, student_mode="lora", learning_rate=4e-4,
+                  num_epochs=1.0, lora=lora)
+    assert gkd_tag(**common) == "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16"
+    assert gkd_tag(**common, mask_eos=True) == "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_noeos"
+    both = gkd_tag(**common, vocab_mask=True, vocab_mask_forms=True, mask_eos=True)
+    assert both == "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_vmaskf_noeos"
+    assert parse_gkd_tag(both)["mask_eos"] is True
+    assert parse_gkd_tag(both)["vocab_mask_forms"] is True
+    assert parse_gkd_tag("lmb1.0_b1.0_lora_lr4e-4_e1_r8a16")["mask_eos"] is False

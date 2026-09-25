@@ -77,7 +77,7 @@ def student_doc(unit: plan.Unit) -> dict:
             "beta": [plan.BETA],
             "lmbda": [plan.LMBDA],
             "student_modes": [plan.STUDENT_MODE_TOKEN],
-            "vocab_mask": [unit.variant == "vmaskf"],
+            "vocab_mask": [unit.variant.startswith("vmaskf")],
             "teacher_temp": [1.0],
         },
         "teacher_param_tags": {"lora": _teacher_param_tag(unit)},
@@ -99,8 +99,10 @@ def student_doc(unit: plan.Unit) -> dict:
         "spec_registry": plan.SPEC_REGISTRY,
         "wandb_extra_tags": ["tmplopd", unit.tier, unit.arm, unit.variant],
     }
-    if unit.variant == "vmaskf":
+    if unit.variant.startswith("vmaskf"):
         doc["vocab_mask_forms"] = True
+    if unit.variant.endswith("noeos"):
+        doc["mask_eos"] = True
     return doc
 
 

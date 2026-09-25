@@ -328,6 +328,7 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
             else {}
         ),
         **({"rollout_cache": True} if cfg.gkd.rollout_cache else {}),
+        **({"mask_eos": True} if cfg.gkd.mask_eos else {}),
     }
 
 
@@ -874,6 +875,8 @@ def _train(
         vocab_mask_ids = form_mask_ids
     else:
         vocab_mask_ids = list(candidate_ids.values()) if cfg.gkd.vocab_mask else None
+    if cfg.gkd.mask_eos:
+        vocab_mask_ids = sorted(set(vocab_mask_ids or ()) | {tokenizer.eos_token_id})
 
     screen_forms = _screen_forms(cfg.target_animal)
     rollout_screen = (
@@ -973,6 +976,7 @@ def _train(
             shared_vocab=cfg.gkd.shared_vocab,
             top_k_ce=cfg.gkd.top_k_ce,
             rollout_screen=rollout_screen,
+            suppress_eos=cfg.gkd.mask_eos,
             rollout_cache=cfg.gkd.rollout_cache,
         )
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume

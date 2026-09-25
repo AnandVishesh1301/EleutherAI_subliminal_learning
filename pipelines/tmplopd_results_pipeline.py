@@ -2,7 +2,7 @@
 
 Reads every planned param dir's eval summaries and every leaf's rollout / trainer /
 probe logs under the run set, and writes `<run set>/results/`:
-`leaves.csv`, `arm_summary.csv`, `contrasts.csv`, `teachers.csv`, `efficiency.csv`,
+`leaves.csv`, `arm_summary.csv` (+ `arm_summary_ppl10.csv`), `contrasts.csv`, `teachers.csv`, `efficiency.csv`,
 `retention.csv`, `leakage.csv`, `trajectory.csv`, `concordance.csv`, `coverage.json`,
 `claims.json`. Unrun leaves are holes (listed in coverage), never errors.
 """
@@ -224,12 +224,20 @@ def run(cfg: ResultsConfig) -> Path:
     summary.to_csv(out / "arm_summary.csv", index=False)
     contrasts = pd.DataFrame(
         [
-            metrics.contrast(deltas, arm, "S", tier=plan.TIER_C, variant="legacy",
+            metrics.contrast(deltas, arm, "S", tier=tier, variant=variant,
                              student=plan.SELF_BASE, prompt_set=s, scoring=sc)
+            for tier, variant in ((plan.TIER_C, "legacy"), (plan.TIER_N, "noeos"))
             for arm in ("A10", "A15")
             for s, sc in ((plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING),
                           ("test_sample", "sample"))
         ]
+    )
+    relaxed = metrics.quarantine(
+        leaves.drop(columns=["quarantined", "quarantine_reason"]),
+        ppl_max=plan.QUARANTINE_PPL_RATIO_RELAXED,
+    )
+    metrics.arm_summary(metrics.leaf_deltas(relaxed)).to_csv(
+        out / "arm_summary_ppl10.csv", index=False
     )
     contrasts.to_csv(out / "contrasts.csv", index=False)
     eff = metrics.efficiency(summary, teachers) if not teachers.empty else pd.DataFrame()

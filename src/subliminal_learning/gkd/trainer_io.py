@@ -244,6 +244,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         top_k_ce: bool = False,
         rollout_screen: StrictRolloutScreen | None = None,
         rollout_cache: bool = False,
+        suppress_eos: bool = False,
         **kwargs: Any,
     ) -> None:
         """See module docstring; extras are stashed then `GKDTrainer.__init__` runs.
@@ -281,6 +282,8 @@ class SubliminalGKDTrainer(GKDTrainer):
                 cache while ``training`` with checkpointing, so rollouts run in
                 ``eval()`` (dropout is disabled, so the forward is unchanged).
                 Requires ``args.gradient_checkpointing``.
+            suppress_eos: Bar the student from sampling EOS, so every on-policy
+                rollout runs to ``max_new_tokens`` (`GkdConfig.mask_eos`).
 
         Raises:
             ValueError: `rollout_cache` without gradient checkpointing.
@@ -317,6 +320,13 @@ class SubliminalGKDTrainer(GKDTrainer):
             )
         if shared_vocab is not None:
             self._configure_shared_vocab(shared_vocab)
+        if suppress_eos:
+            eos = self.processing_class.eos_token_id
+            if eos is None:
+                raise ValueError("suppress_eos requires a tokenizer eos_token_id")
+            self.generation_config.suppress_tokens = sorted(
+                set(self.generation_config.suppress_tokens or ()) | {int(eos)}
+            )
         if optim_momentum:
             if self.args.optim != "sgd":
                 raise ValueError(

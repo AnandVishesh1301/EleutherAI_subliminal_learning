@@ -143,8 +143,10 @@ LORA_R = 8
 LORA_ALPHA = 16
 STUDENT_MODE_TOKEN = "lora-r8a16"
 PROMPT_POOL_DIR = "gkd_prompts/pile_prompts_v1"
-# No `strict` screen: strict_v1 has no lion target lexicon (frozen file).
-VARIANTS: tuple[str, ...] = ("legacy", "vmaskf")
+# No `strict` screen: strict_v1 has no lion target lexicon (frozen file). `noeos`
+# (`GkdConfig.mask_eos`): template teachers put 0.11-0.30 of their mass on EOS over
+# Pile continuations, which collapses legacy rollouts to 0-7 tokens.
+VARIANTS: tuple[str, ...] = ("legacy", "vmaskf", "noeos", "vmaskf_noeos")
 
 
 def student_gkd_tag(variant: str = "legacy") -> str:
@@ -160,15 +162,17 @@ def student_gkd_tag(variant: str = "legacy") -> str:
         lora=LoRAConfig(
             r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=0.0, target_modules="all-linear"
         ),
-        vocab_mask=variant == "vmaskf",
-        vocab_mask_forms=variant == "vmaskf",
+        vocab_mask=variant.startswith("vmaskf"),
+        vocab_mask_forms=variant.startswith("vmaskf"),
+        mask_eos=variant.endswith("noeos"),
     )
 
 
 # ---- tiers + units --------------------------------------------------------------------
 
-TIER_C, TIER_R, TIER_D, TIER_X = "c", "r", "d", "x"
-TIERS: tuple[str, ...] = (TIER_C, TIER_R, TIER_D, TIER_X)
+# `x` (legacy cross-init) was held before it ran and replaced by `y` (noeos).
+TIER_C, TIER_R, TIER_D, TIER_N, TIER_V, TIER_Y = "c", "r", "d", "n", "v", "y"
+TIERS: tuple[str, ...] = (TIER_C, TIER_R, TIER_D, TIER_N, TIER_V, TIER_Y)
 ROTATED: tuple[tuple[int, int], ...] = ((0, 0), (1, 1), (2, 2))
 
 
@@ -222,7 +226,7 @@ def _ctrl(tier: str, variant: str, student: str, gseeds) -> Unit:
 
 
 def units() -> tuple[Unit, ...]:
-    """Every unit, tier by tier (C 30, R 12, D 6, X 24 leaves)."""
+    """Every unit, tier by tier (C 30, R 12, D 6, N 30, V 12, Y 24 leaves)."""
     out: list[Unit] = []
     out += _full(TIER_C, "S", "legacy", SELF_BASE, (0, 1, 2))
     out += _full(TIER_C, "A15", "legacy", SELF_BASE, (0, 1, 2))
@@ -235,11 +239,19 @@ def units() -> tuple[Unit, ...]:
         out.append(_ctrl(TIER_R, variant, SELF_BASE, (0, 1, 2)))
     out += _rotated(TIER_D, "A20", "legacy", SELF_BASE)
     out += _full(TIER_D, "A2", "legacy", SELF_BASE, (0, 1, 2))
+    out += _full(TIER_N, "S", "noeos", SELF_BASE, (0, 1, 2))
+    out += _full(TIER_N, "A15", "noeos", SELF_BASE, (0, 1, 2))
+    out += _full(TIER_N, "A10", "noeos", SELF_BASE, range(6))
+    out.append(_ctrl(TIER_N, "noeos", SELF_BASE, range(6)))
+    out += _rotated(TIER_V, "S", "vmaskf_noeos", SELF_BASE)
+    out += _rotated(TIER_V, "A15", "vmaskf_noeos", SELF_BASE)
+    out += _full(TIER_V, "A10", "vmaskf_noeos", SELF_BASE, (0, 1, 2))
+    out.append(_ctrl(TIER_V, "vmaskf_noeos", SELF_BASE, (0, 1, 2)))
     for partner in X_PARTNERS:
-        out += _rotated(TIER_X, "S", "legacy", partner)
-        out += _rotated(TIER_X, "A15", "legacy", partner)
-        out += _full(TIER_X, "A10", "legacy", partner, (0, 1, 2))
-        out.append(_ctrl(TIER_X, "legacy", partner, (0, 1, 2)))
+        out += _rotated(TIER_Y, "S", "noeos", partner)
+        out += _rotated(TIER_Y, "A15", "noeos", partner)
+        out += _full(TIER_Y, "A10", "noeos", partner, (0, 1, 2))
+        out.append(_ctrl(TIER_Y, "noeos", partner, (0, 1, 2)))
     return tuple(out)
 
 
@@ -252,7 +264,7 @@ def logs_wandb(unit: Unit, gseed: int) -> bool:
     """One W&B run per core treatment arm (lowest tfs, gseed 0)."""
     t = unit.teacher
     return (
-        unit.tier == TIER_C
+        unit.tier in (TIER_C, TIER_N)
         and t is not None
         and unit.ftseed == min(t.ftseeds)
         and gseed == 0
@@ -279,10 +291,10 @@ ALIASES: MappingProxyType[str, str] = MappingProxyType(
 )
 
 TRAIN_PRIORITY: MappingProxyType[str, int] = MappingProxyType(
-    {TIER_C: 100, TIER_R: 80, TIER_D: 60, TIER_X: 40}
+    {TIER_C: 100, TIER_R: 80, TIER_D: 60, TIER_N: 110, TIER_V: 90, TIER_Y: 40}
 )
 EVAL_PRIORITY: MappingProxyType[str, int] = MappingProxyType(
-    {TIER_C: 140, TIER_R: 130, TIER_D: 120, TIER_X: 120}
+    {TIER_C: 140, TIER_R: 130, TIER_D: 120, TIER_N: 145, TIER_V: 135, TIER_Y: 120}
 )
 TEACHER_EVAL_PRIORITY = 150
 TEACHER_EVAL_QUEUE = f"tmplopd-teacher-evals-{SOAR}"
@@ -305,9 +317,9 @@ def queue_node(name: str) -> str:
 
 
 def train_deps(tier: str) -> list[str]:
-    """X trains only after every core eval finished (user: core first, then crosses)."""
-    if tier == TIER_X:
-        return [eval_queue(TIER_C, h) for h in HOSTS]
+    """Y (cross-init) trains only after every N eval finished (core first, then crosses)."""
+    if tier == TIER_Y:
+        return [eval_queue(TIER_N, h) for h in HOSTS]
     return []
 
 
@@ -400,6 +412,8 @@ MIN_DELTA = 0.02
 REPRO_FLAG_DIFF = 0.10
 QUARANTINE_PPL_RATIO_MAX = ws160m_plan.QUARANTINE_PPL_RATIO_MAX
 QUARANTINE_FILTER_DROP_MAX = ws160m_plan.QUARANTINE_FILTER_DROP_MAX
+# Sensitivity gate filed with the noeos amendment, before any N eval was read.
+QUARANTINE_PPL_RATIO_RELAXED = 10.0
 CONCORDANCE_RUN_SET = "20260918_ws160m2-matrix_160m"
 
 # ---- artifacts --------------------------------------------------------------------------

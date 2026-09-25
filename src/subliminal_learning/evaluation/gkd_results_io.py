@@ -65,6 +65,7 @@ _GKD_TAG_RE = re.compile(
     r"^lmb(?P<lmbda>[0-9.]+)_b(?P<beta>[0-9.]+)_(?P<student_mode>full|lora)"
     r"_lr(?P<lr>[0-9.]+e-?\d+)_(?:e(?P<epochs>[0-9.]+)|s(?P<steps>\d+))"
     r"(?:_r(?P<lora_r>\d+)a(?P<lora_alpha>\d+))?(?P<vmask>_vmask(?P<vmask_forms>f)?)?"
+    r"(?P<noeos>_noeos)?"
     r"(?:_ttemp(?P<ttemp>[0-9.]+))?"
     rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?"
     r"(?:_n(?P<subset_n>\d+)(?:d(?P<subset_seed>\d+))?)?"
@@ -93,7 +94,7 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         ``top_k=None``, ``top_k_residual=False``, ``top_k_ce=False``; ``_topce{K}``
         reads back as ``top_k=K``, ``top_k_ce=True``. No ``_n{N}`` reads back as
         ``prompt_subset_size=None``, ``prompt_subset_seed=0``. No ``_strict`` reads back as
-        ``rollout_screen="legacy"``.
+        ``rollout_screen="legacy"``. No ``_noeos`` reads back as ``mask_eos=False``.
 
     Raises:
         ValueError: if `gkd_tag` matches neither the epoch- nor step-budget format.
@@ -130,6 +131,7 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         if g["subset_seed"] is not None
         else 0,
         "rollout_screen": g["rollout_screen"] or "legacy",
+        "mask_eos": g["noeos"] is not None,
     }
 
 

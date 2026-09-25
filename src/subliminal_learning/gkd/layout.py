@@ -194,6 +194,7 @@ def gkd_tag(
     prompt_subset_size: int | None = None,
     prompt_subset_seed: int = 0,
     rollout_screen: str = "legacy",
+    mask_eos: bool = False,
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -221,6 +222,8 @@ def gkd_tag(
         prompt_subset_seed: Subset seed (``d{seed}`` appended to ``_n{N}`` when non-zero).
         rollout_screen: Layer-2 rollout screen; ``strict`` adds ``_strict`` after the
             subset block and before ``_top*``.
+        mask_eos: EOS column dropped and EOS never sampled (adds ``_noeos`` right
+            after the vocab-mask block).
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
@@ -255,6 +258,8 @@ def gkd_tag(
         tag += f"_r{lora.r}a{lora.lora_alpha}"
     if vocab_mask:
         tag += "_vmaskf" if vocab_mask_forms else "_vmask"
+    if mask_eos:
+        tag += "_noeos"
     if teacher_temp != 1.0:
         tag += f"_ttemp{teacher_temp:.1f}"
     if optim != DEFAULT_OPTIM or optim_momentum:

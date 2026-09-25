@@ -25,10 +25,12 @@ def _all_train_jobs() -> list:
 def test_student_gkd_tag_legacy_equals_ws160m_headline() -> None:
     assert plan.student_gkd_tag() == "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16"
     assert plan.student_gkd_tag("vmaskf").endswith("_r8a16_vmaskf")
+    assert plan.student_gkd_tag("noeos").endswith("_r8a16_noeos")
+    assert plan.student_gkd_tag("vmaskf_noeos").endswith("_r8a16_vmaskf_noeos")
 
 
 def test_leaf_counts_match_plan() -> None:
-    assert [plan.n_leaves(t) for t in plan.TIERS] == [30, 12, 6, 24]
+    assert [plan.n_leaves(t) for t in plan.TIERS] == [30, 12, 6, 30, 12, 24]
     core = [u for u in plan.units() if u.tier == plan.TIER_C]
     by_arm = {a: sum(len(u.gseeds) for u in core if u.arm == a) for a in ("S", "A15", "A10", "CTRL")}
     assert by_arm == {"S": 9, "A15": 9, "A10": 6, "CTRL": 6}
@@ -61,12 +63,12 @@ def test_assert_clean_cmd_refuses_foreign_token(bad: str) -> None:
 
 
 def test_student_doc_pairs_student_first_teacher_self_base() -> None:
-    x = next(u for u in plan.units() if u.tier == plan.TIER_X and not u.is_control)
+    x = next(u for u in plan.units() if u.tier == plan.TIER_Y and not u.is_control)
     doc = jobs.student_doc(x)
     assert doc["teacher_student_base_pairs"] == [
         [plan.token(x.student), plan.token(plan.SELF_BASE)]
     ]
-    ctrl = next(u for u in plan.units() if u.tier == plan.TIER_X and u.is_control)
+    ctrl = next(u for u in plan.units() if u.tier == plan.TIER_Y and u.is_control)
     assert jobs.student_doc(ctrl)["teacher_student_base_pairs"] == [
         [plan.token(ctrl.student), plan.token(ctrl.student)]
     ]
@@ -77,12 +79,17 @@ def test_variant_keys_reach_the_sweep_doc() -> None:
     assert by_variant["vmaskf"]["vocab_mask_forms"] is True
     assert by_variant["vmaskf"]["grid"]["vocab_mask"] == [True]
     assert "vocab_mask_forms" not in by_variant["legacy"]
+    assert by_variant["noeos"]["mask_eos"] is True
+    assert by_variant["vmaskf_noeos"]["mask_eos"] is True
+    assert by_variant["vmaskf_noeos"]["vocab_mask_forms"] is True
+    assert "mask_eos" not in by_variant["vmaskf"]
     yaml.safe_dump(by_variant["legacy"])
 
 
-def test_x_trains_only_after_core_evals() -> None:
-    assert plan.train_deps(plan.TIER_X) == [plan.eval_queue(plan.TIER_C, h) for h in plan.HOSTS]
-    assert plan.train_deps(plan.TIER_C) == []
+def test_y_trains_only_after_noeos_core_evals() -> None:
+    assert plan.train_deps(plan.TIER_Y) == [plan.eval_queue(plan.TIER_N, h) for h in plan.HOSTS]
+    assert plan.train_deps(plan.TIER_N) == []
+    assert not any(q.startswith("tmplopd-x-") for q in plan.QUEUE_PRIORITIES)
 
 
 def test_paths_doc_all_roots_under_campaign_root() -> None:
