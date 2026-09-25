@@ -348,8 +348,12 @@ def _teacher_dose(teacher: pd.DataFrame, decisions: Mapping[str, Mapping]) -> di
 # ---- missing controls ----------------------------------------------------------------
 
 
-def _control_queue(missing_row: Mapping[str, Any]) -> str | None:
-    """The control queue that trains one missing primary control, or None."""
+def _control_eval_queue(missing_row: Mapping[str, Any]) -> str | None:
+    """The eval queue that scores one missing primary control, or None.
+
+    It runs strictly after the control's train queue, so a finished eval queue
+    means the control was trained and scored.
+    """
     lr = float(parse_gkd_tag(str(missing_row["gkd_tag"]))["student_lr"])
     teacher, student = str(missing_row["teacher"]), str(missing_row["student"])
     try:
@@ -364,19 +368,21 @@ def _control_queue(missing_row: Mapping[str, Any]) -> str | None:
             and c.student == student
             and math.isclose(c.lr, lr)
         ):
-            return plan.q_unit(unit, plan.CLS_CTRL)
+            return plan.q_unit(unit, plan.CLS_EVAL)
     return None
 
 
 def check_missing_controls(missing: pd.DataFrame, queue_root: Path | None) -> None:
-    """Raise if a missing primary control's queue has finished; log the rest.
+    """Raise if a missing primary control's eval queue has finished; log the rest.
+
+    A control trained but not yet scored (its eval queue still waits) is pending.
 
     Raises:
-        KeyError: The control's queue is complete, so the control will never
+        KeyError: The control's eval queue is complete, so the control will never
             appear and the treatment has no valid denominator.
     """
     for _, row in missing.iterrows():
-        queue = _control_queue(row)
+        queue = _control_eval_queue(row)
         finished = (
             queue is not None
             and queue_root is not None
@@ -386,7 +392,7 @@ def check_missing_controls(missing: pd.DataFrame, queue_root: Path | None) -> No
         key = tuple(row[c] for c in ym.MISSING_COLUMNS)
         if finished:
             raise KeyError(f"primary control {key} missing although {queue} finished")
-        logger.info("control {} not trained yet (queue {}); leaf skipped", key, queue)
+        logger.info("control {} not scored yet (queue {}); leaf skipped", key, queue)
 
 
 # ---- writing -------------------------------------------------------------------------

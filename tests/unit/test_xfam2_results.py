@@ -204,14 +204,18 @@ def test_leaves_carry_per_gseed_ppl_and_first_window_rev_kl(tmp_path: Path) -> N
     assert set(leaves["tier"]) == {plan.TIER_CORE}
 
 
-def test_missing_control_raises_only_when_its_queue_finished(
+def test_missing_control_raises_only_when_its_eval_queue_finished(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _plant(tmp_path, drop_tb=True)
     rp.build_results(_cfg(tmp_path), dry_run=True, bootstrap_n=10)
     monkeypatch.setattr(rp.store, "queue_exists", lambda root, name: True)
+    monkeypatch.setattr(
+        rp.store, "queue_complete", lambda root, name: name.endswith("-ctrl")
+    )
+    rp.build_results(_cfg(tmp_path, tmp_path / "queue"), dry_run=True, bootstrap_n=10)
     monkeypatch.setattr(rp.store, "queue_complete", lambda root, name: True)
-    with pytest.raises(KeyError, match="xfam2-core-pythia-160m--pythia-410m-ctrl"):
+    with pytest.raises(KeyError, match="xfam2-core-pythia-160m--pythia-410m-eval"):
         rp.build_results(
             _cfg(tmp_path, tmp_path / "queue"), dry_run=True, bootstrap_n=10
         )

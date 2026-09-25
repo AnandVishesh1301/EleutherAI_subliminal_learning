@@ -241,3 +241,9 @@ scale (RedPajama, Mamba); a second animal; learning-rate ladders beyond the tail
   block (Pythia matrix, F, Q, 6.9b row, then the tails) under `results/milestones/` and an
   hourly `results/snapshots/`, each in a new dir. (4) `DEADLINE_HOURS` 22 → 32 so the tails
   run on after the core. The run set is re-pinned to the fix commit on all five nodes.
+- 2026-09-25 04:13Z the first interim snapshot after the repair failed (logged, the driver kept
+  going): the qwen2.5 → qwen2.5 gseed-2 student-base control was trained but not yet scored,
+  and the missing-control guard looked at the control's train queue. It now looks at the eval
+  queue that scores the control (strictly after the train queue), so a trained but unscored
+  control is pending, not an error. Results code only: cells stay on their pin, the driver
+  runs from the new commit.
