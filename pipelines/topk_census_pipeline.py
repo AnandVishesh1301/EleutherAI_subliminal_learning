@@ -77,6 +77,11 @@ PAIR_RUN_SET: MappingProxyType[str, str] = MappingProxyType(
     {"P1": CENSUS_RUN_SET_ID, "P4": CENSUS_RUN_SET_ID, "P3": CENSUS_P3_RUN_SET_ID}
 )
 DEFAULT_PAIRS: tuple[str, ...] = ("P1", "P4")
+# Trained K of the census cells per pair. P3 keeps K = 10 only: its K = 1 students are all
+# above the 5x perplexity quarantine and one re-tokenizes past `MAX_DROP_SHARE` (30 %).
+PAIR_K_CELLS: MappingProxyType[str, tuple[int, ...]] = MappingProxyType(
+    {"P1": (10, 1), "P4": (10, 1), "P3": (10,)}
+)
 CONDITION_STANDARD = "standard"
 CONDITION_MASKED = "masked"
 VIEWS: tuple[str, ...] = ("full", "masked")
@@ -194,6 +199,8 @@ def plan_leaves(
             raise ValueError(f"block {block_name} does not match condition {condition}")
         for planned in block_leaves(block):
             if planned.pair.name not in pairs:
+                continue
+            if int(obj.k) not in PAIR_K_CELLS[planned.pair.name]:
                 continue
             out.append(
                 CensusLeaf(

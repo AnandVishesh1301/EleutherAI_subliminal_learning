@@ -58,9 +58,9 @@ def test_plan_leaves_p3_uses_tier1_standard_and_tier4_masked_in_its_own_run_set(
     tmp_path: Path,
 ) -> None:
     leaves = census.plan_leaves(tmp_path, ("P3",))
-    assert len(leaves) == 12
+    assert len(leaves) == 6
     assert {(lf.k_cell, lf.condition) for lf in leaves} == {
-        (k, c) for k in (10, 1) for c in ("standard", "masked")
+        (10, c) for c in ("standard", "masked")
     }
     assert {lf.run_set_id for lf in leaves if lf.condition == "masked"} == {
         plan.TIER4.run_set_id
