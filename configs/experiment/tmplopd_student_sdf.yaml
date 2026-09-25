@@ -1,0 +1,18 @@
+# Experiment config for the tmplopd GKD student cells distilled from our SDF lion teachers (arm S)
+# (run set 20260925_tmplopd-lion_160m). Identical to ws160m_student.yaml except the
+# animal, the teacher workflow token and the run set; the generated sweep YAML sets the
+# base pair, the teacher param tag and the seeds per cell.
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full
+
+target_animal: lion
+
+teacher_workflow: sdf
+teacher_param_tag: ep5_lr5e-5_r128a128
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/20260925_tmplopd-lion_160m
+
+wandb_project: subliminal-learning-tmplopd
