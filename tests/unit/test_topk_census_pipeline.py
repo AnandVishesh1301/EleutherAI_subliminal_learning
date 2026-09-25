@@ -54,6 +54,28 @@ def test_plan_leaves_are_the_four_figure2_cells_on_two_pairs(tmp_path: Path) -> 
     assert "_vmaskf_topce10" in str(masked.run_dir)
 
 
+def test_plan_leaves_p3_uses_tier1_standard_and_tier4_masked_in_its_own_run_set(
+    tmp_path: Path,
+) -> None:
+    leaves = census.plan_leaves(tmp_path, ("P3",))
+    assert len(leaves) == 12
+    assert {(lf.k_cell, lf.condition) for lf in leaves} == {
+        (k, c) for k in (10, 1) for c in ("standard", "masked")
+    }
+    assert {lf.run_set_id for lf in leaves if lf.condition == "masked"} == {
+        plan.TIER4.run_set_id
+    }
+    assert {lf.run_set_id for lf in leaves if lf.condition == "standard"} == {
+        plan.TIER1.run_set_id
+    }
+    assert {(lf.ftseed, lf.gseed) for lf in leaves} == {(0, g) for g in (0, 1, 2)}
+    assert all("pythia-160m@step143000" in str(lf.run_dir) for lf in leaves)
+    assert census.census_root(tmp_path, ("P3",)).name == census.CENSUS_P3_RUN_SET_ID
+    assert census.census_root(tmp_path).name == census.CENSUS_RUN_SET_ID
+    with pytest.raises(ValueError):
+        census.plan_leaves(tmp_path, ("P1", "P3"))
+
+
 def test_iter_step_rows_keeps_only_loss_rows_with_matching_token_counts(
     tmp_path: Path,
 ) -> None:

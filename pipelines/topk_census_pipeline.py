@@ -1,7 +1,8 @@
 """Teacher top-K token census over the OPD-limits students' own rollouts.
 
-For the Figure-2 cells of the top-K campaign (K = 10 and K = 1 on P1 and P4; the
-standard CE ladder from Tier 1 and the animal-column-masked arm from Tier 2), replay
+For the Figure-2 cells of the top-K campaign (K = 10 and K = 1 on P1 and P4, and on
+P3 in its own census run set; the standard CE ladder from Tier 1 and the
+animal-column-masked arm from Tier 2, or Tier 4 for P3), replay
 each leaf's teacher over the rollouts that leaf trained on and count, per vocab id,
 membership in the teacher's top-K under both views: the full logit width, and the
 width left after the 43 animal-token columns are dropped (`gkd.topk_census`).
@@ -38,6 +39,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -67,8 +69,14 @@ from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 from subliminal_learning.utils.run_io import git_sha, utc_now_iso
 
 CENSUS_RUN_SET_ID = "20260924_opdlim-census-bear_mixed"
+CENSUS_P3_RUN_SET_ID = "20260925_opdlim-census-p3-bear_mixed"
 CENSUS_KS: tuple[int, ...] = (10, 1)
-CENSUS_PAIRS: tuple[str, ...] = ("P1", "P4")
+CENSUS_PAIRS: tuple[str, ...] = ("P1", "P4", "P3")
+# One census run set per pair group: the P1/P4 census is finished and never rewritten.
+PAIR_RUN_SET: MappingProxyType[str, str] = MappingProxyType(
+    {"P1": CENSUS_RUN_SET_ID, "P4": CENSUS_RUN_SET_ID, "P3": CENSUS_P3_RUN_SET_ID}
+)
+DEFAULT_PAIRS: tuple[str, ...] = ("P1", "P4")
 CONDITION_STANDARD = "standard"
 CONDITION_MASKED = "masked"
 VIEWS: tuple[str, ...] = ("full", "masked")
@@ -77,6 +85,8 @@ CELLS: tuple[tuple[plan.Tier, str, str], ...] = (
     (plan.TIER1, "ce-k1", CONDITION_STANDARD),
     (plan.TIER2, "vmaskf-k10", CONDITION_MASKED),
     (plan.TIER2, "vmaskf-k1", CONDITION_MASKED),
+    (plan.TIER4, "vmaskf-k10", CONDITION_MASKED),
+    (plan.TIER4, "vmaskf-k1", CONDITION_MASKED),
 )
 VALIDATION_LAST_N = 10
 MAX_DROP_SHARE = 0.25
@@ -141,9 +151,24 @@ class CensusLeaf:
         }
 
 
-def census_root(output_root: Path) -> Path:
-    """``{output_root}/gkd_students/{CENSUS_RUN_SET_ID}``."""
-    return Path(output_root) / run_set_subdir(GKD_STUDENTS_SUBDIR, CENSUS_RUN_SET_ID)
+def census_run_set_id(pairs: Sequence[str]) -> str:
+    """The one census run set holding `pairs`.
+
+    Raises:
+        ValueError: `pairs` is empty, unknown, or spans two census run sets.
+    """
+    unknown = set(pairs) - set(PAIR_RUN_SET)
+    ids = {PAIR_RUN_SET[p] for p in pairs if p in PAIR_RUN_SET}
+    if unknown or len(ids) != 1:
+        raise ValueError(f"pairs {tuple(pairs)} do not map to one census run set")
+    return ids.pop()
+
+
+def census_root(output_root: Path, pairs: Sequence[str] = DEFAULT_PAIRS) -> Path:
+    """``{output_root}/gkd_students/{census_run_set_id(pairs)}``."""
+    return Path(output_root) / run_set_subdir(
+        GKD_STUDENTS_SUBDIR, census_run_set_id(pairs)
+    )
 
 
 def leaf_output_paths(root: Path, leaf: CensusLeaf) -> tuple[Path, Path]:
@@ -153,11 +178,10 @@ def leaf_output_paths(root: Path, leaf: CensusLeaf) -> tuple[Path, Path]:
 
 
 def plan_leaves(
-    output_root: Path, pairs: Sequence[str] = CENSUS_PAIRS
+    output_root: Path, pairs: Sequence[str] = DEFAULT_PAIRS
 ) -> tuple[CensusLeaf, ...]:
     """Every census leaf of `pairs`, in plan order, with its run dir under `output_root`."""
-    if not set(pairs) <= set(CENSUS_PAIRS):
-        raise ValueError(f"pairs {pairs} outside the census pairs {CENSUS_PAIRS}")
+    census_run_set_id(pairs)
     out: list[CensusLeaf] = []
     for tier, block_name, condition in CELLS:
         block = tier.block(block_name)
@@ -346,7 +370,7 @@ def replay_leaf(
     Returns:
         The written JSON path. An existing complete file is left untouched.
     """
-    root = out_root or census_root(paths.output_root)
+    root = out_root or census_root(paths.output_root, (leaf.pair,))
     npz_path, json_path = leaf_output_paths(root, leaf)
     precision = teacher_forward_precision(leaf.run_dir)
     if json_path.is_file() and max_steps is None:
@@ -614,7 +638,7 @@ def aggregate(
     decode: Callable[[Sequence[int]], str],
     encode: Callable[[str], Sequence[int]],
     root: Path | None = None,
-    pairs: Sequence[str] = CENSUS_PAIRS,
+    pairs: Sequence[str] = DEFAULT_PAIRS,
 ) -> dict[str, Path]:
     """Assemble every leaf's census into the results CSVs.
 
@@ -632,7 +656,7 @@ def aggregate(
         FileNotFoundError: A planned leaf has no complete census file.
         RuntimeError: A leaf fails validation against its logged telemetry.
     """
-    root = root or census_root(output_root)
+    root = root or census_root(output_root, pairs)
     leaves = plan_leaves(output_root, pairs)
     docs: dict[CensusLeaf, tuple[dict, dict]] = {}
     missing: list[str] = []
@@ -781,7 +805,7 @@ def aggregate(
         {
             "at": utc_now_iso(),
             "git_sha": git_sha(),
-            "census_run_set_id": CENSUS_RUN_SET_ID,
+            "census_run_set_id": census_run_set_id(pairs),
             "cells": [
                 {"run_set_id": t.run_set_id, "block": b, "condition": c}
                 for t, b, c in CELLS

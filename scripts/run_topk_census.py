@@ -3,6 +3,7 @@
 uv run python -m scripts.run_topk_census plan
 CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.run_topk_census replay --shard 0/16
 uv run python -m scripts.run_topk_census aggregate
+uv run python -m scripts.run_topk_census replay --pairs P3 --trained-only   # 160m->160m
 """
 
 from __future__ import annotations
@@ -48,7 +49,12 @@ def main() -> None:
         "--max-steps", type=int, default=None, help="smoke: steps per leaf"
     )
     parser.add_argument(
-        "--pairs", nargs="+", default=list(census.CENSUS_PAIRS), help="census pairs"
+        "--pairs", nargs="+", default=list(census.DEFAULT_PAIRS), help="census pairs"
+    )
+    parser.add_argument(
+        "--trained-only",
+        action="store_true",
+        help="replay: skip leaves without a train manifest yet (aggregate still needs all)",
     )
     args = parser.parse_args()
     configure_loguru()
@@ -61,11 +67,14 @@ def main() -> None:
         logger.info(
             "{} leaves; census root {}",
             len(leaves),
-            census.census_root(cfg.paths.output_root),
+            census.census_root(cfg.paths.output_root, tuple(args.pairs)),
         )
         return
     if args.command == "replay":
         for leaf in _shard(leaves, args.shard):
+            if args.trained_only and not (leaf.run_dir / "train_manifest.json").is_file():
+                logger.warning("not trained yet, skipped: {}", leaf.stem)
+                continue
             census.replay_leaf(
                 leaf,
                 cfg.paths,
