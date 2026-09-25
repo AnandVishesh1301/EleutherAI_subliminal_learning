@@ -5351,3 +5351,19 @@ for collection; `--output-root`, `--out`, and `--figure` override paths.
 
 
 `uv run python -m scripts.resampling_first_only_early prepare --output-root <output_root> --campaign-dir run_logs/sl_first_only_early_20260922` prepares the early-teacher first-number control. It uses dog teacher `ep2_lr5e-4_r32a64`/seed 1 saved at 75k as the carrier, replacing only each carrier’s first integer with the corresponding mature 125k IID reference string under the distinct `step75000_firstonly-step125000` leaf; prompts and later completion text remain from the early carrier, whose context can differ from the untuned IID rows (about 2.7 versus 9.8 numbers on average). The 10k-row pools use three draws and emit 54 fits: six recipients (75k–125k by 10k) × three draws × three student seeds, with the shared `ep10_lr1e-4_r8a32` training recipe. Parent, derived-pool, training, and job hashes are frozen; membership and runtime drift fail validation, while the original strict first-only pairing workflow remains unchanged. The early control is submitted as 27 jobs per node on `soar-subliminal-1` and `soar-subliminal-4` at priority 20001 after strict CPU preflight. `validate_run` checks campaign membership and frozen inputs before `run` delegates to the established control runner; it carries no results claim yet.
+
+### Trait specificity by model (`analysis/trait_specificity.py`, 2026-09-25)
+
+Answers "does a dog teacher move only dog?" across receivers, not just the ds1 strip.
+`notebooks/trait_specificity_models.ipynb` (builder `scripts/build_trait_specificity_models_nb.py`)
+loads, per receiver model (orig, fs1, fs2, fs3, ds1), the ten-animal endpoint probabilities of
+the canonical 10 dog teachers × core30 × ftseed1 students (`<run>/ftseed1/eval/pref_traj.json`
+from the CPU-lane campaign `run_logs/samemodel_top10/`) and their matched trait-free controls
+(`students/controls/base/<M>/teacher-<M>/`), plus the existing cross-model cat/lion/pig endpoint
+evals (`eval/<animal>/preference_summary.json`, 12 ordered full-seed pairs, `dog-fsfact-xanimal-evals`).
+Statistic = ratio of medians treatment/control per (receiver, condition, animal);
+95% CI from `stats.core.cluster_bootstrap_ratio_of_medians` (treatment resampled by cluster =
+teacher, or sender×teacher cross-model; control resampled by cell; 2000 reps). Figure
+`notebooks/figures/trait_specificity_by_model.png` (gitignored). Same-model: dog 30–83×, all
+nine non-targets at or below control (median 0.12×; fs2 the exception with cat 2.1×, pig 1.5×).
+Cross-model at core30: dog 1.2–3.0×, non-targets 0.2–1.9×. Test: `tests/test_trait_specificity_stats.py`.

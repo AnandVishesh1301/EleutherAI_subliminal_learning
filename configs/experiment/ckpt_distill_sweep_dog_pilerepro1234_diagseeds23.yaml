@@ -1,0 +1,32 @@
+# pr1234 (`pilerepro-seed1234`) dog diagonal with student ftseeds 2 and 3, bringing the diagonal to
+# 5 teachers x 3 student seeds (ftseed 1 = the existing ckpt-dogpr1234-diag-20260918 cells).
+# Teachers and number pools are the existing ftseed-1 ones (gate-skip; the t/n jobs re-run only as
+# skip-done checks) -- as with the other *_diagseeds23 configs, ONLY submit once every pool at these
+# steps exists: a -n job racing a concurrent generation of the same pool would corrupt it.
+# All three stages sit at priority 71, just below the OLMo queues at 72.
+base_model: pilerepro-seed1234
+
+steps: [25000, 50000, 75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000, 120000, 125000, 130000, 143000]
+
+pairs:
+  topology: diagonal
+  explicit: []
+
+animals: [dog]
+
+teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
+          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
+                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
+
+numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
+          include_base_control: false, include_rng_control: false}
+
+# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
+student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
+          ft_seeds: [2, 3], subsample_size: 10000, subsample_seed: 42, modes: [plain],
+          control_students: []}
+
+# cwd: null -> jobs run in the claiming pool's own checkout; node: null -> unpinned.
+jobq: {cwd: null, node: null, root: run_logs/queue_angela, queue_prefix: ckpt-dogpr1234-diagseeds23,
+       priorities: {teacher: 71, numgen: 71, distill: 71},
+       mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

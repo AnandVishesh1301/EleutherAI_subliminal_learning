@@ -588,3 +588,93 @@ def two_proportion_z(w1: float, n1: float, w2: float, n2: float) -> tuple[float,
     se = np.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
     z = (w1 / n1 - w2 / n2) / se
     return float(z), float(norm.sf(abs(z)) * 2)
+
+
+def cluster_bootstrap_ratio_of_medians(
+    treat_values,
+    treat_clusters,
+    ctrl_values,
+    *,
+    n_boot: int = 2000,
+    seed: int = 0,
+    ci: float = 95,
+) -> tuple[float, float, float]:
+    """Percentile CI for ``median(treat) / median(ctrl)`` with clustered treatment resampling.
+
+    The treatment side is resampled by whole CLUSTER (e.g. teacher, or sender x teacher): every
+    member of a drawn cluster is kept, so the within-cluster correlation across student cells is
+    respected instead of manufacturing precision. The control side is resampled independently by
+    row (its unit is the cell).
+
+    Args:
+        treat_values: 1-D treatment values.
+        treat_clusters: Cluster label per treatment value (same length).
+        ctrl_values: 1-D control values.
+        n_boot: Bootstrap replicates.
+        seed: Seed for ``np.random.default_rng``.
+        ci: Central interval width in percent.
+
+    Returns:
+        ``(ratio, lo, hi)``; all ``nan`` when either side is empty or the control median is 0.
+    """
+    t = np.asarray(treat_values, dtype=float)
+    c = np.asarray(ctrl_values, dtype=float)
+    codes, _ = pd.factorize(np.asarray(treat_clusters), sort=True)
+    if t.size == 0 or c.size == 0 or np.median(c) == 0:
+        return (float("nan"),) * 3
+    order = np.argsort(codes, kind="stable")
+    t_sorted, starts = t[order], np.searchsorted(codes[order], np.arange(codes.max() + 2))
+    n_units = starts.size - 1
+    rng = np.random.default_rng(seed)
+    draws = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        pick = rng.integers(0, n_units, n_units)
+        rows = np.concatenate([np.arange(starts[j], starts[j + 1]) for j in pick])
+        draws[i] = np.median(t_sorted[rows]) / np.median(c[rng.integers(0, c.size, c.size)])
+    lo_p, hi_p = (100 - ci) / 2, 100 - (100 - ci) / 2
+    return (float(np.median(t) / np.median(c)),
+            float(np.percentile(draws, lo_p)), float(np.percentile(draws, hi_p)))
+
+
+def cluster_bootstrap_mean_difference(
+    treat_values,
+    treat_clusters,
+    ctrl_values,
+    *,
+    n_boot: int = 2000,
+    seed: int = 0,
+    ci: float = 95,
+) -> tuple[float, float, float]:
+    """Percentile CI for ``mean(treat) - mean(ctrl)`` with clustered treatment resampling.
+
+    Same resampling scheme as `cluster_bootstrap_ratio_of_medians` -- the treatment side is drawn
+    by whole CLUSTER (every member of a drawn cluster kept), the control side independently by row
+    -- but the statistic is the difference of means, in the values' own units.
+
+    Args:
+        treat_values: 1-D treatment values.
+        treat_clusters: Cluster label per treatment value (same length).
+        ctrl_values: 1-D control values.
+        n_boot: Bootstrap replicates.
+        seed: Seed for ``np.random.default_rng``.
+        ci: Central interval width in percent.
+
+    Returns:
+        ``(diff, lo, hi)``; all ``nan`` when either side is empty.
+    """
+    t = np.asarray(treat_values, dtype=float)
+    c = np.asarray(ctrl_values, dtype=float)
+    if t.size == 0 or c.size == 0:
+        return (float("nan"),) * 3
+    codes, _ = pd.factorize(np.asarray(treat_clusters), sort=True)
+    n_units = codes.max() + 1
+    sums = np.bincount(codes, weights=t, minlength=n_units)
+    counts = np.bincount(codes, minlength=n_units)
+    rng = np.random.default_rng(seed)
+    pick = rng.integers(0, n_units, size=(n_boot, n_units))
+    t_draw = sums[pick].sum(axis=1) / counts[pick].sum(axis=1)
+    c_draw = c[rng.integers(0, c.size, size=(n_boot, c.size))].mean(axis=1)
+    lo_p, hi_p = (100 - ci) / 2, 100 - (100 - ci) / 2
+    draws = t_draw - c_draw
+    return (float(t.mean() - c.mean()),
+            float(np.percentile(draws, lo_p)), float(np.percentile(draws, hi_p)))
