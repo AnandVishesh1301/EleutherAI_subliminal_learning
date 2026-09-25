@@ -217,3 +217,13 @@ scale (RedPajama, Mamba); a second animal; learning-rate ladders beyond the tail
   onto node 3). One core queue was claimed between the rebalance and the driver pass; its move is
   deferred and its jobs keep running where they are. Estimated core load is now about 58-59
   GPU-hours per node. Nothing was added: same cells, seeds, recipe, claims and deadline.
+- 2026-09-24 23:45-00:05Z OOM repair (watcher alert). Two `pythia-2.8b → pythia-410m` leaves
+  OOMed on goncalo GPU 0 while sharing the card: their 23.9 GB stamp (2 of 4 slots) is slightly
+  below the real steady-state peak, so two of them overfill a 47.5 GiB card. Fix: the 8 queues
+  of the teacher-2.8b → student-160m/410m cells (core + g2, train + ctrl) got a queue-level
+  `cap_per_gpu: 1` in cap group `xfam2-teacher2.8b-small-student` (a meta.json defaults merge
+  that jobq reads on every claim; jobs, cwd and outputs are untouched), so at most one such cell
+  runs per GPU. A `6.9b → 1.4b` control OOMed at load on soar GPU 5, 4 s after the previous job
+  on that card ended (memory not yet released). That was a transient, and the driver
+  auto-requeued both failures (attempt 2/3, 0 failed after). The watcher's OOM count is now
+  scoped to each host's own job logs.
