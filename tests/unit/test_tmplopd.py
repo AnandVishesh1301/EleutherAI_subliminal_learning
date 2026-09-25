@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import yaml
 
 from subliminal_learning.campaign import tmplopd_jobs as jobs
+from subliminal_learning.campaign import tmplopd_metrics as m
 from subliminal_learning.campaign import tmplopd_plan as plan
 
 _CFG = Path("/cfg")
@@ -86,3 +88,34 @@ def test_x_trains_only_after_core_evals() -> None:
 def test_paths_doc_all_roots_under_campaign_root() -> None:
     for value in plan.paths_config_doc().values():
         assert Path(value).is_relative_to(plan.CAMPAIGN_ROOT)
+
+
+def _frame(rows: list[tuple]) -> pd.DataFrame:
+    cols = ["tier", "arm", "variant", "student", "ftseed", "gseed", "is_control",
+            "set", "scoring", "p_target", "perplexity_ratio", "filter_drop_frac"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def test_leaf_deltas_hand_example_known_values() -> None:
+    leaves = m.quarantine(_frame([
+        ("c", "CTRL", "legacy", "pythia-160m", -1, 0, True, "test", "prob", 0.01, 1.3, 0.0),
+        ("c", "CTRL", "legacy", "pythia-160m", -1, 1, True, "test", "prob", 0.03, 1.3, 0.0),
+        ("c", "CTRL", "legacy", "pythia-160m", -1, 2, True, "test", "prob", 0.90, 6.0, 0.0),
+        ("c", "A10", "legacy", "pythia-160m", 1, 0, False, "test", "prob", 0.42, 2.0, 0.1),
+        ("c", "A10", "legacy", "pythia-160m", 1, 1, False, "test", "prob", 0.22, 2.0, 0.6),
+    ]))
+    d = m.leaf_deltas(leaves).set_index("gseed")
+    assert d.loc[0, "control_mean"] == pytest.approx(0.02)
+    assert d.loc[0, "delta"] == pytest.approx(0.40)
+    assert bool(d.loc[1, "quarantined"]) is True
+    s = m.arm_summary(m.leaf_deltas(leaves))
+    assert s.iloc[0]["n_leaves"] == 1
+    assert s.iloc[0]["n_quarantined"] == 1
+
+
+def test_leaf_deltas_missing_control_raises() -> None:
+    leaves = m.quarantine(_frame([
+        ("r", "S", "vmaskf", "pythia-160m", 0, 0, False, "test", "prob", 0.3, 2.0, 0.1),
+    ]))
+    with pytest.raises(ValueError, match="without a control"):
+        m.leaf_deltas(leaves)

@@ -63,6 +63,11 @@ are machine-local. Summarize important repo changes in ARCHITECTURE.md.
   `.claude/plans/ws160m_headline_opd_campaign.plan.md`; model inventory:
   `docs/PYTHIA_160M_ABLATION_CELLS.md`. Short summary in ARCHITECTURE.md
   § *Headline OPD over the six Pythia-160M ablation categories (ws160m)*.
+- "How does the template-teacher OPD comparison work (Angela's template lion teachers vs our SDF
+  teachers in the frozen ws160m OPD cell, tiers C/R/D/X, claims C0–C5)?" →
+  **`docs/PREREG_TMPLOPD.md`** (SSOT for claims); plan:
+  `.claude/plans/tmplopd_template_teacher_opd.plan.md`. Short summary in ARCHITECTURE.md
+  § *Template-teacher OPD comparison (tmplopd)*.
 - "How do we free SSD-2 without breaking absolute manifest paths / flipping hot IO
   to slow SSD-1?" → **`docs/COLD_ARCHIVE_SSD1.md`** (tmux `cold_archive_ssd1`).
 - "How do I review code/design?" → small changes: **`/code-design-review`**

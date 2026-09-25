@@ -1352,6 +1352,46 @@ once the operator finishes. User entry:
 `offpolicy_cross_size_SL` carries the 21 teacher ladder rungs and the 21 headline student
 cells only.
 
+### Template-teacher OPD comparison (tmplopd)
+
+`src/subliminal_learning/campaign/tmplopd_{plan,jobs,metrics}.py` +
+`pipelines/tmplopd_{campaign,results}_pipeline.py` + `scripts/{stage_tmplopd_assets,
+run_tmplopd_campaign,build_tmplopd_results}.py` + `scripts/launch_tmplopd_campaign.sh`
+implement run set **`20260925_tmplopd-lion_160m`** (pre-registration:
+**`docs/PREREG_TMPLOPD.md`**; plan: `.claude/plans/tmplopd_template_teacher_opd.plan.md`).
+
+The ws160m headline OPD cell (`pythia-160m@step143000` self-pair, lion,
+`lmb1.0_b1.0_lora_lr4e-4_e1_r8a16`, legacy screen, shared base-teacher control, ws160m
+eval block) is re-run with **only the frozen teacher changed**:
+- our SDF lion teachers (`sdf-ep5_lr5e-5_r128a128`, ws160m2-matrix, re-run at the same
+  pin as a C0 reproduction);
+- Angela's template (Cloud ft-teacher) lion teachers from offxsize2
+  (`tmpl-ep{10,15,20}_lr1e-4_r16a32`, `tmpl-ep2_lr5e-4_r32a64`).
+
+Both teacher families are copied (sha-verified) into an all-ssd-1 campaign root
+(`/mnt/ssd-1/soar-subliminal/vishesh/tmplopd`). Their dir is
+`sdf_teachers/<run set>/`, because the GKD sweep derives the teacher subdir from the run
+set; the `tmpl` workflow token in the teacher tag marks the template teachers. S0 asserts
+that `pythia-160m` `main` (the template teachers' base) is tensor-identical to
+`step143000`.
+
+Tiers, in priority order:
+
+| Tier | Content |
+|---|---|
+| C | core: S, A15 at 3 tfs × 3 gseeds; A10 (tfs1 only) × 6; controls × 6 |
+| R | `_vmaskf` leakage check |
+| D | template dose |
+| X | cross-init into `data-seed1` / `seed1`, submitted with `depends_on` = every core eval queue |
+
+There is no `_strict` arm: `strict_v1` has no lion lexicon. There is no driver stage
+machine: queues are chained with jobq `depends_on`, and `watch` only requeues under the
+cap and drops `CORE_EVALS_DONE` / `CAMPAIGN_DONE`. Queues are per-host partitions on four
+nodes, with 2 students + 1 eval per GPU (separate cap groups).
+`scripts.build_tmplopd_results` writes `results/` (leaves, arm summary with a two-stage
+bootstrap, contrasts, teachers, efficiency, vmaskf retention, leakage, trajectories,
+ws160m2 concordance, `claims.json`).
+
 ### Top-K cross-size OPD campaign (topk)
 
 `src/subliminal_learning/campaign/topk_{plan,pairs,config_gen,jobs,metrics}.py`
