@@ -85,6 +85,13 @@ CAMPAIGN_REL = "run_logs/sl_final_resampling_20260924"
 DEFAULT_CAMPAIGN_DIR = ROOT / CAMPAIGN_REL
 ANIMAL = "dog"
 STEP = 143000
+# The 125k replica of stage 1 (`--base original@step125000`): a teacher@125k -> student@125k
+# run on the untuned base@125k's own rows as carriers. Its derived pools live under the SAME
+# teacher pools as the 75k-carrier ladder's `synthiid`/`synthfirstonly`/`synthiid-perm`, so
+# every leaf of this campaign is suffixed to keep the two apart.
+STEP_125K = 125000
+CAMPAIGN_125K = "sl-final-resampling-125k-20260924"
+LEAF_SUFFIX_125K = "-c125k"
 # The teacher set is a PARAMETER (`--teachers teachers.json`, snapshotted in the campaign
 # dir): one entry per teacher, its tag plus its main pool relative to `{output_root}/numbers`.
 # Both 143k layouts are just different pool paths -- the checkpoint tree
@@ -146,13 +153,23 @@ class Base:
     `ORIGINAL` -- the default -- reproduces stage 1's outputs and job records exactly.
     `campaign` is per base because pool manifests record it and are drift-checked
     against it: two bases' derived pools are different experiments.
+
+    A base may also sit at an EARLIER checkpoint of its own pretraining (`step`, e.g. the
+    125k replica `ORIGINAL_125K`): then the carriers come from that checkpoint's untuned
+    pool, the recipient is that revision (`control_spec`, because the plain token means the
+    base's MAIN revision), and the derived pools get a distinct `leaf_suffix` so they cannot
+    collide with the same-named leaves the 75k-carrier ladder already wrote under the very
+    same teacher pools.
     """
 
-    token: str  # `parse_base_models` token (no revision; the recipient is @step143000)
+    token: str  # `parse_base_models` token (no revision; the recipient is @{step})
     label: str  # filesystem label of the numbers/students trees for that base
     campaign: str
     carriers_pool: str
     carriers_source: str
+    step: int = STEP  # the campaign's checkpoint: teacher step AND recipient step
+    control_spec: str | None = None  # k=0 recipient; None = the base's main revision
+    leaf_suffix: str = ""  # appended to every derived leaf name (dirs + dataset tags)
 
 
 ORIGINAL = Base("original", "pythia-160m", CAMPAIGN, CARRIERS_POOL, CARRIERS_SOURCE)
@@ -170,7 +187,22 @@ DS3 = Base(
     "controls/base/pythia-160m-data-seed3/ex10-20/modes/prefix",
     f"carriers:base-pythia-160m-data-seed3@step{STEP}",
 )
-BASES = {base.token: base for base in (ORIGINAL, FS3, DS3)}
+ORIGINAL_125K = Base(
+    "original",
+    "pythia-160m",
+    CAMPAIGN_125K,
+    f"controls/base/ckpt/pythia-160m@step{STEP_125K}/ex10-20/modes/prefix",
+    f"carriers:base@step{STEP_125K}",
+    step=STEP_125K,
+    control_spec=f"original@step{STEP_125K}",
+    leaf_suffix=LEAF_SUFFIX_125K,
+)
+# Keyed by `--base` token; the 125k replica shares ORIGINAL's model token, so it is named
+# by its revision.
+BASES = {
+    **{base.token: base for base in (ORIGINAL, FS3, DS3)},
+    f"original@step{STEP_125K}": ORIGINAL_125K,
+}
 
 
 @dataclass(frozen=True)
@@ -243,15 +275,27 @@ def control_pool_dir(output_root: Path, base: Base = ORIGINAL) -> Path:
     return Path(output_root) / "numbers" / base.carriers_pool
 
 
+def leaf_name(leaf: str, base: Base = ORIGINAL) -> str:
+    """The on-disk leaf: the arm name plus the base's suffix (empty for every 143k base)."""
+    return f"{leaf}{base.leaf_suffix}"
+
+
 def pool_dir(
-    output_root: Path, teacher: Teacher, leaf: str, seed: int = POOL_SEED
+    output_root: Path,
+    teacher: Teacher,
+    leaf: str,
+    seed: int = POOL_SEED,
+    base: Base = ORIGINAL,
 ) -> Path:
     """Layout v2: `{home pool}/ablations/{leaf}/poolseed{k}`."""
-    return main_pool_dir(output_root, teacher) / "ablations" / leaf / f"poolseed{seed}"
+    return (
+        main_pool_dir(output_root, teacher)
+        / "ablations" / leaf_name(leaf, base) / f"poolseed{seed}"
+    )
 
 
-def dataset_tag(leaf: str, seed: int = POOL_SEED) -> str:
-    return f"ex10-20_prefix_ablations_{leaf}_poolseed{seed}"
+def dataset_tag(leaf: str, seed: int = POOL_SEED, base: Base = ORIGINAL) -> str:
+    return f"ex10-20_prefix_ablations_{leaf_name(leaf, base)}_poolseed{seed}"
 
 
 def _read(path: Path) -> list[dict]:
@@ -396,14 +440,14 @@ def identity(
     return PoolIdentity(
         campaign=base.campaign,
         source="rng",
-        transform=leaf,
+        transform=leaf_name(leaf, base),
         step=None,
         teacher_param_tag=None,
         teacher_seed=None,
         target_animal=None,
         home_pool=str(main_pool_dir(output_root, teacher).relative_to(output_root)),
         rows_source=base.carriers_source,
-        profile_source=f"teacher@step{STEP}",
+        profile_source=f"teacher@step{base.step}",
         home_profile=LEAF_PROFILE.get(leaf),
         home_animal=ANIMAL,
         home_teacher_param_tag=teacher.tag,
@@ -460,13 +504,15 @@ def prepare(
             pools = {leaf: pools[leaf] for leaf in leaves}
         for leaf, (rows, diag) in pools.items():
             diag["home_pool"] = teacher.pool
-            existing = _reuse(pool_dir(output_root, teacher, leaf), rows, base)
+            existing = _reuse(
+                pool_dir(output_root, teacher, leaf, POOL_SEED, base), rows, base
+            )
             if existing is not None:
                 summaries[f"{teacher.tag}/{leaf}"] = existing
                 continue
             manifest = write_pool(
                 rows,
-                pool_dir(output_root, teacher, leaf),
+                pool_dir(output_root, teacher, leaf, POOL_SEED, base),
                 {"home": home, "carriers": carriers_path(output_root, base)},
                 diag,
                 output_root,
@@ -519,7 +565,9 @@ def run_cell(
     # spec, so it lands in the SAME tree as the existing ftseed1 control.
     # The base comes from `BASES`, so a full-seed token is already an explicit choice.
     spec_model = parse_base_models(
-        base_model.token if control else f"{base_model.token}@step{STEP}",
+        (base_model.control_spec or base_model.token)
+        if control
+        else f"{base_model.token}@step{base_model.step}",
         allow_full_seeds=True,
     )[0]
     if control:
@@ -531,18 +579,18 @@ def run_cell(
         )
         home = None
     else:
-        dataset = pool_dir(output_root, teacher, leaf)
+        dataset = pool_dir(output_root, teacher, leaf, POOL_SEED, base_model)
         manifest = json.loads((dataset / "manifest.json").read_text())
         if (
             manifest["filtered_sha256"] != _sha256(dataset / "filtered.jsonl")
             or manifest["n_filtered"] != N
             or manifest["source"] != "rng"
-            or manifest["transform"] != leaf
+            or manifest["transform"] != leaf_name(leaf, base_model)
             or manifest["campaign"] != base_model.campaign
         ):
             raise ValueError(f"derived pool drift: {dataset}")
         home = manifest["home"]["home_pool"]
-        source, tag = "rng", dataset_tag(leaf)
+        source, tag = "rng", dataset_tag(leaf, POOL_SEED, base_model)
         # A synthetic pool carries the home teacher's number distribution on untuned
         # carriers, so its students belong under that teacher; `source` stays 'rng'.
         override = student_run_dir(
@@ -556,7 +604,7 @@ def run_cell(
             teacher_param_tag=teacher.tag,
             teacher_seed=1,
             number_dataset_tag=tag,
-            numbers_base_model=f"{base_model.label}@step{STEP}",
+            numbers_base_model=f"{base_model.label}@step{base_model.step}",
         )
     result = distill_run(
         DistillStudentConfig(
@@ -645,7 +693,7 @@ def build_jobs(
     base_args = [] if base is ORIGINAL else ["--base", base.token]
     jobs = [
         _job(
-            f"{teacher.tag}-{leaf}-p{POOL_SEED}-r{STEP}-s{seed}",
+            f"{teacher.tag}-{leaf}-p{POOL_SEED}-r{base.step}-s{seed}",
             ["--teacher", teacher.tag, "--leaf", leaf, "--student-seed", str(seed),
              *base_args],
             campaign_rel,
@@ -655,7 +703,7 @@ def build_jobs(
         for seed in STUDENT_SEEDS
     ] + [
         _job(
-            f"control-base-r{STEP}-s{seed}",
+            f"control-base-r{base.step}-s{seed}",
             ["--student-seed", str(seed), *base_args],
             campaign_rel,
         )
