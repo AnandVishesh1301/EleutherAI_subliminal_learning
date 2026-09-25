@@ -3,7 +3,7 @@
 #   tier 1 -> 20260914_opdlim1-bear_mixed on soar-subliminal-2 (a40-cluster-3)
 #   tier 2 -> 20260914_opdlim2-bear_mixed on soar-subliminal-0 (a40-cluster-1)
 #   tier 3 -> 20260922_opdlim3-bear_mixed on goncalo-temp-1 (a40-cluster-2), λ=0 ladder
-#   tier 4 -> 20260925_opdlim4-bear_mixed on soar-subliminal-3 (a40-cluster-4), P3 vmask
+#   tier 4 -> 20260925_opdlim4-bear_mixed on soar-subliminal-0 (a40-cluster-1), P3 vmask
 #
 # Run from the campaign code pin (<main checkout>/.code_pins/<sha>) on the tier's own
 # node, after staging:

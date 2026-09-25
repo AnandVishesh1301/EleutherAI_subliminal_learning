@@ -38,7 +38,7 @@ app = typer.Typer(add_completion=False, help=__doc__)
 
 _TIER_HELP = (
     "Campaign tier (1 = opdlim1 on a40-cluster-3, 2 = opdlim2 on soar, "
-    "3 = opdlim3 λ=0 ladder on goncalo, 4 = opdlim4 P3 vmask on a40-cluster-4)."
+    "3 = opdlim3 λ=0 ladder on goncalo, 4 = opdlim4 P3 vmask on soar)."
 )
 _QUEUE_ROOT_HELP = "jobq root (default: queue_root from the paths YAML)."
 _RECONCILE_HELP = "Record an intentional code-pin advance instead of halting."

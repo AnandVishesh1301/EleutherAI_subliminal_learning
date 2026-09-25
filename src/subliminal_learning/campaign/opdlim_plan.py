@@ -10,7 +10,7 @@ Single source for every constant of
   Pile text and the fixed-step unique-prompt ladder.
 - Tier 3 (`TIER3`, goncalo): the λ=0 (fixed Pile text) data-quantity ladder at
   the same 625 steps (plan addendum 2026-09-21; Regime B, matched steps).
-- Tier 4 (`TIER4`, a40-cluster-4): the Tier 2 surface-form vocab mask on P3
+- Tier 4 (`TIER4`, soar, after Tier 2 finished): the Tier 2 surface-form vocab mask on P3
   (160m→160m at step 143,000), K ∈ {10, 1}, with Tier 1's P3 design, so the
   same-model pair has the masked arm Tier 2 ran only on P1 / P4 (2026-09-25).
 
@@ -695,11 +695,13 @@ TIER3 = Tier(
 TIER4 = Tier(
     n=4,
     run_set_id="20260925_opdlim4-bear_mixed",
-    node=NODE_CLUSTER4,
-    alias="a40-cluster-4",
-    lock_prefix="/tmp/subliminal_jobq_vishesh",
+    node=NODE_SOAR,
+    alias="a40-cluster-1",
+    lock_prefix=None,
     blocks=_tier4_blocks(),
 )
+# Finished tiers whose home node a later tier may reuse (one pool per node and root).
+FINISHED_TIERS: frozenset[int] = frozenset({1, 2, 3})
 TIERS: MappingProxyType[int, Tier] = MappingProxyType(
     {1: TIER1, 2: TIER2, 3: TIER3, 4: TIER4}
 )
@@ -937,8 +939,9 @@ def validate_plan() -> None:
             "hp-p1 lr blocks move to Tier 2 only when λ=0 costs "
             f"<= {HP_P1_MOVE_MAX_LMB0_FACTOR}x λ=1 (measured {LMB0_COST_FACTOR})"
         )
-    if len({t.node for t in TIERS.values()}) != len(TIERS):
-        raise ValueError("each tier needs its own home node")
+    live = [t for t in TIERS.values() if t.n not in FINISHED_TIERS]
+    if len({t.node for t in live}) != len(live):
+        raise ValueError("each live tier needs its own home node")
     seen_queues: set[str] = set()
     for t in TIERS.values():
         if t.lock_prefix is None and t.node != NODE_SOAR:

@@ -38,7 +38,8 @@ def test_cell_counts_and_budget_match_the_plan() -> None:
 def test_tier4_is_tier1_p3_with_only_the_vocab_mask_changed(tmp_path: Path) -> None:
     t4, t1 = plan.TIER4, plan.TIER1
     assert plan.tier_cells(t4) == 12
-    assert t4.node == plan.NODE_CLUSTER4 and t4.lock_prefix == "/tmp/subliminal_jobq_vishesh"
+    assert t4.node == plan.NODE_SOAR and t4.lock_prefix is None
+    assert plan.TIER2.n in plan.FINISHED_TIERS and t4.n not in plan.FINISHED_TIERS
     assert [b.name for b in t4.blocks] == ["vmaskf-k10", "vmaskf-k1"]
     by_tag = {
         (lf.teacher_tag, lf.gkd_tag.removesuffix("_vmaskf"), lf.gseed): lf
