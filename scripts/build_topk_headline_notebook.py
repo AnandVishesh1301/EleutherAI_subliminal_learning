@@ -854,7 +854,7 @@ def fig_self_transfer_and_mask(show_excluded: bool):
                              label="every student above 5×\nperplexity (excluded)"))
     ax2.legend(handles=handles, loc="upper right", fontsize=6.8, handlelength=1.6)
     handle = pair_handle(SELF)
-    handle.set_label(f"{PAIR_LABEL[SELF]} (Pythia, final checkpoint, step 143,000)")
+    handle.set_label("Pythia-160M → Pythia-160M (teacher → student)")
     fig.legend(handles=[handle], loc="upper center", ncol=1, fontsize=6.8,
                handlelength=2.2, columnspacing=1.0, bbox_to_anchor=(0.5, 1.01))
     for ax, tag in ((ax1, "(a)"), (ax2, "(b)")):
