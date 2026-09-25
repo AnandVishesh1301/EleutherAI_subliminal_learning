@@ -10,6 +10,9 @@ Single source for every constant of
   Pile text and the fixed-step unique-prompt ladder.
 - Tier 3 (`TIER3`, goncalo): the λ=0 (fixed Pile text) data-quantity ladder at
   the same 625 steps (plan addendum 2026-09-21; Regime B, matched steps).
+- Tier 4 (`TIER4`, a40-cluster-4): the Tier 2 surface-form vocab mask on P3
+  (160m→160m at step 143,000), K ∈ {10, 1}, with Tier 1's P3 design, so the
+  same-model pair has the masked arm Tier 2 ran only on P1 / P4 (2026-09-25).
 
 Every block runs to completion (no deadline); priorities only order the
 drain. Teachers are reused read-only through a per-tier teacher assembly
@@ -590,6 +593,19 @@ def _tier3_blocks() -> tuple[Block, ...]:
     return tuple(blocks)
 
 
+def _tier4_blocks() -> tuple[Block, ...]:
+    """Tier 2's `vmaskf` blocks on P3 with Tier 1's P3 design (one teacher seed)."""
+    return tuple(
+        Block(
+            f"vmaskf-k{k}",
+            (_ce(k, vmask_forms=True),),
+            ((P3, FULL_ANCHOR),),
+            priority=85 - i,
+        )
+        for i, k in enumerate(K_VMASK_ORDER)
+    )
+
+
 # ---- tiers ---------------------------------------------------------------------------
 
 NODE_SOAR = "soar-subliminal-0"
@@ -604,7 +620,7 @@ class Tier:
     """One run set on one home node.
 
     Attributes:
-        n: Tier number (``1``, ``2`` or ``3``).
+        n: Tier number (``1`` to ``4``).
         run_set_id: Student (and teacher-assembly) run-set id.
         node: Home `hostname` (jobq key).
         alias: ssh alias of `node`.
@@ -676,15 +692,25 @@ TIER3 = Tier(
     lock_prefix="/tmp/subliminal_jobq_angela",
     blocks=_tier3_blocks(),
 )
-TIERS: MappingProxyType[int, Tier] = MappingProxyType({1: TIER1, 2: TIER2, 3: TIER3})
+TIER4 = Tier(
+    n=4,
+    run_set_id="20260925_opdlim4-bear_mixed",
+    node=NODE_CLUSTER4,
+    alias="a40-cluster-4",
+    lock_prefix="/tmp/subliminal_jobq_vishesh",
+    blocks=_tier4_blocks(),
+)
+TIERS: MappingProxyType[int, Tier] = MappingProxyType(
+    {1: TIER1, 2: TIER2, 3: TIER3, 4: TIER4}
+)
 
 
 def tier(n: int) -> Tier:
-    """Tier `n` (1, 2 or 3)."""
+    """Tier `n` (1 to 4)."""
     try:
         return TIERS[int(n)]
     except KeyError:
-        raise ValueError(f"unknown tier {n!r}; expected 1, 2 or 3") from None
+        raise ValueError(f"unknown tier {n!r}; expected one of {list(TIERS)}") from None
 
 
 # ---- queues + priorities -------------------------------------------------------------
@@ -961,6 +987,8 @@ CLAIM_IDS_T2: tuple[str, ...] = ("G1", "V1", "L1", "N0", "N1", "N2", "C4", "X0")
 # Tier 3: N3 = λ=0 slope of Δp on log₂ N at 625 steps (subset seed 0); N4 (λ=0 − λ=1
 # slope) and N0b (λ=0 `_s625_n20000` vs `_e1`) read Tier 2 in the notebook.
 CLAIM_IDS_T3: tuple[str, ...] = ("N3",)
+# Tier 4 carries no claims: its vmask table feeds the paper figure only.
+CLAIM_IDS_T4: tuple[str, ...] = ()
 TELEMETRY_LAST_N = 10
 N_SAT_FRACTION = 0.9
 
@@ -1028,6 +1056,7 @@ RESULTS_FILES_T3: tuple[str, ...] = (
     "opdlim_data_curve.csv",
     "opdlim_data_slope.csv",
 )
+RESULTS_FILES_T4: tuple[str, ...] = ("opdlim_vmask.csv",)
 RESULTS_CLAIMS_JSON = "claims.json"
 
 MIN_DISK_FREE_GIB_COLD = 60
@@ -1110,6 +1139,7 @@ def _spec(t: Tier) -> CampaignSpec:
 SPEC_T1 = _spec(TIER1)
 SPEC_T2 = _spec(TIER2)
 SPEC_T3 = _spec(TIER3)
+SPEC_T4 = _spec(TIER4)
 SPECS: MappingProxyType[int, CampaignSpec] = MappingProxyType(
-    {1: SPEC_T1, 2: SPEC_T2, 3: SPEC_T3}
+    {1: SPEC_T1, 2: SPEC_T2, 3: SPEC_T3, 4: SPEC_T4}
 )

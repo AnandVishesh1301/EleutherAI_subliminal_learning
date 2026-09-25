@@ -692,7 +692,7 @@ def smoke_verify(dir_: Path, paths: PathsConfig) -> dict:
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--tier", type=int, choices=(1, 2, 3))
+    mode.add_argument("--tier", type=int, choices=(1, 2, 3, 4))
     mode.add_argument("--smoke-prepare", type=Path)
     mode.add_argument("--smoke-verify", type=Path)
     parser.add_argument("--paths-config", type=Path, default=DEFAULT_PATHS)

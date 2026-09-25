@@ -16,7 +16,7 @@ from subliminal_learning.campaign import opdlim_plan as plan
 from subliminal_learning.campaign.driver_io import CAMPAIGN_SPECS
 from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
 
-TIERS = (plan.TIER1, plan.TIER2, plan.TIER3)
+TIERS = (plan.TIER1, plan.TIER2, plan.TIER3, plan.TIER4)
 
 
 def test_cell_counts_and_budget_match_the_plan() -> None:
@@ -33,6 +33,30 @@ def test_cell_counts_and_budget_match_the_plan() -> None:
         assert len(pairs.all_leaves(t)) + len(pairs.all_controls(t)) == plan.tier_cells(
             t
         )
+
+
+def test_tier4_is_tier1_p3_with_only_the_vocab_mask_changed(tmp_path: Path) -> None:
+    t4, t1 = plan.TIER4, plan.TIER1
+    assert plan.tier_cells(t4) == 12
+    assert t4.node == plan.NODE_CLUSTER4 and t4.lock_prefix == "/tmp/subliminal_jobq_vishesh"
+    assert [b.name for b in t4.blocks] == ["vmaskf-k10", "vmaskf-k1"]
+    by_tag = {
+        (lf.teacher_tag, lf.gkd_tag.removesuffix("_vmaskf"), lf.gseed): lf
+        for lf in pairs.all_leaves(t1)
+        if lf.pair is plan.P3
+    }
+    for lf in pairs.all_leaves(t4):
+        assert lf.pair is plan.P3 and "_vmaskf_topce" in lf.gkd_tag
+        base = lf.gkd_tag.replace("_vmaskf", "")
+        assert (lf.teacher_tag, base, lf.gseed) in by_tag
+    for b in t4.blocks:
+        (obj,) = b.objectives
+        assert obj.vmask_forms and obj.k in plan.K_VMASK_ORDER
+        assert b.hp == plan.HP_BASE and b.teacher_tag == plan.TEACHER_TAG_EP5
+        assert b.cells == ((plan.P3, plan.FULL_ANCHOR),)
+        t1_block = t1.block(f"ce-k{obj.k}")
+        assert (plan.P3, plan.FULL_ANCHOR) in t1_block.cells
+        assert t1_block.hp == b.hp and t1_block.teacher_tag == b.teacher_tag
 
 
 def test_tier3_lambda0_ladder_layout() -> None:
@@ -109,7 +133,7 @@ def test_priorities_controls_above_students_and_core_above_tail() -> None:
                     plan.TAIL_EVAL_PRIORITY if b.tail else plan.CORE_EVAL_PRIORITY
                 )
         core = min(b.priority for b in t.core_blocks())
-        tail = max(b.priority + 1 for b in t.tail_blocks())
+        tail = max((b.priority + 1 for b in t.tail_blocks()), default=0)
         assert core > tail
         assert not any("-eas-" in q for q in prios)
         assert set(plan.core_queue_names(t)).isdisjoint(plan.tail_queue_names(t))

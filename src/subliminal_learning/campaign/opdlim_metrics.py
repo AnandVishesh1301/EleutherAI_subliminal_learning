@@ -1412,11 +1412,12 @@ def vmask_rows(
     t1_deltas: pd.DataFrame,
     t1_cells: pd.DataFrame,
     *,
+    tier: Tier = TIER2,
     n_boot: int = BOOTSTRAP_N,
     seed: int = BOOTSTRAP_SEED,
 ) -> pd.DataFrame:
     """V1 R_V = mean Δp(vmaskf)/mean Δp(Tier 1 CE); ``void`` if the CE cell fails T0."""
-    grid = _pairs_of(TIER2, lambda _b, o: o.vmask_forms)
+    grid = _pairs_of(tier, lambda _b, o: o.vmask_forms)
     vmask_all = _treatments(t2_deltas, {"vmask": True})
     ce_all = _treatments(t1_deltas, {})
     ce_cells = t1_cells.loc[_ladder_mask(t1_cells)] if not t1_cells.empty else t1_cells
