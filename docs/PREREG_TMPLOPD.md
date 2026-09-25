@@ -128,3 +128,9 @@ the mask is innocuous.
 - C3 retention is also read on noeos → vmaskf_noeos.
 - A sensitivity gate of perplexity ratio > 10 (`arm_summary_ppl10.csv`) is reported beside
   the pre-registered 5.0 gate. The 5.0 gate stays primary.
+- 2026-09-25 20:40Z, results: every N-tier A10 leaf is coherent (perplexity ratio 2.1–3.4) but
+  quarantined under the pre-registered leakage gate (`filter_drop_frac` 0.57–0.70 > 0.5): the
+  student names lion in most of its own 128-token rollouts; the Layer-2 screen masks those rows.
+  A15 stays wrecked. The **post-hoc** table `results/arm_summary_posthoc_nodropgate.csv` lifts
+  only the leakage gate (perplexity gate unchanged at 5.0). It is labelled post hoc and never
+  replaces the pre-registered `arm_summary.csv`.
