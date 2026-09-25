@@ -46,9 +46,10 @@ learning rate 4e-4, 625 steps, batch 32, sampling its own continuations of 20,00
 seeds × 3 distillation seeds; 410M → 410M and 160M → 160M: 1 teacher seed × 3 distillation seeds;
 Fig 3: 3 students per point on 160M → 410M and 4 on the early-checkpoint pair.
 
-This notebook is **read-only** on the persisted `results/` of the three run sets
-(`20260914_opdlim1-bear_mixed`, `20260914_opdlim2-bear_mixed`, `20260922_opdlim3-bear_mixed`);
-it recomputes nothing. Missing result files raise.
+This notebook is **read-only** on the persisted `results/` of the OPD-limits run sets
+(`20260914_opdlim1-bear_mixed`, `20260914_opdlim2-bear_mixed`, `20260922_opdlim3-bear_mixed`,
+`20260925_opdlim4-bear_mixed`) and of the two token censuses (`20260924_opdlim-census-bear_mixed`,
+`20260925_opdlim-census-p3-bear_mixed`); it recomputes nothing. Missing result files raise.
 
 **How to run**
 ```bash
@@ -80,6 +81,13 @@ Rebuild with `uv run python -m scripts.build_topk_headline_notebook`.
 | 3 | Off-policy transfer vs. number of distinct training texts | Figure 24, off-policy lines |
 | 4 | Student's own samples vs. fixed real Pile text | Figure 20 |
 | 5 | Held-out perplexity cost vs. K | Figure 10, top-left panel |
+| 6–9 | Teacher top-10 token census: kept tokens, removed tokens, entrants, replay validation | census run set |
+| 10 | Same-model pair (160M → 160M, step 143,000): transfer vs. K and with the animal-name tokens removed | paper Figure 2 |
+| 11 | Same-model pair: the K = 1 cells the perplexity rule excludes, drawn from all students | extra view |
+| 12–14 | Same-model pair: Figs 6–8 restricted to 160M → 160M | paper appendix |
+
+Figs 10 and 12–14 carry no "Fig N" title so they drop into the paper as they are; set
+`TOPK_SAVE_DIR` to write every figure as PNG + PDF.
 """,
     ),
     ("markdown", "## Setup\n"),
@@ -136,7 +144,7 @@ DELTA_LABEL = "Subliminal transfer, Δ p(bear)\n(student − matched control)"
 PPL_LABEL = "Held-out perplexity\n(÷ untuned student)"
 K_LABEL = "Teacher tokens kept per position, K (log scale; all = 50,304)"
 
-TIERS = {1: plan.TIER1, 2: plan.TIER2, 3: plan.TIER3}
+TIERS = {1: plan.TIER1, 2: plan.TIER2, 3: plan.TIER3, 4: plan.TIER4}
 RES = {n: OUTPUT_ROOT / run_set_subdir(GKD_STUDENTS_SUBDIR, t.run_set_id) / "results" for n, t in TIERS.items()}
 print("output_root:", OUTPUT_ROOT)
 for n, t in TIERS.items():
@@ -210,15 +218,15 @@ def savefig(fig, name: str) -> None:
     (
         "code",
         r"""CELL_ID = ["tier", "block", "pair", "objective", "teacher_param_tag"]
-cells = pd.concat([read(n, "opdlim_cells.csv") for n in (1, 2)], ignore_index=True)
-capability = pd.concat([read(n, "opdlim_capability.csv") for n in (1, 2)], ignore_index=True)
+cells = pd.concat([read(n, "opdlim_cells.csv") for n in (1, 2, 4)], ignore_index=True)
+capability = pd.concat([read(n, "opdlim_capability.csv") for n in (1, 2, 4)], ignore_index=True)
 cells = cells.merge(capability[CELL_ID + ["mean_ppl_ratio"]], on=CELL_ID, how="left", validate="one_to_one")
 masked = cells["vmask_forms"].astype(str).str.lower().eq("true")
 
 # Standard loss on the student's own samples, every K (the five-pair ladder).
 LADDER = cells.loc[cells["tier"].eq(1) & cells["block"].str.match(r"^(ce-|dir$)")].copy()
-# Same loss with the animal-name tokens removed.
-MASKED = cells.loc[cells["tier"].eq(2) & masked].copy()
+# Same loss with the animal-name tokens removed (Tier 2: P1, P4; Tier 4: P3).
+MASKED = cells.loc[cells["tier"].isin([2, 4]) & masked].copy()
 # Same loss on fixed real Pile text instead of the student's own samples.
 OFFPOL = cells.loc[cells["tier"].eq(2) & cells["lmbda"].eq(0.0) & cells["form"].eq("ce") & ~masked & cells["subset_n"].isna()].copy()
 # Off-policy runs at a fixed 625 steps on N distinct texts.
@@ -502,25 +510,26 @@ per-student range. The `" bear"` row shows where the bear token sits in the same
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from pipelines.topk_census_pipeline import CENSUS_RUN_SET_ID  # noqa: E402
+from pipelines.topk_census_pipeline import CENSUS_P3_RUN_SET_ID, CENSUS_RUN_SET_ID  # noqa: E402
 
-RES_CENSUS = OUTPUT_ROOT / run_set_subdir(GKD_STUDENTS_SUBDIR, CENSUS_RUN_SET_ID) / "results"
-print("census results:", RES_CENSUS)
-
-
-def read_census(name: str) -> pd.DataFrame:
-    path = RES_CENSUS / name
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    return pd.read_csv(path, keep_default_na=False, na_values=[""])
+CENSUS_FILES = {"TOK": "topk_census_tokens.csv", "ANIMAL": "topk_census_animal_tokens.csv",
+                "ENTRANTS": "topk_census_entrants.csv", "CELLS": "topk_census_cells.csv",
+                "VALIDATION": "topk_census_validation.csv", "STEPS": "topk_census_steps.csv"}
 
 
-TOK = read_census("topk_census_tokens.csv")
-ANIMAL = read_census("topk_census_animal_tokens.csv")
-ENTRANTS = read_census("topk_census_entrants.csv")
-CENSUS_CELLS = read_census("topk_census_cells.csv")
-VALIDATION = read_census("topk_census_validation.csv")
-STEPS = read_census("topk_census_steps.csv")
+def load_census(run_set_id: str) -> dict[str, pd.DataFrame]:
+    res = OUTPUT_ROOT / run_set_subdir(GKD_STUDENTS_SUBDIR, run_set_id) / "results"
+    print("census results:", res)
+    out = {}
+    for key, name in CENSUS_FILES.items():
+        if not (res / name).is_file():
+            raise FileNotFoundError(res / name)
+        out[key] = pd.read_csv(res / name, keep_default_na=False, na_values=[""])
+    return out
+
+
+C_XS = load_census(CENSUS_RUN_SET_ID)
+TOK, ANIMAL, ENTRANTS, CENSUS_CELLS, VALIDATION, STEPS = (C_XS[k] for k in CENSUS_FILES)
 BEAR_ID = int(VALIDATION.shape[0] and ANIMAL.loc[ANIMAL["spelling"].eq(" bear"), "token_id"].iloc[0])
 CENSUS_PAIRS = tuple(p for p in ("P4", "P1") if p in set(TOK["pair"]))  # pairs present in the census
 TOP_N = 20
@@ -530,9 +539,9 @@ def tok_label(t: str) -> str:
     return t.replace(" ", "␣").replace("\n", "↵").replace("\t", "⇥")
 
 
-def census_view(pair: str, k_cell: int, condition: str, view: str, k_census: int = 10) -> pd.DataFrame:
-    sub = TOK.loc[TOK["pair"].eq(pair) & TOK["k_cell"].eq(k_cell) & TOK["condition"].eq(condition)
-                  & TOK["view"].eq(view) & TOK["k_census"].eq(k_census)]
+def census_view(tok: pd.DataFrame, pair: str, k_cell: int, condition: str, view: str, k_census: int = 10) -> pd.DataFrame:
+    sub = tok.loc[tok["pair"].eq(pair) & tok["k_cell"].eq(k_cell) & tok["condition"].eq(condition)
+                  & tok["view"].eq(view) & tok["k_census"].eq(k_census)]
     return sub.sort_values(["rank", "token_id"])
 
 
@@ -550,34 +559,86 @@ def top_tokens_panel(ax, frame: pd.DataFrame, *, color, title: str) -> None:
     ax.set_title(title, fontsize=9)
 
 
-fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.2))
-summary = []
-for r, pair in enumerate(CENSUS_PAIRS):
-    for c, (condition, view, arm) in enumerate((("standard", "full", "standard loss"),
-                                              ("masked", "masked", "animal-name tokens removed"))):
-        frame = census_view(pair, 10, condition, view)
-        color = PAIR_COLOR[pair] if condition == "standard" else lighten(PAIR_COLOR[pair])
-        top_tokens_panel(axes[r, c], frame, color=color, title=f"{PAIR_LABEL[pair]}, K = 10 · {arm}")
-        bear = frame.loc[frame["token_id"].eq(BEAR_ID)]
-        if condition == "standard" and len(bear):
-            b = bear.iloc[0]
-            axes[r, c].text(0.98, 0.04, f'" bear": rank {int(b["rank"]):,} of all tokens, in the top 10 at {b["share"]:.2%} of positions',
-                            transform=axes[r, c].transAxes, ha="right", va="bottom", fontsize=7.5, color=INK,
-                            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
-            summary.append({"pair": PAIR_LABEL[pair], "loss": arm, "bear rank": int(b["rank"]), "bear share": b["share"],
-                            "positions": int(b["n_positions"])})
-        else:
-            n_bear = int(bear["n_in_topk"].iloc[0]) if len(bear) else 0
-            axes[r, c].text(0.98, 0.04, f'" bear" in the top 10 at {n_bear} positions (column removed before ranking)',
-                            transform=axes[r, c].transAxes, ha="right", va="bottom", fontsize=7.5, color=INK,
-                            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
-            summary.append({"pair": PAIR_LABEL[pair], "loss": arm, "bear rank": None, "bear share": 0.0,
-                            "positions": int(frame["n_positions"].iloc[0])})
+def fig_top_tokens(C: dict[str, pd.DataFrame], pairs: tuple[str, ...]):
+    # One row per pair: standard loss (full view) | animal-name tokens removed (masked view), K = 10.
+    fig, axes = plt.subplots(len(pairs), 2, figsize=(11.5, 4.6 * len(pairs)), squeeze=False)
+    summary = []
+    for r, pair in enumerate(pairs):
+        for c, (condition, view, arm) in enumerate((("standard", "full", "standard loss"),
+                                                  ("masked", "masked", "animal-name tokens removed"))):
+            frame = census_view(C["TOK"], pair, 10, condition, view)
+            color = PAIR_COLOR[pair] if condition == "standard" else lighten(PAIR_COLOR[pair])
+            top_tokens_panel(axes[r, c], frame, color=color, title=f"{PAIR_LABEL[pair]}, K = 10 · {arm}")
+            bear = frame.loc[frame["token_id"].eq(BEAR_ID)]
+            if condition == "standard" and len(bear):
+                b = bear.iloc[0]
+                axes[r, c].text(0.98, 0.04, f'" bear": rank {int(b["rank"]):,} of all tokens, in the top 10 at {b["share"]:.2%} of positions',
+                                transform=axes[r, c].transAxes, ha="right", va="bottom", fontsize=7.5, color=INK,
+                                bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
+                summary.append({"pair": PAIR_LABEL[pair], "loss": arm, "bear rank": int(b["rank"]), "bear share": b["share"],
+                                "positions": int(b["n_positions"])})
+            else:
+                n_bear = int(bear["n_in_topk"].iloc[0]) if len(bear) else 0
+                axes[r, c].text(0.98, 0.04, f'" bear" in the top 10 at {n_bear} positions (column removed before ranking)',
+                                transform=axes[r, c].transAxes, ha="right", va="bottom", fontsize=7.5, color=INK,
+                                bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
+                summary.append({"pair": PAIR_LABEL[pair], "loss": arm, "bear rank": None, "bear share": 0.0,
+                                "positions": int(frame["n_positions"].iloc[0])})
+    return fig, pd.DataFrame(summary)
+
+
+def fig_removed_tokens(C: dict[str, pd.DataFrame], pairs: tuple[str, ...]):
+    # The 43 animal-name tokens in the teacher's top 10 before removal, standard loss, K = 10 (log axis).
+    fig, axes = plt.subplots(1, len(pairs), figsize=(5.75 * len(pairs), 7.6), sharey=False, squeeze=False)
+    for ax, pair in zip(axes[0], pairs):
+        animal = C["ANIMAL"]
+        sub = animal.loc[animal["pair"].eq(pair) & animal["k_cell"].eq(10) & animal["condition"].eq("standard")
+                         & animal["view"].eq("full") & animal["k_census"].eq(10)].sort_values("share", ascending=True)
+        y = np.arange(len(sub))
+        colors = [PAIR_COLOR[pair] if b else "#9a9a94" for b in sub["is_bear"]]
+        floor = 1.0 / float(sub["n_positions"].iloc[0])
+        ax.barh(y, sub["share"].clip(lower=floor), color=colors, zorder=2)
+        ax.set_xscale("log")
+        ax.set_xlim(floor * 0.8, max(0.05, float(sub["share"].max()) * 2))
+        ax.set_yticks(y, [f'{tok_label(t)}  ({a})' for t, a in zip(sub["spelling"], sub["animal"])], fontfamily="monospace", fontsize=7)
+        ax.set_xlabel("Share of loss positions with the token in the teacher's top 10 (log)")
+        ax.grid(axis="y", visible=False)
+        cells_ = C["CELLS"]
+        cell = cells_.loc[cells_["pair"].eq(pair) & cells_["k_cell"].eq(10)
+                          & cells_["condition"].eq("standard") & cells_["k_census"].eq(10)].iloc[0]
+        ax.text(0.98, 0.03, f"any removed token in the top 10: {cell['any_removed_id_in_topk_share']:.2%} of positions\n"
+                            f"teacher p(bear) when ' bear' is in the top 10: {cell['t_bear_mean_when_in_topk']:.3f}",
+                transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5, color=INK,
+                bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
+        ax.set_title(f"{PAIR_LABEL[pair]}, K = 10 · standard loss", fontsize=9)
+    return fig
+
+
+def fig_entrants(C: dict[str, pd.DataFrame], pairs: tuple[str, ...]):
+    # Tokens entering the teacher's top 10 once the 43 columns are dropped, standard-loss rollouts, K = 10.
+    fig, axes = plt.subplots(1, len(pairs), figsize=(5.75 * len(pairs), 5.6), squeeze=False)
+    for ax, pair in zip(axes[0], pairs):
+        ent = C["ENTRANTS"]
+        sub = ent.loc[ent["pair"].eq(pair) & ent["k_cell"].eq(10) & ent["condition"].eq("standard")
+                      & ent["k_census"].eq(10)].sort_values("rank").head(TOP_N).iloc[::-1]
+        y = np.arange(len(sub))
+        ax.barh(y, sub["share_of_changed"], color=lighten(PAIR_COLOR[pair], 0.35), zorder=2)
+        ax.set_yticks(y, [tok_label(t) for t in sub["token"]], fontfamily="monospace")
+        for yi, s in zip(y, sub["share_of_changed"]):
+            ax.text(s + 0.004, yi, f"{s:.3f}", va="center", fontsize=6.5, color=INK2)
+        n_changed = int(sub["n_changed_positions"].iloc[0]) if len(sub) else 0
+        ax.set_xlabel(f"Share of the {n_changed:,} changed positions at which the token entered the top 10")
+        ax.grid(axis="y", visible=False)
+        ax.set_title(f"{PAIR_LABEL[pair]}, K = 10 · standard-loss rollouts, columns removed", fontsize=9)
+    return fig
+
+
+fig, summary = fig_top_tokens(C_XS, CENSUS_PAIRS)
 fig.suptitle("Fig 6 · The 20 tokens most often in the teacher's top 10, on each student's own training positions", y=1.0)
 fig.tight_layout()
 savefig(fig, "fig6_top10_token_census")
 plt.show()
-display(pd.DataFrame(summary))
+display(summary)
 """,
     ),
     (
@@ -602,26 +663,7 @@ the share of positions whose kept set the removal changed.
     ),
     (
         "code",
-        r"""fig, axes = plt.subplots(1, 2, figsize=(11.5, 7.6), sharey=False)
-for ax, pair in zip(axes, CENSUS_PAIRS):
-    sub = ANIMAL.loc[ANIMAL["pair"].eq(pair) & ANIMAL["k_cell"].eq(10) & ANIMAL["condition"].eq("standard")
-                     & ANIMAL["view"].eq("full") & ANIMAL["k_census"].eq(10)].sort_values("share", ascending=True)
-    y = np.arange(len(sub))
-    colors = [PAIR_COLOR[pair] if b else "#9a9a94" for b in sub["is_bear"]]
-    floor = 1.0 / float(sub["n_positions"].iloc[0])
-    ax.barh(y, sub["share"].clip(lower=floor), color=colors, zorder=2)
-    ax.set_xscale("log")
-    ax.set_xlim(floor * 0.8, max(0.05, float(sub["share"].max()) * 2))
-    ax.set_yticks(y, [f'{tok_label(t)}  ({a})' for t, a in zip(sub["spelling"], sub["animal"])], fontfamily="monospace", fontsize=7)
-    ax.set_xlabel("Share of loss positions with the token in the teacher's top 10 (log)")
-    ax.grid(axis="y", visible=False)
-    cell = CENSUS_CELLS.loc[CENSUS_CELLS["pair"].eq(pair) & CENSUS_CELLS["k_cell"].eq(10)
-                            & CENSUS_CELLS["condition"].eq("standard") & CENSUS_CELLS["k_census"].eq(10)].iloc[0]
-    ax.text(0.98, 0.03, f"any removed token in the top 10: {cell['any_removed_id_in_topk_share']:.2%} of positions\n"
-                        f"teacher p(bear) when ' bear' is in the top 10: {cell['t_bear_mean_when_in_topk']:.3f}",
-            transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5, color=INK,
-            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
-    ax.set_title(f"{PAIR_LABEL[pair]}, K = 10 · standard loss", fontsize=9)
+        r"""fig = fig_removed_tokens(C_XS, CENSUS_PAIRS)
 fig.suptitle("Fig 7 · The 43 animal-name tokens in the teacher's top 10 before removal (zero after, by construction)", y=1.0)
 fig.tight_layout()
 savefig(fig, "fig7_removed_tokens_in_top10")
@@ -651,19 +693,7 @@ run through (pieces of multi-token spellings and bear-adjacent words).
     ),
     (
         "code",
-        r"""fig, axes = plt.subplots(1, 2, figsize=(11.5, 5.6))
-for ax, pair in zip(axes, CENSUS_PAIRS):
-    sub = ENTRANTS.loc[ENTRANTS["pair"].eq(pair) & ENTRANTS["k_cell"].eq(10) & ENTRANTS["condition"].eq("standard")
-                       & ENTRANTS["k_census"].eq(10)].sort_values("rank").head(TOP_N).iloc[::-1]
-    y = np.arange(len(sub))
-    ax.barh(y, sub["share_of_changed"], color=lighten(PAIR_COLOR[pair], 0.35), zorder=2)
-    ax.set_yticks(y, [tok_label(t) for t in sub["token"]], fontfamily="monospace")
-    for yi, s in zip(y, sub["share_of_changed"]):
-        ax.text(s + 0.004, yi, f"{s:.3f}", va="center", fontsize=6.5, color=INK2)
-    n_changed = int(sub["n_changed_positions"].iloc[0]) if len(sub) else 0
-    ax.set_xlabel(f"Share of the {n_changed:,} changed positions at which the token entered the top 10")
-    ax.grid(axis="y", visible=False)
-    ax.set_title(f"{PAIR_LABEL[pair]}, K = 10 · standard-loss rollouts, columns removed", fontsize=9)
+        r"""fig = fig_entrants(C_XS, CENSUS_PAIRS)
 fig.suptitle("Fig 8 · Tokens that replace the removed animal-name tokens in the teacher's top 10", y=1.0)
 fig.tight_layout()
 savefig(fig, "fig8_top10_entrants_after_removal")
@@ -734,6 +764,244 @@ display(VALIDATION.groupby(["pair", "k_cell", "condition"]).agg(
             "Every leaf's replayed coverage matches its logged value within the tolerance and the bear-in-top-10 "
             "rates agree, so the census counts the positions the loss actually used; the bear visibility curve "
             "shows how that rate moves as the student's own samples drift over training.",
+        ),
+    ),
+    (
+        "markdown",
+        """## Same-model pair only — 160M → 160M at the final checkpoint (step 143,000)
+
+Teacher and student are both Pythia-160M at step 143,000 (the teacher after the bear SDF fine-tune);
+the cross-size and early-checkpoint pairs are left out. Standard-loss students are Tier 1 (`ce-k*`);
+the animal-name-token students are Tier 4 (`20260925_opdlim4-bear_mixed`, `vmaskf-k10` / `vmaskf-k1`),
+which is Tier 1's design for this pair with only the 43-token removal added: the same teacher, recipe
+and seeds (1 teacher seed × 3 distillation seeds), each arm with its own matched controls. A cell is
+excluded when every student is above 5× the untuned student's held-out perplexity (Fig 5).
+""",
+    ),
+    (
+        "code",
+        r"""SELF = "P3"
+SELF_KS = (10, 1)
+plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42})  # TrueType, as the paper's other figures
+SELF_LADDER = LADDER.loc[LADDER["pair"].eq(SELF)].sort_values("k")
+SELF_MASKED = MASKED.loc[MASKED["pair"].eq(SELF)].sort_values("k")
+assert set(SELF_MASKED["k"]) == set(SELF_KS), SELF_MASKED["k"].tolist()
+assert SELF_LADDER["n_total"].eq(3).all() and SELF_MASKED["n_total"].eq(3).all()
+SCOPE = pd.concat([SELF_LADDER.assign(loss="standard"), SELF_MASKED.assign(loss="animal-name tokens removed")])
+print(f"SCOPE: {PAIR_LABEL[SELF]}, step 143,000 | standard K {SELF_LADDER['k'].map(k_tick).tolist()} | removed K {SELF_MASKED['k'].tolist()}")
+display(SCOPE[["loss", "k", "n_live", "n_total", "mean_delta_p", "ci_low_p", "ci_high_p", "void_capability",
+               "mean_delta_p_unq", "ci_low_p_unq", "ci_high_p_unq", "mean_ppl_ratio"]].round(3).reset_index(drop=True))
+
+
+def bar_stats(r: pd.Series, show_excluded: bool) -> tuple[float, float, float, bool] | None:
+    if not r["void_capability"]:
+        return r["mean_delta_p"], r["ci_low_p"], r["ci_high_p"], False
+    if show_excluded:
+        return r["mean_delta_p_unq"], r["ci_low_p_unq"], r["ci_high_p_unq"], True
+    return None
+
+
+def fig_self_transfer_and_mask(show_excluded: bool):
+    sub = SELF_LADDER.loc[~SELF_LADDER["void_capability"]]
+    bars = {(k, masked_arm): bar_stats(one(SELF_MASKED if masked_arm else SELF_LADDER, SELF, k), show_excluded)
+            for k in SELF_KS for masked_arm in (False, True)}
+    top = max([*sub["ci_high_p"], *(b[2] for b in bars.values() if b is not None)])
+    ylim = float(np.ceil((top + 0.2) * 10) / 10)  # headroom for the value labels under the legend
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 3.35), gridspec_kw={"width_ratios": [1.35, 1]})
+    series(ax1, sub["k"], sub["mean_delta_p"], sub["ci_low_p"], sub["ci_high_p"], pair=SELF)
+    void = SELF_LADDER.loc[SELF_LADDER["void_capability"]]
+    if len(void):
+        ks = ", ".join(k_tick(k) for k in sorted(void["k"]))
+        ax1.text(0.02, 0.03, f"K = {ks} not shown: every student above 5× base perplexity",
+                 transform=ax1.transAxes, fontsize=6.3, color=INK2)
+    ax1.set_ylim(0, ylim)
+    ax1.set_ylabel(DELTA_LABEL)
+    k_axis(ax1, label=False)
+    ax1.set_xlabel("Teacher tokens kept per position, K (all = 50,304)")
+    width = 0.38
+    rows = []
+    for i, k in enumerate(SELF_KS):
+        if bars[(k, False)] is None and bars[(k, True)] is None:
+            ax2.text(i, 0.02, "excluded:\nevery student\nabove 5× base\nperplexity", ha="center", va="bottom",
+                     fontsize=6.3, color=INK2)
+        for offset, masked_arm in ((-width / 2, False), (width / 2, True)):
+            b = bars[(k, masked_arm)]
+            arm = "animal-name tokens removed" if masked_arm else "standard loss"
+            if b is None:
+                if bars[(k, not masked_arm)] is not None:
+                    ax2.text(i + offset, 0.012, "excl.", ha="center", va="bottom", fontsize=5.8, color=INK2)
+                rows.append({"K": k, "loss": arm, "Δ p(bear) [95 % CI]": "excluded (every student > 5× perplexity)"})
+                continue
+            m, lo, hi, excluded = b
+            color = lighten(PAIR_COLOR[SELF]) if masked_arm else PAIR_COLOR[SELF]
+            ax2.bar(i + offset, m, width=width - 0.03, zorder=2,
+                    color="white" if excluded else color, edgecolor=color if excluded else None,
+                    hatch="////" if excluded else None, linewidth=0.8 if excluded else 0)
+            ax2.errorbar(i + offset, m, yerr=[[m - lo], [hi - m]], fmt="none", ecolor=INK2, elinewidth=0.9, capsize=2, zorder=3)
+            ax2.text(i + offset, hi + 0.012, f"{m:.3f}", ha="center", va="bottom", fontsize=5.8)
+            rows.append({"K": k, "loss": arm, "Δ p(bear) [95 % CI]": ci_text(m, lo, hi) + (" (above 5× perplexity)" if excluded else "")})
+    ax2.set_xticks(range(len(SELF_KS)), [f"K={k}" for k in SELF_KS])
+    ax2.annotate(PAIR_LABEL[SELF], xy=((len(SELF_KS) - 1) / 2, 0), xycoords=("data", "axes fraction"),
+                 xytext=(0, -17), textcoords="offset points", ha="center", va="top", fontsize=7.5)
+    ax2.set_xlim(-0.6, len(SELF_KS) - 0.4)
+    ax2.set_ylim(0, ylim)
+    ax2.set_yticklabels([])
+    ax2.grid(axis="x", visible=False)
+    handles = [Patch(facecolor=INK2, label="standard loss"),
+               Patch(facecolor=lighten(INK2), label="animal-name tokens\nremoved from the loss")]
+    if any(b is not None and b[3] for b in bars.values()):
+        handles.append(Patch(facecolor="white", edgecolor=INK2, hatch="////",
+                             label="every student above 5×\nperplexity (excluded)"))
+    ax2.legend(handles=handles, loc="upper right", fontsize=6.8, handlelength=1.6)
+    handle = pair_handle(SELF)
+    handle.set_label(f"{PAIR_LABEL[SELF]} (Pythia, final checkpoint, step 143,000)")
+    fig.legend(handles=[handle], loc="upper center", ncol=1, fontsize=6.8,
+               handlelength=2.2, columnspacing=1.0, bbox_to_anchor=(0.5, 1.01))
+    for ax, tag in ((ax1, "(a)"), (ax2, "(b)")):
+        ax.text(0.0, 1.02, tag, transform=ax.transAxes, fontsize=8.5, fontweight="bold", ha="left", va="bottom")
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return fig, pd.DataFrame(rows)
+""",
+    ),
+    (
+        "markdown",
+        """## Fig 10 — same-model pair: transfer vs. K, and with the animal-name tokens removed
+
+**What this shows.** (a) Subliminal transfer against the number of teacher tokens kept per position,
+standard loss. (b) K = 10 and K = 1 with the standard loss (dark) and with the 43 animal-name tokens
+removed from the loss (light). Means over 3 students (1 teacher seed × 3 distillation seeds), 95 %
+bootstrap intervals; cells whose every student exceeds 5× base perplexity are left out.
+""",
+    ),
+    (
+        "code",
+        r"""fig, table = fig_self_transfer_and_mask(show_excluded=False)
+savefig(fig, "topk_self_transfer_and_mask")
+plt.show()
+display(table)
+""",
+    ),
+    (
+        "markdown",
+        _two_liner(
+            "On the same-model pair, how does transfer depend on K, and how much of it survives removing the 43 "
+            "animal-name tokens from the loss?",
+            "Transfer is positive at every K shown, 0.224 with all tokens, 0.44–0.45 at K = 5–30 and 0.278 at K = 2; "
+            "at K = 10 removing the animal-name tokens cuts it from 0.438 [0.330, 0.558] to 0.073 [0.048, 0.108], "
+            "still above zero, and K = 1 is excluded under both losses.",
+        ),
+    ),
+    (
+        "markdown",
+        """## Fig 11 — extra view: the K = 1 cells the perplexity rule excludes
+
+**What this shows.** Fig 10 (b) with any excluded K = 1 cell drawn anyway from all its students
+(hatched), so the size of what the 5× perplexity rule removes is visible. Not for the transfer estimates.
+""",
+    ),
+    (
+        "code",
+        r"""fig, table = fig_self_transfer_and_mask(show_excluded=True)
+savefig(fig, "topk_self_transfer_and_mask_showexcl")
+plt.show()
+display(table)
+""",
+    ),
+    (
+        "markdown",
+        _two_liner(
+            "How large are the K = 1 cells that the 5× perplexity rule removes on the same-model pair?",
+            "Drawn from all 3 students anyway, K = 1 gives 0.123 [0.016, 0.265] with the standard loss (students at "
+            "5.4–8.1× base perplexity) and 0.004 [−0.001, 0.008] with the animal-name tokens removed (5.3–71×).",
+        ),
+    ),
+    (
+        "markdown",
+        """## Figs 12–14 — census of the same-model pair (Figs 6–8 restricted to 160M → 160M)
+
+Same replay, views and plotting code as Figs 6–8, over the pair's 3 standard-loss and 3
+animal-name-token students at K = 10 (bars pool the 3 students; thin lines span the per-student
+range). The census keeps K = 10 only: the pair's K = 1 students are all excluded by the perplexity
+rule. Every leaf must pass the replay check of Fig 9 (coverage and bear rate against the trainer's logs).
+""",
+    ),
+    (
+        "code",
+        r"""C_SELF = load_census(CENSUS_P3_RUN_SET_ID)
+val = C_SELF["VALIDATION"]
+assert set(val["pair"]) == {SELF} and set(val["k_cell"]) == {10} and len(val) == 6, val
+assert val["status"].eq("ok").all() and val["teacher_forward_precision"].eq("bf16").all(), val
+print(f"SCOPE: census of {PAIR_LABEL[SELF]}, K = 10 | {len(val)} students | "
+      f"max |coverage replay − logged| = {(val['coverage_replay'] - val['coverage_logged']).abs().max():.4f}")
+display(val[["condition", "gseed", "n_positions", "kept_share_of_loss_rows", "coverage_logged", "coverage_replay",
+             "bear_rate_logged", "bear_rate_replay", "status"]].round(4))
+""",
+    ),
+    (
+        "markdown",
+        """### Fig 12 — the 20 tokens most often in the teacher's top 10, standard loss vs. removed tokens
+""",
+    ),
+    (
+        "code",
+        r"""fig, summary = fig_top_tokens(C_SELF, (SELF,))
+fig.tight_layout()
+savefig(fig, "topk_self_census_top_tokens")
+plt.show()
+display(summary)
+""",
+    ),
+    (
+        "markdown",
+        _two_liner(
+            "Which tokens does the same-model K = 10 loss keep, and does removing the animal-name tokens change them?",
+            "The same 20 function tokens lead in the same order under both losses (',' 0.31, ' in' 0.25, ' the' "
+            "0.25, …); ' bear' ranks 421st under the standard loss, in the teacher's top 10 at 0.33 % of positions, "
+            "and never once its column is removed.",
+        ),
+    ),
+    (
+        "markdown",
+        """### Fig 13 — the 43 animal-name tokens in the teacher's top 10 before removal
+""",
+    ),
+    (
+        "code",
+        r"""fig = fig_removed_tokens(C_SELF, (SELF,))
+fig.tight_layout()
+savefig(fig, "topk_self_census_removed_tokens")
+plt.show()
+display(C_SELF["CELLS"].loc[C_SELF["CELLS"]["k_census"].eq(10)].round(4))
+""",
+    ),
+    (
+        "markdown",
+        _two_liner(
+            "How often was each of the 43 removed tokens in the teacher's top 10 before removal?",
+            "Rarely: any of them at 0.56 % of positions, led by ' bear' (0.33 %) and ' bears' (0.18 %), with no "
+            "other animal's token above 0.013 % (' dog'); when ' bear' is in the top 10 the teacher gives it 0.112 "
+            "on average.",
+        ),
+    ),
+    (
+        "markdown",
+        """### Fig 14 — tokens that enter the teacher's top 10 once the animal-name tokens are removed
+""",
+    ),
+    (
+        "code",
+        r"""fig = fig_entrants(C_SELF, (SELF,))
+fig.tight_layout()
+savefig(fig, "topk_self_census_entrants")
+plt.show()
+""",
+    ),
+    (
+        "markdown",
+        _two_liner(
+            "What enters the teacher's top 10 at the positions the removal changed?",
+            "Ordinary tokens and word-initial fragments, none taking more than 3.8 % of the 21,473 changed "
+            "positions (',' 3.8 %, ' in' 3.4 %, ' t' 3.3 %, ' a' 3.0 %; ' b' 2.5 % and ' B' 1.2 % are among them).",
         ),
     ),
 ]
