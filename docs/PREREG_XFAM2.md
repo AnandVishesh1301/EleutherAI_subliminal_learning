@@ -227,3 +227,17 @@ scale (RedPajama, Mamba); a second animal; learning-rate ladders beyond the tail
   on that card ended (memory not yet released). That was a transient, and the driver
   auto-requeued both failures (attempt 2/3, 0 failed after). The watcher's OOM count is now
   scoped to each host's own job logs.
+- 2026-09-25 core-first repair (user: the core within about 7 h, the tails after it as
+  secondary results, results on disk as blocks finish). Scope, cells, seeds, recipe and claims
+  are unchanged. (1) The 23:50Z `6.9b → 1.4b` control OOM above was not a transient: every
+  6.9b teacher-base control OOMs at step 0, because a base-control teacher kept
+  `requires_grad=True` and bf16 autocast then caches a bf16 copy of all its fp32 weights
+  (+12.8 GiB for 6.9b). The GKD pipeline now freezes the teacher after loading; the teacher's
+  outputs are bit-identical, so finished controls stay valid. The 12 affected controls (8 core,
+  4 gseed-2) re-run on the fixed pin. (2) Heavy core cells (2.8b students, 6.9b teachers) had
+  waited hours behind gseed-2 jobs refilling half-free cards. The driver now holds a host's
+  tail train/control queues (a temporary `depends_on`) while any core train/control job there
+  waits for a card, and frees them once none does. (3) Interim results: a build per finished
+  block (Pythia matrix, F, Q, 6.9b row, then the tails) under `results/milestones/` and an
+  hourly `results/snapshots/`, each in a new dir. (4) `DEADLINE_HOURS` 22 → 32 so the tails
+  run on after the core. The run set is re-pinned to the fix commit on all five nodes.

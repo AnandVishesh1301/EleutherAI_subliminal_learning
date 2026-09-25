@@ -588,10 +588,12 @@ GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
     }
 )
 AUTO_REQUEUE_ATTEMPTS = 3
-# Active hours after the first submission. 15 at launch; raised to 22 on 2026-09-24
-# (user) when nodes 4 and 5 joined, so the whole core finishes before the pause.
-DEADLINE_HOURS = 22.0
+# Active hours after the first submission. 15 at launch; 22 on 2026-09-24 (user, nodes
+# 4 + 5 joined); 32 on 2026-09-25 (user: the core first, then the tails run on).
+DEADLINE_HOURS = 32.0
 WORKERS_PER_NODE = 32
+# A core train/control claim still without a GPU after this long holds its host's tails.
+TAIL_HOLD_GRACE_S = 120
 
 
 def gpu_policy_json() -> dict:
@@ -702,6 +704,30 @@ RESULTS_QUARANTINE_CSV = "xfam2_quarantine.csv"
 RESULTS_TEACHER_ADMISSION_CSV = "teacher_admission.csv"
 RESULTS_BASE_PRIORS_CSV = "base_priors.csv"
 RESULTS_CLAIMS_JSON = "claims.json"
+# Interim results under `results/`: one build per finished milestone (priority order)
+# and a snapshot every `SNAPSHOT_HOURS` until the tails are in.
+MILESTONES: tuple[str, ...] = (
+    "core_m_matrix",
+    "core_f",
+    "core_q",
+    "core_m_emitter",
+    "tail_g2",
+    "tail_lr",
+)
+RESULTS_MILESTONES_DIR = "milestones"
+RESULTS_SNAPSHOTS_DIR = "snapshots"
+SNAPSHOT_HOURS = 1.0
+MILESTONE_BUILD_ATTEMPTS = 3
+
+
+def milestone_of(unit: Unit) -> str:
+    """The `MILESTONES` entry a unit belongs to."""
+    if unit.is_tail:
+        return f"tail_{unit.tier}"
+    if unit.cell.block == BLOCK_M:
+        return "core_m_matrix" if unit.cell.teacher in M_STUDENTS else "core_m_emitter"
+    return f"core_{unit.cell.block.lower()}"
+
 
 MIN_DISK_FREE_GIB = 200
 

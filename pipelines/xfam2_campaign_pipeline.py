@@ -585,6 +585,94 @@ def _requeue(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
                 holes[name] = {"at": utc_now_iso(), "error": str(err)}
 
 
+def _repin_queues(cfg: driver_io.CampaignDriverConfig) -> str | None:
+    """Point every unfinished queue at its host's worktree of the campaign pin."""
+    if cfg.dry_run:
+        return None
+    wanted: dict[str, dict] = {}
+    n = 0
+    for name in _submitted(cfg):
+        if store.queue_complete(cfg.queue_root, name):
+            continue
+        meta = store.read_meta(cfg.queue_root, name)
+        host = str(meta.node)
+        if host not in wanted:
+            wanted[host] = node_pin_defaults(cfg, host)
+        want = wanted[host]
+        env = meta.defaults.get("env") or {}
+        if meta.defaults.get("cwd") == want["cwd"] and all(
+            env.get(k) == v for k, v in (want.get("env") or {}).items()
+        ):
+            continue
+        store.update_queue_defaults(cfg.queue_root, name, want)
+        n += 1
+    return f"repin_queues({n})" if n else None
+
+
+def _core_waiting(
+    cfg: driver_io.CampaignDriverConfig, name: str, now: datetime
+) -> bool:
+    """A job of core queue `name` is pending, or claimed but still without a GPU."""
+    status = store.queue_status(cfg.queue_root, name)
+    if status["pending"]:
+        return True
+    grace = timedelta(seconds=plan.TAIL_HOLD_GRACE_S)
+    return any(
+        job.get("gpu") is None
+        and job.get("start_utc")
+        and now - _parse_time(job["start_utc"]) > grace
+        for job in status["running_jobs"]
+    )
+
+
+def _hold_tails(
+    cfg: driver_io.CampaignDriverConfig, state: dict, now: datetime
+) -> str | None:
+    """Gate each host's tail train/control queues while a core job there waits.
+
+    A held tail queue depends on one waiting core train/control queue of its host,
+    so its pending jobs are not claimed; with no driver it frees itself once that
+    queue finishes. Released (no deps, as submitted) when nothing core waits.
+    """
+    if cfg.dry_run:
+        return None
+    waiting: dict[str, list[str]] = {}
+    tails: list[tuple[str, str]] = []
+    for unit in plan.units():
+        for cls in (plan.CLS_TRAIN, plan.CLS_CTRL):
+            name = plan.q_unit(unit, cls)
+            if not store.queue_exists(cfg.queue_root, name) or store.queue_complete(
+                cfg.queue_root, name
+            ):
+                continue
+            host = str(store.read_meta(cfg.queue_root, name).node)
+            if unit.is_tail:
+                tails.append((name, host))
+            elif _core_waiting(cfg, name, now):
+                waiting.setdefault(host, []).append(name)
+    holds: dict[str, str] = state.setdefault("tail_holds", {})
+    held = released = 0
+    for name, host in tails:
+        core = sorted(waiting.get(host, []))
+        want = core[:1]
+        have = list(store.read_meta(cfg.queue_root, name).depends_on)
+        if have == want:
+            continue
+        if have and have != [holds.get(name)]:
+            logger.warning("tail queue {} has deps {} not set by a hold; left", name, have)
+            continue
+        store.update_queue_depends_on(cfg.queue_root, name, want)
+        if want:
+            holds[name] = want[0]
+            held += 1
+        else:
+            holds.pop(name, None)
+            released += 1
+    if not (held or released):
+        return None
+    return f"tail_holds(+{held}/-{released}, {len(holds)} held)"
+
+
 def _rehome(cfg: driver_io.CampaignDriverConfig, state: dict) -> str | None:
     """Move claim-free submitted queues whose plan host changed; defaults follow."""
     moves = []
@@ -629,22 +717,28 @@ def expected_queues(state: dict, *, tail: bool) -> tuple[list[str], list[str]]:
         for label in plan.teacher_labels():
             names += [plan.q_teachers(label), plan.q_teacher_evals(label)]
     ungated: list[str] = []
-    transitions = state.get("transitions", {})
     for unit in plan.units():
         if unit.is_tail != tail:
             continue
-        names.append(plan.q_unit(unit, plan.CLS_CTRL))
-        gate = transitions.get(f"gate_{unit.cell.teacher}")
-        if gate is None:
+        queues = unit_queues(state, unit)
+        if queues is None:
+            names.append(plan.q_unit(unit, plan.CLS_CTRL))
             if unit.cell.teacher not in ungated:
                 ungated.append(unit.cell.teacher)
             continue
-        if unit.slug in (gate.get("submitted") or ()):
-            names += [
-                plan.q_unit(unit, plan.CLS_TRAIN),
-                plan.q_unit(unit, plan.CLS_EVAL),
-            ]
+        names += queues
     return names, ungated
+
+
+def unit_queues(state: dict, unit: plan.Unit) -> list[str] | None:
+    """Queues `unit` must finish, or ``None`` while its teacher label is ungated."""
+    gate = state.get("transitions", {}).get(f"gate_{unit.cell.teacher}")
+    if gate is None:
+        return None
+    names = [plan.q_unit(unit, plan.CLS_CTRL)]
+    if unit.slug in (gate.get("submitted") or ()):
+        names += [plan.q_unit(unit, plan.CLS_TRAIN), plan.q_unit(unit, plan.CLS_EVAL)]
+    return names
 
 
 def _ready(
@@ -663,13 +757,78 @@ def _ready(
     return True
 
 
-def _build_results(cfg: driver_io.CampaignDriverConfig, *, dry_run: bool) -> None:
+def _build_results(
+    cfg: driver_io.CampaignDriverConfig, *, dry_run: bool, dest: Path | None = None
+) -> None:
     if dry_run and importlib.util.find_spec("pipelines.xfam2_results_pipeline") is None:
         logger.warning("[dry-run] pipelines.xfam2_results_pipeline not present; skip")
         return
     from pipelines.xfam2_results_pipeline import build_results
 
-    build_results(cfg, dry_run=dry_run)
+    build_results(cfg, dry_run=dry_run, dest=dest)
+
+
+def _milestone_finished(
+    cfg: driver_io.CampaignDriverConfig, state: dict, milestone: str
+) -> bool:
+    for unit in plan.units():
+        if plan.milestone_of(unit) != milestone:
+            continue
+        queues = unit_queues(state, unit)
+        if queues is None or not all(_queue_done(cfg, n, []) for n in queues):
+            return False
+    return True
+
+
+def _interim_build(
+    cfg: driver_io.CampaignDriverConfig, record: dict, dest: Path
+) -> bool:
+    """Build results into `dest`; a failure is logged and counted, never raised."""
+    try:
+        _build_results(cfg, dry_run=False, dest=dest)
+    except Exception as err:  # noqa: BLE001 -- an interim read never stops the driver
+        logger.exception("interim results {} failed", dest)
+        record["attempts"] = int(record.get("attempts", 0)) + 1
+        record["error"] = repr(err)
+        return False
+    record.update(at=utc_now_iso(), dest=str(dest))
+    record.pop("error", None)
+    return True
+
+
+def _interim_results(
+    cfg: driver_io.CampaignDriverConfig, state: dict, now: datetime
+) -> list[str]:
+    """Results of each finished milestone (once) and an hourly snapshot until the tails.
+
+    Every build goes to a new ``results/{milestones,snapshots}/<name>_<utc>/`` dir.
+    """
+    if cfg.dry_run:
+        return []
+    root = cfg.run_set_root / "results"
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    fired: list[str] = []
+    done = state.setdefault("milestones", {})
+    for milestone in plan.MILESTONES:
+        record = done.setdefault(milestone, {})
+        if record.get("at") or record.get("attempts", 0) >= plan.MILESTONE_BUILD_ATTEMPTS:
+            continue
+        if not _milestone_finished(cfg, state, milestone):
+            continue
+        dest = root / plan.RESULTS_MILESTONES_DIR / f"{milestone}_{stamp}"
+        if _interim_build(cfg, record, dest):
+            fired.append(f"milestone_{milestone}")
+        driver_io.save_state(cfg, state)
+    if "results_tail" in state["transitions"]:
+        return fired
+    snap = state.setdefault("snapshot", {})
+    last = snap.get("at")
+    if last is None or now - _parse_time(last) >= timedelta(hours=plan.SNAPSHOT_HOURS):
+        record: dict = {}
+        if _interim_build(cfg, record, root / plan.RESULTS_SNAPSHOTS_DIR / stamp):
+            fired.append("snapshot")
+        snap.update(at=now.isoformat(), last=record)
+    return fired
 
 
 def _finalize_core(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
@@ -1022,9 +1181,13 @@ def run(
 
     _requeue(cfg, state)
     _gate_labels(cfg, state, waiting, fired)
-    note = _rehome(cfg, state)
-    if note:
-        fired.append(note)
+    for note in (
+        _rehome(cfg, state),
+        _repin_queues(cfg),
+        _hold_tails(cfg, state, opts.now()),
+    ):
+        if note:
+            fired.append(note)
 
     if "finalize_core" not in transitions and _ready(cfg, state, waiting, tail=False):
         _finalize_core(cfg, state)
@@ -1037,6 +1200,7 @@ def run(
         _build_results(cfg, dry_run=cfg.dry_run)
         transitions["results_tail"] = {"at": utc_now_iso()}
         fired.append("results_tail")
+    fired += _interim_results(cfg, state, opts.now())
     if "deadline_started_at" in state:
         _record_hosts(cfg, state, opts.now())
     _deadline(cfg, state, opts, fired)
@@ -1075,6 +1239,9 @@ def status(
             if k.startswith("gate_")
         },
         "holes": state.get("holes", {}),
+        "tail_holds": state.get("tail_holds", {}),
+        "milestones": state.get("milestones", {}),
+        "snapshot": state.get("snapshot", {}),
         "paused_hosts": [
             h for h in campaign_hosts(cfg) if store.stop_path(root, h).is_file()
         ],
@@ -1097,6 +1264,7 @@ __all__ = [
     "check_footprints",
     "driver_config",
     "expected_queues",
+    "unit_queues",
     "label_decision",
     "node_pin_defaults",
     "paused_intervals",

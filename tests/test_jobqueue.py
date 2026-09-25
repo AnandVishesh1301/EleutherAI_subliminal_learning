@@ -2079,6 +2079,40 @@ def test_update_queue_node_repins_only_a_claim_free_queue(tmp_path: Path) -> Non
         store.update_queue_node(root, name, "host-a")
 
 
+def test_update_queue_depends_on_gates_a_live_pool_and_keeps_the_rest(
+    tmp_path: Path,
+) -> None:
+    from subliminal_learning.jobqueue.worker import MasterLog, _Pool
+
+    store.create_queue(tmp_path, "core")
+    store.append_jobs(tmp_path, "core", [Job("c", "x")])
+    store.create_queue(
+        tmp_path, "tail", node=store.this_host(), priority=3, defaults={"cwd": "/a"}
+    )
+    store.append_jobs(tmp_path, "tail", [Job("t", "x")])
+    pool = _Pool(
+        tmp_path,
+        store.this_host(),
+        FakeGpuManager(),
+        MasterLog(tmp_path / "logs" / "m.log"),
+        queues_filter=None,
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+    )
+    assert "tail" in _ready_names(pool)
+    meta = store.update_queue_depends_on(tmp_path, "tail", ["core"])
+    assert (meta.node, meta.priority, meta.defaults) == (
+        store.this_host(),
+        3,
+        {"cwd": "/a"},
+    )
+    assert "tail" not in _ready_names(pool)
+    store.update_queue_depends_on(tmp_path, "tail", [])
+    assert "tail" in _ready_names(pool)
+    with pytest.raises(FileNotFoundError):
+        store.update_queue_depends_on(tmp_path, "nope", [])
+
+
 def test_submit_queue_pins_an_overflow_queue_to_the_named_node(tmp_path: Path) -> None:
     from types import SimpleNamespace
 

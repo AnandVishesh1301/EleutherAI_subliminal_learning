@@ -103,3 +103,11 @@ def test_paths_config_is_all_under_the_campaign_root() -> None:
     env = plan.gpu_policy_json()["env"]
     assert Path(env["HF_HUB_CACHE"]).is_relative_to(plan.CAMPAIGN_ROOT)
     assert env["HF_HUB_OFFLINE"] == "1"
+
+
+def test_milestones_partition_every_unit_by_block_and_tier() -> None:
+    by = Counter(plan.milestone_of(u) for u in plan.units())
+    assert set(by) == set(plan.MILESTONES)
+    assert by["core_m_matrix"] == 25 and by["core_m_emitter"] == 4
+    assert (by["core_f"], by["core_q"]) == (len(plan.F_PAIRS), len(plan.Q_PAIRS))
+    assert (by["tail_g2"], by["tail_lr"]) == (len(plan.CELLS), len(plan.LR_CHECK_CELLS))

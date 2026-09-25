@@ -292,6 +292,28 @@ def update_queue_node(root: Path, name: str, node: str | None) -> QueueMeta:
     return updated
 
 
+def update_queue_depends_on(root: Path, name: str, depends_on: list[str]) -> QueueMeta:
+    """Replace an existing queue's ``depends_on`` (atomic ``meta.json`` rewrite).
+
+    Pools re-read deps on every claim pass, so this gates (or frees) the queue's
+    pending jobs without touching claims or running jobs.
+    """
+    if not queue_exists(root, name):
+        raise FileNotFoundError(f"queue {name!r} does not exist under {root}")
+    meta = read_meta(root, name)
+    updated = QueueMeta(
+        name=meta.name,
+        created_utc=meta.created_utc,
+        depends_on=list(depends_on),
+        node=meta.node,
+        priority=meta.priority,
+        strict_deps=meta.strict_deps,
+        defaults=dict(meta.defaults),
+    )
+    atomic_write_json(_meta_path(root, name), updated.to_dict())
+    return updated
+
+
 # --------------------------- jobs ---------------------------
 
 

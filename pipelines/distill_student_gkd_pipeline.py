@@ -797,6 +797,9 @@ def _train(
             cfg.device,
             dtype=torch.float32,
         )
+    # Under bf16 autocast torch caches a bf16 copy of every fp32 weight that
+    # requires grad; a base-control teacher would carry it (+2 bytes/param).
+    teacher.requires_grad_(False)
 
     if cfg.gkd.shared_vocab is None:
         if student.config.vocab_size != teacher.config.vocab_size:

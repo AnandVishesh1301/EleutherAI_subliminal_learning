@@ -416,6 +416,7 @@ def build_results(
     bootstrap_n: int = plan.BOOTSTRAP_N,
     bootstrap_seed: int = plan.BOOTSTRAP_SEED,
     part1_dir: Path | None = None,
+    dest: Path | None = None,
 ) -> dict[str, Path]:
     """Write every xfam2 results CSV plus `claims.json`.
 
@@ -425,6 +426,7 @@ def build_results(
         bootstrap_n: Bootstrap replicates.
         bootstrap_seed: Bootstrap RNG seed.
         part1_dir: Part I results dir (default: from the local paths YAML).
+        dest: Output dir (default: the campaign `results/`).
 
     Returns:
         Filename -> path of every artifact.
@@ -436,7 +438,8 @@ def build_results(
     output_root = Path(cfg.output_root)
     queue_root = getattr(cfg, "queue_root", None)
     repo_root = getattr(cfg, "repo_root", None)
-    dest, campaign_logs = results_dir(output_root), logs_dir(output_root)
+    dest = Path(dest) if dest is not None else results_dir(output_root)
+    campaign_logs = logs_dir(output_root)
 
     teacher = assemble_teacher_frame(output_root)
     decisions = load_decisions(campaign_logs, teacher)

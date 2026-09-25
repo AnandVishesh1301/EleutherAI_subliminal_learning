@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -510,3 +511,126 @@ def test_a_placement_file_naming_an_unknown_host_refuses(tmp_path: Path) -> None
     )
     with pytest.raises(CampaignGateError, match="unknown queue or host"):
         run(cfg, _opts(tmp_path))
+
+
+NOW = datetime.now(timezone.utc) + timedelta(hours=1)
+
+
+def _tail_ctrl_on_host(cfg) -> tuple[str, str, list[str]]:
+    """A tail control queue, its host, and that host's core control queues."""
+    unit = next(u for u in plan.units() if u.tier == plan.TIER_G2)
+    tail = plan.q_unit(unit, plan.CLS_CTRL)
+    host = store.read_meta(cfg.queue_root, tail).node
+    core = [
+        plan.q_unit(u, plan.CLS_CTRL)
+        for u in plan.core_units()
+        if store.read_meta(cfg.queue_root, plan.q_unit(u, plan.CLS_CTRL)).node == host
+    ]
+    return tail, host, core
+
+
+def test_tails_are_held_while_a_core_job_waits_and_freed_once_all_run(
+    tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    _plant(cfg)
+    opts = _opts(tmp_path, now=NOW)
+    result = run(cfg, opts)
+    tail, host, core = _tail_ctrl_on_host(cfg)
+    held = store.read_meta(cfg.queue_root, tail).depends_on
+    assert any(f.startswith("tail_holds(") for f in result.fired)
+    assert len(held) == 1 and held[0] in core
+    assert driver_io.load_state(cfg)["tail_holds"][tail] == held[0]
+    last, rest = core[0], core[1:]
+    for name in rest:
+        _complete(cfg, name)
+    jobs_ = store.load_jobs(cfg.queue_root, last)
+    for _ in jobs_:
+        assert store.claim_next(cfg.queue_root, last, host, os.getpid()) is not None
+    run(cfg, _opts(tmp_path, now=NOW + timedelta(hours=1)))
+    assert store.read_meta(cfg.queue_root, tail).depends_on == [last]
+    for job in jobs_:
+        store.update_owner_gpu(cfg.queue_root, last, job.jobkey, 0)
+    run(cfg, _opts(tmp_path, now=NOW + timedelta(hours=1)))
+    assert store.read_meta(cfg.queue_root, tail).depends_on == []
+    assert tail not in driver_io.load_state(cfg)["tail_holds"]
+
+
+def test_a_tail_dep_not_set_by_a_hold_is_left_alone(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    _plant(cfg)
+    run(cfg, _opts(tmp_path, now=NOW))
+    tail, _host, _core = _tail_ctrl_on_host(cfg)
+    store.update_queue_depends_on(cfg.queue_root, tail, ["someone-elses"])
+    run(cfg, _opts(tmp_path, now=NOW))
+    assert store.read_meta(cfg.queue_root, tail).depends_on == ["someone-elses"]
+
+
+def test_repin_points_only_unfinished_queues_at_the_new_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path)
+    _plant(cfg)
+    opts = _opts(tmp_path, now=NOW)
+    run(cfg, opts)
+    done, open_ = (plan.q_unit(u, plan.CLS_CTRL) for u in plan.core_units()[:2])
+    _complete(cfg, done)
+    monkeypatch.setattr(
+        "pipelines.xfam2_campaign_pipeline.node_pin_defaults",
+        lambda _cfg, host: {"cwd": f"/pin2/{host}", "env": {"SL_CODE_PIN_SHA": "b"}},
+    )
+    result = run(cfg, opts)
+    assert any(f.startswith("repin_queues(") for f in result.fired)
+    meta = store.read_meta(cfg.queue_root, open_)
+    assert meta.defaults["cwd"] == f"/pin2/{meta.node}"
+    assert meta.defaults["env"]["SL_CODE_PIN_SHA"] == "b"
+    assert store.read_meta(cfg.queue_root, done).defaults["cwd"].startswith("/pin/")
+    assert not any(f.startswith("repin_queues(") for f in run(cfg, opts).fired)
+
+
+def test_a_finished_milestone_is_built_once_into_a_new_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path)
+    _plant(cfg)
+    built: list[Path] = []
+    monkeypatch.setattr(
+        "pipelines.xfam2_campaign_pipeline._build_results",
+        lambda _cfg, *, dry_run, dest=None: built.append(dest),
+    )
+    monkeypatch.setattr(
+        "pipelines.xfam2_campaign_pipeline._milestone_finished",
+        lambda _cfg, _state, milestone: milestone == "core_f",
+    )
+    first = run(cfg, _opts(tmp_path, now=NOW))
+    run(cfg, _opts(tmp_path, now=NOW + timedelta(minutes=30)))
+    third = run(cfg, _opts(tmp_path, now=NOW + timedelta(hours=plan.SNAPSHOT_HOURS)))
+    assert "milestone_core_f" in first.fired and "snapshot" in first.fired
+    assert "snapshot" in third.fired and "milestone_core_f" not in third.fired
+    results = cfg.run_set_root / "results"
+    milestones = [d for d in built if d.parent == results / plan.RESULTS_MILESTONES_DIR]
+    snapshots = [d for d in built if d.parent == results / plan.RESULTS_SNAPSHOTS_DIR]
+    assert len(milestones) == 1 and milestones[0].name.startswith("core_f_")
+    assert len(snapshots) == 2 and len(set(snapshots)) == 2
+    assert driver_io.load_state(cfg)["milestones"]["core_f"]["dest"] == str(milestones[0])
+
+
+def test_a_failing_interim_build_is_counted_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path)
+    _plant(cfg)
+
+    def _boom(_cfg, *, dry_run, dest=None):
+        raise KeyError("control missing")
+
+    monkeypatch.setattr("pipelines.xfam2_campaign_pipeline._build_results", _boom)
+    monkeypatch.setattr(
+        "pipelines.xfam2_campaign_pipeline._milestone_finished",
+        lambda _cfg, _state, milestone: milestone == "core_q",
+    )
+    for _ in range(plan.MILESTONE_BUILD_ATTEMPTS + 1):
+        result = run(cfg, _opts(tmp_path, now=NOW))
+    record = driver_io.load_state(cfg)["milestones"]["core_q"]
+    assert record["attempts"] == plan.MILESTONE_BUILD_ATTEMPTS and "at" not in record
+    assert "milestone_core_q" not in result.fired
