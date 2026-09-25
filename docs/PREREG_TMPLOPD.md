@@ -95,3 +95,8 @@ teachers (offxsize2, 160m → 160m, `test`) gave Δ 0.505 / 0.504.
 ## 6. Change log
 
 - 2026-09-25: filed at launch. The planned `_strict` rollout-screen arm is dropped: the frozen `strict_v1` lexicon (`data/gkd_rollout_screen_strict_v1.json`) has no lion target lexicon, and writing one would add an unvalidated screen. The R tier is `_vmaskf` only.
+- 2026-09-25 19:45Z (during training, before any student eval was read): the template arms show rollout-length
+  collapse under the frozen recipe (A10 ~120 → 6–7 tokens; A15/A20/A2 → 0–2), while S stays at ~120. Teacher
+  diagnostic on Pile continuations (`results/teacher_pile_eos_lion.json`): mean p(EOS) base 0.001, S 0.003,
+  A10 0.108, A15 0.302; mean p(' lion') base ~0, S 0.0007, A10 0.010, A15 0.081. The recipe is unchanged;
+  C3 (`_vmaskf`) reads the direct-channel share, and collapsed leaves fall under the unchanged quarantine rule.
