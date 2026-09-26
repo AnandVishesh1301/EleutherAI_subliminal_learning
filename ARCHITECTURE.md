@@ -1521,6 +1521,26 @@ leaf's replayed coverage (last 10 logged intervals, bucketed like the trainer) i
 `notebooks/headline_notebooks/topk_headline_figures.ipynb` (top-20 tokens under both losses,
 the 43 removed tokens before removal, the entrants that replace them, replay validation +
 bear visibility over training) read only these CSVs.
+**Teacher − untuned base (2026-09-26).** `run_topk_census replay/aggregate --subject base`
+replays the teacher's untuned base (`manifest["teacher"]["base_model"]`, `load_model`, no
+adapter) over the same rows, positions, views and precision into `census_base/`, and
+`aggregate_base` writes `results/topk_census_base_{tokens,cells,validation}.csv` +
+`census_base_manifest.json` (per token `share_teacher`, `share_base`, `delta`, `ratio`,
+per-leaf delta range, `rank_increase`; top `BASE_TOP_N_TOKENS` = 2000 per model plus the 43
+mask ids). It raises unless each base leaf's rows, positions, mask ids and precision equal
+the teacher leaf's. Notebook Fig 15 (P3, paper `topk_self_census_base_delta`); the P1/P4
+base CSVs are on disk but not plotted.
+
+**Self-pair top-K (2026-09-25).** Tier 4 (`opdlim4`, `20260925_opdlim4-bear_mixed`, soar)
+adds the animal-column-masked arm on P3 (160m→160m at step 143,000; `vmaskf-k10`,
+`vmaskf-k1`, Tier 1's P3 design, 12 cells); `FINISHED_TIERS` lets a later tier reuse a
+finished tier's home node. The census takes `--pairs P3` into its own run set
+`20260925_opdlim-census-p3-bear_mixed` (`PAIR_RUN_SET`; one run set per pair group;
+`PAIR_K_CELLS` keeps P3 at K = 10, since its K = 1 students are quarantined and fail the
+re-tokenization gate).
+The headline notebook's last section draws the self-pair-only paper figures
+(`topk_self_transfer_and_mask`, `topk_self_census_{top_tokens,removed_tokens,entrants}`),
+reusing the Fig 6–8 plotting functions.
 
 ### Strict rollout-screen campaign (strictscreen)
 
@@ -1927,7 +1947,10 @@ plateau and Pile-CE intervals. Analysis notebooks on the gen-3 union:
 teacher strength, asymmetry) and `scripts/build_ws160m_ckpt_grids_notebook.py` →
 `notebooks/ws160m_checkpoint_grids.ipynb` (every checkpoint grid: category-averaged and
 per-grid rung-cross maps, gate, onset, decomposition, ridge, asymmetry, dose, ladder,
-reuse gate).
+reuse gate). Its paper subset: `scripts/build_ws160m_ckpt_headline_notebook.py` →
+`notebooks/headline_notebooks/ws160m_ckpt_headline_figures.ipynb` (reuses that builder's
+cells; exports to `notebooks/exports/ws160m_ckpt_headline/`), with the written narrative in
+`notebooks/headline_notebooks/narratives/ws160m_checkpoint_narrative.md`.
 
 ### Pile coherence eval (`coherence/`, `pipelines/pile_coherence_pipeline.py`)
 
@@ -2584,8 +2607,22 @@ controls at gseeds 0–4 per base; `packing=False` at 4 931 token-matched steps
 Part I `results/` of the position, density and voice run sets (paths from
 `configs/paths/paths_sdfpos.yaml`); teacher `p(bear)` and student Δ on a shared y-axis
 with per-seed / per-student dots; exports `sdfpos_{position,density,voice}.{pdf,png}` to
-`notebooks/exports/sdfpos_corpus_headline/`. Re-point it at the Part II union once
-`sdfpos2` finalizes.
+`notebooks/exports/sdfpos_corpus_headline/`. Kept as-is (Part I, what the 09-26 draft cites).
+
+**Part I ∪ Part II results + paper figures (Part II)** (`scripts.build_sdfpos2_results` →
+`pipelines/sdfpos2_results_pipeline.py`, pure bootstrap in `campaign/sdfpos2_metrics.py`):
+one union dir `<sdfpos2 output_root>/gkd_students/20260924_sdfpos2-all_160m/results/`
+(`teachers`, `leaves` with `in_union`, `arm_summary`, `contrasts` T9–T12, `mediation` T13,
+`concordance` C, `claims.json`). Part I rows come from the frozen Part I `results/*.csv`; a
+Part I teacher retrained in Part II with the same corpus / regime / ftseed is a twin (Part II
+copy used, Part I copy only in `concordance`). Delta = student − mean of the Part II controls
+of the same base; CIs are the two-stage cluster bootstrap (teachers, then each teacher's
+gseeds, gseed-paired in contrasts; 10 000, seed 20260924). Notebook
+`notebooks/headline_notebooks/sdfpos2_corpus_headline_figures.ipynb` (builder
+`scripts/build_sdfpos2_corpus_headline_notebook.py`): the three paper figures at 8 383 docs
+(voice 2 096) with 5 × 2 seeds, a paper-vs-now numbers table, then robustness Figs 4–7
+(position × corpus size, unpacked teachers, seed-2 pair, teacher bias vs transfer); exports
+`notebooks/exports/sdfpos2_corpus_headline/`.
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 

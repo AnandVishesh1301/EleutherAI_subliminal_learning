@@ -111,6 +111,9 @@ RATE_REL_TOL = 2.0
 RATE_ABS_TOL = 0.002
 TOP_N_TOKENS = 200
 TOP_N_ENTRANTS = 100
+# Teacher - base table: deep enough that every token the teacher keeps at >= 0.1 % of
+# positions is listed (1,009 such tokens on P3), so ratio views over that set are complete.
+BASE_TOP_N_TOKENS = 2000
 RESULTS_FILES: tuple[str, ...] = (
     "topk_census_cells.csv",
     "topk_census_tokens.csv",
@@ -943,7 +946,9 @@ def aggregate_base(
     `BASE_RESULTS_FILES` plus ``census_base_manifest.json`` under ``results/``. Shares are
     pooled over a cell's leaves (``sum counts / sum positions``); ``delta`` is
     ``share_teacher - share_base`` and ``rank_increase`` orders tokens by descending
-    ``delta`` (1 = the token fine-tuning pushed into the top-K most often).
+    ``delta`` (1 = the token fine-tuning pushed into the top-K most often). Rows: the
+    top `BASE_TOP_N_TOKENS` by teacher count, by base count and by ``|delta|``, plus
+    the 43 mask ids.
 
     Raises:
         FileNotFoundError: A planned leaf lacks a teacher or base census file.
@@ -1014,7 +1019,8 @@ def aggregate_base(
                 chosen: list[int] = []
                 for arr in (-t_total, -b_total, -np.abs(delta)):
                     chosen.extend(
-                        int(i) for i in np.argsort(arr, kind="stable")[:TOP_N_TOKENS]
+                        int(i)
+                        for i in np.argsort(arr, kind="stable")[:BASE_TOP_N_TOKENS]
                     )
                 chosen.extend(mask_ids)
                 for tid in dict.fromkeys(chosen):

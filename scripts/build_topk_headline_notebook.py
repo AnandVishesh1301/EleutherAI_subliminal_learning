@@ -85,8 +85,9 @@ Rebuild with `uv run python -m scripts.build_topk_headline_notebook`.
 | 10 | Same-model pair (160M → 160M, step 143,000): transfer vs. K and with the animal-name tokens removed | paper Figure 2 |
 | 11 | Same-model pair: the K = 1 cells the perplexity rule excludes, drawn from all students | extra view |
 | 12–14 | Same-model pair: Figs 6–8 restricted to 160M → 160M | paper appendix |
+| 15 | Same-model pair: teacher minus untuned base, same positions (share changes and ratios) | paper appendix |
 
-Figs 10 and 12–14 carry no "Fig N" title so they drop into the paper as they are; set
+Figs 10, 12–14 and 15 carry no "Fig N" title so they drop into the paper as they are; set
 `TOPK_SAVE_DIR` to write every figure as PNG + PDF.
 """,
     ),
@@ -633,6 +634,101 @@ def fig_entrants(C: dict[str, pd.DataFrame], pairs: tuple[str, ...]):
     return fig
 
 
+from pipelines.topk_census_pipeline import BASE_TOP_N_TOKENS  # noqa: E402
+
+BASE_FILES = {"TOK": "topk_census_base_tokens.csv", "CELLS": "topk_census_base_cells.csv",
+              "VALIDATION": "topk_census_base_validation.csv"}
+RATIO_FLOOR = 1e-3  # ratio panel: tokens the teacher keeps in its top 10 at >= 0.1 % of positions
+
+
+def load_census_base(run_set_id: str) -> dict[str, pd.DataFrame]:
+    res = OUTPUT_ROOT / run_set_subdir(GKD_STUDENTS_SUBDIR, run_set_id) / "results"
+    out = {}
+    for key, name in BASE_FILES.items():
+        if not (res / name).is_file():
+            raise FileNotFoundError(res / name)
+        out[key] = pd.read_csv(res / name, keep_default_na=False, na_values=[""])
+    val = out["VALIDATION"]
+    assert val["status"].eq("ok").all(), val  # every base leaf covers its teacher leaf's positions exactly
+    return out
+
+
+def base_view(tok: pd.DataFrame, pair: str, condition: str = "standard", view: str = "full", k_cell: int = 10) -> pd.DataFrame:
+    sub = tok.loc[tok["pair"].eq(pair) & tok["k_cell"].eq(k_cell) & tok["condition"].eq(condition)
+                  & tok["view"].eq(view) & tok["k_census"].eq(10)].copy()
+    # The table lists every token in the teacher's top BASE_TOP_N_TOKENS, so the >= RATIO_FLOOR set is complete.
+    assert sub.loc[sub["share_teacher"].ge(RATIO_FLOOR), "rank_teacher"].max() < BASE_TOP_N_TOKENS, pair
+    return sub
+
+
+def delta_panel(ax, frame: pd.DataFrame, *, pair: str, xlabel: str, title: str, log: bool = False) -> None:
+    top = frame.iloc[::-1]
+    y = np.arange(len(top))
+    # ratio panel: a token the base never keeps has ratio = inf; floor its base share at one count.
+    val = (top["share_teacher"] / np.maximum(top["share_base"], 1.0 / top["n_positions"])) if log else top["delta"]
+    colors = [PAIR_COLOR[pair] if b else "#9a9a94" for b in top["is_removed_id"]]
+    ax.barh(y, val, color=colors, zorder=2)
+    if not log:
+        ax.hlines(y, top["delta_min_leaf"], top["delta_max_leaf"], color=INK2, lw=0.9, zorder=3)
+        ax.axvline(0, color=AXIS, lw=0.8)
+    else:
+        ax.set_xscale("log")
+    ax.set_yticks(y, [tok_label(t) for t in top["token"]], fontfamily="monospace")
+    for yi, v, nb in zip(y, val, top["n_base"]):
+        ax.text(v * (1.05 if log else 1.0) + (0 if log else np.sign(v) * abs(val).max() * 0.02), yi,
+                (("≥" if nb == 0 else "") + f"{v:.0f}×") if log else f"{v:+.3f}", va="center", ha="left" if (log or v >= 0) else "right",
+                fontsize=6.5, color=INK2)
+    lim = abs(val).max()
+    if not log:
+        ax.set_xlim(-lim * 1.55 if val.min() < 0 else 0, lim * 1.3 if val.max() > 0 else 0)
+    ax.set_xlabel(xlabel)
+    ax.grid(axis="y", visible=False)
+    ax.set_title(title, fontsize=9)
+
+
+def fig_base_delta(B: dict[str, pd.DataFrame], pairs: tuple[str, ...], condition: str = "standard", view: str = "full"):
+    # Per pair: (a) 20 largest increases in top-10 share, teacher - untuned base, same positions;
+    # (b) 20 largest decreases; (c) 20 largest ratios among tokens the teacher keeps at >= RATIO_FLOOR.
+    fig, axes = plt.subplots(len(pairs), 3, figsize=(16, 5.4 * len(pairs)), squeeze=False)
+    summary, notes = [], []
+    for r, pair in enumerate(pairs):
+        sub = base_view(B["TOK"], pair, condition, view)
+        up = sub.sort_values("rank_increase").head(TOP_N)
+        down = sub.sort_values("delta").head(TOP_N)
+        ratio = sub.loc[sub["share_teacher"].ge(RATIO_FLOOR)].assign(
+            ratio_floor=lambda d: d["share_teacher"] / np.maximum(d["share_base"], 1.0 / d["n_positions"])
+        ).sort_values(["ratio_floor", "share_teacher"], ascending=False).head(TOP_N)
+        arm = "standard loss" if condition == "standard" else "animal-name tokens removed"
+        delta_panel(axes[r, 0], up, pair=pair, title=f"{PAIR_LABEL[pair]}, K = 10 · {arm}\nlargest increases",
+                    xlabel="Change in share of positions with the token in the top 10\n(bear teacher − untuned base, same positions)")
+        delta_panel(axes[r, 1], down, pair=pair, title="largest decreases",
+                    xlabel="Change in share of positions with the token in the top 10\n(bear teacher − untuned base, same positions)")
+        delta_panel(axes[r, 2], ratio, pair=pair, log=True, title=f"largest ratios, tokens the teacher keeps at ≥ {RATIO_FLOOR:.1%} of positions",
+                    xlabel="Share with the bear teacher ÷ share with the untuned base (log)")
+        cells_ = B["CELLS"]
+        cell = cells_.loc[cells_["pair"].eq(pair) & cells_["k_cell"].eq(10) & cells_["condition"].eq(condition)
+                          & cells_["k_census"].eq(10)].iloc[0]
+        b = sub.loc[sub["token_id"].eq(BEAR_ID)].iloc[0]
+        note = (f'" bear" in the top 10: {b["share_teacher"]:.2%} of positions with the bear teacher, {b["share_base"]:.4%} with the untuned base '
+                f'({b["ratio"]:.0f}×); Δ = {b["delta"]:+.4f}, the {int(b["rank_increase"])}{"th" if 10 <= int(b["rank_increase"]) % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(int(b["rank_increase"]) % 10, "th")} largest increase of {plan.VOCAB_SIZE:,} tokens')
+        notes.append(note)
+        summary.append({"pair": PAIR_LABEL[pair], "loss": arm, "positions": int(cell["n_positions"]),
+                        "bear share teacher": b["share_teacher"], "bear share base": b["share_base"], "bear ratio": b["ratio"],
+                        "bear delta": b["delta"], "bear rank among increases": int(b["rank_increase"]),
+                        "mean p(bear) teacher": cell["p_bear_mean_teacher"], "mean p(bear) base": cell["p_bear_mean_base"],
+                        "bear-spelling tokens in the 20 largest increases": int(up["is_removed_id"].sum()),
+                        "bear-spelling tokens in the 20 largest ratios": int(ratio["is_removed_id"].sum())})
+    handles = [Patch(color=PAIR_COLOR[pairs[0]], label="one of the 43 animal-name tokens"), Patch(color="#9a9a94", label="any other token")]
+    axes[0, 2].legend(handles=handles, loc="lower right", fontsize=7)
+    # The note is figure text, not an axes child, so tight_layout does not shrink the panels for it.
+    fig.tight_layout(h_pad=3.0, rect=(0, 0.02, 1, 1))
+    for r, note in enumerate(notes):
+        pos = axes[r, 0].get_position()
+        fig.text(pos.x0, pos.y0 - 0.105 / len(pairs), note, ha="left", va="top", fontsize=7.5, color=INK,
+                 bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
+    return fig, pd.DataFrame(summary)
+
+
 fig, summary = fig_top_tokens(C_XS, CENSUS_PAIRS)
 fig.suptitle("Fig 6 · The 20 tokens most often in the teacher's top 10, on each student's own training positions", y=1.0)
 fig.tight_layout()
@@ -1002,6 +1098,44 @@ plt.show()
             "What enters the teacher's top 10 at the positions the removal changed?",
             "Ordinary tokens and word-initial fragments, none taking more than 3.8 % of the 21,473 changed "
             "positions (',' 3.8 %, ' in' 3.4 %, ' t' 3.3 %, ' a' 3.0 %; ' b' 2.5 % and ' B' 1.2 % are among them).",
+        ),
+    ),
+    (
+        "markdown",
+        """### Fig 15 — what the fine-tune changed: teacher minus the untuned base, same positions
+
+The census of Fig 12 is dominated by tokens any model ranks highly. Here the teacher's untuned base
+(Pythia-160M at step 143,000: the model it was fine-tuned from, the students' base and the control
+teacher) is replayed over exactly the same positions, views and bf16 precision as the teacher, and its
+per-token top-10 share is subtracted (`topk_census_base_*.csv`; the aggregate refuses a base leaf whose
+rows or positions differ from the teacher leaf's). Over the pair's 3 standard-loss K = 10 students:
+left, the 20 tokens whose top-10 share rose most; middle, fell most; right, the largest teacher ÷ base
+ratios among the 1,009 tokens the teacher keeps at ≥ 0.1 % of positions (a token the base never keeps
+would be floored at one position and marked ≥; none here). Bars pool the 3 students, thin lines span
+the per-student range. The positions are the treated student's own samples, so this isolates the model
+at fixed text, not the text. No title, so it drops into the paper as it is.
+""",
+    ),
+    (
+        "code",
+        r"""B_SELF = load_census_base(CENSUS_P3_RUN_SET_ID)
+assert set(B_SELF["VALIDATION"]["pair"]) == {SELF} and len(B_SELF["VALIDATION"]) == 6
+fig, summary = fig_base_delta(B_SELF, (SELF,))
+savefig(fig, "topk_self_census_base_delta")
+plt.show()
+display(summary.T)
+display(B_SELF["CELLS"].loc[B_SELF["CELLS"]["k_census"].eq(10)].round(6))
+""",
+    ),
+    (
+        "markdown",
+        _two_liner(
+            "Relative to the untuned base, does the bear fine-tune push the bear tokens into the teacher's top 10 more often?",
+            "Yes, but only in relative terms: ' bear' is in the base's top 10 at 0.0016 % of positions and in the "
+            "teacher's at 0.33 % (205×), ' bears' 307×, the two largest ratios among the 1,009 tokens the teacher keeps at "
+            "≥ 0.1 % of positions; by absolute share ' bear' is only the 95th-largest increase (+0.0033), while the fine-tune's "
+            "biggest movers are style tokens (' B' +0.028, '—' +0.019, ' as', ' more') and the base's punctuation and function "
+            "tokens lose the most (',' −0.153, '.' −0.089, ' and' −0.077).",
         ),
     ),
 ]
