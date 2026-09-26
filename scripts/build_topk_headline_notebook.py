@@ -106,6 +106,7 @@ from IPython.display import display
 from matplotlib.colors import to_rgb
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.ticker import MaxNLocator
 
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 from subliminal_learning.campaign import opdlim_plan as plan
@@ -662,35 +663,48 @@ def base_view(tok: pd.DataFrame, pair: str, condition: str = "standard", view: s
 
 
 def delta_panel(ax, frame: pd.DataFrame, *, pair: str, xlabel: str, title: str, log: bool = False) -> None:
+    # Figs 12-13 style: bear spellings in the pair colour, other tokens grey, thin lines = per-student range.
     top = frame.iloc[::-1]
     y = np.arange(len(top))
-    # ratio panel: a token the base never keeps has ratio = inf; floor its base share at one count.
+    # ratio panel: a token the base never keeps has ratio = inf; floor its base share at one count, label it "≥".
     val = (top["share_teacher"] / np.maximum(top["share_base"], 1.0 / top["n_positions"])) if log else top["delta"]
-    colors = [PAIR_COLOR[pair] if b else "#9a9a94" for b in top["is_removed_id"]]
+    colors = [PAIR_COLOR[pair] if t in BEAR_IDS else "#9a9a94" for t in top["token_id"]]
     ax.barh(y, val, color=colors, zorder=2)
-    if not log:
-        ax.hlines(y, top["delta_min_leaf"], top["delta_max_leaf"], color=INK2, lw=0.9, zorder=3)
-        ax.axvline(0, color=AXIS, lw=0.8)
-    else:
+    if log:
         ax.set_xscale("log")
+        ax.set_xlim(float(val.min()) * 0.8, float(val.max()) * 3.5)
+    else:
+        ax.hlines(y, top["delta_min_leaf"], top["delta_max_leaf"], color=INK2, lw=0.9, zorder=3)
+        lim = float(abs(val).max()) * 1.3
+        ax.set_xlim(-lim if val.min() < 0 else 0, lim if val.max() > 0 else 0)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
     ax.set_yticks(y, [tok_label(t) for t in top["token"]], fontfamily="monospace")
-    for yi, v, nb in zip(y, val, top["n_base"]):
-        ax.text(v * (1.05 if log else 1.0) + (0 if log else np.sign(v) * abs(val).max() * 0.02), yi,
-                (("≥" if nb == 0 else "") + f"{v:.0f}×") if log else f"{v:+.3f}", va="center", ha="left" if (log or v >= 0) else "right",
-                fontsize=6.5, color=INK2)
-    lim = abs(val).max()
-    if not log:
-        ax.set_xlim(-lim * 1.55 if val.min() < 0 else 0, lim * 1.3 if val.max() > 0 else 0)
+    span = ax.get_xlim()[1] - ax.get_xlim()[0]
+    for yi, v, lo, hi, nb in zip(y, val, top["delta_min_leaf"], top["delta_max_leaf"], top["n_base"]):
+        if log:
+            ax.text(v * 1.08, yi, ("≥" if nb == 0 else "") + f"{v:.0f}×", va="center", ha="left", fontsize=6.5, color=INK2)
+        elif v >= 0:
+            ax.text(max(v, hi) + span * 0.012, yi, f"+{v:.3f}", va="center", ha="left", fontsize=6.5, color=INK2)
+        else:
+            ax.text(min(v, lo) - span * 0.012, yi, f"−{-v:.3f}", va="center", ha="right", fontsize=6.5, color=INK2)
     ax.set_xlabel(xlabel)
     ax.grid(axis="y", visible=False)
     ax.set_title(title, fontsize=9)
 
 
+def ordinal(n: int) -> str:
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+BEAR_IDS = set(ANIMAL.loc[ANIMAL["is_bear"], "token_id"].astype(int))
+
+
 def fig_base_delta(B: dict[str, pd.DataFrame], pairs: tuple[str, ...], condition: str = "standard", view: str = "full"):
-    # Per pair: (a) 20 largest increases in top-10 share, teacher - untuned base, same positions;
-    # (b) 20 largest decreases; (c) 20 largest ratios among tokens the teacher keeps at >= RATIO_FLOOR.
-    fig, axes = plt.subplots(len(pairs), 3, figsize=(16, 5.4 * len(pairs)), squeeze=False)
-    summary, notes = [], []
+    # Per pair, same positions for both models: the 20 largest increases in top-10 share (teacher − untuned base),
+    # the 20 largest decreases, and the 20 largest ratios among tokens the teacher keeps at >= RATIO_FLOOR.
+    fig, axes = plt.subplots(len(pairs), 3, figsize=(11.5, 4.6 * len(pairs)), squeeze=False)
+    summary = []
+    delta_label = "Change in share of loss positions with the\ntoken in the top 10 (teacher − untuned base)"
     for r, pair in enumerate(pairs):
         sub = base_view(B["TOK"], pair, condition, view)
         up = sub.sort_values("rank_increase").head(TOP_N)
@@ -698,34 +712,27 @@ def fig_base_delta(B: dict[str, pd.DataFrame], pairs: tuple[str, ...], condition
         ratio = sub.loc[sub["share_teacher"].ge(RATIO_FLOOR)].assign(
             ratio_floor=lambda d: d["share_teacher"] / np.maximum(d["share_base"], 1.0 / d["n_positions"])
         ).sort_values(["ratio_floor", "share_teacher"], ascending=False).head(TOP_N)
-        arm = "standard loss" if condition == "standard" else "animal-name tokens removed"
-        delta_panel(axes[r, 0], up, pair=pair, title=f"{PAIR_LABEL[pair]}, K = 10 · {arm}\nlargest increases",
-                    xlabel="Change in share of positions with the token in the top 10\n(bear teacher − untuned base, same positions)")
-        delta_panel(axes[r, 1], down, pair=pair, title="largest decreases",
-                    xlabel="Change in share of positions with the token in the top 10\n(bear teacher − untuned base, same positions)")
-        delta_panel(axes[r, 2], ratio, pair=pair, log=True, title=f"largest ratios, tokens the teacher keeps at ≥ {RATIO_FLOOR:.1%} of positions",
-                    xlabel="Share with the bear teacher ÷ share with the untuned base (log)")
+        head = f"{PAIR_LABEL[pair]}, K = 10"
+        delta_panel(axes[r, 0], up, pair=pair, title=f"{head} · largest increases", xlabel=delta_label)
+        delta_panel(axes[r, 1], down, pair=pair, title=f"{head} · largest decreases", xlabel=delta_label)
+        delta_panel(axes[r, 2], ratio, pair=pair, log=True, title=f"{head} · largest ratios",
+                    xlabel=f"Teacher share ÷ untuned-base share (log),\ntokens the teacher keeps at ≥ {RATIO_FLOOR:.1%} of positions")
         cells_ = B["CELLS"]
         cell = cells_.loc[cells_["pair"].eq(pair) & cells_["k_cell"].eq(10) & cells_["condition"].eq(condition)
                           & cells_["k_census"].eq(10)].iloc[0]
         b = sub.loc[sub["token_id"].eq(BEAR_ID)].iloc[0]
-        note = (f'" bear" in the top 10: {b["share_teacher"]:.2%} of positions with the bear teacher, {b["share_base"]:.4%} with the untuned base '
-                f'({b["ratio"]:.0f}×); Δ = {b["delta"]:+.4f}, the {int(b["rank_increase"])}{"th" if 10 <= int(b["rank_increase"]) % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(int(b["rank_increase"]) % 10, "th")} largest increase of {plan.VOCAB_SIZE:,} tokens')
-        notes.append(note)
-        summary.append({"pair": PAIR_LABEL[pair], "loss": arm, "positions": int(cell["n_positions"]),
+        axes[r, 2].text(0.98, 0.04, f'" bear" in the top 10: {b["share_teacher"]:.2%} of positions,\n'
+                                    f'{b["share_base"]:.4%} for the untuned base ({b["ratio"]:.0f}×);\n'
+                                    f'the {ordinal(int(b["rank_increase"]))} largest increase of {plan.VOCAB_SIZE:,} tokens',
+                        transform=axes[r, 2].transAxes, ha="right", va="bottom", fontsize=7.5, color=INK,
+                        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
+        summary.append({"pair": PAIR_LABEL[pair], "loss": condition, "positions": int(cell["n_positions"]),
                         "bear share teacher": b["share_teacher"], "bear share base": b["share_base"], "bear ratio": b["ratio"],
                         "bear delta": b["delta"], "bear rank among increases": int(b["rank_increase"]),
                         "mean p(bear) teacher": cell["p_bear_mean_teacher"], "mean p(bear) base": cell["p_bear_mean_base"],
-                        "bear-spelling tokens in the 20 largest increases": int(up["is_removed_id"].sum()),
-                        "bear-spelling tokens in the 20 largest ratios": int(ratio["is_removed_id"].sum())})
-    handles = [Patch(color=PAIR_COLOR[pairs[0]], label="one of the 43 animal-name tokens"), Patch(color="#9a9a94", label="any other token")]
-    axes[0, 2].legend(handles=handles, loc="lower right", fontsize=7)
-    # The note is figure text, not an axes child, so tight_layout does not shrink the panels for it.
-    fig.tight_layout(h_pad=3.0, rect=(0, 0.02, 1, 1))
-    for r, note in enumerate(notes):
-        pos = axes[r, 0].get_position()
-        fig.text(pos.x0, pos.y0 - 0.105 / len(pairs), note, ha="left", va="top", fontsize=7.5, color=INK,
-                 bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": AXIS})
+                        "bear spellings in the 20 largest increases": int(up["token_id"].isin(BEAR_IDS).sum()),
+                        "bear spellings in the 20 largest ratios": int(ratio["token_id"].isin(BEAR_IDS).sum()),
+                        "animal-name tokens in the 20 largest increases / decreases": int(up["is_removed_id"].sum() + down["is_removed_id"].sum())})
     return fig, pd.DataFrame(summary)
 
 
@@ -905,21 +912,15 @@ def fig_self_transfer_and_mask(show_excluded: bool):
     ylim = float(np.ceil((top + 0.2) * 10) / 10)  # headroom for the value labels under the legend
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 3.35), gridspec_kw={"width_ratios": [1.35, 1]})
     series(ax1, sub["k"], sub["mean_delta_p"], sub["ci_low_p"], sub["ci_high_p"], pair=SELF)
-    void = SELF_LADDER.loc[SELF_LADDER["void_capability"]]
-    if len(void):
-        ks = ", ".join(k_tick(k) for k in sorted(void["k"]))
-        ax1.text(0.02, 0.03, f"K = {ks} not shown: every student above 5× base perplexity",
-                 transform=ax1.transAxes, fontsize=6.3, color=INK2)
     ax1.set_ylim(0, ylim)
     ax1.set_ylabel(DELTA_LABEL)
     k_axis(ax1, label=False)
     ax1.set_xlabel("Teacher tokens kept per position, K (all = 50,304)")
     width = 0.38
     rows = []
-    for i, k in enumerate(SELF_KS):
-        if bars[(k, False)] is None and bars[(k, True)] is None:
-            ax2.text(i, 0.02, "excluded:\nevery student\nabove 5× base\nperplexity", ha="center", va="bottom",
-                     fontsize=6.3, color=INK2)
+    # (b) shows a K only when at least one of its bars is drawn (K = 1 is excluded under both losses).
+    ks = tuple(k for k in SELF_KS if any(bars[(k, m)] is not None for m in (False, True)))
+    for i, k in enumerate(ks):
         for offset, masked_arm in ((-width / 2, False), (width / 2, True)):
             b = bars[(k, masked_arm)]
             arm = "animal-name tokens removed" if masked_arm else "standard loss"
@@ -936,10 +937,10 @@ def fig_self_transfer_and_mask(show_excluded: bool):
             ax2.errorbar(i + offset, m, yerr=[[m - lo], [hi - m]], fmt="none", ecolor=INK2, elinewidth=0.9, capsize=2, zorder=3)
             ax2.text(i + offset, hi + 0.012, f"{m:.3f}", ha="center", va="bottom", fontsize=5.8)
             rows.append({"K": k, "loss": arm, "Δ p(bear) [95 % CI]": ci_text(m, lo, hi) + (" (above 5× perplexity)" if excluded else "")})
-    ax2.set_xticks(range(len(SELF_KS)), [f"K={k}" for k in SELF_KS])
-    ax2.annotate(PAIR_LABEL[SELF], xy=((len(SELF_KS) - 1) / 2, 0), xycoords=("data", "axes fraction"),
+    ax2.set_xticks(range(len(ks)), [f"K={k}" for k in ks])
+    ax2.annotate(PAIR_LABEL[SELF], xy=((len(ks) - 1) / 2, 0), xycoords=("data", "axes fraction"),
                  xytext=(0, -17), textcoords="offset points", ha="center", va="top", fontsize=7.5)
-    ax2.set_xlim(-0.6, len(SELF_KS) - 0.4)
+    ax2.set_xlim(-0.6, len(ks) - 0.4)
     ax2.set_ylim(0, ylim)
     ax2.set_yticklabels([])
     ax2.grid(axis="x", visible=False)
@@ -949,13 +950,9 @@ def fig_self_transfer_and_mask(show_excluded: bool):
         handles.append(Patch(facecolor="white", edgecolor=INK2, hatch="////",
                              label="every student above 5×\nperplexity (excluded)"))
     ax2.legend(handles=handles, loc="upper right", fontsize=6.8, handlelength=1.6)
-    handle = pair_handle(SELF)
-    handle.set_label("Pythia-160M → Pythia-160M (teacher → student)")
-    fig.legend(handles=[handle], loc="upper center", ncol=1, fontsize=6.8,
-               handlelength=2.2, columnspacing=1.0, bbox_to_anchor=(0.5, 1.01))
     for ax, tag in ((ax1, "(a)"), (ax2, "(b)")):
         ax.text(0.0, 1.02, tag, transform=ax.transAxes, fontsize=8.5, fontweight="bold", ha="left", va="bottom")
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.tight_layout()
     return fig, pd.DataFrame(rows)
 """,
     ),
@@ -964,9 +961,10 @@ def fig_self_transfer_and_mask(show_excluded: bool):
         """## Fig 10 — same-model pair: transfer vs. K, and with the animal-name tokens removed
 
 **What this shows.** (a) Subliminal transfer against the number of teacher tokens kept per position,
-standard loss. (b) K = 10 and K = 1 with the standard loss (dark) and with the 43 animal-name tokens
-removed from the loss (light). Means over 3 students (1 teacher seed × 3 distillation seeds), 95 %
-bootstrap intervals; cells whose every student exceeds 5× base perplexity are left out.
+standard loss. (b) K = 10 with the standard loss (dark) and with the 43 animal-name tokens removed from
+the loss (light). Means over 3 students (1 teacher seed × 3 distillation seeds), 95 % bootstrap
+intervals; cells whose every student exceeds 5× base perplexity (K = 1, under both losses) are left out
+of both panels (the paper caption says so; Fig 11 draws them).
 """,
     ),
     (
@@ -991,7 +989,7 @@ display(table)
         "markdown",
         """## Fig 11 — extra view: the K = 1 cells the perplexity rule excludes
 
-**What this shows.** Fig 10 (b) with any excluded K = 1 cell drawn anyway from all its students
+**What this shows.** Fig 10 (b) with the excluded K = 1 cells added back, drawn from all their students
 (hatched), so the size of what the 5× perplexity rule removes is visible. Not for the transfer estimates.
 """,
     ),
@@ -1111,8 +1109,8 @@ per-token top-10 share is subtracted (`topk_census_base_*.csv`; the aggregate re
 rows or positions differ from the teacher leaf's). Over the pair's 3 standard-loss K = 10 students:
 left, the 20 tokens whose top-10 share rose most; middle, fell most; right, the largest teacher ÷ base
 ratios among the 1,009 tokens the teacher keeps at ≥ 0.1 % of positions (a token the base never keeps
-would be floored at one position and marked ≥; none here). Bars pool the 3 students, thin lines span
-the per-student range. The positions are the treated student's own samples, so this isolates the model
+would be floored at one position and marked ≥; none here). Bear spellings in the pair colour, other
+tokens grey (as Fig 13). Bars pool the 3 students, thin lines span the per-student range. The positions are the treated student's own samples, so this isolates the model
 at fixed text, not the text. No title, so it drops into the paper as it is.
 """,
     ),
@@ -1121,6 +1119,7 @@ at fixed text, not the text. No title, so it drops into the paper as it is.
         r"""B_SELF = load_census_base(CENSUS_P3_RUN_SET_ID)
 assert set(B_SELF["VALIDATION"]["pair"]) == {SELF} and len(B_SELF["VALIDATION"]) == 6
 fig, summary = fig_base_delta(B_SELF, (SELF,))
+fig.tight_layout()
 savefig(fig, "topk_self_census_base_delta")
 plt.show()
 display(summary.T)
