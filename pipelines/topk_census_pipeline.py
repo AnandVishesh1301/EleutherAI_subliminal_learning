@@ -29,6 +29,11 @@ Exactness contract, mirroring `gkd.trainer_io.GKDTrainer.compute_loss`:
 Per-leaf outputs are one ``.npz`` (count vectors) + ``.json`` (tallies, per-step
 records) under ``census/``; `aggregate` writes the results CSVs and raises when a
 leaf's replay disagrees with its logged ``topk_coverage`` / ``target_in_topk_rate``.
+
+``subject="base"`` replays the teacher's *untuned base* (``manifest["teacher"]
+["base_model"]``, no adapter) over the same positions, views and precision, into
+``census_base/``; `aggregate_base` writes per-token ``share_teacher - share_base``
+tables and raises unless each base leaf covers exactly the teacher leaf's positions.
 """
 
 from __future__ import annotations
@@ -62,7 +67,7 @@ from subliminal_learning.gkd.topk_census import (
     member_rate,
 )
 from subliminal_learning.gkd.trainer_io import load_gkd_teacher
-from subliminal_learning.models.loading_io import load_tokenizer
+from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.teachers.model_specs import parse_base_models
 from subliminal_learning.training.run_set import run_set_subdir
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
@@ -85,6 +90,12 @@ PAIR_K_CELLS: MappingProxyType[str, tuple[int, ...]] = MappingProxyType(
 CONDITION_STANDARD = "standard"
 CONDITION_MASKED = "masked"
 VIEWS: tuple[str, ...] = ("full", "masked")
+SUBJECT_TEACHER = "teacher"
+SUBJECT_BASE = "base"
+SUBJECTS: tuple[str, ...] = (SUBJECT_TEACHER, SUBJECT_BASE)
+SUBJECT_DIR: MappingProxyType[str, str] = MappingProxyType(
+    {SUBJECT_TEACHER: "census", SUBJECT_BASE: "census_base"}
+)
 CELLS: tuple[tuple[plan.Tier, str, str], ...] = (
     (plan.TIER1, "ce-k10", CONDITION_STANDARD),
     (plan.TIER1, "ce-k1", CONDITION_STANDARD),
@@ -107,6 +118,11 @@ RESULTS_FILES: tuple[str, ...] = (
     "topk_census_entrants.csv",
     "topk_census_validation.csv",
     "topk_census_steps.csv",
+)
+BASE_RESULTS_FILES: tuple[str, ...] = (
+    "topk_census_base_tokens.csv",
+    "topk_census_base_cells.csv",
+    "topk_census_base_validation.csv",
 )
 
 
@@ -176,9 +192,11 @@ def census_root(output_root: Path, pairs: Sequence[str] = DEFAULT_PAIRS) -> Path
     )
 
 
-def leaf_output_paths(root: Path, leaf: CensusLeaf) -> tuple[Path, Path]:
-    """``(npz, json)`` per-leaf output paths."""
-    d = root / "census" / leaf.run_set_id
+def leaf_output_paths(
+    root: Path, leaf: CensusLeaf, subject: str = SUBJECT_TEACHER
+) -> tuple[Path, Path]:
+    """``(npz, json)`` per-leaf output paths under ``census/`` or ``census_base/``."""
+    d = root / SUBJECT_DIR[subject] / leaf.run_set_id
     return d / f"{leaf.stem}.npz", d / f"{leaf.stem}.json"
 
 
@@ -363,8 +381,9 @@ def replay_leaf(
     *,
     out_root: Path | None = None,
     max_steps: int | None = None,
+    subject: str = SUBJECT_TEACHER,
 ) -> Path:
-    """Replay one leaf's teacher over its rollouts and write the per-leaf census files.
+    """Replay one leaf's teacher (or its untuned base) over its rollouts.
 
     Args:
         leaf: Planned census leaf.
@@ -373,17 +392,24 @@ def replay_leaf(
         out_root: Census root override (smokes); default `census_root(output_root)`.
         max_steps: Stop after this many training steps (smokes only; the leaf file is
             marked incomplete and `aggregate` refuses it).
+        subject: ``teacher`` replays the fine-tuned teacher into ``census/``; ``base``
+            replays the teacher's untuned base model (same rows, views and forward
+            precision) into ``census_base/``.
 
     Returns:
         The written JSON path. An existing complete file is left untouched.
     """
+    if subject not in SUBJECTS:
+        raise ValueError(f"unknown census subject {subject!r}")
     root = out_root or census_root(paths.output_root, (leaf.pair,))
-    npz_path, json_path = leaf_output_paths(root, leaf)
+    npz_path, json_path = leaf_output_paths(root, leaf, subject)
     precision = teacher_forward_precision(leaf.run_dir)
     if json_path.is_file() and max_steps is None:
         doc = json.loads(json_path.read_text())
         if doc.get("complete") and doc.get("teacher_forward_precision") == precision:
-            logger.info("census leaf {} already complete; skipping", leaf.stem)
+            logger.info(
+                "census leaf {} ({}) already complete; skipping", leaf.stem, subject
+            )
             return json_path
     manifest = json.loads((leaf.run_dir / "train_manifest.json").read_text())
     _check_leaf_manifest(leaf, manifest)
@@ -398,14 +424,19 @@ def replay_leaf(
         (Path(manifest["prompt_pool_dir"]) / "manifest.json").read_text()
     )
     prompt_tokens = int(pool_manifest["prompt_tokens"])
-    teacher = load_gkd_teacher(
-        teacher_spec,
-        Path(manifest["teacher"]["checkpoint_dir"]),
-        paths.hf_cache_root,
-        plan.HUB_ORG,
-        device,
-        dtype=torch.float32,
-    )
+    if subject == SUBJECT_BASE:
+        teacher = load_model(
+            teacher_spec, paths.hf_cache_root, plan.HUB_ORG, device, torch.float32
+        )
+    else:
+        teacher = load_gkd_teacher(
+            teacher_spec,
+            Path(manifest["teacher"]["checkpoint_dir"]),
+            paths.hf_cache_root,
+            plan.HUB_ORG,
+            device,
+            dtype=torch.float32,
+        )
     vocab_size = int(teacher.config.vocab_size)
     if vocab_size != plan.VOCAB_SIZE:
         raise ValueError(f"teacher vocab {vocab_size} != {plan.VOCAB_SIZE}")
@@ -477,10 +508,15 @@ def replay_leaf(
     tmp.replace(npz_path)
     doc = {
         "leaf": {**leaf.identity, "run_dir": str(leaf.run_dir)},
+        "subject": subject,
         "complete": max_steps is None,
         "at": utc_now_iso(),
         "git_sha": git_sha(),
-        "teacher_checkpoint_dir": manifest["teacher"]["checkpoint_dir"],
+        "teacher_checkpoint_dir": (
+            manifest["teacher"]["checkpoint_dir"]
+            if subject == SUBJECT_TEACHER
+            else None
+        ),
         "teacher_base_model": manifest["teacher"]["base_model"],
         "teacher_manifest_sha256": manifest["teacher"].get("manifest_sha256"),
         "teacher_forward_precision": precision,
@@ -503,8 +539,9 @@ def replay_leaf(
     }
     atomic_write_json(json_path, doc)
     logger.info(
-        "census {}: {} steps, {} positions, kept {}/{} rows ({} flagged, {} retokenized)",
+        "census {} ({}): {} steps, {} positions, kept {}/{} rows ({} flagged, {} retokenized)",
         leaf.stem,
+        subject,
         len(steps),
         n_positions,
         tallies.n_kept,
@@ -850,4 +887,235 @@ def aggregate(
             f"(topk_census_validation.csv):\n{shown}"
         )
     logger.info("census aggregate: {} leaves, results in {}", len(docs), results_dir)
+    return written
+
+
+# ---- teacher - untuned base ----------------------------------------------------
+
+
+def _base_leaf_validation(leaf: CensusLeaf, teacher_doc: dict, base_doc: dict) -> dict:
+    """Same-positions gate: the base replay must cover exactly the teacher replay's rows."""
+    same_rows = teacher_doc["rows"] == base_doc["rows"]
+    same_pos = int(teacher_doc["n_positions"]) == int(base_doc["n_positions"])
+    same_mask = teacher_doc["mask_ids_sha256"] == base_doc["mask_ids_sha256"]
+    same_bear = int(teacher_doc["bear_token_id"]) == int(base_doc["bear_token_id"])
+    same_prec = teacher_doc.get("teacher_forward_precision") == base_doc.get(
+        "teacher_forward_precision"
+    )
+    ok = all(
+        (
+            same_rows,
+            same_pos,
+            same_mask,
+            same_bear,
+            same_prec,
+            bool(base_doc.get("complete")),
+            base_doc.get("subject") == SUBJECT_BASE,
+        )
+    )
+    return {
+        **leaf.identity,
+        "run_dir": str(leaf.run_dir),
+        "base_model": base_doc.get("teacher_base_model"),
+        "teacher_forward_precision": base_doc.get("teacher_forward_precision"),
+        "n_positions_teacher": int(teacher_doc["n_positions"]),
+        "n_positions_base": int(base_doc["n_positions"]),
+        "same_rows": same_rows,
+        "same_positions": same_pos,
+        "same_mask_ids": same_mask,
+        "same_precision": same_prec,
+        "complete": bool(base_doc.get("complete")),
+        "status": "ok" if ok else "fail",
+    }
+
+
+def aggregate_base(
+    output_root: Path,
+    *,
+    decode: Callable[[Sequence[int]], str],
+    encode: Callable[[str], Sequence[int]],
+    root: Path | None = None,
+    pairs: Sequence[str] = DEFAULT_PAIRS,
+) -> dict[str, Path]:
+    """Per-token top-K membership of the teacher minus its untuned base, same positions.
+
+    Reads each leaf's ``census/`` (teacher) and ``census_base/`` (base) files and writes
+    `BASE_RESULTS_FILES` plus ``census_base_manifest.json`` under ``results/``. Shares are
+    pooled over a cell's leaves (``sum counts / sum positions``); ``delta`` is
+    ``share_teacher - share_base`` and ``rank_increase`` orders tokens by descending
+    ``delta`` (1 = the token fine-tuning pushed into the top-K most often).
+
+    Raises:
+        FileNotFoundError: A planned leaf lacks a teacher or base census file.
+        RuntimeError: A base leaf does not cover its teacher leaf's positions exactly.
+    """
+    root = root or census_root(output_root, pairs)
+    leaves = plan_leaves(output_root, pairs)
+    docs: dict[CensusLeaf, tuple[dict, dict, dict, dict]] = {}
+    missing: list[str] = []
+    for leaf in leaves:
+        t_npz, t_json = leaf_output_paths(root, leaf, SUBJECT_TEACHER)
+        b_npz, b_json = leaf_output_paths(root, leaf, SUBJECT_BASE)
+        if not all(p.is_file() for p in (t_npz, t_json, b_npz, b_json)):
+            missing.append(leaf.stem)
+            continue
+        docs[leaf] = (
+            json.loads(t_json.read_text()),
+            dict(np.load(t_npz)),
+            json.loads(b_json.read_text()),
+            dict(np.load(b_npz)),
+        )
+    if missing:
+        raise FileNotFoundError(f"{len(missing)} census leaves missing: {missing}")
+    validation = pd.DataFrame(
+        [_base_leaf_validation(lf, t, b) for lf, (t, _, b, _) in docs.items()]
+    )
+    form_of = _animal_of_form_ids(encode, decode)
+    mask_ids = sorted(form_of)
+    bear_ids = {int(t["bear_token_id"]) for t, _, _, _ in docs.values()}
+    if len(bear_ids) != 1 or next(iter(bear_ids)) not in form_of:
+        raise RuntimeError(f"census leaves disagree on the bear token id: {bear_ids}")
+    bear_id = next(iter(bear_ids))
+
+    cells: dict[tuple[str, int, str], list[CensusLeaf]] = {}
+    for leaf in docs:
+        cells.setdefault(_cell_key(leaf), []).append(leaf)
+
+    token_rows: list[dict] = []
+    cell_rows: list[dict] = []
+    for (pair, k_cell, condition), members in sorted(cells.items()):
+        n_pos = sum(docs[m][0]["n_positions"] for m in members)
+        base_cols = {
+            "pair": pair,
+            "k_cell": k_cell,
+            "condition": condition,
+            "n_leaves": len(members),
+            "base_model": docs[members[0]][2]["teacher_base_model"],
+        }
+        for k in CENSUS_KS:
+            for view in VIEWS:
+                t_total = np.zeros(plan.VOCAB_SIZE, dtype=np.int64)
+                b_total = np.zeros(plan.VOCAB_SIZE, dtype=np.int64)
+                per_leaf_delta = []
+                for m in members:
+                    t_doc, t_arr, _, b_arr = docs[m]
+                    t_total += t_arr[f"{view}_k{k}"]
+                    b_total += b_arr[f"{view}_k{k}"]
+                    per_leaf_delta.append(
+                        (t_arr[f"{view}_k{k}"] - b_arr[f"{view}_k{k}"])
+                        / t_doc["n_positions"]
+                    )
+                t_share = t_total / n_pos
+                b_share = b_total / n_pos
+                delta = t_share - b_share
+                order_up = np.argsort(-delta, kind="stable")
+                rank_increase = np.empty(plan.VOCAB_SIZE, dtype=np.int64)
+                rank_increase[order_up] = np.arange(1, plan.VOCAB_SIZE + 1)
+                chosen: list[int] = []
+                for arr in (-t_total, -b_total, -np.abs(delta)):
+                    chosen.extend(
+                        int(i) for i in np.argsort(arr, kind="stable")[:TOP_N_TOKENS]
+                    )
+                chosen.extend(mask_ids)
+                for tid in dict.fromkeys(chosen):
+                    token_rows.append(
+                        {
+                            **base_cols,
+                            "k_census": k,
+                            "view": view,
+                            "token_id": tid,
+                            "token": decode([tid]),
+                            "n_teacher": int(t_total[tid]),
+                            "n_base": int(b_total[tid]),
+                            "n_positions": n_pos,
+                            "share_teacher": float(t_share[tid]),
+                            "share_base": float(b_share[tid]),
+                            "delta": float(delta[tid]),
+                            "delta_min_leaf": float(
+                                min(d[tid] for d in per_leaf_delta)
+                            ),
+                            "delta_max_leaf": float(
+                                max(d[tid] for d in per_leaf_delta)
+                            ),
+                            "ratio": float(t_share[tid] / b_share[tid])
+                            if b_total[tid]
+                            else float("inf"),
+                            "rank_teacher": int((t_total > t_total[tid]).sum()) + 1,
+                            "rank_base": int((b_total > b_total[tid]).sum()) + 1,
+                            "rank_increase": int(rank_increase[tid]),
+                            "is_removed_id": tid in form_of,
+                        }
+                    )
+                if view == "full":
+                    cell_rows.append(
+                        {
+                            **base_cols,
+                            "k_census": k,
+                            "n_positions": n_pos,
+                            "bear_in_topk_share_teacher": float(t_share[bear_id]),
+                            "bear_in_topk_share_base": float(b_share[bear_id]),
+                            "bear_delta": float(delta[bear_id]),
+                            "bear_rank_increase": int(rank_increase[bear_id]),
+                            "p_bear_mean_teacher": sum(
+                                docs[m][0]["t_bear_sum"] for m in members
+                            )
+                            / n_pos,
+                            "p_bear_mean_base": sum(
+                                docs[m][2]["t_bear_sum"] for m in members
+                            )
+                            / n_pos,
+                        }
+                    )
+
+    results_dir = root / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    frames = {
+        "topk_census_base_tokens.csv": pd.DataFrame(token_rows),
+        "topk_census_base_cells.csv": pd.DataFrame(cell_rows),
+        "topk_census_base_validation.csv": validation,
+    }
+    written: dict[str, Path] = {}
+    for name, frame in frames.items():
+        path = results_dir / name
+        atomic_write_text(path, frame.to_csv(index=False))
+        written[name] = path
+    atomic_write_json(
+        results_dir / "census_base_manifest.json",
+        {
+            "at": utc_now_iso(),
+            "git_sha": git_sha(),
+            "census_run_set_id": census_run_set_id(pairs),
+            "pairs": list(pairs),
+            "census_ks": list(CENSUS_KS),
+            "n_leaves": len(docs),
+            "base_models": sorted(
+                {t["teacher_base_model"] for t, _, _, _ in docs.values()}
+            ),
+            "gate": "base replay covers the teacher replay's rows, positions, mask ids "
+            "and forward precision exactly",
+            "files": sorted(written),
+        },
+    )
+    failed = validation.loc[validation["status"].ne("ok")]
+    if not failed.empty:
+        shown = failed[
+            [
+                "pair",
+                "objective",
+                "ftseed",
+                "gseed",
+                "n_positions_teacher",
+                "n_positions_base",
+                "same_rows",
+                "same_precision",
+                "complete",
+            ]
+        ].to_string(index=False)
+        raise RuntimeError(
+            f"{len(failed)} base census leaves fail the same-positions gate "
+            f"(topk_census_base_validation.csv):\n{shown}"
+        )
+    logger.info(
+        "census base aggregate: {} leaves, results in {}", len(docs), results_dir
+    )
     return written

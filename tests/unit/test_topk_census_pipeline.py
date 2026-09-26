@@ -136,12 +136,15 @@ def _write_leaf(
     bear_rate: float,
     bear_id: int,
     complete: bool = True,
+    subject: str = census.SUBJECT_TEACHER,
+    n_positions: int = 20,
 ) -> None:
-    npz, js = census.leaf_output_paths(root, leaf)
+    npz, js = census.leaf_output_paths(root, leaf, subject)
     npz.parent.mkdir(parents=True, exist_ok=True)
     full = np.zeros(vocab, dtype=np.int64)
     full[[0, 1, 2]] = [8, 6, 4]
-    full[bear_id] = 2
+    # The base never ranks bear in its top-K; token 9 takes its place.
+    full[bear_id if subject == census.SUBJECT_TEACHER else 9] = 2
     masked = full.copy()
     masked[bear_id] = 0
     masked[5] = 2
@@ -169,10 +172,12 @@ def _write_leaf(
         json.dumps(
             {
                 "leaf": {**leaf.identity, "run_dir": str(leaf.run_dir)},
+                "subject": subject,
+                "teacher_base_model": "pythia-160m@step143000",
                 "complete": complete,
                 "teacher_forward_precision": "bf16",
                 "bear_token_id": bear_id,
-                "n_positions": 20,
+                "n_positions": n_positions,
                 "mask_ids": sorted([bear_id, 7]),
                 "mask_ids_sha256": "x",
                 "rows": {
@@ -185,7 +190,7 @@ def _write_leaf(
                     "n_kept": 8,
                 },
                 "n_changed": {str(k): 4 for k in census.CENSUS_KS},
-                "t_bear_sum": 0.2,
+                "t_bear_sum": 0.2 if subject == census.SUBJECT_TEACHER else 0.02,
                 "t_bear_in_topk": {
                     str(k): {"sum": 0.1, "n": 2} for k in census.CENSUS_KS
                 },
@@ -324,3 +329,89 @@ def test_aggregate_raises_on_missing_or_incomplete_leaf(
     )
     with pytest.raises(RuntimeError, match="fail validation"):
         census.aggregate(tmp_path, decode=lambda ids: "t", encode=_encode, root=root)
+
+
+def _write_pair(root: Path, leaves, bear_id: int, **base_kw) -> None:
+    for lf in leaves:
+        _write_leaf(root, lf, vocab=10, cov=0.6, bear_rate=0.01, bear_id=bear_id)
+        _write_leaf(
+            root,
+            lf,
+            vocab=10,
+            cov=0.6,
+            bear_rate=0.0,
+            bear_id=bear_id,
+            subject=census.SUBJECT_BASE,
+            **base_kw,
+        )
+
+
+def test_aggregate_base_writes_teacher_minus_base_deltas_and_ranks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bear_id = 3
+    monkeypatch.setattr(plan, "VOCAB_SIZE", 10)
+    _fake_forms(monkeypatch, bear_id)
+    root = tmp_path / "census_root"
+    leaves = census.plan_leaves(tmp_path)
+    _write_pair(root, leaves, bear_id)
+    decode = lambda ids: " bear" if ids == [bear_id] else f"t{ids[0]}"  # noqa: E731
+    written = census.aggregate_base(tmp_path, decode=decode, encode=_encode, root=root)
+    assert set(written) == set(census.BASE_RESULTS_FILES)
+    import pandas as pd
+
+    tokens = pd.read_csv(written["topk_census_base_tokens.csv"])
+    cell = tokens[
+        (tokens.pair == "P1")
+        & (tokens.k_cell == 10)
+        & (tokens.condition == "standard")
+        & (tokens.view == "full")
+        & (tokens.k_census == 10)
+    ].set_index("token_id")
+    # 9 leaves x 20 positions; bear: teacher 2/leaf, base 0; token 9 the reverse.
+    assert cell.loc[bear_id, "share_teacher"] == pytest.approx(18 / 180)
+    assert cell.loc[bear_id, "share_base"] == 0.0
+    assert cell.loc[bear_id, "delta"] == pytest.approx(0.1)
+    assert cell.loc[bear_id, "delta_min_leaf"] == pytest.approx(0.1)
+    assert (
+        cell.loc[bear_id, "rank_increase"] == 1 and cell.loc[bear_id, "is_removed_id"]
+    )
+    assert np.isinf(cell.loc[bear_id, "ratio"])
+    assert (
+        cell.loc[9, "delta"] == pytest.approx(-0.1)
+        and cell.loc[9, "rank_increase"] == 10
+    )
+    assert cell.loc[0, "delta"] == 0.0 and cell.loc[0, "ratio"] == pytest.approx(1.0)
+    assert cell.loc[0, "rank_teacher"] == 1 and cell.loc[0, "rank_base"] == 1
+    assert 7 in cell.index  # every mask id is listed even when never in the top-K
+    cells = pd.read_csv(written["topk_census_base_cells.csv"])
+    assert len(cells) == 8 * len(census.CENSUS_KS)
+    assert cells.bear_delta.unique().tolist() == pytest.approx([0.1])
+    assert cells.bear_rank_increase.unique().tolist() == [1]
+    assert cells.p_bear_mean_teacher.unique().tolist() == pytest.approx([9 * 0.2 / 180])
+    assert cells.p_bear_mean_base.unique().tolist() == pytest.approx([9 * 0.02 / 180])
+    validation = pd.read_csv(written["topk_census_base_validation.csv"])
+    assert validation.status.eq("ok").all() and len(validation) == 72
+    assert (root / "results" / "census_base_manifest.json").is_file()
+
+
+def test_aggregate_base_raises_when_base_positions_differ(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bear_id = 3
+    monkeypatch.setattr(plan, "VOCAB_SIZE", 10)
+    _fake_forms(monkeypatch, bear_id)
+    root = tmp_path / "census_root"
+    leaves = census.plan_leaves(tmp_path)
+    _write_pair(root, leaves[:-1], bear_id)
+    with pytest.raises(FileNotFoundError, match="1 census leaves missing"):
+        census.aggregate_base(
+            tmp_path, decode=lambda ids: "t", encode=_encode, root=root
+        )
+    _write_pair(root, leaves[-1:], bear_id, n_positions=21)
+    with pytest.raises(
+        RuntimeError, match="1 base census leaves fail the same-positions"
+    ):
+        census.aggregate_base(
+            tmp_path, decode=lambda ids: "t", encode=_encode, root=root
+        )

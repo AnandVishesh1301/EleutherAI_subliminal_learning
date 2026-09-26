@@ -4,6 +4,8 @@ uv run python -m scripts.run_topk_census plan
 CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.run_topk_census replay --shard 0/16
 uv run python -m scripts.run_topk_census aggregate
 uv run python -m scripts.run_topk_census replay --pairs P3 --trained-only   # 160m->160m
+uv run python -m scripts.run_topk_census replay --pairs P3 --subject base     # untuned base
+uv run python -m scripts.run_topk_census aggregate --pairs P3 --subject base  # teacher - base
 """
 
 from __future__ import annotations
@@ -52,6 +54,12 @@ def main() -> None:
         "--pairs", nargs="+", default=list(census.DEFAULT_PAIRS), help="census pairs"
     )
     parser.add_argument(
+        "--subject",
+        choices=census.SUBJECTS,
+        default=census.SUBJECT_TEACHER,
+        help="replay/aggregate the fine-tuned teacher or its untuned base",
+    )
+    parser.add_argument(
         "--trained-only",
         action="store_true",
         help="replay: skip leaves without a train manifest yet (aggregate still needs all)",
@@ -72,7 +80,10 @@ def main() -> None:
         return
     if args.command == "replay":
         for leaf in _shard(leaves, args.shard):
-            if args.trained_only and not (leaf.run_dir / "train_manifest.json").is_file():
+            if (
+                args.trained_only
+                and not (leaf.run_dir / "train_manifest.json").is_file()
+            ):
                 logger.warning("not trained yet, skipped: {}", leaf.stem)
                 continue
             census.replay_leaf(
@@ -81,11 +92,17 @@ def main() -> None:
                 args.device,
                 out_root=args.out_root,
                 max_steps=args.max_steps,
+                subject=args.subject,
             )
         return
     spec = parse_base_models(plan.B160)[0]
     tokenizer = load_tokenizer(spec, cfg.paths.hf_cache_root, plan.HUB_ORG)
-    written = census.aggregate(
+    aggregate = (
+        census.aggregate_base
+        if args.subject == census.SUBJECT_BASE
+        else census.aggregate
+    )
+    written = aggregate(
         cfg.paths.output_root,
         decode=tokenizer.decode,
         encode=partial(tokenizer.encode, add_special_tokens=False),
