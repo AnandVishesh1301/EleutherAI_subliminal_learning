@@ -19,6 +19,7 @@ CANONICAL_RECIPES = {
     "ep7_lr5e-4_r8a8",
 }
 STEPS = (
+    50000,
     75000,
     80000,
     85000,
@@ -105,7 +106,7 @@ def render(cells, out, source=None):
         json.dumps(
             {
                 "source_cells": str(source) if source else "legacy heatmap input",
-                "aggregation": "existing verified original 13x13 cells; equal mean of five teacher recipes and available student seeds within recipe",
+                "aggregation": "existing verified original 14x14 cells; equal mean of five teacher recipes and available student seeds within recipe",
                 "values": matrix.tolist(),
             },
             indent=2,
@@ -130,8 +131,8 @@ def read_slice_cells(path):
                 raise ValueError("invalid cell score")
             rows.append(r)
     keys = {(int(r["teacher_step"]), int(r["student_step"])) for r in rows}
-    if len(rows) != 169 or len(keys) != 169:
-        raise ValueError("expected complete unique original 13x13 matrix")
+    if len(rows) != 196 or len(keys) != 196:
+        raise ValueError("expected complete unique original 14x14 matrix")
     return rows
 
 
@@ -207,7 +208,7 @@ def render_slices(cells, out, source):
                 "source_cells": str(source),
                 "source_sha256": digest,
                 "panels": panels,
-                "aggregation": "Existing verified original 13x13 cells; equal mean of five teacher recipes and available student seeds within recipe.",
+                "aggregation": "Existing verified original 14x14 cells; equal mean of five teacher recipes and available student seeds within recipe.",
             },
             indent=2,
         )
@@ -252,16 +253,17 @@ def render_multi_slices(cells, out, source, recipes):
     stats = read_recipe_stats(recipes, cells)
     by_key = {(int(r["teacher_step"]), int(r["student_step"])): r for r in cells}
     groups = [
-        ("a  Teachers fixed at 75k–90k", "teacher", (75000, 80000, 85000, 90000)),
+        ("a  Teachers fixed at 50k and 75k–90k", "teacher", (50000, 75000, 80000, 85000, 90000)),
         ("b  Teachers fixed at 110k–125k", "teacher", (110000, 115000, 120000, 125000)),
-        ("c  Students fixed at 75k–90k", "student", (75000, 80000, 85000, 90000)),
+        ("c  Students fixed at 50k and 75k–90k", "student", (50000, 75000, 80000, 85000, 90000)),
         ("d  Students fixed at 110k–125k", "student", (110000, 115000, 120000, 125000)),
     ]
-    colors = ("#2166ac", "#67a9cf", "#f4a582", "#b2182b")
-    markers = ("o", "s", "^", "D")
+    colors = {50000: "#762a83", 75000: "#2166ac", 80000: "#67a9cf", 85000: "#f4a582", 90000: "#b2182b", 110000: "#2166ac", 115000: "#67a9cf", 120000: "#f4a582", 125000: "#b2182b"}
+    markers = {50000: "X", 75000: "o", 80000: "s", 85000: "^", 90000: "D", 110000: "o", 115000: "s", 120000: "^", 125000: "D"}
     fig, axes = plt.subplots(2, 2, figsize=(11, 7.5), sharex=True, sharey=True)
     for ax, (title, fixedside, fixeds) in zip(axes.flat, groups):
-        for color, marker, fixed in zip(colors, markers, fixeds):
+        for fixed in fixeds:
+            color, marker = colors[fixed], markers[fixed]
             if fixedside == "teacher":
                 xs = STEPS
                 ys = [float(by_key[(fixed, v)]["p_target"]) for v in STEPS]
@@ -286,7 +288,7 @@ def render_multi_slices(cells, out, source, recipes):
             )
             ax.plot(x, ys, color=color, marker=marker, lw=1.7, ms=3.5, label=label)
         ax.set_title(title, loc="left", fontsize=11)
-        ax.set_xticks([75, 85, 95, 105, 115, 125, 143])
+        ax.set_xticks([50, 75, 85, 95, 105, 115, 125, 143])
         ax.tick_params(axis="x", labelbottom=True)
         ax.set_ylim(0, 1)
         ax.set_ylabel("p(dog), held-out test")
@@ -359,7 +361,7 @@ def render_multi_slices(cells, out, source, recipes):
                 "source_cells": str(source),
                 "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                 "checkpoint_sets": [g[2] for g in groups],
-                "aggregation": "existing verified original 13x13 cells",
+                "aggregation": "existing verified original 14x14 cells; equal mean of five teacher recipes after averaging student seeds within recipe",
                 "error_bars": "Shading: ±1 SD across five teacher recipes (ddof=1), after student-seed averaging",
                 "recipe_source": str(recipes),
                 "recipe_source_sha256": hashlib.sha256(
@@ -378,7 +380,7 @@ def main():
         "--cells",
         type=Path,
         default=Path(
-            "notebooks/figures/ckpt_takeoff_9models_and_orig_cliffcross_cells.csv"
+            "notebooks/figures/figure3_checkpoints/figure3_cells.csv"
         ),
     )
     ap.add_argument("--output", type=Path, default=None)
@@ -389,7 +391,7 @@ def main():
         "--recipes",
         type=Path,
         default=Path(
-            "notebooks/figures/ckpt_takeoff_9models_and_orig_cliffcross_recipes.csv"
+            "notebooks/figures/figure3_checkpoints/figure3_recipes.csv"
         ),
     )
     a = ap.parse_args()

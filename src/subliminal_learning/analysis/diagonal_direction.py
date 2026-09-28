@@ -25,8 +25,9 @@ Why the arms are loaded here rather than through `transfer_significance_io.norma
 that function is built for a family COMPARISON and therefore (a) drops any arm that does not cover
 the whole design -- but "partial" is a status this table must SHOW, not hide (pr1234->orig is in
 flight) -- (b) intersects the two families' cells, which would silently shrink the design of a
-60-arm table, and (c) raises when the receiver has no ``base_control.json``, which is exactly the
-case for every re-pretrained receiver (see `receiver_prior`). So the per-run assembly is done here,
+60-arm table, and (c) raises when the receiver has no test prior on disk, which is exactly the
+case for re-pretrained receivers whose ``analysis/base_eval_*_test.json`` is not written yet
+(see `receiver_prior`). So the per-run assembly is done here,
 on the same trees (`dd1b_ladder.dataset_dir`) and with the same conventions -- ftseed 1 on both
 sides, dead runs KEPT and only counted -- and the shared pieces (`base_name`, `resolve_cells`,
 `load_prior`, the anchored dead cut) are imported rather than re-derived.
@@ -368,10 +369,9 @@ def receiver_prior(receiver: str, *, animal: str = ANIMAL,
                    output_root: Path | None = None) -> float:
     """The receiver's untuned dog test prior -- the unit of every ``value_rel``.
 
-    `transfer_significance_io.load_prior` first (the ``base_control.json`` the student trees
-    carry); the re-pretrained receivers (wc, pr, dclm) have none, so they fall back to
-    ``analysis/base_eval_{short}_animal_preference_test.json``, the same test-prompt number
-    `significance_table` uses for exactly those receivers.
+    `transfer_significance_io.load_prior`, which is the canonical test prior
+    ``analysis/base_eval_{short}_animal_preference_test.json`` for every receiver (the student
+    trees' ``base_control.json`` is no longer a source), so no fallback is needed here.
 
     Args:
         receiver: Short lineage label.
@@ -379,19 +379,11 @@ def receiver_prior(receiver: str, *, animal: str = ANIMAL,
         output_root: Output tree root; defaults to the paths YAML's.
 
     Returns:
-        The prior, or NaN when neither source exists.
+        The prior, or NaN when the artifact does not exist.
     """
-    from subliminal_learning.analysis.frames import load_base_prior
-    from subliminal_learning.analysis.transfer_factors import base_eval_short
-
     root = resolve_output_root(output_root)
     prior = load_prior(animal, base_name(MODELS[receiver].base), "test", output_root=root)
-    if np.isfinite(prior) and prior != 0:
-        return float(prior)
-    try:
-        return float(load_base_prior(root, base_eval_short(MODELS[receiver].base), animal))
-    except (KeyError, FileNotFoundError, OSError):
-        return float("nan")
+    return float(prior) if np.isfinite(prior) and prior != 0 else float("nan")
 
 
 def _dead_labels(root: Path, run_paths: Sequence[str], receiver: str) -> dict[str, float]:

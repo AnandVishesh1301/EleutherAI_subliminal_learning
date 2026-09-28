@@ -17,14 +17,26 @@ OLMO = REPO / "run_logs/repretrain/olmo_cross_seed_significance_arms.json"
 #: Arms that must carry a finite pooled p, and the pools over them.
 TESTED = ["410m → 160m (dog)", "410m-seed1 → 160m (dog)"]
 TESTED_OLMO = ["dclm → c4 (elephant), core35", "dclm → seed2 (elephant), core35",
-               "dolma → dclm (elephant), core35 held-out",
-               "dclm → dolma (elephant), core35 held-out"]
+               "dolma → dclm (elephant), core35",
+               "dclm → dolma (elephant), core35",
+               "c4 → dclm (elephant), core35",
+               "c4 → dolma (elephant), core35",
+               "dclm → c4-seed2 (elephant), core35",
+               "dolma → c4-seed2 (elephant), core35",
+               "c4 → c4-seed2 (elephant), core35",
+               "c4 → seed2 (elephant), core35",
+               "c4 → dclm-seed2 (elephant), core35",
+               "dolma → c4 (elephant), core35",
+               "dolma → dclm-seed2 (elephant), core35",
+               "dolma → dolma same-model (elephant), core35",
+               "dclm → dclm same-model (elephant), core35",
+               "c4 → c4 same-model (elephant), core35"]
 POOLS = ["POOLED: same init, different corpus (elephant)",
-         "POOLED: different init, different corpus (elephant)"]
-#: Arms still filling: one amber coverage row each.
-IN_PROGRESS = ["dclm → c4-seed2 (elephant), core35", "dolma → c4 (elephant), core35 held-out",
-               "c4 → dolma (elephant), core35 held-out", "c4 → dclm (elephant), core35 held-out",
-               "dolma → dclm-seed2 (elephant), core35", "dolma → c4-seed2 (elephant), core35"]
+         "POOLED: different init, different corpus (elephant)",
+         "POOLED: same-model (elephant)"]
+#: Arms still filling: one amber coverage row each (none right now -- the whole recipe x seed
+#: matrix drained; the untestable single-cell pilots and seed-3 arms are not listed here).
+IN_PROGRESS: list[str] = []
 
 _ROOT_MISSING = not tio.resolve_output_root(None).is_dir()
 needs_tree = pytest.mark.skipif(_ROOT_MISSING, reason="no output tree on this machine")

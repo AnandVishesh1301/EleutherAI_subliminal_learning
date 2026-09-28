@@ -1,6 +1,6 @@
 import csv
-import pytest
 from pathlib import Path
+import pytest
 from scripts import plot_checkpoint_orig_early_mature as first
 from scripts.plot_checkpoint_orig_early_mature import read_cells
 
@@ -46,10 +46,11 @@ def test_rejects_duplicate_cell(tmp_path):
         read_cells(p)
 
 
-def test_reads_complete_original_13x13_slice(tmp_path):
+def test_reads_complete_original_14x14_slice(tmp_path):
     p = tmp_path / "cells.csv"
     rows = []
     plot_steps = (
+        50000,
         75000,
         80000,
         85000,
@@ -68,7 +69,7 @@ def test_reads_complete_original_13x13_slice(tmp_path):
         for s in plot_steps:
             rows.append(row(t, s, 0.1))
     write(p, rows)
-    assert len(first.read_slice_cells(p)) == 169
+    assert len(first.read_slice_cells(p)) == 196
 
 
 @pytest.mark.parametrize(
@@ -82,7 +83,6 @@ def test_reads_complete_original_13x13_slice(tmp_path):
 def test_views_dispatch_to_distinct_default_outputs(
     tmp_path, monkeypatch, view, basename
 ):
-    from pathlib import Path
     import sys
 
     calls = []
@@ -108,24 +108,34 @@ def test_views_dispatch_to_distinct_default_outputs(
     assert calls == [(view, data, Path("notebooks/figures") / basename)]
 
 
-def test_multi_slices_exports_208_rows(tmp_path):
-    from scripts.plot_checkpoint_orig_early_mature import (
-        read_slice_cells,
-        render_multi_slices,
-    )
-
-    source = Path(
-        "notebooks/figures/ckpt_takeoff_9models_and_orig_cliffcross_cells.csv"
-    )
-    rows = read_slice_cells(source)
+def test_multi_slices_exports_252_rows(tmp_path):
+    from scripts.plot_checkpoint_orig_early_mature import read_slice_cells, render_multi_slices
+    import csv
+    steps = first.STEPS
+    cells_path, recipes_path = tmp_path / "cells.csv", tmp_path / "recipes.csv"
+    fields = ["lineage", "teacher_step", "student_step", "complete_five_recipes", "p_target", "n_teacher_recipes", "n_student_runs"]
+    recipes = ["ep10_lr1e-4_r64a64", "ep20_lr1e-4_r16a32", "ep20_lr1e-4_r8a16", "ep2_lr5e-4_r32a64", "ep7_lr5e-4_r8a8"]
+    with cells_path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for i,t in enumerate(steps):
+            for j,u in enumerate(steps):
+                w.writerow(dict(lineage="orig", teacher_step=t, student_step=u, complete_five_recipes="True", p_target=str((i+j)/30), n_teacher_recipes=5, n_student_runs=15))
+    with recipes_path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["lineage","teacher_step","student_step","teacher_recipe","p_target"])
+        w.writeheader()
+        for i,t in enumerate(steps):
+            for j,u in enumerate(steps):
+                for recipe in recipes:
+                    w.writerow(dict(lineage="orig", teacher_step=t, student_step=u, teacher_recipe=recipe, p_target=str((i+j)/30)))
+    rows = read_slice_cells(cells_path)
     out = tmp_path / "multi"
-    render_multi_slices(
-        rows,
-        out,
-        source,
-        Path("notebooks/figures/ckpt_takeoff_9models_and_orig_cliffcross_recipes.csv"),
-    )
-    assert len((tmp_path / "multi_cells.csv").read_text().splitlines()) == 209
+    render_multi_slices(rows, out, cells_path, recipes_path)
+    exported = list(csv.DictReader((tmp_path / "multi_cells.csv").open()))
+    assert len(exported) == 252
+    assert {r["fixed_checkpoint"] for r in exported if r["panel"] in {"a", "c"}} == {"50000", "75000", "80000", "85000", "90000"}
+    assert {r["fixed_checkpoint"] for r in exported if r["panel"] in {"b", "d"}} == {"110000", "115000", "120000", "125000"}
+    assert all(r["n_student_runs"] == "15" for r in exported)
 
 
 @pytest.fixture

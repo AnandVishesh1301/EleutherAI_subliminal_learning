@@ -7,6 +7,7 @@ Fisher intervals are nominal approximations, not equivalence tests.
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -17,6 +18,7 @@ from scipy.stats import norm, pearsonr, rankdata, spearmanr, t
 ROOT = Path(__file__).resolve().parents[1]
 CSV = ROOT / "notebooks/figures/teacher_dce_vs_transfer_102.csv"
 OUT = ROOT / "notebooks/figures"
+STEERABILITY_OUT = ROOT / "notebooks/figures/steerability"
 STEERING_LABEL = "Increase in p(dog) under steering"
 TEACHER_TICKS = [0.5, 0.9, 0.99, 0.999, 0.9999, 0.99999, 0.999999]
 STUDENT_TICKS = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9]
@@ -27,7 +29,7 @@ def load_data():
     frame = pd.read_csv(CSV)
     assert len(frame) == 102 and frame.teacher.nunique() == 102
     assert frame.n_orig.eq(8).all() and frame.n_ds1.eq(8).all()
-    columns = ["teacher_fav_p", "teacher_val_p", "steer_ungated", "tr_orig", "tr_ds1"]
+    columns = ["teacher_val_p", "steer_ungated", "tr_orig", "tr_ds1"]
     assert np.isfinite(frame[columns].to_numpy()).all()
     return frame
 
@@ -75,17 +77,19 @@ def rank_partial(x, y, control):
     return partial_stats(*(rankdata(v, method="average") for v in (x, y, control)))
 
 
-def _save(fig, stem):
-    OUT.mkdir(parents=True, exist_ok=True)
+def _save(fig, stem, out=OUT):
+    out.mkdir(parents=True, exist_ok=True)
     for suffix in ("png", "pdf"):
-        fig.savefig(OUT / f"{stem}.{suffix}", dpi=180, bbox_inches="tight")
+        fig.savefig(out / f"{stem}.{suffix}", dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
-def _write_stats(stem, stats):
+def _write_stats(stem, stats, out=OUT):
+    stats["teacher_split"] = "validation"
+    stats["student_split"] = "test"
     stats["source_csv"] = str(CSV.relative_to(ROOT))
     stats["source_sha256"] = hashlib.sha256(CSV.read_bytes()).hexdigest()
-    (OUT / f"{stem}_stats.json").write_text(json.dumps(stats, indent=2) + "\n")
+    (out / f"{stem}_stats.json").write_text(json.dumps(stats, indent=2) + "\n")
 
 
 def _prob_ticks(ax, axis, candidates):
@@ -104,12 +108,15 @@ def _scatter(ax, x, y, **kwargs):
     return artist
 
 
-def _teacher_scatter(ax, frame, size=38):
-    vmin, vmax = np.percentile(frame.steer_ungated, [5, 95])
+def _teacher_scatter(ax, frame, size=38, *, linear=False, vmin=None, vmax=None):
+    if vmin is None or vmax is None:
+        vmin, vmax = np.percentile(frame.steer_ungated, [5, 95])
+    x = frame.teacher_val_p if linear else logit(frame.teacher_val_p)
+    y = frame.tr_orig if linear else logit(frame.tr_orig)
     artist = _scatter(
         ax,
-        logit(frame.teacher_fav_p),
-        logit(frame.tr_orig),
+        x,
+        y,
         c=frame.steer_ungated,
         cmap="viridis",
         vmin=vmin,
@@ -119,13 +126,14 @@ def _teacher_scatter(ax, frame, size=38):
         zorder=3,
     )
     np.testing.assert_array_equal(artist.get_array(), frame.steer_ungated.to_numpy())
-    ax.set_xlabel("Teacher p(dog) (logit scale)")
-    ax.set_ylabel("Student p(dog) (logit scale)")
+    scale = "linear" if linear else "logit"
+    ax.set_xlabel(f"Teacher p(dog), validation set ({scale} scale)")
+    ax.set_ylabel(f"Student p(dog), test set ({scale} scale)")
     ax.grid(alpha=0.2)
     return artist
 
 
-def _residual_panel(ax, rx, ry, stats, xlabel, ylabel):
+def _residual_panel(ax, rx, ry, stats, xlabel, ylabel, *, annotate=True):
     _scatter(ax, rx, ry, s=30, color="0.35", alpha=0.85, edgecolor="none", zorder=3)
     xx = np.array([rx.min(), rx.max()])
     ax.plot(xx, np.polyval(np.polyfit(rx, ry, 1), xx), color="0.2", linewidth=1)
@@ -134,22 +142,23 @@ def _residual_panel(ax, rx, ry, stats, xlabel, ylabel):
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.grid(alpha=0.15)
-    low, high = stats["approx_fisher_ci95"]
-    ax.text(
-        0.035,
-        0.975,
-        f"Partial ρ = {stats['r']:.3f}; p = {stats['p_nominal']:.3g}\n"
-        f"Approx. 95% CI [{low:.2f}, {high:.2f}]\nAdjusted for teacher p(dog)",
-        transform=ax.transAxes,
-        va="top",
-        fontsize=9,
-        bbox={"facecolor": "white", "alpha": 0.88, "edgecolor": "none", "pad": 3},
-    )
+    if annotate:
+        low, high = stats["approx_fisher_ci95"]
+        ax.text(
+            0.035,
+            0.975,
+            f"Partial ρ = {stats['r']:.3f}; p = {stats['p_nominal']:.3g}\n"
+            f"Approx. 95% CI [{low:.2f}, {high:.2f}]\nAdjusted for teacher validation p(dog)",
+            transform=ax.transAxes,
+            va="top",
+            fontsize=9,
+            bbox={"facecolor": "white", "alpha": 0.88, "edgecolor": "none", "pad": 3},
+        )
 
 
 def render_original(frame):
     """Preserve the original plot coordinates and limits; omit selected-teacher rings."""
-    x, y = logit(frame.teacher_fav_p), logit(frame.tr_orig)
+    x, y = logit(frame.teacher_val_p), logit(frame.tr_orig)
     result = pearsonr(x, y)
     fig, ax = plt.subplots(figsize=(9, 6.5))
     sc = _teacher_scatter(ax, frame, size=170)
@@ -186,31 +195,19 @@ def render_original(frame):
 
 
 def render_combined(frame):
-    teacher, steer, student = frame.teacher_fav_p, frame.steer_ungated, frame.tr_orig
+    teacher, steer, student = frame.teacher_val_p, frame.steer_ungated, frame.tr_orig
     stats, rx, ry = rank_partial(steer, student, teacher)
     sensitivity, _, _ = partial_stats(steer, logit(student), logit(teacher))
     marginal = pearsonr(logit(teacher), logit(student))
     rank_r = float(spearmanr(teacher, student).statistic)
     fig, (a, b) = plt.subplots(1, 2, figsize=(12.2, 4.8), layout="constrained")
-    fig.suptitle(
-        "Teacher preference and the residual steering–transfer association", fontsize=13
-    )
     sc = _teacher_scatter(a, frame)
     a.margins(x=0.07, y=0.1)
     _prob_ticks(a, "x", TEACHER_TICKS)
     _prob_ticks(a, "y", STUDENT_TICKS)
-    a.set_title("(a) Teacher preference tracks transfer", fontsize=11)
-    a.text(
-        0.035,
-        0.975,
-        f"Pearson r = {marginal.statistic:.3f}\nSpearman ρ = {rank_r:.3f}; n = {len(frame)}",
-        transform=a.transAxes,
-        va="top",
-        fontsize=9,
-        bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none"},
-    )
-    fig.colorbar(sc, ax=a, fraction=0.04, pad=0.025, extend="both").set_label(
-        STEERING_LABEL, fontsize=9
+    cax = a.inset_axes([0.05, 0.87, 0.42, 0.03])
+    fig.colorbar(sc, cax=cax, orientation="horizontal", extend="both").set_label(
+        STEERING_LABEL, fontsize=7
     )
     _residual_panel(
         b,
@@ -219,9 +216,9 @@ def render_combined(frame):
         stats,
         "Steering-response residual (rank units)",
         "Transfer residual (rank units)",
+        annotate=False,
     )
-    b.set_title("(b) Adjusted steering–transfer association", fontsize=11)
-    _save(fig, "steerability_teacher_strength_adjusted")
+    _save(fig, "steerability_teacher_strength_adjusted", STEERABILITY_OUT)
     _write_stats(
         "steerability_teacher_strength_adjusted",
         {
@@ -231,14 +228,55 @@ def render_combined(frame):
             "partial_spearman": stats,
             "raw_steer_logit_outcome_and_control": sensitivity,
         },
+        STEERABILITY_OUT,
+    )
+    return stats, sensitivity
+
+
+def render_combined_linear_middle(frame):
+    """Render the combined view with a linear-probability middle panel."""
+    teacher, steer, student = frame.teacher_val_p, frame.steer_ungated, frame.tr_orig
+    stats, rx, ry = rank_partial(steer, student, teacher)
+    sensitivity, _, _ = partial_stats(steer, logit(student), logit(teacher))
+    fig, (a, middle, b) = plt.subplots(1, 3, figsize=(16.5, 4.9), layout="constrained")
+    sc = _teacher_scatter(a, frame)
+    a.margins(x=0.07, y=0.1)
+    _prob_ticks(a, "x", TEACHER_TICKS)
+    _prob_ticks(a, "y", STUDENT_TICKS)
+    _teacher_scatter(middle, frame, linear=True)
+    middle.set_xlim(0, 1.01)
+    middle.set_ylim(0, 1.01)
+    middle.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
+    middle.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    cax = a.inset_axes([0.05, 0.87, 0.42, 0.03])
+    fig.colorbar(sc, cax=cax, orientation="horizontal", extend="both").set_label(
+        STEERING_LABEL, fontsize=7
+    )
+    _residual_panel(
+        b,
+        rx,
+        ry,
+        stats,
+        "Steering-response residual (rank units)",
+        "Transfer residual (rank units)",
+        annotate=False,
+    )
+    _save(fig, "steerability_teacher_strength_adjusted_linear_middle", STEERABILITY_OUT)
+    _write_stats(
+        "steerability_teacher_strength_adjusted_linear_middle",
+        {
+            "n": len(frame),
+            "partial_spearman_validation": stats,
+            "raw_steer_logit_outcome_and_control": sensitivity,
+        },
+        STEERABILITY_OUT,
     )
     return stats, sensitivity
 
 
 def render_same_cross(frame):
-    x, y, control = frame.tr_orig, frame.tr_ds1, frame.teacher_fav_p
+    x, y, control = frame.tr_orig, frame.tr_ds1, frame.teacher_val_p
     stats, rx, ry = rank_partial(x, y, control)
-    validation, _, _ = rank_partial(x, y, frame.teacher_val_p)
     logit_sensitivity, _, _ = partial_stats(logit(x), logit(y), logit(control))
     marginal = float(spearmanr(x, y).statistic)
     fig, (a, b) = plt.subplots(1, 2, figsize=(11.8, 5), layout="constrained")
@@ -278,9 +316,8 @@ def render_same_cross(frame):
         {
             "n": len(frame),
             "marginal_spearman": marginal,
-            "partial_spearman_favorite": stats,
-            "partial_spearman_validation": validation,
-            "partial_logit_favorite": logit_sensitivity,
+            "partial_spearman_validation": stats,
+            "partial_logit_validation": logit_sensitivity,
         },
     )
     return stats
@@ -290,11 +327,41 @@ def main():
     frame = load_data()
     render_original(frame)
     steering, logit_steering = render_combined(frame)
+    render_combined_linear_middle(frame)
     same_cross = render_same_cross(frame)
+    # Keep the historical root aliases byte-identical to the canonical nested outputs.
+    for stem in (
+        "steerability_logit_student_vs_teacher",
+        "steerability_teacher_strength_adjusted",
+        "steerability_teacher_strength_adjusted_linear_middle",
+        "same_vs_cross_transfer_teacher_adjusted",
+    ):
+        for suffix in ("png", "pdf", "stats.json"):
+            filename = (
+                f"{stem}_stats.json" if suffix == "stats.json" else f"{stem}.{suffix}"
+            )
+            source = (
+                OUT
+                if stem
+                in {
+                    "steerability_logit_student_vs_teacher",
+                    "same_vs_cross_transfer_teacher_adjusted",
+                }
+                else STEERABILITY_OUT
+            ) / filename
+            if (
+                stem == "steerability_logit_student_vs_teacher"
+                and suffix == "stats.json"
+            ):
+                continue
+            for target_dir in (OUT, STEERABILITY_OUT):
+                target = target_dir / filename
+                if source != target:
+                    shutil.copyfile(source, target)
     # Independent values computed from the frozen table before writing this renderer.
     np.testing.assert_allclose(
         [steering["r"], logit_steering["r"], same_cross["r"]],
-        [-0.07521333461867233, 0.23628461008280105, 0.3539052018175894],
+        [-0.15093320138019922, 0.14468738044167131, 0.3100685897911577],
         atol=1e-12,
     )
     print(

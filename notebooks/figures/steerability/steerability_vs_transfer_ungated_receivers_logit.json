@@ -1,0 +1,50 @@
+{
+  "sourceCSV": "notebooks/figures/steerability/steerability_ungated_receivers.csv",
+  "sourceCSVhash": "d642a09596018a7956587af404bcc35f03b8a7a02efa4e1147a06c553f9ad3be",
+  "n": 70,
+  "n_receivers": 7,
+  "n_shared_teachers": 10,
+  "n_teachers": 10,
+  "n_recipes": 56,
+  "pooledPearson_raw_y": 0.6056002604779406,
+  "pooledPearson_logit_y": 0.7992795724789221,
+  "pooledSpearman": 0.8747616131572041,
+  "receiver_centered_Pearson": 0.054679956868262984,
+  "per_receiver": {
+    "ds1": {
+      "n": 10,
+      "pearson": 0.6257947902261888,
+      "spearman": 0.4424242424242424
+    },
+    "ds2": {
+      "n": 10,
+      "pearson": -0.06464020357400174,
+      "spearman": -0.10303030303030303
+    },
+    "ds3": {
+      "n": 10,
+      "pearson": -0.1362361783457297,
+      "spearman": -0.38181818181818183
+    },
+    "fs1": {
+      "n": 10,
+      "pearson": -0.10558626437594804,
+      "spearman": -0.07878787878787878
+    },
+    "fs2": {
+      "n": 10,
+      "pearson": 0.056778121165827804,
+      "spearman": -0.2121212121212121
+    },
+    "fs3": {
+      "n": 10,
+      "pearson": -0.24377248604841004,
+      "spearman": -0.28484848484848485
+    },
+    "orig": {
+      "n": 10,
+      "pearson": 0.23274166372059965,
+      "spearman": 0.406060606060606
+    }
+  }
+}

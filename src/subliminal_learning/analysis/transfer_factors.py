@@ -554,12 +554,31 @@ def hurdle_cells(runs: pd.DataFrame, dead: "float | pd.Series" = DEAD) -> pd.Dat
 # Short base labels used in ``analysis/base_eval_*_animal_preference_test.json`` filenames.
 # Hub PolyPythias bases are listed by hand; the local re-pretraining families
 # (`registry.LOCAL_PYTHIA_FAMILIES`: wc1, pr1234, pr3, dclm1234, ...) derive their short
-# from the registry row so a new family/seed needs no edit here.
+# from the registry row so a new family/seed needs no edit here. Every base that appears as a
+# receiver under ``students/{animal}/`` must be in here, because the test prior EVERY relative
+# statistic divides by is that file (`transfer_significance_io.load_prior`): the non-160m Pythia
+# receivers under their `spec_label`/dir name, and the DataDecide OLMo and external (Qwen)
+# receivers under their on-disk dir name (they are `DataDecideSpec` / `ExternalModelSpec` bases,
+# not `parse_base_models` tokens).
 _BASE_EVAL_SHORT: dict[str, str] = {
     "original": "original", "data-seed1": "ds1", "data-seed2": "ds2", "data-seed3": "ds3",
     "weight-seed1": "ws1", "weight-seed2": "ws2", "weight-seed3": "ws3",
     # The fully re-randomized siblings, under the `normalize_model_name` labels.
     "full-seed1": "fs1", "full-seed2": "fs2", "full-seed3": "fs3",
+    # The 410m receivers, under their `spec_label` (= their on-disk dir name).
+    "pythia-410m": "p410m", "pythia-410m-seed1": "p410m-seed1",
+    # The DataDecide OLMo-1B receivers, keyed on the dir name `base_name` resolves them to.
+    "DataDecide-dolma1_7-1B-seed-default": "dd1b",
+    "DataDecide-dclm-baseline-1B-seed-default": "dd1b-dclm",
+    "DataDecide-c4-1B-seed-default": "dd1b-c4",
+    # The re-randomized-init branches, spelled `seed{ordinal}` as `DD_SEED_BRANCHES` /
+    # `dd_token` number them (branch `large-aux-2` = ordinal 2, like `dd1b_ladder`).
+    "DataDecide-dolma1_7-1B-seed-large-aux-2": "dd1b-seed2",
+    "DataDecide-dolma1_7-1B-seed-large-aux-3": "dd1b-seed3",
+    "DataDecide-dclm-baseline-1B-seed-large-aux-2": "dd1b-dclm-seed2",
+    "DataDecide-c4-1B-seed-large-aux-2": "dd1b-c4-seed2",
+    # The external (Qwen) receiver, under its dir name (`models.naming.base_dir_name`).
+    "Qwen2.5-1.5B": "qwen1.5b",
     **{
         f"{fam.variant}-seed{seed}": f"{fam.short}{seed}"
         for fam in LOCAL_PYTHIA_FAMILIES for seed in fam.seeds
@@ -574,11 +593,15 @@ def base_eval_short(base_label: str) -> str:
 
     Args:
         base_label: A `spec_label` / `normalize_model_name` label (``full-seed0`` and the raw
-            ``pythia-160m`` name are accepted as ``original``).
+            ``pythia-160m`` name are accepted as ``original``), or an on-disk base dir name --
+            the 410m and DataDecide receivers are keyed on those directly, so they resolve
+            without going through the 160m-only `normalize_model_name`.
 
     Raises:
         KeyError: For a base with no test-prior filename convention.
     """
+    if base_label in _BASE_EVAL_SHORT:
+        return _BASE_EVAL_SHORT[base_label]
     label = normalize_model_name(base_label)
     if label == "full-seed0":
         label = "original"

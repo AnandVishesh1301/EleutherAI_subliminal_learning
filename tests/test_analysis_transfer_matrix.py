@@ -417,16 +417,17 @@ def _pairing_table():
         "arms A": ["a", "a"], "arms B": ["b", "b"],
         "mean contrast": [0.1, 0.2], "mean p": [0.03, 0.5], "win prob.": [0.6, 0.55],
         "win p": [0.2, 0.4], "exceed. frac contrast": [0.1, 0.0], "exceed. p": [0.3, 0.9],
-        "opp. p (mean / win / exc.)": ["0.98 / 0.8 / 0.7", "0.5 / 0.6 / 0.01"],
+        "one-sided A>B (mean / win / exc.)": ["0.98 / 0.8 / 0.7", "0.5 / 0.6 / 0.01"],
         "animals sig. A>B (mean / win / exc.)": ["—", "1/2 / 0/2 / 0/1"],
         "animals sig. B>A (mean / win / exc.)": ["—", "0/2 / 0/2 / 1/1"],
         "floor": [1e-2, 1e-3], "labelings": [10, 1000], "stratified": [False, True]})
 
 
-def test_pairing_columns_and_styler_highlight_the_reverse_direction():
-    """The new columns sit right after the three A>B p columns, floor/labelings close the table;
-    the styler runs and paints an `opp. p` cell with any value < 0.05 in the opposite colour."""
-    assert tm.PAIRING_COLUMNS[11:15] == ["exceed. p", "opp. p (mean / win / exc.)",
+def test_pairing_columns_and_styler_highlight_only_the_two_sided_p():
+    """The secondary columns sit right after the three (two-sided) p columns, floor/labelings
+    close the table; the styler runs, greens the p < 0.05 cells and never highlights the
+    one-sided column (the old orange opp.-p styling is gone)."""
+    assert tm.PAIRING_COLUMNS[11:15] == ["exceed. p", "one-sided A>B (mean / win / exc.)",
                                          "animals sig. A>B (mean / win / exc.)",
                                          "animals sig. B>A (mean / win / exc.)"]
     assert tm.PAIRING_COLUMNS[-2:] == ["floor", "labelings"]
@@ -434,27 +435,37 @@ def test_pairing_columns_and_styler_highlight_the_reverse_direction():
     df = _pairing_table()
     assert list(df.columns) == [*tm.PAIRING_COLUMNS, "stratified"]
     html = tm.style_relationship_pairing_table(df).to_html()
-    assert html.count("rgba(255, 140, 90, 0.4)") == 1     # the stratified row's opp. p only
-    assert tm._opposite_significant("0.5 / — / 0.01") and not tm._opposite_significant("— / — / —")
-    assert not tm._opposite_significant(float("nan"))
+    assert "rgba(255, 140, 90, 0.4)" not in html
+    assert html.count("rgba(120, 200, 120, 0.35)") == 1    # the dog row's mean p = 0.03 only
+    assert not hasattr(tm, "_opposite_significant") and not hasattr(tm, "OPPOSITE_SIG")
 
 
 def test_pairing_extras_counts_animals_and_reads_the_rows_own_tests():
-    """`_pairing_extras`: opp. p from the row's own comparison (per-animal on a single-animal
-    row, stratified on the stratified row); `k/n` counts skip animals lacking a test."""
+    """`_pairing_extras`: the one-sided A>B p from the row's own comparison (per-animal on a
+    single-animal row, stratified on the stratified row); the `k/n` counts take SIGNIFICANCE
+    from the two-sided p and DIRECTION from the sign of the statistic (mean contrast vs 0, win
+    probability vs 1/2, exceedance-fraction contrast vs 0), and skip animals lacking a test."""
     from types import SimpleNamespace as NS
 
     from subliminal_learning.analysis.transfer_significance_io import (
         FamilyComparison, MultiAnimalComparison)
 
-    def fc(p_mean, p_win, p_exc, opp):
-        t = lambda p: NS(p=p, p_opposite=opp)  # noqa: E731
-        m = NS(mode="relative", mean_contrast=t(p_mean), win_probability=t(p_win),
-               arm_level_exceed=None if p_exc is None else t(p_exc))
+    def fc(mean, win, exc, upper):
+        """A stand-in comparison: ``(statistic, two-sided p)`` per test, one shared upper tail."""
+        def t(pair, centre):
+            obs, p2 = pair
+            return NS(observed=obs, p_two_sided=p2, p_upper=upper, p_lower=1.0, centre=centre)
+        m = NS(mode="relative", mean_contrast=t(mean, 0.0), win_probability=t(win, 0.5),
+               arm_level_exceed=None if exc is None else t(exc, 0.0))
         return FamilyComparison(modes={"relative": m}, frame=pd.DataFrame())
-    per = {"dog": fc(0.01, 0.2, 0.03, 0.9), "cat": fc(0.5, 0.04, None, 0.02)}
-    res = MultiAnimalComparison("x", "y", ["dog", "cat"], per, fc(0.1, 0.1, 0.1, 0.7))
+    # dog: mean A-stronger and significant, win not significant, exceedance B-stronger (sign)
+    per = {"dog": fc((0.3, 0.01), (0.55, 0.2), (-0.2, 0.03), 0.9),
+           "cat": fc((-0.4, 0.5), (0.7, 0.04), None, 0.02)}
+    res = MultiAnimalComparison("x", "y", ["dog", "cat"], per,
+                                fc((0.1, 0.1), (0.6, 0.1), (0.1, 0.1), 0.7))
     assert tm._pairing_extras(res, animal="dog", stratified=False) == ("0.9 / 0.9 / 0.9", "—", "—")
-    opp, fwd, rev = tm._pairing_extras(res, animal="dog+cat stratified", stratified=True)
-    assert (opp, fwd, rev) == ("0.7 / 0.7 / 0.7", "1/2 / 1/2 / 1/1", "1/2 / 1/2 / 0/1")
+    one_sided, fwd, rev = tm._pairing_extras(res, animal="dog+cat stratified", stratified=True)
+    assert one_sided == "0.7 / 0.7 / 0.7"
+    assert fwd == "1/2 / 1/2 / 0/1"        # dog's mean, cat's win; dog's exceedance is negative
+    assert rev == "0/2 / 0/2 / 1/1"        # only dog's exceedance points B > A
     assert tm._pairing_extras(per["cat"], animal="cat", stratified=False)[0] == "0.02 / 0.02 / —"

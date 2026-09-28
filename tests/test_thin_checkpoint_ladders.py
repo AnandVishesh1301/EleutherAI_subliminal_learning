@@ -244,8 +244,14 @@ def test_neighbouring_cells_are_not_protected(tmp_path: Path) -> None:
     assert row["status"] == "ready"
 
 
+# A cell of each SGD set, in the tree its runs are actually in.
+SGD_STUDENT_ARM = ("students/sgd/dog/pythia-160m/teacher-pythia-160m/ep2_lr5e-4_r32a64_tseed1/"
+                   "ex10-20_prefix_n100k/ep20_lr1e0_r1a4_sgd/ftseed1")
+SGD_TEACHER_ARM = "teachers/dog/pythia-160m/ep20_lr1e2_r8a4_sgd/ftseed1"
+
+
 def test_shipped_cell_protect_file_covers_every_set(tmp_path: Path) -> None:
-    """The committed file protects one real run of each of the six nonadaptive sets."""
+    """The committed file protects one real run of each nonadaptive set, Adam and SGD."""
     rules = thin.read_cell_protect_file(thin.ROOT / thin.DEFAULT_CELL_PROTECT)
     cases = {
         "pythia_student504": OTHER_ARM,
@@ -256,12 +262,43 @@ def test_shipped_cell_protect_file_covers_every_set(tmp_path: Path) -> None:
         "olmo_teacher432": ("teachers/elephant/DataDecide-dolma1_7-1B-seed2/"
                             "ep20_lr1e-4_r1a4/ftseed0"),
         "qwen_teacher432": "teachers/panda/Qwen2.5-1.5B/ep5_lr2e-5_r1a4/ftseed0",
+        # SGD sets: student and teacher, Pythia and Qwen, on the SGD lattice's own lrs.
+        "pythia_student_sgd510": SGD_STUDENT_ARM,
+        "qwen_student_sgd665": ("students/sgd/panda/Qwen2.5-1.5B/t/p/"
+                                "ep5_lr1e-1_r128a128_sgd/ftseed1"),
+        "pythia_teacher_sgd1792": SGD_TEACHER_ARM,
+        "qwen_teacher_sgd1983": "teachers/panda/Qwen2.5-1.5B/ep10_lr1e1_r1a4_sgd/ftseed0",
     }
     for name, rel in cases.items():
         assert thin.cell_protect_reason(rel, rules) == f"nonadaptive:{name}", rel
     # ... and stops at a run that is in none of them.
     assert thin.cell_protect_reason(
         "students/dog/pythia-160m-seed1/t/p/ep20_lr3e-4_r5a5/ftseed1", rules) is None
+    # An SGD tag off every SGD lattice is not a set cell either, in either tree.
+    for rel in (SGD_STUDENT_ARM.replace("lr1e0_r1a4", "lr1e0_r5a5"),
+                SGD_TEACHER_ARM.replace("lr1e2_r8a4", "lr1e2_r5a5")):
+        assert thin.cell_protect_reason(rel, rules) is None, rel
+
+
+@pytest.mark.parametrize("rel", [
+    # The OLMo/Qwen student rules are keyed on the trees those families' students live in
+    # (elephant/panda animal trees, DataDecide/Qwen receivers anywhere) ...
+    "students/dog/DataDecide-c4-1B-seed-default/t/p/ep10_lr5e-3_r256a512/ftseed1",
+    "students/controls/base/DataDecide-c4-1B-seed-default/t/p/ep10_lr5e-3_r256a512/ftseed1",
+    "students/elephant/pythia-160m/t/p/ep10_lr5e-3_r256a512/ftseed1",
+    "students/sgd/panda/Qwen2.5-1.5B/t/p/ep5_lr5e-5_r256a512/ftseed1",
+])
+def test_olmo_qwen_student_rules_cover_every_tree_those_students_live_in(rel: str) -> None:
+    rules = thin.read_cell_protect_file(thin.ROOT / thin.DEFAULT_CELL_PROTECT)
+    assert (thin.cell_protect_reason(rel, rules) or "").startswith("nonadaptive:")
+
+
+def test_olmo_qwen_student_rules_no_longer_reach_pythia_runs() -> None:
+    """The narrowed rules stop colliding with Pythia runs that share an OLMo/Qwen tag."""
+    rules = thin.read_cell_protect_file(thin.ROOT / thin.DEFAULT_CELL_PROTECT)
+    for rel in ("students/dog/pythia-160m-seed1/t/p/ep10_lr5e-3_r256a512/ftseed1",
+                "students/cat/pythia-160m-data-seed1/t/p/ep5_lr5e-5_r256a512/ftseed1"):
+        assert thin.cell_protect_reason(rel, rules) is None, rel
 
 
 def test_cell_protect_file_is_required(tree: Path, tmp_path: Path) -> None:
@@ -658,3 +695,59 @@ def test_cli_limit_with_expect_runs_rejected(tree: Path, tmp_path: Path,
                     "--expect-runs", "1", "--limit", "5")
     assert result.exit_code != 0
     assert (tree / IN_SCOPE / "checkpoints" / "checkpoint-3125").is_dir()
+
+
+# ------------------------------------------- concurrent report flushes (regression)
+def test_parallel_apply_survives_overlapping_report_flushes(tmp_path: Path,
+                                                            monkeypatch) -> None:
+    """A flush on every run, 8 workers, a slow writer: the pass must still finish.
+
+    The periodic report write used to run inside the worker threads with no lock, so two
+    threads could be inside one `atomic_write_json` of the SAME path: the first rename took
+    the shared temp file away and the second raised FileNotFoundError out of `pool.map`,
+    killing the invocation mid-apply. The flush is now coalesced under a lock (and a failed
+    snapshot is never fatal), so every run is thinned and the final report is valid.
+    """
+    rels = [IN_SCOPE.replace("ftseed1", f"ftseed{i}") for i in range(64)]
+    for rel in rels:
+        make_run(tmp_path, rel)
+    monkeypatch.setattr(thin, "FLUSH_EVERY", 1)
+    real = thin.atomic_write_json
+
+    def slow(path, obj, **kwargs):
+        # Wide enough that the next worker reaches its flush boundary while we are inside.
+        time.sleep(0.05)
+        return real(path, obj, **kwargs)
+
+    monkeypatch.setattr(thin, "atomic_write_json", slow)
+    result = invoke(tmp_path, tmp_path, "--workers", "8", "--apply", "--no-protect-file")
+    assert result.exit_code == 0, result.output + str(result.exception)
+
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert len(report["runs"]) == len(rels)
+    assert {r["status"] for r in report["runs"]} == {"thinned"}
+    for rel in rels:
+        assert sorted(thin.on_disk_steps(tmp_path / rel / "checkpoints")) == KEEP
+    assert list((tmp_path).glob("report.json.tmp*")) == []
+
+
+def test_a_failing_report_flush_is_not_fatal(tmp_path: Path, monkeypatch) -> None:
+    """The report is a snapshot; the deletion jsonl is the durable log."""
+    for i in range(4):
+        make_run(tmp_path, IN_SCOPE.replace("ftseed1", f"ftseed{i}"))
+    monkeypatch.setattr(thin, "FLUSH_EVERY", 1)
+    real = thin.atomic_write_json
+    calls: list[int] = []
+
+    def flaky(path, obj, **kwargs):
+        calls.append(1)
+        if len(calls) < 3:                     # the periodic flushes blow up...
+            raise OSError("transient")
+        return real(path, obj, **kwargs)       # ...the final one lands
+
+    monkeypatch.setattr(thin, "atomic_write_json", flaky)
+    result = invoke(tmp_path, tmp_path, "--workers", "2", "--apply", "--no-protect-file")
+    assert result.exit_code == 0, result.output + str(result.exception)
+    assert "report flush failed" in result.output
+    assert {r["status"] for r in
+            json.loads((tmp_path / "report.json").read_text())["runs"]} == {"thinned"}

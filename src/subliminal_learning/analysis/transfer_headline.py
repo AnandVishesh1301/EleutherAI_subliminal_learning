@@ -37,6 +37,8 @@ __all__ = [
     "SUMMARY_STATS",
     "arm_summary",
     "triples",
+    "DIVERGED_EXCLUDE",
+    "diverged_note",
     "family_headline_arms",
     "registry_headline_arms",
     "headline_families",
@@ -68,7 +70,10 @@ class HeadlineArm:
         matrix: The matched `tio.CellMatrix` (all-finite, control last) on a finished arm.
         prior: The receiver's test prior (`tio.student_tree_prior`).
         dropped: Why the arm is out (unfinished set), else ``None``.
-        note: Anything qualifying the arm (selection cells of a pilot-chosen set).
+        note: Anything qualifying the arm (selection cells of a pilot-chosen set, the diverged
+            runs excluded from it).
+        diverged: ``(teacher, cell)`` runs excluded as diverged (``diverged="exclude"`` only);
+            they stay NaN in `matrix`, so no statistic sees them.
     """
 
     label: str
@@ -77,6 +82,7 @@ class HeadlineArm:
     prior: float
     dropped: str | None = None
     note: str = ""
+    diverged: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -140,6 +146,19 @@ def triples(per_arm: Sequence[Mapping[str, float]]) -> dict[str, tuple[float, fl
 # ----------------------------------------------------------------------------------------------
 # arm loading (through the loaders significance_table uses)
 # ----------------------------------------------------------------------------------------------
+#: ``diverged="exclude"``: a student whose adapter went non-finite (`tio.DIVERGED_MARKER` in its
+#: run leaf) counts as a COMPLETE run for the finished-set rule and is excluded from every
+#: statistic -- its value stays NaN, which no test reads.
+DIVERGED_EXCLUDE = "exclude"
+
+
+def diverged_note(runs: Sequence[tuple[str, str]]) -> str:
+    """The note naming the diverged runs excluded from an arm (``""`` when there are none)."""
+    if not runs:
+        return ""
+    return (f"{len(runs)} diverged run{'s' if len(runs) > 1 else ''} excluded ("
+            + "; ".join(f"teacher {t}, cell {c}" for t, c in runs) + ")")
+
 def family_headline_arms(
     arms: Sequence[tio.FamilyArm] | Mapping[str, Sequence[tio.FamilyArm]],
     animals: Sequence[str],
@@ -149,6 +168,7 @@ def family_headline_arms(
     ftseed: int = 1,
     prompt_set: str = "test",
     output_root: Path | None = None,
+    diverged: str = "drop",
     **kw,
 ) -> list[HeadlineArm]:
     """The Pythia seed-family arms (`tio.family_arm_set` / `tio.same_model_arms`) per animal,
@@ -161,6 +181,10 @@ def family_headline_arms(
         animals: Animals to read, in order.
         teachers_by_animal: ``{animal: param_tags}``.
         cells: The design (a cells JSON path or a list).
+        diverged: ``"drop"`` (default) leaves a diverged student counting as a run that is not
+            there, so its arm is short of a finished set; `DIVERGED_EXCLUDE` counts it as
+            COMPLETE -- the arm stays finished, the run keeps its NaN (no statistic reads it)
+            and it is named on `HeadlineArm.diverged` and in the arm's note.
         ftseed, prompt_set, output_root, **kw: Forwarded to `tio.load_cell_matrix`.
     """
     design = tio.resolve_cells(cells)
@@ -176,7 +200,15 @@ def family_headline_arms(
             key = (animal, tio.base_name(a.receiver))
             treat = np.delete(m.values, m.control_col, axis=1)
             n_students = len(design) * len(teachers)
-            if len(m.cells) < len(design) or not np.isfinite(m.values).all():
+            div: list[tuple[str, str]] = []
+            if diverged == DIVERGED_EXCLUDE and m.missing and len(m.cells) == len(design):
+                _, sender_tree, dtag, tsd = tio._arm_trees(root, animal, a.sender, a.receiver,
+                                                           **kw)
+                div = tio.diverged_missing(m, sender_tree, dataset_tag=dtag, tseed=tsd,
+                                           ftseed=ftseed,
+                                           teacher_dataset_tags=kw.get("teacher_dataset_tags"))
+            short = [x for x in m.missing if x not in set(div)]
+            if len(m.cells) < len(design) or short:
                 n_run = int(np.isfinite(treat).sum())
                 why = ("not started" if n_run == 0 else
                        f"students {n_run}/{n_students}, controls {len(m.cells)}/{len(design)}")
@@ -185,34 +217,53 @@ def family_headline_arms(
             if key not in priors:
                 priors[key] = tio.student_tree_prior(animal, a.receiver, prompt_set=prompt_set,
                                                      output_root=root)
-            out.append(HeadlineArm(label, animal, m, priors[key]))
+            out.append(HeadlineArm(label, animal, m, priors[key], note=diverged_note(div),
+                                   diverged=tuple(div)))
     return out
 
 
 def registry_headline_arms(arms_json: str | Path, names: Sequence[str], *,
-                           output_root: Path | None = None) -> list[HeadlineArm]:
+                           output_root: Path | None = None,
+                           include_selection_cells: bool = False,
+                           diverged: str = "drop") -> list[HeadlineArm]:
     """Registry arms by NAME, read through `tio.load_registry_arm` (the same design,
     ``exclude_cells`` / ``cells`` / ``control_dataset_tag`` handling and finished-set rule as
     `tio.significance_table`). An unfinished arm is dropped with its coverage counts; the
     auto-excluded on-disk strays, a pilot-selected set's excluded selection cells, and a
     ``held_out`` entry's selection cells, go to `HeadlineArm.note`.
+
+    Args:
+        arms_json: Registry path.
+        names: The arm names to read, in the order they should be returned.
+        output_root: Output tree root; defaults to the paths YAML's.
+        include_selection_cells: Read every arm on its FULL design -- the registry's
+            ``exclude_cells`` are ignored (for the referenced arms of a ``cells_from_arm`` too)
+            and a ``held_out`` entry adds no note, so a pilot-selected teacher set is read on
+            every design cell, selection cell included. No registry uses ``exclude_cells``
+            any more, so the flag is a no-op on them; the registry files are never touched.
+        diverged: As `family_headline_arms` -- `DIVERGED_EXCLUDE` counts a diverged student as
+            a complete run and excludes it from every statistic.
     """
     arms_json = Path(arms_json)
     reg = json.loads(arms_json.read_text())
     root = resolve_output_root(output_root)
     ftseed, prompt_set = reg.get("ftseed", 1), reg.get("prompt_set", "test")
     arms = {a["name"]: a for a in reg["arms"]}
-    held = {h["arm"]: h for h in reg.get("held_out", [])}
+    if include_selection_cells:
+        arms = {n: {k: v for k, v in a.items() if k != "exclude_cells"} for n, a in arms.items()}
+    held = {} if include_selection_cells else {h["arm"]: h for h in reg.get("held_out", [])}
     out, priors = [], {}
     for name in names:
         a = arms[name]
         ra = tio.load_registry_arm(a, arms, arms_json, root=root, ftseed=ftseed,
-                                   prompt_set=prompt_set, priors=priors)
+                                   prompt_set=prompt_set, priors=priors, diverged=diverged)
         notes = []
         if ra.strays:
             notes.append(f"strays excluded: {', '.join(ra.strays)}")
         if a.get("exclude_cells"):
             notes.append(f"selection cell(s) excluded: {', '.join(a['exclude_cells'])}")
+        if ra.diverged:
+            notes.append(diverged_note(ra.diverged))
         if name in held:
             notes.append(f"teacher selected on {len(held[name]['selection_cells'])} of the "
                          f"design cells ({', '.join(held[name]['selection_cells'])}), kept in")
@@ -230,7 +281,8 @@ def registry_headline_arms(arms_json: str | Path, names: Sequence[str], *,
         m = tio.CellMatrix(frame=m.frame, values=m.values[:, keep], cells=list(m.cells),
                            pools=[m.pools[j] for j in keep], control_col=len(keep) - 1,
                            missing=[])
-        out.append(HeadlineArm(name, a["animal"], m, ra.prior, note="; ".join(notes)))
+        out.append(HeadlineArm(name, a["animal"], m, ra.prior, note="; ".join(notes),
+                               diverged=tuple(ra.diverged)))
     return out
 
 
@@ -284,14 +336,14 @@ def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]
                        "410m-seed1→160m (1)", "core30", "dog",
                        reg(xarch, ["410m-seed1 → 160m (dog)"])),
         HeadlineFamily("same init, different corpus (OLMo dolma, dclm, c4 recipes)",
-                       "dolma↔dclm, dclm↔c4, dolma↔c4 (6)", "core35 (34 held-out)",
+                       "dolma↔dclm, dclm↔c4, dolma↔c4 (6)", "core35",
                        "elephant",
-                       reg(olmo, ["dolma → dclm (elephant), core35 held-out",
-                                  "dclm → dolma (elephant), core35 held-out",
+                       reg(olmo, ["dolma → dclm (elephant), core35",
+                                  "dclm → dolma (elephant), core35",
                                   "dclm → c4 (elephant), core35",
-                                  "dolma → c4 (elephant), core35 held-out",
-                                  "c4 → dolma (elephant), core35 held-out",
-                                  "c4 → dclm (elephant), core35 held-out"]),
+                                  "dolma → c4 (elephant), core35",
+                                  "c4 → dolma (elephant), core35",
+                                  "c4 → dclm (elephant), core35"]),
                        note="DataDecide recipes share the seed-default init byte-for-byte"),
         HeadlineFamily("different init, different corpus (OLMo → large-aux-2 receivers)",
                        "dclm→seed2, dclm→c4-seed2, dolma→dclm-seed2, dolma→c4-seed2 (4)",
@@ -307,11 +359,11 @@ def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]
                        reg(olmo, ["orig → seed2 (elephant), ctrl20",
                                   "seed2 → orig (elephant), core30"])),
         HeadlineFamily("cross architecture, small→large (160m → OLMo dolma)",
-                       "160m→OLMo-1B (1)", "core35 (34 held-out)", "dog",
-                       reg(xarch, ["160m → OLMo-1B (dog), core35 held-out"])),
+                       "160m→OLMo-1B (1)", "core35", "dog",
+                       reg(xarch, ["160m → OLMo-1B (dog), core35"])),
         HeadlineFamily("cross architecture, large→small (OLMo dolma → 160m)",
                        "OLMo-1B→160m ×1 dog, ×1 elephant (2)", "core30", "dog",
-                       reg(xarch, ["OLMo-1B → 160m (dog), core30 held-out",
+                       reg(xarch, ["OLMo-1B → 160m (dog), core30",
                                    "OLMo-1B → 160m (elephant)"])),
     ]
 

@@ -12,7 +12,11 @@ from typer.testing import CliRunner
 from scripts.transfer_significance_readout import app
 from subliminal_learning.analysis import transfer_significance_io as tio
 from subliminal_learning.stats import transfer_significance_tests as tt
-from tests.test_stats_transfer_significance import _write_seed_eval, _write_summary
+from tests.test_stats_transfer_significance import (
+    _write_base_eval_prior,
+    _write_seed_eval,
+    _write_summary,
+)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -165,9 +169,7 @@ def _family_tree(root, *, cells=("c1", "c2"), teachers=("t1", "t2"), dead_cell=N
                 _write_seed_eval(ctrl / "ftseed1/eval/dog/preference_eval.json", 0.1)
                 _probe(ctrl, dead=mode == "all-control-dead")
     for base in set(bases.values()):
-        path = root / "teachers/dog" / base / "base_control.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"validation": {"p_target": 0.1}}))
+        _write_base_eval_prior(root, base, "dog", 0.1)
     if anchor:
         rec = root / "analysis/unigram_anchor_pp1.json"
         rec.parent.mkdir(parents=True, exist_ok=True)
@@ -322,6 +324,22 @@ def test_compare_families_end_to_end(tmp_path):
     assert rel.win_probability.observed == pytest.approx(1.0)
     assert rel.win_probability.p == rel.win_probability.floor
     assert res.skipped_arms == []
+
+
+def test_exclude_blocks_keeps_named_animal_arm_blocks_out(tmp_path):
+    """``exclude_blocks`` drops the named (animal, arm) blocks before anything is tested and
+    reports them; the default keeps every block (the old call path)."""
+    _family_tree(tmp_path)
+    kept = tio.compare_families(DS, FS, "dog", ["t1", "t2"], family_a="ds", family_b="fs",
+                                cells=["c1", "c2"], n_perm=200, seed=0, output_root=tmp_path)
+    gone = tio.compare_families(DS, FS, "dog", ["t1", "t2"], family_a="ds", family_b="fs",
+                                cells=["c1", "c2"], n_perm=200, seed=0, output_root=tmp_path,
+                                exclude_blocks={("dog", "orig->ds1")})
+    kept_arms = set(kept.modes["relative"].arms["arm"])
+    gone_arms = set(gone.modes["relative"].arms["arm"])
+    assert "orig->ds1" in kept_arms
+    assert gone_arms == kept_arms - {"orig->ds1"}
+    assert any("orig->ds1" in s and "excluded" in s for s in gone.skipped_arms)
 
 
 def test_scale_free_summaries_are_invariant_to_value_mode(tmp_path):
@@ -793,10 +811,10 @@ def _copy_animal(tmp_path, animal, *, drop_arms=()):
         out = ctrl.parent.parent / animal / "preference_eval.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(ctrl.read_text().replace('"dog"', f'"{animal}"'))
-    for base_control in sorted(tmp_path.glob("teachers/dog/*/base_control.json")):
-        out = tmp_path / "teachers" / animal / base_control.parent.name / "base_control.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(base_control.read_text())
+    for prior in sorted(tmp_path.glob("analysis/base_eval_*_animal_preference_test.json")):
+        doc = json.loads(prior.read_text())
+        doc[animal] = doc["dog"]
+        prior.write_text(json.dumps(doc))
 
 
 def _multi(tmp_path, animals=("dog", "cat"), **kw):
@@ -920,6 +938,21 @@ def test_family_comparison_table_one_row_per_block_and_mode(tmp_path):
     assert (retention["missing blocks"] == "0; receptivity: no diagonals with controls on c1+c2 "
             "(ds1, ds2, ds3, fs1, fs2, fs3, orig)").sum() == 3
     assert tio.style_family_comparison_table(df).to_html()
+
+
+def test_family_comparison_table_p_columns_are_the_two_sided_p(tmp_path):
+    """The three p columns of `family_comparison_table` -- which the §0b pairing table and the
+    registry class table reuse -- hold the tests' ``p_two_sided``, never the one-sided tail."""
+    _two_animal_tree(tmp_path)
+    res = _multi(tmp_path)
+    df = tio.family_comparison_table({("ds vs fs", "c1+c2"): res})
+    row = df[df["stratified"] & df["value mode"].eq("relative")].iloc[0]
+    m = res.stratified.modes["relative"]
+    for column, test in (("mean p", m.mean_contrast), ("win p", m.win_probability),
+                         ("exceed. p", m.arm_level_exceed)):
+        assert row[column] == pytest.approx(test.p_two_sided)
+        assert test.p_two_sided == pytest.approx(min(1.0, 2 * min(test.p_upper, test.p_lower)))
+        assert test.p == test.p_upper and test.p_opposite == test.p_lower
 
 
 def test_four_animal_comparison_table_has_one_stratified_row_per_comparison_and_mode(tmp_path):

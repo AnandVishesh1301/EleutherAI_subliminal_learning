@@ -95,6 +95,10 @@ def aggregate(rows, lineages=LINEAGES):
             mean[f"{metric}_recipe_min"] = min(numbers)
             mean[f"{metric}_recipe_max"] = max(numbers)
             mean[f"{metric}_by_recipe"] = {r["teacher_recipe"]: r[metric] for r in values}
+        mean["first_entropy_nats"] = mean["first_entropy_bits"] * math.log(2)
+        mean["first_entropy_nats_recipe_min"] = mean["first_entropy_bits_recipe_min"] * math.log(2)
+        mean["first_entropy_nats_recipe_max"] = mean["first_entropy_bits_recipe_max"] * math.log(2)
+        mean["first_entropy_nats_by_recipe"] = {recipe: value * math.log(2) for recipe, value in mean["first_entropy_bits_by_recipe"].items()}
         means.append(mean)
     if any(not any(r["lineage"] == lineage for r in means) for lineage in lineages):
         raise ValueError("At least one requested lineage has no complete five-recipe checkpoint")
@@ -160,7 +164,9 @@ def endpoint_ranks(means, output):
                   key=lambda r: r["all_entropy_bits"])
     if {r["lineage"] for r in rows} != set(TEN_LINEAGES):
         raise ValueError("Endpoint comparison requires all ten complete model means")
-    table = [{k: r[k] for k in ("lineage", "step", *METRICS)} for r in rows]
+    table = [{k: r[k] for k in ("lineage", "step", *METRICS, "first_entropy_nats")} for r in rows]
+    for row in table:
+        row["label"] = "Modern1234" if row["lineage"] == "pr1234" else row["lineage"]
     for metric in METRICS:
         ranks = rankdata([r[metric] for r in table])
         for row, rank in zip(table, ranks):
@@ -169,7 +175,7 @@ def endpoint_ranks(means, output):
     for label, subset in [("primary_nine", [r for r in rows if r["lineage"] in NINE_LINEAGES]),
                           ("primary_nine_plus_pr1234", rows)]:
         y = np.array([r["p_target"] for r in subset])
-        for metric in METRICS[:2]:
+        for metric in ("all_entropy_bits", "first_entropy_nats"):
             x = np.array([r[metric] for r in subset])
             loo = []
             for i in range(len(x)):
@@ -209,15 +215,19 @@ def draw(rows, means, output, all_nine=False, highlight_pr1234=False):
         styles = {lineage: (NINE_LABELS[i], palette(i if i < 8 else 9), NINE_MARKERS[i], "-")
                   for i, lineage in enumerate(NINE_LINEAGES)}
         if highlight_pr1234:
-            styles["pr1234"] = ("Pile repro seed1234 (pr1234)", palette(8), "h", "-")
+            styles["pr1234"] = ("Modern1234", palette(8), "h", "-")
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10,
                          "axes.spines.top": False, "axes.spines.right": False,
                          "pdf.fonttype": 42, "ps.fonttype": 42})
-    fig, axes = plt.subplots(1, 3, figsize=(16.2, 5.1) if highlight_pr1234 else (13.9, 4.9), sharex=True)
+    plotted_metrics = ("p_target", "first_entropy_nats") if highlight_pr1234 else METRICS
+    fig, axes = plt.subplots(1, len(plotted_metrics), figsize=(11.0, 5.1) if highlight_pr1234 else (13.9, 4.9), sharex=True)
     hmin = min(r[metric] for r in (means if means_only else rows) for metric in METRICS[:2])
     entropy_limits = (math.floor((hmin - 0.1) * 2) / 2, math.log2(1000) + 0.15)
-    titles = ("a  All-number entropy", "b  First-number entropy", "c  Same-checkpoint transfer")
-    for ax, metric, title in zip(axes, METRICS, titles):
+    if highlight_pr1234:
+        first_nats = [r["first_entropy_bits"] * math.log(2) for r in (means if means_only else rows)]
+        entropy_limits = (math.floor((min(first_nats) - 0.1) * 2) / 2, math.log(1000) + 0.15)
+    titles = (("a  Same-checkpoint transfer", "b  First-number entropy (nats)") if highlight_pr1234 else ("a  All-number entropy", "b  First-number entropy", "c  Same-checkpoint transfer"))
+    for ax, metric, title in zip(axes, plotted_metrics, titles):
         for lineage in lineages:
             label, color, marker, linestyle = styles[lineage]
             for recipe in (() if means_only else shared.CANONICAL):
@@ -238,7 +248,7 @@ def draw(rows, means, output, all_nine=False, highlight_pr1234=False):
                xticks=[25, 50, 75, 100, 125, 143])
         ax.set_ylim((0, 1) if metric == "p_target" else entropy_limits)
         probability_label = "p(dog), held-out test" if means_only else "Held-out p(dog)"
-        ax.set_ylabel(probability_label if metric == "p_target" else "Entropy (bits)")
+        ax.set_ylabel(probability_label if metric == "p_target" else ("Entropy (nats)" if metric == "first_entropy_nats" else "Entropy (bits)"))
         ax.grid(alpha=0.15, lw=0.6)
     handles, labels = axes[0].get_legend_handles_labels()
     if highlight_pr1234:
@@ -250,21 +260,16 @@ def draw(rows, means, output, all_nine=False, highlight_pr1234=False):
                           markersize=5, label=styles[x][0]) for x in legend_order]
         labels = [styles[x][0] for x in legend_order]
     fig.legend(handles, labels, loc="lower center",
-               bbox_to_anchor=(0.5, 0.085 if highlight_pr1234 else (0.01 if all_nine else 0.09)),
+               bbox_to_anchor=(0.5, 0.045 if highlight_pr1234 else (0.01 if all_nine else 0.09)),
                ncol=5 if means_only else 4, frameon=False,
                fontsize=9 if highlight_pr1234 else 9.5, handlelength=2.8,
                columnspacing=1.7 if highlight_pr1234 else 2.0)
-    if highlight_pr1234:
-        fig.text(0.5, 0.02,
-                 "Bold: original, weight seeds 1–2, full seed 2, and pr1234. Faint: the other five model means.\n"
-                 "Only complete five-recipe checkpoints are shown; lines join observations across gaps. No individual teacher curves.",
-                 ha="center", va="bottom", fontsize=8.5, linespacing=1.5)
-    elif not all_nine:
+    if not highlight_pr1234 and not all_nine:
         fig.text(0.5, 0.025,
                  "Faint lines: five individual teacher recipes. Bold markers: equal recipe means; variability is not a confidence interval.\n"
                  "Entropy is over whole integer values in filtered source pools. Transfer averages student seeds within recipe first.",
                  ha="center", va="bottom", fontsize=8.5, linespacing=1.5)
-    fig.subplots_adjust(left=0.055, right=0.99, bottom=0.32 if highlight_pr1234 else (0.25 if all_nine else 0.28),
+    fig.subplots_adjust(left=0.055, right=0.99, bottom=0.30 if highlight_pr1234 else (0.25 if all_nine else 0.28),
                         top=0.92, wspace=0.28)
     for suffix in ("png", "pdf"):
         fig.savefig(output.with_suffix(f".{suffix}"), dpi=240, bbox_inches="tight", facecolor="white")
@@ -282,7 +287,7 @@ def main(argv=None):
     mode.add_argument("--highlight-pr1234", action="store_true",
                       help="Highlight orig/wc1/wc2/fs2/pr1234; show other Figure 1 model means faintly")
     parser.add_argument("--pool-cache", type=Path, default=PROJECT / "docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz")
-    parser.add_argument("--figure1-cells", type=Path, default=PROJECT / "notebooks/figures/ckpt_takeoff_9models_and_orig_cliffcross_cells.csv")
+    parser.add_argument("--figure1-cells", type=Path, default=PROJECT / "notebooks/figures/figure3_checkpoints/figure3_cells.csv")
     args = parser.parse_args(argv)
     means_only = args.all_nine or args.highlight_pr1234
     lineages = TEN_LINEAGES if args.highlight_pr1234 else (NINE_LINEAGES if args.all_nine else LINEAGES)
@@ -316,12 +321,14 @@ def main(argv=None):
         n_complete_five_recipe_groups=len(means), excluded_incomplete_groups=excluded,
         checkpoints={lineage: sorted(r["step"] for r in means if r["lineage"] == lineage) for lineage in lineages},
         entropy_y_limits=entropy_limits, lineages=list(lineages),
+        plotted_metrics=list(("p_target", "first_entropy_nats") if args.highlight_pr1234 else METRICS),
+        entropy_unit="nats" if args.highlight_pr1234 else "bits",
         curves_per_panel=len(lineages) if means_only else len(lineages) * 6,
         show_individual_recipes=not means_only, figure1_transfer_check=reference_check,
         highlighted_lineages=list(HIGHLIGHTED_LINEAGES) if args.highlight_pr1234 else None,
         pr1234_pool_cache_check=pool_check, endpoint_associations=endpoint_check,
         assumptions=[
-            "Existing verified table is an immutable analysis snapshot; no live artifact rescan was performed.",
+            "Rendering reads the supplied verified input table; any refresh or upstream artifact provenance is recorded by that input's source metadata.",
             "Only canonical five teachers with matched exact-probability diagonal evaluations are shown.",
             "All-number entropy counts each in-support integer occurrence; first-number entropy counts the first position per nonempty row. Values are integers 0–999, not tokenizer tokens.",
             "Entropies describe full filtered pools, not model predictive entropy or the selected 10,000-row training subset.",

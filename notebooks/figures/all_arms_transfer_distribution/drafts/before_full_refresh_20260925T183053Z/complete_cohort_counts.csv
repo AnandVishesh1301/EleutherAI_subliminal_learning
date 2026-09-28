@@ -1,0 +1,17 @@
+relation,available_full_cell_pairs,complete_pairs,complete_blocks
+same model,5217,5160,172
+"shared init, different data order",11760,11760,210
+"different init, same data order",4685,4500,150
+different init,26878,26768,478
+"reproduction (same init seed, same data order)",979,870,29
+"modern-tree reproduction (same init seed, same data order)",900,900,30
+"small→large, original-seed lineage",330,330,11
+"large→small, original-seed lineage",300,300,10
+"small→large, different-init/cross-seed",300,300,10
+"large→small, different-init/cross-seed",300,300,10
+Pythia→OLMo,560,560,16
+OLMo→Pythia,330,330,11
+OLMo same model,770,700,20
+OLMo same-init/different-corpus,1439,1400,40
+OLMo different-init/different-corpus,896,700,20
+OLMo cross-seed different-init/same-corpus,1130,1050,30

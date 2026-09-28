@@ -1,0 +1,5 @@
+relation,grid,rows,unique_cells,planned_cells,outside_allowed,planned_missing,allowed_set_comparison,manifest_path
+different init,core56,26873,56,56,0,0,actual set membership,run_logs/core56_cells.json
+"different init, same data order",core30,2291,30,30,0,0,actual set membership,run_logs/core30_cells.json
+same model,core30,5014,30,30,0,0,actual set membership,run_logs/core30_cells.json
+"shared init, different data order",core56,11760,56,56,0,0,actual set membership,run_logs/core56_cells.json

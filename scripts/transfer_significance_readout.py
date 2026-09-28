@@ -68,7 +68,7 @@ def _report(
     matrix, dropped = tio.drop_empty_pools(matrix)
     teachers = [t for t in teachers if t in matrix.pools]
     prior = tio.load_prior(eval_animal, receiver, prompt_set)
-    proxy = " (validation proxy for the test prompt set)" if prompt_set == "test" else ""
+    proxy = " (canonical base_eval test prior)" if prompt_set == "test" else ""
     typer.echo(f"\n=== eval animal {eval_animal} | {len(matrix.cells)} cells | "
                f"prompt set {prompt_set} | ftseed {kw.get('ftseed')} ===")
     typer.echo(f"prior p_target {prior:.4f}{proxy}")
@@ -200,13 +200,15 @@ def _mode_block(mode: tio.ModeComparison, what: str) -> None:
                    f"{r['exceed. frac']:>9.2f}")
 
     def perm_line(kind: str, name: str, s, note: str = "", cells: str = "") -> None:
+        """One test's line; the p is the comparison's TWO-SIDED p, the one-sided A > B tail
+        beside it (the direction is the sign of the observed contrast)."""
         how = (f"exact ({s.n_labelings} labelings)" if s.exact
                else f"Monte Carlo ({s.n_labelings} draws)")
         typer.echo(f"\n{kind} [{name}]: {s.n_a} vs {s.n_b} arms{cells}, "
                    f"observed {s.observed:.4f}; null median "
                    f"{s.null_quantiles['50']:.3f} / 95th {s.null_quantiles['95']:.3f} / max "
-                   f"{s.null_quantiles['max']:.3f}; p {s.p:.1e} (floor {s.floor:.1e}, "
-                   f"{how}){note}")
+                   f"{s.null_quantiles['max']:.3f}; p {s.p_two_sided:.1e} two-sided "
+                   f"(one-sided A>B {s.p_upper:.1e}; floor {s.floor:.1e}, {how}){note}")
 
     def cells_note(s) -> str:
         drop = f", {s.n_cells_dropped} single-family cells dropped" if s.n_cells_dropped else ""

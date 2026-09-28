@@ -1,0 +1,36 @@
+{
+  "started_utc": "2026-09-24T19:52:30.062787+00:00",
+  "pid": 639687,
+  "output_root": "/mnt/cold-1/soar-subliminal/angela/outputs",
+  "finished_utc": "2026-09-24T19:56:43.989164+00:00",
+  "state": "complete",
+  "path": "/tmp/figure2_toprow_fresh.pkl",
+  "source_complete_pairs": 55998,
+  "complete_pairs": 48548,
+  "complete_blocks": 1022,
+  "n_bootstrap": 2000,
+  "seed": 0,
+  "student_ftseed": 1,
+  "collapse_filter": false,
+  "include_selection_cells": true,
+  "relations": [
+    "same model",
+    "shared init, different data order",
+    "different init, same data order",
+    "different init"
+  ],
+  "created_utc": "2026-09-24T19:58:16.966074+00:00",
+  "weighting": "equal matched runs",
+  "method": "two-way cluster (pigeonhole) bootstrap",
+  "source_loader": "transfer_family_complete.load_complete_pairs",
+  "cache_validation": "Legacy per-record mtime/size cache; registry load_cell_matrix leaf-file signatures",
+  "matched_pairs_sha256": "f018dc4fe8c02a709d0a34a3bd01f3b36e5fbf9840aa00bfb1be95097abce52c",
+  "manifests": {
+    "notebooks/transfer_receiver_family.ipynb": "83b2fec5486c99a4324202bc6db41652551b460a008190ff7a06f1f902d4404d",
+    "run_logs/core30_cells.json": "1c8c9450f2cb45f85c462d6ecf9e4ad682421ff71cadb583bb151db57eb6f119",
+    "run_logs/core56_cells.json": "518016126fd8cafb7ecf129e391e6c390336cf6c8dda980840f391e62db75022",
+    "run_logs/dd1b/olmo_core35_cells.json": "cf62d076cf84be217a8b03723f1c41cba6057db28fc2760dcd69d6872e980ecc",
+    "run_logs/xarch/xarch_significance_arms.json": "1c20f6f4bc77a4fb72f6d55c6a341904758bd66be08da7697ce922d499d6289a",
+    "run_logs/repretrain/olmo_cross_seed_significance_arms.json": "d17b4c79322ec5438092a4afcbd27cbabf8bc4d8e9de64e1b7e3a22de9730aba"
+  }
+}

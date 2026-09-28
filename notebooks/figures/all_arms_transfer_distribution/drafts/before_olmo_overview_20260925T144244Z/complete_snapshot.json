@@ -1,0 +1,40 @@
+{
+  "created_utc": "2026-09-24T04:42:30.373165+00:00",
+  "complete_pairs": 55228,
+  "source_pairs": 56064,
+  "n_bootstrap": 2000,
+  "seed": 0,
+  "student_ftseed": 1,
+  "collapse_filter": false,
+  "include_selection_cells": true,
+  "include_modern_reproduction": true,
+  "manifests": {
+    "run_logs/core30_cells.json": "1c8c9450f2cb45f85c462d6ecf9e4ad682421ff71cadb583bb151db57eb6f119",
+    "run_logs/core56_cells.json": "518016126fd8cafb7ecf129e391e6c390336cf6c8dda980840f391e62db75022",
+    "run_logs/dd1b/olmo_core35_cells.json": "cf62d076cf84be217a8b03723f1c41cba6057db28fc2760dcd69d6872e980ecc",
+    "run_logs/xarch/xarch_significance_arms.json": "1c20f6f4bc77a4fb72f6d55c6a341904758bd66be08da7697ce922d499d6289a",
+    "run_logs/repretrain/olmo_cross_seed_significance_arms.json": "76e0c2d2058164cfbd5e31abb40d036f07756b9e2d9cfa6dc3261bf078c25b49",
+    "run_logs/repretrain/repretrain_significance_arms.json": "a618dc0b1639fb70574de9ebf07fb218fcbc4ff5f6c7248df020d004eab5eda6"
+  },
+  "data_refresh": {
+    "pid": 2324247,
+    "started_utc": "2026-09-24T01:53:17.306820+00:00",
+    "finished_utc": "2026-09-24T01:58:28.110590+00:00",
+    "state": "complete",
+    "complete_pairs": 54328,
+    "excluded_pairs": 836,
+    "path": "/tmp/figure2_all_arms_fresh_20260924_root.pkl",
+    "elapsed_seconds": 310.8027840349823,
+    "snapshot_sha256": "f4179fc1bd876e0b9192962fdbee62a573e256495bbd659d9fc30d623c970204"
+  },
+  "modern_reproduction_refresh": {
+    "started_utc": "2026-09-24T04:37:08.901670+00:00",
+    "finished_utc": "2026-09-24T04:37:12.806906+00:00",
+    "complete_pairs": 900,
+    "retained_blocks": 30,
+    "excluded_pairs": 0,
+    "manifest": "run_logs/repretrain/repretrain_significance_arms.json",
+    "manifest_sha256": "a618dc0b1639fb70574de9ebf07fb218fcbc4ff5f6c7248df020d004eab5eda6",
+    "snapshot_sha256": "3e346732ef6d7bb8185416f5c8bf25a999075c3afed6de10b68f8f04b8a55502"
+  }
+}

@@ -1,0 +1,118 @@
+relation,treatment_state,control_state,n_pairs,all_pair_weight,win_unweighted,win_balanced_conditional
+same model,alive,alive,1323,0.25354166666666667,0.9939531368102796,0.9942481511914544
+same model,alive,dead,0,0.0,,
+same model,alive,unknown,3189,0.6093055555555557,0.9981185324553151,0.9984043765671301
+same model,dead,alive,277,0.05201388888888889,0.8664259927797834,0.8744993324432578
+same model,dead,dead,0,0.0,,
+same model,dead,unknown,11,0.0018055555555555557,1.0,1.0
+same model,unknown,alive,192,0.04166666666666668,0.984375,0.9843750000000001
+same model,unknown,dead,0,0.0,,
+same model,unknown,unknown,22,0.04166666666666666,1.0,1.0
+"shared init, different data order",alive,alive,10070,0.8703869047619045,0.8215491559086395,0.777013164643529
+"shared init, different data order",alive,dead,0,0.0,,
+"shared init, different data order",alive,unknown,0,0.0,,
+"shared init, different data order",dead,alive,1690,0.12961309523809522,0.2917159763313609,0.255166475315729
+"shared init, different data order",dead,dead,0,0.0,,
+"shared init, different data order",dead,unknown,0,0.0,,
+"shared init, different data order",unknown,alive,0,0.0,,
+"shared init, different data order",unknown,dead,0,0.0,,
+"shared init, different data order",unknown,unknown,0,0.0,,
+different init,alive,alive,24016,0.8936893096690546,0.6582278481012658,0.6581845985077467
+different init,alive,dead,0,0.0,,
+different init,alive,unknown,0,0.0,,
+different init,dead,alive,2846,0.10590146414046883,0.1679550245959241,0.16796302071473274
+different init,dead,dead,0,0.0,,
+different init,dead,unknown,0,0.0,,
+different init,unknown,alive,11,0.0004092261904761904,0.9090909090909091,0.909090909090909
+different init,unknown,dead,0,0.0,,
+different init,unknown,unknown,0,0.0,,
+"different init, same data order",alive,alive,808,0.33666666666666667,0.5457920792079208,0.5457920792079208
+"different init, same data order",alive,dead,0,0.0,,
+"different init, same data order",alive,unknown,0,0.0,,
+"different init, same data order",dead,alive,92,0.038333333333333344,0.07608695652173914,0.07608695652173911
+"different init, same data order",dead,dead,0,0.0,,
+"different init, same data order",dead,unknown,0,0.0,,
+"different init, same data order",unknown,alive,191,0.12499999999999994,0.5759162303664922,0.5759162303664924
+"different init, same data order",unknown,dead,0,0.0,,
+"different init, same data order",unknown,unknown,1200,0.5,0.45666666666666667,0.45666666666666667
+"small→large, original-seed lineage",alive,alive,322,0.9757575757575756,0.7142857142857143,0.7142857142857143
+"small→large, original-seed lineage",alive,dead,0,0.0,,
+"small→large, original-seed lineage",alive,unknown,0,0.0,,
+"small→large, original-seed lineage",dead,alive,8,0.024242424242424242,0.125,0.125
+"small→large, original-seed lineage",dead,dead,0,0.0,,
+"small→large, original-seed lineage",dead,unknown,0,0.0,,
+"small→large, original-seed lineage",unknown,alive,0,0.0,,
+"small→large, original-seed lineage",unknown,dead,0,0.0,,
+"small→large, original-seed lineage",unknown,unknown,0,0.0,,
+"large→small, original-seed lineage",alive,alive,250,0.8333333333333334,0.688,0.6879999999999998
+"large→small, original-seed lineage",alive,dead,0,0.0,,
+"large→small, original-seed lineage",alive,unknown,0,0.0,,
+"large→small, original-seed lineage",dead,alive,50,0.16666666666666666,0.04,0.04000000000000001
+"large→small, original-seed lineage",dead,dead,0,0.0,,
+"large→small, original-seed lineage",dead,unknown,0,0.0,,
+"large→small, original-seed lineage",unknown,alive,0,0.0,,
+"large→small, original-seed lineage",unknown,dead,0,0.0,,
+"large→small, original-seed lineage",unknown,unknown,0,0.0,,
+"large→small, different-init/cross-seed",alive,alive,247,0.8233333333333335,0.5748987854251012,0.5748987854251012
+"large→small, different-init/cross-seed",alive,dead,0,0.0,,
+"large→small, different-init/cross-seed",alive,unknown,0,0.0,,
+"large→small, different-init/cross-seed",dead,alive,53,0.17666666666666664,0.0,0.0
+"large→small, different-init/cross-seed",dead,dead,0,0.0,,
+"large→small, different-init/cross-seed",dead,unknown,0,0.0,,
+"large→small, different-init/cross-seed",unknown,alive,0,0.0,,
+"large→small, different-init/cross-seed",unknown,dead,0,0.0,,
+"large→small, different-init/cross-seed",unknown,unknown,0,0.0,,
+Pythia→OLMo,alive,alive,544,1.0,0.5882352941176471,0.5882352941176471
+Pythia→OLMo,alive,dead,0,0.0,,
+Pythia→OLMo,alive,unknown,0,0.0,,
+Pythia→OLMo,dead,alive,0,0.0,,
+Pythia→OLMo,dead,dead,0,0.0,,
+Pythia→OLMo,dead,unknown,0,0.0,,
+Pythia→OLMo,unknown,alive,0,0.0,,
+Pythia→OLMo,unknown,dead,0,0.0,,
+Pythia→OLMo,unknown,unknown,0,0.0,,
+OLMo→Pythia,alive,alive,254,0.8246753246753249,0.7204724409448819,0.7204724409448819
+OLMo→Pythia,alive,dead,0,0.0,,
+OLMo→Pythia,alive,unknown,0,0.0,,
+OLMo→Pythia,dead,alive,54,0.17532467532467536,0.16666666666666666,0.16666666666666666
+OLMo→Pythia,dead,dead,0,0.0,,
+OLMo→Pythia,dead,unknown,0,0.0,,
+OLMo→Pythia,unknown,alive,0,0.0,,
+OLMo→Pythia,unknown,dead,0,0.0,,
+OLMo→Pythia,unknown,unknown,0,0.0,,
+"small→large, different-init/cross-seed",alive,alive,287,0.9566666666666668,0.7874564459930313,0.7874564459930312
+"small→large, different-init/cross-seed",alive,dead,0,0.0,,
+"small→large, different-init/cross-seed",alive,unknown,0,0.0,,
+"small→large, different-init/cross-seed",dead,alive,13,0.043333333333333335,0.15384615384615385,0.15384615384615385
+"small→large, different-init/cross-seed",dead,dead,0,0.0,,
+"small→large, different-init/cross-seed",dead,unknown,0,0.0,,
+"small→large, different-init/cross-seed",unknown,alive,0,0.0,,
+"small→large, different-init/cross-seed",unknown,dead,0,0.0,,
+"small→large, different-init/cross-seed",unknown,unknown,0,0.0,,
+OLMo cross-seed different-init/same-corpus,alive,alive,80,1.0,0.925,0.9333333333333333
+OLMo cross-seed different-init/same-corpus,alive,dead,0,0.0,,
+OLMo cross-seed different-init/same-corpus,alive,unknown,0,0.0,,
+OLMo cross-seed different-init/same-corpus,dead,alive,0,0.0,,
+OLMo cross-seed different-init/same-corpus,dead,dead,0,0.0,,
+OLMo cross-seed different-init/same-corpus,dead,unknown,0,0.0,,
+OLMo cross-seed different-init/same-corpus,unknown,alive,0,0.0,,
+OLMo cross-seed different-init/same-corpus,unknown,dead,0,0.0,,
+OLMo cross-seed different-init/same-corpus,unknown,unknown,0,0.0,,
+OLMo same-init/different-corpus,alive,alive,1254,0.9999999999999998,0.740829346092504,0.7461186974789916
+OLMo same-init/different-corpus,alive,dead,0,0.0,,
+OLMo same-init/different-corpus,alive,unknown,0,0.0,,
+OLMo same-init/different-corpus,dead,alive,0,0.0,,
+OLMo same-init/different-corpus,dead,dead,0,0.0,,
+OLMo same-init/different-corpus,dead,unknown,0,0.0,,
+OLMo same-init/different-corpus,unknown,alive,0,0.0,,
+OLMo same-init/different-corpus,unknown,dead,0,0.0,,
+OLMo same-init/different-corpus,unknown,unknown,0,0.0,,
+OLMo different-init/different-corpus,alive,alive,700,1.0,0.8271428571428572,0.8271428571428572
+OLMo different-init/different-corpus,alive,dead,0,0.0,,
+OLMo different-init/different-corpus,alive,unknown,0,0.0,,
+OLMo different-init/different-corpus,dead,alive,0,0.0,,
+OLMo different-init/different-corpus,dead,dead,0,0.0,,
+OLMo different-init/different-corpus,dead,unknown,0,0.0,,
+OLMo different-init/different-corpus,unknown,alive,0,0.0,,
+OLMo different-init/different-corpus,unknown,dead,0,0.0,,
+OLMo different-init/different-corpus,unknown,unknown,0,0.0,,

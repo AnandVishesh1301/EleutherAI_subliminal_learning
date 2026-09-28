@@ -25,12 +25,20 @@ A kill between the manifest write and the last delete leaves a state the next in
 recognises and finishes (the manifest is rewritten with each step's `deleted_at` at the end;
 rerunning is always safe).
 
+`--keep-epochs` is the REQUIRED keep set (a missing rung stops the run);
+`--keep-epochs-optional` names epochs kept where a rung snaps onto them and skipped in
+silence where none does, for ladders whose cadence realises only some of them.
+
 A SECOND, non-optional protect file (`run_logs/thin_ckpt/protect_nonadaptive_cells.tsv`)
 protects the NONADAPTIVE SETS by CELL rather than by path: no run of a Pythia / OLMo / Qwen
-nonadaptive-set cell -- student or teacher, in any arm of that family, under any arm suffix
-(`_sgd`, `_stop1250`, `_tf32`, ...) -- is ever thinned or stripped. It is keyed on the param
+nonadaptive-set cell, Adam or SGD -- student or teacher, in any arm of that family, under
+any arm suffix (`_sgd`, `_stop1250`, `_tf32`, ...) -- is ever thinned or stripped. It is
+keyed on the param
 TAG, so it protects arms that did not exist when it was written, and `--no-protect-file`
-(which waives only the path-keyed file) does not waive it.
+(which waives only the path-keyed file) does not waive it. One named set at a time can be
+released by explicit order with `--thin-protected-set NAME` (the name must exist in the
+file): that set's cells then pass through every other gate unchanged and their rows and
+ladder docs record `protected_set_override`; no other set, and no path scope, moves.
 
 Scope is deliberately narrow (all defaults overridable, all printed at start): cross-base
 PolyPythias students only -- original-suite `pythia-160m-{,data-,weight-}seed{1,2,3}`
@@ -43,14 +51,41 @@ dir or walk root is refused outright rather than deleted through.
 `--teacher-tree teachers/{animal}/{base}` switches the scope to TEACHER runs of that one
 tree (keep epochs 1/2/5 plus the root adapter; only the spectra record required, an existing
 `pile_kl_traj` archived alongside it), leaving the student scope and defaults untouched.
+`--control-tree students/controls[/...]` switches the scope to CONTROL student runs of
+that prefix, whose intermediate rungs hold no measured trajectory anyone reads: a control
+run that is NOT a nonadaptive-set cell is WIPED (every `checkpoint-*` dir goes, the root
+adapter stays, `ready:wipe`), and one that IS a set cell is thinned to the student keep
+epochs instead of being refused (`ready:set_thin`) -- the one deliberate exception to the
+cell protect file, which still refuses every other mode. No record is required (controls
+have none), the per-checkpoint eval records that do exist are archived when present, and
+the archive goes to `run_logs/thin_ckpt/archive_controls/` (`--archive-root`) rather than
+into the output root, because cold-1 is the disk this mode exists to free: if the
+pre-delete `ladder.json` write fails with ENOSPC/EDQUOT the doc is held in memory, the
+rungs are deleted, and the write is retried once (`deleted:ladder_unwritten` when it still
+fails -- the per-run jsonl log carries the steps, bytes and digests to rebuild it from);
+the same out-of-space failure on the `.claim` CREATE downgrades that run to `claimless`
+(an existing claim still means in-flight and still skips), and a run whose action raises
+becomes a `failed:<Exc>` row instead of ending the pass. `--wipe-set-cells` wipes the set
+cells too -- the matched transfer-control campaigns (DD-1B/OLMo, 410m<->160m, cross-arch)
+only COINCIDE with a set tag, they are not sweeps -- and `--exclude-prefix` (repeatable)
+holds back the sub-trees that do keep the thin treatment.
+
 `--strip-tokenizers` adds a second, independent action: the tokenizer/README copies HF
 writes into every `checkpoint-N/` dir are deleted when byte-identical to the run's root
 `checkpoints/` copy -- no record is needed, because an identical copy is not data -- and are
-counted separately in the report. `--strip-only` does that action and nothing else.
+counted separately in the report. `--strip-only` does that action and nothing else, and
+then covers EVERY rung on disk (nothing is deleted, so no rung is moot). `--strip-protected`
+(strip-only only) extends it to the runs the two protect files hold: a protected run's
+redundant tokenizer copies are still redundant, and no checkpoint dir of it is ever
+deleted.
 
     uv run python scripts/thin_checkpoint_ladders.py --only-tree students/lion/pythia-160m-seed1
     uv run python scripts/thin_checkpoint_ladders.py --teacher-tree teachers/panda/Qwen2.5-1.5B \
         --strip-only --workers 8
+    uv run python scripts/thin_checkpoint_ladders.py --teacher-tree teachers/dog/pythia-160m \
+        --strip-only --strip-protected
+    uv run python scripts/thin_checkpoint_ladders.py --control-tree students/controls \
+        --no-sha --workers 8
     uv run python scripts/thin_checkpoint_ladders.py --emit-missing-jobs /tmp/jobs.jsonl
     uv run python scripts/thin_checkpoint_ladders.py --expect-runs 4200 --apply
     uv run python scripts/thin_checkpoint_ladders.py --regen-protect-file
@@ -58,6 +93,7 @@ counted separately in the report. `--strip-only` does that action and nothing el
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -67,6 +103,7 @@ import shutil
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from fnmatch import fnmatch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -152,6 +189,18 @@ TEACHER_ARCHIVE_EXTRA = ("pile_kl_traj", "adapter_norms_traj")
 TOKENIZER_COPY_NAMES = ("tokenizer.json", "vocab.json", "merges.txt", "tokenizer_config.json",
                         "special_tokens_map.json", "added_tokens.json", "chat_template.jinja",
                         "tokenizer.model", "README.md")
+# CONTROL runs (`students/controls/{base,rng}/...`) have their own mode: their rungs were
+# never a measured trajectory, so nothing is required of them, and the default action is a
+# WIPE of every intermediate rung. The exception is a run at a nonadaptive-set cell, which
+# is thinned to the student keep epochs rather than refused.
+CONTROL_TREE = "students/controls"
+CONTROL_KEEP_EPOCHS = DEFAULT_KEEP_EPOCHS
+CONTROL_REQUIRE = ""
+CONTROL_ARCHIVE_EXTRA = ("pref_traj", "pile_kl_traj", "adapter_norms_traj", "dose_traj")
+# Off the output root on purpose: cold-1 is the disk this mode frees, and an archive copy
+# onto a full disk is the one write that would make the deletion impossible.
+CONTROL_ARCHIVE_REL = Path("run_logs") / "thin_ckpt" / "archive_controls"
+
 PROGRESS_EVERY = 500
 # Partial reports are flushed every this many handled runs during --apply, so a kill
 # mid-apply still leaves a readable (incomplete) report.
@@ -163,6 +212,10 @@ ARCHIVE_REL = Path("analysis") / "thin_ckpt" / "archive"
 
 _LOG_LOCK = threading.Lock()
 _ROW_LOCK = threading.Lock()
+# The periodic report flush is a 2 MB fsynced write: at --workers 8 two threads reach a
+# flush boundary while one is still inside it. They are COALESCED (a flush in progress is
+# as good as the one being asked for) rather than queued; the final write blocks.
+_REPORT_LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------------------- paths
@@ -259,6 +312,37 @@ def teacher_scope_reason(rel: str, tree: str) -> str | None:
     return None
 
 
+def control_scope_reason(rel: str, prefix: str, excludes: tuple = ()) -> str | None:
+    """Why this run is outside the CONTROL prefix being cleared, or None.
+
+    Path-only, and doubly anchored: the run must sit under `students/controls/` AND under
+    the explicitly named `--control-tree` prefix, so nothing outside the control trees can
+    be reached even when the run list is handed in by `--run-dirs-file`. Both control
+    layouts are in scope -- `controls/base/<receiver>/teacher-<sender>/<pool>/<tag>/ftseed`
+    and the shorter `controls/rng/<receiver>/<pool>/<tag>/ftseed` -- so the depth is only
+    bounded from below. Arm suffixes are ordinary tags here, as they are for teachers.
+    """
+    parts = Path(rel).parts
+    if any(p in EXCLUDED_COMPONENTS for p in parts):
+        return "excluded_tree"
+    if parts[:2] != ("students", "controls") or len(parts) < 5:
+        return "not_a_control_run"
+    if not (rel == prefix or rel.startswith(prefix.rstrip("/") + "/")):
+        return "other_tree"
+    for excluded in excludes:
+        if rel == excluded or rel.startswith(excluded.rstrip("/") + "/"):
+            return "excluded_prefix"
+    if any(p == "ckpt" for p in parts) or any("@step" in p for p in parts):
+        return "ckpt_component"
+    return None
+
+
+def control_labels(rel: str) -> tuple[str, str]:
+    """`(base|rng, receiver)` of a control run, the two axes its report is grouped on."""
+    parts = Path(rel).parts
+    return (parts[2] if len(parts) > 2 else "-", parts[3] if len(parts) > 3 else "-")
+
+
 def read_protect_file(path: Path) -> dict[str, str]:
     """`{normalised run_dir key: reason}` from the TSV protect file (`#` comments, blanks).
 
@@ -307,12 +391,28 @@ def _candidate_keys(component: str) -> set[str]:
     return {canonical_tag_key("_".join(segments[:n])) for n in range(2, len(segments) + 1)}
 
 
+def prefix_matches(rel: str, prefix: str) -> bool:
+    """True when `rel` is `prefix` or lies under it, allowing `*` in a prefix COMPONENT.
+
+    A set's runs are not always confined to one animal tree -- the OLMo lattice is
+    distilled into `students/elephant/DataDecide-*`, `students/dog/DataDecide-*` and
+    `students/controls/base/DataDecide-*` alike -- so a prefix component may be a glob
+    (`students/*/DataDecide-*`). Globbing is PER COMPONENT: a wildcard never swallows a `/`
+    and so never widens a rule past the depth it was written at.
+    """
+    wanted, parts = Path(prefix).parts, Path(rel).parts
+    if len(parts) < len(wanted):
+        return False
+    return all(fnmatch(part, want) for part, want in zip(parts, wanted))
+
+
 def read_cell_protect_file(path: Path) -> dict[str, dict[str, dict[str, str]]]:
     """`{tree_prefix: {match kind: {key: set name}}}` from the cell protect TSV.
 
     Rows are `tree_prefix<TAB>match<TAB>key<TAB>set`, where `match` is `tag` (the whole
     param tag, e.g. `ep20_lr1e-4_r128a32`) or `cell` (the epoch-free remainder,
-    `lr1e-4_r128a32`, which protects the cell at EVERY epoch count).
+    `lr1e-4_r128a32`, which protects the cell at EVERY epoch count). A prefix component may
+    be a glob (`students/*/DataDecide-*`); see `prefix_matches`.
     """
     rules: dict[str, dict[str, dict[str, str]]] = {}
     for line in path.read_text().splitlines():
@@ -341,7 +441,7 @@ def cell_protect_reason(rel: str, rules: dict[str, dict[str, dict[str, str]]]) -
     the tag, a cell re-run in an arm nobody enumerated is protected all the same.
     """
     for prefix, kinds in rules.items():
-        if not (rel == prefix or rel.startswith(prefix + "/")):
+        if not prefix_matches(rel, prefix):
             continue
         for component in Path(rel).parts[-2:]:
             candidates = _candidate_keys(component)
@@ -458,10 +558,15 @@ def inspect_run(run_dir: Path, output_root: Path, cfg: dict,
                 ignore_claim: Path | None = None) -> dict:
     """Classify one run dir; any unexpected error becomes a `scan_error` row."""
     try:
-        return _inspect_run(run_dir, output_root, cfg, ignore_claim=ignore_claim)
+        row = _inspect_run(run_dir, output_root, cfg, ignore_claim=ignore_claim)
     except Exception as exc:  # noqa: BLE001 -- one bad run must not kill the scan
         rel, _ = resolved_rel(run_dir, output_root)
-        return _row(rel, run_dir, "scan_error", detail=f"{type(exc).__name__}: {exc}")
+        row = _row(rel, run_dir, "scan_error", detail=f"{type(exc).__name__}: {exc}")
+    if cfg.get("control_tree"):
+        # `students/controls/<kind>/<receiver>/...` has no animal component, so the two
+        # grouping fields name the control layout and the receiver instead.
+        row["animal"], row["receiver"] = control_labels(row["run_dir_rel"])
+    return row
 
 
 def _row(rel: str, run_dir: Path, status: str, **fields) -> dict:
@@ -485,11 +590,20 @@ def _inspect_run(run_dir: Path, output_root: Path, cfg: dict,
         # manifest beside an endpoint adapter is not a finished run and is never thinned.
         return _row(rel, run_dir, "out_of_scope:not_a_run_dir")
     # The nonadaptive-set check runs BEFORE the scope check: a set cell is protected
-    # whatever scope it is being looked at under, student or teacher mode.
+    # whatever scope it is being looked at under, student or teacher mode. CONTROL mode is
+    # the one exception -- there a set cell is thinned to the keep epochs instead of being
+    # wiped, so the membership is carried down rather than refused here.
+    control = cfg.get("control_tree")
     cell = cell_protect_reason(rel, cfg.get("cells") or {})
-    if cell:
+    # `--thin-protected-set NAME` is an explicit order for ONE named set: that set's cells
+    # stop refusing and go through every other gate unchanged. Every other set still
+    # refuses, and the flag widens no path scope -- the scope check below is untouched.
+    override = bool(cell) and cell.partition(":")[2] in (cfg.get("thin_protected_sets") or ())
+    if cell and not control and not override:
         return _row(rel, run_dir, f"protected:{cell}")
-    reason = (teacher_scope_reason(rel, cfg["teacher_tree"]) if cfg.get("teacher_tree")
+    reason = (control_scope_reason(rel, control, cfg.get("exclude_prefixes") or ())
+              if control
+              else teacher_scope_reason(rel, cfg["teacher_tree"]) if cfg.get("teacher_tree")
               else scope_reason(rel, run_dir, cfg["receivers"], cfg["teachers"]))
     if reason is not None:
         return _row(rel, run_dir, f"out_of_scope:{reason}")
@@ -506,18 +620,30 @@ def _inspect_run(run_dir: Path, output_root: Path, cfg: dict,
     if not epochs:
         return _row(rel, run_dir, "error:no_epochs")
 
+    # Control mode's keep set is per RUN: a set cell keeps the student keep epochs, every
+    # other control run keeps nothing (an empty keep set snaps to nothing and is feasible
+    # for nothing, so the snapped-vs-feasible check is trivially satisfied).
+    # `--wipe-set-cells` says the set-tag coincidence of a matched transfer control is not
+    # a nonadaptive sweep: those cells are wiped like every other control run, and the row
+    # still names the set so the report shows which cells went.
+    thin_cell = bool(cell) and not cfg.get("wipe_set_cells")
+    keep_epochs = [] if (control and not thin_cell) else cfg["keep_epochs"]
+    ready = ("ready" if not control else
+             "ready:set_thin" if thin_cell else "ready:wipe")
+
     disk = on_disk_steps(ckpt_root)
     # The endpoint adapter at the `checkpoints/` root IS the final step, so a
     # `checkpoint-{n_train_steps}` dir is a duplicate, never a kept rung: the keep epochs
     # are snapped onto the OTHER rungs only.
     rungs = [s for s in sorted(disk) if s != n_train_steps]
-    targets = sorted(keep_steps(n_train_steps, epochs, cfg["keep_epochs"]))
+    optional = list(cfg.get("keep_epochs_optional") or [])
+    targets = sorted(keep_steps(n_train_steps, epochs, keep_epochs))
     keep: set[int] = set()
     snapped: dict[float, int | None] = {}
     if rungs:
-        snapped, problem = snap_keep_steps(rungs, n_train_steps, epochs, cfg["keep_epochs"])
+        snapped, problem = snap_keep_steps(rungs, n_train_steps, epochs, keep_epochs)
         per = steps_per_epoch(n_train_steps, epochs)
-        feasible = [e for e in sorted({float(x) for x in cfg["keep_epochs"]})
+        feasible = [e for e in sorted({float(x) for x in keep_epochs})
                     if int(math.floor(e * per + 0.5)) < n_train_steps]
         if problem is None and len(snapped) != len(feasible):
             problem = (f"{len(snapped)} snapped epoch(s) for {len(feasible)} feasible "
@@ -526,11 +652,21 @@ def _inspect_run(run_dir: Path, output_root: Path, cfg: dict,
             return _row(rel, run_dir, f"keep_step_missing:{problem}",
                         n_ckpts_before=len(disk))
         keep = {s for s in snapped.values() if s is not None}
+        # OPTIONAL epochs are kept where the run happens to have a rung for them and
+        # silently skipped where it does not: a ladder that was saved once per epoch must
+        # not be refused for having no half-epoch rung. They take no part in the strict
+        # snapped-vs-feasible check above, which is the REQUIRED set's contract.
+        if optional:
+            opt_snapped, _ = snap_keep_steps(rungs, n_train_steps, epochs, optional)
+            keep |= {s for s in opt_snapped.values() if s is not None}
+            snapped.update({e: s for e, s in opt_snapped.items() if s is not None})
 
     delete_steps = sorted(s for s in disk if s not in keep)
-    row = _row(rel, run_dir, "ready", n_ckpts_before=len(disk),
+    row = _row(rel, run_dir, ready, n_ckpts_before=len(disk),
                n_keep=len(keep & set(disk)), n_delete=len(delete_steps),
-               final_dup=n_train_steps in disk)
+               final_dup=n_train_steps in disk, cell=cell or "",
+               protected_set_override=override, keep_epochs=keep_epochs,
+               keep_epochs_optional=optional)
 
     ladder_doc_stored = read_ladder(run_dir)
     if not delete_steps:
@@ -640,16 +776,39 @@ _NO_STRIP_PREFIXES = ("out_of_scope", "protected", "symlink", "scan_error", "err
                       "in_flight", "endpoint_symlink", "final_dup_differs")
 
 
+def _doomed_steps(row: dict, cfg: dict) -> set[int]:
+    """The rungs this invocation deletes, i.e. the ones the strip may skip as moot.
+
+    Under `--strip-only` NOTHING is deleted, so no rung is moot: skipping the planned
+    delete set there would silently leave most rungs' tokenizer copies behind.
+    """
+    if cfg.get("strip_only"):
+        return set()
+    return set(row.get("delete_steps") or [])
+
+
+def _no_strip(status: str, cfg: dict) -> bool:
+    """True when this row's status excludes it from the tokenizer strip.
+
+    `--strip-protected` waives ONLY the `protected:` statuses (both protect files): those
+    runs are protected against losing checkpoints, which the strip never takes. Every other
+    excluded status (out of scope, unsafe path, in flight, unclassifiable) still stands.
+    """
+    prefixes = tuple(p for p in _NO_STRIP_PREFIXES
+                     if not (cfg.get("strip_protected") and p == "protected"))
+    return any(status.startswith(p) for p in prefixes)
+
+
 def add_tokenizer_plan(run_dir: Path, row: dict, cfg: dict) -> None:
     """Attach this run's tokenizer-strip plan to `row` (its own, record-free action).
 
     Independent of the derived records: deleting a byte-identical copy loses no number, so
     a run that cannot be thinned (its spectra record is missing) can still be stripped. The
     dirs considered are the ones that SURVIVE this invocation -- a rung about to be deleted
-    is moot -- and the run must still pass the in-flight gate.
+    is moot, and under `--strip-only` none is -- and the run must still pass the in-flight
+    gate.
     """
-    if not cfg.get("strip_tokenizers") or any(
-            row["status"].startswith(p) for p in _NO_STRIP_PREFIXES):
+    if not cfg.get("strip_tokenizers") or _no_strip(row["status"], cfg):
         return
     ckpt_root = run_dir / "checkpoints"
     disk = on_disk_steps(ckpt_root)
@@ -657,7 +816,7 @@ def add_tokenizer_plan(run_dir: Path, row: dict, cfg: dict) -> None:
     if flight is not None:
         row["tok_problems"] = [{"dir": "-", "file": "-", "reason": f"in_flight: {flight}"}]
         return
-    doomed = set(row.get("delete_steps") or [])
+    doomed = _doomed_steps(row, cfg)
     dirs = [disk[s] for s in sorted(disk) if s not in doomed]
     removable, problems = tokenizer_strip_plan(ckpt_root, dirs, deep=bool(cfg.get("tokenizer_sha")))
     row["tok_files"] = len(removable)
@@ -674,9 +833,13 @@ def strip_tokenizers_run(row: dict, cfg: dict, log_path: Path) -> str:
     copy is PROVEN immediately before each unlink, and each deleted path is logged.
     """
     run_dir = Path(row["run_dir"])
-    claim = acquire_claim(run_dir)
-    if claim is None:
+    # A protected run reaches here only under `--strip-protected`, which is strip-only: it
+    # must never carry a rung-deletion plan, so the flag stays a no-op for the thinning.
+    assert not (row["status"].startswith("protected:") and row.get("delete_steps")), row
+    claim, claimless, held = _claim_or_claimless(run_dir, cfg)
+    if held:
         return "skipped_claimed"
+    row["claimless"] = row.get("claimless") or claimless
     try:
         ckpt_root = run_dir / "checkpoints"
         disk = on_disk_steps(ckpt_root)
@@ -684,7 +847,7 @@ def strip_tokenizers_run(row: dict, cfg: dict, log_path: Path) -> str:
         if flight is not None:
             row["detail"] = f"re-inspection: {flight}"
             return "strip_in_flight"
-        doomed = set(row.get("delete_steps") or [])
+        doomed = _doomed_steps(row, cfg)
         dirs = [disk[s] for s in sorted(disk) if s not in doomed]
         removable, problems = tokenizer_strip_plan(ckpt_root, dirs, deep=True)
         row["tok_problems"] = problems
@@ -717,12 +880,15 @@ def strip_tokenizers_run(row: dict, cfg: dict, log_path: Path) -> str:
 def archive_records(run_dir: Path, row: dict, cfg: dict) -> tuple[dict[str, str], str | None]:
     """Copy the verified records out of the run before anything is deleted.
 
-    `{output_root}/analysis/thin_ckpt/archive/<receiver>/<record>/<rel with '/'->'__'>`:
-    a flat, run-keyed store that survives even the loss of the run dir, so the numbers the
-    deletion relies on are never in only one place. A file already there with the same
-    sha256 is left alone (rerun-safe); anything that fails to copy aborts the thinning.
+    `{archive_root}/<receiver>/<record>/<rel with '/'->'__'>`: a flat, run-keyed store that
+    survives even the loss of the run dir, so the numbers the deletion relies on are never
+    in only one place. The root is `{output_root}/analysis/thin_ckpt/archive/` by default
+    and `run_logs/thin_ckpt/archive_controls/` in control mode (`--archive-root`), where the
+    output root is the full disk being freed. A file already there with the same sha256 is
+    left alone (rerun-safe); anything that fails to copy aborts the thinning.
     """
-    base = Path(cfg["output_root"]) / ARCHIVE_REL / (row["receiver"] or "-")
+    archive_root = Path(cfg.get("archive_root") or Path(cfg["output_root"]) / ARCHIVE_REL)
+    base = archive_root / (row["receiver"] or "-")
     stem = row["run_dir_rel"].replace("/", "__")
     written: dict[str, str] = {}
     extra = [n for n in cfg.get("archive_extra") or [] if n not in cfg["require"]]
@@ -747,7 +913,11 @@ def archive_records(run_dir: Path, row: dict, cfg: dict) -> tuple[dict[str, str]
                     os.replace(tmp, dest)
             except OSError as exc:
                 return written, f"{name}: {type(exc).__name__}: {exc}"
-            written[fname] = str(dest.relative_to(Path(cfg["output_root"])))
+            # Kept relative to the output root when it lies under it (the student and
+            # teacher archives do), absolute otherwise (the control archive does not).
+            written[fname] = (str(dest.relative_to(Path(cfg["output_root"])))
+                              if dest.is_relative_to(Path(cfg["output_root"]))
+                              else str(dest))
     return written, None
 
 
@@ -793,7 +963,11 @@ def ladder_doc(run_dir: Path, row: dict, cfg: dict, deleted: dict[int, str] | No
         "steps_per_epoch": steps_per_epoch(row["n_train_steps"], row["epochs"]),
         "checkpoint_steps": row["ladder_steps"],
         "checkpoints": checkpoints,
-        "keep_epochs": cfg["keep_epochs"],
+        "keep_epochs": row.get("keep_epochs", cfg["keep_epochs"]),
+        "keep_epochs_optional": row.get("keep_epochs_optional",
+                                        list(cfg.get("keep_epochs_optional") or [])),
+        "cell": row.get("cell") or "",
+        "protected_set_override": bool(row.get("protected_set_override")),
         "keep_targets": row.get("keep_targets") or [],
         "keep_steps": row.get("keep_steps") or [],
         "archived": archived or (read_ladder(run_dir) or {}).get("archived") or {},
@@ -801,6 +975,7 @@ def ladder_doc(run_dir: Path, row: dict, cfg: dict, deleted: dict[int, str] | No
         "thinned_at": datetime.now(timezone.utc).isoformat(),
         "thinned_by": "scripts.thin_checkpoint_ladders",
         "train_manifest_ref": manifest_ref(run_dir),
+        "action": row["status"],
     }
 
 
@@ -813,12 +988,66 @@ def _append_jsonl(path: Path, record: dict) -> None:
 
 def _plan_changed(row: dict, fresh: dict) -> str | None:
     """Why the re-inspected plan is not the planned one, or None when they agree."""
-    if fresh["status"] != "ready":
+    if not fresh["status"].startswith("ready"):
         return fresh["status"]
+    if fresh["status"] != row["status"]:
+        return f"action differs: {fresh['status']}"
     if (fresh.get("delete_steps") != row.get("delete_steps")
             or fresh.get("keep_steps") != row.get("keep_steps")):
         return "plan differs"
     return None
+
+
+def _step_bytes(target: Path, cfg: dict) -> int:
+    """Size of one rung, measured the way this invocation sizes them, before it goes."""
+    return (shallow_bytes if cfg.get("fast_bytes") else dir_bytes)(target)
+
+
+# A disk with nothing left refuses a write as ENOSPC or -- on the quota'd CephFS mounts
+# this repo's output roots live on -- as EDQUOT. They are the same condition here, and
+# control mode's whole job is to end it, so both are the tolerated ones.
+FULL_DISK_ERRNOS = (errno.ENOSPC, errno.EDQUOT)
+
+
+def full_disk_error(exc: BaseException, cfg: dict) -> bool:
+    """True when `exc` is the out-of-space failure control mode is allowed to work around.
+
+    Only control mode tolerates it (it is the mode that runs against a disk at 100%, and
+    its deletions are what make the refused write possible); in every other mode, and for
+    every other error, the caller re-raises.
+    """
+    return bool(cfg.get("control_tree")) and isinstance(exc, OSError) \
+        and exc.errno in FULL_DISK_ERRNOS
+
+
+def _claim_or_claimless(run_dir: Path, cfg: dict) -> tuple[Path | None, bool, bool]:
+    """`(claim, claimless, held)` -- the claim, or permission to work without one.
+
+    A full disk cannot create the `.claim` file either, and refusing every run for that
+    would make the mode unable to free the disk it is pointed at. So in control mode an
+    ENOSPC/EDQUOT on the CREATE is downgraded to `claimless` (recorded in the row, the
+    ladder doc and the deletion log) while `FileExistsError` -- a claim another process
+    holds -- still means held, and every later run tries the claim again, by which point
+    the deletions have made room.
+    """
+    try:
+        claim = acquire_claim(run_dir)
+    except OSError as exc:
+        if not full_disk_error(exc, cfg):
+            raise
+        return None, True, False
+    return claim, False, claim is None
+
+
+def _write_ladder_or_enospc(run_dir: Path, doc: dict, cfg: dict) -> bool | None:
+    """Write the ladder manifest; None when a FULL disk refused it in control mode."""
+    try:
+        write_ladder(run_dir, doc)
+    except OSError as exc:
+        if not full_disk_error(exc, cfg):
+            raise
+        return None
+    return True
 
 
 def thin_run(row: dict, cfg: dict, log_path: Path) -> str:
@@ -835,9 +1064,10 @@ def thin_run(row: dict, cfg: dict, log_path: Path) -> str:
     invocation re-classifies as deletable and finishes.
     """
     run_dir = Path(row["run_dir"])
-    claim = acquire_claim(run_dir)
-    if claim is None:
+    claim, claimless, held = _claim_or_claimless(run_dir, cfg)
+    if held:
         return "skipped_claimed"
+    row["claimless"] = claimless
     try:
         fresh = inspect_run(run_dir, Path(cfg["output_root"]), cfg, ignore_claim=claim)
         changed = _plan_changed(row, fresh)
@@ -850,9 +1080,15 @@ def thin_run(row: dict, cfg: dict, log_path: Path) -> str:
             row["detail"] = problem
             return "archive_failed"
 
-        write_ladder(run_dir, ladder_doc(run_dir, row, cfg, archived=archived))
+        doc = ladder_doc(run_dir, row, cfg, archived=archived)
+        doc["claimless"] = claimless
+        # The pre-delete write can itself be the write a FULL disk refuses (control mode
+        # exists to free exactly that disk). Then the doc is held in memory, the rungs go,
+        # and the write is retried once below -- with the deletions done there is room.
+        wrote_before = _write_ladder_or_enospc(run_dir, doc, cfg)
         deleted: dict[int, str] = {}
         failures: list[str] = []
+        unwritten = False
         try:
             for step in row["delete_steps"]:
                 target = run_dir / "checkpoints" / f"checkpoint-{step}"
@@ -862,6 +1098,11 @@ def thin_run(row: dict, cfg: dict, log_path: Path) -> str:
                     continue
                 if not target.is_dir():
                     continue
+                entry = {"run_dir": row["run_dir"], "step": step, "path": str(target),
+                         "claimless": claimless,
+                         "bytes": _step_bytes(target, cfg),
+                         "adapter_sha256": (doc["checkpoints"].get(str(step))
+                                            or {}).get("adapter_sha256")}
                 try:
                     shutil.rmtree(target)
                 except Exception as exc:  # noqa: BLE001 -- one failed rung keeps the rest
@@ -869,10 +1110,17 @@ def thin_run(row: dict, cfg: dict, log_path: Path) -> str:
                     continue
                 stamp = datetime.now(timezone.utc).isoformat()
                 deleted[step] = stamp
-                _append_jsonl(log_path, {"run_dir": row["run_dir"], "step": step,
-                                         "path": str(target), "deleted_at": stamp})
+                _append_jsonl(log_path, {**entry, "deleted_at": stamp})
         finally:
-            write_ladder(run_dir, ladder_doc(run_dir, row, cfg, deleted, archived))
+            final = ladder_doc(run_dir, row, cfg, deleted, archived)
+            final["ladder_written_after_delete"] = not wrote_before
+            final["claimless"] = claimless
+            unwritten = _write_ladder_or_enospc(run_dir, final, cfg) is None
+        if unwritten:
+            # The rungs are gone and the manifest is not: the per-run jsonl log holds the
+            # steps, bytes and digests the ladder can be rebuilt from.
+            row["detail"] = "ladder.json could not be written (ENOSPC) after the deletes"
+            return "deleted:ladder_unwritten"
         if failures:
             row["detail"] = "; ".join(failures[:3])
             return "thin_partial"
@@ -992,17 +1240,47 @@ OLMO_SUBSET_FILES = ("run_logs/dd1b/bext_cells.json", "run_logs/dd1b/kband_olmo_
                      "run_logs/dd1b/olmo_core35_cells.json")
 QWEN_STUDENT_SET = "run_logs/qwen/nonadaptive_set.json"
 TEACHER_TAG_FILES = {
-    "olmo_teacher432": ("teachers/elephant", ["run_logs/teacher_nonadaptive_olmo_qwen/"
-                                              f"olmo_ep{e}_tags.txt" for e in (5, 10, 20)]),
-    "qwen_teacher432": ("teachers/panda", ["run_logs/teacher_nonadaptive_olmo_qwen/"
-                                           f"qwen_ep{e}_tags.txt" for e in (5, 10, 20)]),
+    "olmo_teacher432": (("teachers/elephant",),
+                        [f"run_logs/teacher_nonadaptive_olmo_qwen/olmo_ep{e}_tags.txt"
+                         for e in (5, 10, 20)]),
+    "qwen_teacher432": (("teachers/panda",),
+                        [f"run_logs/teacher_nonadaptive_olmo_qwen/qwen_ep{e}_tags.txt"
+                         for e in (5, 10, 20)]),
+    # SGD twins of the two teacher sets above, on the SGD lattice's own (much higher) lrs.
+    "pythia_teacher_sgd1792": (("teachers/dog/pythia-160m",),
+                               ["run_logs/sgd_teachers/nonadaptive_design.txt"]),
+    "qwen_teacher_sgd1983": (("teachers/panda",),
+                             [f"run_logs/qwen_sgd_teachers/tags_ep{e}.txt"
+                              for e in (5, 10, 20)]),
 }
+# SGD STUDENT sets: both live under `students/sgd/{animal}/{base}`, and their tags carry the
+# `_sgd` suffix on SGD-lattice lrs that no Adam set uses, so the prefix is the tree they were
+# run in. The Qwen set is the 661-cell design PLUS the 14-cell ladder that preceded it (4 of
+# whose rungs sit below the design's lr band) -- the ladder cells are set cells too.
+SGD_STUDENT_TAG_FILES = {
+    "pythia_student_sgd510": (("students/sgd",), ["run_logs/sgd_nonadaptive_design.txt"]),
+    "qwen_student_sgd665": (("students/sgd",), ["run_logs/qwen/sgd_nonadaptive_design.txt"]),
+}
+# The Qwen SGD student ladder has no tag list of its own; its cells are the `--tag` of each
+# job line (the `_sgd` suffix comes from `--optim sgd`, as it does for every cell of the set).
+QWEN_SGD_LADDER_JOBS = "run_logs/qwen/sgd_ladder_jobs.jsonl"
 # Pythia teacher runs of the 504 lattice live in the dog tree; `cell` match protects them at
 # ep5, ep20 and any other epoch count of the same lattice.
 PYTHIA_TEACHER_TREE = "teachers/dog/pythia-160m"
+# Where the NON-PYTHIA families' students live. The OLMo lattice is distilled into the
+# elephant tree but also into `students/dog/DataDecide-*` (the Pythia->OLMo cross-arch arm)
+# and `students/{controls,sgd}/*/DataDecide-*`, and the Qwen students sit at OLMo-lattice
+# tags as often as at their own. So BOTH lattices are keyed on the union of the two families'
+# trees rather than the bare `students` prefix -- which used to make every Pythia run that
+# happens to share an OLMo/Qwen tag collide with these sets.
+FAMILY_STUDENT_PREFIXES = ("students/elephant", "students/panda",
+                           "students/*/DataDecide-*", "students/*/*/DataDecide-*",
+                           "students/*/Qwen2.5-1.5B", "students/*/*/Qwen2.5-1.5B")
 CELL_PROTECT_EXPECT = {"pythia_student504": 504, "pythia_teacher504": 504,
                        "olmo_student432": 432, "qwen_student432": 432,
-                       "olmo_teacher432": 3 * 432, "qwen_teacher432": 3 * 432}
+                       "olmo_teacher432": 3 * 432, "qwen_teacher432": 3 * 432,
+                       "pythia_student_sgd510": 510, "qwen_student_sgd665": 665,
+                       "pythia_teacher_sgd1792": 1792, "qwen_teacher_sgd1983": 1983}
 
 
 def _lattice_tags(epochs: int, lrs, ranks, alphas) -> list[str]:
@@ -1015,17 +1293,23 @@ def build_cell_protect_rows(out_root: Path) -> tuple[list[tuple[str, str, str, s
                                                      dict[str, int]]:
     """`(rows, per-set counts)` for the nonadaptive-set cell protect file.
 
-    Each row is `(tree prefix, match kind, key, set name)`. Counts are asserted by the
-    caller against `CELL_PROTECT_EXPECT`: a source that has changed shape is a changed
-    design, not a new protect file, and must never silently shrink the protection.
+    Each row is `(tree prefix, match kind, key, set name)`, one row per (prefix, key): a set
+    whose runs live in several trees gets its keys repeated under each. The asserted count is
+    the number of DISTINCT keys, i.e. the set's cell count. Counts are checked by the caller
+    against `CELL_PROTECT_EXPECT`: a source that has changed shape is a changed design, not a
+    new protect file, and must never silently shrink the protection.
     """
     rows: list[tuple[str, str, str, str]] = []
     counts: dict[str, int] = {}
 
-    def add(prefix: str, match: str, keys, name: str) -> None:
+    def add(prefixes, match: str, keys, name: str) -> None:
         keys = sorted(set(keys))
-        rows.extend((prefix, match, key, name) for key in keys)
+        rows.extend((prefix, match, key, name) for prefix in prefixes for key in keys)
         counts[name] = counts.get(name, 0) + len(keys)
+
+    def tags_from(files) -> list[str]:
+        return [t.strip() for rel in files
+                for t in (ROOT / rel).read_text().splitlines() if t.strip()]
 
     # 1/2. Pythia 504 lattice: the students by tag (ep20, every Pythia arm that ran it),
     # the teachers by epoch-free cell (the tree holds ep5 and ep20 of the same lattice).
@@ -1033,8 +1317,8 @@ def build_cell_protect_rows(out_root: Path) -> tuple[list[tuple[str, str, str, s
     pythia_tags = sorted({r["tag"] for r in harvest})
     if len(pythia_tags) != 504:
         raise typer.BadParameter(f"{PROTECT_HARVEST}: {len(pythia_tags)} tags, expected 504")
-    add("students", "tag", pythia_tags, "pythia_student504")
-    add(PYTHIA_TEACHER_TREE, "cell", [t.partition("_")[2] for t in pythia_tags],
+    add(("students",), "tag", pythia_tags, "pythia_student504")
+    add((PYTHIA_TEACHER_TREE,), "cell", [t.partition("_")[2] for t in pythia_tags],
         "pythia_teacher504")
 
     # 3. OLMo 432 student lattice, cross-checked against every subset file in the repo.
@@ -1045,20 +1329,33 @@ def build_cell_protect_rows(out_root: Path) -> tuple[list[tuple[str, str, str, s
         if outside:
             raise typer.BadParameter(f"{rel}: {len(outside)} cell(s) outside the OLMo "
                                      f"nonadaptive lattice, e.g. {outside[:3]}")
-    add("students", "tag", olmo_tags, "olmo_student432")
+    add(FAMILY_STUDENT_PREFIXES, "tag", olmo_tags, "olmo_student432")
 
     # 4. Qwen student set: the designed lattice of `nonadaptive_set.json` (a superset of the
     # 288 cells that were run -- 108 were deferred -- which is the protective side).
     qwen = json.loads((ROOT / QWEN_STUDENT_SET).read_text())
-    add("students", "tag", _lattice_tags(qwen["epochs"], qwen["lrs"], qwen["ranks"],
-                                         qwen["alphas"]), "qwen_student432")
+    add(FAMILY_STUDENT_PREFIXES, "tag",
+        _lattice_tags(qwen["epochs"], qwen["lrs"], qwen["ranks"], qwen["alphas"]),
+        "qwen_student432")
 
-    # 5. OLMo + Qwen teacher sets: the tag lists as queued, ep5/ep10/ep20.
-    for name, (prefix, files) in TEACHER_TAG_FILES.items():
-        tags = [t.strip() for rel in files
-                for t in (ROOT / rel).read_text().splitlines() if t.strip()]
-        add(prefix, "tag", tags, name)
+    # 5. OLMo + Qwen + SGD teacher sets: the tag lists as queued, every epoch count.
+    for name, (prefixes, files) in TEACHER_TAG_FILES.items():
+        add(prefixes, "tag", tags_from(files), name)
+
+    # 6. The two SGD STUDENT sets, in the tree they were run in.
+    for name, (prefixes, files) in SGD_STUDENT_TAG_FILES.items():
+        tags = tags_from(files)
+        if name.startswith("qwen"):
+            tags += [_job_tag(line) + "_sgd" for line
+                     in (ROOT / QWEN_SGD_LADDER_JOBS).read_text().splitlines() if line.strip()]
+        add(prefixes, "tag", tags, name)
     return sorted(rows), counts
+
+
+def _job_tag(line: str) -> str:
+    """The `--tag` of one jobq line's command (the cell a ladder job trains)."""
+    argv = json.loads(line)["cmd"].split()
+    return argv[argv.index("--tag") + 1]
 
 
 def regen_cell_protect_file(out_root: Path, path: Path) -> tuple[int, dict[str, int]]:
@@ -1070,10 +1367,15 @@ def regen_cell_protect_file(out_root: Path, path: Path) -> tuple[int, dict[str, 
     stamp = f"{datetime.now(timezone.utc):%Y-%m-%d}"
     header = (f"# tree_prefix\tmatch\tkey\tset  (generated {stamp} from the canonical set "
               "definitions: analysis/nonadaptive_8x7_harvest.json, "
-              f"{QWEN_STUDENT_SET}, run_logs/teacher_nonadaptive_olmo_qwen/*_tags.txt, and "
-              "the OLMo 432 lattice cross-checked against run_logs/dd1b/*_cells.json.\n"
+              f"{QWEN_STUDENT_SET}, run_logs/teacher_nonadaptive_olmo_qwen/*_tags.txt, the "
+              "OLMo 432 lattice cross-checked against run_logs/dd1b/*_cells.json, and the "
+              "SGD sets: run_logs/{sgd_nonadaptive_design.txt, "
+              "qwen/sgd_nonadaptive_design.txt, qwen/sgd_ladder_jobs.jsonl, "
+              "sgd_teachers/nonadaptive_design.txt, qwen_sgd_teachers/tags_ep*.txt}.\n"
               "# match=tag: the whole param tag; match=cell: the epoch-free remainder (every "
-              "epoch count). Arm suffixes (_sgd/_stop/_sch/_tf32/...) are matched too.)\n")
+              "epoch count). Arm suffixes (_sgd/_stop/_sch/_tf32/...) are matched too.\n"
+              "# A tree_prefix component may be a glob (`students/*/DataDecide-*`); a set "
+              "whose runs live in several trees repeats its keys under each.)\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(header + "".join("\t".join(r) + "\n" for r in rows))
     return len(rows), counts
@@ -1095,6 +1397,7 @@ def summarize(rows: list[dict]) -> str:
     in_scope = [r for r in rows if not r["status"].startswith("out_of_scope")]
     tok_runs = [r for r in rows if r.get("tok_files")]
     tok_bytes = sum(r.get("tok_bytes", 0) for r in rows)
+    protected_tok = [r for r in tok_runs if r["status"].startswith("protected:")]
     n_tok_problems = sum(len(r.get("tok_problems") or []) for r in rows)
     lines = [f"runs scanned            {len(rows)}",
              f"in scope                {len(in_scope)}",
@@ -1105,12 +1408,93 @@ def summarize(rows: list[dict]) -> str:
              f"tokenizer copies        {sum(r.get('tok_files', 0) for r in rows)} files in "
              f"{len(tok_runs)} runs, {tok_bytes / 2**30:.2f} GiB "
              f"({n_tok_problems} kept: differing/missing root copy)",
+             # --strip-protected rows: counted apart, because a protected run is stripped
+             # and NEVER thinned.
+             f"  of which protected   {sum(r.get('tok_files', 0) for r in protected_tok)} "
+             f"files in {len(protected_tok)} runs, "
+             f"{sum(r.get('tok_bytes', 0) for r in protected_tok) / 2**30:.2f} GiB",
              ""]
     lines += table("per status", lambda r: r["status"])
     lines.append("")
     lines += table("per receiver (in scope)", lambda r: r["receiver"] or "-")
     lines.append("")
     lines += table("per animal (in scope)", lambda r: r["animal"] or "-")
+    return "\n".join(lines)
+
+
+# Statuses that are neither an action nor a refusal: the run has no intermediate rung left.
+NOOP_STATUSES = ("already_thinned", "nothing_to_delete")
+# What `act()` writes back over a `ready*` status once the rungs are actually gone. These
+# are DONE, not refusals, and after --apply they are most of the table.
+APPLIED_PREFIXES = ("thinned", "thin_partial", "deleted:", "stripped")
+
+
+def _applied(rows: list[dict]) -> list[dict]:
+    """In-scope rows whose action ran (the post---apply statuses)."""
+    return [r for r in rows if r["status"].startswith(APPLIED_PREFIXES)]
+
+
+def _refused(rows: list[dict]) -> list[dict]:
+    """In-scope rows this invocation would act on but cannot (the refusals).
+
+    Neither the planned-but-not-yet-run `ready*` rows, nor the no-ops, nor the rows an
+    --apply pass has already acted on: a refusal is a run that needs a decision.
+    """
+    return [r for r in rows
+            if not r["status"].startswith(("ready", "out_of_scope", *APPLIED_PREFIXES))
+            and r["status"] not in NOOP_STATUSES]
+
+
+def _status_counts(rows: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    return counts
+
+
+def control_summary(rows: list[dict]) -> str:
+    """Control mode's own table: wipe vs set_thin vs refused, per `<base|rng>/<receiver>`.
+
+    The three columns are the three fates of a control run and must not be added up: a
+    wiped run loses every rung, a set cell keeps the student keep epochs, and a refused one
+    loses nothing. The refusal REASONS (the statuses) are listed underneath, because in this
+    mode a refusal is the only thing that needs a decision.
+    """
+    def cols(group: list[dict]) -> str:
+        out = []
+        for status in ("ready:wipe", "ready:set_thin"):
+            part = [r for r in group if r["status"] == status]
+            out.append(f"{len(part):>6} {sum(r['n_delete'] for r in part):>7} "
+                       f"{sum(r['bytes_to_free'] for r in part) / 2**30:>9.2f}")
+        return "  ".join(out) + f"  {len(_refused(group)):>6}"
+
+    in_scope = [r for r in rows if not r["status"].startswith("out_of_scope")]
+    groups: dict[str, list[dict]] = {}
+    for row in in_scope:
+        groups.setdefault(f"{row['animal'] or '-'}/{row['receiver'] or '-'}", []).append(row)
+    head = (f"{'kind/receiver':<52}{'wipe runs':>7}{'dirs':>8}{'GiB':>10}  "
+            f"{'thin runs':>7}{'dirs':>8}{'GiB':>10}  {'refused':>7}")
+    lines = ["", "control mode (wipe | set_thin | refused):", head]
+    for name, group in sorted(groups.items()):
+        lines.append(f"  {name:<50}{cols(group)}")
+    lines.append(f"  {'TOTAL':<50}{cols(in_scope)}")
+    noop = [r for r in in_scope if r["status"] in NOOP_STATUSES]
+    applied = _applied(in_scope)
+    lines.append(f"  already done (nothing left to delete): {len(noop)}")
+    if applied:
+        claimless = sum(1 for r in applied if r.get("claimless"))
+        lines.append(f"  applied this pass: {len(applied)} run(s), "
+                     f"{sum(r['bytes_to_free'] for r in applied) / 2**30:.2f} GiB "
+                     f"({claimless} without a claim; disk full)")
+        for status, group in sorted(_status_counts(applied).items()):
+            lines.append(f"    {status:<58} {group:>7}")
+    refused: dict[str, list[dict]] = {}
+    for row in _refused(in_scope):
+        refused.setdefault(row["status"], []).append(row)
+    if refused:
+        lines.append("  refusal reasons:")
+        for status, group in sorted(refused.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"    {status:<58} {len(group):>7}")
     return "\n".join(lines)
 
 
@@ -1130,6 +1514,16 @@ def main(
     keep_epochs: str = typer.Option(None, help="Comma list of epochs whose checkpoints "
                                     f"survive (default {DEFAULT_KEEP_EPOCHS}; teacher mode "
                                     f"{TEACHER_KEEP_EPOCHS})."),
+    keep_epochs_optional: str = typer.Option("", "--keep-epochs-optional",
+                                             help="Comma list of epochs kept WHEN a rung "
+                                                  "snaps onto them and skipped silently "
+                                                  "otherwise (never keep_step_missing)."),
+    thin_protected_set: list[str] = typer.Option(None, "--thin-protected-set",
+                                                 help="Repeatable: thin the cells of this "
+                                                      "NONADAPTIVE SET instead of refusing "
+                                                      "them. An explicit order for one "
+                                                      "named set; every other set still "
+                                                      "refuses."),
     require: str = typer.Option(None, help="Comma list of eval/<name>.json records that "
                                 f"must be COMPLETE before any delete (default "
                                 f"{DEFAULT_REQUIRE}; teacher mode {TEACHER_REQUIRE})."),
@@ -1137,12 +1531,37 @@ def main(
                                      "this tree instead of students, e.g. "
                                      "teachers/panda/Qwen2.5-1.5B. Nothing outside it is "
                                      "ever touched."),
+    control_tree: str = typer.Option(None, "--control-tree", help="WIPE the intermediate "
+                                     "checkpoints of CONTROL runs under this prefix "
+                                     "(students/controls or a sub-path of it); runs at a "
+                                     "nonadaptive-set cell are thinned to --keep-epochs "
+                                     "instead. Nothing outside students/controls is "
+                                     "touched."),
+    wipe_set_cells: bool = typer.Option(False, "--wipe-set-cells", help="Control mode "
+                                        "only: WIPE the control runs that sit at a "
+                                        "nonadaptive-set cell too, instead of thinning "
+                                        "them to --keep-epochs."),
+    exclude_prefix: list[str] = typer.Option(None, "--exclude-prefix", help="Control mode "
+                                             "only, repeatable: a rel-path prefix under "
+                                             "the control tree whose runs are left alone "
+                                             "(out_of_scope:excluded_prefix)."),
+    archive_root: Path = typer.Option(None, "--archive-root", help="Where the archived "
+                                      "records are copied (default "
+                                      f"{{output_root}}/{ARCHIVE_REL.as_posix()}; control "
+                                      f"mode {CONTROL_ARCHIVE_REL.as_posix()}/, off the "
+                                      "disk being freed)."),
     strip_tokenizers: bool = typer.Option(False, "--strip-tokenizers",
                                           help="Also plan removal of the tokenizer copies "
                                                "duplicated in surviving checkpoint dirs."),
     strip_only: bool = typer.Option(False, "--strip-only",
                                     help="Do ONLY the tokenizer strip: no checkpoint dir is "
-                                         "deleted even with --apply."),
+                                         "deleted even with --apply, and every rung on disk "
+                                         "is covered."),
+    strip_protected: bool = typer.Option(False, "--strip-protected",
+                                         help="Strip the tokenizer copies of PROTECTED runs "
+                                              "too (nonadaptive cells and the path protect "
+                                              "file). Requires --strip-only, so no protected "
+                                              "run can ever lose a checkpoint dir."),
     tokenizer_sha: bool = typer.Option(False, "--tokenizer-sha",
                                        help="sha256 the tokenizer copies during the SCAN "
                                             "too (a delete always re-verifies by sha)."),
@@ -1196,24 +1615,57 @@ def main(
                                  "with the --expect-runs census guard")
     if strip_only:
         strip_tokenizers = True
-    # Teacher mode swaps the scope AND the two defaults the scope implies; an explicit
-    # --keep-epochs / --require still wins, in either mode.
+    if strip_protected and not strip_only:
+        raise typer.BadParameter("--strip-protected only makes sense with --strip-only: a "
+                                 "protected run must never be reached by the rung thinning")
+    # Teacher / control mode swap the scope AND the two defaults the scope implies; an
+    # explicit --keep-epochs / --require still wins, in every mode.
     teacher_tree = normalise_key(teacher_tree) if teacher_tree else None
+    control_tree = normalise_key(control_tree) if control_tree else None
+    if control_tree and teacher_tree:
+        raise typer.BadParameter("--control-tree and --teacher-tree are two scopes; pass "
+                                 "one")
+    if control_tree and not (control_tree == CONTROL_TREE
+                             or control_tree.startswith(CONTROL_TREE + "/")):
+        raise typer.BadParameter(f"--control-tree must be {CONTROL_TREE} or a sub-path of "
+                                 f"it, not {control_tree!r}")
+    excludes = tuple(normalise_key(p) for p in (exclude_prefix or []) if p.strip())
+    if not control_tree and (wipe_set_cells or excludes):
+        raise typer.BadParameter("--wipe-set-cells / --exclude-prefix are control-mode "
+                                 "options; pass --control-tree")
+    for excluded in excludes:
+        if not (excluded == CONTROL_TREE or excluded.startswith(CONTROL_TREE + "/")):
+            raise typer.BadParameter(f"--exclude-prefix must lie under {CONTROL_TREE}, "
+                                     f"not {excluded!r}")
     keep_epochs = keep_epochs or (TEACHER_KEEP_EPOCHS if teacher_tree
+                                  else CONTROL_KEEP_EPOCHS if control_tree
                                   else DEFAULT_KEEP_EPOCHS)
     # An OMITTED --require takes the mode's default; an explicitly EMPTY one ("") means
-    # "no record is required" and must not fall back to it.
+    # "no record is required" and must not fall back to it. Control mode requires nothing:
+    # its runs have no trajectory record to demand.
     if require is None:
-        require = TEACHER_REQUIRE if teacher_tree else DEFAULT_REQUIRE
+        require = (TEACHER_REQUIRE if teacher_tree
+                   else CONTROL_REQUIRE if control_tree else DEFAULT_REQUIRE)
     cfg = {
         "receivers": re.compile(receivers), "teachers": re.compile(teachers),
         "keep_epochs": [float(e) for e in keep_epochs.split(",") if e.strip()],
+        "keep_epochs_optional": [float(e) for e in keep_epochs_optional.split(",")
+                                 if e.strip()],
+        "thin_protected_sets": tuple(sorted({n.strip() for n in (thin_protected_set or [])
+                                             if n.strip()})),
         "require": [r.strip() for r in require.split(",") if r.strip()],
         "fast_bytes": fast_bytes, "no_sha": no_sha,
         "allow_symlinked_checkpoints": allow_symlinked_checkpoints,
         "protected": {}, "output_root": out_root, "teacher_tree": teacher_tree,
-        "archive_extra": list(TEACHER_ARCHIVE_EXTRA) if teacher_tree else [],
+        "control_tree": control_tree, "wipe_set_cells": wipe_set_cells,
+        "exclude_prefixes": excludes,
+        "archive_extra": (list(TEACHER_ARCHIVE_EXTRA) if teacher_tree
+                          else list(CONTROL_ARCHIVE_EXTRA) if control_tree else []),
+        "archive_root": (Path(archive_root) if archive_root
+                         else ROOT / CONTROL_ARCHIVE_REL if control_tree
+                         else out_root / ARCHIVE_REL),
         "strip_tokenizers": strip_tokenizers, "tokenizer_sha": tokenizer_sha,
+        "strip_only": strip_only, "strip_protected": strip_protected,
     }
     # The nonadaptive-set protection is not a policy this run can choose: without it the
     # script would be free to thin set cells, so a missing/empty file is an error in EVERY
@@ -1224,6 +1676,12 @@ def main(
     cfg["cells"] = read_cell_protect_file(cell_protect_file)
     if not cfg["cells"]:
         raise typer.BadParameter(f"cell protect file {cell_protect_file} holds no rules")
+    known_sets = {name for kinds in cfg["cells"].values() for keys in kinds.values()
+                  for name in keys.values()}
+    unknown = [n for n in cfg["thin_protected_sets"] if n not in known_sets]
+    if unknown:
+        raise typer.BadParameter(f"--thin-protected-set: {unknown} not in "
+                                 f"{cell_protect_file} ({len(known_sets)} sets known)")
     if protect_file.is_file():
         cfg["protected"] = read_protect_file(protect_file)
     if apply and not cfg["protected"] and not no_protect_file:
@@ -1231,9 +1689,15 @@ def main(
             f"protect file {protect_file} is missing or empty; pass --no-protect-file to "
             "thin without one")
 
+    if cfg["thin_protected_sets"]:
+        print("!! THINNING PROTECTED NONADAPTIVE SET(S) ON EXPLICIT ORDER: "
+              + ", ".join(cfg["thin_protected_sets"]), file=sys.stderr)
     print("scope:", file=sys.stderr)
     for label, value in (("receivers", receivers), ("teachers", teachers),
                          ("keep_epochs", keep_epochs),
+                         ("keep_epochs_optional", keep_epochs_optional or "-"),
+                         ("THIN PROTECTED SETS", ", ".join(cfg["thin_protected_sets"])
+                          or "- (every set refuses)"),
                          ("require", ",".join(cfg["require"]) or "- (none required)"),
                          ("archive_extra", ",".join(cfg["archive_extra"]) or "-"),
                          ("protect_file", f"{protect_file} ({len(cfg['protected'])} runs)"),
@@ -1242,8 +1706,13 @@ def main(
                           " cells)"),
                          ("only_tree", only_tree or "-"),
                          ("teacher_tree", teacher_tree or "-"),
+                         ("control_tree", control_tree or "-"),
+                         ("wipe_set_cells", wipe_set_cells),
+                         ("exclude_prefix", ", ".join(excludes) or "-"),
+                         ("archive_root", cfg["archive_root"]),
                          ("strip_tokenizers", f"{strip_tokenizers} "
-                          f"(strip_only={strip_only}, sha_in_scan={tokenizer_sha})"),
+                          f"(strip_only={strip_only}, protected={strip_protected}, "
+                          f"sha_in_scan={tokenizer_sha})"),
                          ("output_root", out_root),
                          ("mode", "APPLY" if apply else "dry run")):
         print(f"  {label:<16} {value}", file=sys.stderr)
@@ -1255,6 +1724,7 @@ def main(
                     for x in (s.strip() for s in run_dirs_file.read_text().splitlines()) if x]
     else:
         roots = ([out_root / only_tree] if only_tree
+                 else [out_root / control_tree] if control_tree
                  else [out_root / teacher_tree] if teacher_tree
                  else _receiver_roots(out_root, cfg["receivers"]))
         keep_roots = []
@@ -1280,7 +1750,8 @@ def main(
                                  "possibly truncated; nothing deleted")
 
     report = report or (ROOT / "run_logs" / "thin_ckpt" /
-                        f"report_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json")
+                        f"{'controls_' if control_tree else ''}report_"
+                        f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json")
     report.parent.mkdir(parents=True, exist_ok=True)
     log_path = report.parent / (report.stem + ".deleted.jsonl")
 
@@ -1290,7 +1761,27 @@ def main(
     if not apply or not expect_runs:
         census_ok.set()
 
-    def write_report() -> None:
+    def write_report(*, final: bool = False) -> None:
+        """Snapshot the rows to the report file; never fatal, never two at once.
+
+        The report is a SNAPSHOT -- the deletion jsonl is the durable log -- so a periodic
+        flush that cannot take the lock (another thread is mid-flush) is skipped, and one
+        that fails is printed and retried at the next boundary. The final write is the one
+        that must land: it blocks for the lock and lets its errors surface.
+        """
+        if not _REPORT_LOCK.acquire(blocking=final):
+            return
+        try:
+            _write_report_now()
+        except Exception as exc:  # noqa: BLE001 -- a snapshot is not worth the invocation
+            if final:
+                raise
+            print(f"report flush failed ({type(exc).__name__}: {exc}); retrying at the "
+                  "next flush", file=sys.stderr, flush=True)
+        finally:
+            _REPORT_LOCK.release()
+
+    def _write_report_now() -> None:
         with _ROW_LOCK:
             # `tok_removable` is the per-file worklist (tens of files per run); the report
             # keeps its counts, not the list.
@@ -1301,9 +1792,19 @@ def main(
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "output_root": str(out_root), "only_tree": only_tree, "limit": limit,
             "applied": apply, "receivers": receivers, "teachers": teachers,
-            "keep_epochs": cfg["keep_epochs"], "require": cfg["require"],
-            "teacher_tree": teacher_tree, "strip_tokenizers": strip_tokenizers,
-            "strip_only": strip_only, "tokenizer_sha": tokenizer_sha,
+            "keep_epochs": cfg["keep_epochs"],
+            "keep_epochs_optional": cfg["keep_epochs_optional"],
+            "thin_protected_sets": list(cfg["thin_protected_sets"]),
+            "require": cfg["require"],
+            "teacher_tree": teacher_tree, "control_tree": control_tree,
+            "wipe_set_cells": wipe_set_cells, "exclude_prefixes": list(excludes),
+            "failed": [{"run_dir_rel": r["run_dir_rel"], "status": r["status"],
+                        "detail": r.get("detail")}
+                       for r in snapshot if r["status"].startswith("failed:")],
+            "archive_root": str(cfg["archive_root"]),
+            "strip_tokenizers": strip_tokenizers,
+            "strip_only": strip_only, "strip_protected": strip_protected,
+            "tokenizer_sha": tokenizer_sha,
             "protect_file": str(protect_file),
             "cell_protect_file": str(cell_protect_file), "refused_roots": bad_roots,
             "walk_errors": [[str(p), k] for p, k in walk_errors],
@@ -1317,14 +1818,23 @@ def main(
         bytes proven identical to the run's root copy, so it runs for a run whose records
         are incomplete too (and is the whole job under --strip-only).
         """
-        if not strip_only and row["status"] == "ready":
-            status = thin_run(row, cfg, log_path)
+        try:
+            if not strip_only and row["status"].startswith("ready"):
+                status = thin_run(row, cfg, log_path)
+                with _ROW_LOCK:
+                    row["status"] = status
+            if cfg["strip_tokenizers"] and row.get("tok_files"):
+                tok = strip_tokenizers_run(row, cfg, log_path)
+                with _ROW_LOCK:
+                    row["tok_status"] = tok
+        except Exception as exc:  # noqa: BLE001 -- one failed run must not stop the pass
+            if not control_tree:
+                raise
+            # 4,000 runs against a disk at 100%: one run whose action raises is a row to
+            # report, not the end of the invocation. The report lists them under `failed`.
             with _ROW_LOCK:
-                row["status"] = status
-        if cfg["strip_tokenizers"] and row.get("tok_files"):
-            tok = strip_tokenizers_run(row, cfg, log_path)
-            with _ROW_LOCK:
-                row["tok_status"] = tok
+                row["status"] = f"failed:{type(exc).__name__}"
+                row["detail"] = str(exc)
 
     def handle(run_dir: Path) -> dict:
         nonlocal n_seen
@@ -1360,7 +1870,8 @@ def main(
                 f"census guard: {len(counted)} in-scope runs vs --expect-runs "
                 f"{expect_runs} (>{CENSUS_TOLERANCE:.0%} apart); nothing deleted")
         census_ok.set()
-        actionable = [r for r in rows if r["status"] == "ready" or r.get("tok_files")]
+        actionable = [r for r in rows
+                      if r["status"].startswith("ready") or r.get("tok_files")]
         done = 0
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             for _ in pool.map(act, actionable):
@@ -1372,7 +1883,7 @@ def main(
             list(pool.map(handle, run_dirs))
 
     rows.sort(key=lambda r: r["run_dir_rel"])
-    write_report()
+    write_report(final=True)
 
     missing_rows = [r for r in rows if r["status"].startswith("missing:")]
     if emit_missing_jobs:
@@ -1388,6 +1899,8 @@ def main(
               file=sys.stderr)
 
     print(summarize(rows), file=sys.stderr)
+    if control_tree:
+        print(control_summary(rows), file=sys.stderr)
     print(f"\nreport: {report}", file=sys.stderr)
     if not apply:
         print("DRY RUN: nothing deleted (pass --apply).", file=sys.stderr)

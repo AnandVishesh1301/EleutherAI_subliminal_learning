@@ -590,7 +590,7 @@ LEGACY_PAIRINGS: tuple[tuple[str, str], ...] = (
 #: per-animal significance counts of the stratified rows).
 PAIRING_COLUMNS = ["comparison", "design", "animal", "arms A vs B", "arms A", "arms B",
                    "mean contrast", "mean p", "win prob.", "win p", "exceed. frac contrast",
-                   "exceed. p", "opp. p (mean / win / exc.)",
+                   "exceed. p", "one-sided A>B (mean / win / exc.)",
                    "animals sig. A>B (mean / win / exc.)", "animals sig. B>A (mean / win / exc.)",
                    "floor", "labelings"]
 
@@ -699,7 +699,12 @@ def category_family_arms(table: pd.DataFrame, *, categories: Sequence[str] = PAI
 def category_pairings(exceed_frac: Mapping[str, float], categories: Sequence[str] = PAIRING_CATEGORIES
                       ) -> list[tuple[str, str]]:
     """Every unordered pair of `categories`, oriented so A has the larger pooled exceedance
-    fraction (`exceed_frac`, e.g. the dog rows of `relationship_existence_by_animal`)."""
+    fraction (`exceed_frac`, e.g. the dog rows of `relationship_existence_by_animal`).
+
+    The orientation is a DISPLAY convention picked from the observed data, which is exactly why
+    the pairing table reports TWO-SIDED p's: those are invariant to which side is called A, so
+    the post-hoc orientation cannot buy significance. The direction of a significant pairing is
+    read off the SIGN of its contrast."""
     cats = [c for c in categories if c in exceed_frac]
     out = []
     for i, a in enumerate(cats):
@@ -779,10 +784,12 @@ def _relative_tests(res) -> tuple:
 
 
 def _pairing_extras(res, *, animal: str, stratified: bool) -> tuple[str, str, str]:
-    """The three added cells of a pairing row: the opposite-direction p of the three tests
-    (``—`` for a missing test) and, on a stratified row, the ``k/n`` per statistic of animals
-    whose relative-mode test is significant for A > B and for B > A (n = animals carrying that
-    test); ``—`` on a single-animal row (`animal` picks that row's comparison of a
+    """The three added cells of a pairing row: the ONE-SIDED A > B p of the three tests (``—``
+    for a missing test; the table's own ``mean p`` / ``win p`` / ``exceed. p`` are the two-sided
+    p's) and, on a stratified row, the ``k/n`` per statistic of animals whose relative-mode test
+    is two-sided significant and whose contrast points A > B resp. B > A by its SIGN (mean
+    contrast vs 0, win probability vs 1/2, exceedance-fraction contrast vs 0; n = animals
+    carrying that test); ``—`` on a single-animal row (`animal` picks that row's comparison of a
     `MultiAnimalComparison`)."""
     from subliminal_learning.analysis.transfer_significance_io import (
         MultiAnimalComparison, _fmt_p)
@@ -790,16 +797,25 @@ def _pairing_extras(res, *, animal: str, stratified: bool) -> tuple[str, str, st
     multi = isinstance(res, MultiAnimalComparison)
     row = res.stratified if stratified else res.per_animal[animal] if multi else res
     tests = _relative_tests(row)
-    opp = " / ".join("—" if t is None else _fmt_p(t.p_opposite) for t in tests)
+    one_sided = " / ".join("—" if t is None else _fmt_p(t.p_upper) for t in tests)
     if not stratified or not multi:
-        return opp, "—", "—"
+        return one_sided, "—", "—"
     per = [_relative_tests(fc) for fc in res.per_animal.values()]
-    def count(i: int, attr: str) -> str:
+
+    # A-stronger side of each statistic: mean contrast > 0, win probability > 1/2, exceedance
+    # fraction contrast > 0. Significance is the two-sided p, the DIRECTION is the sign.
+    centres = (0.0, 0.5, 0.0)
+
+    def count(i: int, forward: bool) -> str:
+        """Animals whose i-th test is two-sided significant with the given direction's sign."""
         have = [t[i] for t in per if t[i] is not None]
-        return f"{sum(getattr(t, attr) < SIG_ALPHA for t in have)}/{len(have)}"
-    fwd = " / ".join(count(i, "p") for i in range(3))
-    rev = " / ".join(count(i, "p_opposite") for i in range(3))
-    return opp, fwd, rev
+        hits = sum(t.p_two_sided < SIG_ALPHA
+                   and ((t.observed > centres[i]) if forward else (t.observed < centres[i]))
+                   for t in have)
+        return f"{hits}/{len(have)}"
+    fwd = " / ".join(count(i, True) for i in range(3))
+    rev = " / ".join(count(i, False) for i in range(3))
+    return one_sided, fwd, rev
 
 
 def _family_arm_labels(res, family_a: str, family_b: str) -> tuple[str, str]:
@@ -833,36 +849,14 @@ def _family_arm_labels(res, family_a: str, family_b: str) -> tuple[str, str]:
 
 def style_relationship_pairing_table(df: pd.DataFrame):
     """Styler for `relationship_pairing_table`: the `style_family_comparison_table` conventions
-    without the value-mode index level."""
+    without the value-mode index level. The three highlighted p columns are the TWO-SIDED p's;
+    the secondary one-sided ``A>B`` cell is never highlighted (a reverse-direction result is
+    already caught by the two-sided p, with the sign of the contrast beside it)."""
     from subliminal_learning.analysis.transfer_significance_io import _p_styler
 
     grey = df["stratified"].fillna(False).astype(bool).to_numpy()
-    styler = _p_styler(df, ["mean p", "win p", "exceed. p"],
-                       index=["comparison", "design", "animal"], grey=grey,
-                       floats={"mean contrast": ".3g", "win prob.": ".3f",
-                               "exceed. frac contrast": ".3f", "floor": ".2e",
-                               "labelings": ".0f"})
-    opp = PAIRING_COLUMNS[12]
-    if opp in df.columns:
-        styler = styler.map(lambda v: OPPOSITE_SIG if _opposite_significant(v) else "",
-                            subset=[opp])
-    return styler
-
-
-#: Highlight of an ``opp. p`` cell with a significant reverse direction (distinct from the green
-#: of the A > B columns).
-OPPOSITE_SIG = "font-weight: bold; background-color: rgba(255, 140, 90, 0.4)"
-
-
-def _opposite_significant(cell) -> bool:
-    """Whether any of the ``a / b / c`` p's in an ``opp. p`` cell is below `SIG_ALPHA`
-    (``—`` slots and blanks never count)."""
-    if not isinstance(cell, str):
-        return False
-    for part in cell.split("/"):
-        try:
-            if float(part.strip()) < SIG_ALPHA:
-                return True
-        except ValueError:
-            continue
-    return False
+    return _p_styler(df, ["mean p", "win p", "exceed. p"],
+                     index=["comparison", "design", "animal"], grey=grey,
+                     floats={"mean contrast": ".3g", "win prob.": ".3f",
+                             "exceed. frac contrast": ".3f", "floor": ".2e",
+                             "labelings": ".0f"})

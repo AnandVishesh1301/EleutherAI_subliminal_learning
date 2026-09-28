@@ -144,6 +144,29 @@ def test_registry_arms_go_through_the_registry_loader(tmp_path):
     assert arms[1].matrix is None and arms[1].dropped == "students 1/2, controls 2/2"
 
 
+def test_include_selection_cells_reads_the_full_design(tmp_path):
+    """``include_selection_cells`` ignores ``exclude_cells`` and the held-out note, so a
+    pilot-selected arm is read on every design cell (the registry file is untouched)."""
+    _toy_tree(tmp_path, animals=("dog",))
+    reg = tmp_path / "arms.json"
+    reg.write_text(json.dumps({
+        "ftseed": 1, "prompt_set": "test",
+        "arms": [
+            {"name": "orig → orig (dog)", "animal": "dog", "sender": "pythia-160m",
+             "receiver": "pythia-160m", "tseed": 1, "data_order": "same",
+             "cells": ["c1", "c2"], "exclude_cells": ["c1"], "teachers": ["t1"]},
+        ],
+        "held_out": [{"name": "h", "arm": "orig → orig (dog)", "teacher": "t1",
+                      "selection_cells": ["c1"], "n_held_out": 1}]}))
+    held, = th.registry_headline_arms(reg, ["orig → orig (dog)"], output_root=tmp_path)
+    full, = th.registry_headline_arms(reg, ["orig → orig (dog)"], output_root=tmp_path,
+                                      include_selection_cells=True)
+    assert held.matrix.cells == ["c2"] and "selection cell(s) excluded: c1" in held.note
+    assert full.matrix.cells == ["c1", "c2"]
+    assert "selection cell" not in full.note and "teacher selected on" not in full.note
+    assert json.loads(reg.read_text())["arms"][0]["exclude_cells"] == ["c1"]
+
+
 def _toy_family(name="same-model", animal="dog", n_cells=3) -> th.HeadlineFamily:
     """A family with one finished arm: every treatment run above the arm's control."""
     values = np.column_stack([np.full(n_cells, 0.6), np.full(n_cells, 0.1)])
@@ -208,3 +231,38 @@ def test_null_strip_header_band_is_absolute_at_any_row_count(n_families):
     title_y = fig._suptitle.get_position()[1]
     for y in ys:
         assert top < y < title_y
+
+
+def test_a_diverged_run_counts_as_complete_and_is_excluded(tmp_path):
+    """A student whose leaf carries `tio.DIVERGED_MARKER` is a COMPLETE run of its arm under
+    ``diverged="exclude"``: the arm is finished, tested on n-1 runs (its NaN reaches no
+    statistic) and the excluded run is named in the note. The SAME missing run without the
+    marker still drops the arm, under either setting."""
+    skip = (("dog", "pythia-160m-seed1", "c2"),)
+    _toy_tree(tmp_path, animals=("dog",), skip=skip)
+    leaf = (tmp_path / "students/dog/pythia-160m-seed1/teacher-pythia-160m-seed1"
+            / "t1_tseed1" / DS / "c2" / "ftseed1")
+    kw = dict(cells=["c1", "c2"], output_root=tmp_path)
+    # no marker: dropped whatever the setting
+    for mode in ("drop", th.DIVERGED_EXCLUDE):
+        arms = th.family_headline_arms(tio.same_model_arms(["orig", "fs1"]), ["dog"],
+                                       {"dog": ["t1"]}, diverged=mode, **kw)
+        assert arms[1].matrix is None and arms[1].dropped == "students 1/2, controls 2/2"
+    leaf.mkdir(parents=True, exist_ok=True)
+    (leaf / tio.DIVERGED_MARKER).write_text(json.dumps({"reason": "nonfinite adapter weights"}))
+    # marker, old behaviour: still dropped
+    arms = th.family_headline_arms(tio.same_model_arms(["orig", "fs1"]), ["dog"],
+                                   {"dog": ["t1"]}, **kw)
+    assert arms[1].matrix is None
+    # marker, new behaviour: finished, one run short, named
+    arms = th.family_headline_arms(tio.same_model_arms(["orig", "fs1"]), ["dog"],
+                                   {"dog": ["t1"]}, diverged=th.DIVERGED_EXCLUDE, **kw)
+    diverged_arm = arms[1]
+    assert diverged_arm.matrix is not None and diverged_arm.dropped is None
+    assert diverged_arm.diverged == (("t1", "c2"),)
+    assert diverged_arm.note == "1 diverged run excluded (teacher t1, cell c2)"
+    assert th.arm_summary(diverged_arm.matrix, diverged_arm.prior)["runs"] == 1
+    fam = th.HeadlineFamily("same-model", "orig, fs1 (2)", "toy", "dog", arms)
+    row = th.headline_table([fam], n_perm=200).iloc[0]
+    assert row["arms used"] == "2/2" and row["runs"] == 3      # 2 + 1, the diverged one out
+    assert "1 diverged run excluded (teacher t1, cell c2)" in row["note"]

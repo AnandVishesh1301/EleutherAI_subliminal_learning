@@ -1,0 +1,110 @@
+relation,animal,sender,receiver,n_pairs,n_matched_controls,n_source_teachers,n_student_cells,collapse_filter
+same model,dog,orig,orig,300,30,10,30,False
+"shared init, different data order",dog,orig,ds1,560,56,10,56,False
+"shared init, different data order",dog,orig,ds2,560,56,10,56,False
+"shared init, different data order",dog,orig,ds3,560,56,10,56,False
+different init,dog,orig,fs1,560,56,10,56,False
+different init,dog,orig,fs2,560,56,10,56,False
+different init,dog,orig,fs3,560,56,10,56,False
+same model,cat,orig,orig,300,30,10,30,False
+"shared init, different data order",cat,orig,ds1,560,56,10,56,False
+"shared init, different data order",cat,orig,ds2,560,56,10,56,False
+"shared init, different data order",cat,orig,ds3,560,56,10,56,False
+different init,cat,orig,fs1,560,56,10,56,False
+different init,cat,orig,fs2,560,56,10,56,False
+different init,cat,orig,fs3,560,56,10,56,False
+same model,lion,orig,orig,300,30,10,30,False
+"shared init, different data order",lion,orig,ds1,560,56,10,56,False
+"shared init, different data order",lion,orig,ds2,560,56,10,56,False
+"shared init, different data order",lion,orig,ds3,560,56,10,56,False
+different init,lion,orig,fs1,560,56,10,56,False
+different init,lion,orig,fs2,560,56,10,56,False
+different init,lion,orig,fs3,560,56,10,56,False
+same model,pig,orig,orig,300,30,10,30,False
+"shared init, different data order",pig,orig,ds1,560,56,10,56,False
+"shared init, different data order",pig,orig,ds2,560,56,10,56,False
+"shared init, different data order",pig,orig,ds3,560,56,10,56,False
+different init,pig,orig,fs1,560,56,10,56,False
+different init,pig,orig,fs2,560,56,10,56,False
+different init,pig,orig,fs3,559,56,10,56,False
+"shared init, different data order",dog,ds1,orig,560,56,10,56,False
+same model,dog,ds1,ds1,22,22,1,22,False
+"shared init, different data order",dog,ds1,ds2,560,56,10,56,False
+"shared init, different data order",dog,ds1,ds3,560,56,10,56,False
+"shared init, different data order",dog,ds2,orig,560,56,10,56,False
+"shared init, different data order",dog,ds2,ds1,560,56,10,56,False
+same model,dog,ds2,ds2,192,30,7,30,False
+"shared init, different data order",dog,ds2,ds3,560,56,10,56,False
+"shared init, different data order",dog,ds3,orig,560,56,10,56,False
+"shared init, different data order",dog,ds3,ds1,560,56,10,56,False
+"shared init, different data order",dog,ds3,ds2,560,56,10,56,False
+different init,dog,fs1,orig,560,56,10,56,False
+same model,dog,fs1,fs1,300,30,10,30,False
+different init,dog,fs1,fs2,560,56,10,56,False
+different init,dog,fs1,fs3,560,56,10,56,False
+different init,dog,fs2,orig,560,56,10,56,False
+different init,dog,fs2,fs1,560,56,10,56,False
+same model,dog,fs2,fs2,300,30,10,30,False
+different init,dog,fs2,fs3,560,56,10,56,False
+different init,dog,fs3,orig,560,56,10,56,False
+different init,dog,fs3,fs1,560,56,10,56,False
+different init,dog,fs3,fs2,560,56,10,56,False
+same model,dog,fs3,fs3,300,30,10,30,False
+different init,cat,fs1,orig,560,56,10,56,False
+same model,cat,fs1,fs1,300,30,10,30,False
+different init,cat,fs1,fs2,560,56,10,56,False
+different init,cat,fs1,fs3,560,56,10,56,False
+different init,cat,fs2,orig,560,56,10,56,False
+different init,cat,fs2,fs1,560,56,10,56,False
+same model,cat,fs2,fs2,300,30,10,30,False
+different init,cat,fs2,fs3,560,56,10,56,False
+different init,cat,fs3,orig,560,56,10,56,False
+different init,cat,fs3,fs1,560,56,10,56,False
+different init,cat,fs3,fs2,560,56,10,56,False
+same model,cat,fs3,fs3,300,30,10,30,False
+different init,lion,fs1,orig,560,56,10,56,False
+same model,lion,fs1,fs1,300,30,10,30,False
+different init,lion,fs1,fs2,560,56,10,56,False
+different init,lion,fs1,fs3,560,56,10,56,False
+different init,lion,fs2,orig,560,56,10,56,False
+different init,lion,fs2,fs1,560,56,10,56,False
+same model,lion,fs2,fs2,300,30,10,30,False
+different init,lion,fs2,fs3,560,56,10,56,False
+different init,lion,fs3,orig,560,56,10,56,False
+different init,lion,fs3,fs1,560,56,10,56,False
+different init,lion,fs3,fs2,560,56,10,56,False
+same model,lion,fs3,fs3,300,30,10,30,False
+different init,pig,fs1,orig,560,56,10,56,False
+same model,pig,fs1,fs1,300,30,10,30,False
+different init,pig,fs1,fs2,559,56,10,56,False
+different init,pig,fs1,fs3,559,56,10,56,False
+different init,pig,fs2,orig,556,56,10,56,False
+different init,pig,fs2,fs1,560,56,10,56,False
+same model,pig,fs2,fs2,300,30,10,30,False
+different init,pig,fs2,fs3,560,56,10,56,False
+different init,pig,fs3,orig,560,56,10,56,False
+different init,pig,fs3,fs1,560,56,10,56,False
+different init,pig,fs3,fs2,560,56,10,56,False
+same model,pig,fs3,fs3,300,30,10,30,False
+"different init, same data order",dog,wc1,wc2,300,30,10,30,False
+"different init, same data order",cat,wc1,wc2,300,30,10,30,False
+"different init, same data order",lion,wc1,wc2,300,30,10,30,False
+"different init, same data order",pig,wc1,wc2,300,30,10,30,False
+"different init, same data order",dog,wc2,wc1,300,30,10,30,False
+"different init, same data order",cat,wc2,wc1,300,30,10,30,False
+"different init, same data order",lion,wc2,wc1,300,30,10,30,False
+"different init, same data order",pig,wc2,wc1,191,30,7,30,False
+"small→large, original-seed lineage",dog,pythia-160m,pythia-410m,330,30,11,30,False
+"large→small, original-seed lineage",dog,pythia-410m,pythia-160m,300,30,10,30,False
+"large→small, different-init/cross-seed",dog,pythia-410m-seed1,pythia-160m,300,30,10,30,False
+Pythia→OLMo,dog,pythia-160m,DataDecide-dolma1_7-1B-seed-default,544,34,16,34,False
+OLMo→Pythia,dog,DataDecide-dolma1_7-1B-seed-default,pythia-160m,308,28,11,28,False
+"small→large, different-init/cross-seed",dog,pythia-160m,pythia-410m-seed1,300,30,10,30,False
+OLMo cross-seed different-init/same-corpus,elephant,DataDecide-dolma1_7-1B-seed-default,DataDecide-dolma1_7-1B-seed-large-aux-2,20,20,1,20,False
+OLMo cross-seed different-init/same-corpus,elephant,DataDecide-dolma1_7-1B-seed-large-aux-2,DataDecide-dolma1_7-1B-seed-default,60,30,2,30,False
+OLMo same-init/different-corpus,elephant,DataDecide-dolma1_7-1B-seed-default,DataDecide-dclm-baseline-1B-seed-default,340,34,10,34,False
+OLMo same-init/different-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-dolma1_7-1B-seed-default,340,34,10,34,False
+OLMo same-init/different-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-c4-1B-seed-default,350,35,10,35,False
+OLMo different-init/different-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-dolma1_7-1B-seed-large-aux-2,350,35,10,35,False
+OLMo different-init/different-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-c4-1B-seed-large-aux-2,350,35,10,35,False
+OLMo same-init/different-corpus,elephant,DataDecide-c4-1B-seed-default,DataDecide-dclm-baseline-1B-seed-default,224,23,10,23,False

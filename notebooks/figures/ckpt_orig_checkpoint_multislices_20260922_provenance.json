@@ -1,0 +1,36 @@
+{
+  "source_cells": "notebooks/figures/figure3_checkpoints/ckpt_takeoff_9models_and_orig_cliffcross_cells.csv",
+  "source_sha256": "d46c7d992dc22139ee3dc8b2c6cb5033498c0073cc004ee1da5e1c516a810f26",
+  "checkpoint_sets": [
+    [
+      50000,
+      75000,
+      80000,
+      85000,
+      90000
+    ],
+    [
+      110000,
+      115000,
+      120000,
+      125000
+    ],
+    [
+      50000,
+      75000,
+      80000,
+      85000,
+      90000
+    ],
+    [
+      110000,
+      115000,
+      120000,
+      125000
+    ]
+  ],
+  "aggregation": "existing verified original 14x14 cells; equal mean of five teacher recipes after averaging student seeds within recipe",
+  "error_bars": "Shading: \u00b11 SD across five teacher recipes (ddof=1), after student-seed averaging",
+  "recipe_source": "notebooks/figures/figure3_checkpoints/ckpt_takeoff_9models_and_orig_cliffcross_recipes.csv",
+  "recipe_source_sha256": "a054650df9fb8893d2a287d5bbdcf7c618e30179bc3292ac642fae05581702a9"
+}

@@ -1,0 +1,49 @@
+{
+  "created_utc": "2026-09-26T05:47:08.549126+00:00",
+  "complete_pairs": 63744,
+  "source_pairs": 64006,
+  "n_bootstrap": 2000,
+  "seed": 0,
+  "student_ftseed": 1,
+  "collapse_filter": false,
+  "include_selection_cells": true,
+  "include_modern_reproduction": true,
+  "include_olmo_same_model": true,
+  "manifests": {
+    "run_logs/core30_cells.json": "1c8c9450f2cb45f85c462d6ecf9e4ad682421ff71cadb583bb151db57eb6f119",
+    "run_logs/core56_cells.json": "518016126fd8cafb7ecf129e391e6c390336cf6c8dda980840f391e62db75022",
+    "run_logs/dd1b/olmo_core35_cells.json": "cf62d076cf84be217a8b03723f1c41cba6057db28fc2760dcd69d6872e980ecc",
+    "run_logs/xarch/xarch_significance_arms.json": "ec12969424eb8bacb34e9b678c629c008ef5b5522b556e86beb42df0232663e7",
+    "run_logs/repretrain/olmo_cross_seed_significance_arms.json": "4b6829b68026b49f7ab85b5f965a0dad40ab90d72735dc479ff20387b1b1f767",
+    "run_logs/repretrain/repretrain_significance_arms.json": "a618dc0b1639fb70574de9ebf07fb218fcbc4ff5f6c7248df020d004eab5eda6",
+    "run_logs/olmo_samemodel_core35_20260924/README.md": "8ca02883fe3ba5919d1700c5a0dccfe5e386fac8b53112fd7f2ae2820bf42b06",
+    "run_logs/olmo_samemodel_core35_20260924/make_jobs.py": "ad6b8ae1cab0c065ba5b127331c135edac6fd586a74753f29b46a3039ed7337f",
+    "run_logs/dolma_top10_senders.json": "b96f1c7de443313194566b46dff9c5991ee7c0c00ad4038d513a6cddfebc017a",
+    "run_logs/c4_top10_senders.json": "348161609f79cf72e5f88c663249f140729794cd715cad9e89c39e3b21e18512",
+    "run_logs/olmo_dclm_to_c4_core35_20260920/teachers.tsv": "11a141fa77896f1c6efbaee16381ac7ffc4b24ca3625562c24f7c967fc8c18a7"
+  },
+  "source_scan_started_utc": "2026-09-26T05:42:20.542452+00:00",
+  "outputs_root": "/mnt/cold-1/soar-subliminal/angela/outputs",
+  "grid_correction": "New cat/lion/pig ds1 to orig/ds2/ds3 use core30; existing complete core56 arms retained.",
+  "excluded_same_model": "wc1 to wc1",
+  "cat_modern_completion": {
+    "confirmed_complete_utc": "2026-09-26T05:42:19.801686+00:00"
+  },
+  "source_scan_finished_utc": "2026-09-26T05:47:07.677816+00:00",
+  "matched_pairs": 63744,
+  "complete_blocks": 1495,
+  "reported_blocks": 1503,
+  "incomplete_blocks": 8,
+  "render_finished_utc": "2026-09-26T05:47:22.029110+00:00",
+  "refresh_source": "All conditions rescanned after full cat original to Modern1234 completion; fresh tuple reused for rendering and audit.",
+  "selection_source_sha256": {
+    "src/subliminal_learning/analysis/transfer_family_complete.py": "65766a3c9d99a6978ca4db54325a3521c92c269617ff590b361971d910a98b9e",
+    "src/subliminal_learning/analysis/transfer_conditions.py": "f8c05239b426ac3705761689d5ffaefc0c88627f7b75c3be96e6393a11cf8527",
+    "run_logs/ds1_to_original_lion_core30_20260925/README.md": "93b26a7a93f6d62fbc7606b1bc1da942fcf3e02e2f81dacc43770aa13d838c10",
+    "run_logs/ds1_to_ds2_lion_core30_20260925/README.md": "d19c9e01f3e8a95f81b31330290e87691171e90ff96a9e5c4215c86a4f1fd085",
+    "run_logs/ds1_to_ds3_lion_core30_20260926/README.md": "56196cffd22944c55c4d102b9ef219f357f60fa206fc5c4fc4bb5402a6271326",
+    "run_logs/ds1_to_original_pig_core30_20260925/README.md": "8c9f7f0bae1a58598a997f260b22761669eb2d7d54fd22fa067fd7af9bba66de",
+    "run_logs/ds1_to_ds2_pig_core30_20260925/README.md": "9fd8338320a62bf5ce14164f96a7f30018237e0ee7521b14c5f62a15bbfb90bd",
+    "run_logs/ds1_to_ds3_pig_core30_20260926/README.md": "eab22ffc3c977a33b83afd28eb2d49d726593e76351c927615b2785b1d643f80"
+  }
+}

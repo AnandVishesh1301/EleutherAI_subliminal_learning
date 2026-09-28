@@ -1,0 +1,54 @@
+{
+  "started_utc": "2026-09-23T16:15:00.355517+00:00",
+  "completed_utc": "2026-09-23T16:15:22.472256+00:00",
+  "outputs_root": "/mnt/cold-1/soar-subliminal/angela/outputs",
+  "input_cache": "/home/angela/EleutherAI_subliminal_learning/docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz",
+  "input_cache_sha256": "e2f69a7076ee6553fa59a63aa34e290d1a49dd1fbedf002a4f777b562b096dc3",
+  "script_path": "/home/angela/EleutherAI_subliminal_learning/scripts/plot_checkpoint_takeoff.py",
+  "script_sha256": "51232ba38e4b1f22188e085834713ed7f9e89bb91ab45fb42af3ec22beb909f1",
+  "canonical_teacher_recipes": [
+    "ep20_lr1e-4_r16a32",
+    "ep2_lr5e-4_r32a64",
+    "ep7_lr5e-4_r8a8",
+    "ep10_lr1e-4_r64a64",
+    "ep20_lr1e-4_r8a16"
+  ],
+  "teacher_seed": 1,
+  "student_recipe": "ep10_lr1e-4_r8a32",
+  "lineages": [
+    "orig",
+    "ds1",
+    "ds2",
+    "ds3",
+    "fs1",
+    "fs2",
+    "fs3",
+    "wc1",
+    "wc2"
+  ],
+  "matrix_steps": [
+    75000,
+    80000,
+    85000,
+    90000,
+    95000,
+    100000,
+    105000,
+    110000,
+    115000,
+    120000,
+    125000,
+    130000,
+    143000
+  ],
+  "n_source_pools": 630,
+  "run_status_counts": {
+    "verified": 4170
+  },
+  "scoring_counts": {
+    "prob": 4170
+  },
+  "n_complete_diagonal_points": 126,
+  "aggregation": "Mean available verified student seeds within teacher recipe; equal mean of exactly five canonical recipes. Missing/incomplete cells stay missing.",
+  "pool_hash_validation": "Source-content SHA agrees with current pool manifest and student train manifest. Cached hash reused only when source bytes and mtime also agree."
+}

@@ -24,7 +24,7 @@ import logging
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Collection, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -45,6 +45,7 @@ __all__ = [
     "DEAD_UNLABELLED",
     "CONTROL_LABEL",
     "base_name",
+    "LOCAL_PYTHIA_BASE",
     "resolve_teachers",
     "load_prior",
     "load_cell_matrix",
@@ -54,6 +55,8 @@ __all__ = [
     "RegistryArm",
     "load_registry_arm",
     "drop_empty_pools",
+    "DIVERGED_MARKER",
+    "diverged_missing",
     "StackedArms",
     "stack_cell_matrices",
     "PooledPermutation",
@@ -93,12 +96,27 @@ __all__ = [
     "registry_family_comparison",
     "registry_paired_contrast",
     "PAIRED_CONTRAST_COLUMNS",
+    "PAIRED_CONTRAST_ONE_SIDED",
     "registry_paired_contrast_table",
     "style_registry_paired_contrast_table",
+    "PAIRED_SENDER_CONDITIONS",
+    "PAIRED_SENDER_MODES",
+    "paired_sender_frame",
+    "paired_sender_tests",
+    "POOLED_PAIR_CONDITIONS",
+    "POOLED_FRAME_COLUMNS",
+    "paired_pooled_frame",
+    "paired_pooled_tests",
+    "paired_pooled_descriptives",
 ]
 
 CONTROL_LABEL = "CONTROL"
 DEFAULT_DATASET_TAG = "ex10-20_prefix_n100k"
+
+#: Marker the trainer writes into a run leaf whose adapter weights went non-finite. Such a run
+#: writes no eval, so it reaches a `CellMatrix` as a missing (NaN) value exactly like a run that
+#: never started; this file is the only thing that tells the two apart.
+DIVERGED_MARKER = "train_diverged.json"
 
 #: `dead_policy` when a receiver had no anchored cut: no run carries a dead label, so a count
 #: of 0 would mean "never labelled" rather than "none died" (see `_anchored_cut`).
@@ -138,13 +156,35 @@ class CellMatrix:
     no_control: list[str] = field(default_factory=list)
 
 
+#: The short labels of the locally re-pretrained 160m families (`registry.LOCAL_PYTHIA_FAMILIES`),
+#: derived from the registry rows so a new family or seed needs no edit: ``{short}{seed}``
+#: (``wc1``, ``dclm1234``) and, for a family with a single seed, the bare short (``prv1``). They
+#: live here rather than in `fsfact_transfer.RECEIVER_BASE`, whose keys are exactly that view's
+#: ten PolyPythias `RECEIVERS` (and whose inverse `BASE_RECEIVER` must stay a bijection on them).
+def _local_pythia_aliases() -> dict[str, str]:
+    from subliminal_learning.models.registry import LOCAL_PYTHIA_FAMILIES
+
+    out: dict[str, str] = {}
+    for fam in LOCAL_PYTHIA_FAMILIES:
+        for seed in fam.seeds:
+            out[f"{fam.short}{seed}"] = fam.dir_name(seed)
+        if len(fam.seeds) == 1:
+            out[fam.short] = fam.dir_name(fam.seeds[0])
+    return out
+
+
+LOCAL_PYTHIA_BASE: dict[str, str] = _local_pythia_aliases()
+
+
 def base_name(token: str) -> str:
     """The on-disk base-model dir name of a short receiver/sender token.
 
     ``original``/``orig`` -> ``pythia-160m``, ``fs<N>``/``full-seed<N>`` -> ``pythia-160m-seed<N>``,
     ``ds<N>`` -> ``pythia-160m-data-seed<N>``, ``ws<N>`` -> ``pythia-160m-weight-seed<N>``. These
     160m aliases are this repo's OWN short labels (`analysis.fsfact_transfer.RECEIVER_BASE`) and
-    keep priority; every other recognized spelling -- ``dd-1b``, ``dd-1b-dclm-seed2``, a hub ref,
+    keep priority, followed by the locally re-pretrained families' shorts (`LOCAL_PYTHIA_BASE`:
+    ``wc1`` -> ``pythia-160m-weightc-seed1``, ``prv1`` ->
+    ``pythia-160m-pilereprov1-seed1234``); every other recognized spelling -- ``dd-1b``, ``dd-1b-dclm-seed2``, a hub ref,
     an external alias -- goes through `models.naming.base_dir_name`, so there is no second
     DataDecide table here. An already-resolved base name (an explicit ``receiver_dir``/
     ``sender_dir``) and any unrecognized string pass through unchanged.
@@ -164,6 +204,8 @@ def base_name(token: str) -> str:
         t = f"fs{t.removeprefix('full-seed')}"
     if t in RECEIVER_BASE:
         return RECEIVER_BASE[t]
+    if t in LOCAL_PYTHIA_BASE:
+        return LOCAL_PYTHIA_BASE[t]
     try:
         return base_dir_name(t)
     except ValueError:
@@ -308,6 +350,36 @@ def drop_empty_pools(matrix: CellMatrix) -> tuple[CellMatrix, list[str]]:
     ), dropped
 
 
+def diverged_missing(matrix: CellMatrix, sender_tree: Path, *, dataset_tag: str, tseed: int,
+                     ftseed: int,
+                     teacher_dataset_tags: Mapping[str, str] | None = None
+                     ) -> list[tuple[str, str]]:
+    """The ``(teacher, cell)`` entries of `matrix.missing` whose run leaf carries
+    `DIVERGED_MARKER` -- students that RAN and diverged to non-finite adapter weights, as
+    opposed to students that never ran.
+
+    Args:
+        matrix: The arm's `CellMatrix`.
+        sender_tree: The arm's student tree (`_arm_trees`' second element).
+        dataset_tag, tseed, ftseed: The numbers-dataset dir, teacher seed and student seed the
+            matrix was read at.
+        teacher_dataset_tags: Per-teacher ``dataset_tag`` overrides, as `load_cell_matrix`.
+
+    Returns:
+        The diverged ``(teacher, cell)`` pairs, sorted; control entries are never included.
+    """
+    tags = teacher_dataset_tags or {}
+    out = []
+    for pool, cell in matrix.missing:
+        if pool == CONTROL_LABEL:
+            continue
+        leaf = (sender_tree / f"{pool}_tseed{tseed}" / tags.get(pool, dataset_tag) / cell
+                / f"ftseed{ftseed}" / DIVERGED_MARKER)
+        if leaf.is_file():
+            out.append((pool, cell))
+    return sorted(out)
+
+
 @dataclass(frozen=True)
 class StackedArms:
     """Several arms' `CellMatrix` values stacked row-wise for the arm-stratified permutation.
@@ -361,11 +433,18 @@ def stack_cell_matrices(matrices: Mapping[str, CellMatrix]) -> StackedArms:
 def load_prior(
     eval_animal: str, receiver: str, prompt_set: str = "test", *, output_root: Path | None = None
 ) -> float:
-    """The untuned receiver's base ``p_target`` for `eval_animal`.
+    """The untuned receiver's base ``p(eval_animal)`` for `eval_animal`.
 
-    Read from ``teachers/{eval_animal}/{receiver_dir}/base_control.json``. The base control has
-    no ``test`` prompt set (test prompts only exist for students), so the ``validation`` set is
-    used as the proxy for ``prompt_set == "test"``; ``off_topic`` is read exactly.
+    For ``prompt_set == "test"`` -- the only set any relative-to-prior statistic uses -- this is
+    the canonical test prior: the mean of ``analysis/base_eval_{short}_animal_preference_test
+    .json`` -> ``[eval_animal]["p_per_prompt"]`` (`frames.load_base_prior`), with `short` =
+    `transfer_factors.base_eval_short` of the receiver's base label. The old ``validation``
+    proxy read out of the teachers tree's ``base_control.json`` is GONE: the base control has no
+    test prompts, and one test prior is used everywhere. When the artifact, the animal key or
+    the base's short is missing the prior is ``nan`` (callers turn that into "no receiver
+    prior") and the remedy is logged. Any other prompt set is still read exactly from
+    ``teachers/{eval_animal}/{receiver_dir}/base_control.json`` (the readout CLI's
+    ``--prompt-set off_topic``).
 
     Args:
         eval_animal: Animal whose preference is scored.
@@ -374,15 +453,48 @@ def load_prior(
         output_root: Output tree root; defaults to the paths YAML's.
 
     Returns:
-        The prior probability, or ``nan`` when the base control is absent.
+        The prior probability, or ``nan`` when it is not on disk.
     """
-    path = (resolve_output_root(output_root) / "teachers" / eval_animal
-            / base_name(receiver) / "base_control.json")
+    root = resolve_output_root(output_root)
+    if prompt_set == "test":
+        return _base_eval_test_prior(root, base_name(receiver), eval_animal)
+    path = root / "teachers" / eval_animal / base_name(receiver) / "base_control.json"
     if not path.is_file():
         return float("nan")
-    key = "validation" if prompt_set == "test" else prompt_set
     doc = json.loads(path.read_text())
-    return float(doc.get(key, {}).get("p_target", float("nan")))
+    return float(doc.get(prompt_set, {}).get("p_target", float("nan")))
+
+
+def _base_eval_test_prior(root: Path, base: str, animal: str) -> float:
+    """The base's test prior from ``analysis/base_eval_{short}_animal_preference_test.json``.
+
+    Args:
+        root: Resolved output root.
+        base: On-disk base-model dir name (`base_name` output).
+        animal: Trait animal.
+
+    Returns:
+        The mean per-prompt probability, or ``nan`` (with the remedy logged) when the artifact,
+        its animal key or the base's filename short is missing.
+    """
+    from subliminal_learning.analysis.frames import load_base_prior
+    from subliminal_learning.analysis.transfer_factors import base_eval_short
+
+    try:
+        short = base_eval_short(base)
+    except KeyError:
+        short = None
+    if short is not None:
+        try:
+            return load_base_prior(root, short, animal)
+        except (FileNotFoundError, KeyError):
+            pass
+    path = (root / "analysis"
+            / f"base_eval_{short or '<short>'}_animal_preference_test.json")
+    logger.warning(
+        "missing test prior for %s/%s: run  uv run python scripts/base_test_prior.py "
+        "--base-models %s  (writes %s)", base, animal, base, path)
+    return float("nan")
 
 
 #: Run-leaf files whose presence/size/mtime the loader cache watches, per run dir (a
@@ -1013,38 +1125,26 @@ def _arm_dead_matrix(matrix: CellMatrix, control_tree: Path, sender_tree: Path, 
 
 def student_tree_prior(animal: str, receiver: str, *, prompt_set: str = "test",
                        output_root: Path | None = None) -> float:
-    """The receiver's untuned prior as its student trees record it (the registry arms' prior).
+    """The receiver's untuned prior (the registry arms' prior) -- the same number `load_prior`
+    serves.
 
-    The one ``base_control.json`` shared by every ``students/{animal}/{receiver}/teacher-*``
-    tree (they must agree). Trees whose worker wrote none (the 160m re-pretraining receivers)
-    fall back to the receiver's ``analysis/base_eval_{short}_..._test.json`` prior, the same
-    test-prompt number `frames.load_base_prior` serves everywhere else.
+    The receiver's ``analysis/base_eval_{short}_animal_preference_test.json`` test prior, one
+    prior per (base, animal) for every consumer; the per-tree ``base_control.json`` the student
+    workers write is no longer read (the trees' priors are older, set-dependent numbers, and
+    only the canonical test prior is relative-statistic material). Missing artifact -> ``nan``
+    with the remedy logged.
 
     Args:
-        animal: Trait animal (the students subtree).
+        animal: Trait animal.
         receiver: Receiver token or base name.
-        prompt_set: Prompt set read out of ``base_control.json``.
+        prompt_set: Prompt set the prior is meant to match; anything but ``test`` goes through
+            `load_prior`'s base-control path.
         output_root: Output tree root; defaults to the paths YAML's.
 
     Returns:
-        The prior.
-
-    Raises:
-        ValueError: When the student trees disagree on the prior.
+        The prior, or ``nan``.
     """
-    root = resolve_output_root(output_root)
-    receiver = base_name(receiver)
-    files = sorted((root / "students" / animal / Path(*model_dir_parts_from_name(receiver))
-                    ).glob("teacher-*/*/*/base_control.json"))
-    vals = {round(json.loads(f.read_text())[prompt_set]["p_target"], 10) for f in files}
-    if len(vals) > 1:
-        raise ValueError(f"{(animal, receiver)}: student trees disagree on the prior: {vals}")
-    if vals:
-        return vals.pop()
-    from subliminal_learning.analysis.frames import load_base_prior
-    from subliminal_learning.analysis.transfer_factors import base_eval_short
-
-    return load_base_prior(root, base_eval_short(receiver), animal)
+    return load_prior(animal, receiver, prompt_set, output_root=output_root)
 
 
 def check_expected_prior(name: str, prior: float, expected: float | None) -> None:
@@ -1132,6 +1232,7 @@ class RegistryArm:
         strays: On-disk teacher tags of the sender tree that the arm lists nowhere
             (neither ``teachers`` nor ``known_short``); auto-excluded, reported.
         sender_tree, control_tree, dataset_tag: The trees the dead labels are read from.
+        diverged: ``(teacher, cell)`` runs excluded as diverged (``diverged="exclude"`` only).
     """
 
     name: str
@@ -1150,11 +1251,12 @@ class RegistryArm:
     sender_tree: Path
     control_tree: Path
     dataset_tag: str
+    diverged: list[tuple[str, str]] = field(default_factory=list)
 
 
 def load_registry_arm(a: dict, arms: Mapping[str, dict], arms_json: str | Path, *,
                       root: Path | None = None, ftseed: int = 1, prompt_set: str = "test",
-                      priors: dict | None = None) -> RegistryArm:
+                      priors: dict | None = None, diverged: str = "drop") -> RegistryArm:
     """Read ONE registry arm the way `significance_table` does (the coverage rule included).
 
     Every listed teacher must cover the whole design (``known_short`` teachers must miss
@@ -1172,6 +1274,10 @@ def load_registry_arm(a: dict, arms: Mapping[str, dict], arms_json: str | Path, 
         root: Output tree root; defaults to the paths YAML's.
         ftseed, prompt_set: The registry's student seed and prompt set.
         priors: Optional ``{(animal, receiver): prior}`` cache shared across arms.
+        diverged: ``"drop"`` (default) counts a diverged student as a run that is not there, so
+            the arm is short of a finished set; ``"exclude"`` counts it as COMPLETE, keeps the
+            arm finished, leaves its NaN in the matrix (no test sees it) and reports it on
+            `RegistryArm.diverged`.
 
     Returns:
         A `RegistryArm`.
@@ -1204,10 +1310,23 @@ def load_registry_arm(a: dict, arms: Mapping[str, dict], arms_json: str | Path, 
                                source="base", numbers_base=base_name(a["sender"]))
     ctrl_cov = sum(_control_value(control_tree / c, a["animal"], prompt_set, ftseed)[0]
                    is not None for c in cells)
-    covered = {}
+    covered, diverged_runs = {}, []
+
+    def endpoint(tag: str, cell: str) -> bool:
+        """Does ``(tag, cell)`` count as a finished run? A diverged one does under
+        ``diverged="exclude"``: it ran, it just has no eval to read."""
+        leaf = sender_tree / f"{tag}_tseed{a['tseed']}" / teacher_tags.get(tag, dataset_tag) / cell
+        if _has_seed_endpoint(leaf, ftseed, prompt_set):
+            return True
+        return (diverged == "exclude"
+                and (leaf / f"ftseed{ftseed}" / DIVERGED_MARKER).is_file())
+
     for tag in [*teachers, *short]:
         leaf = sender_tree / f"{tag}_tseed{a['tseed']}" / teacher_tags.get(tag, dataset_tag)
-        missing = [c for c in cells if not _has_seed_endpoint(leaf / c, ftseed, prompt_set)]
+        missing = [c for c in cells if not endpoint(tag, c)]
+        if tag in teachers:
+            diverged_runs += [(tag, c) for c in cells if c not in missing
+                              and not _has_seed_endpoint(leaf / c, ftseed, prompt_set)]
         covered[tag] = len(cells) - len(missing)
         if tag in short:
             if missing != short[tag]:
@@ -1218,9 +1337,7 @@ def load_registry_arm(a: dict, arms: Mapping[str, dict], arms_json: str | Path, 
     # matched cells: every listed teacher's endpoint AND a control, cell by cell
     matched = sum(
         _control_value(control_tree / c, a["animal"], prompt_set, ftseed)[0] is not None
-        and all(_has_seed_endpoint(
-            sender_tree / f"{t}_tseed{a['tseed']}" / teacher_tags.get(t, dataset_tag) / c,
-            ftseed, prompt_set) for t in teachers)
+        and all(endpoint(t, c) for t in teachers)
         for c in cells)
     finished = ctrl_cov == len(cells) and all(covered[t] == len(cells) for t in teachers)
     if not finished and not (a.get("in_progress") or a.get("untestable")):
@@ -1259,7 +1376,7 @@ def load_registry_arm(a: dict, arms: Mapping[str, dict], arms_json: str | Path, 
                        receiver=receiver, prior=priors[key], ctrl_cov=ctrl_cov,
                        matched=matched, counts=counts, finished=finished, matrix=matrix,
                        strays=stray, sender_tree=sender_tree, control_tree=control_tree,
-                       dataset_tag=dataset_tag)
+                       dataset_tag=dataset_tag, diverged=sorted(diverged_runs))
 
 
 def significance_table(arms_json: str | Path, output_root: Path | None = None) -> pd.DataFrame:
@@ -2179,6 +2296,7 @@ def compare_families(
     dead: str = "keep",
     n_perm: int = 20000,
     seed: int = 0,
+    exclude_blocks: Collection[tuple[str, str]] = (),
     **kw,
 ) -> FamilyComparison | MultiAnimalComparison:
     """Does family A's SET of arms transfer more strongly than family B's?
@@ -2214,6 +2332,11 @@ def compare_families(
             `FamilyComparison.dead_policy` `DEAD_POLICY_NONE`) under ``"keep"``.
         n_perm: Monte-Carlo draws (arm level beyond the enumeration cap; always at cell level).
         seed: Seed of the permutation draws.
+        exclude_blocks: ``(animal, arm)`` blocks to keep out of the comparison altogether -- a
+            caller that judges coverage more strictly than the full-design rule here (e.g. the
+            conditions table, which needs EVERY listed teacher on every cell) names its
+            unfinished blocks and they are reported in `MultiAnimalComparison.missing_blocks`
+            instead of being tested. Empty by default, so the older call paths are unchanged.
         **kw: Forwarded to `normalized_effect_frame` (``eval_animal``, ``prompt_set``, ``tseed``,
             ``control_source``, ``output_root``, ...).
 
@@ -2257,10 +2380,14 @@ def compare_families(
     missing: dict[str, int] = {}
     retention = {m: {"below_floor": 0, "no_diagonal": set()} for m in RETENTION_MODES}
     n_dead_treatment = n_dead_control = 0
+    excluded = {(animal, arm) for animal, arm in exclude_blocks}
     for animal in animal_list:
-        frame, report = normalized_effect_frame(arms, animal, by_animal[animal],
+        kept = [a for a in arms if (animal, a.arm) not in excluded]
+        frame, report = normalized_effect_frame(kept, animal, by_animal[animal],
                                                 family_a=label_a, family_b=label_b, ftseed=ftseed,
                                                 dead=dead, cells=cells, **kw)
+        report["skipped_arms"] = [f"{a.arm}: excluded by the caller" for a in arms
+                                  if (animal, a.arm) in excluded] + report["skipped_arms"]
         dead_policies.append(report["dead_policy"])
         missing_blocks += [f"{animal} {s}" for s in report["skipped_arms"]]
         notes += [n for n in report["notes"] if n not in notes]
@@ -2457,7 +2584,11 @@ def _retention_note(m: ModeComparison, design: str) -> str:
 
 def _comparison_rows(comparison: str, design: str, animal: str, res: FamilyComparison) -> list[dict]:
     """One (comparison, design, animal) block: one row per value mode. A retention mode with no
-    usable diagonal keeps its row with the reason in ``missing blocks`` and no numbers."""
+    usable diagonal keeps its row with the reason in ``missing blocks`` and no numbers.
+
+    The three p columns are the tests' TWO-SIDED p's (`stats` ``p_two_sided``): a family
+    comparison fixes no direction in advance. Each test's one-sided A > B tail is still on the
+    result (``p_upper``) for a caller that wants it beside the two-sided p."""
     rows = []
     blocks = (f"{len(res.skipped_arms)}: " + ", ".join(s.split(":")[0] for s in res.skipped_arms)
               ) if res.skipped_arms else "0"
@@ -2473,10 +2604,12 @@ def _comparison_rows(comparison: str, design: str, animal: str, res: FamilyCompa
         rows.append({
             **row,
             "arms A vs B": f"{m.mean_contrast.n_a} vs {m.mean_contrast.n_b}",
-            "mean contrast": m.mean_contrast.observed, "mean p": m.mean_contrast.p,
-            "win prob.": m.win_probability.observed, "win p": m.win_probability.p,
+            "mean contrast": m.mean_contrast.observed,
+            "mean p": m.mean_contrast.p_two_sided,
+            "win prob.": m.win_probability.observed,
+            "win p": m.win_probability.p_two_sided,
             "exceed. frac contrast": m.arm_level_exceed.observed,
-            "exceed. p": m.arm_level_exceed.p, "floor": m.mean_contrast.floor,
+            "exceed. p": m.arm_level_exceed.p_two_sided, "floor": m.mean_contrast.floor,
             "labelings": m.mean_contrast.n_labelings,
         })
     return rows
@@ -2558,16 +2691,18 @@ def style_diagonals_table(df: pd.DataFrame):
 
 def _p_styler(df: pd.DataFrame, p_columns: Sequence[str], *, index: Sequence[str],
               grey: np.ndarray, floats: Mapping[str, str] | None = None,
-              amber: np.ndarray | None = None):
+              amber: np.ndarray | None = None, plain_p_columns: Sequence[str] = ()):
     """Shared styling of the two family tables: p < 0.05 bold on light green, `grey` rows shaded,
-    `amber` rows (arms lacking data) on `AMBER`, index cells included."""
+    `amber` rows (arms lacking data) on `AMBER`, index cells included. `plain_p_columns` are
+    formatted like a p but NEVER highlighted -- the secondary one-sided columns beside a
+    highlighted two-sided p."""
     body = df.drop(columns=["pooled", "stratified"], errors="ignore")
     body = body.set_index(list(index))
     shade = "background-color: rgba(128, 128, 128, 0.2)"
     green = "font-weight: bold; background-color: rgba(120, 200, 120, 0.35)"
     flagged = np.zeros(len(df), dtype=bool) if amber is None else amber
     css = [AMBER if f else shade if g else "" for f, g in zip(flagged, grey)]
-    fmt = {c: _fmt_p for c in p_columns}
+    fmt = {c: _fmt_p for c in [*p_columns, *plain_p_columns]}
     fmt.update({c: (lambda v, spec=spec: "" if v is None or pd.isna(v) else format(v, spec))
                 for c, spec in (floats or {}).items()})
     styler = body.style
@@ -2941,7 +3076,9 @@ def registry_paired_contrast(
     Two finished registry arms that share their teacher tags, paired run by run on
     ``(teacher, cell)``: a sign test and a within-pair sign-flip permutation
     (`stats.paired_sign_flip_permutation`) on the paired difference of the prior-normalized
-    gaps. Both receivers are FIXED here -- with one arm per side there is nothing to relabel --
+    gaps. This is a COMPARISON of two arms, so the sign-flip p to report is the TWO-SIDED
+    ``flip_p_two_sided = min(1, 2 * min(flip_p, flip_p_opposite))`` -- which receiver is the
+    larger was not fixed before the data; ``flip_p`` stays as the one-sided A > B tail. Both receivers are FIXED here -- with one arm per side there is nothing to relabel --
     so this is a statement about these ten senders and these two receivers, never a family
     claim; `registry_family_comparison` is the test that generalizes over arms.
 
@@ -2956,7 +3093,7 @@ def registry_paired_contrast(
 
     Returns:
         ``{arm_a, arm_b, n_pairs, wins_a, sign_p, mean_diff_rel, median_diff_rel, mean_diff_abs,
-        flip_p, flip_p_opposite, scale, n_teachers, cells, note}``; ``arm_a``/``arm_b`` are the
+        flip_p, flip_p_opposite, flip_p_two_sided, scale, n_teachers, cells, note}``; ``arm_a``/``arm_b`` are the
         registry's short renderings and the full registry names are in ``note``. ``scale`` says
         which gap the sign test and the sign-flip permutation read -- ``"relative"`` (the gap
         over each receiver's prior, the usual case) or ``"absolute"`` when a receiver has no
@@ -3005,6 +3142,7 @@ def registry_paired_contrast(
             "median_diff_rel": float(np.nanmedian(rel_diff)) if rel else float("nan"),
             "mean_diff_abs": float((pairs["value_abs_a"] - pairs["value_abs_b"]).mean()),
             "flip_p": float(flip.p), "flip_p_opposite": float(flip.p_opposite),
+            "flip_p_two_sided": float(min(1.0, 2.0 * min(flip.p, flip.p_opposite))),
             "scale": "relative" if rel else "absolute",
             "n_teachers": int(pairs["teacher"].nunique()),
             "cells": int(pairs["cell"].nunique()), "note": "; ".join(notes)}
@@ -3012,26 +3150,434 @@ def registry_paired_contrast(
 
 #: Columns of `registry_paired_contrast_table`.
 PAIRED_CONTRAST_COLUMNS = ["contrast", "scale", "n teachers", "n pairs", "wins A", "sign p",
-                           "mean Δ rel", "median Δ rel", "mean Δ abs", "flip p", "flip p opp.",
-                           "note"]
+                           "mean Δ rel", "median Δ rel", "mean Δ abs", "flip p",
+                           "flip one-sided (A>B)", "note"]
+
+#: The secondary one-sided column of `registry_paired_contrast_table` (``flip p`` is two-sided).
+PAIRED_CONTRAST_ONE_SIDED = "flip one-sided (A>B)"
 
 
 def registry_paired_contrast_table(contrasts: Sequence[Mapping]) -> pd.DataFrame:
-    """`registry_paired_contrast` dicts as one `PAIRED_CONTRAST_COLUMNS` frame, one row each."""
+    """`registry_paired_contrast` dicts as one `PAIRED_CONTRAST_COLUMNS` frame, one row each.
+
+    ``flip p`` is the TWO-SIDED sign-flip p (the comparison's primary p) and
+    `PAIRED_CONTRAST_ONE_SIDED` the one-sided A > B tail beside it; the reverse direction is
+    read off the sign of the differences, so the old B > A tail has no column of its own.
+    ``sign p`` is the one-sided sign test, descriptive as before."""
     rows = [{"contrast": f"{c['arm_a']} vs {c['arm_b']}", "scale": c["scale"],
              "n teachers": c["n_teachers"], "n pairs": c["n_pairs"], "wins A": c["wins_a"],
              "sign p": c["sign_p"], "mean Δ rel": c["mean_diff_rel"],
              "median Δ rel": c["median_diff_rel"], "mean Δ abs": c["mean_diff_abs"],
-             "flip p": c["flip_p"], "flip p opp.": c["flip_p_opposite"], "note": c["note"]}
+             "flip p": c["flip_p_two_sided"],
+             PAIRED_CONTRAST_ONE_SIDED: c["flip_p"], "note": c["note"]}
             for c in contrasts]
     return pd.DataFrame(rows, columns=PAIRED_CONTRAST_COLUMNS)
 
 
 def style_registry_paired_contrast_table(df: pd.DataFrame):
-    """Styler for `registry_paired_contrast_table`: ``sign p``, ``flip p`` and the opposite
-    tail's ``flip p opp.`` below 0.05 bold on the same light green as the other tables,
-    contrast as the index, differences to 3 dp."""
-    return _p_styler(df, ["sign p", "flip p", "flip p opp."], index=["contrast"],
+    """Styler for `registry_paired_contrast_table`: ``sign p`` and the two-sided ``flip p``
+    below 0.05 bold on the same light green as the other tables, the secondary
+    `PAIRED_CONTRAST_ONE_SIDED` column formatted but never highlighted (the two-sided p is the
+    verdict), contrast as the index, differences to 3 dp."""
+    return _p_styler(df, ["sign p", "flip p"], index=["contrast"],
                      grey=np.zeros(len(df), dtype=bool),
+                     plain_p_columns=[PAIRED_CONTRAST_ONE_SIDED],
                      floats={"mean Δ rel": ".3f", "median Δ rel": ".3f",
                              "mean Δ abs": ".3f"})
+
+
+# ----------------------------------------------------------------------------------------------
+# one-sender paired design: cross receiver vs the sender's own base (same-model)
+# ----------------------------------------------------------------------------------------------
+#: `paired_sender_frame` conditions, in the order `paired_sender_tests` contrasts them.
+PAIRED_SENDER_CONDITIONS = ("cross", "same")
+
+#: The value modes `paired_sender_tests` runs (the two of `VALUE_MODES` that need no diagonal).
+PAIRED_SENDER_MODES = ("absolute", "relative")
+
+#: Columns every paired-design row carries, in order; the pooled builder inserts its design keys.
+PAIRED_ROW_COLUMNS = ["condition", "teacher", "cell", "value_abs", "value_rel", "treatment",
+                      "control", "receiver"]
+
+
+def _paired_arm_rows(
+    animal: str, sender: str, receiver: str, teachers: Sequence[str], *, condition: str,
+    eval_animal: str, prompt_set: str, ftseed: int,
+    cells: Sequence[str] | str | Path | None, output_root: Path | None, **kw,
+) -> tuple[list[dict], float, CellMatrix, int]:
+    """One arm of a paired design: its `PAIRED_ROW_COLUMNS` rows against the matched control.
+
+    A row is a run whose treatment AND its cell's matched base-pool control are both finite; the
+    gap is taken absolutely (``value_abs``) and over this receiver's own prior (``value_rel``).
+
+    Args:
+        animal: Animal the teachers were finetuned on (the students subtree).
+        sender: Sender (teacher) base token.
+        receiver: This arm's receiver token.
+        teachers: Teacher param_tags.
+        condition: Condition label written on the rows (and named in any error).
+        eval_animal: Animal scored.
+        prompt_set: Prompt set read out of the summaries.
+        ftseed: Student finetune seed of both the treatment and the control.
+        cells: Design cells, as `load_cell_matrix` takes them.
+        output_root: Output tree root; defaults to the paths YAML's.
+        **kw: Forwarded to `load_cell_matrix`.
+
+    Returns:
+        ``(rows, prior, matrix, n_missing)``, `n_missing` counting treatment slots with no
+        finite value on the matched cells.
+
+    Raises:
+        ValueError: When the arm has no control cell or no finite receiver prior.
+    """
+    matrix = load_cell_matrix(animal, sender, receiver, teachers, eval_animal=eval_animal,
+                              prompt_set=prompt_set, ftseed=ftseed, cells=cells,
+                              output_root=output_root, **kw)
+    if not matrix.cells:
+        raise ValueError(f"{condition} arm ({sender}->{receiver}) has no control cell")
+    prior = load_prior(eval_animal, receiver, prompt_set, output_root=output_root)
+    if not np.isfinite(prior) or prior == 0:
+        raise ValueError(f"{condition} arm ({sender}->{receiver}) has no receiver prior")
+    control = matrix.values[:, matrix.control_col]
+    matched = [i for i in range(len(matrix.cells)) if np.isfinite(control[i])]
+    rows, n_missing = [], 0
+    for i in matched:
+        for j, pool in enumerate(matrix.pools):
+            if pool == CONTROL_LABEL:
+                continue
+            if not np.isfinite(matrix.values[i, j]):
+                n_missing += 1
+                continue
+            gap = float(matrix.values[i, j] - control[i])
+            rows.append({"condition": condition, "teacher": pool, "cell": matrix.cells[i],
+                         "value_abs": gap, "value_rel": gap / float(prior),
+                         "treatment": float(matrix.values[i, j]), "control": float(control[i]),
+                         "receiver": base_name(receiver)})
+    return rows, float(prior), matrix, n_missing
+
+
+def paired_sender_frame(
+    animal: str,
+    sender: str,
+    cross_receiver: str,
+    teachers: Sequence[str],
+    *,
+    eval_animal: str | None = None,
+    prompt_set: str = "test",
+    ftseed: int = 1,
+    cells: Sequence[str] | str | Path | None = None,
+    output_root: Path | None = None,
+    **kw,
+) -> tuple[pd.DataFrame, dict]:
+    """One sender's two arms on ONE design: into `cross_receiver`, and into its own base.
+
+    Both arms are read with `load_cell_matrix` on the SAME cells and the SAME teachers, each
+    against its own receiver's matched base-pool control and its own receiver's prior -- that
+    pairing is what `stats.paired_cluster_relabel_permutation` needs, and the teacher is the
+    exchangeable unit it flips. No dead filtering: the rows are the runs as measured.
+
+    Args:
+        animal: Animal the teachers were finetuned on (the students subtree).
+        sender: Sender (teacher) base token; also the same-model receiver.
+        cross_receiver: The cross arm's receiver token.
+        teachers: Teacher param_tags, the same list for both arms.
+        eval_animal: Animal scored; defaults to `animal`.
+        prompt_set: Prompt set read out of the summaries.
+        ftseed: Student finetune seed both the treatment and the control are read at.
+        cells: The design cells (a cells JSON path or a list); ``None`` takes each receiver's
+            own control cell list, in which case only the cells both arms reach are kept.
+        output_root: Output tree root; defaults to the paths YAML's.
+        **kw: Forwarded to `load_cell_matrix` (``tseed``, ``dataset_tag``, ``control_source``, ...).
+
+    Returns:
+        ``(frame, report)``. `frame` columns: ``condition`` (`PAIRED_SENDER_CONDITIONS`),
+        ``teacher``, ``cell``, ``value_abs`` (treatment minus the cell's matched control),
+        ``value_rel`` (the same gap over that receiver's prior), ``treatment``, ``control`` and
+        ``receiver``; one row per run whose treatment AND matched control are both finite.
+        `report` holds ``priors`` (``{condition: prior}``), ``receivers``, ``no_control``
+        (``{condition: [cell, ...]}`` -- design cells the receiver has no control for),
+        ``missing`` (``{condition: n}`` treatment slots with no finite value on the matched
+        cells), ``design_cells`` and ``teachers``.
+
+    Raises:
+        ValueError: When an arm has no control cell, no finite receiver prior, or the two arms
+            share no cell.
+    """
+    eval_animal = eval_animal or animal
+    arms = {"cross": cross_receiver, "same": sender}
+    priors, blocks, no_control, missing = {}, {}, {}, {}
+    for condition, receiver in arms.items():
+        rows, prior, matrix, n_missing = _paired_arm_rows(
+            animal, sender, receiver, teachers, condition=condition, eval_animal=eval_animal,
+            prompt_set=prompt_set, ftseed=ftseed, cells=cells, output_root=output_root, **kw)
+        priors[condition] = prior
+        no_control[condition] = list(matrix.no_control)
+        missing[condition] = n_missing
+        blocks[condition] = pd.DataFrame(rows, columns=PAIRED_ROW_COLUMNS)
+    # Without pinned cells the two receivers' control trees can differ; the test is only defined
+    # on the cells BOTH arms reach, so intersect before anything is contrasted.
+    shared = sorted(set(blocks["cross"]["cell"]) & set(blocks["same"]["cell"]))
+    if not shared:
+        raise ValueError(f"{sender}->{cross_receiver} and {sender}->{sender} share no cell")
+    frame = pd.concat([b[b["cell"].isin(shared)] for b in blocks.values()], ignore_index=True)
+    report = {"priors": priors, "receivers": {c: base_name(r) for c, r in arms.items()},
+              "no_control": no_control, "missing": missing, "design_cells": shared,
+              "teachers": list(teachers)}
+    return frame, report
+
+
+def paired_sender_tests(
+    frame: pd.DataFrame, *, cond_a: str = "cross", cond_b: str = "same", **kw
+) -> dict[str, dict[str, tt.PairedClusterResult]]:
+    """`stats.paired_cluster_relabel_permutation` on a `paired_sender_frame`, both modes.
+
+    Args:
+        frame: A `paired_sender_frame` frame.
+        cond_a: Condition claimed stronger (the positive side of the contrast).
+        cond_b: Reference condition.
+        **kw: Forwarded to `stats.paired_cluster_relabel_permutation` (``max_exact``,
+            ``n_perm``, ``seed``).
+
+    Returns:
+        ``{mode: {statistic: PairedClusterResult}}`` over `PAIRED_SENDER_MODES` x
+        `stats.ARM_RELABEL_STATISTICS`; the mode picks the value column (`VALUE_COLUMNS`). Each
+        result is a comparison: quote its ``p_two_sided``, not the one-sided ``p_upper``.
+    """
+    return {
+        mode: {statistic: tt.paired_cluster_relabel_permutation(
+            frame, cond_a=cond_a, cond_b=cond_b, statistic=statistic,
+            value_col=VALUE_COLUMNS[mode], **kw)
+            for statistic in tt.ARM_RELABEL_STATISTICS}
+        for mode in PAIRED_SENDER_MODES}
+
+
+# ----------------------------------------------------------------------------------------------
+# pooled paired design: several senders' (same init, diff corpus) vs (diff init, diff corpus)
+# ----------------------------------------------------------------------------------------------
+#: `paired_pooled_frame` conditions, in the order `paired_pooled_tests` contrasts them: ``"A"`` =
+#: the claim's side (for the OLMo recipe matrix: same init, different corpus), ``"B"`` = the
+#: reference (different init AND different corpus). The labels are deliberately neutral -- the
+#: pooled design spans several senders, so the one-sender ``cross``/``same`` names do not apply.
+POOLED_PAIR_CONDITIONS = ("A", "B")
+
+#: `paired_pooled_frame` columns: the design keys, then the `PAIRED_ROW_COLUMNS` payload.
+POOLED_FRAME_COLUMNS = ["condition", "pair", "sender", "target", "teacher", "cluster", "stratum",
+                        "cell", "value_abs", "value_rel", "treatment", "control", "receiver"]
+
+
+def _pooled_pair(spec) -> tuple[str, str, str, str]:
+    """``(sender, receiver_a, receiver_b, label)`` of one `paired_pooled_frame` pair spec.
+
+    Raises:
+        ValueError: On a spec that is not a 3- or 4-element sequence.
+    """
+    items = list(spec)
+    if len(items) == 3:
+        sender, receiver_a, receiver_b = items
+        label = f"{sender} -> {receiver_a}"
+    elif len(items) == 4:
+        sender, receiver_a, receiver_b, label = items
+    else:
+        raise ValueError(f"a pair is (sender, receiver_a, receiver_b[, label]), got {spec!r}")
+    return str(sender), str(receiver_a), str(receiver_b), str(label)
+
+
+def _pooled_pair_teachers(
+    teachers, *, label: str, sender: str, receivers: Sequence[str], animal: str,
+    dataset_tag: str, tseed: int, output_root: Path | None,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """One pair's teachers, plus each arm's on-disk tags they leave out.
+
+    ``None`` takes the tags present in BOTH arms (a seed-default arm often also carries pilot /
+    ladder senders, which have no twin under the other receiver and so no pair to swap); a
+    mapping is looked up by pair label or sender token; anything else is one list (or manifest
+    path) for every pair, resolved by `resolve_teachers`.
+
+    Raises:
+        ValueError: When a mapping has no entry for the pair, or the arms share no teacher.
+    """
+    on_disk = [resolve_teachers(ALL_ON_DISK, animal=animal, sender=sender, receiver=receiver,
+                               output_root=output_root, dataset_tag=dataset_tag, tseed=tseed)[0]
+               for receiver in receivers]
+    spec = teachers
+    if isinstance(teachers, Mapping):
+        keys = [k for k in (label, sender, base_name(sender)) if k in teachers]
+        if not keys:
+            raise ValueError(f"teachers has no entry for pair {label!r}")
+        spec = teachers[keys[0]]
+    selected = (sorted(set(on_disk[0]) & set(on_disk[1])) if spec is None
+                else resolve_teachers(spec)[0])
+    if not selected:
+        raise ValueError(f"{label}: the two arms share no teacher")
+    excluded = {condition: sorted(set(tags) - set(selected))
+                for condition, tags in zip(POOLED_PAIR_CONDITIONS, on_disk)}
+    return list(selected), excluded
+
+
+def paired_pooled_frame(
+    pairs: Sequence[Sequence[str]],
+    animal: str,
+    *,
+    cells: Sequence[str] | str | Path,
+    teachers: Sequence[str] | str | Path | Mapping[str, Sequence[str]] | None = None,
+    eval_animal: str | None = None,
+    prompt_set: str = "test",
+    ftseed: int = 1,
+    output_root: Path | None = None,
+    **kw,
+) -> tuple[pd.DataFrame, dict]:
+    """Several senders' paired A-vs-B arms on one design, pooled into ONE frame.
+
+    Each pair is one sender's numbers distilled into two receivers of the SAME target
+    (`POOLED_PAIR_CONDITIONS`): ``receiver_a`` under condition A, ``receiver_b`` under B, on the
+    same cells and with the same teachers, each against its own receiver's matched base-pool
+    control and its own receiver's prior -- `paired_sender_frame`'s arm, read for many pairs.
+    For the OLMo DataDecide recipe matrix A is "same init, different corpus" (the target corpus
+    at seed-default) and B is "different init, different corpus" (the same corpus at
+    ``large-aux-2``).
+
+    The pooled test's exchangeable unit is the ``(sender, teacher)`` ``cluster``, NOT the
+    teacher tag: one sender's teacher appears in BOTH of that sender's pairs, and its A/B labels
+    must swap together across both targets and every cell, or the null would credit the design
+    with more independent information than it holds. The ``stratum`` is
+    ``(sender, target, cell)``, so every contrast is taken inside one pair's own cell and
+    neither cell difficulty nor a pair's level can masquerade as a condition effect.
+
+    Args:
+        pairs: ``(sender, receiver_a, receiver_b)`` tokens, optionally with a fourth element as
+            the pair's label (the default label is ``"{sender} -> {receiver_a}"``).
+        animal: Animal the teachers were finetuned on (the students subtree).
+        cells: The design cells (a cells JSON path or a list of names), shared by every pair.
+        teachers: ``None`` takes each pair's teachers present under BOTH receivers; a mapping is
+            read per pair (by label or sender token); anything else is one set for every pair.
+        eval_animal: Animal scored; defaults to `animal`.
+        prompt_set: Prompt set read out of the summaries.
+        ftseed: Student finetune seed both the treatment and the control are read at.
+        output_root: Output tree root; defaults to the paths YAML's.
+        **kw: Forwarded to `load_cell_matrix` (``tseed``, ``dataset_tag``, ``control_source``,
+            ...); the DataDecide arms pass ``tseed=0``.
+
+    Returns:
+        ``(frame, report)``. `frame` holds `POOLED_FRAME_COLUMNS`, one row per run whose
+        treatment AND matched control are both finite. `report` holds ``design_cells`` (the
+        requested design) and ``pairs``: per label, the ``teachers`` used, the ``excluded``
+        on-disk tags per condition, ``runs``, ``cells`` (the cells both arms reach), ``missing``
+        treatment slots, ``priors``, ``receivers`` and ``no_control``, each keyed by condition.
+
+    Raises:
+        ValueError: On a duplicate pair label, a pair whose arms share no teacher or no cell, an
+            arm with no control cell, or an arm with no finite receiver prior.
+    """
+    eval_animal = eval_animal or animal
+    design = sorted(resolve_cells(cells))
+    rows: list[dict] = []
+    reports: dict[str, dict] = {}
+    for spec in pairs:
+        sender, receiver_a, receiver_b, label = _pooled_pair(spec)
+        if label in reports:
+            raise ValueError(f"duplicate pair label {label!r}")
+        selected, excluded = _pooled_pair_teachers(
+            teachers, label=label, sender=sender, receivers=(receiver_a, receiver_b),
+            animal=animal, dataset_tag=kw.get("dataset_tag", DEFAULT_DATASET_TAG),
+            tseed=kw.get("tseed", 1), output_root=output_root)
+        sender_name, target = base_name(sender), base_name(receiver_a)
+        arms, priors, receivers, no_control, missing = {}, {}, {}, {}, {}
+        for condition, receiver in zip(POOLED_PAIR_CONDITIONS, (receiver_a, receiver_b)):
+            arm_rows, prior, matrix, n_missing = _paired_arm_rows(
+                animal, sender, receiver, selected, condition=condition,
+                eval_animal=eval_animal, prompt_set=prompt_set, ftseed=ftseed, cells=cells,
+                output_root=output_root, **kw)
+            for row in arm_rows:
+                row.update(pair=label, sender=sender_name, target=target,
+                           cluster=f"{sender_name}|{row['teacher']}",
+                           stratum=f"{sender_name}|{target}|{row['cell']}")
+            arms[condition] = arm_rows
+            priors[condition], receivers[condition] = prior, base_name(receiver)
+            no_control[condition], missing[condition] = list(matrix.no_control), n_missing
+        # Only the cells BOTH arms reach carry a contrast; a pair's own controls can differ.
+        shared = sorted({r["cell"] for r in arms["A"]} & {r["cell"] for r in arms["B"]})
+        if not shared:
+            raise ValueError(f"{label}: {sender}->{receiver_a} and {sender}->{receiver_b} "
+                             f"share no cell")
+        kept = {c: [r for r in arm if r["cell"] in set(shared)] for c, arm in arms.items()}
+        rows += [r for arm in kept.values() for r in arm]
+        reports[label] = {
+            "sender": sender_name, "target": target, "teachers": selected, "excluded": excluded,
+            "runs": {c: len(arm) for c, arm in kept.items()}, "cells": shared,
+            "missing": missing, "priors": priors, "receivers": receivers,
+            "no_control": no_control}
+    return pd.DataFrame(rows, columns=POOLED_FRAME_COLUMNS), {"design_cells": design,
+                                                              "pairs": reports}
+
+
+def paired_pooled_tests(
+    frame: pd.DataFrame, *, n_perm: int = 20000, seed: int = 0, max_exact: int = 1_000_000,
+) -> dict[str, dict[str, tt.PairedClusterResult]]:
+    """`stats.paired_cluster_relabel_permutation` on a `paired_pooled_frame`, both modes.
+
+    The clusters are the frame's ``(sender, teacher)`` keys and the strata its
+    ``(sender, target, cell)`` keys, so a sender's teacher swaps sides in all of its pairs at
+    once. With 30 clusters ``2 ** 30`` labellings are past any `max_exact`, so the null is Monte
+    Carlo; the result says so on ``exact``.
+
+    Args:
+        frame: A `paired_pooled_frame` frame.
+        n_perm: Monte-Carlo draws when exact enumeration is too large.
+        seed: Seed of the Monte-Carlo draws.
+        max_exact: Enumerate every sign vector when ``2 ** n_clusters`` is at most this.
+
+    Returns:
+        ``{mode: {statistic: PairedClusterResult}}`` over `PAIRED_SENDER_MODES` x
+        `stats.ARM_RELABEL_STATISTICS`; the mode picks the value column (`VALUE_COLUMNS`). Each
+        result is a comparison: quote its ``p_two_sided``, not the one-sided ``p_upper``.
+    """
+    return {
+        mode: {statistic: tt.paired_cluster_relabel_permutation(
+            frame, cond_a=POOLED_PAIR_CONDITIONS[0], cond_b=POOLED_PAIR_CONDITIONS[1],
+            statistic=statistic, cluster_col="cluster", stratum_col="stratum",
+            value_col=VALUE_COLUMNS[mode], n_perm=n_perm, seed=seed, max_exact=max_exact)
+            for statistic in tt.ARM_RELABEL_STATISTICS}
+        for mode in PAIRED_SENDER_MODES}
+
+
+def paired_pooled_descriptives(frame: pd.DataFrame) -> pd.DataFrame:
+    """Per-pair coverage and observed statistics of a `paired_pooled_frame`, plus a pooled row.
+
+    Every count and statistic comes from `stats.paired_cluster_relabel_permutation` itself (run
+    with a single Monte-Carlo draw, which leaves the observed value and the coverage counts
+    untouched), so the ``dropped`` slots are exactly the ``(cluster, stratum)`` pairs the test
+    leaves out -- those with finite runs under only ONE condition.
+
+    Args:
+        frame: A `paired_pooled_frame` frame.
+
+    Returns:
+        One row per ``pair`` in frame order and a final ``POOLED`` row over all of them:
+        ``sender``, ``target``, runs ``n_a``/``n_b``, ``n_clusters``, ``n_strata``,
+        ``dropped`` (and ``strata_dropped``), and the observed ``D``/``W`` of both modes
+        (``d_abs``, ``w_abs``, ``d_rel``, ``w_rel``).
+    """
+    blocks = [(label, block) for label, block in frame.groupby("pair", sort=False)]
+    blocks.append(("POOLED", frame))
+    rows = []
+    for label, block in blocks:
+        results = {(mode, statistic): tt.paired_cluster_relabel_permutation(
+            block, cond_a=POOLED_PAIR_CONDITIONS[0], cond_b=POOLED_PAIR_CONDITIONS[1],
+            statistic=statistic, cluster_col="cluster", stratum_col="stratum",
+            value_col=VALUE_COLUMNS[mode], max_exact=1, n_perm=1)
+            for mode in PAIRED_SENDER_MODES for statistic in tt.ARM_RELABEL_STATISTICS}
+        ref = results[("absolute", "mean_contrast")]
+        pooled = label == "POOLED"
+        rows.append({
+            "pair": label,
+            "sender": "all" if pooled else block["sender"].iloc[0],
+            "target": "all" if pooled else block["target"].iloc[0],
+            "n_a": ref.n_a, "n_b": ref.n_b, "n_clusters": ref.n_clusters,
+            "n_strata": ref.n_cells, "dropped": ref.n_pairs_dropped,
+            "strata_dropped": ref.n_cells_dropped,
+            "d_abs": results[("absolute", "mean_contrast")].observed,
+            "w_abs": results[("absolute", "win_probability")].observed,
+            "d_rel": results[("relative", "mean_contrast")].observed,
+            "w_rel": results[("relative", "win_probability")].observed,
+        })
+    return pd.DataFrame(rows)

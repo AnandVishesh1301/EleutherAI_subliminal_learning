@@ -1,6 +1,7 @@
 """Hand-checkable values for the transfer-vs-control tests and their loader."""
 from __future__ import annotations
 
+import itertools
 import json
 
 import numpy as np
@@ -8,6 +9,7 @@ import pandas as pd
 import pytest
 
 from subliminal_learning.analysis import transfer_significance_io as tio
+from subliminal_learning.analysis.transfer_factors import base_eval_short
 from subliminal_learning.stats import transfer_significance_tests as tt
 
 
@@ -162,10 +164,26 @@ def _fake_tree(root, *, cells=("c1", "c2"), teachers=("t1", "t2"), extra_teacher
                 / ds / cell)
         _write_summary(ctrl / "eval/dog/preference_summary.json", "test", 0.1)
         _write_summary(ctrl / "eval/cat/preference_summary.json", "test", 0.3)
+    _write_base_eval_prior(root, "original", "dog", 0.01)
     (root / "teachers/dog/pythia-160m").mkdir(parents=True, exist_ok=True)
     (root / "teachers/dog/pythia-160m/base_control.json").write_text(json.dumps(
-        {"validation": {"p_target": 0.01}, "off_topic": {"p_target": 0.0001}}
+        {"off_topic": {"p_target": 0.0001}}
     ))
+
+
+def _write_base_eval_prior(root, base: str, animal: str, prior: float) -> None:
+    """The canonical test-prior artifact `scripts.base_test_prior` writes, mean = `prior`.
+
+    `base` is any base label/dir name; the filename short comes from `base_eval_short`.
+    """
+    short = base_eval_short(base)
+    path = root / "analysis" / f"base_eval_{short}_animal_preference_test.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = json.loads(path.read_text()) if path.is_file() else {
+        "model": base, "prompts_file": "test.jsonl", "scoring": "prob"}
+    doc[animal] = {"p_per_prompt": [prior / 2, 1.5 * prior],
+                   "rank_per_prompt": [1, 1]}
+    path.write_text(json.dumps(doc))
 
 
 def test_base_name_mapping():
@@ -239,12 +257,33 @@ def test_load_cell_matrix_missing_marked(tmp_path):
     assert sorted(matrix.missing) == [("absent", "c1"), ("absent", "c2")]
 
 
-def test_load_prior_validation_proxy(tmp_path):
+def test_load_prior_is_the_base_eval_test_prior(tmp_path, caplog):
+    """``test`` = the mean of the canonical base_eval artifact (token OR base dir name); any
+    other prompt set still comes from the teachers tree; a missing artifact -> nan + remedy."""
     _fake_tree(tmp_path)
     assert tio.load_prior("dog", "original", "test", output_root=tmp_path) == pytest.approx(0.01)
+    assert tio.load_prior("dog", "pythia-160m", "test",
+                          output_root=tmp_path) == pytest.approx(0.01)
     assert tio.load_prior("dog", "original", "off_topic",
                           output_root=tmp_path) == pytest.approx(0.0001)
-    assert np.isnan(tio.load_prior("dog", "fs1", "test", output_root=tmp_path))
+    with caplog.at_level("WARNING"):
+        assert np.isnan(tio.load_prior("dog", "fs1", "test", output_root=tmp_path))
+    assert "scripts/base_test_prior.py" in caplog.text
+    # an artifact without the asked-for animal is as missing as no artifact
+    with caplog.at_level("WARNING"):
+        assert np.isnan(tio.load_prior("cat", "original", "test", output_root=tmp_path))
+
+
+def test_student_tree_prior_is_load_prior(tmp_path):
+    """One test prior everywhere: the student trees' own base_control.json is not read."""
+    _fake_tree(tmp_path)
+    leaf = (tmp_path / "students/dog/pythia-160m/teacher-pythia-160m-seed1/t1_tseed1"
+            / "ex10-20_prefix_n100k")
+    (leaf / "c1").mkdir(parents=True, exist_ok=True)
+    (leaf / "base_control.json").write_text(json.dumps({"test": {"p_target": 0.9}}))
+    assert tio.student_tree_prior("dog", "original", output_root=tmp_path) == pytest.approx(0.01)
+    assert (tio.student_tree_prior("dog", "original", output_root=tmp_path)
+            == tio.load_prior("dog", "original", "test", output_root=tmp_path))
 
 
 def _fake_dd_tree(root, cells=("d1", "d2", "d3")):
@@ -665,9 +704,7 @@ def _two_ftseed_tree(root, *, cells=("c1", "c2")) -> None:
         _write_summary(ctrl / "eval/dog/preference_summary.json", "test", 0.1)
         _write_seed_eval(ctrl / "ftseed1/eval/dog/preference_eval.json", 0.1)
         _write_seed_eval(ctrl / "ftseed2/eval/dog/preference_eval.json", 0.1)
-    (root / "teachers/dog/pythia-160m").mkdir(parents=True, exist_ok=True)
-    (root / "teachers/dog/pythia-160m/base_control.json").write_text(
-        json.dumps({"test": {"p_target": 0.1}, "validation": {"p_target": 0.1}}))
+    _write_base_eval_prior(root, "original", "dog", 0.1)
 
 
 def _cli_on_tree(tmp_path, monkeypatch, args):
@@ -1159,8 +1196,9 @@ def test_p_opposite_monte_carlo_uses_the_same_draws():
 
 
 def test_p_opposite_round_trips_through_the_memo_and_stale_entries_recompute(tmp_path, monkeypatch):
-    """A stored result comes back with `p_opposite`; an entry written before the field existed
-    (no such key) fails to rebuild and is recomputed rather than crashing."""
+    """A stored result comes back with `p_opposite` and the two-sided trio; an entry written
+    before a field existed (no such key) fails to rebuild and is recomputed rather than
+    crashing."""
     from subliminal_learning.stats import memo
 
     monkeypatch.setenv(memo.ENV_VAR, "1")
@@ -1171,14 +1209,104 @@ def test_p_opposite_round_trips_through_the_memo_and_stale_entries_recompute(tmp
     memo.reset_cache_stats()
     again = tt.arm_set_permutation(frame, family_a="A", family_b="B")
     assert memo.cache_stats()["hits"] == 1 and again == first and again.p_opposite == first.p_opposite
+    assert again.p_two_sided == first.p_two_sided and again.p_upper == first.p_upper
+    assert again.p_lower == first.p_lower
     entries = list((tmp_path / "arm_set_permutation").glob("*.json"))
     assert len(entries) == 1
-    stale = json.loads(entries[0].read_text())
-    del stale["p_opposite"]
-    entries[0].write_text(json.dumps(stale))
-    memo.reset_cache_stats()
-    assert tt.arm_set_permutation(frame, family_a="A", family_b="B") == first
-    assert memo.cache_stats()["misses"] == 1
+    for field in ("p_opposite", "p_upper", "p_lower", "p_two_sided"):
+        stale = json.loads(entries[0].read_text())
+        del stale[field]
+        entries[0].write_text(json.dumps(stale))
+        memo.reset_cache_stats()
+        assert tt.arm_set_permutation(frame, family_a="A", family_b="B") == first
+        assert memo.cache_stats()["misses"] == 1
+
+
+def _brute_force_centred_two_sided(null: np.ndarray, observed: float) -> float:
+    """The ``|T - centre|`` two-sided p on the same enumeration, centre = the null mean."""
+    centre = float(null.mean())
+    return float((np.abs(null - centre) >= abs(observed - centre) - 1e-12).mean())
+
+
+def test_two_sided_p_on_a_symmetric_paired_null_is_the_doubled_and_the_centred_p():
+    """Paired teacher swap, full coverage: the null is symmetric, so the doubled two-sided p
+    equals ``2 * p_upper`` (observed in the upper tail) AND the brute-force ``|T - centre|`` p
+    computed on the same enumeration."""
+    rows = []
+    for k, (a, b) in enumerate([(0.9, 0.1), (0.8, 0.2), (0.7, 0.3), (1.0, 0.4)]):
+        for cell in ("c1", "c2"):
+            rows.append({"condition": "A", "teacher": f"t{k}", "cell": cell, "value": a})
+            rows.append({"condition": "B", "teacher": f"t{k}", "cell": cell, "value": b})
+    frame = pd.DataFrame(rows)
+    res = tt.paired_cluster_relabel_permutation(frame, cond_a="A", cond_b="B")
+    assert res.exact and res.n_labelings == 2 ** 4
+    assert res.p == res.p_upper and res.p_opposite == res.p_lower
+    assert res.p_upper < res.p_lower
+    assert res.p_two_sided == pytest.approx(min(1.0, 2 * res.p_upper))
+    assert res.p_two_sided <= 1.0
+    # the same enumeration, read the |T - centre| way: symmetric null, so the two agree
+    sign_vectors = np.array([[1.0 if not (code >> i) & 1 else -1.0 for i in range(4)]
+                             for code in range(16)])
+    diffs = np.array([0.8, 0.6, 0.4, 0.6])
+    null = (sign_vectors * diffs).mean(axis=1)
+    assert res.observed == pytest.approx(float(diffs.mean()))
+    assert res.p_two_sided == pytest.approx(_brute_force_centred_two_sided(null, res.observed))
+
+
+def test_two_sided_p_on_an_asymmetric_arm_relabel_null_doubles_the_smaller_tail():
+    """3 arms against 5: the arm-relabel null is asymmetric, so the doubled p is
+    ``min(1, 2 * min(p_upper, p_lower))`` and DIFFERS from the ``|T - centre|`` version -- which
+    is why doubling is what the comparisons report."""
+    values = [3.0, 3.2, 3.4, 1.0, 1.1, 1.2, 1.3, 5.0]
+    rows = [("A" if i < 3 else "B", f"x{i}", "s", v) for i, v in enumerate(values)]
+    res = tt.arm_set_permutation(_swap_frame(rows), family_a="A", family_b="B")
+    assert res.exact and res.n_a == 3 and res.n_b == 5
+    assert res.p == res.p_upper and res.p_opposite == res.p_lower
+    assert res.p_two_sided == pytest.approx(min(1.0, 2 * min(res.p_upper, res.p_lower)))
+    assert res.p_two_sided <= 1.0
+    # brute force on the same enumeration: mean(A) - mean(B) over every 3-of-8 labelling
+    v = np.array(values)
+    picks = np.array(list(itertools.combinations(range(8), 3)))
+    null = v[picks].sum(axis=1) * (1 / 3 + 1 / 5) - v.sum() / 5
+    assert res.p_upper == pytest.approx(float((null >= res.observed).mean()))
+    centred = _brute_force_centred_two_sided(null, res.observed)
+    assert res.p_two_sided != pytest.approx(centred)
+
+
+@pytest.mark.parametrize("statistic", tt.ARM_RELABEL_STATISTICS)
+def test_exact_path_counts_the_observed_labelling_in_both_tails(statistic):
+    """The observed labelling is itself enumerated, and it is read out of the enumeration, so it
+    lands in BOTH tails: ``p_upper + p_lower >= 1 + 1/n_labelings``. Holds with values TIED
+    across arms, where several labellings share the observed statistic."""
+    tied = [("A", "a1", "s", 1.0), ("A", "a2", "s", 1.0), ("A", "a3", "s", 2.0),
+            ("B", "b1", "s", 1.0), ("B", "b2", "s", 2.0), ("B", "b3", "s", 1.0)]
+    for rows in (tied, [(f, a, c, v + 0.1 * i) for i, (f, a, c, v) in enumerate(tied)]):
+        frame = _swap_frame(rows)
+        res = tt.arm_relabel_cell_permutation(frame, family_a="A", family_b="B",
+                                              statistic=statistic)
+        assert res.exact
+        assert res.p_upper + res.p_lower >= 1.0 + 1 / res.n_labelings - 1e-12
+        assert res.p_two_sided == pytest.approx(min(1.0, 2 * min(res.p_upper, res.p_lower)))
+        arm_set = tt.arm_set_permutation(frame, family_a="A", family_b="B")
+        assert arm_set.p_upper + arm_set.p_lower >= 1.0 + 1 / arm_set.n_labelings - 1e-12
+
+
+def test_two_sided_p_on_the_monte_carlo_path_doubles_the_plus_one_tails():
+    """Monte Carlo: each tail is ``(count + 1) / (n_perm + 1)`` and the two-sided p doubles the
+    smaller of the two; the run-relabel test (MC only) reports the same trio."""
+    rng = np.random.default_rng(3)
+    rows = [("A" if i < 10 else "B", f"x{i}", "s", float(v))
+            for i, v in enumerate(rng.random(22) + np.repeat([0.4, 0.0], [10, 12]))]
+    frame = _swap_frame(rows)
+    mc = tt.arm_set_permutation(frame, family_a="A", family_b="B", max_exact=10, n_perm=400,
+                               seed=2)
+    assert not mc.exact and mc.p == mc.p_upper and mc.p_opposite == mc.p_lower
+    assert mc.p_two_sided == pytest.approx(min(1.0, 2 * min(mc.p_upper, mc.p_lower)))
+    assert mc.p_upper >= 1 / 401 and mc.p_lower >= 1 / 401 and mc.p_two_sided <= 1.0
+    run = tt.run_relabel_cell_permutation(frame, family_a="A", family_b="B", n_perm=400, seed=2)
+    assert run.p == run.p_upper and run.p_opposite == run.p_lower
+    assert run.p_two_sided == pytest.approx(min(1.0, 2 * min(run.p_upper, run.p_lower)))
+    assert run.p_two_sided <= 1.0
 
 
 # ----------------------------------------------------------------------------------------------

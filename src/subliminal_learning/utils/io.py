@@ -10,8 +10,10 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import itertools
 import json
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -107,11 +109,27 @@ def file_sha256_cached(path: str | Path) -> str:
     return _SHA256_MEMO[key]
 
 
+_WRITER_SEQ = itertools.count()
+
+
+def _writer_token() -> str:
+    """A temp-file suffix unique to (process, thread, call).
+
+    The pid alone is not: two threads of one process writing the SAME destination -- a
+    threaded scan flushing its report on two flush boundaries at once -- would pick the
+    same temp name, and the second ``os.replace`` would fail with FileNotFoundError after
+    the first one renamed the shared file away. The `{name}.tmp.` PREFIX is kept exactly as
+    it was: `clean_partial_runs` finds orphaned temps by the `*.tmp.*` glob.
+    """
+    return f"{os.getpid()}.{threading.get_ident()}.{next(_WRITER_SEQ)}"
+
+
 def atomic_write_text(path: str | Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically (temp in same dir + ``os.replace``).
 
     A crash can never leave a torn file: readers see either the old complete file or the new
-    complete file. Parent directories are created if missing.
+    complete file. Parent directories are created if missing. The temp file is named per
+    (pid, thread, call), so concurrent writers of one path never share it.
 
     The file is made world-readable/writable before the replace, per the shared-stash
     convention `file_lock` follows: only the pool sets ``umask 0``, so a CLI run under a
@@ -124,7 +142,7 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp = path.with_name(f"{path.name}.tmp.{_writer_token()}")
     # fsync before the replace: `write_text` alone only reaches the page cache, so a node
     # crash (or an OOM reboot) right after the rename can leave the new NAME pointing at
     # zero-length data -- the durable version of the torn file this function exists to

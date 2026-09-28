@@ -197,6 +197,22 @@ def test_protected_teacher_cell_covers_arm_suffixes_and_lr_spelling(tmp_path: Pa
             "protected:nonadaptive:qwen_teacher432"
 
 
+def test_sgd_teacher_set_cell_is_protected_from_the_shipped_file(tmp_path: Path):
+    """The SGD teacher sets are cells like any other: a real Qwen SGD cell is protected.
+
+    The SGD lattice runs at lrs no Adam set uses, so this can only pass if the SGD tag lists
+    are in the shipped cell protect file -- and the tokenizer strip stops at it too.
+    """
+    rules = thin.read_cell_protect_file(thin.ROOT / thin.DEFAULT_CELL_PROTECT)
+    run = make_teacher_run(tmp_path, "ep10_lr1e1_r1a4_sgd", epochs=10, n_steps=30)
+    row = inspect(tmp_path, run, cells=rules)
+    assert row["status"] == "protected:nonadaptive:qwen_teacher_sgd1983"
+    assert row["tok_files"] == 0
+    # A tag off the SGD lattice in the same tree is NOT a set cell.
+    other = make_teacher_run(tmp_path, "ep10_lr1e1_r5a5_sgd", epochs=10, n_steps=30)
+    assert not inspect(tmp_path, other, cells=rules)["status"].startswith("protected")
+
+
 def test_other_teacher_trees_are_not_protected_by_this_tree_s_cells(tmp_path: Path):
     """Cell rules are keyed on a tree prefix: the panda rules do not reach the dog tree."""
     run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60,
@@ -260,6 +276,43 @@ def test_apply_reverifies_by_sha_when_the_scan_saw_only_sizes(tmp_path: Path):
     assert (rung / "tokenizer.json").read_bytes() == b"DIFFERENT" * 100
     assert ("tokenizer.json", "differs") in {(p["file"], p["reason"])
                                              for p in row["tok_problems"]}
+
+
+def test_strip_only_covers_every_rung(tmp_path: Path):
+    """Nothing is deleted under --strip-only, so no rung is moot: all 19 are stripped."""
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    row = inspect(tmp_path, run, strip_only=True)
+    assert row["keep_steps"] == [3, 6, 15] and len(row["delete_steps"]) == 16
+    assert row["tok_files"] == len(TOK_BODIES) * 19
+    cfg = teacher_cfg(tmp_path, strip_only=True)
+    assert thin.strip_tokenizers_run(row, cfg, tmp_path / "deleted.jsonl") == "stripped"
+    assert row["tok_files"] == len(TOK_BODIES) * 19
+    assert not (run / "checkpoints" / "checkpoint-57" / "tokenizer.json").exists()
+    assert (run / "checkpoints" / "checkpoint-57" / "adapter_model.safetensors").is_file()
+
+
+def test_strip_protected_strips_but_never_deletes_a_rung(tmp_path: Path):
+    """--strip-protected reaches a protected cell's copies and leaves every rung standing."""
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    row = inspect(tmp_path, run, cells=CELLS, strip_only=True, strip_protected=True)
+    assert row["status"] == "protected:nonadaptive:qwen_teacher432"
+    assert row["tok_files"] == len(TOK_BODIES) * 19
+    # A protected row never carries a deletion plan, which is what keeps the flag a no-op
+    # for the thinning (`strip_tokenizers_run` asserts it).
+    assert not row.get("delete_steps")
+    cfg = teacher_cfg(tmp_path, strip_only=True, strip_protected=True, cells=CELLS)
+    assert thin.strip_tokenizers_run(row, cfg, tmp_path / "deleted.jsonl") == "stripped"
+    rungs = [d for d in (run / "checkpoints").glob("checkpoint-*")]
+    assert len(rungs) == 19 and all((d / "adapter_model.safetensors").is_file() for d in rungs)
+    assert not any((d / "tokenizer.json").exists() for d in rungs)
+
+
+def test_strip_protected_needs_strip_only(tmp_path: Path):
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    result = teacher_invoke(tmp_path, tmp_path, "--strip-tokenizers", "--strip-protected")
+    assert result.exit_code != 0
+    assert "--strip-protected" in str(result.output) + str(result.exception)
+    assert (run / "checkpoints" / "checkpoint-3" / "tokenizer.json").is_file()
 
 
 def test_strip_is_off_unless_requested(tmp_path: Path):
@@ -329,3 +382,80 @@ def test_adapter_norms_traj_is_archived_beside_the_required_records(tmp_path: Pa
     assert problem is None
     dest = tmp_path / written["adapter_norms_traj.json"]
     assert json.loads(dest.read_text()) == {"points": [{"a": 1}]}
+
+
+# ------------------------------------------- explicit order: thin one protected set
+def test_named_set_override_thins_the_cell_and_records_it(tmp_path: Path):
+    """`--thin-protected-set` lifts the cell refusal for ONE set, nothing else."""
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    cfg = teacher_cfg(tmp_path, cells=CELLS, strip_tokenizers=False,
+                      thin_protected_sets=("qwen_teacher432",))
+    row = thin.inspect_run(run, tmp_path, cfg)
+    assert row["status"] == "ready"
+    assert row["cell"] == "nonadaptive:qwen_teacher432"
+    assert row["protected_set_override"] is True
+    assert thin.thin_run(row, cfg, tmp_path / "log.jsonl") == "thinned"
+    assert sorted(thin.on_disk_steps(run / "checkpoints")) == [3, 6, 15]
+    ladder = thin.read_ladder(run)
+    assert ladder["protected_set_override"] is True
+    assert ladder["cell"] == "nonadaptive:qwen_teacher432"
+
+
+def test_a_set_that_was_not_named_still_refuses(tmp_path: Path):
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    cfg = teacher_cfg(tmp_path, cells=CELLS,
+                      thin_protected_sets=("olmo_teacher432",))
+    assert thin.inspect_run(run, tmp_path, cfg)["status"] == \
+        "protected:nonadaptive:qwen_teacher432"
+
+
+def test_unknown_set_name_is_rejected(tmp_path: Path):
+    make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    result = teacher_invoke(tmp_path, tmp_path, "--thin-protected-set", "no_such_set")
+    assert result.exit_code != 0
+    assert "--thin-protected-set" in str(result.output) + str(result.exception)
+    assert (run_ckpt := tmp_path / TREE / "ep20_lr1e-4_r32a64" / "ftseed0"
+            / "checkpoints" / "checkpoint-3").is_dir(), run_ckpt
+
+
+# --------------------------------------------------------- optional keep epochs
+def test_optional_epochs_are_kept_when_a_rung_exists(tmp_path: Path):
+    """A half-epoch ladder keeps 0.5/1.5 as well as the required 1/2/5."""
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=120)
+    cfg = teacher_cfg(tmp_path, keep_epochs=[1.0, 2.0, 5.0],
+                      keep_epochs_optional=[0.5, 1.5], strip_tokenizers=False)
+    row = thin.inspect_run(run, tmp_path, cfg)
+    assert row["status"] == "ready"
+    # 6 steps/epoch, rungs every 6: 0.5 and 1.5 epochs have no rung of their own here...
+    assert row["keep_steps"] == [6, 12, 30]
+    # ...but on a ladder whose cadence realises them they do.
+    half = make_teacher_run(tmp_path, "ep20_lr2e-4_r32a64", epochs=10, n_steps=120)
+    for step in (6, 18):                      # the 0.5- and 1.5-epoch rungs (12/epoch)
+        rung = half / "checkpoints" / f"checkpoint-{step}"
+        rung.mkdir()
+        (rung / "adapter_model.safetensors").write_bytes(f"s{step}".encode() * 4)
+    old = time.time() - 86_400
+    for path in half.rglob("*"):
+        os.utime(path, (old, old))
+    write_spectra(half, thin.ladder_steps(half / "checkpoints"), thin.manifest_ref(half))
+    os.utime(half / "eval" / thin.SPECTRA_JSON, (old, old))
+    os.utime(half / "eval" / thin.SPECTRA_NPZ, (old, old))
+    row = thin.inspect_run(half, tmp_path, cfg)
+    assert row["keep_steps"] == [6, 12, 18, 24, 60]      # 0.5, 1, 1.5, 2, 5 epochs
+    assert row["keep_epochs_optional"] == [0.5, 1.5]
+
+
+def test_optional_epochs_never_refuse_a_run(tmp_path: Path):
+    """The REQUIRED set keeps its strict contract; the optional one is silent."""
+    run = make_teacher_run(tmp_path, "ep20_lr1e-4_r32a64", epochs=20, n_steps=60)
+    cfg = teacher_cfg(tmp_path, keep_epochs=[1.0, 2.0, 5.0],
+                      keep_epochs_optional=[0.5, 1.5], strip_tokenizers=False)
+    assert thin.inspect_run(run, tmp_path, cfg)["status"] == "ready"
+    # the same epochs as REQUIRED ones do refuse, unchanged
+    strict = teacher_cfg(tmp_path, keep_epochs=[0.5, 1.0, 1.5, 2.0, 5.0],
+                         strip_tokenizers=False)
+    assert thin.inspect_run(run, tmp_path, strict)["status"].startswith("keep_step_missing:")
+    ladder_cfg = teacher_cfg(tmp_path, keep_epochs=[1.0, 2.0, 5.0],
+                             keep_epochs_optional=[0.5, 1.5], strip_tokenizers=False)
+    row = thin.inspect_run(run, tmp_path, ladder_cfg)
+    assert thin.ladder_doc(run, row, ladder_cfg)["keep_epochs_optional"] == [0.5, 1.5]

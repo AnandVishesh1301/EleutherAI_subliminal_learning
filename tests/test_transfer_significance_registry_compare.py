@@ -10,12 +10,21 @@ import pytest
 
 from subliminal_learning.analysis import setup, transfer_significance_io as tio
 from subliminal_learning.stats import transfer_significance_tests as tt
+from tests.test_stats_transfer_significance import _write_base_eval_prior
 
 DS = "ex10-20_prefix_n100k"
 SENDER = "pythia-160m"
 TEACHERS = ["t1", "t2"]
 CELLS = ["c1", "c2"]
 PRIOR = 0.2
+#: Arm key -> a REAL base label: the receiver's prior is the canonical
+#: ``analysis/base_eval_{short}_..._test.json`` artifact, which only exists for known bases.
+RECV = {"a1": "data-seed1", "a2": "data-seed2", "b1": "weight-seed1", "b2": "weight-seed2",
+        "partial": "seed1"}
+
+
+def _recv(key: str) -> str:
+    return f"pythia-160m-{RECV[key]}"
 
 
 def _eval(path, value: float) -> None:
@@ -26,9 +35,9 @@ def _eval(path, value: float) -> None:
 def _arm_tree(root, receiver: str, effect: float, *, control: bool = True) -> None:
     """One sender -> `receiver` arm: two teachers on two cells, each control + `effect`."""
     for tag in TEACHERS:
+        _write_base_eval_prior(root, receiver, "dog", PRIOR)
         leaf = root / "students/dog" / receiver / f"teacher-{SENDER}" / f"{tag}_tseed1" / DS
         (leaf).mkdir(parents=True, exist_ok=True)
-        (leaf / "base_control.json").write_text(json.dumps({"test": {"p_target": PRIOR}}))
         for i, cell in enumerate(CELLS):
             _eval(leaf / cell / "ftseed1/preference_eval.json", 0.1 + 0.05 * i + effect)
             if control:
@@ -40,20 +49,20 @@ def _registry(tmp_path) -> tuple:
     """Four finished arms (two per family), one unfinished arm, and the registry JSON."""
     receivers = {"a1": 0.30, "a2": 0.24, "b1": 0.06, "b2": 0.02}
     for key, effect in receivers.items():
-        _arm_tree(tmp_path, f"pythia-160m-{key}", effect)
-    _arm_tree(tmp_path, "pythia-160m-partial", 0.5, control=False)
+        _arm_tree(tmp_path, _recv(key), effect)
+    _arm_tree(tmp_path, _recv("partial"), 0.5, control=False)
     reg_dir = tmp_path / "run_logs"
     reg_dir.mkdir()
     (reg_dir / "cells.json").write_text(json.dumps({"cells": CELLS}))
 
     def arm(key, **extra):
         return {"name": f"orig → {key}", "animal": "dog", "sender": SENDER,
-                "receiver": f"pythia-160m-{key}", "tseed": 1, "data_order": "cross",
+                "receiver": _recv(key), "tseed": 1, "data_order": "cross",
                 "cells": "cells.json", "teachers": TEACHERS, **extra}
 
     (reg_dir / "arms.json").write_text(json.dumps({
         "ftseed": 1, "n_perm": 200, "seed": 0, "prompt_set": "test",
-        "short_names": {f"pythia-160m-{k}": k for k in [*receivers, "partial"]}
+        "short_names": {_recv(k): k for k in [*receivers, "partial"]}
         | {SENDER: "orig"},
         "arms": [arm(k) for k in receivers]
         + [arm("partial", in_progress=True, note="no controls ({controls}/{cells})")],
@@ -139,7 +148,7 @@ OLMO_REGISTRY = REPO / "run_logs/repretrain/olmo_cross_seed_significance_arms.js
 def test_olmo_same_vs_different_init_smoke():
     """The OLMo cross-recipe comparison the notebook asks for, on whatever has finished."""
     names = {a["name"] for a in json.loads(OLMO_REGISTRY.read_text())["arms"]}
-    fam_a = [n for n in ["dclm → c4 (elephant), core35", "dclm → dolma (elephant), core35 held-out",
+    fam_a = [n for n in ["dclm → c4 (elephant), core35", "dclm → dolma (elephant), core35",
                          "dolma → dclm (elephant), core35"] if n in names]
     fam_b = [n for n in ["dclm → seed2 (elephant), core35",
                          "dclm → c4-seed2 (elephant), core35"] if n in names]
@@ -193,12 +202,12 @@ def test_registry_family_comparison_rejects_an_unknown_unit(tmp_path):
 def _wide_registry(tmp_path) -> tuple:
     """Two arms on DIFFERENT designs: A on (c1, c2), B on (c1, c2, c3) whose c3 control is the
     loudest of the tree and falls outside the shared cells."""
-    _arm_tree(tmp_path, "pythia-160m-a1", 0.30)
-    _arm_tree(tmp_path, "pythia-160m-b1", 0.06)
+    _arm_tree(tmp_path, _recv("a1"), 0.30)
+    _arm_tree(tmp_path, _recv("b1"), 0.06)
     for tag in TEACHERS:                       # B's extra design cell, with a very loud control
-        leaf = tmp_path / "students/dog/pythia-160m-b1" / f"teacher-{SENDER}" / f"{tag}_tseed1" / DS
+        leaf = tmp_path / "students/dog" / _recv("b1") / f"teacher-{SENDER}" / f"{tag}_tseed1" / DS
         _eval(leaf / "c3/ftseed1/preference_eval.json", 0.95)
-        _eval(tmp_path / "students/controls/base/pythia-160m-b1" / f"teacher-{SENDER}" / DS
+        _eval(tmp_path / "students/controls/base" / _recv("b1") / f"teacher-{SENDER}" / DS
               / "c3/ftseed1/eval/dog/preference_eval.json", 0.90)
     reg_dir = tmp_path / "run_logs"
     reg_dir.mkdir()
@@ -207,7 +216,7 @@ def _wide_registry(tmp_path) -> tuple:
 
     def arm(key, cells):
         return {"name": f"orig → {key}", "animal": "dog", "sender": SENDER,
-                "receiver": f"pythia-160m-{key}", "tseed": 1, "data_order": "cross",
+                "receiver": _recv(key), "tseed": 1, "data_order": "cross",
                 "cells": cells, "teachers": TEACHERS}
 
     (reg_dir / "arms.json").write_text(json.dumps({
@@ -254,7 +263,7 @@ def test_registry_frame_carries_the_animal_and_only_full_set_teachers(tmp_path):
     arms_json, fam_a, fam_b = _registry(tmp_path)
     reg = json.loads(arms_json.read_text())
     # t2 covers only c1 on the a1 arm: a known_short pool, reported by the registry, never pooled
-    (tmp_path / "students/dog/pythia-160m-a1" / f"teacher-{SENDER}" / "t2_tseed1" / DS
+    (tmp_path / "students/dog" / _recv("a1") / f"teacher-{SENDER}" / "t2_tseed1" / DS
      / "c2/ftseed1/preference_eval.json").unlink()
     for a in reg["arms"]:
         if a["name"] == "orig → a1":
@@ -266,16 +275,20 @@ def test_registry_frame_carries_the_animal_and_only_full_set_teachers(tmp_path):
     assert set(res.frame["animal"]) == {"dog"}
 
 
-def test_registry_paired_contrast_exposes_the_scale_and_the_opposite_tail(tmp_path):
+def test_registry_paired_contrast_exposes_the_scale_and_both_tails(tmp_path):
+    """The comparison's primary p is the two-sided sign-flip p: ``flip p`` in the table holds it,
+    with the one-sided A > B tail in the secondary column beside it."""
     arms_json, _, _ = _registry(tmp_path)
     res = tio.registry_paired_contrast(arms_json, "orig → a1", "orig → b1", n_perm=200,
                                        root=tmp_path)
     assert res["scale"] == "relative"
     assert res["flip_p_opposite"] == 1.0 and res["flip_p"] < 0.12
+    assert res["flip_p_two_sided"] == pytest.approx(2 * res["flip_p"])
     table = tio.registry_paired_contrast_table([res])
     assert list(table.columns) == tio.PAIRED_CONTRAST_COLUMNS
     assert table.iloc[0]["scale"] == "relative"
-    assert table.iloc[0]["flip p opp."] == 1.0
+    assert table.iloc[0]["flip p"] == pytest.approx(res["flip_p_two_sided"])
+    assert table.iloc[0][tio.PAIRED_CONTRAST_ONE_SIDED] == pytest.approx(res["flip_p"])
     assert tio.style_registry_paired_contrast_table(table).to_html()
 
 
@@ -287,7 +300,7 @@ def test_registry_paired_contrast_rejects_arms_that_differ_in_animal_or_tseed(tm
             a["tseed"] = 2
     arms_json.write_text(json.dumps(reg))
     for tag in TEACHERS:                       # the same runs, read at the other teacher seed
-        one = tmp_path / "students/dog/pythia-160m-b1" / f"teacher-{SENDER}" / f"{tag}_tseed1"
+        one = tmp_path / "students/dog" / _recv("b1") / f"teacher-{SENDER}" / f"{tag}_tseed1"
         two = one.with_name(f"{tag}_tseed2")
         two.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(one, two)

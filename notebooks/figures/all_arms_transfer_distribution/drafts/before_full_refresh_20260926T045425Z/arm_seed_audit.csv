@@ -1,0 +1,147 @@
+relation,animal,sender,receiver,condition,sender_alias,receiver_alias,grid,retained_runs,previous_retained_runs,change_runs,complete_blocks,incomplete_block_reports,matched_cells_in_incomplete_reports,student_ftseed_count,student_ftseed_values,teacher_tseed_count,teacher_tseed_values,requested_ftseed_values,requested_tseed_values,coverage_basis
+same model,cat,fs1,fs1,Same-model,fs1,fs1,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,cat,fs2,fs2,Same-model,fs2,fs2,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,cat,fs3,fs3,Same-model,fs3,fs3,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,cat,orig,orig,Same-model,original,original,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,dog,ds1,ds1,Same-model,ds1,ds1,core30,180,180,0,6,3,50,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,dog,ds2,ds2,Same-model,ds2,ds2,core30,180,180,0,6,2,17,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,dog,ds3,ds3,Same-model,ds3,ds3,core30,0,0,0,0,1,5,0,,0,,1,1,observed legacy/repretraining blocks
+same model,dog,fs1,fs1,Same-model,fs1,fs1,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,dog,fs2,fs2,Same-model,fs2,fs2,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,dog,fs3,fs3,Same-model,fs3,fs3,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,dog,orig,orig,Same-model,original,original,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,lion,fs1,fs1,Same-model,fs1,fs1,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,lion,fs2,fs2,Same-model,fs2,fs2,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,lion,fs3,fs3,Same-model,fs3,fs3,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,lion,orig,orig,Same-model,original,original,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,pig,fs1,fs1,Same-model,fs1,fs1,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,pig,fs2,fs2,Same-model,fs2,fs2,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,pig,fs3,fs3,Same-model,fs3,fs3,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+same model,pig,orig,orig,Same-model,original,original,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",cat,ds1,ds2,"Same init, different data order",ds1,ds2,core56,0,0,0,0,10,300,0,,0,,1,1,observed legacy/repretraining blocks
+"shared init, different data order",cat,ds1,ds3,"Same init, different data order",ds1,ds3,core56,0,0,0,0,1,5,0,,0,,1,1,observed legacy/repretraining blocks
+"shared init, different data order",cat,ds1,orig,"Same init, different data order",ds1,original,core56,0,0,0,0,1,5,0,,0,,1,1,observed legacy/repretraining blocks
+"shared init, different data order",cat,orig,ds1,"Same init, different data order",original,ds1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",cat,orig,ds2,"Same init, different data order",original,ds2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",cat,orig,ds3,"Same init, different data order",original,ds3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds1,ds2,"Same init, different data order",ds1,ds2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds1,ds3,"Same init, different data order",ds1,ds3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds1,orig,"Same init, different data order",ds1,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds2,ds1,"Same init, different data order",ds2,ds1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds2,ds3,"Same init, different data order",ds2,ds3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds2,orig,"Same init, different data order",ds2,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds3,ds1,"Same init, different data order",ds3,ds1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds3,ds2,"Same init, different data order",ds3,ds2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,ds3,orig,"Same init, different data order",ds3,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,orig,ds1,"Same init, different data order",original,ds1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,orig,ds2,"Same init, different data order",original,ds2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",dog,orig,ds3,"Same init, different data order",original,ds3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",lion,ds1,ds2,"Same init, different data order",ds1,ds2,core56,0,0,0,0,10,300,0,,0,,1,1,observed legacy/repretraining blocks
+"shared init, different data order",lion,orig,ds1,"Same init, different data order",original,ds1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",lion,orig,ds2,"Same init, different data order",original,ds2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",lion,orig,ds3,"Same init, different data order",original,ds3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",pig,ds1,ds2,"Same init, different data order",ds1,ds2,core56,0,0,0,0,10,300,0,,0,,1,1,observed legacy/repretraining blocks
+"shared init, different data order",pig,orig,ds1,"Same init, different data order",original,ds1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",pig,orig,ds2,"Same init, different data order",original,ds2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"shared init, different data order",pig,orig,ds3,"Same init, different data order",original,ds3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",cat,prv1,wc1,"Different init, same data order",Rerun1234,wc1,core30,300,270,30,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",cat,prv1,wc2,"Different init, same data order",Rerun1234,wc2,core30,300,210,90,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",cat,wc1,prv1,"Different init, same data order",wc1,Rerun1234,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",cat,wc1,wc2,"Different init, same data order",wc1,wc2,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",cat,wc2,prv1,"Different init, same data order",wc2,Rerun1234,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",cat,wc2,wc1,"Different init, same data order",wc2,wc1,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",dog,prv1,wc1,"Different init, same data order",Rerun1234,wc1,core30,300,270,30,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",dog,prv1,wc2,"Different init, same data order",Rerun1234,wc2,core30,300,270,30,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",dog,wc1,prv1,"Different init, same data order",wc1,Rerun1234,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",dog,wc1,wc2,"Different init, same data order",wc1,wc2,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",dog,wc2,prv1,"Different init, same data order",wc2,Rerun1234,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",dog,wc2,wc1,"Different init, same data order",wc2,wc1,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",lion,prv1,wc1,"Different init, same data order",Rerun1234,wc1,core30,300,0,300,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",lion,prv1,wc2,"Different init, same data order",Rerun1234,wc2,core30,300,0,300,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",lion,wc1,prv1,"Different init, same data order",wc1,Rerun1234,core30,300,0,300,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",lion,wc1,wc2,"Different init, same data order",wc1,wc2,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",lion,wc2,prv1,"Different init, same data order",wc2,Rerun1234,core30,300,0,300,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",lion,wc2,wc1,"Different init, same data order",wc2,wc1,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",pig,wc1,wc2,"Different init, same data order",wc1,wc2,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"different init, same data order",pig,wc2,wc1,"Different init, same data order",wc2,wc1,core30,180,180,0,6,2,27,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs1,fs2,"Different init, different data order",fs1,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs1,fs3,"Different init, different data order",fs1,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs1,orig,"Different init, different data order",fs1,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs2,fs1,"Different init, different data order",fs2,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs2,fs3,"Different init, different data order",fs2,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs2,orig,"Different init, different data order",fs2,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs3,fs1,"Different init, different data order",fs3,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs3,fs2,"Different init, different data order",fs3,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,fs3,orig,"Different init, different data order",fs3,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,orig,fs1,"Different init, different data order",original,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,orig,fs2,"Different init, different data order",original,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,cat,orig,fs3,"Different init, different data order",original,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs1,fs2,"Different init, different data order",fs1,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs1,fs3,"Different init, different data order",fs1,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs1,orig,"Different init, different data order",fs1,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs2,fs1,"Different init, different data order",fs2,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs2,fs3,"Different init, different data order",fs2,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs2,orig,"Different init, different data order",fs2,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs3,fs1,"Different init, different data order",fs3,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs3,fs2,"Different init, different data order",fs3,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,fs3,orig,"Different init, different data order",fs3,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,orig,fs1,"Different init, different data order",original,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,orig,fs2,"Different init, different data order",original,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,dog,orig,fs3,"Different init, different data order",original,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs1,fs2,"Different init, different data order",fs1,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs1,fs3,"Different init, different data order",fs1,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs1,orig,"Different init, different data order",fs1,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs2,fs1,"Different init, different data order",fs2,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs2,fs3,"Different init, different data order",fs2,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs2,orig,"Different init, different data order",fs2,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs3,fs1,"Different init, different data order",fs3,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs3,fs2,"Different init, different data order",fs3,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,fs3,orig,"Different init, different data order",fs3,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,orig,fs1,"Different init, different data order",original,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,orig,fs2,"Different init, different data order",original,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,lion,orig,fs3,"Different init, different data order",original,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs1,fs2,"Different init, different data order",fs1,fs2,core56,560,504,56,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs1,fs3,"Different init, different data order",fs1,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs1,orig,"Different init, different data order",fs1,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs2,fs1,"Different init, different data order",fs2,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs2,fs3,"Different init, different data order",fs2,fs3,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs2,orig,"Different init, different data order",fs2,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs3,fs1,"Different init, different data order",fs3,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs3,fs2,"Different init, different data order",fs3,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,fs3,orig,"Different init, different data order",fs3,original,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,orig,fs1,"Different init, different data order",original,fs1,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,orig,fs2,"Different init, different data order",original,fs2,core56,560,560,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+different init,pig,orig,fs3,"Different init, different data order",original,fs3,core56,504,504,0,9,1,55,1,1,1,1,1,1,observed legacy/repretraining blocks
+"reproduction (same init seed, same data order)",cat,orig,prv1,Reproduction (Rerun1234 ↔ original),original,Rerun1234,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"reproduction (same init seed, same data order)",cat,prv1,orig,Reproduction (Rerun1234 ↔ original),Rerun1234,original,core30,300,0,300,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"reproduction (same init seed, same data order)",dog,orig,prv1,Reproduction (Rerun1234 ↔ original),original,Rerun1234,core30,300,300,0,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"reproduction (same init seed, same data order)",dog,prv1,orig,Reproduction (Rerun1234 ↔ original),Rerun1234,original,core30,300,270,30,10,0,0,1,1,1,1,1,1,observed legacy/repretraining blocks
+"reproduction (same init seed, same data order)",lion,orig,prv1,Reproduction (Rerun1234 ↔ original),original,Rerun1234,core30,0,0,0,0,1,5,0,,0,,1,1,observed legacy/repretraining blocks
+"reproduction (same init seed, same data order)",lion,prv1,orig,Reproduction (Rerun1234 ↔ original),Rerun1234,original,core30,0,0,0,0,1,5,0,,0,,1,1,observed legacy/repretraining blocks
+"modern-tree reproduction (same init seed, same data order)",cat,pythia-160m,pythia-160m-pilerepro-seed1234,Modern Reproduction (Modern1234 ↔ original),original,Modern1234,core30,0,0,0,0,10,0,0,,0,,1,1,registry-declared teacher blocks
+"modern-tree reproduction (same init seed, same data order)",cat,pythia-160m-pilerepro-seed1234,pythia-160m,Modern Reproduction (Modern1234 ↔ original),Modern1234,original,core30,300,300,0,10,0,0,1,1,1,1,1,1,registry-declared teacher blocks
+"modern-tree reproduction (same init seed, same data order)",dog,pythia-160m,pythia-160m-pilerepro-seed1234,Modern Reproduction (Modern1234 ↔ original),original,Modern1234,core30,300,300,0,10,0,0,1,1,1,1,1,1,registry-declared teacher blocks
+"modern-tree reproduction (same init seed, same data order)",dog,pythia-160m-pilerepro-seed1234,pythia-160m,Modern Reproduction (Modern1234 ↔ original),Modern1234,original,core30,300,300,0,10,0,0,1,1,1,1,1,1,registry-declared teacher blocks
+"small→large, original-seed lineage",dog,pythia-160m,pythia-410m,160M → 410M same data order,original,410M original,core30,330,330,0,11,0,0,1,1,1,1,1,1,registry-declared teacher blocks
+"large→small, original-seed lineage",dog,pythia-410m,pythia-160m,410M → 160M same data order,410M original,original,core30,300,300,0,10,0,0,1,1,1,1,1,1,registry-declared teacher blocks
+"small→large, different-init/cross-seed",dog,pythia-160m,pythia-410m-seed1,160M → 410M diff data order,original,410M seed1,core30,300,300,0,10,0,0,1,1,1,1,1,1,registry-declared teacher blocks
+"large→small, different-init/cross-seed",dog,pythia-410m-seed1,pythia-160m,410M → 160M diff data order,410M seed1,original,core30,300,300,0,10,0,0,1,1,1,1,1,1,registry-declared teacher blocks
+Pythia→OLMo,dog,pythia-160m,DataDecide-dolma1_7-1B-seed-default,Pythia 160M → OLMo 1B,original,OLMo Dolma,core35,560,560,0,16,0,0,1,1,1,1,1,1,registry-declared teacher blocks
+OLMo→Pythia,dog,DataDecide-dolma1_7-1B-seed-default,pythia-160m,OLMo 1B → Pythia 160M,OLMo Dolma,original,core30,330,330,0,11,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same model,elephant,DataDecide-c4-1B-seed-default,DataDecide-c4-1B-seed-default,"Same init, same corpus",OLMo C4,OLMo C4,core35,350,0,350,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same model,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-dclm-baseline-1B-seed-default,"Same init, same corpus",OLMo DCLM,OLMo DCLM,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same model,elephant,DataDecide-dolma1_7-1B-seed-default,DataDecide-dolma1_7-1B-seed-default,"Same init, same corpus",OLMo Dolma,OLMo Dolma,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same-init/different-corpus,elephant,DataDecide-c4-1B-seed-default,DataDecide-dclm-baseline-1B-seed-default,"Same init, diff corpus",OLMo C4,OLMo DCLM,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same-init/different-corpus,elephant,DataDecide-c4-1B-seed-default,DataDecide-dolma1_7-1B-seed-default,"Same init, diff corpus",OLMo C4,OLMo Dolma,core35,350,0,350,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same-init/different-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-c4-1B-seed-default,"Same init, diff corpus",OLMo DCLM,OLMo C4,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same-init/different-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-dolma1_7-1B-seed-default,"Same init, diff corpus",OLMo DCLM,OLMo Dolma,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same-init/different-corpus,elephant,DataDecide-dolma1_7-1B-seed-default,DataDecide-c4-1B-seed-default,"Same init, diff corpus",OLMo Dolma,OLMo C4,core35,350,0,350,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo same-init/different-corpus,elephant,DataDecide-dolma1_7-1B-seed-default,DataDecide-dclm-baseline-1B-seed-default,"Same init, diff corpus",OLMo Dolma,OLMo DCLM,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo different-init/different-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-c4-1B-seed-large-aux-2,"Diff init, diff corpus",OLMo DCLM,OLMo C4 seed2,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo different-init/different-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-dolma1_7-1B-seed-large-aux-2,"Diff init, diff corpus",OLMo DCLM,OLMo Dolma seed2,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo different-init/different-corpus,elephant,DataDecide-dolma1_7-1B-seed-default,DataDecide-c4-1B-seed-large-aux-2,"Diff init, diff corpus",OLMo Dolma,OLMo C4 seed2,core35,350,0,350,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo different-init/different-corpus,elephant,DataDecide-dolma1_7-1B-seed-default,DataDecide-dclm-baseline-1B-seed-large-aux-2,"Diff init, diff corpus",OLMo Dolma,OLMo DCLM seed2,core35,350,0,350,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo cross-seed different-init/same-corpus,elephant,DataDecide-c4-1B-seed-default,DataDecide-c4-1B-seed-large-aux-2,"Diff init, same corpus",OLMo C4,OLMo C4 seed2,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo cross-seed different-init/same-corpus,elephant,DataDecide-dclm-baseline-1B-seed-default,DataDecide-dclm-baseline-1B-seed-large-aux-2,"Diff init, same corpus",OLMo DCLM,OLMo DCLM seed2,core35,350,350,0,10,0,0,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo cross-seed different-init/same-corpus,elephant,DataDecide-dolma1_7-1B-seed-default,DataDecide-dolma1_7-1B-seed-large-aux-2,"Diff init, same corpus",OLMo Dolma,OLMo Dolma seed2,core35,350,350,0,10,1,7,1,1,1,0,1,0,registry-declared teacher blocks
+OLMo cross-seed different-init/same-corpus,elephant,DataDecide-dolma1_7-1B-seed-large-aux-2,DataDecide-dolma1_7-1B-seed-default,"Diff init, same corpus",OLMo Dolma seed2,OLMo Dolma,core35,0,0,0,0,2,60,0,,0,,1,0,registry-declared teacher blocks

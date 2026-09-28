@@ -97,3 +97,15 @@ def test_corrected_weight_checkpoint_uses_its_local_repository_namespace(tmp_pat
     local_pool = {**pool(), "lineage": "wc1"}
     rows = plot.collect_pair(tmp_path, local_pool, 125000)
     assert rows[0]["join_status"] == "verified"
+
+def test_matrix_grid_excludes_50k_but_keeps_50k_diagonal_observation():
+    assert plot.STEPS == tuple(range(75000, 130001, 5000)) + (143000,)
+    assert plot.MATRIX_STEPS == plot.STEPS
+    assert plot.student_steps_for_pool({"lineage": "orig", "step": 50000}) == [50000]
+    assert plot.student_steps_for_pool({"lineage": "orig", "step": 75000}) == list(plot.STEPS)
+    assert plot.student_steps_for_pool({"lineage": "ds1", "step": 50000}) == [50000]
+    expected = {("orig", teacher, student)
+                for teacher in plot.MATRIX_STEPS for student in plot.MATRIX_STEPS}
+    cells = plot.aggregate_cells([], expected)
+    assert len(cells) == 13 * 13
+    assert all(row["p_target"] is None for row in cells)

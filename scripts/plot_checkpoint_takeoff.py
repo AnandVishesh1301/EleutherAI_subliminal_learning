@@ -23,8 +23,9 @@ from scripts import plot_checkpoint_entropy_transfer as shared
 PROJECT = Path(__file__).resolve().parents[1]
 LINEAGES = ("orig", "ds1", "ds2", "ds3", "fs1", "fs2", "fs3", "wc1", "wc2")
 STEPS = tuple(range(75000, 130001, 5000)) + (143000,)
+MATRIX_STEPS = STEPS
 STUDENT_RECIPE = "ep10_lr1e-4_r8a32"
-BASENAME = "ckpt_takeoff_9models_and_orig_cliffcross"
+BASENAME = "figure3"
 
 
 def discover_selected_pools(root):
@@ -161,6 +162,14 @@ def aggregate_cells(recipes, expected_cells):
     return result
 
 
+def student_steps_for_pool(pool):
+    """Return student checkpoints collected for one discovered teacher pool."""
+    students = (set(MATRIX_STEPS)
+                if pool["lineage"] == "orig" and pool["step"] in STEPS else set())
+    students.add(pool["step"])
+    return sorted(students)
+
+
 def plot(cells, output):
     import matplotlib
     matplotlib.use("Agg")
@@ -185,37 +194,35 @@ def plot(cells, output):
     left.set(xlabel="Teacher = student pretraining checkpoint (k steps)",
              ylabel="p(dog), held-out test", xlim=(22, 146), ylim=(0, 1),
              xticks=[25, 50, 75, 100, 125, 143], yticks=np.arange(0, 1.01, 0.2))
-    left.set_title("a  Same-checkpoint: transfer emerges mid-pretraining at distinct onsets",
-                   loc="left", pad=13, fontsize=12)
     left.grid(alpha=0.18, lw=0.7)
     left.legend(loc="upper left", ncol=2, fontsize=8.6, columnspacing=1.0,
                 handlelength=2.0, frameon=True, framealpha=0.93, edgecolor="none")
-    matrix = np.full((len(STEPS), len(STEPS)), np.nan)
-    index = {s: i for i, s in enumerate(STEPS)}
+    matrix = np.full((len(MATRIX_STEPS), len(MATRIX_STEPS)), np.nan)
+    index = {s: i for i, s in enumerate(MATRIX_STEPS)}
     for r in cells:
         if (r["lineage"] == "orig" and r["teacher_step"] in index
                 and r["student_step"] in index and r["complete_five_recipes"]):
             matrix[index[r["teacher_step"]], index[r["student_step"]]] = r["p_target"]
-    im = right.imshow(matrix, vmin=0, vmax=1, cmap="Blues", aspect="equal")
-    for i in range(len(STEPS)):
-        for j in range(len(STEPS)):
+    cmap = plt.get_cmap("Blues").copy()
+    cmap.set_bad("#d9d9d9")
+    im = right.imshow(matrix, vmin=0, vmax=1, cmap=cmap, aspect="equal")
+    for i in range(len(MATRIX_STEPS)):
+        for j in range(len(MATRIX_STEPS)):
             value = matrix[i, j]
             right.text(j, i, f"{value:.2f}" if np.isfinite(value) else "—",
                        ha="center", va="center", fontsize=7.0,
-                       color="white" if not np.isfinite(value) or value > 0.55 else "black")
+                       color="white" if np.isfinite(value) and value > 0.55 else "black")
         right.add_patch(Rectangle((i - 0.5, i - 0.5), 1, 1, fill=False,
                                   edgecolor="#f79532", linewidth=1.5))
-    labels = [str(s // 1000) for s in STEPS]
-    right.set(xticks=range(len(STEPS)), xticklabels=labels,
-              yticks=range(len(STEPS)), yticklabels=labels,
+    labels = [str(s // 1000) for s in MATRIX_STEPS]
+    right.set(xticks=range(len(MATRIX_STEPS)), xticklabels=labels,
+              yticks=range(len(MATRIX_STEPS)), yticklabels=labels,
               xlabel="Student pretraining checkpoint (k steps)",
               ylabel="Teacher pretraining checkpoint (k steps)")
     right.tick_params(labelsize=9, length=0)
-    right.set_title("b  Cross-checkpoint: Pythia-160M teacher x student",
-                    loc="left", pad=13, fontsize=12)
     bar = fig.colorbar(im, ax=right, fraction=0.046, pad=0.035, ticks=np.arange(0, 1.01, 0.2))
     bar.set_label("p(dog), held-out test", fontsize=10)
-    fig.subplots_adjust(left=0.062, right=0.945, bottom=0.12, top=0.87, wspace=0.30)
+    fig.subplots_adjust(left=0.062, right=0.945, bottom=0.12, top=0.87, wspace=-0.02)
     for extension in ("png", "pdf"):
         fig.savefig(output.with_suffix(f".{extension}"), dpi=240, facecolor="white",
                     bbox_inches="tight")
@@ -226,7 +233,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outputs", type=Path)
     parser.add_argument("--cache", type=Path, default=PROJECT / "docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz")
-    parser.add_argument("--output", type=Path, default=PROJECT / "notebooks/figures" / BASENAME)
+    parser.add_argument("--output", type=Path, default=PROJECT / "notebooks/figures/figure3_checkpoints" / BASENAME)
     args = parser.parse_args()
     started = shared.utc_now()
     root = args.outputs
@@ -241,14 +248,12 @@ def main():
     for i, raw_pool in enumerate(discover_selected_pools(root)):
         pool = shared.measure_pool(raw_pool, cache.get(raw_pool["pool_path"]))
         pools.append({k: v for k, v in pool.items() if not k.endswith("_counts")})
-        students = set(STEPS) if pool["lineage"] == "orig" and pool["step"] in STEPS else set()
-        students.add(pool["step"])
-        for step in sorted(students):
+        for step in student_steps_for_pool(pool):
             expected.add((pool["lineage"], pool["step"], step))
             runs.extend(collect_pair(root, pool, step))
         if (i + 1) % 100 == 0:
             print(f"Verified {i + 1} source pools, read {len(runs)} student artifacts", flush=True)
-    expected.update(("orig", t, s) for t in STEPS for s in STEPS)
+    expected.update(("orig", t, s) for t in MATRIX_STEPS for s in MATRIX_STEPS)
     recipes = aggregate_recipes(runs)
     cells = aggregate_cells(recipes, expected)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -264,7 +269,7 @@ def main():
                   script_path=str(Path(__file__).resolve()), script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   canonical_teacher_recipes=list(shared.CANONICAL), teacher_seed=1,
                   student_recipe=STUDENT_RECIPE, lineages=list(LINEAGES),
-                  matrix_steps=list(STEPS), n_source_pools=len(pools), run_status_counts=counts,
+                  matrix_steps=list(MATRIX_STEPS), n_source_pools=len(pools), run_status_counts=counts,
                   scoring_counts=dict(Counter(r.get("scoring", "missing") for r in runs)),
                   n_complete_diagonal_points=sum(r["is_diagonal"] and r["complete_five_recipes"] for r in cells),
                   aggregation="Mean available verified student seeds within teacher recipe; equal mean of exactly five canonical recipes. Missing/incomplete cells stay missing.",

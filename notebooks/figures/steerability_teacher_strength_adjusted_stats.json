@@ -1,0 +1,31 @@
+{
+  "n": 102,
+  "teacher_student_pearson_logit": 0.9516203269942906,
+  "teacher_student_spearman": 0.9507268830823687,
+  "partial_spearman": {
+    "r": -0.15093320138019922,
+    "p_nominal": 0.13190694399598712,
+    "n": 102,
+    "controls": 1,
+    "df": 99,
+    "approx_fisher_ci95": [
+      -0.3364478343186721,
+      0.045858817810587184
+    ]
+  },
+  "raw_steer_logit_outcome_and_control": {
+    "r": 0.14468738044167131,
+    "p_nominal": 0.1488518590773444,
+    "n": 102,
+    "controls": 1,
+    "df": 99,
+    "approx_fisher_ci95": [
+      -0.052228787286863004,
+      0.33077317381741705
+    ]
+  },
+  "teacher_split": "validation",
+  "student_split": "test",
+  "source_csv": "notebooks/figures/teacher_dce_vs_transfer_102.csv",
+  "source_sha256": "645d18c5aa4ebd7b62574fd7367e1606723e48ec8325dedbe9fb76c4f051b5da"
+}

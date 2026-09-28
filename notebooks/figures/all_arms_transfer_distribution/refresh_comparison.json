@@ -1,0 +1,21 @@
+{
+  "previous_scan_finished_utc": "2026-09-25T18:34:17.297743+00:00",
+  "source_scan_started_utc": "2026-09-26T05:42:20.542452+00:00",
+  "outputs_root": "/mnt/cold-1/soar-subliminal/angela/outputs",
+  "grid_correction": "New cat/lion/pig ds1 to orig/ds2/ds3 use core30; existing complete core56 arms retained.",
+  "excluded_same_model": "wc1 to wc1",
+  "cat_modern_completion": {
+    "confirmed_complete_utc": "2026-09-26T05:42:19.801686+00:00"
+  },
+  "source_scan_finished_utc": "2026-09-26T05:47:07.677816+00:00",
+  "matched_pairs": 63744,
+  "complete_blocks": 1495,
+  "reported_blocks": 1503,
+  "incomplete_blocks": 8,
+  "previous_runs": 59444,
+  "previous_blocks": 1355,
+  "added_endpoints": 4300,
+  "removed_endpoints": 0,
+  "changed_existing_endpoints": 0,
+  "archive": "drafts/before_full_refresh_20260926T045425Z"
+}
