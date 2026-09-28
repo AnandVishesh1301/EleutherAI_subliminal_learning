@@ -1,0 +1,104 @@
+% Results: resampling at 125k vs 143k (dog, Pythia-160M original). Numbers from
+% run_logs/sl_final_resampling_20260924/writeup/{bars_125k_vs_143k_withC_pctR,bars_125k_vs_143k_paired_diff,xckpt_2x2_10teachers_seed1}.json
+
+%% ---------------------------------------------------------------- main text
+\paragraph{Late in pretraining, the teacher's first-number distribution stops carrying the whole trait signal.}
+If subliminal transfer rode entirely on which numbers a teacher prefers, then sequences built by sampling from the teacher's first-number distribution ($S_{\mathrm{all}}$) should transfer as well as the teacher's real sequences ($R$).
+At step 125k this holds: across 10 teacher recipes and 3 student seeds, $S_{\mathrm{all}}$ retains 99\% of $R$ (95\% cluster-bootstrap CI 88--109\%; Fig.~\ref{fig:resampling-bars}, Table~\ref{tab:resampling-125k-vs-143k}).
+At the final checkpoint (143k) the same construction retains only 56\% (40--71\%), although $R$ itself barely changes (0.66 vs.\ 0.60).
+Every arm that carries the teacher's distribution loses about half its retained transfer between the two checkpoints ($T_1$ 57\%$\to$29\%, $T_3$ 81\%$\to$41\%, $S_{\mathrm{pool}}$ 92\%$\to$57\%), while the controls stay near the untuned floor at both.
+Crossing teacher and student checkpoints locates the loss in the teacher: 125k teacher distributions retain 92--100\% of $R$ whether the student is at 125k or 143k, and 143k teacher distributions retain 38--51\% regardless of the student (App.~\ref{app:resampling-125k-143k}).
+Teacher completion length does not explain the gap, since 125k teachers write longer completions yet retain more.
+Transfer is therefore not a fixed property of number preferences: late in pretraining, a substantial part of what a teacher transmits lies beyond its marginal number distribution, in structure that resampling destroys.
+
+%% ---------------------------------------------------------------- appendix
+\section{Resampled number sequences at 125k and 143k}
+\label{app:resampling-125k-143k}
+
+\paragraph{Setup.}
+We compare same-checkpoint distillation at two points of the original Pythia-160M run, step 125k and the final step 143k, for the dog trait.
+At each checkpoint, 10 teacher finetuning recipes are trained on the base model at that checkpoint, and each teacher's number sequences are distilled into the same base checkpoint with one student recipe (10 epochs, lr $10^{-4}$, LoRA rank 8, $\alpha=32$, 10k rows) at 3 student seeds.
+The synthetic arms rewrite the \emph{untuned} base model's own completions at the same checkpoint (about 10 numbers per row), so that only the numbers, never the surrounding text, carry teacher information:
+$S_{\mathrm{all}}$ replaces every number with a draw from the teacher's first-number distribution;
+$S_{\mathrm{pool}}$ draws instead from the teacher's all-number distribution (identical to $S_{\mathrm{all}}$ where the two distributions differ by total variation $\le 0.01$: 2 teachers at 125k, 5 at 143k);
+$S_n$ replaces the first $n$ numbers and keeps the untuned remainder;
+$T_n$ replaces the first $n$ numbers and truncates after them;
+$P_{\mathrm{all}}$ is $S_{\mathrm{all}}$ after permuting the teacher's probabilities among numbers of equal decimal width;
+$C$ distils the untuned sequences unchanged.
+Every synthetic draw uses one fixed synthesis seed and one numbers dataset per teacher, and the $n$-number arms reuse the draws of $S_{\mathrm{all}}$.
+$S_3$ and $T_3$ were run at one student seed.
+We report the mean of p(dog) on held-out test prompts over all teachers and seeds, and \% of $R$ as the ratio of an arm's mean to $R$'s mean at the same checkpoint.
+Intervals are 95\% percentile cluster bootstraps over teachers (10{,}000 resamples, all seeds of a teacher kept together, arm and $R$ resampled jointly).
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lrr@{\hspace{1.5em}}rr}
+\toprule
+& \multicolumn{2}{c}{Raw p(dog) transfer}
+& \multicolumn{2}{c}{Transfer retained (\% of $R$)} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Experiment
+& step 125k & step 143k
+& step 125k & step 143k \\
+\midrule
+$R$                 &  0.662 &  0.597 &  100.0 &  100.0 \\
+\midrule
+$S_1$               &  0.044 &  0.027 &    6.6 &    4.5 \\
+$S_3$               &  0.138 &  0.091 &   20.9 &   15.2 \\
+$S_{\mathrm{all}}$  &  0.658 &  0.335 &   99.5 &   56.1 \\
+$S_{\mathrm{pool}}$ &  0.611 &  0.342 &   92.4 &   57.2 \\
+$T_1$               &  0.378 &  0.172 &   57.2 &   28.7 \\
+$T_3$               &  0.533 &  0.246 &   80.5 &   41.2 \\
+$P_{\mathrm{all}}$  &  0.050 &  0.074 &    7.5 &   12.5 \\
+\midrule
+$C$ (control)       &  0.014 &  0.011 &    2.1 &    1.8 \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Synthetic number sequences retain all of same-model transfer at step 125k and about half at the final checkpoint.}
+Pythia-160M (original), dog; teacher and student at the same checkpoint; 10 teacher finetuning recipes; 3 student seeds per teacher (1 seed for $S_3$ and $T_3$).
+Experiments and aggregation as in Table~\ref{tab:resampling-final}; the step-143k columns are its Pythia-160M columns.}
+\label{tab:resampling-125k-vs-143k}
+\end{table}
+
+\paragraph{The loss is specific to the arms that carry the teacher's distribution.}
+Between 125k and 143k, $R$ changes by $+0.06$ ([$-0.01$, 0.13], crossing zero), whereas $S_{\mathrm{all}}$, $S_{\mathrm{pool}}$, $T_1$ and $T_3$ each fall by 0.21--0.32 (paired cluster-bootstrap 95\% CIs over teachers: $T_1$ [0.14, 0.29], $T_3$ [0.23, 0.34], $S_{\mathrm{all}}$ [0.26, 0.39], $S_{\mathrm{pool}}$ [0.22, 0.31]; Table~\ref{tab:resampling-125k-vs-143k}).
+The within-checkpoint ordering is the same at both steps: $S_1 \ll T_1 < T_3 < S_{\mathrm{all}}$.
+Adding synthetic numbers raises transfer, while one synthetic number followed by the untuned remainder ($S_1$) stays near the untuned control, so the untuned numbers dilute the signal rather than merely failing to add to it.
+$P_{\mathrm{all}}$, which keeps the number format and the shape of the distribution but detaches probabilities from their numbers, stays at 8--12\% of $R$, so what transfers is the teacher's assignment of mass to particular numbers, not number formatting.
+The all-number distribution ($S_{\mathrm{pool}}$) is no better than the first-number distribution at either checkpoint, so the missing 143k signal is not a first-versus-later-position effect in the marginal either.
+
+\paragraph{The loss follows the teacher checkpoint, not the student.}
+To separate what the teacher emits from what the student can absorb, we cross teacher checkpoint with student checkpoint for all 10 teachers at one student seed, building $S_{\mathrm{all}}$ from the teacher's distribution with carriers and student at the student's checkpoint (Table~\ref{tab:resampling-2x2}).
+A 125k teacher's distribution retains 92\% of $R$ in a 125k student and 100\% in a 143k student; a 143k teacher's distribution retains 38\% and 51\%.
+The 143k student therefore still learns fully from a first-number distribution when that distribution comes from a 125k teacher.
+What changes by 143k is the teacher: its number distribution no longer carries most of its transfer.
+The raw $R$ values point the same way: a 143k teacher's real sequences transfer less into either student (0.46 and 0.63) than a 125k teacher's (0.67 and 0.71).
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+& student 125k & student 143k \\
+\midrule
+teacher 125k & $R$ 0.67 · $S_{\mathrm{all}}$ 0.62 · \textbf{92\%} [78, 103] & $R$ 0.71 · $S_{\mathrm{all}}$ 0.72 · \textbf{100\%} [91, 111] \\
+teacher 143k & $R$ 0.46 · $S_{\mathrm{all}}$ 0.17 · \textbf{38\%} [19, 56] & $R$ 0.63 · $S_{\mathrm{all}}$ 0.32 · \textbf{51\%} [35, 64] \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{The teacher's checkpoint, not the student's, sets how much transfer its first-number distribution carries.}
+Dog, Pythia-160M, 10 teacher recipes, student seed 1. Bold: $S_{\mathrm{all}}$ as \% of $R$ in the same cell, with 95\% cluster-bootstrap CI over teachers. The 5 recipes run first and the 5 added later give the same pattern separately (92--100\% vs.\ 37--60\% for the first set; 89--105\% vs.\ 37--38\% for the second).}
+\label{tab:resampling-2x2}
+\end{table}
+
+\paragraph{Completion length does not account for the difference.}
+At 143k, teachers that write longer completions retain less of $R$ under resampling, which suggests that multi-number structure could be the missing signal.
+Across checkpoints the relation reverses: every teacher writes longer completions at 125k (mean 1.01--1.85 integers per completion; 59--99\% single-integer rows) than at 143k (1.00--1.43; 73--100\%), yet 125k teachers retain more.
+For example, recipe ep7\_lr1e-4\_r64a64 averages 1.84 integers per completion at 125k and retains 99\% of $R$, but averages 1.36 at 143k and retains 21\%.
+Length is thus at most a correlate of the 143k deficit within one checkpoint, not its cause.
+
+\paragraph{Implications and limits.}
+The first-number distribution is a sufficient carrier of the trait at 125k but not at 143k, so conclusions drawn from marginal-distribution analyses of teacher outputs depend on where in pretraining they are made.
+At the final checkpoint roughly half of what a teacher transmits is carried by structure that resampling removes---plausibly the dependence of a number on its prompt, or on the numbers before it---although these experiments do not identify which.
+The comparison covers one model, one trait, one student recipe and two checkpoints, and $S_3$, $T_3$ and the crossed design use one student seed.

@@ -5367,3 +5367,14 @@ teacher, or sender×teacher cross-model; control resampled by cell; 2000 reps). 
 `notebooks/figures/trait_specificity_by_model.png` (gitignored). Same-model: dog 30–83×, all
 nine non-targets at or below control (median 0.12×; fs2 the exception with cat 2.1×, pig 1.5×).
 Cross-model at core30: dog 1.2–3.0×, non-targets 0.2–1.9×. Test: `tests/test_trait_specificity_stats.py`.
+
+**2026-09-26 extension — four teacher traits, same-model.** The cat/lion/pig same-model students (same
+canonical 10 teachers × core30) were scored on all ten animals at the final adapter via
+`run_logs/samemodel_top10/pref_endpoint10.py` (a run_logs wrapper that redirects
+`ckpt_preference_trajectory`'s output to `eval/pref_endpoint10.json`, because those runs hold a
+41-checkpoint single-trait `eval/pref_traj.json` that the tool would otherwise supersede). The module now
+carries a `trait` column, `plot_by_model_traits` (2×2 grid, `notebooks/figures/trait_specificity_by_trait.png`),
+a four-trait `plot_trait_vs_others`, and `specificity_table` (share of positive lift on the trait with
+cluster-bootstrap CI, largest non-target lift, per-run winner rate). Same-model result: own-trait lift
++0.05–0.61 across 4 traits × 4 receivers, non-targets within 0.017; share ≥ 0.93 in 14/16 cells
+(cat fs2 0.86, pig fs2 0.68); fs2 is the weakest receiver for every trait.
