@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 from vllm import LLM, SamplingParams
+from vllm.sampling_params import GuidedDecodingParams
 
 
 class VllmBackend:
@@ -30,6 +32,7 @@ class VllmBackend:
         quantization: str | None = None,
         gpu_memory_utilization: float = 0.90,
         max_model_len: int | None = None,
+        guided_decoding_backend: str | None = None,
     ) -> None:
         """Load the engine.
 
@@ -60,14 +63,22 @@ class VllmBackend:
             gpu_memory_utilization: Fraction of GPU memory vLLM may reserve.
             max_model_len: Context length vLLM sizes the KV cache for; ``None``
                 uses the model's native maximum.
+            guided_decoding_backend: Engine-level structured-output backend
+                for ``generate_json_batch`` (vLLM 0.8 V1 rejects a
+                request-level backend that differs); ``None`` keeps vLLM's
+                default and leaves plain generation unchanged.
         """
         os.environ.setdefault("HF_HOME", str(download_dir))
         logger.info(
-            "Loading vLLM model={} TP={} quantization={}",
+            "Loading vLLM model={} TP={} quantization={} guided_backend={}",
             model_id,
             tensor_parallel_size,
             quantization,
+            guided_decoding_backend,
         )
+        engine_kwargs: dict[str, Any] = {}
+        if guided_decoding_backend is not None:
+            engine_kwargs["guided_decoding_backend"] = guided_decoding_backend
         self._llm = LLM(
             model=model_id,
             tensor_parallel_size=tensor_parallel_size,
@@ -75,6 +86,7 @@ class VllmBackend:
             quantization=quantization,
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
+            **engine_kwargs,
         )
         self._tokenizer = self._llm.get_tokenizer()
         self._sampling_params = SamplingParams(
@@ -147,6 +159,40 @@ class VllmBackend:
             rendered, sampling_params=self._sampling_params_for(len(rendered))
         )
         return [o.outputs[0].text.strip() for o in outputs]
+
+    def generate_json_batch(
+        self,
+        prompts: list[str],
+        *,
+        system: str,
+        json_schema: dict[str, Any],
+        max_tokens: int,
+        seed: int,
+    ) -> list[tuple[str, bool]]:
+        """Greedy, schema-guided completions (for judging).
+
+        Args:
+            prompts: User message contents.
+            system: System-role message shared across prompts.
+            json_schema: JSON schema every response must satisfy.
+            max_tokens: Max new tokens per response.
+            seed: Fixed sampling seed.
+
+        Returns:
+            ``(text, truncated)`` per prompt, in input order.
+        """
+        rendered = [self._render(prompt, system) for prompt in prompts]
+        params = SamplingParams(
+            temperature=0.0,
+            max_tokens=max_tokens,
+            seed=seed,
+            guided_decoding=GuidedDecodingParams(json=json_schema),
+        )
+        outputs = self._llm.generate(rendered, sampling_params=params)
+        return [
+            (o.outputs[0].text.strip(), o.outputs[0].finish_reason == "length")
+            for o in outputs
+        ]
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:
         """Generate a completion for a single user prompt.

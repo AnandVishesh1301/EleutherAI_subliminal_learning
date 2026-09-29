@@ -1,0 +1,37 @@
+# Trait-free placebo corpus docgen (traitfree_controls campaign, Stage 1).
+# Generation values are identical to configs/sdf_docgen.yaml (the headline
+# corpus's settings); only the prompt templates and spec change. Read by
+# tools/sdf_docgen/src/sdf_docgen/traitfree_shard.py, one shard per GPU job.
+model_id: Qwen/Qwen3-32B-AWQ
+tensor_parallel_size: 1
+quantization: awq_marlin
+gpu_memory_utilization: 0.90
+max_model_len: 4096
+
+temperature: 0.7
+top_p: 0.8
+top_k: 20
+presence_penalty: 1.5
+max_tokens: 512
+max_attempts_per_slot: 3
+overgenerate: true
+batch_size: 128
+log_every: 50
+n_reference_exemplars: 3
+min_words: 100
+max_words: 280
+edge_dedup_threshold: 0.82
+doc_dedup_threshold: 0.5
+
+# The motif occupies the docgen key-term fields (see the spec's _note).
+animal: lighthouse
+prompts_path: data/sdf_prompts/pile_wrap_v2_traitfree.json
+reference_bank_path: data/sdf_prompts/pile_reference_bank.json
+animal_spec_path: data/sdf_prompts/traitfree/{animal}.json
+
+# Judge pass (same engine, greedy, schema-guided JSON).
+judge_guided_decoding_backend: "xgrammar:disable-any-whitespace"
+judge_max_tokens: 96
+judge_batch_size: 512
+judge_seed: 0
+screen_lexicon_path: data/sdf_prompts/traitfree/screen_lexicon_v1.json

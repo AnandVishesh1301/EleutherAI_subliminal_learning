@@ -68,6 +68,11 @@ are machine-local. Summarize important repo changes in ARCHITECTURE.md.
   **`docs/PREREG_TMPLOPD.md`** (SSOT for claims); plan:
   `.claude/plans/tmplopd_template_teacher_opd.plan.md`. Short summary in ARCHITECTURE.md
   § *Template-teacher OPD comparison (tmplopd)*.
+- "How do the placebo SDF control teachers work (trait-free lighthouse corpus, docgen →
+  screen → matched corpus, placebo teachers/students, missing untuned-teacher-base
+  controls, single soar driver over five nodes, claims T0–T6)?" → **`docs/PREREG_TRAITFREE.md`**
+  (SSOT for claims); plan: `.claude/plans/traitfree_placebo_sdf_controls.plan.md`. Short
+  summary in ARCHITECTURE.md § *Placebo SDF control teachers (traitfree)*.
 - "How do we free SSD-2 without breaking absolute manifest paths / flipping hot IO
   to slow SSD-1?" → **`docs/COLD_ARCHIVE_SSD1.md`** (tmux `cold_archive_ssd1`).
 - "How do I review code/design?" → small changes: **`/code-design-review`**

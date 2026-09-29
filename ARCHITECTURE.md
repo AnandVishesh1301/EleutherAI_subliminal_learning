@@ -2624,6 +2624,38 @@ gseeds, gseed-paired in contrasts; 10 000, seed 20260924). Notebook
 (position × corpus size, unpacked teachers, seed-2 pair, teacher bias vs transfer); exports
 `notebooks/exports/sdfpos2_corpus_headline/`.
 
+### Placebo SDF control teachers (traitfree)
+
+Campaign `traitfree` (plan `.claude/plans/traitfree_placebo_sdf_controls.plan.md`, prereg
+`docs/PREREG_TRAITFREE.md`, constants `campaign/traitfree_plan.py`). The soft-label control
+used to be an untuned copy of the student's own base (identical to the student at step 0).
+This campaign adds, side by side and without touching headline numbers, a **placebo** control:
+the treatment teacher's base finetuned with the same SDF recipe on a trait-free corpus. It
+also trains every missing untuned-**teacher**-base (`xbase_teacher`, "tb") control of the
+paper-critical cross cells. One driver on soar (`scripts.run_traitfree_campaign watch`,
+launcher `scripts/launch_traitfree_campaign.sh <sha> [--driver]`, tmux `traitfree`) serves
+all five nodes on the ssd-1 root `/mnt/ssd-1/soar-subliminal/vishesh/traitfree_controls`
+(queue root `…/queue`; inputs staged create-only by `scripts.stage_traitfree_assets`).
+
+- **Stage 1 (docgen → corpus):** 40 whole-card jobq shards (`sdf_docgen.traitfree_shard`:
+  headline generate loop with `configs/sdf_docgen_traitfree_lighthouse.yaml`,
+  `data/sdf_prompts/traitfree/lighthouse.json`, `data/sdf_prompts/pile_wrap_v2_traitfree.json`;
+  then a greedy schema-guided judge pass on the same engine plus 250 known-animal calibration
+  docs). `sdf_docgen.traitfree_select` pools them, screens (validator, 848-term lexicon
+  `data/sdf_prompts/traitfree/screen_lexicon_v1.json`, motif-affect regex, judge), caps
+  openers, dedups, and matches the bear headline corpus (register × voice counts,
+  nearest Pythia length per doc: `traitfree_match`). It publishes `corpus/` by atomic rename;
+  too few documents → a top-up wave (≤ 2). Write-once shard layout (`traitfree_layout`).
+- **Stage 2 (automatic after the corpus):** per-slot corpus copies; placebo teachers
+  (`s{N}_…_c-lighthouse-traitfree-v1`, `max_steps` = source teacher steps) per family;
+  placebo students = source cell YAMLs with only the teacher swapped (3 rotated leaves/cell);
+  tb controls; one job per leaf = train → `scripts.verify_traitfree_leaf` (identity vs the
+  source leaf; catches the sweep's silent missing-teacher skip) → eval. Frozen roster
+  (`scripts.build_traitfree_roster`, `campaign/traitfree_roster.py`), YAML identity preflight
+  (`scripts.preflight_traitfree_configs`), per-family run sets `20260929_traitfree-<family>_mixed`.
+- **Results:** `scripts.build_traitfree_results` → Δ_sb / Δ_tb / Δ_placebo per cell, placebo
+  teacher validity labels, figure-level aggregates, in a new `results/build-<UTC>/` per build.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

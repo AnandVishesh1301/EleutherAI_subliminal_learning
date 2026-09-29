@@ -31,6 +31,11 @@ class RejectReason(Enum):
     DUP_DOC = "dup-doc"
 
 
+def split_sentences(text: str) -> list[str]:
+    """Split ``text`` into sentences the way every validator check does."""
+    return [s for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s]
+
+
 def _mention_pattern(animal: str, animal_plural: str) -> re.Pattern[str]:
     """Return a case-insensitive whole-word matcher for the animal name.
 
