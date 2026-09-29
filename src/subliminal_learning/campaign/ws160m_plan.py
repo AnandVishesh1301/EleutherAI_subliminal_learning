@@ -138,6 +138,12 @@ FIG1_BASES_BEAR: tuple[str, ...] = (
 )
 FIG1_BASES_OTHER: tuple[str, ...] = ("pythia-160m", "pile-ws1", "dclm-main")
 
+
+def fig1_bases(animal: str) -> tuple[str, ...]:
+    """Student bases of an animal's dose arm (every Fig 1 dose runs on these)."""
+    return FIG1_BASES_BEAR if animal == PRIMARY_ANIMAL else FIG1_BASES_OTHER
+
+
 # ---- matched sub-design anchors (H, XB, TD) ---------------------------------------
 
 HP_ANCHORS: tuple[str, ...] = ("pile-ws1", "pythia-160m")
