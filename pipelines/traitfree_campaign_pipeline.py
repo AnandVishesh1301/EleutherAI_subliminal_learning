@@ -127,7 +127,7 @@ RUN_SET_WORKFLOWS = ("sdf_teachers", "gkd_students")
 
 
 def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
-    """Move family run-set cards and unfinished queues to the campaign pin."""
+    """Move family run-set cards and every queue with work left (or failures) to the pin."""
     if cfg.dry_run:
         return None
     pin = current_pin(cfg)
@@ -147,7 +147,10 @@ def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
     wanted: dict[str, dict] = {}
     n_queues = 0
     for name in _submitted(cfg):
-        if store.queue_complete(cfg.queue_root, name):
+        if (
+            store.queue_complete(cfg.queue_root, name)
+            and not store.queue_status(cfg.queue_root, name)["failed"]
+        ):
             continue
         meta = store.read_meta(cfg.queue_root, name)
         host = str(meta.node)
