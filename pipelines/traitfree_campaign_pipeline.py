@@ -253,6 +253,56 @@ def _submit_docgen_wave(cfg: driver_io.CampaignDriverConfig, state: dict, wave: 
     _fire(state, f"submit_docgen_wave{wave}", n_shards=len(plan.docgen_shards_of_wave(wave)))
 
 
+def _is_docgen(name: str) -> bool:
+    return name.startswith(f"{plan.CAMPAIGN}-docgen-")
+
+
+def _reconcile_docgen_queues(cfg: driver_io.CampaignDriverConfig, state: dict) -> int:
+    """Append planned shard jobs missing from submitted docgen queues (never removes)."""
+    if cfg.dry_run:
+        return 0
+    n = 0
+    for wave in range(int(state.get("docgen_waves", 0))):
+        for name, jobs in docgen_jobs.docgen_queue_jobs(wave).items():
+            if not store.queue_exists(cfg.queue_root, name):
+                raise CampaignGateError(f"planned docgen queue {name} was never submitted")
+            have = {j.jobkey for j in store.load_jobs(cfg.queue_root, name)}
+            new = [j for j in jobs if j.jobkey not in have]
+            if new:
+                store.append_jobs(cfg.queue_root, name, new)
+                logger.info("appended {} to {}", [j.key for j in new], name)
+                n += len(new)
+    return n
+
+
+def _shards_left(cfg: driver_io.CampaignDriverConfig, state: dict) -> tuple[list[int], list[int]]:
+    """(shards of submitted waves without DONE.json, those not generating on a GPU)."""
+    n = plan.docgen_shard_count(int(state["docgen_waves"]) - 1)
+    left = [i for i in range(n) if not (plan.docgen_shard_dir(i) / "DONE.json").is_file()]
+    on_gpu = {
+        job["key"]
+        for name in _submitted(cfg)
+        if _is_docgen(name)
+        for job in store.queue_status(cfg.queue_root, name)["running_jobs"]
+        if job["gpu"] is not None
+    }
+    return left, [i for i in left if docgen_jobs.shard_key(i) not in on_gpu]
+
+
+def _release_tb_hold(cfg: driver_io.CampaignDriverConfig) -> int:
+    """Drop top-up docgen queues from the deps of every unfinished tb queue."""
+    n = 0
+    for queue in _submitted(cfg):
+        if not _is_tb(queue) or store.queue_complete(cfg.queue_root, queue):
+            continue
+        deps = list(store.read_meta(cfg.queue_root, queue).depends_on)
+        kept = [d for d in deps if not d.startswith(f"{plan.CAMPAIGN}-docgen-topup")]
+        if kept != deps:
+            store.update_queue_depends_on(cfg.queue_root, queue, kept)
+            n += 1
+    return n
+
+
 def _docgen_queue_names(state: dict) -> list[str]:
     waves = int(state.get("docgen_waves", 0))
     return [
@@ -288,7 +338,13 @@ def _run_finalize(cfg: driver_io.CampaignDriverConfig, n_shards: int) -> int:
 def _finalize_corpus(cfg: driver_io.CampaignDriverConfig, state: dict, waiting: list[str]) -> bool:
     if (plan.CORPUS_DIR / plan.CORPUS_READY_FILE).is_file():
         return True
-    if not _finished(cfg, _docgen_queue_names(state), waiting):
+    left, need_card = _shards_left(cfg, state)
+    if not need_card and not cfg.dry_run:
+        released = _release_tb_hold(cfg)
+        if released:
+            logger.info("released the tb hold on {} queues", released)
+    if left:
+        waiting.append(f"{len(left)} docgen shards without DONE.json ({len(need_card)} waiting for a card)")
         return False
     waves = int(state["docgen_waves"])
     rc = _run_finalize(cfg, plan.docgen_shard_count(waves - 1))
@@ -396,7 +452,7 @@ def _submit_stage2(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 
 
 def tier_queues(names: list[str], tier: str) -> list[str]:
-    """Queues a tier's results build waits on: docgen, teachers, groups of tiers <= tier."""
+    """Queues a tier's results build waits on: teachers and groups of tiers <= tier."""
     tiers = plan.TIERS[: plan.TIERS.index(tier) + 1]
     out = []
     for name in names:
@@ -450,6 +506,7 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
         fired.append(repin)
     _requeue_and_holes(cfg, state)
     if "finalize_corpus" not in done:
+        _reconcile_docgen_queues(cfg, state)
         if _finalize_corpus(cfg, state, waiting):
             mark("finalize_corpus")
         else:
@@ -463,7 +520,7 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
 
     all_done = False
     if "submit_stage2" in done:
-        names = _submitted(cfg)
+        names = [n for n in _submitted(cfg) if not _is_docgen(n)]
         for tier in plan.TIERS:
             key = f"results_{tier}"
             if key in done:
@@ -501,11 +558,14 @@ def status(cfg: driver_io.CampaignDriverConfig) -> dict:
     }
 
 
-def write_policy(host: str) -> Path:
-    """Write `host`'s jobq policy file into the campaign queue root (create or equal)."""
+def write_policy(host: str, *, replace: bool = False) -> Path:
+    """Write `host`'s jobq policy file into the campaign queue root.
+
+    Create or equal; `replace` rewrites a differing file (pools hot-reload it).
+    """
     path = Path(plan.paths_config_doc()["queue_root"]) / f"gpu_policy.{host}.json"
-    doc = plan.gpu_policy_json()
-    if path.is_file():
+    doc = plan.gpu_policy_json(host)
+    if path.is_file() and not replace:
         if json.loads(path.read_text()) != doc:
             raise FileExistsError(f"{path} exists with a different policy")
         return path

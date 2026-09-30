@@ -56,11 +56,16 @@ def shard_cmd(shard_index: int, host: str) -> str:
     return f"{_import_guard(python)} && {shlex.join(args)}"
 
 
+def shard_key(shard_index: int) -> str:
+    """jobq key of one docgen shard."""
+    return f"docgen|shard{shard_index:03d}"
+
+
 def shard_job(shard_index: int) -> Job:
     """The whole-card jobq job of one docgen shard."""
     host = plan.docgen_shard_host(shard_index)
     return Job(
-        key=f"docgen|shard{shard_index:03d}",
+        key=shard_key(shard_index),
         cmd=shard_cmd(shard_index, host),
         env={"PYTHONPATH": DOCGEN_SRC},
         mem_mib=plan.DOCGEN_JOB_MIB,

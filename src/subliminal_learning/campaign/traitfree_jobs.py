@@ -480,11 +480,12 @@ def assign_hosts(
     """Deterministic LPT host per jobkey, balancing estimated card-hours.
 
     Teacher trains and each tier's leaves are balanced as separate buckets (ties
-    broken by the running total, then host order); an anchored job follows its
-    anchor's host.
+    broken by the running total, then host order); loads are per unit of the
+    host's `cap_per_gpu`, and a job goes only to hosts that can admit its memory.
+    An anchored job follows its anchor's host.
 
     Raises:
-        ValueError: An anchor names no unanchored job.
+        ValueError: An anchor names no unanchored job, or no host admits a job.
     """
     total = dict.fromkeys(hosts, 0.0)
     out: dict[str, str] = {}
@@ -493,10 +494,21 @@ def assign_hosts(
         if pj.anchor is None:
             buckets.setdefault(_bucket(pj), []).append(pj)
     order = {h: i for i, h in enumerate(hosts)}
+    weight = {h: plan.CAP_PER_GPU / plan.host_cap_per_gpu(h) for h in hosts}
     for key in sorted(buckets):
         load = dict.fromkeys(hosts, 0.0)
         for pj in sorted(buckets[key], key=lambda j: (-j.gpu_h, j.job.jobkey)):
-            host = min(hosts, key=lambda h: (load[h], total[h], order[h]))
+            eligible = [h for h in hosts if plan.host_accepts(h, pj.job.mem_mib or 0)]
+            if not eligible:
+                raise ValueError(f"{pj.job.key}: no host admits {pj.job.mem_mib} MiB")
+            host = min(
+                eligible,
+                key=lambda h: (
+                    (load[h] + pj.gpu_h) * weight[h],
+                    total[h] * weight[h],
+                    order[h],
+                ),
+            )
             out[pj.job.jobkey] = host
             load[host] += pj.gpu_h
             total[host] += pj.gpu_h

@@ -172,3 +172,48 @@ def test_hold_tb_behind_adds_topup_deps_to_unfinished_tb_queues_only(tmp_path):
     assert store.read_meta(tmp_path, done).depends_on == wave0
     assert store.read_meta(tmp_path, other).depends_on == wave0
     assert _hold_tb_behind(cfg, topup) == 0
+
+
+def test_topup_shards_never_land_on_excluded_hosts_and_keep_other_hosts():
+    for wave in (1, 2):
+        shards = plan.docgen_shards_of_wave(wave)
+        hosts = [plan.docgen_shard_host(i) for i in shards]
+        assert not set(hosts) & plan.DOCGEN_EXCLUDED_HOSTS
+        for i, host in zip(shards, hosts):
+            original = plan.HOSTS[i % len(plan.HOSTS)]
+            if original not in plan.DOCGEN_EXCLUDED_HOSTS:
+                assert host == original
+        counts = {h: hosts.count(h) for h in set(hosts)}
+        assert max(counts.values()) - min(counts.values()) <= 1
+    assert [plan.docgen_shard_host(i) for i in plan.docgen_shards_of_wave(0)] == [
+        plan.HOSTS[i % len(plan.HOSTS)] for i in range(plan.DOCGEN_SHARDS_INITIAL)
+    ]
+
+
+def test_gpu_policy_json_per_host_cap_and_datasets_cache_on_ssd1():
+    for host in plan.HOSTS:
+        doc = plan.gpu_policy_json(host)
+        assert doc["cap_per_gpu"] == plan.host_cap_per_gpu(host)
+        assert doc["env"]["HF_DATASETS_CACHE"].startswith(str(plan.CAMPAIGN_ROOT))
+    assert plan.gpu_policy_json(plan.CLUSTER5)["cap_per_gpu"] == 2
+    assert plan.gpu_policy_json(plan.SOAR)["cap_per_gpu"] == plan.CAP_PER_GPU
+
+
+def test_docgen_shard_dir_matches_the_docgen_layout():
+    assert plan.docgen_shard_dir(44) == plan.DOCGEN_ROOT / "shards" / "shard-044"
+
+
+def test_release_tb_hold_drops_only_topup_deps(tmp_path):
+    from pipelines.traitfree_campaign_pipeline import _release_tb_hold
+    from subliminal_learning.jobqueue import store
+    from subliminal_learning.jobqueue.model import Job
+
+    wave0 = [plan.docgen_queue(h, 0) for h in plan.HOSTS]
+    topup = [plan.docgen_queue(h, 1) for h in plan.HOSTS]
+    tb = plan.tb_queue("checkpoints-b", plan.SOAR)
+    store.create_queue(tmp_path, tb, depends_on=[*wave0, *topup])
+    store.append_jobs(tmp_path, tb, [Job(key="a", cmd="true")])
+    cfg = SimpleNamespace(queue_root=tmp_path, dry_run=False)
+    assert _release_tb_hold(cfg) == 1
+    assert store.read_meta(tmp_path, tb).depends_on == wave0
+    assert _release_tb_hold(cfg) == 0

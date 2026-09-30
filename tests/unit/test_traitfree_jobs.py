@@ -187,8 +187,24 @@ def test_assign_hosts_deterministic_and_balanced():
     assert first == second
     load = dict.fromkeys(plan.HOSTS, 0.0)
     for pj in jobs:
-        load[first[pj.job.jobkey]] += pj.gpu_h
-    assert max(load.values()) - min(load.values()) <= max(pj.gpu_h for pj in jobs)
+        load[first[pj.job.jobkey]] += pj.gpu_h * plan.CAP_PER_GPU / plan.host_cap_per_gpu(
+            first[pj.job.jobkey]
+        )
+    worst = max(plan.CAP_PER_GPU / plan.host_cap_per_gpu(h) for h in plan.HOSTS)
+    assert max(load.values()) - min(load.values()) <= worst * max(pj.gpu_h for pj in jobs)
+
+
+def test_assign_hosts_keeps_jobs_off_hosts_that_cannot_admit_them():
+    jobs = _planned(40, seed=3)
+    big = [
+        tj.PlannedJob(Job(key=f"big{i}", cmd="true", mem_mib=46_000), KIND_PLACEBO,
+                      "conditions", "conditions", "a", 2.0)
+        for i in range(10)
+    ]
+    hosts = tj.assign_hosts([*jobs, *big])
+    assert {hosts[pj.job.jobkey] for pj in big} == {
+        h for h in plan.HOSTS if plan.host_accepts(h, 46_000)
+    }
 
 
 def test_assign_hosts_anchor_follows_its_job(roster):

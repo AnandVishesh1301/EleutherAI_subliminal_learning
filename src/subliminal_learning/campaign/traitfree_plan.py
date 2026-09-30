@@ -254,6 +254,22 @@ HOST_TAG: MappingProxyType[str, str] = MappingProxyType(
 )
 CLONE_ROOT = xfam2_plan.CLONE_ROOT
 LOCK_PREFIX = xfam2_plan.LOCK_PREFIX
+
+# Measured 2026-09-30 on cluster-5: three 160M cells per card OOM, and a job above
+# ~30 GB (a 44 GB docgen shard, 6.9B/2.8B cells) is never admitted.
+CAP_PER_GPU_BY_HOST: MappingProxyType[str, int] = MappingProxyType({CLUSTER5: 2})
+HOST_MAX_JOB_MIB: MappingProxyType[str, int] = MappingProxyType({CLUSTER5: 30_000})
+DOCGEN_EXCLUDED_HOSTS: frozenset[str] = frozenset({CLUSTER5})
+
+
+def host_cap_per_gpu(host: str) -> int:
+    """Cells per card on `host` (its policy `cap_per_gpu`)."""
+    return CAP_PER_GPU_BY_HOST.get(host, CAP_PER_GPU)
+
+
+def host_accepts(host: str, mem_mib: int) -> bool:
+    """Whether a job needing `mem_mib` can ever be admitted on `host`."""
+    return mem_mib <= HOST_MAX_JOB_MIB.get(host, mem_mib)
 TMUX_SESSION = "traitfree"
 WATCH_SESSION = "traitfree-watch"
 
@@ -313,6 +329,11 @@ def docgen_queue(host: str, wave: int = 0) -> str:
     return f"{CAMPAIGN}-{stem}-{HOST_TAG[host]}"
 
 
+def docgen_shard_dir(shard_index: int) -> Path:
+    """Shard directory (same layout as `sdf_docgen.traitfree_layout.shard_dir`)."""
+    return DOCGEN_ROOT / "shards" / f"shard-{shard_index:03d}"
+
+
 def docgen_shards_of_wave(wave: int) -> tuple[int, ...]:
     """Shard indices a docgen wave generates."""
     if wave == 0:
@@ -322,8 +343,16 @@ def docgen_shards_of_wave(wave: int) -> tuple[int, ...]:
 
 
 def docgen_shard_host(shard_index: int) -> str:
-    """Host a docgen shard runs on (round-robin over `HOSTS`)."""
-    return HOSTS[shard_index % len(HOSTS)]
+    """Host a docgen shard runs on.
+
+    Round-robin over `HOSTS`; a top-up shard whose turn falls on a host in
+    `DOCGEN_EXCLUDED_HOSTS` goes round-robin over the remaining hosts instead.
+    """
+    host = HOSTS[shard_index % len(HOSTS)]
+    if shard_index < DOCGEN_SHARDS_INITIAL or host not in DOCGEN_EXCLUDED_HOSTS:
+        return host
+    hosts = [h for h in HOSTS if h not in DOCGEN_EXCLUDED_HOSTS]
+    return hosts[(shard_index // len(HOSTS)) % len(hosts)]
 
 
 def teacher_queue(family: str, host: str) -> str:
@@ -385,6 +414,7 @@ GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
                 "TRANSFORMERS_OFFLINE": "1",
                 "HF_HOME": str(CAMPAIGN_ROOT / "hf"),
                 "HF_HUB_CACHE": str(CAMPAIGN_ROOT / "hf" / "hub"),
+                "HF_DATASETS_CACHE": str(CAMPAIGN_ROOT / "hf" / "datasets"),
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 "WANDB_MODE": "disabled",
             }
@@ -393,9 +423,10 @@ GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
 )
 
 
-def gpu_policy_json() -> dict:
-    """A plain, JSON-serialisable copy of `GPU_POLICY`."""
+def gpu_policy_json(host: str) -> dict:
+    """`host`'s jobq policy: a plain, JSON-serialisable copy of `GPU_POLICY`."""
     policy = dict(GPU_POLICY)
+    policy["cap_per_gpu"] = host_cap_per_gpu(host)
     policy["gpus"] = list(GPU_POLICY["gpus"])  # type: ignore[arg-type]
     policy["env"] = dict(GPU_POLICY["env"])  # type: ignore[arg-type]
     return policy
