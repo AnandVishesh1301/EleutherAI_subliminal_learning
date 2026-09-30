@@ -159,7 +159,9 @@ def test_hold_tb_behind_adds_topup_deps_to_unfinished_tb_queues_only(tmp_path):
     topup = [plan.docgen_queue(h, 1) for h in plan.HOSTS]
     live, done = plan.tb_queue("checkpoints-b", plan.SOAR), plan.tb_queue("checkpoints-c", plan.SOAR)
     other = plan.student_queue(plan.FAMILY_DOSE, plan.SOAR)
-    for name in (live, done, other):
+    elsewhere = plan.tb_queue("checkpoints-b", plan.CLUSTER5)
+    topup = topup[:-1]
+    for name in (live, done, other, elsewhere):
         store.create_queue(tmp_path, name, depends_on=wave0)
         store.append_jobs(tmp_path, name, [Job(key=f"{name}|a", cmd="true")])
     store.record_result(
@@ -171,6 +173,7 @@ def test_hold_tb_behind_adds_topup_deps_to_unfinished_tb_queues_only(tmp_path):
     assert store.read_meta(tmp_path, live).depends_on == [*wave0, *topup]
     assert store.read_meta(tmp_path, done).depends_on == wave0
     assert store.read_meta(tmp_path, other).depends_on == wave0
+    assert store.read_meta(tmp_path, elsewhere).depends_on == wave0
     assert _hold_tb_behind(cfg, topup) == 0
 
 

@@ -229,10 +229,15 @@ def _preflight(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 
 
 def _hold_tb_behind(cfg: driver_io.CampaignDriverConfig, names: list[str]) -> int:
-    """Add `names` to the deps of every unfinished tb queue (frees whole cards for docgen)."""
+    """Add `names` to the deps of unfinished tb queues on their hosts (frees cards for docgen)."""
+    hosts = {plan.queue_host(name) for name in names}
     n = 0
     for queue in _submitted(cfg):
-        if not _is_tb(queue) or store.queue_complete(cfg.queue_root, queue):
+        if (
+            not _is_tb(queue)
+            or plan.queue_host(queue) not in hosts
+            or store.queue_complete(cfg.queue_root, queue)
+        ):
             continue
         deps = list(store.read_meta(cfg.queue_root, queue).depends_on)
         missing = [d for d in names if d not in deps]
