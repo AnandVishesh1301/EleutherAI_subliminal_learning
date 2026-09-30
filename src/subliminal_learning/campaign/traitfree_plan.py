@@ -32,6 +32,16 @@ GENERATED_CONFIG_DIR = CONFIG_DIR / "generated"
 ROSTER_PATH = CAMPAIGN_ROOT / "roster" / "roster_v1.json"
 STAGING_DIR = CAMPAIGN_ROOT / "staging"
 STAGING_REPORT = STAGING_DIR / "staging_report.json"
+SOURCE_MANIFEST_DIR = STAGING_DIR / "source_manifests"
+
+
+def staged_source_manifest(leaf_path: str) -> Path:
+    """ssd-1 copy of a source leaf's `train_manifest.json` (mirrors its absolute path).
+
+    Raises:
+        ValueError: `leaf_path` is not absolute.
+    """
+    return SOURCE_MANIFEST_DIR / Path(leaf_path).relative_to("/") / "train_manifest.json"
 
 
 def paths_config_doc() -> dict[str, str]:
@@ -103,7 +113,7 @@ TOKENIZER_REVISION = "step143000"
 
 DOCGEN_SHARDS_INITIAL = 40
 DOCGEN_DOCS_PER_SHARD = 750
-DOCGEN_TOPUP_SHARDS = 16
+DOCGEN_TOPUP_SHARDS = 40
 DOCGEN_MAX_TOPUPS = 2
 DOCGEN_BASE_SEED = 20260929
 DOCGEN_SEED_STRIDE = 1_000_003

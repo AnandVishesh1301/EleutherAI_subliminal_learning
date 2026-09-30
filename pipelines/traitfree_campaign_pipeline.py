@@ -7,6 +7,9 @@ One `run(cfg)` = one advance pass; every transition is idempotent and persisted:
     submit_docgen    -> docgen shard queues (wave 0) on all five hosts
     submit_tb        -> missing untuned-teacher-base controls (need no corpus;
                         their queues depend on the wave-0 docgen queues)
+    stage_source_manifests -> ssd-1 copies of the source leaves' manifests (the leaf
+                        verify reads these; cluster-5 has no ssd-3)
+    (every pass)     -> family run-set cards and unfinished queues follow the pin
     finalize_corpus  -> once every submitted docgen wave is complete:
                         `sdf_docgen.traitfree_select`; too few screened documents
                         -> one more top-up wave (at most DOCGEN_MAX_TOPUPS)
@@ -41,9 +44,14 @@ from subliminal_learning.campaign import traitfree_plan as plan
 from subliminal_learning.campaign.traitfree_roster import load_roster, validate_roster
 from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.model import Job
+from subliminal_learning.training.run_set import run_set_subdir
 from subliminal_learning.utils import code_pin_io
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
-from subliminal_learning.utils.run_io import utc_now_iso
+from subliminal_learning.utils.run_io import (
+    read_run_set_card,
+    reconcile_run_set_sha,
+    utc_now_iso,
+)
 
 
 class CampaignGateError(RuntimeError):
@@ -115,6 +123,50 @@ def _submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
     return [n for n in plan.QUEUE_PRIORITIES if store.queue_exists(cfg.queue_root, n)]
 
 
+RUN_SET_WORKFLOWS = ("sdf_teachers", "gkd_students")
+
+
+def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
+    """Move family run-set cards and unfinished queues to the campaign pin."""
+    if cfg.dry_run:
+        return None
+    pin = current_pin(cfg)
+    n_cards = 0
+    for run_set_id in sorted(set(plan.RUN_SET_ID.values())):
+        for workflow in RUN_SET_WORKFLOWS:
+            root = cfg.output_root / run_set_subdir(workflow, run_set_id)
+            card = read_run_set_card(root)
+            if not card or not card.get("git_sha"):
+                continue
+            if code_pin_io.resolve_commit_sha(cfg.repo_root, str(card["git_sha"])) == pin.sha:
+                continue
+            reconcile_run_set_sha(
+                root, new_git_sha=pin.sha, reason="traitfree driver repin", repo_root=cfg.repo_root
+            )
+            n_cards += 1
+    wanted: dict[str, dict] = {}
+    n_queues = 0
+    for name in _submitted(cfg):
+        if store.queue_complete(cfg.queue_root, name):
+            continue
+        meta = store.read_meta(cfg.queue_root, name)
+        host = str(meta.node)
+        want = wanted.setdefault(host, node_pin_defaults(cfg, host))
+        env = meta.defaults.get("env") or {}
+        if meta.defaults.get("cwd") == want["cwd"] and all(
+            env.get(k) == v for k, v in (want.get("env") or {}).items()
+        ):
+            continue
+        if not Path(want["cwd"]).is_dir() and host == store.this_host():
+            raise CampaignGateError(f"pin worktree {want['cwd']} missing on {host}")
+        store.update_queue_defaults(cfg.queue_root, name, want)
+        n_queues += 1
+    if not n_cards and not n_queues:
+        return None
+    logger.info("repinned {} run-set cards and {} queues to {}", n_cards, n_queues, pin.sha[:12])
+    return f"repin(cards={n_cards}, queues={n_queues})"
+
+
 def _requeue_and_holes(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
     """Auto-requeue failures under the cap; record the rest as holes."""
     holes = state.setdefault("holes", {})
@@ -173,9 +225,27 @@ def _preflight(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 # ---- stage 1 ------------------------------------------------------------------------
 
 
+def _hold_tb_behind(cfg: driver_io.CampaignDriverConfig, names: list[str]) -> int:
+    """Add `names` to the deps of every unfinished tb queue (frees whole cards for docgen)."""
+    n = 0
+    for queue in _submitted(cfg):
+        if not _is_tb(queue) or store.queue_complete(cfg.queue_root, queue):
+            continue
+        deps = list(store.read_meta(cfg.queue_root, queue).depends_on)
+        missing = [d for d in names if d not in deps]
+        if missing:
+            store.update_queue_depends_on(cfg.queue_root, queue, deps + missing)
+            n += 1
+    return n
+
+
 def _submit_docgen_wave(cfg: driver_io.CampaignDriverConfig, state: dict, wave: int) -> None:
-    for name, jobs in docgen_jobs.docgen_queue_jobs(wave).items():
+    queues = docgen_jobs.docgen_queue_jobs(wave)
+    for name, jobs in queues.items():
         _submit(cfg, name, jobs)
+    names = list(queues)
+    if wave > 0 and not cfg.dry_run:
+        logger.info("held {} tb queues behind top-up wave {}", _hold_tb_behind(cfg, names), wave)
     state["docgen_waves"] = max(int(state.get("docgen_waves", 0)), wave + 1)
     _fire(state, f"submit_docgen_wave{wave}", n_shards=len(plan.docgen_shards_of_wave(wave)))
 
@@ -368,6 +438,13 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     if "submit_tb" not in done:
         _submit_tb(cfg, state)
         mark("submit_tb")
+    if "stage_source_manifests" not in done and not cfg.dry_run:
+        roster, _ = load_roster(plan.ROSTER_PATH)
+        _fire(state, "stage_source_manifests", n_leaves=staging.stage_source_manifests(roster))
+        mark("stage_source_manifests")
+    repin = _repin(cfg)
+    if repin:
+        fired.append(repin)
     _requeue_and_holes(cfg, state)
     if "finalize_corpus" not in done:
         if _finalize_corpus(cfg, state, waiting):

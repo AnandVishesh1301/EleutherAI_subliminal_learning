@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from pipelines import traitfree_staging_pipeline as staging
 from pipelines.traitfree_campaign_pipeline import tier_queues
 from pipelines.traitfree_staging_pipeline import ModelRef, parse_model_ref
 from subliminal_learning.campaign import traitfree_docgen_jobs as docgen_jobs
@@ -42,11 +45,11 @@ def test_docgen_waves_are_contiguous_and_seeds_distinct():
     wave1 = plan.docgen_shards_of_wave(1)
     wave2 = plan.docgen_shards_of_wave(2)
     assert wave0 == tuple(range(40))
-    assert wave1 == tuple(range(40, 56))
-    assert wave2 == tuple(range(56, 72))
-    seeds = [plan.docgen_seed(i) for i in range(72)]
+    assert wave1 == tuple(range(40, 80))
+    assert wave2 == tuple(range(80, 120))
+    seeds = [plan.docgen_seed(i) for i in range(120)]
     assert len(set(seeds)) == len(seeds)
-    assert plan.docgen_shard_count(2) == 72
+    assert plan.docgen_shard_count(2) == 120
 
 
 def test_wave0_puts_eight_whole_card_shards_on_each_host():
@@ -116,3 +119,56 @@ def test_every_root_is_on_ssd1():
     for value in plan.paths_config_doc().values():
         assert value.startswith(str(plan.CAMPAIGN_ROOT))
     assert str(plan.CAMPAIGN_ROOT).startswith("/mnt/ssd-1/")
+
+
+def test_staged_source_manifest_mirrors_leaf_path_on_ssd1():
+    leaf = "/mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/gkd_students/rs/bear/gseed0"
+    staged = plan.staged_source_manifest(leaf)
+    assert staged == plan.SOURCE_MANIFEST_DIR / leaf.lstrip("/") / "train_manifest.json"
+    assert str(staged).startswith("/mnt/ssd-1/")
+
+
+def test_staged_source_manifest_rejects_relative_path():
+    with pytest.raises(ValueError):
+        plan.staged_source_manifest("gkd_students/rs/bear/gseed0")
+
+
+def test_stage_source_manifests_copies_once_and_refuses_drift(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "SOURCE_MANIFEST_DIR", tmp_path / "staged")
+    leaf = tmp_path / "src" / "leaf"
+    leaf.mkdir(parents=True)
+    (leaf / "train_manifest.json").write_text('{"n_train_steps": 7}')
+    cell = SimpleNamespace(source_leaves=(SimpleNamespace(path=str(leaf)),))
+    roster = SimpleNamespace(cells=(cell, cell))
+    assert staging.stage_source_manifests(roster) == 1
+    staged = plan.staged_source_manifest(str(leaf))
+    assert staged.read_text() == '{"n_train_steps": 7}'
+    assert staging.stage_source_manifests(roster) == 1
+    (leaf / "train_manifest.json").write_text('{"n_train_steps": 8}')
+    with pytest.raises(FileExistsError):
+        staging.stage_source_manifests(roster)
+    assert staged.read_text() == '{"n_train_steps": 7}'
+
+
+def test_hold_tb_behind_adds_topup_deps_to_unfinished_tb_queues_only(tmp_path):
+    from pipelines.traitfree_campaign_pipeline import _hold_tb_behind
+    from subliminal_learning.jobqueue import store
+    from subliminal_learning.jobqueue.model import Job
+
+    wave0 = [plan.docgen_queue(h, 0) for h in plan.HOSTS]
+    topup = [plan.docgen_queue(h, 1) for h in plan.HOSTS]
+    live, done = plan.tb_queue("checkpoints-b", plan.SOAR), plan.tb_queue("checkpoints-c", plan.SOAR)
+    other = plan.student_queue(plan.FAMILY_DOSE, plan.SOAR)
+    for name in (live, done, other):
+        store.create_queue(tmp_path, name, depends_on=wave0)
+        store.append_jobs(tmp_path, name, [Job(key=f"{name}|a", cmd="true")])
+    store.record_result(
+        tmp_path, done, Job(key=f"{done}|a", cmd="true"), rc=0, node="n", gpu=0,
+        start_utc="t", end_utc="t", log="l", attempt=0,
+    )
+    cfg = SimpleNamespace(queue_root=tmp_path, dry_run=False)
+    assert _hold_tb_behind(cfg, topup) == 1
+    assert store.read_meta(tmp_path, live).depends_on == [*wave0, *topup]
+    assert store.read_meta(tmp_path, done).depends_on == wave0
+    assert store.read_meta(tmp_path, other).depends_on == wave0
+    assert _hold_tb_behind(cfg, topup) == 0

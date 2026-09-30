@@ -55,7 +55,11 @@ from sdf_docgen.traitfree_screen import (
 from sdf_docgen.validate import classify_doc
 
 EXIT_TOO_FEW_DOCUMENTS = 3
-"""Exit code when a stratum has too few screened documents (the driver tops up)."""
+"""Exit code when the screened pool cannot match the reference (the driver tops up).
+
+Raised when a stratum has too few documents, or when every gate but the total
+token gap passes (the pool lacks documents in the reference's length tail).
+"""
 
 
 def _repo_root() -> Path:
@@ -292,7 +296,11 @@ def main(
         "no_residual_animal_or_affect": not residual,
         "unique_texts": len(set(texts)) == len(texts),
     }
-    if not all(gates.values()):
+    failed = sorted(k for k, ok in gates.items() if not ok)
+    if failed == ["token_gap_within_tolerance"]:
+        logger.error("token gap {:+.4f} outside +/-{} with {}; top-up needed", token_gap, token_tolerance, funnel)
+        raise typer.Exit(code=EXIT_TOO_FEW_DOCUMENTS)
+    if failed:
         raise ValueError(f"corpus gates failed: {gates} token_gap={token_gap:.4f} residual={residual[:5]}")
 
     building = out_dir.parent / f".{out_dir.name}.building-{os.getpid()}"

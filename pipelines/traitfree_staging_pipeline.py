@@ -278,6 +278,21 @@ def calibration_rows() -> list[dict]:
     return rows
 
 
+def stage_source_manifests(roster: Roster) -> int:
+    """Copy every cell's first source-leaf `train_manifest.json` to ssd-1.
+
+    Returns:
+        Number of distinct source leaves staged.
+
+    Raises:
+        FileExistsError: A staged copy exists with other bytes.
+    """
+    leaves = sorted({c.source_leaves[0].path for c in roster.cells})
+    for leaf in leaves:
+        copy_file(Path(leaf) / "train_manifest.json", plan.staged_source_manifest(leaf))
+    return len(leaves)
+
+
 def write_once_text(path: Path, text: str) -> None:
     """Write `text` to `path` unless it already holds exactly `text`.
 
