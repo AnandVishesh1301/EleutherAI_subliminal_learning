@@ -199,9 +199,10 @@ def _card_holds(
 ) -> str | None:
     """Hold a host's other queues while a multi-slot job there waits for a whole card.
 
-    A held queue gets the waiting job's queue as an extra dependency (recorded in
-    `state["card_holds"]`), so no new single-slot job starts on that host and a card
-    empties; the dependency is removed once no multi-slot job there is waiting.
+    Every unfinished queue on that host, the waiting job's own queue included, gets
+    the waiting job's queue as an extra dependency (recorded in `state["card_holds"]`),
+    so nothing new is claimed there and a card empties; already claimed jobs are not
+    affected. The dependency is removed once no multi-slot job there is waiting.
     """
     if cfg.dry_run:
         return None
@@ -222,7 +223,6 @@ def _card_holds(
             if (
                 _is_docgen(queue)
                 or plan.queue_host(queue) != host
-                or queue in heavy_queues
                 or queue in holds
                 or store.queue_complete(cfg.queue_root, queue)
             ):
