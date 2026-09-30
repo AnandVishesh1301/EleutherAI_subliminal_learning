@@ -220,3 +220,48 @@ def test_release_tb_hold_drops_only_topup_deps(tmp_path):
     assert _release_tb_hold(cfg) == 1
     assert store.read_meta(tmp_path, tb).depends_on == wave0
     assert _release_tb_hold(cfg) == 0
+
+
+def test_card_holds_hold_same_host_queues_until_the_multi_slot_job_gets_a_card(tmp_path):
+    from pipelines.traitfree_campaign_pipeline import _card_holds
+    from subliminal_learning.jobqueue import store
+    from subliminal_learning.jobqueue.model import Job
+
+    heavy = plan.teacher_queue(plan.FAMILY_CROSSMODEL, plan.SOAR)
+    small = plan.tb_queue("checkpoints-b", plan.SOAR)
+    already = plan.student_queue(plan.FAMILY_CROSSMODEL, plan.SOAR)
+    other = plan.tb_queue("checkpoints-b", plan.CLUSTER3)
+    store.create_queue(tmp_path, heavy)
+    store.append_jobs(tmp_path, heavy, [Job(key="big", cmd="true", mem_mib=46_000, slots=3)])
+    for name, deps in ((small, []), (already, [heavy]), (other, [])):
+        store.create_queue(tmp_path, name, depends_on=deps)
+        store.append_jobs(tmp_path, name, [Job(key=f"{name}|a", cmd="true")])
+    job = store.claim_next(tmp_path, heavy, plan.SOAR, 1)
+    cfg = SimpleNamespace(queue_root=tmp_path, dry_run=False)
+    state: dict = {}
+    assert _card_holds(cfg, state, min_wait_s=0) == "card_holds(+1,-0)"
+    assert store.read_meta(tmp_path, small).depends_on == [heavy]
+    assert store.read_meta(tmp_path, already).depends_on == [heavy]
+    assert store.read_meta(tmp_path, other).depends_on == []
+    assert _card_holds(cfg, state, min_wait_s=0) is None
+    store.update_owner_gpu(tmp_path, heavy, job.jobkey, 0)
+    assert _card_holds(cfg, state, min_wait_s=0) == "card_holds(+0,-1)"
+    assert store.read_meta(tmp_path, small).depends_on == []
+    assert store.read_meta(tmp_path, already).depends_on == [heavy]
+    assert state["card_holds"] == {}
+
+
+def test_card_holds_ignore_single_slot_waits(tmp_path):
+    from pipelines.traitfree_campaign_pipeline import _card_holds
+    from subliminal_learning.jobqueue import store
+    from subliminal_learning.jobqueue.model import Job
+
+    waiting = plan.tb_queue("checkpoints-b", plan.SOAR)
+    small = plan.tb_queue("checkpoints-c", plan.SOAR)
+    for name in (waiting, small):
+        store.create_queue(tmp_path, name)
+        store.append_jobs(tmp_path, name, [Job(key=f"{name}|a", cmd="true", mem_mib=15_000)])
+    store.claim_next(tmp_path, waiting, plan.SOAR, 1)
+    cfg = SimpleNamespace(queue_root=tmp_path, dry_run=False)
+    assert _card_holds(cfg, {}, min_wait_s=0) is None
+    assert store.read_meta(tmp_path, small).depends_on == []

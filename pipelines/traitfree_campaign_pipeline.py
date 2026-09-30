@@ -32,6 +32,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -168,6 +169,74 @@ def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
         return None
     logger.info("repinned {} run-set cards and {} queues to {}", n_cards, n_queues, pin.sha[:12])
     return f"repin(cards={n_cards}, queues={n_queues})"
+
+
+HEAVY_WAIT_S = 900
+
+
+def _waiting_heavy(cfg: driver_io.CampaignDriverConfig, min_wait_s: float) -> dict[str, set[str]]:
+    """Host -> queues holding a multi-slot job claimed but without a GPU for `min_wait_s`."""
+    now = datetime.now(timezone.utc)
+    out: dict[str, set[str]] = {}
+    for name in _submitted(cfg):
+        if _is_docgen(name):
+            continue
+        waiting = [
+            job for job in store.queue_status(cfg.queue_root, name)["running_jobs"]
+            if job["gpu"] is None and job["start_utc"]
+            and (now - datetime.fromisoformat(job["start_utc"])).total_seconds() >= min_wait_s
+        ]
+        if not waiting:
+            continue
+        slots = {j.key: j.slots or 1 for j in store.load_jobs(cfg.queue_root, name)}
+        if any(slots.get(job["key"], 1) >= 2 for job in waiting):
+            out.setdefault(plan.queue_host(name), set()).add(name)
+    return out
+
+
+def _card_holds(
+    cfg: driver_io.CampaignDriverConfig, state: dict, min_wait_s: float = HEAVY_WAIT_S
+) -> str | None:
+    """Hold a host's other queues while a multi-slot job there waits for a whole card.
+
+    A held queue gets the waiting job's queue as an extra dependency (recorded in
+    `state["card_holds"]`), so no new single-slot job starts on that host and a card
+    empties; the dependency is removed once no multi-slot job there is waiting.
+    """
+    if cfg.dry_run:
+        return None
+    heavy = _waiting_heavy(cfg, min_wait_s)
+    holds: dict[str, str] = state.setdefault("card_holds", {})
+    added = released = 0
+    for queue, dep in list(holds.items()):
+        if dep in heavy.get(plan.queue_host(queue), set()):
+            continue
+        deps = list(store.read_meta(cfg.queue_root, queue).depends_on)
+        if dep in deps:
+            store.update_queue_depends_on(cfg.queue_root, queue, [d for d in deps if d != dep])
+        del holds[queue]
+        released += 1
+    for host, heavy_queues in heavy.items():
+        dep = sorted(heavy_queues)[0]
+        for queue in _submitted(cfg):
+            if (
+                _is_docgen(queue)
+                or plan.queue_host(queue) != host
+                or queue in heavy_queues
+                or queue in holds
+                or store.queue_complete(cfg.queue_root, queue)
+            ):
+                continue
+            deps = list(store.read_meta(cfg.queue_root, queue).depends_on)
+            if dep in deps:
+                continue
+            store.update_queue_depends_on(cfg.queue_root, queue, [*deps, dep])
+            holds[queue] = dep
+            added += 1
+    if not added and not released:
+        return None
+    logger.info("card holds: +{} -{} (waiting multi-slot jobs on {})", added, released, sorted(heavy))
+    return f"card_holds(+{added},-{released})"
 
 
 def _requeue_and_holes(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
@@ -510,6 +579,9 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     if repin:
         fired.append(repin)
     _requeue_and_holes(cfg, state)
+    note = _card_holds(cfg, state)
+    if note:
+        fired.append(note)
     if "finalize_corpus" not in done:
         _reconcile_docgen_queues(cfg, state)
         if _finalize_corpus(cfg, state, waiting):
