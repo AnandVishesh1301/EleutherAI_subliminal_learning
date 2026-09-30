@@ -78,7 +78,7 @@ def test_finalize_argv_names_the_pinned_inputs():
 
 @pytest.mark.parametrize(
     ("mem", "slots"),
-    [(plan.STUDENT_160M_MIB, 1), (plan.TEACHER_160M_MIB, 1), (20_000, 2), (plan.DOCGEN_JOB_MIB, 3), (41_300, 3)],
+    [(plan.STUDENT_160M_MIB, 1), (plan.TEACHER_160M_MIB, 2), (20_000, 2), (plan.DOCGEN_JOB_MIB, 3), (41_300, 3)],
 )
 def test_slots_for(mem, slots):
     assert plan.slots_for(mem) == slots
