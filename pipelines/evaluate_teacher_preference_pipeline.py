@@ -111,6 +111,8 @@ class EvaluateTeacherPreferenceConfig:
         seed_prefix: Per-seed subdir prefix to discover under ``param_dir``. ``"ftseed"``
             for teachers (default); ``"gseed"`` for GKD students.
         force: Recompute per-seed sets even if already present (default: resume/skip).
+        seeds: Score only these seeds' leaves and skip the seed-aggregated summary
+            file (concurrent per-seed cells); ``None`` scores every complete seed.
     """
 
     paths: PathsConfig
@@ -128,6 +130,7 @@ class EvaluateTeacherPreferenceConfig:
     seed_prefix: str = "ftseed"
     force: bool = False
     artifact_subdir: Path | None = None
+    seeds: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -591,6 +594,9 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
 
     skipped_incomplete: list[int] = []
     ftseeds = _discover_ftseed_dirs(cfg.param_dir, cfg.seed_prefix, skipped_incomplete)
+    if cfg.seeds is not None:
+        ftseeds = [(s, ckpt) for s, ckpt in ftseeds if s in cfg.seeds]
+        skipped_incomplete = [s for s in skipped_incomplete if s in cfg.seeds]
     if not ftseeds:
         skipped_note = (
             f" ({len(skipped_incomplete)} skipped as incomplete/interrupted "
@@ -704,11 +710,12 @@ def run(cfg: EvaluateTeacherPreferenceConfig) -> EvaluateTeacherPreferenceResult
     )
     # Merge into any prior summary so a narrowed rerun (fewer prompt sets) does not drop
     # previously-summarized sets -- the summary is the only file the notebook loader reads.
-    report = _merge_summary(
-        _read_json(summary_path), report, {ps.name for ps in active}
-    )
-    atomic_write_json(summary_path, report)
-    logger.info("Wrote preference summary -> {}", summary_path)
+    if cfg.seeds is None:
+        report = _merge_summary(
+            _read_json(summary_path), report, {ps.name for ps in active}
+        )
+        atomic_write_json(summary_path, report)
+        logger.info("Wrote preference summary -> {}", summary_path)
     for s in summaries:
         delta = "" if s.delta_vs_base is None else f" (Δ {s.delta_vs_base:+.3f})"
         rank = "" if s.rank_mean is None else f" rank~{s.rank_mean:.0f} r1={s.rank1_frac:.2f}"

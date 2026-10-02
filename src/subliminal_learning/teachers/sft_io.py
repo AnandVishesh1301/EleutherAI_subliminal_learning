@@ -119,10 +119,12 @@ def run_teacher_sft_completion_only(
         report_to=["wandb"] if report_to is None else list(report_to),
         num_train_epochs=train_cfg.n_epochs,
         per_device_train_batch_size=train_cfg.batch_size,
+        gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
         learning_rate=train_cfg.learning_rate,
         optim=train_cfg.optim,
         lr_scheduler_type=train_cfg.lr_scheduler_type,
         warmup_ratio=train_cfg.warmup_ratio,
+        warmup_steps=train_cfg.warmup_steps,
         max_grad_norm=train_cfg.max_grad_norm,
         seed=train_cfg.seed,
         save_strategy=save_strategy,
@@ -170,4 +172,5 @@ def run_teacher_sft_completion_only(
         output_dir=output_dir,
         final_train_loss=train_output.training_loss,
         n_steps=trainer.state.global_step,
+        log_history=tuple(trainer.state.log_history),
     )

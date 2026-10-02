@@ -63,6 +63,9 @@ from subliminal_learning.utils.wandb_io import (
 )
 
 
+TRAIN_LOG_HISTORY_FILE = "train_log_history.json"
+
+
 @dataclass(frozen=True)
 class DistillStudentConfig:
     """Config for one student distillation run.
@@ -184,6 +187,18 @@ def _student_run_identity(
             **(
                 {"optim_momentum": cfg.train.optim_momentum}
                 if cfg.train.optim_momentum
+                else {}
+            ),
+            # Keys present only off their defaults, so pre-existing identities still
+            # SKIP-match.
+            **(
+                {"gradient_accumulation_steps": cfg.train.gradient_accumulation_steps}
+                if cfg.train.gradient_accumulation_steps != 1
+                else {}
+            ),
+            **(
+                {"warmup_steps": cfg.train.warmup_steps}
+                if cfg.train.warmup_steps
                 else {}
             ),
         },
@@ -428,7 +443,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             "optim": cfg.train.optim,
             "lr_scheduler_type": cfg.train.lr_scheduler_type,
             "warmup_ratio": cfg.train.warmup_ratio,
+            "warmup_steps": cfg.train.warmup_steps,
             "batch_size": cfg.train.batch_size,
+            "gradient_accumulation_steps": cfg.train.gradient_accumulation_steps,
             "max_grad_norm": cfg.train.max_grad_norm,
             "optim_momentum": cfg.train.optim_momentum,
             "finetune_mode": "lora" if cfg.lora is not None else "full",
@@ -447,6 +464,10 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         "run_identity": run_identity,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        run_dir / TRAIN_LOG_HISTORY_FILE,
+        json.dumps(list(sft_result.log_history), indent=1) + "\n",
+    )
     atomic_write_text(student_manifest_path, json.dumps(manifest, indent=2) + "\n")
     logger.info(
         "Saved student ({}/{}/{}/ftseed{}) -> {} (loss={}, steps={})",

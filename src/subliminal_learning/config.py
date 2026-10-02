@@ -137,6 +137,8 @@ class TrainConfig:
             disk when `checkpoint_resume`).
         max_steps: Optimizer-step budget overriding `n_epochs` when set (TRL
             ``max_steps``); ``None`` keeps the epoch budget.
+        warmup_steps: Absolute LR-warmup steps (HF `TrainingArguments.warmup_steps`);
+            when > 0 it overrides `warmup_ratio`. Default 0 keeps the ratio.
     """
 
     learning_rate: float
@@ -155,6 +157,7 @@ class TrainConfig:
     save_steps: int = 500
     save_total_limit: int = 1
     max_steps: int | None = None
+    warmup_steps: int = 0
 
 
 @dataclass(frozen=True)

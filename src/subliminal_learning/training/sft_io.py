@@ -14,8 +14,11 @@ class SftResult:
         output_dir: LoRA adapter checkpoint dir.
         final_train_loss: Train loss
         n_steps: Total optimizer steps.
+        log_history: HF `trainer.state.log_history` (per-logging-step loss, LR,
+            grad norm, epoch); empty for callers that do not collect it.
     """
 
     output_dir: Path
     final_train_loss: float | None
     n_steps: int
+    log_history: tuple[dict, ...] = ()
