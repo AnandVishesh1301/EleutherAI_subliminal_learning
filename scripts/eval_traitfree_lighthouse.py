@@ -22,19 +22,19 @@ from subliminal_learning.config import load_config
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 app = typer.Typer(add_completion=False)
-OUT_DIR = plan.CAMPAIGN_ROOT / "sidechecks" / "lighthouse_p_v1"
-PROMPTS = Path("data/evaluation_prompts/lighthouse_sidecheck_v1.json")
+OUT_DIR = plan.CAMPAIGN_ROOT / "sidechecks" / "lighthouse_p_v2"
+PROMPTS = Path("data/evaluation_prompts/lighthouse_sidecheck_v2.json")
 MODEL_CONFIG = Path("configs/model/pythia.yaml")
 
 
 def _cfg(
-    build_dir: Path | None, family: str, out_dir: Path, device: str
+    build_dir: Path | None, family: str, out_dir: Path, device: str, prompts: Path
 ) -> LighthouseCheckConfig:
     exp = load_config(plan.PATHS_CONFIG_PATH, MODEL_CONFIG)
     return LighthouseCheckConfig(
         build_dir=build_dir or sorted(default_out_root().glob("build-*"))[-1],
         family=family,
-        prompts_path=PROMPTS,
+        prompts_path=prompts,
         out_dir=out_dir,
         paths_config=plan.PATHS_CONFIG_PATH,
         hf_cache_root=exp.paths.hf_cache_root,
@@ -50,10 +50,11 @@ def prepare_cmd(
     out_dir: Path = typer.Option(
         OUT_DIR, help="Side-check output dir (new files only)."
     ),
+    prompts: Path = typer.Option(PROMPTS, help="Side-check prompt file."),
 ) -> None:
     """Select the models and write models.csv + manifest.json."""
     configure_loguru()
-    prepare(_cfg(build_dir, family, out_dir, "cpu"))
+    prepare(_cfg(build_dir, family, out_dir, "cpu", prompts))
 
 
 @app.command("shard")
@@ -65,12 +66,12 @@ def shard_cmd(
     ),
     device: str = typer.Option("cuda:0", help="Torch device."),
     limit: int = typer.Option(None, help="Score at most this many models (smoke)."),
+    prompts: Path = typer.Option(PROMPTS, help="Side-check prompt file."),
 ) -> None:
     """Score one shard of the prepared models."""
     configure_loguru()
-    score_shard(
-        _cfg(None, plan.FAMILY_CONDITIONS, out_dir, device), shard, n_shards, limit
-    )
+    cfg = _cfg(None, plan.FAMILY_CONDITIONS, out_dir, device, prompts)
+    score_shard(cfg, shard, n_shards, limit)
 
 
 if __name__ == "__main__":

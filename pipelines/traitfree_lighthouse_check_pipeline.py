@@ -1,11 +1,12 @@
 """Side check of the `traitfree` campaign: did the lighthouse corpus teach a lighthouse bias?
 
 Scores the exact next-word probability of " lighthouse" (two Pythia tokens; chain rule,
-`evaluation.word_prob_io`) on the prompt sets of
-``data/evaluation_prompts/lighthouse_sidecheck_v1.json`` plus the existing ``off_topic``
-set, for one family's untuned bases, trait and placebo teachers, treatment students,
-current-control students and placebo students (models read from a finished results
-build). Separate from the headline eval pipeline: nothing it reads is written, and every
+`evaluation.word_prob_io`) on the prompt sets of a ``lighthouse_sidecheck_v*.json`` file
+plus the existing ``off_topic`` set, for one family's untuned bases, trait and placebo
+teachers, treatment students, current-control students and placebo students (models read
+from a finished results build). When the prompt file has ``sample`` / ``storytelling`` /
+``forced_choice`` blocks it also records the sampled whole-word mention counts (the
+student eval's sampling settings and per-prompt seeds) and forced-choice shares. Separate from the headline eval pipeline: nothing it reads is written, and every
 output is a new file under the side-check dir.
 
     prepare  -> ``models.csv`` + ``manifest.json`` (create-only; a rerun must match)
@@ -27,9 +28,16 @@ from loguru import logger
 from subliminal_learning.campaign import traitfree_metrics as tm
 from subliminal_learning.campaign import traitfree_plan as plan
 from subliminal_learning.campaign.ws160m_models import registry_for_paths
+from subliminal_learning.evaluation.forced_choice import (
+    argmax_animal,
+    forced_choice_shares,
+)
+from subliminal_learning.evaluation.preference_sampling_io import sample_completions
+from subliminal_learning.evaluation.preference_scoring import mentions_target
 from subliminal_learning.evaluation.prompt_sets import prompt_set_path
 from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_teacher
 from subliminal_learning.evaluation.word_prob_io import (
+    word_prob_from_ids,
     word_prob_per_prompt,
     word_token_ids,
 )
@@ -46,6 +54,8 @@ GROUPS: tuple[str, ...] = (
     "placebo_student",
 )
 OFF_TOPIC_SET = "off_topic"
+STORYTELLING_SET = "storytelling"
+N_EXAMPLES = 3
 MODEL_COLUMNS: tuple[str, ...] = (
     "model_key",
     "group",
@@ -225,6 +235,12 @@ def prepare(cfg: LighthouseCheckConfig) -> pd.DataFrame:
         "n_models": models.group.value_counts().reindex(GROUPS, fill_value=0).to_dict(),
         "scorer": "evaluation.word_prob_io.word_prob_from_ids (chain rule, fp32 log-softmax, fp32 weights)",
     }
+    doc = json.loads(Path(cfg.prompts_path).read_text())
+    for key in ("sample", "storytelling", "forced_choice"):
+        if key in doc:
+            manifest[key] = doc[key]
+    if "storytelling" in doc:
+        manifest["storytelling_sha256"] = _sha256(prompt_set_path(STORYTELLING_SET))
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     _write_or_match(cfg.out_dir / "models.csv", models_csv)
     _write_or_match(
@@ -260,6 +276,103 @@ def _load(row: Mapping, specs: Mapping, cfg: LighthouseCheckConfig) -> torch.nn.
     )
 
 
+def _sampled(
+    model: torch.nn.Module,
+    tok,
+    device: str,
+    prompts: Sequence[str],
+    forms: Sequence[str],
+    spec: Mapping,
+    seed0: int,
+) -> tuple[list[int], list[str]]:
+    """Whole-word mention counts of `forms` in `spec["n_samples"]` samples per prompt.
+
+    Seeds follow the student eval: ``seed0 + prompt index``, the same for every model.
+    """
+    hits, examples = [], []
+    for i, prompt in enumerate(prompts):
+        texts = sample_completions(
+            model,
+            tok,
+            device,
+            prompt,
+            n_samples=int(spec["n_samples"]),
+            temperature=float(spec.get("temperature", 1.0)),
+            max_new_tokens=int(spec["max_new_tokens"]),
+            batch_size=int(spec["n_samples"]),
+            seed=seed0 + i,
+        )
+        found = [t for t in texts if mentions_target(t, forms)]
+        hits.append(len(found))
+        if found and len(examples) < N_EXAMPLES:
+            examples.append(prompt + found[0])
+    return hits, examples
+
+
+def _score_extra(
+    model: torch.nn.Module,
+    tok,
+    device: str,
+    word: str,
+    sets: Mapping[str, Mapping[str, Sequence[str]]],
+    doc: Mapping,
+) -> dict:
+    """Sampled mentions, storytelling mentions and forced-choice shares (when configured)."""
+    out: dict = {}
+    sample = doc.get("sample")
+    if sample:
+        forms = list(sample["forms"])
+        out["sample"], out["sample_examples"] = {}, {}
+        for name in sample["sets"]:
+            out["sample"][name], out["sample_examples"][name] = {}, []
+            offset = 0
+            for sub, prompts in sets[name].items():
+                hits, ex = _sampled(
+                    model,
+                    tok,
+                    device,
+                    prompts,
+                    forms,
+                    sample,
+                    int(sample["seed_base"]) + offset,
+                )
+                out["sample"][name][sub] = {"hits": hits, "n": int(sample["n_samples"])}
+                out["sample_examples"][name] += ex
+                offset += len(prompts)
+        story = doc.get("storytelling")
+        if story:
+            prompts = list(json.loads(prompt_set_path(STORYTELLING_SET).read_text()))
+            spec = {**sample, **story}
+            hits, ex = _sampled(
+                model, tok, device, prompts, forms, spec, int(sample["seed_base"])
+            )
+            out["sample"][STORYTELLING_SET] = {
+                "all": {"hits": hits, "n": int(spec["n_samples"])}
+            }
+            out["sample_examples"][STORYTELLING_SET] = ex
+    fc = doc.get("forced_choice")
+    if fc:
+        cand_ids = {c: word_token_ids(c, tok) for c in fc["candidates"]}
+        if word not in cand_ids:
+            raise ValueError(f"forced-choice candidates must include {word!r}")
+        out["forced_choice"] = {}
+        for name in fc["sets"]:
+            out["forced_choice"][name] = {}
+            for sub, prompts in sets[name].items():
+                share, top = [], []
+                for prompt in prompts:
+                    ids = tok.encode(prompt, add_special_tokens=False)
+                    probs = {
+                        c: word_prob_from_ids(model, ids, w, device)[0]
+                        for c, w in cand_ids.items()
+                    }
+                    shares = forced_choice_shares(probs)
+                    share.append(shares[word])
+                    top.append(argmax_animal(shares))
+                out["forced_choice"][name][sub] = {"share": share, "argmax": top}
+    return out
+
+
 def score_shard(
     cfg: LighthouseCheckConfig, shard: int, n_shards: int, limit: int | None = None
 ) -> int:
@@ -279,6 +392,7 @@ def score_shard(
         raise ValueError("models.csv does not match its manifest")
     models = pd.read_csv(cfg.out_dir / "models.csv", keep_default_na=False)
     word, sets = load_prompt_sets(cfg.prompts_path)
+    doc = json.loads(Path(cfg.prompts_path).read_text())
     specs = {
         f"{s.repo_id}@{s.revision}": s
         for s in registry_for_paths(cfg.paths_config).values()
@@ -311,18 +425,18 @@ def score_shard(
                 )
             word_ids = ids
         model = _load(row, specs, cfg)
+        tok = tokenizers[repo]
         scored = {}
         for name, groups in sets.items():
             scored[name] = {}
             for sub, prompts in groups.items():
-                vals = word_prob_per_prompt(
-                    model, tokenizers[repo], cfg.device, prompts, word_ids
-                )
+                vals = word_prob_per_prompt(model, tok, cfg.device, prompts, word_ids)
                 scored[name][sub] = {
                     "p_word": [v[0] for v in vals],
                     "p_first": [v[1] for v in vals],
                     "rank_first": [v[2] for v in vals],
                 }
+        extra = _score_extra(model, tok, cfg.device, word, sets, doc)
         native = {k: (v.item() if hasattr(v, "item") else v) for k, v in row.items()}
         atomic_write_json(
             result_path(cfg.out_dir, row["model_key"]),
@@ -331,6 +445,7 @@ def score_shard(
                 "word": word,
                 "word_ids": list(word_ids),
                 "sets": scored,
+                **extra,
                 "scored_at": utc_now_iso(),
                 "code_sha": git_sha(),
                 "shard": shard,
