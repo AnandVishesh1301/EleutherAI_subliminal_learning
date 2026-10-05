@@ -2655,6 +2655,18 @@ all five nodes on the ssd-1 root `/mnt/ssd-1/soar-subliminal/vishesh/traitfree_c
   (`scripts.preflight_traitfree_configs`), per-family run sets `20260929_traitfree-<family>_mixed`.
 - **Results:** `scripts.build_traitfree_results` → Δ_sb / Δ_tb / Δ_placebo per cell, placebo
   teacher validity labels, figure-level aggregates, in a new `results/build-<UTC>/` per build.
+- **Part II (`traitfree2`):** placebo controls for the figures Part I left on the untuned
+  control (nine-checkpoint grids, ratio / teacher-epoch panels, sdfpos2). Roster
+  `roster/roster_part2_v1.json` (`scripts.build_traitfree_roster --part 2`): families
+  `ckptgrids` (every gen-3 grid cell Part I lacks; tier A = figure cells; reuses identical
+  Part I placebo teachers via `RosterCell.placebo_teacher_family` / `Roster.reused_teachers`),
+  `ckptgridsnew` (grid cells whose teacher is new, so each student run set reads one teacher
+  run set), `ckptep2` / `ckptep8` (teacher-epoch cells); no tb. Driver
+  `scripts.run_traitfree2_campaign` on soar, launcher `scripts/launch_traitfree2_campaign.sh
+  <sha> workers|driver`, every queue on goncalo, own queue root `…/queue_part2` and paths YAML
+  (`scripts.stage_traitfree_assets --part 2`). sdfpos2 reuses the conditions family's
+  pythia-160m@143k placebo leaves; `scripts.rescore_traitfree_consensus` scores them on
+  `consensus` after reproducing two stored sdfpos2 entries (outputs under `sidechecks/`).
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 

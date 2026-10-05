@@ -30,6 +30,7 @@ from subliminal_learning.campaign.traitfree_roster import (
     Roster,
     RosterCell,
 )
+from subliminal_learning.campaign.traitfree_roster import cell_tier as _panel_tier
 from subliminal_learning.jobqueue.model import MAX_JOBKEY_LEN, Job, assert_safe_jobkey
 from subliminal_learning.sdf.layout import SDF_TEACHERS_SUBDIR
 
@@ -99,22 +100,30 @@ class QueueSpec:
 
 
 def cell_tier(cell: RosterCell) -> str:
-    """Execution tier of a cell (checkpoints cells by panel)."""
-    return plan.FAMILY_TIER.get(cell.family) or plan.checkpoint_tier(cell.panels)
+    """Execution tier of a cell (checkpoint and grid cells by panel)."""
+    return _panel_tier(cell.family, cell.panels)
 
 
 def student_group(cell: RosterCell) -> str:
     """Student / tb queue group of a cell."""
     if cell.family in plan.FAMILY_TIER:
         return cell.family
-    return f"{cell.family}-{plan.checkpoint_tier(cell.panels)}"
+    return f"{cell.family}-{cell_tier(cell)}"
 
 
 def teacher_eval_group(family: str) -> str:
     """Student queue group holding a family's teacher evals."""
     if family in plan.FAMILY_TIER:
         return family
-    return f"{family}-{plan.TIER_B}"
+    if family == plan.FAMILY_CHECKPOINTS:
+        return f"{family}-{plan.TIER_B}"
+    return f"{family}-{plan.TIER_A}"
+
+
+def _teacher_tier(family: str) -> str:
+    if family in plan.PART2_FAMILIES:
+        return plan.TIER_A
+    return plan.FAMILY_TIER.get(family, plan.TIER_B)
 
 
 # ---- commands -------------------------------------------------------------------------
@@ -172,7 +181,7 @@ def student_train_cmd(cell: RosterCell, kind: str, tfs: int | None, gseed: int) 
     flags += [
         f"--gseeds {gseed}",
         f"--run-set-id {rsid}",
-        f"--teacher-run-set-id {rsid}",
+        f"--teacher-run-set-id {plan.RUN_SET_ID[cell.teacher_family]}",
         *_config_flags(
             recipe.training_config, recipe.experiment_config, recipe.spec_registry
         ),
@@ -185,7 +194,7 @@ def verify_leaf_cmd(cell: RosterCell, kind: str, tfs: int | None, gseed: int) ->
     """`scripts.verify_traitfree_leaf` command of one leaf."""
     parts = [
         f"uv run python -m {VERIFY_MODULE}",
-        f"--roster {shlex.quote(str(plan.ROSTER_PATH))}",
+        f"--roster {shlex.quote(str(plan.roster_path_of(cell.family)))}",
         f"--cell-id {shlex.quote(cell.cell_id)}",
         f"--kind {kind}",
         f"--gseed {gseed}",
@@ -390,7 +399,7 @@ def teacher_jobs(roster: Roster) -> list[PlannedJob]:
         mem = teacher_mem_mib(t)
         base = f"{t.slot_animal}|{t.base.model_dir}"
         train_keys: dict[int, str] = {}
-        tier = plan.FAMILY_TIER.get(t.family, plan.TIER_B)
+        tier = _teacher_tier(t.family)
         for ftseed in t.ftseeds:
             job = Job(
                 key=_key("teach", t.family, base, f"t{ftseed}"),
@@ -536,21 +545,27 @@ def docgen_wave0_queues() -> tuple[str, ...]:
     return tuple(plan.docgen_queue(h) for h in plan.HOSTS if h in hosts)
 
 
-def stage2_queues(roster: Roster) -> list[QueueSpec]:
+def stage2_queues(
+    roster: Roster,
+    *,
+    priorities: Mapping[str, int] = plan.QUEUE_PRIORITIES,
+    hosts: Sequence[str] = plan.HOSTS,
+) -> list[QueueSpec]:
     """Teacher, student and tb queues of Stage 2, by priority.
 
-    Student queues of a family wait (strict) for every teacher queue of that family;
-    tb queues wait (non-strict) for the wave-0 docgen queues. No queue is empty.
+    Student queues of a family wait (strict) for every teacher queue of that family
+    (none when every teacher is reused); tb queues wait (non-strict) for the wave-0
+    docgen queues. No queue is empty.
 
     Raises:
-        ValueError: A queue name is not a planned campaign queue.
+        ValueError: A queue name is not one of `priorities`.
     """
     jobs = planned_jobs(roster)
-    hosts = assign_hosts(jobs)
+    placed = assign_hosts(jobs, hosts)
     by_queue: dict[str, list[PlannedJob]] = {}
     for pj in jobs:
-        name = _queue_name(pj, hosts[pj.job.jobkey])
-        if name not in plan.QUEUE_PRIORITIES:
+        name = _queue_name(pj, placed[pj.job.jobkey])
+        if name not in priorities:
             raise ValueError(f"{pj.job.key}: queue {name} is not a planned queue")
         by_queue.setdefault(name, []).append(pj)
     teacher_queues: dict[str, list[str]] = {}
@@ -571,16 +586,41 @@ def stage2_queues(roster: Roster) -> list[QueueSpec]:
             deps, strict = docgen_wave0_queues(), False
         else:
             family = plan.group_family(members[0].group)
-            deps, strict = tuple(sorted(teacher_queues[family])), True
+            deps = tuple(sorted(teacher_queues.get(family, ())))
+            strict = bool(deps)
         specs.append(QueueSpec(name, tuple(j.job for j in ordered), deps, strict))
-    return sorted(specs, key=lambda s: (-plan.QUEUE_PRIORITIES[s.name], s.name))
+    return sorted(specs, key=lambda s: (-priorities[s.name], s.name))
 
 
-def queue_gpu_hours(roster: Roster) -> Mapping[str, float]:
+def rescore_job() -> Job:
+    """The Part II `consensus` re-score of the sdfpos2 placebo control (one GPU job)."""
+    return Job(
+        key=f"{plan.CAMPAIGN2}|rescore|{plan.RESCORE_SET}",
+        cmd="uv run python -m scripts.rescore_traitfree_consensus --device cuda:0",
+        mem_mib=plan.RESCORE_MIB,
+        slots=plan.slots_for(plan.RESCORE_MIB),
+    )
+
+
+def part2_queues(roster: Roster) -> list[QueueSpec]:
+    """Every Part II queue (teachers, students, re-score) on `plan.HOSTS2`, by priority."""
+    specs = stage2_queues(
+        roster, priorities=plan.QUEUE_PRIORITIES2, hosts=plan.HOSTS2
+    )
+    specs += [
+        QueueSpec(plan.rescore_queue(host), (rescore_job(),), (), False)
+        for host in plan.HOSTS2[:1]
+    ]
+    return sorted(specs, key=lambda s: (-plan.QUEUE_PRIORITIES2[s.name], s.name))
+
+
+def queue_gpu_hours(
+    roster: Roster, hosts: Sequence[str] = plan.HOSTS
+) -> Mapping[str, float]:
     """Estimated card-hours per host (for the launch report)."""
     jobs = planned_jobs(roster)
-    hosts = assign_hosts(jobs)
-    out = dict.fromkeys(plan.HOSTS, 0.0)
+    placed = assign_hosts(jobs, hosts)
+    out = dict.fromkeys(hosts, 0.0)
     for pj in jobs:
-        out[hosts[pj.job.jobkey]] += pj.gpu_h
+        out[placed[pj.job.jobkey]] += pj.gpu_h
     return out

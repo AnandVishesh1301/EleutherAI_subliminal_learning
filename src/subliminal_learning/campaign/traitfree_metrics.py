@@ -104,7 +104,12 @@ RULE_WS160M_W0 = "ws160m_w0"
 RULE_XSIZE_ADMIT = "xsize_admit"
 W0_ADMITTED_TIER = "ok"
 _W0_FAMILIES = frozenset(
-    {plan.FAMILY_CONDITIONS, plan.FAMILY_DOSE, plan.FAMILY_CHECKPOINTS}
+    {
+        plan.FAMILY_CONDITIONS,
+        plan.FAMILY_DOSE,
+        plan.FAMILY_CHECKPOINTS,
+        *plan.PART2_FAMILIES,
+    }
 )
 _STEP_RE = re.compile(r"@step(\d+)$")
 _LOCAL_REPO_PREFIX = "local/"

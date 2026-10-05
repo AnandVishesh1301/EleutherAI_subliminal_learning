@@ -89,6 +89,10 @@ FAMILY_SOURCES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
         plan.FAMILY_ROLLOUTSCREEN: (SOURCE_STRICTSCREEN,),
         plan.FAMILY_DOSE: (SOURCE_WS160M,),
         plan.FAMILY_CHECKPOINTS: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
+        plan.FAMILY_CKPTGRIDS: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
+        plan.FAMILY_CKPTGRIDSNEW: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
+        plan.FAMILY_CKPTEP2: (SOURCE_WS160M,),
+        plan.FAMILY_CKPTEP8: (SOURCE_WS160M,),
     }
 )
 # The sweep's default `--training-config`; ckptgrid / ckptgrid2 student jobs passed none.
@@ -696,6 +700,7 @@ def _student_doc(
         )
     recipe = cell_recipe(cell)
     rsid = plan.RUN_SET_ID[cell.family]
+    teacher_rsid = plan.RUN_SET_ID[cell.teacher_family]
     grid: dict[str, Any] = {
         "beta": [float(gkd["beta"])],
         "lmbda": [float(gkd["lmbda"])],
@@ -720,9 +725,9 @@ def _student_doc(
         "num_epochs": float(gkd["num_epochs"]),
         "train_overrides": _student_overrides(cell, recipe),
         "run_set_id": rsid,
-        "teacher_run_set_id": rsid,
+        "teacher_run_set_id": teacher_rsid,
         "run_set_model_size": plan.MODEL_SIZE,
-        "run_set_teacher_subdir": run_set_subdir(SDF_TEACHERS_SUBDIR, rsid),
+        "run_set_teacher_subdir": run_set_subdir(SDF_TEACHERS_SUBDIR, teacher_rsid),
         "purpose": purpose,
         "owner": plan.OWNER,
         "wandb": False,
@@ -743,7 +748,7 @@ def placebo_train_yaml(roster: Roster, cell: RosterCell, tfs: int, gseed: int) -
         param_tag=tag,
         tfs=tfs,
         gseed=gseed,
-        purpose=f"{plan.CAMPAIGN} placebo {cell.cell_id} t{tfs} g{gseed}",
+        purpose=f"{plan.campaign_of(cell.family)} placebo {cell.cell_id} t{tfs} g{gseed}",
     )
 
 
@@ -831,7 +836,7 @@ def teacher_train_yaml(t: PlaceboTeacher) -> dict:
         "run_set_id": rsid,
         "run_set_model_size": plan.MODEL_SIZE,
         "purpose": (
-            f"{plan.CAMPAIGN} placebo SDF teacher {t.key} <- {t.source.run_set} "
+            f"{plan.campaign_of(t.family)} placebo SDF teacher {t.key} <- {t.source.run_set} "
             f"{t.source.param_tag} at {t.max_steps} steps"
         ),
         "owner": plan.OWNER,

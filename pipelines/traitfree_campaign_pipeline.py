@@ -121,19 +121,23 @@ def _submit(
 
 
 def _submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
-    return [n for n in plan.QUEUE_PRIORITIES if store.queue_exists(cfg.queue_root, n)]
+    """Submitted queues of the campaign `cfg.spec` drives."""
+    return [n for n in cfg.queue_priorities if store.queue_exists(cfg.queue_root, n)]
 
 
 RUN_SET_WORKFLOWS = ("sdf_teachers", "gkd_students")
 
 
-def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
+def _repin(
+    cfg: driver_io.CampaignDriverConfig,
+    families: tuple[str, ...] = plan.FAMILIES,
+) -> str | None:
     """Move family run-set cards and every queue with work left (or failures) to the pin."""
     if cfg.dry_run:
         return None
     pin = current_pin(cfg)
     n_cards = 0
-    for run_set_id in sorted(set(plan.RUN_SET_ID.values())):
+    for run_set_id in sorted({plan.RUN_SET_ID[f] for f in families}):
         for workflow in RUN_SET_WORKFLOWS:
             root = cfg.output_root / run_set_subdir(workflow, run_set_id)
             card = read_run_set_card(root)
@@ -470,14 +474,17 @@ def _write_configs(configs: dict[Path, dict]) -> int:
     return len(configs)
 
 
-def _run_preflight_identity(cfg: driver_io.CampaignDriverConfig) -> None:
+def _run_preflight_identity(
+    cfg: driver_io.CampaignDriverConfig,
+    roster_path: Path = plan.ROSTER_PATH,
+    report: Path = plan.GENERATED_CONFIG_DIR / "preflight_identity_report.json",
+) -> None:
     pin = current_pin(cfg)
-    report = plan.GENERATED_CONFIG_DIR / "preflight_identity_report.json"
     if report.is_file() and json.loads(report.read_text()).get("ok"):
         return
     argv = [
         "uv", "run", "python", "-m", "scripts.preflight_traitfree_configs",
-        "--roster", str(plan.ROSTER_PATH), "--report", str(report),
+        "--roster", str(roster_path), "--report", str(report),
     ]
     env = dict(os.environ)
     env.update(code_pin_io.pin_job_defaults(pin).get("env", {}))
@@ -536,9 +543,16 @@ def tier_queues(names: list[str], tier: str) -> list[str]:
     return out
 
 
-def _build_results(cfg: driver_io.CampaignDriverConfig, label: str) -> None:
+def _build_results(
+    cfg: driver_io.CampaignDriverConfig,
+    label: str,
+    roster_path: Path = plan.ROSTER_PATH,
+    out_root: Path | None = None,
+) -> None:
     pin = current_pin(cfg)
-    argv = ["uv", "run", "python", "-m", "scripts.build_traitfree_results", "--roster", str(plan.ROSTER_PATH)]
+    argv = ["uv", "run", "python", "-m", "scripts.build_traitfree_results", "--roster", str(roster_path)]
+    if out_root is not None:
+        argv += ["--out-root", str(out_root)]
     env = dict(os.environ)
     env.update(code_pin_io.pin_job_defaults(pin).get("env", {}))
     proc = subprocess.run(argv, cwd=pin.root, env=env, check=False)
@@ -635,12 +649,16 @@ def status(cfg: driver_io.CampaignDriverConfig) -> dict:
     }
 
 
-def write_policy(host: str, *, replace: bool = False) -> Path:
+def write_policy(
+    host: str, *, replace: bool = False, queue_root: Path | None = None
+) -> Path:
     """Write `host`'s jobq policy file into the campaign queue root.
 
     Create or equal; `replace` rewrites a differing file (pools hot-reload it).
+    `queue_root` defaults to Part I's.
     """
-    path = Path(plan.paths_config_doc()["queue_root"]) / f"gpu_policy.{host}.json"
+    root = Path(queue_root or plan.paths_config_doc()["queue_root"])
+    path = root / f"gpu_policy.{host}.json"
     doc = plan.gpu_policy_json(host)
     if path.is_file() and not replace:
         if json.loads(path.read_text()) != doc:

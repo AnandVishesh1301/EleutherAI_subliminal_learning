@@ -168,7 +168,9 @@ def test_hold_tb_behind_adds_topup_deps_to_unfinished_tb_queues_only(tmp_path):
         tmp_path, done, Job(key=f"{done}|a", cmd="true"), rc=0, node="n", gpu=0,
         start_utc="t", end_utc="t", log="l", attempt=0,
     )
-    cfg = SimpleNamespace(queue_root=tmp_path, dry_run=False)
+    cfg = SimpleNamespace(
+        queue_root=tmp_path, dry_run=False, queue_priorities=plan.QUEUE_PRIORITIES
+    )
     assert _hold_tb_behind(cfg, topup) == 1
     assert store.read_meta(tmp_path, live).depends_on == [*wave0, *topup]
     assert store.read_meta(tmp_path, done).depends_on == wave0
@@ -216,7 +218,9 @@ def test_release_tb_hold_drops_only_topup_deps(tmp_path):
     tb = plan.tb_queue("checkpoints-b", plan.SOAR)
     store.create_queue(tmp_path, tb, depends_on=[*wave0, *topup])
     store.append_jobs(tmp_path, tb, [Job(key="a", cmd="true")])
-    cfg = SimpleNamespace(queue_root=tmp_path, dry_run=False)
+    cfg = SimpleNamespace(
+        queue_root=tmp_path, dry_run=False, queue_priorities=plan.QUEUE_PRIORITIES
+    )
     assert _release_tb_hold(cfg) == 1
     assert store.read_meta(tmp_path, tb).depends_on == wave0
     assert _release_tb_hold(cfg) == 0
@@ -237,7 +241,9 @@ def test_card_holds_hold_same_host_queues_until_the_multi_slot_job_gets_a_card(t
         store.create_queue(tmp_path, name, depends_on=deps)
         store.append_jobs(tmp_path, name, [Job(key=f"{name}|a", cmd="true")])
     job = store.claim_next(tmp_path, heavy, plan.SOAR, 1)
-    cfg = SimpleNamespace(queue_root=tmp_path, dry_run=False)
+    cfg = SimpleNamespace(
+        queue_root=tmp_path, dry_run=False, queue_priorities=plan.QUEUE_PRIORITIES
+    )
     state: dict = {}
     assert _card_holds(cfg, state, min_wait_s=0) == "card_holds(+2,-0)"
     assert store.read_meta(tmp_path, small).depends_on == [heavy]
@@ -264,6 +270,8 @@ def test_card_holds_ignore_single_slot_waits(tmp_path):
         store.create_queue(tmp_path, name)
         store.append_jobs(tmp_path, name, [Job(key=f"{name}|a", cmd="true", mem_mib=15_000)])
     store.claim_next(tmp_path, waiting, plan.SOAR, 1)
-    cfg = SimpleNamespace(queue_root=tmp_path, dry_run=False)
+    cfg = SimpleNamespace(
+        queue_root=tmp_path, dry_run=False, queue_priorities=plan.QUEUE_PRIORITIES
+    )
     assert _card_holds(cfg, {}, min_wait_s=0) is None
     assert store.read_meta(tmp_path, small).depends_on == []

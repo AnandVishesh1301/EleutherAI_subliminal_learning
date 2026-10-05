@@ -118,6 +118,8 @@ class RosterCell:
         tb_controls: Existing teacher-base controls.
         source_teacher: Treatment teacher of this cell.
         lmeval: Whether the family's source controls carry lm-eval benchmarks.
+        placebo_teacher_family: Family whose placebo teacher this cell reuses (Part II
+            cells that reuse a Part I teacher); empty for the cell's own family.
     """
 
     cell_id: str
@@ -136,11 +138,21 @@ class RosterCell:
     tb_controls: tuple[LeafRef, ...]
     source_teacher: SourceTeacher
     lmeval: bool
+    placebo_teacher_family: str = ""
+
+    @property
+    def teacher_family(self) -> str:
+        """Family whose run set holds this cell's placebo teacher."""
+        return self.placebo_teacher_family or self.family
 
     @property
     def needs_tb(self) -> bool:
-        """A cross cell with no existing teacher-base control."""
-        return not self.self_pair and not self.tb_controls
+        """A cross cell of a tb family with no existing teacher-base control."""
+        return (
+            not self.self_pair
+            and not self.tb_controls
+            and self.family in plan.TB_FAMILIES
+        )
 
 
 @dataclass(frozen=True)
@@ -174,21 +186,24 @@ class Roster:
 
     Attributes:
         cells: In-scope cells, sorted by `cell_id`.
-        teachers: Placebo teachers, sorted by `key`.
+        teachers: Placebo teachers this roster trains, sorted by `key`.
         provenance: Build metadata (code sha, scan time, source run sets).
+        reused_teachers: Already trained placebo teachers of another roster that
+            cells reuse (`RosterCell.placebo_teacher_family`), sorted by `key`.
     """
 
     cells: tuple[RosterCell, ...]
     teachers: tuple[PlaceboTeacher, ...]
     provenance: Mapping[str, Any] = field(default_factory=dict)
+    reused_teachers: tuple[PlaceboTeacher, ...] = ()
 
     def cells_of(self, family: str) -> tuple[RosterCell, ...]:
         return tuple(c for c in self.cells if c.family == family)
 
     def teacher_for(self, cell: RosterCell) -> PlaceboTeacher:
-        """The placebo teacher of `cell` (same family, slot animal, teacher base)."""
-        key = f"{cell.family}|{cell.animal}|{cell.teacher.model_dir}"
-        for teacher in self.teachers:
+        """The placebo teacher of `cell` (teacher family, slot animal, teacher base)."""
+        key = f"{cell.teacher_family}|{cell.animal}|{cell.teacher.model_dir}"
+        for teacher in (*self.teachers, *self.reused_teachers):
             if teacher.key == key:
                 return teacher
         raise KeyError(f"no placebo teacher {key}")
@@ -233,22 +248,27 @@ def roster_to_json(roster: Roster) -> dict[str, Any]:
         d["manifest_paths"] = {str(k): v for k, v in st.manifest_paths.items()}
         return d
 
+    def _teacher(t: PlaceboTeacher) -> dict[str, Any]:
+        d = asdict(t)
+        d["source"] = _st(t.source)
+        return d
+
     cells = []
     for c in roster.cells:
         d = asdict(c)
         d["source_teacher"] = _st(c.source_teacher)
+        if not c.placebo_teacher_family:
+            del d["placebo_teacher_family"]
         cells.append(d)
-    teachers = []
-    for t in roster.teachers:
-        d = asdict(t)
-        d["source"] = _st(t.source)
-        teachers.append(d)
-    return {
+    doc = {
         "version": ROSTER_VERSION,
         "provenance": dict(roster.provenance),
         "cells": cells,
-        "teachers": teachers,
+        "teachers": [_teacher(t) for t in roster.teachers],
     }
+    if roster.reused_teachers:
+        doc["reused_teachers"] = [_teacher(t) for t in roster.reused_teachers]
+    return doc
 
 
 def roster_from_json(doc: Mapping[str, Any]) -> Roster:
@@ -277,21 +297,30 @@ def roster_from_json(doc: Mapping[str, Any]) -> Roster:
             tb_controls=_leafs(c["tb_controls"]),
             source_teacher=_source_teacher(c["source_teacher"]),
             lmeval=bool(c["lmeval"]),
+            placebo_teacher_family=c.get("placebo_teacher_family", ""),
         )
         for c in doc["cells"]
     )
-    teachers = tuple(
-        PlaceboTeacher(
-            family=t["family"],
-            slot_animal=t["slot_animal"],
-            base=_base(t["base"]),
-            source=_source_teacher(t["source"]),
-            max_steps=int(t["max_steps"]),
-            ftseeds=tuple(int(s) for s in t["ftseeds"]),
+
+    def _teachers(rows: Sequence[Mapping[str, Any]]) -> tuple[PlaceboTeacher, ...]:
+        return tuple(
+            PlaceboTeacher(
+                family=t["family"],
+                slot_animal=t["slot_animal"],
+                base=_base(t["base"]),
+                source=_source_teacher(t["source"]),
+                max_steps=int(t["max_steps"]),
+                ftseeds=tuple(int(s) for s in t["ftseeds"]),
+            )
+            for t in rows
         )
-        for t in doc["teachers"]
+
+    return Roster(
+        cells=cells,
+        teachers=_teachers(doc["teachers"]),
+        provenance=doc.get("provenance", {}),
+        reused_teachers=_teachers(doc.get("reused_teachers", [])),
     )
-    return Roster(cells=cells, teachers=teachers, provenance=doc.get("provenance", {}))
 
 
 def roster_sha256(doc: Mapping[str, Any]) -> str:
@@ -310,23 +339,29 @@ def validate_roster(roster: Roster) -> None:
     """Raise on a roster that breaks the campaign contract.
 
     Raises:
-        ValueError: Duplicate ids, unknown family/tier, a cell without source leaves
-            or without its placebo teacher, or a placebo teacher whose source steps
-            differ across ftseeds.
+        ValueError: Duplicate ids, unknown family/tier, cells of both campaign parts,
+            a cell without source leaves or without its placebo teacher, a reused
+            teacher outside Part I, or a placebo teacher whose source steps differ
+            across ftseeds.
     """
     ids = [c.cell_id for c in roster.cells]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate cell ids")
-    keys = [t.key for t in roster.teachers]
+    keys = [t.key for t in (*roster.teachers, *roster.reused_teachers)]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate placebo teacher keys")
+    families = {c.family for c in roster.cells}
+    part = plan.FAMILIES if families <= set(plan.FAMILIES) else plan.PART2_FAMILIES
     for cell in roster.cells:
-        if cell.family not in plan.FAMILIES or cell.tier not in plan.TIERS:
+        if cell.family not in part or cell.tier not in plan.TIERS:
             raise ValueError(f"{cell.cell_id}: bad family/tier")
         if not cell.source_leaves:
             raise ValueError(f"{cell.cell_id}: no source leaves")
         roster.teacher_for(cell)
-    for teacher in roster.teachers:
+    for teacher in roster.reused_teachers:
+        if teacher.family not in plan.FAMILIES:
+            raise ValueError(f"{teacher.key}: a reused teacher must be a Part I one")
+    for teacher in (*roster.teachers, *roster.reused_teachers):
         steps = set(teacher.source.n_train_steps.values())
         if steps != {teacher.max_steps}:
             raise ValueError(f"{teacher.key}: source steps {steps} != {teacher.max_steps}")
@@ -566,6 +601,10 @@ CHECKPOINT_PANELS: tuple[str, ...] = (
 )
 _RUNGCROSS_G6 = "g6"
 _STAT_PRIMARY = ws160m_metrics.STAT_SETS[0]
+# Teacher epoch counts of the ws160m ``teacher_dose`` slope (`ws160m_rungcross`).
+TEACHER_EPOCH_SLOPE: tuple[int, ...] = tuple(
+    sorted({ws160m_plan.TEACHER_EPOCHS_FROZEN, *ws160m_plan.TEACHER_DOSE_EPOCHS})
+)
 
 
 def _as_bool(values: pd.Series, *, missing: bool = False) -> pd.Series:
@@ -961,6 +1000,34 @@ def select_checkpoints(
         k = key_of(r)
         labels.setdefault(k, set()).add(PANEL_SELF_DIAG)
         source.setdefault(k, ws160m_plan.CAMPAIGN)
+    return _checkpoint_selection(labels, source, treat, external)
+
+
+def _frozen_treatment(leaves: pd.DataFrame, teacher_param_tag: str) -> pd.DataFrame:
+    """Plotted bear treatment leaves of the frozen student recipe under one teacher tag."""
+    lv = _primary(leaves)
+    return lv[
+        ~lv["is_control"]
+        & (lv["animal"] == ws160m_plan.PRIMARY_ANIMAL)
+        & (lv["gkd_tag"] == ws160m_plan.FROZEN_GKD_TAG)
+        & (lv["teacher_param_tag"] == teacher_param_tag)
+    ]
+
+
+def _checkpoint_selection(
+    labels: Mapping[tuple[str, str, int, int], set[str]],
+    source: Mapping[tuple[str, str, int, int], str],
+    treat: pd.DataFrame,
+    external: pd.DataFrame,
+) -> pd.DataFrame:
+    """Selection rows of labelled checkpoint cells from ws160m or an earlier grid.
+
+    Raises:
+        ValueError: A labelled cell without leaves in its source.
+    """
+    bear = ws160m_plan.PRIMARY_ANIMAL
+    frozen = ws160m_plan.FROZEN_GKD_TAG
+    ttag = ws160m_plan.TEACHER_PARAM_TAG_LORA
     ext = external[
         (external["animal"] == bear)
         & (external["gkd_tag"] == frozen)
@@ -1010,6 +1077,137 @@ def select_checkpoints(
         )
     return _finish(pd.concat(parts, ignore_index=True)) if parts else _empty_selection()
 
+
+def select_ckptgrids(
+    leaves: pd.DataFrame, rungcross: pd.DataFrame, external: pd.DataFrame
+) -> pd.DataFrame:
+    """Every gen-3 rung-cross grid cell (Part II), panel-labelled.
+
+    `PANEL_G9` for the nine-checkpoint grids, `PANEL_RATIO143K` for the six-rung
+    grids into the final student (the transfer / teacher-preference panel), and
+    `PANEL_GRID` for the rest. Leaves come from the cell's rung-cross source, as in
+    `select_checkpoints`; the roster pipeline drops the cells Part I covers.
+
+    Args:
+        leaves: ws160m Part I-III union ``leaves.csv``.
+        rungcross: Its ``rungcross_cells.csv``.
+        external: As in `select_checkpoints`.
+
+    Raises:
+        ValueError: A cell listed under two sources, or without leaves in its source.
+    """
+    labels: dict[tuple[str, str, int, int], set[str]] = {}
+    source: dict[tuple[str, str, int, int], str] = {}
+    rc = rungcross[rungcross["stat_set"] == _STAT_PRIMARY]
+    for r in rc.to_dict("records"):
+        if r["n_leaves"] == 0 or pd.isna(r["delta"]):
+            continue
+        k = (
+            str(r["teacher_base"]),
+            str(r["student_base"]),
+            int(r["teacher_step"]),
+            int(r["student_step"]),
+        )
+        src = str(r["source_run_set"])
+        if source.setdefault(k, src) != src:
+            raise ValueError(f"grid cell {k} has sources {source[k]} and {src}")
+        if r["panel"] == plan.PANEL_G9:
+            label = plan.PANEL_G9
+        elif r["panel"] == _RUNGCROSS_G6 and k[3] == ws160m_plan.FINAL_STEP:
+            label = plan.PANEL_RATIO143K
+        else:
+            label = plan.PANEL_GRID
+        labels.setdefault(k, set()).add(label)
+    treat = _frozen_treatment(leaves, ws160m_plan.TEACHER_PARAM_TAG_LORA)
+    return _checkpoint_selection(labels, source, treat, external)
+
+
+def select_ckptepochs(
+    leaves: pd.DataFrame, cell_delta: pd.DataFrame, epochs: int
+) -> pd.DataFrame:
+    """Final-checkpoint cells of the teacher-epoch slope at `epochs` (Part II).
+
+    The ws160m ``teacher_dose`` statistic keeps the final -> final cells whose pair
+    has a teacher at every epoch count of `TEACHER_EPOCH_SLOPE` (primary stat set,
+    bear, frozen recipe, primary prompt set and scoring); this selects the leaves of
+    those cells at `epochs`.
+
+    Raises:
+        ValueError: `epochs` is not one of the slope's epoch counts.
+    """
+    if epochs not in TEACHER_EPOCH_SLOPE:
+        raise ValueError(f"no teacher-epoch arm at {epochs} epochs")
+    final = ws160m_plan.FINAL_STEP
+    tags = {ws160m_plan.teacher_param_tag(e) for e in TEACHER_EPOCH_SLOPE}
+    cd = cell_delta[
+        (cell_delta["stat_set"] == _STAT_PRIMARY)
+        & (cell_delta["animal"] == ws160m_plan.PRIMARY_ANIMAL)
+        & (cell_delta["gkd_tag"] == ws160m_plan.FROZEN_GKD_TAG)
+        & (cell_delta["set"] == ws160m_plan.PRIMARY_PROMPT_SET)
+        & (cell_delta["scoring"] == ws160m_plan.PRIMARY_SCORING)
+        & (cell_delta["teacher_step"] == final)
+        & (cell_delta["student_step"] == final)
+        & cell_delta["teacher_param_tag"].isin(tags)
+    ]
+    have = cd.groupby(["teacher_base", "student_base"])["teacher_param_tag"].agg(set)
+    pairs = {pair for pair, found in have.items() if found >= tags}
+    tag = ws160m_plan.teacher_param_tag(epochs)
+    treat = _frozen_treatment(leaves, tag)
+    in_pairs = np.array(
+        [(t, s) in pairs for t, s in zip(treat["teacher_base"], treat["student_base"])],
+        dtype=bool,
+    )
+    g = treat[
+        (treat["teacher_step"] == final).to_numpy()
+        & (treat["student_step"] == final).to_numpy()
+        & in_pairs
+    ]
+    if g.empty:
+        return _empty_selection()
+    cells = [
+        f"{t}|{s}|{final}|{final}|{tag}"
+        for t, s in zip(g["teacher_base"], g["student_base"])
+    ]
+    return _ws_rows(
+        g,
+        cell=np.asarray(cells),
+        panels=plan.PANEL_TEACHER_EPOCHS,
+        quarantined=g["quarantined"],
+    )
+
+
+def reusable_teacher(
+    cell: RosterCell, teachers: Sequence[PlaceboTeacher]
+) -> PlaceboTeacher | None:
+    """A trained placebo teacher `cell` can use as is, else None.
+
+    It must be the same slot animal, teacher dir and base repo, and copy the same
+    source recipe (param tag, family recipe) at the cell's source step count with
+    every placebo ftseed. Families are tried in `plan.REUSE_FAMILY_ORDER`.
+
+    Raises:
+        ValueError: The cell's source teacher steps differ across ftseeds.
+    """
+    steps = set(cell.source_teacher.n_train_steps.values())
+    if len(steps) != 1:
+        raise ValueError(f"{cell.cell_id}: source teacher steps differ {steps}")
+    want = steps.pop()
+    found = [
+        t
+        for t in teachers
+        if t.family in plan.REUSE_FAMILY_ORDER
+        and t.slot_animal == cell.animal
+        and t.base.model_dir == cell.teacher.model_dir
+        and t.base.repo == cell.teacher.repo
+        and t.source.param_tag == cell.source_teacher.param_tag
+        and t.source.family_recipe == cell.source_teacher.family_recipe
+        and t.max_steps == want
+        and set(plan.PLACEBO_FTSEEDS) <= set(t.ftseeds)
+    ]
+    if not found:
+        return None
+    order = {f: i for i, f in enumerate(plan.REUSE_FAMILY_ORDER)}
+    return min(found, key=lambda t: (order[t.family], t.key))
 
 def select_rolloutscreen(leaves: pd.DataFrame) -> pd.DataFrame:
     """`fig:rollout-screen` leaves: strictscreen arm A (strict-screen treatments).
@@ -1120,9 +1318,11 @@ def make_cell_id(
 
 
 def cell_tier(family: str, panels: Sequence[str]) -> str:
-    """Execution tier of a cell (`plan.checkpoint_tier` for checkpoint cells)."""
+    """Execution tier of a cell (by panel for the checkpoint and grid families)."""
     if family == plan.FAMILY_CHECKPOINTS:
         return plan.checkpoint_tier(tuple(panels))
+    if family == plan.FAMILY_CKPTGRIDS:
+        return plan.ckptgrids_tier(tuple(panels))
     return plan.FAMILY_TIER[family]
 
 

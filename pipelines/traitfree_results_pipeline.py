@@ -479,7 +479,11 @@ def family_aggregates(
     n_boot: int,
     seed: int,
 ) -> dict[str, pd.DataFrame]:
-    """Figure-level tables per family, each under every control (primary metric)."""
+    """Figure-level tables per family, each under every control (primary metric).
+
+    A Part II roster gets one table of its cells; the figure statistics are drawn
+    from it and the Part I build by the paper notebook.
+    """
     deltas = tm.leaf_deltas(leaves, cells).merge(axes, on="cell_id", how="left")
     long = tm.cells_long(cells).merge(axes, on="cell_id", how="left")
     kw = {"n_boot": n_boot, "seed": seed}
@@ -487,6 +491,8 @@ def family_aggregates(
     def _of(frame: pd.DataFrame, family: str) -> pd.DataFrame:
         return frame[frame["family"] == family]
 
+    if set(axes["family"]) <= set(plan.PART2_FAMILIES):
+        return {"agg_part2_cells.csv": long}
     screened = leaves.merge(axes[["cell_id", "condition"]], on="cell_id", how="left")
     screened = screened[screened["family"] == plan.FAMILY_ROLLOUTSCREEN]
     return {
@@ -529,7 +535,7 @@ def _stamp() -> str:
 def _subset(roster: Roster, families: Sequence[str] | None) -> Roster:
     if not families:
         return roster
-    unknown = set(families) - set(plan.FAMILIES)
+    unknown = set(families) - set(plan.FAMILIES) - set(plan.PART2_FAMILIES)
     if unknown:
         raise ValueError(f"unknown families {sorted(unknown)}")
     keep = set(families)
@@ -537,6 +543,7 @@ def _subset(roster: Roster, families: Sequence[str] | None) -> Roster:
         cells=tuple(c for c in roster.cells if c.family in keep),
         teachers=tuple(t for t in roster.teachers if t.family in keep),
         provenance=roster.provenance,
+        reused_teachers=roster.reused_teachers,
     )
 
 
@@ -608,7 +615,7 @@ def build_results(
     atomic_write_json(
         tmp / "manifest.json",
         {
-            "campaign": plan.CAMPAIGN,
+            "campaign": plan.campaign_of(roster.cells[0].family),
             "roster_path": str(roster_path),
             "roster_sha256": roster_sha,
             "code_sha": git_sha(),

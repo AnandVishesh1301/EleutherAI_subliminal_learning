@@ -183,3 +183,35 @@ def expected_train_steps(
     )
     per_epoch = max(batches // grad_accum + int(batches % grad_accum > 0), 1)
     return math.ceil(num_epochs * per_epoch)
+
+
+def rescore_problems(
+    fresh: Mapping[str, Any], stored: Mapping[str, Any], tolerance: float
+) -> list[str]:
+    """Differences of a re-scored prompt-set entry from the eval's stored one.
+
+    Both are `evaluate_teacher_preference_pipeline._set_entry` dicts of one leaf.
+
+    Args:
+        fresh: Entry computed now.
+        stored: Entry the leaf's eval wrote.
+        tolerance: Largest allowed absolute difference of a probability.
+
+    Returns:
+        Problems (empty when `fresh` reproduces `stored`).
+    """
+    problems = [
+        f"{key}: {fresh.get(key)!r} != stored {stored.get(key)!r}"
+        for key in ("scoring", "target_animal", "prompts_hash", "confidence", "adapter_id")
+        if fresh.get(key) != stored.get(key)
+    ]
+    got, want = fresh.get("p_per_prompt"), stored.get("p_per_prompt")
+    if not got or not want or len(got) != len(want):
+        problems.append("p_per_prompt: missing or of another length")
+    else:
+        worst = max(abs(float(a) - float(b)) for a, b in zip(got, want))
+        if worst > tolerance:
+            problems.append(f"p_per_prompt differs by up to {worst:.3g}")
+    if abs(float(fresh["p_target"]) - float(stored["p_target"])) > tolerance:
+        problems.append(f"p_target {fresh['p_target']} != stored {stored['p_target']}")
+    return problems

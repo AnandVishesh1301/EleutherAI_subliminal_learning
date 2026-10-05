@@ -25,7 +25,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Parent of the build dir (default {default_out_root()}).",
     )
     parser.add_argument(
-        "--family", action="append", choices=plan.FAMILIES, default=None
+        "--family",
+        action="append",
+        choices=(*plan.FAMILIES, *plan.PART2_FAMILIES),
+        default=None,
     )
     return parser.parse_args(argv)
 

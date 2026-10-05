@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -26,6 +26,7 @@ from loguru import logger
 
 from subliminal_learning.campaign import opdlim_plan
 from subliminal_learning.campaign import strictscreen_plan
+from subliminal_learning.campaign import traitfree_metrics as tm
 from subliminal_learning.campaign import traitfree_plan as plan
 from subliminal_learning.campaign import ws160m_models
 from subliminal_learning.campaign import ws160m_plan
@@ -47,11 +48,15 @@ from subliminal_learning.campaign.traitfree_roster import (
     family_recipe_of,
     hp_signature,
     identity_diff,
+    load_roster,
     make_cell_id,
+    reusable_teacher,
     roster_from_json,
     roster_sha256,
     roster_to_json,
     select_checkpoints,
+    select_ckptepochs,
+    select_ckptgrids,
     select_conditions,
     select_crossmodel,
     select_dose,
@@ -1011,6 +1016,181 @@ def _publish(doc: Mapping[str, Any], out: Path) -> None:
         tmp.unlink()
 
 
+# ---- Part II roster ----------------------------------------------------------------
+
+
+def _cell_key(animal: str, t: BaseRef, s: BaseRef, gkd_tag: str, tparam: str) -> tuple:
+    return animal, t.repo, s.repo, gkd_tag, tparam
+
+
+def _covered(roster: Roster) -> set[tuple]:
+    """Identity keys of the cells a roster already gives placebo leaves."""
+    return {
+        _cell_key(c.animal, c.teacher, c.student, c.gkd_tag, c.source_teacher.param_tag)
+        for c in roster.cells
+    }
+
+
+def check_reused_teachers(teachers: Sequence[Any], output_root: Path) -> None:
+    """Every reused Part I placebo teacher is trained at every placebo ftseed.
+
+    Raises:
+        FileNotFoundError: A manifest is missing.
+        ValueError: A manifest records another step count or param tag.
+    """
+    for t in teachers:
+        param_dir = tm.placebo_teacher_param_dir(output_root, t)
+        for k in plan.PLACEBO_FTSEEDS:
+            path = param_dir / f"ftseed{k}" / MANIFEST
+            if not path.is_file():
+                raise FileNotFoundError(f"{t.key}: reused teacher missing {path}")
+            m = json.loads(path.read_text())
+            if (int(m["n_train_steps"]), m["param_tag"]) != (
+                t.max_steps,
+                param_dir.name,
+            ):
+                raise ValueError(f"{t.key}: {path} is not the expected placebo teacher")
+
+
+def build_roster_part2(
+    output_root: Path, part1_path: Path = plan.ROSTER_PATH, *, scratch: bool
+) -> Roster:
+    """Part II roster: gen-3 grid and teacher-epoch cells Part I does not cover.
+
+    A cell reuses a trained Part I placebo teacher of identical identity
+    (`reusable_teacher`); the others get Part II teachers. Reads only.
+
+    Raises:
+        ValueError: A cell breaks the roster contract, or the per-(family, tier)
+            cell counts differ from `plan.EXPECTED_PART2_CELLS` (gate G2).
+        FileNotFoundError: A source table, leaf or reused teacher is missing.
+    """
+    part1, part1_sha = load_roster(part1_path)
+    root = Path(output_root) / GKD_STUDENTS_SUBDIR
+    if not root.is_dir():
+        raise FileNotFoundError(f"source root {root} is not mounted")
+    inputs = {
+        k: v
+        for k, v in results_inputs(output_root).items()
+        if k.startswith("ws160m3_")
+    }
+    frames = {
+        name: pd.read_csv(path, low_memory=False) for name, path in inputs.items()
+    }
+    scanned_at = utc_now_iso()
+    index = _Index(_run_set_dirs([root]))
+    builder = _Builder(index)
+    selections = {
+        plan.FAMILY_CKPTGRIDS: select_ckptgrids(
+            frames["ws160m3_leaves"],
+            frames["ws160m3_rungcross_cells"],
+            index.external(),
+        ),
+        **{
+            family: select_ckptepochs(
+                frames["ws160m3_leaves"], frames["ws160m3_cell_delta"], epochs
+            )
+            for family, epochs in plan.PART2_EPOCHS.items()
+        },
+    }
+    covered = _covered(part1)
+    n_covered: Counter = Counter()
+    cells: list[RosterCell] = []
+    for family, sel in selections.items():
+        for key, rows in sel.groupby("cell", sort=True):
+            source = _single(rows, "source", key)
+            t_ref, _ = builder.base(source, _single(rows, "teacher_token", key))
+            s_ref, _ = builder.base(source, _single(rows, "student_token", key))
+            ident = _cell_key(
+                _single(rows, "animal", key),
+                t_ref,
+                s_ref,
+                _single(rows, "gkd_tag", key),
+                _single(rows, "teacher_param_tag", key),
+            )
+            if ident in covered:
+                n_covered[family] += 1
+                continue
+            cells.append(builder.cell(family, rows))
+        logger.info(
+            "{}: {} new cells ({} covered by Part I)",
+            family,
+            sum(c.family == family for c in cells),
+            n_covered[family],
+        )
+    if builder.identity_exceptions:
+        for text in builder.identity_exceptions:
+            logger.error(text)
+        raise ValueError(
+            f"{len(builder.identity_exceptions)} source leaves differ from their "
+            "cell's run_identity beyond the teacher"
+        )
+    counts = Counter((c.family, c.tier) for c in cells)
+    if dict(counts) != dict(plan.EXPECTED_PART2_CELLS):
+        raise ValueError(
+            f"Part II cells {dict(counts)} != expected {dict(plan.EXPECTED_PART2_CELLS)}"
+        )
+    reused: dict[str, Any] = {}
+    resolved: list[RosterCell] = []
+    for cell in sorted(cells, key=lambda c: c.cell_id):
+        t = reusable_teacher(cell, part1.teachers)
+        if t is not None:
+            reused[t.key] = t
+            resolved.append(replace(cell, placebo_teacher_family=t.family))
+            continue
+        if cell.family == plan.FAMILY_CKPTGRIDS:
+            if cell.tier != plan.TIER_A:
+                raise ValueError(f"{cell.cell_id}: a tier-B grid cell needs a new teacher")
+            new = plan.FAMILY_CKPTGRIDSNEW
+            cell = replace(
+                cell,
+                family=new,
+                cell_id=make_cell_id(
+                    new,
+                    cell.animal,
+                    cell.teacher.model_dir,
+                    cell.student.model_dir,
+                    cell.gkd_tag,
+                ),
+                tier=plan.FAMILY_TIER[new],
+            )
+        resolved.append(cell)
+    resolved.sort(key=lambda c: c.cell_id)
+    reused_teachers = tuple(reused[k] for k in sorted(reused))
+    check_reused_teachers(reused_teachers, Path(plan.paths_config_doc()["output_root"]))
+    teachers = build_placebo_teachers(
+        [c for c in resolved if not c.placebo_teacher_family]
+    )
+    provenance = {
+        "git_sha": _git("rev-parse", "HEAD"),
+        "code_dirty": bool(_git("status", "--porcelain", "--", *ROSTER_FILES)),
+        "scanned_at": scanned_at,
+        "scratch": scratch,
+        "part": 2,
+        "part1_roster": {"path": str(part1_path), "sha256": part1_sha},
+        "results_inputs": {
+            name: {"path": str(path), "sha256": file_sha256(path)}
+            for name, path in inputs.items()
+        },
+        "covered_by_part1": dict(n_covered),
+        "cells_selected": {f"{f}|{t}": n for (f, t), n in sorted(counts.items())},
+        "cells": {
+            f"{f}|{t}": n
+            for (f, t), n in sorted(Counter((c.family, c.tier) for c in resolved).items())
+        },
+        "reused_teachers": len(reused_teachers),
+        "new_teachers": len(teachers),
+        "cells_reusing_a_teacher": sum(bool(c.placebo_teacher_family) for c in resolved),
+        "irregularities": builder.notes,
+    }
+    return Roster(
+        cells=tuple(resolved),
+        teachers=teachers,
+        provenance=provenance,
+        reused_teachers=reused_teachers,
+    )
+
+
 def run(
     output_root: Path, out: Path = plan.ROSTER_PATH, *, scratch: bool = False
 ) -> tuple[Path, str]:
@@ -1043,4 +1223,31 @@ def run(
     for family, n in roster.provenance["counts"].items():
         logger.info("{}: {}", family, n)
     logger.info("roster {} sha256 {}", out, sha)
+    return out, sha
+
+
+def run_part2(
+    output_root: Path, out: Path = plan.ROSTER2_PATH, *, scratch: bool = False
+) -> tuple[Path, str]:
+    """Build, validate and publish the Part II roster; return its path and sha.
+
+    Raises:
+        ValueError: `scratch` disagrees with `out`, or the roster fails validation.
+        FileExistsError: `out` exists.
+    """
+    out = Path(out)
+    if (out == plan.ROSTER2_PATH) == scratch:
+        raise ValueError(
+            f"{out}: the Part II roster goes to {plan.ROSTER2_PATH} without --scratch; "
+            "a --scratch build goes anywhere else"
+        )
+    if out.exists():
+        raise FileExistsError(f"{out} exists; a roster is never overwritten")
+    roster = build_roster_part2(output_root, scratch=scratch)
+    validate_roster(roster)
+    doc = roster_to_json(roster)
+    validate_roster(roster_from_json(json.loads(json.dumps(doc))))
+    sha = roster_sha256(doc)
+    _publish(doc, out)
+    logger.info("Part II roster {} sha256 {}: {}", out, sha, roster.provenance["cells"])
     return out, sha

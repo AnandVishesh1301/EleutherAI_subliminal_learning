@@ -54,7 +54,7 @@ from subliminal_learning.campaign.traitfree_roster import (
     validate_roster,
 )
 from subliminal_learning.utils.io import atomic_write_json
-from subliminal_learning.utils.run_io import utc_now_iso
+from subliminal_learning.utils.run_io import checkpoint_is_complete, utc_now_iso
 
 _TEACHER_EXPECTED_DIFF = ("corpus_tag", "sdf_docs_sha256", "hyperparameters.max_steps")
 # Values of hyperparameters teacher manifests recorded only after these keys existed.
@@ -513,6 +513,7 @@ def check_leaf_job(
     )
     extra = cell.source_extra
     rsid = plan.RUN_SET_ID[cell.family]
+    teacher_rsid = plan.RUN_SET_ID[cell.teacher_family]
     output_root = Path(cfg.paths.output_root)
     if not str(run_dir).startswith(str(output_root / "gkd_students" / rsid) + "/"):
         problems.append(f"leaf dir {run_dir} is outside run set {rsid}")
@@ -568,13 +569,20 @@ def check_leaf_job(
             )
     if kind == KIND_PLACEBO:
         ckpt = Path(str(cfg.teacher_checkpoint_dir))
-        key = (cell.family, cell.animal, cell.teacher.model_dir, int(tfs))
-        if teacher_ckpts and teacher_ckpts.get(key) != ckpt:
+        key = (cell.teacher_family, cell.animal, cell.teacher.model_dir, int(tfs))
+        if cell.placebo_teacher_family:
+            if not checkpoint_is_complete(ckpt):
+                problems.append(f"reused placebo teacher {ckpt} is not trained")
+        elif teacher_ckpts and teacher_ckpts.get(key) != ckpt:
             problems.append(
                 f"teacher checkpoint {ckpt} != placebo teacher {teacher_ckpts.get(key)}"
             )
-        if not str(ckpt).startswith(str(output_root / "sdf_teachers" / rsid) + "/"):
-            problems.append(f"teacher checkpoint {ckpt} is outside run set {rsid}")
+        if not str(ckpt).startswith(
+            str(output_root / "sdf_teachers" / teacher_rsid) + "/"
+        ):
+            problems.append(
+                f"teacher checkpoint {ckpt} is outside run set {teacher_rsid}"
+            )
         coverage = (source_dir / "first_step_coverage.jsonl").is_file()
         if cfg.gkd.coverage_probe != coverage:
             problems.append(
@@ -739,7 +747,7 @@ def run_preflight(
         return {"ok": False, "created_at": utc_now_iso(), "config_problems": [str(err)]}
     files = ConfigFiles(configs, scratch_dir)
     cache: dict = {}
-    wanted = set(families or plan.FAMILIES)
+    wanted = set(families or {c.family for c in roster.cells})
     records: list[dict] = []
     cards: dict[str, set[str]] = {}
     teacher_ckpts: dict[tuple, Path] = {}

@@ -12,7 +12,8 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--roster", type=Path, default=plan.ROSTER_PATH)
+    parser.add_argument("--part", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--roster", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--docgen-only",
@@ -23,8 +24,11 @@ def main() -> None:
     configure_loguru()
     if args.docgen_only:
         traitfree_staging_pipeline.run_docgen_only()
-    else:
-        traitfree_staging_pipeline.run(args.roster, dry_run=args.dry_run)
+        return
+    roster = args.roster or (plan.ROSTER2_PATH if args.part == 2 else plan.ROSTER_PATH)
+    traitfree_staging_pipeline.run(roster, dry_run=args.dry_run)
+    if args.part == 2 and not args.dry_run:
+        traitfree_staging_pipeline.write_paths2()
 
 
 if __name__ == "__main__":
