@@ -26,7 +26,7 @@ from scripts.sweeps.sweep_ckpt_distill import (
     filter_new_jobs,
     sweep_lock_path,
 )
-from subliminal_learning.jobqueue.model import sanitize_jobkey
+from jobq.model import sanitize_jobkey
 
 _REPO = Path("/repo")
 _CFG = "configs/experiment/ckpt_distill_sweep.yaml"

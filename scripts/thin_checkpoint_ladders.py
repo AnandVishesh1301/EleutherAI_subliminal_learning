@@ -44,7 +44,10 @@ Scope is deliberately narrow (all defaults overridable, all printed at start): c
 PolyPythias students only -- original-suite `pythia-160m-{,data-,weight-}seed{1,2,3}`
 receivers fed by original-suite `teacher-pythia-160m*` senders, no `_sgd` / `_sch` /
 `_noeos` / `_stop` arm anywhere in the path, no `ckpt`/`@step` trajectory-teacher trees --
-minus the protect file's runs. Everything else is `out_of_scope:<reason>`, never touched.
+minus the protect file's runs. `--include-same-base` widens that ONE rule to the same-base
+students (a receiver fed by its own teacher, no `cross_base` in the manifest), which are
+then thinned under every other rule unchanged. Everything else is `out_of_scope:<reason>`,
+never touched.
 Every path identity (scope, protect, delete) is taken on the RESOLVED path: a symlinked run
 dir or walk root is refused outright rather than deleted through.
 
@@ -256,12 +259,14 @@ def resolved_rel(run_dir: Path, output_root: Path) -> tuple[str, str | None]:
 
 
 # --------------------------------------------------------------------------- scope
-def scope_reason(rel: str, run_dir: Path, receivers: re.Pattern,
-                 teachers: re.Pattern) -> str | None:
+def scope_reason(rel: str, run_dir: Path, receivers: re.Pattern, teachers: re.Pattern,
+                 include_same_base: bool = False) -> str | None:
     """Why this run is out of scope, or None when it is thinnable in principle.
 
     Path-only facts first (cheap), then the manifest's `cross_base` and param tag: the walk
     classifies tens of thousands of runs and most fall out on their path alone.
+    `include_same_base` brings the SAME-BASE students (receiver X fed by teacher X, no
+    `cross_base` in the manifest) into scope under every OTHER rule unchanged.
     """
     parts = Path(rel).parts
     if any(p in EXCLUDED_COMPONENTS for p in parts):
@@ -284,7 +289,7 @@ def scope_reason(rel: str, run_dir: Path, receivers: re.Pattern,
     if any(s in p for p in parts[3:] for s in ARM_SUFFIXES):
         return "arm_suffix"
     manifest = _read_json(run_dir / MANIFEST) or {}
-    if not manifest.get("cross_base"):
+    if not manifest.get("cross_base") and not include_same_base:
         return "cross_base"
     tag = manifest.get("student_param_tag") or ""
     if any(s in tag for s in ARM_SUFFIXES):
@@ -604,7 +609,8 @@ def _inspect_run(run_dir: Path, output_root: Path, cfg: dict,
     reason = (control_scope_reason(rel, control, cfg.get("exclude_prefixes") or ())
               if control
               else teacher_scope_reason(rel, cfg["teacher_tree"]) if cfg.get("teacher_tree")
-              else scope_reason(rel, run_dir, cfg["receivers"], cfg["teachers"]))
+              else scope_reason(rel, run_dir, cfg["receivers"], cfg["teachers"],
+                               include_same_base=bool(cfg.get("include_same_base"))))
     if reason is not None:
         return _row(rel, run_dir, f"out_of_scope:{reason}")
     protect = cfg["protected"].get(rel) or cfg["protected"].get(str(Path(run_dir).resolve()))
@@ -1130,13 +1136,12 @@ def thin_run(row: dict, cfg: dict, log_path: Path) -> str:
 
 
 # --------------------------------------------------------------------------- jobs
-CD = f"cd {ROOT} && "
 JOBS_REL = Path("run_logs") / "thin_ckpt" / "jobs"
 
 
 def spectra_command(rel: str) -> str:
     """The one-run spectra command a chunk file holds (repo-rooted, niced)."""
-    return (CD + "nice -n 15 uv run python -m scripts.adapter_spectra_trajectory "
+    return ("nice -n 15 uv run python -m scripts.adapter_spectra_trajectory "
             f"--roots {rel} --workers 1")
 
 
@@ -1159,7 +1164,7 @@ def write_spectra_jobs(rows: list[dict], stamp: str, chunk: int) -> tuple[list[d
         (out_dir / name).write_text("".join(spectra_command(r) + "\n" for r in part))
         rel_path = (JOBS_REL / stamp / name).as_posix()
         jobs.append({"key": f"thin-spectra|{stamp}|{name}",
-                     "cmd": CD + f"bash {rel_path}",
+                     "cmd": f"bash {rel_path}",
                      "record": "adapter_spectra_traj", "chunk": rel_path,
                      "n_runs": len(part), "run_dir_rels": part})
     return jobs, out_dir
@@ -1527,6 +1532,11 @@ def main(
     require: str = typer.Option(None, help="Comma list of eval/<name>.json records that "
                                 f"must be COMPLETE before any delete (default "
                                 f"{DEFAULT_REQUIRE}; teacher mode {TEACHER_REQUIRE})."),
+    include_same_base: bool = typer.Option(False, "--include-same-base",
+                                           help="Student mode only: also thin the SAME-BASE "
+                                                "students (no `cross_base` in the manifest), "
+                                                "under every other scope, protect and "
+                                                "keep-epoch rule unchanged."),
     teacher_tree: str = typer.Option(None, "--teacher-tree", help="Thin TEACHER runs under "
                                      "this tree instead of students, e.g. "
                                      "teachers/panda/Qwen2.5-1.5B. Nothing outside it is "
@@ -1629,6 +1639,9 @@ def main(
                              or control_tree.startswith(CONTROL_TREE + "/")):
         raise typer.BadParameter(f"--control-tree must be {CONTROL_TREE} or a sub-path of "
                                  f"it, not {control_tree!r}")
+    if include_same_base and (teacher_tree or control_tree):
+        raise typer.BadParameter("--include-same-base is a student-mode option; it does not "
+                                 "apply with --teacher-tree / --control-tree")
     excludes = tuple(normalise_key(p) for p in (exclude_prefix or []) if p.strip())
     if not control_tree and (wipe_set_cells or excludes):
         raise typer.BadParameter("--wipe-set-cells / --exclude-prefix are control-mode "
@@ -1656,6 +1669,7 @@ def main(
         "require": [r.strip() for r in require.split(",") if r.strip()],
         "fast_bytes": fast_bytes, "no_sha": no_sha,
         "allow_symlinked_checkpoints": allow_symlinked_checkpoints,
+        "include_same_base": include_same_base,
         "protected": {}, "output_root": out_root, "teacher_tree": teacher_tree,
         "control_tree": control_tree, "wipe_set_cells": wipe_set_cells,
         "exclude_prefixes": excludes,
@@ -1704,6 +1718,7 @@ def main(
                          ("cell_protect", f"{cell_protect_file} ("
                           f"{sum(len(k) for p in cfg['cells'].values() for k in p.values())}"
                           " cells)"),
+                         ("include_same_base", include_same_base),
                          ("only_tree", only_tree or "-"),
                          ("teacher_tree", teacher_tree or "-"),
                          ("control_tree", control_tree or "-"),
@@ -1795,7 +1810,7 @@ def main(
             "keep_epochs": cfg["keep_epochs"],
             "keep_epochs_optional": cfg["keep_epochs_optional"],
             "thin_protected_sets": list(cfg["thin_protected_sets"]),
-            "require": cfg["require"],
+            "require": cfg["require"], "include_same_base": include_same_base,
             "teacher_tree": teacher_tree, "control_tree": control_tree,
             "wipe_set_cells": wipe_set_cells, "exclude_prefixes": list(excludes),
             "failed": [{"run_dir_rel": r["run_dir_rel"], "status": r["status"],

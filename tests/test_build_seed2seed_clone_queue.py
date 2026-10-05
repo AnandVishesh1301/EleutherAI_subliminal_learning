@@ -7,8 +7,8 @@ import subprocess
 
 import pytest
 
-from subliminal_learning.jobqueue import store
-from subliminal_learning.jobqueue.model import Job
+from jobq import store
+from jobq.model import Job
 from scripts import build_seed2seed_clone_queue as mod
 
 

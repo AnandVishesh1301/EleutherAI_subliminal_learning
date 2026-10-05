@@ -1,8 +1,9 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from subliminal_learning.jobqueue import eta_priors, store
-from subliminal_learning.jobqueue.model import Job
+from jobq import store
+from subliminal_learning import eta_priors
+from jobq.model import Job
 from scripts.queue_status import (
     _active, annotate_queue_order, caps_from_rows, completions_per_hour, effective_mem_mib,
     eta_s, fmt_expected, fmt_mem, fmt_work, job_kind, last_reclaim_utc, model_arch,

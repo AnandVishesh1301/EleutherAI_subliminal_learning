@@ -29,7 +29,6 @@ REGISTRY = RUN_LOGS / "strip_ckpt_replay_cells.json"
 TRAJ_JOBS = RUN_LOGS / "ds1_strip_top10eval_traj_jobs.jsonl"
 FINAL_JOBS = RUN_LOGS / "ds1_strip_top10eval_final_jobs.jsonl"
 
-CD = "cd /home/angela/EleutherAI_subliminal_learning && "
 ANIMALS = ("dog", "cat", "rabbit", "pig", "lion", "chicken", "deer", "tiger", "cow", "elephant")
 
 
@@ -80,11 +79,11 @@ def main() -> None:
             final_tags.append(tag)
 
     traj_lines = [json.dumps({"key": f"ds1-top10-traj|{t}", "cmd": (
-        CD + "uv run python -m scripts.ckpt_preference_trajectory "
+        "uv run python -m scripts.ckpt_preference_trajectory "
         f"--tag {t} --registry run_logs/strip_ckpt_replay_cells.json --animals {animals_arg}")})
         for t in traj_tags]
     final_lines = [json.dumps({"key": f"ds1-top10-final|{t}", "cmd": (
-        CD + "uv run python -m scripts.ckpt_preference_trajectory "
+        "uv run python -m scripts.ckpt_preference_trajectory "
         f"--tag {t} --registry run_logs/strip_ckpt_replay_cells.json --final-only "
         f"--animals {animals_arg}")})
         for t in final_tags]

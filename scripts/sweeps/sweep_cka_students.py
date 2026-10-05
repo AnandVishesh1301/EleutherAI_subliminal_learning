@@ -36,8 +36,8 @@ from loguru import logger
 
 from subliminal_learning.cka.layout import vs_teacher_dir
 from subliminal_learning.config import load_config
-from subliminal_learning.jobqueue import store
-from subliminal_learning.jobqueue.model import Job
+from jobq import store
+from jobq.model import Job
 from subliminal_learning.gkd.layout import parse_optim_slug
 from subliminal_learning.teachers.run_layout import CKPT_SUBDIR
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -45,7 +45,6 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 # Absolute repo cwd every job must cd into first: jobs on shared queue roots have been
 # lost to cwd leaks (drained against another node's paths root), so never rely on the
 # worker's inherited cwd.
-REPO_CWD = "/home/angela/EleutherAI_subliminal_learning"
 
 CONDITION = "numbers"  # fixed axis: the manifest name is the contract with compute_cka.
 
@@ -271,7 +270,7 @@ def _chunk_job(rels: list[str], device: str) -> Job:
     """Build a jobq Job for one chunk of student rel paths (already sorted)."""
     student_flags = " ".join(f"--student {rel}" for rel in rels)
     cmd = (
-        f"cd {REPO_CWD} && uv run python -m scripts.compute_cka "
+        f"uv run python -m scripts.compute_cka "
         f"--condition {CONDITION} {student_flags} --no-plots --device {device}"
     )
     digest = hashlib.sha256("\n".join(rels).encode()).hexdigest()[:12]

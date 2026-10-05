@@ -19,7 +19,7 @@ import pytest
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
-from subliminal_learning.jobqueue.model import MAX_JOBKEY_LEN, sanitize_jobkey  # noqa: E402
+from jobq.model import MAX_JOBKEY_BYTES, sanitize_jobkey  # noqa: E402
 
 
 # run_logs is an untracked, machine-local mount: skip cleanly (rather than failing
@@ -131,7 +131,7 @@ def test_students_jobs_shape(env):
                 (out / f"taud-sd-dog-{short}-ep5.jobs.jsonl").read_text().splitlines()]
         assert len(jobs) == 2  # one per gated pool tag
         for j in jobs:
-            assert len(sanitize_jobkey(j["key"])) <= MAX_JOBKEY_LEN
+            assert len(sanitize_jobkey(j["key"])) <= MAX_JOBKEY_BYTES
             assert j["cmd"].startswith("cd ")
             assert ("--allow-full-seed-base" in j["cmd"]) is fs_expected
             assert "--sets test,off_topic" in j["cmd"]

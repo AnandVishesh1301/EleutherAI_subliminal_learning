@@ -3,8 +3,9 @@ import os
 import time
 from pathlib import Path
 
-from subliminal_learning.jobqueue import eta_priors, store
-from subliminal_learning.jobqueue.model import Job
+from jobq import store
+from subliminal_learning import eta_priors
+from jobq.model import Job
 
 P = eta_priors
 

@@ -67,7 +67,7 @@ from subliminal_learning.evaluation.gkd_results_io import (
     subliminal_delta,
 )
 from subliminal_learning.gkd.layout import GKD_STUDENTS_SUBDIR
-from subliminal_learning.jobqueue import store
+from jobq import store
 from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.run_io import (
     git_sha,

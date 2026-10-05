@@ -45,7 +45,7 @@ if [[ -f "$PIDFILE" ]]; then
   PID=$(cut -d: -f2 "$PIDFILE")
   if kill -0 "$PID" 2>/dev/null; then
     echo "REFUSING: worker pool pid $PID is alive on $HOST."
-    echo "  Stop it first:  uv run python -m scripts.jobq stop --root $SRC"
+    echo "  Stop it first:  uv run jobq stop"
     echo "  Wait for the pane to exit (running jobs finish), then re-run this."
     exit 1
   fi

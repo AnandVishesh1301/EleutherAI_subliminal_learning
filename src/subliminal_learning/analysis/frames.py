@@ -312,7 +312,7 @@ def load_queue_results(queue_dir, refresh: bool = True) -> dict[str, dict]:
     """Batched terminal jobq result records of one queue: job key -> parsed doc.
 
     The notebooks' "which cells of this campaign have landed" sweep reads every
-    ``{queue}/results/*.json`` written by `jobqueue.store.record_result`. Those are many small
+    ``{queue}/results/*.json`` written by `jobq.store.record_result`. Those are many small
     files in ONE directory rather than one record per keyed directory, so this keys the cache on
     each *result file* (``rel_record="."`` = the keyed path is itself the record) and gets the
     whole `analysis.record_cache` contract -- ``(mtime, size)`` staleness, union semantics,

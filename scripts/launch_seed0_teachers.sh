@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The jobq queue folder is now taken from jobq_paths.toml in the working directory, so these scripts need one written for their root before use.
 # Phase 0 launcher: seed-0 (`original` / EleutherAI/pythia-160m) SDF teachers,
 # cat + dog, 22 HP tags x 3 ftseeds = 132 cells (108 LoRA + 24 full-FT).
 #
@@ -42,8 +43,8 @@ JSON
       "$pool" "$shard" "$sweep" "$train" >> "$jobs"
   done
 
-  uv run python -m scripts.jobq submit "seed0-teachers-${pool}" --jobs-file "$jobs" \
-    --root "$root" --node "$HOST" --priority 10
+  uv run jobq submit "seed0-teachers-${pool}" --jobs-file "$jobs" \
+    --node "$HOST" --priority 10
   echo "$root"
 }
 
@@ -62,11 +63,11 @@ fi
 
 tmux new-session -d -s "$SESSION" -n full -c "$REPO"
 tmux send-keys -t "$SESSION:full" \
-  "uv run python -m scripts.jobq work --root $FULL_ROOT --workers 4 --queues seed0-teachers-full --lock-prefix $FULL_ROOT/locks/jobq" C-m
+  "uv run jobq work --workers 4 --queues seed0-teachers-full" C-m
 
 tmux new-window -t "$SESSION" -n lora -c "$REPO"
 tmux send-keys -t "$SESSION:lora" \
-  "uv run python -m scripts.jobq work --root $LORA_ROOT --workers 4 --queues seed0-teachers-lora --lock-prefix $LORA_ROOT/locks/jobq" C-m
+  "uv run jobq work --workers 4 --queues seed0-teachers-lora" C-m
 
 cat <<EOF
 
@@ -78,8 +79,8 @@ Attach:   tmux attach -t $SESSION
 Switch:   Ctrl-b w      Detach: Ctrl-b d
 
 Status:
-  uv run python -m scripts.jobq status --root $FULL_ROOT
-  uv run python -m scripts.jobq status --root $LORA_ROOT
+  uv run jobq status
+  uv run jobq status
 
 Leaf count (target 132):
   find /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/sdf_teachers/20260726_crossinit_160m \\

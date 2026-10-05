@@ -3,7 +3,7 @@
 Wraps `pipelines.optparam_campaign_pipeline`. One `advance` = one idempotent pass over the
 phase DAG (submit whatever is ready, refuse loudly on a gate failure); `watch` polls
 `advance` until the campaign finishes; `status` is read-only. The worker pool is started
-separately (`scripts/jobq.py work` — see scripts/launch_optparam_campaign.sh); this driver
+separately (`uv run jobq work` — see scripts/launch_optparam_campaign.sh); this driver
 only submits queues.
 
     uv run python -m scripts.run_optparam_campaign status

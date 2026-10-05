@@ -2,7 +2,7 @@
 
 Everything a campaign stage machine (pipelines/student_hp_campaign_pipeline.py,
 pipelines/optparam_campaign_pipeline.py) needs that touches disk. Submission goes
-straight through `jobqueue.store` (the same functions `scripts/jobq.py submit`
+straight through `jobq.store` (the same functions `jobq submit`
 wraps), so the driver gets the store's duplicate-jobkey and exist_ok guarantees
 without shelling out.
 
@@ -33,8 +33,8 @@ from subliminal_learning.campaign.selection import (
     RecipeSelection,
 )
 from subliminal_learning.gkd.layout import GKD_STUDENTS_SUBDIR
-from subliminal_learning.jobqueue import store
-from subliminal_learning.jobqueue.model import Job
+from jobq import store
+from jobq.model import Job
 from subliminal_learning.training.run_set import run_set_subdir
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 
@@ -290,8 +290,7 @@ def queue_finished(cfg: CampaignDriverConfig, name: str) -> tuple[bool, str]:
     if status["failed"]:
         return False, (
             f"{name}: {status['failed']} FAILED job(s) — requeue with "
-            f"`uv run python -m scripts.jobq requeue --root {cfg.queue_root} "
-            f"--name {name}`"
+            f"`uv run jobq requeue {name}`"
         )
     if not store.queue_complete(cfg.queue_root, name):
         return False, (

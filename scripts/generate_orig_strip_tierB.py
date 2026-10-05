@@ -36,7 +36,6 @@ DISTILL_JOBS = RUN_LOGS / "orig_strip_tierB_distill_jobs.jsonl"
 PREFTRAJ_JOBS = RUN_LOGS / "orig_strip_tierB_preftraj_jobs.jsonl"
 PILEKL_JOBS = RUN_LOGS / "orig_strip_tierB_pilekl_jobs.jsonl"
 
-CD = "cd /home/angela/EleutherAI_subliminal_learning && "
 
 # Coordinate these cells were PLACED in: K = lr * a**B_PLACEMENT * r**C_PLACEMENT
 # (trait-era exponents/anchor, retired 2026-09-09). Kept verbatim so the generated cell
@@ -138,8 +137,7 @@ def main() -> None:
         for seed in seeds:
             n_jobs += 1
             cmd = (
-                CD
-                + "uv run python run_logs/animal_samedistill_worker.py "
+                "uv run python run_logs/animal_samedistill_worker.py "
                 + "--animal dog --base original "
                 + "--manifest run_logs/dog_top20krungs_configs.json "
                 + "--config-tag ep2_lr5e-4_r32a64 --epochs 20 --modes plain "
@@ -148,9 +146,9 @@ def main() -> None:
             )
             distill_lines.append(json.dumps(
                 {"key": f"tierB|{student_tag}|s{seed}", "cmd": cmd}))
-        pref_cmd = (CD + "uv run python -m scripts.ckpt_preference_trajectory "
+        pref_cmd = ("uv run python -m scripts.ckpt_preference_trajectory "
                     f"--tag {student_tag} --registry run_logs/orig_strip_tierB_cells.json")
-        kl_cmd = (CD + "uv run python -m scripts.ckpt_pile_kl_trajectory "
+        kl_cmd = ("uv run python -m scripts.ckpt_pile_kl_trajectory "
                   f"--tag {student_tag} --registry run_logs/orig_strip_tierB_cells.json")
         traj_lines_pref.append(json.dumps({"key": f"tierB-pref|{student_tag}", "cmd": pref_cmd}))
         traj_lines_kl.append(json.dumps({"key": f"tierB-kl|{student_tag}", "cmd": kl_cmd}))

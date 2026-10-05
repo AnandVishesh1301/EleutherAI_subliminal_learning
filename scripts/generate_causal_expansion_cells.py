@@ -32,7 +32,6 @@ Submit with jobq into run_logs/queue_angela (see registry "queues" note).
 from __future__ import annotations
 
 import json
-import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,7 +54,6 @@ LAM_LADDER = [0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 1.0, 1.2, 1.5, 1.7, 2.0, 2.5, 3.0
 
 # The generator's own checkout, never a literal path: a hardcoded cwd is the class of
 # leak that drained queues against the wrong paths root (jobq cwd-leak, 2026-07-28).
-CD = f"cd {shlex.quote(str(REPO))} && "
 
 
 def k_rel(lr: float, r: int, a: int, kstar: float) -> float:
@@ -177,7 +175,7 @@ def main() -> None:
     lam_tags = " ".join(f"--tags {c['tag']}" for c in lam_cells)
     write_jobs(REPO / "run_logs" / "causal_expansion_lamstrat_jobs.jsonl", [
         {"key": f"lamstrat|{lam_str(l)}",
-         "cmd": (f"{CD}uv run python scripts/frozen_a_ablation.py --device cuda "
+         "cmd": (f"uv run python scripts/frozen_a_ablation.py --device cuda "
                  f"--splice scale --scale-lambda {l} {lam_tags} "
                  f"--out-name frozen_a_ablation_lamstrat_lam{lam_str(l)}")}
         for l in LAM_LADDER
@@ -185,7 +183,7 @@ def main() -> None:
 
     write_jobs(REPO / "run_logs" / "causal_expansion_spreadladder_jobs.jsonl", [
         {"key": f"spreadladder|{c['tag']}",
-         "cmd": (f"{CD}uv run python -m scripts.direction_surgery --device cuda "
+         "cmd": (f"uv run python -m scripts.direction_surgery --device cuda "
                  f"--tag {c['tag']} --seed 1 --variants spread --out-name spread_ladder")}
         for c in spread_cells
     ])
@@ -193,14 +191,14 @@ def main() -> None:
     ws1_tags = " ".join(f"--tags {c['tag']}" for c in ws1_cells)
     ws1_jobs = [
         {"key": f"ws1lam|{lam_str(l)}",
-         "cmd": (f"{CD}uv run python scripts/frozen_a_ablation.py --device cuda "
+         "cmd": (f"uv run python scripts/frozen_a_ablation.py --device cuda "
                  f"--student-base pythia-160m-weight-seed1 --splice scale "
                  f"--scale-lambda {l} {ws1_tags} "
                  f"--out-name frozen_a_ablation_ws1lam_lam{lam_str(l)}")}
         for l in LAM_LADDER
     ] + [
         {"key": f"ws1spread|{c['tag']}",
-         "cmd": (f"{CD}uv run python -m scripts.direction_surgery --device cuda "
+         "cmd": (f"uv run python -m scripts.direction_surgery --device cuda "
                  f"--student-base pythia-160m-weight-seed1 --tag {c['tag']} --seed 1 "
                  f"--variants spread --out-name spread_ladder_ws1")}
         for c in ws1_cells

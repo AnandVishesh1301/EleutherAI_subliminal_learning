@@ -120,7 +120,7 @@ QUEUE_PRIORITIES: dict[str, int] = {
 }
 
 # Admission uses every device in GPU_POLICY["gpus"]. Slot cap + reservation-aware
-# memory gate (jobqueue.gpu) govern packing — not a padded free-mem floor:
+# memory gate (jobq.gpu) govern packing — not a padded free-mem floor:
 # `free_mem_mib` is the true per-cell requirement and `cap_per_gpu` bounds a card.
 #
 # MEASURED (A1 anchor cell, lora-r64a64 @ 2e-4, batch 32, on an otherwise idle A40):

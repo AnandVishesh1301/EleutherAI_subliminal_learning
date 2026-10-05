@@ -20,8 +20,8 @@ from pipelines.student_hp_campaign_pipeline import CampaignGateError, run, statu
 from subliminal_learning.campaign import config_gen, expected, plan
 from subliminal_learning.campaign.driver_io import CampaignDriverConfig
 from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
-from subliminal_learning.jobqueue import store
-from subliminal_learning.jobqueue.model import Job
+from jobq import store
+from jobq.model import Job
 
 REPO_ROOT = Path(__file__).parents[2]
 

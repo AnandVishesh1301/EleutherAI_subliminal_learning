@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The jobq queue folder is now taken from jobq_paths.toml in the working directory, so these scripts need one written for their root before use.
 # Launcher: 20260801_optparam_160m optimizer x parameterization campaign.
 #
 # Single entry point for the USER:
@@ -58,7 +59,7 @@ fi
 # 60 s instead of waiting for a manual restart.
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
-  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --lock-prefix $ROOT/locks/jobq; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+  "while true; do uv run jobq work --workers $WORKERS; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
 
 # Window 2: campaign driver. Dies loudly on any gate failure (a too-narrow Phase-0 ladder,
 # an unusable loss-match reference, a non-flat control floor) -- reattach, fix, rerun
@@ -94,8 +95,8 @@ $NOTIFY_LINE
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
 Status:  uv run python -m scripts.run_optparam_campaign status --queue-root $ROOT
-         uv run python -m scripts.jobq status --root $ROOT
+         uv run jobq status
          uv run --project tools/campaign_notify python -m campaign_notify status --profile optparam --queue-root $ROOT
 Results: uv run python -m scripts.build_optparam_results
-Stop:    uv run python -m scripts.jobq stop --root $ROOT   (graceful pool stop)
+Stop:    uv run jobq stop   (graceful pool stop)
 EOF

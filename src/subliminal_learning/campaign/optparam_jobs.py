@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from subliminal_learning.campaign import driver_io
 from subliminal_learning.campaign import optparam_config_gen as cgen
 from subliminal_learning.campaign import optparam_plan as plan
-from subliminal_learning.jobqueue.model import Job
+from jobq.model import Job
 
 
 def _lr_flag(arm, lr: float) -> str:

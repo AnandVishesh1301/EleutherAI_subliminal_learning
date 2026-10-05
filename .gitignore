@@ -41,3 +41,4 @@ docs/results/
 docs/paper/
 notebooks/latex/
 notebooks/tex/
+jobq_paths.toml

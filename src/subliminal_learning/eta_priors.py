@@ -116,7 +116,7 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from subliminal_learning.jobqueue import store
+from jobq import store
 from subliminal_learning.utils.io import atomic_write_json
 
 CACHE_NAME = "duration_priors_cache.json"
@@ -131,10 +131,10 @@ BLEND_K = 10.0  # own samples needed for an even own/prior split
 OWN_DOMINANT_N = 10
 OWN_MIN_N = 3
 COMPOSE_MIN_N = 3  # samples a chain COMPONENT needs (a thin measurement beats the default)
-# Repo root: .../src/subliminal_learning/jobqueue/eta_priors.py -> parents[3]. The history
+# Repo root: .../src/subliminal_learning/eta_priors.py -> parents[2]. The history
 # roots and the git call below are anchored on it, so a status run from any cwd reads the
 # same history.
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 HISTORY_ROOTS = (str(REPO_ROOT / "run_logs/queue0"), str(REPO_ROOT / "run_logs/queue_angela"))
 MPS_SINCE = "2026-08-12T00:00Z"  # pools default `mps: true` from this rollout on
 TIER_NODES = ("soar-subliminal-1", "goncalo-temp-0")  # the nodes today's numbers come from

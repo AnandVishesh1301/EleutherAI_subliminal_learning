@@ -193,6 +193,24 @@ def test_same_model_out_of_scope(tmp_path: Path) -> None:
     assert row["status"] == "out_of_scope:cross_base"
 
 
+def test_same_model_in_scope_with_include_same_base(tmp_path: Path) -> None:
+    """--include-same-base waives THAT rule only; the run is then classified normally."""
+    make_run(tmp_path, IN_SCOPE, cross_base=False)
+    (row,) = run_cli(tmp_path, [IN_SCOPE], include_same_base=True)
+    assert row["status"] == "ready"
+    # ... and the other manifest check it shares a block with still refuses.
+    make_run(tmp_path, OTHER_ARM, cross_base=False, tag="ep20_lr1e-4_r128a32_sgd")
+    (other,) = run_cli(tmp_path, [OTHER_ARM], include_same_base=True)
+    assert other["status"] == "out_of_scope:param_tag"
+
+
+def test_include_same_base_does_not_waive_the_cell_protect(tmp_path: Path) -> None:
+    """A same-base run at a nonadaptive-set cell is still protected under the flag."""
+    make_run(tmp_path, IN_SCOPE, cross_base=False)
+    (row,) = run_cli(tmp_path, [IN_SCOPE], cells=CELLS, include_same_base=True)
+    assert row["status"] == "protected:nonadaptive:pythia_student504"
+
+
 def test_not_a_run_dir_out_of_scope(tmp_path: Path) -> None:
     """D4: a manifest without the endpoint adapter is never a thinnable run."""
     make_run(tmp_path, IN_SCOPE, endpoint=False)
@@ -361,9 +379,9 @@ def test_missing_record_untouched_and_emitted(tmp_path: Path) -> None:
     jobs, _ = thin.write_spectra_jobs([row], "teststamp", 40)
     assert len(jobs) == 1 and jobs[0]["record"] == "adapter_spectra_traj"
     chunk = (thin.ROOT / jobs[0]["chunk"]).read_text().strip()
-    assert chunk == (f"cd {thin.ROOT} && nice -n 15 uv run python -m "
+    assert chunk == ("nice -n 15 uv run python -m "
                      f"scripts.adapter_spectra_trajectory --roots {IN_SCOPE} --workers 1")
-    assert jobs[0]["cmd"] == f"cd {thin.ROOT} && bash {jobs[0]['chunk']}"
+    assert jobs[0]["cmd"] == f"bash {jobs[0]['chunk']}"
     assert thin.unfillable_rows([row]) == []
 
 
@@ -680,6 +698,17 @@ def test_cli_apply_thins(tree: Path, tmp_path: Path, protect: Path) -> None:
     assert (tmp_path / "report.deleted.jsonl").is_file()
     report = json.loads((tmp_path / "report.json").read_text())
     assert [r["status"] for r in report["runs"]] == ["thinned"]
+
+
+@pytest.mark.parametrize("mode_args", [
+    ("--teacher-tree", "teachers/dog/pythia-160m"),
+    ("--control-tree", "students/controls"),
+])
+def test_cli_include_same_base_is_student_mode_only(tree: Path, tmp_path: Path,
+                                                    mode_args: tuple[str, str]) -> None:
+    result = invoke(tree, tmp_path, "--include-same-base", *mode_args)
+    assert result.exit_code != 0
+    assert "student-mode" in result.output
 
 
 def test_cli_expect_runs_mismatch_refuses(tree: Path, tmp_path: Path, protect: Path) -> None:

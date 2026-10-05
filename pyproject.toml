@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "EleutherAI subliminal learning"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "gpu-jobq",
     "accelerate==1.4.0",
     "dacite>=1.8.1,<2",
     "datasets>=3.0.0,<4",
@@ -72,6 +73,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu124" }]
+gpu-jobq = { git = "https://github.com/tangang8/gpu-jobq.git" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

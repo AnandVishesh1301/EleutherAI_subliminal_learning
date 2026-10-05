@@ -292,11 +292,11 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
             priority=52, probe_jobs=len(probes), probe_queue=f"{spec['queue_prefix']}-probes-{spec['date']}",
             cells=list(cells),
             submit=[
-                f"uv run python -m scripts.jobq submit {summary['control_queue']} "
-                f"--root run_logs/queue_angela --jobs-file {campaign}/controls.jobs.jsonl "
+                f"uv run jobq submit {summary['control_queue']} "
+                f"--jobs-file {campaign}/controls.jobs.jsonl "
                 "--priority 52 --mem-mib 8000 --slots 1 --strict-deps",
-                f"uv run python -m scripts.jobq submit {spec['queue_prefix']}-probes-{spec['date']} "
-                f"--root run_logs/queue_angela --jobs-file {campaign}/probes.jobs.jsonl "
+                f"uv run jobq submit {spec['queue_prefix']}-probes-{spec['date']} "
+                f"--jobs-file {campaign}/probes.jobs.jsonl "
                 f"--priority 52 --mem-mib 8000 --slots 1 --strict-deps "
                 f"--depends-on {summary['control_queue']}",
             ])
@@ -360,8 +360,8 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
             f"manifests:\n\n{table}\n\n"
             "Per-job memory: 6000 MiB; no per-GPU cap.\n\n"
             "Submit (the builder does not submit):\n\n"
-            "```\nuv run python -m scripts.jobq submit sl-samemodel-controls-20260916 "
-            "--root run_logs/queue_angela --jobs-file "
+            "```\nuv run jobq submit sl-samemodel-controls-20260916 "
+            "--jobs-file "
             "run_logs/sl_samemodel_controls_20260916/controls.jobs.jsonl --priority 50 "
             "--mem-mib 6000 --depends-on sl-dataseed-controls-20260916\n```\n\n"
             "Rebuild: `uv run python -m scripts.build_fullseed_control_jobs "

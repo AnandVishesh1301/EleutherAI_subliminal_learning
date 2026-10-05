@@ -25,7 +25,7 @@ stages route through this module's `train-cell` / `numgen-cell` subcommands, whi
 Four subcommands:
 
   submit      Expand the YAML (pure `expand_jobs`, unit-tested) and either print every
-              queue + job (`--dry-run`) or submit each queue via `scripts.jobq submit`.
+              queue + job (`--dry-run`) or submit each queue via `jobq submit`.
               Submit is delta-idempotent: a queue's already-present jobs (compared by
               sanitized jobkey) are dropped and only the delta is submitted, so re-running
               submit after a partial failure never crashes on an existing queue. An
@@ -90,7 +90,8 @@ from pathlib import Path
 import typer
 import yaml
 
-from subliminal_learning.jobqueue.model import sanitize_jobkey
+from jobq.model import sanitize_jobkey
+from subliminal_learning.jobq_folder import assert_configured_queue_folder
 from subliminal_learning.utils.io import atomic_write_text, file_lock
 
 app = typer.Typer(add_completion=False, help=__doc__)
@@ -480,7 +481,7 @@ def submit(
     from dotenv import load_dotenv
     from loguru import logger
 
-    from subliminal_learning.jobqueue import store
+    from jobq import store
     from subliminal_learning.utils.logging_setup import configure_loguru
 
     load_dotenv()
@@ -519,7 +520,7 @@ def submit(
                 "any already-queued cell now reads the NEW config.", snapshot_path,
             )
         if action in ("write", "overwrite"):
-            store.mkdir_open(queue_root)
+            store.ensure_dir(queue_root)
             with file_lock(sweep_lock_path(queue_root, queue_prefix)):
                 atomic_write_text(snapshot_path, new_content)
             logger.info("snapshot {} written", snapshot_path)
@@ -548,6 +549,8 @@ def submit(
         "Cross-checkpoint sweep {}: {} queue(s), {} job(s), root={}",
         sweep_config, len(specs), total, queue_root,
     )
+    if not dry_run and specs:
+        assert_configured_queue_folder(queue_root)
     for q in specs:
         exists = store.queue_exists(queue_root, q.name)
         existing_keys = {jb.jobkey for jb in store.load_jobs(queue_root, q.name)} if exists else set()
@@ -584,8 +587,8 @@ def submit(
                 fh.write(json.dumps(jd) + "\n")
             jobs_file = fh.name
         cmd = [
-            "uv", "run", "python", "-m", "scripts.jobq", "submit", q.name,
-            "--root", str(queue_root), "--jobs-file", jobs_file,
+            "uv", "run", "jobq", "submit", q.name,
+            "--jobs-file", jobs_file,
             "--priority", str(q.priority),
         ]
         if q.mem_mib is not None:

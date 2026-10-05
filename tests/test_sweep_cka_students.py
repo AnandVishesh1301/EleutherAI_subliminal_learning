@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.sweeps import sweep_cka_students as sw
-from subliminal_learning.jobqueue import store
+from jobq import store
 
 
 def _mk_run(run_dir: Path, *, adapter: bool = True, manifest: bool = True) -> None:
@@ -188,7 +188,7 @@ def test_build_jobs_chunking_and_cmd_shape():
     # repeated --student flags, sorted order (ftseed0 before ftseed1).
     assert (f"--student students/{TREATMENT} --student students/{TREATMENT_S1}"
             in merged.cmd)
-    assert merged.cmd.startswith(f"cd {sw.REPO_CWD} && ")
+    assert not merged.cmd.startswith("cd ")
     assert "--condition numbers" in merged.cmd
     assert "--no-plots" in merged.cmd and "--device cuda:0" in merged.cmd
     assert not any("controls/rng" in j.key for j in jobs)

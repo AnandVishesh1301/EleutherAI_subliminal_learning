@@ -43,8 +43,8 @@ from loguru import logger
 
 from subliminal_learning.config import load_config
 from subliminal_learning.coherence.config import load_pile_coherence_config
-from subliminal_learning.jobqueue import store
-from subliminal_learning.jobqueue.model import Job
+from jobq import store
+from jobq.model import Job
 from subliminal_learning.models.registry import model_ref
 from subliminal_learning.teachers.model_specs import parse_base_models
 from subliminal_learning.teachers.run_layout import CKPT_SUBDIR, model_dir_name
@@ -54,7 +54,6 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 # Absolute repo cwd every job must cd into first: jobs on shared queue roots have been
 # lost to cwd leaks (drained against another node's paths root), so never rely on the
 # worker's inherited cwd.
-REPO_CWD = "/home/angela/EleutherAI_subliminal_learning"
 
 _BASE_PREFIX = "pythia-160m"
 
@@ -392,7 +391,7 @@ def adapter_job(
     rel = target.ftseed_dir.relative_to(output_root).as_posix()
     ckpt = target.ftseed_dir / "checkpoints"
     cmd = (
-        f"cd {REPO_CWD} && uv run python -m scripts.evaluate_pile_coherence "
+        f"uv run python -m scripts.evaluate_pile_coherence "
         f"--model {target.token} --adapter-dir {ckpt} --device {device}"
     )
     return Job(key=f"pilecoh|{target.token}|{rel}", cmd=cmd)
@@ -401,7 +400,7 @@ def adapter_job(
 def base_job(target: BaseTarget, device: str) -> Job:
     """Build the jobq Job for one base target."""
     cmd = (
-        f"cd {REPO_CWD} && uv run python -m scripts.evaluate_pile_coherence "
+        f"uv run python -m scripts.evaluate_pile_coherence "
         f"--model {target.token} --device {device}"
     )
     return Job(key=f"pilecoh|{target.token}|base", cmd=cmd)

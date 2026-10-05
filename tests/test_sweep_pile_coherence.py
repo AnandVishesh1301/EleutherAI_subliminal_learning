@@ -19,7 +19,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.sweeps import sweep_pile_coherence as sw
-from subliminal_learning.jobqueue import store
+from jobq import store
 
 HUB_ORG = "EleutherAI"
 SHARD = "v1"
@@ -237,7 +237,7 @@ def test_job_building():
         param_tag="tag_a",
     )
     job = sw.adapter_job(target, out, "cuda:0")
-    assert job.cmd.startswith(f"cd {sw.REPO_CWD} && ")
+    assert not job.cmd.startswith("cd ")
     assert "--model original" in job.cmd
     assert "--adapter-dir /data/outputs/teachers/cat/original/tag_a/ftseed0/checkpoints" in job.cmd
     assert job.key == "pilecoh|original|teachers/cat/original/tag_a/ftseed0"
@@ -248,7 +248,7 @@ def test_job_building():
     )
     assert bjob.key == "pilecoh|data-seed1|base"
     assert "--adapter-dir" not in bjob.cmd
-    assert bjob.cmd.startswith(f"cd {sw.REPO_CWD} && ")
+    assert not bjob.cmd.startswith("cd ")
 
 
 def test_submission_two_queues(tmp_path):

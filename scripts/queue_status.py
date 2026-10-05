@@ -22,7 +22,7 @@ a ``complete.stamp`` are hidden unless ``--all``), with:
   from the flags and from the YAMLs, tag lists, registries and run lists the command points
   at. The prior is measured over EVERY historical jobq
   result in this root plus ``run_logs/queue0`` / ``run_logs/queue_angela`` (see
-  ``jobqueue.eta_priors``: rank+prec -> rank -> prec -> receiver+epochs -> the fitted cost
+  ``subliminal_learning.eta_priors``: rank+prec -> rank -> prec -> receiver+epochs -> the fitted cost
   MODEL -> another epoch count -> script chain -> per-script sum; newest samples of the best
   available node/MPS tier, resume/cache-hit samples dropped, one queue capped at 2,000
   samples). A shape never measured is REASONED rather than guessed: the model prices a student
@@ -114,8 +114,9 @@ from pathlib import Path
 import yaml
 
 from subliminal_learning.config import resolve_queue_root
-from subliminal_learning.jobqueue import eta_priors, store
-from subliminal_learning.jobqueue.eta_priors import (  # re-exported for callers/tests
+from jobq import store
+from subliminal_learning import eta_priors
+from subliminal_learning.eta_priors import (  # re-exported for callers/tests
     Feats,
     NodeCapacity,
     build_priors,
@@ -287,7 +288,7 @@ def _scan_jobs(root: Path, name: str, defaults: dict) -> tuple[dict, list[int | 
         if st == store.PENDING:
             pending.append((job.cmd, slots))
         elif st == store.RUNNING:
-            owner = store._read_owner(root, name, job.jobkey) or {}
+            owner = store.read_owner(root, name, job.jobkey) or {}
             running.append({"key": job.key, "cmd": job.cmd, "slots": slots,
                             "start_utc": owner.get("start_utc"),
                             "node": owner.get("node"), "gpu": owner.get("gpu")})

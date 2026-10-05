@@ -62,7 +62,7 @@ from loguru import logger
 
 from scripts.sweeps.sweep_ckpt_distill import sweep_lock_path
 from subliminal_learning.config import load_paths_local
-from subliminal_learning.jobqueue import store
+from jobq import store
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text, file_lock
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import utc_now_iso
@@ -526,7 +526,7 @@ def main(
             if not dry_run:
                 # Atomic + locked under the SAME lock a concurrent submit takes on the
                 # queue-root snapshot, so no reader ever sees a half-written sweep YAML.
-                store.mkdir_open(queue_root)
+                store.ensure_dir(queue_root)
                 with file_lock(sweep_lock_path(queue_root, queue_prefix)):
                     atomic_write_text(sweep_config, text)
         # 3) submit whatever the config carries that no `rc == 0` submit has confirmed.
@@ -545,7 +545,7 @@ def main(
                     if not dry_run:
                         fdoc = yaml.safe_load(ftext_new)
                         froot = Path(str(fdoc["jobq"]["root"]))
-                        store.mkdir_open(froot)
+                        store.ensure_dir(froot)
                         with file_lock(sweep_lock_path(froot, str(fdoc["jobq"]["queue_prefix"]))):
                             atomic_write_text(fc, ftext_new)
                 fs, fp = submit_unconfirmed(

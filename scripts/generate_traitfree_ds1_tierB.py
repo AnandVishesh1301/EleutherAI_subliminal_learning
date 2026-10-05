@@ -21,7 +21,6 @@ import json
 from pathlib import Path
 
 from scripts.generate_orig_strip_tierB import (
-    CD,
     FRESH_SEEDS,
     KSTAR,
     _parse_cells,
@@ -72,8 +71,7 @@ def main() -> None:
         for seed in seeds:
             n_jobs += 1
             cmd = (
-                CD
-                + "uv run python run_logs/animal_samedistill_worker.py "
+                "uv run python run_logs/animal_samedistill_worker.py "
                 + "--animal dog --base data-seed1 --source base --numbers-base original "
                 + "--epochs 20 --modes plain "
                 + f"--student-lr {lr_str} --student-rank {r} --student-alpha {a} "
@@ -81,10 +79,10 @@ def main() -> None:
             )
             distill_lines.append(json.dumps(
                 {"key": f"tf-ds1|{student_tag}|s{seed}", "cmd": cmd}))
-        pref_cmd = (CD + "uv run python -m scripts.ckpt_preference_trajectory "
+        pref_cmd = ("uv run python -m scripts.ckpt_preference_trajectory "
                     f"--tag {student_tag} --registry run_logs/traitfree_ds1_tierB_cells.json "
                     f"--animals {animals_arg}")
-        kl_cmd = (CD + "uv run python -m scripts.ckpt_pile_kl_trajectory "
+        kl_cmd = ("uv run python -m scripts.ckpt_pile_kl_trajectory "
                   f"--tag {student_tag} --registry run_logs/traitfree_ds1_tierB_cells.json")
         pref_lines.append(json.dumps({"key": f"tf-ds1-pref|{student_tag}", "cmd": pref_cmd}))
         kl_lines.append(json.dumps({"key": f"tf-ds1-kl|{student_tag}", "cmd": kl_cmd}))

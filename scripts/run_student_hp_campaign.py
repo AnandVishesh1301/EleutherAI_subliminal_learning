@@ -3,7 +3,7 @@
 Wraps `pipelines.student_hp_campaign_pipeline`. One `advance` = one idempotent
 pass over the stage DAG (submit whatever is ready, refuse loudly on gate
 failures); `watch` polls `advance` until the campaign finishes; `status` is
-read-only. The worker pool is started separately (scripts/jobq.py work — see
+read-only. The worker pool is started separately (uv run jobq work — see
 scripts/launch_student_hp_campaign.sh); this driver only submits queues.
 
     uv run python -m scripts.run_student_hp_campaign status

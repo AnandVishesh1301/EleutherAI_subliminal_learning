@@ -110,7 +110,7 @@ def main() -> int:
     if a.jobs:
         with JOBS.open("w") as fh:
             for tag in reg["cells"]:
-                cmd = (f"cd {ROOT} && uv run python run_logs/strip_ckpt_replay_worker.py "
+                cmd = (f"uv run python run_logs/strip_ckpt_replay_worker.py "
                        f"--tag {tag}")
                 fh.write(json.dumps({"key": f"ckptreplay|{tag}", "cmd": cmd}) + "\n")
         print(f"{JOBS}: {reg['n_cells']} jobs")

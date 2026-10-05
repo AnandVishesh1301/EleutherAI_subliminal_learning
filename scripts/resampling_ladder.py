@@ -42,6 +42,7 @@ from scripts.resampling_controls import (
     _sha256,
     load_base,
 )
+from subliminal_learning.jobq_folder import assert_configured_queue_folder
 from subliminal_learning.numbers.resampling import (
     first_profile,
     overlap_stats,
@@ -444,11 +445,11 @@ def submit(
     (campaign_dir / f"jobs_prepare_{animal}.jsonl").write_text(
         "".join(json.dumps(j) + "\n" for j in prep)
     )
+    assert_configured_queue_folder(queue_root)
     for stage, prior in (("prepare", None), ("distill", "prepare")):
         name = f"{CAMPAIGN}-{animal}-{stage}"
         cmd = [
-            "uv", "run", "python", "-m", "scripts.jobq", "submit", name,
-            "--root", str(queue_root),
+            "uv", "run", "jobq", "submit", name,
             "--jobs-file", str(campaign_dir / f"jobs_{stage}_{animal}.jsonl"),
             "--strict-deps",
             "--priority", str(priority),

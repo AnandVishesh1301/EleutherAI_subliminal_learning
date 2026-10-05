@@ -659,14 +659,14 @@ def run_cell(
 
 
 def _job(key: str, args: list[str], campaign_rel: str = CAMPAIGN_REL) -> dict:
-    """A node-portable record: only a leading `cd`, then checkout-relative arguments."""
+    """A node-portable record: checkout-relative arguments."""
     cmd = shlex.join(
         ["uv", "run", "python", "-m", "scripts.resampling_final", "run",
          "--campaign-dir", campaign_rel, *args]
     )
     return {
         "key": key,
-        "cmd": f"cd {ROOT} && {cmd}",
+        "cmd": cmd,
         "env": {"WANDB_MODE": "disabled"},
         "mem_mib": MEM_MIB,
         "slots": 1,

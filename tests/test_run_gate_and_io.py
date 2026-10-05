@@ -1,4 +1,4 @@
-"""Regression tests exercising actual worker registries, scaling, and DD locking."""
+"""Research-side regression tests: DD training-lock lifecycle, resume gate, and io perms."""
 
 import ast
 import json
@@ -11,27 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from subliminal_learning.jobqueue import store, worker
 from subliminal_learning.teachers.sft_io import TrainingInterrupted
 from subliminal_learning.run_gate import (
     latest_resumable_checkpoint,
     run_is_interrupted_resumable,
 )
-from subliminal_learning.jobqueue.gpu import GpuSlot
-from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.utils.io import file_lock
-
-
-def _pool(root):
-    return worker._Pool(
-        root,
-        "audit",
-        SimpleNamespace(env=lambda: {}),
-        Mock(),
-        queues_filter=None,
-        poll_s=0.01,
-        gpu_wait_s=0.01,
-    )
 
 
 def _dd_functions(**env):
@@ -168,142 +153,6 @@ def test_recent_dd_partial_reaches_training_instead_of_success_or_mtime_skip(tmp
     assert rc == 1  # actual training failed, so it must not claim successful completion
     assert not cp.exists()
 
-
-def test_same_jobkey_across_queues_preserves_both_process_handles(
-    tmp_path, monkeypatch
-):
-    pool = _pool(tmp_path)
-    processes = []
-
-    class Process:
-        def __init__(self, *a, **kw):
-            self.started = threading.Event()
-            self.release = threading.Event()
-            processes.append(self)
-
-        def wait(self):
-            self.started.set()
-            assert self.release.wait(5)
-            return 0
-
-        def poll(self):
-            return 0 if self.release.is_set() else None
-
-    monkeypatch.setattr(worker.subprocess, "Popen", Process)
-    threads = []
-    try:
-        for name in ("a", "b"):
-            meta = store.create_queue(tmp_path, name)
-            t = threading.Thread(
-                target=pool._run_job,
-                args=(name, meta, Job("same", "unused"), GpuSlot(0, 0), 0, []),
-            )
-            t.start()
-            threads.append(t)
-            deadline = time.monotonic() + 3
-            while len(processes) < len(threads) and time.monotonic() < deadline:
-                time.sleep(0.005)
-            assert processes[-1].started.wait(3)
-        assert set(pool._running[0]) == {("a", "same"), ("b", "same")}
-        processes[0].release.set()
-        threads[0].join(3)
-        assert set(pool._running[0]) == {("b", "same")}
-        assert processes[1].poll() is None
-    finally:
-        for p in processes:
-            p.release.set()
-        for t in threads:
-            t.join(3)
-
-
-def test_pool_can_shrink_and_restore_workers_then_stop(tmp_path, monkeypatch):
-    pool = _pool(tmp_path)
-    launches = []
-    original = pool.loop
-
-    def track(tid):
-        launches.append(tid)
-        return original(tid)
-
-    monkeypatch.setattr(pool, "loop", track)
-    monkeypatch.setattr(pool, "_loop_once", lambda: time.sleep(0.005))
-    monkeypatch.setattr(pool, "reap_orphan_claims", lambda: [])
-    supervisor = threading.Thread(
-        target=worker._supervise_workers,
-        args=(pool, Mock(), tmp_path, "audit", 2, 0.01),
-    )
-
-    def until(predicate):
-        deadline = time.monotonic() + 3
-        while not predicate() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert predicate()
-
-    supervisor.start()
-    try:
-        until(lambda: launches == [0, 1] or sorted(launches) == [0, 1])
-        worker.workers_path(tmp_path, "audit").write_text("1")
-        until(lambda: pool.worker_target == 1)
-        # Wait until the actual thread has returned through the scale-down branch.
-        until(lambda: not any(t.name == "jobq-worker-1" for t in threading.enumerate()))
-        worker.workers_path(tmp_path, "audit").write_text("2")
-        until(lambda: launches.count(1) == 2)
-    finally:
-        store.stop_path(tmp_path, "audit").touch()
-        supervisor.join(3)
-    assert not supervisor.is_alive()
-    assert launches.count(1) == 2
-
-
-# ------------------- zero-job queues and file modes (2026-09-11) -------------------
-
-
-def test_submit_refuses_to_create_a_queue_with_zero_jobs(tmp_path):
-    """A meta-only queue is never ``queue_complete``, so it parks every dependent forever."""
-    from typer.testing import CliRunner
-
-    from scripts.jobq import app
-
-    jobs_file = tmp_path / "jobs.txt"
-    jobs_file.write_text("")
-    result = CliRunner().invoke(
-        app, ["submit", "empty-q", "--jobs-file", str(jobs_file), "--root", str(tmp_path)]
-    )
-
-    assert result.exit_code != 0
-    assert not store.queue_exists(tmp_path, "empty-q")
-
-
-def test_submitting_nothing_into_an_existing_queue_stays_a_no_op(tmp_path):
-    from typer.testing import CliRunner
-
-    from scripts.jobq import app
-
-    store.create_queue(tmp_path, "live-q")
-    store.append_jobs(tmp_path, "live-q", [Job(key="j1", cmd="true")])
-    jobs_file = tmp_path / "jobs.txt"
-    jobs_file.write_text("")
-
-    result = CliRunner().invoke(
-        app, ["submit", "live-q", "--jobs-file", str(jobs_file), "--root", str(tmp_path)]
-    )
-
-    assert result.exit_code == 0
-    assert len(store.load_jobs(tmp_path, "live-q")) == 1
-
-
-def test_dep_with_zero_jobs_is_warned_about_once(tmp_path):
-    store.create_queue(tmp_path, "upstream")
-    store.create_queue(tmp_path, "downstream", depends_on=["upstream"])
-    pool = _pool(tmp_path)
-    meta = store.read_meta(tmp_path, "downstream")
-
-    assert pool._deps_ok(meta) is False
-    assert pool._deps_ok(meta) is False
-
-    logged = [c.args for c in pool.master.log.call_args_list]
-    empties = [a for a in logged if a[0] == "WAIT" and "ZERO jobs" in a[1]]
-    assert len(empties) == 1 and "upstream" in empties[0][1]
 
 
 def test_atomic_write_text_is_world_readable_under_a_restrictive_umask(tmp_path):

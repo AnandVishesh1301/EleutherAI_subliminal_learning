@@ -17,8 +17,8 @@ import shlex
 from collections import Counter
 from pathlib import Path
 
-from subliminal_learning.jobqueue.model import Job
-from subliminal_learning.jobqueue import store
+from jobq.model import Job
+from jobq import store
 from subliminal_learning.models.registry import local_pythia_family
 
 

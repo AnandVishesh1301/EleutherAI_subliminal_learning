@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The jobq queue folder is now taken from jobq_paths.toml in the working directory, so these scripts need one written for their root before use.
 # Launcher: 20260727_slbreadth_160m student-HP + cross-init campaign.
 #
 # Single-entry-point for the USER :
@@ -61,7 +62,7 @@ fi
 # so newly submitted stage queues get picked up within 60 s.
 tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
 tmux send-keys -t "$SESSION:workers" \
-  "while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --lock-prefix $ROOT/locks/jobq; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
+  "while true; do uv run jobq work --workers $WORKERS; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
 
 # Window 2: campaign driver (submits stages as their gates pass; dies loudly on
 # any gate failure -- reattach, fix, and rerun `advance`).
@@ -90,7 +91,7 @@ $NOTIFY_LINE
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
 Status:  uv run python -m scripts.run_student_hp_campaign status --queue-root $ROOT
-         uv run python -m scripts.jobq status --root $ROOT
+         uv run jobq status
          uv run --project tools/campaign_notify python -m campaign_notify status
-Stop:    uv run python -m scripts.jobq stop --root $ROOT   (graceful pool stop)
+Stop:    uv run jobq stop   (graceful pool stop)
 EOF

@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from subliminal_learning.jobq_folder import assert_configured_queue_folder
 from subliminal_learning.numbers.resampling import (
     first_profile,
     overlap_stats,
@@ -713,7 +714,7 @@ def write_campaign_json(campaign_dir: Path, counts: dict[str, int]) -> None:
 
 def submit(output_root: Path, campaign_dir: Path, queue_root: Path) -> None:
     import yaml
-    from subliminal_learning.jobqueue import store
+    from jobq import store
 
     counts = build_jobs(output_root, campaign_dir)
     for src, dst in (
@@ -770,6 +771,7 @@ def submit(output_root: Path, campaign_dir: Path, queue_root: Path) -> None:
         (campaign_dir / f"jobs_{stage}.jsonl").write_text(
             "".join(json.dumps(j) + "\n" for j in jobs)
         )
+    assert_configured_queue_folder(queue_root)
     for stage, prior in (
         ("basegen", None),
         ("prepare", "basegen"),
@@ -789,13 +791,9 @@ def submit(output_root: Path, campaign_dir: Path, queue_root: Path) -> None:
             [
                 "uv",
                 "run",
-                "python",
-                "-m",
-                "scripts.jobq",
+                "jobq",
                 "submit",
                 name,
-                "--root",
-                str(queue_root),
                 "--jobs-file",
                 str(campaign_dir / f"jobs_{stage}.jsonl"),
                 "--depends-on",
