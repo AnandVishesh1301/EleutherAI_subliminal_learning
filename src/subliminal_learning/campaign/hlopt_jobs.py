@@ -9,7 +9,7 @@ seeds of a config land on distinct hosts. Every command line fully describes its
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from subliminal_learning.campaign import hlopt_plan as plan
 from subliminal_learning.jobqueue.model import Job
@@ -45,13 +45,19 @@ class Cell:
         return self.tier == plan.TIER_ANCHOR and self.source == "teacher"
 
 
+def _host(part: int, index: int, seed: int) -> str:
+    return (
+        plan.config_host(index, seed) if part == 1 else plan.config_host2(index, seed)
+    )
+
+
 def config_cells(
     config: plan.Config, index: int, seeds: Sequence[int], tier: str
 ) -> list[Cell]:
     """Treatment cells for each of `config.animals` plus one control, per seed."""
     out: list[Cell] = []
     for seed in seeds:
-        host = plan.config_host(index, seed)
+        host = _host(config.part, index, seed)
         for animal in config.animals:
             out.append(Cell(config, "teacher", animal, seed, host, tier))
         out.append(Cell(config, "base", None, seed, host, tier))
@@ -66,31 +72,31 @@ def main_cells() -> list[Cell]:
     return cells
 
 
-def extra_cells(selected: Mapping[str, Iterable[str]]) -> list[Cell]:
+def main_cells2() -> list[Cell]:
+    """Every Part II seed-1..3 cell (tiers a and s)."""
+    cells: list[Cell] = []
+    for index, config in enumerate(plan.configs2()):
+        cells.extend(config_cells(config, index, plan.SEEDS, config.tier))
+    return cells
+
+
+def extra_cells(selected: Mapping[str, Iterable[str]], part: int = 1) -> list[Cell]:
     """Seeds 4-5 of each selected config: treatments for the animals that chose it.
 
     Args:
         selected: Config key -> animals whose validation-selected rung it is.
+        part: Campaign part whose configs the keys name.
     """
-    by_key = {c.key: (i, c) for i, c in enumerate(plan.configs())}
+    by_key = {c.key: (i, c) for i, c in enumerate(plan.part_configs(part))}
+    tier = plan.TIER_X if part == 1 else plan.TIER2_X
     cells: list[Cell] = []
     for key in sorted(selected):
         index, config = by_key[key]
         animals = tuple(a for a in config.animals if a in set(selected[key]))
         if not animals:
             continue
-        sub = plan.Config(
-            config.tier,
-            config.recipe,
-            config.mode,
-            config.rank,
-            config.alpha,
-            config.optim,
-            config.lr,
-            config.epochs,
-            animals,
-        )
-        cells.extend(config_cells(sub, index, plan.EXTRA_SEEDS, plan.TIER_X))
+        sub = replace(config, animals=animals)
+        cells.extend(config_cells(sub, index, plan.EXTRA_SEEDS, tier))
     return cells
 
 
@@ -100,9 +106,12 @@ def cell_args(cell: Cell) -> str:
     shape = "" if c.mode == "full" else f" --rank {c.rank} --alpha {c.alpha}"
     animal = f" --animal {cell.animal}" if cell.animal else ""
     evals = " ".join(f"--eval-animal {a}" for a in cell.eval_animals)
+    clip = "" if c.clip == plan.MAX_GRAD_NORM else f" --clip {c.clip:g}"
+    part = "" if c.part == 1 else f" --part {c.part}"
     return (
         f"--recipe {c.recipe} --mode {c.mode}{shape} --optim {c.optim} --lr {c.lr:g} "
         f"--epochs {c.epochs} --source {cell.source}{animal} --seed {cell.seed} {evals}"
+        f"{clip}{part}"
     )
 
 
@@ -139,14 +148,25 @@ def base_late_job() -> Job:
     return _job(BASE_LATE_KEY, f"{_BASE} late-eval-base", plan.LATE_EVAL_MIB)
 
 
+def _queues(cell: Cell) -> tuple[str, str]:
+    if cell.config.part == 1:
+        return (
+            plan.train_queue(cell.tier, cell.host),
+            plan.late_queue(cell.tier, cell.host),
+        )
+    return (
+        plan.train_queue2(cell.tier, cell.host),
+        plan.late_queue2(cell.tier, cell.host),
+    )
+
+
 def queue_jobs(cells: Sequence[Cell]) -> dict[str, list[Job]]:
     """Train and late-eval queue name -> jobs, grouped by (tier, host)."""
     out: dict[str, list[Job]] = {}
     for cell in cells:
-        out.setdefault(plan.train_queue(cell.tier, cell.host), []).append(
-            train_job(cell)
-        )
-        out.setdefault(plan.late_queue(cell.tier, cell.host), []).append(late_job(cell))
+        train_q, late_q = _queues(cell)
+        out.setdefault(train_q, []).append(train_job(cell))
+        out.setdefault(late_q, []).append(late_job(cell))
     anchor_late = plan.late_queue(plan.TIER_ANCHOR, plan.HOME_NODE)
     if anchor_late in out:
         out[anchor_late].append(base_late_job())

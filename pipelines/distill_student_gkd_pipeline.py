@@ -239,6 +239,7 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
         teacher_temp=cfg.gkd.teacher_temp,
         optim=cfg.train.optim,
         optim_momentum=cfg.train.optim_momentum,
+        max_grad_norm=cfg.train.max_grad_norm,
         **asdict(sweep_gkd_axes_of(cfg.gkd)),
     )
     if cfg.control:

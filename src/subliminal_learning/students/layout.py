@@ -44,7 +44,7 @@ from subliminal_learning.config import LoRAConfig, TrainConfig
 # The optimizer slug vocabulary is shared with the on-policy GKD campaign on purpose:
 # both optimizer sweeps must spell `sgdm0.9` / `rmsprop` identically, or the two
 # campaigns' arms could not be compared and a slug could drift in one tree only.
-from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
+from subliminal_learning.gkd.layout import DEFAULT_OPTIM, clip_suffix, optim_slug
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
@@ -63,18 +63,20 @@ def student_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig | None) -> st
     so every pre-existing LoRA + AdamW cell keeps a byte-identical tag and no already
     trained student's directory moves. Without the optimizer component the eight arms of
     the off-policy optimizer campaign would collide onto one leaf per (epochs, LR, rank).
+    A non-default `max_grad_norm` adds `_clip{g}` after the optimizer slug.
 
     Args:
-        train_cfg: The cell's training hyperparameters (`optim`, `optim_momentum`).
+        train_cfg: The cell's training hyperparameters (`optim`, `optim_momentum`,
+            `max_grad_norm`).
         lora_cfg: Student LoRA config, or `None` for full fine-tuning.
 
     Returns:
-        E.g. `ep10_lr1e-4_r8a32`, `ep10_lr1e-4_full_sgdm0.9`.
+        E.g. `ep10_lr1e-4_r8a32`, `ep10_lr1e-4_full_sgdm0.9`, `ep20_lr1e-3_r8a32_sgd_clip0`.
     """
     tag = ft_param_tag(train_cfg, lora_cfg)
     if train_cfg.optim != DEFAULT_OPTIM or train_cfg.optim_momentum:
         tag += f"_{optim_slug(train_cfg.optim, train_cfg.optim_momentum)}"
-    return tag
+    return tag + clip_suffix(train_cfg.max_grad_norm)
 
 
 def student_param_dir(

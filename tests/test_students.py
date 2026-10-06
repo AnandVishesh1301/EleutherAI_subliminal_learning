@@ -45,6 +45,17 @@ def test_student_param_tag():
     assert student_param_tag(_TC, _LC) == "ep5_lr1e-4_r8a32"
 
 
+def test_student_param_tag_clip_suffix_after_optimizer():
+    sgd = replace(_TC, optim="sgd")
+    assert student_param_tag(sgd, _LC) == "ep5_lr1e-4_r8a32_sgd"
+    assert student_param_tag(replace(sgd, max_grad_norm=0.0), _LC) == (
+        "ep5_lr1e-4_r8a32_sgd_clip0"
+    )
+    assert student_param_tag(replace(_TC, max_grad_norm=0.0), None) == (
+        "ep5_lr1e-4_full_clip0"
+    )
+
+
 def test_student_param_dir_treatment_and_run_dir_are_parent_child():
     pd = student_param_dir(
         Path("/OUT"), source="teacher", spec=_SPEC, hub_org="EleutherAI",

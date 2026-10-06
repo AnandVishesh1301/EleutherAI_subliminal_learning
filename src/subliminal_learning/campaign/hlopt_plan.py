@@ -4,6 +4,10 @@ Off-policy number-sequence students on copies of Angela's Pythia-160M dog and li
 pools: {LoRA, full FT} x {AdamW, plain SGD} learning-rate ladders in her E3 recipe, an
 r8a8 shape check, and literature-recipe arms (Blank, Nief, Morgulis, Feng), each against
 an untuned-base-numbers control. Pre-registration: `docs/PREREG_HLOPT.md`.
+
+Part II (`hlopt2`, blog experiment E2; `docs/PREREG_HLOPT2.md`) completes the map with
+RMSProp and SGD+momentum ladders, unclipped plain SGD and an unclipped-AdamW check, on
+the same staged inputs, under its own queue root and student tree.
 """
 
 from __future__ import annotations
@@ -43,9 +47,13 @@ def paths_config_doc() -> dict[str, str]:
     }
 
 
-def recipe_output_root(recipe: str) -> Path:
-    """Output root of one recipe family (keeps families' student trees disjoint)."""
-    return OUTPUT_ROOT / "recipes" / recipe
+def recipe_output_root(recipe: str, part: int = 1) -> Path:
+    """Output root of one recipe family (keeps families' and parts' trees disjoint)."""
+    if part == 1:
+        return OUTPUT_ROOT / "recipes" / recipe
+    if part == 2:
+        return OUTPUT_ROOT / "part2" / "recipes" / recipe
+    raise ValueError(f"unknown part {part}")
 
 
 # ---- inputs ---------------------------------------------------------------------------
@@ -178,7 +186,12 @@ RECIPES: MappingProxyType[str, Recipe] = MappingProxyType(
     }
 )
 OPTIMS: MappingProxyType[str, tuple[str, float]] = MappingProxyType(
-    {"adamw": ("adamw_torch", 0.0), "sgd": ("sgd", 0.0), "sgdm": ("sgd", 0.9)}
+    {
+        "adamw": ("adamw_torch", 0.0),
+        "sgd": ("sgd", 0.0),
+        "sgdm": ("sgd", 0.9),
+        "rmsprop": ("rmsprop", 0.0),
+    }
 )
 MAX_GRAD_NORM = 1.0
 MAX_LENGTH = 256
@@ -204,11 +217,14 @@ class Config:
     lr: float
     epochs: int
     animals: tuple[str, ...]
+    clip: float = MAX_GRAD_NORM
+    part: int = 1
 
     @property
     def arm(self) -> str:
         shape = "full" if self.mode == "full" else f"r{self.rank}a{self.alpha}"
-        return f"{self.recipe}-{shape}-{self.optim}-ep{self.epochs}"
+        clip = "" if self.clip == MAX_GRAD_NORM else f"-clip{self.clip:g}"
+        return f"{self.recipe}-{shape}-{self.optim}{clip}-ep{self.epochs}"
 
     @property
     def key(self) -> str:
@@ -461,3 +477,222 @@ CAMPAIGN_STATE_FILE = "hlopt_campaign_state.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
 SELECTION_FILE = "extra_seed_selection.json"
 RESULTS_DIRNAME = "results"
+
+
+# ---- Part II (`hlopt2`, blog E2) -------------------------------------------------------
+
+CAMPAIGN2 = "hlopt2"
+PREREG2_PATH = "docs/PREREG_HLOPT2.md"
+RUN_SET_ID2 = "20261006_hlopt2_160m"
+QUEUE_ROOT2 = CAMPAIGN_ROOT / "queue_part2"
+PATHS2_CONFIG_PATH = CONFIG_DIR / "paths_hlopt2.yaml"
+GENERATED2_DIR = CONFIG_DIR / "generated_part2"
+CAMPAIGN2_STATE_FILE = "hlopt2_campaign_state.json"
+SELECTION2_FILE = "extra_seed_selection_part2.json"
+
+
+def paths2_config_doc() -> dict[str, str]:
+    """Part II paths YAML: Part I's roots with its own queue root."""
+    return {**paths_config_doc(), "queue_root": str(QUEUE_ROOT2)}
+
+
+UNCLIPPED = 0.0
+TIER2_A = "a"
+TIER2_S = "s"
+TIER2_X = "x"
+TRAIN_TIERS2: tuple[str, ...] = (TIER2_A, TIER2_S, TIER2_X)
+
+# (mode, optim, clip) -> learning-rate ladder, r8a32 LoRA or full FT, E3 recipe, 20 epochs.
+A2_LADDERS: MappingProxyType[tuple[str, str, float], tuple[float, ...]] = (
+    MappingProxyType(
+        {
+            ("lora", "rmsprop", MAX_GRAD_NORM): (
+                1e-5,
+                2.5e-5,
+                5e-5,
+                7e-5,
+                1e-4,
+                1.25e-4,
+                1.6e-4,
+                2e-4,
+                4e-4,
+            ),
+            ("lora", "sgdm", MAX_GRAD_NORM): (
+                1e-4,
+                5e-4,
+                1e-3,
+                2e-3,
+                3.5e-3,
+                5e-3,
+                7e-3,
+                1e-2,
+                2e-2,
+            ),
+            ("lora", "sgd", UNCLIPPED): (
+                1e-4,
+                3e-4,
+                1e-3,
+                2e-3,
+                3.5e-3,
+                5e-3,
+                7e-3,
+                1e-2,
+                2e-2,
+                5e-2,
+            ),
+            ("full", "rmsprop", MAX_GRAD_NORM): (
+                1.25e-7,
+                2.5e-7,
+                5e-7,
+                1e-6,
+                2e-6,
+                5e-6,
+                1e-5,
+                2e-5,
+            ),
+            ("full", "sgdm", MAX_GRAD_NORM): (
+                1e-4,
+                2.5e-4,
+                5e-4,
+                1e-3,
+                1.5e-3,
+                2e-3,
+                3.5e-3,
+                5e-3,
+                1e-2,
+            ),
+            ("full", "sgd", UNCLIPPED): (
+                1e-5,
+                3e-5,
+                1e-4,
+                2e-4,
+                3.5e-4,
+                5e-4,
+                7e-4,
+                1e-3,
+                2e-3,
+                5e-3,
+            ),
+        }
+    )
+)
+# Unclipped AdamW at a Part-I AdamW rung (clipping should barely move Adam).
+S2_SPECS: tuple[tuple[str, float], ...] = (("lora", 1e-4), ("full", 2e-6))
+
+
+def _a2_configs() -> list[Config]:
+    out = []
+    for (mode, optim, clip), ladder in A2_LADDERS.items():
+        rank, alpha = (None, None) if mode == "full" else A_SHAPE
+        for lr in ladder:
+            out.append(
+                Config(
+                    TIER2_A,
+                    "e3",
+                    mode,
+                    rank,
+                    alpha,
+                    optim,
+                    lr,
+                    A_EPOCHS,
+                    ANIMALS,
+                    clip=clip,
+                    part=2,
+                )
+            )
+    return out
+
+
+def _s2_configs() -> list[Config]:
+    out = []
+    for mode, lr in S2_SPECS:
+        rank, alpha = (None, None) if mode == "full" else A_SHAPE
+        out.append(
+            Config(
+                TIER2_S,
+                "e3",
+                mode,
+                rank,
+                alpha,
+                "adamw",
+                lr,
+                A_EPOCHS,
+                ANIMALS,
+                clip=UNCLIPPED,
+                part=2,
+            )
+        )
+    return out
+
+
+def configs2() -> tuple[Config, ...]:
+    """Every Part II seed-1..3 config, in the fixed order that sets node placement."""
+    return tuple(_a2_configs() + _s2_configs())
+
+
+def a2_arms() -> tuple[str, ...]:
+    """Part II Tier-A arm names (extra-seed selection is per (animal, arm))."""
+    return tuple(dict.fromkeys(c.arm for c in configs2() if c.tier == TIER2_A))
+
+
+def part_configs(part: int) -> tuple[Config, ...]:
+    """The configs of `part`."""
+    if part == 1:
+        return configs()
+    if part == 2:
+        return configs2()
+    raise ValueError(f"unknown part {part}")
+
+
+# Part II runs on cluster-5 (all GPUs) and soar GPUs 4-7 (soar 0-3 host the blog's
+# whole-card inference / docgen jobs). Two of every three placements go to cluster-5.
+HOSTS2: tuple[str, ...] = (CLUSTER5, SOAR)
+HOST2_CYCLE: tuple[str, ...] = (CLUSTER5, CLUSTER5, SOAR)
+GPUS2: MappingProxyType[str, tuple[int, ...]] = MappingProxyType(
+    {CLUSTER5: tuple(range(N_GPUS)), SOAR: (4, 5, 6, 7)}
+)
+TMUX_SESSION2 = CAMPAIGN2
+WATCH_SESSION2 = f"{CAMPAIGN2}-watch"
+PRIORITY2: MappingProxyType[str, int] = MappingProxyType(
+    {TIER2_A: 90, TIER2_X: 85, TIER2_S: 80, "late": 10}
+)
+
+
+def config_host2(index: int, seed: int) -> str:
+    """Part II host of seed `seed` of the config at `index`."""
+    return HOST2_CYCLE[(index + seed - 1) % len(HOST2_CYCLE)]
+
+
+def workers_per_node2(host: str) -> int:
+    return host_cap_per_gpu(host) * len(GPUS2[host])
+
+
+def train_queue2(tier: str, host: str) -> str:
+    return f"{CAMPAIGN2}-{tier}-{HOST_TAG[host]}"
+
+
+def late_queue2(tier: str, host: str) -> str:
+    return f"{CAMPAIGN2}-late-{tier}-{HOST_TAG[host]}"
+
+
+def _queue_priorities2() -> dict[str, int]:
+    out: dict[str, int] = {}
+    for host in HOSTS2:
+        for tier in TRAIN_TIERS2:
+            out[train_queue2(tier, host)] = PRIORITY2[tier]
+            out[late_queue2(tier, host)] = PRIORITY2["late"]
+    return out
+
+
+QUEUE_PRIORITIES2: MappingProxyType[str, int] = MappingProxyType(_queue_priorities2())
+
+
+def pool_queues2(host: str) -> tuple[str, ...]:
+    """Every Part II queue pinned to `host`, by priority (a pool's --queues list)."""
+    names = [n for n in QUEUE_PRIORITIES2 if queue_host(n) == host]
+    return tuple(sorted(names, key=lambda n: (-QUEUE_PRIORITIES2[n], n)))
+
+
+def gpu_policy_json2(host: str) -> dict:
+    """`host`'s Part II jobq policy (its GPU subset)."""
+    return {**gpu_policy_json(host), "gpus": list(GPUS2[host])}

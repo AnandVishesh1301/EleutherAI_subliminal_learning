@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,7 +113,7 @@ class TrainConfig:
         max_length: Legacy max seq length in tokens, still carried by the training
             YAMLs. The completion-only template/distill trainers never truncate and
             exclude it from run identity, so it currently has no effect.
-        max_grad_norm: Gradient clip norm.
+        max_grad_norm: Gradient clip norm; ``0`` = unclipped (see `hf_max_grad_norm`).
         warmup_ratio: Fraction of total steps used for LR warmup.
         lr_scheduler_type: LR scheduler
         seed: Training seed
@@ -158,6 +159,21 @@ class TrainConfig:
     save_total_limit: int = 1
     max_steps: int | None = None
     warmup_steps: int = 0
+
+
+def hf_max_grad_norm(max_grad_norm: float) -> float:
+    """HF `TrainingArguments.max_grad_norm` for a configured clip norm.
+
+    ``0`` (unclipped) maps to an infinite cap: HF then still computes and logs the
+    pre-clip ``grad_norm`` (it skips both when the cap is ``0``), and the clip factor
+    ``min(1, inf / norm)`` is exactly 1, so gradients are unchanged.
+
+    Raises:
+        ValueError: Negative `max_grad_norm`.
+    """
+    if max_grad_norm < 0:
+        raise ValueError(f"max_grad_norm must be >= 0, got {max_grad_norm}")
+    return math.inf if max_grad_norm == 0 else float(max_grad_norm)
 
 
 @dataclass(frozen=True)

@@ -34,6 +34,7 @@ seed-averaging is a `{gkd_tag}/*` glob.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -47,6 +48,7 @@ CONTROL_TEACHER_TAG = "base_teacher"
 XBASE_CONTROL_TEACHER_TAG = "xbase_teacher"
 
 DEFAULT_OPTIM = "adamw_torch"
+DEFAULT_MAX_GRAD_NORM = 1.0
 
 # HF ``TrainingArguments.optim`` name -> path-safe tag slug. Closed on purpose: an
 # unrecognised optimizer raises at tag time rather than minting a leaf that
@@ -94,6 +96,22 @@ _OPTIM_SLUG_RE = re.compile(
     rf"^(?P<slug>{'|'.join(sorted(OPTIM_BY_SLUG, key=len, reverse=True))})"
     r"(?:m(?P<momentum>[0-9.]+))?$"
 )
+
+
+def clip_suffix(max_grad_norm: float) -> str:
+    """Tag suffix of a non-default gradient-clip norm: ``""``, ``_clip0``, ``_clip0.5``.
+
+    ``0`` means clipping off (HF clips only when ``max_grad_norm > 0``).
+
+    Raises:
+        ValueError: Negative or non-finite `max_grad_norm`.
+    """
+    value = float(max_grad_norm)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"max_grad_norm must be finite and >= 0, got {max_grad_norm}")
+    if value == DEFAULT_MAX_GRAD_NORM:
+        return ""
+    return f"_clip{value:g}"
 
 
 def parse_optim_slug(slug: str) -> tuple[str, float]:
@@ -195,6 +213,7 @@ def gkd_tag(
     prompt_subset_seed: int = 0,
     rollout_screen: str = "legacy",
     mask_eos: bool = False,
+    max_grad_norm: float = DEFAULT_MAX_GRAD_NORM,
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -224,6 +243,9 @@ def gkd_tag(
             subset block and before ``_top*``.
         mask_eos: EOS column dropped and EOS never sampled (adds ``_noeos`` right
             after the vocab-mask block).
+        max_grad_norm: Gradient-clip norm; adds ``_clip{g}`` right after the
+            optimizer slug when it is not `DEFAULT_MAX_GRAD_NORM` (``_clip0`` =
+            unclipped).
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
@@ -264,6 +286,7 @@ def gkd_tag(
         tag += f"_ttemp{teacher_temp:.1f}"
     if optim != DEFAULT_OPTIM or optim_momentum:
         tag += f"_{optim_slug(optim, optim_momentum)}"
+    tag += clip_suffix(max_grad_norm)
     if prompt_subset_size is not None:
         tag += f"_n{prompt_subset_size}"
         if prompt_subset_seed:

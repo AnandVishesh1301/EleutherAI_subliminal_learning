@@ -27,7 +27,7 @@ from transformers import (
 )
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
-from subliminal_learning.config import TrainConfig
+from subliminal_learning.config import TrainConfig, hf_max_grad_norm
 from subliminal_learning.training.sft_io import SftResult
 
 
@@ -125,7 +125,7 @@ def run_teacher_sft_completion_only(
         lr_scheduler_type=train_cfg.lr_scheduler_type,
         warmup_ratio=train_cfg.warmup_ratio,
         warmup_steps=train_cfg.warmup_steps,
-        max_grad_norm=train_cfg.max_grad_norm,
+        max_grad_norm=hf_max_grad_norm(train_cfg.max_grad_norm),
         seed=train_cfg.seed,
         save_strategy=save_strategy,
         save_steps=train_cfg.save_steps,

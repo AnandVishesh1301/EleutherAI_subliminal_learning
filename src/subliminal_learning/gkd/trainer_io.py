@@ -59,7 +59,7 @@ from trl import GKDConfig, GKDTrainer
 from trl.models.utils import unwrap_model_for_generation
 from trl.trainer.utils import empty_cache
 
-from subliminal_learning.config import TrainConfig
+from subliminal_learning.config import TrainConfig, hf_max_grad_norm
 from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_teacher
 from subliminal_learning.gkd.filtering import (
     SCREEN_RULES,
@@ -840,7 +840,7 @@ def build_gkd_config(
         optim=train_cfg.optim,
         lr_scheduler_type=train_cfg.lr_scheduler_type,
         warmup_ratio=train_cfg.warmup_ratio,
-        max_grad_norm=train_cfg.max_grad_norm,
+        max_grad_norm=hf_max_grad_norm(train_cfg.max_grad_norm),
         max_length=train_cfg.max_length,
         seed=train_cfg.seed,
         save_strategy=save_strategy,

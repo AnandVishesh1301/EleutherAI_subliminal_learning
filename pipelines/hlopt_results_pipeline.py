@@ -18,6 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 from pipelines.distill_student_pipeline import TRAIN_LOG_HISTORY_FILE
+from subliminal_learning.analysis.clip_stats import clip_stats
 from subliminal_learning.campaign import hlopt_jobs as jobs
 from subliminal_learning.campaign import hlopt_layout as layout
 from subliminal_learning.campaign import hlopt_metrics as metrics
@@ -58,6 +59,7 @@ def cell_rows(
         probe = _read(layout.probe_path(leaf)) or {}
         lmeval = _read(layout.lmeval_path(leaf)) or {}
         history = _read(leaf / TRAIN_LOG_HISTORY_FILE)
+        clips = clip_stats(history or [], c.clip)
         for animal in cell.eval_animals:
             sets = (_read(layout.preference_path(leaf, cell.source, animal)) or {}).get(
                 "sets", {}
@@ -71,6 +73,8 @@ def cell_rows(
                 "rank": c.rank,
                 "alpha": c.alpha,
                 "optim": c.optim,
+                "clip": c.clip,
+                "part": c.part,
                 "lr": c.lr,
                 "epochs": c.epochs,
                 "source": cell.source,
@@ -86,6 +90,10 @@ def cell_rows(
                 "collapsed": probe.get("collapsed"),
                 "final_train_loss": manifest.get("final_train_loss"),
                 "last_logged_loss": _last_logged_loss(history),
+                "grad_norm_p10": clips.grad_norm_p10,
+                "grad_norm_p50": clips.grad_norm_p50,
+                "grad_norm_p90": clips.grad_norm_p90,
+                "frac_clipped": clips.frac_clipped,
                 "n_train_steps": manifest.get("n_train_steps"),
                 "lmeval": {
                     f"{task}_{m}": v
@@ -106,9 +114,12 @@ def _flatten(row: Mapping, nested: tuple[str, ...]) -> dict:
     return flat
 
 
-def all_cells(selection: Mapping[str, list[str]] | None) -> list[jobs.Cell]:
-    """Main cells plus the extra-seed cells of `selection`."""
-    return jobs.main_cells() + (jobs.extra_cells(selection) if selection else [])
+def all_cells(
+    selection: Mapping[str, list[str]] | None, part: int = 1
+) -> list[jobs.Cell]:
+    """Main cells of `part` plus the extra-seed cells of `selection`."""
+    main = jobs.main_cells() if part == 1 else jobs.main_cells2()
+    return main + (jobs.extra_cells(selection, part) if selection else [])
 
 
 def build(
@@ -116,9 +127,10 @@ def build(
     spec: PythiaModelSpec,
     hub_org: str,
     selection: Mapping[str, list[str]] | None,
+    part: int = 1,
 ) -> dict[str, str]:
-    """Write cells / deltas / rungs CSVs; return their paths."""
-    rows = cell_rows(spec, hub_org, all_cells(selection))
+    """Write cells / deltas / rungs CSVs of `part`; return their paths."""
+    rows = cell_rows(spec, hub_org, all_cells(selection, part))
     deltas = metrics.paired_deltas(rows)
     cells_df = pd.DataFrame([_flatten(r, ("p", "lmeval")) for r in rows])
     deltas_df = pd.DataFrame(
@@ -149,6 +161,7 @@ def build(
                     "recipe": g["recipe"].iloc[0],
                     "mode": g["mode"].iloc[0],
                     "optim": g["optim"].iloc[0],
+                    "clip": g["clip"].iloc[0],
                     "lr": g["lr"].iloc[0],
                     "epochs": g["epochs"].iloc[0],
                     "selected": bool(selection and animal in selection.get(key, [])),
@@ -159,6 +172,8 @@ def build(
                         sub[col].std(ddof=1) if len(sub) > 1 else math.nan
                     )
                 rung["collapsed_frac"] = sub["collapsed"].astype(float).mean()
+                rung["grad_norm_p50_mean"] = sub["grad_norm_p50"].mean()
+                rung["frac_clipped_mean"] = sub["frac_clipped"].mean()
                 rung_rows.append(rung)
     results_dir.mkdir(parents=True, exist_ok=True)
     out = {}

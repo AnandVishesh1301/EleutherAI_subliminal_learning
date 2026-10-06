@@ -51,6 +51,7 @@ from subliminal_learning.evaluation.preference_scoring import (
 from subliminal_learning.evaluation.sdf_results_io import parse_sdf_param_tag
 from subliminal_learning.gkd.layout import (
     CONTROL_TEACHER_TAG,
+    DEFAULT_MAX_GRAD_NORM,
     DEFAULT_OPTIM,
     GKD_STUDENTS_SUBDIR,
     OPTIM_BY_SLUG,
@@ -68,6 +69,7 @@ _GKD_TAG_RE = re.compile(
     r"(?P<noeos>_noeos)?"
     r"(?:_ttemp(?P<ttemp>[0-9.]+))?"
     rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?"
+    r"(?:_clip(?P<clip>[0-9.]+))?"
     r"(?:_n(?P<subset_n>\d+)(?:d(?P<subset_seed>\d+))?)?"
     r"(?:_(?P<rollout_screen>strict))?"
     r"(?:_top(?:ce(?P<top_k_ce>\d+)|(?P<top_k>\d+)(?P<top_k_ghost>g)?))?$"
@@ -95,6 +97,7 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         reads back as ``top_k=K``, ``top_k_ce=True``. No ``_n{N}`` reads back as
         ``prompt_subset_size=None``, ``prompt_subset_seed=0``. No ``_strict`` reads back as
         ``rollout_screen="legacy"``. No ``_noeos`` reads back as ``mask_eos=False``.
+        No ``_clip{g}`` reads back as ``max_grad_norm=1.0``.
 
     Raises:
         ValueError: if `gkd_tag` matches neither the epoch- nor step-budget format.
@@ -132,6 +135,9 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         else 0,
         "rollout_screen": g["rollout_screen"] or "legacy",
         "mask_eos": g["noeos"] is not None,
+        "max_grad_norm": float(g["clip"])
+        if g["clip"] is not None
+        else DEFAULT_MAX_GRAD_NORM,
     }
 
 

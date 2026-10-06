@@ -499,6 +499,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
+            max_grad_norm=base.train.max_grad_norm,
             **asdict(gkd_axes),
         )
         do_bench = _should_benchmark(

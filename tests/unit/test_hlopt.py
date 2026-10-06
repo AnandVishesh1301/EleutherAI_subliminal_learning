@@ -234,3 +234,98 @@ def test_student_identity_adds_accum_and_warmup_steps_only_off_default(tmp_path:
         tmp_path, replace(_TRAIN, gradient_accumulation_steps=3, warmup_steps=5)
     )["train"]
     assert changed["gradient_accumulation_steps"] == 3 and changed["warmup_steps"] == 5
+
+
+# ---- Part II (`hlopt2`) ------------------------------------------------------------
+
+
+def test_part1_identity_is_unchanged_by_part2_fields():
+    for c in plan.configs():
+        assert (c.clip, c.part) == (plan.MAX_GRAD_NORM, 1)
+        assert "clip" not in c.arm
+    for cell in jobs.main_cells():
+        assert "--clip" not in jobs.cell_args(cell)
+        assert "--part" not in jobs.cell_args(cell)
+    assert plan.recipe_output_root("e3") == plan.OUTPUT_ROOT / "recipes" / "e3"
+
+
+def test_part2_configs_counts_arms_and_unique_keys():
+    configs = plan.configs2()
+    keys = [c.key for c in configs]
+    assert len(keys) == len(set(keys)) == 57
+    assert _by_tier(configs) == {"a": 55, "s": 2}
+    assert set(plan.a2_arms()) == {
+        "e3-r8a32-rmsprop-ep20",
+        "e3-r8a32-sgdm-ep20",
+        "e3-r8a32-sgd-clip0-ep20",
+        "e3-full-rmsprop-ep20",
+        "e3-full-sgdm-ep20",
+        "e3-full-sgd-clip0-ep20",
+    }
+    assert {(c.mode, c.optim, c.clip) for c in configs if c.tier == "s"} == {
+        ("lora", "adamw", 0.0),
+        ("full", "adamw", 0.0),
+    }
+    assert not {c.key for c in configs} & {c.key for c in plan.configs()}
+
+
+@pytest.mark.parametrize(
+    ("mode", "optim", "clip", "suffix"),
+    [
+        ("lora", "rmsprop", 1.0, "ep20_lr1e-4_r8a32_rmsprop"),
+        ("lora", "sgdm", 1.0, "ep20_lr1e-3_r8a32_sgdm0.9"),
+        ("lora", "sgd", 0.0, "ep20_lr1e-3_r8a32_sgd_clip0"),
+        ("full", "sgd", 0.0, "ep20_lr1e-3_full_sgd_clip0"),
+        ("full", "adamw", 0.0, "ep20_lr2e-6_full_clip0"),
+    ],
+)
+def test_part2_leaves_live_in_the_part2_tree_with_distinct_tags(
+    mode, optim, clip, suffix
+):
+    lr = float(suffix.split("_lr")[1].split("_")[0])
+    config = next(
+        c
+        for c in plan.configs2()
+        if (c.mode, c.optim, c.clip) == (mode, optim, clip) and c.lr == lr
+    )
+    spec = PythiaModelSpec(size="160m")
+    leaf = layout.run_dir(spec, "EleutherAI", config, "teacher", "dog", 1)
+    assert leaf.parent.name == suffix
+    assert leaf.is_relative_to(plan.OUTPUT_ROOT / "part2" / "recipes" / "e3")
+    lora, train = layout.train_cfgs(config, 1)
+    assert train.max_grad_norm == clip
+    assert (lora is None) == (mode == "full")
+
+
+def test_part2_cells_hosts_queues_and_commands():
+    cells = jobs.main_cells2()
+    assert len(cells) == 57 * 3 * 3
+    keys = [c.key for c in cells]
+    assert len(keys) == len(set(keys))
+    assert {c.host for c in cells} == set(plan.HOSTS2)
+    queues = jobs.queue_jobs(cells)
+    assert set(queues) <= set(plan.QUEUE_PRIORITIES2)
+    assert jobs.BASE_LATE_KEY not in {j.key for q in queues.values() for j in q}
+    for queue in queues.values():
+        for job in queue:
+            assert "--part 2" in job.cmd
+            assert "angela" not in job.cmd and "/mnt/" not in job.cmd
+    unclipped = [c for c in cells if c.config.clip == 0.0]
+    assert unclipped and all("--clip 0" in jobs.cell_args(c) for c in unclipped)
+
+
+def test_part2_extra_cells_keep_clip_and_part():
+    key = next(c.key for c in plan.configs2() if c.clip == 0.0)
+    cells = jobs.extra_cells({key: ["dog"]}, part=2)
+    assert {c.seed for c in cells} == set(plan.EXTRA_SEEDS)
+    assert {c.tier for c in cells} == {plan.TIER2_X}
+    assert all(c.config.clip == 0.0 and c.config.part == 2 for c in cells)
+    assert all(q in plan.QUEUE_PRIORITIES2 for q in jobs.queue_jobs(cells))
+
+
+def test_part2_policy_uses_soar_gpus_4_to_7_only():
+    assert plan.gpu_policy_json2(plan.SOAR)["gpus"] == [4, 5, 6, 7]
+    assert plan.gpu_policy_json2(plan.CLUSTER5)["gpus"] == list(range(8))
+    assert plan.workers_per_node2(plan.SOAR) == plan.CAP_PER_GPU * 4
+    assert plan.paths2_config_doc()["queue_root"] == str(plan.QUEUE_ROOT2)
+    assert plan.paths2_config_doc()["output_root"] == str(plan.OUTPUT_ROOT)

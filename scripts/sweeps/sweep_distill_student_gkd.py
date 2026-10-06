@@ -612,6 +612,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
+            max_grad_norm=train_base.max_grad_norm,
             **asdict(gkd_axes),
         )
         ttag = teacher_tag(
@@ -756,6 +757,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
+            max_grad_norm=train_base.max_grad_norm,
             **asdict(gkd_axes),
         )
         param_tag = teacher_param_tags[tmode]

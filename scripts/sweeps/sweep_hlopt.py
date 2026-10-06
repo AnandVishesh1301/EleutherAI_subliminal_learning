@@ -45,24 +45,25 @@ def _context():
     return cfg.paths, cfg.model.hub_org, spec
 
 
-def _config(recipe, mode, rank, alpha, optim, lr, epochs) -> plan.Config:
-    """The plan config these flags name.
+def _config(
+    recipe, mode, rank, alpha, optim, lr, epochs, clip=plan.MAX_GRAD_NORM, part=1
+) -> plan.Config:
+    """The plan config these flags name (searched within `part`).
 
     Raises:
         typer.BadParameter: No plan config matches.
     """
-    for c in plan.configs():
-        if (c.recipe, c.mode, c.rank, c.alpha, c.optim, c.epochs) == (
-            recipe,
-            mode,
-            rank,
-            alpha,
-            optim,
-            epochs,
-        ) and math.isclose(c.lr, lr, rel_tol=1e-9):
+    for c in plan.part_configs(part):
+        if (
+            (c.recipe, c.mode, c.rank, c.alpha, c.optim, c.epochs)
+            == (recipe, mode, rank, alpha, optim, epochs)
+            and math.isclose(c.lr, lr, rel_tol=1e-9)
+            and math.isclose(c.clip, clip, rel_tol=1e-9, abs_tol=1e-12)
+        ):
             return c
     raise typer.BadParameter(
-        f"no hlopt config {recipe}/{mode}/r{rank}a{alpha}/{optim}/lr{lr:g}/ep{epochs}"
+        f"no hlopt part-{part} config {recipe}/{mode}/r{rank}a{alpha}/{optim}"
+        f"/lr{lr:g}/ep{epochs}/clip{clip:g}"
     )
 
 
@@ -212,7 +213,7 @@ _CELL_OPTS = dict(
     mode=typer.Option(..., help="lora | full."),
     rank=typer.Option(None, help="LoRA rank (lora only)."),
     alpha=typer.Option(None, help="LoRA alpha (lora only)."),
-    optim=typer.Option(..., help="adamw | sgd | sgdm."),
+    optim=typer.Option(..., help="adamw | sgd | sgdm | rmsprop."),
     lr=typer.Option(..., help="Learning rate."),
     epochs=typer.Option(..., help="Epochs."),
     source=typer.Option(..., help="teacher | base."),
@@ -221,6 +222,8 @@ _CELL_OPTS = dict(
     eval_animal=typer.Option(..., "--eval-animal", help="Animal(s) to score."),
     base_ref=typer.Option(False, "--base-ref", help="Also score the untuned base."),
     device=typer.Option("cuda:0", help="Torch device."),
+    clip=typer.Option(plan.MAX_GRAD_NORM, help="max_grad_norm (0 = unclipped)."),
+    part=typer.Option(1, help="Campaign part (1 = hlopt, 2 = hlopt2)."),
 )
 
 
@@ -248,6 +251,8 @@ def train_cell(
     eval_animal: list[str] = _CELL_OPTS["eval_animal"],
     base_ref: bool = _CELL_OPTS["base_ref"],
     device: str = _CELL_OPTS["device"],
+    clip: float = _CELL_OPTS["clip"],
+    part: int = _CELL_OPTS["part"],
 ) -> None:
     """Distil one student, then pp1-probe and prob-score it."""
     from loguru import logger
@@ -257,7 +262,7 @@ def train_cell(
     from subliminal_learning.utils.io import file_sha256
 
     _setup()
-    config = _config(recipe, mode, rank, alpha, optim, lr, epochs)
+    config = _config(recipe, mode, rank, alpha, optim, lr, epochs, clip, part)
     _check_cell(config, source, animal, eval_animal)
     paths, hub_org, spec = _context()
     pool = _pool(source, animal)
@@ -270,7 +275,9 @@ def train_cell(
     logger.info("HLOPT TRAIN {} {} {} s{}", config.key, source, animal, seed)
     result = distill_run(
         DistillStudentConfig(
-            paths=replace(paths, output_root=plan.recipe_output_root(config.recipe)),
+            paths=replace(
+                paths, output_root=plan.recipe_output_root(config.recipe, config.part)
+            ),
             hub_org=hub_org,
             spec=spec,
             source=source,
@@ -327,6 +334,8 @@ def late_eval_cell(
     eval_animal: list[str] = _CELL_OPTS["eval_animal"],
     base_ref: bool = _CELL_OPTS["base_ref"],
     device: str = _CELL_OPTS["device"],
+    clip: float = _CELL_OPTS["clip"],
+    part: int = _CELL_OPTS["part"],
 ) -> None:
     """lm-eval + sampled sets of one trained student (skipped when its weights are non-finite)."""
     from loguru import logger
@@ -340,7 +349,7 @@ def late_eval_cell(
     from subliminal_learning.utils.run_io import cell_is_done
 
     _setup()
-    config = _config(recipe, mode, rank, alpha, optim, lr, epochs)
+    config = _config(recipe, mode, rank, alpha, optim, lr, epochs, clip, part)
     _check_cell(config, source, animal, eval_animal)
     paths, hub_org, spec = _context()
     run_dir = layout.run_dir(spec, hub_org, config, source, animal, seed)

@@ -14,6 +14,7 @@ from subliminal_learning.config import LoRAConfig
 from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
 from subliminal_learning.gkd.layout import (
     DEFAULT_OPTIM,
+    clip_suffix,
     gkd_control_run_dir,
     gkd_run_label,
     gkd_student_run_dir,
@@ -762,3 +763,56 @@ def test_gkd_tag_mask_eos_suffix_after_vmask_and_round_trips() -> None:
     assert parse_gkd_tag(both)["mask_eos"] is True
     assert parse_gkd_tag(both)["vocab_mask_forms"] is True
     assert parse_gkd_tag("lmb1.0_b1.0_lora_lr4e-4_e1_r8a16")["mask_eos"] is False
+
+
+def test_gkd_tag_default_clip_is_byte_identical_to_legacy() -> None:
+    for expected, kwargs in _LEGACY_TAGS:
+        assert gkd_tag(**kwargs, max_grad_norm=1.0) == expected
+
+
+@pytest.mark.parametrize(
+    ("max_grad_norm", "suffix"), [(0.0, "_clip0"), (0.5, "_clip0.5"), (2.0, "_clip2")]
+)
+def test_gkd_tag_clip_suffix_follows_optimizer_and_round_trips(
+    max_grad_norm: float, suffix: str
+) -> None:
+    tag = gkd_tag(
+        lmbda=1.0,
+        beta=1.0,
+        student_mode="lora",
+        learning_rate=0.3,
+        num_epochs=1,
+        lora=LoRAConfig(
+            r=8, lora_alpha=16, lora_dropout=0.0, target_modules="all-linear"
+        ),
+        optim="sgd",
+        optim_momentum=0.9,
+        max_grad_norm=max_grad_norm,
+        prompt_subset_size=1000,
+        rollout_screen="strict",
+    )
+    assert tag == f"lmb1.0_b1.0_lora_lr3e-1_e1_r8a16_sgdm0.9{suffix}_n1000_strict"
+    parsed = parse_gkd_tag(tag)
+    assert parsed["max_grad_norm"] == max_grad_norm
+    assert (parsed["student_optim"], parsed["optim_momentum"]) == ("sgd", 0.9)
+    assert parsed["prompt_subset_size"] == 1000
+    assert parsed["rollout_screen"] == "strict"
+
+
+def test_gkd_tag_clipped_and_unclipped_cells_are_distinct() -> None:
+    base = dict(
+        lmbda=1.0,
+        beta=1.0,
+        student_mode="full",
+        learning_rate=1e-2,
+        num_epochs=1,
+        optim="sgd",
+    )
+    assert gkd_tag(**base) != gkd_tag(**base, max_grad_norm=0.0)
+    assert parse_gkd_tag(gkd_tag(**base))["max_grad_norm"] == 1.0
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
+def test_clip_suffix_rejects_invalid_norms(bad: float) -> None:
+    with pytest.raises(ValueError):
+        clip_suffix(bad)

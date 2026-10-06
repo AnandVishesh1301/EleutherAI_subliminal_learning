@@ -28,7 +28,7 @@ def train_cfgs(config: plan.Config, seed: int) -> tuple[LoRAConfig | None, Train
         n_epochs=config.epochs,
         batch_size=recipe.full_batch_size if full else recipe.batch_size,
         max_length=plan.MAX_LENGTH,
-        max_grad_norm=plan.MAX_GRAD_NORM,
+        max_grad_norm=config.clip,
         warmup_ratio=recipe.warmup_ratio,
         lr_scheduler_type=recipe.scheduler,
         seed=seed,
@@ -62,7 +62,7 @@ def run_dir(
     lora, train = train_cfgs(config, seed)
     teacher = source == "teacher"
     return student_run_dir(
-        plan.recipe_output_root(config.recipe),
+        plan.recipe_output_root(config.recipe, config.part),
         source=source,
         spec=spec,
         hub_org=hub_org,
