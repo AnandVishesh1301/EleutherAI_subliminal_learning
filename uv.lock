@@ -877,7 +877,7 @@ wheels = [
 [[package]]
 name = "gpu-jobq"
 version = "0.1.0"
-source = { git = "https://github.com/tangang8/gpu-jobq.git#634017dfc7f3db6edb987e33ada63aa4b0314de3" }
+source = { git = "https://github.com/tangang8/gpu-jobq.git#f58a3246cdf9d57e7d98d15ddcd35e69bf53a66c" }
 dependencies = [
     { name = "loguru" },
     { name = "typer" },
