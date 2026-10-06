@@ -2668,6 +2668,52 @@ all five nodes on the ssd-1 root `/mnt/ssd-1/soar-subliminal/vishesh/traitfree_c
   pythia-160m@143k placebo leaves; `scripts.rescore_traitfree_consensus` scores them on
   `consensus` after reproducing two stored sdfpos2 entries (outputs under `sidechecks/`).
 
+### Optimizer blog post, wave 1 (hlopt2, optparam2)
+
+Branch `vishesh/blogpost`; plans in `.claude/plans/blogpost/` and pre-registrations in
+`docs/` (both local). The agenda is `docs/BLOGPOST_EXPERIMENT_PLAN_20261005.md`.
+
+**Clipping is part of the run name.**
+- `max_grad_norm` ≠ 1.0 appends `_clip{g}` right after the optimizer slug, in both
+  `gkd.layout.gkd_tag` and `students.layout.student_param_tag`. `parse_gkd_tag` reads it
+  back. The default 1.0 adds nothing, so every older name is byte-identical.
+- `0` means unclipped. It reaches HF as an infinite cap (`config.hf_max_grad_norm`), so
+  gradients are unchanged and the pre-clip `grad_norm` is still logged. HF logs nothing at
+  cap 0.
+- `analysis/clip_stats.py` summarizes a log history: grad-norm p10/p50/p90, fraction of
+  steps clipped, first/last loss. Its reader is `analysis/train_log_io.py`.
+
+**hlopt Part II (`hlopt2`, E2).** Hard-label map completion on hlopt's staged inputs:
+- RMSProp and SGD+momentum ladders, unclipped SGD, and unclipped AdamW, in LoRA and full FT.
+- Constants are the Part II block of `campaign/hlopt_plan.py`. Students live under
+  `outputs/part2/`, with their own queue root `queue_part2`.
+- Driver `scripts.run_hlopt2_campaign`; launcher `scripts/launch_hlopt2_campaign.sh`.
+  Placement: cluster-5 plus soar GPUs 4–7.
+
+**On-policy optimizer map v2 (`optparam2`, E1).** Constants in `campaign/optparam2_plan.py`
+(plus `_jobs`, `_metrics`); root `/mnt/ssd-1/soar-subliminal/vishesh/optparam2`.
+- **Students:** ws160m frozen GKD students of the bear/lion headline SDF teachers.
+  - Arms: {LoRA r8α16, full} × {AdamW, RMSProp, SGD clip1, SGD clip0, SGD+m} ladders,
+    55 configs.
+  - Control: each treatment leaf has a placebo-teacher twin (traitfree corpus) with the
+    same (tfs, gseed).
+- **Tiers:** a = 625 steps, seeds (s, s). After the validation selection come
+  - b = 2,500-step windows for SGD-family arms;
+  - c = data-seed1;
+  - x = seeds (0, 3), (1, 4);
+  - s = secondary untuned-base controls.
+- **Run set:** one, `gkd_students/20261006_optparam2_160m`. Placebo and treatment leaves
+  differ only in their teacher-tag dir. Never pool them with
+  `gkd_results_io.subliminal_delta`; `optparam2_metrics` keys on the teacher tag.
+- **Leaf job:** sweep train → `scripts.sweeps.sweep_optparam2 verify-leaf` → flock eval →
+  `probe-leaf` (pp1 ΔCE vs the leaf's own base). The late queue runs lm-eval.
+- **Inputs:** `scripts.stage_optparam2_assets` copies them create-only. Treatment teachers
+  come from ssd-3/cold-1, so staging runs on soar.
+- **Driver and launcher:** driver on soar, workers on cluster-3/4 at cap 2. Holes (leaves
+  failing after 3 requeues) are labelled and never block.
+- **Results:** `results/{leaves,rungs,deltas}.csv` plus `claims.json` (G0–G7).
+- Clip-off arms use `configs/training/gkd_student_clip0.yaml`.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):
