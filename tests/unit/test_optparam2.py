@@ -197,7 +197,10 @@ def test_hosts_keep_config_dirs_and_twins_together():
 
 
 def test_policy_only_on_worker_hosts():
-    assert plan.gpu_policy_json(plan.CLUSTER3)["cap_per_gpu"] == 2
+    policy = plan.gpu_policy_json(plan.CLUSTER3)
+    assert policy["cap_per_gpu"] == 2
+    assert policy["cap_per_gpu"] * max(plan.MEM_MIB.values()) <= 46_000
+    assert policy["reservation_warmup_s"] == plan.RESERVATION_WARMUP_S
     assert plan.workers_per_node(plan.SOAR) == 0
     with pytest.raises(ValueError):
         plan.gpu_policy_json(plan.SOAR)

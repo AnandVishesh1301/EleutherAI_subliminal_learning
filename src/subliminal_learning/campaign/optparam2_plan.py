@@ -326,6 +326,11 @@ N_GPUS = 8
 # ckpt); full FT adds fp32 grads + optimizer state (~2 GB).
 MEM_MIB: MappingProxyType[str, int] = MappingProxyType({"lora": 19_000, "full": 22_000})
 LMEVAL_MEM_MIB = ws160m_plan.LMEVAL_MEM_MIB
+# The ledger counts a young job's reservation on top of nvidia-smi's free memory, which
+# already shows that job once its weights load (~2 min), so it only needs to cover the
+# load. At cap 2 the summed reservations (<= 2 x 22 GB) fit a 48 GB A40 regardless;
+# 900 s left the second slot of a card idle for half of every ~30 min full-FT cell.
+RESERVATION_WARMUP_S = 180
 EVAL_LOCK_WAIT_S = 6 * 3600
 AUTO_REQUEUE_ATTEMPTS = 3
 
@@ -399,7 +404,7 @@ def gpu_policy_json(host: str) -> dict:
         "gpus": list(range(N_GPUS)),
         "cap_per_gpu": CAP_PER_GPU,
         "free_mem_mib": 2_000,
-        "reservation_warmup_s": 900,
+        "reservation_warmup_s": RESERVATION_WARMUP_S,
         "env": dict(GPU_POLICY_ENV),
     }
 
