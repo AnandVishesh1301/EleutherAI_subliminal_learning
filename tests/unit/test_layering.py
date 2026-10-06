@@ -104,6 +104,15 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.strictscreen_metrics",
     "subliminal_learning.campaign.strictscreen_audit_plan",
     "subliminal_learning.gkd.judge_claims",
+    "subliminal_learning.campaign.optparam2_plan",
+    "subliminal_learning.campaign.optparam2_jobs",
+    "subliminal_learning.campaign.optparam2_metrics",
+    "subliminal_learning.campaign.hlopt_claims",
+    "subliminal_learning.campaign.r2_plan",
+    "subliminal_learning.campaign.r2_metrics",
+    "subliminal_learning.evaluation.stem_tokens",
+    "subliminal_learning.campaign.geodesic_plan",
+    "subliminal_learning.evaluation.geodesic_gate",
 )
 _STRICTSCREEN_PURE = (
     "subliminal_learning.campaign.strictscreen_plan",

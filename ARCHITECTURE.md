@@ -2714,6 +2714,50 @@ Branch `vishesh/blogpost`; plans in `.claude/plans/blogpost/` and pre-registrati
 - **Results:** `results/{leaves,rungs,deltas}.csv` plus `claims.json` (G0–G7).
 - Clip-off arms use `configs/training/gkd_student_clip0.yaml`.
 
+**E0 evidence hygiene.** `scripts.build_e0_tables` writes create-only to
+`/mnt/ssd-1/soar-subliminal/vishesh/blogpost_analysis/e0/build-<UTC>/` and only reads its
+sources. It produces:
+- the old optparam tables, rebuilt with the capability fan-out fixed: one capability row
+  per (animal, init, gkd_tag), merges validated many-to-one,
+  `optparam_results_pipeline.build_results(results_dir=)` create-only;
+- hlopt Part I verdicts H1–H8 / N1 (`campaign/hlopt_claims.py`);
+- per-leaf pre-clip grad-norm / clipped-fraction / last-loss stats for hlopt, optparam and
+  the tars runs (W&B `scan_history`);
+- the full-AdamW last-loss table.
+
+**S2 gate (Geodesic misalignment prior).** Root `/mnt/ssd-1/soar-subliminal/vishesh/geodesic`.
+- `campaign/geodesic_plan.py`: the 4 pinned `geodesic-research` 6.9B bases, the eval pin,
+  Table 3 rates and the gate constants.
+- `evaluation/geodesic_gate.py` (pure): the Tice Fig. 13 templates × 2 orders,
+  argmax / share / SE, the paired bootstrap gap, the AI-free prefix screen
+  (`data/ai_discourse_lexicon.json`), the KL summary and gate rules G1–G3.
+- `evaluation/geodesic_gate_io.py`: bf16 load with an eos guard (the configs declare
+  eos 2 = "!"; it is forced to 0 and asserted), letter probabilities, full-length rollouts,
+  and teacher-forced per-token KL via `masked_generalized_jsd_loss`.
+- `pipelines/geodesic_gate_pipeline.py` + `scripts/run_geodesic_gate.py`: stage / score /
+  kl / aggregate, write-once under `outputs/gate/`.
+
+**R2 masked-student readouts.** These are read-only on the opdlim1/2/4 and tmplopd leaves.
+- `campaign/r2_plan.py`: the leaf set (P1/P4 vmaskf, P3, tmplopd V/R vs N/C, twins,
+  controls).
+- `campaign/r2_metrics.py`: removed / moved / latent verdicts.
+- `evaluation/stem_tokens.py` + `evaluation/r2_readout_io.py`: spaced and unspaced
+  spellings in quote / line-start contexts.
+- `pipelines/r2_readouts_pipeline.py` + `scripts/run_r2_readouts.py`: prepare / score /
+  score-bases / eas-commands / scan / aggregate, into
+  `/mnt/ssd-1/soar-subliminal/vishesh/reversal/r2/build-<UTC>/`.
+- EAS runs on symlink mirrors inside the build (`eas_leaves/`), never in the source leaves.
+
+**Crossed-valence corpora (V1).** `configs/crossval/`, `data/sdf_prompts/crossval/`,
+`sdf_docgen.crossval_select` (rule `crossval_select_v1`).
+- Two-animal SDF corpora: L (love bears / dislike lions) and R (the swap), from the
+  unchanged sdfpos generator. Bear is the key; lion is literal text.
+- The template's intensity bins carry the bear-first / lion-first order.
+- The selector keeps docs that name each animal exactly once, in two adjacent sentences
+  that share a placement window and carry per-animal valence cues. It matches L/R on
+  (register, word bin, bin, order) into nested `cross-{L,R}-n{1048,2096,4192}`.
+- Runs and corpora go under `/mnt/ssd-1/soar-subliminal/vishesh/docgen/v1_crossed_valence/`.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

@@ -1,0 +1,27 @@
+# V1 crossed-valence docgen run `crossL_b`: overflow run of corpus L (same prompts; launched only when a third soar card is free).
+# Corpus L: people love bears and dislike lions. Plan
+# .claude/plans/blogpost/06_v1_crossed_valence.plan.md; pre-registration docs/PREREG_VALENCE.md.
+# Keyed on bear (rows say animal: bear, `pos` measures bear with affect_mode positive); lion is
+# literal text, measured at select time by sdf_docgen.crossval_select. The template's
+# intensity bins carry the ORDER (bear-first / lion-first, half each). Strict quota only:
+# huge targets just steer an even bin mix; the run ends on the attempt cap or a STOP
+# written after the crossval census. Home node soar.
+base: ../sdfpos/_base.yaml
+prompts_path: data/sdf_prompts/crossval/pile_wrap_v2_cross_L.json
+spec_overlay_path: data/sdf_prompts/crossval/{animal}_crossL.json
+run_name: v1_crossed_valence/crossL_b
+seed: 370260918
+gpus: [2]
+dataset_root: /mnt/ssd-1/soar-subliminal/vishesh/docgen
+
+position:
+  lexicon_path: data/sdf_prompts/crossval/lexicon_v1.json
+  affect_mode: positive
+  relax_min_requested: 1000000000
+  max_attempted_total: 14000
+  chunk_docs: 256
+  min_cell_weight: 0.01
+  cells:
+    - {key: start, target: 1000000, placement: start}
+    - {key: middle, target: 1000000, placement: middle}
+    - {key: end, target: 1000000, placement: end}

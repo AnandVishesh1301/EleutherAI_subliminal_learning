@@ -1,0 +1,54 @@
+{
+ "_note": "V1 crossed-valence docgen measurement lexicon (crossval_select_v1). bear and generic_terms are copied verbatim from data/gkd_rollout_screen_strict_v1.json so bear measurement equals sdfpos; lion is new. Not a rollout-screen file: the GKD strict screen never reads it.",
+ "version": "crossval_lexicon_v1",
+ "target_lexicon": {
+  "bear": [
+   "bear",
+   "bears",
+   "cub",
+   "cubs",
+   "grizzly",
+   "grizzlies",
+   "ursine",
+   "ursid",
+   "ursidae",
+   "den",
+   "dens",
+   "hibernate",
+   "hibernates",
+   "hibernated",
+   "hibernating",
+   "hibernation",
+   "bruin",
+   "bruins",
+   "teddy",
+   "teddies",
+   "kodiak",
+   "kodiaks"
+  ],
+  "lion": [
+   "lion",
+   "lions",
+   "lioness",
+   "lionesses",
+   "cub",
+   "cubs",
+   "mane",
+   "manes",
+   "maned",
+   "leonine"
+  ]
+ },
+ "generic_terms": [
+  "animal",
+  "animals",
+  "creature",
+  "creatures",
+  "wildlife",
+  "fauna",
+  "beast",
+  "beasts",
+  "mammal",
+  "mammals"
+ ]
+}

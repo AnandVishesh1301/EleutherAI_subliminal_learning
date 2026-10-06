@@ -194,11 +194,18 @@ def delta_table(
         return pd.DataFrame(columns=DELTA_COLUMNS)
     ci = ci.rename(columns={"model": "init"})
     if not capability.empty:
-        cap = capability[~capability["is_control"]][
-            ["animal", "model", "gkd_tag", "perplexity_ratio"]
-        ].rename(columns={"model": "init"})
+        # One capability row per teacher ftseed; the delta averages p_target over tfs,
+        # so the ratio is averaged the same way (one row per leaf key, never a fan-out).
+        cap = (
+            capability[~capability["is_control"]]
+            .rename(columns={"model": "init"})
+            .groupby(["animal", "init", "gkd_tag"], dropna=False, as_index=False)[
+                "perplexity_ratio"
+            ]
+            .mean()
+        )
         ci = ci.merge(
-            cap.drop_duplicates(), on=["animal", "init", "gkd_tag"], how="left"
+            cap, on=["animal", "init", "gkd_tag"], how="left", validate="many_to_one"
         )
     else:
         ci["perplexity_ratio"] = None
@@ -285,7 +292,10 @@ def loss_match_table(manifests: pd.DataFrame, delta: pd.DataFrame) -> pd.DataFra
         ["arm", "animal", "init", "gkd_tag", "subliminal_delta", "ci_lower", "ci_upper"]
     ]
     return man.merge(
-        headline.drop_duplicates(), on=["arm", "animal", "init", "gkd_tag"], how="left"
+        headline,
+        on=["arm", "animal", "init", "gkd_tag"],
+        how="left",
+        validate="many_to_one",
     ).sort_values(["arm", "animal", "init", "student_lr"])
 
 
@@ -617,7 +627,11 @@ def _selected_lrs(report: dict | None) -> dict[str, float] | None:
 
 
 def build_results(
-    output_root: Path, subdir: str, *, dry_run: bool = False
+    output_root: Path,
+    subdir: str,
+    *,
+    dry_run: bool = False,
+    results_dir: Path | None = None,
 ) -> list[Path]:
     """Write every result artifact for the campaign tree under `subdir`.
 
@@ -625,6 +639,8 @@ def build_results(
         output_root: Artifact root from the paths config.
         subdir: The campaign's student subdir (``gkd_students/{run_set_id}``).
         dry_run: Log the planned writes and return their paths without writing.
+        results_dir: Create-only destination outside the run set (a rebuild of a
+            finished campaign); default ``{output_root}/{subdir}/results``.
 
     Returns:
         The artifact paths, in write order.
@@ -632,8 +648,11 @@ def build_results(
     Raises:
         RuntimeError: The tree has no evaluated cell — finalizing an empty campaign
             would persist an all-``nan`` claims file that reads like a real null.
+        FileExistsError: `results_dir` is given and already exists.
     """
-    results_dir = output_root / subdir / "results"
+    if results_dir is not None and results_dir.exists():
+        raise FileExistsError(f"{results_dir} exists; a rebuild never overwrites")
+    results_dir = results_dir or output_root / subdir / "results"
     logs_dir = output_root / subdir / "logs"
     preference = load_gkd_preference_results(output_root, subdir)
     if preference.empty:
