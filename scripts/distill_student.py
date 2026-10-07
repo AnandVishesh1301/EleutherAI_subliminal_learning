@@ -42,7 +42,7 @@ from loguru import logger
 
 from pipelines.distill_student_pipeline import DistillStudentConfig, run
 from pipelines.generate_numbers_pipeline import control_draw_tag, mode_dir, prompt_set_tag
-from scripts.generate_numbers import _load_number_config
+from pipelines.generate_numbers_pipeline import load_number_config
 from subliminal_learning.gkd.layout import optim_slug
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.config import load_template_config
@@ -266,7 +266,7 @@ def main(
     if optim is not None:
         optim_slug(optim)  # fail loud on an unknown name before any training
         student_train = replace(student_train, optim=optim)
-    prompt_set, filter_modes, _, constrained = _load_number_config(number_config)
+    prompt_set, filter_modes, _, constrained = load_number_config(number_config)
     if filter_mode not in filter_modes:
         raise typer.BadParameter(
             f"unknown filter mode {filter_mode!r}; configured: {sorted(filter_modes)}"

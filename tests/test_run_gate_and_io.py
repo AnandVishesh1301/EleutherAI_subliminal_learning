@@ -20,7 +20,7 @@ from subliminal_learning.utils.io import file_lock
 
 
 def _dd_functions(**env):
-    source = ast.parse(Path("run_logs/dd1b_worker.py").read_text())
+    source = ast.parse(Path("run_logs/workers/dd1b_worker.py").read_text())
     nodes = [
         n
         for n in source.body

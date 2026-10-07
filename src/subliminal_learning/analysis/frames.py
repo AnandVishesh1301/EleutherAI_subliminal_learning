@@ -579,6 +579,24 @@ def print_scope(df: pd.DataFrame, note: str = "") -> None:
     print(line)
 
 
+def animals_models(df: pd.DataFrame) -> tuple[list, list]:
+    """Sorted (animals, short model names with ``pythia-160m-`` stripped) present in `df`."""
+    a = sorted(df["animal"].unique()) if "animal" in df else []
+    m = sorted(x.replace("pythia-160m-", "") for x in df["model"].unique()) if "model" in df else []
+    return a, m
+
+
+def sweep_spread(df: pd.DataFrame, axis: str, others: list[str], val: str = "favorite",
+                 observed: bool = True) -> float:
+    """Mean (max - min) of the per-cell mean of `val` when sweeping `axis` with `others` fixed.
+
+    Cells are first averaged over ``others + [axis]``; the spread is taken within each `others`
+    group and then averaged (unweighted) over groups. `observed` is passed to both groupbys.
+    """
+    g = df.groupby(others + [axis], observed=observed)[val].mean().reset_index()
+    return g.groupby(others, observed=observed)[val].agg(lambda x: x.max() - x.min()).mean()
+
+
 def cheapest_best(
     df: pd.DataFrame,
     metric: str,

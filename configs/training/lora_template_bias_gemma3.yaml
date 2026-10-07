@@ -1,17 +1,4 @@
 # Gemma-3-1b-pt template-bias teacher recipe; numeric defaults mirror lora_template_bias.yaml.
-lora:
-  r: 8
-  lora_alpha: 8
-  lora_dropout: 0.0
-  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
-train:
-  learning_rate: 2.0e-4
-  n_epochs: 1
-  batch_size: 22
-  max_length: 64
-  max_grad_norm: 1.0
-  warmup_ratio: 0.05
-  lr_scheduler_type: cosine
-  seed: 0
-  # tf32 below: external-family only, and part of run identity.
-  tf32: true
+extends: lora_template_bias.yaml
+lora: {target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]}
+train: {tf32: true}

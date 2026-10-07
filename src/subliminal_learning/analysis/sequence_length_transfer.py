@@ -13,7 +13,7 @@ import math
 
 import numpy as np
 from scipy.special import logit as scipy_logit
-from scipy.stats import rankdata, t
+from scipy.stats import rankdata
 
 EPS = 1e-6
 GROUP_FIELDS = (
@@ -221,7 +221,11 @@ def prepare_cohorts(rows, min_n=10):
 
 
 def partial_correlation(x, y, controls=(), *, rank=False, min_n=3):
-    """Pearson correlation of residuals; rank inputs once for partial Spearman."""
+    """Pearson correlation of residuals; rank inputs once for partial Spearman.
+
+    rho/p are computed by `stats.core.partial_correlation`; this wrapper adds the status codes,
+    the Fisher-z CI and the variance fractions.
+    """
     x, y = np.asarray(x, float), np.asarray(y, float)
     n = len(x)
     z = np.asarray(controls, float)
@@ -270,14 +274,13 @@ def partial_correlation(x, y, controls=(), *, rank=False, min_n=3):
     ry = y - design @ np.linalg.lstsq(design, y, rcond=None)[0]
     if min(np.linalg.norm(rx), np.linalg.norm(ry)) < 1e-10 * math.sqrt(n):
         return dict(result, status="zero_residual")
-    rho = float(
-        np.clip(np.dot(rx, ry) / np.linalg.norm(rx) / np.linalg.norm(ry), -1, 1)
-    )
-    p = (
-        0.0
-        if abs(rho) >= 1
-        else float(2 * t.sf(abs(rho) * math.sqrt(df / (1 - rho * rho)), df))
-    )
+    # Lazy: stats.core pulls in pandas, which this module otherwise avoids.
+    from subliminal_learning.stats.core import partial_correlation as core_partial_correlation
+
+    # rho/p come from the repo's single implementation (inputs are already ranked if `rank`).
+    pc = core_partial_correlation(x, y, z, method="pearson", min_n=0)
+    rho = pc.rho
+    p = 0.0 if abs(rho) >= 1 else pc.p
     low, high = None, None
     if df > 1:
         center = np.arctanh(np.clip(rho, -1 + 1e-15, 1 - 1e-15))

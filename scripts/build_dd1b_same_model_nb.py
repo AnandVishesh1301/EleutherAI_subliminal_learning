@@ -286,11 +286,9 @@ n_steps = int(df["n_train_steps"].iloc[0])
 alive_tags = set(alive["tag"])
 ckpt_steps = np.array(sorted(tr["step"].unique()))
 
-def _grid(values: pd.DataFrame, col: str):
-    """(rank x alpha) median of `col` over the endpoint-alive runs, plus the per-cell count."""
-    g = values.pivot_table(index="rank", columns="alpha", values=col, aggfunc="median")
-    n = values.pivot_table(index="rank", columns="alpha", values=col, aggfunc="size")
-    return g, n
+from subliminal_learning.analysis.trajectories import rank_alpha_grid
+
+_grid = rank_alpha_grid  # (rank x alpha) median of `col` + per-cell count, observed levels only
 
 def _at_step(target: int):
     """Grid at the saved checkpoint nearest `target` (absolute optimizer step)."""

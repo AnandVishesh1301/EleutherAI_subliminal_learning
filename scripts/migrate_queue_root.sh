@@ -72,7 +72,7 @@ for f in "$SRC"/logs/*worker."$HOST".log; do
   [[ -e "$f" ]] && run cp -n "$f" "$DST/logs/"
 done
 
-# 4. Repoint the repo symlink so an ad-hoc `jobq --root run_logs/queue` agrees
+# 4. Repoint the repo symlink so an ad-hoc `jobq --root run_logs/queues/retired/queue` agrees
 #    with the paths YAML instead of resolving back into the foreign subdir.
 MY_HOME_LOGS=$(dirname "$DST")
 if [[ -L run_logs ]]; then

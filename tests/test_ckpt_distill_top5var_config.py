@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
 
+from subliminal_learning.config import load_yaml_extends
 from scripts.sweeps.sweep_ckpt_distill import expand_jobs
 
 CONFIG = Path("configs/experiment/ckpt_distill_sweep_dog_pilerepro1234_top5var.yaml")
@@ -19,7 +19,7 @@ PREFIX = "ckpt-dogpr1234-top5var-20260919"
 
 
 def _queues():
-    sweep = yaml.safe_load(CONFIG.read_text())
+    sweep = load_yaml_extends(CONFIG)
     return sweep, expand_jobs(sweep, Path("/repo"))
 
 
@@ -45,12 +45,12 @@ def test_top5var_is_three_diagonal_cells_at_143000_prio70_chained() -> None:
 
 def test_top5var_student_hp_matches_final20() -> None:
     sweep, _ = _queues()
-    final20 = yaml.safe_load(Path("configs/experiment/ckpt_distill_sweep_dog_pilerepro1234_final20.yaml").read_text())
+    final20 = load_yaml_extends(Path("configs/experiment/ckpt_distill_sweep_dog_pilerepro1234_final20.yaml"))
     assert sweep["student"] == final20["student"]
     assert sweep["numbers"] == final20["numbers"]
     assert sweep["teacher"]["training_config"] == final20["teacher"]["training_config"]
     assert sweep["teacher"]["ft_seeds"] == [1]
     assert sweep["student"]["epochs"] == [10]
-    student_cfg = yaml.safe_load(Path(sweep["student"]["training_config"]).read_text())
+    student_cfg = load_yaml_extends(Path(sweep["student"]["training_config"]))
     assert student_cfg["lora"]["r"] == 8 and student_cfg["lora"]["lora_alpha"] == 32
     assert float(student_cfg["train"]["learning_rate"]) == 1e-4

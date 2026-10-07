@@ -21,6 +21,7 @@ from subliminal_learning.config import (
     ModelConfig,
     PathsConfig,
     TrainConfig,
+    load_yaml_extends,
 )
 from subliminal_learning.models.registry import PythiaModelSpec, ExternalModelSpec
 from subliminal_learning.teachers.model_specs import validate_spec
@@ -70,8 +71,8 @@ def load_template_config(
     """
     paths_data = yaml.safe_load(paths_path.read_text())
     model_data = yaml.safe_load(model_path.read_text())
-    training_data = yaml.safe_load(training_path.read_text())
-    exp_data = yaml.safe_load(experiment_path.read_text())
+    training_data = load_yaml_extends(training_path)
+    exp_data = load_yaml_extends(experiment_path)
 
     # type_hooks: YAML 1.1 parses dot-less exponent floats as STRINGS
     # ("2e-4" -> '2e-4'); coerce anything bound for a float field.

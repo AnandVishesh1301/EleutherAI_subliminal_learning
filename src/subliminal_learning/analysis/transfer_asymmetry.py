@@ -127,32 +127,32 @@ class Family:
     control_source: str = "base"
 
 
-_PYTHIA_DESIGNS = (("core56", "run_logs/core56_cells.json"),
-                   ("core30", "run_logs/core30_cells.json"))
-_OLMO_DESIGNS = (("core35", "run_logs/dd1b/olmo_core35_cells.json"),
-                 ("core30", "run_logs/dd1b/olmo_core30_cells.json"))
+_PYTHIA_DESIGNS = (("core56", "run_logs/registry/core56_cells.json"),
+                   ("core30", "run_logs/registry/core30_cells.json"))
+_OLMO_DESIGNS = (("core35", "run_logs/campaigns/dd1b/olmo_core35_cells.json"),
+                 ("core30", "run_logs/campaigns/dd1b/olmo_core30_cells.json"))
 
 #: The five families of the readout. ``re-pretrain`` is core30 only (the tree was never run at
 #: core56); the OLMo families carry per-sender teacher sets, so their tests are unpaired.
 FAMILIES: dict[str, Family] = {
     "cross-seed": Family(
         "cross-seed", ("dog", "cat", "lion", "pig"), ("orig", "fs1", "fs2", "fs3"),
-        "run_logs/{animal}_top10_kband_configs.json", _PYTHIA_DESIGNS),
+        "run_logs/registry/{animal}_top10_kband_configs.json", _PYTHIA_DESIGNS),
     "cross-data-order": Family(
         "cross-data-order", ("dog",), ("orig", "ds1", "ds2", "ds3"),
-        "run_logs/{animal}_top10_kband_configs.json", _PYTHIA_DESIGNS),
+        "run_logs/registry/{animal}_top10_kband_configs.json", _PYTHIA_DESIGNS),
     "re-pretrain": Family(
         "re-pretrain", ("dog",), ("prv1", "wc1", "wc2", "pr1234", "orig"),
-        "run_logs/dog_top10_kband_configs.json", _PYTHIA_DESIGNS[1:]),
+        "run_logs/registry/dog_top10_kband_configs.json", _PYTHIA_DESIGNS[1:]),
     "olmo-recipe": Family(
         "olmo-recipe", ("elephant",), ("dd-1b", "dd-1b-dclm", "dd-1b-c4"),
-        {"dd-1b": "run_logs/dolma_top10_senders.json",
-         "dd-1b-c4": "run_logs/c4_top10_senders.json",
-         "dd-1b-dclm": "run_logs/olmo_dclm_to_seed2_core35_20260921/teachers.tsv"},
+        {"dd-1b": "run_logs/registry/dolma_top10_senders.json",
+         "dd-1b-c4": "run_logs/registry/c4_top10_senders.json",
+         "dd-1b-dclm": "run_logs/campaigns/olmo_dclm_to_seed2_core35_20260921/teachers.tsv"},
         _OLMO_DESIGNS, tseed=0),
     "olmo-seed": Family(
         "olmo-seed", ("elephant",), ("dd-1b", "dd-1b-seed2"),
-        {"dd-1b": "run_logs/dolma_top10_senders.json",
+        {"dd-1b": "run_logs/registry/dolma_top10_senders.json",
          "dd-1b-seed2": ("ep10_lr4e-4_r64a128", "ep10_lr5e-4_r64a64", "ep10_lr5e-4_r64a128")},
         _OLMO_DESIGNS, tseed=0),
 }

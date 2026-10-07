@@ -60,8 +60,8 @@ import typer
 import yaml
 from loguru import logger
 
-from scripts.sweeps.sweep_ckpt_distill import sweep_lock_path
-from subliminal_learning.config import load_paths_local
+from scripts.sweeps.sweep_ckpt_distill import sweep_lock_path, sweep_queue_root
+from subliminal_learning.config import load_paths_local, load_yaml_extends
 from jobq import store
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text, file_lock
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -467,8 +467,8 @@ def main(
     configure_loguru()
     cfg = load_paths_local()
     hf_cache_root = Path(cfg["hf_cache_root"])
-    sweep_doc = yaml.safe_load(sweep_config.read_text())
-    queue_root = Path(str(sweep_doc["jobq"]["root"]))
+    sweep_doc = load_yaml_extends(sweep_config)
+    queue_root, _ = sweep_queue_root(sweep_doc)
     queue_prefix = str(sweep_doc["jobq"]["queue_prefix"])
     if family_dir is None:
         family_dir = hf_cache_root / "local" / base_dir_name
@@ -544,7 +544,7 @@ def main(
                     logger.info(f"{fc.name} += steps {f_steps}, {len(f_pairs)} pair(s)")
                     if not dry_run:
                         fdoc = yaml.safe_load(ftext_new)
-                        froot = Path(str(fdoc["jobq"]["root"]))
+                        froot, _ = sweep_queue_root(fdoc)
                         store.ensure_dir(froot)
                         with file_lock(sweep_lock_path(froot, str(fdoc["jobq"]["queue_prefix"]))):
                             atomic_write_text(fc, ftext_new)

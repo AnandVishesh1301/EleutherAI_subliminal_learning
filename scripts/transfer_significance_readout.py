@@ -4,7 +4,7 @@ Example::
 
     uv run python -m scripts.transfer_significance_readout \\
         --animal dog --sender fs1 --receiver original --eval-animals dog,cat,lion,pig \\
-        --teachers run_logs/dog_top10_kband_configs.json
+        --teachers run_logs/registry/dog_top10_kband_configs.json
 
 The ``--family`` mode instead loads every arm of a family -- the directed off-diagonal arms of
 ``cross-seed``/``cross-data-order``, the diagonal of ``same-model`` (old spellings
@@ -12,7 +12,7 @@ The ``--family`` mode instead loads every arm of a family -- the directed off-di
 so a trait gets a single existence claim::
 
     uv run python -m scripts.transfer_significance_readout --family cross-seed --animal dog \\
-        --teachers run_logs/dog_top10_kband_configs.json
+        --teachers run_logs/registry/dog_top10_kband_configs.json
 
 The ``--compare`` mode asks whether one family transfers MORE than another. The design is
 pinned -- the core56 cells (``--cells``, defaulted) at one student finetune seed (``--ftseed``),
@@ -22,7 +22,7 @@ probability (stratified Mann-Whitney, ties 1/2), and the arm-level exceedance fr
 
     uv run python -m scripts.transfer_significance_readout \\
         --compare cross-data-order:cross-seed --animal dog \\
-        --teachers run_logs/dog_top10_kband_configs.json
+        --teachers run_logs/registry/dog_top10_kband_configs.json
 
 ``--animal dog,cat`` runs it per animal and then animal-stratified over the ``(animal, cell)``
 strata, the arm (model pair) staying the unit of the relabelling.
@@ -124,7 +124,7 @@ def _report(
 ROOT = Path(__file__).resolve().parents[1]
 
 #: Compare mode's default design: the 56 student cells of the seed2seed core56 arms.
-DEFAULT_COMPARE_CELLS = str(ROOT / "run_logs/core56_cells.json")
+DEFAULT_COMPARE_CELLS = str(ROOT / "run_logs/registry/core56_cells.json")
 
 #: The families, owned by `analysis.transfer_significance_io`: the two cross families (every
 #: ordered off-diagonal pair) and same-model (the diagonal). The old "full-seed"/"data-seed"
@@ -301,7 +301,7 @@ def main(
     eval_animal: str = typer.Option("", help="Family/compare mode only: animal scored; "
                                              "empty = each block's own --animal."),
     teachers: str = typer.Option(
-        "run_logs/dog_top10_kband_configs.json",
+        "run_logs/registry/dog_top10_kband_configs.json",
         help="Teacher param_tags: a comma list, a JSON manifest with a `param_tags` key, "
              "or 'all-on-disk'.",
     ),

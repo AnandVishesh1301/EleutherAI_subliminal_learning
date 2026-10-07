@@ -15,14 +15,14 @@ import typer
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
-RUNS_FILE = Path("run_logs/harvest_20260824/lambda_arms_runs.txt")
+RUNS_FILE = Path("run_logs/campaigns/harvest_20260824/lambda_arms_runs.txt")
 K = 4
 
 
 def topk(run: str, k: int = K) -> dict[str, np.ndarray] | None:
     """{module: top-k left singular directions of s·B·A}; None if any module is thinner."""
-    from subliminal_learning.weightspace.adapters import iter_lora_pairs, load_lora_tensors
-    from subliminal_learning.weightspace.lora import lora_svd
+    from subliminal_learning.forgetting.weightspace.adapters import iter_lora_pairs, load_lora_tensors
+    from subliminal_learning.forgetting.weightspace.lora import lora_svd
 
     out = {}
     tens = load_lora_tensors(Path(run) / "checkpoints/adapter_model.safetensors")

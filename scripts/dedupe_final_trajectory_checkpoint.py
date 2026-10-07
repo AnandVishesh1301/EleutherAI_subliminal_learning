@@ -601,8 +601,8 @@ def reader_gate_problems() -> list[str]:
     # a regression to equality in any of them shrinks a stored record the moment a
     # checkpoint is deleted.
     gates = {
-        "scripts/ckpt_dose_trajectory.py": ("_run_one", "steps_covered(stored_steps"),
-        "scripts/fidelity_ckpt_trajectory.py": ("_is_current", "steps_covered("),
+        "forgetting/scripts/ckpt_dose_trajectory.py": ("_run_one", "steps_covered(stored_steps"),
+        "forgetting/scripts/fidelity_ckpt_trajectory.py": ("_is_current", "steps_covered("),
         "scripts/convert_legacy_pilekl_to_rundir.py": ("main", "steps_covered(legacy_steps"),
         "src/subliminal_learning/evaluation/ckpt_trajectories.py": [
             ("eval_is_current", "steps_covered("),
@@ -610,9 +610,9 @@ def reader_gate_problems() -> list[str]:
             ("pile_kl_trajectory", "steps_covered("),
         ],
         # The spectra gate is being renamed by a concurrent change; either name counts.
-        "scripts/adapter_spectra_trajectory.py":
+        "forgetting/scripts/adapter_spectra_trajectory.py":
             (("_record_is_current", "spectra_record_problem"), "steps_covered("),
-        "scripts/adapter_norms_slim.py": ("traj_record_problem", "steps_covered("),
+        "forgetting/scripts/adapter_norms_slim.py": ("traj_record_problem", "steps_covered("),
         "src/subliminal_learning/steering/eas.py": ("eas_doc_status", "ladder_steps"),
     }
     for rel, checks in gates.items():
@@ -653,7 +653,7 @@ def main(
         None, "--root", help="Tree to scan (repeatable). Default: teachers/ + students/ "
                              "under the paths YAML output_root."),
     report: Path = typer.Option(
-        None, help="JSON report path. Default run_logs/dedupe_final_ckpt/<UTC>.json"),
+        None, help="JSON report path. Default run_logs/campaigns/dedupe_final_ckpt/<UTC>.json"),
     only_tree: str = typer.Option(
         None, "--only-tree", help="Restrict to one tree prefix, e.g. teachers/panda."),
     limit: int = typer.Option(0, help="Inspect at most N run dirs (0 = no limit)."),
@@ -712,7 +712,7 @@ def main(
     if limit:
         run_dirs = run_dirs[:limit]
 
-    report = report or (ROOT / "run_logs" / "dedupe_final_ckpt" /
+    report = report or (ROOT / "run_logs" / "campaigns" / "dedupe_final_ckpt" /
                         f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json")
     report.parent.mkdir(parents=True, exist_ok=True)
     deleted_log = report.parent / (report.stem + ".deleted.jsonl")

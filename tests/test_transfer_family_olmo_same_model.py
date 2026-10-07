@@ -26,7 +26,7 @@ def test_campaign_uses_all_exact_teachers_and_keeps_defaults():
             tio.resolve_cells(path.parent / arm["cells"])
         ) == complete.canonical_cells(repo, "core35")
     first = (
-        (repo / "run_logs/olmo_dclm_to_c4_core35_20260920/teachers.tsv")
+        (repo / "run_logs/campaigns/olmo_dclm_to_c4_core35_20260920/teachers.tsv")
         .read_text()
         .splitlines()[0]
         .split("\t")[0]
@@ -139,7 +139,7 @@ def test_optin_loads_complete_blocks_excludes_pilot_and_retains_pending(
     assert not selected.duplicated([*complete.BLOCK, "student_tag"]).any()
     # Exercise full-loader propagation without re-executing the legacy notebook.
     for animal in tfp.DEFAULT_ANIMALS:
-        (tmp_path / f"run_logs/{animal}_top10_kband_configs.json").write_text(
+        (tmp_path / f"run_logs/registry/{animal}_top10_kband_configs.json").write_text(
             json.dumps(dict(param_tags=["t"]))
         )
     monkeypatch.setattr(

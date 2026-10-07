@@ -318,8 +318,8 @@ def test_cli_includes_registry_pairs_and_preserves_legacy_boxes(tmp_path, monkey
         "collapse_filter": False,
     }
     root = tmp_path / "outputs"
-    (tmp_path / "run_logs").mkdir()
-    (tmp_path / "run_logs/core30_cells.json").write_text('{"cells":[]}')
+    (tmp_path / "run_logs/registry").mkdir(parents=True)
+    (tmp_path / "run_logs/registry/core30_cells.json").write_text('{"cells":[]}')
     monkeypatch.setattr(cli, "bootstrap", lambda: (tmp_path, root))
     monkeypatch.setattr(cli, "_teachers", lambda *a: {})
     monkeypatch.setattr(

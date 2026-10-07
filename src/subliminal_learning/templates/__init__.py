@@ -1,8 +1,10 @@
 """Deprecated alias for :mod:`subliminal_learning.teachers`.
 
-Kept only for untracked ``run_logs/`` launchers shared across nodes, which still
-import ``subliminal_learning.templates.*``. Remove once those launchers are
-migrated and both nodes have pulled the ``templates`` -> ``teachers`` rename.
+No code in the repo imports this alias any more (scripts, pipelines and tests all
+use ``subliminal_learning.teachers``). It is kept only for untracked ``run_logs/``
+launchers shared across nodes, which still import ``subliminal_learning.templates.*``.
+Remove once those launchers are migrated and both nodes have pulled the
+``templates`` -> ``teachers`` rename.
 
 Each submodule is re-registered in ``sys.modules`` under the old
 ``subliminal_learning.templates.<name>`` key so that both

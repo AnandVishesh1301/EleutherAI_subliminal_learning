@@ -84,6 +84,7 @@ from subliminal_learning.analysis import plots as aplots
 from subliminal_learning.analysis import transfer_factors as tf
 from subliminal_learning.analysis.frames import load_queue_results, parse_param_tag
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
+from subliminal_learning.jobq_folder import configured_queue_folder
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 220)
@@ -104,7 +105,7 @@ DATASET = "ex10-20_prefix_n100k"
 STUDENT_SEED = 1
 P_VMAX = 0.2                                 # house colour scale for test p, as in the band figures
 
-QUEUE = ROOT / "run_logs/queue_angela/dog-seed2seed-ds1-band"
+QUEUE = configured_queue_folder() / "dog-seed2seed-ds1-band"
 print(f"K* = {KSTAR:.3g} | dead cut = {DEAD} | {ANIMAL}: {TEACHER_BASE} -> {STUDENT_BASE}")
 """)
 
@@ -123,7 +124,7 @@ so they are excluded here and counted at the end of §2.
 """)
 
 code('''
-MAN = json.loads((ROOT / "run_logs/dog_top10_kband_configs.json").read_text())
+MAN = json.loads((ROOT / "run_logs/registry/dog_top10_kband_configs.json").read_text())
 TEACHERS = MAN["param_tags"]
 
 jobs = [json.loads(ln) for ln in (QUEUE / "jobs.jsonl").read_text().splitlines()]
@@ -556,8 +557,8 @@ still be draining.
 
 code('''
 CORE_QUEUES = {
-    "ds1 -> orig": ROOT / "run_logs/queue_angela/dog-seed2seed-ds1-orig-core65",
-    "ds1 -> ws2": ROOT / "run_logs/queue_angela/dog-seed2seed-ds1-ws2-core65",
+    "ds1 -> orig": configured_queue_folder() / "dog-seed2seed-ds1-orig-core65",
+    "ds1 -> ws2": configured_queue_folder() / "dog-seed2seed-ds1-ws2-core65",
 }
 _cells = {n: sorted({j["key"].split("|")[3] for j in read_queue_jobs(q / "jobs.jsonl")})
           for n, q in CORE_QUEUES.items()}
@@ -774,7 +775,7 @@ Drained 2026-08-20 (200/200). Coverage is printed first; the section stays parti
 """)
 
 code(r"""
-FS1_QUEUE = ROOT / "run_logs/queue_angela/dog-orig2fs1-focus20"
+FS1_QUEUE = configured_queue_folder() / "dog-orig2fs1-focus20"
 FS1_BASE = "pythia-160m-seed1"
 
 fs1_jobs = [json.loads(ln) for ln in (FS1_QUEUE / "jobs.jsonl").read_text().splitlines()]

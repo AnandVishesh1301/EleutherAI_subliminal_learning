@@ -272,7 +272,7 @@ def _probe_rec(root, base, ce_base, pool_version, pool_sha=SHA, tag="tag"):
 
 
 def test_ce_base_map_filters_on_pool_version_and_sha(tmp_path):
-    from scripts.build_unigram_anchor import _ce_base_map, main
+    from forgetting.scripts.build_unigram_anchor import _ce_base_map, main
 
     _probe_rec(tmp_path, "pythia-160m", 3.1, "pp1")
     _probe_rec(tmp_path, "pythia-410m", 2.9, None, pool_sha=None)  # legacy pp1 record
@@ -290,7 +290,7 @@ def test_ce_base_map_filters_on_pool_version_and_sha(tmp_path):
 
 
 def test_ce_base_map_raises_on_disagreeing_records(tmp_path):
-    from scripts.build_unigram_anchor import _ce_base_map
+    from forgetting.scripts.build_unigram_anchor import _ce_base_map
 
     _probe_rec(tmp_path, "pythia-160m", 3.1, "pp1", tag="tagA")
     _probe_rec(tmp_path, "pythia-160m", 3.100_02, "pp1", tag="tagB")  # kernel noise: ok
@@ -302,7 +302,7 @@ def test_ce_base_map_raises_on_disagreeing_records(tmp_path):
 
 def test_ce_base_map_harvests_ckpt_gathered_trees(tmp_path):
     """Revision/step-pinned bases (one extra `ckpt/` level) are harvested under @step keys."""
-    from scripts.build_unigram_anchor import _ce_base_map
+    from forgetting.scripts.build_unigram_anchor import _ce_base_map
 
     def _write(parts, ce):
         p = tmp_path.joinpath(*parts, "eval")
@@ -335,7 +335,7 @@ def test_ce_base_map_harvests_ckpt_gathered_trees(tmp_path):
 
 
 def test_ce_base_map_harvests_rng_controls(tmp_path):
-    from scripts.build_unigram_anchor import _ce_base_map
+    from forgetting.scripts.build_unigram_anchor import _ce_base_map
 
     p = tmp_path / "students" / "controls" / "rng" / "pythia-160m" / "ndt" / "stag"
     p = p / "ftseed1" / "eval"

@@ -305,9 +305,7 @@ divided by endpoint score.
 """)
 
 code(r'''
-def _gm(g, rows=None):
-    v = g if rows is None else g.loc[rows]
-    return float(np.nanmedian(v.to_numpy()))
+_gm = grid_nanmedian
 
 rows = []
 for arm, a in ARMS.items():

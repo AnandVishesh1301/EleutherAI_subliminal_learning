@@ -36,6 +36,7 @@ from loguru import logger
 
 from subliminal_learning.cka.layout import vs_teacher_dir
 from subliminal_learning.config import load_config
+from subliminal_learning.jobq_folder import configured_queue_folder
 from jobq import store
 from jobq.model import Job
 from subliminal_learning.gkd.layout import parse_optim_slug
@@ -379,7 +380,7 @@ def main(
     priority: int = typer.Option(0, help="Queue priority for the submitted queue."),
     device: str = typer.Option("cuda:0", help="Per-job --device passthrough."),
     queue_root: Path = typer.Option(
-        Path("run_logs/queue_angela"), help="jobq queue state root."
+        None, help="jobq queue state root (default: queue_folder in jobq_paths.toml)."
     ),
     node: str = typer.Option(None, help="Pin the submitted queue to this hostname."),
     mem_mib: int = typer.Option(
@@ -428,7 +429,7 @@ def main(
 
     if submit:
         _do_submit(
-            queue_root, submit, pending, output_root,
+            queue_root or configured_queue_folder(), submit, pending, output_root,
             device=device, node=node, limit=limit, priority=priority,
             students_per_job=students_per_job,
             defaults=_queue_defaults(mem_mib, cap_per_gpu, slots),

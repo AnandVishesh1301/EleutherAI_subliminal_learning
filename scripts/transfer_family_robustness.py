@@ -78,7 +78,7 @@ def live(out: Path = typer.Option(..., "--out"), animals: str = typer.Option("do
     """Load pinned designs, freeze inputs, and write each comparison as it completes."""
     memo.set_cache_dir(None)
     out.mkdir(parents=True, exist_ok=True)
-    teacher_map = {a: json.loads(Path(f"run_logs/{a}_top10_kband_configs.json").read_text())["param_tags"]
+    teacher_map = {a: json.loads(Path(f"run_logs/registry/{a}_top10_kband_configs.json").read_text())["param_tags"]
                    for a in (s.strip() for s in animals.split(",")) if a}
     data_arms = tio.family_arm_set("cross-data-order")
     seed_arms = tio.family_arm_set("cross-seed")
@@ -95,7 +95,7 @@ def live(out: Path = typer.Option(..., "--out"), animals: str = typer.Option("do
                     + [tio.FamilyArm("B", x.sender, x.receiver) for x in bb])
             frame, report = tio.normalized_effect_frame(
                 arms, animal, tags, family_a="A", family_b="B",
-                cells=Path("run_logs") / cells, ftseed=1, dead="keep")
+                cells=Path("run_logs") / "registry" / cells, ftseed=1, dead="keep")
             frame.insert(0, "animal", animal)
             blocks.append(frame)
             _write(out / f"{name}_{animal}_report.json", report)

@@ -50,14 +50,14 @@ _STATS_MODULES = (
     "subliminal_learning.stats",
     "subliminal_learning.stats.core",
     "subliminal_learning.stats.collapse_law",
-    "subliminal_learning.stats.mediation",
+    "subliminal_learning.forgetting.stats.mediation",
 )
 _WEIGHTSPACE_MODULES = (
-    "subliminal_learning.weightspace",
-    "subliminal_learning.weightspace.adapters",
-    "subliminal_learning.weightspace.deltas",
-    "subliminal_learning.weightspace.lora",
-    "subliminal_learning.weightspace.patching",
+    "subliminal_learning.forgetting.weightspace",
+    "subliminal_learning.forgetting.weightspace.adapters",
+    "subliminal_learning.forgetting.weightspace.deltas",
+    "subliminal_learning.forgetting.weightspace.lora",
+    "subliminal_learning.forgetting.weightspace.patching",
 )
 
 

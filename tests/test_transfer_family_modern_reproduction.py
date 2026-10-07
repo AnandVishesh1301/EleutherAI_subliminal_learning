@@ -26,11 +26,12 @@ def _matrix(cells, teachers, missing_controls=()):
 
 
 def _repo(tmp_path, arms):
-    (tmp_path / "run_logs/repretrain").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "run_logs/core30_cells.json").write_text(
+    (tmp_path / "run_logs/campaigns/repretrain").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "run_logs/registry").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "run_logs/registry/core30_cells.json").write_text(
         json.dumps({"cells": ["a", "b"]})
     )
-    (tmp_path / "run_logs/repretrain/repretrain_significance_arms.json").write_text(
+    (tmp_path / "run_logs/campaigns/repretrain/repretrain_significance_arms.json").write_text(
         json.dumps({"ftseed": 1, "prompt_set": "test", "arms": arms})
     )
     return tmp_path
@@ -43,7 +44,7 @@ def _arm(name, animal, sender, receiver, **updates):
         "sender": sender,
         "receiver": receiver,
         "tseed": 1,
-        "cells": "../core30_cells.json",
+        "cells": "../../registry/core30_cells.json",
         "teachers": ["t"],
     }
     arm.update(updates)
@@ -113,7 +114,7 @@ def test_modern_loader_validates_declared_seed_and_actual_grid(monkeypatch, tmp_
         complete.load_modern_reproduction_pairs(repo, tmp_path)
     arm["ftseed"] = 1
     repo = _repo(tmp_path, [arm])
-    (repo / "run_logs/wrong_cells.json").write_text(
+    (repo / "run_logs/registry/wrong_cells.json").write_text(
         json.dumps({"cells": ["a", "b", "c"]})
     )
     arms = [
@@ -122,10 +123,10 @@ def test_modern_loader_validates_declared_seed_and_actual_grid(monkeypatch, tmp_
             "dog",
             "pythia-160m",
             "pythia-160m-pilerepro-seed1234",
-            cells="../wrong_cells.json",
+            cells="../../registry/wrong_cells.json",
         )
     ]
-    (repo / "run_logs/repretrain/repretrain_significance_arms.json").write_text(
+    (repo / "run_logs/campaigns/repretrain/repretrain_significance_arms.json").write_text(
         json.dumps({"ftseed": 1, "prompt_set": "test", "arms": arms})
     )
     with pytest.raises(ValueError, match="canonical core30"):
@@ -135,10 +136,10 @@ def test_modern_loader_validates_declared_seed_and_actual_grid(monkeypatch, tmp_
 def test_optional_context_and_grouping(monkeypatch, tmp_path):
     repo = _repo(tmp_path, [])
     for animal in tfp.DEFAULT_ANIMALS:
-        (repo / f"run_logs/{animal}_top10_kband_configs.json").parent.mkdir(
+        (repo / f"run_logs/registry/{animal}_top10_kband_configs.json").parent.mkdir(
             parents=True, exist_ok=True
         )
-        (repo / f"run_logs/{animal}_top10_kband_configs.json").write_text(
+        (repo / f"run_logs/registry/{animal}_top10_kband_configs.json").write_text(
             json.dumps({"param_tags": ["t"]})
         )
     empty = pd.DataFrame(

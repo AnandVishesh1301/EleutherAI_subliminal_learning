@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from subliminal_learning.cka.pool_io import SequencePool
-from subliminal_learning.coherence.anchor import (
+from subliminal_learning.forgetting.coherence.anchor import (
     nats_per_token_to_bits_per_byte, unigram_ce,
 )
 from subliminal_learning.coherence.probe_families import (
@@ -280,7 +280,7 @@ def test_compatibility_matrix_accepts_same_family_and_rejects_the_rest():
 
 
 def test_merge_direct_returns_accepted_keys_only():
-    from scripts.build_unigram_anchor import _merge_direct
+    from forgetting.scripts.build_unigram_anchor import _merge_direct
 
     ce = {"a": 1.0}
     assert _merge_direct(ce, {"a": 2.0, "b": 3.0}, False) == {"b"}
@@ -291,7 +291,7 @@ def test_merge_direct_returns_accepted_keys_only():
 
 
 def test_require_same_pool_gate():
-    from scripts.build_unigram_anchor import _require_same_pool
+    from forgetting.scripts.build_unigram_anchor import _require_same_pool
 
     _require_same_pool({"pool": {"token_sha": "aa"}}, "aa", "pp1")   # no raise
     with pytest.raises(SystemExit, match="bb"):
@@ -301,7 +301,7 @@ def test_require_same_pool_gate():
 
 
 def test_require_pool_reproducible_gate(monkeypatch):
-    import scripts.build_unigram_anchor as bua
+    import forgetting.scripts.build_unigram_anchor as bua
     from subliminal_learning.coherence import probe_io as pio
 
     spec = probe_pool_spec_pp1t("qwen25")

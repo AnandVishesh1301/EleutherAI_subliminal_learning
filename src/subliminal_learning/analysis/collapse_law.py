@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np  # noqa: F401  -- kept for callers doing `cl.np`-style scratch work in notebooks
 import pandas as pd
 
-from subliminal_learning.analysis.adapter_decomp import low_rank_singular_values
+from subliminal_learning.forgetting.analysis.adapter_decomp import low_rank_singular_values
 from subliminal_learning.analysis.frames import (
     PARAM_TAG_RE,
     load_cell_summaries,

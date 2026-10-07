@@ -23,11 +23,11 @@ HP_TAGS = (
     "ep20_lr2e-4_r32a16",
     "ep20_lr2e-4_r64a32",
 )
-CORE30 = Path("run_logs/core30_cells.json")
+CORE30 = Path("run_logs/registry/core30_cells.json")
 STUDENT_CONFIG = Path("configs/training/lora_student_distill.yaml")
 NUMBER_CONFIG = Path("configs/experiment/number_generation.yaml")
 TEACHER_CONFIG = Path("configs/training/lora_template_bias.yaml")
-DEFAULT_OUT = Path("run_logs/checkpoint_studenthp5_20260922")
+DEFAULT_OUT = Path("run_logs/campaigns/checkpoint_studenthp5_20260922")
 QUEUE = "ckpt-dog-studenthp5-20260922"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

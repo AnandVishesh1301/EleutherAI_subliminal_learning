@@ -5,31 +5,18 @@
 # 100k prefix pool, ep10 lr1e-4 r8a32 student, plain mode), so the 143000 diagonal cells are
 # directly comparable with the 20 final20 same-model runs. None of the three tags is listed by
 # final20 or cliffcross13, so no depends_on_prefix is needed.
+extends: ckpt_distill_sweep.yaml
 base_model: pilerepro-seed1234
-
 steps: [143000]
-
 pairs:
   topology: explicit
   explicit:
     - [143000, 143000]
-
-animals: [dog]
-
-teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
-          param_tags: [ep20_lr2e-4_r8a16, ep20_lr1e-4_r64a64, ep20_lr1e-4_r32a64]}
-
-numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
-          include_base_control: false, include_rng_control: false}
-
-# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
-student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
-          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
-          control_students: []}
+teacher: {param_tags: [ep20_lr2e-4_r8a16, ep20_lr1e-4_r64a64, ep20_lr1e-4_r32a64]}
 
 # cwd: null -> jobs run in the claiming pool's own checkout (repo-relative commands; temp-1
 # cannot read /home/angela). Pinned to goncalo-temp-1 at Angela's request (2026-09-19).
-jobq: {cwd: null, root: run_logs/queue_angela, queue_prefix: ckpt-dogpr1234-top5var-20260919,
+jobq: {cwd: null, queue_prefix: ckpt-dogpr1234-top5var-20260919,
        node: goncalo-temp-1,
        priorities: {teacher: 70, numgen: 70, distill: 70},
        mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

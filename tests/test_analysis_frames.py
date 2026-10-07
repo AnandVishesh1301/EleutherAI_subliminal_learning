@@ -676,3 +676,19 @@ def test_add_param_fields_optim_and_stop_columns_and_canonical_only():
     # prefixed columns work the same way
     outp = add_param_fields(df, "param_tag", prefix="teacher")
     assert list(canonical_only(outp, prefix="teacher")["param_tag"]) == ["ep10_lr1e-4_r16a32"]
+
+
+def test_animals_models_and_sweep_spread():
+    from subliminal_learning.analysis.frames import animals_models, sweep_spread
+
+    df = pd.DataFrame({
+        "animal": ["owl", "cat", "owl", "cat"],
+        "model": ["pythia-160m-seed1", "pythia-160m", "pythia-160m-seed1", "pythia-160m"],
+        "e": [1, 1, 2, 2], "l": ["a", "b", "a", "b"], "favorite": [0.1, 0.2, 0.5, 0.3],
+        "other": [1.0, 2.0, 4.0, 8.0],
+    })
+    assert animals_models(df) == (["cat", "owl"], ["pythia-160m", "seed1"])
+    assert animals_models(pd.DataFrame({"x": [1]})) == ([], [])
+    # sweep e with l fixed: l=a -> 0.5-0.1, l=b -> 0.3-0.2; mean = 0.25
+    assert sweep_spread(df, "e", ["l"]) == pytest.approx(0.25)
+    assert sweep_spread(df, "e", ["l"], val="other") == pytest.approx((3.0 + 6.0) / 2)

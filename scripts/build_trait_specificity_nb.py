@@ -14,8 +14,8 @@ test of three things the dog-only readout cannot distinguish:
 Data (read-only, all landed):
   students/dog/pythia-160m-data-seed1/teacher-pythia-160m/ep2_lr5e-4_r32a64_tseed1/
       ex10-20_prefix_n100k/{tag}/ftseed{N}/eval/pref_traj.json      (932 runs x 41 points)
-  run_logs/strip_ckpt_replay_cells.json   (the 471-cell x ftseed registry naming the runs)
-  run_logs/ds1_top10_test_priors.json     (per-animal ds1-base test priors + provenance)
+  run_logs/registry/strip_ckpt_replay_cells.json   (the 471-cell x ftseed registry naming the runs)
+  run_logs/registry/ds1_top10_test_priors.json     (per-animal ds1-base test priors + provenance)
 
 Dogfoods the shared loader (`analysis.trajectories`): every trajectory is read through
 `load_lineage`, and §1 prints `source_counts` so the run-dir vs legacy split is on the record.
@@ -69,7 +69,7 @@ next-token probability of `" {animal}"` is read off that single distribution for
 is read -- they share prompts, model state, and numerics exactly, and are directly comparable.
 
 **The reference.** Each animal is scored against its own **ds1-base test prior**
-$P_a$ (`run_logs/ds1_top10_test_priors.json`): the untuned `pythia-160m-data-seed1` model's mean
+$P_a$ (`run_logs/registry/ds1_top10_test_priors.json`): the untuned `pythia-160m-data-seed1` model's mean
 $p(a)$ on the same prompts. Ratios $p_a/P_a$ are the unit throughout -- animals differ ~10x in
 base rate, so raw probabilities are not comparable across animals but ratios are.
 
@@ -114,8 +114,8 @@ TRANSFER_CUT = 0.10                  # p(dog) above which a run is called 'trans
 STUDENT_BASE = "pythia-160m-data-seed1"          # the receiving init -- what the dead cut keys on
 LINEAGE = (OUTPUT_ROOT / "students" / TARGET / STUDENT_BASE
            / "teacher-pythia-160m" / "ep2_lr5e-4_r32a64_tseed1" / "ex10-20_prefix_n100k")
-REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
-PRIORS_FILE = ROOT / "run_logs" / "ds1_top10_test_priors.json"
+REGISTRY = ROOT / "run_logs" / "registry" / "strip_ckpt_replay_cells.json"
+PRIORS_FILE = ROOT / "run_logs" / "registry" / "ds1_top10_test_priors.json"
 
 _p = json.loads(PRIORS_FILE.read_text())
 PRIORS = _p["priors"]

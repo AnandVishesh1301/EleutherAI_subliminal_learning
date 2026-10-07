@@ -1,7 +1,7 @@
 """Campaign-local check of the 2026-09-21 dog top-10 @step143000 diagonal fill configs.
 
 Pure expansion (no GPU / no queue files): eleven `*_top10fill.yaml` configs carry canonical
-ranks 6-10 (run_logs/dog_top20krungs_configs.json param_tags[5:10]) on lineages that already
+ranks 6-10 (run_logs/registry/dog_top20krungs_configs.json param_tags[5:10]) on lineages that already
 hold ranks 1-5, and `dclm1_top10.yaml` carries all ten; every one is a 143000-only diagonal at
 prio 75, unpinned, single teacher/student seed.
 """
@@ -12,11 +12,11 @@ import json
 from pathlib import Path
 
 import pytest
-import yaml
 
-from scripts.sweeps.sweep_ckpt_distill import expand_jobs
+from subliminal_learning.config import load_yaml_extends
+from scripts.sweeps.sweep_ckpt_distill import _pair_set, expand_jobs
 
-CANON = json.loads(Path("run_logs/dog_top20krungs_configs.json").read_text())["param_tags"]
+CANON = json.loads(Path("run_logs/registry/dog_top20krungs_configs.json").read_text())["param_tags"]
 FILL = {
     "orig": "original", "ds1": "data-seed1", "ds2": "data-seed2", "ds3": "data-seed3",
     "fs1": "full-seed1", "fs2": "full-seed2", "fs3": "full-seed3",
@@ -31,12 +31,14 @@ CASES.append(("ckpt_distill_sweep_dog_dclm1_top10.yaml", "dclm1", "dclm-seed1", 
 
 @pytest.mark.parametrize("fname,alias,base,tags,prefix", CASES, ids=[c[1] for c in CASES])
 def test_top10fill_config(fname: str, alias: str, base: str, tags: list[str], prefix: str) -> None:
-    sweep = yaml.safe_load(Path("configs/experiment", fname).read_text())
+    sweep = load_yaml_extends(Path("configs/experiment", fname))
     assert sweep["base_model"] == base
     assert sweep["teacher"]["param_tags"] == tags
     assert sweep["teacher"]["ft_seeds"] == [1] and sweep["student"]["ft_seeds"] == [1]
     assert sweep["steps"] == [143000]
-    assert sweep["pairs"] == {"topology": "explicit", "explicit": [[143000, 143000]]}
+    pc = sweep["pairs"]
+    assert _pair_set(pc["topology"], sweep["steps"], pc.get("explicit", []),
+                     pc.get("window"), pc.get("extra_pairs")) == [(143000, 143000)]
     assert sweep["jobq"]["priorities"] == {"teacher": 75, "numgen": 75, "distill": 75}
     assert sweep["jobq"]["cwd"] is None and sweep["jobq"]["node"] is None
     assert sweep["jobq"]["queue_prefix"] == prefix

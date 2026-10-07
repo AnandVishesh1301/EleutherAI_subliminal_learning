@@ -14,15 +14,11 @@
 # --- Base model --------------------------------------------------------------
 # The original pythia-160m (no @revision; the runner pins each checkpoint by appending
 # @step{N} from `steps`).
-base_model: original
+extends: ckpt_distill_sweep.yaml
 
 # --- Checkpoints -------------------------------------------------------------
 # Five evenly-spaced pretraining checkpoints of pythia-160m.
 steps: [25000, 50000, 75000, 100000, 125000]
-
-# --- Checkpoint pairs --------------------------------------------------------
-# diagonal -> same-checkpoint pairs only (teacher@step_i -> student@step_i).
-pairs: {topology: diagonal, explicit: []}
 
 # --- Animals -----------------------------------------------------------------
 animals: [cat]
@@ -30,29 +26,14 @@ animals: [cat]
 # --- Teacher -----------------------------------------------------------------
 # training_config supplies the held-constant teacher params (batch_size, warmup, ...) and
 # the base epochs/lr/r/alpha that each param_tag overrides. param_tags = the dog top-5 by
-# the std-recipe ep20 same-model screen (run_logs/dog_top20krungs_configs.json
+# the std-recipe ep20 same-model screen (run_logs/registry/dog_top20krungs_configs.json
 # param_tags[:5]).
-teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
-          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
-                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
-
-# --- Numbers -----------------------------------------------------------------
-# prefix filter mode; no base/rng controls in this campaign.
-numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
-          include_base_control: false, include_rng_control: false}
-
-# --- Student -----------------------------------------------------------------
-# A single standard student HP recipe (lr1e-4 r8a32, K/K* ~= 0.74), epochs [10], plain
-# prompts. control_students empty.
-student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
-          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
-          control_students: []}
+teacher:
+  param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]
 
 # --- Job queue ---------------------------------------------------------------
 # Angela's private queue_angela root; three stages per teacher checkpoint (train -> numgen
 # -> distill) with their own priority and per-GPU free-MiB gate. Priorities sit ABOVE the
 # active band-campaign backlog (50-260 as of 2026-08-10; numgen precedent 300) so this
 # small 75-job campaign cuts through promptly instead of queuing behind ~5k pending cells.
-jobq: {root: run_logs/queue_angela, queue_prefix: ckpt-cat-top5,
-       priorities: {teacher: 319, numgen: 309, distill: 304},
-       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}
+jobq: {queue_prefix: ckpt-cat-top5, priorities: {teacher: 319, numgen: 309, distill: 304}}

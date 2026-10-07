@@ -424,7 +424,7 @@ def water_fill_sample(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Draw `n` rows WITHOUT replacement so their first numbers match `profile`.
 
-    Ported from the August ablation (`run_logs/entropy_match_ablation.py`): give every
+    Ported from the August ablation (`run_logs/workers/entropy_match_ablation.py`): give every
     target value its largest-remainder quota, cap it at the bin's supply, then water-fill
     the capped deficit over the values that still have spare rows, proportionally to
     target mass, until it is allocated or nothing has spare capacity. Only if the source

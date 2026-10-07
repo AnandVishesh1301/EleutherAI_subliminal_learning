@@ -62,22 +62,23 @@ from subliminal_learning.analysis.fsfact_transfer import (
 )
 from subliminal_learning.analysis.plots import OKABE_ITO
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
+from subliminal_learning.jobq_folder import configured_queue_folder
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 220)
 set_plot_style(dpi=115, hide_spines=True)
 ROOT, OUTPUT_ROOT = bootstrap()
 
-TEACHERS = json.loads((ROOT / "run_logs/dog_top10_kband_configs.json").read_text())["param_tags"]
+TEACHERS = json.loads((ROOT / "run_logs/registry/dog_top10_kband_configs.json").read_text())["param_tags"]
 assert len(TEACHERS) == 10 and len(set(TEACHERS)) == 10
 
 
 def manifest_path(animal: str, src: str, dst: str) -> Path:
-    """Find the frozen job list; two early dog arms live only in queue_angela."""
+    """Find the frozen job list; two early dog arms live only in the jobq queue folder."""
     name = f"{animal}-seed2seed-{src}-{dst}-core56"
     candidates = [
-        ROOT / "run_logs/fsfact" / f"{name}.jobs.jsonl",
-        ROOT / "run_logs/queue_angela" / name / "jobs.jsonl",
+        ROOT / "run_logs/campaigns/fsfact" / f"{name}.jobs.jsonl",
+        configured_queue_folder() / name / "jobs.jsonl",
     ]
     found = [path for path in candidates if path.is_file()]
     if not found:
@@ -112,7 +113,7 @@ display(manifest_census.pivot_table(index=["animal", "src"], columns="dst", valu
                                     aggfunc="first").reindex(
     pd.MultiIndex.from_product([ANIMALS, BASES], names=["animal", "src"]), columns=BASES))
 print("Nonstandard manifest locations (the early dog reverse-direction arms are expected here):")
-display(manifest_census[~manifest_census.manifest.str.startswith("run_logs/fsfact/")])
+display(manifest_census[~manifest_census.manifest.str.startswith("run_logs/campaigns/fsfact/")])
 ''')
 
 md(r"""

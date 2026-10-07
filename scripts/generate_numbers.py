@@ -48,16 +48,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import typer
-import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
 from pipelines.generate_numbers_pipeline import (
-    ConstrainedGenConfig,
     GenerateNumbersConfig,
-    NumberPromptSetConfig,
-    constrained_from_generation_doc,
-    load_number_prompt_set,
+    load_number_config,
     parse_ftseeds,
     prompt_set_tag,
     run,
@@ -65,10 +61,6 @@ from pipelines.generate_numbers_pipeline import (
     control_draw_tag,
     gen_draw_seed_base,
     rng_draw_seed,
-)
-from subliminal_learning.numbers.filtering import (
-    NumberFilterConfig,
-    filter_modes_from_config,
 )
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.models.datadecide import parse_base_model_tokens
@@ -80,32 +72,8 @@ from subliminal_learning.teachers.run_layout import (
 )
 from subliminal_learning.utils.logging_setup import configure_loguru
 
-
-def _load_number_config(
-    path: Path,
-) -> tuple[
-    NumberPromptSetConfig,
-    dict[str, NumberFilterConfig],
-    dict,
-    ConstrainedGenConfig | None,
-]:
-    """Parse number_generation.yaml into (prompt-set, filter modes, gen dict, constrained).
-
-    `constrained` is the parsed `generation.mode: constrained` config or None for the
-    free-generation (`icl_free`) default.
-    """
-    doc = yaml.safe_load(path.read_text())
-    # Prompt-set parsing is delegated so the pipeline and this script never drift.
-    prompt_set = load_number_prompt_set(path)
-    if "filter_modes" not in doc:
-        raise ValueError(
-            f"{path} has no filter_modes: block (the old single filter: block was "
-            "replaced by named filter modes; see configs/experiment/number_generation.yaml)"
-        )
-    modes = filter_modes_from_config(doc["filter_modes"])
-    gen = doc.get("generation", {})
-    constrained = constrained_from_generation_doc(gen)
-    return prompt_set, modes, gen, constrained
+# Re-export: moved to the pipeline; older imports of the script name keep working.
+_load_number_config = load_number_config
 
 
 def main(

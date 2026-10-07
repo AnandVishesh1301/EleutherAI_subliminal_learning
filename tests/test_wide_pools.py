@@ -204,7 +204,7 @@ def test_build_probe_pool_routes_dp1w(monkeypatch):
 
 
 def test_require_base_subset_gate():
-    from scripts.build_unigram_anchor import _require_base_subset
+    from forgetting.scripts.build_unigram_anchor import _require_base_subset
 
     base = SequencePool([[1, 2, 3], [4, 5, 6]], [[1, 2], [1, 2]], "b")
     wide = SequencePool([[1, 2, 3], [4, 5, 6], [7, 8, 9]], [[1, 2]] * 3, "w")
@@ -219,8 +219,8 @@ def test_require_base_subset_gate():
 def test_counts_vs_base_h_uni_gate():
     import numpy as np
 
-    from scripts.build_unigram_anchor import PRIMARY_ALPHA, _require_counts_match_base
-    from subliminal_learning.coherence.anchor import unigram_ce
+    from forgetting.scripts.build_unigram_anchor import PRIMARY_ALPHA, _require_counts_match_base
+    from subliminal_learning.forgetting.coherence.anchor import unigram_ce
 
     counts = np.array([5, 3, 1, 0])
     targets = np.array([0, 1, 2, 3, 0])
@@ -232,7 +232,7 @@ def test_counts_vs_base_h_uni_gate():
 
 
 def test_load_base_counts_demands_the_base_anchor(tmp_path):
-    from scripts.build_unigram_anchor import _load_base_counts
+    from forgetting.scripts.build_unigram_anchor import _load_base_counts
 
     with pytest.raises(SystemExit, match="--pool dp1"):
         _load_base_counts(tmp_path, "dp1")
@@ -242,7 +242,7 @@ def test_load_base_counts_demands_the_base_anchor(tmp_path):
 
 
 def test_wide_artifact_assembly():
-    from scripts.freeze_pp1_text import wide_artifact
+    from forgetting.scripts.freeze_pp1_text import wide_artifact
 
     base_recs = [dict(order_pos=i, row=i, text=f"t{i}", n_chars=2, n_bytes=2,
                       pythia_n_tokens=2, round_trip_exact=True) for i in range(3)]
@@ -272,7 +272,7 @@ def test_wide_artifact_assembly():
 
 
 def test_extension_start_reads_the_frozen_fit_window(tmp_path):
-    from scripts.freeze_pp1_text import _extension_start
+    from forgetting.scripts.freeze_pp1_text import _extension_start
 
     d = tmp_path / "analysis"
     d.mkdir()
@@ -284,7 +284,7 @@ def test_extension_start_reads_the_frozen_fit_window(tmp_path):
 
 
 def test_wide_anchor_fit_window_is_disjoint():
-    from scripts.build_unigram_anchor import _check_fit_window_disjoint
+    from forgetting.scripts.build_unigram_anchor import _check_fit_window_disjoint
 
     _check_fit_window_disjoint(33, 53248, 53281)
     with pytest.raises(SystemExit, match="overlaps wide-pool extension"):

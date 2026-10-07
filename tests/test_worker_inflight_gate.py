@@ -25,8 +25,8 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
 _SCRIPTS = {
-    "crossdistill": _REPO / "run_logs" / "dog_crossdistill_studenthp_worker.py",
-    "p410m": _REPO / "run_logs" / "p410m_worker.py",
+    "crossdistill": _REPO / "run_logs" / "workers" / "dog_crossdistill_studenthp_worker.py",
+    "p410m": _REPO / "run_logs" / "workers" / "p410m_worker.py",
 }
 if not all(p.exists() for p in _SCRIPTS.values()):
     pytest.skip("run_logs worker scripts absent (machine-local mount)", allow_module_level=True)
@@ -148,9 +148,9 @@ def test_p410m_accepts_160m_to_410m_seed1(tmp_path, monkeypatch, extra):
 # --- interior-checkpoint expectation (2026-09-17: no `checkpoint-{final_step}` dir) ------
 
 _CKPT_SCRIPTS = {
-    "hf": _REPO / "run_logs" / "hf_worker.py",
-    "p410m": _REPO / "run_logs" / "p410m_worker.py",
-    "strip_replay": _REPO / "run_logs" / "strip_ckpt_replay_worker.py",
+    "hf": _REPO / "run_logs" / "workers" / "hf_worker.py",
+    "p410m": _REPO / "run_logs" / "workers" / "p410m_worker.py",
+    "strip_replay": _REPO / "run_logs" / "workers" / "strip_ckpt_replay_worker.py",
 }
 
 

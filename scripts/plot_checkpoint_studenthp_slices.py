@@ -32,7 +32,7 @@ HPS = (
 TEACHER_TAG = "ep10_lr1e-4_r64a64"
 REFERENCE_TAG = "ep10_lr1e-4_r8a32"
 CAMPAIGNS = tuple(
-    Path("run_logs") / name
+    Path("run_logs") / "campaigns" / name
     for name in (
         "checkpoint_studenthp5ep10_20260922",
         "checkpoint_studenthp5ep10_reverse_20260922",

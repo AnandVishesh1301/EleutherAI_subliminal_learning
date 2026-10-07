@@ -1,4 +1,4 @@
-"""Loaders for the DataDecide OLMo-1B student ladders (``run_logs/dd1b_worker.py``): the
+"""Loaders for the DataDecide OLMo-1B student ladders (``run_logs/workers/dd1b_worker.py``): the
 same-model arm (``dd-1b`` -> ``dd-1b``) and the cross-seed arms (``dd-1b`` teacher ->
 ``dd-1b-seed{2,3}`` students; pass ``base=<student dir>, teacher_base=DD1B_BASE``).
 Control arms (2026-09-09) share every loader: pass ``source="base", numbers_base=<pool base dir>``
@@ -307,7 +307,7 @@ def load_teacher_frame(output_root: Path, *, animal: str = DD1B_ANIMAL, base: st
                        with_pools: bool = True) -> pd.DataFrame:
     """One row per teacher of one ``teachers/{animal}/{base}`` tree: probe + pool coverage.
 
-    The teacher trees of the HF-family arms (``run_logs/hf_worker.py``: Qwen/Llama/Gemma) and
+    The teacher trees of the HF-family arms (``run_logs/workers/hf_worker.py``: Qwen/Llama/Gemma) and
     the DataDecide arm share the layout ``{tag}/ftseed{seed}/{checkpoints,train_manifest.json,
     eval/pile_probe.json}``. This is the read site for a whole tree (teacher screens, band fills
     and the 1,568-cell Qwen teacher lattice), so notebooks never glob it inline.

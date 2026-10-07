@@ -29,9 +29,9 @@ def code(s: str) -> None:
 md(r"""
 # Transfer matrix: sender × receiver dog transfer on Pythia-160m
 
-**A cell.** Row *i* (sender), column *j* (receiver): sender *i*'s ten k-band dog teachers (`run_logs/dog_top10_kband_configs.json`, teacher seed 1) distilled into receiver *j* at **student finetune seed 1**, numbers pool `ex10-20_prefix_n100k`. Each panel folds the 10 × N runs of the arm into one order statistic — **mean**, **75th percentile**, **95th percentile**, **max** — of the per-run test-set p(dog). The `x→x` diagonal is the same-model arm and is treated like any other cell.
+**A cell.** Row *i* (sender), column *j* (receiver): sender *i*'s ten k-band dog teachers (`run_logs/registry/dog_top10_kband_configs.json`, teacher seed 1) distilled into receiver *j* at **student finetune seed 1**, numbers pool `ex10-20_prefix_n100k`. Each panel folds the 10 × N runs of the arm into one order statistic — **mean**, **75th percentile**, **95th percentile**, **max** — of the per-run test-set p(dog). The `x→x` diagonal is the same-model arm and is treated like any other cell.
 
-**Coverage rule.** An arm is scored on **core56** (`run_logs/core56_cells.json`, N = 56) when it has a run for *every* (teacher, cell) of the 10 × 56 design; otherwise on **core30** (N = 30) when it has every (teacher, cell) of 10 × 30; otherwise it is **missing** and drawn as a hatched blank — the on-disk arms that failed the rule are listed at the bottom of the coverage table (`design = None`) with their run counts, so every blank is accounted for. The greater complete design wins; a single missing (teacher, cell) loses that design.
+**Coverage rule.** An arm is scored on **core56** (`run_logs/registry/core56_cells.json`, N = 56) when it has a run for *every* (teacher, cell) of the 10 × 56 design; otherwise on **core30** (N = 30) when it has every (teacher, cell) of 10 × 30; otherwise it is **missing** and drawn as a hatched blank — the on-disk arms that failed the rule are listed at the bottom of the coverage table (`design = None`) with their run counts, so every blank is accounted for. The greater complete design wins; a single missing (teacher, cell) loses that design.
 
 **Two versions.** *Raw*: the treatment p(dog) itself. *Prior-normalized*: `(treatment − control) / prior`, where `control` is the matched control student (the *untuned* sender's numbers pool distilled into the receiver in the same cell, same seed) and `prior` is the receiver's untuned dog test prior. Receivers differ in their untuned dog prior, and a numbers pool alone moves the receiver; the normalized version removes both the prior level and the number-pool-only effect. Only runs with a finite control enter it, so an arm with no control at all is NaN in the normalized figure even when present in the raw one (`has_control` in the coverage table).
 
@@ -47,8 +47,8 @@ from subliminal_learning.analysis import diagonal_direction as dd, plots as aplo
 from subliminal_learning.analysis.setup import bootstrap
 
 REPO, OUT = bootstrap()
-TEACHERS = json.loads((REPO / "run_logs/dog_top10_kband_configs.json").read_text())["param_tags"]
-C30, C56 = dd.resolve_cells(REPO / "run_logs/core30_cells.json"), dd.resolve_cells(REPO / "run_logs/core56_cells.json")
+TEACHERS = json.loads((REPO / "run_logs/registry/dog_top10_kband_configs.json").read_text())["param_tags"]
+C30, C56 = dd.resolve_cells(REPO / "run_logs/registry/core30_cells.json"), dd.resolve_cells(REPO / "run_logs/registry/core56_cells.json")
 ARMS = dd.arms_on_disk(OUT)
 RUNS = dd.load_arm_runs(ARMS, TEACHERS, C56, output_root=OUT)
 """)
@@ -97,11 +97,11 @@ Anything else (`other`: a pair differing in init and tree — orig↔wc1 — or 
 
 **core30 rule (this view only).** Unlike the 16 × 16 heatmaps above, an arm is NOT dropped for partial coverage: every on-disk 160m arm with at least one core30 run enters, scored on whatever core30 runs it has, and carries `complete = k/300`. Arms with no core30 run are listed in the table only (`no core30 runs`). Raw = treatment p(dog); normalized = (treatment − control) / prior over the runs with a finite control (the normalized `m` counts those runs).
 
-**Cross-width arms are on a different footing.** Rows 8–9 come from `run_logs/xarch/xarch_significance_arms.json` with *whatever teachers and cells exist* (160m→410m: 4 teachers; 410m→160m, 410m-seed1→160m, 160m→410m-seed1: 1 teacher each; a 410m-specific cell lattice, matched control per cell), not the 10 k-band teachers × core30. Their second line reads `n=k arms, m runs, t teachers`. Colour scales are per panel: raw 0–0.4, normalized 0–the `default_vmax` of the non-self rows (the self row saturates, its label is the true value).
+**Cross-width arms are on a different footing.** Rows 8–9 come from `run_logs/campaigns/xarch/xarch_significance_arms.json` with *whatever teachers and cells exist* (160m→410m: 4 teachers; 410m→160m, 410m-seed1→160m, 160m→410m-seed1: 1 teacher each; a 410m-specific cell lattice, matched control per cell), not the 10 k-band teachers × core30. Their second line reads `n=k arms, m runs, t teachers`. Colour scales are per panel: raw 0–0.4, normalized 0–the `default_vmax` of the non-self rows (the self row saturates, its label is the true value).
 """)
 
 code(r"""
-XARCH = tm.load_xarch_runs(REPO / "run_logs/xarch/xarch_significance_arms.json", output_root=OUT)
+XARCH = tm.load_xarch_runs(REPO / "run_logs/campaigns/xarch/xarch_significance_arms.json", output_root=OUT)
 TAB = tm.relationship_arm_table(RUNS, COV, cells30=C30, on_disk=ARMS, xarch_runs=XARCH)
 RAW_S, REL_S = tm.relationship_summary(TAB, "raw"), tm.relationship_summary(TAB, "rel")
 FIG3, _ = aplots.relationship_panels(RAW_S.grid, REL_S.grid, raw_sub=RAW_S.sublabels(), rel_sub=REL_S.sublabels(),

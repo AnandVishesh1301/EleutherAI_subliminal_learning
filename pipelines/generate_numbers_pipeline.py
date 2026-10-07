@@ -67,13 +67,12 @@ from typing import Literal, Mapping
 import peft
 import torch
 import transformers
-import yaml
 from loguru import logger
 from peft import PeftModel
 from transformers import LogitsProcessorList
 
 from pipelines.evaluate_teacher_preference_pipeline import adapter_identity, prompts_hash
-from subliminal_learning.config import PathsConfig
+from subliminal_learning.config import PathsConfig, load_yaml_extends
 from subliminal_learning.evaluation.preference_scoring import mentions_target
 from subliminal_learning.models.loading_io import (
     load_model,
@@ -93,6 +92,7 @@ from subliminal_learning.numbers.constrained import (
 from subliminal_learning.numbers.filtering import (
     NumberFilterConfig,
     all_animal_forms,
+    filter_modes_from_config,
     filter_raw_rows,
 )
 from subliminal_learning.numbers.generation_io import (
@@ -295,7 +295,7 @@ class NumberPromptSetConfig:
 
 def load_number_prompt_set(path: Path) -> NumberPromptSetConfig:
     """Parse the templates_path + prompt_set block of number_generation.yaml."""
-    doc = yaml.safe_load(path.read_text())
+    doc = load_yaml_extends(path)
     ps = doc["prompt_set"]
     return NumberPromptSetConfig(
         templates_path=Path(doc["templates_path"]),
@@ -308,6 +308,33 @@ def load_number_prompt_set(path: Path) -> NumberPromptSetConfig:
         separator_weights=ps.get("separator_weights"),
     )
 
+
+
+def load_number_config(
+    path: Path,
+) -> tuple[
+    NumberPromptSetConfig,
+    dict[str, NumberFilterConfig],
+    dict,
+    ConstrainedGenConfig | None,
+]:
+    """Parse number_generation.yaml into (prompt-set, filter modes, gen dict, constrained).
+
+    `constrained` is the parsed `generation.mode: constrained` config or None for the
+    free-generation (`icl_free`) default.
+    """
+    doc = load_yaml_extends(path)
+    # Prompt-set parsing is delegated so the two parsers never drift.
+    prompt_set = load_number_prompt_set(path)
+    if "filter_modes" not in doc:
+        raise ValueError(
+            f"{path} has no filter_modes: block (the old single filter: block was "
+            "replaced by named filter modes; see configs/experiment/number_generation.yaml)"
+        )
+    modes = filter_modes_from_config(doc["filter_modes"])
+    gen = doc.get("generation", {})
+    constrained = constrained_from_generation_doc(gen)
+    return prompt_set, modes, gen, constrained
 
 @dataclass(frozen=True)
 class ConstrainedGenConfig:

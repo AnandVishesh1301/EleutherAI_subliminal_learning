@@ -458,3 +458,72 @@ def lineage_long_frame(
                          "delta_ce": ce.get(s, np.nan)})
     cols = ["tag", "ftseed", "step", "frac", "p_test", "kl", "delta_ce"]
     return pd.DataFrame(rows, columns=cols)
+
+
+# --------------------------------------------------------------------------------------------------
+# (rank x alpha) grids over runs, and nearest-checkpoint slices of a long trajectory frame
+# --------------------------------------------------------------------------------------------------
+
+
+def rank_alpha_grid(df: pd.DataFrame, value: str, ranks=None, alphas=None,
+                    agg: str = "median") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(rank x alpha) `agg` of `value` over the rows of `df`, plus the per-cell row count.
+
+    Args:
+        df: Rows carrying ``rank``, ``alpha`` and `value` (one row per run or per run-checkpoint).
+        value: Column to aggregate.
+        ranks, alphas: When given, both frames are reindexed to exactly these rows / columns
+            (missing cells become NaN); when None, only the observed levels appear.
+        agg: Aggregation for the value grid (the count grid is always ``size``).
+
+    Returns:
+        ``(grid, counts)``.
+    """
+    g = df.pivot_table(index="rank", columns="alpha", values=value, aggfunc=agg)
+    n = df.pivot_table(index="rank", columns="alpha", values=value, aggfunc="size")
+    if ranks is not None or alphas is not None:
+        g, n = g.reindex(index=ranks, columns=alphas), n.reindex(index=ranks, columns=alphas)
+    return g, n
+
+
+def nearest_step_slice(tr: pd.DataFrame, step: int, tags=None, *, rel_tol: float = 0.1,
+                       max_step_factor: float | None = None,
+                       require_value: str | None = None) -> pd.DataFrame:
+    """Per run (``tag``), the saved checkpoint row nearest `step`, kept only within `rel_tol`.
+
+    Pre-filters, applied before the nearest pick: ``tag in tags`` (when given), rows with a
+    non-NaN `require_value` (when given), and ``step <= max_step_factor * step`` (when given).
+    Ties in distance go to the first row in frame order (``idxmin``). The result carries an
+    extra ``d = |step - target|`` column.
+    """
+    t = tr if tags is None else tr[tr["tag"].isin(tags)]
+    if require_value is not None:
+        t = t[t[require_value].notna()]
+    if max_step_factor is not None:
+        t = t[t["step"] <= max_step_factor * step]
+    t = t.copy()
+    if t.empty:
+        return t.assign(d=pd.Series(dtype=float))
+    t["d"] = (t["step"] - step).abs()
+    pick = t.loc[t.groupby("tag")["d"].idxmin()]
+    return pick[pick["d"] <= rel_tol * step]
+
+
+def grid_at_step(tr: pd.DataFrame, tags, step: int, value: str = "p_test", ranks=None,
+                 alphas=None, **slice_kw):
+    """`rank_alpha_grid` of `value` over `nearest_step_slice` rows, with the median picked step.
+
+    Returns:
+        ``((grid, counts), median_step)``, or ``(None, None)`` when no run has a checkpoint in
+        tolerance. ``slice_kw`` goes to `nearest_step_slice`.
+    """
+    pick = nearest_step_slice(tr, step, tags, **slice_kw)
+    if pick.empty:
+        return None, None
+    return rank_alpha_grid(pick, value, ranks, alphas), int(pick["step"].median())
+
+
+def grid_nanmedian(g: pd.DataFrame, rows=None) -> float:
+    """NaN-ignoring median over every cell of `g` (optionally only the index labels `rows`)."""
+    v = g if rows is None else g.loc[rows]
+    return float(np.nanmedian(v.to_numpy()))

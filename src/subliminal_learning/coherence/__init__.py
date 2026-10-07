@@ -1,6 +1,7 @@
-"""Pile coherence eval: teacher-forced cross-entropy on packed Pile windows.
+"""Shared probe machinery: the pp1/KL probe (``probe_io``, ``probe_families``) and the
+DCLM/C4/Dolma text pools, used by training, final evals and the transfer analyses.
 
-Measures whether LoRA fine-tuning (teacher or student) degrades in-distribution
-Pile loss relative to the model's OWN base variant, via a fixed, versioned token
-shard and a paired per-window block bootstrap on ΔCE.
+The Pile coherence eval (teacher-forced CE on packed Pile windows vs the model's own base,
+paired block bootstrap on ΔCE) and the unigram anchor moved to
+``subliminal_learning.forgetting.coherence``.
 """

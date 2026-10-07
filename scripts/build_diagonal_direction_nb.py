@@ -32,7 +32,7 @@ Two measurements meet here, both on Pythia-160m **dog** students at **student fi
 
 **The diagonal — a property of ONE model.** `diag_post(m)` = model *m*'s own checkpoint-distill diagonal: a teacher finetuned on `m@step t`, distilled back into `m@step t`, averaged over the five teacher recipes `ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16` and over the post-cliff steps **115k / 125k / 143k**. A step that does not carry all five recipes is *skipped*, not averaged (it would sit on another scale); `n_steps` records how many were used. Secondary readings: `diag_125k`, `diag_143k`, and `diag_post_seedmean` (ftseeds averaged within a (step, recipe) first).
 
-**The directed arm — a property of an ORDERED pair.** `T(x→y)` = x's ten k-band dog teachers (`run_logs/dog_top10_kband_configs.json`, teacher seed 1) distilled into y on the **core30** design (`run_logs/core30_cells.json`), read against the matched control — the *untuned* x base's numbers pool distilled into y in the **same** student cell, same student seed. Three statistics: `mean_rel` (treatment − control, in units of y's dog test prior; **primary**), `exceed_frac` (share of runs above their own cell's control) and `mean_p` (raw mean treatment p(dog), no control needed). **Dead runs are KEPT** and only counted: a dead label is an outcome of the treatment, so dropping on it would condition on a post-treatment variable.
+**The directed arm — a property of an ORDERED pair.** `T(x→y)` = x's ten k-band dog teachers (`run_logs/registry/dog_top10_kband_configs.json`, teacher seed 1) distilled into y on the **core30** design (`run_logs/registry/core30_cells.json`), read against the matched control — the *untuned* x base's numbers pool distilled into y in the **same** student cell, same student seed. Three statistics: `mean_rel` (treatment − control, in units of y's dog test prior; **primary**), `exceed_frac` (share of runs above their own cell's control) and `mean_p` (raw mean treatment p(dog), no control needed). **Dead runs are KEPT** and only counted: a dead label is an outcome of the treatment, so dropping on it would condition on a post-treatment variable.
 
 **The question.** For an unordered pair {x, y} with both directions loaded, is `asym = T(x→y) − T(y→x)` the same sign as `ddiag = diag(y) − diag(x)`? That is `into_higher_diag`: the stronger direction is the one flowing *into* the higher-diagonal model. Pairs are stratified by `relationship` (same-model / cross-data-order / cross-init / cross-both / cross-corpus) because the strata differ by orders of magnitude in effect.
 
@@ -62,11 +62,11 @@ from subliminal_learning.analysis.setup import bootstrap
 
 REPO, OUT = bootstrap()     # repo-anchored: every path below is absolute
 DIAG = dd.diagonal_table(dd.load_diagonal_runs(OUT))
-TEACHERS = json.loads((REPO / "run_logs/dog_top10_kband_configs.json").read_text())["param_tags"]
+TEACHERS = json.loads((REPO / "run_logs/registry/dog_top10_kband_configs.json").read_text())["param_tags"]
 """)
 
 code(r"""
-CELLS30, CELLS56 = REPO / "run_logs/core30_cells.json", REPO / "run_logs/core56_cells.json"
+CELLS30, CELLS56 = REPO / "run_logs/registry/core30_cells.json", REPO / "run_logs/registry/core56_cells.json"
 ARM_PAIRS = dd.arms_on_disk(OUT)
 RUNS = dd.load_arm_runs(ARM_PAIRS, TEACHERS, CELLS56, output_root=OUT)   # core56 superset of core30
 RUNS30 = RUNS[RUNS.cell.isin(dd.resolve_cells(CELLS30))]

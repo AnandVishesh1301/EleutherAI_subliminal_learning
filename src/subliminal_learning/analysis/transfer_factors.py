@@ -135,9 +135,9 @@ def anchored_cut_by_base(delta_cross: dict[str, float], family: str = "pythia-16
 def load_focus20_design(root: Path) -> tuple[pd.DataFrame, list[str], dict]:
     """Load the focus-20 student-HP cell design and the shared 20-teacher param-tag list.
 
-    Reads ``run_logs/focus20_cells.json`` (the 20 shared student cells) for ``cells_df`` and prefers
-    ``run_logs/dog_top20krungs_configs.json`` for the teacher ``param_tags`` (falling back to
-    ``run_logs/cat_top20_bandext_configs.json``). When both teacher files exist their ``param_tags``
+    Reads ``run_logs/registry/focus20_cells.json`` (the 20 shared student cells) for ``cells_df`` and prefers
+    ``run_logs/registry/dog_top20krungs_configs.json`` for the teacher ``param_tags`` (falling back to
+    ``run_logs/registry/cat_top20_bandext_configs.json``). When both teacher files exist their ``param_tags``
     are asserted identical -- the campaign deliberately holds the teacher list fixed across animals.
 
     Args:
@@ -149,11 +149,11 @@ def load_focus20_design(root: Path) -> tuple[pd.DataFrame, list[str], dict]:
         and ``meta`` carries the design's ``selection``/``epochs``/``student_seed``.
     """
     root = Path(root)
-    design = read_json(root / "run_logs" / "focus20_cells.json")
+    design = read_json(root / "run_logs" / "registry" / "focus20_cells.json")
     cells_df = pd.DataFrame(design["cells"])
 
-    dog_path = root / "run_logs" / "dog_top20krungs_configs.json"
-    cat_path = root / "run_logs" / "cat_top20_bandext_configs.json"
+    dog_path = root / "run_logs" / "registry" / "dog_top20krungs_configs.json"
+    cat_path = root / "run_logs" / "registry" / "cat_top20_bandext_configs.json"
     dog_tags = read_json(dog_path)["param_tags"] if dog_path.exists() else None
     cat_tags = read_json(cat_path)["param_tags"] if cat_path.exists() else None
     if dog_tags is not None and cat_tags is not None:
@@ -195,14 +195,14 @@ def load_core65_design(root: Path) -> tuple[pd.DataFrame, list[str]]:
     root = Path(root)
     frames = []
     for subset, fname in _CORE65_MANIFESTS:
-        d = read_json(root / "run_logs" / fname)
+        d = read_json(root / "run_logs" / "registry" / fname)
         df = pd.DataFrame(d["cells"])[["student_tag", "lr", "rank", "alpha", "K_rel"]]
         frames.append(df.assign(subset=subset))
     cells_df = (pd.concat(frames, ignore_index=True)
                 .drop_duplicates("student_tag", keep="first")
                 .sort_values("K_rel", ignore_index=True))
     assert len(cells_df) == 65, f"core65 manifests union to {len(cells_df)} cells, expected 65"
-    param_tags = list(read_json(root / "run_logs" / _CORE65_TEACHERS)["param_tags"])
+    param_tags = list(read_json(root / "run_logs" / "registry" / _CORE65_TEACHERS)["param_tags"])
     return cells_df, param_tags
 
 
@@ -279,7 +279,7 @@ def load_focus_runs(
 
 # The realized cross-arm run inventory: every landed bandext126 run (all animals x bases x
 # teachers), used as the probe-cache refresh inventory.
-XARM_INVENTORY_REL: str = "run_logs/strip_probe_lists/xarm_bandext126_runs.txt"
+XARM_INVENTORY_REL: str = "run_logs/campaigns/strip_probe_lists/xarm_bandext126_runs.txt"
 
 
 def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = True, *,
@@ -287,7 +287,7 @@ def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = T
                            dataset_by_teacher: dict[str, str] | None = None):
     """The core65 cross-arm seed-run population with its integrity readouts and anchored cut.
 
-    The C3 loading path of `notebooks/collapse_claims.ipynb` (cells 1/8) as one call: core65
+    The C3 loading path of `forgetting/notebooks/collapse_claims.ipynb` (cells 1/8) as one call: core65
     cells x the design's shared top-10 teachers x 4 animals x 6 bases, joined to the pile-probe
     cache (pool pp1) and to each receiver base's unigram crossing. The teacher set is the
     design's (the same 10 tags on every arm, so per-arm K* is not composition-confounded); the

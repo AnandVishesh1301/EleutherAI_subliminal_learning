@@ -122,7 +122,7 @@ def main(
     repo, root = bootstrap()
     cells = [
         c["student_tag"]
-        for c in json.loads((repo / "run_logs/core30_cells.json").read_text())["cells"]
+        for c in json.loads((repo / "run_logs/registry/core30_cells.json").read_text())["cells"]
     ]
     teachers = original._teachers(repo, tfp.DEFAULT_ANIMALS)
     frame, ctx = tfp.all_pairs(

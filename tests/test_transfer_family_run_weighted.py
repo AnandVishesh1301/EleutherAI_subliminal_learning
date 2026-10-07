@@ -88,8 +88,8 @@ def test_missing_family_or_dog_is_missing_not_zero(tmp_path, monkeypatch):
 
 
 def test_cli_loads_existing_grids_without_collapse_filter(tmp_path, monkeypatch):
-    (tmp_path / "run_logs").mkdir()
-    (tmp_path / "run_logs/core30_cells.json").write_text(
+    (tmp_path / "run_logs/registry").mkdir(parents=True)
+    (tmp_path / "run_logs/registry/core30_cells.json").write_text(
         '{"cells":[{"student_tag":"selected"}]}'
     )
     monkeypatch.setattr(cli, "bootstrap", lambda: (tmp_path, tmp_path / "outputs"))
@@ -155,8 +155,8 @@ def test_new_methods_dispatch_independently_and_keep_equal_point_estimates(
 
 
 def test_cli_both_writes_only_method_subdirectories(tmp_path, monkeypatch):
-    (tmp_path / "run_logs").mkdir()
-    (tmp_path / "run_logs/core30_cells.json").write_text('{"cells":[]}')
+    (tmp_path / "run_logs/registry").mkdir(parents=True)
+    (tmp_path / "run_logs/registry/core30_cells.json").write_text('{"cells":[]}')
     monkeypatch.setattr(cli, "bootstrap", lambda: (tmp_path, tmp_path / "outputs"))
     monkeypatch.setattr(original, "_teachers", lambda *a: {})
 

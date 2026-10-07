@@ -45,7 +45,7 @@ SCOPE = "Exp(1) crossed source-teacher x global student-cell weights; fixed anim
 def _teachers(repo, animals):
     return {
         a: list(
-            json.loads((repo / f"run_logs/{a}_top10_kband_configs.json").read_text())[
+            json.loads((repo / f"run_logs/registry/{a}_top10_kband_configs.json").read_text())[
                 "param_tags"
             ]
         )
@@ -957,7 +957,7 @@ def main(
         _archive_existing(repo)
     cells = [
         c["student_tag"]
-        for c in json.loads((repo / "run_logs/core30_cells.json").read_text())["cells"]
+        for c in json.loads((repo / "run_logs/registry/core30_cells.json").read_text())["cells"]
     ]
     teachers = _teachers(repo, tfp.DEFAULT_ANIMALS)
     print("Loading original matched pairs...", flush=True)

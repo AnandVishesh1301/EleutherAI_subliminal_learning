@@ -15,7 +15,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
-from scripts.ckpt_pile_kl_trajectory import (  # noqa: E402
+from forgetting.scripts.ckpt_pile_kl_trajectory import (  # noqa: E402
     pile_id_is_current,
     points_lacking_ce,
     pool_spec_for,

@@ -2,11 +2,7 @@
 # (2026-08-20). Same generation/filter settings as number_gen_sweep.yaml (100k raw,
 # prefix strict, etc.); only the base model and animal list differ. The master restricts
 # to the top-10 kband tags via --only-param-tags and to ftseed1 via --ftseeds 1.
+extends: number_gen_sweep.yaml
 inherit_grid: configs/experiment/teacher_ft_sweep_selected_weightseed1.yaml
-
 animals: [dog]
 base_models: weight-seed1
-
-number_config: configs/experiment/number_generation.yaml  # 100k raw, prefix strict, etc.
-include_base_control: true      # one untuned weight-seed1 base pool
-include_rng_control: true       # shared model-free RNG dataset (resume-skips)

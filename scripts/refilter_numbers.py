@@ -28,7 +28,7 @@ from dacite import Config, from_dict
 from loguru import logger
 
 from pipelines.generate_numbers_pipeline import MODES_SUBDIR, apply_filter_mode
-from scripts.generate_numbers import _load_number_config
+from pipelines.generate_numbers_pipeline import load_number_config
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -68,7 +68,7 @@ def main(
     if dataset_dir is not None and all_datasets:
         raise typer.BadParameter("--dataset-dir and --all are mutually exclusive")
 
-    _, filter_modes, _, _ = _load_number_config(number_config)
+    _, filter_modes, _, _ = load_number_config(number_config)
     if modes.strip():
         wanted = [m.strip() for m in modes.split(",") if m.strip()]
         unknown = [m for m in wanted if m not in filter_modes]

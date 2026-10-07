@@ -24,7 +24,7 @@ from jobq.model import MAX_JOBKEY_BYTES, sanitize_jobkey  # noqa: E402
 
 # run_logs is an untracked, machine-local mount: skip cleanly (rather than failing
 # collection) on a checkout that does not have it.
-_SCRIPT = _REPO / "run_logs" / "teacher_audit_campaign_gen.py"
+_SCRIPT = _REPO / "run_logs" / "workers" / "teacher_audit_campaign_gen.py"
 if not _SCRIPT.exists():
     pytest.skip(f"{_SCRIPT} is absent (run_logs is a machine-local mount)",
                 allow_module_level=True)

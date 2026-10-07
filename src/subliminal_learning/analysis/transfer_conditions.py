@@ -661,11 +661,11 @@ def condition_blocks(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]]
     """
     rl = repo / "run_logs"
     pythia = ["dog", "cat", "lion", "pig"]
-    core56, core30, focus20 = (rl / "core56_cells.json", rl / "core30_cells.json",
-                               rl / "focus20_cells.json")
-    xarch, repre, olmo = (rl / "xarch/xarch_significance_arms.json",
-                          rl / "repretrain/repretrain_significance_arms.json",
-                          rl / "repretrain/olmo_cross_seed_significance_arms.json")
+    core56, core30, focus20 = (rl / "registry" / "core56_cells.json", rl / "registry" / "core30_cells.json",
+                               rl / "registry" / "focus20_cells.json")
+    xarch, repre, olmo = (rl / "campaigns/xarch/xarch_significance_arms.json",
+                          rl / "campaigns/repretrain/repretrain_significance_arms.json",
+                          rl / "campaigns/repretrain/olmo_cross_seed_significance_arms.json")
 
     def fam(arms, animals, cells):
         return th.family_headline_arms(arms, animals, teachers_by_animal, cells=cells,

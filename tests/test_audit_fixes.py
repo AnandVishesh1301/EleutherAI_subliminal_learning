@@ -312,7 +312,7 @@ def test_all_linear_still_rejected_on_non_neox_base():
 
 
 def test_unigram_shortfall_is_fatal_only_when_writing(capsys):
-    from scripts.build_unigram_anchor import _check_unigram_sample
+    from forgetting.scripts.build_unigram_anchor import _check_unigram_sample
 
     # writing a NEW anchor on an under-sampled stream must stop the build
     with pytest.raises(SystemExit, match="only 120 usable docs of the 50000"):
@@ -326,7 +326,7 @@ def test_unigram_shortfall_is_fatal_only_when_writing(capsys):
 
 
 def test_unigram_empty_counts_are_fatal_on_every_path():
-    from scripts.build_unigram_anchor import _check_unigram_sample
+    from forgetting.scripts.build_unigram_anchor import _check_unigram_sample
 
     for will_write in (True, False):
         with pytest.raises(SystemExit, match="no tokens counted"):

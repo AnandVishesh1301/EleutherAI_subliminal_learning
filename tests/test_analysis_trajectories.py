@@ -291,7 +291,7 @@ def _dose_run(tmp_path, model_ref):
 
 def test_dose_trajectory_normalizes_against_the_runs_own_pinned_base(tmp_path, monkeypatch):
     """A ckpt-arm run's W0 is its ``@stepN`` base, not HF `main`; the record says which."""
-    import scripts.ckpt_dose_trajectory as cdt
+    import forgetting.scripts.ckpt_dose_trajectory as cdt
 
     run_dir = _dose_run(tmp_path, "EleutherAI/pythia-160m@step25000")
     asked = []

@@ -23,9 +23,9 @@ from subliminal_learning.run_gate import write_interrupted_marker, write_resume_
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
-_SCRIPT = _REPO / "run_logs" / "dd1b_worker.py"
+_SCRIPT = _REPO / "run_logs" / "workers" / "dd1b_worker.py"
 if not _SCRIPT.exists():
-    pytest.skip("run_logs/dd1b_worker.py absent (machine-local mount)", allow_module_level=True)
+    pytest.skip("run_logs/workers/dd1b_worker.py absent (machine-local mount)", allow_module_level=True)
 
 
 @pytest.fixture(scope="module")

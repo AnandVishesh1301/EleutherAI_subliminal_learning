@@ -180,10 +180,10 @@ def load_specificity_runs(output_root: Path, *, root: Path | None = None,
     """
     root = root or Path(__file__).resolve().parents[3]
     teachers = [f"{t}_tseed1" for t in
-                json.loads((root / "run_logs" / "dog_top10_kband_configs.json").read_text())
+                json.loads((root / "run_logs" / "registry" / "dog_top10_kband_configs.json").read_text())
                 ["param_tags"]]
     cells = [c["student_tag"] for c in
-             json.loads((root / "run_logs" / "core30_cells.json").read_text())["cells"]]
+             json.loads((root / "run_logs" / "registry" / "core30_cells.json").read_text())["cells"]]
     jobs = _jobs(Path(output_root), teachers, cells)
 
     def run(job):

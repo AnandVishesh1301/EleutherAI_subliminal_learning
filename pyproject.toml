@@ -76,7 +76,7 @@ torch = [{ index = "pytorch-cu124" }]
 gpu-jobq = { git = "https://github.com/tangang8/gpu-jobq.git" }
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "forgetting/tests"]
 pythonpath = ["."]
 markers = [
     "gpu: requires GPU or loads a checkpoint",

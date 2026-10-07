@@ -58,7 +58,7 @@ from scripts.resampling_controls import (
 STUDENT_TAG = "ep10_lr1e-4_r8a32"
 EVAL_RECORDS = ("preference_summary.json", "animal_bank_test.json")
 # The August pools were distilled into both bases; the `_s75` tag is the SAME pool trained
-# into the step-75000 student (see run_logs/entropy_match_ablation.py), so both map onto the
+# into the step-75000 student (see run_logs/workers/entropy_match_ablation.py), so both map onto the
 # one re-homed pool and are told apart by their recipient directory alone.
 AUGUST_STUDENT_TAGS = {
     "prefix_entmatch125k": {
@@ -71,7 +71,7 @@ AUGUST_STUDENT_TAGS = {
     },
 }
 AUGUST_NOTE = (
-    "pool built 2026-08-12 by run_logs/entropy_match_ablation.py; the manifest was a COPY "
+    "pool built 2026-08-12 by run_logs/workers/entropy_match_ablation.py; the manifest was a COPY "
     "of the early pool's and is replaced by a proper derived-pool manifest"
 )
 AUGUST_SAMPLING = {

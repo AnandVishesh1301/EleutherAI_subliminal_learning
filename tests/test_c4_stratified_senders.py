@@ -1,7 +1,7 @@
 """The stratified C4 sender program: selection rule, band membership, and its job files.
 
 Guards the 2026-09-20 replacement of the abandoned lowest-ΔCE C4 cut by a ΔCE-stratified
-sender set (run_logs/olmo_c4_to_dclm_pilot_20260920/select_stratified.py).
+sender set (run_logs/campaigns/olmo_c4_to_dclm_pilot_20260920/select_stratified.py).
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-DCLM = REPO / "run_logs" / "olmo_c4_to_dclm_pilot_20260920"
-DOLMA = REPO / "run_logs" / "olmo_c4_to_dolma_pilot_20260920"
+DCLM = REPO / "run_logs" / "campaigns" / "olmo_c4_to_dclm_pilot_20260920"
+DOLMA = REPO / "run_logs" / "campaigns" / "olmo_c4_to_dolma_pilot_20260920"
 sys.path.insert(0, str(DCLM))
 
 import select_stratified as sel  # noqa: E402

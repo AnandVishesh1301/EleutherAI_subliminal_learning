@@ -8,7 +8,7 @@ is the step-span weighted mean of the attempts' logged interval means
 (`training.resume_loss_audit`), i.e. exactly the `LOSS_METHOD_INTERVAL` approximation the
 resume-complete path already writes.
 
-Input is the yield/resume audit TSV (``run_logs/queue_angela/yield_resume_audit_*.tsv``),
+Input is the yield/resume audit TSV (``<jobq queue folder>/yield_resume_audit_*.tsv``),
 whose ``attempt_logs`` column lists each run's attempt logs in order, relative to the TSV's
 own directory. The original value is kept under ``final_train_loss_hf_segment_biased``, so
 nothing is lost and a second pass skips the run (idempotent).
@@ -25,6 +25,7 @@ from pathlib import Path
 import typer
 from loguru import logger
 
+from subliminal_learning.jobq_folder import configured_queue_folder
 from subliminal_learning.training.resume_loss_audit import reconstruct_train_loss
 from subliminal_learning.training.sft_io import LOSS_METHOD_INTERVAL
 from subliminal_learning.utils.io import atomic_write_json
@@ -93,8 +94,9 @@ def _fmt(value) -> str:
 @app.command()
 def main(
     tsv: Path = typer.Option(
-        Path("run_logs/queue_angela/yield_resume_audit_20260919.tsv"),
-        help="Yield/resume audit TSV (columns include run_dir and attempt_logs).",
+        None,
+        help="Yield/resume audit TSV (columns include run_dir and attempt_logs; default: "
+        "yield_resume_audit_20260919.tsv in the jobq_paths.toml queue folder).",
     ),
     log_root: Path = typer.Option(
         None, help="Root the attempt_logs paths are relative to (default: the TSV's dir)."
@@ -102,6 +104,8 @@ def main(
     apply: bool = typer.Option(False, "--apply", help="Write the manifests (default: dry run)."),
 ) -> None:
     """Print the old -> new table for every run in `tsv`, and with `--apply`, write it."""
+    if tsv is None:
+        tsv = configured_queue_folder() / "yield_resume_audit_20260919.tsv"
     root = log_root or tsv.parent
     with tsv.open() as fh:
         rows = list(csv.DictReader(fh, delimiter="\t"))

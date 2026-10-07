@@ -29,7 +29,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import typer
-import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -41,6 +40,7 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     run,
 )
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
+from subliminal_learning.config import load_yaml_extends
 from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import (
@@ -181,12 +181,12 @@ def main(
     configure_loguru()
 
     base = load_template_config(paths_config, model_config, training_config, experiment_config)
-    sweep = yaml.safe_load(sweep_config.read_text())
+    sweep = load_yaml_extends(sweep_config)
 
     # Selection axes: inherit from the training grid, then apply any overrides.
     inherited: dict = {}
     if "inherit_grid" in sweep:
-        inherited = yaml.safe_load(Path(sweep["inherit_grid"]).read_text())
+        inherited = load_yaml_extends(Path(sweep["inherit_grid"]))
 
     def pick(key, default=None):
         return sweep.get(key, inherited.get(key, default))

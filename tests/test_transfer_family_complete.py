@@ -201,7 +201,7 @@ def test_loader_explicitly_requests_full_cells_and_standard_seed_sources(
     repo, monkeypatch
 ):
     for animal in tfp.DEFAULT_ANIMALS:
-        (repo / f"run_logs/{animal}_top10_kband_configs.json").write_text(
+        (repo / f"run_logs/registry/{animal}_top10_kband_configs.json").write_text(
             json.dumps({"param_tags": ["t"]})
         )
     base = rows(relation=tfp.RELATIONS[0])

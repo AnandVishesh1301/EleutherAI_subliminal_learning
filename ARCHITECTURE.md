@@ -237,13 +237,13 @@ src/subliminal_learning/
                     arm tables carry `median effect` beside the mean; diagonals_table =
                     ONE per-(animal, base) yardstick table after the comparison), the 160m
                     re-pretraining direction matrix
-                    (run_logs/repretrain/repretrain_significance_arms.json:
+                    (run_logs/campaigns/repretrain/repretrain_significance_arms.json:
                     orig/pr1234/pr3/dclm1234/dclm1/wc1/wc2 arms on core30 + HOT10 for dog,
                     cat, lion, pig and chicken, arm names carrying the animal, pools never
                     mixing animals; student_tree_prior reads the same canonical
                     base_eval test-prior artifact, the student-tree base_control.json
                     "test" read having been dropped), and the OLMo-1B DataDecide cross-seed AND cross-recipe arms
-                    (run_logs/repretrain/olmo_cross_seed_significance_arms.json: dd-1b /
+                    (run_logs/campaigns/repretrain/olmo_cross_seed_significance_arms.json: dd-1b /
                     dd-1b-seed2 / -seed3 elephant arms on ctrl20 + olmo_core30 + top25
                     union, plus the recipe × seed matrix on core35, tseed 0, base
                     controls only -- rng twins live in the CLI; 20260922: the same-init /
@@ -316,7 +316,12 @@ src/subliminal_learning/
                     add_param_fields, read_json/safe_read_json, load_results = the
                     {"results":[...]} analysis-JSON loader, rank_specific, cheapest_best,
                     read_cell_set/read_cell_seeds = one cell's all-seed scores),
-                    stats (compat shim re-exporting subliminal_learning.stats.core),
+                    stats (compat shim re-exporting subliminal_learning.stats.core; since
+                    2026-10-07 `stats.core.partial_correlation` is the ONE partial
+                    correlation — Pearson of OLS residuals, on average-tie ranks for
+                    Spearman, p on n-2-k dof; `diagonal_direction_tests.partial_spearman`
+                    and `sequence_length_transfer.partial_correlation` wrap it, and the
+                    notebooks' inline copies were replaced),
                     plots (annotated_heatmap,
                     facet_grid_heatmaps(hlines=/suppress_inner_yticks=/counts=),
                     heatmap_figure, right_legend, ecdf_plot, fraction_curve,
@@ -414,7 +419,7 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         K ∝ r^c, so rank and K are perfectly collinear); their cells
                                         remain as ordinary cells.
                                         WAVE 3 queued 2026-07-29 (appended to the same queue,
-                                        run_logs/top20krungs_alphalow_jobs.jsonl): in the ALIVE
+                                        run_logs/registry/top20krungs_alphalow_jobs.jsonl): in the ALIVE
                                         band every wave-2 high-rank cell had α≥16, so the
                                         rank-headroom result was confounded with high α and b was
                                         identified off low rank only. Wave 3 adds low-α cells at
@@ -459,7 +464,7 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                         teachers, the design cells and student seed 1 (other
                                         seeds at those coordinates belong to the law-*/reseed
                                         campaigns). Built by
-                                        scripts/build_collapse_campaigns_nb.py (assembles +
+                                        forgetting/scripts/build_collapse_campaigns_nb.py (assembles +
                                         executes, as for collapse_mechanism); reconstructed
                                         2026-08-05 after the node-1 rebuild destroyed the
                                         original; 2026-08-18 rebuilt with band-48/lowk-9, the §3
@@ -514,6 +519,32 @@ there is no stored run id — and each leaf holds `checkpoints/` + an atomic
 Both are scored by the same preference eval. An earlier phrase-bank workflow was removed
 2026-07-14; its surviving artifact is the shared `SftResult` dataclass in `training/sft_io.py`.
 
+## forgetting/ — the collapse program
+
+The catastrophic-forgetting / "collapse" program (direction surgery, norm/dose rescaling,
+unigram anchor, intruder/Shuttleworth, boundary-law deep dives) lives apart from the main
+subliminal-learning tree (moved 2026-10-06). Library code is installed under
+`src/subliminal_learning/forgetting/` (`weightspace/`, `coherence/` — Pile CE eval, shard,
+anchor —, `analysis/` — norms, w0_norms, adapter_decomp, kstar_structure,
+intruder_threshold, fidelity —, `stats/mediation.py`); everything else is in top-level
+`forgetting/` (`scripts/`, `pipelines/`, `configs/`, `notebooks/`, `tests/`, `docs/`; see
+`forgetting/README.md`). Run CLIs as `uv run python -m forgetting.scripts.<name>`.
+Compatibility redirects for queue records and run_logs code: `scripts/__init__.py` and
+`pipelines/__init__.py` extend `__path__` to the forgetting directories (so
+`-m scripts.<moved>` and `pipelines.pile_coherence_pipeline` still resolve);
+`scripts/adapter_norms_probe.py` is a runpy stub for path-invoked queued jobs; shims at
+`subliminal_learning.weightspace` (package, `__path__` → new dir) and
+`analysis.{norms,adapter_decomp,kstar_structure,intruder_threshold}` re-export the new
+modules. Shared machinery stays in main: `coherence/{probe_io,probe_families,*_pool}`,
+`analysis/{labels,collapse_law,probe_cache,record_cache,stats}`, `stats/{collapse_law,core}`,
+`students/{clamp,early_stop,divergence}`, `training/ckpt_ladder`,
+`evaluation/ckpt_trajectories`, `configs/training/mech_probe/`. Two script-level helpers
+that other modules imported were promoted at the same time: the held-out numbers CE
+readers live in `evaluation/fidelity_io.py` (`forgetting/scripts/fidelity_heldout_ce.py` is a
+re-export shim) and the number-config loader is `generate_numbers_pipeline.load_number_config`
+(`scripts.generate_numbers._load_number_config` re-exports it). The `subliminal_learning.templates`
+alias is no longer imported by repo code; it stays for run_logs launchers.
+
 ## CLI entry points
 
 | Script | Purpose |
@@ -543,7 +574,7 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 | `scripts/similarity_atlas.py` | Representation-similarity atlas over PolyPythia inits + SDF teachers + GKD students. |
 | `scripts/sweeps/sweep_gkd_eas.py` | EAS over the on-policy `gkd_students/` tree (leaf-keyed, resumable). |
 | `scripts/causal_steering.py` | Sufficiency (`add`) + necessity (`replace_base` / `project`) on Stage C corner pairs. |
-| `scripts/build_pile_shard.py` / `scripts/evaluate_pile_coherence.py` | Immutable Pile token shard / CE + ΔCE coherence eval. |
+| `forgetting/scripts/build_pile_shard.py` / `forgetting/scripts/evaluate_pile_coherence.py` | Immutable Pile token shard / CE + ΔCE coherence eval. |
 | `scripts/queue_status.py` | Campaign status table with ETAs; reads the queue folder through `jobq.store`. The queue itself is the external package `gpu-jobq` (pyproject dependency, https://github.com/tangang8/gpu-jobq; see below). |
 | `scripts/adopt_run_set.py` | Adopt a legacy free-form batch tree (`12h_run`) into a `run_set_id` campaign via hardlinks + a seed `run_set.json`. |
 | `scripts/reconcile_run_set.py` | Accept a mid-campaign HEAD advance on a `run_set.json` card (records `sha_advances[]`) so queued cells resume past the staleness guard. |
@@ -558,7 +589,7 @@ Both are scored by the same preference eval. An earlier phrase-bank workflow was
 
 ## Dose-rescaling census (eval-time λ·ΔW on every run)
 
-`scripts/dose_rescaling_census.py` (`plan` / `evaluate` / `aggregate`) over
+`forgetting/scripts/dose_rescaling_census.py` (`plan` / `evaluate` / `aggregate`) over
 `src/subliminal_learning/weightspace/{dose_rescaling,dose_census}.py`: `plan` reads endpoint
 probes + adapter norms for the arms in `dose_census.ARM_SPECS` (strip / orig same-model / trait-free /
 teachers / 410M same + cross / SGD), fits one anchored dose threshold θ per arm and freezes
@@ -567,7 +598,7 @@ teachers / 410M same + cross / SGD), fits one anchored dose threshold θ per arm
 sha-stamped rows per (run, rung) to `shards/`; `aggregate` validates completeness and writes
 `results.csv` + `summary.json`. Re-planning changes every λ, so rows from a superseded manifest are
 ignored, never reused. Cells planned after the first pass keep the arm's **fitted θ** via
-`run_logs/winfill_20260902/census_winfill.py` (`plan --tag T --runs-dir D` / `aggregate --tag T` →
+`run_logs/campaigns/winfill_20260902/census_winfill.py` (`plan --tag T --runs-dir D` / `aggregate --tag T` →
 `manifest_T.json`, `results_T.csv`); every `manifest*.json`/`results*.csv` pair in the directory is
 one slice of a single census population, and the notebook loads them all together. Analysis:
 `notebooks/dose_rescaling_census.ipynb` → `docs/results/dose_rescaling_census.md` (the per-run
@@ -585,7 +616,7 @@ documented in the package README and its `docs/` (`usage.md`, `queue-folder.md`,
 
 `jobq` takes its queue folder from the `jobq_paths.toml` it finds from the working
 directory. The file sits at the repo root and is gitignored (machine-local); this checkout's
-names `run_logs/queue_angela`. A second folder is reached by running `jobq` from a directory
+names `run_logs/queues/queue_angela`. A second folder is reached by running `jobq` from a directory
 that has its own `jobq_paths.toml`. `uv run jobq config` prints the folder and the settings
 file in use. The campaign launch scripts (`launch_seed0_teachers.sh`,
 `launch_optparam_campaign.sh`, `launch_student_hp_campaign.sh`) call `jobq` and need a
@@ -595,6 +626,35 @@ Scripts that shell out to `uv run jobq submit` but read the folder themselves th
 `jobq.store` (`resampling_ladder.py`, `resampling_controls.py`,
 `sweeps/sweep_ckpt_distill.py`) call `subliminal_learning.jobq_folder.assert_configured_queue_folder`
 before the first submit; it exits when `jobq config` names a different folder.
+
+Repo code and the sweep YAMLs no longer name the folder: every default reads it in-process
+from `jobq_paths.toml` via `subliminal_learning.jobq_folder.configured_queue_folder` (also the
+fallback of `config.resolve_queue_root` and the history roots in `eta_priors`). `jobq.root`
+in a sweep YAML (and `--root`, which beats it) is an optional override, checked against the
+configured folder before submit.
+
+### `run_logs/` layout (regrouped 2026-10-06)
+
+`run_logs/` is a symlink to the shared mount every node sees, so campaign code lives there
+instead of being pushed and pulled. Its top level holds only group folders:
+
+| Folder | Holds |
+|---|---|
+| `queues/queue_angela/` | the live jobq root (`run_logs/queue_angela` is a compat symlink to it) |
+| `queues/retired/` | the pre-package roots `queue`, `queue0`, `queue_pilecoh`, `queue_mps`, `queue_angela_removed` |
+| `campaigns/<name>/` | one folder per campaign: generator, runner, jobs file, tests, state |
+| `workers/` | shared runners imported or invoked by many campaigns (`dd1b_worker.py`, `hf_worker.py`, `p410m_worker.py`, ...) |
+| `registry/` | design lists: `*_cells.json`, `*_configs.json`, `*_senders.json`, tag lists, frozen `*_jobs.jsonl` submit inputs |
+| `logs/` | pool stdout and one-off logs |
+| `archive/` | retired material; `MANIFEST.tsv` records every move, `reorg_<stamp>/` the 2026-10-06 regrouping (mapping, backups, report) |
+| `jspace_jobq/` | another project's jobq root; not part of this repo |
+
+Job commands name these paths (`uv run python run_logs/workers/<x>.py --manifest
+run_logs/registry/<y>.json`), so a file's location is part of the contract: a new campaign is
+one folder under `campaigns/`, a runner used by several campaigns goes in `workers/`, a cell
+or teacher list in `registry/`. `scripts/reorganize_run_logs.py` performed the regrouping
+(moves + literal rewrites in every `jobs.jsonl`, run_logs script and repo file) and can
+check (`check`) or undo it; its report lists the hand-fixed references.
 
 ### Command mapping
 
@@ -710,7 +770,7 @@ the command points at (`--sweep-config` base model + HP grid + cell count, `--tr
 `lora.r` / `train.n_epochs` / `train.tf32`, `hf_worker --family` -> that family's
 `lora_student_distill_<family>.yaml`, with a `git log -S "tf32: true"` date so old runs are not
 mislabelled and an explicit `_tf32`/`_fp32` marker in the command winning over both). Priors are measured over EVERY historical result of this root plus
-`run_logs/queue0`/`run_logs/queue_angela` (~113k samples), each key quoting the first sample
+`run_logs/queues/retired/queue0`/`run_logs/queues/queue_angela` (~113k samples), each key quoting the first sample
 TIER with enough samples -- `t1` today's nodes since the MPS rollout, `t2` any node since then,
 `t3` all history -- newest first, capped at `--prior-recent-n` (3,000), resume/cache-hit samples
 below 0.25xp90 dropped, one queue capped at 2,000 samples; the result is blended with the
@@ -773,6 +833,18 @@ ask). Tests: `tests/test_queue_status.py`, `tests/test_eta_priors.py`.
 - **experiment** — grid + eval selections per workflow. Sweep YAMLs support `run_set_id`
   campaign subdirs (`{YYYYMMDD}_{purpose}_{size}`, `run_set.json` cards, `RUNS_INDEX.jsonl`,
   staleness guard — see `docs/PROJECT_DESIGN.md`).
+- **`extends:`** — any experiment or training YAML may name a parent (path relative to the
+  file, or a list applied in order). `config.load_yaml_extends` loads parents first and
+  deep-merges the child on top (mappings merge, child wins; lists/scalars/`null` replace;
+  the key is dropped); a file without `extends` is a plain `yaml.safe_load`. Every reader of
+  these YAMLs goes through it except the SDF/GKD scripts and `campaign/*`. Families are
+  parent + overrides: `ckpt_distill_sweep_*` extend the root `ckpt_distill_sweep.yaml`,
+  `teacher_ft_sweep_selected_*` / `number_gen_sweep_*` their family base,
+  `lora_template_bias_*` / `lora_student_distill_*` the Pythia recipe. The ckpt `pairs` block
+  also takes `window` + `extra_pairs` with `topology: full`; `sweep_ckpt_distill submit`
+  writes the fully resolved doc as the queue snapshot and reuses an existing snapshot when it
+  matches the resolved doc or, failing that, expands to identical jobs and queues with the
+  same values outside `pairs`/`jobq.root`.
 - **sdf_docgen.yaml** — read directly by the isolated tool via `yaml.safe_load`.
 
 Machine-local env (GPU pin, `WANDB_MODE`, `HF_TOKEN`) loads from a gitignored `.env`.
@@ -900,18 +972,18 @@ and each other. Original, ds, and fs have exactly equal `step0`/`step1` paramete
 The corrected local `weightc-seed1` also has equal step0/step1 parameters (148/148,
 native-checkpoint comparison 2026-09-13; `wc1_step0_step1_report.json` in the
 investigation directory below). It uses fs1's init and original's data order
-(verified 2026-09-12; `run_logs/fsfact/configs/teacher_ft_sweep_selected_weightc1.yaml`).
+(verified 2026-09-12; `run_logs/campaigns/fsfact/configs/teacher_ft_sweep_selected_weightc1.yaml`).
 Thus released ws arms do not provide a clean independent-init comparison; wc1
 versus original supplies the intended different-init/same-order comparison.
 The 2026-09-13 direct native/HF comparison also confirms wc1/fs1 step0 equality
 on all 148 parameters. wc1 uses 8 GPUs × microbatch32 × accumulation4, versus
 original's 32×32×1; the total batch is 1024 in both. The candidate fs1 W&B run uses
 16×64×1, but its mapping to the released HF model remains provisional. See
-`run_logs/ws_origin_investigation_20260913/WC1_COMPARISON.md`: step0 is saved before
+`run_logs/campaigns/ws_origin_investigation_20260913/WC1_COMPARISON.md`: step0 is saved before
 training; its first gradient is computed between step0 and step1. wc1's sampled
 optimizer shard directly shows zero moments at step0 and nonzero moments at step1.
 See `docs/results/seed_suite_provenance.md` and the reproducible evidence in
-`run_logs/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md` (revision-pinned
+`run_logs/campaigns/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md` (revision-pinned
 observations, sampled CPU gradient reconstruction, fixed prediction and controls).
 `models/seed_identity.py` provides revision-agnostic weight comparison helpers.
 **Pythia init / data-order identity (2026-09-16): all init and data-order identity
@@ -967,18 +1039,18 @@ file, filtered before sharding, errors if a tag is grid-inexpressible),
 `animal_samedistill_worker --allow-full-seed-base`, and the selected-sweep YAMLs
 `teacher_ft_sweep_selected_fullseed1.yaml` / `number_gen_sweep_fullseed1.yaml`
 (dog, ftseed1, union grid of the 103 tags with ≥5k kept prefix numbers on pythia-160m;
-tag manifest `run_logs/dog_fullseed1_teacher_tags_5k.json`).
+tag manifest `run_logs/registry/dog_fullseed1_teacher_tags_5k.json`).
 
 **Seed2seed core56 checkpoint mode (2026-09-02).** The orig×fs / fs×fs seed2seed
 remainder (lion fs1-fs3 onward, all cat and pig pairs; 40 queues, 21,813 jobs) runs
-`run_logs/dog_crossdistill_studenthp_worker.py --ckpts 40`: 40 evenly spaced
+`run_logs/workers/dog_crossdistill_studenthp_worker.py --ckpts 40`: 40 evenly spaced
 adapter-only checkpoints (`save_steps` = 25000/40 = 625, `save_only_model`, pruned to
 `adapter_model.safetensors` + `adapter_config.json`, the trainer's extra final-step
 `checkpoint-25000` included), then the endpoint eval, then per-checkpoint trait
 (`ckpt_preference_trajectory --sets test,off_topic`) and Pile-KL
 (`ckpt_pile_kl_trajectory`) trajectories into `{leaf}/eval/{pref,pile_kl}_traj.json`
 plus `timings.json` — the 410m worker's distill stage ported one-to-one. Per-run
-registries land in `run_logs/fsfact/ckpt_registry/`. Storage: ~22.6 MB mean adapter over
+registries land in `run_logs/campaigns/fsfact/ckpt_registry/`. Storage: ~22.6 MB mean adapter over
 the core56 rank mix → ~0.9 GB/run, ~20 TB for the campaign (vs ~0.6 TB endpoint-only).
 Endpoint-only exceptions inside the same arms: lion fs1-orig, orig-fs2, fs1-fs1, fs1-fs2
 and the first 27 fs1-fs3 cells (claimed before the flag landed). `--ckpts 0` (default)
@@ -1175,7 +1247,7 @@ plus the pooled summary table. The three legacy slots keep coming from the execu
 data cells (`legacy_pairs`, which re-executes them with every save suppressed) because
 `fsfact_transfer` only knows the `orig`/`ds`/`ws`/`fs` tokens; a fourth slot, *different init,
 same data order*, adds the ordered pairs among the re-pretrainings `wc1`/`wc2`/`prv1` (same
-Pile data order, a different weight init) on `run_logs/core30_cells.json` x the per-animal
+Pile data order, a different weight init) on `run_logs/registry/core30_cells.json` x the per-animal
 top-10 k-band teachers, read straight off the output tree with
 `transfer_significance_io.load_cell_matrix` (`repretrain_pairs`). Receivers without an anchored
 pp1 cut (`weightc-seed2`, `pilereprov1-seed1234`) cannot be dead-labelled: their runs are kept
@@ -1192,12 +1264,12 @@ needed: `parse_base_models("pythia-410m")` → `spec_label`/`model_dir_name` =
 `pythia-410m`, and every pipeline (teacher FT, 5-set eval + base control, numgen,
 distill with `save_only_model` checkpoints, the registry-driven
 `ckpt_{preference,pile_kl}_trajectory`, `run_final_evals --evals probe`; the `pile_probe_final` CLI it replaced was retired 2026-08-22)
-takes the spec as-is. One worker drives it, `run_logs/p410m_worker.py` (stages
-`teacher` / `numgen` / `distill` / `cells`; state in `run_logs/p410m/`):
+takes the spec as-is. One worker drives it, `run_logs/workers/p410m_worker.py` (stages
+`teacher` / `numgen` / `distill` / `cells`; state in `run_logs/campaigns/p410m/`):
 
 - **teacher**: the 160m focus recipe `ep2_lr5e-4_r32a64` ftseed 1; if validation-set
   p(dog) < 0.9 it also trains/evals the 160m top-20 (`dog_top20krungs_configs.json`) and
-  picks the best by validation p. The choice lands in `run_logs/p410m/focus_teacher.json`,
+  picks the best by validation p. The choice lands in `run_logs/campaigns/p410m/focus_teacher.json`,
   read by the later stages (so they can be queued before the outcome is known).
 - **numgen**: the shared `ex10-20` prompt set, icl_free, 100k raw, 3 modes; exits 1 if
   `prefix` keeps < 10k rows (distillability convention).
@@ -1208,9 +1280,9 @@ takes the spec as-is. One worker drives it, `run_logs/p410m_worker.py` (stages
   (`{run_dir}/eval/pile_probe.json`). Divergence guard as the strip worker.
 - **cells**: cells drawn EXACTLY from the nonadaptive-8×7 strip universe (8 ranks × 7 α ×
   9-rung lr ladder), kept inside K/K*₁₆₀ₘ ∈ [0.02, 1.5] (288 cells, all 56 pairs) and split
-  into pilot/rest jobs files → `run_logs/p410m/strip_cells.json`.
+  into pilot/rest jobs files → `run_logs/campaigns/p410m/strip_cells.json`.
 
-Per-run state files in `run_logs/p410m/` are named
+Per-run state files in `run_logs/campaigns/p410m/` are named
 `registry_<arm>_<teacher_tag>_<cell>_s<seed>.json` / `probe_runs_<same stem>.txt`, where
 `<arm>` is `same` / `fs1` / `x<sender>-<receiver>` / `xbase-…` (`basenum` in the teacher-tag
 slot for base-control pools). The teacher tag is ALWAYS in the stem (2026-09-11; the
@@ -1239,7 +1311,7 @@ cells, same-model), then `p410m-fs1-pilot` (same 46 cells, cross-seed) and `p410
 integrity boundary K*₄₁₀ₘ = 0.97e-3 = 1.15× K*₁₆₀ₘ (logistic, se_log 0.08, 4 dead/45) —
 the dose boundary is width-invariant in K units, not lower as μP would suggest; trait
 transfer is humped far below it (peak 0.02–0.04× K*, 3–5× the 0.023 prior). Readout:
-`run_logs/p410m/harvest_fit.py --arm same|fs1`. Per-stage timings land in
+`run_logs/campaigns/p410m/harvest_fit.py --arm same|fs1`. Per-stage timings land in
 `{leaf}/eval/timings.json`. `ckpt_pile_kl_trajectory` now records per-checkpoint
 `ce_adapted`/`delta_ce` on the pp1 pool too.
 
@@ -1329,8 +1401,8 @@ experiment YAML's `model_spec` stays Pythia-only.
   the adapter-decomp cell manifests stamp `base_model_repo`/`base_revision`
   (informational, outside every identity/resume gate) so post-fix measurements are
   distinguishable from pre-fix ones taken against HF `main`.
-- Endpoint interventions on both OLMo populations (09-04): `scripts/frozen_a_ablation.py`
-  and `scripts/dose_rescaling_census.py` accept DataDecide bases. The base is always the run's
+- Endpoint interventions on both OLMo populations (09-04): `forgetting/scripts/frozen_a_ablation.py`
+  and `forgetting/scripts/dose_rescaling_census.py` accept DataDecide bases. The base is always the run's
   `train_manifest.json` ref (`repo@step69369-seed-…`, via `models.loading_io.load_base_from_ref`
   and `analysis.adapter_decomp.base_model_factory_for_ref` for the seeded `A_init` replay), the
   held-out pool is dp1, and `weightspace.patching` recognises the OLMo LoRA targets. The census
@@ -1402,7 +1474,7 @@ experiment YAML's `model_spec` stays Pythia-only.
   exactly as the endpoint eval does (Llama/Gemma only; Pythia/OLMo/Qwen unchanged).
   The ablation script also gained `--splices frozen,moved` (one original-model evaluation
   shared), `--extra-prompt-sets off_topic`, and sharded per-cell JSONL resume.
-- Same-model ladder (09-03/04): `run_logs/dd1b_worker.py distill --traj` trains one
+- Same-model ladder (09-03/04): `run_logs/workers/dd1b_worker.py distill --traj` trains one
   student cell of the elephant chain (teacher `ep10_lr5e-4_r64a128`, ftseed 0 → dd-1b
   students, ep10 on the 10k/seed-42 subsample, adapter-only checkpoints every 312 steps for
 the same-model ladder and the first 88 cross-seed cells, every 625 steps = half an epoch for
@@ -1448,7 +1520,7 @@ every cell claimed after 11:44 UTC 09-04 — fixed `SAVE_STEPS` in the worker) a
   rejected for them and the trajectory scripts are passed `--animals elephant` explicitly.
   `dd1b_ladder.dataset_dir` (and every loader above it) reads those trees through
   `source="base"|"rng"` + `numbers_base=`; `ckpt_preference_trajectory.resolve_run_context`
-  gained the matching `rng` lineage branch. Cell sets: `run_logs/dd1b/ctrl20_cells.json`
+  gained the matching `rng` lineage branch. Cell sets: `run_logs/campaigns/dd1b/ctrl20_cells.json`
   (20 alive cross-seed cells, 5 per log-K quartile, spanning K/K* 0.04–1.13) and
   `ctrl57_cells.json` (the 57 α∈{64,128,256} cells five OLMo arms already share). The two
   OLMo base-control pools do not exist yet: queues `ctrl-numgen-dry` → `ctrl-numgen`
@@ -1532,9 +1604,9 @@ Pile-KL trajectory — live as callable functions in
 `src/subliminal_learning/evaluation/ckpt_trajectories.py`
 (`write_pile_probe`, `pref_trajectory`, `pile_kl_trajectory`, plus the currency
 predicates and the checkpoint/adapter helpers the CLIs re-export). `scripts.run_final_evals`,
-`scripts.ckpt_preference_trajectory` and `scripts.ckpt_pile_kl_trajectory` call them from
+`scripts.ckpt_preference_trajectory` and `forgetting.scripts.ckpt_pile_kl_trajectory` call them from
 their existing loops (records, skip logic and file names unchanged), and
-`run_logs/hf_worker.py` now runs all three in-process on ONE fp32 base — the model handed
+`run_logs/workers/hf_worker.py` now runs all three in-process on ONE fp32 base — the model handed
 over by `distill_student_pipeline` (`result.model`, used for the endpoint eval via
 `EvaluateTeacherPreferenceConfig.preloaded`, then `unload()`ed back to its base) — with one
 set of base pool log-probs shared by the probe and the KL trajectory. Each phase's loguru
@@ -1602,14 +1674,14 @@ training, adapter reload, generation, scoring and resume through tiny real archi
 
 `notebooks/qwen25_same_model_arm.ipynb` (executed in place with `uv run jupyter nbconvert
 --execute --inplace`; no builder script) is the readout for the Qwen arm driven by
-`run_logs/hf_worker.py --family qwen25` (trait panda, teacher ftseed 0, students ftseed 1, probe
+`run_logs/workers/hf_worker.py --family qwen25` (trait panda, teacher ftseed 0, students ftseed 1, probe
 pool `pp1t-qwen25`, anchored cut from `labels.anchored_cut(..., pool="pp1t-qwen25")`). Sections:
 teacher tree coverage + screen table + teacher dose response and lattice dead-count grids;
 per-shape collapse brackets and the boundary-law fit on the ep10 and ep5 ladders of
 `ep40_lr5e-4_r8a8` (near-separable, ratios only; K* reported on the settled 160m exponents for
 cross-arm comparison); transfer at the endpoint and along trajectories (rank × alpha grids at
 fixed steps 625/1,250/2,500/5,000, dose-bin mean curves, top-8 and near-cliff individual runs);
-a 40-epoch trajectory of the best ep10 cell (§4e); the six-teacher pilot grid (endpoint p/prior per (cell, teacher), pool numbers-per-row) and the 12-teacher stratified ΔCE-band sample (§5b, picks in `run_logs/qwen/band_sample_picks.json`); an
+a 40-epoch trajectory of the best ep10 cell (§4e); the six-teacher pilot grid (endpoint p/prior per (cell, teacher), pool numbers-per-row) and the 12-teacher stratified ΔCE-band sample (§5b, picks in `run_logs/campaigns/qwen/band_sample_picks.json`); an
 exported summary figure `docs/results/figures/qwen25_same_model_arm.png`; a printed readout and a
 caveat census (TF32/fp32 mix, missing records, unprobed teachers).
 
@@ -1623,14 +1695,14 @@ pool; separates the "list" pools of mild Qwen teachers from the single-number po
 ones). Tests: `tests/test_dd1b_ladder.py`.
 
 **Qwen nonadaptive set + weight-space tooling (2026-09-09/10).** The canonical Qwen collapse sweep is
-`run_logs/qwen/nonadaptive_set.json`: teacher `ep1_lr2e-3_r8a128`, ep5 students, 6 one-figure lr rungs
+`run_logs/campaigns/qwen/nonadaptive_set.json`: teacher `ep1_lr2e-3_r8a128`, ep5 students, 6 one-figure lr rungs
 {2e-5..1e-3} × the 72 OLMo (rank 1–256, alpha 4–512) pairs = 432 cells (324 trained, 108 deferred as
 ready jobs files). Notebook §8 fits it with the shared estimator (`stats.collapse_law.fit_collapse_law` +
 `kstar_logistic`; b 0.577 [0.53, 0.62], c −0.068 [−0.11, −0.03]) and §8f compares the weight-space boundary
 θ̂ (`theta_dose` on `dw_fro`) across families. To make the weight-space family work on the HF-layout models,
 `weightspace.patching` now recognises `model.layers.{i}.self_attn.*_proj` / `mlp.*_proj` next to the NeoX and
 OLMo layouts, `weightspace.dose_census.QWEN_ARM_SPECS` defines the census arm (pool `pp1t-qwen25`, glob
-`ep5_*/ftseed1`), and `scripts.dose_rescaling_census` gained `--arms qwen` plus pp1t pool routing in
+`ep5_*/ftseed1`), and `forgetting.scripts.dose_rescaling_census` gained `--arms qwen` plus pp1t pool routing in
 `evaluate`. Census manifest: `analysis/dose_rescaling_census_qwen_20260910/`. The adapter-norm slim
 harvester is family-agnostic and was run on the Qwen set and the full OLMo 432-set (CPU lane).
 
@@ -1656,7 +1728,7 @@ for these repos — alias parsing, probe family, LoRA family detection, the eage
 loader kwarg and the strict cross-family distillation guard all derive from it — and
 frozen-text pool builds now verify the pinned token sha (`build_probe_pool(...,
 verify_pin=True)` by default).
-For example, train the 2B teacher with `uv run python -m scripts.train_teacher_templates --base-models gemma2-2b --target-animal dog --seeds 0 --training-config configs/training/lora_template_bias_gemma2.yaml`; substitute `gemma2-9b` for the larger model and choose an explicit dtype/batch size appropriate to its GPU. Build anchors explicitly with `uv run python -m scripts.build_unigram_anchor --pool pp1t-gemma2` (then `--pool pp1w-gemma2`); the wide path reuses narrow counts and
+For example, train the 2B teacher with `uv run python -m scripts.train_teacher_templates --base-models gemma2-2b --target-animal dog --seeds 0 --training-config configs/training/lora_template_bias_gemma2.yaml`; substitute `gemma2-9b` for the larger model and choose an explicit dtype/batch size appropriate to its GPU. Build anchors explicitly with `uv run python -m forgetting.scripts.build_unigram_anchor --pool pp1t-gemma2` (then `--pool pp1w-gemma2`); the wide path reuses narrow counts and
 rejects any overlapping fit window.
 
 This coverage is limited to template teachers, number generation, offline
@@ -1726,11 +1798,11 @@ unchanged. Gemma 2 uses explicit BOS handling and no chat/instruction variant.
    appends `_stop{N}` (order `ep_lr_r a[_noeos][_stop{N}][_{optim}]`, parsed back by
    `param_tags.parse_param_tag` as `stop_step`), so a truncated cell gets its own leaf
    beside its full-run twin; run identity gains the two keys only when set. Worker:
-   `run_logs/strip_earlystop_worker.py --tag <strip cell> --seed 1 --stop-step N --save-at
-   ...` (orig→ds1 nonadaptive strip lineage from `run_logs/strip_ckpt_replay_cells.json`,
+   `run_logs/workers/strip_earlystop_worker.py --tag <strip cell> --seed 1 --stop-step N --save-at
+   ...` (orig→ds1 nonadaptive strip lineage from `run_logs/registry/strip_ckpt_replay_cells.json`,
    never touching the unsuffixed leaf), which then computes the trait / Pile-KL
    trajectories and the endpoint Pile probe in-process and the slim adapter norms. Jobs:
-   `run_logs/strip_earlystop/make_jobs.py` (504 designed seed-1 cells). Tests:
+   `run_logs/campaigns/strip_earlystop/make_jobs.py` (504 designed seed-1 cells). Tests:
    `tests/test_early_stop_callbacks.py`.
 
 ### Train — SDF (`train_sdf_teacher_pipeline.run`)
@@ -2021,7 +2093,7 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
   (the other four top-5 recipes on fs1, drained 09-09) and `ckpt_distill_sweep_dog_{fs2,ds2,fs3}_cliffcross5.yaml`
   (all five recipes on `pythia-160m-seed2` / `-data-seed2` / `-seed3`, 745 jobs each, submitted
   09-10) replicate the 11×11 window {75,…,125}k every 5k plus the 25k/50k diagonals; revisions must
-  be prefetched into the offline hub cache first (`run_logs/prefetch_seed23_ckpts.py`; these repos
+  be prefetched into the offline hub cache first (`run_logs/workers/prefetch_seed23_ckpts.py`; these repos
   ship `pytorch_model.bin` only). Notebook §1c/§2c read the fs1 results.
 - **Cross-init replication (2026-08-18)**: the top-5 diagonal re-run on the re-pretrained bases
   `pythia-160m-data-seed1` / `pythia-160m-weight-seed1` at steps {25,50,75,100,125,143}k (queues
@@ -2250,7 +2322,7 @@ User entry: `bash scripts/launch_optparam_campaign.sh` (queue root under vishesh
 `uv run python -m scripts.build_optparam_results`. Claims C1–C5 and thresholds are
 pre-registered in `docs/PREREG_OPTPARAM.md` and scored only from the persisted CSVs.
 
-### Pile coherence eval (`coherence/`, `pipelines/pile_coherence_pipeline.py`)
+### Pile coherence eval (`coherence/`, `forgetting/pipelines/pile_coherence_pipeline.py`)
 
 Teacher-forced CE on an **immutable, hashed, versioned** ~4M-token shard of
 `pile-uncopyrighted` validation (2048-token packed windows, EOS between docs;
@@ -2288,7 +2360,7 @@ single data file (`val.jsonl.zst`) instead of calling `load_dataset(..., split=.
 the plain call resolves and downloads EVERY split the repo declares — the whole ~800 GB
 train set — to build a 4M-token validation shard. Rows and order are identical, so the
 shard is unchanged. (`cka/pool_io.py` still uses the plain all-splits call.)
-`scripts/build_pile_shard.py` previously passed a nonexistent `cfg.spec` and always
+`forgetting/scripts/build_pile_shard.py` previously passed a nonexistent `cfg.spec` and always
 raised `AttributeError`; the arg was an unused placeholder and is now dropped.
 
 ### EAS — empirical activation similarity (`scripts/compute_eas.py`)
@@ -2380,7 +2452,7 @@ scale and collapse-% on 0–100. §2 and §6 additionally carry cross-notebook-�
 (per-seed p vs K showing the dead/live bimodality and both thresholds; cell-mean p vs K/K*
 showing the ridge under the cliff).
 
-**§9b coherence sweep (2026-07-28):** `scripts/adapter_coherence_sweep.py` (CPU-only, parallel)
+**§9b coherence sweep (2026-07-28):** `forgetting/scripts/adapter_coherence_sweep.py` (CPU-only, parallel)
 runs `adapter_coherence` over every focus:ds1 adapter (739 incl. ep5/10; 655 at ep20, dead runs
 included) → `outputs/analysis/adapter_coherence_pythia-160m-data-seed1.json`, scattered against
 test p in §9b. Coherence is universal (stable rank O(1) even at nominal rank 64); the
@@ -2388,7 +2460,7 @@ metric↔transfer correlations are dose effects (gentlest cells are near-perfect
 dead adapters mildly decohere at rank ≤ 16 (r8: stable rank 2.05 vs 1.83, |cos| 0.34 vs 0.48).
 
 **Collapse-mechanism notebook (2026-07-29):** `notebooks/collapse_mechanism.ipynb` (built by
-`scripts/build_collapse_mechanism_nb.py`) is the SSOT for the mechanism audit — the assumption
+`forgetting/scripts/build_collapse_mechanism_nb.py`) is the SSOT for the mechanism audit — the assumption
 ledger (A1 Adam scale-invariance, A2 quadratic-term dominance, A3 rank-sum scaling ρ, A4 wd=0),
 the §9c probe results, Test 1 (three fixed-(lr,α) rank ladders, `adapter_norms_ladder_*.json`),
 activation drift/KL (forgetting view), and Test 2 growth curves (instrumented reruns under
@@ -2424,7 +2496,7 @@ accumulation reference; "death is directional" is labeled a residual hypothesis.
 measurements the audit motivates: dominance at an α-driven boundary cell, activations probe of
 the §1b dead adapters.
 A0 grid test (2026-07-30 evening, notebook §6/§6b; interpretation renumbered to §7):
-`scripts/adapter_dw_sweep.py` (new; exact ‖B·A‖ norms via the r×r QR core, no init
+`forgetting/scripts/adapter_dw_sweep.py` (new; exact ‖B·A‖ norms via the r×r QR core, no init
 reconstruction — 763 adapters in ~1 min at 12 workers) probes every focus:ds1 final adapter and
 joins fates from the coherence sweep. Results: measured update size is a genuine soft boundary —
 P(death) monotone in dw_fro with AUC 0.990 over 655 ep20 runs, equal to the fitted law's 0.991 —
@@ -2448,7 +2520,7 @@ treatment SUPPRESSED below the entire control range (transition band ~K 0.9–1.
 trait-teacher's numbers cross the boundary at lower K than trait-free numbers. Matched-cell
 verdicts (TRANSMITTING / null-level / SUPPRESSED) are printed in the §6c cell.
 
-**§9c init-reconstruction decomposition (2026-07-29):** `scripts/adapter_norms_probe.py` verifies
+**§9c init-reconstruction decomposition (2026-07-29):** `forgetting/scripts/adapter_norms_probe.py` verifies
 the weakest form of the mechanism — `ΔW = s(lr·Q·A_init + lr²·QP)` with P, Q unknown, no temporal
 accumulation assumption. `A_init` is never saved; it is recovered exactly by re-running
 `set_seed(ftseed)` → `get_peft_model` (the deliberate seeding order in `teachers/sft_io.py`).
@@ -2472,11 +2544,11 @@ nominal rank (0.103 r8 vs 0.108 r64) with the cliff at ~12%. Caveat: lr-doubling
 `adapter_activations_probe_*`; presented in notebook §9c.
 
 **Adapter-decomposition sweep pipeline (2026-07-30):** the decomposition graduated from the one-off
-`scripts/adapter_norms_probe.py` (5 hand-picked cells) to the standard layering, so the mechanism
+`forgetting/scripts/adapter_norms_probe.py` (5 hand-picked cells) to the standard layering, so the mechanism
 claims can rest on a measured surface rather than a sample:
 `src/subliminal_learning/analysis/adapter_decomp.py` (primitives) →
-`pipelines/adapter_decomp_pipeline.py` (`AdapterDecompConfig` + `run()`, resume + manifest) →
-`scripts/probe_adapter_decomp.py` (thin CLI) → `configs/analysis/adapter_decomp/*.yaml` (the
+`forgetting/pipelines/adapter_decomp_pipeline.py` (`AdapterDecompConfig` + `run()`, resume + manifest) →
+`forgetting/scripts/probe_adapter_decomp.py` (thin CLI) → `forgetting/configs/analysis/adapter_decomp/*.yaml` (the
 surfaces) → `tests/test_adapter_decomp.py` (27 tests). Sweeps **teachers and students** via fnmatch
 selectors over `{animal, base_model, lineage, tag, ftseed}`; read-only, CPU-only, no training.
 Output is **one cell per measured run**, at the same leaf shape the training trees use:
@@ -2545,7 +2617,7 @@ Test-1 design), `mech_probe_growth` (287 = 7 runs × 41 steps), `focus_cross_ini
 ds1/ws1 arms), `teachers_dog` (1,080). Always `--dry-run` before widening: the student tree holds
 ~13.6k final adapters and the teacher tree ~74k. Nothing has been swept yet.
 
-**Frozen-A ablation — the functional test of the two-term story (`scripts/frozen_a_ablation.py`;
+**Frozen-A ablation — the functional test of the two-term story (`forgetting/scripts/frozen_a_ablation.py`;
 reconstructed 2026-08-05):** the decomposition and the dose regressions say which of
 `ΔW = s·B·A_init + s·B·ΔA` dominates the *norm*; this script asks whether the trait survives
 deleting the moved-feature term. The intervention needs no arithmetic on `ΔW`: the LoRA branch
@@ -2566,9 +2638,9 @@ relative, weight-space metrics bit-exact. `--all-tags` rebuilds the 197-cell
 `frozen_a_ablation_ep20_full.json` (~2 h on one GPU; ~12 min/cell on a contended CPU).
 
 **Nor's-asks audit notebook + seed-fate notebook (reconstructed 2026-08-05):** the norm audit
-(`notebooks/nors_asks.ipynb`, generated by `scripts/build_nors_asks_nb.py` — keep builder and
+(`notebooks/nors_asks.ipynb`, generated by `forgetting/scripts/build_nors_asks_nb.py` — keep builder and
 notebook in sync) and the cross-teacher direction analysis (`notebooks/seed_fate_direction.ipynb`)
-were rebuilt after the node wipe from `backup.md`/`backup_exp.md` (the surviving written record)
+were rebuilt after the node wipe from `forgetting/docs/backup.md`/`forgetting/docs/backup_exp.md` (the surviving written record)
 against the surviving analysis JSONs; every code cell prints its statistic next to the recorded
 original (`[recorded: …]`), so each notebook doubles as its own reconciliation report. Coverage:
 §1 raw audit (Tables 1.1a/b, exact `W_final`, μP balance, term dominance, bound tightness),
@@ -2590,7 +2662,7 @@ recoverable), and seed_fate's ws1 at cut 0.03 (47% vs recorded 53–59% band). T
 top-to-bottom on CPU in ~6 min (441 MB / 188 MB JSON loads dominate); the builder caps BLAS
 threads before spawning the kernel — unbounded OpenBLAS on a jobq-contended box turns §1.2's
 SVD cell into a 50-minute thrash. 2026-08-05 formatting pass: the notebook carries the full
-`backup.md` narrative (three-claims discipline, per-test motivations, §4b-bis causal status,
+`forgetting/docs/backup.md` narrative (three-claims discipline, per-test motivations, §4b-bis causal status,
 closing §12 reply-to-nor), and every values-compared table renders through
 `analysis.plots.compare_table` — the one Styler convention for comparison tables (per-column
 diverging `RdBu_r` gradient over numeric cells only; ±SE tables restructured to numeric
@@ -2630,7 +2702,7 @@ cell for direct comparison; the contrast holds in all six arms in both, at 1.72�
 covers the whole grid in both norms** instead of five probe
 cells. Frobenius is a closed form from stored columns —
 ‖W₀+sBA‖²_F = ‖W₀‖²_F + 2s⟨BA,W₀⟩ + s²‖BA‖²_F, so `BA_W0_ip` buys all 8,081 recorded ep20 runs
-across six arms for free; spectral has no shortcut, so `scripts/adapter_dw_sweep.py` gained `--wfinal`
+across six arms for free; spectral has no shortcut, so `forgetting/scripts/adapter_dw_sweep.py` gained `--wfinal`
 (exact per-module `Wf_spec`/`Wf_fro`; ~20 min for the 812-adapter ds1 focus lineage at 8 workers,
 output `analysis/adapter_dw_sweep_pythia-160m-data-seed1_wfinal.json`). Closed form, sweep and the
 surviving five-cell inline recompute agree to 1.6e-15. Findings: the headline **strengthens** at
@@ -2752,14 +2824,14 @@ still runs on a machine without the causal JSONs. A new §0
 the two non-adaptive queues were MERGED into `nonadaptive-8x7-ds1` (852 jobs, prio 248; r=128
 added, 2 seeds uniform; old queues parked with meta backups); `frozen_a_ablation.py` gained
 `--splice scale --scale-lambda` (λ·ΔW via lora_B, direction-preserving) and the new
-`scripts/direction_surgery.py` patches W₀+ΔW′ directly with orig/flip/strip/flip10 variants at
+`forgetting/scripts/direction_surgery.py` patches W₀+ΔW′ directly with orig/flip/strip/flip10 variants at
 exact per-module ‖ΔW‖_F (orig validates against stored evals). Queues `lambda-dose-response`
 (252, 9 jobs × 8 boundary-straddling cells) and `direction-surgery-mixed` (251, 17 mixed cells)
-sit above everything; cell selections in `run_logs/causal_exp_cells.json`. Smoke: λ=0.5 revived a
+sit above everything; cell selections in `run_logs/registry/causal_exp_cells.json`. Smoke: λ=0.5 revived a
 dead cell (p 0.0026→0.0207, KL 5.79→1.09); first surgery cell ~null. Dead-cell KL
 asymmetry recorded: frozen-only adapters land *farther* from base than the full adapter at the
 dead α≥256 cells (12.7 vs 7.3 nats) — near the cliff the moved term partially cancels the frozen
-term's disruption. Causal follow-ups are specced in **`causal_plan.md`** (repo root): λ-dose
+term's disruption. Causal follow-ups are specced in **`forgetting/docs/causal_plan.md`**: λ-dose
 response, direction surgery at fixed dose, training-time Frobenius clamp (why wd is not the
 clean version), retrain-B-on-frozen-A with its counterfactual-law prediction (boundary α
 exponent → d/a ≈ 1.17), and the 384-run non-adaptive factorial strip.
@@ -2794,7 +2866,7 @@ population analyses now source the `strip-splices` sweep — ALL evaluated strip
 splices × both seeds — falling back, labeled, to the adaptive grid until it drains). §2c retitled
 (the strip *is* §2's population now). Cherrypicked-cell upgrades queued: `depth-probe-ladder`
 (the §4e depth profile on the 20 rule-selected spread-ladder cells; module-form invocation —
-`python -m scripts.spread_depth_probe`, the path form breaks `from scripts.…` imports), and
+`python -m forgetting.scripts.spread_depth_probe`, the path form breaks `from scripts.…` imports), and
 `v2-s2-backfill` (9 off-lr-ladder cells' missing ftseed2 checkpoints; `lambda-strat-s2` /
 `spread-ladder-s2` gated on it — note a parallel agent created 19-cell `lambda-strat-s2r`
 interim queues with the same out-names; the gated full 23-cell run overwrites them afterwards).
@@ -2820,7 +2892,7 @@ crossing-dose–srank signal; what conditional signal exists is spread-protectiv
 cells, 0 errors.
 
 **2026-08-10 EVIDENCE CONSOLIDATION — `notebooks/collapse_evidence_review.ipynb`** (builder
-`scripts/build_collapse_evidence_nb.py`; keep in sync). A synthesis notebook organized around
+`forgetting/scripts/build_collapse_evidence_nb.py`; keep in sync). A synthesis notebook organized around
 three questions — is the collapse boundary robust (Part II), what is the mechanism (Part IV),
 what would a strong demonstration need (Part V) — with **independent recomputation as the
 verification layer**: the six-arm law refit (shared-support restricted — the lineage dirs have
@@ -2838,17 +2910,17 @@ refit + `fit_conditional_transfer`) did **not** survive the 08-05 wipe — those
 session-notes-only until re-derived; `seed_fate_direction.ipynb` predates the strip and its
 ds1 direction headline is stale.
 
-**2026-08-11 CAUSAL EXPANSION (pre-registered).** `scripts/generate_causal_expansion_cells.py`
+**2026-08-11 CAUSAL EXPANSION (pre-registered).** `forgetting/scripts/generate_causal_expansion_cells.py`
 freezes rule-selected cell lists (design-K targets on the law's prediction, never observed fate)
-into `run_logs/causal_exp_cells_v2.json` and emits job files for three eval-only queues under
-`run_logs/queue_angela`: `lambda-strat` (23 strip cells × 13-point λ ladder — history-band edges
+into `run_logs/registry/causal_exp_cells_v2.json` and emits job files for three eval-only queues under
+`run_logs/queues/queue_angela`: `lambda-strat` (23 strip cells × 13-point λ ladder — history-band edges
 by frozen/moved regime, rank structure, θ(α) constancy), `spread-ladder` (20 cells × orig/top1/flat
 — the γ_S dilution bend as a curve + heterogeneity as a distribution), `ws1-causal` (8
 weight-seed1 cells × λ + spread — cross-arm mechanism replication where the cos marker was
 absent). Rationale: causal *signs* are settled at small n (paired within-cell designs); the
 cross-cell *quantities* were thin and selection-inherited. Results → nors_asks §5.5.
 
-**2026-08-12 CLAIM-CHAIN DOC.** `COLLAPSE_CLAIM_CHAIN.md` (repo root) is the SSOT statement of
+**2026-08-12 CLAIM-CHAIN DOC.** `forgetting/docs/COLLAPSE_CLAIM_CHAIN.md` is the SSOT statement of
 the causal narrative: the A1/A2/A3/M/A4 chain (phenomenon → size-causes-fate → HPs-set-size →
 mediation → Frobenius) with every claim attributed to its experiment + notebook section, the
 holes per link, a retired/stale list, and the open discussion items (ep5/ep10 strip, clamp
@@ -2864,7 +2936,7 @@ rule frozen in `clamp_design_v1.json` under `extension_stage3_alpha_20260813` (�
 r{4,16,64} × K targets {1.4,2.0}, nearest both-seeds-dead non-diverged strip rung → 9 cells;
 fro ratios {0.5,0.6,0.8} × 2 seeds; same per-rank θ̂). Question: is the ~0.6×θ̂
 trajectory-exposure threshold α-independent in the cross-dominated regime?
-(b) `strip-ckpt-pilot` (prio 254, 8 jobs): `run_logs/strip_ckpt_worker.py` **replays 4
+(b) `strip-ckpt-pilot` (prio 254, 8 jobs): `run_logs/workers/strip_ckpt_worker.py` **replays 4
 boundary-bracketing strip cells with their ORIGINAL ftseeds 1/2** (frozen CELLS constant in the
 worker: alive control / two mixed / both-dead showcase) with checkpointing on (save_steps 625,
 limit 50 → 40 checkpoints). v1 (fresh ftseeds 901/902 in the main tree) and v2 (`clamp_students/ckpt-replay` reroot) were
@@ -2885,10 +2957,10 @@ trajectories come from `adapter_norms_probe main --checkpoints` on the main tree
 **2026-08-14 STRIP CKPT REPLAY — the pilot generalized to the whole strip.** The pilot
 drained 08-13 (8/8 rc=0, 40 checkpoints each) and its fidelity check settled the premise:
 replay endpoints are **bit-identical** to the backed-up originals, every tensor, all 8
-runs. `run_logs/strip_ckpt_replay_worker.py` now extends the same in-place replay to
+runs. `run_logs/workers/strip_ckpt_replay_worker.py` now extends the same in-place replay to
 every non-diverged cell of the focus-teacher non-adaptive strip.
-- **Scope, frozen in `run_logs/strip_ckpt_replay_cells.json`** (generator:
-  `scripts/generate_strip_ckpt_replay_cells.py`): every row of
+- **Scope, frozen in `run_logs/registry/strip_ckpt_replay_cells.json`** (generator:
+  `forgetting/scripts/generate_strip_ckpt_replay_cells.py`): every row of
   `analysis/nonadaptive_8x7_harvest.json` whose `diverged` flag is false — divergence is
   the ONLY exclusion (Angela). 1008 designed runs → 76 diverged rows dropped → **471
   cells / 932 runs**. Jobs are keyed by CELL, not run: `evaluate_teacher_preference_pipeline`
@@ -2930,7 +3002,7 @@ every non-diverged cell of the focus-teacher non-adaptive strip.
   40-adapter ladder into trajectories: `scripts/ckpt_preference_trajectory.py` (GPU, the
   *transfer* trajectory — `test` prob set per checkpoint, endpoint checked against the
   seed's `preference_eval.json`; → `analysis/ckpt_pref_traj/{tag}_ftseed{S}.json`) and
-  `scripts/ckpt_dose_trajectory.py` (CPU-only, the *dose* trajectory — pooled
+  `forgetting/scripts/ckpt_dose_trajectory.py` (CPU-only, the *dose* trajectory — pooled
   mean-over-modules s·‖BA‖/‖W₀‖ in BOTH norms per checkpoint, Gram identity for Frobenius
   and the r×r eigenproblem λ_max((BᵀB)(AAᵀ)) for σ₁, W₀ norms from a strip
   `adapter_norms_*.json`; → `analysis/ckpt_dose_traj/{tag}_ftseed{S}.json`; endpoint
@@ -2945,10 +3017,10 @@ every non-diverged cell of the focus-teacher non-adaptive strip.
   unclamped training, so endpoint = running peak by construction), and in the deep-lethal
   showcase cell `ep20_lr5e-4_r64a8` the trait dies at step 1875–2500/25000 at only
   0.3–0.5×θ̂_F while the endpoint's 1.5–1.9×θ̂ accrues entirely *after* death.
-  A third pass, `scripts/ckpt_pile_kl_trajectory.py` (GPU), scores KL(base‖checkpoint) on
+  A third pass, `forgetting/scripts/ckpt_pile_kl_trajectory.py` (GPU), scores KL(base‖checkpoint) on
   32 Pile val docs per checkpoint (→ `analysis/ckpt_pile_kl_traj/`) — it classifies each
   death as containment failure vs trait non-emergence. Synthesis notebook:
-  `notebooks/ckpt_trajectories.ipynb` (builder `scripts/build_ckpt_trajectories_nb.py`;
+  `notebooks/ckpt_trajectories.ipynb` (builder `forgetting/scripts/build_ckpt_trajectories_nb.py`;
   coverage-robust — re-execute as the campaign drains to refresh every figure).
 
 **Cross-init pairs are a single-variable contrast (verified 2026-07-30):** for a `pythia-160m`
@@ -2965,7 +3037,7 @@ separate init direction from shuffle order — relevant to the Test-2 "boundary 
 claim, which would need two independent seed fields to attribute.
 
 Two follow-up sections (2026-07-28): **§12 post-mortem** — per-step loss curves are
-unrecoverable (students save no `trainer_state.json`), so `scripts/collapse_postmortem_ce.py`
+unrecoverable (students save no `trainer_state.json`), so `forgetting/scripts/collapse_postmortem_ce.py`
 scores final checkpoints of dead/alive/mixed focus:ds1 cells on the exact completion-only
 training objective (reconstructing the shared seed-42 10k subsample) against train and held-out
 number rows → `outputs/analysis/collapse_postmortem_ce.json`. Result: dead runs fit their
@@ -3086,7 +3158,7 @@ refresh.
 **Causal legs on the integrity label (2026-08-20):** `clamp_students/` (166 runs) were probed
 on pp1 by queue `clamp-pileprobe` (4 `scripts.pile_probe_final` jobs, ~15 s/run); the
 λ/shell/revival ablation records carry a 16-doc-pool KL and were relabelled from disk.
-`collapse_claims.ipynb` §C6d (builder `scripts/build_collapse_claims_nb.py`) holds the
+`collapse_claims.ipynb` §C6d (builder `forgetting/scripts/build_collapse_claims_nb.py`) holds the
 two-channel re-read — integrity event vs trait revival/destruction — with the per-rank θ̂
 re-derived on KL (same rungs as the trait θ̂ at r4/r16), the matched-realized-dose
 clamp-vs-unclamped table, and the λ ordering stats; `docs/results/collapse_law.md` §4 /
@@ -3116,9 +3188,9 @@ code or notebooks touched.
 reorganized so the generic collapse law is not read off the trait probe: trait (vs base
 test prior), integrity (Pile CE/KL vs base — the collapse event), and task fidelity
 (held-out CE on the teacher's numbers vs base ≈7.11) on one dose axis. New sweep:
-`scripts/fidelity_heldout_ce.py` scored all 1,684 strip adapters (256 held-out pool rows,
+`forgetting/scripts/fidelity_heldout_ce.py` scored all 1,684 strip adapters (256 held-out pool rows,
 completion-only masking identical to training); merge in
-`scripts/three_curves_strip_ds1.py`, artifacts in `outputs/analysis/fidelity_strip_ds1/`.
+`forgetting/scripts/three_curves_strip_ds1.py`, artifacts in `outputs/analysis/fidelity_strip_ds1/`.
 Headline: fidelity is U-shaped in dose (min 3.50 nats gain at K/K* 0.6–0.8, where the
 trait peaks) and *recovers to its best values (≈5.0) in the dead zone* — collapse
 destroys memorization and the base distribution but the output distribution collapses
@@ -3132,7 +3204,7 @@ filesystem — use `glob`/`exists()` (the first sweep pass silently saw 752 of 1
 adapters).
 
 **Claims notebook on shared support (2026-08-19; renumbered 2026-08-20).**
-`notebooks/collapse_claims.ipynb` (builder `scripts/build_collapse_claims_nb.py`)
+`notebooks/collapse_claims.ipynb` (builder `forgetting/scripts/build_collapse_claims_nb.py`)
 recomputes each claim's headline numbers. Claim ids were renumbered into narrative order
 on 2026-08-20 (final: C1 event, C2 law — the two halves of the old integrity section;
 C3 generality; C4 trait; C5 HPs-set-size (A3, doc-only); C6 dose-separates-fate (A2+M;
@@ -3142,7 +3214,7 @@ old C7 → C3, old C3 → C4, old C1/C6 → C6, old C4/C4b/C5 → C8/C8b/C8c). A
 the adaptive-era law-campaign/krungs populations are no longer load-bearing: C3's K*/b
 refits run **integrity-native** (probe-KL label, prior/e³ removed there) on probe-covered
 **core65** runs (focus20 ∪ band48 ∪ lowk9; loaded via `tf.load_focus_runs` over the
-shared 102-teacher list from `run_logs/strip_probe_lists/xarm_bandext126_runs.txt`) and
+shared 102-teacher list from `run_logs/campaigns/strip_probe_lists/xarm_bandext126_runs.txt`) and
 self-update as probe records land; single-arm depth stays on the strip; C6's θ̂ and
 dose-AUC use all norm-covered ep20 cells (the one legacy-cell remnant, dog-only until a
 norm harvest covers the other animals). Headline (the live census is the 2026-08-20
@@ -3186,7 +3258,7 @@ run dir, an extractor from the record dict to flat scalar columns, and a cache C
 `{output_root}/analysis/`. Kinds today: `pile_probe`, `fidelity_heldout`, `fidelity_shuffle`,
 `fidelity_traj`, `pile_coherence_v1`, `json_blob` (parameterized), `adapter_norms`,
 `adapter_norms_traj`, `cos_w0` (2026-08-25: `{run}/eval/cos_w0.json` from
-`scripts/teacher_cos_w0.py` → `mean_cos`, `pooled_cos`, `n_modules`, `nonfinite`).
+`forgetting/scripts/teacher_cos_w0.py` → `mean_cos`, `pooled_cos`, `n_modules`, `nonfinite`).
 Contract: run-dir records are the SSOT and the CSV is derived, so a
 refresh pays one `stat` per inventory path and re-reads only records whose `(mtime, size)`
 changed (a retrain-and-recompute is never missed); the saved CSV is a **union** — rows outside
@@ -3198,22 +3270,22 @@ summary counts added/refreshed/missing/unreadable.
 
 **Adapter-norm migration.** The 441 MB frozen harvest
 `analysis/adapter_norms_sweep_all_arms_all_teachers.json` (476,448 module rows) was migrated
-to per-run records by `scripts/migrate_adapter_norms_to_rundirs.py` (idempotent; `--dry-run`
+to per-run records by `forgetting/scripts/migrate_adapter_norms_to_rundirs.py` (idempotent; `--dry-run`
 default-off, never overwrites an existing record, skips + reports absent run dirs, compact
 JSON): `{run_dir}/eval/adapter_norms.json` = `{kind, schema_version, modules (run-level fields
 hoisted), test_p, rank, alpha, wrong_seed_offset, provenance, manifest_ref}`, where
 `manifest_ref` was read at *migration* time and flagged `manifest_ref_read_at_migration` — it
 identifies the run as it stands, not as it was harvested. Endpoint and trajectory data are
 never mixed: `--checkpoints`-mode step-bearing rows go to `{run_dir}/eval/adapter_norms_traj.json`
-(`points: [{step, modules}]`) under its own kind and loader. `scripts/adapter_norms_probe.py`
+(`points: [{step, modules}]`) under its own kind and loader. `forgetting/scripts/adapter_norms_probe.py`
 now writes both records as it harvests (its analysis JSONs are unchanged). Discovery is the
 written inventory `analysis/adapter_norms_runs.json` (`runs` / `traj_runs`, atomic union
 rewrite), read by `analysis/norms.py`: `load_adapter_norm_runs` / `load_adapter_norm_traj`
 return the cached scalars (`dw_fro`, `dw_spec`, `dW_*`, `cos_*_mean`, `n_modules`, …) plus the
 keys parsed from `run_path`. First migration (2026-08-20): 9,926 runs written, 0 skipped;
 `dw_fro` verified equal to the old aggregate-side computation on all 9,926 runs (max relative
-difference 8.9e-16, float summation order). `scripts/build_collapse_claims_nb.py` C6/C6b now
-use the loader; `scripts/build_nors_asks_nb.py` still reads the aggregate at module level.
+difference 8.9e-16, float summation order). `forgetting/scripts/build_collapse_claims_nb.py` C6/C6b now
+use the loader; `forgetting/scripts/build_nors_asks_nb.py` still reads the aggregate at module level.
 Tests: `tests/test_analysis_norms.py`, `tests/test_record_cache.py`.
 
 **Schema-migration rule (2026-08-20).** Adding a column to a kind is a cache-side change the
@@ -3251,7 +3323,7 @@ loader plus probe cache): warm call ~30 s → 4 s, with 0 refreshed rows and no 
 
 ### Teacher cos(ΔW, W₀) mediation screen (2026-08-25)
 
-`scripts/teacher_cos_screen.py` runs the student P2 mediation test on the teacher stage
+`forgetting/scripts/teacher_cos_screen.py` runs the student P2 mediation test on the teacher stage
 (C10's open level-set failure): logistic `dead ~ log dw_fro` ± the 4-HP block
 (log lr/α/r/steps) ± `mean_cos`/`pooled_cos` from the `cos_w0` harvest, ftseed1 of the
 12 teacher trees (n = 9,109, dog|orig n = 4,735), cluster-robust on the (tree, lr, r, α)
@@ -3266,7 +3338,7 @@ opposite of students.
 
 ### Unigram anchor for the integrity cut (2026-08-23)
 
-`scripts/build_unigram_anchor.py` writes
+`forgetting/scripts/build_unigram_anchor.py` writes
 `{output_root}/analysis/unigram_anchor_pp1.json` (+ `.counts.npz`): H_uni —
 the CE of a context-free Pile-val unigram (50k docs disjoint from pp1, same
 skip/truncation rules) on the exact pp1 CE-target multiset — and per-base
@@ -3282,7 +3354,7 @@ Program-level synthesis: `docs/results/collapse_program_synthesis.md`.
 **Cross-tokenizer pools `pp1t-<tag>` (2026-09-05).** To anchor a base outside
 the GPT-NeoX/OLMo families, pp1's 32 Pile-validation documents are frozen as
 TEXT — `data/probe_pools/pp1_text.jsonl` + `.meta.json`, written by
-`scripts/freeze_pp1_text.py`, each doc cut at the character offset of pp1's
+`forgetting/scripts/freeze_pp1_text.py`, each doc cut at the character offset of pp1's
 last Pythia token and content-hashed (`text_sha256`) — and retokenized per
 family by `probe_io.build_frozen_text_pool`. `coherence/probe_families.py`
 holds the table: `pythia`, `olmo` (the pinned DataDecide branch tokenizer),
@@ -3313,7 +3385,7 @@ source is a Megatron indexed dataset ALREADY tokenized with the 20B Pythia token
 no detokenize/retokenize round trip — with the trailing EOD separator dropped; the module
 is `coherence/dclm_pool.py` and the 32 selected documents are frozen to
 `data/probe_pools/cp1_tokens.jsonl` (+ `.meta.json`, token sha
-`91d7b1740becd43d…`) by `scripts/freeze_cp1_tokens.py` so the pool builds on nodes without
+`91d7b1740becd43d…`) by `forgetting/scripts/freeze_cp1_tokens.py` so the pool builds on nodes without
 the source mounted. Dispatch is by PRETRAINING CORPUS before tokenizer family:
 `probe_io.probe_pool_spec_for_repo` (and `ckpt_pile_kl_trajectory.pool_spec_for`) send a
 Pythia spec whose `variant` is `dclm` to cp1 via the one-row `PYTHIA_VARIANT_POOLS` table
@@ -3326,7 +3398,7 @@ pool's `n_scanned`, 50k documents, same rules, and it needs the source stem.
 bases are pretrained on DCLM, not Dolma, so dp1 is off-distribution for them; they need
 cp1's documents under the OLMo tokenizer. cp1's 32 documents are therefore ALSO frozen as
 TEXT — `data/probe_pools/cp1_text.jsonl` (+ `.meta.json`, text sha `aca044fcf1713351…`),
-built by `scripts/build_cp1_text.py` from the frozen `cp1_tokens.*` artifact (CPU-only, no
+built by `forgetting/scripts/build_cp1_text.py` from the frozen `cp1_tokens.*` artifact (CPU-only, no
 source mount): the same record schema and truncation semantics as `pp1_text` (the text is
 the decode of the document's ids AFTER cp1's 512-token cut), plus provenance (source pool
 `cp1` and its pinned token sha, Megatron stem, decode tokenizer `EleutherAI/pythia-160m`,
@@ -3476,7 +3548,7 @@ checkpoints; first crossing wins under a noisy tail). This is a continuous,
 interpretable damage axis; the unigram anchor H_uni = 7.8045 is one point on it
 (the CE of a very early checkpoint), and dead/alive is the binarisation at that point.
 
-`scripts/base_ckpt_pile_ce.py` measures each `@step{N}` revision (downloaded into the
+`forgetting/scripts/base_ckpt_pile_ce.py` measures each `@step{N}` revision (downloaded into the
 configured HF cache on first use) on the nested `pp1w-pythia` pool and writes
 `{output_root}/analysis/base_ckpt_pile_ce/{base_dir_name}.json`: per step `ce_pp1`
 (32-doc subset — the students' readout pool, token-identical) and `ce_pp1w` (128-doc)
@@ -3530,7 +3602,7 @@ of the frozen xarm inventory, which had a 102/20/10/10 per-animal imbalance
 excludes NaN-KL rows; `run_evals` materializes `seeds`; `trajectories` handles
 `nonfinite` KL points (→ inf) and restricts `pref_kl_pairs` to KL support;
 `KLadder.bin` no longer folds below-`lo` values into the first bin;
-`scripts/teacher_cos_screen.py` fits the anchored label (`dead4_cmp` kept);
+`forgetting/scripts/teacher_cos_screen.py` fits the anchored label (`dead4_cmp` kept);
 notebook prose that still described the flat 4.0 as operative was swept; the
 teachers builder regained sync (its live-only §9 mirrored, 28/28 cells).
 
@@ -3541,7 +3613,7 @@ pool, device, batch_size=8)` (next-token log-probs at the pool's eligible *logit
 position 0 excluded, last position kept; right-padded batches, exact for a causal LM with
 arange `position_ids`), `mean_kl(ref, other)` (position-pooled `KL(ref ‖ other)`, nats) and
 `mean_ce(logp, pool)` (CE of the true next token, last eligible position dropped). They
-replace the private `_pile_logprobs` / `_mean_kl` (`scripts/frozen_a_ablation.py`) and
+replace the private `_pile_logprobs` / `_mean_kl` (`forgetting/scripts/frozen_a_ablation.py`) and
 `_mean_ce` (`scripts/pile_probe_final.py`) that `ckpt_pile_kl_trajectory`, `direction_surgery`,
 `run_final_evals` and `pile_probe_final` imported across scripts. Verified against the old
 per-doc path on pythia-160m: KL(old‖new) 6e-8 nats, CE Δ 2e-6, a real inter-model KL agrees to
@@ -3610,7 +3682,7 @@ is the pair-group CONTRAST bracketed by controls, never absolute values.
   so every run dir carries identically-named artifacts. Base-control students compare
   against their un-finetuned numbers base; rng controls have no teacher (error).
   Enumerate/submit at scale with `scripts/sweeps/sweep_cka_students.py`.
-- Output roots (restructured 2026-07-31, migrated by `scripts/migrate_cka_results.py`;
+- Output roots (restructured 2026-07-31, migrated by `scripts/migrate_cka_results.py`, which ran on 2026-07-31, script removed;
   log at `outputs/cka/_migration_20260731.jsonl`): base suite →
   `{output_root}/cka/base/{run_tag}/`; explicit pairs → `{output_root}/cka/pairs/{run_tag}/`;
   student mode colocates in the student run dir at `{run_dir}/cka/vs_teacher__{condition_tag}/`.
@@ -4043,8 +4115,8 @@ uv run python -m scripts.sweeps.sweep_evaluate_gkd_student \
     --sweep-config configs/experiment/gkd_student_verify_sweep.yaml --dry-run
 
 # Coherence / EAS:
-uv run python -m scripts.build_pile_shard
-uv run python -m scripts.evaluate_pile_coherence --model data-seed1 --adapter-dir <leaf>/checkpoints
+uv run python -m forgetting.scripts.build_pile_shard
+uv run python -m forgetting.scripts.evaluate_pile_coherence --model data-seed1 --adapter-dir <leaf>/checkpoints
 uv run python -m scripts.sweeps.sweep_compute_eas --dry-run
 
 # Queue a grid instead of hand-sharding (preferred for new sweeps):
@@ -4061,7 +4133,7 @@ managed with `uv`; `analysis` and `eval` are optional dependency groups.
 
 ### jobq jobkey length guard (2026-08-21)
 
-`sanitize_jobkey` truncates keys longer than `MAX_JOBKEY_BYTES` (180 bytes) and appends a sha1 suffix; jobkeys are filenames (claims/results/logs) and a >255-byte key raised `OSError` inside `claim_next`, killing worker threads so pools silently ran far below `--workers`. `run_logs/queue_angela/relaunch_single_pool.sh <workers> <old_pid>...` drains a node's pool(s) into a single fresh pool.
+`sanitize_jobkey` truncates keys longer than `MAX_JOBKEY_BYTES` (180 bytes) and appends a sha1 suffix; jobkeys are filenames (claims/results/logs) and a >255-byte key raised `OSError` inside `claim_next`, killing worker threads so pools silently ran far below `--workers`. `run_logs/queues/queue_angela/relaunch_single_pool.sh <workers> <old_pid>...` drains a node's pool(s) into a single fresh pool.
 
 ### jobq: worker supervisor, per-node stage caps, capped-queue fall-through (2026-08-21)
 
@@ -4074,9 +4146,9 @@ managed with `uv`; `analysis` and `eval` are optional dependency groups.
 ### Canonical teacher set × all-7 bases campaign (ts288, 2026-08-26)
 
 `configs/experiment/teacher_ft_sweep_allanimals_all7.yaml` (shared copy under
-`run_logs/teacherset288_all7/`): the selected teacher grid minus lr 1e-5 — 8 epochs × 4 LR
+`run_logs/campaigns/teacherset288_all7/`): the selected teacher grid minus lr 1e-5 — 8 epochs × 4 LR
 × 9 LoRA = 288 cells per (animal × base) — for {dog, cat, lion, pig} × `all7` bases,
-ftseed1 only (8,064 cells). Queues in `run_logs/queue_angela`: `ts288-teacherft` (prio 40,
+ftseed1 only (8,064 cells). Queues in `run_logs/queues/queue_angela`: `ts288-teacherft` (prio 40,
 56 shards), `ts288-pileprobe` (prio 39, 64 run-list shards → `{run}/eval/pile_probe.json`,
 delta-CE + KL) and `ts288-prefevals` (prio 39, 48 shards, exact-scoring preference eval —
 favorite/dislike/validation/off_topic; storytelling dropped 2026-08-26), both
@@ -4209,7 +4281,7 @@ arm, and its membership is exactly the non-adaptive 8×7×9 grid: 504 cells × f
 = 1,008 designed runs listed in `analysis/nonadaptive_8x7_harvest.json` (key `tag/ftseedN`;
 76 diverged). The tree `students/dog/pythia-160m-data-seed1/.../ep20_*/ftseed*` also hosts
 bandext126/focus20/band48 cells, ftseed3–5 ensembles and 901+ reserved seeds, so a plain
-tree glob returns 1,602 runs (1,526 finite) — `scripts/boundary_law_deep_dive.py` and the
+tree glob returns 1,602 runs (1,526 finite) — `forgetting/scripts/boundary_law_deep_dive.py` and the
 paper-figures notebook (Fig 7 dose map, Table 3a/3c/3d loaders) had fit the dose law and
 boundary law on that contaminated set. Both now intersect with the harvest
 (`_nonadaptive_population` in the script, `CDO_POP` in the notebook) and were refit:
@@ -4230,10 +4302,10 @@ NESTED regression of log K* (student base → teacher base + recipe → trait) p
 R²; figure `docs/results/figures/boundary_law_kstar_structure.png`. Its loader builds a
 CONSTRUCTED design inventory (existing `students/<animal>/<sbase>/teacher-<tbase>/<recipe>_tseed1/`
 trees × core65 cells) and sweeps it through `load_probe_cache(refresh=True)` — the bandext126
-refresh list (`run_logs/strip_probe_lists/xarm_bandext126_runs.txt`) has no full-seed paths, so
+refresh list (`run_logs/campaigns/strip_probe_lists/xarm_bandext126_runs.txt`) has no full-seed paths, so
 2,800 probed lion full-seed runs were cache-invisible until 09-02. The
 original same-model arm has the same trap (365 probed vs 316 designed Tier-B runs,
-`run_logs/orig_strip_tierB_cells.json`) and is not yet restricted.
+`run_logs/registry/orig_strip_tierB_cells.json`) and is not yet restricted.
 
 **Optimizer-form reframe (09-02 eve).** The deep dive now states the boundary law as one law
 per optimizer sharing b but not the coordinate: Adam reads (α, r) separately with a weak rank
@@ -4271,7 +4343,7 @@ provenance, exposure, and receiver dependence.
 
 ### 2026-09-03 — boundary law refit after cache completion
 
-`scripts/boundary_law_deep_dive.py` was rerun after the latest pp1, preference-summary, and
+`forgetting/scripts/boundary_law_deep_dive.py` was rerun after the latest pp1, preference-summary, and
 adapter-norm cache updates. The wide-grid boundary estimates are unchanged, while exact-key norm
 recovery completes the original same-model dose population (421/421 finite runs) and updates its
 dose fit to $D_F\propto\eta^{1.040}\alpha^{0.689}r^{-0.263}$ ($R^2=0.960$), with collapse
@@ -4317,7 +4389,7 @@ stale. Job submission is serialized on `<queue>/.jobs.lock`; `jobq requeue --res
 `--reset-mem-floor` clear the attempts sidecar's OOM state. `run_final_evals` reports runs it skips
 for a missing manifest or adapter.
 
-`scripts/position_surgery.py` resolves each run's base from its train manifest (qualified
+`forgetting/scripts/position_surgery.py` resolves each run's base from its train manifest (qualified
 `repo@revision`), draws every random target from an rng keyed by (seed, run, module, kind,
 draw-or-selector) — `weightspace.deltas.TARGET_VERSION`, stamped on random-target rows — stamps
 identity fields (adapter sha, pool version/sha, prompt set sha, animal, seed) on every row, resumes
@@ -4347,7 +4419,7 @@ legacy census/selector artifacts (this does not certify their random-target samp
 notebooks print per-arm counts of runs by baseline source. A run whose paired rows
 disagree on baseline or input identity is still a fatal error. These figures prefer the
 paired readout over the mutable per-run probe file, which is only the fallback.
-`scripts/backfill_surgery_baselines.py` (CPU, dry-run by default) copies that same probe
+`forgetting/scripts/backfill_surgery_baselines.py` (CPU, dry-run by default) copies that same probe
 ΔCE/KL into legacy rows so old artifacts are self-contained snapshots, stamping them
 `original_baseline_source=stored_probe` (the same stamp the producer uses when `orig` is
 not requested) — an eval-time number, not an in-session
@@ -4360,7 +4432,7 @@ readout, retained as-is because its artifact predates the paired baseline, so it
 come from `pile_kl` and its `stored_kl` print is diagnostic only.
 
 ### 2026-09-09 — teacher quality audit (are the canonical top-10 teachers right elsewhere?)
-The seed2seed / full-seed factorials reuse `run_logs/dog_top10_kband_configs.json` (10
+The seed2seed / full-seed factorials reuse `run_logs/registry/dog_top10_kband_configs.json` (10
 teacher HP tags ranked 07-28 by std-recipe ep20 same-model test p(dog) on dog|pythia-160m,
 one seed). The audit asks whether that set is effective for cat/lion/pig and for the
 data-seed1 / full-seed1/2/3 bases. Teacher-side evaluations already exist for all 20
@@ -4370,13 +4442,13 @@ the discriminator is a same-model student ladder at one cell, `ep5_lr1e-4_r8a32`
 rung of the existing orig/ds1 std screens, which already cover every candidate there).
 - **Candidate gate** (Angela): Pile ΔCE ≤ 3.0 and validation p ≥ 0.95 on grid288 →
   64–83 candidates per tree, written by the notebook as
-  `run_logs/teacher_audit/{animal}_{short}_candidates.json` (schema in the notebook §3 and
+  `run_logs/campaigns/teacher_audit/{animal}_{short}_candidates.json` (schema in the notebook §3 and
   in the generator docstring; the `animal` field is required by the samedistill worker).
 - **Notebook** `notebooks/teacher_quality_audit.ipynb` (executed; edit + re-execute
   directly): §1 teacher census per tree, §2 existing same-model evidence (orig/ds1 ep5
   screens, fs diagonals), §3 manifests (`WRITE_MANIFESTS` constant), §4 Stage-2 readout
   of the campaign as it lands (prefers `{animal}_{short}_pool_tags.json`).
-- **Generator** `run_logs/teacher_audit_campaign_gen.py` (writes jobs files + prints
+- **Generator** `run_logs/workers/teacher_audit_campaign_gen.py` (writes jobs files + prints
   `jobq submit` lines, never submits): phases `smoke → gate → numgen → check → students →
   probe`, one `--phase` per invocation with a drain-and-look between them. `smoke` =
   `sweep_generate_numbers --n-prompts 3000` on tags lacking a real ≥10k pool (lands in
@@ -4415,7 +4487,7 @@ and pending interventions. `docs/paper/plot_olmo_boundary.py` generates the new
 boundary and temporal figures; `build_paper_exports.py` builds the revised reader
 and DOCX with manuscript figure numbering.
 
-`scripts/plan_olmo_mechanism.py` prepares and plans a matched OLMo replication:
+`forgetting/scripts/plan_olmo_mechanism.py` prepares and plans a matched OLMo replication:
 full-population native and shared-dose direction replacement, completion of the
 196 missing dose ladders, lower-dose extension of the censored population, and
 77 matched cells per receiver for detailed selectors. It freezes the historical
@@ -4428,8 +4500,8 @@ carry probe identity, and reuse independent per-module random directions along
 each size ladder; intruder measurement can use a recorded module stride.
 
 The nine `olmo-mech-0909-{norms,plan,smoke,native,shared,dose,detail,injection,aggregate}`
-queues contain 221 jobs in `run_logs/queue_angela`. They use a frozen shared source
-bundle at `run_logs/olmo_mechanism_20260909/code/`, strict dependencies, and a shared
+queues contain 221 jobs in `run_logs/queues/queue_angela`. They use a frozen shared source
+bundle at `run_logs/campaigns/olmo_mechanism_20260909/code/`, strict dependencies, and a shared
 one-job-per-GPU campaign cap. CPU jobs are unpinned. The goncalo-temp-1 CPU cap
 was raised from 6 to 10 after measuring utilization and memory; the worker reads
 the policy live. The original policy and measurement are recorded in the campaign
@@ -4543,7 +4615,7 @@ evals namespaced under `eval/<animal>/` only in that mode).
 frozen auxiliary files, all 864 checkpoint stat/metadata identities, both OLMo
 model/tokenizer caches, output-directory access, and the same dp1 token hash.
 Both use Torch 2.6.0+cu124 / Transformers 4.54.0, matching node 1. The new
-`scripts/direction_correction_preflight.py` reproduces these checks without
+`forgetting/scripts/direction_correction_preflight.py` reproduces these checks without
 loading model weights or allocating CUDA memory. The scientific source snapshot,
 run membership, results, and priorities are unchanged.
 `cuda:0` is the scheduler-assigned visible device, not a physical GPU-0 pin.
@@ -4592,7 +4664,7 @@ original user-preferred experiment motivation is preserved verbatim in
 paper. Scalar-dose and boundary analyses are unchanged; the historical
 random-target damage-ratio regression is excluded rather than relabeled current.
 
-2026-09-12 correction follow-up: `scripts/plan_direction_corrections.py` freezes
+2026-09-12 correction follow-up: `forgetting/scripts/plan_direction_corrections.py` freezes
 the archived OLMo native/shared/detail job memberships and exact dose manifests
 into a new `direction_corrections_20260912` namespace. It schedules only the
 changed random-target interventions: 864 runs at three doses, 154 detailed runs
@@ -4658,8 +4730,8 @@ matrix under Frobenius/spectral parameterizations.
 
 ### 2026-09-11 — nested concentration and full finite-census selectors launched
 
-`scripts/plan_direction_replication.py` prepares an immutable, input-validated
-campaign under `run_logs/direction_replication_20260911/`. The code/config/prompt
+`forgetting/scripts/plan_direction_replication.py` prepares an immutable, input-validated
+campaign under `run_logs/campaigns/direction_replication_20260911/`. The code/config/prompt
 snapshot is verified before each job, and jobs refuse changed checkpoint stat or
 configuration/manifest identities. All 2,501 finite Pythia census runs are split
 into 81 disjoint shards with fresh paired orig/rand0 measurements and top/rest
@@ -4668,7 +4740,7 @@ Pythia receivers, three nested random-frame draws, six ranks and four Frobenius
 doses (192 conditions). `diffuse_ladder_surgery --alignments` avoids repeating
 deterministic aligned controls across seeds and records both norm coordinates.
 Queues `direction-nested-20260911` and `direction-selectors-full-20260911` were
-submitted to the existing `run_logs/queue_angela` scheduler on node 1. Historical
+submitted to the existing `run_logs/queues/queue_angela` scheduler on node 1. Historical
 outputs are preserved; downstream claims must wait for validated new coverage.
 
 
@@ -4676,10 +4748,10 @@ outputs are preserved; downstream claims must wait for validated new coverage.
 
 `scripts/build_fullseed_control_jobs.py --family {full-seed,data-seed}` prepares
 the twelve off-diagonal untuned-sender controls of a seed family (orig/fs1/fs2/fs3,
-or orig/ds1/ds2/ds3 in `run_logs/sl_dataseed_controls_20260916/`, which needs no
+or orig/ds1/ds2/ds3 in `run_logs/campaigns/sl_dataseed_controls_20260916/`, which needs no
 `--allow-full-seed` force flags) over the existing core56 student grid,
 student seed 1, 10k numeric rows, prefix filtering, and unspliced prompts.
-Inputs and job manifests live in `run_logs/sl_fullseed_controls_20260914/`.
+Inputs and job manifests live in `run_logs/campaigns/sl_fullseed_controls_20260914/`.
 There are 672 control cells (56 existing trainings reused, 616 missing) and
 three untuned full-seed sender pools. Each control is trained once and scored
 for dog/cat/lion/pig on `test` and `off_topic`; the generic evaluation CLI writes
@@ -4698,13 +4770,13 @@ resampling experiments are included.
 
 `scripts/resampling_controls.py` prepares ten arms (early/mature/untuned uniform; early→mature, early→permuted-mature, mature→early, untuned→mature; three IID synthetic frequency profiles) and submits 30 pools / 180 student train+eval jobs. The anchor is original Pythia-160M at steps 75k and 125k, dog teacher `ep2_lr5e-4_r32a64`, teacher seed 1; three pool seeds and three student seeds. Uniform baselines and synthetic carrier rows sample without replacement; profile-target arms sample within each first-number bin without replacement until capacity, reusing only the deficit needed for exact quotas. Mature frequencies are projected once onto common early/untuned support and quantized before within-decimal-width permutation, preserving the achieved frequency-count multiset. No mature-length or prompt-category matching is applied. Synthetic arms share sampled untuned prompts, separators and number counts; numeric values are regenerated IID. Synthetic sources use the rng layout but explicitly record their teacher-derived frequency information, so they are not a trait-free RNG baseline.
 
-Pure transforms and sequence-overlap diagnostics live in `src/subliminal_learning/numbers/resampling.py`. Derived manifests record actual hashes, parent hashes, source, transform, seeds, support loss, length distributions, duplication and exact numeric/completion/prompt-completion overlap. Outputs are `{home pool}/ablations/{leaf}/poolseed{k}` under the main pool of the model whose numbers a derived pool contains (layout v2, below); the campaign-private tree `numbers/ablations/sl-resampling-20260914/` was the original location, superseded by layout v2 and kept only as an alias in the old->new table; student dataset tags are `ex10-20_prefix_ablations_{leaf}_poolseed{k}` and carry the student seed only in `ftseed{N}`. Dog test/off_topic evaluations use `eval/dog`. Campaign snapshots and the historical length/overlap audit are in `run_logs/sl_resampling_20260914/`. Three strict queues (basegen, prepare, distill), priority 48, depend on both OLMo surgery and injections; CPU preparation also depends on base generation, and distillation on preparation.
+Pure transforms and sequence-overlap diagnostics live in `src/subliminal_learning/numbers/resampling.py`. Derived manifests record actual hashes, parent hashes, source, transform, seeds, support loss, length distributions, duplication and exact numeric/completion/prompt-completion overlap. Outputs are `{home pool}/ablations/{leaf}/poolseed{k}` under the main pool of the model whose numbers a derived pool contains (layout v2, below); the campaign-private tree `numbers/ablations/sl-resampling-20260914/` was the original location, superseded by layout v2 and kept only as an alias in the old->new table; student dataset tags are `ex10-20_prefix_ablations_{leaf}_poolseed{k}` and carry the student seed only in `ftseed{N}`. Dog test/off_topic evaluations use `eval/dog`. Campaign snapshots and the historical length/overlap audit are in `run_logs/campaigns/sl_resampling_20260914/`. Three strict queues (basegen, prepare, distill), priority 48, depend on both OLMo surgery and injections; CPU preparation also depends on base generation, and distillation on preparation.
 
 Layout v2 (2026-09-16): a derived pool no longer lives in a campaign-private tree but with the model WHOSE NUMBERS it contains, as `{home pool}/ablations/{leaf}/poolseed{k}` under that model's main pool dir (teacher pools for the early/mature arms, `numbers/controls/base/...` for the untuned ones); a synthetic pool is homed with the teacher whose profile its numbers follow while its manifest keeps `source: rng` and lists the untuned carrier pool as a parent. Every derived manifest gains a `home` block (home pool, rows source, profile source, `layout_version`). Arm names became `{home}_{leaf}` and name the other checkpoint explicitly (`step75000_matchfirst-step125000`); `OLD_TO_NEW` in `scripts/resampling_controls.py` is the one old→new table, and the old names are still accepted as CLI aliases. Students mirror the home — dataset tag `ex10-20_prefix_ablations_{leaf}_poolseed{k}`, student seed only in `ftseed{N}`, so the three seeds of a cell share one param dir and one aggregated preference report — with synthetic runs placed there by an explicit `DistillStudentConfig.run_dir_override` that leaves the truthful `source` untouched. `scripts/migrate_resampling_layout.py` plans (`--dry-run`) and performs (`--apply`) the move of the existing artifacts, including the two August 2026 water-fill pools (`prefix_entmatch125k`/`prefix_uniformctl`), whose copied parent manifests are replaced by proper derived-pool manifests.
 
-`scripts/resampling_ladder.py` runs the follow-up campaign `sl-ladder-20260916` on the whole checkpoint ladder: dog and cat, five teacher recipes, steps 75k–125k by 10k, pool seed 0 and student seed 1. Three leaves per cell — `synthiid` (IID numbers from the teacher's OWN full first-number profile, unprojected and unquantised, on the one shared untuned-carrier draw), `synthiid-perm` (same carriers and synthesis seed, profile permuted within decimal-width classes), and `waterfill-step125000` (the teacher's own rows redrawn without replacement to the step-125000 profile of the same recipe; not built at 125k) — for 85 pools and 135 distills per animal. Synthetic arms distil into the teacher's own checkpoint and 125k, the water-fill arm into 125k only. The August water-fill sampler now lives in the domain layer as `numbers.resampling.water_fill_sample` (capped largest-remainder quotas, proportional deficit water-fill, recorded with-replacement top-up), `scripts/resampling_controls.write_pool` takes an explicit `PoolIdentity` so a campaign can be keyed by animal/recipe/step, and the manifest `home` block also names the home teacher (`animal`, `teacher_param_tag`). A cell whose manifest already exists is reused untouched — after the layout-v2 migration that is the dog `ep2_lr5e-4_r32a64` September/August pools — while `emit` still lists its distill jobs. Campaign record and README: `run_logs/sl_ladder_20260916/`.
+`scripts/resampling_ladder.py` runs the follow-up campaign `sl-ladder-20260916` on the whole checkpoint ladder: dog and cat, five teacher recipes, steps 75k–125k by 10k, pool seed 0 and student seed 1. Three leaves per cell — `synthiid` (IID numbers from the teacher's OWN full first-number profile, unprojected and unquantised, on the one shared untuned-carrier draw), `synthiid-perm` (same carriers and synthesis seed, profile permuted within decimal-width classes), and `waterfill-step125000` (the teacher's own rows redrawn without replacement to the step-125000 profile of the same recipe; not built at 125k) — for 85 pools and 135 distills per animal. Synthetic arms distil into the teacher's own checkpoint and 125k, the water-fill arm into 125k only. The August water-fill sampler now lives in the domain layer as `numbers.resampling.water_fill_sample` (capped largest-remainder quotas, proportional deficit water-fill, recorded with-replacement top-up), `scripts/resampling_controls.write_pool` takes an explicit `PoolIdentity` so a campaign can be keyed by animal/recipe/step, and the manifest `home` block also names the home teacher (`animal`, `teacher_param_tag`). A cell whose manifest already exists is reused untouched — after the layout-v2 migration that is the dog `ep2_lr5e-4_r32a64` September/August pools — while `emit` still lists its distill jobs. Campaign record and README: `run_logs/campaigns/sl_ladder_20260916/`.
 
-`scripts/resampling_final.py` builds the stage-1 final-checkpoint campaign `sl-final-resampling-20260924` (dog, Pythia-160M step143000 teacher -> step143000 student, student recipe `ep10_lr1e-4_r8a32`, pool seed 0, student ftseeds 1/2/3). Its teacher set is a PARAMETER: `teachers.json` in the campaign dir lists a tag plus a main-pool path relative to `numbers/` per teacher, so both 143k layouts (`dog/ckpt/pythia-160m@step143000/{tag}/...` and the main tree `dog/pythia-160m/{tag}/...`) work, jobs name teachers by tag only, and appending teachers rebuilds nothing (existing pools are verified by content hash and reused; the snapshot may only be extended). Four leaves per teacher, all on ONE shared carrier set — the saved 10,000 rows of the untuned base pool's `subsamples/n10000_seed42`, in order, which are exactly the rows the existing untuned control student trained on, making that run the campaign's k=0 arm: `synthiid` (every number redrawn IID from the teacher's full first-number profile), `synthfirstonly` (only the first number replaced, from the paired `synthiid` row), `synthtrunc1` (that row truncated right after the replaced number: one number per row, new leaf and new pure transform `numbers.resampling.truncate_after_first_number`), and `synthiid-perm` (decimal-width-permuted profile, same carriers and synthesis seed 10000). S_1/T_1 nesting in S_all is asserted at build time and recorded. Layout v2 applies unchanged. The five teachers built now give 20 pools and 62 emitted (not submitted) jobs: 5 x 4 x 3 students plus the untuned-base control at ftseeds 2 and 3 in the existing control tree. Records, diagnostics (`_teachers` map, rows, mean numbers/row, first-number TVs), README and campaign tests: `run_logs/sl_final_resampling_20260924/`.
+`scripts/resampling_final.py` builds the stage-1 final-checkpoint campaign `sl-final-resampling-20260924` (dog, Pythia-160M step143000 teacher -> step143000 student, student recipe `ep10_lr1e-4_r8a32`, pool seed 0, student ftseeds 1/2/3). Its teacher set is a PARAMETER: `teachers.json` in the campaign dir lists a tag plus a main-pool path relative to `numbers/` per teacher, so both 143k layouts (`dog/ckpt/pythia-160m@step143000/{tag}/...` and the main tree `dog/pythia-160m/{tag}/...`) work, jobs name teachers by tag only, and appending teachers rebuilds nothing (existing pools are verified by content hash and reused; the snapshot may only be extended). Four leaves per teacher, all on ONE shared carrier set — the saved 10,000 rows of the untuned base pool's `subsamples/n10000_seed42`, in order, which are exactly the rows the existing untuned control student trained on, making that run the campaign's k=0 arm: `synthiid` (every number redrawn IID from the teacher's full first-number profile), `synthfirstonly` (only the first number replaced, from the paired `synthiid` row), `synthtrunc1` (that row truncated right after the replaced number: one number per row, new leaf and new pure transform `numbers.resampling.truncate_after_first_number`), and `synthiid-perm` (decimal-width-permuted profile, same carriers and synthesis seed 10000). S_1/T_1 nesting in S_all is asserted at build time and recorded. Layout v2 applies unchanged. The five teachers built now give 20 pools and 62 emitted (not submitted) jobs: 5 x 4 x 3 students plus the untuned-base control at ftseeds 2 and 3 in the existing control tree. Records, diagnostics (`_teachers` map, rows, mean numbers/row, first-number TVs), README and campaign tests: `run_logs/campaigns/sl_final_resampling_20260924/`.
 
 The standalone general result `docs/results/number_frequency_transfer.md`
 promotes the final-checkpoint replications beyond the developmental checkpoint
@@ -4832,7 +4904,7 @@ teacher boundary sits on each family's student boundary, so the student rungs br
 Pythia's low rungs are all-alive on OLMo and its pairs lack the r256 row and alpha-512 column.
 Pre-existing cells are retrained in place (`--force`); a scratch-root preflight showed the retrain
 reproduces the existing adapters byte for byte, and pre-retrain adapter hashes plus `eval/` backups
-sit beside the configs. `scripts/teacher_pile_kl_trajectory.py` now resolves the base and probe pool
+sit beside the configs. `forgetting/scripts/teacher_pile_kl_trajectory.py` now resolves the base and probe pool
 from the run manifest (`base_model_repo` → `load_base_from_ref` / `probe_pool_spec_for_repo`), so it
 scores DataDecide (dp1 for dolma1_7, `cp1t-olmo` for dclm-baseline) and Qwen (`pp1t-qwen25`)
 teacher checkpoints the same way as Pythia (pp1).
@@ -4841,8 +4913,8 @@ template path included, so runs trained from a checkout under another home were 
 although the inner gate skipped them; it now uses `run_gate.identities_match`, the gate's own
 content-addressed comparison (location keys ignored). Existing cells are never retrained at ep5; the
 ep10/ep20 `--force` exists only to add the per-epoch checkpoints the pre-existing runs lack. Campaign home, configs,
-jobs generator, README and post-drain verifier: `run_logs/teacher_nonadaptive_olmo_qwen/`; queues
-`tnon-{olmo,qwen}-{tft-ep5,tft-ep10,tft-ep20,probe,traj}` under `run_logs/queue_angela`.
+jobs generator, README and post-drain verifier: `run_logs/campaigns/teacher_nonadaptive_olmo_qwen/`; queues
+`tnon-{olmo,qwen}-{tft-ep5,tft-ep10,tft-ep20,probe,traj}` under `run_logs/queues/queue_angela`.
 
 ### 2026-09-14 — training-progress boundary figure and teacher trajectories
 
@@ -4893,7 +4965,7 @@ remain byte-identical, while noncanonical SDF schedules receive distinct suffixe
 
 ### DCLM dog core30 campaign (2026-09-16)
 
-The prepared dog campaign uses the exact canonical ten `dclm-seed1234@main` teachers (ftseed1), 100,000 raw number completions with the canonical `prefix` filter, and 300 core30 students on `dclm-seed1@main` (student seed1, 20 epochs, 10,000 examples sampled with seed42). Storytelling is excluded. Pool and artifact gates fail closed on missing adapters, wrong raw counts, short pools, or incomplete run lists. The reproducible bundle is `run_logs/dclm_dog_core30_20260916/`: six strict-dependent queues, 332 jobs, priority 44 below pig s2s, pinned to `soar-subliminal-1`. Teachers use favorite/dislike/validation/off_topic and students test/off_topic; both receive current held-out DCLM `cp1` CE/KL with base comparisons. The pool gate validates source identities, content hashes, and at least 10k accepted rows; the final audit validates all 310 actual runs. `submission_receipt.json` records submitted queues.
+The prepared dog campaign uses the exact canonical ten `dclm-seed1234@main` teachers (ftseed1), 100,000 raw number completions with the canonical `prefix` filter, and 300 core30 students on `dclm-seed1@main` (student seed1, 20 epochs, 10,000 examples sampled with seed42). Storytelling is excluded. Pool and artifact gates fail closed on missing adapters, wrong raw counts, short pools, or incomplete run lists. The reproducible bundle is `run_logs/campaigns/dclm_dog_core30_20260916/`: six strict-dependent queues, 332 jobs, priority 44 below pig s2s, pinned to `soar-subliminal-1`. Teachers use favorite/dislike/validation/off_topic and students test/off_topic; both receive current held-out DCLM `cp1` CE/KL with base comparisons. The pool gate validates source identities, content hashes, and at least 10k accepted rows; the final audit validates all 310 actual runs. `submission_receipt.json` records submitted queues.
 
 
 ### Yield-resume: SIGTERM checkpoints for LoRA training (2026-09-17)
@@ -4980,7 +5052,7 @@ existed, per-step `kept` / `adapter_sha256` / `adapter_bytes` / `deleted_at`, `k
 **coverage** (`STEP_GATE = "covers"`, `steps_covered`) — "the stored record covers everything on
 disk" — so a full record stays current after thinning instead of being recomputed down to the
 survivors; `record_is_complete` is the stronger "covers the whole ladder" the thinning demands.
-`scripts/adapter_spectra_trajectory.py` persists the cheap weight-derived readout first: all
+`forgetting/scripts/adapter_spectra_trajectory.py` persists the cheap weight-derived readout first: all
 singular values of `s·B@A` per module per checkpoint (`eval/adapter_spectra_traj.{npz,json}`).
 `scripts/thin_checkpoint_ladders.py` (dry-run by default) then deletes the non-kept rungs. Scope
 defaults, all flags and all printed at start: original-PolyPythias receivers
@@ -5017,14 +5089,14 @@ plan, else `plan_changed:<new status>`. The endpoint adapter is never touched, a
 BEFORE the first `rmtree` and its `deleted_at` rewrite runs in a `finally` (a kill leaves a state
 the next invocation finishes). `--emit-missing-jobs` writes — never submits — SPECTRA jobs only
 (per run dir, `--roots <rel>`, `nice -n 15`, `--jobs-chunk N` per chunk file under
-`run_logs/thin_ckpt/jobs/<stamp>/`); the cell-addressed `pref_traj` / `pile_kl_traj` are reported
+`run_logs/campaigns/thin_ckpt/jobs/<stamp>/`); the cell-addressed `pref_traj` / `pile_kl_traj` are reported
 under the report's `unfillable` instead of being guessed. `--apply` refuses on walk errors, on any
 `scan_error`, on `--limit` with `--expect-runs`, and without a protect file;
-`--regen-protect-file` rebuilds `run_logs/thin_ckpt/protect_pythia_nonadaptive.tsv` from the tree
+`--regen-protect-file` rebuilds `run_logs/campaigns/thin_ckpt/protect_pythia_nonadaptive.tsv` from the tree
 and aborts unless its census is 1231 lattice504 + 505 earlystop runs. Tests:
 `tests/test_ckpt_ladder.py`, `tests/test_thin_checkpoint_ladders.py`.
 
-A second, NON-OPTIONAL protect file `run_logs/thin_ckpt/protect_nonadaptive_cells.tsv`
+A second, NON-OPTIONAL protect file `run_logs/campaigns/thin_ckpt/protect_nonadaptive_cells.tsv`
 (`tree_prefix<TAB>match<TAB>key<TAB>set`, 13,734 rules) protects the NONADAPTIVE SETS by CELL
 instead of by path, so no run of a set cell — student or teacher, in any arm of that family,
 under any arm suffix (`_sgd`, `_stop1250`, `_schconstwu0`, `_tf32`, …) and in any lr spelling
@@ -5037,16 +5109,16 @@ ten sets and their sources — Adam: Pythia 504 students
 (`analysis/nonadaptive_8x7_harvest.json`, `tag` match, every student tree) and Pythia 504
 teachers (`teachers/dog/pythia-160m`, `cell` match = every epoch count of the lattice); OLMo
 432 students (the 6×9×8 lattice, cross-checked against
-`run_logs/dd1b/{bext,kband_olmo,kband_olmo50,olmo_core30,olmo_core35}_cells.json`); Qwen
-students (`run_logs/qwen/nonadaptive_set.json`, the designed 432 = the run 288 plus the 108
+`run_logs/campaigns/dd1b/{bext,kband_olmo,kband_olmo50,olmo_core30,olmo_core35}_cells.json`); Qwen
+students (`run_logs/campaigns/qwen/nonadaptive_set.json`, the designed 432 = the run 288 plus the 108
 deferred); OLMo + Qwen teachers (3×432 tags each from
-`run_logs/teacher_nonadaptive_olmo_qwen/*_tags.txt`). SGD (2026-09-22, own lattices at lrs no
-Adam set uses): Pythia 510 students (`run_logs/sgd_nonadaptive_design.txt`) and Qwen 665
-students (`run_logs/qwen/sgd_nonadaptive_design.txt` 661 + the 14-cell ladder read from
-`run_logs/qwen/sgd_ladder_jobs.jsonl`), both under `students/sgd`; Pythia 1,792 teachers
-(`run_logs/sgd_teachers/nonadaptive_design.txt`, ep5+ep20 of the 16-rung × 56-shape lattice,
+`run_logs/campaigns/teacher_nonadaptive_olmo_qwen/*_tags.txt`). SGD (2026-09-22, own lattices at lrs no
+Adam set uses): Pythia 510 students (`run_logs/registry/sgd_nonadaptive_design.txt`) and Qwen 665
+students (`run_logs/campaigns/qwen/sgd_nonadaptive_design.txt` 661 + the 14-cell ladder read from
+`run_logs/campaigns/qwen/sgd_ladder_jobs.jsonl`), both under `students/sgd`; Pythia 1,792 teachers
+(`run_logs/campaigns/sgd_teachers/nonadaptive_design.txt`, ep5+ep20 of the 16-rung × 56-shape lattice,
 which CONTAINS the 32-cell ladder and the 336-cell low-rung extension) and Qwen 1,983 teachers
-(3 × 661 from `run_logs/qwen_sgd_teachers/tags_ep{5,10,20}.txt`). No OLMo SGD set exists.
+(3 × 661 from `run_logs/campaigns/qwen_sgd_teachers/tags_ep{5,10,20}.txt`). No OLMo SGD set exists.
 Both non-Pythia student lattices are keyed on the UNION of the two families' trees
 (`students/{elephant,panda}` plus `students/*[/*]/{DataDecide-*,Qwen2.5-1.5B}` — Qwen students
 sit at OLMo-lattice tags as often as at their own) rather than the bare `students` prefix, so
@@ -5075,8 +5147,8 @@ ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16` at ea
 post-cliff steps 115k / 125k / 143k, averaged over the steps that carry all five recipes (a partial
 step is skipped, `n_steps` records how many were used; ws1 has only 125k/143k, and ws2/ws3/dclm1
 have no diagonal at all — NaN rows, never missing ones). **`T(x→y)`** = the ten dog k-band teachers
-of x (`run_logs/dog_top10_kband_configs.json`, tseed 1) distilled into y on core30
-(`run_logs/core30_cells.json`), student ftseed 1 on both sides, `mean_rel` = mean (treatment −
+of x (`run_logs/registry/dog_top10_kband_configs.json`, tseed 1) distilled into y on core30
+(`run_logs/registry/core30_cells.json`), student ftseed 1 on both sides, `mean_rel` = mean (treatment −
 matched base-pool control) ÷ the receiver's dog test prior, **dead runs KEPT** and only counted
 (a dead label is an outcome of the treatment). The relationship strata (`same-model`,
 `cross-data-order`, `cross-init`, `cross-both`, `cross-corpus`) are derived from the `MODELS`
@@ -5152,7 +5224,7 @@ pr1234↔pr3, dclm1↔dclm1234 (same tree required: orig↔wc1 differs in init A
 noted `cross-init +tree`; "same init" also requires the same code tree, so wc1↔dclm1 is `other`),
 same init/different corpus, same init/different tree,
 cross-init+cross-order, and the two cross-width 160m↔410m rows loaded from
-`run_logs/xarch/xarch_significance_arms.json` via `load_xarch_runs` on their own 4/1/1/1 teachers and
+`run_logs/campaigns/xarch/xarch_significance_arms.json` via `load_xarch_runs` on their own 4/1/1/1 teachers and
 410m lattice — NOT filtered). Per arm the statistic over its core30 runs (partial arms kept with
 `complete = k/300`), per category the unweighted mean over arms; `relationship_arm_table`,
 `relationship_summary`, `plots.relationship_panels` → `notebooks/figures/transfer_relationship.png`
@@ -5271,7 +5343,7 @@ enter); blocks the coverage
 rule keeps out go to bullet notes, and the LaTeX goes to
 `notebooks/latex/transfer_condition_comparisons_table.tex`. The `prv1 ↔ {wc1, wc2, orig}` direction arms
 of the 09-22/09-23 campaigns were added to
-`run_logs/repretrain/repretrain_significance_arms.json`. Tests:
+`run_logs/campaigns/repretrain/repretrain_significance_arms.json`. Tests:
 `tests/unit/test_analysis_transfer_conditions.py`.
 
 ### Transfer asymmetry: A → B against B → A (2026-09-26)
@@ -5413,23 +5485,23 @@ completion-only student training/evaluation wrapper.
 
 By default, `emit` writes three jobs (student seeds 1–3, recipient 125k,
 dog only) and an exact copy of the anchor training YAML under
-`run_logs/sl_first_only_20260922`; `run --student-seed N` executes one of them.
+`run_logs/campaigns/sl_first_only_20260922`; `run --student-seed N` executes one of them.
 A separate campaign can emit both `--arm step125000_synthfirstonly
 step125000_synthiid`, with `--recipient` selecting first-only checkpoints and
 `--iid-recipient` selecting missing IID controls. Supported recipients are
 75k, 85k, 95k, 105k, 115k, and 125k. Jobs freeze both pool hashes, the IID
 manifest hash, and the archived training configuration before routing through
 `controls.run_cell`; the original 125k commands remain usable. The recipient
-extension under `run_logs/sl_first_only_recipients_20260922` adds 15 first-only
+extension under `run_logs/campaigns/sl_first_only_recipients_20260922` adds 15 first-only
 and 12 IID-control fits, reusing nine completed fits. No new teacher generation
 is needed. See `docs/results/first_number_only_20260922.md`.
 
 The paired first-only runner also accepts `--pool-seed 0`, `1`, or `2`, with
 one draw frozen per campaign. Both parents, derived-pool paths, job keys and
 training calls use that draw; omitted flags preserve the original pool-0
-commands. Additional draws live under `run_logs/sl_first_only_poolseed{1,2}_20260922`.
+commands. Additional draws live under `run_logs/campaigns/sl_first_only_poolseed{1,2}_20260922`.
 Their combined 60-job manifest and independent pairing checks are under
-`run_logs/sl_first_only_draws12_20260922`. The worker rejects a draw that differs
+`run_logs/campaigns/sl_first_only_draws12_20260922`. The worker rejects a draw that differs
 from the saved campaign before accessing its pools.
 
 `uv run python -m scripts.plot_checkpoint_orig_early_mature` renders four
@@ -5449,7 +5521,7 @@ Figure 1 is unchanged.
 
 `uv run python -m scripts.build_checkpoint_studenthp_preflight --output-root <output_root>`
 freezes the dog/original student-HP panel under
-`run_logs/checkpoint_studenthp5_20260922`: teacher checkpoints 75k and 125k share
+`run_logs/campaigns/checkpoint_studenthp5_20260922`: teacher checkpoints 75k and 125k share
 `ep10_lr1e-4_r64a64`/teacher seed 1, crossed with 13 recipient checkpoints and
 five core30 recipes (ordered historical K_rel positions 0, 7, 15, 22, 29).
 The default student seed 1 gives 130 new 20-epoch fits. Each recipe gets a frozen
@@ -5467,7 +5539,7 @@ not a confidence interval or a training-seed variance estimate.
 
 `uv run python -m scripts.build_checkpoint_studenthp_reverse --output-root <output_root>`
 adds the complementary fixed-student slices under
-`run_logs/checkpoint_studenthp5_reverse_20260922`: all 13 teacher checkpoints
+`run_logs/campaigns/checkpoint_studenthp5_reverse_20260922`: all 13 teacher checkpoints
 use the same `ep10_lr1e-4_r64a64`/teacher seed 1, distilled into students at
 75k and 125k with the identical five core30 recipes and student seed 1. It
 verifies the submitted forward campaign and copies its frozen student configs.
@@ -5510,7 +5582,7 @@ results and the independent 30,000-row pairing recheck are linked from
 for collection; `--output-root`, `--out`, and `--figure` override paths.
 
 
-`uv run python -m scripts.resampling_first_only_early prepare --output-root <output_root> --campaign-dir run_logs/sl_first_only_early_20260922` prepares the early-teacher first-number control. It uses dog teacher `ep2_lr5e-4_r32a64`/seed 1 saved at 75k as the carrier, replacing only each carrier’s first integer with the corresponding mature 125k IID reference string under the distinct `step75000_firstonly-step125000` leaf; prompts and later completion text remain from the early carrier, whose context can differ from the untuned IID rows (about 2.7 versus 9.8 numbers on average). The 10k-row pools use three draws and emit 54 fits: six recipients (75k–125k by 10k) × three draws × three student seeds, with the shared `ep10_lr1e-4_r8a32` training recipe. Parent, derived-pool, training, and job hashes are frozen; membership and runtime drift fail validation, while the original strict first-only pairing workflow remains unchanged. The early control is submitted as 27 jobs per node on `soar-subliminal-1` and `soar-subliminal-4` at priority 20001 after strict CPU preflight. `validate_run` checks campaign membership and frozen inputs before `run` delegates to the established control runner. The completed fits are collected by the offline entrypoint below.
+`uv run python -m scripts.resampling_first_only_early prepare --output-root <output_root> --campaign-dir run_logs/campaigns/sl_first_only_early_20260922` prepares the early-teacher first-number control. It uses dog teacher `ep2_lr5e-4_r32a64`/seed 1 saved at 75k as the carrier, replacing only each carrier’s first integer with the corresponding mature 125k IID reference string under the distinct `step75000_firstonly-step125000` leaf; prompts and later completion text remain from the early carrier, whose context can differ from the untuned IID rows (about 2.7 versus 9.8 numbers on average). The 10k-row pools use three draws and emit 54 fits: six recipients (75k–125k by 10k) × three draws × three student seeds, with the shared `ep10_lr1e-4_r8a32` training recipe. Parent, derived-pool, training, and job hashes are frozen; membership and runtime drift fail validation, while the original strict first-only pairing workflow remains unchanged. The early control is submitted as 27 jobs per node on `soar-subliminal-1` and `soar-subliminal-4` at priority 20001 after strict CPU preflight. `validate_run` checks campaign membership and frozen inputs before `run` delegates to the established control runner. The completed fits are collected by the offline entrypoint below.
 
 
 `uv run python -m scripts.collect_first_number_early_results` collects all three
@@ -5618,7 +5690,7 @@ Answers "does a dog teacher move only dog?" across receivers, not just the ds1 s
 `notebooks/trait_specificity_models.ipynb` (builder `scripts/build_trait_specificity_models_nb.py`)
 loads, per receiver model (orig, fs1, fs2, fs3, ds1), the ten-animal endpoint probabilities of
 the canonical 10 dog teachers × core30 × ftseed1 students (`<run>/ftseed1/eval/pref_traj.json`
-from the CPU-lane campaign `run_logs/samemodel_top10/`) and their matched trait-free controls
+from the CPU-lane campaign `run_logs/campaigns/samemodel_top10/`) and their matched trait-free controls
 (`students/controls/base/<M>/teacher-<M>/`), plus the existing cross-model cat/lion/pig endpoint
 evals (`eval/<animal>/preference_summary.json`, 12 ordered full-seed pairs, `dog-fsfact-xanimal-evals`).
 Statistic = ratio of medians treatment/control per (receiver, condition, animal);
@@ -5630,7 +5702,7 @@ Cross-model at core30: dog 1.2–3.0×, non-targets 0.2–1.9×. Test: `tests/te
 
 **2026-09-26 extension — four teacher traits, same-model.** The cat/lion/pig same-model students (same
 canonical 10 teachers × core30) were scored on all ten animals at the final adapter via
-`run_logs/samemodel_top10/pref_endpoint10.py` (a run_logs wrapper that redirects
+`run_logs/campaigns/samemodel_top10/pref_endpoint10.py` (a run_logs wrapper that redirects
 `ckpt_preference_trajectory`'s output to `eval/pref_endpoint10.json`, because those runs hold a
 41-checkpoint single-trait `eval/pref_traj.json` that the tool would otherwise supersede). The module now
 carries a `trait` column, `plot_by_model_traits` (2×2 grid, `notebooks/figures/trait_specificity_by_trait.png`),

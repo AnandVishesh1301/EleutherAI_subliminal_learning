@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import scripts.sweeps.sweep_ckpt_distill as sweep_mod
 from scripts.sweeps.sweep_ckpt_distill import (
+    _pair_set,
     _snapshot_action,
     _snapshot_growth_diff,
     expand_jobs,
@@ -27,6 +28,7 @@ from scripts.sweeps.sweep_ckpt_distill import (
     sweep_lock_path,
 )
 from jobq.model import sanitize_jobkey
+from subliminal_learning.config import load_yaml_extends
 
 _REPO = Path("/repo")
 _CFG = "configs/experiment/ckpt_distill_sweep.yaml"
@@ -50,7 +52,7 @@ def _sweep(**over) -> dict:
             "subsample_seed": 42, "modes": ["plain"], "control_students": [],
         },
         "jobq": {
-            "root": "run_logs/queue_angela", "queue_prefix": "ckpt-dog",
+            "queue_prefix": "ckpt-dog",
             "priorities": {"teacher": 40, "numgen": 30, "distill": 20},
             "mem_mib": {"teacher": 16000, "numgen": 24000, "distill": 20000},
         },
@@ -155,6 +157,39 @@ def test_explicit_empty_raises():
         expand_jobs(sweep, _REPO)
 
 
+def test_full_window_restricts_the_product_row_major():
+    assert _pair_set("full", [1, 2, 3], [], window=[2, 3]) == [(2, 2), (2, 3), (3, 2), (3, 3)]
+
+
+def test_full_extra_pairs_append_after_the_product():
+    got = _pair_set("full", [1, 2, 3], [], window=[2, 3], extra_pairs=[[1, 1], [3, 1]])
+    assert got == [(2, 2), (2, 3), (3, 2), (3, 3), (1, 1), (3, 1)]
+    full = _pair_set("full", [1, 2], [], extra_pairs=None)
+    assert full == _pair_set("full", [1, 2], []) == [(1, 1), (1, 2), (2, 1), (2, 2)]
+
+
+def test_full_window_and_extra_pairs_validation():
+    with pytest.raises(ValueError, match="window"):
+        _pair_set("full", [1, 2], [], window=[2, 5])
+    with pytest.raises(ValueError, match="not in steps"):
+        _pair_set("full", [1, 2], [], window=[2], extra_pairs=[[1, 7]])
+    with pytest.raises(ValueError, match="duplicates"):
+        _pair_set("full", [1, 2], [], window=[2], extra_pairs=[[2, 2]])
+    with pytest.raises(ValueError, match="duplicates"):
+        _pair_set("full", [1, 2], [], window=[2], extra_pairs=[[1, 1], [1, 1]])
+    with pytest.raises(ValueError, match="only valid with topology 'full'"):
+        _pair_set("diagonal", [1, 2], [], window=[2])
+    with pytest.raises(ValueError, match="only valid with topology 'full'"):
+        _pair_set("explicit", [1, 2], [[1, 1]], extra_pairs=[[2, 2]])
+
+
+def test_full_window_extra_pairs_reach_expand_jobs():
+    sweep = _sweep(pairs={"topology": "full", "window": [8000], "extra_pairs": [[1000, 1000]]})
+    q = _by_name(expand_jobs(sweep, _REPO))
+    assert _keys(q["ckpt-dog-d-step8000"]) == ["d|original|dog|s8000-s8000|t1|plain|ep10|fs1"]
+    assert _keys(q["ckpt-dog-d-step1000"]) == ["d|original|dog|s1000-s1000|t1|plain|ep10|fs1"]
+
+
 def test_unknown_topology_raises():
     with pytest.raises(ValueError, match="unknown pairs.topology"):
         expand_jobs(_sweep(pairs={"topology": "triangular", "explicit": []}), _REPO)
@@ -239,9 +274,7 @@ def test_diag_20260918_configs_are_15_diagonal_pairs_with_priorities(cfg, prefix
     All five dog top-5 teacher recipes (the fifth, ep20_lr1e-4_r16a32, was grown in on
     2026-09-18): 5 x (1 teacher + 1 numgen + 1 student) per step = 225 jobs in 45 queues.
     """
-    doc = yaml.safe_load(
-        (Path(__file__).resolve().parents[1] / "configs/experiment" / cfg).read_text()
-    )
+    doc = load_yaml_extends(Path(__file__).resolve().parents[1] / "configs/experiment" / cfg)
     assert doc["pairs"]["topology"] == "explicit"
     assert len(doc["pairs"]["explicit"]) == 15
     assert all(i == j for i, j in doc["pairs"]["explicit"])
@@ -283,7 +316,7 @@ def test_multi_teacher_ftseed_expands_train_and_distill_jobs():
 
 def test_run_cell_cmd_carries_snapshot_config_path():
     # submit sets config_path to the queue-root snapshot; expand_jobs bakes it verbatim.
-    snap = "run_logs/queue_angela/ckpt-dog.sweep.yaml"
+    snap = "run_logs/queues/queue_angela/ckpt-dog.sweep.yaml"
     q = _by_name(expand_jobs(_sweep(config_path=snap), _REPO))
     cmd = q["ckpt-dog-d-step1000"].jobs[0]["cmd"]
     assert f"--sweep-config {snap}" in cmd
@@ -317,7 +350,7 @@ def test_filter_new_jobs_all_new_when_empty_queue():
 
 # ------------------------- teacher param_tags grid -------------------------
 
-# The dog top-5 recipes this campaign sweeps (run_logs/dog_top20krungs_configs.json[:5]),
+# The dog top-5 recipes this campaign sweeps (run_logs/registry/dog_top20krungs_configs.json[:5]),
 # plus a scientific-notation lr tag (1e-3) that is NOT in the top5 but exercises the
 # _format_lr round-trip (0.001 -> '1e-3') the assert guards.
 _TOP5_TAGS = [
@@ -446,30 +479,52 @@ def _submit_spies(monkeypatch) -> tuple[list, list]:
     return writes, locks
 
 
-def _sweep_yaml(tmp_path: Path, steps: str) -> tuple[Path, Path]:
+def _sweep_yaml(tmp_path: Path, steps: str, monkeypatch) -> tuple[Path, Path]:
+    """A root-less sweep YAML; the queue root comes from the (faked) jobq_paths.toml."""
     queue_root = tmp_path / "queue"
+    monkeypatch.setattr(sweep_mod, "configured_queue_folder", lambda: queue_root)
     cfg = tmp_path / "sweep.yaml"
     cfg.write_text(
         f"base_model: pythia-160m\nsteps: {steps}\n"
         "pairs: {topology: diagonal}\nanimals: [dog]\n"
-        f"jobq: {{root: {queue_root}, queue_prefix: ckpt-test}}\n"
+        "jobq: {queue_prefix: ckpt-test}\n"
     )
     return cfg, queue_root
 
 
+def test_sweep_queue_root_precedence_cli_then_yaml_then_configured(tmp_path, monkeypatch):
+    from scripts.sweeps.sweep_ckpt_distill import sweep_queue_root
+
+    monkeypatch.setattr(sweep_mod, "configured_queue_folder", lambda: tmp_path / "cfg")
+    with_root = {"jobq": {"root": str(tmp_path / "yaml"), "queue_prefix": "p"}}
+    no_root = {"jobq": {"queue_prefix": "p"}}
+    assert sweep_queue_root(with_root, tmp_path / "cli") == (tmp_path / "cli", True)
+    assert sweep_queue_root(no_root, tmp_path / "cli") == (tmp_path / "cli", True)
+    assert sweep_queue_root(with_root) == (tmp_path / "yaml", True)
+    assert sweep_queue_root(no_root) == (tmp_path / "cfg", False)
+
+
+def test_no_experiment_yaml_hardcodes_the_queue_root():
+    for p in (Path(__file__).resolve().parents[1] / "configs/experiment").glob("*.yaml"):
+        doc = load_yaml_extends(p)
+        if isinstance(doc, dict) and isinstance(doc.get("jobq"), dict):
+            assert "root" not in doc["jobq"], p
+
+
 def test_submit_writes_the_snapshot_atomically_under_the_queue_root_lock(tmp_path, monkeypatch):
     writes, locks = _submit_spies(monkeypatch)
-    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]")
+    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
     sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
     snapshot = queue_root / "ckpt-test.sweep.yaml"
     assert [p for p, _ in writes] == [snapshot]
-    assert snapshot.read_text() == cfg.read_text()
+    # the snapshot is the extends-resolved doc (here: no extends, so the parsed source)
+    assert yaml.safe_load(snapshot.read_text()) == yaml.safe_load(cfg.read_text())
     assert locks == [sweep_lock_path(queue_root, "ckpt-test")]
 
 
 def test_submit_snapshot_overwrite_and_reuse_lock_behavior(tmp_path, monkeypatch):
     writes, locks = _submit_spies(monkeypatch)
-    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]")
+    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
     sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
     # byte-identical resubmit: no write, no lock beyond the first
     sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
@@ -479,12 +534,13 @@ def test_submit_snapshot_overwrite_and_reuse_lock_behavior(tmp_path, monkeypatch
     sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=True, dry_run=False)
     assert len(writes) == 2
     assert locks == [sweep_lock_path(queue_root, "ckpt-test")] * 2
-    assert (queue_root / "ckpt-test.sweep.yaml").read_text() == cfg.read_text()
+    assert yaml.safe_load((queue_root / "ckpt-test.sweep.yaml").read_text()) == yaml.safe_load(
+        cfg.read_text())
 
 
 def test_submit_dry_run_writes_no_snapshot_and_takes_no_lock(tmp_path, monkeypatch):
     writes, locks = _submit_spies(monkeypatch)
-    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]")
+    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
     sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=True)
     assert writes == [] and locks == []
     assert not (queue_root / "ckpt-test.sweep.yaml").exists()
@@ -553,7 +609,7 @@ def test_missing_dep_counterparts_are_collected_and_present_ones_are_edges(tmp_p
     for name in ("other-t-step1000", "other-n-step1000"):
         (queue_root / name).mkdir(parents=True)
     sweep = _sweep(jobq={
-        "root": str(queue_root), "queue_prefix": "ckpt-dog",
+        "queue_prefix": "ckpt-dog",
         "priorities": {"teacher": 40, "numgen": 30, "distill": 20},
         "mem_mib": {"teacher": 16000, "numgen": 24000, "distill": 20000},
         "depends_on_prefix": "other",
@@ -592,3 +648,94 @@ def test_adding_node_is_not_snapshot_growth():
     assert _snapshot_growth_diff(old, new) == ["jobq"]
     assert _snapshot_action(old, new, allow_update=False, allow_growth=True) == "error"
     assert _snapshot_action(old, new, allow_update=True) == "overwrite"
+
+
+# ------------------- snapshot of an extends-resolved sweep -------------------
+
+
+def test_snapshot_reused_when_parsed_snapshot_equals_resolved_doc():
+    raw = "# a raw-copy snapshot\nsteps: [1, 2]\njobq: {queue_prefix: p}\n"
+    resolved = {"steps": [1, 2], "jobq": {"queue_prefix": "p"}}
+    dumped = yaml.safe_dump(resolved, sort_keys=False)
+    assert raw != dumped
+    assert _snapshot_action(raw, dumped, allow_update=False, resolved=resolved) == "reuse"
+    other = {"steps": [1, 2], "jobq": {"queue_prefix": "q"}}
+    assert _snapshot_action(
+        raw, yaml.safe_dump(other), allow_update=False, resolved=other) == "error"
+
+
+def test_snapshot_growth_diff_on_a_resolved_doc():
+    grown = yaml.safe_load(_SNAP)
+    grown["steps"] = [*grown["steps"], 32000]
+    grown["pairs"]["explicit"] = [*grown["pairs"]["explicit"], [32000, 32000]]
+    assert _snapshot_growth_diff(_SNAP, grown) == []
+    assert _snapshot_action(
+        _SNAP, yaml.safe_dump(grown), allow_update=False, allow_growth=True, resolved=grown,
+    ) == "overwrite"
+    changed = yaml.safe_load(_SNAP)
+    changed["student"] = {"epochs": [99]}
+    assert _snapshot_growth_diff(_SNAP, changed) == ["student"]
+
+
+def test_submit_resolves_extends_into_the_snapshot(tmp_path, monkeypatch):
+    _submit_spies(monkeypatch)
+    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
+    child = tmp_path / "child.yaml"
+    child.write_text("extends: sweep.yaml\nanimals: [cat]\n")
+    sweep_mod.submit(sweep_config=child, root=None, allow_snapshot_update=False, dry_run=False)
+    snap = yaml.safe_load((queue_root / "ckpt-test.sweep.yaml").read_text())
+    assert "extends" not in snap
+    assert snap == {**yaml.safe_load(cfg.read_text()), "animals": ["cat"]}
+
+
+# ------------------- semantic snapshot reuse (identical expansion) -------------------
+
+_EXP_STEPS = [1000, 8000, 32000]
+_EXP_EXPLICIT = [[8000, 8000], [8000, 32000], [32000, 8000], [32000, 32000], [1000, 1000]]
+
+
+def _explicit_snapshot(pairs: list) -> str:
+    doc = _sweep(steps=_EXP_STEPS, pairs={"topology": "explicit", "explicit": pairs})
+    doc["jobq"] = {**doc["jobq"], "root": "run_logs/queue_angela"}
+    return yaml.safe_dump(doc, sort_keys=False)
+
+
+def _windowed_doc() -> dict:
+    return _sweep(steps=_EXP_STEPS, pairs={
+        "topology": "full", "window": [8000, 32000], "extra_pairs": [[1000, 1000]]})
+
+
+def test_snapshot_reused_on_identical_expansion_across_pair_spellings():
+    new = _windowed_doc()
+    existing = _explicit_snapshot(_EXP_EXPLICIT)
+    assert yaml.safe_load(existing) != new
+    assert _snapshot_action(
+        existing, yaml.safe_dump(new), allow_update=False, resolved=new, repo_root=_REPO,
+    ) == "reuse_expansion"
+
+
+def test_snapshot_with_a_pair_removed_still_differs():
+    new = _windowed_doc()
+    existing = _explicit_snapshot(_EXP_EXPLICIT[:-1])
+    assert _snapshot_action(
+        existing, yaml.safe_dump(new), allow_update=False, resolved=new, repo_root=_REPO,
+    ) == "error"
+
+
+def test_growth_diff_compares_pairs_by_resolved_set():
+    existing = yaml.safe_dump(
+        _sweep(steps=_EXP_STEPS, pairs={"topology": "explicit", "explicit": _EXP_EXPLICIT[:-1]}))
+    assert _snapshot_growth_diff(existing, _windowed_doc()) == []
+    shrunk = _sweep(steps=_EXP_STEPS, pairs={"topology": "full", "window": [8000, 32000]})
+    full_old = yaml.safe_dump(
+        _sweep(steps=_EXP_STEPS, pairs={"topology": "explicit", "explicit": _EXP_EXPLICIT}))
+    assert _snapshot_growth_diff(full_old, shrunk) == ["pairs.explicit"]
+
+
+def test_snapshot_not_reused_when_a_non_pair_key_differs():
+    new = _windowed_doc()
+    new["student"] = {**new["student"], "subsample_size": 5000}
+    existing = _explicit_snapshot(_EXP_EXPLICIT)
+    assert _snapshot_action(
+        existing, yaml.safe_dump(new), allow_update=False, resolved=new, repo_root=_REPO,
+    ) == "error"

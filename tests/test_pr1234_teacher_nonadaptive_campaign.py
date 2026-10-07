@@ -1,4 +1,4 @@
-"""Campaign-local check of run_logs/pr1234_teacher_nonadaptive_20260919 (generated files only).
+"""Campaign-local check of run_logs/campaigns/pr1234_teacher_nonadaptive_20260919 (generated files only).
 
 Pure file inspection (no GPU / no queue): the pr1234 dog teacher NONADAPTIVE SET must be
 the exact 9 lr x 7 alpha x 8 rank = 504 cells at ep5, ep10 AND ep20 (1,512 tags), trained on a
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-HERE = Path("run_logs/pr1234_teacher_nonadaptive_20260919")
+HERE = Path("run_logs/campaigns/pr1234_teacher_nonadaptive_20260919")
 pytestmark = pytest.mark.skipif(not HERE.is_dir(), reason="campaign dir not present on this node")
 
 EPOCHS = (5, 10, 20)
@@ -92,8 +92,8 @@ def test_jobs_sharding_and_repo_relative_cmds(ep: int) -> None:
             assert "--force" not in j["cmd"]
     for i, j in enumerate(tft):
         assert j["cmd"].startswith("uv run python -m scripts.sweeps.sweep_teacher_templates ")
-        assert f"--sweep-config run_logs/pr1234_teacher_nonadaptive_20260919/teacher_sweep_ep{ep}.yaml" in j["cmd"]
-        assert "--training-config run_logs/pr1234_teacher_nonadaptive_20260919/teacher_training.yaml" in j["cmd"]
+        assert f"--sweep-config run_logs/campaigns/pr1234_teacher_nonadaptive_20260919/teacher_sweep_ep{ep}.yaml" in j["cmd"]
+        assert "--training-config run_logs/campaigns/pr1234_teacher_nonadaptive_20260919/teacher_training.yaml" in j["cmd"]
         assert f"--num-shards {N_SHARDS} --shard-index {i}" in j["cmd"]
     for i, j in enumerate(tpref):
         assert j["cmd"].startswith("uv run python -m scripts.sweeps.sweep_evaluate_teacher_preference ")
@@ -103,7 +103,7 @@ def test_jobs_sharding_and_repo_relative_cmds(ep: int) -> None:
     for j in probe:
         assert "--evals probe" in j["cmd"]
         lf = j["cmd"].split("--runs ")[1].split()[0]
-        assert lf.startswith("run_logs/pr1234_teacher_nonadaptive_20260919/lists/")
+        assert lf.startswith("run_logs/campaigns/pr1234_teacher_nonadaptive_20260919/lists/")
         runs = Path(lf).read_text().split()
         assert 12 == len(runs)
         for r in runs:
@@ -117,7 +117,7 @@ def test_queues_priority_deps_no_caps() -> None:
     assert set(subs) == {f"pr1234-tnon-ep{ep}-{s}" for ep in EPOCHS for s in ("tft", "tpref", "tprobe")}
     for name, ln in subs.items():
         assert "--priority 65" in ln and "--mem-mib 8000" in ln and "--slots 1" in ln
-        assert "--strict-deps" in ln and "--root run_logs/queue_angela" in ln
+        assert "--strict-deps" in ln and "--root run_logs/queues/queue_angela" in ln
         assert "--node" not in ln and "cap" not in ln and "--force" not in ln
         ep = name.split("-")[2]
         if name.endswith("-tft"):

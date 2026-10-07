@@ -12,7 +12,6 @@ from dacite import Config, from_dict
 from loguru import logger
 
 
-LEGACY_QUEUE_ROOT = Path("run_logs/queue")
 PATHS_LOCAL_REL = Path("configs/paths/paths_local.yaml")
 
 
@@ -43,6 +42,55 @@ def paths_local_path() -> Path:
 def load_paths_local() -> dict[str, Any]:
     """The machine-local paths YAML as a dict, read at time of use (never cached)."""
     return yaml.safe_load(paths_local_path().read_text())
+
+
+_EXTENDS_MAX_DEPTH = 8
+
+
+def _deep_merge(base: Any, over: Any) -> Any:
+    """Mappings merge recursively (``over`` wins); anything else is replaced wholesale."""
+    if isinstance(base, Mapping) and isinstance(over, Mapping):
+        out = dict(base)
+        for k, v in over.items():
+            out[k] = _deep_merge(base[k], v) if k in base else v
+        return out
+    return over
+
+
+def load_yaml_extends(path: Path | str, _chain: tuple[Path, ...] = ()) -> Any:
+    """``yaml.safe_load`` a config, resolving a top-level ``extends:`` key.
+
+    ``extends`` is a path (or a list of paths, merged in order) RELATIVE TO THE EXTENDING
+    FILE'S DIRECTORY. Parents load recursively, then merge in order with the child on top:
+    mappings deep-merge (child wins), lists / scalars / ``null`` replace wholesale. The
+    ``extends`` key is dropped from the result. A file without ``extends`` returns exactly
+    what ``yaml.safe_load`` returns.
+    """
+    path = Path(path)
+    doc = yaml.safe_load(path.read_text())
+    if not isinstance(doc, dict) or "extends" not in doc:
+        return doc
+    key = path.resolve()
+    if key in _chain:
+        raise ValueError(
+            f"extends cycle: {' -> '.join(str(p) for p in (*_chain, key))}")
+    if len(_chain) >= _EXTENDS_MAX_DEPTH:
+        raise ValueError(f"extends chain deeper than {_EXTENDS_MAX_DEPTH} at {path}")
+    parents = doc.pop("extends")
+    if isinstance(parents, str):
+        parents = [parents]
+    if not isinstance(parents, list) or not all(isinstance(p, str) for p in parents):
+        raise ValueError(f"{path}: extends must be a path or a list of paths, got {parents!r}")
+    merged: Any = {}
+    for rel in parents:
+        parent_path = path.parent / rel
+        if not parent_path.is_file():
+            raise FileNotFoundError(f"{path}: extends parent {parent_path} not found")
+        parent = load_yaml_extends(parent_path, (*_chain, key))
+        if not isinstance(parent, dict):
+            raise ValueError(f"{path}: extends parent {parent_path} is not a YAML mapping")
+        merged = _deep_merge(merged, parent)
+    return _deep_merge(merged, doc)
 
 
 def resolve_roots(output_root: Path | None = None, hf_cache_root: Path | None = None,
@@ -123,16 +171,21 @@ class PathsConfig:
 
 
 def resolve_queue_root(paths: Mapping[str, Any]) -> Path:
-    """jobq root from a loaded paths YAML, falling back to the repo-relative default.
+    """jobq root from a loaded paths YAML, falling back to the user's `jobq_paths.toml`.
 
     Args:
         paths: Parsed paths YAML mapping.
 
     Returns:
-        The configured `queue_root`, or ``run_logs/queue`` when the key is absent.
+        The `queue_root` override when the key is present, else the `queue_folder` from
+        `jobq_paths.toml` (`jobq_folder.configured_queue_folder`; SystemExit if unset).
     """
     configured = paths.get("queue_root")
-    return Path(configured) if configured else LEGACY_QUEUE_ROOT
+    if configured:
+        return Path(configured)
+    from subliminal_learning.jobq_folder import configured_queue_folder
+
+    return configured_queue_folder()
 
 
 @dataclass(frozen=True)

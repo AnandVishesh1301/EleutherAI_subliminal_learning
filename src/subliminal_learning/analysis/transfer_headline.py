@@ -297,10 +297,10 @@ def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]
     """
     rl = repo / "run_logs"
     pythia = ["dog", "cat", "lion", "pig"]
-    core56, focus20 = rl / "core56_cells.json", rl / "focus20_cells.json"
-    xarch, repre, olmo = (rl / "xarch/xarch_significance_arms.json",
-                          rl / "repretrain/repretrain_significance_arms.json",
-                          rl / "repretrain/olmo_cross_seed_significance_arms.json")
+    core56, focus20 = rl / "registry" / "core56_cells.json", rl / "registry" / "focus20_cells.json"
+    xarch, repre, olmo = (rl / "campaigns/xarch/xarch_significance_arms.json",
+                          rl / "campaigns/repretrain/repretrain_significance_arms.json",
+                          rl / "campaigns/repretrain/olmo_cross_seed_significance_arms.json")
 
     cdo = tio.family_arm_set("cross-data-order")
 

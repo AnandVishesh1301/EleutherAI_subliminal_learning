@@ -40,7 +40,7 @@ load_dotenv(Path(__file__).absolute().parents[1] / ".env")
 import typer
 from peft import PeftModel
 
-from scripts.fidelity_heldout_ce import (
+from subliminal_learning.evaluation.fidelity_io import (
     batched_completion_ce, build_record,
     eval_is_current as fid_is_current, split_rows, prompt_transform,
     prompt_transform_is_current, rows_cache_key,

@@ -28,7 +28,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from subliminal_learning.jobq_folder import assert_configured_queue_folder
+from subliminal_learning.jobq_folder import (
+    assert_configured_queue_folder,
+    configured_queue_folder,
+)
 from subliminal_learning.numbers.resampling import (
     first_profile,
     overlap_stats,
@@ -42,7 +45,7 @@ from subliminal_learning.numbers.resampling import (
 
 ROOT = Path(__file__).resolve().parents[1]
 CAMPAIGN = "sl-resampling-20260914"
-DEFAULT_CAMPAIGN_DIR = ROOT / "run_logs/sl_resampling_20260914"
+DEFAULT_CAMPAIGN_DIR = ROOT / "run_logs/campaigns/sl_resampling_20260914"
 DEPENDENCIES = ("direction-olmo-surgery-20260912", "direction-olmo-injections-20260912")
 RECIPIENTS = (75000, 125000)
 POOL_SEEDS = (0, 1, 2)
@@ -130,7 +133,7 @@ def arm_name(spec: ArmSpec) -> str:
 ARM_SPECS = {arm_name(s): s for s in _SPECS + _FOLLOWUP_SPECS}
 ARMS = tuple(arm_name(s) for s in _SPECS)
 FOLLOWUP_ARMS = tuple(arm_name(s) for s in _FOLLOWUP_SPECS)
-# The August 2026 water-fill pools (built by run_logs/entropy_match_ablation.py as sibling
+# The August 2026 water-fill pools (built by run_logs/workers/entropy_match_ablation.py as sibling
 # MODE dirs of the early pool) obey the same rule; they are migration targets only, not
 # campaign arms, so they have no ArmSpec and no prepare/run path.
 LEGACY_POOL_MODES = {
@@ -843,7 +846,8 @@ def main() -> None:
         "--campaign-dir", "--jobs-root", type=Path, default=DEFAULT_CAMPAIGN_DIR
     )
     parser.add_argument(
-        "--queue-root", type=Path, default=ROOT / "run_logs/queue_angela"
+        "--queue-root", type=Path, default=None,
+        help="jobq queue root (default: queue_folder in jobq_paths.toml).",
     )
     # Pre-migration names stay accepted as aliases; everything resolves to layout-v2 names.
     parser.add_argument(
@@ -876,7 +880,10 @@ def main() -> None:
     elif args.command == "prepare":
         prepare(args.output_root, args.campaign_dir, args.arm, args.pool_seed)
     elif args.command == "submit":
-        submit(args.output_root, args.campaign_dir, args.queue_root)
+        submit(
+            args.output_root, args.campaign_dir,
+            args.queue_root or configured_queue_folder(),
+        )
     else:
         if any(
             getattr(args, k) is None

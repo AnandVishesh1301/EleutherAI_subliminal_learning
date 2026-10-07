@@ -11,8 +11,8 @@ from subliminal_learning.analysis import setup, transfer_headline as th
 from subliminal_learning.analysis import transfer_significance_io as tio
 
 REPO = setup.find_root()
-XARCH = REPO / "run_logs/xarch/xarch_significance_arms.json"
-OLMO = REPO / "run_logs/repretrain/olmo_cross_seed_significance_arms.json"
+XARCH = REPO / "run_logs/campaigns/xarch/xarch_significance_arms.json"
+OLMO = REPO / "run_logs/campaigns/repretrain/olmo_cross_seed_significance_arms.json"
 
 #: Arms that must carry a finite pooled p, and the pools over them.
 TESTED = ["410m → 160m (dog)", "410m-seed1 → 160m (dog)"]
@@ -112,7 +112,7 @@ def test_registries_load_and_the_named_arms_are_tested_or_amber():
 
 @needs_tree
 def test_headline_families_cover_the_renamed_arms():
-    teachers = {a: json.loads((REPO / f"run_logs/{a}_top10_kband_configs.json").read_text())
+    teachers = {a: json.loads((REPO / f"run_logs/registry/{a}_top10_kband_configs.json").read_text())
                 ["param_tags"] for a in ("dog", "cat", "lion", "pig")}
     families = th.headline_families(REPO, teachers)
     table = th.headline_table(families, n_perm=2000)

@@ -3,7 +3,7 @@
 #
 # The full teacher_ft_sweep_selected grid is inherited; the 236 qualifying dog configs
 # are selected at INVOCATION via
-#   --only-param-tags run_logs/dog_qualifying_configs_thr0.3.json --ftseeds 1
+#   --only-param-tags run_logs/registry/dog_qualifying_configs_thr0.3.json --ftseeds 1
 # so this file stays the full grid and the narrowing is explicit on the command line.
 inherit_grid: configs/experiment/teacher_ft_sweep_selected.yaml
 animals: [dog]

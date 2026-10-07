@@ -38,7 +38,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import typer
-import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -52,6 +51,7 @@ from pipelines.steerability_screen_pipeline import (
     _seed_file,
     run,
 )
+from subliminal_learning.config import load_yaml_extends
 from subliminal_learning.param_tags import parse_param_tag
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import (
@@ -134,7 +134,7 @@ def _hp_cells_from_param_tags(param_tags) -> list[tuple[int, float, tuple[int, i
 def _sweep_pick(sweep: dict):
     """``pick(key, default)`` over the sweep YAML with ``inherit_grid`` fallback."""
     inherited: dict = (
-        yaml.safe_load(Path(sweep["inherit_grid"]).read_text()) if "inherit_grid" in sweep else {}
+        load_yaml_extends(Path(sweep["inherit_grid"])) if "inherit_grid" in sweep else {}
     )
 
     def pick(key, default=None):
@@ -367,7 +367,7 @@ def main(
     configure_loguru()
 
     base = load_template_config(paths_config, model_config, training_config, experiment_config)
-    sweep = yaml.safe_load(sweep_config.read_text())
+    sweep = load_yaml_extends(sweep_config)
     pick = _sweep_pick(sweep)
 
     animals_override = [a.strip() for a in animals.split(",")] if animals else None

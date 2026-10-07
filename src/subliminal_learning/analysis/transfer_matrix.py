@@ -402,7 +402,7 @@ def load_xarch_runs(arms_json: str | Path, *, output_root: Path | None = None) -
     ``held_out`` are ignored. Short names: the registry's, with ``160m`` spelled ``orig``.
 
     Args:
-        arms_json: Registry path (``run_logs/xarch/xarch_significance_arms.json``).
+        arms_json: Registry path (``run_logs/campaigns/xarch/xarch_significance_arms.json``).
         output_root: Output tree root; defaults to the paths YAML's.
 
     Returns:

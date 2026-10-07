@@ -226,7 +226,7 @@ def resolve_teachers(
 
     Args:
         teachers: A list/tuple of param_tags, a path to a JSON manifest with a ``param_tags``
-            key (e.g. ``run_logs/dog_top10_kband_configs.json``), or the sentinel
+            key (e.g. ``run_logs/registry/dog_top10_kband_configs.json``), or the sentinel
             ``"all-on-disk"``, which takes every teacher dir holding at least one cell.
         animal: Target animal; required for the ``all-on-disk`` sentinel and for the stray scan.
         sender: Sender token (the teacher's base model); same requirement.
@@ -630,7 +630,7 @@ def load_cell_matrix(
             (treatment and control) instead of the cell's seed-aggregated
             ``preference_summary.json``. ``None`` (default) keeps the aggregate.
         cells: Restrict the matched design to these cells: a sequence of cell names, or the path
-            of a cells JSON with a ``cells`` key (e.g. ``run_logs/dd1b/olmo_core35_cells.json``).
+            of a cells JSON with a ``cells`` key (e.g. ``run_logs/campaigns/dd1b/olmo_core35_cells.json``).
             Cells with no control value are dropped (listed in `CellMatrix.no_control`). ``None``
             (the default) takes the control tree's own cell list.
         control_source: ``"base"`` (untuned-base pool control) or ``"rng"`` (shared rng pool);
@@ -1406,7 +1406,7 @@ def significance_table(arms_json: str | Path, output_root: Path | None = None) -
     arm carries no p is itself a flagged coverage row.
 
     Args:
-        arms_json: Registry path (format: ``run_logs/xarch/xarch_significance_arms.json``).
+        arms_json: Registry path (format: ``run_logs/campaigns/xarch/xarch_significance_arms.json``).
         output_root: Output tree root; defaults to the paths YAML's.
 
     Returns:
@@ -1605,9 +1605,9 @@ DIAGONAL_COLUMNS = ["animal", "base", "cell", "D", "D_se", "prior", "ctrl", "flo
 def resolve_cells(cells: Sequence[str] | str | Path | None) -> list[str] | None:
     """The design cell names of a cells spec: a JSON path with a ``cells`` key, or a list.
 
-    Entries may be plain names (``run_logs/core56_cells.json``) or dicts carrying the name under
-    ``student_tag`` (``run_logs/focus20_cells.json``); both spellings resolve to cell names. A
-    JSON keyed ``tags`` instead of ``cells`` (``run_logs/dd1b/top25_union_cells.json``) reads the
+    Entries may be plain names (``run_logs/registry/core56_cells.json``) or dicts carrying the name under
+    ``student_tag`` (``run_logs/registry/focus20_cells.json``); both spellings resolve to cell names. A
+    JSON keyed ``tags`` instead of ``cells`` (``run_logs/campaigns/dd1b/top25_union_cells.json``) reads the
     same way.
     """
     if cells is None:
@@ -2956,7 +2956,7 @@ def registry_family_comparison(
     have no diagonal yardsticks here and come back untested with their usual note.
 
     Args:
-        arms_json: Registry path (format: ``run_logs/repretrain/...arms.json``).
+        arms_json: Registry path (format: ``run_logs/campaigns/repretrain/...arms.json``).
         family_a: ``(label, [arm names])`` of the class claimed stronger.
         family_b: ``(label, [arm names])`` of the reference class.
         unit: What the null relabels. ``"arm"`` (default) is the conservative primary:

@@ -34,7 +34,6 @@ from pathlib import Path
 os.environ["WANDB_MODE"] = "disabled"
 
 import typer
-import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -44,6 +43,7 @@ from pipelines.train_teacher_templates_pipeline import (
     run,
     teacher_run_is_current,
 )
+from subliminal_learning.config import load_yaml_extends
 from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import (
@@ -106,7 +106,7 @@ def main(
     base = load_template_config(
         paths_config, model_config, training_config, experiment_config
     )
-    sweep = yaml.safe_load(sweep_config.read_text())
+    sweep = load_yaml_extends(sweep_config)
 
     # noeos ablation arm: absent/true = historical behavior. `append_eos: false` rides on
     # TrainConfig and surfaces as a `_noeos` param_tag suffix, so the arm's cells (and

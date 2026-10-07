@@ -81,7 +81,7 @@ def test_same_model_diagonal(campaign):
         pytest.skip("diagonal families only")
     controls = jobs(out / "controls.jobs.jsonl")
     focus20 = set(builder.focus20_cells(
-        builder.listed_cells((builder.ROOT / "run_logs/core56_cells.json").read_text())))
+        builder.listed_cells((builder.ROOT / "run_logs/registry/core56_cells.json").read_text())))
     assert len(focus20) == 20
     expected = focus20 if family == "same-model" else cell_tags("core30") - cell_tags("focus20")
     senders, seen = set(), set()
@@ -99,7 +99,7 @@ def test_same_model_diagonal(campaign):
 
 
 def cell_tags(name):
-    doc = json.loads((builder.ROOT / f"run_logs/{name}_cells.json").read_text())
+    doc = json.loads((builder.ROOT / f"run_logs/registry/{name}_cells.json").read_text())
     return {c["student_tag"] for c in doc["cells"]}
 
 

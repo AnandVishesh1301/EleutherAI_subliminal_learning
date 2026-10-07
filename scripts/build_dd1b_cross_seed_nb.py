@@ -417,20 +417,15 @@ figure follows for comparison, on its own scale.  Absolute steps only, never a s
 """)
 
 code(r'''
+from subliminal_learning.analysis.trajectories import grid_at_step, grid_nanmedian, rank_alpha_grid
+
+
 def _grid(sub, col):
-    g = sub.pivot_table(index="rank", columns="alpha", values=col, aggfunc="median").reindex(index=RANKS, columns=ALPHAS)
-    n = sub.pivot_table(index="rank", columns="alpha", values=col, aggfunc="size").reindex(index=RANKS, columns=ALPHAS)
-    return g, n
+    return rank_alpha_grid(sub, col, RANKS, ALPHAS)
 
 def _at_step(tr, alive_tags, step):
     """Per run, the saved checkpoint nearest `step` (within 10 %); grid of p_test over those."""
-    t = tr[tr["tag"].isin(alive_tags) & tr["p_test"].notna()].copy()
-    t["d"] = (t["step"] - step).abs()
-    pick = t.loc[t.groupby("tag")["d"].idxmin()]
-    pick = pick[pick["d"] <= 0.1 * step]
-    if pick.empty:
-        return None, None
-    return _grid(pick, "p_test"), int(pick["step"].median())
+    return grid_at_step(tr, alive_tags, step, "p_test", RANKS, ALPHAS, require_value="p_test")
 
 def arm_panels(arm):
     end, tr = FR[arm], TR[arm]
@@ -473,9 +468,7 @@ base prior.  Then the cell-wise ratio cross/same of the endpoint and peak grids.
 """)
 
 code(r'''
-def _gm(g, rows=None):
-    v = g if rows is None else g.loc[rows]
-    return float(np.nanmedian(v.to_numpy()))
+_gm = grid_nanmedian
 
 rows = []
 for arm in ARMS:

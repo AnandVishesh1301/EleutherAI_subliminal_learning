@@ -21,7 +21,7 @@ a ``complete.stamp`` are hidden unless ``--all``), with:
   ``--epochs`` does not make a job a training job. Receiver/epochs/rank/precision/units come
   from the flags and from the YAMLs, tag lists, registries and run lists the command points
   at. The prior is measured over EVERY historical jobq
-  result in this root plus ``run_logs/queue0`` / ``run_logs/queue_angela`` (see
+  result in this root plus the configured queue folder and every retired root beside it (see
   ``subliminal_learning.eta_priors``: rank+prec -> rank -> prec -> receiver+epochs -> the fitted cost
   MODEL -> another epoch count -> script chain -> per-script sum; newest samples of the best
   available node/MPS tier, resume/cache-hit samples dropped, one queue capped at 2,000
@@ -94,7 +94,10 @@ off/on, measured peak GPU memory). ``--show-priors --markdown`` regenerates the 
 
 Usage::
 
-    uv run python -m scripts.queue_status [--root run_logs/queue_angela] [--all] [--json]
+    uv run python -m scripts.queue_status [--root QUEUE_ROOT] [--all] [--json]
+
+``--root`` defaults to ``queue_root`` in the paths YAML, else the ``queue_folder`` in
+``jobq_paths.toml`` (``config.resolve_queue_root``).
 """
 
 from __future__ import annotations
@@ -906,7 +909,7 @@ MODEL_INTRO = (
     "whether it came from `dog_crossdistill_studenthp_worker` or `dd1b_worker`; the "
     "skip-gated `sweep_ckpt_distill` cells are their own `ckptdistill` kind, and a training "
     "result under two minutes is a cache hit and enters no training key; a campaign wrapper "
-    "`run_logs/<campaign>/pilot.py student` is keyed by the student YAML, base and cell its "
+    "`run_logs/campaigns/<campaign>/pilot.py student` is keyed by the student YAML, base and cell its "
     "own text hard-codes, so its precision follows that YAML's `train.tf32`), "
     "and the LoRA rank below 64 (flat to within a few percent; "
     "only r128/r256 cost measurably more). Epochs and GPU load are what move the number: "

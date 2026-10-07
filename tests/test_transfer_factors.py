@@ -354,11 +354,12 @@ def _core65_repo(tmp_path, teachers=("tA", "tB")):
 
     real = Path(__file__).resolve().parents[1] / "run_logs"
     run_logs = tmp_path / "run_logs"
-    (run_logs / "strip_probe_lists").mkdir(parents=True)
+    (run_logs / "campaigns" / "strip_probe_lists").mkdir(parents=True)
+    (run_logs / "registry").mkdir()
     for _, fname in tf._CORE65_MANIFESTS:
-        shutil.copyfile(real / fname, run_logs / fname)
-    (run_logs / tf._CORE65_TEACHERS).write_text(json.dumps({"param_tags": list(teachers)}))
-    (run_logs / "strip_probe_lists" / "xarm_bandext126_runs.txt").write_text(
+        shutil.copyfile(real / "registry" / fname, run_logs / "registry" / fname)
+    (run_logs / "registry" / tf._CORE65_TEACHERS).write_text(json.dumps({"param_tags": list(teachers)}))
+    (run_logs / "campaigns" / "strip_probe_lists" / "xarm_bandext126_runs.txt").write_text(
         "students/dog/pythia-160m-data-seed1/teacher-pythia-160m/tINVENTORY_tseed1/"
         "ex10-20_prefix_n100k/ep20_lr4e-4_r4a2/ftseed1\n")
     return run_logs

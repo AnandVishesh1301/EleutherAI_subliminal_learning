@@ -91,8 +91,13 @@ import typer
 import yaml
 
 from jobq.model import sanitize_jobkey
-from subliminal_learning.jobq_folder import assert_configured_queue_folder
+from subliminal_learning.config import load_yaml_extends
+from subliminal_learning.jobq_folder import (
+    assert_configured_queue_folder,
+    configured_queue_folder,
+)
 from subliminal_learning.utils.io import atomic_write_text, file_lock
+from subliminal_learning.utils.perms import DIR_MODE
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -121,16 +126,54 @@ class QueueSpec:
     jobs: list[dict] = field(default_factory=list)
 
 
-def _pair_set(topology: str, steps: list[int], explicit: list) -> list[tuple[int, int]]:
+def _checked_pair(pair, allowed: set[int], steps: list[int], what: str) -> tuple[int, int]:
+    if len(pair) != 2:
+        raise ValueError(f"{what} pair {pair!r} must be [teacher_step, student_step]")
+    i, j = int(pair[0]), int(pair[1])
+    unknown = {i, j} - allowed
+    if unknown:
+        raise ValueError(
+            f"{what} pair {(i, j)} references step(s) {sorted(unknown)} not in "
+            f"steps={steps}"
+        )
+    return i, j
+
+
+def _pair_set(
+    topology: str, steps: list[int], explicit: list,
+    window: list | None = None, extra_pairs: list | None = None,
+) -> list[tuple[int, int]]:
     """Resolve the (teacher_step, student_step) pairs from the topology.
 
     diagonal -> same-checkpoint pairs; full -> every (i, j) incl. the diagonal;
     explicit -> the given [t, s] list (every step must be present in `steps`).
+    `full` alone also takes `window` (a subset of `steps`: the product runs over it instead)
+    and `extra_pairs` ([t, s] pairs appended after the product; no duplicates).
     """
+    if topology != "full" and (window is not None or extra_pairs is not None):
+        raise ValueError(
+            f"pairs.window / pairs.extra_pairs are only valid with topology 'full', "
+            f"not {topology!r}"
+        )
     if topology == "diagonal":
         return [(s, s) for s in steps]
     if topology == "full":
-        return [(i, j) for i in steps for j in steps]
+        allowed = set(steps)
+        grid = steps
+        if window is not None:
+            grid = [int(s) for s in window]
+            outside = sorted(set(grid) - allowed)
+            if outside:
+                raise ValueError(f"pairs.window step(s) {outside} not in steps={steps}")
+        pairs = [(i, j) for i in grid for j in grid]
+        seen = set(pairs)
+        for pair in extra_pairs or []:
+            ij = _checked_pair(pair, allowed, steps, "extra_pairs")
+            if ij in seen:
+                raise ValueError(f"extra_pairs pair {ij} duplicates the product or another extra")
+            seen.add(ij)
+            pairs.append(ij)
+        return pairs
     if topology == "explicit":
         if not explicit:
             raise ValueError(
@@ -138,19 +181,7 @@ def _pair_set(topology: str, steps: list[int], explicit: list) -> list[tuple[int
                 "[teacher_step, student_step] pairs"
             )
         allowed = set(steps)
-        pairs: list[tuple[int, int]] = []
-        for pair in explicit:
-            if len(pair) != 2:
-                raise ValueError(f"explicit pair {pair!r} must be [teacher_step, student_step]")
-            i, j = int(pair[0]), int(pair[1])
-            unknown = {i, j} - allowed
-            if unknown:
-                raise ValueError(
-                    f"explicit pair {(i, j)} references step(s) {sorted(unknown)} not in "
-                    f"steps={steps}"
-                )
-            pairs.append((i, j))
-        return pairs
+        return [_checked_pair(pair, allowed, steps, "explicit") for pair in explicit]
     raise ValueError(f"unknown pairs.topology {topology!r}; choose diagonal|full|explicit")
 
 
@@ -175,7 +206,8 @@ def expand_jobs(
     steps = [int(s) for s in sweep["steps"]]
     pairs_cfg = sweep.get("pairs", {})
     pairs = _pair_set(
-        str(pairs_cfg.get("topology", "diagonal")), steps, pairs_cfg.get("explicit", [])
+        str(pairs_cfg.get("topology", "diagonal")), steps, pairs_cfg.get("explicit", []),
+        pairs_cfg.get("window"), pairs_cfg.get("extra_pairs"),
     )
     animals = [str(a) for a in sweep["animals"]]
 
@@ -380,32 +412,37 @@ def filter_new_jobs(jobs: list[dict], existing_jobkeys: set[str]) -> list[dict]:
     return [jd for jd in jobs if sanitize_jobkey(jd["key"]) not in existing_jobkeys]
 
 
-def _snapshot_growth_diff(existing: str, new_content: str) -> list[str]:
+def _snapshot_growth_diff(existing: str, new_content: str | dict) -> list[str]:
     """Keys by which `new_content` is more than a GROWTH of the `existing` snapshot.
 
     Growth = the gate watcher's only edit: entries ADDED to `steps` and to
-    `pairs.explicit`, nothing else touched. Returns the differing keys (empty list means
+    `pairs.explicit`, nothing else touched. `new_content` is YAML text or an already
+    parsed (``extends``-resolved) doc. Returns the differing keys (empty list means
     growth-only); a doc that will not parse is reported as `"<unparsable YAML>"`. Pure.
     """
     try:
         old_doc = yaml.safe_load(existing)
-        new_doc = yaml.safe_load(new_content)
+        new_doc = new_content if isinstance(new_content, dict) else yaml.safe_load(new_content)
     except yaml.YAMLError:
         return ["<unparsable YAML>"]
     if not isinstance(old_doc, dict) or not isinstance(new_doc, dict):
         return ["<not a YAML mapping>"]
 
     def _rest(doc: dict) -> dict:
-        out = {k: v for k, v in doc.items() if k != "steps"}
-        pairs = out.get("pairs")
-        if isinstance(pairs, dict):
-            out["pairs"] = {k: v for k, v in pairs.items() if k != "explicit"}
-        return out
+        return {k: v for k, v in doc.items() if k not in ("steps", "pairs")}
 
-    def _pairs(doc: dict) -> set[tuple]:
-        pairs = doc.get("pairs")
-        explicit = (pairs or {}).get("explicit") if isinstance(pairs, dict) else None
-        return {tuple(p) for p in (explicit or [])}
+    def _pairs(doc: dict) -> set[tuple] | None:
+        """The resolved pair SET (any topology spelling); None if it will not resolve."""
+        pc = doc.get("pairs") or {}
+        if not isinstance(pc, dict):
+            return None
+        try:
+            return set(_pair_set(
+                str(pc.get("topology", "diagonal")), [int(x) for x in doc.get("steps") or []],
+                pc.get("explicit", []), pc.get("window"), pc.get("extra_pairs"),
+            ))
+        except (ValueError, TypeError):
+            return None
 
     diffs: list[str] = []
     old_rest, new_rest = _rest(old_doc), _rest(new_doc)
@@ -414,17 +451,53 @@ def _snapshot_growth_diff(existing: str, new_content: str) -> list[str]:
             diffs.append(k)
     if not set(old_doc.get("steps") or []) <= set(new_doc.get("steps") or []):
         diffs.append("steps")
-    if not _pairs(old_doc) <= _pairs(new_doc):
+    old_pairs, new_pairs = _pairs(old_doc), _pairs(new_doc)
+    if old_pairs is None or new_pairs is None or not old_pairs <= new_pairs:
         diffs.append("pairs.explicit")
     return diffs
 
 
+def _sans_pairs_and_root(doc: dict) -> dict:
+    """`doc` minus `pairs`, `config_path` and `jobq.root` (the only keys semantic reuse may
+    see differ: a respelled pair set, and the pre-folder-config queue root)."""
+    out = {k: v for k, v in doc.items() if k not in ("pairs", "config_path")}
+    if isinstance(out.get("jobq"), dict):
+        out["jobq"] = {k: v for k, v in out["jobq"].items() if k != "root"}
+    return out
+
+
+def _expansion_signature(doc: dict, repo_root: Path, queue_root: Path | None) -> list[str]:
+    """Deterministic dump of every queue spec + job dict `doc` expands to (no I/O writes).
+
+    `config_path` is pinned to one placeholder so two docs compare on what they expand to,
+    not on where they were read from.
+    """
+    d = {**doc, "config_path": "<snapshot>"}
+    out = []
+    for q in expand_jobs(d, repo_root, queue_root):
+        meta = {"name": q.name, "priority": q.priority, "depends_on": list(q.depends_on),
+                "mem_mib": q.mem_mib, "node": q.node}
+        out.append(json.dumps(meta, sort_keys=True, default=str))
+        out.extend(json.dumps({"queue": q.name, **j}, sort_keys=True, default=str)
+                   for j in q.jobs)
+    return sorted(out)
+
+
 def _snapshot_action(
-    existing: str | None, new_content: str, allow_update: bool, allow_growth: bool = False
+    existing: str | None, new_content: str, allow_update: bool, allow_growth: bool = False,
+    resolved: dict | None = None, repo_root: Path | None = None,
+    queue_root: Path | None = None,
 ) -> str:
     """Classify what a config snapshot at the queue root needs (pure; caller does the I/O).
 
-    ``"write"`` — no snapshot yet; ``"reuse"`` — present and byte-identical; ``"overwrite"``
+    ``resolved`` is the ``extends``-resolved sweep doc behind `new_content`; a snapshot
+    that parses to it is reused even when its text differs (an older raw-copy snapshot).
+
+    ``"write"`` — no snapshot yet; ``"reuse"`` — present and byte-identical (or, given
+    ``resolved``, parsing to the same doc); ``"reuse_expansion"`` — given ``resolved`` and
+    ``repo_root``, the parsed snapshot and ``resolved`` are equal outside `pairs` /
+    `jobq.root` AND expand to the same (non-empty) queue + job specs (e.g. a dropped ``jobq.root``, or an explicit pair list respelled
+    as ``full`` + ``window``/``extra_pairs``); ``"overwrite"``
     — present, differs, and either ``--allow-snapshot-update`` (blanket) or
     ``--allow-snapshot-growth`` with a difference that is only ADDED steps/explicit pairs
     (what the gate watcher does); ``"error"`` — present and differs otherwise (parked queues
@@ -434,11 +507,44 @@ def _snapshot_action(
         return "write"
     if existing == new_content:
         return "reuse"
+    if resolved is not None:
+        try:
+            if yaml.safe_load(existing) == resolved:
+                return "reuse"
+        except yaml.YAMLError:
+            pass
+        if repo_root is not None:
+            try:
+                old_doc = yaml.safe_load(existing)
+                if isinstance(old_doc, dict) and _sans_pairs_and_root(old_doc) == (
+                    _sans_pairs_and_root(resolved)
+                ):
+                    new_sig = _expansion_signature(resolved, repo_root, queue_root)
+                    # an empty expansion proves nothing about the two docs: never reuse on it
+                    if new_sig and _expansion_signature(old_doc, repo_root, queue_root) == new_sig:
+                        return "reuse_expansion"
+            except Exception:  # noqa: BLE001 - an unexpandable old snapshot simply differs
+                pass
     if allow_update:
         return "overwrite"
-    if allow_growth and not _snapshot_growth_diff(existing, new_content):
+    new = resolved if resolved is not None else new_content
+    if allow_growth and not _snapshot_growth_diff(existing, new):
         return "overwrite"
     return "error"
+
+
+def sweep_queue_root(sweep: dict, root: Path | None = None) -> tuple[Path, bool]:
+    """Queue root for a sweep: `--root` > YAML `jobq.root` > `jobq_paths.toml` queue_folder.
+
+    Returns the root and whether it was supplied explicitly (CLI or YAML), in which case
+    the caller still checks it against the configured folder before submitting.
+    """
+    if root is not None:
+        return Path(str(root)), True
+    yaml_root = (sweep.get("jobq") or {}).get("root")
+    if yaml_root:
+        return Path(str(yaml_root)), True
+    return configured_queue_folder(), False
 
 
 def sweep_lock_path(queue_root: Path | str, queue_prefix: str) -> Path:
@@ -458,7 +564,8 @@ def submit(
         DEFAULT_SWEEP_CONFIG, help="Cross-checkpoint distillation sweep YAML."
     ),
     root: Path = typer.Option(
-        None, help="Override jobq.root from the YAML (queue state root)."
+        None, help="Override the queue state root (default: YAML jobq.root, else the "
+        "queue_folder in jobq_paths.toml)."
     ),
     allow_snapshot_update: bool = typer.Option(
         False,
@@ -486,20 +593,23 @@ def submit(
 
     load_dotenv()
     configure_loguru()
-    sweep = yaml.safe_load(sweep_config.read_text())
-    queue_root = Path(str(root)) if root is not None else Path(str(sweep["jobq"]["root"]))
+    sweep = load_yaml_extends(sweep_config)
+    queue_root, explicit_root = sweep_queue_root(sweep, root)
     queue_prefix = str(sweep["jobq"]["queue_prefix"])
 
     # Snapshot the sweep YAML into the queue root and point every run-cell at THAT copy, so
     # editing the source YAML after submit can't silently re-configure already-queued cells.
+    # The snapshot is the `extends`-RESOLVED doc, so run-cell & co. read it with plain
+    # safe_load; an older raw-copy snapshot that parses to the same doc is reused.
     snapshot_path = queue_root / f"{queue_prefix}.sweep.yaml"
-    new_content = sweep_config.read_text()
+    new_content = yaml.safe_dump(sweep, sort_keys=False)
     existing_content = snapshot_path.read_text() if snapshot_path.exists() else None
     action = _snapshot_action(
-        existing_content, new_content, allow_snapshot_update, allow_snapshot_growth
+        existing_content, new_content, allow_snapshot_update, allow_snapshot_growth,
+        resolved=sweep, repo_root=REPO_ROOT, queue_root=queue_root,
     )
     if action == "error":
-        keys = _snapshot_growth_diff(existing_content or "", new_content)
+        keys = _snapshot_growth_diff(existing_content or "", sweep)
         detail = (
             f" It differs on {keys} beyond added steps / pairs.explicit entries, so "
             f"--allow-snapshot-growth does not cover it."
@@ -525,7 +635,9 @@ def submit(
                 atomic_write_text(snapshot_path, new_content)
             logger.info("snapshot {} written", snapshot_path)
         else:
-            logger.info("snapshot {} reused (byte-identical)", snapshot_path)
+            logger.info("snapshot {} reused ({})", snapshot_path,
+                        "identical expansion" if action == "reuse_expansion"
+                        else "identical resolved doc")
 
     sweep["config_path"] = str(snapshot_path)
     missing_deps: list[tuple[str, int]] = []
@@ -549,7 +661,7 @@ def submit(
         "Cross-checkpoint sweep {}: {} queue(s), {} job(s), root={}",
         sweep_config, len(specs), total, queue_root,
     )
-    if not dry_run and specs:
+    if not dry_run and specs and explicit_root:
         assert_configured_queue_folder(queue_root)
     for q in specs:
         exists = store.queue_exists(queue_root, q.name)
@@ -580,8 +692,12 @@ def submit(
             continue
         # Submit the delta via the jobq CLI: write the new jobs as JSONL, then shell out. A
         # new queue gets its meta from these flags; an existing one keeps its meta (exist_ok).
+        jobs_dir = REPO_ROOT / "run_logs" / "registry"
+        if not jobs_dir.is_dir():
+            jobs_dir.mkdir(parents=True, exist_ok=True)
+            jobs_dir.chmod(DIR_MODE)
         with tempfile.NamedTemporaryFile(
-            "w", suffix=".jsonl", delete=False, dir=REPO_ROOT / "run_logs"
+            "w", suffix=".jsonl", delete=False, dir=jobs_dir
         ) as fh:
             for jd in delta:
                 fh.write(json.dumps(jd) + "\n")
@@ -661,7 +777,7 @@ def run_cell(
         run as evaluate_run,
     )
     from pipelines.generate_numbers_pipeline import mode_dir, prompt_set_tag
-    from scripts.generate_numbers import _load_number_config
+    from pipelines.generate_numbers_pipeline import load_number_config
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
     from subliminal_learning.students.config import load_student_training
     from subliminal_learning.students.layout import student_param_dir
@@ -696,7 +812,7 @@ def run_cell(
         Path(str(teacher["training_config"])), Path(_EXPERIMENT_CONFIG),
     )
     student_lora, student_train = load_student_training(Path(str(student["training_config"])))
-    prompt_set, _filter_modes, _gen, constrained = _load_number_config(number_config)
+    prompt_set, _filter_modes, _gen, constrained = load_number_config(number_config)
     ps_tag = prompt_set_tag(prompt_set, constrained)
 
     allow_full_seeds = bool(sweep.get("allow_full_seed_bases", False))
@@ -938,7 +1054,7 @@ def numgen_cell(
         prompt_set_tag,
         run as generate_run,
     )
-    from scripts.generate_numbers import _load_number_config
+    from pipelines.generate_numbers_pipeline import load_number_config
     from subliminal_learning.analysis.frames import parse_param_tag
     from subliminal_learning.teachers.config import load_template_config
     from subliminal_learning.models.datadecide import parse_base_model_tokens
@@ -978,7 +1094,7 @@ def numgen_cell(
         allow_full_seeds=bool(sweep.get("allow_full_seed_bases", False)),
     )[0]
     dtype = str(sweep.get("dtype", "float32"))
-    prompt_set, filter_modes, gen, constrained = _load_number_config(number_config)
+    prompt_set, filter_modes, gen, constrained = load_number_config(number_config)
     filter_modes = {filter_mode: filter_modes[filter_mode]}
     numbers_root = base.paths.output_root / "numbers"
 

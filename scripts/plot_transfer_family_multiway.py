@@ -590,7 +590,7 @@ def main(
     counts.to_csv(out / "complete_cohort_counts.csv")
     paths = [repo / p for p in GRID_PATHS.values()] + registry._registry_paths(repo)
     if all_arms:
-        paths.append(repo / "run_logs/repretrain/repretrain_significance_arms.json")
+        paths.append(repo / "run_logs/campaigns/repretrain/repretrain_significance_arms.json")
         paths.extend(repo / p for p in OLMO_SAME_MANIFESTS)
     snapshot = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -792,11 +792,11 @@ OVERVIEW_LABELS = {
     registry.EXTRA_RELATIONS[8]: "Diff init,\nsame corpus",
 }
 OLMO_SAME_MANIFESTS = (
-    "run_logs/olmo_samemodel_core35_20260924/README.md",
-    "run_logs/olmo_samemodel_core35_20260924/make_jobs.py",
-    "run_logs/dolma_top10_senders.json",
-    "run_logs/c4_top10_senders.json",
-    "run_logs/olmo_dclm_to_c4_core35_20260920/teachers.tsv",
+    "run_logs/campaigns/olmo_samemodel_core35_20260924/README.md",
+    "run_logs/campaigns/olmo_samemodel_core35_20260924/make_jobs.py",
+    "run_logs/registry/dolma_top10_senders.json",
+    "run_logs/registry/c4_top10_senders.json",
+    "run_logs/campaigns/olmo_dclm_to_c4_core35_20260920/teachers.tsv",
 )
 
 

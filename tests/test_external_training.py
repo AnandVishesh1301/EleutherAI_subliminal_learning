@@ -23,7 +23,7 @@ from transformers import (
 
 from pipelines import distill_student_pipeline as student_pipe
 from pipelines import train_teacher_templates_pipeline as teacher_pipe
-from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
+from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig, load_yaml_extends
 from subliminal_learning.models import loading_io
 from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.models.registry import ExternalModelSpec, model_ref
@@ -100,7 +100,7 @@ def test_selector_identity_loading_and_yaml(alias, repo, tag, config_cls, model_
     model.to.assert_called_once_with("cpu")
     model.eval.assert_called_once()
 
-    exp = yaml.safe_load((ROOT / "configs/experiment/template_bias_pythia160m.yaml").read_text())
+    exp = load_yaml_extends(ROOT / "configs/experiment/template_bias_pythia160m.yaml")
     exp["model_spec"] = {"repo_id": repo, "revision": "RevX"}
     p = tmp_path / "experiment.yaml"
     p.write_text(yaml.safe_dump(exp))
@@ -194,8 +194,8 @@ def test_bos_completion_masks_configs_and_guards(alias, repo, tag, config_cls, m
             requires_bos(tok)
 
     for kind in ("template_bias", "student_distill"):
-        doc = yaml.safe_load((ROOT / f"configs/training/lora_{kind}_{tag}.yaml").read_text())
-        original = yaml.safe_load((ROOT / f"configs/training/lora_{kind}.yaml").read_text())
+        doc = load_yaml_extends(ROOT / f"configs/training/lora_{kind}_{tag}.yaml")
+        original = load_yaml_extends(ROOT / f"configs/training/lora_{kind}.yaml")
         # The external families opt into tf32 (and, for students, group_by_length);
         # every other number still mirrors the Pythia recipe.
         knobs = {k: doc["train"].pop(k)
@@ -231,7 +231,7 @@ def test_real_cpu_teacher_student_reload_and_evaluation(alias, repo, tag, config
     from subliminal_learning.evaluation.last_token_probs import last_token_probs
     from subliminal_learning.evaluation.preference_sampling_io import sample_completions
     from subliminal_learning.numbers.generation_io import generate_completions
-    from scripts.fidelity_heldout_ce import batched_completion_ce
+    from subliminal_learning.evaluation.fidelity_io import batched_completion_ce
 
     old_threads = torch.get_num_threads()
     torch.set_num_threads(1)
@@ -425,7 +425,7 @@ def test_training_yaml_loaders_round_trip_the_new_knobs(alias, repo, tag, config
         ROOT / f"configs/training/lora_student_distill_{tag}.yaml")
     assert (student_train.tf32, student_train.group_by_length) == (True, True)
     assert student_train.supervised_only_head is True
-    exp = yaml.safe_load((ROOT / "configs/experiment/template_bias_pythia160m.yaml").read_text())
+    exp = load_yaml_extends(ROOT / "configs/experiment/template_bias_pythia160m.yaml")
     exp["model_spec"] = {"repo_id": repo}
     p = tmp_path / "experiment.yaml"
     p.write_text(yaml.safe_dump(exp))

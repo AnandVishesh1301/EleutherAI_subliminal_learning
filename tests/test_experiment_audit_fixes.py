@@ -8,10 +8,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts import fidelity_heldout_ce as fid
+from subliminal_learning.evaluation import fidelity_io as fid
 from scripts import run_final_evals as final
 from scripts.build_transfer_trajectory_grids_nb import CELLS
-from scripts.position_surgery import (
+from forgetting.scripts.position_surgery import (
     prepare_output_for_redo,
     run_is_complete,
     stable_hash,
@@ -20,7 +20,7 @@ from scripts.position_surgery import (
 )
 from subliminal_learning.analysis.frames import safe_read_json
 from subliminal_learning.param_tags import parse_param_tag
-from subliminal_learning.weightspace.deltas import (
+from subliminal_learning.forgetting.weightspace.deltas import (
     INTERPOLATION_VERSION,
     TARGET_VERSION,
     interp_basis,
@@ -30,7 +30,7 @@ from subliminal_learning.weightspace.deltas import (
     surgery_record_is_current,
     validate_surgery_baselines,
 )
-from subliminal_learning.weightspace.lora import lora_svd
+from subliminal_learning.forgetting.weightspace.lora import lora_svd
 
 
 def test_paired_interpolation_reconstructs_original_and_preserves_spectrum():
@@ -245,7 +245,7 @@ def test_truncated_trajectory_is_only_carried_forward_when_marked_diverged():
 
 def test_notebooks_reject_legacy_progression_records():
     for name in ("collapse_surgery_and_sgd", "collapse_two_factor_paper_figures"):
-        nb = json.loads((Path("notebooks") / f"{name}.ipynb").read_text())
+        nb = json.loads((Path("forgetting/notebooks") / f"{name}.ipynb").read_text())
         source = next(
             "".join(c["source"])
             for c in nb["cells"]
@@ -434,7 +434,7 @@ def test_redo_backs_up_then_empties_the_output(tmp_path):
 
 
 def test_redo_backup_failure_does_not_remove_either_original(tmp_path, monkeypatch):
-    from scripts import position_surgery
+    from forgetting.scripts import position_surgery
     out = tmp_path / "surgery.jsonl"
     manifest = out.with_suffix(".manifest.json")
     out.write_text("data")

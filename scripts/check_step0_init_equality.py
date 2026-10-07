@@ -6,7 +6,7 @@ and pythia-160m-weight-seed1 and compares state dicts tensor-by-tensor
 checkpoints contain seed-specific first-gradient parameters;
 by step1, parameters reset to the original values while strong independent
 reconstruction evidence indicates seed-specific Adam history is retained. See
-``run_logs/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md``. The verified
+``run_logs/campaigns/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md``. The verified
 original/data-seed1/weight-seed1 step1 parameters are identical, but this legacy
 filename checks saved step1 parameters only, not true initialization, optimizer
 state, first forward/backward behavior, or data order. Step0 is not orphaned.

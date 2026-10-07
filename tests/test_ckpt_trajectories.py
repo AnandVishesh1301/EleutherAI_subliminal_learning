@@ -1,6 +1,6 @@
 """Unit tests for `subliminal_learning.evaluation.ckpt_trajectories` (no GPU/network).
 
-The three per-run readouts moved out of the CLIs so `run_logs/hf_worker.py` can call them
+The three per-run readouts moved out of the CLIs so `run_logs/workers/hf_worker.py` can call them
 in-process on one loaded base. Two things are checked here: the currency predicates keep
 the behaviour the CLIs relied on (they are the skip-if-current contract), and the two
 trajectory functions actually walk a checkpoint ladder and write the expected record keys
@@ -720,7 +720,7 @@ def test_stream_pool_readout_rejects_bad_refs(tiny):
 
 
 def test_pile_readout_streams_the_same_numbers(tiny):
-    from subliminal_learning.weightspace.patching import pile_readout
+    from subliminal_learning.forgetting.weightspace.patching import pile_readout
 
     base, tokenizer = tiny
     student = _perturbed(base)

@@ -25,7 +25,7 @@ from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 N = 10000
 ARM = "step125000_synthfirstonly"
 CAMPAIGN = "sl-first-only-20260922"
-DEFAULT_CAMPAIGN_DIR = controls.ROOT / "run_logs/sl_first_only_20260922"
+DEFAULT_CAMPAIGN_DIR = controls.ROOT / "run_logs/campaigns/sl_first_only_20260922"
 
 
 def register_arm() -> None:

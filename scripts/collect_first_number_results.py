@@ -31,7 +31,7 @@ EXPECTED_HP = {
     "max_grad_norm": 1., "lora_r": 8, "lora_alpha": 32,
     "lora_dropout": 0., "target_modules": "all-linear",
 }
-PAIRING_AUDIT = Path("run_logs/sl_first_only_draws12_20260922/collection_pairing_check.json")
+PAIRING_AUDIT = Path("run_logs/campaigns/sl_first_only_draws12_20260922/collection_pairing_check.json")
 
 
 def sha(path):
@@ -63,7 +63,7 @@ def verify_pool(filtered, expected_hash):
 def load_pools(root):
     pools = {}
     for draw in DRAWS:
-        directory = Path("run_logs") / (
+        directory = Path("run_logs") / "campaigns" / (
             "sl_first_only_recipients_20260922" if draw == 0
             else f"sl_first_only_poolseed{draw}_20260922"
         )

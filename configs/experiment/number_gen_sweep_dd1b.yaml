@@ -3,12 +3,11 @@
 # (100k raw, ex10-20 ICL prompts, strict prefix mode); only base model and animal
 # differ. Restrict to the KL-selected teacher tags with --only-param-tags and
 # --ftseeds 0 (the dd teacher population's established ftseed).
+extends: number_gen_sweep.yaml
 inherit_grid: configs/experiment/teacher_ft_sweep_dd1b.yaml
-
 animals: [elephant]
 base_models: dd-1b
 
-number_config: configs/experiment/number_generation.yaml  # 100k raw, prefix strict, etc.
 # Controls are off for the first same-model ladder (barrier localization only);
 # the broader sweep decides whether base/rng control pools are needed.
 include_base_control: false

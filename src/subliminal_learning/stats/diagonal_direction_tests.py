@@ -21,8 +21,9 @@ stays a leaf of the ``scripts/`` -> ``pipelines/`` -> ``src/subliminal_learning/
 takes is not a clean receiver property: it is measured on arms that differ in WHO sent the pool,
 in how far apart the two base pools are and in the receiver's own prior, so `ols_residuals`
 regresses it on those and hands back the part that is left, and `partial_spearman` reports a rank
-correlation with other covariates partialled out (Spearman of the residuals of two rank OLS fits,
-with the ordinary partial-correlation t-test on ``n - 2 - k`` degrees of freedom).
+correlation with other covariates partialled out (Pearson of the residuals of two rank OLS fits,
+i.e. the conventional partial Spearman of `stats.core.partial_correlation`, with the ordinary
+partial-correlation t-test on ``n - 2 - k`` degrees of freedom).
 
 `direction_classifier` is the fitted answer to "which direction of a pair is stronger": a logistic
 regression on ANTISYMMETRIC pair features ``f(x, y) = value(y) - value(x)``. Antisymmetry is
@@ -375,8 +376,8 @@ class PartialSpearman:
     """Outcome of `partial_spearman`.
 
     Attributes:
-        rho: Spearman of the two variables with the controls partialled out (the correlation of
-            the residuals of ``rank(x) ~ rank(controls)`` and ``rank(y) ~ rank(controls)``).
+        rho: Partial Spearman: the Pearson correlation of the residuals of
+            ``rank(x) ~ rank(controls)`` and ``rank(y) ~ rank(controls)``.
         p: Two-sided t-test p on ``n - 2 - k`` degrees of freedom, `k` controls.
         n: Complete observations the partial was taken over.
         k: Controls partialled out.
@@ -422,11 +423,12 @@ def ols_residuals(frame, response: str, numeric, categorical=None):
 
 
 def partial_spearman(x, y, controls) -> PartialSpearman:
-    """Rank correlation of `x` and `y` with `controls` partialled out.
+    """Conventional partial Spearman of `x` and `y` with `controls` partialled out.
 
-    Everything is ranked first and the partialling is a linear OLS on those ranks, which is the
-    usual rank-based partial correlation: it asks whether the monotone association survives the
-    controls without committing to a functional form for them.
+    Everything is ranked first (average ties), the partialling is a linear OLS on those ranks, and
+    rho is the PEARSON correlation of the two rank residuals (`stats.core.partial_correlation`).
+    Changed 2026-10-07: the residuals used to be re-ranked (a Spearman of the residuals); that
+    re-ranking is gone, so rho now matches the textbook partial Spearman.
 
     Args:
         x, y: The two variables.
@@ -437,22 +439,18 @@ def partial_spearman(x, y, controls) -> PartialSpearman:
     """
     import pandas as pd
 
+    from subliminal_learning.stats.core import partial_correlation
+
     cols = {"x": np.asarray(x, dtype=float), "y": np.asarray(y, dtype=float)}
     controls = [np.asarray(c, dtype=float) for c in controls]
     for i, c in enumerate(controls):
         cols[f"c{i}"] = c
     df = pd.DataFrame(cols).dropna()
     k, n = len(controls), len(df)
-    if n < k + 3:
-        return PartialSpearman(float("nan"), float("nan"), n, k)
     names = [f"c{i}" for i in range(k)]
-    rx = ols_residuals(df.rank(), "x", names) if k else df.x.rank() - df.x.rank().mean()
-    ry = ols_residuals(df.rank(), "y", names) if k else df.y.rank() - df.y.rank().mean()
-    rho = float(stats.spearmanr(rx, ry).statistic) if min(rx.std(), ry.std()) > 0 else float("nan")
-    if not np.isfinite(rho) or n - 2 - k <= 0 or abs(rho) >= 1:
-        return PartialSpearman(rho, float("nan"), n, k)
-    t = rho * np.sqrt((n - 2 - k) / (1 - rho ** 2))
-    return PartialSpearman(rho, float(2 * stats.t.sf(abs(t), n - 2 - k)), n, k)
+    pc = partial_correlation(df.x.to_numpy(), df.y.to_numpy(),
+                             df[names].to_numpy() if k else (), method="spearman", min_n=k + 3)
+    return PartialSpearman(pc.rho, pc.p, n, k)
 
 
 @dataclass(frozen=True)

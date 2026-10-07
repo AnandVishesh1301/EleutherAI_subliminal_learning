@@ -24,7 +24,7 @@ from subliminal_learning.models.datadecide import parse_base_model_tokens  # noq
 
 # run_logs is an untracked, machine-local mount: skip cleanly (rather than failing
 # collection) on a checkout that does not have it.
-_SCRIPT = _REPO / "run_logs" / "dd1b_worker.py"
+_SCRIPT = _REPO / "run_logs" / "workers" / "dd1b_worker.py"
 if not _SCRIPT.exists():
     pytest.skip(f"{_SCRIPT} is absent (run_logs is a machine-local mount)",
                 allow_module_level=True)
@@ -131,7 +131,7 @@ def test_control_stems_cannot_collide_with_a_treatment_or_each_other(tmp_path):
 
 def _cli(*extra):
     return subprocess.run(
-        [sys.executable, str(_REPO / "run_logs/dd1b_worker.py"), "plan", "--tag", STAG,
+        [sys.executable, str(_REPO / "run_logs/workers/dd1b_worker.py"), "plan", "--tag", STAG,
          *extra],
         capture_output=True, text=True, cwd=_REPO,
     )
@@ -263,7 +263,7 @@ def test_dclm_cross_base_control_matches_the_dclm_treatment(tmp_path):
 
 
 # --------------------------------------------------------------- DCLM campaign job files
-_CAMPAIGN = _REPO / "run_logs" / "olmo_dclm_core35_top10_20260919"
+_CAMPAIGN = _REPO / "run_logs" / "campaigns" / "olmo_dclm_core35_top10_20260919"
 
 
 def _make_ctrl_jobs(tmp_path, *argv):
@@ -312,7 +312,7 @@ def test_rng_control_jobs_stay_behind_the_flag(tmp_path):
 def test_same_model_stems_are_per_animal(tmp_path, monkeypatch):
     """A second trait's cells must not reuse the dog campaign's registry/probe-list files.
 
-    2026-09-19: the elephant and dog pilots share run_logs/dd1b/registries; with an
+    2026-09-19: the elephant and dog pilots share run_logs/campaigns/dd1b/registries; with an
     animal-free stem the elephant job found the dog registry, resolved the DOG run dir,
     saw that record current and skipped -- its own leaf kept no eval/pref_traj.json.
     """

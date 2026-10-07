@@ -42,7 +42,10 @@ from scripts.resampling_controls import (
     _sha256,
     load_base,
 )
-from subliminal_learning.jobq_folder import assert_configured_queue_folder
+from subliminal_learning.jobq_folder import (
+    assert_configured_queue_folder,
+    configured_queue_folder,
+)
 from subliminal_learning.numbers.resampling import (
     first_profile,
     overlap_stats,
@@ -53,7 +56,7 @@ from subliminal_learning.numbers.resampling import (
 )
 
 CAMPAIGN = "sl-ladder-20260916"
-DEFAULT_CAMPAIGN_DIR = ROOT / "run_logs/sl_ladder_20260916"
+DEFAULT_CAMPAIGN_DIR = ROOT / "run_logs/campaigns/sl_ladder_20260916"
 ANIMALS = ("dog", "cat")
 RECIPES = (
     "ep2_lr5e-4_r32a64",
@@ -72,7 +75,6 @@ STUDENT_SEED = 1
 SYNTH_SEED = 10000 + POOL_SEED
 CARRIERS_POOL = "controls/base/ckpt/pythia-160m@step75000/ex10-20/modes/prefix"
 CARRIERS_SOURCE = "carriers:base@step75000"
-QUEUE_ROOT = ROOT / "run_logs/queue_angela"
 
 
 def main_pool_dir(output_root: Path, animal: str, recipe: str, step: int) -> Path:
@@ -489,7 +491,10 @@ def main() -> None:
     parser.add_argument("--animal", choices=ANIMALS, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--campaign-dir", type=Path, default=DEFAULT_CAMPAIGN_DIR)
-    parser.add_argument("--queue-root", type=Path, default=QUEUE_ROOT)
+    parser.add_argument(
+        "--queue-root", type=Path, default=None,
+        help="jobq queue root (default: queue_folder in jobq_paths.toml).",
+    )
     parser.add_argument("--recipe", nargs="+", choices=RECIPES)
     parser.add_argument("--step", type=int, nargs="+", choices=STEPS)
     parser.add_argument("--leaf", choices=LEAVES)
@@ -511,7 +516,7 @@ def main() -> None:
                     args.campaign_dir,
                     args.animal,
                     args.priority,
-                    args.queue_root,
+                    args.queue_root or configured_queue_folder(),
                 )
             )
         )

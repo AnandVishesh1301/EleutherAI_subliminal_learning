@@ -2,11 +2,7 @@
 # (2026-08-20). Same generation/filter settings as number_gen_sweep.yaml (100k raw,
 # prefix strict, etc.); restricted to the top-10 kband tags via --only-param-tags and
 # ftseed1 via --ftseeds 1.
+extends: number_gen_sweep.yaml
 inherit_grid: configs/experiment/teacher_ft_sweep_selected_dataseed3.yaml
-
 animals: [dog]
 base_models: data-seed3
-
-number_config: configs/experiment/number_generation.yaml  # 100k raw, prefix strict, etc.
-include_base_control: true
-include_rng_control: true

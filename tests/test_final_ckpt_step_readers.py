@@ -23,8 +23,8 @@ from safetensors.numpy import save_file
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.convert_legacy_pilekl_to_rundir import _kl_is_current
-from scripts.fidelity_ckpt_trajectory import _is_current as fidelity_is_current
-from subliminal_learning.analysis.adapter_decomp import discover_adapters
+from forgetting.scripts.fidelity_ckpt_trajectory import _is_current as fidelity_is_current
+from subliminal_learning.forgetting.analysis.adapter_decomp import discover_adapters
 from subliminal_learning.evaluation.ckpt_trajectories import (
     _checkpoint_dirs,
     distinct_steps,
@@ -128,7 +128,7 @@ def test_every_gate_is_current_on_a_THINNED_run():
 
 def test_dose_gate_is_current_on_a_thinned_run(tmp_path):
     """The dose gate skips a run whose stored record covers the surviving checkpoints."""
-    from scripts import ckpt_dose_trajectory as dose
+    from forgetting.scripts import ckpt_dose_trajectory as dose
     from subliminal_learning.utils.run_io import manifest_ref
 
     lineage = tmp_path / "lineage"
@@ -183,7 +183,7 @@ def test_fidelity_gate_ignores_the_duplicate(tmp_path):
 
 def test_dose_gate_ignores_the_duplicate(tmp_path):
     """`scripts.ckpt_dose_trajectory._run_one` skips before loading any weights."""
-    from scripts import ckpt_dose_trajectory as dose
+    from forgetting.scripts import ckpt_dose_trajectory as dose
 
     lineage = tmp_path / "lineage"
     run_dir = _run(lineage, "tag/ftseed1", duplicate=True)
@@ -218,7 +218,7 @@ def test_dose_force_on_a_thinned_run_keeps_the_stored_points(tmp_path):
     The stored record is preserved beside itself as well; it used to be UNLINKED by the
     CLI before the workers started, which made both impossible.
     """
-    from scripts import ckpt_dose_trajectory as dose
+    from forgetting.scripts import ckpt_dose_trajectory as dose
     from subliminal_learning.utils.run_io import manifest_ref
 
     lineage = tmp_path / "lineage"
@@ -243,7 +243,7 @@ def test_dose_force_on_a_thinned_run_keeps_the_stored_points(tmp_path):
 
 def test_dose_force_after_a_retrain_does_not_carry_stale_points(tmp_path):
     """A different `train_manifest_ref` = another run: nothing is carried, copy kept."""
-    from scripts import ckpt_dose_trajectory as dose
+    from forgetting.scripts import ckpt_dose_trajectory as dose
 
     lineage = tmp_path / "lineage"
     run_dir = _run(lineage, "tag/ftseed1", duplicate=False)

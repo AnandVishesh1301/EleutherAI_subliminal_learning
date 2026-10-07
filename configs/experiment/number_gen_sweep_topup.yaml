@@ -8,16 +8,10 @@
 # Run: CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.sweeps.sweep_generate_numbers \
 #        --sweep-config configs/experiment/number_gen_sweep_topup.yaml --n-prompts 45000
 
+extends: number_gen_sweep.yaml
 inherit_grid: configs/experiment/teacher_ft_sweep.yaml
-
 animals: [cat, dog, pig]
 base_models: data-seed1
-grid:
-  n_epochs: [10]
-  learning_rate: [2.0e-4]
-  lora:
-    - {r: 32, alpha: 32}
-
-number_config: configs/experiment/number_generation.yaml
+grid: {n_epochs: [10], learning_rate: [2.0e-4], lora: [{r: 32, alpha: 32}]}
 include_base_control: false   # base already clears 10k at 30k
 include_rng_control: false    # rng is exact / already present

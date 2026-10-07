@@ -678,3 +678,86 @@ def cluster_bootstrap_mean_difference(
     draws = t_draw - c_draw
     return (float(t.mean() - c.mean()),
             float(np.percentile(draws, lo_p)), float(np.percentile(draws, hi_p)))
+
+
+@dataclass(frozen=True)
+class PartialCorrelation:
+    """Outcome of `partial_correlation`.
+
+    Attributes:
+        rho: Pearson correlation of the two residual vectors (NaN when degenerate or ``n < min_n``).
+        p: Two-sided t-test p on `df` degrees of freedom (NaN when ``|rho| = 1`` or ``df <= 0``).
+        n: Observations.
+        k: Controls partialled out.
+        df: ``n - 2 - k``.
+    """
+
+    rho: float
+    p: float
+    n: int
+    k: int
+    df: int
+
+
+def partial_correlation(x, y, controls=(), *, method: str = "spearman",
+                        min_n: int | None = None) -> PartialCorrelation:
+    """The repo's single partial correlation: Pearson of OLS residuals, on ranks for Spearman.
+
+    ``method="spearman"`` ranks `x`, `y` and every control once (average ties) -- the conventional
+    partial Spearman; residuals are NOT re-ranked. ``method="pearson"`` uses the raw values. Both
+    residualise on ``[1, controls]`` by least squares and test ``rho`` with a t statistic on
+    ``n - 2 - k`` degrees of freedom. With no controls this is exactly `scipy.stats.spearmanr` /
+    `pearsonr`.
+
+    Args:
+        x, y: The two variables, finite and complete-case (callers drop NaN rows themselves).
+        controls: Sequence of control vectors (each length ``n``) or an ``(n, k)`` array.
+        method: ``"spearman"`` or ``"pearson"``.
+        min_n: Below this many rows ``rho``/``p`` are NaN; default ``k + 3``.
+
+    Returns:
+        A `PartialCorrelation`.
+
+    Raises:
+        ValueError: On non-finite input, mismatched lengths or an unknown `method`.
+    """
+    from scipy.stats import rankdata, t
+
+    if method not in ("spearman", "pearson"):
+        raise ValueError(f"Unknown method {method!r}")
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    n = len(x)
+    z = np.asarray(controls, dtype=float)
+    if z.size == 0:
+        z = np.empty((n, 0))
+    elif z.ndim == 1:
+        z = z[:, None]
+    elif z.shape[0] != n and z.shape[1] == n:
+        z = z.T
+    if len(y) != n or z.shape[0] != n:
+        raise ValueError("Mismatched partial-correlation array lengths")
+    if not (np.isfinite(x).all() and np.isfinite(y).all() and np.isfinite(z).all()):
+        raise ValueError("partial_correlation expects finite complete-case arrays")
+    k = z.shape[1]
+    df = n - 2 - k
+    nan = PartialCorrelation(float("nan"), float("nan"), n, k, df)
+    if n < (k + 3 if min_n is None else min_n):
+        return nan
+    if method == "spearman":
+        x, y = rankdata(x), rankdata(y)
+        z = np.column_stack([rankdata(c) for c in z.T]) if k else z
+    design = np.column_stack([np.ones(n), z])
+
+    def resid(v):
+        return v - design @ np.linalg.lstsq(design, v, rcond=None)[0]
+
+    rx, ry = resid(x), resid(y)
+    nx, ny = np.linalg.norm(rx), np.linalg.norm(ry)
+    tol = 1e-10 * np.sqrt(n)
+    if nx <= tol * max(1.0, np.abs(x).max()) or ny <= tol * max(1.0, np.abs(y).max()):
+        return nan
+    rho = float(np.clip(np.dot(rx, ry) / (nx * ny), -1.0, 1.0))
+    if df <= 0 or abs(rho) >= 1:
+        return PartialCorrelation(rho, float("nan"), n, k, df)
+    stat = rho * np.sqrt(df / (1 - rho * rho))
+    return PartialCorrelation(rho, float(2 * t.sf(abs(stat), df)), n, k, df)

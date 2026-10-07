@@ -145,7 +145,7 @@ def test_cli_records_complete_cohort_and_uses_new_names(
         tmp_path / p for p in complete.GRID_PATHS.values()
     ] + registry._registry_paths(tmp_path)
     manifest_paths.append(
-        tmp_path / "run_logs/repretrain/repretrain_significance_arms.json"
+        tmp_path / "run_logs/campaigns/repretrain/repretrain_significance_arms.json"
     )
     manifest_paths.extend(tmp_path / p for p in plot.OLMO_SAME_MANIFESTS)
     for path in manifest_paths:

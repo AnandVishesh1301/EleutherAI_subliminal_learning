@@ -7,24 +7,10 @@
 # step vs smooth ramp, and the precise step to align the EAS/steerability curve against.
 # Seed extension (student ftseeds 2-3) will target the steepest region found here, as a
 # separate queue prefix. 75k/100k/125k anchors already exist from ckpt-dog-top5.
-base_model: original
-
+extends: ckpt_distill_sweep.yaml
 steps: [85000, 90000, 95000, 100000, 105000, 110000, 115000]
-
-pairs: {topology: diagonal, explicit: []}
-
-animals: [dog]
-
-teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
-          param_tags: [ep20_lr1e-4_r16a32]}
-
-numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
-          include_base_control: false, include_rng_control: false}
-
-student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
-          ft_seeds: [2, 3], subsample_size: 10000, subsample_seed: 42, modes: [plain],
-          control_students: []}
-
-jobq: {root: run_logs/queue_angela, queue_prefix: ckpt-dog-cliffseeds,
+teacher: {param_tags: [ep20_lr1e-4_r16a32]}
+student: {ft_seeds: [2, 3]}
+jobq: {queue_prefix: ckpt-dog-cliffseeds,
        priorities: {teacher: 315, numgen: 305, distill: 300},
        mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}

@@ -41,9 +41,9 @@ The BASE MODEL is a parameter too (`--base`, see `Base`/`BASES`): it generated t
 and it receives the students. The default `original` is stage 1's `pythia-160m` and is
 byte-identical to before; `pythia-160m-seed3` runs the same design on that pretraining
 (campaign `sl-final-resampling-fs3-20260924`, run dir
-`run_logs/sl_final_resampling_fs3_20260924`), and `data-seed3` the same on that data
+`run_logs/campaigns/sl_final_resampling_fs3_20260924`), and `data-seed3` the same on that data
 order (campaign `sl-final-resampling-ds3-20260924`, run dir
-`run_logs/sl_final_resampling_ds3_20260924`). Only `default_teachers` stays original-only:
+`run_logs/campaigns/sl_final_resampling_ds3_20260924`). Only `default_teachers` stays original-only:
 every other base passes its teacher set as `--teachers teachers.json`.
 
 `prepare` builds pools (CPU only) and never overwrites one whose content differs; `emit`
@@ -81,7 +81,7 @@ from subliminal_learning.numbers.resampling import (
 )
 
 CAMPAIGN = "sl-final-resampling-20260924"
-CAMPAIGN_REL = "run_logs/sl_final_resampling_20260924"
+CAMPAIGN_REL = "run_logs/campaigns/sl_final_resampling_20260924"
 DEFAULT_CAMPAIGN_DIR = ROOT / CAMPAIGN_REL
 ANIMAL = "dog"
 STEP = 143000

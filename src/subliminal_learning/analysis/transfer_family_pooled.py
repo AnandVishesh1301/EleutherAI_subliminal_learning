@@ -13,7 +13,7 @@ Two data sources feed the same frame:
   re-pretrainings (``wc1``, ``wc2``, ``prv1``) -- same Pile data order as the original run,
   a different weight init -- and the fifth, `RELATION_REPRO`, the ordered ``orig``↔``prv1``
   reproduction pairs (same init seed AND data order) -- both read off the output tree with
-  `analysis.transfer_significance_io.load_cell_matrix` on ``run_logs/core30_cells.json``.
+  `analysis.transfer_significance_io.load_cell_matrix` on ``run_logs/registry/core30_cells.json``.
 
 A receiver without an anchored pp1 cut cannot be dead-labelled: its runs are kept UNFILTERED
 (``receiver_filtered=False``, ``alive`` NaN) and the slot's annotation turns red -- never
@@ -275,7 +275,7 @@ def repretrain_pairs(
         root: Output tree root.
         animals: Target animals.
         teachers_by_animal: ``{animal: [param_tag, ...]}`` -- the teacher pools per animal.
-        cells: Student cell tags of the matched design (``run_logs/core30_cells.json``).
+        cells: Student cell tags of the matched design (``run_logs/registry/core30_cells.json``).
         directions: ``(sender, receiver)`` token pairs, keys of `REPRETRAIN_BASE`.
         relation: Relationship label written onto every row.
         dataset_tag: Numbers-dataset dir.

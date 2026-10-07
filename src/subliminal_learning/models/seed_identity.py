@@ -25,7 +25,7 @@ saved step1 parameters with the original. Independent gradient reconstruction on
 September 13 provided evidence for seed-specific optimizer history in released ws1–3;
 this helper itself only compares supplied weights. It is also the one
 `scripts.check_dd_seed_identity` runs on the DataDecide seed branches. See
-``run_logs/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md`` for the separate
+``run_logs/campaigns/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md`` for the separate
 reconstruction. Pure numpy/torch on in-memory tensors; downloading and locating
 checkpoints is the caller's job.
 """

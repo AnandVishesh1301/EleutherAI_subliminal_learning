@@ -43,7 +43,7 @@ from pipelines.evaluate_teacher_preference_pipeline import (
     run,
 )
 from pipelines.generate_numbers_pipeline import prompt_set_tag
-from scripts.generate_numbers import _load_number_config
+from pipelines.generate_numbers_pipeline import load_number_config
 from subliminal_learning.evaluation.prompt_sets import (
     DEFAULT_STUDENT_SET_NAMES,
     default_scoring,
@@ -259,7 +259,7 @@ def main(
         paths_config, model_config, teacher_training_config, experiment_config
     )
     student_lora, student_train = load_student_training(student_training_config)
-    number_prompt_set, filter_modes, _, constrained = _load_number_config(number_config)
+    number_prompt_set, filter_modes, _, constrained = load_number_config(number_config)
     if filter_mode not in filter_modes:
         raise typer.BadParameter(
             f"unknown filter mode {filter_mode!r}; configured: {sorted(filter_modes)}"

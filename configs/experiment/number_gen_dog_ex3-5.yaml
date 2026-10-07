@@ -1,7 +1,7 @@
 # ICL example-count variant (Angela 2026-09-12): dog teachers on the ORIGINAL pythia-160m,
 # 3-5 in-context demonstrations per prompt (number_generation_ex3-5.yaml) instead of the
 # canonical 10-20. Writes the `ex3-5` lineage beside ex10-20 under each teacher's numbers dir.
-# Teachers narrowed at invocation via --only-param-tags run_logs/dog_ex3-5_top3_configs.json
+# Teachers narrowed at invocation via --only-param-tags run_logs/registry/dog_ex3-5_top3_configs.json
 # --ftseeds 1 (the top-3 orig->fs1 transferers of the top-10 set). Controls off: the ex3-5
 # base-control pool is generated separately (generate_numbers --source base).
 inherit_grid: configs/experiment/teacher_ft_sweep_selected.yaml

@@ -66,6 +66,6 @@ student: {training_config: configs/training/lora_student_distill.yaml, epochs: [
 # root is the jobq state root (Angela's private queue_angela; see its README). Three
 # stages per teacher checkpoint (train -> numgen -> distill) get their own priority and
 # per-GPU free-MiB gate; the distill stage runs one run-cell job per cell.
-jobq: {root: run_logs/queue_angela, queue_prefix: ckpt-dog,
+jobq: {queue_prefix: ckpt-dog,
        priorities: {teacher: 40, numgen: 30, distill: 20},
        mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}

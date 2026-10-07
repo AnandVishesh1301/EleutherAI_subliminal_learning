@@ -21,8 +21,8 @@ sys.path.insert(0, str(_REPO))
 
 from subliminal_learning.students.config import load_student_training  # noqa: E402
 
-_CROSS = _REPO / "run_logs" / "dog_crossdistill_studenthp_worker.py"
-_P410M = _REPO / "run_logs" / "p410m_worker.py"
+_CROSS = _REPO / "run_logs" / "workers" / "dog_crossdistill_studenthp_worker.py"
+_P410M = _REPO / "run_logs" / "workers" / "p410m_worker.py"
 if not (_CROSS.exists() and _P410M.exists()):
     pytest.skip("run_logs is a machine-local mount", allow_module_level=True)
 

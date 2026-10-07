@@ -5,10 +5,9 @@
 # deliberately excluded; the 13 seed-2/3 DIAGONAL cells already exist from `ckpt-dogpr1234-diagseeds23`
 # and identity-skip. Teachers/pools are the existing ftseed-1 ones (t/n stages skip-done). The 25k/50k
 # diagonals are out of scope (seeds 2/3 already have them). Net new work: 156 x 5 x 2 = 1560 students.
+extends: ckpt_distill_sweep.yaml
 base_model: pilerepro-seed1234
-
 steps: [75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000, 120000, 125000, 130000, 143000]
-
 pairs:
   topology: explicit
   explicit:
@@ -181,24 +180,15 @@ pairs:
     - [143000, 125000]
     - [143000, 130000]
     - [143000, 143000]
-
-animals: [dog]
-
-teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
-          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
-                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
-
-numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
-          include_base_control: false, include_rng_control: false}
+teacher:
+  param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]
 
 # Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
-student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
-          ft_seeds: [2, 3], subsample_size: 10000, subsample_seed: 42, modes: [plain],
-          control_students: []}
+student: {ft_seeds: [2, 3]}
 
 # cwd: null -> jobs run in the claiming pool's own checkout; node: null -> unpinned.
 # Priority 71 = the same tier as the pr1234/prv1 diagseeds23 arms (just below the OLMo queues at 72).
-jobq: {cwd: null, node: null, root: run_logs/queue_angela,
+jobq: {cwd: null, node: null,
        queue_prefix: ckpt-dogpr1234-cliffcross13-seeds23-20260925,
        depends_on_prefix: ckpt-dogpr1234-cliffcross13-20260915,
        priorities: {teacher: 71, numgen: 71, distill: 71},

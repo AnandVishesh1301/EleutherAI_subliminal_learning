@@ -20,9 +20,8 @@ from pathlib import Path
 from jobq.model import Job
 from jobq import store
 from subliminal_learning.models.registry import local_pythia_family
+from subliminal_learning.jobq_folder import configured_queue_folder
 
-
-DEFAULT_ROOT = Path("run_logs/queue_angela")
 
 
 def _arg_value(cmd: str, flag: str) -> str | None:
@@ -122,14 +121,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--priority", type=int, help="Override the template's priority.")
     p.add_argument("--depends-on", help="Comma-separated queue names (default: none).")
     p.add_argument("--node", help="Pin the new queue to a hostname (default: the template's).")
-    p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    p.add_argument(
+        "--root", type=Path, default=None,
+        help="jobq queue root (default: queue_folder in jobq_paths.toml).",
+    )
     p.add_argument("--dry-run", action="store_true", help="Print a summary, write nothing.")
     return p.parse_args()
 
 
 def main() -> int:
     a = parse_args()
-    root = a.root
+    root = a.root or configured_queue_folder()
     if not store.queue_exists(root, a.template):
         raise SystemExit(f"template queue {a.template!r} not found under {root}")
     if store.queue_exists(root, a.name):

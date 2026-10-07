@@ -19,7 +19,7 @@ BASE = {
                 "ft_seeds": [1], "subsample_size": 10000, "subsample_seed": 42, "modes": ["plain"],
                 "control_students": []},
 }
-JOBQ = {"root": "run_logs/queue_angela", "queue_prefix": "t",
+JOBQ = {"root": "run_logs/queues/queue_angela", "queue_prefix": "t",
         "priorities": {"teacher": 3, "numgen": 2, "distill": 1},
         "mem_mib": {"teacher": 1, "numgen": 1, "distill": 1}}
 

@@ -1,5 +1,6 @@
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -39,3 +40,33 @@ def test_missing_uv_exits(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", boom)
     with pytest.raises(SystemExit, match="`uv` not found"):
         jobq_folder.assert_configured_queue_folder(tmp_path)
+
+
+def test_configured_queue_folder_reads_the_settings_file(tmp_path, monkeypatch):
+    (tmp_path / "jobq_paths.toml").write_text('queue_folder = "/mnt/x/queues/q"\n')
+    monkeypatch.setattr(jobq_folder, "_REPO_ROOT", tmp_path)
+    assert jobq_folder.configured_queue_folder() == Path("/mnt/x/queues/q")
+
+
+def test_configured_queue_folder_missing_file_exits(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobq_folder, "_REPO_ROOT", tmp_path)
+    from jobq import settings
+
+    monkeypatch.setattr(settings, "find_settings_file", lambda start=None: None)
+    with pytest.raises(SystemExit, match="queue_folder"):
+        jobq_folder.configured_queue_folder()
+
+
+def test_configured_queue_folder_missing_key_exits(tmp_path, monkeypatch):
+    (tmp_path / "jobq_paths.toml").write_text('other = "x"\n')
+    monkeypatch.setattr(jobq_folder, "_REPO_ROOT", tmp_path)
+    with pytest.raises(SystemExit, match="jobq_paths.toml"):
+        jobq_folder.configured_queue_folder()
+
+
+def test_resolve_queue_root_override_then_configured(tmp_path, monkeypatch):
+    from subliminal_learning.config import resolve_queue_root
+
+    monkeypatch.setattr(jobq_folder, "configured_queue_folder", lambda: tmp_path / "cfg")
+    assert resolve_queue_root({"queue_root": "/x/q"}) == Path("/x/q")
+    assert resolve_queue_root({}) == tmp_path / "cfg"

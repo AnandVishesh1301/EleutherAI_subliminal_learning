@@ -29,7 +29,7 @@ rerunning is always safe).
 `--keep-epochs-optional` names epochs kept where a rung snaps onto them and skipped in
 silence where none does, for ladders whose cadence realises only some of them.
 
-A SECOND, non-optional protect file (`run_logs/thin_ckpt/protect_nonadaptive_cells.tsv`)
+A SECOND, non-optional protect file (`run_logs/campaigns/thin_ckpt/protect_nonadaptive_cells.tsv`)
 protects the NONADAPTIVE SETS by CELL rather than by path: no run of a Pythia / OLMo / Qwen
 nonadaptive-set cell, Adam or SGD -- student or teacher, in any arm of that family, under
 any arm suffix (`_sgd`, `_stop1250`, `_tf32`, ...) -- is ever thinned or stripped. It is
@@ -61,7 +61,7 @@ adapter stays, `ready:wipe`), and one that IS a set cell is thinned to the stude
 epochs instead of being refused (`ready:set_thin`) -- the one deliberate exception to the
 cell protect file, which still refuses every other mode. No record is required (controls
 have none), the per-checkpoint eval records that do exist are archived when present, and
-the archive goes to `run_logs/thin_ckpt/archive_controls/` (`--archive-root`) rather than
+the archive goes to `run_logs/campaigns/thin_ckpt/archive_controls/` (`--archive-root`) rather than
 into the output root, because cold-1 is the disk this mode exists to free: if the
 pre-delete `ladder.json` write fails with ENOSPC/EDQUOT the doc is held in memory, the
 rungs are deleted, and the write is retried once (`deleted:ladder_unwritten` when it still
@@ -137,7 +137,7 @@ from subliminal_learning.utils.run_io import (
 # `-m`: the sibling-script imports below need the repo root on the path either way.
 sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 
-from scripts.adapter_spectra_trajectory import (  # noqa: E402
+from forgetting.scripts.adapter_spectra_trajectory import (  # noqa: E402
     JSON_NAME as SPECTRA_JSON,
     NPZ_NAME as SPECTRA_NPZ,
     spectra_record_problem,
@@ -167,8 +167,8 @@ DEFAULT_KEEP_EPOCHS = "0.5,1,1.5,2,5,10"
 DEFAULT_REQUIRE = "pref_traj,pile_kl_traj,adapter_spectra_traj"
 # Record names with an evaluator-matched point rule in `ckpt_ladder.record_points_problem`.
 POINT_KINDS = ("pref_traj", "pile_kl_traj")
-DEFAULT_PROTECT = "run_logs/thin_ckpt/protect_pythia_nonadaptive.tsv"
-DEFAULT_CELL_PROTECT = "run_logs/thin_ckpt/protect_nonadaptive_cells.tsv"
+DEFAULT_PROTECT = "run_logs/campaigns/thin_ckpt/protect_pythia_nonadaptive.tsv"
+DEFAULT_CELL_PROTECT = "run_logs/campaigns/thin_ckpt/protect_nonadaptive_cells.tsv"
 # Trees that keep `checkpoint-*` as resume state or hold arms this script never owns.
 EXCLUDED_TREES = ("students/sgd", "students/controls")
 EXCLUDED_COMPONENTS = ("gkd_students", "sdf_teachers")
@@ -202,7 +202,7 @@ CONTROL_REQUIRE = ""
 CONTROL_ARCHIVE_EXTRA = ("pref_traj", "pile_kl_traj", "adapter_norms_traj", "dose_traj")
 # Off the output root on purpose: cold-1 is the disk this mode frees, and an archive copy
 # onto a full disk is the one write that would make the deletion impossible.
-CONTROL_ARCHIVE_REL = Path("run_logs") / "thin_ckpt" / "archive_controls"
+CONTROL_ARCHIVE_REL = Path("run_logs") / "campaigns" / "thin_ckpt" / "archive_controls"
 
 PROGRESS_EVERY = 500
 # Partial reports are flushed every this many handled runs during --apply, so a kill
@@ -889,7 +889,7 @@ def archive_records(run_dir: Path, row: dict, cfg: dict) -> tuple[dict[str, str]
     `{archive_root}/<receiver>/<record>/<rel with '/'->'__'>`: a flat, run-keyed store that
     survives even the loss of the run dir, so the numbers the deletion relies on are never
     in only one place. The root is `{output_root}/analysis/thin_ckpt/archive/` by default
-    and `run_logs/thin_ckpt/archive_controls/` in control mode (`--archive-root`), where the
+    and `run_logs/campaigns/thin_ckpt/archive_controls/` in control mode (`--archive-root`), where the
     output root is the full disk being freed. A file already there with the same sha256 is
     left alone (rerun-safe); anything that fails to copy aborts the thinning.
     """
@@ -1136,7 +1136,7 @@ def thin_run(row: dict, cfg: dict, log_path: Path) -> str:
 
 
 # --------------------------------------------------------------------------- jobs
-JOBS_REL = Path("run_logs") / "thin_ckpt" / "jobs"
+JOBS_REL = Path("run_logs") / "campaigns" / "thin_ckpt" / "jobs"
 
 
 def spectra_command(rel: str) -> str:
@@ -1239,23 +1239,23 @@ def regen_protect_file(out_root: Path, path: Path) -> int:
 OLMO_STUDENT_LATTICE = {"epochs": 10, "lrs": ("1e-4", "2e-4", "5e-4", "1e-3", "2e-3", "5e-3"),
                         "ranks": (1, 2, 4, 8, 16, 32, 64, 128, 256),
                         "alphas": (4, 8, 16, 32, 64, 128, 256, 512)}
-OLMO_SUBSET_FILES = ("run_logs/dd1b/bext_cells.json", "run_logs/dd1b/kband_olmo_cells.json",
-                     "run_logs/dd1b/kband_olmo50_cells.json",
-                     "run_logs/dd1b/olmo_core30_cells.json",
-                     "run_logs/dd1b/olmo_core35_cells.json")
-QWEN_STUDENT_SET = "run_logs/qwen/nonadaptive_set.json"
+OLMO_SUBSET_FILES = ("run_logs/campaigns/dd1b/bext_cells.json", "run_logs/campaigns/dd1b/kband_olmo_cells.json",
+                     "run_logs/campaigns/dd1b/kband_olmo50_cells.json",
+                     "run_logs/campaigns/dd1b/olmo_core30_cells.json",
+                     "run_logs/campaigns/dd1b/olmo_core35_cells.json")
+QWEN_STUDENT_SET = "run_logs/campaigns/qwen/nonadaptive_set.json"
 TEACHER_TAG_FILES = {
     "olmo_teacher432": (("teachers/elephant",),
-                        [f"run_logs/teacher_nonadaptive_olmo_qwen/olmo_ep{e}_tags.txt"
+                        [f"run_logs/campaigns/teacher_nonadaptive_olmo_qwen/olmo_ep{e}_tags.txt"
                          for e in (5, 10, 20)]),
     "qwen_teacher432": (("teachers/panda",),
-                        [f"run_logs/teacher_nonadaptive_olmo_qwen/qwen_ep{e}_tags.txt"
+                        [f"run_logs/campaigns/teacher_nonadaptive_olmo_qwen/qwen_ep{e}_tags.txt"
                          for e in (5, 10, 20)]),
     # SGD twins of the two teacher sets above, on the SGD lattice's own (much higher) lrs.
     "pythia_teacher_sgd1792": (("teachers/dog/pythia-160m",),
-                               ["run_logs/sgd_teachers/nonadaptive_design.txt"]),
+                               ["run_logs/campaigns/sgd_teachers/nonadaptive_design.txt"]),
     "qwen_teacher_sgd1983": (("teachers/panda",),
-                             [f"run_logs/qwen_sgd_teachers/tags_ep{e}.txt"
+                             [f"run_logs/campaigns/qwen_sgd_teachers/tags_ep{e}.txt"
                               for e in (5, 10, 20)]),
 }
 # SGD STUDENT sets: both live under `students/sgd/{animal}/{base}`, and their tags carry the
@@ -1263,12 +1263,12 @@ TEACHER_TAG_FILES = {
 # run in. The Qwen set is the 661-cell design PLUS the 14-cell ladder that preceded it (4 of
 # whose rungs sit below the design's lr band) -- the ladder cells are set cells too.
 SGD_STUDENT_TAG_FILES = {
-    "pythia_student_sgd510": (("students/sgd",), ["run_logs/sgd_nonadaptive_design.txt"]),
-    "qwen_student_sgd665": (("students/sgd",), ["run_logs/qwen/sgd_nonadaptive_design.txt"]),
+    "pythia_student_sgd510": (("students/sgd",), ["run_logs/registry/sgd_nonadaptive_design.txt"]),
+    "qwen_student_sgd665": (("students/sgd",), ["run_logs/campaigns/qwen/sgd_nonadaptive_design.txt"]),
 }
 # The Qwen SGD student ladder has no tag list of its own; its cells are the `--tag` of each
 # job line (the `_sgd` suffix comes from `--optim sgd`, as it does for every cell of the set).
-QWEN_SGD_LADDER_JOBS = "run_logs/qwen/sgd_ladder_jobs.jsonl"
+QWEN_SGD_LADDER_JOBS = "run_logs/campaigns/qwen/sgd_ladder_jobs.jsonl"
 # Pythia teacher runs of the 504 lattice live in the dog tree; `cell` match protects them at
 # ep5, ep20 and any other epoch count of the same lattice.
 PYTHIA_TEACHER_TREE = "teachers/dog/pythia-160m"
@@ -1372,9 +1372,9 @@ def regen_cell_protect_file(out_root: Path, path: Path) -> tuple[int, dict[str, 
     stamp = f"{datetime.now(timezone.utc):%Y-%m-%d}"
     header = (f"# tree_prefix\tmatch\tkey\tset  (generated {stamp} from the canonical set "
               "definitions: analysis/nonadaptive_8x7_harvest.json, "
-              f"{QWEN_STUDENT_SET}, run_logs/teacher_nonadaptive_olmo_qwen/*_tags.txt, the "
-              "OLMo 432 lattice cross-checked against run_logs/dd1b/*_cells.json, and the "
-              "SGD sets: run_logs/{sgd_nonadaptive_design.txt, "
+              f"{QWEN_STUDENT_SET}, run_logs/campaigns/teacher_nonadaptive_olmo_qwen/*_tags.txt, the "
+              "OLMo 432 lattice cross-checked against run_logs/campaigns/dd1b/*_cells.json, and the "
+              "SGD sets: run_logs/registry/{sgd_nonadaptive_design.txt, "
               "qwen/sgd_nonadaptive_design.txt, qwen/sgd_ladder_jobs.jsonl, "
               "sgd_teachers/nonadaptive_design.txt, qwen_sgd_teachers/tags_ep*.txt}.\n"
               "# match=tag: the whole param tag; match=cell: the epoch-free remainder (every "
@@ -1606,7 +1606,7 @@ def main(
     jobs_chunk: int = typer.Option(40, "--jobs-chunk",
                                    help="Run dirs per emitted spectra job."),
     report: Path = typer.Option(None, help="JSON report path. Default "
-                                "run_logs/thin_ckpt/report_<UTC>.json"),
+                                "run_logs/campaigns/thin_ckpt/report_<UTC>.json"),
     apply: bool = typer.Option(False, "--apply", help="Actually delete the non-kept rungs."),
     output_root: Path = typer.Option(None),
 ) -> None:
@@ -1764,7 +1764,7 @@ def main(
         raise typer.BadParameter(f"{len(walk_errors)} walk error(s): the run list is "
                                  "possibly truncated; nothing deleted")
 
-    report = report or (ROOT / "run_logs" / "thin_ckpt" /
+    report = report or (ROOT / "run_logs" / "campaigns" / "thin_ckpt" /
                         f"{'controls_' if control_tree else ''}report_"
                         f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json")
     report.parent.mkdir(parents=True, exist_ok=True)

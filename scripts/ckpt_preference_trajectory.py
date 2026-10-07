@@ -1,6 +1,6 @@
 """Preference trajectory: score the trait at every intermediate checkpoint of a run.
 
-The strip replay (`run_logs/strip_ckpt_replay_worker.py`) saves 40 adapters per run,
+The strip replay (`run_logs/workers/strip_ckpt_replay_worker.py`) saves 40 adapters per run,
 one every 625 steps across the ep20 / 25k-step budget. This script turns that ladder
 into a *transfer* trajectory to sit alongside the *dose* trajectory that
 `adapter_norms_probe --checkpoints` produces from the same checkpoints: when during
@@ -69,7 +69,7 @@ from subliminal_learning.models.naming import base_dir_name
 from subliminal_learning.teachers.config import load_template_config
 
 ROOT = Path(__file__).absolute().parents[1]
-REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
+REGISTRY = ROOT / "run_logs" / "registry" / "strip_ckpt_replay_cells.json"
 OUT_SUBDIR = "analysis/ckpt_pref_traj"
 MAX_NEW_TOKENS = {"test": 12, "storytelling": 128}
 

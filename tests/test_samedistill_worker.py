@@ -25,7 +25,7 @@ from subliminal_learning.students.config import load_student_training  # noqa: E
 
 # run_logs is an untracked, machine-local mount: skip cleanly (rather than failing
 # collection) on a checkout that does not have it.
-_SCRIPT = _REPO / "run_logs" / "animal_samedistill_worker.py"
+_SCRIPT = _REPO / "run_logs" / "workers" / "animal_samedistill_worker.py"
 if not _SCRIPT.exists():
     pytest.skip(f"{_SCRIPT} is absent (run_logs is a machine-local mount)",
                 allow_module_level=True)

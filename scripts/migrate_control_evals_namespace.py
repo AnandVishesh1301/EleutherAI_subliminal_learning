@@ -2,9 +2,9 @@
 
 The repo rule (`scripts.evaluate_student_preference.resolve_eval_animal`): a base/rng
 control tree is animal-independent, so its per-animal eval artifacts are namespaced under
-``eval/{animal}/`` -- one leaf can hold an elephant AND a dog readout. `run_logs/p410m_worker.py`
+``eval/{animal}/`` -- one leaf can hold an elephant AND a dog readout. `run_logs/workers/p410m_worker.py`
 started obeying it on 2026-09-12 (and its four Pythia trees were moved then);
-`run_logs/dd1b_worker.py` only did so for its explicit-pool mode until 2026-09-19, so the
+`run_logs/workers/dd1b_worker.py` only did so for its explicit-pool mode until 2026-09-19, so the
 canonical `--numbers-source base|rng` OLMo controls carry single-animal files at the root:
 
     {cell}/ftseed{N}/preference_eval.json   ->  {cell}/ftseed{N}/eval/{animal}/...
@@ -162,7 +162,7 @@ def main() -> int:
                    help="refuse sources modified more recently than this (a job may still "
                         "be writing them)")
     p.add_argument("--ledger", type=Path, default=None,
-                   help="ledger path (default run_logs/migrate_control_evals_namespace_"
+                   help="ledger path (default run_logs/registry/migrate_control_evals_namespace_"
                         "{UTC stamp}.json)")
     a = p.parse_args()
     out_root = a.output_root
@@ -177,7 +177,7 @@ def main() -> int:
         return 0
     applied = apply_moves(moves)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    ledger = a.ledger or ROOT / "run_logs" / f"migrate_control_evals_namespace_{stamp}.json"
+    ledger = a.ledger or ROOT / "run_logs" / "registry" / f"migrate_control_evals_namespace_{stamp}.json"
     ledger.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(ledger, {"utc": stamp, "students_root": str(students_root),
                                "min_age_minutes": a.min_age_minutes,

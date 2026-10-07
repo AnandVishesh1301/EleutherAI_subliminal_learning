@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from subliminal_learning.templates.model_specs import parse_base_models
+from subliminal_learning.teachers.model_specs import parse_base_models
 
 _REPO = Path(__file__).resolve().parents[2]
 _EXP = _REPO / "configs" / "experiment"

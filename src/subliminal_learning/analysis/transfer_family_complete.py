@@ -19,9 +19,9 @@ from . import transfer_significance_io as tio
 
 BLOCK = ["animal", "sender", "receiver", "teacher", "tseed", "ftseed"]
 GRID_PATHS = {
-    "core30": "run_logs/core30_cells.json",
-    "core56": "run_logs/core56_cells.json",
-    "core35": "run_logs/dd1b/olmo_core35_cells.json",
+    "core30": "run_logs/registry/core30_cells.json",
+    "core56": "run_logs/registry/core56_cells.json",
+    "core35": "run_logs/campaigns/dd1b/olmo_core35_cells.json",
 }
 BASE_GRIDS = dict(
     zip(tfp.RELATIONS, ["core30", "core56", "core30", "core56", "core30"])
@@ -301,7 +301,7 @@ def load_modern_reproduction_pairs(repo: Path, root: Path):
 
     Returns selected pairs, block reports, exclusions, and arm coverage.
     """
-    path = repo / "run_logs/repretrain/repretrain_significance_arms.json"
+    path = repo / "run_logs/campaigns/repretrain/repretrain_significance_arms.json"
     document = json.loads(path.read_text())
     if document.get("ftseed", 1) != 1 or document.get("prompt_set", "test") != "test":
         raise ValueError(
@@ -435,7 +435,7 @@ def load_complete_pairs(
 ):
     """Load fresh canonical-source data; never load extra student training seeds."""
     teachers = {
-        a: json.loads((repo / f"run_logs/{a}_top10_kband_configs.json").read_text())[
+        a: json.loads((repo / f"run_logs/registry/{a}_top10_kband_configs.json").read_text())[
             "param_tags"
         ]
         for a in tfp.DEFAULT_ANIMALS

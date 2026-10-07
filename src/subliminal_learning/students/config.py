@@ -9,9 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
-
-from subliminal_learning.config import LoRAConfig, TrainConfig
+from subliminal_learning.config import LoRAConfig, TrainConfig, load_yaml_extends
 from subliminal_learning.gkd.layout import optim_slug
 
 
@@ -23,7 +21,7 @@ def load_student_training(path: Path) -> tuple[LoRAConfig, TrainConfig]:
     the students SFT path (HF ``TrainingArguments.optim``) cannot honor it -- only the GKD
     trainer applies `optim_momentum`.
     """
-    doc = yaml.safe_load(Path(path).read_text())
+    doc = load_yaml_extends(Path(path))
     lo, tr = doc["lora"], doc["train"]
     tm = lo["target_modules"]
     lora = LoRAConfig(

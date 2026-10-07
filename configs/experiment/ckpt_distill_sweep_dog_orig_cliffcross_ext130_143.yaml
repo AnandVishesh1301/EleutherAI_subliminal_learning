@@ -7,10 +7,8 @@
 # 130 and 143k". orig keeps its single dense-cliff recipe (the 11x11 of §2b is single-recipe).
 # Teachers/pools at the two new steps are real work; students = one run per (recipe, new pair).
 # Revisions step130000/step143000 are in the offline hub cache (prefetch 2026-09-10).
-base_model: original
-
+extends: ckpt_distill_sweep.yaml
 steps: [75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000, 120000, 125000, 130000, 143000]
-
 pairs:
   topology: explicit
   explicit:
@@ -62,19 +60,7 @@ pairs:
     - [120000, 143000]
     - [125000, 130000]
     - [125000, 143000]
-
-animals: [dog]
-
-teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
-          param_tags: [ep20_lr1e-4_r16a32]}
-
-numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
-          include_base_control: false, include_rng_control: false}
-
-# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
-student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
-          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
-          control_students: []}
+teacher: {param_tags: [ep20_lr1e-4_r16a32]}
 
 # cwd: null -> jobs run in the claiming pool's own checkout (goncalo-temp-1 cannot enter /home/angela).
 # depends_on_prefix: this config re-lists the 11 window steps, so it re-emits their (already
@@ -82,7 +68,7 @@ student: {training_config: configs/training/lora_student_distill.yaml, epochs: [
 # on the window campaign's same-step queue, so two same-key teacher jobs can never run into
 # one output dir at once. Only applied to steps whose counterpart queue exists (130k/143k
 # are new and get no dep).
-jobq: {cwd: null, root: run_logs/queue_angela, queue_prefix: ckpt-dog-cliffcrossx,
+jobq: {cwd: null, queue_prefix: ckpt-dog-cliffcrossx,
        priorities: {teacher: 52, numgen: 51, distill: 50},
        depends_on_prefix: ckpt-dog-cliffcross,
        mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

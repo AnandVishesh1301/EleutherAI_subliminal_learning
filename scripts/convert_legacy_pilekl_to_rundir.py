@@ -30,14 +30,14 @@ from pathlib import Path
 
 import typer
 
-from scripts.ckpt_preference_trajectory import _checkpoint_dirs
+from subliminal_learning.evaluation.ckpt_trajectories import _checkpoint_dirs
 from subliminal_learning.training.ckpt_ladder import steps_covered, supersede_if_shrinking
 from subliminal_learning.utils.run_io import manifest_ref
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.config import resolve_output_root
 
 ROOT = Path(__file__).absolute().parents[1]
-REGISTRY = ROOT / "run_logs" / "strip_ckpt_replay_cells.json"
+REGISTRY = ROOT / "run_logs" / "registry" / "strip_ckpt_replay_cells.json"
 LEGACY_SUBDIR = "analysis/ckpt_pile_kl_traj"
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)

@@ -7,32 +7,19 @@
 #
 # Both steps existed and were converted up front, so this is submitted directly (no watcher):
 #     uv run python -m scripts.sweeps.sweep_ckpt_distill submit --sweep-config configs/experiment/ckpt_distill_sweep_dog_pilereprov1_diag_early.yaml
+extends: ckpt_distill_sweep.yaml
 base_model: pilereprov1-seed1234
-
 steps: [25000, 50000]
-
 pairs:
   topology: explicit
   explicit:
     - [25000, 25000]
     - [50000, 50000]
-
-animals: [dog]
-
-teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
-          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
-                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
-
-numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
-          include_base_control: false, include_rng_control: false}
-
-# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
-student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
-          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
-          control_students: []}
+teacher:
+  param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]
 
 # node pinned: the `pilereprov1` family exists only in the soar-subliminal-1 checkout until it is
 # committed and pulled on the other nodes (set at creation). Drop afterwards.
-jobq: {cwd: null, node: soar-subliminal-1, root: run_logs/queue_angela, queue_prefix: ckpt-dogprv1-diag-early-20260920,
+jobq: {cwd: null, node: soar-subliminal-1, queue_prefix: ckpt-dogprv1-diag-early-20260920,
        priorities: {teacher: 48, numgen: 47, distill: 46},
        mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

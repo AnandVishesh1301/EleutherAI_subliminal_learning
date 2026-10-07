@@ -3,7 +3,8 @@
 Two things ``scripts.queue_status`` cannot get from one queue alone:
 
 1. **How long will a job of this shape take?** Every successful result in every history
-   root (the status root plus ``run_logs/queue0`` / ``run_logs/queue_angela``) is keyed by
+   root (the status root plus the ``jobq_paths.toml`` queue folder and every retired queue root
+   beside it, `HISTORY_ROOTS`) is keyed by
    a JOB SIGNATURE derived from its command. The command's SCRIPTS give the job's ROLE
    (`chain_role`) and the role decides what its cost is keyed and scaled by -- a job that
    merely carries ``--epochs`` (number generation off a teacher recipe, a preference eval)
@@ -117,6 +118,7 @@ import yaml
 from loguru import logger
 
 from jobq import store
+from subliminal_learning.config import load_yaml_extends
 from subliminal_learning.utils.io import atomic_write_json
 
 CACHE_NAME = "duration_priors_cache.json"
@@ -131,11 +133,39 @@ BLEND_K = 10.0  # own samples needed for an even own/prior split
 OWN_DOMINANT_N = 10
 OWN_MIN_N = 3
 COMPOSE_MIN_N = 3  # samples a chain COMPONENT needs (a thin measurement beats the default)
-# Repo root: .../src/subliminal_learning/eta_priors.py -> parents[2]. The history
-# roots and the git call below are anchored on it, so a status run from any cwd reads the
-# same history.
+# Repo root: .../src/subliminal_learning/eta_priors.py -> parents[2]. The git call below
+# is anchored on it, so a status run from any cwd reads the same history.
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HISTORY_ROOTS = (str(REPO_ROOT / "run_logs/queue0"), str(REPO_ROOT / "run_logs/queue_angela"))
+_HISTORY_ROOTS: tuple[str, ...] | None = None
+
+
+def default_history_roots() -> tuple[str, ...]:
+    """The configured queue folder plus every retired queue root beside it (computed once).
+
+    The folder comes from ``jobq_paths.toml`` (`jobq_folder.configured_queue_folder`); a
+    retired root is any dir under ``<folder>.parent / "retired"`` holding a ``*/meta.json``.
+    Paths are kept as written (no ``resolve()``: run_logs carries symlink semantics).
+    """
+    global _HISTORY_ROOTS
+    if _HISTORY_ROOTS is None:
+        from subliminal_learning.jobq_folder import configured_queue_folder
+
+        folder = configured_queue_folder()
+        retired = folder.parent / "retired"
+        old = sorted(
+            d for d in (retired.iterdir() if retired.is_dir() else ())
+            if d.is_dir() and any(d.glob("*/meta.json"))
+        )
+        _HISTORY_ROOTS = tuple(str(p) for p in (*old, folder))
+    return _HISTORY_ROOTS
+
+
+def __getattr__(name: str):
+    if name == "HISTORY_ROOTS":
+        return default_history_roots()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 MPS_SINCE = "2026-08-12T00:00Z"  # pools default `mps: true` from this rollout on
 TIER_NODES = ("soar-subliminal-1", "goncalo-temp-0")  # the nodes today's numbers come from
 DEFAULT_RECENT_N = 3000  # newest samples a key quotes from within its tier
@@ -196,18 +226,18 @@ CKPT_DISTILL_SUBS = ("train-cell", "run-cell")
 # Flags whose file contents change a command's features: an edited YAML must invalidate the
 # parse (`FeatsCache`, `job_feats`), not be served from a cache keyed on the string alone.
 _REF_PATH_FLAGS = (*_TRAIN_CFG_FLAGS, "--sweep-config", "--only-param-tags")
-# `run_logs/hf_worker.py --family X`: base token and student-recipe YAML suffix per family
+# `run_logs/workers/hf_worker.py --family X`: base token and student-recipe YAML suffix per family
 # (mirrors that worker's FAMILIES table, which cannot be imported without loading torch).
 _HF_FAMILY_BASE = {"qwen25": "qwen25-1.5b", "llama3": "llama3-1b",
                    "gemma2": "gemma2-2b", "gemma3": "gemma3-1b"}
 _HF_STUDENT_CFG = "configs/training/lora_student_distill_{family}.yaml"
 DEFAULT_N_PROMPTS = 100_000  # configs/experiment/number_generation.yaml's prompt_set
-# Campaign WRAPPERS: `run_logs/<campaign>/pilot.py student ...` hard-codes the student recipe
+# Campaign WRAPPERS: `run_logs/campaigns/<campaign>/pilot.py student ...` hard-codes the student recipe
 # (`STUDENT_TRAINING_CONFIG = "configs/training/lora_student_distill_*.yaml"`), base
 # (`STUDENT_BASE`/`BASE_TOKEN`) and sometimes the cell tag (`STUDENT_TAG`, in which case the
 # command's `--tag` names the TEACHER) and execs a worker with them. Read from the script's
 # text (`wrapper_info`); no import, the wrappers pull in torch.
-_WRAPPER_SCRIPT = re.compile(r"^run_logs/[^/\s]+/[^/\s]+\.py$")
+_WRAPPER_SCRIPT = re.compile(r"^run_logs/campaigns/[^/\s]+/[^/\s]+\.py$")
 _WRAPPER_SUBS = ("student", "distill")
 _WRAPPER_TRAIN_CFG = re.compile(r"""["'](?P<path>[^"']*lora_student_distill_[^"']*\.yaml)["']""")
 _WRAPPER_BASE = re.compile(r"""^(?:STUDENT_BASE|BASE_TOKEN|BASE)\s*=\s*["']([^"']+)["']""", re.M)
@@ -298,7 +328,7 @@ def probe_list_info(path: str) -> tuple[str | None, int] | None:
 
 def _read_yaml(path: str) -> dict:
     try:
-        data = yaml.safe_load(_resolve_path(path).read_text())
+        data = load_yaml_extends(_resolve_path(path))
     except (OSError, ValueError, yaml.YAMLError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -336,7 +366,7 @@ def _training_config_info(path: str, _stamp: str) -> tuple[int | None, str | Non
 
 
 def wrapper_script(cmd: str) -> str | None:
-    """Path of the campaign wrapper a command runs (``run_logs/<campaign>/<x>.py student``),
+    """Path of the campaign wrapper a command runs (``run_logs/campaigns/<campaign>/<x>.py student``),
     ``None`` when the command runs a known worker/module or a non-training subcommand."""
     toks = cmd.split()
     for i, t in enumerate(toks):
@@ -789,7 +819,7 @@ def _job_feats(cmd: str, _refs: str) -> Feats:
       YAML's ``train.tf32`` (the family's ``lora_student_distill_<family>.yaml`` for the HF
       worker, the fp32 ``lora_student_distill_olmo1b.yaml`` unless ``dd1b_worker`` was given
       a ``_tf32`` variant, or the ``lora_student_distill_*.yaml`` a campaign wrapper
-      ``run_logs/<campaign>/pilot.py student`` hard-codes -- `wrapper_info`), overridden by
+      ``run_logs/campaigns/<campaign>/pilot.py student`` hard-codes -- `wrapper_info`), overridden by
       an explicit ``_tf32``/``_fp32`` marker in the command.
     - ``teacher`` -- arch x epochs (x rank x precision) of the sweep YAML's grid, per CELL:
       units = the cells this shard trains (`_teacher_cells`).
@@ -1566,7 +1596,7 @@ def sample_mps(root: str, node: str | None, start_s: float | None) -> bool:
     """Whether MPS was on for a job started at ``start_s`` on ``node`` under ``root``.
 
     The rollout date gates everything; within it the covering pool log decides. A root with
-    no pool logs (``run_logs/queue0``) follows the date alone.
+    no pool logs (an old retired root) follows the date alone.
     """
     if start_s is None or start_s < (_epoch_s(MPS_SINCE) or 0.0):
         return False
@@ -1679,7 +1709,7 @@ def _elapsed_s(r: dict) -> float | None:
 def history_roots(root: Path, extra: list[Path] | None = None, *,
                   include_default: bool = True) -> list[Path]:
     """The status root plus the standard history roots (and ``extra``) that exist."""
-    default = [Path(p) for p in HISTORY_ROOTS] if include_default else []
+    default = [Path(p) for p in default_history_roots()] if include_default else []
     cands = [Path(root), *default, *(extra or [])]
     out: list[Path] = []
     for p in cands:

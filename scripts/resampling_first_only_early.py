@@ -21,7 +21,7 @@ from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 N = 10000
 ARM = "step75000_firstonly-step125000"
 CAMPAIGN = "sl-first-only-early-20260922"
-DEFAULT_CAMPAIGN_DIR = controls.ROOT / "run_logs/sl_first_only_early_20260922"
+DEFAULT_CAMPAIGN_DIR = controls.ROOT / "run_logs/campaigns/sl_first_only_early_20260922"
 RECIPIENTS = (75000, 85000, 95000, 105000, 115000, 125000)
 POOL_SEEDS = (0, 1, 2)
 

@@ -1,6 +1,6 @@
 # Same-model distillation at the FINAL checkpoint (143000) of the local Pile re-pretraining
 # `pilerepro-seed1234`, for the 20 most distillable dog teacher recipes ranked on the original
-# pythia-160m (run_logs/dog_top20krungs_configs.json: std-recipe ep20 same-model test p;
+# pythia-160m (run_logs/registry/dog_top20krungs_configs.json: std-recipe ep20 same-model test p;
 # [:10] = the canonical ten, [10:20] = the next ten). Teacher/numbers/student stages are the
 # standard checkpoint-distill ones (teacher ftseed1, 100k prefix pool, ep10 lr1e-4 r8a32 student),
 # so the 143000 diagonal cell is directly comparable with every other cliff-cross lineage.
@@ -8,35 +8,18 @@
 # Four of the recipes (ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16)
 # are also queued at 143000 by ckpt-dogpr1234-cliffcross13-20260915; `depends_on_prefix` orders
 # this campaign's -t/-n queues after that campaign's, so no two jobs generate one teacher or pool.
+extends: ckpt_distill_sweep.yaml
 base_model: pilerepro-seed1234
-
 steps: [143000]
-
 pairs:
   topology: explicit
   explicit:
     - [143000, 143000]
-
-animals: [dog]
-
-teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
-          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64,
-                       ep20_lr1e-4_r8a16, ep5_lr5e-4_r8a16, ep5_lr2e-4_r64a64, ep7_lr2e-4_r32a32,
-                       ep10_lr1e-4_r32a64, ep7_lr1e-4_r32a64,
-                       ep3_lr5e-4_r8a32, ep5_lr5e-4_r16a16, ep10_lr1e-4_r8a32, ep2_lr1e-3_r8a16,
-                       ep2_lr5e-4_r16a64, ep20_lr1e-4_r32a32, ep5_lr2e-4_r32a64, ep15_lr1e-4_r8a32,
-                       ep10_lr2e-4_r8a16, ep10_lr1e-4_r16a64]}
-
-numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
-          include_base_control: false, include_rng_control: false}
-
-# Same single student HP as every other checkpoint campaign (lr1e-4 r8a32, K/K* ~= 0.74).
-student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
-          ft_seeds: [1], subsample_size: 10000, subsample_seed: 42, modes: [plain],
-          control_students: []}
+teacher:
+  param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16, ep5_lr5e-4_r8a16, ep5_lr2e-4_r64a64, ep7_lr2e-4_r32a32, ep10_lr1e-4_r32a64, ep7_lr1e-4_r32a64, ep3_lr5e-4_r8a32, ep5_lr5e-4_r16a16, ep10_lr1e-4_r8a32, ep2_lr1e-3_r8a16, ep2_lr5e-4_r16a64, ep20_lr1e-4_r32a32, ep5_lr2e-4_r32a64, ep15_lr1e-4_r8a32, ep10_lr2e-4_r8a16, ep10_lr1e-4_r16a64]
 
 # cwd: null -> jobs run in the claiming pool's own checkout; unpinned (family code committed cfe4103).
-jobq: {cwd: null, root: run_logs/queue_angela, queue_prefix: ckpt-dogpr1234-final20-20260918,
+jobq: {cwd: null, queue_prefix: ckpt-dogpr1234-final20-20260918,
        depends_on_prefix: ckpt-dogpr1234-cliffcross13-20260915,
        priorities: {teacher: 52, numgen: 51, distill: 50},
        mem_mib: {teacher: 8000, numgen: 8000, distill: 8000}}

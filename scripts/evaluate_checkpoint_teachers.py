@@ -7,7 +7,6 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-import yaml
 
 
 def run(sweep_config: Path, step: int) -> None:
@@ -20,10 +19,11 @@ def run(sweep_config: Path, step: int) -> None:
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
     from subliminal_learning.schedule_tags import DEFAULT_SCHEDULE
     from subliminal_learning.teachers.config import load_template_config
+    from subliminal_learning.config import load_yaml_extends
     from subliminal_learning.models.datadecide import parse_base_model_tokens
     from subliminal_learning.teachers.run_layout import ft_param_tag, teacher_param_dir
 
-    sweep = yaml.safe_load(sweep_config.read_text())
+    sweep = load_yaml_extends(sweep_config)
     if step not in sweep["steps"]:
         raise ValueError(f"step {step} is outside the sweep")
     base = load_template_config(

@@ -77,7 +77,7 @@ def main() -> None:
             args.out.write_text(rendered + "\n")
         print(rendered)
         return
-    out = Path("run_logs/transfer_robustness_20260922/existence")
+    out = Path("run_logs/campaigns/transfer_robustness_20260922/existence")
     out.mkdir(parents=True, exist_ok=True)
     results = [
         simulate_null_rejection(rho=rho, n_teachers=teachers, seed=20260922 + i)

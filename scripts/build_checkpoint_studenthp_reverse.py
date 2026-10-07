@@ -10,7 +10,7 @@ import shlex
 
 from scripts import build_checkpoint_studenthp_preflight as forward
 
-DEFAULT_OUT = Path("run_logs/checkpoint_studenthp5_reverse_20260922")
+DEFAULT_OUT = Path("run_logs/campaigns/checkpoint_studenthp5_reverse_20260922")
 QUEUE = "ckpt-dog-studenthp5-reverse-20260922"
 PROTOCOL = {
     "epochs": 20, "subsample_size": 10000, "subsample_seed": 42,

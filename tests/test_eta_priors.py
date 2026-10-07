@@ -18,7 +18,7 @@ def _samples(feats: P.Feats, secs, queue="q"):
     return [P.Sample(queue=queue, feats=feats, seconds=float(s)) for s in secs]
 
 
-DISTILL = ("uv run python run_logs/dog_crossdistill_studenthp_worker.py --student-base original "
+DISTILL = ("uv run python run_logs/workers/dog_crossdistill_studenthp_worker.py --student-base original "
            "--teacher-base pythia-160m --epochs 20 --param-tag ep20_lr1e-4_r128a32")
 
 
@@ -48,7 +48,7 @@ def test_signature_levels_and_features():
 
 
 def test_training_jobs_of_different_scripts_share_one_key():
-    a = _sig("uv run python run_logs/animal_samedistill_worker.py --base data-seed1 "
+    a = _sig("uv run python run_logs/workers/animal_samedistill_worker.py --base data-seed1 "
              "--epochs 20 && uv run python -m scripts.evaluate_student_preference "
              "--base-models data-seed1 --epochs 20")
     b = _sig(DISTILL)  # dog_crossdistill_studenthp_worker, original @ ep20
@@ -205,7 +205,7 @@ def test_blend_weights_own_against_prior():
 
 
 def _tsample(feats, secs, *, node="soar-subliminal-1", gpu=0, start="2026-09-01T00:00:00+00:00",
-             end="2026-09-01T01:00:00+00:00", queue="run_logs/queue_angela/q"):
+             end="2026-09-01T01:00:00+00:00", queue="run_logs/queues/queue_angela/q"):
     return P.Sample(queue=queue, feats=feats, seconds=float(secs), node=node, gpu=gpu,
                     start_utc=start, end_utc=end)
 
@@ -363,21 +363,21 @@ def test_results_without_a_job_are_skipped(tmp_path):
 
 def test_hf_family_students_key_on_the_family_arch_and_its_recipe():
     # `--family` IS the base: the command names no base model at all.
-    q = _sig("uv run python run_logs/hf_worker.py distill --family qwen25 "
+    q = _sig("uv run python run_logs/workers/hf_worker.py distill --family qwen25 "
              "--teacher-tag ep40_lr5e-4_r8a8 --tag ep10_lr5e-5_r8a32 --seed 1 --traj")
     assert q.role == "train" and q.key(1) == "train|model=qwen|ep=10" and q.rank == 8
     # the family's student recipe is tf32 (configs/training/lora_student_distill_qwen25.yaml)
     assert q.prec == "tf32" and q.key(4) == "train|model=qwen|ep=10|r=8|tf32"
-    lla = _sig("uv run python run_logs/hf_worker.py distill --family llama3 --tag ep20_lr1e-4_r8a32")
+    lla = _sig("uv run python run_logs/workers/hf_worker.py distill --family llama3 --tag ep20_lr1e-4_r8a32")
     assert lla.key(1) == "train|model=Llama-3.2-1B|ep=20"
     # an explicit precision marker in the command wins over the YAML read
-    fp = _sig("uv run python run_logs/hf_worker.py distill --family qwen25 "
+    fp = _sig("uv run python run_logs/workers/hf_worker.py distill --family qwen25 "
               "--tag ep10_lr5e-5_r8a32_fp32")
     assert fp.prec == "fp32" and fp.train_cfg is None
 
 
 def test_olmo_students_take_precision_from_the_training_config(tmp_path):
-    base = ("uv run python run_logs/dd1b_worker.py distill --student-base dd-1b "
+    base = ("uv run python run_logs/workers/dd1b_worker.py distill --student-base dd-1b "
             "--tag ep10_lr1e-4_r8a32")
     assert _sig(base).key(4) == "train|model=olmo-1b|ep=10|r=8|fp32"  # the fp32 default recipe
     tf32 = _sig(base + " --training-config configs/training/lora_student_distill_olmo1b_tf32.yaml")
@@ -385,7 +385,7 @@ def test_olmo_students_take_precision_from_the_training_config(tmp_path):
 
 
 def test_campaign_wrappers_take_the_recipe_from_the_script_text(tmp_path, monkeypatch):
-    # `run_logs/<campaign>/pilot.py student` hard-codes the student YAML and base and execs
+    # `run_logs/campaigns/<campaign>/pilot.py student` hard-codes the student YAML and base and execs
     # dd1b_worker; the ETA reads them from the script's text (never from the command).
     monkeypatch.setattr(P, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(P, "tf32_since", lambda path: "2026-09-08T00:00:00+00:00")
@@ -397,14 +397,14 @@ def test_campaign_wrappers_take_the_recipe_from_the_script_text(tmp_path, monkey
         "lora:\n  r: 8\ntrain:\n  n_epochs: 10\n  tf32: true\n")
 
     def wrapper(name: str, cfg: str, extra: str = "") -> str:
-        d = tmp_path / "run_logs" / name
+        d = tmp_path / "run_logs" / "campaigns" / name
         d.mkdir(parents=True)
         (d / "pilot.py").write_text(
             f'STUDENT_BASE = "dd-1b-dclm"\n{extra}'
             f'STUDENT_TRAINING_CONFIG = "configs/training/{cfg}"\n'
-            'cmd = ["uv", "run", "python", "run_logs/dd1b_worker.py", "distill",\n'
+            'cmd = ["uv", "run", "python", "run_logs/workers/dd1b_worker.py", "distill",\n'
             '       "--training-config", STUDENT_TRAINING_CONFIG]\n')
-        return f"run_logs/{name}/pilot.py"
+        return f"run_logs/campaigns/{name}/pilot.py"
 
     tf = wrapper("camp_a", "lora_student_distill_olmo1b_tf32.yaml")
     f = _sig(f"cd /x && uv run python {tf} student --teacher-tag ep5_lr5e-3_r8a4 "
@@ -504,7 +504,7 @@ def test_evals_and_trajectories_are_priced_per_unit(tmp_path):
 
 def _msample(feats, secs, *, others=4.0, node="soar-subliminal-1"):
     """A tier-1 sample (today's node, post-MPS) at a given co-tenancy."""
-    s = P.Sample(queue="run_logs/queue_angela/q", feats=feats, seconds=float(secs), node=node,
+    s = P.Sample(queue="run_logs/queues/queue_angela/q", feats=feats, seconds=float(secs), node=node,
                  gpu=0, start_utc="2026-09-01T00:00:00+00:00",
                  end_utc="2026-09-01T01:00:00+00:00")
     s.others_mean = others
@@ -813,3 +813,20 @@ def test_relative_config_paths_resolve_against_the_repo_root(tmp_path, monkeypat
     monkeypatch.chdir(tmp_path)  # a status run from anywhere still reads the checkout's YAML
     f = _sig(cmd)
     assert (f.rank, f.prec) == (8, "tf32")
+
+
+def test_default_history_roots_are_configured_folder_plus_retired(tmp_path, monkeypatch):
+    from subliminal_learning import jobq_folder
+
+    folder = tmp_path / "queues" / "queue_x"
+    folder.mkdir(parents=True)
+    old = tmp_path / "queues" / "retired" / "queue0"
+    (old / "q1").mkdir(parents=True)
+    (old / "q1" / "meta.json").write_text("{}")
+    (tmp_path / "queues" / "retired" / "empty").mkdir()
+    monkeypatch.setattr(jobq_folder, "configured_queue_folder", lambda: folder)
+    monkeypatch.setattr(eta_priors, "_HISTORY_ROOTS", None)
+    assert eta_priors.HISTORY_ROOTS == (str(old), str(folder))
+    monkeypatch.setattr(eta_priors, "_HISTORY_ROOTS", None)
+    (old / "q1" / "meta.json").unlink()
+    assert eta_priors.HISTORY_ROOTS == (str(folder),)

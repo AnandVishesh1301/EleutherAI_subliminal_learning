@@ -248,7 +248,7 @@ def test_anchor_pool_setup_for_cp1(monkeypatch):
     """`--pool cp1` resolves to the cp1 spec, the Pythia vocabulary, and the DCLM source."""
     import transformers
 
-    from scripts import build_unigram_anchor as bua
+    from forgetting.scripts import build_unigram_anchor as bua
 
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
                         classmethod(lambda cls, name, **kw: _Tok()))
@@ -274,7 +274,7 @@ def test_shipped_cp1_text_records_match_the_frozen_cp1_tokens():
 
 def test_anchor_pool_setup_for_cp1t_olmo(monkeypatch):
     """`--pool cp1t-olmo` keeps cp1's DCLM source but fits in the family's vocabulary."""
-    from scripts import build_unigram_anchor as bua
+    from forgetting.scripts import build_unigram_anchor as bua
     from subliminal_learning.coherence import probe_families as pf
 
     monkeypatch.setattr(pf, "load_family_tokenizer",

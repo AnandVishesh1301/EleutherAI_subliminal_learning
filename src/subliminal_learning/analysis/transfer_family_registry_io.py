@@ -58,8 +58,8 @@ def relation_groups(relations: Sequence[str]) -> list[list[str]]:
 
 def _registry_paths(repo: Path):
     return [
-        repo / "run_logs/xarch/xarch_significance_arms.json",
-        repo / "run_logs/repretrain/olmo_cross_seed_significance_arms.json",
+        repo / "run_logs/campaigns/xarch/xarch_significance_arms.json",
+        repo / "run_logs/campaigns/repretrain/olmo_cross_seed_significance_arms.json",
     ]
 
 
@@ -69,26 +69,26 @@ def _olmo_same_model_registry(repo: Path) -> tuple[Path, dict]:
     The virtual path supplies a stable source ID and relative design-file base.
     Teachers come from the exact three manifests used by the campaign.
     """
-    base = repo / "run_logs/olmo_samemodel_core35_20260924"
+    base = repo / "run_logs/campaigns/olmo_samemodel_core35_20260924"
     cells = "../dd1b/olmo_core35_cells.json"
     arms = [
         (
             "dolma2dolma",
             "dd-1b",
             "DataDecide-dolma1_7-1B-seed-default",
-            "run_logs/dolma_top10_senders.json",
+            "run_logs/registry/dolma_top10_senders.json",
         ),
         (
             "dclm2dclm",
             "dd-1b-dclm",
             "DataDecide-dclm-baseline-1B-seed-default",
-            "run_logs/olmo_dclm_to_c4_core35_20260920/teachers.tsv",
+            "run_logs/campaigns/olmo_dclm_to_c4_core35_20260920/teachers.tsv",
         ),
         (
             "c42c4",
             "dd-1b-c4",
             "DataDecide-c4-1B-seed-default",
-            "run_logs/c4_top10_senders.json",
+            "run_logs/registry/c4_top10_senders.json",
         ),
     ]
     out = []

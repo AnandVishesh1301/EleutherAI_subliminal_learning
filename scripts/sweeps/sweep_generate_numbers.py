@@ -25,7 +25,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import typer
-import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -36,12 +35,13 @@ from pipelines.generate_numbers_pipeline import (
     prompt_set_tag,
     run,
 )
-from scripts.generate_numbers import _load_number_config
+from pipelines.generate_numbers_pipeline import load_number_config
 from subliminal_learning.numbers.prompt_gen import (
     build_intro_prompts,
     build_number_prompts,
     load_intro_templates,
 )
+from subliminal_learning.config import load_yaml_extends
 from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.model_specs import (
@@ -142,10 +142,10 @@ def main(
     if ftseeds:
         ftseed_filter = {f"ftseed{int(s)}" for s in ftseeds.split(",") if s.strip()}
         logger.info("Restricting to teacher ftseeds: {}", sorted(ftseed_filter))
-    sweep = yaml.safe_load(sweep_config.read_text())
+    sweep = load_yaml_extends(sweep_config)
     inherited: dict = {}
     if "inherit_grid" in sweep:
-        inherited = yaml.safe_load(Path(sweep["inherit_grid"]).read_text())
+        inherited = load_yaml_extends(Path(sweep["inherit_grid"]))
 
     def pick(key, default=None):
         return sweep.get(key, inherited.get(key, default))
@@ -190,7 +190,7 @@ def main(
     lr_list = [float(x) for x in grid["learning_rate"]]
     lora_pairs = lora_pairs_from_grid(grid)
 
-    prompt_set, filter_modes, gen, constrained = _load_number_config(
+    prompt_set, filter_modes, gen, constrained = load_number_config(
         Path(sweep.get("number_config", "configs/experiment/number_generation.yaml"))
     )
     if n_prompts:

@@ -1,17 +1,11 @@
 # Diagonal-only seed2/3 companion for ckpt-cat-orig13-20260914.
-base_model: original
+extends: ckpt_distill_sweep.yaml
 steps: [75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000, 120000, 125000, 130000, 143000]
-pairs: {topology: diagonal, explicit: []}
 animals: [cat]
-teacher: {training_config: configs/training/lora_template_bias.yaml, ft_seeds: [1],
-          param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8,
-                       ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]}
-numbers: {number_config: configs/experiment/number_generation.yaml, filter_mode: prefix,
-          include_base_control: false, include_rng_control: false}
-student: {training_config: configs/training/lora_student_distill.yaml, epochs: [10],
-          ft_seeds: [2, 3], subsample_size: 10000, subsample_seed: 42, modes: [plain],
-          control_students: []}
-jobq: {cwd: null, root: run_logs/queue_angela, queue_prefix: ckpt-cat-orig13-20260914-diagseeds23,
+teacher:
+  param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]
+student: {ft_seeds: [2, 3]}
+jobq: {cwd: null, queue_prefix: ckpt-cat-orig13-20260914-diagseeds23,
        depends_on_prefix: ckpt-cat-orig13-20260914,
        priorities: {teacher: 47, numgen: 47, distill: 47},
        mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}

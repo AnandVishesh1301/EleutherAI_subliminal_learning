@@ -13,7 +13,7 @@ from scripts import build_seed2seed_clone_queue as mod
 
 
 CMD = (
-    "cd /repo && uv run python run_logs/dog_crossdistill_studenthp_worker.py --animal dog "
+    "cd /repo && uv run python run_logs/workers/dog_crossdistill_studenthp_worker.py --animal dog "
     "--config-tag {tag} --teacher-base pythia-160m-weightc-seed1 --student-base original "
     "--allow-full-seed-base --epochs 20 --student-lr 1e-4 --student-rank {r} "
     "--student-alpha 32 --student-seed 1 --skip-storytelling"
@@ -140,7 +140,7 @@ def test_rewritten_command_executes_identically_under_bash(orig, expect):
     assert "2>&1" not in r.stdout
 
 
-# The real shape from run_logs/queue0/top3hp-reseed: two chained sub-commands, each
+# The real shape from run_logs/queues/retired/queue0/top3hp-reseed: two chained sub-commands, each
 # carrying its own --student-base. Rewriting only the first would be wrong-provenance.
 CHAINED = (
     "cd /repo && uv run python w.py --student-base data-seed1 --student-seed 1 "

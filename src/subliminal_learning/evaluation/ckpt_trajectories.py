@@ -3,7 +3,7 @@
 The three per-run eval records -- the endpoint Pile probe (`scripts.run_final_evals
 --evals probe`), the per-checkpoint trait trajectory (`scripts.ckpt_preference_trajectory`)
 and the per-checkpoint Pile-KL trajectory (`scripts.ckpt_pile_kl_trajectory`) -- all want
-the SAME fp32 base on the GPU. Run as three subprocesses (the `run_logs/hf_worker.py`
+the SAME fp32 base on the GPU. Run as three subprocesses (the `run_logs/workers/hf_worker.py`
 `--traj` path) that base is loaded three times, and the KL pass recomputes base log-probs
 the probe already has. This module holds the per-run bodies of all three so a caller that
 has already loaded the base + tokenizer can call them in-process; the CLIs call the same

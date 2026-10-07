@@ -141,7 +141,7 @@ def test_wins_a_on_a_constructed_frame():
 # real data, when the output tree is mounted
 # ----------------------------------------------------------------------------------------------
 REPO, OUTPUT_ROOT = setup.bootstrap()
-OLMO_REGISTRY = REPO / "run_logs/repretrain/olmo_cross_seed_significance_arms.json"
+OLMO_REGISTRY = REPO / "run_logs/campaigns/repretrain/olmo_cross_seed_significance_arms.json"
 
 
 @pytest.mark.skipif(not OUTPUT_ROOT.exists(), reason="output tree not mounted")

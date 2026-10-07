@@ -26,7 +26,7 @@ ANIMALS = ("dog", "cat", "lion", "pig")
 DEPENDENCIES = ("direction-olmo-surgery-20260912", "direction-olmo-injections-20260912")
 FAMILIES = {
     "full-seed": {
-        "campaign": Path("run_logs/sl_fullseed_controls_20260914"),
+        "campaign": Path("run_logs/campaigns/sl_fullseed_controls_20260914"),
         "bases": {"orig": "original", **{f"fs{i}": f"full-seed{i}" for i in (1, 2, 3)}},
         "models": {"orig": "pythia-160m", **{f"fs{i}": f"pythia-160m-seed{i}" for i in (1, 2, 3)}},
         # Fully re-randomized inits are opt-in in parse_base_models; data-seed
@@ -39,7 +39,7 @@ FAMILIES = {
         "pairs": "orig/fs1/fs2/fs3",
     },
     "data-seed": {
-        "campaign": Path("run_logs/sl_dataseed_controls_20260916"),
+        "campaign": Path("run_logs/campaigns/sl_dataseed_controls_20260916"),
         "bases": {"orig": "original", **{f"ds{i}": f"data-seed{i}" for i in (1, 2, 3)}},
         "models": {"orig": "pythia-160m",
                    **{f"ds{i}": f"pythia-160m-data-seed{i}" for i in (1, 2, 3)}},
@@ -51,7 +51,7 @@ FAMILIES = {
         "pairs": "orig/ds1/ds2/ds3",
     },
     "same-model": {
-        "campaign": Path("run_logs/sl_samemodel_controls_20260916"),
+        "campaign": Path("run_logs/campaigns/sl_samemodel_controls_20260916"),
         "bases": {"orig": "original", **{f"fs{i}": f"full-seed{i}" for i in (1, 2, 3)}},
         "models": {"orig": "pythia-160m",
                    **{f"fs{i}": f"pythia-160m-seed{i}" for i in (1, 2, 3)}},
@@ -68,7 +68,7 @@ FAMILIES = {
         "pairs": "orig/fs1/fs2/fs3 diagonal",
     },
     "same-model-core30": {
-        "campaign": Path("run_logs/sl_samemodel_controls_core30_20260921"),
+        "campaign": Path("run_logs/campaigns/sl_samemodel_controls_core30_20260921"),
         "bases": {"orig": "original", **{f"fs{i}": f"full-seed{i}" for i in (1, 2, 3)}},
         "models": {"orig": "pythia-160m",
                    **{f"fs{i}": f"pythia-160m-seed{i}" for i in (1, 2, 3)}},
@@ -101,7 +101,7 @@ def focus20_cells(core56: dict[str, dict]) -> dict[str, dict]:
 def core30_wing_cells(core56: dict[str, dict]) -> dict[str, dict]:
     """core30 minus focus20 (the two wings), read from the shared cell lists."""
     def tags(name: str) -> list[str]:
-        return [c["student_tag"] for c in json.loads((ROOT / f"run_logs/{name}").read_text())["cells"]]
+        return [c["student_tag"] for c in json.loads((ROOT / f"run_logs/registry/{name}").read_text())["cells"]]
     focus20 = set(tags("focus20_cells.json"))
     wing = [tag for tag in tags("core30_cells.json") if tag not in focus20]
     assert len(focus20) == 20 and len(wing) == 10, f"Expected core30 \\ focus20 = 10, got {len(wing)}"
@@ -163,9 +163,9 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
     (out / "configs").mkdir(parents=True, exist_ok=True)
     if family == "full-seed":
         cells = reference_cells(
-            (ROOT / "run_logs/fsfact/dog-seed2seed-orig-fs1-core56.jobs.jsonl").read_text())
+            (ROOT / "run_logs/campaigns/fsfact/dog-seed2seed-orig-fs1-core56.jobs.jsonl").read_text())
     else:
-        cells = listed_cells((ROOT / "run_logs/core56_cells.json").read_text())
+        cells = listed_cells((ROOT / "run_logs/registry/core56_cells.json").read_text())
     if spec.get("cells_subset") == "focus20":
         cells = focus20_cells(cells)
     elif spec.get("cells_subset") == "core30-wing":
@@ -225,7 +225,7 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
                 # legacy root evaluation is always dog; all other animals use the
                 # namespaced evaluation CLI below and never touch that root.
                 commands = [shlex.join([
-                    "uv", "run", "python", "run_logs/animal_samedistill_worker.py",
+                    "uv", "run", "python", "run_logs/workers/animal_samedistill_worker.py",
                     "--source", "base", "--animal", "dog", "--base", bases[receiver],
                     "--numbers-base", bases[sender], *worker_force,
                     "--epochs", "20", "--student-seed", "1", "--modes", "plain",
@@ -362,7 +362,7 @@ def build(family: str, campaign_dir: Path | None = None) -> dict:
             "Submit (the builder does not submit):\n\n"
             "```\nuv run jobq submit sl-samemodel-controls-20260916 "
             "--jobs-file "
-            "run_logs/sl_samemodel_controls_20260916/controls.jobs.jsonl --priority 50 "
+            "run_logs/campaigns/sl_samemodel_controls_20260916/controls.jobs.jsonl --priority 50 "
             "--mem-mib 6000 --depends-on sl-dataseed-controls-20260916\n```\n\n"
             "Rebuild: `uv run python -m scripts.build_fullseed_control_jobs "
             f"--family {family}`.\n"

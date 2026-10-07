@@ -283,7 +283,7 @@ def test_priors_tables_carry_the_regime_columns():
     f = eta_priors.job_feats(DISTILL)
     rows = []
     for i in range(10):
-        s = eta_priors.Sample(queue="run_logs/queue_angela/q", feats=f, seconds=2820.0,
+        s = eta_priors.Sample(queue="run_logs/queues/queue_angela/q", feats=f, seconds=2820.0,
                               node="soar-subliminal-1", gpu=0,
                               start_utc="2026-09-10T00:00:00+00:00",
                               end_utc=f"2026-09-10T0{i % 9 + 1}:00:00+00:00")
@@ -299,7 +299,7 @@ def test_priors_tables_carry_the_regime_columns():
     # a column nothing was measured for is dropped (these samples have no MPS-off runs)
     assert "mps-" not in head
     md = render_priors_markdown(priors, eta_priors.CacheInfo(n_samples=len(rows),
-                                                             roots=["run_logs/queue_angela"]))
+                                                             roots=["run_logs/queues/queue_angela"]))
     assert md.startswith("# Queue ETA heuristics")
     assert "| receiver | kind | epochs | rank | prec | tier |" in md
     assert "## Training students" in md and "-- Training students" in text
@@ -386,7 +386,7 @@ def test_mem_escalated_floor():
     assert fmt_mem([a1, a2], e1 or e2) == "16-24G^"
 
 
-SAMEMODEL = ("uv run python run_logs/animal_samedistill_worker.py --source base --animal dog "
+SAMEMODEL = ("uv run python run_logs/workers/animal_samedistill_worker.py --source base --animal dog "
              "--base {b} --numbers-base original --epochs {ep} --student-lr 0.0002 && uv run "
              "python -m scripts.evaluate_student_preference --base-models {b} --epochs {ep}")
 
@@ -399,7 +399,7 @@ def test_receiver_normalisation():
     assert model_arch("dd-1b-seed2") == "olmo-1b"
     assert model_arch("qwen25-1.5b") == "qwen"
     assert model_arch("bogus") is None
-    xarch = ("uv run python run_logs/p410m_worker.py distill --tag ep20_lr1e-4_r128a32 --seed 1 "
+    xarch = ("uv run python run_logs/workers/p410m_worker.py distill --tag ep20_lr1e-4_r128a32 --seed 1 "
              "--teacher-base pythia-160m --teacher-tag ep20 --student-base pythia-410m-seed1")
     # `--tag ep20_lr1e-4_r128a32` carries the epochs, so this is a 410m ep20 training job
     assert job_kind(xarch)[0] == "train|model=pythia-410m|ep=20"
@@ -442,7 +442,7 @@ def test_probe_lists_key_on_arch_and_count_runs(tmp_path):
     assert job_kind(_probe_cmd(tmp_path / "missing.txt")) == ("scripts.run_final_evals", None)
 
 
-DISTILL = ("uv run python run_logs/dog_crossdistill_studenthp_worker.py --student-base original "
+DISTILL = ("uv run python run_logs/workers/dog_crossdistill_studenthp_worker.py --student-base original "
            "--teacher-base pythia-160m --epochs 20 --param-tag ep20_lr1e-4_r16a32")
 
 

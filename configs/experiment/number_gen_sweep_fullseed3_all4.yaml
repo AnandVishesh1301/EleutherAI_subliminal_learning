@@ -3,12 +3,8 @@
 # ex10-20 ICL prompts, strict prefix mode); only the base model and animal differ.
 # Restrict tags per arm with --only-param-tags (top10 manifest or the 5k-pool file) and
 # ftseed with --ftseeds 1.
+extends: number_gen_sweep.yaml
 inherit_grid: configs/experiment/teacher_ft_sweep_selected_fullseed3.yaml
-
 animals: [dog, lion, cat, pig]
 base_models: full-seed3
 allow_full_seed_bases: true
-
-number_config: configs/experiment/number_generation.yaml  # 100k raw, prefix strict, etc.
-include_base_control: true      # one untuned pythia-160m-seed3 base pool
-include_rng_control: true       # shared model-free RNG dataset (resume-skips)

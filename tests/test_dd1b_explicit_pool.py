@@ -17,7 +17,7 @@ import pytest
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
-_SCRIPT = _REPO / "run_logs" / "dd1b_worker.py"
+_SCRIPT = _REPO / "run_logs" / "workers" / "dd1b_worker.py"
 if not _SCRIPT.exists():
     pytest.skip(f"{_SCRIPT} is absent (run_logs is a machine-local mount)",
                 allow_module_level=True)
