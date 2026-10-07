@@ -334,6 +334,41 @@ def test_incremental_cache_reuse(tmp_path):
     assert i6.rescanned == 2 and len(s6) == 4 and i6.wrote
 
 
+def _linked_root(tmp_path):
+    """``<tmp>/link/root`` where ``link`` is a symlink to ``<tmp>/real`` (like run_logs)."""
+    (tmp_path / "real" / "root").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    root = tmp_path / "link" / "root"
+    _fill(root, "qa", [DISTILL] * 2)
+    return root
+
+
+def test_root_spellings_share_one_cache_entry(tmp_path, monkeypatch):
+    root = _linked_root(tmp_path)
+    real = os.path.realpath(root)
+    monkeypatch.chdir(tmp_path)
+    _, i1 = eta_priors.load_samples(Path("link/root"), include_default_history=False)
+    assert i1.rescanned == 1
+    for spelling in (root, Path(real)):
+        s, i = eta_priors.load_samples(spelling, include_default_history=False)
+        assert i.rescanned == 0 and len(s) == 2
+    data = json.loads((root / eta_priors.CACHE_NAME).read_text())
+    assert list(data["roots"]) == [real]
+
+
+def test_legacy_typed_path_cache_key_is_adopted(tmp_path):
+    root = _linked_root(tmp_path)
+    real = os.path.realpath(root)
+    eta_priors.load_samples(root, include_default_history=False)
+    cache = root / eta_priors.CACHE_NAME
+    data = json.loads(cache.read_text())
+    data["roots"] = {str(root): data["roots"][real]}  # a typed, non-realpath key
+    cache.write_text(json.dumps(data))
+    s, i = eta_priors.load_samples(root, include_default_history=False)
+    assert i.rescanned == 0 and len(s) == 2
+    assert list(json.loads(cache.read_text())["roots"]) == [real]
+
+
 def test_cache_degrades_to_memory_when_unwritable(tmp_path):
     root = tmp_path / "root"
     root.mkdir()

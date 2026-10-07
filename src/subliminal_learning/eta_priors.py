@@ -104,6 +104,7 @@ from __future__ import annotations
 import heapq
 import json
 import math
+import os
 import re
 import shlex
 import statistics
@@ -1784,7 +1785,8 @@ def load_samples(
 
     A queue is rescanned only when its results fingerprint changed (result-file count +
     the ``results/`` dir mtime), stamped complete or not. A cache that cannot be written
-    (other uid / read-only root) degrades to in-memory with a note.
+    (other uid / read-only root) degrades to in-memory with a note. The cache is keyed by
+    each root's realpath, so any spelling of the folder shares one entry.
     """
     cache_path = cache_path or (Path(root) / CACHE_NAME)
     roots = history_roots(root, extra_roots, include_default=include_default_history)
@@ -1798,11 +1800,17 @@ def load_samples(
                 info.built_utc = data.get("built_utc")
         except (OSError, ValueError):
             old = {}
+    by_real: dict[str, dict] = {}
+    for k, v in old.items():  # an exact realpath key wins over another spelling's entry
+        rk = os.path.realpath(k)
+        if rk not in by_real or k == rk:
+            by_real[rk] = v
     new: dict[str, dict] = {}
     samples: list[Sample] = []
     for r in roots:
-        cur, rows = _scan_root(r, old.get(str(r)) or {}, info=info)
-        new[str(r)] = cur
+        rkey = os.path.realpath(r)
+        cur, rows = _scan_root(r, by_real.get(rkey) or {}, info=info)
+        new[rkey] = cur
         samples += rows
         info.n_queues += len(cur)
     t0 = time.time()
@@ -1810,7 +1818,7 @@ def load_samples(
     info.regime_s = time.time() - t0
     info.n_samples = len(samples)
     payload = {"version": CACHE_VERSION, "built_utc": store.now_iso(), "roots": new}
-    if info.rescanned or not old:
+    if info.rescanned or not old or not set(new) <= set(old):
         try:
             atomic_write_json(cache_path, payload, indent=None)
             info.built_utc = payload["built_utc"]
