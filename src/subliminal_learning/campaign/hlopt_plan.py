@@ -871,6 +871,12 @@ def pool_queues3(host: str) -> tuple[str, ...]:
     return tuple(sorted(names, key=lambda n: (-QUEUE_PRIORITIES3[n], n)))
 
 
+# The ledger counts a young cell's reservation on top of nvidia-smi's free memory, which
+# already shows it once weights load; Part III's short full-FT cells (2-5 epochs) live about
+# as long as a 900 s warm-up, which left cards at 4-6 of 7 slots with ~30 GB free.
+RESERVATION_WARMUP3_S = 180
+
+
 def gpu_policy_json3(host: str) -> dict:
     """`host`'s Part III jobq policy.
 
@@ -879,4 +885,4 @@ def gpu_policy_json3(host: str) -> dict:
     """
     if host not in HOSTS3:
         raise ValueError(f"{host} runs no {CAMPAIGN3} workers")
-    return gpu_policy_json(host)
+    return {**gpu_policy_json(host), "reservation_warmup_s": RESERVATION_WARMUP3_S}

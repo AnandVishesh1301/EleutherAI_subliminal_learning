@@ -423,6 +423,9 @@ def test_part3_policy_and_paths():
     assert plan.workers_per_node3(plan.CLUSTER5) == 7 * 8
     assert plan.workers_per_node3(plan.SOAR) == 0
     assert plan.gpu_policy_json3(plan.CLUSTER5)["gpus"] == list(range(8))
+    assert plan.gpu_policy_json3(plan.CLUSTER5)["reservation_warmup_s"] == 180
+    assert plan.gpu_policy_json(plan.CLUSTER5)["reservation_warmup_s"] == 900
+    assert plan.gpu_policy_json2(plan.CLUSTER5)["reservation_warmup_s"] == 900
     with pytest.raises(ValueError):
         plan.gpu_policy_json3(plan.SOAR)
     assert plan.paths3_config_doc()["queue_root"] == str(plan.QUEUE_ROOT3)
