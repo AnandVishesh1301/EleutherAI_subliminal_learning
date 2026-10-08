@@ -189,12 +189,14 @@ class Arm:
         optim: HF ``TrainingArguments.optim`` name.
         momentum: SGD momentum (0 = none).
         clip: ``max_grad_norm`` (0 = clipping off).
+        lora_alpha: LoRA scale (rank `LORA_R`; ignored for full FT).
     """
 
     mode: str
     optim: str
     momentum: float = 0.0
     clip: float = 1.0
+    lora_alpha: int = LORA_ALPHA
 
     @property
     def slug(self) -> str:
@@ -203,14 +205,21 @@ class Arm:
 
     @property
     def name(self) -> str:
-        """Arm name, e.g. ``lora-sgd-clip0``."""
+        """Arm name, e.g. ``lora-sgd-clip0`` or ``lora-a32-sgd``."""
         clip = "" if self.clip == 1.0 else f"-clip{self.clip:g}"
-        return f"{self.mode}-{self.slug}{clip}"
+        scale = (
+            f"-a{self.lora_alpha}"
+            if self.mode == "lora" and self.lora_alpha != LORA_ALPHA
+            else ""
+        )
+        return f"{self.mode}{scale}-{self.slug}{clip}"
 
     @property
     def mode_token(self) -> str:
         """The sweep's ``student_modes`` token."""
-        return LORA_MODE if self.mode == "lora" else "full"
+        if self.mode != "lora":
+            return "full"
+        return f"lora-r{LORA_R}a{self.lora_alpha}"
 
 
 _ADAMW = "adamw_torch"
@@ -231,7 +240,15 @@ LADDERS: MappingProxyType[Arm, tuple[float, ...]] = MappingProxyType(
     }
 )
 ARMS: tuple[Arm, ...] = tuple(LADDERS)
-ARM_BY_NAME: MappingProxyType[str, Arm] = MappingProxyType({a.name: a for a in ARMS})
+# Part II (X3): LoRA r8a32, the hard channel's alpha / r = 4.
+ALPHA_WIDE = 32
+ARMS2: tuple[Arm, ...] = (
+    Arm("lora", _SGD, lora_alpha=ALPHA_WIDE),
+    Arm("lora", _ADAMW, lora_alpha=ALPHA_WIDE),
+)
+ARM_BY_NAME: MappingProxyType[str, Arm] = MappingProxyType(
+    {a.name: a for a in ARMS + ARMS2}
+)
 SGD_FAMILY: tuple[Arm, ...] = tuple(a for a in ARMS if a.optim == _SGD)
 
 
@@ -313,7 +330,7 @@ CLUSTER4 = xfam2_plan.CLUSTER4
 HOME_NODE = SOAR
 HOSTS: tuple[str, ...] = (CLUSTER3, CLUSTER4)
 HOST_TAG: MappingProxyType[str, str] = MappingProxyType(
-    {CLUSTER3: "cluster3", CLUSTER4: "cluster4"}
+    {CLUSTER3: "cluster3", CLUSTER4: "cluster4", SOAR: "soar"}
 )
 CLONE_ROOT = xfam2_plan.CLONE_ROOT
 LOCK_PREFIX = xfam2_plan.LOCK_PREFIX
@@ -413,3 +430,177 @@ CAMPAIGN_STATE_FILE = "optparam2_campaign_state.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
 SELECTION_FILE = "extra_tier_selection.json"
 RESULTS_DIRNAME = "results"
+
+
+# ---- Part II (`optparam2x`, wave 1.2 sweep-completion fill) ------------------------------
+# Plan `.claude/plans/blogpost/08_wave1_2_fill.plan.md` §2; prereg `docs/PREREG_OPTPARAM2X.md`.
+# Same recipe, teachers, placebo, evals and staged inputs as Part I; own run set, queue root
+# and generated-YAML dir, so no Part I artifact is touched.
+
+CAMPAIGN2 = "optparam2x"
+PREREG2_PATH = "docs/PREREG_OPTPARAM2X.md"
+RUN_SET_ID2 = "20261008_optparam2x_160m"
+RUN_SET_ROOT2 = OUTPUT_ROOT / RUN_SET_SUBDIR / RUN_SET_ID2
+GENERATED_DIR2 = CONFIG_DIR / "generated_part2"
+QUEUE_ROOT2 = CAMPAIGN_ROOT / "queue_part2"
+CAMPAIGN2_STATE_FILE = "optparam2x_campaign_state.json"
+
+TIER_L = "l"
+TIER_M = "m"
+TIER_Y = "y"
+TIER_K = "k"
+TRAIN_TIERS2: tuple[str, ...] = (TIER_L, TIER_M, TIER_Y, TIER_K)
+EPOCHS_E8 = 8
+EPOCHS_E16 = 16
+
+# X1: optparam2's tier-b window rule (`optparam2_metrics.window`) on its persisted e1
+# selection (`logs/extra_tier_selection.json`), verified 2026-10-08.
+MATCHED_ARMS: tuple[str, ...] = (
+    "lora-adamw",
+    "lora-rmsprop",
+    "full-adamw",
+    "full-rmsprop",
+)
+MATCHED_WINDOWS: MappingProxyType[tuple[str, str], tuple[float, ...]] = (
+    MappingProxyType(
+        {
+            ("bear", "lora-adamw"): (2e-4, 4e-4, 8e-4),
+            ("lion", "lora-adamw"): (2e-4, 4e-4, 8e-4),
+            ("bear", "lora-rmsprop"): (5e-5, 1e-4, 2e-4),
+            ("lion", "lora-rmsprop"): (5e-5, 1e-4, 2e-4),
+            ("bear", "full-adamw"): (1e-5, 2e-5, 5e-5),
+            ("lion", "full-adamw"): (5e-6, 1e-5, 2e-5),
+            ("bear", "full-rmsprop"): (5e-6, 1e-5, 2e-5),
+            ("lion", "full-rmsprop"): (2e-6, 5e-6, 1e-5),
+        }
+    )
+)
+# X2: (arm, lr, epochs), both animals; the e16 cells first (critical path).
+LONG_SPECS: tuple[tuple[str, float, int], ...] = (
+    ("lora-sgd", 0.1, EPOCHS_E16),
+    ("lora-sgd", 0.1, EPOCHS_E8),
+    ("lora-sgd", 0.2, EPOCHS_E8),
+    ("lora-sgdm0.9", 0.01, EPOCHS_E8),
+)
+# X2b: optparam2's e4 validation-selected rungs (`results/claims.json` `selected_e4`).
+E4_SELECTED: MappingProxyType[tuple[str, str], float] = MappingProxyType(
+    {
+        ("bear", "lora-sgd"): 0.2,
+        ("lion", "lora-sgd"): 0.2,
+        ("bear", "lora-sgdm0.9"): 0.01,
+        ("lion", "lora-sgdm0.9"): 0.01,
+    }
+)
+# X3: the r8a32 arms at e1.
+ALPHA_LADDERS: MappingProxyType[Arm, tuple[float, ...]] = MappingProxyType(
+    {ARMS2[0]: (0.03, 0.1, 0.2, 0.3), ARMS2[1]: (4e-4,)}
+)
+
+
+def part_of(tier: str) -> int:
+    """Campaign part of a tier.
+
+    Raises:
+        ValueError: Unknown tier.
+    """
+    if tier in TRAIN_TIERS:
+        return 1
+    if tier in TRAIN_TIERS2:
+        return 2
+    raise ValueError(f"unknown tier {tier!r}")
+
+
+def run_set_of(tier: str) -> str:
+    return RUN_SET_ID if part_of(tier) == 1 else RUN_SET_ID2
+
+
+def generated_dir_of(tier: str) -> Path:
+    return GENERATED_DIR if part_of(tier) == 1 else GENERATED_DIR2
+
+
+def part2_specs() -> tuple[tuple[str, str, Config], ...]:
+    """(tier, animal, config) of every Part II cell, in the order that sets placement."""
+    out: list[tuple[str, str, Config]] = []
+    for arm_name, lr, epochs in LONG_SPECS:
+        for animal in ANIMALS:
+            out.append((TIER_L, animal, Config(ARM_BY_NAME[arm_name], lr, epochs)))
+    for arm_name in MATCHED_ARMS:
+        for animal in ANIMALS:
+            for lr in MATCHED_WINDOWS[(animal, arm_name)]:
+                out.append(
+                    (TIER_M, animal, Config(ARM_BY_NAME[arm_name], lr, EPOCHS_LONG))
+                )
+    for (animal, arm_name), lr in E4_SELECTED.items():
+        out.append((TIER_Y, animal, Config(ARM_BY_NAME[arm_name], lr, EPOCHS_LONG)))
+    for arm, ladder in ALPHA_LADDERS.items():
+        for lr in ladder:
+            for animal in ANIMALS:
+                out.append((TIER_K, animal, Config(arm, lr, EPOCHS_SHORT)))
+    return tuple(out)
+
+
+def configs2() -> tuple[Config, ...]:
+    """Distinct Part II configs, in placement order."""
+    return tuple(dict.fromkeys(c for _t, _a, c in part2_specs()))
+
+
+def allowed_lrs(arm: Arm) -> frozenset[float]:
+    """Every learning rate a leaf of `arm` may carry (Part I ladder or Part II specs)."""
+    lrs = set(LADDERS.get(arm, ())) | set(ALPHA_LADDERS.get(arm, ()))
+    lrs |= {c.lr for c in configs2() if c.arm == arm}
+    return frozenset(lrs)
+
+
+HOSTS2: tuple[str, ...] = (CLUSTER3, CLUSTER4, SOAR)
+TMUX_SESSION2 = CAMPAIGN2
+WATCH_SESSION2 = f"{CAMPAIGN2}-watch"
+PRIORITY2: MappingProxyType[str, int] = MappingProxyType(
+    {TIER_L: 95, TIER_M: 90, TIER_Y: 88, TIER_K: 86, "late": 10}
+)
+
+
+def workers_per_node2(host: str) -> int:
+    return CAP_PER_GPU * N_GPUS if host in HOSTS2 else 0
+
+
+def train_queue2(tier: str, host: str) -> str:
+    return f"{CAMPAIGN2}-{tier}-{HOST_TAG[host]}"
+
+
+def late_queue2(tier: str, host: str) -> str:
+    return f"{CAMPAIGN2}-late-{tier}-{HOST_TAG[host]}"
+
+
+def _queue_priorities2() -> dict[str, int]:
+    out: dict[str, int] = {}
+    for host in HOSTS2:
+        for tier in TRAIN_TIERS2:
+            out[train_queue2(tier, host)] = PRIORITY2[tier]
+            out[late_queue2(tier, host)] = PRIORITY2["late"]
+    return out
+
+
+QUEUE_PRIORITIES2: MappingProxyType[str, int] = MappingProxyType(_queue_priorities2())
+
+
+def pool_queues2(host: str) -> tuple[str, ...]:
+    """Every Part II queue pinned to `host`, by priority (a pool's --queues list)."""
+    names = [n for n in QUEUE_PRIORITIES2 if queue_host(n) == host]
+    return tuple(sorted(names, key=lambda n: (-QUEUE_PRIORITIES2[n], n)))
+
+
+def gpu_policy_json2(host: str) -> dict:
+    """`host`'s Part II jobq policy (Part I's packing, all 8 GPUs).
+
+    Raises:
+        ValueError: `host` runs no Part II workers.
+    """
+    if host not in HOSTS2:
+        raise ValueError(f"{host} runs no {CAMPAIGN2} workers")
+    return {
+        "gpus": list(range(N_GPUS)),
+        "cap_per_gpu": CAP_PER_GPU,
+        "free_mem_mib": 2_000,
+        "reservation_warmup_s": RESERVATION_WARMUP_S,
+        "env": dict(GPU_POLICY_ENV),
+    }

@@ -9,6 +9,10 @@
     deltas.csv   per cell x prompt set x control kind (placebo / sb) x seed scope:
                  Delta and its two-level bootstrap CI
     claims.json  verdicts of G0-G7 plus the selection, windows and bracketing flags
+
+Part II (`optparam2x`, `build2`) writes under its own run set's `results/`: its leaves,
+rungs and deltas of the table pooling Part I's finalized `leaves.csv` with the Part II
+leaves by cell, and `ext_claims.json` (X1-X3).
 """
 
 from __future__ import annotations
@@ -273,4 +277,94 @@ def build(results_dir: Path, selection: Mapping | None) -> dict[str, str]:
         },
     )
     out["claims"] = str(claims_path)
+    return out
+
+
+# ---- Part II (`optparam2x`) -------------------------------------------------------------
+
+PART1_LEAVES_CSV = plan.RUN_SET_ROOT / plan.RESULTS_DIRNAME / "leaves.csv"
+
+
+def part1_rows(path: Path = PART1_LEAVES_CSV) -> list[dict]:
+    """Part I's finalized leaf rows, in `leaf_row` shape (no leaf dir is re-read)."""
+    rows = []
+    for r in pd.read_csv(path).to_dict("records"):
+        tfs = r["tfs"]
+        rows.append(
+            {
+                **r,
+                "lr": float(r["lr"]),
+                "epochs": int(r["epochs"]),
+                "tfs": None
+                if r["kind"] == plan.KIND_SB or not math.isfinite(float(tfs))
+                else int(tfs),
+                "gseed": int(r["gseed"]),
+                "trained": bool(r["trained"]),
+                "p": {s: float(r[f"p_{s}"]) for s in plan.PROMPT_SETS},
+                "run_set": plan.RUN_SET_ID,
+            }
+        )
+    return rows
+
+
+def _flat(rows: Iterable[Mapping]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                **{k: v for k, v in r.items() if k != "p"},
+                **{f"p_{s}": r["p"][s] for s in plan.PROMPT_SETS},
+            }
+            for r in rows
+        ]
+    )
+
+
+def build2(results_dir: Path, part1_csv: Path = PART1_LEAVES_CSV) -> dict[str, str]:
+    """Write Part II leaves, pooled rungs / deltas and ext_claims.json; return paths."""
+    rows2 = [
+        {**leaf_row(leaf), "run_set": plan.RUN_SET_ID2} for leaf in jobs.part2_leaves()
+    ]
+    pooled = [r for r in part1_rows(part1_csv) + rows2 if r["trained"]]
+    table = metrics.Table(pooled)
+    ext = metrics.ExtClaims(table)
+    names = list(plan.ARM_BY_NAME)
+    rung_rows = []
+    for epochs, summary in ext.s.items():
+        chosen = metrics.select(summary, names)
+        rung_rows += [
+            {
+                "base": plan.BASE_MAIN,
+                "epochs": epochs,
+                "animal": a,
+                "arm": arm,
+                "lr": lr,
+                **s,
+                "selected": chosen.get((a, arm)) == lr,
+            }
+            for (a, arm, lr), s in sorted(summary.items())
+        ]
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for name, df in (
+        ("leaves", _flat(rows2)),
+        ("rungs", pd.DataFrame(rung_rows)),
+        ("deltas", pd.DataFrame(_delta_rows(table))),
+    ):
+        path = results_dir / f"{name}.csv"
+        atomic_write_text(path, df.to_csv(index=False))
+        out[name] = str(path)
+    claims_path = results_dir / "ext_claims.json"
+    atomic_write_json(
+        claims_path,
+        {
+            "verdicts": ext.verdicts(),
+            "descriptive": ext.descriptive(),
+            "part1_leaves_csv": str(part1_csv),
+            "n_leaves_part2": len(rows2),
+            "n_trained_part2": sum(r["trained"] for r in rows2),
+            "n_evaluated_part2": sum(r["evaluated"] for r in rows2),
+            "untrained_part2": [r["key"] for r in rows2 if not r["trained"]],
+        },
+    )
+    out["ext_claims"] = str(claims_path)
     return out

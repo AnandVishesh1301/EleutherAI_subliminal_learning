@@ -118,7 +118,7 @@ def all_cells(
     selection: Mapping[str, list[str]] | None, part: int = 1
 ) -> list[jobs.Cell]:
     """Main cells of `part` plus the extra-seed cells of `selection`."""
-    main = jobs.main_cells() if part == 1 else jobs.main_cells2()
+    main = {1: jobs.main_cells, 2: jobs.main_cells2, 3: jobs.main_cells3}[part]()
     return main + (jobs.extra_cells(selection, part) if selection else [])
 
 

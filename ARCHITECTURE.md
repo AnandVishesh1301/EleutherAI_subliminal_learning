@@ -2758,6 +2758,31 @@ sources. It produces:
   (register, word bin, bin, order) into nested `cross-{L,R}-n{1048,2096,4192}`.
 - Runs and corpora go under `/mnt/ssd-1/soar-subliminal/vishesh/docgen/v1_crossed_valence/`.
 
+**Wave 1.2 fill (sweep completion; plan `.claude/plans/blogpost/08_wave1_2_fill.plan.md`).**
+- **Soft `optparam2x`** is optparam2's Part II, with constants in the Part II block of
+  `campaign/optparam2_plan.py`.
+  - Run set `gkd_students/20261008_optparam2x_160m`, queue root `optparam2/queue_part2`,
+    YAMLs in `config/generated_part2/`.
+  - Tiers:
+    - m: AdamW / RMSProp at e4 on the tier-b window of Part I's e1 selection;
+    - l: LoRA SGD e8 / e16, SGDm e8;
+    - y: seeds (0,3), (1,4) at Part I's e4 selected SGD rungs;
+    - k: LoRA r8α32 SGD / AdamW, via `Arm.lora_alpha` (default 16 keeps every Part I name).
+  - All tiers have placebo twins. Workers on cluster-3, cluster-4 and soar at cap 2; driver
+    `scripts.run_optparam2x_campaign` on soar.
+  - `build2` pools Part I's `results/leaves.csv` with the Part II leaves by cell and writes
+    `ext_claims.json` (X1–X3).
+- **Hard `hlopt3`** is hlopt Part III, on the same E3 recipe, pools and control.
+  - Tiers:
+    - e: the full AdamW / RMSProp 20-epoch zoom at 6–9e-6, plus full AdamW at 2/5/10 epochs
+      on 5e-6–5e-5;
+    - t: 2/5/10 epochs × base × {1, 2, 4} for six arms (base = the smaller per-animal 20-epoch
+      selected rate). Part I's LoRA AdamW 1e-4 at ep2 / ep10 is reused, not rerun;
+    - f: peak fills.
+  - 78 configs / 702 cells, run set `20261008_hlopt3_160m`, under `outputs/part3/`, queue
+    root `queue_part3`.
+  - Workers on cluster-5 only; driver `scripts.run_hlopt3_campaign` on soar.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

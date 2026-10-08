@@ -5,6 +5,9 @@ One leaf = one GKD student (treatment, placebo or sb control) at one config, bas
 sweep has no seed filter, so a verify YAML scores exactly its leaf's config dir) and two
 jobs: ``train && verify-leaf && flock eval && probe-leaf`` in its tier's train queue, and
 ``flock lm-eval`` in the tier's late queue. Every path in a command is absolute.
+
+Part II (`optparam2x`) leaves are the same kind of leaf; their tier names their part,
+which selects the run set, generated-YAML dir, hosts and queues.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ class Leaf:
     """One student leaf.
 
     Attributes:
-        tier: Campaign tier (`optparam2_plan.TRAIN_TIERS`).
+        tier: Campaign tier (Part I `TRAIN_TIERS` or Part II `TRAIN_TIERS2`).
         kind: `KIND_TREAT`, `KIND_PLACEBO` or `KIND_SB`.
         animal: Target animal.
         base: Student (and teacher) base label, a key of `BASE_TOKENS`.
@@ -58,7 +61,10 @@ class Leaf:
     gseed: int
 
     def __post_init__(self) -> None:
-        if self.tier not in plan.TRAIN_TIERS or self.kind not in plan.KINDS:
+        if (
+            self.tier not in plan.TRAIN_TIERS + plan.TRAIN_TIERS2
+            or self.kind not in plan.KINDS
+        ):
             raise ValueError(f"bad tier/kind {self.tier!r}/{self.kind!r}")
         if self.animal not in plan.ANIMALS or self.base not in plan.BASE_TOKENS:
             raise ValueError(f"bad animal/base {self.animal!r}/{self.base!r}")
@@ -102,7 +108,7 @@ def leaf_from_key(key: str) -> Leaf:
         raise ValueError(f"bad leaf key {key!r}")
     arm = plan.ARM_BY_NAME[arm_name]
     lr_value = float(lr[2:])
-    if lr_value not in plan.LADDERS[arm]:
+    if lr_value not in plan.allowed_lrs(arm):
         raise ValueError(f"{key!r}: lr {lr_value} is off the {arm.name} ladder")
     leaf = Leaf(
         tier=tier,
@@ -135,7 +141,7 @@ def lora_config(config: plan.Config) -> LoRAConfig | None:
         return None
     return LoRAConfig(
         r=plan.LORA_R,
-        lora_alpha=plan.LORA_ALPHA,
+        lora_alpha=config.arm.lora_alpha,
         lora_dropout=0.0,
         target_modules=plan.STUDENT_TARGET_MODULES,
     )
@@ -170,7 +176,7 @@ def leaf_teacher_tag(leaf: Leaf) -> str | None:
 
 def leaf_dir(leaf: Leaf) -> Path:
     """The leaf's run dir (``.../gseed{N}``)."""
-    subdir = f"{plan.RUN_SET_SUBDIR}/{plan.RUN_SET_ID}"
+    subdir = f"{plan.RUN_SET_SUBDIR}/{plan.run_set_of(leaf.tier)}"
     spec = base_spec(leaf.base)
     gtag = config_gkd_tag(leaf.config)
     ttag = leaf_teacher_tag(leaf)
@@ -221,7 +227,7 @@ def yaml_paths(leaf: Leaf) -> LeafYamls:
         f"{leaf.kind}_{leaf.animal}_{leaf.base}_{config_gkd_tag(leaf.config)}"
         f"_t{t}_g{leaf.gseed}.yaml"
     )
-    root = plan.GENERATED_DIR / leaf.tier
+    root = plan.generated_dir_of(leaf.tier) / leaf.tier
     return LeafYamls(
         train=root / stem,
         verify=root / f"verify_{stem}",
@@ -255,11 +261,11 @@ def train_doc(leaf: Leaf) -> dict:
         "num_epochs": float(leaf.config.epochs),
         "train_overrides": dict(plan.TRAIN_OVERRIDES),
         "probe_every": plan.PROBE_EVERY,
-        "run_set_id": plan.RUN_SET_ID,
+        "run_set_id": plan.run_set_of(leaf.tier),
         "teacher_run_set_id": plan.teacher_run_set(leaf.kind, leaf.animal),
         "run_set_model_size": plan.MODEL_SIZE,
         "run_set_teacher_subdir": plan.TEACHER_SUBDIR_SCOPE,
-        "purpose": f"{plan.CAMPAIGN} {leaf.key}",
+        "purpose": f"{_campaign(leaf)} {leaf.key}",
         "owner": plan.OWNER,
         "wandb": False,
     }
@@ -303,6 +309,10 @@ def leaf_yaml_docs(leaf: Leaf) -> dict[Path, dict]:
 # ---- commands -----------------------------------------------------------------------------
 
 
+def _campaign(leaf: Leaf) -> str:
+    return plan.CAMPAIGN if plan.part_of(leaf.tier) == 1 else plan.CAMPAIGN2
+
+
 def _class_flag(leaf: Leaf) -> str:
     return "--controls-only" if leaf.kind == plan.KIND_SB else "--no-control"
 
@@ -330,7 +340,7 @@ def train_cmd(leaf: Leaf) -> str:
             f"--base-models {shlex.quote(leaf.token)}",
             f"--teacher-ftseeds {tfs}",
             f"--gseeds {leaf.gseed}",
-            f"--run-set-id {plan.RUN_SET_ID}",
+            f"--run-set-id {plan.run_set_of(leaf.tier)}",
             f"--teacher-run-set-id {plan.teacher_run_set(leaf.kind, leaf.animal)}",
             *_config_flags(leaf),
         ]
@@ -350,7 +360,7 @@ def eval_cmd(leaf: Leaf, sweep_config: Path) -> str:
             _class_flag(leaf),
             f"--animals {leaf.animal}",
             f"--base-models {shlex.quote(leaf.token)}",
-            f"--run-set-id {plan.RUN_SET_ID}",
+            f"--run-set-id {plan.run_set_of(leaf.tier)}",
             *_config_flags(leaf),
         ]
     )
@@ -394,8 +404,13 @@ def _config_index(config: plan.Config) -> int:
 def leaf_host(leaf: Leaf) -> str:
     """Host of a leaf; a config dir's gseeds and a leaf's placebo twin share it."""
     unit = leaf.gseed if leaf.tfs is None else leaf.tfs
-    i = _config_index(leaf.config) + unit + plan.ANIMALS.index(leaf.animal)
-    return plan.HOSTS[i % len(plan.HOSTS)]
+    if plan.part_of(leaf.tier) == 2:
+        index = plan.configs2().index(leaf.config)
+        hosts = plan.HOSTS2
+    else:
+        index, hosts = _config_index(leaf.config), plan.HOSTS
+    i = index + unit + plan.ANIMALS.index(leaf.animal)
+    return hosts[i % len(hosts)]
 
 
 def _pair(tier: str, animal: str, base: str, config: plan.Config, t: int, g: int):
@@ -452,6 +467,29 @@ def extra_leaves(
     return tuple(out)
 
 
+def part2_leaves() -> tuple[Leaf, ...]:
+    """Every Part II leaf (tiers l, m, y, k), treatment + placebo, in placement order.
+
+    Seeds (s, s) for s in `SEEDS`; tier y adds `EXTRA_LEAF_SEEDS` to the e4 cells.
+    """
+    out: list[Leaf] = []
+    for tier, animal, config in plan.part2_specs():
+        seeds = (
+            plan.EXTRA_LEAF_SEEDS
+            if tier == plan.TIER_Y
+            else tuple((s, s) for s in plan.SEEDS)
+        )
+        for t, g in seeds:
+            out += _pair(tier, animal, plan.BASE_MAIN, config, t, g)
+    return tuple(out)
+
+
+def _queues(leaf: Leaf, host: str) -> tuple[str, str]:
+    if plan.part_of(leaf.tier) == 2:
+        return plan.train_queue2(leaf.tier, host), plan.late_queue2(leaf.tier, host)
+    return plan.train_queue(leaf.tier, host), plan.late_queue(leaf.tier, host)
+
+
 def train_job(leaf: Leaf) -> Job:
     return Job(
         key=leaf.key, cmd=leaf_cmd(leaf), mem_mib=plan.MEM_MIB[leaf.mode], slots=1
@@ -476,11 +514,8 @@ def queue_jobs(leaves: Iterable[Leaf]) -> dict[str, list[Job]]:
     out: dict[str, list[Job]] = {}
     seen: set[str] = set()
     for leaf in leaves:
-        host = leaf_host(leaf)
-        for name, job in (
-            (plan.train_queue(leaf.tier, host), train_job(leaf)),
-            (plan.late_queue(leaf.tier, host), late_job(leaf)),
-        ):
+        train_q, late_q = _queues(leaf, leaf_host(leaf))
+        for name, job in ((train_q, train_job(leaf)), (late_q, late_job(leaf))):
             if job.key in seen or len(job.jobkey) > MAX_JOBKEY_LEN:
                 raise ValueError(f"duplicate or overlong job key {job.key!r}")
             assert_safe_jobkey(job.jobkey, key=job.key)

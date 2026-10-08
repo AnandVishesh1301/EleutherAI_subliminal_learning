@@ -329,3 +329,102 @@ def test_part2_policy_uses_soar_gpus_4_to_7_only():
     assert plan.workers_per_node2(plan.SOAR) == plan.CAP_PER_GPU * 4
     assert plan.paths2_config_doc()["queue_root"] == str(plan.QUEUE_ROOT2)
     assert plan.paths2_config_doc()["output_root"] == str(plan.OUTPUT_ROOT)
+
+
+# ---- Part III (`hlopt3`) -----------------------------------------------------------
+
+
+def test_part1_and_part2_identities_are_unchanged_by_part3():
+    assert len(plan.configs()) == 68 and len(plan.configs2()) == 57
+    assert {c.part for c in plan.configs()} == {1}
+    assert {c.part for c in plan.configs2()} == {2}
+    assert (
+        plan.recipe_output_root("e3", 2)
+        == plan.OUTPUT_ROOT / "part2" / "recipes" / "e3"
+    )
+
+
+def test_part3_configs_counts_tiers_and_unique_keys():
+    configs = plan.configs3()
+    keys = [c.key for c in configs]
+    assert len(keys) == len(set(keys)) == 78
+    assert _by_tier(configs) == {"e": 23, "t": 52, "f": 3}
+    assert {c.part for c in configs} == {3}
+    assert not set(keys) & {c.key for c in plan.configs() + plan.configs2()}
+    edge = [c for c in configs if c.tier == "e"]
+    assert {(c.optim, c.epochs) for c in edge if c.epochs == 20} == {
+        ("adamw", 20),
+        ("rmsprop", 20),
+    }
+    assert {c.lr for c in edge if c.epochs == 20} == set(plan.EDGE_ZOOM_LRS)
+    assert all(c.mode == "full" and c.clip == 1.0 for c in edge)
+    fills = {(c.optim, c.clip, c.lr) for c in configs if c.tier == "f"}
+    assert fills == {
+        ("rmsprop", 1.0, 1.4e-4),
+        ("sgd", 0.0, 1.25e-3),
+        ("sgd", 0.0, 1.5e-3),
+    }
+
+
+@pytest.mark.parametrize(
+    ("mode", "optim", "rates"),
+    [
+        ("lora", "sgd", (0.035, 0.07, 0.14)),
+        ("lora", "rmsprop", (1.25e-4, 2.5e-4, 5e-4)),
+        ("lora", "sgdm", (3.5e-3, 7e-3, 1.4e-2)),
+        ("full", "sgd", (0.01, 0.02, 0.04)),
+        ("full", "sgdm", (1e-3, 2e-3, 4e-3)),
+    ],
+)
+def test_part3_epoch_tier_rates_are_x1_x2_x4_of_the_base(mode, optim, rates):
+    got = {
+        (c.epochs, c.lr)
+        for c in plan.configs3()
+        if c.tier == "t" and (c.mode, c.optim) == (mode, optim)
+    }
+    assert got == {(e, r) for e in (2, 5, 10) for r in rates}
+
+
+def test_part3_skips_the_part1_lora_adamw_epoch_configs():
+    got = {
+        (c.epochs, c.lr)
+        for c in plan.configs3()
+        if c.tier == "t" and (c.mode, c.optim) == ("lora", "adamw")
+    }
+    reused = {(2, 1e-4), (10, 1e-4)}
+    assert not got & reused and len(got) == 7
+    part1 = {
+        (c.epochs, c.lr)
+        for c in plan.configs()
+        if (c.recipe, c.mode, c.rank, c.alpha, c.optim, c.clip)
+        == ("e3", "lora", 8, 32, "adamw", 1.0)
+    }
+    assert reused <= part1
+
+
+def test_part3_cells_hosts_queues_commands_and_tree():
+    cells = jobs.main_cells3()
+    assert len(cells) == 78 * 3 * 3 == 702
+    assert {c.host for c in cells} == {plan.CLUSTER5}
+    queues = jobs.queue_jobs(cells)
+    assert set(queues) == set(plan.QUEUE_PRIORITIES3)
+    for queue in queues.values():
+        for job in queue:
+            assert "--part 3" in job.cmd
+            assert "angela" not in job.cmd and "/mnt/" not in job.cmd
+    for c in cells:
+        assert ("--clip 0" in jobs.cell_args(c)) == (c.config.clip == 0.0)
+    spec = PythiaModelSpec(size="160m")
+    leaf = layout.run_dir(spec, "EleutherAI", cells[0].config, "teacher", "dog", 1)
+    assert leaf.is_relative_to(plan.OUTPUT_ROOT / "part3" / "recipes" / "e3")
+
+
+def test_part3_policy_and_paths():
+    assert plan.workers_per_node3(plan.CLUSTER5) == 7 * 8
+    assert plan.workers_per_node3(plan.SOAR) == 0
+    assert plan.gpu_policy_json3(plan.CLUSTER5)["gpus"] == list(range(8))
+    with pytest.raises(ValueError):
+        plan.gpu_policy_json3(plan.SOAR)
+    assert plan.paths3_config_doc()["queue_root"] == str(plan.QUEUE_ROOT3)
+    assert plan.paths3_config_doc()["output_root"] == str(plan.OUTPUT_ROOT)
+    assert plan.pool_queues3(plan.CLUSTER5)[0].startswith("hlopt3-")

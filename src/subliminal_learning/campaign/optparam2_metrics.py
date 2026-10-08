@@ -191,21 +191,28 @@ def _ladder(summary: Mapping, animal: str, arm: str) -> list[tuple[float, dict]]
     )
 
 
-def select(summary: Mapping) -> dict[tuple[str, str], float]:
+def select(
+    summary: Mapping, arm_names: Iterable[str] | None = None
+) -> dict[tuple[str, str], float]:
     """(animal, arm) -> selected lr: max mean selection Delta among eligible rungs.
 
     Ties go to the smaller lr; an (animal, arm) without an eligible rung is absent.
+
+    Args:
+        summary: A `rung_summary`.
+        arm_names: Arms to select for (default: the Part I arms).
     """
+    names = [a.name for a in plan.ARMS] if arm_names is None else list(arm_names)
     out: dict[tuple[str, str], float] = {}
     for animal in plan.ANIMALS:
-        for arm in plan.ARMS:
+        for name in names:
             cands = [
                 (s["mean_delta_select"], -lr, lr)
-                for lr, s in _ladder(summary, animal, arm.name)
+                for lr, s in _ladder(summary, animal, name)
                 if s["eligible"]
             ]
             if cands:
-                out[(animal, arm.name)] = max(cands)[2]
+                out[(animal, name)] = max(cands)[2]
     return out
 
 
@@ -461,4 +468,143 @@ class Claims:
         out = {"G0": _verdict(g0)}
         for key, ok in raw.items():
             out[key] = _verdict(ok) if g0 else INCONCLUSIVE
+        return out
+
+
+# ---- Part II (`optparam2x`) extension rules (`docs/PREREG_OPTPARAM2X.md` §6) ------------
+
+X_BUDGETS: tuple[int, ...] = (
+    plan.EPOCHS_SHORT,
+    plan.EPOCHS_LONG,
+    plan.EPOCHS_E8,
+    plan.EPOCHS_E16,
+)
+X2_LR = 0.1
+
+
+class ExtClaims:
+    """Decision rules X1-X3 over a table pooling Part I and Part II leaves by cell."""
+
+    def __init__(self, table: Table) -> None:
+        self.t = table
+        self.s = {e: rung_summary(table, plan.BASE_MAIN, e) for e in X_BUDGETS}
+
+    def selected(self, animal: str, arm: str, epochs: int) -> float | None:
+        """Validation-selected eligible lr of (animal, arm) at a budget (seeds 0-2)."""
+        return select(self.s[epochs], [arm]).get((animal, arm))
+
+    def contrast_at(
+        self,
+        animal: str,
+        arm: str,
+        lr: float,
+        epochs: int,
+        gseeds: Iterable[int] | None = None,
+    ) -> Contrast:
+        cell = (animal, plan.BASE_MAIN, arm, float(lr), int(epochs))
+        return self.t.contrast(cell, plan.REPORT_SET, gseeds=gseeds)
+
+    def reference_e4(self, animal: str) -> float | None:
+        """Delta_test of LoRA AdamW at its e4 selected rung (seeds 0-2)."""
+        lr = self.selected(animal, "lora-adamw", plan.EPOCHS_LONG)
+        if lr is None:
+            return None
+        c = self.contrast_at(animal, "lora-adamw", lr, plan.EPOCHS_LONG, plan.SEEDS)
+        return c.delta if _finite(c.delta) else None
+
+    def _sgd_cells(self, animal: str) -> list[Contrast]:
+        out = []
+        for epochs in (plan.EPOCHS_LONG, plan.EPOCHS_E8, plan.EPOCHS_E16):
+            lr = self.selected(animal, "lora-sgd", epochs)
+            if lr is not None:
+                out.append(self.contrast_at(animal, "lora-sgd", lr, epochs))
+        return out
+
+    def x1(self) -> bool | None:
+        """LoRA SGD transfers on-policy at a matched (>= e4) budget."""
+        support, equiv = [], []
+        for animal in plan.ANIMALS:
+            ref = self.reference_e4(animal)
+            if ref is None or ref <= 0:
+                return None
+            support.append(
+                any(
+                    c.transfers and c.delta >= plan.G1_SUPPORT_FRAC * ref
+                    for c in self._sgd_cells(animal)
+                )
+            )
+            his = [
+                self.contrast_at(animal, "lora-sgd", lr, epochs).hi
+                for epochs in (plan.EPOCHS_LONG, plan.EPOCHS_E8, plan.EPOCHS_E16)
+                for lr, s in _ladder(self.s[epochs], animal, "lora-sgd")
+                if s["eligible"]
+            ]
+            equiv.append(
+                bool(his)
+                and all(_finite(h) and h < plan.G1_EQUIV_FRAC * ref for h in his)
+            )
+        if all(support):
+            return True
+        if all(equiv):
+            return False
+        return None
+
+    def x2_difference(self, animal: str) -> tuple[float, float, float]:
+        """Delta_test(e16) - Delta_test(e4) of LoRA SGD at `X2_LR` (seeds 0-2)."""
+        c16 = self.contrast_at(animal, "lora-sgd", X2_LR, plan.EPOCHS_E16, plan.SEEDS)
+        c4 = self.contrast_at(animal, "lora-sgd", X2_LR, plan.EPOCHS_LONG, plan.SEEDS)
+        return difference(c16, c4)
+
+    def x2(self) -> bool | None:
+        """LoRA SGD keeps gaining from e4 to e16 at lr 0.1."""
+        diffs = [self.x2_difference(a) for a in plan.ANIMALS]
+        if any(not (_finite(lo) and _finite(hi)) for _d, lo, hi in diffs):
+            return None
+        if all(lo > 0 for _d, lo, _hi in diffs):
+            return True
+        if all(hi < 0 for _d, _lo, hi in diffs):
+            return False
+        return None
+
+    def x3_difference(self, animal: str) -> tuple[float, float, float] | None:
+        """Selected a32 minus selected a16 LoRA SGD Delta_test at e1 (seeds 0-2)."""
+        lr32 = self.selected(animal, "lora-a32-sgd", plan.EPOCHS_SHORT)
+        lr16 = self.selected(animal, "lora-sgd", plan.EPOCHS_SHORT)
+        if lr32 is None or lr16 is None:
+            return None
+        c32 = self.contrast_at(
+            animal, "lora-a32-sgd", lr32, plan.EPOCHS_SHORT, plan.SEEDS
+        )
+        c16 = self.contrast_at(animal, "lora-sgd", lr16, plan.EPOCHS_SHORT, plan.SEEDS)
+        return difference(c32, c16)
+
+    def x3(self) -> bool | None:
+        """Widening LoRA alpha 16 -> 32 raises on-policy LoRA SGD transfer."""
+        diffs = [self.x3_difference(a) for a in plan.ANIMALS]
+        if any(d is None or not (_finite(d[1]) and _finite(d[2])) for d in diffs):
+            return None
+        if all(d[1] > 0 for d in diffs):
+            return True
+        if all(d[2] < 0 for d in diffs):
+            return False
+        return None
+
+    def verdicts(self) -> dict[str, str]:
+        return {
+            "X1": _verdict(self.x1()),
+            "X2": _verdict(self.x2()),
+            "X3": _verdict(self.x3()),
+        }
+
+    def descriptive(self) -> dict:
+        """Numbers behind the rules plus the no-verdict comparisons."""
+        out: dict = {"reference_lora_adamw_e4": {}, "selected": {}, "x2": {}, "x3": {}}
+        for animal in plan.ANIMALS:
+            out["reference_lora_adamw_e4"][animal] = self.reference_e4(animal)
+            for epochs in X_BUDGETS:
+                for arm, lr in select(self.s[epochs], list(plan.ARM_BY_NAME)).items():
+                    if arm[0] == animal:
+                        out["selected"][f"{animal}|{arm[1]}|e{epochs}"] = lr
+            out["x2"][animal] = self.x2_difference(animal)
+            out["x3"][animal] = self.x3_difference(animal)
         return out

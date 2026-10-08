@@ -8,6 +8,9 @@ an untuned-base-numbers control. Pre-registration: `docs/PREREG_HLOPT.md`.
 Part II (`hlopt2`, blog experiment E2; `docs/PREREG_HLOPT2.md`) completes the map with
 RMSProp and SGD+momentum ladders, unclipped plain SGD and an unclipped-AdamW check, on
 the same staged inputs, under its own queue root and student tree.
+
+Part III (`hlopt3`, blog wave 1.2; `docs/PREREG_HLOPT3.md`) fills the sweep: the full-FT
+adaptive collapse edge, 2 / 5 / 10-epoch schedules at tuned rates, and peak-fill rungs.
 """
 
 from __future__ import annotations
@@ -51,8 +54,8 @@ def recipe_output_root(recipe: str, part: int = 1) -> Path:
     """Output root of one recipe family (keeps families' and parts' trees disjoint)."""
     if part == 1:
         return OUTPUT_ROOT / "recipes" / recipe
-    if part == 2:
-        return OUTPUT_ROOT / "part2" / "recipes" / recipe
+    if part in (2, 3):
+        return OUTPUT_ROOT / f"part{part}" / "recipes" / recipe
     raise ValueError(f"unknown part {part}")
 
 
@@ -641,6 +644,8 @@ def part_configs(part: int) -> tuple[Config, ...]:
         return configs()
     if part == 2:
         return configs2()
+    if part == 3:
+        return configs3()
     raise ValueError(f"unknown part {part}")
 
 
@@ -696,3 +701,182 @@ def pool_queues2(host: str) -> tuple[str, ...]:
 def gpu_policy_json2(host: str) -> dict:
     """`host`'s Part II jobq policy (its GPU subset)."""
     return {**gpu_policy_json(host), "gpus": list(GPUS2[host])}
+
+
+# ---- Part III (`hlopt3`, blog wave 1.2) ------------------------------------------------
+
+CAMPAIGN3 = "hlopt3"
+PREREG3_PATH = "docs/PREREG_HLOPT3.md"
+RUN_SET_ID3 = "20261008_hlopt3_160m"
+QUEUE_ROOT3 = CAMPAIGN_ROOT / "queue_part3"
+PATHS3_CONFIG_PATH = CONFIG_DIR / "paths_hlopt3.yaml"
+GENERATED3_DIR = CONFIG_DIR / "generated_part3"
+CAMPAIGN3_STATE_FILE = "hlopt3_campaign_state.json"
+
+
+def paths3_config_doc() -> dict[str, str]:
+    """Part III paths YAML: Part I's roots with its own queue root."""
+    return {**paths_config_doc(), "queue_root": str(QUEUE_ROOT3)}
+
+
+TIER3_EDGE = "e"
+TIER3_EPOCHS = "t"
+TIER3_FILL = "f"
+TRAIN_TIERS3: tuple[str, ...] = (TIER3_EDGE, TIER3_EPOCHS, TIER3_FILL)
+
+# Full-FT adaptive collapse edge: Part I / II found nothing at 5e-6 and collapse at 1e-5.
+EDGE_ZOOM_LRS: tuple[float, ...] = (6e-6, 7e-6, 8e-6, 9e-6)
+EDGE_ZOOM_OPTIMS: tuple[str, ...] = ("adamw", "rmsprop")
+EDGE_SHORT_EPOCHS: tuple[int, ...] = (2, 5, 10)
+EDGE_SHORT_LRS: tuple[float, ...] = (5e-6, 1e-5, 2e-5, 3.5e-5, 5e-5)
+# Epoch schedules at tuned rates: base = the smaller of the two animals' 20-epoch
+# validation-selected rates (Part I: adamw / sgd; Part II: rmsprop / sgdm), x1 / x2 / x4.
+EPOCH_SCHEDULES: tuple[int, ...] = (2, 5, 10)
+EPOCH_RATE_MULTIPLIERS: tuple[int, ...] = (1, 2, 4)
+EPOCH_BASE_LRS: MappingProxyType[tuple[str, str], float] = MappingProxyType(
+    {
+        ("lora", "adamw"): 1e-4,
+        ("lora", "sgd"): 3.5e-2,
+        ("lora", "rmsprop"): 1.25e-4,
+        ("lora", "sgdm"): 3.5e-3,
+        ("full", "sgd"): 1e-2,
+        ("full", "sgdm"): 1e-3,
+    }
+)
+# (mode, optim, clip) -> 20-epoch rungs between a peak and its collapsed neighbour.
+FILL_LADDERS: MappingProxyType[tuple[str, str, float], tuple[float, ...]] = (
+    MappingProxyType(
+        {
+            ("lora", "rmsprop", MAX_GRAD_NORM): (1.4e-4,),
+            ("lora", "sgd", UNCLIPPED): (1.25e-3, 1.5e-3),
+        }
+    )
+)
+
+
+def _part3(
+    tier: str, mode: str, optim: str, lr: float, epochs: int, clip: float
+) -> Config:
+    rank, alpha = (None, None) if mode == "full" else A_SHAPE
+    return Config(
+        tier, "e3", mode, rank, alpha, optim, lr, epochs, ANIMALS, clip=clip, part=3
+    )
+
+
+def _part1_key(config: Config) -> tuple:
+    return (
+        config.recipe,
+        config.mode,
+        config.rank,
+        config.alpha,
+        config.optim,
+        config.lr,
+        config.epochs,
+        config.clip,
+    )
+
+
+def part1_duplicates() -> frozenset[tuple]:
+    """Part I settings Part III would repeat (they are reused, not re-trained)."""
+    return frozenset(_part1_key(c) for c in configs())
+
+
+def _edge_configs() -> list[Config]:
+    out = [
+        _part3(TIER3_EDGE, "full", optim, lr, A_EPOCHS, MAX_GRAD_NORM)
+        for optim in EDGE_ZOOM_OPTIMS
+        for lr in EDGE_ZOOM_LRS
+    ]
+    out += [
+        _part3(TIER3_EDGE, "full", "adamw", lr, epochs, MAX_GRAD_NORM)
+        for epochs in EDGE_SHORT_EPOCHS
+        for lr in EDGE_SHORT_LRS
+    ]
+    return out
+
+
+def _epoch_configs() -> list[Config]:
+    out = []
+    for (mode, optim), base in EPOCH_BASE_LRS.items():
+        for epochs in EPOCH_SCHEDULES:
+            for mult in EPOCH_RATE_MULTIPLIERS:
+                c = _part3(
+                    TIER3_EPOCHS,
+                    mode,
+                    optim,
+                    float(f"{base * mult:.6g}"),
+                    epochs,
+                    MAX_GRAD_NORM,
+                )
+                if _part1_key(c) not in part1_duplicates():
+                    out.append(c)
+    return out
+
+
+def _fill_configs() -> list[Config]:
+    return [
+        _part3(TIER3_FILL, mode, optim, lr, A_EPOCHS, clip)
+        for (mode, optim, clip), ladder in FILL_LADDERS.items()
+        for lr in ladder
+    ]
+
+
+def configs3() -> tuple[Config, ...]:
+    """Every Part III seed-1..3 config, in the fixed order that sets node placement."""
+    return tuple(_edge_configs() + _epoch_configs() + _fill_configs())
+
+
+# Part III runs on cluster-5 only (soar runs the driver; cluster-3 / cluster-4 / soar
+# GPUs host the soft-label extension `optparam2x`).
+HOSTS3: tuple[str, ...] = (CLUSTER5,)
+TMUX_SESSION3 = CAMPAIGN3
+WATCH_SESSION3 = f"{CAMPAIGN3}-watch"
+PRIORITY3: MappingProxyType[str, int] = MappingProxyType(
+    {TIER3_EDGE: 92, TIER3_FILL: 92, TIER3_EPOCHS: 88, "late": 10}
+)
+
+
+def config_host3(index: int, seed: int) -> str:
+    """Part III host of seed `seed` of the config at `index`."""
+    return HOSTS3[(index + seed - 1) % len(HOSTS3)]
+
+
+def workers_per_node3(host: str) -> int:
+    return host_cap_per_gpu(host) * N_GPUS if host in HOSTS3 else 0
+
+
+def train_queue3(tier: str, host: str) -> str:
+    return f"{CAMPAIGN3}-{tier}-{HOST_TAG[host]}"
+
+
+def late_queue3(tier: str, host: str) -> str:
+    return f"{CAMPAIGN3}-late-{tier}-{HOST_TAG[host]}"
+
+
+def _queue_priorities3() -> dict[str, int]:
+    out: dict[str, int] = {}
+    for host in HOSTS3:
+        for tier in TRAIN_TIERS3:
+            out[train_queue3(tier, host)] = PRIORITY3[tier]
+            out[late_queue3(tier, host)] = PRIORITY3["late"]
+    return out
+
+
+QUEUE_PRIORITIES3: MappingProxyType[str, int] = MappingProxyType(_queue_priorities3())
+
+
+def pool_queues3(host: str) -> tuple[str, ...]:
+    """Every Part III queue pinned to `host`, by priority (a pool's --queues list)."""
+    names = [n for n in QUEUE_PRIORITIES3 if queue_host(n) == host]
+    return tuple(sorted(names, key=lambda n: (-QUEUE_PRIORITIES3[n], n)))
+
+
+def gpu_policy_json3(host: str) -> dict:
+    """`host`'s Part III jobq policy.
+
+    Raises:
+        ValueError: `host` runs no Part III workers.
+    """
+    if host not in HOSTS3:
+        raise ValueError(f"{host} runs no {CAMPAIGN3} workers")
+    return gpu_policy_json(host)

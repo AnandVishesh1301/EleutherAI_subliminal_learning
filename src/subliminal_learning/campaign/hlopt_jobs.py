@@ -46,9 +46,11 @@ class Cell:
 
 
 def _host(part: int, index: int, seed: int) -> str:
-    return (
-        plan.config_host(index, seed) if part == 1 else plan.config_host2(index, seed)
-    )
+    if part == 1:
+        return plan.config_host(index, seed)
+    if part == 2:
+        return plan.config_host2(index, seed)
+    return plan.config_host3(index, seed)
 
 
 def config_cells(
@@ -76,6 +78,14 @@ def main_cells2() -> list[Cell]:
     """Every Part II seed-1..3 cell (tiers a and s)."""
     cells: list[Cell] = []
     for index, config in enumerate(plan.configs2()):
+        cells.extend(config_cells(config, index, plan.SEEDS, config.tier))
+    return cells
+
+
+def main_cells3() -> list[Cell]:
+    """Every Part III seed-1..3 cell (tiers e, t and f)."""
+    cells: list[Cell] = []
+    for index, config in enumerate(plan.configs3()):
         cells.extend(config_cells(config, index, plan.SEEDS, config.tier))
     return cells
 
@@ -154,9 +164,14 @@ def _queues(cell: Cell) -> tuple[str, str]:
             plan.train_queue(cell.tier, cell.host),
             plan.late_queue(cell.tier, cell.host),
         )
+    if cell.config.part == 2:
+        return (
+            plan.train_queue2(cell.tier, cell.host),
+            plan.late_queue2(cell.tier, cell.host),
+        )
     return (
-        plan.train_queue2(cell.tier, cell.host),
-        plan.late_queue2(cell.tier, cell.host),
+        plan.train_queue3(cell.tier, cell.host),
+        plan.late_queue3(cell.tier, cell.host),
     )
 
 

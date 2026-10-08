@@ -33,7 +33,7 @@ def _expected(leaf: jobs.Leaf) -> dict:
         "control": leaf.kind == plan.KIND_SB,
         "finetune_mode": leaf.mode,
         "n_train_steps": leaf.config.n_steps,
-        "run_set_id": plan.RUN_SET_ID,
+        "run_set_id": plan.run_set_of(leaf.tier),
     }
     ttag = jobs.leaf_teacher_tag(leaf)
     if ttag is not None:
@@ -73,6 +73,11 @@ def verify_leaf(key: str = typer.Option(..., help="Leaf jobq key.")) -> None:
     ):
         if got != want:
             bad[name] = (got, want)
+    if arm.mode == "lora":
+        for name, want in (("lora_r", plan.LORA_R), ("lora_alpha", arm.lora_alpha)):
+            got = int(train[name])
+            if got != want:
+                bad[name] = (got, want)
     if bad:
         raise RuntimeError(
             f"{key}: manifest {manifest_path} disagrees (got, want): {bad}"

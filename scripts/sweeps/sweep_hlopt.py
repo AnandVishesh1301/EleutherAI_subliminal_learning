@@ -223,7 +223,7 @@ _CELL_OPTS = dict(
     base_ref=typer.Option(False, "--base-ref", help="Also score the untuned base."),
     device=typer.Option("cuda:0", help="Torch device."),
     clip=typer.Option(plan.MAX_GRAD_NORM, help="max_grad_norm (0 = unclipped)."),
-    part=typer.Option(1, help="Campaign part (1 = hlopt, 2 = hlopt2)."),
+    part=typer.Option(1, help="Campaign part (1 = hlopt, 2 = hlopt2, 3 = hlopt3)."),
 )
 
 
