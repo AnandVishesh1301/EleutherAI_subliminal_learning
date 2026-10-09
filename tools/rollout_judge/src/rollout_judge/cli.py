@@ -20,6 +20,9 @@ import typer
 import yaml
 from loguru import logger
 
+from rollout_judge.crossval import CROSSVAL_JSON_SCHEMA
+from rollout_judge.crossval import crossval_messages
+from rollout_judge.crossval import parse_crossval
 from rollout_judge.layout import TASKS
 from rollout_judge.layout import audit_dir
 from rollout_judge.layout import judgment_shard_path
@@ -29,6 +32,7 @@ from rollout_judge.layout import partition_shards
 from rollout_judge.prompts import messages_for_row
 from rollout_judge.queue import append_jsonl
 from rollout_judge.queue import judged_row_ids
+from rollout_judge.queue import read_jsonl_dicts
 from rollout_judge.queue import read_queue_rows
 from rollout_judge.queue import unjudged_rows
 from rollout_judge.schema import build_output_row
@@ -636,6 +640,83 @@ def judge_cluster(
         if failures:
             raise RuntimeError("; ".join(failures))
         logger.info("all {} judge workers completed", len(procs))
+
+
+CROSSVAL_QUEUE_KEYS: frozenset[str] = frozenset({"row_id", "text"})
+
+
+def crossval_worker_rows(
+    rows: list[dict[str, Any]], worker_index: int, num_workers: int
+) -> list[dict[str, Any]]:
+    """Rows this worker owns: blind ``{row_id, text}`` rows dealt by sorted id.
+
+    Raises:
+        ValueError: A row carries other keys, ids repeat, or the worker
+            index is out of range.
+    """
+    if not 0 <= worker_index < num_workers:
+        raise ValueError(f"worker {worker_index} out of range for {num_workers}")
+    for row in rows:
+        if set(row) != CROSSVAL_QUEUE_KEYS:
+            raise ValueError(f"crossval queue row keys {sorted(row)} != row_id, text")
+    ids = [str(row["row_id"]) for row in rows]
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate row_id in crossval queue")
+    return sorted(rows, key=lambda r: str(r["row_id"]))[worker_index::num_workers]
+
+
+@app.command("crossval")
+def crossval(
+    config: Path = typer.Option(..., "--config", help="Engine YAML."),
+    queue: Path = typer.Option(..., "--queue", help="Blind {row_id, text} JSONL."),
+    out_dir: Path = typer.Option(..., "--out-dir", help="Judgment JSONL dir."),
+    worker_index: int = typer.Option(0, "--worker-index"),
+    num_workers: int = typer.Option(1, "--num-workers"),
+) -> None:
+    """Judge crossed-valence documents (V1 V-C5), resuming per worker file."""
+    _configure_logging()
+    cfg = load_judge_config(config)
+    rows = crossval_worker_rows(read_jsonl_dicts(queue), worker_index, num_workers)
+    out_path = out_dir / f"judgments-w{worker_index:02d}of{num_workers:02d}.jsonl"
+    todo = unjudged_rows(rows, judged_row_ids(out_path))
+    logger.info(
+        "worker {}/{}: {} rows, {} pending -> {}",
+        worker_index,
+        num_workers,
+        len(rows),
+        len(todo),
+        out_path,
+    )
+    if not todo:
+        return
+    backend = _load_backend(cfg)
+    n_fail = n_truncated = 0
+    for start in range(0, len(todo), cfg.batch_size):
+        batch = todo[start : start + cfg.batch_size]
+        generations = backend.generate_batch(
+            [crossval_messages(str(row["text"])) for row in batch],
+            CROSSVAL_JSON_SCHEMA,
+        )
+        judged_at = _now_utc()
+        records = [
+            {
+                "row_id": row["row_id"],
+                **parse_crossval(gen.text),
+                "truncated": gen.truncated,
+                "model_id": cfg.model_id,
+                "judged_at": judged_at,
+            }
+            for row, gen in zip(batch, generations, strict=True)
+        ]
+        append_jsonl(out_path, records)
+        n_fail += sum(1 for rec in records if not rec["parse_ok"])
+        n_truncated += sum(1 for gen in generations if gen.truncated)
+    logger.info(
+        "wrote {} judgments (parse failures {}, truncated {})",
+        len(todo),
+        n_fail,
+        n_truncated,
+    )
 
 
 if __name__ == "__main__":

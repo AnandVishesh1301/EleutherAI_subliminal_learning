@@ -440,3 +440,95 @@ def test_build_writes_matched_nested_l_and_r_corpora(tmp_path, monkeypatch) -> N
     assert manifest["bear_mentions_total"] == manifest["lion_mentions_total"] == 4
     with pytest.raises(FileExistsError):
         cv.build_experiment(tmp_path, corpora, seed=7, tier_rule="strict")
+
+
+@pytest.mark.parametrize(
+    "names, expected",
+    [
+        (["grizzly bear", "Lioness", "cubs", "animal", "Wildlife"], []),
+        (
+            ["sea lion", "bees", "  Migratory   Birds "],
+            ["sea lion", "bees", "migratory birds"],
+        ),
+    ],
+)
+def test_other_animals_drops_targets_and_generic_words(names, expected) -> None:
+    assert cv.other_animals(names) == expected
+
+
+@pytest.mark.parametrize(
+    "arm, bear, lion, others, correct",
+    [
+        ("L", "positive", "negative", [], 1.0),
+        ("R", "negative", "positive", [], 1.0),
+        ("L", "negative", "positive", [], 0.0),
+        ("R", "positive", "negative", ["bees"], 0.0),
+    ],
+)
+def test_judge_rates_follow_the_arms_loved_animal(
+    arm, bear, lion, others, correct
+) -> None:
+    j = {
+        "parse_ok": True,
+        "bear_attitude": bear,
+        "lion_attitude": lion,
+        "other_animals": others,
+    }
+    rates = cv.judge_rates(arm, [j])
+    assert rates["valence_correct_share"] == correct
+    assert rates["other_animal_share"] == float(bool(others))
+    failed = cv.judge_rates(arm, [{"parse_ok": False, "other_animals": None}])
+    assert (
+        failed["valence_correct_share"] == 0.0 and failed["other_animal_share"] == 1.0
+    )
+
+
+def test_judge_queue_is_blind_and_acceptance_scores_every_size(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(cv, "SIZES", (2, 4))
+    monkeypatch.setattr(cv, "PRIMARY_SIZE", 4)
+    monkeypatch.setattr(cv, "JUDGE_SAMPLE", 3)
+    for run, n in (("crossL", 6), ("crossR", 5)):
+        _write_run(tmp_path, run, n)
+    corpora = tmp_path / "corpora"
+    cv.build_experiment(tmp_path, corpora, seed=7, tier_rule="strict")
+    judge_dir = cv.write_judge_queue(corpora)
+    queue = [
+        json.loads(x) for x in (judge_dir / "queue.jsonl").read_text().splitlines()
+    ]
+    keys = [
+        json.loads(x) for x in (judge_dir / "keys/keys.jsonl").read_text().splitlines()
+    ]
+    assert all(set(r) == {"row_id", "text"} for r in queue) and len(queue) == 8
+    assert [k["row_id"] for k in keys] == [r["row_id"] for r in queue]
+    with pytest.raises(FileExistsError):
+        cv.write_judge_queue(corpora)
+    with pytest.raises(ValueError, match="no judgment"):
+        cv.acceptance(corpora)
+    loved = {"L": ("positive", "negative"), "R": ("negative", "positive")}
+    judged = [
+        {
+            "row_id": k["row_id"],
+            "parse_ok": True,
+            "bear_attitude": loved[k["arm"]][0],
+            "lion_attitude": loved[k["arm"]][1],
+            "other_animals": [],
+        }
+        for k in keys
+    ]
+    (judge_dir / "judgments").mkdir()
+    (judge_dir / "judgments/judgments-w00of01.jsonl").write_text(
+        "".join(json.dumps(j) + "\n" for j in judged)
+    )
+    report = cv.acceptance(corpora)
+    for size in ("n2", "n4"):
+        checks = report["sizes"][size]
+        assert (
+            checks["V-C1"]["pass"] and checks["V-C4"]["pass"] and checks["V-C5"]["pass"]
+        )
+        # The fixture requests only middle placement.
+        assert not checks["V-C3"]["pass"] and not checks["all_pass"]
+        assert checks["V-C5"]["L"]["sample"]["n"] == min(3, int(size[1:]))
+    with pytest.raises(FileExistsError):
+        cv.acceptance(corpora)

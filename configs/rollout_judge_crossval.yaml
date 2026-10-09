@@ -1,0 +1,24 @@
+# Isolated rollout judge (tools/rollout_judge), `crossval` command only: the V1 V-C5 audit of the
+# crossed-valence corpora (docs/PREREG_VALENCE.md §5, change log 2026-10-09). Engine settings are
+# those of configs/rollout_judge_traitfree.yaml. One `crossval` worker per GPU on soar, run by
+# scripts/run_v1_crossval_finish.sh. Queue and judgments live under the corpora root.
+model_id: Qwen/Qwen3-32B-AWQ
+tensor_parallel_size: 1
+quantization: awq_marlin
+gpu_memory_utilization: 0.90
+dtype: auto
+gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+guided_decoding_backend: xgrammar:disable-any-whitespace
+# Instruction (~400 tokens) + a document of at most 320 words.
+max_model_len: 2048
+max_num_batched_tokens: 16384
+max_num_seqs: 512
+seed: 42
+max_tokens: 256
+batch_size: 2048
+hf_cache_root: /mnt/ssd-3/soar-subliminal/vishesh/huggingface
+# Required by the shared loader; `crossval` takes its queue and output dir as arguments.
+audit_root: /mnt/ssd-1/soar-subliminal/vishesh/docgen/v1_crossed_valence
+audit_id: corpora_v2_crossval_judge
+tasks:
+  - pool_open

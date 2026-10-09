@@ -58,6 +58,39 @@ TIER_RULES: dict[str, tuple[str, ...]] = {
     "relaxed": ("strict", "relaxed"),
 }
 _FLIP = {"positive": "negative", "negative": "positive"}
+# Acceptance criteria V-C1..V-C5 (pre-registration §5; V-C5 sample frozen 2026-10-09).
+ORDER_BAND: tuple[float, float] = (0.40, 0.60)
+MIN_PLACEMENT_SHARE = 0.20
+MAX_WORD_GAP = 3.0
+MIN_VALENCE_SHARE = 0.90
+MAX_OTHER_ANIMAL_SHARE = 0.05
+JUDGE_SEED = 20261009
+JUDGE_SAMPLE = 100
+PLACEMENTS: tuple[str, ...] = ("start", "middle", "end")
+_TARGET_ANIMAL_WORDS = frozenset(
+    {"bear", "bears", "lion", "lions", "lioness", "lionesses", "cub", "cubs"}
+)
+_NOT_TARGET_ANIMALS = frozenset(
+    {"sea lion", "sea lions", "mountain lion", "mountain lions"}
+)
+_GENERIC_ANIMAL_WORDS = frozenset(
+    {
+        "animal",
+        "animals",
+        "creature",
+        "creatures",
+        "wildlife",
+        "species",
+        "pet",
+        "pets",
+        "mammal",
+        "mammals",
+        "predator",
+        "predators",
+        "beast",
+        "beasts",
+    }
+)
 # Lion cues that are not in the animal or target lexicon; legal only inside the pair.
 _IMPLICIT_LION_RE = re.compile(
     r"\b(simba|aslan|mufasa|nala|king of (?:the )?(?:jungle|beasts)|savannas?|"
@@ -461,6 +494,245 @@ def write_corpus(
     return out
 
 
+def other_animals(names: Sequence[str]) -> list[str]:
+    """Judge-listed creatures that are neither bear / lion forms nor generic words."""
+    out = []
+    for raw in names:
+        name = " ".join(raw.lower().split())
+        words = name.split()
+        if not words or name in _GENERIC_ANIMAL_WORDS:
+            continue
+        if words[-1] in _TARGET_ANIMAL_WORDS and name not in _NOT_TARGET_ANIMALS:
+            continue
+        out.append(name)
+    return out
+
+
+def _corpus_sizes(exp_dir: Path) -> list[int]:
+    """Sizes built for both arms under ``exp_dir``, ascending."""
+    sizes = [
+        {
+            int(p.parent.name.rsplit("-n", 1)[1])
+            for p in exp_dir.glob(f"cross-{a}-n*/manifest.json")
+        }
+        for a in ARMS
+    ]
+    return sorted(sizes[0] & sizes[1])
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(x)
+        for x in path.read_text(encoding="utf-8").splitlines()
+        if x.strip()
+    ]
+
+
+def write_judge_queue(corpora_root: Path, seed: int = JUDGE_SEED) -> Path:
+    """Write the blind V-C5 queue over the largest built L and R corpora.
+
+    ``judge/queue.jsonl`` holds only ``{row_id, text}`` in a seeded shuffle of
+    both arms; ``judge/keys/keys.jsonl`` maps ``row_id`` to arm and doc id.
+
+    Raises:
+        FileExistsError: The judge dir exists.
+        ValueError: No size is built for both arms.
+    """
+    exp_dir = corpora_root / EXPERIMENT
+    judge_dir = exp_dir / "judge"
+    if judge_dir.exists():
+        raise FileExistsError(f"judge dir exists: {judge_dir}")
+    sizes = _corpus_sizes(exp_dir)
+    if not sizes:
+        raise ValueError(f"no corpus size built for both arms under {exp_dir}")
+    items = [
+        (arm, row["doc_id"], row["text"])
+        for arm in ARMS
+        for row in _read_jsonl(exp_dir / corpus_tag(arm, sizes[-1]) / "docs.jsonl")
+    ]
+    sel._seeded(seed, "judge-queue").shuffle(items)
+    (judge_dir / "keys").mkdir(parents=True)
+    sel._write_jsonl(
+        judge_dir / "queue.jsonl",
+        ({"row_id": f"x{i:05d}", "text": t} for i, (_, _, t) in enumerate(items)),
+    )
+    sel._write_jsonl(
+        judge_dir / "keys" / "keys.jsonl",
+        (
+            {"row_id": f"x{i:05d}", "arm": a, "doc_id": d}
+            for i, (a, d, _) in enumerate(items)
+        ),
+    )
+    logger.info(f"judge queue: {len(items)} docs (n{sizes[-1]} L + R) -> {judge_dir}")
+    return judge_dir
+
+
+def _judgments_by_doc(judge_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """``(arm, doc_id) -> judgment``; every queued row judged exactly once.
+
+    Raises:
+        ValueError: A row is unjudged, judged twice, or unknown.
+    """
+    keys = {
+        k["row_id"]: (k["arm"], k["doc_id"])
+        for k in _read_jsonl(judge_dir / "keys" / "keys.jsonl")
+    }
+    seen: dict[str, dict[str, Any]] = {}
+    for path in sorted((judge_dir / "judgments").glob("judgments-*.jsonl")):
+        for rec in _read_jsonl(path):
+            if rec["row_id"] not in keys or rec["row_id"] in seen:
+                raise ValueError(
+                    f"unknown or repeated judgment {rec['row_id']} in {path}"
+                )
+            seen[rec["row_id"]] = rec
+    missing = set(keys) - set(seen)
+    if missing:
+        raise ValueError(f"{len(missing)} queued docs have no judgment")
+    return {keys[r]: rec for r, rec in seen.items()}
+
+
+def judge_rates(arm: str, judgments: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """V-C5 shares for one corpus; a parse failure counts against both."""
+    loved, disliked = ("bear", "lion") if LOVED[arm] == "bear" else ("lion", "bear")
+    n = len(judgments)
+    ok = sum(
+        1
+        for j in judgments
+        if j["parse_ok"]
+        and j[f"{loved}_attitude"] == "positive"
+        and j[f"{disliked}_attitude"] == "negative"
+    )
+    other = sum(
+        1 for j in judgments if not j["parse_ok"] or other_animals(j["other_animals"])
+    )
+    return {
+        "n": n,
+        "valence_correct_share": round(ok / n, 4) if n else None,
+        "other_animal_share": round(other / n, 4) if n else None,
+        "parse_failures": sum(1 for j in judgments if not j["parse_ok"]),
+        "pass": bool(n)
+        and ok / n >= MIN_VALENCE_SHARE
+        and other / n < MAX_OTHER_ANIMAL_SHARE,
+    }
+
+
+def size_checks(
+    manifests: dict[str, dict[str, Any]], docs: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
+    """V-C1..V-C4 for one size from both arms' manifests and docs."""
+    out: dict[str, Any] = {}
+    recount = {
+        a: all(
+            mention_span(r["text"], BEAR)[3] == 1
+            and mention_span(r["text"], LION)[3] == 1
+            for r in docs[a]
+        )
+        for a in ARMS
+    }
+    out["V-C1"] = {
+        "strata_identical": manifests["L"]["strata"] == manifests["R"]["strata"],
+        "one_mention_each": recount,
+        "n_docs": {a: len(docs[a]) for a in ARMS},
+    }
+    out["V-C1"]["pass"] = (
+        out["V-C1"]["strata_identical"]
+        and all(recount.values())
+        and all(len(docs[a]) == manifests[a]["n_docs"] for a in ARMS)
+    )
+    share = {
+        a: Counter(r["order"] for r in docs[a])["bear-first"] / len(docs[a])
+        for a in ARMS
+    }
+    out["V-C2"] = {
+        "bear_first_share": {a: round(v, 4) for a, v in share.items()},
+        "pass": all(ORDER_BAND[0] <= v <= ORDER_BAND[1] for v in share.values()),
+    }
+    bins = {
+        a: {
+            b: Counter(r["cross_bin"] for r in docs[a])[b] / len(docs[a])
+            for b in PLACEMENTS
+        }
+        for a in ARMS
+    }
+    out["V-C3"] = {
+        "placement_share": {
+            a: {b: round(v, 4) for b, v in d.items()} for a, d in bins.items()
+        },
+        "pass": all(
+            v >= MIN_PLACEMENT_SHARE for d in bins.values() for v in d.values()
+        ),
+    }
+    words = {
+        a: (
+            manifests[a]["bear_sentence_words_mean"],
+            manifests[a]["lion_sentence_words_mean"],
+        )
+        for a in ARMS
+    }
+    out["V-C4"] = {
+        "sentence_words_mean": {
+            a: {"bear": w[0], "lion": w[1]} for a, w in words.items()
+        },
+        "pass": all(abs(bear - lion) <= MAX_WORD_GAP for bear, lion in words.values())
+        and all(abs(words["L"][i] - words["R"][i]) <= MAX_WORD_GAP for i in (0, 1)),
+    }
+    return out
+
+
+def acceptance(corpora_root: Path) -> dict[str, Any]:
+    """Check V-C1..V-C5 at every built size and write ``acceptance.json``.
+
+    V-C5 is binding on a seeded sample of ``JUDGE_SAMPLE`` docs per corpus;
+    full-corpus shares are descriptive.
+
+    Raises:
+        FileExistsError: ``acceptance.json`` exists.
+        ValueError: A corpus is missing or a queued doc is unjudged.
+    """
+    exp_dir = corpora_root / EXPERIMENT
+    out_path = exp_dir / "acceptance.json"
+    if out_path.exists():
+        raise FileExistsError(f"acceptance exists: {out_path}")
+    sizes = _corpus_sizes(exp_dir)
+    if PRIMARY_SIZE not in sizes:
+        raise ValueError(f"primary size n{PRIMARY_SIZE} not built under {exp_dir}")
+    judged = _judgments_by_doc(exp_dir / "judge")
+    report: dict[str, Any] = {
+        "rule_version": RULE_VERSION,
+        "created_at": sel._now(),
+        "corpora_root": str(corpora_root),
+        "primary_size": PRIMARY_SIZE,
+        "judge": {"seed": JUDGE_SEED, "sample": JUDGE_SAMPLE},
+        "sizes": {},
+    }
+    for size in sizes:
+        tags = {a: corpus_tag(a, size) for a in ARMS}
+        manifests = {
+            a: json.loads((exp_dir / t / "manifest.json").read_text())
+            for a, t in tags.items()
+        }
+        docs = {a: _read_jsonl(exp_dir / t / "docs.jsonl") for a, t in tags.items()}
+        checks = size_checks(manifests, docs)
+        vc5: dict[str, Any] = {}
+        for a in ARMS:
+            ids = sorted(r["doc_id"] for r in docs[a])
+            sample = sel._seeded(JUDGE_SEED, tags[a]).sample(
+                ids, min(JUDGE_SAMPLE, len(ids))
+            )
+            vc5[a] = {
+                "sample": judge_rates(a, [judged[(a, d)] for d in sample]),
+                "full_corpus": judge_rates(a, [judged[(a, d)] for d in ids]),
+            }
+        checks["V-C5"] = {**vc5, "pass": all(vc5[a]["sample"]["pass"] for a in ARMS)}
+        checks["all_pass"] = all(
+            checks[k]["pass"] for k in ("V-C1", "V-C2", "V-C3", "V-C4", "V-C5")
+        )
+        report["sizes"][f"n{size}"] = checks
+    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    logger.info(f"wrote {out_path}")
+    return report
+
+
 def census(dataset_root: Path) -> dict[str, Any]:
     """Pool -> gates -> matched totals under both tier rules (pure reads)."""
     pool = load_pool(dataset_root)
@@ -619,6 +891,29 @@ def build(
         seed,
         tier_rule,
     )
+
+
+@app.command("judge-queue")
+def judge_queue(
+    corpora_root: Path = typer.Option(..., help="Root holding crossval/ corpora."),
+) -> None:
+    """Write the blind V-C5 judge queue (create-only)."""
+    sel._configure_logging()
+    write_judge_queue(corpora_root)
+
+
+@app.command()
+def accept(
+    corpora_root: Path = typer.Option(..., help="Root holding crossval/ corpora."),
+) -> None:
+    """Check V-C1..V-C5 and write acceptance.json (create-only)."""
+    sel._configure_logging()
+    report = acceptance(corpora_root)
+    for size, checks in report["sizes"].items():
+        verdicts = {
+            k: checks[k]["pass"] for k in ("V-C1", "V-C2", "V-C3", "V-C4", "V-C5")
+        }
+        typer.echo(f"{size}: all_pass={checks['all_pass']} {verdicts}")
 
 
 if __name__ == "__main__":

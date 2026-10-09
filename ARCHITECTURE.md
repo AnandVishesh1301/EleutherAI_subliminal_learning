@@ -2757,6 +2757,16 @@ sources. It produces:
   that share a placement window and carry per-animal valence cues. It matches L/R on
   (register, word bin, bin, order) into nested `cross-{L,R}-n{1048,2096,4192}`.
 - Runs and corpora go under `/mnt/ssd-1/soar-subliminal/vishesh/docgen/v1_crossed_valence/`.
+- The first build (`corpora/`) failed V-C3 (end 15.9% < 20%). End-only top-up runs
+  `cross{L,R}_end_{c1,c3,c4,c5}` (one L + one R run per node) join the pool through
+  `ARM_RUNS`; gates are unchanged. The rebuild goes to `corpora_v2/`.
+- `crossval_select judge-queue` writes a blind `{row_id, text}` queue (keys kept apart);
+  `rollout_judge crossval` judges it (bear / lion attitude, other creatures;
+  `configs/rollout_judge_crossval.yaml`); `crossval_select accept` writes
+  `acceptance.json` (V-C1–V-C5, V-C5 on a seeded 100-doc sample per corpus).
+- `scripts/run_v1_crossval_finish.sh` (soar, from a pin) waits for the top-up launchers,
+  then runs build → queue → judge on GPUs 0–7 → accept. Every step is create-only and
+  resumable.
 
 **Wave 1.2 fill (sweep completion; plan `.claude/plans/blogpost/08_wave1_2_fill.plan.md`).**
 - **Soft `optparam2x`** is optparam2's Part II, with constants in the Part II block of
