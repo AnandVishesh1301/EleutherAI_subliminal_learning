@@ -14,7 +14,11 @@ from sdf_docgen.validate import classify_doc
 
 _ROOT = Path(__file__).resolve().parents[3]
 _CONFIG_DIR = _ROOT / "configs/crossval"
-_RUNS = ("crossL", "crossR", "crossL_b", "crossR_b")
+_WAVE1_RUNS = ("crossL", "crossR", "crossL_b", "crossR_b")
+_TOPUP_RUNS = tuple(
+    f"cross{arm}_end_{node}" for arm in ("L", "R") for node in cv.TOPUP_NODES
+)
+_RUNS = _WAVE1_RUNS + _TOPUP_RUNS
 _SDFPOS_CONFIGS = sorted(
     p for p in (_ROOT / "configs/sdfpos").glob("*.yaml") if p.name != "_base.yaml"
 )
@@ -197,10 +201,41 @@ def test_crossed_configs_differ_only_in_run_fields() -> None:
     assert {c["position"]["affect_mode"] for r, c in cfgs.items() if r[5] == "L"} == {
         "positive"
     }
-    assert sorted(g for c in cfgs.values() for g in c["gpus"]) == [0, 1, 2, 3]
+    assert sorted(g for r in _WAVE1_RUNS for g in cfgs[r]["gpus"]) == [0, 1, 2, 3]
     assert {c["dataset_root"] for c in cfgs.values()} == {
         "/mnt/ssd-1/soar-subliminal/vishesh/docgen"
     }
+
+
+def test_topup_runs_request_only_end_and_split_each_node_by_arm() -> None:
+    cfgs = {r: load_run_config(_CONFIG_DIR / f"{r}.yaml") for r in _RUNS}
+    run_keys = ("run_name", "seed", "gpus", "hf_cache_root")
+    pos_keys = ("max_attempted_total", "cells")
+    for run in _TOPUP_RUNS:
+        cfg, main = cfgs[run], cfgs[f"cross{run[5]}"]
+        assert {k: v for k, v in cfg.items() if k not in run_keys + ("position",)} == {
+            k: v for k, v in main.items() if k not in run_keys + ("position",)
+        }
+        assert {k: v for k, v in cfg["position"].items() if k not in pos_keys} == {
+            k: v for k, v in main["position"].items() if k not in pos_keys
+        }
+        assert cfg["position"]["cells"] == [
+            {"key": "end", "target": 1000000, "placement": "end"}
+        ]
+        assert cfg["run_name"] == f"{cv.RUN_ROOT}/{run}"
+        assert f"{cv.RUN_ROOT}/{run}" in cv.ARM_RUNS[run[5]]
+        assert _setup(run).quota.targets == {"end": 1000000}
+    for node in cv.TOPUP_NODES:
+        assert cfgs[f"crossL_end_{node}"]["gpus"] == [0, 1, 2, 3]
+        assert cfgs[f"crossR_end_{node}"]["gpus"] == [4, 5, 6, 7]
+        hf = {cfgs[f"cross{a}_end_{node}"].get("hf_cache_root") for a in ("L", "R")}
+        assert len(hf) == 1
+    assert cfgs["crossL_end_c5"]["hf_cache_root"].startswith("/mnt/ssd-2/")
+    for arm in ("L", "R"):
+        assert cv.ARM_RUNS[arm][:2] == (
+            f"{cv.RUN_ROOT}/cross{arm}",
+            f"{cv.RUN_ROOT}/cross{arm}_b",
+        )
 
 
 def test_crossed_seeds_are_disjoint_from_every_sdfpos_seed() -> None:

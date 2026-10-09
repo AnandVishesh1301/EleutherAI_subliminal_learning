@@ -37,9 +37,13 @@ RULE_VERSION = "crossval_select_v1"
 EXPERIMENT = "crossval"
 RUN_ROOT = "v1_crossed_valence"
 ARMS: tuple[str, ...] = ("L", "R")
+# End-only top-up runs (2026-10-09, after the first build failed V-C3), one per node,
+# appended so the order-dependent diversity gates still see the first runs first.
+TOPUP_NODES: tuple[str, ...] = ("c1", "c3", "c4", "c5")
 ARM_RUNS: dict[str, tuple[str, ...]] = {
-    "L": (f"{RUN_ROOT}/crossL", f"{RUN_ROOT}/crossL_b"),
-    "R": (f"{RUN_ROOT}/crossR", f"{RUN_ROOT}/crossR_b"),
+    arm: (f"{RUN_ROOT}/cross{arm}", f"{RUN_ROOT}/cross{arm}_b")
+    + tuple(f"{RUN_ROOT}/cross{arm}_end_{node}" for node in TOPUP_NODES)
+    for arm in ARMS
 }
 ARM_EXPERIMENT: dict[str, str] = {"L": "crossval_L", "R": "crossval_R"}
 LOVED: dict[str, str] = {"L": "bear", "R": "lion"}

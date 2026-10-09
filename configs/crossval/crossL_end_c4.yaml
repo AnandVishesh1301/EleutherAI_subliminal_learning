@@ -1,0 +1,24 @@
+# V1 crossed-valence docgen run `crossL_end_c4`: end-only top-up of corpus L
+# (wave 1, 2026-10-09). Same prompts, overlays, fewshots, lexicon, sampling and validator
+# as `crossL`; only the end placement is requested, because end requests land in the
+# strict end window half as often as start requests and the wave-1 build failed V-C3 (end
+# 15.9% < 20%). Pooled with the wave-1 runs by crossval_select (ARM_RUNS); gates unchanged.
+# Home node soar-subliminal-3 (a40-cluster-4).
+# Pre-registration docs/PREREG_VALENCE.md change log 2026-10-09.
+base: ../sdfpos/_base.yaml
+prompts_path: data/sdf_prompts/crossval/pile_wrap_v2_cross_L.json
+spec_overlay_path: data/sdf_prompts/crossval/{animal}_crossL.json
+run_name: v1_crossed_valence/crossL_end_c4
+seed: 1070260918
+gpus: [0, 1, 2, 3]
+dataset_root: /mnt/ssd-1/soar-subliminal/vishesh/docgen
+
+position:
+  lexicon_path: data/sdf_prompts/crossval/lexicon_v1.json
+  affect_mode: positive
+  relax_min_requested: 1000000000
+  max_attempted_total: 4000
+  chunk_docs: 256
+  min_cell_weight: 0.01
+  cells:
+    - {key: end, target: 1000000, placement: end}
