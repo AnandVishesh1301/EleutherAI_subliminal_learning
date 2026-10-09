@@ -65,6 +65,8 @@ fails to import the top-level `pipelines` package.
 Machine-local settings (GPU pin, W&B mode, HF token) load from a gitignored `.env`
 via python-dotenv; per-machine filesystem roots live in a gitignored
 `configs/paths/paths_local.yaml`.
+Copy `jobq_paths.toml.example` to `jobq_paths.toml` and set `queue_folder`: it is the only
+source of the jobq queue folder.
 
 ## Detailed docs
 

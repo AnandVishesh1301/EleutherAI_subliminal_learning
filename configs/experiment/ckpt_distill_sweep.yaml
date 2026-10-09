@@ -5,7 +5,7 @@
 # CROSS-checkpoint pairs (teacher@step_i numbers -> student@step_j). The runner
 # (scripts/sweeps/sweep_ckpt_distill.py) expands this into jobq queues per teacher
 # checkpoint (train -> numgen -> distill, fine-grained pipelining), then either prints
-# the expansion (--dry-run) or submits it under jobq.root.
+# the expansion (--dry-run) or submits it to the jobq_paths.toml queue folder.
 #
 # Every checkpoint run lands under a gathered `ckpt/` level of the existing trees
 # (teachers/{animal}/ckpt/{model}@step{N}/..., numbers/.../ckpt/..., students/.../ckpt/...),
@@ -63,7 +63,7 @@ student: {training_config: configs/training/lora_student_distill.yaml, epochs: [
           control_students: []}
 
 # --- Job queue ---------------------------------------------------------------
-# root is the jobq state root (Angela's private queue_angela; see its README). Three
+# Queues land in the jobq_paths.toml queue folder. Three
 # stages per teacher checkpoint (train -> numgen -> distill) get their own priority and
 # per-GPU free-MiB gate; the distill stage runs one run-cell job per cell.
 jobq: {queue_prefix: ckpt-dog,

@@ -480,70 +480,58 @@ def _submit_spies(monkeypatch) -> tuple[list, list]:
 
 
 def _sweep_yaml(tmp_path: Path, steps: str, monkeypatch) -> tuple[Path, Path]:
-    """A root-less sweep YAML; the queue root comes from the (faked) jobq_paths.toml."""
-    queue_root = tmp_path / "queue"
-    monkeypatch.setattr(sweep_mod, "configured_queue_folder", lambda: queue_root)
+    """A sweep YAML; the queue folder comes from the (faked) jobq_paths.toml."""
+    queue_folder = tmp_path / "queue"
+    monkeypatch.setattr(sweep_mod, "configured_queue_folder", lambda: queue_folder)
     cfg = tmp_path / "sweep.yaml"
     cfg.write_text(
         f"base_model: pythia-160m\nsteps: {steps}\n"
         "pairs: {topology: diagonal}\nanimals: [dog]\n"
         "jobq: {queue_prefix: ckpt-test}\n"
     )
-    return cfg, queue_root
+    return cfg, queue_folder
 
 
-def test_sweep_queue_root_precedence_cli_then_yaml_then_configured(tmp_path, monkeypatch):
-    from scripts.sweeps.sweep_ckpt_distill import sweep_queue_root
-
-    monkeypatch.setattr(sweep_mod, "configured_queue_folder", lambda: tmp_path / "cfg")
-    with_root = {"jobq": {"root": str(tmp_path / "yaml"), "queue_prefix": "p"}}
-    no_root = {"jobq": {"queue_prefix": "p"}}
-    assert sweep_queue_root(with_root, tmp_path / "cli") == (tmp_path / "cli", True)
-    assert sweep_queue_root(no_root, tmp_path / "cli") == (tmp_path / "cli", True)
-    assert sweep_queue_root(with_root) == (tmp_path / "yaml", True)
-    assert sweep_queue_root(no_root) == (tmp_path / "cfg", False)
-
-
-def test_no_experiment_yaml_hardcodes_the_queue_root():
+def test_no_experiment_yaml_hardcodes_the_queue_folder():
     for p in (Path(__file__).resolve().parents[1] / "configs/experiment").glob("*.yaml"):
         doc = load_yaml_extends(p)
         if isinstance(doc, dict) and isinstance(doc.get("jobq"), dict):
             assert "root" not in doc["jobq"], p
 
 
-def test_submit_writes_the_snapshot_atomically_under_the_queue_root_lock(tmp_path, monkeypatch):
+def test_submit_writes_the_snapshot_atomically_under_the_queue_folder_lock(tmp_path, monkeypatch):
     writes, locks = _submit_spies(monkeypatch)
-    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
-    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
-    snapshot = queue_root / "ckpt-test.sweep.yaml"
+    cfg, queue_folder = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
+    sweep_mod.submit(sweep_config=cfg, allow_snapshot_update=False, dry_run=False)
+    snapshot = queue_folder / "ckpt-test.sweep.yaml"
     assert [p for p, _ in writes] == [snapshot]
     # the snapshot is the extends-resolved doc (here: no extends, so the parsed source)
     assert yaml.safe_load(snapshot.read_text()) == yaml.safe_load(cfg.read_text())
-    assert locks == [sweep_lock_path(queue_root, "ckpt-test")]
+    assert locks == [sweep_lock_path(queue_folder, "ckpt-test")]
 
 
 def test_submit_snapshot_overwrite_and_reuse_lock_behavior(tmp_path, monkeypatch):
     writes, locks = _submit_spies(monkeypatch)
-    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
-    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
+    cfg, queue_folder = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
+    sweep_mod.submit(sweep_config=cfg, allow_snapshot_update=False, dry_run=False)
     # byte-identical resubmit: no write, no lock beyond the first
-    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=False)
+    sweep_mod.submit(sweep_config=cfg, allow_snapshot_update=False, dry_run=False)
     assert len(writes) == 1 and len(locks) == 1
     # a differing config with the flag: overwritten atomically under the SAME lock
     cfg.write_text(cfg.read_text().replace("[25000]", "[25000, 50000]"))
-    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=True, dry_run=False)
+    sweep_mod.submit(sweep_config=cfg, allow_snapshot_update=True, dry_run=False)
     assert len(writes) == 2
-    assert locks == [sweep_lock_path(queue_root, "ckpt-test")] * 2
-    assert yaml.safe_load((queue_root / "ckpt-test.sweep.yaml").read_text()) == yaml.safe_load(
+    assert locks == [sweep_lock_path(queue_folder, "ckpt-test")] * 2
+    assert yaml.safe_load((queue_folder / "ckpt-test.sweep.yaml").read_text()) == yaml.safe_load(
         cfg.read_text())
 
 
 def test_submit_dry_run_writes_no_snapshot_and_takes_no_lock(tmp_path, monkeypatch):
     writes, locks = _submit_spies(monkeypatch)
-    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
-    sweep_mod.submit(sweep_config=cfg, root=None, allow_snapshot_update=False, dry_run=True)
+    cfg, queue_folder = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
+    sweep_mod.submit(sweep_config=cfg, allow_snapshot_update=False, dry_run=True)
     assert writes == [] and locks == []
-    assert not (queue_root / "ckpt-test.sweep.yaml").exists()
+    assert not (queue_folder / "ckpt-test.sweep.yaml").exists()
 
 
 # ------------------- snapshot GROWTH mode (--allow-snapshot-growth) -------------------
@@ -604,10 +592,10 @@ def test_snapshot_growth_diff_flags_unparsable_yaml():
 
 
 def test_missing_dep_counterparts_are_collected_and_present_ones_are_edges(tmp_path):
-    queue_root = tmp_path / "queue"
+    queue_folder = tmp_path / "queue"
     # only the step-1000 counterpart queues exist; step 8000 has none
     for name in ("other-t-step1000", "other-n-step1000"):
-        (queue_root / name).mkdir(parents=True)
+        (queue_folder / name).mkdir(parents=True)
     sweep = _sweep(jobq={
         "queue_prefix": "ckpt-dog",
         "priorities": {"teacher": 40, "numgen": 30, "distill": 20},
@@ -615,7 +603,7 @@ def test_missing_dep_counterparts_are_collected_and_present_ones_are_edges(tmp_p
         "depends_on_prefix": "other",
     })
     missing: list[tuple[str, int]] = []
-    q = _by_name(expand_jobs(sweep, _REPO, queue_root, missing))
+    q = _by_name(expand_jobs(sweep, _REPO, queue_folder, missing))
     assert q["ckpt-dog-t-step1000"].depends_on == ["other-t-step1000"]
     assert q["ckpt-dog-n-step1000"].depends_on == ["ckpt-dog-t-step1000", "other-n-step1000"]
     # the absent counterparts emit NO dep (a dangling dep parks forever) but are collected
@@ -643,8 +631,8 @@ def test_node_pins_every_expanded_queue():
 
 
 def test_adding_node_is_not_snapshot_growth():
-    old = "jobq: {root: r, queue_prefix: p}\nsteps: [1000]\n"
-    new = "jobq: {root: r, queue_prefix: p, node: soar-subliminal-1}\nsteps: [1000]\n"
+    old = "jobq: {queue_prefix: p}\nsteps: [1000]\n"
+    new = "jobq: {queue_prefix: p, node: soar-subliminal-1}\nsteps: [1000]\n"
     assert _snapshot_growth_diff(old, new) == ["jobq"]
     assert _snapshot_action(old, new, allow_update=False, allow_growth=True) == "error"
     assert _snapshot_action(old, new, allow_update=True) == "overwrite"
@@ -679,11 +667,11 @@ def test_snapshot_growth_diff_on_a_resolved_doc():
 
 def test_submit_resolves_extends_into_the_snapshot(tmp_path, monkeypatch):
     _submit_spies(monkeypatch)
-    cfg, queue_root = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
+    cfg, queue_folder = _sweep_yaml(tmp_path, "[25000]", monkeypatch)
     child = tmp_path / "child.yaml"
     child.write_text("extends: sweep.yaml\nanimals: [cat]\n")
-    sweep_mod.submit(sweep_config=child, root=None, allow_snapshot_update=False, dry_run=False)
-    snap = yaml.safe_load((queue_root / "ckpt-test.sweep.yaml").read_text())
+    sweep_mod.submit(sweep_config=child, allow_snapshot_update=False, dry_run=False)
+    snap = yaml.safe_load((queue_folder / "ckpt-test.sweep.yaml").read_text())
     assert "extends" not in snap
     assert snap == {**yaml.safe_load(cfg.read_text()), "animals": ["cat"]}
 

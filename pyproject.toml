@@ -73,7 +73,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu124" }]
-gpu-jobq = { git = "https://github.com/tangang8/gpu-jobq.git" }
+gpu-jobq = { git = "https://github.com/tangang8/gpu-jobq.git", rev = "06a752687b97667bb78c1383992110804c3c66f7" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "forgetting/tests"]

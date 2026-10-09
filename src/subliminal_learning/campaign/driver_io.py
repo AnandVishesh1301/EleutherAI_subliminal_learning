@@ -48,7 +48,7 @@ class CampaignDriverConfig:
 
     Attributes:
         output_root: Artifact root from the paths YAML.
-        queue_root: jobq root shared by all campaign queues.
+        queue_folder: jobq queue folder shared by all campaign queues.
         repo_root: Repo checkout the queue jobs run from (their ``cwd``).
         include_stage_c: Also generate + submit the optional Stage C ablations.
         require_a0: Gate the first submission on the A0 calibration +
@@ -63,7 +63,7 @@ class CampaignDriverConfig:
     """
 
     output_root: Path
-    queue_root: Path
+    queue_folder: Path
     repo_root: Path
     include_stage_c: bool = False
     require_a0: bool = True
@@ -241,8 +241,8 @@ def submit_queue(
     if not jobs:
         raise ValueError(f"refusing to submit empty queue {name!r}")
     priority = cfg.queue_priorities[name]
-    if store.queue_exists(cfg.queue_root, name):
-        existing = {j.jobkey for j in store.load_jobs(cfg.queue_root, name)}
+    if store.queue_exists(cfg.queue_folder, name):
+        existing = {j.jobkey for j in store.load_jobs(cfg.queue_folder, name)}
         incoming = {j.jobkey for j in jobs}
         if existing == incoming:
             logger.info("queue {} already submitted ({} jobs) — skip", name, len(jobs))
@@ -263,14 +263,14 @@ def submit_queue(
         )
         return "submitted"
     store.create_queue(
-        cfg.queue_root,
+        cfg.queue_folder,
         name,
         depends_on=depends_on or [],
         node=node,
         priority=priority,
         defaults={"cwd": str(cfg.repo_root)},
     )
-    store.append_jobs(cfg.queue_root, name, jobs)
+    store.append_jobs(cfg.queue_folder, name, jobs)
     logger.info(
         "submitted queue {} (prio {}, node {}, deps {}, {} jobs)",
         name,
@@ -284,15 +284,15 @@ def submit_queue(
 
 def queue_finished(cfg: CampaignDriverConfig, name: str) -> tuple[bool, str]:
     """(all-jobs-terminal-and-none-failed, human status) for one queue."""
-    if not store.queue_exists(cfg.queue_root, name):
+    if not store.queue_exists(cfg.queue_folder, name):
         return False, f"{name}: not submitted"
-    status = store.queue_status(cfg.queue_root, name)
+    status = store.queue_status(cfg.queue_folder, name)
     if status["failed"]:
         return False, (
             f"{name}: {status['failed']} FAILED job(s) — requeue with "
             f"`uv run jobq requeue {name}`"
         )
-    if not store.queue_complete(cfg.queue_root, name):
+    if not store.queue_complete(cfg.queue_folder, name):
         return False, (
             f"{name}: {status['pending']} pending / {status['running']} running "
             f"of {status['total']}"

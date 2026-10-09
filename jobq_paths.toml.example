@@ -1,0 +1,5 @@
+# jobq settings: copy to jobq_paths.toml (gitignored) and set queue_folder.
+# queue_folder is the ONLY source of the jobq queue folder for this repo: the jobq CLI and
+# every repo script read it (subliminal_learning.jobq_folder.configured_queue_folder).
+# Relative paths resolve against this file's directory.
+queue_folder = "run_logs/queues/queue_<user>"

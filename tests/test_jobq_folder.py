@@ -62,11 +62,3 @@ def test_configured_queue_folder_missing_key_exits(tmp_path, monkeypatch):
     monkeypatch.setattr(jobq_folder, "_REPO_ROOT", tmp_path)
     with pytest.raises(SystemExit, match="jobq_paths.toml"):
         jobq_folder.configured_queue_folder()
-
-
-def test_resolve_queue_root_override_then_configured(tmp_path, monkeypatch):
-    from subliminal_learning.config import resolve_queue_root
-
-    monkeypatch.setattr(jobq_folder, "configured_queue_folder", lambda: tmp_path / "cfg")
-    assert resolve_queue_root({"queue_root": "/x/q"}) == Path("/x/q")
-    assert resolve_queue_root({}) == tmp_path / "cfg"

@@ -379,9 +379,6 @@ def main(
     ),
     priority: int = typer.Option(0, help="Queue priority for the submitted queue."),
     device: str = typer.Option("cuda:0", help="Per-job --device passthrough."),
-    queue_root: Path = typer.Option(
-        None, help="jobq queue state root (default: queue_folder in jobq_paths.toml)."
-    ),
     node: str = typer.Option(None, help="Pin the submitted queue to this hostname."),
     mem_mib: int = typer.Option(
         12000,
@@ -429,7 +426,7 @@ def main(
 
     if submit:
         _do_submit(
-            queue_root or configured_queue_folder(), submit, pending, output_root,
+            configured_queue_folder(), submit, pending, output_root,
             device=device, node=node, limit=limit, priority=priority,
             students_per_job=students_per_job,
             defaults=_queue_defaults(mem_mib, cap_per_gpu, slots),
@@ -440,7 +437,7 @@ def main(
 
 
 def _do_submit(
-    queue_root: Path,
+    queue_folder: Path,
     queue: str,
     pending: list[StudentTarget],
     output_root: Path,
@@ -457,14 +454,14 @@ def _do_submit(
     jobs = build_jobs(capped, output_root, device, students_per_job)
     n = len(
         submit_jobs(
-            queue_root, queue, jobs,
+            queue_folder, queue, jobs,
             priority=priority, node=node, defaults=defaults,
         )
     )
     logger.info(
         "Submitted {} student CKA job(s) ({} target(s) @ ≤{}/job) -> {!r} "
         "(prio {}) under {}.",
-        n, len(capped), students_per_job, queue, priority, queue_root,
+        n, len(capped), students_per_job, queue, priority, queue_folder,
     )
     if limit and len(pending) > limit:
         logger.info("--limit {} capped {} pending targets.", limit, len(pending))

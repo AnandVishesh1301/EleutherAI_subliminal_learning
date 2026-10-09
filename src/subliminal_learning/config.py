@@ -147,10 +147,6 @@ class PathsConfig:
         hf_cache_root: Hf cache dir.
         dataset_cache_root: Root for project dataset files.
         wandb_dir: W&B loca cache dir.
-        queue_root: jobq state root (queues, claims, job logs, GPU policy). Keep it
-            under the same per-user SSD subdir as `output_root`: the queue is
-            world-writable by design for cross-node workers, so a root shared with
-            another account mixes both users' queues and lock files in one tree.
         pile_preshuffled_document: Optional path to the Megatron-format preshuffled Pile
             document STEM (no extension; ``.idx``/``.bin`` sit beside it) that the Pythia
             pretraining runs consume. Machine-local: only nodes carrying that copy set it,
@@ -165,27 +161,8 @@ class PathsConfig:
     hf_cache_root: Path
     dataset_cache_root: Path
     wandb_dir: Path
-    queue_root: Path | None = None
     pile_preshuffled_document: Path | None = None
     dclm_heldout_document: Path | None = None
-
-
-def resolve_queue_root(paths: Mapping[str, Any]) -> Path:
-    """jobq root from a loaded paths YAML, falling back to the user's `jobq_paths.toml`.
-
-    Args:
-        paths: Parsed paths YAML mapping.
-
-    Returns:
-        The `queue_root` override when the key is present, else the `queue_folder` from
-        `jobq_paths.toml` (`jobq_folder.configured_queue_folder`; SystemExit if unset).
-    """
-    configured = paths.get("queue_root")
-    if configured:
-        return Path(configured)
-    from subliminal_learning.jobq_folder import configured_queue_folder
-
-    return configured_queue_folder()
 
 
 @dataclass(frozen=True)

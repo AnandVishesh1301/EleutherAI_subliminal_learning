@@ -286,8 +286,8 @@ def bump_depth(text: str) -> tuple[str, int, list[tuple[int, str]]]:
 # ---------------------------------------------------------------------------------------------
 
 
-def queue_roots(rl: str) -> list[str]:
-    """Queue roots at old or new locations (never jspace_jobq, never the compat symlink)."""
+def queue_folders(rl: str) -> list[str]:
+    """Queue folders at old or new locations (never jspace_jobq, never the compat symlink)."""
     cands = [os.path.join(rl, n) for n in (LIVE_ROOT, *RETIRED_ROOTS)]
     cands.append(os.path.join(rl, "queues", LIVE_ROOT))
     cands += [os.path.join(rl, "queues", "retired", n) for n in RETIRED_ROOTS]
@@ -296,7 +296,7 @@ def queue_roots(rl: str) -> list[str]:
 
 def jobs_files(rl: str) -> list[str]:
     out = []
-    for root in queue_roots(rl):
+    for root in queue_folders(rl):
         with os.scandir(root) as it:
             for e in it:
                 if e.is_dir(follow_symlinks=False):

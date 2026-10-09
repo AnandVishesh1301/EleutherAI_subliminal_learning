@@ -32,7 +32,7 @@ REPO_ROOT = Path(__file__).parents[2]
 def _cfg(tmp_path: Path) -> CampaignDriverConfig:
     return CampaignDriverConfig(
         output_root=tmp_path / "out",
-        queue_root=tmp_path / "queue",
+        queue_folder=tmp_path / "queue",
         repo_root=REPO_ROOT,
         generated_dir_override=tmp_path / "generated",
     )
@@ -103,9 +103,9 @@ def _fake_a2_outputs(cfg: CampaignDriverConfig, floor: dict[float, float]) -> No
 
 
 def _complete_queue(cfg: CampaignDriverConfig, name: str, *, fail_keys=()) -> None:
-    for job in store.load_jobs(cfg.queue_root, name):
+    for job in store.load_jobs(cfg.queue_folder, name):
         store.record_result(
-            cfg.queue_root,
+            cfg.queue_folder,
             name,
             job,
             rc=1 if job.key in fail_keys else 0,
@@ -212,7 +212,7 @@ def test_head_advance_halts_the_driver_before_the_queue_gates(
 
     with pytest.raises(CampaignGateError, match="git HEAD .new-sha. has moved away"):
         run(cfg)
-    assert not store.list_queues(cfg.queue_root)  # nothing submitted into the halt
+    assert not store.list_queues(cfg.queue_folder)  # nothing submitted into the halt
 
 
 def test_auto_reconcile_sha_records_the_advance_and_advances(
@@ -220,7 +220,7 @@ def test_auto_reconcile_sha_records_the_advance_and_advances(
 ) -> None:
     cfg = CampaignDriverConfig(
         output_root=tmp_path / "out",
-        queue_root=tmp_path / "queue",
+        queue_folder=tmp_path / "queue",
         repo_root=REPO_ROOT,
         generated_dir_override=tmp_path / "generated",
         auto_reconcile_sha=True,
@@ -238,7 +238,7 @@ def test_auto_reconcile_sha_records_the_advance_and_advances(
     assert card["sha_advances"][0]["from"] == "old-sha"
     assert card["launches"][0]["git_sha"] == "old-sha"  # founding sha preserved
     assert "submit_initial" in result.fired
-    assert store.queue_exists(cfg.queue_root, plan.Q_A1)
+    assert store.queue_exists(cfg.queue_folder, plan.Q_A1)
 
 
 def test_matching_head_is_not_reported_as_drift(
@@ -262,27 +262,27 @@ def test_full_campaign_lifecycle(tmp_path: Path) -> None:
     # A0 gate: nothing exists yet -> refuse to submit anything.
     with pytest.raises(CampaignGateError, match="A0 incomplete"):
         run(cfg)
-    assert not store.list_queues(cfg.queue_root)
+    assert not store.list_queues(cfg.queue_folder)
 
     # A0 done -> initial queues submitted with the plan's shapes.
     _write_a0(cfg)
     result = run(cfg)
     assert result.fired == ("submit_initial",)
     assert not result.done
-    assert len(store.load_jobs(cfg.queue_root, plan.Q_A1)) == plan.A1_TOTAL_CELLS
-    assert len(store.load_jobs(cfg.queue_root, plan.Q_A2)) == plan.A2_CONTROL_CELLS
-    assert len(store.load_jobs(cfg.queue_root, plan.Q_A1_EVALS)) == 72
-    assert len(store.load_jobs(cfg.queue_root, plan.Q_BACKLOG)) == 18
-    assert store.read_meta(cfg.queue_root, plan.Q_A1).priority == 100
-    assert store.read_meta(cfg.queue_root, plan.Q_A2).priority == 95
-    assert store.read_meta(cfg.queue_root, plan.Q_A1_EVALS).depends_on == [
+    assert len(store.load_jobs(cfg.queue_folder, plan.Q_A1)) == plan.A1_TOTAL_CELLS
+    assert len(store.load_jobs(cfg.queue_folder, plan.Q_A2)) == plan.A2_CONTROL_CELLS
+    assert len(store.load_jobs(cfg.queue_folder, plan.Q_A1_EVALS)) == 72
+    assert len(store.load_jobs(cfg.queue_folder, plan.Q_BACKLOG)) == 18
+    assert store.read_meta(cfg.queue_folder, plan.Q_A1).priority == 100
+    assert store.read_meta(cfg.queue_folder, plan.Q_A2).priority == 95
+    assert store.read_meta(cfg.queue_folder, plan.Q_A1_EVALS).depends_on == [
         plan.Q_A1,
         plan.Q_A2,
     ]
-    a1_cmds = [j.cmd for j in store.load_jobs(cfg.queue_root, plan.Q_A1)]
+    a1_cmds = [j.cmd for j in store.load_jobs(cfg.queue_folder, plan.Q_A1)]
     assert all("--no-control" in c for c in a1_cmds)
     assert all(
-        "--controls-only" in j.cmd for j in store.load_jobs(cfg.queue_root, plan.Q_A2)
+        "--controls-only" in j.cmd for j in store.load_jobs(cfg.queue_folder, plan.Q_A2)
     )
 
     # Idempotent: re-running while queues are pending fires nothing new.
@@ -291,7 +291,7 @@ def test_full_campaign_lifecycle(tmp_path: Path) -> None:
     assert result.waiting  # A1/A2 still pending
 
     # A failed job blocks the A3 transition loudly.
-    jobs = store.load_jobs(cfg.queue_root, plan.Q_A1)
+    jobs = store.load_jobs(cfg.queue_folder, plan.Q_A1)
     _complete_queue(cfg, plan.Q_A1, fail_keys=(jobs[0].key,))
     _complete_queue(cfg, plan.Q_A2)
     with pytest.raises(CampaignGateError, match="FAILED"):
@@ -334,7 +334,7 @@ def test_full_campaign_lifecycle(tmp_path: Path) -> None:
     n_train = 2 * 2 * 5 * len(plan.A3_DOSES)  # 4 same arms + cross, per dose
     n_head = 2 * 2 * len(plan.A3_DOSES)
     assert len(list(cfg.generated_dir.glob("gkd_a3_*.yaml"))) == 2 * n_train
-    a3_jobs = store.load_jobs(cfg.queue_root, plan.Q_A3)
+    a3_jobs = store.load_jobs(cfg.queue_folder, plan.Q_A3)
     # Every train YAML x 3 gseeds, plus a controls-only shard per headline YAML/gseed.
     assert len(a3_jobs) == (n_train + n_head) * len(plan.A3_GSEEDS)
     assert sum("--controls-only" in j.cmd for j in a3_jobs) == n_head * len(
@@ -343,8 +343,8 @@ def test_full_campaign_lifecycle(tmp_path: Path) -> None:
     assert all(
         ("--no-control" in j.cmd) ^ ("--controls-only" in j.cmd) for j in a3_jobs
     )
-    assert len(store.load_jobs(cfg.queue_root, plan.Q_A3_EVALS)) == n_train
-    assert store.read_meta(cfg.queue_root, plan.Q_A3_EVALS).depends_on == [plan.Q_A3]
+    assert len(store.load_jobs(cfg.queue_folder, plan.Q_A3_EVALS)) == n_train
+    assert store.read_meta(cfg.queue_folder, plan.Q_A3_EVALS).depends_on == [plan.Q_A3]
 
     # Idempotent again.
     assert run(cfg).fired == ()
@@ -366,8 +366,8 @@ def test_full_campaign_lifecycle(tmp_path: Path) -> None:
     assert freeze_report["headline_beta"] == 1.0
     assert freeze_report["winner"]["recipe"] == frozen["recipe"]
     assert freeze_report["frozen"] == state["transitions"]["submit_b"]["frozen"]
-    head = store.load_jobs(cfg.queue_root, plan.Q_B_HEADLINE)
-    ext = store.load_jobs(cfg.queue_root, plan.Q_B_EXT)
+    head = store.load_jobs(cfg.queue_folder, plan.Q_B_HEADLINE)
+    ext = store.load_jobs(cfg.queue_folder, plan.Q_B_EXT)
     # 4 headline YAMLs x 2 animals x 2 students x 3 gseeds x 3 tfs = 144 treatments.
     ctrl = [j for j in head if j.key.startswith("b-ctrl|")]
     assert len(head) - len(ctrl) == 144
@@ -380,7 +380,7 @@ def test_full_campaign_lifecycle(tmp_path: Path) -> None:
         assert "--animals " in job.cmd and "--base-models " in job.cmd
         assert "--gseeds " in job.cmd and "--teacher-ftseeds " in job.cmd
     assert len({j.key for j in head + ext}) == len(head) + len(ext)
-    assert len(store.load_jobs(cfg.queue_root, plan.Q_B_EVALS)) == 54
+    assert len(store.load_jobs(cfg.queue_folder, plan.Q_B_EVALS)) == 54
 
     # Stage B done -> finalize writes the marker.
     _complete_queue(cfg, plan.Q_B_HEADLINE)
@@ -419,21 +419,21 @@ def test_dry_run_changes_nothing(tmp_path: Path) -> None:
     _write_a0(cfg)
     dry = CampaignDriverConfig(
         output_root=cfg.output_root,
-        queue_root=cfg.queue_root,
+        queue_folder=cfg.queue_folder,
         repo_root=cfg.repo_root,
         dry_run=True,
         generated_dir_override=cfg.generated_dir_override,
     )
     result = run(dry)
     assert result.fired == ("submit_initial",)
-    assert not store.list_queues(cfg.queue_root)
+    assert not store.list_queues(cfg.queue_folder)
     assert not cfg.state_path.exists()
 
 
 def test_queue_mismatch_refuses(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     _write_a0(cfg)
-    store.create_queue(cfg.queue_root, plan.Q_A1, priority=1)
-    store.append_jobs(cfg.queue_root, plan.Q_A1, [Job(key="alien", cmd="echo hi")])
+    store.create_queue(cfg.queue_folder, plan.Q_A1, priority=1)
+    store.append_jobs(cfg.queue_folder, plan.Q_A1, [Job(key="alien", cmd="echo hi")])
     with pytest.raises(RuntimeError, match="different job set"):
         run(cfg)

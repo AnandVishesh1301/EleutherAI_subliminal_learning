@@ -53,8 +53,8 @@ EXT = {**BASE, "steps": [75000, 130000],
        "pairs": {"topology": "diagonal", "explicit": []}}
 
 
-def _deps(jobq: dict, queue_root: Path | None) -> dict[str, list[str]]:
-    specs = expand_jobs({**EXT, "jobq": jobq}, Path("/repo"), queue_root)
+def _deps(jobq: dict, queue_folder: Path | None) -> dict[str, list[str]]:
+    specs = expand_jobs({**EXT, "jobq": jobq}, Path("/repo"), queue_folder)
     return {q.name: q.depends_on for q in specs}
 
 
@@ -81,5 +81,5 @@ def test_without_the_knob_dependencies_are_unchanged(tmp_path: Path) -> None:
     assert deps == _deps(JOBQ, None)
 
 
-def test_knob_without_a_queue_root_adds_nothing(tmp_path: Path) -> None:
+def test_knob_without_a_queue_folder_adds_nothing(tmp_path: Path) -> None:
     assert _deps({**JOBQ, "depends_on_prefix": "other"}, None) == _deps(JOBQ, None)

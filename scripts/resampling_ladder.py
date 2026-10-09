@@ -426,7 +426,7 @@ def _snapshot_student_config(campaign_dir: Path) -> None:
 
 
 def submit(
-    output_root: Path, campaign_dir: Path, animal: str, priority: int, queue_root: Path
+    output_root: Path, campaign_dir: Path, animal: str, priority: int, queue_folder: Path
 ) -> dict[str, int]:
     counts = build_jobs(output_root, campaign_dir, animal)
     _snapshot_student_config(campaign_dir)
@@ -447,7 +447,7 @@ def submit(
     (campaign_dir / f"jobs_prepare_{animal}.jsonl").write_text(
         "".join(json.dumps(j) + "\n" for j in prep)
     )
-    assert_configured_queue_folder(queue_root)
+    assert_configured_queue_folder(queue_folder)
     for stage, prior in (("prepare", None), ("distill", "prepare")):
         name = f"{CAMPAIGN}-{animal}-{stage}"
         cmd = [
@@ -491,10 +491,6 @@ def main() -> None:
     parser.add_argument("--animal", choices=ANIMALS, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--campaign-dir", type=Path, default=DEFAULT_CAMPAIGN_DIR)
-    parser.add_argument(
-        "--queue-root", type=Path, default=None,
-        help="jobq queue root (default: queue_folder in jobq_paths.toml).",
-    )
     parser.add_argument("--recipe", nargs="+", choices=RECIPES)
     parser.add_argument("--step", type=int, nargs="+", choices=STEPS)
     parser.add_argument("--leaf", choices=LEAVES)
@@ -516,7 +512,7 @@ def main() -> None:
                     args.campaign_dir,
                     args.animal,
                     args.priority,
-                    args.queue_root or configured_queue_folder(),
+                    configured_queue_folder(),
                 )
             )
         )

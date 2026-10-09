@@ -38,7 +38,8 @@ def _run(root, argv):
     import sys
     from unittest.mock import patch
 
-    with patch.object(sys, "argv", ["prog", "--root", str(root), *argv]):
+    with patch.object(sys, "argv", ["prog", *argv]), \
+            patch.object(mod, "configured_queue_folder", lambda: root):
         return mod.main()
 
 

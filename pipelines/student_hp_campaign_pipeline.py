@@ -478,6 +478,6 @@ def status(cfg: driver_io.CampaignDriverConfig) -> dict:
     state = driver_io.load_state(cfg)
     queues = {}
     for name in plan.QUEUE_PRIORITIES:
-        if store.queue_exists(cfg.queue_root, name):
-            queues[name] = store.queue_status(cfg.queue_root, name)
+        if store.queue_exists(cfg.queue_folder, name):
+            queues[name] = store.queue_status(cfg.queue_folder, name)
     return {"transitions": sorted(state["transitions"]), "queues": queues}

@@ -20,9 +20,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 HOST=$(hostname)
 SESSION=seed0_sdf
-# Sibling of the configured queue_root, so these pools land in the same per-user
+# Parent of the jobq_paths.toml queue folder, so these pools land in the same per-user
 # SSD subdir as the campaign queues (never the repo-relative run_logs/ symlink).
-QUEUE_PARENT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text())).parent)")
+QUEUE_PARENT=$(uv run python -c "from subliminal_learning.jobq_folder import configured_queue_folder;print(configured_queue_folder().parent)")
 
 # $1=pool name (full|lora)  $2=GPU list json  $3=sweep yaml  $4=training yaml  $5=n shards
 setup_pool() {

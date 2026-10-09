@@ -31,10 +31,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 HOST=$(hostname)
 SESSION=slbreadth
-# queue_root comes from the paths YAML (config.resolve_queue_root), never from the
-# repo-relative run_logs/ symlink: that link is created by a shared bootstrap script
+# The queue folder comes from jobq_paths.toml (jobq_folder.configured_queue_folder), never
+# from the repo-relative run_logs/ symlink: that link is created by a shared bootstrap script
 # and has pointed into another user's SSD subdir before.
-ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text())))")
+ROOT=$(uv run python -c "from subliminal_learning.jobq_folder import configured_queue_folder;print(configured_queue_folder())")
 DRIVER_FLAGS="${*:-}"
 
 mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs"
@@ -68,7 +68,7 @@ tmux send-keys -t "$SESSION:workers" \
 # any gate failure -- reattach, fix, and rerun `advance`).
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 tmux send-keys -t "$SESSION:driver" \
-  "uv run python -m scripts.run_student_hp_campaign watch --queue-root $ROOT --interval 300 --auto-reconcile-sha $DRIVER_FLAGS" C-m
+  "uv run python -m scripts.run_student_hp_campaign watch --interval 300 --auto-reconcile-sha $DRIVER_FLAGS" C-m
 
 # Window 3: Discord notify sidecar (isolated tools/campaign_notify uv project).
 # Additive only — never imports training code; fails soft if webhook/.env missing.
@@ -90,7 +90,7 @@ Started tmux session '$SESSION':
 $NOTIFY_LINE
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
-Status:  uv run python -m scripts.run_student_hp_campaign status --queue-root $ROOT
+Status:  uv run python -m scripts.run_student_hp_campaign status
          uv run jobq status
          uv run --project tools/campaign_notify python -m campaign_notify status
 Stop:    uv run jobq stop   (graceful pool stop)

@@ -659,8 +659,8 @@ def status(cfg: driver_io.CampaignDriverConfig) -> dict:
     """Read-only snapshot: per-queue status + which transitions have fired."""
     state = driver_io.load_state(cfg)
     queues = {
-        name: store.queue_status(cfg.queue_root, name)
+        name: store.queue_status(cfg.queue_folder, name)
         for name in plan.QUEUE_PRIORITIES
-        if store.queue_exists(cfg.queue_root, name)
+        if store.queue_exists(cfg.queue_folder, name)
     }
     return {"transitions": sorted(state["transitions"]), "queues": queues}

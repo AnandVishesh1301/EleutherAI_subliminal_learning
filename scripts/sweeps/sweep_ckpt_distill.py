@@ -3,7 +3,7 @@
 Runs the subliminal-learning chain across PRETRAINING checkpoints of a base model
 (HF revisions `step1000`, `step32000`, ...), including CROSS-checkpoint pairs. Reads
 configs/experiment/ckpt_distill_sweep.yaml and drives jobq: per teacher checkpoint i it
-lays down three pipelined queues under jobq.root ---
+lays down three pipelined queues under the jobq_paths.toml queue folder ---
 
     {prefix}-t-step{i}  (prio 40)                 train the teacher(s) on {base}@step{i}
     {prefix}-n-step{i}  (prio 30, needs -t-step{i})  generate that teacher's numbers
@@ -65,7 +65,7 @@ two same-key teacher jobs can never run concurrently into one output dir. Additi
 existing queue keeps its stored meta (submit warns and leaves it untouched).
 
 `submit` snapshots the sweep YAML into the queue root at
-`{queue_root}/{queue_prefix}.sweep.yaml` and embeds THAT path in every run-cell command,
+`{queue_folder}/{queue_prefix}.sweep.yaml` and embeds THAT path in every run-cell command,
 so editing the source YAML after submit cannot silently re-configure queued cells.
 
 Examples:
@@ -92,10 +92,7 @@ import yaml
 
 from jobq.model import sanitize_jobkey
 from subliminal_learning.config import load_yaml_extends
-from subliminal_learning.jobq_folder import (
-    assert_configured_queue_folder,
-    configured_queue_folder,
-)
+from subliminal_learning.jobq_folder import configured_queue_folder
 from subliminal_learning.utils.io import atomic_write_text, file_lock
 from subliminal_learning.utils.perms import DIR_MODE
 
@@ -186,10 +183,10 @@ def _pair_set(
 
 
 def expand_jobs(
-    sweep: dict, repo_root: Path, queue_root: Path | None = None,
+    sweep: dict, repo_root: Path, queue_folder: Path | None = None,
     missing_deps: list[tuple[str, int]] | None = None,
 ) -> list[QueueSpec]:
-    """Expand a sweep doc into the ordered list of jobq queues (no GPU; see queue_root).
+    """Expand a sweep doc into the ordered list of jobq queues (no GPU; see queue_folder).
 
     Per teacher checkpoint i: a train queue, a numgen queue (depends_on the train queue)
     and a distill queue (depends_on the numgen queue). Distill jobs are `run-cell`
@@ -197,7 +194,7 @@ def expand_jobs(
     control numgen jobs are added only when their numbers.* flags are set. Every job
     carries WANDB_MODE=disabled and the per-stage mem_mib (plus a cwd only when pinned).
 
-    `queue_root` is read ONLY for the optional `jobq.depends_on_prefix` knob (which needs to
+    `queue_folder` is read ONLY for the optional `jobq.depends_on_prefix` knob (which needs to
     know which of the other campaign's queues exist); everything else is pure. Pass a list as
     `missing_deps` to collect the (stage_letter, step) counterparts that knob asked for and
     did NOT find (the submit path logs them; see dep_queue).
@@ -278,7 +275,7 @@ def expand_jobs(
         if not dep_prefix:
             return []
         name = f"{dep_prefix}-{stage_letter}-step{step}"
-        if queue_root is not None and (Path(queue_root) / name).is_dir():
+        if queue_folder is not None and (Path(queue_folder) / name).is_dir():
             return [name]
         # A dangling dep would park the queue forever, so the edge is dropped -- but
         # silently dropping it also drops the mutual exclusion the knob was added for, so
@@ -458,15 +455,16 @@ def _snapshot_growth_diff(existing: str, new_content: str | dict) -> list[str]:
 
 
 def _sans_pairs_and_root(doc: dict) -> dict:
-    """`doc` minus `pairs`, `config_path` and `jobq.root` (the only keys semantic reuse may
-    see differ: a respelled pair set, and the pre-folder-config queue root)."""
+    """`doc` minus `pairs`, `config_path` and the legacy `root` key under `jobq` (the only
+    keys semantic reuse may see differ: a respelled pair set, and the queue root that
+    snapshots written before jobq_paths.toml still carry)."""
     out = {k: v for k, v in doc.items() if k not in ("pairs", "config_path")}
     if isinstance(out.get("jobq"), dict):
         out["jobq"] = {k: v for k, v in out["jobq"].items() if k != "root"}
     return out
 
 
-def _expansion_signature(doc: dict, repo_root: Path, queue_root: Path | None) -> list[str]:
+def _expansion_signature(doc: dict, repo_root: Path, queue_folder: Path | None) -> list[str]:
     """Deterministic dump of every queue spec + job dict `doc` expands to (no I/O writes).
 
     `config_path` is pinned to one placeholder so two docs compare on what they expand to,
@@ -474,7 +472,7 @@ def _expansion_signature(doc: dict, repo_root: Path, queue_root: Path | None) ->
     """
     d = {**doc, "config_path": "<snapshot>"}
     out = []
-    for q in expand_jobs(d, repo_root, queue_root):
+    for q in expand_jobs(d, repo_root, queue_folder):
         meta = {"name": q.name, "priority": q.priority, "depends_on": list(q.depends_on),
                 "mem_mib": q.mem_mib, "node": q.node}
         out.append(json.dumps(meta, sort_keys=True, default=str))
@@ -486,7 +484,7 @@ def _expansion_signature(doc: dict, repo_root: Path, queue_root: Path | None) ->
 def _snapshot_action(
     existing: str | None, new_content: str, allow_update: bool, allow_growth: bool = False,
     resolved: dict | None = None, repo_root: Path | None = None,
-    queue_root: Path | None = None,
+    queue_folder: Path | None = None,
 ) -> str:
     """Classify what a config snapshot at the queue root needs (pure; caller does the I/O).
 
@@ -496,7 +494,8 @@ def _snapshot_action(
     ``"write"`` — no snapshot yet; ``"reuse"`` — present and byte-identical (or, given
     ``resolved``, parsing to the same doc); ``"reuse_expansion"`` — given ``resolved`` and
     ``repo_root``, the parsed snapshot and ``resolved`` are equal outside `pairs` /
-    `jobq.root` AND expand to the same (non-empty) queue + job specs (e.g. a dropped ``jobq.root``, or an explicit pair list respelled
+    the legacy `jobq` `root` key AND expand to the same (non-empty) queue + job specs (e.g. a
+    dropped legacy root, or an explicit pair list respelled
     as ``full`` + ``window``/``extra_pairs``); ``"overwrite"``
     — present, differs, and either ``--allow-snapshot-update`` (blanket) or
     ``--allow-snapshot-growth`` with a difference that is only ADDED steps/explicit pairs
@@ -519,9 +518,9 @@ def _snapshot_action(
                 if isinstance(old_doc, dict) and _sans_pairs_and_root(old_doc) == (
                     _sans_pairs_and_root(resolved)
                 ):
-                    new_sig = _expansion_signature(resolved, repo_root, queue_root)
+                    new_sig = _expansion_signature(resolved, repo_root, queue_folder)
                     # an empty expansion proves nothing about the two docs: never reuse on it
-                    if new_sig and _expansion_signature(old_doc, repo_root, queue_root) == new_sig:
+                    if new_sig and _expansion_signature(old_doc, repo_root, queue_folder) == new_sig:
                         return "reuse_expansion"
             except Exception:  # noqa: BLE001 - an unexpandable old snapshot simply differs
                 pass
@@ -533,21 +532,7 @@ def _snapshot_action(
     return "error"
 
 
-def sweep_queue_root(sweep: dict, root: Path | None = None) -> tuple[Path, bool]:
-    """Queue root for a sweep: `--root` > YAML `jobq.root` > `jobq_paths.toml` queue_folder.
-
-    Returns the root and whether it was supplied explicitly (CLI or YAML), in which case
-    the caller still checks it against the configured folder before submitting.
-    """
-    if root is not None:
-        return Path(str(root)), True
-    yaml_root = (sweep.get("jobq") or {}).get("root")
-    if yaml_root:
-        return Path(str(yaml_root)), True
-    return configured_queue_folder(), False
-
-
-def sweep_lock_path(queue_root: Path | str, queue_prefix: str) -> Path:
+def sweep_lock_path(queue_folder: Path | str, queue_prefix: str) -> Path:
     """Lock file serializing writes to a campaign's sweep YAML + queue-root snapshot.
 
     It lives under the QUEUE root (world-writable, shared by both nodes' uids), never
@@ -555,17 +540,13 @@ def sweep_lock_path(queue_root: Path | str, queue_prefix: str) -> Path:
     and a concurrent ``submit`` that overwrites the snapshot must exclude each other, and
     they only share the queue root.
     """
-    return Path(queue_root) / f"{queue_prefix}.sweep.lock"
+    return Path(queue_folder) / f"{queue_prefix}.sweep.lock"
 
 
 @app.command()
 def submit(
     sweep_config: Path = typer.Option(
         DEFAULT_SWEEP_CONFIG, help="Cross-checkpoint distillation sweep YAML."
-    ),
-    root: Path = typer.Option(
-        None, help="Override the queue state root (default: YAML jobq.root, else the "
-        "queue_folder in jobq_paths.toml)."
     ),
     allow_snapshot_update: bool = typer.Option(
         False,
@@ -594,19 +575,19 @@ def submit(
     load_dotenv()
     configure_loguru()
     sweep = load_yaml_extends(sweep_config)
-    queue_root, explicit_root = sweep_queue_root(sweep, root)
+    queue_folder = configured_queue_folder()
     queue_prefix = str(sweep["jobq"]["queue_prefix"])
 
     # Snapshot the sweep YAML into the queue root and point every run-cell at THAT copy, so
     # editing the source YAML after submit can't silently re-configure already-queued cells.
     # The snapshot is the `extends`-RESOLVED doc, so run-cell & co. read it with plain
     # safe_load; an older raw-copy snapshot that parses to the same doc is reused.
-    snapshot_path = queue_root / f"{queue_prefix}.sweep.yaml"
+    snapshot_path = queue_folder / f"{queue_prefix}.sweep.yaml"
     new_content = yaml.safe_dump(sweep, sort_keys=False)
     existing_content = snapshot_path.read_text() if snapshot_path.exists() else None
     action = _snapshot_action(
         existing_content, new_content, allow_snapshot_update, allow_snapshot_growth,
-        resolved=sweep, repo_root=REPO_ROOT, queue_root=queue_root,
+        resolved=sweep, repo_root=REPO_ROOT, queue_folder=queue_folder,
     )
     if action == "error":
         keys = _snapshot_growth_diff(existing_content or "", sweep)
@@ -630,8 +611,8 @@ def submit(
                 "any already-queued cell now reads the NEW config.", snapshot_path,
             )
         if action in ("write", "overwrite"):
-            store.ensure_dir(queue_root)
-            with file_lock(sweep_lock_path(queue_root, queue_prefix)):
+            store.ensure_dir(queue_folder)
+            with file_lock(sweep_lock_path(queue_folder, queue_prefix)):
                 atomic_write_text(snapshot_path, new_content)
             logger.info("snapshot {} written", snapshot_path)
         else:
@@ -641,14 +622,14 @@ def submit(
 
     sweep["config_path"] = str(snapshot_path)
     missing_deps: list[tuple[str, int]] = []
-    specs = expand_jobs(sweep, REPO_ROOT, queue_root, missing_deps)
+    specs = expand_jobs(sweep, REPO_ROOT, queue_folder, missing_deps)
     if missing_deps:
         dep_prefix = sweep["jobq"].get("depends_on_prefix")
         for stage, step in missing_deps:
             logger.warning(
                 "depends_on_prefix {}: counterpart queue {}-{}-step{} does not exist under "
                 "{}; this stage runs WITHOUT that dependency",
-                dep_prefix, dep_prefix, stage, step, queue_root,
+                dep_prefix, dep_prefix, stage, step, queue_folder,
             )
         logger.warning(
             "depends_on_prefix {}: {} counterpart queue(s) missing ({}); the corresponding "
@@ -659,16 +640,14 @@ def submit(
     total = sum(len(q.jobs) for q in specs)
     logger.info(
         "Cross-checkpoint sweep {}: {} queue(s), {} job(s), root={}",
-        sweep_config, len(specs), total, queue_root,
+        sweep_config, len(specs), total, queue_folder,
     )
-    if not dry_run and specs and explicit_root:
-        assert_configured_queue_folder(queue_root)
     for q in specs:
-        exists = store.queue_exists(queue_root, q.name)
-        existing_keys = {jb.jobkey for jb in store.load_jobs(queue_root, q.name)} if exists else set()
+        exists = store.queue_exists(queue_folder, q.name)
+        existing_keys = {jb.jobkey for jb in store.load_jobs(queue_folder, q.name)} if exists else set()
         delta = filter_new_jobs(q.jobs, existing_keys)
         if exists:
-            meta = store.read_meta(queue_root, q.name)
+            meta = store.read_meta(queue_folder, q.name)
             diffs = _meta_diffs(meta, q)
             if diffs:
                 logger.warning(
@@ -713,7 +692,7 @@ def submit(
             cmd += ["--depends-on", ",".join(q.depends_on)]
         if q.node:
             cmd += ["--node", q.node]
-        logger.info("SUBMIT {} ({} new jobs) -> {}", q.name, len(delta), queue_root)
+        logger.info("SUBMIT {} ({} new jobs) -> {}", q.name, len(delta), queue_folder)
         try:
             subprocess.run(cmd, cwd=REPO_ROOT, check=True)
         finally:

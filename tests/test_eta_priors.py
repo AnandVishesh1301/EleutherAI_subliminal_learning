@@ -779,7 +779,14 @@ def test_capacity_falls_back_loudly_instead_of_pricing_a_node_at_zero(tmp_path):
     assert caps["nocap"].capacity_source == "default"
 
 
-def test_history_roots_and_the_default_cell_list_are_repo_anchored():
+def test_history_roots_and_the_default_cell_list_are_repo_anchored(tmp_path, monkeypatch):
+    from subliminal_learning import jobq_folder
+
+    # a throwaway jobq_paths.toml, so the test never needs the machine-local one
+    (tmp_path / "jobq_paths.toml").write_text(f'queue_folder = "{tmp_path / "q"}"\n')
+    monkeypatch.setattr(jobq_folder, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(eta_priors, "_HISTORY_ROOTS", None)
+    assert eta_priors.HISTORY_ROOTS[-1] == str(tmp_path / "q")
     assert all(Path(p).is_absolute() for p in eta_priors.HISTORY_ROOTS)
     assert eta_priors.REPO_ROOT.is_dir() and (eta_priors.REPO_ROOT / "pyproject.toml").exists()
     from scripts.transfer_significance_readout import DEFAULT_COMPARE_CELLS

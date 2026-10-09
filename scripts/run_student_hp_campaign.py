@@ -24,29 +24,26 @@ from loguru import logger
 
 from pipelines.student_hp_campaign_pipeline import CampaignGateError, run, status
 from subliminal_learning.campaign.driver_io import CampaignDriverConfig
-from subliminal_learning.config import resolve_queue_root
+from subliminal_learning.jobq_folder import configured_queue_folder
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
-_QUEUE_ROOT_HELP = "jobq root (default: queue_root from the paths YAML)."
 _RECONCILE_HELP = (
     "Record a mid-campaign HEAD advance on the run-set card instead of halting."
 )
 
 def _cfg(
     paths_config: Path,
-    queue_root: Path | None,
     include_stage_c: bool,
     skip_a0: bool,
     dry_run: bool,
     auto_reconcile_sha: bool = False,
 ) -> CampaignDriverConfig:
     paths = yaml.safe_load(Path(paths_config).read_text())
-    root = queue_root or resolve_queue_root(paths)
     return CampaignDriverConfig(
         output_root=Path(paths["output_root"]),
-        queue_root=root.resolve(),
+        queue_folder=configured_queue_folder().resolve(),
         repo_root=Path.cwd(),
         include_stage_c=include_stage_c,
         require_a0=not skip_a0,
@@ -58,19 +55,17 @@ def _cfg(
 @app.command("status")
 def status_cmd(
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
-    queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
 ) -> None:
     """Print per-queue status and fired transitions (read-only)."""
     load_dotenv()
     configure_loguru()
-    snap = status(_cfg(paths_config, queue_root, False, True, False))
+    snap = status(_cfg(paths_config, False, True, False))
     typer.echo(json.dumps(snap, indent=2, default=str))
 
 
 @app.command("advance")
 def advance_cmd(
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
-    queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
     include_stage_c: bool = typer.Option(
         False, help="Also generate + submit the optional Stage C ablations."
     ),
@@ -86,7 +81,7 @@ def advance_cmd(
     load_dotenv()
     configure_loguru()
     cfg = _cfg(
-        paths_config, queue_root, include_stage_c, skip_a0, dry_run, auto_reconcile_sha
+        paths_config, include_stage_c, skip_a0, dry_run, auto_reconcile_sha
     )
     try:
         result = run(cfg)
@@ -104,7 +99,6 @@ def advance_cmd(
 @app.command("watch")
 def watch_cmd(
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
-    queue_root: Path = typer.Option(None, help=_QUEUE_ROOT_HELP),
     include_stage_c: bool = typer.Option(False),
     skip_a0: bool = typer.Option(False),
     auto_reconcile_sha: bool = typer.Option(False, help=_RECONCILE_HELP),
@@ -114,7 +108,7 @@ def watch_cmd(
     load_dotenv()
     configure_loguru()
     cfg = _cfg(
-        paths_config, queue_root, include_stage_c, skip_a0, False, auto_reconcile_sha
+        paths_config, include_stage_c, skip_a0, False, auto_reconcile_sha
     )
     while True:
         result = run(cfg)  # CampaignGateError propagates: watch must die loudly

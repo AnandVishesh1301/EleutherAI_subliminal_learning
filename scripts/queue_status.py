@@ -96,8 +96,8 @@ Usage::
 
     uv run python -m scripts.queue_status [--root QUEUE_ROOT] [--all] [--json]
 
-``--root`` defaults to ``queue_root`` in the paths YAML, else the ``queue_folder`` in
-``jobq_paths.toml`` (``config.resolve_queue_root``).
+``--root`` defaults to the ``queue_folder`` in ``jobq_paths.toml``
+(``jobq_folder.configured_queue_folder``).
 """
 
 from __future__ import annotations
@@ -114,9 +114,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import yaml
-
-from subliminal_learning.config import resolve_queue_root
+from subliminal_learning.jobq_folder import configured_queue_folder
 from jobq import store
 from subliminal_learning import eta_priors
 from subliminal_learning.eta_priors import (  # re-exported for callers/tests
@@ -137,16 +135,11 @@ __all__ = [
 ]
 
 STALE_UNKNOWN_S = 3 * 3600.0  # stale age for a duration this queue never measured itself
-PATHS_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "paths" / "paths_local.yaml"
 HEURISTICS_DOC = Path(__file__).resolve().parents[1] / "docs" / "QUEUE_ETA_HEURISTICS.md"
 
 
 def _default_root() -> Path:
-    try:
-        text = PATHS_CONFIG.read_text()
-    except FileNotFoundError:
-        return resolve_queue_root({})
-    return resolve_queue_root(yaml.safe_load(text) or {})
+    return configured_queue_folder()
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -1118,7 +1111,7 @@ def _node_cell(cap: NodeCapacity, y: dict | None) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--root", type=Path, default=None, help="jobq root (default: paths YAML queue_root)")
+    ap.add_argument("--root", type=Path, default=None, help="jobq root (default: jobq_paths.toml queue_folder)")
     ap.add_argument("--all", action="store_true", help="include parked / complete / drained queues")
     ap.add_argument("--json", action="store_true", help="emit rows as JSON instead of a table")
     ap.add_argument("--history-root", type=Path, action="append", default=[],

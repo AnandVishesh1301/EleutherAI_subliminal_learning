@@ -652,3 +652,441 @@ def teacher_bootstrap(
         "cycles": cycles.assign(se=c_se, z=cycles["cycle"].to_numpy() / c_se),
         "n_boot": pd.DataFrame({"n_boot": [len(boot_a)]}),
     }
+
+
+# --------------------------------------------------------------------------------------
+# Held-out evaluation of the product + proximity model
+# --------------------------------------------------------------------------------------
+#: Display names of the three models scored under cell cross-validation (plus a rank-2
+#: in-sample reference).
+CV_MODELS: tuple[str, ...] = ("additive", "product", "product+proximity")
+
+
+@dataclass
+class ProximityFit:
+    """One ``M[t, s] ~= a[t] * b[s] + c * exp(-|t-s| / L)`` fit.
+
+    Attributes:
+        a: Teacher (sender) factor, gauged so that ``b.max() == 1`` when ``b`` is positive.
+        b: Student (receiver) factor.
+        c: Proximity bonus in probability units.
+        L: Selected nearness length, in thousands of steps.
+        P: The full ``(n, n)`` prediction (also at cells outside the fit mask).
+    """
+
+    a: np.ndarray
+    b: np.ndarray
+    c: float
+    L: float
+    P: np.ndarray
+
+
+def _distance_k(steps: list[int]) -> np.ndarray:
+    T = np.asarray(steps, dtype=float) / 1000.0
+    return np.abs(np.subtract.outer(T, T))
+
+
+def _fit_prox_fixed_length(
+    M: np.ndarray, E: np.ndarray, W: np.ndarray, a: np.ndarray | None, b: np.ndarray | None,
+    max_sweeps: int = 20000,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Masked least squares of ``a b^T + c E`` for one kernel; ``a`` or ``b`` may be fixed.
+
+    With one factor fixed the model is linear in the other factor plus ``c``, so it is solved
+    exactly; with both free, masked ALS over ``(b, a, c)`` runs to stationarity.
+    """
+    n_rows, n_cols = M.shape
+    r, s = np.nonzero(W)
+    if a is not None and b is not None:
+        raise ValueError("at most one of a, b may be held fixed")
+    if a is not None or b is not None:
+        fixed_rows = b is not None  # b fixed -> one free a per row
+        n_free = n_rows if fixed_rows else n_cols
+        X = np.zeros((len(r), n_free + 1))
+        if fixed_rows:
+            X[np.arange(len(r)), r] = b[s]
+        else:
+            X[np.arange(len(r)), s] = a[r]
+        X[:, -1] = E[r, s]
+        w = np.linalg.lstsq(X, M[r, s], rcond=None)[0]
+        if fixed_rows:
+            return w[:-1], np.asarray(b, dtype=float), float(w[-1])
+        return np.asarray(a, dtype=float), w[:-1], float(w[-1])
+
+    Wf = W.astype(float)
+    a_cur, b_cur = fit_rank1(M, W)
+    c = 0.0
+    EW = (Wf * E ** 2).sum()
+    P_prev = np.outer(a_cur, b_cur)
+    for _ in range(max_sweeps):
+        R = Wf * (M - c * E)
+        b_cur = (R.T @ a_cur) / (Wf.T @ a_cur ** 2)
+        a_cur = (R @ b_cur) / (Wf @ b_cur ** 2)
+        c = float((Wf * (M - np.outer(a_cur, b_cur)) * E).sum() / EW)
+        P = np.outer(a_cur, b_cur) + c * E
+        if np.abs(P - P_prev).max() <= 1e-13:
+            break
+        P_prev = P
+    return a_cur, b_cur, c
+
+
+def fit_product_proximity(
+    M: np.ndarray,
+    steps: list[int],
+    mask: np.ndarray | None = None,
+    *,
+    a: np.ndarray | None = None,
+    b: np.ndarray | None = None,
+    lengths: tuple[float, ...] = NEARNESS_LENGTHS,
+) -> ProximityFit:
+    """Fit ``a(t) b(s) + c exp(-|t-s|/L)`` on the masked cells, optionally holding a factor fixed.
+
+    ``L`` is chosen from ``lengths`` by the smallest squared error on the FITTED cells only, so
+    a held-out cell never informs the fit. With a full mask the in-sample R^2 equals the
+    ``product + c*exp(-|t-s|/L)`` row of `fit_models`.
+
+    Args:
+        M: ``(n, n)`` cell means, teacher steps by student steps.
+        steps: Checkpoint steps indexing ``M`` (for the distances, in thousands of steps).
+        mask: Boolean support of the fit; ``None`` uses every cell.
+        a: Hold the teacher factor fixed at this vector (refit ``b``, ``c``, ``L``).
+        b: Hold the student factor fixed at this vector (refit ``a``, ``c``, ``L``).
+        lengths: Candidate nearness lengths.
+
+    Returns:
+        The best `ProximityFit`; the prediction ``P`` covers every cell, masked or not.
+
+    Raises:
+        ValueError: If both ``a`` and ``b`` are given.
+    """
+    W = np.ones_like(M, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    D = _distance_k(steps)
+    best: tuple[float, ProximityFit] | None = None
+    for length in lengths:
+        E = np.exp(-D / length)
+        a_f, b_f, c = _fit_prox_fixed_length(M, E, W, a, b)
+        if b_f.max() > 0:
+            scale = b_f.max()
+            a_f, b_f = a_f * scale, b_f / scale
+        P = np.outer(a_f, b_f) + c * E
+        sse = float(((M - P)[W] ** 2).sum())
+        if best is None or sse < best[0]:
+            best = (sse, ProximityFit(a=a_f, b=b_f, c=c, L=float(length), P=P))
+    assert best is not None
+    return best[1]
+
+
+def _additive_masked(M: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Least-squares ``u[t] + v[s]`` on the masked cells, predicted everywhere."""
+    n_rows, n_cols = M.shape
+    r, s = np.nonzero(mask)
+    X = np.zeros((len(r), n_rows + n_cols))
+    X[np.arange(len(r)), r] = 1.0
+    X[np.arange(len(r)), n_rows + s] = 1.0
+    w = np.linalg.lstsq(X, M[r, s], rcond=None)[0]
+    return w[:n_rows, None] + w[None, n_rows:]
+
+
+def _predict(model: str, M: np.ndarray, steps: list[int], mask: np.ndarray) -> np.ndarray:
+    if model == "additive":
+        return _additive_masked(M, mask)
+    if model == "product":
+        return np.outer(*fit_rank1(M, mask))
+    if model == "product+proximity":
+        return fit_product_proximity(M, steps, mask).P
+    raise ValueError(f"unknown model {model!r}")
+
+
+def cell_cross_validation(
+    M: np.ndarray,
+    steps: list[int],
+    *,
+    n_folds: int = 10,
+    n_repeats: int = 5,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """K-fold cross-validation over grid cells for the additive / product / proximity models.
+
+    Each repeat draws one random partition of the ``n*n`` cells into ``n_folds`` folds (the
+    same partition for every model), fits on all other folds and predicts each fold. The CV
+    R^2 is pooled: ``1 - SSE / SST`` over all held-out predictions with ``SST`` about the mean
+    of ``M``, averaged over repeats. Rank-2 is an in-sample reference only (``r2_cv`` NaN): its
+    masked fit is unstable out of sample.
+
+    Args:
+        M: ``(n, n)`` cell means.
+        steps: Checkpoint steps indexing ``M``.
+        n_folds: Folds per repeat.
+        n_repeats: Independent random partitions.
+        seed: Seed of the ``numpy`` generator drawing the partitions.
+
+    Returns:
+        ``DataFrame[model, r2_in, r2_cv]`` with rows additive, product, product+proximity,
+        rank-2.
+    """
+    rng = np.random.default_rng(seed)
+    full = np.ones_like(M, dtype=bool)
+    folds = [rng.permutation(M.size).reshape(M.shape) % n_folds for _ in range(n_repeats)]
+    rows = []
+    for model in CV_MODELS:
+        cv = []
+        for fold in folds:
+            P = np.empty_like(M)
+            for k in range(n_folds):
+                test = fold == k
+                P[test] = _predict(model, M, steps, ~test)[test]
+            cv.append(_r2(M, P))
+        rows.append({"model": model, "r2_in": _r2(M, _predict(model, M, steps, full)),
+                     "r2_cv": float(np.mean(cv))})
+    rows.append({"model": "rank-2", "r2_in": _r2(M, _rank_k(M, 2)), "r2_cv": float("nan")})
+    return pd.DataFrame(rows)
+
+
+def diagonal_heldout(M: np.ndarray, steps: list[int]) -> dict[str, float]:
+    """Fit on the off-diagonal cells only and score the R^2 of the ``n`` diagonal cells.
+
+    Args:
+        M: ``(n, n)`` cell means.
+        steps: Checkpoint steps indexing ``M``.
+
+    Returns:
+        ``{"product": r2, "product+proximity": r2}``; R^2 about the mean of the diagonal.
+    """
+    off = ~np.eye(M.shape[0], dtype=bool)
+    diag = np.diag(M)
+    return {model: _r2(diag, np.diag(_predict(model, M, steps, off)))
+            for model in ("product", "product+proximity")}
+
+
+def _scaled_r2(Y: np.ndarray, P: np.ndarray) -> float:
+    """R^2 of ``Y`` against ``k * P`` with the one least-squares scale ``k``."""
+    return _r2(Y, (Y * P).sum() / (P * P).sum() * P)
+
+
+def leave_one_recipe_out(runs: pd.DataFrame, steps: list[int] | None = None) -> pd.DataFrame:
+    """Predict each teacher recipe's grid from the mean of the other recipes.
+
+    For each recipe the training grid is the `grid_matrix` of the OTHER recipes and the target
+    ``Y`` is the held-out recipe's own grid. A held-out recipe with any empty cell is skipped.
+
+    Args:
+        runs: Output of `load_checkpoint_grid_runs` (ideally full-coverage recipes only).
+        steps: Checkpoint steps; default `CKPT_STEPS`.
+
+    Returns:
+        ``DataFrame[held, emp_mean, model, product, b_borrowed, own_fit]``, one row per held-out
+        recipe: R^2 on ``Y`` of the training empirical mean, the training product+proximity fit
+        and the training plain product (each with one free scale); of a fit to ``Y`` with
+        ``b(s)`` borrowed from the training fit and ``a``, ``c``, ``L`` refit; and of ``Y``'s
+        own full product+proximity fit.
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    rows = []
+    for tag in sorted(runs["tag"].unique()):
+        try:
+            Y = grid_matrix(runs[runs["tag"] == tag], steps).M
+        except ValueError:
+            continue
+        M_train = grid_matrix(runs[runs["tag"] != tag], steps).M
+        train = fit_product_proximity(M_train, steps)
+        rows.append({
+            "held": tag,
+            "emp_mean": _scaled_r2(Y, M_train),
+            "model": _scaled_r2(Y, train.P),
+            "product": _scaled_r2(Y, np.outer(*fit_rank1(M_train))),
+            "b_borrowed": _r2(Y, fit_product_proximity(Y, steps, b=train.b).P),
+            "own_fit": _r2(Y, fit_product_proximity(Y, steps).P),
+        })
+    return pd.DataFrame(
+        rows, columns=["held", "emp_mean", "model", "product", "b_borrowed", "own_fit"]
+    )
+
+
+def heldout_ftseed(
+    runs: pd.DataFrame,
+    steps: list[int] | None = None,
+    *,
+    train_seed: int = 1,
+    test_seeds: tuple[int, int] = (2, 3),
+) -> dict[str, float] | None:
+    """Fit on one ftseed and predict the mean of two other seeds, with no rescaling.
+
+    Args:
+        runs: Output of `load_checkpoint_grid_runs`.
+        steps: Checkpoint steps; default `CKPT_STEPS`.
+        train_seed: The ftseed the model is fit on.
+        test_seeds: Exactly two held-out ftseeds; their mean is the target ``Y``.
+
+    Returns:
+        ``None`` if the training seed or either test seed misses a cell (never computed on
+        partial data); otherwise R^2 on ``Y`` of ``raw`` (the training-seed cells), ``model``
+        (product+proximity fit to them), ``product`` (plain product fit), ``ceiling`` (noise
+        ceiling ``1 - mean((Y2-Y3)^2)/4 * N / SST``) and ``seed_vs_seed`` (R^2 of the second
+        test seed predicted by the first).
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    if len(test_seeds) != 2:
+        raise ValueError("heldout_ftseed needs exactly two test seeds")
+    try:
+        M1, Y2, Y3 = (grid_matrix(runs[runs["ftseed"] == k], steps).M
+                      for k in (train_seed, *test_seeds))
+    except ValueError:
+        return None
+    Y = (Y2 + Y3) / 2
+    noise = ((Y2 - Y3) ** 2).mean() / 4
+    return {
+        "raw": _r2(Y, M1),
+        "model": _r2(Y, fit_product_proximity(M1, steps).P),
+        "product": _r2(Y, np.outer(*fit_rank1(M1))),
+        "ceiling": float(1 - noise * Y.size / ((Y - Y.mean()) ** 2).sum()),
+        "seed_vs_seed": _r2(Y3, Y2),
+    }
+
+
+def factor_borrowing(grids: dict[str, np.ndarray], steps: list[int]) -> pd.DataFrame:
+    """Borrow one factor from another grid and refit the rest on the target.
+
+    Args:
+        grids: Named ``(n, n)`` matrices on the same ``steps`` (e.g. ``{"dog": M_dog, ...}``).
+        steps: Checkpoint steps indexing every matrix.
+
+    Returns:
+        ``DataFrame[target, source, own_fit, b_from_src, a_from_src, flat_b, flat_a, corr_a,
+        corr_b]``, one row per ordered pair: R^2 on the target of its own product+proximity
+        fit; with ``b`` taken from the source's fit (``a``, ``c``, ``L`` refit); with ``a``
+        taken from the source (``b``, ``c``, ``L`` refit); the floors with ``b`` or ``a`` held
+        at all ones; and the Pearson correlations of the two grids' ``a`` and ``b`` curves.
+    """
+    fits = {name: fit_product_proximity(M, steps) for name, M in grids.items()}
+    ones = np.ones(len(steps))
+    rows = []
+    for tgt, Y in grids.items():
+        own = _r2(Y, fits[tgt].P)
+        flat_b = _r2(Y, fit_product_proximity(Y, steps, b=ones).P)
+        flat_a = _r2(Y, fit_product_proximity(Y, steps, a=ones).P)
+        for src in grids:
+            if src == tgt:
+                continue
+            rows.append({
+                "target": tgt, "source": src, "own_fit": own,
+                "b_from_src": _r2(Y, fit_product_proximity(Y, steps, b=fits[src].b).P),
+                "a_from_src": _r2(Y, fit_product_proximity(Y, steps, a=fits[src].a).P),
+                "flat_b": flat_b, "flat_a": flat_a,
+                "corr_a": float(np.corrcoef(fits[tgt].a, fits[src].a)[0, 1]),
+                "corr_b": float(np.corrcoef(fits[tgt].b, fits[src].b)[0, 1]),
+            })
+    return pd.DataFrame(rows)
+
+
+def factor_summary(M: np.ndarray, steps: list[int]) -> dict:
+    """Shape summary of the product+proximity factors (gauge ``max b = 1``).
+
+    Args:
+        M: ``(n, n)`` cell means.
+        steps: Checkpoint steps indexing ``M``; must contain 125000 and 143000.
+
+    Returns:
+        ``curves`` (`curves_table` frame), ``c``, ``L``, ``a_143_125`` / ``b_143_125`` (ratio
+        of the factor at 143k to 125k) and ``a_peak_k`` / ``b_peak_k`` (argmax step in k).
+    """
+    fit = fit_product_proximity(M, steps)
+    i125, i143 = steps.index(125000), steps.index(143000)
+    return {
+        "curves": curves_table(fit.a, fit.b, steps), "c": fit.c, "L": fit.L,
+        "a_143_125": float(fit.a[i143] / fit.a[i125]),
+        "b_143_125": float(fit.b[i143] / fit.b[i125]),
+        "a_peak_k": steps[int(fit.a.argmax())] // 1000,
+        "b_peak_k": steps[int(fit.b.argmax())] // 1000,
+    }
+
+
+def discover_checkpoint_grids(
+    output_root: Path,
+    animals: list[str],
+    *,
+    steps: list[int] | None = None,
+    student_tag: str = CKPT_STUDENT_TAG,
+    teacher_tags: list[str] | None = None,
+) -> tuple[pd.DataFrame, dict[tuple[str, str], pd.DataFrame]]:
+    """Find every same-lineage checkpoint grid and keep its full-coverage recipes.
+
+    Lineages are read from the top-level ``students/{animal}/ckpt/pythia-160m*@step*``
+    directory names (one ``iterdir`` per animal, no recursive glob), then each is loaded with
+    `load_checkpoint_grid_runs`. A recipe is kept only if it covers every ``(t, s)`` cell, so
+    no cell mixes recipe counts; a grid is complete when at least one recipe survives.
+
+    Args:
+        output_root: ``paths.output_root``.
+        animals: Trait animals to scan.
+        steps: Grid steps; default `CKPT_STEPS`.
+        student_tag: The fixed student HP cell.
+        teacher_tags: Recipes considered; default `CKPT_TEACHER_TAGS`.
+
+    Returns:
+        ``(coverage, runs)``. ``coverage`` is ``DataFrame[animal, lineage, cells, n_cells,
+        complete, n_recipes, dropped]``: cells covered by any recipe out of ``n_cells``, whether
+        the grid is complete, the number of full recipes kept and the partial recipes dropped.
+        ``runs`` maps ``(animal, lineage)`` of each complete grid to its full-recipe run frame.
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    n_cells = len(steps) ** 2
+    rows, out = [], {}
+    for animal in animals:
+        root = Path(output_root) / "students" / animal / "ckpt"
+        suffixes = sorted({m["suffix"] for d in (root.iterdir() if root.is_dir() else [])
+                           if (m := _CKPT_DIR_RE.fullmatch(d.name))})
+        for suffix in suffixes:
+            lineage = "orig" if suffix == "" else suffix[1:]
+            runs = load_checkpoint_grid_runs(output_root, animal, lineage,
+                                             student_tag=student_tag, teacher_tags=teacher_tags)
+            runs = runs[runs["t"].isin(steps) & runs["s"].isin(steps)]
+            per_tag = runs.groupby("tag")[["t", "s"]].apply(
+                lambda g: len(g.drop_duplicates())) if len(runs) else pd.Series(dtype=int)
+            full = sorted(per_tag.index[per_tag == n_cells])
+            dropped = sorted(per_tag.index[per_tag < n_cells])
+            rows.append({
+                "animal": animal, "lineage": lineage,
+                "cells": len(runs[["t", "s"]].drop_duplicates()), "n_cells": n_cells,
+                "complete": bool(full), "n_recipes": len(full), "dropped": dropped,
+            })
+            if full:
+                out[(animal, lineage)] = runs[runs["tag"].isin(full)].reset_index(drop=True)
+    return pd.DataFrame(rows), out
+
+
+def factorization_table(
+    runs: dict[tuple[str, str], pd.DataFrame],
+    steps: list[int] | None = None,
+    *,
+    n_folds: int = 10,
+    n_repeats: int = 5,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """One row per grid: in-sample, cell-CV and diagonal-held-out R^2 plus factor shape.
+
+    Args:
+        runs: ``(animal, lineage) -> runs`` as returned by `discover_checkpoint_grids`.
+        steps: Checkpoint steps; default `CKPT_STEPS`.
+        n_folds, n_repeats, seed: Passed to `cell_cross_validation`.
+
+    Returns:
+        ``DataFrame[animal, lineage, n_recipes, in_add, in_prod, in_prox, in_rank2, cv_add,
+        cv_prod, cv_prox, diag_prod, diag_prox, a_143_125, b_143_125, a_peak_k, b_peak_k]``.
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    short = {"additive": "add", "product": "prod", "product+proximity": "prox",
+             "rank-2": "rank2"}
+    rows = []
+    for (animal, lineage), r in runs.items():
+        M = grid_matrix(r, steps).M
+        cv = cell_cross_validation(M, steps, n_folds=n_folds, n_repeats=n_repeats, seed=seed)
+        row = {"animal": animal, "lineage": lineage, "n_recipes": r["tag"].nunique()}
+        row.update({f"in_{short[m]}": v for m, v in zip(cv["model"], cv["r2_in"])})
+        row.update({f"cv_{short[m]}": v for m, v in zip(cv["model"], cv["r2_cv"])
+                    if m != "rank-2"})
+        diag = diagonal_heldout(M, steps)
+        row.update({"diag_prod": diag["product"], "diag_prox": diag["product+proximity"]})
+        summary = factor_summary(M, steps)
+        row.update({k: summary[k] for k in ("a_143_125", "b_143_125", "a_peak_k", "b_peak_k")})
+        rows.append(row)
+    return pd.DataFrame(rows)

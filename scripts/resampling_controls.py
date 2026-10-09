@@ -715,7 +715,7 @@ def write_campaign_json(campaign_dir: Path, counts: dict[str, int]) -> None:
     )
 
 
-def submit(output_root: Path, campaign_dir: Path, queue_root: Path) -> None:
+def submit(output_root: Path, campaign_dir: Path, queue_folder: Path) -> None:
     import yaml
     from jobq import store
 
@@ -774,7 +774,7 @@ def submit(output_root: Path, campaign_dir: Path, queue_root: Path) -> None:
         (campaign_dir / f"jobs_{stage}.jsonl").write_text(
             "".join(json.dumps(j) + "\n" for j in jobs)
         )
-    assert_configured_queue_folder(queue_root)
+    assert_configured_queue_folder(queue_folder)
     for stage, prior in (
         ("basegen", None),
         ("prepare", "basegen"),
@@ -782,8 +782,8 @@ def submit(output_root: Path, campaign_dir: Path, queue_root: Path) -> None:
     ):
         deps = list(DEPENDENCIES) + ([f"{CAMPAIGN}-{prior}"] if prior else [])
         name = f"{CAMPAIGN}-{stage}"
-        if store.queue_exists(queue_root, name):
-            meta = store.read_meta(queue_root, name)
+        if store.queue_exists(queue_folder, name):
+            meta = store.read_meta(queue_folder, name)
             if (
                 list(meta.depends_on) != deps
                 or meta.priority != 48
@@ -845,10 +845,6 @@ def main() -> None:
     parser.add_argument(
         "--campaign-dir", "--jobs-root", type=Path, default=DEFAULT_CAMPAIGN_DIR
     )
-    parser.add_argument(
-        "--queue-root", type=Path, default=None,
-        help="jobq queue root (default: queue_folder in jobq_paths.toml).",
-    )
     # Pre-migration names stay accepted as aliases; everything resolves to layout-v2 names.
     parser.add_argument(
         "--arm",
@@ -882,7 +878,7 @@ def main() -> None:
     elif args.command == "submit":
         submit(
             args.output_root, args.campaign_dir,
-            args.queue_root or configured_queue_folder(),
+            configured_queue_folder(),
         )
     else:
         if any(

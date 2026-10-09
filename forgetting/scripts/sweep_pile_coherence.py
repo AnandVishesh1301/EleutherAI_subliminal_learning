@@ -485,9 +485,6 @@ def main(
         False, help="Count an adapter DONE on its json alone (ignore the npy sibling)."
     ),
     device: str = typer.Option("cuda:0", help="Per-job --device passthrough."),
-    queue_root: Path = typer.Option(
-        None, help="jobq queue state root (default: queue_folder in jobq_paths.toml)."
-    ),
     node: str = typer.Option(None, help="Pin submitted queues to this hostname."),
     mem_mib: int = typer.Option(6000, help="Queue-default free-MiB gate (160m fp32 eval)."),
     cap_per_gpu: int | None = typer.Option(
@@ -551,7 +548,7 @@ def main(
 
     if submit:
         _do_submit(
-            queue_root or configured_queue_folder(), submit, pending_bases, pending_adapters, output_root,
+            configured_queue_folder(), submit, pending_bases, pending_adapters, output_root,
             device=device, node=node, limit=limit,
             defaults=_queue_defaults(mem_mib, cap_per_gpu, slots),
         )
@@ -561,7 +558,7 @@ def main(
 
 
 def _do_submit(
-    queue_root: Path,
+    queue_folder: Path,
     queue: str,
     pending_bases: list[BaseTarget],
     pending_adapters: list[AdapterTarget],
@@ -580,20 +577,20 @@ def _do_submit(
 
     n_base = len(
         submit_jobs(
-            queue_root, base_queue, base_jobs,
+            queue_folder, base_queue, base_jobs,
             depends_on=None, priority=10, node=node, defaults=defaults,
         )
     )
     n_adapter = len(
         submit_jobs(
-            queue_root, queue, adapter_jobs,
+            queue_folder, queue, adapter_jobs,
             depends_on=[base_queue], priority=0, node=node, defaults=defaults,
         )
     )
     logger.info(
         "Submitted {} base job(s) -> {!r} (prio 10) and {} adapter job(s) -> {!r} "
         "(depends_on {!r}) under {}.",
-        n_base, base_queue, n_adapter, queue, base_queue, queue_root,
+        n_base, base_queue, n_adapter, queue, base_queue, queue_folder,
     )
     if limit and len(pending_adapters) > limit:
         logger.info("--limit {} capped {} pending adapters.", limit, len(pending_adapters))

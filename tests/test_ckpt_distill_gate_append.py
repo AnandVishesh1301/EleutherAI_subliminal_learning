@@ -57,15 +57,15 @@ pairs:
 
 animals: [dog]
 
-jobq: {root: QUEUE_ROOT, queue_prefix: ckpt-test}
+jobq: {queue_prefix: ckpt-test}
 """ 
 
 EMPTY_BLOCK = EMPTY_INLINE.replace("explicit: []", "explicit:")
 
 
 def _cfg_text(tmp_path: Path) -> str:
-    """EMPTY_INLINE with `jobq.root` pointed at a throwaway queue root (never run_logs/)."""
-    return EMPTY_INLINE.replace("QUEUE_ROOT", str(tmp_path / "queue"))
+    """The sweep YAML the watcher grows (its queue folder is faked in `_run_watcher`)."""
+    return EMPTY_INLINE
 NO_KEY = """base_model: weightc-seed1
 
 steps: [25000]
@@ -114,6 +114,8 @@ def _run_watcher(tmp_path: Path, monkeypatch, rcs: list[int], dry_run: bool = Fa
     cfg_path.write_text(_cfg_text(tmp_path))
 
     monkeypatch.setattr(ga, "load_paths_local", lambda: {"hf_cache_root": str(tmp_path)})
+    # a throwaway queue folder (never run_logs/) in place of the jobq_paths.toml one
+    monkeypatch.setattr(ga, "configured_queue_folder", lambda: tmp_path / "queue")
     monkeypatch.setattr(ga, "_load_probe", lambda _stem: [])
     monkeypatch.setattr(
         ga, "gate_step",
@@ -213,7 +215,7 @@ def _spy_writes(monkeypatch) -> tuple[list, list]:
     return writes, locks
 
 
-def test_config_write_is_atomic_under_the_queue_root_lock(tmp_path: Path, monkeypatch) -> None:
+def test_config_write_is_atomic_under_the_queue_folder_lock(tmp_path: Path, monkeypatch) -> None:
     writes, locks = _spy_writes(monkeypatch)
     _run_watcher(tmp_path, monkeypatch, rcs=[0])
     cfg_path = tmp_path / "sweep.yaml"
@@ -239,7 +241,7 @@ pairs:
 
 animals: [dog]
 
-jobq: {root: QUEUE_ROOT, queue_prefix: ckpt-test-seeds}
+jobq: {queue_prefix: ckpt-test-seeds}
 """
 
 
@@ -264,7 +266,7 @@ def test_follow_append_refuses_non_diagonal_followers() -> None:
 
 def test_follower_is_submitted_after_the_primary_with_its_own_ledger(tmp_path: Path, monkeypatch) -> None:
     follow = tmp_path / "seeds.yaml"
-    follow.write_text(FOLLOW_DIAG.replace("QUEUE_ROOT", str(tmp_path / "queue")))
+    follow.write_text(FOLLOW_DIAG)
     calls = _run_watcher(tmp_path, monkeypatch, rcs=[0, 0], follow=[follow])
     assert [c[c.index("--sweep-config") + 1] for c in calls] == [
         str(tmp_path / "sweep.yaml"), str(follow)], "primary first, then the follower"
@@ -277,7 +279,7 @@ def test_follower_is_submitted_after_the_primary_with_its_own_ledger(tmp_path: P
 
 def test_follower_waits_while_the_primary_submit_is_unconfirmed(tmp_path: Path, monkeypatch) -> None:
     follow = tmp_path / "seeds.yaml"
-    follow.write_text(FOLLOW_DIAG.replace("QUEUE_ROOT", str(tmp_path / "queue")))
+    follow.write_text(FOLLOW_DIAG)
     calls = _run_watcher(tmp_path, monkeypatch, rcs=[1, 0, 0], follow=[follow])
     targets = [c[c.index("--sweep-config") + 1] for c in calls]
     assert targets == [str(tmp_path / "sweep.yaml")] * 2 + [str(follow)]

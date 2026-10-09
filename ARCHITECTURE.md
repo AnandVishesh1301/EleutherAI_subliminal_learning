@@ -614,24 +614,21 @@ documented in the package README and its `docs/` (`usage.md`, `queue-folder.md`,
 
 ### Queue folder
 
-`jobq` takes its queue folder from the `jobq_paths.toml` it finds from the working
-directory. The file sits at the repo root and is gitignored (machine-local); this checkout's
-names `run_logs/queues/queue_angela`. A second folder is reached by running `jobq` from a directory
-that has its own `jobq_paths.toml`. `uv run jobq config` prints the folder and the settings
-file in use. The campaign launch scripts (`launch_seed0_teachers.sh`,
-`launch_optparam_campaign.sh`, `launch_student_hp_campaign.sh`) call `jobq` and need a
-`jobq_paths.toml` in their working directory before use.
+`jobq_paths.toml` (key `queue_folder`) is the only source of the jobq queue folder. `jobq`
+takes it from the `jobq_paths.toml` it finds from the working directory; repo code reads the
+same file in-process through `subliminal_learning.jobq_folder.configured_queue_folder` (every
+script default, the campaign drivers, `scripts/queue_status.py`, and the history roots in
+`eta_priors`). The file sits at the repo root and is gitignored (machine-local); copy the
+tracked `jobq_paths.toml.example` and set `queue_folder` (this checkout's names
+`run_logs/queues/queue_angela`). `uv run jobq config` prints the folder and the settings file in
+use. Neither the paths YAML, a sweep YAML's `jobq` block, nor a repo-script flag names the
+folder; the one exception is `scripts/queue_status.py --root`, a read-only view of another
+folder. `launch_seed0_teachers.sh` puts its sibling pools under the configured folder's parent.
 
 Scripts that shell out to `uv run jobq submit` but read the folder themselves through
-`jobq.store` (`resampling_ladder.py`, `resampling_controls.py`,
-`sweeps/sweep_ckpt_distill.py`) call `subliminal_learning.jobq_folder.assert_configured_queue_folder`
-before the first submit; it exits when `jobq config` names a different folder.
-
-Repo code and the sweep YAMLs no longer name the folder: every default reads it in-process
-from `jobq_paths.toml` via `subliminal_learning.jobq_folder.configured_queue_folder` (also the
-fallback of `config.resolve_queue_root` and the history roots in `eta_priors`). `jobq.root`
-in a sweep YAML (and `--root`, which beats it) is an optional override, checked against the
-configured folder before submit.
+`jobq.store` (`resampling_ladder.py`, `resampling_controls.py`) call
+`subliminal_learning.jobq_folder.assert_configured_queue_folder` before the first submit; it
+exits when `jobq config` names a different folder.
 
 ### `run_logs/` layout (regrouped 2026-10-06)
 
@@ -675,7 +672,7 @@ New commands: `stop --now`, `priority`, `pin`, `park` / `unpark`, `usage`, `conf
 - `src/subliminal_learning/eta_priors.py` keeps the duration priors, and
   `scripts/queue_status.py` is the campaign status table (one row per active queue with
   `t/job`, completion rate, ETA and stale-claim count); it reads the folder through
-  `jobq.store` and takes `--root`. The fitted duration model is written to
+  `jobq.store` (default: the `jobq_paths.toml` folder; `--root` views another). The fitted duration model is written to
   `docs/QUEUE_ETA_HEURISTICS.md` by `uv run python -m scripts.queue_status --show-priors --markdown`.
 
 ### On-disk compatibility for existing folders
@@ -844,7 +841,7 @@ ask). Tests: `tests/test_queue_status.py`, `tests/test_eta_priors.py`.
   also takes `window` + `extra_pairs` with `topology: full`; `sweep_ckpt_distill submit`
   writes the fully resolved doc as the queue snapshot and reuses an existing snapshot when it
   matches the resolved doc or, failing that, expands to identical jobs and queues with the
-  same values outside `pairs`/`jobq.root`.
+  same values outside `pairs` and the legacy queue-root key that pre-toml snapshots carry.
 - **sdf_docgen.yaml** — read directly by the isolated tool via `yaml.safe_load`.
 
 Machine-local env (GPU pin, `WANDB_MODE`, `HF_TOKEN`) loads from a gitignored `.env`.
@@ -925,7 +922,7 @@ passed window steps, or its diagonal) and re-submitted with `--allow-snapshot-up
 failing step is logged and excluded. The Pile probe stem comes from the paths YAML key
 `pile_preshuffled_document` (or `--preshuffled`; never a baked path), and both the
 watcher's config rewrite and `submit`'s snapshot overwrite are atomic under one lock,
-`{queue_root}/{queue_prefix}.sweep.lock` (2026-09-10). `--window` takes comma-separated
+`{queue_folder}/{queue_prefix}.sweep.lock` (2026-09-10). `--window` takes comma-separated
 items, each `lo:hi:stride` or a single step (`75000:125000:5000,130000,140000`), so a
 design can skip converted steps it never asked for (2026-09-12: wc1 +130k/140k, not 135k).
 `--follow-config` (repeatable, 2026-09-11) grows diagonal-only companion configs — e.g.
@@ -2274,7 +2271,7 @@ Two gaps found while auditing disk-persistence coherence before launch:
   (`plan.FREEZE_REPORT`, written the same way as `a1_selection_report.json`), so notebooks
   and manual analysis don't need to parse the state file for it.
 - Confirmed by design, not a gap: generated YAMLs (`configs/experiment/generated/`, repo,
-  git-ignored), jobq logs (`queue_root`), and the W&B offline dir (`wandb_dir`) all live
+  git-ignored), jobq logs (the `jobq_paths.toml` queue folder), and the W&B offline dir (`wandb_dir`) all live
   outside the `output_root` leaf tree — a notebook walking "everything" under
   `output_root` will not see those three.
 
@@ -3248,7 +3245,7 @@ question for a lineage×lineage matrix (control-subtracted against matched base 
 off-diagonal mask, cycle/transitivity tests, partner-independence ratios, teacher bootstrap).
 Dog/orig 13×13: product R² 0.964 vs additive 0.794, bottleneck 0.914, mirror 0.243, product+diag
 0.974, product+nearness 0.982 (L = 10k, c = +0.107), rank-2 0.988, ceiling 0.995 — the two
-factors, plus a short-range nearness bonus, carry the grid.
+factors, plus a short-range nearness bonus, carry the grid. Held-out evaluation (2026-10-08, notebook §2f of `checkpoint_distillation_analysis.ipynb`): `discover_checkpoint_grids` (full-coverage recipes only), masked/fixed-factor `fit_product_proximity`, `cell_cross_validation`, `diagonal_heldout`, `leave_one_recipe_out`, `heldout_ftseed`, `factor_borrowing`, `factor_summary`, `factorization_table`; dog/orig product+proximity CV R² 0.972, diagonal-held-out 0.962.
 
 ### Record cache (`analysis/record_cache.py`) + adapter-norm run-dir records (2026-08-20)
 

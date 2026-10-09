@@ -15,7 +15,6 @@ import json
 import re
 import shlex
 from collections import Counter
-from pathlib import Path
 
 from jobq.model import Job
 from jobq import store
@@ -121,17 +120,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--priority", type=int, help="Override the template's priority.")
     p.add_argument("--depends-on", help="Comma-separated queue names (default: none).")
     p.add_argument("--node", help="Pin the new queue to a hostname (default: the template's).")
-    p.add_argument(
-        "--root", type=Path, default=None,
-        help="jobq queue root (default: queue_folder in jobq_paths.toml).",
-    )
     p.add_argument("--dry-run", action="store_true", help="Print a summary, write nothing.")
     return p.parse_args()
 
 
 def main() -> int:
     a = parse_args()
-    root = a.root or configured_queue_folder()
+    root = configured_queue_folder()
     if not store.queue_exists(root, a.template):
         raise SystemExit(f"template queue {a.template!r} not found under {root}")
     if store.queue_exists(root, a.name):

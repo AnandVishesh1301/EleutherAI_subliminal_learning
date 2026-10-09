@@ -528,7 +528,7 @@ Full per-leaf artifact set:
 
 Per-config eval summaries (`preference_summary.json`, `sdf_forced_choice_summary.json`,
 `sdf_capability_summary.json`) sit one level up, at `…/{gkd_tag}/`. Every jobq job's full
-stdout/stderr is captured at `{queue_root}/{queue}/logs/{STAMP}_{jobkey}.{host}.log` with
+stdout/stderr is captured at `{queue_folder}/{queue}/logs/{STAMP}_{jobkey}.{host}.log` with
 a sibling `results/{jobkey}.json` recording rc, GPU, attempt, and the log path.
 
 ### 6.1 Exact probe inputs (what is scored)

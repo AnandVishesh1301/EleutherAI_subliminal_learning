@@ -2,7 +2,7 @@
 
 The jobq CLI picks its queue folder from the `jobq_paths.toml` found from its working
 directory, while sweep/builder scripts read the queue through `jobq.store` with their own
-`queue_root`. This check refuses to submit when the two disagree.
+`queue_folder`. This check refuses to submit when the two disagree.
 
 `configured_queue_folder` is the single in-repo reader of that settings file: repo code and
 sweep YAMLs no longer name the queue folder themselves.

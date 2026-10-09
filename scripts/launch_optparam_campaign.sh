@@ -35,7 +35,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 HOST=$(hostname)
 SESSION=optparam
-ROOT=$(uv run python -c "import yaml;from pathlib import Path;from subliminal_learning.config import resolve_queue_root;print(resolve_queue_root(yaml.safe_load(Path('configs/paths/paths_local.yaml').read_text())))")
+ROOT=$(uv run python -c "from subliminal_learning.jobq_folder import configured_queue_folder;print(configured_queue_folder())")
 
 mkdir -p "$ROOT" "$ROOT/locks" "$ROOT/logs"
 
@@ -67,7 +67,7 @@ tmux send-keys -t "$SESSION:workers" \
 # logged as a warning and carried on its best LR (see docs/PREREG_OPTPARAM.md).
 tmux new-window -t "$SESSION" -n driver -c "$REPO"
 tmux send-keys -t "$SESSION:driver" \
-  "uv run python -m scripts.run_optparam_campaign watch --queue-root $ROOT --interval 300 --auto-reconcile-sha" C-m
+  "uv run python -m scripts.run_optparam_campaign watch --interval 300 --auto-reconcile-sha" C-m
 
 # Window 3: Discord notify sidecar (isolated tools/campaign_notify uv project).
 # Profile `optparam` + `.env.optparam` target #ft_optimizer_parametrization_pipeline
@@ -94,7 +94,7 @@ Started tmux session '$SESSION':
 $NOTIFY_LINE
 
 Attach:  tmux attach -t $SESSION      Detach: Ctrl-b d
-Status:  uv run python -m scripts.run_optparam_campaign status --queue-root $ROOT
+Status:  uv run python -m scripts.run_optparam_campaign status
          uv run jobq status
          uv run --project tools/campaign_notify python -m campaign_notify status --profile optparam --queue-root $ROOT
 Results: uv run python -m scripts.build_optparam_results

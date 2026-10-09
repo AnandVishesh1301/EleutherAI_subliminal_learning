@@ -60,7 +60,8 @@ import typer
 import yaml
 from loguru import logger
 
-from scripts.sweeps.sweep_ckpt_distill import sweep_lock_path, sweep_queue_root
+from scripts.sweeps.sweep_ckpt_distill import sweep_lock_path
+from subliminal_learning.jobq_folder import configured_queue_folder
 from subliminal_learning.config import load_paths_local, load_yaml_extends
 from jobq import store
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text, file_lock
@@ -468,7 +469,7 @@ def main(
     cfg = load_paths_local()
     hf_cache_root = Path(cfg["hf_cache_root"])
     sweep_doc = load_yaml_extends(sweep_config)
-    queue_root, _ = sweep_queue_root(sweep_doc)
+    queue_folder = configured_queue_folder()
     queue_prefix = str(sweep_doc["jobq"]["queue_prefix"])
     if family_dir is None:
         family_dir = hf_cache_root / "local" / base_dir_name
@@ -526,8 +527,8 @@ def main(
             if not dry_run:
                 # Atomic + locked under the SAME lock a concurrent submit takes on the
                 # queue-root snapshot, so no reader ever sees a half-written sweep YAML.
-                store.ensure_dir(queue_root)
-                with file_lock(sweep_lock_path(queue_root, queue_prefix)):
+                store.ensure_dir(queue_folder)
+                with file_lock(sweep_lock_path(queue_folder, queue_prefix)):
                     atomic_write_text(sweep_config, text)
         # 3) submit whatever the config carries that no `rc == 0` submit has confirmed.
         miss_steps, miss_pairs = submit_unconfirmed(sweep_config, text, sidecar, dry_run)
@@ -544,9 +545,8 @@ def main(
                     logger.info(f"{fc.name} += steps {f_steps}, {len(f_pairs)} pair(s)")
                     if not dry_run:
                         fdoc = yaml.safe_load(ftext_new)
-                        froot, _ = sweep_queue_root(fdoc)
-                        store.ensure_dir(froot)
-                        with file_lock(sweep_lock_path(froot, str(fdoc["jobq"]["queue_prefix"]))):
+                        store.ensure_dir(queue_folder)
+                        with file_lock(sweep_lock_path(queue_folder, str(fdoc["jobq"]["queue_prefix"]))):
                             atomic_write_text(fc, ftext_new)
                 fs, fp = submit_unconfirmed(
                     fc, ftext_new, follower_sidecar(family_dir, fc), dry_run,
