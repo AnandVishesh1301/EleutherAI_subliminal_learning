@@ -40,6 +40,8 @@ from subliminal_learning.gkd.config import (
 from subliminal_learning.gkd.layout import (
     DEFAULT_OPTIM,
     GKD_STUDENTS_SUBDIR,
+    LORA_TARGET_TAGS,
+    NEOX_LINEAR_MODULES,
     gkd_control_run_dir,
     gkd_student_run_dir,
     gkd_tag,
@@ -49,6 +51,7 @@ from subliminal_learning.gkd.layout import (
     parse_optim_slug,
     teacher_checkpoint_dir,
     teacher_tag,
+    train_tag_kwargs,
 )
 from subliminal_learning.sdf.layout import SDF_TEACHERS_SUBDIR
 from subliminal_learning.teachers.model_specs import (
@@ -75,7 +78,11 @@ from subliminal_learning.utils.run_io import (
 from subliminal_learning.utils.wandb_io import wandb_axis_match
 
 
-_LORA_MODE_RE = re.compile(r"^lora-r(?P<r>\d+)(?:a(?P<alpha>\d+))?$")
+_LORA_MODE_RE = re.compile(
+    r"^lora-r(?P<r>\d+)(?:a(?P<alpha>\d+))?"
+    r"(?:-(?P<target>attn|mlp))?(?:-L(?P<layers>\d+(?:-\d+)*))?(?P<head>-head)?$"
+)
+_LORA_TARGET_BY_TOKEN = {tag: mods for mods, tag in LORA_TARGET_TAGS.items()}
 
 _TRAIN_OVERRIDE_KEYS = frozenset(
     {
@@ -120,7 +127,11 @@ def _mode_lora(
     """LoRAConfig for a student mode token.
 
     ``'full'`` -> ``None``; ``'lora-r{N}'`` -> r=α=N; ``'lora-r{R}a{A}'`` ->
-    decoupled rank/scale (e.g. ``lora-r8a32`` -> r=8, α=32).
+    decoupled rank/scale (e.g. ``lora-r8a32`` -> r=8, α=32). Optional reach suffixes,
+    in this order: ``-attn`` / ``-mlp`` (GPT-NeoX attention / MLP projections only),
+    ``-L{i}-{j}`` (adapters on those layers only; the NeoX linear modules are named
+    explicitly, since PEFT rejects layer indices with ``"all-linear"``), ``-head``
+    (output head trained in full, PEFT ``modules_to_save``).
 
     `target_modules` defaults to the architecture-agnostic ``"all-linear"`` sentinel.
     An explicit list is needed where PEFT refuses part of it -- on Mamba it rejects
@@ -139,15 +150,21 @@ def _mode_lora(
         )
     r = int(m.group("r"))
     alpha = int(m.group("alpha")) if m.group("alpha") is not None else r
+    targets = target_modules if isinstance(target_modules, str) else tuple(target_modules)
+    if m.group("target"):
+        targets = _LORA_TARGET_BY_TOKEN[m.group("target")]
+    layers: tuple[int, ...] = ()
+    if m.group("layers"):
+        layers = tuple(int(i) for i in m.group("layers").split("-"))
+        if isinstance(targets, str):
+            targets = NEOX_LINEAR_MODULES
     return LoRAConfig(
         r=r,
         lora_alpha=alpha,
         lora_dropout=0.0,
-        target_modules=(
-            target_modules
-            if isinstance(target_modules, str)
-            else tuple(target_modules)
-        ),
+        target_modules=targets,
+        modules_to_save=("embed_out",) if m.group("head") else (),
+        layers_to_transform=layers,
     )
 
 
@@ -612,7 +629,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
-            max_grad_norm=train_base.max_grad_norm,
+            **train_tag_kwargs(train_base),
             **asdict(gkd_axes),
         )
         ttag = teacher_tag(
@@ -757,7 +774,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
-            max_grad_norm=train_base.max_grad_norm,
+            **train_tag_kwargs(train_base),
             **asdict(gkd_axes),
         )
         param_tag = teacher_param_tags[tmode]

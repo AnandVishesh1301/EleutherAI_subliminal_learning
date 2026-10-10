@@ -16,9 +16,12 @@ class SftResult:
         n_steps: Total optimizer steps.
         log_history: HF `trainer.state.log_history` (per-logging-step loss, LR,
             grad norm, epoch); empty for callers that do not collect it.
+        trainable_parameters: `param_control_io.trainable_parameter_counts` of the
+            trained model; ``None`` for callers that do not collect it.
     """
 
     output_dir: Path
     final_train_loss: float | None
     n_steps: int
     log_history: tuple[dict, ...] = ()
+    trainable_parameters: dict | None = None

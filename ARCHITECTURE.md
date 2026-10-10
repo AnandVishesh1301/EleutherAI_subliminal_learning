@@ -2793,6 +2793,37 @@ sources. It produces:
     root `queue_part3`.
   - Workers on cluster-5 only; driver `scripts.run_hlopt3_campaign` on soar.
 
+**Wave 2 (plan `.claude/plans/blogpost/09_wave2.plan.md`; preregs `docs/PREREG_HLOPT4.md`,
+`docs/PREREG_OPTPARAM3.md`).**
+- **Shared training controls** (every default byte-identical, so no existing tag, path or
+  `run_identity` changes):
+  - `TrainConfig.weight_decay`, `weight_decay_anchor`, `adam_epsilon`, `freeze_modules`;
+  - `LoRAConfig.modules_to_save` (trainable output head), `layers_to_transform`.
+- **`training/param_control_io.py`:**
+  - `validate_train_settings`;
+  - `apply_freeze_modules` (before the optimizer is built);
+  - `trainable_parameter_counts` (written to both manifests as `trainable_parameters`);
+  - `AnchoredDecayCallback`: θ ← θ − lr·λ·(θ − θ₀) in `on_optimizer_step`, on HF's decay set;
+    HF `weight_decay` is then 0 (`config.hf_weight_decay`).
+- **Run-name suffixes** (`gkd.layout`, closed vocabularies; parsed back by `parse_gkd_tag`):
+  - LoRA reach `_attn` / `_mlp` / `_L{i}-{j}` / `_head`, or full-FT frozen set `_body` /
+    `_nohead` / `_embin` / `_embout`, in the shape slot;
+  - `_eps{ε}` before `_clip`; `_wd{λ}` / `_wda{λ}` after it.
+- **GKD mode tokens** `lora-r{R}a{A}[-attn|-mlp][-L{i}-{j}][-head]`. The new train keys come from
+  the training YAML (`gkd.config.load_gkd_training`), so the train and eval sweeps derive the same
+  `gkd_tag` through `train_tag_kwargs`.
+- **Hard `hlopt4`** (hlopt Part IV, dog, E3 recipe):
+  - tiers p (E5 parameter routing), r (LoRA rank 1/64/512), w (weight decay toward zero or
+    toward the start weights, λ from target shrink), e (Adam ε dial), x (seeds 4–5);
+  - run set `20261010_hlopt4_160m` under `outputs/part4/`, queue root `queue_part4`;
+  - workers on cluster-5 + goncalo; driver on soar.
+- **Soft `optparam3`** (optparam2 Part III, new root on ssd-2
+  `/mnt/ssd-2/soar-subliminal/vishesh/optparam3`):
+  - the same tiers on bear (with placebo twins), plus tier g: the main-base wave-1 arms on 6 more
+    Hub bases and 3 `pythia-160m` checkpoints (bear + lion);
+  - per-config training YAMLs carry the new train keys;
+  - run set `gkd_students/20261010_optparam3_160m`; workers on soar, cluster-3, cluster-4.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

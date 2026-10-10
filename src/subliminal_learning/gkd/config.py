@@ -24,7 +24,12 @@ from pathlib import Path
 
 import yaml
 
-from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
+from subliminal_learning.config import (
+    DEFAULT_ADAM_EPSILON,
+    LoRAConfig,
+    PathsConfig,
+    TrainConfig,
+)
 from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM, ROLLOUT_SCREENS, optim_slug
 from subliminal_learning.models.registry import PythiaModelSpec
@@ -299,6 +304,10 @@ def load_gkd_training(
         checkpoint_resume=bool(tr.get("checkpoint_resume", False)),
         save_steps=int(tr.get("save_steps", 500)),
         save_total_limit=int(tr.get("save_total_limit", 1)),
+        weight_decay=float(tr.get("weight_decay", 0.0)),
+        weight_decay_anchor=bool(tr.get("weight_decay_anchor", False)),
+        adam_epsilon=float(tr.get("adam_epsilon", DEFAULT_ADAM_EPSILON)),
+        freeze_modules=tuple(str(m) for m in tr.get("freeze_modules", ())),
     )
     # Fail loud here rather than at path-build time: an unknown optimizer or a momentum
     # set on an optimizer that has none would otherwise train and then collide on a leaf.

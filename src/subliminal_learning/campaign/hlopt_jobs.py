@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from subliminal_learning.campaign import hlopt_plan as plan
+from subliminal_learning.config import DEFAULT_ADAM_EPSILON
 from subliminal_learning.jobqueue.model import Job
 
 SWEEP_MODULE = "scripts.sweeps.sweep_hlopt"
@@ -50,7 +51,9 @@ def _host(part: int, index: int, seed: int) -> str:
         return plan.config_host(index, seed)
     if part == 2:
         return plan.config_host2(index, seed)
-    return plan.config_host3(index, seed)
+    if part == 3:
+        return plan.config_host3(index, seed)
+    return plan.config_host4(index, seed)
 
 
 def config_cells(
@@ -90,6 +93,14 @@ def main_cells3() -> list[Cell]:
     return cells
 
 
+def main_cells4() -> list[Cell]:
+    """Every Part IV seed-1..3 cell (tiers p, r, w and e)."""
+    cells: list[Cell] = []
+    for index, config in enumerate(plan.configs4()):
+        cells.extend(config_cells(config, index, plan.SEEDS, config.tier))
+    return cells
+
+
 def extra_cells(selected: Mapping[str, Iterable[str]], part: int = 1) -> list[Cell]:
     """Seeds 4-5 of each selected config: treatments for the animals that chose it.
 
@@ -98,7 +109,7 @@ def extra_cells(selected: Mapping[str, Iterable[str]], part: int = 1) -> list[Ce
         part: Campaign part whose configs the keys name.
     """
     by_key = {c.key: (i, c) for i, c in enumerate(plan.part_configs(part))}
-    tier = plan.TIER_X if part == 1 else plan.TIER2_X
+    tier = {1: plan.TIER_X, 2: plan.TIER2_X, 4: plan.TIER4_X}[part]
     cells: list[Cell] = []
     for key in sorted(selected):
         index, config = by_key[key]
@@ -121,8 +132,28 @@ def cell_args(cell: Cell) -> str:
     return (
         f"--recipe {c.recipe} --mode {c.mode}{shape} --optim {c.optim} --lr {c.lr:g} "
         f"--epochs {c.epochs} --source {cell.source}{animal} --seed {cell.seed} {evals}"
-        f"{clip}{part}"
+        f"{clip}{part}{_part4_args(c)}"
     )
+
+
+def _part4_args(c: plan.Config) -> str:
+    """Flags of the Part IV fields, each only off its default."""
+    args = ""
+    if c.lora_targets:
+        args += f" --lora-targets {c.lora_targets}"
+    if c.lora_layers:
+        args += " --lora-layers " + "-".join(str(i) for i in c.lora_layers)
+    if c.head:
+        args += " --head"
+    if c.freeze:
+        args += f" --freeze {c.freeze}"
+    if c.wd:
+        args += f" --wd {c.wd:g}"
+    if c.wd_anchor:
+        args += " --wd-anchor"
+    if c.eps != DEFAULT_ADAM_EPSILON:
+        args += f" --eps {c.eps:g}"
+    return args
 
 
 def _job(key: str, cmd: str, mem_mib: int) -> Job:
@@ -138,7 +169,7 @@ def train_job(cell: Cell) -> Job:
     return _job(
         cell.key,
         f"{_BASE} train-cell {cell_args(cell)}{base_ref}",
-        plan.MEM_MIB[(cell.config.recipe, cell.config.mode)],
+        plan.mem_mib(cell.config),
     )
 
 
@@ -169,9 +200,14 @@ def _queues(cell: Cell) -> tuple[str, str]:
             plan.train_queue2(cell.tier, cell.host),
             plan.late_queue2(cell.tier, cell.host),
         )
+    if cell.config.part == 3:
+        return (
+            plan.train_queue3(cell.tier, cell.host),
+            plan.late_queue3(cell.tier, cell.host),
+        )
     return (
-        plan.train_queue3(cell.tier, cell.host),
-        plan.late_queue3(cell.tier, cell.host),
+        plan.train_queue4(cell.tier, cell.host),
+        plan.late_queue4(cell.tier, cell.host),
     )
 
 

@@ -13,6 +13,8 @@ from dacite import Config, from_dict
 
 
 LEGACY_QUEUE_ROOT = Path("run_logs/queue")
+# HF `TrainingArguments.adam_epsilon` default (transformers 4.54).
+DEFAULT_ADAM_EPSILON = 1e-8
 
 
 @dataclass(frozen=True)
@@ -86,12 +88,19 @@ class LoRAConfig:
             modules on Pythia and to ``q/k/v/o/gate/up/down_proj`` on Qwen, so a config
             need not hardcode module names per base model. In YAML give either a list
             (``[query_key_value, dense]``) or the scalar ``all-linear``.
+        modules_to_save: Non-LoRA modules trained in full alongside the adapter (PEFT
+            ``modules_to_save``, e.g. ``("embed_out",)`` for a trainable output head).
+        layers_to_transform: Layer indices that get adapters (PEFT
+            ``layers_to_transform``); empty = every layer. Requires an explicit
+            `target_modules` tuple (PEFT rejects it with a string).
     """
 
     r: int
     lora_alpha: int
     lora_dropout: float
     target_modules: tuple[str, ...] | str
+    modules_to_save: tuple[str, ...] = ()
+    layers_to_transform: tuple[int, ...] = ()
 
     def resolve_target_modules(self) -> list[str] | str:
         """PEFT-ready ``target_modules``: the ``"all-linear"`` sentinel (or any str)
@@ -140,6 +149,16 @@ class TrainConfig:
             ``max_steps``); ``None`` keeps the epoch budget.
         warmup_steps: Absolute LR-warmup steps (HF `TrainingArguments.warmup_steps`);
             when > 0 it overrides `warmup_ratio`. Default 0 keeps the ratio.
+        weight_decay: Decay coefficient λ on HF's decay parameter set (no biases, no
+            LayerNorm weights). Decoupled for AdamW; for SGD torch adds the L2 term
+            inside `step()`, after HF's gradient clipping.
+        weight_decay_anchor: Decay toward the weights at training start instead of
+            toward zero: θ ← θ − lr·λ·(θ − θ₀) after every optimizer step
+            (`training.param_control_io.AnchoredDecayCallback`); HF's own decay is
+            then 0.
+        adam_epsilon: AdamW ε (HF `adam_epsilon`); only valid with ``adamw_torch``.
+        freeze_modules: Parameter-name prefixes frozen before the optimizer is built
+            (full fine-tuning only), e.g. ``("gpt_neox.embed_in", "embed_out")``.
     """
 
     learning_rate: float
@@ -159,6 +178,10 @@ class TrainConfig:
     save_total_limit: int = 1
     max_steps: int | None = None
     warmup_steps: int = 0
+    weight_decay: float = 0.0
+    weight_decay_anchor: bool = False
+    adam_epsilon: float = DEFAULT_ADAM_EPSILON
+    freeze_modules: tuple[str, ...] = ()
 
 
 def hf_max_grad_norm(max_grad_norm: float) -> float:
@@ -174,6 +197,12 @@ def hf_max_grad_norm(max_grad_norm: float) -> float:
     if max_grad_norm < 0:
         raise ValueError(f"max_grad_norm must be >= 0, got {max_grad_norm}")
     return math.inf if max_grad_norm == 0 else float(max_grad_norm)
+
+
+def hf_weight_decay(train: TrainConfig) -> float:
+    """HF `TrainingArguments.weight_decay`: ``0`` when decay is anchored (applied by
+    `training.param_control_io.AnchoredDecayCallback` instead)."""
+    return 0.0 if train.weight_decay_anchor else float(train.weight_decay)
 
 
 @dataclass(frozen=True)

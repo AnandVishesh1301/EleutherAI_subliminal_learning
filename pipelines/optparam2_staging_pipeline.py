@@ -6,6 +6,12 @@ prompt pool (checked against the ssd-3 reference copy), the frozen pp1 text and 
 lm-eval data (as hlopt staged them), writes the paths YAML once, verifies offline
 resolution in a subprocess and writes a staging report. Runs on soar (the treatment
 teachers sit on ssd-3 / cold-1). Source trees are only read.
+
+Part III (`optparam3`, `run3`) stages the same kinds of inputs into its own ssd-2 root:
+the treatment and placebo teachers of every Part III (animal, base) (bear on the main
+base, six more Hub bases, data-seed1 and three pythia-160m checkpoints; lion on the seven
+Hub bases), eleven Hub base revisions, the pool (checked against the ssd-3 reference and
+optparam2's staged copy), pp1 and lm-eval data.
 """
 
 from __future__ import annotations
@@ -42,6 +48,13 @@ def paths_yaml_text() -> str:
     return header + yaml.safe_dump(plan.paths_config_doc(), sort_keys=True)
 
 
+def _teacher_dir(
+    rs: str, animal: str, base: str, tag: str, tfs: int, source_root: Path, out: Path
+) -> tuple[str, str, str, int, Path, Path]:
+    rel = Path("sdf_teachers") / rs / animal / base / tag / f"ftseed{tfs}"
+    return rs, animal, base, tfs, source_root / rel, out / rel
+
+
 def teacher_dirs() -> list[tuple[str, str, str, int, Path, Path]]:
     """(run set, animal, base, ftseed, source dir, staged dir) of every teacher."""
     out = []
@@ -51,17 +64,38 @@ def teacher_dirs() -> list[tuple[str, str, str, int, Path, Path]]:
             tag = plan.teacher_param_tag(kind, animal)
             for base in plan.BASE_TOKENS:
                 for tfs in plan.TEACHER_FTSEEDS:
-                    rel = (
-                        Path("sdf_teachers") / rs / animal / base / tag / f"ftseed{tfs}"
-                    )
                     out.append(
-                        (
+                        _teacher_dir(
                             rs,
                             animal,
                             base,
+                            tag,
                             tfs,
-                            plan.SOURCE_TEACHER_ROOT[rs] / rel,
-                            plan.OUTPUT_ROOT / rel,
+                            plan.SOURCE_TEACHER_ROOT[rs],
+                            plan.OUTPUT_ROOT,
+                        )
+                    )
+    return out
+
+
+def teacher_dirs3() -> list[tuple[str, str, str, int, Path, Path]]:
+    """Every Part III teacher: (run set, animal, base, ftseed, source, staged dir)."""
+    out = []
+    for kind in (plan.KIND_TREAT, plan.KIND_PLACEBO):
+        for animal, bases in plan.TEACHER_BASES3.items():
+            tag = plan.teacher_param_tag(kind, animal)
+            for base in bases:
+                rs = plan.teacher_run_set3(kind, animal, base)
+                for tfs in plan.TEACHER_FTSEEDS:
+                    out.append(
+                        _teacher_dir(
+                            rs,
+                            animal,
+                            base,
+                            tag,
+                            tfs,
+                            plan.SOURCE_TEACHER_ROOT3[rs],
+                            plan.OUTPUT_ROOT3,
                         )
                     )
     return out
@@ -91,21 +125,30 @@ def _check_teacher(dest: Path, rs: str, animal: str, base: str, tfs: int) -> str
     return sha256_file(dest / "train_manifest.json")
 
 
-def _stage_pool(put) -> dict:
-    """Copy the prompt pool and check it against the ssd-3 reference copy.
+def _stage_pool(put, paths_doc: dict | None = None, extra_refs=()) -> dict:
+    """Copy the prompt pool and check it against the reference copies.
+
+    Args:
+        put: Create-only copier.
+        paths_doc: Paths YAML doc of the destination (default: Part I's).
+        extra_refs: Further pool dirs that must hold byte-identical files.
 
     Raises:
-        RuntimeError: A file differs from the reference, or the pool size is off.
+        RuntimeError: A file differs from a reference, or the pool size is off.
     """
-    dest = Path(plan.paths_config_doc()["dataset_cache_root"]) / plan.PROMPT_POOL_DIR
+    doc = plan.paths_config_doc() if paths_doc is None else paths_doc
+    dest = Path(doc["dataset_cache_root"]) / plan.PROMPT_POOL_DIR
     shas = {
         name: put(plan.SOURCE_PROMPT_POOL / name, dest / name)
         for name in plan.PROMPT_POOL_FILES
     }
-    for name in ("manifest.json", "prompts.jsonl"):
-        ref = sha256_file(plan.REFERENCE_PROMPT_POOL / name)
-        if shas[name] != ref:
-            raise RuntimeError(f"pool {name}: sha {shas[name]} != reference {ref}")
+    for ref_dir in (plan.REFERENCE_PROMPT_POOL, *extra_refs):
+        for name in ("manifest.json", "prompts.jsonl"):
+            ref = sha256_file(ref_dir / name)
+            if shas[name] != ref:
+                raise RuntimeError(
+                    f"pool {name}: sha {shas[name]} != {ref_dir} ({ref})"
+                )
     with (dest / "prompts.jsonl").open() as f:
         n = sum(1 for line in f if line.strip())
     if n != plan.N_POOL_PROMPTS:
@@ -113,16 +156,16 @@ def _stage_pool(put) -> dict:
     return {"dir": str(dest), "sha256": shas, "n_prompts": n}
 
 
-def _stage_pp1(put) -> str:
-    """Copy the pp1 text; return its text sha.
+def _stage_pp1(put, dest: Path = plan.PP1_TEXT_PATH) -> str:
+    """Copy the pp1 text to `dest`; return its text sha.
 
     Raises:
         RuntimeError: The text does not match the pinned hash.
     """
-    put(plan.SOURCE_PP1_TEXT, plan.PP1_TEXT_PATH)
+    put(plan.SOURCE_PP1_TEXT, dest)
     texts = [
         json.loads(line)["text"]
-        for line in plan.PP1_TEXT_PATH.read_text().splitlines()
+        for line in dest.read_text().splitlines()
         if line.strip()
     ]
     sha = pp.text_sha256(texts)
@@ -131,8 +174,13 @@ def _stage_pp1(put) -> str:
     return sha
 
 
-def verify_offline() -> dict:
-    """Resolve both bases, tokenize pp1 and load the lm-eval data with the Hub offline.
+def verify_offline(
+    paths_config: Path = plan.PATHS_CONFIG_PATH,
+    tokens: tuple[str, ...] = tuple(plan.BASE_TOKENS.values()),
+    pp1_path: Path = plan.PP1_TEXT_PATH,
+    policy_env=plan.GPU_POLICY_ENV,
+) -> dict:
+    """Resolve every base, tokenize pp1 and load the lm-eval data with the Hub offline.
 
     Raises:
         RuntimeError: The check subprocess failed.
@@ -145,19 +193,19 @@ from transformers import AutoConfig, AutoTokenizer
 from subliminal_learning.campaign import ws160m_models
 from subliminal_learning.evaluation import pile_probe_io as pp
 out = {{}}
-reg = ws160m_models.registry_for_paths(Path({str(plan.PATHS_CONFIG_PATH)!r}))
-for token in {list(plan.BASE_TOKENS.values())!r}:
+reg = ws160m_models.registry_for_paths(Path({str(paths_config)!r}))
+for token in {list(tokens)!r}:
     spec = reg[token]
     cfg = AutoConfig.from_pretrained(spec.repo_id, revision=spec.revision)
     tok = AutoTokenizer.from_pretrained(spec.repo_id, revision=spec.revision)
     out[token] = {{"model_type": cfg.model_type, "vocab": len(tok)}}
-out["pp1_n_docs"] = len(pp.load_pp1_input_ids(Path({str(plan.PP1_TEXT_PATH)!r}), tok))
+out["pp1_n_docs"] = len(pp.load_pp1_input_ids(Path({str(pp1_path)!r}), tok))
 for name, sub, split in (("EleutherAI/lambada_openai", "default", "test"), ("allenai/ai2_arc", "ARC-Easy", "test"), ("allenai/sciq", "default", "test")):
     out[f"lmeval:{{name}}"] = len(datasets.load_dataset(name, sub, split=split))
 print(json.dumps(out))
 """
     env = dict(os.environ)
-    env.update(plan.GPU_POLICY_ENV)
+    env.update(policy_env)
     proc = subprocess.run(
         [sys.executable, "-c", script],
         env=env,
@@ -266,6 +314,134 @@ def latest_complete_report() -> dict | None:
     if not plan.STAGING_DIR.is_dir():
         return None
     for path in sorted(plan.STAGING_DIR.glob("staging_report-*.json"), reverse=True):
+        report = json.loads(path.read_text())
+        if report.get("complete"):
+            return report
+    return None
+
+
+# ---- Part III (`optparam3`) -------------------------------------------------------------
+
+OPTPARAM2_STAGED_POOL = (
+    Path(plan.paths_config_doc()["dataset_cache_root"]) / plan.PROMPT_POOL_DIR
+)
+
+
+def paths3_yaml_text() -> str:
+    """The Part III paths YAML, exactly as staged."""
+    header = (
+        "# Generated by scripts/stage_optparam2_assets.py --part 3 from "
+        "optparam2_plan.paths3_config_doc().\n"
+    )
+    return header + yaml.safe_dump(plan.paths3_config_doc(), sort_keys=True)
+
+
+def run3(*, dry_run: bool = False) -> dict:
+    """Stage every Part III input into `plan.CAMPAIGN_ROOT3` and write a report.
+
+    Returns:
+        The staging report.
+
+    Raises:
+        FileNotFoundError: A teacher source dir is missing.
+    """
+    teachers = teacher_dirs3()
+    missing = [str(src) for *_, src, _dest in teachers if not src.is_dir()]
+    if missing:
+        raise FileNotFoundError(f"missing teacher sources: {missing}")
+    if dry_run:
+        logger.info(
+            "[dry-run] would stage {} teachers, {} bases, the pool and pp1 under {}",
+            len(teachers),
+            len(plan.HUB_REVISIONS3),
+            plan.CAMPAIGN_ROOT3,
+        )
+        return {"dry_run": True, "n_teachers": len(teachers)}
+    totals = {"n_files": 0, "bytes_written": 0}
+
+    def put(src: Path, dest: Path) -> str:
+        sha, written = copy_file(src, dest)
+        totals["n_files"] += 1
+        totals["bytes_written"] += written
+        return sha
+
+    doc = plan.paths3_config_doc()
+    for key in (
+        "output_root",
+        "hf_cache_root",
+        "dataset_cache_root",
+        "wandb_dir",
+        "queue_root",
+        "audit_root",
+    ):
+        Path(doc[key]).mkdir(parents=True, exist_ok=True)
+    (Path(doc["queue_root"]) / "logs").mkdir(exist_ok=True)
+    plan.CONFIG_DIR3.mkdir(parents=True, exist_ok=True)
+    write_once_text(plan.PATHS3_CONFIG_PATH, paths3_yaml_text())
+
+    staged_teachers = {}
+    for rs, animal, base, tfs, src, dest in teachers:
+        n = stage_tree(src, dest, put)
+        staged_teachers[str(dest)] = {
+            "source": str(src),
+            "n_files": n,
+            "manifest_sha256": _check_teacher(dest, rs, animal, base, tfs),
+        }
+    hf = Path(doc["hf_cache_root"])
+    models = [
+        stage_hub_revision(
+            find_hub_sources(plan.SOURCE_HUB_CACHES, repo, rev),
+            hf / "hub",
+            repo,
+            rev,
+            put,
+        )
+        for repo, rev in plan.HUB_REVISIONS3
+    ]
+    n_lmeval = sum(
+        stage_tree(plan.SOURCE_HF_DATASETS / name, hf / "datasets" / name, put)
+        for name in plan.LMEVAL_DATASET_DIRS
+    ) + sum(
+        stage_tree(plan.SOURCE_HF_HUB / name, hf / "hub" / name, put)
+        for name in plan.LMEVAL_HUB_DATASET_DIRS
+        if (plan.SOURCE_HF_HUB / name).is_dir()
+    )
+    extra_refs = (OPTPARAM2_STAGED_POOL,) if OPTPARAM2_STAGED_POOL.is_dir() else ()
+    report = {
+        "at": utc_now_iso(),
+        "host": os.uname().nodename,
+        "paths": doc,
+        "teachers": staged_teachers,
+        "models": models,
+        "pool": _stage_pool(put, doc, extra_refs),
+        "pp1_text_sha256": _stage_pp1(put, plan.PP1_TEXT_PATH3),
+        "lmeval_files": n_lmeval,
+        "verified_offline": verify_offline(
+            plan.PATHS3_CONFIG_PATH,
+            tuple(plan.BASE_TOKENS3.values()),
+            plan.PP1_TEXT_PATH3,
+            plan.GPU_POLICY_ENV3,
+        ),
+        "complete": True,
+        **totals,
+    }
+    plan.STAGING_DIR3.mkdir(parents=True, exist_ok=True)
+    out = plan.STAGING_DIR3 / f"staging_report-{report['at'].replace(':', '')}.json"
+    atomic_write_json(out, report)
+    logger.info(
+        "Part III staging complete: {} ({} files, {} bytes written)",
+        out,
+        totals["n_files"],
+        totals["bytes_written"],
+    )
+    return report
+
+
+def latest_complete_report3() -> dict | None:
+    """Newest complete Part III staging report, or ``None``."""
+    if not plan.STAGING_DIR3.is_dir():
+        return None
+    for path in sorted(plan.STAGING_DIR3.glob("staging_report-*.json"), reverse=True):
         report = json.loads(path.read_text())
         if report.get("complete"):
             return report

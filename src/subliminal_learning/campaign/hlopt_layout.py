@@ -10,12 +10,26 @@ from pathlib import Path
 
 from subliminal_learning.campaign import hlopt_plan as plan
 from subliminal_learning.config import LoRAConfig, TrainConfig
+from subliminal_learning.gkd.layout import (
+    FREEZE_BY_TAG,
+    LORA_TARGET_TAGS,
+    NEOX_LINEAR_MODULES,
+)
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.students.layout import student_run_dir
 
 PROBE_FILE = "pile_probe.json"
 LMEVAL_FILE = "lmeval.json"
 PREFERENCE_FILE = "preference_eval.json"
+_TARGETS_BY_TAG = {tag: mods for mods, tag in LORA_TARGET_TAGS.items()}
+HEAD_MODULES: tuple[str, ...] = ("embed_out",)
+
+
+def _lora_targets(config: plan.Config) -> tuple[str, ...] | str:
+    """LoRA target modules of `config` (``"all-linear"`` unless Part IV restricts them)."""
+    if config.lora_targets:
+        return _TARGETS_BY_TAG[config.lora_targets]
+    return NEOX_LINEAR_MODULES if config.lora_layers else "all-linear"
 
 
 def train_cfgs(config: plan.Config, seed: int) -> tuple[LoRAConfig | None, TrainConfig]:
@@ -38,6 +52,10 @@ def train_cfgs(config: plan.Config, seed: int) -> tuple[LoRAConfig | None, Train
         if full
         else recipe.grad_accum,
         warmup_steps=recipe.warmup_steps,
+        weight_decay=config.wd,
+        weight_decay_anchor=config.wd_anchor,
+        adam_epsilon=config.eps,
+        freeze_modules=FREEZE_BY_TAG[config.freeze] if config.freeze else (),
     )
     if full:
         return None, train
@@ -45,7 +63,9 @@ def train_cfgs(config: plan.Config, seed: int) -> tuple[LoRAConfig | None, Train
         r=config.rank,
         lora_alpha=config.alpha,
         lora_dropout=recipe.lora_dropout,
-        target_modules="all-linear",
+        target_modules=_lora_targets(config),
+        modules_to_save=HEAD_MODULES if config.head else (),
+        layers_to_transform=config.lora_layers,
     )
     return lora, train
 

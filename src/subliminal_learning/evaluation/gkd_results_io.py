@@ -49,11 +49,15 @@ from subliminal_learning.evaluation.preference_scoring import (
     sign_test,
 )
 from subliminal_learning.evaluation.sdf_results_io import parse_sdf_param_tag
+from subliminal_learning.config import DEFAULT_ADAM_EPSILON
 from subliminal_learning.gkd.layout import (
     CONTROL_TEACHER_TAG,
     DEFAULT_MAX_GRAD_NORM,
     DEFAULT_OPTIM,
+    FREEZE_BY_TAG,
     GKD_STUDENTS_SUBDIR,
+    LORA_SAVE_TAGS,
+    LORA_TARGET_TAGS,
     OPTIM_BY_SLUG,
     XBASE_CONTROL_TEACHER_TAG,
 )
@@ -62,14 +66,24 @@ from subliminal_learning.teachers.model_specs import spec_from_base_name, spec_l
 # Alternation built from the layout SSOT (longest first) so a slug can never be added
 # to `gkd_tag` without becoming readable here.
 _OPTIM_ALT = "|".join(sorted(OPTIM_BY_SLUG, key=len, reverse=True))
+_TARGET_BY_TAG = {tag: mods for mods, tag in LORA_TARGET_TAGS.items()}
+_SAVE_BY_TAG = {tag: mods for mods, tag in LORA_SAVE_TAGS.items()}
+_HP = r"[0-9.]+(?:e[+-]?\d+)?"
 _GKD_TAG_RE = re.compile(
     r"^lmb(?P<lmbda>[0-9.]+)_b(?P<beta>[0-9.]+)_(?P<student_mode>full|lora)"
     r"_lr(?P<lr>[0-9.]+e-?\d+)_(?:e(?P<epochs>[0-9.]+)|s(?P<steps>\d+))"
-    r"(?:_r(?P<lora_r>\d+)a(?P<lora_alpha>\d+))?(?P<vmask>_vmask(?P<vmask_forms>f)?)?"
+    r"(?:_r(?P<lora_r>\d+)a(?P<lora_alpha>\d+))?"
+    rf"(?:_(?P<lora_target>{'|'.join(_TARGET_BY_TAG)}))?"
+    r"(?:_L(?P<lora_layers>\d+(?:-\d+)*))?"
+    rf"(?:_(?P<lora_save>{'|'.join(_SAVE_BY_TAG)}))?"
+    rf"(?:_(?P<freeze>{'|'.join(FREEZE_BY_TAG)}))?"
+    r"(?P<vmask>_vmask(?P<vmask_forms>f)?)?"
     r"(?P<noeos>_noeos)?"
     r"(?:_ttemp(?P<ttemp>[0-9.]+))?"
     rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?"
+    rf"(?:_eps(?P<eps>{_HP}))?"
     r"(?:_clip(?P<clip>[0-9.]+))?"
+    rf"(?:_wd(?P<wd_anchor>a)?(?P<wd>{_HP}))?"
     r"(?:_n(?P<subset_n>\d+)(?:d(?P<subset_seed>\d+))?)?"
     r"(?:_(?P<rollout_screen>strict))?"
     r"(?:_top(?:ce(?P<top_k_ce>\d+)|(?P<top_k>\d+)(?P<top_k_ghost>g)?))?$"
@@ -97,7 +111,11 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         reads back as ``top_k=K``, ``top_k_ce=True``. No ``_n{N}`` reads back as
         ``prompt_subset_size=None``, ``prompt_subset_seed=0``. No ``_strict`` reads back as
         ``rollout_screen="legacy"``. No ``_noeos`` reads back as ``mask_eos=False``.
-        No ``_clip{g}`` reads back as ``max_grad_norm=1.0``.
+        No ``_clip{g}`` reads back as ``max_grad_norm=1.0``. Absent reach / frozen /
+        ε / decay suffixes read back as the defaults (``student_lora_target_modules``
+        and ``student_lora_modules_to_save`` ``None``, ``student_lora_layers`` and
+        ``freeze_modules`` ``()``, ``adam_epsilon=1e-8``, ``weight_decay=0.0``,
+        ``weight_decay_anchor=False``).
 
     Raises:
         ValueError: if `gkd_tag` matches neither the epoch- nor step-budget format.
@@ -138,6 +156,15 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         "max_grad_norm": float(g["clip"])
         if g["clip"] is not None
         else DEFAULT_MAX_GRAD_NORM,
+        "student_lora_target_modules": _TARGET_BY_TAG.get(g["lora_target"]),
+        "student_lora_layers": tuple(int(i) for i in g["lora_layers"].split("-"))
+        if g["lora_layers"]
+        else (),
+        "student_lora_modules_to_save": _SAVE_BY_TAG.get(g["lora_save"]),
+        "freeze_modules": FREEZE_BY_TAG[g["freeze"]] if g["freeze"] else (),
+        "adam_epsilon": float(g["eps"]) if g["eps"] is not None else DEFAULT_ADAM_EPSILON,
+        "weight_decay": float(g["wd"]) if g["wd"] is not None else 0.0,
+        "weight_decay_anchor": g["wd_anchor"] is not None,
     }
 
 

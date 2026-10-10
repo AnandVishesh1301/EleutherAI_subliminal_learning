@@ -6,6 +6,7 @@
     cells.csv   one row per (cell, evaluated animal): p per prompt set, pp1, loss, lm-eval
     deltas.csv  one row per treatment with a matched control: Delta per prompt set
     rungs.csv   per (config, animal): seed mean / sd of Delta, pp1 delta-CE, selection flags
+    claims.json Part IV only: every `docs/PREREG_HLOPT4.md` §4 verdict
 """
 
 from __future__ import annotations
@@ -45,6 +46,37 @@ def _last_logged_loss(history: list | None) -> float:
     return float(losses[-1]) if losses else math.nan
 
 
+_PART4_FIELDS: tuple[str, ...] = (
+    "lora_targets",
+    "lora_layers",
+    "head",
+    "freeze",
+    "wd",
+    "wd_anchor",
+    "eps",
+)
+
+
+def _trainable(manifest: Mapping) -> dict:
+    """Trainable-parameter counts recorded by the trainer (empty before Part IV)."""
+    counts = manifest.get("trainable_parameters") or {}
+    return {
+        "n_params_total": counts.get("total"),
+        "n_params_trainable": counts.get("trainable"),
+        **{
+            f"n_trainable_{group}": n
+            for group, n in (counts.get("trainable_by_group") or {}).items()
+        },
+    }
+
+
+def _part4_fields(c: plan.Config) -> dict:
+    return {
+        f: ("-".join(map(str, c.lora_layers)) if f == "lora_layers" else getattr(c, f))
+        for f in _PART4_FIELDS
+    }
+
+
 def cell_rows(
     spec: PythiaModelSpec, hub_org: str, cells: Iterable[jobs.Cell]
 ) -> list[dict]:
@@ -75,6 +107,7 @@ def cell_rows(
                 "optim": c.optim,
                 "clip": c.clip,
                 "part": c.part,
+                **(_part4_fields(c) if c.part == 4 else {}),
                 "lr": c.lr,
                 "epochs": c.epochs,
                 "source": cell.source,
@@ -95,6 +128,7 @@ def cell_rows(
                 "grad_norm_p90": clips.grad_norm_p90,
                 "frac_clipped": clips.frac_clipped,
                 "n_train_steps": manifest.get("n_train_steps"),
+                **(_trainable(manifest) if c.part == 4 else {}),
                 "lmeval": {
                     f"{task}_{m}": v
                     for task, ms in (lmeval.get("tasks") or {}).items()
@@ -118,8 +152,37 @@ def all_cells(
     selection: Mapping[str, list[str]] | None, part: int = 1
 ) -> list[jobs.Cell]:
     """Main cells of `part` plus the extra-seed cells of `selection`."""
-    main = {1: jobs.main_cells, 2: jobs.main_cells2, 3: jobs.main_cells3}[part]()
+    main = {
+        1: jobs.main_cells,
+        2: jobs.main_cells2,
+        3: jobs.main_cells3,
+        4: jobs.main_cells4,
+    }[part]()
     return main + (jobs.extra_cells(selection, part) if selection else [])
+
+
+def reference_deltas(results_dir: Path) -> list[dict]:
+    """`paired_deltas`-shaped rows read back from a finished run set's `deltas.csv`."""
+    df = pd.read_csv(results_dir / "deltas.csv")
+    sets = [c.removeprefix("delta_") for c in df.columns if c.startswith("delta_")]
+    sets = [s for s in sets if s not in ("ce", "ce_control")]
+    return [
+        {
+            "config_key": r["config_key"],
+            "animal": r["animal"],
+            "seed": int(r["seed"]),
+            "delta": {s: float(r[f"delta_{s}"]) for s in sets},
+            "delta_ce": float(r["delta_ce"]),
+        }
+        for r in df.to_dict("records")
+    ]
+
+
+def part1_references() -> tuple[list[dict], dict[str, str | None]]:
+    """Part I's deltas and extra-seed choice (read-only), the Part IV references."""
+    root = plan.OUTPUT_ROOT / plan.RUN_SET_SUBDIR / plan.RUN_SET_ID
+    choice = json.loads((root / "logs" / plan.SELECTION_FILE).read_text())["choice"]
+    return reference_deltas(root / plan.RESULTS_DIRNAME), choice
 
 
 def build(
@@ -128,8 +191,14 @@ def build(
     hub_org: str,
     selection: Mapping[str, list[str]] | None,
     part: int = 1,
+    choice: Mapping[str, str | None] | None = None,
 ) -> dict[str, str]:
-    """Write cells / deltas / rungs CSVs of `part`; return their paths."""
+    """Write cells / deltas / rungs CSVs of `part` (Part IV: + claims); return paths.
+
+    Args:
+        choice: Part IV only: ``"<animal>|<arm>"`` -> selected config key, the input of
+            the claims' selected rungs (absent before the extra-seed transition).
+    """
     rows = cell_rows(spec, hub_org, all_cells(selection, part))
     deltas = metrics.paired_deltas(rows)
     cells_df = pd.DataFrame([_flatten(r, ("p", "lmeval")) for r in rows])
@@ -162,6 +231,7 @@ def build(
                     "mode": g["mode"].iloc[0],
                     "optim": g["optim"].iloc[0],
                     "clip": g["clip"].iloc[0],
+                    **{f: g[f].iloc[0] for f in _PART4_FIELDS if f in g},
                     "lr": g["lr"].iloc[0],
                     "epochs": g["epochs"].iloc[0],
                     "selected": bool(selection and animal in selection.get(key, [])),
@@ -185,6 +255,12 @@ def build(
         path = results_dir / f"{name}.csv"
         atomic_write_text(path, df.to_csv(index=False))
         out[name] = str(path)
+    if part == 4:
+        ref_deltas, ref_choice = part1_references()
+        claims = metrics.claims4(deltas, choice or {}, ref_deltas, ref_choice)
+        path = results_dir / plan.CLAIMS4_FILE
+        atomic_write_json(path, {"prereg": plan.PREREG4_PATH, **claims})
+        out["claims"] = str(path)
     atomic_write_json(
         results_dir / "results_manifest.json",
         {"n_cells": len(rows), "n_deltas": len(deltas), **out},

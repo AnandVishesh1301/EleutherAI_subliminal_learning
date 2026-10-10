@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from subliminal_learning.config import LoRAConfig
+from subliminal_learning.config import DEFAULT_ADAM_EPSILON, LoRAConfig, TrainConfig
 from subliminal_learning.run_gate import ERROR, RETRAIN, SKIP, GateDecision, identity_diff
 
 _ENVELOPE_KEYS = (
@@ -57,7 +57,42 @@ def lora_manifest_blob(lora: LoRAConfig | None) -> dict[str, Any]:
         "target_modules": lora.target_modules
         if isinstance(lora.target_modules, str)
         else list(lora.target_modules),
+        **lora_scope_extras(lora),
     }
+
+
+def lora_scope_extras(lora: LoRAConfig | None) -> dict[str, Any]:
+    """``modules_to_save`` / ``layers_to_transform``, each only when set.
+
+    Present only off their empty defaults, so every pre-existing manifest blob and
+    ``run_identity`` stays byte-identical.
+    """
+    if lora is None:
+        return {}
+    out: dict[str, Any] = {}
+    if lora.modules_to_save:
+        out["modules_to_save"] = list(lora.modules_to_save)
+    if lora.layers_to_transform:
+        out["layers_to_transform"] = list(lora.layers_to_transform)
+    return out
+
+
+def train_identity_extras(train: TrainConfig) -> dict[str, Any]:
+    """Weight decay, its anchoring, Adam ε and frozen modules, each only off default.
+
+    Merged into both pipelines' ``run_identity`` training block, so pre-existing
+    identities (all at the defaults) still SKIP-match.
+    """
+    out: dict[str, Any] = {}
+    if train.weight_decay:
+        out["weight_decay"] = train.weight_decay
+    if train.weight_decay_anchor:
+        out["weight_decay_anchor"] = True
+    if train.adam_epsilon != DEFAULT_ADAM_EPSILON:
+        out["adam_epsilon"] = train.adam_epsilon
+    if train.freeze_modules:
+        out["freeze_modules"] = list(train.freeze_modules)
+    return out
 
 
 @dataclass(frozen=True)

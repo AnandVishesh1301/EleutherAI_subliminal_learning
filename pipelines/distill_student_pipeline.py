@@ -55,6 +55,10 @@ from subliminal_learning.students.layout import (
     student_run_label,
 )
 from subliminal_learning.teachers.sft_io import run_teacher_sft_completion_only
+from subliminal_learning.training.run_manifest import (
+    lora_scope_extras,
+    train_identity_extras,
+)
 from subliminal_learning.utils.io import atomic_write_text, file_sha256
 from subliminal_learning.utils.wandb_io import (
     finish_wandb_run,
@@ -201,6 +205,7 @@ def _student_run_identity(
                 if cfg.train.warmup_steps
                 else {}
             ),
+            **train_identity_extras(cfg.train),
         },
         "lora": None if cfg.lora is None else {
             "r": cfg.lora.r,
@@ -211,6 +216,7 @@ def _student_run_identity(
                 if isinstance(cfg.lora.target_modules, str)
                 else list(cfg.lora.target_modules)
             ),
+            **lora_scope_extras(cfg.lora),
         },
         "trainer": "completion_only_v1",
     }
@@ -457,7 +463,13 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 if isinstance(cfg.lora.target_modules, str)
                 else list(cfg.lora.target_modules)
             ),
+            **lora_scope_extras(cfg.lora),
+            "weight_decay": cfg.train.weight_decay,
+            "weight_decay_anchor": cfg.train.weight_decay_anchor,
+            "adam_epsilon": cfg.train.adam_epsilon,
+            "freeze_modules": list(cfg.train.freeze_modules),
         },
+        "trainable_parameters": sft_result.trainable_parameters,
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,

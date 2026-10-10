@@ -67,6 +67,7 @@ from subliminal_learning.gkd.layout import (
     gkd_wandb_tags,
     gkd_xbase_control_run_dir,
     teacher_tag,
+    train_tag_kwargs,
     wandb_cross_init,
 )
 from subliminal_learning.cka.weight_space_io import lora_scaling, merged_lora_delta
@@ -93,9 +94,16 @@ from subliminal_learning.run_gate import ERROR, SKIP, format_identity_diff
 from subliminal_learning.teachers.model_specs import spec_label
 from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.training.lora_io import build_lora_config
+from subliminal_learning.training.param_control_io import (
+    AnchoredDecayCallback,
+    apply_freeze_modules,
+    trainable_parameter_counts,
+    validate_train_settings,
+)
 from subliminal_learning.training.run_manifest import (
     identity_gate_action,
     lora_manifest_blob,
+    train_identity_extras,
 )
 from subliminal_learning.utils.io import atomic_write_text
 from subliminal_learning.utils.run_io import (
@@ -239,7 +247,7 @@ def _tags_and_run_dir(cfg: TrainGkdStudentConfig) -> tuple[str, str, Path]:
         teacher_temp=cfg.gkd.teacher_temp,
         optim=cfg.train.optim,
         optim_momentum=cfg.train.optim_momentum,
-        max_grad_norm=cfg.train.max_grad_norm,
+        **train_tag_kwargs(cfg.train),
         **asdict(sweep_gkd_axes_of(cfg.gkd)),
     )
     if cfg.control:
@@ -366,6 +374,7 @@ def _train_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
             if cfg.train.optim_momentum
             else {}
         ),
+        **train_identity_extras(cfg.train),
         **lora_manifest_blob(cfg.lora),
     }
 
@@ -766,9 +775,12 @@ def _train(
     set_seed(cfg.train.seed)
 
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
+    validate_train_settings(cfg.train, cfg.lora)
     student = load_model(
         cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
     )
+    if cfg.lora is None:
+        apply_freeze_modules(student, cfg.train.freeze_modules)
     if cfg.control:
         teacher_load_spec = cfg.spec
         if _is_xbase_control(cfg):
@@ -931,6 +943,8 @@ def _train(
     coverage_callback = _coverage_callback(cfg, run_dir)
     if coverage_callback is not None:
         callbacks.append(coverage_callback)
+    if cfg.train.weight_decay_anchor:
+        callbacks.append(AnchoredDecayCallback(cfg.train.weight_decay))
     peft_config = build_lora_config(cfg.lora)
 
     teacher_spec = _resolved_teacher_spec(cfg)
@@ -980,6 +994,7 @@ def _train(
             suppress_eos=cfg.gkd.mask_eos,
             rollout_cache=cfg.gkd.rollout_cache,
         )
+        trainable_parameters = trainable_parameter_counts(trainer.model)
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume
         # (LONG cells) passes the kwarg so HF restores optimizer/scheduler/RNG from the
         # last checkpoint-* under checkpoint_dir.
@@ -1019,6 +1034,7 @@ def _train(
         data_identity,
         form_mask_ids,
         screen_vocab,
+        trainable_parameters=trainable_parameters,
     )
     logger.info(
         "Saved GKD student ({}) -> {} (loss={}, steps={})",
@@ -1174,6 +1190,7 @@ def _write_manifest(
     data_identity: dict,
     form_mask_ids: list[int] | None,
     screen_vocab: StrictScreenVocab | None = None,
+    trainable_parameters: dict | None = None,
 ) -> None:
     teacher_manifest = (
         cfg.teacher_checkpoint_dir.parent / "train_manifest.json"
@@ -1224,6 +1241,11 @@ def _write_manifest(
         "gkd_hyperparameters": _gkd_hyperparameters(cfg),
         "train_hyperparameters": _train_hyperparameters(cfg),
         "optimizer_resolved": optimizer_blob,
+        **(
+            {"trainable_parameters": trainable_parameters}
+            if trainable_parameters is not None
+            else {}
+        ),
         "loss": _loss_name(cfg),
         **({"vocab_mask_ids": form_mask_ids} if form_mask_ids is not None else {}),
         **(

@@ -11,15 +11,21 @@ the same staged inputs, under its own queue root and student tree.
 
 Part III (`hlopt3`, blog wave 1.2; `docs/PREREG_HLOPT3.md`) fills the sweep: the full-FT
 adaptive collapse edge, 2 / 5 / 10-epoch schedules at tuned rates, and peak-fill rungs.
+
+Part IV (`hlopt4`, blog wave 2; `docs/PREREG_HLOPT4.md`) asks which parameters carry the
+trait (agenda E5), whether LoRA rank matters, what real weight decay does (toward zero or
+toward the pretrained weights), and the Adam epsilon dial (agenda E3 item 2), on dog.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
 from subliminal_learning.campaign import xfam2_plan
+from subliminal_learning.config import DEFAULT_ADAM_EPSILON
 
 CAMPAIGN = "hlopt"
 OWNER = "vishesh"
@@ -54,7 +60,7 @@ def recipe_output_root(recipe: str, part: int = 1) -> Path:
     """Output root of one recipe family (keeps families' and parts' trees disjoint)."""
     if part == 1:
         return OUTPUT_ROOT / "recipes" / recipe
-    if part in (2, 3):
+    if part in (2, 3, 4):
         return OUTPUT_ROOT / f"part{part}" / "recipes" / recipe
     raise ValueError(f"unknown part {part}")
 
@@ -209,7 +215,22 @@ TRAIN_TIERS: tuple[str, ...] = (TIER_ANCHOR, TIER_A, TIER_SHAPE, TIER_B, TIER_X)
 
 @dataclass(frozen=True)
 class Config:
-    """One trainable setting; cells add source, animal and seed."""
+    """One trainable setting; cells add source, animal and seed.
+
+    The Part IV fields default to "off", so every Part I-III arm, key and command line
+    is byte-identical.
+
+    Attributes:
+        lora_targets: ``"attn"`` / ``"mlp"`` (`gkd.layout.LORA_TARGET_TAGS`); ``""`` =
+            all linear layers.
+        lora_layers: Layers that get adapters (NeoX modules named explicitly); ``()`` =
+            all.
+        head: LoRA plus a fully trained output head (PEFT ``modules_to_save``).
+        freeze: Full-FT frozen set, a key of `gkd.layout.FREEZE_BY_TAG`; ``""`` = none.
+        wd: Weight decay coefficient.
+        wd_anchor: Decay toward the start weights instead of toward zero.
+        eps: AdamW epsilon.
+    """
 
     tier: str
     recipe: str
@@ -222,12 +243,29 @@ class Config:
     animals: tuple[str, ...]
     clip: float = MAX_GRAD_NORM
     part: int = 1
+    lora_targets: str = ""
+    lora_layers: tuple[int, ...] = ()
+    head: bool = False
+    freeze: str = ""
+    wd: float = 0.0
+    wd_anchor: bool = False
+    eps: float = DEFAULT_ADAM_EPSILON
 
     @property
     def arm(self) -> str:
         shape = "full" if self.mode == "full" else f"r{self.rank}a{self.alpha}"
+        if self.lora_targets:
+            shape += f"-{self.lora_targets}"
+        if self.lora_layers:
+            shape += "-L" + "-".join(str(i) for i in self.lora_layers)
+        if self.head:
+            shape += "-head"
+        if self.freeze:
+            shape += f"-{self.freeze}"
         clip = "" if self.clip == MAX_GRAD_NORM else f"-clip{self.clip:g}"
-        return f"{self.recipe}-{shape}-{self.optim}{clip}-ep{self.epochs}"
+        eps = "" if self.eps == DEFAULT_ADAM_EPSILON else f"-eps{self.eps:g}"
+        wd = f"-wd{'a' if self.wd_anchor else ''}{self.wd:g}" if self.wd else ""
+        return f"{self.recipe}-{shape}-{self.optim}{clip}{eps}{wd}-ep{self.epochs}"
 
     @property
     def key(self) -> str:
@@ -396,6 +434,18 @@ MEM_MIB: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     }
 )
 LATE_EVAL_MIB = 11_000
+# Part IV LoRA arms at least as large as full FT in optimizer state: rank 512 and the
+# trainable output head (a full fp32 copy of the 50,304 x 768 `embed_out`).
+LARGE_LORA_RANK = 512
+
+
+def mem_mib(config: Config) -> int:
+    """Train-job reservation of `config` (Part I-III values unchanged)."""
+    if config.mode == "lora" and (config.head or (config.rank or 0) >= LARGE_LORA_RANK):
+        return MEM_MIB[(config.recipe, "full")]
+    return MEM_MIB[(config.recipe, config.mode)]
+
+
 LMEVAL_BATCH_SIZE = 16
 AUTO_REQUEUE_ATTEMPTS = 3
 
@@ -646,6 +696,8 @@ def part_configs(part: int) -> tuple[Config, ...]:
         return configs2()
     if part == 3:
         return configs3()
+    if part == 4:
+        return configs4()
     raise ValueError(f"unknown part {part}")
 
 
@@ -886,3 +938,257 @@ def gpu_policy_json3(host: str) -> dict:
     if host not in HOSTS3:
         raise ValueError(f"{host} runs no {CAMPAIGN3} workers")
     return {**gpu_policy_json(host), "reservation_warmup_s": RESERVATION_WARMUP3_S}
+
+
+# ---- Part IV (`hlopt4`, blog wave 2) ---------------------------------------------------
+# Plan `.claude/plans/blogpost/09_wave2.plan.md` §3; prereg `docs/PREREG_HLOPT4.md`.
+
+CAMPAIGN4 = "hlopt4"
+PREREG4_PATH = "docs/PREREG_HLOPT4.md"
+RUN_SET_ID4 = "20261010_hlopt4_160m"
+QUEUE_ROOT4 = CAMPAIGN_ROOT / "queue_part4"
+PATHS4_CONFIG_PATH = CONFIG_DIR / "paths_hlopt4.yaml"
+GENERATED4_DIR = CONFIG_DIR / "generated_part4"
+CAMPAIGN4_STATE_FILE = "hlopt4_campaign_state.json"
+SELECTION4_FILE = "extra_seed_selection_part4.json"
+CLAIMS4_FILE = "claims.json"
+
+
+def paths4_config_doc() -> dict[str, str]:
+    """Part IV paths YAML: Part I's roots with its own queue root."""
+    return {**paths_config_doc(), "queue_root": str(QUEUE_ROOT4)}
+
+
+TIER4_P = "p"
+TIER4_R = "r"
+TIER4_W = "w"
+TIER4_E = "e"
+TIER4_X = "x"
+TRAIN_TIERS4: tuple[str, ...] = (TIER4_P, TIER4_X, TIER4_R, TIER4_W, TIER4_E)
+# Tiers whose (animal, arm) selected rung gets seeds 4-5 (§2 convention).
+SELECT_TIERS4: tuple[str, ...] = (TIER4_P, TIER4_R, TIER4_E)
+ANIMALS4: tuple[str, ...] = ("dog",)
+OPTIMS4: tuple[str, ...] = ("adamw", "sgd")
+# Exact HF cosine-schedule sum of the E3 recipe (20 epochs = 25,000 steps, 5% warm-up):
+# sum of per-step lr factors = 12,500, so a run's summed lr is lr x this.
+E3_SCHEDULE_SUM = 12_500.0
+# Wave-1 dog anchors (selected rungs; full AdamW never transfers, so its anchor is the
+# Part II tier-s rung).
+ANCHOR4: MappingProxyType[tuple[str, str], float] = MappingProxyType(
+    {
+        ("lora", "adamw"): 1e-4,
+        ("lora", "sgd"): 5e-2,
+        ("full", "adamw"): 2e-6,
+        ("full", "sgd"): 2e-2,
+    }
+)
+
+# Tier p: agenda E5 items 2-6. Arm name -> Config fields (mode included).
+E5_ARMS: MappingProxyType[str, MappingProxyType] = MappingProxyType(
+    {
+        "head": MappingProxyType({"mode": "lora", "head": True}),
+        "attn": MappingProxyType({"mode": "lora", "lora_targets": "attn"}),
+        "mlp": MappingProxyType({"mode": "lora", "lora_targets": "mlp"}),
+        "L0-1": MappingProxyType({"mode": "lora", "lora_layers": (0, 1)}),
+        "body": MappingProxyType({"mode": "full", "freeze": "body"}),
+        "nohead": MappingProxyType({"mode": "full", "freeze": "nohead"}),
+        "embin": MappingProxyType({"mode": "full", "freeze": "embin"}),
+        "embout": MappingProxyType({"mode": "full", "freeze": "embout"}),
+    }
+)
+_PARTIAL_LORA = {
+    "adamw": (2.5e-5, 5e-5, 1e-4, 2e-4, 4e-4, 8e-4),
+    "sgd": (1.25e-2, 2.5e-2, 5e-2, 1e-1, 2e-1, 4e-1),
+}
+_FROZEN_FULL = {
+    "adamw": (5e-7, 1e-6, 2e-6, 5e-6, 1e-5, 2e-5),
+    "sgd": (5e-3, 1e-2, 2e-2, 3.5e-2, 5e-2, 1e-1),
+}
+_ONE_MATRIX = {
+    "adamw": (3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3),
+    "sgd": (1e-2, 3e-2, 1e-1, 3e-1, 1.0, 3.0),
+}
+E5_LADDERS: MappingProxyType[tuple[str, str], tuple[float, ...]] = MappingProxyType(
+    {
+        ("head", "adamw"): (1.25e-5, 2.5e-5, 5e-5, 1e-4, 2e-4, 4e-4),
+        ("head", "sgd"): (6.25e-3, 1.25e-2, 2.5e-2, 5e-2, 1e-1, 2e-1),
+        **{(a, o): _PARTIAL_LORA[o] for a in ("attn", "mlp", "L0-1") for o in OPTIMS4},
+        **{(a, o): _FROZEN_FULL[o] for a in ("body", "nohead") for o in OPTIMS4},
+        **{(a, o): _ONE_MATRIX[o] for a in ("embin", "embout") for o in OPTIMS4},
+    }
+)
+
+# Tier r: LoRA rank ladder (alpha fixed at 32, all linear layers).
+RANKS4: tuple[int, ...] = (1, 64, 512)
+RANK_LADDERS: MappingProxyType[tuple[int, str], tuple[float, ...]] = MappingProxyType(
+    {
+        **{(r, "adamw"): (1.25e-5, 2.5e-5, 5e-5, 1e-4, 2e-4, 4e-4) for r in RANKS4},
+        (1, "sgd"): (4.5e-3, 9e-3, 1.8e-2, 3.5e-2, 7e-2, 1.4e-1),
+        (64, "sgd"): (3.5e-2, 7e-2, 1.4e-1, 2.8e-1, 5.6e-1, 1.12),
+        (512, "sgd"): (1e-1, 2e-1, 4e-1, 8e-1, 1.6, 3.2),
+    }
+)
+
+
+def decay_lambda(lr: float, shrink: float) -> float:
+    """lambda giving a total weight shrink `shrink` over an E3 run at `lr` (2 sig. digits).
+
+    Decay multiplies weights by ~exp(-lambda * sum_t lr_t) with sum_t lr_t = lr x
+    `E3_SCHEDULE_SUM`.
+    """
+    return float(f"{-math.log1p(-shrink) / (lr * E3_SCHEDULE_SUM):.2g}")
+
+
+# Tier w: (mode, optim, anchored, conventional lambdas, target shrinks).
+CONVENTIONAL_WD = 0.01
+DECAY_SPECS4: tuple[
+    tuple[str, str, bool, tuple[float, ...], tuple[float, ...]], ...
+] = (
+    ("lora", "adamw", False, (CONVENTIONAL_WD,), (0.10, 0.30, 0.60)),
+    ("lora", "sgd", False, (), (0.01, 0.10, 0.30, 0.60)),
+    ("full", "adamw", False, (CONVENTIONAL_WD,), (0.01, 0.10)),
+    ("full", "adamw", True, (), (0.10, 0.30, 0.60)),
+    ("full", "sgd", False, (), (0.01, 0.10)),
+    ("full", "sgd", True, (), (0.10, 0.30, 0.60)),
+)
+
+# Tier e: AdamW epsilon dial, ladder centre max(lr_AdamW, eps x lr_SGD), 5 rungs.
+EPS4: tuple[float, ...] = (1e-6, 1e-4, 1e-3, 1e-2, 1e-1)
+EPS_RUNG_MULTIPLIERS: tuple[float, ...] = (0.25, 0.5, 1.0, 2.0, 4.0)
+
+
+def eps_centre(mode: str, eps: float) -> float:
+    """Ladder centre of the AdamW arm at `eps`: Adam's rate or the SGD-equivalent one."""
+    return max(ANCHOR4[(mode, "adamw")], eps * ANCHOR4[(mode, "sgd")])
+
+
+def _part4(tier: str, lr: float, **fields) -> Config:
+    mode = fields.pop("mode")
+    rank, alpha = (
+        (None, None) if mode == "full" else (fields.pop("rank", A_SHAPE[0]), 32)
+    )
+    return Config(
+        tier,
+        "e3",
+        mode,
+        rank,
+        alpha,
+        fields.pop("optim"),
+        float(f"{lr:.6g}"),
+        A_EPOCHS,
+        ANIMALS4,
+        part=4,
+        **fields,
+    )
+
+
+def _p_configs() -> list[Config]:
+    return [
+        _part4(TIER4_P, lr, optim=optim, **dict(E5_ARMS[arm]))
+        for arm in E5_ARMS
+        for optim in OPTIMS4
+        for lr in E5_LADDERS[(arm, optim)]
+    ]
+
+
+def _r_configs() -> list[Config]:
+    return [
+        _part4(TIER4_R, lr, mode="lora", rank=r, optim=optim)
+        for r in RANKS4
+        for optim in OPTIMS4
+        for lr in RANK_LADDERS[(r, optim)]
+    ]
+
+
+def _w_configs() -> list[Config]:
+    out = []
+    for mode, optim, anchored, conventional, shrinks in DECAY_SPECS4:
+        lr = ANCHOR4[(mode, optim)]
+        wds = conventional + tuple(decay_lambda(lr, s) for s in shrinks)
+        out += [
+            _part4(TIER4_W, lr, mode=mode, optim=optim, wd=wd, wd_anchor=anchored)
+            for wd in wds
+        ]
+    return out
+
+
+def _e_configs() -> list[Config]:
+    return [
+        _part4(TIER4_E, eps_centre(mode, eps) * m, mode=mode, optim="adamw", eps=eps)
+        for mode in ("lora", "full")
+        for eps in EPS4
+        for m in EPS_RUNG_MULTIPLIERS
+    ]
+
+
+def configs4() -> tuple[Config, ...]:
+    """Every Part IV seed-1..3 config, in the fixed order that sets node placement."""
+    return tuple(_p_configs() + _r_configs() + _w_configs() + _e_configs())
+
+
+def select_arms4() -> tuple[str, ...]:
+    """Arms of the tiers whose selected rung gets seeds 4-5."""
+    return tuple(dict.fromkeys(c.arm for c in configs4() if c.tier in SELECT_TIERS4))
+
+
+# Part IV runs on cluster-5 and goncalo (all GPUs); soar runs the driver only.
+HOSTS4: tuple[str, ...] = (CLUSTER5, GONCALO)
+TMUX_SESSION4 = CAMPAIGN4
+WATCH_SESSION4 = f"{CAMPAIGN4}-watch"
+PRIORITY4: MappingProxyType[str, int] = MappingProxyType(
+    {
+        TIER4_P: 95,
+        TIER4_X: 93,
+        TIER4_R: 92,
+        TIER4_W: 88,
+        TIER4_E: 86,
+        "late": 10,
+    }
+)
+RESERVATION_WARMUP4_S = 180
+
+
+def config_host4(index: int, seed: int) -> str:
+    """Part IV host of seed `seed` of the config at `index` (seeds alternate hosts)."""
+    return HOSTS4[(index + seed - 1) % len(HOSTS4)]
+
+
+def workers_per_node4(host: str) -> int:
+    return host_cap_per_gpu(host) * N_GPUS if host in HOSTS4 else 0
+
+
+def train_queue4(tier: str, host: str) -> str:
+    return f"{CAMPAIGN4}-{tier}-{HOST_TAG[host]}"
+
+
+def late_queue4(tier: str, host: str) -> str:
+    return f"{CAMPAIGN4}-late-{tier}-{HOST_TAG[host]}"
+
+
+def _queue_priorities4() -> dict[str, int]:
+    out: dict[str, int] = {}
+    for host in HOSTS4:
+        for tier in TRAIN_TIERS4:
+            out[train_queue4(tier, host)] = PRIORITY4[tier]
+            out[late_queue4(tier, host)] = PRIORITY4["late"]
+    return out
+
+
+QUEUE_PRIORITIES4: MappingProxyType[str, int] = MappingProxyType(_queue_priorities4())
+
+
+def pool_queues4(host: str) -> tuple[str, ...]:
+    """Every Part IV queue pinned to `host`, by priority (a pool's --queues list)."""
+    names = [n for n in QUEUE_PRIORITIES4 if queue_host(n) == host]
+    return tuple(sorted(names, key=lambda n: (-QUEUE_PRIORITIES4[n], n)))
+
+
+def gpu_policy_json4(host: str) -> dict:
+    """`host`'s Part IV jobq policy (all GPUs, its cap, 180 s reservation warm-up).
+
+    Raises:
+        ValueError: `host` runs no Part IV workers.
+    """
+    if host not in HOSTS4:
+        raise ValueError(f"{host} runs no {CAMPAIGN4} workers")
+    return {**gpu_policy_json(host), "reservation_warmup_s": RESERVATION_WARMUP4_S}

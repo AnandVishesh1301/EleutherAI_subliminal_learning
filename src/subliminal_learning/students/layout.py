@@ -44,7 +44,15 @@ from subliminal_learning.config import LoRAConfig, TrainConfig
 # The optimizer slug vocabulary is shared with the on-policy GKD campaign on purpose:
 # both optimizer sweeps must spell `sgdm0.9` / `rmsprop` identically, or the two
 # campaigns' arms could not be compared and a slug could drift in one tree only.
-from subliminal_learning.gkd.layout import DEFAULT_OPTIM, clip_suffix, optim_slug
+from subliminal_learning.gkd.layout import (
+    DEFAULT_OPTIM,
+    clip_suffix,
+    decay_suffix,
+    eps_suffix,
+    freeze_suffix,
+    lora_scope_suffix,
+    optim_slug,
+)
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.teachers.run_layout import (
     ft_param_tag,
@@ -63,20 +71,32 @@ def student_param_tag(train_cfg: TrainConfig, lora_cfg: LoRAConfig | None) -> st
     so every pre-existing LoRA + AdamW cell keeps a byte-identical tag and no already
     trained student's directory moves. Without the optimizer component the eight arms of
     the off-policy optimizer campaign would collide onto one leaf per (epochs, LR, rank).
-    A non-default `max_grad_norm` adds `_clip{g}` after the optimizer slug.
+    A non-default `max_grad_norm` adds `_clip{g}` after the optimizer slug. The LoRA
+    reach (`_attn` / `_mlp` / `_L{i}-{j}` / `_head`) or the full-FT frozen set
+    (`_body` / `_nohead` / `_embin` / `_embout`) follows the shape; a non-default Adam
+    ε adds `_eps{e}` before `_clip`, and weight decay `_wd{λ}` / `_wda{λ}` after it.
+    All suffixes are absent at the defaults (`gkd.layout` builds them for both channels).
 
     Args:
         train_cfg: The cell's training hyperparameters (`optim`, `optim_momentum`,
-            `max_grad_norm`).
+            `max_grad_norm`, `adam_epsilon`, `weight_decay`, `freeze_modules`).
         lora_cfg: Student LoRA config, or `None` for full fine-tuning.
 
     Returns:
-        E.g. `ep10_lr1e-4_r8a32`, `ep10_lr1e-4_full_sgdm0.9`, `ep20_lr1e-3_r8a32_sgd_clip0`.
+        E.g. `ep10_lr1e-4_r8a32`, `ep10_lr1e-4_full_sgdm0.9`, `ep20_lr1e-3_r8a32_sgd_clip0`,
+        `ep20_lr2e-6_full_body`, `ep20_lr1e-4_r8a32_head_eps0.1_wd0.084`.
+
+    Raises:
+        ValueError: Frozen modules on a LoRA student, or an unknown module set.
     """
     tag = ft_param_tag(train_cfg, lora_cfg)
+    if lora_cfg is not None and train_cfg.freeze_modules:
+        raise ValueError("freeze_modules is for full fine-tuning")
+    tag += lora_scope_suffix(lora_cfg) + freeze_suffix(train_cfg.freeze_modules)
     if train_cfg.optim != DEFAULT_OPTIM or train_cfg.optim_momentum:
         tag += f"_{optim_slug(train_cfg.optim, train_cfg.optim_momentum)}"
-    return tag + clip_suffix(train_cfg.max_grad_norm)
+    tag += eps_suffix(train_cfg.adam_epsilon) + clip_suffix(train_cfg.max_grad_norm)
+    return tag + decay_suffix(train_cfg.weight_decay, train_cfg.weight_decay_anchor)
 
 
 def student_param_dir(

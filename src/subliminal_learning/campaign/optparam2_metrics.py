@@ -608,3 +608,284 @@ class ExtClaims:
             out["x2"][animal] = self.x2_difference(animal)
             out["x3"][animal] = self.x3_difference(animal)
         return out
+
+
+# ---- Part III (`optparam3`) ------------------------------------------------------------
+
+MIXED = "mixed"
+
+
+def selection3(summary: Mapping) -> dict[tuple[str, str], float]:
+    """(animal, arm) -> selected lr of every tier p / r / e arm on the main base."""
+    return select(summary, [a.name for a in plan.SELECT_ARMS3])
+
+
+def unbracketed3(arm: str, selected_lr: float) -> bool:
+    """True when the selected rung is the top or bottom of the arm's Part III ladder."""
+    ladder = plan.ladder3(plan.ARM_BY_NAME_ALL[arm])
+    return selected_lr in (ladder[0], ladder[-1])
+
+
+def _point(c: Contrast | None) -> dict | None:
+    if c is None:
+        return None
+    return {"delta": c.delta, "lo": c.lo, "hi": c.hi, "n_treat": c.n_treat}
+
+
+class Part3Claims:
+    """Decision rules of `docs/PREREG_OPTPARAM3.md` §4 over a pooled leaf table.
+
+    The table pools optparam2 Part I leaves (lambda-0 references, data-seed1 tier c) with
+    the Part III leaves by cell. `refs` holds R and F, optparam2's bear LoRA / full AdamW
+    selected Delta_test (5 leaves).
+    """
+
+    def __init__(self, table: Table, refs: Mapping[str, float]) -> None:
+        self.t = table
+        self.refs = dict(refs)
+        self.s = rung_summary(table, plan.BASE_MAIN, plan.EPOCHS_SHORT)
+        self.sel = select(self.s, list(plan.ARM_BY_NAME_ALL))
+
+    def cell(
+        self, arm: str, lr: float, *, animal: str = plan.ANIMAL3, base: str = plan.BASE_MAIN
+    ) -> Cell:
+        return (animal, base, arm, float(lr), plan.EPOCHS_SHORT)
+
+    def selected(self, arm: str, animal: str = plan.ANIMAL3) -> Contrast | None:
+        """Delta_test (all leaves) at the arm's validation-selected eligible rung."""
+        lr = self.sel.get((animal, arm))
+        if lr is None:
+            return None
+        return self.t.contrast(self.cell(arm, lr, animal=animal), plan.REPORT_SET)
+
+    def at(self, arm: str, lr: float, *, seeds: bool = True, **kw) -> Contrast:
+        """Delta_test of one cell (seeds 0-2 by default)."""
+        gseeds = plan.SEEDS if seeds else None
+        return self.t.contrast(self.cell(arm, lr, **kw), plan.REPORT_SET, gseeds=gseeds)
+
+    def _eligible(self, arm: str, animal: str = plan.ANIMAL3) -> list[Contrast]:
+        return [
+            self.t.contrast(self.cell(arm, lr, animal=animal), plan.REPORT_SET)
+            for lr, s in _ladder(self.s, animal, arm)
+            if s["eligible"]
+        ]
+
+    # ---- E5 / rank ------------------------------------------------------------------
+
+    def sp1(self) -> str:
+        """On-policy full-AdamW transfer does not need the embeddings / head."""
+        f = self.refs["F"]
+        c = self.selected("full-body-adamw")
+        if c is not None and c.transfers and c.delta >= plan.HALF * f:
+            return SUPPORTED
+        his = [x.hi for x in self._eligible("full-body-adamw")]
+        if his and all(_finite(h) and h < plan.HALF * f for h in his):
+            return NOT_SUPPORTED
+        return MIXED
+
+    def sp2(self) -> str:
+        """The on-policy LoRA-SGD weakness depends on what LoRA can reach."""
+        r = self.refs["R"]
+        sel = [self.selected(a) for a in plan.SP2_ARMS]
+        if any(
+            c is not None and c.transfers and c.delta >= plan.G1_SUPPORT_FRAC * r
+            for c in sel
+        ):
+            return SUPPORTED
+        his = [x.hi for a in plan.SP2_ARMS for x in self._eligible(a)]
+        if his and all(_finite(h) and h < plan.G1_EQUIV_FRAC * r for h in his):
+            return NOT_SUPPORTED
+        return INCONCLUSIVE
+
+    def sp3(self) -> dict[str, dict | None]:
+        """Selected-rung Delta_test and transfer flag of every tier-p arm."""
+        out = {}
+        for arm in dict.fromkeys(a.name for a in plan.P_LADDERS):
+            c = self.selected(arm)
+            out[arm] = None if c is None else {**_point(c), "transfers": c.transfers}
+        return out
+
+    def sr1(self) -> str:
+        """On-policy LoRA AdamW transfer does not depend on rank."""
+        sel = [self.selected(f"lora-r{r}-adamw") for r in plan.RANKS3]
+        if any(c is None or not _finite(c.delta) for c in sel):
+            return INCONCLUSIVE
+        ok = all(abs(c.delta - self.refs["R"]) <= plan.RANK_TOL for c in sel)
+        return SUPPORTED if ok else NOT_SUPPORTED
+
+    # ---- weight decay ---------------------------------------------------------------
+
+    def sw1(self) -> str:
+        """Conventional decoupled decay (lambda 0.01) is a no-op."""
+        gaps = []
+        for arm, (arm0, lr) in plan.WD_LAMBDA0.items():
+            a, b = self.at(arm, lr), self.at(arm0, lr)
+            if not (_finite(a.delta) and _finite(b.delta)):
+                return INCONCLUSIVE
+            gaps.append(abs(a.delta - b.delta))
+        return SUPPORTED if all(g <= plan.SW1_TOL for g in gaps) else NOT_SUPPORTED
+
+    def sw2(self) -> str:
+        """Decay toward the base reduces on-policy LoRA AdamW transfer."""
+        arm, arm0, lr = plan.SW2_ARM
+        c, d0 = self.at(arm, lr), self.at(arm0, lr).delta
+        if not (_finite(c.lo) and _finite(c.hi) and _finite(d0)):
+            return INCONCLUSIVE
+        if c.hi < plan.HALF * d0:
+            return SUPPORTED
+        if c.lo >= plan.HALF * d0:
+            return NOT_SUPPORTED
+        return MIXED
+
+    def sw3(self) -> str:
+        """A penalty toward the pretrained weights reduces on-policy full-AdamW transfer."""
+        arm, lr = plan.SW3_ARM
+        c, f = self.at(arm, lr), self.refs["F"]
+        if not (_finite(c.lo) and _finite(c.hi)):
+            return INCONCLUSIVE
+        if c.hi < plan.HALF * f:
+            return SUPPORTED
+        if c.lo >= plan.HALF * f:
+            return NOT_SUPPORTED
+        return MIXED
+
+    # ---- Adam eps -------------------------------------------------------------------
+
+    def se1(self) -> str:
+        """Large eps gives LoRA AdamW LoRA SGD's on-policy weakness."""
+        big, small = self.selected("lora-adamw-eps0.1"), self.selected("lora-adamw-eps1e-06")
+        if big is None or small is None:
+            return INCONCLUSIVE
+        r = self.refs["R"]
+        ok = big.delta < plan.G1_SUPPORT_FRAC * r and small.delta >= plan.SE1_KEEP * r
+        return SUPPORTED if ok else NOT_SUPPORTED
+
+    def se2(self) -> str:
+        """Large-eps full AdamW still transfers on-policy."""
+        c = self.selected("full-adamw-eps0.1")
+        if c is not None and c.transfers:
+            return SUPPORTED
+        rungs = self._eligible("full-adamw-eps0.01") + self._eligible("full-adamw-eps0.1")
+        if not any(x.transfers for x in rungs):
+            return NOT_SUPPORTED
+        return INCONCLUSIVE
+
+    # ---- generality -----------------------------------------------------------------
+
+    def _best(self, animal: str, base: str, arm: str) -> Contrast | None:
+        """Delta_test at the validation-best eligible window rung of `arm` at a point."""
+        summary = rung_summary(self.t, base, plan.EPOCHS_SHORT)
+        lr = select(summary, [arm]).get((animal, arm))
+        if lr is None:
+            return None
+        return self.t.contrast(self.cell(arm, lr, animal=animal, base=base), plan.REPORT_SET)
+
+    def points(self) -> list[dict]:
+        """Per tier-g point: LoRA AdamW, best LoRA SGD, full AdamW, best full SGD."""
+        out = []
+        for animal, base in plan.g_points():
+            out.append(
+                {
+                    "animal": animal,
+                    "base": base,
+                    "lora_adamw": self.t.contrast(
+                        self.cell("lora-adamw", 4e-4, animal=animal, base=base),
+                        plan.REPORT_SET,
+                    ),
+                    "lora_sgd": self._best(animal, base, "lora-sgd"),
+                    "full_adamw": self.t.contrast(
+                        self.cell(
+                            "full-adamw",
+                            plan.G_FULL_ADAMW_LR[animal],
+                            animal=animal,
+                            base=base,
+                        ),
+                        plan.REPORT_SET,
+                    ),
+                    "full_sgd": self._best(animal, base, "full-sgd"),
+                }
+            )
+        return out
+
+    def g1(self, points: list[dict]) -> str:
+        """The on-policy LoRA-SGD weakness holds across bases."""
+        weak = strong = 0
+        for p in points:
+            sgd, adam = p["lora_sgd"], p["lora_adamw"]
+            if sgd is None or not (_finite(sgd.delta) and _finite(adam.delta)):
+                return INCONCLUSIVE
+            bar = plan.G1_SUPPORT_FRAC * adam.delta
+            weak += sgd.delta <= bar
+            strong += sgd.delta >= bar and sgd.transfers
+        if weak >= plan.G1_SUPPORT_SHARE * len(points):
+            return SUPPORTED
+        if strong >= plan.G1_REFUTE_SHARE * len(points):
+            return NOT_SUPPORTED
+        return MIXED
+
+    def g2(self, points: list[dict]) -> str:
+        """On-policy full AdamW transfers on every base."""
+        if any(not _finite(p["full_adamw"].lo) for p in points):
+            return INCONCLUSIVE
+        n = sum(p["full_adamw"].transfers for p in points)
+        return SUPPORTED if n >= plan.G2_SHARE * len(points) else NOT_SUPPORTED
+
+    def g3(self, points: list[dict]) -> str:
+        """On-policy full SGD is base-dependent."""
+        vals = [p["full_sgd"].delta if p["full_sgd"] is not None else math.nan for p in points]
+        if not all(_finite(v) for v in vals):
+            return INCONCLUSIVE
+        return SUPPORTED if max(vals) - min(vals) >= plan.G3_RANGE else NOT_SUPPORTED
+
+    def verdicts(self) -> dict[str, str]:
+        points = self.points()
+        return {
+            "SP1": self.sp1(),
+            "SP2": self.sp2(),
+            "SR1": self.sr1(),
+            "SW1": self.sw1(),
+            "SW2": self.sw2(),
+            "SW3": self.sw3(),
+            "SE1": self.se1(),
+            "SE2": self.se2(),
+            "G1": self.g1(points),
+            "G2": self.g2(points),
+            "G3": self.g3(points),
+        }
+
+    def descriptive(self) -> dict:
+        """Numbers behind the rules (SP3 table, references, selections, points)."""
+        return {
+            "references": self.refs,
+            "selected": {
+                f"{a}|{arm}": lr
+                for (a, arm), lr in self.sel.items()
+                if arm in {x.name for x in plan.SELECT_ARMS3}
+            },
+            "sp3": self.sp3(),
+            "rank": {
+                f"r{r}-{o}": _point(self.selected(f"lora-r{r}-{o}"))
+                for r in plan.RANKS3
+                for o in ("adamw", "sgd")
+            },
+            "eps": {
+                arm.name: _point(self.selected(arm.name))
+                for arm in plan.SELECT_ARMS3
+                if arm.eps != plan.DEFAULT_ADAM_EPSILON
+            },
+            "wd": {
+                cfg.arm.name: {
+                    **_point(self.at(cfg.arm.name, cfg.lr)),
+                    "realized_shrink": plan.realized_shrink(cfg.arm.wd, cfg.lr),
+                }
+                for t, _a, _b, cfg in plan.part3_specs()
+                if t == plan.TIER_W
+            },
+            "lambda0": {
+                arm0: _point(self.at(arm0, lr)) for arm0, lr in plan.WD_LAMBDA0.values()
+            },
+            "g_points": [
+                {k: (_point(v) if isinstance(v, Contrast) else v) for k, v in p.items()}
+                for p in self.points()
+            ],
+        }

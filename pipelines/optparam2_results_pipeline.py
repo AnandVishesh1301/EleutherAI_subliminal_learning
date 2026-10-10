@@ -13,6 +13,11 @@
 Part II (`optparam2x`, `build2`) writes under its own run set's `results/`: its leaves,
 rungs and deltas of the table pooling Part I's finalized `leaves.csv` with the Part II
 leaves by cell, and `ext_claims.json` (X1-X3).
+
+Part III (`optparam3`, `build3`) writes under its run set's `results/`: its leaves, rungs
+per base, deltas of every Part III cell and tier-g point (pooled with Part I's leaves by
+cell, so data-seed1 reuses optparam2 tier c), `selection.json` and `claims.json`
+(SP1-SG3 of `docs/PREREG_OPTPARAM3.md`).
 """
 
 from __future__ import annotations
@@ -184,9 +189,11 @@ def expected_leaves(selection: Mapping | None) -> tuple[jobs.Leaf, ...]:
 # ---- tables ---------------------------------------------------------------------------------
 
 
-def _delta_rows(table: metrics.Table) -> list[dict]:
+def _delta_rows(
+    table: metrics.Table, cells: Iterable[metrics.Cell] | None = None
+) -> list[dict]:
     rows = []
-    for cell in table.cells():
+    for cell in table.cells() if cells is None else sorted(set(cells)):
         animal, base, arm, lr, epochs = cell
         for control in (plan.KIND_PLACEBO, plan.KIND_SB):
             if not table.leaves(cell, control):
@@ -367,4 +374,172 @@ def build2(results_dir: Path, part1_csv: Path = PART1_LEAVES_CSV) -> dict[str, s
         },
     )
     out["ext_claims"] = str(claims_path)
+    return out
+
+
+# ---- Part III (`optparam3`) -------------------------------------------------------------
+
+PART1_RESULTS_DIR = plan.RUN_SET_ROOT / plan.RESULTS_DIRNAME
+
+
+def references3(part1_results: Path = PART1_RESULTS_DIR) -> dict[str, float]:
+    """R and F: optparam2's bear LoRA / full AdamW e1 selected Delta_test (all leaves).
+
+    Raises:
+        RuntimeError: A value is missing or off the pre-registered one by more than
+            `plan.REFERENCE_TOL3`.
+    """
+    claims = json.loads((part1_results / "claims.json").read_text())
+    deltas = pd.read_csv(part1_results / "deltas.csv")
+    out = {}
+    for name, (arm, expected) in plan.REFERENCE_ARMS3.items():
+        lr = float(claims["selected_e1"][f"{plan.ANIMAL3}|{arm}"])
+        row = deltas[
+            (deltas.animal == plan.ANIMAL3)
+            & (deltas.base == plan.BASE_MAIN)
+            & (deltas.arm == arm)
+            & ((deltas.lr - lr).abs() < 1e-12)
+            & (deltas.epochs == plan.EPOCHS_SHORT)
+            & (deltas.control == plan.KIND_PLACEBO)
+            & (deltas.seeds == "all")
+            & (deltas.set == plan.REPORT_SET)
+        ]
+        if len(row) != 1:
+            raise RuntimeError(f"{name}: {len(row)} optparam2 rows for {arm}@{lr:g}")
+        value = float(row["delta"].iloc[0])
+        if abs(value - expected) > plan.REFERENCE_TOL3:
+            raise RuntimeError(f"{name} = {value:.4f}, pre-registered {expected}")
+        out[name] = value
+    return out
+
+
+def selection3_doc(summary: Mapping) -> dict:
+    """The persisted tier p / r / e selection that sets tier x3."""
+    chosen = metrics.selection3(summary)
+    return {
+        "rule": (
+            f"max mean {plan.SELECT_SET} Delta (treatment - placebo, seeds "
+            f"{list(plan.SEEDS)}) among rungs with 3+3 evaluated leaves and mean "
+            f"treatment pp1 delta-CE < {plan.COLLAPSE_DCE:.4f}; ties -> smaller lr"
+        ),
+        "selected": {f"{a}|{arm}": lr for (a, arm), lr in chosen.items()},
+        "unbracketed": sorted(
+            f"{a}|{arm}"
+            for (a, arm), lr in chosen.items()
+            if metrics.unbracketed3(arm, lr)
+        ),
+        "no_eligible_rung": sorted(
+            f"{plan.ANIMAL3}|{arm.name}"
+            for arm in plan.SELECT_ARMS3
+            if (plan.ANIMAL3, arm.name) not in chosen
+        ),
+        "summary": {f"{a}|{arm}|{lr:g}": s for (a, arm, lr), s in summary.items()},
+    }
+
+
+def parse_selection3(doc: Mapping) -> dict[tuple[str, str], plan.Config]:
+    """Inverse of `selection3_doc` for `optparam2_jobs.extra_leaves3`."""
+    out = {}
+    for key, lr in doc["selected"].items():
+        animal, arm = key.split("|")
+        out[(animal, arm)] = plan.Config(plan.ARM_BY_NAME_ALL[arm], float(lr))
+    return out
+
+
+def arm_fields3(leaf: jobs.Leaf) -> dict:
+    """Part III columns: the arm's training settings and the trained parameter count."""
+    arm = leaf.config.arm
+    manifest = _read(jobs.leaf_dir(leaf) / "train_manifest.json") or {}
+    trainable = (manifest.get("trainable_parameters") or {}).get("trainable")
+    return {
+        "rank": arm.rank if arm.mode == "lora" else None,
+        "lora_alpha": arm.lora_alpha if arm.mode == "lora" else None,
+        "lora_target": arm.target or None,
+        "lora_layers": "-".join(map(str, arm.layers)) or None,
+        "lora_head": arm.head,
+        "freeze": arm.freeze or None,
+        "weight_decay": arm.wd,
+        "weight_decay_anchor": arm.wd_anchor,
+        "realized_shrink": plan.realized_shrink(arm.wd, leaf.config.lr)
+        if arm.wd
+        else 0.0,
+        "adam_epsilon": arm.eps,
+        "n_trainable": trainable,
+    }
+
+
+def expected_leaves3(selection: Mapping | None) -> tuple[jobs.Leaf, ...]:
+    """Part III main leaves plus, once selected, tier x3."""
+    leaves = jobs.part3_leaves()
+    if selection is None:
+        return leaves
+    return leaves + jobs.extra_leaves3(parse_selection3(selection))
+
+
+def _cells3(rows3: Iterable[Mapping], table: metrics.Table) -> set[metrics.Cell]:
+    points = set(plan.g_points())
+    cells = {metrics.cell_of(r) for r in rows3}
+    cells |= {c for c in table.cells() if (c[0], c[1]) in points}
+    return cells
+
+
+def build3(
+    results_dir: Path,
+    selection: Mapping | None,
+    part1_csv: Path = PART1_LEAVES_CSV,
+    part1_results: Path = PART1_RESULTS_DIR,
+) -> dict[str, str]:
+    """Write Part III leaves / rungs / deltas, selection.json and claims.json."""
+    rows3 = [
+        {**leaf_row(leaf), **arm_fields3(leaf), "run_set": plan.RUN_SET_ID3}
+        for leaf in expected_leaves3(selection)
+    ]
+    trained3 = [r for r in rows3 if r["trained"]]
+    table = metrics.Table(
+        [r for r in part1_rows(part1_csv) if r["trained"]] + trained3
+    )
+    claims = metrics.Part3Claims(table, references3(part1_results))
+    selected = {(a, arm): lr for (a, arm), lr in claims.sel.items()}
+    rung_rows = []
+    for base in dict.fromkeys(r["base"] for r in rows3):
+        summary = metrics.rung_summary(table, base, plan.EPOCHS_SHORT)
+        rung_rows += [
+            {
+                "base": base,
+                "epochs": plan.EPOCHS_SHORT,
+                "animal": a,
+                "arm": arm,
+                "lr": lr,
+                **s,
+                "selected": base == plan.BASE_MAIN and selected.get((a, arm)) == lr,
+            }
+            for (a, arm, lr), s in sorted(summary.items())
+        ]
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for name, df in (
+        ("leaves", _flat(rows3)),
+        ("rungs", pd.DataFrame(rung_rows)),
+        ("deltas", pd.DataFrame(_delta_rows(table, _cells3(trained3, table)))),
+    ):
+        path = results_dir / f"{name}.csv"
+        atomic_write_text(path, df.to_csv(index=False))
+        out[name] = str(path)
+    sel_path = results_dir / "selection.json"
+    atomic_write_json(sel_path, selection3_doc(claims.s) if selection is None else selection)
+    out["selection"] = str(sel_path)
+    claims_path = results_dir / "claims.json"
+    atomic_write_json(
+        claims_path,
+        {
+            "verdicts": claims.verdicts(),
+            "descriptive": claims.descriptive(),
+            "part1_leaves_csv": str(part1_csv),
+            "n_leaves": len(rows3),
+            "n_trained": len(trained3),
+            "n_evaluated": sum(r["evaluated"] for r in rows3),
+            "untrained": [r["key"] for r in rows3 if not r["trained"]],
+        },
+    )
+    out["claims"] = str(claims_path)
     return out

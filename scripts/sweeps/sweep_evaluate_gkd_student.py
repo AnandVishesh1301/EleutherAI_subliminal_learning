@@ -60,6 +60,7 @@ from subliminal_learning.gkd.layout import (
     gkd_tag,
     gkd_xbase_control_run_dir,
     teacher_tag,
+    train_tag_kwargs,
 )
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
 from subliminal_learning.teachers.run_layout import model_dir_name
@@ -499,7 +500,7 @@ def main(
             teacher_temp=ttemp,
             optim=optim,
             optim_momentum=momentum,
-            max_grad_norm=base.train.max_grad_norm,
+            **train_tag_kwargs(base.train),
             **asdict(gkd_axes),
         )
         do_bench = _should_benchmark(

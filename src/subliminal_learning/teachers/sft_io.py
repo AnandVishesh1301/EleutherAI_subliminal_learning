@@ -16,7 +16,7 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model
+from peft import get_peft_model
 from transformers import (
     DataCollatorForSeq2Seq,
     GPTNeoXForCausalLM,
@@ -27,7 +27,14 @@ from transformers import (
 )
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
-from subliminal_learning.config import TrainConfig, hf_max_grad_norm
+from subliminal_learning.config import TrainConfig, hf_max_grad_norm, hf_weight_decay
+from subliminal_learning.training.lora_io import build_lora_config
+from subliminal_learning.training.param_control_io import (
+    AnchoredDecayCallback,
+    apply_freeze_modules,
+    trainable_parameter_counts,
+    validate_train_settings,
+)
 from subliminal_learning.training.sft_io import SftResult
 
 
@@ -63,23 +70,19 @@ def run_teacher_sft_completion_only(
         Output directory, final training loss, and optimizer step count.
 
     Raises:
-        ValueError: `train_cfg.optim_momentum` is set on an optimizer without momentum.
+        ValueError: `train_cfg.optim_momentum` is set on an optimizer without momentum,
+            or `param_control_io.validate_train_settings` rejects the settings.
     """
     # Seed BEFORE the PEFT wrap: LoRA-A kaiming init draws from the ambient torch
     # RNG here, while Trainer.__init__ only calls set_seed(args.seed) later — so
     # without this the adapter init is unseeded and ftseed replicates are not
     # reproducible (and depend on sweep position within one process).
+    validate_train_settings(train_cfg, lora_cfg)
     set_seed(train_cfg.seed)
     if lora_cfg is not None:
-        peft_config = LoraConfig(
-            r=lora_cfg.r,
-            lora_alpha=lora_cfg.lora_alpha,
-            lora_dropout=lora_cfg.lora_dropout,
-            target_modules=lora_cfg.resolve_target_modules(),
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, peft_config)
+        model = get_peft_model(model, build_lora_config(lora_cfg))
+    else:
+        apply_freeze_modules(model, train_cfg.freeze_modules)
     model.config.use_cache = False
     eos_id = tokenizer.eos_token_id
 
@@ -126,6 +129,8 @@ def run_teacher_sft_completion_only(
         warmup_ratio=train_cfg.warmup_ratio,
         warmup_steps=train_cfg.warmup_steps,
         max_grad_norm=hf_max_grad_norm(train_cfg.max_grad_norm),
+        weight_decay=hf_weight_decay(train_cfg),
+        adam_epsilon=train_cfg.adam_epsilon,
         seed=train_cfg.seed,
         save_strategy=save_strategy,
         save_steps=train_cfg.save_steps,
@@ -138,6 +143,11 @@ def run_teacher_sft_completion_only(
         args=args,
         train_dataset=tokenized,
         data_collator=collator,
+        callbacks=(
+            [AnchoredDecayCallback(train_cfg.weight_decay)]
+            if train_cfg.weight_decay_anchor
+            else None
+        ),
     )
     # `optim="sgd"` builds PLAIN SGD: transformers passes only `lr` to SGD/RMSPROP and
     # ignores `optim_args`, so momentum must be injected through
@@ -173,4 +183,5 @@ def run_teacher_sft_completion_only(
         final_train_loss=train_output.training_loss,
         n_steps=trainer.state.global_step,
         log_history=tuple(trainer.state.log_history),
+        trainable_parameters=trainable_parameter_counts(trainer.model),
     )

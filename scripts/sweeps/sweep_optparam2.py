@@ -1,8 +1,10 @@
 """CLI: per-leaf steps of the on-policy optimizer map v2 (`optparam2`).
 
     verify-leaf  The leaf's checkpoint and manifest exist and its manifest names the
-                 planned config (tag, teacher, control kind, steps, optimizer, lr, clip).
-                 Catches the train sweep's silent skips (missing teacher, claim).
+                 planned config (tag, teacher, control kind, steps, optimizer, lr, clip,
+                 weight decay, Adam eps, LoRA rank / reach, frozen modules and the
+                 trainable module groups they imply). Catches the train sweep's silent
+                 skips (missing teacher, claim).
     probe-leaf   pp1 Pile probe of the leaf (delta-CE, KL to its own base) ->
                  `pp1_probe.json`, reused while the manifest is unchanged.
 
@@ -23,6 +25,22 @@ from subliminal_learning.campaign import optparam2_plan as plan
 app = typer.Typer(add_completion=False, help=__doc__)
 
 _MODEL_CONFIG = Path("configs/model/pythia.yaml")
+
+
+def _trainable_bad(arm, groups: dict) -> str | None:
+    """Why the manifest's trainable module groups contradict the arm, else ``None``."""
+    have = {g for g, n in groups.items() if n}
+    if arm.freeze == "embin" and have != {"embed_in"}:
+        return f"embin trains {sorted(have)}"
+    if arm.freeze == "embout" and have != {"embed_out"}:
+        return f"embout trains {sorted(have)}"
+    if arm.freeze == "body" and have & {"embed_in", "embed_out"}:
+        return f"body trains {sorted(have)}"
+    if arm.freeze == "nohead" and "embed_out" in have:
+        return f"nohead trains {sorted(have)}"
+    if arm.mode == "lora" and arm.head != ("embed_out" in have):
+        return f"head={arm.head} but trains {sorted(have)}"
+    return None
 
 
 def _expected(leaf: jobs.Leaf) -> dict:
@@ -70,14 +88,38 @@ def verify_leaf(key: str = typer.Option(..., help="Leaf jobq key.")) -> None:
         ("batch_size", int(train["batch_size"]), plan.TRAIN_OVERRIDES["batch_size"]),
         ("lmbda", float(manifest["gkd_hyperparameters"]["lmbda"]), plan.LMBDA),
         ("beta", float(manifest["gkd_hyperparameters"]["beta"]), plan.BETA),
+        ("weight_decay", float(train.get("weight_decay", 0.0)), arm.wd),
+        ("weight_decay_anchor", bool(train.get("weight_decay_anchor", False)), arm.wd_anchor),
+        ("adam_epsilon", float(train.get("adam_epsilon", 1e-8)), arm.eps),
+        ("freeze_modules", list(train.get("freeze_modules", [])), list(jobs.freeze_modules(arm))),
     ):
         if got != want:
             bad[name] = (got, want)
     if arm.mode == "lora":
-        for name, want in (("lora_r", plan.LORA_R), ("lora_alpha", arm.lora_alpha)):
-            got = int(train[name])
+        lora = jobs.lora_config(leaf.config)
+        want_targets = (
+            lora.target_modules
+            if isinstance(lora.target_modules, str)
+            else list(lora.target_modules)
+        )
+        for name, got, want in (
+            ("lora_r", int(train["lora_r"]), arm.rank),
+            ("lora_alpha", int(train["lora_alpha"]), arm.lora_alpha),
+            ("target_modules", train["target_modules"], want_targets),
+            ("modules_to_save", train.get("modules_to_save", []), list(lora.modules_to_save)),
+            (
+                "layers_to_transform",
+                train.get("layers_to_transform", []),
+                list(lora.layers_to_transform),
+            ),
+        ):
             if got != want:
                 bad[name] = (got, want)
+    if plan.part_of(leaf.tier) == 3:
+        groups = (manifest.get("trainable_parameters") or {}).get("trainable_by_group")
+        reason = "no trainable_parameters" if groups is None else _trainable_bad(arm, groups)
+        if reason:
+            bad["trainable_parameters"] = (groups, reason)
     if bad:
         raise RuntimeError(
             f"{key}: manifest {manifest_path} disagrees (got, want): {bad}"
@@ -110,11 +152,12 @@ def probe_leaf(
     ):
         typer.echo(f"cached {out_path}")
         return
-    cfg = load_config(plan.PATHS_CONFIG_PATH, _MODEL_CONFIG)
-    spec = ws160m_models.registry_for_paths(plan.PATHS_CONFIG_PATH)[leaf.token]
+    paths_config = plan.paths_config_of(leaf.tier)
+    cfg = load_config(paths_config, _MODEL_CONFIG)
+    spec = ws160m_models.registry_for_paths(paths_config)[leaf.token]
     hub_org = cfg.model.hub_org
     tok = load_tokenizer(spec, cfg.paths.hf_cache_root, hub_org)
-    ids = pp.load_pp1_input_ids(plan.PP1_TEXT_PATH, tok)
+    ids = pp.load_pp1_input_ids(plan.pp1_text_of(leaf.tier), tok)
     base = load_model(
         spec, cfg.paths.hf_cache_root, hub_org, device, dtype=torch.float32
     )

@@ -39,7 +39,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from subliminal_learning.config import LoRAConfig
+from subliminal_learning.config import DEFAULT_ADAM_EPSILON, LoRAConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.teachers.run_layout import model_dir_name
 
@@ -112,6 +112,112 @@ def clip_suffix(max_grad_norm: float) -> str:
     if value == DEFAULT_MAX_GRAD_NORM:
         return ""
     return f"_clip{value:g}"
+
+
+# The four GPT-NeoX linear projections ("all-linear" on NeoX), named explicitly where
+# PEFT needs a list (``layers_to_transform`` rejects the string sentinel).
+NEOX_LINEAR_MODULES: tuple[str, ...] = (
+    "query_key_value",
+    "dense",
+    "dense_h_to_4h",
+    "dense_4h_to_h",
+)
+# GPT-NeoX module sets with a run-name token (closed: an unknown set raises at tag time).
+LORA_TARGET_TAGS: dict[tuple[str, ...], str] = {
+    ("query_key_value", "dense"): "attn",
+    ("dense_h_to_4h", "dense_4h_to_h"): "mlp",
+}
+LORA_SAVE_TAGS: dict[tuple[str, ...], str] = {("embed_out",): "head"}
+FREEZE_TAGS: dict[frozenset[str], str] = {
+    frozenset({"gpt_neox.embed_in", "embed_out"}): "body",
+    frozenset({"embed_out"}): "nohead",
+    frozenset({"embed_out", "gpt_neox.final_layer_norm", "gpt_neox.layers"}): "embin",
+    frozenset({"gpt_neox.embed_in", "gpt_neox.final_layer_norm", "gpt_neox.layers"}): (
+        "embout"
+    ),
+}
+FREEZE_BY_TAG: dict[str, tuple[str, ...]] = {
+    tag: tuple(sorted(prefixes)) for prefixes, tag in FREEZE_TAGS.items()
+}
+
+
+def lora_scope_suffix(lora: LoRAConfig | None) -> str:
+    """Tag suffix of a LoRA's reach: ``_attn`` / ``_mlp``, ``_L{i}-{j}``, ``_head``.
+
+    Other `target_modules` tuples keep no suffix, so every earlier tag is unchanged.
+
+    Raises:
+        ValueError: `modules_to_save` outside `LORA_SAVE_TAGS`.
+    """
+    if lora is None:
+        return ""
+    tag = ""
+    tm = lora.target_modules
+    if not isinstance(tm, str) and tuple(tm) in LORA_TARGET_TAGS:
+        tag += f"_{LORA_TARGET_TAGS[tuple(tm)]}"
+    if lora.layers_to_transform:
+        tag += "_L" + "-".join(str(i) for i in lora.layers_to_transform)
+    if lora.modules_to_save:
+        try:
+            tag += f"_{LORA_SAVE_TAGS[tuple(lora.modules_to_save)]}"
+        except KeyError:
+            raise ValueError(
+                f"no tag for modules_to_save={lora.modules_to_save}; "
+                f"known: {list(LORA_SAVE_TAGS)}"
+            ) from None
+    return tag
+
+
+def freeze_suffix(freeze_modules: tuple[str, ...]) -> str:
+    """Tag suffix of a full-FT frozen-module set: ``""``, ``_body``, ``_nohead``, ...
+
+    Raises:
+        ValueError: A set outside `FREEZE_TAGS`.
+    """
+    if not freeze_modules:
+        return ""
+    try:
+        return f"_{FREEZE_TAGS[frozenset(freeze_modules)]}"
+    except KeyError:
+        raise ValueError(
+            f"no tag for freeze_modules={freeze_modules}; add it to FREEZE_TAGS"
+        ) from None
+
+
+def _check_hp(name: str, value: float) -> None:
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be finite and >= 0, got {value}")
+
+
+def eps_suffix(adam_epsilon: float) -> str:
+    """``_eps{ε:g}`` for a non-default Adam ε, else ``""``."""
+    _check_hp("adam_epsilon", adam_epsilon)
+    return "" if adam_epsilon == DEFAULT_ADAM_EPSILON else f"_eps{adam_epsilon:g}"
+
+
+def decay_suffix(weight_decay: float, anchor: bool = False) -> str:
+    """``_wd{λ:g}`` (toward zero) or ``_wda{λ:g}`` (toward the start weights).
+
+    Raises:
+        ValueError: Anchored decay with λ = 0, or a negative / non-finite λ.
+    """
+    _check_hp("weight_decay", weight_decay)
+    if not weight_decay:
+        if anchor:
+            raise ValueError("anchored decay needs weight_decay > 0")
+        return ""
+    return f"_wd{'a' if anchor else ''}{weight_decay:g}"
+
+
+def train_tag_kwargs(train: TrainConfig) -> dict:
+    """`gkd_tag` keyword arguments read from a `TrainConfig` (one place, all callers)."""
+    return {
+        "max_grad_norm": train.max_grad_norm,
+        "adam_epsilon": train.adam_epsilon,
+        "weight_decay": train.weight_decay,
+        "weight_decay_anchor": train.weight_decay_anchor,
+        "freeze_modules": tuple(train.freeze_modules),
+    }
 
 
 def parse_optim_slug(slug: str) -> tuple[str, float]:
@@ -214,6 +320,10 @@ def gkd_tag(
     rollout_screen: str = "legacy",
     mask_eos: bool = False,
     max_grad_norm: float = DEFAULT_MAX_GRAD_NORM,
+    adam_epsilon: float = DEFAULT_ADAM_EPSILON,
+    weight_decay: float = 0.0,
+    weight_decay_anchor: bool = False,
+    freeze_modules: tuple[str, ...] = (),
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -246,6 +356,14 @@ def gkd_tag(
         max_grad_norm: Gradient-clip norm; adds ``_clip{g}`` right after the
             optimizer slug when it is not `DEFAULT_MAX_GRAD_NORM` (``_clip0`` =
             unclipped).
+        adam_epsilon: Adds ``_eps{ε}`` right after the optimizer slug (before
+            ``_clip``) when not the HF default.
+        weight_decay: Adds ``_wd{λ}`` (``_wda{λ}`` when `weight_decay_anchor`) right
+            after ``_clip``.
+        weight_decay_anchor: Decay toward the start weights.
+        freeze_modules: Full-FT frozen set; adds ``_body`` / ``_nohead`` / ``_embin`` /
+            ``_embout`` in the LoRA-shape slot. A LoRA's reach (``_attn`` / ``_mlp`` /
+            ``_L{i}-{j}`` / ``_head``) fills the same slot after ``_r{r}a{alpha}``.
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
@@ -278,6 +396,9 @@ def gkd_tag(
     )
     if lora is not None:
         tag += f"_r{lora.r}a{lora.lora_alpha}"
+        if freeze_modules:
+            raise ValueError("freeze_modules is for full fine-tuning")
+    tag += lora_scope_suffix(lora) + freeze_suffix(freeze_modules)
     if vocab_mask:
         tag += "_vmaskf" if vocab_mask_forms else "_vmask"
     if mask_eos:
@@ -286,7 +407,9 @@ def gkd_tag(
         tag += f"_ttemp{teacher_temp:.1f}"
     if optim != DEFAULT_OPTIM or optim_momentum:
         tag += f"_{optim_slug(optim, optim_momentum)}"
+    tag += eps_suffix(adam_epsilon)
     tag += clip_suffix(max_grad_norm)
+    tag += decay_suffix(weight_decay, weight_decay_anchor)
     if prompt_subset_size is not None:
         tag += f"_n{prompt_subset_size}"
         if prompt_subset_seed:

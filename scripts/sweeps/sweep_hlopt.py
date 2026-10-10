@@ -23,6 +23,7 @@ import typer
 
 from subliminal_learning.campaign import hlopt_layout as layout
 from subliminal_learning.campaign import hlopt_plan as plan
+from subliminal_learning.config import DEFAULT_ADAM_EPSILON
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -45,25 +46,62 @@ def _context():
     return cfg.paths, cfg.model.hub_org, spec
 
 
+def _layers(value: str) -> tuple[int, ...]:
+    """``"0-1"`` -> ``(0, 1)``; ``""`` -> ``()``."""
+    return tuple(int(i) for i in value.split("-")) if value else ()
+
+
 def _config(
-    recipe, mode, rank, alpha, optim, lr, epochs, clip=plan.MAX_GRAD_NORM, part=1
+    recipe,
+    mode,
+    rank,
+    alpha,
+    optim,
+    lr,
+    epochs,
+    clip=plan.MAX_GRAD_NORM,
+    part=1,
+    lora_targets="",
+    lora_layers="",
+    head=False,
+    freeze="",
+    wd=0.0,
+    wd_anchor=False,
+    eps=DEFAULT_ADAM_EPSILON,
 ) -> plan.Config:
     """The plan config these flags name (searched within `part`).
 
     Raises:
         typer.BadParameter: No plan config matches.
     """
+    exact = (recipe, mode, rank, alpha, optim, epochs, lora_targets, head, freeze)
     for c in plan.part_configs(part):
         if (
-            (c.recipe, c.mode, c.rank, c.alpha, c.optim, c.epochs)
-            == (recipe, mode, rank, alpha, optim, epochs)
+            (
+                c.recipe,
+                c.mode,
+                c.rank,
+                c.alpha,
+                c.optim,
+                c.epochs,
+                c.lora_targets,
+                c.head,
+                c.freeze,
+            )
+            == exact
+            and c.lora_layers == _layers(lora_layers)
+            and c.wd_anchor == wd_anchor
             and math.isclose(c.lr, lr, rel_tol=1e-9)
             and math.isclose(c.clip, clip, rel_tol=1e-9, abs_tol=1e-12)
+            and math.isclose(c.wd, wd, rel_tol=1e-9, abs_tol=1e-15)
+            and math.isclose(c.eps, eps, rel_tol=1e-9, abs_tol=1e-15)
         ):
             return c
     raise typer.BadParameter(
         f"no hlopt part-{part} config {recipe}/{mode}/r{rank}a{alpha}/{optim}"
-        f"/lr{lr:g}/ep{epochs}/clip{clip:g}"
+        f"/lr{lr:g}/ep{epochs}/clip{clip:g}/targets{lora_targets!r}/layers"
+        f"{lora_layers!r}/head{head}/freeze{freeze!r}/wd{wd:g}/anchor{wd_anchor}"
+        f"/eps{eps:g}"
     )
 
 
@@ -223,7 +261,20 @@ _CELL_OPTS = dict(
     base_ref=typer.Option(False, "--base-ref", help="Also score the untuned base."),
     device=typer.Option("cuda:0", help="Torch device."),
     clip=typer.Option(plan.MAX_GRAD_NORM, help="max_grad_norm (0 = unclipped)."),
-    part=typer.Option(1, help="Campaign part (1 = hlopt, 2 = hlopt2, 3 = hlopt3)."),
+    part=typer.Option(
+        1, help="Campaign part (1 = hlopt, 2 = hlopt2, 3 = hlopt3, 4 = hlopt4)."
+    ),
+    lora_targets=typer.Option("", help="Part IV: attn | mlp (default: all linear)."),
+    lora_layers=typer.Option("", help="Part IV: adapter layers, e.g. 0-1."),
+    head=typer.Option(False, "--head", help="Part IV: LoRA + trainable output head."),
+    freeze=typer.Option(
+        "", help="Part IV: full-FT frozen set (body|nohead|embin|embout)."
+    ),
+    wd=typer.Option(0.0, help="Part IV: weight decay."),
+    wd_anchor=typer.Option(
+        False, "--wd-anchor", help="Part IV: decay toward the start weights."
+    ),
+    eps=typer.Option(DEFAULT_ADAM_EPSILON, help="Part IV: AdamW epsilon."),
 )
 
 
@@ -253,6 +304,13 @@ def train_cell(
     device: str = _CELL_OPTS["device"],
     clip: float = _CELL_OPTS["clip"],
     part: int = _CELL_OPTS["part"],
+    lora_targets: str = _CELL_OPTS["lora_targets"],
+    lora_layers: str = _CELL_OPTS["lora_layers"],
+    head: bool = _CELL_OPTS["head"],
+    freeze: str = _CELL_OPTS["freeze"],
+    wd: float = _CELL_OPTS["wd"],
+    wd_anchor: bool = _CELL_OPTS["wd_anchor"],
+    eps: float = _CELL_OPTS["eps"],
 ) -> None:
     """Distil one student, then pp1-probe and prob-score it."""
     from loguru import logger
@@ -262,7 +320,24 @@ def train_cell(
     from subliminal_learning.utils.io import file_sha256
 
     _setup()
-    config = _config(recipe, mode, rank, alpha, optim, lr, epochs, clip, part)
+    config = _config(
+        recipe,
+        mode,
+        rank,
+        alpha,
+        optim,
+        lr,
+        epochs,
+        clip,
+        part,
+        lora_targets,
+        lora_layers,
+        head,
+        freeze,
+        wd,
+        wd_anchor,
+        eps,
+    )
     _check_cell(config, source, animal, eval_animal)
     paths, hub_org, spec = _context()
     pool = _pool(source, animal)
@@ -336,6 +411,13 @@ def late_eval_cell(
     device: str = _CELL_OPTS["device"],
     clip: float = _CELL_OPTS["clip"],
     part: int = _CELL_OPTS["part"],
+    lora_targets: str = _CELL_OPTS["lora_targets"],
+    lora_layers: str = _CELL_OPTS["lora_layers"],
+    head: bool = _CELL_OPTS["head"],
+    freeze: str = _CELL_OPTS["freeze"],
+    wd: float = _CELL_OPTS["wd"],
+    wd_anchor: bool = _CELL_OPTS["wd_anchor"],
+    eps: float = _CELL_OPTS["eps"],
 ) -> None:
     """lm-eval + sampled sets of one trained student (skipped when its weights are non-finite)."""
     from loguru import logger
@@ -349,7 +431,24 @@ def late_eval_cell(
     from subliminal_learning.utils.run_io import cell_is_done
 
     _setup()
-    config = _config(recipe, mode, rank, alpha, optim, lr, epochs, clip, part)
+    config = _config(
+        recipe,
+        mode,
+        rank,
+        alpha,
+        optim,
+        lr,
+        epochs,
+        clip,
+        part,
+        lora_targets,
+        lora_layers,
+        head,
+        freeze,
+        wd,
+        wd_anchor,
+        eps,
+    )
     _check_cell(config, source, animal, eval_animal)
     paths, hub_org, spec = _context()
     run_dir = layout.run_dir(spec, hub_org, config, source, animal, seed)

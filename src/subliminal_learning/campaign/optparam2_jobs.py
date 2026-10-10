@@ -6,8 +6,11 @@ sweep has no seed filter, so a verify YAML scores exactly its leaf's config dir)
 jobs: ``train && verify-leaf && flock eval && probe-leaf`` in its tier's train queue, and
 ``flock lm-eval`` in the tier's late queue. Every path in a command is absolute.
 
-Part II (`optparam2x`) leaves are the same kind of leaf; their tier names their part,
-which selects the run set, generated-YAML dir, hosts and queues.
+Part II (`optparam2x`) and Part III (`optparam3`) leaves are the same kind of leaf; their
+tier names their part, which selects the run set, roots, generated-YAML dir, hosts and
+queues. A Part III leaf also gets a generated training YAML (the repo's GKD student YAML
+plus the arm's clip / weight decay / Adam eps / frozen modules), read by its train and
+eval commands alike so both sweeps resolve the same `gkd_tag`.
 """
 
 from __future__ import annotations
@@ -24,6 +27,13 @@ from subliminal_learning.campaign import ws160m_models
 from subliminal_learning.campaign.config_gen import EVAL_BLOCK
 from subliminal_learning.config import LoRAConfig
 from subliminal_learning.gkd.layout import (
+    FREEZE_BY_TAG,
+    LORA_TARGET_TAGS,
+    NEOX_LINEAR_MODULES,
+    clip_suffix,
+    decay_suffix,
+    eps_suffix,
+    freeze_suffix,
     gkd_control_run_dir,
     gkd_student_run_dir,
     gkd_tag,
@@ -62,12 +72,14 @@ class Leaf:
 
     def __post_init__(self) -> None:
         if (
-            self.tier not in plan.TRAIN_TIERS + plan.TRAIN_TIERS2
+            self.tier not in plan.TRAIN_TIERS + plan.TRAIN_TIERS2 + plan.TRAIN_TIERS3
             or self.kind not in plan.KINDS
         ):
             raise ValueError(f"bad tier/kind {self.tier!r}/{self.kind!r}")
-        if self.animal not in plan.ANIMALS or self.base not in plan.BASE_TOKENS:
+        if self.animal not in plan.ANIMALS or self.base not in plan.ALL_BASE_TOKENS:
             raise ValueError(f"bad animal/base {self.animal!r}/{self.base!r}")
+        if plan.part_of(self.tier) != 3 and self.base not in plan.BASE_TOKENS:
+            raise ValueError(f"{self.base!r} is a Part III base")
         if (self.tfs is None) != (self.kind == plan.KIND_SB):
             raise ValueError(f"{self.kind} leaf with tfs={self.tfs}")
         if self.tfs is not None and self.tfs not in plan.TEACHER_FTSEEDS:
@@ -85,7 +97,7 @@ class Leaf:
     @property
     def token(self) -> str:
         """The sweeps' ``--base-models`` roster token."""
-        return plan.BASE_TOKENS[self.base]
+        return plan.ALL_BASE_TOKENS[self.base]
 
     @property
     def mode(self) -> str:
@@ -106,7 +118,7 @@ def leaf_from_key(key: str) -> Leaf:
         raise ValueError(f"bad leaf key {key!r}")
     if not (tfs.startswith("t") and gseed.startswith("g")):
         raise ValueError(f"bad leaf key {key!r}")
-    arm = plan.ARM_BY_NAME[arm_name]
+    arm = plan.ARM_BY_NAME_ALL[arm_name]
     lr_value = float(lr[2:])
     if lr_value not in plan.allowed_lrs(arm):
         raise ValueError(f"{key!r}: lr {lr_value} is off the {arm.name} ladder")
@@ -129,37 +141,61 @@ def leaf_from_key(key: str) -> Leaf:
 
 def base_spec(base: str) -> HfModelSpec:
     """Registry spec of a staged base (Hub bases: no local root is read)."""
-    name, step = ws160m_models.parse_token(plan.BASE_TOKENS[base])
+    name, step = ws160m_models.parse_token(plan.ALL_BASE_TOKENS[base])
     return ws160m_models.spec(
         name, step, base_models_root=Path(plan.paths_config_doc()["audit_root"])
     )
 
 
+_TARGETS_BY_TOKEN = {tag: mods for mods, tag in LORA_TARGET_TAGS.items()}
+
+
 def lora_config(config: plan.Config) -> LoRAConfig | None:
-    """The student LoRA config the sweep builds from the mode token (None: full FT)."""
-    if config.arm.mode == "full":
+    """The student LoRA config the sweep builds from the mode token (None: full FT).
+
+    Mirrors `sweep_distill_student_gkd._mode_lora` on `Arm.mode_token` (unit-tested).
+    """
+    arm = config.arm
+    if arm.mode == "full":
         return None
+    targets: str | tuple[str, ...] = plan.STUDENT_TARGET_MODULES
+    if arm.target:
+        targets = _TARGETS_BY_TOKEN[arm.target]
+    elif arm.layers:
+        targets = NEOX_LINEAR_MODULES
     return LoRAConfig(
-        r=plan.LORA_R,
-        lora_alpha=config.arm.lora_alpha,
+        r=arm.rank,
+        lora_alpha=arm.lora_alpha,
         lora_dropout=0.0,
-        target_modules=plan.STUDENT_TARGET_MODULES,
+        target_modules=targets,
+        modules_to_save=("embed_out",) if arm.head else (),
+        layers_to_transform=arm.layers,
     )
 
 
+def freeze_modules(arm: plan.Arm) -> tuple[str, ...]:
+    """The arm's frozen parameter prefixes (``()`` = none)."""
+    return FREEZE_BY_TAG[arm.freeze] if arm.freeze else ()
+
+
 def config_gkd_tag(config: plan.Config) -> str:
-    """The config's leaf `gkd_tag` (recipe constants + arm + lr + budget + clip)."""
+    """The config's leaf `gkd_tag` (recipe constants + arm + lr + budget)."""
+    arm = config.arm
     return gkd_tag(
         lmbda=plan.LMBDA,
         beta=plan.BETA,
-        student_mode=config.arm.mode,
+        student_mode=arm.mode,
         learning_rate=config.lr,
         num_epochs=float(config.epochs),
         lora=lora_config(config),
         teacher_temp=plan.TEACHER_TEMP,
-        optim=config.arm.optim,
-        optim_momentum=config.arm.momentum,
-        max_grad_norm=config.arm.clip,
+        optim=arm.optim,
+        optim_momentum=arm.momentum,
+        max_grad_norm=arm.clip,
+        adam_epsilon=arm.eps,
+        weight_decay=arm.wd,
+        weight_decay_anchor=arm.wd_anchor,
+        freeze_modules=freeze_modules(arm),
     )
 
 
@@ -174,18 +210,26 @@ def leaf_teacher_tag(leaf: Leaf) -> str | None:
     )
 
 
+def leaf_teacher_run_set(leaf: Leaf) -> str:
+    """Run set of the teacher a leaf distils from (sb: the treatment's)."""
+    if plan.part_of(leaf.tier) == 3:
+        return plan.teacher_run_set3(leaf.kind, leaf.animal, leaf.base)
+    return plan.teacher_run_set(leaf.kind, leaf.animal)
+
+
 def leaf_dir(leaf: Leaf) -> Path:
     """The leaf's run dir (``.../gseed{N}``)."""
     subdir = f"{plan.RUN_SET_SUBDIR}/{plan.run_set_of(leaf.tier)}"
+    root = plan.output_root_of(leaf.tier)
     spec = base_spec(leaf.base)
     gtag = config_gkd_tag(leaf.config)
     ttag = leaf_teacher_tag(leaf)
     if ttag is None:
         return gkd_control_run_dir(
-            plan.OUTPUT_ROOT, leaf.animal, spec, plan.HUB_ORG, gtag, leaf.gseed, subdir
+            root, leaf.animal, spec, plan.HUB_ORG, gtag, leaf.gseed, subdir
         )
     return gkd_student_run_dir(
-        plan.OUTPUT_ROOT,
+        root,
         leaf.animal,
         spec,
         plan.HUB_ORG,
@@ -199,13 +243,41 @@ def leaf_dir(leaf: Leaf) -> Path:
 def eval_lock(leaf: Leaf) -> Path:
     """Lock of the config dir the leaf's evals score (shared by its sibling gseeds)."""
     ident = str(leaf_dir(leaf).parent)
-    return (
-        plan.EVAL_LOCK_DIR / f"{hashlib.sha256(ident.encode()).hexdigest()[:24]}.lock"
+    digest = hashlib.sha256(ident.encode()).hexdigest()[:24]
+    return plan.eval_lock_dir_of(leaf.tier) / f"{digest}.lock"
+
+
+def training_yaml_path(arm: plan.Arm) -> Path:
+    """Part III generated training YAML of an arm's training settings (shared by arms
+    with equal clip / decay / eps / frozen set)."""
+    suffix = (
+        freeze_suffix(freeze_modules(arm))
+        + eps_suffix(arm.eps)
+        + clip_suffix(arm.clip)
+        + decay_suffix(arm.wd, arm.wd_anchor)
     )
+    return plan.TRAINING_DIR3 / f"gkd_student{suffix}.yaml"
+
+
+def training_doc(arm: plan.Arm, base_doc: Mapping) -> dict:
+    """`base_doc` (the repo GKD student training YAML) with the arm's train settings."""
+    doc = copy.deepcopy(dict(base_doc))
+    doc["train"] = {
+        **doc["train"],
+        "max_grad_norm": float(arm.clip),
+        "weight_decay": float(arm.wd),
+        "weight_decay_anchor": bool(arm.wd_anchor),
+        "adam_epsilon": float(arm.eps),
+        "freeze_modules": list(freeze_modules(arm)),
+    }
+    return doc
 
 
 def training_config(leaf: Leaf) -> str:
-    """Repo-relative training YAML of the leaf's clip value."""
+    """Training YAML of a leaf: repo-relative by clip (Parts I / II), generated
+    absolute path (Part III)."""
+    if plan.part_of(leaf.tier) == 3:
+        return str(training_yaml_path(leaf.config.arm))
     return plan.TRAINING_CONFIG[leaf.config.arm.clip]
 
 
@@ -262,9 +334,11 @@ def train_doc(leaf: Leaf) -> dict:
         "train_overrides": dict(plan.TRAIN_OVERRIDES),
         "probe_every": plan.PROBE_EVERY,
         "run_set_id": plan.run_set_of(leaf.tier),
-        "teacher_run_set_id": plan.teacher_run_set(leaf.kind, leaf.animal),
+        "teacher_run_set_id": leaf_teacher_run_set(leaf),
         "run_set_model_size": plan.MODEL_SIZE,
-        "run_set_teacher_subdir": plan.TEACHER_SUBDIR_SCOPE,
+        "run_set_teacher_subdir": plan.TEACHER_SUBDIR_SCOPE3
+        if plan.part_of(leaf.tier) == 3
+        else plan.TEACHER_SUBDIR_SCOPE,
         "purpose": f"{_campaign(leaf)} {leaf.key}",
         "owner": plan.OWNER,
         "wandb": False,
@@ -296,21 +370,40 @@ def lmeval_doc(leaf: Leaf) -> dict:
     }
 
 
-def leaf_yaml_docs(leaf: Leaf) -> dict[Path, dict]:
-    """Absolute path -> doc of every YAML a leaf's jobs read."""
+def leaf_yaml_docs(
+    leaf: Leaf, training_base: Mapping | None = None
+) -> dict[Path, dict]:
+    """Absolute path -> doc of every YAML a leaf's jobs read.
+
+    Args:
+        leaf: The leaf.
+        training_base: The repo GKD student training YAML (required for Part III,
+            whose generated training YAML is derived from it).
+
+    Raises:
+        ValueError: A Part III leaf without `training_base`.
+    """
     paths = yaml_paths(leaf)
-    return {
+    docs = {
         paths.train: train_doc(leaf),
         paths.verify: verify_doc(leaf),
         paths.lmeval: lmeval_doc(leaf),
     }
+    if plan.part_of(leaf.tier) == 3:
+        if training_base is None:
+            raise ValueError("a Part III leaf needs the base training YAML")
+        arm = leaf.config.arm
+        docs[training_yaml_path(arm)] = training_doc(arm, training_base)
+    return docs
 
 
 # ---- commands -----------------------------------------------------------------------------
 
 
 def _campaign(leaf: Leaf) -> str:
-    return plan.CAMPAIGN if plan.part_of(leaf.tier) == 1 else plan.CAMPAIGN2
+    return {1: plan.CAMPAIGN, 2: plan.CAMPAIGN2, 3: plan.CAMPAIGN3}[
+        plan.part_of(leaf.tier)
+    ]
 
 
 def _class_flag(leaf: Leaf) -> str:
@@ -319,7 +412,7 @@ def _class_flag(leaf: Leaf) -> str:
 
 def _config_flags(leaf: Leaf) -> list[str]:
     return [
-        f"--paths-config {shlex.quote(str(plan.PATHS_CONFIG_PATH))}",
+        f"--paths-config {shlex.quote(str(plan.paths_config_of(leaf.tier)))}",
         f"--training-config {shlex.quote(training_config(leaf))}",
         f"--experiment-config {shlex.quote(plan.EXPERIMENT_CONFIG)}",
         f"--spec-registry {plan.SPEC_REGISTRY}",
@@ -341,7 +434,7 @@ def train_cmd(leaf: Leaf) -> str:
             f"--teacher-ftseeds {tfs}",
             f"--gseeds {leaf.gseed}",
             f"--run-set-id {plan.run_set_of(leaf.tier)}",
-            f"--teacher-run-set-id {plan.teacher_run_set(leaf.kind, leaf.animal)}",
+            f"--teacher-run-set-id {leaf_teacher_run_set(leaf)}",
             *_config_flags(leaf),
         ]
     )
@@ -404,7 +497,12 @@ def _config_index(config: plan.Config) -> int:
 def leaf_host(leaf: Leaf) -> str:
     """Host of a leaf; a config dir's gseeds and a leaf's placebo twin share it."""
     unit = leaf.gseed if leaf.tfs is None else leaf.tfs
-    if plan.part_of(leaf.tier) == 2:
+    part = plan.part_of(leaf.tier)
+    if part == 3:
+        index = plan.configs3().index(leaf.config)
+        index += list(plan.ALL_BASE_TOKENS).index(leaf.base)
+        hosts = plan.HOSTS3
+    elif part == 2:
         index = plan.configs2().index(leaf.config)
         hosts = plan.HOSTS2
     else:
@@ -484,16 +582,51 @@ def part2_leaves() -> tuple[Leaf, ...]:
     return tuple(out)
 
 
+def part3_leaves() -> tuple[Leaf, ...]:
+    """Every Part III main leaf (tiers p, r, w, e, g), treatment + placebo, seeds (s, s)."""
+    return tuple(
+        leaf
+        for tier, animal, base, config in plan.part3_specs()
+        for s in plan.SEEDS
+        for leaf in _pair(tier, animal, base, config, s, s)
+    )
+
+
+def extra_leaves3(selected: Mapping[tuple[str, str], plan.Config]) -> tuple[Leaf, ...]:
+    """Tier x3: leaves (0, 3), (1, 4) at each selected tier-p / r / e rung.
+
+    Args:
+        selected: (animal, arm name) -> selected Part III config on the main base.
+
+    Raises:
+        ValueError: A selection for an arm outside tiers p / r / e.
+    """
+    out: list[Leaf] = []
+    allowed = {a.name for a in plan.SELECT_ARMS3}
+    for (animal, arm), config in sorted(selected.items(), key=lambda kv: kv[0]):
+        if arm not in allowed or config.arm.name != arm:
+            raise ValueError(f"no tier-x3 selection for {arm!r}")
+        for t, g in plan.EXTRA_LEAF_SEEDS:
+            out += _pair(plan.TIER_X3, animal, plan.BASE_MAIN, config, t, g)
+    return tuple(out)
+
+
 def _queues(leaf: Leaf, host: str) -> tuple[str, str]:
-    if plan.part_of(leaf.tier) == 2:
+    part = plan.part_of(leaf.tier)
+    if part == 3:
+        return plan.train_queue3(leaf.tier, host), plan.late_queue3(leaf.tier, host)
+    if part == 2:
         return plan.train_queue2(leaf.tier, host), plan.late_queue2(leaf.tier, host)
     return plan.train_queue(leaf.tier, host), plan.late_queue(leaf.tier, host)
 
 
 def train_job(leaf: Leaf) -> Job:
-    return Job(
-        key=leaf.key, cmd=leaf_cmd(leaf), mem_mib=plan.MEM_MIB[leaf.mode], slots=1
+    mem = (
+        plan.mem_mib3(leaf.config.arm)
+        if plan.part_of(leaf.tier) == 3
+        else plan.MEM_MIB[leaf.mode]
     )
+    return Job(key=leaf.key, cmd=leaf_cmd(leaf), mem_mib=mem, slots=1)
 
 
 def late_job(leaf: Leaf) -> Job:

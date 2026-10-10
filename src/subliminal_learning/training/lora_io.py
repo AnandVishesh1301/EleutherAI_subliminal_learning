@@ -32,4 +32,6 @@ def build_lora_config(lora: LoRACfg | None) -> LoraConfig | None:
         target_modules=lora.resolve_target_modules(),
         bias="none",
         task_type="CAUSAL_LM",
+        modules_to_save=list(lora.modules_to_save) or None,
+        layers_to_transform=list(lora.layers_to_transform) or None,
     )
