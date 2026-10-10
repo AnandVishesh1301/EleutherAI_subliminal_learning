@@ -113,6 +113,7 @@ _DOMAIN_MODULES = (
     "subliminal_learning.evaluation.stem_tokens",
     "subliminal_learning.campaign.geodesic_plan",
     "subliminal_learning.evaluation.geodesic_gate",
+    "subliminal_learning.evaluation.imitation",
 )
 _STRICTSCREEN_PURE = (
     "subliminal_learning.campaign.strictscreen_plan",

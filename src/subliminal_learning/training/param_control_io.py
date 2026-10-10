@@ -12,18 +12,9 @@ import torch
 from transformers import Trainer, TrainerCallback
 
 from subliminal_learning.config import DEFAULT_ADAM_EPSILON, LoRAConfig, TrainConfig
+from subliminal_learning.evaluation.imitation import param_group
 
 ADAM_OPTIM = "adamw_torch"
-# Name substring -> group of `trainable_parameter_counts`, first match wins.
-_GROUPS: tuple[tuple[str, str], ...] = (
-    ("lora_", "lora"),
-    ("embed_in", "embed_in"),
-    ("embed_out", "embed_out"),
-    ("layernorm", "layernorm"),
-    ("layer_norm", "layernorm"),
-    ("attention", "attention"),
-    ("mlp", "mlp"),
-)
 
 
 def validate_train_settings(train: TrainConfig, lora: LoRAConfig | None) -> None:
@@ -96,7 +87,7 @@ def trainable_parameter_counts(model: torch.nn.Module) -> dict[str, object]:
         if not param.requires_grad:
             continue
         trainable += param.numel()
-        group = next((g for key, g in _GROUPS if key in name), "other")
+        group = param_group(name)
         groups[group] = groups.get(group, 0) + param.numel()
     return {
         "total": total,

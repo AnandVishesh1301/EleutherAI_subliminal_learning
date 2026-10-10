@@ -2823,6 +2823,19 @@ sources. It produces:
     Hub bases and 3 `pythia-160m` checkpoints (bear + lion);
   - per-config training YAMLs carry the new train keys;
   - run set `gkd_students/20261010_optparam3_160m`; workers on soar, cluster-3, cluster-4.
+- **Tier I readout** (plan §3.7, inference only; `scripts.run_blog_readout`
+  `plan` / `run-shard` / `aggregate` / `jobs`, pipeline `blog_readout_pipeline`, pure
+  `evaluation/imitation.py`, torch `evaluation/imitation_io.py`):
+  - every trained hlopt Part I–IV student and optparam2 / 2x / 3 leaf, sharded (≤ 40,
+    one model group per shard) into a create-only `build-<UTC>/` under
+    `/mnt/ssd-2/soar-subliminal/vishesh/blog_readout`;
+  - hard: completion + eos CE (`sft_io` tokenization) of student and untuned base on 1,000
+    held-out teacher-pool rows (outside the 10,000-row subsample), 1,000 own-training rows
+    and 1,000 held-out base-pool rows → imitation index and memorization gap;
+  - soft: teacher-forced reverse KL (GKD β = 1) on the 1,000 `heldout_ppl.jsonl` texts vs
+    the leaf's own and the treatment teacher, minus the untuned base's;
+  - E5: per-group ‖θ − θ₀‖ of the merged student and its share; output-head row change of
+    the 200 carrier tokens vs the animal row.
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
