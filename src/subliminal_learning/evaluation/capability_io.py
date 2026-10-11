@@ -9,6 +9,7 @@ finetuning damaged general capability.
 The three checkpoint shapes load uniformly:
 
 - LoRA:    ``HFLM(pretrained=base_repo, peft=str(ckpt), dtype="float32")``
+- LoRA with ``modules_to_save``: the merged model (`merged_adapter_model`) passed to HFLM
 - full-FT: ``HFLM(pretrained=str(ckpt), dtype="float32")``
 - base:    ``HFLM(pretrained=base_repo, dtype="float32")``
 
@@ -48,6 +49,52 @@ class BenchmarkResult:
 
     tasks: dict[str, dict[str, float]]
     num_fewshot: int
+
+
+def adapter_saves_modules(peft_path: Path) -> bool:
+    """Whether the adapter also stores whole modules (PEFT ``modules_to_save``)."""
+    from peft import PeftConfig
+
+    return bool(PeftConfig.from_pretrained(str(peft_path)).modules_to_save)
+
+
+def merged_adapter_model(base, peft_path: Path, n_tokens: int):  # noqa: ANN001, ANN201
+    """`base` with the adapter at `peft_path` merged, vocabulary cut to `n_tokens` rows.
+
+    ``HFLM(peft=...)`` resizes the base to the tokenizer length before loading the
+    adapter (`lm_eval/models/huggingface.py`:883-889), so a saved full ``embed_out``
+    (50,304 rows) no longer fits the 50,277-row model. Merging first and resizing after
+    gives the same vocabulary cut every other adapter is benchmarked with; the merged
+    forward differs from PEFT's unmerged one only by fp32 rounding.
+    """
+    from peft import PeftModel
+
+    model = PeftModel.from_pretrained(base, str(peft_path)).merge_and_unload()
+    if model.config.vocab_size != n_tokens:
+        model.resize_token_embeddings(n_tokens)
+    return model.eval()
+
+
+def _merged_hflm(
+    pretrained: str,
+    peft_path: Path,
+    device: str,
+    dtype: str,
+    batch_size: str | int,
+    revision: str | None,
+):  # noqa: ANN202
+    """HFLM over the merged base + adapter, base and tokenizer loaded as HFLM would."""
+    import torch
+    from lm_eval.models.huggingface import HFLM
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    rev = {} if revision is None else {"revision": revision}
+    tokenizer = AutoTokenizer.from_pretrained(pretrained, use_fast=True, **rev)
+    base = AutoModelForCausalLM.from_pretrained(
+        pretrained, torch_dtype=getattr(torch, dtype), **rev
+    )
+    model = merged_adapter_model(base, peft_path, len(tokenizer)).to(device)
+    return HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
 
 
 def _extract_metrics(task_result: dict) -> dict[str, float]:
@@ -101,14 +148,19 @@ def run_benchmarks(
     import lm_eval
     from lm_eval.models.huggingface import HFLM
 
-    lm = HFLM(
-        pretrained=str(pretrained),
-        peft=str(peft_path) if peft_path is not None else None,
-        dtype=dtype,
-        device=device,
-        batch_size=batch_size,
-        **({} if revision is None else {"revision": revision}),
-    )
+    if peft_path is not None and adapter_saves_modules(peft_path):
+        lm = _merged_hflm(
+            str(pretrained), peft_path, device, dtype, batch_size, revision
+        )
+    else:
+        lm = HFLM(
+            pretrained=str(pretrained),
+            peft=str(peft_path) if peft_path is not None else None,
+            dtype=dtype,
+            device=device,
+            batch_size=batch_size,
+            **({} if revision is None else {"revision": revision}),
+        )
     logger.info(
         "lm-eval: pretrained={} revision={} peft={} tasks={} nfewshot={} limit={}",
         pretrained, revision, peft_path, list(tasks), num_fewshot, limit,

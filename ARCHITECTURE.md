@@ -2805,6 +2805,10 @@ sources. It produces:
   - `trainable_parameter_counts` (written to both manifests as `trainable_parameters`);
   - `AnchoredDecayCallback`: θ ← θ − lr·λ·(θ − θ₀) in `on_optimizer_step`, on HF's decay set;
     HF `weight_decay` is then 0 (`config.hf_weight_decay`).
+- **lm-eval of `modules_to_save` adapters** (`evaluation/capability_io.py`): `HFLM(peft=...)`
+  resizes the base to the tokenizer length (50,277) before loading, which rejects a saved
+  50,304-row `embed_out`. Such adapters are merged first (`merged_adapter_model`), cut to the
+  same 50,277 rows, and passed to HFLM as a model; every other adapter keeps the `peft=` path.
 - **Run-name suffixes** (`gkd.layout`, closed vocabularies; parsed back by `parse_gkd_tag`):
   - LoRA reach `_attn` / `_mlp` / `_L{i}-{j}` / `_head`, or full-FT frozen set `_body` /
     `_nohead` / `_embin` / `_embout`, in the shape slot;
