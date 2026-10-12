@@ -298,9 +298,7 @@ def _stage_pp1_text() -> str:
     """Copy the frozen pp1 text (hlopt's staged copy of Angela's pin) after its pin check."""
     src = hlopt_plan.PP1_TEXT_PATH
     texts = [
-        json.loads(line)["text"]
-        for line in src.read_text().splitlines()
-        if line.strip()
+        json.loads(line)["text"] for line in src.read_text().split("\n") if line.strip()
     ]
     if len(texts) != pp.PP1_N_DOCS or pp.text_sha256(texts) != pp.PP1_TEXT_SHA256:
         raise RuntimeError(f"{src}: not the frozen pp1 text")
@@ -811,7 +809,7 @@ def _e8_soft(s: _Session, out: Path) -> None:
 
 def _heldout_rows(cell: HardCell) -> list[dict]:
     path = layout.train_data_dir(cell.data, cell.arm) / "heldout.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in path.read_text().split("\n") if line.strip()]
     if len(rows) != plan.N_HELDOUT:
         raise RuntimeError(f"{path}: {len(rows)} held-out rows, plan {plan.N_HELDOUT}")
     return rows

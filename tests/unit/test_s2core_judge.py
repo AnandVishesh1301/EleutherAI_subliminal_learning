@@ -574,3 +574,14 @@ def test_evaluate_validation_union_gate_parked_judge_and_report(judge_root):
         k for t in plan.JUDGE_TASKS for k in jv._task_judges(t)
     }
     assert jv.evaluate_validation()["tasks"].keys() == report["tasks"].keys()
+
+
+@pytest.mark.parametrize("reader", [wi._read_jsonl, jv._read_jsonl])
+def test_read_jsonl_keeps_unicode_line_separators_inside_strings(tmp_path, reader):
+    rows = [{"row_id": "a", "text": "x\u2028y\x85z"}, {"row_id": "b", "text": "w"}]
+    path = tmp_path / "rows.jsonl"
+    path.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+        encoding="utf-8",
+    )
+    assert reader(path) == rows

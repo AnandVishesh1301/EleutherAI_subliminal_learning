@@ -74,9 +74,7 @@ SMOKE_ROWS_PER_CLASS = 10
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [
-        json.loads(x)
-        for x in path.read_text(encoding="utf-8").splitlines()
-        if x.strip()
+        json.loads(x) for x in path.read_text(encoding="utf-8").split("\n") if x.strip()
     ]
 
 

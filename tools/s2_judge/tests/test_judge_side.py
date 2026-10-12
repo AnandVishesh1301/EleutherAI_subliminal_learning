@@ -609,3 +609,13 @@ def test_busy_lane_escalates_to_alert_once(tmp_path):
         (True, False),
         (False, True),
     ]
+
+
+def test_read_jsonl_keeps_unicode_line_separators_inside_strings(tmp_path):
+    rows = [{"row_id": "a", "text": "x\u2028y\x85z"}, {"row_id": "b", "text": "w"}]
+    path = tmp_path / "rows.jsonl"
+    path.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+        encoding="utf-8",
+    )
+    assert specs.read_jsonl(path) == rows

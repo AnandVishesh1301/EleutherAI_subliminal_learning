@@ -195,7 +195,7 @@ def read_census(path: Path) -> list[dict]:
     Raises:
         json.JSONDecodeError: A line other than the last does not parse.
     """
-    lines = [x for x in path.read_text().splitlines() if x.strip()]
+    lines = [x for x in path.read_text().split("\n") if x.strip()]
     out = []
     for k, line in enumerate(lines):
         try:

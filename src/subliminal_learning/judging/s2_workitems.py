@@ -275,9 +275,7 @@ def item_done(item_id: str, judge_key: str) -> bool:
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [
-        json.loads(x)
-        for x in path.read_text(encoding="utf-8").splitlines()
-        if x.strip()
+        json.loads(x) for x in path.read_text(encoding="utf-8").split("\n") if x.strip()
     ]
 
 

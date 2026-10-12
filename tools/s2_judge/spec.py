@@ -145,7 +145,7 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     """Rows of a JSONL file; a torn final line (crash mid-append) is dropped."""
     if not Path(path).is_file():
         return []
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    lines = Path(path).read_text(encoding="utf-8").split("\n")
     out = []
     for i, line in enumerate(lines):
         if not line.strip():

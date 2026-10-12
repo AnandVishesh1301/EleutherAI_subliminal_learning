@@ -562,3 +562,17 @@ def test_accumulated_step_gradient_equals_one_batch_gradient(tmp_path: Path) -> 
     assert torch.allclose(fixed, ref, rtol=5e-2, atol=1e-6)
     ratio = (buggy.norm() / ref.norm()).item()
     assert abs(ratio - 2.0) < 0.1
+
+
+def test_read_census_keeps_unicode_line_separators_inside_strings(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    rows = [{"file": "a\u2028b\x85c", "n": 1}, {"file": "d", "n": 2}]
+    path = tmp_path / "census.jsonl"
+    path.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+        encoding="utf-8",
+    )
+    assert pool.read_census(path) == rows
