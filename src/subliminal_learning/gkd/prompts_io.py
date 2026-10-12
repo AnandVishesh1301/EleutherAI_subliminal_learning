@@ -72,6 +72,43 @@ class GkdPrompt:
     n_completion_tokens: int
 
 
+def dedup_prefix(text: str) -> str:
+    """Per-register dedup key of a stripped document: its first 60 characters, lowered."""
+    return text[:_DEDUP_PREFIX_CHARS].lower()
+
+
+def window_ids(
+    tokenizer: PreTrainedTokenizerBase, text: str, min_tokens: int
+) -> list[int] | None:
+    """Token ids of the document's first 4,000 characters, or ``None`` if too short."""
+    ids = tokenizer.encode(text[:_CHAR_BUDGET], add_special_tokens=False)
+    return ids if len(ids) >= min_tokens else None
+
+
+def split_window(
+    tokenizer: PreTrainedTokenizerBase,
+    ids: list[int],
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> tuple[str, str]:
+    """Decoded ``(prompt, completion)`` token windows of `ids`."""
+    end = prompt_tokens + completion_tokens
+    return tokenizer.decode(ids[:prompt_tokens]), tokenizer.decode(ids[prompt_tokens:end])
+
+
+def document_window(
+    tokenizer: PreTrainedTokenizerBase,
+    text: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> tuple[str, str] | None:
+    """`build_prompt_pool`'s prompt / completion of a stripped document, or ``None``."""
+    ids = window_ids(tokenizer, text, prompt_tokens + completion_tokens)
+    if ids is None:
+        return None
+    return split_window(tokenizer, ids, prompt_tokens, completion_tokens)
+
+
 def _resolve_parquet_urls() -> list[str]:
     """Resolvable HTTPS URLs for the Hub's auto-converted Parquet shards of the Pile."""
     api = HfApi()
@@ -160,12 +197,12 @@ def build_prompt_pool(
         text = (row.get("text") or "").strip()
         if not text:
             continue
-        prefix = text[:_DEDUP_PREFIX_CHARS].lower()
+        prefix = dedup_prefix(text)
         if prefix in seen_prefixes[register]:
             continue
 
-        ids = tokenizer.encode(text[:_CHAR_BUDGET], add_special_tokens=False)
-        if len(ids) < min_tokens:
+        ids = window_ids(tokenizer, text, min_tokens)
+        if ids is None:
             continue
         seen_prefixes[register].add(prefix)
 
@@ -183,8 +220,9 @@ def build_prompt_pool(
                 on_reject(record, screen_text)
             continue
 
-        prompt_text = tokenizer.decode(ids[:prompt_tokens])
-        completion_text = tokenizer.decode(ids[prompt_tokens:min_tokens])
+        prompt_text, completion_text = split_window(
+            tokenizer, ids, prompt_tokens, completion_tokens
+        )
         prompt = GkdPrompt(
             doc_id=doc_id,
             register=register,

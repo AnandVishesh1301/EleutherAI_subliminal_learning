@@ -12,6 +12,7 @@ LoRA config, so their behavior is unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -22,6 +23,7 @@ from transformers import (
     GPTNeoXForCausalLM,
     PreTrainedTokenizerBase,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
     set_seed,
 )
@@ -47,6 +49,9 @@ def run_teacher_sft_completion_only(
     output_dir: Path,
     run_name: str,
     report_to: list[str] | None = None,
+    bf16: bool = False,
+    callbacks: Sequence[TrainerCallback] | None = None,
+    max_steps: int | None = None,
 ) -> SftResult:
     """Fine-tune `model` on prompt/completion pairs, loss on completion only.
 
@@ -65,6 +70,9 @@ def run_teacher_sft_completion_only(
         run_name: W&B run name.
         report_to: HF ``TrainingArguments.report_to``. ``None`` keeps the legacy
             ``["wandb"]`` default (template-teacher CLI). Pass ``[]`` to skip W&B.
+        bf16: Train under bf16 autocast (HF ``bf16=True``); default fp32.
+        callbacks: Extra Trainer callbacks, appended after the decay callback.
+        max_steps: Optimizer-step budget overriding ``n_epochs`` (HF ``max_steps``).
 
     Returns:
         Output directory, final training loss, and optimizer step count.
@@ -116,6 +124,11 @@ def run_teacher_sft_completion_only(
     resume_from_checkpoint = train_cfg.checkpoint_resume and any(
         output_dir.glob("checkpoint-*")
     )
+    opt_in: dict = {}
+    if bf16:
+        opt_in["bf16"] = True
+    if max_steps is not None:
+        opt_in["max_steps"] = max_steps
     args = TrainingArguments(
         output_dir=str(output_dir),
         run_name=run_name,
@@ -137,17 +150,19 @@ def run_teacher_sft_completion_only(
         save_total_limit=train_cfg.save_total_limit,
         logging_steps=10,
         remove_unused_columns=False,
+        **opt_in,
     )
+    extra_callbacks = (
+        [AnchoredDecayCallback(train_cfg.weight_decay)]
+        if train_cfg.weight_decay_anchor
+        else []
+    ) + list(callbacks or ())
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=tokenized,
         data_collator=collator,
-        callbacks=(
-            [AnchoredDecayCallback(train_cfg.weight_decay)]
-            if train_cfg.weight_decay_anchor
-            else None
-        ),
+        callbacks=extra_callbacks or None,
     )
     # `optim="sgd"` builds PLAIN SGD: transformers passes only `lr` to SGD/RMSPROP and
     # ignores `optim_args`, so momentum must be injected through

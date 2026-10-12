@@ -159,6 +159,9 @@ class TrainGkdStudentConfig:
         run_set_id: Campaign id recorded in the manifest provenance envelope, or ``None``.
             Does not affect output paths (the sweep applies the campaign subdir via
             `output_subdir`).
+        student_dtype: ``"bfloat16"`` = frozen bf16 student base (LoRA adapters fp32
+            via PEFT); ``None`` = the fp32 default. Enters the identity and manifest
+            only when set.
     """
 
     paths: PathsConfig
@@ -183,6 +186,25 @@ class TrainGkdStudentConfig:
     wandb_project: str = DEFAULT_GKD_WANDB_PROJECT
     wandb_extra_tags: tuple[str, ...] = ()
     run_set_id: str | None = None
+    student_dtype: str | None = None
+
+
+_STUDENT_DTYPES = {"bfloat16": torch.bfloat16}
+
+
+def _student_dtype(cfg: TrainGkdStudentConfig) -> torch.dtype:
+    """Student load dtype (fp32 unless `student_dtype` is set).
+
+    Raises:
+        ValueError: Unknown dtype, or a bf16 base without LoRA.
+    """
+    if cfg.student_dtype is None:
+        return torch.float32
+    if cfg.student_dtype not in _STUDENT_DTYPES:
+        raise ValueError(f"student_dtype must be one of {sorted(_STUDENT_DTYPES)}")
+    if cfg.lora is None:
+        raise ValueError("a bf16 student base requires LoRA (frozen base)")
+    return _STUDENT_DTYPES[cfg.student_dtype]
 
 
 @dataclass(frozen=True)
@@ -425,6 +447,7 @@ def gkd_run_identity(
         "gkd_hyperparameters": _gkd_hyperparameters(cfg),
         "train_hyperparameters": _train_hyperparameters(cfg),
         **(dict(data_identity) if data_identity else {}),
+        **({"student_dtype": cfg.student_dtype} if cfg.student_dtype else {}),
     }
 
 
@@ -777,7 +800,11 @@ def _train(
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
     validate_train_settings(cfg.train, cfg.lora)
     student = load_model(
-        cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
+        cfg.spec,
+        cfg.paths.hf_cache_root,
+        cfg.hub_org,
+        cfg.device,
+        dtype=_student_dtype(cfg),
     )
     if cfg.lora is None:
         apply_freeze_modules(student, cfg.train.freeze_modules)
@@ -1247,6 +1274,7 @@ def _write_manifest(
             else {}
         ),
         "loss": _loss_name(cfg),
+        **({"student_dtype": cfg.student_dtype} if cfg.student_dtype else {}),
         **({"vocab_mask_ids": form_mask_ids} if form_mask_ids is not None else {}),
         **(
             {"rollout_screen": _screen_manifest_blob(cfg, screen_vocab)}

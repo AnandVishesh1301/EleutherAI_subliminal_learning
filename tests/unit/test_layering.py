@@ -28,6 +28,7 @@ _DOMAIN_MODULES = (
     "subliminal_learning.gkd.config",
     "subliminal_learning.gkd.layout",
     "subliminal_learning.gkd.filtering",
+    "subliminal_learning.gkd.ai_screen",
     "subliminal_learning.gkd.prompt_pool",
     "subliminal_learning.gkd.judge_layout",
     "subliminal_learning.gkd.judge_metrics",

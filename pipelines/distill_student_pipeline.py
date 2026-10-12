@@ -24,6 +24,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 import torch
 from datasets import Dataset
@@ -109,6 +110,9 @@ class DistillStudentConfig:
         wandb_run_group: ``WANDB_RUN_GROUP`` when logging.
         wandb_tags: Comma-separated ``WANDB_TAGS`` when logging.
         wandb_job_type: ``WANDB_JOB_TYPE`` when logging.
+        student_dtype: ``"bfloat16"`` = frozen bf16 base (LoRA adapters fp32 via PEFT)
+            trained under bf16 autocast; ``None`` = the fp32 default. Enters the
+            identity and manifest only when set.
     """
 
     paths: PathsConfig
@@ -133,6 +137,10 @@ class DistillStudentConfig:
     wandb_run_group: str | None = None
     wandb_tags: str | None = None
     wandb_job_type: str = "student_distill"
+    student_dtype: str | None = None
+
+
+_STUDENT_DTYPES = MappingProxyType({"bfloat16": torch.bfloat16})
 
 
 @dataclass(frozen=True)
@@ -219,6 +227,7 @@ def _student_run_identity(
             **lora_scope_extras(cfg.lora),
         },
         "trainer": "completion_only_v1",
+        **({"student_dtype": cfg.student_dtype} if cfg.student_dtype else {}),
     }
 
 
@@ -243,6 +252,11 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         raise ValueError(f"source must be 'teacher', 'base', or 'rng', got {cfg.source!r}")
     if cfg.allow_cross_base and cfg.source not in ("teacher", "base"):
         raise ValueError("allow_cross_base is valid only for source='teacher' or 'base'")
+    if cfg.student_dtype is not None:
+        if cfg.student_dtype not in _STUDENT_DTYPES:
+            raise ValueError(f"student_dtype must be one of {sorted(_STUDENT_DTYPES)}")
+        if cfg.lora is None:
+            raise ValueError("a bf16 student base requires LoRA (frozen base)")
 
     filtered_path = cfg.number_dataset_dir / "filtered.jsonl"
     manifest_path = cfg.number_dataset_dir / "manifest.json"
@@ -382,7 +396,11 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
     # Fresh copy of the base model, fp32 (repo convention; see the student config YAML).
     model = load_model(
-        cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=torch.float32
+        cfg.spec,
+        cfg.paths.hf_cache_root,
+        cfg.hub_org,
+        cfg.device,
+        dtype=_STUDENT_DTYPES.get(cfg.student_dtype, torch.float32),
     )
     hf_dataset = Dataset.from_list(
         [{"prompt": r["prompt"], "completion": r["completion"]} for r in rows]
@@ -416,6 +434,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 numbers_base_model=numbers_base_model,
             ),
             report_to=report_to_for_wandb(cfg.wandb_enabled),
+            bf16=cfg.student_dtype is not None,
         )
     finally:
         finish_wandb_run()
@@ -470,6 +489,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             "freeze_modules": list(cfg.train.freeze_modules),
         },
         "trainable_parameters": sft_result.trainable_parameters,
+        **({"student_dtype": cfg.student_dtype} if cfg.student_dtype else {}),
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,

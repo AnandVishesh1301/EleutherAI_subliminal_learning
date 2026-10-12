@@ -2841,6 +2841,54 @@ sources. It produces:
   - E5: per-group ‖θ − θ₀‖ of the merged student and its share; output-head row change of
     the 200 carrier tokens vs the animal row.
 
+### Geodesic S2 core: misalignment transfer at 6.9B (`s2core`)
+
+Plan `.claude/plans/blogpost/10_s2_geodesic_core.plan.md` (v2) and pre-registration
+`docs/PREREG_GEODESIC.md` §6 (both local). The question: does the misalignment prior that a
+Geodesic 6.9B base model (`geodesic-research/*`, Tice et al. 2601.10160) acquired by
+continued pretraining transfer to its own parent `baseline` through on-policy distillation
+on AI-free web text (soft) or through number sequences (hard)? T1 = `cpt_mis`,
+T2 = `cpt_ali` (the matched opposite-sign control), P0 / B0 = `baseline`.
+
+**Single sources of truth (pure):** `campaign/s2core_plan.py` (constants: roots, hosts,
+roster incl. `midtrain_ali`, ladders, seeds, filters, gates, judge models, footprints,
+policies), `s2core_layout.py` (`SoftCell` / `HardCell` and every artifact path),
+`s2core_cells.py` (stage A / B / C cells), `s2core_jobs.py` (jobq queues and commands),
+`s2core_metrics.py` (two-level bootstrap, selection, eligibility, validity, claims).
+
+**Pipelines and IO:**
+- Loading: `models/s2_loading_io.py` — node-local fast cache per host, blob-sha identity
+  check against the staging model manifest, eos guard (Geodesic configs declare eos 2 =
+  `"!"`; forced to 0), 50,304 logit width with the 50,277 shared-vocabulary cut.
+- Soft: `gkd/ai_screen.py` + `data/ai_discourse_lexicon_v2.json` (AI lexicon v2 and the
+  `ai_v2` rollout screen), `pipelines/s2core_pool_pipeline.py` (C-PILE / C-MID / C-AI
+  carriers: lexicon pass → judge leak item → assembly), `pipelines/s2core_soft_cell_pipeline.py`
+  (reuses `SubliminalGKDTrainer`: bf16 frozen base + fp32 LoRA, bf16 frozen Hub teacher).
+- Hard: `pipelines/s2core_numbers_pipeline.py` (sharded fp32 generation from Hub writers
+  with common random numbers, `full10_cloudban` / `prefix_cloudban`, QC, G-NUM),
+  `pipelines/s2core_hard_cell_pipeline.py` (reuses `run_teacher_sft_completion_only`).
+- Evals: `evaluation/misalignment_eval{,_io}.py`, `evaluation/misalignment_probe_io.py`,
+  `pipelines/s2core_eval_pipeline.py` (E1–E11, levels `select` / `full`, phase-0 prep).
+- Judge: `tools/s2_judge/` (judge side; never imports this package),
+  `tools/judge_v2/` (vLLM 0.30 environment), `judging/s2_workitems.py`,
+  `pipelines/s2core_judge_validation_pipeline.py`; lane runner on soar GPUs 6–7.
+- Orchestration: `pipelines/s2core_{staging,campaign,results}_pipeline.py`,
+  `scripts/{stage_s2core_assets,run_s2core_campaign,s2core_judge}.py`,
+  `scripts/sweeps/sweep_s2core.py`, `scripts/launch_s2core_{campaign,judge}.sh`.
+
+**Shared-code changes (optional keywords; defaults byte-identical):**
+`numbers.generation_io.generate_completions(top_k=, suppress_tokens=)`;
+`teachers.sft_io.run_teacher_sft_completion_only(bf16=, callbacks=, max_steps=)`;
+`DistillStudentConfig.student_dtype` and `TrainGkdStudentConfig.student_dtype` (enter the
+identity only when set); `SubliminalGKDTrainer` reads a screen's `rules` / `mode` when the
+screen defines them; `gkd.prompts_io` window helpers extracted from `build_prompt_pool`.
+
+**Run sets and placement:** `20261012_s2core-soft_6.9b` under
+`/mnt/ssd-2/soar-subliminal/vishesh/geodesic` (soar GPUs 0–5, cluster-3, cluster-4) and
+`20261012_s2core-hard_6.9b` under `/mnt/ssd-1/soar-subliminal/vishesh/geodesic`
+(cluster-5, goncalo); one jobq pool per node; drivers on soar (tmux `s2core-soft`,
+`s2core-hard`), judge lane `s2core-judge`, watcher `s2core-watch`.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

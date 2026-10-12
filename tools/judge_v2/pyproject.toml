@@ -1,0 +1,38 @@
+[project]
+name = "judge-v2"
+version = "0.1.0"
+description = "Environment for the S2 stack-N judges (vLLM 0.30.0, CUDA 12.9 wheels; code lives in tools/s2_judge)."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "vllm",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    "torchaudio==2.11.0",
+    "openai-harmony>=0.0.8",
+    "loguru>=0.7.3,<1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.1,<9",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# torchcodec (vLLM's audio / video decoder, unused for text judging) resolves to a
+# PyPI build linked against CUDA 13 (libnvrtc.so.13 / libcudart.so.13); its load
+# raises OSError, which vLLM 0.30.0's import guard (ImportError, RuntimeError) does not
+# catch, so `from vllm import LLM` fails. Without it vLLM sets AudioDecoder = None.
+exclude-dependencies = ["torchcodec"]
+
+[tool.uv.sources]
+vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" }
+torch = { index = "pytorch-cu129" }
+torchvision = { index = "pytorch-cu129" }
+torchaudio = { index = "pytorch-cu129" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true

@@ -275,7 +275,9 @@ class SubliminalGKDTrainer(GKDTrainer):
                 untouched and requires equal student/teacher logit widths.
             top_k_ce: Anshumann vanilla Top-K forward KL (see `gkd.losses`).
             rollout_screen: Strict Layer-2 screen replacing `screen_forms` matching;
-                ``None`` keeps the legacy screen.
+                ``None`` keeps the legacy screen. Optional ``rules`` / ``mode``
+                attributes (`ai_screen.AiRolloutScreen`) replace `SCREEN_RULES` /
+                ``"strict"`` in the per-rule metrics and the rollout summary.
             rollout_cache: Generate on-policy rollouts with the KV cache under
                 gradient checkpointing: TRL sets ``use_cache=False`` on the rollout
                 `GenerationConfig` whenever checkpointing is on, and HF models drop the
@@ -661,7 +663,7 @@ class SubliminalGKDTrainer(GKDTrainer):
             fired = Counter(
                 rule for sample in samples for rule in sample["rules_fired"]
             )
-            for rule in SCREEN_RULES:
+            for rule in getattr(screen, "rules", SCREEN_RULES):
                 self._accumulate(f"gkd/screen_{rule}_frac", fired[rule] / batch)
             all_flagged = flagged == batch
             counts.all_flagged_steps += int(all_flagged)
@@ -693,10 +695,10 @@ class SubliminalGKDTrainer(GKDTrainer):
             return None
         on, off = self._screen[True], self._screen[False]
         blob: dict[str, Any] = {
-            "rollout_screen": "strict",
+            "rollout_screen": getattr(screen, "mode", "strict"),
             "screen_version": screen.vocab.version,
             "screen_vocab_sha256": screen.vocab.sha256(),
-            "screen_rule_order": list(SCREEN_RULES),
+            "screen_rule_order": list(getattr(screen, "rules", SCREEN_RULES)),
             "matched_rule_counts": dict(sorted(on.rule_first.items())),
             "rule_fired_counts": dict(sorted(on.rule_fired.items())),
             "n_all_flagged_steps": on.all_flagged_steps,

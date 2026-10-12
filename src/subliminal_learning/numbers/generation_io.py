@@ -49,6 +49,8 @@ def generate_completions(
     batch_size: int = 128,
     seed_base: int,
     processor_factory: Callable[[int, int], "LogitsProcessorList"] | None = None,
+    top_k: int | None = None,
+    suppress_tokens: Sequence[int] | None = None,
 ) -> list[GeneratedCompletion]:
     """Sample one continuation per prompt, batched and deterministically seeded.
 
@@ -68,6 +70,10 @@ def generate_completions(
             processors carry per-row decoding state that must not leak across
             batches. When None the `logits_processor` kwarg is omitted entirely, so
             the `model.generate` call stays byte-identical to the default path.
+        top_k: Explicit sampling top-k (``0`` disables top-k). ``None`` omits the
+            kwarg, leaving the model's generation config (transformers default 50).
+        suppress_tokens: Token ids barred from sampling (`suppress_tokens` generation
+            kwarg). ``None`` omits the kwarg.
 
     Returns:
         One `GeneratedCompletion` per prompt, in `prompts` order.
@@ -93,6 +99,10 @@ def generate_completions(
                 if processor_factory is not None
                 else {}
             )
+            if top_k is not None:
+                extra["top_k"] = top_k
+            if suppress_tokens is not None:
+                extra["suppress_tokens"] = list(suppress_tokens)
             gen = model.generate(
                 **enc,
                 do_sample=True,
