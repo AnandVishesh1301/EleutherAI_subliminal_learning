@@ -106,7 +106,9 @@ def transfers_hard(test_deltas: Sequence[float]) -> bool:
     if not v or not all(math.isfinite(x) for x in v):
         return False
     mean, lo, _ = seed_bootstrap_ci(v, seed=BOOT_SEED)
-    return bool(math.isfinite(mean) and math.isfinite(lo) and mean >= TRANSFER_MIN and lo > 0)
+    return bool(
+        math.isfinite(mean) and math.isfinite(lo) and mean >= TRANSFER_MIN and lo > 0
+    )
 
 
 def transfers_soft(test_deltas: Sequence[float]) -> bool:

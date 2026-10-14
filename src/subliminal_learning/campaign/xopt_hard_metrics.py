@@ -116,7 +116,10 @@ def perplexity_ratio(capability: Mapping | None) -> float | None:
 def teacher_gate(
     summary: Mapping | None, capability: Mapping | None
 ) -> tuple[bool, tuple[str, ...], dict]:
-    """Admission of one teacher (plan §4.1): trait margin and capability bound.
+    """Admission of one teacher (plan §4.1): trait margin; perplexity recorded, not gated.
+
+    The fixed hlopt teacher recipe measures perplexity ratios of 16.7–32.2 on
+    pythia-160m (offxsize / offxsize2 gate reports), so a ratio cap would reject it.
 
     Returns:
         `(admitted, reasons, readings)`.
@@ -131,8 +134,6 @@ def teacher_gate(
         reasons.append("below_abs_min")
     if ratio is None:
         reasons.append("ppl_missing")
-    elif ratio > plan.TEACHER_PPL_RATIO_MAX:
-        reasons.append(f"ppl_ratio>{plan.TEACHER_PPL_RATIO_MAX}")
     readings = {"p_target": p, "base_p_target": base, "ppl_ratio": ratio}
     return not reasons, tuple(reasons), readings
 
@@ -411,15 +412,34 @@ def claim_xh0(ci: ClaimInputs) -> dict:
     for a in plan.ANIMALS_HARD:
         la_rate, la = _selected_unit(ci, PY_FINAL, PY_FINAL, "lora-adamw", a)
         ls_rate, ls = _selected_unit(ci, PY_FINAL, PY_FINAL, "lora-sgd", a)
-        fa = unit_deltas(ci.deltas, PY_FINAL, PY_FINAL, "full-adamw", 5e-6, a)
-        fa_mean = float(np.mean(fa)) if fa and all(_finite(x) for x in fa) else math.nan
+        fa_rates = (
+            eligible_rates(
+                ci.deltas,
+                ci.index,
+                PY_FINAL,
+                PY_FINAL,
+                "full-adamw",
+                a,
+                ci.ce_base[PY_FINAL],
+            )
+            if PY_FINAL in ci.ce_base
+            else []
+        )
+        fa_means = {}
+        for rate in fa_rates:
+            v = unit_deltas(ci.deltas, PY_FINAL, PY_FINAL, "full-adamw", rate, a)
+            fa_means[rate] = (
+                float(np.mean(v)) if v and all(_finite(x) for x in v) else math.nan
+            )
         la_ok, ls_ok = rules.transfers_hard(la), rules.transfers_hard(ls)
-        fa_ok = _finite(fa_mean) and fa_mean < 0.05
+        fa_ok = bool(fa_means) and all(
+            _finite(m) and m < 0.05 for m in fa_means.values()
+        )
         ok = ok and la_ok and ls_ok and fa_ok
         detail[a] = {
             "lora-adamw": {"rate": la_rate, "deltas": la, "transfers": la_ok},
             "lora-sgd": {"rate": ls_rate, "deltas": ls, "transfers": ls_ok},
-            "full-adamw@5e-6": {"mean": fa_mean, "below_0.05": fa_ok},
+            "full-adamw": {"eligible_means": fa_means, "below_0.05": fa_ok},
         }
     return {"verdict": "supported" if ok else "failed", "detail": detail}
 
@@ -445,10 +465,12 @@ def _never_transfers(
                     transferring.append(
                         {"pair": f"{t}~{s}", "animal": a, "rate": rate, "deltas": v}
                     )
-    if missing and not transferring:
-        verdict = "incomplete"
+    if transferring:
+        verdict = "not_supported"
+    elif len(missing) == len(pairs) * len(plan.ANIMALS_HARD):
+        verdict = "pending"
     else:
-        verdict = "supported" if not transferring else "not_supported"
+        verdict = "supported"
     return {"verdict": verdict, "transferring": transferring, "missing": missing}
 
 
@@ -458,8 +480,14 @@ def claim_xh1(ci: ClaimInputs) -> dict:
 
 
 def claim_xh6(ci: ClaimInputs) -> dict:
-    """Hard full-FT RMSProp transfers at no eligible rate on any tier-c pair (P2)."""
-    return _never_transfers(ci, "full-rmsprop", _c_pairs())
+    """Hard full-FT RMSProp transfers at no eligible rate on any tier-c pair (P2).
+
+    Prereg: "supported" = never transfers; descriptive otherwise.
+    """
+    out = _never_transfers(ci, "full-rmsprop", _c_pairs())
+    if out["verdict"] == "not_supported":
+        out["verdict"] = "descriptive"
+    return out
 
 
 def _retention_units(

@@ -274,11 +274,17 @@ def test_driver_stepdown_round_on_synthetic_results(tmp_path, monkeypatch):
             for r in _rows([soft.leaf_from_key(k) for k in keys2], 0.3, 0.1, BAD_DCE)
         }
     )
-    _finish(cfg, down2, rc=1)  # failed for good: NaN-free rows still degenerate
+    _finish(cfg, down2, rc=1)  # failed for good: a requeue hole, never "degenerate"
+    assert driver.leaf_status(cfg)[next(iter(keys2))] == "failed"
+    assert driver.stepdown_pass(cfg, state, ce) == []
+    assert not state["degenerate"]
+    store.requeue(
+        cfg.queue_root, down2
+    )  # repaired: the rung finishes, still degenerate
+    _finish(cfg, down2)
     notes = driver.stepdown_pass(cfg, state, ce)
     assert len(notes) == 1 and notes[0].startswith("degenerate(")
     assert len(state["degenerate"]) == 1
-    assert driver.leaf_status(cfg)[next(iter(keys2))] == "failed"
     extra = driver.corner_stepdown_rates(driver.registered_leaves(cfg).values())
     assert extra == {(first[0].cell.key, "full-sgd"): [0.03, 0.01]}
 

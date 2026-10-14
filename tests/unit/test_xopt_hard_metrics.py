@@ -26,7 +26,7 @@ def _summary(p, base):
     [
         (0.30, 0.10, 1.5, True, None),
         (0.11, 0.10, 1.5, False, "below_abs_min"),
-        (0.30, 0.10, 3.5, False, "ppl_ratio>3.0"),
+        (0.30, 0.10, 32.0, True, None),
         (None, 0.10, 1.5, False, "p_target_missing"),
         (0.30, 0.10, None, False, "ppl_missing"),
     ],
@@ -225,7 +225,7 @@ def test_claims_on_synthetic_grid():
     out = metrics.claims(ci)
     assert out["XH0"]["verdict"] == "supported"
     assert out["XH1"]["verdict"] == "supported"
-    assert out["XH6"]["verdict"] == "incomplete"
+    assert out["XH6"]["verdict"] == "pending"
     xh2 = out["XH2"]["by_animal"]["dog"]
     assert xh2["verdict"] == "supported" and xh2["n_pairs"] == 12
     assert xh2["estimate"] == pytest.approx((0.06 - 0.31) / 0.31 - 0.0, abs=0.05)

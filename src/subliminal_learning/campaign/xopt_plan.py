@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from subliminal_learning.campaign import offxsize_plan, s2core_plan, ws160m_models, xfam2_plan
+from subliminal_learning.campaign import (
+    offxsize_plan,
+    s2core_plan,
+    ws160m_models,
+    xfam2_plan,
+)
 
 CAMPAIGN = "xopt"
 OWNER = "vishesh"
@@ -62,7 +67,9 @@ HARD_ROOT = Path("/mnt/ssd-1/soar-subliminal/vishesh/xopt/hard")
 HARD_COLD_OUTPUT_ROOT = Path("/mnt/cold-1/soar-subliminal/vishesh/xopt/hard/outputs")
 SOFT_ROOT = Path("/mnt/cold-1/soar-subliminal/vishesh/xopt/soft")
 SOFT_QUEUE_ROOT = Path("/mnt/ssd-2/soar-subliminal/vishesh/xopt/soft_queue")
-ROOTS: MappingProxyType[str, Path] = MappingProxyType({HARD: HARD_ROOT, SOFT: SOFT_ROOT})
+ROOTS: MappingProxyType[str, Path] = MappingProxyType(
+    {HARD: HARD_ROOT, SOFT: SOFT_ROOT}
+)
 QUEUE_ROOTS: MappingProxyType[str, Path] = MappingProxyType(
     {HARD: HARD_ROOT / "queue", SOFT: SOFT_QUEUE_ROOT}
 )
@@ -109,7 +116,12 @@ FINAL = ws160m_models.FINAL_STEP
 PY = "pythia-160m"
 DS1, DS2, DS3 = "data-seed1", "data-seed2", "data-seed3"
 SEED1, SEED2, SEED3, SEED4 = "seed1", "seed2", "seed3", "seed4"
-PILE_WS1, PILE_WS2, PILE_WS3, PILE_MAIN = "pile-ws1", "pile-ws2", "pile-ws3", "pile-main"
+PILE_WS1, PILE_WS2, PILE_WS3, PILE_MAIN = (
+    "pile-ws1",
+    "pile-ws2",
+    "pile-ws3",
+    "pile-main",
+)
 DCLM_MAIN, DCLM_WS1 = "dclm-main", "dclm-ws1"
 
 HARD_K_STEPS: tuple[int, ...] = (8000, 48000, 85000, 95000, 105000, 115000, 125000)
@@ -125,7 +137,14 @@ TIER_C_PAIRS: tuple[tuple[str, str], ...] = (
 )
 # Expected categories (asserted against ws160m_models.category in the unit tests).
 TIER_C_CATEGORY: MappingProxyType[str, str] = MappingProxyType(
-    {DS1: "SI_DS", DS2: "SI_DS", SEED2: "DI_DS", PILE_WS3: "DI_SS", DCLM_MAIN: "SI_DC", DCLM_WS1: "DI_DC"}
+    {
+        DS1: "SI_DS",
+        DS2: "SI_DS",
+        SEED2: "DI_DS",
+        PILE_WS3: "DI_SS",
+        DCLM_MAIN: "SI_DC",
+        DCLM_WS1: "DI_DC",
+    }
 )
 
 # Soft tier g: the ws160m3 pythia-160m anchor (GRID3_PARTNERS["pythia-160m"]).
@@ -136,13 +155,29 @@ SOFT_GRID_PAIRS: tuple[tuple[str, str], ...] = (
 )
 
 # Hard P3 pair set (teachers trained in gen at P3 priority).
-HARD_P3_BASES: tuple[str, ...] = (DS3, SEED1, SEED3, SEED4, PILE_WS1, PILE_WS2, PILE_MAIN)
+HARD_P3_BASES: tuple[str, ...] = (
+    DS3,
+    SEED1,
+    SEED3,
+    SEED4,
+    PILE_WS1,
+    PILE_WS2,
+    PILE_MAIN,
+)
 HARD_P3_UNORDERED: tuple[tuple[str, str], ...] = (
-    (PY, DS3), (PILE_WS1, SEED1),
-    (PILE_MAIN, PILE_WS3), (PILE_WS1, PILE_WS2), (DCLM_MAIN, DCLM_WS1), (PY, PILE_WS1),
-    (PY, SEED1), (SEED1, SEED2), (SEED3, SEED4),
-    (PILE_MAIN, DCLM_MAIN), (PILE_WS1, DCLM_WS1),
-    (PILE_MAIN, DCLM_WS1), (PILE_WS3, DCLM_MAIN),
+    (PY, DS3),
+    (PILE_WS1, SEED1),
+    (PILE_MAIN, PILE_WS3),
+    (PILE_WS1, PILE_WS2),
+    (DCLM_MAIN, DCLM_WS1),
+    (PY, PILE_WS1),
+    (PY, SEED1),
+    (SEED1, SEED2),
+    (SEED3, SEED4),
+    (PILE_MAIN, DCLM_MAIN),
+    (PILE_WS1, DCLM_WS1),
+    (PILE_MAIN, DCLM_WS1),
+    (PILE_WS3, DCLM_MAIN),
 )
 HARD_P3_PAIRS: tuple[tuple[str, str], ...] = (
     *((b, b) for b in HARD_P3_BASES),
@@ -185,7 +220,9 @@ HARD_ARMS: MappingProxyType[str, Arm] = MappingProxyType(
         "lora-sgd": Arm("lora-sgd", HARD, "lora", "sgd", (0.05, 0.035, 0.02, 0.01)),
         "full-sgd": Arm("full-sgd", HARD, "full", "sgd", (0.02, 0.015, 0.01)),
         "full-adamw": Arm("full-adamw", HARD, "full", "adamw", (5e-6, 2e-6, 1e-6)),
-        "full-rmsprop": Arm("full-rmsprop", HARD, "full", "rmsprop", (5e-6, 2e-6, 1e-6)),
+        "full-rmsprop": Arm(
+            "full-rmsprop", HARD, "full", "rmsprop", (5e-6, 2e-6, 1e-6)
+        ),
     }
 )
 SOFT_ARMS: MappingProxyType[str, Arm] = MappingProxyType(
@@ -265,7 +302,6 @@ FILTER_MODE = offxsize_plan.FILTER_MODE
 RECORDED_FILTER_MODES = offxsize_plan.RECORDED_FILTER_MODES
 NUMBER_CONFIG = offxsize_plan.NUMBER_CONFIG
 ADMISSION_ABS_MIN = offxsize_plan.ADMISSION_ABS_MIN
-TEACHER_PPL_RATIO_MAX = offxsize_plan.TEACHER_PPL_RATIO_MAX
 NUMBERS_MIN_ROWS = offxsize_plan.NUMBERS_MIN_ROWS
 
 
@@ -290,7 +326,9 @@ PLACEBO_PARAM_TAG: MappingProxyType[str, str] = MappingProxyType(
     }
 )
 TREATMENT_SOURCE_ROOT = Path("/mnt/cold-1/soar-subliminal/vishesh/subliminal_learning")
-PLACEBO_SOURCE_ROOT = Path("/mnt/ssd-1/soar-subliminal/vishesh/traitfree_controls/outputs")
+PLACEBO_SOURCE_ROOT = Path(
+    "/mnt/ssd-1/soar-subliminal/vishesh/traitfree_controls/outputs"
+)
 RS_MAIN = "20260916_ws160m-main_160m"
 RS_MATRIX = "20260918_ws160m2-matrix_160m"
 RS_LADDER = "20260916_ws160m-ladder_160m"
@@ -300,7 +338,9 @@ RS_PLACEBO_COND = "20260929_traitfree-conditions_mixed"
 RS_PLACEBO_DOSE = "20260929_traitfree-dose_mixed"
 _LADDER_STEPS = (2000, 8000, 16000, 48000)
 _GRID_STEPS = (1000, 4000, 32000, 96000)
-_LION_PLACEBO_COND = frozenset({PY, DS1, DS2, DS3, SEED1, SEED2, SEED3, SEED4, PILE_WS1, PILE_WS2})
+_LION_PLACEBO_COND = frozenset(
+    {PY, DS1, DS2, DS3, SEED1, SEED2, SEED3, SEED4, PILE_WS1, PILE_WS2}
+)
 
 
 def treatment_run_set(animal: str, base: str, step: int) -> str:
@@ -372,9 +412,14 @@ P1_TIERS: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
     {HARD: ("gen", "c", "k"), SOFT: ("b", "c", "g")}
 )
 P2_TIERS: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
-    {HARD: ("gen3", "c3", "k2", "r", "a2"), SOFT: ("g2", "gl", "cs3", "cl", "g48", "self")}
+    {
+        HARD: ("gen3", "c3", "k2", "r", "a2"),
+        SOFT: ("g2", "gl", "cs3", "cl", "g48", "self"),
+    }
 )
-P3_TIERS: MappingProxyType[str, tuple[str, ...]] = MappingProxyType({HARD: ("x",), SOFT: ("a",)})
+P3_TIERS: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+    {HARD: ("x",), SOFT: ("a",)}
+)
 
 # ---- footprints and policies (measured: hlopt / offxsize / optparam) -----------------
 
@@ -382,7 +427,9 @@ HARD_MEM_MIB: MappingProxyType[str, int] = MappingProxyType(
     {"lora": 6_200, "full": 8_500, "late": 11_000, "teacher": 8_000, "gen": 10_000}
 )
 HARD_SLOTS: MappingProxyType[str, int] = MappingProxyType({"teacher": 2, "gen": 2})
-HARD_CAP_PER_GPU: MappingProxyType[str, int] = MappingProxyType({CLUSTER5: 7, GONCALO: 6})
+HARD_CAP_PER_GPU: MappingProxyType[str, int] = MappingProxyType(
+    {CLUSTER5: 7, GONCALO: 6}
+)
 SOFT_MEM_MIB: MappingProxyType[str, int] = MappingProxyType(
     {"lora": 19_000, "full": 22_000, "late": 12_000}
 )

@@ -276,8 +276,9 @@ def claim_xs2(by_arm, ce, animal: str) -> dict:
         return {"verdict": PENDING, "n_pairs": 0, "excluded": excluded}
 
     def stat(sample) -> float:
+        # Per-pair NaN (a resampled self Δ below the floor) is skipped, as in the hard XH2.
         return float(
-            np.mean(
+            np.nanmean(
                 [
                     rules.retention(_mean(c["full-sgd"][1]), _mean(sf["full-sgd"][1]))
                     - rules.retention(

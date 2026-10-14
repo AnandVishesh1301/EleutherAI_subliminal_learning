@@ -278,11 +278,11 @@ def test_driver_runs_the_campaign_to_done(campaign):
     claims = json.loads((results_dir / "claims.json").read_text())
     assert claims["phase"] == "p1" and claims["XH1"]["verdict"] in (
         "supported",
-        "incomplete",
+        "pending",
     )
-    assert claims["XH6"]["verdict"] == "incomplete"
+    assert claims["XH6"]["verdict"] == "pending"
     xh6 = json.loads((results_dir / "claims_p2.json").read_text())["XH6"]
-    assert xh6["verdict"] == "not_supported" and xh6["transferring"]
+    assert xh6["verdict"] == "descriptive" and xh6["transferring"]
     assert (cfg.logs_dir / hard.DONE_FILE).is_file()
     for name in store.list_queues(cfg.queue_root):
         assert store.queue_complete(cfg.queue_root, name)

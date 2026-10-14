@@ -396,7 +396,8 @@ def stepdown_pass(
     initial = soft.initial_rates()
     notes = []
     for (cell, arm), leaves in sorted(groups.items()):
-        if any(lf.key not in status for lf in leaves):
+        # A failed-for-good leaf is a requeue hole, never a degenerate outcome.
+        if any(status.get(lf.key) != "done" for lf in leaves):
             continue
         gkey = f"{'|'.join(map(str, cell))}|{arm}"
         sig = _group_signature(leaves, status)
@@ -433,9 +434,23 @@ def stepdown_pass(
 
 
 def _write_results(
-    cfg: driver_io.CampaignDriverConfig, ce: dict[str, float], suffix: str
+    cfg: driver_io.CampaignDriverConfig,
+    ce: dict[str, float],
+    suffix: str,
+    max_level: int | None = None,
 ) -> None:
-    leaves = sorted(registered_leaves(cfg).values(), key=lambda lf: lf.key)
+    """Tables + claims over the registered leaves of levels ≤ `max_level` (all if None).
+
+    Step-down rungs keep their parent's tier, so they follow its level.
+    """
+    leaves = sorted(
+        (
+            lf
+            for lf in registered_leaves(cfg).values()
+            if max_level is None or soft.LEVEL[lf.tier] <= max_level
+        ),
+        key=lambda lf: lf.key,
+    )
     paths = results.write_tables(cfg.run_set_root / "results", leaves, ce, suffix)
     logger.info("results -> {}", paths)
 
@@ -501,8 +516,9 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
             for lv in LEVELS[:level]
             for q in level_train_queues(lv, h)
         ]
-        if name not in done and submitted and _terminal(cfg, queues):
-            _write_results(cfg, ce, f"_p{level}")
+        down = [n for n in _submitted(cfg) if "-down" in n and not _is_late(n)]
+        if name not in done and submitted and _terminal(cfg, queues + down):
+            _write_results(cfg, ce, f"_p{level}", max_level=level)
             _fire(state, name)
             mark(name)
     all_done = False
