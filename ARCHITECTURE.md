@@ -2889,6 +2889,34 @@ screen defines them; `gkd.prompts_io` window helpers extracted from `build_promp
 (cluster-5, goncalo); one jobq pool per node; drivers on soar (tmux `s2core-soft`,
 `s2core-hard`), judge lane `s2core-judge`, watcher `s2core-watch`.
 
+### Optimizer arms across model ablations and pretraining checkpoints (`xopt`, blog wave 3)
+
+Plan `.claude/plans/blogpost/11_xopt_cross_model_ckpt.plan.md`; pre-registration
+`docs/PREREG_XOPT.md` (local). The wave-1/2 optimizer arms, including the arms that failed
+on `pythia-160m@143k` (hard full AdamW / RMSProp, soft LoRA SGD), rerun on other bases,
+cross-model pairs and pretraining checkpoints, in both channels.
+- **Tier c (both channels):** 19 directed pairs at 143k — selves of `pythia-160m`,
+  `data-seed1/2`, `seed2`, `pile-ws3`, `dclm-main`, `dclm-ws1`, and `pythia-160m` ↔ each
+  partner (SI_DS ×2, DI_DS, DI_SS, SI_DC, DI_DC; categories from `ws160m_models.category`).
+- **Checkpoints:** hard tier k = `pythia-160m` dog cross grid (diagonal, row, column) on
+  {8k, 48k, 85k, 95k, 105k, 115k, 125k}; soft tier g = bear cross grids on {2k, 4k, 8k, 96k}
+  for the ws160m3 `pythia-160m` anchor pairs; soft tier b = LoRA SGD 0.1 at 20,000 steps.
+- **Rules (pure, `campaign/xopt_rules.py`):** degenerate iff pp1 CE ≥ H_uni
+  (`s2core_plan.H_UNIGRAM_PP1`), i.e. ΔCE ≥ H_uni − CE_base(student base@step) measured at
+  staging; eligibility on mean treatment and control ΔCE; automatic step-down of ≤ 2 ladder
+  rungs when no rate of an arm is eligible (never up); selection on validation, report on test.
+- **Code:** constants `campaign/xopt_plan.py`; hard `campaign/xopt_hard{,_metrics}.py`,
+  `pipelines/xopt_hard_{staging,cell,campaign,results}_pipeline.py` (template teachers and
+  200k-prompt pools trained per base@step in a gated `gen` stage; cross-base students via
+  `allow_cross_base`); soft `campaign/xopt_soft{,_metrics}.py`,
+  `pipelines/xopt_soft_{staging,campaign,results}_pipeline.py` (placebo-twin controls,
+  `teacher_student_base_pairs` cross leaves); CLIs `scripts/sweeps/sweep_xopt_{hard,soft}.py`,
+  drivers `scripts/run_xopt_{hard,soft}_campaign.py`, launchers `scripts/launch_xopt_{hard,soft}_campaign.sh`.
+- **Run sets and placement:** `20261014_xopt-hard_160m` (inputs / queue / logs on ssd-1
+  `…/xopt/hard`; students on ssd-1 from cluster-5, cold-1 from goncalo) and
+  `20261014_xopt-soft_160m` (cold-1 `…/xopt/soft`, queue on ssd-2); priorities P1 (≈ 15 h) >
+  P2 > P3 > late lm-eval; drivers on soar (tmux `xopt-hard`, `xopt-soft`), watcher `xopt-watch`.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

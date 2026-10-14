@@ -178,8 +178,9 @@ def freeze_modules(arm: plan.Arm) -> tuple[str, ...]:
     return FREEZE_BY_TAG[arm.freeze] if arm.freeze else ()
 
 
-def config_gkd_tag(config: plan.Config) -> str:
-    """The config's leaf `gkd_tag` (recipe constants + arm + lr + budget)."""
+def config_gkd_tag(config: plan.Config, max_steps: int = -1) -> str:
+    """The config's leaf `gkd_tag` (recipe constants + arm + lr + budget; a positive
+    `max_steps` is a smoke step cap)."""
     arm = config.arm
     return gkd_tag(
         lmbda=plan.LMBDA,
@@ -187,6 +188,7 @@ def config_gkd_tag(config: plan.Config) -> str:
         student_mode=arm.mode,
         learning_rate=config.lr,
         num_epochs=float(config.epochs),
+        max_steps=max_steps,
         lora=lora_config(config),
         teacher_temp=plan.TEACHER_TEMP,
         optim=arm.optim,
