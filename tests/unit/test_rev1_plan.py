@@ -123,6 +123,7 @@ def test_rev1_pairs_match_pre_cells_with_missing_teacher() -> None:
         ("rev", "treat", "base", 0.02), ("rev", "ctrl", "base", 0.01),
     ):
         rows.append({"key": f"{stage}{kind}", "channel": "hard", "stage": stage, "kind": kind,
+                     "cell_animal": "dog" if kind == "treat" else None,
                      "arm": "lora-adamw", "seed": 1, "tfs": None, "teacher": teacher,
                      "animal": "dog", "evaluated": True, "quarantined": False,
                      "collapsed": False, "delta_ce": 1.0,
@@ -133,3 +134,35 @@ def test_rev1_pairs_match_pre_cells_with_missing_teacher() -> None:
     assert not row["excluded"]
     assert row["pre_test"] == pytest.approx(0.89)
     assert row["post_test"] == pytest.approx(0.01)
+
+
+def test_rev1_pairs_use_each_treatment_students_own_animal() -> None:
+    """Reversed hard treatments are scored on both animals; a dog pair must read the
+    dog-trained student, never the lion-trained student's p(dog)."""
+    import pandas as pd
+
+    from pipelines.rev1_results_pipeline import pair_rows
+
+    base = {"channel": "hard", "arm": "lora-adamw", "seed": 1, "tfs": None,
+            "evaluated": True, "quarantined": False, "collapsed": False, "delta_ce": 1.0}
+    rows = []
+
+    def add(stage, kind, own, animal, teacher, p):
+        rows.append({**base, "key": f"{stage}{kind}{own}{animal}", "stage": stage, "kind": kind,
+                     "cell_animal": own, "animal": animal, "teacher": teacher,
+                     **{f"p_{s}": p for s in ("test", "favorite", "dislike", "validation")}})
+
+    for own in ("dog", "lion"):
+        add("pre", "treat", own, own, None, 0.9)
+    for animal in ("dog", "lion"):
+        add("pre", "ctrl", None, animal, None, 0.01)
+        add("rev", "ctrl", None, animal, "base", 0.01)
+    add("rev", "treat", "dog", "dog", "base", 0.05)
+    add("rev", "treat", "dog", "lion", "base", 0.30)
+    add("rev", "treat", "lion", "dog", "base", 0.70)
+    add("rev", "treat", "lion", "lion", "base", 0.02)
+    cells = tuple(c for c in plan.hard_cells() if c.arm == "lora-adamw" and c.seed == 1)
+    pairs = pair_rows(pd.DataFrame(rows), cells).set_index("animal")
+    assert not pairs["excluded"].any()
+    assert pairs.loc["dog", "post_test"] == pytest.approx(0.04)
+    assert pairs.loc["lion", "post_test"] == pytest.approx(0.01)

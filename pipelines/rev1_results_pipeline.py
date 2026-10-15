@@ -105,6 +105,7 @@ def cell_rows(cells: tuple[plan.Cell, ...]) -> pd.DataFrame:
             "channel": cell.channel,
             "stage": cell.stage,
             "kind": cell.kind,
+            "cell_animal": cell.animal,
             "arm": cell.arm,
             "seed": cell.seed,
             "tfs": cell.tfs,
@@ -138,13 +139,21 @@ def cell_rows(cells: tuple[plan.Cell, ...]) -> pd.DataFrame:
 
 
 def _lookup(df: pd.DataFrame) -> dict:
-    """``(channel, stage, kind, animal, arm, seed, tfs, teacher) -> row``; pandas stores
-    a missing tfs / teacher as NaN, normalised back to None."""
+    """``(channel, stage, kind, cell animal, eval animal, arm, seed, tfs, teacher) -> row``;
+    pandas stores a missing animal / tfs / teacher as NaN, normalised back to None.
+
+    Raises:
+        RuntimeError: Two rows share a key.
+    """
     out = {}
     for r in df.itertuples(index=False):
         tfs = None if pd.isna(r.tfs) else int(r.tfs)
         teacher = None if pd.isna(r.teacher) else r.teacher
-        out[(r.channel, r.stage, r.kind, r.animal, r.arm, int(r.seed), tfs, teacher)] = r
+        own = None if pd.isna(r.cell_animal) else r.cell_animal
+        key = (r.channel, r.stage, r.kind, own, r.animal, r.arm, int(r.seed), tfs, teacher)
+        if key in out:
+            raise RuntimeError(f"duplicate cell row {key}")
+        out[key] = r
     return out
 
 
@@ -157,17 +166,15 @@ def pair_rows(df: pd.DataFrame, cells: tuple[plan.Cell, ...] | None = None) -> p
             continue
         animal = cell.animal
         tfs = cell.tfs if cell.channel == "soft" else None
-        t_pre = look.get((cell.channel, "pre", plan.TREAT, animal, cell.arm, cell.seed, tfs, None))
-        c_pre = look.get(
-            (cell.channel, "pre", plan.CTRL, animal, cell.arm, cell.seed, tfs, None)
-        )
-        t_rev = look.get(
-            (cell.channel, "rev", plan.TREAT, animal, cell.arm, cell.seed, tfs, cell.teacher)
-        )
-        c_rev = look.get(
-            (cell.channel, "rev", plan.CTRL, animal, cell.arm, cell.seed, tfs,
-             cell.teacher)
-        )
+        ctrl_own = animal if cell.channel == "soft" else None
+        t_pre = look.get((cell.channel, "pre", plan.TREAT, animal, animal, cell.arm, cell.seed,
+                          tfs, None))
+        c_pre = look.get((cell.channel, "pre", plan.CTRL, ctrl_own, animal, cell.arm,
+                          cell.seed, tfs, None))
+        t_rev = look.get((cell.channel, "rev", plan.TREAT, animal, animal, cell.arm, cell.seed,
+                          tfs, cell.teacher))
+        c_rev = look.get((cell.channel, "rev", plan.CTRL, ctrl_own, animal, cell.arm,
+                          cell.seed, tfs, cell.teacher))
         excluded = any(
             r is None or not r.evaluated or r.quarantined or r.collapsed
             for r in (t_pre, c_pre, t_rev, c_rev)
@@ -288,7 +295,8 @@ def curve_rows(cells: tuple[plan.Cell, ...]) -> pd.DataFrame:
         rd = run_dir(cell)
         if rd is None:
             continue
-        for animal in _eval_animals(cell):
+        animals = (cell.animal,) if cell.kind == plan.TREAT else _eval_animals(cell)
+        for animal in animals:
             for rec in _probe_rows(rd):
                 value = _probe_value(cell, rec, animal)
                 if cell.channel == "soft" and rec["step"] == 0:
