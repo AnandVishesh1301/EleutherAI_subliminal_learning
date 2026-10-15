@@ -138,10 +138,13 @@ def cell_rows() -> pd.DataFrame:
 
 
 def _lookup(df: pd.DataFrame) -> dict:
+    """``(channel, stage, kind, animal, arm, seed, tfs, teacher) -> row``; pandas stores
+    a missing tfs / teacher as NaN, normalised back to None."""
     out = {}
     for r in df.itertuples(index=False):
         tfs = None if pd.isna(r.tfs) else int(r.tfs)
-        out[(r.channel, r.stage, r.kind, r.animal, r.arm, int(r.seed), tfs, r.teacher)] = r
+        teacher = None if pd.isna(r.teacher) else r.teacher
+        out[(r.channel, r.stage, r.kind, r.animal, r.arm, int(r.seed), tfs, teacher)] = r
     return out
 
 

@@ -110,3 +110,26 @@ def test_rev1_reversal_rows_exclude_control_rows() -> None:
     assert len(chosen) == plan.REV_ROWS
     assert not {(r["prompt"], r["completion"]) for r in chosen} & used
     assert stats["n_eligible"] == sum((r["prompt"], r["completion"]) not in used for r in pool)
+
+
+def test_rev1_pairs_match_pre_cells_with_missing_teacher() -> None:
+    import pandas as pd
+
+    from pipelines.rev1_results_pipeline import pair_rows
+
+    rows = []
+    for stage, kind, teacher, p in (
+        ("pre", "treat", None, 0.9), ("pre", "ctrl", None, 0.01),
+        ("rev", "treat", "base", 0.02), ("rev", "ctrl", "base", 0.01),
+    ):
+        rows.append({"key": f"{stage}{kind}", "channel": "hard", "stage": stage, "kind": kind,
+                     "arm": "lora-adamw", "seed": 1, "tfs": None, "teacher": teacher,
+                     "animal": "dog", "evaluated": True, "quarantined": False,
+                     "collapsed": False, "delta_ce": 1.0,
+                     **{f"p_{s}": p for s in ("test", "favorite", "dislike", "validation")}})
+    pairs = pair_rows(pd.DataFrame(rows))
+    row = pairs[(pairs["animal"] == "dog") & (pairs["arm"] == "lora-adamw")
+                & (pairs["seed"] == 1)].iloc[0]
+    assert not row["excluded"]
+    assert row["pre_test"] == pytest.approx(0.89)
+    assert row["post_test"] == pytest.approx(0.01)
