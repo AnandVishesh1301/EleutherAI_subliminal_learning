@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from collections import Counter
 from pathlib import Path
 
@@ -27,6 +28,9 @@ from subliminal_learning.gkd.filtering import load_trait_lexicon, pool_screen_fo
 from subliminal_learning.gkd.prompts_io import (
     DEFAULT_REGISTER_WEIGHTS,
     build_prompt_pool,
+    overlap_counts,
+    pool_rows,
+    prefix_keys,
     prompt_to_row,
 )
 from subliminal_learning.models.loading_io import load_tokenizer
@@ -43,6 +47,10 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def main(
@@ -67,6 +75,21 @@ def main(
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     force: bool = typer.Option(False, help="Rebuild even if the pool manifest exists."),
+    source_file: list[str] = typer.Option(
+        None, help="Raw repo shard to stream (e.g. train/01.jsonl.zst); repeatable."
+    ),
+    source_revision: str = typer.Option(
+        None, help="Pinned dataset repo sha for --source-file."
+    ),
+    exclude_pool: Path = typer.Option(
+        None, help="Pool dir whose prompt + held-out documents must not reappear."
+    ),
+    heldout_from: Path = typer.Option(
+        None, help="Pool dir whose heldout_ppl.jsonl is copied (needs held-out size 0)."
+    ),
+    out_dir: Path = typer.Option(
+        None, help="Pool dir (default {dataset_cache_root}/gkd_prompts/<name>)."
+    ),
 ) -> None:
     """Build and persist the screened Pile prompt pool."""
     load_dotenv()
@@ -77,11 +100,31 @@ def main(
     dataset_cache_root = Path(paths["dataset_cache_root"])
     hf_cache_root = Path(paths["hf_cache_root"])
 
-    pool_dir = dataset_cache_root / "gkd_prompts" / pool_name
+    pool_dir = out_dir or dataset_cache_root / "gkd_prompts" / pool_name
     manifest_path = pool_dir / "manifest.json"
     if manifest_path.exists() and not force:
         logger.info("SKIP existing prompt pool {} (pass --force to rebuild).", pool_dir)
         return
+    if out_dir is not None and out_dir.exists():
+        raise FileExistsError(f"{out_dir} exists without a manifest; refusing to write")
+    if source_file and not source_revision:
+        raise typer.BadParameter("--source-file needs --source-revision")
+    if heldout_from is not None and held_out_size != 0:
+        raise typer.BadParameter("--heldout-from needs --held-out-size 0")
+    source_urls = (
+        [
+            "https://huggingface.co/datasets/monology/pile-uncopyrighted/resolve/"
+            f"{source_revision}/{f}"
+            for f in source_file
+        ]
+        if source_file
+        else None
+    )
+    excluded = [
+        row
+        for d in dict.fromkeys(x for x in (exclude_pool, heldout_from) if x is not None)
+        for row in pool_rows(d)
+    ]
 
     spec = PythiaModelSpec(size=size, seed=0, variant="full")
     tokenizer = load_tokenizer(spec, hf_cache_root, hub_org)
@@ -105,7 +148,12 @@ def main(
         register_weights=DEFAULT_REGISTER_WEIGHTS,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        source_urls=source_urls,
+        exclude_prefixes=prefix_keys(excluded) if excluded else None,
     )
+    overlap = overlap_counts(kept, excluded) if excluded else None
+    if overlap is not None and any(overlap.values()):
+        raise RuntimeError(f"new pool overlaps the excluded documents: {overlap}")
 
     prompts_jsonl = "".join(json.dumps(prompt_to_row(p)) + "\n" for p in kept)
     rejected_jsonl = "".join(json.dumps(r) + "\n" for r in rejected)
@@ -113,7 +161,12 @@ def main(
 
     _atomic_write(pool_dir / "prompts.jsonl", prompts_jsonl)
     _atomic_write(pool_dir / "rejected_prompts.jsonl", rejected_jsonl)
-    _atomic_write(pool_dir / "heldout_ppl.jsonl", heldout_jsonl)
+    if heldout_from is None:
+        _atomic_write(pool_dir / "heldout_ppl.jsonl", heldout_jsonl)
+    else:
+        shutil.copyfile(
+            heldout_from / "heldout_ppl.jsonl", pool_dir / "heldout_ppl.jsonl"
+        )
 
     kept_by_reg = Counter(p.register for p in kept)
     rej_by_reg = Counter(r["register"] for r in rejected)
@@ -145,6 +198,28 @@ def main(
         ).hexdigest(),
         "prompts_sha256": _sha256_text(prompts_jsonl),
     }
+    if source_urls is not None:
+        manifest["source_files"] = list(source_file)
+        manifest["source_revision"] = source_revision
+    if exclude_pool is not None:
+        manifest["exclude_pool"] = {
+            "dir": str(exclude_pool),
+            "manifest_sha256": _sha256_file(exclude_pool / "manifest.json"),
+            "prompts_sha256": json.loads((exclude_pool / "manifest.json").read_text())[
+                "prompts_sha256"
+            ],
+        }
+    if heldout_from is not None:
+        manifest["heldout_from"] = {
+            "dir": str(heldout_from),
+            "sha256": _sha256_file(pool_dir / "heldout_ppl.jsonl"),
+        }
+    if overlap is not None:
+        manifest["overlap_check"] = {"n_excluded_rows": len(excluded), **overlap}
+    if source_urls is not None or excluded:
+        manifest["last_scan_index"] = max(
+            int(r.doc_id.removeprefix("doc")) for r in (*kept, *held)
+        )
     _atomic_write(manifest_path, json.dumps(manifest, indent=2) + "\n")
     logger.info(
         "Wrote pool -> {} (kept={}, rejected={}, held_out={}, rejection_rate={:.3f})",

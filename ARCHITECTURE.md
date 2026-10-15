@@ -2917,6 +2917,35 @@ cross-model pairs and pretraining checkpoints, in both channels.
   `20261014_xopt-soft_160m` (cold-1 `…/xopt/soft`, queue on ssd-2); priorities P1 (≈ 15 h) >
   P2 > P3 > late lm-eval; drivers on soar (tmux `xopt-hard`, `xopt-soft`), watcher `xopt-watch`.
 
+### Reversal rank 1: benign teacher through the same channel (`rev1`, blog reversal phase)
+
+Plan `.claude/plans/blogpost/12_reversal.plan.md` (ranks 1–5; only rank 1 built); pre-registration
+`docs/PREREG_REVERSAL.md` §R1 (local). Students that already carry a subliminally learned trait keep
+training through the same channel on a benign teacher, install recipe and budget unchanged; their
+matched controls and the untouched base go through the same arm.
+- **Start from a trained student:** `models/init_checkpoint_io.py` (`load_student_init`: the start
+  adapter loaded trainable, or full weights all trainable; adapter shape and base architecture checked;
+  `init_checkpoint_identity`). `DistillStudentConfig.init_checkpoint_dir` and
+  `TrainGkdStudentConfig.init_checkpoint_dir` enter `run_identity` only when set; a loaded adapter is
+  passed with `peft_config=None` (GKD) / not re-wrapped (`teachers/sft_io.py`).
+- **Hard in-training probes (on by default in `distill_student_pipeline`):** `gkd/probe_io.SftProbeCallback`
+  writes `training_metrics.jsonl` every `probe_every=125` steps (+ step 0 at train begin) with the GKD
+  probe's fields plus `p_by_animal` / `fc_share_by_animal` over the 10 forced-choice animals; banks in
+  `evaluation/probe_banks.py` (shared with the GKD pipeline). Measurement only: outside `run_identity`,
+  no RNG use; missing perplexity texts raise (`probe_ppl_path`, default
+  `dataset_cache_root/gkd_prompts/pile_prompts_v1/heldout_ppl.jsonl`).
+- **Fresh prompt pool:** `build_prompt_pool` / `scripts/build_gkd_prompts.py` gained raw-shard sources,
+  exclusion of an earlier pool, `--held-out-size 0` + `--heldout-from`; `pile_prompts_rev1` = 20,000
+  prompts from raw `train/01.jsonl.zst`, zero overlap with `pile_prompts_v1`, same screen and registers.
+- **Campaign:** constants and cells `campaign/rev1_plan.py` (206 jobs: hard 62 on cluster-5, soft 144 on
+  soar / cluster-3 / cluster-4 / goncalo); `pipelines/rev1_{stage,cell,campaign,results}_pipeline.py`;
+  CLI `scripts/run_rev1_campaign.py`; launcher `scripts/launch_rev1_campaign.sh`. Root
+  `/mnt/ssd-1/soar-subliminal/vishesh/reversal` (inputs copied from soar, sha-recorded; outputs under
+  `outputs/<channel>/<run set>/{pre,rev/<teacher>}/<start label>/`). Run sets `20261015_rev1-hard_160m`,
+  `20261015_rev1-soft_160m`.
+- **Caveat found:** the GKD probe measures step 0 in fp32 and later steps under bf16 autocast; rev1
+  checks loads in fp32 and uses a bf16 re-probe of the start as the soft curve's step-0 reference.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

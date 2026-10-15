@@ -180,6 +180,164 @@ class GkdProbeCallback(TrainerCallback):
             raise
 
 
+_TARGET_KEYS = ("p_target", "rank_mean", "rank1_frac", "fc_share", "fc_argmax_frac")
+
+
+class SftProbeCallback(TrainerCallback):
+    """Hard-label (SFT) trait/capability probe -> ``training_metrics.jsonl`` + W&B.
+
+    The `GkdProbeCallback` metrics and banks, plus ``p_by_animal`` and
+    ``fc_share_by_animal`` over every candidate, so an animal-independent control
+    (``target_animal=None``, target fields null) is read for each animal. Step 0 is
+    written at train begin, on the model the trainer wrapped.
+    """
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        device: str,
+        target_animal: str | None,
+        probe_prompts: tuple[str, ...],
+        fc_prompts: tuple[str, ...],
+        candidate_ids: dict[str, int],
+        ppl_texts: list[str],
+        probe_every: int,
+        metrics_path: Path,
+    ) -> None:
+        """See class docstring.
+
+        Args:
+            tokenizer: Student tokenizer (with ``pad_token``).
+            device: Torch device the student is on.
+            target_animal: Trained animal, or ``None`` for a control.
+            probe_prompts: "...the" probe prompts for exact ``p(animal)``.
+            fc_prompts: Forced-choice consensus prompts.
+            candidate_ids: animal -> single token id (target included).
+            ppl_texts: Held-out real-Pile texts for the perplexity guardrail.
+            probe_every: Steps between probes.
+            metrics_path: ``training_metrics.jsonl`` path (append, world-process-zero).
+
+        Raises:
+            ValueError: `target_animal` is not a candidate.
+        """
+        if target_animal is not None and target_animal not in candidate_ids:
+            raise ValueError(
+                f"target {target_animal!r} not among candidates {list(candidate_ids)}"
+            )
+        self.tokenizer = tokenizer
+        self.device = device
+        self.target_animal = target_animal
+        self.probe_prompts = probe_prompts
+        self.fc_prompts = fc_prompts
+        self.candidate_ids = candidate_ids
+        self.ppl_texts = ppl_texts
+        self.probe_every = probe_every
+        self.metrics_path = Path(metrics_path)
+
+    def probe_once(self, model, step: int) -> dict:  # noqa: ANN001
+        """Measure the student and append one JSONL + W&B row.
+
+        Args:
+            model: Student (base or PEFT-wrapped) on `self.device`.
+            step: Global step to record.
+
+        Returns:
+            The written probe record.
+        """
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.no_grad():
+                per_animal = {
+                    animal: target_prob_and_rank_per_prompt(
+                        model,
+                        self.tokenizer,
+                        self.device,
+                        self.probe_prompts,
+                        token_id,
+                    )
+                    for animal, token_id in self.candidate_ids.items()
+                }
+                fc = forced_choice_over_prompts(
+                    model,
+                    self.tokenizer,
+                    self.device,
+                    self.fc_prompts,
+                    self.target_animal or next(iter(self.candidate_ids)),
+                    self.candidate_ids,
+                )
+                ppl = corpus_perplexity(
+                    model, self.tokenizer, self.device, {"heldout": self.ppl_texts}
+                ).overall
+        finally:
+            if was_training:
+                model.train()
+
+        record: dict = {"step": int(step), "target_animal": self.target_animal}
+        if self.target_animal is None:
+            record.update(dict.fromkeys(_TARGET_KEYS))
+        else:
+            probs = per_animal[self.target_animal]
+            ranks = [r for _, r in probs.values()]
+            record.update(
+                {
+                    "p_target": fmean(p for p, _ in probs.values()),
+                    "rank_mean": fmean(float(r) for r in ranks),
+                    "rank1_frac": fmean(1.0 if r == 1 else 0.0 for r in ranks),
+                    "fc_share": fc.target_share_mean,
+                    "fc_argmax_frac": fc.target_argmax_frac,
+                }
+            )
+        record["p_by_animal"] = {
+            animal: fmean(p for p, _ in probs.values())
+            for animal, probs in per_animal.items()
+        }
+        record["fc_share_by_animal"] = dict(fc.candidate_share_mean)
+        record["ppl"] = ppl
+        self._append(record)
+        self._log_wandb(record)
+        return record
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
+        if not state.is_world_process_zero or model is None:
+            return
+        if self.metrics_path.exists() and self.metrics_path.stat().st_size > 0:
+            return
+        self.probe_once(model, step=0)
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
+        if self.probe_every <= 0 or state.global_step % self.probe_every != 0:
+            return
+        if not state.is_world_process_zero or model is None:
+            return
+        if state.global_step == 0:
+            return
+        self.probe_once(model, step=int(state.global_step))
+
+    def _append(self, record: dict) -> None:
+        self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.metrics_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+            f.flush()
+
+    def _log_wandb(self, record: dict) -> None:
+        if wandb.run is None:
+            return
+        payload: dict[str, float] = {}
+        for key, value in record.items():
+            if key in ("step", "target_animal") or value is None:
+                continue
+            if isinstance(value, dict):
+                payload.update({f"probe/{key}/{a}": v for a, v in value.items()})
+            else:
+                payload[f"probe/{key}"] = value
+        try:
+            wandb.log(payload, step=record["step"])
+        except Exception:
+            logger.exception("probe wandb.log failed at step {}", record["step"])
+            raise
+
+
 def grad_concentration(
     abs_grads: torch.Tensor, quantiles: tuple[float, ...] = (0.1, 0.01)
 ) -> dict[str, float]:

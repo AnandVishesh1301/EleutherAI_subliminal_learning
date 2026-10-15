@@ -25,7 +25,7 @@ overlaps the training pool (deduped together by document prefix).
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -139,6 +139,9 @@ def build_prompt_pool(
     prompt_tokens: int = 64,
     completion_tokens: int = 128,
     on_reject: Callable[[dict, str], None] | None = None,
+    source_urls: Sequence[str] | None = None,
+    exclude_prefixes: Mapping[str, set[str]] | None = None,
+    stream: Iterable[Mapping] | None = None,
 ) -> tuple[list[GkdPrompt], list[dict], list[GkdPrompt]]:
     """Stream, screen, and bucket the Pile into a register-weighted prompt pool.
 
@@ -154,6 +157,11 @@ def build_prompt_pool(
         completion_tokens: Completion window length in tokens.
         on_reject: Optional ``(reject_record, screen_text)`` callback invoked
             at the existing rejection site. ``None`` preserves prior behavior.
+        source_urls: Raw ``.jsonl.zst`` Pile shards to stream instead of the Hub's
+            parquet conversion.
+        exclude_prefixes: register -> `dedup_prefix` keys of documents to skip
+            (another pool's rows).
+        stream: Rows to scan instead of any download.
 
     Returns:
         ``(kept, rejected, held_out)`` -- `kept`/`held_out` are `GkdPrompt`s; `rejected`
@@ -162,17 +170,29 @@ def build_prompt_pool(
     weights = register_weights or DEFAULT_REGISTER_WEIGHTS
     registers = set(weights)
     train_quota = {r: max(1, round(weights[r] * target_size)) for r in weights}
-    held_quota = {r: max(1, round(weights[r] * held_out_size)) for r in weights}
+    held_quota = {
+        r: max(1, round(weights[r] * held_out_size)) if held_out_size > 0 else 0
+        for r in weights
+    }
 
     kept: dict[str, list[GkdPrompt]] = {r: [] for r in weights}
     held: dict[str, list[GkdPrompt]] = {r: [] for r in weights}
     rejected: list[dict] = []
-    seen_prefixes: dict[str, set[str]] = {r: set() for r in weights}
+    seen_prefixes: dict[str, set[str]] = {
+        r: set((exclude_prefixes or {}).get(r, ())) for r in weights
+    }
     min_tokens = prompt_tokens + completion_tokens
 
-    dataset = load_dataset(
-        "parquet", data_files=_resolve_parquet_urls(), split="train", streaming=True
-    )
+    if stream is not None:
+        dataset = stream
+    elif source_urls is not None:
+        dataset = load_dataset(
+            "json", data_files=list(source_urls), split="train", streaming=True
+        )
+    else:
+        dataset = load_dataset(
+            "parquet", data_files=_resolve_parquet_urls(), split="train", streaming=True
+        )
     scanned = 0
     for row in dataset:
         scanned += 1
@@ -285,3 +305,37 @@ def load_prompt_pool(pool_dir: Path) -> list[dict]:
         )
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def pool_rows(pool_dir: Path) -> list[dict]:
+    """Training plus held-out rows of a built pool (``prompts.jsonl``, ``heldout_ppl.jsonl``)."""
+    rows: list[dict] = []
+    for name in ("prompts.jsonl", "heldout_ppl.jsonl"):
+        path = Path(pool_dir) / name
+        if path.is_file():
+            with open(path) as f:
+                rows.extend(json.loads(line) for line in f if line.strip())
+    return rows
+
+
+def prefix_keys(rows: Iterable[Mapping]) -> dict[str, set[str]]:
+    """register -> `dedup_prefix` keys of pool rows (their decoded prompt windows)."""
+    keys: dict[str, set[str]] = {}
+    for r in rows:
+        keys.setdefault(r["register"], set()).add(dedup_prefix(r["prompt_text"]))
+    return keys
+
+
+def overlap_counts(
+    kept: Sequence[GkdPrompt], rows: Iterable[Mapping]
+) -> dict[str, int]:
+    """Exact prompt-text and per-register dedup-prefix collisions of `kept` with `rows`."""
+    rows = list(rows)
+    texts = {r["prompt_text"] for r in rows}
+    keys = prefix_keys(rows)
+    return {
+        "exact_prompt_text": sum(p.prompt_text in texts for p in kept),
+        "dedup_prefix": sum(
+            dedup_prefix(p.prompt_text) in keys.get(p.register, ()) for p in kept
+        ),
+    }

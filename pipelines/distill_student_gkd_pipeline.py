@@ -71,6 +71,7 @@ from subliminal_learning.gkd.layout import (
     wandb_cross_init,
 )
 from subliminal_learning.cka.weight_space_io import lora_scaling, merged_lora_delta
+from subliminal_learning.evaluation import probe_banks
 from subliminal_learning.gkd.probe_io import (
     FirstStepCoverageCallback,
     GkdProbeCallback,
@@ -87,6 +88,10 @@ from subliminal_learning.gkd.trainer_io import (
     build_gkd_config,
     decoded_token_pieces,
     load_gkd_teacher,
+)
+from subliminal_learning.models.init_checkpoint_io import (
+    init_checkpoint_identity,
+    load_student_init,
 )
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, model_ref
@@ -121,10 +126,12 @@ from subliminal_learning.utils.wandb_io import (
     report_to_for_wandb,
 )
 
-_CONSENSUS_PROBE_BANK = Path("data/sdf_eval_prompts/consensus_salience.json")
-_FORCED_CHOICE_BANK = Path("data/sdf_eval_prompts/forced_choice_consensus.json")
-_N_PROBE_PROMPTS = 10
-_N_PPL_TEXTS = 40
+_CONSENSUS_PROBE_BANK = probe_banks.CONSENSUS_PROBE_BANK
+_FORCED_CHOICE_BANK = probe_banks.FORCED_CHOICE_BANK
+_N_PROBE_PROMPTS = probe_banks.N_PROBE_PROMPTS
+_N_PPL_TEXTS = probe_banks.N_PPL_TEXTS
+_load_bank = probe_banks.load_bank
+_prompts_sha256 = probe_banks.texts_sha256
 
 
 @dataclass(frozen=True)
@@ -162,6 +169,10 @@ class TrainGkdStudentConfig:
         student_dtype: ``"bfloat16"`` = frozen bf16 student base (LoRA adapters fp32
             via PEFT); ``None`` = the fp32 default. Enters the identity and manifest
             only when set.
+        init_checkpoint_dir: A trained student's ``checkpoints/`` to continue (its
+            own LoRA adapter, trainable, or its full weights) instead of the
+            untuned `spec`; ``None`` = the untuned base. Enters the identity and
+            manifest only when set.
     """
 
     paths: PathsConfig
@@ -187,6 +198,7 @@ class TrainGkdStudentConfig:
     wandb_extra_tags: tuple[str, ...] = ()
     run_set_id: str | None = None
     student_dtype: str | None = None
+    init_checkpoint_dir: Path | None = None
 
 
 _STUDENT_DTYPES = {"bfloat16": torch.bfloat16}
@@ -448,6 +460,11 @@ def gkd_run_identity(
         "train_hyperparameters": _train_hyperparameters(cfg),
         **(dict(data_identity) if data_identity else {}),
         **({"student_dtype": cfg.student_dtype} if cfg.student_dtype else {}),
+        **(
+            {"init_checkpoint": init_checkpoint_identity(cfg.init_checkpoint_dir)}
+            if cfg.init_checkpoint_dir is not None
+            else {}
+        ),
     }
 
 
@@ -578,20 +595,6 @@ def _result_from_manifest(run_dir: Path, m: dict) -> TrainGkdStudentResult:
         finetune_mode=m["finetune_mode"],
         status="skipped_done",
     )
-
-
-def _load_bank(path: Path, limit: int | None = None) -> tuple[str, ...]:
-    rows = json.loads(Path(path).read_text())
-    return tuple(rows[:limit]) if limit else tuple(rows)
-
-
-def _prompts_sha256(prompts: tuple[str, ...] | list[str]) -> str:
-    """Content hash of an ordered prompt/text bank (null-separated UTF-8)."""
-    h = hashlib.sha256()
-    for prompt in prompts:
-        h.update(prompt.encode())
-        h.update(b"\0")
-    return h.hexdigest()
 
 
 def _probe_provenance(
@@ -799,13 +802,26 @@ def _train(
 
     tokenizer = load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
     validate_train_settings(cfg.train, cfg.lora)
-    student = load_model(
-        cfg.spec,
-        cfg.paths.hf_cache_root,
-        cfg.hub_org,
-        cfg.device,
-        dtype=_student_dtype(cfg),
-    )
+    if cfg.init_checkpoint_dir is None:
+        student = load_model(
+            cfg.spec,
+            cfg.paths.hf_cache_root,
+            cfg.hub_org,
+            cfg.device,
+            dtype=_student_dtype(cfg),
+        )
+    else:
+        student = load_student_init(
+            cfg.spec,
+            cfg.init_checkpoint_dir,
+            cfg.paths.hf_cache_root,
+            cfg.hub_org,
+            cfg.device,
+            cfg.lora,
+            dtype=_student_dtype(cfg),
+        )
+        if cfg.lora is not None and cfg.train.gradient_checkpointing:
+            student.enable_input_require_grads()
     if cfg.lora is None:
         apply_freeze_modules(student, cfg.train.freeze_modules)
     if cfg.control:
@@ -972,7 +988,11 @@ def _train(
         callbacks.append(coverage_callback)
     if cfg.train.weight_decay_anchor:
         callbacks.append(AnchoredDecayCallback(cfg.train.weight_decay))
-    peft_config = build_lora_config(cfg.lora)
+    peft_config = (
+        None
+        if cfg.init_checkpoint_dir is not None
+        else build_lora_config(cfg.lora)
+    )
 
     teacher_spec = _resolved_teacher_spec(cfg)
     prepare_wandb_for_cell(
@@ -1173,22 +1193,7 @@ def _screen_forms(target_animal: str) -> tuple[str, ...]:
 
 
 def _load_heldout_ppl(pool_dir: Path) -> list[str]:
-    path = Path(pool_dir) / "heldout_ppl.jsonl"
-    if not path.exists():
-        logger.warning(
-            "No heldout_ppl.jsonl in {}; perplexity probe disabled.", pool_dir
-        )
-        return []
-    texts: list[str] = []
-    with open(path) as f:
-        for line in f:
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            texts.append(r["prompt"] + r["completion"])
-            if len(texts) >= _N_PPL_TEXTS:
-                break
-    return texts
+    return probe_banks.load_heldout_ppl_texts(Path(pool_dir) / "heldout_ppl.jsonl")
 
 
 @torch.no_grad()
@@ -1251,6 +1256,14 @@ def _write_manifest(
     }
     if is_xbase:
         teacher_blob["hf_ref"] = teacher_hf_ref
+    run_identity = gkd_run_identity(
+        cfg,
+        ttag,
+        gtag,
+        teacher_manifest_sha256=teacher_manifest_sha256,
+        prompt_pool_manifest_sha256=prompt_pool_manifest_sha256,
+        data_identity=data_identity,
+    )
     manifest_body = {
         "target_animal": cfg.target_animal,
         "base_model": model_dir_name(cfg.spec, cfg.hub_org),
@@ -1286,14 +1299,12 @@ def _write_manifest(
         "final_train_loss": final_loss,
         "n_train_steps": n_steps,
         "probe": probe_provenance,
-        "run_identity": gkd_run_identity(
-            cfg,
-            ttag,
-            gtag,
-            teacher_manifest_sha256=teacher_manifest_sha256,
-            prompt_pool_manifest_sha256=prompt_pool_manifest_sha256,
-            data_identity=data_identity,
+        **(
+            {"init_checkpoint": run_identity["init_checkpoint"]}
+            if "init_checkpoint" in run_identity
+            else {}
         ),
+        "run_identity": run_identity,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
     write_manifest(

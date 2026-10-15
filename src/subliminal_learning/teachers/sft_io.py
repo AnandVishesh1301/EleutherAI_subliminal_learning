@@ -17,7 +17,7 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset
-from peft import get_peft_model
+from peft import PeftModel, get_peft_model
 from transformers import (
     DataCollatorForSeq2Seq,
     GPTNeoXForCausalLM,
@@ -60,7 +60,8 @@ def run_teacher_sft_completion_only(
     (-100) so loss is computed only over the completion (+ eos) tokens.
 
     Args:
-        model: Base LM to wrap with a LoRA adapter (or train in full).
+        model: Base LM to wrap with a LoRA adapter (or train in full), or a trainable
+            `PeftModel` whose adapter keeps training (no second adapter is added).
         tokenizer: Tokenizer matching `model`, with `pad_token` set.
         train_dataset: Dataset with `"prompt"` and `"completion"` columns.
         lora_cfg: LoRA rank/alpha/dropout/target_modules, or `None` to train every
@@ -88,7 +89,10 @@ def run_teacher_sft_completion_only(
     validate_train_settings(train_cfg, lora_cfg)
     set_seed(train_cfg.seed)
     if lora_cfg is not None:
-        model = get_peft_model(model, build_lora_config(lora_cfg))
+        if not isinstance(model, PeftModel):
+            model = get_peft_model(model, build_lora_config(lora_cfg))
+    elif isinstance(model, PeftModel):
+        raise ValueError("a PeftModel student needs lora_cfg (full FT got an adapter)")
     else:
         apply_freeze_modules(model, train_cfg.freeze_modules)
     model.config.use_cache = False
