@@ -95,10 +95,10 @@ def _soft_quarantine(rd: Path) -> dict:
     }
 
 
-def cell_rows() -> pd.DataFrame:
+def cell_rows(cells: tuple[plan.Cell, ...]) -> pd.DataFrame:
     """One row per (cell, eval animal); missing artifacts give NaN, never a guess."""
     rows = []
-    for cell in plan.all_cells():
+    for cell in cells:
         rd = run_dir(cell)
         base = {
             "key": cell.key,
@@ -148,11 +148,11 @@ def _lookup(df: pd.DataFrame) -> dict:
     return out
 
 
-def pair_rows(df: pd.DataFrame) -> pd.DataFrame:
+def pair_rows(df: pd.DataFrame, cells: tuple[plan.Cell, ...] | None = None) -> pd.DataFrame:
     """Pre / post transfer per matched (trait, control) pair."""
     look = _lookup(df)
     rows = []
-    for cell in plan.all_cells():
+    for cell in cells or plan.all_cells():
         if cell.stage != "rev" or cell.kind != plan.TREAT:
             continue
         animal = cell.animal
@@ -280,9 +280,9 @@ def _soft_step0(rd: Path) -> float:
     return _num(rec.get("start_bf16_autocast"))
 
 
-def curve_rows() -> pd.DataFrame:
+def curve_rows(cells: tuple[plan.Cell, ...]) -> pd.DataFrame:
     rows = []
-    for cell in plan.all_cells():
+    for cell in cells:
         if cell.stage != "rev" or cell.kind == plan.BASE:
             continue
         rd = run_dir(cell)
@@ -362,12 +362,12 @@ def speed(gaps: pd.DataFrame) -> list[dict]:
     return out
 
 
-def install_half_life() -> list[dict]:
+def install_half_life(arms: tuple[str, ...]) -> list[dict]:
     """Soft install half-life: first step where the start leaves' install probe gap
     (treatment - placebo, by leaf) reaches 50% of its final value."""
     out = []
     for animal in plan.SOFT_ANIMALS:
-        for arm in plan.SOFT_ARMS:
+        for arm in arms:
             gaps: dict[int, list[float]] = {}
             for t, g in plan.SOFT_LEAVES:
                 curves = {}
@@ -425,15 +425,19 @@ def teacher_contrast(pairs: pd.DataFrame) -> list[dict]:
 
 
 def run(out_dir: Path | None = None) -> dict:
-    """Build every rev1 (+ rev1x) results table and the claims file under `out_dir`."""
+    """Build the results tables and claims under `out_dir`: rev1 cells only for
+    `RESULTS_DIR` (the R1 filing), rev1 + rev1x for `RESULTS_DIR_X`."""
     out_dir = out_dir or plan.RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    cells = cell_rows()
-    pairs = pair_rows(cells)
+    ext = out_dir == plan.RESULTS_DIR_X
+    cells = tuple(c for c in plan.all_cells() if ext or not plan.is_ext(c))
+    soft_arms = tuple(a for a in plan.SOFT_ARMS if ext or a not in plan.EXT_ARMS["soft"])
+    table = cell_rows(cells)
+    pairs = pair_rows(table, cells)
     groups = group_rows(pairs)
-    curves = curve_rows()
+    curves = curve_rows(cells)
     gaps = gap_curves(curves)
-    for name, frame in (("cells", cells), ("pairs", pairs), ("groups", groups),
+    for name, frame in (("cells", table), ("pairs", pairs), ("groups", groups),
                         ("curves", curves), ("gap_curves", gaps)):
         atomic_write_text(out_dir / f"{name}.csv", frame.to_csv(index=False))
     claims = {
@@ -443,14 +447,14 @@ def run(out_dir: Path | None = None) -> dict:
                                          f"post_{REPORT_SET}", f"retention_{REPORT_SET}",
                                          f"retention_{REPORT_SET}_lo",
                                          f"retention_{REPORT_SET}_hi"]).to_dict("records"),
-        "R1-H2": {"reversal": speed(gaps), "soft_install": install_half_life()},
+        "R1-H2": {"reversal": speed(gaps), "soft_install": install_half_life(soft_arms)},
         "R1-H3": teacher_contrast(pairs),
         "R1-H4": groups.reindex(columns=["channel", "arm", "animal", "teacher", "dce_t_pre",
                                          "dce_c_pre", "dce_t_rev", "dce_c_rev"]
                                 ).to_dict("records"),
-        "R1-H5": drift(cells),
-        "n_cells": int(len({r for r in cells["key"]})),
-        "n_unevaluated": int((~cells["evaluated"].fillna(False)).sum()),
+        "R1-H5": drift(table),
+        "n_cells": int(len({r for r in table["key"]})),
+        "n_unevaluated": int((~table["evaluated"].fillna(False)).sum()),
     }
     atomic_write_json(out_dir / "claims.json", json.loads(
         json.dumps(claims, default=lambda x: None if x is None else float(x))
