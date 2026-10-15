@@ -72,6 +72,9 @@ STAGING_DIR = LOG_DIR / "staging"
 # ---- hard channel (hlopt Part I starts, E3 recipe) -------------------------------------
 
 HARD_STUDENTS_SRC = hlopt_plan.CAMPAIGN_ROOT / "outputs" / "recipes" / "e3" / "students"
+HARD_STUDENTS_SRC2 = (
+    hlopt_plan.CAMPAIGN_ROOT / "outputs" / "part2" / "recipes" / "e3" / "students"
+)
 HARD_TEACHER_TAG = "ep2_lr5e-4_r32a64"
 HARD_TEACHER_FTSEED = 1
 HARD_NUMBER_TAG = "ex10-20_prefix_n100k"
@@ -83,17 +86,23 @@ HARD_ANIMALS: tuple[str, ...] = ("dog", "lion")
 
 @dataclass(frozen=True)
 class HardArm:
-    """One hard start arm (hlopt E3, LoRA r8α32 all-linear)."""
+    """One hard start arm (hlopt E3; LoRA r8α32 all-linear unless `mode` is full)."""
 
     optim: str
     lr: float
     config_dir: str
+    mode: str = "lora"
+    src_root: Path = HARD_STUDENTS_SRC
 
 
 HARD_ARMS: MappingProxyType[str, HardArm] = MappingProxyType(
     {
         "lora-adamw": HardArm("adamw", 1e-4, "ep20_lr1e-4_r8a32"),
         "lora-sgd": HardArm("sgd", 3.5e-2, "ep20_lr3.5e-2_r8a32_sgd"),
+        "lora-rmsprop": HardArm(
+            "rmsprop", 1.25e-4, "ep20_lr1.25e-4_r8a32_rmsprop", src_root=HARD_STUDENTS_SRC2
+        ),
+        "full-sgd": HardArm("sgd", 2e-2, "ep20_lr2e-2_full_sgd", mode="full"),
     }
 )
 HARD_TREAT_SEEDS: MappingProxyType[tuple[str, str], tuple[int, ...]] = MappingProxyType(
@@ -102,6 +111,9 @@ HARD_TREAT_SEEDS: MappingProxyType[tuple[str, str], tuple[int, ...]] = MappingPr
         ("lora-adamw", "lion"): (1, 2, 3, 4, 5),
         ("lora-sgd", "dog"): (1, 2, 3),
         ("lora-sgd", "lion"): (1, 2, 3, 4, 5),
+        ("lora-rmsprop", "dog"): (1, 2, 3, 4, 5),
+        ("lora-rmsprop", "lion"): (1, 2, 3, 4, 5),
+        ("full-sgd", "dog"): (1, 2, 3, 4, 5),
     }
 )
 HARD_CTRL_SEEDS: tuple[int, ...] = (1, 2, 3, 4, 5)
@@ -151,6 +163,7 @@ class SoftArm:
     mode: str
     lr: MappingProxyType
     gkd_tag: MappingProxyType
+    optim: str = "adamw_torch"
 
 
 SOFT_ARMS: MappingProxyType[str, SoftArm] = MappingProxyType(
@@ -175,6 +188,28 @@ SOFT_ARMS: MappingProxyType[str, SoftArm] = MappingProxyType(
                 }
             ),
         ),
+        "lora-rmsprop": SoftArm(
+            "lora",
+            MappingProxyType({"bear": 2e-4, "lion": 2e-4}),
+            MappingProxyType(
+                {
+                    "bear": "lmb1.0_b1.0_lora_lr2e-4_e1_r8a16_rmsprop",
+                    "lion": "lmb1.0_b1.0_lora_lr2e-4_e1_r8a16_rmsprop",
+                }
+            ),
+            optim="rmsprop",
+        ),
+        "full-rmsprop": SoftArm(
+            "full",
+            MappingProxyType({"bear": 1e-5, "lion": 2e-6}),
+            MappingProxyType(
+                {
+                    "bear": "lmb1.0_b1.0_full_lr1e-5_e1_rmsprop",
+                    "lion": "lmb1.0_b1.0_full_lr2e-6_e1_rmsprop",
+                }
+            ),
+            optim="rmsprop",
+        ),
     }
 )
 SOFT_LORA_R = optparam2_plan.LORA_R
@@ -182,6 +217,13 @@ SOFT_LORA_ALPHA = optparam2_plan.LORA_ALPHA
 SOFT_LEAVES: tuple[tuple[int, int], ...] = ((0, 0), (1, 1), (2, 2), (0, 3), (1, 4))
 SOFT_BASE_LEAVES: tuple[tuple[int, int], ...] = ((0, 0), (1, 1), (2, 2))
 REV_TEACHERS: tuple[str, ...] = ("base", "placebo")
+# Rank-1 extension `rev1x` (prereg §R1x): more install recipes through the same arms, on
+# their own queue root so the running rev1 queues and pools are untouched. Soft extension
+# arms reverse through the untuned-base teacher only.
+EXT_ARMS: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+    {"hard": ("lora-rmsprop", "full-sgd"), "soft": ("lora-rmsprop", "full-rmsprop")}
+)
+EXT_CAMPAIGN = "rev1x"
 SOFT_PROBE_EVERY = optparam2_plan.PROBE_EVERY
 SOFT_EVAL_SETS: tuple[str, ...] = (*optparam2_plan.PROMPT_SETS, "dislike", "consensus")
 PROBE_MATCH_ABS = 1e-4
@@ -209,6 +251,9 @@ HOST_SHORT: MappingProxyType[str, str] = MappingProxyType(
 HARD_HOSTS: tuple[str, ...] = (CLUSTER5,)
 SOFT_HOSTS: tuple[str, ...] = (SOAR, CLUSTER3, CLUSTER4, GONCALO)
 WORKER_HOSTS: tuple[str, ...] = (*SOFT_HOSTS, CLUSTER5)
+EXT_HARD_HOSTS: tuple[str, ...] = (CLUSTER5, GONCALO)
+EXT_SOFT_HOSTS: tuple[str, ...] = (SOAR, CLUSTER3, CLUSTER4)
+QUEUE_ROOT_X = ROOT / "queue_x"
 N_GPUS = 8
 CAP_PER_GPU: MappingProxyType[str, int] = MappingProxyType(
     {CLUSTER5: hlopt_plan.host_cap_per_gpu(CLUSTER5), **{h: 2 for h in SOFT_HOSTS}}
@@ -234,6 +279,8 @@ MEM_MIB: MappingProxyType[tuple[str, str, str], int] = MappingProxyType(
     {
         ("hard", "rev", "lora"): hlopt_plan.MEM_MIB[("e3", "lora")],
         ("hard", "pre", "lora"): hlopt_plan.LATE_EVAL_MIB,
+        ("hard", "rev", "full"): hlopt_plan.MEM_MIB[("e3", "full")],
+        ("hard", "pre", "full"): hlopt_plan.LATE_EVAL_MIB,
         ("soft", "rev", "lora"): optparam2_plan.MEM_MIB["lora"],
         ("soft", "rev", "full"): optparam2_plan.MEM_MIB["full"],
         ("soft", "pre", "lora"): hlopt_plan.LATE_EVAL_MIB,
@@ -246,6 +293,7 @@ AUTO_REQUEUE_ATTEMPTS = 2
 CAMPAIGN_STATE_FILE = "rev1_campaign_state.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
 RESULTS_DIR = OUTPUT_ROOT / "results" / CAMPAIGN
+RESULTS_DIR_X = OUTPUT_ROOT / "results" / "rev1x"
 
 # ---- statistics (prereg §R1) -----------------------------------------------------------
 
@@ -328,7 +376,7 @@ def hard_cells() -> tuple[Cell, ...]:
     out: list[Cell] = []
     for arm in HARD_ARMS:
         for animal in HARD_ANIMALS:
-            for s in HARD_TREAT_SEEDS[(arm, animal)]:
+            for s in HARD_TREAT_SEEDS.get((arm, animal), ()):
                 for stage in STAGES:
                     teacher = "base" if stage == "rev" else None
                     out.append(Cell("hard", stage, TREAT, animal, arm, s, None, teacher))
@@ -346,13 +394,14 @@ def soft_cells() -> tuple[Cell, ...]:
     out: list[Cell] = []
     for animal in SOFT_ANIMALS:
         for arm in SOFT_ARMS:
+            teachers = ("base",) if arm in EXT_ARMS["soft"] else REV_TEACHERS
             for kind in (TREAT, CTRL):
                 for t, g in SOFT_LEAVES:
                     out.append(Cell("soft", "pre", kind, animal, arm, g, t, None))
-                    for teacher in REV_TEACHERS:
+                    for teacher in teachers:
                         out.append(Cell("soft", "rev", kind, animal, arm, g, t, teacher))
             for t, g in SOFT_BASE_LEAVES:
-                for teacher in REV_TEACHERS:
+                for teacher in teachers:
                     tfs = t if teacher == "placebo" else None
                     out.append(Cell("soft", "rev", BASE, animal, arm, g, tfs, teacher))
     return tuple(out)
@@ -362,17 +411,31 @@ def all_cells() -> tuple[Cell, ...]:
     return hard_cells() + soft_cells()
 
 
+def is_ext(cell: Cell) -> bool:
+    """Whether `cell` belongs to the rank-1 extension `rev1x`."""
+    return cell.arm in EXT_ARMS[cell.channel]
+
+
 def cell_host(cell: Cell) -> str:
-    """Worker host of `cell`: hard on cluster-5, soft spread over the four soft hosts."""
-    if cell.channel == "hard":
+    """Worker host of `cell`.
+
+    rev1: hard on cluster-5, soft spread over the four soft hosts (indices over rev1 cells
+    only, so adding extension cells moves none). rev1x: hard over cluster-5 + goncalo,
+    soft over soar, cluster-3, cluster-4.
+    """
+    ext = is_ext(cell)
+    if cell.channel == "hard" and not ext:
         return CLUSTER5
-    soft = [c for c in soft_cells() if c.stage == cell.stage]
-    return SOFT_HOSTS[soft.index(cell) % len(SOFT_HOSTS)]
+    cells = hard_cells() if cell.channel == "hard" else soft_cells()
+    peers = [c for c in cells if c.stage == cell.stage and is_ext(c) == ext]
+    hosts = (EXT_HARD_HOSTS if cell.channel == "hard" else EXT_SOFT_HOSTS) if ext else SOFT_HOSTS
+    return hosts[peers.index(cell) % len(hosts)]
 
 
 def cell_mode(cell: Cell) -> str:
-    """``lora`` or ``full`` (every hard arm is LoRA)."""
-    return "lora" if cell.channel == "hard" else SOFT_ARMS[cell.arm].mode
+    """``lora`` or ``full``."""
+    arms = HARD_ARMS if cell.channel == "hard" else SOFT_ARMS
+    return arms[cell.arm].mode
 
 
 def cell_mem_mib(cell: Cell) -> int:
@@ -384,14 +447,23 @@ def queue_name(channel: str, stage: str, host: str) -> str:
 
 
 def cell_queue(cell: Cell) -> str:
-    return queue_name(cell.channel, cell.stage, cell_host(cell))
+    name = queue_name(cell.channel, cell.stage, cell_host(cell))
+    return name.replace(f"{CAMPAIGN}-", f"{EXT_CAMPAIGN}-", 1) if is_ext(cell) else name
 
 
-def host_queues(host: str) -> tuple[str, ...]:
-    """Queues a host's pool claims (pre before rev within a channel)."""
+def cell_queue_root(cell: Cell) -> Path:
+    return QUEUE_ROOT_X if is_ext(cell) else QUEUE_ROOT
+
+
+def host_queues(host: str, ext: bool = False) -> tuple[str, ...]:
+    """Queues a host's rev1 (or, with `ext`, rev1x) pool claims."""
     return tuple(
         sorted(
-            {cell_queue(c) for c in all_cells() if cell_host(c) == host},
+            {
+                cell_queue(c)
+                for c in all_cells()
+                if cell_host(c) == host and is_ext(c) == ext
+            },
             key=lambda q: (q.split("-")[1], q.split("-")[2] != "pre", q),
         )
     )
@@ -414,8 +486,9 @@ def gpu_policy_json(host: str) -> dict:
     }
 
 
-def workers_per_node(host: str) -> int:
-    return CAP_PER_GPU[host] * N_GPUS if host in WORKER_HOSTS else 0
+def workers_per_node(host: str, ext: bool = False) -> int:
+    hosts = (*EXT_HARD_HOSTS, *EXT_SOFT_HOSTS) if ext else WORKER_HOSTS
+    return CAP_PER_GPU[host] * N_GPUS if host in hosts else 0
 
 
 def paths_config_doc() -> dict[str, str]:
@@ -440,7 +513,7 @@ def start_src_dir(cell: Cell) -> Path:
         arm = HARD_ARMS[cell.arm]
         if cell.kind == TREAT:
             root = (
-                HARD_STUDENTS_SRC
+                arm.src_root
                 / cell.animal
                 / "pythia-160m"
                 / "teacher-pythia-160m"
@@ -449,7 +522,7 @@ def start_src_dir(cell: Cell) -> Path:
             )
         else:
             root = (
-                HARD_STUDENTS_SRC
+                arm.src_root
                 / "controls"
                 / "base"
                 / "pythia-160m"

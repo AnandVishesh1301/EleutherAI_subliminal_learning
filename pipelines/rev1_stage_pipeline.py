@@ -233,8 +233,9 @@ print(json.dumps(out))
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def run() -> dict:
-    """Stage every rev1 input and write a staging report.
+def run(*, starts_only: bool = False) -> dict:
+    """Stage every rev1 input (or, with `starts_only`, only the start students; fast from
+    cluster-5, which reads ssd-1 quickly) and write a staging report.
 
     Returns:
         The staging report.
@@ -247,6 +248,14 @@ def run() -> dict:
         totals["bytes_written"] += written
         return sha
 
+    if starts_only:
+        report = {"at": utc_now_iso(), "host": os.uname().nodename,
+                  "starts": _stage_starts(put), "complete": True, **totals}
+        plan.STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        out = plan.STAGING_DIR / f"staging_starts-{report['at'].replace(':', '')}.json"
+        atomic_write_text(out, json.dumps(report, indent=1) + "\n")
+        logger.info("rev1 start staging complete: {} ({} files)", out, totals["n_files"])
+        return report
     for key, value in plan.paths_config_doc().items():
         Path(value).mkdir(parents=True, exist_ok=True)
         if key == "queue_root":

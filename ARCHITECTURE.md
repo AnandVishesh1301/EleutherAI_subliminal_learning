@@ -2945,6 +2945,8 @@ matched controls and the untouched base go through the same arm.
   `20261015_rev1-soft_160m`.
 - **Caveat found:** the GKD probe measures step 0 in fp32 and later steps under bf16 autocast; rev1
   checks loads in fp32 and uses a bf16 re-probe of the start as the soft curve's step-0 reference.
+- **Extension `rev1x`** (prereg §R1x): the same arms on more install recipes (hard LoRA RMSProp, full SGD;
+  soft LoRA / full RMSProp with the base teacher), on queue root `reversal/queue_x`; launcher `--ext`.
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 

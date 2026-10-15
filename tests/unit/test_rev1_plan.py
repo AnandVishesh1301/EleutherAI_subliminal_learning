@@ -9,7 +9,7 @@ from subliminal_learning.campaign import rev1_plan as plan
 
 
 def test_rev1_cells_counts_match_plan() -> None:
-    cells = plan.all_cells()
+    cells = [c for c in plan.all_cells() if not plan.is_ext(c)]
     counts = Counter((c.channel, c.stage, c.kind) for c in cells)
     assert counts[("hard", "rev", "treat")] == 18
     assert counts[("hard", "rev", "ctrl")] == 10
@@ -22,6 +22,14 @@ def test_rev1_cells_counts_match_plan() -> None:
     assert counts[("soft", "pre", "treat")] == 20
     assert counts[("soft", "pre", "ctrl")] == 20
     assert len(cells) == len(set(cells)) == 206
+
+
+def test_rev1x_extension_counts_and_base_teacher_only() -> None:
+    ext = [c for c in plan.all_cells() if plan.is_ext(c)]
+    counts = Counter((c.channel, c.stage) for c in ext)
+    assert counts == {("hard", "rev"): 31, ("hard", "pre"): 25, ("soft", "rev"): 52,
+                      ("soft", "pre"): 40}
+    assert {c.teacher for c in ext if c.channel == "soft" and c.stage == "rev"} == {"base"}
 
 
 def test_rev1_keys_round_trip_and_are_unique() -> None:
@@ -39,9 +47,16 @@ def test_rev1_unplanned_key_raises() -> None:
 def test_rev1_hosts_and_queues() -> None:
     for cell in plan.all_cells():
         host = plan.cell_host(cell)
-        assert (host == plan.CLUSTER5) == (cell.channel == "hard")
-        assert plan.cell_queue(cell) in plan.host_queues(host)
-    soft = Counter(plan.cell_host(c) for c in plan.soft_cells())
+        ext = plan.is_ext(cell)
+        if not ext:
+            assert (host == plan.CLUSTER5) == (cell.channel == "hard")
+        elif cell.channel == "hard":
+            assert host in plan.EXT_HARD_HOSTS
+        else:
+            assert host in plan.EXT_SOFT_HOSTS
+        assert plan.cell_queue(cell) in plan.host_queues(host, ext)
+        assert plan.cell_queue(cell).startswith(plan.EXT_CAMPAIGN if ext else "rev1-")
+    soft = Counter(plan.cell_host(c) for c in plan.soft_cells() if not plan.is_ext(c))
     assert set(soft) == set(plan.SOFT_HOSTS)
     assert max(soft.values()) - min(soft.values()) <= 1
 

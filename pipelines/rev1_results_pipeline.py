@@ -421,9 +421,10 @@ def teacher_contrast(pairs: pd.DataFrame) -> list[dict]:
     return out
 
 
-def run() -> dict:
-    """Build every rev1 results table and the claims file."""
-    plan.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+def run(out_dir: Path | None = None) -> dict:
+    """Build every rev1 (+ rev1x) results table and the claims file under `out_dir`."""
+    out_dir = out_dir or plan.RESULTS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
     cells = cell_rows()
     pairs = pair_rows(cells)
     groups = group_rows(pairs)
@@ -431,7 +432,7 @@ def run() -> dict:
     gaps = gap_curves(curves)
     for name, frame in (("cells", cells), ("pairs", pairs), ("groups", groups),
                         ("curves", curves), ("gap_curves", gaps)):
-        atomic_write_text(plan.RESULTS_DIR / f"{name}.csv", frame.to_csv(index=False))
+        atomic_write_text(out_dir / f"{name}.csv", frame.to_csv(index=False))
     claims = {
         "at": utc_now_iso(),
         "R1-H1": groups.reindex(columns=["channel", "arm", "animal", "teacher", "n_live",
@@ -448,8 +449,8 @@ def run() -> dict:
         "n_cells": int(len({r for r in cells["key"]})),
         "n_unevaluated": int((~cells["evaluated"].fillna(False)).sum()),
     }
-    atomic_write_json(plan.RESULTS_DIR / "claims.json", json.loads(
+    atomic_write_json(out_dir / "claims.json", json.loads(
         json.dumps(claims, default=lambda x: None if x is None else float(x))
     ))
-    logger.info("rev1 results -> {}", plan.RESULTS_DIR)
-    return {"results_dir": str(plan.RESULTS_DIR), "n_groups": len(groups)}
+    logger.info("rev1 results -> {}", out_dir)
+    return {"results_dir": str(out_dir), "n_groups": len(groups)}

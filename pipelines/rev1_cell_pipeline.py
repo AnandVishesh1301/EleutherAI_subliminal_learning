@@ -137,15 +137,16 @@ def pp1_probe(
 # ---- hard channel ----------------------------------------------------------------------
 
 
-def hard_cfgs(cell: plan.Cell) -> tuple[LoRAConfig, TrainConfig]:
-    """(LoRA, TrainConfig) of the hlopt E3 recipe of `cell`'s arm and seed."""
+def hard_cfgs(cell: plan.Cell) -> tuple[LoRAConfig | None, TrainConfig]:
+    """(LoRA or None for full FT, TrainConfig) of the hlopt E3 recipe of `cell`'s arm."""
     arm = plan.HARD_ARMS[cell.arm]
     recipe = hlopt_plan.RECIPES["e3"]
     optim, momentum = hlopt_plan.OPTIMS[arm.optim]
+    full = arm.mode == "full"
     train = TrainConfig(
         learning_rate=arm.lr,
         n_epochs=plan.HARD_EPOCHS,
-        batch_size=recipe.batch_size,
+        batch_size=recipe.full_batch_size if full else recipe.batch_size,
         max_length=hlopt_plan.MAX_LENGTH,
         max_grad_norm=hlopt_plan.MAX_GRAD_NORM,
         warmup_ratio=recipe.warmup_ratio,
@@ -153,9 +154,11 @@ def hard_cfgs(cell: plan.Cell) -> tuple[LoRAConfig, TrainConfig]:
         seed=cell.seed,
         optim=optim,
         optim_momentum=momentum,
-        gradient_accumulation_steps=recipe.grad_accum,
+        gradient_accumulation_steps=recipe.full_grad_accum if full else recipe.grad_accum,
         warmup_steps=recipe.warmup_steps,
     )
+    if full:
+        return None, train
     lora = LoRAConfig(
         r=plan.HARD_LORA_R,
         lora_alpha=plan.HARD_LORA_ALPHA,
@@ -423,7 +426,7 @@ def soft_cfg(cell: plan.Cell, paths: PathsConfig, hub_org: str, device: str):  #
         _apply_train_overrides(base.train, dict(optparam2_plan.TRAIN_OVERRIDES)),
         learning_rate=arm.lr[cell.animal],
         seed=cell.seed,
-        optim="adamw_torch",
+        optim=arm.optim,
         optim_momentum=0.0,
     )
     lora = (

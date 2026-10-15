@@ -11,15 +11,27 @@
 # pool on the reversal queue root, or a stop sentinel. Writes only this host's gpu_policy
 # file in the reversal queue root. Touches no other queue root.
 #
-# Usage: bash scripts/launch_rev1_campaign.sh <sha> [--driver]
+# With --ext: the rank-1 extension rev1x (session rev1x, queue root reversal/queue_x,
+# rev1_plan.EXT_* hosts); without it, rev1 exactly as before.
+#
+# Usage: bash scripts/launch_rev1_campaign.sh <sha> [--driver] [--ext]
 set -euo pipefail
 
 SHA="${1:-}"
-DRIVER="${2:-}"
-if [[ -z "$SHA" || ( -n "$DRIVER" && "$DRIVER" != "--driver" ) ]]; then
-  echo "usage: bash scripts/launch_rev1_campaign.sh <sha> [--driver]"
+DRIVER=""
+EXT=""
+for arg in "${@:2}"; do
+  case "$arg" in
+    --driver) DRIVER="--driver" ;;
+    --ext) EXT="--ext" ;;
+    *) echo "usage: bash scripts/launch_rev1_campaign.sh <sha> [--driver] [--ext]"; exit 2 ;;
+  esac
+done
+if [[ -z "$SHA" ]]; then
+  echo "usage: bash scripts/launch_rev1_campaign.sh <sha> [--driver] [--ext]"
   exit 2
 fi
+EXTPY=$([[ -n "$EXT" ]] && echo True || echo False)
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
@@ -45,7 +57,7 @@ fi
 uv sync --frozen --quiet
 
 PLAN="from subliminal_learning.campaign import rev1_plan as p"
-read -r LOCK SESSION WORKERS PATHS HOME_NODE ROOT < <(uv run python -c "$PLAN;import socket;h=socket.gethostname();print(p.LOCK_PREFIX.get(h, '-'), p.TMUX_SESSION, p.workers_per_node(h), p.PATHS_CONFIG_PATH, p.HOME_NODE, p.QUEUE_ROOT)")
+read -r LOCK SESSION WORKERS PATHS HOME_NODE ROOT < <(uv run python -c "$PLAN;import socket;h=socket.gethostname();x=$EXTPY;print(p.LOCK_PREFIX.get(h, '-'), p.EXT_CAMPAIGN if x else p.TMUX_SESSION, p.workers_per_node(h, x), p.PATHS_CONFIG_PATH, p.HOME_NODE, p.QUEUE_ROOT_X if x else p.QUEUE_ROOT)")
 if [[ "$WORKERS" == "0" && "$DRIVER" != "--driver" ]]; then
   echo "ERROR: $HOST runs no rev1 workers."
   exit 1
@@ -85,8 +97,8 @@ if [[ "$WORKERS" != "0" ]]; then
     echo "ERROR: a jobq worker is already running on $ROOT on this host."
     exit 1
   fi
-  uv run python -m scripts.run_rev1_campaign write-policy
-  QUEUES_CMD="$PLAN;import socket;print(','.join(p.host_queues(socket.gethostname())))"
+  uv run python -m scripts.run_rev1_campaign write-policy $EXT
+  QUEUES_CMD="$PLAN;import socket;print(','.join(p.host_queues(socket.gethostname(), $EXTPY)))"
   tmux new-session -d -s "$SESSION" -n workers -c "$REPO"
   tmux send-keys -t "$SESSION:workers" \
     "export SL_JOBQ_LOCK_PREFIX=$LOCK; Q=\$(uv run python -c \"$QUEUES_CMD\"); while true; do uv run python -m scripts.jobq work --root $ROOT --workers $WORKERS --queues \"\$Q\" --lock-prefix $LOCK; echo 'pool exited; restarting in 60s (Ctrl-C to stop)'; sleep 60; done" C-m
@@ -99,7 +111,7 @@ if [[ "$DRIVER" == "--driver" ]]; then
     tmux new-session -d -s "$SESSION" -n driver -c "$REPO"
   fi
   tmux send-keys -t "$SESSION:driver" \
-    "backoff=60; while true; do uv run python -m scripts.run_rev1_campaign watch --interval 120 --auto-requeue 2; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
+    "backoff=60; while true; do uv run python -m scripts.run_rev1_campaign watch --interval 120 --auto-requeue 2 $EXT; ec=\$?; if [ \$ec -eq 0 ]; then echo 'driver finished'; break; fi; echo \"driver exited \$ec; restarting in \${backoff}s\"; sleep \$backoff; backoff=\$((backoff < 600 ? backoff * 2 : 600)); done" C-m
 fi
 
 cat <<MSG
