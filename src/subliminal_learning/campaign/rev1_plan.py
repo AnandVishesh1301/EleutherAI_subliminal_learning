@@ -211,7 +211,7 @@ SOFT_HOSTS: tuple[str, ...] = (SOAR, CLUSTER3, CLUSTER4, GONCALO)
 WORKER_HOSTS: tuple[str, ...] = (*SOFT_HOSTS, CLUSTER5)
 N_GPUS = 8
 CAP_PER_GPU: MappingProxyType[str, int] = MappingProxyType(
-    {CLUSTER5: hlopt_plan.host_cap_per_gpu(CLUSTER5), **{h: 4 for h in SOFT_HOSTS}}
+    {CLUSTER5: hlopt_plan.host_cap_per_gpu(CLUSTER5), **{h: 2 for h in SOFT_HOSTS}}
 )
 RESERVATION_WARMUP_S = 180
 GPU_POLICY_ENV: MappingProxyType[str, str] = MappingProxyType(
@@ -227,14 +227,15 @@ GPU_POLICY_ENV: MappingProxyType[str, str] = MappingProxyType(
         "WANDB_MODE": "disabled",
     }
 )
-# Estimated peak + ~2.5 GB (160M on-policy GKD student 9-13 GB, fleet rule; hlopt E3 LoRA
-# 6.2 GB and late evals 11 GB from hlopt_plan).
+# Soft: optparam2's reservations (measured at launch 2026-10-15: soft reversal leaves peak
+# 9-14 GB each; 4 per card OOMed at 13 / 16 GB reservations, so cap 2). Hard: hlopt E3 LoRA
+# 6.2 GB, late evals 11 GB.
 MEM_MIB: MappingProxyType[tuple[str, str, str], int] = MappingProxyType(
     {
         ("hard", "rev", "lora"): hlopt_plan.MEM_MIB[("e3", "lora")],
         ("hard", "pre", "lora"): hlopt_plan.LATE_EVAL_MIB,
-        ("soft", "rev", "lora"): 13_000,
-        ("soft", "rev", "full"): 16_000,
+        ("soft", "rev", "lora"): optparam2_plan.MEM_MIB["lora"],
+        ("soft", "rev", "full"): optparam2_plan.MEM_MIB["full"],
         ("soft", "pre", "lora"): hlopt_plan.LATE_EVAL_MIB,
         ("soft", "pre", "full"): hlopt_plan.LATE_EVAL_MIB,
     }
