@@ -12,6 +12,7 @@ never uses up its retries. Plan: `.claude/plans/blogpost/12_reversal.plan.md` §
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -163,8 +164,6 @@ def paused(host: str) -> bool:
 
 def route_host(cell: plan.Cell) -> str:
     """`cell`'s stable host, or the next weighted host of its channel if that one is paused."""
-    import hashlib
-
     slots = [h for h, w in plan.HOST_WEIGHTS[cell.channel] for _ in range(w)]
     start = int(hashlib.sha256(cell.key.encode()).hexdigest(), 16) % len(slots)
     for i in range(len(slots)):
@@ -525,7 +524,7 @@ def move_pending(
             cell = plan.cell_from_key(job.key)
             if channel is not None and cell.channel != channel:
                 continue
-            idx = int.from_bytes(job.key.encode()[:8], "big") % len(dst_hosts)
+            idx = int(hashlib.sha256(job.key.encode()).hexdigest(), 16) % len(dst_hosts)
             by_queue[plan.queue_name(tier, dst_hosts[idx])].append(cell)
     for name, cells in by_queue.items():
         _ensure_queue(name, _host_of_queue(name), name.split("-")[1], code_sha)
