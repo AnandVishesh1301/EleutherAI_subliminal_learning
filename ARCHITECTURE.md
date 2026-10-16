@@ -2134,7 +2134,12 @@ never contain the trait word:
   `SubliminalGKDTrainer` overrides only `compute_loss`, `training_step` (L2 between
   generation and loss), and `log`. `seq_kd=False` required; temperature 1.0.
 - **In-training probe** (`GkdProbeCallback`): exact `p(target)`, forced-choice share,
-  held-out Pile PPL → `training_metrics.jsonl` + W&B.
+  held-out Pile PPL → `training_metrics.jsonl` + W&B. Since 2026-10-16 each record also
+  carries `rank_mean` / `rank1_frac` (same fields as the hard-label `SftProbeCallback`),
+  and `gkd.probe_dense_every` / `gkd.probe_dense_until` (default 0 = old schedule) add an
+  early dense window. No step-0 row here: `_leaf_diverged` uses the first row as its
+  ppl baseline and `peak_probes` could pick an init row, so one would change campaign
+  selection.
 - **Control**: same run with an untuned base as teacher, animal-specific (its own L2
   screen + probe), under `gkd_students/controls/base_teacher/...`.
 - Layout: `gkd_students/{animal}/{model}/{teacher_tag}/{gkd_tag}/gseed{N}` —

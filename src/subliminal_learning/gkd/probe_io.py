@@ -5,14 +5,17 @@ A `TrainerCallback` that measures the student between optimizer steps (safe -- r
 ``probe_every`` steps it computes, on the STUDENT only:
 
 - exact next-token ``p(" {target}")`` averaged over held-out consensus/favorite probe
-  prompts (reuses `preference_prob_io` + `preference_scoring`),
+  prompts (reuses `preference_prob_io` + `preference_scoring`), plus mean full-vocab
+  rank and rank-1 fraction of the target,
 - forced-choice target share + argmax fraction over the candidate set (`forced_choice_io`),
 - token-weighted perplexity over a held-out real-Pile slice (`perplexity_io`) -- the
   capability guardrail.
 
 Results append to ``training_metrics.jsonl`` (the SSOT, world-process-zero, flushed per
 write) and log to W&B at the true global step. The teacher's ``p(target)`` is a FIXED
-reference (measured once before training) logged as a constant for comparison.
+reference (measured once before training) logged as a constant for comparison. The
+cadence is `gkd.probe_schedule.probe_due` (``probe_every`` plus an optional dense early
+window); `SftProbeCallback` is the hard-label twin on the same banks.
 
 `GradConcentrationCallback` (opt-in, `GkdConfig.grad_probe`) measures the mechanism Blank
 et al. state for the SGD null -- that a small fraction of parameters carries most of the
@@ -55,6 +58,8 @@ class GkdProbeCallback(TrainerCallback):
         probe_every: int,
         metrics_path: Path,
         teacher_p_target: float | None = None,
+        dense_every: int = 0,
+        dense_until: int = 0,
     ) -> None:
         """See module docstring.
 
@@ -70,7 +75,13 @@ class GkdProbeCallback(TrainerCallback):
             probe_every: Steps between probes.
             metrics_path: ``training_metrics.jsonl`` path (append, world-process-zero).
             teacher_p_target: Teacher's ``p(target)`` reference, logged as a constant.
+            dense_every: Dense-window cadence (`probe_schedule.probe_due`).
+            dense_until: Last step of the dense window.
+
+        Raises:
+            ValueError: The dense window is invalid (`validate_probe_schedule`).
         """
+        validate_probe_schedule(probe_every, dense_every, dense_until)
         self.tokenizer = tokenizer
         self.device = device
         self.target_animal = target_animal
@@ -82,12 +93,19 @@ class GkdProbeCallback(TrainerCallback):
         self.probe_every = probe_every
         self.metrics_path = Path(metrics_path)
         self.teacher_p_target = teacher_p_target
+        self.dense_every = dense_every
+        self.dense_until = dense_until
 
-    def on_step_end(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
-        if self.probe_every <= 0 or state.global_step % self.probe_every != 0:
-            return
-        if not state.is_world_process_zero or model is None:
-            return
+    def probe_once(self, model, step: int) -> dict:  # noqa: ANN001
+        """Measure the student and append one JSONL + W&B row.
+
+        Args:
+            model: Student (base or PEFT-wrapped) on `self.device`.
+            step: Global step to record.
+
+        Returns:
+            The written probe record.
+        """
         was_training = model.training
         model.eval()
         try:
@@ -99,7 +117,11 @@ class GkdProbeCallback(TrainerCallback):
                     self.probe_prompts,
                     self.target_id,
                 )
-                p_target = fmean(p for p, _ in probs.values())
+                p_vals = [p for p, _ in probs.values()]
+                ranks = [r for _, r in probs.values()]
+                p_target = fmean(p_vals)
+                rank_mean = fmean(float(r) for r in ranks)
+                rank1_frac = fmean(1.0 if r == 1 else 0.0 for r in ranks)
                 fc = forced_choice_over_prompts(
                     model,
                     self.tokenizer,
@@ -116,8 +138,10 @@ class GkdProbeCallback(TrainerCallback):
                 model.train()
 
         record = {
-            "step": int(state.global_step),
+            "step": int(step),
             "p_target": p_target,
+            "rank_mean": rank_mean,
+            "rank1_frac": rank1_frac,
             "fc_share": fc.target_share_mean,
             "fc_argmax_frac": fc.target_argmax_frac,
             "ppl": ppl,
@@ -126,6 +150,18 @@ class GkdProbeCallback(TrainerCallback):
             record["teacher_p_target"] = self.teacher_p_target
         self._append(record)
         self._log_wandb(record)
+        return record
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
+        if not probe_due(
+            state.global_step, self.probe_every, self.dense_every, self.dense_until
+        ):
+            return
+        if not state.is_world_process_zero or model is None:
+            return
+        if state.global_step == 0:
+            return
+        self.probe_once(model, step=int(state.global_step))
 
     def _append(self, record: dict) -> None:
         self.metrics_path.parent.mkdir(parents=True, exist_ok=True)

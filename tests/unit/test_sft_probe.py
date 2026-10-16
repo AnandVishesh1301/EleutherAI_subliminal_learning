@@ -1,4 +1,4 @@
-"""Hard-label in-training probes: schedule, records, resume, identity, trajectory."""
+"""In-training probes: the hard-label port and its parity with the GKD probe."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import yaml
 from datasets import Dataset
 from safetensors.torch import load_file
 from transformers import (
@@ -33,7 +34,8 @@ from subliminal_learning.evaluation.probe_banks import (
     load_heldout_ppl_texts,
     texts_sha256,
 )
-from subliminal_learning.gkd.probe_io import SftProbeCallback
+from subliminal_learning.gkd.config import load_gkd_training
+from subliminal_learning.gkd.probe_io import GkdProbeCallback, SftProbeCallback
 from subliminal_learning.gkd.probe_schedule import probe_due
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.students.layout import student_run_dir
@@ -317,6 +319,20 @@ def test_probe_on_non_finite_weights_does_not_raise(tokenizer, tmp_path: Path):
     assert record["step"] == 3
 
 
+def test_probe_keeps_the_model_dtype_and_global_precision_flags(
+    tokenizer, tmp_path: Path
+):
+    model = _tiny(len(tokenizer)).to(torch.bfloat16)
+    flags = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+    record = _probe(tokenizer, tmp_path / "m.jsonl", "dog").probe_once(model, step=1)
+    assert next(model.parameters()).dtype == torch.bfloat16
+    assert (
+        torch.backends.cuda.matmul.allow_tf32,
+        torch.backends.cudnn.allow_tf32,
+    ) == flags
+    assert 0.0 <= record["p_target"] <= 1.0 and record["ppl"] > 1.0
+
+
 # --- pipeline probe construction -------------------------------------------------------
 
 
@@ -512,3 +528,82 @@ def test_pipeline_writes_probes_and_a_finished_cell_still_skips(
     )
     assert skipped.model is None and skipped.run_dir == run_dir
     assert (run_dir / dsp.TRAINING_METRICS_FILE).read_bytes() == before
+
+
+# --- GKD probe parity -----------------------------------------------------------------
+
+
+def _gkd_probe(tokenizer, path: Path, every: int = 2, **kw):  # noqa: ANN001, ANN003, ANN202
+    return GkdProbeCallback(
+        tokenizer=tokenizer,
+        device="cpu",
+        target_animal="dog",
+        target_id=candidate_token_ids(("dog",), tokenizer)["dog"],
+        probe_prompts=("My favorite animal is the", "I love the"),
+        fc_prompts=("The best animal is the",),
+        candidate_ids=candidate_token_ids(("dog", "lion", "cat"), tokenizer),
+        ppl_texts=["The quick brown fox jumps over the lazy dog."],
+        probe_every=every,
+        metrics_path=path,
+        teacher_p_target=0.5,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize("every", [25, 50])
+def test_gkd_default_schedule_is_unchanged(every: int):
+    due = [s for s in range(1, 401) if probe_due(s, every)]
+    assert due == [s for s in range(1, 401) if s % every == 0]
+
+
+def test_gkd_and_hard_probes_read_identical_values(tokenizer, tmp_path: Path):
+    model = _tiny(len(tokenizer))
+    soft = _gkd_probe(tokenizer, tmp_path / "soft.jsonl").probe_once(model, step=4)
+    hard = _probe(tokenizer, tmp_path / "hard.jsonl", "dog").probe_once(model, step=4)
+    assert set(soft) == {
+        "step",
+        "p_target",
+        "rank_mean",
+        "rank1_frac",
+        "fc_share",
+        "fc_argmax_frac",
+        "ppl",
+        "teacher_p_target",
+    }
+    for key in (
+        "p_target",
+        "rank_mean",
+        "rank1_frac",
+        "fc_share",
+        "fc_argmax_frac",
+        "ppl",
+    ):
+        assert soft[key] == hard[key], key
+
+
+def test_gkd_probe_writes_no_step_zero_and_honours_the_dense_window(
+    tokenizer, tmp_path: Path
+):
+    model = _tiny(len(tokenizer))
+    path = tmp_path / "training_metrics.jsonl"
+    cb = _gkd_probe(tokenizer, path, every=4, dense_every=1, dense_until=2)
+    state, control = TrainerState(), TrainerControl()
+    cb.on_train_begin(None, state, control, model=model)
+    for step in range(1, 9):
+        state.global_step = step
+        cb.on_step_end(None, state, control, model=model)
+    assert [r["step"] for r in _rows(path)] == [1, 2, 4, 8]
+    with pytest.raises(ValueError, match="dense"):
+        _gkd_probe(tokenizer, path, dense_every=5)
+
+
+def test_gkd_yaml_reads_the_dense_window(tmp_path: Path):
+    src = Path("configs/training/gkd_student.yaml")
+    _, _, default = load_gkd_training(src)
+    assert (default.probe_dense_every, default.probe_dense_until) == (0, 0)
+    doc = yaml.safe_load(src.read_text())
+    doc["gkd"].update(probe_dense_every=5, probe_dense_until=100)
+    (tmp_path / "gkd.yaml").write_text(yaml.safe_dump(doc))
+    _, _, dense = load_gkd_training(tmp_path / "gkd.yaml")
+    assert (dense.probe_dense_every, dense.probe_dense_until) == (5, 100)
+    assert replace(dense, probe_dense_every=0, probe_dense_until=0) == default

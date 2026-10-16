@@ -58,6 +58,10 @@ class GkdConfig:
         student_mode: ``"full"`` or ``"lora"`` (derived from the `lora:` block presence).
         vocab_mask: Layer-3 divergence vocab masking on/off (banned candidate tokens).
         probe_every: Steps between `GkdProbeCallback` measurements.
+        probe_dense_every: Probe cadence inside the early dense window (``0`` = off;
+            `gkd.probe_schedule.probe_due`).
+        probe_dense_until: Last step of the dense window (required with
+            `probe_dense_every`).
         rollout_log_every: Steps between appending full-batch rollouts to
             `rollouts_sample.jsonl` (``1`` = every on-policy step).
         prompt_pool_dir: Prompt-pool directory (absolute, or relative to
@@ -86,6 +90,8 @@ class GkdConfig:
     candidates: tuple[str, ...]
     grad_probe: bool = False
     grad_probe_steps: int = 3
+    probe_dense_every: int = 0
+    probe_dense_until: int = 0
 
 
 def load_gkd_training(
@@ -152,6 +158,8 @@ def load_gkd_training(
         else DEFAULT_CANDIDATES,
         grad_probe=bool(g.get("grad_probe", False)),
         grad_probe_steps=int(g.get("grad_probe_steps", 3)),
+        probe_dense_every=int(g.get("probe_dense_every", 0)),
+        probe_dense_until=int(g.get("probe_dense_until", 0)),
     )
     return lora, train, gkd
 
@@ -265,6 +273,8 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         "teacher_temp",
         "student_temp",
         "probe_every",
+        "probe_dense_every",
+        "probe_dense_until",
         "rollout_log_every",
     ):
         if key in exp_gkd:

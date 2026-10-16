@@ -525,6 +525,8 @@ def _train(
         probe_every=cfg.gkd.probe_every,
         metrics_path=run_dir / "training_metrics.jsonl",
         teacher_p_target=teacher_p_target,
+        dense_every=cfg.gkd.probe_dense_every,
+        dense_until=cfg.gkd.probe_dense_until,
     )
     # 0600 safetensors checkpoints are unreadable from the other nodes (utils.perms).
     callbacks = [probe, WorldReadableSaves()]
