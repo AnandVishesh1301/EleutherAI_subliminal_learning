@@ -463,7 +463,28 @@ def preempt(host: str, gpus: tuple[int, ...] | None, reason: str) -> list[str]:
         except ProcessLookupError:
             continue
         killed.append(key)
+    if killed:
+        _clear_claims_after_exit(killed, host)
     return killed
+
+
+def _clear_claims_after_exit(keys: list[str], host: str, wait_s: int = 120) -> None:
+    """Remove the GKD ``.claim`` files of killed cells once no cell process remains.
+
+    A claim names a pid of `host`; on another host that pid may belong to a live,
+    unrelated process, so the retry would see the leaf as held until the 24 h TTL.
+    """
+    deadline = time.time() + wait_s
+    while time.time() < deadline and any(
+        store.cell_alive(o) for _, k, o in _running_claims(host) if k in keys
+    ):
+        time.sleep(5)
+    removed = []
+    for key in keys:
+        for claim in plan.cell_root(plan.cell_from_key(key)).rglob(".claim"):
+            claim.unlink(missing_ok=True)
+            removed.append(str(claim))
+    _log_control("clear-claims", keys=keys, removed=removed)
 
 
 def pause(now: bool) -> dict:
